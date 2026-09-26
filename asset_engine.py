@@ -383,7 +383,70 @@ class AssetEngine:
             state[name] = {aid: dict(row) for aid, row in data.items()}
         return state
 
-    def _diff_state(self, old_state: dict, new_state: dict) -> list:
+    # 角色表没有 Path 列，靠"非 ID 字段仍一致"来推断重命名。
+    # 只比较"两边都有且非空"的身份字段，缺字段的一方不参与否决，
+    # 否则手工补一列就会让重命名识别失效。
+    _CHAR_IDENTITY_KEYS = ('Name', 'Color', 'ImageTag', 'WhatColor')
+
+    @classmethod
+    def _looks_like_rename(cls, old_row: dict, new_row: dict) -> bool:
+        compared = False
+        for key in cls._CHAR_IDENTITY_KEYS:
+            ov, nv = old_row.get(key), new_row.get(key)
+            if not ov or not nv:
+                continue
+            if ov != nv:
+                return False      # 有冲突字段 → 不是同一个角色
+            compared = True
+        # Notes 会带 source 位置，不参与身份比较
+        return compared
+
+    @classmethod
+    def _infer_character_renames(cls, old_chars: dict,
+                                 new_chars: dict) -> dict:
+        """
+        推断 characters 表的重命名：{old_id: new_id}。
+
+        images / music 等表有 Path 列，重命名靠 Path 相同来认领；
+        characters 没有 Path，只能退而求其次——
+        消失的 ID 与新增的 ID 之间，身份字段全部吻合时认为是一次改名。
+        """
+        disappeared = set(old_chars) - set(new_chars)
+        appeared = set(new_chars) - set(old_chars)
+        available = set(appeared)
+        result = {}
+
+        for oid in sorted(disappeared):
+            candidates = [
+                nid for nid in sorted(available)
+                if cls._looks_like_rename(old_chars[oid], new_chars[nid])
+            ]
+            if not candidates:
+                continue
+            # 身份字段完全相同时取名字最接近的那个，避免多候选举棋不定
+            nid = min(candidates, key=lambda n: cls._edit_distance(oid, n))
+            result[oid] = nid
+            available.discard(nid)
+        return result
+
+    @staticmethod
+    def _edit_distance(a: str, b: str) -> int:
+        """Levenshtein 距离的两重循环版（角色表规模很小，够用）。"""
+        if a == b:
+            return 0
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i]
+            for j, cb in enumerate(b, 1):
+                cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                              prev[j - 1] + (ca != cb)))
+            prev = cur
+        return prev[-1]
+
+    def _diff_state(self, old_state: dict, new_state: dict,
+                    char_renames: Optional[dict] = None) -> list:
+        char_renames = char_renames or {}
+        rename_targets = set(char_renames.values())
         changes = []
         for cat in ('images', 'music', 'sounds', 'transforms', 'characters'):
             old = old_state.get(cat, {})
@@ -392,24 +455,28 @@ class AssetEngine:
             old_ids = set(old.keys())
             new_ids = set(new.keys())
 
-            # 新增
-            for aid in new_ids - old_ids:
+            added_ids = new_ids - old_ids
+
+            # 新增（被认领成重命名的目标不再单独报 added）
+            for aid in added_ids - rename_targets:
                 changes.append(_Change('added', cat, aid, {}, new[aid]))
 
             # 用 Path 识别重命名
             new_by_path = defaultdict(list)
-            for nid in new_ids - old_ids:
+            for nid in added_ids:
                 p = new[nid].get('Path')
                 if p:
                     new_by_path[p].append(nid)
 
             # 删除 / 重命名
             for aid in old_ids - new_ids:
-                old_path = old[aid].get('Path')
-                matched_new = None
-                if old_path and new_by_path.get(old_path):
-                    matched_new = new_by_path[old_path].pop(0)
-                if matched_new:
+                matched_new = char_renames.get(aid) if cat == 'characters' \
+                    else None
+                if matched_new is None:
+                    old_path = old[aid].get('Path')
+                    if old_path and new_by_path.get(old_path):
+                        matched_new = new_by_path[old_path].pop(0)
+                if matched_new and matched_new in new:
                     changes.append(_Change(
                         'renamed', cat, aid,
                         before=old[aid], after=new[matched_new],
@@ -527,21 +594,27 @@ class AssetEngine:
         else:
             new_registry.references = defaultdict(list)
 
-        # 关键：先同步脚本角色定义到 new_registry，再 diff
-        # 否则会把脚本里 define 出来的角色误判为 removed
-        self.registry = new_registry
-        self._sync_character_definitions()
+        # 必须在 _sync_character_definitions 之前算 diff：
+        # 一旦把脚本里的旧 define 塞回 registry，Excel 侧的改名就被
+        # 盖成一副"没变过"的样子，脚本永远收不到补丁。
+        new_state = self._snapshot_registry_state(new_registry)
+        prev_chars = self._prev_state.get('characters', {})
+        char_renames = self._infer_character_renames(
+            prev_chars, new_registry.characters
+        )
+        changes = self._diff_state(self._prev_state, new_state, char_renames)
 
-        # 角色定义可能改变（新增了脚本里 define 的角色），
-        # 引用索引需要重建，否则 references 会保留旧值
+        self.registry = new_registry
+
+        # 应用变更（重命名补丁、删除确认）。补丁会改写 .rpy，
+        # 其中的 _load_scripts 会让脚本侧也用上新 ID。
+        self._apply_changes(changes)
+
+        # 脚本可能已被补丁改写，此时再同步角色定义才是安全的
+        self._sync_character_definitions()
         self._rebuild_references()
 
-        new_state = self._snapshot_registry_state(new_registry)
-        changes = self._diff_state(self._prev_state, new_state)
-        self._prev_state = new_state
-
-        # 应用变更（重命名补丁、删除确认）
-        self._apply_changes(changes)
+        self._prev_state = self._snapshot_registry_state(self.registry)
 
         # 汇总事件
         self._emit(AssetEventType.TABLE_RELOADED, {

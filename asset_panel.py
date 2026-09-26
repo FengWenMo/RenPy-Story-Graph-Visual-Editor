@@ -16,7 +16,7 @@ asset_panel.py
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Optional
 
 
@@ -56,7 +56,8 @@ class AssetPanelData:
                 sg = row.get('Category', 'other') or 'other'
             elif group_by == 'folder':
                 p = row.get('Path', '')
-                g = str(Path(p).parent) if p else '_'
+                # 用 posix 分隔符：否则 Windows 上会生成反斜杠分组 key
+                g = str(PurePosixPath(p).parent) if p else '_'
                 sg = row.get('Category', 'other') or 'other'
             elif group_by == 'type':
                 g = 'image'

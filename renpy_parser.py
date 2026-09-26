@@ -1,4 +1,4 @@
-"""
+r"""
 renpy_parser.py
 ================
 Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
@@ -1706,7 +1706,10 @@ class IncrementalRenPyAnalyzer:
             gb = GraphBuilder(graph)
             gb.build(all_ast, clear_graph=clear_graph)
             parse_result.warnings.extend(gb.warnings)
-        elif Graph is not None:
+        else:
+            # 调用方没给 graph：新建一个。
+            # 注意这里是 `graph is None`，不是 `Graph is not None`
+            # ——后者检查的是类能否导入，与本分支语义无关。
             graph = Graph()
             gb = GraphBuilder(graph)
             gb.build(all_ast, clear_graph=True)

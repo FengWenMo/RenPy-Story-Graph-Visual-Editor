@@ -233,7 +233,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None) -> dict:
             stem = file.stem
             if any(kw in rel_str for kw in CATEGORY_KEYWORDS['music']):
                 audio_music.append({
-                    'ID': f"bgm_{stem}",
+                    'ID': f"bgm_{stem}" if not stem.startswith('bgm_')
+                          else stem,
                     'Path': rel_path.as_posix(),
                     'Loop': True,
                     'Volume': 1.0,
@@ -241,7 +242,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None) -> dict:
                 })
             else:
                 audio_sound.append({
-                    'ID': f"sfx_{stem}",
+                    'ID': f"sfx_{stem}" if not stem.startswith('sfx_')
+                          else stem,
                     'Path': rel_path.as_posix(),
                     'Notes': '',
                 })

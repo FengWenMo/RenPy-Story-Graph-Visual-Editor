@@ -21,7 +21,7 @@ import json
 import re
 import shutil
 import difflib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, Optional
@@ -494,7 +494,9 @@ class AssetPanelModel:
                 sg = row.get('Category', 'other') or 'other'
             elif group_by == 'folder':
                 path = row.get('Path', '')
-                g = str(Path(path).parent) if path else '_'
+                # 用 posix 分隔符：Windows 上 str(Path(...)) 会给出反斜杠，
+                # 同一张表在不同平台会长出不同的分组 key。
+                g = str(PurePosixPath(path).parent) if path else '_'
                 sg = row.get('Category', 'other') or 'other'
             else:
                 g, sg = 'other', '_'

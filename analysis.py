@@ -1,6 +1,7 @@
 # analysis.py
 import math
 import ast
+import re
 from models import Graph
 from utils import extract_variables, collect_all_variables
 
@@ -140,9 +141,17 @@ class VariableState:
                 self.ranges[k] = ValueRange(-math.inf, math.inf)
 
     def is_bottom(self):
-        if not self.ranges:
-            return False
-        return all(r.is_bottom() for r in self.ranges.values())
+        """
+        任一变量的取值集合为空 → 整条路径不可行。
+
+        用 any 而非 all：一个已知变量被约束到空集，说明这条路径本身就
+        走不到；若要求"全部为空"才算不可行，会把矛盾的分支判成可达。
+
+        注意：变量集合本身为空（没有任何已知变量）时返回 False——
+        没有约束意味着可达，这不矛盾。可达性由 analyze_reachability
+        单独的 reached 集合负责，不复用本方法。
+        """
+        return any(r.is_bottom() for r in self.ranges.values())
 
     def __str__(self):
         items = []
@@ -250,6 +259,29 @@ class IntervalEvaluator:
         return ValueRange(-math.inf, math.inf)
 
 
+# 语法无法解析时的兜底变量提取：只要长得像标识符就先把它们置为 TOP，
+# 宁可放宽也不要给出错误的"不可达"结论。
+_FALLBACK_IDENT_RE = re.compile(r'[A-Za-z_]\w*')
+
+_FALLBACK_EXCLUDED = frozenset({'if', 'else', 'elif', 'for', 'while',
+                                'return', 'pass', 'and', 'or', 'not',
+                                'in', 'is', 'lambda', 'def', 'class',
+                                'True', 'False', 'None'})
+
+
+def _fallback_variables(text: str) -> list:
+    """无法走 ast 时，用正则粗提取标识符（去重、保序）。"""
+    seen = set()
+    result = []
+    for m in _FALLBACK_IDENT_RE.finditer(text):
+        name = m.group(0)
+        if name in _FALLBACK_EXCLUDED or name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return result
+
+
 def apply_operation(state, op_line):
     new_state = state.copy()
     op = op_line.strip()
@@ -258,7 +290,10 @@ def apply_operation(state, op_line):
     try:
         tree = ast.parse(op, mode='exec')
     except SyntaxError:
-        for var in extract_variables(op):
+        # 解析失败时不能什么都不做：变量名提取同样依赖 ast，
+        # 若直接返回原状态，后续会拿着过期区间断言"分支不可达"。
+        # 退化到正则提取，把所有出现的标识符置为 TOP。
+        for var in _fallback_variables(op):
             if var in new_state.ranges:
                 new_state.ranges[var] = ValueRange(-math.inf, math.inf)
         return new_state
@@ -541,6 +576,28 @@ def _ast_apply_compare(node, state, polarity=True):
     return True
 
 
+def _widen(old_state, new_state, all_vars):
+    """
+    加宽：把本轮"变大"的那一侧直接推到 ±inf。
+
+    循环里 `x += 1` 会让 entry_states[x] 每次迭代都抬高上界，
+    单纯靠合并无法收敛（0→1→2→...→永不停止）。
+    加宽后区间迅速到达 ⊤，不动点迭代得以终止，代价是精度下降，
+    这正是静态分析里"-∞..∞ 至少不会漏报"的取舍。
+    """
+    widened = old_state.copy()
+    for var in all_vars:
+        old_r = old_state.ranges.get(var)
+        new_r = new_state.ranges.get(var)
+        if old_r is None or new_r is None:
+            widened.ranges[var] = ValueRange(-math.inf, math.inf)
+            continue
+        lo = -math.inf if new_r.lo < old_r.lo else old_r.lo
+        hi = math.inf if new_r.hi > old_r.hi else old_r.hi
+        widened.ranges[var] = ValueRange(lo, hi)
+    return widened
+
+
 def analyze_reachability(graph, start_node_id):
     if start_node_id not in graph.nodes:
         return {}, ["起始节点不存在！"]
@@ -559,12 +616,25 @@ def analyze_reachability(graph, start_node_id):
         init_state.ranges[v] = ValueRange(0, 0)
     entry_states[start_node_id] = init_state
 
+    # 可达性单独记账，不能靠"区间是否为空"推断：
+    # 没有任何变量的图里所有节点区间都是空集，会被整片误判为不可达。
+    reached = {start_node_id}
+
+    # 每个节点的入口状态更新次数，超过阈值后对该节点加宽
+    update_counts = {}
+    # 加宽阈值：允许几次精确传播再抽象，避免过早起 ⊤ 丢精度
+    WIDEN_THRESHOLD = 4
+    # 兜底：任何情况下都不让算法无限跑下去
+    max_steps = max(1000, 200 * len(graph.nodes))
+
     worklist = [start_node_id]
     in_worklist = {start_node_id}
+    steps = 0
 
-    while worklist:
+    while worklist and steps < max_steps:
         nid = worklist.pop(0)
         in_worklist.discard(nid)
+        steps += 1
 
         state = entry_states[nid]
         if state.is_bottom():
@@ -597,14 +667,32 @@ def analyze_reachability(graph, start_node_id):
                     changed = True
                     break
 
-            if changed:
+            first_visit = target not in reached
+            reached.add(target)
+
+            # 首次到达必须继续传播，即使没有任何变量的区间发生变化
+            # ——无变量图里 changed 恒为 False，图上会停在起点。
+            if first_visit or changed:
+                if changed:
+                    update_counts[target] = update_counts.get(target, 0) + 1
+                    if update_counts[target] > WIDEN_THRESHOLD:
+                        merged = _widen(old_state, merged, all_vars)
                 entry_states[target] = merged
                 if target not in in_worklist:
                     worklist.append(target)
                     in_worklist.add(target)
 
+    if steps >= max_steps:
+        return entry_states, [
+            f"⚠️ 分析超出迭代上限（{max_steps} 步）已中止，结果可能不完整"
+        ]
+
     warnings = []
     for nid, node in graph.nodes.items():
+        if nid not in reached:
+            warnings.append(f"🚫 不可达节点：{node.label_name}")
+            continue
+
         instate = entry_states[nid]
         if instate.is_bottom():
             warnings.append(f"🚫 不可达节点：{node.label_name}")
