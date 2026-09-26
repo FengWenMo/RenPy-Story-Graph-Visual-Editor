@@ -247,6 +247,9 @@ class LogicalLine:
     indent: int
     filename: str = ''
     subblock: list = field(default_factory=list)
+    # 整行注释（`# ...`）。原先在 lexer 就被丢弃，导致"给美术的表情标注"
+    # 这类跨职能信息在 rpy↔表格 往返中消失。现在保留下来。
+    is_comment: bool = False
 
 
 class RenPyLexer:
@@ -278,11 +281,18 @@ class RenPyLexer:
             line_no = i + 1
             stripped = raw.strip()
 
-            if not stripped or stripped.startswith('#'):
+            if not stripped:
                 i += 1
                 continue
 
             indent = len(raw) - len(raw.lstrip())
+
+            # 整行注释：保留（含前导 '#'），供"标注/待办"类信息往返。
+            if stripped.startswith('#'):
+                flat.append((stripped, line_no, indent, True))
+                i += 1
+                continue
+
             accumulated = raw
 
             if self._has_unclosed_triple(accumulated):
@@ -315,7 +325,7 @@ class RenPyLexer:
 
             accumulated = self._strip_inline_comment(accumulated)
 
-            flat.append((accumulated, line_no, indent))
+            flat.append((accumulated, line_no, indent, False))
             i += 1
 
         return flat
@@ -404,12 +414,14 @@ class RenPyLexer:
                            filename=filename)
         stack = [root]
 
-        for text, line_no, indent in flat:
+        for item in flat:
+            text, line_no, indent, is_comment = item
             node = LogicalLine(
                 text=text,
                 line_number=line_no,
                 indent=indent,
                 filename=filename,
+                is_comment=is_comment,
             )
             while len(stack) > 1 and stack[-1].indent >= indent:
                 stack.pop()
@@ -445,6 +457,11 @@ class DefineNode(ASTNode):
     color: str = ''
     what_color: str = ''
     image_tag: str = ''
+    # Character(...) 里的其余关键字参数原样留存（kind / voice_tag /
+    # side_image / what_prefix …）。角色定义写得很花，只挑 4 个字段
+    # 存下来，导入到资源表时就会"看着不对"，说不清到底漏了什么。
+    kwargs: dict = field(default_factory=dict)
+    positional: list = field(default_factory=list)
 
 
 @dataclass
@@ -497,6 +514,24 @@ class PythonNode(ASTNode):
 
 
 @dataclass
+class TransformNode(ASTNode):
+    """
+    自定义变换定义：`transform name(params):` + ATL 块体。
+
+    以前这类块语句被当作"未建模的块"直接跳过，于是
+      · 表格里 `At` / `Transform` 列没法选到项目自己定义的变换；
+      · 文案不知道 `leftish` 到底是"靠左站"还是"侧身回头"。
+    现在把名字、参数、ATL 原文、以及给美术看的说明（前导注释或首个
+    字符串字面量）全部收下来。
+    """
+    name: str = ''
+    params: str = ''
+    body: str = ''        # ATL 原文，按相对缩进还原
+    doc: str = ''         # 说明：紧邻的前导注释，或块体首个字符串字面量
+    is_expression: bool = False   # transform expression / ATL inline 等非常规形态
+
+
+@dataclass
 class ShowNode(ASTNode):
     image: str = ''
     at: list = field(default_factory=list)
@@ -537,6 +572,25 @@ class AudioNode(ASTNode):
 @dataclass
 class VoiceNode(ASTNode):
     name: str = ''
+
+
+@dataclass
+class CommentNode(ASTNode):
+    """整行注释（text 含前导 '#'，便于原样回写）。"""
+    text: str = ''
+
+
+@dataclass
+class RawNode(ASTNode):
+    """
+    未建模、但属于演出流的原始语句（`with dissolve` / `pause` /
+    `window hide` / `call screen` / 动态 jump 等）。
+
+    原样保存、原样回写：宁可表格里多一列原文，也不要在往返中
+    悄悄删掉程序员的代码。raw_kind 仅作诊断标签。
+    """
+    text: str = ''
+    raw_kind: str = ''
 
 
 # 字符串正则：双引号分支与单引号分支分离
@@ -582,6 +636,12 @@ class RenPyParser:
     _RE_SHOW_HEAD = re.compile(r'^show\s+')
     _RE_SCENE_HEAD = re.compile(r'^scene\s+')
     _RE_HIDE_HEAD = re.compile(r'^hide\s+')
+    # transform 定义两种形态都要认：
+    #   transform name:            （无参）
+    #   transform name(a, b=1):    （带参）
+    _RE_TRANSFORM = re.compile(r'^transform\s+([\w.]+)')
+    # 只认"整行就是一个字符串字面量"的首行（Ren'Py 用作文档字符串）
+    _RE_ONLY_STR = re.compile(r'^(?:' + _STR + r')\s*(?:#.*)?$')
     _RE_AUDIO = re.compile(
         r'^(?P<action>play|queue|stop)\s+'
         r'(?P<channel>music|sound|audio)'
@@ -622,6 +682,7 @@ class RenPyParser:
     def _parse_block(self, lines: list) -> list:
         nodes = []
         i = 0
+        pending_comments = []       # 紧邻的整行注释（可能成为下个定义的 doc）
         while i < len(lines):
             line = lines[i]
             text = line.text.strip()
@@ -631,16 +692,107 @@ class RenPyParser:
                 i += 1
                 continue
 
+            if line.is_comment:
+                pending_comments.append(line)
+
             if isinstance(node, IfNode):
                 i = self._consume_if_chain(lines, i, node)
                 nodes.append(node)
+                pending_comments = []
                 continue
 
+            # transform 的"说明"常常写成紧邻的注释行。把它接到定义上，
+            # 表格里选中这个变换时就能看到人话解释，而不是一串 xpos。
+            if isinstance(node, TransformNode) and not node.doc:
+                doc_lines = [p.text.lstrip('#').strip()
+                             for p in pending_comments
+                             if p.indent == line.indent]
+                doc_lines = [d for d in doc_lines if d]
+                if doc_lines:
+                    node.doc = '\n'.join(doc_lines)
+
             nodes.append(node)
+            if not line.is_comment:
+                pending_comments = []
             i += 1
         return nodes
 
+    # ---------- transform 解析 ----------
+
+    @staticmethod
+    def _render_block_source(lines: list, base_indent: int) -> list:
+        """
+        把逻辑行树按相对缩进还原成源码行（用于保留 ATL 原文）。
+
+        注意 LogicalLine.text 是**带行首缩进的原始文本**，所以要先按
+        `indent` 切掉原缩进，再补上相对缩进，否则缩进会翻倍。
+        """
+        out = []
+        for ln in lines:
+            rel = max(0, ln.indent - base_indent)
+            body = ln.text[ln.indent:] if ln.indent > 0 else ln.text
+            out.append(' ' * rel + body)
+            if ln.subblock:
+                out.extend(
+                    RenPyParser._render_block_source(ln.subblock, base_indent))
+        return out
+
+    def _parse_transform(self, line: LogicalLine,
+                         text: str) -> Optional[TransformNode]:
+        m = self._RE_TRANSFORM.match(text)
+        if not m:
+            return None
+        name = m.group(1)
+
+        # 形如 `transform foo(x=0.5, y=0.5):` —— 名字后紧跟 '(' 的是参数表
+        rest = text[m.end():]
+        params = ''
+        if rest.startswith('('):
+            close = _scan_balanced_close(rest, 0)
+            if close == -1:
+                self.warnings.append(
+                    f"{line.filename}:{line.line_number}: "
+                    f"transform {name} 的参数括号不匹配，已按无参处理"
+                )
+            else:
+                params = rest[1:close].strip()
+
+        # 块体：按相对缩进还原，comment 行也写进去（注释是给美术的意图）
+        body_lines = self._render_block_source(line.subblock, line.indent)
+        body = '\n'.join(body_lines)
+
+        doc = ''
+        for raw in body_lines:
+            s = raw.strip()
+            if not s or s.startswith('#'):
+                continue
+            sm = self._RE_ONLY_STR.match(s)
+            if sm:
+                doc = _pick_str(sm, 1, 2)
+            break
+
+        return TransformNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            name=name,
+            params=params,
+            body=body,
+            doc=doc,
+        )
+
     def _parse_statement(self, line: LogicalLine, text: str):
+        # ---- 整行注释 ----
+        # 注释不是"可忽略的噪声"：`# 表情A6，距离近` 是文案给美术的意图，
+        # 往返丢了它，美术就不知道这张立绘该是什么情绪。
+        if line.is_comment:
+            return CommentNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=line.text.strip(),
+            )
+
         # ---- label ----
         if self._RE_LABEL_HEAD.match(text):
             return self._parse_label(line, text)
@@ -721,23 +873,35 @@ class RenPyParser:
 
         # ---- jump expression ----
         if self._RE_JUMP_EXPR.match(text):
-            self.warnings.append(
-                f"{line.filename}:{line.line_number}: "
-                f"jump expression 为动态跳转，控制流图不断言目标"
+            # 动态跳转无法静态断言目标，但语句本身必须保真——
+            # 原样存成 Raw，导出时原样回写，否则控制流被悄悄改掉。
+            return RawNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=text,
+                raw_kind='jump_expression',
             )
-            return None
 
         # ---- call expression / call screen ----
         if self._RE_CALL_EXPR.match(text):
-            self.warnings.append(
-                f"{line.filename}:{line.line_number}: "
-                f"call expression 为动态调用，控制流图不断言目标"
+            return RawNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=text,
+                raw_kind='call_expression',
             )
-            return None
 
         if self._RE_CALL_SCREEN.match(text):
-            # call screen 是 UI 调用，不产生 label 跳转边，静默忽略
-            return None
+            # call screen 是 UI 调用，不产生 label 跳转边，但仍是演出一步
+            return RawNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=text,
+                raw_kind='call_screen',
+            )
 
         # ---- jump ----
         m = self._RE_JUMP.match(text)
@@ -913,6 +1077,33 @@ class RenPyParser:
                 what=what,
             )
 
+        # ---- transform 定义 ----
+        # 这是"支持自定义变换"的关键：不解析它，表格里的 At / Transform
+        # 列就永远选不到项目自己写的变换。
+        if self._RE_TRANSFORM.match(text):
+            node = self._parse_transform(line, text)
+            if node is not None:
+                return node
+
+        # ---- 未建模语句的兜底 ----
+        # 到这里还没被任何分支接住的叶语句，说明模型没覆盖它。与其
+        # 静默丢弃（这正是"解析不够强大"的根源），不如原样保存：
+        # 渲染时逐字回写，保证 rpy↔表格 往返不丢程序员的代码。
+        # 只收叶语句——带子块的未知语句（screen/init/transform …）交给
+        # 上层忽略，避免只留头部、丢掉块体造成更严重的破坏。
+        if not line.subblock:
+            return RawNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=text,
+                raw_kind='unmodeled',
+            )
+
+        self.warnings.append(
+            f"{line.filename}:{line.line_number}: "
+            f"未建模的块语句已跳过（不在演出流内）: {text[:40]!r}"
+        )
         return None
 
     # ---------- label 解析 ----------
@@ -1278,6 +1469,7 @@ class RenPyParser:
         pos = self._RE_POS_ARG.match(args_str)
         if pos:
             node.display_name = _pick_str(pos, 1, 2)
+            node.positional.append(node.display_name)
 
         i = 0
         n = len(args_str)
@@ -1306,6 +1498,10 @@ class RenPyParser:
                 i += 1
                 continue
             i = new_i
+
+            # 全部关键字参数原样留存，UI/资源表需要哪个就取哪个，
+            # 不必为了一个新字段回来改解析器。
+            node.kwargs[key] = value_text
 
             if key in ('color', 'who_color'):
                 node.color = value_text
@@ -1359,6 +1555,18 @@ class RenPyParser:
 # ====================================================================
 
 @dataclass
+class TransformDefinition:
+    """脚本里 `transform` 块解析出来的自定义变换。"""
+    name: str
+    params: str = ''
+    body: str = ''
+    doc: str = ''
+    source_file: str = ''
+    source_line: int = 0
+    used_count: int = 0
+
+
+@dataclass
 class CharacterDefinition:
     variable_name: str
     display_name: str = ''
@@ -1368,6 +1576,15 @@ class CharacterDefinition:
     source_file: str = ''
     source_line: int = 0
     dialogue_count: int = 0
+    # 其余定义细节（kind / voice_tag / side_image / *_prefix / *_suffix …）
+    kind: str = ''
+    voice_tag: str = ''
+    side_image: str = ''
+    what_prefix: str = ''
+    what_suffix: str = ''
+    who_prefix: str = ''
+    who_suffix: str = ''
+    extra: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1398,6 +1615,8 @@ class ParseResult:
     characters: dict = field(default_factory=dict)
     dialogues: list = field(default_factory=list)
     labels: dict = field(default_factory=dict)
+    # 脚本里自定义的 transform：{name: TransformDefinition}
+    transforms: dict = field(default_factory=dict)
     translation_units: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
@@ -1407,6 +1626,11 @@ class ParseResult:
     # statement_labels 与 statements 一一对应，记录每条语句所属 label。
     statements: list = field(default_factory=list)
     statement_labels: list = field(default_factory=list)
+    # 与 statements 一一对应的"所属菜单选项文本"，'' 表示不在菜单选项内。
+    # 图与 Beat 表都要知道一条 jump 是从哪个选项里出去的（边上的
+    # option_text / 表里的 Condition 语义），所以和 statement_labels
+    # 一样用平行数组承载，避免污染 Statement 的相等与哈希契约。
+    statement_menu_options: list = field(default_factory=list)
 
 
 # ====================================================================
@@ -1421,16 +1645,18 @@ class ParseResultBuilder:
         return result
 
     def _walk(self, nodes: list, current_label: str, result: ParseResult,
-              accum_cond: str = ''):
+              accum_cond: str = '', menu_option: str = ''):
         def add_stmt(stmt):
             """
-            收集语句，同时记下它属于哪个 label。
+            收集语句，同时记下它属于哪个 label / 哪个菜单选项。
 
             Statement 本身不带 label（那是"内容指纹"契约的一部分），
-            所以归属信息放在平行的 statement_labels 里。
+            所以归属信息放在平行的 statement_labels /
+            statement_menu_options 里。
             """
             result.statements.append(stmt)
             result.statement_labels.append(current_label)
+            result.statement_menu_options.append(menu_option)
 
         for node in nodes:
             if isinstance(node, LabelNode):
@@ -1446,6 +1672,30 @@ class ParseResultBuilder:
                         color=node.color,
                         what_color=node.what_color,
                         image_tag=node.image_tag,
+                        source_file=node.filename,
+                        source_line=node.line_number,
+                        kind=node.kwargs.get('kind', ''),
+                        voice_tag=node.kwargs.get('voice_tag', ''),
+                        side_image=(node.kwargs.get('side_image')
+                                    or node.kwargs.get('side_image_prefix')
+                                    or ''),
+                        what_prefix=node.kwargs.get('what_prefix', ''),
+                        what_suffix=node.kwargs.get('what_suffix', ''),
+                        who_prefix=node.kwargs.get('who_prefix', ''),
+                        who_suffix=node.kwargs.get('who_suffix', ''),
+                        extra=dict(node.kwargs),
+                    )
+
+            elif isinstance(node, TransformNode):
+                # 后写的不覆盖先写的：同名 transform 以首次定义为准，
+                # 与 Ren'Py "先定义先生效" 的直觉一致，也避免重定义把
+                # 有注释的那份挤掉。
+                if node.name not in result.transforms:
+                    result.transforms[node.name] = TransformDefinition(
+                        name=node.name,
+                        params=node.params,
+                        body=node.body,
+                        doc=node.doc,
                         source_file=node.filename,
                         source_line=node.line_number,
                     )
@@ -1500,7 +1750,8 @@ class ParseResultBuilder:
                         opt.text, self._combine(accum_cond, opt.condition),
                         source=(opt.filename, opt.line_number)))
                     self._walk(opt.block, current_label, result,
-                               self._combine(accum_cond, opt.condition))
+                               self._combine(accum_cond, opt.condition),
+                               opt.text)
 
             elif isinstance(node, ShowNode):
                 add_stmt(Statement.make_show(
@@ -1540,6 +1791,21 @@ class ParseResultBuilder:
                     node.code, accum_cond,
                     source=(node.filename, node.line_number)))
 
+            elif isinstance(node, CommentNode):
+                # 只保留 label 内的注释——顶层注释属于文件头/定义区，
+                # 不属于任何演出流，混进表格反而会误导文案。
+                if current_label:
+                    add_stmt(Statement.make_comment(
+                        node.text, accum_cond,
+                        source=(node.filename, node.line_number)))
+
+            elif isinstance(node, RawNode):
+                if current_label:
+                    add_stmt(Statement.make_raw(
+                        node.text, raw_kind=node.raw_kind,
+                        condition=accum_cond,
+                        source=(node.filename, node.line_number)))
+
             elif isinstance(node, JumpNode):
                 add_stmt(Statement.make_jump(
                     node.target, accum_cond,
@@ -1556,9 +1822,23 @@ class ParseResultBuilder:
                     source=(node.filename, node.line_number)))
 
             elif isinstance(node, IfNode):
+                # else 分支要写成 `not (前面的条件)`：以前直接给空条件，
+                # 导致"else 里的 jump/台词"在图上是无条件边、在表里
+                # Condition 列空白——和 GraphBuilder 的语义不一致。
+                # 现在两条路径（AST 图 / Statement 图）用同一套组合规则。
+                prev_conds = []
                 for cond, block in node.branches:
-                    child_cond = self._combine(accum_cond, cond)
-                    self._walk(block, current_label, result, child_cond)
+                    if cond:
+                        child_cond = self._combine(accum_cond, cond)
+                        prev_conds.append(cond)
+                    else:
+                        neg = ' or '.join(f'({c})' for c in prev_conds)
+                        child_cond = (
+                            f"({accum_cond}) and not ({neg})"
+                            if accum_cond else f"not ({neg})"
+                        )
+                    self._walk(block, current_label, result, child_cond,
+                               menu_option)
 
     @staticmethod
     def _combine(c1: str, c2: str) -> str:
@@ -1591,6 +1871,7 @@ class GraphBuilder:
         self._existing_edges: set = set()
 
     def build(self, ast_nodes: list, clear_graph: bool = True):
+        """AST 入口（保留给直接吃 AST 的调用方与既有测试）。"""
         self.warnings = []
 
         # 本次 AST 里的 label 名：既用于 clear_graph 的节点清理，
@@ -1598,6 +1879,93 @@ class GraphBuilder:
         new_label_names = set()
         self._collect_label_names(ast_nodes, new_label_names)
 
+        self._prepare(new_label_names, clear_graph)
+
+        seen_labels: dict = {}
+        self._collect_labels(ast_nodes, seen_labels)
+        self._extract_edges(ast_nodes)
+
+    # ---------- Statement 入口（图与 Beat 同源） ----------
+
+    def build_from_parse_result(self, parse_result, clear_graph: bool = True):
+        """
+        从 ParseResult 建图 —— **与剧本表(Beat) 吃同一份 IR**。
+
+        以前图直接吃 AST、表吃 Statement，两套 walk 各自累积条件、各自
+        判断菜单归属，时间一长必然漂移（同一个 if 在图上是 A、在表里是 B）。
+        现在统一为"ParseResult 是唯一中间层"：图与表都只从它派生。
+
+        AST 入口 build() 保留，供显式传 AST 的调用方与既有测试使用。
+        """
+        labels = getattr(parse_result, 'labels', None) or {}
+        return self.build_from_statements(
+            parse_result.statements,
+            labels,
+            statement_labels=getattr(parse_result, 'statement_labels', None),
+            statement_menu_options=getattr(
+                parse_result, 'statement_menu_options', None),
+            clear_graph=clear_graph,
+        )
+
+    def build_from_statements(self, statements, label_positions,
+                              statement_labels=None,
+                              statement_menu_options=None,
+                              clear_graph: bool = True):
+        """
+        Statement 流 → 图。
+
+        label_positions: {label_name: (file, line)}，来自 ParseResult.labels。
+        statement_labels / statement_menu_options: 与 statements 平行的归属数组。
+        """
+        from core.statement import StatementKind
+
+        self.warnings = []
+        label_positions = label_positions or {}
+        statements = list(statements or [])
+        n = len(statements)
+        if statement_labels is None:
+            statement_labels = [''] * n
+        if statement_menu_options is None:
+            statement_menu_options = [''] * n
+
+        new_label_names = set(label_positions)
+        self._prepare(new_label_names, clear_graph)
+
+        # 建/更新 label 节点
+        for name, pos in label_positions.items():
+            nid = self._label_to_nid.get(name)
+            if nid is None or nid not in self.graph.nodes:
+                nid = self.graph.add_node(name, 200, 200)
+                self._label_to_nid[name] = nid
+            node = self.graph.nodes[nid]
+            try:
+                node.file_path, node.line_number = pos
+            except (TypeError, ValueError):
+                pass
+
+        for i, st in enumerate(statements):
+            label = statement_labels[i] if i < len(statement_labels) else ''
+            option = (statement_menu_options[i]
+                      if i < len(statement_menu_options) else '')
+            kind = getattr(st, 'kind', '')
+            payload = getattr(st, 'payload', None) or {}
+            cond = getattr(st, 'condition', '') or ''
+
+            if kind == StatementKind.JUMP:
+                self._add_edge(label, payload.get('target', ''), 'jump',
+                               cond, option)
+            elif kind == StatementKind.CALL:
+                self._add_edge(label, payload.get('target', ''), 'call',
+                               cond, option)
+            elif kind == StatementKind.PYTHON:
+                nid = self._label_to_nid.get(label)
+                if nid is not None:
+                    node = self.graph.nodes.get(nid)
+                    if node is not None:
+                        node.operations.append(payload.get('code', ''))
+
+    def _prepare(self, new_label_names: set, clear_graph: bool):
+        """建图前的公共准备：清节点、建索引、清 operations、重置边去重表。"""
         if clear_graph:
             to_remove = [
                 nid for nid, n in self.graph.nodes.items()
@@ -1611,9 +1979,6 @@ class GraphBuilder:
         }
 
         # [FIX-46] 只清空即将被重建的节点的 operations。
-        # 若调用方只传部分文件（例如 parse_renpy_file 兼容接口，
-        # 单文件 + clear_graph=False），其他文件节点的 operations
-        # 不再被误清空。
         for n in self.graph.nodes.values():
             if n.label_name in new_label_names:
                 n.operations = []
@@ -1623,10 +1988,6 @@ class GraphBuilder:
             self._existing_edges.add((
                 e.from_id, e.to_id, e.type, e.condition, e.option_text
             ))
-
-        seen_labels: dict = {}
-        self._collect_labels(ast_nodes, seen_labels)
-        self._extract_edges(ast_nodes)
 
     def _collect_label_names(self, nodes: list, target: set):
         for node in nodes:
@@ -1888,9 +2249,12 @@ class IncrementalRenPyAnalyzer:
 
         TranslationUnitGenerator().generate(parse_result)
 
+        # 图从 ParseResult（Statement 流）建，而不是再扫一遍 AST：
+        # 图与剧本表从此同源，条件累积 / 菜单归属 / 变量操作三处语义
+        # 只有一份实现（一.1）。AST 入口 build() 仍为兼容保留。
         if graph is not None:
             gb = GraphBuilder(graph)
-            gb.build(all_ast, clear_graph=clear_graph)
+            gb.build_from_parse_result(parse_result, clear_graph=clear_graph)
             parse_result.warnings.extend(gb.warnings)
         else:
             # 调用方没给 graph：新建一个。
@@ -1898,7 +2262,7 @@ class IncrementalRenPyAnalyzer:
             # ——后者检查的是类能否导入，与本分支语义无关。
             graph = Graph()
             gb = GraphBuilder(graph)
-            gb.build(all_ast, clear_graph=True)
+            gb.build_from_parse_result(parse_result, clear_graph=True)
             parse_result.warnings.extend(gb.warnings)
 
         return parse_result, graph

@@ -35,10 +35,18 @@ class StatementKind:
     CALL = 'call'
     RETURN = 'return'
     PYTHON = 'python'
+    # 注释：`# ...`。作者会说"这是给美术的表情标注"，
+    # 丢掉它等于丢掉一条跨职能沟通信息，必须保真往返。
+    COMMENT = 'comment'
+    # 原始语句：当前模型没建模、但在 label 内确属演出流的语句
+    # （`with dissolve` / `pause 1.0` / `window hide` / `call screen` …）。
+    # 原样保存、原样回写——这是"容忍输入的编译器"不丢信息的关键。
+    RAW = 'raw'
     UNKNOWN = 'unknown'
 
     ALL = (SAY, EXTEND, SHOW, SCENE, HIDE, PLAY, VOICE,
-           MENU, MENU_OPTION, JUMP, CALL, RETURN, PYTHON, UNKNOWN)
+           MENU, MENU_OPTION, JUMP, CALL, RETURN, PYTHON,
+           COMMENT, RAW, UNKNOWN)
 
 
 # 每种 kind 参与哈希的字段
@@ -63,7 +71,77 @@ _HASH_FIELDS = {
     StatementKind.CALL:        (None, None),
     StatementKind.RETURN:      (None, None),
     StatementKind.PYTHON:      (None, None),
+    StatementKind.COMMENT:     (None, None),
+    StatementKind.RAW:         (None, None),
 }
+
+
+# 每种 kind 的工厂方法必须提供的 payload 字段。
+# 与 _HASH_FIELDS 一样，是自解释契约的一部分：加字段忘了同步
+# 会让 content_hash 静默错位，所以用 validate_hash_contract() 卡住。
+_FACTORY_FIELDS = {
+    StatementKind.SAY:         ('speaker', 'text'),
+    StatementKind.EXTEND:      ('text',),
+    StatementKind.MENU:        ('caption',),
+    StatementKind.MENU_OPTION: ('text',),
+    StatementKind.SHOW:        ('image',),
+    StatementKind.SCENE:       ('image',),
+    StatementKind.HIDE:        ('image',),
+    StatementKind.PLAY:        ('action', 'channel', 'name'),
+    StatementKind.VOICE:       ('name',),
+    StatementKind.JUMP:        ('target',),
+    StatementKind.CALL:        ('target',),
+    StatementKind.RETURN:      (),
+    StatementKind.PYTHON:      ('code',),
+    StatementKind.COMMENT:     ('text',),
+    StatementKind.RAW:         ('text',),
+}
+
+
+def validate_hash_contract() -> list:
+    """
+    自检：每个参与哈希的 kind，其 _HASH_FIELDS 字段必须被
+    对应工厂方法的 payload 覆盖。返回问题列表（空 = 通过）。
+
+    这正是上一轮指出的坑：加了字段却忘了同步哈希输入，
+    content_hash 会静默错位，翻译单元 uid 跟着漂移。
+    """
+    issues = []
+    for kind, (prefix, fields) in _HASH_FIELDS.items():
+        if prefix is None:
+            continue
+        factory_fields = _FACTORY_FIELDS.get(kind)
+        if factory_fields is None:
+            issues.append(f"{kind}: 参与哈希但没有工厂字段声明")
+            continue
+        for f in fields:
+            if f not in factory_fields:
+                issues.append(
+                    f"{kind}: 哈希输入字段 {f!r} 不在工厂 payload 中"
+                )
+    return issues
+
+
+def _freeze(value):
+    """
+    把任意 payload 值递归转成可哈希、且与 == 语义一致的不可变表示。
+
+    · dict → 按键排序的 tuple（键排序保证 {a:1,b:2} 与 {b:2,a:1} 同哈希）
+    · list/tuple → tuple
+    · set → 排序后的 tuple
+    · 其它不可哈希对象 → 退化为 repr（兜底，不影响常见路径）
+    """
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted(str(v) for v in value))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
 
 
 def _compute_content_hash(kind: str, payload: dict) -> str:
@@ -118,15 +196,12 @@ class Statement:
                 and self.condition == other.condition)
 
     def __hash__(self):
-        # payload 是 dict，不可哈希；用 content_hash + kind + condition
-        # 作为稳定键。content_hash 为空时用 sorted items 兜底。
-        if self.content_hash:
-            payload_key = self.content_hash
-        else:
-            payload_key = tuple(sorted(
-                (k, str(v)) for k, v in self.payload.items()
-            ))
-        return hash((self.kind, payload_key, self.condition))
+        # 契约：__eq__ 相等 ⇒ __hash__ 相等。
+        # payload 是 dict（值里还有 list，如 show 的 at/behind），
+        # 不能直接哈希；用**与 __eq__ 同源的字段**做递归冻结，
+        # 而不是用 content_hash——content_hash 对 show/scene 恒为空，
+        # 会造成"两份不同的 show 语句哈希相同"（违反契约的反向）。
+        return hash((self.kind, _freeze(self.payload), self.condition))
 
     def __repr__(self):
         summary = []
@@ -336,6 +411,33 @@ class Statement:
             content_hash='',
         )
 
+    @classmethod
+    def make_comment(cls, text, condition='', source=('', 0)):
+        """整行注释（不含前导 '#'）。"""
+        return cls(
+            kind=StatementKind.COMMENT,
+            payload={'text': text},
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+    @classmethod
+    def make_raw(cls, text, raw_kind='', condition='', source=('', 0)):
+        """
+        未被结构化建模、但属于演出流的原始语句，原样保存。
+
+        raw_kind 只是诊断标签（如 'with' / 'pause' / 'call_screen'），
+        不参与渲染——渲染时按 text 原样回写。
+        """
+        return cls(
+            kind=StatementKind.RAW,
+            payload={'text': text, 'raw_kind': raw_kind},
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
 
 def validate_statement(stmt: Statement) -> list:
     """
@@ -364,6 +466,8 @@ def validate_statement(stmt: Statement) -> list:
         StatementKind.CALL:        ('target',),
         StatementKind.RETURN:      (),
         StatementKind.PYTHON:      ('code',),
+        StatementKind.COMMENT:     ('text',),
+        StatementKind.RAW:         ('text',),
         StatementKind.UNKNOWN:     (),
     }
     for f in required.get(stmt.kind, ()):

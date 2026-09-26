@@ -14,7 +14,8 @@ from script_table import (
     Beat, beats_from_statements, beats_from_parse_result,
     export_beats_to_excel, import_beats_from_excel,
     render_beats_to_rpy, render_beat_to_rpy, write_beats_to_rpy,
-    open_rpy_as_table, export_table_to_rpy,
+    open_rpy_as_table, export_table_to_rpy, refresh_candidate_sheets,
+    find_unregistered_assets,
     BEAT_FIELDS, KIND_SAY, KIND_NARRATION, KIND_MENU_OPTION, KIND_EXTEND,
 )
 
@@ -139,8 +140,8 @@ class TestBeatsFromStatements:
         assert beats[0].kind == KIND_MENU_OPTION
         assert beats[0].text == '选项A'
 
-    def test_python_recorded_in_notes(self, write_rpy):
-        """变量操作不进主列，但要留痕，否则改表时会悄悄丢逻辑。"""
+    def test_python_recorded_in_codeblock(self, write_rpy):
+        """变量操作进 CodeBlock，导出时原样回写，不再只留痕。"""
         from renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(
             'label a:\n'
@@ -148,7 +149,10 @@ class TestBeatsFromStatements:
             '    e "嗯"\n', 'py.rpy')
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
         beats = beats_from_parse_result(result)
-        assert 'love' in beats[0].notes
+        assert 'love' in beats[0].code
+        # 渲染回写时原样带 $ 前缀
+        lines = render_beat_to_rpy(beats[0])
+        assert '$ love += 1' in lines
 
     def test_voice_captured(self):
         stmts = [
@@ -367,8 +371,11 @@ class TestExcelRoundTrip:
         path = tmp_path / 'c.xlsx'
         export_beats_to_excel(beats, path)
         wb = openpyxl.load_workbook(path)
-        wb['Beats'].append([2, '', '', 'say', '', '', '', '', '', '',
-                            '', '', '', '', '', ''])
+        # 只有 Seq/Kind、没有任何演出内容的行 → 视为空行丢弃
+        row = [''] * len(BEAT_FIELDS)
+        row[BEAT_FIELDS.index('Seq')] = 2
+        row[BEAT_FIELDS.index('Kind')] = 'say'
+        wb['Beats'].append(row)
         wb.save(path)
         assert len(import_beats_from_excel(path)) == 1
 
@@ -401,6 +408,7 @@ class TestExcelRoundTrip:
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {'ID': 'bg_classroom'}}
         reg.music = {'bgm_theme': {'ID': 'bgm_theme'}}
+        reg.voices = {'v_eileen_01': {'ID': 'v_eileen_01'}}
         beats = beats_from_parse_result(parse_result)
         path = tmp_path / 'd.xlsx'
         export_beats_to_excel(beats, path, registry=reg)
@@ -409,7 +417,11 @@ class TestExcelRoundTrip:
         wb = openpyxl.load_workbook(path)
         assert 'Candidates_图片' in wb.sheetnames
         assert 'Candidates_音乐' in wb.sheetnames
-        assert wb['Candidates_图片']['A2'].value == 'bg_classroom'
+        assert 'Candidates_语音' in wb.sheetnames
+        # 第 1 行是说明，第 2 行是表头，第 3 行起才是候选
+        assert wb['Candidates_图片']['A3'].value == 'bg_classroom'
+        assert wb['Candidates_语音']['A3'].value == 'v_eileen_01'
+        assert wb['Candidates_图片']['A1'].value.startswith('↓')
 
     def test_dropdowns_attached(self, tmp_path, parse_result):
         from asset_registry import AssetRegistry
@@ -430,7 +442,41 @@ class TestExcelRoundTrip:
         export_beats_to_excel(beats, path)
         import openpyxl
         wb = openpyxl.load_workbook(path)
-        assert wb.sheetnames == ['Beats']
+        # 没有 registry 就不该有候选表（下拉没有候选可挂）；
+        # 「舞台快照」是从 Beats 推导出来的派生视图，始终生成。
+        assert 'Beats' in wb.sheetnames
+        assert not [s for s in wb.sheetnames
+                    if s.startswith('Candidates_')]
+        assert '舞台快照' in wb.sheetnames
+
+    def test_refresh_candidate_sheets_preserves_beats(self, tmp_path,
+                                                      parse_result):
+        """刷新候选只重写 Candidates_*，不动 Beats 表里的用户数据。"""
+        from asset_registry import AssetRegistry
+        reg = AssetRegistry()
+        reg.images = {'bg_classroom': {'ID': 'bg_classroom'}}
+        beats = beats_from_parse_result(parse_result)
+        path = tmp_path / 'f.xlsx'
+        export_beats_to_excel(beats, path, registry=reg)
+        # 用户改过的台词
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        wb['Beats'].cell(row=2, column=BEAT_FIELDS.index('Text') + 1,
+                         value='用户改的台词')
+        wb.save(path)
+
+        # 资源表新增一张图，刷新候选
+        reg.images['bg_new'] = {'ID': 'bg_new'}
+        refresh_candidate_sheets(path, reg)
+
+        wb2 = openpyxl.load_workbook(path)
+        # Beats 用户数据保留
+        assert wb2['Beats'].cell(row=2, column=BEAT_FIELDS.index('Text') + 1
+                                 ).value == '用户改的台词'
+        # 候选表出现新图
+        ids = [c.value for c in wb2['Candidates_图片']['A']]
+        assert 'bg_new' in ids
+        assert 'bg_classroom' in ids
 
     def test_open_rpy_as_table(self, tmp_path, write_rpy):
         from asset_registry import AssetRegistry
@@ -449,6 +495,49 @@ class TestExcelRoundTrip:
         text = out.read_text(encoding='utf-8')
         assert 'label' in text
         assert '早上好。' in text
+
+
+class TestUnregisteredDetection:
+    """M4：演出表引用了资源表没有的资产 → 要能检测出来。"""
+
+    def test_unregistered_flagged(self):
+        from asset_registry import AssetRegistry
+        reg = AssetRegistry()
+        reg.images = {'bg_classroom': {}}
+        reg.music = {'bgm_theme': {}}
+        reg.characters = {'e': {}}
+        beats = [
+            Beat(seq=1, label='ch', speaker='e', text='hi',
+                 scene='bg classroom', music='bgm_theme'),
+            Beat(seq=2, label='ch', text='x',
+                 show='eileen happy@left', voice='v_new'),
+        ]
+        found = find_unregistered_assets(beats, reg)
+        by_id = {aid for _t, aid in found}
+        assert 'eileen_happy' in by_id      # 图片未登记（空格已归一为下划线）
+        assert 'v_new' in by_id             # 语音未登记
+        # 已登记的不报
+        assert 'bg_classroom' not in by_id
+        assert 'e' not in by_id
+
+    def test_builtin_transform_not_flagged(self):
+        from asset_registry import AssetRegistry
+        reg = AssetRegistry()
+        beats = [Beat(seq=1, label='ch', text='x', at='left',
+                     with_='dissolve')]
+        found = find_unregistered_assets(beats, reg)
+        assert found == []        # left / dissolve 是 Ren'Py 内置
+
+    def test_space_normalized_against_registry(self):
+        from asset_registry import AssetRegistry
+        reg = AssetRegistry()
+        reg.images = {'bg_classroom': {}}     # 下划线形式
+        beats = [Beat(seq=1, label='ch', text='x', scene='bg classroom')]
+        found = find_unregistered_assets(beats, reg)
+        assert found == []        # 空格与下划线视为同一资产
+
+    def test_none_registry_returns_empty(self):
+        assert find_unregistered_assets([Beat(text='x')], None) == []
 
 
 class TestOrderAndAudioArePreserved:

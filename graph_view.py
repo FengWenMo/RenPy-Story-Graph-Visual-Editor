@@ -148,15 +148,27 @@ class GraphView:
         self.project_label = tk.Label(btn_frame, text="（未打开项目）",
                                       font=("微软雅黑", 8), fg="#666")
         self.project_label.pack(pady=2, fill=tk.X)
+        tk.Button(btn_frame, text="从脚本导入角色表",
+                  command=self.import_characters_from_script).pack(pady=2, fill=tk.X)
+        tk.Button(btn_frame, text="项目体检（三级校验）",
+                  command=self.open_validation_panel, bg="#FF9800",
+                  fg="white").pack(pady=2, fill=tk.X)
 
         # 剧本表：把 .rpy 摊成一行一句演出的 Excel，改完再生成脚本
         script_frame = tk.LabelFrame(right_panel, text="剧本表（Excel 双向）",
                                      padx=5, pady=5)
         script_frame.pack(fill=tk.X, pady=5)
-        tk.Button(script_frame, text="用 Excel 打开 .rpy",
-                  command=self.open_rpy_in_excel).pack(pady=2, fill=tk.X)
         tk.Button(script_frame, text="从剧本表生成 .rpy",
                   command=self.export_rpy_from_table).pack(pady=2, fill=tk.X)
+        tk.Button(script_frame, text="刷新候选（从资源表重读）",
+                  command=self.refresh_table_candidates).pack(pady=2, fill=tk.X)
+        tk.Button(script_frame, text="在应用内编辑剧本表",
+                  command=self.open_script_table_editor).pack(pady=2, fill=tk.X)
+        tk.Label(script_frame,
+                 text="（「用 Excel 打开 .rpy」已移到画布上\n"
+                      "右键章节节点 → 与「在编辑器中打开」同级）",
+                 font=("微软雅黑", 8), fg="#666", justify=tk.LEFT
+                 ).pack(pady=(2, 0), fill=tk.X)
 
         tk.Button(btn_frame, text="检查逻辑漏洞", command=self.analyze_and_warn,
                  bg="#4CAF50", fg="white").pack(pady=10, fill=tk.X)
@@ -191,6 +203,9 @@ class GraphView:
         self.menu.add_command(label="设为当前章节", command=self.set_current)
         self.menu.add_command(label="编辑变量操作", command=self.edit_operations)
         self.menu.add_command(label="在编辑器中打开", command=self.open_label_in_editor, state="disabled")
+        # 与「在编辑器中打开」同级：同一个章节，一个给程序员看源码，
+        # 一个给文案看演出表——不该藏在侧栏，得在节点本身右键。
+        self.menu.add_command(label="用 Excel 打开此章节", command=self.open_node_rpy_in_excel, state="disabled")
         self.menu.add_separator()
         self.menu.add_command(label="自动布局", command=self.auto_layout)
         self.menu.add_command(label="重新扫描项目", command=self.rescan_project)
@@ -715,12 +730,13 @@ class GraphView:
 
         if self.selected_node:
             node = self.graph.nodes[self.selected_node]
-            if node.file_path and node.line_number:
-                self.menu.entryconfig("在编辑器中打开", state="normal")
-            else:
-                self.menu.entryconfig("在编辑器中打开", state="disabled")
+            has_src = bool(node.file_path and node.line_number)
+            state = "normal" if has_src else "disabled"
+            self.menu.entryconfig("在编辑器中打开", state=state)
+            self.menu.entryconfig("用 Excel 打开此章节", state=state)
         else:
             self.menu.entryconfig("在编辑器中打开", state="disabled")
+            self.menu.entryconfig("用 Excel 打开此章节", state="disabled")
 
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
@@ -1138,23 +1154,19 @@ is_unlocked = love > 5 and money >= 100"""
         except Exception:
             return None
 
-    def open_rpy_in_excel(self):
+    def _generate_and_open_table(self, script_path):
         """
-        选一个 .rpy，解析成剧本表并用 Excel 打开。
+        把一个 .rpy 解析成演出表（同名 .xlsx）并用系统默认程序打开。
 
-        这是"用表格编演出"的入口：表里一行一句台词，立绘/背景/音乐/变换
-        都是下拉框，候选直接来自资产表。
+        Excel 打开路径与"在编辑器中打开"共用同一份选节点逻辑，区别只是
+        一个给程序员看源码、一个给文案看演出表。
         """
-        script_path = filedialog.askopenfilename(
-            title="选择要用 Excel 打开的 .rpy 文件",
-            filetypes=[("Ren'Py 脚本", "*.rpy"), ("所有文件", "*.*")],
-        )
-        if not script_path:
+        script_path = Path(script_path)
+        if not script_path.exists():
+            messagebox.showwarning("找不到脚本", f"文件不存在：\n{script_path}")
             return
 
-        script_path = Path(script_path)
         table_path = script_path.with_suffix('.xlsx')
-
         try:
             from script_table import open_rpy_as_table
             registry = self._current_registry()
@@ -1172,6 +1184,142 @@ is_unlocked = love > 5 and money >= 100"""
             f"[剧本表] 已生成 {table_path.name}\n"
             f"（改完保存后，用「从剧本表生成 .rpy」写回脚本）\n"
         )
+
+    def open_node_rpy_in_excel(self):
+        """
+        右键章节节点 → 用它对应的 .rpy 生成演出表并用 Excel 打开。
+
+        这是"用表格编演出"的入口：表里一行一句台词，立绘/背景/音乐/
+        变换都是下拉框，候选直接来自资产表。
+        """
+        if not self.selected_node:
+            messagebox.showinfo("提示", "请先选中一个章节节点")
+            return
+        node = self.graph.nodes[self.selected_node]
+        if not node.file_path:
+            messagebox.showinfo(
+                "提示", "该节点未关联源文件，请先导入或手动设置文件路径。")
+            return
+        self._generate_and_open_table(node.file_path)
+
+    # 角色表的列顺序：脚本解析出来的字段全部落表，导入完能一眼看清
+    # 这个角色是怎么定义的（显示名/颜色/立绘标签/语音/前后缀…）。
+    CHARACTER_TABLE_FIELDS = [
+        'ID', 'Name', 'Color', 'WhatColor', 'ImageTag', 'Kind', 'VoiceTag',
+        'SideImage', 'WhatPrefix', 'WhatSuffix', 'WhoPrefix', 'WhoSuffix',
+        'DefaultTransform', 'Notes',
+    ]
+
+    def import_characters_from_script(self):
+        """
+        把脚本里 `define xxx = Character(...)` 解析出的角色写进 characters.xlsx。
+
+        以前角色只"悄悄"合并进内存注册表，用户看不到导入了什么；这个动作
+        把结果显式落表并打开，缺哪个字段一目了然。
+        """
+        if self.asset_engine is None:
+            messagebox.showwarning("未打开项目", "请先「打开项目」。")
+            return
+        registry = self._current_registry()
+        if registry is None or not registry.characters:
+            messagebox.showinfo("没有角色", "脚本里没解析到 Character 定义。")
+            return
+
+        asset_dir = getattr(self.asset_engine, 'asset_dir', None)
+        if asset_dir is None:
+            messagebox.showwarning("未知资源表目录", "该项目没有资产表目录。")
+            return
+
+        from asset_registry import write_dict_to_excel
+        target = Path(asset_dir) / 'characters.xlsx'
+        data = {}
+        for cid, row in registry.characters.items():
+            data[cid] = {k: row.get(k, '') for k in self.CHARACTER_TABLE_FIELDS}
+        try:
+            write_dict_to_excel(target, data,
+                                list(self.CHARACTER_TABLE_FIELDS))
+        except Exception as e:
+            messagebox.showerror("写角色表失败", str(e))
+            return
+
+        self._append_analysis(
+            f"[角色] 已把脚本中的 {len(data)} 个角色写入 {target.name}\n")
+        messagebox.showinfo(
+            "导入完成",
+            f"已写入 {len(data)} 个角色：\n{target}\n\n"
+            f"列：{' / '.join(self.CHARACTER_TABLE_FIELDS)}")
+        _open_with_system_default(target)
+
+    def open_validation_panel(self):
+        """
+        项目体检：L1 单条 / L2 表内 / L3 全库 三级校验，集中一处看。
+
+        用 build.collect_report 而不是 build_project —— 体检不该往工作区
+        写产物；这也保证"面板看到的结论"和"CI 构建时的结论"是同一套规则。
+        """
+        if self.project_root is None:
+            messagebox.showwarning("未打开项目", "请先「打开项目」。")
+            return
+        asset_dir = getattr(self.asset_engine, 'asset_dir', None)
+        try:
+            from build import collect_report
+            collected = collect_report(self.project_root,
+                                       asset_dir=asset_dir)
+        except Exception as e:
+            messagebox.showerror("体检失败", str(e))
+            return
+
+        report = collected['report']
+        stats = {
+            'scripts': len(collected['scripts']),
+            'lines': len(collected['beats']),
+        }
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"项目体检 · {report.summary()}")
+        dlg.geometry("900x600")
+        body = tk.Frame(dlg)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        tk.Label(body,
+                 text=(f"项目：{Path(self.project_root).name} · "
+                       f"章节脚本 {stats['scripts']} 个 · "
+                       f"演出 {stats['lines']} 行"),
+                 font=("微软雅黑", 9, "bold")).pack(anchor='w')
+        text = st.ScrolledText(body, font=("Consolas", 9))
+        text.pack(fill=tk.BOTH, expand=True, pady=6)
+        text.insert(tk.END, report.format(max_per_level=80))
+
+        def save_report():
+            from tkinter import filedialog as fd
+            p = fd.asksaveasfilename(title="保存体检报告",
+                                     defaultextension=".json",
+                                     filetypes=[("JSON", "*.json")])
+            if not p:
+                return
+            Path(p).write_text(report.to_json(), encoding='utf-8')
+            messagebox.showinfo("已保存", p)
+
+        bar = tk.Frame(dlg)
+        bar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Button(bar, text="保存报告 JSON", command=save_report
+                  ).pack(side='left')
+        tk.Button(bar, text="关闭", command=dlg.destroy).pack(side='right')
+
+        self._append_analysis(
+            f"[体检] {report.summary()}\n")
+
+    def open_rpy_in_excel(self):
+        """
+        选一个 .rpy，解析成剧本表并用 Excel 打开（文件选择器版本）。
+
+        正常流程走节点右键；这里作为"没有图/没有节点"时的兜底入口。
+        """
+        script_path = filedialog.askopenfilename(
+            title="选择要用 Excel 打开的 .rpy 文件",
+            filetypes=[("Ren'Py 脚本", "*.rpy"), ("所有文件", "*.*")],
+        )
+        if not script_path:
+            return
+        self._generate_and_open_table(script_path)
 
     def export_rpy_from_table(self):
         """
@@ -1203,6 +1351,18 @@ is_unlocked = love > 5 and money >= 100"""
             messagebox.showwarning("剧本表为空", "没有读到任何演出行。")
             return
 
+        # M4：检测演出表里引用、但资源表未登记的资产，提示文案去登记
+        registry = self._current_registry()
+        unregistered = []
+        if registry is not None:
+            try:
+                from script_table import find_unregistered_assets
+                unregistered = find_unregistered_assets(beats, registry)
+            except Exception:
+                unregistered = []
+        if unregistered:
+            self._show_unregistered_dialog(unregistered)
+
         out_path = table_path.with_suffix('.generated.rpy')
         if not messagebox.askyesno(
             "确认导出",
@@ -1212,7 +1372,9 @@ is_unlocked = love > 5 and money >= 100"""
 
         try:
             # label 交给表里每一行的 Label 列决定，保持多章节结构
-            write_beats_to_rpy(beats, out_path, label_name=None)
+            # registry 传入后，会把用到的自定义 transform 一并生成
+            write_beats_to_rpy(beats, out_path, label_name=None,
+                               registry=registry)
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
             return
@@ -1220,6 +1382,147 @@ is_unlocked = love > 5 and money >= 100"""
         self._append_analysis(
             f"[剧本表] 已生成脚本 {out_path.name}（{len(beats)} 个演出单元）\n")
         messagebox.showinfo("导出完成", f"已写入：\n{out_path}")
+
+    def refresh_table_candidates(self):
+        """
+        刷新一张已导出演出表的候选下拉，不动 Beats 里的任何用户数据。
+
+        资源表新增了资产 → 演出表下拉看不见，点这里即可让下拉跟上，
+        不必重新导出 .rpy、丢掉文案改好的台词/立绘。
+        """
+        initial = str(self.project_root) if self.project_root else None
+        table_path = filedialog.askopenfilename(
+            title="选择要刷新候选的演出表（.xlsx）",
+            initialdir=initial,
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+        )
+        if not table_path:
+            return
+
+        registry = self._current_registry()
+        if registry is None:
+            messagebox.showwarning(
+                "未打开项目",
+                "请先打开项目以加载资源表，否则没有候选可刷新。")
+            return
+
+        try:
+            from script_table import refresh_candidate_sheets
+            refresh_candidate_sheets(table_path, registry)
+        except Exception as e:
+            messagebox.showerror("刷新候选失败", str(e))
+            return
+
+        self._append_analysis(
+            f"[剧本表] 已刷新 {Path(table_path).name} 的候选下拉\n")
+        messagebox.showinfo(
+            "刷新完成",
+            f"已用当前资源表更新候选下拉：\n{table_path}")
+
+    def open_script_table_editor(self):
+        """
+        M5/M6：在应用内直接编辑剧本表，不必先开 Excel。
+
+        载入一个 .rpy → 列出所有 Beat → 选中后在右侧面板改角色/台词/
+        语音/音乐/立绘 → 资产列可点 🔍 从资源表选择，或"新建资产"直接
+        写回资源表。改完导出 .rpy。
+        """
+        try:
+            from beat_editor import ScriptTableEditorWindow
+            from asset_registry import add_asset_to_registry
+        except Exception as e:
+            messagebox.showerror("无法打开编辑器", str(e))
+            return
+
+        registry = self._current_registry()
+        asset_dir = (getattr(self.asset_engine, 'asset_dir', None)
+                     if self.asset_engine else None)
+
+        def on_new_asset(asset_type, asset_id, path):
+            if registry is None:
+                return
+            add_asset_to_registry(registry, asset_type, asset_id, path,
+                                 asset_dir)
+            self._append_analysis(
+                f"[剧本表] 已新建资产 {asset_type}/{asset_id}"
+                f"{('（' + path + '）') if path else ''}\n")
+
+        ScriptTableEditorWindow(
+            self.root, self.asset_engine, asset_dir=asset_dir,
+            on_new_asset=on_new_asset)
+
+    _ASSET_TABLE_FILE = {
+        'character': 'characters.xlsx',
+        'image': 'images.xlsx',
+        'transform': 'transforms.xlsx',
+        'music': 'music.xlsx',
+        'sound': 'sounds.xlsx',
+        'voice': 'voices.xlsx',
+    }
+
+    def _show_unregistered_dialog(self, unregistered):
+        """
+        M4：演出表引用了资源表里没有的资产 → 弹窗提示去登记。
+
+        每个出现的资产类型给一个"打开资源表"按钮（直接定位到对应的
+        .xlsx），另给"忽略"放行。导出的脚本仍可继续生成，但这里先把
+        断裂引用的风险摆在文案眼前。
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("待登记资产")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg,
+            text="以下资产在演出表中被引用，但资源表里没有：",
+            font=("微软雅黑", 10, "bold"),
+        ).pack(padx=12, pady=8, anchor="w")
+
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(padx=12, fill=tk.X)
+        shown = set()
+        for atype, aid in unregistered:
+            if (atype, aid) in shown:
+                continue
+            shown.add((atype, aid))
+            tk.Label(list_frame, text=f"  · [{atype}] {aid}",
+                     anchor="w").pack(fill=tk.X)
+
+        tk.Label(
+            dlg,
+            text="请在资源表登记后再导出，否则脚本会出现断裂引用。",
+            fg="#a00",
+        ).pack(padx=12, pady=6, anchor="w")
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(padx=12, pady=8, fill=tk.X)
+        asset_dir = (getattr(self.asset_engine, 'asset_dir', None)
+                     if self.asset_engine else None)
+
+        def open_table(fname):
+            if asset_dir is None:
+                return
+            p = Path(asset_dir) / fname
+            if p.exists():
+                _open_with_system_default(p)
+            else:
+                messagebox.showinfo("资源表不存在", f"未找到：{p}")
+
+        opened = set()
+        for atype, _ in unregistered:
+            if atype in opened:
+                continue
+            opened.add(atype)
+            fname = self._ASSET_TABLE_FILE.get(atype)
+            if not fname:
+                continue
+            tk.Button(btn_frame, text=f"打开 {atype} 表",
+                      command=lambda f=fname: open_table(f)
+                      ).pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text="忽略", command=dlg.destroy
+                  ).pack(side=tk.RIGHT, padx=4)
+        dlg.wait_window()
 
     def _stop_asset_engine(self):
         """停止当前引擎并释放轮询句柄。"""

@@ -1,0 +1,62 @@
+{
+  "ok": true,
+  "error_count": 0,
+  "warning_count": 3,
+  "by_level": {
+    "L1": 0,
+    "L2": 0,
+    "L3": 3
+  },
+  "issues": [
+    {
+      "level": "L3",
+      "code": "W301",
+      "severity": "warning",
+      "message": "图片：2 个未被任何脚本引用（如 bg_rooftop、happy_blush）",
+      "where": "images",
+      "hint": "确认是否废弃；确实不用就从资源表删除"
+    },
+    {
+      "level": "L3",
+      "code": "W301",
+      "severity": "warning",
+      "message": "音效：1 个未被任何脚本引用（如 sfx_click）",
+      "where": "sounds",
+      "hint": "确认是否废弃；确实不用就从资源表删除"
+    },
+    {
+      "level": "L3",
+      "code": "W301",
+      "severity": "warning",
+      "message": "变换：2 个未被任何脚本引用（如 fade_in_soft、shake_hard）",
+      "where": "transforms",
+      "hint": "确认是否废弃；确实不用就从资源表删除"
+    }
+  ],
+  "build": {
+    "ok": true,
+    "engine": "renpy",
+    "strict": true,
+    "generated_at": "2026-09-26T23:55:33",
+    "stats": {
+      "scripts": [
+        "demo\\game\\script\\ch01.rpy"
+      ],
+      "lines": 4,
+      "labels": 1,
+      "chars": 36,
+      "registry": {
+        "images": 6,
+        "music": 2,
+        "sounds": 2,
+        "voices": 2,
+        "transforms": 3,
+        "characters": 2
+      }
+    },
+    "artifacts": [
+      "demo\\build_renpy\\story.generated.rpy",
+      "demo\\build_renpy\\story_ir.json"
+    ]
+  }
+}

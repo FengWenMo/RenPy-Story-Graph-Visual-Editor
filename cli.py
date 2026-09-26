@@ -1,0 +1,291 @@
+#!/usr/bin/env python
+"""
+cli.py
+======
+命令行入口：让这套工具能被 CI、脚本、以及不爱点鼠标的程序使用。
+
+    python cli.py validate <项目根>            # 只体检
+    python cli.py build <项目根> --engine renpy # 体检 + 出产物
+    python cli.py table rpy2xlsx <a.rpy>       # 单文件摊表
+    python cli.py table xlsx2rpy <a.xlsx>      # 表写回脚本
+    python cli.py collab init|pull|push|status|lock|unlock|approve
+
+退出码：0 通过；1 有错误；2 用法/环境问题。CI 直接看退出码。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def _cmd_validate(args) -> int:
+    from build import build_project
+
+    result = build_project(
+        args.project, asset_dir=args.asset_dir, out_dir=args.out,
+        engine='json', strict=args.strict, char_limit=args.char_limit,
+        write_report=bool(args.out))
+    from validate import Issue, ValidationReport
+
+    report = ValidationReport()
+    report.issues = [Issue(**i) for i in result.report.get('issues', [])]
+
+    if args.json:
+        print(report.to_json())
+    else:
+        stats = result.report.get('build', {}).get('stats', {})
+        print(f"项目：{args.project}")
+        print(f"章节脚本 {len(stats.get('scripts', []))} 个，"
+              f"演出 {stats.get('lines', 0)} 行 / "
+              f"{stats.get('labels', 0)} 章 / "
+              f"文本 {stats.get('chars', 0)} 字")
+        if stats.get('registry'):
+            print('资源表：' + '，'.join(
+                f'{k} {v}' for k, v in stats['registry'].items()))
+        print()
+        print(report.format())
+    return 0 if report.ok else 1
+
+
+def _cmd_build(args) -> int:
+    from build import build_project, format_build_result
+
+    result = build_project(
+        args.project, asset_dir=args.asset_dir, out_dir=args.out,
+        engine=args.engine, strict=args.strict, char_limit=args.char_limit)
+    print(format_build_result(result))
+    if result.report_path:
+        print(f'\n报告：{result.report_path}')
+    return 0 if result.ok else 1
+
+
+def _cmd_table(args) -> int:
+    from script_table import export_table_to_rpy, import_beats_from_excel, \
+        open_rpy_as_table
+
+    if args.action == 'rpy2xlsx':
+        out = open_rpy_as_table(args.path, args.out)
+        print(f'已生成剧本表：{out}')
+        return 0
+    if args.action == 'xlsx2rpy':
+        beats = import_beats_from_excel(args.path)
+        if not beats:
+            print('剧本表为空', file=sys.stderr)
+            return 2
+        out = export_table_to_rpy(args.path, args.out)
+        print(f'已生成脚本：{out}（{len(beats)} 个演出单元）')
+        return 0
+    print(f'未知动作：{args.action}', file=sys.stderr)
+    return 2
+
+
+# ==================================================================
+#  collab：Excel 前端 + 数据库后端
+# ==================================================================
+
+def _collab_db(args) -> Path:
+    if args.db:
+        return Path(args.db)
+    return Path(args.project) / 'collab.db'
+
+
+def _cmd_collab(args) -> int:
+    import collab_store as cs
+
+    db = _collab_db(args)
+    action = args.action
+
+    if action == 'init':
+        users = [u for u in (args.users or '').split(',') if u.strip()]
+        cs.init_db(db, users=users)
+        print(f'已建库：{db}')
+        if users:
+            print('成员：' + '，'.join(users))
+        print('下一步：collab pull 把库导出成 Excel 交给文案；')
+        print('        collab push 把改好的 Excel 写回库。')
+        return 0
+
+    if not db.exists():
+        print(f'找不到数据库 {db}，先跑 collab init', file=sys.stderr)
+        return 2
+
+    if action == 'pull':
+        if not args.sheet:
+            print('pull 需要 --sheet 指定要写出的 Excel', file=sys.stderr)
+            return 2
+        registry = _load_registry(args)
+        info = cs.pull(db, args.sheet, actor=args.user, registry=registry)
+        print(f"已导出 {info['rows']} 行到 {info['sheet']}")
+        print(f'（含「{cs.COLLAB_SHEET}」工作表：Revision / LockedBy / Status，'
+              f'push 时用它判断冲突）')
+        return 0
+
+    if action == 'push':
+        if not args.sheet:
+            print('push 需要 --sheet 指定要写回的 Excel', file=sys.stderr)
+            return 2
+        res = cs.push(db, args.sheet, actor=args.user, force=args.force)
+        print(f"新增 {len(res['added'])}，更新 {len(res['updated'])}，"
+              f"未变 {len(res['unchanged'])}，"
+              f"冲突 {len(res['conflicts'])}，被拒 {len(res['rejected'])}")
+        for c in res['conflicts']:
+            print(f"  冲突 {c['line_id']}（库里 rev {c['db_revision']} > "
+                  f"你基于的 rev {c['base_revision']}，"
+                  f"最后改于 {c['updated_by']}）")
+        for r in res['rejected']:
+            print(f"  拒绝 {r['line_id']}：{r['reason']}")
+        if res['conflicts'] or res['rejected']:
+            print('先 pull 同步、或与对方沟通后用 --force 覆盖')
+            return 1
+        return 0
+
+    if action == 'status':
+        s = cs.status_summary(db)
+        print(f"总行数 {s['lines']}，已锁 {s['locked_total']}")
+        print('状态：' + '，'.join(f'{k} {v}' for k, v in s['by_status'].items()))
+        if s['locked_by']:
+            print('持锁人：' + '，'.join(f'{k} {v} 行'
+                                      for k, v in s['locked_by'].items()))
+        if s['labels']:
+            print('按章：')
+            for l in s['labels']:
+                print(f"  {l['label']}: {l['total']} 行"
+                      f"（approved {l['approved'] or 0}"
+                      f"，in_review {l['in_review'] or 0}"
+                      f"，locked {l['locked'] or 0}）")
+        if s['recent']:
+            print('最近变更：')
+            for r in s['recent'][:8]:
+                print(f"  {r['ts']} {r['actor']} {r['action']} {r['line_id']}")
+        return 0
+
+    if action == 'lock':
+        if args.label:
+            res = cs.lock_range(db, args.label, args.user)
+            print(f"已锁 {len(res['locked'])} 行"
+                  + (f"，跳过 {len(res['skipped'])} 行（别人持有）"
+                     if res['skipped'] else ''))
+            return 0
+        res = cs.lock(db, args.line_id, args.user, note=args.note or '')
+        print('已上锁' if res['ok'] else f"失败：{res['reason']}")
+        return 0 if res['ok'] else 1
+
+    if action == 'unlock':
+        res = cs.unlock(db, args.line_id, args.user, force=args.force)
+        print('已解锁' if res['ok'] else f"失败：{res['reason']}")
+        return 0 if res['ok'] else 1
+
+    if action == 'approve':
+        res = cs.set_status(db, args.line_id, args.status, args.user)
+        print(f"已置为 {res.get('status')}" if res['ok']
+              else f"失败：{res['reason']}")
+        return 0 if res['ok'] else 1
+
+    if action == 'import-ir':
+        # 从 .rpy 灌进数据库：新项目第一次入库走这个
+        from build import load_asset_registry
+        from renpy_parser import IncrementalRenPyAnalyzer
+        from script_table import beats_from_parse_result
+        from build import discover_scripts
+
+        scripts = discover_scripts(args.project)
+        analyzer = IncrementalRenPyAnalyzer()
+        pr, _ = analyzer.analyze(files=scripts, graph=None)
+        beats = beats_from_parse_result(pr)
+        cs.init_db(db, users=[args.user])
+        tmp = Path(args.sheet) if args.sheet else Path(args.project) / \
+            '_import_tmp.xlsx'
+        from script_table import export_beats_to_excel
+        export_beats_to_excel(beats, tmp)
+        res = cs.push(db, tmp, actor=args.user, force=True)
+        cs.upsert_assets(db, load_asset_registry(args.project), actor=args.user)
+        print(f"入库 {len(res['added'])} 行（来自 {len(scripts)} 个脚本）")
+        return 0
+
+    print(f'未知动作：{action}', file=sys.stderr)
+    return 2
+
+
+def _load_registry(args):
+    from build import load_asset_registry
+    if not getattr(args, 'project', None):
+        return None
+    return load_asset_registry(args.project, getattr(args, 'asset_dir', None))
+
+
+# ==================================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog='cli.py',
+        description='RenPy 剧情编辑器命令行：体检 / 构建 / 表格 / 协作')
+    sub = p.add_subparsers(dest='cmd', required=True)
+
+    def add_build_args(sp):
+        sp.add_argument('project', help='项目根目录（含 game/）')
+        sp.add_argument('--asset-dir', default=None, help='资源表目录')
+        sp.add_argument('--out', default=None, help='产物目录')
+        sp.add_argument('--char-limit', type=int, default=60,
+                        help='单句台词字数上限（默认 60）')
+        sp.add_argument('--no-strict', dest='strict', action='store_false',
+                        help='有错误也继续出产物')
+
+    sp = sub.add_parser('validate', help='只做三级校验')
+    add_build_args(sp)
+    sp.add_argument('--json', action='store_true', help='输出 JSON（CI 用）')
+    sp.set_defaults(func=_cmd_validate)
+
+    sp = sub.add_parser('build', help='校验 + 导出产物')
+    add_build_args(sp)
+    sp.add_argument('--engine', default='renpy',
+                    choices=['renpy', 'unity', 'godot', 'json', 'csv'],
+                    help='目标引擎（默认 renpy）')
+    sp.set_defaults(func=_cmd_build)
+
+    sp = sub.add_parser('table', help='单文件 .rpy ↔ .xlsx')
+    sp.add_argument('action', choices=['rpy2xlsx', 'xlsx2rpy'])
+    sp.add_argument('path')
+    sp.add_argument('--out', default=None)
+    sp.set_defaults(func=_cmd_table)
+
+    sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
+    sp.add_argument('action',
+                    choices=['init', 'pull', 'push', 'status', 'lock',
+                             'unlock', 'approve', 'import-ir'])
+    sp.add_argument('--db', default=None, help='数据库路径（默认 <项目>/collab.db）')
+    sp.add_argument('--project', default='.', help='项目根目录')
+    sp.add_argument('--asset-dir', default=None)
+    sp.add_argument('--sheet', default=None, help='Excel 路径')
+    sp.add_argument('--user', default='anonymous', help='你的成员 ID')
+    sp.add_argument('--users', default='', help='init 时登记的成员，逗号分隔')
+    sp.add_argument('--line-id', dest='line_id', default='')
+    sp.add_argument('--label', default='', help='lock 时按整章上锁')
+    sp.add_argument('--status', default='in_review',
+                    choices=['draft', 'in_review', 'approved'])
+    sp.add_argument('--note', default='')
+    sp.add_argument('--force', action='store_true', help='忽略锁/冲突强制写入')
+    sp.set_defaults(func=_cmd_collab)
+
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except FileNotFoundError as e:
+        print(f'路径不存在：{e}', file=sys.stderr)
+        return 2
+    except Exception as e:                      # noqa: BLE001
+        print(f'执行失败：{e}', file=sys.stderr)
+        if '--debug' in (argv or sys.argv):
+            raise
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

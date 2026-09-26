@@ -14,6 +14,7 @@ from renpy_parser import (
     LogicalLine, LabelNode, DefineNode, SayNode, ExtendNode,
     MenuNode, MenuOptionNode, IfNode, JumpNode, CallNode,
     ReturnNode, PythonNode, ShowNode, SceneNode,
+    CommentNode, RawNode,
     ParseResultBuilder, GraphBuilder, TranslationUnitGenerator,
     IncrementalRenPyAnalyzer, parse_renpy_file, parse_translation_files,
     _skip_string, _scan_toplevel_colon, _scan_balanced_close,
@@ -238,17 +239,54 @@ class TestStatementParsing:
         assert isinstance(nodes[1].block[0], CallNode)
         assert isinstance(nodes[1].block[1], ReturnNode)
 
-    def test_jump_expression_warns(self, write_rpy):
-        """FIX-43：jump expression 不生成 target='expression' 幽灵边。"""
+    def test_jump_expression_preserved_as_raw(self, write_rpy):
+        """动态跳转不生成 target='expression' 幽灵边；语句本身保真。"""
         fp = write_rpy('label a:\n    jump expression val\n')
         p = RenPyParser()
-        p.parse(fp)
-        assert any('jump expression' in w for w in p.warnings)
+        nodes = p.parse(fp)
+        node = nodes[0].block[0]
+        assert isinstance(node, RawNode)
+        assert node.text == 'jump expression val'
+        assert node.raw_kind == 'jump_expression'
+        # 不产生任何 Figure 幽灵边：GraphBuilder 不认 RawNode
+        from models import Graph
+        g = Graph()
+        GraphBuilder(g).build(nodes)
+        assert g.edges == [] or all(
+            e.target != 'expression' for e in g.edges)
 
-    def test_call_screen_silently_ignored(self, write_rpy):
+    def test_call_screen_preserved_as_raw(self, write_rpy):
+        """call screen 不产生 label 边，但语句要在往返中保留。"""
         fp = write_rpy('label a:\n    call screen my_screen\n')
         label = RenPyParser().parse(fp)[0]
-        assert label.block == []
+        assert len(label.block) == 1
+        assert isinstance(label.block[0], RawNode)
+        assert label.block[0].text == 'call screen my_screen'
+        assert label.block[0].raw_kind == 'call_screen'
+
+    def test_comment_node_captured(self, write_rpy):
+        """整行注释必须被保留，不能当作噪声丢掉。"""
+        fp = write_rpy('label a:\n    # 表情A6，距离近\n    "hi"\n')
+        label = RenPyParser().parse(fp)[0]
+        assert isinstance(label.block[0], CommentNode)
+        assert label.block[0].text == '# 表情A6，距离近'
+
+    def test_unknown_leaf_statement_preserved(self, write_rpy):
+        """未建模的叶语句（pause / window hide）原样保真。"""
+        fp = write_rpy('label a:\n    pause 1.0\n    window hide\n')
+        label = RenPyParser().parse(fp)[0]
+        kinds = [n.text for n in label.block if isinstance(n, RawNode)]
+        assert 'pause 1.0' in kinds
+        assert 'window hide' in kinds
+
+    def test_top_level_unknown_not_captured(self, write_rpy):
+        """顶层未建模语句不属于演出流，不该进 label 表。"""
+        fp = write_rpy('image eileen = "e.png"\nlabel a:\n    "hi"\n')
+        nodes = RenPyParser().parse(fp)
+        labels = [n for n in nodes if isinstance(n, LabelNode)]
+        assert len(labels) == 1
+        assert all(not isinstance(n, RawNode) or n.text != 'image eileen = "e.png"'
+                   for n in labels[0].block)
 
     def test_dollar_python(self, write_rpy):
         fp = write_rpy('label a:\n    $ x = 1\n')

@@ -1,0 +1,210 @@
+{
+  "schema": "renpy-story-ir/1.0",
+  "project": "demo",
+  "characters": [
+    {
+      "id": "e",
+      "display_name": "爱莲",
+      "color": "#c8ffc8",
+      "image_tag": "eileen",
+      "voice_tag": "eileen"
+    },
+    {
+      "id": "m",
+      "display_name": "玛丽",
+      "color": "#ffc8c8",
+      "image_tag": "mary",
+      "voice_tag": ""
+    }
+  ],
+  "lines": [
+    {
+      "line_id": "ch01.0001",
+      "label": "ch01",
+      "seq": 1,
+      "speaker_id": "e",
+      "speaker_name": "爱莲",
+      "text": "早上好，昨晚睡得好吗？",
+      "condition": "",
+      "stage": {
+        "background": "bg classroom",
+        "poses": [
+          "eileen happy@leftish"
+        ],
+        "bgm": "night",
+        "bgm_action": "play",
+        "sfx": "",
+        "voice": ""
+      },
+      "line_hash": "e55edfddf8"
+    },
+    {
+      "line_id": "ch01.0002",
+      "label": "ch01",
+      "seq": 2,
+      "speaker_id": "m",
+      "speaker_name": "玛丽",
+      "text": "还行，就是雨下了一整晚。",
+      "condition": "",
+      "stage": {
+        "background": "bg classroom",
+        "poses": [
+          "eileen happy@leftish"
+        ],
+        "bgm": "night",
+        "bgm_action": "play",
+        "sfx": "door",
+        "voice": "v_eileen_01"
+      },
+      "line_hash": "04d7405dfa"
+    },
+    {
+      "line_id": "ch01.0003",
+      "label": "ch01",
+      "seq": 3,
+      "speaker_id": "m",
+      "speaker_name": "玛丽",
+      "text": "别想了，今天我们还有正事。",
+      "condition": "",
+      "stage": {
+        "background": "bg classroom",
+        "poses": [
+          "eileen sad@leftish",
+          "mary smile@right"
+        ],
+        "bgm": "rain",
+        "bgm_action": "play",
+        "sfx": "",
+        "voice": ""
+      },
+      "line_hash": "17c8fe0577"
+    },
+    {
+      "line_id": "ch01.0004",
+      "label": "ch01",
+      "seq": 4,
+      "speaker_id": "",
+      "speaker_name": "",
+      "text": "",
+      "condition": "",
+      "stage": {
+        "background": "bg classroom",
+        "poses": [
+          "eileen sad@leftish",
+          "mary smile@right"
+        ],
+        "bgm": "",
+        "bgm_action": "stop",
+        "sfx": "",
+        "voice": ""
+      },
+      "line_hash": "39b7c73016"
+    }
+  ],
+  "assets": {
+    "images": [
+      {
+        "id": "bg_classroom",
+        "type": "image",
+        "path": "game/images/bg/bg_classroom.png",
+        "tag": "bg",
+        "category": "background"
+      },
+      {
+        "id": "bg_rooftop",
+        "type": "image",
+        "path": "game/images/bg/bg_rooftop.png",
+        "tag": "bg",
+        "category": "background"
+      },
+      {
+        "id": "happy",
+        "type": "image",
+        "path": "game/images/eileen/happy.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "happy_blush",
+        "type": "image",
+        "path": "game/images/eileen/happy_blush.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "sad",
+        "type": "image",
+        "path": "game/images/eileen/sad.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "smile",
+        "type": "image",
+        "path": "game/images/mary/smile.png",
+        "tag": "mary",
+        "category": "other"
+      }
+    ],
+    "music": [
+      {
+        "id": "bgm_night",
+        "type": "music",
+        "path": "game/music/night.ogg",
+        "loop": true,
+        "volume": 1
+      },
+      {
+        "id": "bgm_rain",
+        "type": "music",
+        "path": "game/music/rain.ogg",
+        "loop": true,
+        "volume": 1
+      }
+    ],
+    "sounds": [
+      {
+        "id": "sfx_click",
+        "type": "sound",
+        "path": "game/sounds/click.ogg"
+      },
+      {
+        "id": "sfx_door",
+        "type": "sound",
+        "path": "game/sounds/door.ogg"
+      }
+    ],
+    "voices": [
+      {
+        "id": "v_eileen_01",
+        "type": "voice",
+        "path": "game/voice/v_eileen_01.ogg"
+      },
+      {
+        "id": "v_eileen_02",
+        "type": "voice",
+        "path": "game/voice/v_eileen_02.ogg"
+      }
+    ],
+    "transforms": [
+      {
+        "id": "fade_in_soft",
+        "type": "transform",
+        "category": "custom",
+        "doc": "柔和淡入，用于回忆切入"
+      },
+      {
+        "id": "leftish",
+        "type": "transform",
+        "category": "custom",
+        "doc": "靠左站，双人对话时主角在左"
+      },
+      {
+        "id": "shake_hard",
+        "type": "transform",
+        "category": "custom",
+        "doc": "剧烈抖动，挨打/惊吓演出用"
+      }
+    ]
+  }
+}

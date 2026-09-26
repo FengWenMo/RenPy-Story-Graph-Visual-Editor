@@ -32,6 +32,7 @@ from asset_registry import (
     AssetRegistry,
     parse_asset_tables,
     analyze_references,
+    analyze_statement_references,
     load_hooks,
 )
 from asset_events import (
@@ -357,6 +358,7 @@ class AssetEngine:
 
         # 把角色定义合并进 registry，重建引用索引
         self._sync_character_definitions()
+        self._sync_transform_definitions()
         self._rebuild_references()
 
     def _rebuild_references(self):
@@ -372,6 +374,17 @@ class AssetEngine:
             self.registry.unresolved.clear()
 
         if self.script_files:
+            # 主路径：从已解析的 Statement 流抽取（一.3 统一真源），
+            # 比正则扫原文准；正则版作为兜底补上它覆盖不到的地方
+            # （例如 label 内独立的 `with dissolve`）。
+            statements = getattr(self.parse_result, 'statements', None) \
+                if self.parse_result is not None else None
+            if statements:
+                try:
+                    analyze_statement_references(statements, self.registry)
+                except Exception as e:
+                    self.registry.warnings.append(
+                        f"Statement 引用分析失败，回退正则：{e}")
             analyze_references(self.script_files, self.registry)
 
         if self.linker is not None:
@@ -756,17 +769,19 @@ class AssetEngine:
 
     def _is_script_injected(self, ch) -> bool:
         """
-        这个"被删掉"的角色是不是脚本里 define 出来的？
+        这个"被删掉"的条目是不是脚本里定义出来的（define / transform）？
 
-        角色表是脚本与 Excel 双向同步的：脚本里有 define 的角色会被补进
+        角色表与变换表都是脚本与 Excel 双向同步的：脚本里有定义会被补进
         registry。若某次重载里它没出现，多半只是同步时序问题，
-        而不是用户真的删了角色——不该为此弹窗。
+        而不是用户真的删了它——不该为此弹窗。
         """
-        if ch.category != 'characters':
-            return False
         if self.parse_result is None:
             return False
-        return ch.asset_id in self.parse_result.characters
+        if ch.category == 'characters':
+            return ch.asset_id in self.parse_result.characters
+        if ch.category == 'transforms':
+            return ch.asset_id in getattr(self.parse_result, 'transforms', {})
+        return False
 
     def _handle_rename(self, ch: _Change, refs: list, approved: bool = True):
         request = self.gate.needs_confirmation('renamed', ref_count=len(refs))
@@ -858,13 +873,25 @@ class AssetEngine:
             return
 
         for var_name, char in self.parse_result.characters.items():
+            # 角色定义里能拿到的东西都落表，别只留 Name/Color/ImageTag：
+            # 少一半字段，导入到资源表以后就看不出这个角色到底怎么配的。
+            detail = {
+                'Name': char.display_name,
+                'Color': char.color,
+                'WhatColor': char.what_color,
+                'ImageTag': char.image_tag,
+                'Kind': char.kind,
+                'VoiceTag': char.voice_tag,
+                'SideImage': char.side_image,
+                'WhatPrefix': char.what_prefix,
+                'WhatSuffix': char.what_suffix,
+                'WhoPrefix': char.who_prefix,
+                'WhoSuffix': char.who_suffix,
+                'DefaultTransform': '',
+            }
             if var_name in self.registry.characters:
                 existing = self.registry.characters[var_name]
-                for key, val in (
-                    ('Name', char.display_name),
-                    ('Color', char.color),
-                    ('ImageTag', char.image_tag),
-                ):
+                for key, val in detail.items():
                     if not existing.get(key) and val:
                         existing[key] = val
                 existing['_dialogue_count'] = char.dialogue_count
@@ -872,16 +899,51 @@ class AssetEngine:
                     'Notes', f"{char.source_file}:{char.source_line}"
                 )
             else:
-                self.registry.characters[var_name] = {
-                    'ID': var_name,
-                    'Name': char.display_name,
-                    'Color': char.color,
-                    'ImageTag': char.image_tag,
-                    'SideImage': '',
-                    'DefaultTransform': '',
-                    'Notes': f"{char.source_file}:{char.source_line}",
-                    '_dialogue_count': char.dialogue_count,
+                row = {'ID': var_name}
+                row.update(detail)
+                row['Notes'] = f"{char.source_file}:{char.source_line}"
+                row['_dialogue_count'] = char.dialogue_count
+                row['_from_script'] = True
+                self.registry.characters[var_name] = row
+
+    def _sync_transform_definitions(self):
+        """
+        把脚本里 `transform` 块解析出的自定义变换合并进 registry.transforms。
+
+        为什么必须做这一步：剧本表里 `At` / `Transform` / `With` 三列的候选
+        来自资源表，而绝大多数自定义变换是**程序员在 .rpy 里写的**、
+        根本没进过 transforms.xlsx。不合并，文案就永远选不到
+        `leftish` / `shake_hard` 这些真正在用的变换，只能手打。
+
+        已登记的同名变换不被覆盖（人写的 ATL/分类是权威），只补空缺字段。
+        """
+        if self.parse_result is None or self.registry is None:
+            return
+
+        for name, tf in self.parse_result.transforms.items():
+            if name in self.registry.transforms:
+                existing = self.registry.transforms[name]
+                for key, val in (('ATL', tf.body), ('Params', tf.params),
+                                 ('Doc', tf.doc)):
+                    if not existing.get(key) and val:
+                        existing[key] = val
+                existing.setdefault('Notes', self._transform_note(tf))
+                existing.setdefault('_from_script', True)
+            else:
+                self.registry.transforms[name] = {
+                    'ID': name,
+                    'Path': '',
+                    'ATL': tf.body,
+                    'Params': tf.params,
+                    'Doc': tf.doc,
+                    'Category': 'custom',
+                    'Notes': self._transform_note(tf),
+                    '_from_script': True,
                 }
+
+    @staticmethod
+    def _transform_note(tf) -> str:
+        return f"{tf.source_file}:{tf.source_line}" if tf.source_file else ''
 
     # ===================== 诊断汇总 =====================
 

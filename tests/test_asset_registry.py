@@ -112,6 +112,28 @@ class TestScanAssets:
         assets = scan_assets(scan_root, audio_dirs=[extra])
         assert assets['audio']['music'] or assets['audio']['sound']
 
+    def test_scan_detects_voice_dir(self, tmp_path):
+        """game/voice/ 与 game/audio/voice/ 应被识别为语音，不与音效混。"""
+        root = tmp_path / 'game'
+        (root / 'voice').mkdir(parents=True)
+        (root / 'voice' / 'v_eileen_01.ogg').write_bytes(b'1')
+        (root / 'audio' / 'voice').mkdir(parents=True)
+        (root / 'audio' / 'voice' / 'v_boss_02.ogg').write_bytes(b'1')
+        (root / 'audio').mkdir(parents=True, exist_ok=True)
+        (root / 'audio' / 'sfx_click.wav').write_bytes(b'1')
+        assets = scan_assets(root)
+        voice_ids = {a['ID'] for a in assets['voices']}
+        assert voice_ids == {'v_eileen_01', 'v_boss_02'}
+        # 语音不应出现在音效候选里
+        assert 'v_eileen_01' not in {a['ID'] for a in assets['audio']['sound']}
+
+    def test_scan_voice_dir_default_empty(self, tmp_path):
+        root = tmp_path / 'game'
+        (root / 'audio').mkdir(parents=True)
+        (root / 'audio' / 'bgm_theme.ogg').write_bytes(b'1')
+        assets = scan_assets(root)
+        assert assets['voices'] == []
+
     def test_make_unique_id_fallback_counter(self):
         existing = {'x', 'parent_x'}
         assert _make_unique_id('x', ['parent'], existing) == 'x_1'
@@ -140,6 +162,16 @@ class TestExcelIO:
         assert len(rows) == 1
         assert rows[0]['ID'] == 'a'
         assert rows[0]['Notes'] == 'hi'
+
+    def test_write_then_read_voices(self, tmp_path):
+        write_asset_excel(
+            {'images': [], 'audio': {'music': [], 'sound': []},
+             'voices': [{'ID': 'v_eileen_01', 'Path': 'voice/v_eileen_01.ogg',
+                        'Notes': ''}]},
+            tmp_path / 'out')
+        rows = read_excel_rows(tmp_path / 'out' / 'voices.xlsx')
+        assert len(rows) == 1
+        assert rows[0]['ID'] == 'v_eileen_01'
 
     def test_blank_rows_skipped(self, tmp_path):
         import openpyxl

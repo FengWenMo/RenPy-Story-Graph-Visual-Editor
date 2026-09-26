@@ -1,0 +1,288 @@
+{
+  "schema": "renpy-story-ir/1.0",
+  "project": "demo",
+  "title": "demo",
+  "characters": [
+    {
+      "id": "e",
+      "name": "爱莲",
+      "color": "#c8ffc8",
+      "image_tag": "eileen",
+      "voice_tag": "eileen",
+      "dialogue_count": 0
+    },
+    {
+      "id": "m",
+      "name": "玛丽",
+      "color": "#ffc8c8",
+      "image_tag": "mary",
+      "voice_tag": "",
+      "dialogue_count": 0
+    }
+  ],
+  "lines": [
+    {
+      "line_id": "ch01.0001",
+      "label": "ch01",
+      "seq": 1,
+      "kind": "say",
+      "speaker": "e",
+      "speaker_name": "爱莲",
+      "text": "早上好，昨晚睡得好吗？",
+      "condition": "",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen happy@leftish"
+      ],
+      "music": "night",
+      "music_action": "play",
+      "music_params": "fadein 1.0",
+      "sound": "",
+      "sound_action": "play",
+      "sound_params": "",
+      "voice": "",
+      "at": "",
+      "with": "",
+      "transform": "",
+      "comment": "# 表情A6，距离近",
+      "raw": "",
+      "code": "",
+      "line_hash": "e55edfddf8"
+    },
+    {
+      "line_id": "ch01.0002",
+      "label": "ch01",
+      "seq": 2,
+      "kind": "say",
+      "speaker": "m",
+      "speaker_name": "玛丽",
+      "text": "还行，就是雨下了一整晚。",
+      "condition": "",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen happy@leftish"
+      ],
+      "music": "night",
+      "music_action": "play",
+      "music_params": "",
+      "sound": "door",
+      "sound_action": "play",
+      "sound_params": "",
+      "voice": "v_eileen_01",
+      "at": "",
+      "with": "",
+      "transform": "",
+      "comment": "",
+      "raw": "",
+      "code": "",
+      "line_hash": "04d7405dfa"
+    },
+    {
+      "line_id": "ch01.0003",
+      "label": "ch01",
+      "seq": 3,
+      "kind": "say",
+      "speaker": "m",
+      "speaker_name": "玛丽",
+      "text": "别想了，今天我们还有正事。",
+      "condition": "",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen sad@leftish",
+        "mary smile@right"
+      ],
+      "music": "rain",
+      "music_action": "play",
+      "music_params": "fadeout 2.0",
+      "sound": "",
+      "sound_action": "play",
+      "sound_params": "",
+      "voice": "",
+      "at": "",
+      "with": "",
+      "transform": "",
+      "comment": "",
+      "raw": "with dissolve",
+      "code": "",
+      "line_hash": "17c8fe0577"
+    },
+    {
+      "line_id": "ch01.0004",
+      "label": "ch01",
+      "seq": 4,
+      "kind": "say",
+      "speaker": "",
+      "speaker_name": "",
+      "text": "",
+      "condition": "",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen sad@leftish",
+        "mary smile@right"
+      ],
+      "music": "",
+      "music_action": "stop",
+      "music_params": "",
+      "sound": "",
+      "sound_action": "play",
+      "sound_params": "",
+      "voice": "",
+      "at": "",
+      "with": "",
+      "transform": "",
+      "comment": "",
+      "raw": "",
+      "code": "",
+      "line_hash": "39b7c73016"
+    }
+  ],
+  "assets": {
+    "images": [
+      {
+        "id": "bg_classroom",
+        "type": "image",
+        "path": "game/images/bg/bg_classroom.png",
+        "tag": "bg",
+        "category": "background"
+      },
+      {
+        "id": "bg_rooftop",
+        "type": "image",
+        "path": "game/images/bg/bg_rooftop.png",
+        "tag": "bg",
+        "category": "background"
+      },
+      {
+        "id": "happy",
+        "type": "image",
+        "path": "game/images/eileen/happy.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "happy_blush",
+        "type": "image",
+        "path": "game/images/eileen/happy_blush.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "sad",
+        "type": "image",
+        "path": "game/images/eileen/sad.png",
+        "tag": "eileen",
+        "category": "other"
+      },
+      {
+        "id": "smile",
+        "type": "image",
+        "path": "game/images/mary/smile.png",
+        "tag": "mary",
+        "category": "other"
+      }
+    ],
+    "music": [
+      {
+        "id": "bgm_night",
+        "type": "music",
+        "path": "game/music/night.ogg",
+        "loop": true,
+        "volume": 1
+      },
+      {
+        "id": "bgm_rain",
+        "type": "music",
+        "path": "game/music/rain.ogg",
+        "loop": true,
+        "volume": 1
+      }
+    ],
+    "sounds": [
+      {
+        "id": "sfx_click",
+        "type": "sound",
+        "path": "game/sounds/click.ogg"
+      },
+      {
+        "id": "sfx_door",
+        "type": "sound",
+        "path": "game/sounds/door.ogg"
+      }
+    ],
+    "voices": [
+      {
+        "id": "v_eileen_01",
+        "type": "voice",
+        "path": "game/voice/v_eileen_01.ogg"
+      },
+      {
+        "id": "v_eileen_02",
+        "type": "voice",
+        "path": "game/voice/v_eileen_02.ogg"
+      }
+    ],
+    "transforms": [
+      {
+        "id": "fade_in_soft",
+        "type": "transform",
+        "category": "custom",
+        "doc": "柔和淡入，用于回忆切入"
+      },
+      {
+        "id": "leftish",
+        "type": "transform",
+        "category": "custom",
+        "doc": "靠左站，双人对话时主角在左"
+      },
+      {
+        "id": "shake_hard",
+        "type": "transform",
+        "category": "custom",
+        "doc": "剧烈抖动，挨打/惊吓演出用"
+      }
+    ]
+  },
+  "stage": [
+    {
+      "line_id": "ch01.0001",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen happy@leftish"
+      ],
+      "music": "night"
+    },
+    {
+      "line_id": "ch01.0002",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen happy@leftish"
+      ],
+      "music": "night"
+    },
+    {
+      "line_id": "ch01.0003",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen sad@leftish",
+        "mary smile@right"
+      ],
+      "music": "rain"
+    },
+    {
+      "line_id": "ch01.0004",
+      "scene": "bg classroom",
+      "actors": [
+        "eileen sad@leftish",
+        "mary smile@right"
+      ],
+      "music": ""
+    }
+  ],
+  "stats": {
+    "lines": 4,
+    "labels": 1,
+    "characters": 2,
+    "spoken_lines": 3,
+    "chars": 36
+  }
+}
