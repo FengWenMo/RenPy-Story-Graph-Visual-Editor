@@ -26,6 +26,9 @@ class StatementKind:
     EXTEND = 'extend'
     SHOW = 'show'
     SCENE = 'scene'
+    HIDE = 'hide'
+    PLAY = 'play'
+    VOICE = 'voice'
     MENU = 'menu'
     MENU_OPTION = 'menu_option'
     JUMP = 'jump'
@@ -34,8 +37,8 @@ class StatementKind:
     PYTHON = 'python'
     UNKNOWN = 'unknown'
 
-    ALL = (SAY, EXTEND, SHOW, SCENE, MENU, MENU_OPTION,
-           JUMP, CALL, RETURN, PYTHON, UNKNOWN)
+    ALL = (SAY, EXTEND, SHOW, SCENE, HIDE, PLAY, VOICE,
+           MENU, MENU_OPTION, JUMP, CALL, RETURN, PYTHON, UNKNOWN)
 
 
 # 每种 kind 参与哈希的字段
@@ -53,6 +56,9 @@ _HASH_FIELDS = {
     StatementKind.MENU_OPTION: ('menu',        ('text',)),
     StatementKind.SHOW:        (None, None),
     StatementKind.SCENE:       (None, None),
+    StatementKind.HIDE:        (None, None),
+    StatementKind.PLAY:        (None, None),
+    StatementKind.VOICE:       (None, None),
     StatementKind.JUMP:        (None, None),
     StatementKind.CALL:        (None, None),
     StatementKind.RETURN:      (None, None),
@@ -225,6 +231,48 @@ class Statement:
         )
 
     @classmethod
+    def make_hide(cls, image, with_='', condition='', source=('', 0)):
+        payload = {'image': image, 'with_': with_}
+        return cls(
+            kind=StatementKind.HIDE,
+            payload=payload,
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+    @classmethod
+    def make_play(cls, action, channel, name, loop=False,
+                  fadein=0.0, fadeout=0.0,
+                  condition='', source=('', 0)):
+        payload = {
+            'action': action,      # 'play' / 'queue' / 'stop'
+            'channel': channel,    # 'music' / 'sound' / 'audio'
+            'name': name,
+            'loop': bool(loop),
+            'fadein': float(fadein or 0.0),
+            'fadeout': float(fadeout or 0.0),
+        }
+        return cls(
+            kind=StatementKind.PLAY,
+            payload=payload,
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+    @classmethod
+    def make_voice(cls, name, condition='', source=('', 0)):
+        payload = {'name': name}
+        return cls(
+            kind=StatementKind.VOICE,
+            payload=payload,
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+    @classmethod
     def make_menu(cls, caption, condition='', source=('', 0)):
         payload = {'caption': caption}
         return cls(
@@ -307,6 +355,9 @@ def validate_statement(stmt: Statement) -> list:
         StatementKind.EXTEND:      ('text',),
         StatementKind.SHOW:        ('image',),
         StatementKind.SCENE:       ('image',),
+        StatementKind.HIDE:        ('image',),
+        StatementKind.PLAY:        ('channel', 'name'),
+        StatementKind.VOICE:       ('name',),
         StatementKind.MENU:        ('caption',),
         StatementKind.MENU_OPTION: ('text',),
         StatementKind.JUMP:        ('target',),

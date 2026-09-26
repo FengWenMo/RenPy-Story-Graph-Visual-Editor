@@ -452,15 +452,17 @@ class TestRenameApplication:
         result = _apply_rename_patch('a', 'b', [tmp_path / 'nope.rpy'])
         assert result['modified'] == []
 
+    def _engine(self, asset_env, ask=lambda r: False, **gate_kw):
+        gate = ConfirmationGate(ask_callback=ask, **gate_kw)
+        return AssetEngine(asset_dir=asset_env['asset_dir'],
+                           project_root=asset_env['project_root'],
+                           script_files=[asset_env['game_dir'] / 'script.rpy'],
+                           confirmation_gate=gate,
+                           watch_source_dirs=False)
+
     def test_rename_rejected_rolls_back(self, asset_env):
         """用户在闸门里拒绝重命名 → registry 必须恢复旧值。"""
-        gate = ConfirmationGate(ask_callback=lambda r: False,
-                                rename_threshold=0)
-        eng = AssetEngine(asset_dir=asset_env['asset_dir'],
-                          project_root=asset_env['project_root'],
-                          script_files=[asset_env['game_dir'] / 'script.rpy'],
-                          confirmation_gate=gate,
-                          watch_source_dirs=False)
+        eng = self._engine(asset_env, rename_threshold=0)
         eng._initial_load()
 
         from asset_engine import _Change
@@ -471,22 +473,163 @@ class TestRenameApplication:
         eng.registry.images['new_id'] = {'Path': 'p.png'}
         eng._prev_state.setdefault('images', {})['new_id'] = {'Path': 'p.png'}
 
-        eng._handle_rename(ch, ['script.rpy:1'])
+        eng._handle_rename(ch, ['script.rpy:1'], approved=False)
 
         assert 'new_id' not in eng.registry.images
         assert eng.registry.images['old_id'] == before
 
     def test_delete_rejected_rolls_back(self, asset_env):
-        gate = ConfirmationGate(ask_callback=lambda r: False)
-        eng = AssetEngine(asset_dir=asset_env['asset_dir'],
-                          project_root=asset_env['project_root'],
-                          script_files=[asset_env['game_dir'] / 'script.rpy'],
-                          confirmation_gate=gate,
-                          watch_source_dirs=False)
+        eng = self._engine(asset_env)
         eng._initial_load()
 
         from asset_engine import _Change
         before = {'Path': 'p.png'}
         ch = _Change('removed', 'images', 'gone_id', before, {})
-        eng._handle_removed(ch, ['script.rpy:1'])
+        eng._handle_removed(ch, ['script.rpy:1'], approved=False)
         assert eng.registry.images['gone_id'] == before
+
+    def test_unreferenced_removal_never_asks(self, asset_env):
+        """
+        整库扫描一次可能上千条删除，若每条都弹窗 UI 就废了。
+        没有引用的删除必须静默通过。
+        """
+        asked = []
+        eng = self._engine(asset_env, ask=lambda r: asked.append(r) or False)
+        eng._initial_load()
+
+        from asset_engine import _Change
+        changes = [
+            _Change('removed', 'images', f'img{i}', {'Path': f'{i}.png'}, {})
+            for i in range(50)
+        ]
+        eng._apply_changes(changes)
+        assert asked == []
+
+
+class TestBatchApplication:
+    """确认次数必须与变更条数解耦。"""
+
+    def test_many_removals_ask_only_once(self, asset_env):
+        asked = []
+        eng = AssetEngine(
+            asset_dir=asset_env['asset_dir'],
+            project_root=asset_env['project_root'],
+            script_files=[asset_env['game_dir'] / 'script.rpy'],
+            confirmation_gate=ConfirmationGate(
+                ask_callback=lambda r: asked.append(r) or False),
+            watch_source_dirs=False)
+        eng._initial_load()
+
+        from asset_engine import _Change
+        # 这些资产确实被脚本引用（脚本里有 bgm_theme）
+        changes = [
+            _Change('removed', 'music', 'bgm_theme', {'Path': 'a.ogg'}, {}),
+            _Change('removed', 'music', 'x1', {'Path': 'a.ogg'}, {}),
+            _Change('removed', 'music', 'x2', {'Path': 'a.ogg'}, {}),
+        ]
+        eng.registry.references['x1'] = ['s.rpy:1']
+        eng.registry.references['x2'] = ['s.rpy:2']
+        eng._apply_changes(changes)
+        assert len(asked) == 1
+        assert asked[0].reason == 'batch'
+
+    def test_batch_rejection_applies_to_all(self, asset_env):
+        eng = AssetEngine(
+            asset_dir=asset_env['asset_dir'],
+            project_root=asset_env['project_root'],
+            script_files=[asset_env['game_dir'] / 'script.rpy'],
+            confirmation_gate=ConfirmationGate(ask_callback=lambda r: False),
+            watch_source_dirs=False)
+        eng._initial_load()
+
+        from asset_engine import _Change
+        changes = [
+            _Change('removed', 'music', 'x1', {'Path': 'a.ogg'}, {}),
+            _Change('removed', 'music', 'x2', {'Path': 'a.ogg'}, {}),
+        ]
+        eng.registry.references['x1'] = ['s.rpy:1']
+        eng.registry.references['x2'] = ['s.rpy:2']
+        eng._apply_changes(changes)
+        # 两项都被拒绝 → 都回滚
+        assert eng.registry.music.get('x1') == {'Path': 'a.ogg'}
+        assert eng.registry.music.get('x2') == {'Path': 'a.ogg'}
+
+    def test_script_injected_character_never_asks(self, asset_env):
+        """脚本里 define 的角色不算"用户删掉的"，不该弹窗。"""
+        asked = []
+        eng = AssetEngine(
+            asset_dir=asset_env['asset_dir'],
+            project_root=asset_env['project_root'],
+            script_files=[asset_env['game_dir'] / 'script.rpy'],
+            confirmation_gate=ConfirmationGate(
+                ask_callback=lambda r: asked.append(r) or False),
+            watch_source_dirs=False)
+        eng._initial_load()
+        assert 'e' in eng.parse_result.characters
+
+        from asset_engine import _Change
+        ch = _Change('removed', 'characters', 'e', {'ID': 'e'}, {})
+        eng.registry.references['e'] = ['s.rpy:1']
+        eng._apply_changes([ch])
+        assert asked == []
+
+
+class TestDiagnosticsDeduplication:
+    """同一份诊断不能每次 poll 都刷一遍。"""
+
+    def _engine(self, asset_env, bus):
+        return AssetEngine(asset_dir=asset_env['asset_dir'],
+                           project_root=asset_env['project_root'],
+                           script_files=[asset_env['game_dir'] / 'script.rpy'],
+                           event_bus=bus,
+                           watch_source_dirs=False)
+
+    def test_identical_diagnostics_emitted_once(self, asset_env):
+        from asset_events import AssetEventBus
+        bus = AssetEventBus()
+        events = []
+        bus.subscribe(None, events.append)
+        eng = self._engine(asset_env, bus)
+        eng._initial_load()
+
+        eng.emit_diagnostics()
+        first = len([e for e in events
+                     if e.event_type in (AssetEventType.UNUSED_ASSETS_FOUND,
+                                         AssetEventType.BROKEN_REFERENCES_FOUND)])
+        events.clear()
+        eng.emit_diagnostics()
+        second = len([e for e in events
+                      if e.event_type in (AssetEventType.UNUSED_ASSETS_FOUND,
+                                          AssetEventType.BROKEN_REFERENCES_FOUND)])
+        assert second == 0
+        assert first >= 0
+
+    def test_force_reemits(self, asset_env):
+        from asset_events import AssetEventBus
+        bus = AssetEventBus()
+        events = []
+        bus.subscribe(None, events.append)
+        eng = self._engine(asset_env, bus)
+        eng._initial_load()
+        eng.emit_diagnostics()
+        events.clear()
+        eng.emit_diagnostics(force=True)
+        assert events
+
+    def test_poll_emits_diagnostics_once(self, asset_env):
+        """脚本任务 + 资产表任务同时处理，诊断只发一轮。"""
+        from asset_events import AssetEventBus
+        bus = AssetEventBus()
+        events = []
+        bus.subscribe(None, events.append)
+        eng = self._engine(asset_env, bus)
+        eng._initial_load()
+        events.clear()
+
+        eng._mark_dirty(eng.TASK_SCRIPT)
+        eng._mark_dirty(eng.TASK_TABLE)
+        eng.poll()
+
+        counts = [e for e in events
+                  if e.event_type == AssetEventType.UNUSED_ASSETS_FOUND]
+        assert len(counts) <= 1

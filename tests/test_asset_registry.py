@@ -17,6 +17,8 @@ from asset_registry import (
     AssetRegistry, scan_assets, write_asset_excel, parse_asset_tables,
     read_excel_rows, validate_registry, analyze_references, load_hooks,
     _detect_category, _make_unique_id,
+    resolve_reference, extract_script_references,
+    RENPY_BUILTIN_TRANSFORMS,
 )
 
 
@@ -303,19 +305,29 @@ class TestHooks:
 # ------------------------------------------------------------------
 
 class TestAnalyzeReferences:
-    def test_references_found_with_line(self, tmp_path, write_rpy):
+    def test_references_found_with_line(self, write_rpy):
+        """
+        脚本写 `show bg room`，资产表里叫 `bg_room`（文件名）。
+        两边形状不同，必须能认出来是同一个东西。
+        """
+        reg = AssetRegistry()
+        reg.images = {
+            'bg_room': {'ID': 'bg_room', 'Path': 'images/bg_room.png',
+                        'Tag': 'bg', 'Attributes': 'bg_room'},
+            'bgm_theme': {},
+        }
         fp = write_rpy(
             'label a:\n'
             '    show bg room\n'
             '    play music bgm_theme\n')
-        reg = AssetRegistry()
         analyze_references([fp], reg)
-        assert reg.references['bg'] == [f'{fp.name}:2']
+        assert reg.references['bg_room'] == [f'{fp.name}:2']
         assert reg.references['bgm_theme'] == [f'{fp.name}:3']
 
     def test_duplicate_locations_deduplicated(self, write_rpy):
-        fp = write_rpy('label a:\n    show bg x\n    scene bg y\n')
         reg = AssetRegistry()
+        reg.images = {'bg': {'ID': 'bg', 'Tag': 'bg', 'Attributes': 'bg'}}
+        fp = write_rpy('label a:\n    show bg\n    scene bg\n')
         analyze_references([fp], reg)
         assert len(reg.references['bg']) == 2
 
@@ -325,8 +337,109 @@ class TestAnalyzeReferences:
         assert not reg.references
 
     def test_plain_dict_converted_to_defaultdict(self, write_rpy):
-        fp = write_rpy('label a:\n    show bg x\n')
         reg = AssetRegistry()
+        reg.images = {'bg': {'ID': 'bg', 'Tag': 'bg', 'Attributes': 'bg'}}
         reg.references = {}
+        fp = write_rpy('label a:\n    show bg\n')
         analyze_references([fp], reg)
         assert reg.references['bg']
+
+
+class TestImageSpecMatching:
+    """`show bg room` 与文件 `bg_room.png` 是同一个东西。"""
+
+    def _reg(self):
+        reg = AssetRegistry()
+        reg.images = {
+            'bg_classroom': {'ID': 'bg_classroom', 'Path': 'p.png',
+                             'Tag': 'bg', 'Attributes': 'bg_classroom'},
+            'eileen_happy': {'ID': 'eileen_happy', 'Path': 'q.png',
+                             'Tag': 'eileen', 'Attributes': 'eileen_happy'},
+        }
+        return reg
+
+    def test_full_spec_maps_to_underscore_id(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show bg classroom\n')
+        analyze_references([fp], reg)
+        assert 'bg_classroom' in reg.references
+
+    def test_two_word_character_sprite(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show eileen happy\n')
+        analyze_references([fp], reg)
+        assert 'eileen_happy' in reg.references
+
+    def test_tag_only_falls_back_to_tag_match(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    scene bg\n')
+        analyze_references([fp], reg)
+        assert reg.references  # 至少匹配到一张 tag=bg 的图
+
+    def test_spec_stops_at_keywords(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show bg classroom at leftish\n')
+        analyze_references([fp], reg)
+        assert 'bg_classroom' in reg.references
+        # 'at' 之后的内容不该被当成图像名的一部分
+        assert 'bg_classroom_at' not in reg.references
+
+    def test_unknown_name_goes_to_unresolved(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show mysterious\n')
+        analyze_references([fp], reg)
+        assert not reg.references
+        assert reg.unresolved['image']
+
+    def test_builtin_transition_not_flagged(self, write_rpy):
+        """`with dissolve` 是 Ren'Py 自带的，不是缺失的资产。"""
+        reg = self._reg()
+        fp = write_rpy('label a:\n    scene bg with dissolve\n')
+        analyze_references([fp], reg)
+        assert not reg.unresolved['transform']
+
+    def test_builtin_position_not_flagged(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show bg at left\n')
+        analyze_references([fp], reg)
+        assert not reg.unresolved['transform']
+
+    def test_custom_transform_still_captured(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    show bg at my_slide\n')
+        analyze_references([fp], reg)
+        assert reg.unresolved['transform']
+
+    def test_registered_transform_resolves(self, write_rpy):
+        reg = self._reg()
+        reg.transforms = {'my_slide': {'ID': 'my_slide'}}
+        fp = write_rpy('label a:\n    show bg at my_slide\n')
+        analyze_references([fp], reg)
+        assert reg.references['my_slide']
+
+    def test_hide_is_captured(self, write_rpy):
+        reg = self._reg()
+        fp = write_rpy('label a:\n    hide bg classroom\n')
+        analyze_references([fp], reg)
+        assert 'bg_classroom' in reg.references
+
+
+class TestResolveReference:
+    def test_exact_id(self):
+        reg = AssetRegistry()
+        reg.images = {'a': {'ID': 'a', 'Tag': 'x', 'Attributes': 'y'}}
+        assert resolve_reference('a', reg) == 'a'
+
+    def test_attributes_match(self):
+        reg = AssetRegistry()
+        reg.images = {'a': {'ID': 'a', 'Tag': 'x', 'Attributes': 'y_z'}}
+        assert resolve_reference('y_z', reg) == 'a'
+
+    def test_tag_match(self):
+        reg = AssetRegistry()
+        reg.images = {'a': {'ID': 'a', 'Tag': 'x', 'Attributes': 'y'}}
+        assert resolve_reference('x', reg) == 'a'
+
+    def test_no_match(self):
+        assert resolve_reference('nope', AssetRegistry()) is None
+        assert resolve_reference('', AssetRegistry()) is None

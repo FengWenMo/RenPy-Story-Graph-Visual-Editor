@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox, filedialog
 import tkinter.scrolledtext as st
 import os
+import sys
+import subprocess
 import json
 import math
 import queue
@@ -25,6 +27,28 @@ from commands import (
 )
 from editor_utils import open_file_at_line
 
+
+def _open_with_system_default(path) -> bool:
+    """
+    用系统默认程序打开文件（Windows 上是 Excel，macOS 是 Numbers/Excel）。
+
+    返回 False 表示没能唤起任何程序——调用方应提示用户手动打开，
+    而不是假装成功了。
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        if sys.platform == 'win32':
+            os.startfile(str(path))
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', str(path)])
+        else:
+            subprocess.Popen(['xdg-open', str(path)])
+        return True
+    except Exception:
+        return False
+
 # 新增：导入资产注册模块
 from asset_registry import (
     AssetRegistry,
@@ -36,6 +60,10 @@ from asset_events import (
     AssetEventBus,
     AssetEventType,
     ConfirmationGate,
+)
+from script_table import (
+    beats_from_parse_result, export_beats_to_excel,
+    import_beats_from_excel, write_beats_to_rpy,
 )
 
 
@@ -120,6 +148,15 @@ class GraphView:
         self.project_label = tk.Label(btn_frame, text="（未打开项目）",
                                       font=("微软雅黑", 8), fg="#666")
         self.project_label.pack(pady=2, fill=tk.X)
+
+        # 剧本表：把 .rpy 摊成一行一句演出的 Excel，改完再生成脚本
+        script_frame = tk.LabelFrame(right_panel, text="剧本表（Excel 双向）",
+                                     padx=5, pady=5)
+        script_frame.pack(fill=tk.X, pady=5)
+        tk.Button(script_frame, text="用 Excel 打开 .rpy",
+                  command=self.open_rpy_in_excel).pack(pady=2, fill=tk.X)
+        tk.Button(script_frame, text="从剧本表生成 .rpy",
+                  command=self.export_rpy_from_table).pack(pady=2, fill=tk.X)
 
         tk.Button(btn_frame, text="检查逻辑漏洞", command=self.analyze_and_warn,
                  bg="#4CAF50", fg="white").pack(pady=10, fill=tk.X)
@@ -1089,6 +1126,100 @@ is_unlocked = love > 5 and money >= 100"""
         """手动触发一次全量重载。"""
         if self.asset_engine is not None:
             self.asset_engine.reload_all()
+
+    # ===================== 剧本表（Excel 双向） =====================
+
+    def _current_registry(self):
+        """当前项目的资产注册表；没有打开项目时为 None。"""
+        if self.asset_engine is None:
+            return None
+        try:
+            return self.asset_engine.get_registry()
+        except Exception:
+            return None
+
+    def open_rpy_in_excel(self):
+        """
+        选一个 .rpy，解析成剧本表并用 Excel 打开。
+
+        这是"用表格编演出"的入口：表里一行一句台词，立绘/背景/音乐/变换
+        都是下拉框，候选直接来自资产表。
+        """
+        script_path = filedialog.askopenfilename(
+            title="选择要用 Excel 打开的 .rpy 文件",
+            filetypes=[("Ren'Py 脚本", "*.rpy"), ("所有文件", "*.*")],
+        )
+        if not script_path:
+            return
+
+        script_path = Path(script_path)
+        table_path = script_path.with_suffix('.xlsx')
+
+        try:
+            from script_table import open_rpy_as_table
+            registry = self._current_registry()
+            open_rpy_as_table(script_path, table_path, registry=registry)
+        except Exception as e:
+            messagebox.showerror("生成剧本表失败", str(e))
+            return
+
+        if not _open_with_system_default(table_path):
+            messagebox.showinfo(
+                "已生成剧本表",
+                f"未能自动调用 Excel，请手动打开：\n{table_path}")
+
+        self._append_analysis(
+            f"[剧本表] 已生成 {table_path.name}\n"
+            f"（改完保存后，用「从剧本表生成 .rpy」写回脚本）\n"
+        )
+
+    def export_rpy_from_table(self):
+        """
+        把剧本表写回 .rpy。
+
+        表格优先：如果当前 .rpy 旁边有同名 .xlsx，直接选它；
+        否则让用户手动挑一张表。
+        """
+        initial = None
+        if self.project_root is not None:
+            initial = str(self.project_root)
+
+        table_path = filedialog.askopenfilename(
+            title="选择剧本表（.xlsx）",
+            initialdir=initial,
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+        )
+        if not table_path:
+            return
+
+        table_path = Path(table_path)
+        try:
+            beats = import_beats_from_excel(table_path)
+        except Exception as e:
+            messagebox.showerror("读取剧本表失败", str(e))
+            return
+
+        if not beats:
+            messagebox.showwarning("剧本表为空", "没有读到任何演出行。")
+            return
+
+        out_path = table_path.with_suffix('.generated.rpy')
+        if not messagebox.askyesno(
+            "确认导出",
+            f"将生成 {len(beats)} 个演出单元到：\n{out_path}\n\n继续？"
+        ):
+            return
+
+        try:
+            # label 交给表里每一行的 Label 列决定，保持多章节结构
+            write_beats_to_rpy(beats, out_path, label_name=None)
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+            return
+
+        self._append_analysis(
+            f"[剧本表] 已生成脚本 {out_path.name}（{len(beats)} 个演出单元）\n")
+        messagebox.showinfo("导出完成", f"已写入：\n{out_path}")
 
     def _stop_asset_engine(self):
         """停止当前引擎并释放轮询句柄。"""

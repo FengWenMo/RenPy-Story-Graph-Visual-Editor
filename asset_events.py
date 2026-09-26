@@ -292,13 +292,18 @@ class ConfirmationRequest:
 class ConfirmationGate:
     """
     判定哪些变更需要用户确认。
-    
+
     默认策略：
-      - 删除资产              → 需要确认
-      - 重命名影响引用 > N    → 需要确认（N 可配置，默认 5）
-      - 脚本补丁前            → 可选确认（默认关闭，因为已自动备份）
-      - 其余变更              → 静默
-    
+      - 删除**有引用**的资产   → 需要确认
+      - 删除无引用的资产       → 静默（没有脚本会因此坏掉）
+      - 重命名影响引用 > N     → 需要确认（N 可配置，默认 5）
+      - 脚本补丁前             → 可选确认（默认关闭，因为已自动备份）
+      - 其余变更               → 静默
+
+    一次重载可能产出成百上千条变更，逐条弹窗会把 UI 卡死。
+    因此所有确认都走 ask_batch：把待确认项汇总成一条请求，
+    用户只需回答一次。
+
     通过 ask_callback 与 UI 交互：
       ask_callback(request: ConfirmationRequest) -> bool
       返回 True 表示用户同意执行。
@@ -309,10 +314,12 @@ class ConfirmationGate:
         ask_callback: Optional[Callable[[ConfirmationRequest], bool]] = None,
         rename_threshold: int = 5,
         confirm_script_patch: bool = False,
+        max_preview_items: int = 8,
     ):
         self.ask_callback = ask_callback
         self.rename_threshold = rename_threshold
         self.confirm_script_patch = confirm_script_patch
+        self.max_preview_items = max_preview_items
 
     def needs_confirmation(self, change_type: str,
                            ref_count: int = 0) -> Optional[ConfirmationRequest]:
@@ -321,9 +328,12 @@ class ConfirmationGate:
         由调用方决定何时调用 ask()。
         """
         if change_type == 'removed':
+            # 没有任何脚本引用的资产，删掉不会破坏任何东西，不必打扰用户
+            if ref_count <= 0:
+                return None
             return ConfirmationRequest(
                 reason='delete',
-                summary='检测到资产被删除',
+                summary=f'删除被 {ref_count} 处脚本引用的资产',
                 details={'ref_count': ref_count},
             )
         if change_type == 'renamed' and ref_count > self.rename_threshold:
@@ -339,6 +349,35 @@ class ConfirmationGate:
                 details={},
             )
         return None
+
+    def build_batch_request(self, items: list) -> Optional[ConfirmationRequest]:
+        """
+        把 [(change, request), ...] 汇总成一条 ConfirmationRequest。
+
+        items 为空时返回 None（没有需要打扰用户的事）。
+        """
+        if not items:
+            return None
+
+        total = len(items)
+        refs = sum(
+            (req.details or {}).get('ref_count', 0) for _c, req in items
+        )
+        preview = []
+        for change, _req in items[:self.max_preview_items]:
+            preview.append(f"{change.category}/{change.asset_id}")
+        if total > len(preview):
+            preview.append(f'…等共 {total} 项')
+
+        return ConfirmationRequest(
+            reason='batch',
+            summary=f'{total} 项资产变更需要确认（涉及 {refs} 处脚本引用）',
+            details={
+                'total': total,
+                'ref_count': refs,
+                'preview': preview,
+            },
+        )
 
     def ask(self, request: ConfirmationRequest) -> bool:
         """调用 UI 弹窗。若未提供 ask_callback，则默认同意。"""

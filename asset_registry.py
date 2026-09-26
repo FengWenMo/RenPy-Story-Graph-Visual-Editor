@@ -16,6 +16,7 @@ asset_registry.py
 import re
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional
 import openpyxl
 import importlib.util
 
@@ -54,8 +55,10 @@ class AssetRegistry:
         self.transforms = {}
         self.music = {}
         self.sounds = {}
+        self.voices = {}
         self.custom = {}
         self.references = defaultdict(list)
+        self.unresolved = defaultdict(list)
         self.errors = []
         self.warnings = []
 
@@ -66,6 +69,7 @@ class AssetRegistry:
             'transform': self.transforms,
             'music': self.music,
             'sound': self.sounds,
+            'voice': self.voices,
         }
         return list(mapping.get(asset_type, {}).keys())
 
@@ -143,21 +147,31 @@ def _make_unique_id(stem: str, parent_dirs: list, existing_ids: set) -> str:
         counter += 1
 
 
-def scan_assets(scan_root, include_ui=True, audio_dirs=None) -> dict:
+def scan_assets(scan_root, include_ui=True, audio_dirs=None,
+                voice_dirs=None) -> dict:
     """
-    扫描目录下的资产，返回 {'images': [...], 'audio': {'music': [...], 'sound': [...]}}。
+    扫描目录下的资产，返回：
+    {
+        'images': [...],
+        'audio': {'music': [...], 'sound': [...]},
+        'voices': [...],          # 语音文件（game/voice/ 等）
+    }
 
     scan_root:   扫描根目录（Path 或 str）
     include_ui:  是否包含 UI 相关图片
     audio_dirs:  自定义音频目录列表；None 则自动探测
+    voice_dirs:  自定义语音目录列表；None 则自动探测（game/voice/、
+                 game/audio/voice/）
     """
     scan_root = Path(scan_root)
     if not scan_root.exists():
-        return {'images': [], 'audio': {'music': [], 'sound': []}}
+        return {'images': [], 'audio': {'music': [], 'sound': []},
+                'voices': []}
 
     image_assets = []
     audio_music = []
     audio_sound = []
+    voice_assets = []
 
     # 音频目录自动探测
     if audio_dirs is None:
@@ -165,6 +179,12 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None) -> dict:
                       scan_root / 'sounds', scan_root / 'bgm']
         existing = [d for d in candidates if d.exists()]
         audio_dirs = existing if existing else [scan_root]
+
+    # 语音目录自动探测（语音常独立存放，不应混进音效候选）
+    if voice_dirs is None:
+        vcands = [scan_root / 'voice', scan_root / 'audio' / 'voice']
+        voice_dirs = [d for d in vcands if d.exists()]
+    voice_dirs = list(voice_dirs)
 
     existing_image_ids = set()
 
@@ -248,9 +268,28 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None) -> dict:
                     'Notes': '',
                 })
 
+    # ---------- 语音扫描（独立目录，不与音效混） ----------
+    for vdir in voice_dirs:
+        vdir = Path(vdir)
+        if not vdir.exists():
+            continue
+        for file in vdir.rglob('*'):
+            if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
+                continue
+            try:
+                rel_path = file.relative_to(scan_root)
+            except ValueError:
+                rel_path = file
+            voice_assets.append({
+                'ID': file.stem,
+                'Path': rel_path.as_posix(),
+                'Notes': '',
+            })
+
     return {
         'images': image_assets,
         'audio': {'music': audio_music, 'sound': audio_sound},
+        'voices': voice_assets,
     }
 
 
@@ -319,6 +358,16 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
         sound_file, new_data,
         ['ID', 'Path', 'Notes'])
 
+    # ---------- 语音 ----------
+    voice_file = output_dir / 'voices.xlsx'
+    existing = {r['ID']: r for r in read_excel_rows(voice_file) if r.get('ID')}
+    new_data = {}
+    for a in assets_dict.get('voices', []):
+        new_data[a['ID']] = _merge_existing(existing, a, ['Path'])
+    write_dict_to_excel(
+        voice_file, new_data,
+        ['ID', 'Path', 'Notes'])
+
 
 # ===================== 钩子加载 =====================
 
@@ -376,6 +425,7 @@ _STANDARD_TABLES = {
     'transforms': 'transforms.xlsx',
     'music': 'music.xlsx',
     'sounds': 'sounds.xlsx',
+    'voices': 'voices.xlsx',
 }
 
 
@@ -460,7 +510,7 @@ def validate_registry(registry: AssetRegistry, project_root):
         if p and not (project_root / p).exists():
             registry.warnings.append(f"图片 '{img_id}' 文件不存在: {p}")
 
-    for type_key in ('music', 'sounds'):
+    for type_key in ('music', 'sounds', 'voices'):
         for aid, data in getattr(registry, type_key).items():
             p = data.get('Path')
             if p and not (project_root / p).exists():
@@ -487,19 +537,153 @@ def validate_registry(registry: AssetRegistry, project_root):
 
 # ===================== 脚本引用分析 =====================
 
-_RENPY_ASSET_PATTERNS = [
-    # show / scene / hide image_id
-    (re.compile(r'^\s*(?:show|scene|hide)\s+([a-zA-Z_]\w*)',
-                re.MULTILINE), 'image'),
-    # play / queue / stop music "bgm_xxx"
-    (re.compile(r'^\s*(?:play|queue|stop)\s+music\s+["\']?([a-zA-Z_]\w*)',
-                re.MULTILINE), 'music'),
-    # play / queue / stop sound "sfx_xxx"
-    (re.compile(r'^\s*(?:play|queue|stop)\s+sound\s+["\']?([a-zA-Z_]\w*)',
-                re.MULTILINE), 'sound'),
-    # show ... at transform_id
-    (re.compile(r'\bat\s+([a-zA-Z_]\w*)', re.MULTILINE), 'transform'),
-]
+# Ren'Py 自带的变换 / 转场 / 位置。脚本里出现这些名字是正常的，
+# 不该把它们当成"引用了不存在的资产"，否则一次扫描就报上百处断裂引用。
+RENPY_BUILTIN_TRANSFORMS = frozenset({
+    # 转场
+    'dissolve', 'fade', 'pixellate', 'move', 'moveinright', 'moveinleft',
+    'moveintop', 'moveinbottom', 'moveoutright', 'moveoutleft',
+    'moveouttop', 'moveoutbottom', 'ease', 'zoomin', 'zoomout',
+    'hpunch', 'vpunch', 'blinds', 'squares', 'wipeleft', 'wiperight',
+    'wipeup', 'wipedown', 'slideleft', 'slideright', 'slideup',
+    'slidedown', 'slideawayleft', 'slideawayright', 'slideawayup',
+    'slideawaydown', 'pushright', 'pushleft', 'pushup', 'pushdown',
+    'irisin', 'irisout', 'cropmove', 'pixellate', 'None', 'null',
+    # 默认位置
+    'left', 'right', 'center', 'truecenter', 'top', 'bottom',
+    'topleft', 'topright', 'bottomleft', 'bottomright',
+    'offscreenleft', 'offscreenright', 'reset', 'default',
+})
+
+# show / scene / hide 之后用来切分"图像名"与关键字的分界符
+_SHOW_STOP_WORDS = frozenset({
+    'at', 'as', 'with', 'behind', 'onlayer', 'zorder', 'expression',
+})
+
+_RE_SHOW_LINE = re.compile(
+    r'^\s*(?P<verb>show|scene|hide)\s+(?P<rest>.*?)\s*$', re.MULTILINE)
+_RE_AUDIO_LINE = re.compile(
+    r'^\s*(?:play|queue|stop)\s+(?P<channel>music|sound|audio)\s+'
+    r'["\']?(?P<name>[\w.]+)', re.MULTILINE)
+_RE_AT_TRANSFORM = re.compile(r'\bat\s+(?P<name>[\w.]+)')
+_RE_WITH_TRANSITION = re.compile(r'\bwith\s+(?P<name>[\w.]+)')
+
+
+def _image_spec_candidates(spec: str) -> list:
+    """
+    把一个脚本里的图像名展开成"可能在资产表里叫什么的候选列表"，
+    按确定性从高到低排列。
+
+    Ren'Py 的 `show bg room` 与文件 `bg_room.png` 是同一个东西，
+    所以空格形式和下划线形式都要试；只有 tag（`show bg`）时退化为
+    最宽泛的匹配，交给 resolve_reference 兜底。
+    """
+    if not spec:
+        return []
+    parts = spec.split()
+    candidates = []
+    # 完整名（下划线形式优先级最高：bg room -> bg_room）
+    if len(parts) > 1:
+        candidates.append('_'.join(parts))
+    candidates.append(spec)
+    # 逐段递减的后缀：bg room night -> bg_room -> bg
+    for i in range(len(parts) - 1, 0, -1):
+        candidates.append('_'.join(parts[:i]))
+    # 去重保序
+    seen = set()
+    result = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
+def _extract_image_spec(rest: str) -> str:
+    """从 show/scene/hide 的剩余部分里切出图像名，遇到关键字即停。"""
+    parts = []
+    for tok in rest.split():
+        low = tok.lower().rstrip(',')
+        if low in _SHOW_STOP_WORDS:
+            break
+        parts.append(tok.rstrip(','))
+    return ' '.join(parts)
+
+
+def resolve_reference(candidate: str, registry: AssetRegistry) -> Optional[str]:
+    """
+    把脚本里出现的一个名字解析成资产表里的 ID，解析不了返回 None。
+
+    匹配顺序：
+      1. 五类资产的 ID 精确匹配
+      2. 图片的 Attributes 匹配（'bg room' -> Attributes 'bg_room'）
+      3. 图片的 Tag 匹配（'bg' -> 任一张 tag=bg 的图）
+    """
+    if not candidate:
+        return None
+
+    for name in ('images', 'music', 'sounds', 'transforms', 'characters'):
+        data = getattr(registry, name, {})
+        if candidate in data:
+            return candidate
+
+    for aid, row in registry.images.items():
+        if row.get('Attributes') == candidate:
+            return aid
+
+    for aid, row in registry.images.items():
+        if row.get('Tag') == candidate:
+            return aid
+
+    return None
+
+
+def extract_script_references(text: str) -> list:
+    """
+    抽取一段脚本里的资产引用。
+
+    返回 [(kind, raw_name, line_no, candidates), ...]：
+      kind ∈ {'image', 'music', 'sound', 'transform'}
+      raw_name   用于报告的名字（图像就是完整 spec）
+      candidates 这个名字"可能在资产表里叫什么"的候选，按确定性排序
+
+    抽取阶段只做语法识别，不做资产表解析——后者交给
+    resolve_reference，避免这里硬编码表的形状。
+
+    注意候选是**整组**的：`show bg room` 会展开成
+    ('bg_room', 'bg room', 'bg')，只要有一个能对上就算引用成立；
+    若逐个独立判定，命中之外的候选都会被误报成断裂引用。
+    """
+    refs = []
+
+    def line_of(pos):
+        return text[:pos].count('\n') + 1
+
+    for m in _RE_SHOW_LINE.finditer(text):
+        spec = _extract_image_spec(m.group('rest'))
+        if not spec or spec.lower() == 'expression':
+            continue
+        clean = spec.replace('"', '')
+        cands = _image_spec_candidates(clean)
+        refs.append(('image', clean, line_of(m.start()), tuple(cands)))
+
+    for m in _RE_AUDIO_LINE.finditer(text):
+        name = m.group('name')
+        refs.append((m.group('channel'), name, line_of(m.start()), (name,)))
+
+    for m in _RE_AT_TRANSFORM.finditer(text):
+        name = m.group('name')
+        if name in RENPY_BUILTIN_TRANSFORMS:
+            continue
+        refs.append(('transform', name, line_of(m.start()), (name,)))
+
+    for m in _RE_WITH_TRANSITION.finditer(text):
+        name = m.group('name')
+        if name in RENPY_BUILTIN_TRANSFORMS:
+            continue
+        refs.append(('transform', name, line_of(m.start()), (name,)))
+
+    return refs
 
 
 def analyze_references(script_files, registry: AssetRegistry):
@@ -507,6 +691,11 @@ def analyze_references(script_files, registry: AssetRegistry):
     扫描 .rpy 脚本中的资产引用，填充 registry.references。
 
     registry.references: {asset_id: ['file.rpy:line', ...]}
+    只有解析到具体资产的才记入；解析不到的留在
+    registry.unresolved（供"断裂引用"诊断，可按需忽略某些类型）。
+
+    之前的实现只取 `show` 后的第一个词（tag），而资产 ID 是完整文件名，
+    两边对不上，导致整库图片被判成"未使用"。
     """
     if registry.references is None:
         registry.references = defaultdict(list)
@@ -515,6 +704,9 @@ def analyze_references(script_files, registry: AssetRegistry):
         for k, v in registry.references.items():
             converted[k] = list(v)
         registry.references = converted
+
+    if not hasattr(registry, 'unresolved') or registry.unresolved is None:
+        registry.unresolved = defaultdict(list)
 
     for fp in script_files:
         fp = Path(fp)
@@ -525,13 +717,23 @@ def analyze_references(script_files, registry: AssetRegistry):
         except Exception:
             continue
 
-        for pattern, _kind in _RENPY_ASSET_PATTERNS:
-            for match in pattern.finditer(text):
-                asset_id = match.group(1)
-                line_no = text[:match.start()].count('\n') + 1
-                loc = f"{fp.name}:{line_no}"
+        for kind, raw, line_no, cands in extract_script_references(text):
+            loc = f"{fp.name}:{line_no}"
+
+            # 候选整组判定：命中第一个能解析的就算引用成立
+            asset_id = None
+            for cand in cands:
+                asset_id = resolve_reference(cand, registry)
+                if asset_id:
+                    break
+
+            if asset_id:
                 if loc not in registry.references[asset_id]:
                     registry.references[asset_id].append(loc)
+            else:
+                bucket = registry.unresolved[kind]
+                if (raw, loc) not in bucket:
+                    bucket.append((raw, loc))
 
 
 # ===================== 命令行自测 =====================

@@ -26,6 +26,7 @@ class AssetCompletion:
         'image': 'images',
         'music': 'music',
         'sound': 'sounds',
+        'voice': 'voices',
         'transform': 'transforms',
         'character': 'characters',
     }

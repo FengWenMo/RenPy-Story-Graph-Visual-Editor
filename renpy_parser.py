@@ -117,6 +117,7 @@ except ImportError:
     Graph = None
 
 from core.uid import make_translation_uid
+from core.statement import Statement
 
 
 # ====================================================================
@@ -516,6 +517,28 @@ class SceneNode(ASTNode):
     is_expression: bool = False
 
 
+@dataclass
+class HideNode(ASTNode):
+    image: str = ''
+    with_: str = ''
+
+
+@dataclass
+class AudioNode(ASTNode):
+    """play / queue / stop music|sound|audio <name>"""
+    action: str = ''       # 'play' / 'queue' / 'stop'
+    channel: str = ''      # 'music' / 'sound' / 'audio'
+    name: str = ''
+    fadein: float = 0.0
+    fadeout: float = 0.0
+    loop: bool = False
+
+
+@dataclass
+class VoiceNode(ASTNode):
+    name: str = ''
+
+
 # 字符串正则：双引号分支与单引号分支分离
 _STR_DQ = r'"((?:[^"\\]|\\.)*)"'
 _STR_SQ = r"'((?:[^'\\]|\\.)*)'"
@@ -544,7 +567,9 @@ class RenPyParser:
     _RE_ELIF_HEAD = re.compile(r'^elif\s+')
     _RE_ELSE_HEAD = re.compile(r'^else\s*:')
     _RE_MENU_HEAD = re.compile(r'^menu\b')
-    _RE_DEFINE = re.compile(r'^define\s+([\w.]+)\s*=\s*(.+)$', re.DOTALL)
+    # 角色定义两种写法都收：define 是常量，default 是可存档变量
+    _RE_DEFINE = re.compile(
+        r'^(?:define|default)\s+([\w.]+)\s*=\s*(.+)$', re.DOTALL)
     _RE_SAY = re.compile(r'^([A-Za-z_][\w.]*)?\s*' + _STR)
     _RE_JUMP_EXPR = re.compile(r'^jump\s+expression\b')
     _RE_CALL_EXPR = re.compile(r'^call\s+expression\b')
@@ -556,6 +581,15 @@ class RenPyParser:
     _RE_PYTHON = re.compile(r'^python(?:\s+[\w. ]+)?\s*:')
     _RE_SHOW_HEAD = re.compile(r'^show\s+')
     _RE_SCENE_HEAD = re.compile(r'^scene\s+')
+    _RE_HIDE_HEAD = re.compile(r'^hide\s+')
+    _RE_AUDIO = re.compile(
+        r'^(?P<action>play|queue|stop)\s+'
+        r'(?P<channel>music|sound|audio)'
+        r'(?:\s+(?P<rest>.*?))?\s*$')
+    # voice 接受两种写法：字符串字面量（voice "a.ogg"）或裸表达式
+    # （voice v_001，v_001 是变量）。后者也是合法 Ren'Py 语法，
+    # 之前只收字符串导致裸表达式的语音被整句丢掉了。
+    _RE_VOICE = re.compile(r'^voice\s+(?:' + _STR + r'|(\S+))')
     _RE_EXTEND_HEAD = re.compile(r'^extend\s+')
     _RE_EXTEND_STR = re.compile(r'^extend\s+' + _STR)
 
@@ -793,6 +827,65 @@ class RenPyParser:
                     onlayer=parsed['onlayer'],
                     is_expression=parsed['is_expression'],
                 )
+
+        # ---- hide ----
+        m = self._RE_HIDE_HEAD.match(text)
+        if m:
+            rest = text[m.end():].strip()
+            with_ = ''
+            mw = re.search(r'\bwith\s+([\w.]+)', rest)
+            if mw:
+                with_ = mw.group(1)
+                rest = rest[:mw.start()].strip()
+            return HideNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                image=rest,
+                with_=with_,
+            )
+
+        # ---- play / queue / stop ----
+        m = self._RE_AUDIO.match(text)
+        if m:
+            rest = (m.group('rest') or '').strip()
+            qm = re.match(r'^["\']([^"\']+)["\']', rest)
+            if qm:
+                name = qm.group(1)
+                rest = rest[qm.end():]
+            else:
+                parts = rest.split()
+                name = parts[0] if parts else ''
+                rest = ' '.join(parts[1:])
+
+            def _num(pat):
+                mm = re.search(pat, rest)
+                try:
+                    return float(mm.group(1)) if mm else 0.0
+                except ValueError:
+                    return 0.0
+
+            return AudioNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                action=m.group('action'),
+                channel=m.group('channel'),
+                name=name,
+                fadein=_num(r'\bfadein\s+([\d.]+)'),
+                fadeout=_num(r'\bfadeout\s+([\d.]+)'),
+                loop=bool(re.search(r'\bloop\b', rest)),
+            )
+
+        # ---- voice ----
+        m = self._RE_VOICE.match(text)
+        if m:
+            return VoiceNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                name=_pick_str(m, 1, 2, 3),
+            )
 
         # ---- extend ----
         if self._RE_EXTEND_HEAD.match(text):
@@ -1308,6 +1401,12 @@ class ParseResult:
     translation_units: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    # 按源码顺序保留的全部演出语句（core.Statement）。
+    # dialogues 只留对话，做不了"句子级演出配置"——
+    # 说这句台词时舞台上站着谁、放着什么音乐，只有顺序能回答。
+    # statement_labels 与 statements 一一对应，记录每条语句所属 label。
+    statements: list = field(default_factory=list)
+    statement_labels: list = field(default_factory=list)
 
 
 # ====================================================================
@@ -1321,7 +1420,18 @@ class ParseResultBuilder:
         self._compute_counts(result)
         return result
 
-    def _walk(self, nodes: list, current_label: str, result: ParseResult):
+    def _walk(self, nodes: list, current_label: str, result: ParseResult,
+              accum_cond: str = ''):
+        def add_stmt(stmt):
+            """
+            收集语句，同时记下它属于哪个 label。
+
+            Statement 本身不带 label（那是"内容指纹"契约的一部分），
+            所以归属信息放在平行的 statement_labels 里。
+            """
+            result.statements.append(stmt)
+            result.statement_labels.append(current_label)
+
         for node in nodes:
             if isinstance(node, LabelNode):
                 result.labels[node.name] = (node.filename, node.line_number)
@@ -1348,6 +1458,9 @@ class ParseResultBuilder:
                     source_file=node.filename,
                     source_line=node.line_number,
                 ))
+                add_stmt(Statement.make_say(
+                    node.who, node.what, accum_cond,
+                    source=(node.filename, node.line_number)))
 
             elif isinstance(node, ExtendNode):
                 result.dialogues.append(DialogueLine(
@@ -1357,6 +1470,9 @@ class ParseResultBuilder:
                     source_file=node.filename,
                     source_line=node.line_number,
                 ))
+                add_stmt(Statement.make_extend(
+                    node.text, accum_cond,
+                    source=(node.filename, node.line_number)))
 
             elif isinstance(node, MenuNode):
                 if node.caption:
@@ -1367,6 +1483,9 @@ class ParseResultBuilder:
                         source_file=node.filename,
                         source_line=node.line_number,
                     ))
+                    add_stmt(Statement.make_menu(
+                        node.caption, accum_cond,
+                        source=(node.filename, node.line_number)))
                 for opt in node.options:
                     result.dialogues.append(DialogueLine(
                         character_var='',
@@ -1377,11 +1496,78 @@ class ParseResultBuilder:
                         is_menu_option=True,
                         menu_condition=opt.condition,
                     ))
-                    self._walk(opt.block, current_label, result)
+                    add_stmt(Statement.make_menu_option(
+                        opt.text, self._combine(accum_cond, opt.condition),
+                        source=(opt.filename, opt.line_number)))
+                    self._walk(opt.block, current_label, result,
+                               self._combine(accum_cond, opt.condition))
+
+            elif isinstance(node, ShowNode):
+                add_stmt(Statement.make_show(
+                    node.image, at=node.at, as_=node.as_, with_=node.with_,
+                    zorder=node.zorder, onlayer=node.onlayer,
+                    behind=node.behind, is_expression=node.is_expression,
+                    condition=accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, SceneNode):
+                add_stmt(Statement.make_scene(
+                    node.image, at=node.at, with_=node.with_,
+                    onlayer=node.onlayer,
+                    is_expression=node.is_expression,
+                    condition=accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, HideNode):
+                add_stmt(Statement.make_hide(
+                    node.image, with_=node.with_, condition=accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, AudioNode):
+                add_stmt(Statement.make_play(
+                    node.action, node.channel, node.name,
+                    loop=node.loop, fadein=node.fadein,
+                    fadeout=node.fadeout, condition=accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, VoiceNode):
+                add_stmt(Statement.make_voice(
+                    node.name, accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, PythonNode):
+                add_stmt(Statement.make_python(
+                    node.code, accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, JumpNode):
+                add_stmt(Statement.make_jump(
+                    node.target, accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, CallNode):
+                add_stmt(Statement.make_call(
+                    node.target, accum_cond,
+                    source=(node.filename, node.line_number)))
+
+            elif isinstance(node, ReturnNode):
+                add_stmt(Statement.make_return(
+                    accum_cond,
+                    source=(node.filename, node.line_number)))
 
             elif isinstance(node, IfNode):
-                for _cond, block in node.branches:
-                    self._walk(block, current_label, result)
+                for cond, block in node.branches:
+                    child_cond = self._combine(accum_cond, cond)
+                    self._walk(block, current_label, result, child_cond)
+
+    @staticmethod
+    def _combine(c1: str, c2: str) -> str:
+        """条件累积，与 GraphBuilder._combine 同形（都形如 (a) and (b)）。"""
+        if not c1:
+            return c2
+        if not c2:
+            return c1
+        return f"({c1}) and ({c2})"
 
     @staticmethod
     def _compute_counts(result: ParseResult):

@@ -204,10 +204,18 @@ class TestFileWatcher:
 # ------------------------------------------------------------------
 
 class TestConfirmationGate:
-    def test_delete_needs_confirmation(self):
+    def test_delete_with_refs_needs_confirmation(self):
         gate = ConfirmationGate()
-        req = gate.needs_confirmation('removed', ref_count=0)
+        req = gate.needs_confirmation('removed', ref_count=3)
         assert req is not None and req.reason == 'delete'
+
+    def test_delete_without_refs_is_silent(self):
+        """
+        没有脚本引用的资产被删掉不会破坏任何东西。
+        一次重载几百条这种变更，逐条弹窗会把 UI 淹掉。
+        """
+        gate = ConfirmationGate()
+        assert gate.needs_confirmation('removed', ref_count=0) is None
 
     def test_rename_under_threshold_is_silent(self):
         gate = ConfirmationGate(rename_threshold=5)
@@ -242,3 +250,46 @@ class TestConfirmationGate:
 
     def test_unknown_change_type_silent(self):
         assert ConfirmationGate().needs_confirmation('whatever') is None
+
+
+class TestBatchConfirmation:
+    """一次重载可能产出成百上千条变更，必须合成一次询问。"""
+
+    def _change(self, asset_id, category='images'):
+        class _C:
+            def __init__(self):
+                self.category = category
+                self.asset_id = asset_id
+        return _C()
+
+    def test_empty_batch_returns_none(self):
+        assert ConfirmationGate().build_batch_request([]) is None
+
+    def test_batch_aggregates_counts(self):
+        gate = ConfirmationGate()
+        items = []
+        for i in range(20):
+            ch = self._change(f'img{i}')
+            req = gate.needs_confirmation('removed', ref_count=2)
+            items.append((ch, req))
+        batch = gate.build_batch_request(items)
+        assert batch.reason == 'batch'
+        assert batch.details['total'] == 20
+        assert batch.details['ref_count'] == 40
+
+    def test_batch_preview_is_truncated(self):
+        gate = ConfirmationGate(max_preview_items=3)
+        items = [(self._change(f'img{i}'),
+                  gate.needs_confirmation('removed', ref_count=1))
+                 for i in range(10)]
+        batch = gate.build_batch_request(items)
+        preview = batch.details['preview']
+        assert len(preview) == 4          # 3 项 + 一条"等共 N 项"
+        assert '共 10 项' in preview[-1]
+
+    def test_batch_summary_mentions_totals(self):
+        gate = ConfirmationGate()
+        items = [(self._change('a'),
+                  gate.needs_confirmation('removed', ref_count=1))]
+        batch = gate.build_batch_request(items)
+        assert '1 项' in batch.summary

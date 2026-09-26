@@ -170,6 +170,9 @@ class AssetEngine:
         self._dirty: set = set()
         self._dirty_lock = threading.Lock()
 
+        # 诊断输出去重：记录上一次发出的诊断指纹
+        self._diag_state: dict = {}
+
         # 监听目录
         self._watch_paths = self._compute_watch_paths()
 
@@ -362,6 +365,11 @@ class AssetEngine:
             return
 
         self.registry.references = defaultdict(list)
+        if not hasattr(self.registry, 'unresolved') or \
+                self.registry.unresolved is None:
+            self.registry.unresolved = defaultdict(list)
+        else:
+            self.registry.unresolved.clear()
 
         if self.script_files:
             analyze_references(self.script_files, self.registry)
@@ -567,6 +575,14 @@ class AssetEngine:
                 self._emit(AssetEventType.ENGINE_ERROR,
                            {'error': str(e), 'phase': 'source'})
 
+        if dirty:
+            # 诊断只在整轮结束后发一次，避免同一句话被刷多遍
+            try:
+                self.emit_diagnostics()
+            except Exception as e:
+                self._emit(AssetEventType.ENGINE_ERROR,
+                           {'error': str(e), 'phase': 'diagnostics'})
+
     # ===================== 事件发布 =====================
 
     def _emit(self, event_type: AssetEventType, payload: dict):
@@ -625,7 +641,7 @@ class AssetEngine:
             'characters': len(new_registry.characters),
         })
 
-        # 逐项事件（removed 已在 _handle_removed 中单独处理）
+        # 逐项事件（renamed / removed 已在 _apply_changes 中单独处理）
         # 注意：'renamed' 与 'removed' 已在 _apply_changes 里由
         # _handle_rename / _handle_removed 单独 emit（带 ref_count、
         # modified_files、orphan_references 等额外字段）。
@@ -648,8 +664,6 @@ class AssetEngine:
                 'before': ch.before,
                 'after': ch.after,
             })
-
-        self._emit_unused_summary()
 
     # ===================== 处理：脚本变化 =====================
 
@@ -687,8 +701,6 @@ class AssetEngine:
                                if self.parse_result else 0),
         })
 
-        self._emit_unused_summary()
-
     # ===================== 处理：源目录变化 =====================
 
     def _handle_source_changed(self):
@@ -699,20 +711,66 @@ class AssetEngine:
 
     # ===================== 变更应用 =====================
 
+    def _resolve_refs(self, asset_id: str) -> list:
+        if self.registry is None:
+            return []
+        return list(self.registry.references.get(asset_id, []))
+
     def _apply_changes(self, changes: list):
+        """
+        应用变更。
+
+        两道降噪：
+          1. 先筛出真正需要用户拍板的项，凑成**一次**批量确认。
+             以往是逐条弹窗，一次重载几百条删除就把 UI 淹了。
+          2. 脚本注入的角色（脚本里有 define、Excel 表里没有）不参与
+             删除确认——它们本来就不属于用户手写的表。
+        """
+        pending = []      # [(change, request), ...]
+        decisions = {}    # id(change) -> bool
+
+        for ch in changes:
+            if ch.kind not in ('renamed', 'removed'):
+                continue
+            if ch.kind == 'removed' and self._is_script_injected(ch):
+                continue
+            refs = self._resolve_refs(ch.asset_id)
+            request = self.gate.needs_confirmation(ch.kind, ref_count=len(refs))
+            if request is not None:
+                pending.append((ch, request))
+
+        batch = self.gate.build_batch_request(pending)
+        approved = True
+        if batch is not None:
+            approved = self.gate.ask(batch)
+        for ch, _req in pending:
+            decisions[id(ch)] = approved
+
         for ch in changes:
             if ch.kind == 'renamed':
-                refs = (list(self.registry.references.get(ch.asset_id, []))
-                        if self.registry else [])
-                self._handle_rename(ch, refs)
+                self._handle_rename(ch, self._resolve_refs(ch.asset_id),
+                                    decisions.get(id(ch), True))
             elif ch.kind == 'removed':
-                refs = (list(self.registry.references.get(ch.asset_id, []))
-                        if self.registry else [])
-                self._handle_removed(ch, refs)
+                self._handle_removed(ch, self._resolve_refs(ch.asset_id),
+                                     decisions.get(id(ch), True))
 
-    def _handle_rename(self, ch: _Change, refs: list):
+    def _is_script_injected(self, ch) -> bool:
+        """
+        这个"被删掉"的角色是不是脚本里 define 出来的？
+
+        角色表是脚本与 Excel 双向同步的：脚本里有 define 的角色会被补进
+        registry。若某次重载里它没出现，多半只是同步时序问题，
+        而不是用户真的删了角色——不该为此弹窗。
+        """
+        if ch.category != 'characters':
+            return False
+        if self.parse_result is None:
+            return False
+        return ch.asset_id in self.parse_result.characters
+
+    def _handle_rename(self, ch: _Change, refs: list, approved: bool = True):
         request = self.gate.needs_confirmation('renamed', ref_count=len(refs))
-        if request is not None and not self.gate.ask(request):
+        if request is not None and not approved:
             # 回滚 registry：删掉新 ID，恢复旧 ID
             if self.registry is not None:
                 target = getattr(self.registry, ch.category, None)
@@ -767,9 +825,9 @@ class AssetEngine:
             'modified_files': result['modified'],
         })
 
-    def _handle_removed(self, ch: _Change, refs: list):
+    def _handle_removed(self, ch: _Change, refs: list, approved: bool = True):
         request = self.gate.needs_confirmation('removed', ref_count=len(refs))
-        if request is not None and not self.gate.ask(request):
+        if request is not None and not approved:
             # 回滚
             if self.registry is not None and ch.before:
                 target = getattr(self.registry, ch.category, None)
@@ -825,10 +883,64 @@ class AssetEngine:
                     '_dialogue_count': char.dialogue_count,
                 }
 
-    # ===================== 未使用资产汇总 =====================
+    # ===================== 诊断汇总 =====================
 
-    def _emit_unused_summary(self):
+    def emit_diagnostics(self, force: bool = False):
+        """
+        一次性输出全部诊断，且**只在内容变化时输出**。
+
+        一次 poll 里脚本任务和资产表任务会各跑一遍，两处都发诊断就会
+        把同一句话刷三遍。这里统一在 poll 末尾调一次，并用指纹去重：
+        内容没变的诊断不再打扰用户。
+        """
+        self._emit_script_diagnostics(force)
+        self._emit_asset_diagnostics(force)
+
+    def _emit_script_diagnostics(self, force: bool):
+        undefined = self.find_undefined_characters()
+        unused_chars = self.find_unused_characters()
+        fingerprint = (
+            'script',
+            len(undefined),
+            tuple(sorted(u['variable'] for u in undefined)),
+            len(unused_chars),
+            tuple(sorted(u['variable'] for u in unused_chars)),
+        )
+        if not force and fingerprint == self._diag_state.get('script'):
+            return
+        self._diag_state['script'] = fingerprint
+
+        if undefined:
+            self._emit(AssetEventType.ENGINE_NOTICE, {
+                'info': 'undefined_characters',
+                'count': len(undefined),
+                'items': undefined[:20],
+            })
+        if unused_chars:
+            self._emit(AssetEventType.ENGINE_NOTICE, {
+                'info': 'unused_characters',
+                'count': len(unused_chars),
+                'items': unused_chars[:20],
+            })
+
+    def _emit_asset_diagnostics(self, force: bool):
+        broken = self.find_broken_references()
         unused = self.find_unused_assets()
+        fingerprint = (
+            'asset',
+            len(broken),
+            tuple(sorted(b['asset_id'] for b in broken)),
+            len(unused),
+        )
+        if not force and fingerprint == self._diag_state.get('asset'):
+            return
+        self._diag_state['asset'] = fingerprint
+
+        if broken:
+            self._emit(AssetEventType.BROKEN_REFERENCES_FOUND, {
+                'count': len(broken),
+                'items': broken[:50],
+            })
         if unused:
             self._emit(AssetEventType.UNUSED_ASSETS_FOUND, {
                 'count': len(unused),
@@ -851,15 +963,30 @@ class AssetEngine:
             ids.update(getattr(self.registry, name, {}).keys())
         return ids
 
-    def find_broken_references(self) -> list:
+    def find_broken_references(self, include_transforms: bool = False) -> list:
+        """
+        脚本引用了、但资产表里查不到的名字。
+
+        transform 类默认不算断裂：脚本里 `at my_slide` 引用的自定义变换，
+        用户完全可以不登记到 transforms.xlsx（那里只放需要复用和管理的），
+        把它报成"断裂引用"只会制造噪音。
+        """
         if self.registry is None:
             return []
-        all_ids = self.get_all_asset_ids()
-        return [
-            {'asset_id': aid, 'locations': list(locs)}
-            for aid, locs in self.registry.references.items()
-            if aid not in all_ids
-        ]
+
+        unresolved = getattr(self.registry, 'unresolved', {})
+        broken = []
+        for kind, entries in unresolved.items():
+            if kind == 'transform' and not include_transforms:
+                continue
+            grouped = defaultdict(list)
+            for raw, loc in entries:
+                grouped[raw].append(loc)
+            for raw, locs in grouped.items():
+                broken.append({'asset_id': raw, 'kind': kind,
+                               'locations': list(locs)})
+        broken.sort(key=lambda b: (b['kind'], b['asset_id']))
+        return broken
 
     def find_unused_assets(self) -> list:
         if self.registry is None:
