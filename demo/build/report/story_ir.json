@@ -9,7 +9,7 @@
       "color": "#c8ffc8",
       "image_tag": "eileen",
       "voice_tag": "eileen",
-      "dialogue_count": 0
+      "dialogue_count": 1
     },
     {
       "id": "m",
@@ -17,7 +17,7 @@
       "color": "#ffc8c8",
       "image_tag": "mary",
       "voice_tag": "",
-      "dialogue_count": 0
+      "dialogue_count": 2
     }
   ],
   "lines": [
@@ -30,7 +30,10 @@
       "speaker_name": "爱莲",
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
-      "scene": "bg classroom",
+      "stage": "show eileen happy at leftish",
+      "bgm": "[音乐] night fadein 1.0",
+      "sfx": "",
+      "scene": "",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -47,7 +50,7 @@
       "comment": "# 表情A6，距离近",
       "raw": "",
       "code": "",
-      "line_hash": "e55edfddf8"
+      "line_hash": "2b93371142"
     },
     {
       "line_id": "ch01.0002",
@@ -58,7 +61,10 @@
       "speaker_name": "玛丽",
       "text": "还行，就是雨下了一整晚。",
       "condition": "",
-      "scene": "bg classroom",
+      "stage": "",
+      "bgm": "",
+      "sfx": "[音效] door",
+      "scene": "",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -75,7 +81,7 @@
       "comment": "",
       "raw": "",
       "code": "",
-      "line_hash": "04d7405dfa"
+      "line_hash": "160225a63e"
     },
     {
       "line_id": "ch01.0003",
@@ -86,7 +92,10 @@
       "speaker_name": "玛丽",
       "text": "别想了，今天我们还有正事。",
       "condition": "",
-      "scene": "bg classroom",
+      "stage": "show eileen sad at leftish; show mary smile at right",
+      "bgm": "[音乐] rain fadeout 2.0",
+      "sfx": "",
+      "scene": "",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -104,7 +113,7 @@
       "comment": "",
       "raw": "with dissolve",
       "code": "",
-      "line_hash": "17c8fe0577"
+      "line_hash": "253cb8d2f5"
     },
     {
       "line_id": "ch01.0004",
@@ -115,7 +124,10 @@
       "speaker_name": "",
       "text": "",
       "condition": "",
-      "scene": "bg classroom",
+      "stage": "",
+      "bgm": "[停止音乐]",
+      "sfx": "",
+      "scene": "",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -133,7 +145,7 @@
       "comment": "",
       "raw": "",
       "code": "",
-      "line_hash": "39b7c73016"
+      "line_hash": "9a8e844fbb"
     }
   ],
   "assets": {
@@ -245,7 +257,7 @@
   "stage": [
     {
       "line_id": "ch01.0001",
-      "scene": "bg classroom",
+      "scene": "",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -253,7 +265,7 @@
     },
     {
       "line_id": "ch01.0002",
-      "scene": "bg classroom",
+      "scene": "",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -261,7 +273,7 @@
     },
     {
       "line_id": "ch01.0003",
-      "scene": "bg classroom",
+      "scene": "",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -270,7 +282,7 @@
     },
     {
       "line_id": "ch01.0004",
-      "scene": "bg classroom",
+      "scene": "",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"

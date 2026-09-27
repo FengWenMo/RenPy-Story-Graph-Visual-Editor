@@ -26,6 +26,8 @@ from asset_registry import describe_asset
 from script_table import (
     Beat, _assign_identity, beats_from_parse_result,
     render_beats_to_rpy, write_beats_to_rpy,
+    compose_stage, compose_audio_text, compose_code,
+    hydrate_from_dsl, make_symbols,
 )
 from asset_registry import add_asset_to_registry
 from renpy_parser import RenPyParser, ParseResultBuilder
@@ -137,30 +139,28 @@ def load_thumbnail(path, max_size=(220, 140)):
         return None
 
 
-def beat_to_fields(beat: Beat) -> dict:
-    """Beat → 面板字段字典（界面与数据之间的中性中间层）。"""
+def beat_to_fields(beat: Beat, symbols=None) -> dict:
+    """
+    Beat → 面板字段字典（界面与数据之间的中性中间层）。
+
+    面板把**全部舞台指令投影进 Stage 一格**（给了符号表就合成中文写法
+    `[显示] 凌跃捷 开心 左`，合不成就写原生写法 `show ling close_happy
+    at left`——两种都能被编译器吃回去），另有 Scene / Voice 两个能点选的
+    结构化列。Excel 那面则是 20 列结构化列 + Stage 高级通道；两边通过
+    `compose_stage` / `hydrate_from_dsl` 互为投影，不会各输出一次。
+    """
     return {
         'Label': beat.label,
         'Kind': beat.kind,
         'Speaker': beat.speaker,
         'Text': beat.text,
         'Scene': beat.scene,
-        'Show': beat.show,
-        'Hide': beat.hide,
-        'At': beat.at,
-        'With': beat.with_,
-        'Transform': beat.transform,
-        'Comment': beat.comment,
-        'Raw': beat.raw,
-        'CodeBlock': beat.code,
-        'Music': beat.music,
-        'MusicParams': beat.music_params,
-        'MusicAction': beat.music_action,
-        'Sound': beat.sound,
-        'SoundParams': beat.sound_params,
-        'SoundAction': beat.sound_action,
+        'Stage': beat.stage or compose_stage(beat, symbols),
+        'BGM': beat.bgm or compose_audio_text(beat, 'music'),
+        'SFX': beat.sfx or compose_audio_text(beat, 'sound'),
         'Voice': beat.voice,
-        'Condition': beat.condition,
+        'CodeBlock': compose_code(beat),
+        'Comment': beat.comment,
         'Notes': beat.notes,
     }
 
@@ -173,23 +173,20 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     b.speaker = (fields.get('Speaker') or '').strip()
     b.text = (fields.get('Text') or '').strip()
     b.scene = (fields.get('Scene') or '').strip()
-    b.show = (fields.get('Show') or '').strip()
-    b.hide = (fields.get('Hide') or '').strip()
-    b.at = (fields.get('At') or '').strip()
-    b.with_ = (fields.get('With') or '').strip()
-    b.transform = (fields.get('Transform') or '').strip()
-    b.comment = (fields.get('Comment') or '').strip()
-    b.raw = (fields.get('Raw') or '').strip()
-    b.code = (fields.get('CodeBlock') or '').strip()
-    b.music = (fields.get('Music') or '').strip()
-    b.music_params = (fields.get('MusicParams') or '').strip()
-    b.music_action = (fields.get('MusicAction') or 'play').strip() or 'play'
-    b.sound = (fields.get('Sound') or '').strip()
-    b.sound_params = (fields.get('SoundParams') or '').strip()
-    b.sound_action = (fields.get('SoundAction') or 'play').strip() or 'play'
+    b.stage = (fields.get('Stage') or '').strip()
+    b.bgm = (fields.get('BGM') or '').strip()
+    b.sfx = (fields.get('SFX') or '').strip()
     b.voice = (fields.get('Voice') or '').strip()
-    b.condition = (fields.get('Condition') or '').strip()
+    b.code = (fields.get('CodeBlock') or '').strip()
+    # raw 已经并入 CodeBlock（唯一的"保真后门"），这里不再单独维护
+    b.raw = ''
+    b.comment = (fields.get('Comment') or '').strip()
+    # 「备注」列已经取消（并入注释，见 Beat.from_row 的老表迁移）。
+    # 这里再兜一次：旧 Beat / 旧表带来的 notes 绝不能静默丢掉。
     b.notes = (fields.get('Notes') or '').strip()
+    if b.notes:
+        b.comment = f'{b.comment}\n{b.notes}'.strip() if b.comment else b.notes
+        b.notes = ''
     return b
 
 
@@ -360,93 +357,146 @@ class AssetPickerDialog(tk.Toplevel):
 # ===================== Beat 快速编辑面板 =====================
 
 class BeatEditorPanel(tk.Frame):
-    """选中一拍后的快速编辑面板。"""
+    """
+    选中一拍后的快速编辑面板。
 
-    # 字段 → 是否走资产选择器（及其资产类型）
+    面板是"一格写完整演出"的简化面：**舞台 / BGM / SFX** 三格 DSL 人话
+    （`[显示] 凌跃捷 开心 左`），外加 Scene / Voice 两个能点选的列。
+    以前这里摆着 Show / Hide / At / With / Transform / Music / Sound 七个
+    输入框——同一个动作被拆到三处、还允许互相冗余，改一个位置要动两格。
+    现在整段舞台写在一格里，下拉与词表帮他保证写对，「预览」直接看它会
+    生成什么代码；Excel 那面另有 20 列结构化下拉列（见 BEAT_FIELDS），
+    两边靠 compose_stage / hydrate_from_dsl 互为投影。
+    """
+
+    # 走资产选择器的字段（一格一个值，能点选）
     _ASSET_FIELDS = {
         'Speaker': ('character',),
         'Scene': ('image',),
-        'Show': ('image',),
-        'Hide': ('image',),
-        'At': ('transform',),
-        'With': ('transform',),
-        'Transform': ('transform',),
-        'Music': ('music',),
-        'Sound': ('sound',),
         'Voice': ('voice',),
     }
 
-    # 只读 / 特殊字段
-    _TEXT_FIELDS = ['Label', 'Kind', 'Text', 'Condition', 'Comment',
-                    'CodeBlock', 'Raw', 'Notes']
-    _ACTION_FIELDS = {'MusicAction': ['play', 'queue', 'stop'],
-                     'SoundAction': ['play', 'queue', 'stop']}
-    # 音频参数（fadein/loop 等）——自由文本，导出时原样接到 play 后面
-    _PARAM_FIELDS = ['MusicParams', 'SoundParams']
+    # 单行字段（按界面上从上到下的顺序）
+    _SINGLE_FIELDS = ['Speaker', 'Scene', 'Voice', 'Comment',
+                      'Label', 'Kind', 'Notes']
+    # 多行字段 → 行高（DSL 与长文本要能换行写）
+    _MULTI_FIELDS = {'Text': 4, 'Stage': 3, 'BGM': 2, 'SFX': 2,
+                     'CodeBlock': 3}
+    # 真正的展示顺序：先说谁说什么，再说舞台音响，最后是程序的东西
+    _ORDER = ['Speaker', 'Text', 'Stage', 'BGM', 'SFX', 'Scene', 'Voice',
+              'Comment', 'CodeBlock', 'Label', 'Kind', 'Notes']
 
-    def __init__(self, parent, engine, **kw):
+    _HINTS = {
+        'Stage': '[显示] 凌跃捷 开心 左 ; [转场] dissolve',
+        'BGM': '[音乐] 春天花瓣 fadein 1.0　/　[停止音乐]',
+        'SFX': '[音效] 开门',
+    }
+
+    def __init__(self, parent, engine, on_new_asset=None, **kw):
         super().__init__(parent, **kw)
         self.engine = engine
+        self.on_new_asset = on_new_asset
         self._beat = None
         self._widgets = {}
+        self._multi = set()
         self._note_var = tk.StringVar(value='')
+        self._stage_var = tk.StringVar(value='')
         self._build()
+
+    # ---------- 控件读写（StringVar 与 Text 统一） ----------
+
+    def _wget(self, name: str) -> str:
+        w = self._widgets.get(name)
+        if w is None:
+            return ''
+        if name in self._multi:
+            return w.get('1.0', 'end-1c')
+        return w.get() if hasattr(w, 'get') else ''
+
+    def _wset(self, name: str, value: str):
+        w = self._widgets.get(name)
+        if w is None:
+            return
+        if name in self._multi:
+            if not hasattr(w, 'delete'):
+                return
+            w.delete('1.0', 'end')
+            if value:
+                w.insert('1.0', value)
+        elif hasattr(w, 'set'):
+            w.set(value or '')
 
     def _build(self):
         row = 0
-        for name in self._TEXT_FIELDS:
-            tk.Label(self, text=name).grid(row=row, column=0, sticky='w')
-            var = tk.StringVar()
-            tk.Entry(self, textvariable=var).grid(row=row, column=1,
-                                                  sticky='we')
-            self._widgets[name] = var
-            row += 1
+        for name in self._ORDER:
+            label = name
+            hint = self._HINTS.get(name, '')
+            col0 = tk.Frame(self)
+            col0.grid(row=row, column=0, sticky='nw')
+            tk.Label(col0, text=label).pack(anchor='w')
+            if hint:
+                tk.Label(col0, text=hint, font=('微软雅黑', 7), fg='#888',
+                         wraplength=120, justify='left').pack(anchor='w')
 
-        for name, _types in self._ASSET_FIELDS.items():
-            tk.Label(self, text=name).grid(row=row, column=0, sticky='w')
-            var = tk.StringVar()
-            tk.Entry(self, textvariable=var).grid(row=row, column=1,
-                                                  sticky='we')
-            tk.Button(self, text="🔍", width=2,
-                      command=lambda n=name, t=_types: self._pick(n, t)
-                      ).grid(row=row, column=2)
-            tk.Button(self, text="?说明", width=5,
-                      command=lambda n=name, t=_types: self._explain(n, t)
-                      ).grid(row=row, column=3)
-            self._widgets[name] = var
-            row += 1
+            if name in self._MULTI_FIELDS:
+                import tkinter.scrolledtext as st
+                widget = st.ScrolledText(self, height=self._MULTI_FIELDS[name],
+                                         wrap='word', font=('Consolas', 9))
+                widget.grid(row=row, column=1, sticky='we')
+                self._multi.add(name)
+            else:
+                var = tk.StringVar()
+                widget = tk.Entry(self, textvariable=var)
+                widget.grid(row=row, column=1, sticky='we')
+            self._widgets[name] = widget
 
-        for name, values in self._ACTION_FIELDS.items():
-            tk.Label(self, text=name).grid(row=row, column=0, sticky='w')
-            var = tk.StringVar(value='play')
-            tk.Entry(self, textvariable=var).grid(row=row, column=1,
-                                                  sticky='we')
-            self._widgets[name] = var
-            row += 1
-
-        for name in self._PARAM_FIELDS:
-            tk.Label(self, text=name).grid(row=row, column=0, sticky='w')
-            var = tk.StringVar()
-            tk.Entry(self, textvariable=var).grid(row=row, column=1,
-                                                  sticky='we')
-            self._widgets[name] = var
+            types = self._ASSET_FIELDS.get(name)
+            if types:
+                tk.Button(self, text="🔍", width=2,
+                          command=lambda n=name, t=types: self._pick(n, t)
+                          ).grid(row=row, column=2)
+                tk.Button(self, text="?说明", width=5,
+                          command=lambda n=name, t=types: self._explain(n, t)
+                          ).grid(row=row, column=3)
             row += 1
 
         self.columnconfigure(1, weight=1)
 
+        # 动作条：预览编译结果 / 看词表 / 解释舞台
+        act = tk.Frame(self)
+        act.grid(row=row, column=0, columnspan=4, sticky='we', pady=(6, 0))
+        tk.Button(act, text="预览编译结果",
+                  command=self.preview_compiled).pack(side='left')
+        tk.Button(act, text="舞台词表",
+                  command=self.show_keywords).pack(side='left')
+        tk.Button(act, text="解释舞台列",
+                  command=self.explain_stage).pack(side='left')
+        row += 1
+
         # 说明区：选中/填好一个变换、立绘、音乐后，这里给出"它是什么"
         tk.Label(self, text="说明").grid(row=row, column=0, sticky='nw')
         tk.Label(self, textvariable=self._note_var, justify='left',
-                 anchor='nw', wraplength=320, fg='#444'
+                 anchor='nw', wraplength=380, fg='#444'
                  ).grid(row=row, column=1, columnspan=3, sticky='we')
         row += 1
 
         # 舞台快照：这一拍播出来玩家看见什么（背景/立绘/音乐）
         tk.Label(self, text="舞台快照").grid(row=row, column=0, sticky='nw')
-        self._stage_var = tk.StringVar(value='')
         tk.Label(self, textvariable=self._stage_var, justify='left',
-                 anchor='nw', wraplength=320, fg='#0A5'
+                 anchor='nw', wraplength=380, fg='#0A5'
                  ).grid(row=row, column=1, columnspan=3, sticky='we')
+
+    # ---------- 符号表 / 审计 ----------
+
+    def _symbols(self):
+        reg = None
+        try:
+            reg = self.engine.get_registry() if self.engine else None
+        except Exception:
+            reg = None
+        return make_symbols(reg)
+
+    # ---------- 交互 ----------
 
     def set_stage_snapshot(self, text: str):
         """外部（选中某拍时）灌入这一拍的舞台状态文本。"""
@@ -463,13 +513,10 @@ class BeatEditorPanel(tk.Frame):
 
     def _explain(self, field_name, asset_types):
         """点「?说明」：解释当前字段里填的值是什么。"""
-        if not hasattr(self._widgets[field_name], 'get'):
-            return
-        value = (self._widgets[field_name].get() or '').strip()
+        value = self._wget(field_name).strip()
         if not value:
             self._set_note(f'{field_name}：还没填。点 🔍 从资源表里选。')
             return
-        # 值可能是 `图像@变换` / 多个值（; 分隔），逐个解释
         texts = []
         for token in re.split(r'[;\s]+', value):
             if not token or token == '@':
@@ -490,31 +537,97 @@ class BeatEditorPanel(tk.Frame):
         result = dlg.pick()
         if result is not None:
             _atype, aid = result
-            self._widgets[field_name].set(aid)
+            self._wset(field_name, aid)
             detail = asset_detail(self.engine, _atype, aid)
             self._set_note(f'{field_name} = {aid}\n{detail}')
 
+    def explain_stage(self):
+        """把 Stage / BGM / SFX 逐条解释：会被翻译成什么，或缺什么。"""
+        from dsl import compile_stage, compile_audio, Audit, TODO
+
+        symbols = self._symbols()
+        audit = Audit(symbols)
+        lines = []
+        stage = self._wget('Stage').strip()
+        if stage:
+            lines.append('【舞台】')
+            for intent, code, status in compile_stage(stage, symbols, audit):
+                mark = '⚠ ' if status == TODO else '  '
+                lines.append(f'{mark}{intent}  →  {code}')
+        for name, channel, label in (('BGM', 'music', '音乐'),
+                                     ('SFX', 'sound', '音效')):
+            text = self._wget(name).strip()
+            if not text:
+                continue
+            lines.append(f'【{label}】')
+            for intent, code, status in compile_audio(text, channel, symbols,
+                                                      audit):
+                mark = '⚠ ' if status == TODO else '  '
+                lines.append(f'{mark}{intent}  →  {code}')
+        self._set_note('\n'.join(lines) or '舞台 / BGM / SFX 都还没填。')
+
+    def preview_compiled(self):
+        """把这一拍编译成 Ren'Py 代码看一眼——所见即所得。"""
+        beat = self.collect_beat()
+        text = render_beats_to_rpy([beat], label_name=beat.label or 'preview',
+                                   registry=self._registry())
+        win = tk.Toplevel(self)
+        win.title('编译预览（这一拍会生成什么）')
+        import tkinter.scrolledtext as st
+        box = st.ScrolledText(win, width=84, height=22,
+                              font=('Consolas', 10))
+        box.pack(fill='both', expand=True, padx=8, pady=8)
+        box.insert('1.0', text)
+        box.configure(state='disabled')
+        tk.Button(win, text='关闭', command=win.destroy).pack(pady=(0, 8))
+
+    def show_keywords(self):
+        """把 Stage 里能写的词摊出来（角色/位置/表情/转场）。"""
+        from dsl import DEFAULT_POSITIONS, DEFAULT_EXPRESSIONS, NON_ACTOR_TAGS  # noqa
+
+        symbols = self._symbols()
+        lines = ['【角色】可写显示名或变量名，后面跟表情/位置']
+        for var, row in (symbols._by_var or {}).items():
+            name = (row.get('Name') or var)
+            tag = row.get('ImageTag') or var
+            lines.append(f'  {name}（变量 {var}，立绘 {tag}）')
+        lines.append('')
+        lines.append('【位置】' + '、'.join(DEFAULT_POSITIONS))
+        lines.append('【表情】' + '、'.join(
+            w for w, m in DEFAULT_EXPRESSIONS.items() if m))
+        lines.append('')
+        lines.append('写法：[显示] 角色 表情 位置　例：[显示] 凌跃捷 开心 左')
+        self._set_note('\n'.join(lines))
+
+    def _registry(self):
+        try:
+            return self.engine.get_registry() if self.engine else None
+        except Exception:
+            return None
+
+    # ---------- 载入 / 回写 ----------
+
     def load_beat(self, beat: Beat):
         self._beat = beat
-        fields = beat_to_fields(beat)
-        for name, var in self._widgets.items():
-            val = fields.get(name, '')
-            if hasattr(var, 'set'):
-                var.set(val)
-        # 载入时就把变换说明摆出来——文案最常问的就是"这个变换是干嘛的"
-        for fname in ('Transform', 'At', 'With'):
-            types = self._ASSET_FIELDS.get(fname)
-            if types:
-                self._explain(fname, types)
-                note = self._note_var.get() if hasattr(self._note_var, 'get') \
-                    else ''
-                if note and '还没填' not in note:
-                    break
+        symbols = self._symbols()
+        fields = beat_to_fields(beat, symbols)
+        for name in self._ORDER:
+            self._wset(name, fields.get(name, ''))
+        self._set_note('')
+        # 载入时就把舞台列解释一遍——文案最常问的就是"这行会变成什么"
+        if self._wget('Stage') or self._wget('BGM') or self._wget('SFX'):
+            self.explain_stage()
 
     def collect_beat(self) -> Beat:
-        fields = {name: (var.get() if hasattr(var, 'get') else '')
-                 for name, var in self._widgets.items()}
-        return fields_to_beat(fields, base=self._beat)
+        fields = {name: self._wget(name) for name in self._ORDER}
+        beat = fields_to_beat(fields, base=self._beat)
+        # 立刻把 DSL 解释成结构化字段：舞台快照/校验才看得见这一拍的内容
+        try:
+            hydrate_from_dsl([beat], self._symbols())
+        except Exception:
+            pass
+        return beat
+
 
 
 # ===================== 对话轮转（说话人"乒乓"） =====================
@@ -670,6 +783,11 @@ class ScriptTableEditorWindow(tk.Toplevel):
         nodes = RenPyParser().parse(Path(script_path))
         result = ParseResultBuilder().build(nodes)
         self.beats = beats_from_parse_result(result)
+        # 合成中文 DSL：能无损反推就显示 `[显示] 凌跃捷 开心 左`，
+        # 反推不了就保留原生写法（绝不猜错一个表情）
+        symbols = make_symbols(self._registry())
+        for b in self.beats:
+            b.stage = compose_stage(b, symbols) or b.stage
         if hasattr(self._list, 'delete'):
             self._list.delete(0, 'end')
         if hasattr(self._list, 'insert'):
@@ -688,7 +806,17 @@ class ScriptTableEditorWindow(tk.Toplevel):
             self.load_script(p)
 
     def _on_export(self):
+        """
+        编译导出：先生成脚本，再写「编译结果表」。
+
+        找不到资源**不会**中断导出——只在脚本里留一行
+        `# TODO: 缺少资源 …`，然后把数量报给策划。这是刻意的：
+        一个 2600 张图的项目，没人会去看 1073 条红字；
+        但 12 处"待补资源"他会去改。
+        """
         from tkinter import filedialog
+        from compile import compile_beats, write_export_sheet
+
         self.apply_current_beat()
         out = filedialog.asksaveasfilename(
             title="导出 .rpy",
@@ -696,8 +824,26 @@ class ScriptTableEditorWindow(tk.Toplevel):
             filetypes=[("Ren'Py 脚本", "*.rpy")])
         if not out:
             return
-        write_beats_to_rpy(self.beats, out, registry=self._registry())
-        messagebox.showinfo("导出完成", f"已写入：\n{out}")
+        registry = self._registry()
+        result = compile_beats(self.beats, registry=registry)
+        Path(out).write_text(result.rpy_text, encoding='utf-8')
+        sheet = None
+        try:
+            sheet = write_export_sheet(out, result)
+        except Exception:
+            sheet = None
+
+        msg = [f'已写入：{out}', '', result.summary()]
+        if sheet:
+            msg += ['', f'编译结果表：{sheet}']
+        todos = [r for r in result.rows if r.get('status') == 'todo']
+        if todos:
+            msg += ['', '待补资源（已作为 # TODO 注释写进脚本）：']
+            for r in todos[:8]:
+                msg.append(f"  · {r['code']}")
+            if len(todos) > 8:
+                msg.append(f'  …还有 {len(todos) - 8} 处')
+        messagebox.showinfo("编译导出完成", '\n'.join(msg))
 
     def _registry(self):
         if self.engine is None:

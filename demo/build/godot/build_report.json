@@ -1,18 +1,26 @@
 {
   "ok": true,
   "error_count": 0,
-  "warning_count": 3,
+  "warning_count": 4,
   "by_level": {
     "L1": 0,
     "L2": 0,
-    "L3": 3
+    "L3": 4
   },
   "issues": [
     {
       "level": "L3",
+      "code": "W304",
+      "severity": "warning",
+      "message": "图里没有可识别的入口 label（start/splashscreen/main_menu…），已跳过可达性检查",
+      "where": "graph",
+      "hint": "入口 label 命名不同时属正常；如需检查可在图里把某个节点设为当前章节"
+    },
+    {
+      "level": "L3",
       "code": "W301",
       "severity": "warning",
-      "message": "图片：2 个未被任何脚本引用（如 bg_rooftop、happy_blush）",
+      "message": "图片：2/6 个未被任何脚本引用（如 bg_rooftop、happy_blush）",
       "where": "images",
       "hint": "确认是否废弃；确实不用就从资源表删除"
     },
@@ -20,7 +28,7 @@
       "level": "L3",
       "code": "W301",
       "severity": "warning",
-      "message": "音效：1 个未被任何脚本引用（如 sfx_click）",
+      "message": "音效：1/2 个未被任何脚本引用（如 sfx_click）",
       "where": "sounds",
       "hint": "确认是否废弃；确实不用就从资源表删除"
     },
@@ -28,7 +36,7 @@
       "level": "L3",
       "code": "W301",
       "severity": "warning",
-      "message": "变换：2 个未被任何脚本引用（如 fade_in_soft、shake_hard）",
+      "message": "变换：2/3 个未被任何脚本引用（如 fade_in_soft、shake_hard）",
       "where": "transforms",
       "hint": "确认是否废弃；确实不用就从资源表删除"
     }
@@ -37,7 +45,7 @@
     "ok": true,
     "engine": "godot",
     "strict": false,
-    "generated_at": "2026-09-27T00:08:09",
+    "generated_at": "2026-09-27T16:45:53",
     "stats": {
       "scripts": [
         "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\game\\script\\ch01.rpy"
@@ -45,6 +53,7 @@
       "lines": 4,
       "labels": 1,
       "chars": 36,
+      "todos": 0,
       "registry": {
         "images": 6,
         "music": 2,

@@ -94,3 +94,67 @@ def test_editor_utils_reports_missing_file(monkeypatch, tmp_path):
     monkeypatch.setattr(mb, 'showerror', lambda *a, **k: calls.append(a))
     editor_utils.open_file_at_line(tmp_path / 'ghost.rpy', 1)
     assert calls
+
+
+# ------------------------------------------------------------------
+# 静态接线检查：按钮/菜单的 command 必须真的存在
+# ------------------------------------------------------------------
+
+def _iter_command_targets(tree):
+    """找出源码里所有 `command=self.xxx` / `command=lambda: ...self.xxx(`。"""
+    import ast
+
+    targets = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg != 'command':
+                continue
+            v = kw.value
+            # command=self.foo
+            if (isinstance(v, ast.Attribute)
+                    and isinstance(v.value, ast.Name)
+                    and v.value.id == 'self'):
+                targets.add(v.attr)
+            # command=lambda: self.foo(...)
+            if isinstance(v, ast.Lambda):
+                for sub in ast.walk(v):
+                    if (isinstance(sub, ast.Attribute)
+                            and isinstance(sub.value, ast.Name)
+                            and sub.value.id == 'self'):
+                        targets.add(sub.attr)
+    return targets
+
+
+class TestUiWiring:
+    """
+    「批量导入章节」按钮曾经挂在 `self.batch_import_chapters` 上，而这个
+    方法根本不在 UI 类里（函数住在 renpy_parser 里）——点一下 AttributeError。
+    无头环境实例化不了 GraphView，所以这里做静态接线检查：凡是挂在
+    command= 上的 self.xxx，类里必须真有这个方法。
+    """
+
+    def _missing(self, path):
+        import ast
+        from pathlib import Path
+
+        src = Path(path).read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        defined = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined.add(node.name)
+        return sorted(_iter_command_targets(tree) - defined)
+
+    def test_graph_view_commands_all_exist(self):
+        from pathlib import Path
+        import graph_view
+        missing = self._missing(Path(graph_view.__file__))
+        assert missing == [], f'按钮/菜单指向了不存在的方法：{missing}'
+
+    def test_main_entry_commands_all_exist(self):
+        from pathlib import Path
+        import RenPy_Story_Graph_Visual_Editor as legacy
+        missing = self._missing(Path(legacy.__file__))
+        assert missing == [], f'遗留单文件版同样有悬空 command：{missing}'

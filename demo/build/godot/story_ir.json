@@ -27,7 +27,7 @@
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
       "stage": {
-        "background": "bg classroom",
+        "background": "",
         "poses": [
           "eileen happy@leftish"
         ],
@@ -36,7 +36,7 @@
         "sfx": "",
         "voice": ""
       },
-      "line_hash": "e55edfddf8"
+      "line_hash": "2b93371142"
     },
     {
       "line_id": "ch01.0002",
@@ -47,7 +47,7 @@
       "text": "还行，就是雨下了一整晚。",
       "condition": "",
       "stage": {
-        "background": "bg classroom",
+        "background": "",
         "poses": [
           "eileen happy@leftish"
         ],
@@ -56,7 +56,7 @@
         "sfx": "door",
         "voice": "v_eileen_01"
       },
-      "line_hash": "04d7405dfa"
+      "line_hash": "160225a63e"
     },
     {
       "line_id": "ch01.0003",
@@ -67,7 +67,7 @@
       "text": "别想了，今天我们还有正事。",
       "condition": "",
       "stage": {
-        "background": "bg classroom",
+        "background": "",
         "poses": [
           "eileen sad@leftish",
           "mary smile@right"
@@ -77,7 +77,7 @@
         "sfx": "",
         "voice": ""
       },
-      "line_hash": "17c8fe0577"
+      "line_hash": "253cb8d2f5"
     },
     {
       "line_id": "ch01.0004",
@@ -88,7 +88,7 @@
       "text": "",
       "condition": "",
       "stage": {
-        "background": "bg classroom",
+        "background": "",
         "poses": [
           "eileen sad@leftish",
           "mary smile@right"
@@ -98,7 +98,7 @@
         "sfx": "",
         "voice": ""
       },
-      "line_hash": "39b7c73016"
+      "line_hash": "9a8e844fbb"
     }
   ],
   "assets": {

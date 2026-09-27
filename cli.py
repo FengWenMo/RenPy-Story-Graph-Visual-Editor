@@ -63,20 +63,29 @@ def _cmd_build(args) -> int:
 
 
 def _cmd_table(args) -> int:
-    from script_table import export_table_to_rpy, import_beats_from_excel, \
-        open_rpy_as_table
+    from script_table import import_beats_from_excel, open_rpy_as_table
+
+    registry = _load_registry(args)
 
     if args.action == 'rpy2xlsx':
-        out = open_rpy_as_table(args.path, args.out)
+        out = open_rpy_as_table(args.path, args.out, registry=registry)
         print(f'已生成剧本表：{out}')
         return 0
     if args.action == 'xlsx2rpy':
-        beats = import_beats_from_excel(args.path)
+        from compile import compile_beats, format_compile_result
+
+        beats = import_beats_from_excel(args.path, registry=registry)
         if not beats:
             print('剧本表为空', file=sys.stderr)
             return 2
-        out = export_table_to_rpy(args.path, args.out)
-        print(f'已生成脚本：{out}（{len(beats)} 个演出单元）')
+        result = compile_beats(beats, registry=registry)
+        out = Path(args.out) if args.out else \
+            Path(args.path).with_suffix('.rpy')
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(result.rpy_text, encoding='utf-8')
+        print(f'已生成脚本：{out}')
+        print()
+        print(format_compile_result(result))
         return 0
     print(f'未知动作：{args.action}', file=sys.stderr)
     return 2
@@ -216,6 +225,43 @@ def _load_registry(args):
     return load_asset_registry(args.project, getattr(args, 'asset_dir', None))
 
 
+def _cmd_compile(args) -> int:
+    """
+    演出表 → .rpy（**不做全局校验**）。
+
+    这是"策划写人话、工具翻代码"的主路径：缺资源只在脚本里留
+    `# TODO: 缺少资源 …`，退出码仍然是 0——构建不该因为一句台词
+    引用了一个还没登记的图片就整体失败。
+    """
+    from compile import (compile_beats, format_compile_result,
+                         merge_export_sheet, write_export_sheet)
+    from script_table import import_beats_from_excel
+
+    table_path = Path(args.table)
+    if not table_path.exists():
+        print(f'找不到演出表：{table_path}', file=sys.stderr)
+        return 2
+
+    registry = _load_registry(args)
+    beats = import_beats_from_excel(table_path, registry=registry)
+    result = compile_beats(beats, registry=registry)
+
+    out = Path(args.out) if args.out else table_path.with_suffix('.rpy')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(result.rpy_text, encoding='utf-8')
+
+    print(f'已生成脚本：{out}')
+    if args.in_place_sheet:
+        merge_export_sheet(table_path, result)
+        print(f'编译结果已作为「Export_RenPy」表并入：{table_path}')
+    elif args.sheet:
+        sheet = write_export_sheet(table_path, result)
+        print(f'编译结果表：{sheet}')
+    print()
+    print(format_compile_result(result))
+    return 0
+
+
 # ==================================================================
 
 def build_parser() -> argparse.ArgumentParser:
@@ -228,8 +274,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument('project', help='项目根目录（含 game/）')
         sp.add_argument('--asset-dir', default=None, help='资源表目录')
         sp.add_argument('--out', default=None, help='产物目录')
-        sp.add_argument('--char-limit', type=int, default=60,
-                        help='单句台词字数上限（默认 60）')
+        sp.add_argument('--char-limit', type=int, default=120,
+                        help='单句台词字数上限，仅作提醒（W101）；设为 0 关闭该检查')
         sp.add_argument('--no-strict', dest='strict', action='store_false',
                         help='有错误也继续出产物')
 
@@ -249,7 +295,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('action', choices=['rpy2xlsx', 'xlsx2rpy'])
     sp.add_argument('path')
     sp.add_argument('--out', default=None)
+    sp.add_argument('--asset-dir', default=None, help='资源表目录')
+    sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
     sp.set_defaults(func=_cmd_table)
+
+    sp = sub.add_parser('compile',
+                        help='演出表 → .rpy（缺资源写 TODO，不报错不中断）')
+    sp.add_argument('table', help='演出表 .xlsx')
+    sp.add_argument('--out', default=None, help='输出的 .rpy 路径')
+    sp.add_argument('--asset-dir', default=None, help='资源表目录')
+    sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
+    sp.add_argument('--sheet', action='store_true',
+                    help='另外写一份编译结果表（Export_RenPy）')
+    sp.add_argument('--in-place-sheet', dest='in_place_sheet',
+                    action='store_true',
+                    help='把编译结果作为新表并进原工作簿（不碰 Beats）')
+    sp.set_defaults(func=_cmd_compile)
 
     sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
     sp.add_argument('action',

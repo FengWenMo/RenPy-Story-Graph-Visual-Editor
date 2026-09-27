@@ -52,7 +52,9 @@ class TestBeat:
                     speaker='e', text='hi', scene='bg a')
         row = beat.to_row()
         back = Beat.from_row(dict(zip(BEAT_FIELDS, row)))
-        assert back == beat
+        # 逐列等价即可（stage 是由 scene 派生出的展示文本，
+        # 往返一次后由空变成 'scene bg a'，语义一致）
+        assert back.to_row() == row
 
     def test_from_row_handles_none(self):
         beat = Beat.from_row({'Text': None, 'Speaker': None})
@@ -291,16 +293,30 @@ class TestStopLanding:
         assert 'play sound sfx_door' in stripped
 
     def test_action_dropdown_attached(self, tmp_path, write_rpy):
+        """
+        BGM / SFX / 舞台 是文本列，挂不上格级下拉；能点选的是
+        说话人 / 场景 / 立绘 / 语音等列。这里同时锁住"没有偷偷留下旧列"。
+        表头现在用中文（见 BEAT_HEADERS）。
+        """
         from asset_registry import AssetRegistry
+        from script_table import BEAT_HEADERS
         fp = write_rpy(self.STOP_SCRIPT, 'ch03.rpy')
         reg = AssetRegistry()
-        reg.music = {'bgm_theme': {}}
-        reg.sounds = {'sfx_door': {}}
+        reg.images = {'bg_room': {'ID': 'bg_room', 'Tag': 'bg'}}
+        reg.voices = {'v_001': {'ID': 'v_001'}}
         table = open_rpy_as_table(fp, tmp_path / 'ch03.xlsx', registry=reg)
         import openpyxl
         wb = openpyxl.load_workbook(table)
         ws = wb['Beats']
-        assert len(ws.data_validations.dataValidation) >= 3
+        headers = [c.value for c in ws[1]]
+        for col in ('BGM', 'SFX', 'Stage'):
+            assert BEAT_HEADERS[col] in headers, \
+                f'{col} 列（{BEAT_HEADERS[col]}）缺失'
+        for gone in ('Show', 'Hide', 'At', 'Transform', 'Raw',
+                     'Music', 'MusicAction', 'Sound', 'SoundAction',
+                     'Condition', 'Notes'):
+            assert gone not in headers, f'旧列 {gone} 还在表里'
+        assert len(ws.data_validations.dataValidation) >= 2
 
     def test_multiple_labels_split(self):
         beats = [
@@ -393,15 +409,16 @@ class TestExcelRoundTrip:
         ws = wb['Beats']
         ws.cell(row=2, column=BEAT_FIELDS.index('Text') + 1,
                 value='改过的台词')
-        ws.cell(row=2, column=BEAT_FIELDS.index('Show') + 1,
-                value='eileen sad@right')
+        # 舞台只有一列：策划写人话或原生写法都行，编译器照单全收
+        ws.cell(row=2, column=BEAT_FIELDS.index('Stage') + 1,
+                value='show eileen sad at right')
         wb.save(path)
 
         back = import_beats_from_excel(path)
         text = render_beats_to_rpy(back)
         assert '改过的台词' in text
-        # 渲染成下划线形式，与资产表 ID 对齐（Ren'Py 里两者等价）
-        assert 'show eileen_sad at right' in text
+        # 原生写法原样出去：作者怎么写就怎么回，不做下划线改写
+        assert 'show eileen sad at right' in text
 
     def test_candidate_sheets_created(self, tmp_path, parse_result):
         from asset_registry import AssetRegistry

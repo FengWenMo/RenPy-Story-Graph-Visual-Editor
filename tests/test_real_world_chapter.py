@@ -180,7 +180,7 @@ class TestRenderFidelity:
         i_hide = next(i for i, ln in enumerate(lines)
                       if ln.strip() == 'hide ye')
         i_show = next(i for i, ln in enumerate(lines)
-                      if ln.strip().startswith('show ye_happy'))
+                      if ln.strip().startswith('show ye happy'))
         assert i_hide < i_show
 
     def test_complex_show_and_hides_rendered(self, beats):

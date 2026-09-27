@@ -27,7 +27,7 @@
       "speakerName": "爱莲",
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
-      "background": "bg classroom",
+      "background": "",
       "poses": [
         "eileen happy@leftish"
       ],
@@ -36,7 +36,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "e55edfddf8"
+      "lineHash": "2b93371142"
     },
     {
       "lineId": "ch01.0002",
@@ -47,7 +47,7 @@
       "speakerName": "玛丽",
       "text": "还行，就是雨下了一整晚。",
       "condition": "",
-      "background": "bg classroom",
+      "background": "",
       "poses": [
         "eileen happy@leftish"
       ],
@@ -56,7 +56,7 @@
       "sfx": "door",
       "sfxAction": "play",
       "voice": "v_eileen_01",
-      "lineHash": "04d7405dfa"
+      "lineHash": "160225a63e"
     },
     {
       "lineId": "ch01.0003",
@@ -67,7 +67,7 @@
       "speakerName": "玛丽",
       "text": "别想了，今天我们还有正事。",
       "condition": "",
-      "background": "bg classroom",
+      "background": "",
       "poses": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -77,7 +77,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "17c8fe0577"
+      "lineHash": "253cb8d2f5"
     },
     {
       "lineId": "ch01.0004",
@@ -88,7 +88,7 @@
       "speakerName": "",
       "text": "",
       "condition": "",
-      "background": "bg classroom",
+      "background": "",
       "poses": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -98,7 +98,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "39b7c73016"
+      "lineHash": "9a8e844fbb"
     }
   ],
   "assets": [

@@ -89,6 +89,11 @@ def build_neutral_ir(beats, registry=None, project: str = '',
             'speaker_name': char_name.get(b.speaker, b.speaker),
             'text': b.text,
             'condition': b.condition,
+            # DSL 原文也带上：Unity/Godot 侧想还原"策划原本想干什么"，
+            # 比只给编译后的 scene/actors 更有用（也便于将来换引擎）。
+            'stage': getattr(b, 'stage', '') or '',
+            'bgm': getattr(b, 'bgm', '') or '',
+            'sfx': getattr(b, 'sfx', '') or '',
             'scene': snap.get('scene', b.scene),
             'actors': [a for a in (snap.get('actors') or '').split('; ')
                        if a],

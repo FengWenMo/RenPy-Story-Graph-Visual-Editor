@@ -157,13 +157,12 @@ def _beat_to_payload(beat: Beat) -> dict:
 _FIELD_ATTR = {
     'LineId': 'line_id', 'Seq': 'seq', 'Label': 'label',
     'Condition': 'condition', 'Comment': 'comment', 'Kind': 'kind',
-    'Speaker': 'speaker', 'Text': 'text', 'Scene': 'scene', 'Show': 'show',
-    'Hide': 'hide', 'At': 'at', 'With': 'with_', 'Transform': 'transform',
-    'StageOrder': 'stage_order', 'Raw': 'raw', 'CodeBlock': 'code',
-    'Music': 'music', 'MusicParams': 'music_params',
-    'MusicAction': 'music_action', 'Sound': 'sound',
-    'SoundParams': 'sound_params', 'SoundAction': 'sound_action',
-    'Voice': 'voice', 'Notes': 'notes', 'ContentHash': 'content_hash',
+    'Speaker': 'speaker', 'Text': 'text', 'Scene': 'scene',
+    # 三列人话演出（DSL）。内部字段 show/hide/at/music/... 是它们解析出来的
+    # 派生结果，不入库——库里存原文，谁来读谁负责解释（避免两套真源打架）。
+    'Stage': 'stage', 'BGM': 'bgm', 'SFX': 'sfx',
+    'CodeBlock': 'code', 'Voice': 'voice', 'Notes': 'notes',
+    'ContentHash': 'content_hash',
 }
 
 

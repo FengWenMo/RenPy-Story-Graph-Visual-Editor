@@ -44,8 +44,9 @@ L3 = 'L3'
 ERROR = 'error'
 WARNING = 'warning'
 
-# UI 里一句台词的安全长度（超过就要换行/拆页，否则对话框会溢出）
-DEFAULT_CHAR_LIMIT = 60
+# UI 里一句台词的安全长度（超过就要换行/拆页，否则对话框会溢出）。
+# 仅作为「提醒」级别（W101），不是硬错误；设为 <=0 即关闭该检查。
+DEFAULT_CHAR_LIMIT = 120
 
 _VALID_ACTIONS = {'play', 'queue', 'stop'}
 
@@ -129,14 +130,15 @@ class ValidationReport:
         return '\n'.join(lines).rstrip()
 
 
-def _ref_ok(name: str, asset_type: str, registry, builtin_ok=False) -> bool:
+def _ref_ok(name: str, asset_type: str, registry, index=None,
+            builtin_ok=False) -> bool:
     if not name:
         return True
     if builtin_ok and name in RENPY_BUILTIN_TRANSFORMS:
         return True
     if registry is None:
         return True
-    return bool(resolve_references(name, registry))
+    return bool(resolve_references(name, registry, index))
 
 
 # 资产类型 → registry 属性名（判断"这一类资产到底管没管"）
@@ -169,35 +171,105 @@ def _category_managed(registry, asset_type: str) -> bool:
 #  L1：单条
 # ==================================================================
 
+def _image_ref_issue(name, registry, index):
+    """
+    图像引用的判定：精确解析 → tag + 属性都声明过 → 才是"未登记"。
+
+    合成立绘（`layeredimage ye:`）的写法是 `show ye base_handdown happy`：
+    引用由 tag 和若干 attribute 组成，资源表里往往只登记了 tag。
+    只要 tag 存在、属性也都在 layeredimage 里声明过，就不该报未登记
+    （Ren'Py 运行时会自己合成）。否则真实项目一次报上百条。
+    """
+    if resolve_references(name, registry, index):
+        return None
+    parts = str(name or '').split()
+    if not parts:
+        return None
+    tag_id = resolve_references(parts[0], registry, index)
+    if not tag_id:
+        return 'unknown'
+    row = (registry.images or {}).get(tag_id[0]) or {}
+    declared = set(row.get('_attrs') or [])
+    if not declared:
+        return 'attrs'          # 表里有这个 tag，但没登记属性清单
+    unknown = [p for p in parts[1:] if p not in declared]
+    return 'attrs' if unknown else None
+
+
 def validate_level1(beats, registry=None,
                     char_limit: int = DEFAULT_CHAR_LIMIT) -> list:
+    from asset_registry import AssetIndex
+    index = AssetIndex(registry) if registry is not None else None
     issues = []
     for b in beats or []:
         where = getattr(b, 'line_id', '') or f"{b.label}.{b.seq:04d}"
 
-        # 空台词：纯 `stop music` / `stop sound` 是明确指令，不算空
-        if b.kind in ('say', 'narration') and not b.text and not b.comment \
-                and not b.raw and not b.code and not b.sound and not b.voice \
-                and not b.music and not b.scene and not b.show \
-                and not b.hide and (b.music_action or '') != 'stop' \
-                and (b.sound_action or '') != 'stop':
-            issues.append(Issue(
-                L1, 'E101', ERROR, '台词为空', where,
-                '补台词，或把这一行删掉'))
+        # 空台词：`""`（清空对话框）是常见写法，警告即可；
+        # 有说话人却空了台词，那才是明显的漏写 → 错误。
+        empty_say = (b.kind in ('say', 'narration') and not b.text
+                     and not b.comment and not b.raw and not b.code
+                     and not b.sound and not b.voice and not b.music
+                     and not b.scene and not b.show and not b.hide
+                     and not getattr(b, 'stage', '')
+                     and not getattr(b, 'bgm', '')
+                     and not getattr(b, 'sfx', '')
+                     and (b.music_action or '') != 'stop'
+                     and (b.sound_action or '') != 'stop')
+        if empty_say:
+            if b.speaker:
+                issues.append(Issue(
+                    L1, 'E101', ERROR,
+                    f"说话人 '{b.speaker}' 有台词行但内容是空的", where,
+                    '补台词，或把这一行删掉'))
+            else:
+                issues.append(Issue(
+                    L1, 'W113', WARNING, '空台词行（`""`）', where,
+                    '常见用法是清空对话框；若是漏写就补上'))
 
-        # 说话人未定义
+        # 说话人未定义：角色表**明显不完整**时只给警告。
+        # 否则"角色解析漏了一批（如 DynamicCharacter）"会翻成上千条
+        # 错误把真正的问题埋掉——真实项目一次报了 1000+ 条就是这个原因。
         if b.speaker and registry is not None \
-                and not resolve_references(b.speaker, registry):
+                and not resolve_references(b.speaker, registry, index):
+            managed = _category_managed(registry, 'character')
             issues.append(Issue(
-                L1, 'E102', ERROR,
+                L1, 'E102' if managed else 'W110',
+                ERROR if managed else WARNING,
                 f"说话人 '{b.speaker}' 不在资源表角色里", where,
-                '在 characters.xlsx 登记，或改成本表已有的角色变量名'))
+                '在 characters.xlsx 登记，或改成本表已有的角色变量名'
+                if managed else
+                '角色表还是空的：先「从脚本导入角色表」，再回来看这条'))
 
         # 资产引用未登记
         for atype, name, builtin_ok in _beat_asset_refs(b):
-            if _ref_ok(name, atype, registry, builtin_ok):
+            if _ref_ok(name, atype, registry, index, builtin_ok):
                 continue
             managed = _category_managed(registry, atype)
+
+            # 图像：tag 存在且属性都声明过 → 正常（合成立绘的常见写法）
+            if atype == 'image' and registry is not None:
+                status = _image_ref_issue(name, registry, index)
+                if status is None:
+                    continue
+                if status == 'attrs':
+                    issues.append(Issue(
+                        L1, 'W111', WARNING,
+                        f"图片 '{name}' 的属性组合未在资源表声明"
+                        f"（tag 已存在）", where,
+                        '合成立绘按 tag+属性合成；如需精确管理可在'
+                        ' images.xlsx 登记该组合'))
+                    continue
+
+            # 音频：脚本写的是**文件路径**且文件不存在 → 警告。
+            # Ren'Py 对加载不到的音频只是静音 + 写日志，不会崩，
+            # 所以它不是"构建会失败"级别的错误。
+            if atype in ('music', 'sound', 'voice') and _looks_like_path(name):
+                issues.append(Issue(
+                    L1, 'W112', WARNING,
+                    f"音频 '{name}' 在资源表里找不到对应条目", where,
+                    '核对文件名/路径；Ren\'Py 会静音但日志会报错'))
+                continue
+
             issues.append(Issue(
                 L1, 'E103' if managed else 'W110',
                 ERROR if managed else WARNING,
@@ -208,31 +280,32 @@ def validate_level1(beats, registry=None,
 
         # 台词长度 / 文本标签
         if b.text:
-            if len(b.text) > char_limit:
+            # char_limit <= 0 时关闭长度提醒（台词长短由作者把控，
+            # 不应作为硬性门槛——一行超过 60/120 字在长台词里很常见）。
+            if char_limit and len(b.text) > char_limit:
                 issues.append(Issue(
                     L1, 'W101', WARNING,
                     f'台词 {len(b.text)} 字，超过 UI 上限 {char_limit}', where,
-                    '拆成两拍，或调短'))
+                    '拆成两拍，或调短（如不需要此提醒可把字符上限设为 0 关闭）'))
             issues.extend(_check_text_tags(b.text, where))
 
-        # 音频动作取值
-        for col, val in (('MusicAction', b.music_action),
-                         ('SoundAction', b.sound_action)):
+        # 音频动作取值（BGM / SFX 列里的 [音乐] / [音效] 编译出来的动作）
+        for col, val in (('BGM', b.music_action), ('SFX', b.sound_action)):
             if val and val not in _VALID_ACTIONS:
                 issues.append(Issue(
                     L1, 'W102', WARNING,
-                    f'{col} 取值 {val!r} 非法（应为 play/queue/stop）',
+                    f'{col} 列的动作 {val!r} 非法（应为 play/queue/stop）',
                     where, '改成 play / queue / stop'))
 
         # 音频参数写在没有音频的拍上
         if b.music_params and not b.music and b.music_action != 'stop':
             issues.append(Issue(
-                L1, 'W103', WARNING, 'MusicParams 填了但没有音乐', where,
-                '补 Music，或清空参数'))
+                L1, 'W103', WARNING, 'BGM 列写了参数却没有音乐', where,
+                '补上音乐名，或清空参数'))
         if b.sound_params and not b.sound:
             issues.append(Issue(
-                L1, 'W104', WARNING, 'SoundParams 填了但没有音效', where,
-                '补 Sound，或清空参数'))
+                L1, 'W104', WARNING, 'SFX 列写了参数却没有音效', where,
+                '补上音效名，或清空参数'))
 
         # 同一拍里 scene 与 show 撞同一图像：顺序敏感，容易出错
         scene_img = (b.scene or '').strip()
@@ -242,14 +315,7 @@ def validate_level1(beats, registry=None,
                     issues.append(Issue(
                         L1, 'W105', WARNING,
                         f'scene 与 show 用了同一图像 {scene_img!r}', where,
-                        '确认 StageOrder 是否符合本意'))
-
-        # 内置变换写进 Transform/With 列（大概率是选错了列）
-        if b.transform and b.transform in RENPY_BUILTIN_TRANSFORMS:
-            issues.append(Issue(
-                L1, 'W106', WARNING,
-                f"Transform 列填的是内置变换 '{b.transform}'", where,
-                '内置变换直接留在 At 列即可'))
+                        '确认 Stage 里的书写顺序是否符合本意'))
 
         # 条件表达式肉眼可见的壳
         if b.condition and not _looks_like_condition(b.condition):
@@ -263,21 +329,30 @@ def validate_level1(beats, registry=None,
 
 def _beat_asset_refs(beat) -> list:
     """一条 Beat 引用的资产：[(类型, 名字, 是否放行内置)]"""
+    from asset_registry import is_dynamic_image_spec, \
+        is_dynamic_transform_spec
+
     refs = []
-    if beat.scene:
-        refs.append(('image', beat.scene.strip(), False))
+
+    def img(name):
+        name = (name or '').strip()
+        if name and not is_dynamic_image_spec(name):
+            refs.append(('image', name, False))
+
+    def tf(name):
+        name = (name or '').strip()
+        if name and not is_dynamic_transform_spec(name):
+            refs.append(('transform', name, True))
+
+    img(beat.scene)
     for item in _split_show_items(beat.show):
-        if (item.get('image') or '').strip():
-            refs.append(('image', item['image'].strip(), False))
+        img(item.get('image'))
     for item in _split_hide_items(beat.hide):
-        if (item.get('image') or '').strip():
-            refs.append(('image', item['image'].strip(), False))
+        img(item.get('image'))
     for t in (beat.at or '').split():
-        refs.append(('transform', t, True))
-    if beat.transform:
-        refs.append(('transform', beat.transform.strip(), True))
-    if beat.with_:
-        refs.append(('transform', beat.with_.strip(), True))
+        tf(t)
+    tf(beat.transform)
+    tf(beat.with_)
     if beat.music:
         refs.append(('music', beat.music.strip(), False))
     if beat.sound:
@@ -285,6 +360,16 @@ def _beat_asset_refs(beat) -> list:
     if beat.voice:
         refs.append(('voice', beat.voice.strip(), False))
     return refs
+
+
+def _looks_like_path(name: str) -> bool:
+    """引用看起来像"文件路径"（含目录分隔符或音频扩展名）。"""
+    s = str(name or '')
+    if '/' in s or '\\' in s:
+        return True
+    low = s.lower()
+    return any(low.endswith(ext) for ext in
+               ('.ogg', '.mp3', '.wav', '.m4a', '.flac', '.opus', '.aac'))
 
 
 def _check_text_tags(text: str, where: str) -> list:
@@ -312,18 +397,42 @@ def _looks_like_condition(cond: str) -> bool:
     return True
 
 
+def _is_silent_char_excluded(cid: str, data: dict) -> bool:
+    """W302 不该报的角色：内置旁白、占位名、单字母小游戏角色、用旁白像者。
+
+    · `narrator` 是 Ren'Py 内置旁白，永远静默，报它没意义；
+    · 显示名为空 / `???` / `-` 的是占位或没配好的角色；
+    · 单 ASCII 字母名（m/n/t/u…）几乎都是小游戏 / UI 的静默占位角色，
+      不是叙事说话人；
+    · `n = Character(image="narrator")` 这类"借旁白像"的角色也排除。
+    """
+    if cid == 'narrator':
+        return True
+    name = (data.get('Name') or '').strip()
+    if not name or name in ('???', '?', '-'):
+        return True
+    if len(cid) == 1 and cid.isascii() and cid.isalpha():
+        return True
+    if (data.get('ImageTag') or '').strip() == 'narrator':
+        return True
+    return False
+
+
 # ==================================================================
 #  L2：表内
 # ==================================================================
 
-def validate_level2(beats, registry=None) -> list:
+def validate_level2(beats, registry=None, menu_labels=None) -> list:
     issues = []
     beats = list(beats or [])
 
     seen_line_ids = {}
     seq_by_label = {}
     menu_options_by_label = {}
-    has_menu_caption = set()
+    # 有没有 `menu` 行：以解析结果为准（`menu:` 没有标题也算 menu），
+    # 不能用"有没有 caption 非空的 MENU 拍"来判断，否则会误报
+    # "有菜单选项却没有 menu 行"。
+    has_menu_caption = set(menu_labels or ())
 
     for b in beats:
         where = getattr(b, 'line_id', '') or f"{b.label}.{b.seq:04d}"
@@ -344,8 +453,6 @@ def validate_level2(beats, registry=None) -> list:
                 seen_line_ids[b.line_id] = b.seq
 
         seq_by_label.setdefault(b.label, []).append(b.seq)
-        if b.kind == KIND_MENU:
-            has_menu_caption.add(b.label)
         if b.kind == KIND_MENU_OPTION:
             menu_options_by_label.setdefault(b.label, 0)
             menu_options_by_label[b.label] += 1
@@ -380,16 +487,67 @@ def validate_level2(beats, registry=None) -> list:
 #  L3：全库
 # ==================================================================
 
+# Ren'Py 里常见的入口 label（按优先级）
+_ENTRY_LABELS = ('start', 'splashscreen', 'main_menu', 'before_main_menu',
+                 'beginstory', 'beginstory1', 'begin')
+
+
+def _entry_node_id(graph):
+    """找到图的入口节点；找不到返回 None。"""
+    by_name = {}
+    for nid, n in graph.nodes.items():
+        by_name.setdefault(n.label_name, nid)
+    current = next((nid for nid, n in graph.nodes.items() if n.is_current),
+                   None)
+    if current is not None:
+        return current
+    for cand in _ENTRY_LABELS:
+        if cand in by_name:
+            return by_name[cand]
+    return None
+
+
+def resolve_asset_path(project_root, rel):
+    """
+    资产表里的相对路径 → 真实存在的文件（找不到返回 None）。
+
+    真实项目里 Path 的**基准五花八门**：早期扫描根可能是游戏的上级目录
+    （`sr_general/game/images/x.png`）、game 目录（`images/x.png`）、
+    甚至项目根（`game/images/x.png`）。只按 project_root 拼会把上千个
+    存在的文件判成"缺失"（实测 1446 条误报）。这里逐个基准试。
+    """
+    if not rel:
+        return None
+    rel = str(rel).replace('\\', '/').lstrip('/')
+    root = Path(project_root)
+    parts = rel.split('/')
+    candidates = [root / rel, root.parent / rel]
+    if len(parts) > 1:
+        tail = '/'.join(parts[1:])
+        candidates += [root / tail, root.parent / tail]
+    candidates.append(root / 'game' / rel)
+    for c in candidates:
+        try:
+            if c.exists():
+                return c
+        except OSError:
+            continue
+    return None
+
+
 def validate_level3(beats, registry=None, graph=None,
-                    script_warnings=None, project_root=None) -> list:
+                    script_warnings=None, project_root=None,
+                    project_speakers=None) -> list:
     issues = []
     beats = list(beats or [])
 
-    # 断裂跳转 / 不可达：优先用图的告警与可达性
+    # 断裂跳转：动态 jump / 运行时求得的目标静态判不出来，所以是**警告**
+    # （真实项目里 minigame 之类用 expression 跳转很常见，报成错误会淹没真问题）。
     for w in (script_warnings or []):
         if '未定义的跳转目标' in str(w):
             issues.append(Issue(
-                L3, 'E301', ERROR, str(w), '', '补上目标 label 或改跳转'))
+                L3, 'W301', WARNING, str(w), '',
+                '确认目标是否在别处定义（含动态跳转）；确实缺失就补上'))
 
     if graph is not None:
         issues.extend(_unreachable_issues(graph))
@@ -402,34 +560,51 @@ def validate_level3(beats, registry=None, graph=None,
     for attr, label in (('images', '图片'), ('music', '音乐'),
                         ('sounds', '音效'), ('transforms', '变换')):
         data = getattr(registry, attr, {}) or {}
+        if not data:
+            continue
         unused = [aid for aid in data if aid not in referenced]
-        if unused:
-            sample = '、'.join(sorted(unused)[:6])
+        if not unused:
+            continue
+        ratio = len(unused) / len(data)
+        sample = '、'.join(sorted(unused)[:6])
+        issues.append(Issue(
+            L3, 'W301', WARNING,
+            f'{label}：{len(unused)}/{len(data)} 个未被任何脚本引用'
+            f'（如 {sample}）', attr,
+            '确认是否废弃；确实不用就从资源表删除'))
+        # 比例异常高时给出真正的原因提示，而不是让人去逐个核对两千条
+        if ratio > 0.8 and len(data) > 50:
             issues.append(Issue(
-                L3, 'W301', WARNING,
-                f'{label}：{len(unused)} 个未被任何脚本引用（如 {sample}）',
-                attr, '确认是否废弃；确实不用就从资源表删除'))
+                L3, 'W303', WARNING,
+                f'{label}的未引用比例高达 {ratio:.0%}，资源表很可能把'
+                f'UI/参考图/临时素材也扫进来了', attr,
+                '用「重新扫描」并关闭 include_ui 重建资源表，'
+                '或确认这些素材是否本就不该进表'))
 
-    # 角色没有台词
-    if beats:
-        speakers = {b.speaker for b in beats if b.speaker}
+    # 角色没有台词（项目级检查）
+    # 某一章没说话，不代表整本书没说——单章体检不报 W302，否则会把
+    # "只在别章出场"或"小游戏/UI 用的静默角色"（m/n/t/u、narrator）
+    # 误报成问题。只有拿到"整本书的说话人集合"时才报，并排除
+    # 内置旁白 / 占位名 / 单字母小游戏角色 / 用旁白像的角色。
+    if beats and project_speakers is not None:
         chars = getattr(registry, 'characters', {}) or {}
-        silent = [cid for cid in chars if cid not in speakers]
-        if silent:
+        silent = [cid for cid in chars
+                  if cid not in project_speakers
+                  and not _is_silent_char_excluded(cid, chars.get(cid, {}))]
+        if silent and len(chars) > 1:
             issues.append(Issue(
                 L3, 'W302', WARNING,
-                f'{len(silent)} 个角色在本批次里没有台词（如 '
+                f'{len(silent)} 个角色在整本书里都没有台词（如 '
                 f'{"、".join(sorted(silent)[:6])}）', 'characters',
-                '确认是尚未出场，还是被漏掉了'))
+                '确认是尚未出场，还是小游戏/UI 用的静默角色'))
 
     # 资源表登记了但文件不存在
     if project_root:
-        root = Path(project_root)
         missing = []
         for attr in ('images', 'music', 'sounds', 'voices'):
             for aid, row in (getattr(registry, attr, {}) or {}).items():
                 rel = (row or {}).get('Path')
-                if rel and not (root / str(rel)).exists():
+                if rel and not resolve_asset_path(project_root, rel):
                     missing.append(f'{aid}({rel})')
         if missing:
             issues.append(Issue(
@@ -442,23 +617,17 @@ def validate_level3(beats, registry=None, graph=None,
 
 
 def _unreachable_issues(graph) -> list:
-    """从入口做可达性分析，报出到不了的 label。"""
-    try:
-        from analysis import analyze_reachability
-    except Exception:
-        return []
+    """从入口做可达性分析，报出到不了的 label。找不到入口就不报。"""
     if not getattr(graph, 'nodes', None):
         return []
-    start = next((nid for nid, n in graph.nodes.items() if n.is_current),
-                 None)
+    start = _entry_node_id(graph)
     if start is None:
-        start = next(iter(graph.nodes), None)
-    if start is None:
-        return []
-    try:
-        _states, _warnings = analyze_reachability(graph.copy(), start)
-    except Exception:
-        return []
+        return [Issue(
+            L3, 'W304', WARNING,
+            f'图里没有可识别的入口 label（{"/".join(_ENTRY_LABELS[:3])}…），'
+            f'已跳过可达性检查', 'graph',
+            '入口 label 命名不同时属正常；如需检查可在图里把某个节点'
+            '设为当前章节')]
 
     reached = _reached_nodes(graph, start)
     unreachable = [n.label_name for nid, n in graph.nodes.items()
@@ -466,10 +635,10 @@ def _unreachable_issues(graph) -> list:
     if not unreachable:
         return []
     return [Issue(
-        L3, 'E303', ERROR,
+        L3, 'E303', WARNING,
         f'{len(unreachable)} 个 label 从入口走不到（如 '
         f'{"、".join(sorted(unreachable)[:6])}）', 'graph',
-        '检查是否少了 jump/call，或它们本就是调试用残留')]
+        '多数是动态跳转/调试残留；确实不该存在再清理')]
 
 
 def _reached_nodes(graph, start_id) -> set:
@@ -492,11 +661,52 @@ def _reached_nodes(graph, start_id) -> set:
 # ==================================================================
 
 def validate_all(beats, registry=None, graph=None, script_warnings=None,
-                 project_root=None,
-                 char_limit: int = DEFAULT_CHAR_LIMIT) -> ValidationReport:
+                 project_root=None, menu_labels=None,
+                 char_limit: int = DEFAULT_CHAR_LIMIT,
+                 dedupe: bool = True, cap_per_code: int = 40,
+                 project_speakers=None
+                 ) -> ValidationReport:
+    """
+    跑完三级校验。
+
+    **刻意加了去重与上限**：真实项目（2600 张图、2000+ 行）跑一次能刷出
+    上千条同类信息——那不是报告，是噪音，人的反应是不看。同一 code 只留
+    前 `cap_per_code` 条，其余折成一行"还有 N 条同类"。
+    CI 要全量就把 dedupe=False、cap_per_code=0。
+    """
     report = ValidationReport()
     report.extend(validate_level1(beats, registry, char_limit=char_limit))
-    report.extend(validate_level2(beats, registry))
+    report.extend(validate_level2(beats, registry, menu_labels=menu_labels))
     report.extend(validate_level3(beats, registry, graph,
-                                  script_warnings, project_root))
+                                  script_warnings, project_root,
+                                  project_speakers))
+    if dedupe or cap_per_code:
+        report.issues = _dedupe_and_cap(report.issues, cap_per_code)
     return report
+
+
+def _dedupe_and_cap(issues: list, cap_per_code: int) -> list:
+    """同一 (code, message, where) 只留一条；同一 code 最多留 cap_per_code 条。"""
+    seen = set()
+    counts = {}
+    kept = []
+    overflow = {}
+    for issue in issues:
+        key = (issue.code, issue.message, issue.where)
+        if key in seen:
+            continue
+        seen.add(key)
+        counts[issue.code] = counts.get(issue.code, 0) + 1
+        if cap_per_code and counts[issue.code] > cap_per_code:
+            overflow[issue.code] = overflow.get(issue.code, 0) + 1
+            continue
+        kept.append(issue)
+    for code, n in overflow.items():
+        sample = next((i for i in issues if i.code == code), None)
+        if sample is None:
+            continue
+        kept.append(Issue(
+            sample.level, code, sample.severity,
+            f'……另有 {n} 条同类问题（同类仅展示前 {cap_per_code} 条）',
+            '', sample.hint))
+    return kept

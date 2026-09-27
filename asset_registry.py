@@ -97,6 +97,23 @@ def read_excel_rows(file_path) -> list:
     return rows
 
 
+def _asset_set_text(ws, row, col, value):
+    """同 script_table._set_text：强制以文本存储，避免 `=` 开头的路径/备注被当公式。"""
+    cell = ws.cell(row=row, column=col)
+    cell.value = value
+    if isinstance(value, str) and value.startswith('='):
+        cell.data_type = 's'
+    return cell
+
+
+def _asset_append_row(ws, values):
+    """整行安全写入（经 _asset_set_text）。"""
+    row = ws.max_row + 1 if ws.max_row else 1
+    for col, value in enumerate(values, start=1):
+        _asset_set_text(ws, row, col, value)
+    return row
+
+
 def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
     """将 {id: row_dict} 写入 Excel。"""
     file_path = Path(file_path)
@@ -106,7 +123,7 @@ def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
     ws.append(field_order)
     for _asset_id, row_data in data_dict.items():
         excel_row = [row_data.get(field, '') for field in field_order]
-        ws.append(excel_row)
+        _asset_append_row(ws, excel_row)
     wb.save(file_path)
 
 
@@ -245,6 +262,26 @@ def _make_unique_id(stem: str, parent_dirs: list, existing_ids: set) -> str:
         counter += 1
 
 
+def _is_scan_noise(filename: str) -> bool:
+    """
+    过滤掉"不是真资产"的噪声文件，避免误扫进资源表。
+
+    典型来源：从聊天/浏览器粘贴截图时产生的
+    ``Clipboard_Screenshot.png``、``屏幕截图 xxx.png``、``Snipaste_xxx.png``，
+    以及 Excel 的临时锁文件 ``~$xxx.xlsx``。这些不该出现在候选下拉里。
+    """
+    name = (filename or '').lower()
+    if not name:
+        return True
+    if name.startswith('~$'):
+        return True
+    for kw in ('clipboard', 'screenshot', '屏幕截图', '截屏',
+               'snipaste', 'screen shot'):
+        if kw in name:
+            return True
+    return False
+
+
 def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 voice_dirs=None) -> dict:
     """
@@ -296,6 +333,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
     # ---------- 图片扫描 ----------
     for file in scan_root.rglob('*'):
         if not file.is_file() or file.suffix.lower() not in SUPPORTED_IMAGE_EXT:
+            continue
+        if _is_scan_noise(file.name):
             continue
         rel_path = file.relative_to(scan_root)
         rel_str = rel_path.as_posix().lower()
@@ -359,6 +398,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
         for file in adir.rglob('*'):
             if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
                 continue
+            if _is_scan_noise(file.name):
+                continue
             # 语音目录已经单独扫过，别再把同一个文件当作音效收一遍
             if _under_voice(file):
                 continue
@@ -391,6 +432,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
             continue
         for file in vdir.rglob('*'):
             if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
+                continue
+            if _is_scan_noise(file.name):
                 continue
             try:
                 rel_path = file.relative_to(scan_root)
@@ -604,17 +647,74 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
                     # 按文件真实表头对齐追加，避免列错位（老文件可能
                     # 只有 ID/Path/Notes，新文件才有 ATL/Params…）
                     headers = [c.value for c in ws[1]]
-                    ws.append([row.get(h, '') if h else '' for h in headers])
+                    _asset_append_row(ws, [row.get(h, '') if h else '' for h in headers])
                 else:
                     wb = openpyxl.Workbook()
                     ws = wb.active
                     fields = _TABLE_FIELDS[asset_type]
                     ws.append(fields)
-                    ws.append([row.get(h, '') for h in fields])
+                    _asset_append_row(ws, [row.get(h, '') for h in fields])
                 wb.save(p)
             except Exception as e:
                 print(f"[asset_registry] 写入资源表失败: {e}")
     return True
+
+
+def append_rows_to_table(asset_dir, table_key: str, rows: list) -> int:
+    """
+    把若干行**追加**进资源表（已存在的 ID 跳过），返回新增行数。
+
+    这是"程序敲代码 → 表格跟着变"的落地动作：脚本里新写的 transform /
+    角色 / image 声明，要真的出现在 transforms.xlsx / characters.xlsx 里，
+    文案才看得见、选得到。真实项目里曾经一个 transform 都存不下来
+    （只进了内存注册表，从不落盘），就是这个环节缺失。
+
+    策略是"只追加、不覆盖"：人填的说明/分类是权威，工具不该改它。
+    """
+    table_key = str(table_key or '')
+    fname = _STANDARD_TABLES.get(table_key)
+    if not fname or not rows:
+        return 0
+    asset_dir = Path(asset_dir)
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    path = asset_dir / fname
+    added = 0
+    try:
+        if path.exists():
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            headers = [c.value for c in ws[1]]
+            if not headers or all(h is None for h in headers):
+                headers = list(rows[0].keys())
+                ws.append(headers)
+            existing = set()
+            id_col = headers.index('ID') + 1 if 'ID' in headers else 1
+            for r in range(2, ws.max_row + 1):
+                v = ws.cell(row=r, column=id_col).value
+                if v:
+                    existing.add(str(v))
+            for row in rows:
+                aid = str(row.get('ID') or '')
+                if not aid or aid in existing:
+                    continue
+                _asset_append_row(ws, [row.get(h, '') if h else '' for h in headers])
+                existing.add(aid)
+                added += 1
+            if added:
+                wb.save(path)
+        else:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            headers = list(rows[0].keys())
+            ws.append(headers)
+            for row in rows:
+                _asset_append_row(ws, [row.get(h, '') for h in headers])
+                added += 1
+            wb.save(path)
+    except Exception as e:                      # noqa: BLE001
+        print(f"[asset_registry] 追加 {fname} 失败: {e}")
+        return 0
+    return added
 
 
 def parse_asset_tables(asset_dir, hooks=None, project_root=None) -> AssetRegistry:
@@ -761,6 +861,33 @@ _RE_VOICE_LINE = re.compile(
     r'^\s*voice\s+(?:["\'](?P<q>[^"\']+)["\']|(?P<w>[\w.]+))', re.MULTILINE)
 
 
+def is_dynamic_image_spec(spec: str) -> bool:
+    """
+    这个"图像名"是运行时才确定的表达式吗？
+
+    Ren'Py 允许 `show expression Text("...") as x`、`scene expression
+    holo("lan base")`，以及带 ATL 的 `image icon:` 块头。
+    这些都不是静态资产引用，拿去查资源表必然查不到——以前会把它们
+    报成"未登记"（真实项目里就是这几条）。
+    """
+    s = str(spec or '').strip()
+    if not s:
+        return True
+    if s.startswith('expression') or s.startswith('at '):
+        return True
+    if s.endswith(':'):
+        return True
+    if '(' in s or ')' in s:
+        return True
+    return False
+
+
+def is_dynamic_transform_spec(name: str) -> bool:
+    """`with Dissolve(1.5)` 这种函数式转场不是 transform ID。"""
+    s = str(name or '').strip()
+    return bool(s) and ('(' in s or ')' in s or s.startswith('expression'))
+
+
 def _image_spec_candidates(spec: str) -> list:
     """
     把一个脚本里的图像名展开成"可能在资产表里叫什么的候选列表"，
@@ -893,92 +1020,144 @@ def image_aliases(aid: str, row: dict) -> set:
     return {a for a in out if a}
 
 
-def resolve_references(candidate: str, registry: AssetRegistry) -> list:
+class AssetIndex:
     """
-    把一个脚本里出现的名字解析成**一组**资产 ID（可能是一张图，也可能
-    是"该立绘的所有表情变体"）。
+    一次构建、重复使用的**解析索引**。
 
-    匹配顺序（命中即停）：
-      1. 非图片资产的精确 ID（music / sound / voice / transform / character）
-      2. 图片 ID 精确匹配
-      3. 图片别名精确匹配（Tag / Attributes / `Tag Attributes`）
-      4. 图片别名**前缀**匹配 —— Ren'Py 的 `show tag attr` 语义就是
-         "匹配名字以 tag attr 开头的所有图"，所以 `show eileen happy`
-         应当同时覆盖 `eileen_happy` 与 `eileen_happy_blush`。
+    为什么必须有它：解析一个名字原本要遍历所有资产并现场算别名，
+    于是"校验 N 条引用 × M 个资产"变成 O(N×M)。真实项目 2828 张图 ×
+    4058 次解析 = 1800 万次别名计算，一次体检要 268 秒，UI 直接假死。
+    索引建一次（O(M)），之后每次解析是哈希查找 + 二分前缀，O(log M)。
+
+    索引是**快照**：资源表变了要重新 build（引擎/校验都在每轮开始时重建）。
+    """
+
+    def __init__(self, registry: AssetRegistry):
+        self.ids = {}          # 原始 ID（全类型）
+        self.audio = {}        # 音频别名（归一化）-> [id]
+        self.image = {}        # 图片别名（归一化）-> [(id, is_loose)]
+        self.prefix = []       # 排序后的 (别名, id)，用于前缀匹配（排除纯 tag）
+
+        mapping = (('images', 'image'), ('music', 'music'),
+                   ('sounds', 'sound'), ('voices', 'voice'),
+                   ('transforms', 'transform'),
+                   ('characters', 'character'))
+        for attr, _kind in mapping:
+            for aid in (getattr(registry, attr, {}) or {}):
+                self.ids[aid] = True
+
+        for attr in ('music', 'sounds', 'voices'):
+            for aid, row in (getattr(registry, attr, {}) or {}).items():
+                for alias in audio_aliases(aid, row or {}):
+                    self.audio.setdefault(alias, [])
+                    if aid not in self.audio[alias]:
+                        self.audio[alias].append(aid)
+
+        prefix_buf = set()
+        for aid, row in (registry.images or {}).items():
+            row = row or {}
+            tag = _normalize_spec(row.get('Tag'))
+            attrs = _normalize_spec(row.get('Attributes'))
+            for alias in image_aliases(aid, row):
+                loose = bool(alias) and alias == tag and attrs != alias
+                self.image.setdefault(alias, [])
+                entry = (aid, loose)
+                if entry not in self.image[alias]:
+                    self.image[alias].append(entry)
+                if alias and not loose:
+                    prefix_buf.add((alias, aid))
+        self.prefix = sorted(prefix_buf)
+
+    # ---------- 查询 ----------
+
+    def resolve(self, candidate: str) -> list:
+        if not candidate:
+            return []
+        cand = str(candidate).strip()
+        if not cand:
+            return []
+        if cand in self.ids:
+            return [cand]
+
+        # 脚本里音频经常写成"路径"（`play music "bgm/bgm02.mp3"`），
+        # 表里存的却是 ID（`bgm_bgm02`）。所以路径要逐级退化成
+        # 去目录名 → 去扩展名 再试，否则整章音乐全被报"未登记"。
+        for norm in _spec_variants(cand):
+            if not norm:
+                continue
+            audio = self.audio.get(norm)
+            if audio:
+                return list(audio)
+
+            hits, loose = [], []
+            for aid, is_loose in self.image.get(norm, ()):
+                (loose if is_loose else hits).append(aid)
+            if hits:
+                return hits
+            if loose:
+                # 只写 tag（`scene bg`）时认一张代表，否则"未使用资产"恒为 0
+                return loose[:1]
+
+            found = self._prefix_ids(norm)
+            if found:
+                return found
+        return []
+
+    def _prefix_ids(self, norm: str) -> list:
+        """前缀匹配（Ren'Py 的 `show tag attr` 语义），二分定位起止。"""
+        import bisect
+        start = bisect.bisect_left(self.prefix, (norm + ' ', ''))
+        out = []
+        for i in range(start, len(self.prefix)):
+            alias, aid = self.prefix[i]
+            if not alias.startswith(norm + ' '):
+                break
+            if aid not in out:
+                out.append(aid)
+        return out
+
+
+def _spec_variants(name: str) -> list:
+    """
+    一个引用的可能写法（按精确度递减）：
+      原始归一 → 去掉目录部分 → 去掉扩展名
+    """
+    s = str(name or '').replace('\\', '/').strip()
+    out = []
+    for v in (s, s.rsplit('/', 1)[-1]):
+        n = _normalize_spec(v)
+        if n and n not in out:
+            out.append(n)
+        if '.' in v and not v.startswith('.'):
+            n2 = _normalize_spec(v.rsplit('.', 1)[0])
+            if n2 and n2 not in out:
+                out.append(n2)
+    return out
+
+
+def resolve_references(candidate: str, registry: AssetRegistry = None,
+                       index: 'AssetIndex' = None) -> list:
+    """
+    把一个脚本里出现的名字解析成**一组**资产 ID。
+
+    匹配顺序：全类型精确 ID → 音频别名（剥 bgm_/sfx_ 前缀）→ 图片别名
+    → 图片前缀（`show eileen happy` 覆盖 `eileen happy *` 变体）。
+
+    循环里调用请传 index（否则每次都会重建索引，真实项目上是几百倍差距）。
     """
     if not candidate:
         return []
-    cand = str(candidate).strip()
-    if not cand:
-        return []
-
-    for name in ('music', 'sounds', 'voices', 'transforms', 'characters'):
-        if cand in getattr(registry, name, {}):
-            return [cand]
-
-    if cand in (registry.images or {}):
-        return [cand]
-
-    norm = _normalize_spec(cand)
-    if not norm:
-        return []
-
-    # ---- 音频别名：扫描时给音乐/音效加了 bgm_ / sfx_ 前缀，脚本里
-    # 却写 `play music night`。前缀不剥掉，音乐会被整组误报未使用。----
-    audio_hits = []
-    for attr in ('music', 'sounds', 'voices'):
-        for aid, row in (getattr(registry, attr, {}) or {}).items():
-            if norm in audio_aliases(aid, row):
-                if aid not in audio_hits:
-                    audio_hits.append(aid)
-    if audio_hits:
-        return audio_hits
-
-    hits = []
-    loose_hits = []      # 只靠 Tag 命中的（`scene bg`）：不该等同于"整组都用过"
-
-    def _add(bucket, aid):
-        if aid not in bucket:
-            bucket.append(aid)
-
-    # ---- 1) 别名精确匹配 ----
-    for aid, row in (registry.images or {}).items():
-        aliases = image_aliases(aid, row)
-        if norm not in aliases:
-            continue
-        tag = _normalize_spec(row.get('Tag'))
-        attrs = _normalize_spec(row.get('Attributes'))
-        if norm == tag and attrs != norm:
-            # 光写 tag（`scene bg`）时，Ren'Py 只会显示该 tag 的某一张；
-            # 把所有 bg 图都算"已使用"会让"未使用资产"永远为 0，
-            # 但完全不算又会把整库图误报成未使用——折中：认一张代表。
-            _add(loose_hits, aid)
-        else:
-            _add(hits, aid)
-
-    if hits:
-        return hits
-    if loose_hits:
-        return loose_hits[:1]
-
-    # ---- 2) 前缀匹配：`show eileen happy` 覆盖所有 `eileen happy *` ----
-    prefix = norm + ' '
-    for aid, row in (registry.images or {}).items():
-        for alias in image_aliases(aid, row):
-            if alias.startswith(prefix):
-                _add(hits, aid)
-                break
-    return hits
+    if index is None:
+        if registry is None:
+            return []
+        index = AssetIndex(registry)
+    return index.resolve(candidate)
 
 
-def resolve_reference(candidate: str, registry: AssetRegistry) -> Optional[str]:
-    """
-    单值版本：解析不了返回 None，能解析时返回优先级最高的那个 ID。
-
-    保留它是为了兼容旧调用方；需要"覆盖整组变体"的场景请用
-    resolve_references。
-    """
-    ids = resolve_references(candidate, registry)
+def resolve_reference(candidate: str, registry: AssetRegistry = None,
+                      index: 'AssetIndex' = None) -> Optional[str]:
+    """单值版本：解析不了返回 None。需要覆盖整组变体时用 resolve_references。"""
+    ids = resolve_references(candidate, registry, index)
     return ids[0] if ids else None
 
 
@@ -1008,6 +1187,9 @@ def extract_script_references(text: str) -> list:
         if not spec or spec.lower() == 'expression':
             continue
         clean = spec.replace('"', '')
+        # 运行时表达式 / 带 ATL 的块头 / 函数调用 → 不是静态资产引用
+        if is_dynamic_image_spec(clean):
+            continue
         cands = _image_spec_candidates(clean)
         refs.append(('image', clean, line_of(m.start()), tuple(cands)))
 
@@ -1067,17 +1249,20 @@ def references_from_statements(statements) -> list:
                     StatementKind.HIDE):
             spec = (payload.get('image') or '').strip()
             loc = loc_of(st)
-            if spec and spec.lower() != 'expression':
+            is_expr = bool(payload.get('is_expression'))
+            if spec and not is_expr and not is_dynamic_image_spec(spec):
                 clean = spec.replace('"', '')
                 refs.append(('image', clean,
                              tuple(_image_spec_candidates(clean)), loc))
             # show 子句里的 `at xxx` / `with xxx` 也是变换引用
             for t in (payload.get('at') or []):
                 t = str(t).strip()
-                if t and t not in RENPY_BUILTIN_TRANSFORMS:
+                if t and t not in RENPY_BUILTIN_TRANSFORMS \
+                        and not is_dynamic_transform_spec(t):
                     refs.append(('transform', t, (t,), loc))
             with_ = (payload.get('with_') or '').strip()
-            if with_ and with_ not in RENPY_BUILTIN_TRANSFORMS:
+            if with_ and with_ not in RENPY_BUILTIN_TRANSFORMS \
+                    and not is_dynamic_transform_spec(with_):
                 refs.append(('transform', with_, (with_,), loc))
 
         elif kind == StatementKind.PLAY:
@@ -1108,10 +1293,11 @@ def analyze_statement_references(statements, registry: AssetRegistry):
     if not isinstance(registry.unresolved, defaultdict):
         registry.unresolved = defaultdict(list, registry.unresolved or {})
 
+    index = AssetIndex(registry)          # 建一次，循环里复用
     for kind, raw, cands, loc in references_from_statements(statements):
         asset_ids = []
         for cand in cands:
-            asset_ids = resolve_references(cand, registry)
+            asset_ids = resolve_references(cand, registry, index)
             if asset_ids:
                 break
         if asset_ids:
@@ -1147,6 +1333,7 @@ def analyze_references(script_files, registry: AssetRegistry):
     if not hasattr(registry, 'unresolved') or registry.unresolved is None:
         registry.unresolved = defaultdict(list)
 
+    index = AssetIndex(registry)          # 建一次，循环里复用
     for fp in script_files:
         fp = Path(fp)
         if not fp.exists():
@@ -1162,7 +1349,7 @@ def analyze_references(script_files, registry: AssetRegistry):
             # 候选整组判定：用一个候选解析（可能命中多张图，如立绘的表情集）
             asset_ids = []
             for cand in cands:
-                asset_ids = resolve_references(cand, registry)
+                asset_ids = resolve_references(cand, registry, index)
                 if asset_ids:
                     break
 

@@ -58,6 +58,10 @@ class BuildResult:
                 f"（L1 {r.get('by_level', {}).get('L1', 0)} / "
                 f"L2 {r.get('by_level', {}).get('L2', 0)} / "
                 f"L3 {r.get('by_level', {}).get('L3', 0)}）")
+        todos = stats.get('todos', 0)
+        if todos:
+            tail += (f"\n待补资源：{todos} 处"
+                     f"（已写成 # TODO 注释，构建不受影响）")
         return f'{head}\n{tail}'
 
 
@@ -128,11 +132,15 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
     beats = beats_from_parse_result(parse_result)
 
     # 没有资源表也不能让导出退化成"只有角色变量名"：Unity/Godot 侧要的是
-    # 显示名。脚本里 define 出来的角色/transform 本身就够用。
+    # 显示名。脚本里 define / image / transform 声明本身就够用。
+    from script_table import apply_script_definitions, registry_from_parse_result
     if registry is None:
-        from script_table import registry_from_parse_result
         registry = registry_from_parse_result(parse_result)
-    elif scripts:
+    else:
+        # 把脚本里的角色/变换/image 声明合并进资源表——不合并的话，
+        # `scene black`（image 声明出来的）会被报"未登记"，
+        # 说话人也会被报"不在角色表里"。
+        apply_script_definitions(registry, parse_result)
         # 引用分析：registry.references 不填，L3 的"未使用资产"会 100% 误报。
         # 这里走与编辑器相同的那一条抽取链（Statement 优先 + 正则兜底）。
         try:
@@ -144,10 +152,20 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
         except Exception:
             pass
 
+    # 舞台/音频是 DSL 人话，必须先用符号表解释成结构化字段，
+    # 否则舞台快照、校验、多引擎导出都会看到"空舞台"。
+    try:
+        from script_table import hydrate_from_dsl, make_symbols
+        hydrate_from_dsl(beats, make_symbols(registry))
+    except Exception:
+        pass
+
     report = validate_all(
         beats, registry=registry, graph=graph,
         script_warnings=parse_result.warnings,
-        project_root=project_root, char_limit=char_limit)
+        project_root=project_root, char_limit=char_limit,
+        menu_labels=getattr(parse_result, 'menu_labels', None),
+        project_speakers={b.speaker for b in beats if b.speaker})
 
     return {
         'report': report,
@@ -160,11 +178,15 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
 
 
 def build_project(project_root, asset_dir=None, out_dir=None,
-                  engine: str = 'renpy', strict: bool = True,
+                  engine: str = 'renpy', strict: bool = False,
                   char_limit: int = DEFAULT_CHAR_LIMIT,
                   registry=None, write_report: bool = True) -> BuildResult:
     """
     跑完一整条流水线。返回 BuildResult（含可 json 化的 report）。
+
+    strict 默认 **False**：构建不因"某句台词引用了还没登记的资产"而失败。
+    缺资源只在生成的脚本里留 `# TODO: 缺少资源 …`——构建照常出产物。
+    要拿校验当 CI 门禁用 `cli.py validate`（或显式 strict=True）。
     """
     project_root = Path(project_root)
     out_dir = Path(out_dir) if out_dir else project_root / 'build_out'
@@ -178,6 +200,7 @@ def build_project(project_root, asset_dir=None, out_dir=None,
     scripts = collected['scripts']
 
     artifacts = []
+    todo_count = 0
 
     # 1) 引擎产物
     if engine == 'renpy':
@@ -186,6 +209,8 @@ def build_project(project_root, asset_dir=None, out_dir=None,
         text = render_beats_to_rpy(beats, label_name=None, registry=registry)
         target.write_text(text, encoding='utf-8')
         artifacts.append(str(target))
+        todo_count = sum(1 for ln in text.splitlines()
+                         if ln.strip().startswith('# TODO'))
         # 同时导出 IR，方便 Unity 迁移或外部工具消费
         artifacts += export_ir('json', beats, out_dir, registry=registry,
                                project=str(project_root.name))
@@ -200,6 +225,7 @@ def build_project(project_root, asset_dir=None, out_dir=None,
         'lines': len(beats),
         'labels': len({b.label for b in beats if b.label}),
         'chars': sum(len(b.text or '') for b in beats),
+        'todos': todo_count,
         'registry': _registry_stats(registry),
     }
 

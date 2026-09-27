@@ -598,9 +598,103 @@ def _widen(old_state, new_state, all_vars):
     return widened
 
 
-def analyze_reachability(graph, start_node_id):
-    if start_node_id not in graph.nodes:
-        return {}, ["起始节点不存在！"]
+# Ren'Py 里常见的入口 label（按优先级）。放在 analysis 里是因为它现在
+# 同时被 graph_view（交互分析）和 validate（三级校验）使用——两处必须
+# 用同一套入口判定，否则同一个工程在两个入口得出相反的结论。
+ENTRY_LABELS = ('start', 'splashscreen', 'main_menu', 'before_main_menu',
+                'after_load', 'beginstory', 'beginstory1', 'begin')
+
+
+def root_nodes(graph) -> list:
+    """没有入边的节点：要么是真入口，要么是被外部 call/jump 的独立章节。"""
+    has_incoming = {e.to_id for e in graph.edges.values()}
+    return [nid for nid in graph.nodes if nid not in has_incoming]
+
+
+def pick_entry_node(graph):
+    """
+    挑可达性分析的起点，返回 ``(node_id, reason)``；空图返回 ``(None, 'empty')``。
+
+    优先级：
+      1. 被标成"当前章节"的节点（用户在图上点过的那个）
+      2. Ren'Py 标准入口 label（start / splashscreen / main_menu …）
+      3. 唯一的无入边节点（多章节独立文件常这样）
+      4. 多个无入边节点里出度最大的那个（最像主线）
+      5. 兜底：随便挑第一个
+
+    reason 会被上层用来判断"这次分析是不是有权威入口"：
+    只有 1 / 2 是权威的，3 / 4 / 5 只能算猜测——**猜测出来的入口不能
+    拿来断言某个节点不可达**，否则 `chapter0_0` 这种"第 1 章的第 1 幕"
+    会被随便挑中的起点判成走不到（真实用户报的就是这个）。
+    """
+    nodes = getattr(graph, 'nodes', None)
+    if not nodes:
+        return None, 'empty'
+
+    current = next((nid for nid, n in nodes.items() if n.is_current), None)
+    if current is not None:
+        return current, 'current'
+
+    by_name = {}
+    for nid, n in nodes.items():
+        by_name.setdefault(n.label_name, nid)
+    for cand in ENTRY_LABELS:
+        if cand in by_name:
+            return by_name[cand], f'entry-label:{cand}'
+
+    roots = root_nodes(graph)
+    if len(roots) == 1:
+        return roots[0], 'single-root'
+    if roots:
+        fanout = {}
+        for e in graph.edges.values():
+            fanout[e.from_id] = fanout.get(e.from_id, 0) + 1
+        best = max(roots, key=lambda nid: fanout.get(nid, 0))
+        return best, 'multi-root'
+    return next(iter(nodes)), 'fallback'
+
+
+def is_authoritative_entry(reason: str) -> bool:
+    """入口判定是否可靠（可靠才能断言"不可达"）。"""
+    return reason == 'current' or str(reason or '').startswith('entry-label:')
+
+
+def _empty_result(message: str) -> dict:
+    return {'states': {}, 'warnings': [message], 'entry_id': None,
+            'entry_name': '', 'independent': [], 'stranded': [],
+            'reached': set(), 'authoritative': False}
+
+
+def analyze_reachability_full(graph, start_node_id=None) -> dict:
+    """
+    区间可达性分析（完整结果）。
+
+    start_node_id 传 None 时自动挑入口（`pick_entry_node`）。找不到权威
+    入口时，没有入边的节点按"可能是外部入口/独立章节"单独归类，**不再
+    一律报"不可达"**——多文件章节工程里几乎每个章节文件都是无入边的。
+
+    返回 dict：
+      states        节点 → 入口变量区间
+      warnings      人类可读的告警列表
+      entry_id/name 实际用的入口
+      authoritative 入口是否权威（可靠才能断言"不可达"）
+      independent   未接入主线的独立入口节点 label（仅非权威时归类）
+      stranded      真正走不到的节点 label
+      reached       可达节点 id 集合
+    """
+    if not getattr(graph, 'nodes', None):
+        return _empty_result("图中没有节点")
+
+    entry_reason = 'explicit'
+    if start_node_id is None:
+        start_node_id, entry_reason = pick_entry_node(graph)
+    if start_node_id is None or start_node_id not in graph.nodes:
+        return _empty_result("起始节点不存在！")
+
+    authoritative = is_authoritative_entry(entry_reason) \
+        if entry_reason != 'explicit' else True
+    entry_name = graph.nodes[start_node_id].label_name
+    root_ids = set(root_nodes(graph))
 
     all_vars = collect_all_variables(graph)
     entry_states = {}
@@ -683,19 +777,34 @@ def analyze_reachability(graph, start_node_id):
                     in_worklist.add(target)
 
     if steps >= max_steps:
-        return entry_states, [
-            f"⚠️ 分析超出迭代上限（{max_steps} 步）已中止，结果可能不完整"
-        ]
+        result = _empty_result(
+            f"⚠️ 分析超出迭代上限（{max_steps} 步）已中止，结果可能不完整")
+        result.update(states=entry_states, entry_id=start_node_id,
+                      entry_name=entry_name, reached=reached,
+                      authoritative=authoritative)
+        return result
 
     warnings = []
+    if not authoritative:
+        warnings.append(
+            f"ℹ️ 未找到标准入口 label（{'/'.join(ENTRY_LABELS[:3])}…），"
+            f"已从「{entry_name}」开始分析；"
+            f"没有入边的章节按「独立入口」处理，不计入不可达"
+        )
+
+    orphan_entries = []      # 无入边且走不到：多半是外部入口 / 独立章节
+    stranded = []            # 有入边却走不到：真的断了
     for nid, node in graph.nodes.items():
         if nid not in reached:
-            warnings.append(f"🚫 不可达节点：{node.label_name}")
+            if not authoritative and nid in root_ids:
+                orphan_entries.append(node.label_name)
+            else:
+                stranded.append(node.label_name)
             continue
 
         instate = entry_states[nid]
         if instate.is_bottom():
-            warnings.append(f"🚫 不可达节点：{node.label_name}")
+            stranded.append(node.label_name)
             continue
 
         out_edges = [e for e in graph.edges.values() if e.from_id == nid]
@@ -718,15 +827,55 @@ def analyze_reachability(graph, start_node_id):
                 f"⚠️ 下落风险：{node.label_name} 的所有分支条件在当前变量范围内不可能满足"
             )
 
-    return entry_states, warnings
+    for name in stranded:
+        warnings.append(f"🚫 不可达节点：{name}（从入口「{entry_name}」走不到）")
+
+    if orphan_entries:
+        sample = '、'.join(sorted(orphan_entries)[:8])
+        more = (f' 等 {len(orphan_entries)} 个'
+                if len(orphan_entries) > 8 else '')
+        warnings.append(
+            f"🔌 未接入主线的独立入口：{sample}{more}"
+            f"（无入边，多为被外部调用/独立章节，通常无需处理）"
+        )
+
+    return {
+        'states': entry_states,
+        'warnings': warnings,
+        'entry_id': start_node_id,
+        'entry_name': entry_name,
+        'authoritative': authoritative,
+        'independent': orphan_entries,
+        'stranded': stranded,
+        'reached': reached,
+    }
 
 
-def visualize_analysis_results(graph, entry_states, warnings):
+def analyze_reachability(graph, start_node_id=None):
+    """兼容壳：返回 ``(entry_states, warnings)``。"""
+    result = analyze_reachability_full(graph, start_node_id)
+    return result['states'], result['warnings']
+
+
+def visualize_analysis_results(graph, entry_states, warnings,
+                               entry_id=None, independent=None,
+                               independent_ids=None):
+    """
+    把分析结果渲染成人看的文本。
+
+    entry_id / independent_ids 由 `analyze_reachability_full` 给出：
+    入口节点标「← 分析入口」，未接入主线的独立入口标「独立入口」而不是
+    「不可达」——否则多章节工程里每个章节文件都会被说成走不到。
+    """
+    independent_ids = set(independent_ids or ())
+    independent_names = set(independent or ())
     result_text = "=== 变量区间分析结果 ===\n\n"
     for nid, node in graph.nodes.items():
         result_text += f"节点: {node.label_name}\n"
         state = entry_states.get(nid)
         if state and not state.is_bottom():
+            if nid == entry_id:
+                result_text += "  ← 分析入口\n"
             result_text += f"  入口状态: {state}\n"
             current = state.copy()
             for op in node.operations:
@@ -734,8 +883,10 @@ def visualize_analysis_results(graph, entry_states, warnings):
             if node.operations:
                 result_text += f"  出口状态: {current}\n"
             result_text += f"  操作: {node.operations if node.operations else '无'}\n"
+        elif nid in independent_ids or node.label_name in independent_names:
+            result_text += "  状态: 独立入口（无入边，不参与主线可达性）\n"
         else:
-            result_text += f"  状态: 不可达\n"
+            result_text += "  状态: 不可达\n"
         result_text += "\n"
 
     if warnings:

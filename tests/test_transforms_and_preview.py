@@ -144,18 +144,25 @@ class TestTransformReachesTable:
         """
         下拉走**工作簿级动态名称**（二）：区间自伸缩，候选表里加一行
         Excel 立刻能选到，不必回头点"刷新候选"。
+
+        能挂格级下拉的是"一格一个值"的列（说话人/场景/语音）。
+        变换现在写在 Stage 文本里，但它的候选名称照样登记着，
+        `词表` 里也能查到——严格性由编译器提供，不再靠拆列。
         """
         wb = self._sheet(registry, tmp_path)
         ws = wb['Beats']
         formulas = [dv.formula1 for dv in ws.data_validations.dataValidation]
-        # 变换列的下拉指向名称
-        assert 'CAND_TRANSFORM' in formulas
+        assert 'CAND_CHARACTER' in formulas
 
-        dn = wb.defined_names['CAND_TRANSFORM']
+        dn = wb.defined_names['CAND_CHARACTER']
         text = dn.attr_text
-        assert "Candidates_变换" in text
+        assert 'Candidates_角色' in text
         assert '$A$3' in text
         assert 'COUNTA' in text and 'OFFSET' in text
+
+        # 变换的候选名称也还在（供 Stage 词表 / 未来扩展使用）
+        tf = wb.defined_names['CAND_TRANSFORM'].attr_text
+        assert 'Candidates_变换' in tf
 
     def test_character_sheet_shows_identity(self, registry, tmp_path):
         wb = self._sheet(registry, tmp_path)
@@ -623,7 +630,7 @@ class TestEndToEnd:
         headers = [c.value for c in ws[1]]
         rows = [dict(zip(headers, r)) for r in
                 ws.iter_rows(min_row=2, values_only=True)]
-        texts = [r['Text'] for r in rows]
+        texts = [r['台词'] for r in rows]
         assert '早上好。' in texts
         # 未登记资产一个都不该报
         from script_table import import_beats_from_excel

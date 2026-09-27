@@ -15,7 +15,7 @@ from pathlib import Path
 from asset_engine import AssetEngine, is_under_path
 from models import Graph, Node, Edge
 from utils import collect_all_variables
-from analysis import analyze_reachability, visualize_analysis_results, apply_operation, condition_possible, apply_condition, VariableState
+from analysis import analyze_reachability, visualize_analysis_results, apply_operation, condition_possible, apply_condition, VariableState, pick_entry_node, analyze_reachability_full
 from renpy_parser import parse_renpy_file
 from renpy_exporter import export_to_renpy
 from layout import layout_graph
@@ -23,9 +23,10 @@ from commands import (
     AddNodeCommand, RemoveNodeCommand, AddEdgeCommand, RemoveEdgeCommand,
     UpdateNodeOperationsCommand, UpdateEdgeCommand, SetCurrentNodeCommand,
     MoveNodeCommand, ClearGraphCommand, ImportRenPyCommand, LoadLayoutCommand,
-    HistoryManager
+    ReplaceGraphCommand, HistoryManager
 )
 from editor_utils import open_file_at_line
+import story_ops
 
 
 def _open_with_system_default(path) -> bool:
@@ -79,6 +80,7 @@ class GraphView:
         self.asset_bus = None
         self.project_root = None
         self._asset_poll_handle = None
+        self._busy_desc = ''          # 当前后台任务描述（状态提示用）
 
         self.offset_x = 0
         self.offset_y = 0
@@ -138,21 +140,27 @@ class GraphView:
         btn_frame.pack(fill=tk.X, pady=5)
 
         tk.Button(btn_frame, text="导入Ren'Py文件", command=self.import_renpy).pack(pady=2, fill=tk.X)
+        tk.Button(btn_frame, text="批量导入章节", command=self.batch_import_chapters,
+                  bg="#9C27B0", fg="white").pack(pady=2, fill=tk.X)
         tk.Button(btn_frame, text="导出为Ren'Py", command=self.export_renpy).pack(pady=2, fill=tk.X)
         tk.Button(btn_frame, text="保存布局(JSON)", command=self.save_layout).pack(pady=2, fill=tk.X)
         tk.Button(btn_frame, text="加载布局", command=self.load_layout).pack(pady=2, fill=tk.X)
         tk.Button(btn_frame, text="清空图", command=self.clear_graph, bg="#F44336", fg="white").pack(pady=2, fill=tk.X)
 
-        # 资产集成按钮
-        tk.Button(btn_frame, text="打开项目", command=self.open_project).pack(pady=2, fill=tk.X)
+        # 资产集成按钮（保留引用：重活进行中要禁用，避免连点重入）
+        self.btn_open_project = tk.Button(btn_frame, text="打开项目",
+                                          command=self.open_project)
+        self.btn_open_project.pack(pady=2, fill=tk.X)
         self.project_label = tk.Label(btn_frame, text="（未打开项目）",
                                       font=("微软雅黑", 8), fg="#666")
         self.project_label.pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="从脚本导入角色表",
-                  command=self.import_characters_from_script).pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="项目体检（三级校验）",
-                  command=self.open_validation_panel, bg="#FF9800",
-                  fg="white").pack(pady=2, fill=tk.X)
+        self.btn_chars = tk.Button(btn_frame, text="从脚本导入角色表",
+                                   command=self.import_characters_from_script)
+        self.btn_chars.pack(pady=2, fill=tk.X)
+        self.btn_health = tk.Button(btn_frame, text="项目体检（三级校验）",
+                                    command=self.open_validation_panel,
+                                    bg="#FF9800", fg="white")
+        self.btn_health.pack(pady=2, fill=tk.X)
 
         # 剧本表：把 .rpy 摊成一行一句演出的 Excel，改完再生成脚本
         script_frame = tk.LabelFrame(right_panel, text="剧本表（Excel 双向）",
@@ -279,8 +287,11 @@ class GraphView:
         text_id = self.canvas.create_text(sx, sy - 10, text=node.label_name,
                                             font=("微软雅黑", 10, "bold"))
         op_text_id = None
-        if node.operations:
-            op_text_id = self.canvas.create_text(sx, sy + 15, text=f"{len(node.operations)} 操作",
+        # 只把**剧情变量操作**显示出来：技术代码（renpy./persistent. 之类）
+        # 既不影响剧情走向、数量还特别多，混在一起会把真正要看的变量淹掉。
+        _summary = story_ops.summarize(node)
+        if _summary:
+            op_text_id = self.canvas.create_text(sx, sy + 15, text=_summary,
                                                     font=("微软雅黑", 8), fill="#666")
         self.canvas_ids[nid] = (rect_id, text_id, op_text_id)
 
@@ -561,10 +572,7 @@ class GraphView:
         if nid is not None and nid in self.canvas_ids:
             self.update_node_position(nid)
             node = self.graph.nodes[nid]
-            if node.operations:
-                op_text = f"{len(node.operations)} 操作"
-            else:
-                op_text = ""
+            op_text = story_ops.summarize(node)
             rect_id, text_id, op_text_id = self.canvas_ids[nid]
             if op_text_id:
                 self.canvas.itemconfig(op_text_id, text=op_text)
@@ -842,13 +850,19 @@ is_unlocked = love > 5 and money >= 100"""
 
         text_widget = st.ScrolledText(dlg, width=80, height=20, font=("Consolas", 10))
         text_widget.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
-        for op in node.operations:
+        # 默认只列剧情变量操作；技术代码（引擎 API / 重复的 renpy.transition）
+        # 收进下方折叠区，避免"55 条操作"其实大半是噪音。
+        _nar = story_ops.narrative_operations(node)
+        for op in _nar:
             text_widget.insert(tk.END, op + '\n')
         text_widget.focus_set()
 
         def on_ok():
             lines = text_widget.get("1.0", tk.END).splitlines()
             new_ops = [l.strip() for l in lines if l.strip()]
+            # 面板只显示剧情变量；技术代码必须原样保留回去，
+            # 否则"编辑一次变量"就把 renpy.transition/persistent 全删了。
+            new_ops = new_ops + story_ops.tech_operations(node)
             cmd = UpdateNodeOperationsCommand(self, nid, new_ops)
             self.history.execute_command(cmd)
             dlg.destroy()
@@ -936,9 +950,7 @@ is_unlocked = love > 5 and money >= 100"""
         with self.lock:
             self.busy_count += 1
         graph_copy = self.graph.copy()
-        start_nid = next((nid for nid, n in graph_copy.nodes.items() if n.is_current), None)
-        if not start_nid:
-            start_nid = list(graph_copy.nodes.keys())[0]
+        start_nid, _reason = pick_entry_node(graph_copy)
         def worker():
             try:
                 layout_graph(graph_copy, start_id=start_nid)
@@ -959,13 +971,16 @@ is_unlocked = love > 5 and money >= 100"""
         with self.lock:
             self.busy_count += 1
         graph_copy = self.graph.copy()
-        start_nid = next((nid for nid, n in graph_copy.nodes.items() if n.is_current), None)
-        if not start_nid:
-            start_nid = list(graph_copy.nodes.keys())[0]
         def worker():
             try:
-                entry_states, warnings = analyze_reachability(graph_copy, start_nid)
-                result_text = visualize_analysis_results(graph_copy, entry_states, warnings)
+                result = analyze_reachability_full(graph_copy)
+                entry_states = result['states']
+                warnings = result['warnings']
+                result_text = visualize_analysis_results(
+                    graph_copy, entry_states, warnings,
+                    entry_id=result.get('entry_id'),
+                    independent=result.get('independent'),
+                )
                 self.result_queue.put(("analysis", result_text, warnings))
             except Exception as e:
                 self.result_queue.put(("error", str(e)))
@@ -982,13 +997,12 @@ is_unlocked = love > 5 and money >= 100"""
         with self.lock:
             self.busy_count += 1
         graph_copy = self.graph.copy()
-        start_nid = next((nid for nid, n in graph_copy.nodes.items() if n.is_current), None)
-        if not start_nid:
-            start_nid = list(graph_copy.nodes.keys())[0]
         def worker():
             try:
-                entry_states, warnings = analyze_reachability(graph_copy, start_nid)
-                report = self._build_detailed_report(graph_copy, entry_states, warnings)
+                result = analyze_reachability_full(graph_copy)
+                report = self._build_detailed_report(
+                    graph_copy, result['states'], result['warnings'],
+                    result=result)
                 self.result_queue.put(("detailed_report", report))
             except Exception as e:
                 self.result_queue.put(("error", str(e)))
@@ -996,9 +1010,15 @@ is_unlocked = love > 5 and money >= 100"""
                 self.result_queue.put(("busy_end",))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _build_detailed_report(self, graph, entry_states, warnings):
+    def _build_detailed_report(self, graph, entry_states, warnings,
+                               result=None):
+        result = result or {}
+        entry_id = result.get('entry_id')
+        independent_ids = set(result.get('independent') or ())
         report = "=" * 80 + "\n"
         report += "详细变量区间分析报告\n"
+        if result.get('entry_name'):
+            report += f"分析入口: {result['entry_name']}\n"
         report += "=" * 80 + "\n\n"
         all_vars = collect_all_variables(graph)
         report += f"检测到的变量 ({len(all_vars)}个): {', '.join(sorted(all_vars))}\n\n"
@@ -1007,6 +1027,8 @@ is_unlocked = love > 5 and money >= 100"""
             report += "-" * 40 + "\n"
             state = entry_states.get(nid)
             if state and not state.is_bottom():
+                if nid == entry_id:
+                    report += "入口: 是（本次分析起点）\n"
                 report += f"入口状态:\n{state}\n\n"
                 current = state.copy()
                 if node.operations:
@@ -1025,19 +1047,15 @@ is_unlocked = love > 5 and money >= 100"""
                         report += f"  → {target} ({opt}{cond})\n"
                         possible = condition_possible(current, edge.condition)
                         report += f"    条件可能: {'是' if possible else '否'}\n"
-                        if possible and edge.condition:
-                            after_cond = apply_condition(current, edge.condition)
-                            if after_cond:
-                                report += f"    满足条件后状态: {after_cond}\n"
+            elif nid in independent_ids:
+                report += "状态: 独立入口（无入边，不参与主线可达性分析）\n"
             else:
                 report += "状态: 不可达\n"
-            report += "\n" + "=" * 80 + "\n\n"
-        if warnings:
-            report += "\n" + "!" * 40 + "\n"
-            report += "警告信息\n"
-            report += "!" * 40 + "\n"
-            for warning in warnings:
-                report += f"• {warning}\n"
+            report += "\n"
+            if warnings:
+                report += "=" * 80 + "\n警告\n" + "=" * 80 + "\n"
+                for w in warnings:
+                    report += f"• {w}\n"
         return report
 
     # ===================== 资产引擎接线 =====================
@@ -1115,28 +1133,41 @@ is_unlocked = love > 5 and money >= 100"""
             rename_threshold=5,
         )
 
-        self.asset_engine = AssetEngine(
-            asset_dir=asset_dir,
-            project_root=project_root,
-            script_files=script_files,
-            tl_dir=tl_dir,
-            event_bus=self.asset_bus,
-            confirmation_gate=gate,
-            watch_source_dirs=True,
-            poll_interval=1.5,
-        )
+        # 建引擎 + 首次全量加载（扫描资产表、解析所有 .rpy）是重活，
+        # 放到后台线程，UI 只显示"正在加载"。
+        def work():
+            engine = AssetEngine(
+                asset_dir=asset_dir,
+                project_root=project_root,
+                script_files=script_files,
+                tl_dir=tl_dir,
+                event_bus=self.asset_bus,
+                confirmation_gate=gate,
+                watch_source_dirs=True,
+                poll_interval=1.5,
+            )
+            engine.start()
+            return engine
 
-        try:
-            self.asset_engine.start()
-        except Exception as e:
-            messagebox.showerror("引擎启动失败", str(e))
+        def done(engine):
+            self.asset_engine = engine
+            self.project_label.config(text=f"项目：{project_root.name}",
+                                      fg="#2E7D32")
+            self._poll_asset_engine()
+            reg = self._current_registry()
+            if reg is not None:
+                self._append_analysis(
+                    f"[项目] 已加载：脚本 {len(script_files)} 个 · "
+                    f"图片 {len(reg.images)} · 音乐 {len(reg.music)} · "
+                    f"音效 {len(reg.sounds)} · 语音 {len(reg.voices)} · "
+                    f"变换 {len(reg.transforms)} · 角色 {len(reg.characters)}\n")
+
+        def failed(err):
             self.asset_engine = None
-            return
+            messagebox.showerror("引擎启动失败", str(err))
 
-        self.project_label.config(text=f"项目：{project_root.name}",
-                                fg="#2E7D32")
-
-        self._poll_asset_engine()
+        self._run_async(f"正在加载项目 {project_root.name}（扫描资产表与脚本）",
+                        work, done, failed)
 
     def rescan_project(self):
         """手动触发一次全量重载。"""
@@ -1261,14 +1292,14 @@ is_unlocked = love > 5 and money >= 100"""
             messagebox.showwarning("未打开项目", "请先「打开项目」。")
             return
         asset_dir = getattr(self.asset_engine, 'asset_dir', None)
-        try:
-            from build import collect_report
-            collected = collect_report(self.project_root,
-                                       asset_dir=asset_dir)
-        except Exception as e:
-            messagebox.showerror("体检失败", str(e))
-            return
 
+        def work():
+            from build import collect_report
+            return collect_report(self.project_root, asset_dir=asset_dir)
+
+        self._run_async("项目体检（三级校验）", work, self._show_validation_panel)
+
+    def _show_validation_panel(self, collected):
         report = collected['report']
         stats = {
             'scripts': len(collected['scripts']),
@@ -1306,6 +1337,51 @@ is_unlocked = love > 5 and money >= 100"""
 
         self._append_analysis(
             f"[体检] {report.summary()}\n")
+
+    def _run_async(self, desc: str, work, on_done=None, on_error=None):
+        """
+        在后台线程跑重活，主线程收结果。
+
+        为什么必须有：打开项目要扫几千个文件、解析几十个 .rpy；体检要
+        跑全库分析。这些都放在 UI 线程里做，窗口就是"未响应"——
+        用户第一次打开项目的体验直接毁掉（真实反馈）。tkinter 不允许
+        子线程碰控件，所以统一走"后台干活 + 队列回主线程"这条路。
+
+        work: 无参函数，返回值交给 on_done(result)
+        """
+        self._set_busy(desc)
+
+        def runner():
+            try:
+                result = work()
+                self.result_queue.put(("job_done", on_done, result))
+            except Exception as e:                     # noqa: BLE001
+                self.result_queue.put(("job_failed", on_error, desc, e))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _set_busy(self, desc: str = ''):
+        """状态提示 + 禁掉会重入的按钮（避免连点触发两遍重活）。"""
+        self._busy_desc = desc or ''
+        if desc:
+            self._append_analysis(f'[进行中] {desc}…\n')
+        try:
+            self.root.config(cursor='watch' if desc else '')
+        except Exception:
+            pass
+        for name in ('btn_open_project', 'btn_health', 'btn_chars'):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            try:
+                btn.config(state='disabled' if desc else 'normal')
+            except Exception:
+                pass
+
+    def _finish_job(self, desc: str = ''):
+        self._set_busy('')
+        if desc:
+            self._append_analysis(f'[完成] {desc}\n')
 
     def open_rpy_in_excel(self):
         """
@@ -1647,6 +1723,55 @@ is_unlocked = love > 5 and money >= 100"""
             cmd = ImportRenPyCommand(self, file_path)
             self.history.execute_command(cmd)
 
+    def batch_import_chapters(self):
+        """
+        一次选多个 .rpy，全部解析进同一张图 → 每个 label 一个章节节点。
+
+        以前这里只挂了「导入Ren'Py文件」单个文件；整部剧本（40 个 .rpy）
+        要重复点 40 次，而且中途一次 `clear_graph=True` 就会把前面导入的
+        全部冲掉。这里改成一次性累加导入：
+
+          · `batch_import_chapters(..., clear_graph=False)` 一次 analyzer
+            调用吃下所有文件，跨文件 label 互不覆盖、不重复建节点；
+          · 解析几十个文件是重活，走 `_run_async` 后台线程，窗口不会假死；
+          · 结果用 `ReplaceGraphCommand` 提交，Ctrl+Z 能整体撤销这次导入。
+        """
+        file_paths = filedialog.askopenfilenames(
+            title="选择要导入的章节脚本（可多选）",
+            filetypes=[("Ren'Py 脚本", "*.rpy"), ("所有文件", "*.*")],
+        )
+        if not file_paths:
+            return
+
+        from renpy_parser import batch_import_chapters as _batch_import
+
+        before = self.graph.copy()
+        work_graph = self.graph.copy()
+
+        def work():
+            _batch_import(list(file_paths), work_graph)
+            return work_graph
+
+        def on_done(new_graph):
+            self._finish_job(f'批量导入 {len(file_paths)} 个章节')
+            self.history.execute_command(
+                ReplaceGraphCommand(self, new_graph, before))
+            self.fit_view()
+            added = len(new_graph.nodes) - len(before.nodes)
+            messagebox.showinfo(
+                "批量导入完成",
+                f"共选择 {len(file_paths)} 个文件，"
+                f"新增 {max(added, 0)} 个章节节点，"
+                f"当前共 {len(new_graph.nodes)} 个节点。\n"
+                f"（Ctrl+Z 可整体撤销这次导入）")
+
+        def on_error(err):
+            self._finish_job()
+            messagebox.showerror("批量导入失败", str(err))
+
+        self._run_async(f'批量导入 {len(file_paths)} 个章节脚本',
+                        work, on_done=on_done, on_error=on_error)
+
     def export_renpy(self):
         file_path = filedialog.asksaveasfilename(defaultextension=".rpy", filetypes=[("Ren'Py 文件", "*.rpy")])
         if file_path:
@@ -1726,6 +1851,18 @@ is_unlocked = love > 5 and money >= 100"""
                     self._show_report_window(report)
                 elif msg[0] == "error":
                     messagebox.showerror("错误", msg[1])
+                elif msg[0] == "job_done":
+                    callback, result = msg[1], msg[2]
+                    self._finish_job(self._busy_desc)
+                    if callback is not None:
+                        callback(result)
+                elif msg[0] == "job_failed":
+                    on_error, desc, err = msg[1], msg[2], msg[3]
+                    self._finish_job('')
+                    if on_error is not None:
+                        on_error(err)
+                    else:
+                        messagebox.showerror(f'{desc}失败', str(err))
                 elif msg[0] == "busy_end":
                     with self.lock:
                         self.busy_count -= 1

@@ -255,11 +255,16 @@ class LogicalLine:
 class RenPyLexer:
     """将 .rpy 源文件转换为逻辑行嵌套树。"""
 
+    # 一条逻辑语句最多允许合并多少物理行（括号续行的安全阀）
+    _MAX_MERGE_LINES = 120
+
     def __init__(self):
         self.errors: list = []
+        self._current_file: str = ''
 
     def tokenize(self, filepath) -> list:
         filepath = Path(filepath)
+        self._current_file = str(filepath)
         try:
             raw_lines = filepath.read_text(encoding='utf-8').splitlines()
         except Exception as e:
@@ -320,8 +325,19 @@ class RenPyLexer:
                 oc, cc = self._count_brackets(clean_for_count)
                 if oc <= cc:
                     break
+                # 安全阀：括号计数万一被奇葩代码骗了，也不能一路并到文件末尾
+                # （那会把后面所有 label 吃掉）。宁可留一条超长语句 + 警告。
+                if i - line_no > self._MAX_MERGE_LINES:
+                    self.errors.append(
+                        f"{self._current_file}:{line_no}: 括号始终未闭合，"
+                        f"已停止合并（可能解析不完整）"
+                    )
+                    break
                 i += 1
-                accumulated += ' ' + raw_lines[i].strip()
+                # 用 '\n' 而不是 ' ' 拼接：这些是**真正的多行语句**
+                # （参数表、列表字面量）。用空格拼会把换行信息抹掉，
+                # 之后按行剥离行内注释时第一个 '#' 就会把后面全删掉。
+                accumulated += '\n' + raw_lines[i].rstrip()
 
             accumulated = self._strip_inline_comment(accumulated)
 
@@ -358,29 +374,46 @@ class RenPyLexer:
         return False
 
     @staticmethod
-    def _strip_inline_comment(text: str) -> str:
+    def _strip_line_comment(line: str) -> str:
+        """去掉**单行**的行内注释（字符串里的 # 不算）。"""
         i = 0
-        n = len(text)
+        n = len(line)
         while i < n:
-            ch = text[i]
+            ch = line[i]
 
             if ch == '\\':
                 i += 2
                 continue
 
             if ch in ('"', "'"):
-                end, closed = _skip_string(text, i)
+                end, closed = _skip_string(line, i)
                 if not closed:
-                    return text
+                    return line          # 引号未闭合，别乱动
                 i = end
                 continue
 
             if ch == '#':
-                return text[:i].rstrip()
+                return line[:i].rstrip()
 
             i += 1
 
-        return text
+        return line
+
+    @staticmethod
+    def _strip_inline_comment(text: str) -> str:
+        """
+        去掉行内注释，**按行处理**。
+
+        这里曾经是"遇到第一个 # 就 return text[:i]"。对单行没问题，
+        但对**已合并的多行逻辑语句**就是从第一个 # 起把后面所有行全删掉：
+          括号计数因此永远配不平 → 合并循环一路吃到底 →
+          整个文件被并成一条逻辑行、里面所有 label 全丢。
+        真实项目（init python 里带多行参数表和行内中文注释）必然触发。
+        """
+        if '\n' not in text:
+            return RenPyLexer._strip_line_comment(text)
+        return '\n'.join(RenPyLexer._strip_line_comment(ln)
+                         for ln in text.split('\n'))
 
     @staticmethod
     def _count_brackets(text: str) -> tuple:
@@ -453,10 +486,14 @@ class DefineNode(ASTNode):
     target: str = ''
     value_type: str = ''
     args_str: str = ''
+    rhs: str = ''                 # 等号右侧原文（用于收集字符串常量）
     display_name: str = ''
     color: str = ''
     what_color: str = ''
     image_tag: str = ''
+    # DynamicCharacter('jc_name', ...) 的第一个位置参数是**名字变量**，
+    # 不是显示名——显示名要去 `default jc_name = "「蒋忱」"` 里取。
+    name_var: str = ''
     # Character(...) 里的其余关键字参数原样留存（kind / voice_tag /
     # side_image / what_prefix …）。角色定义写得很花，只挑 4 个字段
     # 存下来，导入到资源表时就会"看着不对"，说不清到底漏了什么。
@@ -532,6 +569,33 @@ class TransformNode(ASTNode):
 
 
 @dataclass
+class LayeredImageNode(ASTNode):
+    """
+    `layeredimage ye:` —— Ren'Py 的合成立绘。
+
+    它定义了 tag（ye）和一整套 attribute（happy / base_handdown / …），
+    脚本里 `show ye base_handdown happy` 引用的就是这些。
+    不解析它，这类"多属性立绘"会被整批报成"未登记"（实测 130 条）。
+    """
+    name: str = ''
+    attributes: list = field(default_factory=list)
+    image_format: str = ''
+
+
+@dataclass
+class ImageDefNode(ASTNode):
+    """
+    `image bg room = "images/bg/room.png"` / `image black = "#000000"`。
+
+    这是 Ren'Py 里**最权威的图像清单**（比按文件名猜可靠得多）：
+    `scene black`、`show bg bg1_1` 引用的名字就写在这里。不解析它，
+    校验会把项目里明明定义好的图全报成"未登记"。
+    """
+    name: str = ''
+    expr: str = ''
+
+
+@dataclass
 class ShowNode(ASTNode):
     image: str = ''
     at: list = field(default_factory=list)
@@ -598,6 +662,12 @@ _STR_DQ = r'"((?:[^"\\]|\\.)*)"'
 _STR_SQ = r"'((?:[^'\\]|\\.)*)'"
 _STR = f'(?:{_STR_DQ}|{_STR_SQ})'
 
+# 音频语句里的"参数词"：出现它们说明后面不是资产名
+_AUDIO_PARAM_WORDS = frozenset({
+    'fadein', 'fadeout', 'loop', 'noloop', 'volume', 'relative_volume',
+    'if_changed', 'tight', 'fadeinout',
+})
+
 # 翻译文件用的命名组版本
 _TR_DQ = r'"(?P<dq>(?:[^"\\]|\\.)*)"'
 _TR_SQ = r"'(?P<sq>(?:[^'\\]|\\.)*)'"
@@ -610,6 +680,43 @@ def _pick_str(m, *groups) -> str:
         if v is not None:
             return v
     return ''
+
+
+def _string_literal(text: str):
+    """`"abc"` / `'abc'` → 'abc'；不是纯字符串字面量则返回 None。"""
+    text = (text or '').strip()
+    if len(text) < 2:
+        return None
+    if text[0] not in '"\'' or text[-1] != text[0]:
+        return None
+    inner = text[1:-1]
+    if text[0] in inner:                 # 里面还有同类引号 → 不是简单字面量
+        return None
+    return inner
+
+
+def _image_path_from_expr(expr: str):
+    """`image x = "images/a.png"` → 'images/a.png'；不是路径则 None。"""
+    value = _string_literal(expr)
+    if not value:
+        return None
+    low = value.lower()
+    if any(low.endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.webp',
+                                        '.bmp', '.gif', '.avif')):
+        return value
+    return None
+
+
+def _image_solid_from_expr(expr: str):
+    """`image x = "#000000"` / `Solid("#000")` → '#000000'。"""
+    expr = (expr or '').strip()
+    value = _string_literal(expr)
+    if value and value.startswith('#'):
+        return value
+    m = re.search(r'Solid\(\s*["\'](#[0-9a-fA-F]{3,8})["\']', expr)
+    if m:
+        return m.group(1)
+    return None
 
 
 class RenPyParser:
@@ -636,6 +743,18 @@ class RenPyParser:
     _RE_SHOW_HEAD = re.compile(r'^show\s+')
     _RE_SCENE_HEAD = re.compile(r'^scene\s+')
     _RE_HIDE_HEAD = re.compile(r'^hide\s+')
+    # `show screen X` / `hide screen X` 是 UI 操作，不是立绘
+    _RE_SCREEN_SHOW = re.compile(r'^(?:show|hide)\s+screen\b')
+    # `image <名字> = <表达式>`：名字允许带空格（`bg bg1_1`）
+    _RE_IMAGE_DEF = re.compile(
+        r'^image\s+(?P<name>[^\s=][^=]*?)\s*=\s*(?P<rhs>.+)$')
+    # `layeredimage <tag>:`（合成立绘）
+    _RE_LAYEREDIMAGE = re.compile(r'^layeredimage\s+([\w.]+)')
+    # layeredimage 块里声明属性的写法
+    _RE_ATTR_DECL = re.compile(r'^attribute\s+([\w.]+)')
+    _RE_ATTR_CLAUSE = re.compile(
+        r'\b(?:when|if_all|if_any|if_not)\s+(.+)$')
+    _RE_IMAGE_FORMAT = re.compile(r'image_format\s+["\']([^"\']+)["\']')
     # transform 定义两种形态都要认：
     #   transform name:            （无参）
     #   transform name(a, b=1):    （带参）
@@ -650,8 +769,9 @@ class RenPyParser:
     # （voice v_001，v_001 是变量）。后者也是合法 Ren'Py 语法，
     # 之前只收字符串导致裸表达式的语音被整句丢掉了。
     _RE_VOICE = re.compile(r'^voice\s+(?:' + _STR + r'|(\S+))')
-    _RE_EXTEND_HEAD = re.compile(r'^extend\s+')
-    _RE_EXTEND_STR = re.compile(r'^extend\s+' + _STR)
+    # extend 允许紧跟字符串（`extend"补充"` 也是合法写法，真实项目在用）
+    _RE_EXTEND_HEAD = re.compile(r'^extend(?=\s|["\'])')
+    _RE_EXTEND_STR = re.compile(r'^extend\s*' + _STR)
 
     # show / scene 解析用的关键字集合
     _SHOW_KEYWORDS = frozenset(
@@ -781,6 +901,57 @@ class RenPyParser:
             doc=doc,
         )
 
+    def _parse_layeredimage(self, line: LogicalLine, text: str,
+                            m) -> LayeredImageNode:
+        """
+        解析 `layeredimage <tag>:` 块，收集它声明的全部 attribute。
+
+        attribute 有两种写法：
+          · `attribute happy default:` —— 直接声明
+          · `group expressions when not base_handdown:` —— 条件里出现的
+            base_handdown 也是属性名（在别的 group 里声明）
+        两种都要收，否则 `show ye base_handdown happy` 里的
+        base_handdown 会被判成"未声明"。
+        """
+        name = m.group(1)
+        attrs = []
+        image_format = ''
+
+        def _add(word):
+            word = str(word or '').strip()
+            if word and word not in attrs and word.isidentifier():
+                attrs.append(word)
+
+        def walk(block, fmt):
+            for ln in block or ():
+                body = ln.text.strip()
+                fm = self._RE_IMAGE_FORMAT.search(body)
+                if fm:
+                    fmt = fm.group(1)
+                am = self._RE_ATTR_DECL.match(body)
+                if am:
+                    _add(am.group(1))
+                cm = self._RE_ATTR_CLAUSE.search(
+                    RenPyLexer._strip_line_comment(body))
+                if cm:
+                    for tok in re.split(r'[\s()]+', cm.group(1)):
+                        if tok and tok not in ('not', 'and', 'or', 'True',
+                                               'False', 'None'):
+                            _add(tok)
+                if ln.subblock:
+                    fmt = walk(ln.subblock, fmt)
+            return fmt
+
+        image_format = walk(line.subblock, image_format)
+        return LayeredImageNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            name=name,
+            attributes=attrs,
+            image_format=image_format,
+        )
+
     def _parse_statement(self, line: LogicalLine, text: str):
         # ---- 整行注释 ----
         # 注释不是"可忽略的噪声"：`# 表情A6，距离近` 是文案给美术的意图，
@@ -830,8 +1001,9 @@ class RenPyParser:
                 target=target,
                 value_type=value_type,
                 args_str=args_str,
+                rhs=rhs,
             )
-            if value_type == 'Character' or value_type.endswith('.Character'):
+            if self._is_character_type(value_type):
                 self._parse_character_args(node, args_str)
             return node
 
@@ -951,6 +1123,32 @@ class RenPyParser:
                 code=code,
             )
 
+        # ---- layeredimage（合成立绘）----
+        m = self._RE_LAYEREDIMAGE.match(text)
+        if m:
+            return self._parse_layeredimage(line, text, m)
+
+        # ---- image 声明 ----
+        m = self._RE_IMAGE_DEF.match(text)
+        if m:
+            return ImageDefNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                name=m.group('name').strip(),
+                expr=m.group('rhs').strip(),
+            )
+
+        # ---- show / hide screen（UI 操作，不是图像引用）----
+        if self._RE_SCREEN_SHOW.match(text):
+            return RawNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                text=text,
+                raw_kind='screen',
+            )
+
         # ---- show ----
         if self._RE_SHOW_HEAD.match(text):
             parsed = self._parse_show_scene(text, is_scene=False)
@@ -1012,15 +1210,32 @@ class RenPyParser:
         # ---- play / queue / stop ----
         m = self._RE_AUDIO.match(text)
         if m:
+            action = m.group('action')
             rest = (m.group('rest') or '').strip()
-            qm = re.match(r'^["\']([^"\']+)["\']', rest)
-            if qm:
-                name = qm.group(1)
-                rest = rest[qm.end():]
-            else:
+            name = ''
+            # `stop music fadeout 1.0`：stop 后面没有"要播的资产"，
+            # 全是参数。以前会把 fadeout 当成音频名，于是校验报
+            # "音频 'fadeout' 未登记"（真实项目一次 11 条）。
+            if action == 'stop':
                 parts = rest.split()
-                name = parts[0] if parts else ''
-                rest = ' '.join(parts[1:])
+                if parts and parts[0] in _AUDIO_PARAM_WORDS:
+                    name, rest = '', rest
+                elif parts:
+                    name = parts[0]
+                    rest = ' '.join(parts[1:])
+            else:
+                qm = re.match(r'^["\']([^"\']+)["\']', rest)
+                if qm:
+                    name = qm.group(1)
+                    rest = rest[qm.end():]
+                else:
+                    parts = rest.split()
+                    # `play music fadein 1.0` 这种没有名字的写法
+                    if parts and parts[0] in _AUDIO_PARAM_WORDS:
+                        name = ''
+                    else:
+                        name = parts[0] if parts else ''
+                        rest = ' '.join(parts[1:])
 
             def _num(pat):
                 mm = re.search(pat, rest)
@@ -1033,7 +1248,7 @@ class RenPyParser:
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
-                action=m.group('action'),
+                action=action,
                 channel=m.group('channel'),
                 name=name,
                 fadein=_num(r'\bfadein\s+([\d.]+)'),
@@ -1465,11 +1680,42 @@ class RenPyParser:
 
     # ---------- Character 参数（扫描器） ----------
 
+    @staticmethod
+    def _is_character_type(value_type: str) -> bool:
+        """
+        是不是"角色定义"的构造函数。
+
+        Ren'Py 的角色类型不止 `Character`：`DynamicCharacter`（可变名字）、
+        `ADVCharacter` / `NVLCharacter` / `FlagCharacter` / `RandomCharacter`，
+        以及 `renpy.Character` 这种带前缀的写法。
+        旧实现只认 `Character` 和 `*.Character`，导致真实项目里
+        **一整批 DynamicCharacter 角色被静默丢掉**，接着引用它们的每一句
+        台词都被报成"说话人不在角色表里"（实测 703 条误报）。
+        统一按"以 Character 结尾"识别。
+        """
+        if not value_type:
+            return False
+        return value_type == 'Character' or value_type.endswith('Character')
+
+    @staticmethod
+    def _is_dynamic_character(value_type: str) -> bool:
+        """DynamicCharacter 的第一个位置参数是**名字变量**，不是显示名。"""
+        return 'Dynamic' in (value_type or '')
+
     def _parse_character_args(self, node: DefineNode, args_str: str):
         pos = self._RE_POS_ARG.match(args_str)
         if pos:
-            node.display_name = _pick_str(pos, 1, 2)
-            node.positional.append(node.display_name)
+            first = _pick_str(pos, 1, 2)
+            node.positional.append(first)
+            if self._is_dynamic_character(node.value_type):
+                # `DynamicCharacter('jc_name', ...)`：存变量名，显示名
+                # 之后从 `default jc_name = "「蒋忱」"` 里解析。
+                node.name_var = first
+            elif 'dynamic' in node.kwargs and node.kwargs['dynamic'] not in (
+                    'False', 'false', '0', ''):
+                node.name_var = first
+            else:
+                node.display_name = first
 
         i = 0
         n = len(args_str)
@@ -1509,6 +1755,13 @@ class RenPyParser:
                 node.what_color = value_text
             elif key == 'image':
                 node.image_tag = value_text
+
+        # `Character("x", dynamic=True)`：位置参数同样是名字变量
+        dyn = node.kwargs.get('dynamic', '')
+        if dyn and dyn not in ('False', 'false', '0', 'None', '') \
+                and not node.name_var and node.display_name:
+            node.name_var = node.display_name
+            node.display_name = ''
 
     def _scan_arg_value(self, text: str, start: int):
         n = len(text)
@@ -1573,6 +1826,8 @@ class CharacterDefinition:
     color: str = ''
     what_color: str = ''
     image_tag: str = ''
+    # DynamicCharacter 的名字变量（显示名从同名 default 里取）
+    name_var: str = ''
     source_file: str = ''
     source_line: int = 0
     dialogue_count: int = 0
@@ -1617,6 +1872,14 @@ class ParseResult:
     labels: dict = field(default_factory=dict)
     # 脚本里自定义的 transform：{name: TransformDefinition}
     transforms: dict = field(default_factory=dict)
+    # 脚本里 `image name = expr` 声明的图像：{image_name: {...}}
+    # 这是"哪些图真的存在"的权威来源（比按文件名猜可靠）。
+    images: dict = field(default_factory=dict)
+    # 字符串常量：{变量名: 值}，用于解析 DynamicCharacter 的显示名
+    string_defaults: dict = field(default_factory=dict)
+    # 含 `menu` 的 label 集合（`menu:` 没有标题也算）——校验用：
+    # 判断"有菜单选项却没有 menu 行"必须按这个来，不能按 caption 是否为空。
+    menu_labels: set = field(default_factory=set)
     translation_units: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
@@ -1640,9 +1903,33 @@ class ParseResult:
 class ParseResultBuilder:
     def build(self, ast_nodes: list) -> ParseResult:
         result = ParseResult()
+        # 先扫一遍字符串常量：DynamicCharacter 的显示名定义在
+        # `default x_name = "..."`，而它可能出现在 define 之后。
+        self._collect_string_defaults(ast_nodes, result)
         self._walk(ast_nodes, '', result)
         self._compute_counts(result)
         return result
+
+    @staticmethod
+    def _is_char_define(node) -> bool:
+        return RenPyParser._is_character_type(
+            getattr(node, 'value_type', '') or '')
+
+    def _collect_string_defaults(self, nodes: list, result: ParseResult):
+        """收集 `default/define x = "字面量"`（含嵌套块）。"""
+        for node in nodes or ():
+            if isinstance(node, DefineNode) and node.target:
+                value = _string_literal(node.rhs)
+                if value is not None:
+                    result.string_defaults.setdefault(node.target, value)
+            if isinstance(node, LabelNode):
+                self._collect_string_defaults(node.block, result)
+            elif isinstance(node, (IfNode,)):
+                for _cond, block in node.branches:
+                    self._collect_string_defaults(block, result)
+            elif isinstance(node, MenuNode):
+                for opt in node.options:
+                    self._collect_string_defaults(opt.block, result)
 
     def _walk(self, nodes: list, current_label: str, result: ParseResult,
               accum_cond: str = '', menu_option: str = ''):
@@ -1664,14 +1951,17 @@ class ParseResultBuilder:
                 self._walk(node.block, node.name, result)
 
             elif isinstance(node, DefineNode):
-                if node.value_type == 'Character' or \
-                        node.value_type.endswith('.Character'):
+                if ParseResultBuilder._is_char_define(node):
+                    display = node.display_name
+                    if not display and node.name_var:
+                        display = result.string_defaults.get(node.name_var, '')
                     result.characters[node.target] = CharacterDefinition(
                         variable_name=node.target,
-                        display_name=node.display_name or node.target,
+                        display_name=display or node.target,
                         color=node.color,
                         what_color=node.what_color,
                         image_tag=node.image_tag,
+                        name_var=node.name_var,
                         source_file=node.filename,
                         source_line=node.line_number,
                         kind=node.kwargs.get('kind', ''),
@@ -1685,6 +1975,31 @@ class ParseResultBuilder:
                         who_suffix=node.kwargs.get('who_suffix', ''),
                         extra=dict(node.kwargs),
                     )
+
+            elif isinstance(node, LayeredImageNode):
+                if node.name and node.name not in result.images:
+                    result.images[node.name] = {
+                        'name': node.name,
+                        'expr': node.image_format or '',
+                        'path': None,
+                        'solid': None,
+                        'layered': True,
+                        'attrs': list(node.attributes),
+                        'source_file': node.filename,
+                        'source_line': node.line_number,
+                    }
+
+            elif isinstance(node, ImageDefNode):
+                # 后声明的不覆盖先声明的（Ren'Py 里也是先定义先生效）
+                if node.name and node.name not in result.images:
+                    result.images[node.name] = {
+                        'name': node.name,
+                        'expr': node.expr,
+                        'path': _image_path_from_expr(node.expr),
+                        'solid': _image_solid_from_expr(node.expr),
+                        'source_file': node.filename,
+                        'source_line': node.line_number,
+                    }
 
             elif isinstance(node, TransformNode):
                 # 后写的不覆盖先写的：同名 transform 以首次定义为准，
@@ -1725,6 +2040,8 @@ class ParseResultBuilder:
                     source=(node.filename, node.line_number)))
 
             elif isinstance(node, MenuNode):
+                if current_label:
+                    result.menu_labels.add(current_label)
                 if node.caption:
                     result.dialogues.append(DialogueLine(
                         character_var='',
@@ -2295,6 +2612,20 @@ def parse_renpy_file(filepath, graph):
     _result, graph = _default_analyzer.analyze(
         [filepath], graph=graph, clear_graph=False
     )
+    return graph
+
+
+def batch_import_chapters(filepaths, graph):
+    """批量把多个 .rpy 解析进同一张图（`clear_graph=False` 累加节点）。
+
+    比循环调用 `parse_renpy_file` 更省：一次 analyzer 调用把所有文件的
+    AST 合起来建图，且 `（mtime, size）` 缓存命中时直接复用已解析结果。
+    `clear_graph=False` 保证多次导入 / 跨文件 label 互不覆盖、不重复建节点。
+    """
+    global _default_analyzer
+    if _default_analyzer is None:
+        _default_analyzer = IncrementalRenPyAnalyzer()
+    _default_analyzer.analyze(list(filepaths), graph=graph, clear_graph=False)
     return graph
 
 

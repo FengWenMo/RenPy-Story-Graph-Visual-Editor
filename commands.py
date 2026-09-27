@@ -216,6 +216,23 @@ class ImportRenPyCommand(Command):
         self.graph_view.graph = self.old_graph
         self.graph_view.on_graph_structure_changed()
 
+
+class ReplaceGraphCommand(Command):
+    """整图替换（用于批量导入后撤销）：graph_view.graph 在两个快照间切换。"""
+
+    def __init__(self, graph_view, new_graph, old_graph):
+        self.graph_view = graph_view
+        self.new_graph = new_graph
+        self.old_graph = old_graph
+
+    def execute(self):
+        self.graph_view.graph = self.new_graph
+        self.graph_view.on_graph_structure_changed()
+
+    def undo(self):
+        self.graph_view.graph = self.old_graph
+        self.graph_view.on_graph_structure_changed()
+
 class LoadLayoutCommand(Command):
     def __init__(self, graph_view, data):
         self.graph_view = graph_view

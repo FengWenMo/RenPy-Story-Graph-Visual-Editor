@@ -181,7 +181,10 @@ class TestScriptTableAtScale:
 
         text = render_beats_to_rpy(beats)
         for i in range(USED_COUNT):
-            assert f'show bg_{i:03d}' in text
+            # 作者写法 `show bg 001` 与下划线形态 bg_001 在 Ren'Py 里等价；
+            # 本用例没给资源表，按约定退回下划线形态，所以两种都算"存活"。
+            assert f'show bg {i:03d}' in text or \
+                f'show bg_{i:03d}' in text
         assert 'play music bgm_theme' in text
 
     def test_generated_script_is_reparsable(self, big_project, tmp_path):

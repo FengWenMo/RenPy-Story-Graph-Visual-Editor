@@ -390,9 +390,14 @@ class TestValidation:
     def test_l1_empty_text(self):
         from script_table import Beat
         from validate import L1, validate_level1
-        issues = validate_level1([Beat(seq=1, label='a', kind='say')])
-        assert any(i.code == 'E101' for i in issues)
+        # 没有说话人的空台词（`""`，清空对话框的常见写法）→ 警告
+        issues = validate_level1([Beat(seq=1, label='a', kind='narration')])
+        assert any(i.code == 'W113' for i in issues)
         assert all(i.level == L1 for i in issues)
+        # 有说话人却空了台词 → 错误（明显漏写）
+        err = validate_level1([Beat(seq=1, label='a', kind='say',
+                                    speaker='e')])
+        assert any(i.code == 'E101' and i.severity == 'error' for i in err)
 
     def test_l1_unknown_speaker_and_asset(self):
         from script_table import Beat
@@ -411,8 +416,11 @@ class TestValidation:
 
     def test_l1_char_limit_and_tags(self):
         from script_table import Beat
-        from validate import validate_level1
-        beats = [Beat(seq=1, label='a', text='很长' * 50),
+        from validate import DEFAULT_CHAR_LIMIT, validate_level1
+
+        # 用"比上限多几个字"来构造，别写死 100 字——上限本身会随项目调整
+        too_long = '长' * (DEFAULT_CHAR_LIMIT + 10)
+        beats = [Beat(seq=1, label='a', text=too_long),
                  Beat(seq=2, label='a', text='{b 没闭合', speaker='e')]
         codes = {i.code for i in validate_level1(beats, self._registry())}
         assert 'W101' in codes and 'W108' in codes
@@ -677,6 +685,7 @@ class TestHealthEntry:
         assert not (proj / 'build_out').exists()
 
     def test_collect_report_flags_real_errors(self, tmp_path):
+        """角色表为空时是警告（管线还没上），有表却查不到才是错误。"""
         from build import collect_report
         proj = tmp_path / 'p2'
         game = proj / 'game'
@@ -685,7 +694,21 @@ class TestHealthEntry:
             'label start:\n    ghost "没这个角色"\n    return\n',
             encoding='utf-8')
         collected = collect_report(proj)
-        assert not collected['report'].ok
+        issues = collected['report'].issues
+        assert any(i.message.startswith("说话人 'ghost'") for i in issues)
+        # 没有角色表 → 只给警告，不拦构建
+        assert collected['report'].ok
+
+        # 建了角色表（有别的角色）而 ghost 不在其中 → 错误
+        from asset_registry import write_dict_to_excel
+        tables = proj / 'game' / 'asset_tables'
+        tables.mkdir(parents=True, exist_ok=True)
+        write_dict_to_excel(tables / 'characters.xlsx',
+                            {'e': {'ID': 'e', 'Name': 'Eileen'}},
+                            ['ID', 'Name'])
+        collected2 = collect_report(proj)
+        assert not collected2['report'].ok
+        assert any(i.code == 'E102' for i in collected2['report'].errors)
 
     def test_graph_view_has_validation_panel(self):
         import graph_view
@@ -1115,3 +1138,73 @@ class TestCollabStore:
                      '--user', 'bob'])
         assert code == 1
         assert '冲突' in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------
+# F. 批量导入章节：一个 .rpy 一个章节节点，累加不覆盖
+# ------------------------------------------------------------------
+
+class TestBatchImportChapters:
+    """
+    「批量导入章节」按钮曾经只会 `self.batch_import_chapters` ——
+    这个属性在 UI 类上根本不存在（函数住在 renpy_parser 里），
+    点下去直接 AttributeError。这里锁住"批量导入必须真的能work"：
+    多个文件一次导入、跨文件 label 各建节点、不互相覆盖。
+    """
+
+    def test_multiple_labels_become_separate_nodes(self, write_rpy):
+        from renpy_parser import batch_import_chapters
+
+        a = write_rpy('label ch01:\n    "一"\n    return\n', 'ch01.rpy')
+        b = write_rpy('label ch02:\n    "二"\n    return\n', 'ch02.rpy')
+        graph = Graph()
+        batch_import_chapters([a, b], graph)
+
+        labels = {n.label_name for n in graph.nodes.values()}
+        assert 'ch01' in labels and 'ch02' in labels
+
+    def test_second_batch_accumulates_and_does_not_duplicate(self, write_rpy):
+        from renpy_parser import batch_import_chapters
+
+        a = write_rpy('label ch01:\n    "一"\n    return\n', 'a.rpy')
+        b = write_rpy('label ch02:\n    "二"\n    return\n', 'b.rpy')
+        graph = Graph()
+        batch_import_chapters([a], graph)
+        first = {n.id for n in graph.nodes.values()}
+        assert first
+
+        batch_import_chapters([b], graph)
+        labels = [n.label_name for n in graph.nodes.values()]
+        assert labels.count('ch01') == 1
+        assert 'ch02' in labels
+
+        # 同一个文件再导入一次也不能长出重复节点
+        batch_import_chapters([b], graph)
+        labels = [n.label_name for n in graph.nodes.values()]
+        assert labels.count('ch02') == 1
+
+    def test_undo_command_restores_previous_graph(self, write_rpy):
+        """导入走 ReplaceGraphCommand，Ctrl+Z 必须能整体撤销。"""
+        from commands import ReplaceGraphCommand
+        from renpy_parser import batch_import_chapters
+
+        a = write_rpy('label ch01:\n    "一"\n    return\n', 'a.rpy')
+        graph = Graph()
+        before = graph.copy()
+        batch_import_chapters([a], graph)
+        after = graph.copy()
+        assert len(after.nodes) > len(before.nodes)
+
+        class _FakeView:
+            def __init__(self, g):
+                self.graph = g
+
+            def on_graph_structure_changed(self):
+                pass
+
+        view = _FakeView(after)
+        cmd = ReplaceGraphCommand(view, after, before)
+        cmd.execute()
+        assert len(view.graph.nodes) == len(after.nodes)
+        cmd.undo()
+        assert len(view.graph.nodes) == len(before.nodes)

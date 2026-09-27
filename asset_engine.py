@@ -356,10 +356,57 @@ class AssetEngine:
         if self.registry is None:
             return
 
-        # 把角色定义合并进 registry，重建引用索引
-        self._sync_character_definitions()
-        self._sync_transform_definitions()
+        # 把脚本定义合并进 registry（角色 / 变换 / image 声明）并落盘，
+        # 再重建引用索引
+        self._sync_script_definitions()
         self._rebuild_references()
+
+    def _sync_script_definitions(self):
+        """
+        脚本 → 资源表：角色 / 变换 / image 声明。
+
+        合并进内存后**立刻落盘**（只追加、不覆盖用户编辑）。否则这些定义
+        只活在内存里：用户打开 transforms.xlsx 会发现脚本里明明写了
+        146 个变换、表里一个都没有（真实项目踩过）。
+        """
+        if self.parse_result is None or self.registry is None:
+            return
+        from script_table import apply_script_definitions
+
+        added = apply_script_definitions(self.registry, self.parse_result)
+        if not added or not any(added.values()):
+            return
+        try:
+            self._persist_script_definitions()
+        except Exception as e:                  # noqa: BLE001
+            self._emit(AssetEventType.ENGINE_ERROR,
+                       {'error': str(e), 'phase': 'persist_definitions'})
+        self._emit(AssetEventType.ENGINE_NOTICE, {
+            'info': 'script_definitions_synced',
+            'count': sum(added.values()),
+            'message': (f"已从脚本导入：角色 +{added['characters']}、"
+                        f"变换 +{added['transforms']}、"
+                        f"图片声明 +{added['images']}"),
+        })
+
+    def _persist_script_definitions(self):
+        """把脚本新增的角色/变换追加进对应资源表。"""
+        from asset_registry import _TABLE_FIELDS, append_rows_to_table
+
+        if self.registry is None or self.asset_dir is None:
+            return 0
+        char_rows = [{k: row.get(k, '') for k in _TABLE_FIELDS['character']}
+                     for row in self.registry.characters.values()
+                     if row.get('_from_script')]
+        tf_rows = [{k: row.get(k, '') for k in _TABLE_FIELDS['transform']}
+                   for row in self.registry.transforms.values()
+                   if row.get('_from_script')]
+        n = 0
+        if char_rows:
+            n += append_rows_to_table(self.asset_dir, 'characters', char_rows)
+        if tf_rows:
+            n += append_rows_to_table(self.asset_dir, 'transforms', tf_rows)
+        return n
 
     def _rebuild_references(self):
         """重建 registry.references：脚本引用 + 角色对话位置。"""
@@ -639,8 +686,8 @@ class AssetEngine:
         # 其中的 _load_scripts 会让脚本侧也用上新 ID。
         self._apply_changes(changes)
 
-        # 脚本可能已被补丁改写，此时再同步角色定义才是安全的
-        self._sync_character_definitions()
+        # 脚本可能已被补丁改写，此时再同步脚本定义才是安全的
+        self._sync_script_definitions()
         self._rebuild_references()
 
         self._prev_state = self._snapshot_registry_state(self.registry)
