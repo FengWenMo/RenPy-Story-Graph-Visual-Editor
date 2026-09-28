@@ -15,13 +15,13 @@ tests/test_transforms_and_preview.py
 
 import pytest
 
-from asset_registry import (
+from storygraph.assets.asset_registry import (
     AssetRegistry, scan_assets, write_asset_excel, describe_asset,
     resolve_reference, resolve_references, analyze_statement_references,
     references_from_statements,
 )
-from renpy_parser import RenPyParser, ParseResultBuilder
-from script_table import (
+from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
+from storygraph.story.script_table import (
     Beat, export_beats_to_excel, find_unregistered_assets,
     open_rpy_as_table,
 )
@@ -172,7 +172,7 @@ class TestTransformReachesTable:
         assert 'Eileen' in (ws.cell(row=3, column=2).value or '')
 
     def test_transform_doc_rendered_as_comment(self, registry, tmp_path):
-        from script_table import render_beats_to_rpy
+        from storygraph.story.script_table import render_beats_to_rpy
         beats = [Beat(seq=1, label='a', text='hi', at='leftish')]
         text = render_beats_to_rpy(beats, registry=registry)
         assert '# 靠左站' in text
@@ -209,7 +209,7 @@ class TestAudioClassification:
                                         'game/audio/night2.ogg'])
         out = tmp_path / 'tables'
         write_asset_excel(scan_assets(root, include_ui=False), out)
-        from asset_registry import parse_asset_tables
+        from storygraph.assets.asset_registry import parse_asset_tables
         reg = parse_asset_tables(out, project_root=root)
         # 两条都进音乐（目录 music/ 语义 + 关键词兜底）
         assert 'bgm_night' in reg.music
@@ -254,8 +254,8 @@ class TestCharacterParsingRich:
 
     def test_engine_writes_rich_character_row(self, tmp_path, write_rpy):
         """_sync_character_definitions 落进 registry 的行要有新字段。"""
-        from asset_engine import AssetEngine
-        from asset_events import AssetEventBus, ConfirmationGate
+        from storygraph.assets.asset_engine import AssetEngine
+        from storygraph.assets.asset_events import AssetEventBus, ConfirmationGate
 
         game = tmp_path / 'proj' / 'game'
         game.mkdir(parents=True)
@@ -322,7 +322,7 @@ class TestImageTagIdMapping:
         assert resolve_reference('bg classroom', self._reg()) == 'bg_classroom'
 
     def test_script_reference_marks_image_used(self, write_rpy):
-        from asset_registry import analyze_references
+        from storygraph.assets.asset_registry import analyze_references
         reg = self._reg()
         fp = write_rpy('label a:\n    show eileen happy\n')
         analyze_references([fp], reg)
@@ -337,15 +337,15 @@ class TestImageTagIdMapping:
         fp = write_rpy('label a:\n'
                        '    scene bg classroom\n'
                        '    show eileen happy\n')
-        from asset_registry import analyze_references
+        from storygraph.assets.asset_registry import analyze_references
         analyze_references([fp], reg)
         unused = set(reg.images) - set(reg.references)
         assert unused == {'eileen_happy_blush', 'eileen_sad'}
 
     def test_engine_unused_not_all_images(self, tmp_path):
         """端到端：engine.find_unused_assets 不该把整库图片判成未使用。"""
-        from asset_engine import AssetEngine
-        from asset_events import AssetEventBus, ConfirmationGate
+        from storygraph.assets.asset_engine import AssetEngine
+        from storygraph.assets.asset_events import AssetEventBus, ConfirmationGate
 
         project = tmp_path / 'proj'
         game = project / 'game'
@@ -373,7 +373,7 @@ class TestImageTagIdMapping:
     def test_validate_imagetag_uses_tag_index(self, tmp_path):
         reg = self._reg()
         reg.characters = {'e': {'ID': 'e', 'ImageTag': 'eileen'}}
-        from asset_registry import validate_registry
+        from storygraph.assets.asset_registry import validate_registry
         validate_registry(reg, tmp_path)
         assert not any('ImageTag' in w for w in reg.warnings)
 
@@ -434,7 +434,7 @@ class TestScriptSelfRegistry:
     )
 
     def test_registry_from_parse_result(self, write_rpy):
-        from script_table import registry_from_parse_result
+        from storygraph.story.script_table import registry_from_parse_result
         res = _parse(write_rpy, self.SRC)
         reg = registry_from_parse_result(res)
         assert 'leftish' in reg.transforms
@@ -482,7 +482,7 @@ class TestAudioAliases:
             == ['v_eileen_01']
 
     def test_audio_not_reported_unused(self, write_rpy):
-        from asset_registry import analyze_references
+        from storygraph.assets.asset_registry import analyze_references
         reg = self._reg()
         fp = write_rpy('label a:\n'
                        '    play music night\n'
@@ -522,7 +522,7 @@ class TestDescriptionAndPreview:
         assert '背景' in text and 'bg_room.png' in text
 
     def test_asset_detail_includes_transform_atl(self, write_rpy):
-        from beat_editor import asset_detail
+        from storygraph.ui.beat_editor import asset_detail
 
         class _Engine:
             def __init__(self, reg):
@@ -539,7 +539,7 @@ class TestDescriptionAndPreview:
         assert 'ATL' in detail
 
     def test_preview_path_resolution(self, tmp_path):
-        from beat_editor import asset_preview_path
+        from storygraph.ui.beat_editor import asset_preview_path
 
         class _Engine:
             def __init__(self, reg, root):
@@ -561,7 +561,7 @@ class TestDescriptionAndPreview:
 
     def test_load_thumbnail_is_graceful(self, tmp_path):
         """无 tk 环境 / 坏图都不能抛异常，最多返回 None。"""
-        from beat_editor import load_thumbnail
+        from storygraph.ui.beat_editor import load_thumbnail
         bad = tmp_path / 'bad.png'
         bad.write_bytes(b'not an image')
         assert load_thumbnail(bad) is None
@@ -574,13 +574,13 @@ class TestDescriptionAndPreview:
 
 class TestUiEntryPoints:
     def test_graph_view_has_node_excel_entry(self):
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
         assert hasattr(graph_view.GraphView, 'open_node_rpy_in_excel')
         assert hasattr(graph_view.GraphView, '_generate_and_open_table')
 
     def test_menu_label_present_in_source(self):
-        from pathlib import Path
-        src = Path(__file__).resolve().parent.parent / 'graph_view.py'
+        from _source_paths import graph_view_source
+        src = graph_view_source()
         text = src.read_text(encoding='utf-8')
         assert '用 Excel 打开此章节' in text
         # 与「在编辑器中打开」同级：同一次右键里两者一起切换状态
@@ -633,6 +633,6 @@ class TestEndToEnd:
         texts = [r['台词'] for r in rows]
         assert '早上好。' in texts
         # 未登记资产一个都不该报
-        from script_table import import_beats_from_excel
+        from storygraph.story.script_table import import_beats_from_excel
         assert find_unregistered_assets(
             import_beats_from_excel(out), reg) == []

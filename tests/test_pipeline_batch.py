@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from models import Graph
-from renpy_parser import (
+from storygraph.graph.models import Graph
+from storygraph.parsing.renpy_parser import (
     GraphBuilder, ParseResultBuilder, RenPyParser,
 )
 
@@ -121,7 +121,7 @@ class TestGraphFromStatements:
 
     def test_analyzer_uses_statement_path(self, write_rpy):
         """增量分析器（编辑器实际走的路）也要产出同一张图。"""
-        from renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
 
         fp = write_rpy(PARITY_SRC, 'p2.rpy')
         pr, g = IncrementalRenPyAnalyzer().analyze(files=[fp], graph=None)
@@ -138,7 +138,7 @@ class TestGraphFromStatements:
     def test_clear_graph_false_keeps_other_labels(self, write_rpy):
         fp1 = write_rpy(PARITY_SRC, 'a.rpy')
         fp2 = write_rpy('label extra:\n    return\n', 'b.rpy')
-        from renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
 
         an = IncrementalRenPyAnalyzer()
         _pr, g = an.analyze(files=[fp1], graph=None)
@@ -152,7 +152,7 @@ class TestGraphFromStatements:
 
 class TestStageSnapshot:
     def _beats(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         return [
             Beat(seq=1, label='a', scene='bg classroom',
                  music='bgm_night', text='开场'),
@@ -167,7 +167,7 @@ class TestStageSnapshot:
         ]
 
     def test_scene_clears_actors(self):
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.stage_snapshot import stage_snapshots
         snaps = stage_snapshots(self._beats())
         assert snaps[0]['scene'] == 'bg classroom'
         assert snaps[0]['actors'] == ''
@@ -177,25 +177,25 @@ class TestStageSnapshot:
 
     def test_tag_replacement_not_duplicate(self):
         """同 tag 的 show 是换表情，不是叠一个人。"""
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.stage_snapshot import stage_snapshots
         snaps = stage_snapshots(self._beats())
         assert snaps[1]['actors'] == 'eileen happy@leftish'
         assert snaps[2]['actors'] == 'eileen sad@leftish'   # 位置继承
         assert snaps[2]['actors'].count('eileen') == 1
 
     def test_two_actors_side_by_side(self):
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.stage_snapshot import stage_snapshots
         snaps = stage_snapshots(self._beats())
         assert snaps[3]['actors'] == 'eileen sad@leftish; mary smile@right'
 
     def test_hide_removes(self):
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.stage_snapshot import stage_snapshots
         snaps = stage_snapshots(self._beats())
         assert 'eileen' not in snaps[4]['actors']
         assert 'mary' in snaps[4]['actors']
 
     def test_music_state_is_sticky_and_stoppable(self):
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.stage_snapshot import stage_snapshots
         snaps = stage_snapshots(self._beats())
         assert snaps[1]['music'] == 'bgm_night'
         assert snaps[5]['music'] == 'bgm_night'
@@ -203,8 +203,8 @@ class TestStageSnapshot:
 
     def test_stage_order_respects_source_order(self):
         """hide+show 同一立绘：顺序不同结果不同（StageOrder 说了算）。"""
-        from script_table import Beat
-        from stage_snapshot import stage_snapshots
+        from storygraph.story.script_table import Beat
+        from storygraph.story.stage_snapshot import stage_snapshots
         reset = [Beat(seq=1, label='a', hide='eileen',
                       show='eileen happy', stage_order='hide,show',
                       text='重置立绘')]
@@ -215,7 +215,7 @@ class TestStageSnapshot:
         assert stage_snapshots(reverse)[0]['actors'] == ''
 
     def test_stage_digest_text(self):
-        from stage_snapshot import stage_digest
+        from storygraph.story.stage_snapshot import stage_digest
         text = stage_digest(self._beats(), 3)
         assert '背景' in text and '立绘' in text
         assert 'mary smile@right' in text
@@ -223,7 +223,7 @@ class TestStageSnapshot:
     def test_snapshot_sheet_written(self, tmp_path):
         """「舞台快照」= 全量状态 + 本拍变化；另有一张「演出时间轴」只看变化。"""
         import openpyxl
-        from script_table import export_beats_to_excel
+        from storygraph.story.script_table import export_beats_to_excel
         out = tmp_path / 's.xlsx'
         export_beats_to_excel(self._beats(), out)
         wb = openpyxl.load_workbook(out)
@@ -243,7 +243,7 @@ class TestStageSnapshot:
         没有这个着色，整张表每行都重复填满，看不出哪一刻切了 BGM、谁入场。
         """
         import openpyxl
-        from script_table import export_beats_to_excel
+        from storygraph.story.script_table import export_beats_to_excel
         out = tmp_path / 's.xlsx'
         export_beats_to_excel(self._beats(), out)
         ws = openpyxl.load_workbook(out)['舞台快照']
@@ -265,7 +265,7 @@ class TestStageSnapshot:
     def test_timeline_only_lists_changes(self, tmp_path):
         """时间轴表要短于全量表：它只保留确实有变化的拍。"""
         import openpyxl
-        from script_table import export_beats_to_excel
+        from storygraph.story.script_table import export_beats_to_excel
         beats = self._beats()
         out = tmp_path / 's.xlsx'
         export_beats_to_excel(beats, out)
@@ -283,8 +283,8 @@ class TestStageSnapshot:
         ——真实项目里 UI 切图和立绘混在一起，策划根本没法选。
         """
         import openpyxl
-        from asset_registry import AssetRegistry
-        from script_table import export_beats_to_excel
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import export_beats_to_excel
         reg = AssetRegistry()
         reg.images = {
             'ling_happy': {'ID': 'ling_happy', 'Tag': 'ling',
@@ -322,8 +322,8 @@ class TestStageSnapshot:
         扫描器只看路径关键词，`charactercenter/Frame 13.png` 会被判成立绘。
         它的 tag 其实是文件名——必须归到界面段，否则立绘段全是 UI 切图。
         """
-        from asset_registry import AssetRegistry
-        from script_table import _looks_like_system_name
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import _looks_like_system_name
         for junk in ('Frame 13', 'Frame 24', '2026-2-1 13_20', '123',
                      'icon_01', 'button'):
             assert _looks_like_system_name(junk), junk
@@ -336,8 +336,8 @@ class TestStageSnapshot:
         W313：命名规范只给**建议**，不自动改名（改文件名会打断所有引用）。
         不规范资产少的时候不报，免得新项目一打开就满屏。
         """
-        from asset_registry import AssetRegistry
-        from validate import _naming_convention_issues
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.pipeline.validate import _naming_convention_issues
 
         # 少量不规范 → 不报
         few = AssetRegistry()
@@ -359,8 +359,8 @@ class TestStageSnapshot:
         `unhappy` 不能被子串匹配当成 `happy` —— 猜错一个表情就是演出事故。
         词边界命中（close_happy ⊃ happy）仍要工作。
         """
-        from asset_registry import AssetRegistry
-        from dsl import Symbols
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.dsl import Symbols
         reg = AssetRegistry()
         reg.images = {
             'ling_happy': {'ID': 'ling_happy', 'Tag': 'ling',
@@ -378,15 +378,15 @@ class TestStageSnapshot:
         assert sym2.attr_for('ling', '开心') == 'close_happy'
         # unhappy 不该被 happy 命中
         assert sym.attr_for('ling', '不高兴') != 'unhappy' or True
-        from dsl import _attr_has_token
+        from storygraph.story.dsl import _attr_has_token
         assert _attr_has_token('close_happy', 'happy') is True
         assert _attr_has_token('unhappy', 'happy') is False
 
     def test_thumbnails_off_by_default(self, tmp_path):
         """缩略图默认不嵌（CI/CLI 不该为解码几百张图变慢）。"""
         import openpyxl
-        from asset_registry import AssetRegistry
-        from script_table import export_beats_to_excel
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import export_beats_to_excel
         reg = AssetRegistry()
         reg.images = {'a': {'ID': 'a', 'Tag': 'a', 'Category': 'character',
                             'Path': 'a.png'}}
@@ -395,8 +395,8 @@ class TestStageSnapshot:
         assert len(openpyxl.load_workbook(out)['资源图库']._images) == 0
 
     def test_snapshot_sheet_refreshed_too(self, tmp_path):
-        from asset_registry import AssetRegistry
-        from script_table import export_beats_to_excel, refresh_candidate_sheets
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import export_beats_to_excel, refresh_candidate_sheets
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {'ID': 'bg_classroom', 'Tag': 'bg'}}
         out = tmp_path / 's.xlsx'
@@ -410,8 +410,8 @@ class TestStageSnapshot:
 
 class TestDynamicDropdown:
     def test_defined_names_are_self_extending(self, tmp_path):
-        from asset_registry import AssetRegistry
-        from script_table import Beat, export_beats_to_excel
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import Beat, export_beats_to_excel
         reg = AssetRegistry()
         reg.images = {'bg_a': {'ID': 'bg_a'}}
         reg.transforms = {'leftish': {'ID': 'leftish'}}
@@ -426,8 +426,8 @@ class TestDynamicDropdown:
             assert 'OFFSET' in f and 'COUNTA' in f and '$A$3' in f
 
     def test_dropdown_prefers_named_range(self, tmp_path):
-        from asset_registry import AssetRegistry
-        from script_table import Beat, export_beats_to_excel
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import Beat, export_beats_to_excel
         reg = AssetRegistry()
         reg.images = {'bg_a': {'ID': 'bg_a'}}
         out = tmp_path / 's.xlsx'
@@ -447,8 +447,8 @@ class TestDynamicDropdown:
 class TestEngineExporters:
     @pytest.fixture
     def beats_and_registry(self):
-        from asset_registry import AssetRegistry
-        from script_table import Beat, _assign_identity
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import Beat, _assign_identity
         reg = AssetRegistry()
         reg.characters = {'e': {'ID': 'e', 'Name': 'Eileen',
                                'Color': '#c8ffc8', 'ImageTag': 'eileen'}}
@@ -465,7 +465,7 @@ class TestEngineExporters:
         return beats, reg
 
     def test_neutral_ir_shape(self, beats_and_registry):
-        from engine_exporters import build_neutral_ir
+        from storygraph.pipeline.engine_exporters import build_neutral_ir
         beats, reg = beats_and_registry
         ir = build_neutral_ir(beats, registry=reg, project='demo')
         assert ir['schema'].startswith('renpy-story-ir/')
@@ -478,14 +478,14 @@ class TestEngineExporters:
         assert ir['stage'][0]['scene'] == 'bg classroom'
 
     def test_line_ids_are_stable_and_unique(self, beats_and_registry):
-        from engine_exporters import build_neutral_ir
+        from storygraph.pipeline.engine_exporters import build_neutral_ir
         beats, reg = beats_and_registry
         ir = build_neutral_ir(beats, registry=reg)
         ids = [l['line_id'] for l in ir['lines']]
         assert ids == ['a.0001', 'a.0002']
 
     def test_unity_shape_is_flat(self, beats_and_registry):
-        from engine_exporters import build_neutral_ir, to_unity
+        from storygraph.pipeline.engine_exporters import build_neutral_ir, to_unity
         beats, reg = beats_and_registry
         u = to_unity(build_neutral_ir(beats, registry=reg))
         assert u['lines'][0]['lineId'] == 'a.0001'
@@ -497,14 +497,14 @@ class TestEngineExporters:
             assert not any(isinstance(v, dict) for v in a.values())
 
     def test_godot_keeps_stage_nested(self, beats_and_registry):
-        from engine_exporters import build_neutral_ir, to_godot
+        from storygraph.pipeline.engine_exporters import build_neutral_ir, to_godot
         beats, reg = beats_and_registry
         g = to_godot(build_neutral_ir(beats, registry=reg))
         assert g['lines'][0]['stage']['background'] == 'bg classroom'
 
     def test_export_writes_files_for_each_engine(self, beats_and_registry,
                                                 tmp_path):
-        from engine_exporters import export_ir
+        from storygraph.pipeline.engine_exporters import export_ir
         beats, reg = beats_and_registry
         for engine in ('renpy', 'unity', 'godot', 'json', 'csv'):
             out = tmp_path / engine
@@ -517,21 +517,21 @@ class TestEngineExporters:
     def test_unity_import_doc_mentions_lineid(self, beats_and_registry,
                                              tmp_path):
         from pathlib import Path
-        from engine_exporters import export_ir
+        from storygraph.pipeline.engine_exporters import export_ir
         beats, reg = beats_and_registry
         export_ir('unity', beats, tmp_path / 'u', registry=reg)
         doc = (tmp_path / 'u' / 'UNITY_IMPORT.md').read_text(encoding='utf-8')
         assert 'JsonUtility' in doc and 'lineId' in doc
 
     def test_csv_has_utf8_bom_for_excel(self, beats_and_registry, tmp_path):
-        from engine_exporters import export_ir
+        from storygraph.pipeline.engine_exporters import export_ir
         beats, reg = beats_and_registry
         export_ir('csv', beats, tmp_path / 'c', registry=reg)
         raw = (tmp_path / 'c' / 'story_lines.csv').read_bytes()
         assert raw.startswith(b'\xef\xbb\xbf')
 
     def test_unknown_engine_raises(self, beats_and_registry, tmp_path):
-        from engine_exporters import export_ir
+        from storygraph.pipeline.engine_exporters import export_ir
         beats, reg = beats_and_registry
         with pytest.raises(ValueError):
             export_ir('unreal', beats, tmp_path, registry=reg)
@@ -543,7 +543,7 @@ class TestEngineExporters:
 
 class TestValidation:
     def _registry(self):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.characters = {'e': {'ID': 'e', 'Name': 'Eileen'}}
         reg.images = {'bg_classroom': {'ID': 'bg_classroom', 'Tag': 'bg'}}
@@ -551,8 +551,8 @@ class TestValidation:
         return reg
 
     def test_l1_empty_text(self):
-        from script_table import Beat
-        from validate import L1, validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import L1, validate_level1
         # 没有说话人的空台词（`""`，清空对话框的常见写法）→ 警告
         issues = validate_level1([Beat(seq=1, label='a', kind='narration')])
         assert any(i.code == 'W113' for i in issues)
@@ -563,23 +563,23 @@ class TestValidation:
         assert any(i.code == 'E101' and i.severity == 'error' for i in err)
 
     def test_l1_unknown_speaker_and_asset(self):
-        from script_table import Beat
-        from validate import validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level1
         beats = [Beat(seq=1, label='a', text='hi', speaker='ghost',
                       scene='bg nowhere', music='bgm_missing')]
         codes = {i.code for i in validate_level1(beats, self._registry())}
         assert 'E102' in codes and 'E103' in codes
 
     def test_l1_known_speaker_and_asset_pass(self):
-        from script_table import Beat
-        from validate import validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level1
         beats = [Beat(seq=1, label='a', text='hi', speaker='e',
                       scene='bg classroom', music='bgm_night')]
         assert validate_level1(beats, self._registry()) == []
 
     def test_l1_char_limit_and_tags(self):
-        from script_table import Beat
-        from validate import DEFAULT_CHAR_LIMIT, validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import DEFAULT_CHAR_LIMIT, validate_level1
 
         # 用"比上限多几个字"来构造，别写死 100 字——上限本身会随项目调整
         too_long = '长' * (DEFAULT_CHAR_LIMIT + 10)
@@ -589,51 +589,51 @@ class TestValidation:
         assert 'W101' in codes and 'W108' in codes
 
     def test_l1_bad_audio_action(self):
-        from script_table import Beat
-        from validate import validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level1
         beats = [Beat(seq=1, label='a', text='x', speaker='e',
                       music='bgm_night', music_action='fadeout')]
         codes = {i.code for i in validate_level1(beats, self._registry())}
         assert 'W102' in codes
 
     def test_l1_stop_music_is_not_empty(self):
-        from script_table import Beat
-        from validate import validate_level1
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level1
         beats = [Beat(seq=1, label='a', music_action='stop')]
         assert validate_level1(beats) == []
 
     def test_l2_duplicate_line_id_and_seq(self):
-        from script_table import Beat
-        from validate import validate_level2
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level2
         beats = [Beat(seq=1, label='a', text='x', line_id='a.0001'),
                  Beat(seq=1, label='a', text='y', line_id='a.0001')]
         codes = {i.code for i in validate_level2(beats)}
         assert 'E202' in codes and 'E203' in codes
 
     def test_l2_menu_option_without_menu(self):
-        from script_table import Beat
-        from validate import validate_level2
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level2
         beats = [Beat(seq=1, label='a', kind='menu_option', text='选项')]
         codes = {i.code for i in validate_level2(beats)}
         assert 'W202' in codes
 
     def test_l2_missing_label(self):
-        from script_table import Beat
-        from validate import validate_level2
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level2
         assert any(i.code == 'E201'
                    for i in validate_level2([Beat(seq=1, text='x')]))
 
     def test_l3_unused_assets(self):
-        from script_table import Beat
-        from validate import validate_level3
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level3
         reg = self._registry()
         issues = validate_level3([Beat(seq=1, label='a', text='x',
                                       speaker='e')], reg)
         assert any(i.code == 'W301' for i in issues)
 
     def test_l3_missing_file(self, tmp_path):
-        from script_table import Beat
-        from validate import validate_level3
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_level3
         reg = self._registry()
         reg.images['bg_classroom']['Path'] = 'images/nope.png'
         issues = validate_level3([Beat(seq=1, label='a', text='x',
@@ -642,9 +642,9 @@ class TestValidation:
         assert any(i.code == 'E302' for i in issues)
 
     def test_l3_unreachable_label(self, write_rpy):
-        from renpy_parser import IncrementalRenPyAnalyzer
-        from script_table import beats_from_parse_result
-        from validate import validate_level3
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.story.script_table import beats_from_parse_result
+        from storygraph.pipeline.validate import validate_level3
         fp = write_rpy('label start:\n'
                        '    return\n'
                        '\n'
@@ -656,8 +656,8 @@ class TestValidation:
         assert any(i.code == 'E303' for i in issues)
 
     def test_report_ok_and_json(self):
-        from script_table import Beat
-        from validate import validate_all
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_all
         good = validate_all([Beat(seq=1, label='a', text='hi',
                                  speaker='e', scene='bg classroom',
                                  music='bgm_night')], self._registry())
@@ -666,8 +666,8 @@ class TestValidation:
         assert '通过' in good.summary()
 
     def test_report_not_ok_on_error(self):
-        from script_table import Beat
-        from validate import validate_all
+        from storygraph.story.script_table import Beat
+        from storygraph.pipeline.validate import validate_all
         bad = validate_all([Beat(seq=1, label='a', text='hi',
                                 speaker='ghost')], self._registry())
         assert not bad.ok
@@ -696,7 +696,7 @@ class TestBuildCommand:
         return tmp_path / 'proj'
 
     def test_build_renpy(self, project):
-        from build import build_project
+        from storygraph.pipeline.build import build_project
         r = build_project(project, out_dir=project / 'out', engine='renpy')
         assert r.ok
         assert any(a.endswith('.rpy') for a in r.artifacts)
@@ -704,7 +704,7 @@ class TestBuildCommand:
         assert r.report['build']['stats']['lines'] == 1
 
     def test_build_unity_writes_contract(self, project):
-        from build import build_project
+        from storygraph.pipeline.build import build_project
         r = build_project(project, out_dir=project / 'out_u', engine='unity')
         names = {__import__('pathlib').Path(a).name for a in r.artifacts}
         assert 'UnityDialogueData.json' in names
@@ -713,12 +713,12 @@ class TestBuildCommand:
         assert data['lines'][0]['speakerName'] == 'Eileen'
 
     def test_build_godot_writes_loader(self, project):
-        from build import build_project
+        from storygraph.pipeline.build import build_project
         r = build_project(project, out_dir=project / 'out_g', engine='godot')
         assert (project / 'out_g' / 'dialogue_importer.gd').exists()
 
     def test_strict_fails_on_error(self, project):
-        from build import build_project
+        from storygraph.pipeline.build import build_project
         (project / 'game' / 'bad.rpy').write_text(
             'label bad:\n    ghost "没有这个角色"\n', encoding='utf-8')
         r = build_project(project, out_dir=project / 'out_b', engine='json',
@@ -727,7 +727,7 @@ class TestBuildCommand:
         assert r.errors
 
     def test_non_strict_reports_but_passes(self, project):
-        from build import build_project
+        from storygraph.pipeline.build import build_project
         (project / 'game' / 'bad.rpy').write_text(
             'label bad:\n    ghost "没有这个角色"\n', encoding='utf-8')
         r = build_project(project, out_dir=project / 'out_ns', engine='json',
@@ -736,7 +736,7 @@ class TestBuildCommand:
         assert r.errors          # 报告里仍然有错误，只是不拦构建
 
     def test_discover_skips_tl_and_generated(self, project):
-        from build import discover_scripts
+        from storygraph.pipeline.build import discover_scripts
         (project / 'game' / 'tl' / 'chinese').mkdir(parents=True)
         (project / 'game' / 'tl' / 'chinese' / 'a.rpy').write_text(
             'translate chinese x:\n    pass\n', encoding='utf-8')
@@ -747,20 +747,20 @@ class TestBuildCommand:
         assert 'a.rpy' not in names and 'x.generated.rpy' not in names
 
     def test_format_build_result_readable(self, project):
-        from build import build_project, format_build_result
+        from storygraph.pipeline.build import build_project, format_build_result
         r = build_project(project, out_dir=project / 'out_f', engine='json')
         text = format_build_result(r)
         assert '构建成功' in text and '产物' in text
 
     def test_cli_build_exit_code(self, project, capsys):
-        from cli import main
+        from storygraph.cli import main
         code = main(['build', str(project), '--out', str(project / 'cli_out'),
                      '--engine', 'json'])
         assert code == 0
         assert '构建成功' in capsys.readouterr().out
 
     def test_cli_validate_json(self, project, capsys):
-        from cli import main
+        from storygraph.cli import main
         code = main(['validate', str(project), '--json',
                      '--out', str(project / 'v')])
         assert code in (0, 1)
@@ -776,7 +776,7 @@ class TestSpeakerRotation:
     """参考 Ren'Py Story Architect 的"乒乓"：回车自动换下一个说话人。"""
 
     def _engine(self, chars):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
 
         class _E:
             def __init__(self, reg):
@@ -790,7 +790,7 @@ class TestSpeakerRotation:
         return _E(reg)
 
     def test_participants_ranked_by_dialogue_count(self):
-        from beat_editor import participants
+        from storygraph.ui.beat_editor import participants
         eng = self._engine({
             'a': {'ID': 'a', '_dialogue_count': 3},
             'b': {'ID': 'b', '_dialogue_count': 9},
@@ -799,22 +799,22 @@ class TestSpeakerRotation:
         assert participants(eng) == ['b', 'a', 'c']
 
     def test_participants_limit(self):
-        from beat_editor import participants
+        from storygraph.ui.beat_editor import participants
         eng = self._engine({f'c{i}': {'ID': f'c{i}'} for i in range(20)})
         assert len(participants(eng, limit=5)) == 5
 
     def test_participants_without_engine(self):
-        from beat_editor import participants
+        from storygraph.ui.beat_editor import participants
         assert participants(None) == []
 
     def test_next_speaker_ping_pong(self):
-        from beat_editor import next_speaker
+        from storygraph.ui.beat_editor import next_speaker
         rot = ['e', 'm']
         assert next_speaker(rot, 'e') == 'm'
         assert next_speaker(rot, 'm') == 'e'
 
     def test_next_speaker_wraps_and_falls_back(self):
-        from beat_editor import next_speaker
+        from storygraph.ui.beat_editor import next_speaker
         assert next_speaker(['e', 'm', 'n'], 'n') == 'e'
         # 当前说话人不在轮转里 → 从第一个开始，不跳到第二个
         assert next_speaker(['e', 'm'], 'outsider') == 'e'
@@ -822,19 +822,19 @@ class TestSpeakerRotation:
         assert next_speaker(None, 'e') == ''
 
     def test_editor_window_exposes_new_actions(self):
-        import beat_editor
+        import storygraph.ui.beat_editor as beat_editor
         cls = beat_editor.ScriptTableEditorWindow
         for name in ('next_beat', 'show_health', '_refresh_participants'):
             assert hasattr(cls, name)
 
     def test_panel_has_stage_snapshot(self):
-        import beat_editor
+        import storygraph.ui.beat_editor as beat_editor
         assert hasattr(beat_editor.BeatEditorPanel, 'set_stage_snapshot')
 
 
 class TestHealthEntry:
     def test_collect_report_without_writing_files(self, tmp_path):
-        from build import collect_report
+        from storygraph.pipeline.build import collect_report
         proj = tmp_path / 'p'
         game = proj / 'game'
         game.mkdir(parents=True)
@@ -849,7 +849,7 @@ class TestHealthEntry:
 
     def test_collect_report_flags_real_errors(self, tmp_path):
         """角色表为空时是警告（管线还没上），有表却查不到才是错误。"""
-        from build import collect_report
+        from storygraph.pipeline.build import collect_report
         proj = tmp_path / 'p2'
         game = proj / 'game'
         game.mkdir(parents=True)
@@ -863,7 +863,7 @@ class TestHealthEntry:
         assert collected['report'].ok
 
         # 建了角色表（有别的角色）而 ghost 不在其中 → 错误
-        from asset_registry import write_dict_to_excel
+        from storygraph.assets.asset_registry import write_dict_to_excel
         tables = proj / 'game' / 'asset_tables'
         tables.mkdir(parents=True, exist_ok=True)
         write_dict_to_excel(tables / 'characters.xlsx',
@@ -874,7 +874,7 @@ class TestHealthEntry:
         assert any(i.code == 'E102' for i in collected2['report'].errors)
 
     def test_graph_view_has_validation_panel(self):
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
         assert hasattr(graph_view.GraphView, 'open_validation_panel')
 
 
@@ -882,8 +882,8 @@ class TestRoundTripFidelity:
     """本轮修掉的两个保真 bug（都是"生成出来的脚本跑不了"级别）。"""
 
     def test_transform_atl_indent_not_doubled(self, tmp_path):
-        from asset_registry import AssetRegistry
-        from script_table import render_transform_definitions
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import render_transform_definitions
         reg = AssetRegistry()
         reg.transforms = {'t': {
             'ID': 't', 'ATL': '    xpos 0.0\n    linear 0.5 xpos 1.0'}}
@@ -894,8 +894,8 @@ class TestRoundTripFidelity:
 
     def test_transform_atl_from_handwritten_excel(self):
         """手填的 ATL（没有缩进）也要缩进 4 格。"""
-        from asset_registry import AssetRegistry
-        from script_table import render_transform_definitions
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import render_transform_definitions
         reg = AssetRegistry()
         reg.transforms = {'t': {'ID': 't',
                                 'ATL': 'xpos 0.0\nlinear 0.5 xpos 1.0'}}
@@ -904,8 +904,8 @@ class TestRoundTripFidelity:
         assert '    linear 0.5 xpos 1.0' in blocks
 
     def test_transform_nested_block_keeps_relative_indent(self):
-        from asset_registry import AssetRegistry
-        from script_table import render_transform_definitions
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import render_transform_definitions
         reg = AssetRegistry()
         reg.transforms = {'t': {
             'ID': 't',
@@ -916,8 +916,8 @@ class TestRoundTripFidelity:
         assert '    repeat 2' in blocks
 
     def test_doc_string_not_duplicated_as_comment(self):
-        from asset_registry import AssetRegistry
-        from script_table import render_transform_definitions
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import render_transform_definitions
         reg = AssetRegistry()
         reg.transforms = {'t': {
             'ID': 't', 'ATL': '    "抖动用"\n    linear 0.1 xoffset 8',
@@ -927,8 +927,8 @@ class TestRoundTripFidelity:
         assert '    "抖动用"' in blocks
 
     def test_doc_from_comment_is_emitted(self):
-        from asset_registry import AssetRegistry
-        from script_table import render_transform_definitions
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import render_transform_definitions
         reg = AssetRegistry()
         reg.transforms = {'t': {'ID': 't', 'ATL': '    xpos 0.0',
                                 'Doc': '靠左站'}}
@@ -937,8 +937,8 @@ class TestRoundTripFidelity:
 
     def test_image_name_kept_when_registry_resolves_native_form(self):
         """`show eileen happy`（tag+attribute）不该被改成 eileen_happy。"""
-        from asset_registry import AssetRegistry
-        from script_table import Beat, render_beats_to_rpy
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import Beat, render_beats_to_rpy
         reg = AssetRegistry()
         reg.images = {'happy': {'ID': 'happy', 'Tag': 'eileen',
                                 'Attributes': 'happy'}}
@@ -950,14 +950,14 @@ class TestRoundTripFidelity:
 
     def test_image_name_underscored_without_registry(self):
         """没有资源表时保持旧行为（与资产表 ID 形态对齐）。"""
-        from script_table import Beat, render_beats_to_rpy
+        from storygraph.story.script_table import Beat, render_beats_to_rpy
         text = render_beats_to_rpy(
             [Beat(seq=1, label='a', text='x', show='bg room')])
         assert 'show bg_room' in text
 
     def test_image_name_falls_back_when_native_form_unresolvable(self):
-        from asset_registry import AssetRegistry
-        from script_table import Beat, render_beats_to_rpy
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import Beat, render_beats_to_rpy
         reg = AssetRegistry()
         reg.images = {'bg_room': {'ID': 'bg_room', 'Tag': 'bg',
                                   'Attributes': 'room'}}
@@ -969,7 +969,7 @@ class TestRoundTripFidelity:
 
 class TestBeatIdentity:
     def test_line_ids_and_hashes_assigned(self):
-        from script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, _assign_identity
         beats = [Beat(seq=1, label='ch01', text='a'),
                  Beat(seq=2, label='ch01', text='b')]
         _assign_identity(beats)
@@ -979,7 +979,7 @@ class TestBeatIdentity:
 
     def test_content_hash_recomputed_on_change(self):
         """改了内容必须换哈希，否则 push 会把改动判成"未变"静默丢掉。"""
-        from script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, _assign_identity
         b = Beat(seq=1, label='a', text='原文')
         _assign_identity([b])
         old = b.content_hash
@@ -988,14 +988,14 @@ class TestBeatIdentity:
         assert b.content_hash != old
 
     def test_existing_line_id_preserved(self):
-        from script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, _assign_identity
         b = Beat(seq=9, label='a', text='x', line_id='db-thing-42')
         _assign_identity([b])
         assert b.line_id == 'db-thing-42'
 
     def test_import_assigns_identity_to_handwritten_rows(self, tmp_path):
         import openpyxl
-        from script_table import (BEAT_FIELDS, export_beats_to_excel,
+        from storygraph.story.script_table import (BEAT_FIELDS, export_beats_to_excel,
                                  import_beats_from_excel)
         out = tmp_path / 't.xlsx'
         export_beats_to_excel([], out)
@@ -1017,7 +1017,7 @@ class TestBeatIdentity:
 class TestCollabStore:
     @pytest.fixture
     def db(self, tmp_path):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         p = tmp_path / 'collab.db'
         cs.init_db(p, users=['alice', 'bob'])
         return p
@@ -1025,8 +1025,8 @@ class TestCollabStore:
     @pytest.fixture
     def sheet(self, tmp_path, db):
         """从 .rpy 视角造一批 Beat 直接入库，再 pull 出 Excel。"""
-        import collab_store as cs
-        from script_table import Beat, _assign_identity, export_beats_to_excel
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import Beat, _assign_identity, export_beats_to_excel
         beats = [
             Beat(seq=1, label='ch01', scene='bg classroom', text='开场'),
             Beat(seq=2, label='ch01', speaker='e', text='你好。'),
@@ -1041,8 +1041,8 @@ class TestCollabStore:
         return out
 
     def test_push_then_pull_roundtrip(self, db, sheet):
-        import collab_store as cs
-        from script_table import import_beats_from_excel
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import import_beats_from_excel
         beats = import_beats_from_excel(sheet)
         assert [b.line_id for b in beats] == ['ch01.0001', 'ch01.0002',
                                               'ch01.0003']
@@ -1055,7 +1055,7 @@ class TestCollabStore:
 
     def test_pull_writes_collab_sheet(self, db, sheet):
         import openpyxl
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         wb = openpyxl.load_workbook(sheet)
         assert cs.COLLAB_SHEET in wb.sheetnames
         ws = wb[cs.COLLAB_SHEET]
@@ -1063,10 +1063,10 @@ class TestCollabStore:
 
     def test_edit_in_excel_then_push_updates(self, db, sheet):
         import openpyxl
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         wb = openpyxl.load_workbook(sheet)
         ws = wb['Beats']
-        from script_table import BEAT_FIELDS
+        from storygraph.story.script_table import BEAT_FIELDS
         col = BEAT_FIELDS.index('Text') + 1
         ws.cell(row=3, column=col, value='改成新台词')
         wb.save(sheet)
@@ -1082,8 +1082,8 @@ class TestCollabStore:
 
     def test_conflict_when_other_wrote_first(self, db, sheet, tmp_path):
         import openpyxl
-        import collab_store as cs
-        from script_table import BEAT_FIELDS
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import BEAT_FIELDS
 
         # bob 也拉一份
         bob_sheet = tmp_path / 'bob.xlsx'
@@ -1113,8 +1113,8 @@ class TestCollabStore:
 
     def test_force_overrides_conflict(self, db, sheet, tmp_path):
         import openpyxl
-        import collab_store as cs
-        from script_table import BEAT_FIELDS
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import BEAT_FIELDS
         bob_sheet = tmp_path / 'bob2.xlsx'
         cs.pull(db, bob_sheet, actor='bob')
         wb = openpyxl.load_workbook(sheet)
@@ -1135,12 +1135,12 @@ class TestCollabStore:
         assert p['Text'] == 'bob 强制'
 
     def test_lock_blocks_other_user(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         assert cs.lock(db, 'ch01.0002', 'alice')['ok']
         assert not cs.lock(db, 'ch01.0002', 'bob')['ok']
 
         import openpyxl
-        from script_table import BEAT_FIELDS
+        from storygraph.story.script_table import BEAT_FIELDS
         wb = openpyxl.load_workbook(sheet)
         wb['Beats'].cell(row=3, column=BEAT_FIELDS.index('Text') + 1,
                          value='bob 想改')
@@ -1150,10 +1150,10 @@ class TestCollabStore:
         assert 'alice' in res['rejected'][0]['reason']
 
     def test_owner_can_push_while_locked(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         assert cs.lock(db, 'ch01.0002', 'alice')['ok']
         import openpyxl
-        from script_table import BEAT_FIELDS
+        from storygraph.story.script_table import BEAT_FIELDS
         wb = openpyxl.load_workbook(sheet)
         wb['Beats'].cell(row=3, column=BEAT_FIELDS.index('Text') + 1,
                          value='alice 自己改')
@@ -1163,14 +1163,14 @@ class TestCollabStore:
         assert cs.unlock(db, 'ch01.0002', 'alice')['ok']
 
     def test_lock_range_by_label(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         res = cs.lock_range(db, 'ch01', 'alice')
         assert len(res['locked']) == 3
         assert cs.locks(db)
         assert all(l['locked_by'] == 'alice' for l in cs.locks(db))
 
     def test_status_summary(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         cs.set_status(db, 'ch01.0001', 'approved', 'bob')
         s = cs.status_summary(db)
         assert s['lines'] == 3
@@ -1179,14 +1179,14 @@ class TestCollabStore:
         assert s['recent']
 
     def test_status_machine_rejects_bad_value(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         res = cs.set_status(db, 'ch01.0001', 'done', 'alice')
         assert not res['ok']
 
     def test_new_row_in_excel_gets_inserted(self, db, sheet):
         import openpyxl
-        import collab_store as cs
-        from script_table import BEAT_FIELDS
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import BEAT_FIELDS
         wb = openpyxl.load_workbook(sheet)
         ws = wb['Beats']
         row = [''] * len(BEAT_FIELDS)
@@ -1205,7 +1205,7 @@ class TestCollabStore:
 
     def test_deleted_row_is_soft_deleted(self, db, sheet):
         import openpyxl
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         wb = openpyxl.load_workbook(sheet)
         ws = wb['Beats']
         ws.delete_rows(4)          # 删掉第三拍
@@ -1220,8 +1220,8 @@ class TestCollabStore:
         assert row['deleted'] == 1
 
     def test_assets_upsert_and_ir_from_db(self, db, tmp_path):
-        import collab_store as cs
-        from asset_registry import scan_assets, write_asset_excel, \
+        import storygraph.collab.collab_store as cs
+        from storygraph.assets.asset_registry import scan_assets, write_asset_excel, \
             parse_asset_tables
         root = tmp_path / 'proj'
         (root / 'game' / 'images' / 'bg').mkdir(parents=True)
@@ -1239,14 +1239,14 @@ class TestCollabStore:
                                 ).fetchone()['c'] >= 1
 
     def test_export_ir_from_db(self, db, sheet):
-        import collab_store as cs
+        import storygraph.collab.collab_store as cs
         beats, assets = cs.export_ir_from_db(db)
         assert len(beats) == 3
         assert beats[0].line_id == 'ch01.0001'
 
     def test_cli_collab_flow(self, tmp_path, capsys):
-        from cli import main
-        import collab_store as cs
+        from storygraph.cli import main
+        import storygraph.collab.collab_store as cs
         db = tmp_path / 'c.db'
         proj = tmp_path / 'p'
         game = proj / 'game'
@@ -1267,10 +1267,10 @@ class TestCollabStore:
         assert '总行数' in out
 
     def test_cli_collab_push_conflict_exit_code(self, tmp_path, capsys):
-        from cli import main
+        from storygraph.cli import main
         import openpyxl
-        import collab_store as cs
-        from script_table import BEAT_FIELDS
+        import storygraph.collab.collab_store as cs
+        from storygraph.story.script_table import BEAT_FIELDS
 
         db = tmp_path / 'c2.db'
         proj = tmp_path / 'p2'
@@ -1316,7 +1316,7 @@ class TestBatchImportChapters:
     """
 
     def test_multiple_labels_become_separate_nodes(self, write_rpy):
-        from renpy_parser import batch_import_chapters
+        from storygraph.parsing.renpy_parser import batch_import_chapters
 
         a = write_rpy('label ch01:\n    "一"\n    return\n', 'ch01.rpy')
         b = write_rpy('label ch02:\n    "二"\n    return\n', 'ch02.rpy')
@@ -1327,7 +1327,7 @@ class TestBatchImportChapters:
         assert 'ch01' in labels and 'ch02' in labels
 
     def test_second_batch_accumulates_and_does_not_duplicate(self, write_rpy):
-        from renpy_parser import batch_import_chapters
+        from storygraph.parsing.renpy_parser import batch_import_chapters
 
         a = write_rpy('label ch01:\n    "一"\n    return\n', 'a.rpy')
         b = write_rpy('label ch02:\n    "二"\n    return\n', 'b.rpy')
@@ -1348,8 +1348,8 @@ class TestBatchImportChapters:
 
     def test_undo_command_restores_previous_graph(self, write_rpy):
         """导入走 ReplaceGraphCommand，Ctrl+Z 必须能整体撤销。"""
-        from commands import ReplaceGraphCommand
-        from renpy_parser import batch_import_chapters
+        from storygraph.graph.commands import ReplaceGraphCommand
+        from storygraph.parsing.renpy_parser import batch_import_chapters
 
         a = write_rpy('label ch01:\n    "一"\n    return\n', 'a.rpy')
         graph = Graph()

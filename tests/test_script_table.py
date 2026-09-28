@@ -9,8 +9,8 @@ tests/test_script_table.py
 
 import pytest
 
-from core.statement import Statement, StatementKind
-from script_table import (
+from storygraph.core.statement import Statement, StatementKind
+from storygraph.story.script_table import (
     Beat, beats_from_statements, beats_from_parse_result,
     export_beats_to_excel, import_beats_from_excel,
     render_beats_to_rpy, render_beat_to_rpy, write_beats_to_rpy,
@@ -37,7 +37,7 @@ SCRIPT = (
 
 @pytest.fixture
 def parse_result(write_rpy):
-    from renpy_parser import RenPyParser, ParseResultBuilder
+    from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
     fp = write_rpy(SCRIPT, 'ch01.rpy')
     return ParseResultBuilder().build(RenPyParser().parse(fp))
 
@@ -121,7 +121,7 @@ class TestBeatsFromStatements:
         assert beats[-1].with_ == 'fade'
 
     def test_condition_from_if_block(self, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(
             'label a:\n'
             '    if love > 5:\n'
@@ -131,7 +131,7 @@ class TestBeatsFromStatements:
         assert beats[0].condition == 'love > 5'
 
     def test_menu_option_becomes_own_beat(self, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(
             'label a:\n'
             '    menu:\n'
@@ -144,7 +144,7 @@ class TestBeatsFromStatements:
 
     def test_python_recorded_in_codeblock(self, write_rpy):
         """变量操作进 CodeBlock，导出时原样回写，不再只留痕。"""
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(
             'label a:\n'
             '    $ love += 1\n'
@@ -261,7 +261,7 @@ class TestStopLanding:
     )
 
     def test_stop_parsed_into_beat(self, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(self.STOP_SCRIPT, 'ch03.rpy')
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
         beats = beats_from_parse_result(result)
@@ -278,7 +278,7 @@ class TestStopLanding:
         assert not Beat(sound_action='stop').is_empty()
 
     def test_stop_roundtrip(self, tmp_path, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(self.STOP_SCRIPT, 'ch03.rpy')
         table = open_rpy_as_table(fp, tmp_path / 'ch03.xlsx')
         beats = import_beats_from_excel(table)
@@ -298,8 +298,8 @@ class TestStopLanding:
         说话人 / 场景 / 立绘 / 语音等列。这里同时锁住"没有偷偷留下旧列"。
         表头现在用中文（见 BEAT_HEADERS）。
         """
-        from asset_registry import AssetRegistry
-        from script_table import BEAT_HEADERS
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import BEAT_HEADERS
         fp = write_rpy(self.STOP_SCRIPT, 'ch03.rpy')
         reg = AssetRegistry()
         reg.images = {'bg_room': {'ID': 'bg_room', 'Tag': 'bg'}}
@@ -335,7 +335,7 @@ class TestStopLanding:
 
     def test_rendered_script_is_reparsable(self):
         """生成的脚本必须能被自己的解析器吃回去——这是"能跑"的必要条件。"""
-        from renpy_parser import RenPyParser
+        from storygraph.parsing.renpy_parser import RenPyParser
         beats = [
             Beat(seq=1, label='ch01', kind=KIND_SAY, speaker='e',
                  text='早上好', scene='bg classroom',
@@ -421,7 +421,7 @@ class TestExcelRoundTrip:
         assert 'show eileen sad at right' in text
 
     def test_candidate_sheets_created(self, tmp_path, parse_result):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {'ID': 'bg_classroom'}}
         reg.music = {'bgm_theme': {'ID': 'bgm_theme'}}
@@ -441,7 +441,7 @@ class TestExcelRoundTrip:
         assert wb['Candidates_图片']['A1'].value.startswith('↓')
 
     def test_dropdowns_attached(self, tmp_path, parse_result):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'a': {'ID': 'a'}, 'b': {'ID': 'b'}}
         beats = beats_from_parse_result(parse_result)
@@ -469,7 +469,7 @@ class TestExcelRoundTrip:
     def test_refresh_candidate_sheets_preserves_beats(self, tmp_path,
                                                       parse_result):
         """刷新候选只重写 Candidates_*，不动 Beats 表里的用户数据。"""
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {'ID': 'bg_classroom'}}
         beats = beats_from_parse_result(parse_result)
@@ -496,7 +496,7 @@ class TestExcelRoundTrip:
         assert 'bg_classroom' in ids
 
     def test_open_rpy_as_table(self, tmp_path, write_rpy):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'bg classroom': {'ID': 'bg classroom'}}
         fp = write_rpy(SCRIPT, 'open_me.rpy')
@@ -518,7 +518,7 @@ class TestUnregisteredDetection:
     """M4：演出表引用了资源表没有的资产 → 要能检测出来。"""
 
     def test_unregistered_flagged(self):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {}}
         reg.music = {'bgm_theme': {}}
@@ -538,7 +538,7 @@ class TestUnregisteredDetection:
         assert 'e' not in by_id
 
     def test_builtin_transform_not_flagged(self):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         beats = [Beat(seq=1, label='ch', text='x', at='left',
                      with_='dissolve')]
@@ -546,7 +546,7 @@ class TestUnregisteredDetection:
         assert found == []        # left / dissolve 是 Ren'Py 内置
 
     def test_space_normalized_against_registry(self):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {'bg_classroom': {}}     # 下划线形式
         beats = [Beat(seq=1, label='ch', text='x', scene='bg classroom')]
@@ -585,7 +585,7 @@ class TestOrderAndAudioArePreserved:
     )
 
     def test_emitted_order_matches_source(self, tmp_path, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
 
         fp = write_rpy(self.ORDERED_SCRIPT, 'ch02.rpy')
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
@@ -635,7 +635,7 @@ class TestOrderAndAudioArePreserved:
         assert 'queue sound sfx_footstep' in stripped
 
     def test_full_roundtrip_keeps_order_and_audio(self, tmp_path, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
 
         fp = write_rpy(self.ORDERED_SCRIPT, 'ch02.rpy')
         table = open_rpy_as_table(fp, tmp_path / 'ch02.xlsx')

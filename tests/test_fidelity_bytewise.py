@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-from script_table import (
+from storygraph.story.script_table import (
     Beat, import_beats_from_excel, open_rpy_as_table, render_beats_to_rpy,
 )
 
@@ -224,9 +224,9 @@ class TestKnownDifferencesArePinned:
         有资源表、且作者的写法能解析出来时，**必须原样保留**——
         `show eileen happy` 不许被改写成 `eileen_happy`。
         """
-        from asset_registry import AssetRegistry
-        from script_table import registry_from_parse_result
-        from renpy_parser import ParseResultBuilder, RenPyParser
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.script_table import registry_from_parse_result
+        from storygraph.parsing.renpy_parser import ParseResultBuilder, RenPyParser
 
         script = tmp_path / 'r.rpy'
         script.write_text(

@@ -8,8 +8,8 @@ CharacterScriptLinker 测试。
 
 import pytest
 
-from renpy_parser import RenPyParser, ParseResultBuilder, TranslationUnitGenerator
-from character_script_linker import CharacterScriptLinker
+from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder, TranslationUnitGenerator
+from storygraph.parsing.character_script_linker import CharacterScriptLinker
 
 
 SCRIPT = (

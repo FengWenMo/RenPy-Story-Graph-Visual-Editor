@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storygraph"
+version = "1.0.0"
+description = "Ren'Py 剧情树可视化编辑器：Excel ↔ .rpy 双向联通的句子级演出编排工具"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+# 缩略图（jpg/webp 预览）用。没装也能跑：PNG/GIF 走 tk.PhotoImage，
+# 其余格式降级为不显示预览——代码里每条路径都有降级分支。
+thumbnails = ["Pillow>=10"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+# 安装后可直接用的命令；没安装时用根目录垫片 `python cli.py ...` 等价。
+storygraph = "storygraph.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["storygraph*"]

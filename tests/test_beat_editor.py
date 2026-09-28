@@ -11,10 +11,10 @@ tkinter 在无头环境下是桩，无法验证真实交互；这里只测抽出
 
 import pytest
 
-from asset_registry import AssetRegistry, add_asset_to_registry
-from beat_editor import search_assets, beat_to_fields, fields_to_beat
-from script_table import Beat
-from asset_completion import AssetCompletion
+from storygraph.assets.asset_registry import AssetRegistry, add_asset_to_registry
+from storygraph.ui.beat_editor import search_assets, beat_to_fields, fields_to_beat
+from storygraph.story.script_table import Beat
+from storygraph.assets.asset_completion import AssetCompletion
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ class TestAddAssetToRegistry:
         asset_dir = tmp_path / 'tables'
         asset_dir.mkdir()
         # 先放一个已有的 voices 表
-        from asset_registry import write_asset_excel
+        from storygraph.assets.asset_registry import write_asset_excel
         write_asset_excel(
             {'images': [], 'audio': {'music': [], 'sound': []},
              'voices': [{'ID': 'v_eileen_01', 'Path': 'voice/e.ogg',
@@ -94,7 +94,7 @@ class TestAddAssetToRegistry:
         ok = add_asset_to_registry(registry, 'voice', 'v_boss_02',
                                   'voice/boss.ogg', asset_dir=asset_dir)
         assert ok
-        from asset_registry import read_excel_rows
+        from storygraph.assets.asset_registry import read_excel_rows
         rows = read_excel_rows(asset_dir / 'voices.xlsx')
         ids = {r['ID'] for r in rows}
         assert ids == {'v_eileen_01', 'v_boss_02'}

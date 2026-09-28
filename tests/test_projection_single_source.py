@@ -31,8 +31,8 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from renpy_parser import ParseResultBuilder, RenPyParser
-from script_table import (
+from storygraph.parsing.renpy_parser import ParseResultBuilder, RenPyParser
+from storygraph.story.script_table import (
     BEAT_FIELDS, Beat, compose_hide_cell, compose_show_cell,
     compose_stage_extra, import_beats_from_excel, make_symbols,
     open_rpy_as_table, render_beats_to_rpy, beats_from_parse_result,
@@ -214,7 +214,7 @@ class TestStageSnapshotDisambiguation:
 '''
 
     def _snap(self, write_rpy, tmp_path, src, name):
-        from stage_snapshot import snapshot_rows
+        from storygraph.story.stage_snapshot import snapshot_rows
         fp = write_rpy(src, f'proj/game/{name}.rpy')
         beats = beats_from_parse_result(
             ParseResultBuilder().build(RenPyParser().parse(fp)))
@@ -255,7 +255,7 @@ class TestRealChapterSnapshot43:
     """真实章节第 43 / 67 拍当固定用例（两种相反的 stage_order）。"""
 
     def _rows(self):
-        from stage_snapshot import snapshot_rows
+        from storygraph.story.stage_snapshot import snapshot_rows
         beats = beats_from_parse_result(
             ParseResultBuilder().build(RenPyParser().parse(REAL)))
         return beats, snapshot_rows(beats)

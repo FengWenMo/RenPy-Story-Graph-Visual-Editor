@@ -17,11 +17,11 @@ DSL 与编译流水线的测试（dsl.py / compile.py）。
 import openpyxl
 import pytest
 
-from asset_registry import AssetRegistry
-from dsl import (Audit, Symbols, compile_audio, compile_stage,
+from storygraph.assets.asset_registry import AssetRegistry
+from storygraph.story.dsl import (Audit, Symbols, compile_audio, compile_stage,
                  normalize_text, parse_audio, parse_stage,
                  stage_word_if_lossless)
-from script_table import (
+from storygraph.story.script_table import (
     BEAT_FIELDS, BEAT_HEADERS, DROPDOWN_COLUMNS, HIDDEN_BEAT_COLUMNS, Beat,
     compose_code, compose_stage,
     export_beats_to_excel, import_beats_from_excel, make_symbols,
@@ -369,8 +369,8 @@ class TestSheetContract:
 class TestCompilePipeline:
     def test_bracket_form_survives_excel_and_compiles(self, registry,
                                                      tmp_path):
-        from renpy_parser import RenPyParser, ParseResultBuilder
-        from script_table import beats_from_parse_result
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.story.script_table import beats_from_parse_result
 
         beats = [Beat(seq=1, label='ch01', kind='say', speaker='lyj',
                       text='挺精致的实验室哎…',
@@ -397,7 +397,7 @@ class TestCompilePipeline:
 
     def test_export_sheet_matches_generated_code(self, registry):
         """承诺 5：编译结果表与脚本同源，不是"另写一套再对一遍"。"""
-        from compile import compile_beats
+        from storygraph.pipeline.compile import compile_beats
 
         beats = [Beat(seq=1, label='ch01', kind='say', speaker='lyj',
                       text='台词', stage='[显示] 凌跃捷 开心 左'),
@@ -414,7 +414,7 @@ class TestCompilePipeline:
 
     def test_compile_table_writes_new_file_and_keeps_source(self, registry,
                                                            tmp_path):
-        from compile import compile_table
+        from storygraph.pipeline.compile import compile_table
 
         src = tmp_path / 'ch01.xlsx'
         export_beats_to_excel(
@@ -435,7 +435,7 @@ class TestCompilePipeline:
         assert wb['Export_RenPy']['A1'].value == 'LineId'
 
     def test_todo_shows_up_in_generated_script(self, registry):
-        from compile import compile_beats
+        from storygraph.pipeline.compile import compile_beats
 
         beats = [Beat(seq=1, label='ch01', kind='say', speaker='lyj',
                       text='台词', stage='[显示] 凌跃捷 开心 左',

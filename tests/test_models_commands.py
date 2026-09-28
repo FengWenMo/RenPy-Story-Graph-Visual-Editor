@@ -14,8 +14,8 @@ Graph 数据结构与 Command 撤销 / 重做测试。
 
 import pytest
 
-from models import Graph, Node, Edge
-from commands import (
+from storygraph.graph.models import Graph, Node, Edge
+from storygraph.graph.commands import (
     AddNodeCommand, RemoveNodeCommand,
     AddEdgeCommand, RemoveEdgeCommand,
     UpdateNodeOperationsCommand, UpdateEdgeCommand,

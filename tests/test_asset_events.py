@@ -12,7 +12,7 @@ tests/test_asset_events.py
 
 import time
 
-from asset_events import (
+from storygraph.assets.asset_events import (
     AssetEventType, AssetEvent, AssetEventBus,
     AssetFileWatcher, ConfirmationGate, ConfirmationRequest,
 )

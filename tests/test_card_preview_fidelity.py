@@ -17,11 +17,11 @@ tests/test_card_preview_fidelity.py
 
 import re
 
-from renpy_parser import ParseResultBuilder, RenPyParser
-from script_table import (
+from storygraph.parsing.renpy_parser import ParseResultBuilder, RenPyParser
+from storygraph.story.script_table import (
     Beat, beats_from_parse_result, open_rpy_as_table, render_beats_to_rpy,
 )
-from stage_snapshot import snapshot_rows
+from storygraph.story.stage_snapshot import snapshot_rows
 
 #: 从生成的代码里抽舞台语句：`show ling happy at left`
 STAGE_LINE = re.compile(r'^\s*(show|hide|scene)\s+(.+?)\s*$')

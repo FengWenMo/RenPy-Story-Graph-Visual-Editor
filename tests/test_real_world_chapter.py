@@ -21,10 +21,10 @@ tests/test_real_world_chapter.py
 
 import pytest
 
-from core.statement import (
+from storygraph.core.statement import (
     Statement, StatementKind, validate_hash_contract, validate_statement,
 )
-from script_table import (
+from storygraph.story.script_table import (
     Beat, beats_from_parse_result, render_beat_to_rpy, render_beats_to_rpy,
     import_beats_from_excel, export_beats_to_excel, open_rpy_as_table,
     BEAT_FIELDS,
@@ -76,7 +76,7 @@ CHAPTER = (
 
 @pytest.fixture
 def beats(write_rpy):
-    from renpy_parser import RenPyParser, ParseResultBuilder
+    from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
     fp = write_rpy(CHAPTER, 'chapter1_2.rpy')
     result = ParseResultBuilder().build(RenPyParser().parse(fp))
     return beats_from_parse_result(result, label='chapter1_2')
@@ -200,7 +200,7 @@ class TestRenderFidelity:
 
     def test_rendered_script_reparsable(self, beats, tmp_path):
         """往返产物必须能被自己的解析器吃回去。"""
-        from renpy_parser import RenPyParser
+        from storygraph.parsing.renpy_parser import RenPyParser
         text = render_beats_to_rpy(beats, label_name='chapter1_2')
         fp = tmp_path / 'rt.rpy'
         fp.write_text(text, encoding='utf-8')
@@ -233,7 +233,7 @@ class TestExcelRoundTripFidelity:
         assert hides
 
     def test_full_excel_roundtrip_renders(self, tmp_path, write_rpy, beats):
-        from renpy_parser import RenPyParser
+        from storygraph.parsing.renpy_parser import RenPyParser
         path = tmp_path / 'ch12.xlsx'
         export_beats_to_excel(beats, path)
         back = import_beats_from_excel(path)
@@ -247,7 +247,7 @@ class TestExcelRoundTripFidelity:
         assert not p.errors, p.errors
 
     def test_open_rpy_as_table_keeps_everything(self, tmp_path, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(CHAPTER, 'chapter1_2.rpy')
         table = open_rpy_as_table(fp, tmp_path / 'c.xlsx')
         back = import_beats_from_excel(table)
@@ -263,7 +263,7 @@ class TestExcelRoundTripFidelity:
 
 class TestTransformGeneration:
     def _registry(self):
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.transforms = {
             'slide_in_left': {
@@ -281,7 +281,7 @@ class TestTransformGeneration:
         return reg
 
     def test_collect_used_excludes_builtins(self):
-        from script_table import collect_used_transforms
+        from storygraph.story.script_table import collect_used_transforms
         beats = [
             Beat(text='x', at='left slide_in_left'),
             Beat(text='y', transform='dissolve'),
@@ -292,7 +292,7 @@ class TestTransformGeneration:
         assert 'left' not in used and 'dissolve' not in used
 
     def test_definitions_generated_with_params(self):
-        from script_table import render_beats_to_rpy
+        from storygraph.story.script_table import render_beats_to_rpy
         reg = self._registry()
         beats = [Beat(label='a', speaker='e', text='hi', at='slide_in_left')]
         text = render_beats_to_rpy(beats, registry=reg)
@@ -301,21 +301,21 @@ class TestTransformGeneration:
         assert '    linear 0.5 xalign 1.0' in text
 
     def test_transform_without_atl_skipped(self):
-        from script_table import render_beats_to_rpy
+        from storygraph.story.script_table import render_beats_to_rpy
         reg = self._registry()
         beats = [Beat(label='a', speaker='e', text='hi', at='no_atl')]
         text = render_beats_to_rpy(beats, registry=reg)
         assert 'transform no_atl' not in text
 
     def test_no_registry_no_transform_block(self):
-        from script_table import render_beats_to_rpy
+        from storygraph.story.script_table import render_beats_to_rpy
         beats = [Beat(label='a', speaker='e', text='hi', at='slide_in_left')]
         text = render_beats_to_rpy(beats)
         assert 'transform slide_in_left' not in text
 
     def test_generated_script_reparsable(self, tmp_path):
-        from script_table import render_beats_to_rpy
-        from renpy_parser import RenPyParser
+        from storygraph.story.script_table import render_beats_to_rpy
+        from storygraph.parsing.renpy_parser import RenPyParser
         reg = self._registry()
         beats = [Beat(label='a', speaker='e', text='hi',
                       at='slide_in_left')]

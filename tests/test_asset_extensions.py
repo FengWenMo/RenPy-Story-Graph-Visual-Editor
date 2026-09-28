@@ -6,8 +6,8 @@ tests/test_asset_extensions.py
 
 import pytest
 
-from asset_registry import AssetRegistry
-from asset_extensions import (
+from storygraph.assets.asset_registry import AssetRegistry
+from storygraph.assets.asset_extensions import (
     AssetSnapshot, AssetChange, AssetChangeTracker,
     DependencyAnalyzer, generate_rename_patch,
     AssetCompletionProvider, AssetPanelModel, AssetWorkspace,

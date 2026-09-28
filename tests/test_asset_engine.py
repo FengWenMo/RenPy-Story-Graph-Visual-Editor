@@ -11,9 +11,9 @@ AssetEngine 测试（不依赖 UI）。
 
 import pytest
 
-from asset_engine import AssetEngine, _apply_rename_patch
-from asset_registry import AssetRegistry
-from asset_events import AssetEventType, AssetEventBus, ConfirmationGate
+from storygraph.assets.asset_engine import AssetEngine, _apply_rename_patch
+from storygraph.assets.asset_registry import AssetRegistry
+from storygraph.assets.asset_events import AssetEventType, AssetEventBus, ConfirmationGate
 
 
 @pytest.fixture
@@ -269,7 +269,7 @@ class TestCharacterRenameInference:
         """
         完整链路：改 Excel → poll → .rpy 里的 define 与对话同步改名。
         """
-        from asset_registry import write_dict_to_excel
+        from storygraph.assets.asset_registry import write_dict_to_excel
         asset_dir = asset_env['asset_dir']
         script = asset_env['game_dir'] / 'script.rpy'
         script.write_text(
@@ -434,7 +434,7 @@ class TestRenameApplication:
 
     def test_dry_run_does_not_write(self, write_rpy):
         """预览模式只能告诉我们哪些文件会变，不落盘。"""
-        from asset_extensions import generate_rename_patch
+        from storygraph.assets.asset_extensions import generate_rename_patch
         fp = write_rpy('show hero\n')
         before = fp.read_text(encoding='utf-8')
         result = generate_rename_patch('hero', 'x', [fp], dry_run=True,
@@ -465,7 +465,7 @@ class TestRenameApplication:
         eng = self._engine(asset_env, rename_threshold=0)
         eng._initial_load()
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         before = {'Path': 'p.png'}
         ch = _Change('renamed', 'images', 'old_id', before,
                      {'Path': 'p.png'}, new_id='new_id')
@@ -482,7 +482,7 @@ class TestRenameApplication:
         eng = self._engine(asset_env)
         eng._initial_load()
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         before = {'Path': 'p.png'}
         ch = _Change('removed', 'images', 'gone_id', before, {})
         eng._handle_removed(ch, ['script.rpy:1'], approved=False)
@@ -497,7 +497,7 @@ class TestRenameApplication:
         eng = self._engine(asset_env, ask=lambda r: asked.append(r) or False)
         eng._initial_load()
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         changes = [
             _Change('removed', 'images', f'img{i}', {'Path': f'{i}.png'}, {})
             for i in range(50)
@@ -520,7 +520,7 @@ class TestBatchApplication:
             watch_source_dirs=False)
         eng._initial_load()
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         # 这些资产确实被脚本引用（脚本里有 bgm_theme）
         changes = [
             _Change('removed', 'music', 'bgm_theme', {'Path': 'a.ogg'}, {}),
@@ -542,7 +542,7 @@ class TestBatchApplication:
             watch_source_dirs=False)
         eng._initial_load()
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         changes = [
             _Change('removed', 'music', 'x1', {'Path': 'a.ogg'}, {}),
             _Change('removed', 'music', 'x2', {'Path': 'a.ogg'}, {}),
@@ -567,7 +567,7 @@ class TestBatchApplication:
         eng._initial_load()
         assert 'e' in eng.parse_result.characters
 
-        from asset_engine import _Change
+        from storygraph.assets.asset_engine import _Change
         ch = _Change('removed', 'characters', 'e', {'ID': 'e'}, {})
         eng.registry.references['e'] = ['s.rpy:1']
         eng._apply_changes([ch])
@@ -585,7 +585,7 @@ class TestDiagnosticsDeduplication:
                            watch_source_dirs=False)
 
     def test_identical_diagnostics_emitted_once(self, asset_env):
-        from asset_events import AssetEventBus
+        from storygraph.assets.asset_events import AssetEventBus
         bus = AssetEventBus()
         events = []
         bus.subscribe(None, events.append)
@@ -605,7 +605,7 @@ class TestDiagnosticsDeduplication:
         assert first >= 0
 
     def test_force_reemits(self, asset_env):
-        from asset_events import AssetEventBus
+        from storygraph.assets.asset_events import AssetEventBus
         bus = AssetEventBus()
         events = []
         bus.subscribe(None, events.append)
@@ -618,7 +618,7 @@ class TestDiagnosticsDeduplication:
 
     def test_poll_emits_diagnostics_once(self, asset_env):
         """脚本任务 + 资产表任务同时处理，诊断只发一轮。"""
-        from asset_events import AssetEventBus
+        from storygraph.assets.asset_events import AssetEventBus
         bus = AssetEventBus()
         events = []
         bus.subscribe(None, events.append)

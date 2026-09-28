@@ -77,9 +77,9 @@ script_dir.mkdir(parents=True, exist_ok=True)
 (script_dir / 'ch01.rpy').write_text(SCRIPT, encoding='utf-8')
 
 # --- 扫描生成资源表 ---
-from asset_registry import scan_assets, write_asset_excel
-from asset_engine import AssetEngine
-from asset_events import AssetEventBus, ConfirmationGate
+from storygraph.assets.asset_registry import scan_assets, write_asset_excel
+from storygraph.assets.asset_engine import AssetEngine
+from storygraph.assets.asset_events import AssetEventBus, ConfirmationGate
 
 asset_dir = DEMO / 'asset_tables'
 asset_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +97,7 @@ eng._initial_load()
 reg = eng.get_registry()
 
 # --- 把脚本解析出的角色/变换落成资源表（"从脚本导入角色表"的等价动作）---
-from asset_registry import write_dict_to_excel
+from storygraph.assets.asset_registry import write_dict_to_excel
 
 CHAR_FIELDS = ['ID', 'Name', 'Color', 'WhatColor', 'ImageTag', 'Kind',
                'VoiceTag', 'SideImage', 'WhatPrefix', 'WhatSuffix',
@@ -116,7 +116,7 @@ write_dict_to_excel(
     TF_FIELDS)
 
 # --- 生成剧本表（候选带说明列）---
-from script_table import open_rpy_as_table, import_beats_from_excel
+from storygraph.story.script_table import open_rpy_as_table, import_beats_from_excel
 table = open_rpy_as_table(script_dir / 'ch01.rpy',
                          DEMO / '剧本表_ch01.xlsx', registry=reg)
 
@@ -135,7 +135,7 @@ for u in unused:
 # --- 本批新能力的演示产物 ---
 print()
 print('=== 多引擎导出 ===')
-from build import build_project, format_build_result
+from storygraph.pipeline.build import build_project, format_build_result
 
 for engine in ('unity', 'godot', 'json'):
     r = build_project(DEMO, out_dir=DEMO / 'build' / engine, engine=engine,
@@ -155,7 +155,7 @@ print('  ', f"错误 {rep['error_count']}，警告 {rep['warning_count']}"
 
 print()
 print('=== 团队协作（Excel 前端 + SQLite 后端）===')
-import collab_store as cs
+import storygraph.collab.collab_store as cs
 
 db = DEMO / 'collab.db'
 if db.exists():

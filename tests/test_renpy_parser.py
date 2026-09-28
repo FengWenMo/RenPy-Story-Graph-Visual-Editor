@@ -8,8 +8,8 @@ renpy_parser 全流程测试：Lexer → AST → ParseResult / Graph / Translati
 
 import pytest
 
-from models import Graph
-from renpy_parser import (
+from storygraph.graph.models import Graph
+from storygraph.parsing.renpy_parser import (
     RenPyLexer, RenPyParser,
     LogicalLine, LabelNode, DefineNode, SayNode, ExtendNode,
     MenuNode, MenuOptionNode, IfNode, JumpNode, CallNode,
@@ -249,7 +249,7 @@ class TestStatementParsing:
         assert node.text == 'jump expression val'
         assert node.raw_kind == 'jump_expression'
         # 不产生任何 Figure 幽灵边：GraphBuilder 不认 RawNode
-        from models import Graph
+        from storygraph.graph.models import Graph
         g = Graph()
         GraphBuilder(g).build(nodes)
         assert g.edges == [] or all(
@@ -641,7 +641,7 @@ class TestTranslationUnits:
 
     def test_content_hash_matches_core_statement(self, write_rpy):
         """契约：TU 的 hash 部分必须与 Statement.make_say 一致。"""
-        from core.statement import Statement
+        from storygraph.core.statement import Statement
         fp = write_rpy('label start:\n    e "Hello"\n')
         r = ParseResultBuilder().build(RenPyParser().parse(fp))
         units = TranslationUnitGenerator().generate(r)
@@ -649,7 +649,7 @@ class TestTranslationUnits:
         assert units[0].identifier == f'start_{expected}'
 
     def test_menu_option_hash_matches_statement(self, write_rpy):
-        from core.statement import Statement
+        from storygraph.core.statement import Statement
         fp = write_rpy('label start:\n    menu:\n        "Yes":\n            return\n')
         r = ParseResultBuilder().build(RenPyParser().parse(fp))
         units = TranslationUnitGenerator().generate(r)

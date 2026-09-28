@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from script_table import (
+from storygraph.story.script_table import (
     Beat, GenerationBlocked, GuardIssue, evaluate_generation,
     generation_guard, occupied_labels, planned_output_path,
     render_beats_to_rpy, write_beats_to_rpy, write_generation,
@@ -327,3 +327,32 @@ class TestExportPlan:
         assert art.written
         assert art.blocking == []
         assert [i.code for i in art.warnings] == ['UNRESOLVED_TODO']
+
+    def test_label_collision_only_matters_inside_game_dir(self, tmp_path):
+        """
+        "和原文重名"只在产物**会被 Ren'Py 扫描**（落在 `<项目>/game/` 里）
+        时才是致命问题。
+
+        这条规则是两次实测逼出来的，缺一不可：
+          · 修 `_guess_project_root` 之前：它恒返回 None，occupied 永远空集
+            → LABEL_COLLISION **从来不判**（门禁形同虚设）；
+          · 修好推断之后：`build` 写 `<项目>/out/story.generated.rpy` 时
+            因为与 `game/script.rpy` 都有 `label start` 被拦下 —— 而那份
+            产物根本不在 game/ 下、不会被扫描，**这是误报**。
+        正确规则 = 两者取交集：会被扫描才判。
+        """
+        project = tmp_path / 'proj'
+        (project / 'game').mkdir(parents=True)
+        (project / 'game' / 'script.rpy').write_text(
+            'label start:\n    return\n', encoding='utf-8')
+
+        beat = Beat(seq=1, label='start', text='喂')
+
+        target = project / 'build' / 'renpy' / 'ch1.rpy'
+        write_beats_to_rpy([beat], target, project_root=project)
+        assert target.exists(), '产物不在 game/ 下，撞名不该被拦'
+
+        inside = project / 'game' / 'ch1.rpy'
+        with pytest.raises(GenerationBlocked):
+            write_beats_to_rpy([beat], inside, project_root=project)
+        assert not inside.exists(), '真写进 game/ 时必须拦下且不留文件'

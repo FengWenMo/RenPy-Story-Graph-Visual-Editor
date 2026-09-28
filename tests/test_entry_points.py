@@ -23,10 +23,10 @@ tests/test_entry_points.py
 
 import ast
 import re
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-GRAPH_VIEW = ROOT / 'graph_view.py'
+from _source_paths import graph_view_source
+
+GRAPH_VIEW = graph_view_source()
 
 
 def _source():

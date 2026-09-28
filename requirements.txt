@@ -1,0 +1,7 @@
+# 运行时依赖（只有这些）
+#
+#   python -m pip install -r requirements.txt
+#
+# 本项目的设计约束是"依赖越少越好"：除了把 Excel 当好用的前端之外，
+# 其余全靠标准库（tkinter / sqlite3 / ast / hashlib …）。
+openpyxl>=3.1          # Excel 读写（剧本表、资源表、候选表全部依赖它）

@@ -11,14 +11,14 @@ tests/test_roundtrip.py
 
 import openpyxl
 
-from models import Graph
-from renpy_parser import (
+from storygraph.graph.models import Graph
+from storygraph.parsing.renpy_parser import (
     RenPyParser, ParseResultBuilder, IncrementalRenPyAnalyzer,
 )
-from renpy_exporter import export_to_renpy
-from asset_engine import AssetEngine
-from asset_registry import write_asset_excel, scan_assets
-from asset_extensions import AssetWorkspace
+from storygraph.pipeline.renpy_exporter import export_to_renpy
+from storygraph.assets.asset_engine import AssetEngine
+from storygraph.assets.asset_registry import write_asset_excel, scan_assets
+from storygraph.assets.asset_extensions import AssetWorkspace
 
 
 SCRIPT = (
@@ -158,8 +158,8 @@ class TestExcelRoundTrip:
         """
         脚本 → 角色行 → characters.xlsx → 重新解析 → 角色集合不变。
         """
-        from character_script_linker import CharacterScriptLinker
-        from asset_registry import write_dict_to_excel, parse_asset_tables
+        from storygraph.parsing.character_script_linker import CharacterScriptLinker
+        from storygraph.assets.asset_registry import write_dict_to_excel, parse_asset_tables
 
         result, _ = self._run(write_rpy)
         linker = CharacterScriptLinker(result)
@@ -195,7 +195,7 @@ class TestExcelRoundTrip:
             {'images': [],
              'audio': {'music': [], 'sound': []}},
             asset_dir)
-        from asset_registry import write_dict_to_excel
+        from storygraph.assets.asset_registry import write_dict_to_excel
         write_dict_to_excel(
             asset_dir / 'characters.xlsx',
             {'e': {'ID': 'e', 'Name': 'Eileen'}},
@@ -252,7 +252,7 @@ class TestExcelRoundTrip:
         scan_result = scan_assets(root, include_ui=False)
         write_asset_excel(scan_result, asset_dir)
 
-        from asset_registry import parse_asset_tables
+        from storygraph.assets.asset_registry import parse_asset_tables
         registry = parse_asset_tables(asset_dir, project_root=root)
         assert 'bg_school' in registry.images
         assert registry.images['bg_school']['Path'] == \
@@ -295,7 +295,7 @@ class TestScriptFidelity:
     """从 .rpy 解析出来的 Beat，导出时必须还原成同一段代码。"""
 
     def _roundtrip(self, write_rpy, src):
-        from script_table import (beats_from_statements,
+        from storygraph.story.script_table import (beats_from_statements,
                                   render_beats_to_rpy)
         fp = write_rpy(src, 'src.rpy')
         pr = ParseResultBuilder().build(RenPyParser().parse(fp))
@@ -325,7 +325,7 @@ class TestScriptFidelity:
 
     def test_ordered_survives_being_empty(self):
         """没有 ordered（表里读回来的 Beat）走历史行为，不报错。"""
-        from script_table import Beat, compose_code
+        from storygraph.story.script_table import Beat, compose_code
         b = Beat(raw='pause', code='x = 1')
         assert compose_code(b) == 'pause\nx = 1'
 
@@ -364,7 +364,7 @@ class TestScriptFidelity:
         `hydrate_from_dsl` 是"追加"语义，而 Stage 列往往已经写了结构化列的
         内容 → 同一项会被追加第二次。导出去就是两遍 `show`（重复执行转场）。
         """
-        from script_table import (Beat, hydrate_from_dsl, render_beat_to_rpy,
+        from storygraph.story.script_table import (Beat, hydrate_from_dsl, render_beat_to_rpy,
                                   make_symbols)
         b = Beat(seq=1, label='a', text='x',
                  show='ling close_happy@i11',
@@ -379,7 +379,7 @@ class TestScriptFidelity:
         ——否则每一行新表都会走进老表迁移，`raw = g('Raw')` 把从 CodeBlock
         拆出来的 raw 行整批清空（真实项目 `show screen`/`pause` 全丢）。
         """
-        from script_table import Beat, compose_code
+        from storygraph.story.script_table import Beat, compose_code
         cell = 'pause\nx = 1\nshow screen msg_dialogue'
         b = Beat.from_row({'Label': 'a', 'Seq': 1, 'Text': 'y',
                            'CodeBlock': cell, 'Show': 'ling happy',

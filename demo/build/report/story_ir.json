@@ -30,10 +30,10 @@
       "speaker_name": "爱莲",
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
-      "stage": "show eileen happy at leftish",
+      "stage": "",
       "bgm": "[音乐] night fadein 1.0",
       "sfx": "",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -64,7 +64,7 @@
       "stage": "",
       "bgm": "",
       "sfx": "[音效] door",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -92,10 +92,10 @@
       "speaker_name": "玛丽",
       "text": "别想了，今天我们还有正事。",
       "condition": "",
-      "stage": "show eileen sad at leftish; show mary smile at right",
+      "stage": "",
       "bgm": "[音乐] rain fadeout 2.0",
       "sfx": "",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -127,7 +127,7 @@
       "stage": "",
       "bgm": "[停止音乐]",
       "sfx": "",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -257,7 +257,7 @@
   "stage": [
     {
       "line_id": "ch01.0001",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -265,7 +265,7 @@
     },
     {
       "line_id": "ch01.0002",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen happy@leftish"
       ],
@@ -273,7 +273,7 @@
     },
     {
       "line_id": "ch01.0003",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -282,7 +282,7 @@
     },
     {
       "line_id": "ch01.0004",
-      "scene": "",
+      "scene": "bg classroom",
       "actors": [
         "eileen sad@leftish",
         "mary smile@right"

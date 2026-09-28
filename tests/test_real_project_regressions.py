@@ -15,16 +15,16 @@ tests/test_real_project_regressions.py
 
 import pytest
 
-from asset_registry import (
+from storygraph.assets.asset_registry import (
     AssetIndex, AssetRegistry, analyze_references, resolve_references,
 )
-from renpy_parser import (
+from storygraph.parsing.renpy_parser import (
     IncrementalRenPyAnalyzer, ParseResultBuilder, RenPyLexer, RenPyParser,
 )
-from script_table import (
+from storygraph.story.script_table import (
     _assign_identity, beats_from_parse_result, registry_from_parse_result,
 )
-from validate import (
+from storygraph.pipeline.validate import (
     resolve_asset_path, validate_all, validate_level1, validate_level3,
 )
 
@@ -186,7 +186,7 @@ class TestImageDeclarations:
     def test_no_false_unregistered(self, write_rpy):
         res = _parse(write_rpy, self.SRC)
         reg = registry_from_parse_result(res)
-        from script_table import apply_script_definitions
+        from storygraph.story.script_table import apply_script_definitions
         apply_script_definitions(reg, res)
         beats = beats_from_parse_result(res)
         issues = validate_level1(beats, reg)
@@ -294,7 +294,7 @@ class TestResolvePerformance:
 
 class TestValidationGrading:
     def test_empty_registry_gives_warnings_not_errors(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         reg = AssetRegistry()
         beats = [Beat(seq=1, label='a', text='x', speaker='ghost',
                       scene='bg nowhere')]
@@ -303,7 +303,7 @@ class TestValidationGrading:
         assert all(i.severity == 'warning' for i in issues)
 
     def test_managed_category_gives_error(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         reg = AssetRegistry()
         # tag 是全新的（表里没有）→ 错误
         reg.images = {'bg_room': {'ID': 'bg_room', 'Tag': 'bg'}}
@@ -312,7 +312,7 @@ class TestValidationGrading:
         assert any(i.code == 'E103' and i.severity == 'error' for i in issues)
 
     def test_audio_path_missing_is_warning(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         reg = AssetRegistry()
         reg.music = {'bgm_x': {'ID': 'bgm_x'}}
         beats = [Beat(seq=1, label='a', text='x', music='bgm/没有这个.mp3')]
@@ -332,7 +332,7 @@ class TestValidationGrading:
         assert resolve_asset_path(root, 'game/images/nope.png') is None
 
     def test_unreachable_skipped_without_entry(self):
-        from models import Graph
+        from storygraph.graph.models import Graph
         g = Graph()
         g.add_node('only_one', 0, 0)
         g.add_node('another', 10, 10)
@@ -342,7 +342,7 @@ class TestValidationGrading:
         assert 'W304' in codes              # 但要说明跳过了可达性检查
 
     def test_no_candidate_noise_when_no_assets(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         issues = validate_level1([Beat(seq=1, label='a', text='x')], None)
         assert issues == []
 
@@ -353,7 +353,7 @@ class TestValidationGrading:
 
 class TestStoryOps:
     def test_engine_code_filtered(self):
-        import story_ops
+        import storygraph.story.story_ops as story_ops
         assert not story_ops.is_narrative_code(
             'renpy.transition(Dissolve(0.1), layer="master")')
         assert not story_ops.is_narrative_code(
@@ -362,13 +362,13 @@ class TestStoryOps:
         assert not story_ops.is_narrative_code('import random')
 
     def test_narrative_variables_kept(self):
-        import story_ops
+        import storygraph.story.story_ops as story_ops
         for code in ('love += 1', 'flag = True', 'score = love + 1',
                      'route_a = 2'):
             assert story_ops.is_narrative_code(code), code
 
     def test_node_summary_and_grouping(self):
-        import story_ops
+        import storygraph.story.story_ops as story_ops
 
         class _N:
             operations = [
@@ -383,7 +383,7 @@ class TestStoryOps:
         assert grouped[0] == ('renpy.transition(Dissolve(0.1))', 3)
 
     def test_narrative_only_list(self):
-        import story_ops
+        import storygraph.story.story_ops as story_ops
 
         class _N:
             operations = ['a = 1', 'renpy.restart_interaction()']
@@ -439,7 +439,7 @@ def test_end_to_end_on_rich_project(tmp_path):
         '    return\n',
         encoding='utf-8')
 
-    from build import collect_report
+    from storygraph.pipeline.build import collect_report
     c = collect_report(tmp_path / 'proj')
     report = c['report']
     assert report.errors == [], [i.message for i in report.errors]
@@ -485,7 +485,7 @@ class TestCompilerAudioResolution:
         return reg
 
     def test_path_reference_resolves_to_asset_id(self):
-        from dsl import Symbols
+        from storygraph.story.dsl import Symbols
         sym = Symbols(self._reg())
         assert sym.audio_ok('music', 'bgm/bgm02.mp3') is True
         assert sym.audio_ok('music', 'pomodorro/music/cafe.ogg') is True
@@ -497,7 +497,7 @@ class TestCompilerAudioResolution:
 
     def test_ref_is_renpy_relative_not_table_path(self):
         """表里的 Path 带项目前缀，写进脚本前必须削成 game 相对路径。"""
-        from dsl import Symbols
+        from storygraph.story.dsl import Symbols
         sym = Symbols(self._reg())
         assert sym.audio_ref('music', 'bgm/bgm02.mp3') == 'bgm/bgm02.mp3'
         assert sym.audio_ref(
@@ -506,7 +506,7 @@ class TestCompilerAudioResolution:
 
     def test_no_todo_for_registered_path_reference(self):
         """端到端：登记过的路径引用不该产出 TODO，也不该漏出项目前缀。"""
-        from script_table import Beat, render_beats_to_rpy
+        from storygraph.story.script_table import Beat, render_beats_to_rpy
         reg = self._reg()
         beats = [Beat(seq=1, label='ch01', kind='say', speaker='jc',
                       text='第一章。', bgm='[音乐] bgm/bgm02.mp3 fadein 1.0')]
@@ -516,7 +516,7 @@ class TestCompilerAudioResolution:
         assert 'sr_general' not in text
 
     def test_missing_asset_still_todo(self):
-        from script_table import Beat, render_beats_to_rpy
+        from storygraph.story.script_table import Beat, render_beats_to_rpy
         beats = [Beat(seq=1, label='ch01', kind='say', speaker='jc',
                       text='第一章。', bgm='[音乐] bgm/ghost.mp3')]
         text = render_beats_to_rpy(beats, label_name='ch01',
@@ -527,7 +527,7 @@ class TestCompilerAudioResolution:
 
 def test_renpy_asset_path_strips_project_prefix():
     """`renpy_asset_path` 只削 `game/` 之前的部分，不做多余猜测。"""
-    from dsl import renpy_asset_path
+    from storygraph.story.dsl import renpy_asset_path
     assert renpy_asset_path('sr_general/game/bgm/x.mp3') == 'bgm/x.mp3'
     assert renpy_asset_path('game/images/bg/x.png') == 'images/bg/x.png'
     assert renpy_asset_path(r'sr_general\game\bgm\a b.mp3') == 'bgm/a b.mp3'

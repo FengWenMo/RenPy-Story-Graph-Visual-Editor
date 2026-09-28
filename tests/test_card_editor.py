@@ -20,14 +20,14 @@ tests/test_card_editor.py
 
 import pytest
 
-from beat_editor import (
+from storygraph.ui.beat_editor import (
     BeatEditorPanel, apply_expression, apply_position, apply_sprite_rows,
     beat_expression_word, beat_position_word, beat_sprite_rows,
     beat_to_fields, expression_choices, fields_to_beat,
     inherited_state_hint, normalize_expression, normalize_position,
     position_choices,
 )
-from script_table import Beat, make_symbols, render_beats_to_rpy
+from storygraph.story.script_table import Beat, make_symbols, render_beats_to_rpy
 
 
 @pytest.fixture
@@ -301,7 +301,7 @@ class TestSingleLineFieldsActuallyReceiveValues:
             return self.value if self.value is not None else ''
 
     def _panel_with_spies(self):
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         p = BeatEditorPanel.__new__(BeatEditorPanel)
         p._beat = None
@@ -336,7 +336,7 @@ class TestSingleLineFieldsActuallyReceiveValues:
 
         这一条盯的是"有人以后又把里 Entry 的 textvariable 拿掉"。
         """
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         single = [n for n in BeatEditorPanel._ORDER
                   if n not in ('Text', 'Stage', 'BGM', 'SFX', 'CodeBlock')]
@@ -351,7 +351,7 @@ class TestSingleLineFieldsActuallyReceiveValues:
         `tk.Entry` 没有这个方法——依赖它就会静默失败。
         这里断言"控件没有 set() 也照样能写"。
         """
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         p = self._panel_with_spies()
 
@@ -388,7 +388,7 @@ class TestOnlyTextEditIsSafe:
     @pytest.fixture
     def loaded(self):
         """模拟：面板载入一拍（含舞台/音频/语音），高级区**收起**。"""
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         class Probe(BeatEditorPanel):
             def __init__(self, beat):
@@ -549,7 +549,7 @@ class TestSpriteArray:
         实测踩过：`collect_beat` 里用空数组去覆盖 `b.show`，
         结果"打开一拍什么都不改、直接下一句"就把立绘抹掉了。
         """
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         b = Beat(seq=1, label='t', text='x', show='ling happy@left')
         p = BeatEditorPanel.__new__(BeatEditorPanel)
@@ -650,7 +650,7 @@ class TestConditionField:
 
     def test_card_loads_and_writes_condition(self, symbols):
         """卡片能把条件读进来、再写回 Beat，并真的渲染成 if。"""
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         b = Beat(seq=1, label='t', text='台词', speaker='e')
         p = BeatEditorPanel.__new__(BeatEditorPanel)
@@ -673,7 +673,7 @@ class TestConditionField:
         assert 'e "台词"' in render_beats_to_rpy([out])
 
     def test_card_clearing_condition_removes_if(self, symbols):
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         b = Beat(seq=1, label='t', text='台词', speaker='e',
                  condition='old > 1')
@@ -698,7 +698,7 @@ class TestConditionField:
 class TestChoices:
     def test_expression_choices_come_from_tag_attributes(self):
         """候选只取该 tag 声明过的属性，不给别的角色的表情。"""
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.images = {
             'ling_happy': {'ID': 'ling_happy', 'Tag': 'ling',
@@ -719,7 +719,7 @@ class TestChoices:
 
     def test_position_choices_include_custom_transforms(self):
         """自定义 transform 一定要在候选里——真实项目里 `i11` 比 `left` 用得多。"""
-        from asset_registry import AssetRegistry
+        from storygraph.assets.asset_registry import AssetRegistry
         reg = AssetRegistry()
         reg.transforms = {'i11': {'ID': 'i11', 'ATL': 'xpos 0.1'},
                           'leftish': {'ID': 'leftish', 'ATL': 'xpos 0.2'}}

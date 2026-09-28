@@ -16,8 +16,8 @@ tests/test_exporter.py
 
 import pytest
 
-from models import Graph
-from renpy_exporter import export_to_renpy
+from storygraph.graph.models import Graph
+from storygraph.pipeline.renpy_exporter import export_to_renpy
 
 
 @pytest.fixture

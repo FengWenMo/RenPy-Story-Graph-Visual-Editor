@@ -9,9 +9,9 @@ tests/test_scale_scenario.py
 
 import pytest
 
-from asset_registry import scan_assets, write_asset_excel
-from asset_engine import AssetEngine
-from asset_events import AssetEventBus, AssetEventType, ConfirmationGate
+from storygraph.assets.asset_registry import scan_assets, write_asset_excel
+from storygraph.assets.asset_engine import AssetEngine
+from storygraph.assets.asset_events import AssetEventBus, AssetEventType, ConfirmationGate
 
 
 BG_COUNT = 200
@@ -169,7 +169,7 @@ class TestDiagnosticsAreNotSpammy:
 class TestScriptTableAtScale:
     def test_chapter_roundtrip(self, big_project, tmp_path):
         """整章摊成表格再生成脚本，句子数不能变。"""
-        from script_table import (
+        from storygraph.story.script_table import (
             open_rpy_as_table, import_beats_from_excel,
             render_beats_to_rpy,
         )
@@ -188,8 +188,8 @@ class TestScriptTableAtScale:
         assert 'play music bgm_theme' in text
 
     def test_generated_script_is_reparsable(self, big_project, tmp_path):
-        from renpy_parser import RenPyParser
-        from script_table import (
+        from storygraph.parsing.renpy_parser import RenPyParser
+        from storygraph.story.script_table import (
             open_rpy_as_table, import_beats_from_excel, write_beats_to_rpy,
         )
         table = open_rpy_as_table(big_project['script'],

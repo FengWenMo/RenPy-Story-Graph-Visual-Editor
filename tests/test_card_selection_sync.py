@@ -14,8 +14,8 @@ tests/test_card_selection_sync.py
 
 import pytest
 
-from beat_editor import ScriptTableEditorWindow
-from script_table import Beat
+from storygraph.ui.beat_editor import ScriptTableEditorWindow
+from storygraph.story.script_table import Beat
 
 
 class _FakeList:
@@ -79,7 +79,7 @@ class _FakePanel:
 
 def _window(beats):
     """绕开 tkinter 建一个只有内部状态的窗口对象。"""
-    from beat_editor import ScriptTableEditorWindow as W
+    from storygraph.ui.beat_editor import ScriptTableEditorWindow as W
     w = W.__new__(W)
     w.beats = beats
     w.rotation = []

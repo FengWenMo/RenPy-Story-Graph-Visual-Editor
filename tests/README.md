@@ -23,41 +23,68 @@ python -m pytest tests/test_renpy_parser.py -v
 
 ## 项目结构梳理
 
+> **2026-09-28 变更**：原先 33 个模块**扁平铺在项目根**，已装进
+> `storygraph/` 包并按功能分层。测试里凡是要"扫源码"的地方，
+> 一律走 `tests/_source_paths.py` 的 `module_source('storygraph.x.y')`，
+> 不要再硬编码相对路径（当天就有 12 个用例因此失效）。
+
 ```
-main.py                     入口：Graph + GraphView
-│
-├─ 数据层
-│   models.py               Node / Edge / Graph（含深拷贝）
-│   commands.py             Command 模式 + HistoryManager（撤销/重做）
-│   layout.py               分层有向图自动布局（Sugiyama 变体）
+main.py / cli.py            根目录垫片（真实实现在 storygraph/ 里，逻辑一份）
+storygraph/
+├─ core/                    零依赖地基
+│   statement.py            Statement IR（.rpy ↔ Excel 中枢）
+│   uid.py                  翻译单元 uid 拼接唯一真源
+│   vocabulary.py           共享词表唯一真源（资产类型/非角色 tag/内置变换）
 │   utils.py                变量提取（AST）
 │
-├─ 解析 / 导出
-│   renpy_parser.py         Lexer → AST → ParseResult / Graph / 翻译单元
-│   renpy_exporter.py       Graph → 可运行的 .rpy 控制流
-│   core/statement.py       Statement 类型系统与内容哈希契约
-│   core/uid.py             翻译单元 uid 拼接的唯一真源
+├─ excel/
+│   cells.py                安全写单元格（`=` 开头当文本，别被 Excel 当公式）
 │
-├─ 分析
-│   analysis.py             变量区间抽象 + 可达性分析
+├─ parsing/
+│   renpy_parser.py         Lexer → AST → ParseResult(Statement 流) / 翻译单元
+│   discover.py             扫出该被构建的 .rpy（门禁与构建共用）
+│   character_script_linker.py  角色 ↔ 剧本 ↔ 翻译 三层索引
 │
-└─ 资产链路（Excel 双向联通主线）
-    asset_registry.py       扫描 / Excel 读写 / 解析 / 校验 / 引用分析
-    asset_events.py         事件总线 + 文件监听 + 确认闸门
-    asset_engine.py         编排层：脏标记 → poll → 变更 → 脚本补丁
-    asset_extensions.py     快照 / 变更追踪 / 依赖分析 / 重命名补丁 / 补全
-    character_script_linker.py  角色 ↔ 剧本 ↔ 翻译 三层索引
-    asset_panel.py          UI 数据源
-    asset_completion.py     上下文感知补全
-    graph_view.py           tkinter 画布（未覆盖，需要真实 GUI）
+├─ assets/
+│   asset_registry.py       扫描 / 资源表读写 / 引用判定唯一真源
+│   asset_events.py         事件总线 + 文件监听 + 确认闸门
+│   asset_engine.py         编排层：脏标记 → poll → 变更 → 脚本补丁
+│   asset_extensions.py     快照 / 变更追踪 / 依赖分析 / 重命名补丁 / 补全(缓存版)
+│   asset_completion.py     上下文感知补全（实时版；打分排序与上面共用）
+│
+├─ story/                   （原 3.8k 行的 script_table 按职责拆成 7 个模块）
+│   beat_model.py           Beat 数据结构 + 列契约 + 单元格编解码
+│   beat_build.py           .rpy / DSL → Beat
+│   beat_render.py          Beat → Ren'Py 代码
+│   excel_export.py         Beat → Excel（主表 + 派生视图 + 图库/缩略图）
+│   excel_import.py         Excel → Beat
+│   generation_guard.py     生成安全门禁 + 落盘
+│   paths.py                项目路径判定（门禁与缩略图共用）
+│   script_table.py         **兼容门面**（re-export，老 import 不用改）
+│   dsl.py                  单元格人话 ⇄ Ren'Py 代码（唯一翻译层）
+│   stage_snapshot.py       舞台快照 / 演出时间轴（派生视图）
+│   story_ops.py            剧情变量 vs 引擎代码
+│
+├─ pipeline/
+│   build.py                体检（collect_report）/ 构建（build_project）
+│   validate.py             三级校验（L1 单条 / L2 表内 / L3 全库）
+│   compile.py              演出表 → .rpy + 编译结果表（同源）
+│   engine_exporters.py     中立 IR → Unity / Godot / CSV
+│   renpy_exporter.py       Graph → .rpy（保真，不过滤）
+│
+├─ graph/                   Node/Edge/Graph、Command、布局、区间分析
+├─ ui/                      tkinter 层（graph_view / beat_editor / asset_panel）
+└─ collab/collab_store.py   SQLite 协作后端（行锁/冲突/状态机/审计）
+
+legacy/                     归档的单文件老版本（不参与构建）
 ```
 
 数据流：
 
 ```
-.rpy ──parse──▶ AST ──┬──▶ ParseResult ──▶ CharacterScriptLinker
-                      └──▶ Graph ──▶ layout / analysis / export
-.xlsm ──parse──▶ AssetRegistry ──diff──▶ 变更 ──补丁──▶ .rpy
+.rpy ──parse──▶ AST ──▶ ParseResult(Statement 流) ──┬──▶ Graph ──▶ layout/analysis/export
+                                                    └──▶ Beat ──▶ Excel ⇄ DSL 编译 ──▶ .rpy
+.xlsx ──parse──▶ AssetRegistry ──diff──▶ 变更 ──补丁──▶ .rpy
 ```
 
 ---

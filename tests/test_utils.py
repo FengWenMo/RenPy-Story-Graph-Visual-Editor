@@ -10,8 +10,8 @@ utils.extract_variables / collect_all_variables 测试。
   · 无法解析返回空列表（不是抛异常）
 """
 
-from models import Graph
-from utils import extract_variables, collect_all_variables
+from storygraph.graph.models import Graph
+from storygraph.core.utils import extract_variables, collect_all_variables
 
 
 class TestExtractVariables:

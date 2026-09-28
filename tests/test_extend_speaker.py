@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pytest
 
-from renpy_parser import ParseResultBuilder, RenPyParser
-from script_table import (
+from storygraph.parsing.renpy_parser import ParseResultBuilder, RenPyParser
+from storygraph.story.script_table import (
     KIND_EXTEND, KIND_NARRATION, beats_from_parse_result,
     render_beats_to_rpy,
 )
@@ -230,7 +230,7 @@ class TestSpeakerMissingGuard:
     """
 
     def _probe(self):
-        from beat_editor import BeatEditorPanel
+        from storygraph.ui.beat_editor import BeatEditorPanel
 
         class Probe(BeatEditorPanel):
             def __init__(self):
@@ -242,14 +242,14 @@ class TestSpeakerMissingGuard:
         return Probe()
 
     def test_warns_when_say_has_no_speaker(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         p = self._probe()
         p._warn_if_speaker_missing(
             Beat(seq=1, kind='say', speaker='', text='有台词'))
         assert p.note and '旁白' in p.note
 
     def test_silent_when_speaker_present(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         p = self._probe()
         p._warn_if_speaker_missing(
             Beat(seq=1, kind='say', speaker='jc', text='有台词'))
@@ -257,7 +257,7 @@ class TestSpeakerMissingGuard:
 
     def test_silent_for_narration(self):
         """旁白本来就该没有说话人，别吵。"""
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         p = self._probe()
         p._warn_if_speaker_missing(
             Beat(seq=1, kind=KIND_NARRATION, speaker='', text='旁白'))
@@ -265,14 +265,14 @@ class TestSpeakerMissingGuard:
 
     def test_silent_for_extend(self):
         """`extend` 本来就不带说话人（续上一句），别吵。"""
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         p = self._probe()
         p._warn_if_speaker_missing(
             Beat(seq=1, kind=KIND_EXTEND, speaker='', text='续句'))
         assert p.note == ''
 
     def test_silent_when_no_text(self):
-        from script_table import Beat
+        from storygraph.story.script_table import Beat
         p = self._probe()
         p._warn_if_speaker_missing(Beat(seq=1, kind='say', speaker='', text=''))
         assert p.note == ''

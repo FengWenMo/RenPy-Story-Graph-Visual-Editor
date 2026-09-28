@@ -12,8 +12,8 @@ tests/test_layout.py
   · DAG 上，边的源层严格小于目标层
 """
 
-from models import Graph
-from layout import layout_graph
+from storygraph.graph.models import Graph
+from storygraph.graph.layout import layout_graph
 
 
 def _layers(graph, start_id=None):

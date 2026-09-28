@@ -27,7 +27,7 @@
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
       "stage": {
-        "background": "",
+        "background": "bg classroom",
         "poses": [
           "eileen happy@leftish"
         ],
@@ -47,7 +47,7 @@
       "text": "还行，就是雨下了一整晚。",
       "condition": "",
       "stage": {
-        "background": "",
+        "background": "bg classroom",
         "poses": [
           "eileen happy@leftish"
         ],
@@ -67,7 +67,7 @@
       "text": "别想了，今天我们还有正事。",
       "condition": "",
       "stage": {
-        "background": "",
+        "background": "bg classroom",
         "poses": [
           "eileen sad@leftish",
           "mary smile@right"
@@ -88,7 +88,7 @@
       "text": "",
       "condition": "",
       "stage": {
-        "background": "",
+        "background": "bg classroom",
         "poses": [
           "eileen sad@leftish",
           "mary smile@right"

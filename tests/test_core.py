@@ -11,8 +11,8 @@ core.statement 与 core.uid 的单元测试。
   · uid 拼接规则：非 \\w 替换、空 label、空 hash
 """
 
-from core.statement import Statement, StatementKind, validate_statement
-from core.uid import sanitize_label, make_translation_uid
+from storygraph.core.statement import Statement, StatementKind, validate_statement
+from storygraph.core.uid import sanitize_label, make_translation_uid
 
 
 # ------------------------------------------------------------------

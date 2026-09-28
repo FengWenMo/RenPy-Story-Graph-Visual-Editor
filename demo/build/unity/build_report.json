@@ -45,7 +45,7 @@
     "ok": true,
     "engine": "unity",
     "strict": false,
-    "generated_at": "2026-09-27T18:20:08",
+    "generated_at": "2026-09-28T16:16:25",
     "stats": {
       "scripts": [
         "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\game\\script\\ch01.rpy"
@@ -67,6 +67,7 @@
       "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\unity\\story_ir.json",
       "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\unity\\UnityDialogueData.json",
       "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\unity\\UNITY_IMPORT.md"
-    ]
+    ],
+    "guard": {}
   }
 }

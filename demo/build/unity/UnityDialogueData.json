@@ -27,7 +27,7 @@
       "speakerName": "爱莲",
       "text": "早上好，昨晚睡得好吗？",
       "condition": "",
-      "background": "",
+      "background": "bg classroom",
       "poses": [
         "eileen happy@leftish"
       ],
@@ -47,7 +47,7 @@
       "speakerName": "玛丽",
       "text": "还行，就是雨下了一整晚。",
       "condition": "",
-      "background": "",
+      "background": "bg classroom",
       "poses": [
         "eileen happy@leftish"
       ],
@@ -67,7 +67,7 @@
       "speakerName": "玛丽",
       "text": "别想了，今天我们还有正事。",
       "condition": "",
-      "background": "",
+      "background": "bg classroom",
       "poses": [
         "eileen sad@leftish",
         "mary smile@right"
@@ -88,7 +88,7 @@
       "speakerName": "",
       "text": "",
       "condition": "",
-      "background": "",
+      "background": "bg classroom",
       "poses": [
         "eileen sad@leftish",
         "mary smile@right"

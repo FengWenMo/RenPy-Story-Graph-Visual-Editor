@@ -16,19 +16,19 @@ def test_graph_view_imports_without_real_tkinter():
     """
     无 GUI 环境下模块仍应可导入，否则 CI 上连语法回归都跑不了。
     """
-    import graph_view
+    import storygraph.ui.graph_view as graph_view
     assert hasattr(graph_view, 'GraphView')
     assert hasattr(graph_view, '_open_with_system_default')
 
 
 class TestOpenWithSystemDefault:
     def test_missing_file_returns_false(self, tmp_path):
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
         assert graph_view._open_with_system_default(
             tmp_path / 'nope.xlsx') is False
 
     def test_existing_file_invokes_opener(self, tmp_path, monkeypatch):
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
 
         calls = []
 
@@ -50,7 +50,7 @@ class TestOpenWithSystemDefault:
 
     def test_opener_exception_returns_false(self, tmp_path, monkeypatch):
         """唤起失败要如实上报，调用方才能提示用户手动打开。"""
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
 
         def boom(cmd, *a, **k):
             raise OSError('no opener')
@@ -69,7 +69,7 @@ class TestOpenWithSystemDefault:
 
 def test_editor_utils_opens_existing_file(monkeypatch, tmp_path):
     """open_file_at_line 对存在的文件不应弹错误框。"""
-    import editor_utils
+    import storygraph.graph.editor_utils as editor_utils
     import tkinter.messagebox as mb
 
     calls = []
@@ -87,7 +87,7 @@ def test_editor_utils_opens_existing_file(monkeypatch, tmp_path):
 
 
 def test_editor_utils_reports_missing_file(monkeypatch, tmp_path):
-    import editor_utils
+    import storygraph.graph.editor_utils as editor_utils
     import tkinter.messagebox as mb
 
     calls = []
@@ -149,12 +149,24 @@ class TestUiWiring:
 
     def test_graph_view_commands_all_exist(self):
         from pathlib import Path
-        import graph_view
+        import storygraph.ui.graph_view as graph_view
         missing = self._missing(Path(graph_view.__file__))
         assert missing == [], f'按钮/菜单指向了不存在的方法：{missing}'
 
-    def test_main_entry_commands_all_exist(self):
-        from pathlib import Path
-        import RenPy_Story_Graph_Visual_Editor as legacy
-        missing = self._missing(Path(legacy.__file__))
-        assert missing == [], f'遗留单文件版同样有悬空 command：{missing}'
+    def test_legacy_editor_commands_all_exist(self):
+        """
+        遗留单文件版已归档到 `legacy/`（**不在包里、不参与构建**），
+        但仍留在仓库里供参考，所以保留这条静态检查：万一有人从归档里
+        把代码复制回去，悬空 `command=` 会被当场发现。
+
+        2026-09-28：以前这里是 `import RenPy_Story_Graph_Visual_Editor`
+        （靠根目录在 sys.path 上），归档后该 import 不再成立 ——
+        改为按归档路径读源码。
+        """
+        from _source_paths import legacy_editor_source
+
+        path = legacy_editor_source()
+        if not path.exists():
+            pytest.skip('遗留单文件版已移除')
+        missing = self._missing(path)
+        assert missing == [], f'遗留单文件版有悬空 command：{missing}'

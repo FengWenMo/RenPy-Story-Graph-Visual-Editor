@@ -4,7 +4,7 @@ tests/conftest.py
 pytest 全局夹具。
 
 职责：
-  · 把项目根目录加入 sys.path（源码是扁平导入，不是包结构）
+  · 把项目根目录加入 sys.path（源码是 `storygraph` 包，放在项目根下）
   · 在无 GUI 环境下为 tkinter 提供桩，保证 commands / exporter / panel 可导入
   · 提供写 .rpy 临时文件的工厂 fixture
 """
@@ -159,7 +159,7 @@ def asset_env(tmp_path):
 
     返回 dict(project_root, asset_dir, game_dir)。
     """
-    from asset_registry import write_asset_excel
+    from storygraph.assets.asset_registry import write_asset_excel
 
     project = tmp_path / 'project'
     game = project / 'game'

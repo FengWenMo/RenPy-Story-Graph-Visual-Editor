@@ -9,9 +9,9 @@ UI 数据源层（asset_panel / asset_completion）测试。
 
 import pytest
 
-from asset_registry import AssetRegistry
-from asset_panel import AssetPanelData
-from asset_completion import AssetCompletion
+from storygraph.assets.asset_registry import AssetRegistry
+from storygraph.ui.asset_panel import AssetPanelData
+from storygraph.assets.asset_completion import AssetCompletion
 
 
 @pytest.fixture
@@ -134,7 +134,7 @@ class TestPanelData:
         assert stats['unused_assets'] == 1
 
     def test_statistics_with_parse_result(self, registry, write_rpy):
-        from renpy_parser import RenPyParser, ParseResultBuilder
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy('label a:\n    e "hi"\n')
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
         panel = AssetPanelData(FakeEngine(registry, parse_result=result))

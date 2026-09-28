@@ -45,7 +45,7 @@
     "ok": true,
     "engine": "json",
     "strict": false,
-    "generated_at": "2026-09-27T18:20:08",
+    "generated_at": "2026-09-28T16:16:26",
     "stats": {
       "scripts": [
         "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\game\\script\\ch01.rpy"
@@ -65,6 +65,7 @@
     },
     "artifacts": [
       "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\report\\story_ir.json"
-    ]
+    ],
+    "guard": {}
   }
 }

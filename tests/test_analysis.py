@@ -16,8 +16,8 @@ import math
 
 import pytest
 
-from models import Graph
-from analysis import (
+from storygraph.graph.models import Graph
+from storygraph.graph.analysis import (
     ValueRange, VariableState, IntervalEvaluator,
     apply_operation, condition_possible, apply_condition,
     analyze_reachability, visualize_analysis_results,

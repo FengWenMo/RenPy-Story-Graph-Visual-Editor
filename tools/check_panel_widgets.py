@@ -25,9 +25,9 @@ sys.path.insert(0, str(ROOT))
 
 import tkinter as tk                                                # noqa: E402
 
-from beat_editor import BeatEditorPanel, beat_to_fields             # noqa: E402
-from renpy_parser import ParseResultBuilder, RenPyParser            # noqa: E402
-from script_table import (                                          # noqa: E402
+from storygraph.ui.beat_editor import BeatEditorPanel, beat_to_fields             # noqa: E402
+from storygraph.parsing.renpy_parser import ParseResultBuilder, RenPyParser            # noqa: E402
+from storygraph.story.script_table import (                                          # noqa: E402
     Beat, beats_from_parse_result, compose_stage, make_symbols,
 )
 

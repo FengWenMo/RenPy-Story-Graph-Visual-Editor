@@ -13,7 +13,7 @@ tests/test_asset_registry.py
 
 import pytest
 
-from asset_registry import (
+from storygraph.assets.asset_registry import (
     AssetRegistry, scan_assets, write_asset_excel, parse_asset_tables,
     read_excel_rows, validate_registry, analyze_references, load_hooks,
     _detect_category, _make_unique_id,
@@ -210,7 +210,7 @@ class TestExcelIO:
 
 class TestParseAssetTables:
     def _write(self, asset_dir, rows, filename='images.xlsx'):
-        from asset_registry import write_dict_to_excel
+        from storygraph.assets.asset_registry import write_dict_to_excel
         data = {r['ID']: r for r in rows}
         write_dict_to_excel(asset_dir / filename, data,
                             list(rows[0].keys()))
