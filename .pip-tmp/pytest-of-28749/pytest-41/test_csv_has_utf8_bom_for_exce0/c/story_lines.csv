@@ -1,3 +1,0 @@
-﻿line_id,label,seq,kind,speaker,speaker_name,text,condition,scene,actors,music,sound,voice,line_hash
-a.0001,a,1,say,,,开场,,bg classroom,,bgm_night,,,5e1fde8b82
-a.0002,a,2,say,e,Eileen,你好。,,bg classroom,eileen happy@leftish,bgm_night,,,bf48458dce

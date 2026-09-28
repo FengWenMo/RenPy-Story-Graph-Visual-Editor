@@ -1,2 +1,0 @@
-label start:
-    "hi"

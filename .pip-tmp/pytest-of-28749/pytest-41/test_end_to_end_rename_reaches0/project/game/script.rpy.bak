@@ -1,4 +1,0 @@
-define meiko = Character("Meiko")
-label start:
-    meiko "hello"
-    return

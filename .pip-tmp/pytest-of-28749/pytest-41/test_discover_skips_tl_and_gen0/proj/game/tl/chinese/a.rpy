@@ -1,2 +1,0 @@
-translate chinese x:
-    pass

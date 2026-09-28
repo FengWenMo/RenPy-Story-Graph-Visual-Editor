@@ -1,2 +1,0 @@
-label a:
-    scene bg
