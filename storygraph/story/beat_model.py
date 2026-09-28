@@ -16,17 +16,7 @@ storygraph.story.beat_model
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from io import BytesIO
-from pathlib import Path
-from typing import Iterable, Optional
-import openpyxl
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
-from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from typing import Optional
 
 
 
@@ -79,6 +69,8 @@ BEAT_HEADERS = {
 }
 
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
+# 兼容英文表头（旧表 / 程序自己生成的表）
+_HEADER_ALIASES.update({f: f for f in BEAT_FIELDS})
 
 
 # 需要下拉框的列 -> 资产类型。

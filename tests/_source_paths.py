@@ -15,9 +15,21 @@ tests/_source_paths.py
 
 import importlib
 import inspect
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+#: 真实项目验收对象（本机是 `sr_general`：40 个脚本 / 2900 张图 / 146 个变换）。
+#:
+#: 换机器时用环境变量指到自己那份，相关用例就不会静默 skip：
+#:     Windows:  set STORYGRAPH_REAL_PROJECT=D:\path\to\my_renpy_project
+#:     bash:     export STORYGRAPH_REAL_PROJECT=/path/to/my_renpy_project
+REAL_PROJECT = Path(os.environ.get(
+    'STORYGRAPH_REAL_PROJECT', r'D:\千连万理\RenPyTest\sr_general'))
+
+#: 真实项目里的"保真基准章节"：一批用例拿它当固定输入。
+REAL_CHAPTER = REAL_PROJECT / 'game' / 'chapter' / 'chapter1_3.rpy'
 
 
 def module_source(dotted: str) -> Path:

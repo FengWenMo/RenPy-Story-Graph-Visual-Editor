@@ -145,7 +145,11 @@ class TestRealChapterCardMatchesGenerated:
       · **语义**：快照里出现的每个立绘，都能在代码里找到对应 show。
     """
 
-    REAL = (r'D:\千连万理\RenPyTest\sr_general\game\chapter\chapter1_3.rpy')
+    # 真实项目路径统一从 `_source_paths` 取（可用环境变量
+    # STORYGRAPH_REAL_PROJECT 覆盖，换机器不必改代码）
+    from _source_paths import REAL_CHAPTER
+
+    REAL = str(REAL_CHAPTER)
 
     def _load(self):
         from pathlib import Path

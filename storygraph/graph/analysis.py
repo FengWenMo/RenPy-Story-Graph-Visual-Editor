@@ -2,7 +2,6 @@
 import math
 import ast
 import re
-from storygraph.graph.models import Graph
 from storygraph.core.utils import extract_variables, collect_all_variables
 
 

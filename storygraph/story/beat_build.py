@@ -14,71 +14,27 @@ storygraph.story.beat_build
 """
 
 from __future__ import annotations
-import re
-from dataclasses import dataclass, field
-from io import BytesIO
-from pathlib import Path
 from typing import Iterable, Optional
-import openpyxl
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
 from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
 
-from storygraph.story.beat_model import (  # noqa: F401
-    ACTION_COLUMNS,
-    ACTION_HINTS,
-    AUDIO_PSEUDO,
-    BEAT_FIELDS,
-    BEAT_HEADERS,
+from storygraph.story.beat_model import (
     Beat,
-    DROPDOWN_COLUMNS,
-    HIDDEN_BEAT_COLUMNS,
     KIND_EXTEND,
     KIND_MENU,
     KIND_MENU_OPTION,
     KIND_NARRATION,
     KIND_SAY,
-    LEGACY_AUDIO_COLUMNS,
-    LEGACY_STAGE_COLUMNS,
-    _AUDIO_PSEUDO_REVERSE,
-    _HEADER_ALIASES,
-    _NATIVE_TAIL_RE,
-    _RENPY_STATEMENT_HEADS,
-    _SHOW_ARG_KEYWORDS,
     _append_line,
     _assign_identity,
     _audio_params,
-    _beat_content_hash,
-    _clause_image,
-    _fill_audio_from_cells,
-    _fill_audio_legacy,
-    _fmt_seconds,
-    _is_bare_renpy_verb,
     _join_hide_items,
     _join_show_items,
-    _looks_like_renpy_statement,
-    _ordered_code_lines,
     _parse_native_stage_tail,
-    _show_clause_args,
     _show_item_text,
-    _spec_at,
-    _spec_image,
-    _split_code_cell,
     _split_hide_items,
     _split_lines,
     _split_show_items,
-    _split_spec_list,
-    compose_audio_cell,
     compose_audio_text,
-    compose_code,
-    compose_hide_cell,
-    compose_scene_cell,
-    compose_show_cell,
-    compose_stage,
     compose_stage_extra,
 )
 
@@ -366,7 +322,8 @@ def hydrate_from_dsl(beats: list, symbols) -> list:
     幂等：同一段原文只解释一次（`_hydrated_stage` 记着上次处理过的文本），
     否则 import → compile 两次 hydrate 会把立绘输出两遍。
     """
-    from storygraph.story.dsl import parse_stage, parse_audio, Symbols, Audit, TODO
+    from storygraph.story.dsl import (Audit, Symbols, parse_audio,
+                                      parse_stage)
 
     symbols = symbols if isinstance(symbols, Symbols) else Symbols(symbols)
     audit = Audit(symbols)
@@ -541,14 +498,29 @@ def apply_script_definitions(registry, parse_result) -> dict:
       · `transform bounce_quick:` → 变换清单（否则表格里选不到自定义变换）
       · `define x = DynamicCharacter(...)` → 角色清单
 
-    已登记的同名条目**不覆盖**（人在表里写的说明/分类是权威），只补空缺。
+    合并策略分两种，因为"谁权威"本来就不同：
 
-    返回 {'images': n, 'transforms': n, 'characters': n} 表示各类新增数量。
+      · **新增**：表里没有的条目直接加进来；
+      · **更新**：`transform` 的 `ATL` / `Params` / `Doc` 以**脚本为准**
+        （脚本里定义了这个 transform，它的定义就是权威）。
+
+    为什么要有第二种：原先对已登记条目一律"只补空缺"，于是**改了 .rpy 里的
+    定义、表格永远不跟着变**；更糟的是，解析器历史上写坏的旧 ATL 会被永久
+    固化在表里（2026-09-28 实测：`    #anchor(0.5, 0.5)` 被啃成
+    `    hor(0.5, 0.5)` 落进 transforms.xlsx，解析器修好后产物依旧是错的）。
+
+    其余字段不动：人写的 `Category` / `Notes` 保留；`image` / `character`
+    仍"只补空缺"（显示名之类可能被人改过）。
+
+    返回 `{'images': n, 'transforms': n, 'characters': n, 'updated': n}`：
+    前三个是**新增**数量，`updated` 是**被脚本改写的字段数**（调用方据此判断
+    "要不要落盘"——只更新时也得写）。
     """
     if registry is None or parse_result is None:
-        return {'images': 0, 'transforms': 0, 'characters': 0}
+        return {'images': 0, 'transforms': 0, 'characters': 0, 'updated': 0}
 
     added = {'images': 0, 'transforms': 0, 'characters': 0}
+    updated = 0
 
     # ---------- 图像声明 ----------
     for name, info in (getattr(parse_result, 'images', {}) or {}).items():
@@ -616,11 +588,13 @@ def apply_script_definitions(registry, parse_result) -> dict:
         }
         if name in registry.transforms:
             existing = registry.transforms[name]
-            for key, val in row.items():
-                if key.startswith('_'):
-                    continue
-                if not existing.get(key) and val:
+            # 脚本是 ATL / Params / Doc 的权威来源：**值不同就更新**（见 docstring）
+            for key in ('ATL', 'Params', 'Doc'):
+                val = row.get(key)
+                if val and existing.get(key) != val:
                     existing[key] = val
+                    updated += 1
+            existing.setdefault('_from_script', True)
         else:
             registry.transforms[name] = row
             added['transforms'] += 1
@@ -659,6 +633,7 @@ def apply_script_definitions(registry, parse_result) -> dict:
             registry.characters[var] = row
             added['characters'] += 1
 
+    added['updated'] = updated
     return added
 
 

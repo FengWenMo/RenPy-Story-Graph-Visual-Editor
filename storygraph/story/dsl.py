@@ -39,7 +39,6 @@ from storygraph.core.vocabulary import (
     ASSET_TYPE_ATTR,
     AUDIO_TYPE_ATTR,
     NON_ACTOR_TAGS,
-    NON_ACTOR_SHOW_TARGETS as _NOT_ACTOR_TARGETS,
 )
 
 # ---------------------------------------------------------------------------

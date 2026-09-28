@@ -20,19 +20,7 @@ storygraph.story.script_table —— 剧本演出表（**兼容门面**）
 """
 
 from __future__ import annotations
-import re
-from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
-from typing import Iterable, Optional
-import openpyxl
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
-from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
 
 from storygraph.story.beat_build import (  # noqa: F401
     _absorb_native,
@@ -195,15 +183,8 @@ from storygraph.excel.cells import (  # noqa: F401
 
 
 
-# ===================== 写单元格的安全封装 =====================
-#
-# 实现已收敛到 `storygraph.excel.cells`（唯一真源）：这段逻辑曾在
-# script_table / asset_registry / compile 三处各写一份，行为开始漂移。
-# 这里以别名导入，保持本模块内 20+ 个调用点写法不变。
-
-_set_text = set_text
-
-_append_text_row = append_text_row
+# 写单元格的安全封装：唯一实现在 `storygraph.excel.cells`，
+# 本模块顶部已以 `_set_text` / `_append_text_row` 别名导入（见 re-export 区）。
 
 
 

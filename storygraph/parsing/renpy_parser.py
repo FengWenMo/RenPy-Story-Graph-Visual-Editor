@@ -293,8 +293,16 @@ class RenPyLexer:
             indent = len(raw) - len(raw.lstrip())
 
             # 整行注释：保留（含前导 '#'），供"标注/待办"类信息往返。
+            #
+            # 存**含缩进的原文**（`raw`），不能存 `stripped`：
+            # `_render_block_source` 按 `ln.text[ln.indent:]` 还原块体，
+            # 若这里已经去掉缩进，缩进就会被扣两次、吃掉注释开头的字符——
+            # 真实事故（2026-09-28，sr_general 的 transform.rpy）：
+            # `    #anchor(0.5, 0.5)` 变成 `    hor(0.5, 0.5)`，
+            # **注释的 `#` 被吃掉、变成了非法 ATL 代码**，产物跑不起来。
+            # 消费方（CommentNode / pending_comments）本来就用 `.strip()` 取文本。
             if stripped.startswith('#'):
-                flat.append((stripped, line_no, indent, True))
+                flat.append((raw, line_no, indent, True))
                 i += 1
                 continue
 
@@ -2753,7 +2761,7 @@ if __name__ == "__main__":
     analyzer = IncrementalRenPyAnalyzer()
     result, graph = analyzer.analyze(scripts)
 
-    print(f"=== 首次解析 ===")
+    print("=== 首次解析 ===")
     print(f"文件数:    {len(scripts)}")
     print(f"角色定义:  {len(result.characters)}")
     print(f"对话行数:  {len(result.dialogues)}")
@@ -2762,21 +2770,21 @@ if __name__ == "__main__":
     print(f"错误:      {len(result.errors)}")
     print(f"警告:      {len(result.warnings)}")
 
-    print(f"\n=== 角色 ===")
+    print("\n=== 角色 ===")
     for var, ch in sorted(result.characters.items(),
                           key=lambda x: -x[1].dialogue_count):
         print(f"  {var}: {ch.display_name}  ({ch.dialogue_count} 行)")
 
-    print(f"\n=== 翻译单元（前5）===")
+    print("\n=== 翻译单元（前5）===")
     for tu in result.translation_units[:5]:
         print(f"  {tu.identifier}  @ {tu.label}")
 
     if graph is not None:
-        print(f"\n=== 控制流 ===")
+        print("\n=== 控制流 ===")
         print(f"节点: {len(graph.nodes)}, 边: {len(graph.edges)}")
 
     result2, graph2 = analyzer.analyze(scripts, graph=graph)
-    print(f"\n=== 二次解析（缓存命中）===")
+    print("\n=== 二次解析（缓存命中）===")
     print(f"错误:      {len(result2.errors)}  (应与首次一致)")
     print(f"警告:      {len(result2.warnings)}  (应与首次一致)")
     print(f"缓存:      {analyzer.stats()['cached_files']} 个文件")

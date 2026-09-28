@@ -26,9 +26,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Optional
 
-from storygraph.story.beat_model import BEAT_FIELDS
 from storygraph.story.stage_snapshot import stage_snapshots
 
 SCHEMA_VERSION = '1.0'

@@ -27,7 +27,13 @@
 13. `LineId` 是协作主键；`ContentHash` 每次按当前内容重算
 14. **依赖方向单向**：core ← parsing/excel ← assets/story ← pipeline ← ui。
     story 层不许顶层 import pipeline（需要时走 script_table 的 `__getattr__` 转发）
-15. 改中文 `.py` 只能用编辑工具或 Python 脚本（PowerShell 会 GBK 往返毁文件）
+15. **整行注释必须保真**：lexer 存的是**含缩进**的原文
+    （`_render_block_source` 按 `text[indent:]` 还原块体；存 stripped 会
+    双重去缩进，把注释啃成非法代码——真实项目踩过 4 条 transform）
+16. **transform 的 `ATL`/`Params`/`Doc` 以脚本为权威**：脚本改了定义，资源表
+    要跟着更新（`append_rows_to_table(update_keys=...)`）；人写的
+    `Category`/`Notes` 一律不动
+17. 改中文 `.py` 只能用编辑工具或 Python 脚本（PowerShell 会 GBK 往返毁文件）
 
 ## 二、仓库与运行（稳定事实）
 
@@ -56,13 +62,19 @@
 4. "程序改代码 → 表格自动反映" = 1.5s 全目录轮询 + 全量重解析；
    `asset_engine._apply_rename_patch` 会**正则改写用户的 .rpy**（改名靠编辑距离推断）
 5. Excel 前端上限：`Stage` 列无格级下拉；候选表整表重建；导出无增量
-6. 测试仍绑本机真实项目路径（换机静默 skip）
+6. **行内注释**（`show x # 注释`）仍会丢：整行注释已保真，行内注释要给 Beat
+   加一列才能存（属新增功能，别顺手在做别的改动时"顺带"塞进去）
 
 ## 四、变更历史（倒序；细节见同目录 `YYYY-MM-DD.md`）
 
 - **2026-09-28 下半场**：拆 `script_table`（3.8k 行 → 7 模块 + 兼容门面，环清零）；
   `discover_scripts` 下移 parsing 断开门禁反向依赖；两套补全共用打分函数、
   TYPE_MAP 收敛到 vocabulary；补 CI
+- **2026-09-28 晚**：真实项目实测修两个真 bug——①块体整行注释被双重去缩进、
+  啃成非法 ATL（4 条 transform / 15 行，**真实项目表里的坏值已修好并备份**）；
+  ②表里旧值永不更新 → "改脚本表格不反映"；补齐切分脚本丢掉的 2 个顶层语句块
+  （`_HEADER_ALIASES.update` 静默丢数据、`_PILImage` NameError）；
+  引入 pyflakes 清理冗余导入（565→143，其余是门面刻意 re-export）
 - **2026-09-28 上半场**：扁平 33 模块 → `storygraph` 分层包（481 处 import 自动
   改写）；P0（门禁真正生效 / 覆盖 build+compile / 体检不写盘）；P1（vocabulary /
   excel.cells）；归档 legacy；清掉 9612 个误入库缓存

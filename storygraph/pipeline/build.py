@@ -25,7 +25,6 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import storygraph.story.stage_snapshot as stage_snapshot  # noqa: F401  (保持导入面稳定，供下游扩展)
 from storygraph.pipeline.engine_exporters import export_ir
@@ -195,7 +194,6 @@ def build_project(project_root, asset_dir=None, out_dir=None,
     report = collected['report']
     beats = collected['beats']
     registry = collected['registry']
-    scripts = collected['scripts']
 
     artifacts = []
     todo_count = 0

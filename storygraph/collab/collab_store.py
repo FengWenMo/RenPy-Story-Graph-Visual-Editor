@@ -30,7 +30,6 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from storygraph.story.beat_model import BEAT_FIELDS, Beat, _assign_identity
 from storygraph.story.excel_export import export_beats_to_excel

@@ -15,71 +15,20 @@ storygraph.story.beat_render
 
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
-from io import BytesIO
-from pathlib import Path
-from typing import Iterable, Optional
-import openpyxl
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
-from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
+from typing import Optional
 from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
 
-from storygraph.story.beat_model import (  # noqa: F401
-    ACTION_COLUMNS,
-    ACTION_HINTS,
-    AUDIO_PSEUDO,
-    BEAT_FIELDS,
-    BEAT_HEADERS,
+from storygraph.story.beat_model import (
     Beat,
-    DROPDOWN_COLUMNS,
-    HIDDEN_BEAT_COLUMNS,
     KIND_EXTEND,
     KIND_MENU,
     KIND_MENU_OPTION,
-    KIND_NARRATION,
-    KIND_SAY,
-    LEGACY_AUDIO_COLUMNS,
-    LEGACY_STAGE_COLUMNS,
-    _AUDIO_PSEUDO_REVERSE,
-    _HEADER_ALIASES,
-    _NATIVE_TAIL_RE,
-    _RENPY_STATEMENT_HEADS,
-    _SHOW_ARG_KEYWORDS,
-    _append_line,
-    _assign_identity,
-    _audio_params,
-    _beat_content_hash,
-    _clause_image,
     _fill_audio_from_cells,
-    _fill_audio_legacy,
-    _fmt_seconds,
-    _is_bare_renpy_verb,
-    _join_hide_items,
-    _join_show_items,
     _looks_like_renpy_statement,
-    _ordered_code_lines,
-    _parse_native_stage_tail,
-    _show_clause_args,
-    _show_item_text,
-    _spec_at,
-    _spec_image,
-    _split_code_cell,
     _split_hide_items,
     _split_lines,
     _split_show_items,
-    _split_spec_list,
-    compose_audio_cell,
-    compose_audio_text,
     compose_code,
-    compose_hide_cell,
-    compose_scene_cell,
-    compose_show_cell,
-    compose_stage,
-    compose_stage_extra,
 )
 
 

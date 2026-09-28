@@ -1,8 +1,6 @@
 # layout.py
-import math
 from collections import deque, defaultdict
 import bisect
-from storygraph.graph.models import Graph
 
 def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
     if not graph.nodes:

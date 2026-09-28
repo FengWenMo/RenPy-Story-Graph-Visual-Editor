@@ -9,21 +9,34 @@ import json
 import math
 import queue
 import threading
-import hashlib
 from pathlib import Path
 
 from storygraph.assets.asset_engine import AssetEngine, is_under_path
-from storygraph.graph.models import Graph, Node, Edge
+from storygraph.graph.models import Node, Edge
 from storygraph.core.utils import collect_all_variables
-from storygraph.graph.analysis import analyze_reachability, visualize_analysis_results, apply_operation, condition_possible, apply_condition, VariableState, pick_entry_node, analyze_reachability_full
-from storygraph.parsing.renpy_parser import parse_renpy_file
+from storygraph.graph.analysis import (
+    visualize_analysis_results,
+    apply_operation,
+    condition_possible,
+    VariableState,
+    pick_entry_node,
+    analyze_reachability_full,
+)
 from storygraph.pipeline.renpy_exporter import export_to_renpy
 from storygraph.graph.layout import layout_graph
 from storygraph.graph.commands import (
-    AddNodeCommand, RemoveNodeCommand, AddEdgeCommand, RemoveEdgeCommand,
-    UpdateNodeOperationsCommand, UpdateEdgeCommand, SetCurrentNodeCommand,
-    MoveNodeCommand, ClearGraphCommand, ImportRenPyCommand, LoadLayoutCommand,
-    ReplaceGraphCommand, HistoryManager
+    AddNodeCommand,
+    RemoveNodeCommand,
+    AddEdgeCommand,
+    RemoveEdgeCommand,
+    UpdateNodeOperationsCommand,
+    UpdateEdgeCommand,
+    SetCurrentNodeCommand,
+    MoveNodeCommand,
+    ClearGraphCommand,
+    LoadLayoutCommand,
+    ReplaceGraphCommand,
+    HistoryManager,
 )
 from storygraph.graph.editor_utils import open_file_at_line
 import storygraph.story.story_ops as story_ops
@@ -51,25 +64,18 @@ def _open_with_system_default(path) -> bool:
         return False
 
 # 新增：导入资产注册模块
-from storygraph.assets.asset_registry import (
-    AssetRegistry,
-    parse_asset_tables,
-    load_hooks
-)
 from storygraph.assets.asset_engine import AssetEngine
 from storygraph.assets.asset_events import (
     AssetEventBus,
     AssetEventType,
     ConfirmationGate,
 )
-from storygraph.story.beat_build import beats_from_parse_result
 from storygraph.story.generation_guard import (
     evaluate_generation,
     occupied_labels,
     planned_output_path,
     write_generation,
 )
-from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 from storygraph.story.beat_render import render_beats_to_rpy
 

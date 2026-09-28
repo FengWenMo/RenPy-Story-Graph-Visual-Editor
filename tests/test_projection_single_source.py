@@ -38,8 +38,9 @@ from storygraph.story.script_table import (
     open_rpy_as_table, render_beats_to_rpy, beats_from_parse_result,
 )
 
-#: 真实章节：用于"第 43 / 67 拍"这两个固定用例（两种相反的 stage_order）
-REAL = Path(r'D:\千连万理\RenPyTest\sr_general\game\chapter\chapter1_3.rpy')
+#: 真实章节：用于"第 43 / 67 拍"这两个固定用例（两种相反的 stage_order）。
+#: 路径统一从 `_source_paths` 取（环境变量 STORYGRAPH_REAL_PROJECT 可覆盖）。
+from _source_paths import REAL_CHAPTER as REAL       # noqa: E402
 
 
 # ==================================================================

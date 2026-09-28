@@ -32,8 +32,9 @@ from storygraph.story.script_table import (
 )
 
 
-#: 本机真实项目里那份坏产物。换成别的机器没有这个目录，相关用例会自动 skip。
-REAL_PROJECT = Path(r'D:\千连万理\RenPyTest\sr_general')
+#: 真实项目里那份坏产物。没有这个目录时相关用例自动 skip；
+#: 换机器用环境变量 STORYGRAPH_REAL_PROJECT 指到自己那份即可（见 _source_paths）。
+from _source_paths import REAL_PROJECT               # noqa: E402
 
 
 # ==================================================================

@@ -374,19 +374,25 @@ class AssetEngine:
         from storygraph.story.beat_build import apply_script_definitions
 
         added = apply_script_definitions(self.registry, self.parse_result)
-        if not added or not any(added.values()):
+        # `updated`（脚本改写了表里已有的变换定义）也要算进来：只更新时同样
+        # 必须落盘，否则内存里修好了、Excel 里还是旧值。
+        if not any(added.values()):
             return
         try:
             self._persist_script_definitions()
         except Exception as e:                  # noqa: BLE001
             self._emit(AssetEventType.ENGINE_ERROR,
                        {'error': str(e), 'phase': 'persist_definitions'})
+        msg = (f"已从脚本导入：角色 +{added['characters']}、"
+               f"变换 +{added['transforms']}、"
+               f"图片声明 +{added['images']}")
+        if added.get('updated'):
+            msg += (f"；并按脚本更新了 {added['updated']} 处变换定义"
+                    f"（ATL / 参数 / 说明）")
         self._emit(AssetEventType.ENGINE_NOTICE, {
             'info': 'script_definitions_synced',
             'count': sum(added.values()),
-            'message': (f"已从脚本导入：角色 +{added['characters']}、"
-                        f"变换 +{added['transforms']}、"
-                        f"图片声明 +{added['images']}"),
+            'message': msg,
         })
 
     def _persist_script_definitions(self):
@@ -405,7 +411,11 @@ class AssetEngine:
         if char_rows:
             n += append_rows_to_table(self.asset_dir, 'characters', char_rows)
         if tf_rows:
-            n += append_rows_to_table(self.asset_dir, 'transforms', tf_rows)
+            # transform 的 ATL / Params / Doc **以脚本为权威**：脚本改了定义，
+            # 表里必须跟着变（否则"改代码表格不反映"，且历史坏值永久固化）。
+            # 只更新这三列，人写的 Category / Notes 不动。
+            n += append_rows_to_table(self.asset_dir, 'transforms', tf_rows,
+                                      update_keys=('ATL', 'Params', 'Doc'))
         return n
 
     def _rebuild_references(self):
@@ -953,44 +963,11 @@ class AssetEngine:
                 row['_from_script'] = True
                 self.registry.characters[var_name] = row
 
-    def _sync_transform_definitions(self):
-        """
-        把脚本里 `transform` 块解析出的自定义变换合并进 registry.transforms。
-
-        为什么必须做这一步：剧本表里 `At` / `Transform` / `With` 三列的候选
-        来自资源表，而绝大多数自定义变换是**程序员在 .rpy 里写的**、
-        根本没进过 transforms.xlsx。不合并，文案就永远选不到
-        `leftish` / `shake_hard` 这些真正在用的变换，只能手打。
-
-        已登记的同名变换不被覆盖（人写的 ATL/分类是权威），只补空缺字段。
-        """
-        if self.parse_result is None or self.registry is None:
-            return
-
-        for name, tf in self.parse_result.transforms.items():
-            if name in self.registry.transforms:
-                existing = self.registry.transforms[name]
-                for key, val in (('ATL', tf.body), ('Params', tf.params),
-                                 ('Doc', tf.doc)):
-                    if not existing.get(key) and val:
-                        existing[key] = val
-                existing.setdefault('Notes', self._transform_note(tf))
-                existing.setdefault('_from_script', True)
-            else:
-                self.registry.transforms[name] = {
-                    'ID': name,
-                    'Path': '',
-                    'ATL': tf.body,
-                    'Params': tf.params,
-                    'Doc': tf.doc,
-                    'Category': 'custom',
-                    'Notes': self._transform_note(tf),
-                    '_from_script': True,
-                }
-
-    @staticmethod
-    def _transform_note(tf) -> str:
-        return f"{tf.source_file}:{tf.source_line}" if tf.source_file else ''
+    # 2026-09-28 删除：`_sync_transform_definitions` 与配套的 `_transform_note`
+    # 是**死代码**（无任何调用点）——它们曾与 `story.beat_build.
+    # apply_script_definitions` 做同一件事，后者才是活跃入口。
+    # 保留两套"把脚本 transform 合并进 registry"的实现，正是"改一处漏一处"
+    # 的温床（这次的 ATL 更新策略就差点只改了其中一处）。
 
     # ===================== 诊断汇总 =====================
 

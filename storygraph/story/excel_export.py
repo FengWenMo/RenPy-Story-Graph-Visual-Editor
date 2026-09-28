@@ -13,33 +13,17 @@ storygraph.story.excel_export
 
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable, Optional
 import openpyxl
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
-from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
 from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
 
-from storygraph.story.beat_build import (  # noqa: F401
-    _absorb_native,
-    _category_from_tag,
-    _hydrate_audio,
-    _hydrate_stage,
-    _image_id_from_name,
-    _source_note,
-    _split_image_name,
-    apply_script_definitions,
-    beats_from_parse_result,
-    beats_from_statements,
-    hydrate_from_dsl,
-)
-from storygraph.story.beat_model import (  # noqa: F401
+from storygraph.story.beat_build import hydrate_from_dsl
+from storygraph.story.beat_model import (
     ACTION_COLUMNS,
     ACTION_HINTS,
     AUDIO_PSEUDO,
@@ -48,71 +32,10 @@ from storygraph.story.beat_model import (  # noqa: F401
     Beat,
     DROPDOWN_COLUMNS,
     HIDDEN_BEAT_COLUMNS,
-    KIND_EXTEND,
-    KIND_MENU,
-    KIND_MENU_OPTION,
-    KIND_NARRATION,
-    KIND_SAY,
-    LEGACY_AUDIO_COLUMNS,
-    LEGACY_STAGE_COLUMNS,
-    _AUDIO_PSEUDO_REVERSE,
-    _HEADER_ALIASES,
-    _NATIVE_TAIL_RE,
-    _RENPY_STATEMENT_HEADS,
-    _SHOW_ARG_KEYWORDS,
-    _append_line,
     _assign_identity,
-    _audio_params,
-    _beat_content_hash,
-    _clause_image,
-    _fill_audio_from_cells,
-    _fill_audio_legacy,
-    _fmt_seconds,
-    _is_bare_renpy_verb,
-    _join_hide_items,
-    _join_show_items,
-    _looks_like_renpy_statement,
-    _ordered_code_lines,
-    _parse_native_stage_tail,
-    _show_clause_args,
-    _show_item_text,
-    _spec_at,
-    _spec_image,
-    _split_code_cell,
-    _split_hide_items,
-    _split_lines,
-    _split_show_items,
-    _split_spec_list,
-    compose_audio_cell,
-    compose_audio_text,
-    compose_code,
-    compose_hide_cell,
-    compose_scene_cell,
-    compose_show_cell,
-    compose_stage,
-    compose_stage_extra,
 )
-from storygraph.story.beat_render import (  # noqa: F401
-    _audio_ref,
-    _emit_image_name,
-    _needs_quote,
-    _normalize_image_name,
-    _quote,
-    _render_audio_from_fields,
-    _render_code_block,
-    _render_stage_from_fields,
-    _resolve_audio_ref,
-    _resolver_for,
-    collect_used_transforms,
-    make_symbols,
-    render_beat_to_rpy,
-    render_beats_to_rpy,
-    render_transform_definitions,
-)
-from storygraph.story.paths import (  # noqa: F401
-    _guess_project_root,
-    inside_game_dir,
-)
+from storygraph.story.beat_render import make_symbols
+from storygraph.story.paths import _guess_project_root
 from storygraph.excel.cells import set_text as _set_text
 from storygraph.excel.cells import append_text_row as _append_text_row
 
@@ -580,6 +503,15 @@ def _write_asset_gallery(wb, registry, project_root=None,
     return ws
 
 
+# ---------------------------------------------------------------------------
+#  缩略图：把真实图片嵌进 Excel（Pillow 可选，没有就静默降级）
+# ---------------------------------------------------------------------------
+
+try:                                     # pragma: no cover - 依赖环境
+    from PIL import Image as _PILImage
+except Exception:                        # noqa: BLE001
+    _PILImage = None
+
 #: 支持的扩展名：webp/动图之类 Pillow 不一定能读，读不了就跳过
 _THUMB_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
 
@@ -892,7 +824,7 @@ def _write_keyword_sheet(wb, registry) -> None:
     抄，编译器在生成结果里标记写错的词（TODO）。这是不拆列也能得到的
     严格性。
     """
-    from storygraph.story.dsl import (DEFAULT_EXPRESSIONS, DEFAULT_POSITIONS, NON_ACTOR_TAGS)
+    from storygraph.story.dsl import DEFAULT_EXPRESSIONS, DEFAULT_POSITIONS
 
     ws = wb.create_sheet('词表')
     _set_text(ws, 1, 1, '↓ 这里的词可以直接写进 Beats 的 Stage / BGM / SFX 列。'

@@ -30,12 +30,10 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS, resolve_references
 from storygraph.core.vocabulary import ASSET_TYPE_ATTR as _TYPE_ATTR
 from storygraph.story.beat_model import (
-    KIND_MENU,
     KIND_MENU_OPTION,
     _split_hide_items,
     _split_show_items,

@@ -275,7 +275,15 @@ class AssetChangeTracker:
 
 class DependencyAnalyzer:
     """
-    依赖分析：查找资产的引用位置、断裂引用、未使用资产。
+    资产依赖**查询**封装：引用位置 / 断裂引用 / 未使用资产。
+
+    职责边界（2026-09-28 标注）：它只**读** `registry.references`，
+    不做"这条引用指向哪个资产"的判定 —— 那个唯一真源是
+    `asset_registry.resolve_references`（多值、支持路径退化与别名）。
+    新代码要判定引用请直接用后者，别在这里再写一套匹配规则。
+
+    `all_asset_ids()` 的类别列表已改从 `core.vocabulary` 取：
+    原先硬编码的 5 项**漏了 `voices`**，会让语音类资产永远被判成"未使用"。
     """
 
     def __init__(self, registry: AssetRegistry):
@@ -289,8 +297,8 @@ class DependencyAnalyzer:
 
     def all_asset_ids(self) -> set:
         ids = set()
-        for name in ['images', 'music', 'sounds', 'transforms', 'characters']:
-            ids.update(getattr(self.registry, name).keys())
+        for name in ASSET_TYPE_ATTR.values():      # 唯一真源（含 voices）
+            ids.update(getattr(self.registry, name, {}) or {})
         return ids
 
     def find_broken(self):

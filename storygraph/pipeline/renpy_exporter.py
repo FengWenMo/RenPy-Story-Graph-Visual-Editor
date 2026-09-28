@@ -1,6 +1,5 @@
 # renpy_exporter.py
 import tkinter.messagebox as messagebox
-from storygraph.graph.models import Graph
 from storygraph.core.utils import collect_all_variables
 
 def export_to_renpy(graph, filepath):
@@ -95,7 +94,7 @@ def export_to_renpy(graph, filepath):
                     target_node = graph.nodes.get(uncond_edges[0].to_id)
                     if target_node:
                         next_label = f"{target_node.label_name}_control"
-                        lines.append(f"    else:")
+                        lines.append("    else:")
                         lines.append(f"        {uncond_edges[0].type} {next_label}")
             else:
                 if uncond_edges:

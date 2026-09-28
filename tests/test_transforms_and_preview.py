@@ -96,6 +96,102 @@ class TestTransformParsing:
         res = _parse(write_rpy, self.SRC)
         assert 'transform' not in res.transforms
 
+    def test_indented_comment_inside_block_kept_verbatim(self, write_rpy):
+        """
+        块体里的**带缩进整行注释**必须逐字保留（连同 `#`）。
+
+        2026-09-28 真实项目事故（sr_general / game/transform.rpy 的 endcgshow2）：
+        原文 `    #anchor(0.5, 0.5)` 在生成的 .rpy 里变成 `    hor(0.5, 0.5)` ——
+        注释的 `#` 与开头字符被吃掉，**注释直接变成了非法 ATL 代码**
+        （`hor` / `gn` 都不是 ATL 属性），产物跑不起来。
+
+        根因：lexer 对整行注释存的是 `stripped`（已去缩进），而
+        `_render_block_source` 按"text 含行首缩进"再切一次 → 缩进被扣两次。
+        """
+        src = (
+            'transform endcgshow2:\n'
+            '    perspective True\n'
+            '    #anchor(0.5, 0.5)\n'
+            '    #align (0, 0)\n'
+            '    linear 2:\n'
+            '        xzoom 0.1\n'
+            '        #rotate 2\n'
+            '        yrotate 40\n'
+        )
+        res = _parse(write_rpy, src)
+        body = res.transforms['endcgshow2'].body
+        assert '    #anchor(0.5, 0.5)' in body
+        assert '    #align (0, 0)' in body
+        assert '        #rotate 2' in body
+        # 反向断言：不能只剩"被啃过"的残骸。
+        # 注意不能用 `'hor(' not in body` —— `#anchor(` 里本身就含 `hor(`，
+        # 要按"整行开头"判：被啃过的那行会**以 `hor(` 开头且没有 `#`**。
+        bare = [ln.strip() for ln in body.split('\n')]
+        assert not any(ln.startswith('hor(') for ln in bare)
+        assert not any(ln.startswith('gn ') for ln in bare)
+
+
+class TestTransformDefinitionFollowsScript:
+    """
+    脚本改了 transform 定义，资源表必须跟着变。
+
+    2026-09-28 修：此前 `apply_script_definitions` 对"已登记的同名条目"
+    一律"只补空缺"，于是**改了 .rpy、表格永远不更新**；更糟的是解析器历史上
+    写坏的 ATL（`    #anchor(0.5, 0.5)` 被啃成 `    hor(0.5, 0.5)`）会
+    **永久固化**在 transforms.xlsx 里 —— 解析器修好了，产物依旧是错的。
+
+    现在 `ATL` / `Params` / `Doc` 以脚本为权威（值不同就更新），
+    人写的 `Category` / `Notes` 一律不动。
+    """
+
+    SRC = (
+        'transform endcgshow2:\n'
+        '    perspective True\n'
+        '    #anchor(0.5, 0.5)\n'
+    )
+
+    def test_stale_atl_is_updated_from_script(self, write_rpy):
+        from storygraph.story.beat_build import apply_script_definitions
+
+        reg = AssetRegistry()
+        reg.transforms['endcgshow2'] = {
+            'ID': 'endcgshow2', 'Path': '', 'ATL': '    hor(0.5, 0.5)',
+            'Params': '', 'Doc': '', 'Category': '人工分类',
+            'Notes': '人写的备注',
+        }
+        res = _parse(write_rpy, self.SRC)
+        added = apply_script_definitions(reg, res)
+
+        row = reg.transforms['endcgshow2']
+        assert row['ATL'] == '    perspective True\n    #anchor(0.5, 0.5)'
+        assert added['updated'] >= 1, '更新必须被计数（否则不会落盘）'
+        # 人写的列不许被工具改
+        assert row['Category'] == '人工分类'
+        assert row['Notes'] == '人写的备注'
+
+    def test_update_persists_to_table_with_whitelist(self, tmp_path):
+        from storygraph.assets.asset_registry import (
+            append_rows_to_table, parse_asset_tables)
+
+        asset_dir = tmp_path / 'asset_tables'
+        row = {'ID': 'endcgshow2', 'Path': '', 'ATL': '    hor(0.5, 0.5)',
+               'Params': '', 'Doc': '', 'Category': 'custom',
+               'Notes': '人写'}
+        assert append_rows_to_table(asset_dir, 'transforms', [row]) == 1
+
+        # 默认策略"只追加不覆盖"：已存在的 ID 跳过
+        fresh = {**row, 'ATL': '    #anchor(0.5, 0.5)'}
+        assert append_rows_to_table(asset_dir, 'transforms', [fresh]) == 0
+        assert (parse_asset_tables(asset_dir).transforms['endcgshow2']['ATL']
+                == '    hor(0.5, 0.5)')
+
+        # 给 update_keys → 白名单列被更新，其它列不动
+        assert append_rows_to_table(asset_dir, 'transforms', [fresh],
+                                    update_keys=('ATL',)) == 1
+        after = parse_asset_tables(asset_dir).transforms['endcgshow2']
+        assert after['ATL'] == '    #anchor(0.5, 0.5)'
+        assert after['Notes'] == '人写'
+
 
 # ------------------------------------------------------------------
 # B/C. transform 进注册表 + 候选表说明列

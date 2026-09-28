@@ -1,7 +1,6 @@
 # commands.py
 import copy
 import tkinter.messagebox as messagebox
-from storygraph.graph.models import Graph
 from storygraph.parsing.renpy_parser import parse_renpy_file
 
 class Command:

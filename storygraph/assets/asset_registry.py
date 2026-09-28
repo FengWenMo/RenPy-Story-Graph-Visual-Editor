@@ -655,16 +655,45 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
     return True
 
 
-def append_rows_to_table(asset_dir, table_key: str, rows: list) -> int:
+def _update_row_cells(ws, row_no: int, headers: list, row: dict,
+                      keys) -> int:
     """
-    把若干行**追加**进资源表（已存在的 ID 跳过），返回新增行数。
+    更新指定行的若干列（只写**值确实不同**的单元格），返回改写的单元格数。
+
+    单独抽出来是因为它只做"受控更新"：调用方给**列白名单**，
+    白名单之外的列（人写的分类、备注…）一个都不碰。
+    """
+    changed = 0
+    for key in keys:
+        if key not in headers:
+            continue
+        col = headers.index(key) + 1
+        new = row.get(key, '')
+        cell = ws.cell(row=row_no, column=col)
+        if (cell.value or '') != (new or ''):
+            _asset_set_text(ws, row_no, col, new)
+            changed += 1
+    return changed
+
+
+def append_rows_to_table(asset_dir, table_key: str, rows: list,
+                         update_keys: tuple = ()) -> int:
+    """
+    把若干行写进资源表：**已存在的 ID 默认跳过**，返回写入的行数。
 
     这是"程序敲代码 → 表格跟着变"的落地动作：脚本里新写的 transform /
     角色 / image 声明，要真的出现在 transforms.xlsx / characters.xlsx 里，
     文案才看得见、选得到。真实项目里曾经一个 transform 都存不下来
     （只进了内存注册表，从不落盘），就是这个环节缺失。
 
-    策略是"只追加、不覆盖"：人填的说明/分类是权威，工具不该改它。
+    策略默认"只追加、不覆盖"：人填的说明/分类是权威，工具不该改它。
+
+    `update_keys` 是唯一的例外：给定时，对**已存在的 ID** 也更新这几列。
+    适用场景是"这几列以脚本为权威"——典型是 transform 的
+    `ATL` / `Params` / `Doc`：脚本改了定义，表里必须跟着变，否则
+    "程序改代码 → 表格自动反映"就是空话，而且被写坏的旧值会永久固化
+    （2026-09-28 实测）。其它列仍然不动。
+    返回 = 新增行数 + 被改写的单元格数。
     """
     table_key = str(table_key or '')
     fname = _STANDARD_TABLES.get(table_key)
@@ -673,7 +702,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list) -> int:
     asset_dir = Path(asset_dir)
     asset_dir.mkdir(parents=True, exist_ok=True)
     path = asset_dir / fname
-    added = 0
+    added = updated = 0
     try:
         if path.exists():
             wb = openpyxl.load_workbook(path)
@@ -682,20 +711,26 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list) -> int:
             if not headers or all(h is None for h in headers):
                 headers = list(rows[0].keys())
                 ws.append(headers)
-            existing = set()
+            row_of = {}
             id_col = headers.index('ID') + 1 if 'ID' in headers else 1
             for r in range(2, ws.max_row + 1):
                 v = ws.cell(row=r, column=id_col).value
                 if v:
-                    existing.add(str(v))
+                    row_of.setdefault(str(v), r)
             for row in rows:
                 aid = str(row.get('ID') or '')
-                if not aid or aid in existing:
+                if not aid:
                     continue
-                _asset_append_row(ws, [row.get(h, '') if h else '' for h in headers])
-                existing.add(aid)
+                if aid in row_of:
+                    # 已存在的行：默认跳过；给了 update_keys 才更新白名单列
+                    if update_keys:
+                        updated += _update_row_cells(
+                            ws, row_of[aid], headers, row, update_keys)
+                    continue
+                row_of[aid] = _asset_append_row(
+                    ws, [row.get(h, '') if h else '' for h in headers])
                 added += 1
-            if added:
+            if added or updated:
                 wb.save(path)
         else:
             wb = openpyxl.Workbook()
@@ -707,9 +742,9 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list) -> int:
                 added += 1
             wb.save(path)
     except Exception as e:                      # noqa: BLE001
-        print(f"[asset_registry] 追加 {fname} 失败: {e}")
+        print(f"[asset_registry] 写入 {fname} 失败: {e}")
         return 0
-    return added
+    return added + updated
 
 
 def parse_asset_tables(asset_dir, hooks=None, project_root=None) -> AssetRegistry:

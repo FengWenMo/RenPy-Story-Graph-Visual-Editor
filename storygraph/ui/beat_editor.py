@@ -38,13 +38,8 @@ from storygraph.story.beat_build import (
     beats_from_parse_result,
     hydrate_from_dsl,
 )
-from storygraph.story.generation_guard import (
-    generation_guard,
-    occupied_labels,
-    write_beats_to_rpy,
-)
+from storygraph.story.generation_guard import generation_guard, occupied_labels
 from storygraph.story.beat_render import render_beats_to_rpy, make_symbols
-from storygraph.assets.asset_registry import add_asset_to_registry
 from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
 from storygraph.story.stage_snapshot import stage_digest
 from storygraph.pipeline.validate import validate_all
@@ -273,7 +268,6 @@ def beat_sprite_rows(beat: Beat, symbols=None) -> list:
             continue
         parts = (item.get('image') or '').split()
         tag = parts[0] if parts else ''
-        attrs = parts[1:]
         one = Beat(seq=1, label='', text='', show=item.get('image') or '')
         one.at = item.get('at') or ''
         rows.append({

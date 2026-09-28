@@ -19,37 +19,12 @@ storygraph.story.generation_guard
 
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
-from io import BytesIO
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
-import openpyxl
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
-from storygraph.core.statement import Statement, StatementKind
-from storygraph.excel.cells import append_text_row, set_text
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from typing import Optional
 
-from storygraph.story.beat_render import (  # noqa: F401
-    _audio_ref,
-    _emit_image_name,
-    _needs_quote,
-    _normalize_image_name,
-    _quote,
-    _render_audio_from_fields,
-    _render_code_block,
-    _render_stage_from_fields,
-    _resolve_audio_ref,
-    _resolver_for,
-    collect_used_transforms,
-    make_symbols,
-    render_beat_to_rpy,
-    render_beats_to_rpy,
-    render_transform_definitions,
-)
-from storygraph.story.paths import (  # noqa: F401
+from storygraph.story.beat_render import render_beats_to_rpy
+from storygraph.story.paths import (
     _guess_project_root,
     inside_game_dir,
 )
