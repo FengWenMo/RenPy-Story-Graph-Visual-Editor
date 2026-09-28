@@ -1,0 +1,6 @@
+# 由剧本表自动生成，请勿在此文件手工改动结构
+
+label ch01:
+    show ling close_happy at left
+    lyj "台词"
+    return

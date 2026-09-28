@@ -22,7 +22,8 @@ from dsl import (Audit, Symbols, compile_audio, compile_stage,
                  normalize_text, parse_audio, parse_stage,
                  stage_word_if_lossless)
 from script_table import (
-    BEAT_FIELDS, DROPDOWN_COLUMNS, Beat, compose_code, compose_stage,
+    BEAT_FIELDS, BEAT_HEADERS, DROPDOWN_COLUMNS, HIDDEN_BEAT_COLUMNS, Beat,
+    compose_code, compose_stage,
     export_beats_to_excel, import_beats_from_excel, make_symbols,
     render_beats_to_rpy, render_beat_to_rpy,
 )
@@ -266,19 +267,27 @@ class TestReverseWords:
 
 
 # ------------------------------------------------------------------
-#  五、列契约：26 列遗物收敛 → 20 列结构化 + Stage/BGM/SFX
+#  五、列契约：26 列遗物收敛 → 20 列结构化 + Stage/BGM/SFX + 1 隐藏列
 # ------------------------------------------------------------------
 
 class TestSheetContract:
     def test_structured_columns_with_dropdowns(self):
         """
-        现在的契约：**20 列**。结构化列（Scene/Show/At/With/Hide/BGM/
-        BGM 参数/SFX/音效参数/Voice）每列都能下拉，是策划主要的编辑面；
-        Stage 是"结构化列表达不了的"高级通道；真正的旧列（Transform/Raw、
-        Music*/Sound*、Condition、Notes）已被收敛掉。
-        用户明确要删的 Condition 列也不在表里。
+        现在的契约：**22 列**（20 列结构化编辑面 + 2 列隐藏的内部元数据）。
+        结构化列（Scene/Show/At/With/Hide/BGM/BGM 参数/SFX/音效参数/Voice）
+        每列都能下拉，是策划主要的编辑面；Stage 是"结构化列表达不了的"
+        高级通道；真正的旧列（Transform/Raw、Music*/Sound*、Condition、
+        Notes）已被收敛掉。用户明确要删的 Condition 列也不在表里。
+
+        两列隐藏元数据都是 2026-09-28 拍板加回来的，**由工具维护**：
+          · `StageOrder` —— 舞台指令之间的相对顺序（`hide,show` = 重置立绘）
+          · `OpOrder`    —— 本拍**全部操作**的源码顺序（跨类别：
+            `play music` 写在 `show` 之前时，音频就得先出）
+
+        两者都整列隐藏，策划的界面里看不到。注意它们和 26 列时代的
+        `StageOrder` 不是一回事——那次它和结构化列并列出现。
         """
-        assert len(BEAT_FIELDS) == 20, BEAT_FIELDS
+        assert len(BEAT_FIELDS) == 22, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
             assert col in BEAT_FIELDS
         # 每列都挂得上下拉的"结构化编辑面"
@@ -287,8 +296,16 @@ class TestSheetContract:
             assert col in DROPDOWN_COLUMNS, f'{col} 应该有下拉'
         for gone in ('Transform', 'Raw', 'Music', 'MusicParams', 'MusicAction',
                      'Sound', 'SoundParams', 'SoundAction', 'Condition',
-                     'Notes', 'StageOrder'):
+                     'Notes'):
             assert gone not in BEAT_FIELDS, f'{gone} 应该被收敛掉了'
+        # 两列内部元数据在表里，但必须整列隐藏
+        for col in ('StageOrder', 'OpOrder'):
+            assert col in BEAT_FIELDS, col
+            assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'
+        # 其余列的中文表头里不该出现它们，否则策划会去找那一列
+        hidden_headers = [h for k, h in BEAT_HEADERS.items()
+                          if k in ('StageOrder', 'OpOrder')]
+        assert hidden_headers, '隐藏列也该有表头（隐藏≠没有这一列）'
         # 顺带锁住"行"与"列"不会错位
         assert len(Beat(seq=1, label='a', text='x').to_row()) == \
             len(BEAT_FIELDS)

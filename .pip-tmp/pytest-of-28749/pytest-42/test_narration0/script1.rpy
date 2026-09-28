@@ -1,0 +1,2 @@
+label a:
+    "Narrator line"

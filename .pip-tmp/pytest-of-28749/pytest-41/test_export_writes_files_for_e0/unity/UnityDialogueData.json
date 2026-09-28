@@ -1,0 +1,71 @@
+{
+  "schema": "renpy-story-ir/1.0",
+  "project": "demo",
+  "characters": [
+    {
+      "id": "e",
+      "displayName": "Eileen",
+      "color": "#c8ffc8",
+      "imageTag": "eileen",
+      "voiceTag": ""
+    }
+  ],
+  "lines": [
+    {
+      "lineId": "a.0001",
+      "label": "a",
+      "seq": 1,
+      "kind": "say",
+      "speakerId": "",
+      "speakerName": "",
+      "text": "开场",
+      "condition": "",
+      "background": "bg classroom",
+      "poses": [],
+      "bgm": "bgm_night",
+      "bgmAction": "play",
+      "sfx": "",
+      "sfxAction": "play",
+      "voice": "",
+      "lineHash": "5e1fde8b82"
+    },
+    {
+      "lineId": "a.0002",
+      "label": "a",
+      "seq": 2,
+      "kind": "say",
+      "speakerId": "e",
+      "speakerName": "Eileen",
+      "text": "你好。",
+      "condition": "",
+      "background": "bg classroom",
+      "poses": [
+        "eileen happy@leftish"
+      ],
+      "bgm": "bgm_night",
+      "bgmAction": "play",
+      "sfx": "",
+      "sfxAction": "play",
+      "voice": "",
+      "lineHash": "bf48458dce"
+    }
+  ],
+  "assets": [
+    {
+      "id": "bg_classroom",
+      "type": "image",
+      "path": "i/b.png",
+      "tag": "bg",
+      "category": "",
+      "doc": ""
+    },
+    {
+      "id": "bgm_night",
+      "type": "music",
+      "path": "m/n.ogg",
+      "tag": "",
+      "category": "",
+      "doc": ""
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+label a:
+    jump nowhere

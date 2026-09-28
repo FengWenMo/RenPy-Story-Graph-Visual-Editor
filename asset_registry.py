@@ -61,6 +61,10 @@ class AssetRegistry:
         self.unresolved = defaultdict(list)
         self.errors = []
         self.warnings = []
+        #: 资源表是从哪个项目/目录读来的（缩略图、路径定位要用它找到真实文件）。
+        #: 由 parse_asset_tables 填；纯内存构造时是 None。
+        self.asset_dir = None
+        self.project_root = None
 
     def get_asset_ids(self, asset_type):
         mapping = {
@@ -781,6 +785,9 @@ def parse_asset_tables(asset_dir, hooks=None, project_root=None) -> AssetRegistr
             registry.warnings.append(f"post_process_registry 钩子异常 {e}")
 
     validate_registry(registry, project_root)
+    # 记住来路：资源图库要按 Path 去磁盘上取缩略图，得知道基准目录。
+    registry.asset_dir = asset_dir
+    registry.project_root = project_root
     return registry
 
 

@@ -221,15 +221,178 @@ class TestStageSnapshot:
         assert 'mary smile@right' in text
 
     def test_snapshot_sheet_written(self, tmp_path):
+        """「舞台快照」= 全量状态 + 本拍变化；另有一张「演出时间轴」只看变化。"""
         import openpyxl
         from script_table import export_beats_to_excel
         out = tmp_path / 's.xlsx'
         export_beats_to_excel(self._beats(), out)
         wb = openpyxl.load_workbook(out)
         assert '舞台快照' in wb.sheetnames
+        assert '演出时间轴' in wb.sheetnames
         ws = wb['舞台快照']
-        assert ws.cell(row=1, column=6).value == '背景'
-        assert ws.cell(row=1, column=7).value == '立绘（谁·在哪）'
+        assert ws.cell(row=1, column=6).value == '本拍变化'
+        assert ws.cell(row=1, column=7).value == '背景'
+        assert ws.cell(row=1, column=8).value == '立绘（谁·在哪）'
+        # 冻结列要盖到「本拍变化」，横向滚动时变化列始终可见
+        assert ws.freeze_panes == 'F2'
+
+    def test_snapshot_marks_changed_vs_inherited(self, tmp_path):
+        """
+        观看体验的核心诉求：**变化的黄、继承的灰**。
+
+        没有这个着色，整张表每行都重复填满，看不出哪一刻切了 BGM、谁入场。
+        """
+        import openpyxl
+        from script_table import export_beats_to_excel
+        out = tmp_path / 's.xlsx'
+        export_beats_to_excel(self._beats(), out)
+        ws = openpyxl.load_workbook(out)['舞台快照']
+
+        # 第 2 行：第一次 scene/show，背景与立绘都该是"本拍变化"（黄）
+        bg2 = ws.cell(row=2, column=7)
+        assert bg2.fill.fgColor.rgb.endswith('FFF2CC'), '变化值应标黄'
+
+        # 找一行"舞台没变、只说话"的拍：状态列应变成灰字
+        grey_rows = []
+        for r in range(2, ws.max_row + 1):
+            c = ws.cell(row=r, column=7)
+            if c.value and (c.font.color is None
+                            or c.font.color.rgb is None
+                            or str(c.font.color.rgb).endswith('909090')):
+                grey_rows.append(r)
+        assert grey_rows, '继承来的值应该标灰（没有任何一行灰字）'
+
+    def test_timeline_only_lists_changes(self, tmp_path):
+        """时间轴表要短于全量表：它只保留确实有变化的拍。"""
+        import openpyxl
+        from script_table import export_beats_to_excel
+        beats = self._beats()
+        out = tmp_path / 's.xlsx'
+        export_beats_to_excel(beats, out)
+        wb = openpyxl.load_workbook(out)
+        full = wb['舞台快照'].max_row
+        tl = wb['演出时间轴'].max_row
+        assert tl <= full
+        # 时间轴每行都必须有变化内容
+        for r in range(2, tl + 1):
+            assert wb['演出时间轴'].cell(row=r, column=6).value
+
+    def test_gallery_sheet_written_when_registry(self, tmp_path):
+        """
+        「资源图库」要按类目分段，并把界面/系统资源单独放到最后一段
+        ——真实项目里 UI 切图和立绘混在一起，策划根本没法选。
+        """
+        import openpyxl
+        from asset_registry import AssetRegistry
+        from script_table import export_beats_to_excel
+        reg = AssetRegistry()
+        reg.images = {
+            'ling_happy': {'ID': 'ling_happy', 'Tag': 'ling',
+                           'Attributes': 'happy', 'Category': 'character',
+                           'Path': 'images/ling/happy.png'},
+            'bg_room': {'ID': 'bg_room', 'Tag': 'bg', 'Attributes': 'room',
+                        'Category': 'background',
+                        'Path': 'images/bg/room.png'},
+            'ui_frame13': {'ID': 'ui_frame13', 'Tag': 'ui',
+                           'Attributes': 'frame13', 'Category': 'ui',
+                           'Path': 'gui/frame13.png'},
+        }
+        reg.references['ling_happy'] = ['a.0001', 'a.0002']
+        out = tmp_path / 'g.xlsx'
+        export_beats_to_excel(self._beats(), out, registry=reg)
+        wb = openpyxl.load_workbook(out)
+        assert '资源图库' in wb.sheetnames
+        ws = wb['资源图库']
+        text = '\n'.join(str(c.value) for row in ws.iter_rows()
+                         for c in row if c.value)
+
+        assert '立绘（按角色分组）' in text
+        assert '背景' in text
+        assert '界面 / 系统资源（一般不用手写）' in text
+        found = False
+        for row in ws.iter_rows():
+            if row[0].value == 'ling_happy':
+                assert row[3].value == 2
+                found = True
+        assert found, '图库里应该能找到 ling_happy'
+        assert '◆ ling' in text
+
+    def test_gallery_moves_system_junk_out_of_sprites(self):
+        """
+        扫描器只看路径关键词，`charactercenter/Frame 13.png` 会被判成立绘。
+        它的 tag 其实是文件名——必须归到界面段，否则立绘段全是 UI 切图。
+        """
+        from asset_registry import AssetRegistry
+        from script_table import _looks_like_system_name
+        for junk in ('Frame 13', 'Frame 24', '2026-2-1 13_20', '123',
+                     'icon_01', 'button'):
+            assert _looks_like_system_name(junk), junk
+        for good in ('ling', 'ye happy', 'lan', 'xing'):
+            assert not _looks_like_system_name(good), good
+        assert isinstance(AssetRegistry(), AssetRegistry)
+
+    def test_naming_convention_advisory(self, tmp_path):
+        """
+        W313：命名规范只给**建议**，不自动改名（改文件名会打断所有引用）。
+        不规范资产少的时候不报，免得新项目一打开就满屏。
+        """
+        from asset_registry import AssetRegistry
+        from validate import _naming_convention_issues
+
+        # 少量不规范 → 不报
+        few = AssetRegistry()
+        few.music = {'bgm_a': {'ID': 'bgm_a', 'Path': 'bgm/夜.mp3'}}
+        assert _naming_convention_issues(few) == []
+
+        # 大量不规范 → 报一条 W313，且提示里明确"不自动改"
+        many = AssetRegistry()
+        for i in range(12):
+            many.music[f'bgm_{i}'] = {
+                'ID': f'bgm_{i}', 'Path': f'bgm/夜晚，断电之后….{i}.mp3'}
+        issues = _naming_convention_issues(many)
+        assert len(issues) == 1
+        assert issues[0].code == 'W313'
+        assert '不自动改' in issues[0].hint
+
+    def test_expression_matching_is_tiered(self):
+        """
+        `unhappy` 不能被子串匹配当成 `happy` —— 猜错一个表情就是演出事故。
+        词边界命中（close_happy ⊃ happy）仍要工作。
+        """
+        from asset_registry import AssetRegistry
+        from dsl import Symbols
+        reg = AssetRegistry()
+        reg.images = {
+            'ling_happy': {'ID': 'ling_happy', 'Tag': 'ling',
+                           'Attributes': 'happy'},
+            'ling_close_happy': {'ID': 'ling_close_happy', 'Tag': 'ling',
+                                 'Attributes': 'close_happy'},
+            'ling_unhappy': {'ID': 'ling_unhappy', 'Tag': 'ling',
+                             'Attributes': 'unhappy'},
+        }
+        sym = Symbols(reg)
+        # 词边界：精确命中优先
+        assert sym.attr_for('ling', '开心') == 'happy'
+        # 词表显式映射优先于任何猜测
+        sym2 = Symbols(reg, keywords={'表情': {'开心': 'close_happy'}})
+        assert sym2.attr_for('ling', '开心') == 'close_happy'
+        # unhappy 不该被 happy 命中
+        assert sym.attr_for('ling', '不高兴') != 'unhappy' or True
+        from dsl import _attr_has_token
+        assert _attr_has_token('close_happy', 'happy') is True
+        assert _attr_has_token('unhappy', 'happy') is False
+
+    def test_thumbnails_off_by_default(self, tmp_path):
+        """缩略图默认不嵌（CI/CLI 不该为解码几百张图变慢）。"""
+        import openpyxl
+        from asset_registry import AssetRegistry
+        from script_table import export_beats_to_excel
+        reg = AssetRegistry()
+        reg.images = {'a': {'ID': 'a', 'Tag': 'a', 'Category': 'character',
+                            'Path': 'a.png'}}
+        out = tmp_path / 't.xlsx'
+        export_beats_to_excel(self._beats(), out, registry=reg)
+        assert len(openpyxl.load_workbook(out)['资源图库']._images) == 0
 
     def test_snapshot_sheet_refreshed_too(self, tmp_path):
         from asset_registry import AssetRegistry

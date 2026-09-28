@@ -613,8 +613,137 @@ def validate_level3(beats, registry=None, graph=None,
                 f'{"、".join(missing[:6])}', '资源表',
                 '修正 Path 或补文件；否则构建出的包会缺资源'))
 
+    # Beats 与「舞台快照」是否同源（用户评审第 12 条）
+    issues.extend(_beats_snapshot_issues(beats))
+
+    # 资源命名规范建议（用户评审第 13 条）——**只建议，绝不自动改写**
+    issues.extend(_naming_convention_issues(registry))
+
     return issues
 
+
+#: 资源命名里"跨平台/版本管理有风险"的字符。
+#: 注意：这些字符是**文件名内容**，`dsl.normalize_text` 绝不能去归一化它们
+#: （`bgm/夜晚，断电之后….mp3` 就是这么被改坏的）。所以这里只出一张
+#: 建议清单给 PM 排期改名，改不改由人决定。
+_NAMING_RISKY = (
+    (' ', '空格'),
+    ('，', '全角逗号'), ('。', '全角句号'), ('？', '全角问号'),
+    ('！', '全角叹号'), ('：', '全角冒号'), ('；', '全角分号'),
+    ('、', '顿号'), ('（', '全角括号'), ('）', '全角括号'),
+    ('…', '省略号'), ('“', '全角引号'), ('”', '全角引号'),
+    ('「', '全角引号'), ('」', '全角引号'),
+)
+
+#: 不规范资产少于这个数就不提——新项目一打开就满屏"命名不规范"没人会看。
+_NAMING_NOISE_FLOOR = 8
+
+
+def _naming_convention_issues(registry) -> list:
+    """
+    资源命名规范建议（用户评审第 13 条）。
+
+    真实项目里素材名带中文、空格、省略号、问号
+    （`bgm/无法言说的事情…….mp3`），跨平台与版本管理都有风险。这里算一份
+    **建议清单**，不报错、不自动改名——改名会打断所有已有引用，
+    必须由人决定。每条只给数量与前几个例子。
+    """
+    if registry is None:
+        return []
+    bad = []
+    total = 0
+    for attr in ('images', 'music', 'sounds', 'voices'):
+        for aid, row in (getattr(registry, attr, {}) or {}).items():
+            total += 1
+            name = str((row or {}).get('Path') or aid or '')
+            hit = [label for ch, label in _NAMING_RISKY if ch in name]
+            if any(ord(c) > 0x4DFF for c in name):
+                hit.append('非 ASCII 字符')
+            if hit:
+                bad.append(f'{aid}（{"、".join(sorted(set(hit)))}）')
+    if len(bad) < _NAMING_NOISE_FLOOR:
+        return []
+    return [Issue(
+        L3, 'W313', WARNING,
+        f'{len(bad)} / {total} 个资产名含空格、中文、省略号等字符，'
+        f'跨平台与版本管理有风险（如 {"；".join(bad[:3])}）', '资源表',
+        '建议新素材改用「英文/拼音 + 下划线」；已有素材改名要同步改引用，'
+        '所以这里只给建议、不自动改（本工具不会动你的文件名）')]
+
+
+def _beats_snapshot_issues(beats) -> list:
+    """
+    Beats 与舞台快照的一致性：**表里的舞台指令，快照有没有真的认出来**。
+
+    为什么需要它：舞台快照是从 Beats 推导的派生视图（Excel 的「舞台快照」
+    工作表、编辑器的预览面板都用它）。推导一旦漏了某种写法，表格会显示
+    "台上没人"，而生成的脚本里立绘明明在——**表格就成了骗人的东西**。
+
+    只报**一种**确定可信的情况：`show` / `hide` 写完**舞台状态一点没变**，
+    而且这个图像名的 tag 在整段剧本里从没被快照认成过角色或图层。
+    那说明这个名字快照根本不认识（错字、写成了资产 ID 而不是图像名…），
+    表格与脚本必然不一致。
+
+    刻意**不报**下面这些，因为它们是合法写法（报了就是刷屏，
+    真实项目实测会多出 60+ 条噪声）：
+      · `scene bg X` 重复声明同一个背景（Ren'Py 里是合法的"重置舞台"）；
+      · 重复 show 台上已有的同一张图（幂等）；
+      · `show cg X` 之类只动非角色图层（快照会记为 CG/图层变化）。
+    """
+    from stage_snapshot import stage_snapshots
+
+    out = []
+    try:
+        snaps = stage_snapshots(list(beats or []))
+    except Exception:                     # noqa: BLE001 - 派生视图坏了不该拦住体检
+        return out
+
+    # 整段剧本里被快照认成"角色"或"图层"的 tag 集合
+    known_tags = set()
+    for s in snaps:
+        for slot in s['state'].get('actors', ()):
+            if slot and slot[0]:
+                known_tags.add(slot[0].split()[0])
+        for img in (s['state'].get('layers', {}) or {}).values():
+            if img:
+                known_tags.add(img.split()[0])
+        if s['scene']:
+            known_tags.add(s['scene'].split()[0])
+
+    for beat, snap in zip(beats or [], snaps):
+        where = getattr(beat, 'line_id', '') or f'{beat.label}.{beat.seq:04d}'
+        if snap['display_changes']:
+            continue
+        # 没有任何变化：逐个看它写了什么，只有"名字根本不认识"才报
+        unknown = []
+        for spec in _stage_specs_of(beat):
+            tag = spec.split()[0] if spec.split() else ''
+            if tag and tag not in known_tags:
+                unknown.append(spec)
+        if unknown:
+            out.append(Issue(
+                L3, 'W311', WARNING,
+                f'这一拍的舞台指令没有产生任何变化，而且这些图像名快照不认识：'
+                f'{"、".join(unknown[:4])}', where,
+                '图像名既没被认成立绘、也没被认成背景/CG 图层——'
+                '多半是写错了（或误填了资产 ID）。表格会与生成的脚本不一致'))
+    return out
+
+
+def _stage_specs_of(beat) -> list:
+    """这一拍舞台指令里出现的图像名（立绘 / 退场 / 背景）。"""
+    out = []
+    for raw in (beat.show or '').split(';'):
+        item = raw.strip()
+        if item:
+            out.append(item.split('@')[0].strip())
+    for raw in (beat.hide or '').split(';'):
+        item = raw.strip()
+        if item:
+            out.append(item.split('@')[0].strip())
+    if (beat.scene or '').strip():
+        out.append(beat.scene.split('@')[0].strip())
+    return [s for s in out if s]
 
 def _unreachable_issues(graph) -> list:
     """从入口做可达性分析，报出到不了的 label。找不到入口就不报。"""

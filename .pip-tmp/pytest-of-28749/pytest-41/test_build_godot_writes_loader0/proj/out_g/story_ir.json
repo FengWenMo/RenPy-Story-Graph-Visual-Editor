@@ -1,0 +1,40 @@
+{
+  "schema": "renpy-story-ir/1.0",
+  "project": "proj",
+  "characters": [
+    {
+      "id": "e",
+      "display_name": "Eileen",
+      "color": "",
+      "image_tag": "",
+      "voice_tag": ""
+    }
+  ],
+  "lines": [
+    {
+      "line_id": "start.0001",
+      "label": "start",
+      "seq": 1,
+      "speaker_id": "e",
+      "speaker_name": "Eileen",
+      "text": "你好。",
+      "condition": "",
+      "stage": {
+        "background": "bg room",
+        "poses": [],
+        "bgm": "bgm_theme",
+        "bgm_action": "play",
+        "sfx": "",
+        "voice": ""
+      },
+      "line_hash": "85523e3e95"
+    }
+  ],
+  "assets": {
+    "images": [],
+    "music": [],
+    "sounds": [],
+    "voices": [],
+    "transforms": []
+  }
+}

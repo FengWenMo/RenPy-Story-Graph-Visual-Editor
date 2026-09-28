@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-09-28T13:49:27",
+  "data": {
+    "images": {
+      "bg_room": {
+        "ID": "bg_room",
+        "Path": "images/bg/room.png",
+        "Tag": "bg",
+        "Attributes": "room",
+        "Category": "background",
+        "Notes": "手工备注"
+      }
+    },
+    "music": {},
+    "sounds": {},
+    "transforms": {},
+    "characters": {}
+  },
+  "custom": {},
+  "references": {}
+}

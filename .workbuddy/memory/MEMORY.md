@@ -80,6 +80,25 @@
   变换用 `at f11` 留在人话句法里
 - `Symbols.has(kind)` 决定放行还是核对：**该类资产表为空 → 任何引用放行**；
   有表却查不到 → TODO。新项目因此不会一编译就满屏 TODO
+- **舞台快照的"变了没有"必须以整块状态 diff 为准**，不能只看自己记的
+  `changes` 列表：`show bg X` 换背景这类写法会改状态但不产生描述，
+  只看 changes 就会把它判成"什么都没变"（快照显示假阴性）。
+  `stage_snapshot` 现在按 `before`/after 对比 scene/actors/layers 三块，
+  再用每条变化上的 `column` 字段精确到"哪一列标黄"
+- **非角色图层（cg/ui/movie）也是舞台变化**：`_apply_show` 会把它们挡在
+  actors 之外（免得快照说"台上站着 bg"），但它们必须进 `state['layers']`，
+  否则只换 CG 的那一拍在快照/时间轴里看起来什么都没发生
+- **快照默认不认识"重名"的合法写法**：`scene bg X` 重复声明同一背景、
+  重复 show 同一张图都是合法的幂等写法。校验不能把它们报成错误——
+  真实项目实测这类"看起来可疑"的行有 60+ 条，全报就是刷屏。
+  W311 只报"状态没变 + 图像名快照从来没见过"这一种确定可信的情况
+- **缩略图要磁盘缓存 + 总量上限**：为每张图解码缩放很贵（真实项目 2902 张，
+  冷缓存一次导出 ~90s）。缓存键 = `路径|mtime|size|目标尺寸`，放系统临时目录；
+  `_GALLERY_MAX_THUMBS`（默认 150）限制嵌入数量。
+  `export_beats_to_excel(include_thumbnails=)` **默认 False**（CI/CLI 快），
+  编辑器走后台线程传 True
+- `AssetRegistry.project_root` / `asset_dir` 由 `parse_asset_tables` 记录，
+  缩略图/路径定位靠它找真实文件。丢了就退回"只按 cwd 试"，静默不嵌图
 - 旧 26 列表（Show/Hide/At/With/Transform/Music/…）在 `Beat.from_row` 里自动
   迁移到当前 20 列（`LEGACY_STAGE_COLUMNS` / `LEGACY_AUDIO_COLUMNS`）；旧表
   `At` 属于 **scene** 不是 show，迁移时要保持该语义
@@ -142,6 +161,38 @@
 
 ## 已修坑（别再踩回去）
 
+- **绝对不要用 PowerShell 的 `Set-Content` / `Out-File` / `>` 重定向去改项目里的
+  .py 文件**（2026-09-28 实际事故）。本机 PowerShell 默认编码是 GBK，于是
+  `Get-Content -Raw` 按 GBK 解码 UTF-8 源文件 → 中文全变乱码 →
+  `Set-Content -Encoding utf8` 把乱码写回去 → **整个文件语法错误**。
+  更糟的是这个转换**不可逆**：部分 UTF-8 字节序列在 GBK 里落在未映射区，
+  反向 encode 抛 `illegal multibyte sequence`，恢复不完整。
+  改文件只有三条路：`edit` 工具、`write` 工具、或**由 Python 脚本**
+  （`Path.read_text(encoding='utf-8')` / `write_text(..., encoding='utf-8')`）。
+  批量替换就写 Python 脚本 + `str.count` 校验锚点 + `ast.parse` 自检。
+  本次 `script_table.py` 就是这么整文件丢的，只能
+  `git checkout HEAD -- script_table.py` 后用脚本把 14 处改动逐条重放才恢复。
+- **"导出→导入"必须逐行保真**（2026-09-28 第二轮）。用户反馈"同一张表
+  导出去再导进来效果天差地别"。根因是四个独立缺陷叠在一起，全部修掉后
+  真实项目 chapter1_4 的相似度 **0.833 → 0.907**（经 Excel 往返 0.884）：
+  1. **raw/code 交错顺序丢失**：`compose_code` 是 `raw + code` 拼接，
+     而真实演出是 `$ msg_add(…)` → `show screen` → `pause` 交替。
+     现在 `Beat.ordered` 记 `[('raw',行),('code',行)]`，`compose_code` 按它
+     还原；读 Excel 时由 `_split_code_cell` 重新分类 + 重建 ordered
+  2. **老表迁移把新表也吃了**：`LEGACY_STAGE_COLUMNS` 含 `Show/Hide/At/With`，
+     而**当前 20 列表也有这些列** → 每行都走进迁移分支并 `beat.raw = g('Raw')`
+     → CodeBlock 拆出来的 raw 行（`show screen`/`pause`）**整批清空**。
+     判据必须用 `set(LEGACY_STAGE_COLUMNS) - set(BEAT_FIELDS)`
+  3. **图像名被改写**：`image_ok`（校验用，严）被拿去决定生成写法，于是
+     `show ling base_arms_akimbo close_happy` 因"资源表没这个组合"被改成
+     `ling_base_arms_akimbo_close_happy`——**把能跑的脚本改坏了**。
+     生成侧要用 `Symbols.image_spec_ok`（tag 存在就放行）；
+     解析来的 Beat（`Beat._from_script`）更是逐字还原，连下划线都不换
+  4. **`scene ... at X` 的 at 丢了**：`beats_from_statements` 的 SCENE 分支
+     把 `payload['at']` 写进了 `pending.at`（立绘位置）而不是 `pending.scene_at`,
+     背景变换既丢失、又被错套到那一拍的立绘上
+  另修：`_join_show_items`/`_join_hide_items` 去重（hydrate 是追加语义，
+  Stage 列已写过一遍 → 会生成两遍 show，重复执行转场）
 - **`dsl.Symbols.audio_row` 必须走 `AssetIndex.resolve`**（2026-09-28）。它原来
   只手写"ID + 剥 bgm_/sfx_ 别名"比对，漏了路径退化 → 脚本按项目惯例写
   `play music "bgm/bgm02.mp3"` 时被判 `# TODO`，而文件其实存在且已登记。
@@ -205,9 +256,43 @@
    注意 20 列里的 Scene/Show/At/With/Hide/BGM/SFX/Voice **已经是格级下拉**
    （见 `DROPDOWN_COLUMNS`），只有 Stage 这一格是全自由的
 
+### 用户 2026-09-28 第二轮设计评审 —— 已全部落地
+
+用户认可"三层分层方向、词表/使用说明、ID 而非路径、候选动作完整、内容指纹"，
+并指出了下面这些体验问题。**第 8-14 条已全部实现**（见"三条派生视图"一节）。
+
+8. ✅ 快照改成"只显示变化"：新增「演出时间轴」表（只留真有变化的拍），
+   全量「舞台快照」保留但**继承值灰字、本拍变化黄底**
+9. ✅ 三层职责分离：Beats（编辑）/ 资源图库（看图选 ID）/ 快照+时间轴（还原舞台）
+10. ✅ 资源图库独立成表：立绘按 tag 分组、背景/CG/其他/界面分段、带引用次数；
+    界面段明确标"一般不用手写"；`Frame 13` / `2026-2-1 13_20` 这类系统名
+    被 `_looks_like_system_name` 从立绘段挪走
+11. ✅ 表情匹配分档（词表显式 > 精确 > 下划线词边界 > 子串兜底），
+    `unhappy` 不再被子串命中 `happy`
+12. ✅ 新增 W311：舞台指令没产生任何变化、且图像名快照完全不认识 → 报警
+    （只报这一种确定可信的情况，避免刷屏）
+13. ✅ 新增 W313 命名规范**建议**（含空格/中文/省略号/问号），只给建议、
+    **绝不自动改名**（改文件名会打断所有引用）
+14. ✅ 表格观看体验：冻结窗格盖到「本拍变化」、按内容估行高、自动筛选、
+    新增「列说明」表把 20 列分成 编辑区/高级区/程序区
+
+### 三条派生视图：各自回答一个问题（别混）
+
+| 工作表 | 回答的问题 | 谁看 |
+|---|---|---|
+| **Beats** | 这一行我该怎么写 | 策划（编辑） |
+| **资源图库** | 这个东西的 ID 叫什么、长什么样 | 策划（查/选） |
+| **舞台快照** | 这句台词播出来时台上是什么样 | 策划 + QA（核对） |
+| **演出时间轴** | 整段里哪几拍真的动了 | 策划 + QA（复核） |
+
+派生视图全部**只读**（改了没用，重算就覆盖）。别再往 Beats 里加派生列。
+
 （已完成：26 列 → 当前 20 列结构化下拉列 + Stage/BGM/SFX DSL 高级通道 +
 编译器（无全局校验、TODO 兜底）+ 编译结果表；image tag ↔ 资产 ID 映射；
 统一资产引用抽取（含编译器侧）；一.1 图吃 Statement；二 舞台快照 + 动态下拉；
 五 多引擎导出器；七 三级校验 + build + CLI；八 协作后端 SQLite + Excel 前端；
 transform 块解析（名字/参数/ATL/注释）、角色定义解析、脚本定义合并进 registry、
-候选表说明列 + 变换注释解释、资产说明面板 + 缩略图预览、批量导入章节）
+候选表说明列 + 变换注释解释、资产说明面板 + 缩略图预览、批量导入章节；
+脚本 → Beats → 脚本逐行保真：raw/code 交错顺序、图像名不改写、
+scene at、老表迁移不吃新表、show 去重；
+资源图库 / 演出时间轴 / 列说明 三张派生表 + 变化着色 + 缩略图 + W311/W313）

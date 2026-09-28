@@ -1,0 +1,19 @@
+# 开发依赖（跑测试用）
+# =========================
+#
+# 运行时依赖只有 openpyxl（见 README）；Pillow 是可选的缩略图依赖。
+# 这里只放"跑测试"需要的东西。
+#
+#   python -m pip install -r requirements-dev.txt
+#
+# **本机注意（已实测）**：pip 在写**系统临时目录**时会被沙箱拒绝，
+# 表现为"pip 卡住不动"，实际是
+#   PermissionError: ... pip-unpack-...whl
+# 不是网络问题。把 TMPDIR/TEMP/TMP 指到仓库内即可：
+#
+#   $env:TMPDIR = (Resolve-Path '.pip-tmp').Path
+#   $env:TEMP = $env:TMPDIR; $env:TMP = $env:TMPDIR
+#   python -m pip install pytest
+#   python -m pytest -q
+#
+pytest>=8

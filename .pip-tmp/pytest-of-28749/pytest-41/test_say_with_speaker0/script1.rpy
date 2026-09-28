@@ -1,0 +1,2 @@
+label a:
+    e "Hello"

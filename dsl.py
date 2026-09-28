@@ -393,6 +393,25 @@ def _clean_name(text: str) -> str:
     return text.strip(_QUOTE_CHARS)
 
 
+#: 属性名的分词符：`close_happy` → {close, happy}，`base-arms` → {base, arms}
+_ATTR_TOKEN_SPLIT = re.compile(r'[_\-\s]+')
+
+
+def _attr_has_token(attr: str, mapped: str) -> bool:
+    """
+    核心词是否落在属性名的**词边界**上。
+
+    `close_happy` vs `happy` → True
+    `unhappy`      vs `happy` → False（这是关键：子串匹配会把它算命中，
+                               猜错表情就是演出事故）
+    """
+    attr = (attr or '').strip().lower()
+    mapped = (mapped or '').strip().lower()
+    if not attr or not mapped:
+        return False
+    return mapped in _ATTR_TOKEN_SPLIT.split(attr)
+
+
 #: 媒体扩展名：用来判断"这看起来是文件路径还是资产 ID"
 _MEDIA_EXTS = ('.mp3', '.ogg', '.wav', '.opus', '.flac', '.m4a', '.mp2',
                '.webm', '.avi', '.mp4', '.png', '.jpg', '.jpeg', '.webp',
@@ -545,13 +564,57 @@ class Symbols:
     def attrs_of_tag(self, tag: str) -> list:
         return list(self._attrs_by_tag.get((tag or '').strip(), []))
 
+    def has_image_tag(self, tag: str) -> bool:
+        """资源表里存在这个 image tag 吗（Ren'Py 的 `show <tag> <属性>`）。"""
+        return bool((tag or '').strip()) and \
+            (tag or '').strip() in self._attrs_by_tag
+
+    def image_spec_ok(self, spec: str) -> bool:
+        """
+        这个图像名**能不能原样写进脚本**（生成代码时决定要不要改写成下划线）。
+
+        比 `image_ok` 宽松，因为它回答的是不同的问题：
+          · `image_ok`   —— "这条引用在资源表里查得到吗"（校验用，要严）
+          · `image_spec_ok` —— "这个名字形态能不能跑"（生成用，别乱改）
+
+        Ren'Py 的 `show ling base_arms_akimbo close_happy` 是合法的
+        `tag + 多个属性`，只要 `ling` 这个 tag 存在就一定能跑——哪怕资源表里
+        没有"这个属性组合"的那一行。曾经这里只认 `image_ok`，于是真实项目里
+        大量立绘被判"查不到"，生成时被改写成 `ling_base_arms_akimbo_close_happy`
+        ——**把能跑的脚本改坏了**，而且让导出/导入两个方向生成的代码不一样。
+        """
+        spec = (spec or '').strip()
+        if not spec:
+            return True
+        if not self.has('image'):
+            # 没有图片表 = 无从判断，保持作者写法
+            return True
+        if self.image_ok(spec):
+            return True
+        tag = spec.split()[0] if spec.split() else ''
+        if tag and len(spec.split()) > 1 and self.has_image_tag(tag):
+            return True
+        # `bg room`: bg 是背景 tag，属性就是房间名
+        return bool(tag) and self.has_image_tag(tag)
+
     def attr_for(self, tag: str, word: str) -> str:
         """
-        表情词 → 图像属性。
+        表情词 → 图像属性。**分档匹配，且能解释为什么命中**。
 
-        先按词表翻译成"语义核心词"（开心 → happy），再到该 tag 的候选属性里
-        模糊匹配：属性名叫 `close_happy` / `happy` / `e_happy` 都能命中。
-        这样策划写中文、美术命名英文，两边不用开会也能对上。
+        为什么不能再只做"子串模糊匹配"：策划写「开心」，属性里同时有
+        `close_happy` / `unhappy` 时，`mapped in a` 会把 `unhappy` 也算命中
+        `happy`——**猜错一个表情就是演出事故**（用户评审第 11 条）。
+
+        档位（从强到弱，命中即返回）：
+          1. 词表显式命中：项目在「词表」里写了 `开心 → close_happy`
+             （或者直接写属性名），这是**权威**，不再做任何猜测；
+          2. 属性名整体等于核心词：`happy` == `happy`；
+          3. 下划线分词命中：`close_happy` 切成 {close, happy}，
+             核心词 `happy` 落在词边界上——`unhappy` 不会被切出 `happy`；
+          4. 仅当该 tag **没有任何分词能命中** 时，才退回子串匹配
+             （兼容 `e_happy` 这种没按词表命名的情况）。
+
+        候选属性为空（项目没声明属性）→ 原样输出，交给 Ren'Py。
         """
         word = (word or '').strip()
         if not word:
@@ -560,12 +623,19 @@ class Symbols:
         if not mapped:
             return ''
         attrs = self.attrs_of_tag(tag)
+        if not attrs:
+            return mapped
+        # 1) 权威：词表里已经写成了该 tag 的真实属性名
         if mapped in attrs:
             return mapped
-        hits = [a for a in attrs if mapped in a]
-        if hits:
-            return sorted(hits, key=len)[0]
-        # 候选属性为空（项目没声明属性）→ 原样输出，交给 Ren'Py
+        # 2) 分词命中（词边界）
+        token_hits = [a for a in attrs if _attr_has_token(a, mapped)]
+        if token_hits:
+            return sorted(token_hits, key=len)[0]
+        # 3) 兜底子串（会命中 unhappy⊃happy 这类，所以放最后）
+        sub_hits = [a for a in attrs if mapped in a]
+        if sub_hits:
+            return sorted(sub_hits, key=len)[0]
         return mapped
 
     def position_for(self, word: str) -> str:

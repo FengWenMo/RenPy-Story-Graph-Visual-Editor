@@ -1,0 +1,2 @@
+label y:
+    return

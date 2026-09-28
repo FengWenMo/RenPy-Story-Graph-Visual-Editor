@@ -1,0 +1,3 @@
+label a:
+    "x"
+    return

@@ -36,7 +36,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "2b93371142"
+      "lineHash": "6ccbcf2f09"
     },
     {
       "lineId": "ch01.0002",
@@ -56,7 +56,7 @@
       "sfx": "door",
       "sfxAction": "play",
       "voice": "v_eileen_01",
-      "lineHash": "160225a63e"
+      "lineHash": "af4a87ffd5"
     },
     {
       "lineId": "ch01.0003",
@@ -77,7 +77,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "253cb8d2f5"
+      "lineHash": "5bdf06dc58"
     },
     {
       "lineId": "ch01.0004",
@@ -98,7 +98,7 @@
       "sfx": "",
       "sfxAction": "play",
       "voice": "",
-      "lineHash": "9a8e844fbb"
+      "lineHash": "6bc464952b"
     }
   ],
   "assets": [

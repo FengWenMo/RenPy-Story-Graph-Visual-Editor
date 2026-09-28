@@ -1,0 +1,71 @@
+{
+  "ok": false,
+  "error_count": 1,
+  "warning_count": 3,
+  "by_level": {
+    "L1": 3,
+    "L2": 0,
+    "L3": 1
+  },
+  "issues": [
+    {
+      "level": "L1",
+      "code": "E102",
+      "severity": "error",
+      "message": "说话人 'ghost' 不在资源表角色里",
+      "where": "bad.0001",
+      "hint": "在 characters.xlsx 登记，或改成本表已有的角色变量名"
+    },
+    {
+      "level": "L1",
+      "code": "W110",
+      "severity": "warning",
+      "message": "image 'bg room' 未登记",
+      "where": "start.0002",
+      "hint": "这类资产还没建资源表：建好后引用即可下拉选择"
+    },
+    {
+      "level": "L1",
+      "code": "W110",
+      "severity": "warning",
+      "message": "music 'bgm_theme' 未登记",
+      "where": "start.0002",
+      "hint": "这类资产还没建资源表：建好后引用即可下拉选择"
+    },
+    {
+      "level": "L3",
+      "code": "E303",
+      "severity": "warning",
+      "message": "1 个 label 从入口走不到（如 bad）",
+      "where": "graph",
+      "hint": "多数是动态跳转/调试残留；确实不该存在再清理"
+    }
+  ],
+  "build": {
+    "ok": true,
+    "engine": "json",
+    "strict": false,
+    "generated_at": "2026-09-28T13:47:55",
+    "stats": {
+      "scripts": [
+        "D:\\千连万理\\Renpy_Story_Graph_Editor\\.pip-tmp\\pytest-of-28749\\pytest-40\\test_non_strict_reports_but_pa0\\proj\\game\\bad.rpy",
+        "D:\\千连万理\\Renpy_Story_Graph_Editor\\.pip-tmp\\pytest-of-28749\\pytest-40\\test_non_strict_reports_but_pa0\\proj\\game\\script.rpy"
+      ],
+      "lines": 2,
+      "labels": 2,
+      "chars": 9,
+      "todos": 0,
+      "registry": {
+        "images": 0,
+        "music": 0,
+        "sounds": 0,
+        "voices": 0,
+        "transforms": 0,
+        "characters": 1
+      }
+    },
+    "artifacts": [
+      "D:\\千连万理\\Renpy_Story_Graph_Editor\\.pip-tmp\\pytest-of-28749\\pytest-40\\test_non_strict_reports_but_pa0\\proj\\out_ns\\story_ir.json"
+    ]
+  }
+}

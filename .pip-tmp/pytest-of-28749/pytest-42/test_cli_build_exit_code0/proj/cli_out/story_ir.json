@@ -1,0 +1,68 @@
+{
+  "schema": "renpy-story-ir/1.0",
+  "project": "proj",
+  "title": "proj",
+  "characters": [
+    {
+      "id": "e",
+      "name": "Eileen",
+      "color": "",
+      "image_tag": "",
+      "voice_tag": "",
+      "dialogue_count": 1
+    }
+  ],
+  "lines": [
+    {
+      "line_id": "start.0001",
+      "label": "start",
+      "seq": 1,
+      "kind": "say",
+      "speaker": "e",
+      "speaker_name": "Eileen",
+      "text": "你好。",
+      "condition": "",
+      "stage": "",
+      "bgm": "[音乐] bgm_theme",
+      "sfx": "",
+      "scene": "bg room",
+      "actors": [],
+      "music": "bgm_theme",
+      "music_action": "play",
+      "music_params": "",
+      "sound": "",
+      "sound_action": "play",
+      "sound_params": "",
+      "voice": "",
+      "at": "",
+      "with": "",
+      "transform": "",
+      "comment": "",
+      "raw": "",
+      "code": "",
+      "line_hash": "85523e3e95"
+    }
+  ],
+  "assets": {
+    "images": [],
+    "music": [],
+    "sounds": [],
+    "voices": [],
+    "transforms": []
+  },
+  "stage": [
+    {
+      "line_id": "start.0001",
+      "scene": "bg room",
+      "actors": [],
+      "music": "bgm_theme"
+    }
+  ],
+  "stats": {
+    "lines": 1,
+    "labels": 1,
+    "characters": 1,
+    "spoken_lines": 1,
+    "chars": 3
+  }
+}

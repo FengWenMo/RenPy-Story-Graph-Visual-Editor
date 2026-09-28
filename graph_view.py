@@ -63,8 +63,9 @@ from asset_events import (
     ConfirmationGate,
 )
 from script_table import (
-    beats_from_parse_result, export_beats_to_excel,
-    import_beats_from_excel, write_beats_to_rpy,
+    beats_from_parse_result, evaluate_generation, export_beats_to_excel,
+    import_beats_from_excel, occupied_labels, planned_output_path,
+    render_beats_to_rpy, write_generation,
 )
 
 
@@ -139,15 +140,32 @@ class GraphView:
         btn_frame = tk.Frame(right_panel)
         btn_frame.pack(fill=tk.X, pady=5)
 
-        tk.Button(btn_frame, text="导入Ren'Py文件", command=self.import_renpy).pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="批量导入章节", command=self.batch_import_chapters,
-                  bg="#9C27B0", fg="white").pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="导出为Ren'Py", command=self.export_renpy).pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="保存布局(JSON)", command=self.save_layout).pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="加载布局", command=self.load_layout).pack(pady=2, fill=tk.X)
-        tk.Button(btn_frame, text="清空图", command=self.clear_graph, bg="#F44336", fg="white").pack(pady=2, fill=tk.X)
+        # ============ 主入口：打开本章剧本（4 项卡片） ============
+        # 用户 2026-09-28 反馈："我不知道如何打开你说的卡片入口"。
+        # 根因是入口埋在侧栏第三组按钮里、名字叫「在应用内编辑剧本表」，
+        # 而且打开后是**空窗口**（还要自己找底部的「载入 .rpy」）。
+        # 现在把它放到最上面、改成人话名字，并在打开时自动载入当前章节。
+        self.btn_script = tk.Button(
+            btn_frame, text="✎ 打开本章剧本（改台词）",
+            command=self.open_script_table_editor,
+            bg="#1976D2", fg="white",
+            font=("微软雅黑", 10, "bold"))
+        self.btn_script.pack(pady=(2, 2), fill=tk.X)
 
-        # 资产集成按钮（保留引用：重活进行中要禁用，避免连点重入）
+        # 当前要编辑哪一章：跟着画布上选中的章节节点走
+        self.chapter_label = tk.Label(
+            btn_frame, text="（先在画布上点一个章节，或用右键菜单选文件）",
+            font=("微软雅黑", 8), fg="#666", wraplength=330, justify=tk.LEFT)
+        self.chapter_label.pack(pady=(0, 4), fill=tk.X)
+
+        # ============ 导入：一个按钮，可多选 ============
+        # 用户明确要求："批量导入其实可以删掉，本来直接写导入 Renpy 文件
+        # 就包括了批量导入"。`filedialog` 本来就支持多选，所以这里只留一个
+        # 按钮，标题写明"可多选"——功能没少，按钮少一个。
+        tk.Button(btn_frame, text="导入章节 .rpy（可多选）",
+                  command=self.import_renpy).pack(pady=2, fill=tk.X)
+
+        # ============ 项目与资源 ============
         self.btn_open_project = tk.Button(btn_frame, text="打开项目",
                                           command=self.open_project)
         self.btn_open_project.pack(pady=2, fill=tk.X)
@@ -162,21 +180,32 @@ class GraphView:
                                     bg="#FF9800", fg="white")
         self.btn_health.pack(pady=2, fill=tk.X)
 
-        # 剧本表：把 .rpy 摊成一行一句演出的 Excel，改完再生成脚本
-        script_frame = tk.LabelFrame(right_panel, text="剧本表（Excel 双向）",
-                                     padx=5, pady=5)
+        # ============ 交换面：Excel（降级为互换格式，不是主编辑面） ============
+        script_frame = tk.LabelFrame(
+            right_panel, text="交给 Excel（批量改 / 校对）", padx=5, pady=5)
         script_frame.pack(fill=tk.X, pady=5)
-        tk.Button(script_frame, text="从剧本表生成 .rpy",
+        tk.Button(script_frame, text="导出本章为 Excel 表…",
+                  command=self.export_table_for_chapter).pack(pady=2, fill=tk.X)
+        tk.Button(script_frame, text="从 Excel 表生成 .rpy…",
                   command=self.export_rpy_from_table).pack(pady=2, fill=tk.X)
-        tk.Button(script_frame, text="刷新候选（从资源表重读）",
+        tk.Button(script_frame, text="刷新下拉候选（从资源表重读）",
                   command=self.refresh_table_candidates).pack(pady=2, fill=tk.X)
-        tk.Button(script_frame, text="在应用内编辑剧本表",
-                  command=self.open_script_table_editor).pack(pady=2, fill=tk.X)
         tk.Label(script_frame,
-                 text="（「用 Excel 打开 .rpy」已移到画布上\n"
-                      "右键章节节点 → 与「在编辑器中打开」同级）",
+                 text="（主编辑面是上面的「打开本章剧本」；\n"
+                      "Excel 用来批量改台词、本地化、QA 校对）",
                  font=("微软雅黑", 8), fg="#666", justify=tk.LEFT
                  ).pack(pady=(2, 0), fill=tk.X)
+
+        layout_frame = tk.LabelFrame(right_panel, text="画布", padx=5, pady=5)
+        layout_frame.pack(fill=tk.X, pady=5)
+        tk.Button(layout_frame, text="保存布局(JSON)",
+                  command=self.save_layout).pack(pady=2, fill=tk.X)
+        tk.Button(layout_frame, text="加载布局",
+                  command=self.load_layout).pack(pady=2, fill=tk.X)
+        tk.Button(layout_frame, text="导出为Ren'Py（控制流图）",
+                  command=self.export_renpy).pack(pady=2, fill=tk.X)
+        tk.Button(layout_frame, text="清空图", command=self.clear_graph,
+                  bg="#F44336", fg="white").pack(pady=2, fill=tk.X)
 
         tk.Button(btn_frame, text="检查逻辑漏洞", command=self.analyze_and_warn,
                  bg="#4CAF50", fg="white").pack(pady=10, fill=tk.X)
@@ -211,6 +240,9 @@ class GraphView:
         self.menu.add_command(label="设为当前章节", command=self.set_current)
         self.menu.add_command(label="编辑变量操作", command=self.edit_operations)
         self.menu.add_command(label="在编辑器中打开", command=self.open_label_in_editor, state="disabled")
+        # 主入口放这里**第一个**：用户选中的章节 = 他要编的那一章。
+        # 与「在编辑器中打开」（给程序看源码）并列，一左一右各服务一类人。
+        self.menu.add_command(label="改本章台词（卡片）", command=self.open_script_table_editor, state="disabled")
         # 与「在编辑器中打开」同级：同一个章节，一个给程序员看源码，
         # 一个给文案看演出表——不该藏在侧栏，得在节点本身右键。
         self.menu.add_command(label="用 Excel 打开此章节", command=self.open_node_rpy_in_excel, state="disabled")
@@ -616,6 +648,8 @@ class GraphView:
                 self.drag_data["old_x"] = self.graph.nodes[nid].x
                 self.drag_data["old_y"] = self.graph.nodes[nid].y
             self.update_selection_highlight()
+            # 选中章节 → 主入口下面那行提示跟着变（用户要知道会打开哪一章）
+            self._update_chapter_label(self.graph.nodes.get(nid))
             return
 
         eid = self.edge_at(event.x, event.y)
@@ -623,12 +657,14 @@ class GraphView:
             self.selected_edge = eid
             self.selected_node = None
             self.update_selection_highlight()
+            self._update_chapter_label(None)
             return
 
         self.selected_node = None
         self.selected_edge = None
         self.drag_data["node"] = None
         self.update_selection_highlight()
+        self._update_chapter_label(None)
 
     def on_left_drag(self, event):
         # 平移模式处理
@@ -742,9 +778,13 @@ class GraphView:
             state = "normal" if has_src else "disabled"
             self.menu.entryconfig("在编辑器中打开", state=state)
             self.menu.entryconfig("用 Excel 打开此章节", state=state)
+            self.menu.entryconfig("改本章台词（卡片）", state=state)
+            self._update_chapter_label(node)
         else:
             self.menu.entryconfig("在编辑器中打开", state="disabled")
             self.menu.entryconfig("用 Excel 打开此章节", state="disabled")
+            self.menu.entryconfig("改本章台词（卡片）", state="disabled")
+            self._update_chapter_label(None)
 
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
@@ -1201,7 +1241,8 @@ is_unlocked = love > 5 and money >= 100"""
         try:
             from script_table import open_rpy_as_table
             registry = self._current_registry()
-            open_rpy_as_table(script_path, table_path, registry=registry)
+            open_rpy_as_table(script_path, table_path, registry=registry,
+                              with_thumbnails=True)
         except Exception as e:
             messagebox.showerror("生成剧本表失败", str(e))
             return
@@ -1439,20 +1480,63 @@ is_unlocked = love > 5 and money >= 100"""
         if unregistered:
             self._show_unregistered_dialog(unregistered)
 
-        out_path = table_path.with_suffix('.generated.rpy')
-        if not messagebox.askyesno(
-            "确认导出",
-            f"将生成 {len(beats)} 个演出单元到：\n{out_path}\n\n继续？"
-        ):
+        out_path = planned_output_path(
+            table_path, project_root=self.project_root)
+        text = render_beats_to_rpy(beats, label_name=None, registry=registry)
+
+        # 生成安全门禁（在 script_table 里跑，UI 只摆结果）。
+        # 这一道闸是为一次真实事故加的：产物曾直接写进 game/chapter/，
+        # 与原文抢同一个 label，还带了 18 行中文图像 tag。
+        # 顺序刻意是"先评、再问、最后写"——不在用户点头前落任何盘。
+        occupied = occupied_labels(project_root=self.project_root,
+                                   exclude={out_path, table_path})
+        issues = evaluate_generation(text, out_path,
+                                     project_root=self.project_root,
+                                     occupied=occupied)
+        blocking = [i for i in issues if i.is_blocking]
+        warnings = [i for i in issues if not i.is_blocking]
+
+        if blocking:
+            # 拒写，但**不把产物丢掉**：另存一份 .blocked.rpy 供对比，
+            # 否则"拒写"会让人连问题长什么样都看不到（信任 > 方便）。
+            review = None
+            try:
+                review = out_path.with_suffix('.blocked.rpy')
+                review.parent.mkdir(parents=True, exist_ok=True)
+                review.write_text(text, encoding='utf-8')
+            except OSError:
+                review = None
+
+            messagebox.showerror(
+                '拒绝导出：生成的脚本会让游戏跑不起来',
+                '发现 %d 条致命问题，**没有写入目标文件**'
+                '（原文与演出表都没动）。\n\n%s\n\n%s'
+                % (len(blocking),
+                   '\n'.join('· ' + i.format() for i in blocking[:12]),
+                   f'产物已另存一份供对比：\n{review}' if review
+                   else '（产物副本也没能写出，请检查目录权限）'))
+            self._append_analysis(
+                f'[剧本表] 导出被拦下：{len(blocking)} 条致命问题'
+                + (f'，产物存为 {review.name}' if review else '') + '\n')
             return
 
-        try:
-            # label 交给表里每一行的 Label 列决定，保持多章节结构
-            # registry 传入后，会把用到的自定义 transform 一并生成
-            write_beats_to_rpy(beats, out_path, label_name=None,
-                               registry=registry)
-        except Exception as e:
-            messagebox.showerror("导出失败", str(e))
+        # 确认框必须把"写到哪 / 门禁怎么看"说清楚。以前这里只写一句
+        # "将生成 N 个演出单元到 xxx.generated.rpy"，没有任何警告——
+        # 产物和原文抢 label 就是这样被点掉的。
+        tip = f'将生成 {len(beats)} 个演出单元到：\n{out_path}\n'
+        if warnings:
+            tip += '\n提醒（不阻止导出）：\n' + '\n'.join(
+                '· ' + i.format() for i in warnings[:6]) + '\n'
+        else:
+            tip += '\n生成安全门禁：无问题。\n'
+        tip += '\n继续？'
+        if not messagebox.askyesno('确认导出', tip):
+            return
+
+        art = write_generation(text, out_path)
+        if not art.written:
+            messagebox.showerror(
+                '导出失败', f'写不出去：\n{art.out_path}\n（检查文件是否被占用）')
             return
 
         self._append_analysis(
@@ -1495,13 +1579,68 @@ is_unlocked = love > 5 and money >= 100"""
             "刷新完成",
             f"已用当前资源表更新候选下拉：\n{table_path}")
 
+    def _selected_chapter_script(self):
+        """
+        画布上当前选中的章节对应哪个 .rpy（找不到返回 None）。
+
+        这是所有"针对本章"的按钮共用的定位逻辑：
+        选中章节 → 知道文件路径 → 打开卡片 / 导出 Excel / 导入 Excel。
+        找不到就直接返回 None，由调用方给出可操作的提示。
+        """
+        node_id = self.selected_node
+        if not node_id:
+            return None
+        node = self.graph.nodes.get(node_id)
+        if node is None or not getattr(node, 'file_path', None):
+            return None
+        path = Path(node.file_path)
+        return path if path.exists() else None
+
+    def _update_chapter_label(self, node=None):
+        """
+        更新主入口下面那行"当前编哪一章"的提示。
+
+        为什么需要：用户反馈"不知道如何打开卡片入口"。
+        入口不只要求**看得见**，还要让人在点之前就知道**会打开哪一章**。
+        """
+        label = getattr(self, 'chapter_label', None)
+        # 控件在 setup_ui 里才创建；早于它被调用（或测试里的桩）要安全退出
+        if label is None or not hasattr(label, 'config'):
+            return
+        path = None
+        if node is not None and getattr(node, 'file_path', None):
+            path = Path(node.file_path)
+        if path and path.exists():
+            name = getattr(node, 'name', '') or path.stem
+            label.config(text=f'当前章节：{name}（{path.name}）')
+        elif node is not None:
+            label.config(text='该章节没有关联源文件——用「导入章节」先导进来')
+        else:
+            label.config(text='（先在画布上点一个章节，再点上面的按钮）')
+    def export_table_for_chapter(self):
+        """
+        把当前选中的章节导出成 Excel 表（交换面）。
+
+        **这个方法是补的**：侧栏写着「导出本章为 Excel 表」但原来没有对应
+        实现——用户点下去什么也不会发生。现在它复用"用 Excel 打开此章节"
+        那条已经被验证过的路径（生成表 + 交给系统默认程序打开）。
+        """
+        script_path = self._selected_chapter_script()
+        if script_path is None:
+            messagebox.showinfo(
+                "先选一章",
+                "请先在画布上点选一个章节节点（右键 → 用 Excel 打开此章节\n"
+                "也可以），再点这里导出成 Excel 表。")
+            return
+        self._generate_and_open_table(script_path)
+
     def open_script_table_editor(self):
         """
-        M5/M6：在应用内直接编辑剧本表，不必先开 Excel。
+        主入口：在应用内编辑本章剧本（4 项卡片）。
 
-        载入一个 .rpy → 列出所有 Beat → 选中后在右侧面板改角色/台词/
-        语音/音乐/立绘 → 资产列可点 🔍 从资源表选择，或"新建资产"直接
-        写回资源表。改完导出 .rpy。
+        **自动载入当前选中的章节**——以前这里打开的是**空窗口**，
+        还要用户自己找到底部的「载入 .rpy」，等于没有入口（用户反馈
+        "我不知道如何打开你说的卡片入口"）。没选章节时才退回让用户选文件。
         """
         try:
             from beat_editor import ScriptTableEditorWindow
@@ -1509,6 +1648,17 @@ is_unlocked = love > 5 and money >= 100"""
         except Exception as e:
             messagebox.showerror("无法打开编辑器", str(e))
             return
+
+        script_path = self._selected_chapter_script()
+        if script_path is None:
+            # 没选中章节 → 让用户挑一个文件，而不是开一个空窗口
+            picked = filedialog.askopenfilename(
+                title="选择要编辑的章节脚本（.rpy）",
+                initialdir=str(self.project_root) if self.project_root else None,
+                filetypes=[("Ren'Py 脚本", "*.rpy"), ("所有文件", "*.*")])
+            if not picked:
+                return
+            script_path = Path(picked)
 
         registry = self._current_registry()
         asset_dir = (getattr(self.asset_engine, 'asset_dir', None)
@@ -1524,8 +1674,10 @@ is_unlocked = love > 5 and money >= 100"""
                 f"{('（' + path + '）') if path else ''}\n")
 
         ScriptTableEditorWindow(
-            self.root, self.asset_engine, asset_dir=asset_dir,
-            on_new_asset=on_new_asset)
+            self.root, self.asset_engine, script_path=script_path,
+            asset_dir=asset_dir, on_new_asset=on_new_asset)
+        self._append_analysis(
+            f'[剧本] 已打开 {script_path.name}（卡片式编辑）\n')
 
     _ASSET_TABLE_FILE = {
         'character': 'characters.xlsx',
@@ -1718,10 +1870,15 @@ is_unlocked = love > 5 and money >= 100"""
         )
 
     def import_renpy(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Ren'Py 文件", "*.rpy")])
-        if file_path:
-            cmd = ImportRenPyCommand(self, file_path)
-            self.history.execute_command(cmd)
+        """
+        导入章节脚本（**可多选**）。
+
+        用户 2026-09-28 明确反馈：「批量导入其实可以删掉，本来直接写
+        导入 Renpy 文件就包括了批量导入」。确实如此——`filedialog` 本来就
+        支持多选，多文件导入是**同一个动作**，没有理由拆成两个按钮。
+        所以这里直接走多文件路径（后台线程 + 整图可 Ctrl+Z 撤销）。
+        """
+        self.batch_import_chapters()
 
     def batch_import_chapters(self):
         """

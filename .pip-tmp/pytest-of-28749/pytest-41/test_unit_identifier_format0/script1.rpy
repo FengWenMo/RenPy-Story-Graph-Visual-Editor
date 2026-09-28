@@ -1,0 +1,2 @@
+label start:
+    e "Hello"
