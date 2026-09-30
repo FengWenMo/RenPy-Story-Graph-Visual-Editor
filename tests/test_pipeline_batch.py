@@ -769,11 +769,17 @@ class TestBuildCommand:
 
 
 # ------------------------------------------------------------------
-# F. UI 改进（调研结论落地）：说话人轮转 / 舞台预览 / 体检入口
+# F. UI 改进（调研结论落地）：参与角色 / 舞台预览 / 体检入口
 # ------------------------------------------------------------------
 
-class TestSpeakerRotation:
-    """参考 Ren'Py Story Architect 的"乒乓"：回车自动换下一个说话人。"""
+class TestParticipants:
+    """
+    「参与角色」= **参考表**：一表看清这一章有谁、谁在说话，双击填进当前拍。
+
+    它曾经驱动"回车自动换下一个说话人"，那条路会在翻页时静默改写下一拍的
+    说话人（用户 2026-09-30 标记为最严重的问题），已删除 ——
+    所以这里只剩"谁能参与"这一件纯逻辑。
+    """
 
     def _engine(self, chars):
         from storygraph.assets.asset_registry import AssetRegistry
@@ -806,20 +812,6 @@ class TestSpeakerRotation:
     def test_participants_without_engine(self):
         from storygraph.ui.beat_editor import participants
         assert participants(None) == []
-
-    def test_next_speaker_ping_pong(self):
-        from storygraph.ui.beat_editor import next_speaker
-        rot = ['e', 'm']
-        assert next_speaker(rot, 'e') == 'm'
-        assert next_speaker(rot, 'm') == 'e'
-
-    def test_next_speaker_wraps_and_falls_back(self):
-        from storygraph.ui.beat_editor import next_speaker
-        assert next_speaker(['e', 'm', 'n'], 'n') == 'e'
-        # 当前说话人不在轮转里 → 从第一个开始，不跳到第二个
-        assert next_speaker(['e', 'm'], 'outsider') == 'e'
-        assert next_speaker([], 'e') == ''
-        assert next_speaker(None, 'e') == ''
 
     def test_editor_window_exposes_new_actions(self):
         import storygraph.ui.beat_editor as beat_editor

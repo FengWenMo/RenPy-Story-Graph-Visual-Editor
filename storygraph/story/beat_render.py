@@ -25,10 +25,15 @@ from storygraph.story.beat_model import (
     KIND_MENU_OPTION,
     _fill_audio_from_cells,
     _looks_like_renpy_statement,
+    _parse_native_stage_tail,
     _split_hide_items,
     _split_lines,
     _split_show_items,
     compose_code,
+    hide_item_part,
+    hide_item_parts,
+    show_item_part,
+    show_item_parts,
 )
 
 
@@ -100,7 +105,14 @@ def _render_code_block(text: str) -> list:
     out = []
     for ln in lines:
         s = ln.strip()
-        if s.startswith('$') or _looks_like_renpy_statement(s):
+        # 行首 `\x01` = 原文写的是 `$code`（`$` 后无空格），原样还回去。
+        # 不还的话每个 `$` 行都会变成一个 diff 块。
+        tight = s.startswith('\x01')
+        if tight:
+            s = s.lstrip('\x01').strip()
+        if tight:
+            out.append('$' + s)
+        elif s.startswith('$') or _looks_like_renpy_statement(s):
             out.append(ln)
         else:
             out.append('$ ' + s)
@@ -150,22 +162,51 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     # 所以记下来做精确去重，避免同一句 show 被生成两次。
     emitted_stage = set()
 
-    def emit_stage():
+    def emit_stage_verbs(verbs):
+        """输出**指定的几个 stage verb**（供拍内交错用）。"""
         _render_stage_from_fields(beat, emit,
                                   _resolver_for(audit, name_resolver),
-                                  audit, emitted_stage)
+                                  audit, emitted_stage, verbs=verbs)
+
+    def emit_stage_tail():
+        """舞台的收尾部分：Stage 高级列 + 旧 Transform 列。
+
+        无论单条 verb 怎么切分，这部分都在**所有舞台指令之后**输出一次。
+        """
         if beat.stage:
-            from storygraph.story.dsl import compile_stage
-            for intent, code, status in compile_stage(beat.stage, symbols,
-                                                      audit):
+            from storygraph.story.dsl import compile_stage, parse_stage
+            # 结构化字段已经承载了哪些指令（见 `_stage_op_covered`）。
+            # 每次渲染现算：`beat.show` / `beat.hide` 可能在这一拍里刚被改过。
+            show_parts = show_item_parts(beat.show)
+            hide_parts = hide_item_parts(beat.hide)
+            ops = parse_stage(beat.stage).ops
+            for op, (intent, code, status) in zip(
+                    ops, compile_stage(beat.stage, symbols, audit)):
+                if op.native:
+                    # **作者手写的原生指令：逐字原样出去**（不做下划线改写，
+                    # 也是"不把能跑的脚本改坏"的底线）。结构化列里那份是
+                    # hydrate 留下的影子，`_stage_lines` 已经跳过它了。
+                    # 只有"结构化通道自己又出了完全同一条"时才去重。
+                    if code in emitted_stage:
+                        continue
+                    emit(code, '舞台', intent, status)
+                    continue
                 if code in emitted_stage:
-                    # 结构化列已出过同一条指令（Stage 原文被 hydrate 并回）
+                    # 结构化列已原样出过同一条指令（Stage 原文被 hydrate 并回）
+                    continue
+                if _stage_op_covered(code, op, beat, show_parts, hide_parts):
+                    # 同一条指令换了写法重复出现在 Stage 里 → 不重复输出
                     continue
                 emit(code, '舞台', intent, status)
 
         # 旧表带过来的 Transform 列（现已取消）：当成这一拍的转场
         if beat.transform and not beat.with_:
             emit(f"with {beat.transform}", '舞台', beat.transform)
+
+    def emit_stage():
+        """一次输出全部舞台指令（历史行为，给没有 op_order 的 Beat 用）。"""
+        emit_stage_verbs(None)
+        emit_stage_tail()
 
     # ---------------- 代码块（保真后门） ----------------
     def emit_code():
@@ -201,27 +242,50 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             emit(f"voice {_audio_ref(beat.voice)}", '语音', beat.voice)
 
     # ---------------- 按**源码里的顺序**输出 ----------------
-    # 这一节修的是「跨类别顺序」差异：`play music X` 写在 `show Y` 之前时，
-    # 以前固定按"舞台→音频→语音"输出，音频会跑到立绘后面。
-    # 同一次交互里最终画面一样，但回放/时间轴看到的顺序是错的——
-    # 而顺序本身就是演出语义（"音乐先起还是立绘先亮"）。
+    # 这一节修的是「跨类别顺序」+「同类内交错」：
+    #   · `play music X` 写在 `show Y` 之前时，音频要真的在前（跨类别）；
+    #   · `scene → play → show` 这种**同类内交错**也要保住——
+    #     只按类别分组输出会得到一个"整块的舞台 + 整块的音频"，
+    #     语义近似但顺序错了，回放/时间轴看到的顺序不对。
     #
-    # `op_order` 只记**舞台 / 音频 / 语音**三类；代码块（CodeBlock 后门）
-    # 不在其中，所以按历史契约紧跟在舞台之后输出——它内部有自己更细的
-    # `beat.ordered`（raw/code 交错顺序）负责保真。
-    _ops = {'stage': emit_stage, 'audio': emit_audio, 'voice': emit_voice}
-    order = [k for k in beat.order_ops if k in _ops]
-    if order:
-        # 老表/手工新增行可能只记了部分（甚至没记）——把漏掉的按历史顺序补在
-        # 后面，**绝不因为顺序信息不全就丢掉操作**。
-        order += [k for k in ('stage', 'audio', 'voice') if k not in order]
-    else:
-        order = ['stage', 'audio', 'voice']
-    for kind in order:
-        _ops[kind]()
-        if kind == 'stage':
-            # 代码块固定跟舞台走（历史契约，见上）
+    # `op_order` 记的是 **verb 级**顺序（`scene,audio,show`），
+    # 所以这里逐条输出：stage verb 交给 `emit_stage_verbs` 单独渲染，
+    # 这才能把音频插进 `scene` 与 `show` 之间。
+    #
+    # 代码块（CodeBlock 后门）不在 op_order 里，按历史契约紧跟舞台之后
+    # 输出——它内部有更细的 `beat.ordered`（raw/code 交错）负责保真。
+    _verb_ops = {'scene': lambda: emit_stage_verbs(['scene']),
+                 'show': lambda: emit_stage_verbs(['show']),
+                 'hide': lambda: emit_stage_verbs(['hide']),
+                 'audio': emit_audio, 'voice': emit_voice}
+
+    tokens = [t for t in beat.order_tokens if t in _verb_ops]
+    if tokens:
+        # 老表/手工新增行可能只记了部分——把漏掉的 stage verb 按 StageOrder
+        # 补在后面，**绝不因为顺序信息不全就丢掉操作**。
+        missed_stage = [v for v in ('scene', 'show', 'hide')
+                        if v not in tokens]
+        for v in missed_stage:
+            tokens.append(v)
+        for k in ('audio', 'voice'):
+            if k not in tokens:
+                tokens.append(k)
+        code_done = False
+        for t in tokens:
+            _verb_ops[t]()
+            if t == 'scene' and not code_done:
+                # 代码块跟在**第一条舞台指令**之后（历史位置）
+                emit_code()
+                code_done = True
+        if not code_done:
             emit_code()
+        emit_stage_tail()
+    else:
+        # 没有任何顺序信息（老表 / 直接构造的 Beat）：维持历史固定顺序
+        emit_stage()
+        emit_code()
+        emit_audio()
+        emit_voice()
 
     # ---------------- 台词 ----------------
     speaker = beat.speaker
@@ -253,6 +317,53 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
 
 
 
+def _stage_op_covered(code, op, beat, show_parts, hide_parts) -> bool:
+    """
+    Stage 里的这条指令，`beat` 的**结构化字段是不是已经承载**了它？
+
+    这是"互为投影"契约的落点。Stage 与结构化列是同一条流水线的两段输入：
+    `hydrate_from_dsl` 会把 Stage 里的 `scene` / `show` / `hide` 吸进结构化
+    字段，于是渲染时结构化通道先出一次、Stage 尾段再出一次 —— **双写**。
+
+    原来只靠"输出字符串完全相等"去重（`emitted_stage`）：中文化写法
+    （`[显示] 凌跃捷 开心 at f11`）与原生写法生成出来的串不完全一样时，
+    这道防线就失效。这里改成**按语义比对**：把这条指令规范化成与结构化
+    字段**同一套片段编码**（`show_item_parts` / `hide_item_parts`），
+    在结构化那一侧找得到就算"已承载"。
+
+      · 真重复 → 只由结构化通道输出一次（不再双写）
+      · Stage 独有的东西（`pause`、认不出的指令）→ 仍由 Stage 输出（不丢）
+
+    **认不出动词、或片段解析不出来的一律不跳过**：宁可多出一行，
+    也不能吞掉作者手写的指令。
+    """
+    text = code if code and not str(code).startswith('#') else (op.raw or '')
+    head = str(text).split(None, 1)
+    verb = head[0] if head else ''
+    rest = head[1].strip() if len(head) > 1 else ''
+    if verb == 'show':
+        parts = show_item_parts(rest)
+        if parts and parts <= show_parts:
+            return True
+        # 原生 `show X at Y`：`_split_show_items` 会把 `at` 归成"复杂子句"、
+        # 编码成整串，而结构化列里存的是 `X@Y`。两种编码都试一次。
+        spec, at, with_ = _parse_native_stage_tail(rest)
+        if spec and not with_:
+            part = f'{spec}@{at}' if at else spec
+            if part in show_parts:
+                return True
+        return False
+    if verb == 'hide':
+        parts = hide_item_parts(rest)
+        return bool(parts) and parts <= hide_parts
+    if verb == 'scene':
+        spec, at, _with = _parse_native_stage_tail(rest)
+        return bool(spec) and spec == (beat.scene or '').strip() \
+            and at == (beat.scene_at or '').strip()
+    return False
+
+
+
 def _resolver_for(audit, name_resolver=None):
     """
     挑一个"图像名能不能解析"的判定函数。
@@ -272,8 +383,85 @@ def _resolver_for(audit, name_resolver=None):
 
 
 
+def _stage_lines(beat, name_resolver) -> dict:
+    """
+    结构化列 → 按 verb 分组的舞台指令行 `{'scene': [...], 'show': [...], 'hide': [...]}`。
+
+    拆出来是为了让**单条 verb** 能被独立渲染（见 `_render_stage_from_fields`
+    的 `verbs` 参数）——否则拍内 `scene → play → show` 的交错保不住。
+    """
+    preserve = bool(getattr(beat, '_from_script', False))
+
+    # 作者在 Stage 列手写的**原生真迹**：结构化列里那份只是 hydrate 留下的
+    # 影子（供舞台快照/校验用），**不能在这里再渲染一遍** —— 出脚本时
+    # 真迹由 Stage 尾段逐字输出（不做下划线改写，见 `test_roundtrip`）。
+    native_show = getattr(beat, '_stage_native_show', None) or frozenset()
+    native_hide = getattr(beat, '_stage_native_hide', None) or frozenset()
+    native_scene = getattr(beat, '_stage_native_scene', None)
+
+    def art(name):
+        return name if preserve else _emit_image_name(name, name_resolver)
+
+    scene_is_native = bool(beat.scene) and native_scene == (
+        (beat.scene or '').strip(), (beat.scene_at or '').strip())
+    scene_line = ''
+    if beat.scene and not scene_is_native:
+        scene_line = f"scene {art(beat.scene)}"
+        if beat.scene_at:
+            scene_line += f" at {beat.scene_at}"
+
+    show_lines = []
+    for item in _split_show_items(beat.show):
+        if item.get('clause'):
+            if show_item_part(item) in native_show:
+                continue
+            show_lines.append(f"show {item['clause']}")
+            continue
+        if show_item_part(item) in native_show:
+            continue
+        line = f"show {art(item['image'])}"
+        at = (item.get('at') or '').strip() or (beat.at or '').strip()
+        if at:
+            line += f" at {at}"
+        show_lines.append(line)
+
+    hide_lines = []
+    for item in _split_hide_items(beat.hide):
+        if hide_item_part(item) in native_hide:
+            continue
+        line = f"hide {art(item['image'])}"
+        if item.get('with'):
+            line += f" with {item['with']}"
+        hide_lines.append(line)
+
+    # 转场挂在该拍最后一条舞台指令上（有背景就挂背景，否则挂最后一条立绘，
+    # 都没有就单独成行）——Ren'Py 里 `scene X with D` 与
+    # `show X with D` 是最常见的两种写法。
+    #
+    # 背景若是**原生真迹**（Stage 尾段会逐字输出 `scene … with D`），
+    # 这里就不能再挂一次，否则同一拍出现两条转场。
+    if beat.with_ and not scene_is_native:
+        if scene_line:
+            scene_line += f" with {beat.with_}"
+        elif show_lines:
+            show_lines[-1] += f" with {beat.with_}"
+        elif not hide_lines:
+            show_lines.append(f"with {beat.with_}")
+    return {'scene': [scene_line] if scene_line else [],
+            'show': show_lines, 'hide': hide_lines}
+
+
+def _emit_stage_verbs(beat, stage_lines, verbs, emit, emitted=None) -> None:
+    """按 `verbs` 顺序输出舞台行（每 verb 内部保持原顺序）。"""
+    for v in verbs:
+        for ln in stage_lines.get(v, ()):
+            if emitted is not None:
+                emitted.add(ln)
+            emit(ln, '舞台', ln)
+
+
 def _render_stage_from_fields(beat, emit, name_resolver, audit,
-                              emitted: set = None) -> None:
+                              emitted: set = None, verbs=None) -> None:
     """
     结构化列 → Ren'Py 舞台指令（顺序按 StageOrder 还原）。
 
@@ -287,59 +475,23 @@ def _render_stage_from_fields(beat, emit, name_resolver, audit,
 
     从 .rpy 解析来的 Beat（`_from_script`）**逐字还原图像名**：作者的原文
     就是能跑的那份，不拿资源表的解析结果去改写它。
+
+    `verbs` 非空时**只输出列出的 verb**（调用方按拍内源顺序逐个调用），
+    这是保住 `scene → play → show` 这类**同类内交错**的关键；
+    为空则维持历史行为（一次输出全部，按 stage_order）。
     """
-    preserve = bool(getattr(beat, '_from_script', False))
+    stage_lines = _stage_lines(beat, name_resolver)
 
-    def art(name):
-        return name if preserve else _emit_image_name(name, name_resolver)
+    if verbs is not None:
+        _emit_stage_verbs(beat, stage_lines, verbs, emit, emitted)
+        return
 
-    scene_line = ''
-    if beat.scene:
-        scene_line = f"scene {art(beat.scene)}"
-        if beat.scene_at:
-            scene_line += f" at {beat.scene_at}"
-
-    show_lines = []
-    for item in _split_show_items(beat.show):
-        if item.get('clause'):
-            show_lines.append(f"show {item['clause']}")
-            continue
-        line = f"show {art(item['image'])}"
-        at = (item.get('at') or '').strip() or (beat.at or '').strip()
-        if at:
-            line += f" at {at}"
-        show_lines.append(line)
-
-    hide_lines = []
-    for item in _split_hide_items(beat.hide):
-        line = f"hide {art(item['image'])}"
-        if item.get('with'):
-            line += f" with {item['with']}"
-        hide_lines.append(line)
-
-    # 转场挂在该拍最后一条舞台指令上（有背景就挂背景，否则挂最后一条立绘，
-    # 都没有就单独成行）——Ren'Py 里 `scene X with D` 与
-    # `show X with D` 是最常见的两种写法。
-    if beat.with_:
-        if scene_line:
-            scene_line += f" with {beat.with_}"
-        elif show_lines:
-            show_lines[-1] += f" with {beat.with_}"
-        elif not hide_lines:
-            show_lines.append(f"with {beat.with_}")
-
-    stage = {'scene': [scene_line] if scene_line else [],
-             'show': show_lines, 'hide': hide_lines}
     order = [v for v in (beat.stage_order.split(',')
-                         if beat.stage_order else []) if v in stage]
+                         if beat.stage_order else []) if v in stage_lines]
     for v in ('scene', 'show', 'hide'):
         if v not in order:
             order.append(v)
-    for v in order:
-        for ln in stage[v]:
-            if emitted is not None:
-                emitted.add(ln)
-            emit(ln, '舞台', ln)
+    _emit_stage_verbs(beat, stage_lines, order, emit, emitted)
 
 
 
@@ -361,19 +513,77 @@ def _render_audio_from_fields(beat, emit, audit=None) -> None:
         elif action == 'queue':
             ref = _resolve_audio_ref(audit, channel, name)
             if ref is None:
-                emit(f"# TODO: 缺少资源 {label} '{name}'", label, name, 'todo')
+                hint = _suggest_missing_ref(audit, channel, name)
+                extra = f'（是不是想写 {hint!r}？）' if hint else ''
+                emit(f"# TODO: 缺少资源 {label} '{name}'{extra}",
+                     label, name, 'todo')
                 continue
             line = f"queue {channel} {ref}"
         else:
             ref = _resolve_audio_ref(audit, channel, name)
             if ref is None:
-                emit(f"# TODO: 缺少资源 {label} '{name}'", label, name, 'todo')
+                hint = _suggest_missing_ref(audit, channel, name)
+                extra = f'（是不是想写 {hint!r}？）' if hint else ''
+                emit(f"# TODO: 缺少资源 {label} '{name}'{extra}",
+                     label, name, 'todo')
                 continue
             line = f"play {channel} {ref}"
         if params:
             line += f" {params}"
         emit(line, label, name or action)
 
+
+
+def _base_stem(text: str) -> str:
+    """`bgm/夜晚，断电之后…….mp3` → `夜晚，断电之后`（去目录、去扩展名、去结尾省略号）。"""
+    text = str(text or '').strip().replace('\\', '/')
+    if '/' in text:
+        text = text.rsplit('/', 1)[1]
+    text = re.sub(r'\.[A-Za-z0-9]{1,5}$', '', text)
+    return re.sub(r'[….\s]+$', '', text).strip()
+
+
+def _suggest_missing_ref(audit, channel: str, name: str) -> str:
+    """
+    "缺少资源"时给一句**可操作**的猜测：是不是想写这一条？
+
+    真实场景（`chapter1_4.rpy` 的 7 条音乐 TODO）：脚本里写的是
+    `bgm/夜晚，断电之后…….mp3` —— 文件名被手写截断了（带省略号）。
+    **资产其实就在盘里**，叫 `夜晚，断电之后，不存在的教室.mp3`。
+    只报"缺少资源"会让人去找一张根本不缺的曲；给出唯一的前缀匹配，
+    一眼就能把脚本里的名字改对。
+
+    只报**唯一**候选，含糊就不猜（宁可不建议，也绝不指错一条）。
+    """
+    import difflib
+    symbols = getattr(audit, 'symbols', None) if audit is not None else None
+    reg = getattr(symbols, 'registry', None)
+    if reg is None or not channel:
+        return ''
+    from storygraph.core.vocabulary import ASSET_TYPE_ATTR
+    attr = ASSET_TYPE_ATTR.get(channel)
+    rows = getattr(reg, attr, {}) if attr else None
+    if not rows:
+        return ''
+    want = _base_stem(name)
+    if not want:
+        return ''
+    best, best_score = '', 0.0
+    for _aid, row in rows.items():
+        row = row or {}
+        cand = _base_stem(row.get('Path') or '') or _base_stem(row.get('ID') or '')
+        if not cand:
+            continue
+        if cand == want:
+            return ''                       # 一模一样：那不该判成缺
+        score = difflib.SequenceMatcher(None, want, cand).ratio()
+        if cand.startswith(want) or want.startswith(cand):
+            score = max(score, 0.9)         # 前缀关系（省略号截断的典型形态）
+        if score > best_score:
+            best, best_score = cand, score
+        elif score == best_score:
+            best = ''                       # 并列 → 不猜
+    return best if (best and best_score >= 0.72) else ''
 
 
 def _resolve_audio_ref(audit, channel: str, name: str):

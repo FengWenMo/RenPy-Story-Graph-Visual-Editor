@@ -63,8 +63,7 @@ def _open_with_system_default(path) -> bool:
     except Exception:
         return False
 
-# 新增：导入资产注册模块
-from storygraph.assets.asset_engine import AssetEngine
+# 资产事件：`AssetEngine` 已在文件顶部导入，这里只补事件相关符号
 from storygraph.assets.asset_events import (
     AssetEventBus,
     AssetEventType,
@@ -72,6 +71,7 @@ from storygraph.assets.asset_events import (
 )
 from storygraph.story.generation_guard import (
     evaluate_generation,
+    labels_in_danger,
     occupied_labels,
     planned_output_path,
     write_generation,
@@ -1254,6 +1254,7 @@ is_unlocked = love > 5 and money >= 100"""
             registry = self._current_registry()
             open_rpy_as_table(script_path, table_path, registry=registry,
                               with_thumbnails=True)
+            self._remember_table_mtime(table_path)
         except Exception as e:
             messagebox.showerror("生成剧本表失败", str(e))
             return
@@ -1449,6 +1450,23 @@ is_unlocked = love > 5 and money >= 100"""
             return
         self._generate_and_open_table(script_path)
 
+    def _source_rpy_for(self, table_path):
+        """
+        演出表对应的**源 .rpy**（增量补丁要拿它当底稿）。
+
+        查法（从可信到兜底）：
+          1. 画布上选中章节的 `file_path`（最准）；
+          2. 表旁边同名 `.rpy`（`chapter1_3.xlsx` → `chapter1_3.rpy`）；
+        都没有就返回 None → 调用方退回全量（安全）。
+        """
+        picked = self._selected_chapter_script()
+        if picked is not None:
+            return picked
+        cand = Path(table_path).with_suffix('.rpy')
+        if cand.exists() and not cand.name.endswith('.generated.rpy'):
+            return cand
+        return None
+
     def export_rpy_from_table(self):
         """
         把剧本表写回 .rpy。
@@ -1469,6 +1487,9 @@ is_unlocked = love > 5 and money >= 100"""
             return
 
         table_path = Path(table_path)
+        # 这张表被外部改过（另存/换机器/Excel 保存）→ 先自动刷一次候选，
+        # 让人不必记得点「刷新候选」。失败只提示，不打断导出。
+        self.auto_refresh_candidates(table_path)
         try:
             beats = import_beats_from_excel(table_path)
         except Exception as e:
@@ -1495,12 +1516,44 @@ is_unlocked = love > 5 and money >= 100"""
             table_path, project_root=self.project_root)
         text = render_beats_to_rpy(beats, label_name=None, registry=registry)
 
-        # 生成安全门禁（在 script_table 里跑，UI 只摆结果）。
+        # **优先走增量导出**（受控补丁）：把新内容合并进原 .rpy，
+        # 没改的行逐字节保留。用户 2026-09-28 的决定：
+        # "对原有的程序做增量的修改……保留注释，全量修改出来的东西，
+        #  根本就没办法看！！！"
+        # 实测（真实章节 chapter1_3）：全量与原文相似度 0.9246、
+        # 丢 18 行 / 多 13 行；增量 0.9947、**零丢失零多出**、只改 4 行。
+        patch_note = ''
+        try:
+            from storygraph.story.patcher import patch_export
+            src_rpy = self._source_rpy_for(table_path)
+            # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
+            # 否则生成写法会不一致（`ling happy` 被写成中文 tag / 下划线形态），
+            # 那就是"把能跑的脚本改坏"。
+            res = patch_export(beats, src_rpy, text, registry=registry)
+            if res.ok:
+                text = res.text
+                patch_note = (f'增量补丁：对位 {res.matched_beats}/{res.total_beats} 拍，'
+                              f'实际改动 {res.changed_lines} 行')
+                if res.unlanded_lines:
+                    patch_note += (f'（{res.unlanded_lines} 行注释/代码未参与替换，'
+                                   f'保持原文）')
+            else:
+                why = '；'.join(res.reasons) if res.reasons else \
+                    f'与源文件对位率不足（{res.coverage:.0%}）'
+                patch_note = f'全量重生成（增量补丁未采用：{why}）'
+        except Exception as e:                      # noqa: BLE001
+            patch_note = f'全量重生成（增量补丁不可用：{e}）'
+
+        # 生成安全门禁（判定在 story 层，UI 只摆结果）。
         # 这一道闸是为一次真实事故加的：产物曾直接写进 game/chapter/，
         # 与原文抢同一个 label，还带了 18 行中文图像 tag。
         # 顺序刻意是"先评、再问、最后写"——不在用户点头前落任何盘。
-        occupied = occupied_labels(project_root=self.project_root,
-                                   exclude={out_path, table_path})
+        #
+        # **occupied 必须走 labels_in_danger，不能在这里自己算**
+        # （用户 2026-09-28 实测：UI 自己算了一遍，绕过了
+        #  "产物在 build/ 就免查重名"的守卫，于是写到 build/ 也被拒写）。
+        occupied = labels_in_danger(out_path, self.project_root,
+                                    exclude={out_path, table_path})
         issues = evaluate_generation(text, out_path,
                                      project_root=self.project_root,
                                      occupied=occupied)
@@ -1535,6 +1588,8 @@ is_unlocked = love > 5 and money >= 100"""
         # "将生成 N 个演出单元到 xxx.generated.rpy"，没有任何警告——
         # 产物和原文抢 label 就是这样被点掉的。
         tip = f'将生成 {len(beats)} 个演出单元到：\n{out_path}\n'
+        if patch_note:
+            tip += f'\n{patch_note}\n'
         if warnings:
             tip += '\n提醒（不阻止导出）：\n' + '\n'.join(
                 '· ' + i.format() for i in warnings[:6]) + '\n'
@@ -1554,12 +1609,65 @@ is_unlocked = love > 5 and money >= 100"""
             f"[剧本表] 已生成脚本 {out_path.name}（{len(beats)} 个演出单元）\n")
         messagebox.showinfo("导出完成", f"已写入：\n{out_path}")
 
+    # ---------- 候选下拉：记 mtime + 变了自动刷 ----------
+    #
+    # 用户 2026-09-28：一致性责任不该推给人。
+    # 以前资源表加了资产 → 演出表下拉看不见，得自己记得点「刷新候选」，
+    # 忘了就会一直用过期的候选。现在：生成/刷新时记下 mtime，
+    # 再打开同一张表之前自动比对，变了就静默刷新一次。
+
+    def _remember_table_mtime(self, table_path):
+        """记下这张表**我们已知的** mtime（生成/刷新之后调用）。"""
+        if not hasattr(self, '_table_mtimes'):
+            self._table_mtimes = {}
+        try:
+            self._table_mtimes[str(Path(table_path).resolve())] = \
+                Path(table_path).stat().st_mtime
+        except OSError:
+            pass
+
+    def auto_refresh_candidates(self, table_path) -> bool:
+        """
+        若这张表的 mtime 变过（用户另存/外部工具改过），自动刷新候选。
+
+        返回 True 表示"确实刷新了"。**失败只提示、不打断**：
+        刷新候选是辅助动作，不该拦住主流程。
+        """
+        table_path = Path(table_path)
+        registry = self._current_registry()
+        if registry is None:
+            return False
+        cached = getattr(self, '_table_mtimes', {}).get(
+            str(table_path.resolve()))
+        if cached is None:
+            self._remember_table_mtime(table_path)
+            return False
+        try:
+            now = table_path.stat().st_mtime
+        except OSError:
+            return False
+        if now == cached:
+            return False
+        try:
+            from storygraph.story.excel_export import refresh_candidate_sheets
+            refresh_candidate_sheets(table_path, registry)
+            self._remember_table_mtime(table_path)
+            self._append_analysis(
+                f'[剧本表] 检测到 {table_path.name} 被改过，已自动刷新候选\n')
+            return True
+        except Exception as e:                      # noqa: BLE001
+            self._append_analysis(
+                f'[剧本表] 自动刷新候选失败（不影响继续）：{e}\n')
+            return False
+
     def refresh_table_candidates(self):
         """
         刷新一张已导出演出表的候选下拉，不动 Beats 里的任何用户数据。
 
         资源表新增了资产 → 演出表下拉看不见，点这里即可让下拉跟上，
         不必重新导出 .rpy、丢掉文案改好的台词/立绘。
+
+        （多数情况下不用手点：`auto_refresh_candidates` 会在表变过时自动刷。）
         """
         initial = str(self.project_root) if self.project_root else None
         table_path = filedialog.askopenfilename(
@@ -1580,6 +1688,7 @@ is_unlocked = love > 5 and money >= 100"""
         try:
             from storygraph.story.excel_export import refresh_candidate_sheets
             refresh_candidate_sheets(table_path, registry)
+            self._remember_table_mtime(table_path)
         except Exception as e:
             messagebox.showerror("刷新候选失败", str(e))
             return

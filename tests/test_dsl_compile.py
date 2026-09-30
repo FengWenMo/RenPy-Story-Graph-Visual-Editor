@@ -479,3 +479,53 @@ class TestNoDoubleEmit:
                       bgm='[停止音乐]', sfx='[停止音效]')]
         text = render_beats_to_rpy(beats, registry=registry)
         assert 'stop music' in text and 'stop sound' in text
+
+
+# ==================================================================
+#  缺资源：要给一句"是不是想写这个"（2026-09-30）
+# ==================================================================
+
+class TestMissingAssetSuggestion:
+    """
+    真实场景（`chapter1_4.rpy` 的 7 条音乐 TODO）：脚本里写的是
+    `bgm/夜晚，断电之后…….mp3` —— 文件名被手写截断了（带省略号）。
+    **资产其实就在盘里**，叫 `夜晚，断电之后，不存在的教室.mp3`。
+    只报"缺少资源"会让人去找一张根本不缺的曲。
+    """
+
+    def _audit(self):
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.dsl import Audit, Symbols
+        reg = AssetRegistry()
+        reg.music = {
+            'bgm_night': {'ID': 'bgm_night',
+                          'Path': 'sr_general/game/bgm/夜晚，断电之后，不存在的教室.mp3'},
+            'bgm_spring': {'ID': 'bgm_spring',
+                           'Path': 'sr_general/game/bgm/春天花瓣剥落的早晨，抹去睡眼.mp3'},
+            'bgm_other': {'ID': 'bgm_other', 'Path': 'bgm/别的曲.mp3'},
+        }
+        return Audit(Symbols(reg))
+
+    def test_ellipsis_truncated_name_gets_a_suggestion(self):
+        from storygraph.story.beat_render import _suggest_missing_ref
+        aud = self._audit()
+        got = _suggest_missing_ref(aud, 'music', 'bgm/夜晚，断电之后…….mp3')
+        assert got == '夜晚，断电之后，不存在的教室'
+
+    def test_no_suggestion_when_nothing_remotely_matches(self):
+        from storygraph.story.beat_render import _suggest_missing_ref
+        aud = self._audit()
+        assert _suggest_missing_ref(aud, 'music', 'bgm/毫不相干.mp3') == ''
+
+    def test_suggestion_lands_in_the_todo_comment(self):
+        """建议要写进 `# TODO`（导出对话框列的就是这一行）"""
+        from storygraph.story.beat_model import Beat
+        from storygraph.story.beat_render import render_beat_to_rpy
+        aud = self._audit()
+        b = Beat(label='a', kind='say', speaker='x', text='台词',
+                 music='', bgm='bgm/夜晚，断电之后…….mp3')
+        lines = render_beat_to_rpy(b, audit=aud)
+        joined = '\n'.join(str(x) for x in lines)
+        assert '缺少资源' in joined, joined
+        assert '是不是想写' in joined, joined
+        assert '夜晚，断电之后，不存在的教室' in joined, joined

@@ -85,21 +85,47 @@ def beats_from_statements(statements: Iterable[Statement],
             order.append(verb)
         pending.stage_order = ','.join(order)
 
-    def mark_op(kind):
+    def with_src(beat, line_no):
         """
-        记录**全部操作**在本拍中的出现顺序（舞台 / 音乐 / 音效 / 语音）。
+        给**直接构造的 Beat** 带上源行号（1-based）。
 
-        与 `mark_stage` 的区别：`mark_stage` 只管舞台内部（scene/show/hide）
-        的相对顺序；这里管**跨类别**——`play music X` 写在 `show Y` 之前时，
-        必须记住 audio 在前，否则渲染固定按"舞台→音频→语音"输出，
-        音频会跑到立绘后面（回放/时间轴看到的顺序就错了）。
-
-        同类只记一次：同一拍里两条 `play sound` 已经被 flush 拆成了两拍
-        （见 PLAY 分支），所以这里不需要计数。
+        为什么需要：`extend` / `menu` / `menu_option` / `jump` 这几个分支是
+        直接 `beats.append(Beat(...))` 建的，不走 `pending` 那条路，
+        所以 `pending.src_first/src_last` 的赋值到不了它们身上 ——
+        实测 12 条 `extend` 全部 `src=[0,0]`，增量导出对不上位。
         """
+        if line_no:
+            beat.src_first = line_no
+            beat.src_last = line_no
+        return beat
+
+    def mark_op(token):
+        """
+        记录操作在本拍中的**verb 级**出现顺序，供导出时逐条还原。
+
+        存的是 verb（`scene` / `show` / `hide` / `audio` / `voice`），
+        不是类别。**这一点很关键**：
+
+        只记类别（`stage,audio`）时，渲染只能把整个舞台组一次输出，
+        得到"整块舞台 + 整块音频"，于是 `scene → play → show` 变成
+        `scene, show, play` —— `play` 被挤到 `show` 后面。
+        demo ch01 实测就是这样（`play music night` 原本在
+        `show eileen happy` 之前），而这属于**演出顺序被改**。
+
+        audio / voice 同类只记一次：同一拍里两条 `play sound` 已经被
+        flush 拆成了两拍（见 PLAY 分支），所以不需要计数。
+        舞台 verb 按 `mark_stage` 的语义去重（同 verb 不重复记）。
+        """
+        if token in ('scene', 'show', 'hide'):
+            order = pending.op_order.split(',') if pending.op_order else []
+            # 舞台按"尚未记录的 verb"补位，与 stage_order 的顺序保持一致
+            if token not in order:
+                order.append(token)
+            pending.op_order = ','.join(order)
+            return
         order = pending.op_order.split(',') if pending.op_order else []
-        if kind not in order:
-            order.append(kind)
+        if token not in order:
+            order.append(token)
         pending.op_order = ','.join(order)
 
     for stmt, stmt_label in zip(statements, labels):
@@ -108,6 +134,18 @@ def beats_from_statements(statements: Iterable[Statement],
             pending.label = current_label
         kind = stmt.kind
         payload = stmt.payload or {}
+        # 记下这条语句在**源文件里的行号**（1-based），供增量导出定位。
+        # `Statement.source` 是 `(文件路径, 行号)`；没有就不记。
+        try:
+            _src = stmt.source
+            _ln = int(_src[1]) if (_src and len(_src) > 1 and _src[1]) else 0
+        except (TypeError, ValueError, IndexError):
+            _ln = 0
+        if _ln:
+            if not pending.src_first:
+                pending.src_first = _ln
+            pending.src_last = _ln
+
 
         if kind == StatementKind.SAY:
             speaker = payload.get('speaker', '') or ''
@@ -136,34 +174,34 @@ def beats_from_statements(statements: Iterable[Statement],
             #
             # 只是在 Beat 上「显示用」地填 speaker，渲染仍然走 `extend`
             # 分支（见 render_beat_to_rpy），**不会**生成 `jc "…"`。
-            beats.append(Beat(
+            beats.append(with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
                 kind=KIND_EXTEND,
                 speaker=last_speaker,
                 text=payload.get('text', '') or '',
-            ))
+            ), _ln))
 
         elif kind == StatementKind.MENU:
             caption = payload.get('caption', '') or ''
             if caption:
                 seq += 1
-                beats.append(Beat(
+                beats.append(with_src(Beat(
                     seq=seq, label=current_label,
                     condition=stmt.condition or '',
                     kind=KIND_MENU, text=caption,
-                ))
+                ), _ln))
                 # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
                 last_speaker = ''
 
         elif kind == StatementKind.MENU_OPTION:
             seq += 1
-            beats.append(Beat(
+            beats.append(with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
                 kind=KIND_MENU_OPTION,
                 text=payload.get('text', '') or '',
-            ))
+            ), _ln))
             flush_stage_only()
             last_speaker = ''
 
@@ -182,7 +220,7 @@ def beats_from_statements(statements: Iterable[Statement],
             pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
             mark_stage('scene')
-            mark_op('stage')
+            mark_op('scene')
             # 换景 = 换了说话语境，`extend` 的显示归属到此为止（见下）
             last_speaker = ''
 
@@ -198,7 +236,7 @@ def beats_from_statements(statements: Iterable[Statement],
             pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
             mark_stage('show')
-            mark_op('stage')
+            mark_op('show')
 
         elif kind == StatementKind.HIDE:
             items = _split_hide_items(pending.hide)
@@ -207,7 +245,7 @@ def beats_from_statements(statements: Iterable[Statement],
             pending.hide = _join_hide_items(items)
             pending_has_stage = True
             mark_stage('hide')
-            mark_op('stage')
+            mark_op('hide')
             # 退场也算"说话人离开"：`A say → hide A → extend` 时，
             # 那句 extend 归属谁是不确定的（A 已经不在台上了）。
             # 宁可标成空（策划会去补），也不要安错人。
@@ -272,12 +310,12 @@ def beats_from_statements(statements: Iterable[Statement],
             flush_stage_only()
             target = payload.get('target', '')
             seq += 1
-            beats.append(Beat(
+            beats.append(with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
                 kind=KIND_NARRATION,
                 raw=f"{kind} {target}",
-            ))
+            ), _ln))
             # 控制流走了，后面的 extend 不再属于任何已说话的 Beat
             last_speaker = ''
 
@@ -350,7 +388,13 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     原生写法的指令也要拆进结构化字段（舞台快照才看得见演员），但**不写回
     raw**——raw 属于代码块后门，同一行语句被输出两次就会生成重复代码。
     拆不动就忽略：`beat.stage` 原文还在，渲染时它会原样出去。
+
+    同时记下**哪些结构化条目是"原生真迹的影子"**（见 `_absorb_native` 与
+    `render_beat_to_rpy` 的舞台尾段）：作者在 Stage 列手写的原生指令，
+    出脚本时要**逐字原样**出去（不做下划线改写），所以结构化列里那份
+    不能再渲染一遍 —— 影子只给快照/校验用。
     """
+    from storygraph.story.beat_model import hide_item_part, show_item_part
     from storygraph.story.dsl import compile_stage
 
     parsed = parse_stage(beat.stage)
@@ -359,11 +403,19 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     at = ''            # 立绘的位置
     scene_at = ''      # 背景自己的变换
     with_ = ''
+    #: 原生真迹 → 它在结构化列里留下的影子（用于"只渲染真迹"）
+    native_show, native_hide = set(), set()
+    native_scene = None
 
     for op, (_intent, code, status) in zip(
             parsed.ops, compile_stage(beat.stage, symbols, audit)):
         if op.native:
+            n_show, n_hide = len(show_items), len(hide_items)
             _absorb_native(op, show_items, hide_items, order)
+            native_show.update(show_item_part(it)
+                               for it in show_items[n_show:])
+            native_hide.update(hide_item_part(it)
+                               for it in hide_items[n_hide:])
             head = op.raw.split()[0] if op.raw.split() else ''
             if head == 'scene':
                 spec, _at, _w = _parse_native_stage_tail(
@@ -371,6 +423,8 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
                 scene = spec or scene
                 scene_at = _at or scene_at
                 with_ = _w or with_
+                if spec:
+                    native_scene = (spec, _at or '')
             elif head == 'with' and not with_:
                 parts = op.raw.split()
                 with_ = parts[1] if len(parts) > 1 else ''
@@ -429,6 +483,16 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     if dedup:
         beat.stage_order = ','.join(dedup)
 
+    # 记下"原生真迹"的影子：渲染时结构化列要跳过它们（真迹由 Stage 自己出）。
+    # 放在最后而不是逐条赋值，是为了让"没原生指令"时也能把上一轮残留清掉。
+    for attr, val in (('_stage_native_show', frozenset(native_show)),
+                      ('_stage_native_hide', frozenset(native_hide)),
+                      ('_stage_native_scene', native_scene)):
+        try:
+            setattr(beat, attr, val)
+        except Exception:                    # noqa: BLE001
+            pass
+
 
 
 def _absorb_native(op, show_items, hide_items, order):
@@ -478,12 +542,21 @@ def _hydrate_audio(beat, channel, symbols, parse_audio):
             action, name = 'queue', op.name
         else:
             action, name = 'play', op.name
+        # **参数只在 DSL 文本真的带了参数时才覆盖**
+        # （2026-09-28 实测的数据丢失）：`[停止音乐]` 这类**伪值本身不含参数**，
+        # 而参数住在旁边那一列（「音乐参数」= `fadeout 1.0`）。
+        # 原来这里无条件 `op.params` 覆盖，于是把已经读出来的 fadeout 冲成空，
+        # 真实章节 6 条 `stop music fadeout 1.0` 全变成裸 `stop music`。
+        params = op.params
+        if not params:
+            params = (beat.music_params if channel == 'music'
+                      else beat.sound_params) or ''
         if channel == 'music':
             beat.music, beat.music_params, beat.music_action = \
-                name, op.params, action
+                name, params, action
         else:
             beat.sound, beat.sound_params, beat.sound_action = \
-                name, op.params, action
+                name, params, action
 
 
 
@@ -635,6 +708,39 @@ def apply_script_definitions(registry, parse_result) -> dict:
 
     added['updated'] = updated
     return added
+
+
+
+def stage_only_ops(text: str, symbols=None, audit=None) -> str:
+    """
+    Stage 原文里**结构化列永远表达不了**的那些指令（`[停顿] 1.0` / 认不出的原生语句）。
+
+    用途：编辑器重新投影 `beat.stage` 时，把这部分**原样留下**。
+    能表达的（scene / show / hide / with）会由结构化列重新生成，
+    表达不了的必须由 Stage 自己带着走 ——
+    否则"打开卡片、点一下下一句"，作者手写的 `[停顿] 1.0` 就没了。
+
+    判定按**编译后的动词**：`[停顿] 1.0` 编译成 `pause 1.0`，首词是
+    `pause`，不在 `scene/show/hide/with` 里 → 留下。
+    """
+    text = str(text or '').strip()
+    if not text:
+        return ''
+    try:
+        from storygraph.story.dsl import compile_stage, parse_stage
+        parsed = parse_stage(text)
+        compiled = compile_stage(text, symbols, audit)
+    except Exception:                        # noqa: BLE001 - 解析不了就整条留下
+        return text
+    keep = []
+    for op, (_intent, code, _status) in zip(parsed.ops, compiled):
+        head = str(code).split(None, 1)[0] if str(code).split() else ''
+        if head in ('scene', 'show', 'hide', 'with'):
+            continue
+        line = str(code).strip()
+        if line and line not in keep:
+            keep.append(line)
+    return '; '.join(keep)
 
 
 

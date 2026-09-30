@@ -401,7 +401,20 @@ class Statement:
         )
 
     @classmethod
-    def make_python(cls, code, condition='', source=('', 0)):
+    def make_python(cls, code, condition='', source=('', 0),
+                    dollar_space: bool = True):
+        """
+        `$ python` 语句。
+
+        `dollar_space=False` 表示原文写的是 `$code`（`$` 后无空格）。
+        两种写法 Ren'Py 都认，但**往返要保真** —— 原文 `$persistent.x= True`
+        导回去变成 `$ persistent.x= True`，会让每个 `$` 行都成为一个 diff 块。
+
+        这一位用**行首标记 `\\x01`** 承载（而不是加 payload 键）：
+        payload 形状不变，对 content_hash / 表格列 / 其他消费者都没有影响。
+        """
+        if not dollar_space:
+            code = '\x01' + (code or '')
         return cls(
             kind=StatementKind.PYTHON,
             payload={'code': code},

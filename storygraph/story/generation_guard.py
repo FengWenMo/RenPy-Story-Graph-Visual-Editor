@@ -344,6 +344,27 @@ def evaluate_generation(text: str, out_path, *, project_root=None,
 
 
 
+def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
+    """
+    **只有产物真会落进 `<root>/game/` 时**才返回项目里已占用的 label 集合。
+
+    为什么必须是**一个**函数：这个判据同时决定"要不要查重名"，
+    而它以前在两个地方各写了一遍 —— 结果是 UI 绕过了 `write_generation`
+    里的守卫，自己算出 50 个 label 传进去，于是**连写到 `build/renpy/`
+    的产物都被判 `LABEL_COLLISION` 拒写**（用户 2026-09-28 实测：
+    "我其实已经在 build 目录里面了，它还是拒绝导出"）。
+
+    Ren'Py 把 game/ 下所有 .rpy 当同一个脚本，所以：
+      · 产物会进 game/  → 重名致命，必须查；
+      · 产物进 build/ 等 → 根本不被扫描，重名无害，**不许拦**。
+
+    判定复用 `paths.inside_game_dir`（同一处实现，别再抄一份）。
+    """
+    if not inside_game_dir(out_path, project_root):
+        return set()
+    return occupied_labels(project_root=project_root, exclude=exclude)
+
+
 def write_generation(text: str, out_path, *, review_on_block: bool = True,
                      project_root=None, occupied=None):
     """
@@ -370,9 +391,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     if occupied is None:
         # 只有产物**会被 Ren'Py 扫描**（落在 <root>/game/ 里）时，
         # "和原文抢 label"才是致命问题；写到 build/ 或临时目录的产物
-        # 根本不被扫描，与原文同名无害（见 inside_game_dir）。
-        occupied = (occupied_labels(project_root=root, exclude={out_path})
-                    if inside_game_dir(out_path, root) else set())
+        # 根本不被扫描，与原文同名无害（见 labels_in_danger）。
+        occupied = labels_in_danger(out_path, root, exclude={out_path})
     issues = generation_guard(text, out_path, project_root=root,
                               occupied_labels=occupied)
     blocking = [i for i in issues if i.is_blocking]
@@ -413,10 +433,8 @@ def write_beats_to_rpy(beats: list, output_path,
     output_path = Path(output_path)
 
     root = project_root or _guess_project_root(output_path)
-    # label 重名**只在产物会被 Ren'Py 扫描时**才算致命（见 inside_game_dir）：
-    # 产物写进 game/ 才怕和原文抢 label；写到 build/ 或临时目录的根本不被扫描。
-    occupied = (occupied_labels(project_root=root, exclude={output_path})
-                if inside_game_dir(output_path, root) else set())
+    # label 重名**只在产物会被 Ren'Py 扫描时**才算致命（见 labels_in_danger）。
+    occupied = labels_in_danger(output_path, root, exclude={output_path})
     issues = generation_guard(text, output_path, project_root=root,
                               occupied_labels=occupied)
     blocking = [i for i in issues if i.is_blocking]

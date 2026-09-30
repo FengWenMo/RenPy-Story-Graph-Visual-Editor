@@ -21,6 +21,7 @@ tests/test_generation_guard.py
   · `TestExportPlan`       —— "先评、再问、最后写"这套顺序的纯逻辑
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -176,15 +177,21 @@ def real_chapter_paths():
 
 class TestRealProjectArtifact:
     """
-    用**真实发生过的那份坏文件**当固定用例。
+    用**真实项目里那份产物**当输入，检查门禁"有没有看漏/误报"。
 
-    数字是事故当时的实测值：18 行中文 tag + 1 处 label 重名。
-    如果哪天数字变了，说明生成器或者这份文件被改过——两种情况都值得人看一眼。
+    为什么要改（2026-09-30）：这里原来写死"18 行中文 tag + 1 处 label 重名"
+    —— 但这份 `.generated.rpy` **每次导出都会被重写**（实测当天 22:53
+    用户又导出了一次），于是"产物换了"会表现成"代码坏了"（红了一次，
+    而真实原因是：当天修掉中文 tag 产出之后，那 18 行自然就没了）。
+
+    现在改成**按内容自证**：文件里真有几行中文 tag，门禁就必须报几行；
+    产物与原文真有同名 label，就必须报重名。无论产物怎么变，
+    测的都是"门禁的判定对不对"。
     """
 
     @needs_real
     def test_broken_artifact_is_caught(self, real_chapter_paths):
-        bad, _good = real_chapter_paths
+        bad, good = real_chapter_paths
         text = bad.read_text(encoding='utf-8')
         occ = occupied_labels(project_root=REAL_PROJECT, exclude={bad})
         issues = generation_guard(text, bad, project_root=REAL_PROJECT,
@@ -194,11 +201,24 @@ class TestRealProjectArtifact:
         for i in issues:
             by_code.setdefault(i.code, []).append(i)
 
-        assert len(by_code.get('CJK_IN_IMAGE_TAG', [])) == 18, \
-            '真实坏产物里的中文 tag 行数变了，请人工确认'
-        assert len(by_code.get('LABEL_COLLISION', [])) == 1
-        assert all(i.is_blocking for i in by_code['CJK_IN_IMAGE_TAG'])
-        assert all(i.is_blocking for i in by_code['LABEL_COLLISION'])
+        # ① 中文 tag：独立粗扫一遍，和门禁的判定对齐
+        want_cjk = [l for l in text.splitlines()
+                    if re.search(r'^\s*(show|scene|hide)\s+\S*[\u4e00-\u9fff]',
+                                 l)]
+        got_cjk = by_code.get('CJK_IN_IMAGE_TAG', [])
+        assert len(got_cjk) == len(want_cjk), (
+            f'中文 tag：独立扫到 {len(want_cjk)} 行，门禁报 {len(got_cjk)} 条')
+        assert all(i.is_blocking for i in got_cjk)
+
+        # ② label 重名：产物 label 与原文撞车时必须报（且是阻断级）
+        def labels_of(t):
+            return set(re.findall(r'^\s*label\s+([\w.]+)\s*:', t, re.M))
+        collide = labels_of(text) & labels_of(good.read_text(encoding='utf-8'))
+        got_col = by_code.get('LABEL_COLLISION', [])
+        if collide:
+            assert got_col, f'产物与原文同名 label {sorted(collide)}，门禁必须报'
+            assert all(i.is_blocking for i in got_col)
+        assert 'OUTSIDE_BUILD_DIR' in by_code, '产物写在 game/ 下必须提示'
 
     @needs_real
     def test_original_script_has_no_blocking_issue(self, real_chapter_paths):

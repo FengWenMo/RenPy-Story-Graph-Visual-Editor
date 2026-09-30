@@ -556,6 +556,11 @@ class ReturnNode(ASTNode):
 @dataclass
 class PythonNode(ASTNode):
     code: str = ''
+    #: 原文是 `$ code`（`$` 后有空格）还是 `$code`。
+    #: Ren'Py 两种都合法，但**往返要保真**：原文写 `$persistent.x= True`，
+    #: 导回去变成 `$ persistent.x= True` 会让每个 `$` 行都成一个 diff 块
+    #: （用户："全量修改出来的东西，根本就没办法看"）。
+    dollar_space: bool = True
 
 
 @dataclass
@@ -1114,11 +1119,14 @@ class RenPyParser:
         # ---- $ python ----
         m = self._RE_DOLLAR.match(text)
         if m:
+            # `$ x` 与 `$x` 都合法；记下原文写法，导出时原样还回去
+            raw_after = text[1:]
             return PythonNode(
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
                 code=m.group(1).strip(),
+                dollar_space=bool(raw_after[:1].isspace()),
             )
 
         # ---- python: block ----
@@ -2114,7 +2122,8 @@ class ParseResultBuilder:
             elif isinstance(node, PythonNode):
                 add_stmt(Statement.make_python(
                     node.code, accum_cond,
-                    source=(node.filename, node.line_number)))
+                    source=(node.filename, node.line_number),
+                    dollar_space=getattr(node, 'dollar_space', True)))
 
             elif isinstance(node, CommentNode):
                 # 只保留 label 内的注释——顶层注释属于文件头/定义区，

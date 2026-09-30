@@ -529,6 +529,14 @@ def thumb_cache_dir():
 
 
 
+#: 兼容旧名：`story.script_table` 门面以 `_resolve_thumb_source` 转发它；
+#: UI 侧的缩略图加载器走公开名（见 `ui/thumb_loader.py`）。
+#: 用**函数包装**而不是直接赋值别名——直接赋值会踩定义顺序：本函数定义在
+#: 后面，模块导入时求值就到 `NameError`（这就是刚才测试全收集失败的原因）。
+def _resolve_thumb_source(path, project_root=None):
+    return resolve_thumb_source(path, project_root)
+
+
 def _thumbnail_bytes(path, project_root=None):
     """
     把一张图缩成 PNG 字节；读不了返回 None（绝不抛异常）。
@@ -539,7 +547,7 @@ def _thumbnail_bytes(path, project_root=None):
     """
     if _PILImage is None:
         return None
-    real = _resolve_thumb_source(path, project_root)
+    real = resolve_thumb_source(path, project_root)
     if real is None:
         return None
     cache_file = None
@@ -580,7 +588,7 @@ def _thumbnail_bytes(path, project_root=None):
 
 
 
-def _resolve_thumb_source(path, project_root=None):
+def resolve_thumb_source(path, project_root=None):
     """
     资源表里的 Path → 磁盘上真实存在的图。
 

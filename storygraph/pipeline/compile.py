@@ -230,7 +230,7 @@ def format_compile_result(result: CompileResult, max_rows: int = 12) -> str:
     lines = [result.summary(), '']
     todos = [r for r in result.rows if r.get('status') == 'todo']
     if todos:
-        lines.append('待补资源（已作为 # TODO 注释写进脚本）：')
+        lines.append('缺少资源（脚本里找不到的引用；新生成/改动的行会写成 # TODO 注释，源文件里原有的行按原样保留）：')
         for r in todos[:max_rows]:
             lines.append(f"  · [{r['line_id']}] {r['code']}")
         if len(todos) > max_rows:

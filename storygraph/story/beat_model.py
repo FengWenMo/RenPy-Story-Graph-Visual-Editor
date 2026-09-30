@@ -187,6 +187,11 @@ class Beat:
     #: 本拍**全部操作**按源码出现的顺序，如 `'stage,music,sound,voice'`。
     #: 见 `BeatsFromStatements` 里的记录点与 `render_beat_to_rpy` 的消费点。
     op_order: str = ''
+    #: 本拍对应的**源文件行区间**（1-based，闭区间）。
+    #: 只用于**增量导出**（把原文件对应区间替换成新生成的行），
+    #: 是运行时元数据：不入表、不进 ContentHash，也不影响渲染。
+    src_first: int = 0
+    src_last: int = 0
     raw: str = ''
     code: str = ''
     # CodeBlock 里"原生语句"与"python 代码"的**交错顺序**：
@@ -222,14 +227,15 @@ class Beat:
         # 音频列：文本列（beat.bgm / beat.sfx）是真相源，有就优先写它；
         # 没有再从结构化字段合成（.rpy 解析来的 Beat 才有结构化字段）。
         # 否则策划手写在「音乐」列的人话/原生写法会在"导出→导入"往返里丢。
-        if self.bgm:
-            bgm, bgm_params = self.bgm, ''
-        else:
-            bgm, bgm_params = compose_audio_cell(self, 'music')
-        if self.sfx:
-            sfx, sfx_params = self.sfx, ''
-        else:
-            sfx, sfx_params = compose_audio_cell(self, 'sound')
+        #
+        # **参数列始终从结构化字段走 `compose_audio_cell`**（2026-09-28 修）：
+        # 原来文本列优先时把参数硬编码成 `''`，于是
+        # `stop music fadeout 1.0`（文本列 = `[停止音乐]`）的参数**静默丢失**，
+        # 读回来变成裸 `stop music`。真实章节里 6 条全中招。
+        _bgm_cell, bgm_params = compose_audio_cell(self, 'music')
+        _sfx_cell, sfx_params = compose_audio_cell(self, 'sound')
+        bgm = self.bgm or _bgm_cell
+        sfx = self.sfx or _sfx_cell
         return [
             self.line_id, self.seq, self.label, self.kind,
             self.speaker, self.comment, self.text,
@@ -238,7 +244,7 @@ class Beat:
             self.at, self.with_,
             compose_hide_cell(self),
             bgm, bgm_params, sfx, sfx_params, self.voice,
-            stage, compose_code(self),
+            stage, compose_code_cell(self),
             self.content_hash,
             # 隐藏列：源顺序。工具写、工具读，策划的界面里看不到它们。
             self.stage_order,
@@ -357,12 +363,71 @@ class Beat:
 
     @property
     def order_ops(self) -> list:
-        """本拍全部操作的源顺序（`['audio', 'stage']` 这样）。
-
-        空表示"没有记录"（老表 / 手工新增行）——消费方要退回历史固定顺序，
-        **不能当成"顺序是空的"**，否则会一条都不输出。
         """
-        return [t.strip() for t in (self.op_order or '').split(',') if t.strip()]
+        本拍操作的**类别**顺序（`['audio', 'stage']`）——`order_tokens` 的粗粒度视图。
+
+        保留它是因为已有调用方（快照/校验/测试）只关心"音频在舞台前还是后"。
+        要逐条还原请用 `order_tokens`。
+        """
+        cats = []
+        for t in self.order_tokens:
+            c = 'stage' if t in ('scene', 'show', 'hide') else t
+            if c not in cats:
+                cats.append(c)
+        return cats
+
+    @property
+    def order_tokens(self) -> list:
+        """
+        本拍全部操作的**verb 级**顺序，用于逐条还原（保住同类内交错）。
+
+        形如 `['scene', 'audio', 'show']`——这正是
+        `scene bg X / play music Y / show ling happy` 的源码顺序。
+
+        为什么不能只记类别（`stage,audio`）：那样渲染时会得到一个
+        "整块舞台 + 整块音频"，把 `play` 挤到 `show` 后面
+        （demo ch01 实测：`play music night` 原本在 `show eileen happy` 之前）。
+        只记类别 + 成组输出 = 顺序错了但看起来"差不多"，
+        而顺序本身是演出语义。
+
+        兼容两种存法：
+          · **verb 级**（新）：`scene,audio,show` —— 直接用；
+          · **类别级**（老表）：`stage,audio` —— 用 `stage_order` 把
+            `stage` 展开成具体 verb，尽量还原。
+        完全没有顺序信息时返回空，让调用方走历史固定顺序。
+        """
+        raw = [t.strip() for t in (self.op_order or '').split(',') if t.strip()]
+        if not raw and not (self.stage_order or '').strip():
+            return []
+
+        stage_seq = [t.strip() for t in (self.stage_order or '').split(',')
+                     if t.strip()]
+        out = []
+        used = 0
+        seen_audio = seen_voice = False
+        for t in raw:
+            if t in ('scene', 'show', 'hide'):
+                out.append(t)
+                used += 1
+            elif t == 'stage':
+                # 老格式：展开 StageOrder 里还没用掉的下一个 verb
+                if used < len(stage_seq):
+                    out.append(stage_seq[used])
+                    used += 1
+                else:
+                    for v in ('scene', 'show', 'hide'):
+                        if v not in out:
+                            out.append(v)
+            elif t == 'audio' and not seen_audio:
+                out.append('audio')
+                seen_audio = True
+            elif t == 'voice' and not seen_voice:
+                out.append('voice')
+                seen_voice = True
+        # stage_order 里还剩的 verb 补在最后
+        for v in stage_seq[used:]:
+            out.append(v)
+        return out
 
     def is_empty(self) -> bool:
         """这一行没有任何内容（用户留空的行不该生成代码）。
@@ -398,8 +463,13 @@ def compose_stage(beat: 'Beat', symbols=None) -> str:
     ops = []
     if beat.scene:
         line = f"scene {beat.scene}"
-        if beat.at:
-            line += f" at {beat.at}"
+        # 背景自己的变换是 `scene_at`（`scene bg bg9_5 at bgfit`）。
+        # 这里曾错用 `beat.at`——那是**立绘**的位置，于是同一张表里
+        # "Stage 列显示的"和"生成的 .rpy"对不上（背景变换丢失、
+        # 立绘位置串到背景上）。渲染走 `beat_render._stage_lines`，
+        # 两边必须同源。
+        if beat.scene_at:
+            line += f" at {beat.scene_at}"
         if beat.with_:
             line += f" with {beat.with_}"
         ops.append(('scene', line))
@@ -408,14 +478,28 @@ def compose_stage(beat: 'Beat', symbols=None) -> str:
             ops.append(('show', f"show {item['clause']}"))
             continue
         line = f"show {item['image']}"
-        if item.get('at'):
-            line += f" at {item['at']}"
+        # 立绘的位置：自带 `@` 优先，其次才是整拍的「位置」列——
+        # 与 `_stage_lines` 一致（少这一档就会出现"表里没位置、生成的有"）。
+        at = (item.get('at') or '').strip() or (beat.at or '').strip()
+        if at:
+            line += f" at {at}"
         ops.append(('show', line))
     for item in _split_hide_items(beat.hide):
         line = f"hide {item['image']}"
         if item.get('with'):
             line += f" with {item['with']}"
         ops.append(('hide', line))
+    # 转场没背景可挂时挂哪儿：最后一条立绘；连立绘都没有就单独成行。
+    # 与 `beat_render._stage_lines` 一致 —— 那边是生成 .rpy 的真源，
+    # 少这一档就会出现"Stage 列看不到转场、生成的脚本里有"。
+    if beat.with_ and not beat.scene:
+        show_at = [i for i, (v, _l) in enumerate(ops) if v == 'show']
+        hide_at = [i for i, (v, _l) in enumerate(ops) if v == 'hide']
+        if show_at:
+            i = show_at[-1]
+            ops[i] = ('show', ops[i][1] + f" with {beat.with_}")
+        elif not hide_at:
+            ops.append(('show', f"with {beat.with_}"))
     if beat.transform and not beat.at:
         ops.append(('with', f"with {beat.transform}"))
     # 注意：raw（`with dissolve` / `pause` / `jump x` 这类原生语句）**不进
@@ -611,6 +695,17 @@ def compose_audio_cell(beat: 'Beat', channel: str) -> tuple:
 
     停止 / 排队 这两种"动作"用**伪值**塞进同一个下拉列
     （`（停止音乐）` / `（排队播放）`）。策划少记一列，也不用手打动作词。
+
+    **参数列必须照写，哪怕动作是停止**（2026-09-28 实测的数据丢失）：
+
+        `stop music fadeout 1.0`  ——(导出 xlsx)→ 音乐=`（停止音乐）`、参数=空
+                                  ——(读回)→ `stop music`
+                                  ——(导出 .rpy)→ **`stop music`（fadeout 丢了）**
+
+    原来这里在伪值分支直接 `return back.get(action, ''), ''`，
+    把 `params` 吃掉了；读回时参数列是空的，`_fill_audio_from_cells`
+    又用空参数覆盖掉已经解析出来的 `fadeout 1.0`。
+    真实章节 `chapter1_3` 里 **6 条 `stop music fadeout 1.0` 全中招**。
     """
     if channel == 'music':
         name, params, action = beat.music, beat.music_params, \
@@ -622,7 +717,7 @@ def compose_audio_cell(beat: 'Beat', channel: str) -> tuple:
         pseudo = AUDIO_PSEUDO['SFX']
     if action in ('stop', 'queue') and not name:
         back = {v: k for k, v in pseudo.items()}
-        return back.get(action, ''), ''
+        return back.get(action, ''), params or ''
     return name, params
 
 
@@ -660,12 +755,18 @@ def _fill_audio_from_cells(beat, channel: str, value: str, params: str):
         action, name = raw.lower(), ''
     else:
         action, name = 'play', raw
+    # 参数列为空时**不要**覆盖已经解析出来的参数（老表没这列）。
+    # 2026-09-28：`stop music fadeout 1.0` 因为这一句把 fadeout 丢了。
+    keep = (params or '').strip()
+    if not keep:
+        keep = (beat.music_params if channel == 'music'
+                else beat.sound_params) or ''
     if channel == 'music':
         beat.music, beat.music_params, beat.music_action = \
-            name, (params or '').strip(), action
+            name, keep, action
     else:
         beat.sound, beat.sound_params, beat.sound_action = \
-            name, (params or '').strip(), action
+            name, keep, action
 
 
 
@@ -747,6 +848,23 @@ def compose_code(beat: 'Beat') -> str:
     return '\n'.join(parts)
 
 
+#: 内部标记：`$code`（`$` 后无空格）这一位用它承载（见 Statement.make_python）。
+#: **绝不能写进 Excel** —— openpyxl 拒绝控制字符：
+#: `IllegalCharacterError: ... cannot be used in worksheets`（实测踩过）。
+_MARKER = '\x01'
+
+
+def compose_code_cell(beat: 'Beat') -> str:
+    """
+    写进「代码」列**单元格**的文本 = `compose_code` 且剥掉内部标记。
+
+    渲染走 `compose_code`（保留标记，才能还原 `$code` 紧写形式）；
+    写表走这里（`)` 是控制字符，openpyxl 会直接报错）。
+    两者只在"是否保留标记"这一点上不同，内容完全一致。
+    """
+    return (compose_code(beat) or '').replace(_MARKER, '')
+
+
 
 def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
     """
@@ -812,8 +930,16 @@ def _split_code_cell(cell: str) -> tuple:
         if s.startswith('$') or (s and not _looks_like_renpy_statement(s)
                                  and not s.endswith(':')
                                  and not _is_bare_renpy_verb(s)):
-            code.append(ln)
-            ordered.append(('code', ln))
+            # `$x`（`$` 后无空格）在**原文件里**很常见，而生成器默认写 `$ x`。
+            # 逐字节保留这一位，否则每个 `$` 行都成一个 diff 块。
+            # 用 `\x01` 前缀承载（见 Statement.make_python 的说明）。
+            if s.startswith('$') and not s[1:2].isspace() and len(s) > 1:
+                marked = '\x01' + s[1:]
+                code.append(marked)
+                ordered.append(('code', marked))
+            else:
+                code.append(ln)
+                ordered.append(('code', ln))
         else:
             raw.append(ln)
             ordered.append(('raw', ln))
@@ -915,6 +1041,30 @@ def _show_item_text(payload: dict) -> str:
 
 
 
+def show_item_part(item: dict) -> str:
+    """
+    一个 show 项 → **规范片段**（`图像@变换` / 复杂子句原文 / 纯图像名）。
+
+    这是 show 项在单元格里的唯一编码形式，`_join_show_items` 与
+    `show_item_parts` 都用它 —— 编码只有一份，比较才有意义。
+    """
+    if item.get('clause'):
+        return ' '.join(str(item['clause']).split())
+    image = ' '.join(str(item.get('image') or '').split())
+    at = str(item.get('at') or '').strip()
+    if not image:
+        return ''
+    return f'{image}@{at}' if at else image
+
+
+def show_item_parts(text: str) -> set:
+    """
+    show 文本 → 它包含的**规范片段集合**（给"这条 Stage 指令是否已被
+    结构化列承载"用，见 `beat_render` 的舞台尾段）。
+    """
+    return {p for p in (show_item_part(it) for it in _split_show_items(text)) if p}
+
+
 def _join_show_items(items: list) -> str:
     """
     把多个 show 项拼成 `图像@变换; 图像2; cg x at y behind z`。
@@ -926,12 +1076,7 @@ def _join_show_items(items: list) -> str:
     """
     parts, seen = [], set()
     for it in items:
-        if it.get('clause'):
-            part = it['clause']
-        elif it.get('at'):
-            part = f"{it['image']}@{it['at']}"
-        else:
-            part = it['image']
+        part = show_item_part(it)
         if not part or part in seen:
             continue
         seen.add(part)
@@ -985,13 +1130,37 @@ def _split_hide_items(text: str) -> list:
 
 
 
+def hide_item_part(item: dict) -> str:
+    """一个退场项 → 规范片段（`图像@转场` / 纯图像名）。"""
+    image = ' '.join(str(item.get('image') or '').split())
+    w = str(item.get('with') or '').strip()
+    if not image:
+        return ''
+    return f'{image}@{w}' if w else image
+
+
+def hide_item_parts(text: str) -> set:
+    """退场文本 → 规范片段集合（同 `show_item_parts`）。"""
+    return {p for p in (hide_item_part(it) for it in _split_hide_items(text)) if p}
+
+
 def _join_hide_items(items: list) -> str:
-    parts = []
+    """
+    `hide` 项 → `ye; lan@dissolve`。**同样要做"同名同参数去重"**。
+
+    为什么必须去重（2026-09-30 真实数据实测）：`hydrate_from_dsl` 是追加
+    语义，而 Stage 列常常把结构化列的内容原样又写了一遍。show 那条路早就
+    有去重（见 `_join_show_items`），hide 这条**漏了**，于是同一条退场指令
+    被吸两次就翻倍：`hide cg03` → `cg03; cg03`。**逐句校对必然踩中**
+    （chapter1_3 实测 11 拍被改写）。
+    """
+    parts, seen = [], set()
     for it in items:
-        if it.get('with'):
-            parts.append(f"{it['image']}@{it['with']}")
-        else:
-            parts.append(it['image'])
+        part = hide_item_part(it)
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        parts.append(part)
     return '; '.join(parts)
 
 

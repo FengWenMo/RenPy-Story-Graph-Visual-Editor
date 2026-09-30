@@ -53,9 +53,18 @@ class _V:
 # ==================================================================
 
 class TestCardShape:
-    def test_exactly_four_primary_fields(self):
+    def test_primary_fields_cover_the_daily_basics(self):
+        """
+        主区 = **每一拍都要看 / 要填**的字段。
+
+        2026-09-29：从主区摘掉 `Expression` / `Position`——它们不属于主区，
+        只在立绘卡内编辑（卡上的 chip，1 次点击）。
+        2026-09-30：按用户要求把 `Scene` / `BGM` / `Voice` / `Comment`
+        **从折叠的高级区提上来**——"背景 / 音乐 / 语音 / 备注"本来就是每一拍的
+        基本信息，藏在折叠区里等于没有。
+        """
         assert BeatEditorPanel.PRIMARY_FIELDS == [
-            'Speaker', 'Text', 'Expression', 'Position']
+            'Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
 
     def test_primary_and_advanced_are_disjoint_and_cover_everything(self):
         """两项加一起必须覆盖所有面板字段，且不许重叠——
@@ -66,8 +75,13 @@ class TestCardShape:
         assert set(BeatEditorPanel._ORDER) == primary | advanced
 
     def test_programmer_fields_are_not_primary(self):
-        """代码 / 舞台 / 音频这些不该占第一眼。"""
-        for name in ('CodeBlock', 'Stage', 'BGM', 'SFX', 'Kind'):
+        """
+        真正**程序向**的东西不该占第一眼。
+
+        注：`BGM` 2026-09-30 已按用户要求提到主区（策划每天要填音乐），
+        不再算"程序向"；这里留下的才是该折叠的。
+        """
+        for name in ('CodeBlock', 'Stage', 'SFX', 'Kind', 'Notes'):
             assert name not in BeatEditorPanel.PRIMARY_FIELDS
             assert name in BeatEditorPanel.ADVANCED_FIELDS
 
@@ -325,8 +339,8 @@ class TestSingleLineFieldsActuallyReceiveValues:
     def test_wget_roundtrips_through_stringvar(self):
         """写进去再读出来必须一样——这是卡片显示值的最基本要求。"""
         p = self._panel_with_spies()
-        for name, value in (('Speaker', 'lyj'), ('Expression', '开心'),
-                            ('Position', '左')):
+        for name, value in (('Speaker', 'lyj'), ('Comment', '备注'),
+                            ('Label', 'ch01')):
             p._wset(name, value)
             assert p._wget(name) == value, f'{name} 写进去读不出来'
 

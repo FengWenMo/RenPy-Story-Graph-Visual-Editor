@@ -187,6 +187,107 @@ class TestSemanticEquivalence:
 #  L3：把还剩的已知差异钉住（改好了就来改这里）
 # ==================================================================
 
+class TestAudioParamsSurviveExcel:
+    """
+    **音频参数不能在 xlsx 往返里丢**（2026-09-28 实测的数据丢失）。
+
+    用户对比原文与 build 产物时发现：
+
+        原文: stop music fadeout 1.0   × 6
+        产物: stop music               × 6     ← 参数没了
+
+    这条语句被**三个层各剥一层**才丢干净，只修一处看不出来：
+
+      1. `compose_audio_cell` 伪值分支 `return back.get(action,''), ''`
+         —— 把参数一起丢了；
+      2. `Beat.to_row` 的"文本列优先"分支把参数硬编码成 `''`
+         （`bgm, ''`）；
+      3. `_hydrate_audio` 用 `op.params` **无条件覆盖**已解析参数，
+         而伪值 `[停止音乐]` 本身不含参数 → 冲成空。
+
+    所以这里**端到端**验（而不是只验某个函数）：真实形态走一遍
+    `rpy → xlsx → rpy`，逐类数参数个数。
+    """
+
+    SRC = '''label t:
+    scene bg room
+    play music theme fadein 1.0
+    e "一"
+    stop music fadeout 1.0
+    e "二"
+    play sound door fadeout 0.5
+    e "三"
+'''
+
+    def _roundtrip(self, write_rpy, tmp_path):
+        src = write_rpy(self.SRC, 'proj/game/a.rpy')
+        table = tmp_path / 'a.xlsx'
+        open_rpy_as_table(src, table)
+        return render_beats_to_rpy(import_beats_from_excel(table))
+
+    def test_stop_fadeout_survives(self, write_rpy, tmp_path):
+        out = self._roundtrip(write_rpy, tmp_path)
+        assert 'stop music fadeout 1.0' in out, \
+            f'stop 的参数在往返里丢了：\n{out}'
+
+    def test_play_fadein_survives(self, write_rpy, tmp_path):
+        out = self._roundtrip(write_rpy, tmp_path)
+        assert 'play music theme fadein 1.0' in out, out
+
+    def test_sound_params_survive(self, write_rpy, tmp_path):
+        out = self._roundtrip(write_rpy, tmp_path)
+        assert 'play sound door fadeout 0.5' in out, out
+
+    def test_no_bare_stop_when_params_existed(self, write_rpy, tmp_path):
+        """反向约束：原来带参数的 stop 不许退化成裸 stop。"""
+        out = self._roundtrip(write_rpy, tmp_path)
+        naked = [l for l in out.splitlines()
+                 if l.strip() == 'stop music']
+        assert not naked, f'出现了裸 stop music（参数被吃）：{out}'
+
+    def test_volume_param_is_a_known_parser_gap(self, write_rpy, tmp_path):
+        """
+        **已知缺口**（钉住它，修好了这条会失败、提醒更新文档）：
+
+        `play sound door volume 0.5` 的 `volume` **解析器根本不认**
+        （payload 里只有 `fadein`/`fadeout`），所以它**不是往返丢的**，
+        而是从来没被读进来过。要修得扩解析器的音频参数白名单。
+        """
+        src = write_rpy(
+            'label t:\n'
+            '    play sound door volume 0.5\n'
+            '    e "x"\n',
+            'proj/game/v.rpy')
+        from storygraph.parsing.renpy_parser import (ParseResultBuilder,
+                                                     RenPyParser)
+        res = ParseResultBuilder().build(RenPyParser().parse(src))
+        play = [s for s in res.statements if s.kind == 'play']
+        assert play, '没解析出 play 语句'
+        assert 'volume' not in play[0].payload, \
+            'volume 似乎被支持了（太好了）——请更新这条与文档'
+
+
+class TestRealChapterAudioFidelity:
+    """真实章节：`fadein` / `fadeout` / `play music` 条数必须与原文一致。"""
+
+    CH = Path(r'D:\千连万理\RenPyTest\sr_general\game\chapter')
+
+    @pytest.mark.parametrize('name', ['chapter1_3.rpy', 'chapter1_4.rpy'])
+    def test_audio_param_counts_match(self, name, tmp_path):
+        src = self.CH / name
+        if not src.exists():
+            pytest.skip('本机没有该章节')
+        orig = src.read_text(encoding='utf-8')
+        table = tmp_path / f'{name}.xlsx'
+        open_rpy_as_table(src, table)
+        out = render_beats_to_rpy(import_beats_from_excel(table))
+        for pat in (r'fadein\s+[\d.]+', r'fadeout\s+[\d.]+',
+                    r'play music', r'stop music\s+fadeout'):
+            a = len(re.findall(pat, orig))
+            b = len(re.findall(pat, out))
+            assert a == b, f'{name} 的 {pat} 条数不一致：原文 {a} 产物 {b}'
+
+
 class TestKnownDifferencesArePinned:
     """
     这些用例**故意断言"当前是有差异的"**。
@@ -279,15 +380,63 @@ class TestCrossKindOrder:
     def kinds(text):
         return [v for v, _ in statement_seq(text)]
 
-    def test_interleaved_order_is_preserved(self, write_rpy, tmp_path):
-        src = write_rpy(self.INTERLEAVED, 'proj/game/t.rpy')
-        table = tmp_path / 't.xlsx'
+    def test_scene_play_show_interleave_is_preserved(self, write_rpy, tmp_path):
+        """
+        **同类内交错**：`scene → play → show`。
+
+        只记"类别"时（`stage,audio`）渲染会把整个舞台组一次输出，
+        得到 `scene, show, play` —— `play` 被挤到 `show` 后面。
+        实测来源：demo ch01 原文 `play music night` 在
+        `show eileen happy` 之前，重构期间差点漏掉。
+
+        修法：`op_order` 记 **verb 级**（`scene,audio,show`），
+        渲染逐条输出，音频才能插进 `scene` 与 `show` 之间。
+        """
+        src = write_rpy(
+            'label t:\n'
+            '    scene bg classroom\n'
+            '    play music night fadein 1.0\n'
+            '    show eileen happy at left\n'
+            '    e "台词"\n',
+            'proj/game/sp.rpy')
+        table = tmp_path / 'sp.xlsx'
         open_rpy_as_table(src, table)
         produced = render_beats_to_rpy(import_beats_from_excel(table))
-        assert self.kinds(self.INTERLEAVED) == self.kinds(produced), (
-            '跨类别顺序没保住：\n'
-            f'  原文 {self.kinds(self.INTERLEAVED)}\n'
-            f'  产物 {self.kinds(produced)}')
+        assert self.kinds(produced) == ['scene', 'play', 'show'], (
+            f'play 被挤到 show 后面了：{self.kinds(produced)}\n{produced}')
+
+    def test_audio_between_two_shows_is_a_known_gap(self, write_rpy, tmp_path):
+        """
+        **已知局限**（钉住它，修好了这条会失败，提醒更新文档）：
+        一拍里有两个 `show` 且 `play` 夹在中间时，顺序还原不了 ——
+        `op_order` 是 verb **集合**（按首现排序），同 verb 的**实例**顺序丢失。
+
+            show a x
+            play music m      ← 夹在两个 show 之间
+            show b y
+
+        产物会变成 `show a x; show b y; play music m`。
+        条数不错、画面终态一样，但"音乐在第几个立绘之后起"变了。
+        真实项目 `chapter1_3` / `chapter1_4` 实测都命中这一类。
+        要彻底修需记"每个舞台 verb 实例之间的音频位置"（即整拍语句级顺序）。
+        """
+        src = write_rpy(
+            'label t:\n'
+            '    show e a\n'
+            '    play music m\n'
+            '    show f b\n'
+            '    e "台词"\n',
+            'proj/game/gap.rpy')
+        table = tmp_path / 'gap.xlsx'
+        open_rpy_as_table(src, table)
+        produced = render_beats_to_rpy(import_beats_from_excel(table))
+        kinds = self.kinds(produced)
+        # 条数必须对（这是硬要求）
+        from collections import Counter
+        assert Counter(kinds) == Counter(['show', 'play', 'show'])
+        # 目前 play 会落在两个 show 之后 —— 已知局限
+        assert kinds == ['show', 'show', 'play'], \
+            f'这个局限似乎被修好了（太好了）——请更新文档：{kinds}'
 
     def test_play_before_show_stays_before(self, write_rpy, tmp_path):
         """最直观的一条：`play music` 写在 `scene`/`show` 之前就得在前。"""
