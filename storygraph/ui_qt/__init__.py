@@ -1,0 +1,1 @@
+"""storygraph.ui_qt —— Qt（PySide6）前端（tkinter 版的姊妹实现）。"""

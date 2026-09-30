@@ -72,7 +72,6 @@ from storygraph.assets.asset_events import (
 from storygraph.story.generation_guard import (
     evaluate_generation,
     labels_in_danger,
-    occupied_labels,
     planned_output_path,
     write_generation,
 )
