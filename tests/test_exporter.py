@@ -139,14 +139,14 @@ class TestExport:
         text = export(g)
         assert '自动生成的控制流' in text
 
-    def test_export_failure_reports_error(self, export, clear_messagebox):
+    def test_export_failure_reports_error(self, export, notify_calls):
         g = Graph()
         g.add_node('a', 0, 0)
         export_to_renpy(g, '/nonexistent/dir/out.rpy')
-        assert clear_messagebox['error']
+        assert notify_calls.of('error')
 
-    def test_success_reports_info(self, export, clear_messagebox, tmp_path):
+    def test_success_reports_info(self, export, notify_calls, tmp_path):
         g = Graph()
         g.add_node('a', 0, 0)
         export_to_renpy(g, tmp_path / 'ok.rpy')
-        assert clear_messagebox['info']
+        assert notify_calls.of('info')

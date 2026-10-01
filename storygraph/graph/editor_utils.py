@@ -2,11 +2,13 @@
 import os
 import subprocess
 import sys
-import tkinter.messagebox as messagebox
+
+from storygraph.app import notify
+
 
 def open_file_at_line(file_path, line_number):
     if not os.path.exists(file_path):
-        messagebox.showerror("错误", f"文件不存在：{file_path}")
+        notify.error(f"文件不存在：{file_path}", title="错误")
         return
     commands = []
     if sys.platform == "win32":
@@ -35,4 +37,4 @@ def open_file_at_line(file_path, line_number):
         else:
             subprocess.Popen(["xdg-open", file_path])
     except Exception as e:
-        messagebox.showerror("错误", f"无法打开文件：{e}")
+        notify.error(f"无法打开文件：{e}", title="错误")

@@ -136,6 +136,66 @@ QFrame[role="spriteCard"][speaking="true"] {{
 }}
 QFrame[role="spriteCard"]:hover {{ background: {c('bg.cardHover')}; }}
 
+/* ---------- Toast（浮层提示）---------- */
+/* 不参与布局：出现/消失都不推动任何控件，不打断正在输入的人。 */
+QFrame[role="toast"] {{
+    background: {c('toast.bg')};
+    border: 1px solid {c('border.default')};
+    border-radius: {T.RADIUS['card']}px;
+}}
+
+/* ---------- 页签（说明窗口）---------- */
+QTabWidget::pane {{
+    border: 1px solid {c('border.default')};
+    border-radius: {T.RADIUS['control']}px;
+    background: {c('bg.canvas')};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: {c('bg.surface')};
+    color: {c('text.secondary')};
+    border: 1px solid {c('border.default')};
+    border-bottom: none;
+    border-top-left-radius: {T.RADIUS['control']}px;
+    border-top-right-radius: {T.RADIUS['control']}px;
+    padding: 6px 14px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background: {c('bg.canvas')};
+    color: {c('text.primary')};
+    font-weight: bold;
+}}
+QTabBar::tab:hover {{ background: {c('bg.cardHover')}; }}
+
+/* ---------- 分隔条 / 停靠区分隔 ---------- */
+QSplitter::handle {{ background: {c('bg.surface')}; }}
+QSplitter::handle:hover {{ background: {c('brand.subtle')}; }}
+
+/* ---------- 复选框 ---------- */
+QCheckBox {{ spacing: 6px; }}
+QCheckBox::indicator {{
+    width: 15px; height: 15px;
+    border: 1px solid {c('border.default')};
+    border-radius: 3px;
+    background: {c('bg.canvas')};
+}}
+QCheckBox::indicator:checked {{
+    background: {c('brand.primary')};
+    border: 1px solid {c('brand.primary')};
+}}
+
+/* ---------- 数字输入 ---------- */
+QSpinBox {{ padding: 3px 4px; }}
+
+/* ---------- 提示气泡 ---------- */
+QToolTip {{
+    background: {c('toast.bg')};
+    color: {c('toast.fg')};
+    border: 1px solid {c('border.default')};
+    padding: 4px 6px;
+}}
+
 /* ---------- 滚动条 ---------- */
 QScrollBar:vertical {{
     background: {c('scroll.trough')}; width: 10px; margin: 0;

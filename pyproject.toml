@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 缩略图（jpg/webp 预览）用。没装也能跑：PNG/GIF 走 tk.PhotoImage，
+# 图形界面。**刻意放在 optional 里**：后端（core/parsing/excel/assets/
+# story/pipeline/app）不依赖任何 UI 库，所以 CLI 与 CI 可以不装界面库
+# 就跑（`python cli.py validate …`）。
+gui = ["PySide6>=6.5"]
+# 缩略图（jpg/webp 预览）用。没装也能跑：PNG/GIF 走 Qt 自带解码器，
 # 其余格式降级为不显示预览——代码里每条路径都有降级分支。
 thumbnails = ["Pillow>=10"]
 dev = ["pytest>=8"]

@@ -2,6 +2,14 @@
 #
 #   python -m pip install -r requirements.txt
 #
-# 本项目的设计约束是"依赖越少越好"：除了把 Excel 当好用的前端之外，
-# 其余全靠标准库（tkinter / sqlite3 / ast / hashlib …）。
+# 本项目的设计约束是"依赖越少越好"：
+#   · openpyxl —— Excel 读写（剧本表、资源表、候选表全靠它）
+#   · PySide6  —— 图形界面（2026-10-01 起 tkinter → PySide6）
+#   · Pillow   —— 可选，jpg/webp 缩略图；没装则只显示 PNG/GIF
+#
+# 注意：**后端（core/parsing/excel/assets/story/pipeline/app）不依赖
+# 上面任何一个 UI 库**。PySide6 只有 `storygraph.ui_qt` 需要，所以
+# CLI 与 CI 可以完全不装界面库就跑（`python cli.py validate …`）。
 openpyxl>=3.1          # Excel 读写（剧本表、资源表、候选表全部依赖它）
+PySide6>=6.5           # 图形界面（ui_qt/）；不装则 main.py 报错退出
+Pillow>=10             # 可选：jpg/webp 缩略图（PNG/GIF 不需要）

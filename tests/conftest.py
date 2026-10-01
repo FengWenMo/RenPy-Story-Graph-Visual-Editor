@@ -5,7 +5,9 @@ pytest 全局夹具。
 
 职责：
   · 把项目根目录加入 sys.path（源码是 `storygraph` 包，放在项目根下）
-  · 在无 GUI 环境下为 tkinter 提供桩，保证 commands / exporter / panel 可导入
+  · 在无 GUI 环境下为 tkinter 提供桩（**迁移期**：只有 `storygraph.ui.*`
+    与尚未迁完的旧界面还需要它；后端已改为走 `storygraph.app.notify`）
+  · 提供 `notify_calls`：后端通知端口的捕获夹具（**新的推荐断言方式**）
   · 提供写 .rpy 临时文件的工厂 fixture
 """
 
@@ -137,12 +139,67 @@ def write_rpy(tmp_path):
 
 @pytest.fixture
 def clear_messagebox():
-    """清空 messagebox 桩记录，返回记录字典。"""
+    """
+    （迁移期遗留）清空 tkinter messagebox 桩记录。
+
+    后端已改用 `storygraph.app.notify`，新测试请用 `notify_calls`。
+    """
     mb = sys.modules['tkinter.messagebox']
     calls = mb._calls
     for lst in calls.values():
         lst.clear()
     return calls
+
+
+class NotifyCalls:
+    """
+    后端通知端口的捕获器（见 `storygraph.app.notify`）。
+
+    后端现在**只汇报事实**，不弹窗；这个夹具就是"假装自己是前端"，
+    把通知按级别收集起来供断言。这样测的是**语义**（后端报了什么），
+    而不是**显示方式**（tkinter 还是 Qt 弹的窗）。
+    """
+
+    def __init__(self):
+        self.calls = []                  # [(level, message, title)]
+
+    def __call__(self, level, message, title=''):
+        self.calls.append((level, message, title))
+
+    # ---- 便捷查询 ----
+    def of(self, level):
+        return [(m, t) for lv, m, t in self.calls if lv == level]
+
+    def messages(self, level=None):
+        return [m for lv, m, _ in self.calls if level is None or lv == level]
+
+    def clear(self):
+        self.calls.clear()
+
+    def __len__(self):
+        return len(self.calls)
+
+    def __bool__(self):
+        return bool(self.calls)
+
+
+@pytest.fixture
+def notify_calls():
+    """
+    订阅后端通知端口，返回捕获器；用例结束自动退订。
+
+        def test_x(notify_calls):
+            do_something()
+            assert notify_calls.of('error')
+    """
+    from storygraph.app import notify
+
+    catcher = NotifyCalls()
+    unsubscribe = notify.subscribe(catcher)
+    try:
+        yield catcher
+    finally:
+        unsubscribe()
 
 
 @pytest.fixture

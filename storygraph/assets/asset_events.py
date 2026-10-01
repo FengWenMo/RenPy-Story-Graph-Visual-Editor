@@ -150,10 +150,19 @@ class AssetFileWatcher:
         # 状态：{path_str: (mtime, size)}
         self._snapshot: Optional[dict] = None   # 已确认稳定的状态
         self._pending: Optional[dict] = None    # 上一轮扫描结果，用于稳定性对比
-        self._pending_since: Optional[float] = None  # pending 起始时间（monotonic）
+        self._pending_ticks = 0                 # 已经等了几个 tick（见 _tick）
+        self._pending_since: Optional[float] = None  # 起始时间（保留给诊断/测试）
 
-        # 稳定性检查的最长等待：超过 MAX_PENDING_TICKS * interval 仍未稳定，
-        # 强制以最新扫描结果提交（避免用户持续保存导致 on_change 永不触发）
+        # 稳定性检查的最长等待：超过 MAX_PENDING_TICKS 轮仍未稳定，
+        # 强制以最新扫描结果提交（避免用户持续保存导致 on_change 永不触发）。
+        #
+        # 为什么用**轮数**而不是 `MAX_PENDING_TICKS * interval` 秒：
+        # 后者是拿墙钟做阈值，而 `_pending_since` 在每个 tick 里被重置，
+        # 于是一秒内的连续 tick 全都落在同一个 `time.monotonic()` 刻度上
+        # （Windows 上 monotonic 粒度约 15ms）→ `elapsed > 0` 有时成立、
+        # 有时不成立。表现就是测试偶发失败（全量跑必现、单跑必过），
+        # 真实场景里则是"改了文件偶尔要等下一拍才生效"。改成数轮数以后，
+        # 判定只跟 tick 次数有关，**完全确定**，也不再看机器快慢。
         self.MAX_PENDING_TICKS = 3
 
     # ---------- 生命周期 ----------
@@ -208,14 +217,17 @@ class AssetFileWatcher:
                     except Exception as e:
                         print(f"[AssetFileWatcher] on_change 回调异常: {e}")
                 self._snapshot = current
+            self._pending_ticks = 0
             self._pending_since = None
         else:
-            # 本轮与上一轮不同（或首轮）：只记录时间，继续等待稳定
+            # 本轮与上一轮不同（或首轮）：只计数，继续等待稳定
             if self._pending_since is None:
                 self._pending_since = time.monotonic()
-            elif (time.monotonic() - self._pending_since
-                  > self.MAX_PENDING_TICKS * self.interval):
-                # 超过最大等待，强制以最新扫描结果为准
+                self._pending_ticks = 0
+            else:
+                self._pending_ticks += 1
+            if self._pending_ticks >= self.MAX_PENDING_TICKS:
+                # 等够轮数了，强制以最新扫描结果为准
                 changes = self._diff(self._snapshot or {}, current)
                 if changes:
                     try:
@@ -223,6 +235,7 @@ class AssetFileWatcher:
                     except Exception as e:
                         print(f"[AssetFileWatcher] on_change 回调异常: {e}")
                 self._snapshot = current
+                self._pending_ticks = 0
                 self._pending_since = None
 
         self._pending = current

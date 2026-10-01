@@ -15,11 +15,11 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt     # 运行时只依赖 openpyxl
-python -m pytest                    # 1031 个用例，约 50 秒
+pip install -r requirements.txt     # 运行时依赖 openpyxl；界面用 PySide6
+python -m pytest                    # 1261 个用例，约 30 秒
 
 python demo/make_demo.py            # 一键重建示例工程（含产物与协作库）
-python main.py                      # 启动图形界面
+python main.py                      # 启动图形界面（PySide6）
 ```
 
 命令行（CI 友好，退出码 **0 通过 / 1 有错误 / 2 用法或环境问题**）：
@@ -55,7 +55,7 @@ storygraph/
 │   ├── asset_events.py   文件监听与事件总线
 │   ├── asset_engine.py   编排层：目录变化 → 重载 → 同步进表格
 │   ├── asset_extensions.py / asset_completion.py
-├── story/      剧本表与 DSL（原先一个 3.8k 行模块，2026-09-28 按职责拆开）
+├── story/      剧本表与 DSL
 │   ├── beat_model.py     Beat 数据结构 + 列契约 + 单元格编解码 ← 加列改这里
 │   ├── beat_build.py     .rpy / DSL → Beat
 │   ├── beat_render.py    Beat → Ren'Py 代码
@@ -73,22 +73,39 @@ storygraph/
 │   ├── compile.py        演出表 → .rpy + 编译结果表
 │   ├── engine_exporters.py 中立 IR → Unity / Godot / CSV
 │   └── renpy_exporter.py 图 → .rpy（保真，不过滤）
+├── app/        **应用服务层（框架无关）← 前端只跟这一层打交道**
+│   ├── beats.py          编辑语义唯一真源（Beat↔字段、立绘行、表情/位置投影）
+│   ├── stage.py          舞台推导（Beat 序列 → 可绘制帧 + 素材解析）
+│   ├── editor.py         `EditorSession`：载入/写回/导出/体检/分析（会话门面）
+│   ├── notify.py         通知端口（后端只汇报，不弹框）
+│   └── picker.py         资产选择器的语义层（分组/搜索/image spec）
+├── ui_qt/      **PySide6 界面（当前前端）**
+│   ├── main_window.py    主窗口：块状编辑器 + 卡片界面
+│   ├── graph_canvas.py   块状编辑器（QGraphicsScene）
+│   ├── sprite_grid.py    立绘网格（真缩略图 + chip）
+│   ├── asset_picker.py   资产选择器（换图用）
+│   ├── stage_preview.py  演出预览
+│   ├── dialogs.py        加章节 / 编辑操作 / 加连线 / 变量分析
+│   ├── help_dialog.py    「使用说明」窗口（操作提示不占主界面）
+│   ├── status.py         状态栏 + Toast + 通知订阅
+│   ├── theme.py          tokens → QSS
+│   └── thumb_loader.py   QThreadPool 异步缩略图
 ├── graph/      图视图数据层与算法
 │   ├── models.py / layout.py / commands.py / analysis.py
-├── ui/         tkinter 界面
-│   ├── graph_view.py     主窗口（剧情树画布 + 菜单）
-│   ├── beat_editor.py    应用内卡片编辑器（含舞台快照预览）
-│   └── asset_panel.py
+├── ui/         tkinter 界面（**过渡期保留**，已无用户可见入口）
+│   ├── graph_view.py     旧主窗口
+│   └── beat_editor.py    旧卡片编辑器 + 兼容门面（re-export app.beats）
 ├── collab/     团队协作后端
 │   └── collab_store.py   SQLite：行级锁 / 冲突检测 / 状态机 / 审计
 ├── cli.py      命令行入口
-└── main.py     桌面入口
+└── main.py     桌面入口（默认 Qt）
 legacy/         归档的单文件老版本（**不参与构建**，见其 README）
 demo/           示例 Ren'Py 工程 + 一键重建脚本
-tests/          1031 个用例
+tests/          1261 个用例
 ```
 
-**依赖方向单向**：`core` ← 其它所有；`ui` 依赖全部，谁都不依赖 `ui`。
+**依赖方向单向**：`core` ← 其它所有；`app` 依赖后端但**禁止**依赖任何
+UI 框架；`ui` / `ui_qt` 依赖全部，谁都不依赖它们。
 禁止反向 import，也禁止再写第二套同类实现（每个"判定"只许有一处）。
 
 ## 数据流
@@ -129,8 +146,17 @@ tests/          1031 个用例
 8. **改中文 `.py` 只能用编辑器工具或 Python 脚本**（`encoding='utf-8'`）。
    PowerShell 的 `Set-Content` 会按 GBK 往返，把整个文件写坏且**不可逆**。
 9. **依赖方向单向**：`core` ← `parsing` / `excel` ← `assets` / `story` ← `pipeline`
-   ← `ui`。`story` 层**不许**顶层 import `pipeline`（历史上一度靠函数内 import
-   压着环）；需要高层编排时走 `script_table` 的模块级 `__getattr__` 按需转发。
+   ← `app` ← `ui` / `ui_qt`。**后端与 `app/` 一律不许 import 任何 UI 框架**，
+   `app/` 也不许 import `storygraph.ui*`（历史上后端为了弹一个框而
+   `import tkinter`，导致无头环境直接跑不起来）。
+   需要提示用户时走 `storygraph.app.notify`（后端只汇报，前端订阅后决定怎么显示）。
+10. **编辑语义只有一处**：Beat ↔ 卡片字段、立绘行、表情/位置投影全在
+    `app/beats.py`；舞台推导全在 `app/stage.py`。`ui/beat_editor.py` 与
+    `ui/stage_preview.py` 只剩控件 + **兼容门面**（re-export），
+    新代码（Qt / CLI / 测试）请直接 import `storygraph.app.*`。
+11. **前端只碰 `EditorSession`**：载入 / 投影 / 写回 / 导出 / 体检 / 分析
+    都在 `app/editor.py`。窗口里**不许**出现 `beat.xxx = ...`，
+    也不许跨对象摸 `_` 开头的成员（那正是两套前端各写一套语义的根源）。
 
 ## 常见改动落点
 
@@ -143,5 +169,9 @@ tests/          1031 个用例
 | 让人话多认一个词 | `story/dsl.py` 的 `DEFAULT_POSITIONS` / `DEFAULT_EXPRESSIONS` / `VERB_ALIAS` |
 | 加一条校验规则 | `pipeline/validate.py`（选好 L1/L2/L3 与 severity） |
 | 加一个导出目标 | `pipeline/engine_exporters.py`（先扩中立 IR，再写适配器） |
-| 改界面 | `ui/graph_view.py`（`legacy/` 里那份**不要**动） |
+| 改**编辑语义**（卡片怎么读写 Beat） | `app/beats.py`（唯一真源，两套前端共用） |
+| 改**舞台推导 / 预览语义** | `app/stage.py` |
+| 改**载入/写回/导出/体检的编排** | `app/editor.py`（`EditorSession`） |
+| 加一个"要告诉用户的事" | `app/notify.py`（别在后端弹框） |
+| 改 **Qt 界面** | `ui_qt/main_window.py`（`legacy/` 与 `ui/` 里那两份**不要**动） |
 | 加共享词表 | `core/vocabulary.py`（别就地再写一份） |

@@ -1,5 +1,5 @@
 # renpy_exporter.py
-import tkinter.messagebox as messagebox
+from storygraph.app import notify
 from storygraph.core.utils import collect_all_variables
 
 def export_to_renpy(graph, filepath):
@@ -109,7 +109,8 @@ def export_to_renpy(graph, filepath):
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
-        messagebox.showinfo("导出成功",
-            f"控制流已写入 {filepath}\n请确保对应的剧本 label 末尾有 return。")
+        notify.info(f"控制流已写入 {filepath}\n"
+                    f"请确保对应的剧本 label 末尾有 return。",
+                    title="导出成功")
     except Exception as e:
-        messagebox.showerror("导出失败", str(e))
+        notify.error(str(e), title="导出失败")

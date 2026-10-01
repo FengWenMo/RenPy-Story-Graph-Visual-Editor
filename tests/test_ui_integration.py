@@ -67,13 +67,9 @@ class TestOpenWithSystemDefault:
         assert graph_view._open_with_system_default(f) is False
 
 
-def test_editor_utils_opens_existing_file(monkeypatch, tmp_path):
-    """open_file_at_line 对存在的文件不应弹错误框。"""
+def test_editor_utils_opens_existing_file(monkeypatch, tmp_path, notify_calls):
+    """open_file_at_line 对存在的文件不应报错。"""
     import storygraph.graph.editor_utils as editor_utils
-    import tkinter.messagebox as mb
-
-    calls = []
-    monkeypatch.setattr(mb, 'showerror', lambda *a, **k: calls.append(a))
 
     f = tmp_path / 'a.rpy'
     f.write_text('x', encoding='utf-8')
@@ -83,17 +79,15 @@ def test_editor_utils_opens_existing_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(editor_utils.subprocess, 'Popen', fake_popen)
     editor_utils.open_file_at_line(f, 1)
-    assert calls == []
+    assert notify_calls.of('error') == []
 
 
-def test_editor_utils_reports_missing_file(monkeypatch, tmp_path):
+def test_editor_utils_reports_missing_file(tmp_path, notify_calls):
+    """文件不存在时要如实上报（走通知端口，不再直接弹 tkinter 框）。"""
     import storygraph.graph.editor_utils as editor_utils
-    import tkinter.messagebox as mb
 
-    calls = []
-    monkeypatch.setattr(mb, 'showerror', lambda *a, **k: calls.append(a))
     editor_utils.open_file_at_line(tmp_path / 'ghost.rpy', 1)
-    assert calls
+    assert notify_calls.of('error')
 
 
 # ------------------------------------------------------------------

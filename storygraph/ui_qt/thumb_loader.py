@@ -55,8 +55,20 @@ class _Job(QRunnable):
                                          Qt.SmoothTransformation)
         except Exception:                    # noqa: BLE001 - 缺图就是空 QImage
             img = QImage()
-        # 交还主线程（loader 是 QObject，信号会排队到它所属线程）
-        self.loader.image_ready.emit(self.slot, self.key, img, self.path)
+        # 交还主线程（loader 是 QObject，信号会排队到它所属线程）。
+        #
+        # **必须防"信号宿主已销毁"**：关窗/关对话框时，工作线程可能还在跑；
+        # 此时 loader 的 C++ 对象已经没了，`emit` 会抛
+        # `RuntimeError: Signal source has been deleted`（PySide6 会把它
+        # 打到 stderr，刷屏且看起来像崩溃）。所以：
+        #   1. 先看 loader 的 shutdown 标志（Python 侧，最快）；
+        #   2. 再兜住 emit 本身的异常（C++ 对象被删的竞态）。
+        if getattr(self.loader, '_shutting_down', True):
+            return
+        try:
+            self.loader.image_ready.emit(self.slot, self.key, img, self.path)
+        except RuntimeError:
+            return                           # 宿主已销毁：静默丢弃结果
 
 
 class ThumbLoader(QObject):
@@ -79,6 +91,7 @@ class ThumbLoader(QObject):
         self._pending: dict = {}             # slot -> (path, apply, size)
         self._jobs: dict = {}                # slot -> 已发出任务的 key
         self._debounce_timer: dict = {}      # slot -> QTimer
+        self._shutting_down = False          # 关窗后工作线程要能看到（见 _Job.run）
         self.image_ready.connect(self._on_ready)
 
     # ------------------------------------------------------------------
@@ -93,6 +106,8 @@ class ThumbLoader(QObject):
         max_size: 本张图的目标尺寸（不给就用实例默认值）
         """
         path = str(path or '').strip()
+        if self._shutting_down:              # 已关窗：不再排队，直接放弃
+            return
         size = tuple(max_size) if max_size else self._default_size
         if not path:
             self._safe_apply(apply, None, path)
@@ -161,6 +176,14 @@ class ThumbLoader(QObject):
             pass
 
     def shutdown(self):
+        """
+        停止接收任何结果。**必须幂等**（close 事件可能来两次）。
+
+        注意：这里**不阻塞等线程池**——解码中的图会自然跑完，只是结果
+        被丢掉（`_shutting_down` + `_Job.run` 里的 try/except 双重兜底）。
+        阻塞等待会让"关窗"卡住，体验比丢几张缩略图差得多。
+        """
+        self._shutting_down = True
         for timer in list(self._debounce_timer.values()):
             try:
                 timer.stop()

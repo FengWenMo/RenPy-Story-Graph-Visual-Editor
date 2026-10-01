@@ -1,6 +1,7 @@
 # commands.py
 import copy
-import tkinter.messagebox as messagebox
+
+from storygraph.app import notify
 from storygraph.parsing.renpy_parser import parse_renpy_file
 
 class Command:
@@ -263,7 +264,7 @@ class HistoryManager:
 
     def undo(self):
         if not self.undo_stack:
-            messagebox.showinfo("提示", "没有可撤销的操作")
+            notify.info('没有可撤销的操作', title='提示')
             return
         command = self.undo_stack.pop()
         command.undo()
@@ -271,7 +272,7 @@ class HistoryManager:
 
     def redo(self):
         if not self.redo_stack:
-            messagebox.showinfo("提示", "没有可重做的操作")
+            notify.info('没有可重做的操作', title='提示')
             return
         command = self.redo_stack.pop()
         command.execute()

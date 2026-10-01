@@ -22,8 +22,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                               QPushButton, QVBoxLayout, QWidget)
 
+from storygraph.app.beats import choices_for_image, uniform_sprite_position
 from storygraph.ui import tokens as T
 from storygraph.ui_qt import theme
 
@@ -32,44 +33,8 @@ THUMB_W = T.CARD['thumbW'] + 8
 THUMB_H = T.CARD['thumbH'] + 8
 
 
-def cards_to_show(cards: list, symbols=None) -> str:
-    """
-    卡片数组 → `show` 文本（`ling happy@left; mary smile@right`）。
-
-    与 tkinter 版 `_collect_sprites` **同一条语义**：
-      · 按 `order_index`（原始出场顺序）写回，不按显示顺序；
-      · `extras`（同一角色的其余条目，换表情保留的）**原样带回，不能丢**；
-      · 表情词**逐词**归一（`normalize_expression_words`）—— 多属性立绘
-        （`ling base_arms_akimbo sigh`）不许被压成一个属性；
-      · 只有"所有立绘位置一致"才允许拿它当整拍位置（`uniform_sprite_position`）。
-    """
-    from storygraph.ui.beat_editor import normalize_expression_words
-
-    ordered = sorted(cards, key=lambda it: it.get('order_index', 0))
-    parts = []
-    for it in ordered:
-        image = str(it.get('image') or '').strip()
-        if not image:
-            continue
-        for extra in it.get('extra_rows') or []:
-            parts.append((extra.get('image') or '').strip())
-        expr = normalize_expression_words(str(it.get('expression') or ''),
-                                          image, symbols)
-        spec = image
-        if expr:
-            tag = image.split()[0]
-            spec = ' '.join([tag] + expr)
-        at = (str(it.get('position') or '').strip()
-              or str(it.get('at') or '').strip())
-        if at:
-            spec += f'@{at}'
-        parts.append(spec)
-    return '; '.join(p for p in parts if p)
-
-
 def uniform_position_of(cards: list) -> str:
     """只有"所有立绘位置一致"才返回它（否则整拍位置留空 —— 防立绘错位）。"""
-    from storygraph.ui.beat_editor import uniform_sprite_position
     rows = [{'at': (str(c.get('position') or '').strip()
                     or str(c.get('at') or '').strip())} for c in cards]
     return uniform_sprite_position(rows)
@@ -82,12 +47,13 @@ class SpriteCardWidget(QFrame):
     remove_requested = Signal(object)
 
     def __init__(self, item: dict, symbols=None, loader=None,
-                 parent=None, on_change=None):
+                 parent=None, on_change=None, on_resolve_path=None):
         super().__init__(parent)
         self.item = dict(item or {})
         self._symbols = symbols
         self._loader = loader
         self._on_change = on_change
+        self._on_resolve_path = on_resolve_path
         self.setProperty('role', 'spriteCard')
         self._build()
         self.refresh()
@@ -176,22 +142,55 @@ class SpriteCardWidget(QFrame):
                              max_size=(THUMB_W, THUMB_H))
 
     def _thumb_path(self, spec):
+        """
+        立绘 image spec → 磁盘上的真实图片路径。
+
+        为什么不能只看 `symbols`：`symbols`（`make_symbols` 的结果）
+        **没有** `registry` 属性，所以早期写法
+        `getattr(self._symbols, 'registry', None)` 恒为 None，
+        → 缩略图永远加载不出来（卡片只剩名字，静默失效）。
+
+        现在由主窗口注入 `on_resolve_path`（真源是资源表的 `Path` 列）；
+        没注入时退回"按 Ren'Py 的 images 目录约定猜一下"，
+        猜不到就显示名字 —— **降级可见，不假装成功**。
+        """
+        if self._on_resolve_path is not None:
+            try:
+                return self._on_resolve_path(spec) or None
+            except Exception:                # noqa: BLE001
+                return None
+        return self._guess_image_path(spec)
+
+    def _guess_image_path(self, spec):
+        """兜底：`ling happy` → `<项目>/game/images/ling/happy.png`（逐个试）。"""
+        parts = [p for p in str(spec or '').split() if p]
+        if len(parts) < 2:
+            return None
+        root = getattr(self._loader, 'project_root', None)
+        if not root:
+            return None
+        rel = '/'.join([parts[0], '_'.join(parts[1:])])
         try:
-            from storygraph.ui.stage_preview import resolve_stage_asset
-            images = getattr(self._symbols, 'registry', None)
-            images = getattr(images, 'images', {}) if images is not None else {}
-            return resolve_stage_asset(spec, images,
-                                       getattr(self._loader, 'project_root', None))
+            from storygraph.story.excel_export import resolve_thumb_source
+            for cand in (f'game/images/{rel}.png', f'game/images/{rel}.webp',
+                         f'images/{rel}.png', f'{rel}.png'):
+                found = resolve_thumb_source(cand, root)
+                if found:
+                    return found
         except Exception:                    # noqa: BLE001
             return None
+        return None
 
     def _cycle(self, field):
-        from storygraph.ui.beat_editor import expression_choices, position_choices
-        try:
-            choices = (expression_choices if field == 'expression'
-                       else position_choices)(self._symbols)
-        except Exception:                    # noqa: BLE001
-            choices = []
+        """
+        点 chip → 换下一个候选（表情 / 位置）。
+
+        候选由 `app.beats.choices_for_image` 给出 —— 拿这一张卡自己的
+        image spec 去问符号表，问不到就什么都不做。
+        """
+        opts = choices_for_image(str(self.item.get('image') or ''),
+                                 self._symbols)
+        choices = list(opts.get(field) or [])
         cur = str(self.item.get(field) or '').strip()
         if not choices:
             return
@@ -221,6 +220,8 @@ class SpriteGridWidget(QWidget):
         self._symbols = symbols
         self._loader = loader
         self._on_pick_image = on_pick_image
+        #: `image spec → 真实图片路径` 的解析器（主窗口注入；真源是资源表）
+        self._on_resolve_path = None
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(4, 4, 4, 4)
         self._grid.setSpacing(T.SPACE['sm'])
@@ -231,6 +232,19 @@ class SpriteGridWidget(QWidget):
 
     def set_symbols(self, symbols):
         self._symbols = symbols
+
+    def set_path_resolver(self, resolver):
+        """
+        注入"立绘 → 图片路径"的解析器，并让已有卡片重取缩略图。
+
+        为什么要有这个钩子：`symbols` 里**没有**资源表，光靠它取不到
+        路径（早期写法就是这么静默失败的）。路径的真源是资源表的
+        `Path` 列，而那个只有主窗口/会话拿得到。
+        """
+        self._on_resolve_path = resolver
+        for card in self._cards:
+            card._on_resolve_path = resolver
+            card.refresh()
 
     def cards(self) -> list:
         return [c.item for c in self._cards]
@@ -244,7 +258,8 @@ class SpriteGridWidget(QWidget):
         for it in items:
             card = SpriteCardWidget(it, symbols=self._symbols,
                                     loader=self._loader,
-                                    on_change=self._on_card_change)
+                                    on_change=self._on_card_change,
+                                    on_resolve_path=self._on_resolve_path)
             card.remove_requested.connect(self._on_remove)
             card.clicked.connect(self._on_click)
             self._cards.append(card)
@@ -278,7 +293,8 @@ class SpriteGridWidget(QWidget):
                  'speaking': False, 'order_index': len(self._cards),
                  'extra_rows': []},
                 symbols=self._symbols, loader=self._loader,
-                on_change=self._on_card_change))
+                on_change=self._on_card_change,
+                on_resolve_path=self._on_resolve_path))
             self._cards[-1].remove_requested.connect(self._on_remove)
             self._cards[-1].clicked.connect(self._on_click)
             self._layout()
