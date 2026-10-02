@@ -42,6 +42,17 @@ class RegistrySource:
     def get_registry(self):
         return self._registry
 
+    # `app.asset_panel.AssetPanelData` 要求传入对象带这两个查询（历史上只有
+    # `AssetEngine` 有）。实现是纯函数、只看 registry，所以这里转发即可 ——
+    # 于是"资产统计 / 未使用资产 / 断裂引用"在**没有引擎**的 Qt 会话里也能用。
+    def find_unused_assets(self) -> list:
+        from storygraph.assets.asset_registry import unused_assets
+        return unused_assets(self._registry)
+
+    def find_broken_references(self, include_transforms: bool = False) -> list:
+        from storygraph.assets.asset_registry import broken_references
+        return broken_references(self._registry, include_transforms)
+
 
 def groups(registry, limit: int = 3000, project_root=None) -> dict:
     """分类候选：`{类别名: [(asset_type, asset_id), ...]}`（可分组的唯一真源）。"""
@@ -49,6 +60,59 @@ def groups(registry, limit: int = 3000, project_root=None) -> dict:
         return {}
     return B.categorize_assets(RegistrySource(registry, project_root),
                                limit=limit)
+
+
+#: 非图片类型 → （资源表字段名, 中文名）。
+#: 它们**没有分类组**（分类是给 2828 张图用的），所以各自成一组。
+PLAIN_ASSET_TYPES = (('music', 'music', '音乐'),
+                     ('sound', 'sounds', '音效'),
+                     ('voice', 'voices', '语音'),
+                     ('transform', 'transforms', '变换'),
+                     ('character', 'characters', '角色'))
+
+
+def groups_with_plain(registry, types=None, project_root=None,
+                      limit: int = 3000) -> dict:
+    """
+    分类组（图片那套）**加上**音频 / 变换 / 角色各自的整组。
+
+    为什么必须补这一层（用户 2026-10-05）：
+
+    > 音乐跟语音的选择没有绑定到音乐上……选择按钮全是立绘……根本就没有音乐
+
+    `groups()` 走的是 `categorize_assets`，而它**只按图片的 Category/Tag 分组** ——
+    音乐 / 音效 / 语音 / 变换 / 角色根本不在返回结果里。于是选择器（分类列表 +
+    "全部"）里永远只有立绘：想选音乐要么搜到零条，要么看到一屏立绘。
+
+    `types` 给了就只补用户要的那几类（`pick_asset` 会传）。
+    """
+    out = dict(groups(registry, limit=limit, project_root=project_root))
+    if registry is None:
+        return out
+    if types and 'image' not in types:
+        # 只想要音频/变换时，把图片分类组去掉：留着它们只会让人点进一个
+        # 空列表（"怎么全是立绘/怎么一条都没有"就是这么来的）。
+        out = {k: v for k, v in out.items()
+               if not any(t == 'image' for t, _ in (v or []))}
+    # 已经出现过的 (类型, id)：`categorize_assets` 有时**已经**给了音乐/角色
+    # 之类的分组，再补一遍就会出现"同一首歌列两次"（合成资源表实测 3 条变 6 条）。
+    seen = {(t, a) for rows in out.values() for (t, a) in (rows or [])}
+    for asset_type, field, label in PLAIN_ASSET_TYPES:
+        if types and asset_type not in types:
+            continue
+        rows = getattr(registry, field, None) or {}
+        if not rows:
+            continue
+        missing = [(asset_type, aid) for aid in sorted(rows.keys())
+                   if (asset_type, aid) not in seen]
+        if not missing:
+            continue                         # 已经有这一组了
+        name = f'{label}（全部）'
+        while name in out:
+            name += '＋'
+        out[name] = missing
+        seen.update(missing)
+    return out
 
 
 def search(registry, query: str = '', asset_types=None, limit: int = 50,

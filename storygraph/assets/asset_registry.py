@@ -1464,6 +1464,169 @@ def describe_asset(asset_type: str, row: dict) -> str:
     return ' · '.join(parts)
 
 
+# ===================== 引用体检（纯函数：只看 registry） =====================
+#
+# 这两个查询原先只长在 `AssetEngine` 上（`find_unused_assets` /
+# `find_broken_references`），于是**只有"有一个真引擎"的地方能用** ——
+# Qt 版的会话手上只有 registry，而 `app.asset_panel` 又要求传入的对象带这
+# 两个方法，结果"未使用资产 / 断裂引用"这类体检在编辑器里一直没有入口。
+# 实现只依赖 `registry.references` / `registry.unresolved`，所以下移到资源表
+# 层：引擎与适配器都转发到这里（一份实现，两处调用）。
+
+def unused_assets(registry) -> list:
+    """没人引用的资产：`[{'category': 'images', 'asset_id': …}, …]`。"""
+    if registry is None:
+        return []
+    referenced = set(getattr(registry, 'references', {}) or {})
+    out = []
+    for name in ('images', 'music', 'sounds', 'transforms'):
+        for aid in (getattr(registry, name, None) or {}):
+            if aid not in referenced:
+                out.append({'category': name, 'asset_id': aid})
+    return out
+
+
+def broken_references(registry, include_transforms: bool = False) -> list:
+    """
+    脚本引用了、但资产表里查不到的名字。
+
+    transform 默认**不算**断裂：脚本里 `at my_slide` 用的自定义变换，用户
+    完全可以不登记到 transforms.xlsx（那里只放要复用和管理的），把它报成
+    "断裂引用"只会制造噪音。
+    """
+    if registry is None:
+        return []
+    unresolved = getattr(registry, 'unresolved', {}) or {}
+    grouped = defaultdict(list)
+    for kind, entries in unresolved.items():
+        if kind == 'transform' and not include_transforms:
+            continue
+        for raw, loc in (entries or ()):
+            grouped[(kind, raw)].append(loc)
+    out = [{'asset_id': raw, 'kind': kind, 'locations': list(locs)}
+           for (kind, raw), locs in grouped.items()]
+    out.sort(key=lambda b: (b['kind'], b['asset_id']))
+    return out
+
+
+# ===================== 补登缺失资源（合并写，绝不重写整表） =====================
+
+def _norm_path_for_compare(path) -> str:
+    """比对用路径：统一分隔符、去空格、小写（表里实测有 `bg_2 .png` 这种手误）。"""
+    s = str(path or '').replace('\\', '/').strip().lower()
+    return re.sub(r'\s+', '', s)
+
+
+def register_missing_assets(project_root, asset_dir=None,
+                            include_ui: bool = False) -> dict:
+    """
+    把**磁盘上有、资产表里没登记**的图片（以及音乐/音效/语音）**追加**进表。
+
+    用户 2026-10-05：
+
+    > 先查背景图为何没有被登记进去，然后，让背景图被登记进去。
+
+    实测 `sr_general`：`game/images/bg` 下有 39 张，表里只认到 30 张；
+    表里用下划线名（`bg_1`）而磁盘是点号名（`bg1.2.png`）—— 于是脚本里的
+    `bg bg1_2` 在表里查不到，演出预览的背景只能靠磁盘回退兜着。
+
+    为什么不能直接用 `write_asset_excel`：它是"**只写扫描结果**"的全量重写
+    （2828 行会掉到 349 行）。这里改成**只追加缺失行**：
+      · 已登记（路径或 ID 命中，路径比对会去掉空格/大小写差异）→ 跳过；
+      · 其余 → 追加到对应表的末尾，并在写之前把原表备份成 `*.bak.xlsx`。
+
+    图片的 `Attributes` 会做一次 `.` → `_` 归一（Ren'Py 里
+    `image bg bg6_2 = "images/bg/bg6.2.png"` 就是这种对应关系），
+    这样脚本里写的 `bg bg6_2` 才能在表里查到。
+    返回 `{ok, added, skipped, backup, by_kind, rows}`。
+    """
+    project_root = Path(project_root) if project_root else None
+    if project_root is None:
+        return {'ok': False, 'error': '没有项目根目录', 'added': 0,
+                'skipped': 0, 'backup': '', 'by_kind': {}, 'rows': []}
+    tables_dir = Path(asset_dir) if asset_dir else \
+        (project_root / 'game' / 'asset_tables')
+    game = project_root / 'game'
+    scan_root = game if game.is_dir() else project_root
+    try:
+        assets = scan_assets(scan_root, include_ui=include_ui)
+    except Exception as e:                    # noqa: BLE001
+        return {'ok': False, 'error': f'扫描失败：{e}', 'added': 0,
+                'skipped': 0, 'backup': '', 'by_kind': {}, 'rows': []}
+
+    plan = [
+        ('images', 'images.xlsx',
+         ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'],
+         list(assets.get('images') or []), True),
+        ('music', 'music.xlsx', ['ID', 'Path', 'Loop', 'Volume', 'Notes'],
+         list((assets.get('audio') or {}).get('music') or []), False),
+        ('sounds', 'sounds.xlsx', ['ID', 'Path', 'Notes'],
+         list((assets.get('audio') or {}).get('sounds') or []), False),
+        ('voices', 'voices.xlsx', ['ID', 'Path', 'Notes'],
+         list(assets.get('voices') or []), False),
+    ]
+
+    by_kind: dict = {}
+    all_rows: list = []
+    backups: list = []
+    added_total = skipped_total = 0
+    import shutil
+    for kind, filename, headers, scanned, is_image in plan:
+        target = tables_dir / filename
+        if not scanned and not target.exists():
+            continue
+        try:
+            existing = read_excel_rows(target) if target.exists() else []
+        except Exception:                     # noqa: BLE001
+            existing = []
+        have_paths = {_norm_path_for_compare(r.get('Path')) for r in existing}
+        have_ids = {str(r.get('ID') or '').strip() for r in existing}
+        fresh = []
+        for row in scanned:
+            if _norm_path_for_compare(row.get('Path')) in have_paths:
+                skipped_total += 1
+                continue
+            if str(row.get('ID') or '').strip() in have_ids:
+                skipped_total += 1
+                continue
+            row = dict(row)
+            if is_image:
+                row['Attributes'] = str(row.get('Attributes') or '').replace('.', '_')
+                row['ID'] = str(row.get('ID') or '').replace('.', '_')
+            fresh.append(row)
+        by_kind[kind] = len(fresh)
+        if not fresh:
+            continue
+        backup = ''
+        try:
+            tables_dir.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                backup_path = target.with_suffix('.bak.xlsx')
+                shutil.copyfile(target, backup_path)
+                backup = str(backup_path)
+                backups.append(backup)
+            wb = openpyxl.load_workbook(target) if target.exists() \
+                else openpyxl.Workbook()
+            ws = wb.active
+            if ws.max_row < 1 or not any(c.value for c in ws[1]):
+                for col, name in enumerate(headers, start=1):
+                    set_text(ws, 1, col, name)
+            for row in fresh:
+                values = [row.get(h, '') for h in headers]
+                append_text_row(ws, values)
+                all_rows.append(row)
+            wb.save(target)
+            added_total += len(fresh)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': f'写 {filename} 失败：{e}',
+                    'added': added_total, 'skipped': skipped_total,
+                    'backup': backup, 'by_kind': by_kind, 'rows': all_rows}
+    return {'ok': True, 'error': '', 'added': added_total,
+            'skipped': skipped_total, 'backup': backups[0] if backups else '',
+            'backups': backups, 'by_kind': by_kind, 'rows': all_rows,
+            'tables_dir': str(tables_dir)}
+
+
 # ===================== 命令行自测 =====================
 
 if __name__ == "__main__":

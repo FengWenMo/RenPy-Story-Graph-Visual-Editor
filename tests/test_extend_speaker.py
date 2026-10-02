@@ -228,55 +228,59 @@ class TestSpeakerMissingGuard:
     为什么需要（用户 2026-09-28 报"幽灵旁白"）：当时卡片上什么都没提示，
     只看得出 Speaker 是空的——而空着也能点「下一句」，错误就被带过去了。
     宁可吵一点，也不要让"会变成旁白"的拍静默通过。
+
+    2026-10-01：判据搬到了 `app.beats.speaker_missing_warning`（纯函数，
+    只算文案），Qt 卡片负责显示（`BeatCardEditor.set_note`）。
+    以前要靠继承 tkinter 面板造 `Probe` 才能测 —— 现在直接测纯函数。
     """
 
-    def _probe(self):
-        from storygraph.ui.beat_editor import BeatEditorPanel
-
-        class Probe(BeatEditorPanel):
-            def __init__(self):
-                self.note = ''
-
-            def _set_note(self, text):
-                self.note = text or ''
-
-        return Probe()
+    @staticmethod
+    def _warn(beat):
+        from storygraph.app.beats import speaker_missing_warning
+        return speaker_missing_warning(beat)
 
     def test_warns_when_say_has_no_speaker(self):
         from storygraph.story.script_table import Beat
-        p = self._probe()
-        p._warn_if_speaker_missing(
-            Beat(seq=1, kind='say', speaker='', text='有台词'))
-        assert p.note and '旁白' in p.note
+        note = self._warn(Beat(seq=1, kind='say', speaker='', text='有台词'))
+        assert note and '旁白' in note
 
     def test_silent_when_speaker_present(self):
         from storygraph.story.script_table import Beat
-        p = self._probe()
-        p._warn_if_speaker_missing(
-            Beat(seq=1, kind='say', speaker='jc', text='有台词'))
-        assert p.note == ''
+        assert self._warn(
+            Beat(seq=1, kind='say', speaker='jc', text='有台词')) == ''
 
     def test_silent_for_narration(self):
         """旁白本来就该没有说话人，别吵。"""
         from storygraph.story.script_table import Beat
-        p = self._probe()
-        p._warn_if_speaker_missing(
-            Beat(seq=1, kind=KIND_NARRATION, speaker='', text='旁白'))
-        assert p.note == ''
+        assert self._warn(
+            Beat(seq=1, kind=KIND_NARRATION, speaker='', text='旁白')) == ''
 
     def test_silent_for_extend(self):
         """`extend` 本来就不带说话人（续上一句），别吵。"""
         from storygraph.story.script_table import Beat
-        p = self._probe()
-        p._warn_if_speaker_missing(
-            Beat(seq=1, kind=KIND_EXTEND, speaker='', text='续句'))
-        assert p.note == ''
+        assert self._warn(
+            Beat(seq=1, kind=KIND_EXTEND, speaker='', text='续句')) == ''
 
     def test_silent_when_no_text(self):
         from storygraph.story.script_table import Beat
-        p = self._probe()
-        p._warn_if_speaker_missing(Beat(seq=1, kind='say', speaker='', text=''))
-        assert p.note == ''
+        assert self._warn(
+            Beat(seq=1, kind='say', speaker='', text='')) == ''
+
+    def test_the_card_actually_shows_it(self, qapp, ui_window):
+        """
+        纯函数算得对还不够 —— 卡片必须**真的显示出来**。
+        这一条盯的是"文案算了但没人接"（幽灵旁白当年就是这样：
+        数据层知道、界面不知道）。
+        """
+        ui_window._show_index(0)
+        beat = ui_window.beats[0]
+        beat.speaker = ''
+        beat.kind = 'say'
+        beat.text = '有台词但没人说'
+        ui_window._show_index(0)
+        assert ui_window._panel._note_label.isVisible() or \
+            ui_window._panel._note_label.text(), \
+            '有台词没说话人时卡片没有任何提示'
 
 
 @pytest.mark.skipif(not REAL.exists(), reason='本机没有 chapter1_3.rpy')

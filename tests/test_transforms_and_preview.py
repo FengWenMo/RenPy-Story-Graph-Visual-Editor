@@ -618,7 +618,7 @@ class TestDescriptionAndPreview:
         assert '背景' in text and 'bg_room.png' in text
 
     def test_asset_detail_includes_transform_atl(self, write_rpy):
-        from storygraph.ui.beat_editor import asset_detail
+        from storygraph.app.beats import asset_detail
 
         class _Engine:
             def __init__(self, reg):
@@ -635,7 +635,7 @@ class TestDescriptionAndPreview:
         assert 'ATL' in detail
 
     def test_preview_path_resolution(self, tmp_path):
-        from storygraph.ui.beat_editor import asset_preview_path
+        from storygraph.app.beats import asset_preview_path
 
         class _Engine:
             def __init__(self, reg, root):
@@ -655,13 +655,19 @@ class TestDescriptionAndPreview:
         assert asset_preview_path(eng, 'image', 'nope') is None
         assert asset_preview_path(eng, 'music', 'a') is None
 
-    def test_load_thumbnail_is_graceful(self, tmp_path):
-        """无 tk 环境 / 坏图都不能抛异常，最多返回 None。"""
-        from storygraph.ui.beat_editor import load_thumbnail
+    def test_thumbnail_decoding_is_graceful(self, tmp_path):
+        """
+        坏图 / 缺图都不能抛异常，最多返回 None。
+
+        2026-10-01：原来测的是 tkinter 的 `load_thumbnail`（PIL → PhotoImage）。
+        tkinter 删除后，对应的内核是 `app.thumbs.decode_sync`（PIL Image，
+        框架无关）—— 它才是"两个前端共用一份解码"的那个真源。
+        """
+        from storygraph.app.thumbs import decode_sync
         bad = tmp_path / 'bad.png'
         bad.write_bytes(b'not an image')
-        assert load_thumbnail(bad) is None
-        assert load_thumbnail(tmp_path / 'missing.png') is None
+        assert decode_sync(bad, (32, 32)) is None
+        assert decode_sync(tmp_path / 'missing.png', (32, 32)) is None
 
 
 # ------------------------------------------------------------------
@@ -669,18 +675,30 @@ class TestDescriptionAndPreview:
 # ------------------------------------------------------------------
 
 class TestUiEntryPoints:
-    def test_graph_view_has_node_excel_entry(self):
-        import storygraph.ui.graph_view as graph_view
-        assert hasattr(graph_view.GraphView, 'open_node_rpy_in_excel')
-        assert hasattr(graph_view.GraphView, '_generate_and_open_table')
+    def test_node_has_an_excel_entry(self):
+        """
+        右键节点必须能"用 Excel 打开这一章的演出表" ——
+        tkinter 版有，删 tkinter 时**不能弄丢**。
+
+        逻辑现在住在 `app.tables`（框架无关），Qt 窗口只挑路径 + 展示结果。
+        """
+        from storygraph.app import tables
+        assert callable(tables.generate_table)
+        from storygraph.ui_qt.main_window import MainWindowQt
+        assert hasattr(MainWindowQt, 'open_node_in_excel')
 
     def test_menu_label_present_in_source(self):
-        from _source_paths import graph_view_source
-        src = graph_view_source()
-        text = src.read_text(encoding='utf-8')
+        from _source_paths import main_window_source
+        text = main_window_source().read_text(encoding='utf-8')
         assert '用 Excel 打开此章节' in text
-        # 与「在编辑器中打开」同级：同一次右键里两者一起切换状态
-        assert text.count('entryconfig("用 Excel 打开此章节"') >= 2
+        # 旧版还有「在编辑器中打开」（上一版漏了它）
+        assert '在编辑器中打开' in text
+        # 旧版的主入口叫「改本章台词（卡片）」—— 名字保持原样
+        assert '改本章台词（卡片）' in text
+        # 没有源文件的块要置灰（而不是点完再弹一句"未关联源文件"）：
+        # 判据看**运行时**（`test_ui_qt.py::TestNodeMenu`），这里只确认
+        # "有一组动作会被一起禁用"这段逻辑还在。
+        assert 'setEnabled(False)' in text
 
 
 # ------------------------------------------------------------------
@@ -732,3 +750,106 @@ class TestEndToEnd:
         from storygraph.story.script_table import import_beats_from_excel
         assert find_unregistered_assets(
             import_beats_from_excel(out), reg) == []
+
+class TestBackgroundResolutionFallsBackToDisk:
+    """
+    用户 2026-10-05：
+
+    > 还有，这个演出预览，背景没有显示出来啊……
+
+    根因：
+esolve_stage_asset 在**资源表里查不到** tag/属性时**直接 return None**
+    —— 后面那句有界磁盘回退（image_index_lookup）成了**死代码**。
+    真实项目的背景图根本没登记进 images.xlsx（g bg1_2 一条都搜不到），
+    而 game/images/bg/bg1.2.png 就在磁盘上 → 预览里背景永远空白
+    （立绘却正常，因为它们登记在表里）。
+    """
+
+    def test_table_miss_still_tries_the_disk_index(self, monkeypatch):
+        """
+        资源表里**查不到**时，也必须走磁盘回退（这正是曾经的死代码）。
+
+        真实项目实测：g bg1_2 在 images.xlsx 里一条都搜不到，而
+        game/images/bg/bg1.2.png 在磁盘上 —— 修前返回 None（预览背景空白），
+        修后返回真实路径。
+        """
+        from storygraph.app import stage as S
+        seen = []
+
+        def fake_lookup(spec, index):
+            seen.append(spec)
+            return 'FOUND'
+
+        monkeypatch.setattr(S, 'image_index_lookup', fake_lookup)
+        # images 不能是空字典：空表会走'没有资源表'的早退分支
+        images = {'other': {'ID': 'other', 'Tag': 'nobody',
+                           'Attributes': 'nobody', 'Path': None}}
+        hit = S.resolve_stage_asset('bg bg1_2', images, None, {})
+        assert seen == ['bg bg1_2'], '表里查不到时没有尝试磁盘回退（死代码又回来了）'
+        assert hit == 'FOUND'
+
+    def test_table_hit_still_wins(self, tmp_path):
+        """表里查得到时仍走表（磁盘回退只是兜底）。"""
+        from storygraph.app.stage import resolve_stage_asset
+        real = tmp_path / 'game' / 'images' / 'characters' / 'ling'
+        real.mkdir(parents=True)
+        (real / 'happy.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        images = {'_happy': {'ID': '_happy', 'Tag': 'ling',
+                             'Attributes': 'happy',
+                             'Path': 'game/images/characters/ling/happy.png'}}
+        hit = resolve_stage_asset('ling happy', images, tmp_path)
+        assert hit is not None and str(hit).endswith('happy.png'), hit
+
+class TestRegisterMissingAssets:
+    """
+    用户 2026-10-05：
+
+    > 先查背景图为何没有被登记进去，然后，让背景图被登记进去。
+
+    实测真实项目：game/images/bg 下 39 张、表里只认到 30 张，而且表里是
+    下划线名（g_1）而磁盘是点号名（g1.2.png）—— 脚本里的 g bg1_2
+    在表里查不到（演出预览背景只能靠磁盘回退兜着）。补登 63 条后表内直接可解析。
+    """
+
+    def _project(self, tmp_path):
+        import openpyxl
+        game = tmp_path / 'game'
+        (game / 'images' / 'bg').mkdir(parents=True)
+        (game / 'images' / 'bg' / 'bg1.2.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        (game / 'images' / 'bg' / 'bg1.3.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        tables = game / 'asset_tables'
+        tables.mkdir(parents=True)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'])
+        ws.append(['bg_1', 'images/bg_1.jpg', 'bg', 'bg_1', 'background', ''])
+        wb.save(tables / 'images.xlsx')
+        return tmp_path
+
+    def test_appends_only_missing_rows_and_backs_up(self, tmp_path):
+        from storygraph.assets.asset_registry import (read_excel_rows,
+                                                      register_missing_assets)
+        root = self._project(tmp_path)
+        tables = root / 'game' / 'asset_tables'
+        before = read_excel_rows(tables / 'images.xlsx')
+        res = register_missing_assets(root, asset_dir=tables)
+        assert res['ok'], res
+        assert res['added'] >= 2, res           # bg1.2 / bg1.3
+        assert (tables / 'images.bak.xlsx').is_file(), '写前必须备份'
+        after = read_excel_rows(tables / 'images.xlsx')
+        # 已登记的行一个字都不许动
+        assert [r for r in after if r.get('ID') == 'bg_1'] == \
+            [r for r in before if r.get('ID') == 'bg_1']
+        ids = {r.get('ID') for r in after}
+        assert 'bg1_2' in ids, f'点号名没有归一成脚本用的下划线名：{sorted(ids)[:6]}'
+
+    def test_is_idempotent(self, tmp_path):
+        from storygraph.assets.asset_registry import (read_excel_rows,
+                                                      register_missing_assets)
+        root = self._project(tmp_path)
+        tables = root / 'game' / 'asset_tables'
+        register_missing_assets(root, asset_dir=tables)
+        n1 = len(read_excel_rows(tables / 'images.xlsx'))
+        res2 = register_missing_assets(root, asset_dir=tables)
+        assert res2['ok'] and res2['added'] == 0, res2
+        assert len(read_excel_rows(tables / 'images.xlsx')) == n1

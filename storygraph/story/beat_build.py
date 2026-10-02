@@ -14,6 +14,7 @@ storygraph.story.beat_build
 """
 
 from __future__ import annotations
+from storygraph.core.safeguard import swallow
 from typing import Iterable, Optional
 from storygraph.core.statement import Statement, StatementKind
 
@@ -371,8 +372,8 @@ def hydrate_from_dsl(beats: list, symbols) -> list:
             _hydrate_stage(beat, symbols, audit, parse_stage)
             try:
                 beat._hydrated_stage = beat.stage
-            except Exception:
-                pass
+            except Exception as e:
+                swallow('beat_build.hydrate_from_dsl', e)
         if beat.bgm:
             _hydrate_audio(beat, 'music', symbols, parse_audio)
         if beat.sfx:
@@ -491,7 +492,7 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
         try:
             setattr(beat, attr, val)
         except Exception:                    # noqa: BLE001
-            pass
+            swallow('beat_build._hydrate_stage')
 
 
 

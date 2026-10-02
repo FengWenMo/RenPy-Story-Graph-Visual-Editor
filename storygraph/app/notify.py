@@ -40,6 +40,7 @@ storygraph.app.notify
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 from typing import Callable, List
 
 #: 通知级别
@@ -64,8 +65,8 @@ def subscribe(listener: Callable[[str, str, str], None]) -> Callable:
     def _unsubscribe():
         try:
             _listeners.remove(listener)
-        except ValueError:
-            pass
+        except ValueError as e:
+            swallow('notify._unsubscribe', e)
 
     return _unsubscribe
 
@@ -73,8 +74,8 @@ def subscribe(listener: Callable[[str, str, str], None]) -> Callable:
 def unsubscribe(listener) -> None:
     try:
         _listeners.remove(listener)
-    except ValueError:
-        pass
+    except ValueError as e:
+        swallow('notify.unsubscribe', e)
 
 
 def subscribers() -> list:

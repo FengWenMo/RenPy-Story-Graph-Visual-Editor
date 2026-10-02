@@ -19,6 +19,7 @@ asset_engine.py
 """
 
 from __future__ import annotations
+from storygraph.core.safeguard import swallow
 import os
 import re
 import shutil
@@ -92,13 +93,13 @@ def _apply_rename_patch(old_id: str, new_id: str,
         if backup:
             try:
                 shutil.copy2(fp, fp.with_suffix(fp.suffix + '.bak'))
-            except Exception:
-                pass
+            except Exception as e:
+                swallow('asset_engine._apply_rename_patch', e)
         try:
             fp.write_text(pattern.sub(new_id, text), encoding='utf-8')
             modified.append(str(fp))
-        except Exception:
-            pass
+        except Exception as e:
+            swallow('asset_engine._apply_rename_patch', e)
 
     return {'modified': modified, 'matched_files': matched}
 
@@ -347,8 +348,8 @@ class AssetEngine:
         translations = {}
         try:
             translations = parse_translation_files(self.tl_dir)
-        except Exception:
-            pass
+        except Exception as e:
+            swallow('asset_engine._load_scripts', e)
 
         self.linker = CharacterScriptLinker(self.parse_result, translations)
         self.linker.link()
@@ -1053,37 +1054,16 @@ class AssetEngine:
         """
         脚本引用了、但资产表里查不到的名字。
 
-        transform 类默认不算断裂：脚本里 `at my_slide` 引用的自定义变换，
-        用户完全可以不登记到 transforms.xlsx（那里只放需要复用和管理的），
-        把它报成"断裂引用"只会制造噪音。
+        实现搬到了 `asset_registry.broken_references`（纯函数、只看 registry）
+        —— 这样**没有引擎**的调用方（Qt 会话 / 资产面板适配器）也能用同一份
+        判断，而不是各自再写一遍。这里保留方法只是兼容既有调用点。
         """
-        if self.registry is None:
-            return []
-
-        unresolved = getattr(self.registry, 'unresolved', {})
-        broken = []
-        for kind, entries in unresolved.items():
-            if kind == 'transform' and not include_transforms:
-                continue
-            grouped = defaultdict(list)
-            for raw, loc in entries:
-                grouped[raw].append(loc)
-            for raw, locs in grouped.items():
-                broken.append({'asset_id': raw, 'kind': kind,
-                               'locations': list(locs)})
-        broken.sort(key=lambda b: (b['kind'], b['asset_id']))
-        return broken
+        from storygraph.assets.asset_registry import broken_references
+        return broken_references(self.registry, include_transforms)
 
     def find_unused_assets(self) -> list:
-        if self.registry is None:
-            return []
-        referenced = set(self.registry.references.keys())
-        unused = []
-        for name in ('images', 'music', 'sounds', 'transforms'):
-            for aid in getattr(self.registry, name, {}):
-                if aid not in referenced:
-                    unused.append({'category': name, 'asset_id': aid})
-        return unused
+        from storygraph.assets.asset_registry import unused_assets
+        return unused_assets(self.registry)
 
     def find_undefined_characters(self) -> list:
         if self.linker is None:

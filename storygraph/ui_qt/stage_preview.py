@@ -21,19 +21,174 @@ Qt 版**舞台演出预览**：把这一章按卡片效果"播"出来。
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from storygraph.core.safeguard import swallow
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from storygraph.app.stage import (BLOCK_H, BLOCK_W, SPRITE_H_RATIO, SPRITE_MAX,
-                                  STAGE_H, STAGE_W, image_index,
-                                  resolve_frame_assets, resolve_solid_color)
-from storygraph.ui import tokens as T
+                                  STAGE_H, STAGE_W, audio_spec_name,
+                                  image_index, resolve_frame_assets,
+                                  resolve_solid_color, sprite_box,
+                                  stage_audio_cues)
+from storygraph.app.thumbs import natural_size
+from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 PLAY_MS = 900          # 自动播放间隔；节奏仅示意，不代表真实时长
+
+#: 预取往后几拍（用户 2026-10-05："每次加载时……总有一个蓝色框当占位符
+#: 一闪而过"）。预告下一两拍的图，翻到它时就是内存命中（0 延迟），
+#: 加载中的占位框自然也就看不见了。
+PREFETCH_AHEAD = 2
+#: 预取队列的上限（跳来跳去时别把线程池塞满）
+PREFETCH_QUEUE_LIMIT = 40
+
+
+def _is_stale_frame_slot(slot, idx) -> bool:
+    """这个 loader slot 是"**别的帧**的素材"吗（预取的 slot 不算）？"""
+    return (isinstance(slot, tuple) and len(slot) >= 2
+            and slot[0] in ('bg', 'sp', 'layer') and slot[1] != idx)
+
+
+class StageAudio:
+    """
+    预览的**声音**：BGM 循环 + 音效 / 语音一次性（QtMultimedia）。
+
+    用户 2026-10-05：
+
+    > 演出的预览界面可能仍旧有点问题，第一个是 bgm 未被实际播放
+
+    语义（照 Ren'Py）：
+      · **BGM 是持续状态** —— 这一拍没换曲就继续放，绝不每拍重头开始；
+      · **音效 / 语音是一次性的** —— 换到那一拍响一次。
+
+    播放器**可注入**（`player_factory`）：没装 QtMultimedia、或者没有音频设备
+    的环境里退化成"什么都不放"，并把原因写在 `note()` 里给界面显示 ——
+    绝不因为放不出声就把预览搞崩。
+    """
+
+    #: BGM 音量（提示性的预览，别盖过用户别的音频）
+    BGM_VOLUME = 0.55
+    FX_VOLUME = 0.9
+
+    def __init__(self, project_root=None, registry=None, enabled: bool = True,
+                 player_factory=None):
+        self.project_root = project_root
+        self._registry = registry
+        self._enabled = bool(enabled)
+        self._error = ''
+        self._notes: list = []
+        self._music_path = None
+        self._last_key = None
+        self._bgm = None
+        self._fx = None
+        self._factory = player_factory
+        self._make_players()
+
+    # ------------------------------------------------------------------
+
+    def _make_players(self):
+        if self._factory is not None:
+            # 注入的假播放器（测试用）：`() -> (bgm, bgm_out, fx, fx_out)`
+            try:
+                made = self._factory()
+                self._bgm, self._bgm_out, self._fx, self._fx_out = made
+            except Exception as e:                # noqa: BLE001
+                self._error = f'音频初始化失败（{e.__class__.__name__}）'
+            return
+        try:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        except Exception as e:                    # noqa: BLE001
+            self._error = f'这个环境没有音频后端（{e.__class__.__name__}）'
+            return
+        try:
+            self._bgm = QMediaPlayer()
+            out = QAudioOutput()
+            out.setVolume(self.BGM_VOLUME)
+            self._bgm.setAudioOutput(out)
+            self._bgm.setLoops(QMediaPlayer.Loops.Infinite)
+            self._bgm_out = out                  # 保引用：被回收就没声了
+            self._fx = QMediaPlayer()
+            fx_out = QAudioOutput()
+            fx_out.setVolume(self.FX_VOLUME)
+            self._fx.setAudioOutput(fx_out)
+            self._fx_out = fx_out
+        except Exception as e:                    # noqa: BLE001
+            self._error = f'音频初始化失败（{e.__class__.__name__}）'
+            self._bgm = self._fx = None
+
+    def note(self) -> str:
+        """给界面显示的一句话（正常时为空）。"""
+        return self._error
+
+    def set_registry(self, registry):
+        self._registry = registry
+
+    def set_enabled(self, on: bool):
+        self._enabled = bool(on)
+        if not self._enabled:
+            self.stop()
+
+    def set_frame(self, frame, key=None):
+        """
+        切到某一帧：该换曲就换曲，该响一次就响一次。
+
+        `key` 用来判"同一帧被重画"（例如切「真实贴图」开关）—— 同一帧不重放
+        音效/语音，否则点一下开关就重复喊一句。
+
+        返回 `stage_audio_cues` 的结果（含 `notes`：**找不到文件**、**近似匹配**
+        这类必须让用户看见的话 —— 用户 2026-10-05 "我这里没有声音" 就是
+        脚本引用的文件名在磁盘上不存在，以前预览一声不响、也不说为什么）。
+        """
+        cues = stage_audio_cues(frame, self._registry, self.project_root)
+        self._notes = list(cues.get('notes') or ())
+        if not self._enabled:
+            return cues
+        music = cues.get('music')
+        if music != self._music_path:
+            self._music_path = music
+            if music:
+                self._play(self._bgm, music, loop=True)
+            else:
+                self._stop(self._bgm)
+        if key is not None and key == self._last_key:
+            return cues                            # 同一帧重画：不重放
+        self._last_key = key
+        for _kind, path in cues.get('once') or ():
+            self._play(self._fx, path, loop=False)
+        return cues
+
+    def notes(self) -> list:
+        """这一拍"必须让用户知道"的声音提示（缺文件 / 近似匹配）。"""
+        return list(self._notes)
+
+    def _play(self, player, path, loop: bool = False):
+        if player is None or not path:
+            return
+        try:
+            player.stop()
+            player.setSource(QUrl.fromLocalFile(str(path)))
+            player.play()
+        except Exception as e:                    # noqa: BLE001
+            self._error = f'播放失败：{e.__class__.__name__}'
+
+    @staticmethod
+    def _stop(player):
+        if player is None:
+            return
+        try:
+            player.stop()
+        except Exception:                         # noqa: BLE001
+            swallow('stage_preview._stop')
+
+    def stop(self):
+        self._stop(self._bgm)
+        self._stop(self._fx)
+        self._music_path = None
+        self._last_key = None
 
 
 class StageCanvas(QWidget):
@@ -41,14 +196,20 @@ class StageCanvas(QWidget):
     舞台画布：一帧的画面。
 
     绘制顺序 = 真实游戏的层级：背景 → 立绘 → 非角色图层 → 说话人角标。
+
+    立绘的位置/大小：**有项目 transform 就按真实几何画**（原图尺寸 × zoom +
+    xcenter/xoffset/yanchor/ypos — 见 `app.stage.sprite_box`）；没算出来才退回
+    "按屏幕百分比"的示意图（老行为，保持兼容）。
     """
 
-    def __init__(self, parent=None, project_root=None, real_images=True):
+    def __init__(self, parent=None, project_root=None, real_images=True,
+                 screen=None):
         super().__init__(parent)
         self.setMinimumSize(STAGE_W // 2, STAGE_H // 2)
         self.setAutoFillBackground(False)
         self.project_root = project_root
         self.real_images = real_images
+        self.screen = tuple(screen) if screen else (1920, 1080)
         self._images: dict = {}
         self._loader = ThumbLoader(self, max_size=SPRITE_MAX,
                                    project_root=project_root)
@@ -57,6 +218,12 @@ class StageCanvas(QWidget):
         self._bg_pix = None
         #: 当前帧的立绘贴图：{序号: QPixmap}
         self._sprites: dict = {}
+        #: 当前帧立绘的**真实几何**（虚拟屏幕像素）：{序号: (left, top, w, h)}
+        self._boxes: dict = {}
+        #: **正在解码**的立绘序号（用来画"低调的加载中"，而不是亮蓝占位块）
+        self._loading: set = set()
+        #: 这一帧**脚本里写了、磁盘上找不到**的素材名（缺图要显眼地说出来）
+        self._missing: list = []
         self._layer_pix = None
 
     # ------------------------------------------------------------------
@@ -68,7 +235,7 @@ class StageCanvas(QWidget):
         try:
             self._loader.shutdown()
         except Exception:                    # noqa: BLE001
-            pass
+            swallow('stage_preview.shutdown')
 
     # ------------------------------------------------------------------
 
@@ -79,28 +246,100 @@ class StageCanvas(QWidget):
         self._bg_pix = None
         self._layer_pix = None
         self._sprites = {}
+        self._boxes = {}
+        self._loading = set()
+        self._missing = []
         self.update()
         if frame is None or not self.real_images:
             return
+        # 上一帧的贴图不再需要：把"还排在队里、没开始解"的那些丢掉
+        # （正在解的会跑完并进缓存，切回去就是命中）。不丢的话，一路播下去
+        # 会攒下几百张"没人再看"的图，白占线程池（见 `ThumbLoader` 的调度模型）。
+        # **但预取要留着** —— 那是下一两拍的图，丢了等于没预取（翻到那拍又要等）。
+        try:
+            self._loader.clear_pending(
+                keep=lambda slot: not _is_stale_frame_slot(slot, idx))
+        except Exception:                     # noqa: BLE001
+            swallow('stage_preview.show_frame')
         assets = resolve_frame_assets(
             frame, self._images, self.project_root,
             image_index(self.project_root))
-        w, h = self.width(), self.height()
+        self._missing = list(assets.get('missing') or ())
         if assets.get('bg') is not None:
             self._request(('bg', idx), str(assets['bg']), self._on_bg,
                           (STAGE_W, STAGE_H))
         for i, (s, path) in enumerate(assets.get('sprites') or []):
             if path is not None:
+                # 位置按项目 transform 的真实几何算；尺寸问图片的**原始像素**
+                # （只读文件头，快）—— 立绘大小 = 原图 × zoom，缺一不可。
+                size = natural_size(path, self.project_root)
+                box = sprite_box(s, size, self.screen)
+                if box is not None:
+                    self._boxes[i] = box
+                # 先记"正在解"再请求：`request` 在内存命中时会**同步**回调，
+                # 那一瞬间就要把它从"正在解"里划掉（见 `_on_sprite`）。
+                self._loading.add(i)
                 self._request(('sp', idx, i), str(path),
                               self._on_sprite(i),
-                              (SPRITE_MAX[0], int(STAGE_H * SPRITE_H_RATIO)))
+                              (SPRITE_MAX[0], SPRITE_MAX[1]))
         if assets.get('layers') is not None:
             self._request(('layer', idx), str(assets['layers']), self._on_layer,
                           (STAGE_W, STAGE_H))
-        _ = (w, h)
+
+    # ------------------------------------------------------------------
+
+    def missing_assets(self) -> list:
+        """这一帧**脚本里写了、磁盘上找不到**的素材名（横条上要显眼地写出来）。"""
+        return list(self._missing)
+
+    def prefetch_frame(self, frame, limit: int = 6):
+        """
+        把**下一拍**要用的图解进内存缓存（翻到它时 0 延迟，加载框也就看不见了）。
+
+        优先级是 `PRIORITY_BACKGROUND`：**预取永远不许挡住当前这一帧** ——
+        正在解的那几张先出图，空下来的线程才轮到预取。
+        """
+        if frame is None or not self.real_images:
+            return
+        try:
+            if self._prefetch_queued() > PREFETCH_QUEUE_LIMIT:
+                return
+        except Exception:                     # noqa: BLE001
+            swallow('stage_preview.prefetch_frame')
+        try:
+            assets = resolve_frame_assets(
+                frame, self._images, self.project_root,
+                image_index(self.project_root))
+        except Exception:                     # noqa: BLE001
+            return
+        jobs = []
+        if assets.get('bg') is not None:
+            jobs.append((str(assets['bg']), (STAGE_W, STAGE_H)))
+        for _s, path in (assets.get('sprites') or [])[:max(1, int(limit))]:
+            if path is not None:
+                jobs.append((str(path), (SPRITE_MAX[0], SPRITE_MAX[1])))
+        if assets.get('layers') is not None:
+            jobs.append((str(assets['layers']), (STAGE_W, STAGE_H)))
+        for path, size in jobs:
+            try:
+                self._loader.prefetch(path, size)
+            except Exception:                 # noqa: BLE001
+                swallow('stage_preview.prefetch_frame')
+
+    def _prefetch_queued(self) -> int:
+        n = 0
+        for slot in self._loader.queued():
+            if isinstance(slot, tuple) and slot and slot[0] == 'prefetch':
+                n += 1
+        return n
 
     def _request(self, slot, path, apply, size):
-        self._loader.request(slot, path, apply, max_size=size)
+        # `placeholder` **必须给**：不给的话 `ThumbLoader` 会拿 `apply(None)`
+        # 当"先画个骨架"，而这里的 `apply` 语义是"结果到了"（`pixmap=None`
+        # = 没解出来）。于是"正在解"会被立刻当成"解完了但没图" ——
+        # 加载中的标记一闪就没，画面上就还是那个占位框。
+        self._loader.request(slot, path, apply, max_size=size,
+                             placeholder=lambda: None)
 
     def _on_bg(self, pixmap, _path):
         self._bg_pix = pixmap
@@ -112,6 +351,7 @@ class StageCanvas(QWidget):
 
     def _on_sprite(self, i):
         def apply(pixmap, _path):
+            self._loading.discard(i)
             if pixmap is not None:
                 self._sprites[i] = pixmap
             self.update()
@@ -136,7 +376,8 @@ class StageCanvas(QWidget):
                 p.drawPixmap(0, 0, w, h, self._bg_pix)
             else:
                 color = resolve_solid_color(getattr(f, 'scene', ''),
-                                            self._images) if f else None
+                                            self._images,
+                                            self.project_root) if f else None
                 p.fillRect(0, 0, w, h,
                            QColor(color) if color else QColor(T.t('stage.letterbox')))
                 if f is not None and f.scene:
@@ -147,9 +388,27 @@ class StageCanvas(QWidget):
 
             # 2) 立绘：真图逐张；没有就占位块
             sprites = getattr(f, 'sprites', []) if f else []
+            k = w / max(1.0, float(self.screen[0]))     # 虚拟屏幕 → 控件
             base_y = h - 14
             for i, s in enumerate(sprites):
                 pix = self._sprites.get(i)
+                box = self._boxes.get(i)
+                if box is not None:
+                    # **真实几何**（项目 transform 算出来的）：位置与大小都按
+                    # 游戏里的像素来，超出画面的部分由控件裁掉（与游戏一致）
+                    left, top, bw, bh = box
+                    rect = (int(left * k), int(top * k),
+                            max(1, int(bw * k)), max(1, int(bh * k)))
+                    if pix is not None:
+                        p.drawPixmap(rect[0], rect[1], rect[2], rect[3], pix)
+                    else:
+                        self._draw_block(p, s, rect, loading=i in self._loading)
+                    if s.speaking:
+                        p.setPen(QPen(QColor(T.t('stage.speakingOutline')), 3))
+                        p.drawRect(*rect)
+                    continue
+                # 没有真实几何（transform 没解析出来 / 找不到原图尺寸）：
+                # 退回"按屏幕百分比"的示意图
                 x = int(max(0.0, min(1.0, s.x)) * w)
                 if pix is not None:
                     ph = int(h * SPRITE_H_RATIO)
@@ -159,7 +418,9 @@ class StageCanvas(QWidget):
                         p.setPen(QPen(QColor(T.t('stage.speakingOutline')), 3))
                         p.drawRect(x - pw // 2, base_y - ph, pw, ph)
                 else:
-                    self._draw_block(p, s, x, base_y)
+                    self._draw_block(p, s, (x - BLOCK_W // 2, base_y - BLOCK_H,
+                                            BLOCK_W, BLOCK_H),
+                                     loading=i in self._loading)
 
             if f is not None and not sprites:
                 p.setPen(QPen(QColor(T.t('stage.textDim'))))
@@ -170,7 +431,8 @@ class StageCanvas(QWidget):
             if self._layer_pix is not None:
                 p.drawPixmap(0, 0, w, h, self._layer_pix)
             elif f is not None and f.layers:
-                color = resolve_solid_color(f.layers, self._images)
+                color = resolve_solid_color(f.layers, self._images,
+                                            self.project_root)
                 if color:
                     p.fillRect(0, 0, w, h, QColor(color))
                 else:
@@ -179,30 +441,44 @@ class StageCanvas(QWidget):
                                     theme.font_pt('caption')))
                     p.drawText(w - 10, 18, f'图层：{f.layers}')
         except Exception:                    # noqa: BLE001 - paint 里绝不外抛
-            pass
+            swallow('stage_preview.paintEvent')
         finally:
             p.end()
 
-    def _draw_block(self, p, s, x, base_y):
-        """占位块：真图不可用时也要让"台上有人"看得出来。"""
+    def _draw_block(self, p, s, rect, loading: bool = False):
+        """
+        占位块：真图不可用时也要让"台上有人"看得出来（`rect` = 框）。
+
+        两种含义**必须分开画**（用户 2026-10-05："每次加载时……总会有一个蓝色框
+        当占位符一闪而过，影响观感"）：
+          · `loading=True`：图已经解析到、只是在解 —— 画得**越低调越好**
+            （深色底 + 几乎看不见的 1px 边，不写字），图到了就自然顶上来；
+          · `loading=False`：**磁盘上找不到这张图** —— 那就该显眼（亮蓝框 +
+            名字 + 站位），这是要用户去修的，不是"再等等"。
+        """
+        left, top, bw, bh = [int(v) for v in rect]
+        if loading:
+            p.setBrush(QColor(T.t('stage.loading')))
+            p.setPen(QPen(QColor(T.t('stage.loadingOutline')), 1))
+            p.drawRect(left, top, bw, bh)
+            return
         speaking = bool(getattr(s, 'speaking', False))
         fill = QColor(T.t('stage.speaking') if speaking
                       else T.t('stage.placeholder'))
         outline = QColor(T.t('stage.speakingOutline') if speaking
                          else T.t('stage.placeholderOutline'))
-        bw = BLOCK_W // 2
         p.setBrush(fill)
         p.setPen(QPen(outline, 3 if speaking else 1))
-        p.drawRect(x - bw, base_y - BLOCK_H, BLOCK_W, BLOCK_H)
+        p.drawRect(left, top, bw, bh)
         p.setPen(QPen(QColor(T.t('stage.text'))))
         p.setFont(QFont(theme.font_family(), theme.font_pt('caption')))
         label = getattr(s, 'label', '') or ''
-        p.drawText(x - bw + 4, base_y - BLOCK_H + 4, BLOCK_W - 8, BLOCK_H - 8,
+        p.drawText(left + 4, top + 4, max(8, bw - 8), max(8, bh - 8),
                    Qt.AlignCenter | Qt.TextWordWrap, label)
         dim = getattr(s, 'tag', '') + (f' @ {s.at}' if getattr(s, 'at', '')
                                        else '')
         p.setPen(QPen(QColor(T.t('stage.textDim'))))
-        p.drawText(x - bw, base_y + 2, BLOCK_W, 16, Qt.AlignHCenter, dim)
+        p.drawText(left, top + bh + 2, max(40, bw), 16, Qt.AlignHCenter, dim)
 
 
 class StagePreviewWindow(QDialog):
@@ -214,7 +490,8 @@ class StagePreviewWindow(QDialog):
     """
 
     def __init__(self, parent=None, frames=None, title: str = '舞台演出预览',
-                 registry=None, project_root=None, real_images: bool = True):
+                 registry=None, project_root=None, real_images: bool = True,
+                 screen=None, sound: bool = True, player_factory=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         theme.apply_to(self)
@@ -223,9 +500,16 @@ class StagePreviewWindow(QDialog):
         self.idx = 0
         self._playing = False
         self._images = getattr(registry, 'images', {}) or {}
+        self._registry = registry
         self._project_root = project_root
         self._real = bool(real_images)
         self._only_changed = False
+        #: 真实舞台几何（游戏分辨率）：transform 的像素值按它归一化
+        from storygraph.story.atl import DEFAULT_SCREEN, project_screen
+        self._screen = tuple(screen) if screen else (
+            project_screen(project_root) if project_root else DEFAULT_SCREEN)
+        self._audio = StageAudio(project_root, registry=registry,
+                                 enabled=sound, player_factory=player_factory)
         self._build()
         self._timer = QTimer(self)
         self._timer.setInterval(PLAY_MS)
@@ -241,7 +525,8 @@ class StagePreviewWindow(QDialog):
                                 T.SPACE['sm'], T.SPACE['sm'])
         root.setSpacing(T.SPACE['xs'])
 
-        self._canvas = StageCanvas(self, project_root=self._project_root)
+        self._canvas = StageCanvas(self, project_root=self._project_root,
+                                   screen=self._screen)
         self._canvas._images = self._images
         self._canvas.real_images = self._real
         self._canvas.setFixedSize(STAGE_W, STAGE_H)
@@ -302,6 +587,15 @@ class StagePreviewWindow(QDialog):
         self._real_cb.setChecked(True)
         self._real_cb.toggled.connect(self._on_real)
         bar.addWidget(self._real_cb)
+        # 声音：默认开（用户 2026-10-05："bgm 未被实际播放"）——
+        # 但给一个开关，免得预览一开就出声吓人。
+        self._sound_cb = QCheckBox('🔊 声音')
+        self._sound_cb.setChecked(True)
+        self._sound_cb.setToolTip(
+            '按这一拍的 BGM / 音效 / 语音真的放出来（走系统音频设备）。\n'
+            'BGM 是持续状态：没换曲就继续放；音效/语音换到那一拍响一次。')
+        self._sound_cb.toggled.connect(self._on_sound)
+        bar.addWidget(self._sound_cb)
         self._only_cb = QCheckBox('只看有变化的拍')
         self._only_cb.toggled.connect(self._on_only)
         bar.addWidget(self._only_cb)
@@ -325,21 +619,64 @@ class StagePreviewWindow(QDialog):
         self.idx = idx
         f = self.frames[idx]
         self._canvas.show_frame(f, idx)
+        # 声音：BGM 持续、音效/语音一次性（同一帧重画不重放 —— 见 StageAudio）
+        cues = {}
+        try:
+            cues = self._audio.set_frame(
+                f, key=(getattr(f, 'line_id', ''), idx)) or {}
+        except Exception:                     # noqa: BLE001 - 放不出声不影响画面
+            cues = {}
         self._who.setText(f.speaker or '　')
         self._dlg.setText(f.text or '（这一拍没有台词）')
-        self._summary.setText(self._summary_text(f))
+        self._summary.setText(self._summary_text(f, cues))
         self._pos.setText(f'{idx + 1} / {len(self.frames)}')
         self._jump.setValue(idx + 1)
         self._prev.setEnabled(idx > 0)
         self._next.setEnabled(idx < len(self.frames) - 1)
+        # 下一两拍的图先解起来（翻过去就是内存命中，不再有"加载框一闪"）
+        self._prefetch_neighbours(idx)
 
-    def _summary_text(self, f) -> str:
-        """本拍变化清单（与「舞台快照」表同一份文字）。"""
+    def _prefetch_neighbours(self, idx: int):
+        for step in range(1, PREFETCH_AHEAD + 1):
+            j = idx + step
+            if j >= len(self.frames):
+                break
+            try:
+                self._canvas.prefetch_frame(self.frames[j])
+            except Exception:                 # noqa: BLE001
+                swallow('stage_preview._prefetch_neighbours')
+
+    def _summary_text(self, f, cues=None) -> str:
+        """
+        横条上的说明：本拍变化清单（与「舞台快照」表同一份文字）
+        + **缺什么**（缺图 / 缺音频 / 音频是近似匹配）。
+
+        用户 2026-10-05：
+
+        > 这个你确定 bgm 导入了吗？背景导入了吗？是否正确呢？查询一下，
+        > 因为我这里没有声音……
+
+        以前"没解析出来"是**静默**的（界面上一片黑、一点声都没有，用户只能猜）。
+        现在把原因写在脸上：哪张图没找到、哪个音频没找到、近似匹配到了谁。
+        """
         from storygraph.app.stage import frame_summary
         try:
-            return frame_summary(f)
+            base = frame_summary(f) if f is not None else ''
         except Exception:                    # noqa: BLE001
-            return ''
+            base = ''
+        extra = [str(n) for n in ((cues or {}).get('notes') or ())]
+        try:
+            miss = self._canvas.missing_assets()
+        except Exception:                    # noqa: BLE001
+            miss = []
+        if miss:
+            extra.append('⚠ 缺图：' + '、'.join(miss))
+        note = self._audio.note() if self._sound_cb.isChecked() else ''
+        if note:
+            extra.append(f'（声音：{note}）')
+        if not extra:
+            return base
+        return (base + '\n' if base else '') + '\n'.join(extra)
 
     # ------------------------------------------------------------------
 
@@ -374,6 +711,34 @@ class StagePreviewWindow(QDialog):
     def _on_real(self, checked: bool):
         self._canvas.real_images = bool(checked)
         self.show_frame(self.idx)
+
+    def _on_sound(self, checked: bool):
+        """
+        声音开关：开=开始按拍放；关=立刻停（不残留上一首 BGM）。
+
+        注意：**关掉声音不等于"没有缺资源"** —— 所以这一拍该有的提示
+        （缺文件 / 近似匹配）照样算出来写在横条上：那是脚本的问题，
+        跟这个开关无关（用户 2026-10-05 就是靠这条才发现 BGM 名字对不上）。
+        """
+        self._audio.set_enabled(bool(checked))
+        if not self.frames:
+            return
+        f = self.frames[self.idx]
+        if checked:
+            try:                              # 重新放当前这一拍该有的声音
+                cues = self._audio.set_frame(f, key=None) or {}
+            except Exception:                 # noqa: BLE001
+                cues = {}
+        else:
+            cues = self._cues_for(f)
+        self._summary.setText(self._summary_text(f, cues))
+
+    def _cues_for(self, f) -> dict:
+        """**只算**这一拍的声音提示（不放声）—— 给横条显示用。"""
+        try:
+            return stage_audio_cues(f, self._registry, self._project_root) or {}
+        except Exception:                     # noqa: BLE001
+            return {}
 
     def _on_only(self, checked: bool):
         """
@@ -419,20 +784,25 @@ class StagePreviewWindow(QDialog):
     def closeEvent(self, event):
         self.stop_play()
         try:
+            self._audio.stop()             # 关窗必须停声（否则 BGM 会一直响）
+        except Exception:                   # noqa: BLE001
+            swallow('stage_preview.closeEvent')
+        try:
             self._canvas.shutdown()
         except Exception:                    # noqa: BLE001
-            pass
+            swallow('stage_preview.closeEvent')
         super().closeEvent(event)
 
 
 def open_preview(parent, frames, registry=None, project_root=None,
-                 real_images: bool = True, title: str = '舞台演出预览'):
+                 real_images: bool = True, title: str = '舞台演出预览',
+                 sound: bool = True):
     """打开预览窗口（非模态，开着也能回去改卡片）。"""
     win = StagePreviewWindow(parent, frames, title=title, registry=registry,
                              project_root=project_root,
-                             real_images=real_images)
+                             real_images=real_images, sound=sound)
     win.show()
     return win
 
 
-__all__ = ['StageCanvas', 'StagePreviewWindow', 'open_preview']
+__all__ = ['StageAudio', 'StageCanvas', 'StagePreviewWindow', 'open_preview']

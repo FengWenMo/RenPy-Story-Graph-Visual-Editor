@@ -1,17 +1,17 @@
 """
 storygraph.ui_qt.theme
 ======================
-Qt 版的**主题唯一真源**：把 `ui/tokens.py` 翻译成 Qt StyleSheet（QSS）。
+Qt 版的**主题唯一真源**：把 `ui_qt/tokens.py` 翻译成 Qt StyleSheet（QSS）。
 
 为什么不是直接抄一份颜色：项目契约是"界面代码**不许写死**色值/字号"，
-tkinter 版遵守它（都走 `ui.tokens`），Qt 版也必须遵守 ——
-所以这里**只读取** `ui.tokens`，一个真源、两套界面。
+所以这里**只读取** `ui_qt.tokens`，一个真源、一处修改。
 主题切换（light/dark）也因此天然跟着走（`tokens` 本来就是两套）。
 """
 
 from __future__ import annotations
 
-from storygraph.ui import tokens as T
+from storygraph.core.safeguard import swallow
+from storygraph.ui_qt import tokens as T
 
 
 def t(name: str) -> str:
@@ -123,6 +123,8 @@ QLabel[role="section"] {{
 }}
 QLabel[role="caption"] {{ color: {c('text.tertiary')}; }}
 QLabel[role="note"] {{ color: {c('text.secondary')}; }}
+/* 「有未保存的改动」/ 台词超长：用警示色，但**不抢眼到像报错** */
+QLabel[role="warn"] {{ color: {c('state.warning')}; }}
 
 /* ---------- 立绘卡 ---------- */
 QFrame[role="spriteCard"] {{
@@ -227,4 +229,4 @@ def apply_to(widget):
     try:
         widget.setStyleSheet(qss())
     except Exception:                        # noqa: BLE001
-        pass
+        swallow('theme.apply_to')

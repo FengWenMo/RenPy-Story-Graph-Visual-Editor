@@ -69,7 +69,8 @@ class CompileResult:
 
 
 def compile_beats(beats: list, registry=None, symbols=None,
-                  label_name=None) -> CompileResult:
+                  label_name=None, include_transforms: bool = True
+                  ) -> CompileResult:
     """
     Beat 列表 → 编译结果。
 
@@ -106,7 +107,8 @@ def compile_beats(beats: list, registry=None, symbols=None,
             })
 
     rpy_text = render_beats_to_rpy(beats, label_name=label_name,
-                                   registry=registry, symbols=symbols)
+                                   registry=registry, symbols=symbols,
+                                   include_transforms=include_transforms)
     labels = []
     for ln in rpy_text.splitlines():
         if ln.startswith('label '):

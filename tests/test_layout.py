@@ -143,3 +143,44 @@ class TestLayoutRobustness:
             g.add_edge(l, sink)
         coords = _layers(g)
         assert coords[root][0] < coords[sink][0]
+
+
+class TestLayoutSpacing:
+    """
+    间距是**调用方给的**（前端按节点尺寸算出来，见
+    `ui_qt.graph_canvas._layout_gaps`）。布局器必须照用，而且不许
+    自己再动坐标 —— 这里钉住两条真实事故。
+    """
+
+    def test_custom_gaps_are_respected(self):
+        """给定间距必须原样生效（否则改节点尺寸时排版会重叠）。"""
+        g = Graph()
+        a = g.add_node('a', 0, 0)
+        leaves = [g.add_node(f'l{i}', 0, 0) for i in range(4)]
+        for l in leaves:
+            g.add_edge(a, l)
+        layout_graph(g, layer_gap=300, node_gap=150)
+        ys = sorted(g.nodes[l].y for l in leaves)
+        assert all(b - x >= 150 for x, b in zip(ys, ys[1:])), ys
+        assert all(g.nodes[l].x - g.nodes[a].x == 300 for l in leaves)
+
+    def test_self_loop_does_not_shift_the_node(self):
+        """
+        自环**不许**给节点加偏移。
+
+        旧实现把带自环的节点沿 y 推 `node_gap * 0.5`，本意是给自环腾地方，
+        实际正好把它推到同层邻居身上（同层间距就是 node_gap，推半格
+        = 压掉一半）。真实项目 51 个块里有 3 对因此重叠 ——
+        用户看到的"一堵糊在一起的小方块墙"就是这么来的。
+        """
+        g = Graph()
+        a = g.add_node('a', 0, 0)
+        b = g.add_node('b', 0, 0)
+        c = g.add_node('c', 0, 0)
+        g.add_edge(a, b)
+        g.add_edge(a, c)
+        g.add_edge(b, b)                 # b 带自环
+        layout_graph(g, layer_gap=300, node_gap=150)
+        ys = sorted((g.nodes[b].y, g.nodes[c].y))
+        assert ys[1] - ys[0] >= 150, \
+            f'自环把节点推到了同层邻居身上：y = {ys}'

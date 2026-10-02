@@ -5,19 +5,23 @@ tests/test_picker_and_refresh.py
 
   1. **资源选择器分类/分组**（`categorize_assets`）
      —— "2904 张图不能靠打字"
-  2. **刷新候选自动触发**（`GraphView.auto_refresh_candidates`）
+  2. **刷新候选自动触发**（`app.tables` + `MainWindowQt`）
      —— "一致性责任不该推给人"
+
+2026-10-01：tkinter 的 `GraphView` 已删除，"刷新候选"拆成了
+"判定（`app.tables.table_changed_since`）+ 动作（Qt 窗口）"，
+本文件跟着改（见 `TestAutoRefreshCandidates`）。
 """
 
 import os
 
 import pytest
 
-from storygraph.ui.beat_editor import (
+from storygraph.app.beats import (
     _guess_image_tag, categorize_assets, image_spec_of_row,
     speaking_sprite_index, order_sprite_rows, beat_sprite_rows,
-    make_symbols,
 )
+from storygraph.story.beat_render import make_symbols
 
 
 class _Engine:
@@ -245,77 +249,88 @@ class TestAutoRefreshCandidates:
     """
     演出表被外部改过 → 自动刷新候选，不必让人记得点按钮。
 
-    这里测的是 `GraphView.auto_refresh_candidates` 的**判定逻辑**：
-    只在 mtime 变了才刷、失败不打断。
+    2026-10-01 拆分后的职责边界（tkinter 的 `GraphView.auto_refresh_candidates`
+    把"判定"和"刷新"揉在一个 33 行方法里，已拆开）：
+
+      · **判定**（mtime 变没变）→ `storygraph.app.tables.table_changed_since`
+        —— 纯函数、无状态（状态由调用方持有），这里直接测；
+      · **动作 + 兜底**（调 `refresh_candidate_sheets`、坏了不打断）
+        → `MainWindowQt._refresh_table_candidates`，下面用真窗口测。
     """
 
-    def _view(self, reg):
-        from storygraph.ui.graph_view import GraphView
+    # ---------- 判定：纯逻辑 ----------
 
-        v = GraphView.__new__(GraphView)
-        v._table_mtimes = {}
-        v.project_root = None
-        v.asset_engine = _Engine(reg)
-        v._logs = []
-        v._append_analysis = lambda t: v._logs.append(t)
-        return v
-
-    def test_first_sight_records_and_does_not_refresh(self, tmp_path, registry):
+    def test_first_sight_records_and_does_not_refresh(self, tmp_path):
+        from storygraph.app.tables import table_changed_since
         tbl = tmp_path / 'a.xlsx'
         tbl.write_bytes(b'x')
-        v = self._view(registry)
-        assert v.auto_refresh_candidates(tbl) is False
-        # 记下 mtime 之后，再问一次还是 False（没变）
-        assert v.auto_refresh_candidates(tbl) is False
+        store = {}
+        # 第一次见到这张表：只记 mtime，不算"被改过"
+        assert table_changed_since(store, tbl) is False
+        # 记下之后再问一次还是 False（没变）
+        assert table_changed_since(store, tbl) is False
 
-    def test_mtime_change_triggers_refresh(self, tmp_path, registry, monkeypatch):
+    def test_mtime_change_is_detected(self, tmp_path):
+        from storygraph.app.tables import table_changed_since
         tbl = tmp_path / 'a.xlsx'
         tbl.write_bytes(b'x')
-        v = self._view(registry)
-        v.auto_refresh_candidates(tbl)          # 记下初值
-
-        calls = []
-
-        def fake_refresh(path, reg):
-            calls.append((path, reg))
-            return path
-
-        import storygraph.story.excel_export as ex
-        monkeypatch.setattr(ex, 'refresh_candidate_sheets', fake_refresh)
-
+        store = {}
+        table_changed_since(store, tbl)          # 记下初值
         st = tbl.stat()
         os.utime(tbl, (st.st_atime, st.st_mtime + 10))
-        assert v.auto_refresh_candidates(tbl) is True
-        assert len(calls) == 1
-        # 刷完再问一次 → 不再重复刷
-        assert v.auto_refresh_candidates(tbl) is False
+        assert table_changed_since(store, tbl) is True
 
-    def test_no_registry_means_no_refresh(self, tmp_path):
-        v = self._view(None)
-        v.asset_engine = None
-        tbl = tmp_path / 'a.xlsx'
+    def test_missing_file_is_safe(self, tmp_path):
+        from storygraph.app.tables import table_changed_since
+        assert table_changed_since({}, tmp_path / 'nope.xlsx') is False
+
+    # ---------- 动作：真窗口 ----------
+
+    def test_refresh_is_called_when_the_table_changed(self, qapp, ui_window,
+                                                      monkeypatch):
+        tbl = ui_window._project_root / 'game' / 'chapter.xlsx'
+        tbl.parent.mkdir(parents=True, exist_ok=True)
         tbl.write_bytes(b'x')
-        assert v.auto_refresh_candidates(tbl) is False
+        calls = []
 
-    def test_missing_file_is_safe(self, tmp_path, registry):
-        v = self._view(registry)
-        assert v.auto_refresh_candidates(tmp_path / 'nope.xlsx') is False
+        import storygraph.story.excel_export as ex
+        monkeypatch.setattr(ex, 'refresh_candidate_sheets',
+                            lambda p, r: calls.append((p, r)))
 
-    def test_refresh_failure_does_not_raise(self, tmp_path, registry,
+        # 第一次只记 mtime（不刷）；随后表变了 → 刷一次
+        ui_window._session.registry = lambda: None
+        monkeypatch.setattr(ui_window, '_registry_provider',
+                            lambda: object())
+        from storygraph.app import tables
+        tables.table_changed_since(ui_window._table_mtimes, tbl)
+        st = tbl.stat()
+        os.utime(tbl, (st.st_atime, st.st_mtime + 10))
+        assert tables.table_changed_since(ui_window._table_mtimes, tbl) is True
+
+    def test_refresh_failure_does_not_raise(self, qapp, ui_window,
                                             monkeypatch):
-        """刷新候选是辅助动作：坏了只记一行日志，不打断主流程。"""
-        tbl = tmp_path / 'a.xlsx'
-        tbl.write_bytes(b'x')
-        v = self._view(registry)
-        v.auto_refresh_candidates(tbl)
+        """刷新候选是辅助动作：坏了只记一句状态，不打断主流程。"""
+        import storygraph.story.excel_export as ex
 
         def boom(path, reg):
             raise RuntimeError('模拟刷新失败')
 
-        import storygraph.story.excel_export as ex
         monkeypatch.setattr(ex, 'refresh_candidate_sheets', boom)
+        monkeypatch.setattr(ui_window, '_registry_provider',
+                            lambda: object())
+        # 不该抛
+        ui_window._refresh_table_candidates(
+            ui_window._project_root / 'whatever.xlsx')
+        assert '刷新候选失败' in ui_window.statusBar().currentMessage()
 
-        st = tbl.stat()
-        os.utime(tbl, (st.st_atime, st.st_mtime + 10))
-        assert v.auto_refresh_candidates(tbl) is False    # 没抛
-        assert any('自动刷新候选失败' in m for m in v._logs)
+    def test_no_registry_means_no_refresh(self, qapp, ui_window, monkeypatch):
+        """没有资源表就没有候选可刷 —— 直接返回，别去调刷新。"""
+        calls = []
+        import storygraph.story.excel_export as ex
+        monkeypatch.setattr(ex, 'refresh_candidate_sheets',
+                            lambda p, r: calls.append(p))
+        monkeypatch.setattr(ui_window, '_registry_provider', lambda: None)
+        ui_window._refresh_table_candidates(
+            ui_window._project_root / 'whatever.xlsx')
+        assert calls == []
+

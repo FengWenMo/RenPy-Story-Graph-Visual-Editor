@@ -27,13 +27,22 @@ class Node:
         return result
 
 class Edge:
-    def __init__(self, edge_id, from_id, to_id, etype="jump", condition="", option_text=""):
+    def __init__(self, edge_id, from_id, to_id, etype="jump", condition="",
+                 option_text="", from_clause=""):
         self.id = edge_id
         self.from_id = from_id
         self.to_id = to_id
         self.type = etype
         self.condition = condition
         self.option_text = option_text
+        #: `call X from Y` 里的 `Y`（空 = 没写 from）。
+        #:
+        #: 为什么要存它（用户 2026-10-05）：
+        #: > 先修复子句会丢的问题。
+        #: `from` 是 Ren'Py 的"存档点标识"：同一个 label 被多个地方 call 时，
+        #: 靠它区分存档属于哪一处调用。丢了它，导出的脚本语义等价但**存档
+        #: 兼容性变了**（老存档会因为找不到 `_call_xxx` 而回滚到上一个 label）。
+        self.from_clause = from_clause
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -45,6 +54,7 @@ class Edge:
         result.type = self.type
         result.condition = self.condition
         result.option_text = self.option_text
+        result.from_clause = getattr(self, 'from_clause', '')
         return result
 
 class Graph:
@@ -53,11 +63,23 @@ class Graph:
         self.edges = {}
         self.next_node_id = 1
         self.next_edge_id = 1
+        #: 这张图是不是"**控制流图**"（只由 call/jump/menu/条件 组成，
+        #: 没有演出语句）？由**导入时的内容判据**设定，见
+        #: EditorSession.import_chapters。
+        #:
+        #: 为什么必须有这个字段（用户 2026-10-05）：
+        #: > 要是有人非要以 A_control 这种标签起名怎么办？……不得是变成保留字，
+        #: > 因为你不能阻拦用户起什么名。
+        #: 上一版靠"节点名是否以 _control 结尾"猜，用户一旦把章节命名成
+        #: A_control 就会被误判。现在改成**内容判据 + 显式标志**，
+        #: 名字完全不参与判断。
+        self.control_flow = False
 
     def copy(self):
         g = Graph()
         g.next_node_id = self.next_node_id
         g.next_edge_id = self.next_edge_id
+        g.control_flow = bool(getattr(self, 'control_flow', False))
         for nid, node in self.nodes.items():
             g.nodes[nid] = copy.deepcopy(node)
         for eid, edge in self.edges.items():
@@ -77,10 +99,12 @@ class Graph:
         self.nodes[nid] = node
         return nid
 
-    def add_edge(self, from_id, to_id, etype="jump", condition="", option_text=""):
+    def add_edge(self, from_id, to_id, etype="jump", condition="",
+                 option_text="", from_clause=""):
         eid = self.next_edge_id
         self.next_edge_id += 1
-        edge = Edge(eid, from_id, to_id, etype, condition, option_text)
+        edge = Edge(eid, from_id, to_id, etype, condition, option_text,
+                    from_clause)
         self.edges[eid] = edge
         return eid
 

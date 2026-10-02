@@ -796,7 +796,7 @@ class TestParticipants:
         return _E(reg)
 
     def test_participants_ranked_by_dialogue_count(self):
-        from storygraph.ui.beat_editor import participants
+        from storygraph.app.beats import participants
         eng = self._engine({
             'a': {'ID': 'a', '_dialogue_count': 3},
             'b': {'ID': 'b', '_dialogue_count': 9},
@@ -805,23 +805,31 @@ class TestParticipants:
         assert participants(eng) == ['b', 'a', 'c']
 
     def test_participants_limit(self):
-        from storygraph.ui.beat_editor import participants
+        from storygraph.app.beats import participants
         eng = self._engine({f'c{i}': {'ID': f'c{i}'} for i in range(20)})
         assert len(participants(eng, limit=5)) == 5
 
     def test_participants_without_engine(self):
-        from storygraph.ui.beat_editor import participants
+        from storygraph.app.beats import participants
         assert participants(None) == []
 
     def test_editor_window_exposes_new_actions(self):
-        import storygraph.ui.beat_editor as beat_editor
-        cls = beat_editor.ScriptTableEditorWindow
-        for name in ('next_beat', 'show_health', '_refresh_participants'):
-            assert hasattr(cls, name)
+        """
+        Qt 主窗口必须把这一章真正要用的动作都露出来
+        （tkinter 的 `ScriptTableEditorWindow` 已删除，对应物是 `MainWindowQt`）。
+        """
+        from storygraph.ui_qt.main_window import MainWindowQt
+        for name in ('next_beat', 'prev_beat', 'show_health',
+                     'save_current_beat', 'undo_current_beat'):
+            assert hasattr(MainWindowQt, name), f'主窗口缺少 {name}'
 
-    def test_panel_has_stage_snapshot(self):
-        import storygraph.ui.beat_editor as beat_editor
-        assert hasattr(beat_editor.BeatEditorPanel, 'set_stage_snapshot')
+    def test_card_has_stage_snapshot_support(self):
+        """
+        「看到这时台上是谁、在哪、放什么音乐」——这条能力现在住在
+        `app.stage.build_frames`（框架无关），前端只负责画。
+        """
+        from storygraph.app.stage import build_frames, frame_summary
+        assert callable(build_frames) and callable(frame_summary)
 
 
 class TestHealthEntry:
@@ -865,9 +873,10 @@ class TestHealthEntry:
         assert not collected2['report'].ok
         assert any(i.code == 'E102' for i in collected2['report'].errors)
 
-    def test_graph_view_has_validation_panel(self):
-        import storygraph.ui.graph_view as graph_view
-        assert hasattr(graph_view.GraphView, 'open_validation_panel')
+    def test_health_panel_is_reachable(self):
+        """体检入口必须在（tkinter 的 `open_validation_panel` → Qt 的 `show_health`）。"""
+        from storygraph.ui_qt.main_window import MainWindowQt
+        assert hasattr(MainWindowQt, 'show_health')
 
 
 class TestRoundTripFidelity:
@@ -1293,6 +1302,130 @@ class TestCollabStore:
                      '--user', 'bob'])
         assert code == 1
         assert '冲突' in capsys.readouterr().out
+
+
+class TestBranchConditionsAreLogicallyCorrect:
+    """
+    条件分支的**逻辑**必须正确（用户 2026-10-03："我那个存在条件选择分支，
+    请确保逻辑正确"）。
+
+    两条真实缺陷（都在这一轮修掉）：
+
+      · `if a: … elif b: …` 的第 2 条边只写了 `b`，**漏了"a 没走"** ——
+        条件比实际宽：图上标签误导人，按图导出会把 `elif` 写成错的判断；
+      · `menu` 里带条件的选项要把选项文字和条件**分别**带出来
+        （文字进 `option_text`、条件进 `condition`），否则图上只看到一个。
+    """
+
+    SRC = (
+        'label hub:\n'
+        '    menu:\n'
+        '        "去图书馆" if love >= 5:\n'
+        '            jump library\n'
+        '        "回家":\n'
+        '            jump home\n'
+        '\n'
+        'label library:\n'
+        '    if score > 3:\n'
+        '        jump good_end\n'
+        '    elif score > 1:\n'
+        '        jump mid_end\n'
+        '    else:\n'
+        '        jump bad_end\n'
+        '\n'
+        'label home:\n'
+        '    return\n'
+        'label good_end:\n'
+        '    return\n'
+        'label mid_end:\n'
+        '    return\n'
+        'label bad_end:\n'
+        '    return\n'
+    )
+
+    @staticmethod
+    def _edges(write_rpy, src=None):
+        from storygraph.parsing.renpy_parser import batch_import_chapters
+
+        fp = write_rpy(src or TestBranchConditionsAreLogicallyCorrect.SRC,
+                       'branch.rpy')
+        g = Graph()
+        batch_import_chapters([fp], g)
+        name = {nid: n.label_name for nid, n in g.nodes.items()}
+        return {(name.get(e.from_id), name.get(e.to_id)): e
+                for e in g.edges.values()}
+
+    def test_menu_option_text_and_condition_are_separate(self, write_rpy):
+        edges = self._edges(write_rpy)
+        e = edges[('hub', 'library')]
+        assert e.option_text == '去图书馆', e.option_text
+        assert e.condition == 'love >= 5', e.condition
+        # 没写条件的选项：文字在，条件空（不是"无条件=空"搞混）
+        assert edges[('hub', 'home')].option_text == '回家'
+        assert edges[('hub', 'home')].condition == ''
+
+    def test_elif_excludes_the_earlier_branch(self, write_rpy):
+        """`elif` 的边必须隐含"前面的条件不成立"。"""
+        cond = self._edges(write_rpy)[('library', 'mid_end')].condition
+        assert 'score > 1' in cond, cond
+        assert 'not' in cond and 'score > 3' in cond, \
+            f'elif 漏了"前面的分支没走"：{cond}'
+
+    def test_else_is_de_morgan_of_all_previous(self, write_rpy):
+        cond = self._edges(write_rpy)[('library', 'bad_end')].condition
+        assert 'not' in cond and 'score > 3' in cond and 'score > 1' in cond, cond
+
+    def test_first_branch_condition_is_untouched(self, write_rpy):
+        cond = self._edges(write_rpy)[('library', 'good_end')].condition
+        assert cond == 'score > 3', cond
+
+    def test_conditions_decide_the_right_branch(self, write_rpy):
+        """
+        用**区间分析**验证：给定 score 的取值，只有对的分支走得通。
+
+        这是"逻辑正确"最硬的判据 —— 不是看字符串像不像，而是看
+        `apply_condition` 在具体取值下判不判它可行。
+
+        注意一处**已知的保守**（`analysis._ast_apply_cond` 的 D2）：
+        "否定下的 And/Or" 不做 De Morgan 化，直接放行 —— 所以
+        `not ((score > 3) or (score > 1))` 这种 else 条件，分析器**不敢**
+        判它不可行。这是安全方向的保守（宁可不报"不可达"，也不误报），
+        所以下面只断言"能判的那些"，不假装它能判 else。
+        """
+        from storygraph.graph.analysis import (ValueRange, VariableState,
+                                               apply_condition)
+        edges = self._edges(write_rpy)
+
+        def possible(target, score):
+            state = VariableState(['score'])
+            state.ranges['score'] = ValueRange(score, score)
+            cond = edges[('library', target)].condition
+            return apply_condition(state, cond) is not None
+
+        # 该走的分支一定走得通
+        assert possible('good_end', 5) is True
+        assert possible('mid_end', 2) is True
+        # 比较类条件能判死：score=5 时 elif 的 "not (score>3)" 被满足不了
+        assert possible('mid_end', 5) is False, 'score=5 不该走到 elif 分支'
+        assert possible('good_end', 2) is False, 'score=2 不该走 if 分支'
+        assert possible('good_end', 0) is False
+        # else 的否定式条件：分析器保守（D2），这里明确记录这个已知限制
+        assert possible('bad_end', 0) is True
+        assert possible('bad_end', 5) is True, \
+            '分析器对"否定下的 Or"是保守的（安全方向），不是条件写错'
+
+    def test_menu_condition_gates_the_option(self, write_rpy):
+        """`menu` 选项上的条件同样要能挡住不该走的分支。"""
+        from storygraph.graph.analysis import (ValueRange, VariableState,
+                                               apply_condition)
+        edges = self._edges(write_rpy)
+        e = edges[('hub', 'library')]
+        low = VariableState(['love'])
+        low.ranges['love'] = ValueRange(0, 0)
+        high = VariableState(['love'])
+        high.ranges['love'] = ValueRange(9, 9)
+        assert apply_condition(low, e.condition) is None, 'love=0 不该能选这一项'
+        assert apply_condition(high, e.condition) is not None
 
 
 # ------------------------------------------------------------------

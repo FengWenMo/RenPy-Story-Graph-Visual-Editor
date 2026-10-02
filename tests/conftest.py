@@ -5,14 +5,22 @@ pytest 全局夹具。
 
 职责：
   · 把项目根目录加入 sys.path（源码是 `storygraph` 包，放在项目根下）
-  · 在无 GUI 环境下为 tkinter 提供桩（**迁移期**：只有 `storygraph.ui.*`
-    与尚未迁完的旧界面还需要它；后端已改为走 `storygraph.app.notify`）
-  · 提供 `notify_calls`：后端通知端口的捕获夹具（**新的推荐断言方式**）
+  · 提供 `notify_calls`：后端通知端口的捕获夹具（断言后端"报了什么"）
   · 提供写 .rpy 临时文件的工厂 fixture
+
+历史（2026-10-01）
+------------------
+这里曾经有 80 行 **tkinter 桩**。它存在的原因值得记下来：后端
+（`graph.commands` / `pipeline.renpy_exporter` / `graph.editor_utils`）
+为了弹一个"没有可撤销的操作"而 `import tkinter.messagebox`，
+于是无头环境下**连 import 都过不去**，只能在测试里造假模块兜着。
+
+现在后端只走 `storygraph.app.notify`（只汇报事实、不弹窗），
+`storygraph/ui/` 整个包也已删除 —— 桩没有存在意义了。**故意不留**
+"以防万一"的桩：真有人再往核心里塞 UI 依赖，这里就该当场炸。
 """
 
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -20,100 +28,11 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-
-# ------------------------------------------------------------------
-#  tkinter 桩
-# ------------------------------------------------------------------
-
-def _install_tkinter_stub():
-    """无头环境下用桩替换 tkinter，避免 ImportError。"""
-    if 'tkinter' in sys.modules:
-        return
-
-    calls = {'info': [], 'error': [], 'warning': [], 'yesno': []}
-
-    def _record(kind):
-        def _fn(title, message, *args, **kwargs):
-            calls[kind].append((title, message))
-            return None
-        return _fn
-
-    tk = types.ModuleType('tkinter')
-    tk.Tk = object
-    tk.Toplevel = object
-    tk.Frame = object
-    tk.Canvas = object
-    tk.Label = object
-    tk.Button = object
-    tk.Entry = object
-    tk.Listbox = object
-    tk.Scrollbar = object
-    tk.Checkbutton = object
-    tk.OptionMenu = object
-    tk.Text = object
-    tk.StringVar = object
-    tk.IntVar = object
-    tk.BooleanVar = object
-    tk.END = 'end'
-    tk.LEFT = 'left'
-    tk.RIGHT = 'right'
-    tk.TOP = 'top'
-    tk.BOTH = 'both'
-    tk.Y = 'y'
-    tk.X = 'x'
-    tk.NORMAL = 'normal'
-    tk.DISABLED = 'disabled'
-    tk.SINGLE = 'single'
-    tk.EXTENDED = 'extended'
-    tk.W = 'w'
-    tk.VERTICAL = 'vertical'
-
-    messagebox = types.ModuleType('tkinter.messagebox')
-    messagebox.showinfo = _record('info')
-    messagebox.showerror = _record('error')
-    messagebox.showwarning = _record('warning')
-    messagebox.askyesno = _record('yesno')
-    messagebox._calls = calls
-
-    filedialog = types.ModuleType('tkinter.filedialog')
-    filedialog.askopenfilename = lambda *a, **k: ''
-    filedialog.asksaveasfilename = lambda *a, **k: ''
-    filedialog.askdirectory = lambda *a, **k: ''
-
-    ttk = types.ModuleType('tkinter.ttk')
-    ttk.Frame = object
-    ttk.Label = object
-    ttk.Button = object
-    ttk.Entry = object
-
-    scrolledtext = types.ModuleType('tkinter.scrolledtext')
-    scrolledtext.ScrolledText = object
-
-    font = types.ModuleType('tkinter.font')
-    font.Font = object
-
-    simpledialog = types.ModuleType('tkinter.simpledialog')
-    simpledialog.askstring = lambda *a, **k: None
-    simpledialog.askinteger = lambda *a, **k: None
-
-    tk.messagebox = messagebox
-    tk.filedialog = filedialog
-    tk.ttk = ttk
-    tk.scrolledtext = scrolledtext
-    tk.font = font
-    tk.simpledialog = simpledialog
-
-    sys.modules['tkinter'] = tk
-    sys.modules['tkinter.messagebox'] = messagebox
-    sys.modules['tkinter.filedialog'] = filedialog
-    sys.modules['tkinter.ttk'] = ttk
-    sys.modules['tkinter.scrolledtext'] = scrolledtext
-    sys.modules['tkinter.font'] = font
-    sys.modules['tkinter.simpledialog'] = simpledialog
-
-
-_install_tkinter_stub()
+# 测试自带的辅助模块（`_ui_project` / `_source_paths`）也按模块名 import，
+# 所以 tests/ 自身也要在 sys.path 上。
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 
 # ------------------------------------------------------------------
@@ -135,20 +54,6 @@ def write_rpy(tmp_path):
         return fp
 
     return _write
-
-
-@pytest.fixture
-def clear_messagebox():
-    """
-    （迁移期遗留）清空 tkinter messagebox 桩记录。
-
-    后端已改用 `storygraph.app.notify`，新测试请用 `notify_calls`。
-    """
-    mb = sys.modules['tkinter.messagebox']
-    calls = mb._calls
-    for lst in calls.values():
-        lst.clear()
-    return calls
 
 
 class NotifyCalls:
@@ -273,3 +178,86 @@ def asset_env(tmp_path):
         'asset_dir': asset_dir,
         'game_dir': game,
     }
+
+
+# ------------------------------------------------------------------
+#  Qt 前端夹具（offscreen 跑真 Qt —— tkinter 已删除，这是唯一前端）
+# ------------------------------------------------------------------
+
+@pytest.fixture(scope='session')
+def qapp():
+    """
+    一个 `QApplication`（session 级：Qt 只允许有一个）。
+
+    没有 PySide6 就 skip，而不是让整个测试会话崩掉。
+    """
+    pytest.importorskip('PySide6')
+    import os
+
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # 不定字体目录的话，中文/emoji 会渲染成方框（截图看起来像坏了）
+    os.environ.setdefault('QT_QPA_FONTDIR', r'C:\Windows\Fonts')
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def ui_project(tmp_path):
+    """
+    现场生成的 Ren'Py 工程（4 个 label / 11 拍 / 真 PNG）。
+
+    **可移植**：不再依赖作者机器上的绝对路径 —— 换机器 / 上 CI 会真的跑
+    （历史上 Qt 测试因为写死路径而在别的机器上静默 skip）。
+    """
+    from _ui_project import build_project
+
+    return build_project(tmp_path / 'proj')
+
+
+@pytest.fixture
+def ui_window(qapp, ui_project):
+    """
+    载入上面那一章的主窗口（`storygraph.ui_qt.MainWindowQt`）。
+
+    engine 桩**真的加载资源表**（并合并脚本里的 `define ... = Character`）——
+    否则 `registry` 恒为 None，"参与角色 / 资产选择器 / 缩略图路径"这些
+    功能全部空转，测试就变成了"测一个空壳"（本夹具改造前正是如此）。
+    """
+    from storygraph.ui_qt.main_window import MainWindowQt
+
+    script = ui_project / 'game' / 'script' / 'ch01.rpy'
+
+    class _Engine:
+        def __init__(self, root):
+            self.project_root = root
+            self._registry = None
+            self._load()
+
+        def _load(self):
+            try:
+                from storygraph.pipeline.build import load_asset_registry
+                self._registry = load_asset_registry(self.project_root)
+            except Exception:                    # noqa: BLE001 - 夹具不该挂
+                self._registry = None
+            if self._registry is None:
+                return
+            try:
+                from storygraph.parsing.renpy_parser import (
+                    IncrementalRenPyAnalyzer)
+                from storygraph.parsing.discover import discover_scripts
+                from storygraph.story.beat_build import apply_script_definitions
+                analyzer = IncrementalRenPyAnalyzer()
+                pr, _graph = analyzer.analyze(
+                    files=discover_scripts(self.project_root), graph=None)
+                apply_script_definitions(self._registry, pr)
+            except Exception:                    # noqa: BLE001
+                pass
+
+        def get_registry(self):
+            return self._registry
+
+    win = MainWindowQt(_Engine(ui_project), script)
+    yield win
+    win.close()

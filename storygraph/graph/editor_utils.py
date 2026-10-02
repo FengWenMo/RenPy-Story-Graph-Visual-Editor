@@ -2,8 +2,35 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from storygraph.app import notify
+
+
+def open_with_system_default(path) -> bool:
+    """
+    用系统默认程序打开文件（Windows 上是 Excel，macOS 是 Numbers/Excel）。
+
+    返回 False 表示没能唤起任何程序 —— 调用方应提示用户手动打开，
+    而不是假装成功了。
+
+    2026-10-01 从 `storygraph/ui/graph_view.py` 搬来这里：它是纯平台
+    逻辑（一行 tkinter 都没有），却因为住在 UI 包里，导致"用 Excel 打开
+    这一章"这件事只有 tkinter 前端能用。
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        if sys.platform == 'win32':
+            os.startfile(str(path))
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', str(path)])
+        else:
+            subprocess.Popen(['xdg-open', str(path)])
+        return True
+    except Exception:                         # noqa: BLE001 - 交给调用方提示
+        return False
 
 
 def open_file_at_line(file_path, line_number):

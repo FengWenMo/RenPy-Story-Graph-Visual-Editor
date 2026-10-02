@@ -18,14 +18,17 @@ tkinter 版的这些对话框是 `Toplevel` + `Entry` + `Text` 拼的，Qt 版�
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 import re
+from pathlib import Path
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QPushButton,
                                QVBoxLayout)
 
-from storygraph.ui import tokens as T
+from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
 #: Ren'Py label 名：字母/数字/下划线，不以数字开头。
@@ -76,6 +79,194 @@ class _BaseDialog(QDialog):
 
     def _on_accept(self):
         self.accept()
+
+
+# ======================================================================
+#  只读文本窗（统计 / 分析结果这类"给人看的一段文字"）
+# ======================================================================
+
+class TextViewDialog(_BaseDialog):
+    """
+    一段只读文字 + 「复制」「关闭」。
+
+    为什么不弹 `QMessageBox`：统计与分析动辄几十行，消息框会把它挤成
+    一条滚动条（还得手动滚）。这里给一个能选中、能复制的正经文本框。
+    """
+
+    def __init__(self, parent=None, title: str = '详情', text: str = '',
+                 width: int = 760, height: int = 560):
+        super().__init__(parent, title)
+        self.resize(width, height)
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(str(text or ''))
+        box.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self.text = box.toPlainText
+        self._box = box
+        self._root.addWidget(box, 1)
+
+        row = QHBoxLayout()
+        copy = QPushButton('复制全部')
+        copy.clicked.connect(self._copy)
+        row.addWidget(copy)
+        row.addStretch(1)
+        close = QPushButton('关闭')
+        close.setProperty('variant', 'primary')
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        self._root.addLayout(row)
+
+    def _copy(self):
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(self._box.toPlainText())
+            self._error.setText('已复制到剪贴板。')
+            self._error.setStyleSheet(f"color: {T.t('state.ok')};")
+            self._error.setVisible(True)
+        except Exception:                     # noqa: BLE001
+            swallow('dialogs._copy')
+
+
+# ======================================================================
+#  协作库（SQLite ↔ Excel）
+# ======================================================================
+
+class CollabDialog(_BaseDialog):
+    """
+    协作库入口：**登记 / 拉取 / 提交 / 看状态**。
+
+    冲突规则全在 `collab.collab_store.push`（行被别人锁着 → 拒；
+    库里的 revision 比你拉取时更新 → 冲突并列出来），界面**不重写**这套规则 ——
+    它只负责把结果显示清楚（"不静默覆盖"是这一层的底线）。
+
+    数据库与 Excel 路径都可以手填；Excel 默认取当前章节导出的剧本表。
+    """
+
+    def __init__(self, parent=None, session=None, project_root=None,
+                 log=None, status=None):
+        super().__init__(parent, '协作库（SQLite ↔ Excel）')
+        self.resize(720, 560)
+        self._session = session
+        self._log_fn = log
+        self._status_fn = status
+        root_dir = Path(project_root) if project_root else Path.cwd()
+
+        form = QFormLayout()
+        form.setSpacing(T.SPACE['sm'])
+
+        self.db_path = QLineEdit(str(root_dir / 'collab.sqlite3'))
+        db_row = QHBoxLayout()
+        db_row.addWidget(self.db_path, 1)
+        db_browse = QPushButton('浏览…')
+        db_browse.clicked.connect(lambda: self._pick(self.db_path, save=True,
+                                                     ext='SQLite (*.sqlite3 *.db)'))
+        db_row.addWidget(db_browse, 0)
+        form.addRow('协作数据库', self._wrap(db_row))
+
+        self.sheet_path = QLineEdit(str(root_dir / 'game' / 'script.xlsx'))
+        sh_row = QHBoxLayout()
+        sh_row.addWidget(self.sheet_path, 1)
+        sh_browse = QPushButton('浏览…')
+        sh_browse.clicked.connect(lambda: self._pick(self.sheet_path, save=False,
+                                                     ext='Excel (*.xlsx)'))
+        sh_row.addWidget(sh_browse, 0)
+        form.addRow('剧本表（Excel）', self._wrap(sh_row))
+
+        self.actor = QLineEdit('')
+        self.actor.setPlaceholderText('你的名字（锁 / revision 都记在它上面）')
+        form.addRow('当前用户', self.actor)
+        self._root.addLayout(form)
+
+        acts = QHBoxLayout()
+        for text, slot, tip in (
+                ('🗃 建库并登记成员', self._init_db, '建表 + 登记用户（可重复执行）'),
+                ('⬇ 从库导出到 Excel', self._pull, '数据库 → Excel（带锁与 revision）'),
+                ('⬆ 提交 Excel 到库', self._push, 'Excel → 数据库（冲突不覆盖）'),
+                ('📊 查看状态', self._status, '谁锁了多少 / 各状态多少 / 最近改动')):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            acts.addWidget(btn)
+        acts.addStretch(1)
+        self._root.addLayout(acts)
+
+        self.out = QPlainTextEdit()
+        self.out.setReadOnly(True)
+        self.out.setPlaceholderText('操作结果会写在这里…')
+        self.out.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._root.addWidget(self.out, 1)
+        self._add_buttons('关闭')
+
+    @staticmethod
+    def _wrap(layout):
+        from PySide6.QtWidgets import QWidget
+        w = QWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(layout)
+        return w
+
+    def _pick(self, line: QLineEdit, save: bool, ext: str):
+        from PySide6.QtWidgets import QFileDialog
+        if save:
+            path, _ = QFileDialog.getSaveFileName(self, '选择文件',
+                                                  line.text(), ext)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, '选择文件',
+                                                  line.text(), ext)
+        if path:
+            line.setText(path)
+
+    # ---- 四个动作（都委托会话，界面不碰 sqlite）----
+
+    def _say(self, text: str):
+        self.out.appendPlainText(str(text))
+        if callable(self._log_fn):
+            self._log_fn(str(text))
+
+    def _init_db(self):
+        users = [u.strip() for u in (self.actor.text() or '').split(',')
+                 if u.strip()]
+        res = self._session.collab_init(self.db_path.text(), users=users)
+        if not res.get('ok'):
+            self._say(f'建库失败：{res.get("error")}')
+            return
+        self._say(f'✔ 已建库：{res["path"]}'
+                  + (f'（登记 {len(users)} 个用户）' if users else ''))
+
+    def _pull(self):
+        res = self._session.collab_pull(self.db_path.text(),
+                                        self.sheet_path.text(),
+                                        actor=self.actor.text().strip())
+        if not res.get('ok'):
+            self._say(f'导出失败：{res.get("error")}')
+            return
+        self._say(f'✔ 已从数据库导出到 Excel：{self.sheet_path.text()}')
+        self._say(f'   {res.get("result")}')
+
+    def _push(self):
+        actor = self.actor.text().strip()
+        if not actor:
+            self._say('请先填"当前用户"——锁与 revision 要记在它上面。')
+            return
+        res = self._session.collab_push(self.db_path.text(),
+                                        self.sheet_path.text(), actor=actor)
+        if not res.get('ok'):
+            self._say(f'提交失败：{res.get("error")}')
+            return
+        r = res.get('result') or {}
+        self._say(f'✔ 已提交：新增 {r.get("added")} / 更新 {r.get("updated")} / '
+                  f'未变 {r.get("unchanged")}')
+        for key in ('conflicts', 'rejected'):
+            rows = r.get(key) or []
+            if rows:
+                self._say(f'   ⚠ {key}（{len(rows)}）：{rows[:5]}')
+
+    def _status(self):
+        res = self._session.collab_status(self.db_path.text())
+        if not res.get('ok'):
+            self._say(f'看不了状态：{res.get("error")}')
+            return
+        self._say(f'状态总览：{res.get("summary")}')
 
 
 # ======================================================================
@@ -136,32 +327,103 @@ class AddNodeDialog(_BaseDialog):
 # ======================================================================
 
 class NodeOpsDialog(_BaseDialog):
-    """编辑一个章节块的变量操作（`$ ...` 或 `python:` 块）。"""
+    """
+    编辑一个章节的**剧情变量**（策划 / 编剧调整剧情分支用的地方）。
 
-    def __init__(self, parent=None, label_name: str = '', operations=None):
-        super().__init__(parent, f'编辑变量操作 · {label_name}')
-        self.operations = list(operations or [])
+    用户 2026-10-03：
+
+    > 这个所谓的"技术代码"，它不是变量，是具体的实现细节！……
+    > 我不要再在变量的窗口上看到任何内部技术代码的名字！
+
+    所以这里**只**列 `story_ops.narrative_operations`。
+    `renpy.transition(...)` / `persistent.x = ...` 这一批连名字都不出现 ——
+    它们不是变量，是引擎实现细节。
+
+    ⚠ 保存时**不能**用编辑器里的内容替换整份 operations：那样会把看不见的
+    技术代码一起删掉（`EditorSession.set_node_variables` 负责原位保留）。
+
+    另外把旧版的**「语法检查」**按钮补回来了：变量写错一个符号，整章的
+    区间分析就会跑偏 —— 在写回之前先说一声。
+    """
+
+    def __init__(self, parent=None, label_name: str = '', variables=None,
+                 tech_count: int = 0, on_check=None):
+        super().__init__(parent, f'编辑剧情变量 · {label_name}')
+        self.variables = list(variables or [])
+        # 旧版这个对话框是 700×500；太小的话多行变量看不清。
+        self.resize(620, 460)
+        #: 可选：`on_check(lines) -> [错误文本]`（语义在会话里，对话框只显示）
+        self._on_check = on_check
 
         head = QLabel(f'章节：{label_name}')
         head.setProperty('role', 'section')
         self._root.addWidget(head)
 
         self._text = QPlainTextEdit()
-        self._text.setPlainText('\n'.join(self.operations))
-        self._text.setMinimumHeight(220)
+        self._text.setPlainText('\n'.join(self.variables))
+        self._text.setMinimumHeight(240)
+        self._text.setFont(QFont('Consolas', 10))
         self._root.addWidget(self._text)
 
-        hint = QLabel('一行一条。多行代码请用 `python:` 起一个块'
-                      '（保存时会按原样写进生成的 .rpy）。')
+        # 注意：这里是**纯文本** QLabel（不是说明窗口那种富文本），
+        # 所以文案里不要写 Markdown 的 `**`，否则星号会原样显示给用户。
+        hint = QLabel('一行一个剧情变量赋值（例如 love += 1、flag = True）。'
+                      '它们决定剧情分支走向，是给策划 / 编剧编排剧情用的。')
         hint.setProperty('role', 'caption')
         hint.setWordWrap(True)
         self._root.addWidget(hint)
+
+        if tech_count:
+            # 只报"还有 N 条实现细节"，**不报它们的名字** —— 用户明确要求
+            # 在变量窗口里看不到任何内部技术代码。
+            tech = QLabel(f'（这个章节还有 {tech_count} 条实现细节，'
+                          f'不属于变量，不在这里编辑；保存时原样保留。）')
+            tech.setProperty('role', 'caption')
+            tech.setWordWrap(True)
+            self._root.addWidget(tech)
+
+        self._check_label = QLabel('')
+        self._check_label.setWordWrap(True)
+        self._check_label.setProperty('role', 'caption')
+        self._root.addWidget(self._check_label)
+
+        bar = QHBoxLayout()
+        self._check_btn = QPushButton('语法检查')
+        self._check_btn.setToolTip('逐行检查这些变量能不能被解析（只检查，不改数据）')
+        self._check_btn.clicked.connect(self._check)
+        bar.addWidget(self._check_btn)
+        bar.addStretch(1)
+        self._root.addLayout(bar)
+
         self._add_buttons('保存')
         self._text.setFocus()
 
+    def _lines(self) -> list:
+        return [ln.strip() for ln in self._text.toPlainText().splitlines()
+                if ln.strip()]
+
+    def _check(self):
+        lines = self._lines()
+        errors = []
+        if self._on_check is not None:
+            try:
+                errors = list(self._on_check(lines) or [])
+            except Exception as e:                # noqa: BLE001
+                errors = [f'检查失败：{e}']
+        if errors:
+            self._check_label.setText('⚠ ' + '；'.join(errors))
+            self._check_label.setProperty('role', 'warn')
+        else:
+            self._check_label.setText(f'✔ {len(lines)} 行都能解析。')
+            self._check_label.setProperty('role', 'caption')
+        try:
+            self._check_label.style().unpolish(self._check_label)
+            self._check_label.style().polish(self._check_label)
+        except Exception:                         # noqa: BLE001
+            swallow('dialogs._check')
+
     def _on_accept(self):
-        raw = self._text.toPlainText()
-        self.operations = [ln for ln in raw.splitlines() if ln.strip()]
+        self.variables = self._lines()
         self.accept()
 
 

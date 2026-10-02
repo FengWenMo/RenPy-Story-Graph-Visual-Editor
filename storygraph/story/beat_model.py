@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from storygraph.core.statement import MARKER
+
 
 
 
@@ -851,7 +853,9 @@ def compose_code(beat: 'Beat') -> str:
 #: 内部标记：`$code`（`$` 后无空格）这一位用它承载（见 Statement.make_python）。
 #: **绝不能写进 Excel** —— openpyxl 拒绝控制字符：
 #: `IllegalCharacterError: ... cannot be used in worksheets`（实测踩过）。
-_MARKER = '\x01'
+#:
+#: 2026-10-05：改为从 `core.statement` 取（约定只有一份，见那里的 `MARKER`）。
+_MARKER = MARKER
 
 
 def compose_code_cell(beat: 'Beat') -> str:
@@ -932,9 +936,9 @@ def _split_code_cell(cell: str) -> tuple:
                                  and not _is_bare_renpy_verb(s)):
             # `$x`（`$` 后无空格）在**原文件里**很常见，而生成器默认写 `$ x`。
             # 逐字节保留这一位，否则每个 `$` 行都成一个 diff 块。
-            # 用 `\x01` 前缀承载（见 Statement.make_python 的说明）。
+            # 用标记前缀承载（见 `Statement.make_python` / `core.statement.MARKER`）。
             if s.startswith('$') and not s[1:2].isspace() and len(s) > 1:
-                marked = '\x01' + s[1:]
+                marked = MARKER + s[1:]
                 code.append(marked)
                 ordered.append(('code', marked))
             else:

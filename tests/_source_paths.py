@@ -8,9 +8,10 @@ tests/_source_paths.py
 失效而红。以后再搬、再改名，`module_source()` 都不会坏。
 
 用法：
-    from _source_paths import module_source, graph_view_source
+    from _source_paths import module_source, main_window_source
 
-    src = module_source('storygraph.ui.graph_view').read_text(encoding='utf-8')
+    src = main_window_source().read_text(encoding='utf-8')
+    src = module_source('storygraph.app.beats').read_text(encoding='utf-8')
 """
 
 import importlib
@@ -37,8 +38,16 @@ def module_source(dotted: str) -> Path:
     return Path(inspect.getfile(importlib.import_module(dotted)))
 
 
-def graph_view_source() -> Path:
-    return module_source('storygraph.ui.graph_view')
+def main_window_source() -> Path:
+    """
+    Qt 主窗口源码（**唯一前端的入口**）。
+
+    2026-10-01：`storygraph/ui/`（tkinter）整个删除，界面只剩
+    `storygraph/ui_qt/`。以前这里叫 `graph_view_source()`，
+    指向已被删掉的 tkinter 文件 —— 名字也跟着改，免得"扫源码"的测试
+    还在读一个不存在的路径。
+    """
+    return module_source('storygraph.ui_qt.main_window')
 
 
 def legacy_editor_source() -> Path:
@@ -46,5 +55,5 @@ def legacy_editor_source() -> Path:
     return PROJECT_ROOT / 'legacy' / 'RenPy_Story_Graph_Visual_Editor.py'
 
 
-__all__ = ['PROJECT_ROOT', 'module_source', 'graph_view_source',
+__all__ = ['PROJECT_ROOT', 'module_source', 'main_window_source',
            'legacy_editor_source']

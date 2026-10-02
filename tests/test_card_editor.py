@@ -15,18 +15,25 @@ tests/test_card_editor.py
 （`ling happy@left`）这一格的**投影**。直接让策划编辑 show 字符串，
 等于要求他记住 `图@位置` 语法——那正是要消灭的负担。
 
-这个文件锁住那对投影函数与面板字段的正确性（tkinter 是桩，测纯逻辑）。
+这个文件锁住那对投影函数与卡片字段的正确性。
+
+2026-10-01：编辑语义的唯一实现在 `storygraph.app`（前端只剩 Qt），
+所以"面板"这套不再是 tkinter 的 `BeatEditorPanel`，而是
+  · 字段划分 → `storygraph.app.editor.PRIMARY_FIELDS / ADVANCED_FIELDS`
+  · 读写语义 → `EditorSession`
+  · 控件行为 → 真 Qt 的 `BeatCardEditor`（`qapp` / `ui_window` 夹具）
 """
 
 import pytest
 
-from storygraph.ui.beat_editor import (
-    BeatEditorPanel, apply_expression, apply_position, apply_sprite_rows,
+from storygraph.app.beats import (
+    apply_expression, apply_position, apply_sprite_rows,
     beat_expression_word, beat_position_word, beat_sprite_rows,
     beat_to_fields, expression_choices, fields_to_beat,
     inherited_state_hint, normalize_expression, normalize_position,
     position_choices,
 )
+from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 from storygraph.story.script_table import Beat, make_symbols, render_beats_to_rpy
 
 
@@ -53,6 +60,11 @@ class _V:
 # ==================================================================
 
 class TestCardShape:
+    """
+    主区 / 高级区的划分现在住在 `storygraph.app.editor`
+    （前端只剩 Qt，划分是**语义**不是控件布局，所以由 app 层拥有）。
+    """
+
     def test_primary_fields_cover_the_daily_basics(self):
         """
         主区 = **每一拍都要看 / 要填**的字段。
@@ -63,16 +75,25 @@ class TestCardShape:
         **从折叠的高级区提上来**——"背景 / 音乐 / 语音 / 备注"本来就是每一拍的
         基本信息，藏在折叠区里等于没有。
         """
-        assert BeatEditorPanel.PRIMARY_FIELDS == [
+        assert PRIMARY_FIELDS == [
             'Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
 
-    def test_primary_and_advanced_are_disjoint_and_cover_everything(self):
-        """两项加一起必须覆盖所有面板字段，且不许重叠——
-        重了意味着同一个值能被两个控件改（互相打架）。"""
-        primary = set(BeatEditorPanel.PRIMARY_FIELDS)
-        advanced = set(BeatEditorPanel.ADVANCED_FIELDS)
-        assert primary & advanced == set()
-        assert set(BeatEditorPanel._ORDER) == primary | advanced
+    def test_primary_and_advanced_are_disjoint(self):
+        """两项不许重叠——重了意味着同一个值能被两个控件改（互相打架）。"""
+        assert set(PRIMARY_FIELDS) & set(ADVANCED_FIELDS) == set()
+
+    def test_every_card_field_is_owned_by_one_of_the_two_groups(self, qapp,
+                                                               ui_window):
+        """
+        卡片上的每个控件都必须属于主区或高级区（或有明确归属的额外控件）
+        —— 否则它既不会被写回、也不会被脏标记跟踪，就是一个**死的输入框**。
+        """
+        from storygraph.ui_qt.main_window import BeatCardEditor
+
+        known = set(PRIMARY_FIELDS) | set(ADVANCED_FIELDS) \
+            | set(BeatCardEditor.EXTRA_WIDGETS)
+        widgets = set(ui_window._panel._widgets)
+        assert widgets <= known, f'这些控件没有归属：{sorted(widgets - known)}'
 
     def test_programmer_fields_are_not_primary(self):
         """
@@ -82,11 +103,23 @@ class TestCardShape:
         不再算"程序向"；这里留下的才是该折叠的。
         """
         for name in ('CodeBlock', 'Stage', 'SFX', 'Kind', 'Notes'):
-            assert name not in BeatEditorPanel.PRIMARY_FIELDS
-            assert name in BeatEditorPanel.ADVANCED_FIELDS
+            assert name not in PRIMARY_FIELDS
+            assert name in ADVANCED_FIELDS
 
-    def test_advanced_is_collapsed_by_default(self):
-        assert BeatEditorPanel.ADVANCED_FIELDS, '高级区不该是空的'
+    def test_advanced_is_collapsed_by_default(self, qapp, ui_window):
+        assert ADVANCED_FIELDS, '高级区不该是空的'
+        assert ui_window._panel.is_advanced_open() is False, \
+            '高级区默认必须是收起的'
+
+    def test_condition_is_editable_and_reachable(self, qapp, ui_window):
+        """
+        条件显示必须**有地方填** —— `Beat.condition` 数据层一直支持，
+        当年却从没暴露给策划（既不在表里也不在卡片里）。
+        """
+        assert 'condition' in ui_window._panel._widgets
+        ui_window._show_index(0)
+        ui_window._panel._set_value('condition', 'love >= 5')
+        assert ui_window._panel.collect_fields()['condition'] == 'love >= 5'
 
 
 # ==================================================================
@@ -287,103 +320,49 @@ class TestNormalization:
 
 class TestSingleLineFieldsActuallyReceiveValues:
     """
-    **单行字段必须真的写得进去**（幽灵空格的回归）。
+    **每一个字段都必须真的写得进去**（幽灵空格的回归）。
 
-    2026-09-28 实测事故：卡片上只有「台词」有值，说话人 / 表情 / 位置全空。
-    根因是 `_wset` 判据写成 `elif hasattr(w, 'set')`——
-    **`tk.Entry` 根本没有 `set()` 方法**（读写只能通过 textvariable），
-    于是单行字段**静默**写不进去；多行用 ScrolledText 有 `insert()`，所以没受影响。
+    2026-09-28 实测事故（tkinter 时代）：卡片上只有「台词」有值，
+    说话人 / 表情 / 位置全空。根因是判据写成 `hasattr(w, 'set')`，
+    而 **`tk.Entry` 根本没有 `set()` 方法**（读写只能通过 textvariable），
+    于是单行字段**静默**写不进去。
 
-    为什么之前的测试没拦住：我用的是"记录型控件桩"，给假 Entry 加了 `set()`
-    方法——**桩比真控件"更聪明"，把 bug 藏起来了**。
-    这个用例改成断言"**StringVar 收到了 set() 调用**"，
-    不依赖桩有没有 set()，所以不能再说谎。
+    为什么以前的测试没拦住：用的是"记录型控件桩"，给假 Entry 加了 `set()`
+    —— **桩比真控件"更聪明"，把 bug 藏起来了**。
+
+    2026-10-01 改成打**真 Qt 卡片**：`QComboBox` / `QLineEdit` /
+    `QPlainTextEdit` 三种控件各走各的读写分支，用真控件测才能覆盖
+    "哪一类控件没接上"（这正是上面那个 bug 的形态）。
     """
 
-    class _SpyVar:
-        """记录 set() 调用——不提供任何 Entry 才有的能力。"""
+    def test_every_primary_field_receives_its_value(self, qapp, ui_window):
+        """一次载入，**所有**主区字段都要有值（不许只剩台词有值）。"""
+        ui_window._show_index(0)
+        fields = ui_window._session.fields(0)
+        # 逐字段核对：写进去的必须能读回来
+        missing = []
+        for name in ui_window._panel._widgets:
+            got = ui_window._panel._get_value(name)
+            want = str(fields.get(name, '') or '')
+            if got != want:
+                missing.append((name, want, got))
+        assert not missing, f'这些字段没写进去 / 读不出来：{missing}'
 
-        def __init__(self):
-            self.value = None
-            self.set_calls = []
+    def test_speaker_combo_holds_the_value(self, qapp, ui_window):
+        """说话人走 QComboBox（可编辑）—— 它有自己的读写方式，单独钉住。"""
+        ui_window._show_index(0)
+        want = ui_window._session.beats[0].speaker
+        assert ui_window._panel.speaker() == want
+        ui_window._panel.set_speaker('lyj')
+        assert ui_window._panel.speaker() == 'lyj'
+        assert ui_window._panel._get_value('Speaker') == 'lyj'
 
-        def set(self, v):
-            self.value = v
-            self.set_calls.append(v)
-
-        def get(self):
-            return self.value if self.value is not None else ''
-
-    def _panel_with_spies(self):
-        from storygraph.ui.beat_editor import BeatEditorPanel
-
-        p = BeatEditorPanel.__new__(BeatEditorPanel)
-        p._beat = None
-        p._multi = {'Text', 'Stage', 'BGM', 'SFX', 'CodeBlock'}
-        p._widgets = {}
-        p._vars = {}
-        for name in BeatEditorPanel._ORDER:
-            if name in p._multi:
-                continue
-            spy = self._SpyVar()
-            p._vars[name] = spy
-        return p
-
-    def test_stringvar_receives_value(self):
-        """写一个值进去，StringVar 必须收到 set()。"""
-        p = self._panel_with_spies()
-        p._wset('Speaker', 'jc')
-        assert p._vars['Speaker'].set_calls == ['jc'], \
-            'Speaker 没写进 StringVar（单行字段又静默失败了）'
-
-    def test_wget_roundtrips_through_stringvar(self):
+    def test_roundtrip_for_every_field(self, qapp, ui_window):
         """写进去再读出来必须一样——这是卡片显示值的最基本要求。"""
-        p = self._panel_with_spies()
-        for name, value in (('Speaker', 'lyj'), ('Comment', '备注'),
-                            ('Label', 'ch01')):
-            p._wset(name, value)
-            assert p._wget(name) == value, f'{name} 写进去读不出来'
-
-    def test_real_widgets_path_uses_textvariable(self):
-        """
-        真控件路径：**每一个**单行字段都必须登记了 StringVar。
-
-        这一条盯的是"有人以后又把里 Entry 的 textvariable 拿掉"。
-        """
-        from storygraph.ui.beat_editor import BeatEditorPanel
-
-        single = [n for n in BeatEditorPanel._ORDER
-                  if n not in ('Text', 'Stage', 'BGM', 'SFX', 'CodeBlock')]
-        p = self._panel_with_spies()
-        missing = [n for n in single if n not in p._vars]
-        assert not missing, f'这些单行字段没有 StringVar：{missing}'
-
-    def test_does_not_rely_on_widget_having_set(self):
-        """
-        反面约束：**不能**再对控件本身调 `set()`。
-
-        `tk.Entry` 没有这个方法——依赖它就会静默失败。
-        这里断言"控件没有 set() 也照样能写"。
-        """
-        from storygraph.ui.beat_editor import BeatEditorPanel
-
-        p = self._panel_with_spies()
-
-        class EntryLike:
-            """像真 tk.Entry：有 get 但**没有 set**，且经过 textvariable。"""
-
-            def __init__(self, var):
-                self._var = var
-
-            def get(self):
-                return self._var.get()
-
-        p._vars['Speaker'] = p._vars.get('Speaker')
-        spy = p._vars['Speaker']
-        p._widgets['Speaker'] = EntryLike(spy)
-        p._wset('Speaker', 'jc')
-        assert p._wget('Speaker') == 'jc', \
-            '控件没有 set() 时写不进去——说明还在依赖控件自身的 set()'
+        for name in list(ui_window._panel._widgets):
+            ui_window._panel._set_value(name, f'值-{name}')
+            assert ui_window._panel._get_value(name) == f'值-{name}', \
+                f'{name} 写进去读不出来'
 
 
 class TestOnlyTextEditIsSafe:
@@ -391,45 +370,16 @@ class TestOnlyTextEditIsSafe:
     「只改台词」不能碰舞台 / 音频 / 语音 / 背景。
 
     这是文案最高频的动作，也是**最容易造成数据丢失**的路径：
-    卡片把高级区折起来时，那些控件是只读的——如果 `collect_beat`
-    把所有控件整体读一遍再覆盖，就会把 Stage / BGM / SFX / Voice 清空，
+    卡片把高级区折起来时，如果提交时把所有控件整体读一遍再覆盖，
+    就会把 Stage / BGM / SFX / Voice 清空，
     变成"改一句台词把这一拍的音乐弄没了"。
 
     用户 2026-09-28 明确要求手测这一条，这里用测试先把它钉死
     （因为手测只能抽查几拍，测试能覆盖所有拍）。
+
+    2026-10-01：改用 `EditorSession`（语义层），`advanced_open=False`
+    就是"高级区收起"。
     """
-
-    @pytest.fixture
-    def loaded(self):
-        """模拟：面板载入一拍（含舞台/音频/语音），高级区**收起**。"""
-        from storygraph.ui.beat_editor import BeatEditorPanel
-
-        class Probe(BeatEditorPanel):
-            def __init__(self, beat):
-                self._beat = beat
-                self._adv_open = False
-                self._vals = {}
-                self._note_var = None
-
-            def _wget(self, name):
-                return self._vals.get(name, '')
-
-            def _wset(self, name, value):
-                self._vals[name] = value or ''
-
-            def _symbols(self):
-                return make_symbols(None)
-
-            def _set_note(self, text):
-                pass
-
-            def explain_stage(self):
-                pass
-
-            def _warn_if_speaker_missing(self, beat):
-                pass
-
-        return Probe
 
     def _full_beat(self):
         return Beat(seq=7, label='ch01', kind='say', speaker='lyj',
@@ -441,13 +391,19 @@ class TestOnlyTextEditIsSafe:
                     hide='ye@dissolve',
                     code='$ renpy.transition(None)')
 
-    def test_changing_text_keeps_everything_else(self, loaded):
+    def _session(self, beat, symbols):
+        from storygraph.app.editor import EditorSession
+        s = EditorSession(registry_provider=lambda: None)
+        s.symbols = symbols
+        s.beats = [beat]
+        return s
+
+    def test_changing_text_keeps_everything_else(self, symbols):
         beat = self._full_beat()
-        p = loaded(beat)
-        p.load_beat(beat)
-        # 只改台词
-        p._vals['Text'] = '新台词'
-        out = p.collect_beat()
+        s = self._session(beat, symbols)
+        fields = dict(s.fields(0), Text='新台词')
+        # **高级区收起**（默认就是收起）—— 这正是丢数据的场合
+        out = s.apply(0, fields, cards=None, advanced_open=False)
 
         assert out.text == '新台词'
         # 舞台 / 音频 / 语音 / 背景一个都不能丢
@@ -460,46 +416,46 @@ class TestOnlyTextEditIsSafe:
         assert out.speaker == 'lyj'
         assert '$ renpy.transition(None)' in (out.code or '')
 
-    def test_rendering_after_text_edit_keeps_stage_and_audio(self, loaded):
+    def test_rendering_after_text_edit_keeps_stage_and_audio(self, symbols):
         """最终判据：改完台词后生成的代码里，舞台/音频语句一条不少。"""
         beat = self._full_beat()
-        p = loaded(beat)
-        p.load_beat(beat)
-        p._vals['Text'] = '新台词'
-        out = render_beats_to_rpy([p.collect_beat()])
+        s = self._session(beat, symbols)
+        fields = dict(s.fields(0), Text='新台词')
+        out = render_beats_to_rpy(
+            [s.apply(0, fields, cards=None, advanced_open=False)])
 
         # 音频引用（bgm_night / sfx_door / v_001）**不带下划线归一**——
         # 它们是资产 ID，下划线是 ID 的一部分。
         for frag in ('play music bgm_night fadein 1.0', 'play sound sfx_door',
                      'voice v_001', 'hide ye with dissolve',
-                     'scene bg_classroom',
+                     'scene bg classroom',
                      '$ renpy.transition(None)'):
             assert frag in out, f'{frag} 丢了：\n{out}'
         # 图像名在无 registry 时写成下划线形态（已知 L3 差异 1），归一后比
         assert 'show ling close happy at left' in out.replace('_', ' '), out
         assert 'lyj "新台词"' in out
 
-    def test_chinese_expression_does_not_leak_into_show(self, loaded):
+    def test_chinese_expression_does_not_leak_into_show(self, symbols):
         """
         手测第 3 条：卡片上的中文表情，写回后必须是 `show eileen sad at left`，
         **不能是 `show eileen 开心`**。
 
-        多立绘改版后，表情在**立绘数组的每一行**里编辑（见 beat_sprite_rows /
-        apply_sprite_rows），所以这里直接验数组 → show 的写回链。
+        表情在**立绘卡**上编辑（`cards()` → 用户改 `expression` chip），
+        所以这里直接验"卡数组 → show"的写回链。
         """
         beat = Beat(seq=1, label='t', kind='say', speaker='e',
                     text='台词', show='eileen happy@left')
-        p = loaded(beat)
-        p.load_beat(beat)
-        # 模拟：策划在第一行把表情改成「难过」、位置改成「左」
-        p._sprite_widgets = [{'frame': None,
-                              'image': _V('eileen happy'),
-                              'expression': _V('难过'),
-                              'position': _V('左')}]
-        out = p.collect_beat()
+        s = self._session(beat, symbols)
+        cards = s.cards(0)
+        assert cards, '这一拍应该有立绘卡'
+        # 模拟：策划把表情 chip 改成「难过」、位置 chip 改成「左」
+        cards[0]['expression'] = '难过'
+        cards[0]['position'] = '左'
+        out = s.apply(0, {'Speaker': 'e', 'Text': '台词'}, cards=cards,
+                      advanced_open=False)
         assert all(ord(c) < 128 for c in out.show), \
             f'中文漏进 show 了：{out.show!r}'
-        text = render_beats_to_rpy([out])
+        text = render_beats_to_rpy([out], symbols=symbols)
         # `eileen sad`（空格形态）或 `eileen_sad`（无 registry 的下划线形态）
         assert 'show eileen sad at left' in text or \
             'show eileen_sad at left' in text, text
@@ -560,37 +516,17 @@ class TestSpriteArray:
         """
         **空数组 ≠ 清空立绘。**
 
-        实测踩过：`collect_beat` 里用空数组去覆盖 `b.show`，
+        实测踩过：用空数组去覆盖 `b.show`，
         结果"打开一拍什么都不改、直接下一句"就把立绘抹掉了。
         """
-        from storygraph.ui.beat_editor import BeatEditorPanel
+        from storygraph.app.editor import EditorSession
 
         b = Beat(seq=1, label='t', text='x', show='ling happy@left')
-        p = BeatEditorPanel.__new__(BeatEditorPanel)
-        p._beat = b
-        p._sprite_widgets = []          # 空数组
-        p._adv_open = False
-
-        class _W:
-            def __init__(self, v=''):
-                self.v = v
-
-            def get(self):
-                return self.v
-
-            def set(self, v):
-                self.v = v or ''
-
-        p._widgets = {}
-        p._vars = {}
-
-        def _wget(n):
-            return '台词' if n == 'Text' else ''
-        p._wget = _wget
-        p._symbols = lambda: symbols
-        p._set_note = lambda t: None
-        p._warn_if_speaker_missing = lambda b: None
-        out = p.collect_beat()
+        s = EditorSession(registry_provider=lambda: None)
+        s.symbols = symbols
+        s.beats = [b]
+        # cards=[] 模拟"表单里一张立绘卡都没有"
+        out = s.apply(0, {'Text': '台词'}, cards=[], advanced_open=False)
         assert out.show == 'ling happy@left', \
             f'空数组把立绘清掉了：{out.show!r}'
 
@@ -663,50 +599,44 @@ class TestConditionField:
         assert 'if ' not in out, f'没有条件却生成了 if：\n{out}'
 
     def test_card_loads_and_writes_condition(self, symbols):
-        """卡片能把条件读进来、再写回 Beat，并真的渲染成 if。"""
-        from storygraph.ui.beat_editor import BeatEditorPanel
+        """条件能读进来、再写回 Beat，并真的渲染成 if。"""
+        from storygraph.app.editor import EditorSession
 
         b = Beat(seq=1, label='t', text='台词', speaker='e')
-        p = BeatEditorPanel.__new__(BeatEditorPanel)
-        p._condition_var = _V()
-        p._beat = b
-        p._sprite_widgets = []
-        p._adv_open = False
-        p._widgets = {}
-        p._vars = {}
-        # 模拟"表单里说话人与台词都有值"
-        p._wget = lambda n: {'Speaker': 'e', 'Text': '台词'}.get(n, '')
-        p._symbols = lambda: symbols
-        p._set_note = lambda t: None
-        p._warn_if_speaker_missing = lambda be: None
-
-        p._condition_var.set('score > 10')      # 相当于在「＋ 条件」里填写
-        out = p.collect_beat()
-        assert out.condition == 'score > 10'
+        s = EditorSession(registry_provider=lambda: None)
+        s.symbols = symbols
+        s.beats = [b]
+        fields = dict(s.fields(0), condition='score > 10')
+        out = s.apply(0, fields, cards=None, advanced_open=False)
         assert 'if score > 10:' in render_beats_to_rpy([out])
         assert 'e "台词"' in render_beats_to_rpy([out])
 
     def test_card_clearing_condition_removes_if(self, symbols):
-        from storygraph.ui.beat_editor import BeatEditorPanel
+        from storygraph.app.editor import EditorSession
 
         b = Beat(seq=1, label='t', text='台词', speaker='e',
                  condition='old > 1')
-        p = BeatEditorPanel.__new__(BeatEditorPanel)
-        p._condition_var = _V()
-        p._beat = b
-        p._sprite_widgets = []
-        p._adv_open = False
-        p._widgets = {}
-        p._vars = {}
-        p._wget = lambda n: {'Speaker': 'e', 'Text': '台词'}.get(n, '')
-        p._symbols = lambda: symbols
-        p._set_note = lambda t: None
-        p._warn_if_speaker_missing = lambda be: None
-
-        p._condition_var.set('')                # 清空条件
-        out = p.collect_beat()
+        s = EditorSession(registry_provider=lambda: None)
+        s.symbols = symbols
+        s.beats = [b]
+        fields = dict(s.fields(0), condition='')
+        out = s.apply(0, fields, cards=None, advanced_open=False)
         assert out.condition == ''
         assert 'if ' not in render_beats_to_rpy([out])
+
+    def test_condition_field_round_trips_through_the_form(self, symbols):
+        """
+        `condition` 必须**出现在表单字段里** —— 否则卡片根本读不到它
+        （数据层早就有，但当年从没暴露给策划）。
+        """
+        from storygraph.app.editor import EditorSession
+
+        b = Beat(seq=1, label='t', text='台词', speaker='e',
+                 condition='love >= 5')
+        s = EditorSession(registry_provider=lambda: None)
+        s.symbols = symbols
+        s.beats = [b]
+        assert s.fields(0).get('condition') == 'love >= 5'
 
 
 class TestChoices:

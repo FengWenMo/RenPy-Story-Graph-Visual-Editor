@@ -390,6 +390,29 @@ class TestStoryOps:
         assert story_ops.narrative_operations(_N()) == ['a = 1']
         assert story_ops.tech_operations(_N()) == ['renpy.restart_interaction()']
 
+    # ---- 2026-10-05 审计"双 IR 并存"时抓到的两处误判 ----
+
+    def test_tight_dollar_marker_does_not_hide_a_variable(self):
+        """
+        行首 `\\x01` = 原文写紧凑 `$love += 1`。分类前必须先脱掉它 ——
+        否则赋值正则匹配不上，这条**真实变量**会被当成技术代码藏起来
+        （变量编辑器里整条看不见）。
+        """
+        import storygraph.story.story_ops as story_ops
+        assert story_ops.is_narrative_code('\x01love += 1')
+        assert story_ops.is_narrative_code('\x01flag = True')
+        assert not story_ops.is_narrative_code(
+            '\x01renpy.transition(Dissolve(0.1))')
+
+    def test_store_namespace_is_a_narrative_variable(self):
+        """`store.x` 就是默认命名空间的 `x`（Ren'Py 语义），不是技术代码。"""
+        import storygraph.story.story_ops as story_ops
+        assert story_ops.is_narrative_code('store.love += 1')
+        assert story_ops.is_narrative_code('store.flag = True')
+        # 但引擎模块名开头的仍然是技术代码
+        assert not story_ops.is_narrative_code('renpy.store.x = 1')
+        assert not story_ops.is_narrative_code('persistent.x = 1')
+
 
 # ------------------------------------------------------------------
 # I. 聚合：真实项目的场景（多文件 + 全特性）

@@ -12,7 +12,7 @@ tkinter 在无头环境下是桩，无法验证真实交互；这里只测抽出
 import pytest
 
 from storygraph.assets.asset_registry import AssetRegistry, add_asset_to_registry
-from storygraph.ui.beat_editor import search_assets, beat_to_fields, fields_to_beat
+from storygraph.app.beats import search_assets, beat_to_fields, fields_to_beat
 from storygraph.story.script_table import Beat
 from storygraph.assets.asset_completion import AssetCompletion
 

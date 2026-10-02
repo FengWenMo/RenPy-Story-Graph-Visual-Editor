@@ -17,10 +17,11 @@ storygraph.ui_qt.status
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QStatusBar)
 
-from storygraph.ui import tokens as T
+from storygraph.ui_qt import tokens as T
 
 #: 各级别的停留时长（毫秒）。错误留久一点，让人来得及读。
 _DURATION = {'info': 3000, 'warn': 5000, 'error': 8000}
@@ -147,22 +148,22 @@ class Notifier:
                 self.status_bar.showMessage(str(message).replace('\n', '  '),
                                             8000)
             except Exception:                # noqa: BLE001
-                pass
+                swallow('status._receive')
         if self.toast is not None:
             try:
                 self.toast.show_message(level, message)
             except Exception:                # noqa: BLE001
-                pass
+                swallow('status._receive')
         if self._on_message is not None:
             try:
                 self._on_message(level, message, title)
             except Exception:                # noqa: BLE001
-                pass
+                swallow('status._receive')
 
     def close(self):
         if self._unsubscribe is not None:
             try:
                 self._unsubscribe()
             except Exception:                # noqa: BLE001
-                pass
+                swallow('status.close')
             self._unsubscribe = None

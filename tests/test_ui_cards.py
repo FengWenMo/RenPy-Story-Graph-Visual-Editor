@@ -1,19 +1,30 @@
 """
 tests/test_ui_cards.py
 ======================
-立绘卡改版（2026-09-29）的回归：**按角色聚合**、缩略图缓存键、设计 token。
+立绘卡改版的回归：**按角色聚合**、缩略图缓存键、设计 token、
+Stage 列里的立绘、裸词位置、字数提示、翻页纯导航。
 
-这里全部是**纯逻辑**，不需要实例化 tkinter —— 无头环境（CI）也跑得动。
-界面本身的观感与手感由人工验收（见 docs/卡牌编辑器界面设计规格_v3.md §9）。
+2026-10-01：tkinter 前端已删除。
+  · 纯逻辑（聚合 / 缓存键 / token / Stage 行 / 裸词位置）保持原样，
+    只把 import 指向 `storygraph.app`；
+  · 原来测 tkinter `ThumbLoader` 桩行为的一组删掉了 —— Qt 版
+    `ui_qt.thumb_loader` 用的是 `QTimer` + `'_shutting_down'` 标志，
+    根本没有"没有事件循环就偷偷建线程"这个坑，对应测试由
+    `tests/test_ui_qt.py` 里的 Qt 用例覆盖；
+  · 窗口相关的（翻页纯导航、字数）改成跑**真 Qt 窗口**。
 """
+
+import pytest
+
+from pathlib import Path
 
 from storygraph.story.beat_model import Beat
 from storygraph.story.beat_render import make_symbols
-from storygraph.ui import tokens as T
-from storygraph.ui.beat_editor import (beat_sprite_rows, group_sprites_by_tag,
-                                       lookup_image_id, stage_sprite_rows,
-                                       strip_stage_show_lines)
-from storygraph.ui.thumb_loader import cache_key
+from storygraph.ui_qt import tokens as T
+from storygraph.app.beats import (beat_sprite_rows, group_sprites_by_tag,
+                                  lookup_image_id, stage_sprite_rows,
+                                  strip_stage_show_lines)
+from storygraph.app.thumbs import cache_key
 
 
 def _rows(show):
@@ -83,6 +94,15 @@ class TestGroupSpritesByTag:
 # ==================================================================
 
 class TestCacheKey:
+    """
+    缓存键的内核现在住在 `storygraph.app.thumbs`（框架无关）。
+
+    为什么搬家：它原先在 `storygraph/ui/thumb_loader.py`，
+    而 **Qt 的缩略图加载器也要用它** —— 于是 Qt 前端
+    `from storygraph.ui.thumb_loader import cache_key`，
+    等于"Qt 依赖 tkinter"。搬到 app 层才把这个反向依赖摘掉。
+    """
+
     def test_same_input_is_stable(self):
         assert (cache_key('x.png', (88, 118), (1, 2))
                 == cache_key('x.png', (88, 118), (1, 2)))
@@ -100,6 +120,18 @@ class TestCacheKey:
     def test_size_in_bytes_change_invalidates(self):
         assert (cache_key('x.png', (88, 118), (1, 2))
                 != cache_key('x.png', (88, 118), (1, 99)))
+
+    def test_real_file_uses_stat(self, tmp_path):
+        """不给 stamp 时自己去 stat（真实调用路径）。"""
+        f = tmp_path / 'x.png'
+        f.write_bytes(b'12345')
+        k1 = cache_key(f, (88, 118))
+        f.write_bytes(b'1234567890')
+        assert cache_key(f, (88, 118)) != k1, '文件换了键必须跟着换'
+
+    def test_missing_file_is_safe(self, tmp_path):
+        """文件不存在也不能抛（界面要能降级成占位）。"""
+        assert cache_key(tmp_path / 'nope.png', (88, 118))
 
 
 # ==================================================================
@@ -146,96 +178,7 @@ class TestTokens:
 
 
 # ==================================================================
-#  四、缩略图加载器：没有事件循环就别加载
-# ==================================================================
-
-class TestThumbLoaderGuard:
-    """
-    这条守卫修过一次真实的"测试卡死"：
-
-    测试环境的 tkinter 是桩，widget 没有 `after`（没有事件循环）。
-    第一版代码在 `after` 失败时会**退化成直接在线程池里解码**——
-    于是每个实例化面板的用例都建线程 + 解码真实大图（真实项目 2902 张），
-    全量跑跑到 41% 就被拖到超时（SIGTERM）。
-    正确行为：**没有事件循环就完全不加载**，占位文字代替。
-    """
-
-    class _NoEvents:
-        """像测试桩：什么都没有。"""
-
-    class _WithEvents:
-        def __init__(self):
-            self.calls = []
-
-        def after(self, delay, fn):
-            self.calls.append(delay)
-            return len(self.calls)
-
-        def after_cancel(self, _id):
-            pass
-
-    def test_no_event_loop_does_not_load(self):
-        from storygraph.ui.thumb_loader import ThumbLoader
-
-        loader = ThumbLoader(self._NoEvents(), max_size=(10, 10))
-        got = []
-        loader.request('slot', 'whatever.png',
-                       lambda photo, path: got.append(photo))
-        assert got == [], '没有事件循环时不该加载（更不能偷偷建线程）'
-        assert loader.cache_size == 0
-        loader.shutdown()
-
-    def test_empty_path_short_circuits(self):
-        from storygraph.ui.thumb_loader import ThumbLoader
-
-        loader = ThumbLoader(self._WithEvents(), max_size=(10, 10))
-        got = []
-        loader.request('slot', '', lambda photo, path: got.append(photo))
-        assert got == [None], '空路径应立刻回调（显示占位），不排队等待'
-        loader.shutdown()
-
-    def test_request_is_debounced(self):
-        from storygraph.ui.thumb_loader import ThumbLoader
-
-        widget = self._WithEvents()
-        loader = ThumbLoader(widget, max_size=(10, 10), debounce_ms=77)
-        loader.request('slot', 'x.png', lambda photo, path: None)
-        assert widget.calls == [77], '请求应当被防抖延迟合并，而不是立刻解码'
-        loader.shutdown()
-
-    def test_forget_cancels_pending(self):
-        from storygraph.ui.thumb_loader import ThumbLoader
-
-        loader = ThumbLoader(self._WithEvents(), max_size=(10, 10))
-        loader.request('slot', 'x.png', lambda photo, path: None)
-        loader.forget('slot')
-        assert 'slot' not in loader._pending
-        loader.shutdown()
-
-    def test_accepts_path_object(self):
-        """
-        **回归**：路径可能是 `pathlib.Path`，不是字符串。
-
-        2026-09-30 真实事故：`asset_preview_path()` 返回 `Path`，
-        而加载器写了 `path.strip()` → `AttributeError` →
-        卡片构造崩 → `load_beat` 崩 → **用户看到"立绘全没了"**。
-        假数据（返回空字符串）正好绕过这条路径，所以必须用 Path 测。
-        """
-        from pathlib import Path
-
-        from storygraph.ui.thumb_loader import ThumbLoader
-
-        widget = self._WithEvents()
-        loader = ThumbLoader(widget, max_size=(10, 10))
-        # 关键：**不抛异常**（第一版这里直接 AttributeError，把面板刷新带崩）。
-        # 假 widget 只记录排程、不执行回调（那正是防抖，符合预期）。
-        loader.request('slot', Path('a') / 'b.png', lambda photo, path: None)
-        assert widget.calls, 'Path 入参应被正常排程，而不是崩掉'
-        loader.shutdown()
-
-
-# ==================================================================
-#  五、Stage 列里的立绘（老写法）：用户报"立绘没显示"的那条路
+#  四、Stage 列里的立绘（老写法）：用户报"立绘没显示"的那条路
 # ==================================================================
 
 class TestStageSpriteRows:
@@ -280,7 +223,7 @@ class TestStageSpriteRows:
 
 
 # ==================================================================
-#  六、裸词位置：`凌跃捷 开心 左` 里的"左"是位置，不是表情
+#  五、裸词位置：`凌跃捷 开心 左` 里的"左"是位置，不是表情
 # ==================================================================
 
 class TestSpriteRowsBarePosition:
@@ -315,56 +258,589 @@ class TestSpriteRowsBarePosition:
 
 
 # ==================================================================
-#  七、台词字数统计（超长台词是演出现场真会踩的坑）
+#  六、台词字数统计（超长台词是演出现场真会踩的坑）
 # ==================================================================
-
-class _SpyVar:
-    def __init__(self, value=''):
-        self.value = value
-
-    def set(self, value):
-        self.value = value
-
-    def get(self):
-        return self.value
-
 
 class TestCharCount:
-    def _panel(self, text):
-        from storygraph.ui.beat_editor import BeatEditorPanel
+    """
+    超长台词在**游戏里**会溢出对话框，而编辑器里换行好看 ——
+    这是"作者看不见的坑"，必须给数字与警示。
 
-        panel = BeatEditorPanel.__new__(BeatEditorPanel)
-        panel._vars = {'Text': _SpyVar(text)}
-        panel._multi = set()          # 让 _wget 走 StringVar 分支
-        panel._widgets = {}
-        panel._char_count_var = _SpyVar()
-        panel._char_count_label = None
-        return panel
+    tkinter 版有这一项，搬 Qt 时漏了；这里用真 Qt 卡片测。
+    """
 
-    def test_short_text(self):
-        panel = self._panel('短句。')
-        panel._update_char_count()
-        assert panel._char_count_var.value == '3 字'
+    def test_short_text(self, qapp, ui_window):
+        ui_window._show_index(0)
+        ui_window._panel.set_text('短句。')
+        ui_window._panel.update_char_count()
+        assert ui_window._panel._char_label.text() == '3 字'
 
-    def test_long_text_warns(self):
-        panel = self._panel('长' * 250)
-        panel._update_char_count()
-        assert '250 字' in panel._char_count_var.value
-        assert '超过' in panel._char_count_var.value, '超长要明说，不能只给个数字'
+    def test_long_text_warns(self, qapp, ui_window):
+        ui_window._show_index(0)
+        ui_window._panel.set_text('长' * 250)
+        ui_window._panel.update_char_count()
+        txt = ui_window._panel._char_label.text()
+        assert '250 字' in txt
+        assert '超过' in txt, '超长要明说，不能只给个数字'
 
-    def test_empty_clears_counter(self):
-        panel = self._panel('')
-        panel._update_char_count()
-        assert panel._char_count_var.value == ''
+    def test_empty_clears_counter(self, qapp, ui_window):
+        ui_window._show_index(0)
+        ui_window._panel.set_text('')
+        ui_window._panel.update_char_count()
+        assert ui_window._panel._char_label.text() == ''
 
-    def test_whitespace_not_counted(self):
-        panel = self._panel('a b\nc\nd')
-        panel._update_char_count()
-        assert panel._char_count_var.value == '4 字'
+    def test_whitespace_not_counted(self, qapp, ui_window):
+        ui_window._show_index(0)
+        ui_window._panel.set_text('a b\nc\nd')
+        ui_window._panel.update_char_count()
+        assert ui_window._panel._char_label.text() == '4 字'
 
 
 # ==================================================================
-#  八、立绘解析不能跨角色串图
+#  六·五、立绘缩略图：CG 兜底 / 加载中的可见反馈 / 异步结果不串
+# ==================================================================
+
+class TestSpriteThumbPath:
+    """
+    用户 2026-10-03：
+
+    > 为何卡片界面有立绘时，图片一开始没有显示？为何立绘加载得有点久，
+    > 而 cg 很难出现？
+
+    实测 `sr_general`：`cg03.png` **在磁盘上**（`game/images/cg/cg03.png`），
+    但 2828 条图片记录里**一条 cg 都没有**。旧代码
+    `return self._on_resolve_path(spec) or None` 一拿到 None 就直接放弃，
+    永远走不到"按目录约定猜"那一步 —— 所以立绘（在表里）正常、CG 全灭。
+    """
+
+    @staticmethod
+    def _card(spec, resolver=None, tmp_path=None):
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+        return SpriteCardWidget({'image': spec, 'expression': '',
+                                 'position': '', 'at': '', 'speaking': False,
+                                 'order_index': 0, 'extra_rows': []},
+                                on_resolve_path=resolver)
+
+    def test_falls_back_to_convention_when_resolver_says_none(self, qapp,
+                                                             tmp_path):
+        game = tmp_path / 'game' / 'images' / 'cg'
+        game.mkdir(parents=True)
+        real = game / 'cg03.png'
+        real.write_bytes(b'\x89PNG\r\n\x1a\n')
+        card = self._card('cg cg03', resolver=lambda spec: None)
+        card._loader = None
+        # 注入一个假的 loader：只记录请求到的路径
+        seen = {}
+
+        class _L:
+            project_root = tmp_path
+
+            def request(self, slot, path, apply, max_size=None,
+                        placeholder=None):
+                seen['path'] = path
+        card._loader = _L()
+        card._load_thumb('cg cg03')
+        assert seen.get('path'), 'CG 没能通过目录约定找到文件'
+        assert Path(seen['path']).name == 'cg03.png', seen
+
+    def test_resolver_wins_when_it_finds_something(self, qapp):
+        card = self._card('ling oh', resolver=lambda spec: 'D:/x/ling_oh.png')
+        assert card._thumb_path('ling oh') == 'D:/x/ling_oh.png'
+
+    def test_loading_state_is_visible_not_blank(self, qapp, tmp_path):
+        """解码要时间（立绘 1500×2200）—— 期间必须**看得见"在加载"**。"""
+        card = self._card('ling oh', resolver=lambda spec: 'D:/x/ling_oh.png')
+
+        class _L:
+            project_root = None
+
+            def request(self, slot, path, apply, max_size=None,
+                        placeholder=None):
+                pass
+        card._loader = _L()
+        card._load_thumb('ling oh')
+        assert '…' in card._thumb.text(), f'没有加载提示：{card._thumb.text()!r}'
+        assert '正在加载' in card._thumb.toolTip()
+
+    def test_placeholder_never_says_the_image_is_broken(self, qapp):
+        """
+        骨架占位（loader 起解码时那一下）**不许**写成"读不出来"。
+
+        用户 2026-10-05："卡牌界面图片加载慢" —— 真实立绘是 4320×7680 /
+        9.4 MB，解一张 350~600 ms。以前骨架走的是 `apply(None)`，而那张卡的
+        `apply(None)` 的含义是"**这张图读不出来（可能损坏或格式不支持）**"：
+        图还在解，卡片上就已经在报损坏了。
+        """
+        card = self._card('ling oh', resolver=lambda spec: 'D:/x/ling_oh.png')
+
+        class _L:
+            project_root = None
+            placeholder = None
+            apply = None
+
+            def request(self, slot, path, apply, max_size=None,
+                        placeholder=None):
+                self.placeholder, self.apply = placeholder, apply
+        card._loader = _L()
+        card._load_thumb('ling oh')
+        assert card._loader.placeholder is not None, '没有给 loader 骨架回调'
+        card._loader.placeholder()
+        assert '正在加载' in card._thumb.toolTip(), card._thumb.toolTip()
+        assert '读不出来' not in card._thumb.toolTip(), \
+            '图还在解，卡片上就写着"读不出来"'
+        card._loader.apply(None, 'D:/x/ling_oh.png')     # 这次是真的失败
+        assert '读不出来' in card._thumb.toolTip(), \
+            '真解不出来时反而没说原因'
+
+    def test_missing_image_says_why_instead_of_pretending(self, qapp):
+        card = self._card('nobody x', resolver=lambda spec: None)
+        card._loader = type('L', (), {'project_root': None,
+                                      'request': lambda *a, **k: None})()
+        card._load_thumb('nobody x')
+        assert '找不到' in card._thumb.toolTip(), card._thumb.toolTip()
+
+
+class TestPositionChip:
+    """
+    用户 2026-10-03：
+
+    > 我说的位置不显示，是这个立绘下面的位置没有显示……这是bug，
+    > 明明说了在 i11……
+
+    真相：`at` 在 Ren'Py 里是**持续状态** —— 这一拍只写
+    `show ye base_handdown care`（没有 `at`），`i11` 是更早那一拍
+    `show ye care at i11` 留下的。舞台快照（累积推导）知道它现在在 `i11`，
+    而卡片只读"这一拍自己写的"，于是显示成 `—`。
+    """
+
+    @staticmethod
+    def _card(item):
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+        return SpriteCardWidget(item, on_resolve_path=lambda s: None)
+
+    def test_inherited_position_is_shown_with_a_marker(self, qapp):
+        card = self._card({'image': 'ye base_handdown care', 'expression': '',
+                           'position': '', 'at': '', 'inherited_at': 'i11',
+                           'effective_at': 'i11'})
+        card._loader = None
+        assert 'i11' in card._pos_btn.text(), card._pos_btn.text()
+        assert '继承' in card._pos_btn.text()
+        assert '固定' in card._pos_btn.toolTip()
+
+    def test_own_position_has_no_marker(self, qapp):
+        card = self._card({'image': 'ye happy', 'expression': '',
+                           'position': 'f11', 'at': 'f11',
+                           'inherited_at': '', 'effective_at': 'f11'})
+        card._loader = None
+        assert card._pos_btn.text() == '位置：f11'
+
+    def test_no_position_anywhere_shows_dash(self, qapp):
+        card = self._card({'image': 'ye happy', 'expression': '',
+                           'position': '', 'at': '', 'inherited_at': '',
+                           'effective_at': ''})
+        card._loader = None
+        assert card._pos_btn.text() == '位置：—'
+
+    def test_clicking_an_inherited_position_fixes_it_to_this_beat(self, qapp):
+        """
+        点一下继承来的位置 = **把它固定到这一拍**（值不变），
+        而不是硬跳到候选表第一项把位置改掉。
+        """
+        card = self._card({'image': 'ye base_handdown care', 'expression': '',
+                           'position': '', 'at': '', 'inherited_at': 'i11',
+                           'effective_at': 'i11'})
+        card._loader = None
+        card._symbols = None                  # 没有候选表（自定义 transform）
+        card._pos_btn.click()
+        assert card.item['position'] == 'i11', card.item
+
+    def test_session_exposes_effective_and_inherited_at(self, write_rpy):
+        """会话层要把"当前生效"与"继承来的"算出来给前端。"""
+        from storygraph.app.editor import EditorSession
+
+        src = ('label ch:\n'
+               '    show ye care at i11\n'
+               '    "一"\n'
+               '    show ye base_handdown care\n'
+               '    "二"\n'
+               '    return\n')
+        s = EditorSession()
+        s.load(write_rpy(src, 'ch.rpy'))
+        first = s.cards(0)[0]
+        assert first['effective_at'] == 'i11' and first['inherited_at'] == ''
+        second = s.cards(1)[0]
+        assert second['position'] == '' and second['inherited_at'] == 'i11', second
+
+
+class TestThumbLoaderBehaviour:
+    """异步加载器的两条硬要求：**过期结果必须丢**、**用共享内核解码**。"""
+
+    def test_stale_result_is_dropped(self, qapp, monkeypatch):
+        """
+        同一张卡连续两次请求（换表情）时，先回来的旧结果**不许**顶掉新的。
+
+        旧实现不看 key：旧结果会 `_pending.pop(slot)` 拿到**新请求的回调**
+        并把旧图缓存到**新键**上 —— 表现就是"换了表情/点了 CG 之后图不出来"。
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        jobs = []
+        monkeypatch.setattr(TL.QThreadPool, 'globalInstance',
+                            staticmethod(lambda: type('P', (), {
+                                'start': staticmethod(
+                                    lambda job: jobs.append(job))})()))
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        applied = []
+        loader.request('slot', 'a.png', lambda px, p: applied.append(('a', px)))
+        old_key, old_job = jobs[-1].key, jobs[-1]
+        # 同一张卡又改了（换表情）：新的想头排在旧的后面
+        loader.request('slot', 'b.png', lambda px, p: applied.append(('b', px)))
+        assert len(jobs) == 1, '旧任务还在跑，不该同时排两个'
+        img = QImage(4, 4, QImage.Format.Format_RGBA8888)
+        loader.image_ready.emit('slot', old_key, img, 'a.png')
+        assert [px for _, px in applied if px is not None] == [], \
+            f'过期结果被应用了：{applied}'
+        assert loader._cache, '过期结果本身是一张真图，应该进缓存而不是丢掉'
+        # 旧任务跑完 → 接着解当前想要的那张
+        assert len(jobs) == 2, '旧任务结束后没有接着解最新的那张'
+        loader.image_ready.emit('slot', jobs[-1].key, img, 'b.png')
+        assert applied and applied[-1][0] == 'b' and applied[-1][1] is not None
+        assert old_job.key != jobs[-1].key
+
+    def test_uses_the_shared_decode_kernel(self, qapp, monkeypatch):
+        """
+        解码必须走 `app.thumbs.decode_sync`（解码器级降采样 + 磁盘缓存）。
+
+        旧实现自己 `QImageReader.read()` 整图再缩：立绘 1500×2200、CG 更大，
+        冷缓存下慢得肉眼可见（用户："立绘加载得有点久"）。
+        """
+        from PySide6.QtGui import QImage
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        calls = []
+
+        class _FakePil:
+            mode = 'RGBA'
+            width, height = 8, 6
+
+            def tobytes(self, *a):
+                return bytes(8 * 6 * 4)
+
+        def fake_decode(path, max_size, project_root=None):
+            calls.append((path, tuple(max_size)))
+            return _FakePil()
+
+        monkeypatch.setattr(TL, 'decode_sync', fake_decode)
+        img = TL._decode('some/spec', (16, 16), None)
+        assert calls, '没有走 app.thumbs.decode_sync'
+        assert isinstance(img, QImage) and img.width() == 8
+
+    def test_duplicate_in_flight_request_is_not_queued_twice(self, qapp,
+                                                             monkeypatch):
+        """同一个 slot 反复请求（翻页顺带刷新）不该排出重复的解码任务。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        monkeypatch.setattr(TL.QThreadPool, 'globalInstance',
+                            staticmethod(lambda: type('P', (), {
+                                'start': staticmethod(
+                                    lambda job: started.append(job))})()))
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        loader.request('slot', 'a.png', lambda *a: None)
+        loader.request('slot', 'a.png', lambda *a: None)   # 同一个 key 再要一次
+        loader._pump()
+        assert len(started) == 1, f'同一个 key 排了重复的解码任务：{len(started)}'
+
+    def test_memory_cache_key_uses_resolved_path(self, qapp, tmp_path,
+                                                monkeypatch):
+        """内存缓存的键要用**解析后的真实文件**（spec 上 stat 不到 mtime）。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        real = tmp_path / 'real.png'
+        real.write_bytes(b'x')
+        monkeypatch.setattr(TL, 'resolve_thumb_source',
+                            lambda path, root: str(real))
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        seen = {}
+        monkeypatch.setattr(TL, 'cache_key',
+                            lambda path, size: seen.setdefault('path', path))
+        loader.request('slot', 'cg cg03', lambda *a: None)
+        assert seen.get('path') == str(real), seen
+
+
+class TestThumbLoadingIsFast:
+    """
+    用户 2026-10-05：
+
+    > 现在先优化之前提到的……卡牌界面图片加载慢的问题
+    > ……这个选择器内图片的加载还是不够迅速，优先加载目前在窗口内的图片！
+
+    真实项目的立绘是 **4320×7680 / 9.4 MB** 的 PNG：冷解码 350~600 ms
+    （磁盘缓存命中后 ~1 ms）。所以这里钉几件事：
+
+      · 请求**立刻开工**（不再有"每个 slot 先白等 120ms 防抖"）；
+      · 骨架占位走独立回调，**不许**把"图坏了"提前写到卡片上；
+      · 预取（相邻拍的图）能真的填进缓存，之后请求 0 延迟命中；
+      · **优先级**：窗口内可见的排最前，预取永远排最后（不许挡路）。
+    """
+
+    @staticmethod
+    def _fake_pool(monkeypatch, TL, started):
+        """把全局线程池换成"只记下发了哪些任务"的假货。"""
+        monkeypatch.setattr(TL.QThreadPool, 'globalInstance',
+                            staticmethod(lambda: type('P', (), {
+                                'start': staticmethod(
+                                    lambda job: started.append(job))})()))
+
+    def test_request_starts_immediately(self, qapp, monkeypatch):
+        """请求立刻开工（以前每个 slot 要先白等一个防抖周期）。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        loader.request('slot', 'a.png', lambda *a: None)
+        assert len(started) == 1, '请求没有立刻开工'
+
+    def test_repeat_request_while_decoding_is_merged(self, qapp, monkeypatch):
+        """同一个 slot 在解的过程中又被改 → 只更新想头，不重复排队（chip 连点）。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        loader.request('slot', 'a.png', lambda *a: None)
+        loader.request('slot', 'b.png', lambda *a: None)   # 立刻又改一次
+        assert len(started) == 1, f'第二次请求直接开工了：{len(started)} 个任务'
+
+    def test_in_flight_count_is_bounded(self, qapp, monkeypatch):
+        """
+        同时在解的张数有上限 —— 池子里**只有当下最想要的几张**。
+
+        不限流的话，`QThreadPool` 先进先出：滚过去的几百个任务会挡在
+        "现在看得见的那几张"前面（用户："优先加载目前在窗口内的图片"）。
+        """
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=3)
+        for i in range(20):
+            loader.request(f'slot{i}', f'img{i}.png', lambda *a: None)
+        assert len(started) == 3, f'没有限流，一次排了 {len(started)} 个任务'
+        assert len(loader.queued()) == 17, '其余应该在排队'
+
+    def test_focus_puts_visible_ones_first(self, qapp, monkeypatch):
+        """
+        `focus()` 把**窗口内可见的**提到最前，滚过去的降回普通。
+
+        这就是"优先加载目前在窗口内的图片"的全部机制：排队顺序由我们定，
+        不由 `QThreadPool` 的先进先出定。
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=1)
+        for i in range(6):
+            loader.request(f'slot{i}', f'img{i}.png', lambda *a: None)
+        # 先要的 0..4 在排队，1 号正在解；现在用户滚到了 4/5 那一屏
+        loader.focus(['slot4', 'slot5'])
+        order = loader.queued()
+        assert order[:2] == ['slot4', 'slot5'], \
+            f'窗口内的没有排到最前：{order}'
+        # 正在解的那张跑完 → 下一个必须是可见项，不是"先要的 0 号"
+        job = started[0]
+        img = QImage(4, 4, QImage.Format.Format_RGBA8888)
+        loader.image_ready.emit(job.slot, job.key, img, 'x.png')
+        assert started[-1].slot in ('slot4', 'slot5'), \
+            f'下一个解的不是窗口内的：{started[-1].slot}'
+
+    def test_prefetch_never_jumps_the_queue(self, qapp, monkeypatch):
+        """预取永远排最后 —— 它不许挡着真正要显示的那张。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=1)
+        loader.prefetch('future.png')                 # 先来的预取（正在解）
+        loader.request('card', 'now.png', lambda *a: None)    # 后到的正式请求
+        loader.request('card2', 'now2.png', lambda *a: None)
+        assert len(started) == 1, '限流没生效'
+        assert loader.queued() == ['card', 'card2'], \
+            f'正式请求没有排在预取前面：{loader.queued()}'
+
+        # 预取（正在解的那个）跑完 → 接着解正式请求，预取不插队
+        job = started[0]
+        from PySide6.QtGui import QImage
+        loader.image_ready.emit(job.slot, job.key,
+                                QImage(4, 4, QImage.Format.Format_RGBA8888),
+                                'future.png')
+        assert started[-1].slot == 'card', f'下一个解的是：{started[-1].slot}'
+
+    def test_placeholder_is_called_instead_of_apply_none(self, qapp,
+                                                        monkeypatch):
+        """
+        给了 `placeholder` 就不许再用 `apply(None)` 占位。
+
+        立绘卡的 `apply(None)` 含义是"**这张图读不出来**"：拿它当骨架，
+        图还在解的时候卡片上就已经写着"可能损坏"了。
+        """
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        self._fake_pool(monkeypatch, TL, [])
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        skeleton, applied = [], []
+        loader.request('slot', 'a.png', lambda px, p: applied.append(px),
+                       placeholder=lambda: skeleton.append(1))
+        assert skeleton == [1], '骨架回调没被调用'
+        assert applied == [], f'占位时调用了 apply(None)：{applied}'
+
+    def test_apply_is_not_called_for_pure_prefetch(self, qapp):
+        """预取是"只要缓存"：连 apply=None 也不许炸。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt.thumb_loader import ThumbLoader
+
+        loader = ThumbLoader(QWidget(), max_size=(16, 16))
+        loader._shutting_down = True           # 走"直接放弃"那条路，够验签名
+        loader.prefetch('a.png')
+        assert loader._want == {}
+
+    def test_prefetch_fills_the_cache_so_the_next_request_is_instant(self,
+                                                                    qapp,
+                                                                    tmp_path,
+                                                                    monkeypatch):
+        """
+        预取之后，真正的请求必须**同步**拿到图（不再排解码任务）。
+
+        这就是"翻到下一拍不空等"的全部机制：预取先把图解进内存缓存。
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        jobs = []
+        self._fake_pool(monkeypatch, TL, jobs)
+        loader.prefetch('lan happy')
+        assert len(jobs) == 1, '预取没排任务'
+        slot = jobs[0].slot
+        img = QImage(4, 4, QImage.Format.Format_RGBA8888)
+        loader.image_ready.emit(slot, jobs[0].key, img, 'lan happy')
+        assert loader._cache, '预取结果没有进缓存'
+
+        applied = []
+        loader.request('card-1', 'lan happy', lambda px, p: applied.append(px))
+        assert applied and applied[-1] is not None, '预取之后还要现解一遍'
+        assert len(jobs) == 1, '预取命中了却还是排了新任务'
+
+    def test_prefetch_skips_what_is_already_cached_or_in_flight(self, qapp,
+                                                               monkeypatch):
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16))
+        jobs = []
+        self._fake_pool(monkeypatch, TL, jobs)
+        loader.prefetch('lan happy')
+        loader.prefetch('lan happy')           # 正在解 → 不重复排
+        assert len(jobs) == 1, f'预取重复排了任务：{len(jobs)}'
+
+    def test_clear_pending_drops_queued_but_keeps_running(self, qapp,
+                                                          monkeypatch):
+        """换候选列表 / 换帧时：丢掉还没开始的，正在解的让它跑完（结果进缓存）。"""
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        started = []
+        self._fake_pool(monkeypatch, TL, started)
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=1)
+        loader.request('running', 'a.png', lambda *a: None)
+        loader.request('queued', 'b.png', lambda *a: None)
+        loader.clear_pending()
+        assert 'running' in loader._running, '正在解的被丢掉了（白白浪费）'
+        assert loader.queued() == [], f'排队里还有：{loader.queued()}'
+
+    def test_clear_pending_can_keep_what_the_caller_still_wants(self, qapp,
+                                                               monkeypatch):
+        """
+        `keep(slot)`：只丢**调用方说是旧的**那些。
+
+        演出预览换一帧时要丢掉别的帧的想头，但**预取**（下一拍的图）必须留着 ——
+        否则每翻一页都把刚预热的丢掉，预取等于白做（用户 2026-10-05 说的
+        "蓝色框一闪而过"就又回来了）。
+        """
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        self._fake_pool(monkeypatch, TL, [])
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=1)
+        loader.request('running', 'a.png', lambda *a: None, priority=100)
+        loader.request(('bg', 7), 'b.png', lambda *a: None)      # 别的帧
+        loader.request(('bg', 8), 'c.png', lambda *a: None)      # 这一帧
+        loader.prefetch('d.png')                                 # 预取
+        loader.clear_pending(keep=lambda s: s != ('bg', 7))
+        left = loader.queued()
+        assert ('bg', 7) not in left, f'别的帧的想头没丢掉：{left}'
+        assert ('bg', 8) in left, f'这一帧的想头被误丢了：{left}'
+        assert any(isinstance(s, tuple) and s and s[0] == 'prefetch'
+                   for s in left), f'预取被丢了（白预热）：{left}'
+
+    def test_pump_fills_from_cache_when_another_slot_already_decoded_it(
+            self, qapp, monkeypatch):
+        """
+        **同一张图**在排队期间被别的 slot 解好了 → 直接回填，不再解第二遍。
+
+        演出预览里最明显：预取和当前帧要的是同一张图，不查缓存就每张都解两遍
+        （白等一个解码时间，正好是"占位框多闪一会儿"）。
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QWidget
+
+        from storygraph.ui_qt import thumb_loader as TL
+
+        loader = TL.ThumbLoader(QWidget(), max_size=(16, 16), max_in_flight=1)
+        jobs = []
+        self._fake_pool(monkeypatch, TL, jobs)
+        loader.prefetch('lan happy')            # 占住唯一的线程
+        assert len(jobs) == 1
+        applied = []
+        loader.request('card-1', 'lan happy', lambda px, p: applied.append(px))
+        # 预取的结果回来了（按它自己的 key 进缓存）
+        img = QImage(4, 4, QImage.Format.Format_RGBA8888)
+        loader.image_ready.emit(jobs[0].slot, jobs[0].key, img, 'lan happy')
+        assert len(jobs) == 1, '缓存里已经有了还排新任务（同一张图解了两遍）'
+        assert applied and applied[-1] is not None, '缓存回填没走到回调'
+
+
+# ==================================================================
+#  七、立绘解析不能跨角色串图
 # ==================================================================
 
 class TestLookupImageId:
@@ -402,7 +878,7 @@ class TestLookupImageId:
 
 
 # ==================================================================
-#  九、翻页是**纯导航**（不改任何一拍的数据）
+#  八、翻页是**纯导航**（不改任何一拍的数据）
 # ==================================================================
 
 class TestPagingIsPureNavigation:
@@ -416,59 +892,48 @@ class TestPagingIsPureNavigation:
     现在翻页只提交**当前这一拍**的编辑，别的拍一个字符都不许动。
     """
 
-    def _win(self, speakers):
-        from storygraph.ui.beat_editor import ScriptTableEditorWindow
-
-        win = ScriptTableEditorWindow.__new__(ScriptTableEditorWindow)
-        win.beats = [Beat(seq=i + 1, label='a', text='x', speaker=sp)
-                     for i, sp in enumerate(speakers)]
-        win._loaded_idx = 0
-        # 只测"导航"这件事本身：把"提交当前拍"与"渲染"换成记账
-        win.apply_current_beat = lambda: None
-        win._show_index = lambda i: setattr(win, '_loaded_idx', i)
-        return win
-
-    def test_rotation_helper_is_gone(self):
+    def test_rotation_helper_is_gone(self, qapp, ui_window):
         """轮转自动填充必须**整个删除**，不是"加个守卫"——
         只要它还在，就有第二次被接到导航路径上的机会。"""
-        from storygraph.ui.beat_editor import ScriptTableEditorWindow
-        assert not hasattr(ScriptTableEditorWindow, '_advance_speaker')
+        assert not hasattr(ui_window, '_advance_speaker')
+        assert not hasattr(ui_window, '_active_rotation')
 
-    def test_next_beat_touches_nothing_but_the_index(self):
-        win = self._win(['dhy', '', 'lyj'])
-        before = [(b.speaker, b.text, b.kind) for b in win.beats]
-        win.next_beat()
-        after = [(b.speaker, b.text, b.kind) for b in win.beats]
+    def test_next_beat_touches_nothing_but_the_index(self, qapp, ui_window):
+        ui_window._show_index(0)
+        before = [(b.speaker, b.text, b.kind) for b in ui_window.beats]
+        ui_window.next_beat()
+        after = [(b.speaker, b.text, b.kind) for b in ui_window.beats]
         assert before == after, '翻页不许改任何一拍的数据'
-        assert win._loaded_idx == 1
+        assert ui_window._loaded_idx == 1
 
-    def test_prev_beat_touches_nothing(self):
-        win = self._win(['dhy', '', 'lyj'])
-        win._loaded_idx = 2
-        before = [(b.speaker, b.text) for b in win.beats]
-        win.prev_beat()
-        assert before == [(b.speaker, b.text) for b in win.beats]
-        assert win._loaded_idx == 1
+    def test_prev_beat_touches_nothing(self, qapp, ui_window):
+        ui_window._show_index(2)
+        before = [(b.speaker, b.text) for b in ui_window.beats]
+        ui_window.prev_beat()
+        assert before == [(b.speaker, b.text) for b in ui_window.beats]
+        assert ui_window._loaded_idx == 1
 
-    def test_first_and_last_are_stops(self):
-        win = self._win(['dhy'])
-        win.prev_beat()
-        assert win._loaded_idx == 0
-        win.next_beat()
-        assert win._loaded_idx == 0, '已经是最后一拍就不动'
+    def test_first_and_last_are_stops(self, qapp, ui_window):
+        """两端到头就不动（**而且 `_loaded_idx` 不许变成 -1**）。"""
+        ui_window._show_index(0)
+        ui_window.prev_beat()
+        assert ui_window._loaded_idx == 0
+        last = len(ui_window.beats) - 1
+        ui_window._show_index(last)
+        ui_window.next_beat()
+        assert ui_window._loaded_idx == last, '最后一拍之后不该越界'
 
-    def test_fill_speaker_from_participant_only_touches_current_beat(self):
+    def test_fill_speaker_from_participant_only_touches_current_beat(
+            self, qapp, ui_window):
         """
         便利性用**显式动作**保留：双击参与角色 → 填进**眼前这一拍**。
         别的拍照样不许动。
         """
-        from storygraph.ui.beat_editor import ScriptTableEditorWindow
-
-        win = self._win(['', '', ''])
-        win._highlight_speaker = lambda *a, **k: None
-        win._set_note = lambda *a, **k: None
-        win._panel = None
-        win.fill_speaker_from_participant('lyj')
-        assert win.beats[0].speaker == 'lyj'
-        assert win.beats[1].speaker == ''
-        assert win.beats[2].speaker == ''
+        ui_window._show_index(0)
+        target = ui_window._who.item(0)
+        if target is None:
+            pytest.skip('这个夹具项目没有参与角色')
+        before = [b.speaker for b in ui_window.beats]
+        ui_window._fill_speaker(target)
+        assert ui_window.beats[0].speaker == target.text()
+        assert [b.speaker for b in ui_window.beats[1:]] == before[1:]

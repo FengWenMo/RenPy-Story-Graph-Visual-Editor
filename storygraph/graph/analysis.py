@@ -610,6 +610,42 @@ def root_nodes(graph) -> list:
     return [nid for nid in graph.nodes if nid not in has_incoming]
 
 
+def reachable_from_all_roots(graph) -> set:
+    """
+    从**任意**无入边节点出发能走到的节点集合（纯图可达，**不看条件**）。
+
+    用途：区分两种"走不到" —— 这个区别决定了图上标红还是打灰虚线：
+
+      · 从某个入口走不到、但从**别的**入口可达 → 通常是独立章节 /
+        被菜单或外部调用进入，工程本身没问题，不该报红；
+      · 从**任何**入口都走不到（被关在一个没有入口的环里）
+        → 真的断了，这才是"逻辑漏洞"。
+
+    只看结构、不看条件：这里回答的是"图上通不通"，
+    "分支条件是否恒假"由 `analyze_reachability_full` 的区间分析负责
+    （它报的是"下落风险"，另一类问题）。
+
+    一个没有无入边节点的图（整张图都在环里）返回全部节点 ——
+    这种图没有"入口"可言，不能据此断言谁走不到。
+    """
+    nodes = getattr(graph, 'nodes', None) or {}
+    roots = root_nodes(graph)
+    if not roots:
+        return set(nodes)
+    out_edges = {}
+    for edge in (getattr(graph, 'edges', {}) or {}).values():
+        out_edges.setdefault(edge.from_id, []).append(edge.to_id)
+    seen = set(roots)
+    stack = list(roots)
+    while stack:
+        nid = stack.pop()
+        for nxt in out_edges.get(nid, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
 def pick_entry_node(graph):
     """
     挑可达性分析的起点，返回 ``(node_id, reason)``；空图返回 ``(None, 'empty')``。
@@ -858,13 +894,20 @@ def analyze_reachability(graph, start_node_id=None):
 
 def visualize_analysis_results(graph, entry_states, warnings,
                                entry_id=None, independent=None,
-                               independent_ids=None):
+                               independent_ids=None,
+                               operations_filter=None):
     """
     把分析结果渲染成人看的文本。
 
     entry_id / independent_ids 由 `analyze_reachability_full` 给出：
     入口节点标「← 分析入口」，未接入主线的独立入口标「独立入口」而不是
     「不可达」——否则多章节工程里每个章节文件都会被说成走不到。
+
+    `operations_filter(node) -> list`（可选）：渲染「操作」那一行时用哪批操作。
+    用户 2026-10-03 明确要求**变量的视图里不许出现技术代码的名字**
+    （"技术代码不是变量，是具体的实现细节"），所以 app 层会传进来一个
+    "只取剧情变量"的过滤器。默认 None = 原样列出（保持本函数的通用性，
+    也不让 graph 层去依赖 story 层的 `story_ops`）。
     """
     independent_ids = set(independent_ids or ())
     independent_names = set(independent or ())
@@ -876,12 +919,15 @@ def visualize_analysis_results(graph, entry_states, warnings,
             if nid == entry_id:
                 result_text += "  ← 分析入口\n"
             result_text += f"  入口状态: {state}\n"
+            shown = (list(operations_filter(node)) if operations_filter
+                     else list(node.operations))
+            label = '剧情变量' if operations_filter else '操作'
             current = state.copy()
-            for op in node.operations:
+            for op in shown:
                 current = apply_operation(current, op)
-            if node.operations:
+            if shown:
                 result_text += f"  出口状态: {current}\n"
-            result_text += f"  操作: {node.operations if node.operations else '无'}\n"
+            result_text += f"  {label}: {shown if shown else '无'}\n"
         elif nid in independent_ids or node.label_name in independent_names:
             result_text += "  状态: 独立入口（无入边，不参与主线可达性）\n"
         else:

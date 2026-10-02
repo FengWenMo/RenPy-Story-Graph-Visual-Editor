@@ -16,6 +16,7 @@ storygraph.parsing.discover
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 #: 这些目录名出现在路径里就跳过：翻译产物、引擎自带目录、缓存。
@@ -25,6 +26,16 @@ SKIP_DIR_PARTS = frozenset({
 
 #: 本工具自己生成的产物后缀：不能被当成"项目原文"扫进来（否则自我循环）。
 GENERATED_SUFFIX = '.generated.rpy'
+
+#: `label 名字:`（行首、允许缩进）。只用来回答"这个 label 在哪个文件里"，
+#: 不替代解析器 —— 跑一次正则比解析 40 个文件快得多，而且这个问题
+#: （"还缺哪个文件"）只在用户导入时问一次。
+_LABEL_RE = re.compile(r'^[ \t]*label[ \t]+([A-Za-z_]\w*)[ \t]*(?:\([^)]*\))?[ \t]*:',
+                       re.MULTILINE)
+
+#: `jump 名字` / `call 名字`（含 `call X from Y` 那种）。同样只用于
+#: "谁引用了这一章"这种导航性问题，不做语法判断。
+_REF_RE = re.compile(r'^[ \t]*(?:jump|call)[ \t]+([A-Za-z_]\w*)', re.MULTILINE)
 
 
 def discover_scripts(project_root, extra_dirs=None) -> list:
@@ -55,4 +66,71 @@ def discover_scripts(project_root, extra_dirs=None) -> list:
     return found
 
 
-__all__ = ['discover_scripts', 'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']
+def find_label_files(project_root, labels) -> dict:
+    """
+    `{label 名: 声明它的 .rpy}` —— 只回答"这个 label 在哪个文件里"。
+
+    用途（用户 2026-10-03："我连线呢！？"）：剧情图上出现了**没有源文件的
+    占位块** —— 别的章节 `jump/call` 到了它，但那个文件还没被导入，
+    所以连线画不出来。这时要能一句话告诉用户"还缺哪个文件"，
+    并且支持一键把它们一起导入。
+
+    实现刻意用**正则扫一遍**而不是解析器：这个问题只在导入/提示时问一次，
+    40 个小文件跑正则远快于跑一遍完整解析；而且它不需要 AST 级别的准确度
+    （找不到就归到 `unknown`，由调用方如实告知）。
+
+    返回里只包含**找得到**的 label；调用方自己算差集 = 找不到的那些。
+    """
+    wanted = {str(x) for x in (labels or ()) if str(x)}
+    if not wanted:
+        return {}
+    found: dict = {}
+    for fp in discover_scripts(project_root):
+        try:
+            text = fp.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        for m in _LABEL_RE.finditer(text):
+            name = m.group(1)
+            if name in wanted and name not in found:
+                found[name] = fp
+        if len(found) == len(wanted):
+            break
+    return found
+
+
+def find_files_referencing_labels(project_root, labels) -> dict:
+    """
+    `{label 名: [引用它的 .rpy, ...]}` —— 谁 `jump`/`call` 了这些 label。
+
+    和 `find_label_files` 是**两个方向**，两个都要（用户 2026-10-03 实测）：
+
+      · 声明方向 → 图上有**占位块**时用（别的章节跳到它，文件没导入）；
+      · 引用方向 → 导入的章节**自己不含跳转**时用（串起它们的是另一个
+        文件，比如 `chapter_controller.rpy`）。
+
+    只做声明方向的话，`chapter1_1/1_2/1_3` 这种情况会**什么都提示不出来**
+    —— 因为它们自己没跳转、也没人跳到它们之外的缺失文件，
+    结果就是用户对着一张没有线的图继续猜"我连线呢？"。
+    """
+    wanted = {str(x) for x in (labels or ()) if str(x)}
+    if not wanted:
+        return {}
+    found: dict = {}
+    for fp in discover_scripts(project_root):
+        try:
+            text = fp.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        for m in _REF_RE.finditer(text):
+            name = m.group(1)
+            if name in wanted:
+                found.setdefault(name, [])
+                if fp not in found[name]:
+                    found[name].append(fp)
+    return found
+
+
+__all__ = ['discover_scripts', 'find_label_files',
+           'find_files_referencing_labels',
+           'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']

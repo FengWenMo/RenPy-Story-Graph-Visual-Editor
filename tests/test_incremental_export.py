@@ -324,17 +324,23 @@ class TestFailSafe:
             f'reasons={res.reasons} coverage={res.coverage}'
 
     def test_deleted_beat_is_reported(self, write_rpy):
-        """表里删掉一拍：本轮不支持删行 → 必须报出来并退回全量
-        （否则源文件与表永远不一致，而用户以为删掉了）。"""
+        """
+        表里删掉一拍：**现在真的会删掉那几行**（2026-10-05 实现增量删行）。
+
+        以前这里断言"必须退回全量"——那是"不支持删行"时代的契约。
+        现在的契约是：删掉的行必须**真的从产物里消失**，而且其余部分
+        一个字节不动（下面的 `test_deleted_beat_keeps_everything_else`）。
+        """
         fp, beats = _beats_of(write_rpy, TRICKY)
         beats = [b for b in beats if b.text != '好感不够']
         for b in beats:
             b.src_first = b.src_last = 0        # 模拟"从表里读回来"没有行号
         full = render_beats_to_rpy(beats)
         res = patch_export(beats, fp, full)
-        assert res.dropped_beats >= 1
-        assert not res.ok
-        assert any('删' in r for r in res.reasons)
+        assert res.dropped_beats >= 1, '删掉的拍没被检测出来'
+        assert res.removed_lines >= 1, '没有真的删行'
+        assert '好感不够' not in res.text, '删掉的台词还在产物里'
+        assert res.ok, f'删行被否掉：{res.reasons}'
 
 
 class TestRangeRecovery:
@@ -503,3 +509,375 @@ class TestRealChapterIncremental:
         p = RenPyParser()
         p.parse(out)
         assert not p.errors, p.errors
+
+
+class TestInsertedBeatLands:
+    """
+    2026-10-05 用户追问："你预料到增加新卡片或者删除原卡片的对照了吗？"
+
+    实测（真实项目 `chapter1_2`，214 拍）：插入一张卡片 → 新拍 `src_first=0`
+    → 补丁的 `usable` 把"没有行号的拍"整个过滤掉 → **新卡片的内容静默丢失**，
+    而且报告"增量成功"（替换 0 行、无原因）。全量产物里倒是有 —— 也就是说
+    用户点了导出、看到"成功"，文件里却没有那句台词。
+
+    修法：给新拍一个**插入锚点**（前一拍的末行），合并时按"插入"处理，
+    缩进借锚点行（`render_beat_to_rpy` 返回的是不带基础缩进的相对行）。
+    """
+
+    SRC = (
+        'label ch01:\n'
+        '    "第一句"\n'
+        '    "第二句"\n'
+        '    "第三句"\n'
+        '    return\n'
+    )
+
+    def _loaded(self, write_rpy):
+        fp = write_rpy(self.SRC, 'proj/game/ch01.rpy')
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(fp)))
+        return fp, beats
+
+    def test_inserted_beat_is_spliced_in(self, write_rpy):
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._loaded(write_rpy)
+        beats.insert(1, Beat(seq=0, label='ch01', kind='say',
+                             speaker='jc', text='新插进来的一句'))
+        full = render_beats_to_rpy(beats)
+        res = patch_export(beats, fp, full)
+        assert '新插进来的一句' in res.text, '插入的台词没进产物'
+        assert res.inserted_lines >= 1, '没有走插入通道'
+        assert res.ok, f'增量被否掉：{res.reasons}'
+        # 插在了正确的位置（第二句之后、原来的"第二句"之前）
+        lines = res.text.splitlines()
+        idx = next(i for i, ln in enumerate(lines) if '新插进来的一句' in ln)
+        assert '第一句' in lines[idx - 1], lines
+        assert '第二句' in lines[idx + 1], lines
+        # **缩进必须跟着锚点**（否则 parser 会把文件结构读坏）
+        assert lines[idx].startswith('    '), repr(lines[idx])
+
+    def test_inserted_beat_product_reparses_with_one_more_beat(
+            self, write_rpy, tmp_path):
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._loaded(write_rpy)
+        before = len(beats)
+        beats.append(Beat(seq=0, label='ch01', kind='say', speaker='jc',
+                          text='追加的一句'))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        out = tmp_path / 'patched.rpy'
+        out.write_text(res.text, encoding='utf-8')
+        again = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(out)))
+        assert len(again) == before + 1, \
+            f'插入后拍数不对：{len(again)}（期望 {before + 1}）'
+
+    def test_unmodified_file_is_still_byte_identical(self, write_rpy):
+        """插入通道不许影响"没改就一个字节不动"这条契约。"""
+        fp, beats = self._loaded(write_rpy)
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.text == fp.read_text(encoding='utf-8')
+        assert res.inserted_lines == 0
+
+    def test_inserted_beat_survives_a_second_export(self, write_rpy):
+        """
+        **连导两次**，插入的那句必须还在（用户 2026-10-05 实测的静默丢失）。
+
+        根因：第一次导出把锚点写进了新拍的 `src_first/src_last`，于是它不再是
+        "没有行号的拍" —— **第二次导出**被当成"替换一行"处理，对位守卫判
+        "这段不像这一拍"就跳过；而"什么都没改"（补丁结果 == 原文）又跳过了整体
+        校验 → 报告"增量补丁：改动 0 行"，产物里那句**没了**。
+        修法：锚点存成运行期字段 `insert_anchor`，`src_first` 保持 0，
+        每次导出都按"插入"重算；另外加一条"新增内容没落地 → 退回全量"的兜底。
+        """
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._loaded(write_rpy)
+        beats.insert(1, Beat(seq=0, label='ch01', kind='say', speaker='jc',
+                             text='连导两次也要在的一句'))
+        full = render_beats_to_rpy(beats)
+        res1 = patch_export(beats, fp, full)
+        assert '连导两次也要在的一句' in res1.text, res1.reasons
+        res2 = patch_export(beats, fp, full)
+        assert '连导两次也要在的一句' in res2.text, \
+            f'第二次导出把它丢了：ok={res2.ok} reasons={res2.reasons}'
+        assert res2.inserted_lines >= 1, '第二次导出没有走插入通道'
+        # 而且**绝不许报告成功却丢内容**
+        assert res2.ok or res2.reasons
+
+
+class TestTableRowInsertLands:
+    """
+    用户 2026-10-05：
+
+    > 增量的修改没有问题，插入功能却永远只插到前面……
+
+    **表格那条路**（.xlsx 里插一行 → 「⤒ 从剧本表写回 .rpy」）实测抓到两个坑：
+
+      · 表里读出来的拍**没有行号**，位置靠 `difflib` 对位现算；对位给新增行
+        的"插入点"原先被当成**替换**处理 —— 插入点正好落在 `label ch01:`
+        那一行时，对位守卫判"这段不像这一拍"就跳过了，而"什么都没改"时
+        又跳过了整体校验 → **导出报告成功、产物里却没有那句台词**；
+      · 于是"在最前面插一行"这种写法直接就没了。
+
+    修法：对位算出来的插入点收进 `inserted_out`，交给**插入通道**（缩进借锚点
+    行）；另外加一道"新增的拍一行都没落地 → 退回全量"的兜底，宁可重生成，
+    也绝不报告成功却丢内容。
+    """
+
+    SRC = (
+        '# 文件头注释（必须保住）\n'
+        'label ch01:\n'
+        '    scene bg room\n'
+        '    "第一句旁白"\n'
+        '    ling "有说话人的一句"\n'
+        '    "第三句旁白"\n'
+        '    return\n'
+    )
+
+    def _table_beats(self, write_rpy):
+        """按**表格那条路**准备：解析出来之后把行号全清掉。"""
+        fp = write_rpy(self.SRC, 'proj/game/ch01.rpy')
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(fp)))
+        for b in beats:
+            b.src_first = b.src_last = 0
+        return fp, beats
+
+    def test_row_inserted_at_the_front_actually_lands(self, write_rpy):
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._table_beats(write_rpy)
+        beats.insert(0, Beat(seq=0, label='ch01', kind='say', speaker='jc',
+                             text='表格里新插的第一行'))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert '表格里新插的第一行' in res.text, \
+            f'新增行被静默丢了：{res.reasons}'
+        assert res.inserted_lines >= 1, '没有走插入通道'
+        lines = res.text.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if '表格里新插的第一行' in ln)
+        assert lines[i].startswith('    '), f'缩进丢了：{lines[i]!r}'
+        assert lines[i - 1].strip().startswith('label'), lines[i - 1]
+
+    def test_row_inserted_in_the_middle_lands_at_its_own_place(self, write_rpy):
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._table_beats(write_rpy)
+        # 拍序列 = [scene+第一句旁白, 有说话人的一句, 第三句旁白]
+        # 插在中间（第 2 个下标）→ 应该落在"有说话人的一句"之后
+        beats.insert(2, Beat(seq=0, label='ch01', kind='say', speaker='jc',
+                             text='表格里新插的中间行'))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        lines = res.text.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if '表格里新插的中间行' in ln)
+        assert '有说话人的一句' in lines[i - 1], lines
+        assert '第三句旁白' in lines[i + 1], lines
+
+    def test_never_reports_success_when_a_new_row_did_not_land(self, write_rpy):
+        """
+        **绝不"报告成功、东西没了"**：新增的拍一行都没落地时，必须 ok=False
+        （调用方据此退回全量重生成）。
+        """
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._table_beats(write_rpy)
+        # 一个**诡异的锚点**（文件头那一行之前，没有前邻居）：
+        # 无论补丁怎么处理，只要产物里没有这句，就不许说 ok。
+        beats.insert(0, Beat(seq=0, label='不存在的label', kind='say',
+                             speaker='jc', text='没有源拍可依附的一句'))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        landed = '没有源拍可依附的一句' in res.text
+        assert landed or not res.ok, \
+            f'报告成功却没有那句台词：ok={res.ok} reasons={res.reasons}'
+
+
+class TestInsertIntoBlockStaysStructurallyValid:
+    """
+    用户 2026-10-05："插入功能却永远只插到前面" 排查时抓到的一类：
+
+    在**菜单选项拍**后面插一张卡，锚点行是 `"去屋顶看看":`（块头），
+    紧贴着插出来的产物是
+
+        menu:
+            "去屋顶看看":
+            "新台词"          ← 和选项同级 —— Ren'Py 要的是缩进块，直接不认
+                jump ch01_roof
+
+    修法（`_insert_anchor`）：锚点是块头时退到**最外层包围块**（`menu:`），
+    把新行插在**整个块之后**、与块头同级；`label …:` 例外（插在它后面正是
+    "这一章第一拍"）。
+    """
+
+    SRC = (
+        'label ch01:\n'
+        '    "开场旁白"\n'
+        '    menu:\n'
+        '        "去屋顶看看":\n'
+        '            jump ch01_roof\n'
+        '        "先回教室":\n'
+        '            jump ch01_class\n'
+        '\n'
+        'label ch01_roof:\n'
+        '    "屋顶"\n'
+        '    return\n'
+        '\n'
+        'label ch01_class:\n'
+        '    "教室"\n'
+        '    return\n'
+    )
+
+    def _loaded(self, write_rpy):
+        fp = write_rpy(self.SRC, 'proj/game/ch01.rpy')
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(fp)))
+        return fp, beats
+
+    def _insert_after(self, write_rpy, match, text='新插的一句'):
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._loaded(write_rpy)
+        idx = next(i for i, b in enumerate(beats)
+                   if match in (b.text or ''))
+        beats.insert(idx + 1, Beat(seq=0, label=beats[idx].label or 'ch01',
+                                   kind='say', speaker='jc', text=text))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        return res, text
+
+    def test_after_the_last_menu_option_it_leaves_the_block(self, write_rpy):
+        res, text = self._insert_after(write_rpy, '先回教室')
+        lines = res.text.splitlines()
+        i = next(k for k, ln in enumerate(lines) if text in ln)
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        assert indent == 4, \
+            f'插成了块里的一句（缩进 {indent}）：{lines[max(0, i - 3):i + 2]}'
+        assert 'jump ch01_class' in lines[i - 1], lines[max(0, i - 3):i + 2]
+        assert res.text.index(text) < res.text.index('label ch01_roof')
+
+    def test_after_the_first_menu_option_too(self, write_rpy):
+        res, text = self._insert_after(write_rpy, '去屋顶看看')
+        lines = res.text.splitlines()
+        i = next(k for k, ln in enumerate(lines) if text in ln)
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        assert indent == 4, f'缩进不对：{lines[max(0, i - 3):i + 2]}'
+
+    def test_after_a_label_head_is_the_first_beat_of_that_label(self, write_rpy):
+        """锚点是 `label ch01:` 时插在它后面 —— 别一路退到几百行以后。"""
+        from storygraph.story.beat_model import Beat
+        fp, beats = self._loaded(write_rpy)
+        beats.insert(0, Beat(seq=0, label='ch01', kind='say', speaker='jc',
+                             text='这一章的第一句'))
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        lines = res.text.splitlines()
+        i = next(k for k, ln in enumerate(lines) if '这一章的第一句' in ln)
+        assert lines[i - 1].strip().startswith('label'), lines[max(0, i - 3):i + 2]
+        assert lines[i].startswith('    '), repr(lines[i])
+
+
+class TestEditedBeatActuallyLands:
+
+    """
+    2026-10-05 用**真实项目**验证增量生成时抓到的两个 P0：
+
+      ① 改**旁白**（没有说话人的台词）→ 导出后那句台词**静默保持原样**；
+      ② 删掉一拍 → 导出后那一拍**还在文件里**（且报告"增量成功"）。
+
+    ①的根因：`_range_looks_like` 用 `beat.text`（**当前**文本）判断"这段原文
+    属于这一拍"，而用户刚把它改掉 —— 原文里当然找不到新文本，于是判成
+    "源码区间对不上"跳过。有说话人的台词因为还能匹配说话人，所以一直没暴露。
+    ②的根因：`dropped`（"表里删了拍"）只在 `recover_source_ranges` 里算，
+    而那个函数**只在拍上没有行号时**才被调用；编辑器那条路拍上都带行号
+    （载入章节 → 删卡片 → 导出），于是删拍检测整个被跳过。
+    """
+
+    SRC = (
+        '# 文件头注释（必须保住）\n'
+        'label ch01:\n'
+        '    scene bg room\n'
+        '    "第一句旁白"\n'
+        '    ling "有说话人的一句"\n'
+        '    "第三句旁白"\n'
+        '    return\n'
+    )
+
+    @staticmethod
+    def _loaded(write_rpy, src=None):
+        """按**编辑器那条路**载入：走 beats_from_parse_result（带行号）。"""
+        fp = write_rpy(src or TestEditedBeatActuallyLands.SRC,
+                       'proj/game/ch01.rpy')
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(fp)))
+        return fp, beats
+
+    def test_edited_narration_lands_in_the_patch(self, write_rpy):
+        fp, beats = self._loaded(write_rpy)
+        narr = next(b for b in beats if not (b.speaker or '').strip()
+                    and (b.text or '').strip())
+        narr.text = narr.text + '（改过）'
+        full = render_beats_to_rpy(beats)
+        res = patch_export(beats, fp, full)
+        assert '（改过）' in res.text, \
+            f'改过的旁白没进产物（stale={res.stale_beats}）'
+        assert res.ok, f'增量被否掉：{res.reasons}'
+        # 没动的地方逐字节不动
+        assert res.text.splitlines()[0] == '# 文件头注释（必须保住）'
+        assert 'ling "有说话人的一句"' in res.text
+
+    def test_edited_narration_only_changes_one_line(self, write_rpy):
+        fp, beats = self._loaded(write_rpy)
+        narr = next(b for b in beats if not (b.speaker or '').strip()
+                    and (b.text or '').strip())
+        narr.text = narr.text + '！'
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        orig = fp.read_text(encoding='utf-8').splitlines()
+        assert res.changed_lines == 1, f'改动行数不是 1：{res.changed_lines}'
+        new = res.text.splitlines()
+        diff = [i for i, (a, b) in enumerate(zip(orig, new)) if a != b]
+        assert len(diff) == 1, f'不同的行不止一处：{diff}'
+
+    def test_deleted_beat_keeps_everything_else(self, write_rpy):
+        """
+        删一拍：**只有那一拍的行消失**，其余（含文件头注释）逐字节不动。
+
+        这是"增量删行"的核心契约 —— 全量重生成同样能删掉那一拍，
+        但它会把注释和排版一起重排，那正是用户不要的。
+        """
+        fp, beats = self._loaded(write_rpy)
+        gone = beats[1].text
+        beats.pop(1)
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.ok, f'删行被否掉：{res.reasons}'
+        assert res.removed_lines == 1, res.removed_lines
+        before = fp.read_text(encoding='utf-8').splitlines()
+        expected = [ln for ln in before if gone not in ln]
+        assert res.text.splitlines() == expected, '删多了或删错了行'
+        assert res.text.splitlines()[0] == '# 文件头注释（必须保住）'
+
+    def test_deleted_beat_is_detected_even_with_line_numbers(self, write_rpy):
+        """
+        拍上**有行号**时也要查"表里删了拍"（编辑器那条路就是这样），
+        而且现在**真的会删行**（2026-10-05 实现了增量删行）。
+        """
+        fp, beats = self._loaded(write_rpy)
+        assert beats[0].src_first, '这条用例要的是"带行号"的拍'
+        gone = beats[1].text
+        beats.pop(1)                      # 删掉中间那一拍
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.dropped_beats >= 1, '删掉的拍没被检测出来'
+        assert res.removed_lines >= 1, '没有真的删行'
+        assert gone not in res.text, f'删掉的台词还在产物里：{gone!r}'
+        assert res.ok, f'删行被否掉：{res.reasons}'
+
+    def test_deleted_beat_is_actually_gone_after_full_fallback(self, write_rpy):
+        """退回全量之后，删掉的那一拍必须真的不在产物里。"""
+        fp, beats = self._loaded(write_rpy)
+        gone = beats[1].text
+        beats.pop(1)
+        full = render_beats_to_rpy(beats)
+        res = patch_export(beats, fp, full)
+        final = res.text if res.ok else full
+        assert gone not in final, f'删掉的台词还在产物里：{gone!r}'
+
+    def test_empty_chapter_reason_is_distinct(self, write_rpy):
+        """纯 init/python 文件没有拍 —— 原因要与"没有源文件"分开报。"""
+        fp = write_rpy('init python:\n    x = 1\n', 'proj/game/pure.rpy')
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(fp)))
+        res = patch_export(beats, fp, 'generated')
+        assert not res.ok
+        assert any('没有解析出任何拍' in r for r in res.reasons), res.reasons

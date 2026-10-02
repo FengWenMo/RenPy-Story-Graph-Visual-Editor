@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.statement import is_tight_dollar, strip_marker
 
 from storygraph.story.beat_model import (
     Beat,
@@ -87,36 +88,52 @@ def _emit_image_name(name: str, resolver=None) -> str:
 
 
 
-def _render_code_block(text: str) -> list:
+def render_code_block(text: str, multiline: str = 'auto') -> list:
     """
-    CodeBlock（保真后门）→ 代码行，**不解析、不校验**。
+    CodeBlock / python op（保真后门）→ 代码行，**不解析、不校验**。
 
     处理三类内容：
       · `$ x += 1`            → 原样
       · `with dissolve`       → 原样（原生语句）
       · `x += 1` / `renpy.x()` → 补 `$`（裸 python 表达式在 Ren'Py 里必须带 $）
       · 带缩进的多行（`python:` 块的块体）→ 包回 `python:` 块，保持结构
+
+    `multiline`：
+      · `'auto'`（默认，卡片那条路）：多行但**没有缩进**时逐行写 `$ …`；
+      · `'python'`（控制流导出那条路）：多行一律包成 `python:` 块 ——
+        与它一直以来的产物形状一致（多行 op 在原文件里本来就是 `python:` 块）。
+
+    **这份实现是"python op → 源文本"的唯一规则源**（2026-10-05 审计"两套
+    .rpy 生成器"时合并）：`pipeline/renpy_exporter` 以前自己手写
+    `f"    $ {op}"`，而它不知道行首 `\\x01`（紧凑 `$code`）这个约定，
+    于是把控制字符原样写进了 .rpy（实测产物里 `$ ^Apersistent…`）。
+    两个生成器现在都调这里，约定只有一份。
     """
     lines = _split_lines(text)
     if not lines:
         return []
-    if any(ln != ln.lstrip() for ln in lines):
+    if any(ln != ln.lstrip() for ln in lines) or (multiline == 'python'
+                                                  and len(lines) > 1):
         return ['python:'] + [('    ' + ln) if ln.strip() else '' for ln in lines]
     out = []
     for ln in lines:
         s = ln.strip()
         # 行首 `\x01` = 原文写的是 `$code`（`$` 后无空格），原样还回去。
         # 不还的话每个 `$` 行都会变成一个 diff 块。
-        tight = s.startswith('\x01')
+        tight = is_tight_dollar(s)
         if tight:
-            s = s.lstrip('\x01').strip()
+            s = strip_marker(s).strip()
         if tight:
             out.append('$' + s)
         elif s.startswith('$') or _looks_like_renpy_statement(s):
-            out.append(ln)
+            out.append(strip_marker(ln))
         else:
             out.append('$ ' + s)
     return out
+
+
+#: 旧名（模块内一直在用）。新代码请用 `render_code_block`。
+_render_code_block = render_code_block
 
 
 
@@ -728,7 +745,8 @@ def make_symbols(registry=None, keywords=None):
 
 def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
                         indent: str = '    ', registry=None,
-                        symbols=None, trace: list = None) -> str:
+                        symbols=None, trace: list = None,
+                        include_transforms: bool = True) -> str:
     """
     Beat 列表 → 完整 .rpy 文本。
 
@@ -740,6 +758,11 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         `transform` 定义前置到文件头，让产物自包含；
       · 建立符号表，把 `[显示] 凌跃捷 开心 左` 翻成 `show ling close_happy at left`；
       · 找不到资源就写 `# TODO: 缺少资源 …`，**不报错、不中断**。
+
+    `include_transforms=False`：**不写 transform 定义段**（只留文件头 + label）。
+    给"项目里已经有 definitions.rpy 定义过这些 transform"的场合用 ——
+    否则退回全量重生成会把同一批定义**重复写进章节文件**（用户 2026-10-05 实测：
+    `chapter1_1` 151 行、`chapter3_1` 473 行差异主要就是这一段）。
     """
     from storygraph.story.dsl import Audit
 
@@ -749,7 +772,7 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
 
     out = ['# 由剧本表自动生成，请勿在此文件手工改动结构']
 
-    if registry is not None:
+    if registry is not None and include_transforms:
         used = collect_used_transforms(beats)
         defs = render_transform_definitions(registry, used)
         if defs:

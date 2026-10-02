@@ -1,7 +1,20 @@
 """
-storygraph.ui.tokens —— 界面设计 token 的**唯一来源**。
+storygraph.ui_qt.tokens —— 界面设计 token 的**唯一来源**。
 
-为什么要有这个模块（2026-09-29）
+位置变更（2026-10-01）
+---------------------
+本文件原先住在 `storygraph/ui/`（tkinter 前端）里。清理 tkinter 时发现：
+**Qt 前端自己也在 import 它**（`theme` / `main_window` / `graph_canvas` /
+`dialogs` / `asset_picker` / `sprite_grid` / `stage_preview` / `status`
+八处）——因为它是**纯数据**（色值 / 字号 / 间距），一行 tkinter 都没有。
+所以它跟着 Qt 前端走，而不是跟着 tkinter 一起被删。
+
+`FONTS` 里的值仍是 tkinter 风格的元组（`('微软雅黑', 9, 'bold')`），
+这是**刻意的数据契约**：`ui_qt.theme` 负责把它翻译成 Qt 的
+family / pt / weight 三件套。保持元组形态，让"色号与字号"这份数据
+只有一个定义处。
+
+为什么要有一个模块（2026-09-29）
 --------------------------------
 界面改版前，色值/字号/间距是**散落在各处的字面量**
 （`fg='#888'`、`font=('微软雅黑', 7)`、`pady=6`…），后果有两个：
@@ -63,6 +76,11 @@ LIGHT = {
     #    用同一份值（游戏里那块屏幕不跟着编辑器换主题）。放这里是为了
     #    遵守"界面代码不许写死色值"这条契约，而不是因为要分主题。
     'stage.letterbox': '#101418',      # 舞台底（没有背景图时的黑边）
+    # **加载中**：图已经解析到、只是在解 —— 画得越低调越好（用户 2026-10-05：
+    # "总会有一个蓝色框当占位符一闪而过，影响观感"）。真正**找不到图**才用下面
+    # 那组亮蓝的占位块（那是要用户去修的，必须显眼）。
+    'stage.loading': '#151A22',
+    'stage.loadingOutline': '#232C3A',
     'stage.placeholder': '#2B3A55',    # 找不到图时的占位块
     'stage.placeholderOutline': '#4A90D9',
     'stage.speaking': '#1B3B6F',       # 正在说话的那张
@@ -119,6 +137,8 @@ DARK = {
 
     # 演出预览：画的是游戏画面，两套主题共用（见 LIGHT 里的说明）
     'stage.letterbox': '#101418',
+    'stage.loading': '#151A22',        # 加载中的低调底（见 LIGHT 里的说明）
+    'stage.loadingOutline': '#232C3A',
     'stage.placeholder': '#2B3A55',
     'stage.placeholderOutline': '#4A90D9',
     'stage.speaking': '#1B3B6F',
@@ -162,7 +182,7 @@ def t(key: str, theme_name: str = None) -> str:
 
 
 # ==================================================================
-#  字体（tkinter 用 pt；96dpi 下 1pt ≈ 1.33px）
+#  字体（**tkinter 风格的元组**，由 `ui_qt.theme` 翻译成 Qt 三件套）
 # ==================================================================
 
 FONTS = {
@@ -199,9 +219,13 @@ MOTION = {
 # ==================================================================
 
 CARD = {
-    'w': 100, 'h': 176,
+    #: 缩略图放大过一轮（用户 2026-10-03："卡牌窗口那个立绘部分实在是太小了，
+    #: 图我都看不清楚，请你把它拉高点"）。旧值 88×118 在 1080p 上确实看不清。
+    #: `h` 必须与"内边距 + 图 + 名字条 + 徽标行"自洽 ——
+    #: `tests/test_ui_cards.py::test_card_geometry_is_self_consistent` 钉着它。
+    'w': 168, 'h': 254,
     'pad': 6,
-    'thumbW': 88, 'thumbH': 118,
+    'thumbW': 148, 'thumbH': 196,
     'nameH': 18,
     'chipH': 20, 'chipRowH': 22,
     'closeW': 16, 'closeHit': 24,
@@ -209,9 +233,9 @@ CARD = {
     'gap': 8,
 }
 CARD_COMPACT = {
-    'w': 76, 'h': 132,
+    'w': 124, 'h': 186,
     'pad': 6,
-    'thumbW': 64, 'thumbH': 86,
+    'thumbW': 104, 'thumbH': 132,
     'nameH': 16,
     'chipH': 18, 'chipRowH': 20,
     'closeW': 14, 'closeHit': 22,

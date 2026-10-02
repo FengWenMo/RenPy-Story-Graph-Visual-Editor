@@ -347,9 +347,15 @@ def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
         if nid not in coords:
             coords[nid] = (max_layer + 1, 0)
 
-    for u, v in self_loops:
-        if u in coords:
-            coords[u] = (coords[u][0], coords[u][1] + node_gap * 0.5)
+    # 自环**不再**给节点加偏移。
+    #
+    # 旧实现把带自环的节点沿 y 推 `node_gap * 0.5`，本意是"给自环腾地方"，
+    # 实际效果是把这块**正好推到同层邻居身上**（同层间距就是 node_gap，
+    # 推半格 = 压掉一半）——真实项目 51 个块里有 3 对因此重叠。
+    # 自环现在由前端画在块的右侧（见 `ui_qt.graph_canvas.EdgeItem._points`），
+    # 不需要在坐标里腾地方。
+    # 自环本身已经在上面的 `break_cycles` 之前被摘出来（不参与分层），
+    # 所以这里什么都不用做。
 
     for nid, (x, y) in coords.items():
         graph.nodes[nid].x = x

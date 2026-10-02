@@ -18,6 +18,28 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+#: `$` 语句"紧凑写法"的**行首标记**（见 `Statement.make_python`）。
+#:
+#: 为什么要有这个常量（2026-10-05 审计"双 IR / 两套生成器"时抓到的真 bug）：
+#: 这个标记以前是**三处各自硬编码**的 `'\x01'`（`statement.py` 写、`beat_model.py`
+#: 读、`beat_render.py` 再读），而 `pipeline/renpy_exporter` **根本不知道它** ——
+#: 于是导出控制流时把标记原样写进了 .rpy：
+#:
+#:     $ ^Apersistent.lock_lst["cg01"]= True      ← 控制字符，Ren'Py 直接不认
+#:
+#: 约定只能有一份：谁要拼 `$` 语句、谁要判分类，都从这里拿。
+MARKER = '\x01'
+
+
+def is_tight_dollar(code) -> bool:
+    """这条 python op 原文是紧凑写法（`$x = 1`，`$` 后没有空格）吗？"""
+    return str(code or '').startswith(MARKER)
+
+
+def strip_marker(code) -> str:
+    """去掉行首那个记号，拿到**真正的代码文本**（分类 / 抽变量 / 渲染都要先过它）。"""
+    return str(code or '').lstrip(MARKER)
+
 
 class StatementKind:
     """Statement 的 kind 常量。"""
@@ -381,10 +403,10 @@ class Statement:
         )
 
     @classmethod
-    def make_call(cls, target, condition='', source=('', 0)):
+    def make_call(cls, target, condition='', source=('', 0), from_clause=''):
         return cls(
             kind=StatementKind.CALL,
-            payload={'target': target},
+            payload={'target': target, 'from_clause': from_clause},
             condition=condition,
             source=source,
             content_hash='',
@@ -414,7 +436,7 @@ class Statement:
         payload 形状不变，对 content_hash / 表格列 / 其他消费者都没有影响。
         """
         if not dollar_space:
-            code = '\x01' + (code or '')
+            code = MARKER + (code or '')
         return cls(
             kind=StatementKind.PYTHON,
             payload={'code': code},

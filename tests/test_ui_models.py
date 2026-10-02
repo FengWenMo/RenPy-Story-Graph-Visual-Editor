@@ -10,7 +10,7 @@ UI 数据源层（asset_panel / asset_completion）测试。
 import pytest
 
 from storygraph.assets.asset_registry import AssetRegistry
-from storygraph.ui.asset_panel import AssetPanelData
+from storygraph.app.asset_panel import AssetPanelData
 from storygraph.assets.asset_completion import AssetCompletion
 
 

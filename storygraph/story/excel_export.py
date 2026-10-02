@@ -12,6 +12,7 @@ storygraph.story.excel_export
 """
 
 from __future__ import annotations
+from storygraph.core.safeguard import swallow
 import re
 from io import BytesIO
 from pathlib import Path
@@ -571,7 +572,7 @@ def _thumbnail_bytes(path, project_root=None):
             try:
                 im.draft('RGB', (_GALLERY_THUMB_PX, _GALLERY_THUMB_PX))
             except Exception:             # noqa: BLE001 - PNG 不支持，忽略
-                pass
+                swallow('excel_export._thumbnail_bytes')
             im = im.convert('RGBA')
             im.thumbnail((_GALLERY_THUMB_PX, _GALLERY_THUMB_PX))
             buf = BytesIO()
@@ -582,8 +583,8 @@ def _thumbnail_bytes(path, project_root=None):
     if cache_file is not None:
         try:
             cache_file.write_bytes(data)
-        except OSError:
-            pass
+        except OSError as e:
+            swallow('excel_export._thumbnail_bytes', e)
     return data
 
 
@@ -956,8 +957,8 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
         beats = _read_beats_from_ws(ws)
         hydrate_from_dsl(beats, make_symbols(registry))
         _write_stage_snapshot_sheet(wb, beats)
-    except Exception:
-        pass
+    except Exception as e:
+        swallow('excel_export.refresh_candidate_sheets', e)
 
     wb.save(table_path)
     return table_path

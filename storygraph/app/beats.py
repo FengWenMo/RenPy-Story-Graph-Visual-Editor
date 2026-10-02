@@ -14,13 +14,14 @@ storygraph.app.beats
   · Qt 前端与 tkinter 前端从此共用同一份，**不可能各写一套**。
 
 契约（勿破）：
-  · 本模块**禁止** import 任何 UI 框架，也禁止 import `storygraph.ui*`；
-  · `ui/beat_editor.py` 作为兼容门面 re-export 这里的一切，
-    老的 `from storygraph.ui.beat_editor import beat_to_fields` 继续可用。
+  · 本模块**禁止** import 任何 UI 框架，也禁止 import `storygraph.ui_qt*`；
+  · 编辑语义**只有这一份**：2026-10-01 tkinter 前端（`storygraph/ui/`）
+    已整个删除，前端只剩 `ui_qt`，它也只做"摆控件 / 读表单 / 写表单"。
 """
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 from pathlib import Path
 from typing import Optional
 
@@ -177,6 +178,10 @@ def beat_to_fields(beat: Beat, symbols=None) -> dict:
         'Kind': beat.kind,
         'Speaker': beat.speaker,
         'Text': beat.text,
+        # 条件显示（`if <条件>:`）—— 数据层一直有 `Beat.condition`，
+        # 但当年**从没暴露给策划**（既不在表里也不在卡片里）。
+        # 卡片上做成「＋ 条件」按钮，取字段就是这里。
+        'condition': beat.condition,
         'Expression': beat_expression_word(beat, symbols),
         'Position': beat_position_word(beat, symbols),
         'Scene': beat.scene,
@@ -288,7 +293,7 @@ def beat_sprite_rows(beat: Beat, symbols=None) -> list:
                     at = attrs[-1]
                     attrs = attrs[:-1]
             except Exception:                # noqa: BLE001
-                pass
+                swallow('beats.beat_sprite_rows')
         probe = Beat(seq=1, label='', text='',
                      show=' '.join([tag] + attrs))
         probe.at = at
@@ -327,15 +332,39 @@ def cards_to_show(cards: list, symbols=None) -> str:
         if not image:
             continue
         for extra in it.get('extra_rows') or []:
-            parts.append((extra.get('image') or '').strip())
+            # **逐条位置必须跟着一起带回**（用户 2026-10-05 实测的"学姐第一次
+            # 出场位置丢了"）：一拍里同一角色先 `show ye happy at i11` 再换表情
+            # `show ye care` 时，前一条落在 `extra_rows` 里 —— 原先只带回
+            # `image`，于是 `at i11` 被吃掉，产物变成 `show ye happy`。
+            #
+            # 触发点很隐蔽：**翻到下一句 / 保存 / 导出 / 增删卡**都会先把当前拍
+            # 提交一遍（`apply_current_beat`），而提交就是"卡片 → show"这条路，
+            # 所以只要在那一拍上待过，位置就悄悄没了。
+            ex_image = str(extra.get('image') or '').strip()
+            if not ex_image:
+                continue
+            ex_at = normalize_position(
+                str(extra.get('position') or '').strip()
+                or str(extra.get('at') or '').strip(), symbols)
+            parts.append(f'{ex_image}@{ex_at}' if ex_at else ex_image)
         expr = normalize_expression_words(str(it.get('expression') or ''),
                                           image, symbols)
         spec = image
         if expr:
             tag = image.split()[0]
             spec = ' '.join([tag] + expr)
-        at = (str(it.get('position') or '').strip()
-              or str(it.get('at') or '').strip())
+        # 位置也要**归一**（中文词 → transform 名）。
+        #
+        # 2026-10-01 修：位置 chip 的候选是中文人话（`左` / `右边`…），
+        # 而这里原先直接把它拼进 `show` —— 于是中文漏进脚本：
+        # `show eileen sad@左`。tkinter 版的 `_collect_sprites` 当年
+        # 做过这一步归一，搬 Qt 时丢了（`normalize_position` 一直在，
+        # 只是**没人调**）。
+        # 认不出来的自定义 transform（`i11` / `靠左站`）原样保留 ——
+        # 宁可不猜，也不能把作者写的变换名改坏。
+        at = normalize_position(
+            str(it.get('position') or '').strip()
+            or str(it.get('at') or '').strip(), symbols)
         if at:
             spec += f'@{at}'
         parts.append(spec)
@@ -457,7 +486,7 @@ def stage_sprite_rows(stage_text: str, symbols=None) -> list:
                     at = attrs[-1]
                     attrs = attrs[:-1]
             except Exception:                # noqa: BLE001
-                pass
+                swallow('beats.stage_sprite_rows')
         piece = ' '.join([target] + attrs)
         if at:
             piece += '@' + at
@@ -503,6 +532,31 @@ def apply_sprite_rows(show: str, rows: list) -> str:
         at = (row.get('at') or '').strip()
         out.append({'clause': '', 'image': image, 'at': at})
     return _join_show_items(out + kept)
+
+
+def speaker_missing_warning(beat: Beat) -> str:
+    """
+    有台词、却没有任何说话人 → 导出后就是旁白，这里说清楚。
+
+    `extend` 例外：它本来就不带说话人（续上一句），渲染成 `extend "…"`。
+    旁白（`narration`）也例外——它**就是**旁白。
+
+    为什么要有这条（用户 2026-09-28 报"幽灵旁白"）：当时卡片上什么都没提示，
+    只看得出「说话人」是空的——而空着也能点「下一句」，错误就被带过去了。
+    宁可吵一点，也不要让"会变成旁白"的拍静默通过。
+
+    返回 '' 表示不需要提示（调用方据此清掉提示条）。
+    这里**只算文案**，怎么显示由前端决定（`app` 层不认识控件）。
+    """
+    if not (beat.text or '').strip():
+        return ''
+    if beat.speaker:
+        return ''
+    if beat.kind in ('narration', 'extend'):
+        return ''
+    return ('⚠ 这一拍有台词但没有说话人 —— 导出后会变成**旁白**。\n'
+            f'   kind={beat.kind!r}，请确认这句是谁说的；'
+            '若确实是旁白，把「类型」改成 narration。')
 
 
 def inherited_state_hint(beats: list, idx: int) -> str:
@@ -580,8 +634,8 @@ def speaking_sprite_index(beat: Beat, rows: list, symbols=None) -> int:
             hit = find(symbols.actor_image_tag(who))
             if hit >= 0:
                 return hit
-        except Exception:
-            pass
+        except Exception as e:
+            swallow('beats.speaking_sprite_index', e)
     hit = find(who)
     if hit >= 0:
         return hit

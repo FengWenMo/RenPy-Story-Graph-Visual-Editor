@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
 from storygraph.app.beats import choices_for_image, uniform_sprite_position
-from storygraph.ui import tokens as T
+from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
 CARD_W = T.CARD['w'] + 26            # 卡片宽（含 chip 行）
@@ -38,6 +38,53 @@ def uniform_position_of(cards: list) -> str:
     rows = [{'at': (str(c.get('position') or '').strip()
                     or str(c.get('at') or '').strip())} for c in cards]
     return uniform_sprite_position(rows)
+
+
+def sprite_thumb_size() -> tuple:
+    """卡片上立绘缩略图的解码尺寸（**唯一的真源**）。"""
+    return (THUMB_W, THUMB_H)
+
+
+def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
+    """
+    立绘 image spec → 磁盘上的真实图片路径（卡片与预取共用这一份）。
+
+    两级查找，**第二级是关键**：
+
+      1. 主窗口注入的解析器（`session.path_of_image`）—— 真源是资源表的
+         `Path` 列，最准；
+      2. 它查不到时**退回按 Ren'Py 的目录约定猜**
+         （`<tag> <attrs>` → `game/images/<tag>/<attrs>.png`）。
+
+    为什么必须有第 2 级：CG 这类图**往往不在资源表里**（实测
+    `sr_general`：`cg03.png` 在磁盘上，但 2828 条图片记录里一条 cg 都没有）。
+    以前一拿到 None 就放弃，`_guess_image_path` 永远走不到 ——
+    于是"CG 很难出现"，而立绘（在表里）正常，看起来像"只有 CG 坏了"。
+    """
+    spec = str(spec or '').strip()
+    if not spec:
+        return None
+    if resolver is not None:
+        try:
+            found = resolver(spec)
+        except Exception:                    # noqa: BLE001
+            found = None
+        if found:
+            return found
+    parts = [p for p in spec.split() if p]
+    if len(parts) < 2 or not project_root:
+        return None
+    rel = '/'.join([parts[0], '_'.join(parts[1:])])
+    try:
+        from storygraph.story.excel_export import resolve_thumb_source
+        for cand in (f'game/images/{rel}.png', f'game/images/{rel}.webp',
+                     f'images/{rel}.png', f'{rel}.png'):
+            found = resolve_thumb_source(cand, project_root)
+            if found:
+                return found
+    except Exception:                        # noqa: BLE001
+        return None
+    return None
 
 
 class SpriteCardWidget(QFrame):
@@ -116,8 +163,23 @@ class SpriteCardWidget(QFrame):
         self._name.setText(spec if spec else '（点击换图）')
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
+        inherited = str(self.item.get('inherited_at') or '').strip()
         self._expr_btn.setText(f'表情：{expr or "—"}')
-        self._pos_btn.setText(f'位置：{pos or "—"}')
+        # 位置**继承**自更早的拍（Ren'Py 的 `at` 是持续状态）时也要显示出来 ——
+        # 用户 2026-10-03："明明说了在 i11，卡片上却是空的"。
+        # 标一个「继承」是为了不让人以为"这一拍自己写了这个位置"：
+        # 保存时**只写这一拍真正有的值**，点一下 chip 才会把它固定下来。
+        if pos:
+            self._pos_btn.setText(f'位置：{pos}')
+            self._pos_btn.setToolTip('这一拍自己写了位置')
+        elif inherited:
+            self._pos_btn.setText(f'位置：{inherited}（继承）')
+            self._pos_btn.setToolTip(
+                f'这一拍没写位置，屏幕上沿用的是更早那一拍的 `at {inherited}`。\n'
+                f'点一下即可把它固定到这一拍。')
+        else:
+            self._pos_btn.setText('位置：—')
+            self._pos_btn.setToolTip('这一拍没有位置（也没人可继承）')
         self.setProperty('speaking', 'true' if self.item.get('speaking') else 'false')
         self.style().unpolish(self)
         self.style().polish(self)
@@ -126,60 +188,49 @@ class SpriteCardWidget(QFrame):
     def _load_thumb(self, spec):
         if self._loader is None or not spec:
             self._thumb.setText('＋')
+            self._thumb.setToolTip('')
             return
         slot = ('card', id(self), spec)
         path = self._thumb_path(spec)
+        tag = spec.split()[0]
         if not path:
-            self._thumb.setText(spec.split()[0])
+            self._thumb.setText(tag)
+            self._thumb.setToolTip(
+                f'找不到这张图：{spec}\n'
+                f'（资源表里没有，按 game/images/{tag}/ 也没猜出来；'
+                f'检查文件名或补进资源表）')
             return
+
+        # 先给"正在加载"的可见反馈：立绘 1500×2200、CG 更大，解码要时间。
+        # 用户 2026-10-03："有立绘时图片一开始没有显示" —— 以前这里只是
+        # 显示一个标签名，看起来就像坏了；现在写明在加载什么。
+        #
+        # 这个"骨架"走独立的 `placeholder` 回调（2026-10-05）：以前它是
+        # loader 用 `apply(None)` 触发的，而 `apply(None)` 在本卡里表示
+        # "这张图读不出来" —— 于是图还在解的时候卡片就已经写着"可能损坏"了。
+        # 真实项目里立绘是 4320×7680 / 9.4 MB，这一等是肉眼可见的。
+        def loading():
+            self._thumb.setText(f'{tag} …')
+            self._thumb.setToolTip(f'正在加载：{path}')
 
         def apply(pixmap, _p):
             if pixmap is not None:
                 self._thumb.setPixmap(pixmap)
+                self._thumb.setToolTip(f'{spec}\n{path}')
             else:
-                self._thumb.setText(spec.split()[0])
+                self._thumb.setText(tag)
+                self._thumb.setToolTip(f'这张图读不出来（可能损坏或格式不支持）：\n{path}')
+        self._thumb.setText(f'{tag} …')
+        self._thumb.setToolTip(f'正在加载：{path}')
         self._loader.request(slot, str(path), apply,
-                             max_size=(THUMB_W, THUMB_H))
+                             max_size=(THUMB_W, THUMB_H),
+                             placeholder=loading)
 
     def _thumb_path(self, spec):
-        """
-        立绘 image spec → 磁盘上的真实图片路径。
-
-        为什么不能只看 `symbols`：`symbols`（`make_symbols` 的结果）
-        **没有** `registry` 属性，所以早期写法
-        `getattr(self._symbols, 'registry', None)` 恒为 None，
-        → 缩略图永远加载不出来（卡片只剩名字，静默失效）。
-
-        现在由主窗口注入 `on_resolve_path`（真源是资源表的 `Path` 列）；
-        没注入时退回"按 Ren'Py 的 images 目录约定猜一下"，
-        猜不到就显示名字 —— **降级可见，不假装成功**。
-        """
-        if self._on_resolve_path is not None:
-            try:
-                return self._on_resolve_path(spec) or None
-            except Exception:                # noqa: BLE001
-                return None
-        return self._guess_image_path(spec)
-
-    def _guess_image_path(self, spec):
-        """兜底：`ling happy` → `<项目>/game/images/ling/happy.png`（逐个试）。"""
-        parts = [p for p in str(spec or '').split() if p]
-        if len(parts) < 2:
-            return None
-        root = getattr(self._loader, 'project_root', None)
-        if not root:
-            return None
-        rel = '/'.join([parts[0], '_'.join(parts[1:])])
-        try:
-            from storygraph.story.excel_export import resolve_thumb_source
-            for cand in (f'game/images/{rel}.png', f'game/images/{rel}.webp',
-                         f'images/{rel}.png', f'{rel}.png'):
-                found = resolve_thumb_source(cand, root)
-                if found:
-                    return found
-        except Exception:                    # noqa: BLE001
-            return None
-        return None
+        """立绘 image spec → 磁盘路径（规则在 `resolve_sprite_thumb_path`）。"""
+        return resolve_sprite_thumb_path(
+            spec, self._on_resolve_path,
+            getattr(self._loader, 'project_root', None))
 
     def _cycle(self, field):
         """
@@ -187,17 +238,32 @@ class SpriteCardWidget(QFrame):
 
         候选由 `app.beats.choices_for_image` 给出 —— 拿这一张卡自己的
         image spec 去问符号表，问不到就什么都不做。
+
+        位置那一格有个特例：显示的是**继承**来的值（更早那一拍的 `at`），
+        而候选表里往往没有这个写法（项目自定义 transform 如 `i11`）。
+        这时第一次点 = **把它固定到这一拍**（值不变，但从此写进这一拍），
+        而不是硬跳到候选表的第一项把位置改掉。
         """
         opts = choices_for_image(str(self.item.get('image') or ''),
                                  self._symbols)
         choices = list(opts.get(field) or [])
         cur = str(self.item.get(field) or '').strip()
+        if not cur and field == 'position':
+            cur = str(self.item.get('inherited_at') or '').strip()
+        if not cur and not choices:
+            return
+        # 当前值不在候选表里（项目自定义的写法，如 `i11`）：
+        # 点一下 = 把它**固定到这一拍**（值不变，但从此会写进这一拍）。
+        # 顺序很重要：候选表为空时也要能固定，所以这一支放在"没有候选就返回"之前。
+        if cur and cur not in choices:
+            self.item[field] = cur
+            self.refresh()
+            if self._on_change is not None:
+                self._on_change(self)
+            return
         if not choices:
             return
-        if cur in choices:
-            nxt = choices[(choices.index(cur) + 1) % len(choices)]
-        else:
-            nxt = choices[0]
+        nxt = choices[(choices.index(cur) + 1) % len(choices)]
         self.item[field] = nxt
         self.refresh()
         if self._on_change is not None:
@@ -248,6 +314,40 @@ class SpriteGridWidget(QWidget):
 
     def cards(self) -> list:
         return [c.item for c in self._cards]
+
+    def prefetch(self, items: list, limit: int = 8):
+        """
+        后台**预取**几拍之后的立绘缩略图（不画任何卡）。
+
+        用户 2026-10-05：
+
+        > 现在先优化之前提到的……卡牌界面图片加载慢的问题
+
+        真实项目的立绘是 4320×7680 / 9.4 MB 的 PNG：**冷解码约 350~600 ms**
+        （磁盘缓存命中后 ~1 ms）。翻拍时每张新脸都要现解，一卡就是半秒。
+        所以主窗口在看这一拍时，把**相邻几拍**的图先解进 loader 的缓存 ——
+        等真翻过去，`request` 直接命中内存缓存，0 延迟。
+
+        路径与尺寸都走**卡片自己那两条**（`resolve_sprite_thumb_path` +
+        `sprite_thumb_size`），否则缓存键对不上，预取等于白做。
+        `limit` 卡住"一次最多预取几张"，免得把线程池全占了、反把当前这一拍
+        挤到后面。
+        """
+        loader = self._loader
+        if loader is None or not items:
+            return
+        root = getattr(loader, 'project_root', None)
+        seen = set()
+        for it in items:
+            if len(seen) >= max(0, int(limit)):
+                break
+            spec = str((it or {}).get('image') or '').strip()
+            if not spec or spec in seen:
+                continue
+            seen.add(spec)
+            path = resolve_sprite_thumb_path(spec, self._on_resolve_path, root)
+            if path:
+                loader.prefetch(str(path), max_size=sprite_thumb_size())
 
     def load(self, items: list):
         """items：卡 item 列表（见模块 docstring 的数据契约）。"""

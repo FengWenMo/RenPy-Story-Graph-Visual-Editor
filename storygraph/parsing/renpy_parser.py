@@ -105,6 +105,7 @@ Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -546,6 +547,8 @@ class JumpNode(ASTNode):
 @dataclass
 class CallNode(ASTNode):
     target: str = ''
+    #: `call X from Y` 的 `Y`（空 = 没写）
+    from_clause: str = ''
 
 
 @dataclass
@@ -750,6 +753,8 @@ class RenPyParser:
     _RE_CALL_SCREEN = re.compile(r'^call\s+screen\b')
     _RE_JUMP = re.compile(r'^jump\s+([\w.]+)')
     _RE_CALL = re.compile(r'^call\s+([\w.]+)')
+    #: `call X from Y` 里的 Y（存档点标识）
+    _RE_CALL_FROM = re.compile(r'\bfrom\s+([A-Za-z_]\w*)')
     _RE_RETURN = re.compile(r'^return\s*$')
     _RE_DOLLAR = re.compile(r'^\$\s*(.+)')
     _RE_PYTHON = re.compile(r'^python(?:\s+[\w. ]+)?\s*:')
@@ -1106,6 +1111,10 @@ class RenPyParser:
                 indent=line.indent,
                 filename=line.filename,
                 target=m.group(1),
+                # `call X from Y`：Y 是**存档点标识**（同一个 label 被多处
+                # call 时靠它区分存档属于哪一处）。丢了它对老存档不友好。
+                from_clause=(self._RE_CALL_FROM.search(text).group(1)
+                             if self._RE_CALL_FROM.search(text) else ''),
             )
 
         # ---- return ----
@@ -2148,7 +2157,8 @@ class ParseResultBuilder:
             elif isinstance(node, CallNode):
                 add_stmt(Statement.make_call(
                     node.target, accum_cond,
-                    source=(node.filename, node.line_number)))
+                    source=(node.filename, node.line_number),
+                    from_clause=getattr(node, 'from_clause', '')))
 
             elif isinstance(node, ReturnNode):
                 add_stmt(Statement.make_return(
@@ -2160,10 +2170,19 @@ class ParseResultBuilder:
                 # 导致"else 里的 jump/台词"在图上是无条件边、在表里
                 # Condition 列空白——和 GraphBuilder 的语义不一致。
                 # 现在两条路径（AST 图 / Statement 图）用同一套组合规则。
+                #
+                # **elif 也一样**：`if a / elif b / else` 的第 2 个分支隐含
+                # "a 没走"。以前只 AND 了 b 自己，于是 `if score>3: jump X /
+                # elif score>1: jump Y` 的第 2 条边条件写成 `score > 1`
+                # （比实际宽），图上标签会误导人、按图导出也会写错分支。
                 prev_conds = []
                 for cond, block in node.branches:
                     if cond:
                         child_cond = self._combine(accum_cond, cond)
+                        if prev_conds:
+                            neg = ' or '.join(f'({c})' for c in prev_conds)
+                            child_cond = (f"({child_cond}) and not ({neg})"
+                                          if child_cond else f"not ({neg})")
                         prev_conds.append(cond)
                     else:
                         neg = ' or '.join(f'({c})' for c in prev_conds)
@@ -2202,7 +2221,7 @@ class GraphBuilder:
         self.graph = graph
         self._label_to_nid: dict = {}
         self.warnings: list = []
-        self._existing_edges: set = set()
+        self._existing_edges: dict = {}
 
     def build(self, ast_nodes: list, clear_graph: bool = True):
         """AST 入口（保留给直接吃 AST 的调用方与既有测试）。"""
@@ -2274,8 +2293,8 @@ class GraphBuilder:
             node = self.graph.nodes[nid]
             try:
                 node.file_path, node.line_number = pos
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                swallow('renpy_parser.build_from_statements', e)
 
         for i, st in enumerate(statements):
             label = statement_labels[i] if i < len(statement_labels) else ''
@@ -2290,7 +2309,8 @@ class GraphBuilder:
                                cond, option)
             elif kind == StatementKind.CALL:
                 self._add_edge(label, payload.get('target', ''), 'call',
-                               cond, option)
+                               cond, option,
+                               payload.get('from_clause', ''))
             elif kind == StatementKind.PYTHON:
                 nid = self._label_to_nid.get(label)
                 if nid is not None:
@@ -2317,11 +2337,12 @@ class GraphBuilder:
             if n.label_name in new_label_names:
                 n.operations = []
 
-        self._existing_edges = set()
+        self._existing_edges = {}
         for e in self.graph.edges.values():
-            self._existing_edges.add((
-                e.from_id, e.to_id, e.type, e.condition, e.option_text
-            ))
+            # 值放边 id：重入时若新解析带来 rom 子句，就补到这条边上
+            # （键不含 from —— 带上它会把同一条边重复加一遍）
+            self._existing_edges[
+                (e.from_id, e.to_id, e.type, e.condition, e.option_text)] = e.id
 
     def _collect_label_names(self, nodes: list, target: set):
         for node in nodes:
@@ -2368,13 +2389,25 @@ class GraphBuilder:
 
             elif isinstance(node, CallNode):
                 self._add_edge(current_label, node.target, 'call',
-                               accum_cond, option_text)
+                               accum_cond, option_text,
+                               getattr(node, 'from_clause', ''))
 
             elif isinstance(node, IfNode):
                 prev_conds = []
                 for cond, block in node.branches:
                     if cond:
                         new_cond = self._combine(accum_cond, cond)
+                        # **if/elif/else 的语义**：第 2 个及以后的分支还隐含
+                        # "前面所有分支都没走"。以前这里只 AND 了自己的条件，
+                        # 于是 `if a: jump X / elif b: jump Y` 的第 2 条边写成
+                        # `b`（正确是 `b 且 not a`）—— 图上的条件标签会误导人，
+                        # 按图导出时也会把 `elif` 写成永远更宽的条件。
+                        # `else` 分支本来就做了 De Morgan，这里把 elif 补齐，
+                        # 两者口径一致。
+                        if prev_conds:
+                            neg = " or ".join(f"({c})" for c in prev_conds)
+                            new_cond = (f"({new_cond}) and not ({neg})"
+                                        if new_cond else f"not ({neg})")
                         prev_conds.append(cond)
                     else:
                         neg = " or ".join(f"({c})" for c in prev_conds)
@@ -2403,7 +2436,8 @@ class GraphBuilder:
                         n.operations.append(node.code)
 
     def _add_edge(self, from_label: str, to_label: str,
-                  etype: str, condition: str, option_text: str = ''):
+                  etype: str, condition: str, option_text: str = '',
+                  from_clause: str = ''):
         if not from_label or not to_label:
             return
 
@@ -2422,14 +2456,23 @@ class GraphBuilder:
         if from_id is None or to_id is None:
             return
 
+        # 去重键**不含 from_clause**：同一个 (from,to,type,cond,option)
+        # 就是同一条边，带上 from 反而会造出重复边（AST 与 Statement 两条
+        # 解析路径里总有一条抓不到 from，实测直接把边翻倍）。
         key = (from_id, to_id, etype, condition, option_text)
         if key in self._existing_edges:
+            # 已经有这条边 → 不重复建；但如果这次带来了 `from` 子句而旧的
+            # 没有，就把它补上（谁抓到了就以谁为准，不会丢）。
+            edge = self.graph.edges.get(self._existing_edges[key])
+            if (edge is not None and from_clause
+                    and not getattr(edge, 'from_clause', '')):
+                edge.from_clause = from_clause
             return
-        self._existing_edges.add(key)
-
-        self.graph.add_edge(from_id, to_id, etype=etype,
-                            condition=condition,
-                            option_text=option_text)
+        eid = self.graph.add_edge(from_id, to_id, etype=etype,
+                                  condition=condition,
+                                  option_text=option_text,
+                                  from_clause=from_clause)
+        self._existing_edges[key] = eid
 
     @staticmethod
     def _combine(c1: str, c2: str) -> str:

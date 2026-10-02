@@ -21,6 +21,7 @@ CI 读 exit code 就够。
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -145,8 +146,8 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
             if parse_result.statements:
                 analyze_statement_references(parse_result.statements, registry)
             analyze_references(scripts, registry)
-        except Exception:
-            pass
+        except Exception as e:
+            swallow('build.collect_report', e)
 
     # 舞台/音频是 DSL 人话，必须先用符号表解释成结构化字段，
     # 否则舞台快照、校验、多引擎导出都会看到"空舞台"。
@@ -154,8 +155,8 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
         from storygraph.story.beat_build import hydrate_from_dsl
         from storygraph.story.beat_render import make_symbols
         hydrate_from_dsl(beats, make_symbols(registry))
-    except Exception:
-        pass
+    except Exception as e:
+        swallow('build.collect_report', e)
 
     report = validate_all(
         beats, registry=registry, graph=graph,

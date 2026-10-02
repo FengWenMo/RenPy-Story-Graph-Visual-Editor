@@ -17,6 +17,7 @@ asset_extensions.py
 
 from __future__ import annotations
 
+from storygraph.core.safeguard import swallow
 import json
 import re
 import shutil
@@ -378,14 +379,14 @@ def generate_rename_patch(
             backup_path = fp.with_suffix(fp.suffix + '.bak')
             try:
                 shutil.copy2(fp, backup_path)
-            except Exception:
-                pass
+            except Exception as e:
+                swallow('asset_extensions.generate_rename_patch', e)
         new_text = pattern.sub(new_id, text)
         try:
             fp.write_text(new_text, encoding='utf-8')
             modified.append(str(fp))
-        except Exception:
-            pass
+        except Exception as e:
+            swallow('asset_extensions.generate_rename_patch', e)
 
     return {
         'modified': modified,
@@ -677,8 +678,8 @@ class AssetWorkspace:
         for old in snaps[:-keep]:
             try:
                 old.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                swallow('asset_extensions.prune_snapshots', e)
 
     # ---------- 依赖追踪 + 重命名补丁 ----------
     def rename_asset_in_scripts(

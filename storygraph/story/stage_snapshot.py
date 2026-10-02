@@ -419,9 +419,9 @@ def snapshot_summary(beats: list, limit: int = 200) -> list:
 
 def stage_digest(beats: list, index: int) -> str:
     """
-    单拍的可读摘要（编辑器里的预览面板用）。
+    单拍的可读摘要（卡片上的「当前舞台」与旧版预览面板共用）。
 
-    返回多行文本：变化 / 背景 / 立绘 / 音乐 / 音效 / 语音 / 条件。
+    返回多行文本：变化 / 背景 / 立绘 / CG图层 / 音乐 / 音效 / 语音 / 条件 / 备注。
     """
     snaps = stage_snapshots(beats)
     if not snaps:
@@ -438,6 +438,10 @@ def stage_digest(beats: list, index: int) -> str:
         lines.append('本拍变化：（舞台无变化）')
     lines.append(f"背景：{s['scene'] or '（未设置）'}")
     lines.append(f"立绘：{s['actors'] or '（台上没人）'}")
+    # CG / 图层也要写出来：`cg cg03` 这类整屏图不是"立绘"，
+    # 少了这一行就会出现"舞台说明里看不出屏幕上有张 CG"。
+    if s.get('layers'):
+        lines.append(f"CG/图层：{s['layers']}")
     lines.append(f"音乐：{s['music'] or '（静音）'}")
     if s['sound']:
         lines.append(f"音效：{s['sound']}")
