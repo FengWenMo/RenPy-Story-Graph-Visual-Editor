@@ -92,6 +92,17 @@
 29. **编辑器的落盘时机要在界面上说清**：卡片改动先提交到**内存里的这一拍**
     （`save_current_beat` / Ctrl+S），**导出 .rpy 才落盘**。以前只有翻页/导出
     顺带提交，改完停在原地没有落点（用户以为"保存不了"）
+30. **IR 是"语句流"不是"语句树"，无法表达嵌套**（2026-10-02 实测确认）：
+    15 个 kind 没有一个能带子语句。已兑现的代价——① **`menu` 块往返后整体
+    消失**（`beat_render.py:314` 把 menu_option 渲染成裸台词，第二分支成死代码）
+    ② `elif`/`else` 被展开成 `not((前一条件))` 合取。改这个要动 IR 形状，
+    别在渲染层打补丁
+31. **测试必须测"往返不变式"，不能只测半程**（2026-10-02 教训）：
+    1731 个测试全绿，却漏掉 menu 100% 丢失与 condition 100% 丢失，因为
+    `test_script_table.py` 里 condition/menu 的用例都断言到
+    `beats_from_parse_result()` 就停了，**没导出 Excel、没回导、没重编译**。
+    任何"保存/同步"类改动，都要断言 `原文 → 载体 → 原文'` 的多重集相等
+    （脚本见 `tools/audit_roundtrip.py`）
 
 ## 二、仓库与运行（稳定事实）
 
@@ -116,9 +127,10 @@
 
 ## 三、已知缺口
 
-1. **双轨模型**：`graph.models.Graph`（`Node.operations` 存代码字符串）与
-   `core.Statement` 并存 —— 这是"图视图要展示可编辑代码"的刻意设计，不是重复；
-   真要统一需单独立项
+1. ~~**双轨模型**~~ **已收敛**（2026-10-02 git "修复双IR问题"）：
+   `Node.statements: list[Statement]` 是结构化真源，`Node.operations` 降为派生
+   兼容视图；`python_operation` / `operation_source` 是唯一转换点，
+   行首标记常量收敛到 `core.statement.MARKER`
 2. `asset_extensions.DependencyAnalyzer` 是引用分析的旧入口（判定已收敛）
 3. **多语言链路不可用**：`parse_translation_files` 不支持现代 `tl` 格式，
    而 IR 哈希契约（menu_option 前缀 `'menu'`）正是为它做的历史兼容

@@ -35,7 +35,7 @@ from storygraph.story.beat_model import (
     HIDDEN_BEAT_COLUMNS,
     _assign_identity,
 )
-from storygraph.story.beat_render import make_symbols
+from storygraph.story.beat_render import make_symbols, stamp_menu_bodies
 from storygraph.story.paths import _guess_project_root
 from storygraph.excel.cells import set_text as _set_text
 from storygraph.excel.cells import append_text_row as _append_text_row
@@ -94,13 +94,17 @@ def export_beats_to_excel(beats: list, output_path,
     ws.row_dimensions[1].height = 30
 
     symbols = make_symbols(registry) if registry is not None else None
+    # 菜单选项体的"空条件"先补成恒真条件（`True`）：Excel 里没有
+    # "这拍在菜单块里"这一位，只能靠条件把它记下来，否则回导之后
+    # 选项体分不出块内块外（P0-1 的最后一环，见 `stamp_menu_bodies`）。
+    stamp_menu_bodies(beats)
     for beat in beats:
         _append_text_row(ws, beat.to_row(symbols))
 
     # 列宽：台词最宽，技术列压窄。'ContentHash' 是协作指纹，给程序员看的，
     # 压到 12 并放到最后一列，避免它跟内容列抢视觉重心。
     widths = {'LineId': 14, 'Seq': 5, 'Label': 14, 'Kind': 10,
-              'Speaker': 12, 'Comment': 24, 'Text': 48,
+              'Speaker': 12, 'Comment': 24, 'Text': 48, 'Condition': 22,
               'Scene': 20, 'Show': 26, 'At': 14, 'With': 14, 'Hide': 16,
               'BGM': 18, 'BGMParams': 14, 'SFX': 18, 'SFXParams': 14,
               'Voice': 16, 'Stage': 36, 'CodeBlock': 30,
@@ -316,6 +320,8 @@ def _write_usage_sheet(wb, registry, beats, has_candidates: bool):
         ('说话人 Speaker', '编辑区', '策划', '下拉选角色'),
         ('注释 Comment', '编辑区', '策划', '给自己/同事看的备注，会写进脚本注释'),
         ('台词 Text', '编辑区', '策划', '这一句台词'),
+        ('条件 Condition', '编辑区', '策划',
+         '这一拍成立的条件（`if …:` 里的表达式）；留空 = 无条件'),
         ('背景 Scene', '编辑区', '策划', '下拉选背景；`图@变换` 可带背景变换'),
         ('立绘 Show', '编辑区', '策划', '下拉选图；`图@位置` 指定站位'),
         ('位置 At', '编辑区', '策划', '没用 @ 指定站位的立绘统一用这列'),

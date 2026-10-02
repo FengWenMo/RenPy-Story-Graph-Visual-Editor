@@ -123,6 +123,7 @@ Beat ──▶ Excel ⇄ DSL 编译 ──▶ .rpy.xlsx ──parse──▶ Ass
 | `test_code_health.py` | 10 | **审计守卫**：全项目不许再有 `except …: pass`（唯一豁免 `safeguard.py` 的记录失败路径）、`swallow()` 真的记下来了（context/次数/详情/报告/有界）、**两个 .rpy 生成器共用规则不许再分叉**（op 渲染 / `default` 名单 / 标记只有一处） |
 | `test_entry_points.py` | 22 | 入口可达性：悬空回调、`act(...)` 文案与实现、**两条路分开**（资源表 vs 剧情图）、启动不再扫全项目 |
 | `test_roundtrip.py` | 10 | `.rpy → Graph → .rpy` 与 `.rpy ↔ Excel` 往返一致性 |
+| `test_roundtrip_invariants.py` | 30 | **往返不变式**（评估报告 5.4 的结论）：`parse → beat → xlsx → beat → compile → re-parse` 之后**语句多重集必须相等**。评估报告当时指出"1731 个测试全绿却漏掉两个 P0"，根因就是这一类测试**只测了半程**（断言到 beat 就结束，没有导出 / 回导 / 重编译）。这里把整条链路的不变式补上：菜单（裸 / 带标题 / 带条件 / 带块体 / 连续两个 / 空选项）、`if-elif-else`、嵌套 `if`、尾部空格、紧凑 `$x`、舞台音频、注释、`$ f()` 与 `show screen` 的交错顺序、**`python:` 块的嵌套层级与多行语句**、**Ren'Py 语句不许被吞进 `python:` 块**、**`call … from` 存档点**、**`show expression` 的位置与别名**、**空台词不产出语句**、整章兜底、两次往返收敛 |
 
 ---
 

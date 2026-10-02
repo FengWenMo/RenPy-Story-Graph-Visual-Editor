@@ -124,15 +124,45 @@ class TestSharedRulesBetweenGenerators:
             '"出现过的名字"不能拿来写 default（会写出 default renpy = 0）'
 
     def test_marker_is_hardcoded_in_exactly_one_place(self):
-        """标记（`\\x01`）只许在 `core/statement.py` 里硬编码。"""
+        """
+        标记（`core.statement.MARKER`）只许在 `core/statement.py` 里硬编码。
+
+        判据跟着常量走（不再写死具体字符）：**标记的字面量**出现在别处
+        就说明约定又分叉了 —— 这正是当初 `renpy_exporter` 不认识它、
+        把标记原样写进 .rpy 的原因。
+        """
+        from storygraph.core.statement import MARKER
+
+        literals = (f"'{MARKER}'", f'"{MARKER}"')
         offenders = []
         for path in sorted(PKG.rglob('*.py')):
             if path.name == 'statement.py':
                 continue
             src = path.read_text(encoding='utf-8')
-            if "'\\x01'" in src or '"\\x01"' in src:
+            if any(lit in src for lit in literals):
                 offenders.append(path.relative_to(PKG).as_posix())
         assert offenders == [], f'这些文件又硬编码了标记：{offenders}'
+
+    def test_marker_survives_excel(self):
+        """
+        标记必须是**能进出 Excel 的字符**（2026-10-05 实测的 5% 代码丢失）。
+
+        `openpyxl` 拒收控制字符，所以一旦标记是 `\\x01` 这类字符，写表时就
+        只能把它剥掉，读回来便再也认不出"原文是紧凑写 `$persistent.x`"——
+        真实项目 22 条代码因此在 `rpy → xlsx → rpy` 往返里被改写。
+        """
+        from storygraph.core.statement import MARKER
+        import openpyxl
+        import tempfile
+        from pathlib import Path
+
+        assert len(MARKER) == 1, '标记必须是单个字符（逐行前缀匹配靠它）'
+        tmp = Path(tempfile.mkdtemp()) / 'm.xlsx'
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = f'{MARKER}persistent.x= True'
+        wb.save(tmp)                                  # 控制字符会在这里抛错
+        back = openpyxl.load_workbook(tmp).active['A1'].value
+        assert back == f'{MARKER}persistent.x= True', back
 
 
 class TestSafeguardHelper:

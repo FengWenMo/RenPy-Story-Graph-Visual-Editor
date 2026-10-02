@@ -394,15 +394,16 @@ class TestStoryOps:
 
     def test_tight_dollar_marker_does_not_hide_a_variable(self):
         """
-        行首 `\\x01` = 原文写紧凑 `$love += 1`。分类前必须先脱掉它 ——
-        否则赋值正则匹配不上，这条**真实变量**会被当成技术代码藏起来
-        （变量编辑器里整条看不见）。
+        行首标记（`core.statement.MARKER`）= 原文写紧凑 `$love += 1`。
+        分类前必须先脱掉它 —— 否则赋值正则匹配不上，这条**真实变量**会被
+        当成技术代码藏起来（变量编辑器里整条看不见）。
         """
+        from storygraph.core.statement import MARKER
         import storygraph.story.story_ops as story_ops
-        assert story_ops.is_narrative_code('\x01love += 1')
-        assert story_ops.is_narrative_code('\x01flag = True')
+        assert story_ops.is_narrative_code(MARKER + 'love += 1')
+        assert story_ops.is_narrative_code(MARKER + 'flag = True')
         assert not story_ops.is_narrative_code(
-            '\x01renpy.transition(Dissolve(0.1))')
+            MARKER + 'renpy.transition(Dissolve(0.1))')
 
     def test_store_namespace_is_a_narrative_variable(self):
         """`store.x` 就是默认命名空间的 `x`（Ren'Py 语义），不是技术代码。"""

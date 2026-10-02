@@ -16,7 +16,8 @@ from storygraph.story.script_table import (
     render_beats_to_rpy, render_beat_to_rpy, write_beats_to_rpy,
     open_rpy_as_table, export_table_to_rpy, refresh_candidate_sheets,
     find_unregistered_assets,
-    BEAT_FIELDS, KIND_SAY, KIND_NARRATION, KIND_MENU_OPTION, KIND_EXTEND,
+    BEAT_FIELDS, KIND_SAY, KIND_NARRATION, KIND_MENU, KIND_MENU_OPTION,
+    KIND_EXTEND, menu_caption_text,
 )
 
 
@@ -131,6 +132,14 @@ class TestBeatsFromStatements:
         assert beats[0].condition == 'love > 5'
 
     def test_menu_option_becomes_own_beat(self, write_rpy):
+        """
+        `menu:` 与每个选项都要各自成拍。
+
+        **2026-10-05 修 P0-1**：以前无标题的 `menu:` **一张拍都不建**，
+        于是「这里有一个菜单」这个结构事实在拍这一层完全消失，选项拍成了
+        孤立的一行 —— 渲染层只能把选项当裸旁白导出去（第一分支无条件执行、
+        第二分支成死代码）。现在菜单拍一定在，选项拍紧跟在它后面。
+        """
         from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         fp = write_rpy(
             'label a:\n'
@@ -139,8 +148,36 @@ class TestBeatsFromStatements:
             '            jump b\n', 'menu.rpy')
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
         beats = beats_from_parse_result(result)
-        assert beats[0].kind == KIND_MENU_OPTION
-        assert beats[0].text == '选项A'
+        assert beats[0].kind == KIND_MENU, '无标题的 menu 也必须有一张拍'
+        assert menu_caption_text(beats[0].text) == ''
+        assert beats[1].kind == KIND_MENU_OPTION
+        assert beats[1].text == '选项A'
+
+    def test_bare_menu_roundtrips_to_menu_block(self, write_rpy):
+        """裸 `menu:`（真实项目最常见写法）必须原样生成 `menu:` 块。"""
+        from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
+        fp = write_rpy(
+            'label a:\n'
+            '    "开场"\n'
+            '    menu:\n'
+            '        "选项A":\n'
+            '            jump b\n'
+            '        "选项B":\n'
+            '            jump c\n'
+            '    return\n', 'menu_rt.rpy')
+        result = ParseResultBuilder().build(RenPyParser().parse(fp))
+        beats = beats_from_parse_result(result)
+        text = render_beats_to_rpy(beats, label_name='a')
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        assert '    menu:' in lines, text
+        # 选项各自是块头，分支体缩进在它下面
+        assert '        "选项A":' in lines, text
+        assert '            jump b' in lines, text
+        assert '        "选项B":' in lines, text
+        assert '            jump c' in lines, text
+        # 选项**不能**再变成裸旁白/无条件跳转
+        assert '    "选项A"' not in lines, text
+        assert '    jump b' not in lines, text
 
     def test_python_recorded_in_codeblock(self, write_rpy):
         """变量操作进 CodeBlock，导出时原样回写，不再只留痕。"""
@@ -592,17 +629,20 @@ class TestOrderAndAudioArePreserved:
         beats = beats_from_parse_result(result)
 
         # 顺序：scene → show → music → say → sound → voice → say → sound
-        #       → menu_option("进去") → say("他转身走了。")
-        # （本脚本 menu 无 caption，所以选项先于"离开"里的旁白出现，
-        #   与 Ren'Py 源码顺序一致）
+        #       → menu（无标题，2026-10-05 起会落一张拍）
+        #       → menu_option("进去") → menu_option("离开")
+        #       → say("他转身走了。")（"离开"分支里的旁白，归在它那张选项后面）
         kinds = [b.kind for b in beats if b.text or b.music or b.sound
                  or b.voice or b.scene or b.show]
-        assert kinds[:4] == [
-            KIND_SAY,          # 第一句（吸附 scene/show/music）
-            KIND_SAY,          # 第二句（吸附 sound）
-            KIND_MENU_OPTION,  # 选项"进去"（吸附 queue sound）
-            KIND_SAY,          # "离开"分支里的旁白
-        ]
+        # 无标题菜单的拍**也要落在这一串里**（它的 text 是占位符，非空），
+        # 于是菜单拍紧跟在两句台词之后、选项之前 —— 这正是渲染层归组
+        # 需要的顺序。
+        assert kinds[:2] == [KIND_SAY, KIND_SAY]
+        assert kinds[2] == KIND_MENU, '菜单拍必须排在它的选项之前'
+        assert kinds[3:5] == [KIND_MENU_OPTION, KIND_MENU_OPTION], \
+            '两张选项拍都要在菜单块里（2026-10-05 修：选项头与块体交错）'
+        assert kinds[5] == KIND_NARRATION, \
+            '"离开"分支里的旁白紧跟在它的选项之后'
 
         text = render_beats_to_rpy(beats)
         lines = [ln for ln in text.splitlines()

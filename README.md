@@ -155,8 +155,11 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
    路径**，改写 `<stem>.blocked.rpy`。所有落盘路径都必须过它。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
-7. **`BEAT_FIELDS` 是列顺序唯一真源**（22 列，含隐藏的 `StageOrder` / `OpOrder`），
-   `Beat.to_row/from_row` 必须逐列对应。
+7. **`BEAT_FIELDS` 是列顺序唯一真源**（23 列，含隐藏的 `StageOrder` / `OpOrder`），
+   `Beat.to_row/from_row` 必须逐列对应。`Condition` 是**语义列**（不是排版列）：
+   它 2026-10-05 从"已被收敛掉的旧列"里**加回来**了 —— 没有它，
+   `Beat.condition` 在进出 Excel 时没有任何出口，所有 `if` / 菜单条件会在
+   往返里被静默抹平（实测真实项目一条章节 7 条条件 → 0 条）。
 8. **改中文 `.py` 只能用编辑器工具或 Python 脚本**（`encoding='utf-8'`）。
    PowerShell 的 `Set-Content` 会按 GBK 往返，把整个文件写坏且**不可逆**。
 9. **依赖方向单向**：`core` ← `parsing` / `excel` ← `assets` / `story` ← `pipeline`
@@ -642,6 +645,90 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
       · **不动 → 逐字节等于原文**：8/8 章通过（这条是底线，上一版被 TODO 顶行破坏）；
       · 每种操作都走增量（对位率都在门槛之上），注释零丢失；
       · **产物再导一次逐字节不变**（不动点：插重复 / 漏写都会在这里露馅）：全部通过。
+63. **`menu:` 是块，拍是扁平的 —— 渲染前必须重新归组**（评估报告 2026-10-02 的
+    P0-1，2026-10-05 修）。这是"用扁平语句流表达树形剧本"这个选择的代价兑现处：
+
+        menu:                    逐拍渲染（修复前的实际产物）
+            "选项A":                 "选项A"        ← 变成裸旁白
+                jump b               jump b         ← 无条件执行
+            "选项B":                 "选项B"
+                jump c               jump c         ← 永远不可达
+
+    `menu:` 整块消失、第一个分支无条件跳转、第二个分支是死代码 ——
+    **游戏能启动、剧情全错、不报任何错**（真实项目 7 处菜单全是这种写法，
+    20 个选项 100% 丢失）。修复分四层，每一层都单独可测：
+
+      · **解析器**：裸 `menu:`（没有 caption）也要产出 `MENU` 语句
+        （以前只在 `if node.caption:` 里产出 —— 无标题菜单在语句流里
+        **根本不存在**，下游无从知道"这里有个菜单"）；同时给菜单块内的
+        语句标一个结构位 `Statement._menu_member`（`_walk` 是唯一还看得见
+        嵌套的地方）；
+      · **拍构建**：菜单拍 / 选项拍一律落拍（空 caption 用 `MENU_NO_CAPTION`
+        占位，**不写进 Excel** —— openpyxl 拒收控制字符）；并把交错的
+        "选项头 vs 块体"归一成"选项 → 它的块体"（`order_menu_bodies`：
+        解析器先收全部选项头再下钻块体，扁平序列里两者是错开的）；
+      · **渲染**：`split_beat_units` 把拍重新按**组**切分，`render_menu_block`
+        生成 `menu:` / `"选项":` / 缩进块体，空块补 `pass`（空块是语法错误）；
+      · **写表**：`stamp_menu_bodies` 给选项体里**没有条件**的拍补恒真的
+        `True` —— Excel 里存不下结构位，而"选项无条件 + 块体只写跳转 +
+        块外紧跟一句台词"三个条件都是空串，**只能靠这一位区分**。
+
+    边界判据（踩过两次，都写进 docstring）：`_menu_member` 优先；
+    下一张 `menu` 拍断开；再看条件（累积条件 / 恒真 `True`）。
+    关掉这一条的后果不是"少生成几行"，是**静默改剧情**。
+64. **「代码」列是"保真后门"，但后门也有三条硬规则**（2026-10-05 续修，
+    评估报告 P0 之后把剩下的往返丢失逐条清掉）。这一格装两类东西 ——
+    原生 Ren'Py 语句与 python 代码，混在一起时**任何一条分类错误都是
+    静默的产物损坏**。实测踩到的三条：
+
+      · **`python:` 块的层级必须活过 Excel**。块结构在单元格里只体现为
+        **缩进**，而 `_split_code_cell` 原先把它 `strip` 掉了 → 整块被拆成
+        一条条 `$` 语句（`mini_game1.rpy` 一个块拆出 53 条），`for` / `if`
+        的嵌套体全被压到同一层。现在：
+          – 每行的**相对物理缩进**记进 `beat.ordered` 的第三位
+            （`(kind, line, indent)`，`_relative_indents` 算：块层级归一成
+            4 的倍数，括号续行保留原对齐）；
+          – 渲染时 `_python_block_indent` 认出"有人真的进了下一层"
+            （用**括号平衡**区分续行与真块层级）就出 `python:` 块，
+            **块内原有缩进保留**（那是嵌套层级）；
+          – 判定"这不是 python 块"必须用**Ren'Py 专有**语句头
+            （`_is_native_renpy_line`）：`_looks_like_renpy_statement` 的表里
+            含 `for` / `if` / `while` / `with` / `pass`，拿它一票否决会把
+            真块体全拦下来，而把 `window hide` 认成 python 又会让整段演出
+            消失（`mini_game_dfinder.rpy` 实测 7 条）。
+      · **多行语句不许被拆开**：`show screen prompt("…", act=[ Call(…), ])`
+        是一条语句，逐行补 `$` 会生成 `$ Call("…"),` —— 语法错误。
+        `_group_code_statements` 按括号平衡把续行粘回一条，`$` 只加在首行。
+      · **一行里不许出现两个 `$`**：`_split_code_cell` 现在把 `$` 前缀
+        剥干净（紧凑写法用 `core.statement.MARKER` 承载，`$ x` 存裸文本），
+        渲染时按 `$` / `$ ` 两种写法还原。
+      · 顺带修掉一个**隐形杀手**：`_split_lines` 现在把 CRLF 归一成 LF ——
+        Windows 写出去的单元格行尾带 `\r`，会让缩进计算、`$` 判定、
+        按行比对全部悄悄错位（实测就是它让"续行缩进"算成 0）。
+65. **可保真的东西必须保真：`call … from` / `show expression` / 空台词**
+    （同上）。这一轮清掉的三条都不是"少几个字符"：
+
+      · **`call X from Y`**：`from` 是 Ren'Py 的**存档点标识**。拼 Raw 文本
+        时漏掉它，往返后就退化成裸 `call` —— 照样跳得过去，但**老存档里的
+        `_call_xxx` 全找不到，玩家读档会落到别处**（`chapter_controller.rpy`
+        实测 7 条）。`_call_from_suffix` 补上（`renpy_exporter` 那条控制流
+        路径早就补过，这是章节路径的同一修）。
+      · **`show expression X`**：图像名是一段 **Python 代码**
+        （`holo("lan base")`），带空格/括号/引号，装不进 `图像@位置` 那种
+        紧凑编码。现在它编码成**自描述子句** `expression X as q at i`
+        （`_expression_clause`，`show_item_part` 与 `compose_show_cell` 共用
+        一份），`_parse_show_expression` 按**跳过引号**的关键词扫描读回来 ——
+        位置与别名都不丢（`script.rpy` 实测 5 条）。
+      · **空台词不产出语句**：`who` 与 `what` 都为空是解析噪声（来自空行与
+        **三引号文档字符串**，`eyes_tracker.rpy` 实测 3 条全在 `"""…"""` 里）。
+        留着它的代价不是"多一行"：`Beat.is_empty()` 会把那张拍丢掉，
+        整个文件因此退化成 `label start: pass`，而这张拍在往返里必然对不上。
+
+    **量化**（`tools/audit_roundtrip.py`，真实项目 41 文件 / 3800 语句）：
+    丢失从 **76 条（2.0%）降到 11 条（0.3%）**，`menu` / `menu_option` /
+    `hide` / `scene` / `play` / `comment` 全部 **0 丢失**。剩下的 11 条是
+    "一个 `python:` 格里混着多条语句、块边界在表里表达不了"这一类，
+    逐条在审计输出里带文件名与指纹，可继续收敛。
 
 ## 常见改动落点
 
@@ -649,6 +736,9 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 |---|---|
 | 给剧本表加一列 | `story/beat_model.py` 的 `BEAT_FIELDS` + `Beat.to_row/from_row` |
 | 改导出的生成代码 | `story/beat_render.py`（`render_beat_to_rpy`） |
+| 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |
+| 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` + `story/beat_render.render_code_block` / `_python_block_indent` / `_group_code_statements`（见不变量 64） |
+| 改**`call … from` / `show expression` / 空台词**的处理 | `story/beat_build._call_from_suffix` / `story/beat_model._parse_show_expression` / `parsing/renpy_parser.add_stmt`（见不变量 65） |
 | 改 Excel 长什么样 | `story/excel_export.py` |
 | 加一条门禁规则 | `story/generation_guard.py` |
 | 让人话多认一个词 | `story/dsl.py` 的 `DEFAULT_POSITIONS` / `DEFAULT_EXPRESSIONS` / `VERB_ALIAS` |

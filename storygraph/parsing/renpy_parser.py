@@ -118,7 +118,7 @@ except ImportError:
     Graph = None
 
 from storygraph.core.uid import make_translation_uid
-from storygraph.core.statement import Statement
+from storygraph.core.statement import Statement, StatementKind
 
 
 # ====================================================================
@@ -1965,7 +1965,33 @@ class ParseResultBuilder:
             Statement 本身不带 label（那是"内容指纹"契约的一部分），
             所以归属信息放在平行的 statement_labels /
             statement_menu_options 里。
+
+            `_menu_member`（2026-10-05 加）是**结构位**：这条语句是不是
+            "某个菜单块内部的东西"（菜单头 / 选项 / 选项体）。
+
+            为什么必须记在语句上：`menu` 在 Ren'Py 里是**嵌套块**，而语句流
+            是扁平的 —— 一旦走出 `_walk`，"选项体到哪儿结束"就再也算不出来，
+            于是渲染层无法把扁平拍还原成 `menu:` 块（P0-1：菜单整块丢失、
+            选项变裸旁白、分支变死代码）。这里记一位，比让渲染层去猜
+            （比行号、比条件）都可靠。
+
+            它**不进 Excel、不参与相等/哈希**：`.rpy` 侧的信息。
+            Excel 往返之后 Beat 上没有这一位，`beat_render` 会退回按
+            行号 / 条件推断（见 `_take_menu_run`）。
             """
+            # **空台词不产出语句**（2026-10-05 修）：`who` 与 `what` 都为空
+            # 的 `say` 是解析噪声，不是演出内容 —— 真实项目实测它来自
+            # **空行**与**三引号文档字符串**（`eyes_tracker.rpy` 的 3 条
+            # 全在 `"""…"""` 里）。留着它的代价不是"多一行"：
+            # `Beat.is_empty()` 会把这条拍丢掉，可它不是干净地消失 ——
+            # 整个文件因此变成"有拍但空标签"的 `label start: pass`
+            # （实测 `eyes_tracker.rpy` 的产物就是这样），而这张拍在
+            # Excel 往返里必然对不上（原文有、产物没有）。
+            if stmt.kind == StatementKind.SAY and not (
+                    (stmt.payload or {}).get('speaker')
+                    or (stmt.payload or {}).get('text')):
+                return
+            stmt._menu_member = bool(menu_option)
             result.statements.append(stmt)
             result.statement_labels.append(current_label)
             result.statement_menu_options.append(menu_option)
@@ -2075,9 +2101,23 @@ class ParseResultBuilder:
                         source_file=node.filename,
                         source_line=node.line_number,
                     ))
-                    add_stmt(Statement.make_menu(
-                        node.caption, accum_cond,
-                        source=(node.filename, node.line_number)))
+                # **MENU 语句一律产出**（2026-10-05 修 P0-1 的根因）。
+                #
+                # 以前只在 `node.caption` 非空时才 `add_stmt(make_menu(...))`，
+                # 于是**裸 `menu:`（没有标题）在语句流里完全不存在** ——
+                # 真实项目 7 处菜单全是这种写法，全部中招。后果一路往下传：
+                #
+                #   · 拍这一层看不到"这里有个菜单"（`beats_from_statements`
+                #     只能听 MENU 语句的），`menu_option` 拍于是成了孤立的
+                #     拍，渲染层把选项当裸旁白导出去；
+                #   · `validate_level2` 按 `menu_labels` 判"有选项却没 menu 行"，
+                #     计数与真实脚本对不上。
+                #
+                # 空 caption 是**合法**的菜单（Ren'Py 允许 `menu:` 无标题），
+                # 所以这里照常产出，由下游决定"空标题怎么显示"。
+                add_stmt(Statement.make_menu(
+                    node.caption or '', accum_cond,
+                    source=(node.filename, node.line_number)))
                 for opt in node.options:
                     result.dialogues.append(DialogueLine(
                         character_var='',

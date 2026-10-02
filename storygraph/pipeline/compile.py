@@ -83,6 +83,8 @@ def compile_beats(beats: list, registry=None, symbols=None,
         make_symbols,
         render_beat_to_rpy,
         render_beats_to_rpy,
+        render_menu_block,
+        split_beat_units,
     )
 
     beats = list(beats or ())
@@ -94,8 +96,25 @@ def compile_beats(beats: list, registry=None, symbols=None,
     hydrate_from_dsl(beats, symbols)
 
     rows = []
-    for beat in beats:
-        trace: list = []
+    # 菜单按**块**走同一条渲染路径（与 `render_beats_to_rpy` 同一套分组）：
+    # 少了这一步，"编译结果表"会把菜单显示成一行行裸语句，而 .rpy 里是
+    # `menu:` 块 —— 两个视图就对不上了，而"必然一致"正是这张表存在的理由。
+    for kind, unit in split_beat_units(beats):
+        if kind == 'menu':
+            trace: list = []
+            render_menu_block(unit, audit=audit, trace=trace)
+            line_id = unit[0].line_id or f"{unit[0].label}.{unit[0].seq:04d}"
+            for item in trace:
+                rows.append({
+                    'line_id': line_id,
+                    'source': item.get('source', ''),
+                    'intent': item.get('intent', ''),
+                    'code': item.get('code', ''),
+                    'status': item.get('status', 'ok'),
+                })
+            continue
+        beat = unit[0]
+        trace = []
         render_beat_to_rpy(beat, audit=audit, trace=trace)
         for item in trace:
             rows.append({

@@ -131,7 +131,8 @@ class TestDeclaredVariables:
 
     def test_tight_dollar_marker_is_stripped_first(self):
         """`$love += 1`（紧凑写法）也要认出来，否则它是**写不进 default** 的。"""
-        assert declared_variables(['\x01love += 1']) == ['love']
+        from storygraph.core.statement import MARKER
+        assert declared_variables([MARKER + 'love += 1']) == ['love']
 
     def test_conditions_do_not_declare(self):
         """条件里出现的名字只是被读，不该被 `default`。"""

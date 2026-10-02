@@ -43,7 +43,11 @@ def app():
 
 @pytest.fixture
 def project(tmp_path):
-    """现场生成的 Ren'Py 工程（含 4 个 label / 11 拍 / 真 PNG）。"""
+    """现场生成的 Ren'Py 工程（含 4 个 label / 12 拍 / 真 PNG）。
+
+    12 拍 = 原来的 11 拍 + 1 张**菜单拍**：`ch01` 里那处无标题的 `menu:`
+    自 2026-10-05 起会落一张拍（否则菜单结构在表里没有痕迹，见 P0-1）。
+    """
     return build_project(tmp_path / 'proj')
 
 
@@ -166,8 +170,10 @@ class TestEditorSession:
         from storygraph.app.editor import EditorSession
         s = EditorSession(project_root=project)
         n = s.load(project / 'game' / 'script' / 'ch01.rpy')
-        assert n == 11
-        assert len(s.beats) == 11
+        # 11 拍内容 + 1 张菜单拍（`menu:` 本身也要有拍，见 P0-1）
+        assert n == 12
+        assert len(s.beats) == 12
+        assert any(b.kind == 'menu' for b in s.beats), '菜单拍不能缺'
 
     def test_fields_projection(self, project):
         from storygraph.app.editor import EditorSession
@@ -256,8 +262,9 @@ class TestEditorSession:
 
 class TestMainWindow:
     def test_loads_chapter(self, window):
-        assert len(window.beats) == 11
-        assert window._pos.text() == '1 / 11'
+        # 11 拍内容 + 1 张菜单拍（`menu:` 本身也要有拍，见 P0-1）
+        assert len(window.beats) == 12
+        assert window._pos.text() == '1 / 12'
 
     def test_save_current_beat_writes_back(self, window):
         window._show_index(0)
@@ -576,7 +583,7 @@ class TestKeyboardIsPageScoped:
     def test_crumb_shows_where_you_are(self, window):
         window._set_page(window.PAGE_CARD)
         assert 'ch01.rpy' in window._crumb.text()
-        assert '/ 11' in window._crumb_hint.text()
+        assert '/ 12' in window._crumb_hint.text()
 
 
 class TestGraphScope:

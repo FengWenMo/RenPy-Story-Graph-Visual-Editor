@@ -29,11 +29,14 @@ from storygraph.assets.asset_completion import AssetCompletion
 from storygraph.assets.asset_registry import describe_asset
 from storygraph.story.beat_model import (
     Beat,
+    KIND_MENU,
+    MENU_NO_CAPTION,
     _join_show_items,
     _split_show_items,
     compose_audio_text,
     compose_code,
     compose_stage,
+    menu_caption_text,
 )
 
 # ===================== 纯逻辑（可单测） =====================
@@ -172,12 +175,17 @@ def beat_to_fields(beat: Beat, symbols=None) -> dict:
     它们是"卡片上 4 个可编辑项"里的后两项（前两项是 Speaker / Text）。
     见 `beat_expression_word` / `beat_position_word` 的说明——
     这两个字段没有对应的 Beat 属性，是 `show` 的投影。
+
+    **菜单拍的标题**（`Text` 字段）走 `menu_caption_text`：无标题的 `menu:`
+    在 Beat 上用占位符承载"这里有个菜单"（见 `MENU_NO_CAPTION`），
+    那一位是**内部标记**，不该出现在表单里让策划看到 `\x00menu`。
+    写回去由 `fields_to_beat` 重新补上占位符。
     """
     return {
         'Label': beat.label,
         'Kind': beat.kind,
         'Speaker': beat.speaker,
-        'Text': beat.text,
+        'Text': menu_caption_text(beat.text),
         # 条件显示（`if <条件>:`）—— 数据层一直有 `Beat.condition`，
         # 但当年**从没暴露给策划**（既不在表里也不在卡片里）。
         # 卡片上做成「＋ 条件」按钮，取字段就是这里。
@@ -209,6 +217,11 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     b.kind = (fields.get('Kind') or 'say').strip() or 'say'
     b.speaker = (fields.get('Speaker') or '').strip()
     b.text = (fields.get('Text') or '').strip()
+    # 菜单拍的标题留空 = "无标题菜单"，不是"没有菜单"：
+    # 占位符必须补回来，否则 `menu:` 那一段会在渲染时整块消失
+    # （见 `MENU_NO_CAPTION`）。表单里显示的是空串（见 `beat_to_fields`）。
+    if b.kind == KIND_MENU and not b.text:
+        b.text = MENU_NO_CAPTION
     b.scene = (fields.get('Scene') or '').strip()
     b.stage = (fields.get('Stage') or '').strip()
     b.bgm = (fields.get('BGM') or '').strip()

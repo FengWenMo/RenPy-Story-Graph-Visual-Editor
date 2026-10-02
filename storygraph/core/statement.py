@@ -20,15 +20,24 @@ from dataclasses import dataclass, field
 
 #: `$` 语句"紧凑写法"的**行首标记**（见 `Statement.make_python`）。
 #:
-#: 为什么要有这个常量（2026-10-05 审计"双 IR / 两套生成器"时抓到的真 bug）：
-#: 这个标记以前是**三处各自硬编码**的 `'\x01'`（`statement.py` 写、`beat_model.py`
-#: 读、`beat_render.py` 再读），而 `pipeline/renpy_exporter` **根本不知道它** ——
-#: 于是导出控制流时把标记原样写进了 .rpy：
+#: 2026-10-05 二次修正（第一次是把三处硬编码收敛到这一个常量）：
+#: 标记**不能再是控制字符**。
 #:
-#:     $ ^Apersistent.lock_lst["cg01"]= True      ← 控制字符，Ren'Py 直接不认
+#: 上一版用 `'\x01'` 承载"原文紧凑写 `$code`"，但这一位要经过「代码」列
+#: 进出 Excel，而 `openpyxl` 会直接拒收控制字符
+#: （`IllegalCharacterError: … cannot be used in worksheets`）——
+#: 于是写表时只能把它 `.replace()` 掉（见 `beat_model.compose_code_cell`），
+#: **读回来就再也认不出**：真实项目实测 22 条 `$persistent…` 的紧凑写法在
+#: `rpy → xlsx → rpy` 往返里被改写成 `$ persistent…`（23/464 = 5% 的代码丢失）。
 #:
-#: 约定只能有一份：谁要拼 `$` 语句、谁要判分类，都从这里拿。
-MARKER = '\x01'
+#: 换成 Unicode **私用区**字符：非控制字符，Excel 原样保存，人眼也看不见
+#: （不会污染卡片和表格里显示的代码）。半角/全角空格之类的"看起来像空白"
+#: 的候选都不行 —— Excel 会顺手把它们归一到普通空格。
+#:
+#: 约定只能有一份：谁要拼 `$` 语句、谁要判分类，都从这里拿
+#: （以前它散在三处各自硬编码，`pipeline/renpy_exporter` 根本不知道它，
+#: 于是把控制字符原样写进了 .rpy：`$ ^Apersistent.lock_lst["cg01"]= True`）。
+MARKER = '\ue000'
 
 
 def is_tight_dollar(code) -> bool:
@@ -476,8 +485,10 @@ class Statement:
         两种写法 Ren'Py 都认，但**往返要保真** —— 原文 `$persistent.x= True`
         导回去变成 `$ persistent.x= True`，会让每个 `$` 行都成为一个 diff 块。
 
-        这一位用**行首标记 `\\x01`** 承载（而不是加 payload 键）：
-        payload 形状不变，对 content_hash / 表格列 / 其他消费者都没有影响。
+        这一位用**行首标记**（`MARKER`，一个私用区字符）承载，而不是加
+        payload 键：payload 形状不变，对 content_hash / 表格列 / 其他消费者
+        都没有影响。标记本身**绝不会进产物**——渲染时由
+        `beat_render.render_code_block` 翻回 `$` / `$ ` 两种写法。
         """
         if not dollar_space:
             code = MARKER + (code or '')

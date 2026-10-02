@@ -51,7 +51,8 @@ from storygraph.app import beats as B
 from storygraph.app.stage import build_frames
 from storygraph.story.beat_build import (beats_from_parse_result,
                                          hydrate_from_dsl, stage_only_ops)
-from storygraph.story.beat_model import Beat, compose_stage_extra
+from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
+                                        compose_stage_extra)
 from storygraph.story.beat_render import make_symbols
 from storygraph.story.generation_guard import (evaluate_generation,
                                                labels_in_danger,
@@ -1000,6 +1001,11 @@ class EditorSession:
 
         b.speaker = str(fields.get('Speaker') or '').strip()
         b.text = str(fields.get('Text') or '').strip()
+        # 无标题菜单的占位符要补回来：表单里那一格是空的（`beat_to_fields`
+        # 把占位符显示成空串），但"空"在这里的意思是"菜单没有标题"，
+        # 不是"这一拍什么都没有"——补不回占位符，`menu:` 块就会消失。
+        if b.kind == KIND_MENU and not b.text:
+            b.text = MENU_NO_CAPTION
         b.scene = str(fields.get('Scene') or '').strip()
         b.bgm = str(fields.get('BGM') or '').strip()
         b.voice = str(fields.get('Voice') or '').strip()

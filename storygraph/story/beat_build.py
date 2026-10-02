@@ -25,6 +25,7 @@ from storygraph.story.beat_model import (
     KIND_MENU_OPTION,
     KIND_NARRATION,
     KIND_SAY,
+    MENU_NO_CAPTION,
     _append_line,
     _assign_identity,
     _audio_params,
@@ -70,7 +71,15 @@ def beats_from_statements(statements: Iterable[Statement],
     seq = 0
 
     def flush_stage_only():
-        """把只含舞台指令、没有台词的指令段单独落成一行。"""
+        """
+        把只含舞台指令、没有台词的指令段单独落成一行。
+
+        **不在这里标结构位**：这一拍的 `_menu_member` 由"把它攒起来的那些
+        语句"决定，而那些语句在处理时就已标过（见循环末尾）。若在这里按
+        **当前**语句再标一次，就会拿"下一条语句"的值覆盖它 —— 实测
+        `menu_option` 分支正是先 `flush_stage_only()` 再 append，
+        于是选项体的拍被标成 `False`（选项拍的值），菜单组整块散架。
+        """
         nonlocal pending, pending_has_stage, seq
         if pending_has_stage and not pending.text:
             seq += 1
@@ -78,6 +87,23 @@ def beats_from_statements(statements: Iterable[Statement],
             beats.append(pending)
         pending = Beat(label=current_label)
         pending_has_stage = False
+
+    def _mark_struct(beat, stmt):
+        """
+        把**结构位**从语句转发到拍上：这一拍属于某个菜单块吗？
+
+        `Statement._menu_member` 由解析器在 `_walk` 里标好（它当时还看得见
+        `menu:` 的嵌套结构）。渲染层靠这一位把扁平的拍还原成 `menu:` 块
+        （见 `beat_render.split_beat_units`）——没它就只能靠行号/条件去猜，
+        而"猜"在"选项体后面紧跟一句块外台词"时必然猜错（两边条件都是空串）。
+
+        **只在语句真的有这一位时才写**：`hasattr` 为假表示语句是手工构造的
+        （单测、老代码），那就让 Beat 上根本没有这一位，渲染层自然会退回
+        推断路径，而不是被一个假的 `False` 骗到。
+        """
+        if hasattr(stmt, '_menu_member'):
+            beat._menu_member = bool(stmt._menu_member)
+        return beat
 
     def mark_stage(verb):
         """记录舞台指令在本拍中的出现顺序，供导出时保序。"""
@@ -157,6 +183,9 @@ def beats_from_statements(statements: Iterable[Statement],
         # 而 `scene bg bg3_1` **无处可放**（产物里背景变成错的），
         # 整体校验发现后整章退回全量重生成 → **手写注释全丢**。
         absorbed = True
+        #: 这一轮的语句是否已经把结构位标在了**自己的 Beat** 上
+        #: （菜单拍 / 选项拍 / 跳转拍是直接构造的 —— 见循环末尾）
+        struct_done = False
 
         if kind == StatementKind.SAY:
             speaker = payload.get('speaker', '') or ''
@@ -171,6 +200,7 @@ def beats_from_statements(statements: Iterable[Statement],
                 if not pending.src_first:
                     pending.src_first = _ln
                 pending.src_last = _ln
+            _mark_struct(pending, stmt)
             beats.append(pending)
             pending = Beat(label=current_label)
             pending_has_stage = False
@@ -204,6 +234,7 @@ def beats_from_statements(statements: Iterable[Statement],
                 if not pending.src_first:
                     pending.src_first = _ln
                 pending.src_last = _ln
+            _mark_struct(pending, stmt)
             beats.append(pending)
             pending = Beat(label=current_label)
             pending_has_stage = False
@@ -212,25 +243,50 @@ def beats_from_statements(statements: Iterable[Statement],
         elif kind == StatementKind.MENU:
             caption = payload.get('caption', '') or ''
             absorbed = False             # 自成一张卡（`with_src` 已带上行号）
-            if caption:
-                seq += 1
-                beats.append(with_src(Beat(
-                    seq=seq, label=current_label,
-                    condition=stmt.condition or '',
-                    kind=KIND_MENU, text=caption,
-                ), _ln))
-                # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
-                last_speaker = ''
+            # **无标题的 `menu:` 也要落一张卡**（2026-10-05 修 P0-1 的第一半）。
+            # 以前只在 `if caption:` 时建拍，于是真实项目里 7 处裸 `menu:`
+            # （策划最常见的写法）在拍这一层**没有任何痕迹**：后面那一串
+            # `menu_option` 拍孤零零地排着，渲染层无从知道"这几条选项属于
+            # 同一个菜单"，只能把选项当成裸旁白导出去：
+            #
+            #     "选项A"        ← 本该是 `menu:` 里的一行
+            #     jump b         ← 本该缩进在"选项A"下面
+            #     "选项B"
+            #     jump c         ← 永远不可达
+            #
+            # 空 caption 用占位符承载（**不写进 Excel**，见 `MENU_NO_CAPTION`）
+            # ——"有菜单"这个结构事实必须活到渲染那一刻。
+            seq += 1
+            _menu_beat = with_src(Beat(
+                seq=seq, label=current_label,
+                condition=stmt.condition or '',
+                kind=KIND_MENU,
+                text=caption or MENU_NO_CAPTION,
+            ), _ln)
+            # 菜单拍**不算**选项体（`_menu_member=False`）：它是组头。
+            # 结构位必须在这里显式写死，不能让循环末尾那趟"按当前语句"的
+            # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，
+            # 组头会被标成 True，菜单组就从头断开了。
+            _menu_beat._menu_member = False
+            struct_done = True
+            beats.append(_menu_beat)
+            # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
+            last_speaker = ''
 
         elif kind == StatementKind.MENU_OPTION:
             seq += 1
             absorbed = False             # 自成一张卡（`with_src` 已带上行号）
-            beats.append(with_src(Beat(
+            _opt = with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
                 kind=KIND_MENU_OPTION,
                 text=payload.get('text', '') or '',
-            ), _ln))
+            ), _ln)
+            # 同上：选项拍自己**不算**选项体，但它是菜单组的一员
+            # （渲染层边界判据里 `menu_option` 那条分支优先于结构位）。
+            _opt._menu_member = False
+            struct_done = True
+            beats.append(_opt)
             flush_stage_only()
             last_speaker = ''
 
@@ -340,12 +396,13 @@ def beats_from_statements(statements: Iterable[Statement],
             absorbed = False             # 自成一张卡（`with_src` 已带上行号）
             target = payload.get('target', '')
             seq += 1
-            beats.append(with_src(Beat(
+            beats.append(_mark_struct(with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
                 kind=KIND_NARRATION,
-                raw=f"{kind} {target}",
-            ), _ln))
+                raw=f"{kind} {target}{_call_from_suffix(kind, payload)}",
+            ), _ln), stmt))
+            struct_done = True
             # 控制流走了，后面的 extend 不再属于任何已说话的 Beat
             last_speaker = ''
 
@@ -355,11 +412,28 @@ def beats_from_statements(statements: Iterable[Statement],
             # 一章结束：`extend` 不可能跨 label 续写，归属清零
             last_speaker = ''
 
-        # —— 行号归属：只记"真被这一拍吸收"的那条 ——
+        # **行号归属：只记"真被这一拍吸收"的那条**
         if _ln and absorbed:
             if not pending.src_first:
                 pending.src_first = _ln
             pending.src_last = _ln
+        # **结构位**：把"这一拍属于哪个菜单块"标在 `pending` 上。
+        #
+        # 这一位由**创建 pending 的那条语句**决定，而 `pending` 会在流程里
+        # 被换掉（选项拍就是先 `flush_stage_only()` 再把 `pending` 换成新
+        # Beat），所以：
+        #   · 直接构造 Beat 的分支（菜单 / 选项 / 跳转）在 append 处就标好，
+        #     并把 `struct_done` 置真 —— 这里**不能再标**，否则会被**下一条**
+        #     语句的 `_menu_member=False`（选项拍的）覆盖成 False，
+        #     整组块体都被判成"块外"（实测：credits 4 个选项丢 3 个）。
+        #   · 其余分支（舞台 / 台词 / 代码 / 注释…）攒的是 `pending`，
+        #     在这里标一次即可。
+        #
+        # `_mark_struct` 只在语句真的有 `_menu_member` 时才写 —— 手工构造的
+        # Statement 没有这一位，Beat 上也不会凭空多出一个假的 `False`，
+        # 渲染层因此能正确退回"按条件推断"。
+        if not struct_done:
+            _mark_struct(pending, stmt)
 
     flush_stage_only()
     _assign_identity(beats)
@@ -377,7 +451,145 @@ def beats_from_statements(statements: Iterable[Statement],
         b.stage = compose_stage_extra(b, None)
         b.bgm = compose_audio_text(b, 'music')
         b.sfx = compose_audio_text(b, 'sound')
+    order_menu_bodies(beats)
     return beats
+
+
+def _call_from_suffix(kind: str, payload: dict) -> str:
+    """
+    `call X from Y` 的 ` from Y` 尾巴（不是 call、或没有 from 就走空串）。
+
+    `from` 是 Ren'Py 的**存档点标识**：同一个 label 被多处 call 时靠它区分
+    存档属于哪一处。`pipeline/renpy_exporter` 对"控制流导出"那条路已经补过
+    （见那里的 `_from_suffix`），这里是**章节导出**这条路的同一修。
+
+    为什么必须修（2026-10-05 真实项目实测）：`chapter_controller.rpy` 里
+    7 条 `call chapterN from _call_chapterN` 在 `rpy → xlsx → rpy` 往返后
+    **全部退化成裸 `call`**。语义看着等价（照样跳得过去），代价是**老存档里的
+    `_call_chapterN` 存档点全都找不到** —— 玩家读档直接落到别处。
+    而这一位一直好好地存在 `Statement.payload['from_clause']` 里，
+    只是拼 Raw 文本那行代码把它忘了。
+    """
+    if str(kind) != StatementKind.CALL:
+        return ''
+    clause = str(payload.get('from_clause', '') or '').strip()
+    return f' from {clause}' if clause else ''
+
+
+def order_menu_bodies(beats: list) -> list:
+    """
+    把菜单组里的拍**重排成"选项 → 它的块体"**（就地修改并返回同一个列表）。
+
+    为什么需要（2026-10-05 实测真实项目 `credits_screen.rpy` 丢 2 个选项）：
+
+    解析器吐语句的顺序与源码**物理顺序不一致**。`_parse_menu` 先把一个
+    `menu:` 里的**全部选项头**收完，`_walk` 再逐个下钻它们的块体，于是
+
+        选项"完整带图片版本"(605) → 选项"简化带图片版本"(608)
+        → 块体 raw(606) → 选项(611) → 块体 raw(609) → …
+
+    而"一拍一行"的落盘规则把块体挂在**当时攒着的那一拍**上，于是扁平序列
+    变成 `option(605), option(608), body(606), option(611), …` ——
+    选项头与块体交错。渲染时按"相邻"判块边界，第二个选项就被判成块外，
+    `menu:` 块在那里截断，后面几个选项当成裸旁白导出去。
+
+    归位规则（只用**渲染顺序**，不依赖源行号 —— Excel 回导之后行号是 0）：
+
+        块体拍 → 挂到它前面最近的那张**选项拍**后面
+
+    这正好同时满足两种形态：
+      · 常见形态 `option, body, option, body` —— 块体前面最近的选项就是它
+        自己的选项，重排后顺序不变；
+      · credits 那种 `option, option, body, option, body` —— 块体被搬回
+        它真正归属的那张选项后面。
+
+    **只在菜单组内部搬**：菜单组之外的拍一个都不动（顺序是演出语义）。
+    **就地**重排，调用方拿到的就是同一个列表对象。
+    """
+    n = len(beats)
+    i = 0
+    while i < n:
+        if beats[i].kind != KIND_MENU:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and beats[j].kind == KIND_MENU_OPTION:
+            j += 1
+        if j == i + 1:
+            # 这个菜单一张选项拍都没有（`menu:` 后面直接跟块外内容）→ 不动
+            i += 1
+            continue
+        # 组尾：从 j 起，直到出现下一张 menu 拍
+        k = j
+        while k < n and beats[k].kind != KIND_MENU:
+            k += 1
+        beats[i + 1:k] = _cluster_option_order(list(beats[i + 1:k]))
+        i = k
+    return beats
+
+
+def _cluster_option_order(items: list) -> list:
+    """
+    菜单组内的拍 → "选项 + 它的块体"的顺序（`order_menu_bodies` 的实现）。
+
+    输入形如 `[optA, optB, bodyA, optC, bodyB]`（选项头与块体交错），
+    输出 `[optA, bodyA, optB, bodyB, optC]`。
+
+    归位判据（按可靠性排序）：
+
+      1. **源行号**（`.rpy` 解析来的拍有）：块体属于"行号在它之前、
+         且离它最近"的那张选项拍。这就是源码里的归属，不用猜。
+      2. **出场顺序兜底**（Excel 回导后行号是 0）：按"第 k 张块体归
+         第 k 张选项"。
+
+    为什么需要两种：`Beat.src_first/src_last` 是运行时元数据，不入表
+    （增量导出要用，但 Excel 里没有这两列），所以回导之后只能靠顺序。
+    """
+    options = [it for it in items if it.kind == KIND_MENU_OPTION]
+    if not options:
+        return list(items)
+    first_opt = next(i for i, it in enumerate(items)
+                     if it.kind == KIND_MENU_OPTION)
+
+    #: 第一张选项拍**之前**的拍：它们不属于任何选项，位置原样保留。
+    #: （真实项目里这一段是"上一条 `queue sound` 攒下的那一拍"——
+    #:   它被 `menu_option` 的 `flush_stage_only()` 落盘，出现在选项拍之前。
+    #:   若把它当成块体归给第一个选项，它就会**跑到菜单后面**去，
+    #:   块的顺序整段错位。）
+    lead = list(items[:first_opt])
+    body_items = list(items[first_opt:])
+    options = [it for it in body_items if it.kind == KIND_MENU_OPTION]
+
+    bodies = [it for it in body_items if it.kind != KIND_MENU_OPTION]
+    lines = [int(getattr(o, 'src_last', 0) or 0) for o in options]
+    use_lines = bool(bodies) and all(lines) and all(
+        int(getattr(b, 'src_last', 0) or 0) for b in bodies)
+
+    owners = {}                     # id(选项) -> [块体拍]
+    leftover = []                   # 认不出归属的（绝不丢）
+    if use_lines:
+        for b in bodies:
+            line = int(getattr(b, 'src_last', 0))
+            best = None
+            for idx, opt_line in enumerate(lines):
+                if opt_line <= line:
+                    best = idx
+            if best is None:
+                leftover.append(b)
+            else:
+                owners.setdefault(id(options[best]), []).append(b)
+    else:
+        # 顺序兜底：第 k 张块体归第 k 张选项；多余的留给最后一张
+        for idx, b in enumerate(bodies):
+            owner = options[idx] if idx < len(options) else options[-1]
+            owners.setdefault(id(owner), []).append(b)
+
+    out = list(lead)
+    for opt in options:
+        out.append(opt)
+        out.extend(owners.get(id(opt), []))
+    out.extend(leftover)
+    return out
 
 
 

@@ -28,6 +28,15 @@ from storygraph.core.statement import MARKER
 
 BEAT_FIELDS = [
     'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Comment', 'Text',
+    # Condition 紧跟在 Text 后面（不是塞在最后一列）：它是**台词的修饰符**
+    # ——"这句话在什么条件下才出现"，策划读表时和 Text 是同一眼的。
+    # 2026-10-05 补：这一列**此前根本不存在**，于是 `Beat.condition`
+    # 在 `to_row` / `from_row` 里两头都没有出口 —— `.rpy → .rpy` 看起来
+    # 正常（渲染层 `beat_render` 一直是对的），可**一经过 Excel 往返，
+    # 所有 if / 菜单条件全被抹平**（真实项目 `mini_game1` 实测 7 条 → 0 条，
+    # if 行 5 → 1，分支变成顺序执行）。加列会改变 `BEAT_FIELDS` 的下标，
+    # 所以必须同时迁 `HIDDEN_BEAT_COLUMNS` 的隐藏列定位（见下）。
+    'Condition',
     'Scene', 'Show', 'At', 'With', 'Hide',
     'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
     'Stage', 'CodeBlock', 'ContentHash',
@@ -60,6 +69,7 @@ HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder')
 BEAT_HEADERS = {
     'LineId': '行号', 'Seq': '序号', 'Label': '章节', 'Kind': '类型',
     'Speaker': '说话人', 'Comment': '注释', 'Text': '台词',
+    'Condition': '条件',
     'Scene': '背景', 'Show': '立绘', 'At': '位置', 'With': '转场',
     'Hide': '退场',
     'BGM': '音乐', 'BGMParams': '音乐参数', 'SFX': '音效',
@@ -131,6 +141,35 @@ KIND_MENU = 'menu'
 KIND_MENU_OPTION = 'menu_option'
 
 KIND_EXTEND = 'extend'
+
+#: 「这个菜单没有标题」的占位文本（只活在内存里的 Beat 上）。
+#:
+#: 为什么需要它：Ren'Py 的 `menu:` **可以没有 caption**（真实项目 7 处
+#: 全是这种），而 `Beat.text` 为空时"菜单拍"和"这一拍什么都没有"无法区分
+#: —— 渲染层只能二选一，于是无标题菜单被整块丢掉、选项变成裸旁白。
+#:
+#: 用**不会与任何真实台词相撞**的字符串当占位（`\x00` 是控制字符，
+#: 真人打不出来），并且：
+#:   · **不写进 Excel**（`to_row` 写空串）——`openpyxl` 拒绝控制字符，
+#:     写进去会直接抛 `IllegalCharacterError`；
+#:   · `from_row` 读回空 cell 时按空 caption 处理，所以往返之后
+#:     "有菜单、无标题"这个事实由 `kind='menu'` 自己承载，不靠文本。
+MENU_NO_CAPTION = '\x00menu'
+
+
+def menu_caption_text(text) -> str:
+    """
+    Beat.text → 菜单标题。
+
+    · 占位符（`MENU_NO_CAPTION`）→ 空串；
+    · **只有空白也算"没有标题"** —— 源脚本里 `menu " ":` 这种写法
+      （真实项目里 2 处）语义上就是一个无标题菜单，而空白标题会在
+      Excel / 往返归一化里被 `.strip()` 掉，留着它只会制造假差异。
+    """
+    text = str(text or '')
+    if text == MENU_NO_CAPTION:
+        return ''
+    return text if text.strip() else ''
 
 @dataclass
 class Beat:
@@ -240,7 +279,8 @@ class Beat:
         sfx = self.sfx or _sfx_cell
         return [
             self.line_id, self.seq, self.label, self.kind,
-            self.speaker, self.comment, self.text,
+            self.speaker, self.comment, menu_caption_text(self.text),
+            self.condition,
             compose_scene_cell(self),
             compose_show_cell(self),
             self.at, self.with_,
@@ -267,6 +307,21 @@ class Beat:
                 v = int(v)
             return str(v).strip()
 
+        # 台词**只去首部空白**，尾部原样保留。
+        # 为什么不能跟别的列一样 strip：项目自己定的契约是"逐字节不变"，
+        # 而真实数据里存在以空格结尾的台词（`'元神，启动！ '`，
+        # `chapter0_0.rpy` 一处 116 条）。`strip()` 会把它静默吃掉，
+        # 虽然是低危改动，但它让"打开→导出"产生了无意义的 diff。
+        # 首部空白仍然去掉：Ren'Py 里台词字符串前面的空格没有语义，
+        # 而 Excel 单元格里它多半是手误。
+        def g_text(key, default=''):
+            v = row.get(key, default)
+            if v is None:
+                return default
+            if isinstance(v, float) and v.is_integer():
+                v = int(v)
+            return str(v).lstrip()
+
         seq = row.get('Seq', 0)
         try:
             seq = int(seq) if seq not in (None, '') else 0
@@ -289,10 +344,12 @@ class Beat:
             label=g('Label'),
             line_id=g('LineId'),
             content_hash=g('ContentHash'),
+            # 条件（`if …:` 走哪一支）：与 Text 同样保真，是**语义**不是排版
+            condition=g('Condition'),
             comment=comment,
             kind=kind,
             speaker=g('Speaker'),
-            text=g('Text'),
+            text=g_text('Text'),
             code=g('CodeBlock') or g('Raw'),
             voice=g('Voice'),
         )
@@ -437,7 +494,13 @@ class Beat:
         纯 `stop music` / `stop sound` 没有"要播的资产"，但它是明确的
         演出指令（转场 / 进战斗的关键节点），必须算有内容，否则会被丢掉。
         注释 / 代码块同理——它们都是要回写的演出内容。
+
+        `menu`（菜单拍）**永远算有内容**：它可能一个字都没有
+        （`menu:` 无标题、选项在后面的行里），但那一行本身是整块菜单的
+        结构锚点——按"空行"丢掉它，选项就变成了裸旁白。
         """
+        if self.kind in (KIND_MENU, KIND_MENU_OPTION):
+            return False
         return not any((
             self.text, self.speaker, self.scene, self.show, self.hide,
             self.stage, self.bgm, self.sfx,
@@ -662,11 +725,25 @@ def compose_show_cell(beat: 'Beat') -> str:
     parts = []
     for item in _split_show_items(beat.show):
         if item.get('clause'):
+            # 复杂子句（behind / onlayer / zorder / 多目标 at…）由
+            # 「舞台（高级）」列承载 —— 两列必须严格互补，各写一份就会双写
+            # （见 `compose_stage_extra` 的 docstring）。
+            # 注意 `expression` 项**不是** clause（`_parse_show_expression`
+            # 返回 clause=''），它走下面那条路。
             continue
         img = (item.get('image') or '').strip()
         if not img:
             continue
         at = (item.get('at') or '').strip()
+        if item.get('is_expression'):
+            line = _expression_clause(item)
+            if not item.get('at'):
+                # 位置可能落在"整拍"那格（`位置` 列）上
+                fallback = (beat.at or '').strip()
+                if fallback:
+                    line += f' at {fallback}'
+            parts.append(line)
+            continue
         parts.append(f'{img}@{at}' if at else img)
     return '; '.join(parts)
 
@@ -838,9 +915,14 @@ def compose_code(beat: 'Beat') -> str:
 
     这是唯一的"保真后门"：里面有东西，编译器就原封不动抄进脚本。
 
-    有 `ordered` 时按**源码里的交错顺序**拼（`$ f()` 与 `show screen`/`pause`
-    交替的演出必须逐行还原）；没有 `ordered`（表里读回来的 Beat）就退回
-    "raw 在前、code 在后"的历史行为，保证老表照旧。
+    有 `ordered` 时按**源码里的交错顺序**拼，并恢复每行的块层级
+    （`ordered` 的第三位；见 `_relative_indents`）—— 不恢复的话
+    `python:` 块的嵌套结构在往返里就没了。
+
+    没有 `ordered`（表里读回来的 Beat）就退回"raw 在前、code 在后"的
+    历史行为，保证老表照旧。
+
+    返回文本**不带整体缩进**（缩进由渲染层按上下文加）。
     """
     ordered = _ordered_code_lines(beat)
     if ordered is not None:
@@ -850,23 +932,24 @@ def compose_code(beat: 'Beat') -> str:
     return '\n'.join(parts)
 
 
+
 #: 内部标记：`$code`（`$` 后无空格）这一位用它承载（见 Statement.make_python）。
-#: **绝不能写进 Excel** —— openpyxl 拒绝控制字符：
-#: `IllegalCharacterError: ... cannot be used in worksheets`（实测踩过）。
-#:
-#: 2026-10-05：改为从 `core.statement` 取（约定只有一份，见那里的 `MARKER`）。
+#: 约定只有一份，从 `core.statement` 取；它现在是一个**私用区字符**
+#: （不是控制字符），所以能安全地进出 Excel 单元格。
 _MARKER = MARKER
 
 
 def compose_code_cell(beat: 'Beat') -> str:
     """
-    写进「代码」列**单元格**的文本 = `compose_code` 且剥掉内部标记。
+    写进「代码」列**单元格**的文本 = `compose_code`（标记原样保留）。
 
-    渲染走 `compose_code`（保留标记，才能还原 `$code` 紧写形式）；
-    写表走这里（`)` 是控制字符，openpyxl 会直接报错）。
-    两者只在"是否保留标记"这一点上不同，内容完全一致。
+    2026-10-05 修正：标记以前是控制字符 `\\x01`，`openpyxl` 拒收，所以这里
+    必须把它 `.replace()` 掉 —— 代价是**读回来认不出"原文紧凑写 `$code`"**，
+    真实项目 22 条 `$persistent…` 因此在往返里被改写成 `$ persistent…`。
+    标记改成 Unicode 私用区字符（见 `core.statement.MARKER`）之后它就能
+    安全地待在单元格里，写表与渲染**内容完全一致**，不再需要剥。
     """
-    return (compose_code(beat) or '').replace(_MARKER, '')
+    return compose_code(beat) or ''
 
 
 
@@ -883,6 +966,10 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
     实现是把 `ordered` 当**消费序列**：逐条按记录的类型去对应的行队列里取。
     某类型的行不够了就说明 ordered 与字段不同步（表被手改过），
     此时返回 None 走历史行为，绝不猜。
+
+    条目可以是二元组 `(kind, line)`（`.rpy` 解析那条路，行自带原始缩进）
+    或三元组 `(kind, line, indent)`（**从 Excel 读回来**那条路：单元格里
+    的行缩进是不可信的排版残留，按记录的真实层级重新缩进）。
     """
     ordered = getattr(beat, 'ordered', None) or []
     if not ordered:
@@ -893,8 +980,9 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
     out = []
     for item in ordered:
         try:
-            kind, line = item
-        except (TypeError, ValueError):
+            kind, line = item[0], item[1]
+            indent = int(item[2]) if len(item) > 2 else None
+        except (TypeError, ValueError, IndexError):
             return None
         pool = pools.get(kind)
         if pool is None:
@@ -902,12 +990,31 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
         i = pos[kind]
         if i >= len(pool) or pool[i] != line:
             return None
-        out.append(line)
+        out.append(_reindent(line, indent))
         pos[kind] = i + 1
     # ordered 必须是"两个队列都恰好取完"，否则说明它不完整
     if pos['raw'] != len(pools['raw']) or pos['code'] != len(pools['code']):
         return None
     return out
+
+
+
+def _reindent(line: str, indent) -> str:
+    """
+    按记录的真实层级给一行补缩进（`indent=None` = 原样）。
+
+    为什么需要（2026-10-05 真实项目实测）：`python:` 块的块体在 Excel
+    单元格里**没有层级信息** —— 一格里就是几行文本。写表时把头一行的
+    缩进剥掉之后，读回来再也分不出"哪些行是块体的一部分"，
+    渲染只能逐行补 `$`，一个 `python:` 块被拆成十几条 `$` 语句
+    （实测 `mini_game1.rpy` 一个块拆出 53 条）。把层级记在 `ordered`
+    里，块结构就能原样回来。
+    """
+    if indent is None:
+        return line
+    if not line.strip():
+        return ''
+    return ' ' * max(0, int(indent)) + line.lstrip()
 
 
 
@@ -924,30 +1031,101 @@ def _split_code_cell(cell: str) -> tuple:
 
     ordered 一并给出，让渲染能按**原来的交错顺序**出代码（见
     `_ordered_code_lines`）。
+
+    单元格里的**缩进不可信**（写表/用户手改都会动它），所以：
+
+      · 存进 `raw` / `code` 字段的行一律 `strip`（字段里只放内容）；
+      · 真实层级记进 `ordered` 的第三位（`(kind, line, indent)`），
+        渲染时按它重新缩进。这样 `python:` 块的块结构能原样回来，
+        块里的每行也不会被当成独立的 `$` 语句拆散。
+      · `$` 前缀一并剥掉（渲染时会按 `$` / `$ ` 两种写法还原）——
+        留着会变成 `$ $ x`（实测的双美元 bug）。
     """
     lines = _split_lines(cell)
     if not lines:
         return '', '', []
+    indents = _relative_indents(lines)
     raw, code, ordered = [], [], []
-    for ln in lines:
+    for idx, ln in enumerate(lines):
         s = ln.strip()
+        rel = indents[idx] if idx < len(indents) else 0
         if s.startswith('$') or (s and not _looks_like_renpy_statement(s)
                                  and not s.endswith(':')
                                  and not _is_bare_renpy_verb(s)):
             # `$x`（`$` 后无空格）在**原文件里**很常见，而生成器默认写 `$ x`。
             # 逐字节保留这一位，否则每个 `$` 行都成一个 diff 块。
-            # 用标记前缀承载（见 `Statement.make_python` / `core.statement.MARKER`）。
-            if s.startswith('$') and not s[1:2].isspace() and len(s) > 1:
-                marked = MARKER + s[1:]
-                code.append(marked)
-                ordered.append(('code', marked))
+            # 标记只给**紧凑写法**：`$ x` 存裸文本，渲染时补 `$ ` 就是原样
+            # （标记标记号，标记再补 `$` 就会变成 `$ $ x`）。
+            if s.startswith('$'):
+                body = s[1:]
+                line = MARKER + body if (body and not body[:1].isspace()) \
+                    else body
             else:
-                code.append(ln)
-                ordered.append(('code', ln))
+                line = s
+            code.append(line)
+            ordered.append(('code', line, rel))
         else:
-            raw.append(ln)
-            ordered.append(('raw', ln))
+            raw.append(s)
+            ordered.append(('raw', s, rel))
     return '\n'.join(raw), '\n'.join(code), ordered
+
+
+
+def _relative_indents(lines: list) -> list:
+    """
+    每个非空行的**相对块层级**（0 = 与上一句同层，1 = 进了下一层，…）。
+
+    为什么需要（2026-10-05 真实项目实测）：Excel 单元格里没有块结构，
+    `python:` 块的嵌套关系只体现为**缩进**。写表时 `compose_code_cell`
+    会把缩进一起写进去（那是重建块体唯一的依据），可读回来时如果直接
+    `strip` 掉，块结构就永久丢了 —— 渲染只能逐行补 `$`，一个
+    `python:` 块被拆成十几条 `$` 语句（`mini_game1.rpy` 实测一个块拆出
+    53 条，`for` / `if` 的嵌套体全被压到同一层）。
+
+    **只认真块的层级，不认续行对齐**：
+
+        positions = [                     ← 语句没写完（括号未收平）
+                (200, 200), (600, 200),   ← 这是**续行对齐**，不是块层级
+            ]                             ← 收平
+
+    续行那几行比首行深，可它们在 Python 里没有语义 —— 归成块层级只会
+    把 `positions = [` 后面的内容整体拖深一级。所以带括号的行按
+    "括号平衡"算出续行，续行一律记 0；只有**上一句已经收平**之后
+    缩进变深，才算真的进了一层。
+
+    （`_render_code_block` 的 `_group_code_statements` 用同一套括号口径
+    把续行重新粘成一条语句，两边必须一致。）
+    """
+    from storygraph.story.beat_render import _bracket_delta, _quote_state
+
+    rel = []
+    stack = [0]
+    depth = 0
+    quote = ''
+    prev_open = False
+    for ln in lines:
+        if not ln.strip():
+            rel.append(0)
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        if prev_open:
+            # **续行**：保留它**原本的物理缩进**。续行的缩进在 Python 里没有
+            # 语义（只是对齐括号），但它决定这条语句重新渲染出来好不好看；
+            # 归成块层级会把 `[` 后面的内容拖到括号位置之外。
+            rel.append(indent)
+        else:
+            while len(stack) > 1 and indent < stack[-1]:
+                stack.pop()
+            if indent > stack[-1]:
+                stack.append(indent)
+            # **块层级**：归一成 4 的倍数。真块体在单元格里可能被写成 2 空格
+            # 一级（有人手改过），归一到 4 才能和 `render_code_block` 的
+            # `python:` 块缩进对上（那边按 4 空格一级出）。
+            rel.append(4 * (len(stack) - 1) if indent > stack[0] else 0)
+        depth += _bracket_delta(ln, '')
+        quote = _quote_state(ln, quote)
+        prev_open = depth > 0 or bool(quote)
+    return rel
 
 
 
@@ -1031,34 +1209,76 @@ def _show_clause_args(payload: dict) -> str:
 
 
 def _show_item_text(payload: dict) -> str:
-    """单个 show 语句 -> Show 单元格里的一项。"""
+    """
+    单个 show 语句 -> Show 单元格里的一项。
+
+    三种编码：
+      · 简单形态        → `图像@位置`（或纯图像名）
+      · `expression`    → `expression <表达式>@位置`（**必须带前缀**：
+        表达式本体的形态与普通图像名无从区分，不带前缀读回来就只能当普通图）
+      · 带 as/behind/…  → 完整子句（那些修饰符没有结构化列承载）
+    """
     image = payload.get('image', '') or ''
-    at = payload.get('at') or []
+    at = ' '.join(payload.get('at') or [])
     simple = not any((
         payload.get('as_'), payload.get('with_'), payload.get('onlayer'),
-        payload.get('behind'), payload.get('is_expression'),
-        payload.get('zorder') is not None,
+        payload.get('behind'), payload.get('zorder') is not None,
     ))
+    if payload.get('is_expression'):
+        # 表达式形态统一用自描述子句（见 `_expression_clause`）：
+        # 位置、别名都不丢，读回来还是同一个项。
+        return _expression_clause({
+            'image': image, 'at': at, 'as_': payload.get('as_') or '',
+            'with_': payload.get('with_') or '',
+        })
     if simple:
-        return f"{image}@{' '.join(at)}" if at else image
+        return f'{image}@{at}' if at else image
     return _show_clause_args(payload)
 
 
 
 def show_item_part(item: dict) -> str:
     """
-    一个 show 项 → **规范片段**（`图像@变换` / 复杂子句原文 / 纯图像名）。
+    一个 show 项 → **规范片段**（`expression X as q at i` / 复杂子句原文 /
+    `图像@变换` / 纯图像名）。
 
     这是 show 项在单元格里的唯一编码形式，`_join_show_items` 与
     `show_item_parts` 都用它 —— 编码只有一份，比较才有意义。
+
+    `expression` 项**不能**用 `图像@位置` 那种紧凑编码：表达式本体里
+    可能有空格、括号、引号（`holo("lan base")`），`@` 分不出边界。
+    所以它编码成自描述的完整子句 `expression X as q at i`。
     """
     if item.get('clause'):
         return ' '.join(str(item['clause']).split())
     image = ' '.join(str(item.get('image') or '').split())
-    at = str(item.get('at') or '').strip()
     if not image:
         return ''
+    if item.get('is_expression'):
+        return _expression_clause(item)
+    at = str(item.get('at') or '').strip()
     return f'{image}@{at}' if at else image
+
+
+
+def _expression_clause(item: dict) -> str:
+    """
+    `show expression` 项 → 规范子句 `expression X [as q] [at i] [with d]`。
+
+    `beat_model` 内部（`compose_show_cell` / `show_item_part`）共用这一份，
+    保证"写进单元格的"与"用来比较去重的"是**同一个字符串**。
+    """
+    line = f"expression {item.get('image', '')}"
+    as_ = str(item.get('as_') or '').strip()
+    if as_:
+        line += f' as {as_}'
+    at = str(item.get('at') or '').strip()
+    if at:
+        line += f' at {at}'
+    with_ = str(item.get('with_') or '').strip()
+    if with_:
+        line += f' with {with_}'
+    return line
 
 
 def show_item_parts(text: str) -> set:
@@ -1096,24 +1316,103 @@ def _split_show_items(text: str) -> list:
           {'clause': '', 'image': 'eileen happy', 'at': ''},
           {'clause': 'cg cg02 at t behind ye', 'image': 'cg cg02', 'at': ''}]
 
-    逗号后面也可能跟 at 之外的写法，这里只认 `图像@变换`（紧凑式）与
-    "含修饰关键字的完整子句"两种；其余当纯图像名。
+    只认 `图像@变换`（紧凑式）与"含修饰关键字的完整子句"两种；其余当纯图像名。
+
+    **`expression` 形态单独走一条路**（2026-10-05 修）：`show expression`
+    的图像名本身是个 Python 表达式（`holo("lan base")`），里面可能带空格、
+    括号、引号，所以 `@位置` 那种紧凑编码**表达不了**它 —— 必须像别的
+    修饰符一样解析成 `{expression, image, at, as, with}`，否则位置信息
+    （`at i11`）会在写表时丢掉（真实项目 `script.rpy` 实测 5 条）。
     """
     items = []
     for part in (text or '').split(';'):
         part = part.strip()
         if not part:
             continue
-        if '@' in part:
+        if part.startswith('expression') and (
+                part == 'expression' or part[len('expression')].isspace()):
+            items.append(_parse_show_expression(part))
+        elif '@' in part:
             image, _, at = part.partition('@')
-            items.append({'clause': '', 'image': image.strip(),
-                          'at': at.strip()})
+            image = image.strip()
+            # `expression X@at` 进来时（`show_item_part` 的编码）走表达式的路
+            if image.startswith('expression') and (
+                    image == 'expression'
+                    or image[len('expression')].isspace()):
+                item = _parse_show_expression(image)
+                item['at'] = at.strip()
+                items.append(item)
+                continue
+            items.append({'clause': '', 'image': image, 'at': at.strip()})
         elif any(w in _SHOW_ARG_KEYWORDS for w in part.split()):
             items.append({'clause': part, 'image': _clause_image(part),
                           'at': ''})
         else:
             items.append({'clause': '', 'image': part, 'at': ''})
     return items
+
+
+
+def _parse_show_expression(part: str) -> dict:
+    """
+    `expression holo("lan base") at i11 as qing with dissolve`
+      → {clause: '', is_expression: True, image: 'holo("lan base")',
+         at: 'i11', as_: 'qing', with_: 'dissolve'}
+
+    关键词的**识别要跳过引号**：表达式里完全可以出现 `at` / `as` 这样的词
+    （`Text("at as")`），按空格硬切会切错。找不到关键词时整个剩余部分
+    就是表达式本体。
+    """
+    rest = part[len('expression'):].strip()
+    at = as_ = with_ = ''
+    spec_chars = []
+    i = 0
+    n = len(rest)
+    while i < n:
+        ch = rest[i]
+        if ch in '"\'':
+            # 跳过整个字符串字面量（含转义）
+            j = i + 1
+            while j < n:
+                if rest[j] == '\\':
+                    j += 2
+                    continue
+                if rest[j] == ch:
+                    break
+                j += 1
+            spec_chars.append(rest[i:j + 1])
+            i = j + 1
+            continue
+        if ch == ' ':
+            m = re.match(r'\s+(at|as|with)\s+', rest[i:])
+            if m:
+                word = m.group(1)
+                i += m.end()
+                j = i
+                while j < n and not rest[j].isspace():
+                    j += 1
+                value = rest[i:j]
+                i = j
+                if word == 'at' and not at:
+                    at = value
+                elif word == 'as' and not as_:
+                    as_ = value
+                elif word == 'with' and not with_:
+                    with_ = value
+                continue
+            spec_chars.append(ch)
+            i += 1
+            continue
+        spec_chars.append(ch)
+        i += 1
+    return {
+        'clause': '',
+        'is_expression': True,
+        'image': ''.join(spec_chars).strip(),
+        'at': at,
+        'as_': as_,
+        'with_': with_,
+    }
 
 
 
@@ -1223,8 +1522,16 @@ def _beat_content_hash(beat: 'Beat') -> str:
 
 
 def _split_lines(text: str) -> list:
-    """多行单元格（Comment/Raw/CodeBlock）按行拆开，去空行。"""
-    return [ln.rstrip() for ln in (text or '').split('\n') if ln.strip()]
+    """
+    多行单元格（Comment/Raw/CodeBlock）按行拆开，去空行。
+
+    **行尾一律归一成 `\\n`**：Windows 上写出去的 `.rpy` / 单元格可能是 CRLF，
+    而 `split('\\n')` 会把 `\\r` 留在行尾 —— 于是行尾多一个不可见字符，
+    缩进计算、`$` 判定、按行比对全部悄悄错位（实测踩过：续行缩进被算成 0，
+    一整个 `python:` 块被拆成几十条 `$` 语句）。
+    """
+    text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    return [ln.rstrip() for ln in text.split('\n') if ln.strip()]
 
 
 

@@ -36,7 +36,11 @@ from storygraph.core.vocabulary import (
     LAYER_CN_TAG as _LAYER_CN_TAG,
     NON_ACTOR_TAGS as _NON_ACTOR_TAGS,
 )
-from storygraph.story.beat_model import _split_show_items, _split_hide_items
+from storygraph.story.beat_model import (
+    _split_hide_items,
+    _split_show_items,
+    menu_caption_text,
+)
 
 # 「哪些 tag 是图层而不是角色立绘」已收敛到
 # `storygraph.core.vocabulary.NON_ACTOR_TAGS`（顶部以 `_NON_ACTOR_TAGS` 导入）。
@@ -344,7 +348,9 @@ def stage_snapshots(beats: list) -> list:
             'seq': beat.seq,
             'label': beat.label,
             'speaker': beat.speaker,
-            'text': beat.text,
+            # 菜单拍的"无标题"占位符**不能漏进 Excel**：`\x00` 是控制字符，
+            # openpyxl 会直接抛 `IllegalCharacterError`（整张表写不出去）。
+            'text': menu_caption_text(beat.text),
             'scene': state['scene'],
             'actors': _render_actors(state['actors']),
             'music': state['music'],

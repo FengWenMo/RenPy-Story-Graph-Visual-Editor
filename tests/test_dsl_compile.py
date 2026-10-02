@@ -273,11 +273,18 @@ class TestReverseWords:
 class TestSheetContract:
     def test_structured_columns_with_dropdowns(self):
         """
-        现在的契约：**22 列**（20 列结构化编辑面 + 2 列隐藏的内部元数据）。
+        现在的契约：**23 列**（21 列结构化编辑面 + 2 列隐藏的内部元数据）。
         结构化列（Scene/Show/At/With/Hide/BGM/BGM 参数/SFX/音效参数/Voice）
         每列都能下拉，是策划主要的编辑面；Stage 是"结构化列表达不了的"
-        高级通道；真正的旧列（Transform/Raw、Music*/Sound*、Condition、
-        Notes）已被收敛掉。用户明确要删的 Condition 列也不在表里。
+        高级通道；真正的旧列（Transform/Raw、Music*/Sound*、Notes）
+        已被收敛掉。
+
+        `Condition` **2026-10-05 加回来**（`Text` 之后）：它当初被当成
+        旧列删掉，于是"这一拍在什么条件下才出现"**没有任何列的出口** ——
+        渲染层一直是对的，可 `.rpy → Excel → .rpy` 往返会把所有 `if` 分支
+        和菜单选项条件**静默抹平**（真实项目 `mini_game1` 实测 7 条 → 0 条，
+        if 行 5 → 1，分支变顺序执行）。它不是排版列，是**语义列**：
+        删掉它等于丢剧情逻辑，所以必须回表。
 
         两列隐藏元数据都是 2026-09-28 拍板加回来的，**由工具维护**：
           · `StageOrder` —— 舞台指令之间的相对顺序（`hide,show` = 重置立绘）
@@ -287,7 +294,7 @@ class TestSheetContract:
         两者都整列隐藏，策划的界面里看不到。注意它们和 26 列时代的
         `StageOrder` 不是一回事——那次它和结构化列并列出现。
         """
-        assert len(BEAT_FIELDS) == 22, BEAT_FIELDS
+        assert len(BEAT_FIELDS) == 23, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
             assert col in BEAT_FIELDS
         # 每列都挂得上下拉的"结构化编辑面"
@@ -295,9 +302,15 @@ class TestSheetContract:
                     'BGM', 'SFX', 'Voice'):
             assert col in DROPDOWN_COLUMNS, f'{col} 应该有下拉'
         for gone in ('Transform', 'Raw', 'Music', 'MusicParams', 'MusicAction',
-                     'Sound', 'SoundParams', 'SoundAction', 'Condition',
+                     'Sound', 'SoundParams', 'SoundAction',
                      'Notes'):
             assert gone not in BEAT_FIELDS, f'{gone} 应该被收敛掉了'
+        # 条件列必须在表里，而且落在「编辑区」（不是隐藏列）：
+        # 它是剧情逻辑，策划要能看见、能改。
+        assert 'Condition' in BEAT_FIELDS, '条件列不能丢（见 docstring）'
+        assert BEAT_FIELDS.index('Condition') < \
+            BEAT_FIELDS.index('Scene'), '条件列应紧挨着台词，不该被赶到技术列区'
+        assert 'Condition' not in HIDDEN_BEAT_COLUMNS
         # 两列内部元数据在表里，但必须整列隐藏
         for col in ('StageOrder', 'OpOrder'):
             assert col in BEAT_FIELDS, col

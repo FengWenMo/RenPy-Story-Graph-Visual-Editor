@@ -51,8 +51,8 @@ from storygraph.story.beat_model import (  # noqa: F401
     KIND_SAY,
     LEGACY_AUDIO_COLUMNS,
     LEGACY_STAGE_COLUMNS,
-    _AUDIO_PSEUDO_REVERSE,
-    _HEADER_ALIASES,
+    MENU_NO_CAPTION,
+    _AUDIO_PSEUDO_REVERSE,    _HEADER_ALIASES,
     _NATIVE_TAIL_RE,
     _RENPY_STATEMENT_HEADS,
     _SHOW_ARG_KEYWORDS,
@@ -87,6 +87,7 @@ from storygraph.story.beat_model import (  # noqa: F401
     compose_show_cell,
     compose_stage,
     compose_stage_extra,
+    menu_caption_text,
 )
 from storygraph.story.beat_render import (  # noqa: F401
     _audio_ref,
@@ -103,7 +104,9 @@ from storygraph.story.beat_render import (  # noqa: F401
     make_symbols,
     render_beat_to_rpy,
     render_beats_to_rpy,
+    render_menu_block,
     render_transform_definitions,
+    split_beat_units,
 )
 from storygraph.story.excel_export import (  # noqa: F401
     COMMON_TRANSITIONS,
