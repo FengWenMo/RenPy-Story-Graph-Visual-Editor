@@ -1,16 +1,78 @@
 # models.py
 import copy
 
+from storygraph.core.statement import (is_code_statement, operation_source,
+                                       python_operation)
+
+
 class Node:
+    """
+    剧情图上的一个模块（= 一个 label）。
+
+    **结构债迁移（用户 2026-10-05："开始迁移，处理结构债"）**
+    --------------------------------------------------------
+    以前这里只有 `self.operations: list[str]` —— 裸代码字符串，下游（导出 /
+    分析 / 分类 / 抽变量）各自用正则或 AST 反解。现在真源是**结构化语句**：
+
+        node.statements : list[Statement]     ← 写路径（新）
+        node.operations : list[str]            ← 兼容视图（派生，老调用方照旧）
+
+    `operations` 是**属性**（不是字段）：读出来 = 每条语句的源码文本，
+    写进去 = 重建语句表。所以二十来处老调用点一行都不用改，
+    而"字符串 → 语句 → 字符串"必须逐字节回到原样（有回归测试钉着）。
+
+    ⚠ **不要写 `node.operations.append(x)`** —— 属性返回的是新列表，
+    那样 append 会**静默丢掉**（实测这条最容易踩）。要加就调
+    `node.add_operation(x)`；`tests/test_graph_statements.py` 有守卫。
+    """
+
     def __init__(self, node_id, label_name, x=100, y=100):
         self.id = node_id
         self.label_name = label_name
         self.x = x
         self.y = y
         self.is_current = False
-        self.operations = []
+        #: 结构化语句表（真源）。图上的"操作"目前都是 `kind='python'`。
+        self.statements: list = []
         self.file_path = None
         self.line_number = None
+
+    # ---- 结构化真源 ↔ 兼容视图 ----
+
+    @property
+    def operations(self) -> list:
+        """兼容视图：每条语句的源码文本（**新列表**，改它不会改到节点）。"""
+        return [operation_source(s) for s in self.statements
+                if is_code_statement(s)]
+
+    @operations.setter
+    def operations(self, values) -> None:
+        self.set_operations(values)
+
+    def set_operations(self, values) -> None:
+        """整批替换（`operations` 的赋值语法走这里）。"""
+        self.statements = [python_operation(v) for v in (values or [])]
+
+    def add_operation(self, code, index: int = None) -> None:
+        """追加一条**裸代码**（老调用方 / 对话框输入走这里）。"""
+        self.add_statement(python_operation(code), index=index)
+
+    def add_statement(self, stmt, index: int = None) -> None:
+        """
+        追加一条**结构化语句**（解析器走这里 —— 它是唯一能带上
+        `source`（文件/行号）与 `condition` 的入口，别退化成只塞字符串）。
+        """
+        if index is None:
+            self.statements.append(stmt)
+        else:
+            self.statements.insert(int(index), stmt)
+
+    def code_texts(self) -> list:
+        """只要源码文本（与 `operations` 等价，给"不想拿新列表"的热路径用）。"""
+        return self.operations
+
+    def clear_operations(self) -> None:
+        self.statements = []
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -21,10 +83,14 @@ class Node:
         result.x = self.x
         result.y = self.y
         result.is_current = self.is_current
-        result.operations = copy.deepcopy(self.operations, memo)
+        result.statements = copy.deepcopy(self.statements, memo)
         result.file_path = self.file_path
         result.line_number = self.line_number
         return result
+
+    def __repr__(self):
+        return (f'Node({self.id}, {self.label_name!r}, '
+                f'{len(self.statements)} statements)')
 
 class Edge:
     def __init__(self, edge_id, from_id, to_id, etype="jump", condition="",
@@ -91,7 +157,7 @@ class Graph:
         self.next_node_id += 1
         node = Node(nid, label_name, x, y)
         if operations:
-            node.operations = operations
+            node.set_operations(operations)
         if file_path:
             node.file_path = file_path
         if line_number:

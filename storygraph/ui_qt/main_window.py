@@ -1475,13 +1475,13 @@ class MainWindowQt(QMainWindow):
             self._status(f'保存失败：{res.get("error")}')
             return
         # 变量改动也进历史（Ctrl+Z 能撤回来）。这里操作**已经生效**，
-        # 所以只记历史、不重复 execute；`old_ops` 要显式给（否则命令会
-        # 把"撤销"恢复成新值）。
+        # 所以只记历史、不重复 execute；改动前的文本用 `old_ops` 显式给，
+        # 否则命令会把"撤销"恢复成新值。
         try:
             from storygraph.graph.commands import UpdateNodeOperationsCommand
             cmd = UpdateNodeOperationsCommand(
-                self, nid, list(self.graph.nodes[nid].operations))
-            cmd.old_ops = before
+                self, nid, list(self.graph.nodes[nid].operations),
+                old_ops=before)
             self._record_applied(cmd)
         except Exception:                     # noqa: BLE001
             swallow('main_window.edit_node_ops')

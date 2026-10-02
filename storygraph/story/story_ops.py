@@ -91,6 +91,35 @@ def narrative_operations(node_or_ops) -> list:
     return [op for op in ops if is_narrative_code(op)]
 
 
+def is_narrative_statement(stmt) -> bool:
+    """
+    **结构化**版本的判定：这条语句是不是"剧情变量操作"？
+
+    迁移（2026-10-05）：下游不该再靠"把字符串塞回正则"来判类型 ——
+    `kind` 直接告诉我们它是不是 python；只有 python 才需要看代码内容。
+    """
+    from storygraph.core.statement import (StatementKind, is_code_statement,
+                                           operation_source)
+    if not is_code_statement(stmt):
+        return False
+    if getattr(stmt, 'kind', '') != StatementKind.PYTHON:
+        return False                        # raw（with/pause/jump…）不是变量
+    return is_narrative_code(operation_source(stmt))
+
+
+def narrative_statements(node) -> list:
+    """节点上的剧情变量语句（`narrative_operations` 的结构化版）。"""
+    return [s for s in (getattr(node, 'statements', None) or [])
+            if is_narrative_statement(s)]
+
+
+def tech_statements(node) -> list:
+    """节点上的技术语句（引擎 API / 非赋值代码）。"""
+    from storygraph.core.statement import is_code_statement
+    return [s for s in (getattr(node, 'statements', None) or [])
+            if is_code_statement(s) and not is_narrative_statement(s)]
+
+
 def tech_operations(node_or_ops) -> list:
     """过滤出技术代码（引擎 API / 非赋值调用）。"""
     ops = getattr(node_or_ops, 'operations', node_or_ops) or []
@@ -175,6 +204,33 @@ def merge_narrative_operations(original, edited) -> list:
         else:
             out.append(op)
     out.extend(edited[used:])          # 新增的变量追加到末尾
+    return out
+
+
+def merge_narrative_statements(original, edited) -> list:
+    """
+    `merge_narrative_operations` 的**结构化版本**（迁移后走这条）。
+
+    区别只有一个，但很关键：技术语句是**原对象带回去**的 ——
+    `source`（文件/行号）与 `condition`（它原本在哪个 if 里）不会因为
+    "变量编辑器保存一次"就丢掉；字符串版本做不到这一点。
+    """
+    from storygraph.core.statement import (StatementKind, operation_source,
+                                           python_operation)
+    out = []
+    edited = list(edited or [])
+    used = 0
+    for stmt in list(original or []):
+        code = operation_source(stmt)
+        is_narrative = (getattr(stmt, 'kind', '') == StatementKind.PYTHON
+                        and is_narrative_code(code))
+        if is_narrative:
+            if used < len(edited):
+                out.append(python_operation(edited[used]))
+                used += 1
+        else:
+            out.append(stmt)
+    out.extend(python_operation(t) for t in edited[used:])
     return out
 
 

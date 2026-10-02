@@ -24,6 +24,22 @@ def _declared_variables(graph):
         return []
 
 
+def _operation_texts(node) -> list:
+    """
+    节点上的代码文本（**结构化真源 → 文本**）。
+
+    迁移后 `Node` 存的是 `list[Statement]`；这里显式只取"代码类"语句的文本，
+    而不是去读兼容视图 `node.operations` —— 视图是给老调用方的，
+    导出这条路自己该看得见 `kind`（以后图里要是有了非代码语句，
+    这里天然不会把它当 `$` 写出来）。
+    """
+    from storygraph.core.statement import is_code_statement, operation_source
+    stmts = getattr(node, 'statements', None)
+    if stmts is None:                     # 极老的鸭子类型对象（测试桩）
+        return list(getattr(node, 'operations', []) or [])
+    return [operation_source(s) for s in stmts if is_code_statement(s)]
+
+
 def _from_suffix(edge) -> str:
     """
     `call X from Y` 的 ` from Y` 尾巴（没有就空串）。
@@ -77,7 +93,7 @@ def export_to_renpy(graph, filepath, wrapper=None):
     for nid, node in graph.nodes.items():
         control_label = control_name(node.label_name)
         lines.append(f"label {control_label}:")
-        for op in node.operations:
+        for op in _operation_texts(node):
             # **渲染 python op 只有一份规则**（`story.beat_render.render_code_block`）：
             # 以前这里手写 `f"    $ {op}"`，而它不知道行首 `\x01`
             # （= 原文是紧凑 `$code`）这个约定，于是把控制字符原样写进产物

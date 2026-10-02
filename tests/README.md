@@ -6,7 +6,7 @@
 # 依赖：pytest + openpyxl
 pip install pytest openpyxl
 # 项目根目录执行
-python -m pytest            # 全部用例（1697 条，约 70 秒）
+python -m pytest            # 全部用例（1732 条，约 53 秒）
 python -m pytest tests/test_renpy_parser.py -v
 ```
 `pytest.ini` 已把 `SyntaxWarning` 提升为失败——源码里若再写出非法转义会直接红灯。`tests/conftest.py`
@@ -117,6 +117,9 @@ Beat ──▶ Excel ⇄ DSL 编译 ──▶ .rpy.xlsx ──parse──▶ Ass
 | `test_stage_preview.py` | 43 | 预览语义同源（帧 = `snapshot_rows`）、说话人高亮、素材解析（表里没有但磁盘上有 / 纯色不算缺图）、**脚本 `image` 声明（`bg bg11_0` 这种别名只写在脚本里 / 注释与缩进块不算 / 纯色声明 / 按项目缓存）**、**立绘真实几何 `sprite_box`（原图 × zoom + 锚点偏移）** |
 | `test_stage_audio.py` | 27 | 预览的声音：素材名 → 真实文件（含"表里带项目目录前缀"与目录兜底）、**缺文件不许静默：公共前缀近似匹配 + 标出真名（并列第一不猜 / 同名副本与 mp3+wav 算同一首 / 严格模式不近似）**、BGM 持续 / 音效语音一次性、同一帧重画不重喊、关声音停干净 |
 | `test_pipeline_batch.py` | 102 | 两条构图路径同源、舞台快照、多引擎导出、三级校验、协作、**分支条件逻辑（elif 排除前分支 / menu 选项文字与条件分开 / 区间分析验证分支）** |
+| `test_graph_statements.py` | 12 |
+| `test_beat_ranges.py` | 7 | **拍的行区间**（增量导出的地基）：区间不许交叠、每句台词必须在自己区间里、`extend` 带走它前面的`show/transition/注释`、ppt 段（scene 撞 scene）的行号归属、真实项目全章扫描（`STORYGRAPH_REAL_PROJECT`） | **结构债迁移**：`statements`（结构化真源）与 `operations`（兼容视图）**逐字节往返**（紧凑 `$x` / 多行 / 空串 / Unicode）、视图是新列表（`append` 会静默失效 → AST 守卫）、出处与条件留得住、变量保存不吃技术代码出处、老布局 `.json` 照旧能读 |
+| `test_patch_grow_shrink.py` | 16 | **增量补丁增删整行**（清掉 `show` 要跟着删、控制流卡新填台词要插得进去、代码行改写）：三条准入线（平整区间 / 单调 / 身份不重复）、块结构里永不增删、`# TODO: 缺少资源` 不许顶掉作者的行、单引号台词不许插成两遍、**不动必须逐字节相同**、**产物是不动点** |
 | `test_code_health.py` | 10 | **审计守卫**：全项目不许再有 `except …: pass`（唯一豁免 `safeguard.py` 的记录失败路径）、`swallow()` 真的记下来了（context/次数/详情/报告/有界）、**两个 .rpy 生成器共用规则不许再分叉**（op 渲染 / `default` 名单 / 标记只有一处） |
 | `test_entry_points.py` | 22 | 入口可达性：悬空回调、`act(...)` 文案与实现、**两条路分开**（资源表 vs 剧情图）、启动不再扫全项目 |
 | `test_roundtrip.py` | 10 | `.rpy → Graph → .rpy` 与 `.rpy ↔ Excel` 往返一致性 |
@@ -203,4 +206,4 @@ tag ↔ asset ID 的映射规则，或让 ID 生成遵循 Ren'Py 的 image 命�
 的场景会错。
 5. **`AssetWorkspace.load()` 没传 `project_root` 给 `load_hooks`**，   与 `AssetEngine._initial_load()`
 的钩子查找路径不一致。
-6. **`Graph.add_node` 直接保存调用方传入的 operations 列表引用**，   外部改动会穿透到节点内部。当前测试已固化该行为，若要修需一并改调用点。
+6. ~~**`Graph.add_node` 直接保存调用方传入的 operations 列表引用**~~ **已修（2026-10-05 结构债迁移）**：真源改成结构化语句表，`operations` 只是派生视图，调用方那个 list 与节点不再共享。

@@ -77,16 +77,23 @@ class TestGraph:
         assert g.nodes[nid].file_path == 's.rpy'
         assert g.nodes[nid].line_number == 10
 
-    def test_add_node_operations_shared_reference(self):
+    def test_add_node_operations_are_copied_not_shared(self):
         """
-        已知行为（非 bug 但易踩）：operations 直接存传入的 list 引用。
-        外部修改源 list 会影响节点。测试固化该语义，防止未来意外改动。
+        **迁移后修掉的老毛病**（原来是"已知行为"）：`operations` 以前直接存
+        传入 list 的引用，外部一改就穿透到节点内部（旧版还把它写进"已知问题"
+        清单，注明"若要修需一并改调用点"）。
+
+        现在真源是结构化语句表（`node.statements`），`operations` 只是派生视图
+        —— 天然没有共享引用这回事。顺手把这条"已知问题"消掉。
         """
         g = Graph()
         ops = ['x = 1']
         nid = g.add_node('start', 0, 0, operations=ops)
         ops.append('y = 2')
-        assert g.nodes[nid].operations is ops
+        assert g.nodes[nid].operations == ['x = 1']
+        # 反向也不共享：改节点不会改到调用方那个 list
+        g.nodes[nid].add_operation('z = 3')
+        assert ops == ['x = 1', 'y = 2']
 
     def test_add_edge_increments_id(self):
         g = Graph()
@@ -130,7 +137,7 @@ class TestGraph:
         g = Graph()
         nid = g.add_node('a', 0, 0, operations=['x = 1'])
         other = g.copy()
-        other.nodes[nid].operations.append('y = 2')
+        other.nodes[nid].add_operation('y = 2')
         other.nodes[nid].label_name = 'changed'
         assert g.nodes[nid].operations == ['x = 1']
         assert g.nodes[nid].label_name == 'a'

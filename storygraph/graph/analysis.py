@@ -2,7 +2,8 @@
 import math
 import ast
 import re
-from storygraph.core.utils import extract_variables, collect_all_variables
+from storygraph.core.utils import (collect_all_variables, extract_variables,
+                                   node_code_texts as _code_texts)
 
 
 # ===================== D1/D2 辅助函数 =====================
@@ -771,7 +772,7 @@ def analyze_reachability_full(graph, start_node_id=None) -> dict:
 
         current = state.copy()
         node = graph.nodes[nid]
-        for op in node.operations:
+        for op in _code_texts(node):
             current = apply_operation(current, op)
 
         out_edges = [e for e in graph.edges.values() if e.from_id == nid]
@@ -848,7 +849,7 @@ def analyze_reachability_full(graph, start_node_id=None) -> dict:
 
         # 用出口状态判断，和主循环里的传播口径一致
         current = instate.copy()
-        for op in node.operations:
+        for op in _code_texts(node):
             current = apply_operation(current, op)
 
         has_possible = False

@@ -79,6 +79,10 @@ class PatchResult:
     inserted_beats: int = 0
     #: **删掉**的行数（"增量删行"，见 `patch_export` 的删除通道）
     removed_lines: int = 0
+    #: 拍内**长出来**的行数（给控制流卡填台词 / 给某一拍加 show）
+    grown_lines: int = 0
+    #: 拍内**跟着删掉**的行数（清掉某一拍的 show，行数不变就删不掉 → 静默错产物）
+    shrunk_lines: int = 0
     #: 校验不通过的原因（空 = 通过）。**非空时 `text` 不可用。**
     reasons: list = field(default_factory=list)
 
@@ -291,6 +295,41 @@ def recover_source_ranges(beats: list, source_path,
     _, new_groups = group_by_label(beats)
     _, src_groups = group_by_label(src_beats)
 
+    # —— 编辑器那条路（`apply_ranges=False`）：**按行区间对身份，不靠内容对齐** ——
+    #
+    # 为什么不能靠内容对齐（2026-10-05 真实 chapter0_0 / chapter1_1 实测）：
+    # 拍上本来就带着**准确的行号**（解析时记下的），却拿 `_align_key`
+    # （label/kind/speaker/舞台指纹，**不含台词正文**）去重新对齐 —— 旁白连成
+    # 一片时 SequenceMatcher 会挑错元素：用户删的是第 152 行那一拍，
+    # 它却报"第 156 行那一拍被删了"，而那一拍**明明还在**
+    # → "被删的拍与在册拍交叠" → 判定删除不安全 → 整章退回全量（注释全丢）。
+    #
+    # 判据其实很简单：源拍的行区间还**有人认领**就是还在，没人认领就是被删了。
+    if not apply_ranges:
+        claimed = set()
+        for b in beats:
+            f = int(getattr(b, 'src_first', 0) or 0)
+            l = int(getattr(b, 'src_last', 0) or 0)
+            if f:
+                claimed.add((f, l))
+        all_src = [sb for pool in src_groups.values() for sb in pool]
+        unclaimed = []
+        if claimed and all_src:
+            for sb in all_src:
+                f = int(getattr(sb, 'src_first', 0) or 0)
+                l = int(getattr(sb, 'src_last', 0) or 0)
+                if not (f and (f, l) in claimed):
+                    unclaimed.append(sb)
+        # **只在"少数源拍没人认领"时才信行号**：大面积对不上说明行号过期
+        # （源文件被手工改过 / 整体错位）—— 那时必须退回内容对齐，
+        # 否则会把它当成"用户删了整章"，一路删下去（实测过：全部 +1 偏移
+        # 会让这里报"每一拍都被删了"）。
+        if claimed and all_src and len(unclaimed) <= max(2, len(all_src) // 5):
+            n_dropped = len(unclaimed)
+            if dropped_out is not None:
+                dropped_out.extend(unclaimed)
+            return len(beats), len(beats), n_dropped
+
     matched = 0
     dropped: list = []
     for name, group in new_groups.items():
@@ -372,8 +411,13 @@ def _set_insert_point(beat, prev_src, nxt_src=None, inserted_out: list = None,
 #  二、对位守卫 + **一对一**行内替换（行数永不变化）
 # ==================================================================
 
-#: 台词行：`说话人 "正文"`（说话人可缺，那就是旁白）
-_SAY_RE = re.compile(r'^(?P<who>[A-Za-z_][\w.]*)?\s*"(?P<body>.*)"$')
+#: 台词行：`说话人 "正文"`（说话人可缺，那就是旁白）。
+#: **单引号也算**（2026-10-05 真实 chapter1_2 实测）：原文可能写成
+#: `'file "c:\\a.py", line 24'`（单引号包、内部双引号不转义），
+#: 生成器写成 `"file \"c:\\\\a.py\", line 24"` —— 只认双引号时这两行
+#: 「身份」不同 → 配不上对 → 生成的那行被当成**新内容插进去**，文件里就多一句。
+_SAY_RE = re.compile(
+    r'^(?P<who>[A-Za-z_][\w.]*)?\s*(?P<q>"|\')(?P<body>.*)(?P=q)$')
 #: 舞台/音频行：动词 + 目标
 _VERB_RE = re.compile(
     r'^(?P<verb>show|hide|scene|play|stop|queue)\s+(?P<rest>.*)$')
@@ -401,24 +445,27 @@ def _parse_stage_body(body: str) -> tuple:
 
 def _line_key(body: str) -> tuple:
     """
-    一行的**身份**：只有身份相同的两行才允许互相替换。
+    配对用的身份键（见 `_replace_matched` 的说明）。
 
-    这是"不改坏脚本"的核心。拍内行序会被生成器重排、写法会被规范化，
-    所以**不能整段替换**（实测：整段替换会多出 24 行、或把 `if` 体缩进压平）。
-    改成"按身份配对"之后：
+      · 台词：`('say', 说话人)` —— 说话人一样才允许换正文
+      · 舞台：`('show', tag)` / `('hide', tag)` / `('scene', tag)`
+      · 音频：`('play', 通道)` …
+      · 代码：`('code', 目标)`（`$ love += 1` ↔ `$ love += 2` —— 迁移后
+        允许"改了脚本逻辑"这一行跟着换，见 `_rewrite`）
+      · 其余：`('other', 原文)` —— 只和自己逐字相同的行配对
 
-      · 台词配台词，而且**说话人必须一样**（`lyj "…"` 不会去配 `jc "…"`）
-      · `show ling …` 配 `show ling …`（tag 一样），`hide ye` 配 `hide ye`
-      · `play music …` 配 `play music …`
-      · 其余（注释 / 代码 / `if` / 菜单 / 未识别）一律 **`('other', 原文)`**：
-        只和自己逐字相同的行配对 → **不会被替换**，也就不会被改坏
-
-    认不出的一律保守（配对失败 = 原文一个字不动）。
+    台词配台词，而且**说话人必须一样**（`lyj "…"` 不会去配 `jc "…"`）。
+    `show ling …` 配 `show ling …`（tag 一样），`hide ye` 配 `hide ye`，
+    `play music …` 配 `play music …`。其余（注释 / `if` / 菜单 / 未识别）
+    一律 `('other', 原文)`：只和自己逐字相同的行配对 → **不会被替换**，
+    也就不会被改坏。认不出的一律保守（配对失败 = 原文一个字不动）。
     """
     s = (body or '').strip()
     m = _SAY_RE.match(s)
     if m:
         return ('say', (m.group('who') or '').strip())
+    if s.startswith('$'):
+        return ('code', _code_target(s))
     m = _VERB_RE.match(s)
     if m:
         verb, rest = m.group('verb'), m.group('rest')
@@ -486,6 +533,16 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
     speaker = (getattr(beat, 'speaker', '') or '').strip()
     if speaker and re.search(rf'(?<![\w]){re.escape(speaker)}(?![\w])', blob):
         return True
+    # **原生语句 / 代码行也是身份**（2026-10-05 补）：控制流那种卡
+    # （内容就是 `jump X` / `call X from Y`，没有台词也没有舞台）以前一条
+    # 判据都命中不了 —— 用户往卡里**新填一句台词**时，守卫判"这段不像这一拍"，
+    # 于是新内容既不落地也不报错（`lost_new` → 整章退回全量）。
+    # 这些行本来就字面写在区间里，能对上就是对的区间，很安全。
+    for attr in ('raw', 'code'):
+        body = (getattr(beat, attr, '') or '').strip()
+        for ln in body.splitlines():
+            if ln.strip() and ln.strip() in blob:
+                return True
     for token in _stage_tokens(beat):
         name = token.split(':', 1)[-1]
         if name and name in blob:
@@ -521,61 +578,355 @@ def _collapse(line: str) -> str:
     return re.sub(r'[ \t]+', ' ', line or '').strip()
 
 
-def _replace_matched(old_lines: list, gen_bodies: list) -> tuple:
+def _squash(line: str) -> str:
     """
-    原文区间 → 新区间：**只做一对一替换，行数永不变化**。
+    把**所有**空白都去掉（"是不是只差空白"的更强形式）。
 
-    返回 `(新行列表, 真正改动数, 未落地的生成行)`。
+    为什么还需要它（2026-10-05 真实数据）：作者写 `xqlz"pass."` /
+    `yhj"结。"`（说话人后**没有**空格），生成器写 `xqlz "pass."` ——
+    `_collapse` 只把"一串空白"折成一个，**不会**把"没有空白"和"有一个空格"
+    看成同一件事，于是这一行被当成"参数变了"改写掉：
+    `没改却动了文件`，每个 `$`/说话人行都成一个 diff 块。
+    空白在 Ren'Py 里对这两处写法没有语义差别，所以按"去掉全部空白"比。
+    """
+    return re.sub(r'\s+', '', line or '')
 
-    为什么行长不变是最重要的不变量（2026-09-30 实测）：
-    只要允许"插入/删除"，缩进、空行、结构就全会被牵动 ——
-    上一版在 `if` 体里把 8 空格压成 4 空格（**语法直接坏掉**），
-    还因为"生成器把注释提到拍首"而多插了 24 行。
-    一对一替换则连"什么都不改 → 产物逐字节等于原文"这条契约都天然成立。
+
+#: 允许"因为生成器不再产出它"而**整行删掉**的动词（舞台 / 音频）。
+#: 台词、注释、`jump`/`call`、结构行一律不在内 —— 那些不许被静默删掉。
+_DROPPABLE_VERBS = ('show', 'hide', 'scene', 'play', 'stop', 'queue')
+
+#: 生成器标注"这个引用在资源表里找不到"用的注释标记。
+#: `pipeline/compile.py` 的约定是：**新生成 / 改动的行**才写这种注释，
+#: "**源文件里原有的行按原样保留**" —— 增量补丁必须守住这条。
+_MISSING_MARK = '缺少资源'
+
+_REF_TOKEN_RE = re.compile(r'[\w./\\-]{2,}')
+
+
+def _is_missing_note(body: str) -> bool:
+    """这一行是不是 `# TODO: 缺少资源 …` 这种"说明型注释"？"""
+    return _body(body).lstrip().startswith('#') and _MISSING_MARK in (body or '')
+
+
+def _mentions(a: str, b: str) -> bool:
+    """两行是不是在说**同一个引用**（共用一段够长的词 / 路径片段）？"""
+    return bool(set(_REF_TOKEN_RE.findall(a or ''))
+                & set(_REF_TOKEN_RE.findall(b or '')))
+
+
+def _code_target(s: str) -> str:
+    """`$ love += 1` → `love`；`$ renpy.transition(…)` → `renpy.transition`。"""
+    body = _body(s).lstrip('$').strip()
+    for sep in ('(', '[', '=', '+', '-', '*', '/', ':', ' ', '\t'):
+        i = body.find(sep)
+        if i >= 0:
+            body = body[:i]
+    return body.strip()
+
+
+def _head_of(body: str) -> tuple:
+    """
+    这一行"讲的是哪件事"的**粗粒度身份** —— 增删行的准入判据。
+
+    为什么要它：生成器里的一条行如果**没能在原文里配对成功**，有两种可能：
+
+      · 它是**新内容**（用户刚加的）→ 应该插进去；
+      · 它是**同一件事的变体**（`call X from Y` 被渲染成 `call X`、
+        说话人从 A 改成 B、代码行被规范化）→ 插进去就成了**重复行**。
+
+    实测踩到过第二种：控制流文件里原文是 `call chapter1_2 from _call_chapter1_2`、
+    生成器写 `call chapter1_2`（`from` 子句由渲染尾缀补）→ 按"没配上就插"
+    会写出一条重复的 `call`。所以增删前先比身份：区间里已经有同一件事的行
+    → 一律不许增、不许删（老实报 unlanded，让调用方退回全量）。
+    """
+    s = _norm(body)
+    m = _SAY_RE.match(s)
+    if m:
+        # 台词按**正文**比：换说话人＝同一句话，别把旧行留着又插一条新的
+        return ('say', m.group('body'))
+    if s.startswith('$'):
+        return ('code', _code_target(s))
+    m = _VERB_RE.match(s)
+    if m:
+        rest = m.group('rest').split()
+        return (m.group('verb'), rest[0] if rest else '')
+    return ('other', ' '.join(s.split()[:2]))   # `call X from Y` / `jump X` …
+
+
+def _droppable_line(line: str) -> bool:
+    """
+    这一行可以因为"生成器不再产出它"而被删掉吗？
+
+    只放行**舞台 / 音频 / `$` 代码**这三类：
+
+      · 用户把某一拍的 `show` 清掉 → 文件里那一行必须跟着走，
+        否则"表里没有、文件里还有"（实测：清掉 show 之后补丁报成功，
+        产物里 sprite 还在 → **静默错产物**）；
+      · 台词不许删（那是删卡片该干的事，走删除通道）；
+      · 注释绝不许删（注释是这个功能存在的理由）；
+      · `jump`/`call`/结构行不许删（控制流与块结构）。
+    """
+    body = _body(line).rstrip()
+    if not body:
+        return False
+    if body.startswith('$'):
+        return True                           # `$ code`
+    key = _line_key(body)
+    return key[0] in _DROPPABLE_VERBS
+
+
+def _narration_slot_replaced(beat, first: int, last: int, old: list, gen: list,
+                             index: int, blocks: list, strict_of: dict) -> bool:
+    """
+    这一拍是不是"**旁白被整句换掉**"？（正文对不上，但位置确实还是它）
+
+    为什么需要（2026-10-05 真实 chapter1_2 实测）：旁白改成一句全新的话之后，
+    `_range_looks_like` 的每一条判据都失效（正文没了、没有说话人、没有舞台），
+    于是这一拍被当成"源文件被手工改过"跳过 —— 新台词不落地 →
+    `lost_new` → **整章退回全量重生成、手写注释被冲掉**。
+
+    判据（只对"纯台词拍"开口子，宁可漏认也不乱认）：
+      · 是旁白（有正文、没有说话人），而且没有舞台/`raw`/代码；
+      · 旧段与新段的**非空行数相同**（位置与形状都对得上）；
+      · 旧段里**正好有一行台词**（这一拍就占着这一个台词槽）；
+      · **左右邻居都自洽**（各自"精确区间认得出自己"）——
+        源文件整体错位时，邻居这一关过不去，所以不会写错行。
+
+    通过之后只允许**一对一替换**（`allow_edit=False`），不许在这里增删行。
+    """
+    text = (getattr(beat, 'text', '') or '').strip()
+    if not text or (getattr(beat, 'speaker', '') or '').strip():
+        return False
+    if _stage_tokens(beat) or (getattr(beat, 'raw', '') or '').strip() \
+            or (getattr(beat, 'code', '') or '').strip():
+        return False
+    if len([ln for ln in old if _norm(ln)]) != len([ln for ln in gen if ln]):
+        return False
+    if len([ln for ln in old if _SAY_RE.match(_norm(ln))]) != 1:
+        return False
+    neighbours = []
+    for j, f, l, _g, _b in blocks:
+        if j == index or l < f:
+            continue
+        if l < first:
+            neighbours.append(j)
+        elif f > last:
+            neighbours.append(j)
+    if not neighbours:
+        return False
+    return all(strict_of.get(j, False) for j in neighbours)
+
+
+def _flat_editable_range(old_lines: list) -> bool:
+    """
+    这一段是不是"平整的兄弟行"（可以安全地增删整行）？
+
+    三个条件缺一不可：
+      · 没有块头（`menu:` / `if` / `elif` / `else:` / `python:` / `label` …）；
+      · 没有块首（行尾是 `:` 的，如菜单选项 `"A":`）；
+      · 非空行的缩进**只有一种**（有嵌套 = 增删会破坏结构）。
+
+    不满足就退回"一对一替换、行数不变"的老行为 —— 增删一定发生在
+    平整区间里，这是这一版敢动行数的唯一理由。
+    """
+    indents = set()
+    for ln in old_lines or ():
+        body = _body(ln).rstrip()
+        if not body:
+            continue
+        if _BLOCK_HEAD_RE.match(_norm(ln)) or body.endswith(':'):
+            return False
+        indents.add(_indent_of(ln))
+    return len(indents) <= 1
+
+
+def _replace_matched(old_lines: list, gen_bodies: list,
+                     allow_edit: bool = True, file_squash=None) -> tuple:
+    """
+    原文区间 → 新区间。
+
+    返回 `(新行列表, 改动行数, 未落地的生成行, 新增行数, 删除行数)`。
+
+    **两条纪律**（这一版新增了后一条，用户 2026-10-05："继续实现，清除结构债"）：
+
+      ① **配对替换**：台词配台词（说话人必须一样）、`show ling …` 配
+         `show ling …`、`play music …` 配 `play music …`，其余只和逐字相同的
+         行配对 —— 认不出一律保守（原文一个字不动）。缩进**只来自原文**。
+      ② **平整区间里允许增删整行**（所谓结构债：以前硬性要求"行数永不变化"，
+         代价是"清掉一条 `show` 删不掉"和"给控制流卡填台词填不进去"）：
+         生成器多出来的内容按**渲染顺序**插到"前一个对上的行"之后；
+         生成器不再产出、且属于舞台/音频/`$` 的行跟着删掉。
+         三条准入线（任一不过就退回①的老行为，**绝不猜**）：
+           · 区间平整（旧段与新段都不含块结构、只有一种缩进）；
+           · 配对顺序与渲染顺序一致（单调）—— 否则按渲染顺序合并会把原文重排；
+           · 要增/删的那一行，其"身份"（`_head_of`）在对面**不存在** ——
+             否则就是"同一件事没配上"（`call X from Y` 之类），
+             增减都会写出**重复行 / 少一行**。
+
+    为什么"行数不变"曾经是最重要的不变量（2026-09-30 实测）：只要允许增删，
+    缩进、空行、结构就全会被牵动 —— 上一版在 `if` 体里把 8 空格压成 4 空格
+    （**语法直接坏掉**），还因为"生成器把注释提到拍首"多插了 24 行。
+    所以这一版的增删**只在平整区间**发生，插入的缩进**借原文区间**，
+    并且事后仍有"重新解析 + 内容全在"的整体校验兜底（不过就退回全量）。
     """
     pool: dict = {}
-    for g in gen_bodies:
-        pool.setdefault(_line_key(g), []).append(g)
+    for idx, g in enumerate(gen_bodies):
+        pool.setdefault(_line_key(g), []).append(idx)
     used: set = set()
+    #: `gen 下标 → 原文下标` 的配对（先贪心配对，再检查单调性）
+    pair_of_gen: dict = {}
+    pick_of_old: dict = {}
+    for j, ln in enumerate(old_lines):
+        cand = pool.get(_line_key(_norm(ln))) or []
+        for idx in cand:
+            if idx in used:
+                continue
+            used.add(idx)
+            pair_of_gen[idx] = j
+            pick_of_old[j] = idx
+            break
+
     out: list = []
     changed = 0
-    landed: list = []
+    grown = 0
+    shrunk = 0
+    landed_idx = set()
 
-    for ln in old_lines:
-        body = _norm(ln)
-        key = _line_key(body)
-        cand = pool.get(key) or []
-        pick = None
-        for idx, g in enumerate(cand):
-            if (key, idx) not in used:
-                pick, slot = g, idx
-                break
-        if pick is None:
-            out.append(ln)                   # 生成器里没有对应的行 → 一个字不动
-            continue
-        used.add((key, slot))
-        landed.append(_norm(pick))
+    def _rewrite(old_line, pick):
+        """原文那一行 → 生成器那一行（或保留原文）。返回 (行, 是否改了)。"""
+        body = _norm(old_line)
         if body == _norm(pick):
-            out.append(ln)                   # 内容一致 → 保留原文那一行（逐字节）
-            continue
-        if _collapse(body) == _collapse(pick):
-            # **只差空白**（原文 `jc  "…"` 两个空格、生成器一个）：
+            return old_line, False
+        if _collapse(body) == _collapse(pick) or _squash(body) == _squash(pick):
+            # **只差空白**（原文 `jc  "…"` 两个空格、生成器一个；或者
+            # 原文 `xqlz"pass."` 没空格、生成器写 `xqlz "pass."`）：
             # 保留原文那一行 —— 用户要的是"改一处只动一行"，不是"顺手把我的
             # 排版也改了"。Ren'Py 两种写法等价，改它没有任何好处，
             # 却会让每次导出的 diff 多出一堆"看起来没改"的行。
-            out.append(ln)
-            continue
+            return old_line, False
+        if _unescaped(body) == _unescaped(pick):
+            # **只差引号 / 转义**（原文 `'file "c:\\a.py", line 24'`、
+            # 生成器 `"file \"c:\\\\a.py\", line 24"`）：Ren'Py 读出来是同一句，
+            # 同样保留原文那一行 —— 这也是"没改就不许动文件"的一部分。
+            return old_line, False
+        # 代码行：按**目标**配上了就允许换正文（这就是"改了一行脚本逻辑"）。
+        # 以前代码行只和逐字相同的行配对，改一个数字就配不上 →
+        # 新内容既不落地也不报错（`$` 不属于内容行）→ **静默保持旧代码**。
+        if body.startswith('$') and _norm(pick).startswith('$'):
+            return _indent_of(old_line) + _norm(pick), True
         if not _same_thing_unless_rewritten(body, pick):
-            out.append(ln)                   # 不是"同一件事" → 不许换
-            continue
-        out.append(_indent_of(ln) + _norm(pick))   # **缩进只来自原文**
-        changed += 1
+            return old_line, False            # 不是"同一件事" → 不许换
+        return _indent_of(old_line) + _norm(pick), True   # 缩进只来自原文
 
-    # 生成器里"没能在本区间落地"的行（通常是注释/代码/结构行）——
-    # 它们不属于这次替换范围，如实报出来，便于判断有没有漏改。
-    unlanded = [g for key, items in pool.items()
-                for idx, g in enumerate(items) if (key, idx) not in used]
-    return out, changed, unlanded
+    # 单调性：只有"配对顺序和渲染顺序一致"时才敢按渲染顺序合并（否则会重排原文）
+    order = [pair_of_gen[i] for i in sorted(pair_of_gen)]
+    monotonic = all(order[t] < order[t + 1] for t in range(len(order) - 1))
+    editable = (allow_edit and monotonic and _flat_editable_range(old_lines)
+                and _flat_editable_range(gen_bodies))
+    old_heads = {_head_of(_norm(ln)) for ln in old_lines if _norm(ln)}
+    gen_heads = {_head_of(_norm(g)) for g in gen_bodies if _norm(g)}
+    old_squash = [_squash(ln) for ln in old_lines if _squash(ln)]
+    gen_squash = [_squash(g) for g in gen_bodies if _squash(g)]
+
+    def _is_new_content(body: str) -> bool:
+        """
+        这条生成行是**真新内容**吗？（准入判据）
+
+        三条都要过：
+          · 身份（`_head_of`）在旧段里不存在 —— 不是"同一件事没配上"；
+          · 去空白后，旧段里没有任何一行**包含**它 / 被它包含 ——
+            防止"写法不同但同一句话"被插成重复行。
+            实测踩到：原文 `yhj"结。"   ###注意：…`（行尾带作者注释）
+            与生成 `yhj "结。"` 就是这种关系，只比身份判不出来；
+          · **整份原文里也没有这一行**（去空白后完全相同）—— 这条专治
+            "行号整体错位"：错位时宽松守卫仍可能放行，而被"多出来"的那一行
+            其实就写在文件的别处，插进去就是**重复行**（实测：整体 +1 偏移
+            会让 `show ling happy at i11` 被插第二遍）。
+        """
+        s = _squash(body)
+        if not s or _head_of(body) in old_heads:
+            return False
+        # `# TODO: 缺少资源 …` 是**说明**，不是内容：它说的东西原文里已经有了
+        # （`play music "bgm/x.mp3"` 被资源表拒了）→ 不许插。
+        # 反过来说：不许拿它去顶掉/删掉作者原来那一行。
+        # 实测（真实 chapter1_4/1_1/1_3）：不做这一条，"什么都不改"的导出
+        # 会把 12~16 行 `play music` 变成 `# TODO` 注释 —— 音乐全没了，
+        # 也直接违反 `pipeline/compile.py` 写明的"源文件里原有的行按原样保留"。
+        if _is_missing_note(body) and any(_mentions(body, o)
+                                          for o in old_lines):
+            return False
+        for so in old_squash:
+            if s in so or so in s:
+                return False
+        if file_squash and s in file_squash:
+            return False
+        return True
+
+    if editable:
+        def _may_drop(line):
+            """这一行能不能因为"生成器不再产出它"而删掉？（两条准入都过才删）"""
+            if not _droppable_line(line):
+                return False
+            so = _squash(line)
+            if not so or _head_of(_norm(line)) in gen_heads:
+                return False
+            # 生成器只是**写了条 TODO 说这个引用找不到**时，作者原来那一行
+            # 必须原样留着（见 `_is_new_content` 的说明）。
+            if any(_is_missing_note(g) and _mentions(g, line)
+                   for g in gen_bodies):
+                return False
+            for sg in gen_squash:
+                if so in sg or sg in so:
+                    return False
+            return True
+
+        cursor = 0
+        for idx, g in enumerate(gen_bodies):
+            j = pair_of_gen.get(idx)
+            if j is None:
+                body = _norm(g)
+                # 准入不过 → 不插（保持未落地，调用方据此退回全量，绝不写重复行）
+                if not _is_new_content(body):
+                    continue
+                pad = _indent_of(old_lines[0]) if old_lines else ''
+                out.append(pad + body)
+                landed_idx.add(idx)
+                grown += 1
+                changed += 1
+                continue
+            # 游标到 j 之间：原文有、生成器没有的行 → 能删就删，否则原样保留
+            for t in range(cursor, j):
+                if _may_drop(old_lines[t]):
+                    shrunk += 1
+                    changed += 1
+                else:
+                    out.append(old_lines[t])
+            new_line, did = _rewrite(old_lines[j], g)
+            out.append(new_line)
+            landed_idx.add(idx)
+            changed += 1 if did else 0
+            cursor = j + 1
+        for t in range(cursor, len(old_lines)):
+            if _may_drop(old_lines[t]):
+                shrunk += 1
+                changed += 1
+            else:
+                out.append(old_lines[t])
+    else:
+        for j, ln in enumerate(old_lines):
+            idx = pick_of_old.get(j)
+            if idx is None:
+                out.append(ln)                # 生成器里没有对应的行 → 一个字不动
+                continue
+            landed_idx.add(idx)
+            new_line, did = _rewrite(ln, gen_bodies[idx])
+            out.append(new_line)
+            changed += 1 if did else 0
+
+    # 生成器里"没能在本区间落地"的行（通常是注释/结构行，或不平整区间里的增行）
+    unlanded = [g for idx, g in enumerate(gen_bodies) if idx not in landed_idx]
+    return out, changed, unlanded, grown, shrunk
 
 
 # ==================================================================
@@ -675,22 +1026,38 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
     # 比对要**容忍结尾冒号**：菜单选项在源文件里是 `"A":`，而生成器
     # 只产 `"A"`（冒号是 `menu:` 结构的语法）。不放这一档就会把
     # 正常脚本误判成"源码区间对不上"。
+    #
+    # 还要容忍**空白写法差异**（2026-10-05 真实 chapter3_1 实测）：
+    # 原文 `yhj"结。"   ###注意：…`（说话人后没空格 + 行尾还有作者注释）而
+    # 生成器写 `yhj "结。"` —— Ren'Py 读出来是同一句，按逐字节比却判"内容丢了"
+    # → **整章退回全量重生成、手写注释被冲掉**。所以：
+    #   · 键里加上"去掉全部空白"的形式；
+    #   · 再允许"生成的那行是产物某一行（去空白后）的子串"，
+    #     用来吸收"源文件那行后面还跟着注释"这种情况。
+    def _keys(line):
+        out = set()
+        n = _norm(line)
+        for k in (n, n.rstrip(':'), _unescaped(n), _unescaped(n).rstrip(':')):
+            if k:
+                out.add(k)
+                out.add(re.sub(r'\s+', '', k))
+        return {k for k in out if k}
+
     text_set = set()
     for ln in text.splitlines():
-        n = _norm(ln)
-        text_set.add(n)
-        text_set.add(n.rstrip(':'))
-        # 转义差异不算"内容丢了"：生成器会把台词里的 `"` / `\` 写成
-        # Ren'Py 的 `\"` / `\\`，而原文可能是没转义的写法 —— 两种 Ren'Py 都
-        # 读成同一句话。只按逐字节比会把这种行判成"生成内容找不到"，
-        # 于是**整章白白退回全量**（真实项目 chapter1_2 就卡在这里一行上）。
-        text_set.add(_unescaped(n))
-        text_set.add(_unescaped(n).rstrip(':'))
+        text_set |= _keys(ln)
+    out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in text.splitlines()]
+    out_blobs = [b for b in out_blobs if b]
     lost = []
     for _i, _first, _last, gen, _beat in blocks:
         for line in _content_lines(gen):
-            if line not in text_set and _unescaped(line) not in text_set:
-                lost.append(line)
+            keys = _keys(line)
+            if keys & text_set:
+                continue
+            stripped = re.sub(r'\s+', '', _norm(line))
+            if stripped and any(stripped in blob for blob in out_blobs):
+                continue
+            lost.append(line)
     if lost:
         reasons.append(f'{len(lost)} 条生成内容在补丁结果里找不到（例：'
                        f'{lost[0][:40]!r}）——多半是源码区间对不上原文')
@@ -843,6 +1210,8 @@ def patch_export(beats: list, source_path, generated_text: str,
     changed = 0
     stale = 0
     unlanded_total = 0
+    grown_total = 0                           # 拍内"长出来"的行（新台词/新 show）
+    shrunk_total = 0                          # 拍内"跟着删掉"的行（清掉的 show…）
     lost_new = 0                              # "新增的内容没能落地"的拍数
     out_lines = list(orig_lines)
     # 从后往前改，避免前面的替换影响后面的行号（本版行数不变，
@@ -853,8 +1222,19 @@ def patch_export(beats: list, source_path, generated_text: str,
     #: 原文里出现过的行（判定"这条内容是不是**新**的"用）
     orig_set = {_norm(ln) for ln in orig_lines}
     orig_set |= {_unescaped(x) for x in orig_set}
+    #: 原文里出现过、且**去掉全部空白**的形式（增行的准入判据之一）
+    orig_squash = {_squash(ln) for ln in orig_lines if _squash(ln)}
 
     changed += 0                              # （占位：下面插完再统计）
+    #: 每一拍"用**精确区间**也认得出自己"吗？（增删行 / 旁白整句换写的准入）
+    strict_of: dict = {}
+    for _bi, _bf, _bl, _bg, _bb in blocks:
+        if not _bf or _bl < _bf or _bl > len(orig_lines):
+            strict_of[_bi] = False
+            continue
+        _old_seg = orig_lines[_bf - 1:_bl]
+        strict_of[_bi] = _range_looks_like(_old_seg, _bb, _bg,
+                                           exact_lines=_old_seg)
     seen_ranges: list = []
     for _i, first, last, gen, beat in usable:
         if _i in insert_ids:
@@ -871,6 +1251,19 @@ def patch_export(beats: list, source_path, generated_text: str,
         #    太严会把正常表判成"源文件被改过"。**替换仍然只动精确区间。**
         window = orig_lines[max(0, first - 2):min(len(orig_lines), last + 1)]
         if not _range_looks_like(window, beat, gen, exact_lines=old):
+            if _narration_slot_replaced(beat, first, last, old, gen, _i,
+                                        blocks, strict_of):
+                # 旁白被整句换掉：位置由"邻居自洽"佐证 → 认这一拍，
+                # 但**只做一对一替换**（增删行的准入比这严得多）。
+                seen_ranges.append((first, last))
+                matched += 1
+                new_seg, n_changed, unlanded, _gd, _sk = _replace_matched(
+                    old, gen, allow_edit=False)
+                unlanded_total += len(unlanded)
+                if new_seg != old:
+                    changed += n_changed
+                    out_lines[first - 1:last] = new_seg
+                continue
             stale += 1
             if not gen:
                 continue
@@ -891,8 +1284,18 @@ def patch_export(beats: list, source_path, generated_text: str,
             continue                          # 这一拍生成器没输出内容
         if [_norm(ln) for ln in old] == gen:
             continue                          # 内容一致 → 一个字节都不动
-        new_seg, n_changed, unlanded = _replace_matched(old, gen)
+        # ② **增删行的准入**：只有"精确区间自己也认得出这一拍"时才允许
+        #    增删整行。上面那道守卫允许**多看前后一行**（解析器有 off-by-one
+        #    的怪癖），那种宽松判据可以用来"替换"，但**不足以**支撑增删 ——
+        #    实测：整体错位 +1 的源文件（行号全过期）配上宽松判据之后，
+        #    生成器多出来的行会被当成"新内容"插进去 → 文件里出现重复行。
+        #    错位时只做一对一替换（= 老行为：一个字节都不动）。
+        strict = _range_looks_like(old, beat, gen, exact_lines=old)
+        new_seg, n_changed, unlanded, grown, shrunk = _replace_matched(
+            old, gen, allow_edit=strict, file_squash=orig_squash)
         unlanded_total += len(unlanded)
+        grown_total += grown
+        shrunk_total += shrunk
         if new_seg == old:
             continue
         changed += n_changed
@@ -977,7 +1380,7 @@ def patch_export(beats: list, source_path, generated_text: str,
                 pad = _indent_of(nxt_line) or indent
             out_lines[at:at] = [pad + ln for ln in b]
             inserted_lines += len(b)
-    changed += inserted_lines + removed_lines
+    changed += inserted_lines + removed_lines + grown_total + shrunk_total
 
     text = '\n'.join(out_lines)
     if original.endswith('\n'):
@@ -1025,6 +1428,8 @@ def patch_export(beats: list, source_path, generated_text: str,
                        inserted_lines=inserted_lines,
                        inserted_beats=len(insert_ids),
                        removed_lines=removed_lines,
+                       grown_lines=grown_total,
+                       shrunk_lines=shrunk_total,
                        reasons=reasons)
 
 

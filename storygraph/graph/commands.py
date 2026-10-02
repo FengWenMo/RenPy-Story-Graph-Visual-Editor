@@ -2,6 +2,7 @@
 import copy
 
 from storygraph.app import notify
+from storygraph.core.statement import python_operation
 from storygraph.parsing.renpy_parser import parse_renpy_file
 
 class Command:
@@ -95,19 +96,37 @@ class RemoveEdgeCommand(Command):
         self.graph_view.on_graph_structure_changed()
 
 class UpdateNodeOperationsCommand(Command):
-    def __init__(self, graph_view, node_id, new_ops):
+    """
+    改一个节点的代码块（可撤销）。
+
+    迁移（2026-10-05）：快照存的是**结构化语句**（`node.statements`），
+    撤销时整份还原 —— 用 `operations` 字符串往返会把语句上的
+    `source`（文件/行号）/ `condition` 元信息丢掉。
+    """
+
+    def __init__(self, graph_view, node_id, new_ops, old_ops=None):
         self.graph_view = graph_view
         self.node_id = node_id
         self.new_ops = list(new_ops)
-        self.old_ops = None
+        #: 调用方**已经改完**的情况（"只记历史、不重复 execute"）：
+        #: 把改动前的文本显式给进来 —— 这时 `execute()` 不会被调，
+        #: 所以快照必须在构造时就备好，否则撤销会恢复不了。
+        if old_ops is not None:
+            self.old_statements = [python_operation(o) for o in old_ops]
+        else:
+            self.old_statements = None
 
     def execute(self):
-        self.old_ops = list(self.graph_view.graph.nodes[self.node_id].operations)
-        self.graph_view.graph.nodes[self.node_id].operations = list(self.new_ops)
+        node = self.graph_view.graph.nodes[self.node_id]
+        if self.old_statements is None:
+            self.old_statements = copy.deepcopy(node.statements)
+        node.set_operations(self.new_ops)
         self.graph_view.on_graph_content_changed(self.node_id)
 
     def undo(self):
-        self.graph_view.graph.nodes[self.node_id].operations = list(self.old_ops)
+        node = self.graph_view.graph.nodes[self.node_id]
+        if self.old_statements is not None:
+            node.statements = copy.deepcopy(self.old_statements)
         self.graph_view.on_graph_content_changed(self.node_id)
 
 class UpdateEdgeCommand(Command):

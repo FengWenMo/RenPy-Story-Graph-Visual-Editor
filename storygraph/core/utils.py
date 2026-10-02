@@ -108,10 +108,28 @@ def extract_variables(text):
     return result
 
 
+def node_code_texts(node) -> list:
+    """
+    节点上的代码文本（**结构化真源优先**）。
+
+    迁移（2026-10-05）：`Node` 现在存 `list[Statement]`；这里只取"代码类"
+    语句的文本。老对象（只有 `operations` 的鸭子类型）照样能喂进来。
+    """
+    stmts = getattr(node, 'statements', None)
+    if stmts is None:
+        return list(getattr(node, 'operations', []) or [])
+    from storygraph.core.statement import is_code_statement, operation_source
+    return [operation_source(s) for s in stmts if is_code_statement(s)]
+
+
+#: 旧名（模块内部一直这么叫）
+_node_code_texts = node_code_texts
+
+
 def collect_all_variables(graph):
     vars_set = set()
     for node in graph.nodes.values():
-        for op in node.operations:
+        for op in _node_code_texts(node):
             vars_set.update(extract_variables(strip_marker(op)))
     for edge in graph.edges.values():
         if edge.condition:
@@ -214,7 +232,7 @@ def declared_variables_of_graph(graph) -> list:
     """整张图里**该 `default` 的变量**（`graph` → `declared_variables`）。"""
     ops, conds = [], []
     for node in graph.nodes.values():
-        ops.extend(getattr(node, 'operations', None) or ())
+        ops.extend(_node_code_texts(node))
     for edge in graph.edges.values():
         if getattr(edge, 'condition', ''):
             conds.append(edge.condition)

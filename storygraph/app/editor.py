@@ -170,7 +170,20 @@ def graph_from_layout_dict(data) -> 'object':
         node = Node(nid, str(nd.get('label') or ''),
                     float(nd.get('x') or 0), float(nd.get('y') or 0))
         node.is_current = bool(nd.get('is_current', False))
-        node.operations = list(nd.get('operations') or [])
+        # 迁移（2026-10-05）：新文件带 `statements`（结构化，含出处/条件），
+        # 老文件只有 `operations`（裸字符串）—— 两种都能读，
+        # 读不出结构就退回字符串路径（老的 `.json` 一张都不会作废）。
+        stmts = nd.get('statements')
+        if isinstance(stmts, list) and stmts:
+            from storygraph.core.statement import Statement
+            try:
+                node.statements = [Statement.from_dict(s) for s in stmts
+                                   if isinstance(s, dict)]
+            except Exception as e:            # noqa: BLE001 - 坏文件别让人打不开
+                swallow('editor.graph_from_dict.statements', e)
+                node.set_operations(list(nd.get('operations') or []))
+        else:
+            node.set_operations(list(nd.get('operations') or []))
         node.file_path = nd.get('file_path')
         node.line_number = nd.get('line_number')
         graph.nodes[nid] = node
@@ -425,6 +438,10 @@ class EditorSession:
 
         这样用户以前存过的 `.json` 还能直接加载回来（新格式会让旧文件
         白白作废，而这是一份"手排的版式"，重建很贵）。
+
+        迁移（2026-10-05）：**新增** `statements` 字段（结构化，含 `source`
+        文件/行号与 `condition`），`operations` 照旧写 —— 新版本能读回全部
+        信息，老版本读 `operations` 也不受影响（只多一个它不认识的键）。
         """
         import json
         data = {
@@ -433,6 +450,9 @@ class EditorSession:
                 'x': n.x, 'y': n.y,
                 'is_current': bool(getattr(n, 'is_current', False)),
                 'operations': list(getattr(n, 'operations', []) or []),
+                # 结构化真源（老读者会忽略这一项）
+                'statements': [s.to_dict()
+                               for s in (getattr(n, 'statements', []) or [])],
                 'file_path': getattr(n, 'file_path', None),
                 'line_number': getattr(n, 'line_number', None),
             } for nid, n in (getattr(graph, 'nodes', {}) or {}).items()},
@@ -1484,19 +1504,29 @@ class EditorSession:
         见 `story_ops.merge_narrative_operations`：直接把整份 operations
         换成编辑器内容的话，"改一个 love += 1"会顺手把 `renpy.transition(...)`
         全删掉（用户看不见它们，也就不会发现自己删了东西）。
+
+        迁移（2026-10-05）：走**结构化**合并（`merge_narrative_statements`）——
+        技术代码那几条是原对象带回去的，`source`（文件/行号）与 `condition`
+        不会因为"变量编辑器保存一次"就丢。
         """
         node = (getattr(graph, 'nodes', {}) or {}).get(nid)
         if node is None:
             return {'ok': False, 'error': '这个模块不在了', 'variables': 0,
                     'kept_tech': 0}
         from storygraph.story import story_ops
-        original = list(getattr(node, 'operations', []) or [])
-        merged = story_ops.merge_narrative_operations(original, variables)
-        node.operations = merged
+        original = list(getattr(node, 'statements', []) or [])
+        if original:
+            node.statements = story_ops.merge_narrative_statements(
+                original, variables)
+        else:                                 # 老路径（纯字符串构造出来的节点）
+            merged = story_ops.merge_narrative_operations(
+                list(getattr(node, 'operations', []) or []), variables)
+            node.set_operations(merged)
+        merged_ops = list(node.operations)
         return {
             'ok': True, 'error': '',
-            'variables': len(story_ops.narrative_operations(merged)),
-            'kept_tech': len(story_ops.tech_operations(merged)),
+            'variables': len(story_ops.narrative_operations(merged_ops)),
+            'kept_tech': len(story_ops.tech_operations(merged_ops)),
         }
 
     def check_variable_syntax(self, lines) -> list:

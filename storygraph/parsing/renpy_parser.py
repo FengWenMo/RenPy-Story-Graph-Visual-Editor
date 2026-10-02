@@ -2316,7 +2316,10 @@ class GraphBuilder:
                 if nid is not None:
                     node = self.graph.nodes.get(nid)
                     if node is not None:
-                        node.operations.append(payload.get('code', ''))
+                        # **整条语句**进节点（含 `condition` 与 `source`
+                        # 文件/行号）—— 以前只塞 `payload['code']` 字符串，
+                        # 条件和出处到这里就丢了。
+                        node.add_statement(st)
 
     def _prepare(self, new_label_names: set, clear_graph: bool):
         """建图前的公共准备：清节点、建索引、清 operations、重置边去重表。"""
@@ -2335,7 +2338,7 @@ class GraphBuilder:
         # [FIX-46] 只清空即将被重建的节点的 operations。
         for n in self.graph.nodes.values():
             if n.label_name in new_label_names:
-                n.operations = []
+                n.clear_operations()
 
         self._existing_edges = {}
         for e in self.graph.edges.values():
@@ -2426,14 +2429,20 @@ class GraphBuilder:
 
             elif isinstance(node, PythonNode):
                 # 所有 PythonNode 的 code 都会被收集（含条件块内），
-                # 这是 v3 [FIX-6] 有意为之；operations 目前不带条件
-                # 前缀，供下游按需处理。
-                # 风格统一：以 is not None 判断，与 FIX-45 一致。
+                # 这是 v3 [FIX-6] 有意为之。
+                # 迁移（2026-10-05）：这里存**结构化语句**，把 `accum_cond`
+                # （条件前缀）与 `source`（文件/行号）一起带上 —— 以前只留
+                # 字符串，下游再也看不出这条代码在什么条件里。
+                # `operations` 兼容视图只取代码文本，行为一字不变。
                 nid = self._label_to_nid.get(current_label)
                 if nid is not None:
                     n = self.graph.nodes.get(nid)
                     if n is not None:
-                        n.operations.append(node.code)
+                        n.add_statement(Statement.make_python(
+                            node.code, accum_cond,
+                            source=(getattr(node, 'filename', ''),
+                                    getattr(node, 'line_number', 0)),
+                            dollar_space=getattr(node, 'dollar_space', True)))
 
     def _add_edge(self, from_label: str, to_label: str,
                   etype: str, condition: str, option_text: str = '',

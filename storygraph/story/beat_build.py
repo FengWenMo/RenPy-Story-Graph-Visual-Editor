@@ -142,11 +142,21 @@ def beats_from_statements(statements: Iterable[Statement],
             _ln = int(_src[1]) if (_src and len(_src) > 1 and _src[1]) else 0
         except (TypeError, ValueError, IndexError):
             _ln = 0
-        if _ln:
-            if not pending.src_first:
-                pending.src_first = _ln
-            pending.src_last = _ln
-
+        # **行号归属**（2026-10-05 修）：
+        # 只有"真的被这一拍吸收"的语句才把行号记进 `pending`。
+        # 以前是在这里**无条件**先记上，于是"处理到一半发现要落拍"的分支
+        # （`scene` 撞 `scene`、`play` 撞 `play`、`voice` 撞 `voice`）
+        # 会把**属于下一拍的那一行**算进上一拍：
+        #
+        #     31: pause 0.1
+        #     32: scene bg bg3_1      ← 属于第 33 行那句台词那一拍
+        #     33: "宿舍，食堂……"
+        #
+        # 实测（真实 chapter1_1）：第 18 拍的行区间变成 31-32、第 19 拍只剩
+        # 33-33 —— 补丁按区间替换时把 32 行写成了上一拍的 `scene bg bg6_1`，
+        # 而 `scene bg bg3_1` **无处可放**（产物里背景变成错的），
+        # 整体校验发现后整章退回全量重生成 → **手写注释全丢**。
+        absorbed = True
 
         if kind == StatementKind.SAY:
             speaker = payload.get('speaker', '') or ''
@@ -156,9 +166,15 @@ def beats_from_statements(statements: Iterable[Statement],
             pending.condition = stmt.condition or pending.condition
             seq += 1
             pending.seq = seq
+            # 台词那一行属于**这张卡**（在落卡之前记，见循环末尾的行号归属）
+            if _ln:
+                if not pending.src_first:
+                    pending.src_first = _ln
+                pending.src_last = _ln
             beats.append(pending)
             pending = Beat(label=current_label)
             pending_has_stage = False
+            absorbed = False             # 已经落在上面那张卡上了
             # 记住最后一个说话人，给紧随其后的 `extend` 用（见 EXTEND 分支）。
             # **旁白也算"最后一句"**：`"旁白。"` 之后跟 `extend` 续的是旁白，
             # 所以这里要把 last_speaker 清空，不能让它继承更早那个角色
@@ -173,18 +189,29 @@ def beats_from_statements(statements: Iterable[Statement],
             # 跟旁白一模一样，分不清是谁。用户 2026-09-28 报的"幽灵旁白"
             # 就是这个现象。
             #
-            # 只是在 Beat 上「显示用」地填 speaker，渲染仍然走 `extend`
-            # 分支（见 render_beat_to_rpy），**不会**生成 `jc "…"`。
-            beats.append(with_src(Beat(
-                seq=seq, label=current_label,
-                condition=stmt.condition or '',
-                kind=KIND_EXTEND,
-                speaker=last_speaker,
-                text=payload.get('text', '') or '',
-            ), _ln))
+            # 迁移（2026-10-05）：**它仍然是"这一拍"** —— 把 pending 里攒的
+            # 舞台 / 代码 / 注释一起带走（与 SAY 同一条规矩）。否则那些行的
+            # 行号会被**下一句台词**那一拍吞掉，于是两拍的行区间**交叠**
+            # （实测真实 test.rpy：extend 拍 18-18 落在下一拍 16-23 里面），
+            # 增量补丁遇到区间交叠只能跳过后拍 → 对位率掉到 71% → 整章退回
+            # 全量重生成（注释全丢）。
+            pending.seq = seq
+            pending.kind = KIND_EXTEND
+            pending.speaker = last_speaker
+            pending.text = payload.get('text', '') or ''
+            pending.condition = stmt.condition or pending.condition
+            if _ln:
+                if not pending.src_first:
+                    pending.src_first = _ln
+                pending.src_last = _ln
+            beats.append(pending)
+            pending = Beat(label=current_label)
+            pending_has_stage = False
+            absorbed = False             # 已经落在上面那张卡上了
 
         elif kind == StatementKind.MENU:
             caption = payload.get('caption', '') or ''
+            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
             if caption:
                 seq += 1
                 beats.append(with_src(Beat(
@@ -197,6 +224,7 @@ def beats_from_statements(statements: Iterable[Statement],
 
         elif kind == StatementKind.MENU_OPTION:
             seq += 1
+            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
             beats.append(with_src(Beat(
                 seq=seq, label=current_label,
                 condition=stmt.condition or '',
@@ -309,6 +337,7 @@ def beats_from_statements(statements: Iterable[Statement],
         elif kind in (StatementKind.JUMP, StatementKind.CALL):
             # 跳转/调用是控制流，进 Raw 原样保留，绝不丢。
             flush_stage_only()
+            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
             target = payload.get('target', '')
             seq += 1
             beats.append(with_src(Beat(
@@ -322,8 +351,15 @@ def beats_from_statements(statements: Iterable[Statement],
 
         elif kind == StatementKind.RETURN:
             flush_stage_only()
+            absorbed = False             # `return` 不落成卡（只是章尾）
             # 一章结束：`extend` 不可能跨 label 续写，归属清零
             last_speaker = ''
+
+        # —— 行号归属：只记"真被这一拍吸收"的那条 ——
+        if _ln and absorbed:
+            if not pending.src_first:
+                pending.src_first = _ln
+            pending.src_last = _ln
 
     flush_stage_only()
     _assign_identity(beats)

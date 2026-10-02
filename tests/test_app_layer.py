@@ -921,9 +921,14 @@ class TestLayoutJsonAndControlFlowExport:
         # **逐字段**与旧版 tkinter `graph_view.save_layout` 一致
         assert sorted(data.keys()) == ['edges', 'next_ids', 'nodes']
         n0 = data['nodes'][str(ids[0])]
+        # 迁移（2026-10-05）：多了 `statements`（结构化真源，含出处/条件），
+        # 旧版的七个键一个不少 —— 老读者只多一个它不认识的键，其余照旧。
         assert sorted(n0.keys()) == ['file_path', 'is_current', 'label',
-                                     'line_number', 'operations', 'x', 'y']
+                                     'line_number', 'operations',
+                                     'statements', 'x', 'y']
         assert n0['label'] == 'ch0' and n0['operations'] == ['love += 1']
+        assert n0['statements'][0]['kind'] == 'python'
+        assert n0['statements'][0]['payload']['code'] == 'love += 1'
         e0 = data['edges'][next(iter(data['edges']))]
         # 旧版的五个键一个不少（老文件照样能读）；唯一新增的是 rom_clause
         # —— call X from Y 的存档点标识，不存它存布局→读布局就会丢。

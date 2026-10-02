@@ -41,6 +41,50 @@ def strip_marker(code) -> str:
     return str(code or '').lstrip(MARKER)
 
 
+# ===================== python op ↔ Statement（结构债迁移用） =====================
+#
+# 用户 2026-10-05：
+# > 开始迁移，处理结构债
+#
+# 背景（审计结论"双 IR 并存"）：`Graph.Node.operations` 存的是**裸代码字符串**，
+# 下游（导出 / 分析 / 分类 / 抽变量）各自用正则或 AST 反解它；而 `core.Statement`
+# 这套结构化 IR 一直只服务于"拍"那条路。迁移之后：
+#
+#     graph.Node.statements : list[Statement]      ← 结构化真源
+#     graph.Node.operations : list[str]            ← 兼容视图（派生，老调用方照旧）
+#
+# 这两个函数就是"字符串 ↔ 语句"的唯一转换点（**含行首标记**这一位，
+# 以前它散落在三处）。
+
+def python_operation(code) -> 'Statement':
+    """裸代码字符串 → PYTHON 语句（保留"紧凑 `$code`"这一位）。"""
+    text = str(code if code is not None else '')
+    tight = is_tight_dollar(text)
+    return Statement.make_python(strip_marker(text), dollar_space=not tight)
+
+
+def operation_source(stmt) -> str:
+    """
+    语句 → 裸代码字符串（`Node.operations` 的取值方式）。
+
+    只对 PYTHON / RAW 有定义：其余 kind 返回空串 —— 它们**不是**"操作"，
+    调用方该看 `stmt.kind`，而不是把它硬塞回字符串。
+    """
+    if not isinstance(stmt, Statement):
+        return str(stmt or '')
+    if stmt.kind == StatementKind.PYTHON:
+        return str(stmt.payload.get('code', '') or '')
+    if stmt.kind == StatementKind.RAW:
+        return str(stmt.payload.get('text', '') or '')
+    return ''
+
+
+def is_code_statement(stmt) -> bool:
+    """这条语句是不是"代码/原生语句"（= 以前 `operations` 里的东西）？"""
+    return (isinstance(stmt, Statement)
+            and stmt.kind in (StatementKind.PYTHON, StatementKind.RAW))
+
+
 class StatementKind:
     """Statement 的 kind 常量。"""
     SAY = 'say'
