@@ -55,13 +55,25 @@ BEAT_FIELDS = [
     # 渲染固定按"舞台→音频→语音"输出，音频就跑到立绘后面去了。
     # 这在同一次交互里不改变最终画面，但回放/时间轴看起来是错的顺序。
     'OpOrder',
+    # CodeBlocks = 「代码」列里**哪些行构成 `python:` 块**（行号区间）。
+    #
+    # 放在最末尾、**整列隐藏**（用户 2026-10-05：「新增的列放远点，甚至可默认
+    # 隐藏，因为事实上策划和文案不需要」）。它纯属工具维护的内部结构：
+    #
+    #   · 「代码」列一个格子装的是**多行文本**，`python:` 块的边界在纯文本里
+    #     **表达不出来** —— 一格里混着多条语句时（`$ a` / `$ b` / `python: c`）
+    #     读回来无从知道哪几行属于同一个块；
+    #   · 猜错的代价是**静默改语义**：整个块被拆成一条条 `$` 语句之后，
+    #     `for` / `if` 的嵌套体全被压到同一层（真实项目 `mini_game1.rpy`
+    #     一个块拆出 53 条，`for` 里的 `if` 直接变成顺序执行）。
+    'CodeBlocks',
 ]
 
 
 #: 这些列整列隐藏（工具维护的内部元数据，策划不该看见也不该填）。
 #: 隐藏（hidden=True）在 Excel/WPS 里都是"列被收起"而不是"没有这一列"，
 #: 数据照旧读写，所以往返不会丢——这是选隐藏列而非"不写这一列"的原因。
-HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder')
+HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks')
 
 
 # 写进 Excel 的表头（中文）。策划只看中文；程序侧键名仍是英文，
@@ -78,6 +90,7 @@ BEAT_HEADERS = {
     'ContentHash': '内容指纹',
     'StageOrder': '舞台顺序（内部）',
     'OpOrder': '操作顺序（内部）',
+    'CodeBlocks': '代码块结构（内部）',
 }
 
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
@@ -204,7 +217,7 @@ class Beat:
     seq: int = 0
     label: str = ''
     # 稳定身份 + 内容指纹：协作（DB 主键/锁）与翻译单元要用，
-    # 详细理由见 _assign_identity。
+    # 详细理由见 assign_identity。
     line_id: str = ''
     content_hash: str = ''
     condition: str = ''
@@ -241,6 +254,16 @@ class Beat:
     # 不记的话导出会把 `$ f()` / `show screen` / `pause` 的交替演出排成
     # "先全部 show/pause，再全部 $ f()"——同一张表导回去代码却变了样。
     ordered: list = field(default_factory=list)
+    #: 「代码」列里**哪些行构成 `python:` 块**：`[(起始行, 结束行), ...]`
+    #: （**1-based、闭区间**，行号对应 `compose_code(beat).splitlines()`）。
+    #:
+    #: 为什么需要它（2026-10-05 实测）：一个格子里可能混着多条语句 ——
+    #: `$ a` / `$ b` / `python: c` / `python: d`，而**块的边界在纯文本里
+    #: 表达不出来**（`python:` 关键字在单元格里已经被剥掉）。猜错的代价是
+    #: 静默改语义：整个块被拆成一条条 `$` 语句之后，`for` / `if` 的嵌套体
+    #: 全被压到同一层（`mini_game1.rpy` 实测一个块拆出 53 条）。
+    #: 兜底：这一列为空（老表 / 手工新建行）时，渲染层退回"按缩进推断"。
+    code_blocks: list = field(default_factory=list)
     music: str = ''
     music_params: str = ''
     music_action: str = 'play'     # 'play' / 'queue' / 'stop'
@@ -288,9 +311,10 @@ class Beat:
             bgm, bgm_params, sfx, sfx_params, self.voice,
             stage, compose_code_cell(self),
             self.content_hash,
-            # 隐藏列：源顺序。工具写、工具读，策划的界面里看不到它们。
+            # 隐藏列：源顺序 + 代码块结构。工具写、工具读，策划界面里看不到。
             self.stage_order,
             self.op_order,
+            compose_code_blocks_cell(self),
         ]
 
     @classmethod
@@ -357,7 +381,13 @@ class Beat:
         # 读回来时按"看起来像不像一条 Ren'Py 语句"重新分类，并把交错顺序
         # 记进 ordered——否则 `$ f()` 与 `show screen`/`pause` 交替的演出
         # 会被排成"先全部 show/pause 再全部 $ f()"，导出的代码和源脚本不一样。
-        beat.raw, beat.code, beat.ordered = _split_code_cell(beat.code)
+        beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
+        (beat.raw, beat.code, beat.ordered,
+         marked_blocks) = _split_code_cell(
+             beat.code, expand_code_blocks(beat.code_blocks))
+        # 单元格里的块标记是**权威**（写表时打的）；隐藏列只在标记缺失
+        # （老表 / 手工新建行）时兜底。
+        beat.code_blocks = marked_blocks or beat.code_blocks
 
         # —— 结构化列 → 内部字段 ——
         # 新版表：背景 / 立绘 / 位置 / 转场 / 退场 / 音乐 / 音效 各自一列，
@@ -384,6 +414,7 @@ class Beat:
             beat.stage_order = g('StageOrder')
         if g('OpOrder'):
             beat.op_order = g('OpOrder')
+        beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
 
         # —— 音频列 → 内部字段（含「停止/排队」伪值）——
         _fill_audio_from_cells(beat, 'music', g('BGM'), g('BGMParams'))
@@ -689,6 +720,21 @@ def _spec_image(spec: str) -> str:
 
 
 
+def _join_at_targets(targets) -> str:
+    """
+    `at` 目标列表 → 文本。
+
+    多个目标之间**保留逗号**（`at left, right`）：空格连接会得到
+    `at left right`，而 Ren'Py 的 `at` 是"逗号分隔的变换列表" ——
+    少了逗号语义就变了。
+
+    单个目标原样返回（这是绝大多数情况：`at h11` / `at leftish`）。
+    """
+    parts = [str(t).strip() for t in (targets or []) if str(t).strip()]
+    return ', '.join(parts)
+
+
+
 def _spec_at(spec: str) -> str:
     """`bg room@bgfit` → `bgfit`"""
     items = _split_spec_list(spec)
@@ -911,25 +957,135 @@ def compose_stage_extra(beat: 'Beat', symbols=None) -> str:
 
 def compose_code(beat: 'Beat') -> str:
     """
-    CodeBlock 单元格 = 原生语句（raw）+ python 代码（code），原样拼。
+    CodeBlock = 原生语句（raw）+ python 代码（code），按源码交错顺序拼。
 
     这是唯一的"保真后门"：里面有东西，编译器就原封不动抄进脚本。
 
-    有 `ordered` 时按**源码里的交错顺序**拼，并恢复每行的块层级
-    （`ordered` 的第三位；见 `_relative_indents`）—— 不恢复的话
-    `python:` 块的嵌套结构在往返里就没了。
+    有 `ordered` 时按**源码里的交错顺序**拼，并恢复每行的缩进
+    （`ordered` 的第三位；见 `_relative_indents`）。
 
-    没有 `ordered`（表里读回来的 Beat）就退回"raw 在前、code 在后"的
-    历史行为，保证老表照旧。
+    **每一行都带块标记**（见 `CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`）：
+    「代码」列一个格子装多行文本，`python:` 块的边界在纯文本里表达不出来
+    （`python:` 关键字在单元格里已经被剥掉），而块结构决定 `for` / `if`
+    的嵌套层级 —— 猜错就是静默改语义。标记由隐藏列 `CodeBlocks`
+    （或 `.rpy` 解析时的行数）确定，渲染层 `render_code_block` 按标记出
+    `python:` 块；写进 Excel 前由 `compose_code_cell` 把标记剥掉。
 
     返回文本**不带整体缩进**（缩进由渲染层按上下文加）。
     """
-    ordered = _ordered_code_lines(beat)
-    if ordered is not None:
-        return '\n'.join(ordered)
-    parts = [ln for ln in _split_lines(beat.raw)]
-    parts += [ln for ln in _split_lines(beat.code)]
-    return '\n'.join(parts)
+    lines = _ordered_code_lines(beat)
+    if lines is None:
+        lines = [ln for ln in _split_lines(beat.raw)]
+        lines += [ln for ln in _split_lines(beat.code)]
+    return '\n'.join(mark_code_blocks(lines,
+                                      getattr(beat, 'code_blocks', None)))
+
+
+#: 代码块标记：**行首**这两个私用区字符表示"这行属于一个 `python:` 块"。
+#: `CODE_BLOCK_OPEN` = 块的第一行（渲染时出 `python:` 头），
+#: `CODE_BLOCK_BODY` = 块体的后续行。私用区字符策划打不出来，
+#: 也不是控制字符（`openpyxl` 拒收控制字符，见 `core.statement.MARKER`）。
+CODE_BLOCK_OPEN = '\ue001'
+CODE_BLOCK_BODY = '\ue002'
+
+
+def mark_code_blocks(lines: list, blocks) -> list:
+    """
+    按 `blocks`（1-based 闭区间）给行打上块标记；`blocks` 为空则原样返回。
+
+    兜底（老表 / 手工新建行）：`blocks` 为空时**不打标记**，
+    渲染层会退回"按缩进推断"那条路（见 `render_code_block`）——
+    最坏是块结构没保住，而不是产物改坏。
+    """
+    ranges = [(int(a), int(b)) for a, b in (blocks or []) if int(b) >= int(a)]
+    if not ranges:
+        return list(lines)
+    out = []
+    for idx, line in enumerate(lines, start=1):
+        flag = ''
+        for start, end in ranges:
+            if start <= idx <= end:
+                flag = CODE_BLOCK_OPEN if idx == start else CODE_BLOCK_BODY
+                break
+        out.append(flag + line)
+    return out
+
+
+
+def unmask_code_block_markers(text: str) -> str:
+    """
+    去掉**每一行**行首的块标记（写 Excel、比对、显示都用它）。
+
+    要逐行做：`compose_code` 返回的是多行文本，只 `lstrip` 整个字符串
+    只能去掉第一行那个标记，其余行的标记会原样写进单元格（实测）。
+    """
+    lines = [str(line or '').lstrip(CODE_BLOCK_OPEN + CODE_BLOCK_BODY)
+             for line in str(text or '').split('\n')]
+    return '\n'.join(lines)
+
+
+
+def compose_code_blocks_cell(beat: 'Beat') -> str:
+    """
+    `Beat.code_blocks` → 隐藏列文本。
+
+    编码刻意选**人能读懂**的形式（万一有人展开隐藏列）：
+
+        '1-11 13-17'   ← 第 1~11 行、第 13~17 行各是一个 python 块
+        '3'            ← 只有第 3 行（单行块）
+        ''             ← 没有块，或老表（渲染层退回按缩进推断）
+    """
+    parts = []
+    for item in getattr(beat, 'code_blocks', None) or []:
+        try:
+            start, end = int(item[0]), int(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if start <= 0 or end < start:
+            continue
+        parts.append(str(start) if start == end else f'{start}-{end}')
+    return ' '.join(parts)
+
+
+
+def expand_code_blocks(blocks) -> set:
+    """
+    `[(2, 3), (4, 5)]` → `{2, 3, 4, 5}`（把区间摊成行号集合）。
+
+    `_split_code_cell` 需要"**每一行**是不是 python 代码"，而隐藏列记的是
+    区间；不摊开的话组里只有首行算代码，`for i in range(2):` 的体
+    （`a += i`）会被当成 raw，块又被拆散。
+    """
+    out = set()
+    for a, b in blocks or []:
+        try:
+            start, end = int(a), int(b)
+        except (TypeError, ValueError):
+            continue
+        out.update(range(start, end + 1))
+    return out
+
+
+
+def parse_code_blocks_cell(text) -> list:
+    """
+    隐藏列文本 → `[(start, end), ...]`（1-based 闭区间）。
+
+    解析不出来就返回 `[]`（**不抛异常**）：这一列是工具维护的内部元数据，
+    手改坏了不该让整张表读不进来 —— 返回空列表后渲染层会退回按缩进推断，
+    最坏情况是"块结构没保住"，而不是"表打不开"。
+    """
+    out = []
+    for token in str(text or '').replace(',', ' ').split():
+        left, _, right = token.partition('-')
+        try:
+            start = int(left)
+            end = int(right) if right else start
+        except ValueError:
+            continue
+        if start > 0 and end >= start:
+            out.append((start, end))
+    return out
 
 
 
@@ -941,15 +1097,19 @@ _MARKER = MARKER
 
 def compose_code_cell(beat: 'Beat') -> str:
     """
-    写进「代码」列**单元格**的文本 = `compose_code`（标记原样保留）。
+    写进「代码」列**单元格**的文本 = `compose_code` 剥掉块标记。
 
-    2026-10-05 修正：标记以前是控制字符 `\\x01`，`openpyxl` 拒收，所以这里
+    2026-10-05：标记以前是控制字符 `\\x01`，`openpyxl` 拒收，所以这里
     必须把它 `.replace()` 掉 —— 代价是**读回来认不出"原文紧凑写 `$code`"**，
     真实项目 22 条 `$persistent…` 因此在往返里被改写成 `$ persistent…`。
     标记改成 Unicode 私用区字符（见 `core.statement.MARKER`）之后它就能
-    安全地待在单元格里，写表与渲染**内容完全一致**，不再需要剥。
+    安全地待在单元格里，写表与渲染**内容完全一致**。
+
+    块标记（`CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`）**不写进这里**：
+    它们承载的结构信息落在隐藏列 `CodeBlocks` 上，单元格里只留纯文本
+    —— 策划/文案万一展开那一列，看到的还是能读的代码。
     """
-    return compose_code(beat) or ''
+    return unmask_code_block_markers(compose_code(beat) or '')
 
 
 
@@ -974,8 +1134,16 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
     ordered = getattr(beat, 'ordered', None) or []
     if not ordered:
         return None
-    pools = {'raw': list(_split_lines(beat.raw)),
-             'code': list(_split_lines(beat.code))}
+    # `raw` / `code` 字段里存的是**不带块标记**的纯文本（写表之前会剥掉），
+    # 而 `ordered` 可能带着标记（同一个 Beat 先写过表再渲染时）——
+    # 比对前统一剥掉，两边口径才一致。
+    #
+    # 两个池子都按**逻辑语句**成组（`for …:\n    body` 是一个元素）：
+    # `_split_code_cell` 写进 `code` 的就是逻辑语句，逐行比会对不上。
+    pools = {'raw': [unmask_code_block_markers(ln)
+                     for ln in _split_lines(beat.raw)],
+             'code': [unmask_code_block_markers(ln)
+                      for ln in _split_lines(beat.code)]}
     pos = {'raw': 0, 'code': 0}
     out = []
     for item in ordered:
@@ -987,6 +1155,19 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
         pool = pools.get(kind)
         if pool is None:
             return None
+        line = unmask_code_block_markers(line)
+        if not line.strip():
+            # **空行**：它的位置由 `ordered` 说了算，但**字段里没有它**
+            # （`_split_code_cell` 不把空行写进 `raw` / `code`）。
+            # 这里若把游标指向的池行也吐出来，就会**多输出一行**，
+            # 而块结构是按行号区间记的（隐藏列 `CodeBlocks`）——
+            # 行数一错，块边界就整体串位：实测
+            # `mini_game_puzzle.rpy` 的块尾被算到下一行的 `call screen` 上，
+            # 产物变成 `python:` 里包含 `call screen …` → **语法错误**。
+            #
+            # 游标**不动**、只补一个空行：空行不参与"逐行取用"的配对。
+            out.append('')
+            continue
         i = pos[kind]
         if i >= len(pool) or pool[i] != line:
             return None
@@ -1018,9 +1199,41 @@ def _reindent(line: str, indent) -> str:
 
 
 
-def _split_code_cell(cell: str) -> tuple:
+def _group_logical_lines(tokens: list) -> list:
     """
-    CodeBlock 单元格 → (raw, code, ordered)。
+    物理行 → **逻辑语句组**（把多行语句的续行粘回同一个元素）。
+
+        ['for i in range(2):', '    a += i', 'for j in range(2):']
+          → ['for i in range(2):\\n    a += i', 'for j in range(2):']
+
+    为什么必须成组：`_split_code_cell` 是按行判断"这行是语句还是代码"的，
+    而 `for i in range(2):` 这一行**两种解释都成立**（Ren'Py 也有 `for`）。
+    成组之后判据变成"**下一行更深 → 这是个块头**"（以及括号/引号状态），
+    单行无法回答的问题就有答案了。
+
+    输入是 `(文本, 是否带块标记)`；返回 `[(组文本, 是否带标记), ...]`。
+    """
+    from storygraph.story.beat_render import _bracket_delta, _quote_state
+
+    groups = []
+    buf, marked, quote, depth = [], False, '', 0
+    for text, flag in tokens:
+        buf.append(text)
+        marked = marked or flag
+        depth += _bracket_delta(text, '')
+        quote = _quote_state(text, quote)
+        if depth <= 0 and not quote:
+            groups.append(('\n'.join(buf), marked))
+            buf, marked, depth = [], False, 0
+    if buf:
+        groups.append(('\n'.join(buf), marked))
+    return groups
+
+
+
+def _split_code_cell(cell: str, block_lines=None) -> tuple:
+    """
+    CodeBlock 单元格 → `(raw, code, ordered, blocks)`。
 
     表里只有**一个**格子装"原生语句 + python 代码"，所以读回来时必须重新
     分类。分类规则刻意保守（只认确定是语句的头），因为猜错的代价是
@@ -1029,29 +1242,76 @@ def _split_code_cell(cell: str) -> tuple:
       · `with dissolve` / `show screen x` / `pause` / `jump x` … → raw
       · `$ f()` / `f()` 裸表达式 / `python:` 块 → code
 
-    ordered 一并给出，让渲染能按**原来的交错顺序**出代码（见
-    `_ordered_code_lines`）。
+    `ordered` 一并给出，让渲染能按**原来的交错顺序**出代码（见
+    `_ordered_code_lines`）；`blocks` 是"哪几行是一个 `python:` 块"的
+    行区间（1-based 闭区间），落进隐藏列 `CodeBlocks`。
+
+    **块标记（`CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`）优先于一切推断**：
+    它由写表前的 `compose_code` 打上，是"这行属于一个 `python:` 块"的
+    权威说法。有标记时不再猜缩进 —— 一个格子里混着 `$ a` / `$ b` /
+    `python: c` 时，只有标记能把块边界说清楚。
 
     单元格里的**缩进不可信**（写表/用户手改都会动它），所以：
 
-      · 存进 `raw` / `code` 字段的行一律 `strip`（字段里只放内容）；
-      · 真实层级记进 `ordered` 的第三位（`(kind, line, indent)`），
-        渲染时按它重新缩进。这样 `python:` 块的块结构能原样回来，
-        块里的每行也不会被当成独立的 `$` 语句拆散。
+      · 存进 `raw` / `code` 字段的行一律去掉行首空白；
+      · 真实缩进记进 `ordered` 的第三位（`(kind, line, indent)`），
+        渲染时按它还原；
       · `$` 前缀一并剥掉（渲染时会按 `$` / `$ ` 两种写法还原）——
         留着会变成 `$ $ x`（实测的双美元 bug）。
     """
-    lines = _split_lines(cell)
+    lines = _split_code_lines(cell)
     if not lines:
-        return '', '', []
-    indents = _relative_indents(lines)
+        return '', '', [], []
+    #: 隐藏列 `CodeBlocks` 说的"这些物理行是 python 代码"（1-based）。
+    #: 单元格标记丢了（老表 / 手工复制行）时由它兜底 —— 没有它就只能按
+    #: 行的形态猜，而 `for i in range(2):` 这种**一行两解**的写法猜不准。
+    forced = {int(n) for n in (block_lines or [])}
+    plain, in_block = [], []
+    for no, ln in enumerate(lines, start=1):
+        marker = ln[:1]
+        opened = marker == CODE_BLOCK_OPEN
+        inside = marker in (CODE_BLOCK_OPEN, CODE_BLOCK_BODY) or no in forced
+        plain.append(ln[1:] if marker in (CODE_BLOCK_OPEN, CODE_BLOCK_BODY)
+                     else ln)
+        in_block.append((inside, opened))
+    indents = _relative_indents(plain, in_block)
+    # **分类要成组做，输出要逐行**（2026-10-05）：
+    # `for i in range(2):` 单独一行时"是 Ren'Py 还是 Python"无从判断，
+    # 但它的**下一行更深**就说明它是个块头 —— 判据只在组上成立。
+    # 而 `ordered` 必须逐物理行记：`_ordered_code_lines` 是按行去
+    # `raw` / `code` 两个池子里取用的（池子被 `_split_lines` 拆成物理行），
+    # 记成逻辑行就取不上、整条 ordered 作废（实测：退回"raw 在前 code 在后"
+    # 的兜底顺序，`$ game = 1` 跑到 `show screen` 后面去了）。
+    kinds = []
+    for group, _marked in _group_logical_lines(
+            list(zip(plain, [f[0] for f in in_block]))):
+        first = group.split('\n', 1)[0].strip()
+        if not first:
+            kinds.append('blank')
+        elif first.startswith('$') or (
+                not _looks_like_renpy_statement(first)
+                and not first.endswith(':') and not _is_bare_renpy_verb(first)):
+            kinds.append('code')
+        else:
+            kinds.append('raw')
+        kinds.extend(['code'] * (group.count('\n')))
+
     raw, code, ordered = [], [], []
-    for idx, ln in enumerate(lines):
+    blocks = []
+    for idx, ln in enumerate(plain):
         s = ln.strip()
+        inside = in_block[idx][0]
+        if not s:
+            if inside and ordered:
+                kind, line, rel = ordered[-1]
+                ordered.append((kind, '', rel))
+            continue
         rel = indents[idx] if idx < len(indents) else 0
-        if s.startswith('$') or (s and not _looks_like_renpy_statement(s)
-                                 and not s.endswith(':')
-                                 and not _is_bare_renpy_verb(s)):
+        if in_block[idx][1]:
+            blocks.append([idx + 1, idx + 1])
+        elif inside and blocks:
+            blocks[-1][1] = idx + 1
+        if kinds[idx] == 'code':
             # `$x`（`$` 后无空格）在**原文件里**很常见，而生成器默认写 `$ x`。
             # 逐字节保留这一位，否则每个 `$` 行都成一个 diff 块。
             # 标记只给**紧凑写法**：`$ x` 存裸文本，渲染时补 `$ ` 就是原样
@@ -1067,11 +1327,31 @@ def _split_code_cell(cell: str) -> tuple:
         else:
             raw.append(s)
             ordered.append(('raw', s, rel))
-    return '\n'.join(raw), '\n'.join(code), ordered
+    return ('\n'.join(raw), '\n'.join(code), ordered,
+            [(a, b) for a, b in blocks])
 
 
 
-def _relative_indents(lines: list) -> list:
+def _looks_like_code(line: str) -> bool:
+    """
+    这一行**确定**是 Python 代码（`$ xxx` 或赋值），而不是"认不出来的
+    Ren'Py 语句"？
+
+    只认两类无歧义的写法：`$` 前缀、`名字 = 值`（含 `+=` / `//=` 这类）。
+
+    保留它是给"证据不足、只能保守判断"的场合用：认不出来时宁可当 raw
+    原样透传，也不要把作者的 Ren'Py 错误翻译成我们生成的 Python 错误。
+    """
+    s = str(line or '').strip()
+    if not s:
+        return False
+    if s.startswith('$'):
+        return True
+    return bool(re.match(
+        r'^[A-Za-z_][\w.\[\]\'"]*\s*(?:[+\-*/%|&^@]|//|>>|<<)?=(?!=)', s))
+
+
+def _relative_indents(lines: list, in_block=None) -> list:
     """
     每个非空行的**相对块层级**（0 = 与上一句同层，1 = 进了下一层，…）。
 
@@ -1098,17 +1378,19 @@ def _relative_indents(lines: list) -> list:
     """
     from storygraph.story.beat_render import _bracket_delta, _quote_state
 
+    flags = list(in_block or [])
     rel = []
     stack = [0]
     depth = 0
     quote = ''
     prev_open = False
-    for ln in lines:
+    for idx, ln in enumerate(lines):
         if not ln.strip():
             rel.append(0)
             continue
+        inside = bool(flags[idx][0]) if idx < len(flags) else False
         indent = len(ln) - len(ln.lstrip())
-        if prev_open:
+        if inside or prev_open:
             # **续行**：保留它**原本的物理缩进**。续行的缩进在 Python 里没有
             # 语义（只是对齐括号），但它决定这条语句重新渲染出来好不好看；
             # 归成块层级会把 `[` 后面的内容拖到括号位置之外。
@@ -1219,7 +1501,10 @@ def _show_item_text(payload: dict) -> str:
       · 带 as/behind/…  → 完整子句（那些修饰符没有结构化列承载）
     """
     image = payload.get('image', '') or ''
-    at = ' '.join(payload.get('at') or [])
+    # 多个 `at` 目标之间**必须保留逗号**（`at left, right`）：空格连接得到
+    # `at left right`，Ren'Py 会把 `right` 当成 `left` 后面的另一个词法单元
+    # 而不是第二个变换 —— 语义直接变了。
+    at = _join_at_targets(payload.get('at'))
     simple = not any((
         payload.get('as_'), payload.get('with_'), payload.get('onlayer'),
         payload.get('behind'), payload.get('zorder') is not None,
@@ -1474,7 +1759,7 @@ def _append_line(existing: str, line: str) -> str:
 
 
 
-def _assign_identity(beats: list):
+def assign_identity(beats: list):
     """
     给每条 Beat 补上稳定身份：LineId + ContentHash。
 
@@ -1532,6 +1817,21 @@ def _split_lines(text: str) -> list:
     """
     text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
     return [ln.rstrip() for ln in text.split('\n') if ln.strip()]
+
+
+
+def _split_code_lines(text) -> list:
+    """
+    代码格按行拆开，**保留空行**（其余同 `_split_lines`）。
+
+    为什么代码格要留空行：Python 里空行没有语义，但它出现在多行语句的
+    参数列表中间时（`drag_puzzle(` 里就有），丢了会让"同一段代码"的指纹
+    在往返前后对不上 —— 审计把它算成一条丢失 + 一条新增。空行**不写进
+    `raw` / `code` 字段**（由 `_ordered_code_lines` 在还原时插回去，
+    见 `_split_code_cell`）。
+    """
+    text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    return [ln.rstrip() for ln in text.split('\n')]
 
 
 

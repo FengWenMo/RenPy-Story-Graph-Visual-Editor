@@ -1,7 +1,7 @@
 # commands.py
 import copy
 
-from storygraph.app import notify
+from storygraph.core import notify
 from storygraph.core.statement import python_operation
 from storygraph.parsing.renpy_parser import parse_renpy_file
 

@@ -448,7 +448,7 @@ class TestEngineExporters:
     @pytest.fixture
     def beats_and_registry(self):
         from storygraph.assets.asset_registry import AssetRegistry
-        from storygraph.story.script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, assign_identity
         reg = AssetRegistry()
         reg.characters = {'e': {'ID': 'e', 'Name': 'Eileen',
                                'Color': '#c8ffc8', 'ImageTag': 'eileen'}}
@@ -461,7 +461,7 @@ class TestEngineExporters:
             Beat(seq=2, label='a', speaker='e', show='eileen happy@leftish',
                  text='你好。'),
         ]
-        _assign_identity(beats)
+        assign_identity(beats)
         return beats, reg
 
     def test_neutral_ir_shape(self, beats_and_registry):
@@ -970,28 +970,28 @@ class TestRoundTripFidelity:
 
 class TestBeatIdentity:
     def test_line_ids_and_hashes_assigned(self):
-        from storygraph.story.script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, assign_identity
         beats = [Beat(seq=1, label='ch01', text='a'),
                  Beat(seq=2, label='ch01', text='b')]
-        _assign_identity(beats)
+        assign_identity(beats)
         assert [b.line_id for b in beats] == ['ch01.0001', 'ch01.0002']
         assert all(b.content_hash for b in beats)
         assert beats[0].content_hash != beats[1].content_hash
 
     def test_content_hash_recomputed_on_change(self):
         """改了内容必须换哈希，否则 push 会把改动判成"未变"静默丢掉。"""
-        from storygraph.story.script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, assign_identity
         b = Beat(seq=1, label='a', text='原文')
-        _assign_identity([b])
+        assign_identity([b])
         old = b.content_hash
         b.text = '改成新的'
-        _assign_identity([b])
+        assign_identity([b])
         assert b.content_hash != old
 
     def test_existing_line_id_preserved(self):
-        from storygraph.story.script_table import Beat, _assign_identity
+        from storygraph.story.script_table import Beat, assign_identity
         b = Beat(seq=9, label='a', text='x', line_id='db-thing-42')
-        _assign_identity([b])
+        assign_identity([b])
         assert b.line_id == 'db-thing-42'
 
     def test_import_assigns_identity_to_handwritten_rows(self, tmp_path):
@@ -1027,13 +1027,13 @@ class TestCollabStore:
     def sheet(self, tmp_path, db):
         """从 .rpy 视角造一批 Beat 直接入库，再 pull 出 Excel。"""
         import storygraph.collab.collab_store as cs
-        from storygraph.story.script_table import Beat, _assign_identity, export_beats_to_excel
+        from storygraph.story.script_table import Beat, assign_identity, export_beats_to_excel
         beats = [
             Beat(seq=1, label='ch01', scene='bg classroom', text='开场'),
             Beat(seq=2, label='ch01', speaker='e', text='你好。'),
             Beat(seq=3, label='ch01', speaker='e', text='再见。'),
         ]
-        _assign_identity(beats)
+        assign_identity(beats)
         tmp_xlsx = tmp_path / '_seed.xlsx'
         export_beats_to_excel(beats, tmp_xlsx)
         cs.push(db, tmp_xlsx, actor='alice')

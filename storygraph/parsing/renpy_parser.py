@@ -1443,9 +1443,28 @@ class RenPyParser:
         """
         把 show/scene 语句的目标部分分词。
         · 空格分隔
-        · 逗号作为独立 token
+        · 逗号作为独立 token（**只在括号外**，见下）
         · 引号字符串不切分（'show expression "a b.png"' 中
           '"a b.png"' 是一个 token）
+
+        **括号里的逗号不算分隔符**（2026-10-05 修）：`at` 的目标可以是一个
+        Python 表达式 ——
+
+            show image puzzle_path at Transform(xysize=(1920, 1080))
+
+        `(1920, 1080)` 里那个逗号是**元组的分隔符**。以前无脑当 token 切，
+        于是 `at` 收成 `['Transform(xysize=(1920', '1080))']`，
+        再拼回去（`beat_path` 用空格连接多目标）就变成
+
+            show image puzzle_path at Transform(xysize=(1920 1080))
+
+        —— **一个 Python 语法错误**，产物直接跑不起来。逗号被吃掉这件事
+        连往返多重集断言都看不出来（它把 `at` 列表归一化了，两边"一样"），
+        所以只能靠"产物里必须逐字含 `Transform(xysize=(1920, 1080))`"
+        这种断言把它钉住（见 `TestCustomTransformRoundtrip`）。
+
+        括号深度只在 token 内部累计：到空格/顶层逗号就结束，不会把
+        后续 token 吞进来。
         """
         tokens = []
         i = 0
@@ -1473,8 +1492,18 @@ class RenPyParser:
                     i += 1
                 tokens.append(rest[start:i])
                 continue
+            # 普通 token：一路吃到空格或**顶层**逗号；括号里的逗号留住
             start = i
-            while i < n and rest[i] not in ' \t,':
+            depth = 0
+            while i < n:
+                ch = rest[i]
+                if ch in '([{':
+                    depth += 1
+                elif ch in ')]}':
+                    if depth:
+                        depth -= 1
+                elif depth == 0 and (ch in ' \t,'):
+                    break
                 i += 1
             tokens.append(rest[start:i])
         return tokens
@@ -2742,6 +2771,37 @@ def batch_import_chapters(filepaths, graph):
 #  翻译文件解析
 # ====================================================================
 
+def _unescape_renpy_string(text: str) -> str:
+    """
+    Ren'Py 字符串字面量的内容 → 实际文本（反转义）。
+
+    只处理转义序列，**不动 `{tag}` 与 `[var]`**（那是 Ren'Py 的文本标记，
+    属于内容本身，反转义不该碰它们）。
+    """
+    if '\\' not in text:
+        return text
+    out, i, n = [], 0, len(text)
+    table = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\',
+             '"': '"', "'": "'", ' ': ' ', 'a': '\a', 'b': '\b',
+             'f': '\f', 'v': '\v', '0': '\0'}
+    while i < n:
+        ch = text[i]
+        if ch == '\\' and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in table:
+                out.append(table[nxt])
+                i += 2
+                continue
+            # `\uXXXX` 这类：认不出就原样留着（不做多余猜测）
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+
 def parse_translation_files(tl_dir) -> dict:
     """
     解析 tl/ 目录，返回 {unit_id: {'original', 'translated', 'language'}}。
@@ -2764,17 +2824,39 @@ def parse_translation_files(tl_dir) -> dict:
 
     re_translate = re.compile(r'^\s*translate\s+([\w-]+)\s+([\w-]+)\s*:')
     re_translate_any = re.compile(r'^\s*translate\b')
-    re_old = re.compile(r'^\s*#\s*old\s+' + _TR_STR)
-    re_new = re.compile(r'^\s*new\s+' + _TR_STR)
+    # `# old "…"` = 对话块的"原文"注释（**必须带 `#`**）。
+    # `old "…"`（无 `#`）= `strings:` 块的原文条目。
+    # 两者分开：合成一个正则会把 `strings:` 块的条目认成注释。
+    re_old_comment = re.compile(r'^\s+#\s*old\s+' + _TR_STR)
+    re_old = re.compile(r'^\s+old\s+(?!#)' + _TR_STR)
+    # `new "…"` 只认**缩进**的行（`^\s+`）。
+    # 用 `^\s*` 会把**零缩进**的 `new "…"` 也吃进去 —— 而 `strings:` 块
+    # 的 `new` 就在零缩进上，被这里先截走之后字符串翻译一条都读不到。
+    re_new = re.compile(r'^\s+new\s+(?!#)' + _TR_STR)
+    # `strings:` 块的 `new` 在**零缩进**上（`old` / `new` 与 `translate`
+    # 顶格对齐），所以单独一条。
+    re_new_strings = re.compile(r'^\s*new\s+(?!#)' + _TR_STR)
+    # 现代 tl 格式：`translate <lang> <id>:` 下面**直接跟一句裸字符串**。
+    # Ren'Py 自己生成的 tl 文件长这样，而旧实现只认 `# old` / `new`，
+    # 于是新式文件的译文一条都读不到（翻译面板空的，且不报错）。
+    re_bare_dialogue = re.compile(
+        r'^\s+(?:[A-Za-z_]\w*\s+)?' + _TR_STR + r'\s*$')
 
     def _pick_named(m):
+        """
+        取正则捕获的字符串字面量，并**反转义**。
+
+        `"他说：\\"走吧\\""` 取出来是 `他说：\\"走吧\\"`（正则里的 `\\.` 保留了
+        反斜杠），而它的**实际文本**是 `他说："走吧"`。返回未反转义的原文会让
+        翻译面板显示 `\\"`（用户看到的是源码而不是文字），拿去写回也会多出
+        一层转义。Ren'Py 的字符串里 `\\"` / `\\'` / `\\\\` / `\\n` 都是转义。
+        """
         v = m.group('dq')
-        if v is not None:
-            return v
-        v = m.group('sq')
-        if v is not None:
-            return v
-        return ''
+        if v is None:
+            v = m.group('sq')
+        if v is None:
+            return ''
+        return _unescape_renpy_string(v)
 
     for lang_dir in tl_dir.iterdir():
         if not lang_dir.is_dir():
@@ -2808,6 +2890,10 @@ def parse_translation_files(tl_dir) -> dict:
                         current_id = ident
                         current_lang = None
                         in_strings_block = False
+                        # **先登记**：现代 tl 格式里对话 id 下面只有一句译文
+                        # （没有 `# old`），译文行才补 `translated`。
+                        # 不先登记的话那条线的 `language` 永远缺（实测 KeyError）。
+                        result.setdefault(current_id, {'language': language})
                     continue
 
                 if re_translate_any.match(line):
@@ -2817,7 +2903,8 @@ def parse_translation_files(tl_dir) -> dict:
                     in_strings_block = False
                     continue
 
-                m = re_old.match(line)
+                # 原文：对话块是 `# old "…"`，`strings:` 块是 `old "…"`。
+                m = re_old_comment.match(line) or re_old.match(line)
                 if m:
                     orig = _pick_named(m)
                     if in_strings_block and current_lang:
@@ -2826,21 +2913,42 @@ def parse_translation_files(tl_dir) -> dict:
                         ).hexdigest()[:8]
                         key = f"{current_lang}.strings_{h}"
                         current_id = key
-                        result.setdefault(key, {
-                            'original': orig,
-                            'language': language,
-                        })
+                        entry = result.setdefault(key, {})
                     elif current_id:
-                        result.setdefault(current_id, {
-                            'original': orig,
-                            'language': language,
-                        })
+                        entry = result.setdefault(current_id, {})
+                    else:
+                        entry = None
+                    if entry is not None:
+                        # **逐字段写**，不用 `setdefault(key, {...})`：
+                        # 对话 id 在 `translate` 那一行就登记过了，
+                        # `setdefault` 遇到已存在的键会**整块跳过**，
+                        # `original` 于是永远补不上（实测 KeyError）。
+                        entry['original'] = orig
+                        entry.setdefault('language', language)
                     continue
 
+                if in_strings_block:
+                    m = re_new_strings.match(line)
+                    if m and current_id:
+                        result.setdefault(current_id, {})['translated'] = \
+                            _pick_named(m)
+                        continue
+
                 m = re_new.match(line)
-                if m and current_id:
-                    result.setdefault(current_id, {})['translated'] = \
+                if m and current_id and not in_strings_block:
+                    result.setdefault(
+                        current_id, {'language': language})['translated'] = \
                         _pick_named(m)
+                    continue
+
+                # **现代 tl 格式**：对话 id 下面直接一句裸字符串
+                # （`"你好啊"` 或 `e "你好啊"`）。
+                if current_id and not in_strings_block:
+                    m = re_bare_dialogue.match(line)
+                    if m:
+                        result.setdefault(current_id, {})['translated'] = \
+                            _pick_named(m)
+                        continue
 
     return result
 

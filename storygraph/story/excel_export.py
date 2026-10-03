@@ -21,7 +21,7 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
 
 from storygraph.story.beat_build import hydrate_from_dsl
 from storygraph.story.beat_model import (
@@ -33,7 +33,7 @@ from storygraph.story.beat_model import (
     Beat,
     DROPDOWN_COLUMNS,
     HIDDEN_BEAT_COLUMNS,
-    _assign_identity,
+    assign_identity,
 )
 from storygraph.story.beat_render import make_symbols, stamp_menu_bodies
 from storygraph.story.paths import _guess_project_root
@@ -986,7 +986,7 @@ def _read_beats_from_ws(ws) -> list:
         beat = Beat.from_row(row_dict)
         if not beat.is_empty():
             beats.append(beat)
-    _assign_identity(beats)
+    assign_identity(beats)
     return beats
 
 

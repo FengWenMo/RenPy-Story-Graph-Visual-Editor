@@ -52,12 +52,15 @@ from storygraph.story.beat_model import (  # noqa: F401
     LEGACY_AUDIO_COLUMNS,
     LEGACY_STAGE_COLUMNS,
     MENU_NO_CAPTION,
-    _AUDIO_PSEUDO_REVERSE,    _HEADER_ALIASES,
+    CODE_BLOCK_BODY,
+    CODE_BLOCK_OPEN,
+    _AUDIO_PSEUDO_REVERSE,
+    _HEADER_ALIASES,
     _NATIVE_TAIL_RE,
     _RENPY_STATEMENT_HEADS,
     _SHOW_ARG_KEYWORDS,
     _append_line,
-    _assign_identity,
+    assign_identity,
     _audio_params,
     _beat_content_hash,
     _clause_image,
@@ -75,6 +78,7 @@ from storygraph.story.beat_model import (  # noqa: F401
     _spec_at,
     _spec_image,
     _split_code_cell,
+    _split_code_lines,
     _split_hide_items,
     _split_lines,
     _split_show_items,
@@ -82,12 +86,15 @@ from storygraph.story.beat_model import (  # noqa: F401
     compose_audio_cell,
     compose_audio_text,
     compose_code,
+    compose_code_blocks_cell,
     compose_hide_cell,
     compose_scene_cell,
     compose_show_cell,
     compose_stage,
     compose_stage_extra,
     menu_caption_text,
+    parse_code_blocks_cell,
+    unmask_code_block_markers,
 )
 from storygraph.story.beat_render import (  # noqa: F401
     _audio_ref,
@@ -188,6 +195,88 @@ from storygraph.excel.cells import (  # noqa: F401
 
 # 写单元格的安全封装：唯一实现在 `storygraph.excel.cells`，
 # 本模块顶部已以 `_set_text` / `_append_text_row` 别名导入（见 re-export 区）。
+
+
+#: 门面的**公共面**（风险清单 P2-7）。
+#:
+#: 为什么必须显式写出来：这个模块为了当门面，从 `beat_model` /
+#: `beat_render` 等处 re-export 了 **90+ 个下划线名**。没有 `__all__` 时，
+#: "对外契约"就等于"这个文件恰好 import 了什么"——
+#:
+#:   · `from storygraph.story.script_table import *` 会把 92 个私有 helper
+#:     一起拖出来（实测）；
+#:   · IDE / 文档工具分不出"给你用的"和"实现细节"；
+#:   · 加一个内部 helper 会**无声地**变成公共 API，没人会注意到。
+#:
+#: 私有 re-export **保留**（`beat_build` / `excel_export` 这些同层模块
+#: 靠它拿到共享 helper，是刻意的单一来源），但它们从此**不在公共面上**。
+#: 契约由 `tests/test_facade_surface.py` 守着。
+__all__ = [
+    # —— 数据模型 ——
+    'Beat',
+    'BEAT_FIELDS',
+    'BEAT_HEADERS',
+    'HIDDEN_BEAT_COLUMNS',
+    'DROPDOWN_COLUMNS',
+    'ACTION_COLUMNS',
+    'ACTION_HINTS',
+    'AUDIO_PSEUDO',
+    'COMMON_TRANSITIONS',
+    'LEGACY_AUDIO_COLUMNS',
+    'LEGACY_STAGE_COLUMNS',
+    'KIND_SAY',
+    'KIND_NARRATION',
+    'KIND_MENU',
+    'KIND_MENU_OPTION',
+    'KIND_EXTEND',
+    # —— 表格 ↔ Beat ——
+    'export_beats_to_excel',
+    'import_beats_from_excel',
+    'open_rpy_as_table',
+    'beats_from_statements',
+    'beats_from_parse_result',
+    'registry_from_parse_result',
+    'hydrate_from_dsl',
+    'apply_script_definitions',
+    'find_unregistered_assets',
+    'refresh_candidate_sheets',
+    # —— 渲染 ——
+    'render_beats_to_rpy',
+    'render_beat_to_rpy',
+    'render_menu_block',
+    'render_transform_definitions',
+    'collect_used_transforms',
+    'split_beat_units',
+    'menu_caption_text',
+    # —— 单元格级编码（结构化列 ↔ 文本）——
+    'compose_show_cell',
+    'compose_hide_cell',
+    'compose_scene_cell',
+    'compose_stage',
+    'compose_stage_extra',
+    'compose_code',
+    'compose_code_blocks_cell',
+    'compose_audio_cell',
+    'compose_audio_text',
+    'parse_code_blocks_cell',
+    'unmask_code_block_markers',
+    'CODE_BLOCK_OPEN',
+    'CODE_BLOCK_BODY',
+    'MENU_NO_CAPTION',
+    # —— 生成门禁 ——
+    'generation_guard',
+    'evaluate_generation',
+    'write_generation',
+    'write_beats_to_rpy',
+    'GeneratedArtifact',
+    'GenerationBlocked',
+    'GuardIssue',
+    'planned_output_path',
+    'inside_game_dir',
+    'occupied_labels',
+    'thumb_cache_dir',
+    'make_symbols',
+]
 
 
 

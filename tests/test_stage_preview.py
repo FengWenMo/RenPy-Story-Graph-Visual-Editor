@@ -16,7 +16,7 @@ tests/test_stage_preview.py
 
 import pytest
 
-from storygraph.story.beat_model import Beat, _assign_identity
+from storygraph.story.beat_model import Beat, assign_identity
 from storygraph.story.stage_snapshot import snapshot_rows
 from storygraph.app.stage import (
     CENTER_X, StageFrame, build_frames, frame_summary, transform_x,
@@ -66,7 +66,7 @@ class TestBuildFrames:
             Beat(seq=3, label='t', speaker='e', text='三', hide='ling'),
         ]
         # 真实管线上 LineId 由 beats_from_parse_result / 导入时统一分配
-        _assign_identity(beats)
+        assign_identity(beats)
         rows = snapshot_rows(beats)
         frames = build_frames(beats)
         assert len(frames) == len(rows) == 3
@@ -493,7 +493,7 @@ class TestBuildFramesWithTransformIndex:
     def _beats():
         beats = [Beat(seq=1, label='t', speaker='e', text='一',
                       show='ye happy@f21')]
-        _assign_identity(beats)
+        assign_identity(beats)
         return beats
 
     def test_placement_rides_along(self):

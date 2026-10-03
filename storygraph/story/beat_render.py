@@ -16,11 +16,13 @@ storygraph.story.beat_render
 from __future__ import annotations
 import re
 from typing import Optional
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
 from storygraph.core.statement import is_tight_dollar, strip_marker
 
 from storygraph.story.beat_model import (
     Beat,
+    CODE_BLOCK_BODY,
+    CODE_BLOCK_OPEN,
     KIND_EXTEND,
     KIND_MENU,
     KIND_MENU_OPTION,
@@ -35,6 +37,7 @@ from storygraph.story.beat_model import (
     hide_item_parts,
     show_item_part,
     show_item_parts,
+    unmask_code_block_markers,
 )
 
 
@@ -129,6 +132,12 @@ def render_code_block(text: str, multiline: str = 'auto') -> list:
     lines = _split_lines(text)
     if not lines:
         return []
+    # **块标记优先**（隐藏列 / `.rpy` 解析给的确定结构）：标记在行首，是
+    # "这行属于一个 python 块"的**权威**说法，不必再去猜缩进与括号。
+    marked = [ln for ln in lines
+              if ln[:1] in (CODE_BLOCK_OPEN, CODE_BLOCK_BODY)]
+    if marked:
+        return _render_marked_code_block(lines, multiline)
     block_indent = _python_block_indent(lines, multiline)
     if block_indent is not None:
         # 真块体：块体每一行统一缩进 `base + 4`，**行内原有的缩进保留** ——
@@ -155,8 +164,146 @@ def render_code_block(text: str, multiline: str = 'auto') -> list:
             # 后面 —— 逐行加 `$` 会把它拆成好几条（`$ Call(...)` 直接语法错误）。
             out.append('$ ' + strip_marker(chunk))
         else:
+            # 兜底：补 `$` 当成裸 python 表达式（`love += 1` / `msg_add(1)`）。
+            # 不能一律原样透传 —— 那是**生成语法正确的脚本**所依赖的路径
+            # （实测透传后 13 个测试变红）。真正"认不出来的 Ren'Py 语句"
+            # （`l oh "3"`）由 `_looks_like_renpy_statement` 提前拦住。
             out.append('$ ' + s)
     return out
+
+
+def _indent_block_body(body: list) -> list:
+    """
+    `python:` 块体 → 已缩进的行（块层级按 4 空格重建，续行对齐到括号）。
+
+    块体里有两类"更深"的行，**必须分开处理**（2026-10-05 实测踩过）：
+
+      · **块层级**（`for` / `if` 的体）：它是语义，必须保住 ——
+            for i, digit in enumerate(...):
+                available_positions = [...]      ← 少了这级缩进，
+                if available_positions:          ← Ren'Py 直接
+                    pos = ...                    ← "expected an indented block"
+      · **续行对齐**（括号没闭合）：它是排版，必须归一 ——
+            drag_puzzle(
+                puzzle_path,      ← 对齐到括号即可，照抄单元格里那 12 个
+                rows=2)           ← 空格会叠加块层级 → Ren'Py 当成嵌套块 → 语法错误
+
+    判据是**括号深度**：上一行还有没闭合的括号 → 这一行是续行；否则
+    缩进变深就是真的进了一层块。块层级记成"相对首行的层数 × 4"，
+    与单元格里的排版无关（**不动点**：再往返一次逐字节相同）。
+    """
+    anchor = None
+    for ln in body:
+        if ln.strip():
+            anchor = len(ln) - len(ln.lstrip())
+            break
+    if anchor is None:
+        return [''] * len(body)
+
+    # 块层级 = "比它**浅的缩进档位**有几个"（续行不参与，它归所在语句那一层）。
+    #
+    # 关键是数**档位（distinct 缩进值）**，不是数行数 —— 数行数会把
+    # 同一层的多条语句各算一层，`for` 体里三行就变成第 4 层
+    # （实测：`for` 体内缩进 4 的行被算成 lvl=4 → 输出 20 个空格，
+    #  而 `for` 体的内层又叠到 28 个空格，产物直接语法错误）。
+    levels = []
+    distinct = sorted({len(ln) - len(ln.lstrip())
+                       for ln in body if ln.strip()})
+    open_depth = 0
+    for ln in body:
+        if not ln.strip():
+            levels.append(0)
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        if open_depth > 0:
+            # **续行**（上一行的括号还没闭合）：它不是块层级
+            levels.append(levels[-1] if levels else 0)
+        else:
+            levels.append(sum(1 for d in distinct if d < indent))
+        open_depth += _bracket_delta(ln, '')
+        if open_depth < 0:
+            open_depth = 0
+
+    out = []
+    #: 尚未闭合的开括号所在列
+    opens = []
+    for idx, ln in enumerate(body):
+        if not ln.strip():
+            out.append('')
+            continue
+        text = ln.strip()
+        lvl = levels[idx]
+        prev_level = lvl
+        if opens:
+            base = ' ' * max(4 * (lvl + 1), opens[-1] + 1)
+        else:
+            base = '    ' * (lvl + 1)
+        out.append(base + text)
+        col = len(base)
+        for ch in text:
+            if ch in '([{':
+                opens.append(col)
+            elif ch in ')]}':
+                if opens:
+                    opens.pop()
+            col += 1
+    return out
+
+
+def _render_marked_code_block(lines: list, multiline: str) -> list:
+    """
+    按**块标记**渲染：标记说哪些行属于同一个 `python:` 块。
+
+    这是"结构由数据说话"的那条路（块边界来自隐藏列 `CodeBlocks` /
+    `.rpy` 解析），不依赖缩进推断 —— 一个格子里混着 `$ a` / `$ b` /
+    `python: c` 时，只有它能准确还原。
+
+    块**外**的行**按原文原样透传**，不补 `$` —— 走到这里说明
+    `compose_code` 已经给需要 `$` 的行留了 `$`（或行首标记）；
+    再不问青红皂白补一个 `$`，一个手写错句（实测 `script.rpy` 的
+    `l oh "3"`，`l` 后面多打了个 `oh`）就会变成 `$ l oh "3"` ——
+    **产物从"Ren'Py 报未知语句"变成"Python 语法错误"**，更难查。
+    """
+    out = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        marker = line[:1]
+        if marker == CODE_BLOCK_OPEN:
+            j = i + 1
+            while j < n and lines[j][:1] == CODE_BLOCK_BODY:
+                j += 1
+            body = [unmask_code_block_markers(ln) for ln in lines[i:j]]
+            out.append('python:')
+            out.extend(_indent_block_body(body))
+            i = j
+            continue
+        if marker == CODE_BLOCK_BODY:
+            # 只有块体行而没有块头：数据不一致，按普通行处理（不吞）
+            i += 1
+            continue
+        s = unmask_code_block_markers(line).strip()
+        if not s:
+            i += 1
+            continue
+        tight = is_tight_dollar(s)
+        if tight:
+            out.append('$' + strip_marker(s).strip())
+        elif s.startswith('$') or _looks_like_renpy_statement(s):
+            out.append(strip_marker(line))
+        else:
+            # 兜底：补 `$` 当成裸 python 表达式 —— 走到这里说明
+            # `_split_code_cell` 把它判成了 code（两处判据同源）。
+            # 不补的话 `$ a = 1` 会退化成裸 `a = 1`（实测往返丢 3 条）。
+            #
+            # 真正"认不出来的 Ren'Py 语句"（`l oh "3"`）由
+            # `_looks_like_renpy_statement` 的**台词形态**提前拦住，
+            # 不会掉进这里。
+            out.append('$ ' + s)
+        i += 1
+    return out
+
 
 
 def _python_block_indent(lines: list, multiline: str):
@@ -627,6 +774,16 @@ def _take_menu_run(beats: list, start: int) -> tuple:
         "剧情继续"            ← 块外，也**无条件**
 
     两者的 `condition` 都是空串 —— 任何"条件比对"都会把块外那句吞进菜单。
+
+    **为什么还要接住"掉队的选项拍"**（2026-10-05，P1-2 实测）：
+    分组是**重建**的（`_menu_member` 存不进 Excel），所以策划在 Excel 里
+    往两个选项之间插一拍、或给某拍清掉条件时，`_in_menu_body` 会在那一拍上
+    判 False、组就此断开，**后面的选项拍全部掉出菜单** —— 产物里
+    `"选项B"` 变成一句普通旁白、它的块体成了无条件执行的 `if True:`。
+
+    所以组**只能收在"下一个带选项/成员标记的拍之前"**：一张选项拍（或
+    `_menu_member=True` 的拍）跟在后面时，中间那张认不出归属的拍照收不误，
+    菜单结构不会被一次误判拆散。
     """
     run = [beats[start]]
     #: 当前块体**属于**的选项拍在 `run` 里的下标（None = 还没出现选项拍）
@@ -645,11 +802,35 @@ def _take_menu_run(beats: list, start: int) -> tuple:
             i += 1
             continue
         if not _in_menu_body(b, run, cur_idx):
-            break
+            # 认不出归属 —— 但后面**还有**选项/成员拍时不能就此收尾，
+            # 否则那半截菜单会被散成一句句普通台词（静默改剧情）。
+            if not _menu_looks_unfinished(beats, i + 1):
+                break
         run.append(b)
         cur_body += 1
         i += 1
     return run, i
+
+
+
+def _menu_looks_unfinished(beats: list, start: int) -> bool:
+    """
+    从 `start` 往后扫，**在遇到菜单块外的拍之前**还有没有选项/成员拍？
+
+    用来救"中间插了一拍、后面接着还是这个菜单"的畸形序列。
+    一遇到明确属于块外的拍（`_menu_member is False`）就停 —— 那才是菜单
+    真的结束了（`menu: …` 之后那句块外台词正是这个形态）。
+    """
+    for b in beats[start:]:
+        if b.kind == KIND_MENU:
+            return False                 # 新菜单开始，本菜单到此为止
+        if b.kind == KIND_MENU_OPTION:
+            return True
+        if getattr(b, '_menu_member', None) is True:
+            return True
+        if getattr(b, '_menu_member', None) is False:
+            return False                 # 明确在菜单块外
+    return False
 
 
 
@@ -720,10 +901,13 @@ def stamp_menu_bodies(beats: list) -> int:
     for kind, unit in split_beat_units(beats):
         if kind != 'menu':
             continue
-        for opt, body in _menu_segments(unit):
+        for opt, body, _foreign in _menu_segments(unit):
             if opt is None:
                 continue
-            for beat in body:
+            # 只补**能确定属于本选项**的拍：认不出归属的（`_foreign`）
+            # 补成 `True` 会让它下一轮被误判成"块体的一员"，
+            # 那句显式警告就消失了（见 `_is_menu_foreign`）。
+            for _pos, beat, _why in body:
                 if not (beat.condition or '').strip():
                     beat.condition = TRUE_CONDITION
                     stamped += 1
@@ -775,21 +959,57 @@ def _expected_body_condition(option, menu_condition) -> str:
 
 def _menu_segments(run: list) -> list:
     """
-    菜单组 → `[(选项拍 or None, 选项体的拍列表), ...]`。
+    菜单组 → `[(选项拍 or None, 选项体的拍列表, 认不出归属的拍), ...]`。
 
     按 `menu_option` 切段：一张选项拍之后的拍都归它（直到下一张选项拍）。
+
+    **认不出归属的拍**（见 `_is_menu_foreign`）单独记在第三位：渲染时给它
+    加一句显式警告，而不是悄悄塞进当前选项体（那会让它变成"只有选中这个
+    选项才播"的静默剧情错误）。
     """
+    menu_cond = (run[0].condition or '').strip() if run else ''
     segments = []
-    for b in run[1:]:
+    for pos, b in enumerate(run[1:]):
         if b.kind == KIND_MENU_OPTION:
-            segments.append((b, []))
+            segments.append([b, [], []])
         elif segments:
-            segments[-1][1].append(b)
+            why = _is_menu_foreign(segments[-1][0], b, menu_cond)
+            if why:
+                segments[-1][2].append((pos, b, why))
+            else:
+                segments[-1][1].append((pos, b, ''))
         else:
             # 理论上到不了这里（`_take_menu_run` 从 menu 拍起走），
             # 但真出现时**不能丢**：当成菜单里的杂项拍放在块首。
-            segments.append((None, [b]))
+            segments.append([None, [(pos, b, '')], []])
     return segments
+
+
+
+def _is_menu_foreign(option, beat, menu_cond: str) -> str:
+    """
+    这一拍**能确定**它属于 `option` 的块体吗？不能就返回原因（供写警告）。
+
+    能确定的两条（与 `_in_menu_body` 同一套判据）：
+
+      · `_menu_member is True` —— 解析器标的真结构位（`.rpy → .rpy` 这条
+        路，产出必须逐字不变，所以**不能**加警告）；
+      · 条件正好等于"本选项 + 外层菜单"的累积条件 —— Excel 往返那条路，
+        `stamp_menu_bodies` 把无条件块体补成了 `True`。
+
+    都不成立时这拍很可能是策划**手工插进菜单组中间**的（P1-2）：
+    它不属于任何选项，但 Ren'Py 的 `menu:` 里除选项外没有合法位置，
+    只能收在某个选项体里放。此时**必须让它可见**。
+    """
+    if getattr(beat, '_menu_member', None) is True:
+        return ''
+    if option is None:
+        return ''
+    got = (beat.condition or '').strip()
+    if got and got in (_expected_body_condition(option, menu_cond),
+                       (option.condition or '').strip()):
+        return ''
+    return '这一拍不确定属于哪个选项'
 
 
 
@@ -820,10 +1040,12 @@ def _render_menu_segments(run: list, segments: list, indent: str,
     head += ':'
     emit(head, '菜单', caption)
 
-    for opt, body in segments:
+    for seg in segments:
+        opt, body, foreign = (seg + [[], []])[:3] if len(seg) < 3 else seg
         if opt is None:
             # 菜单块里认不出归属的拍（认不出就当普通拍输出，不吞）
-            lines.extend(_render_unit_lines(body, opt_indent, audit, trace))
+            lines.extend(_render_unit_lines(
+                [b for _p, b, _w in body], opt_indent, audit, trace))
             continue
         own_cond = (opt.condition or '').strip()
         menu_cond = (run[0].condition or '').strip()
@@ -840,17 +1062,26 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         #   · 正好等于"本选项 + 外层菜单"的累积条件 → 那只是解析器的记账，
         #     块体不该再多一层 `if`，把它**剥掉**再渲染；
         #   · 不等于（真的嵌了一层 `if`）→ 保留，让渲染器出嵌套 `if`。
+        #
+        # 认不出归属的拍（策划插进菜单组中间的）**按原位置**插回来，
+        # 前面加一句显式警告：Ren'Py 的 `menu:` 里除选项外没有合法位置，
+        # 只能收进某个选项体，静默收进去就成了"只有选中才播"的剧情错误。
         expected = _expected_body_condition(own_cond, menu_cond)
         stripped, nested = [], []
-        for beat in body:
+        for _pos, beat, why in sorted(list(body) + list(foreign)):
+            if why:
+                nested.append((_with_condition(beat, ''), why))
+                continue
             got = (beat.condition or '').strip()
             if got and got == expected:
                 stripped.append(_with_condition(beat, ''))
             else:
-                nested.append(beat)
+                nested.append((beat, ''))
         body_lines = _render_unit_lines(stripped, opt_indent + '    ',
                                        audit, trace)
-        for beat in nested:
+        for beat, why in nested:
+            if why:
+                body_lines.append(opt_indent + '    ' + f'# TODO: {why}')
             body_lines.extend(opt_indent + '    ' + ln
                               for ln in render_beat_to_rpy(
                                   beat, indent='', audit=audit, trace=trace)

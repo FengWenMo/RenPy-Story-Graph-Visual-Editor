@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from storygraph.story.beat_model import BEAT_FIELDS, Beat, _assign_identity
+from storygraph.story.beat_model import BEAT_FIELDS, Beat, assign_identity
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
@@ -204,7 +204,7 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
     beats = [beat_from_payload(json.loads(r['payload'])) for r in rows]
     for b in beats:
         b.line_id = b.line_id or ''
-    _assign_identity(beats)
+    assign_identity(beats)
 
     out = Path(sheet_path)
     export_beats_to_excel(beats, out, registry=registry)
@@ -270,7 +270,7 @@ def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
     返回 {'added','updated','unchanged','conflicts','rejected'}
     """
     beats = import_beats_from_excel(sheet_path)
-    _assign_identity(beats)
+    assign_identity(beats)
     base = read_collab_sheet(sheet_path)
 
     result = {'added': [], 'updated': [], 'unchanged': [], 'conflicts': [],
@@ -502,5 +502,5 @@ def export_ir_from_db(db_path):
         ).fetchall()
         assets = conn.execute('SELECT * FROM assets').fetchall()
     beats = [beat_from_payload(json.loads(r['payload'])) for r in rows]
-    _assign_identity(beats)
+    assign_identity(beats)
     return beats, [dict(a) for a in assets]

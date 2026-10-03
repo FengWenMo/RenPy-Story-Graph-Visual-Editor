@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from storygraph.app import notify
+from storygraph.core import notify
 
 
 def open_with_system_default(path) -> bool:

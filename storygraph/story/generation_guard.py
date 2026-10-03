@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from storygraph.core.safeguard import swallow
 from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.paths import (
     _guess_project_root,
@@ -401,14 +402,41 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         if blocking and review_on_block:
             review = out_path.with_suffix('.blocked.rpy')
             review.write_text(text, encoding='utf-8')
+            _publish_blocked(out_path, blocking, review)
             return GeneratedArtifact(out_path, review, False, issues)
         if blocking:
+            _publish_blocked(out_path, blocking, None)
             return GeneratedArtifact(out_path, None, False, issues)
         out_path.write_text(text, encoding='utf-8')
         return GeneratedArtifact(out_path, None, True, issues)
     except OSError:
         # 写不出去（权限/占用）不该把门禁结论一起吞掉
         return GeneratedArtifact(out_path, None, False, issues)
+
+
+
+def _publish_blocked(out_path, blocking, review) -> None:
+    """
+    **把"产物没写出去"这件事说出去**（P2-9）。
+
+    为什么必须在这里发：门禁拦下时目标文件**没有**被写出去，而调用方
+    （`build` / UI 导出）拿到的只是一个 `written=False` —— 界面上很可能
+    只显示"导出完成"，用户以为产物在，实际 `game/` 里什么都没有。
+    CI 靠退出码能发现，人在界面上发现不了。
+
+    无头环境（CLI / 单测）默认没有订阅者，发通知是**零副作用**的
+    （见 `core.notify`：订阅者列表默认空），所以只会在真有人看时出现。
+    """
+    from storygraph.core import notify as _notify
+    try:
+        first = blocking[0].format() if blocking else ''
+        extra = f'（另有 {len(blocking) - 1} 条）' if len(blocking) > 1 else ''
+        tail = f'已写出待对照的副本：{review.name}' if review else '产物未写出。'
+        _notify.error(
+            f'生成被拦下，没有写入 {Path(out_path).name}：{first}{extra}。{tail}',
+            title='生成被拦下')
+    except Exception as e:                  # noqa: BLE001 - 通知失败绝不拖垮导出
+        swallow('generation_guard._publish_blocked', e)
 
 
 

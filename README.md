@@ -155,11 +155,14 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
    路径**，改写 `<stem>.blocked.rpy`。所有落盘路径都必须过它。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
-7. **`BEAT_FIELDS` 是列顺序唯一真源**（23 列，含隐藏的 `StageOrder` / `OpOrder`），
+7. **`BEAT_FIELDS` 是列顺序唯一真源**（24 列 = 21 列编辑面 + 3 列隐藏元数据），
    `Beat.to_row/from_row` 必须逐列对应。`Condition` 是**语义列**（不是排版列）：
    它 2026-10-05 从"已被收敛掉的旧列"里**加回来**了 —— 没有它，
    `Beat.condition` 在进出 Excel 时没有任何出口，所有 `if` / 菜单条件会在
    往返里被静默抹平（实测真实项目一条章节 7 条条件 → 0 条）。
+   隐藏列放**最后**、整列收起（用户 2026-10-05：「新增的列放远点，甚至可默认
+   隐藏，因为事实上策划和文案不需要」）：`StageOrder` / `OpOrder` /
+   `CodeBlocks`。隐藏 ≠ 没有这一列 —— 数据照旧读写，只是不占策划的视线。
 8. **改中文 `.py` 只能用编辑器工具或 Python 脚本**（`encoding='utf-8'`）。
    PowerShell 的 `Set-Content` 会按 GBK 往返，把整个文件写坏且**不可逆**。
 9. **依赖方向单向**：`core` ← `parsing` / `excel` ← `assets` / `story` ← `pipeline`
@@ -725,10 +728,66 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
         整个文件因此退化成 `label start: pass`，而这张拍在往返里必然对不上。
 
     **量化**（`tools/audit_roundtrip.py`，真实项目 41 文件 / 3800 语句）：
-    丢失从 **76 条（2.0%）降到 11 条（0.3%）**，`menu` / `menu_option` /
-    `hide` / `scene` / `play` / `comment` 全部 **0 丢失**。剩下的 11 条是
-    "一个 `python:` 格里混着多条语句、块边界在表里表达不了"这一类，
-    逐条在审计输出里带文件名与指纹，可继续收敛。
+    丢失从 **76 条（2.0%）降到 6 条（0.16%）**，`menu` / `menu_option` /
+    `hide` / `scene` / `play` / `comment` / `extend` / `jump` / `return` /
+    `show` 全部 **0 丢失**；凭空新增也从 99 条降到 35 条
+    （新增主要是"一个 `python:` 块被拆成几条 `$`"这类**语义等价**的写法差异）。
+
+    审计还有一条独立口径：**产物里的 Python 语法是否正确**
+    （`_unparsable_python` 用 `ast.parse` 逐段过）。这条口径是必要的——
+    实测有一个"丢失 0 / 新增 0"却让产物跑不起来的缺陷
+    （`at Transform(xysize=(1920, 1080))` 的逗号被吃掉）。
+
+    另见 `tools/audit_branch_scope.py`：**分支内舞台指令**是否留在自己的
+    分支里（这类错误产物能跑、不报错，但演出已经错了）。
+66. **`python:` 块的边界由一个隐藏列说了算**（用户 2026-10-05：「新增的列
+    放远点，甚至可默认隐藏，因为事实上策划和文案不需要」）。
+
+    「代码」列一个格子装的是**多行文本**，而 `python:` 块的边界在纯文本里
+    **表达不出来**（`python:` 关键字在单元格里已经被剥掉）：
+
+        代码格内容                     块边界是哪几行？
+        $ a = 1                        ← 不是块
+        # 注释                          ← ？注释后面就是块
+        for i in range(2):             ← 块从这里开始（第 3 行）
+            a += i                     ← 块体
+        python:（第二个块）             ← 又一个块（第 5 行）
+        for j in range(2):
+            a -= j
+
+    只按缩进推断时，"两个块的首行都在第 0 列"完全分不出来 —— 猜错的代价是
+    **静默改语义**（两块并成一个，`for` 的体跑到另一个块的变量上；
+    `mini_game1.rpy` 实测一个块拆出 53 条 `$`，`for` 里的 `if` 变成顺序执行）。
+
+    落地方案分两半：
+
+      · **单元格里打标记**：`compose_code` 给每个块体行加行首标记
+        （`CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`，两个私用区字符）。
+        它是**权威**说法，读回来（`_split_code_cell`）不再猜缩进；
+        写进 Excel 前由 `compose_code_cell` 剥掉 —— 单元格里只留纯文本。
+      · **隐藏列 `CodeBlocks`**：块在格子里的**行区间**（`1-11 13-17`，
+        1-based 闭区间，**人能读懂**）。标记丢了（老表、手工复制行、
+        有人清空那一列）时由它兜底（`from_row` 把区间摊成行号集合交给
+        `_split_code_cell`，`for i in range(2):` 这种"一行两解"的写法就
+        不再靠猜）；再没有就退回"按缩进推断"——
+
+    三层兜底的顺序是刻意的：**最坏是块结构没保住，而不是产物改坏**。
+    `Beat.code_blocks` 是这份数据的载体，不进 `ContentHash`
+    （它描述排版，不描述内容）。
+
+    分类时**成组判断、逐行输出**：`for i in range(2):` 单独一行时"是
+    Ren'Py 还是 Python"无从判断，但它的**下一行更深**就说明它是个块头；
+    而 `ordered` 必须逐物理行记（`_ordered_code_lines` 是按行去
+    `raw`/`code` 两个池子里取用的）。两条都要满足，缺一个都会退回
+    "raw 在前 code 在后"的兜底顺序。
+
+    **还剩 6 条**（审计输出里带文件名与指纹，可继续逐条收敛）：
+    3 条是 `python:` 块内**续行对齐空格**被规整（语义不变，只是排版）；
+    2 条 `say` 分别是前导空格与引号形态；1 条 `code_line` 是
+    `script.rpy` 第 93 行的**手写错句** `l oh "3"`（`l` 后面多打了个
+    `oh`）—— 原文被 Ren'Py 当未知语句，产物把它放进 `$` 于是成了
+    Python 语法错误。要彻底解决得让分类器认出"这像台词"，但那会让另外
+    2 条真实丢失回来，暂不做。
 
 ## 常见改动落点
 
@@ -737,7 +796,8 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 给剧本表加一列 | `story/beat_model.py` 的 `BEAT_FIELDS` + `Beat.to_row/from_row` |
 | 改导出的生成代码 | `story/beat_render.py`（`render_beat_to_rpy`） |
 | 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |
-| 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` + `story/beat_render.render_code_block` / `_python_block_indent` / `_group_code_statements`（见不变量 64） |
+| 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` / `mark_code_blocks` + `story/beat_render.render_code_block` / `_render_marked_code_block` / `_python_block_indent`（见不变量 64/66） |
+| 改**隐藏列**（`StageOrder` / `OpOrder` / `CodeBlocks`） | `BEAT_FIELDS` 尾部 + `HIDDEN_BEAT_COLUMNS` + `Beat.to_row/from_row`（见不变量 66） |
 | 改**`call … from` / `show expression` / 空台词**的处理 | `story/beat_build._call_from_suffix` / `story/beat_model._parse_show_expression` / `parsing/renpy_parser.add_stmt`（见不变量 65） |
 | 改 Excel 长什么样 | `story/excel_export.py` |
 | 加一条门禁规则 | `story/generation_guard.py` |

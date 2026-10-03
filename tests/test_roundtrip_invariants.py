@@ -48,6 +48,11 @@ from storygraph.story.beat_build import beats_from_statements
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 from storygraph.story.script_table import render_beats_to_rpy
+from storygraph.story.beat_model import (
+    KIND_MENU_OPTION,
+    KIND_NARRATION,
+    Beat,
+)
 
 
 # ------------------------------------------------------------------
@@ -147,6 +152,161 @@ def assert_same_multiset(original, produced, props=None):
 # ------------------------------------------------------------------
 #  用例
 # ------------------------------------------------------------------
+
+class TestMenuGroupingUnderEdits:
+    """
+    P1-2：**菜单分组是"重建"而不是"保持"** —— 策划在 Excel 里改一拍，
+    分组会不会错乱？
+
+    `split_beat_units` / `_take_menu_run` 靠「拍的顺序 + 条件（写表时补的
+    `True`）」重建 `menu:` 块，而 `_menu_member`（解析器标的真结构位）
+    **存不进 Excel**。所以真正要守的是"用 Excel 的拍序列还能不能还原"。
+
+    判据（这一族错误都是**静默**的，产物能跑、不报错）：
+      · **少吞一拍** → 分支体掉到菜单外，**无条件执行**；
+      · **多吞一拍** → 块外那句被塞进最后一个选项，**只有选中它才播**。
+    """
+
+    #: 一条带块体的菜单 + 块外一句（最容易被吞/被漏的形状）
+    SOURCE = (
+        'label a:\n'
+        '    "开场"\n'
+        '    menu:\n'
+        '        "选项A":\n'
+        '            "A 的内容"\n'
+        '        "选项B":\n'
+        '            "B 的内容"\n'
+        '    "菜单之后"\n'
+        '    return\n'
+    )
+
+    def _render_from_beats(self, beats):
+        return render_beats_to_rpy(beats, label_name='a')
+
+    def test_baseline_menu_blocks_are_intact(self, tmp_path):
+        """先确认基线：两个选项各自成块，块外那句在菜单外。"""
+        _o, _p, props = roundtrip(self.SOURCE, tmp_path, 'mg_base')
+        rpy = props['rpy']
+        assert rpy.count('menu:') == 1, rpy
+        assert '"选项A":' in rpy and '"选项B":' in rpy, rpy
+        # 两句内容都要**缩进在选项体里**
+        for text in ('"A 的内容"', '"B 的内容"'):
+            line = next(ln for ln in rpy.splitlines() if text in ln)
+            assert line.startswith(' ' * 12), rpy
+        # 菜单之后那句必须在 menu 块**外**（缩进回到 label 那一级）
+        after = next(ln for ln in rpy.splitlines() if '"菜单之后"' in ln)
+        assert after.startswith(' ' * 4), rpy
+
+    def test_inserting_a_beat_between_options_keeps_the_menu(self, tmp_path):
+        """
+        策划在**两个选项之间**插一拍（最典型的"改剧情"动作）。
+
+        插进来的拍不带选项条件（条件是空串），所以它**不属于**任何选项体：
+        正确的还原是"它把菜单切成两半"或"它进不了菜单"，但**绝不能**
+        把它当成某个选项的块体吞掉（那是"只有选中才播"的静默错误）。
+
+        实测（2026-10-05）修复前：那一拍让 `_take_menu_run` 当场收尾，
+        **后面的选项全部掉出菜单** —— 产物里 `"选项B"` 变成一句普通旁白、
+        它的块体成了无条件执行的 `if True:`。整块菜单被一拍拆散。
+
+        修复后：菜单结构完整（组只收在"下一个选项/成员拍之前"），
+        那一拍按**原位置**收进它前面的选项体，并加一句 `# TODO` 让它可见
+        —— Ren'Py 的 `menu:` 里除选项外没有合法位置，只能这么放，
+        但**不能悄悄放**。
+        """
+        _o, _p, props = roundtrip(self.SOURCE, tmp_path, 'mg_insert')
+        beats = list(props['back'])
+        # 找到第一张选项拍，在它**后面**插一句旁白（模拟"选项A 之后加一句"）
+        idx = next(i for i, b in enumerate(beats)
+                   if b.kind == KIND_MENU_OPTION)
+        beats.insert(idx + 1, Beat(label='a', kind=KIND_NARRATION,
+                                   text='插进来的旁白'))
+        rpy = self._render_from_beats(beats)
+        # 结构不许散：还是一个菜单、两个选项
+        assert rpy.count('menu:') == 1, rpy
+        assert '"选项A":' in rpy and '"选项B":' in rpy, rpy
+        # 插进来的旁白按原位置排在选项A 体内，并且**看得见警告**
+        assert '插进来的旁白' in rpy, rpy
+        assert '# TODO' in rpy, rpy
+        # 它的块体不能再被降级成无条件执行的裸台词
+        assert 'if True:\n    "A 的内容"' not in rpy, rpy
+        # 菜单之后那句仍在菜单外
+        after = next(ln for ln in rpy.splitlines() if '"菜单之后"' in ln)
+        assert after.startswith(' ' * 4), rpy
+
+    def test_appending_a_beat_after_the_menu_keeps_it_outside(self, tmp_path):
+        """
+        菜单**之后**再加一句 —— 它必须留在菜单外（不能被最后一个选项吞掉）。
+
+        这是"多吞一拍"的方向，也是最危险的方向：被吞之后那句话
+        **只有选中最后一个选项才会播**。
+        """
+        _o, _p, props = roundtrip(self.SOURCE, tmp_path, 'mg_append')
+        beats = list(props['back'])
+        beats.append(Beat(label='a', kind=KIND_NARRATION, text='新加的结尾'))
+        rpy = self._render_from_beats(beats)
+        line = next(ln for ln in rpy.splitlines() if '新加的结尾' in ln)
+        assert line.startswith(' ' * 4), (
+            f'菜单之后新加的拍被吞进选项体了：{line!r}\n{rpy}')
+
+    def test_reordering_options_keeps_both_blocks(self, tmp_path):
+        """策划把两个选项**对调**：两个块体都要跟着自己的选项走。"""
+        _o, _p, props = roundtrip(self.SOURCE, tmp_path, 'mg_swap')
+        beats = list(props['back'])
+        opt_idx = [i for i, b in enumerate(beats)
+                   if b.kind == KIND_MENU_OPTION]
+        assert len(opt_idx) == 2, [b.kind for b in beats]
+        i, j = opt_idx
+        # 交换两张选项拍（块体不动）—— 归一化之后块体应当各跟各的选项
+        beats[i], beats[j] = beats[j], beats[i]
+        rpy = self._render_from_beats(beats)
+        assert rpy.count('menu:') == 1, rpy
+        a = next(ln for ln in rpy.splitlines() if 'A 的内容' in ln)
+        b = next(ln for ln in rpy.splitlines() if 'B 的内容' in ln)
+        assert a.startswith(' ' * 12) and b.startswith(' ' * 12), rpy
+
+    def test_deleting_an_option_keeps_the_rest(self, tmp_path):
+        """删掉一个选项及其块体：另一个选项必须还在菜单里。"""
+        _o, _p, props = roundtrip(self.SOURCE, tmp_path, 'mg_del')
+        beats = list(props['back'])
+        idx = next(i for i, b in enumerate(beats)
+                   if b.kind == KIND_MENU_OPTION)
+        # 删掉选项A 以及紧跟的块体
+        end = idx + 1
+        while end < len(beats) and beats[end].kind != KIND_MENU_OPTION:
+            end += 1
+        del beats[idx:end]
+        rpy = self._render_from_beats(beats)
+        assert rpy.count('menu:') == 1, rpy
+        assert '"选项B":' in rpy, rpy
+        assert '"选项A":' not in rpy, rpy
+        b = next(ln for ln in rpy.splitlines() if 'B 的内容' in ln)
+        assert b.startswith(' ' * 12), rpy
+        after = next(ln for ln in rpy.splitlines() if '菜单之后' in ln)
+        assert after.startswith(' ' * 4), rpy
+
+    def test_menu_after_menu_stays_two_menus(self, tmp_path):
+        """连续两个菜单**不许**并成一块（并了就是两个菜单的文字混在一起）。"""
+        script = (
+            'label a:\n'
+            '    menu:\n'
+            '        "第一个 A":\n'
+            '            "A 体"\n'
+            '        "第一个 B":\n'
+            '            "B 体"\n'
+            '    menu:\n'
+            '        "第二个 A":\n'
+            '            "C 体"\n'
+            '    return\n'
+        )
+        _o, _p, props = roundtrip(script, tmp_path, 'mg_two')
+        rpy = props['rpy']
+        assert rpy.count('menu:') == 2, rpy
+        # 第二个菜单的第一个选项不能被接到第一个菜单里
+        for text in ('"A 体"', '"B 体"', '"C 体"'):
+            line = next(ln for ln in rpy.splitlines() if text in ln)
+            assert line.startswith(' ' * 12), rpy
+
 
 class TestMenuRoundtrip:
     """
@@ -260,6 +420,126 @@ class TestMenuRoundtrip:
         out = tmp_path / 'menu_pass_out.rpy'
         parser.parse(out)
         assert not parser.errors, parser.errors
+
+
+class TestBranchScopedStage:
+    """
+    P1-1：**分支内的舞台指令必须留在自己的分支里**。
+
+    这是评估报告之后那份清单里"静默改演出"的第二例，根因与 menu 一模一样：
+    扁平拍装不下嵌套结构。
+
+    实测样本（`pomodorro/script_pomo.rpy`）：
+
+        if pomoplace == "beach":
+            show bgocean with dissolve
+        elif pomoplace == "cafe":
+            show bgcafe with dissolve
+        elif pomoplace == "library":
+            show bglibrary with dissolve
+        show qing base at h11
+
+    解析器**明明给每条 `show` 都带了条件**（`pomoplace == "beach"` /
+    `(pomoplace == "cafe") and not (…)` / `(pomoplace == "library") and not (…)`），
+    但 `beats_from_statements` 把这三条舞台指令**吸进同一张拍**，而一张拍
+    只有一个 `condition`。结果产物变成三个背景依次无条件 show，
+    最后一个永远生效 —— **玩家永远看到 library**，且不报任何错。
+    """
+
+    SCRIPT = (
+        'label pomodoro:\n'
+        '    hide homo\n'
+        '    if pomoplace == "beach":\n'
+        '        show bgocean with dissolve\n'
+        '    elif pomoplace == "cafe":\n'
+        '        show bgcafe with dissolve\n'
+        '    elif pomoplace == "library":\n'
+        '        show bglibrary with dissolve\n'
+        '    show qing base at h11\n'
+        '    return\n'
+    )
+
+    def test_each_show_keeps_its_own_condition(self, tmp_path):
+        _original, _produced, props = roundtrip(self.SCRIPT, tmp_path,
+                                                'branchstage')
+        rpy = props['rpy']
+        # 三条 show 必须各自被 `if` 包住 —— 不能无条件执行
+        for img in ('bgocean', 'bgcafe', 'bglibrary'):
+            assert f'show {img}' in rpy, rpy
+            guarded = any(
+                ln.strip().startswith('if ') and img in later
+                for ln, later in zip(
+                    rpy.splitlines(),
+                    rpy.splitlines()[1:] + [''])
+            )
+            assert guarded, f'`show {img}` 没有被 if 包住：\n{rpy}'
+        # 条件本身必须还在（`pomoplace` 至少出现 3 次）
+        assert rpy.count('pomoplace') >= 3, rpy
+        # 块外那条 `show qing base` 不许被套上任何分支条件
+        lines = rpy.splitlines()
+        idx = next(i for i, ln in enumerate(lines) if 'show qing' in ln)
+        assert not lines[idx - 1].strip().startswith('if '), rpy
+
+    def test_branch_stage_roundtrips_through_excel(self, tmp_path):
+        """同样的事必须活过 Excel 一圈（条件列 + 分组）。"""
+        original, produced, props = roundtrip(self.SCRIPT, tmp_path,
+                                              'branchstage_x')
+        assert_same_multiset(original, produced, props)
+        conds = [b.condition for b in props['back'] if b.condition]
+        assert len(conds) >= 3, conds
+
+    def test_produced_script_parses(self, tmp_path):
+        _original, _produced, props = roundtrip(self.SCRIPT, tmp_path,
+                                                'branchstage_p')
+        out = tmp_path / 'branchstage_p_out.rpy'
+        parser = RenPyParser()
+        parser.parse(out)
+        assert not parser.errors, parser.errors
+
+    def test_block_stage_not_swallowed_by_next_branch(self, tmp_path):
+        """
+        **块外的舞台指令不许被后一个分支的台词吸进去**。
+
+        实测 `script_pomo.rpy` 第 194 行：
+
+            193:        show bglibrary with dissolve     ← elif 分支里
+            194:    show qing base at h11                 ← **块外**（无条件）
+            196:    if breakline == 1:
+            197:        q "时间到了……"                    ← 条件 breakline == 1
+
+        修 P1-1 之前，第 194 行的舞台指令和第 197 行的台词被吸进**同一张拍**，
+        而那张拍的条件是 `breakline == 1` —— 于是 `show qing base`
+        跟着台词一起被 `if breakline == 1:` 包住：只有 `breakline == 1`
+        时立绘才出现。原文里它**无条件执行**。
+        """
+        script = (
+            'label a:\n'
+            '    show qing base at h11\n'
+            '    if breakline == 1:\n'
+            '        q "一"\n'
+            '    return\n'
+        )
+        _original, _produced, props = roundtrip(script, tmp_path, 'swallow')
+        lines = props['rpy'].splitlines()
+        idx = next(i for i, ln in enumerate(lines) if 'show qing' in ln)
+        assert not lines[idx - 1].strip().startswith('if '), props['rpy']
+        assert lines[idx - 1].strip() != 'if breakline == 1:', props['rpy']
+
+    def test_stage_split_from_say_keeps_order(self, tmp_path):
+        """拆开之后，舞台指令仍然在台词**之前**（顺序不许乱）。"""
+        script = (
+            'label a:\n'
+            '    show qing base at h11\n'
+            '    if breakline == 1:\n'
+            '        q "一"\n'
+            '    return\n'
+        )
+        original, produced, props = roundtrip(script, tmp_path, 'order')
+        assert_same_multiset(original, produced, props)
+        lines = props['rpy'].splitlines()
+        show_i = next(i for i, ln in enumerate(lines) if 'show qing' in ln)
+        say_i = next(i for i, ln in enumerate(lines) if 'q "一"' in ln)
+        assert show_i < say_i, props['rpy']
 
 
 class TestConditionRoundtrip:
@@ -405,6 +685,89 @@ class TestStageRoundtrip:
                and ln.strip() != 'return']
         assert seq == ['$ msg_add("hello")', 'show screen msg', 'pause',
                        'hide screen msg', '$ msg_add("world")'], seq
+
+
+class TestCustomTransformRoundtrip:
+    """
+    P2-4：**自定义 transform 的链路到底是通的吗**。
+
+    清单（`docs/问题清单与优化路线_2026-10-03.md` 第一批第 3 项）问的是这个。
+    复验结论：**通，但不是走 `beat.transform`** ——
+
+      · 每个立绘自己的变换（`show eileen happy at leftish`）走 `beat.at`，
+        编码成 `立绘` 列的 `eileen happy@leftish`，往返完整；
+      · 背景自己的变换（`scene bg room at bgfit`）走 `beat.scene_at`；
+      · 整拍的转场（`with Dissolve(0.5)`）走 `beat.with_`。
+
+    `beat.transform` 是**旧模型的残留**：它只在渲染时被读
+    （`with <transform>`），解析与 Excel 回导**都不写它**，所以真实项目
+    2013 拍里有值 0 次。这几条测试把"真正在用的那条路"钉住。
+    """
+
+    def test_per_sprite_custom_transform_survives(self, tmp_path):
+        script = ('label a:\n'
+                  '    show eileen happy at leftish\n'
+                  '    e "一句"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'tf_sprite')
+        assert_same_multiset(original, produced, props)
+        assert 'at leftish' in props['rpy'], props['rpy']
+        assert props['beats'][0].show == 'eileen happy@leftish', \
+            props['beats'][0].show
+
+    def test_scene_transform_survives(self, tmp_path):
+        script = ('label a:\n'
+                  '    scene bg room at bgfit\n'
+                  '    "旁白"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'tf_scene')
+        assert_same_multiset(original, produced, props)
+        assert 'at bgfit' in props['rpy'], props['rpy']
+
+    def test_expression_transform_survives(self, tmp_path):
+        """
+        表达式变换（`at Transform(xysize=(1920, 1080))`）位置不许丢。
+
+        **括号里的逗号也必须逐字保留**（2026-10-05 修）：
+
+            show image puzzle_path at Transform(xysize=(1920, 1080))
+
+        分词器以前把逗号一律当分隔符，于是 `at` 收成
+        `['Transform(xysize=(1920', '1080))']`，再拼回去（空格连接多目标）
+        变成 `at Transform(xysize=(1920 1080))` —— **Python 语法错误**，
+        产物直接跑不起来。
+
+        注意这条**多重集断言抓不住**：`_key` 会把 `at` 列表归一化，两边
+        看着"一样"。所以这里额外断言产物的**逐字文本**。
+        真实项目 `mini_game_puzzle.rpy` 第 262/284 行就是这个写法。
+        """
+        script = ('label a:\n'
+                  '    show image puzzle_path at Transform(xysize=(1920, 1080))\n'
+                  '    "旁白"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'tf_expr')
+        assert_same_multiset(original, produced, props)
+        assert 'at Transform(xysize=(1920, 1080))' in props['rpy'], props['rpy']
+
+    def test_multi_target_at_keeps_its_comma(self, tmp_path):
+        """多目标 `at left, right` 里的逗号同样不许并成空格。"""
+        script = ('label a:\n'
+                  '    show ling at left, right\n'
+                  '    "旁白"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'tf_multi')
+        assert_same_multiset(original, produced, props)
+        assert 'at left, right' in props['rpy'], props['rpy']
+
+    def test_bare_with_transition_survives(self, tmp_path):
+        script = ('label a:\n'
+                  '    e "一句"\n'
+                  '    with Dissolve(0.5)\n'
+                  '    e "两句"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'tf_with')
+        assert_same_multiset(original, produced, props)
+        assert 'with Dissolve(0.5)' in props['rpy'], props['rpy']
 
 
 class TestFullChapterRoundtrip:
@@ -556,6 +919,97 @@ class TestPythonBlockRoundtrip:
         assert 'window hide' in rpy, rpy
         assert 'hide screen prompt' in rpy, rpy
         assert 'show screen prompt(' in rpy, rpy
+        # python 代码与 Ren'Py 语句必须**同时**在产物里（单行 python 块
+        # 生成 `$ x` 是等价的 —— 见 `CodeBlocks` 的记录口径）
+        assert '    $ game = 1' in rpy.splitlines(), rpy
+
+    def test_two_python_blocks_in_one_cell_stay_separate(self, tmp_path):
+        """
+        一个格子里混着两条 `python:` 语句时，**块边界靠标记与隐藏列说话**。
+
+        没有它就只能猜缩进，而"两个块的首行都在第 0 列"完全分不出来 ——
+        猜错的代价是两块被并成一个（`for` 的体跑到另一个块的变量上）。
+        """
+        script = (
+            'label a:\n'
+            '    $ a = 1\n'
+            '    python:\n'
+            '        for i in range(2):\n'
+            '            a += i\n'
+            '    python:\n'
+            '        for j in range(2):\n'
+            '            a -= j\n'
+            '    "x"\n'
+            '    return\n'
+        )
+        original, produced, props = roundtrip(script, tmp_path, 'twoblocks')
+        assert_same_multiset(original, produced, props)
+        lines = props['rpy'].splitlines()
+        # 两个块各自成 python:，嵌套层级都在
+        assert lines.count('    python:') == 2, props['rpy']
+        assert '        for i in range(2):' in lines, props['rpy']
+        assert '        for j in range(2):' in lines, props['rpy']
+        assert '            a += i' in lines, props['rpy']
+        assert '            a -= j' in lines, props['rpy']
+
+
+class TestCodeBlocksColumn:
+    """
+    隐藏列 `CodeBlocks`：`python:` 块在「代码」列里的**行区间**。
+
+    它是"结构由数据说话"的落点 —— 用户 2026-10-05：「新增的列放远点，
+    甚至可默认隐藏，因为事实上策划和文案不需要」。
+    """
+
+    def test_column_exists_and_is_hidden(self):
+        from storygraph.story.script_table import (BEAT_FIELDS,
+                                                   HIDDEN_BEAT_COLUMNS)
+        assert 'CodeBlocks' in BEAT_FIELDS
+        assert 'CodeBlocks' in HIDDEN_BEAT_COLUMNS
+        # "放远点"：排在最后一列
+        assert BEAT_FIELDS[-1] == 'CodeBlocks'
+
+    def test_encoding_is_human_readable(self):
+        """区间编码要人能读（万一有人展开隐藏列）。"""
+        from storygraph.story.script_table import (Beat,
+                                                   compose_code_blocks_cell,
+                                                   parse_code_blocks_cell)
+        assert compose_code_blocks_cell(Beat(code_blocks=[(1, 11), (13, 17)])) \
+            == '1-11 13-17'
+        assert compose_code_blocks_cell(Beat(code_blocks=[(3, 3)])) == '3'
+        assert parse_code_blocks_cell('1-11 13-17') == [(1, 11), (13, 17)]
+        assert parse_code_blocks_cell('3') == [(3, 3)]
+        # 手改坏了不该让表读不进来：认不出的片段直接忽略，
+        # 能认出一半的（`5-` = 只有起点）按单行算
+        assert parse_code_blocks_cell('abc') == []
+        assert parse_code_blocks_cell(None) == []
+        assert parse_code_blocks_cell('7-3') == []
+        assert parse_code_blocks_cell('5-  9-11') == [(5, 5), (9, 11)]
+
+    def test_column_survives_excel(self, tmp_path):
+        """回导之后块区间必须还在（老表 / 手工行没有它也不许炸）。"""
+        script = ('label a:\n'
+                  '    python:\n'
+                  '        x = 1\n'
+                  '        y = 2\n'
+                  '    "t"\n'
+                  '    return\n')
+        _original, _produced, props = roundtrip(script, tmp_path, 'blockcol')
+        assert props['back'][0].code_blocks == [(1, 2)], \
+            props['back'][0].code_blocks
+
+    def test_missing_column_falls_back_to_inference(self, tmp_path):
+        """
+        老表没有这一列（或手工新建行）时，渲染层退回"按缩进推断"——
+        **最坏是块结构没保住，而不是产物改坏**。
+        """
+        from storygraph.story.script_table import (Beat, compose_code,
+                                                   render_beat_to_rpy)
+        beat = Beat(seq=1, label='a', code='x = 1\ny = 2')
+        beat.code_blocks = []
+        lines = render_beat_to_rpy(beat)
+        assert lines == ['$ x = 1', '$ y = 2'], lines
+        assert compose_code(beat) == 'x = 1\ny = 2'
 
 
 class TestCallFromClauseRoundtrip:

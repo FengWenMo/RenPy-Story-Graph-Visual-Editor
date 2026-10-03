@@ -1,5 +1,5 @@
 # renpy_exporter.py
-from storygraph.app import notify
+from storygraph.core import notify
 
 
 def _declared_variables(graph):

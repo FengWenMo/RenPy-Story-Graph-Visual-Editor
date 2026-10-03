@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import re
 import sys
+import textwrap
 import tempfile
 import traceback
 from pathlib import Path
@@ -104,6 +106,138 @@ def reparse(text: str, path: Path, analyzer):
     return pr.statements
 
 
+def _is_renpy_statement(line: str) -> bool:
+    """
+    这一行看起来是 Ren'Py 语句（不是 Python 代码）？
+
+    **`if` / `elif` / `else` / `while` / `for` 不算** —— 它们在 Python 里
+    同样是关键字，滤掉它们会把 `python:` 块里的条件体删掉，剩下的行
+    缩进就对不上了（实测：滤掉 `if available_positions:` 之后，
+    它下面那些更深一层的行全被误报成 `unexpected indent`）。
+
+    台词行（`l "…"` / `l happy "…"`）也算 —— 实测 `script.rpy` 第 93 行
+    有一句**手写错句** `l oh "3"`（`l` 后面多打了个 `oh`），原文的解析器
+    把它归成 `raw`，我们的产物也**原样透传**。它会走进 `python:` 块外的
+    裸语句通道，但它是 Ren'Py 台词、不是 Python，`ast` 当然不认。
+    """
+    text = str(line or '').strip()
+    if text.startswith('$'):
+        return False
+    head = text.split(None, 1)
+    word = head[0].rstrip(':') if head else ''
+    if word in {
+        'call', 'jump', 'menu', 'scene', 'show', 'hide', 'pause', 'play',
+        'stop', 'queue', 'voice', 'window', 'nvl', 'return', 'label',
+        'with', 'init', 'screen', 'transform', 'image', 'define',
+        'default', 'style',
+    }:
+        return True
+    # 台词行：`<标识符> [属性…] "<文本>"`（`l oh "3"` 也命中，按 Ren'Py 算）
+    return bool(re.match(r'^[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)*\s+["\']', text))
+
+
+
+def _net_brackets(line: str, depth: int) -> int:
+    """这一行让括号深度净变化多少（引号内与 `#` 之后不算）。"""
+    d, i, n, quote = 0, 0, len(line), ''
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == '\\':
+                i += 2
+                continue
+            if line.startswith(quote, i):
+                i += len(quote)
+                quote = ''
+                continue
+            i += 1
+            continue
+        if ch == '#':
+            break
+        if ch in '"\'':
+            quote = ch
+            i += 1
+            continue
+        if ch in '([{':
+            d += 1
+        elif ch in ')]}':
+            d -= 1
+        i += 1
+    return d
+
+
+
+def _unparsable_python(rpy_text: str) -> list:
+    """
+    产物里**语法不正确的 Python 片段**（`$ xxx` 与 `python:` 块）。
+
+    为什么单独查这一项：语句多重集比的是"解析出来的结构"，而解析器对坏
+    语法是宽容的 —— 逗号被吃掉（`Transform(xysize=(1920 1080))`）时两边
+    的 `at` 列表**一模一样**，审计看着"零丢失"，但产物**跑不起来**。
+    真实项目 `mini_game_puzzle.rpy` 第 262/284 行就踩过。
+
+    返回 `[(行号, 代码片段, 错误)]`，通常应为空。
+    """
+    import ast
+    lines = str(rpy_text or '').split('\n')
+    bad = []
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        s = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        snippet, first = None, i + 1
+        if s.startswith('$') and len(s) > 1:
+            snippet = s[1:].strip()
+        elif s.startswith('python:'):
+            body, j = [], i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                    break
+                body.append(nxt)
+                j += 1
+            # **整体去掉块体那一级缩进**，再 `ast.parse`。
+            #
+            # 基准必须只由**语句行**（不在续行里的行）决定：续行是按括号
+            # 对齐的（实测 `drag_puzzle(` 的续行缩进 51 列），拿它当基准
+            # 会把首行切到负数列（假报 `invalid syntax`）。只数语句行，
+            # 续行的多余缩进就自然保留下来，Python 也认。
+            base, depth = None, 0
+            for b in body:
+                if not b.strip():
+                    continue
+                ind = len(b) - len(b.lstrip())
+                if depth == 0 and (base is None or ind < base):
+                    base = ind
+                depth += _net_brackets(b, depth)
+            base = base or 0
+            # 块体里混进的 **Ren'Py 语句**（`call screen x` / `pause` …）
+            # 不是 Python，`ast` 当然不认 —— 那不是"Python 抄坏了"，
+            # 而是"语句被吞进 python 块"，属于另一类问题（块边界），
+            # 由 `CodeBlocks` 那套机制管。这里把它们滤掉，只查真正的 Python。
+            body = [b for b in body if not _is_renpy_statement(b)]
+            base, depth = None, 0
+            for b in body:
+                if not b.strip():
+                    continue
+                ind = len(b) - len(b.lstrip())
+                if depth == 0 and (base is None or ind < base):
+                    base = ind
+                depth += _net_brackets(b, depth)
+            base = base or 0
+            snippet = '\n'.join(b[base:] if b.strip() else '' for b in body)
+            i = j - 1
+        if snippet is not None and snippet.strip():
+            try:
+                ast.parse(snippet)
+            except SyntaxError as e:
+                bad.append((first, snippet.strip()[:60], str(e)))
+        i += 1
+    return bad
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--project', default=str(PROJECT),
@@ -122,6 +256,7 @@ def main() -> int:
     errs = []
     per_file = []
     samples = collections.defaultdict(list)
+    unparsable = []
 
     for f in files:
         try:
@@ -134,6 +269,14 @@ def main() -> int:
             export_beats_to_excel(beats, x)
             back = import_beats_from_excel(x)
             res = compile_beats(back)
+            # **产物里的 Python 必须语法正确**：`$ x` / `python:` 块里的
+            # 代码是逐字抄进脚本的，抄坏了（比如把 `Transform(xysize=(1920,
+            # 1080))` 里的逗号吃掉）语句多重集照样"相等"—— 多重集比的是
+            # 解析出来的结构，而解析器对坏语法是宽容的。所以单独用 `ast`
+            # 把每一段 Python 过一遍。
+            bad = _unparsable_python(res.rpy_text)
+            if bad:
+                unparsable.append((f.name, bad[0]))
             stmts_b = reparse(res.rpy_text, f, analyzer)
         except Exception as e:                       # noqa: BLE001
             errs.append((f.name, f'{type(e).__name__}: {e}'))
@@ -163,6 +306,10 @@ def main() -> int:
     print(f'  原文 {ta}  →  产物 {sum(b_all.values())}')
     print(f'  丢失 {nl}（{nl * 100.0 / ta:.1f}%）   '
           f'凭空新增 {na}（{na * 100.0 / ta:.1f}%）')
+    print(f'  产物里的 Python 语法错误 {len(unparsable)} 处'
+          + ('  ← **产物跑不起来**' if unparsable else '  （产物可运行）'))
+    for name, sample in unparsable[:5]:
+        print(f'    {name}: 第 {sample[0]} 行 {sample[1]!r} —— {sample[2]}')
     print()
     print('=== 按 kind 的丢失 ===')
     byk = collections.Counter()

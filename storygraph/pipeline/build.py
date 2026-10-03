@@ -222,6 +222,7 @@ def build_project(project_root, asset_dir=None, out_dir=None,
         artifacts.append(str(artifact.review_path or artifact.out_path))
         todo_count = sum(1 for ln in text.splitlines()
                          if ln.strip().startswith('# TODO'))
+        _publish_build_degradation(artifact, todo_count, target)
         # 同时导出 IR，方便 Unity 迁移或外部工具消费
         artifacts += export_ir('json', beats, out_dir, registry=registry,
                                project=str(project_root.name))
@@ -258,6 +259,36 @@ def build_project(project_root, asset_dir=None, out_dir=None,
     return BuildResult(ok=result_ok, engine=engine, out_dir=str(out_dir),
                        artifacts=artifacts, report_path=report_path,
                        report=report_dict)
+
+
+def _publish_build_degradation(artifact, todo_count: int, target) -> None:
+    """
+    **把构建的降级结论说给用户听**（P2-9）。
+
+    构建报告 / CI 退出码里一直有这些数字，但界面上不发一条通知 ——
+    用户点完"构建"看到成功，产物里却有几处 `# TODO: 缺少资源 …`
+    （那些台词／立绘在游戏里**不会出现**）。
+
+    两条：门禁拦下（error）与缺资源兜底（warn）。都没问题就**什么也不发**
+    —— 通知一多就没人看了。
+
+    无头环境默认没有订阅者，发通知零副作用（见 `core.notify`）。
+    """
+    from storygraph.core import notify
+    try:
+        if not artifact.written:
+            # 门禁那条已经在 `generation_guard._publish_blocked` 里发过
+            # （带具体 issue），这里不重复刷屏。
+            return
+        if todo_count:
+            notify.warn(
+                f'构建完成，但有 {todo_count} 处引用了表里没有的资源，'
+                f'产物里已写成 `# TODO`（这些内容在游戏里不会出现）。'
+                f'产物：{Path(target).name}',
+                title='资源缺失')
+    except Exception as e:                  # noqa: BLE001 - 通知失败不拖垮构建
+        swallow('pipeline.build._publish_build_degradation', e)
+
 
 
 def _registry_stats(registry) -> dict:

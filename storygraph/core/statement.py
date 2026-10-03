@@ -150,25 +150,36 @@ _HASH_FIELDS = {
 }
 
 
-# 每种 kind 的工厂方法必须提供的 payload 字段。
-# 与 _HASH_FIELDS 一样，是自解释契约的一部分：加字段忘了同步
-# 会让 content_hash 静默错位，所以用 validate_hash_contract() 卡住。
+# 每种 kind 的工厂方法会产出哪些 payload 字段 —— **完整清单**。
+#
+# 与 _HASH_FIELDS 不同：这里覆盖**所有** kind，不只是参与哈希的那些。
+# 为什么要完整的（2026-10-05，风险清单 P2-3）：
+# 原来的自检只查"参与哈希的 kind"，于是**不参与哈希的 kind 声不声明都没人
+# 管** —— `CALL` 的 payload 里明明有 `from_clause`（`call X from Y` 的存档点
+# ID，真实项目 7 条），声明里却只写了 `target`；`SHOW` 漏了
+# `at` / `as_` / `with_` / `zorder` / `onlayer` / `behind` / `is_expression`。
+#
+# 这份清单的正确性由 `tests/test_kind_declaration_sync.py` 守着：
+# 它拿真的工厂产出与这里逐一对照，**新增字段漏改会当场变红**。
 _FACTORY_FIELDS = {
     StatementKind.SAY:         ('speaker', 'text'),
     StatementKind.EXTEND:      ('text',),
     StatementKind.MENU:        ('caption',),
     StatementKind.MENU_OPTION: ('text',),
-    StatementKind.SHOW:        ('image',),
-    StatementKind.SCENE:       ('image',),
-    StatementKind.HIDE:        ('image',),
-    StatementKind.PLAY:        ('action', 'channel', 'name'),
+    StatementKind.SHOW:        ('image', 'at', 'as_', 'with_', 'zorder',
+                                'onlayer', 'behind', 'is_expression'),
+    StatementKind.SCENE:       ('image', 'at', 'with_', 'onlayer',
+                                'is_expression'),
+    StatementKind.HIDE:        ('image', 'with_'),
+    StatementKind.PLAY:        ('action', 'channel', 'name', 'loop',
+                                'fadein', 'fadeout'),
     StatementKind.VOICE:       ('name',),
     StatementKind.JUMP:        ('target',),
-    StatementKind.CALL:        ('target',),
+    StatementKind.CALL:        ('target', 'from_clause'),
     StatementKind.RETURN:      (),
     StatementKind.PYTHON:      ('code',),
     StatementKind.COMMENT:     ('text',),
-    StatementKind.RAW:         ('text',),
+    StatementKind.RAW:         ('text', 'raw_kind'),
 }
 
 

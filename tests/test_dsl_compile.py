@@ -273,7 +273,7 @@ class TestReverseWords:
 class TestSheetContract:
     def test_structured_columns_with_dropdowns(self):
         """
-        现在的契约：**23 列**（21 列结构化编辑面 + 2 列隐藏的内部元数据）。
+        现在的契约：**24 列**（21 列结构化编辑面 + 3 列隐藏的内部元数据）。
         结构化列（Scene/Show/At/With/Hide/BGM/BGM 参数/SFX/音效参数/Voice）
         每列都能下拉，是策划主要的编辑面；Stage 是"结构化列表达不了的"
         高级通道；真正的旧列（Transform/Raw、Music*/Sound*、Notes）
@@ -286,15 +286,19 @@ class TestSheetContract:
         if 行 5 → 1，分支变顺序执行）。它不是排版列，是**语义列**：
         删掉它等于丢剧情逻辑，所以必须回表。
 
-        两列隐藏元数据都是 2026-09-28 拍板加回来的，**由工具维护**：
-          · `StageOrder` —— 舞台指令之间的相对顺序（`hide,show` = 重置立绘）
-          · `OpOrder`    —— 本拍**全部操作**的源码顺序（跨类别：
-            `play music` 写在 `show` 之前时，音频就得先出）
+        三列隐藏元数据都由**工具维护**，放在最后、整列隐藏：
 
-        两者都整列隐藏，策划的界面里看不到。注意它们和 26 列时代的
+          · `StageOrder`    —— 舞台指令之间的相对顺序（`hide,show` = 重置立绘）
+          · `OpOrder`       —— 本拍**全部操作**的源码顺序（跨类别：
+            `play music` 写在 `show` 之前时，音频就得先出）
+          · `CodeBlocks`    —— 「代码」列里哪些行构成 `python:` 块
+            （2026-10-05 加；用户：「新增的列放远点，甚至可默认隐藏，
+            因为事实上策划和文案不需要」）
+
+        三者都整列隐藏，策划的界面里看不到。注意它们和 26 列时代的
         `StageOrder` 不是一回事——那次它和结构化列并列出现。
         """
-        assert len(BEAT_FIELDS) == 23, BEAT_FIELDS
+        assert len(BEAT_FIELDS) == 24, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
             assert col in BEAT_FIELDS
         # 每列都挂得上下拉的"结构化编辑面"
@@ -311,14 +315,16 @@ class TestSheetContract:
         assert BEAT_FIELDS.index('Condition') < \
             BEAT_FIELDS.index('Scene'), '条件列应紧挨着台词，不该被赶到技术列区'
         assert 'Condition' not in HIDDEN_BEAT_COLUMNS
-        # 两列内部元数据在表里，但必须整列隐藏
-        for col in ('StageOrder', 'OpOrder'):
+        # 三列内部元数据在表里，但必须整列隐藏；且 `CodeBlocks` 要**排在最后**
+        # （用户明确要求"放远点"）
+        for col in ('StageOrder', 'OpOrder', 'CodeBlocks'):
             assert col in BEAT_FIELDS, col
             assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'
+        assert BEAT_FIELDS[-1] == 'CodeBlocks', BEAT_FIELDS
         # 其余列的中文表头里不该出现它们，否则策划会去找那一列
         hidden_headers = [h for k, h in BEAT_HEADERS.items()
-                          if k in ('StageOrder', 'OpOrder')]
-        assert hidden_headers, '隐藏列也该有表头（隐藏≠没有这一列）'
+                          if k in ('StageOrder', 'OpOrder', 'CodeBlocks')]
+        assert len(hidden_headers) == 3, '隐藏列也该有表头（隐藏≠没有这一列）'
         # 顺带锁住"行"与"列"不会错位
         assert len(Beat(seq=1, label='a', text='x').to_row()) == \
             len(BEAT_FIELDS)

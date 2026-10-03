@@ -10,11 +10,11 @@ storygraph.story.excel_import
 from __future__ import annotations
 from pathlib import Path
 import openpyxl
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
 
 from storygraph.story.beat_build import hydrate_from_dsl
 from storygraph.story.beat_model import (
-    _assign_identity,
+    assign_identity,
     _split_hide_items,
     _split_show_items,
 )
@@ -43,7 +43,7 @@ def import_beats_from_excel(path, registry=None) -> list:
         beats = _read_beats_from_ws(ws)
         # 手工新加的行没有 LineId/ContentHash → 这里补上，
         # 让"Excel 前端 + 数据库后端"拿到的主键不空（八）
-        _assign_identity(beats)
+        assign_identity(beats)
         hydrate_from_dsl(beats, make_symbols(registry))
         return beats
     finally:

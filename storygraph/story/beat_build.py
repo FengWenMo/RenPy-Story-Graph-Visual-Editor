@@ -27,8 +27,9 @@ from storygraph.story.beat_model import (
     KIND_SAY,
     MENU_NO_CAPTION,
     _append_line,
-    _assign_identity,
+    assign_identity,
     _audio_params,
+    _join_at_targets,
     _join_hide_items,
     _join_show_items,
     _parse_native_stage_tail,
@@ -36,6 +37,7 @@ from storygraph.story.beat_model import (
     _split_hide_items,
     _split_lines,
     _split_show_items,
+    _split_code_lines,
     compose_audio_text,
     compose_stage_extra,
 )
@@ -62,6 +64,20 @@ def beats_from_statements(statements: Iterable[Statement],
     if labels is None:
         labels = [label] * len(statements)
 
+    # **分支边界**（2026-10-05 修 P1-1）：相邻两条语句条件不同 = 这里换分支。
+    #
+    # 用途见 `_branch_guard`：舞台指令要按条件各自成拍，而"分支最后一条
+    # 指令"挂在它下面的 `with` 过渡**不能提到拍级** —— 一提，同一个拍里
+    # 别的（块外的）指令就都会被套上这个过渡，而拍级 `with` 是按原文
+    # `with dissolve` 独立成行输出的，于是产物里凭空多出若干条
+    # `with dissolve`（实测 3 条凭空新增）。
+    _branch_edges = set()
+    for _i in range(1, len(statements)):
+        _prev = (statements[_i - 1].condition or '').strip()
+        _cur = (statements[_i].condition or '').strip()
+        if _prev != _cur:
+            _branch_edges.add(id(statements[_i - 1]))
+
     beats = []
     pending = Beat(label=label)
     pending_has_stage = False
@@ -87,6 +103,42 @@ def beats_from_statements(statements: Iterable[Statement],
             beats.append(pending)
         pending = Beat(label=current_label)
         pending_has_stage = False
+
+    def _branch_guard(stmt):
+        """
+        **分支守卫**：舞台指令的条件与当前拍不一致时，先把当前拍落下去。
+
+        为什么必须这样（2026-10-05 修 P1-1，实测 `script_pomo.rpy`）：
+
+            if pomoplace == "beach":
+                show bgocean with dissolve
+            elif pomoplace == "cafe":
+                show bgcafe with dissolve
+            elif pomoplace == "library":
+                show bglibrary with dissolve
+            show qing base at h11
+
+        解析器**明明给每条 `show` 都带了条件**，但下面那些分支里写的是
+        `pending.condition = stmt.condition or pending.condition` ——
+        三条舞台指令被吸进**同一张拍**，而一张拍只有一个 `condition`，
+        于是：
+
+          · 第一个条件被后两个覆盖（`or` 链只留最后一个真值）；
+          · 块外那条 `show qing base`（条件是空串）反倒继承了
+            残留的分支条件。
+
+        产物变成"三个背景依次无条件 show + `qing base` 也被 `if` 包住"——
+        最后一个背景永远生效（玩家永远看到 library），且**不报任何错**。
+
+        修法与 menu 同源：**扁平拍 + 按条件归组**。条件不同的舞台指令
+        各自成拍，渲染层就能给每条套上自己的 `if`。
+        条件相同（同一分支里的连续几条指令）继续合并在同一拍，
+        不改变原有产物形状。
+        """
+        incoming = (stmt.condition or '').strip()
+        current = (pending.condition or '').strip()
+        if incoming != current:
+            flush_stage_only()
 
     def _mark_struct(beat, stmt):
         """
@@ -188,6 +240,26 @@ def beats_from_statements(statements: Iterable[Statement],
         struct_done = False
 
         if kind == StatementKind.SAY:
+            # 这一拍要落卡了，先把"条件对不上的舞台指令"单独落成自己的拍。
+            #
+            # 为什么必须（2026-10-05 修 P1-1 的第二半，实测 `script_pomo.rpy`
+            # 第 194/197 行）：
+            #
+            #     194:    show qing base at h11      ← 块外，无条件
+            #     196:    if breakline == 1:
+            #     197:        q "时间到了……"         ← 条件 breakline == 1
+            #
+            # `pending` 里攒着无条件的 `show qing base`，台词带条件 ——
+            # 下面那句 `pending.condition = stmt.condition or pending.condition`
+            # 会把**台词的条件**盖到整张拍上，于是块外的立绘跟着台词一起
+            # 被 `if breakline == 1:` 包住：只有 `breakline == 1`（三分之一
+            # 概率）时立绘才出现，而原文里它无条件执行。
+            #
+            # 条件**相同**（同一分支内的舞台+台词）照旧合并在同一拍，
+            # 不改变产物形状。
+            if (stmt.condition or '').strip() != \
+                    (pending.condition or '').strip():
+                flush_stage_only()
             speaker = payload.get('speaker', '') or ''
             pending.speaker = speaker
             pending.text = payload.get('text', '') or ''
@@ -291,6 +363,7 @@ def beats_from_statements(statements: Iterable[Statement],
             last_speaker = ''
 
         elif kind == StatementKind.SCENE:
+            _branch_guard(stmt)
             if pending.scene:
                 # 同拍已有背景，新背景会覆盖它——先落拍，保留两条指令
                 flush_stage_only()
@@ -301,7 +374,7 @@ def beats_from_statements(statements: Iterable[Statement],
                 # 背景自己的变换（`scene bg bg9_5 at bgfit`）要落到 scene_at。
                 # 落到 `at`（立绘位置）会同时错两处：背景的 at 丢失，
                 # 而这一拍后面的 show 会莫名其妙被套上 bgfit。
-                pending.scene_at = ' '.join(payload['at'])
+                pending.scene_at = _join_at_targets(payload['at'])
             pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
             mark_stage('scene')
@@ -310,13 +383,17 @@ def beats_from_statements(statements: Iterable[Statement],
             last_speaker = ''
 
         elif kind == StatementKind.SHOW:
+            _branch_guard(stmt)
             items = _split_show_items(pending.show)
             items.append({'clause': _show_item_text(payload),
                           'image': payload.get('image', '') or '',
                           'at': ''})
             pending.show = _join_show_items(items)
-            if payload.get('with_') and not payload.get('at'):
-                # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里
+            if payload.get('with_') and not payload.get('at') \
+                    and id(stmt) not in _branch_edges:
+                # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里。
+                # **分支最后一条**不提（见 `_branch_edges`）：那会让块外的
+                # 指令也被套上这个过渡，并让产物多出独立的 `with` 行。
                 pending.with_ = payload['with_']
             pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
@@ -324,10 +401,12 @@ def beats_from_statements(statements: Iterable[Statement],
             mark_op('show')
 
         elif kind == StatementKind.HIDE:
+            _branch_guard(stmt)
             items = _split_hide_items(pending.hide)
             items.append({'image': payload.get('image', '') or '',
                           'with': payload.get('with_', '') or ''})
             pending.hide = _join_hide_items(items)
+            pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
             mark_stage('hide')
             mark_op('hide')
@@ -337,6 +416,7 @@ def beats_from_statements(statements: Iterable[Statement],
             last_speaker = ''
 
         elif kind == StatementKind.PLAY:
+            _branch_guard(stmt)
             channel = payload.get('channel', '')
             name = payload.get('name', '') or ''
             action = payload.get('action', 'play')
@@ -359,21 +439,39 @@ def beats_from_statements(statements: Iterable[Statement],
                 pending.sound_params = params
                 pending_has_stage = True
                 mark_op('audio')
+            pending.condition = stmt.condition or pending.condition
 
         elif kind == StatementKind.VOICE:
+            _branch_guard(stmt)
             if pending.voice:
                 flush_stage_only()
             pending.voice = payload.get('name', '') or ''
+            pending.condition = stmt.condition or pending.condition
             pending_has_stage = True
             mark_op('voice')
 
         elif kind == StatementKind.PYTHON:
-            # $ / python 逻辑进 CodeBlock，导出时原样回写，不再丢。
+            # `$` / `python:` 逻辑进 CodeBlock，导出时原样回写，不再丢。
             code = (payload.get('code', '') or '').strip()
             if code:
+                # 条件不同就不能合并：一拍只有一个条件，合并会让
+                # `if A: $ x` / `elif B: $ y` 里 `y` 的代码在 `A` 不成立时
+                # 也执行（与舞台指令同一个根因，见 `_branch_guard`）。
+                _branch_guard(stmt)
+                pending.condition = stmt.condition or pending.condition
+                # **保留空行**：Python 里空行没有语义，但它出现在多行语句的
+                # 参数列表中间时（`drag_puzzle(` 里就有），丢了会让往返
+                # 前后的代码指纹对不上（审计算一条丢失 + 一条新增）。
+                lines = _split_code_lines(code)
+                start = len(pending.ordered) + 1        # 1-based 行号
                 pending.code = _append_line(pending.code, code)
-                pending.ordered.extend(('code', ln)
-                                       for ln in _split_lines(code))
+                pending.ordered.extend(('code', ln) for ln in lines)
+                if len(lines) > 1:
+                    # **多行** = 它来自 `python:` 块（单行 `$ x` 只占一行）。
+                    # 记下它在格子里的行区间，写进隐藏列 `CodeBlocks` ——
+                    # 一个格子里混着多条语句时，块的边界在纯文本里表达不出来
+                    # （见 `BEAT_FIELDS` 里 `CodeBlocks` 的说明）。
+                    pending.code_blocks.append((start, start + len(lines) - 1))
                 pending_has_stage = True
 
         elif kind == StatementKind.COMMENT:
@@ -385,6 +483,19 @@ def beats_from_statements(statements: Iterable[Statement],
         elif kind == StatementKind.RAW:
             text = (payload.get('text', '') or '').strip()
             if text:
+                # **分支守卫**（与舞台指令同源，2026-10-05 实测补上）：
+                # 透传语句（`pause 0.1` / `show screen` / `window hide` …）
+                # 也有条件 —— 以前这里既不看条件、也不落条件，于是
+                #
+                #     if flag:
+                #         pause 0.1
+                #     "一句"
+                #
+                # 里那句 `pause 0.1` 被吸进**后面那张无条件拍**，
+                # 产物变成 `pause 0.1` 无条件执行、`if flag:` 整个消失。
+                # 真实项目 81 条 unmodeled 里相当一部分是这种形状。
+                _branch_guard(stmt)
+                pending.condition = stmt.condition or pending.condition
                 pending.raw = _append_line(pending.raw, text)
                 pending.ordered.extend(('raw', ln)
                                        for ln in _split_lines(text))
@@ -436,7 +547,7 @@ def beats_from_statements(statements: Iterable[Statement],
             _mark_struct(pending, stmt)
 
     flush_stage_only()
-    _assign_identity(beats)
+    assign_identity(beats)
     # 标记"解析来的 Beat"：导出时图像名要逐字还原，不做下划线改写。
     for b in beats:
         b._from_script = True

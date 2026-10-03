@@ -22,7 +22,7 @@ from storygraph.parsing.renpy_parser import (
     IncrementalRenPyAnalyzer, ParseResultBuilder, RenPyLexer, RenPyParser,
 )
 from storygraph.story.script_table import (
-    _assign_identity, beats_from_parse_result, registry_from_parse_result,
+    assign_identity, beats_from_parse_result, registry_from_parse_result,
 )
 from storygraph.pipeline.validate import (
     resolve_asset_path, validate_all, validate_level1, validate_level3,
