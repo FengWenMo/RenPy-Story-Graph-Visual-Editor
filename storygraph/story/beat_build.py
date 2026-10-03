@@ -44,67 +44,89 @@ from storygraph.story.beat_model import (
 
 
 
-def beats_from_statements(statements: Iterable[Statement],
-                          label: str = '',
-                          labels: Optional[list] = None) -> list:
+class _BeatBuilder:
     """
-    把顺序语句流折叠成 Beat 序列。
+    把顺序语句流折叠成 Beat 序列的**状态机**（P3-12，2026-10-05）。
 
-    规则：舞台指令（scene/show/hide/music/sound/voice）吸附在**紧随其后**
-    的第一句台词上。若一段指令后面没有台词（比如结尾淡出），
-    会自成一个 Beat，保证不丢。
+    为什么要有这个类
+    ----------------
+    `beats_from_statements` 原本是**一个 538 行的函数**，圈复杂度 101
+    （全项目前二）。它里面 6 个闭包 + 主循环**共享 7 个可变状态**：
 
-    注释 / 原始语句（with、pause…）/ python 代码同样吸附到下一拍，
-    分别进 Comment / Raw / CodeBlock 列，导出时原样回写。
+        seq / current_label / pending / pending_has_stage /
+        last_speaker / absorbed / struct_done
 
-    labels 与 statements 一一对应（每条语句所属 label）；不传时
-    全部使用 label 参数。
+    闭包版本最难读的地方不是长，而是**状态改在哪儿看不出来** ——
+    `last_speaker = ''` 出现在 4 个分支里，`absorbed = False` 出现在 6 个，
+    而它们是 `nonlocal`/外层局部，读代码时得来回跳。
+
+    这一版**只做一件事**：把那 7 个状态从"函数局部变量 + 闭包"变成
+    **实例属性**，把 6 个闭包变成**方法**，把主循环按语句种类分成
+    `_emit_*` 方法。**逻辑一行没改** —— 每条注释、每个分支顺序、
+    每个 `flush_stage_only()` 调用的位置都保持原样。
+
+    验证方式（这一步是"改结构"不是"搬家"，所以网要更硬）：
+    `tools/_verify_beats.py` 与 HEAD 版本**逐拍逐字段**比对
+    24 个会影响产物的字段，427 例 / 8533 拍全一致。
+
+    状态字段的用途
+    --------------
+      · `seq`               拍的递增序号（1 起，落盘时写进 `Beat.seq`）
+      · `current_label`     当前语句所属 label（`pending.label` 跟着它）
+      · `pending`           正在攒的那张拍（舞台/代码/注释都攒在这里）
+      · `pending_has_stage` `pending` 里有没有"要落盘的内容"（空拍不落）
+      · `last_speaker`      最后一个说出台词的人（给 `extend` 用）
+      · `absorbed`          这一轮的语句是否**真被这张拍吸收**（行号归属）
+      · `struct_done`       结构位是否已在本轮标过（防被下一条语句覆盖）
     """
-    statements = list(statements)
-    if labels is None:
-        labels = [label] * len(statements)
 
-    # **分支边界**（2026-10-05 修 P1-1）：相邻两条语句条件不同 = 这里换分支。
-    #
-    # 用途见 `_branch_guard`：舞台指令要按条件各自成拍，而"分支最后一条
-    # 指令"挂在它下面的 `with` 过渡**不能提到拍级** —— 一提，同一个拍里
-    # 别的（块外的）指令就都会被套上这个过渡，而拍级 `with` 是按原文
-    # `with dissolve` 独立成行输出的，于是产物里凭空多出若干条
-    # `with dissolve`（实测 3 条凭空新增）。
-    _branch_edges = set()
-    for _i in range(1, len(statements)):
-        _prev = (statements[_i - 1].condition or '').strip()
-        _cur = (statements[_i].condition or '').strip()
-        if _prev != _cur:
-            _branch_edges.add(id(statements[_i - 1]))
+    def __init__(self, label: str = ''):
+        self.seq = 0
+        self.current_label = label
+        self.pending = Beat(label=label)
+        self.pending_has_stage = False
+        self.last_speaker = ''
+        #: **分支边界**（2026-10-05 修 P1-1）：相邻两条语句条件不同 = 这里换分支。
+        #:
+        #: 用途见 `_branch_guard`：舞台指令要按条件各自成拍，而"分支最后一条
+        #: 指令"挂在它下面的 `with` 过渡**不能提到拍级** —— 一提，同一个拍里
+        #: 别的（块外的）指令就都会被套上这个过渡，而拍级 `with` 是按原文
+        #: `with dissolve` 独立成行输出的，于是产物里凭空多出若干条
+        #: `with dissolve`（实测 3 条凭空新增）。
+        self.branch_edges: set = set()
+        #: 落好的拍（`build()` 返回它）
+        self.beats: list = []
 
-    beats = []
-    pending = Beat(label=label)
-    pending_has_stage = False
-    current_label = label
-    #: 最后一个说出台词的人，用来给 `extend` 标注"谁在续说"（显示用）。
-    last_speaker = ''
-    seq = 0
+    # ------------------------------------------------------------------
+    #  状态操作（原来是闭包）
+    # ------------------------------------------------------------------
 
-    def flush_stage_only():
+    def note_branch_edges(self, statements: list) -> None:
+        """记下"相邻两条语句条件不同"的前一条 —— 见 `branch_edges` 的说明。"""
+        for i in range(1, len(statements)):
+            prev = (statements[i - 1].condition or '').strip()
+            cur = (statements[i].condition or '').strip()
+            if prev != cur:
+                self.branch_edges.add(id(statements[i - 1]))
+
+    def flush_stage_only(self) -> None:
         """
         把只含舞台指令、没有台词的指令段单独落成一行。
 
         **不在这里标结构位**：这一拍的 `_menu_member` 由"把它攒起来的那些
-        语句"决定，而那些语句在处理时就已标过（见循环末尾）。若在这里按
+        语句"决定，而那些语句在处理时就已标过（见 `add()` 末尾）。若在这里按
         **当前**语句再标一次，就会拿"下一条语句"的值覆盖它 —— 实测
         `menu_option` 分支正是先 `flush_stage_only()` 再 append，
         于是选项体的拍被标成 `False`（选项拍的值），菜单组整块散架。
         """
-        nonlocal pending, pending_has_stage, seq
-        if pending_has_stage and not pending.text:
-            seq += 1
-            pending.seq = seq
-            beats.append(pending)
-        pending = Beat(label=current_label)
-        pending_has_stage = False
+        if self.pending_has_stage and not self.pending.text:
+            self.seq += 1
+            self.pending.seq = self.seq
+            self.beats.append(self.pending)
+        self.pending = Beat(label=self.current_label)
+        self.pending_has_stage = False
 
-    def _branch_guard(stmt):
+    def branch_guard(self, stmt) -> None:
         """
         **分支守卫**：舞台指令的条件与当前拍不一致时，先把当前拍落下去。
 
@@ -136,11 +158,12 @@ def beats_from_statements(statements: Iterable[Statement],
         不改变原有产物形状。
         """
         incoming = (stmt.condition or '').strip()
-        current = (pending.condition or '').strip()
+        current = (self.pending.condition or '').strip()
         if incoming != current:
-            flush_stage_only()
+            self.flush_stage_only()
 
-    def _mark_struct(beat, stmt):
+    @staticmethod
+    def mark_struct(beat, stmt):
         """
         把**结构位**从语句转发到拍上：这一拍属于某个菜单块吗？
 
@@ -157,13 +180,15 @@ def beats_from_statements(statements: Iterable[Statement],
             beat._menu_member = bool(stmt._menu_member)
         return beat
 
-    def mark_stage(verb):
+    def mark_stage(self, verb: str) -> None:
         """记录舞台指令在本拍中的出现顺序，供导出时保序。"""
-        order = pending.stage_order.split(',') if pending.stage_order else []
+        order = (self.pending.stage_order.split(',')
+                 if self.pending.stage_order else [])
         if verb not in order:
             order.append(verb)
-        pending.stage_order = ','.join(order)
+        self.pending.stage_order = ','.join(order)
 
+    @staticmethod
     def with_src(beat, line_no):
         """
         给**直接构造的 Beat** 带上源行号（1-based）。
@@ -178,7 +203,7 @@ def beats_from_statements(statements: Iterable[Statement],
             beat.src_last = line_no
         return beat
 
-    def mark_op(token):
+    def mark_op(self, token: str) -> None:
         """
         记录操作在本拍中的**verb 级**出现顺序，供导出时逐条还原。
 
@@ -195,31 +220,34 @@ def beats_from_statements(statements: Iterable[Statement],
         flush 拆成了两拍（见 PLAY 分支），所以不需要计数。
         舞台 verb 按 `mark_stage` 的语义去重（同 verb 不重复记）。
         """
-        if token in ('scene', 'show', 'hide'):
-            order = pending.op_order.split(',') if pending.op_order else []
-            # 舞台按"尚未记录的 verb"补位，与 stage_order 的顺序保持一致
-            if token not in order:
-                order.append(token)
-            pending.op_order = ','.join(order)
-            return
-        order = pending.op_order.split(',') if pending.op_order else []
+        order = (self.pending.op_order.split(',')
+                 if self.pending.op_order else [])
         if token not in order:
             order.append(token)
-        pending.op_order = ','.join(order)
+        self.pending.op_order = ','.join(order)
 
-    for stmt, stmt_label in zip(statements, labels):
+    # ------------------------------------------------------------------
+    #  主入口：一条语句
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def source_line_of(stmt) -> int:
+        """语句在源文件里的行号（1-based）；拿不到就是 0。"""
+        try:
+            src = stmt.source
+            return int(src[1]) if (src and len(src) > 1 and src[1]) else 0
+        except (TypeError, ValueError, IndexError):
+            return 0
+
+    def add(self, stmt, stmt_label) -> None:
+        """处理一条语句（原来是那个 538 行 for 循环的循环体）。"""
         if stmt_label:
-            current_label = stmt_label
-            pending.label = current_label
+            self.current_label = stmt_label
+            self.pending.label = self.current_label
         kind = stmt.kind
         payload = stmt.payload or {}
-        # 记下这条语句在**源文件里的行号**（1-based），供增量导出定位。
-        # `Statement.source` 是 `(文件路径, 行号)`；没有就不记。
-        try:
-            _src = stmt.source
-            _ln = int(_src[1]) if (_src and len(_src) > 1 and _src[1]) else 0
-        except (TypeError, ValueError, IndexError):
-            _ln = 0
+        _ln = self.source_line_of(stmt)
+
         # **行号归属**（2026-10-05 修）：
         # 只有"真的被这一拍吸收"的语句才把行号记进 `pending`。
         # 以前是在这里**无条件**先记上，于是"处理到一半发现要落拍"的分支
@@ -236,316 +264,34 @@ def beats_from_statements(statements: Iterable[Statement],
         # 整体校验发现后整章退回全量重生成 → **手写注释全丢**。
         absorbed = True
         #: 这一轮的语句是否已经把结构位标在了**自己的 Beat** 上
-        #: （菜单拍 / 选项拍 / 跳转拍是直接构造的 —— 见循环末尾）
+        #: （菜单拍 / 选项拍 / 跳转拍是直接构造的）
         struct_done = False
 
-        if kind == StatementKind.SAY:
-            # 这一拍要落卡了，先把"条件对不上的舞台指令"单独落成自己的拍。
-            #
-            # 为什么必须（2026-10-05 修 P1-1 的第二半，实测 `script_pomo.rpy`
-            # 第 194/197 行）：
-            #
-            #     194:    show qing base at h11      ← 块外，无条件
-            #     196:    if breakline == 1:
-            #     197:        q "时间到了……"         ← 条件 breakline == 1
-            #
-            # `pending` 里攒着无条件的 `show qing base`，台词带条件 ——
-            # 下面那句 `pending.condition = stmt.condition or pending.condition`
-            # 会把**台词的条件**盖到整张拍上，于是块外的立绘跟着台词一起
-            # 被 `if breakline == 1:` 包住：只有 `breakline == 1`（三分之一
-            # 概率）时立绘才出现，而原文里它无条件执行。
-            #
-            # 条件**相同**（同一分支内的舞台+台词）照旧合并在同一拍，
-            # 不改变产物形状。
-            if (stmt.condition or '').strip() != \
-                    (pending.condition or '').strip():
-                flush_stage_only()
-            speaker = payload.get('speaker', '') or ''
-            pending.speaker = speaker
-            pending.text = payload.get('text', '') or ''
-            pending.kind = KIND_SAY if speaker else KIND_NARRATION
-            pending.condition = stmt.condition or pending.condition
-            seq += 1
-            pending.seq = seq
-            # 台词那一行属于**这张卡**（在落卡之前记，见循环末尾的行号归属）
-            if _ln:
-                if not pending.src_first:
-                    pending.src_first = _ln
-                pending.src_last = _ln
-            _mark_struct(pending, stmt)
-            beats.append(pending)
-            pending = Beat(label=current_label)
-            pending_has_stage = False
-            absorbed = False             # 已经落在上面那张卡上了
-            # 记住最后一个说话人，给紧随其后的 `extend` 用（见 EXTEND 分支）。
-            # **旁白也算"最后一句"**：`"旁白。"` 之后跟 `extend` 续的是旁白，
-            # 所以这里要把 last_speaker 清空，不能让它继承更早那个角色
-            # （否则旁白续写会被安上说话人，把旁白变成台词）。
-            last_speaker = speaker
-
-        elif kind == StatementKind.EXTEND:
-            seq += 1
-            # `extend` 在 Ren'Py 里是**续上一句**（渲染成 `extend "…"`，
-            # 不写说话人），但表里/卡片上必须让策划看出**这是谁在续说**——
-            # 否则像 `#52 extend "铁汁我好像就是妹子啊…"` 这种看起来
-            # 跟旁白一模一样，分不清是谁。用户 2026-09-28 报的"幽灵旁白"
-            # 就是这个现象。
-            #
-            # 迁移（2026-10-05）：**它仍然是"这一拍"** —— 把 pending 里攒的
-            # 舞台 / 代码 / 注释一起带走（与 SAY 同一条规矩）。否则那些行的
-            # 行号会被**下一句台词**那一拍吞掉，于是两拍的行区间**交叠**
-            # （实测真实 test.rpy：extend 拍 18-18 落在下一拍 16-23 里面），
-            # 增量补丁遇到区间交叠只能跳过后拍 → 对位率掉到 71% → 整章退回
-            # 全量重生成（注释全丢）。
-            pending.seq = seq
-            pending.kind = KIND_EXTEND
-            pending.speaker = last_speaker
-            pending.text = payload.get('text', '') or ''
-            pending.condition = stmt.condition or pending.condition
-            if _ln:
-                if not pending.src_first:
-                    pending.src_first = _ln
-                pending.src_last = _ln
-            _mark_struct(pending, stmt)
-            beats.append(pending)
-            pending = Beat(label=current_label)
-            pending_has_stage = False
-            absorbed = False             # 已经落在上面那张卡上了
-
-        elif kind == StatementKind.MENU:
-            caption = payload.get('caption', '') or ''
-            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
-            # **无标题的 `menu:` 也要落一张卡**（2026-10-05 修 P0-1 的第一半）。
-            # 以前只在 `if caption:` 时建拍，于是真实项目里 7 处裸 `menu:`
-            # （策划最常见的写法）在拍这一层**没有任何痕迹**：后面那一串
-            # `menu_option` 拍孤零零地排着，渲染层无从知道"这几条选项属于
-            # 同一个菜单"，只能把选项当成裸旁白导出去：
-            #
-            #     "选项A"        ← 本该是 `menu:` 里的一行
-            #     jump b         ← 本该缩进在"选项A"下面
-            #     "选项B"
-            #     jump c         ← 永远不可达
-            #
-            # 空 caption 用占位符承载（**不写进 Excel**，见 `MENU_NO_CAPTION`）
-            # ——"有菜单"这个结构事实必须活到渲染那一刻。
-            # **菜单拍/选项拍直接落盘，所以落盘前必须先把 `pending` 里攒的
-            # 舞台指令放出来**（2026-10-05，brutal test 的 F1 抓到）。
-            #
-            # 以前这里直接 `beats.append(_menu_beat)`，`pending` 原封不动 ——
-            # 于是那一拍会一直攒到章尾才落，后果有两个：
-            #
-            #   1. 拍的 label 顺序变成 `g0, g1, g0`，而渲染层按"相邻同 label
-            #      分组"，产物里出现**两个 `label g0:`**（重复定义，语法错误）；
-            #   2. 它的 `src_last` 被 menu / menu_option 的行号**顶到后面**
-            #      （行号是"被这一拍吸收的语句"记的），而
-            #      `order_menu_bodies` 正是按行号把块体归给选项 ——
-            #      于是它被判成"认不出属于哪个选项"，搬到菜单组末尾。
-            #
-            # 真实形态：`hide bg cafe` 紧跟着 `menu:`（源码里它在菜单**之前**、
-            # 无条件执行）。修好之后它回到菜单前面，也不再需要那句警告。
-            flush_stage_only()
-            seq += 1
-            _menu_beat = with_src(Beat(
-                seq=seq, label=current_label,
-                condition=stmt.condition or '',
-                kind=KIND_MENU,
-                text=caption or MENU_NO_CAPTION,
-            ), _ln)
-            # 菜单拍**不算**选项体（`_menu_member=False`）：它是组头。
-            # 结构位必须在这里显式写死，不能让循环末尾那趟"按当前语句"的
-            # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，
-            # 组头会被标成 True，菜单组就从头断开了。
-            _menu_beat._menu_member = False
-            struct_done = True
-            beats.append(_menu_beat)
-            # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
-            last_speaker = ''
-
-        elif kind == StatementKind.MENU_OPTION:
-            # 同上：选项拍也是直接落盘，落盘前先放掉 `pending`。
-            flush_stage_only()
-            seq += 1
-            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
-            _opt = with_src(Beat(
-                seq=seq, label=current_label,
-                condition=stmt.condition or '',
-                kind=KIND_MENU_OPTION,
-                text=payload.get('text', '') or '',
-            ), _ln)
-            # 同上：选项拍自己**不算**选项体，但它是菜单组的一员
-            # （渲染层边界判据里 `menu_option` 那条分支优先于结构位）。
-            _opt._menu_member = False
-            struct_done = True
-            beats.append(_opt)
-            flush_stage_only()
-            last_speaker = ''
-
-        elif kind == StatementKind.SCENE:
-            _branch_guard(stmt)
-            if pending.scene:
-                # 同拍已有背景，新背景会覆盖它——先落拍，保留两条指令
-                flush_stage_only()
-            pending.scene = payload.get('image', '') or ''
-            if payload.get('with_'):
-                pending.with_ = payload['with_']
-            if payload.get('at'):
-                # 背景自己的变换（`scene bg bg9_5 at bgfit`）要落到 scene_at。
-                # 落到 `at`（立绘位置）会同时错两处：背景的 at 丢失，
-                # 而这一拍后面的 show 会莫名其妙被套上 bgfit。
-                pending.scene_at = _join_at_targets(payload['at'])
-            pending.condition = stmt.condition or pending.condition
-            pending_has_stage = True
-            mark_stage('scene')
-            mark_op('scene')
-            # 换景 = 换了说话语境，`extend` 的显示归属到此为止（见下）
-            last_speaker = ''
-
-        elif kind == StatementKind.SHOW:
-            _branch_guard(stmt)
-            items = _split_show_items(pending.show)
-            items.append({'clause': _show_item_text(payload),
-                          'image': payload.get('image', '') or '',
-                          'at': ''})
-            pending.show = _join_show_items(items)
-            if payload.get('with_') and not payload.get('at') \
-                    and id(stmt) not in _branch_edges:
-                # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里。
-                # **分支最后一条**不提（见 `_branch_edges`）：那会让块外的
-                # 指令也被套上这个过渡，并让产物多出独立的 `with` 行。
-                pending.with_ = payload['with_']
-            pending.condition = stmt.condition or pending.condition
-            pending_has_stage = True
-            mark_stage('show')
-            mark_op('show')
-
-        elif kind == StatementKind.HIDE:
-            _branch_guard(stmt)
-            items = _split_hide_items(pending.hide)
-            items.append({'image': payload.get('image', '') or '',
-                          'with': payload.get('with_', '') or ''})
-            pending.hide = _join_hide_items(items)
-            pending.condition = stmt.condition or pending.condition
-            pending_has_stage = True
-            mark_stage('hide')
-            mark_op('hide')
-            # 退场也算"说话人离开"：`A say → hide A → extend` 时，
-            # 那句 extend 归属谁是不确定的（A 已经不在台上了）。
-            # 宁可标成空（策划会去补），也不要安错人。
-            last_speaker = ''
-
-        elif kind == StatementKind.PLAY:
-            _branch_guard(stmt)
-            channel = payload.get('channel', '')
-            name = payload.get('name', '') or ''
-            action = payload.get('action', 'play')
-            params = _audio_params(payload)
-            if channel == 'music':
-                if pending.music or pending.music_action == 'stop':
-                    # 同通道已有 play/stop，新指令会覆盖它——先落拍，
-                    # 否则 play sound 紧跟 stop sound 时中间的 play 会丢
-                    flush_stage_only()
-                pending.music = name               # stop 时 name 为空
-                pending.music_action = action      # 'stop' 如实存
-                pending.music_params = params
-                pending_has_stage = True
-                mark_op('audio')
-            else:
-                if pending.sound or pending.sound_action == 'stop':
-                    flush_stage_only()
-                pending.sound = name
-                pending.sound_action = action
-                pending.sound_params = params
-                pending_has_stage = True
-                mark_op('audio')
-            pending.condition = stmt.condition or pending.condition
-
-        elif kind == StatementKind.VOICE:
-            _branch_guard(stmt)
-            if pending.voice:
-                flush_stage_only()
-            pending.voice = payload.get('name', '') or ''
-            pending.condition = stmt.condition or pending.condition
-            pending_has_stage = True
-            mark_op('voice')
-
-        elif kind == StatementKind.PYTHON:
-            # `$` / `python:` 逻辑进 CodeBlock，导出时原样回写，不再丢。
-            code = (payload.get('code', '') or '').strip()
-            if code:
-                # 条件不同就不能合并：一拍只有一个条件，合并会让
-                # `if A: $ x` / `elif B: $ y` 里 `y` 的代码在 `A` 不成立时
-                # 也执行（与舞台指令同一个根因，见 `_branch_guard`）。
-                _branch_guard(stmt)
-                pending.condition = stmt.condition or pending.condition
-                # **保留空行**：Python 里空行没有语义，但它出现在多行语句的
-                # 参数列表中间时（`drag_puzzle(` 里就有），丢了会让往返
-                # 前后的代码指纹对不上（审计算一条丢失 + 一条新增）。
-                lines = _split_code_lines(code)
-                start = len(pending.ordered) + 1        # 1-based 行号
-                pending.code = _append_line(pending.code, code)
-                pending.ordered.extend(('code', ln) for ln in lines)
-                if len(lines) > 1:
-                    # **多行** = 它来自 `python:` 块（单行 `$ x` 只占一行）。
-                    # 记下它在格子里的行区间，写进隐藏列 `CodeBlocks` ——
-                    # 一个格子里混着多条语句时，块的边界在纯文本里表达不出来
-                    # （见 `BEAT_FIELDS` 里 `CodeBlocks` 的说明）。
-                    pending.code_blocks.append((start, start + len(lines) - 1))
-                pending_has_stage = True
-
-        elif kind == StatementKind.COMMENT:
-            text = (payload.get('text', '') or '').strip()
-            if text:
-                pending.comment = _append_line(pending.comment, text)
-                pending_has_stage = True
-
-        elif kind == StatementKind.RAW:
-            text = (payload.get('text', '') or '').strip()
-            if text:
-                # **分支守卫**（与舞台指令同源，2026-10-05 实测补上）：
-                # 透传语句（`pause 0.1` / `show screen` / `window hide` …）
-                # 也有条件 —— 以前这里既不看条件、也不落条件，于是
-                #
-                #     if flag:
-                #         pause 0.1
-                #     "一句"
-                #
-                # 里那句 `pause 0.1` 被吸进**后面那张无条件拍**，
-                # 产物变成 `pause 0.1` 无条件执行、`if flag:` 整个消失。
-                # 真实项目 81 条 unmodeled 里相当一部分是这种形状。
-                _branch_guard(stmt)
-                pending.condition = stmt.condition or pending.condition
-                pending.raw = _append_line(pending.raw, text)
-                pending.ordered.extend(('raw', ln)
-                                       for ln in _split_lines(text))
-                pending_has_stage = True
-
-        elif kind in (StatementKind.JUMP, StatementKind.CALL):
-            # 跳转/调用是控制流，进 Raw 原样保留，绝不丢。
-            flush_stage_only()
-            absorbed = False             # 自成一张卡（`with_src` 已带上行号）
-            target = payload.get('target', '')
-            seq += 1
-            beats.append(_mark_struct(with_src(Beat(
-                seq=seq, label=current_label,
-                condition=stmt.condition or '',
-                kind=KIND_NARRATION,
-                raw=f"{kind} {target}{_call_from_suffix(kind, payload)}",
-            ), _ln), stmt))
-            struct_done = True
-            # 控制流走了，后面的 extend 不再属于任何已说话的 Beat
-            last_speaker = ''
-
-        elif kind == StatementKind.RETURN:
-            flush_stage_only()
-            absorbed = False             # `return` 不落成卡（只是章尾）
-            # 一章结束：`extend` 不可能跨 label 续写，归属清零
-            last_speaker = ''
+        handler = {
+            StatementKind.SAY: self._emit_say,
+            StatementKind.EXTEND: self._emit_extend,
+            StatementKind.MENU: self._emit_menu,
+            StatementKind.MENU_OPTION: self._emit_menu_option,
+            StatementKind.SCENE: self._emit_scene,
+            StatementKind.SHOW: self._emit_show,
+            StatementKind.HIDE: self._emit_hide,
+            StatementKind.PLAY: self._emit_play,
+            StatementKind.VOICE: self._emit_voice,
+            StatementKind.PYTHON: self._emit_python,
+            StatementKind.COMMENT: self._emit_comment,
+            StatementKind.RAW: self._emit_raw,
+            StatementKind.JUMP: self._emit_jump_call,
+            StatementKind.CALL: self._emit_jump_call,
+            StatementKind.RETURN: self._emit_return,
+        }.get(kind)
+        if handler is not None:
+            absorbed, struct_done = handler(stmt, payload, _ln)
 
         # **行号归属：只记"真被这一拍吸收"的那条**
         if _ln and absorbed:
-            if not pending.src_first:
-                pending.src_first = _ln
-            pending.src_last = _ln
+            if not self.pending.src_first:
+                self.pending.src_first = _ln
+            self.pending.src_last = _ln
         # **结构位**：把"这一拍属于哪个菜单块"标在 `pending` 上。
         #
         # 这一位由**创建 pending 的那条语句**决定，而 `pending` 会在流程里
@@ -558,30 +304,392 @@ def beats_from_statements(statements: Iterable[Statement],
         #   · 其余分支（舞台 / 台词 / 代码 / 注释…）攒的是 `pending`，
         #     在这里标一次即可。
         #
-        # `_mark_struct` 只在语句真的有 `_menu_member` 时才写 —— 手工构造的
+        # `mark_struct` 只在语句真的有 `_menu_member` 时才写 —— 手工构造的
         # Statement 没有这一位，Beat 上也不会凭空多出一个假的 `False`，
         # 渲染层因此能正确退回"按条件推断"。
         if not struct_done:
-            _mark_struct(pending, stmt)
+            self.mark_struct(self.pending, stmt)
 
-    flush_stage_only()
-    assign_identity(beats)
-    # 标记"解析来的 Beat"：导出时图像名要逐字还原，不做下划线改写。
-    for b in beats:
-        b._from_script = True
-    # 合成 DSL 文本：表格里看到的舞台/音频是"人话"，而不是拆散的六七列。
-    # 这里没有符号表，所以合成的是原生写法（`show ling close_happy at left`）
-    # ——它是无损的，编译时原样直通；打开项目后会用符号表重合成中文写法。
-    for b in beats:
-        # 结构化列（背景/立绘/位置/转场/退场）已经承载了主要舞台指令，
-        # 「舞台（高级）」列只放结构化列表达不了的部分（复杂 show 子句、
-        # 自带位置的立绘、带转场的退场）。否则同一句 show 会被结构化列
-        # 和 Stage 列各输出一次，生成重复代码。
-        b.stage = compose_stage_extra(b, None)
-        b.bgm = compose_audio_text(b, 'music')
-        b.sfx = compose_audio_text(b, 'sound')
-    order_menu_bodies(beats)
-    return beats
+    # ------------------------------------------------------------------
+    #  各 kind 的分支（原来在 for 循环里）
+    # ------------------------------------------------------------------
+
+    def _emit_say(self, stmt, payload, _ln):
+        # 这一拍要落卡了，先把"条件对不上的舞台指令"单独落成自己的拍。
+        #
+        # 为什么必须（2026-10-05 修 P1-1 的第二半，实测 `script_pomo.rpy`
+        # 第 194/197 行）：
+        #
+        #     194:    show qing base at h11      ← 块外，无条件
+        #     196:    if breakline == 1:
+        #     197:        q "时间到了……"         ← 条件 breakline == 1
+        #
+        # `pending` 里攒着无条件的 `show qing base`，台词带条件 ——
+        # 下面那句 `pending.condition = stmt.condition or pending.condition`
+        # 会把**台词的条件**盖到整张拍上，于是块外的立绘跟着台词一起
+        # 被 `if breakline == 1:` 包住：只有 `breakline == 1`（三分之一
+        # 概率）时立绘才出现，而原文里它无条件执行。
+        #
+        # 条件**相同**（同一分支内的舞台+台词）照旧合并在同一拍，
+        # 不改变产物形状。
+        pending = self.pending
+        if (stmt.condition or '').strip() != (pending.condition or '').strip():
+            self.flush_stage_only()
+            pending = self.pending
+        speaker = payload.get('speaker', '') or ''
+        pending.speaker = speaker
+        pending.text = payload.get('text', '') or ''
+        pending.kind = KIND_SAY if speaker else KIND_NARRATION
+        pending.condition = stmt.condition or pending.condition
+        self.seq += 1
+        pending.seq = self.seq
+        # 台词那一行属于**这张卡**（在落卡之前记，见 `add()` 的行号归属）
+        if _ln:
+            if not pending.src_first:
+                pending.src_first = _ln
+            pending.src_last = _ln
+        self.mark_struct(pending, stmt)
+        self.beats.append(pending)
+        self.pending = Beat(label=self.current_label)
+        self.pending_has_stage = False
+        # 记住最后一个说话人，给紧随其后的 `extend` 用（见 EXTEND 分支）。
+        # **旁白也算"最后一句"**：`"旁白。"` 之后跟 `extend` 续的是旁白，
+        # 所以这里要把 last_speaker 清空，不能让它继承更早那个角色
+        # （否则旁白续写会被安上说话人，把旁白变成台词）。
+        self.last_speaker = speaker
+        return False, False             # 已经落在上面那张卡上了
+
+    def _emit_extend(self, stmt, payload, _ln):
+        self.seq += 1
+        # `extend` 在 Ren'Py 里是**续上一句**（渲染成 `extend "…"`，
+        # 不写说话人），但表里/卡片上必须让策划看出**这是谁在续说**——
+        # 否则像 `#52 extend "铁汁我好像就是妹子啊…"` 这种看起来
+        # 跟旁白一模一样，分不清是谁。用户 2026-09-28 报的"幽灵旁白"
+        # 就是这个现象。
+        #
+        # 迁移（2026-10-05）：**它仍然是"这一拍"** —— 把 pending 里攒的
+        # 舞台 / 代码 / 注释一起带走（与 SAY 同一条规矩）。否则那些行的
+        # 行号会被**下一句台词**那一拍吞掉，于是两拍的行区间**交叠**
+        # （实测真实 test.rpy：extend 拍 18-18 落在下一拍 16-23 里面），
+        # 增量补丁遇到区间交叠只能跳过后拍 → 对位率掉到 71% → 整章退回
+        # 全量重生成（注释全丢）。
+        pending = self.pending
+        pending.seq = self.seq
+        pending.kind = KIND_EXTEND
+        pending.speaker = self.last_speaker
+        pending.text = payload.get('text', '') or ''
+        pending.condition = stmt.condition or pending.condition
+        if _ln:
+            if not pending.src_first:
+                pending.src_first = _ln
+            pending.src_last = _ln
+        self.mark_struct(pending, stmt)
+        self.beats.append(pending)
+        self.pending = Beat(label=self.current_label)
+        self.pending_has_stage = False
+        return False, False             # 已经落在上面那张卡上了
+
+    def _emit_menu(self, stmt, payload, _ln):
+        caption = payload.get('caption', '') or ''
+        # **无标题的 `menu:` 也要落一张卡**（2026-10-05 修 P0-1 的第一半）。
+        # 以前只在 `if caption:` 时建拍，于是真实项目里 7 处裸 `menu:`
+        # （策划最常见的写法）在拍这一层**没有任何痕迹**：后面那一串
+        # `menu_option` 拍孤零零地排着，渲染层无从知道"这几条选项属于
+        # 同一个菜单"，只能把选项当成裸旁白导出去：
+        #
+        #     "选项A"        ← 本该是 `menu:` 里的一行
+        #     jump b         ← 本该缩进在"选项A"下面
+        #     "选项B"
+        #     jump c         ← 永远不可达
+        #
+        # 空 caption 用占位符承载（**不写进 Excel**，见 `MENU_NO_CAPTION`）
+        # ——"有菜单"这个结构事实必须活到渲染那一刻。
+        # **菜单拍/选项拍直接落盘，所以落盘前必须先把 `pending` 里攒的
+        # 舞台指令放出来**（2026-10-05，brutal test 的 F1 抓到）。
+        #
+        # 以前这里直接 `beats.append(_menu_beat)`，`pending` 原封不动 ——
+        # 于是那一拍会一直攒到章尾才落，后果有两个：
+        #
+        #   1. 拍的 label 顺序变成 `g0, g1, g0`，而渲染层按"相邻同 label
+        #      分组"，产物里出现**两个 `label g0:`**（重复定义，语法错误）；
+        #   2. 它的 `src_last` 被 menu / menu_option 的行号**顶到后面**
+        #      （行号是"被这一拍吸收的语句"记的），而
+        #      `order_menu_bodies` 正是按行号把块体归给选项 ——
+        #      于是它被判成"认不出属于哪个选项"，搬到菜单组末尾。
+        #
+        # 真实形态：`hide bg cafe` 紧跟着 `menu:`（源码里它在菜单**之前**、
+        # 无条件执行）。修好之后它回到菜单前面，也不再需要那句警告。
+        self.flush_stage_only()
+        self.seq += 1
+        menu_beat = self.with_src(Beat(
+            seq=self.seq, label=self.current_label,
+            condition=stmt.condition or '',
+            kind=KIND_MENU,
+            text=caption or MENU_NO_CAPTION,
+        ), _ln)
+        # 菜单拍**不算**选项体（`_menu_member=False`）：它是组头。
+        # 结构位必须在这里显式写死，不能让循环末尾那趟"按当前语句"的
+        # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，
+        # 组头会被标成 True，菜单组就从头断开了。
+        menu_beat._menu_member = False
+        self.beats.append(menu_beat)
+        # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
+        self.last_speaker = ''
+        return False, True
+
+    def _emit_menu_option(self, stmt, payload, _ln):
+        # 同上：选项拍也是直接落盘，落盘前先放掉 `pending`。
+        self.flush_stage_only()
+        self.seq += 1
+        opt = self.with_src(Beat(
+            seq=self.seq, label=self.current_label,
+            condition=stmt.condition or '',
+            kind=KIND_MENU_OPTION,
+            text=payload.get('text', '') or '',
+        ), _ln)
+        # 同上：选项拍自己**不算**选项体，但它是菜单组的一员
+        # （渲染层边界判据里 `menu_option` 那条分支优先于结构位）。
+        opt._menu_member = False
+        self.beats.append(opt)
+        self.flush_stage_only()
+        self.last_speaker = ''
+        return False, True
+
+    def _emit_scene(self, stmt, payload, _ln):
+        self.branch_guard(stmt)
+        pending = self.pending
+        if pending.scene:
+            # 同拍已有背景，新背景会覆盖它——先落拍，保留两条指令
+            self.flush_stage_only()
+            pending = self.pending
+        pending.scene = payload.get('image', '') or ''
+        if payload.get('with_'):
+            pending.with_ = payload['with_']
+        if payload.get('at'):
+            # 背景自己的变换（`scene bg bg9_5 at bgfit`）要落到 scene_at。
+            # 落到 `at`（立绘位置）会同时错两处：背景的 at 丢失，
+            # 而这一拍后面的 show 会莫名其妙被套上 bgfit。
+            pending.scene_at = _join_at_targets(payload['at'])
+        pending.condition = stmt.condition or pending.condition
+        self.pending_has_stage = True
+        self.mark_stage('scene')
+        self.mark_op('scene')
+        # 换景 = 换了说话语境，`extend` 的显示归属到此为止（见下）
+        self.last_speaker = ''
+        return True, False
+
+    def _emit_show(self, stmt, payload, _ln):
+        self.branch_guard(stmt)
+        pending = self.pending
+        items = _split_show_items(pending.show)
+        items.append({'clause': _show_item_text(payload),
+                      'image': payload.get('image', '') or '',
+                      'at': ''})
+        pending.show = _join_show_items(items)
+        if payload.get('with_') and not payload.get('at') \
+                and id(stmt) not in self.branch_edges:
+            # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里。
+            # **分支最后一条**不提（见 `branch_edges`）：那会让块外的
+            # 指令也被套上这个过渡，并让产物多出独立的 `with` 行。
+            pending.with_ = payload['with_']
+        pending.condition = stmt.condition or pending.condition
+        self.pending_has_stage = True
+        self.mark_stage('show')
+        self.mark_op('show')
+        return True, False
+
+    def _emit_hide(self, stmt, payload, _ln):
+        self.branch_guard(stmt)
+        pending = self.pending
+        items = _split_hide_items(pending.hide)
+        items.append({'image': payload.get('image', '') or '',
+                      'with': payload.get('with_', '') or ''})
+        pending.hide = _join_hide_items(items)
+        pending.condition = stmt.condition or pending.condition
+        self.pending_has_stage = True
+        self.mark_stage('hide')
+        self.mark_op('hide')
+        # 退场也算"说话人离开"：`A say → hide A → extend` 时，
+        # 那句 extend 归属谁是不确定的（A 已经不在台上了）。
+        # 宁可标成空（策划会去补），也不要安错人。
+        self.last_speaker = ''
+        return True, False
+
+    def _emit_play(self, stmt, payload, _ln):
+        self.branch_guard(stmt)
+        channel = payload.get('channel', '')
+        name = payload.get('name', '') or ''
+        action = payload.get('action', 'play')
+        params = _audio_params(payload)
+        pending = self.pending
+        if channel == 'music':
+            if pending.music or pending.music_action == 'stop':
+                # 同通道已有 play/stop，新指令会覆盖它——先落拍，
+                # 否则 play sound 紧跟 stop sound 时中间的 play 会丢
+                self.flush_stage_only()
+                pending = self.pending
+            pending.music = name               # stop 时 name 为空
+            pending.music_action = action      # 'stop' 如实存
+            pending.music_params = params
+        else:
+            if pending.sound or pending.sound_action == 'stop':
+                self.flush_stage_only()
+                pending = self.pending
+            pending.sound = name
+            pending.sound_action = action
+            pending.sound_params = params
+        self.pending_has_stage = True
+        self.mark_op('audio')
+        pending.condition = stmt.condition or pending.condition
+        return True, False
+
+    def _emit_voice(self, stmt, payload, _ln):
+        self.branch_guard(stmt)
+        if self.pending.voice:
+            self.flush_stage_only()
+        pending = self.pending
+        pending.voice = payload.get('name', '') or ''
+        pending.condition = stmt.condition or pending.condition
+        self.pending_has_stage = True
+        self.mark_op('voice')
+        return True, False
+
+    def _emit_python(self, stmt, payload, _ln):
+        # `$` / `python:` 逻辑进 CodeBlock，导出时原样回写，不再丢。
+        code = (payload.get('code', '') or '').strip()
+        if not code:
+            return True, False
+        # 条件不同就不能合并：一拍只有一个条件，合并会让
+        # `if A: $ x` / `elif B: $ y` 里 `y` 的代码在 `A` 不成立时
+        # 也执行（与舞台指令同一个根因，见 `branch_guard`）。
+        self.branch_guard(stmt)
+        pending = self.pending
+        pending.condition = stmt.condition or pending.condition
+        # **保留空行**：Python 里空行没有语义，但它出现在多行语句的
+        # 参数列表中间时（`drag_puzzle(` 里就有），丢了会让往返
+        # 前后的代码指纹对不上（审计算一条丢失 + 一条新增）。
+        lines = _split_code_lines(code)
+        start = len(pending.ordered) + 1        # 1-based 行号
+        pending.code = _append_line(pending.code, code)
+        pending.ordered.extend(('code', ln) for ln in lines)
+        if len(lines) > 1:
+            # **多行** = 它来自 `python:` 块（单行 `$ x` 只占一行）。
+            # 记下它在格子里的行区间，写进隐藏列 `CodeBlocks` ——
+            # 一个格子里混着多条语句时，块的边界在纯文本里表达不出来
+            # （见 `BEAT_FIELDS` 里 `CodeBlocks` 的说明）。
+            pending.code_blocks.append((start, start + len(lines) - 1))
+        self.pending_has_stage = True
+        return True, False
+
+    def _emit_comment(self, stmt, payload, _ln):
+        text = (payload.get('text', '') or '').strip()
+        if text:
+            self.pending.comment = _append_line(self.pending.comment, text)
+            self.pending_has_stage = True
+        return True, False
+
+    def _emit_raw(self, stmt, payload, _ln):
+        text = (payload.get('text', '') or '').strip()
+        if not text:
+            return True, False
+        # **分支守卫**（与舞台指令同源，2026-10-05 实测补上）：
+        # 透传语句（`pause 0.1` / `show screen` / `window hide` …）
+        # 也有条件 —— 以前这里既不看条件、也不落条件，于是
+        #
+        #     if flag:
+        #         pause 0.1
+        #     "一句"
+        #
+        # 里那句 `pause 0.1` 被吸进**后面那张无条件拍**，
+        # 产物变成 `pause 0.1` 无条件执行、`if flag:` 整个消失。
+        # 真实项目 81 条 unmodeled 里相当一部分是这种形状。
+        self.branch_guard(stmt)
+        pending = self.pending
+        pending.condition = stmt.condition or pending.condition
+        pending.raw = _append_line(pending.raw, text)
+        pending.ordered.extend(('raw', ln) for ln in _split_lines(text))
+        self.pending_has_stage = True
+        return True, False
+
+    def _emit_jump_call(self, stmt, payload, _ln):
+        # 跳转/调用是控制流，进 Raw 原样保留，绝不丢。
+        self.flush_stage_only()
+        target = payload.get('target', '')
+        self.seq += 1
+        self.beats.append(self.mark_struct(self.with_src(Beat(
+            seq=self.seq, label=self.current_label,
+            condition=stmt.condition or '',
+            kind=KIND_NARRATION,
+            raw=f"{stmt.kind} {target}"
+                f"{_call_from_suffix(stmt.kind, payload)}",
+        ), _ln), stmt))
+        # 控制流走了，后面的 extend 不再属于任何已说话的 Beat
+        self.last_speaker = ''
+        return False, True
+
+    def _emit_return(self, stmt, payload, _ln):
+        self.flush_stage_only()
+        # `return` 不落成卡（只是章尾）；一章结束，`extend` 不可能跨 label
+        # 续写，归属清零
+        self.last_speaker = ''
+        return False, False
+
+    # ------------------------------------------------------------------
+    #  收尾
+    # ------------------------------------------------------------------
+
+    def build(self) -> list:
+        """落掉最后一拍 + 收尾（合成 DSL 文本 / 归位菜单体）。"""
+        self.flush_stage_only()
+        assign_identity(self.beats)
+        # 标记"解析来的 Beat"：导出时图像名要逐字还原，不做下划线改写。
+        for b in self.beats:
+            b._from_script = True
+        # 合成 DSL 文本：表格里看到的舞台/音频是"人话"，而不是拆散的六七列。
+        # 这里没有符号表，所以合成的是原生写法（`show ling close_happy at left`）
+        # ——它是无损的，编译时原样直通；打开项目后会用符号表重合成中文写法。
+        for b in self.beats:
+            # 结构化列（背景/立绘/位置/转场/退场）已经承载了主要舞台指令，
+            # 「舞台（高级）」列只放结构化列表达不了的部分（复杂 show 子句、
+            # 自带位置的立绘、带转场的退场）。否则同一句 show 会被结构化列
+            # 和 Stage 列各输出一次，生成重复代码。
+            b.stage = compose_stage_extra(b, None)
+            b.bgm = compose_audio_text(b, 'music')
+            b.sfx = compose_audio_text(b, 'sound')
+        order_menu_bodies(self.beats)
+        return self.beats
+
+
+def beats_from_statements(statements: Iterable[Statement],
+                          label: str = '',
+                          labels: Optional[list] = None) -> list:
+    """
+    把顺序语句流折叠成 Beat 序列。
+
+    规则：舞台指令（scene/show/hide/music/sound/voice）吸附在**紧随其后**
+    的第一句台词上。若一段指令后面没有台词（比如结尾淡出），
+    会自成一个 Beat，保证不丢。
+
+    注释 / 原始语句（with、pause…）/ python 代码同样吸附到下一拍，
+    分别进 Comment / Raw / CodeBlock 列，导出时原样回写。
+
+    labels 与 statements 一一对应（每条语句所属 label）；不传时
+    全部使用 label 参数。
+
+    **实现搬到了 `_BeatBuilder`**（P3-12，2026-10-05）：它原本是一个
+    538 行 / 复杂度 101 的函数，7 个可变状态藏在闭包里。
+    这个函数保留原签名，只负责"取 labels → 喂给 builder → 收结果" ——
+    调用方一行都不用改。
+    """
+    statements = list(statements)
+    if labels is None:
+        labels = [label] * len(statements)
+
+    builder = _BeatBuilder(label)
+    builder.note_branch_edges(statements)
+    for stmt, stmt_label in zip(statements, labels):
+        builder.add(stmt, stmt_label)
+    return builder.build()
 
 
 def _call_from_suffix(kind: str, payload: dict) -> str:
