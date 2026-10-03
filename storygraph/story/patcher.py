@@ -1209,6 +1209,143 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
     return inserted_lines, removed_lines
 
 
+def _insert_ids_of(beats: list) -> set:
+    """
+    哪些拍**没有源行号**（= 编辑器里新插进来的卡片）。
+
+    行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来。
+    **"新增的拍"也一样要处理**（用户 2026-10-05："你预料到增加新卡片或者
+    删除原卡片的对照了吗？"）：新拍**没有行号**，而 `patch_export` 里的
+    `usable` 过滤掉了没有行号的拍 → 新卡片的内容**静默丢失**
+    （实测：插入一拍、导出后产物里根本没有那句台词，却报告"增量成功"）。
+    所以这里把它们挑出来，交给**插入通道**处理。
+    """
+    return {i for i, b in enumerate(beats)
+            if not int(getattr(b, 'src_first', 0) or 0)}
+
+
+def _recover_ranges(beats: list, source_path):
+    """
+    取"被删掉的源拍"与"要插入的位置"。
+
+    两条路**必须分开**，因为触发条件不同：
+
+      · **全都没行号**（表格那条路）→ 现算。对位给"新增行"的插入点也要
+        收下来，交给**插入通道**（见 `_set_insert_point` 的 docstring：
+        当替换处理时，插入点若正好落在 `label` 行上，那一行会被静默丢掉）。
+      · **拍上有行号**（编辑器那条路）→ **"表里删了拍"必须每次查**，
+        不能因为"拍上已经有行号"就跳过：编辑器那条路（载入章节 →
+        删一张卡片 → 导出）拍上都带行号，于是删掉的那一拍在源文件里被
+        **静默保留**（2026-10-05 用真实项目验证抓到：214 拍的文件删 1 拍
+        导出后仍是 214 拍、差异 0 行）。这里只**数**被删的拍 + 给新拍
+        补插入点，不改已有行号。
+
+    返回 `(insert_ids, dropped, dropped_src)`。
+    """
+    dropped_src: list = []
+    if not any(getattr(b, 'src_first', 0) for b in beats):
+        aligned_inserts: list = []
+        _m, _t, dropped = recover_source_ranges(beats, source_path,
+                                                dropped_out=dropped_src,
+                                                inserted_out=aligned_inserts)
+        return set(aligned_inserts), dropped, dropped_src
+    try:
+        # `apply_inserts=False`：插入点**不用对位算** —— 对位可能把新拍
+        # 放到"源拍序列的开头"（它没有对应行），锚点会落到 `label` 之前。
+        # 下面用"前后邻居"这条更实在的规则算（实测把它放在 label 后面、
+        # 前一句台词之后）。
+        _m, _t, dropped = recover_source_ranges(
+            beats, source_path, apply_ranges=False, apply_inserts=False,
+            dropped_out=dropped_src)
+    except Exception as e:                    # noqa: BLE001 - 查不了就当没有
+        swallow('story.patcher.patch_export', e)
+        dropped = 0
+    return set(_insert_ids_of(beats)), dropped, dropped_src
+
+
+def _compute_insert_anchors(beats: list, insert_ids, dropped,
+                            dropped_src: list):
+    """
+    给每张新卡片算**插入锚点**（用它在拍序列里的前后邻居）。
+
+    对齐可能把新拍当成"替换"（说话人一样 → 认为是同一拍改了词），
+    于是它还是没行号。这时用前后邻居推锚点。
+
+    选点规则（实机踩过两个坑，都写在这里）：
+
+      · 有"前一个带行号的拍" → 插在它的**末行之后**；
+      · 只能靠后一个拍 → 插在它**起始行的前一行**；
+      · 锚点行的缩进为空（锚点是 `label`/注释这类顶层行）时，
+        缩进改用**下一行**的 —— 否则新台词会顶格写成 `jc "…"`，
+        把文件结构读坏（实测：产物解析后少了 208 句台词）。
+
+    ⚠ **锚点不写进 `src_first`**：写了之后这一拍就不再是"没有行号的拍"，
+    **下一次导出**会被当成"替换一行"处理 —— 实测（真实 chapter1_3）：
+    插一张卡、连导两次，第二次报告"增量补丁：改动 0 行"、产物里那句**没了**。
+    存成运行期锚点（`insert_anchor`，不进 Excel、不入表），
+    每次导出都重新按"插入"处理。
+
+    返回清理后的 `(dropped, dropped_src)`。
+    """
+    for i in sorted(insert_ids):
+        b = beats[i]
+        if int(getattr(b, 'insert_anchor', 0) or 0):
+            continue                     # 上一轮已经算过锚点了，沿用
+        if int(getattr(b, 'src_first', 0) or 0):
+            continue
+        prev = next((beats[k] for k in range(i - 1, -1, -1)
+                     if int(getattr(beats[k], 'src_last', 0) or 0)), None)
+        nxt = next((beats[k] for k in range(i + 1, len(beats))
+                    if int(getattr(beats[k], 'src_first', 0) or 0)), None)
+        anchor = 0
+        if prev is not None and int(getattr(prev, 'src_last', 0) or 0):
+            anchor = int(prev.src_last)
+        elif nxt is not None and int(getattr(nxt, 'src_first', 0) or 0) > 1:
+            anchor = int(nxt.src_first) - 1
+        b.insert_anchor = anchor
+        # 两个邻居都没有 → 留 0，调用方按"找不到插入位置"退回全量
+    if dropped and insert_ids and dropped <= len(insert_ids):
+        # 对齐会把"新插了一拍"错认成"删了一拍 + 插了一拍"（同一件事的
+        # 两面）：新拍本来就要单独插入，所以这里的 dropped 不算"删拍"，
+        # 否则每次插入都会白白退回全量（注释全丢）。
+        # `dropped_src` 是同一件事的另一半，要一起清掉 —— 否则那些
+        # "看着像被删"的区间会和仍在的拍交叠，触发"删除不安全"。
+        dropped = 0
+        dropped_src = []
+    return dropped, dropped_src
+
+
+def _render_blocks(beats: list, indent: str, audit):
+    """
+    每一拍 → `(序号, 起始行, 结束行, 归一化后的生成行, Beat)`。
+
+    另外返回 `{序号: 带缩进的生成行}`（`raw_gen`）—— 插入新拍时要用它，
+    因为插入没有"原文行"可依，只能整段写进去。
+
+    渲染失败（拍本身有问题）就记一笔 `swallow` 并当作"这一拍没有生成行" ——
+    不抛出去，因为增量补丁失败时调用方会退回全量重生成，
+    而"其中一拍渲染不了"不该让整次导出变成异常。
+    """
+    from storygraph.story.beat_render import render_beat_to_rpy
+
+    blocks = []
+    raw_gen: dict = {}
+    for i, b in enumerate(beats):
+        first = int(getattr(b, 'src_first', 0) or 0)
+        last = int(getattr(b, 'src_last', 0) or 0)
+        try:
+            lines = [ln for ln in render_beat_to_rpy(b, indent=indent,
+                                                     audit=audit)
+                     if str(ln).strip()]
+        except Exception as e:                    # noqa: BLE001
+            swallow('story.patcher.patch_export', e)
+            lines = []
+        raw_gen[i] = lines
+        gen = [_norm(ln) for ln in lines]
+        blocks.append((i, first, last, gen, b))
+    return blocks, raw_gen
+
+
 def patch_export(beats: list, source_path, generated_text: str,
                  registry=None, symbols=None, indent: str = '    ') -> PatchResult:
     """
@@ -1241,105 +1378,18 @@ def patch_export(beats: list, source_path, generated_text: str,
         return PatchResult(generated_text, None, 0, len(beats), 0,
                            reasons=[f'源文件读不了：{exc}'])
 
-    # 行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来
-    #
-    # **"新增的拍"也一样要处理**（用户 2026-10-05："你预料到增加新卡片或者
-    # 删除原卡片的对照了吗？"）：编辑器里"插入一张卡片"的新拍**没有行号**，
-    # 而下面的 `usable` 过滤掉了没有行号的拍 → 新卡片的内容**静默丢失**
-    # （实测：插入一拍、导出后产物里根本没有那句台词，却报告"增量成功"）。
-    # 所以这里给它们一个**插入锚点**（前一拍的末行），合并时按"插入"处理。
-    insert_ids = {i for i, b in enumerate(beats)
-                  if not int(getattr(b, 'src_first', 0) or 0)}
-    dropped = 0
-    dropped_src: list = []                   # 被删掉的**源拍**（带源码区间）
-    if not any(getattr(b, 'src_first', 0) for b in beats):
-        # 表格那条路：全都没行号 → 现算。对位给"新增行"的插入点也要收下来，
-        # 交给**插入通道**处理（见 `_set_insert_point` 的 docstring：
-        # 当替换处理时，插入点若正好落在 `label` 行上，那一行会被静默丢掉）。
-        aligned_inserts: list = []
-        _m, _t, dropped = recover_source_ranges(beats, source_path,
-                                                dropped_out=dropped_src,
-                                                inserted_out=aligned_inserts)
-        insert_ids = set(aligned_inserts)
-    else:
-        # **"表里删了拍"必须每次查**，不能因为"拍上已经有行号"就跳过：
-        # 编辑器那条路（载入章节 → 删一张卡片 → 导出）拍上都带行号，
-        # 于是删掉的那一拍在源文件里被**静默保留**（2026-10-05 用真实项目
-        # 验证抓到：214 拍的文件删 1 拍导出后仍是 214 拍、差异 0 行）。
-        # 这里只**数**被删的拍 + 给新拍补插入点，不改已有行号。
-        try:
-            # `apply_inserts=False`：插入点**不用对位算** —— 对位可能把新拍
-            # 放到"源拍序列的开头"（它没有对应行），锚点会落到 `label` 之前。
-            # 下面用"前后邻居"这条更实在的规则算（实测把它放在 label 后面、
-            # 前一句台词之后）。
-            _m, _t, dropped = recover_source_ranges(
-                beats, source_path, apply_ranges=False, apply_inserts=False,
-                dropped_out=dropped_src)
-        except Exception as e:                    # noqa: BLE001 - 查不了就当没有
-            swallow('story.patcher.patch_export', e)
-            dropped = 0
-        # 兜底：对齐可能把新拍当成"替换"（说话人一样 → 认为是同一拍改了词），
-        # 于是它还是没行号。这时用**它在拍序列里的前后邻居**推锚点。
-        #
-        # 选点规则（实机踩过两个坑，都写在这里）：
-        #   · 有"前一个带行号的拍"→ 插在它的**末行之后**；
-        #   · 只能靠后一个拍 → 插在它**起始行的前一行**；
-        #   · 锚点行的缩进为空（锚点是 `label`/注释这类顶层行）时，
-        #     缩进改用**下一行**的 —— 否则新台词会顶格写成 `jc "…"`，
-        #     把文件结构读坏（实测：产物解析后少了 208 句台词）。
-        for i in sorted(insert_ids):
-            b = beats[i]
-            if int(getattr(b, 'insert_anchor', 0) or 0):
-                continue                     # 上一轮已经算过锚点了，沿用
-            if int(getattr(b, 'src_first', 0) or 0):
-                continue
-            prev = next((beats[k] for k in range(i - 1, -1, -1)
-                         if int(getattr(beats[k], 'src_last', 0) or 0)), None)
-            nxt = next((beats[k] for k in range(i + 1, len(beats))
-                        if int(getattr(beats[k], 'src_first', 0) or 0)), None)
-            anchor = 0
-            if prev is not None and int(getattr(prev, 'src_last', 0) or 0):
-                anchor = int(prev.src_last)
-            elif nxt is not None and int(getattr(nxt, 'src_first', 0) or 0) > 1:
-                anchor = int(nxt.src_first) - 1
-            # **锚点不写进 `src_first`**（写进去就会踩下面这个坑）：
-            # 写了之后这一拍就不再是"没有行号的拍"，**下一次导出**会被当成
-            # "替换一行"处理 —— 实测（真实 chapter1_3）：插一张卡、连导两次，
-            # 第二次报告"增量补丁：改动 0 行"、产物里那句**没了**。
-            # 存成运行期锚点（`insert_anchor`，不进 Excel、不入表），
-            # 每次导出都重新按"插入"处理。
-            b.insert_anchor = anchor
-            # 两个邻居都没有 → 留 0，下面按"找不到插入位置"退回全量
-        if dropped and insert_ids and dropped <= len(insert_ids):
-            # 对齐会把"新插了一拍"错认成"删了一拍 + 插了一拍"（同一件事的
-            # 两面）：新拍本来就要单独插入，所以这里的 dropped 不算"删拍"，
-            # 否则每次插入都会白白退回全量（注释全丢）。
-            # `dropped_src` 是同一件事的另一半，要一起清掉 —— 否则那些
-            # "看着像被删"的区间会和仍在的拍交叠，触发"删除不安全"。
-            dropped = 0
-            dropped_src = []
+    # 行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来。
+    # 细节见 `_insert_ids_of` / `_recover_ranges` 的 docstring。
+    insert_ids, dropped, dropped_src = _recover_ranges(beats, source_path)
+    dropped, dropped_src = _compute_insert_anchors(
+        beats, insert_ids, dropped, dropped_src)
 
-    from storygraph.story.beat_render import render_beat_to_rpy
     from storygraph.story.dsl import Audit
     audit = Audit(symbols) if symbols is not None else None
 
     orig_lines = original.splitlines()
     out_lines = list(orig_lines)
-    blocks = []
-    raw_gen: dict = {}                       # 带缩进的生成行（插入新拍时要用）
-    for i, b in enumerate(beats):
-        first = int(getattr(b, 'src_first', 0) or 0)
-        last = int(getattr(b, 'src_last', 0) or 0)
-        try:
-            lines = [ln for ln in render_beat_to_rpy(b, indent=indent,
-                                                     audit=audit)
-                     if str(ln).strip()]
-        except Exception as e:                    # noqa: BLE001
-            swallow('story.patcher.patch_export', e)
-            lines = []
-        raw_gen[i] = lines
-        gen = [_norm(ln) for ln in lines]
-        blocks.append((i, first, last, gen, b))
+    blocks, raw_gen = _render_blocks(beats, indent, audit)
 
     matched = 0
     changed = 0
