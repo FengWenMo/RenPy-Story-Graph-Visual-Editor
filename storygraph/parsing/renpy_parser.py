@@ -118,7 +118,8 @@ except ImportError:
     Graph = None
 
 from storygraph.core.uid import make_translation_uid
-from storygraph.core.statement import Statement, StatementKind
+from storygraph.core.statement import (CONTENT_HASH_HEX, Statement,
+                                       StatementKind)
 
 
 # ====================================================================
@@ -2775,7 +2776,20 @@ class TranslationUnitGenerator:
         return units
 
     def _unique_id(self, label: str, content: str) -> str:
-        h = hashlib.md5(content.encode('utf-8')).hexdigest()[:8]
+        """
+        翻译单元 id：`{安全 label}_{内容指纹}`，冲突再加 `_1`/`_2`。
+
+        ⚠ 指纹位数**必须**与 `core.statement.CONTENT_HASH_HEX` 走同一个常量
+        （2026-10-05 修）。这里原来是**写死的 `[:8]`**，而 `Statement`
+        那边也写死 `[:8]` —— 两处手抄同一个数字，正是文档里明令禁止的
+        "各自拼接"（`core/uid.py` 的 docstring 第 4-5 行）。
+        后果不是立刻错，而是**改位数时只改一边**：
+        `Statement.content_hash` 变成 16 位、TU 的 hash 还是 8 位，
+        两者不再"逐字节一致"，而没有任何测试会发现
+        （各自内部都自洽）。所以这里改成引用常量。
+        """
+        h = hashlib.md5(content.encode('utf-8')).hexdigest()[
+            :CONTENT_HASH_HEX]
         base = make_translation_uid(label, h)
         ident = base
         counter = 1

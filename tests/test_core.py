@@ -12,6 +12,7 @@ core.statement 与 core.uid 的单元测试。
 """
 
 from storygraph.core.statement import Statement, StatementKind, validate_statement
+from storygraph.core.statement import CONTENT_HASH_HEX
 from storygraph.core.uid import sanitize_label, make_translation_uid
 
 
@@ -25,18 +26,18 @@ class TestContentHash:
         import hashlib
         expected = hashlib.md5(
             'say\0e\0Hello'.encode('utf-8')
-        ).hexdigest()[:8]
+        ).hexdigest()[:CONTENT_HASH_HEX]
         assert Statement.make_say('e', 'Hello').content_hash == expected
 
     def test_menu_option_uses_menu_prefix(self):
         """menu_option 的 prefix 是 'menu'（历史兼容，不是笔误）。"""
         import hashlib
-        expected = hashlib.md5('menu\0Yes'.encode('utf-8')).hexdigest()[:8]
+        expected = hashlib.md5('menu\0Yes'.encode('utf-8')).hexdigest()[:CONTENT_HASH_HEX]
         assert Statement.make_menu_option('Yes').content_hash == expected
 
     def test_menu_caption_hash(self):
         import hashlib
-        expected = hashlib.md5('menu\0Choose'.encode('utf-8')).hexdigest()[:8]
+        expected = hashlib.md5('menu\0Choose'.encode('utf-8')).hexdigest()[:CONTENT_HASH_HEX]
         assert Statement.make_menu('Choose').content_hash == expected
 
     def test_non_hashable_kinds_return_empty(self):
@@ -62,7 +63,7 @@ class TestContentHash:
 
     def test_extend_hash(self):
         import hashlib
-        expected = hashlib.md5('extend\0more'.encode('utf-8')).hexdigest()[:8]
+        expected = hashlib.md5('extend\0more'.encode('utf-8')).hexdigest()[:CONTENT_HASH_HEX]
         assert Statement.make_extend('more').content_hash == expected
 
 

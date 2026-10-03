@@ -7,7 +7,10 @@
 格式：{safe_label}_{content_hash}
   · safe_label: label 中非 \\w 字符替换为下划线，去首尾下划线；
                 空 label 退化为 'unnamed'
-  · content_hash: 8 位 hex
+  · content_hash: `statement.CONTENT_HASH_HEX` 位 hex（2026-10-05 起是 **16**，
+    原来是 8 —— 32 bit 的生日碰撞门槛只有 65536 个内容，
+    撞上会让两条不同台词共用一个翻译单元身份，已有的译文就对不上号了。
+    位数只由那一个常量决定，本模块**不重复写死**。）
 
 不保证可反解（label 可能含下划线，冲突后缀 _1/_2 也可能撞车）。
 需要 label 时从结构化对象取字段，不要从 uid 反推。

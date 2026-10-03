@@ -10,7 +10,11 @@ Statement 类型系统（Phase 1 Step 2 S1）。
   · 每种 kind 显式定义哈希输入格式，不用 canonical(payload)
 
 与 TranslationUnitGenerator 的契约：
-  · content_hash 与 TU 的 hash 部分必须逐字节一致
+  · content_hash 与 TU 的 hash 部分必须逐字节一致。
+    ⚠ 这句说的是"**两边算法要一致**"（唯一真源在 `core/uid.py`），
+    **不是**"必须等于某个外部生产的值" —— 它是本项目自己算的指纹。
+    所以位数可以一起改（8 → 16，见 `CONTENT_HASH_HEX`），
+    不存在"必须迁就 Ren'Py 原生 tl 文件"这回事。
   · uid 拼接由 core.uid.make_translation_uid 统一负责
 """
 from __future__ import annotations
@@ -19,8 +23,7 @@ import hashlib
 from dataclasses import dataclass, field
 
 #: `$` 语句"紧凑写法"的**行首标记**（见 `Statement.make_python`）。
-#:
-#: 2026-10-05 二次修正（第一次是把三处硬编码收敛到这一个常量）：
+#:#: 2026-10-05 二次修正（第一次是把三处硬编码收敛到这一个常量）：
 #: 标记**不能再是控制字符**。
 #:
 #: 上一版用 `'\x01'` 承载"原文紧凑写 `$code`"，但这一位要经过「代码」列
@@ -121,6 +124,49 @@ class StatementKind:
     ALL = (SAY, EXTEND, SHOW, SCENE, HIDE, PLAY, VOICE,
            MENU, MENU_OPTION, JUMP, CALL, RETURN, PYTHON,
            COMMENT, RAW, UNKNOWN)
+
+
+#: `content_hash` 的**十六进制位数**（唯一真源，见 `_compute_content_hash`）。
+#:
+#: **为什么是 16 而不是 8**（P3-15，2026-10-05）
+#: -------------------------------------------------
+#: 原来是 `md5(...).hexdigest()[:8]` —— 只有 **32 bit**。风险清单把它列为
+#: P3-15：8 位 hex 的生日碰撞门槛是 `2**16 = 65536` 个不同内容，
+#: 也就是**约 65% 概率在 7.7 万条时撞一次**。真实项目（sr_general）
+#: 已经 3800 条 → 约 0.17%；一个 30 章的中大型项目就上到 1% 量级。
+#:
+#: 撞了会怎样（**不是**丢内容，是"身份"错）：
+#:   · `make_translation_uid` 把 `{label}_{hash}` 当翻译单元的**身份**，
+#:     `_unique_id` 用 `_1`/`_2` 后缀去重 —— 两条**不同**台词撞上同一个
+#:     hash 时，第二条会被改名，于是**已有译文对不上号**；
+#:   · `collab_store` 拿它当"内容变没变"的判据（`row['content_hash']
+#:     == chash`）—— 撞了就当没变，改动静默不同步。
+#:
+#: 16 位 = 64 bit，门槛抬到 `2**32 ≈ 43 亿`，对任何剧本都是零风险，
+#: 而 uid 只长 8 个字符（Excel 列宽、工具链都没压力）。
+#:
+#: **为什么可以改**：`content_hash` 是**本项目自己算的**，不是 Ren'Py
+#: 外部格式 —— 文档里那句"与 TU 的 hash 部分逐字节一致"指的是
+#: `Statement` 与 `TranslationUnitGenerator` **两边算法要一致**
+#: （唯一真源在 `core/uid.py`），不是"必须等于某个外部生产的值"。
+#: 所以两边一起改就自洽；`tests/test_core.py` 里那几条"手动拼 md5"
+#: 的断言断言的是**格式**，跟着这条常量走。
+#:
+#: 老数据的兼容：既有的协作库 / 旧表里存的是 8 位。
+#: 我们**不做迁移**——`collab_store` 的比较是"不等 → 认为变了 → 更新"，
+#: 所以第一次同步会把旧 hash 刷成新的，代价是一次多余的上行；
+#: 反过来（当成没变）才危险。`tests/test_no_short_content_hash.py`
+#: 把这条常量的下限钉住，防止有人手滑改回 8。
+CONTENT_HASH_HEX = 16
+
+#: 公开符号。
+#:
+#: `CONTENT_HASH_HEX` **必须**对外可见：`parsing/renpy_parser.py` 的
+#: `TranslationUnitGenerator._unique_id` 也要用它拼翻译单元 id ——
+#: 两处各写一个 `[:8]` 正是文档禁止的"各自拼接"，改位数时会只改一边。
+#: 由 `tests/test_content_hash_contract.py` 守。
+__all__ = ['CONTENT_HASH_HEX', 'Statement', 'StatementKind',
+           'validate_hash_contract']
 
 
 # 每种 kind 参与哈希的字段
@@ -245,7 +291,7 @@ def _compute_content_hash(kind: str, payload: dict) -> str:
         v = payload.get(f, '')
         parts.append(str(v))
     content = '\0'.join(parts)
-    return hashlib.md5(content.encode('utf-8')).hexdigest()[:8]
+    return hashlib.md5(content.encode('utf-8')).hexdigest()[:CONTENT_HASH_HEX]
 
 
 @dataclass
@@ -258,7 +304,8 @@ class Statement:
       payload:       按 kind 不同；见工厂方法
       condition:     前缀条件（来自 if 累积）
       source:        (file, line)，位置元信息，不参与相等比较
-      content_hash:  内容指纹（8 位 hex），'' 表示不参与哈希；
+      content_hash:  内容指纹（`CONTENT_HASH_HEX` 位 hex，默认 16），
+                     '' 表示不参与哈希；
                      由工厂方法计算，不参与相等比较
 
     相等语义：kind + payload + condition
