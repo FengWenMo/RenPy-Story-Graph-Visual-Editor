@@ -300,9 +300,22 @@ class Beat:
         _sfx_cell, sfx_params = compose_audio_cell(self, 'sound')
         bgm = self.bgm or _bgm_cell
         sfx = self.sfx or _sfx_cell
+        # `notes` 已经取消（UI 不再暴露，见 `ADVANCED_FIELDS` 的说明），
+        # 但**不能因此静默丢掉别人设过的值**（2026-10-05 修，
+        # `test_editor_session_mixin_contract.TestFieldContract` 抓到）：
+        # `Beat(notes='…')` 直接构造出来的拍（脚本、单测、老的协作数据）
+        # 走 `to_row` 时那个值会**蒸发且不报错**。
+        #
+        # 修法与 `from_row` 对称：读的时候把 `Notes` 并进 `comment`，
+        # 写的时候也把 `self.notes` 并进注释列。这样"设过 notes 的拍"
+        # 往返一次之后内容还在（落在「注释」列）。
+        comment = self.comment
+        if self.notes:
+            comment = (f'{comment}\n{self.notes}'.strip()
+                       if comment else self.notes)
         return [
             self.line_id, self.seq, self.label, self.kind,
-            self.speaker, self.comment, menu_caption_text(self.text),
+            self.speaker, comment, menu_caption_text(self.text),
             self.condition,
             compose_scene_cell(self),
             compose_show_cell(self),

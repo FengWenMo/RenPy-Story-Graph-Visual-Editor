@@ -688,8 +688,10 @@ class TestUiEntryPoints:
         assert hasattr(MainWindowQt, 'open_node_in_excel')
 
     def test_menu_label_present_in_source(self):
-        from _source_paths import main_window_source
-        text = main_window_source().read_text(encoding='utf-8')
+        # 2026-10-05：菜单文案搬到了 `window_nodes.py`（右键菜单那一块），
+        # 所以要扫**整个前端**（入口 + 5 个 mixin），不能只读入口文件。
+        from _source_paths import main_window_source_text
+        text = main_window_source_text()
         assert '用 Excel 打开此章节' in text
         # 旧版还有「在编辑器中打开」（上一版漏了它）
         assert '在编辑器中打开' in text

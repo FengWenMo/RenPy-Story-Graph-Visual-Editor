@@ -85,7 +85,20 @@ from storygraph.story.beat_render import make_symbols
 #: 主区字段（每一拍真正常改的）—— 与两套前端共用同一份划分
 PRIMARY_FIELDS = ['Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
 #: 高级区字段（默认折叠）
-ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Notes', 'Stage']
+#:
+#: **不含 `Notes`**（2026-10-05 定：这个字段取消）。它以前在这里，
+#: 于是前端照样建"备注"控件、照样把值回读进 `Beat.notes` ——
+#: 而 `BEAT_FIELDS` 里**没有这一列**，`to_row` 不写它，
+#: 所以编剧认真写的备注**导出一次就蒸发，且不报错**。
+#:
+#: 二选一里选了"取消"而不是"补一列"，理由是它与 `Comment` 完全重叠：
+#: `Comment`（表头「注释」）在**主区**、是 `BEAT_FIELDS` 里真有的列、
+#: 导出会写。留两个语义相同的输入框，只会让人猜该填哪个。
+#:
+#: 老表里的 `Notes` 列**仍然读得回来**（`Beat.from_row` 把它并进
+#: `Comment`，绝不丢字）—— 这条兼容链路没动，见
+#: `tests/test_editor_session_mixin_contract.py` 的 `TestFieldContract`。
+ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage']
 
 
 class EditorSession(TableSessionMixin, GraphSessionMixin,

@@ -33,12 +33,15 @@ from pathlib import Path
 
 import pytest
 
-from _source_paths import main_window_source
-MAIN_WINDOW = main_window_source()
+from _source_paths import main_window_source_text
+#: **整个前端**的源码（入口 + 5 个 mixin）。2026-10-05 起 `MainWindowQt`
+#: 拆成六个文件，所以"某回调在不在"要看全部 —— 只读入口会误报
+#: "按钮指向了不存在的方法"。
+SOURCE_TEXT = main_window_source_text()
 
 
 def _source() -> str:
-    return MAIN_WINDOW.read_text(encoding='utf-8')
+    return SOURCE_TEXT
 
 
 def _defined_names() -> set:

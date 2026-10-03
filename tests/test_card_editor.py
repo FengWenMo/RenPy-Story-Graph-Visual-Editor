@@ -101,10 +101,18 @@ class TestCardShape:
 
         注：`BGM` 2026-09-30 已按用户要求提到主区（策划每天要填音乐），
         不再算"程序向"；这里留下的才是该折叠的。
+
+        `Notes` 2026-10-05 **已取消**（不在主区也不在高级区）：
+        它与主区的 `Comment`（表头「注释」）语义重叠，而 `Comment` 才是
+        `BEAT_FIELDS` 里真有的列。留着它等于让用户对着一个注定蒸发的
+        输入框认真写字（`tests/test_editor_session_mixin_contract.py`
+        的 `TestFieldContract` 就是抓这个的）。
         """
-        for name in ('CodeBlock', 'Stage', 'SFX', 'Kind', 'Notes'):
+        for name in ('CodeBlock', 'Stage', 'SFX', 'Kind'):
             assert name not in PRIMARY_FIELDS
             assert name in ADVANCED_FIELDS
+        assert 'Notes' not in PRIMARY_FIELDS, 'Notes 已取消，不该在主区'
+        assert 'Notes' not in ADVANCED_FIELDS, 'Notes 已取消，不该在高级区'
 
     def test_advanced_is_collapsed_by_default(self, qapp, ui_window):
         assert ADVANCED_FIELDS, '高级区不该是空的'

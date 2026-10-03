@@ -19,7 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from _source_paths import legacy_editor_source, main_window_source
+from _source_paths import (legacy_editor_source,
+                           main_window_source,
+                           main_window_source_text,
+                           main_window_sources)
 
 
 # ------------------------------------------------------------------
@@ -182,15 +185,27 @@ class TestUiWiring:
     """
 
     @staticmethod
-    def _missing(path) -> list:
-        src = Path(path).read_text(encoding='utf-8')
-        tree = ast.parse(src)
-        defined = {n.name for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        return sorted(_iter_command_targets(tree) - defined)
+    def _missing(paths) -> list:
+        """
+        `paths` 可以是单个文件**或一组**（2026-10-05：`MainWindowQt` 拆成
+        入口 + 5 个 mixin，回调散在 6 个文件里 —— 只扫入口会误报 39 个
+        "回调不存在"，而它们全都好好地在 mixin 里）。
+        """
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
+        defined = set()
+        for p in paths:
+            tree = ast.parse(Path(p).read_text(encoding='utf-8'))
+            defined |= {n.name for n in ast.walk(tree)
+                        if isinstance(n, (ast.FunctionDef,
+                                          ast.AsyncFunctionDef))}
+            tree = None
+        # 目标要从**入口**那个文件取（控件是它在搭）
+        first = ast.parse(Path(paths[0]).read_text(encoding='utf-8'))
+        return sorted(_iter_command_targets(first) - defined)
 
     def test_qt_window_callbacks_all_exist(self):
-        missing = self._missing(main_window_source())
+        missing = self._missing(main_window_sources())
         assert missing == [], f'按钮/菜单指向了不存在的方法：{missing}'
 
     def test_qt_window_has_no_tkinter_style_command(self):
@@ -199,7 +214,7 @@ class TestUiWiring:
         老代码粘回来了 —— 而 Qt **不认**这个关键字，等于根本没接线
         （这正是"点了没反应"最容易的来源）。
         """
-        src = Path(main_window_source()).read_text(encoding='utf-8')
+        src = main_window_source_text()
         assert 'command=self.' not in src
         assert 'import tkinter' not in src
 

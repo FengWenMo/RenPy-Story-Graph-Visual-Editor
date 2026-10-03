@@ -57,13 +57,26 @@ class ExportMixin:
     """
     导出那一半（见模块 docstring 的职责边界）。
 
-    它**要求宿主提供** `registry()` / `refresh_symbols()` / `compile()` /
-    `symbols` / `project_root` / `script_path` / `beats` —— 见 `REQUIRES`。
+    它**要求宿主提供** `registry()` / `compile()` / `symbols` /
+    `project_root` / `script_path` / `beats`，以及跨块共享状态
+    `_transforms_decision` —— 见 `REQUIRES`。
     """
 
     #: 本 mixin 要求宿主（或其它 mixin）提供的成员（**实测**，不是凭印象）。
+    #:
+    #: `_transforms_decision` 是**跨块共享状态**（2026-10-05 补）：
+    #: `AssetRegistryMixin.register_missing_assets` 在资源表变了之后把它
+    #: 清成 `None`（写），本 mixin 的 `should_write_transforms` 读它当缓存。
+    #:
+    #: 漏声明的后果**不是报错**，而是"属性是否存在取决于之前发生过什么"：
+    #: `getattr(self, '_transforms_decision', None)` 在宿主没初始化时
+    #: 静默拿 `None` → 重新判定一遍 → 症状是"偶尔多写一段 transform 定义"，
+    #: 没人会把这和拆分联系起来。所以它必须两头都说清：
+    #: 读它的人（本 mixin）声明、写它的人（资产块）声明、
+    #: 宿主 `EditorSession.__init__` 初始化。
+    #: 守卫：`tests/test_editor_session_mixin_contract.py`。
     REQUIRES = ('registry', 'compile', 'symbols', 'project_root',
-                'script_path', 'beats')
+                'script_path', 'beats', '_transforms_decision')
 
     EXPORT_ENGINES = ('unity', 'godot', 'json', 'csv', 'renpy')
     def export_ir(self, engine: str, out_dir) -> dict:

@@ -1,0 +1,1023 @@
+{
+ "steps": [
+  [
+   "title-unknown",
+   {
+    "title_has_project": true
+   }
+  ],
+  [
+   "page",
+   "0"
+  ],
+  [
+   "beats",
+   [
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "show": "ling base_arms_akimbo sigh@i11",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "ling oh",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "mary smile@right",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "\u0000menu"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "去屋顶看看"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "先回教室"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "show": "ling happy@leftish",
+     "speaker": "e",
+     "text": "风好大。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "e",
+     "text": "还是算了。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    }
+   ]
+  ],
+  [
+   "graph-empty",
+   null
+  ],
+  [
+   "open_project_path",
+   {
+    "keys": [
+     "counts",
+     "error",
+     "ok",
+     "registry"
+    ],
+    "ok": true
+   }
+  ],
+  [
+   "graph-after-open",
+   null
+  ],
+  [
+   "import_chapter_files",
+   {
+    "keys": [
+     "added_edges",
+     "added_nodes",
+     "control_flow",
+     "edges",
+     "error",
+     "errors",
+     "files",
+     "graph",
+     "nodes",
+     "ok",
+     "warnings"
+    ],
+    "ok": true
+   }
+  ],
+  [
+   "graph-after-import",
+   {
+    "edges": [
+     [
+      "1",
+      "2",
+      "jump"
+     ],
+     [
+      "1",
+      "3",
+      "jump"
+     ],
+     [
+      "2",
+      "4",
+      "jump"
+     ],
+     [
+      "3",
+      "4",
+      "jump"
+     ]
+    ],
+    "nodes": [
+     "ch01",
+     "ch01_class",
+     "ch01_end",
+     "ch01_roof"
+    ]
+   }
+  ],
+  [
+   "page-graph",
+   "0"
+  ],
+  [
+   "loaded-index-initial",
+   0
+  ],
+  [
+   "next_beat[0]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index[0]",
+   1
+  ],
+  [
+   "body[0]",
+   {
+    "text": "还行，就是雨下了一整晚。"
+   }
+  ],
+  [
+   "next_beat[1]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index[1]",
+   2
+  ],
+  [
+   "body[1]",
+   {
+    "text": ""
+   }
+  ],
+  [
+   "next_beat[2]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index[2]",
+   3
+  ],
+  [
+   "body[2]",
+   {
+    "text": ""
+   }
+  ],
+  [
+   "prev_beat",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index-after-prev",
+   2
+  ],
+  [
+   "show_index[0]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index-at[0]",
+   0
+  ],
+  [
+   "body-at[0]",
+   {
+    "text": "早上好，昨晚睡得好吗？"
+   }
+  ],
+  [
+   "status-at[0]",
+   "✔ 已导入 1 章（ch01.rpy）：新增模块 4 个 / 连线 4 条，图上共 4 个模块 · 4 条连线"
+  ],
+  [
+   "show_index[4]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index-at[4]",
+   4
+  ],
+  [
+   "body-at[4]",
+   {
+    "text": "去屋顶看看"
+   }
+  ],
+  [
+   "status-at[4]",
+   "✔ 已导入 1 章（ch01.rpy）：新增模块 4 个 / 连线 4 条，图上共 4 个模块 · 4 条连线"
+  ],
+  [
+   "show_index[7]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index-at[7]",
+   7
+  ],
+  [
+   "body-at[7]",
+   {
+    "text": ""
+   }
+  ],
+  [
+   "status-at[7]",
+   "✔ 已导入 1 章（ch01.rpy）：新增模块 4 个 / 连线 4 条，图上共 4 个模块 · 4 条连线"
+  ],
+  [
+   "show_index[11]",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "loaded-index-at[11]",
+   11
+  ],
+  [
+   "body-at[11]",
+   {
+    "text": ""
+   }
+  ],
+  [
+   "status-at[11]",
+   "✔ 已导入 1 章（ch01.rpy）：新增模块 4 个 / 连线 4 条，图上共 4 个模块 · 4 条连线"
+  ],
+  [
+   "insert_card",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "beats-after-insert",
+   [
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "ling oh",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "mary smile@right",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "\u0000menu"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "去屋顶看看"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "先回教室"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "show": "ling happy@leftish",
+     "speaker": "e",
+     "text": "风好大。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "e",
+     "text": "还是算了。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    }
+   ]
+  ],
+  [
+   "delete_card",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "beats-after-delete",
+   [
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "ling oh",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "mary smile@right",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "\u0000menu"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "去屋顶看看"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "先回教室"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "show": "ling happy@leftish",
+     "speaker": "e",
+     "text": "风好大。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "e",
+     "text": "还是算了。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    }
+   ]
+  ],
+  [
+   "check_logic",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "analysis-status",
+   "✔ 检查完成：没有发现结构断裂"
+  ],
+  [
+   "clear_analysis",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "validate",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "save_layout",
+   {
+    "ok": true,
+    "type": "str"
+   }
+  ],
+  [
+   "layout-file-exists",
+   true
+  ],
+  [
+   "load_layout",
+   {
+    "ok": true,
+    "type": "str"
+   }
+  ],
+  [
+   "graph-after-load-layout",
+   {
+    "edges": [
+     [
+      "1",
+      "2",
+      "jump"
+     ],
+     [
+      "1",
+      "3",
+      "jump"
+     ],
+     [
+      "2",
+      "4",
+      "jump"
+     ],
+     [
+      "3",
+      "4",
+      "jump"
+     ]
+    ],
+    "nodes": [
+     "ch01",
+     "ch01_class",
+     "ch01_end",
+     "ch01_roof"
+    ]
+   }
+  ],
+  [
+   "export_control_flow",
+   {
+    "ok": true,
+    "type": "str"
+   }
+  ],
+  [
+   "cf-exists",
+   true
+  ],
+  [
+   "undo_graph",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "graph-after-undo",
+   {
+    "edges": [
+     [
+      "1",
+      "2",
+      "jump"
+     ],
+     [
+      "1",
+      "3",
+      "jump"
+     ],
+     [
+      "2",
+      "4",
+      "jump"
+     ],
+     [
+      "3",
+      "4",
+      "jump"
+     ]
+    ],
+    "nodes": [
+     "ch01",
+     "ch01_class",
+     "ch01_end",
+     "ch01_roof"
+    ]
+   }
+  ],
+  [
+   "redo_graph",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "graph-after-redo",
+   {
+    "edges": [
+     [
+      "1",
+      "2",
+      "jump"
+     ],
+     [
+      "1",
+      "3",
+      "jump"
+     ],
+     [
+      "2",
+      "4",
+      "jump"
+     ],
+     [
+      "3",
+      "4",
+      "jump"
+     ]
+    ],
+    "nodes": [
+     "ch01",
+     "ch01_class",
+     "ch01_end",
+     "ch01_roof"
+    ]
+   }
+  ],
+  [
+   "undo_current_beat",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "beats-after-undo-beat",
+   [
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "ling oh",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "mary smile@right",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "\u0000menu"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "去屋顶看看"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": "先回教室"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "show": "ling happy@leftish",
+     "speaker": "e",
+     "text": "风好大。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "e",
+     "text": "还是算了。"
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    }
+   ]
+  ],
+  [
+   "remove_chapter",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "graph-after-remove",
+   {
+    "edges": [],
+    "nodes": []
+   }
+  ],
+  [
+   "clear_graph",
+   {
+    "ok": true,
+    "type": "NoneType"
+   }
+  ],
+  [
+   "graph-after-clear",
+   {
+    "edges": [],
+    "nodes": []
+   }
+  ],
+  [
+   "page-final",
+   "0"
+  ],
+  [
+   "status-final",
+   "剧情图本来就是空的。"
+  ]
+ ]
+}
