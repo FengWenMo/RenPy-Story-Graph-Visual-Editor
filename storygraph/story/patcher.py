@@ -1090,6 +1090,125 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
 #  四、主入口
 # ==================================================================
 
+def _insert_points_for(beats, insert_ids, raw_gen: dict) -> tuple:
+    """
+    新增的拍 → `{插入锚点行号: [该锚点上的每一拍的渲染行]}`。
+
+    锚点优先用**运行期锚点**（`beat.insert_anchor`，见 `patch_export` 里
+    "锚点不写进 `src_first`"那段），其次才是表格那条路按对位算出来的
+    `src_first`。
+
+    ⚠ 锚点行号**不写回拍**：写进 `src_first` 之后这一拍就不再是
+    "没有行号的拍"，**下一次导出**会被当成"替换一行"处理 ——
+    实测（真实 chapter1_3）插一张卡、连导两次，第二次报告
+    "增量补丁：改动 0 行"、产物里那句**没了**。
+
+    `raw_gen` 是 `{拍序号: 已渲染的行}`（`patch_export` 算好的），
+    返回的字典里同一锚点上有多张卡片时按拍序排好。
+
+    返回 `(anchors, failed)`。
+    """
+    anchors: dict = {}
+    failed = 0
+    for i in sorted(insert_ids):
+        point = int(getattr(beats[i], 'insert_anchor', 0) or 0) or \
+            int(getattr(beats[i], 'src_first', 0) or 0)
+        rows = list(raw_gen.get(i) or [])
+        if not point or not rows:
+            failed += 1                       # 没有锚点（文件头？）→ 不能安全插
+            continue
+        anchors.setdefault(point, []).append(rows)
+    return anchors, failed
+
+
+def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
+    """
+    被删掉的源拍 → 可以安全删除的区间列表。
+
+    用户 2026-10-05："为何删行无法进行增量操作？" → 这一版实现了。
+    与"插入"同一套纪律：**只动该动的那几行，凡是拿不准的一律放弃**
+    （退回全量），并由 `patch_export` 末尾的全局校验兜底。
+
+    放弃的情形（**不猜**）：
+
+      · 区间越界 / 空；
+      · 区间里含块头（`menu:` / `if` / `elif` / `else:` / `python:`）——
+        删掉会留下悬空的块结构（上一版就是在这里把 `if` 体的缩进压平、
+        语法直接坏掉）；
+      · 区间与**仍在的拍**交叠（那几行不只属于被删的拍）。
+
+    返回 `(delete_ranges, delete_failed)`。
+    """
+    delete_ranges: list = []
+    delete_failed = 0
+    if not dropped_src:
+        return delete_ranges, delete_failed
+    taken = [(first, last) for (_i, first, last, _g, _b) in blocks if first]
+    for b in dropped_src:
+        first = int(getattr(b, 'src_first', 0) or 0)
+        last = int(getattr(b, 'src_last', 0) or 0)
+        if first < 1 or last < first or last > len(orig_lines):
+            delete_failed += 1
+            continue
+        body = [_norm(x) for x in orig_lines[first - 1:last]]
+        if any(_BLOCK_HEAD_RE.match(x) for x in body if x):
+            delete_failed += 1                # 含块头 → 会删坏结构
+            continue
+        if any(first <= t_last and last >= t_first
+               for t_first, t_last in taken if t_first and t_last >= t_first):
+            delete_failed += 1                # 与仍在的拍交叠 → 不敢删
+            continue
+        delete_ranges.append((first, last))
+    return delete_ranges, delete_failed
+
+
+def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
+                          indent: str) -> tuple:
+    """
+    插入 + 删除**一起按位置从后往前**做（先动后面的行，前面的行号才不受影响）。
+
+    返回 `(inserted_lines, removed_lines)`。
+
+    两处容易写错、都留着注释：
+      · **锚点是块头**（`menu:` / `"选项":` / `if …:`）时不能紧贴着插，
+        否则新台词会掉进那个块里（见 `_insert_anchor`）；
+      · **缩进必须自己补** —— `render_beat_to_rpy` 返回的是"相对行"
+        （不带基础缩进）。替换路径之所以看着没问题，是因为
+        `_replace_matched` 保留原文那一行的缩进；插入没有"原文行"可依，
+        只能借**锚点行**的缩进（新卡片在结构上就是锚点的兄弟节点）。
+    """
+    inserted_lines = 0
+    removed_lines = 0
+    ops: list = []
+    for first, last in delete_ranges:
+        ops.append((last, 0, first, last))    # (位置, 类型 0=删, 起, 止)
+    for point, rows in anchors.items():
+        # 同一锚点上的多张新卡片保持拍序（`rows` 是"每张卡片的行"的列表）
+        flat = [ln for group in rows for ln in group]
+        ops.append((point, 1, point, flat))   # (位置, 类型 1=插, 点, 行)
+    for _pos, kind, a, b in sorted(ops, reverse=True,
+                                   key=lambda t: (t[0], t[1])):
+        if kind == 0:
+            del out_lines[a - 1:b]
+            removed_lines += b - a + 1
+        else:
+            at = max(0, min(a, len(out_lines)))
+            # **锚点是块头**时不能紧贴着插（见 `_insert_anchor` 的 docstring）
+            at, pad_hint = _insert_anchor(out_lines, at)
+            if pad_hint is not None:
+                pad = pad_hint
+            else:
+                pad = _indent_of(out_lines[at - 1]) if at >= 1 else ''
+            if not pad:
+                # 锚点是 `label` / 注释这类顶层行 → 用**下一行**的缩进，
+                # 否则顶格写出来的台词会把文件结构读坏。
+                nxt_line = out_lines[at] if 0 <= at < len(out_lines) else ''
+                pad = _indent_of(nxt_line) or indent
+            out_lines[at:at] = [pad + ln for ln in b]
+            inserted_lines += len(b)
+    return inserted_lines, removed_lines
+
+
 def patch_export(beats: list, source_path, generated_text: str,
                  registry=None, symbols=None, indent: str = '    ') -> PatchResult:
     """
@@ -1317,85 +1436,19 @@ def patch_export(beats: list, source_path, generated_text: str,
         changed += n_changed
         out_lines[first - 1:last] = new_seg
 
-    # —— 被删掉的拍：**精确删掉它们的那几行** ——
+    # —— 被删除的拍：**精确删掉它们的那几行** ——
     #
     # 用户 2026-10-05："为何删行无法进行增量操作？" → 这一版实现了。
     # 与"插入"同一套纪律：只动该动的那几行，凡是拿不准的一律放弃
-    # （退回全量），并由下面的全局校验兜底。
-    #
-    # 放弃的情形（**不猜**）：
-    #   · 区间越界 / 空；
-    #   · 区间里含块头（`menu:` / `if` / `elif` / `else:` / `python:`）——
-    #     删掉会留下悬空的块结构（上一版就是在这里把 `if` 体的缩进压平、
-    #     语法直接坏掉）；
-    #   · 区间与别人的区间交叠。
-    removed_lines = 0
-    inserted_lines = 0
-    insert_failed = 0
-    delete_failed = 0
-    delete_ranges: list = []
-    anchors: dict = {}
-    for i in sorted(insert_ids):
-        # 锚点：新增的拍优先用运行期锚点（`insert_anchor`），表格那条路用
-        # 对位算出来的 `src_first`（`_set_insert_point`）。
-        point = int(getattr(beats[i], 'insert_anchor', 0) or 0) or \
-            int(getattr(beats[i], 'src_first', 0) or 0)
-        rows = list(raw_gen.get(i) or [])
-        if not point or not rows:
-            insert_failed += 1                # 没有锚点（文件头？）→ 不能安全插
-            continue
-        anchors.setdefault(point, []).append(rows)
-    if dropped_src:
-        # 与**仍在的拍**的区间比对（交叠就不敢删：那几行不只属于被删的拍）
-        taken = [(first, last) for (_i, first, last, _g, _b) in blocks if first]
-        for b in dropped_src:
-            first = int(getattr(b, 'src_first', 0) or 0)
-            last = int(getattr(b, 'src_last', 0) or 0)
-            if first < 1 or last < first or last > len(orig_lines):
-                delete_failed += 1
-                continue
-            body = [_norm(x) for x in orig_lines[first - 1:last]]
-            if any(_BLOCK_HEAD_RE.match(x) for x in body if x):
-                delete_failed += 1            # 含块头 → 会删坏结构
-                continue
-            if any(first <= t_last and last >= t_first
-                   for t_first, t_last in taken if t_first and t_last >= t_first):
-                delete_failed += 1            # 与仍在的拍交叠 → 不敢删
-                continue
-            delete_ranges.append((first, last))
-
-    # 插入 + 删除**一起按位置从后往前**做：先动后面的行，前面的行号才不受影响
-    ops: list = []
-    for first, last in delete_ranges:
-        ops.append((last, 0, first, last))    # (位置, 类型 0=删, 起, 止)
-    for point, rows in anchors.items():
-        # 同一锚点上的多张新卡片保持拍序（`rows` 是"每张卡片的行"的列表）
-        flat = [ln for group in rows for ln in group]
-        ops.append((point, 1, point, flat))   # (位置, 类型 1=插, 点, 行)
-    for _pos, kind, a, b in sorted(ops, reverse=True, key=lambda t: (t[0], t[1])):
-        if kind == 0:
-            del out_lines[a - 1:b]
-            removed_lines += b - a + 1
-        else:
-            at = max(0, min(a, len(out_lines)))
-            # **锚点是块头**（`menu:` / `"选项":` / `if …:`）时不能紧贴着插：
-            # 那样新台词会掉进那个块里（实测见 `_insert_anchor` 的 docstring）。
-            at, pad_hint = _insert_anchor(out_lines, at)
-            # **缩进必须自己补**：`render_beat_to_rpy` 返回的是"相对行"
-            # （不带基础缩进）—— 替换路径之所以看着没问题，是因为
-            # `_replace_matched` 保留原文那一行的缩进；插入没有"原文行"可依，
-            # 只能借**锚点行**的缩进（新卡片在结构上就是锚点的兄弟节点）。
-            if pad_hint is not None:
-                pad = pad_hint
-            else:
-                pad = _indent_of(out_lines[at - 1]) if at >= 1 else ''
-            if not pad:
-                # 锚点是 `label` / 注释这类顶层行 → 用**下一行**的缩进，
-                # 否则顶格写出来的台词会把文件结构读坏。
-                nxt_line = out_lines[at] if 0 <= at < len(out_lines) else ''
-                pad = _indent_of(nxt_line) or indent
-            out_lines[at:at] = [pad + ln for ln in b]
-            inserted_lines += len(b)
+    # （退回全量），并由下面末尾的全局校验兜底。
+    # 具体"哪些情形不敢删"见 `_plan_deletions` 的 docstring。
+    delete_ranges, delete_failed = _plan_deletions(
+        dropped_src, blocks, orig_lines)
+    # 新增的拍 → 插入点（锚点见 `_insert_points_for` 的 docstring）
+    anchors, insert_failed = _insert_points_for(beats, insert_ids, raw_gen)
+    # 插入 + 删除一起按位置**从后往前**做（先动后面的行，前面行号才不漂）
+    inserted_lines, removed_lines = _apply_sequence_edits(
+        out_lines, delete_ranges, anchors, indent)
     changed += inserted_lines + removed_lines + grown_total + shrunk_total
 
     text = '\n'.join(out_lines)
