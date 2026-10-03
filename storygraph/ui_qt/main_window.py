@@ -599,6 +599,22 @@ class BeatCardEditor(QWidget):
 
 
 
+def _overwritable(res: dict) -> bool:
+    """
+    这次 block **可以**让用户选择"仍然覆盖"吗？
+
+    只有一条可以：`HANDWRITTEN_TARGET`（产物没问题，只是目标是人手写的）。
+    其余 block（`PYTHON_SYNTAX_ERROR` / `CJK_IN_IMAGE_TAG` /
+    `LABEL_COLLISION` …）是**产物本身坏了** —— 覆盖只会把坏脚本写进
+    `game/`，让游戏起不来。那几条一律不给逃生舱。
+
+    判据放在这里而不是写死在对话框里：`codes` 是 `EditorSession.export`
+    的公开契约，将来新增 block 代码时，"能不能覆盖"必须是个明确决定，
+    不能靠默认放行。
+    """
+    return 'HANDWRITTEN_TARGET' in (res.get('codes') or [])
+
+
 class MainWindowQt(QMainWindow):
     """
     Qt 版主窗口 —— **两页**：剧情结构图（第一屏）→ 卡片编辑器（点进模块才进）。
@@ -3141,6 +3157,18 @@ class MainWindowQt(QMainWindow):
             QMessageBox.critical(self, '导出失败', str(e))
             self._report_swallowed(mark)
             return
+        if not res.get('ok') and _overwritable(res):
+            # **手写文件才给逃生舱**（方案 3，2026-10-05）。
+            #
+            # 为什么单独这一条：其余 block（图像名非法 / label 重名 /
+            # Python 语法错误）是**产物本身坏了**，覆盖只会把坏脚本
+            # 写进 game/，所以那些一律不给 force。
+            # 而"目标是你手写的文件"性质不同 —— 产物没问题，
+            # 只是工具不敢替你决定要不要丢掉 `default` / `init python`。
+            #
+            # 默认按钮是**取消**（`QMessageBox.Cancel` 作 default），
+            # 因为这一刀不可逆。
+            res = self._confirm_force_overwrite(path) or res
         if not res.get('ok'):
             blocking = res.get('blocking') or ['（未知原因）']
             QMessageBox.warning(self, '生成被门禁拦截', '\n'.join(blocking))
@@ -3153,6 +3181,40 @@ class MainWindowQt(QMainWindow):
                   f'（{res.get("note", "")}{warn}）')
         self._status(f'✔ 已导出 {Path(path).name}（{res.get("note", "")}{warn}）')
         self._report_swallowed(mark)
+
+    def _confirm_force_overwrite(self, path):
+        """
+        「目标是你手写的文件，真的要覆盖吗？」—— 用户点"覆盖"才返回结果。
+
+        **说清会丢什么**，而不是一句"是否覆盖"：真正让人踩坑的是
+        "全量生成只认得拍"，`default` / `init python` / `transform`
+        一行都留不下（`docs/P0_静默全量覆盖_2026-10-03.md`）。
+        默认按钮是**取消**，因为这一刀不可逆。
+
+        返回 `export` 的结果字典；用户取消则返回 None。
+        """
+        name = Path(path).name
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle('覆盖手写文件？')
+        box.setText(f'{name} 看起来是**手写**的 .rpy（没有生成标记）。')
+        box.setInformativeText(
+            '继续导出会用"全量生成"重写它，而全量只认得剧本表里的拍 ——\n'
+            '`default` / `define` / `init python` / `transform` / `screen`\n'
+            '这些**不进表**的内容会全部消失，游戏可能起不来。\n\n'
+            '建议：改导出到 build/renpy/ 下的新路径，或先备份。')
+        box.setStandardButtons(QMessageBox.Cancel | QMessageBox.Yes)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.button(QMessageBox.Yes).setText('仍然覆盖')
+        box.button(QMessageBox.Cancel).setText('取消（推荐）')
+        if box.exec() != QMessageBox.Yes:
+            self._status('已取消导出（目标是你手写的文件）。')
+            return None
+        try:
+            return self._session.export(path, force=True)
+        except Exception as e:                  # noqa: BLE001
+            QMessageBox.critical(self, '导出失败', str(e))
+            return None
 
     # ------------------------------------------------------------------
     #  剧本表（Excel 双向）

@@ -1,0 +1,365 @@
+"""
+storygraph.app.session_export
+=============================
+`EditorSession` 的**导出那一半**：编译、增量补丁、安全门禁、多引擎导出、
+预览数据、项目体检。
+
+为什么把它拆出来（P2-6 第四步，2026-10-05）
+--------------------------------------------
+`EditorSession` 原本是 1900 行的上帝对象（74 个方法）。已拆走三块：
+剧情图（13）、资产（11）、**导出+协作（14，本文件与 `session_collab.py`）**。
+
+这一块里有**这个项目最危险的一段代码**（`export` + `_patch_note`）——
+它管着"patch 失败不许静默退回全量覆盖"那个 P0
+（`docs/P0_静默全量覆盖_2026-10-03.md`）。所以它既是"最独立的一块"，
+也是**最不能动坏的一块**；搬的时候一个字都没改，只是换了住址。
+
+职责边界
+--------
+**属于这里**：编译（`compile` 的**下游**）、落盘与门禁、增量补丁、
+  多引擎导出、预览帧（`frames` / `transform_index` / `screen_size`）、
+  项目体检（`health`）。
+
+**不属于这里**（留在 `EditorSession`，见那边的说明）：
+  · `compile()` —— 它是"拍 → 编译结果"的**基建**：`export` 用它，
+    别的地方也会直接用（前端预览、表格侧）。搬进来会让宿主反向依赖本块。
+  · `registry()` / `source()` / `refresh_symbols()` —— 同前两块，
+    是"资源从哪来"的基建。
+  · 表格/拍编辑那一整块（`load` / `fields` / `cards` / `apply` /
+    `insert` / `delete` / 撤销）—— 核心，网最密，留到最后。
+
+`EXPORT_ENGINES` 放在这里而不是宿主：它只有 `export_ir` 用
+（"支持哪些引擎"是导出这一块的词表）。
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from storygraph.core.safeguard import swallow
+from storygraph.app.stage import build_frames
+# 门禁这一套（`export` / `_patch_note` 全靠它们）：
+#   · `evaluate_generation` + `labels_in_danger` —— 落盘**前**预检；
+#   · `write_generation` —— 落盘那一步的兜底门禁；
+#   · `would_destroy_opaque` —— "覆盖它会不会毁掉不进表的东西"（P0 的判据）；
+#   · `ensure_generator_marker` —— 产物必须带生成标记，否则护栏认不出自家产物。
+from storygraph.story.generation_guard import (ensure_generator_marker,
+                                               evaluate_generation,
+                                               labels_in_danger,
+                                               would_destroy_opaque,
+                                               write_generation)
+
+
+__all__ = ['ExportMixin']
+
+
+class ExportMixin:
+    """
+    导出那一半（见模块 docstring 的职责边界）。
+
+    它**要求宿主提供** `registry()` / `refresh_symbols()` / `compile()` /
+    `symbols` / `project_root` / `script_path` / `beats` —— 见 `REQUIRES`。
+    """
+
+    #: 本 mixin 要求宿主（或其它 mixin）提供的成员（**实测**，不是凭印象）。
+    REQUIRES = ('registry', 'compile', 'symbols', 'project_root',
+                'script_path', 'beats')
+
+    EXPORT_ENGINES = ('unity', 'godot', 'json', 'csv', 'renpy')
+    def export_ir(self, engine: str, out_dir) -> dict:
+        """
+        把当前章节的演出表导出成**其他引擎**要的格式。
+
+        用户 2026-10-05："请确保所有的功能都接上UI" —— 这条以前只有
+        `pipeline.engine_exporters.export_ir` 这个后端函数，Qt 版没有任何入口。
+
+        `engine`: unity / godot / json / csv / renpy（见 `EXPORT_ENGINES`）。
+        返回 `{ok, engine, out_dir, files, error}`。
+        """
+        engine = str(engine or '').lower()
+        if engine not in self.EXPORT_ENGINES:
+            return {'ok': False, 'engine': engine, 'out_dir': str(out_dir),
+                    'files': [],
+                    'error': f'不支持的引擎：{engine or "（空）"}'}
+        if not self.beats:
+            return {'ok': False, 'engine': engine, 'out_dir': str(out_dir),
+                    'files': [], 'error': '还没有载入章节，没有可导出的演出表'}
+        from storygraph.pipeline.engine_exporters import export_ir
+        try:
+            files = export_ir(engine, self.beats, Path(out_dir),
+                              registry=self.registry(),
+                              project=str(self.project_root or ''),
+                              title=Path(self.script_path).stem
+                              if self.script_path else '')
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'engine': engine, 'out_dir': str(out_dir),
+                    'files': [], 'error': str(e)}
+        return {'ok': True, 'engine': engine, 'out_dir': str(out_dir),
+                'files': [str(f) for f in (files or [])], 'error': ''}
+    def frames(self) -> list:
+        """
+        整章的舞台帧（供预览窗口播放）。
+
+        `transform_index` / `screen` 来自项目源码（`transform.rpy` 的
+        `transform f21: focus(320)` 与 `gui.init(1920, 1080)`）—— 用户
+        2026-10-05："transform 未对应到舞台真实位置"。**按项目根缓存**：
+        扫一遍源码是有代价的，但预览只在打开时取一次。
+        """
+        return build_frames(self.beats, self.registry(),
+                            transform_index=self.transform_index(),
+                            screen=self.screen_size())
+    def transform_index(self) -> dict:
+        """项目里的 transform 定义（按项目根缓存；换项目自动失效）。"""
+        root = str(self.project_root or '')
+        cached = getattr(self, '_transform_index_cache', None)
+        if cached is not None and cached[0] == root:
+            return cached[1]
+        index = {}
+        try:
+            from storygraph.story.atl import scan_transforms
+            index = scan_transforms(self.project_root) if root else {}
+        except Exception:                     # noqa: BLE001 - 扫不动就退回启发式
+            index = {}
+        self._transform_index_cache = (root, index)
+        return index
+    def screen_size(self) -> tuple:
+        """游戏分辨率（`gui.init(w, h)`）；读不到用 1920×1080。"""
+        root = str(self.project_root or '')
+        cached = getattr(self, '_screen_cache', None)
+        if cached is not None and cached[0] == root:
+            return cached[1]
+        from storygraph.story.atl import DEFAULT_SCREEN, project_screen
+        size = project_screen(self.project_root) if root else DEFAULT_SCREEN
+        self._screen_cache = (root, size)
+        return size
+    def should_write_transforms(self) -> bool:
+        """
+        生成物**要不要自带 transform 定义段**？
+
+        用户 2026-10-05：
+
+        > 全量不要重复写 transform 定义 —— 项目里已经有 definitions.rpy
+
+        判定：这一章用到的自定义变换，**项目里别的 .rpy 已经声明过**
+        （`transform <名字>:`）→ 不写（写了就是重复定义，Ren'Py 里后者
+        覆盖前者，章节文件被悄悄改语义）。
+        找不到就老实写上，让产物自包含。
+
+        成本：一次正则扫项目脚本（40 个文件约 0.3s），结果按需缓存。
+        """
+        if getattr(self, '_transforms_decision', None) is not None:
+            return self._transforms_decision
+        decision = True
+        try:
+            reg = self.registry()
+            if reg is None or not self.project_root or not self.beats:
+                return True
+            from storygraph.parsing.discover import discover_scripts
+            from storygraph.story.beat_render import collect_used_transforms
+            used = collect_used_transforms(self.beats)
+            # 只关心**资源表里带 ATL 的那些**（`render_transform_definitions`
+            # 会真正写出来的就是它们）——`used` 里还混着 `left` / `dissolve`
+            # 这类 Ren'Py 内置变换，它们项目里当然没人声明，拿它们一起判
+            # 会永远得出"其他文件没定义全 → 要写"。
+            rows = getattr(reg, 'transforms', None) or {}
+            used = {t for t in (used or ()) if t in rows}
+            if not used:
+                return True
+            # 排除"正在导出的这一章"自己（它里面的 transform 定义不算数）
+            target = Path(self.script_path) if self.script_path else None
+            pattern = re.compile(
+                r'^[ \t]*transform[ \t]+([A-Za-z_]\w*)', re.MULTILINE)
+            found: set = set()
+            for fp in discover_scripts(self.project_root):
+                if target is not None and Path(fp) == target:
+                    continue
+                try:
+                    text = Path(fp).read_text(encoding='utf-8',
+                                              errors='replace')
+                except OSError:
+                    continue
+                found.update(pattern.findall(text))
+                if used <= found:
+                    break
+            decision = not (used <= found)
+        except Exception:                     # noqa: BLE001 - 判不了就老实写
+            decision = True
+        self._transforms_decision = decision
+        return decision
+    @staticmethod
+    def _issue_message(issue) -> str:
+        """
+        门禁发现 → 一句给人看的话。
+
+        统一在这里取：`blocking` 要交给 UI 直接显示，
+        而 `GuardIssue` 有 `.message`、别的实现可能只有 `__str__`
+        （单测里塞过裸字符串）。三种形态都兜住，别在调用点各写一遍。
+        """
+        return str(getattr(issue, 'message', None) or issue)
+    def default_output_path(self) -> Path:
+        stem = self.script_path.stem if self.script_path else 'out'
+        base = (self.project_root or Path('.')) / 'build' / 'renpy'
+        return base / f'{stem}.generated.rpy'
+    def export(self, target, force: bool = False) -> dict:
+        """
+        落盘导出。**所有安全检查都在这里**，前端只管挑路径。
+
+        返回：{ok, path, note, todos, blocking, codes}
+          · ok=False 时 `blocking` 是拦截原因（前端展示即可）；
+          · `codes` 是门禁问题的**代码**（`HANDWRITTEN_TARGET` 等），
+            前端靠它决定"要不要给用户一个强制覆盖的选项" ——
+            只有手写目标这一条是**可覆盖**的，语法/重名那几条不可；
+          · note 说明用了增量补丁还是全量重生成。
+          · ok=False 且 `review_path` 非空时，产物留在那个 `.blocked.rpy`
+            副本里供人对比（沿用门禁既有机制）。
+
+        `force=True`（逃生舱，方案 3）：允许覆盖已存在的手写 `.rpy`。
+        **必须由用户显式确认过**（见 `ui_qt.main_window.export_script` 的
+        "覆盖手写文件？"对话框）—— 全量生成只认得"拍"，
+        `default` / `init python` / `transform` 一行都留不下
+        （`docs/P0_静默全量覆盖_2026-10-03.md`）。
+        """
+        target = Path(target)
+        result = self.compile()
+        if getattr(result, 'blocking', None):
+            return {'ok': False, 'path': target, 'blocking': list(result.blocking),
+                    'codes': ['COMPILE'], 'note': '', 'todos': 0}
+
+        text = result.rpy_text
+        note = self._patch_note(text)
+        if note['used_patch']:
+            text = note['text']
+        elif note.get('blocking') and not force and would_destroy_opaque(
+                target, self.script_path):
+            # **补丁失败 + 覆盖它会毁掉不进表的东西 = 拒绝写盘**（P0，2026-10-05）。
+            #
+            # 为什么必须拦：此时唯一的替代是"全量重生成"，而全量只认得"拍"，
+            # `default` / `init python` / `transform` / `screen` 一行都留不下。
+            #
+            # `_would_destroy_opaque` 的判据是"**目标文件里有没有工具不认识的
+            # 内容**"，而不是笼统的"补丁失败了"：
+            #
+            #   · 目标就是源 .rpy（原地导出）→ 那是作者手写的文件，
+            #     里面很可能有 `default` / `init python` → **必须拦**；
+            #   · 目标是一个**新建的**路径（导出到 `build/`、另存一章）→
+            #     覆盖它不会毁掉任何东西，全量正是要做的事 → **放行**；
+            #   · 目标已存在且**没有生成标记** → 别人的手写文件 → **拦**。
+            #
+            # 第一版只看 `had_source`（"有源 .rpy 可增量"），那会把
+            # "编辑 ch01、导出到 out.rpy"这种正常操作也拦掉 ——
+            # 实测 `test_export_reflects_the_edit` 当场红。
+            #
+            # 第二层护栏（`write_generation` 的 `HANDWRITTEN_TARGET`）仍然
+            # 会兜住"凭空新建到别人的手写文件上"那种情况。
+            return {'ok': False, 'path': target,
+                    'blocking': list(note['blocking']),
+                    'codes': ['PATCH_FAILED'],
+                    'note': note['text_note'], 'todos': 0}
+
+        # **产物必须带生成标记**，补丁那条路也一样（2026-10-05 实测）。
+        #
+        # 为什么：`patch_export` 的合并策略是"保留原文那一行"，
+        # 它产出的首行是**源文件的首行**（常常是 `default …` 之类），
+        # 于是补丁产出的文件**没有生成标记**。后果是护栏认不出自家产物：
+        #
+        #     第一次导出 → ok=True   （补丁成功，写出去的没有标记）
+        #     第二次导出 → 拒绝覆盖  （被判成"手写文件"）
+        #
+        # 也就是说"再导出一次"在一个已经由工具生成的文件上必然失败 ——
+        # 这正是 `test_allows_overwriting_its_own_output` 想防的那种事故，
+        # 只不过它当时只在 `write_generation` 这一层测，没经过 export。
+        text = ensure_generator_marker(text)
+
+        occupied = labels_in_danger(target, self.project_root,
+                                   exclude={target, self.script_path})
+        issues = evaluate_generation(text, target,
+                                     project_root=self.project_root,
+                                     occupied=occupied)
+        blocking = [i for i in issues if i.is_blocking]
+        if blocking:
+            # `force` **不**越过这几条：图像名非法 / label 重名 /
+            # Python 语法错误都是"产物本身坏了"，覆盖只会把坏脚本写进 game/。
+            # `force` 的语义只有一条 —— "我确认要覆盖手写文件"。
+            return {'ok': False, 'path': target,
+                    'blocking': [self._issue_message(i) for i in blocking],
+                    'codes': [str(getattr(i, 'code', '')) for i in blocking],
+                    'note': note['text_note'], 'todos': 0}
+
+        # `write_generation` 自己还有一道兜底门禁（`HANDWRITTEN_TARGET`：
+        # 目标已存在且不是工具生成的，拒写）。它**必须被检查** ——
+        # 不检查就回到当年那个形态：文件根本没写出去，却报告"导出成功"，
+        # 用户以为产物在。`review_path` 指向留给人对比的副本。
+        art = write_generation(text, target, project_root=self.project_root,
+                               force=force)
+        if not art.written:
+            return {'ok': False, 'path': target,
+                    'blocking': [self._issue_message(i) for i in art.issues]
+                                or ['生成门禁拒绝写入'],
+                    'codes': [str(getattr(i, 'code', '')) for i in art.issues],
+                    'review_path': art.review_path,
+                    'note': note['text_note'], 'todos': 0}
+        return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
+                'note': note['text_note'],
+                'todos': getattr(result, 'todo_count', 0)}
+    def _patch_note(self, text: str) -> dict:
+        """
+        试着走增量补丁。**补不上时不许装作"换了个写法"**（P0，2026-10-05）。
+
+        为什么原来是 P0（见 `docs/P0_静默全量覆盖_2026-10-03.md`）：
+        以前补丁失败时这里返回 `{'used_patch': False, 'text': text}` ——
+        也就是"用全量文本接着写"。而**全量生成只认得"拍"**，
+        `default` / `define` / `init python` / `transform` / `screen`
+        一行都留不下。于是"对位失败"这个**可恢复的小麻烦**，
+        被静默放大成"用户手写的定义全没了、游戏起不来"。
+
+        现在返回的 `blocking` 是**非空就代表这刀不能落盘**：
+
+          · `used_patch=True`  → `blocking=[]`，`text` 是合并后的全文；
+          · 补丁失败           → `blocking=[原因…]`，`text=''`
+            （故意不给可用文本 —— 给了就会有人拿它去写盘，
+             这正是当年的事故形态）。
+
+        `had_source` 告诉调用方"当时到底有没有源 .rpy 可增量"：
+
+          · `True`  → 有源文件可合并，补丁却没过 → 全量会丢东西 → **拦住**；
+          · `False` → 新建章节，本来就没有可增量的源 → 全量是唯一正确做法。
+
+        调用方 `export` 靠它区分这两种"补丁失败"（见那里的注释）。
+        """
+        from storygraph.story.patcher import patch_export
+        src = (self.script_path
+               if self.script_path and Path(self.script_path).exists()
+               else None)
+        had_source = src is not None
+        try:
+            res = patch_export(self.beats, src, text, registry=self.registry())
+            if res.ok:
+                return {'used_patch': True, 'text': res.text, 'blocking': [],
+                        'had_source': had_source,
+                        'text_note': f'增量补丁：对位 {res.matched_beats}/'
+                                     f'{res.total_beats} 拍，'
+                                     f'改动 {res.changed_lines} 行'}
+            reason = ('；'.join(res.reasons)
+                      or f'对位率不足（{res.coverage:.0%}）')
+            return {'used_patch': False, 'text': '', 'blocking': [reason],
+                    'had_source': had_source,
+                    'text_note': f'增量未采用：{reason}'}
+        except Exception as e:               # noqa: BLE001
+            # 异常**也是**拦截理由，不是"退回全量"的许可证：
+            # patcher 崩了说明状态不可信，此时覆盖手写文件风险最大。
+            return {'used_patch': False, 'text': '',
+                    'blocking': [f'增量不可用：{e}'],
+                    'had_source': had_source,
+                    'text_note': f'增量不可用：{e}'}
+    def health(self, limit: int = 30) -> dict:
+        """项目体检（**只读，不写盘**）。返回 {'issues': [...], 'total': n}。"""
+        if not self.project_root:
+            return {'issues': [], 'total': 0,
+                    'error': '还没有打开项目'}
+        from storygraph.pipeline.build import collect_report
+        r = collect_report(self.project_root)
+        issues = list(getattr(r, 'issues', []) or [])
+        return {
+            'issues': [str(getattr(i, 'message', i)) for i in issues[:limit]],
+            'total': len(issues),
+        }

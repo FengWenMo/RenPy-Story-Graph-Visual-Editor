@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.vocabulary import GENERATOR_MARKER
 from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.paths import (
     _guess_project_root,
@@ -50,6 +51,112 @@ from storygraph.story.paths import (
 #: Ren'Py 允许的图像 tag / 属性 / transform 名：字母数字下划线（官方规则）。
 #: 中文 tag 不是"风格问题"，是语法错误——所以按"非 ASCII 即非法"判。
 _ASCII_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+#: 认标记时只看**不变的那一段**（逗号之前）。
+#:
+#: 为什么要截断（2026-10-05，我自己写的测试抓到的）：完整标记是
+#: `# 由剧本表自动生成，请勿在此文件手工改动结构`，而人（和测试）写
+#: `# 由剧本表自动生成` 就够了 —— 逗号后面那句是"叮嘱",不是身份。
+#: 要求整串相等的话，任何只写前半句的产物都会被当成手写文件拒写，
+#: 而那正是"我明明是用工具生成的"这类最难自查的事故。
+_MARKER_PREFIX = GENERATOR_MARKER.split('，')[0]
+
+
+def _looks_handwritten(path: Path) -> bool:
+    """
+    `path` 是不是**手写文件**（已存在、且首行没有生成标记）？
+
+    判据刻意只看**首行**（生成器总是把标记写在第 1 行）：
+
+      · 文件不存在            → False（不是"手写"，是"新建"，放行）；
+      · 首行含 `GENERATOR_MARKER` → False（工具自己写的，可以再导出）；
+      · 读不出来（权限/编码） → **True**（读不出来就别赌，宁可拦下）。
+
+    为什么要单独一个函数：判据会在"写盘前"和"CLI 预检"两处用到，
+    抄两份迟早漂移（`excel/cells.py` 的教训）。
+    """
+    p = Path(path)
+    try:
+        if not p.is_file():
+            return False
+    except OSError:
+        return True
+    try:
+        with p.open('r', encoding='utf-8', errors='replace') as fh:
+            first = fh.readline()
+    except OSError:
+        return True
+    return _MARKER_PREFIX not in first
+
+
+def _make_blocking_issue(path: Path, reason: str) -> GuardIssue:
+    """把"不许覆盖手写文件"包成一条 block 级发现（与语法门禁同一套类型）。"""
+    return GuardIssue(code='HANDWRITTEN_TARGET', level='block',
+                      message=f'{path}：{reason}')
+
+
+def would_destroy_opaque(target, source_path=None) -> bool:
+    """
+    "把全量产物写到 `target`"，会毁掉**工具不认识的内容**吗？
+
+    这是 `EditorSession.export` 拦不拦的判据（P0，2026-10-05）。
+    全量生成只认得"拍"，`default` / `define` / `init python` /
+    `transform` / `screen` 一行都留不下 —— 所以只有当目标文件里
+    **可能真的有那些东西**时才必须拦：
+
+      · `target` 就是**源 .rpy**（原地导出）→ True
+        —— 作者手写的章节文件，几乎必然含第三类内容；
+      · `target` 已存在且**没有生成标记** → True —— 别人的手写文件；
+      · 其余（目标不存在 / 是工具以前生成的）→ False
+        —— 覆盖它毁不掉任何东西，全量正是要做的事。
+
+    为什么不只调 `_looks_handwritten`：原地导出那条要单独判。
+    它可能正是一份**带生成标记**的文件（工具以前生成的），
+    但**源区间对不上**导致补丁失败 —— 那种情况覆盖它是安全的；
+    可是"源 == 目标"意味着用户在编辑自己的章节，
+    退回全量会把 `init python` 冲掉。所以两条都要看。
+
+    **这条判据刻意只管"会不会毁东西"**，不管"补丁为什么失败"：
+    编辑 ch01、导出到一个**新**路径时补丁也会失败，而那是完全正常的
+    操作（`test_export_reflects_the_edit` 就是这条，第一版把它拦掉了）。
+    """
+    t = Path(target) if target else None
+    if t is None:
+        return False
+    try:
+        if source_path and Path(source_path) == t:
+            return True
+    except OSError:
+        return True
+    return _looks_handwritten(t)
+
+
+def ensure_generator_marker(text: str) -> str:
+    """
+    保证产物首行是 `GENERATOR_MARKER`；已经有了就**一个字不动**。
+
+    为什么必须有这一步（2026-10-05 实测）：护栏靠"首行有没有标记"判断
+    一个已存在的文件是不是工具自己写的。而**增量补丁那条路**产出的首行是
+    **源文件的首行**（合并策略是"保留原文那一行"，常常是 `default …`），
+    于是补丁产物没有标记 —— 护栏认不出自家产物：
+
+        第一次导出 → ok=True    （补丁成功，写出去的没有标记）
+        第二次导出 → 拒绝覆盖   （被判成"手写文件"）
+
+    也就是说"再导出一次"在一个已由工具生成的文件上**必然失败**。
+    所以标记要在**写盘之前**确保，而不是只在全量渲染时写。
+
+    为什么放在这里而不是 `beat_render`：判据与"认标记"（`_looks_handwritten`）
+    是一对，必须同进同退 —— 两处分头写就是下一次漂移的起点。
+    """
+    body = str(text or '')
+    first = body.split('\n', 1)[0]
+    if _MARKER_PREFIX in first:
+        return body
+    if not body.strip():
+        return GENERATOR_MARKER + '\n'
+    return f'{GENERATOR_MARKER}\n\n{body}'
+
 
 @dataclass(frozen=True)
 class GuardIssue:
@@ -184,6 +291,66 @@ def _is_valid_ident(name: str) -> bool:
 
 
 
+def _python_syntax_issues(text: str) -> list:
+    """
+    产物里的 `$ …` / `python:` 块体，逐条过一遍 Python 编译器。
+
+    为什么必须拦（P0，2026-10-05，真实项目 `script.rpy:93` 实测）：
+
+        原文：  l oh "3"            ← Ren'Py 当台词读，**脚本能跑**
+        产物：  $ l oh "3"          ← Python 语法错误，**Ren'Py 加载就报错**
+
+    也就是说工具的产物比作者原文**更糟**。这类问题以前只有
+    `tools/audit_roundtrip.py` 事后能看见，而**工具照样把文件写出去** ——
+    和 P0 静默覆盖同一个性质：算出了"要出事"，却没拦住。
+
+    判据尽量窄，避免误报：
+
+      · 只看 `$`/`$ ` 开头的行，以及 `python:` 块体里**比 `python:` 更深**
+        的行（块体结束 = 回到浅缩进或遇到新语句）；
+      · `#` 注释与空行跳过（Ren'Py 允许行尾注释，Python 也认）；
+      · **翻译/文本行里的引号不参与** —— 我们只编译"被当代码的那部分"。
+
+    编译不过就是 block：**这一份产物写进 game/ 会让游戏起不来**。
+    """
+    out = []
+    in_python = False
+    py_indent = 0
+    for i, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped == 'python:':
+            in_python, py_indent = True, indent
+            continue
+        if in_python:
+            if indent <= py_indent:
+                in_python = False          # 块体结束，这一行按普通行继续判
+            else:
+                _check(out, stripped, i, 'python: 块体')
+                continue
+        if stripped.startswith('$'):
+            code = stripped[1:].strip()
+            if code and not code.startswith('#'):
+                _check(out, code, i, '`$` 语句')
+    return out
+
+
+def _check(out: list, code: str, line_no: int, where: str) -> None:
+    """编译一条（可能是多行剩下的单条）python，失败就记一条 block。"""
+    try:
+        compile(code, '<generated>', 'exec')
+    except SyntaxError as exc:
+        out.append(GuardIssue(
+            'PYTHON_SYNTAX_ERROR', 'block',
+            f'{where}里的 Python 语法错误：{exc.msg}'
+            f'（`{code}`）。这一行会让 Ren\'Py 加载脚本时直接报错，'
+            f'游戏起不来。常见原因：作者手写了一句 Ren\'Py 语句'
+            f'（比如台词 `l oh "3"`）被当成了代码。',
+            line_no))
+
+
 def _image_refs(text: str) -> list:
     """抽出生成文本里所有的 show/hide/scene 图像名（跳过注释行）。"""
     refs = []
@@ -218,6 +385,11 @@ def generation_guard(text: str, out_path, *,
     """
     issues = []
     out_path = Path(out_path) if out_path else None
+
+    # —— 0. 产物里的 Python 语法（P0，2026-10-05）——
+    # 放在最前面：这是**唯一**一类"Ren'Py 连加载都加载不了"的错误，
+    # 比图像名/标签重名更致命（那两类至少能进到解析阶段）。
+    issues.extend(_python_syntax_issues(text))
 
     # —— 1. 图像名 / transform 名的合法性 ——
     for ref in _image_refs(text):
@@ -367,13 +539,14 @@ def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
 
 
 def write_generation(text: str, out_path, *, review_on_block: bool = True,
-                     project_root=None, occupied=None):
+                     project_root=None, occupied=None, force: bool = False):
     """
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
       · 无 block 级问题 → 写 `out_path`，`written=True`；
       · 有 block 级问题 → **不写目标文件**，改写 `<stem>.blocked.rpy`
         供人对比，`written=False`、`review_path` 指向副本。
+      · **目标已存在且不是工具生成的** → 同样不写（见下，P0）。
 
     为什么拦下也要留副本：只报错不给人看产物，等于让人猜哪里错了；
     但绝不能写进目标路径（那正是事故的形态）。
@@ -384,11 +557,38 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
       · 都没有 → 退回"不检查"（临时目录、单测场景），宁可少报。
     2026-09-28 修：以前这里写死 `project_root=None`，**等于把这条门禁关了**。
 
+    **"目标已存在"护栏**（P0，2026-10-05，见
+    `docs/P0_静默全量覆盖_2026-10-03.md`）：
+
+      目标已存在 **且** 首行不含工具生成标记 → 判为**手写文件**，拒绝覆盖。
+      理由是"全量重生成只认得拍"：`default` / `define` / `init python` /
+      `transform` / `screen` 一行都留不下，覆盖手写文件等于**静默毁掉定义**。
+
+      · 首行带 `GENERATOR_MARKER`（工具自己以前写的）→ 允许覆盖，
+        "再导出一次"是正常操作，不能拦；
+      · 目标不存在 → 正常写（**新建文件是全量的正当用途**）；
+      · `force=True` → 明确知道自己在做什么，放行（逃生舱 / CLI `--force`）。
+
     调用方要"先问后写"就直接用 `evaluate_generation` + 自己写，
     这个函数是给"已经确认过，但还要兜一层底"的路径用的。
     """
     out_path = Path(out_path)
     root = project_root or _guess_project_root(out_path)
+    if not force and _looks_handwritten(out_path):
+        reason = ('目标已存在且不是工具生成的（没有生成标记），'
+                  '拒绝覆盖手写 .rpy')
+        blocking = [_make_blocking_issue(out_path, reason)]
+        review = None
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if review_on_block:
+                review = out_path.with_suffix('.blocked.rpy')
+                review.write_text(text, encoding='utf-8')
+        except OSError:
+            review = None
+        _publish_blocked(out_path, blocking, review)
+        return GeneratedArtifact(out_path, review, False, blocking)
+
     if occupied is None:
         # 只有产物**会被 Ren'Py 扫描**（落在 <root>/game/ 里）时，
         # "和原文抢 label"才是致命问题；写到 build/ 或临时目录的产物

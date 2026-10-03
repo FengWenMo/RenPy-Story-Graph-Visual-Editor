@@ -209,3 +209,70 @@ def test_backend_never_imports_ui():
     assert not bad, ('后端不许依赖前端：\n'
                      + '\n'.join(f'  {p}:{ln}  {a} -> ui_qt'
                                  for a, p, ln in bad))
+
+
+# ==================================================================
+#  跨包使用"私有名"（P2-7 的教训）
+# ==================================================================
+
+def _candidate_names(path: Path, mod: str):
+    """产出这个文件 import 的 `storygraph.…` 名字，带"是否跨包"。"""
+    try:
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+    except SyntaxError:
+        return
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not (node.module or '').startswith('storygraph.'):
+            continue
+        bits = (node.module or '').split('.')
+        tgt_pkg = bits[1] if len(bits) >= 2 else ''
+        src_pkg = path.relative_to(PKG_ROOT).parts[0]
+        for alias in node.names:
+            yield (src_pkg, tgt_pkg, alias.name, node.lineno)
+
+
+#: 跨包使用下划线名，且**确实**该如此的（`(来源, 目标, 名字): 理由`）。
+#:
+#: 目前**空** —— 那 7 处实测出来的跨包私有名都改成了公共别名
+#: （`split_show_items` / `join_show_items` / `split_hide_items` /
+#: `image_path_from_expr` / `image_solid_from_expr` / `would_destroy_opaque`），
+#: 因为它们确实已经是契约。留这个空表是给"将来真有一处只能如此"用的：
+#: 到那时必须在这里写清理由，而不是把测试放宽。
+CROSS_PKG_PRIVATE_ALLOWED = {}
+
+
+def test_no_private_names_cross_package():
+    """
+    跨包 import 的名字**不许以下划线开头**。
+
+    这是 P2-7 的直接推论：那次实测发现 `script_table` 门面 re-export 了
+    **92 个**下划线名，而外部真正用到的只有 2 个。结论是
+    "下划线名一旦跨包使用，它就已经是公共 API 了，只是没声明" ——
+    于是改名/删掉它会**静默**打断另一个包（`test_facade_surface.py`
+    只守 `script_table` 一个门面，守不住这一条）。
+
+    判据：`from storygraph.<别的包> import _xxx` 一律红。
+    修法二选一：
+      · 它确实是公共契约 → **去掉下划线**（并在那边写清契约）；
+      · 它只是内部实现 → 让调用方别再取它。
+    """
+    bad = []
+    for path in sorted(PKG_ROOT.rglob('*.py')):
+        parts = path.relative_to(PKG_ROOT).parts
+        if len(parts) < 2:
+            continue
+        for src_pkg, tgt_pkg, name, ln in _candidate_names(path, ''):
+            if src_pkg == tgt_pkg:
+                continue                      # 包内用私有名是正常的
+            if not name.startswith('_') or name.startswith('__'):
+                continue
+            if (src_pkg, tgt_pkg, name) in CROSS_PKG_PRIVATE_ALLOWED:
+                continue
+            bad.append((src_pkg, tgt_pkg, name, path.name, ln))
+    assert not bad, (
+        '跨包使用了私有名（下划线开头）—— 它其实已经是公共 API 了：\n'
+        + '\n'.join(f'  {p}:{ln}  {a} 从 {b} 取 {n!r}'
+                    for a, b, n, p, ln in bad)
+        + '\n\n要么去掉下划线（承认它是契约），要么让调用方别再取它。')

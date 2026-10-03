@@ -37,7 +37,16 @@ def import_beats_from_excel(path, registry=None) -> list:
     path = Path(path)
     if not path.exists():
         return []
-    wb = openpyxl.load_workbook(path, data_only=True)
+    # **`data_only=False`**（2026-10-05 修）：以 `=` 开头的**用户文本**会被
+    # openpyxl / Excel 当成公式（`data_type='f'`），而 `data_only=True` 读到的
+    # 是**缓存的计算结果** —— 这张表从来没被 Excel 打开算过，缓存是空的，
+    # 于是那一格读回来是 `None`，用户的文本**静默消失**
+    # （brutal test 的 F3「公式前缀」就是这个）。
+    #
+    # 我们**不打算读任何真实公式的值**：表里唯一的公式是下拉框的
+    # defined name（`_dynamic_range_formula`），它不属于单元格值。
+    # 所以这里要的是"格子里的原始字符串"，正是 `data_only=False` 的语义。
+    wb = openpyxl.load_workbook(path, data_only=False)
     try:
         ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
         beats = _read_beats_from_ws(ws)

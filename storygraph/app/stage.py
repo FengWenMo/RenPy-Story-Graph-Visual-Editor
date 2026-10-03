@@ -291,10 +291,10 @@ def script_images(project_root) -> dict:
     if got is not None:
         return got
     try:
-        from storygraph.parsing.renpy_parser import (_image_path_from_expr,
-                                                     _image_solid_from_expr)
+        from storygraph.parsing.renpy_parser import (image_path_from_expr,
+                                                     image_solid_from_expr)
     except Exception:                         # noqa: BLE001 - 桩环境
-        _image_path_from_expr = _image_solid_from_expr = lambda _e: None
+        image_path_from_expr = image_solid_from_expr = lambda _e: None
 
     names: dict = {}
     attrs: dict = {}
@@ -327,11 +327,11 @@ def script_images(project_root) -> dict:
                     continue
                 rhs = m.group('rhs').strip()
                 info: dict = {'path': '', 'solid': ''}
-                path = _image_path_from_expr(rhs)
+                path = image_path_from_expr(rhs)
                 if path:
                     info['path'] = path
                 else:
-                    solid = _image_solid_from_expr(rhs)
+                    solid = image_solid_from_expr(rhs)
                     if not solid:
                         continue      # 既不是文件也不是纯色（layeredimage…）
                     info['solid'] = solid

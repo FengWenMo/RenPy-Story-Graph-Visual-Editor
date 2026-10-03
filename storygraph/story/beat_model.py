@@ -331,20 +331,28 @@ class Beat:
                 v = int(v)
             return str(v).strip()
 
-        # 台词**只去首部空白**，尾部原样保留。
-        # 为什么不能跟别的列一样 strip：项目自己定的契约是"逐字节不变"，
-        # 而真实数据里存在以空格结尾的台词（`'元神，启动！ '`，
-        # `chapter0_0.rpy` 一处 116 条）。`strip()` 会把它静默吃掉，
-        # 虽然是低危改动，但它让"打开→导出"产生了无意义的 diff。
-        # 首部空白仍然去掉：Ren'Py 里台词字符串前面的空格没有语义，
-        # 而 Excel 单元格里它多半是手误。
+        # 台词**逐字节原样**，首尾空白都不动。
+        #
+        # 为什么不能 `.strip()` / `.lstrip()`（2026-10-05 修正）：
+        # 以前这里写的是"首部空白仍去掉：Ren'Py 里台词字符串前面的空格
+        # 没有语义，而 Excel 单元格里它多半是手误"。**这个判断是错的** ——
+        # `beat.text` 是**字符串字面量的内容**，里面的空格就是内容：
+        #
+        #     jc " 听起来很有意思，来吧！"
+        #        ^ 这个空格是台词的一部分
+        #
+        # `lstrip()` 之后往返回来变成 `"听起来很有意思，来吧！"`，
+        # 而本项目的硬契约是"打开 → 导出**逐字节不变**"。
+        # 真实项目 `script_pomo.rpy` 一处就是这么丢的（审计里 6 条之一）。
+        #
+        # 尾部空白同理（老注释里记的那 116 条）：`.strip()` 会静默吃掉。
         def g_text(key, default=''):
             v = row.get(key, default)
             if v is None:
                 return default
             if isinstance(v, float) and v.is_integer():
                 v = int(v)
-            return str(v).lstrip()
+            return str(v)
 
         seq = row.get('Seq', 0)
         try:
@@ -1755,6 +1763,27 @@ def _join_hide_items(items: list) -> str:
 
 def _append_line(existing: str, line: str) -> str:
     return (existing + '\n' + line) if existing else line
+
+
+# ===================== 立绘列的公共契约（跨包使用） =====================
+#
+# `split_show_items` / `join_show_items` / `split_hide_items` 是
+# **立绘列（`beat.show` / `beat.hide`）的唯一编解码器**：
+# `app`（卡片编辑器）、`pipeline`（校验）、`excel_import`、
+# `stage_snapshot` **都在用**它们。
+#
+# 既然跨包在用，它们**已经是公共 API 了** —— 只是名字还带下划线。
+# `test_package_layering.test_no_private_names_cross_package` 会把这种
+# "事实上是契约、名义上是私有"的名字标出来（P2-7 的教训：那次实测
+# `script_table` 门面 re-export 了 92 个下划线名，而外部只用 2 个）。
+#
+# 这里做成**别名**而不是重命名：包内还有几十处调用 `_split_show_items`，
+# 一次性改名会把 diff 铺得很大、掩盖真正要审的改动。函数体只有一份，
+# 两个名字指向同一个对象，**不会漂移**。
+split_show_items = _split_show_items
+join_show_items = _join_show_items
+split_hide_items = _split_hide_items
+join_hide_items = _join_hide_items
 
 
 

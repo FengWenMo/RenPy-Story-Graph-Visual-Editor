@@ -71,9 +71,19 @@ def _texts(w):
 
 class TestLoadedIndexIsSourceOfTruth:
     def test_show_index_loads_that_beat_and_highlights_it(self, win):
+        """
+        列表第 3 行与卡片内容必须来自**同一拍**。
+
+        用 `menu_caption_text` 取期望值而不是直接读 `beat.text`：菜单拍的
+        `text` 是**占位符**（无标题菜单的 `MENU_NO_CAPTION`），
+        表单里显示的是空串 —— 那是刻意的（占位符是内部标记，不该让策划
+        看到）。第 3 拍现在是那张菜单拍（修好落盘顺序之后菜单拍提前到了
+        这里，见 `test_structural_nesting.TestBeatsStayInSourceOrder`）。
+        """
+        from storygraph.story.beat_model import menu_caption_text
         win._show_index(3)
         assert win._loaded_idx == 3
-        assert win._panel.text() == win.beats[3].text
+        assert win._panel.text() == menu_caption_text(win.beats[3].text)
         assert win._list.currentRow() == 3, '列表高亮没跟着走'
 
     def test_out_of_range_is_ignored(self, win):

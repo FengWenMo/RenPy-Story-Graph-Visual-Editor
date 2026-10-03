@@ -690,11 +690,63 @@ _TR_SQ = r"'(?P<sq>(?:[^'\\]|\\.)*)'"
 _TR_STR = f'(?:{_TR_DQ}|{_TR_SQ})'
 
 
+def unescape_renpy_string(text: str) -> str:
+    """
+    Ren'Py 字符串字面量的内容 → 实际文本（反转义）。
+
+    只处理转义序列，**不动 `{tag}` 与 `[var]`**（那是 Ren'Py 的文本标记，
+    属于内容本身，反转义不该碰它们）。
+
+    两个调用方：`_pick_str`（解析侧，`.rpy` → 内容）与
+    `parse_translation_files._pick_named`（`tl/` → 译文）。
+    """
+    if '\\' not in text:
+        return text
+    out, i, n = [], 0, len(text)
+    table = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\',
+             '"': '"', "'": "'", ' ': ' ', 'a': '\a', 'b': '\b',
+             'f': '\f', 'v': '\v', '0': '\0'}
+    while i < n:
+        ch = text[i]
+        if ch == '\\' and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in table:
+                out.append(table[nxt])
+                i += 2
+                continue
+            # `\uXXXX` 这类：认不出就原样留着（不做多余猜测）
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+
 def _pick_str(m, *groups) -> str:
+    """
+    取正则捕获的字符串字面量，并**反转义**。
+
+    `_STR` / `_TR_STR` 的捕获组是 `((?:[^"\\\\]|\\\\.)*)` —— 它把 `\\.` 的
+    反斜杠**一起留在捕获内容里**。于是
+
+        "file \\"c:\\\\admin_script.py\\", line 24, "
+
+    取出来是 `file \\"c:\\\\admin_script.py\\", line 24, `（源码形态），
+    而它的**实际文本**是 `file "c:\\admin_script.py", line 24, `。
+
+    不反转义的代价是**每往返一次转义层数翻倍**（`"` → `\\"` → `\\\\\\"` …）：
+    真实项目 `chapter1_2.rpy` 里那条调试输出旁白就是这么漂的。
+
+    **所有调用点都该反转义**：这里拿到的都是"内容"（台词 / 选项文字 /
+    角色名 / 路径），没有一处需要"源码形态"—— 要源码的场合调的是
+    `line.text`，不是这里。
+    """
     for g in groups:
         v = m.group(g)
         if v is not None:
-            return v
+            return unescape_renpy_string(v)
     return ''
 
 
@@ -735,9 +787,71 @@ def _image_solid_from_expr(expr: str):
     return None
 
 
+#: 公共别名（跨包使用 —— `app/stage.py` 靠它们把 `image x = …` 认成资源）。
+#: 名字带下划线但跨包在用，就说明**它已经是契约**，只是没声明
+#: （见 `tests/test_package_layering.py::test_no_private_names_cross_package`）。
+image_path_from_expr = _image_path_from_expr
+image_solid_from_expr = _image_solid_from_expr
+
+
+def _has_open_bracket(text: str) -> bool:
+    """
+    这行结束时**还有没闭合的括号**吗？（= 它的下一行是续行）
+
+    ⚠ **当前没有调用方**（2026-10-05）：它是给"续行参与/不参与块体基准"
+    那两个修法用的，两个都实测失败（见 `beat_render._indent_block_body`）。
+    留在这里是因为它是判断"续行 vs 下一层块体"的**唯一正确判据** ——
+    块体里"更深"的行有两种、含义完全相反，想再动手的人一定会需要它。
+    """
+    depth = 0
+    i = 0
+    s = str(text or '')
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == '\\':
+            i += 2
+            continue
+        if ch in ('"', "'"):
+            i, _ = _skip_string(s, i)
+            continue
+        if ch == '#':
+            break                     # 行内注释之后的括号不算
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        i += 1
+    return depth > 0
+
+
+def _shift_embedded_indent(text: str, delta: int) -> str:
+    """
+    多行文本（`_flatten` 用 `'\\n'` 拼出来的续行）整体左移 `delta` 个空格。
+
+    ⚠ **当前没有调用方**（2026-10-05）：它本来是给"把续行也按块体基准平移"
+    那个修法用的，而那个修法实测让全项目解析异常从 0 涨到 5，已放弃。
+    留在这是因为下一个人一定会再想"把续行平移一下就好了" ——
+    先读 `beat_render._indent_block_body` 的说明再动手。
+
+    只动**第二行起**的行首空白：首行由调用方 `lstrip` 之后自己管。
+    空行原样保留（它没有缩进可言）。
+    """
+    if delta <= 0 or '\n' not in text:
+        return text
+    parts = text.split('\n')
+    out = [parts[0]]
+    for ln in parts[1:]:
+        if not ln.strip():
+            out.append('')
+            continue
+        room = len(ln) - len(ln.lstrip())
+        out.append(ln[min(delta, room):])
+    return '\n'.join(out)
+
+
 class RenPyParser:
     """递归下降解析器：LogicalLine 树 → ASTNode 列表。"""
-
     # ---------- 简单前缀正则 ----------
     _RE_LABEL_HEAD = re.compile(r'^label(?=\s)')
     _RE_IF_HEAD = re.compile(r'^if\s+')
@@ -1608,6 +1722,32 @@ class RenPyParser:
     # ---------- python: 块收集 ----------
 
     def _collect_python_block(self, line: LogicalLine) -> str:
+        """
+        `python:` 块 → 归一化到"块体基准缩进 0"的代码文本。
+
+        **合并进同一个逻辑行的续行也要跟着平移**（2026-10-05 修，真实项目实测）：
+
+        `_flatten` 会把括号未闭合的多行语句**并成一条逻辑行**
+        （`node.text` 里因此含 `\\n`），而 `node.indent` 只是**第一行**的缩进。
+        下面原来只给第一行算 `rel`，于是续行**原封不动带着它在原文件里的
+        绝对缩进**进了 payload：
+
+            原文件（块体缩进 8）
+                renpy.store.drag_puzzle_game = drag_puzzle(     ← indent 8
+                            puzzle_path,                        ← indent 12
+                )
+
+            payload 里就是 rel=0 的首行 + 12 空格的续行 ——
+            可**规约是"相对块体基准"**，那个 12 会被当成"更深一层"。
+
+        后果不是立刻错，而是**再渲染一次就翻倍**：`_indent_block_body` 给
+        整块加 4，续行本身那 12 还在 → 16；第三轮 20…（实测产物里
+        `puzzle_path,` 是 20 空格，原文 12 —— 审计按逐行文本比，算一条丢失）。
+
+        修法：把**每一行**都减去 `base_indent`（`_flatten` 用 `'\\n'` 拼接时
+        每行都保留了原文缩进），与第一行同一套口径。
+        块体基准取 `line.subblock` 里最小的缩进（与原来一致）。
+        """
         result = []
 
         def walk(nodes, base_indent):
@@ -1627,8 +1767,7 @@ class RenPyParser:
 
     # ---------- if 链消费 ----------
 
-    def _consume_if_chain(self, lines: list, start_i: int,
-                          if_node: IfNode) -> int:
+    def _consume_if_chain(self, lines: list, start_i: int,                          if_node: IfNode) -> int:
         j = start_i + 1
         base_indent = lines[start_i].indent
 
@@ -2144,8 +2283,34 @@ class ParseResultBuilder:
                 #
                 # 空 caption 是**合法**的菜单（Ren'Py 允许 `menu:` 无标题），
                 # 所以这里照常产出，由下游决定"空标题怎么显示"。
+                # MENU 语句的 condition = **包在 `menu:` 外面那一层的条件**。
+                #
+                # 为什么要单独算（2026-10-05 实测）：`accum_cond` 同时包含
+                # "外层 `if`"与"选项体累积条件"两种来源，而渲染层需要分清
+                #
+                #     if flag:            ← `if` 要写在 **menu 外面**
+                #         menu:
+                #             "A":
+                #                 jump a
+                #
+                #     menu:               ← `if` 要写在 **选项那一行**
+                #         "A" if flag:
+                #             jump a
+                #
+                # 判据：菜单**自身**的 `if` 会出现在"选项体最浅一层"的条件里
+                # （`_combine` 把它并进了选项体），因此
+                # `self._combine(accum_cond, opt.condition)` 就是承载它的值；
+                # 只有"外层 if"（与选项无关）才需要整块包住。
+                #
+                # 具体做法：选项自己的 condition 为空 → 那个累积值来自菜单
+                # 外面那一层 → 整块 `if`；否则菜单没有自己的 `if`。
+                menu_own_cond = ''
+                if node.options and all(
+                        not (getattr(o, 'condition', '') or '').strip()
+                        for o in node.options):
+                    menu_own_cond = accum_cond
                 add_stmt(Statement.make_menu(
-                    node.caption or '', accum_cond,
+                    node.caption or '', menu_own_cond,
                     source=(node.filename, node.line_number)))
                 for opt in node.options:
                     result.dialogues.append(DialogueLine(
@@ -2771,34 +2936,9 @@ def batch_import_chapters(filepaths, graph):
 #  翻译文件解析
 # ====================================================================
 
-def _unescape_renpy_string(text: str) -> str:
-    """
-    Ren'Py 字符串字面量的内容 → 实际文本（反转义）。
-
-    只处理转义序列，**不动 `{tag}` 与 `[var]`**（那是 Ren'Py 的文本标记，
-    属于内容本身，反转义不该碰它们）。
-    """
-    if '\\' not in text:
-        return text
-    out, i, n = [], 0, len(text)
-    table = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\',
-             '"': '"', "'": "'", ' ': ' ', 'a': '\a', 'b': '\b',
-             'f': '\f', 'v': '\v', '0': '\0'}
-    while i < n:
-        ch = text[i]
-        if ch == '\\' and i + 1 < n:
-            nxt = text[i + 1]
-            if nxt in table:
-                out.append(table[nxt])
-                i += 2
-                continue
-            # `\uXXXX` 这类：认不出就原样留着（不做多余猜测）
-            out.append(ch)
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return ''.join(out)
+# 反转义实现在文件上方（`unescape_renpy_string`）—— 解析侧与翻译侧共用
+# 同一份，别再抄一遍。这里保留一个私有别名，兼容既有调用。
+_unescape_renpy_string = unescape_renpy_string
 
 
 

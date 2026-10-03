@@ -1,0 +1,1924 @@
+{
+ "steps": [
+  [
+   "load",
+   "ok",
+   12
+  ],
+  [
+   "beats",
+   "note",
+   [
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "seq": 1,
+     "show": "ling base_arms_akimbo sigh@i11",
+     "sound": "",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 2,
+     "show": "ling oh",
+     "sound": "door",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。",
+     "voice": "v_ling_01",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 3,
+     "show": "mary smile@right",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 4,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "\u0000menu",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 5,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "去屋顶看看",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "seq": 6,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 7,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "先回教室",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "seq": 8,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "seq": 9,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "风好大。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 10,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 11,
+     "show": "",
+     "sound": "",
+     "speaker": "e",
+     "text": "还是算了。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 12,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    }
+   ]
+  ],
+  [
+   "health",
+   "ok",
+   {
+    "issues": [],
+    "total": 0
+   }
+  ],
+  [
+   "fields[0]",
+   "ok",
+   {
+    "BGM": "[音乐] night fadein 1.0",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "base_arms_akimbo 无语",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "i11",
+    "SFX": "",
+    "Scene": "bg classroom",
+    "Speaker": "e",
+    "Stage": "scene bg classroom; show ling base_arms_akimbo sigh at i11",
+    "Text": "早上好，昨晚睡得好吗？",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[1]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "oh",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "[音效] door",
+    "Scene": "",
+    "Speaker": "m",
+    "Stage": "show ling oh",
+    "Text": "还行，就是雨下了一整晚。",
+    "Voice": "v_ling_01",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[2]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "笑",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "右",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "show mary smile at right",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[3]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "menu",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[4]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "menu_option",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "去屋顶看看",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[5]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "jump ch01_roof",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "narration",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[6]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "menu_option",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "先回教室",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[7]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "jump ch01_class",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "narration",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[8]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "开心",
+    "Kind": "say",
+    "Label": "ch01_roof",
+    "Notes": "",
+    "Position": "leftish",
+    "SFX": "",
+    "Scene": "bg rooftop",
+    "Speaker": "e",
+    "Stage": "scene bg rooftop; show ling happy at leftish",
+    "Text": "风好大。",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[9]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "jump ch01_end",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "narration",
+    "Label": "ch01_roof",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[10]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "say",
+    "Label": "ch01_class",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "e",
+    "Stage": "",
+    "Text": "还是算了。",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "fields[11]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "jump ch01_end",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "narration",
+    "Label": "ch01_class",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "cards[0]",
+   "ok",
+   [
+    {
+     "at": "i11",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "base_arms_akimbo 无语",
+     "extra_rows": [],
+     "image": "ling base_arms_akimbo sigh",
+     "inherited_at": "",
+     "order_index": 0,
+     "position": "i11",
+     "tag": "ling"
+    }
+   ]
+  ],
+  [
+   "cards[1]",
+   "ok",
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    }
+   ]
+  ],
+  [
+   "cards[2]",
+   "ok",
+   [
+    {
+     "at": "right",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "笑",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited_at": "",
+     "order_index": 0,
+     "position": "右",
+     "tag": "mary"
+    }
+   ]
+  ],
+  [
+   "cards[3]",
+   "ok",
+   []
+  ],
+  [
+   "cards[4]",
+   "ok",
+   []
+  ],
+  [
+   "cards[5]",
+   "ok",
+   []
+  ],
+  [
+   "cards[6]",
+   "ok",
+   []
+  ],
+  [
+   "cards[7]",
+   "ok",
+   []
+  ],
+  [
+   "cards[8]",
+   "ok",
+   [
+    {
+     "at": "leftish",
+     "clause": "",
+     "effective_at": "leftish",
+     "expression": "开心",
+     "extra_rows": [],
+     "image": "ling happy",
+     "inherited_at": "",
+     "order_index": 0,
+     "position": "leftish",
+     "tag": "ling"
+    }
+   ]
+  ],
+  [
+   "cards[9]",
+   "ok",
+   []
+  ],
+  [
+   "cards[10]",
+   "ok",
+   []
+  ],
+  [
+   "cards[11]",
+   "ok",
+   []
+  ],
+  [
+   "frames",
+   "ok",
+   [
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "e",
+     "text": "早上好，昨晚睡得好吗？"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": "去屋顶看看"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": "先回教室"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01_roof",
+     "speaker": "e",
+     "text": "风好大。"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01_roof",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01_class",
+     "speaker": "e",
+     "text": "还是算了。"
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01_class",
+     "speaker": "",
+     "text": ""
+    }
+   ]
+  ],
+  [
+   "stage_digest_text(0)",
+   "ok",
+   "第 1 拍 · label ch01\n本拍变化：\n  + ling base_arms_akimbo sigh @ i11（登场）\n  ♪ 音乐 → night fadein 1.0\n  背景 → bg classroom\n背景：bg classroom\n立绘：ling base_arms_akimbo sigh@i11\n音乐：night"
+  ],
+  [
+   "stage_digest_text(1)",
+   "ok",
+   "第 2 拍 · label ch01\n本拍变化：\n  + ling oh（登场）\n  ♫ 音效 door\n  🎙 语音 v_ling_01\n背景：bg classroom\n立绘：ling oh@i11\n音乐：night\n音效：door\n语音：v_ling_01\n备注：音效 door"
+  ],
+  [
+   "speaking_card_index(0)",
+   "ok",
+   -1
+  ],
+  [
+   "list_entry(0)",
+   "ok",
+   {
+    "index": 0,
+    "line_id": "ch01.0001",
+    "prefix": "",
+    "text": "早上好，昨晚睡得好吗？",
+    "who": "e"
+   }
+  ],
+  [
+   "list_entry(1)",
+   "ok",
+   {
+    "index": 1,
+    "line_id": "ch01.0002",
+    "prefix": "",
+    "text": "还行，就是雨下了一整晚。",
+    "who": "m"
+   }
+  ],
+  [
+   "_graph.Graph()",
+   "ok",
+   "<Graph>"
+  ],
+  [
+   "import_chapters",
+   "ok",
+   {
+    "added_edges": 4,
+    "added_nodes": 4,
+    "control_flow": false,
+    "edges": 4,
+    "error": "",
+    "errors": [],
+    "files": [
+     "<PROJ>\\game\\script\\ch01.rpy"
+    ],
+    "graph": "<Graph>",
+    "nodes": 4,
+    "ok": true,
+    "warnings": []
+   }
+  ],
+  [
+   "graph_files",
+   "ok",
+   [
+    "<PROJ>\\game\\script\\ch01.rpy"
+   ]
+  ],
+  [
+   "missing_chapter_files",
+   "ok",
+   {
+    "files": [],
+    "labels": [],
+    "unknown": []
+   }
+  ],
+  [
+   "analyze_graph",
+   "ok",
+   "节点 4 个 <ABS> 连线 4 条；分析入口「ch01」（猜测，不断言不可达）；真断了 0 个 <ABS> 死分支 0 个 <ABS> 其它入口可达 0 个 <ABS> 其它告警 1 条\n\n=== 变量区间分析结果 ===\n\n节点: ch01\n  ← 分析入口\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_roof\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_class\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_end\n  入口状态: {}\n  剧情变量: 无\n\n\n=== 警告 ===\nℹ️ 未找到标准入口 label（start<ABS>\n"
+  ],
+  [
+   "analyze_graph_problems",
+   "ok",
+   {
+    "authoritative": false,
+    "counts": {
+     "dead_end": 0,
+     "edges": 4,
+     "independent": 0,
+     "issues": 1,
+     "nodes": 4,
+     "stranded": 0
+    },
+    "dead_end_ids": [],
+    "entry_id": 1,
+    "entry_name": "ch01",
+    "independent_ids": [],
+    "issue_ids": [],
+    "notes": [],
+    "ok": true,
+    "problem_ids": [],
+    "stranded_ids": [],
+    "summary": "节点 4 个 <ABS> 连线 4 条；分析入口「ch01」（猜测，不断言不可达）；真断了 0 个 <ABS> 死分支 0 个 <ABS> 其它入口可达 0 个 <ABS> 其它告警 1 条",
+    "text": "节点 4 个 <ABS> 连线 4 条；分析入口「ch01」（猜测，不断言不可达）；真断了 0 个 <ABS> 死分支 0 个 <ABS> 其它入口可达 0 个 <ABS> 其它告警 1 条\n\n=== 变量区间分析结果 ===\n\n节点: ch01\n  ← 分析入口\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_roof\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_class\n  入口状态: {}\n  剧情变量: 无\n\n节点: ch01_end\n  入口状态: {}\n  剧情变量: 无\n\n\n=== 警告 ===\nℹ️ 未找到标准入口 label（start<ABS>\n",
+    "warnings": [
+     "ℹ️ 未找到标准入口 label（start<ABS>"
+    ]
+   }
+  ],
+  [
+   "node_variables",
+   "ok",
+   {
+    "file": "<PROJ>\\game\\script\\ch01.rpy",
+    "label": "ch01",
+    "line": 13,
+    "ok": true,
+    "tech_count": 0,
+    "variables": []
+   }
+  ],
+  [
+   "characters",
+   "ok",
+   []
+  ],
+  [
+   "participants",
+   "ok",
+   []
+  ],
+  [
+   "asset_choices(image)",
+   "ok",
+   []
+  ],
+  [
+   "asset_choices(music)",
+   "ok",
+   []
+  ],
+  [
+   "transform_index",
+   "ok",
+   {
+    "i11": "<TransformDef>",
+    "leftish": "<TransformDef>"
+   }
+  ],
+  [
+   "screen_size",
+   "ok",
+   [
+    1920,
+    1080
+   ]
+  ],
+  [
+   "default_output_path",
+   "ok",
+   "<PROJ>\\build\\renpy\\ch01.generated.rpy"
+  ],
+  [
+   "should_write_transforms",
+   "ok",
+   true
+  ],
+  [
+   "asset_overview",
+   "ok",
+   {
+    "broken": [],
+    "categories": {},
+    "error": "还没有资源表 —— 先「📁 打开项目」",
+    "ok": false,
+    "statistics": {},
+    "top_characters": [],
+    "undefined": [],
+    "unused_assets": [],
+    "unused_characters": []
+   }
+  ],
+  [
+   "apply(0)",
+   "ok",
+   {
+    "__obj__": "Beat",
+    "condition": "",
+    "kind": "say",
+    "label": "ch01",
+    "seq": 1,
+    "speaker": "e",
+    "text": "快照改过的台词"
+   }
+  ],
+  [
+   "fields[0]-after-apply",
+   "ok",
+   {
+    "BGM": "[音乐] night fadein 1.0",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "base_arms_akimbo 无语",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "i11",
+    "SFX": "",
+    "Scene": "bg classroom",
+    "Speaker": "e",
+    "Stage": "scene bg classroom; show ling base_arms_akimbo sigh at i11",
+    "Text": "快照改过的台词",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "can_undo",
+   "ok",
+   false
+  ],
+  [
+   "undo",
+   "ok",
+   null
+  ],
+  [
+   "fields[0]-after-undo",
+   "ok",
+   {
+    "BGM": "[音乐] night fadein 1.0",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "base_arms_akimbo 无语",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "i11",
+    "SFX": "",
+    "Scene": "bg classroom",
+    "Speaker": "e",
+    "Stage": "scene bg classroom; show ling base_arms_akimbo sigh at i11",
+    "Text": "快照改过的台词",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "apply(0,cards)",
+   "ok",
+   {
+    "__obj__": "Beat",
+    "condition": "",
+    "kind": "say",
+    "label": "ch01",
+    "seq": 1,
+    "speaker": "e",
+    "text": "x"
+   }
+  ],
+  [
+   "fields[0]-after-cards",
+   "ok",
+   {
+    "BGM": "[音乐] night fadein 1.0",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "开心",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "leftish",
+    "SFX": "",
+    "Scene": "bg classroom",
+    "Speaker": "e",
+    "Stage": "scene bg classroom; show ling happy at leftish",
+    "Text": "x",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "apply-for-snapshot",
+   "ok",
+   {
+    "__obj__": "Beat",
+    "condition": "",
+    "kind": "say",
+    "label": "ch01",
+    "seq": 1,
+    "speaker": "e",
+    "text": "改一版再快照"
+   }
+  ],
+  [
+   "snapshot(0)",
+   "note",
+   "<BeatSnapshot>"
+  ],
+  [
+   "restore(snapshot(0))",
+   "ok",
+   {
+    "__obj__": "Beat",
+    "condition": "",
+    "kind": "say",
+    "label": "ch01",
+    "seq": 1,
+    "speaker": "e",
+    "text": "改一版再快照"
+   }
+  ],
+  [
+   "fields[0]-after-restore",
+   "ok",
+   {
+    "BGM": "[音乐] night fadein 1.0",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "开心",
+    "Kind": "say",
+    "Label": "ch01",
+    "Notes": "",
+    "Position": "leftish",
+    "SFX": "",
+    "Scene": "bg classroom",
+    "Speaker": "e",
+    "Stage": "scene bg classroom; show ling happy at leftish",
+    "Text": "改一版再快照",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
+   "insert_beat",
+   "ok",
+   {
+    "count": 13,
+    "error": "",
+    "index": 2,
+    "label": "ch01",
+    "ok": true
+   }
+  ],
+  [
+   "beats-after-insert",
+   "note",
+   [
+    {
+     "at": "leftish",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "seq": 1,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "改一版再快照",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 2,
+     "show": "ling oh",
+     "sound": "door",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。",
+     "voice": "v_ling_01",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 3,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 4,
+     "show": "mary smile@right",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 5,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "\u0000menu",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 6,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "去屋顶看看",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "seq": 7,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 8,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "先回教室",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "seq": 9,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "seq": 10,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "风好大。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 11,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 12,
+     "show": "",
+     "sound": "",
+     "speaker": "e",
+     "text": "还是算了。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 13,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    }
+   ]
+  ],
+  [
+   "has_removed",
+   "ok",
+   false
+  ],
+  [
+   "delete_beat",
+   "ok",
+   {
+    "count": 12,
+    "error": "",
+    "index": 1,
+    "ok": true,
+    "removed": {
+     "__obj__": "Beat",
+     "condition": "",
+     "kind": "say",
+     "label": "ch01",
+     "seq": 2,
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。"
+    }
+   }
+  ],
+  [
+   "has_removed-after-delete",
+   "ok",
+   true
+  ],
+  [
+   "restore_last_removed",
+   "ok",
+   {
+    "count": 13,
+    "error": "",
+    "index": 1,
+    "ok": true
+   }
+  ],
+  [
+   "beats-after-restore",
+   "note",
+   [
+    {
+     "at": "leftish",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "seq": 1,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "改一版再快照",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 2,
+     "show": "ling oh",
+     "sound": "door",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。",
+     "voice": "v_ling_01",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 3,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 4,
+     "show": "mary smile@right",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 5,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "\u0000menu",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 6,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "去屋顶看看",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "seq": 7,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 8,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "先回教室",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "seq": 9,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "seq": 10,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "风好大。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 11,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 12,
+     "show": "",
+     "sound": "",
+     "speaker": "e",
+     "text": "还是算了。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 13,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    }
+   ]
+  ],
+  [
+   "set_speaker(0)",
+   "ok",
+   true
+  ],
+  [
+   "remove_sprite(0)",
+   "ok",
+   {
+    "__obj__": "Beat",
+    "condition": "",
+    "kind": "say",
+    "label": "ch01",
+    "seq": 1,
+    "speaker": "m",
+    "text": "改一版再快照"
+   }
+  ],
+  [
+   "compile",
+   "ok",
+   "<CompileResult>"
+  ],
+  [
+   "export_ir(json)",
+   "ok",
+   {
+    "engine": "json",
+    "error": "",
+    "files": [
+     "<PROJ>\\snap_out\\story_ir.json"
+    ],
+    "ok": true,
+    "out_dir": "<PROJ>\\snap_out"
+   }
+  ],
+  [
+   "export_control_flow",
+   "ok",
+   {
+    "count": 4,
+    "error": "",
+    "labels": [
+     "ch01_control",
+     "ch01_roof_control",
+     "ch01_class_control",
+     "ch01_end_control"
+    ],
+    "mode": "补 _control 包装（章节图）",
+    "ok": true,
+    "path": "<PROJ>\\snap_out\\control_flow.json",
+    "warnings": []
+   }
+  ],
+  [
+   "check_variable_syntax",
+   "ok",
+   []
+  ],
+  [
+   "check_variable_syntax-bad",
+   "ok",
+   []
+  ],
+  [
+   "save_layout",
+   "ok",
+   {
+    "edges": 4,
+    "error": "",
+    "nodes": 4,
+    "ok": true,
+    "path": "<PROJ>\\snap_out\\layout.json"
+   }
+  ],
+  [
+   "load_layout",
+   "ok",
+   {
+    "edges": 4,
+    "error": "",
+    "graph": "<Graph>",
+    "nodes": 4,
+    "ok": true,
+    "path": "<PROJ>\\snap_out\\layout.json"
+   }
+  ],
+  [
+   "beats-final",
+   "note",
+   [
+    {
+     "at": "leftish",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "night",
+     "raw": "",
+     "scene": "bg classroom",
+     "seq": 1,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "m",
+     "text": "改一版再快照",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 2,
+     "show": "ling oh",
+     "sound": "door",
+     "speaker": "m",
+     "text": "还行，就是雨下了一整晚。",
+     "voice": "v_ling_01",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 3,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 4,
+     "show": "mary smile@right",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 5,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "\u0000menu",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 6,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "去屋顶看看",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_roof",
+     "scene": "",
+     "seq": 7,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "menu_option",
+     "label": "ch01",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 8,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "先回教室",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01",
+     "music": "",
+     "raw": "jump ch01_class",
+     "scene": "",
+     "seq": 9,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "",
+     "scene": "bg rooftop",
+     "seq": 10,
+     "show": "ling happy@leftish",
+     "sound": "",
+     "speaker": "e",
+     "text": "风好大。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_roof",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 11,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 12,
+     "show": "",
+     "sound": "",
+     "speaker": "e",
+     "text": "还是算了。",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "narration",
+     "label": "ch01_class",
+     "music": "",
+     "raw": "jump ch01_end",
+     "scene": "",
+     "seq": 13,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    }
+   ]
+  ]
+ ]
+}

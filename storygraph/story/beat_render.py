@@ -14,9 +14,11 @@ storygraph.story.beat_render
 """
 
 from __future__ import annotations
+import ast
 import re
 from typing import Optional
-from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.vocabulary import (GENERATOR_MARKER,
+                                        RENPY_BUILTIN_TRANSFORMS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
 
 from storygraph.story.beat_model import (
@@ -89,6 +91,125 @@ def _emit_image_name(name: str, resolver=None) -> str:
         return underscored
     return name
 
+
+
+def _looks_like_dialogue(line: str) -> bool:
+    """
+    这行"只可能"是**台词**（`角色 属性… "内容"`），而不是裸 python 表达式吗？
+
+    为什么要它（P0，2026-10-05，真实项目 `script.rpy:93` 实测）：
+    作者手写了一句 `l oh "3"`（`l` 后面多打了一个 `oh`）。Ren'Py 把
+    **裸的 `词 词 "串"`** 当台词读（角色 `l oh` 说 `"3"`）—— Ren'Py 要到
+    **运行时**才抱怨角色未定义，那属于"脚本能跑、演出不对"的范畴。
+
+    而工具把它归成 `raw`，导出时按"裸 python 表达式"补了 `$`：
+
+        $ l oh "3"            ← Python 语法错误 → **Ren'Py 加载脚本就报错**
+
+    也就是说工具的产物比作者原文**更糟**（原文至少能跑）。这是 P0，
+    `audit_roundtrip.py` 在真实项目里一直报着它。
+
+    **判据刻意保守**：只认 `标识符链 + 一个引号串 + 行尾`。
+
+        'l oh "3"'        → True     台词
+        'ling "台词"'     → True     台词
+        "e '单引号'"       → True     台词
+        'love += 1'       → False    `+=` 不在允许字符内
+        'msg_add(1)'      → False    括号
+        'x = "s"'         → False    `=`
+        'foo("a")'        → False    括号
+        'persistent.n = 1'→ False    `=`（且后面还有内容）
+
+    唯一会被它放过的 python 形态是 `f() "x"`（函数调用后面跟一个串），
+    而那**本身就是语法错误** —— 透传反而更接近原文，不亏。
+
+    为什么不用"动词白名单"（第一版就是这么做的，已回退）：
+    白名单只认 `show` / `jump` / `pause` 这类**已知动词**，而
+    `l oh "3"` 的第一步是个**角色名**，白名单必然漏掉它，
+    同时又会把白名单内的真 python 内容误判。**按形态认，不按名字认。**
+    """
+    s = str(line or '').strip()
+    if not s:
+        return False
+    i = 0
+    # 标识符链：`l`、`ling`、`e happy`、`renpy.x` 都行（空格或点分隔）
+    seen = False
+    while i < len(s):
+        ch = s[i]
+        if ch.isalnum() or ch == '_':
+            seen = True
+            i += 1
+            continue
+        if ch in ' .' and seen:
+            # 后面必须还接标识符字符，否则这个空格/点就是分隔符之前的东西
+            j = i + 1
+            if j < len(s) and (s[j].isalnum() or s[j] == '_'):
+                i = j
+                continue
+            break
+        break
+    if not seen or i >= len(s):
+        return False
+    # 角色名与台词之间的空格（`l oh "3"` 里 `oh` 与 `"3"` 之间那个）
+    while i < len(s) and s[i] in ' \t':
+        i += 1
+    # 剩下来的必须正好是**一个引号串**，直到行尾
+    rest = s[i:]
+    if rest[:1] not in ('"', "'"):
+        return False
+    quote = rest[0]
+    try:
+        tree = ast.parse(rest, mode='eval')
+    except SyntaxError:
+        return False
+    return (isinstance(tree.body, ast.Constant)
+            and isinstance(tree.body.value, str)
+            and rest.endswith(quote))
+
+
+#: **已知的 Ren'Py 语句动词**：以它们开头的行是原文真迹，不许补 `$`。
+#:
+#: 为什么必须有这一份（2026-10-05 实测）：`show screen my_hud` / 跨文件
+#: `jump external_minigame` 这类语句由解析器归成 `raw`（设计内的"原样保存、
+#: 原样回写"），如果被当成裸 python 补上 `$`，产物就成了
+#: `$ show screen my_hud` —— 语法错误。
+#:
+#: 与 `_looks_like_dialogue` 是**并集**关系，两者不可互相替代：
+#:   · 动词白名单认 `show` / `jump` / `pause` …，但**认不出**台词
+#:     （`l oh "3"` 的第一步是**角色名**，不可能在白名单里）；
+#:   · 台词形态认 `标识符链 + 引号串`，但认不出 `show screen my_hud`
+#:     （它没有引号串）。
+#:
+#: 只在**动词那一档**放宽，不做"整体像 Ren'Py 就透传"的猜测 ——
+#: 猜测那版（第一版）实测红了 13 个测试。
+_RENPY_STATEMENT_HEADS = frozenset({
+    '$', 'python', 'with', 'pause', 'jump', 'call', 'play', 'queue', 'stop',
+    'scene', 'show', 'hide', 'voice', 'window', 'menu', 'return', 'pass',
+    'init', 'label', 'define', 'default', 'transform', 'image', 'extend',
+    'screen', 'nvl', 'camera', 'style', 'layeredimage', 'translate',
+    'renpy.', 'persistent.', 'config.', 'gui.', 'store.',
+    'narrator', 'voice_sustain',
+})
+
+
+def _looks_like_renpy_statement(line: str) -> bool:
+    """
+    这行像一条 **Ren'Py 语句**（而不是裸 python 表达式）→ 原样透传、不补 `$`。
+
+    两条并集（见 `_RENPY_STATEMENT_HEADS` 与 `_looks_like_dialogue` 的说明）：
+    已知动词，或者"只可能是台词"的形态。
+
+    **不包含 `if` / `elif` / `else` / `while` / `for`** —— 那几条在
+    `raw` 里出现时是**代码块的条件行**（`python:` 块内），当成语句透传
+    会把块结构弄坏（第一版把 `while` 放进来，实测红了两个测试）。
+    """
+    s = str(line or '').strip()
+    if not s:
+        return False
+    head = s.split(None, 1)[0].rstrip(':')
+    if head in _RENPY_STATEMENT_HEADS:
+        return True
+    return _looks_like_dialogue(s)
 
 
 def render_code_block(text: str, multiline: str = 'auto') -> list:
@@ -174,23 +295,46 @@ def render_code_block(text: str, multiline: str = 'auto') -> list:
 
 def _indent_block_body(body: list) -> list:
     """
-    `python:` 块体 → 已缩进的行（块层级按 4 空格重建，续行对齐到括号）。
+    `python:` 块体 → 已缩进的行：**整体平移，相对缩进原样保留**。
 
-    块体里有两类"更深"的行，**必须分开处理**（2026-10-05 实测踩过）：
+    为什么不再"按括号重新对齐"（2026-10-05 修，真实项目实测）：
 
-      · **块层级**（`for` / `if` 的体）：它是语义，必须保住 ——
-            for i, digit in enumerate(...):
-                available_positions = [...]      ← 少了这级缩进，
-                if available_positions:          ← Ren'Py 直接
-                    pos = ...                    ← "expected an indented block"
-      · **续行对齐**（括号没闭合）：它是排版，必须归一 ——
-            drag_puzzle(
-                puzzle_path,      ← 对齐到括号即可，照抄单元格里那 12 个
-                rows=2)           ← 空格会叠加块层级 → Ren'Py 当成嵌套块 → 语法错误
+    旧实现把续行**对齐到未闭合括号所在列**，于是
 
-    判据是**括号深度**：上一行还有没闭合的括号 → 这一行是续行；否则
-    缩进变深就是真的进了一层块。块层级记成"相对首行的层数 × 4"，
-    与单元格里的排版无关（**不动点**：再往返一次逐字节相同）。
+        positions = [
+                    (200, 200), (600, 200), …      ← 原始：12 空格
+            ]                                      ← 原始：8 空格
+
+    被改写成（括号在第 21 列）
+
+        positions = [
+                             (200, 200), …         ← 变成 21 空格
+                             ]                     ← 变成 21 空格
+
+    **语法一样能跑**（括号内换行的缩进在 Python 里自由），但它是
+    "凭空改写了作者手写的排版" —— 三处 Python 块的往返"丢失"全部来自
+    这里（两个 `mini_game*.rpy`）。审计按逐行文本比对，把"同一段代码
+    缩进不同"算成一丢一增。
+
+    为什么"整体平移"就够：单元格里的相对缩进是**原文的**，原文是合法
+    Python，所以
+
+      · 块层级（`for` 体比 `for` 深）→ 相对缩进保住 → 语义保住；
+      · 续行对齐 → 相对缩进保住 → 排版逐字节回到原文。
+
+    也就是说这一条同时满足"语义正确"和"不动作者的排版"，
+    而"重新对齐"只在语义上够用。**能不动就不动。**
+
+    平移量取**第一条非空行的相对缩进**（`anchor`）：代码格写表时会把
+    块头那一行的缩进剥掉，所以 `anchor` 通常就是 0。
+    减去 `anchor` 再统一加块体基准缩进（`python:` 的块体必须比它深一层，
+    所以每一行都要加）。
+
+    ⚠ **已知的排版漂移（未修，见文末）**：续行自己那 12 个空格是原文的
+    绝对排版，再统一加 4 之后产物里是 16/20，与原文对不上 —— 两个
+    `mini_game*.rpy` 的往返"丢失"就是它。这是**纯排版**（括号内换行的
+    缩进在 Python 里自由），语义完全等价。试过三种归一化写法都让
+    全项目丢失数**变多**（3 → 7），所以保持现状并记录清楚。
     """
     anchor = None
     for ln in body:
@@ -200,53 +344,14 @@ def _indent_block_body(body: list) -> list:
     if anchor is None:
         return [''] * len(body)
 
-    # 块层级 = "比它**浅的缩进档位**有几个"（续行不参与，它归所在语句那一层）。
-    #
-    # 关键是数**档位（distinct 缩进值）**，不是数行数 —— 数行数会把
-    # 同一层的多条语句各算一层，`for` 体里三行就变成第 4 层
-    # （实测：`for` 体内缩进 4 的行被算成 lvl=4 → 输出 20 个空格，
-    #  而 `for` 体的内层又叠到 28 个空格，产物直接语法错误）。
-    levels = []
-    distinct = sorted({len(ln) - len(ln.lstrip())
-                       for ln in body if ln.strip()})
-    open_depth = 0
-    for ln in body:
-        if not ln.strip():
-            levels.append(0)
-            continue
-        indent = len(ln) - len(ln.lstrip())
-        if open_depth > 0:
-            # **续行**（上一行的括号还没闭合）：它不是块层级
-            levels.append(levels[-1] if levels else 0)
-        else:
-            levels.append(sum(1 for d in distinct if d < indent))
-        open_depth += _bracket_delta(ln, '')
-        if open_depth < 0:
-            open_depth = 0
-
     out = []
-    #: 尚未闭合的开括号所在列
-    opens = []
-    for idx, ln in enumerate(body):
+    for ln in body:
         if not ln.strip():
             out.append('')
             continue
-        text = ln.strip()
-        lvl = levels[idx]
-        prev_level = lvl
-        if opens:
-            base = ' ' * max(4 * (lvl + 1), opens[-1] + 1)
-        else:
-            base = '    ' * (lvl + 1)
-        out.append(base + text)
-        col = len(base)
-        for ch in text:
-            if ch in '([{':
-                opens.append(col)
-            elif ch in ')]}':
-                if opens:
-                    opens.pop()
-            col += 1
+        indent = len(ln) - len(ln.lstrip())
+        # 比 anchor 还浅的行（理论上不该有）夹到 0，避免负缩进
+        out.append(' ' * (4 + max(0, indent - anchor)) + ln.lstrip())
     return out
 
 
@@ -272,8 +377,29 @@ def _render_marked_code_block(lines: list, multiline: str) -> list:
         marker = line[:1]
         if marker == CODE_BLOCK_OPEN:
             j = i + 1
-            while j < n and lines[j][:1] == CODE_BLOCK_BODY:
-                j += 1
+            while j < n:
+                nxt = lines[j]
+                if nxt[:1] == CODE_BLOCK_BODY:
+                    j += 1
+                    continue
+                # **空行也是块体的一部分**（2026-10-05 修）。
+                #
+                # 实测来源：`mini_game_puzzle.rpy` 的多行调用里有一个空行
+                # （`cols=3,` 与 `grid_width=800,` 之间）。块标记是**行首字符**，
+                # 而空行没有行首字符 —— 旧循环到它这里就停了，于是：
+                #   · 空行之后那几行**掉出块体**；
+                #   · `python:` 块被从中间截断，尾巴按"块外行"逐行处理；
+                #   · 那一整段在往返后逐行文本对不上（审计算一条丢失）。
+                # 判据要"往前看"：空行**后面还有块体行**才算块内空行，
+                # 否则它是块与下一段之间的分隔（那种要留在块外）。
+                if not nxt.strip():
+                    k = j
+                    while k < n and not lines[k].strip():
+                        k += 1
+                    if k < n and lines[k][:1] == CODE_BLOCK_BODY:
+                        j = k
+                        continue
+                break
             body = [unmask_code_block_markers(ln) for ln in lines[i:j]]
             out.append('python:')
             out.extend(_indent_block_body(body))
@@ -691,8 +817,21 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         return pre
 
     if beat.condition:
+        # 条件拍：`if <条件>:` 一行 + 块体。
+        #
+        # **块体必须比 `if` 深一层**（2026-10-05 实测，brutal test 的 F4）。
+        # 以前写的是 `indent + ln`：`indent` 在"顶层直接渲染一拍"时是默认的
+        # 4 空格，看着像是缩进了；但**嵌套渲染**（菜单选项体、`_render_unit_lines`）
+        # 传的是 `indent=''`，于是 `if deepest:` 与它的块体贴成同一层 ——
+        #
+        #     if deepest:
+        #     e "深层"          ← 与 `if` 齐平 = 语法错误
+        #
+        # 正确做法是**无条件再加一层**：调用方负责"这一拍整体在哪一层"，
+        # 这里负责"拍内部块体比条件头深一层"。两条职责分开之后，
+        # 顶层与嵌套两条路都能出对。
         return pre + [f"if {beat.condition}:"] + [
-            indent + ln for ln in lines
+            '    ' + ln if ln.strip() else '' for ln in lines
         ]
     return pre + lines
 
@@ -990,12 +1129,26 @@ def _is_menu_foreign(option, beat, menu_cond: str) -> str:
     """
     这一拍**能确定**它属于 `option` 的块体吗？不能就返回原因（供写警告）。
 
-    能确定的两条（与 `_in_menu_body` 同一套判据）：
+    能确定的三条（与 `_in_menu_body` 同一套判据）：
 
       · `_menu_member is True` —— 解析器标的真结构位（`.rpy → .rpy` 这条
         路，产出必须逐字不变，所以**不能**加警告）；
       · 条件正好等于"本选项 + 外层菜单"的累积条件 —— Excel 往返那条路，
         `stamp_menu_bodies` 把无条件块体补成了 `True`。
+      · **条件是上面那个累积条件的"加强版"** —— 选项体里又嵌了一层 `if`：
+
+            menu:
+                "选项":
+                    show bg_deep
+                    if deepest:        ← 它的条件是
+                        e "深层"          `((外层) and (选项)) and (deepest)`
+                    else:                比块体基准**多一个合取项**
+
+        这一条是必须的（2026-10-05 实测，brutal test 的 F4）：`_menu_member`
+        **存不进 Excel**，所以表格往返之后"嵌套 if 的那几拍"只能靠条件
+        认出来。不认的后果不是"少一句警告"，而是渲染层**不再写
+        `if deepest:`** —— 两个分支都被无条件执行（静默改剧情），
+        外加一句 TODO。
 
     都不成立时这拍很可能是策划**手工插进菜单组中间**的（P1-2）：
     它不属于任何选项，但 Ren'Py 的 `menu:` 里除选项外没有合法位置，
@@ -1006,10 +1159,115 @@ def _is_menu_foreign(option, beat, menu_cond: str) -> str:
     if option is None:
         return ''
     got = (beat.condition or '').strip()
-    if got and got in (_expected_body_condition(option, menu_cond),
-                       (option.condition or '').strip()):
+    if not got:
+        # **条件为空 = 认不出归属**（这个守卫是有用的，别删）：
+        # 解析器给"菜单选项体里的拍"都会带上累积条件（连嵌套 if 也是
+        # `((外层) and (选项)) and (内层)`），所以**条件为空**只可能是
+        # "策划手工插进来的拍"（`Beat(kind=…, text=…)` 不带条件）。
+        # 实测它插在两个选项中间时，条件为空正是它唯一的特征 ——
+        # 靠这个守卫才认得出、才写得出那句 `# TODO`。
+        return '这一拍不确定属于哪个选项'
+    expected = _expected_body_condition(option, menu_cond)
+    if got in (expected, (option.condition or '').strip()):
+        return ''
+    if _condition_is_refinement(got, expected):
         return ''
     return '这一拍不确定属于哪个选项'
+
+
+
+def _condition_is_refinement(cond: str, base: str) -> bool:
+    """
+    `cond` 是不是 `base` 的**加强版**（含 `base` 的全部合取项）？
+
+    判据刻意粗粒度 —— 按 `and` 拆成原子，看集合包含：
+
+        base = '(outer) and (middle)'
+        cond = '((outer) and (middle)) and (deepest)'
+          → base 的原子 {(outer),(middle)} 全在 cond 里 → True（嵌套 if）
+
+        base = '(outer) and (middle)'
+        cond = 'not ((outer))'
+          → (outer) 不在里面 → False（不是这个选项的块体）
+
+    为什么不解析成 AST 去判蕴含：那要引入一门表达式语法，而这里只需要
+    "明显是同一分支的加强"这一档判断。认不出时**保持原来的保守行为**
+    （标 foreign、写警告）—— 不会比现在更差。
+    """
+    b = _condition_atoms(base)
+    if not b:
+        return False
+    return b <= _condition_atoms(cond)
+
+
+def _condition_atoms(text: str) -> set:
+    """
+    `a and b and c` → `{'a','b','c'}`，**递归剥括号**。
+
+    括号里的内容如果本身是 `and` 串，要接着拆 —— 否则
+
+        base = '(outer) and (middle)'      → {'outer','middle'}
+        cond = '((outer) and (middle)) and (deepest)'
+             → 只拆外面那层得到 {'(outer) and (middle)','deepest'}
+
+    两边对不上，嵌套 if 就认不出来（第一版就是这么错的）。
+    递归之后 cond → {'outer','middle','deepest'}，包含判定成立。
+    """
+    def _strip_parens(t: str) -> str:
+        s = t.strip()
+        while len(s) >= 2 and s[0] == '(' and s[-1] == ')':
+            depth = 0
+            balanced = True
+            for k, ch in enumerate(s):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0 and k != len(s) - 1:
+                        balanced = False
+                        break
+            if not balanced:
+                break
+            s = s[1:-1].strip()
+        return s
+
+    def _split(t: str) -> list:
+        parts, buf, depth, i = [], [], 0, 0
+        s = _strip_parens(t)
+        while i < len(s):
+            ch = s[i]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            if (depth == 0 and s.startswith('and', i)
+                    and (i == 0 or not s[i - 1].isalnum())
+                    and (i + 3 >= len(s) or not s[i + 3].isalnum())):
+                parts.append(''.join(buf))
+                buf = []
+                i += 3
+                continue
+            buf.append(ch)
+            i += 1
+        if buf:
+            parts.append(''.join(buf))
+        return parts
+
+    def _atoms(t: str) -> set:
+        out = set()
+        for part in _split(t):
+            # 括号剥掉之后变短了 → 说明里面还有结构，继续递归
+            if _strip_parens(part).strip() != part.strip():
+                out |= _atoms(part)
+                continue
+            inner = _strip_parens(part)
+            if ' and ' in inner:
+                out |= _atoms(inner)
+            elif inner:
+                out.add(inner)
+        return out
+
+    return _atoms(text)
 
 
 
@@ -1082,10 +1340,11 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         for beat, why in nested:
             if why:
                 body_lines.append(opt_indent + '    ' + f'# TODO: {why}')
-            body_lines.extend(opt_indent + '    ' + ln
-                              for ln in render_beat_to_rpy(
-                                  beat, indent='', audit=audit, trace=trace)
-                              if ln.strip())
+            # 走 `_indent_beat_lines`：条件拍的块体（`if x:` 下面那几行）
+            # 有自己的相对缩进，逐行贴 `opt_indent + '    '` 会把它们
+            # 压到与 `if` 齐平（**语法错误**，见那个函数的 docstring）。
+            body_lines.extend(_indent_beat_lines(
+                beat, opt_indent + '    ', audit, trace))
         if not body_lines:
             # 空块在 Ren'Py 里是语法错误；"只写条件、不打正文"的选项确实存在
             body_lines = [opt_indent + '    pass']
@@ -1110,18 +1369,91 @@ def _render_unit_lines(beats: list, indent: str, audit, trace: list) -> list:
     一串拍 → 已带缩进的行（**嵌套菜单走递归**，与顶层同一套规则）。
 
     `indent` 是这一串拍所在层级的缩进；菜单在其中占 `menu:` + 一级块体。
+
+    **整个菜单还有自己的条件**（`if flag:` 里包 `menu:`，2026-10-05 实测）：
+    那种写法解析出来的 menu 拍 / 选项拍 / 选项体**全都带 `flag`**，
+    而 `_render_menu_segments` 只处理"选项自身的条件"，整块的 `if` 就没人写
+    —— 产物变成无条件的 `menu:`，**菜单从"满足条件才出现"变成"总是出现"**。
+    修法：跑一遍 `_expected_body_condition` 的同一套判据，认出"这一组菜单
+    被包在 `if` 里"就把整块缩进一层、外面补 `if`。
     """
     lines = []
     for kind, group in split_beat_units(beats):
         if kind == 'menu':
-            lines.extend(_render_menu_segments(
-                group, _menu_segments(group), indent, indent + '    ',
-                audit, trace))
+            # 统一走 `render_menu_block`：菜单整块的条件（`if flag:` 包着
+            # `menu:`）也要在那里补，两处各写一遍迟早会不一致。
+            lines.extend(render_menu_block(group, indent=indent,
+                                           audit=audit, trace=trace))
         else:
-            for ln in render_beat_to_rpy(group[0], indent='', audit=audit,
-                                         trace=trace):
-                lines.append(indent + ln if ln.strip() else '')
+            lines.extend(_indent_beat_lines(group[0], indent, audit, trace))
     return lines
+
+
+
+def _indent_beat_lines(beat, indent: str, audit, trace: list) -> list:
+    """
+    一拍 → 已按 `indent` 缩进好的行，**保住拍内部的相对缩进**。
+
+    为什么不能 `indent + ln` 一行行贴（2026-10-05 实测，brutal test 的 F4）：
+
+        render_beat_to_rpy 已经有层级概念 —— 条件拍会吐
+        `['if deepest:', 'e "深层"']`（第二行是**拍内**的块体，本该更深一层）。
+        一律 `indent + ln` 会把两行贴成同一层：
+
+            menu:
+                "选项":
+                    if deepest:
+                    e "深层"        ← 与 `if` 齐平 = **语法错误**
+
+    正解：以**第一条非空行的缩进**为拍自身的基准，其余行的**相对缩进**
+    原样保留。这样 `if`/块体、多行 `python:` 块、嵌套菜单都跟着一起走。
+
+    ⚠ **已知的排版漂移（未修，见 `_indent_block_body` 的说明）**：
+    `python:` 块里**续行**（括号内换行）的缩进每往返一轮会大一档 ——
+    续行自己那 12 个空格里已经含了"块体比 `python:` 深一层"的 4 个，
+    而这里按 `base` 平移时又加了一次。试过三种改法（基准改成从非续行取、
+    只给续行减一档、`_indent_block_body` 不叠基准），**每一种都让
+    全项目丢失数变多或让解析异常从 0 涨到 5**，所以保持现状。
+    这是**纯排版**：括号内换行的缩进在 Python 里自由，语义完全等价。
+    """
+    raw = render_beat_to_rpy(beat, indent='', audit=audit, trace=trace)
+    base = None
+    for ln in raw:
+        if ln.strip():
+            base = len(ln) - len(ln.lstrip())
+            break
+    if base is None:
+        return []
+    out = []
+    for ln in raw:
+        if not ln.strip():
+            out.append('')
+            continue
+        out.append(indent + ln[base:] if len(ln) >= base else indent + ln)
+    return out
+
+
+
+def _menu_block_condition(run: list) -> str:
+    """
+    这一组菜单**整体**被包在 `if` 里吗？是就返回那个条件。
+
+    判据只有一条：menu 拍自身带条件。
+
+    解析器已经把两种形态分开了（见 `renpy_parser` 里 MENU 语句那一处）：
+
+      · `if flag:` 包着 `menu:` → **menu 拍带 `flag`**（选项体那条累积条件
+        也被 `_combine` 并进去，但"选项自己写的 `if`"是空）；
+      · `menu:` 里选项写 `"A" if flag:` → **menu 拍不带条件**
+        （`flag` 只落在选项/选项体上），`if` 由 `_render_menu_segments`
+        写在**选项那一行**。
+
+    所以这里**不需要**再跟选项条件比对 —— 比对反而会在第一种形态下
+    误判（两者恰好相等），把整块的 `if` 吞掉。
+    """
+    if not run:
+        return ''
+    return (getattr(run[0], 'condition', '') or '').strip()
 
 
 
@@ -1140,11 +1472,18 @@ def render_menu_block(run: list, indent: str = '    ',
                 <选项体的拍>
 
     `indent` 是**块体那一层的缩进**（默认 4 空格），选项体是它再加一级。
+
+    **整个菜单还有自己的条件**时（`if flag:` 里包 `menu:`），`if` 写在这一块
+    **外面**、整块缩进一层 —— 见 `_menu_block_condition`。
     """
     lines = _render_menu_segments(run, _menu_segments(run), '', indent,
                                   audit, trace)
     if not lines:
         return []
+    cond = _menu_block_condition(run)
+    if cond:
+        return [f'if {cond}:'] + ['    ' + ln if ln.strip() else ''
+                                  for ln in lines]
     return [lines[0]] + [ln for ln in lines[1:]]
 
 
@@ -1284,8 +1623,20 @@ def _stage_lines(beat, name_resolver) -> dict:
     #
     # 背景若是**原生真迹**（Stage 尾段会逐字输出 `scene … with D`），
     # 这里就不能再挂一次，否则同一拍出现两条转场。
+    #
+    # **还要防"这句已经带了同一个 with"**（2026-10-05 实测）：
+    # 复杂子句形态的 show（`clause='bgcafe with dissolve'`）本身就把
+    # 转场带在句子里，而 `beat.with_` 可能同时也是 `dissolve`
+    # （`_show_clause_args` 把它报了出来）。两个来源各写一次，产物就成了
+    # `show bgcafe with dissolve with dissolve` —— 语法错误。
+    # 判据是"最后那条 show 行是否已经以 `with <同一个转场>` 收尾"。
     if beat.with_ and not scene_is_native:
-        if scene_line:
+        already = (show_lines
+                   and show_lines[-1].rstrip().endswith(
+                       f' with {beat.with_}'.rstrip()))
+        if already:
+            pass
+        elif scene_line:
             scene_line += f" with {beat.with_}"
         elif show_lines:
             show_lines[-1] += f" with {beat.with_}"
@@ -1597,7 +1948,7 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         symbols = make_symbols(registry)
     audit = Audit(symbols) if symbols is not None else None
 
-    out = ['# 由剧本表自动生成，请勿在此文件手工改动结构']
+    out = [GENERATOR_MARKER]
 
     if registry is not None and include_transforms:
         used = collect_used_transforms(beats)
@@ -1640,8 +1991,22 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
             else:
                 body.extend(render_beat_to_rpy(unit[0], indent=indent,
                                                audit=audit, trace=trace))
-        if body:
-            body = [ln for ln in body if ln.strip() != '']
+        # **只去掉首尾的空行，中间的空行留着**（2026-10-05 修）。
+        #
+        # 旧写法是 `body = [ln for ln in body if ln.strip() != '']` ——
+        # 把**所有**空行都扔了。那对拍之间的空行无所谓（纯排版），
+        # 但对 `python:` 块内的空行是**实打实的内容丢失**：
+        # 实测 `mini_game_puzzle.rpy` 的多行调用里 `cols=3,` 与
+        # `grid_width=800,` 之间有一个空行，它被扔掉之后往返的逐行文本
+        # 就对不上（审计算一条丢失），而且作者手写的排版被改掉了。
+        #
+        # 为什么不能干脆全留：`render_beat_to_rpy` 的返回值里，
+        # 拍与拍之交可能有空行，全留会在 label 里堆出很多空行
+        # （每个拍之间一个），产物会很散。所以只trim首尾。
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
         if body:
             out.extend(indent + ln if ln.strip() else '' for ln in body)
         else:

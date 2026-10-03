@@ -87,11 +87,23 @@ class AssetRegistry:
 # ===================== Excel 读写 =====================
 
 def read_excel_rows(file_path) -> list:
-    """读取 Excel 首个 sheet，返回 [{header: value, ...}, ...]。"""
+    """
+    读取 Excel 首个 sheet，返回 [{header: value, ...}, ...]。
+
+    **`data_only=False`**（2026-10-05，与 `story.excel_import` 同一处修复）：
+    资源表的 `Doc` / `Notes` / `ATL` 都是**自由文本**，里面完全可能出现
+    以 `=` 开头的内容（transform 说明里的 `=====` 分隔线、用户写的
+    `=TODO`）。openpyxl 会给这样的字符串打上 `data_type='f'`，而
+    `data_only=True` 读到的是**缓存的计算结果** —— 这张表从没被 Excel
+    打开算过，缓存是空的，于是那些格读回来是 `None`，**用户的文本静默消失**。
+
+    要的是"格子里的原始字符串"，不是"公式的值"：资源表里没有需要计算的
+    真实公式（下拉框走 defined name，不属于单元格值）。
+    """
     file_path = Path(file_path)
     if not file_path.exists():
         return []
-    wb = openpyxl.load_workbook(file_path, data_only=True)
+    wb = openpyxl.load_workbook(file_path, data_only=False)
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
     rows = []

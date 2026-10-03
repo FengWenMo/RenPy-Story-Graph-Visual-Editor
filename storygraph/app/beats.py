@@ -31,8 +31,8 @@ from storygraph.story.beat_model import (
     Beat,
     KIND_MENU,
     MENU_NO_CAPTION,
-    _join_show_items,
-    _split_show_items,
+    join_show_items,
+    split_show_items,
     compose_audio_text,
     compose_code,
     compose_stage,
@@ -211,29 +211,57 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     会拿改好的 Beat 调 `compose_stage`（见 `BeatEditorPanel.collect`），
     否则 4 项卡片里改的表情/位置会在 Stage 里显示成旧值，
     正是"我表里看到的和生成的不一样"。
+
+    **键不存在 = 不动这一格**（2026-10-05 修）：以前一律
+    `(fields.get(k) or '').strip()`，于是**局部表单会静默清空其它列** ——
+    实测 `apply(0, {'Speaker': 'e', 'Text': '只改台词'})` 之后
+    `beat.scene` 从 `'bg classroom'` 变成了 `''`（背景被抹掉）。
+    `Expression` / `Position` 早就用"键存在才改"防住了这一类，
+    这里把同一判据推广到全部列：
+
+      · 前端交回**完整表单**（`fields()` 的产物）→ 行为完全不变；
+      · 前端/调用方只交回改过的几格 → 其余列保持原值，不再被误清空；
+      · 想**主动清空**某一格 → 显式传空串（`{'Scene': ''}`），照旧生效。
+
+    区分"没给我"与"给我空串"是关键 —— 这是"收起高级区 ≠ 清空"
+    那条已知规则的一般化。
     """
     b = base or Beat()
-    b.label = (fields.get('Label') or '').strip()
-    b.kind = (fields.get('Kind') or 'say').strip() or 'say'
-    b.speaker = (fields.get('Speaker') or '').strip()
-    b.text = (fields.get('Text') or '').strip()
+    if 'Label' in fields:
+        b.label = (fields.get('Label') or '').strip()
+    elif base is None:
+        b.label = ''
+    if 'Kind' in fields:
+        b.kind = (fields.get('Kind') or 'say').strip() or 'say'
+    if 'Speaker' in fields:
+        b.speaker = (fields.get('Speaker') or '').strip()
+    if 'Text' in fields:
+        b.text = (fields.get('Text') or '').strip()
     # 菜单拍的标题留空 = "无标题菜单"，不是"没有菜单"：
     # 占位符必须补回来，否则 `menu:` 那一段会在渲染时整块消失
     # （见 `MENU_NO_CAPTION`）。表单里显示的是空串（见 `beat_to_fields`）。
     if b.kind == KIND_MENU and not b.text:
         b.text = MENU_NO_CAPTION
-    b.scene = (fields.get('Scene') or '').strip()
-    b.stage = (fields.get('Stage') or '').strip()
-    b.bgm = (fields.get('BGM') or '').strip()
-    b.sfx = (fields.get('SFX') or '').strip()
-    b.voice = (fields.get('Voice') or '').strip()
-    b.code = (fields.get('CodeBlock') or '').strip()
-    # raw 已经并入 CodeBlock（唯一的"保真后门"），这里不再单独维护
-    b.raw = ''
-    b.comment = (fields.get('Comment') or '').strip()
+    if 'Scene' in fields:
+        b.scene = (fields.get('Scene') or '').strip()
+    if 'Stage' in fields:
+        b.stage = (fields.get('Stage') or '').strip()
+    if 'BGM' in fields:
+        b.bgm = (fields.get('BGM') or '').strip()
+    if 'SFX' in fields:
+        b.sfx = (fields.get('SFX') or '').strip()
+    if 'Voice' in fields:
+        b.voice = (fields.get('Voice') or '').strip()
+    if 'CodeBlock' in fields:
+        b.code = (fields.get('CodeBlock') or '').strip()
+        # raw 已经并入 CodeBlock（唯一的"保真后门"），这里不再单独维护
+        b.raw = ''
+    if 'Comment' in fields:
+        b.comment = (fields.get('Comment') or '').strip()
     # 「备注」列已经取消（并入注释，见 Beat.from_row 的老表迁移）。
     # 这里再兜一次：旧 Beat / 旧表带来的 notes 绝不能静默丢掉。
-    b.notes = (fields.get('Notes') or '').strip()
+    if 'Notes' in fields:
+        b.notes = (fields.get('Notes') or '').strip()
     if b.notes:
         b.comment = f'{b.comment}\n{b.notes}'.strip() if b.comment else b.notes
         b.notes = ''
@@ -262,7 +290,7 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
 
 def _first_show_item(beat: Beat) -> dict:
     """取第一个「一般立绘」项（跳过 clause 形态）。没有就返回空 dict。"""
-    for item in _split_show_items(getattr(beat, 'show', '') or ''):
+    for item in split_show_items(getattr(beat, 'show', '') or ''):
         if item.get('clause') or not (item.get('image') or '').strip():
             continue
         return item
@@ -270,7 +298,7 @@ def _first_show_item(beat: Beat) -> dict:
 
 
 def _show_items(beat: Beat) -> list:
-    return [i for i in _split_show_items(getattr(beat, 'show', '') or '')
+    return [i for i in split_show_items(getattr(beat, 'show', '') or '')
             if not i.get('clause') and (i.get('image') or '').strip()]
 
 
@@ -288,7 +316,7 @@ def beat_sprite_rows(beat: Beat, symbols=None) -> list:
     顺序即出场顺序（不丢信息）。
     """
     rows = []
-    for item in _split_show_items(getattr(beat, 'show', '') or ''):
+    for item in split_show_items(getattr(beat, 'show', '') or ''):
         if item.get('clause') or not (item.get('image') or '').strip():
             # 复杂子句（behind/as/onlayer）不在这套结构里表达，跳过
             continue
@@ -536,7 +564,7 @@ def apply_sprite_rows(show: str, rows: list) -> str:
 
     **复杂子句原样保留**：它们结构化列表达不了，重建时不能丢。
     """
-    kept = [i for i in _split_show_items(show or '') if i.get('clause')]
+    kept = [i for i in split_show_items(show or '') if i.get('clause')]
     out = []
     for row in rows or ():
         image = (row.get('image') or '').strip()
@@ -544,7 +572,7 @@ def apply_sprite_rows(show: str, rows: list) -> str:
             continue
         at = (row.get('at') or '').strip()
         out.append({'clause': '', 'image': image, 'at': at})
-    return _join_show_items(out + kept)
+    return join_show_items(out + kept)
 
 
 def speaker_missing_warning(beat: Beat) -> str:
@@ -1019,7 +1047,7 @@ def apply_expression(show: str, word: str) -> str:
     写 `close_happy` 就原样——与 DSL 编译期同一套规则，避免"卡片上写中文、
     脚本里出中文"。
     """
-    items = _split_show_items(show or '')
+    items = split_show_items(show or '')
     if not items:
         # 没有立绘可改：不凭空造一个（那会改变演出）
         return show or ''
@@ -1039,7 +1067,7 @@ def apply_expression(show: str, word: str) -> str:
                                  if p])
         out.append(new)
         done = True
-    return _join_show_items(out)
+    return join_show_items(out)
 
 
 def apply_position(show: str, word: str) -> str:
@@ -1050,7 +1078,7 @@ def apply_position(show: str, word: str) -> str:
     站不同位置时，策划改的是"这句台词时谁在左谁在右"——这里给的是
     统一位置，单张要精细控制在「高级」区改 `图@位置`。
     """
-    items = _split_show_items(show or '')
+    items = split_show_items(show or '')
     if not items:
         return show or ''
     out = []
@@ -1061,4 +1089,4 @@ def apply_position(show: str, word: str) -> str:
         new = dict(item)
         new['at'] = word or ''
         out.append(new)
-    return _join_show_items(out)
+    return join_show_items(out)

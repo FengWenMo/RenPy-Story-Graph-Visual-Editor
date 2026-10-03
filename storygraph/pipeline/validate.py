@@ -35,8 +35,8 @@ from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS, resolve_r
 from storygraph.core.vocabulary import ASSET_TYPE_ATTR as _TYPE_ATTR
 from storygraph.story.beat_model import (
     KIND_MENU_OPTION,
-    _split_hide_items,
-    _split_show_items,
+    split_hide_items,
+    split_show_items,
 )
 
 L1 = 'L1'
@@ -309,7 +309,7 @@ def validate_level1(beats, registry=None,
         # 同一拍里 scene 与 show 撞同一图像：顺序敏感，容易出错
         scene_img = (b.scene or '').strip()
         if scene_img:
-            for item in _split_show_items(b.show):
+            for item in split_show_items(b.show):
                 if (item.get('image') or '').strip() == scene_img:
                     issues.append(Issue(
                         L1, 'W105', WARNING,
@@ -344,9 +344,9 @@ def _beat_asset_refs(beat) -> list:
             refs.append(('transform', name, True))
 
     img(beat.scene)
-    for item in _split_show_items(beat.show):
+    for item in split_show_items(beat.show):
         img(item.get('image'))
-    for item in _split_hide_items(beat.hide):
+    for item in split_hide_items(beat.hide):
         img(item.get('image'))
     for t in (beat.at or '').split():
         tf(t)

@@ -84,8 +84,17 @@ def _report_guard(result, out, stream=None) -> bool:
         print(f'  {issue.format()}', file=stream)
     if result.review_path:
         print(f'  已留副本供对照：{result.review_path}', file=stream)
-    print('  （坏脚本落进 game/ 会让游戏起不来，所以门禁拒绝写入）',
-          file=stream)
+    codes = {getattr(i, 'code', '') for i in result.guard_issues}
+    if 'HANDWRITTEN_TARGET' in codes:
+        # 这一条**有**逃生舱，而且和上面那条"坏脚本"的性质不同：
+        # 不是产物有问题，是"目标是人手写的"。所以提示要分开给，
+        # 否则用户会以为自己的产物坏了。
+        print('  目标是你手写的 .rpy，工具不敢覆盖它（会丢掉 default / '
+              'init python / transform）。', file=stream)
+        print('  确认要覆盖（或换个 --out 路径）时加 --force。', file=stream)
+    else:
+        print('  （坏脚本落进 game/ 会让游戏起不来，所以门禁拒绝写入）',
+              file=stream)
     return False
 
 
@@ -111,8 +120,11 @@ def _cmd_table(args) -> int:
         result = compile_beats(beats, registry=registry)
         out = Path(args.out) if args.out else \
             Path(args.path).with_suffix('.rpy')
-        # 落盘走生成门禁（以前这里直接 write_text，绕过了闸门）
-        artifact = write_generation(result.rpy_text, out)
+        # 落盘走生成门禁（以前这里直接 write_text，绕过了闸门）。
+        # `--force` 是逃生舱：明确要覆盖已存在的手写文件时才用
+        # （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+        artifact = write_generation(result.rpy_text, out,
+                                    force=bool(getattr(args, 'force', False)))
         result.written = artifact.written
         result.out_path = artifact.out_path
         result.review_path = artifact.review_path
@@ -268,13 +280,16 @@ def _cmd_compile(args) -> int:
     这是"策划写人话、工具翻代码"的主路径：缺资源只在脚本里留
     `# TODO: 缺少资源 …`，退出码仍然是 0——构建不该因为一句台词
     引用了一个还没登记的图片就整体失败。
+
+    **落盘逻辑全在 `pipeline.compile.compile_table`**（2026-10-05 收口）：
+    这里以前自己又写了一遍 `import_beats_from_excel` + `compile_beats` +
+    `write_generation`，与 `compile_table` 是同一件事的两份实现 ——
+    门禁结论的字段名、`force` 的传递都得改两处，迟早漂移
+    （`excel/cells.py` 的 `set_text` 就是三份实现漂移后收敛的）。
     """
-    from storygraph.pipeline.compile import (compile_beats,
+    from storygraph.pipeline.compile import (compile_table,
                                             format_compile_result,
-                                            merge_export_sheet,
-                                            write_export_sheet)
-    from storygraph.story.excel_import import import_beats_from_excel
-    from storygraph.story.generation_guard import write_generation
+                                            merge_export_sheet)
 
     table_path = Path(args.table)
     if not table_path.exists():
@@ -282,24 +297,22 @@ def _cmd_compile(args) -> int:
         return 2
 
     registry = _load_registry(args)
-    beats = import_beats_from_excel(table_path, registry=registry)
-    result = compile_beats(beats, registry=registry)
-
     out = Path(args.out) if args.out else table_path.with_suffix('.rpy')
-    # 落盘走生成门禁（以前这里直接 write_text，绕过了闸门）
-    artifact = write_generation(result.rpy_text, out)
-    result.written = artifact.written
-    result.out_path = artifact.out_path
-    result.review_path = artifact.review_path
-    result.guard_issues = list(artifact.blocking)
+    # `--force` 是逃生舱：允许覆盖已存在的手写 .rpy
+    # （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+    _path, sheet, result = compile_table(
+        table_path,
+        rpy_path=out,
+        registry=registry,
+        write_sheet=bool(args.sheet) and not args.in_place_sheet,
+        force=bool(getattr(args, 'force', False)))
 
     if not _report_guard(result, out):
         return 1
     if args.in_place_sheet:
         merge_export_sheet(table_path, result)
         print(f'编译结果已作为「Export_RenPy」表并入：{table_path}')
-    elif args.sheet:
-        sheet = write_export_sheet(table_path, result)
+    elif args.sheet and sheet:
         print(f'编译结果表：{sheet}')
     print()
     print(format_compile_result(result))
@@ -341,6 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--out', default=None)
     sp.add_argument('--asset-dir', default=None, help='资源表目录')
     sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
+    sp.add_argument('--force', action='store_true',
+                    help='目标已存在也允许覆盖（会丢掉 default/init python '
+                         '等不进表的东西，明确知道自己在做什么时才用）')
     sp.set_defaults(func=_cmd_table)
 
     sp = sub.add_parser('compile',
@@ -349,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--out', default=None, help='输出的 .rpy 路径')
     sp.add_argument('--asset-dir', default=None, help='资源表目录')
     sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
+    sp.add_argument('--force', action='store_true',
+                    help='目标已存在也允许覆盖（逃生舱，见上）')
     sp.add_argument('--sheet', action='store_true',
                     help='另外写一份编译结果表（Export_RenPy）')
     sp.add_argument('--in-place-sheet', dest='in_place_sheet',

@@ -602,7 +602,7 @@ class TestConditionRoundtrip:
 
 
 class TestTextFidelityRoundtrip:
-    """台词内容本身（含尾部空格）必须逐字还回来。"""
+    """台词内容本身（含首尾空格）必须逐字还回来。"""
 
     def test_trailing_space_is_not_eaten(self, tmp_path):
         """
@@ -618,6 +618,49 @@ class TestTextFidelityRoundtrip:
         assert props['beats'][0].text == '元神，启动！ '
         assert props['back'][0].text == '元神，启动！ ', \
             repr(props['back'][0].text)
+
+    def test_leading_space_is_not_eaten(self, tmp_path):
+        """
+        **首部空格也是台词内容**（2026-10-05 修）。
+
+        `beat.text` 是字符串字面量的**内容**，里面的空格就是内容：
+
+            jc " 听起来很有意思，来吧！"
+               ^ 这个空格是台词的一部分
+
+        `from_row` 以前对它 `lstrip()`（注释里写的理由是"Ren'Py 里台词
+        字符串前面的空格没有语义"——**这个判断是错的**），于是往返之后
+        变成 `"听起来很有意思，来吧！"`。真实项目 `script_pomo.rpy`
+        一处就是这么丢的（审计里 6 条之一）。
+        """
+        script = ('label a:\n'
+                  '    jc " 听起来很有意思，来吧！"\n'
+                  '    return\n')
+        _original, _produced, props = roundtrip(script, tmp_path, 'lead')
+        assert props['beats'][0].text == ' 听起来很有意思，来吧！', \
+            repr(props['beats'][0].text)
+        assert props['back'][0].text == ' 听起来很有意思，来吧！', \
+            repr(props['back'][0].text)
+        assert 'jc " 听起来很有意思，来吧！"' in props['rpy'], props['rpy']
+
+    def test_backslashes_and_quotes_survive(self, tmp_path):
+        """
+        台词里的**反斜杠与引号**不许被二次转义。
+
+        真实样本（`chapter1_2.rpy`，程序员的调试输出被写成了旁白）：
+
+            "file \\"c:\\\\admin_script.py\\", line 24, in <module>"
+
+        渲染时 `_quote` 会把 `\\` → `\\\\`、`"` → `\\"`（这是**对的**：
+        写进 .rpy 必须转义），但读回来必须**反转义一次且只一次**。
+        少了这段，审计里那一条就是"原文一次转义、产物两次转义"。
+        """
+        script = ('label a:\n'
+                  '    "file \\"c:\\\\\\\\admin_script.py\\", line 24, "\n'
+                  '    "in <module>"\n'
+                  '    return\n')
+        original, produced, props = roundtrip(script, tmp_path, 'escape')
+        assert_same_multiset(original, produced, props)
 
     def test_tight_dollar_survives_excel(self, tmp_path):
         """
@@ -889,6 +932,58 @@ class TestPythonBlockRoundtrip:
         # 续行必须跟在第一行后面（同一条语句），而不是各带一个 `$`
         assert rpy.count('$ (1, 2)') == 0, rpy
         assert rpy.count('$ (3, 4)') == 0, rpy
+
+    def test_blank_line_inside_a_python_block_survives(self, tmp_path):
+        """
+        `python:` 块**内部**的空行必须活下来。
+
+        实测来源（2026-10-05，真实项目 `mini_game_puzzle.rpy`）：
+        多行调用的参数表中间有一个空行
+
+            renpy.store.drag_puzzle_game = drag_puzzle(
+                        puzzle_path,
+                        rows=2,
+                        cols=3,
+                                                     ← 这个空行
+                        grid_width=800,
+                        )
+
+        两个地方会把它吃掉，两个都修了：
+
+          1. `_render_marked_code_block` 收集块体时**遇到空行就收尾**
+             （块标记是行首字符，空行没有行首字符）—— 于是空行之后那几行
+             掉出块体、`python:` 被从中间截断。判据改成"往前看"：
+             空行后面还有块体行才算块内空行。
+          2. `render_beats_to_rpy` 收尾时 `[ln for ln in body if ln.strip()]`
+             **把整个 label 的空行全扔了**。改成只去首尾。
+
+        空行在 Python 里没有语义，但**丢掉它就是丢掉作者手写的排版**，
+        而往返审计按逐行文本比 —— 算一条丢失 + 一条新增。
+        """
+        script = (
+            'label a:\n'
+            '    python:\n'
+            '        game = drag(\n'
+            '            path,\n'
+            '            rows=2,\n'
+            '\n'
+            '            cols=3)\n'
+            '    "x"\n'
+            '    return\n'
+        )
+        _original, _produced, props = roundtrip(script, tmp_path, 'blankline')
+        rpy = props['rpy']
+        body = [ln for ln in rpy.splitlines() if 'rows=2,' in ln
+                or 'cols=3)' in ln or 'path,' in ln]
+        assert body, rpy
+        # 块内那三行之间必须还有一个空行
+        idx_rows = next(i for i, ln in enumerate(rpy.splitlines())
+                        if 'rows=2,' in ln)
+        idx_cols = next(i for i, ln in enumerate(rpy.splitlines())
+                        if 'cols=3)' in ln)
+        between = rpy.splitlines()[idx_rows + 1:idx_cols]
+        assert any(not ln.strip() for ln in between), (
+            f'块内空行被吃掉了：{between!r}\n{rpy}')
 
     def test_show_screen_not_swallowed_into_python_block(self, tmp_path):
         """

@@ -628,21 +628,25 @@ class TestOrderAndAudioArePreserved:
         result = ParseResultBuilder().build(RenPyParser().parse(fp))
         beats = beats_from_parse_result(result)
 
-        # 顺序：scene → show → music → say → sound → voice → say → sound
-        #       → menu（无标题，2026-10-05 起会落一张拍）
-        #       → menu_option("进去") → menu_option("离开")
-        #       → say("他转身走了。")（"离开"分支里的旁白，归在它那张选项后面）
-        kinds = [b.kind for b in beats if b.text or b.music or b.sound
-                 or b.voice or b.scene or b.show]
-        # 无标题菜单的拍**也要落在这一串里**（它的 text 是占位符，非空），
-        # 于是菜单拍紧跟在两句台词之后、选项之前 —— 这正是渲染层归组
-        # 需要的顺序。
-        assert kinds[:2] == [KIND_SAY, KIND_SAY]
-        assert kinds[2] == KIND_MENU, '菜单拍必须排在它的选项之前'
-        assert kinds[3:5] == [KIND_MENU_OPTION, KIND_MENU_OPTION], \
+        # 拍序列（**整串**，不过滤 —— 过滤会把只带 `jump` 的选项体滤掉，
+        # 断言就看着像"两张选项拍挨着"）：
+        #
+        #   0 say          ← `e "你来了。"`（scene/show/music 都并进这一拍）
+        #   1 say          ← `m "门没锁。"`（sound / voice 并进这一拍）
+        #   2 say          ← `queue sound sfx_footstep`（**只有音频、没有台词**，
+        #                    所以它自成一张卡 —— 2026-10-05 修落盘顺序之后
+        #                    它正确地排在菜单**之前**，不再被并进选项体）
+        #   3 menu         ← 无标题 `menu:` 的拍
+        #   4 menu_option  ← "进去"  → 5 narration(jump inner)
+        #   6 menu_option  ← "离开"  → 7 narration("他转身走了。")
+        kinds = [b.kind for b in beats]
+        assert kinds[:3] == [KIND_SAY, KIND_SAY, KIND_SAY], kinds
+        assert kinds[3] == KIND_MENU, '菜单拍必须排在它的选项之前'
+        assert kinds[4] == KIND_MENU_OPTION and kinds[6] == KIND_MENU_OPTION, \
             '两张选项拍都要在菜单块里（2026-10-05 修：选项头与块体交错）'
-        assert kinds[5] == KIND_NARRATION, \
-            '"离开"分支里的旁白紧跟在它的选项之后'
+        # 每张选项的块体紧跟在**它自己**后面：进去→jump、离开→旁白
+        assert beats[5].raw.strip() == 'jump inner', beats[5].raw
+        assert beats[7].text == '他转身走了。', beats[7].text
 
         text = render_beats_to_rpy(beats)
         lines = [ln for ln in text.splitlines()

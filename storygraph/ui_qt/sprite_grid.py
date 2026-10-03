@@ -25,19 +25,18 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
 from storygraph.app.beats import choices_for_image, uniform_sprite_position
+# `uniform_position_of` 以前在这里**又写了一份**（与 `app/session_table.py`
+# 里那份逐字节相同）—— 2026-10-05 收敛：它是"卡数组 → 整拍位置"的**唯一规则**，
+# 而 `apply()` 写回 `beat.at` 用的正是它。两份一旦漂移，
+# "卡片上显示的位置"与"存进 .rpy 的位置"就会不一致
+# （那正是当年"立绘错位"事故的形态）。所以这里只 re-export，不再自带实现。
+from storygraph.app.session_table import uniform_position_of  # noqa: F401
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
 CARD_W = T.CARD['w'] + 26            # 卡片宽（含 chip 行）
 THUMB_W = T.CARD['thumbW'] + 8
 THUMB_H = T.CARD['thumbH'] + 8
-
-
-def uniform_position_of(cards: list) -> str:
-    """只有"所有立绘位置一致"才返回它（否则整拍位置留空 —— 防立绘错位）。"""
-    rows = [{'at': (str(c.get('position') or '').strip()
-                    or str(c.get('at') or '').strip())} for c in cards]
-    return uniform_sprite_position(rows)
 
 
 def sprite_thumb_size() -> tuple:

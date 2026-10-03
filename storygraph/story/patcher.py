@@ -39,7 +39,9 @@ storygraph.story.patcher
      插行用**相邻原文行**的缩进。**缩进是结构，补丁不许碰。**
   ③ 没有校验 → 现在补丁后**重新解析**，确认"每拍该有的台词都在"
      且 `label` / `return` 数量没少；不过 → `ok=False`，
-     调用方退回全量（**绝不写半对的产物**）。
+     **调用方拒绝写盘**（**绝不写半对的产物**，也绝不因此改成全量覆盖 ——
+     全量会丢掉 `default` / `init python` 等不进表的东西，
+     见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
   ④ 没有对位守卫 → 现在替换前先确认"原文这一段确实属于这一拍"
      （看得到它的台词/说话人/图像名），对不上就跳过、不猜。
   ⑤ 行号传不过来 → 新增 `recover_source_ranges()`：**解析源 .rpy，
@@ -106,9 +108,20 @@ class PatchResult:
         """
         只有"对位够 + 校验通过"才算真的走了增量。
 
-        覆盖率的门槛是 0.9（低于这个数说明源文件与表对不上，
-        退化成全量更稳）；**校验必须通过**，否则一律退回全量 ——
-        宁可丢注释，也不能写出半对的脚本。
+        覆盖率的门槛是 0.9（低于这个数说明源文件与表对不上）。
+
+        **`ok=False` 的意思是"这次别写盘"，不是"改用全量再写"**
+        （2026-10-05 改正，见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+
+        这里原来写的是「退化成全量更稳」—— 那个前提是**错的**：
+        全量生成只认得"拍"，`default` / `define` / `init python` /
+        `transform` / `screen` 一行都留不下。所以"退回全量"丢的不是注释，
+        是**游戏能不能起来**。真实事故形态就是这里被当成"更稳"，
+        于是覆盖掉了用户手写的定义文件。
+
+        现在调用方（`EditorSession.export` / `GenerationGuard`）见到
+        `ok=False` 一律**拒绝写盘**并报出原因；全量只许用于**新建文件**，
+        或者调用方显式 `force=True`。
         """
         if not self.source_path or self.reasons:
             return False
@@ -970,8 +983,9 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
     """
     补丁后的文本能解析、且**该有的东西一样不少**吗？返回不通过的原因列表。
 
-    这是最后一道闸：任何一条不过，`ok` 就是 False，调用方退回全量。
-    宁可丢注释（全量的代价），也绝不写出半对的脚本。
+    这是最后一道闸：任何一条不过，`ok` 就是 False ——
+    而 `ok=False` 的意思是**调用方拒绝写盘**（不是"改用全量"，
+    见 `PatchResult.ok` 的说明）。宁可这次不保存，也绝不写出半对的脚本。
 
     四查：
       ① 能解析回来
@@ -1397,27 +1411,24 @@ def patch_export(beats: list, source_path, generated_text: str,
     if insert_failed:
         # 有新增的拍但**找不到锚点**（例如它是文件里的第一拍，
         # 前面没有任何源拍可依附）→ 不猜，退回全量。
-        reasons.append(f'{insert_failed} 张新卡片找不到插入位置'
-                       f'（已退回全量重生成）')
+        reasons.append(f'{insert_failed} 张新卡片找不到插入位置，'
+                       f'无法安全地增量写入')
     if insert_ids and inserted_lines == 0 and insert_failed == 0:
         # **新增的卡片一行都没落进产物** = 静默丢失。用户 2026-10-05 实测：
         # 表格里插一行、锚点正好是 `label …:` 那一行时，替换路径的对位守卫
         # 判"这段不像这一拍"就跳过了，而"什么都没改"时又跳过了整体校验 →
         # 导出报告"增量成功"，产物里却没有那句台词。这种"看着成功、东西没了"
         # 比报错糟得多，所以这里**宁可退回全量**。
-        reasons.append(f'{len(insert_ids)} 张新卡片一行都没落进产物'
-                       f'（已退回全量重生成）')
+        reasons.append(f'{len(insert_ids)} 张新卡片一行都没落进产物，'
+                       f'继续写会静默丢内容')
     if lost_new:
         # 有**原文里根本没有的内容**没能落地（新写的台词 / 插入的卡片）。
         # 一动不动就是把它弄丢了 → 退回全量重生成，绝不报告成功。
-        reasons.append(f'{lost_new} 处新增内容没能落进产物'
-                       f'（已退回全量重生成）')
+        reasons.append(f'{lost_new} 处新增内容没能落进产物')
     if delete_failed:
         # 被删的拍里，有几拍**不敢删**（区间含块头 / 与别的拍交叠 / 越界）。
-        # 少删一拍就会留下"表里没有、文件里还有"的幽灵台词，
-        # 所以宁可整章退回全量。
-        reasons.append(f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）'
-                       f'（已退回全量重生成）')
+        # 少删一拍就会留下"表里没有、文件里还有"的幽灵台词。
+        reasons.append(f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）')
     if text != original:
         reasons.extend(_verify_patch(text, original, beats, blocks))
 

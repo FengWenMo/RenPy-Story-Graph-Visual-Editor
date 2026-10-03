@@ -110,8 +110,23 @@ RENPY_BUILTIN_TRANSFORMS = frozenset({
 })
 
 
+#: 生成器写在产物**首行**的标记。
+#:
+#: 为什么它必须只有一份实现（2026-10-05）：两处要用它，而**方向相反** ——
+#:   · `story.beat_render` 把它**写**进产物；
+#:   · `story.generation_guard._looks_handwritten` 靠它判断
+#:     "这个已存在的文件是不是工具自己写的"，从而决定要不要拒绝覆盖。
+#: 两处字符串一旦漂移，护栏就会认不出自家产物，"再导出一次"被拦下 ——
+#: 那比不拦更烦，而且症状（"我明明是用工具生成的"）极难自查。
+#:
+#: 放 `core` 而不是那两个模块：`generation_guard` 已经 import 了
+#: `beat_render`，反向 import 会成环（`beat_render` 自己也不能为了这个
+#: 常量去依赖 story 层）。
+GENERATOR_MARKER = '# 由剧本表自动生成，请勿在此文件手工改动结构'
+
+
 __all__ = [
     'ASSET_TYPE_ATTR', 'AUDIO_TYPE_ATTR',
     'NON_ACTOR_TAGS', 'NON_ACTOR_SHOW_TARGETS', 'LAYER_CN_TAG',
-    'RENPY_BUILTIN_TRANSFORMS',
+    'RENPY_BUILTIN_TRANSFORMS', 'GENERATOR_MARKER',
 ]

@@ -328,6 +328,22 @@ def beats_from_statements(statements: Iterable[Statement],
             #
             # 空 caption 用占位符承载（**不写进 Excel**，见 `MENU_NO_CAPTION`）
             # ——"有菜单"这个结构事实必须活到渲染那一刻。
+            # **菜单拍/选项拍直接落盘，所以落盘前必须先把 `pending` 里攒的
+            # 舞台指令放出来**（2026-10-05，brutal test 的 F1 抓到）。
+            #
+            # 以前这里直接 `beats.append(_menu_beat)`，`pending` 原封不动 ——
+            # 于是那一拍会一直攒到章尾才落，后果有两个：
+            #
+            #   1. 拍的 label 顺序变成 `g0, g1, g0`，而渲染层按"相邻同 label
+            #      分组"，产物里出现**两个 `label g0:`**（重复定义，语法错误）；
+            #   2. 它的 `src_last` 被 menu / menu_option 的行号**顶到后面**
+            #      （行号是"被这一拍吸收的语句"记的），而
+            #      `order_menu_bodies` 正是按行号把块体归给选项 ——
+            #      于是它被判成"认不出属于哪个选项"，搬到菜单组末尾。
+            #
+            # 真实形态：`hide bg cafe` 紧跟着 `menu:`（源码里它在菜单**之前**、
+            # 无条件执行）。修好之后它回到菜单前面，也不再需要那句警告。
+            flush_stage_only()
             seq += 1
             _menu_beat = with_src(Beat(
                 seq=seq, label=current_label,
@@ -346,6 +362,8 @@ def beats_from_statements(statements: Iterable[Statement],
             last_speaker = ''
 
         elif kind == StatementKind.MENU_OPTION:
+            # 同上：选项拍也是直接落盘，落盘前先放掉 `pending`。
+            flush_stage_only()
             seq += 1
             absorbed = False             # 自成一张卡（`with_src` 已带上行号）
             _opt = with_src(Beat(

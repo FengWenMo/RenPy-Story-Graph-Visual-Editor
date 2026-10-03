@@ -208,7 +208,7 @@ def _fill_export_sheet(ws, result, openpyxl, Font, PatternFill, Alignment):
 
 def compile_table(table_path, rpy_path=None, registry=None,
                   label_name=None, write_sheet: bool = True,
-                  sheet_path=None) -> tuple:
+                  sheet_path=None, force: bool = False) -> tuple:
     """
     一步到位：演出表 → (.rpy, 编译结果表)。
 
@@ -222,6 +222,11 @@ def compile_table(table_path, rpy_path=None, registry=None,
 
     2026-09-28 修：这里以前直接 `write_text`，**绕过了门禁** ——
     而"表 → 脚本"正是最常用的一条落盘路径。
+
+    `force=True`（2026-10-05 补，方案 3 的逃生舱）：目标已存在的手写 `.rpy`
+    也允许覆盖。**默认拒绝** —— 全量生成只认得"拍"，
+    `default` / `init python` / `transform` 一行都留不下
+    （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
     """
     from storygraph.story.excel_import import import_beats_from_excel
     from storygraph.story.generation_guard import write_generation
@@ -234,7 +239,7 @@ def compile_table(table_path, rpy_path=None, registry=None,
         rpy_path = table_path.with_suffix('.rpy')
     rpy_path = Path(rpy_path)
 
-    artifact = write_generation(result.rpy_text, rpy_path)
+    artifact = write_generation(result.rpy_text, rpy_path, force=force)
     result.written = artifact.written
     result.out_path = artifact.out_path
     result.review_path = artifact.review_path
@@ -264,7 +269,8 @@ def format_compile_result(result: CompileResult, max_rows: int = 12) -> str:
 
 
 def export_table_to_rpy(table_path, output_path=None, label_name=None,
-                        registry=None, write_export_sheet: bool = True):
+                        registry=None, write_export_sheet: bool = True,
+                        force: bool = False):
     """
     把演出表编译回 .rpy：**反向路径的便捷入口**（表路径 → .rpy 路径）。
 
@@ -275,11 +281,13 @@ def export_table_to_rpy(table_path, output_path=None, label_name=None,
 
     找不到资源不报错，只在生成的代码里留 `# TODO: 缺少资源 …`；
     顺手再写一张编译结果表（与脚本同源，必然一致）。原始演出表一个字不改。
+
+    `force=True`：允许覆盖已存在的手写 `.rpy`（逃生舱，见 `compile_table`）。
     """
     table_path = Path(table_path)
     if output_path is None:
         output_path = table_path.with_suffix('.rpy')
     rpy_path, _sheet, _result = compile_table(
         table_path, rpy_path=output_path, registry=registry,
-        label_name=label_name, write_sheet=write_export_sheet)
+        label_name=label_name, write_sheet=write_export_sheet, force=force)
     return Path(rpy_path)
