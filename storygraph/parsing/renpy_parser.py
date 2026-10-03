@@ -1085,10 +1085,29 @@ class RenPyParser:
             image_format=image_format,
         )
 
-    def _parse_statement(self, line: LogicalLine, text: str):
-        # ---- 整行注释 ----
-        # 注释不是"可忽略的噪声"：`# 表情A6，距离近` 是文案给美术的意图，
-        # 往返丢了它，美术就不知道这张立绘该是什么情绪。
+    #: 分派哨兵：`_stmt_*` 返回它 = "这条语句我认不出，试下一个分支"。
+    #:
+    #: 与 `None` **必须分开** —— `None` 是"认出来了但决定放弃解析"
+    #: （例如 `if` 条件缺顶层冒号，那时要**就此结束**、不能继续试别的分支，
+    #: 否则一句坏掉的 `if` 会被后面的 `_stmt_say` 当成台词吃掉）。
+    _NO_MATCH = object()
+
+    # ------------------------------------------------------------------
+    #  语句分派（每个分支一个方法；原来是 375 行的扁平 if 链）
+    #
+    #  P3-12 拆的。**分派顺序就是匹配优先级**，不能重排。
+    #  上一轮试过"按 ast 取行区间"的生成器自动搬：跑通了但结果是错的
+    #  （`m = ...match()` 与 `if m:` 之间夹注释时会漏掉赋值 → `NameError`，
+    #   而 `ast.parse` 完全通过）。所以这一版是**手写**的 ——
+    #  结论记在 docs/问题清单与优化路线_2026-10-03.md §20.5。
+    # ------------------------------------------------------------------
+
+    def _stmt_comment(self, line, text):
+        """整行注释。
+
+        注释不是"可忽略的噪声"：`# 表情A6，距离近` 是文案给美术的意图，
+        往返丢了它，美术就不知道这张立绘该是什么情绪。
+        """
         if line.is_comment:
             return CommentNode(
                 line_number=line.line_number,
@@ -1096,90 +1115,103 @@ class RenPyParser:
                 filename=line.filename,
                 text=line.text.strip(),
             )
+        return self._NO_MATCH
 
-        # ---- label ----
+    def _stmt_label(self, line, text):
+        """label 定义。"""
         if self._RE_LABEL_HEAD.match(text):
             return self._parse_label(line, text)
+        return self._NO_MATCH
 
-        # ---- define ----
+    def _stmt_define(self, line, text):
+        """define 声明（含 Character 参数）。"""
         m = self._RE_DEFINE.match(text)
-        if m:
-            target = m.group(1)
-            rhs = m.group(2).strip()
-            value_type = ''
-            args_str = ''
-            fm = self._RE_DEFINE_FUNC_HEAD.match(rhs)
-            if fm:
-                open_idx = fm.end() - 1
-                close_idx = _scan_balanced_close(rhs, open_idx)
-                if close_idx != -1:
-                    tail = rhs[close_idx + 1:].strip()
-                    if not tail:
-                        value_type = fm.group(1)
-                        args_str = rhs[open_idx + 1:close_idx]
-                    else:
-                        tail_display = tail[:60] + (
-                            '...' if len(tail) > 60 else ''
-                        )
-                        self.warnings.append(
-                            f"{line.filename}:{line.line_number}: "
-                            f"define 右侧存在额外表达式，"
-                            f"未解析其参数: {tail_display!r}"
-                        )
-
-            node = DefineNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                target=target,
-                value_type=value_type,
-                args_str=args_str,
-                rhs=rhs,
-            )
-            if self._is_character_type(value_type):
-                self._parse_character_args(node, args_str)
-            return node
-
-        # ---- menu ----
-        m_menu = self._RE_MENU_HEAD.match(text)
-        if m_menu:
-            header_caption = self._scan_menu_header(text, m_menu)
-            if header_caption is not None:
-                node = MenuNode(
-                    line_number=line.line_number,
-                    indent=line.indent,
-                    filename=line.filename,
-                )
-                sub_caption, node.options = self._parse_menu(line.subblock)
-                if header_caption and sub_caption:
-                    node.caption = header_caption + '\n' + sub_caption
+        if not m:
+            return self._NO_MATCH
+        target = m.group(1)
+        rhs = m.group(2).strip()
+        value_type = ''
+        args_str = ''
+        fm = self._RE_DEFINE_FUNC_HEAD.match(rhs)
+        if fm:
+            open_idx = fm.end() - 1
+            close_idx = _scan_balanced_close(rhs, open_idx)
+            if close_idx != -1:
+                tail = rhs[close_idx + 1:].strip()
+                if not tail:
+                    value_type = fm.group(1)
+                    args_str = rhs[open_idx + 1:close_idx]
                 else:
-                    node.caption = header_caption or sub_caption
-                return node
+                    tail_display = tail[:60] + (
+                        '...' if len(tail) > 60 else ''
+                    )
+                    self.warnings.append(
+                        f"{line.filename}:{line.line_number}: "
+                        f"define 右侧存在额外表达式，"
+                        f"未解析其参数: {tail_display!r}"
+                    )
 
-        # ---- if ----
+        node = DefineNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            target=target,
+            value_type=value_type,
+            args_str=args_str,
+            rhs=rhs,
+        )
+        if self._is_character_type(value_type):
+            self._parse_character_args(node, args_str)
+        return node
+
+    def _stmt_menu(self, line, text):
+        """menu 块头。"""
+        m_menu = self._RE_MENU_HEAD.match(text)
+        if not m_menu:
+            return self._NO_MATCH
+        header_caption = self._scan_menu_header(text, m_menu)
+        if header_caption is None:
+            return self._NO_MATCH
+        node = MenuNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+        )
+        sub_caption, node.options = self._parse_menu(line.subblock)
+        if header_caption and sub_caption:
+            node.caption = header_caption + '\n' + sub_caption
+        else:
+            node.caption = header_caption or sub_caption
+        return node
+
+    def _stmt_if(self, line, text):
+        """if 块头（条件缺顶层冒号时**放弃解析**，返回 `None`）。"""
         m = self._RE_IF_HEAD.match(text)
-        if m:
-            colon = _scan_toplevel_colon(text, m.end())
-            if colon == -1:
-                self.errors.append(
-                    f"{line.filename}:{line.line_number}: "
-                    f"if 条件缺少顶层冒号"
-                )
-                return None
-            cond = text[m.end():colon].strip()
-            node = IfNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
+        if not m:
+            return self._NO_MATCH
+        colon = _scan_toplevel_colon(text, m.end())
+        if colon == -1:
+            self.errors.append(
+                f"{line.filename}:{line.line_number}: "
+                f"if 条件缺少顶层冒号"
             )
-            node.branches.append((cond, self._parse_block(line.subblock)))
-            return node
+            return None
+        cond = text[m.end():colon].strip()
+        node = IfNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+        )
+        node.branches.append((cond, self._parse_block(line.subblock)))
+        return node
 
-        # ---- jump expression ----
+    def _stmt_jump_expression(self, line, text):
+        """动态跳转 `jump expression`。
+
+        动态跳转无法静态断言目标，但语句本身必须保真 ——
+        原样存成 Raw，导出时原样回写，否则控制流被悄悄改掉。
+        """
         if self._RE_JUMP_EXPR.match(text):
-            # 动态跳转无法静态断言目标，但语句本身必须保真——
-            # 原样存成 Raw，导出时原样回写，否则控制流被悄悄改掉。
             return RawNode(
                 line_number=line.line_number,
                 indent=line.indent,
@@ -1187,8 +1219,10 @@ class RenPyParser:
                 text=text,
                 raw_kind='jump_expression',
             )
+        return self._NO_MATCH
 
-        # ---- call expression / call screen ----
+    def _stmt_call_expression(self, line, text):
+        """动态调用 `call expression`（同动态跳转，保真存 Raw）。"""
         if self._RE_CALL_EXPR.match(text):
             return RawNode(
                 line_number=line.line_number,
@@ -1197,9 +1231,11 @@ class RenPyParser:
                 text=text,
                 raw_kind='call_expression',
             )
+        return self._NO_MATCH
 
+    def _stmt_call_screen(self, line, text):
+        """`call screen`（UI 调用，不产生 label 跳转边，但仍是演出一步）。"""
         if self._RE_CALL_SCREEN.match(text):
-            # call screen 是 UI 调用，不产生 label 跳转边，但仍是演出一步
             return RawNode(
                 line_number=line.line_number,
                 indent=line.indent,
@@ -1207,53 +1243,63 @@ class RenPyParser:
                 text=text,
                 raw_kind='call_screen',
             )
+        return self._NO_MATCH
 
-        # ---- jump ----
+    def _stmt_jump(self, line, text):
+        """静态跳转。"""
         m = self._RE_JUMP.match(text)
-        if m:
-            return JumpNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                target=m.group(1),
-            )
+        if not m:
+            return self._NO_MATCH
+        return JumpNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            target=m.group(1),
+        )
 
-        # ---- call ----
+    def _stmt_call(self, line, text):
+        """静态调用（含 `call X from Y` 的存档点标识）。"""
         m = self._RE_CALL.match(text)
-        if m:
-            return CallNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                target=m.group(1),
-                # `call X from Y`：Y 是**存档点标识**（同一个 label 被多处
-                # call 时靠它区分存档属于哪一处）。丢了它对老存档不友好。
-                from_clause=(self._RE_CALL_FROM.search(text).group(1)
-                             if self._RE_CALL_FROM.search(text) else ''),
-            )
+        if not m:
+            return self._NO_MATCH
+        return CallNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            target=m.group(1),
+            # `call X from Y`：Y 是**存档点标识**（同一个 label 被多处
+            # call 时靠它区分存档属于哪一处）。丢了它对老存档不友好。
+            from_clause=(self._RE_CALL_FROM.search(text).group(1)
+                         if self._RE_CALL_FROM.search(text) else ''),
+        )
 
-        # ---- return ----
+    def _stmt_return(self, line, text):
+        """return。"""
         if self._RE_RETURN.match(text):
             return ReturnNode(
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
             )
+        return self._NO_MATCH
 
-        # ---- $ python ----
+    def _stmt_dollar(self, line, text):
+        """`$ python` 单行。"""
         m = self._RE_DOLLAR.match(text)
-        if m:
-            # `$ x` 与 `$x` 都合法；记下原文写法，导出时原样还回去
-            raw_after = text[1:]
-            return PythonNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                code=m.group(1).strip(),
-                dollar_space=bool(raw_after[:1].isspace()),
-            )
+        if not m:
+            return self._NO_MATCH
+        # `$ x` 与 `$x` 都合法；记下原文写法，导出时原样还回去
+        raw_after = text[1:]
+        return PythonNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            code=m.group(1).strip(),
+            dollar_space=bool(raw_after[:1].isspace()),
+        )
 
-        # ---- python: block ----
+    def _stmt_python_block(self, line, text):
+        """`python:` 块。"""
         if self._RE_PYTHON.match(text):
             code = self._collect_python_block(line)
             return PythonNode(
@@ -1262,24 +1308,30 @@ class RenPyParser:
                 filename=line.filename,
                 code=code,
             )
+        return self._NO_MATCH
 
-        # ---- layeredimage（合成立绘）----
+    def _stmt_layeredimage(self, line, text):
+        """`layeredimage`（合成立绘）。"""
         m = self._RE_LAYEREDIMAGE.match(text)
         if m:
             return self._parse_layeredimage(line, text, m)
+        return self._NO_MATCH
 
-        # ---- image 声明 ----
+    def _stmt_image_def(self, line, text):
+        """`image` 声明。"""
         m = self._RE_IMAGE_DEF.match(text)
-        if m:
-            return ImageDefNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                name=m.group('name').strip(),
-                expr=m.group('rhs').strip(),
-            )
+        if not m:
+            return self._NO_MATCH
+        return ImageDefNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            name=m.group('name').strip(),
+            expr=m.group('rhs').strip(),
+        )
 
-        # ---- show / hide screen（UI 操作，不是图像引用）----
+    def _stmt_screen_op(self, line, text):
+        """`show/hide screen`（UI 操作，不是图像引用）。"""
         if self._RE_SCREEN_SHOW.match(text):
             return RawNode(
                 line_number=line.line_number,
@@ -1288,164 +1340,190 @@ class RenPyParser:
                 text=text,
                 raw_kind='screen',
             )
+        return self._NO_MATCH
 
-        # ---- show ----
-        if self._RE_SHOW_HEAD.match(text):
-            parsed = self._parse_show_scene(text, is_scene=False)
-            if parsed and parsed['image']:
-                for w in parsed['warnings']:
-                    self.warnings.append(
-                        f"{line.filename}:{line.line_number}: {w}"
-                    )
-                return ShowNode(
-                    line_number=line.line_number,
-                    indent=line.indent,
-                    filename=line.filename,
-                    image=parsed['image'],
-                    at=parsed['at'],
-                    as_=parsed['as_'],
-                    with_=parsed['with_'],
-                    zorder=parsed['zorder'],
-                    onlayer=parsed['onlayer'],
-                    behind=parsed['behind'],
-                    is_expression=parsed['is_expression'],
+    def _stmt_show(self, line, text):
+        """`show` 立绘。"""
+        if not self._RE_SHOW_HEAD.match(text):
+            return self._NO_MATCH
+        parsed = self._parse_show_scene(text, is_scene=False)
+        if parsed and parsed['image']:
+            for w in parsed['warnings']:
+                self.warnings.append(
+                    f"{line.filename}:{line.line_number}: {w}"
                 )
+            return ShowNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                image=parsed['image'],
+                at=parsed['at'],
+                as_=parsed['as_'],
+                with_=parsed['with_'],
+                zorder=parsed['zorder'],
+                onlayer=parsed['onlayer'],
+                behind=parsed['behind'],
+                is_expression=parsed['is_expression'],
+            )
+        return self._NO_MATCH
 
-        # ---- scene ----
-        if self._RE_SCENE_HEAD.match(text):
-            parsed = self._parse_show_scene(text, is_scene=True)
-            if parsed and parsed['image']:
-                for w in parsed['warnings']:
-                    self.warnings.append(
-                        f"{line.filename}:{line.line_number}: {w}"
-                    )
-                return SceneNode(
-                    line_number=line.line_number,
-                    indent=line.indent,
-                    filename=line.filename,
-                    image=parsed['image'],
-                    at=parsed['at'],
-                    with_=parsed['with_'],
-                    onlayer=parsed['onlayer'],
-                    is_expression=parsed['is_expression'],
+    def _stmt_scene(self, line, text):
+        """`scene` 背景。"""
+        if not self._RE_SCENE_HEAD.match(text):
+            return self._NO_MATCH
+        parsed = self._parse_show_scene(text, is_scene=True)
+        if parsed and parsed['image']:
+            for w in parsed['warnings']:
+                self.warnings.append(
+                    f"{line.filename}:{line.line_number}: {w}"
                 )
+            return SceneNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                image=parsed['image'],
+                at=parsed['at'],
+                with_=parsed['with_'],
+                onlayer=parsed['onlayer'],
+                is_expression=parsed['is_expression'],
+            )
+        return self._NO_MATCH
 
-        # ---- hide ----
+    def _stmt_hide(self, line, text):
+        """`hide`。"""
         m = self._RE_HIDE_HEAD.match(text)
-        if m:
-            rest = text[m.end():].strip()
-            with_ = ''
-            mw = re.search(r'\bwith\s+([\w.]+)', rest)
-            if mw:
-                with_ = mw.group(1)
-                rest = rest[:mw.start()].strip()
-            return HideNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                image=rest,
-                with_=with_,
-            )
+        if not m:
+            return self._NO_MATCH
+        rest = text[m.end():].strip()
+        with_ = ''
+        mw = re.search(r'\bwith\s+([\w.]+)', rest)
+        if mw:
+            with_ = mw.group(1)
+            rest = rest[:mw.start()].strip()
+        return HideNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            image=rest,
+            with_=with_,
+        )
 
-        # ---- play / queue / stop ----
+    def _stmt_audio(self, line, text):
+        """`play / queue / stop music|sound`。"""
         m = self._RE_AUDIO.match(text)
-        if m:
-            action = m.group('action')
-            rest = (m.group('rest') or '').strip()
-            name = ''
-            # `stop music fadeout 1.0`：stop 后面没有"要播的资产"，
-            # 全是参数。以前会把 fadeout 当成音频名，于是校验报
-            # "音频 'fadeout' 未登记"（真实项目一次 11 条）。
-            if action == 'stop':
-                parts = rest.split()
-                if parts and parts[0] in _AUDIO_PARAM_WORDS:
-                    name, rest = '', rest
-                elif parts:
-                    name = parts[0]
-                    rest = ' '.join(parts[1:])
+        if not m:
+            return self._NO_MATCH
+        action = m.group('action')
+        rest = (m.group('rest') or '').strip()
+        name = ''
+        # `stop music fadeout 1.0`：stop 后面没有"要播的资产"，
+        # 全是参数。以前会把 fadeout 当成音频名，于是校验报
+        # "音频 'fadeout' 未登记"（真实项目一次 11 条）。
+        if action == 'stop':
+            parts = rest.split()
+            if parts and parts[0] in _AUDIO_PARAM_WORDS:
+                name, rest = '', rest
+            elif parts:
+                name = parts[0]
+                rest = ' '.join(parts[1:])
+        else:
+            qm = re.match(r'^["\']([^"\']+)["\']', rest)
+            if qm:
+                name = qm.group(1)
+                rest = rest[qm.end():]
             else:
-                qm = re.match(r'^["\']([^"\']+)["\']', rest)
-                if qm:
-                    name = qm.group(1)
-                    rest = rest[qm.end():]
+                parts = rest.split()
+                # `play music fadein 1.0` 这种没有名字的写法
+                if parts and parts[0] in _AUDIO_PARAM_WORDS:
+                    name = ''
                 else:
-                    parts = rest.split()
-                    # `play music fadein 1.0` 这种没有名字的写法
-                    if parts and parts[0] in _AUDIO_PARAM_WORDS:
-                        name = ''
-                    else:
-                        name = parts[0] if parts else ''
-                        rest = ' '.join(parts[1:])
+                    name = parts[0] if parts else ''
+                    rest = ' '.join(parts[1:])
 
-            def _num(pat):
-                mm = re.search(pat, rest)
-                try:
-                    return float(mm.group(1)) if mm else 0.0
-                except ValueError:
-                    return 0.0
+        def _num(pat):
+            mm = re.search(pat, rest)
+            try:
+                return float(mm.group(1)) if mm else 0.0
+            except ValueError:
+                return 0.0
 
-            return AudioNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                action=action,
-                channel=m.group('channel'),
-                name=name,
-                fadein=_num(r'\bfadein\s+([\d.]+)'),
-                fadeout=_num(r'\bfadeout\s+([\d.]+)'),
-                loop=bool(re.search(r'\bloop\b', rest)),
-            )
+        return AudioNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            action=action,
+            channel=m.group('channel'),
+            name=name,
+            fadein=_num(r'\bfadein\s+([\d.]+)'),
+            fadeout=_num(r'\bfadeout\s+([\d.]+)'),
+            loop=bool(re.search(r'\bloop\b', rest)),
+        )
 
-        # ---- voice ----
+    def _stmt_voice(self, line, text):
+        """`voice`。"""
         m = self._RE_VOICE.match(text)
+        if not m:
+            return self._NO_MATCH
+        return VoiceNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            name=_pick_str(m, 1, 2, 3),
+        )
+
+    def _stmt_extend(self, line, text):
+        """`extend` 续写。"""
+        if not self._RE_EXTEND_HEAD.match(text):
+            return self._NO_MATCH
+        m = self._RE_EXTEND_STR.match(text)
         if m:
-            return VoiceNode(
+            return ExtendNode(
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
-                name=_pick_str(m, 1, 2, 3),
+                text=_pick_str(m, 1, 2),
             )
+        return self._NO_MATCH
 
-        # ---- extend ----
-        if self._RE_EXTEND_HEAD.match(text):
-            m = self._RE_EXTEND_STR.match(text)
-            if m:
-                return ExtendNode(
-                    line_number=line.line_number,
-                    indent=line.indent,
-                    filename=line.filename,
-                    text=_pick_str(m, 1, 2),
-                )
-
-        # ---- say（兜底） ----
+    def _stmt_say(self, line, text):
+        """台词（**兜底**：前面的分支都没接住，才算台词）。"""
         m = self._RE_SAY.match(text)
-        if m:
-            who = m.group(1) or ''
-            if who in self._IGNORED_SAY_HEADS:
-                return None
-            what = _pick_str(m, 2, 3)
-            return SayNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                who=who,
-                what=what,
-            )
+        if not m:
+            return self._NO_MATCH
+        who = m.group(1) or ''
+        if who in self._IGNORED_SAY_HEADS:
+            return None
+        what = _pick_str(m, 2, 3)
+        return SayNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            who=who,
+            what=what,
+        )
 
-        # ---- transform 定义 ----
-        # 这是"支持自定义变换"的关键：不解析它，表格里的 At / Transform
-        # 列就永远选不到项目自己写的变换。
-        if self._RE_TRANSFORM.match(text):
-            node = self._parse_transform(line, text)
-            if node is not None:
-                return node
+    def _stmt_transform(self, line, text):
+        """`transform` 定义。
 
-        # ---- 未建模语句的兜底 ----
-        # 到这里还没被任何分支接住的叶语句，说明模型没覆盖它。与其
-        # 静默丢弃（这正是"解析不够强大"的根源），不如原样保存：
-        # 渲染时逐字回写，保证 rpy↔表格 往返不丢程序员的代码。
-        # 只收叶语句——带子块的未知语句（screen/init/transform …）交给
-        # 上层忽略，避免只留头部、丢掉块体造成更严重的破坏。
+        这是"支持自定义变换"的关键：不解析它，表格里的 At / Transform
+        列就永远选不到项目自己写的变换。
+        """
+        if not self._RE_TRANSFORM.match(text):
+            return self._NO_MATCH
+        node = self._parse_transform(line, text)
+        if node is not None:
+            return node
+        return self._NO_MATCH
+
+    def _stmt_unmodeled(self, line, text):
+        """未建模语句的兜底。
+
+        到这里还没被任何分支接住的叶语句，说明模型没覆盖它。与其
+        静默丢弃（这正是"解析不够强大"的根源），不如原样保存：
+        渲染时逐字回写，保证 rpy↔表格 往返不丢程序员的代码。
+        只收叶语句 —— 带子块的未知语句（screen/init/transform …）交给
+        上层忽略，避免只留头部、丢掉块体造成更严重的破坏。
+        """
         if not line.subblock:
             return RawNode(
                 line_number=line.line_number,
@@ -1454,14 +1532,126 @@ class RenPyParser:
                 text=text,
                 raw_kind='unmodeled',
             )
-
         self.warnings.append(
             f"{line.filename}:{line.line_number}: "
             f"未建模的块语句已跳过（不在演出流内）: {text[:40]!r}"
         )
         return None
 
-    # ---------- label 解析 ----------
+    def _parse_statement(self, line: LogicalLine, text: str):
+        """一条逻辑行 → AST 节点（按语句种类分派）。
+
+        每个分支各自住在 `_stmt_*` 里（P3-12 拆的：原本是 375 行 /
+        圈复杂度 60 的扁平 if 链）。**分派顺序就是匹配优先级**，
+        不能重排 —— 它必须与 `_stmt_*` 的定义顺序一致：
+
+             1. `comment`
+             2. `label`
+             3. `define`
+             4. `menu`
+             5. `if`
+             6. `jump_expression`
+             7. `call_expression`
+             8. `call_screen`
+             9. `jump`
+            10. `call`
+            11. `return`
+            12. `dollar`
+            13. `python_block`
+            14. `layeredimage`
+            15. `image_def`
+            16. `screen_op`
+            17. `show`
+            18. `scene`
+            19. `hide`
+            20. `audio`
+            21. `voice`
+            22. `extend`
+            23. `say`
+            24. `transform`
+            25. `unmodeled`
+
+        `_stmt_*` 返回 `self._NO_MATCH` 表示"这条语句我认不出，
+        试下一个分支"；返回别的（含 `None`）表示"有结论了，
+        就此结束" —— 两者**必须分开**，否则一句坏掉的 `if` 会被
+        后面的 `_stmt_say` 当作台词吃掉。
+        """
+        node = self._stmt_comment(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_label(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_define(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_menu(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_if(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_jump_expression(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_call_expression(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_call_screen(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_jump(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_call(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_return(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_dollar(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_python_block(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_layeredimage(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_image_def(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_screen_op(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_show(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_scene(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_hide(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_audio(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_voice(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_extend(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_say(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_transform(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_unmodeled(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        return None
 
     def _parse_label(self, line: LogicalLine, text: str) -> Optional[LabelNode]:
         m = self._RE_LABEL_HEAD.match(text)
