@@ -3005,7 +3005,10 @@ def parse_translation_files(tl_dir) -> dict:
         for fp in lang_dir.glob('*.rpy'):
             try:
                 lines = fp.read_text(encoding='utf-8').splitlines()
-            except Exception:
+            except Exception as e:        # noqa: BLE001
+                # 读不了这一个文件（编码坏 / 权限 / 中途删了）就跳过它 ——
+                # 但**记一笔**：整份翻译文件静默消失，比报错更难查。
+                swallow('parsing.renpy_parser.parse_translation_files', e)
                 continue
 
             current_id = None

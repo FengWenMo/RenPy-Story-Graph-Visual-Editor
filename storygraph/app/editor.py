@@ -73,6 +73,8 @@ from storygraph.app.session_collab import CollabMixin
 from storygraph.story.beat_model import Beat
 from storygraph.story.beat_render import make_symbols
 
+from storygraph.core.safeguard import swallow
+
 
 #: 主区字段（每一拍真正常改的）—— 与两套前端共用同一份划分。
 #:
@@ -174,7 +176,8 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
             return None
         try:
             return self._registry_provider()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.editor.registry', e)
             return None
 
     def source(self):

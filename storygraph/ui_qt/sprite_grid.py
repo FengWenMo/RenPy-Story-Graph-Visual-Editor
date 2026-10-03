@@ -34,6 +34,8 @@ from storygraph.app.session_table import uniform_position_of  # noqa: F401
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
+from storygraph.core.safeguard import swallow
+
 CARD_W = T.CARD['w'] + 26            # 卡片宽（含 chip 行）
 THUMB_W = T.CARD['thumbW'] + 8
 THUMB_H = T.CARD['thumbH'] + 8
@@ -66,7 +68,8 @@ def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
     if resolver is not None:
         try:
             found = resolver(spec)
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.sprite_grid.resolve_sprite_thumb_path', e)
             found = None
         if found:
             return found
@@ -81,7 +84,8 @@ def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
             found = resolve_thumb_source(cand, project_root)
             if found:
                 return found
-    except Exception:                        # noqa: BLE001
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.sprite_grid.resolve_sprite_thumb_path', e)
         return None
     return None
 

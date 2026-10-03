@@ -266,7 +266,8 @@ class CardPageMixin:
                 continue
             try:
                 cards.extend(self._session.cards(j) or ())
-            except Exception:                # noqa: BLE001 - 预取失败无所谓
+            except Exception as e:                # noqa: BLE001 - 预取失败无所谓
+                swallow('ui_qt.window_card._prefetch_neighbours', e)
                 continue
         if cards:
             panel.prefetch_sprites(cards)

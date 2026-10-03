@@ -117,7 +117,8 @@ class AssetRegistryMixin:
         reg = self.registry()
         try:
             return sorted((getattr(reg, 'characters', {}) or {}).keys())
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.characters', e)
             return []
 
     def participants(self, limit: int = 8) -> list:
@@ -126,7 +127,8 @@ class AssetRegistryMixin:
             return []
         try:
             return B.participants(self.source(), limit=limit)
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.participants', e)
             return []
 
     def assets_registry(self):
@@ -187,7 +189,8 @@ class AssetRegistryMixin:
         try:
             from storygraph.assets.asset_registry import describe_asset
             return describe_asset(asset_type, row)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_assets._describe_asset', e)
             return ''
 
     def asset_linker(self):
@@ -216,7 +219,8 @@ class AssetRegistryMixin:
                 self._linker.link()
             except Exception:                 # noqa: BLE001
                 swallow('editor.asset_linker')
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_assets.asset_linker', e)
             self._linker = None
         return self._linker
 
@@ -258,7 +262,8 @@ class AssetRegistryMixin:
                 out.setdefault('warnings', []).append(f'{key}: {e}')
         try:
             out['top_characters'] = panel.get_character_ranking()[:top]
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_assets.asset_overview', e)
             out['top_characters'] = []
         # 大列表只给前 N 条（界面是给人看的，不是 dump）
         for key in ('unused_assets', 'broken', 'undefined'):
@@ -325,5 +330,6 @@ class AssetRegistryMixin:
                 hit = resolve_stage_asset(spec, images, self.project_root,
                                           image_index(self.project_root))
             return hit
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.path_of_image', e)
             return None

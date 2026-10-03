@@ -260,7 +260,8 @@ class AssetPanelData:
             return []
         try:
             return linker.character_activity_ranking()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_panel.get_character_ranking', e)
             return []
 
     def get_character_dialogues(self, var_name: str) -> list:
@@ -290,7 +291,8 @@ class AssetPanelData:
             return []
         try:
             return linker.find_undefined_characters()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_panel.get_undefined_characters', e)
             return []
 
     def get_unused_characters(self) -> list:
@@ -300,7 +302,8 @@ class AssetPanelData:
             return []
         try:
             return linker.find_unused_characters()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_panel.get_unused_characters', e)
             return []
 
     # ===================== 依赖视角 =====================
@@ -309,14 +312,16 @@ class AssetPanelData:
         """脚本引用但资产不存在的引用列表。"""
         try:
             return self.engine.find_broken_references()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_panel.get_broken_references', e)
             return []
 
     def get_unused_assets(self) -> list:
         """未被脚本引用的资产列表。"""
         try:
             return self.engine.find_unused_assets()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_panel.get_unused_assets', e)
             return []
 
     # ===================== 分组工具 =====================

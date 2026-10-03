@@ -108,7 +108,8 @@ def decode_sync(path, max_size, project_root=None):
     """
     try:
         from PIL import Image
-    except Exception:                       # noqa: BLE001 - 没装 Pillow 走降级
+    except Exception as e:                       # noqa: BLE001 - 没装 Pillow 走降级
+        swallow('app.thumbs.decode_sync', e)
         return None
 
     real = resolve_thumb_source(path, project_root)
@@ -145,7 +146,8 @@ def decode_sync(path, max_size, project_root=None):
             except OSError as e:
                 swallow('thumbs.decode_sync', e)
         return out
-    except Exception:                       # noqa: BLE001 - 损坏文件不阻断界面
+    except Exception as e:                       # noqa: BLE001 - 损坏文件不阻断界面
+        swallow('app.thumbs.decode_sync', e)
         return None
 
 
@@ -167,7 +169,8 @@ def natural_size(path, project_root=None, use_cache: bool = True):
     """
     try:
         from PIL import Image
-    except Exception:                       # noqa: BLE001 - 没装 Pillow 就放弃
+    except Exception as e:                       # noqa: BLE001 - 没装 Pillow 就放弃
+        swallow('app.thumbs.natural_size', e)
         return None
     real = resolve_thumb_source(path, project_root)
     if real is None:
@@ -178,7 +181,8 @@ def natural_size(path, project_root=None, use_cache: bool = True):
     try:
         with Image.open(real) as im:
             size = (int(im.width), int(im.height))
-    except Exception:                       # noqa: BLE001 - 损坏文件
+    except Exception as e:                       # noqa: BLE001 - 损坏文件
+        swallow('app.thumbs.natural_size', e)
         return None
     if use_cache:
         if len(_SIZE_CACHE) > 512:

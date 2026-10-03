@@ -342,7 +342,8 @@ class AssetPickerDialog(QDialog):
         try:
             row = P.row_of(self._registry, atype, aid, self._project_root)
             spec = P.image_spec_of(aid, row) if row else ''
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.asset_picker._short_label', e)
             spec = ''
         spec = str(spec or '').strip()
         words = spec.split()

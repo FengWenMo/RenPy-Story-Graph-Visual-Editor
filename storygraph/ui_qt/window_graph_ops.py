@@ -701,7 +701,8 @@ class GraphOpsMixin:
         """把"被跳到、但文件还没导入"的章节写进控制台（并提示补全）。"""
         try:
             info = self._session.missing_chapter_files(graph)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.window_graph_ops._report_missing_chapters', e)
             return
         files = info.get('files') or []
         unknown = info.get('unknown') or []

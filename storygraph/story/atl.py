@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from storygraph.core.safeguard import swallow
+
 #: 默认游戏分辨率（读不到 `gui.init(...)` 时用）
 DEFAULT_SCREEN = (1920, 1080)
 
@@ -264,7 +266,8 @@ def eval_number(expr, env: dict) -> Optional[float]:
             return None
     try:
         value = _eval_node(tree.body, env or {})
-    except Exception:                        # noqa: BLE001 - 名字没绑上等
+    except Exception as e:                        # noqa: BLE001 - 名字没绑上等
+        swallow('story.atl.eval_number', e)
         return None
     if isinstance(value, bool) or value is None:
         return None

@@ -81,7 +81,8 @@ class WindowAssetsMixin:
         for field, kind in self.ASSET_FIELD_KINDS.items():
             try:
                 choices = self._session.asset_choices(kind)
-            except Exception:                  # noqa: BLE001
+            except Exception as e:                  # noqa: BLE001
+                swallow('ui_qt.window_assets._refresh_asset_choices', e)
                 choices = []
             panel.set_asset_choices(field, choices)
     def _pick_asset_for(self, field: str, current: str) -> str:

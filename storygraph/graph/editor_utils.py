@@ -6,6 +6,8 @@ from pathlib import Path
 
 from storygraph.core import notify
 
+from storygraph.core.safeguard import swallow
+
 
 def open_with_system_default(path) -> bool:
     """
@@ -29,7 +31,8 @@ def open_with_system_default(path) -> bool:
         else:
             subprocess.Popen(['xdg-open', str(path)])
         return True
-    except Exception:                         # noqa: BLE001 - 交给调用方提示
+    except Exception as e:                         # noqa: BLE001 - 交给调用方提示
+        swallow('graph.editor_utils.open_with_system_default', e)
         return False
 
 

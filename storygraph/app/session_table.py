@@ -264,7 +264,8 @@ class TableSessionMixin:
                 return {}
             actors = (rows[idx].get('state') or {}).get('actors') or []
             return {str(img): str(at or '') for img, at in actors}
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_table._effective_positions', e)
             return {}
     def list_entry(self, idx: int) -> dict:
         """章节列表要用的一行摘要（前缀图标 / 说话人 / 台词预览）。"""
@@ -303,7 +304,8 @@ class TableSessionMixin:
         try:
             from storygraph.story.stage_snapshot import stage_digest
             return stage_digest(self.beats, idx)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_table.stage_digest_text', e)
             return ''
     def speaking_card_index(self, idx: int) -> int:
         """当前说话人对应哪张立绘卡（-1 = 没有）。"""

@@ -95,7 +95,8 @@ def notify(level: str, message: str, title: str = '') -> str:
     for listener in list(_listeners):
         try:
             listener(level, message, title)
-        except Exception:                    # noqa: BLE001 - 一个坏订阅者不拖垮其余
+        except Exception as e:                    # noqa: BLE001 - 一个坏订阅者不拖垮其余
+            swallow('core.notify.notify', e)
             continue
     return level
 

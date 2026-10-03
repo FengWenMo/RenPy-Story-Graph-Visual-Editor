@@ -41,6 +41,8 @@ from storygraph.core.vocabulary import (
     NON_ACTOR_TAGS,
 )
 
+from storygraph.core.safeguard import swallow
+
 # ---------------------------------------------------------------------------
 # 词表：把"人话"映射成 Ren'Py 认识的东西。
 # 项目可以用 `配置_词表` 工作表覆盖（列：类别 | 词 | 映射为 | 说明）。
@@ -1030,7 +1032,8 @@ def stage_word_if_lossless(symbols: Symbols, verb: str, spec: str,
         if with_:
             expected += f" with {with_}"
         return text if code == expected else ''
-    except Exception:
+    except Exception as e:
+        swallow('story.dsl.stage_word_if_lossless', e)
         return ''
 
 

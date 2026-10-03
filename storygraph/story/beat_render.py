@@ -42,6 +42,8 @@ from storygraph.story.beat_model import (
     unmask_code_block_markers,
 )
 
+from storygraph.core.safeguard import swallow
+
 
 
 # ===================== Beat -> rpy =====================
@@ -87,7 +89,8 @@ def _emit_image_name(name: str, resolver=None) -> str:
             return name
         if resolver(underscored):
             return underscored
-    except Exception:
+    except Exception as e:
+        swallow('story.beat_render._emit_image_name', e)
         return underscored
     return name
 

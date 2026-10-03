@@ -516,7 +516,8 @@ def _write_asset_gallery(wb, registry, project_root=None,
 
 try:                                     # pragma: no cover - 依赖环境
     from PIL import Image as _PILImage
-except Exception:                        # noqa: BLE001
+except Exception as e:                        # noqa: BLE001
+    swallow('story.excel_export.<module>', e)
     _PILImage = None
 
 #: 支持的扩展名：webp/动图之类 Pillow 不一定能读，读不了就跳过
@@ -584,7 +585,8 @@ def _thumbnail_bytes(path, project_root=None):
             buf = BytesIO()
             im.save(buf, format='PNG')
             data = buf.getvalue()
-    except Exception:                     # noqa: BLE001 - 坏图不能挡住导表
+    except Exception as e:                     # noqa: BLE001 - 坏图不能挡住导表
+        swallow('story.excel_export._thumbnail_bytes', e)
         return None
     if cache_file is not None:
         try:
@@ -672,7 +674,8 @@ def _embed_gallery_thumbnail(ws, row, col, path, project_root, aid,
         img.height = _GALLERY_THUMB_PX
         img.anchor = f'{get_column_letter(col)}{row}'
         ws.add_image(img)
-    except Exception:                     # noqa: BLE001
+    except Exception as e:                     # noqa: BLE001
+        swallow('story.excel_export._embed_gallery_thumbnail', e)
         return False
     if budget is not None:
         budget[0] -= 1          # 不扣额度的话上限形同虚设

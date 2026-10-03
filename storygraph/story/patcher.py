@@ -1156,7 +1156,8 @@ def patch_export(beats: list, source_path, generated_text: str,
             _m, _t, dropped = recover_source_ranges(
                 beats, source_path, apply_ranges=False, apply_inserts=False,
                 dropped_out=dropped_src)
-        except Exception:                    # noqa: BLE001 - 查不了就当没有
+        except Exception as e:                    # noqa: BLE001 - 查不了就当没有
+            swallow('story.patcher.patch_export', e)
             dropped = 0
         # 兜底：对齐可能把新拍当成"替换"（说话人一样 → 认为是同一拍改了词），
         # 于是它还是没行号。这时用**它在拍序列里的前后邻居**推锚点。
@@ -1214,7 +1215,8 @@ def patch_export(beats: list, source_path, generated_text: str,
             lines = [ln for ln in render_beat_to_rpy(b, indent=indent,
                                                      audit=audit)
                      if str(ln).strip()]
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('story.patcher.patch_export', e)
             lines = []
         raw_gen[i] = lines
         gen = [_norm(ln) for ln in lines]

@@ -218,7 +218,8 @@ class WindowKeyboardMixin:
                     return True
                 p = p.parentWidget()
             return False
-        except Exception:                       # noqa: BLE001
+        except Exception as e:                       # noqa: BLE001
+            swallow('ui_qt.window_keyboard._event_belongs_here', e)
             return False
     def _install_shortcuts(self):
         """
@@ -243,7 +244,8 @@ class WindowKeyboardMixin:
         try:
             cur = edit.textCursor().blockNumber()
             return (cur >= edit.blockCount() - 1) if down else cur <= 0
-        except Exception:                       # noqa: BLE001
+        except Exception as e:                       # noqa: BLE001
+            swallow('ui_qt.window_keyboard._caret_at_edge', e)
             return True
     def _remove_shortcuts(self):
         """逆着 `_install_shortcuts` 摘干净（幂等）。"""

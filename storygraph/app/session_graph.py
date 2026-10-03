@@ -532,7 +532,8 @@ class GraphSessionMixin:
         for fp in (files or ()):
             try:
                 wanted.add(str(Path(str(fp))))
-            except Exception:                 # noqa: BLE001
+            except Exception as e:                 # noqa: BLE001
+                swallow('app.session_graph.drop_chapters', e)
                 continue
         doomed = [nid for nid, node in (graph.nodes or {}).items()
                   if str(getattr(node, 'file_path', '') or '') in wanted]

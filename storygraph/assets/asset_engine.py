@@ -85,7 +85,8 @@ def _apply_rename_patch(old_id: str, new_id: str,
             continue
         try:
             text = fp.read_text(encoding='utf-8')
-        except Exception:
+        except Exception as e:
+            swallow('assets.asset_engine._apply_rename_patch', e)
             continue
         if not pattern.search(text):
             continue
@@ -1070,7 +1071,8 @@ class AssetEngine:
             return []
         try:
             return self.linker.find_undefined_characters()
-        except Exception:
+        except Exception as e:
+            swallow('assets.asset_engine.find_undefined_characters', e)
             return []
 
     def find_unused_characters(self) -> list:
@@ -1078,7 +1080,8 @@ class AssetEngine:
             return []
         try:
             return self.linker.find_unused_characters()
-        except Exception:
+        except Exception as e:
+            swallow('assets.asset_engine.find_unused_characters', e)
             return []
 
 # ===================== 模块级别名（向后兼容） =====================

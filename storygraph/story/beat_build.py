@@ -1108,7 +1108,8 @@ def stage_only_ops(text: str, symbols=None, audit=None) -> str:
         from storygraph.story.dsl import compile_stage, parse_stage
         parsed = parse_stage(text)
         compiled = compile_stage(text, symbols, audit)
-    except Exception:                        # noqa: BLE001 - 解析不了就整条留下
+    except Exception as e:                        # noqa: BLE001 - 解析不了就整条留下
+        swallow('story.beat_build.stage_only_ops', e)
         return text
     keep = []
     for op, (_intent, code, _status) in zip(parsed.ops, compiled):

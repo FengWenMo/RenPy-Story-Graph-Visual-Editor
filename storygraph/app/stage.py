@@ -203,7 +203,8 @@ def build_frames(beats: list, registry=None, transform_index=None,
             try:
                 ch = (getattr(registry, 'characters', {}) or {}).get(speaker) or {}
                 spk_tag = str(ch.get('ImageTag') or '').strip()
-            except Exception:
+            except Exception as e:
+                swallow('app.stage.build_frames', e)
                 spk_tag = ''
             hit = spk_tag or speaker
             for s in sprites:
@@ -293,7 +294,8 @@ def script_images(project_root) -> dict:
     try:
         from storygraph.parsing.renpy_parser import (image_path_from_expr,
                                                      image_solid_from_expr)
-    except Exception:                         # noqa: BLE001 - 桩环境
+    except Exception as e:                         # noqa: BLE001 - 桩环境
+        swallow('app.stage.script_images', e)
         image_path_from_expr = image_solid_from_expr = lambda _e: None
 
     names: dict = {}
@@ -392,7 +394,8 @@ def resolve_stage_asset(name: str, images: dict, project_root=None,
     if images:
         try:
             aid = lookup_image_id(images, tag, rest)
-        except Exception:                    # noqa: BLE001 - 桩环境
+        except Exception as e:                    # noqa: BLE001 - 桩环境
+            swallow('app.stage.resolve_stage_asset', e)
             aid = None
         if aid:
             row = images.get(aid) or {}
@@ -435,7 +438,8 @@ def resolve_solid_color(name: str, images: dict, project_root=None):
     if images:
         try:
             aid = lookup_image_id(images, parts[0], parts[1:])
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.stage.resolve_solid_color', e)
             aid = None
     if aid:
         row = images.get(aid) or {}

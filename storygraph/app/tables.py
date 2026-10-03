@@ -142,7 +142,8 @@ def export_table(table_path, registry=None, project_root=None,
     if registry is not None:
         try:
             unregistered = list(find_unregistered_assets(beats, registry))
-        except Exception:                     # noqa: BLE001 - 纯提示，不该拦住
+        except Exception as e:                     # noqa: BLE001 - 纯提示，不该拦住
+            swallow('app.tables.export_table', e)
             unregistered = []
 
     target = Path(out_path) if out_path else planned_output_path(

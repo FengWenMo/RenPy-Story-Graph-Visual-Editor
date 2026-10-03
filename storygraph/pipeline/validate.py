@@ -39,6 +39,8 @@ from storygraph.story.beat_model import (
     split_show_items,
 )
 
+from storygraph.core.safeguard import swallow
+
 L1 = 'L1'
 L2 = 'L2'
 L3 = 'L3'
@@ -694,7 +696,8 @@ def _beats_snapshot_issues(beats) -> list:
     out = []
     try:
         snaps = stage_snapshots(list(beats or []))
-    except Exception:                     # noqa: BLE001 - 派生视图坏了不该拦住体检
+    except Exception as e:                     # noqa: BLE001 - 派生视图坏了不该拦住体检
+        swallow('pipeline.validate._beats_snapshot_issues', e)
         return out
 
     # 整段剧本里被快照认成"角色"或"图层"的 tag 集合

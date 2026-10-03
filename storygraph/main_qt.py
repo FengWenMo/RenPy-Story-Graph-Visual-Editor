@@ -25,6 +25,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from storygraph.core.safeguard import swallow
+
 
 class _EngineShim:
     """
@@ -44,7 +46,8 @@ class _EngineShim:
             try:
                 from storygraph.pipeline.build import load_asset_registry
                 self._registry = load_asset_registry(self.project_root)
-            except Exception:                    # noqa: BLE001
+            except Exception as e:                    # noqa: BLE001
+                swallow('main_qt.get_registry', e)
                 self._registry = None
         return self._registry
 

@@ -36,7 +36,8 @@ def default_max_in_flight() -> int:
     try:
         from PySide6.QtCore import QThread
         n = int(QThread.idealThreadCount() or 4)
-    except Exception:                         # noqa: BLE001
+    except Exception as e:                         # noqa: BLE001
+        swallow('ui_qt.thumb_loader.default_max_in_flight', e)
         n = 4
     return max(2, min(16, n))
 
@@ -360,7 +361,8 @@ class ThumbLoader(QObject):
         try:
             if isinstance(img, QImage) and not img.isNull():
                 pixmap = QPixmap.fromImage(img)
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.thumb_loader._on_ready', e)
             pixmap = None
         if pixmap is not None:
             self._cache[key] = pixmap

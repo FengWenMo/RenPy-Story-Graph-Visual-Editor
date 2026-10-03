@@ -48,7 +48,8 @@ def _json_safe(obj):
         return {str(k): _json_safe(v) for k, v in obj.items()}
     try:
         return str(obj)
-    except Exception:
+    except Exception as e:
+        swallow('assets.asset_extensions._json_safe', e)
         return None
 
 
@@ -368,7 +369,8 @@ def generate_rename_patch(
             continue
         try:
             text = fp.read_text(encoding='utf-8')
-        except Exception:
+        except Exception as e:
+            swallow('assets.asset_extensions.generate_rename_patch', e)
             continue
         if not pattern.search(text):
             continue

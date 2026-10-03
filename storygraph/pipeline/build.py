@@ -104,7 +104,8 @@ def load_asset_registry(project_root, asset_dir=None):
                 return parse_asset_tables(
                     c, hooks=load_hooks(project_root=project_root),
                     project_root=project_root)
-            except Exception:
+            except Exception as e:
+                swallow('pipeline.build.load_asset_registry', e)
                 return None
     return None
 

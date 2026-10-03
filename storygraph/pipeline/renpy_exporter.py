@@ -1,6 +1,8 @@
 # renpy_exporter.py
 from storygraph.core import notify
 
+from storygraph.core.safeguard import swallow
+
 
 def _declared_variables(graph):
     """
@@ -20,7 +22,8 @@ def _declared_variables(graph):
     from storygraph.core.utils import declared_variables_of_graph
     try:
         return declared_variables_of_graph(graph)
-    except Exception:                    # noqa: BLE001 - 抽不出来就别写 default
+    except Exception as e:                    # noqa: BLE001 - 抽不出来就别写 default
+        swallow('pipeline.renpy_exporter._declared_variables', e)
         return []
 
 

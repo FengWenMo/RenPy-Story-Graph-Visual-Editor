@@ -26,6 +26,8 @@ from storygraph.core.vocabulary import (
 )
 from storygraph.excel.cells import append_text_row, set_text
 
+from storygraph.core.safeguard import swallow
+
 
 # ===================== 常量 =====================
 SUPPORTED_IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
@@ -1372,7 +1374,8 @@ def analyze_references(script_files, registry: AssetRegistry):
             continue
         try:
             text = fp.read_text(encoding='utf-8', errors='ignore')
-        except Exception:
+        except Exception as e:
+            swallow('assets.asset_registry.analyze_references', e)
             continue
 
         for kind, raw, line_no, cands in extract_script_references(text):
@@ -1589,7 +1592,8 @@ def register_missing_assets(project_root, asset_dir=None,
             continue
         try:
             existing = read_excel_rows(target) if target.exists() else []
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('assets.asset_registry.register_missing_assets', e)
             existing = []
         have_paths = {_norm_path_for_compare(r.get('Path')) for r in existing}
         have_ids = {str(r.get('ID') or '').strip() for r in existing}

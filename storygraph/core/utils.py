@@ -3,6 +3,8 @@ import ast
 
 from storygraph.core.statement import strip_marker
 
+from storygraph.core.safeguard import swallow
+
 # 排除：内建函数名与语言关键字
 # （与旧正则版的 keywords 集合语义一致，仅补齐常用内建）
 _BUILTINS_WHITELIST = frozenset({
@@ -223,7 +225,8 @@ def declared_variables(ops=(), conditions=(), extra_ops=()) -> list:
             continue
         try:
             collector.visit(tree)
-        except Exception:                 # noqa: BLE001 - 半个 AST 也不该炸导出
+        except Exception as e:                 # noqa: BLE001 - 半个 AST 也不该炸导出
+            swallow('core.utils.declared_variables', e)
             continue
     return [n for n in collector.names if n not in collector._loop_targets]
 

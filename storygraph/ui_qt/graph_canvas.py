@@ -173,7 +173,8 @@ class NodeItem(QGraphicsRectItem):
             # 只讲**剧情变量**（技术代码连数量都不上块）：用户 2026-10-03
             # "技术代码不是变量，是具体的实现细节"。
             summary = story_ops.narrative_summary(self.node)
-        except Exception:                # noqa: BLE001
+        except Exception as e:                # noqa: BLE001
+            swallow('ui_qt.graph_canvas._refresh_inner', e)
             summary = ''
         self._summary.setText(_elide(summary, self._summary.font(), inner_w))
         self._summary.setVisible(bool(summary))
@@ -270,7 +271,8 @@ class NodeItem(QGraphicsRectItem):
             if event.button() == Qt.LeftButton and not getattr(
                     self.canvas, '_space_down', False):
                 self._drag_from = (float(self.pos().x()), float(self.pos().y()))
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.graph_canvas.mousePressEvent', e)
             self._drag_from = None
         super().mousePressEvent(event)
 
@@ -596,7 +598,8 @@ class GraphCanvas(QGraphicsView):
         try:
             return (QTransform(self.transform()),
                     self.mapToScene(self.viewport().rect().center()))
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.graph_canvas._view_state', e)
             return None
 
     def _restore_view(self, state) -> bool:
@@ -608,7 +611,8 @@ class GraphCanvas(QGraphicsView):
             self.setTransform(transform)
             self._clamp_zoom()
             self.centerOn(center)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.graph_canvas._restore_view', e)
             return False
         self._emit_zoom()
         return True
@@ -694,7 +698,8 @@ class GraphCanvas(QGraphicsView):
         """
         try:
             rect = self.scene().itemsBoundingRect()
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.graph_canvas._update_scene_rect', e)
             return
         if rect.isEmpty():
             self.setSceneRect(QRectF(-400, -300, 800, 600))
@@ -759,7 +764,8 @@ class GraphCanvas(QGraphicsView):
             return False
         try:
             vis = self.mapToScene(self.viewport().rect()).boundingRect()
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.graph_canvas._extend_scene_rect', e)
             return False
         step = max(self.SCENE_GROW_STEP,
                    max(vis.width(), vis.height()) * 0.6)

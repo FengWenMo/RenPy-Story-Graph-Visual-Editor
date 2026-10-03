@@ -53,7 +53,8 @@ def asset_row(engine, asset_type: str, asset_id: str):
         return None
     try:
         registry = engine.get_registry()
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.asset_row', e)
         return None
     if registry is None:
         return None
@@ -498,7 +499,8 @@ def stage_sprite_rows(stage_text: str, symbols=None) -> list:
     try:
         from storygraph.story.dsl import parse_stage
         parsed = parse_stage(text)
-    except Exception:                        # noqa: BLE001
+    except Exception as e:                        # noqa: BLE001
+        swallow('app.beats.stage_sprite_rows', e)
         return []
 
     # 把每条 `[显示]` 还原成"人话片段"（`凌跃捷 开心@左`），再交给
@@ -620,7 +622,8 @@ def inherited_state_hint(beats: list, idx: int) -> str:
     try:
         from storygraph.story.stage_snapshot import snapshot_rows
         rows = snapshot_rows(beats)
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.inherited_state_hint', e)
         return ''
     if idx >= len(rows):
         return ''
@@ -748,7 +751,8 @@ def categorize_assets(engine, asset_types=None, limit: int = 3000) -> dict:
     reg = None
     try:
         reg = engine.get_registry() if engine is not None else None
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.categorize_assets', e)
         reg = None
 
     # 拿全量候选（空查询）+ 各类型的原始行，用于判断 tag
@@ -867,14 +871,16 @@ def beat_expression_word(beat: Beat, symbols=None) -> str:
         if symbols is not None:
             try:
                 candidate = symbols.expression_word_for(tag, attr)
-            except Exception:
+            except Exception as e:
+                swallow('app.beats.beat_expression_word', e)
                 candidate = ''
             # 自证无损：翻回来必须是同一个属性
             if candidate:
                 try:
                     if normalize_expression(candidate, beat, symbols) == attr:
                         word = candidate
-                except Exception:
+                except Exception as e:
+                    swallow('app.beats.beat_expression_word', e)
                     word = ''
         words.append(word or attr)
     return ' '.join(words)
@@ -890,7 +896,8 @@ def beat_position_word(beat: Beat, symbols=None) -> str:
         return at
     try:
         return symbols.position_word_for(at) or at
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.beat_position_word', e)
         return at
 
 
@@ -908,13 +915,15 @@ def expression_choices(beat: Beat, symbols, limit: int = 200) -> list:
     tag = (item.get('image') or '').split()[0] if item.get('image') else ''
     try:
         attrs = symbols.attrs_of_tag(tag)
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.expression_choices', e)
         return []
     out = []
     for attr in attrs[:limit]:
         try:
             word = symbols.expression_word_for(tag, attr)
-        except Exception:
+        except Exception as e:
+            swallow('app.beats.expression_choices', e)
             word = ''
         out.append(word or attr)
     return out
@@ -938,7 +947,8 @@ def participants(engine, limit: int = 8) -> list:
         return []
     try:
         registry = engine.get_registry()
-    except Exception:                        # noqa: BLE001
+    except Exception as e:                        # noqa: BLE001
+        swallow('app.beats.participants', e)
         return []
     if registry is None:
         return []
@@ -994,7 +1004,8 @@ def normalize_expression(word: str, beat: Beat, symbols) -> str:
         return word
     try:
         return symbols.attr_for(tag, word) or word
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.normalize_expression', e)
         return word
 
 
@@ -1030,7 +1041,8 @@ def normalize_position(word: str, symbols) -> str:
         return word
     try:
         return symbols.position_for(word) or word
-    except Exception:
+    except Exception as e:
+        swallow('app.beats.normalize_position', e)
         return word
 
 

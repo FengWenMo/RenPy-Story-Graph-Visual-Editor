@@ -310,7 +310,8 @@ class StageCanvas(QWidget):
             assets = resolve_frame_assets(
                 frame, self._images, self.project_root,
                 image_index(self.project_root))
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.stage_preview.prefetch_frame', e)
             return
         jobs = []
         if assets.get('bg') is not None:
@@ -624,7 +625,8 @@ class StagePreviewWindow(QDialog):
         try:
             cues = self._audio.set_frame(
                 f, key=(getattr(f, 'line_id', ''), idx)) or {}
-        except Exception:                     # noqa: BLE001 - 放不出声不影响画面
+        except Exception as e:                     # noqa: BLE001 - 放不出声不影响画面
+            swallow('ui_qt.stage_preview.show_frame', e)
             cues = {}
         self._who.setText(f.speaker or '　')
         self._dlg.setText(f.text or '（这一拍没有台词）')
@@ -662,12 +664,14 @@ class StagePreviewWindow(QDialog):
         from storygraph.app.stage import frame_summary
         try:
             base = frame_summary(f) if f is not None else ''
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.stage_preview._summary_text', e)
             base = ''
         extra = [str(n) for n in ((cues or {}).get('notes') or ())]
         try:
             miss = self._canvas.missing_assets()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.stage_preview._summary_text', e)
             miss = []
         if miss:
             extra.append('⚠ 缺图：' + '、'.join(miss))
@@ -727,7 +731,8 @@ class StagePreviewWindow(QDialog):
         if checked:
             try:                              # 重新放当前这一拍该有的声音
                 cues = self._audio.set_frame(f, key=None) or {}
-            except Exception:                 # noqa: BLE001
+            except Exception as e:                 # noqa: BLE001
+                swallow('ui_qt.stage_preview._on_sound', e)
                 cues = {}
         else:
             cues = self._cues_for(f)
@@ -737,7 +742,8 @@ class StagePreviewWindow(QDialog):
         """**只算**这一拍的声音提示（不放声）—— 给横条显示用。"""
         try:
             return stage_audio_cues(f, self._registry, self._project_root) or {}
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.stage_preview._cues_for', e)
             return {}
 
     def _on_only(self, checked: bool):
@@ -761,7 +767,8 @@ class StagePreviewWindow(QDialog):
         from storygraph.app.stage import frame_summary
         try:
             return bool(frame_summary(f))
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.stage_preview._has_change', e)
             return True
 
     # ------------------------------------------------------------------

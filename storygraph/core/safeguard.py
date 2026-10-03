@@ -88,7 +88,7 @@ def swallow(context: str, exc: BaseException = None) -> None:
     except Exception:                 # noqa: BLE001 - 记录失败也不许影响主流程
         # **这里必须是空实现**：`swallow` 自己就在错误处理路径上，
         # 再调一次自己、万一又失败就是无限递归。
-        # （全项目唯一允许的 `except …: pass`，见 tests/test_code_health.py）
+        # （全项目唯一允许的 `except …: pass`，见 tests/test_no_silent_except.py）
         pass
 
 

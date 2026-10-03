@@ -522,7 +522,8 @@ class AddEdgeDialog(_BaseDialog):
             from storygraph.graph.analysis import (VariableState,
                                                    condition_possible)
             return condition_possible(VariableState(), cond) is not False
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.dialogs._condition_ok', e)
             return True
 
 

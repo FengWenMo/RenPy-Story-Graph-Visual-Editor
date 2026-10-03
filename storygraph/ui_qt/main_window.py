@@ -804,7 +804,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             swallow('main_window._registry_provider')
         try:
             return self.engine.get_registry()
-        except Exception:                    # noqa: BLE001
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window._registry_provider', e)
             return None
 
     def _ensure_registry(self) -> bool:
@@ -1582,7 +1583,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             if self._is_text_widget(obj):
                 return True
             return self._is_text_widget(QApplication.focusWidget())
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.main_window._text_input_has_focus', e)
             return False
 
     def _record_applied(self, command):

@@ -131,7 +131,8 @@ class ExportMixin:
         try:
             from storygraph.story.atl import scan_transforms
             index = scan_transforms(self.project_root) if root else {}
-        except Exception:                     # noqa: BLE001 - 扫不动就退回启发式
+        except Exception as e:                     # noqa: BLE001 - 扫不动就退回启发式
+            swallow('app.session_export.transform_index', e)
             index = {}
         self._transform_index_cache = (root, index)
         return index
@@ -195,7 +196,8 @@ class ExportMixin:
                 if used <= found:
                     break
             decision = not (used <= found)
-        except Exception:                     # noqa: BLE001 - 判不了就老实写
+        except Exception as e:                     # noqa: BLE001 - 判不了就老实写
+            swallow('app.session_export.should_write_transforms', e)
             decision = True
         self._transforms_decision = decision
         return decision
