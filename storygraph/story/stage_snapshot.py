@@ -136,6 +136,184 @@ def _layer_cn(kind: str) -> str:
 SNAPSHOT_COLUMNS = ('scene', 'actors', 'music', 'sound', 'voice')
 
 
+def _apply_show_verb(item, beat, actors, state):
+    """
+    处理一个 `show` item（角色 / 非角色图层 / 换背景）。
+
+    返回**新的 actors 列表**与要追加的 changes。
+
+    ⚠ `actors` 是**重新绑定**的（`_apply_show` 可能就地改）——
+    所以必须把新列表返回给调用方，不能只改 `state['actors']`
+    （外面那个局部变量 `actors` 还指着旧对象）。
+    """
+    changes = []
+    image = (item.get('image') or '').strip()
+    if not image:
+        return actors, changes
+    at = ((item.get('at') or '').strip()
+          or (beat.at or '').strip()
+          or (beat.transform or '').strip())
+    had_actor = [(s[0], s[1]) for s in actors]
+    _apply_show(actors, image, at, state['scene'])
+    state['actors'] = actors
+    if [(s[0], s[1]) for s in actors] != had_actor:
+        added = not any(s[0] == image for s in had_actor)
+        verb_word = '登场' if added else '换表情/换位'
+        changes.append({'kind': 'actor', 'column': 'actors', 'text':
+                        f'+ {image}'
+                        + (f' @ {at}' if at else '')
+                        + f'（{verb_word}）'})
+        return actors, changes
+    # 没进 actors：要么是同 tag 换背景，要么是非角色图层（cg/ui/movie…）。
+    # 这些同样是"舞台变了"，必须记下来，
+    # 否则"只换 CG"的那一拍会看起来什么都没变。
+    kind = _layer_kind(image, state['scene'])
+    if kind is None:
+        return actors, changes                 # 幂等重复，确实没变
+    if kind == 'scene':
+        # `show bg rooftop` 就是换背景
+        if state['scene'] != image:
+            state['scene'] = image
+        return actors, changes
+    key = image.split()[0]
+    if state['layers'].get(key) != image:
+        state['layers'][key] = image
+        changes.append({'kind': kind, 'column': 'layer', 'text':
+                        f'{_layer_cn(kind)} → {image}'
+                        + (f' @ {at}' if at else '')})
+    return actors, changes
+
+
+def _apply_hide_verb(item, actors, state):
+    """
+    处理一个 `hide` item（角色退场 / 撤图层 / 撤掉当前背景）。
+
+    返回新的 actors 列表与要追加的 changes。
+    """
+    changes = []
+    image = (item.get('image') or '').strip()
+    if not image:
+        return actors, changes
+    had = [s for s in actors
+           if s[0] == image or s[0].startswith(image + ' ')]
+    _apply_hide(actors, image)
+    if had:
+        changes.append({'kind': 'actor', 'column': 'actors',
+                        'text': f'− {image}（退场）'})
+    tag = image.split()[0]
+    if state['layers'].pop(tag, None) is not None:
+        changes.append({'kind': 'layer', 'column': 'layer',
+                        'text': f'− 撤下 {image}'})
+    # 退场也把"背景就是这张图"的情况算上
+    if state['scene'] and state['scene'].split()[0] == tag:
+        state['scene'] = ''
+    return actors, changes
+
+
+def _apply_audio(beat, state):
+    """
+    音乐 / 音效 / 语音：就地改 `state`，返回 `(changes, notes)`。
+
+    音效是**一次性**事件、不是状态（只有本拍有）；音乐与语音是状态。
+    """
+    changes = []
+    notes = []
+    if beat.music:
+        if (beat.music_action or 'play') == 'stop':
+            if state['music']:
+                changes.append({'kind': 'music', 'column': 'music',
+                                'text': '♪ 停止音乐'})
+            state['music'] = ''
+        else:
+            if state['music'] != beat.music:
+                changes.append({'kind': 'music', 'column': 'music',
+                                'text': f'♪ 音乐 → {beat.music}'
+                                        + (f' {beat.music_params}'
+                                           if beat.music_params else '')})
+            state['music'] = beat.music
+    elif (beat.music_action or '') == 'stop':
+        if state['music']:
+            changes.append({'kind': 'music', 'column': 'music',
+                            'text': '♪ 停止音乐'})
+        state['music'] = ''
+    if beat.sound:
+        if (beat.sound_action or 'play') == 'stop':
+            changes.append({'kind': 'sound', 'column': 'sound',
+                            'text': f'♫ 停止音效 {beat.sound}'})
+        else:
+            changes.append({'kind': 'sound', 'column': 'sound',
+                            'text': f'♫ 音效 {beat.sound}'
+                                    + (f' {beat.sound_params}'
+                                       if beat.sound_params else '')})
+        notes.append(f"音效 {beat.sound}")
+    if beat.voice:
+        if state['voice'] != beat.voice:
+            changes.append({'kind': 'voice', 'column': 'voice',
+                            'text': f'🎙 语音 {beat.voice}'})
+        state['voice'] = beat.voice
+    return changes, notes
+
+
+def _changed_columns(state, before, changes, note_scene):
+    """
+    整块状态 diff → `changed` 列集合，并**补上**推断出来的变化描述。
+
+    以 diff 为准（只看 `changes` 会漏：`show bg X` 换背景不产生文字描述），
+    再用 `changes` 里记的 column 精确到"哪一列变了"。
+
+    `note_scene` 是调用方的闭包（它只往 `changes` 里加一条背景变化），
+    传进来是为了**保持原来的调用形态**（原来 `note_scene` 就在
+    `stage_snapshots` 内部定义并使用）。
+    """
+    changed = {c.get('column') for c in changes if c.get('column')}
+    if state['scene'] != before['scene']:
+        changed.add('scene')
+        if not any(c['kind'] == 'scene' for c in changes):
+            note_scene(state['scene'])
+    if [(s[0], s[1]) for s in state['actors']] != before['actors']:
+        changed.add('actors')
+        if not any(c['kind'] == 'actor' for c in changes):
+            changes.append({'kind': 'actor', 'column': 'actors',
+                            'text': '台上立绘发生变化'})
+    if state['layers'] != before['layers']:
+        changed.add('layer')
+        if not any(c['kind'] == 'layer' for c in changes):
+            changes.append({'kind': 'layer', 'column': 'layer',
+                            'text': 'CG/图层发生变化'})
+    return changed
+
+
+def _note_add_then_clear(changes, state):
+    """
+    消歧：本拍"上了台又立刻被清掉"时补一句说明。
+
+    用户 2026-09-28 报过"逻辑矛盾"：第 43 拍的变化清单里同时有
+    `+ ling oh @ i11（登场）` 和 `× 清空立绘`，最终状态却是"台上没人"。
+    **快照没算错**（源码就是 `show ling oh` → `scene bg bg6_2`，
+    scene 会清空全部立绘），但清单读起来像自相矛盾。
+
+    判定必须精确，否则会误报：`hide cg03 → scene bg X → show ling shy`
+    （第 67 拍）最后**是有人**的，不该加这句。
+    """
+    add_at = cdr_at = None
+    for i, c in enumerate(changes):
+        t = str(c.get('text', ''))
+        if c.get('kind') == 'actor' and t.startswith('+') and add_at is None:
+            add_at = i
+        if c.get('kind') == 'clear' and cdr_at is None:
+            cdr_at = i
+    if add_at is not None and cdr_at is not None and cdr_at > add_at:
+        # 清空之后还有没有"重新登场"？有就说明台上最终有人，不加说明。
+        readded = any(str(c.get('text', '')).startswith('+')
+                      for c in changes[cdr_at + 1:])
+        if not readded and not state['actors']:
+            changes.append({
+                'kind': 'note', 'column': '',
+                'text': '注：上面的「+ …（登场）」在本拍内又被「scene」'
+                        '清掉了，所以最终台上没人'
+                        '（源码顺序如此，快照与生成脚本一致）'})
+
+
 def stage_snapshots(beats: list) -> list:
     """
     逐 Beat 推导舞台状态 + 本拍变化。
@@ -195,145 +373,27 @@ def stage_snapshots(beats: list) -> list:
                     state['scene'] = image
             elif verb == 'show':
                 for item in _split_show_items(beat.show):
-                    image = (item.get('image') or '').strip()
-                    if not image:
-                        continue
-                    at = (item.get('at') or '').strip() \
-                        or (beat.at or '').strip() \
-                        or (beat.transform or '').strip()
-                    had_actor = [(s[0], s[1]) for s in actors]
-                    _apply_show(actors, image, at, state['scene'])
-                    state['actors'] = actors
-                    if [(s[0], s[1]) for s in actors] != had_actor:
-                        added = not any(s[0] == image for s in had_actor)
-                        verb_word = '登场' if added else '换表情/换位'
-                        changes.append({'kind': 'actor',
-                                        'column': 'actors', 'text':
-                                        f'+ {image}'
-                                        + (f' @ {at}' if at else '')
-                                        + f'（{verb_word}）'})
-                        continue
-                    # 没进 actors：要么是同 tag 换背景，要么是非角色图层
-                    # （cg/ui/movie…）。这些同样是"舞台变了"，必须记下来，
-                    # 否则"只换 CG"的那一拍会看起来什么都没变。
-                    kind = _layer_kind(image, state['scene'])
-                    if kind is None:
-                        continue                       # 幂等重复，确实没变
-                    if kind == 'scene':
-                        # `show bg rooftop` 就是换背景
-                        if state['scene'] != image:
-                            state['scene'] = image
-                        continue
-                    key = image.split()[0]
-                    if state['layers'].get(key) != image:
-                        state['layers'][key] = image
-                        changes.append({'kind': kind,
-                                        'column': 'layer', 'text':
-                                        f'{_layer_cn(kind)} → {image}'
-                                        + (f' @ {at}' if at else '')})
+                    actors, _ch = _apply_show_verb(item, beat, actors, state)
+                    changes.extend(_ch)
             elif verb == 'hide':
                 for item in _split_hide_items(beat.hide):
-                    image = (item.get('image') or '').strip()
-                    if not image:
-                        continue
-                    had = [s for s in actors
-                           if s[0] == image or s[0].startswith(image + ' ')]
-                    _apply_hide(actors, image)
-                    if had:
-                        changes.append({'kind': 'actor',
-                                        'column': 'actors',
-                                        'text': f'− {image}（退场）'})
-                    tag = image.split()[0]
-                    if state['layers'].pop(tag, None) is not None:
-                        changes.append({'kind': 'layer',
-                                        'column': 'layer',
-                                        'text': f'− 撤下 {image}'})
-                    # 退场也把"背景就是这张图"的情况算上
-                    if state['scene'] and state['scene'].split()[0] == tag:
-                        state['scene'] = ''
+                    actors, _ch = _apply_hide_verb(item, actors, state)
+                    changes.extend(_ch)
                 state['actors'] = actors
 
         # ---- 音频 ----
-        if beat.music:
-            if (beat.music_action or 'play') == 'stop':
-                if state['music']:
-                    changes.append({'kind': 'music', 'column': 'music',
-                                    'text': '♪ 停止音乐'})
-                state['music'] = ''
-            else:
-                if state['music'] != beat.music:
-                    changes.append({'kind': 'music', 'column': 'music',
-                                    'text': f'♪ 音乐 → {beat.music}'
-                                            + (f' {beat.music_params}'
-                                               if beat.music_params else '')})
-                state['music'] = beat.music
-        elif (beat.music_action or '') == 'stop':
-            if state['music']:
-                changes.append({'kind': 'music', 'column': 'music',
-                                'text': '♪ 停止音乐'})
-            state['music'] = ''
-        if beat.sound:
-            if (beat.sound_action or 'play') == 'stop':
-                changes.append({'kind': 'sound', 'column': 'sound',
-                                'text': f'♫ 停止音效 {beat.sound}'})
-            else:
-                changes.append({'kind': 'sound', 'column': 'sound',
-                                'text': f'♫ 音效 {beat.sound}'
-                                        + (f' {beat.sound_params}'
-                                           if beat.sound_params else '')})
-            notes.append(f"音效 {beat.sound}")
-        if beat.voice:
-            if state['voice'] != beat.voice:
-                changes.append({'kind': 'voice', 'column': 'voice',
-                                'text': f'🎙 语音 {beat.voice}'})
-            state['voice'] = beat.voice
+        _audio_changes, _audio_notes = _apply_audio(beat, state)
+        changes.extend(_audio_changes)
+        notes.extend(_audio_notes)
 
         # ---- 变化判定：整块状态 diff（唯一可靠的做法）----
         # 只看 `changes` 会漏：某些写法改了状态却不产生一条文字描述
         # （例如 `show bg X` 换背景）。所以以 diff 为准，再用 changes 里
         # 记的 column 精确到「哪一列变了」。
-        changed = {c.get('column') for c in changes if c.get('column')}
-        if state['scene'] != before['scene']:
-            changed.add('scene')
-            if not any(c['kind'] == 'scene' for c in changes):
-                note_scene(state['scene'])
-        if [(s[0], s[1]) for s in state['actors']] != before['actors']:
-            changed.add('actors')
-            if not any(c['kind'] == 'actor' for c in changes):
-                changes.append({'kind': 'actor', 'column': 'actors',
-                                'text': '台上立绘发生变化'})
-        if state['layers'] != before['layers']:
-            changed.add('layer')
-            if not any(c['kind'] == 'layer' for c in changes):
-                changes.append({'kind': 'layer', 'column': 'layer',
-                                'text': 'CG/图层发生变化'})
+        changed = _changed_columns(state, before, changes, note_scene)
 
         # ---- 消歧：本拍"上了台又立刻被清掉" ----
-        # 用户 2026-09-28 报过一个"逻辑矛盾"：第 43 拍的变化清单里同时有
-        # `+ ling oh @ i11（登场）` 和 `× 清空立绘`，最终状态却是"台上没人"。
-        # **快照没算错**（源码就是 `show ling oh` → `scene bg bg6_2`，
-        # scene 会清空全部立绘），但清单读起来像自相矛盾。
-        # 这里补一句说明，让人一眼看出"这个 show 被后面的 scene 清掉了"。
-        #
-        # 判定必须精确，否则会误报：`hide cg03 → scene bg X → show ling shy`
-        # （第 67 拍）最后**是有人**的，不该加这句。
-        add_at = cdr_at = None
-        for i, c in enumerate(changes):
-            t = str(c.get('text', ''))
-            if c.get('kind') == 'actor' and t.startswith('+') and add_at is None:
-                add_at = i
-            if c.get('kind') == 'clear' and cdr_at is None:
-                cdr_at = i
-        if add_at is not None and cdr_at is not None and cdr_at > add_at:
-            # 清空之后还有没有"重新登场"？有就说明台上最终有人，不加说明。
-            readded = any(str(c.get('text', '')).startswith('+')
-                          for c in changes[cdr_at + 1:])
-            if not readded and not state['actors']:
-                changes.append({
-                    'kind': 'note', 'column': '',
-                    'text': '注：上面的「+ …（登场）」在本拍内又被「scene」'
-                            '清掉了，所以最终台上没人'
-                            '（源码顺序如此，快照与生成脚本一致）'})
+        _note_add_then_clear(changes, state)
 
 
         if beat.raw:
