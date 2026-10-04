@@ -1,4 +1,4 @@
-"""
+﻿"""
 **嵌套菜单的渲染**（菜单套在选项体里）—— 见不变量 81。
 
 为什么单开一份用例：`tests/` 里以前**一条嵌套菜单都没有**，
@@ -194,3 +194,44 @@ class TestMenuConditionWrapping:
         assert prev.strip().startswith('if '), rpy
         assert len(prev) - len(prev.lstrip()) + 4 == \
             len(lines[i_head]) - len(lines[i_head].lstrip()), rpy
+
+
+class TestConditionContextIsNotRepeated:
+    """
+    **条件不许翻倍**（N2 不动点；2026-10-05）。
+
+    解析器把外层条件 `_combine` 进了里层每一拍，而外层那个 `if:` 往往已经由
+    结构写出来了（菜单块自己的条件写在 `menu:` 外面）。里层再写一遍
+    `(flag0) and (flag2)`，产物再解析就会被**再累加**一次 → 每轮更长。
+    """
+
+    SRC = '''label t:
+    if flag0:
+        menu:
+            "选项1":
+                if flag2:
+                    e "叶子"
+'''
+
+    def test_the_outer_condition_is_not_repeated(self, tmp_path):
+        rpy = _render(self.SRC, tmp_path)
+        conds = [ln.strip() for ln in rpy.splitlines()
+                 if ln.strip().startswith('if ')]
+        assert conds.count('if flag0:') == 1, rpy
+        assert 'if flag2:' in conds, rpy
+        assert not any('flag0' in c for c in conds if c != 'if flag0:'), rpy
+
+    def test_it_is_a_fixed_point(self, tmp_path):
+        first = _render(self.SRC, tmp_path)
+        again = _render(first, tmp_path)
+        assert _body(again) == _body(first), f'{_body(first)}\n---\n{_body(again)}'
+
+    def test_the_context_strip_is_conservative(self):
+        """减不干净就**原样返回** —— 宁可多写一层，也不许漏掉一个合取项。"""
+        from storygraph.story.beat_render import strip_condition_context as sc
+        assert sc('(a) and (b)', 'a') == 'b'
+        assert sc('(a) and (b)', '(a)') == 'b'
+        assert sc('a', 'a') == ''
+        assert sc('(a) and (b)', 'zzz') == '(a) and (b)'   # 减不掉 → 原样
+        assert sc('(a) and (b)', '') == '(a) and (b)'
+        # 外层写着  and c：那个  已经被外层 if 覆盖，只剩 \n        assert sc('(a) and (b)', 'a and c') == 'b'\n        assert sc('(a) and (b) and (c)', 'a') == 'b and (c)'

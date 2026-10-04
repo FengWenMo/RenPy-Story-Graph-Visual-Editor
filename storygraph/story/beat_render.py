@@ -1325,6 +1325,60 @@ def _last_option(run: list):
 
 
 
+def strip_condition_context(cond: str, context: str) -> str:
+    """
+    从 `cond` 里**去掉已经写在结构上的那部分条件** `context`。
+
+    为什么需要（2026-10-05，N2 不动点实测）：解析器把外层条件 `_combine` 进了
+    里层每一拍，而渲染时外层那个 `if:` 往往**已经由结构写出来了** ——
+    菜单块自己的条件由 `_menu_block_condition` 写在 `menu:` 外面。里层再写一遍
+    `(flag0) and (flag2)`，产物再解析就会被**再累加**一次外层条件，
+    每轮更长（语义等价，但违反"渲染不动点"）：
+
+        if flag0:
+            menu:
+                "选项1":
+                    if (flag0) and (flag2):   ← 多写了 flag0
+                        e "叶子"
+
+    判据是**合取项级**的相等（两边都按 ` and ` 切开、去空白后比字面量），
+    所以 `flag0` 能去掉 `(flag0)`：把两边都归一成"去掉包裹括号"再比。
+    减不干净（对不上）时**原样返回** —— 宁可多写一层条件，也不要漏写一个
+    合取项（漏了就是"该满足条件才播的，变成无条件播"）。
+    """
+    cond = str(cond or '').strip()
+    context = str(context or '').strip()
+    if not cond or not context:
+        return cond
+    if cond == context:
+        return ''
+
+    def _parts(text: str) -> list:
+        return [p.strip() for p in text.split(' and ') if p.strip()]
+
+    def _bare(text: str) -> str:
+        text = text.strip()
+        while len(text) > 1 and text[0] == '(' and text[-1] == ')':
+            text = text[1:-1].strip()
+        return text
+
+    ctx = {_bare(p) for p in _parts(context)}
+    kept = []
+    for p in _parts(cond):
+        if _bare(p) in ctx and _bare(p) not in {_bare(k) for k in kept}:
+            continue                      # 这一项外层已经写过
+        kept.append(p)
+    if len(kept) == len(_parts(cond)):
+        return cond                       # 一项都没减掉 → 原样（不猜）
+    if len(kept) == 1:
+        # 只剩一项：**脱掉包裹括号**。`_combine` 每轮都会再包一层，留着
+        # `((flag2))` 的话"渲染 → 解析 → 渲染"永远多一层（语义一样，
+        # 但 N2 的**逐字节不动点**过不去）。脱到最里面之后，解析器下一轮
+        # 又会包一层，正好回到 `(flag2)` —— 收敛。
+        return _bare(kept[0])
+    return ' and '.join(kept)
+
+
 def _expected_body_condition(option, menu_condition) -> str:
     """
     选项体里的拍**应当**带的条件。
@@ -1712,8 +1766,16 @@ def _render_menu_segments(run: list, segments: list, indent: str,
             got = (beat.condition or '').strip()
             if not why and (not got or got == expected):
                 prepared.append((_with_condition(beat, ''), ''))
-            else:
-                prepared.append((beat, why))
+                continue
+            # 要保留自己条件的拍：减去**已经写在结构上**的那部分
+            # （选项条件 + 菜单块条件）—— 外层那个 `if:` 已经表达了它。
+            # 不减就会翻倍（见 `strip_condition_context` 的 docstring）。
+            if not why and got:
+                lean = strip_condition_context(got, expected)
+                if lean != got:
+                    prepared.append((_with_condition(beat, lean), why))
+                    continue
+            prepared.append((beat, why))
         body_lines = []
 
         def _render_body(beats_: list) -> list:
