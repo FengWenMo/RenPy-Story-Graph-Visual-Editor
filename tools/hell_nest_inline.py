@@ -14,6 +14,11 @@
 
   N1 **结构守恒** —— 产物再解析回来，`Nest` 路径的**多重集**必须与原文一致。
      这是最硬的一条：它同时钉住"块边界有没有被猜错"和"隐藏列有没有掉"。
+     ⚠ **口径校准（2026-10-05，见 §有意为之 5/6）**：只比**菜单口径**——
+     `if:<n>` 那几段按"文档序、不参与渲染"排除，空块补的 `pass` 拍两边
+     都不计。校准前它把 5 处**故意为之**的展平报成了"结构丢了"，
+     真信号反而被淹。if 的保真由 N2/N3 逐字节盯着（`if` 从 `Condition`
+     列来，不经过 `Nest`）。
   N2 **编码不动点** —— `render → parse → render` 必须**逐字节**相等。
      注释不许翻倍、缩进不许漂移、`elif` 不许越展越乱。
   N3 **两路一致** —— 直接渲染的产物 `R1` 与"全量 Excel 往返"后的产物 `R2`
@@ -40,6 +45,20 @@
 3. 选项体里的拍**不再重复写 `if`**（选项条件已经写在选项那一行）——
    所以选项体里"无内层条件"的拍仍是一行，它自己的注释照样贴。
 4. 空块补 `pass`（Ren'Py 语法要求）。
+5. **`if:<n>` 的文档序不进 N1**（2026-10-05 校准）。那个 `n` 是"这一份文本里
+   第几个 if 块"的序号，而 §有意为之 1 允许 `elif/else` 展平成多个 `if` ——
+   展平之后**块数必然变**，编号跟着变：
+   · 真实项目 `mini_game_dfinder.rpy`：原文 `if/else` 一个块体里 2 张拍
+     （`if:2` ×2），产物把它写成两个 `if not (…)` 块 → `if:2` + `if:3`；
+   · `pomodorro.rpy` / `mini_game1.rpy` / `mini_game_puzzle.rpy` 同型。
+   `if:` 段**不参与渲染**（`if` 从 `Condition` 列来），所以拿它当"结构位守恒"
+   的判据是把"故意展平"当缺陷 —— 而 `Condition` 的保真由 N2/N3 逐字节盯着。
+   真正承载语义的是**菜单/选项体归属**，那一段一个字符都不许变。
+6. **相邻同条件拍在产物里写成多个 `if` 块**（同上，文本形状差异，语义一致）：
+   原文一个 `if` 块体里的两张拍（`show screen …` / `jump …`），渲染时各写一个
+   `if <同一个条件>:`。产物能跑、语义一样，只是块数不同 —— 这也是上面
+   `if:<n>` 编号漂移的来源。（真正要修的是"相邻同条件拍并块"，
+   属于文本形状优化，不是数据丢失；记在这里免得下次当 bug 猜。）
 
 用法：
     D:/Python/python.exe tools/hell_nest_inline.py              # 全跑
@@ -268,10 +287,57 @@ def _beats(text: str, path: Path) -> tuple:
     return beats_from_parse_result(pr), getattr(analyzer, 'errors', None) or []
 
 
+#: 空块补的那个 `pass`（Ren'Py 语法要求，见 §有意为之 4）在**产物再解析**时
+#: 会变成一张普通拍：`raw='pass'`、别的字段全空。它**不是**内容，
+#: 只是"这个块体在原文里是空的"的语法填充 —— 两边都按"没有这一拍"算。
+_PASS_FILLER_FIELDS = ('text', 'comment', 'scene', 'show', 'hide', 'stage',
+                       'code', 'bgm', 'sfx', 'voice')
+
+
+def _is_pass_filler(beat) -> bool:
+    """这一拍是不是"空块补的 `pass`"（§有意为之 4）？"""
+    if (getattr(beat, 'raw', '') or '').strip() != 'pass':
+        return False
+    return not any(str(getattr(beat, f, '') or '').strip()
+                   for f in _PASS_FILLER_FIELDS)
+
+
+def _menu_scope(path):
+    """
+    `Nest` 路径 → **菜单口径**（N1 的判据，见 §有意为之 5）。
+
+    只滤掉 `if:<n>` 段：
+      · 那个编号是**文档序**，`elif/else` 一展平（§有意为之 1）就变，
+        拿它比会把"故意展平"报成"结构丢了"；
+      · `if:` 段**不参与渲染**（`if` 从 `Condition` 列来），丢了也不改产物。
+
+    `None`（不知道 —— 老表/手工构造的拍）**原样保留**：那是"隐藏列整个掉了"
+    的信号，绝不能当成"在顶层"放过（与 N4 对拍器的口径一致）。
+    """
+    if path is None:
+        return None
+    return '>'.join(s for s in split_nest(path) if not s.startswith('if:'))
+
+
+def _if_shape(path):
+    """`if:<n>` 段只留"有一个 if"（给"提示"用的软口径，不进判据）。"""
+    if path is None:
+        return None
+    return '>'.join('if' if s.startswith('if:') else s
+                    for s in split_nest(path))
+
+
 def _paths(beats: list) -> list:
-    """每个 label 内 `Nest` 路径的多重集（排序后可比）。"""
-    return sorted(f'{getattr(b, "label", "")}|{getattr(b, "nest_path", None)}'
-                  for b in beats)
+    """每个 label 内 `Nest` 路径（**菜单口径**）的多重集（排序后可比）。"""
+    return sorted(f'{getattr(b, "label", "")}|{_menu_scope(getattr(b, "nest_path", None))}'
+                  for b in beats if not _is_pass_filler(b))
+
+
+def _if_shapes(beats: list) -> list:
+    """`if:<n>` 只留"有一个 if"的多重集 —— 只用来**提示**文档序差异。"""
+    return sorted(
+        f'{getattr(b, "label", "")}|{_if_shape(getattr(b, "nest_path", None))}'
+        for b in beats if not _is_pass_filler(b))
 
 
 def _notes(rpy: str) -> list:
@@ -430,8 +496,19 @@ def _path_diff(beats: list, again: list) -> str:
     a, b = _paths(beats), _paths(again)
     lost = [x for x in a if x not in b][:4]
     extra = [x for x in b if x not in a][:4]
-    return f'少 {len(a) - len(b) + len(extra)} 条 / 多 {len(extra)} 条\n' \
+    return f'菜单口径 少 {len(a) - len(b) + len(extra)} 条 / 多 {len(extra)} 条\n' \
            f'    丢: {lost}\n    多: {extra}'
+
+
+def _if_order_only_diff(beats: list, again: list) -> bool:
+    """
+    菜单口径**一致**、只是 `if:<n>` 的文档序不同（§有意为之 5/6）？
+
+    这一档不是失败，但要**报出来** —— 免得下一次真出了 if 结构问题，
+    被"这条判据本来就不看 if"当成默认行为放过。
+    """
+    return (_if_shapes(beats) != _if_shapes(again)
+            and _paths(beats) == _paths(again))
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +526,7 @@ def run_real(verbose: bool) -> list:
     bad: list = []
     tmp = Path(tempfile.mkdtemp(prefix='hell_nest_real_'))
     stat = {'files': 0, 'notes': 0, 'kept': 0, 'deep': 0, 'nested': 0,
-            'nested_menu': 0, 'nested_files': set()}
+            'nested_menu': 0, 'nested_files': set(), 'if_order': []}
 
     for p in files:
         analyzer = IncrementalRenPyAnalyzer()
@@ -496,6 +573,9 @@ def run_real(verbose: bool) -> list:
             bad.append((p.name, 'N6自洽', f'产物不能再解析：{aerr[:1]}'))
         elif _paths(again) != _paths(beats):
             bad.append((p.name, 'N1结构', _path_diff(beats, again)))
+        elif _if_order_only_diff(beats, again):
+            # 菜单归属一致、只有 `if:<n>` 文档序不同 —— **报出来但不计失败**
+            stat['if_order'].append(p.name)
         stat['notes'] += len(notes) + len(conds)
         stat['kept'] += sum(1 for n in notes + conds if n in r2)
 
@@ -505,6 +585,8 @@ def run_real(verbose: bool) -> list:
     print(f'  **真嵌套菜单**（路径里两个 menu 段）的拍 {stat["nested_menu"]} 张，'
           f'分布在 {sorted(stat["nested_files"])}')
     print(f'  行尾+条件注释 {stat["notes"]} 条，往返后还在 {stat["kept"]} 条')
+    print(f'  提示（不计失败）：`if:<n>` 文档序变了但菜单归属一致的文件 '
+          f'{len(stat["if_order"])} 个 —— {sorted(stat["if_order"])}')
     return bad
 
 

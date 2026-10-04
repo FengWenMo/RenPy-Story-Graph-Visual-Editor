@@ -1,4 +1,4 @@
-﻿"""
+"""
 **嵌套菜单的渲染**（菜单套在选项体里）—— 见不变量 81。
 
 为什么单开一份用例：`tests/` 里以前**一条嵌套菜单都没有**，
@@ -234,4 +234,97 @@ class TestConditionContextIsNotRepeated:
         assert sc('a', 'a') == ''
         assert sc('(a) and (b)', 'zzz') == '(a) and (b)'   # 减不掉 → 原样
         assert sc('(a) and (b)', '') == '(a) and (b)'
-        # 外层写着  and c：那个  已经被外层 if 覆盖，只剩 \n        assert sc('(a) and (b)', 'a and c') == 'b'\n        assert sc('(a) and (b) and (c)', 'a') == 'b and (c)'
+        # 外层写着 a and c：那个 a 已经被外层 if 覆盖，只剩 b
+        assert sc('(a) and (b)', 'a and c') == 'b'
+        assert sc('(a) and (b) and (c)', 'a') == 'b and c'
+
+    # ------------------------------------------------------------------
+    #  **嵌套的合取式**（2026-10-05 修，`depth5_imimi` 的 N2 不动点）
+    #
+    #  条件是被 `_combine` 层层包起来的：`((a) and (b)) and (c)`。
+    #  按字面 `split(' and ')` 会切进括号里面，于是：
+    #    · 减不掉 → 条件每轮翻倍（不动点过不去）；
+    #    · 拼回去**括号不配对** → 写进 `if` 就是产物语法错。
+    # ------------------------------------------------------------------
+
+    def test_a_nested_conjunction_is_stripped(self):
+        from storygraph.story.beat_render import strip_condition_context as sc
+        assert sc('((a) and (b)) and (c)', '(a) and (b)') == 'c'
+        assert sc('((a) and (b)) and (((a) and (b)) and (c))',
+                  '(a) and (b)') == 'c'
+        assert sc('((a)) and (b)', 'a') == 'b'
+
+    def test_not_and_parenthesised_or_are_single_atoms(self):
+        """`not (a and b)` / `(a or b)` 是**一个**原子项 —— 不许被切开。"""
+        from storygraph.story.beat_render import strip_condition_context as sc
+        assert sc('not (a and b) and (c)', 'c') == 'not (a and b)'
+        assert sc('(a or b) and (c and d)', '(a or b)') == 'c and d'
+        # 减不掉就原样（`not (a and b)` 与 `a` 不是一回事）
+        assert sc('(a) and (b)', 'not (a and b)') == '(a) and (b)'
+
+    def test_an_or_atom_keeps_its_parenthesis(self):
+        """
+        `and` 比 `or` 紧：`x and (a or b)` **不许**被拉平成 `x and a or b`
+        （那等于 `(x and a) or b`，语义改了）。
+        """
+        from storygraph.story.beat_render import strip_condition_context as sc
+        # 整条就是它 → 顶层没有 `and`，脱括号安全
+        assert sc('(x) and (a or b)', 'x') == 'a or b'
+        assert sc('(x) and (a or b) and (c)', 'x') == '(a or b) and c'
+
+    def test_the_strip_never_returns_a_broken_parenthesis(self):
+        """
+        产出必须**括号平衡**：旧实现在真实数据上返回过 `'(((a) and (c))'`
+        —— 那是直接写进 `if …:` 的语法错，比"多写一层条件"坏得多。
+        """
+        from storygraph.story.beat_render import strip_condition_context as sc
+        cases = [
+            ('((a) and (b)) and (c)', '(a) and (b)'),
+            ('((a) and (b)) and (((a) and (b)) and (c))',
+             '((a) and (b)) and (b)'),
+            ('((not ((a))) and (b)) and (c)', '(not ((a))) and (b)'),
+        ]
+        for cond, ctx in cases:
+            got = sc(cond, ctx)
+            assert got.count('(') == got.count(')'), (cond, ctx, got)
+
+    def test_the_atoms_helper_does_not_recurse_forever(self):
+        """
+        `_condition_atoms` 必须**一份实现**、且对 `not (a and b)` 终止。
+
+        回归：从前 `beat_render` 里有两份各自递归的实现，其中一份遇到
+        `not (a and b)` 会无限递归（`RecursionError`）。
+        """
+        from storygraph.story.beat_render import (_condition_atoms,
+                                                  _condition_is_refinement)
+        assert _condition_atoms('not (a and b)') == {'not (a and b)'}
+        assert _condition_atoms('((a) and (b)) and (c)') == {'a', 'b', 'c'}
+        assert _condition_is_refinement('((a) and (b)) and (c)', '(a) and (b)')
+        assert not _condition_is_refinement('not ((a))', '(a) and (b)')
+
+    def test_the_five_level_mixed_nesting_is_a_fixed_point(self, tmp_path):
+        """
+        5 层混合嵌套（`if → menu → if → menu → if`）必须**逐字节**不动点。
+
+        这是 `tools/hell_nest_inline.py` 的 `depth5_imimi` 用例缩小版：
+        第 4 层那个 `if` 里的条件原本是 `((flag0) and (flag2)) and (flag4)`，
+        再解析一轮就变成
+        `((flag0) and (flag2)) and (((flag0) and (flag2)) and (flag4))`
+        —— 每轮更长。
+        """
+        src = ('label t:\n'
+               '    if flag0:\n'
+               '        menu:\n'
+               '            "选项1":\n'
+               '                if flag2:\n'
+               '                    menu:\n'
+               '                        "选项1":\n'
+               '                            if flag4:\n'
+               '                                e "叶子"\n')
+        first = _render(src, tmp_path)
+        again = _render(first, tmp_path)
+        assert _body(again) == _body(first), \
+            f'{_body(first)}\n---\n{_body(again)}'
+        # 外层结构已经写了 flag0 / flag2，里层只该剩 flag4
+        assert 'if flag4:' in first, first
+        assert first.count('flag0') == 1, first

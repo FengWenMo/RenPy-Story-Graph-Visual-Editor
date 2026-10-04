@@ -1520,6 +1520,8 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
         两条路一致；菜单整块挂 `if` 时 `if` 在 `menu:` **外面**（浅 4 格）；
       · 真实项目产物**逐字节不变**（`tools/render_hash.py` 对前一版比对：
         `212a48c5b565` / `f8f75139b8e4`）—— 因为真实项目没有嵌套菜单。
+        ⚠ 那两个值是**当时**的；同日晚些时候修完不变量 82 之后，
+        它们变成 `8eea612fe151` / `8eea612fe151`（两条路终于完全相等）。
 
     **条件不许翻倍**（同日修掉，N2 不动点）：解析器把外层条件 `_combine` 进了
     里层每一拍，而外层那个 `if:` 往往**已经由结构写出来了**（菜单块自己的条件
@@ -1535,18 +1537,135 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 
     实测：`if flag0:` → `menu:` → 选项体里 `if flag2:` 的产物现在是
     `if flag0:` / `if flag2:`（从前里层写成 `(flag0) and (flag2)`），
-    R1 == R2 **逐字节**；真实项目产物**不变**（`212a48c5b565` / `f8f75139b8e4`），
+    R1 == R2 **逐字节**；真实项目产物**不变**（`212a48c5b565` / `f8f75139b8e4`，
+    同日晚些时候修完不变量 82 之后变成 `8eea612fe151` / `8eea612fe151`），
     hell 失败 11 → **8**，全量 2406 → **2425**（新增 19 条）。
 
-    ⚠ **还没修的**（同日记录）：
-      · `empty_option_body`：空选项体补 `pass` 之后，再解析会多一条
-        `menu:1>A` 路径 —— 那个 `pass` 是 Ren'Py 语法要求的**合成行**
-        （harness 自己的"有意为之"清单里也列了），算它"多一条结构位"
-        属于**判据过严**，不是产物错；
-      · `depth5_imimi`（5 层混合嵌套）还有一条待查；
-      · hell 的真实项目 6 处：5 处看着是 harness 过严（`if:n` 计数没算上
-        "elif/else 展平成多个 if"、空块补 `pass`），1 处 `chapter1_2.rpy` 的
-        N3（`show cg cg02_2 at cg38402160 behind ye`）**像是真的渲染差异**，待查。
+    ⚠ **当时还没修的三条**（同日记录）→ **已全部修完**，见不变量 82：
+    `empty_option_body`、`depth5_imimi`、`chapter1_2.rpy` 的 N3；
+    并且"5 处 harness 过严"在校准判据之后查出**其中一处是真缺陷**
+    （注释改写它所搭载那一拍的结构位）。
+
+82. **三条收尾缺陷修完 + harness 判据校准**（2026-10-05，接不变量 81 的欠账）
+
+    上一轮留了三条（① `depth5_imimi` 的 N2 不动点、② `empty_option_body` 的
+    结构位多一条、③ `chapter1_2.rpy` 的舞台指令顺序），并把真实项目 5 处
+    N1 归给"判据过严"。这一轮三条都修完了，而且**校准判据之后发现
+    "过严"里藏着一处真缺陷**。五件事：
+
+    **(a) 舞台尾段排在代码块之前**（`beat_render.render_beat_to_rpy`）
+
+      `chapter1_2.rpy` 拍 136/152 的原文是
+      `hide ye` / `show cg cg02_2 at cg38402160 behind ye` / `$ persistent…`。
+      从 .rpy 直接渲染时那条复杂子句 `show` 由**结构化列**出（在代码之前），
+      过一趟表之后 `hydrate_from_dsl` 把它标成"原生真迹的影子"、结构化通道
+      跳过它，改由**舞台尾段**出 —— 而尾段当时排在 `emit_code()` **之后**，
+      于是 `$` 跑到了 `show` 前面。**条数一模一样，只有顺序变了**，
+      与"没有顺序信息"那条路（`emit_stage()` → `emit_code()`）也不自洽。
+
+      修法两处：尾段回归舞台一侧（`emit_stage_tail()` 提到 `emit_code()`
+      之前）；"代码块跟在第一条 `scene` 之后"的触发条件从"**token 名叫
+      `scene`**"改成"**这一支真的往产物里加过行**" —— `tokens` 会被补齐
+      （`missed_stage` 把没记的 `scene/show/hide` 一律追加到末尾），
+      于是**没有背景的拍**也会走过 `scene` 那一支，代码块被提前到一个
+      **没出任何行**的位置。
+
+      判据：真实项目 40 个文件两条路**逐字节相等**（`tools/render_hash.py`：
+      直接 = 过表 = `8eea612fe151`；从前是 `212a48c5b565` / `f8f75139b8e4`）；
+      `tests/test_fidelity_bytewise.py::TestCodeBlockStaysAfterTheWholeStage`。
+
+    **(b) 空选项体不再让两个选项体对调**
+        （`core.nest_path.option_index` + `beat_render._menu_segments_by_path`）
+
+      `menu:` 里第一个选项体是空的时候（真实项目 `credits_screen.rpy` /
+      `mini_game_puzzle.rpy` 同型），块体的位置键会"缺一个"，而"键 → 选项"
+      从前**只按出现顺序**配（`[B]` → 第 1 段）→
+
+          "空的":   e "x"      ← 本该属于「有内容」
+          "有内容": pass       ← 本该属于「空的」
+
+      **选"空的"播了台词、选"有内容"什么都不做**（静默改剧情）。
+      修法：位置键本身就是位置（`option_key` 的逆函数 `option_index`）——
+      **全部**键都能解成"落在选项数之内、互不重复"的序号时按键配对；
+      只要有一个解不出/越界/撞车（表被人工编辑过、选项被删过）就整体退回
+      顺序配对（`test_deleting_an_option_keeps_the_rest` 那一档照旧）。
+
+      判据：`tests/test_option_body_attribution.py`（空体在前/中/后 ×
+      直渲/过表 × 两条路逐字节 + 键与逆函数 + 越界退回顺序）。
+
+    **(c) 注释不许越过分支、更不许改写结构位**（`beat_build._emit_comment`）
+
+      注释从前是唯一**不过 `branch_guard`** 的语句，于是顶层注释会被吸进
+      上一张条件拍的 pending 里：那一拍的 `Nest` 被注释的路径**覆盖**
+      （条件还是分支的、位置成了顶层），注释在产物里还被写到 `if …:`
+      **前面**（从"分支之后"漂到"分支之前"），产物再解析时又被拆成单独一拍
+      —— 这一条正是真实项目 N1 里最后一处"菜单口径也解释不掉"的差异
+      （`mini_game1.rpy` 拍 12）。
+
+      修法：注释也过 `branch_guard`（**条件不同的语句不许并进同一拍**）。
+
+    **(d) 条件减法要认括号**（`beat_render.strip_condition_context`）
+
+      条件是被 `_combine` **层层包起来**的（`((flag0) and (flag2)) and (flag4)`），
+      而"减掉外层已经写过的合取项"从前用字面 `split(' and ')` 切 —— 会切进
+      括号里面，两个后果：
+
+        · 永远减不掉 → 条件每轮翻倍（`depth5_imimi` 的 N2 不动点过不去）；
+        · 拼回去**括号不配对**：实测产出过 `'(((flag0) and (flag4))'` ——
+          那玩意儿直接写进 `if …:` 就是产物语法错。
+
+      修法：`_split_conjuncts` 只切**顶层**（括号深度 0）的 `and`；
+      `_bare_condition` 只脱"配对右括号就在末尾"的整层括号；
+      `_condition_atoms` 递归拆括号、但把 `not (…)` / `(…) or (…)` 当
+      **一个**原子项；残余项在合取式里**该带括号就带**（`x and (a or b)`
+      不许被拉平成 `x and a or b`，那等于 `(x and a) or b`）。
+      顺带把**两份各自递归的 `_condition_atoms` 合成一份** —— 其中一份遇到
+      `not (a and b)` 会**无限递归**（`RecursionError`）。
+
+      判据：`tests/test_nested_menu_render.py::TestConditionContextIsNotRepeated`
+      （嵌套合取、`not`/`or` 原子、括号平衡、无限递归回归、5 层不动点）。
+
+    **(e) harness 判据校准：N1 只比"菜单口径"**
+        （`tools/hell_nest_inline.py`）
+
+      上一轮把 5 处真实项目 N1 归给"判据过严"，方向对了一半 ——
+      校准之后是**两处过严 + 一处真缺陷**（就是上面那条注释改写结构位）：
+
+        · **`if:<n>` 的文档序不进判据**（§有意为之 5）：那个 `n` 是"这一份
+          文本里第几个 if 块"的序号，而 `elif/else` 展平成多个 `if`
+          （§有意为之 1）之后块数必然变；`if:` 段**不参与渲染**
+          （`if` 从 `Condition` 列来），它的保真由 N2/N3 逐字节盯着；
+        · **空块补的 `pass` 两边都不计**（§有意为之 4）：它在产物里是一张
+          普通拍（`raw='pass'`），从前正好把 (b) 那处**真的**错位
+          **掩盖**掉了 —— 源里 `menu:1>B`（台词）与产物里 `menu:1>B`（pass）
+          在多重集里互相抵消，只剩一条"多出来的 `menu:1>A`"；
+        · 校准后仍然只有**菜单/选项体归属**是硬判据：那才是承载语义、
+          也是 `STRUCTURE_LOST` 门禁守的东西。
+
+      校准后：合成用例 **17/17** 绿、真实项目 **40 个文件全绿**；
+      另外把"`if` 文档序变了但菜单归属一致"的文件**单独提示出来**
+      （不计失败），免得真出了 if 结构问题、被当成"这条判据本来就不看 if"。
+
+    **仍然存在的已知边界**（都是**文本形状**差异，语义等价，不是数据丢失）：
+
+      · 相邻同条件拍在产物里写成**多个** `if <同一条件>:` 块（原文是
+        一个块体里的两张拍）；合并它们属于排版优化，不在这一轮；
+      · **同类内实例级**交错仍然丢失（`op_order` 是 verb **集合**）：
+        `show a / play music m / show b` 里 `play` 的位置还原不了。
+        `tools/probe_stage_code_source_order.py` 实测真实项目另有
+        **35 张拍**属于这一类（见不变量 81 的
+        `test_audio_between_two_shows_is_a_known_gap`）；
+      · `python:` 块**续行**的缩进每往返一轮大一档（纯排版，
+        见 `_indent_beat_lines` 的说明）。
+
+    **这一轮的取证工具**（都不进 CI，按需跑）：
+    `tools/probe_remaining3.py`（三条的回归钉 —— 已从"诊断"改成"断言"，
+    退出码 0/1）、`tools/probe_chapter_stage_loss.py`（③ 的字段级取证）、
+    `tools/probe_beat_order.py`（同一张拍在两种身份下为什么排出不同顺序）、
+    `tools/probe_depth5_cond.py`（① 的条件逐轮长大）、
+    `tools/probe_n1_paths.py`（N1 两边逐条对照）、
+    `tools/probe_stage_code_source_order.py`（源码顺序 vs 渲染顺序的分布）、
+    `tools/snapshot_beat_render.py`（改渲染前 dump 逐拍产物、改完 diff）。
 
 ## 常见改动落点
 
@@ -1554,6 +1673,11 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 |---|---|
 | 给剧本表加一列 | `story/beat_model.py` 的 `BEAT_FIELDS` + `Beat.to_row/from_row` |
 | 改导出的生成代码 | `story/beat_render.py`（`render_beat_to_rpy`） |
+| 改**拍内顺序**（舞台尾段 / 代码块 / 首个 `scene` 之后插代码） | `story/beat_render.render_beat_to_rpy` 的 `emit_stage_tail()` 位置 + `len(lines) > mark` 那条判据（见不变量 82a） |
+| 改**选项体归属**（哪个选项拿哪段块体） | `story/beat_render._menu_segments_by_path` + `core/nest_path.option_index`（键=位置；越界才退回顺序配对，见不变量 82b） |
+| 改**注释落在哪张拍上** | `story/beat_build._emit_comment`（必须过 `branch_guard`，见不变量 82c） |
+| 改**条件减法**（里层 `if` 该不该再写外层条件） | `story/beat_render.strip_condition_context` + `_split_conjuncts` / `_bare_condition` / `_condition_atoms`（见不变量 82d） |
+| 改**嵌套/注释 harness 的判据** | `tools/hell_nest_inline.py`（N1 只比"菜单口径"，`§有意为之` 那份清单是口径真源） |
 | 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |
 | 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` / `mark_code_blocks` + `story/beat_render.render_code_block` / `_render_marked_code_block` / `_python_block_indent`（见不变量 64/66） |
 | 改**隐藏列**（`StageOrder` / `OpOrder` / `CodeBlocks`） | `BEAT_FIELDS` 尾部 + `HIDDEN_BEAT_COLUMNS` + `Beat.to_row/from_row`（见不变量 66） |

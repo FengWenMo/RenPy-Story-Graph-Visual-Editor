@@ -21,7 +21,7 @@ from storygraph.core.vocabulary import (GENERATOR_MARKER,
                                         RENPY_BUILTIN_TRANSFORMS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
 from storygraph.core.nest_path import (body_chain, join_nest,
-                                       option_key, split_nest)
+                                       option_index, option_key, split_nest)
 
 from storygraph.story.beat_model import (
     Beat,
@@ -810,6 +810,7 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     #
     # 代码块（CodeBlock 后门）不在 op_order 里，按历史契约紧跟舞台之后
     # 输出——它内部有更细的 `beat.ordered`（raw/code 交错）负责保真。
+    # "紧跟舞台之后"包含**舞台尾段**（见下面 `emit_stage_tail()` 的位置）。
     _verb_ops = {'scene': lambda: emit_stage_verbs(['scene']),
                  'show': lambda: emit_stage_verbs(['show']),
                  'hide': lambda: emit_stage_verbs(['hide']),
@@ -828,14 +829,49 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
                 tokens.append(k)
         code_done = False
         for t in tokens:
+            mark = len(lines)
             _verb_ops[t]()
-            if t == 'scene' and not code_done:
+            # **"真出了一行的 scene"才算数**（2026-10-05 修）。
+            #
+            # `tokens` 上面被**补齐**过：`missed_stage` 把 `scene/show/hide`
+            # 里"op_order 没记的"一律追加到末尾，于是**没有背景的拍**
+            # 也会走过 `t == 'scene'` 这一支 —— 原来的判据只看 token 名字，
+            # 于是代码块被提前到那个**根本没出任何行**的 scene 位置，
+            # 落在舞台尾段**之前**（`chapter1_2.rpy` 拍 136/152 实测：
+            # `hide ye` / `show cg … behind ye` / `$ persistent…`，
+            # 过表后 `$` 跑到了 `show` 前面）。
+            #
+            # 判据改成"这一支真的往 `lines` 里加过行"：有背景时行为与从前
+            # **逐字节一致**（真 scene 一定出了行），没背景时不再误触发。
+            if t == 'scene' and not code_done and len(lines) > mark:
                 # 代码块跟在**第一条舞台指令**之后（历史位置）
                 emit_code()
                 code_done = True
+        # **舞台尾段必须排在代码块之前**（2026-10-05 修，真实项目
+        # `chapter1_2.rpy` 拍 136/152 实测）。
+        #
+        # 为什么：尾段（「舞台（高级）」列里的原生真迹）**属于舞台**，
+        # 而"没有顺序信息"那条路本来就是 `emit_stage()` → `emit_code()`
+        # （舞台在前）。这里原来把尾段放在 `emit_code()` **之后**，
+        # 于是**同一条指令**在两条路上的位置不一样：
+        #
+        #   · 解析来的拍：`_stage_native_show` 是空的（`beat.stage` 是
+        #     `compose_stage_extra` 从结构化列**合成**的），所以那行由
+        #     结构化通道在 verb 位置出，尾段被 `emitted_stage` 去重 —— 代码在后；
+        #   · 过表来的拍：`from_row` → `hydrate_from_dsl` 把它标成"原生影子"，
+        #     结构化通道**跳过**它，于是只能由尾段出 —— 代码在前。
+        #
+        # 产物因此不一样，而且**源码顺序被改**（那两拍原文是
+        # `hide ye` / `show cg … behind ye` / `$ persistent…`，过表后
+        # `$` 跑到了 `show` 前面）。修法就是让尾段回到舞台这一侧：
+        # 两条路都得到"动词 → 尾段 → 代码块"。
+        #
+        # 注意：`scene` 那条历史通道（代码紧跟第一条 scene）**不动** ——
+        # 那两种排法在两条路上是一致的（被跳过的尾段行落在代码之后，
+        # 与"结构化通道在 code 之后出它"同址）。
+        emit_stage_tail()
         if not code_done:
             emit_code()
-        emit_stage_tail()
     else:
         # 没有任何顺序信息（老表 / 直接构造的 Beat）：维持历史固定顺序
         emit_stage()
@@ -1325,6 +1361,141 @@ def _last_option(run: list):
 
 
 
+def _split_conjuncts(text: str) -> list:
+    """
+    `cond` 文本 → **顶层**合取项列表（只切括号深度为 0 的 `and`）。
+
+    为什么不能 `text.split(' and ')`（2026-10-05，真实数据实测）：
+    条件是被 `_combine` **层层嵌套**起来的 ——
+    `((flag0) and (flag2)) and (flag4)`。按字面切会切进括号里面，
+    得到 `['((flag0)', '(flag2))', '(flag4)']` 这种**碎片**：
+
+      · 碎片既不等于任何合取项，于是"减条件"永远减不掉 → 条件每轮翻倍
+        （`depth5_imimi` 的 N2 不动点失败）；
+      · 更糟的是**产出语法坏的文本**：把碎片拼回去会得到
+        `'(((flag0) and (flag4))'` —— 括号不配对，写进 `if` 就是产物语法错。
+
+    同一栈里 `not (a and b)`、`(a or b)` 这些内部带 `and` 的项，
+    也会被它切碎。
+
+    切分对空白宽容（`a and b` / `a  and  b` 都认），但要求 `and` 两侧是词边界
+    （`brand` 不算）—— 手写在「条件」列里的条件不一定带括号。
+    """
+    parts, depth, buf = [], 0, ''
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if depth == 0 and text.startswith('and', i) \
+                and (i == 0 or not (text[i - 1].isalnum()
+                                    or text[i - 1] == '_')) \
+                and (i + 3 >= n or not (text[i + 3].isalnum()
+                                        or text[i + 3] == '_')):
+            parts.append(buf)
+            buf = ''
+            i += 3
+            continue
+        buf += ch
+        i += 1
+    parts.append(buf)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _bare_condition(text: str) -> str:
+    """
+    反复脱掉**整层**包裹括号：`((flag0))` → `flag0`。
+
+    ⚠ 必须确认"首括号配对的右括号就在末尾"（2026-10-05 修）：
+    只看"首字符是 `(`、末字符是 `)`"就脱，会把
+    `(flag0) and (flag2)` 脱成 `flag0) and (flag2`（**碎掉**）——
+    旧实现正是这样，于是 5 层嵌套里真的产出过 `'(((flag0) and (flag4))'`
+    这种括号不配对的 `if` 条件（写进产物就是语法错）。
+    """
+    text = (text or '').strip()
+    while len(text) > 2 and text[0] == '(' and text[-1] == ')':
+        depth, closes_at_end = 0, False
+        for i, ch in enumerate(text):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    closes_at_end = (i == len(text) - 1)
+                    break
+        if not closes_at_end:
+            return text
+        text = text[1:-1].strip()
+    return text
+
+
+def _has_top_level_or(text: str) -> bool:
+    """顶层（括号深度 0）有没有 `or`？有就**不能**随便脱括号。"""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if depth == 0 and text.startswith('or', i) \
+                and (i == 0 or not (text[i - 1].isalnum()
+                                    or text[i - 1] == '_')) \
+                and (i + 2 >= n or not (text[i + 2].isalnum()
+                                        or text[i + 2] == '_')):
+            return True
+        i += 1
+    return False
+
+
+def _rejoin_conjunct(text: str) -> str:
+    """
+    一个**残余项**要塞进合取式里时的写法（括号该留就留）。
+
+    为什么必须管括号（2026-10-05 自查抓到）：`and` 比 `or` 紧，
+    把 `(a or b)` 脱成 `a or b` 再和别的项 `and` 起来，
+    `x and (a or b)` 就变成了 `(x and a) or b` —— **语义被改了**。
+    所以只有"单个合取项且顶层没有 `or`"的残余才能不带括号。
+    """
+    text = (text or '').strip()
+    if not text:
+        return ''
+    inner = _bare_condition(text)
+    if len(_split_conjuncts(inner)) > 1 or _has_top_level_or(inner):
+        return f'({inner})'
+    return inner
+
+
+def _condition_atoms(text: str) -> set:
+    """
+    条件 → **原子合取项**集合（括号只当分组，递归拆到底）。
+
+    `((flag0) and (flag2)) and (flag4)` → `{'flag0', 'flag2', 'flag4'}`；
+    `(flag0) and not ((flag2))` → `{'flag0', 'not ((flag2))'}`
+    （`not (…)` 是**一个**原子项，不能再拆 —— 拆了就是改语义）。
+
+    用途见 `strip_condition_context`（判"这一项外层 `if` 是否已经写过"）
+    与 `_condition_is_refinement`（判"是不是同一分支的加强版"）——
+    **两份共用一个实现**：从前这里有两份各自递归的实现，其中一份
+    `_split` 只认 `' and '` 也递归，遇到 `not (a and b)` 会**无限递归**
+    （`RecursionError`），另一份按字面切又会切碎括号。
+
+    `_atoms('((outer) and (middle)) and (deepest)')`
+      → `{'outer', 'middle', 'deepest'}`（括号只当分组，递归拆到底）
+    `_atoms('not (a and b)')` → `{'not (a and b)'}`（`not (…)` 是**一个**原子项）
+    """
+    out = set()
+    for part in _split_conjuncts(text):
+        inner = _bare_condition(part)
+        if len(_split_conjuncts(inner)) > 1:
+            out |= _condition_atoms(inner)      # 括号里还是一个合取式
+        else:
+            out.add(inner)
+    return out
+
+
 def strip_condition_context(cond: str, context: str) -> str:
     """
     从 `cond` 里**去掉已经写在结构上的那部分条件** `context`。
@@ -1345,6 +1516,15 @@ def strip_condition_context(cond: str, context: str) -> str:
     所以 `flag0` 能去掉 `(flag0)`：把两边都归一成"去掉包裹括号"再比。
     减不干净（对不上）时**原样返回** —— 宁可多写一层条件，也不要漏写一个
     合取项（漏了就是"该满足条件才播的，变成无条件播"）。
+
+    **嵌套的合取式也要能减**（2026-10-05 修，`depth5_imimi`）：5 层混合嵌套
+    里，条件长成 `((flag0) and (flag2)) and (flag4)` —— 外层结构已经写了
+    `if flag0:` / `if flag2:`，所以这里该只剩 `flag4`。括号里的那一坨
+    本身也是合取式，**递归下去**减（合取可结合，去掉被上下文蕴含的项
+    永远安全）：只要它的每一项都能在 `context` 里找到，整坨就可以去掉。
+
+    减掉过东西才返回新值；`dropped` 为假表示"一项都没对上"，
+    原样返回（不猜）。
     """
     cond = str(cond or '').strip()
     context = str(context or '').strip()
@@ -1353,30 +1533,41 @@ def strip_condition_context(cond: str, context: str) -> str:
     if cond == context:
         return ''
 
-    def _parts(text: str) -> list:
-        return [p.strip() for p in text.split(' and ') if p.strip()]
+    ctx = _condition_atoms(context)
 
-    def _bare(text: str) -> str:
-        text = text.strip()
-        while len(text) > 1 and text[0] == '(' and text[-1] == ')':
-            text = text[1:-1].strip()
-        return text
+    def _residual(text: str) -> tuple:
+        """`text` 减去 `ctx` 里已有的项 → `(残余文本, 有没有减掉过)`。"""
+        bare = _bare_condition(text)
+        if bare != text:
+            # 括号里可能还是一个合取式 → 进去看（括号只是分组，语义不变）
+            rest, did = _residual(bare)
+            return (_rejoin_conjunct(rest) if rest else ''), did
+        pieces = _split_conjuncts(text)
+        if len(pieces) > 1:
+            kept, dropped = [], False
+            for part in pieces:
+                rest, did = _residual(part)
+                dropped = dropped or did
+                if rest:
+                    # ⚠ 每个残余项都要**自带括号**（`or` 项 / 嵌套合取项），
+                    # 否则 `x and (a or b)` 会被拉平成 `(x and a) or b`。
+                    kept.append(_rejoin_conjunct(rest))
+            return ' and '.join(kept), dropped
+        if _bare_condition(text) in ctx:
+            return '', True
+        return text, False
 
-    ctx = {_bare(p) for p in _parts(context)}
-    kept = []
-    for p in _parts(cond):
-        if _bare(p) in ctx and _bare(p) not in {_bare(k) for k in kept}:
-            continue                      # 这一项外层已经写过
-        kept.append(p)
-    if len(kept) == len(_parts(cond)):
+    lean, dropped = _residual(cond)
+    if not dropped:
         return cond                       # 一项都没减掉 → 原样（不猜）
-    if len(kept) == 1:
+    pieces = _split_conjuncts(lean)
+    if len(pieces) == 1:
         # 只剩一项：**脱掉包裹括号**。`_combine` 每轮都会再包一层，留着
         # `((flag2))` 的话"渲染 → 解析 → 渲染"永远多一层（语义一样，
         # 但 N2 的**逐字节不动点**过不去）。脱到最里面之后，解析器下一轮
         # 又会包一层，正好回到 `(flag2)` —— 收敛。
-        return _bare(kept[0])
-    return ' and '.join(kept)
+        return _bare_condition(pieces[0])
+    return lean
 
 
 def _expected_body_condition(option, menu_condition) -> str:
@@ -1471,15 +1662,40 @@ def _menu_segments_by_path(run: list):
             keys_in_order.append(key)
     if not option_rows:
         return None                           # 一级选项都没有 → 老路
-    # 键 → 段：按**出现顺序**配对（不是按键的字母）。为什么：
-    # 键是解析器按"当时第几个选项"写的（`A`/`B`…），而**表可以被编辑** ——
-    # 删掉选项 A 之后，存下来的键还是 `B`，可它现在排第 1 位。
-    # 按顺序配对才对得上（`test_deleting_an_option_keeps_the_rest` 抓到的）。
+    # 键 → 段：**先按键本身**（`B` → 第 2 段，那是"结构位"的本义），
+    # 解不出来才退回"按出现顺序配对"。
+    #
+    # 为什么不能只用顺序配对（2026-10-05 修，空选项体实测）：
+    # **某个选项体是空的**时候键会缺一个 ——
+    #
+    #     menu:
+    #         "空的":            ← A，没有块体
+    #         "有内容":          ← B
+    #             e "x"          ← 路径 `menu:1>B`
+    #
+    # 唯一的键 `B` 会被配给第 1 个选项（`空的`）→ **两个选项体对调**：
+    # 选"空的"播了台词、选"有内容"什么都不做（静默改剧情）。
+    #
+    # 为什么还要保留顺序配对：**表可以被编辑** —— 删掉选项 A 之后，
+    # 存下来的键还是 `B`/`C`（越界了），而它们现在排第 1/2 位。
+    # 判据因此是"**所有**键都能解成互不重复、且落在选项数之内的序号"，
+    # 才敢按键配对；只要有一个解不出/越界/撞车，就整体退回顺序配对
+    # （`test_deleting_an_option_keeps_the_rest` 钉着这一档）。
     segments = [[opt, [], []] for _pos, opt in option_rows]
     key_of: dict = {}
-    for i, key in enumerate(keys_in_order):
-        if i < len(segments):
-            key_of[key] = i
+    by_key: dict = {}
+    used: set = set()
+    for key in keys_in_order:
+        i = option_index(key)
+        if i and i <= len(segments) and (i - 1) not in used:
+            by_key[key] = i - 1
+            used.add(i - 1)
+    if len(by_key) == len(keys_in_order):
+        key_of = by_key
+    else:
+        for i, key in enumerate(keys_in_order):
+            if i < len(segments):
+                key_of[key] = i
     # 第二趟：块体拍按**它的键**归位；键对不上（编辑过）就按出现顺序找空位
     for pos, b in enumerate(run[1:]):
         path = str(getattr(b, 'nest_path', ''))
@@ -1610,81 +1826,14 @@ def _condition_is_refinement(cond: str, base: str) -> bool:
     为什么不解析成 AST 去判蕴含：那要引入一门表达式语法，而这里只需要
     "明显是同一分支的加强"这一档判断。认不出时**保持原来的保守行为**
     （标 foreign、写警告）—— 不会比现在更差。
+
+    原子集合由 `_condition_atoms` 算（与 `strip_condition_context` **同一份
+    实现**，见那里的说明：从前两份各自递归，一份还会无限递归）。
     """
     b = _condition_atoms(base)
     if not b:
         return False
     return b <= _condition_atoms(cond)
-
-
-def _condition_atoms(text: str) -> set:
-    """
-    `a and b and c` → `{'a','b','c'}`，**递归剥括号**。
-
-    括号里的内容如果本身是 `and` 串，要接着拆 —— 否则
-
-        base = '(outer) and (middle)'      → {'outer','middle'}
-        cond = '((outer) and (middle)) and (deepest)'
-             → 只拆外面那层得到 {'(outer) and (middle)','deepest'}
-
-    两边对不上，嵌套 if 就认不出来（第一版就是这么错的）。
-    递归之后 cond → {'outer','middle','deepest'}，包含判定成立。
-    """
-    def _strip_parens(t: str) -> str:
-        s = t.strip()
-        while len(s) >= 2 and s[0] == '(' and s[-1] == ')':
-            depth = 0
-            balanced = True
-            for k, ch in enumerate(s):
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                    if depth == 0 and k != len(s) - 1:
-                        balanced = False
-                        break
-            if not balanced:
-                break
-            s = s[1:-1].strip()
-        return s
-
-    def _split(t: str) -> list:
-        parts, buf, depth, i = [], [], 0, 0
-        s = _strip_parens(t)
-        while i < len(s):
-            ch = s[i]
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-            if (depth == 0 and s.startswith('and', i)
-                    and (i == 0 or not s[i - 1].isalnum())
-                    and (i + 3 >= len(s) or not s[i + 3].isalnum())):
-                parts.append(''.join(buf))
-                buf = []
-                i += 3
-                continue
-            buf.append(ch)
-            i += 1
-        if buf:
-            parts.append(''.join(buf))
-        return parts
-
-    def _atoms(t: str) -> set:
-        out = set()
-        for part in _split(t):
-            # 括号剥掉之后变短了 → 说明里面还有结构，继续递归
-            if _strip_parens(part).strip() != part.strip():
-                out |= _atoms(part)
-                continue
-            inner = _strip_parens(part)
-            if ' and ' in inner:
-                out |= _atoms(inner)
-            elif inner:
-                out.add(inner)
-        return out
-
-    return _atoms(text)
 
 
 

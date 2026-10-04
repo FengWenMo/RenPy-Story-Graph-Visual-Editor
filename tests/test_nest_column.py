@@ -202,3 +202,77 @@ class TestRealProjectAgrees:
                         and getattr(b, 'src_first', 0)]
         assert not missing, f'这些拍有源行号却没有结构位：{missing[:5]}'
         assert not conflicts, f'老推断与结构列对不上：{conflicts[:5]}'
+
+
+class TestACommentNeverStealsTheStructure:
+    """
+    注释**不许改写它所搭载那一拍的结构位**（2026-10-05 修）。
+
+    真实形态（`mini_game1.rpy` 第 116-119 行）：
+
+        if fail_round >= 3:          ← 分支体（有条件的那一段）
+            python:
+                fsflag = True
+        # 生成选项（1个正确，3个错误）  ← **顶层**注释
+        python:
+            wrong_answers = []
+
+    从前 `_emit_comment` 既不比条件、也不落拍，于是那条顶层注释被吸进
+    **上面那张条件拍**的 pending 里，两个后果：
+
+      · 那一拍的结构位被注释的路径**覆盖**（条件还是分支的，位置却成了顶层）
+        —— 隐藏列 `Nest` 说的位置就不真了；
+      · 注释渲染在该拍 `if …:` 的**前面**（位置从"分支之后"漂到"分支之前"），
+        产物再解析时它又会被拆成单独一拍。
+    """
+
+    SRC = '''label t:
+    if fail:
+        python:
+            fsflag = True
+    # 生成选项
+    python:
+        wrong = []
+'''
+
+    def test_the_path_stays_with_the_executable_statement(self, tmp_path):
+        beats = _beats_of(self.SRC, tmp_path)
+        code = next(b for b in beats if 'fsflag' in (b.code or ''))
+        assert code.condition == 'fail'
+        assert code.nest_path == 'if:1', \
+            f'条件在分支里，结构位却成了 {code.nest_path!r}'
+        assert '生成选项' not in (code.comment or ''), \
+            '顶层注释不该并进条件拍'
+
+    def test_the_comment_keeps_its_place_in_the_product(self, tmp_path):
+        rpy = render_beats_to_rpy(_beats_of(self.SRC, tmp_path), label_name='t')
+        lines = [ln for ln in rpy.splitlines() if ln.strip()]
+        i_comment = next(i for i, ln in enumerate(lines) if '生成选项' in ln)
+        i_if = next(i for i, ln in enumerate(lines) if ln.strip() == 'if fail:')
+        # 注释在 `if` **块之后**（原文就在分支后面），而不是被搬到 `if` 前面
+        assert i_comment > i_if, rpy
+
+    def test_it_is_a_roundtrip_fixed_point(self, tmp_path):
+        def _strip(text: str) -> str:
+            # 生成标记行每次渲染都会重写，比对前滤掉（`hell_nest_inline._norm`
+            # 同一口径），其余一个字都不放过
+            lines = [ln.rstrip() for ln in text.splitlines()
+                     if not ln.startswith('# 由剧本表自动生成')]
+            while lines and not lines[0]:
+                lines.pop(0)
+            while lines and not lines[-1]:
+                lines.pop()
+            return '\n'.join(lines)
+
+        beats = _beats_of(self.SRC, tmp_path)
+        first = render_beats_to_rpy(beats, label_name='t')
+        again = render_beats_to_rpy(_beats_of(first, tmp_path), label_name='t')
+        assert _strip(again) == _strip(first), f'{first}\n---\n{again}'
+
+    def test_the_two_paths_agree_through_the_workbook(self, tmp_path):
+        beats = _beats_of(self.SRC, tmp_path)
+        xl = tmp_path / 'ch.xlsx'
+        export_beats_to_excel(beats, xl)
+        back = import_beats_from_excel(xl)
+        assert (render_beats_to_rpy(back, label_name='t')
+                == render_beats_to_rpy(beats, label_name='t'))

@@ -1,9 +1,18 @@
 """
-剩下三条的诊断（为下一轮铺路）：把"从哪来、为什么、该改哪一行"打出来。
+**三条收尾缺陷的回归钉**（2026-10-05 全部修完；这个文件从"诊断"变成"判据"）。
 
-  ① 条件翻倍（N2 不动点）：产物已是展平合取，再解析被**再累加**一次
-  ② `empty_option_body`：空体补 `pass` 后结构位多一条 `menu:1>A`
-  ③ `chapter1_2.rpy` 的 N3：源码那一行 vs 产物那一行（疑似真差异）
+它原本是给下一轮定位用的取证脚本（打印"从哪来、为什么、该改哪一行"）。
+三条都修好之后，打印没有意义了 —— 现在它**断言**，红了就是回退：
+
+  ① 条件翻倍（N2 不动点）：`if flag0:` → `menu:` → 选项体里 `if flag2:`，
+     产物再解析再渲染必须**逐字节**不变；
+  ② `empty_option_body`：空选项体补的 `pass` 必须留在**它自己**那个选项下，
+     台词不许被"吸"到空选项名下（从前两个选项体对调：选空的播台词）；
+  ③ `chapter1_2.rpy` 的舞台指令顺序：`hide` / `show … behind ye` / `$ …`
+     三行的相对顺序，直接渲染与过表渲染必须**逐字节**一致。
+
+用法：
+    python tools/probe_remaining3.py            # 断言，退出码 0/1
 """
 from __future__ import annotations
 
@@ -42,103 +51,117 @@ def _beats(text: str, tmp: Path, name: str = 'ch.rpy'):
     return beats_from_parse_result(pr)
 
 
-def case_cond_double(tmp: Path) -> None:
+def _lines(rpy: str) -> list:
+    return [ln.rstrip() for ln in rpy.splitlines()
+            if ln.strip() and not ln.startswith('#')]
+
+
+def _cli(text: str) -> list:
+    """`label t:` 那一份产物里、**去掉 label/return 外壳**的行（带缩进）。"""
+    out = []
+    for ln in _lines(text):
+        if ln.strip() in ('label t:', 'return'):
+            continue
+        out.append(ln[4:] if ln.startswith('    ') else ln)
+    return out
+
+
+def case_cond_double(tmp: Path) -> list:
+    """① 条件不许翻倍（N2 不动点）。"""
     from storygraph.story.beat_render import render_beats_to_rpy
     print('=' * 72)
-    print('① 条件翻倍')
+    print('① 条件翻倍（N2 不动点）')
     beats = _beats(DEPTH3, tmp)
-    print('  解析出来的条件：')
-    for b in beats:
-        if (b.condition or '').strip():
-            print(f'    {b.kind:<12} cond={b.condition!r:<34} '
-                  f'nest={b.nest_path!r}')
     r1 = render_beats_to_rpy(beats)
-    print('  R1：')
-    for ln in r1.splitlines():
-        if ln.strip() and not ln.startswith('#'):
-            print(f'    |{ln}')
     r2 = render_beats_to_rpy(_beats(r1, tmp, 'again1.rpy'))
-    print('  R2（把 R1 再解析一遍后渲染）：')
-    for ln in r2.splitlines():
-        if ln.strip() and not ln.startswith('#'):
-            print(f'    |{ln}')
-    print('  诊断：产物把**累积条件**写在里层 `if` 上，而它外面已经有外层 `if:`')
-    print('        → 再解析时解析器又 `_combine` 一次外层条件 → 每轮更长。')
-    print('  R1 里的条件行：')
-    for ln in r1.splitlines():
-        if ln.strip().startswith('if '):
-            print(f'    {ln.strip()!r}')
+    for ln in _lines(r1):
+        print(f'    |{ln}')
+    bad = []
+    if _lines(r1) != _lines(r2):
+        bad.append(f'R1 != R2：\n  {_lines(r1)}\n  {_lines(r2)}')
+    conds = [ln.strip() for ln in _lines(r1) if ln.strip().startswith('if ')]
+    if conds != ['if flag0:', 'if flag2:']:
+        bad.append(f'里层条件多写了外层那一项：{conds}')
+    return bad
 
 
-def case_empty_body(tmp: Path) -> None:
+def case_empty_body(tmp: Path) -> list:
+    """② 空选项体不许把台词吸走。"""
     from storygraph.story.beat_render import render_beats_to_rpy
     from storygraph.story.excel_export import export_beats_to_excel
     from storygraph.story.excel_import import import_beats_from_excel
     print('=' * 72)
-    print('② 空选项体：结构位多重集')
+    print('② 空选项体：`pass` 归空的、台词归有内容的')
     beats = _beats(EMPTY, tmp)
-    print('  原文路径：', [b.nest_path for b in beats])
     r1 = render_beats_to_rpy(beats)
-    print('  R1：')
-    for ln in r1.splitlines():
-        if ln.strip() and not ln.startswith('#'):
-            print(f'    |{ln}')
-    again = _beats(r1, tmp, 'again2.rpy')
-    print('  产物再解析的路径：', [b.nest_path for b in again])
-    print('  诊断：空体补的 `pass` 在产物里是一张**普通拍**，再解析时它落进')
-    print('        选项体的路径上 → 多重集多一条 `menu:1>A`。')
+    for ln in _lines(r1):
+        print(f'    |{ln}')
     xl = tmp / 'e.xlsx'
     export_beats_to_excel(beats, xl)
     back = import_beats_from_excel(xl)
-    print('  过表后的路径：', [b.nest_path for b in back])
+    r2 = render_beats_to_rpy(back)
+    bad = []
+    if _cli(r1) != _cli(r2):
+        bad.append(f'两条路不一致：\n  {_cli(r1)}\n  {_cli(r2)}')
+    want = ['menu:', '    "空的":', '        pass', '    "有内容":', '        e "x"']
+    if _cli(r1) != want:
+        bad.append(f'选项体归属错了：\n  实际 {_cli(r1)}\n  期望 {want}')
+    return bad
 
 
-def case_chapter(tmp: Path) -> None:
-    from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
-    from storygraph.story.beat_build import beats_from_parse_result
+def case_chapter(tmp: Path) -> list:
+    """③ `chapter1_2.rpy` 的舞台/代码顺序（真实项目证据）。"""
     from storygraph.story.beat_render import render_beats_to_rpy
     from storygraph.story.excel_export import export_beats_to_excel
     from storygraph.story.excel_import import import_beats_from_excel
     print('=' * 72)
-    print('③ chapter1_2.rpy 的 N3 差异')
+    print('③ chapter1_2.rpy 的舞台指令 vs 代码块顺序')
     f = next(REAL.rglob('chapter1_2.rpy'), None)
     if f is None:
-        print('  （本机没有这个文件）')
-        return
+        print('  （本机没有这个文件）—— 跳过')
+        return []
+    from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+    from storygraph.story.beat_build import beats_from_parse_result
     pr, _ = IncrementalRenPyAnalyzer().analyze(files=[f], graph=None)
     beats = beats_from_parse_result(pr)
-    r1 = render_beats_to_rpy(beats)
+    r1 = _lines(render_beats_to_rpy(beats))
     xl = tmp / 'c.xlsx'
     export_beats_to_excel(beats, xl)
-    r2 = render_beats_to_rpy(import_beats_from_excel(xl))
-
-    def norm(t):
-        return [ln.rstrip() for ln in t.splitlines()
-                if ln.strip() and not ln.startswith('#')]
-    a, b = norm(r1), norm(r2)
-    for i, (x, y) in enumerate(zip(a, b)):
-        if x != y:
-            print(f'  第 {i + 1} 行起不同：')
-            print(f'    直接渲染: {x!r}')
-            print(f'    过表渲染: {y!r}')
+    r2 = _lines(render_beats_to_rpy(import_beats_from_excel(xl)))
+    bad = []
+    if r1 != r2:
+        for i in range(max(len(r1), len(r2))):
+            a = r1[i] if i < len(r1) else '<缺行>'
+            b = r2[i] if i < len(r2) else '<缺行>'
+            if a != b:
+                bad.append(f'第 {i + 1} 行起不同：\n  直接: {a!r}\n  过表: {b!r}')
+                break
+    for a, b in zip(r1, r1[1:]):
+        if 'behind ye' in a and b.strip().startswith('$'):
+            print(f'    ok  {a.strip()!r}\n        在 {b.strip()[:40]!r} 之前')
             break
-    # 找那条 show 的来源拍
-    for i, bt in enumerate(beats):
-        blob = f'{bt.show} {bt.stage} {bt.raw}'
-        if 'cg02_2' in blob or 'cg38402160' in blob:
-            print(f'  相关拍[{i}] kind={bt.kind} show={bt.show!r} '
-                  f'stage={bt.stage!r} at={bt.at!r} scene_at={bt.scene_at!r} '
-                  f'stage_order={bt.stage_order!r} op_order={bt.op_order!r}')
-    print('  诊断线索：过表后那一拍少了/换了舞台指令 —— 看上面两个拍的字段差异。')
+    else:
+        bad.append('没找到 `show … behind ye` / `$ …` 那一对（用例形状变了？）')
+    if not bad:
+        print(f'    两条路逐字节一致（{len(r1)} 行）')
+    return bad
 
 
 def main() -> int:
     import tempfile
+    bad: list = []
     with tempfile.TemporaryDirectory(prefix='diag_') as td:
         tmp = Path(td)
-        case_cond_double(tmp)
-        case_empty_body(tmp)
-        case_chapter(tmp)
+        bad += case_cond_double(tmp)
+        bad += case_empty_body(tmp)
+        bad += case_chapter(tmp)
+    print('=' * 72)
+    if bad:
+        print(f'失败 {len(bad)} 处：')
+        for b in bad:
+            print(f'  ✗ {b}')
+        return 1
+    print('三条全部通过')
     return 0
 
 

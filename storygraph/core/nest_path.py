@@ -47,6 +47,32 @@ def option_key(index: int) -> str:
     return f'A{i}' if i > 0 else ''
 
 
+def option_index(key) -> int:
+    """
+    位置键 → 序号（1-based，``option_key`` 的逆）：``A`` → 1、``B`` → 2、
+    ``A27`` → 27。**认不出返回 0**（调用方据此退回"按出现顺序配对"）。
+
+    为什么需要逆函数（2026-10-05 实测，空选项体）：渲染层要把"块体的键"
+    对到"第几个选项"。只按出现顺序配对时，**某个选项体是空的**就会错位 ——
+
+        menu:
+            "空的":            ← A，原文里没有块体
+            "有内容":          ← B
+                e "x"          ← 路径 `menu:1>B`
+
+    唯一的键 ``B`` 被配给第 1 个选项（``空的``）→ **两个选项体对调**：
+    选"空的"播了台词、选"有内容"什么都不做（静默改剧情）。
+    键本身就是位置，能解出来就必须用它。
+    """
+    text = str(key or '').strip()
+    if len(text) == 1 and 'A' <= text <= 'Z':
+        return ord(text) - ord('A') + 1
+    if len(text) > 1 and text[0] == 'A' and text[1:].isdigit():
+        i = int(text[1:])
+        return i if i > 0 else 0
+    return 0
+
+
 def split_nest(path) -> list:
     """``'if:1>menu:2>A'`` → ``['if:1', 'menu:2', 'A']``（空路径 → ``[]``）。"""
     return [s for s in str(path or '').split('>') if s]

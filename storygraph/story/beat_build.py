@@ -618,10 +618,36 @@ class _BeatBuilder:
         return True, False
 
     def _emit_comment(self, stmt, payload, _ln):
+        """
+        注释进「注释」列（`Beat.comment`），导出时原样回写。
+
+        ⚠ **注释也要过 `branch_guard`**（2026-10-05 修，真实项目
+        `mini_game1.rpy` 第 116-119 行实测）。从前这里既不比条件、也不落拍，
+        于是一条**顶层**注释会被吸进**上一个条件拍**的 pending 里，后果两条：
+
+          · 那一拍的 `nest_path` 被注释的路径**覆盖**（条件还是分支的、
+            结构位却成了顶层）—— 隐藏列 `Nest` 说的位置就不真了；
+          · 渲染时注释写在该拍 `if …:` 的**前面**（注释永远排第一），
+            位置从"分支之后"漂到"分支之前"；产物再解析时，
+            `branch_guard` 会因为"注释无条件、后面的分支语句有条件"把这一拍
+            **拆成两拍** —— N1 因此报"多一条结构位"。
+
+        真实形态：
+
+             116:        python:            ← 分支体（cond = fail_round>=3）
+             117:            fsflag = True
+             118:    # 生成选项（1个正确，3个错误）   ← 顶层注释
+             119:    python:            ← 下一条顶层语句
+
+        不落拍的后果：`$ fsflag = True` 与那条顶层注释并成**同一拍**，
+        注释被搬到分支之前。落拍之后两者各归各位，产物与原文同序。
+        """
         text = (payload.get('text', '') or '').strip()
-        if text:
-            self.pending.comment = _append_line(self.pending.comment, text)
-            self.pending_has_stage = True
+        if not text:
+            return True, False
+        self.branch_guard(stmt)
+        self.pending.comment = _append_line(self.pending.comment, text)
+        self.pending_has_stage = True
         return True, False
 
     def _emit_raw(self, stmt, payload, _ln):

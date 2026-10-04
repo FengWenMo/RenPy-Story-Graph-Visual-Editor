@@ -475,6 +475,60 @@ class TestCrossKindOrder:
         assert voice < sound, f'voice 跑到 play sound 后面了：{lines}'
 
 
+class TestCodeBlockStaysAfterTheWholeStage:
+    """
+    **代码块（`$ …`）不许跑到舞台指令前面**（2026-10-05 修）。
+
+    真实项目 `chapter1_2.rpy` 拍 136/152 的形状：
+
+        hide ye
+        show cg cg02_2 at cg38402160 behind ye   ← 复杂子句 → 住在 Stage 列
+        $ persistent.lock_lst["cg02.2"]= True
+
+    从 .rpy 直接渲染时那条 `show` 由**结构化列**出（在代码块之前）；
+    过一趟表之后 `hydrate_from_dsl` 把它标成"原生真迹的影子"，
+    结构化通道跳过它、改由**舞台尾段**出 —— 而尾段当时排在 `emit_code()`
+    **之后**，于是 `$ persistent…` 跑到了 `show` 前面：
+
+        hide ye
+        $ persistent.lock_lst["cg02.2"]= True
+        show cg cg02_2 at cg38402160 behind ye
+
+    舞台两行、代码一行都在，**条数看不出差别**，只有"谁在前"变了 ——
+    而这两行是同一拍里的执行顺序（`$ renpy.transition(...)` 就在同型的位置），
+    必须两条路逐字节一致。
+    """
+
+    SRC = ('label t:\n'
+           '    hide ye\n'
+           '    show cg cg02_2 at cg38402160 behind ye\n'
+           '    $ persistent.lock_lst["cg02.2"]= True\n'
+           '    e "台词"\n')
+
+    def test_direct_and_table_paths_are_byte_identical(self, write_rpy,
+                                                       tmp_path):
+        src = write_rpy(self.SRC, 'proj/game/cg.rpy')
+        table = tmp_path / 'cg.xlsx'
+        open_rpy_as_table(src, table)
+        via_table = render_beats_to_rpy(import_beats_from_excel(table))
+        # 直接渲染（同一份源码，不经表）
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.story.beat_build import beats_from_parse_result
+        pr, _ = IncrementalRenPyAnalyzer().analyze(files=[src], graph=None)
+        direct = render_beats_to_rpy(beats_from_parse_result(pr))
+        assert via_table == direct, f'{direct}\n---\n{via_table}'
+
+    def test_the_show_comes_before_the_code_block(self, write_rpy, tmp_path):
+        src = write_rpy(self.SRC, 'proj/game/cg2.rpy')
+        table = tmp_path / 'cg2.xlsx'
+        open_rpy_as_table(src, table)
+        produced = render_beats_to_rpy(import_beats_from_excel(table))
+        lines = [l.strip() for l in produced.splitlines() if l.strip()]
+        show = next(i for i, l in enumerate(lines) if l.startswith('show cg'))
+        code = next(i for i, l in enumerate(lines) if l.startswith('$'))
+        assert show < code, f'代码块跑到舞台前了：{lines}'
+
+
 class TestOpOrderFallback:
     """
     没有 `op_order` 的 Beat（老表 / 手工新增行 / 直接构造）必须
