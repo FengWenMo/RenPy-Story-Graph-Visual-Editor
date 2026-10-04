@@ -234,6 +234,13 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     result.review_path = artifact.review_path
     result.guard_issues = list(artifact.blocking)
     result.guard_warnings = list(artifact.warnings)
+    # **对拍**（B 阶段一）：结构列说的位置 vs 老推断实际摆的位置。
+    # 行为零变化（渲染仍按老推断），只是把不一致说出来 —— 逐拍、指名道姓，
+    # 而且表格往返之后照样有效（`Nest` 随表走）。
+    if beats:
+        from storygraph.story.generation_guard import nest_conflict_warnings
+        result.guard_warnings += nest_conflict_warnings(
+            beats, source_path=source_path)
     return result
 
 

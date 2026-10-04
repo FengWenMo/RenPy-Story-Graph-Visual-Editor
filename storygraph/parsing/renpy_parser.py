@@ -118,6 +118,7 @@ except ImportError:
     Graph = None
 
 from storygraph.core.uid import make_translation_uid
+from storygraph.core.nest_path import join_nest, option_key
 from storygraph.core.statement import (CONTENT_HASH_HEX, Statement,
                                        StatementKind)
 
@@ -2537,8 +2538,13 @@ class ParseResultBuilder:
                     self._collect_string_defaults(opt.block, result)
 
     def _walk(self, nodes: list, current_label: str, result: ParseResult,
-              accum_cond: str = '', menu_option: str = ''):
-        def add_stmt(stmt):
+              accum_cond: str = '', menu_option: str = '',
+              nest_path: str = '', counters: dict = None):
+        #: 同 kind 兄弟块的**文档序**计数器（整个 label 共用一份）——
+        #: `menu:2` 就是"这个 label 里第 2 个菜单块"，与按行扫出来的顺序一致。
+        counters = counters if counters is not None else {}
+
+        def add_stmt(stmt, path: str = None):
             """
             收集语句，同时记下它属于哪个 label / 哪个菜单选项。
 
@@ -2572,6 +2578,12 @@ class ParseResultBuilder:
                     or (stmt.payload or {}).get('text')):
                 return
             stmt._menu_member = bool(menu_option)
+            # **结构位（块路径）**：这条语句在哪个块里（B 阶段一）。
+            # 与 `_menu_member` 一样是**运行期动态属性**（不是 dataclass 字段）
+            # —— Statement 的相等/哈希是"内容指纹"契约的一部分，结构位不许进去。
+            #   · `''`   = label 顶层
+            #   · `if:1>menu:2>A>if:3` = 第 1 个 if → 第 2 个菜单 → 第 A 个选项 → 第 3 个 if
+            stmt.nest_path = nest_path if path is None else path
             result.statements.append(stmt)
             result.statement_labels.append(current_label)
             result.statement_menu_options.append(menu_option)
@@ -2724,7 +2736,9 @@ class ParseResultBuilder:
                 add_stmt(Statement.make_menu(
                     node.caption or '', menu_own_cond,
                     source=(node.filename, node.line_number)))
-                for opt in node.options:
+                counters['menu'] = counters.get('menu', 0) + 1
+                menu_path = join_nest(nest_path, f"menu:{counters['menu']}")
+                for _oi, opt in enumerate(node.options, start=1):
                     result.dialogues.append(DialogueLine(
                         character_var='',
                         text=opt.text,
@@ -2734,12 +2748,15 @@ class ParseResultBuilder:
                         is_menu_option=True,
                         menu_condition=opt.condition,
                     ))
+                    # 选项行本身**在菜单里、不在任何选项体里** → 路径到菜单为止
                     add_stmt(Statement.make_menu_option(
                         opt.text, self._combine(accum_cond, opt.condition),
-                        source=(opt.filename, opt.line_number)))
+                        source=(opt.filename, opt.line_number)), menu_path)
                     self._walk(opt.block, current_label, result,
                                self._combine(accum_cond, opt.condition),
-                               opt.text)
+                               opt.text,
+                               nest_path=join_nest(menu_path, option_key(_oi)),
+                               counters=counters)
 
             elif isinstance(node, ShowNode):
                 add_stmt(Statement.make_show(
@@ -2855,8 +2872,12 @@ class ParseResultBuilder:
                             f"({accum_cond}) and not ({neg})"
                             if accum_cond else f"not ({neg})"
                         )
+                    counters['if'] = counters.get('if', 0) + 1
                     self._walk(block, current_label, result, child_cond,
-                               menu_option)
+                               menu_option,
+                               nest_path=join_nest(
+                                   nest_path, f"if:{counters['if']}"),
+                               counters=counters)
 
     @staticmethod
     def _combine(c1: str, c2: str) -> str:

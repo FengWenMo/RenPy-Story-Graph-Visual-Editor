@@ -20,6 +20,7 @@ from typing import Optional
 from storygraph.core.vocabulary import (GENERATOR_MARKER,
                                         RENPY_BUILTIN_TRANSFORMS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
+from storygraph.core.nest_path import body_chain, option_key
 
 from storygraph.story.beat_model import (
     Beat,
@@ -1007,6 +1008,84 @@ def _in_menu_body(beat, run: list, cur_idx) -> bool:
     return (beat.condition or '').strip() == expected
 
 
+
+
+def _group_by_label(beats: list) -> list:
+    """按 label 分组（保持文档序）。块路径里的菜单序号是**label 内**数的。"""
+    order, buckets = [], {}
+    for b in beats or ():
+        name = str(getattr(b, 'label', '') or '')
+        if name not in buckets:
+            buckets[name] = []
+            order.append(name)
+        buckets[name].append(b)
+    return [(n, buckets[n]) for n in order]
+
+
+def _actual_chains(group: list, counter: list, parent_chain: tuple) -> dict:
+    """
+    老推断把这一组拍**实际**摆到了哪条选项体链上：`{id(拍): 链}`。
+
+    与渲染**同源**：`split_beat_units` 切菜单组、`_menu_segments` 切选项体；
+    选项体里再套菜单时**递归**（计数器接着数，所以嵌套菜单的序号与解析器
+    的文档序一致）。认不出归属的拍（`_is_menu_foreign`）算**父层** ——
+    它们渲染时本来就被摆在菜单外（带一句显式警告）。
+    """
+    chains: dict = {}
+    for kind, unit in split_beat_units(group):
+        if kind != 'menu':
+            for b in unit:
+                chains[id(b)] = parent_chain
+            continue
+        counter[0] += 1
+        n = counter[0]
+        for oi, (opt, body, foreign) in enumerate(_menu_segments(unit), start=1):
+            if opt is None:
+                continue
+            chains[id(opt)] = parent_chain          # 选项行在菜单层
+            chain = parent_chain + ((n, option_key(oi)),)
+            body_beats = [b for _pos, b, _why in body]
+            for b in body_beats:
+                chains[id(b)] = chain
+            for _pos, b, _why in foreign:
+                chains[id(b)] = parent_chain        # 认不出 → 摆在菜单外
+            # 选项体里可能还有嵌套菜单 → 递归
+            for bid, c in _actual_chains(body_beats, counter, chain).items():
+                chains[bid] = c
+        for b in unit:                              # 菜单头等杂项拍
+            chains.setdefault(id(b), parent_chain)
+    return chains
+
+
+def nest_placement_conflicts(beats: list) -> list:
+    """
+    **对拍器**（B 阶段一）：结构列（`Nest`）说的位置 vs 老推断**实际**摆的位置。
+
+    返回 `[(label, 拍序号, 结构列说的链, 实际摆的链), …]`，只报不一致的。
+
+    为什么要有它：`menu` 在 Ren'Py 里是**嵌套块**，而拍是扁平的 ——
+    "这条拍属于哪个选项"以前只有两个信息源：
+      · `_menu_member`（.rpy 侧，**进不了 Excel**）；
+      · `Condition` 串 + 行号（表格侧 —— 只有 1 bit：在选项体里 / 不在，
+        分不出**哪个**选项、也分不出多深；选项体一复杂信号就塌）。
+    `Nest` 列是第三个、也是最完整的那个。这一版**不改任何行为**
+    （渲染仍然走老推断），只把"两者不一致"说出来 —— 全绿之后，
+    阶段二才让渲染改用结构列。
+
+    ⚠ 只对**整份结构位都已知**的 label 判（`nest_path is None` = 老表 /
+    手工加的行）。拿"不知道"当"在顶层"会天天假报，而假阳性比漏报更贵。
+    """
+    conflicts: list = []
+    for name, group in _group_by_label(beats):
+        if any(getattr(b, 'nest_path', None) is None for b in group):
+            continue
+        actual = _actual_chains(group, [0], ())
+        for i, b in enumerate(group):
+            claim = body_chain(getattr(b, 'nest_path', '') or '')
+            got = actual.get(id(b), ())
+            if claim != got:
+                conflicts.append((name, i, claim, got))
+    return conflicts
 
 
 def stamp_menu_bodies(beats: list) -> int:

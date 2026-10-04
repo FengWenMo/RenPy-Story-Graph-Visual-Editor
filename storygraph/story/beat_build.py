@@ -181,6 +181,12 @@ class _BeatBuilder:
         """
         if hasattr(stmt, '_menu_member'):
             beat._menu_member = bool(stmt._menu_member)
+        # **结构位（块路径）**也一起转发（B 阶段一）：`_menu_member` 只答
+        # "在不在选项体里"，它答"在**哪个**选项体里、套了几层" ——
+        # 而后者才是能随表走、能对拍的那一份。`''` 是合法值（label 顶层），
+        # 所以判据是"语句上有没有这一位"（`None` = 手工构造的语句 = 不知道）。
+        if getattr(stmt, 'nest_path', None) is not None:
+            beat.nest_path = stmt.nest_path
         return beat
 
     def mark_stage(self, verb: str) -> None:
@@ -453,6 +459,8 @@ class _BeatBuilder:
         # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，
         # 组头会被标成 True，菜单组就从头断开了。
         menu_beat._menu_member = False
+        # 菜单头在**父块**里（组头不属于任何选项体）
+        menu_beat.nest_path = getattr(stmt, 'nest_path', None)
         self.beats.append(menu_beat)
         # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
         self.last_speaker = ''
@@ -471,6 +479,8 @@ class _BeatBuilder:
         # 同上：选项拍自己**不算**选项体，但它是菜单组的一员
         # （渲染层边界判据里 `menu_option` 那条分支优先于结构位）。
         opt._menu_member = False
+        # 选项行在**菜单里、不在任何选项体里**（解析器给的路径到菜单为止）
+        opt.nest_path = getattr(stmt, 'nest_path', None)
         self.beats.append(opt)
         self.flush_stage_only()
         self.last_speaker = ''

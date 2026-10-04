@@ -372,6 +372,42 @@ def structure_loss(source_text, product_text) -> list:
     return lost
 
 
+def nest_conflict_warnings(beats, source_path=None) -> list:
+    """
+    结构列（`Nest`）vs 老推断不一致 → 一条 **warn** 级发现（B 阶段一）。
+
+    与 A 档的 `STRUCTURE_LOST` 分工**不同、互补**：
+      · `STRUCTURE_LOST` 比的是"源文本 vs 产物文本" —— 它管**结果**，
+        但没有源可比时就不说话；
+      · 这一条比的是"**结构列说这条拍在哪** vs **老推断把它摆在哪**" ——
+        它管**过程**，逐拍、指名道姓，而且**表格往返之后照样有效**
+        （`Nest` 随表走，`_menu_member` 走不了）。
+
+    两者都是 warn：这一版**不改行为**（渲染仍按老推断），对拍只是把不一致
+    说出来。等它对真实项目全绿（已实测 40 个文件 0 处），阶段二才让渲染
+    改用结构列；那时这条警告才会变成"表坏了"的信号。
+    """
+    if not beats:
+        return []
+    from storygraph.story.beat_render import nest_placement_conflicts
+    conflicts = nest_placement_conflicts(beats)
+    if not conflicts:
+        return []
+    name, idx, claim, got = conflicts[0]
+    more = f'（共 {len(conflicts)} 条拍）' if len(conflicts) > 1 else ''
+    where = f'{source_path} ' if source_path else ''
+    return [GuardIssue(
+        'NEST_CONFLICT', 'warn',
+        f'{where}结构列与老推断对不上{more}：`{name}` 第 {idx + 1} 条拍 —— '
+        f'结构列说 {"顶层" if not claim else claim}，'
+        f'老推断摆在 {"顶层" if not got else got}。'
+        f'说明"这条拍属于哪个选项"两套判断不一致；产物很可能把选项体压平了'
+        f'（`"选项": pass` + 内容提到菜单外）。'
+        f'这一版渲染仍按老推断走（B 阶段一只双写不切换）——'
+        f'先照这条线索核对那几拍，方案见 '
+        f'docs/嵌套与行尾注释_修复方案_2026-10-05.md')]
+
+
 def _make_structure_issue(lost: list, source_path=None) -> GuardIssue:
     """把"菜单结构对不上"包成一条 **warn** 级发现（不拦写盘，见上）。"""
     label, want, got = lost[0]

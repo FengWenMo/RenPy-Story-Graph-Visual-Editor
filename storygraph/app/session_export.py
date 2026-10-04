@@ -366,8 +366,12 @@ class ExportMixin:
         if art.written and self.script_path \
                 and Path(target) == Path(self.script_path):
             self._reload_after_inplace_write()
+        # 对拍（B 阶段一）：结构列 vs 老推断。放**重载之后**算 —— 重载会把
+        # 结构列一起读回来（它就是随表走的），算的是"磁盘上这一份"的账。
+        nest_notes = self._nest_conflict_notes()
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
-                'note': note['text_note'],
+                'note': note['text_note'] + nest_notes,
+                'structure_conflicts': self._nest_conflict_count(),
                 'used_patch': bool(note.get('used_patch')),
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
                 'count': len(self.beats),
@@ -388,6 +392,28 @@ class ExportMixin:
         except (OSError, UnicodeDecodeError) as e:
             swallow('session_export._source_text_for_guard', e)
             return None
+
+    def _nest_conflict_count(self) -> int:
+        """结构列 vs 老推断不一致的拍数（B 阶段一的对拍结论）。"""
+        from storygraph.story.beat_render import nest_placement_conflicts
+        try:
+            return len(nest_placement_conflicts(self.beats))
+        except Exception as e:                  # noqa: BLE001
+            swallow('session_export._nest_conflict_count', e)
+            return 0
+
+    def _nest_conflict_notes(self) -> str:
+        """
+        把对拍结论接进导出说明（有才加，没有就是空串）。
+
+        为什么走 `note` 而不是弹框：这是一条**给开发者/细心人的线索**
+        （渲染仍按老推断，产物大概率没问题），不该打断策划的导出流程。
+        """
+        n = self._nest_conflict_count()
+        if not n:
+            return ''
+        return (f'；⚠ 结构列与老推断有 {n} 条拍对不上'
+                f'（`NEST_CONFLICT`，见 docs/嵌套与行尾注释_修复方案_2026-10-05.md）')
 
     def _reload_after_inplace_write(self) -> None:
         """

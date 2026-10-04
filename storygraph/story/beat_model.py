@@ -67,13 +67,18 @@ BEAT_FIELDS = [
     #     `for` / `if` 的嵌套体全被压到同一层（真实项目 `mini_game1.rpy`
     #     一个块拆出 53 条，`for` 里的 `if` 直接变成顺序执行）。
     'CodeBlocks',
+    # `Nest`：**结构位**（块路径，见 `Beat.nest_path`，B 阶段一）。
+    # 它与 `_menu_member` 是**同一个信息的两份载体**：后者只活在 .rpy 侧、
+    # 一进 Excel 就没了；前者随表走，于是"这条拍属于哪个选项"在表格往返
+    # 之后仍然说得清（现在只用来**对拍**，阶段二才让渲染改用）。
+    'Nest',
 ]
 
 
 #: 这些列整列隐藏（工具维护的内部元数据，策划不该看见也不该填）。
 #: 隐藏（hidden=True）在 Excel/WPS 里都是"列被收起"而不是"没有这一列"，
 #: 数据照旧读写，所以往返不会丢——这是选隐藏列而非"不写这一列"的原因。
-HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks')
+HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest')
 
 
 # 写进 Excel 的表头（中文）。策划只看中文；程序侧键名仍是英文，
@@ -91,6 +96,7 @@ BEAT_HEADERS = {
     'StageOrder': '舞台顺序（内部）',
     'OpOrder': '操作顺序（内部）',
     'CodeBlocks': '代码块结构（内部）',
+    'Nest': '结构位（内部）',
 }
 
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
@@ -128,7 +134,7 @@ SINGLE_LINE_BEAT_FIELDS = (
     'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Condition',
     'Scene', 'Show', 'At', 'With', 'Hide',
     'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
-    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks',
+    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks', 'Nest',
 )
 
 #: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。
@@ -377,6 +383,16 @@ class Beat:
     #: 单元格 32767 字符的上限，塞进单元格会被**静默截断**
     #: （实测 38492 → 32767）。表是一行一行存的，没有这个限制。
     file_blocks: str = ''
+    #: **结构位（块路径）**：这一拍在哪个块里（B 阶段一，2026-10-05）。
+    #:
+    #: DSL 与 `Stage` 同风格、人可读：
+    #:   · `''`   = label 顶层
+    #:   · `if:1>menu:2>A>if:3` = 第 1 个 if → 第 2 个菜单 → 第 A 个选项体 → 第 3 个 if
+    #:   · segment 形如 `<块类型>:<同类型的文档序>`，选项体用**位置键**（A/B/C…）
+    #:     —— 用位置而不是选项文案：改文案不该算"结构变了"。
+    #:   · `None` = **不知道**（老表 / 手工构造的拍）→ 对拍时整份跳过，
+    #:     绝不拿"不知道"当"在顶层"（那会天天假报）。
+    nest_path: Optional[str] = None
     music: str = ''
     music_params: str = ''
     music_action: str = 'play'     # 'play' / 'queue' / 'stop'
@@ -442,6 +458,9 @@ class Beat:
             self.stage_order,
             self.op_order,
             compose_code_blocks_cell(self),
+            # 结构位：顶层写 `-`（**有信息**），不知道写空（老表兼容）——
+            # 两者必须能分开，否则对拍会把"不知道"当成"在顶层"。
+            ('-' if self.nest_path == '' else (self.nest_path or '')),
         ])
 
     @classmethod
@@ -528,6 +547,22 @@ class Beat:
         # 记进 ordered——否则 `$ f()` 与 `show screen`/`pause` 交替的演出
         # 会被排成"先全部 show/pause 再全部 $ f()"，导出的代码和源脚本不一样。
         beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
+        # 结构位（块路径）：`-` = 顶层（**有信息**）；空 = **不知道**
+        # （老表 / 手工加的行）。两者必须分得开 —— 否则对拍会把"不知道"
+        # 当成"在顶层"，凡是老表都天天假报。
+        #
+        # 用 `g`（会清洗并留痕）而不是 `g_text`：这一列在
+        # `SINGLE_LINE_BEAT_FIELDS` 里，脏值必须被压成一行**并且记进
+        # `sanitized_cells`**（W114），否则又是"静默改数据"
+        # —— `test_cleaning_is_recorded[Nest]` 当场抓过这一条。
+        _nest = g('Nest')
+        if _nest and 'Nest' in sanitized:
+            # 被清洗过 = 这一格本来就不是一条合法路径（有换行/控制字符）。
+            # 那就不许拿它当依据：按"**不知道**"处理（整份跳过对拍），
+            # 而不是拿一条残缺路径去指认"结构对不上"——假阳性比漏报贵。
+            _nest = ''
+        beat.nest_path = (None if not _nest
+                          else ('' if _nest == '-' else _nest))
         (beat.raw, beat.code, beat.ordered,
          marked_blocks) = _split_code_cell(
              beat.code, expand_code_blocks(beat.code_blocks))

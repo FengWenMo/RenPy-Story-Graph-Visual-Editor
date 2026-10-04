@@ -1,0 +1,76 @@
+"""
+storygraph.core.nest_path
+=========================
+**结构位（块路径）的 DSL** —— 定义只有这一处：解析器写它、渲染器与门禁读它。
+
+    ``                 label 顶层
+    ``if:1``           第 1 个 ``if`` 块里
+    ``if:1>menu:2>A>if:3``
+                       第 1 个 if → 第 2 个菜单 → **第 A 个选项体** → 第 3 个 if
+
+片段形如 ``<块类型>:<同类型的文档序>``（文档序在**整个 label 内**数，
+与按行扫出来的顺序一致）；选项体用**位置键**（``A`` / ``B`` …）。
+
+为什么用位置键而不是选项文案：文案改一个字，"结构"就变了 ——
+对拍会天天假报，而假阳性比漏报更贵。位置是稳定的，渲染层数出来的也是位置。
+
+为什么放在 ``core``：``parsing`` 拼它、``story`` 解它，而**跨包 import 私有名
+是被禁止的**（``tests/test_package_layering.py`` 守着）。所以 DSL 的函数
+必须是公开名，并且只有这一份实现。
+"""
+
+from __future__ import annotations
+
+
+def join_nest(parent: str, seg: str) -> str:
+    """块路径拼接：``'if:1'`` + ``'menu:2'`` → ``'if:1>menu:2'``。"""
+    parent = str(parent or '')
+    seg = str(seg or '')
+    if not seg:
+        return parent
+    return f'{parent}>{seg}' if parent else seg
+
+
+def option_key(index: int) -> str:
+    """
+    选项在菜单里的**位置键**：1 → ``A``，2 → ``B`` …… 26 之后 → ``A27``。
+
+    超过 26 个选项的菜单很少见，但**不许撞键**：``A27`` 带数字，
+    与单字母不会混。
+    """
+    try:
+        i = int(index)
+    except (TypeError, ValueError):
+        return ''
+    if 1 <= i <= 26:
+        return chr(ord('A') + i - 1)
+    return f'A{i}' if i > 0 else ''
+
+
+def split_nest(path) -> list:
+    """``'if:1>menu:2>A'`` → ``['if:1', 'menu:2', 'A']``（空路径 → ``[]``）。"""
+    return [s for s in str(path or '').split('>') if s]
+
+
+def body_chain(path) -> tuple:
+    """
+    这一条路径落在**哪条选项体链**里：``((菜单序, 选项键), …)``（由外到内）。
+
+    ``'if:1>menu:2>A>if:3'`` → ``((2, 'A'),)``；
+    菜单头 / 选项行 / 块外（``'if:1'`` / ``'if:1>menu:2'`` / ``''``）→ ``()``。
+
+    只有"``menu:<n>`` 段后面**紧跟**一个非块段"才算进了选项体 ——
+    这正是"选项行在菜单里、但不在任何选项体里"与"选项体的内容"的分界。
+    """
+    segs = split_nest(path)
+    chain: list = []
+    for i, seg in enumerate(segs):
+        if not seg.startswith('menu:'):
+            continue
+        nxt = segs[i + 1] if i + 1 < len(segs) else ''
+        if nxt and not (nxt.startswith('menu:') or nxt.startswith('if:')):
+            try:
+                chain.append((int(seg.split(':', 1)[1]), nxt))
+            except ValueError:
+                continue
+    return tuple(chain)
