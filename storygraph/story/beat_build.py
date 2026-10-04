@@ -1034,8 +1034,25 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     for v in order:
         if v in ('scene', 'show', 'hide') and v not in dedup:
             dedup.append(v)
-    if dedup:
-        beat.stage_order = ','.join(dedup)
+    # ⚠ **不许覆盖**已有的 `stage_order`（2026-10-05 修，真实项目 17 处）：
+    # 这个值是从表里 `StageOrder` 列带回来的、**解析时的真迹**；而 `Stage`
+    # 这一列里**没有** `scene` 那条（`scene` 存在 `Scene` 列），拿它推导出来的
+    # 顺序必然少一个 `scene` → 渲染时 `with` 从句就贴到别的一行上：
+    #
+    #     scene bg bg1_1 with dissolve      ← `with` 本来是给下一行 show 的
+    #     show lan agreeable at right
+    #     show bg bg2_1 with dissolve
+    #
+    # 规矩：**已有的顺序保留**，只把 DSL 里出现、原顺序里没有的 verb 补在后面
+    # （老表没有这一列时 `existing` 为空，行为与从前一致）。
+    existing = [v.strip() for v in (beat.stage_order or '').split(',')
+                if v.strip()]
+    merged = list(existing)
+    for v in dedup:
+        if v not in merged:
+            merged.append(v)
+    if merged:
+        beat.stage_order = ','.join(merged)
 
     # 记下"原生真迹"的影子：渲染时结构化列要跳过它们（真迹由 Stage 自己出）。
     # 放在最后而不是逐条赋值，是为了让"没原生指令"时也能把上一轮残留清掉。

@@ -308,17 +308,20 @@ class TestKnownDifferencesArePinned:
         beats = import_beats_from_excel(table)
         return DEMO_SCRIPT.read_text(encoding='utf-8'), render_beats_to_rpy(beats)
 
-    def test_L3_1_image_form_differs_without_registry(self, roundtrip):
-        """差异 1：无资源表时 `show ye hi` → `show ye_hi`（语义等价）。
+    def test_L3_1_image_form_is_preserved_without_registry(self, roundtrip):
+        """差异 1 **已修**（2026-10-05）：无资源表时**原样保留**图像名。
 
-        口径见 §7.1：**有资源表时按"能否解析"择优**，无资源表才统一成
-        下划线形态。归一之后必须逐字节一致，所以它不是"改了演出"。
+        从前这里是"无资源表 → 空格换下划线"（`show ye hi` → `show ye_hi`），
+        当成"语义等价"钉住。**它不等价**：真实项目用 Ren'Py 原生
+        `tag + attribute` 命名（`image bg bg1_1`），全工程没有 `bg_bg1_1`，
+        改写之后运行时找不到图（实测 7 个文件 17 处），还会跟 `with` 抢词。
+
+        现在没给 resolver 就**一个字都不改**；有 resolver 才按"能否解析"择优。
         """
         original, produced = roundtrip
         a, b = show_specs(original), show_specs(produced)
-        assert a != b, '图像名形态忽然一致了——请更新 §7.1 的差异清单'
-        assert [x.replace('_', ' ') for x in a] == \
-            [x.replace('_', ' ') for x in b]
+        assert a == b, ('图像名形态应当原样保留（无资源表时不许改写）：'
+                        f'\n原文={a}\n产物={b}')
 
     def test_image_form_is_stable_when_registry_resolves(self, tmp_path):
         """
@@ -483,7 +486,8 @@ class TestOpOrderFallback:
                  scene='bg room', show='eileen happy',
                  music='theme', voice='v1')
         text = render_beats_to_rpy([b])
-        for frag in ('scene bg_room', 'show eileen_happy', 'play music theme',
+        # 名字**原样保留**（2026-10-05：没资源表不改写，见 L3_1 那条）
+        for frag in ('scene bg room', 'show eileen happy', 'play music theme',
                      'voice v1'):
             assert frag in text, f'{frag} 丢了：\n{text}'
 
@@ -493,6 +497,6 @@ class TestOpOrderFallback:
                  scene='bg room', music='theme', voice='v1',
                  op_order='stage')
         text = render_beats_to_rpy([b])
-        assert 'scene bg_room' in text
+        assert 'scene bg room' in text
         assert 'play music theme' in text, f'audio 被顺序信息吃掉了：\n{text}'
         assert 'voice v1' in text, f'voice 被顺序信息吃掉了：\n{text}'

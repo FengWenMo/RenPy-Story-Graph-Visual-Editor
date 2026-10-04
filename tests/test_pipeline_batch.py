@@ -949,12 +949,21 @@ class TestRoundTripFidelity:
         assert 'show eileen happy' in text
         assert 'show eileen_happy' not in text
 
-    def test_image_name_underscored_without_registry(self):
-        """没有资源表时保持旧行为（与资产表 ID 形态对齐）。"""
+    def test_image_name_is_preserved_without_registry(self):
+        """
+        没有资源表时**原样保留**图像名（2026-10-05 改）。
+
+        从前这条断言的是 `show bg_room`（"空格换下划线"，说与资产表 ID 对齐）。
+        **那是个破坏**：真实项目定义的是 `image bg bg1_1`（Ren'Py 原生
+        tag + attribute），全工程没有 `bg_bg1_1` —— 改写之后运行时找不到图
+        （实测 7 个文件 17 处）。没给 resolver 就没有"该改成什么"的证据，
+        所以一个字都不改。
+        """
         from storygraph.story.script_table import Beat, render_beats_to_rpy
         text = render_beats_to_rpy(
             [Beat(seq=1, label='a', text='x', show='bg room')])
-        assert 'show bg_room' in text
+        assert 'show bg room' in text
+        assert 'bg_room' not in text, '没有资源表时不许改写图像名' 
 
     def test_image_name_falls_back_when_native_form_unresolvable(self):
         from storygraph.assets.asset_registry import AssetRegistry

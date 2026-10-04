@@ -69,23 +69,37 @@ def _emit_image_name(name: str, resolver=None) -> str:
     """
     决定生成脚本时图像名用哪种写法。
 
-    历史行为是"空格一律换成下划线"（`show bg room` → `show bg_room`），
-    因为资产表 ID 是文件名形态。但这个改写有个致命前提：项目里必须有
-    `bg_room` 这个名字。对用 Ren'Py 原生 `tag + attribute` 命名
-    （`images/eileen/happy.png` → `show eileen happy`）的项目，
-    改成 `eileen_happy` 反而把能跑的脚本改坏了。
+    ⚠ **2026-10-05 改过一次（用户实测报到）**：这里原来写着
 
-    所以：给了 resolver（有资源表）时，**优先原样保留作者写的形态**——
-    只要它能在资源表里解析出来；解析不了才退回下划线形态（那是文案
-    从下拉里选的 ID 形态，本来就带下划线）。没给 resolver 时保持旧行为，
-    兼容单测与"无资源表"场景。
+        if resolver is None:
+            return underscored        # ← 没给资源表就"空格换下划线"
+
+    后果是"**没资源表时反而改坏**"：真实项目 `definitions.rpy:111` 定义的是
+    `image bg bg1_1`（Ren'Py 原生 **tag + attribute**），全工程 `grep bg_bg1_1`
+    **0 命中** —— 于是 `scene bg bg1_1` 过一趟表就成 `scene bg_bg1_1`，
+    运行时找不到这张图（真实项目 7 个文件 17 处）。
+    更糟的是它会跟 `with` 抢词：`scene bg bg1_1 with dissolve` 再解析一轮
+    只剩 `scene bg_bg1_1`（`with` 从句被名字吞掉）。
+
+    **现在的规矩**（"没证据就别改"）：
+
+      · **没给 resolver**（CLI 没 `--asset-dir`、单测）→ **原样返回**。
+        作者写的就是工程里在用的形态，而我们**没有任何证据**说明下划线形态
+        真的存在 —— 这时改写是**凭空的破坏**，不是"降级"；
+      · 给了 resolver → 优先作者形态（资源表里解析得出就用它）；
+        解析不了才试下划线形态；都不行仍返回作者形态（缺资源交给审计报）。
+
+    为什么不再"至少提醒一声"：改成原样保留之后，这条路上**没有发生降级**，
+    不需要提醒。真该提醒的是"资源表里找不到这个名字" —— 那件事由
+    `audit.image()` 负责（卡片编辑器显示 TODO），与这里不重复。
     """
     name = (name or '').strip()
     if not name or '"' in name or "'" in name:
         return name
     underscored = name.replace(' ', '_')
     if resolver is None:
-        return underscored
+        # 原样保留：没有资源表就没有"该改成什么"的证据（见 docstring）
+        return name
     try:
         if name == underscored or resolver(name):
             return name
@@ -1337,8 +1351,16 @@ def _menu_segments_by_path(run: list):
     for pos, b in enumerate(run[1:]):
         path = str(getattr(b, 'nest_path', ''))
         rest = path[len(prefix):].lstrip('>') if path.startswith(prefix) else ''
-        if not rest or b.kind == KIND_MENU_OPTION:
-            continue                          # 选项行/畸形拍已经处理过
+        if not rest:
+            continue                          # 菜单层上的拍：第一趟已经处理过
+        if b.kind == KIND_MENU_OPTION and path == prefix:
+            continue                          # **本层的**选项行（第一趟建过段）
+        # ⚠ **嵌套菜单的选项行必须留下**（2026-10-05 修，`minimal_nested_menu`）：
+        # 它的路径是 `menu:1>A>menu:2`（`rest='A>menu:2'`），属于**本层选项 A
+        # 的块体**，要交给 `render_menu_block` 递归去渲染那一层菜单。
+        # 第一版这里写的是"凡 `KIND_MENU_OPTION` 一律跳过" —— 那会把嵌套菜单的
+        # 选项行**静默丢掉**：菜单头还在、选项行没了，整层菜单就塌进外层选项体
+        # （`e "深深"` 直接漏到外面）。老推断那条路至少把它记成 `foreign` 保住结构。
         key = rest.split('>')[0]
         idx = key_of.get(key)
         if idx is None:
@@ -1591,8 +1613,8 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         expected = _expected_body_condition(own_cond, menu_cond)
         ordered = list(sorted(list(body) + list(foreign)))
         inner = opt_indent + '    '
-        # **带嵌套菜单的选项体走老路**：嵌套菜单要整组一起渲染
-        # （`_render_unit_lines` 内部递归），逐拍拆开会把它拆散。
+        # ⚠ **带嵌套菜单的选项体仍然走这一支**（2026-10-05：试过合并成一条，
+        # 结果更糟 —— 嵌套菜单被渲染到**外层缩进**上，见下面的 `KNOWN` 注释）。
         if any(b.kind == KIND_MENU for _pos, b, _w in ordered):
             stripped, nested = [], []
             for _pos, beat, why in ordered:
@@ -1604,6 +1626,16 @@ def _render_menu_segments(run: list, segments: list, indent: str,
                     stripped.append(_with_condition(beat, ''))
                 else:
                     nested.append((beat, ''))
+            # ⚠ **KNOWN（未修，2026-10-05）**：嵌套菜单（菜单套在选项体里）
+            # 这一支还是会把菜单**拆散** —— `stripped` 只拿到"条件是累积条件"
+            # 的那些，嵌套菜单的**选项行**（`menu_option`，它的条件与本选项
+            # 不同）落进 `nested`，于是递归进 `_render_unit_lines` 的那一半
+            # 组不成菜单 → 整层塌进外层选项体。
+            #
+            # 现在**不再丢拍**（选项行已由 `_menu_segments_by_path` 保住，
+            # 见那里的注释），但渲染出来的这一层是错的（选项行变成一句台词）。
+            # 真实项目 **0 个嵌套菜单**，所以这条路上没有实机影响；
+            # 判据见 `tools/hell_nest_inline.py::minimal_nested_menu`。
             body_lines = _render_unit_lines(stripped, inner, audit, trace)
             for beat, why in nested:
                 if why:
@@ -1930,7 +1962,16 @@ def _stage_lines(beat, name_resolver) -> dict:
     # （`_show_clause_args` 把它报了出来）。两个来源各写一次，产物就成了
     # `show bgcafe with dissolve with dissolve` —— 语法错误。
     # 判据是"最后那条 show 行是否已经以 `with <同一个转场>` 收尾"。
-    if beat.with_ and not scene_is_native:
+    # **原生尾段里已经带了同一个转场吗**（2026-10-05 修，真实项目 17 处）：
+    # 作者写在 `Stage` 列的那一行（如 `show bg bg2_1 with dissolve`）会**逐字**
+    # 输出一次，而 `beat.with_` 同时也等于 `dissolve` —— 这里若再按"有背景就挂
+    # 背景"的启发式挂一次，产物就成了
+    #     scene bg bg1_1 with dissolve      ← 多出来的一条，语义还不一样
+    #     show bg bg2_1 with dissolve
+    # 判据用**原文**（`beat.stage` 是作者写的真迹），不看结构化列。
+    native_with = bool(beat.with_) and bool(re.search(
+        r'\bwith\s+' + re.escape(str(beat.with_)), str(beat.stage or '')))
+    if beat.with_ and not scene_is_native and not native_with:
         already = (show_lines
                    and show_lines[-1].rstrip().endswith(
                        f' with {beat.with_}'.rstrip()))

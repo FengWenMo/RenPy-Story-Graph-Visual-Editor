@@ -1432,6 +1432,49 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
   · 编辑器里**不要手工改生成物**的头两行标记 —— 那是"这是生成物"的判据，
     删了会被当成手写文件重新猜结构。
 
+80. **没证据就别改：图像名与舞台顺序**（2026-10-05，用户实测报到后修）
+
+    这两条是同一类错误的两个实例 —— **"降级"其实是在破坏**。
+
+    **(a) 图像名不许"空格换下划线"**（`beat_render._emit_image_name`）
+
+    从前 `resolver is None` 时返回 `name.replace(' ', '_')`，注释里写的是
+    "保持旧行为，兼容单测与无资源表场景"。**它不等价**：真实项目
+    `definitions.rpy:111` 定义的是 `image bg bg1_1`（Ren'Py 原生
+    **tag + attribute**），全工程 `grep bg_bg1_1` **0 命中** —— 于是
+    `scene bg bg1_1` 过一趟表变成 `scene bg_bg1_1`，**运行时找不到图**
+    （实测 7 个文件 17 处）。而且它会跟 `with` 抢词：
+    `scene bg bg1_1 with dissolve` 再解析一轮只剩 `scene bg_bg1_1`。
+
+    现在的规矩：**没给 resolver → 一个字都不改**（作者写的就是工程在用的）；
+    给了 resolver → 优先作者形态，解析不了才试下划线形态。
+    "该提醒"的是"资源表里找不到这个名字"，那件事由 `audit.image()` 负责，
+    与这里不重复 —— 改成原样保留之后这条路**没有发生降级**，不需要提醒。
+
+    **(b) `StageOrder` 不许被 `Stage` 列推导的顺序覆盖**（`beat_build._hydrate_stage`）
+
+    `Stage` 列里**没有** `scene` 那条（`scene` 存在 `Scene` 列），拿它推导顺序
+    必然少一个 `scene` → 渲染时 `with` 从句就挂到 scene 行上（语义不一样：
+    `scene X with D` 与 `show X with D` 是两种转场）。修法：**已有的顺序保留**，
+    只把 DSL 里新出现、原顺序里没有的 verb 补在后面（老表没有这一列时行为不变）。
+
+    **(c) 原生舞台尾段已经带了同一个转场时，不许再挂一次**（`_stage_lines`）
+
+    作者写在 `Stage` 列的那一行会**逐字**输出一次，而 `beat.with_` 同时也等于
+    那个转场 —— 再按"有背景就挂背景"挂一次，产物就成了同一拍两条转场
+    （`scene … with D` + `show … with D`）。判据用**原文**（`beat.stage`）。
+
+    **验收**：`tools/hell_nest_inline.py` 的 `scene_show_tag_attr` 用例
+    与**真实项目全部 40 个文件**由 FAIL 转 ok（那 17 处就是这三条）。
+    改掉的旧契约测试见 `test_fidelity_bytewise::test_L3_1_image_form_is_preserved_without_registry`
+    （原名叫 `..._differs_without_registry`，钉的正是这个"差异"）。
+
+    ⚠ **欠账**（同日记录，未修）：`tools/hell_nest_inline.py` 的嵌套菜单用例
+    （菜单套在选项体里）**渲染**仍然不对 —— 结构位（`Nest`）已经正确、
+    选项行也不再丢，但那一层菜单会被渲染成外层缩进/变成一句台词。
+    真实项目 **0 个嵌套菜单**，所以没有实机影响；诊断见
+    `beat_render._menu_segments` 那支"带嵌套菜单的选项体"上面的 `KNOWN` 注释。
+
 ## 常见改动落点
 
 | 想做什么 | 改哪里 |

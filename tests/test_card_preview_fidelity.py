@@ -60,7 +60,9 @@ class TestCardPreviewFidelity:
                  show='ling close_happy@left')
         code = render_beats_to_rpy([b])
         ops = stage_ops(code)
-        assert ('show', 'ling_close_happy', 'left') in ops, ops
+        # 没有资源表时**原样保留**（2026-10-05：不再"空格换下划线"，
+        # 见 `test_fidelity_bytewise::test_L3_1_image_form_is_preserved_...`）
+        assert ('show', 'ling close_happy', 'left') in ops, ops
 
         snap = snapshot_rows([b])[0]
         assert 'ling close_happy@left' in snap['actors'], snap['actors']
