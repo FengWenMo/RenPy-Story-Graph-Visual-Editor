@@ -255,6 +255,140 @@ def _make_opaque_lost_issue(lost: list, source_path=None) -> GuardIssue:
         f'要么确认这些定义在别处也有、用 `--force` 再来一次。')
 
 
+# ---------------------------------------------------------------------------
+#  结构位（嵌套）门禁 —— 见不变量 74
+# ---------------------------------------------------------------------------
+
+#: 会开一个缩进块的语句头（用来数"这个选项体里有几个块"）。
+_BLOCK_HEAD_RE = re.compile(r'^(?:if|elif|else|menu|for|while|python|init'
+                            r'|screen|style|translate|\$)\b|:$')
+
+
+def _subtree_shape(lines) -> tuple:
+    """
+    一棵子树 → `(语句数, 块数)`。注释与空行不算语句。
+
+    为什么是这两个数（而不是把整棵树序列化）：要判的是"**选项体里的内容
+    有没有被搬走**" —— 搬走会让语句数变（`pass` 让 2 变 0），
+    嵌套被压平会让块数变（`if` 里的两条被提出来 → 块数 1 变 0）。
+    两个数一起看，够用且**不会因为文本改写而误报**（台词改了不影响它们）。
+    """
+    n_stmt = 0
+    n_block = 0
+    for ln in lines or ():
+        text = (ln.text or '').strip()
+        if not text or text.startswith('#'):
+            continue
+        n_stmt += 1
+        if _BLOCK_HEAD_RE.search(text) and getattr(ln, 'subblock', None):
+            n_block += 1
+        sub = _subtree_shape(getattr(ln, 'subblock', None))
+        n_stmt += sub[0]
+        n_block += sub[1]
+    return n_stmt, n_block
+
+
+def _menu_signature(lines) -> list:
+    """
+    一段子树里的**所有菜单**（含嵌套），按文档顺序 →
+    `[[(选项体语句数, 选项体块数), …], …]`。
+
+    只认"菜单块里的选项"（头以引号开头），不碰 `screen` / `translate`
+    里那些长得像块的语句 —— 那是第一版探针踩过的坑（把 374 个块当成选项）。
+    """
+    out: list = []
+    for ln in lines or ():
+        text = (ln.text or '').strip()
+        if text.startswith('menu') and getattr(ln, 'subblock', None):
+            bodies = []
+            for opt in ln.subblock:
+                head = (opt.text or '').strip()
+                if not (head.startswith('"') or head.startswith("'")):
+                    continue
+                bodies.append(_subtree_shape(opt.subblock))
+            out.append(bodies)
+        out.extend(_menu_signature(getattr(ln, 'subblock', None)))
+    return out
+
+
+def menu_structure(text) -> dict:
+    """
+    `{label 名: 菜单结构指纹}` —— 每个 label 的每个菜单、每个选项体的形状。
+
+    这是"**结构位有没有被压平**"的可计算判据（交付审查的 A 档止血，
+    方案见 `docs/嵌套与行尾注释_修复方案_2026-10-05.md`）。
+
+    为什么只比菜单、不比全部嵌套：
+      · **纯 `if` 嵌套**在全量路径上走"条件合取"近似（`if a:` 里套 `if b:`
+        → `if (a) and (b):`）—— 那是**设计内**的，语义大体等价。
+        真实项目里这种嵌套有 **109 处**，报它就是刷屏，等于没报；
+      · 坏的只有**菜单选项体**：选项体里一旦有第二条语句或嵌套块，
+        "这条拍属于哪个选项"就只能靠 `Condition` 猜 → 实测被压平成
+        `"选项": pass` + 内容提到 label 级（**不管玩家选没选都会执行**）。
+    """
+    from storygraph.parsing.renpy_parser import RenPyLexer
+
+    try:
+        tree = RenPyLexer().tokenize_text(text)
+    except Exception as e:                   # noqa: BLE001 - 解析不了就不判
+        # 判不了就**不报**（宁可漏报也不许凭空报"结构坏了"）；
+        # 但要有痕迹：解析器真出错时 `safeguard.report()` 里看得到。
+        swallow('generation_guard.menu_structure', e)
+        return {}
+    out: dict = {}
+    for ln in tree:
+        text_ = (ln.text or '').strip()
+        if text_.startswith('label ') and text_.endswith(':'):
+            name = text_[len('label '):-1].strip().split()[0] if text_ else ''
+            if name:
+                out[name] = _menu_signature(ln.subblock)
+    return out
+
+
+def structure_loss(source_text, product_text) -> list:
+    """
+    源与产物的**菜单结构**对不上的 label：`[(label, 原样, 产物), …]`。
+
+    ⚠ 这是 **warn 级**判据，**故意不 block**（2026-10-05 实测的取舍）：
+    结构"变了"有两种可能 ——
+      · **被压平**（缺陷）：产物里 `"选项": pass`、内容跑到菜单外面；
+      · **人有意改的**（正常）：策划在表里给某个选项加了一句，
+        或在卡片编辑器里往选项体里插了一张卡。
+    只看"源 vs 产物"分不出这两者。而"假阳性比漏报更贵"（本项目既有立场）——
+    拦错一次就会让人学会忽略这条警告。所以：**报出来、别拦**。
+    等结构位进了表（方案 B），判据就能变成"产物 vs 表里说的结构"，
+    那时才可以升成 block。
+    """
+    src = menu_structure(source_text)
+    if not src:
+        return []
+    prod = menu_structure(product_text)
+    lost = []
+    for label, sig in src.items():
+        if label not in prod:
+            continue                          # label 缺失是另一条门禁的事
+        if sig != prod[label]:
+            lost.append((label, sig, prod[label]))
+    return lost
+
+
+def _make_structure_issue(lost: list, source_path=None) -> GuardIssue:
+    """把"菜单结构对不上"包成一条 **warn** 级发现（不拦写盘，见上）。"""
+    label, want, got = lost[0]
+    more = f'（共 {len(lost)} 个 label）' if len(lost) > 1 else ''
+    where = f'{source_path} ' if source_path else ''
+    return GuardIssue(
+        'STRUCTURE_LOST', 'warn',
+        f'{where}菜单结构对不上{more}：`{label}` 原文各选项体 '
+        f'{[tuple(x) for x in want]} / 产物 {[tuple(x) for x in got]}。'
+        f'全量重生成只认得"拍"，而"这条拍属于哪个选项"**没进表** ——'
+        f'选项体里有第二条语句或嵌套块时会被压平（`"选项": pass`、'
+        f'内容提到菜单外面 → 玩家选没选都会执行）。'
+        f'如果这是你有意改的结构，忽略本条；如果不是，'
+        f'加 `--source <这一章原来的 .rpy>` 走增量，别走全量。'
+        f'（方案见 docs/嵌套与行尾注释_修复方案_2026-10-05.md）')
+
+
 @dataclass(frozen=True)
 class GuardIssue:
     """生成安全门禁的一条发现。"""
@@ -825,6 +959,11 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
                 issue = GuardIssue(issue.code, 'warn', issue.message,
                                    issue.line_no)
             issues.append(issue)
+        # 结构位（菜单选项体）对不上 —— **只 warn，不拦**（见
+        # `structure_loss` 的 docstring：分不出"被压平"还是"人有意改的"）。
+        structure = structure_loss(source_text, text)
+        if structure:
+            issues.append(_make_structure_issue(structure, source_path))
     blocking = [i for i in issues if i.is_blocking]
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)

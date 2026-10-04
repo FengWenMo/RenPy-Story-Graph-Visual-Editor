@@ -401,6 +401,17 @@ class RenPyLexer:
         flat = self._flatten(raw_lines)
         return self._build_tree(flat, str(filepath))
 
+    def tokenize_text(self, text: str, filename: str = '<memory>') -> list:
+        """
+        同 `tokenize`，但源是**内存里的字符串**（不落盘）。
+
+        给"拿两段文本比结构"用（`generation_guard.menu_structure`：
+        源 .rpy vs 产物，见不变量 74）——那种地方不该为了解析去写临时文件。
+        """
+        self._current_file = str(filename)
+        flat = self._flatten(str(text or '').splitlines())
+        return self._build_tree(flat, str(filename))
+
     # ---------- 扁平化 ----------
 
     def _flatten(self, raw_lines: list) -> list:
