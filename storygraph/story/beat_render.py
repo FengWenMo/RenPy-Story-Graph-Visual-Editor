@@ -866,7 +866,9 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
 # 信息本来就完整地活在这一串拍里（顺序 + kind + condition），
 # 只是以前没有任何消费者去读它。
 
-#: 菜单选项体"无显式条件"时补的恒真条件（见 `stamp_menu_bodies`）。
+#: 菜单选项体分不出块内块外时的**兜底**条件（老表遗留的写法，见
+#: `_expected_body_condition`）。B 阶段三之后**不再由我们写入**：新表靠
+#: 隐藏列 `Nest`（块路径）说结构，只有老表里才可能见到 `True`。
 #: Ren'Py 里 `if True:` 永远成立，所以补它**不改变任何演出**；
 #: 它唯一的作用是让"这拍在菜单块里"变成一个可判定的结构信号。
 TRUE_CONDITION = 'True'
@@ -1181,56 +1183,6 @@ def nest_placement_conflicts(beats: list) -> list:
     return conflicts
 
 
-def stamp_menu_bodies(beats: list) -> int:
-    """
-    给菜单选项体里**没有条件**的拍补一个恒真条件（`True`），返回补了几拍。
-
-    为什么需要它（P0-1 的最后一环）：菜单组的边界靠 `condition` 兜底判定
-    （`_menu_member` 是 `.rpy` 侧的结构位，Excel 里存不下），而"选项无条件
-    + 选项体只写跳转"是最常见的写法 ——
-
-        menu:
-            "进去":              ← 选项 condition = ''
-                jump inner       ← 选项体 condition 也是 ''
-        "剧情继续"                ← 块外，condition 还是 ''
-
-    三个空串分不出谁在块里。把选项体里**空条件**的拍写成 `True`
-    （**语义等价**，Ren'Py 里 `if True:` 永远成立）之后，条件就成了可判定
-    的结构信号：
-
-        选项体（无条件）→ `True`      块外 → 空
-
-    为什么只补空条件（不统一覆盖选项体）：
-      · 选项自身有条件的（`"去屋顶" if love >= 0:`），选项体的拍本来就带着
-        那个条件（解析器 `_combine` 进去的），边界已经可判定，不必再动；
-      · 只补"本来没有信息"的那些，改动面最小。
-
-    两个直接好处：
-      · Excel 往返（以及任何丢掉 `_menu_member` 的路径）之后菜单结构还在；
-      · 反复往返**收敛**（第二次拿到的 `True` 原样保留，不会再变）。
-
-    为什么不在渲染时就写 `if True:`：渲染会把"与选项同条件的累积条件"
-    剥掉（那是解析器的记账，不是真嵌套 `if`），所以 `.rpy → .rpy` 那条路
-    完全不需要动内容，少写一层缩进更贴近原文。只在**写表前**补。
-    """
-    stamped = 0
-    for kind, unit in split_beat_units(beats):
-        if kind != 'menu':
-            continue
-        for opt, body, _foreign in _menu_segments(unit):
-            if opt is None:
-                continue
-            # 只补**能确定属于本选项**的拍：认不出归属的（`_foreign`）
-            # 补成 `True` 会让它下一轮被误判成"块体的一员"，
-            # 那句显式警告就消失了（见 `_is_menu_foreign`）。
-            for _pos, beat, _why in body:
-                if not (beat.condition or '').strip():
-                    beat.condition = TRUE_CONDITION
-                    stamped += 1
-    return stamped
-
-
-
 def _last_option(run: list):
     """
     这一组菜单里**当前生效**的选项的条件。
@@ -1316,39 +1268,53 @@ def _menu_segments_by_path(run: list):
             break
     if not prefix:
         return None                           # 没有选项行 → 交给老路
-    # 先按**选项行的顺序**建段（键 = 位置键），再把块体拍按路径的键归位
-    segments: list = []
-    key_of: dict = {}
-    for b in run[1:]:
-        path = str(getattr(b, 'nest_path', ''))
-        if path == prefix and b.kind == KIND_MENU_OPTION:
-            key = option_key(len(segments) + 1)
-            key_of[key] = len(segments)
-            segments.append([b, [], []])
-        elif path == prefix:
-            # 菜单层上"不是选项行"的畸形拍：先寄在上一段（没有段就单开一段）
-            target = segments[-1] if segments else None
-            if target is None:
-                segments.append([None, [], []])
-                target = segments[-1]
-            target[2].append((0, b, '这一拍在菜单层、却不属于任何选项'))
-    if not segments:
-        return None                           # 一级选项都没有 → 老路
+    # 建段的第一趟：按**选项行的顺序**排好位置（选项行本身不带键）。
+    option_rows: list = []                    # [(pos, 选项拍)]
+    malformed: list = []                      # 菜单层上"不是选项行"的畸形拍
+    keys_in_order: list = []                  # 块体按键**首次出现**的顺序
     for pos, b in enumerate(run[1:]):
-        if b.kind == KIND_MENU_OPTION and \
-                str(getattr(b, 'nest_path', '')) == prefix:
-            continue                          # 选项行本身已经建过段
         path = str(getattr(b, 'nest_path', ''))
+        if path == prefix:
+            if b.kind == KIND_MENU_OPTION:
+                option_rows.append((pos, b))
+            else:
+                malformed.append((pos, b))
+            continue
         rest = path[len(prefix):].lstrip('>') if path.startswith(prefix) else ''
         if not rest:
-            continue                          # 上面的畸形拍已经收过
+            return None                       # 在菜单里却算不出键 → 交给老路
+        key = rest.split('>')[0]
+        if key not in keys_in_order:
+            keys_in_order.append(key)
+    if not option_rows:
+        return None                           # 一级选项都没有 → 老路
+    # 键 → 段：按**出现顺序**配对（不是按键的字母）。为什么：
+    # 键是解析器按"当时第几个选项"写的（`A`/`B`…），而**表可以被编辑** ——
+    # 删掉选项 A 之后，存下来的键还是 `B`，可它现在排第 1 位。
+    # 按顺序配对才对得上（`test_deleting_an_option_keeps_the_rest` 抓到的）。
+    segments = [[opt, [], []] for _pos, opt in option_rows]
+    key_of: dict = {}
+    for i, key in enumerate(keys_in_order):
+        if i < len(segments):
+            key_of[key] = i
+    # 第二趟：块体拍按**它的键**归位；键对不上（编辑过）就按出现顺序找空位
+    for pos, b in enumerate(run[1:]):
+        path = str(getattr(b, 'nest_path', ''))
+        rest = path[len(prefix):].lstrip('>') if path.startswith(prefix) else ''
+        if not rest or b.kind == KIND_MENU_OPTION:
+            continue                          # 选项行/畸形拍已经处理过
         key = rest.split('>')[0]
         idx = key_of.get(key)
         if idx is None:
-            idx = len(segments)
+            # 没配上的键（例如它的选项行被删了）：找第一个还没认领的段
+            idx = next((k for k in range(len(segments))
+                        if not segments[k][1]), None)
+            if idx is None:
+                return None                   # 实在放不下 → 交给老路
             key_of[key] = idx
-            segments.append([None, [], []])   # 先见块体、后见选项行
         segments[idx][1].append((pos, b, ''))
+    for pos, b in malformed:                  # 菜单层上"不是选项行"的拍
+        segments[-1][2].append((pos, b, '这一拍在菜单层、却不属于任何选项'))
     return segments
 
 

@@ -35,7 +35,7 @@ from storygraph.story.beat_model import (
     HIDDEN_BEAT_COLUMNS,
     assign_identity,
 )
-from storygraph.story.beat_render import make_symbols, stamp_menu_bodies
+from storygraph.story.beat_render import make_symbols
 from storygraph.story.paths import _guess_project_root
 from storygraph.excel.cells import set_text as _set_text
 from storygraph.excel.cells import append_text_row as _append_text_row
@@ -94,10 +94,12 @@ def export_beats_to_excel(beats: list, output_path,
     ws.row_dimensions[1].height = 30
 
     symbols = make_symbols(registry) if registry is not None else None
-    # 菜单选项体的"空条件"先补成恒真条件（`True`）：Excel 里没有
-    # "这拍在菜单块里"这一位，只能靠条件把它记下来，否则回导之后
-    # 选项体分不出块内块外（P0-1 的最后一环，见 `stamp_menu_bodies`）。
-    stamp_menu_bodies(beats)
+    # ⚠ **不再给选项体补 `True` 条件**（B 阶段三，2026-10-05）：
+    # 从前必须补，是因为表里没有"这拍在菜单块里"这一位，只能拿 Condition
+    # 记 1 bit（`True` = 在某个选项体里 / 空 = 块外）。现在隐藏列 `Nest`
+    # （块路径）随表走、渲染器也按它建树（见不变量 75/76），这一位就多余了；
+    # 留着还会让产物多出一层 `if True:`、让"过表"与"直接渲染"两份产物对不上。
+    # 老表（有 `True`、没有 `Nest`）照样能读：渲染退回老推断，而它要的正是那些 `True`。
     for beat in beats:
         _append_text_row(ws, beat.to_row(symbols))
 
