@@ -378,6 +378,13 @@ class LogicalLine:
     # 整行注释（`# ...`）。原先在 lexer 就被丢弃，导致"给美术的表情标注"
     # 这类跨职能信息在 rpy↔表格 往返中消失。现在保留下来。
     is_comment: bool = False
+    #: **行尾注释原文**（含 `#`）。原先在词法器里被 `_strip_inline_comment`
+    #: 直接丢掉 —— IR 里根本没有这个字段，于是"表 → 新文件"这条路必然丢它
+    #: （改过的行走增量也丢）。现在留下来，随隐藏列 `Inline` 走。
+    #:
+    #: ⚠ **只对单行逻辑语句有值**：多行逻辑语句（括号续行、`\` 续行）里
+    #: "这条注释属于哪一行"说不清，硬记下来只会贴错地方 —— 那种情况留空。
+    inline_comment: str = ''
 
 
 class RenPyLexer:
@@ -441,7 +448,7 @@ class RenPyLexer:
             # **注释的 `#` 被吃掉、变成了非法 ATL 代码**，产物跑不起来。
             # 消费方（CommentNode / pending_comments）本来就用 `.strip()` 取文本。
             if stripped.startswith('#'):
-                flat.append((raw, line_no, indent, True))
+                flat.append((raw, line_no, indent, True, ''))
                 i += 1
                 continue
 
@@ -486,9 +493,11 @@ class RenPyLexer:
                 # 之后按行剥离行内注释时第一个 '#' 就会把后面全删掉。
                 accumulated += '\n' + raw_lines[i].rstrip()
 
+            # 先摘出**行尾注释原文**，再剥掉它（顺序不能反）
+            inline = self._inline_comment(accumulated)
             accumulated = self._strip_inline_comment(accumulated)
 
-            flat.append((accumulated, line_no, indent, False))
+            flat.append((accumulated, line_no, indent, False, inline))
             i += 1
 
         return flat
@@ -547,6 +556,22 @@ class RenPyLexer:
         return line
 
     @staticmethod
+    def _inline_comment(text: str) -> str:
+        r"""
+        行尾注释**原文**（含 `#`）；没有就返回 `''`。
+
+        只认**单行**逻辑语句：多行语句（括号续行 / 反斜杠续行）里注释可能挂在
+        任何一行上，记成"这条语句的注释"会在渲染时贴到别的行去 ——
+        宁可不留（那种情况本来就是少数，且贴错比不贴更坏）。
+        """
+        text = str(text or '')
+        if not text or '\n' in text:
+            return ''
+        code = RenPyLexer._strip_line_comment(text)
+        rest = text[len(code):].strip()
+        return rest if rest.startswith('#') else ''
+
+    @staticmethod
     def _strip_inline_comment(text: str) -> str:
         """
         去掉行内注释，**按行处理**。
@@ -595,13 +620,15 @@ class RenPyLexer:
         stack = [root]
 
         for item in flat:
-            text, line_no, indent, is_comment = item
+            text, line_no, indent, is_comment = item[:4]
+            inline = item[4] if len(item) > 4 else ''
             node = LogicalLine(
                 text=text,
                 line_number=line_no,
                 indent=indent,
                 filename=filename,
                 is_comment=is_comment,
+                inline_comment=inline,
             )
             while len(stack) > 1 and stack[-1].indent >= indent:
                 stack.pop()
@@ -1124,6 +1151,11 @@ class RenPyParser:
             line = lines[i]
             text = line.text.strip()
             node = self._parse_statement(line, text)
+            if node is not None:
+                # 行尾注释跟着**这一行**走（C：见 `LogicalLine.inline_comment`）。
+                # 动态属性，与 `Statement.nest_path` 同款 —— 不让它进 dataclass
+                # 的相等/哈希（那是"内容指纹"契约的一部分）。
+                node.inline_comment = getattr(line, 'inline_comment', '')
 
             if node is None:
                 i += 1
@@ -2203,6 +2235,9 @@ class RenPyParser:
             opt = self._parse_menu_option(line, text)
             if opt is not None:
                 opt.block = self._parse_block(line.subblock)
+                # 选项行自己的行尾注释（C）：选项行不是独立 AST 节点，
+                # 注释只能挂在这张选项节点上（动态属性，同 `nest_path` 的做法）
+                opt.inline_comment = getattr(line, 'inline_comment', '')
                 options.append(opt)
                 i += 1
                 continue
@@ -2543,8 +2578,10 @@ class ParseResultBuilder:
         #: 同 kind 兄弟块的**文档序**计数器（整个 label 共用一份）——
         #: `menu:2` 就是"这个 label 里第 2 个菜单块"，与按行扫出来的顺序一致。
         counters = counters if counters is not None else {}
+        #: 当前 AST 节点的行尾注释（`add_stmt` 读它 —— 逐节点更新）
+        cur_inline = ['']
 
-        def add_stmt(stmt, path: str = None):
+        def add_stmt(stmt, path: str = None, inline: str = None):
             """
             收集语句，同时记下它属于哪个 label / 哪个菜单选项。
 
@@ -2584,11 +2621,16 @@ class ParseResultBuilder:
             #   · `''`   = label 顶层
             #   · `if:1>menu:2>A>if:3` = 第 1 个 if → 第 2 个菜单 → 第 A 个选项 → 第 3 个 if
             stmt.nest_path = nest_path if path is None else path
+            # 行尾注释（C）：与 `nest_path` 一样是**动态属性**，不进内容指纹。
+            # `inline` 用于"这一行的注释不在 AST 节点上"的情况（菜单选项行）。
+            stmt.inline_comment = (cur_inline[0] if inline is None else inline)
             result.statements.append(stmt)
             result.statement_labels.append(current_label)
             result.statement_menu_options.append(menu_option)
 
         for node in nodes:
+            # 行尾注释（C）：本节点这一行的注释，`add_stmt` 会读到它
+            cur_inline[0] = getattr(node, 'inline_comment', '')
             if isinstance(node, LabelNode):
                 result.labels[node.name] = (node.filename, node.line_number)
                 self._walk(node.block, node.name, result)
@@ -2751,7 +2793,8 @@ class ParseResultBuilder:
                     # 选项行本身**在菜单里、不在任何选项体里** → 路径到菜单为止
                     add_stmt(Statement.make_menu_option(
                         opt.text, self._combine(accum_cond, opt.condition),
-                        source=(opt.filename, opt.line_number)), menu_path)
+                        source=(opt.filename, opt.line_number)), menu_path,
+                        inline=getattr(opt, 'inline_comment', ''))
                     self._walk(opt.block, current_label, result,
                                self._combine(accum_cond, opt.condition),
                                opt.text,

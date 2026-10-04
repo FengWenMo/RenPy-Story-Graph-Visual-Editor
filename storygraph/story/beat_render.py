@@ -632,6 +632,36 @@ _render_code_block = render_code_block
 
 
 
+def _attach_inline_note(lines: list, beat) -> list:
+    """
+    把行尾注释贴到这一拍渲染出来的行上。
+
+    **贴哪一行**有讲究：
+
+      · 一拍一行 → 就是它；
+      · 一拍多行 → **只有当前面几行都是"块头"（以 `:` 收尾）时才贴最后一行**
+        （语句本体在那里）。典型形态是条件拍：
+
+            if (fsflag) and not (_return == correct_answer):
+                "你是笨蛋嘛喵？…"      ← 源码里注释写的是**这一行**
+
+        别的多行形态（舞台指令 + 台词、多行代码）**不贴** —— 说不清注释原本
+        挂在哪一行，**贴错比不贴更坏**。
+    """
+    note = _inline_note(beat)
+    if not note or not lines:
+        return lines
+    target = 0
+    if len(lines) > 1:
+        heads = [ln for ln in lines[:-1] if ln.strip()]
+        if not heads or not all(ln.rstrip().endswith(':') for ln in heads):
+            return lines
+        target = len(lines) - 1
+    if '#' in lines[target]:
+        return lines                      # 这一行已经有注释了，别叠
+    return [ln + note if i == target else ln for i, ln in enumerate(lines)]
+
+
 def render_beat_to_rpy(beat: Beat, indent: str = '    ',
                        name_resolver=None, audit=None,
                        trace: list = None) -> list:
@@ -837,10 +867,14 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         # 正确做法是**无条件再加一层**：调用方负责"这一拍整体在哪一层"，
         # 这里负责"拍内部块体比条件头深一层"。两条职责分开之后，
         # 顶层与嵌套两条路都能出对。
-        return pre + [f"if {beat.condition}:"] + [
-            '    ' + ln if ln.strip() else '' for ln in lines
-        ]
-    return pre + lines
+        return _attach_inline_note(
+            pre + [f"if {beat.condition}:"] + [
+                '    ' + ln if ln.strip() else '' for ln in lines
+            ], beat)
+    # **行尾注释**（C）：贴在这一拍的输出上（只在一拍一行、源语句也一行时贴，
+    # 见 `_inline_note`）。放在**这里**是因为它是"单拍渲染"的唯一出口 ——
+    # 顶层（`render_beats_to_rpy`）、菜单头/选项行之外的所有拍都走它。
+    return _attach_inline_note(pre + lines, beat)
 
 
 
@@ -1522,6 +1556,7 @@ def _render_menu_segments(run: list, segments: list, indent: str,
     if caption:
         head += ' ' + _quote(caption)
     head += ':'
+    head += _inline_note(run[0])
     emit(head, '菜单', caption)
 
     for seg in segments:
@@ -1539,6 +1574,7 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         if own_cond and own_cond != menu_cond:
             label += f' if {own_cond}'
         label += ':'
+        label += _inline_note(opt)
         emit(label, '菜单', opt.text or '')
 
         # 选项体在拍上带的条件是**累积**的（`_combine(外层, 选项条件)`）。
@@ -2070,6 +2106,30 @@ def _normalize_image_name(name: str) -> str:
         return name
     return name.replace(' ', '_')
 
+
+
+def _inline_note(beat) -> str:
+    """
+    这一拍的行尾注释要不要贴、贴成什么样（C 阶段）。
+
+    判据**故意严**：
+
+      · 拍本身只能渲染出**一行**（贴到多行拍的第一行会变成"整个块"的注释）；
+      · 注释本身得是单行、且以 `#` 开头（词法器给的原文）。
+
+    "源语句是不是单独一行"这件事**不在这里判** —— 它由词法器在采集时就定死了
+    （`_inline_comment` 对多行逻辑语句返回空），所以列里有值 = 那一行是单行。
+    第一版在这里又查了 `src_first == src_last`，结果**表那条路全丢**：
+    行号是运行期元数据、不进表（`from_row` 之后全是 0）。
+
+    返回 `'  # …'`（可直接拼到行尾）或 `''`（不贴）。
+    """
+    note = str(getattr(beat, 'inline_comment', '') or '').strip()
+    if not note.startswith('#'):
+        return ''
+    if '\n' in note or '\r' in note:
+        return ''
+    return '  ' + note
 
 
 def _quote(text: str) -> str:

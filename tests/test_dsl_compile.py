@@ -309,7 +309,7 @@ class TestSheetContract:
         现在走**隐藏表**「文件级保真」（见 `beat_model.FILE_BLOCK_SHEET`）——
         表是按行存的，没有长度上限。
         """
-        assert len(BEAT_FIELDS) == 25, BEAT_FIELDS
+        assert len(BEAT_FIELDS) == 26, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
             assert col in BEAT_FIELDS
         # 每列都挂得上下拉的"结构化编辑面"
@@ -328,18 +328,18 @@ class TestSheetContract:
         assert 'Condition' not in HIDDEN_BEAT_COLUMNS
         # 三列内部元数据在表里，但必须整列隐藏；**新增的要排在最末尾**
         # （用户明确要求"放远点"），且先后顺序就是"加进来的顺序"。
-        for col in ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest'):
+        for col in ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline'):
             assert col in BEAT_FIELDS, col
             assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'
-        # 顺序 = 加进来的顺序（`Nest` = 结构位，B 阶段一）
-        assert BEAT_FIELDS[-2:] == ['CodeBlocks', 'Nest'], BEAT_FIELDS
+        # 顺序 = 加进来的顺序（`Nest` = 结构位 B 阶段一；`Inline` = 行尾注释 C）
+        assert BEAT_FIELDS[-3:] == ['CodeBlocks', 'Nest', 'Inline'], BEAT_FIELDS
         # 文件级保真块**不许**再回到列里（它超长会被静默截断）
         assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
         # 其余列的中文表头里不该出现它们，否则策划会去找那一列
         hidden_headers = [h for k, h in BEAT_HEADERS.items()
                           if k in ('StageOrder', 'OpOrder', 'CodeBlocks',
-                                   'Nest')]
-        assert len(hidden_headers) == 4, '隐藏列也该有表头（隐藏≠没有这一列）'
+                                   'Nest', 'Inline')]
+        assert len(hidden_headers) == 5, '隐藏列也该有表头（隐藏≠没有这一列）'
         # 顺带锁住"行"与"列"不会错位
         assert len(Beat(seq=1, label='a', text='x').to_row()) == \
             len(BEAT_FIELDS)

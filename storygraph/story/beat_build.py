@@ -187,6 +187,8 @@ class _BeatBuilder:
         # 所以判据是"语句上有没有这一位"（`None` = 手工构造的语句 = 不知道）。
         if getattr(stmt, 'nest_path', None) is not None:
             beat.nest_path = stmt.nest_path
+        # 行尾注释（C）同样转发；空串是合法值（这一行本来就没注释）
+        beat.inline_comment = getattr(stmt, 'inline_comment', '') or ''
         return beat
 
     def mark_stage(self, verb: str) -> None:
@@ -461,6 +463,7 @@ class _BeatBuilder:
         menu_beat._menu_member = False
         # 菜单头在**父块**里（组头不属于任何选项体）
         menu_beat.nest_path = getattr(stmt, 'nest_path', None)
+        menu_beat.inline_comment = getattr(stmt, 'inline_comment', '') or ''
         self.beats.append(menu_beat)
         # 菜单把说话链打断了：选项之后的第一句该谁说是新语境
         self.last_speaker = ''
@@ -481,6 +484,7 @@ class _BeatBuilder:
         opt._menu_member = False
         # 选项行在**菜单里、不在任何选项体里**（解析器给的路径到菜单为止）
         opt.nest_path = getattr(stmt, 'nest_path', None)
+        opt.inline_comment = getattr(stmt, 'inline_comment', '') or ''
         self.beats.append(opt)
         self.flush_stage_only()
         self.last_speaker = ''

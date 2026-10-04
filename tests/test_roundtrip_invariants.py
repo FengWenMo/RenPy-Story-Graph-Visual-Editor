@@ -1064,8 +1064,8 @@ class TestCodeBlocksColumn:
         # "放远点"：内部元数据排在最后（`FileBlocks` 一度也是隐藏列，
         # 2026-10-05 挪去隐藏表了 —— Excel 单元格 32767 的上限会静默截断
         # 真实文件的顶层区间，见 `beat_model.FILE_BLOCK_SHEET`）
-        # `Nest`（结构位，B 阶段一）排在 `CodeBlocks` 之后。
-        assert BEAT_FIELDS[-2:] == ['CodeBlocks', 'Nest'], BEAT_FIELDS
+        # `Nest`（结构位，B 阶段一）/ `Inline`（行尾注释，C）排在后面。
+        assert BEAT_FIELDS[-3:] == ['CodeBlocks', 'Nest', 'Inline'], BEAT_FIELDS
         assert 'Nest' in HIDDEN_BEAT_COLUMNS
         assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
 

@@ -72,13 +72,17 @@ BEAT_FIELDS = [
     # 一进 Excel 就没了；前者随表走，于是"这条拍属于哪个选项"在表格往返
     # 之后仍然说得清（现在只用来**对拍**，阶段二才让渲染改用）。
     'Nest',
+    # `Inline`：**行尾注释**（C）。它与 `Nest` 不同 —— 那是结构位，这是
+    # 词法细节；两者都"工具维护 + 整列隐藏"。
+    'Inline',
 ]
 
 
 #: 这些列整列隐藏（工具维护的内部元数据，策划不该看见也不该填）。
 #: 隐藏（hidden=True）在 Excel/WPS 里都是"列被收起"而不是"没有这一列"，
 #: 数据照旧读写，所以往返不会丢——这是选隐藏列而非"不写这一列"的原因。
-HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest')
+HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest',
+                       'Inline')
 
 
 # 写进 Excel 的表头（中文）。策划只看中文；程序侧键名仍是英文，
@@ -97,6 +101,7 @@ BEAT_HEADERS = {
     'OpOrder': '操作顺序（内部）',
     'CodeBlocks': '代码块结构（内部）',
     'Nest': '结构位（内部）',
+    'Inline': '行尾注释（内部）',
 }
 
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
@@ -134,7 +139,7 @@ SINGLE_LINE_BEAT_FIELDS = (
     'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Condition',
     'Scene', 'Show', 'At', 'With', 'Hide',
     'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
-    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks', 'Nest',
+    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline',
 )
 
 #: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。
@@ -393,6 +398,12 @@ class Beat:
     #:   · `None` = **不知道**（老表 / 手工构造的拍）→ 对拍时整份跳过，
     #:     绝不拿"不知道"当"在顶层"（那会天天假报）。
     nest_path: Optional[str] = None
+    #: **行尾注释原文**（含 `#`，C 阶段）。
+    #:
+    #: 从前它被词法器丢掉了（`_strip_inline_comment`），于是"表 → 新文件"
+    #: 这条路必然丢、改过的行走增量也丢。现在随隐藏列 `Inline` 走。
+    #: 空串 = 这一行没有行尾注释（**不是"不知道"**：注释本来就是可选的）。
+    inline_comment: str = ''
     music: str = ''
     music_params: str = ''
     music_action: str = 'play'     # 'play' / 'queue' / 'stop'
@@ -461,6 +472,7 @@ class Beat:
             # 结构位：顶层写 `-`（**有信息**），不知道写空（老表兼容）——
             # 两者必须能分开，否则对拍会把"不知道"当成"在顶层"。
             ('-' if self.nest_path == '' else (self.nest_path or '')),
+            self.inline_comment or '',
         ])
 
     @classmethod
@@ -563,6 +575,13 @@ class Beat:
             _nest = ''
         beat.nest_path = (None if not _nest
                           else ('' if _nest == '-' else _nest))
+        # 行尾注释（C）：原文（含 `#`），空 = 没有。
+        # ⚠ 与 `Nest` 同一个道理：用 `g`（会清洗并记进 `sanitized_cells`），
+        # 不能用 `g_text` —— 后者不留痕，正是"静默改数据"
+        # （`test_cleaning_is_recorded[Inline]` 当场抓到）。
+        # 被清洗过 = 这一格本来不是一条干净的注释 → **丢掉**（不清洗过的才可信）。
+        _inline = g('Inline')
+        beat.inline_comment = '' if 'Inline' in sanitized else _inline
         (beat.raw, beat.code, beat.ordered,
          marked_blocks) = _split_code_cell(
              beat.code, expand_code_blocks(beat.code_blocks))
