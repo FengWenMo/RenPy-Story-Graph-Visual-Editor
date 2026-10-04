@@ -20,7 +20,8 @@ from typing import Optional
 from storygraph.core.vocabulary import (GENERATOR_MARKER,
                                         RENPY_BUILTIN_TRANSFORMS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
-from storygraph.core.nest_path import body_chain, option_key
+from storygraph.core.nest_path import (body_chain, join_nest,
+                                       option_key, split_nest)
 
 from storygraph.story.beat_model import (
     Beat,
@@ -871,24 +872,113 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
 TRUE_CONDITION = 'True'
 
 
-def split_beat_units(beats: list) -> list:
+def split_beat_units(beats: list, use_paths: bool = True) -> list:
     """
     拍序列 → **渲染单元**序列：`[('menu', 菜单组的拍), ('beat', [一拍])]`。
 
     菜单组从一张 `menu` 拍开始（见 `_take_menu_run` 的边界判据），
     其余每张拍自成一个单元——渲染行为与以前完全一致。
+
+    `use_paths=False` 强制走**老推断**（`_menu_member` / 条件 / 行号）：
+    对拍器要用它算"老路本来会怎么摆"，否则就成了拿路径比路径
+    （见 `nest_placement_conflicts`）。
     """
     beats = list(beats or ())
+    # **结构位齐不齐**逐 label 判（B 阶段二）：齐了就让块路径说了算，
+    # 否则那一份整份退回老推断 —— 混着用会出现"半截菜单"，而多吞/少吞
+    # 一拍都是静默的剧情错误（见 `_take_menu_run` 的 docstring）。
+    plan = _nest_plan(beats) if use_paths else {'known': {}, 'menu_no': {}}
     units = []
     i = 0
     while i < len(beats):
         if beats[i].kind == KIND_MENU:
-            run, i = _take_menu_run(beats, i)
+            by_path = _take_menu_run_by_path(beats, i, plan)
+            if by_path is None:
+                run, i = _take_menu_run(beats, i)
+            else:
+                run, i = by_path
             units.append(('menu', run))
             continue
         units.append(('beat', [beats[i]]))
         i += 1
     return units
+
+
+def _nest_plan(beats: list) -> dict:
+    """
+    预扫：`{'known': {label: 是不是每条拍都有结构位},
+            'menu_no': {id(menu 拍): 它在 label 内第几个}}`。
+
+    `menu_no` 与解析器 `_walk` 的计数是**同一套文档序**：第 k 张
+    `KIND_MENU` 拍对应块路径里的 `menu:k`（嵌套菜单也是文档序，
+    所以这条对应关系对嵌套同样成立）。
+    """
+    known: dict = {}
+    menu_no: dict = {}
+    counters: dict = {}
+    for b in beats or ():
+        label = str(getattr(b, 'label', '') or '')
+        if getattr(b, 'nest_path', None) is None:
+            known[label] = False
+        else:
+            known.setdefault(label, True)
+        if b.kind == KIND_MENU:
+            counters[label] = counters.get(label, 0) + 1
+            menu_no[id(b)] = counters[label]
+    return {'known': known, 'menu_no': menu_no}
+
+
+def _under_nest(path, prefix: str) -> bool:
+    """`path` 在这棵子树里吗（等于前缀，或前缀 + `>` 再往下）。"""
+    if path is None:
+        return False
+    path = str(path)
+    return path == prefix or path.startswith(f'{prefix}>')
+
+
+def _next_under_nest(beats: list, start: int, prefix: str):
+    """`start` 之后（不含）还有没有落在 `prefix` 里的拍？返回它的下标。"""
+    for j in range(start, len(beats)):
+        if _under_nest(getattr(beats[j], 'nest_path', None), prefix):
+            return j
+    return None
+
+
+def _take_menu_run_by_path(beats: list, start: int, plan: dict):
+    """
+    结构位齐全时：菜单组 = **块路径落在同一棵子树里**的那些拍（B 阶段二）。
+
+    比老推断强在哪：一张"掉队的选项拍"（策划在 Excel 里插过一拍）不再靠
+    `_menu_looks_unfinished` 去救 —— 它的路径直接说明它在这个菜单里。
+
+    落单的拍（不在这棵子树里、但后面还有本菜单的拍）**照样收进来**，
+    交给 `_menu_segments_by_path` 标成 `foreign`（渲染时带显式警告）——
+    这与老路一致，且避免"半截菜单"。
+
+    返回 `None` = 这一份用不了路径（调用方退回老路）。
+    """
+    head = beats[start]
+    label = str(getattr(head, 'label', '') or '')
+    k = plan['menu_no'].get(id(head))
+    if not plan['known'].get(label) or not k:
+        return None
+    prefix = join_nest(getattr(head, 'nest_path', '') or '', f'menu:{k}')
+    run = [head]
+    i = start + 1
+    while i < len(beats):
+        if _under_nest(getattr(beats[i], 'nest_path', None), prefix):
+            run.append(beats[i])
+            i += 1
+            continue
+        # 不在这棵子树里：后面还有本菜单的拍吗？（有 → 这是"掉队"的拍）
+        if beats[i].kind == KIND_MENU:
+            break
+        nxt = _next_under_nest(beats, i + 1, prefix)
+        if nxt is None:
+            break
+        run.extend(beats[i:nxt])              # 掉队的那几张一起收
+        i = nxt
+    return run, i
 
 
 
@@ -1032,14 +1122,17 @@ def _actual_chains(group: list, counter: list, parent_chain: tuple) -> dict:
     它们渲染时本来就被摆在菜单外（带一句显式警告）。
     """
     chains: dict = {}
-    for kind, unit in split_beat_units(group):
+    # ⚠ **必须 `use_paths=False`**：这里要算的是"**老推断**会把它摆在哪"，
+    # 拿路径再算一遍就成了自证（永远一致），对拍器也就没用了。
+    for kind, unit in split_beat_units(group, use_paths=False):
         if kind != 'menu':
             for b in unit:
                 chains[id(b)] = parent_chain
             continue
         counter[0] += 1
         n = counter[0]
-        for oi, (opt, body, foreign) in enumerate(_menu_segments(unit), start=1):
+        for oi, (opt, body, foreign) in enumerate(
+                _menu_segments(unit, use_paths=False), start=1):
             if opt is None:
                 continue
             chains[id(opt)] = parent_chain          # 选项行在菜单层
@@ -1180,7 +1273,86 @@ def _expected_body_condition(option, menu_condition) -> str:
 
 
 
-def _menu_segments(run: list) -> list:
+def _menu_segments_by_path(run: list):
+    """
+    结构位齐全时：选项归属**由块路径直接决定**（B 阶段二）。
+
+    与老路的差别（也是它存在的理由）：
+
+      · **不再猜**。老路靠 `_menu_member`（进不了 Excel）与 `Condition` 串
+        （只有 1 bit）判"这条拍属于哪个选项"；选项体里一旦有第二条语句
+        或嵌套块，信号就塌 —— 实测会产出 `"选项": pass` + 内容提到菜单外
+        （**选没选都会执行**，`tools/probe_nesting_min.py`）。
+      · **"认不出归属"这一类基本消失**：路径齐的时候，拍要么在菜单层
+        （选项行），要么在某个选项键下面。真正畸形（在菜单层却不是选项行）
+        才进 `foreign`，渲染时带一句显式警告。
+
+    选项键用的是**位置键**（第 1 个选项 `A`、第 2 个 `B`…）—— 与解析器
+    写路径时同一套口径（`core/nest_path.option_key`）。
+
+    返回 `None` = 这一组用不了路径（有拍没结构位 / 算不出本菜单前缀），
+    调用方退回老路。
+    """
+    if not run:
+        return None
+    # **整组必须都有结构位**，一条"不知道"就整组退回老路 ——
+    # 与 `_take_menu_run_by_path` 同一套粒度。
+    # ⚠ 别只在前缀那一趟里查：手工加的行（`nest_path is None`）会在后面的
+    # 落拍循环里被 `str(None)` 变成字面量 `'None'`、**静默跳过** ——
+    # 那一拍就这么丢了（`test_inserting_a_beat_between_options_keeps_the_menu`
+    # 当场抓到）。
+    if any(getattr(b, 'nest_path', None) is None for b in run):
+        return None
+    head_path = str(getattr(run[0], 'nest_path', '') or '')
+    depth = len(split_nest(head_path))
+    prefix = ''
+    for b in run[1:]:
+        path = getattr(b, 'nest_path', None)
+        if path is None:
+            return None                       # 有一条不知道 → 整组退回老路
+        segs = split_nest(path)
+        if len(segs) > depth and segs[-1].startswith('menu:'):
+            prefix = '>'.join(segs)
+            break
+    if not prefix:
+        return None                           # 没有选项行 → 交给老路
+    # 先按**选项行的顺序**建段（键 = 位置键），再把块体拍按路径的键归位
+    segments: list = []
+    key_of: dict = {}
+    for b in run[1:]:
+        path = str(getattr(b, 'nest_path', ''))
+        if path == prefix and b.kind == KIND_MENU_OPTION:
+            key = option_key(len(segments) + 1)
+            key_of[key] = len(segments)
+            segments.append([b, [], []])
+        elif path == prefix:
+            # 菜单层上"不是选项行"的畸形拍：先寄在上一段（没有段就单开一段）
+            target = segments[-1] if segments else None
+            if target is None:
+                segments.append([None, [], []])
+                target = segments[-1]
+            target[2].append((0, b, '这一拍在菜单层、却不属于任何选项'))
+    if not segments:
+        return None                           # 一级选项都没有 → 老路
+    for pos, b in enumerate(run[1:]):
+        if b.kind == KIND_MENU_OPTION and \
+                str(getattr(b, 'nest_path', '')) == prefix:
+            continue                          # 选项行本身已经建过段
+        path = str(getattr(b, 'nest_path', ''))
+        rest = path[len(prefix):].lstrip('>') if path.startswith(prefix) else ''
+        if not rest:
+            continue                          # 上面的畸形拍已经收过
+        key = rest.split('>')[0]
+        idx = key_of.get(key)
+        if idx is None:
+            idx = len(segments)
+            key_of[key] = idx
+            segments.append([None, [], []])   # 先见块体、后见选项行
+        segments[idx][1].append((pos, b, ''))
+    return segments
+
+
+def _menu_segments(run: list, use_paths: bool = True) -> list:
     """
     菜单组 → `[(选项拍 or None, 选项体的拍列表, 认不出归属的拍), ...]`。
 
@@ -1190,6 +1362,10 @@ def _menu_segments(run: list) -> list:
     加一句显式警告，而不是悄悄塞进当前选项体（那会让它变成"只有选中这个
     选项才播"的静默剧情错误）。
     """
+    if use_paths:
+        by_path = _menu_segments_by_path(run)
+        if by_path is not None:
+            return by_path
     menu_cond = (run[0].condition or '').strip() if run else ''
     segments = []
     for pos, b in enumerate(run[1:]):
@@ -1409,26 +1585,62 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         # 前面加一句显式警告：Ren'Py 的 `menu:` 里除选项外没有合法位置，
         # 只能收进某个选项体，静默收进去就成了"只有选中才播"的剧情错误。
         expected = _expected_body_condition(own_cond, menu_cond)
-        stripped, nested = [], []
-        for _pos, beat, why in sorted(list(body) + list(foreign)):
-            if why:
-                nested.append((_with_condition(beat, ''), why))
-                continue
-            got = (beat.condition or '').strip()
-            if got and got == expected:
-                stripped.append(_with_condition(beat, ''))
-            else:
-                nested.append((beat, ''))
-        body_lines = _render_unit_lines(stripped, opt_indent + '    ',
-                                       audit, trace)
-        for beat, why in nested:
-            if why:
-                body_lines.append(opt_indent + '    ' + f'# TODO: {why}')
-            # 走 `_indent_beat_lines`：条件拍的块体（`if x:` 下面那几行）
-            # 有自己的相对缩进，逐行贴 `opt_indent + '    '` 会把它们
-            # 压到与 `if` 齐平（**语法错误**，见那个函数的 docstring）。
-            body_lines.extend(_indent_beat_lines(
-                beat, opt_indent + '    ', audit, trace))
+        ordered = list(sorted(list(body) + list(foreign)))
+        inner = opt_indent + '    '
+        # **带嵌套菜单的选项体走老路**：嵌套菜单要整组一起渲染
+        # （`_render_unit_lines` 内部递归），逐拍拆开会把它拆散。
+        if any(b.kind == KIND_MENU for _pos, b, _w in ordered):
+            stripped, nested = [], []
+            for _pos, beat, why in ordered:
+                if why:
+                    nested.append((_with_condition(beat, ''), why))
+                    continue
+                got = (beat.condition or '').strip()
+                if got and got == expected:
+                    stripped.append(_with_condition(beat, ''))
+                else:
+                    nested.append((beat, ''))
+            body_lines = _render_unit_lines(stripped, inner, audit, trace)
+            for beat, why in nested:
+                if why:
+                    body_lines.append(inner + f'# TODO: {why}')
+                body_lines.extend(_indent_beat_lines(beat, inner, audit, trace))
+        else:
+            # **按源码顺序逐拍渲染**（B 阶段二）：只把"条件是累积条件"的
+            # 那一层记账剥掉，别的原样 —— 不再"先铺平、再补 if"（那会换序）。
+            #
+            # 同类连着的拍**整段**交给 `_render_unit_lines`（它管合并/缩进/
+            # 去重这些成组才做得对的事），条件拍单独走 `_indent_beat_lines`
+            # （它的块体有相对缩进，逐行贴平会出语法错，见那个函数 docstring）。
+            body_lines = []
+            # ⚠ **别叫 `run`**：这个名字是本函数的参数（整个菜单组的拍），
+            # 同名会把它覆盖成空列表 —— 下面读 `run[0]` 直接 `IndexError`
+            # （写这一版时当场踩到，别改回去）。
+            plain_run: list = []
+
+            def _flush():
+                if plain_run:
+                    body_lines.extend(_render_unit_lines(
+                        list(plain_run), inner, audit, trace))
+                    plain_run.clear()
+
+            for _pos, beat, why in ordered:
+                got = (beat.condition or '').strip()
+                if not why and got and got != expected:
+                    _flush()
+                    body_lines.extend(
+                        _indent_beat_lines(beat, inner, audit, trace))
+                    continue
+                if why:
+                    _flush()
+                    body_lines.append(inner + f'# TODO: {why}')
+                    body_lines.extend(
+                        _indent_beat_lines(_with_condition(beat, ''),
+                                           inner, audit, trace))
+                    continue
+                plain_run.append(_with_condition(beat, '')
+                                 if got == expected else beat)
+            _flush()
         if not body_lines:
             # 空块在 Ren'Py 里是语法错误；"只写条件、不打正文"的选项确实存在
             body_lines = [opt_indent + '    pass']
