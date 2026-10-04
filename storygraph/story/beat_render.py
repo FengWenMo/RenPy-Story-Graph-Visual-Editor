@@ -961,14 +961,23 @@ def _nest_plan(beats: list) -> dict:
     预扫：`{'known': {label: 是不是每条拍都有结构位},
             'menu_no': {id(menu 拍): 它在 label 内第几个}}`。
 
-    `menu_no` 与解析器 `_walk` 的计数是**同一套文档序**：第 k 张
-    `KIND_MENU` 拍对应块路径里的 `menu:k`（嵌套菜单也是文档序，
-    所以这条对应关系对嵌套同样成立）。
+    ⚠ **`menu_no` 必须从块路径推，不能"数第几张 KIND_MENU"**（2026-10-05 修，
+    嵌套菜单）：`split_beat_units` 会被递归调用在**子列表**上（选项体那一段拍），
+    子列表里的局部次序与 label 的文档序**对不上** —— 两层的例子里，嵌套菜单头
+    在子列表里是第 1 张 `KIND_MENU`，可它的路径写的是 `menu:2`。数出来的编号
+    与路径不符，切组就只切到"菜单头"一张拍（`render_menu_block(indent=8 拍数=1)`
+    —— `tools/probe_nested_render.py` 的调用轨迹原样抓到），整层菜单随之塌掉。
+
+    怎么从路径推：菜单头自己那条路径**不含**它自己的编号（那是"它所在的外层
+    块"），编号出现在它的**子孙**路径里 —— 头后面第一条路径以
+    `头路径>menu:` 开头的拍，取那一段的 `n`。一个菜单一个编号，label 内不重复，
+    所以"往后找到第一条"就够。
     """
     known: dict = {}
     menu_no: dict = {}
     counters: dict = {}
-    for b in beats or ():
+    items = list(beats or ())
+    for i, b in enumerate(items):
         label = str(getattr(b, 'label', '') or '')
         if getattr(b, 'nest_path', None) is None:
             known[label] = False
@@ -976,8 +985,33 @@ def _nest_plan(beats: list) -> dict:
             known.setdefault(label, True)
         if b.kind == KIND_MENU:
             counters[label] = counters.get(label, 0) + 1
-            menu_no[id(b)] = counters[label]
+            n = _menu_number_from_path(items, i)
+            menu_no[id(b)] = n if n else counters[label]
     return {'known': known, 'menu_no': menu_no}
+
+
+def _menu_number_from_path(beats: list, head_i: int):
+    """
+    菜单头 `beats[head_i]` 的 `menu:n` 里的 `n`（从它子孙的块路径里读）。
+
+    读不到（空菜单 / 结构位不全）返回 `0`，调用方退回"数第几张"。
+    """
+    head = beats[head_i]
+    head_path = getattr(head, 'nest_path', None)
+    if head_path is None:
+        return 0
+    head_path = str(head_path)
+    want = f'{head_path}>menu:' if head_path else 'menu:'
+    for b in beats[head_i + 1:]:
+        path = getattr(b, 'nest_path', None)
+        if path is None:
+            return 0
+        path = str(path)
+        if not path.startswith(want):
+            continue
+        seg = path[len(want):].split('>', 1)[0]
+        return int(seg) if seg.isdigit() else 0
+    return 0
 
 
 def _under_nest(path, prefix: str) -> bool:
@@ -1193,7 +1227,11 @@ def _actual_chains(group: list, counter: list, parent_chain: tuple) -> dict:
             for b in body_beats:
                 chains[id(b)] = chain
             for _pos, b, _why in foreign:
-                chains[id(b)] = parent_chain        # 认不出 → 摆在菜单外
+                # **认不出归属 = 老推断不知道**，不是"摆在菜单外"（2026-10-05）：
+                # 记成 `parent_chain` 会让对拍器把它当成"结构位说谎"，
+                # 而嵌套菜单正是它认不出的那一类 —— 那是**能力边界**，
+                # 报出来只会制造假阳性。`None` = 不知道，对拍器跳过。
+                chains[id(b)] = None
             # 选项体里可能还有嵌套菜单 → 递归
             for bid, c in _actual_chains(body_beats, counter, chain).items():
                 chains[bid] = c
@@ -1224,10 +1262,51 @@ def nest_placement_conflicts(beats: list) -> list:
     for name, group in _group_by_label(beats):
         if any(getattr(b, 'nest_path', None) is None for b in group):
             continue
+        # ⚠ **这个 label 里有嵌套菜单 → 整份跳过**（2026-10-05）。
+        #
+        # 老推断（`_menu_member` / 条件 / 行号）的能力上限是 1 bit：
+        # "这一拍在某个选项体里 / 不在"，分不出是哪一层的**哪个**选项。
+        # 选项体里再套一层菜单时它**整份**都不可信 —— 不只是嵌套那几拍：
+        # 它会把嵌套那一层当成外层菜单的选项，于是**嵌套菜单之后**的拍
+        # （`e "后"`，路径 `menu:1>A`）也被算到那个假选项里（实测
+        # `minimal_nested_menu`：4 处"不一致"，结构列全对）。
+        #
+        # 所以判据限定在"没有嵌套菜单"的 label 上（真实项目 40 个文件全是
+        # 这一类，那里它被验证过、也确实抓到过东西）。嵌套那几层由渲染侧的
+        # 判据管：`tools/hell_nest_inline.py` 的 N1/N2/N3 与
+        # `tests/test_nested_menu_render.py`。
+        if any(str(getattr(b, 'nest_path', '') or '').count('menu:') >= 2
+               for b in group):
+            continue
         actual = _actual_chains(group, [0], ())
         for i, b in enumerate(group):
-            claim = body_chain(getattr(b, 'nest_path', '') or '')
+            path = getattr(b, 'nest_path', '') or ''
+            claim = body_chain(path)
             got = actual.get(id(b), ())
+            if got is None:
+                # 老推断**认不出**这一拍的归属（见 `_actual_chains` 的 foreign）；
+                # "不知道"不等于"不一致"，跳过（嵌套菜单就是这一类）。
+                continue
+            # ⚠ **老推断做不到嵌套菜单，所以不对嵌套形态判"不一致"**
+            # （2026-10-05，`minimal_nested_menu` 实测）。
+            #
+            # 它的能力上限是"这一拍在某个选项体里 / 不在"这 1 bit
+            # （`_menu_member` 进不了 Excel、`Condition` 也只有 1 bit）：
+            # 选项体里再套一层菜单时，它要么把那一层的选项行当成**外层菜单**
+            # 的选项，要么把菜单头算成"顶层" —— 而结构列全是对的。
+            # 那不是"结构位说谎"，是**它没有这个能力**；拿它当判据只制造假阳性
+            # （假阳性比漏报更贵）。
+            #
+            # 判据：这一拍处在**嵌套菜单的上下文**里吗 —— 看它自己的块路径
+            # 有没有**两个及以上** `menu:` 段，或者它本身就是一张**在块里的**
+            # 菜单头（`KIND_MENU` 且路径非空 = 嵌在别人体内）。
+            # 嵌套那几层由渲染侧的判据管：`tools/hell_nest_inline.py` 的
+            # N1 结构守恒 / N2 不动点 / N3 两路一致，以及
+            # `tests/test_nested_menu_render.py`。
+            nested_ctx = (path.count('menu:') >= 2
+                          or (b.kind == KIND_MENU and bool(path)))
+            if nested_ctx or len(claim) >= 2 or len(got) >= 2:
+                continue
             if claim != got:
                 conflicts.append((name, i, claim, got))
     return conflicts
@@ -1613,70 +1692,74 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         expected = _expected_body_condition(own_cond, menu_cond)
         ordered = list(sorted(list(body) + list(foreign)))
         inner = opt_indent + '    '
-        # ⚠ **带嵌套菜单的选项体仍然走这一支**（2026-10-05：试过合并成一条，
-        # 结果更糟 —— 嵌套菜单被渲染到**外层缩进**上，见下面的 `KNOWN` 注释）。
-        if any(b.kind == KIND_MENU for _pos, b, _w in ordered):
-            stripped, nested = [], []
-            for _pos, beat, why in ordered:
-                if why:
-                    nested.append((_with_condition(beat, ''), why))
-                    continue
-                got = (beat.condition or '').strip()
-                if got and got == expected:
-                    stripped.append(_with_condition(beat, ''))
+        # **选项体统一走这条递归路**（2026-10-05 修，`minimal_nested_menu`）。
+        #
+        # 从前这里分两支，两支都错在同一个地方：**非"记账条件"的拍一律扁平渲染**
+        # （`_indent_beat_lines` 逐拍），于是嵌套菜单的头/选项行永远走不到
+        # `render_menu_block` —— 那层菜单要么变成一句台词（`"菜单"`），要么整个
+        # 塌进外层选项体。看 `tools/probe_nested_render.py` 的调用轨迹最清楚：
+        # 两层的用例里 `render_menu_block` **只被调用一次**（外层那次）。
+        #
+        # 现在只有一条：
+        #   1. 把"累积条件记账"那一层剥掉 —— `got == expected`，或者 `got` 为空
+        #      （外层还是内层都没条件时，约定值就是恒真，见 `_expected_body_condition`）；
+        #   2. **整段**交给 `_render_unit_lines` —— 它内部 `split_beat_units` →
+        #      `render_menu_block`，嵌套菜单就在那里递归，**要几层有几层**；
+        #   3. 认不出归属的拍（`why`）在**原位置**插一句显式 TODO（不许静默收进
+        #      选项体：那会变成"只有选中这个选项才播"的剧情错误）。
+        prepared: list = []
+        for _pos, beat, why in ordered:
+            got = (beat.condition or '').strip()
+            if not why and (not got or got == expected):
+                prepared.append((_with_condition(beat, ''), ''))
+            else:
+                prepared.append((beat, why))
+        body_lines = []
+
+        def _render_body(beats_: list) -> list:
+            """
+            一串拍 → 已带**本层前缀**（`inner`）的行。
+
+            为什么不用 `_render_unit_lines`：它的口径是"相对调用方框架、
+            不补前缀"，而这里的调用方（label 循环那边）会补一次 —— 两个框架
+            混用，嵌套菜单的**菜单头**就会少一级（`probe_nested_render.py`
+            的调用轨迹原样抓到）。这里统一自己补：菜单块用 `indent=''`
+            渲染成纯相对形式，再整体加 `inner`：
+
+                菜单头 = inner        选项 = inner+4        选项体 = inner+8
+
+            与 `_indent_beat_lines` 的口径一致，所以**嵌套可以任意深**。
+            """
+            out = []
+            for kind, group in split_beat_units(beats_):
+                if kind == 'menu':
+                    out.extend(
+                        inner + ln if ln.strip() else ''
+                        # 一级相对（`render_menu_block(indent=X)` 把**选项**放在 X
+                        # 那一级、**菜单头**放在 0 那一级，量过见 probe），
+                        # 再整体加 `inner` → 头 inner / 选项 inner+4 / 体 inner+8
+                        for ln in render_menu_block(group, indent='    ',
+                                                    audit=audit, trace=trace))
                 else:
-                    nested.append((beat, ''))
-            # ⚠ **KNOWN（未修，2026-10-05）**：嵌套菜单（菜单套在选项体里）
-            # 这一支还是会把菜单**拆散** —— `stripped` 只拿到"条件是累积条件"
-            # 的那些，嵌套菜单的**选项行**（`menu_option`，它的条件与本选项
-            # 不同）落进 `nested`，于是递归进 `_render_unit_lines` 的那一半
-            # 组不成菜单 → 整层塌进外层选项体。
-            #
-            # 现在**不再丢拍**（选项行已由 `_menu_segments_by_path` 保住，
-            # 见那里的注释），但渲染出来的这一层是错的（选项行变成一句台词）。
-            # 真实项目 **0 个嵌套菜单**，所以这条路上没有实机影响；
-            # 判据见 `tools/hell_nest_inline.py::minimal_nested_menu`。
-            body_lines = _render_unit_lines(stripped, inner, audit, trace)
-            for beat, why in nested:
-                if why:
-                    body_lines.append(inner + f'# TODO: {why}')
-                body_lines.extend(_indent_beat_lines(beat, inner, audit, trace))
-        else:
-            # **按源码顺序逐拍渲染**（B 阶段二）：只把"条件是累积条件"的
-            # 那一层记账剥掉，别的原样 —— 不再"先铺平、再补 if"（那会换序）。
-            #
-            # 同类连着的拍**整段**交给 `_render_unit_lines`（它管合并/缩进/
-            # 去重这些成组才做得对的事），条件拍单独走 `_indent_beat_lines`
-            # （它的块体有相对缩进，逐行贴平会出语法错，见那个函数 docstring）。
-            body_lines = []
-            # ⚠ **别叫 `run`**：这个名字是本函数的参数（整个菜单组的拍），
-            # 同名会把它覆盖成空列表 —— 下面读 `run[0]` 直接 `IndexError`
-            # （写这一版时当场踩到，别改回去）。
-            plain_run: list = []
+                    out.extend(_indent_beat_lines(group[0], inner,
+                                                  audit, trace))
+            return out
 
-            def _flush():
-                if plain_run:
-                    body_lines.extend(_render_unit_lines(
-                        list(plain_run), inner, audit, trace))
-                    plain_run.clear()
+        body_run: list = []          # ⚠ 别叫 `run`：那是本函数的参数（整个菜单组）
 
-            for _pos, beat, why in ordered:
-                got = (beat.condition or '').strip()
-                if not why and got and got != expected:
-                    _flush()
-                    body_lines.extend(
-                        _indent_beat_lines(beat, inner, audit, trace))
-                    continue
-                if why:
-                    _flush()
-                    body_lines.append(inner + f'# TODO: {why}')
-                    body_lines.extend(
-                        _indent_beat_lines(_with_condition(beat, ''),
-                                           inner, audit, trace))
-                    continue
-                plain_run.append(_with_condition(beat, '')
-                                 if got == expected else beat)
-            _flush()
+        def _flush_body() -> None:
+            if body_run:
+                body_lines.extend(_render_body(list(body_run)))
+                body_run.clear()
+
+        for beat, why in prepared:
+            if why:
+                _flush_body()
+                body_lines.append(inner + f'# TODO: {why}')
+                body_run.append(_with_condition(beat, ''))
+                continue
+            body_run.append(beat)
+        _flush_body()
         if not body_lines:
             # 空块在 Ren'Py 里是语法错误；"只写条件、不打正文"的选项确实存在
             body_lines = [opt_indent + '    pass']
@@ -1714,6 +1797,11 @@ def _render_unit_lines(beats: list, indent: str, audit, trace: list) -> list:
         if kind == 'menu':
             # 统一走 `render_menu_block`：菜单整块的条件（`if flag:` 包着
             # `menu:`）也要在那里补，两处各写一遍迟早会不一致。
+            #
+            # ⚠ 这里的 `indent` 是**相对调用方框架**的层级：本函数不补前缀
+            # （与 label 循环那种"调用方补"的框架不同）。选项体那条路已经
+            # 改成自己显式补前缀（见 `_render_menu_segments` 里的 `_body_lines`），
+            # 所以这里保持原样，别再动 —— 两个框架各按各的口径来。
             lines.extend(render_menu_block(group, indent=indent,
                                            audit=audit, trace=trace))
         else:
