@@ -259,6 +259,26 @@ def main() -> int:
                    else 'full_keeps_top_level')
             results[key] = not gone
 
+    # —— 9. Qt 接线静态审计（不许裸 connect，见 README 不变量 73）——
+    #
+    # 为什么放进体检：这一类缺陷的症状是"点了没反应 / 传错参数"，
+    # 跑起来才发现；而判据是纯静态的，体检时顺手跑一遍最省事
+    # （`tests/test_qt_signal_wiring.py` 里也跑同一条判据，同一份实现）。
+    print('\n-- 9. Qt 接线静态审计（信号 bool 不许被当成参数）' + '-' * 8)
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            'audit_qt_signal_slots', ROOT / 'tools' / 'audit_qt_signal_slots.py')
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _code = _mod.main()
+        results['qt_wiring_clean'] = (_code == 0)
+        print(f'  [{"PASS" if _code == 0 else "FAIL"}] '
+              f'{"干净：没有\"信号 bool 被当成参数\"的接线" if _code == 0 else "有接线把 bool 当成槽的参数"}')
+    except Exception as e:                      # noqa: BLE001
+        results['qt_wiring_clean'] = False
+        print(f'  [FAIL] 审计跑不起来：{type(e).__name__}: {e}')
+
     print('\n' + '=' * 60)
     bad = [k for k, v in results.items() if not v]
     if bad:

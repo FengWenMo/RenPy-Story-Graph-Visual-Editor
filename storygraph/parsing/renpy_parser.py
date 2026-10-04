@@ -2175,6 +2175,15 @@ class RenPyParser:
                 text = node.text.lstrip()
                 if text.strip():
                     text = text.rstrip()
+                    # **块体里这一行自己的行尾注释也要带上**（C 阶段的收尾）：
+                    # 块体是拿 `.text`（注释已被剥掉）拼的，于是
+                    # `    x = 1  # 备注` 里的备注在产物里消失（真实项目
+                    # `mini_game1.rpy` 实测 7 行）。块体里每一行都是**独立逻辑行**，
+                    # 自己那份 `inline_comment` 本来就在。
+                    # 注释在 Python 里是合法行尾，进代码文本安全（语法检查也过）。
+                    note = getattr(node, 'inline_comment', '') or ''
+                    if note:
+                        text = f'{text}  {note}'
                     result.append(' ' * rel + text)
                 walk(node.subblock, base_indent)
 
