@@ -1209,8 +1209,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._insert_before_btn.setToolTip('在当前这一拍**前面**插入一张空卡片')
         self._insert_before_btn.clicked.connect(lambda: self.insert_card(after=False))
         bh.addWidget(self._insert_before_btn)
-        self._restore_btn = QPushButton('↩ 撤销删除')
-        self._restore_btn.setToolTip('把刚删掉的那张卡片放回原位')
+        self._restore_btn = QPushButton('↩ 撤销结构操作')
+        self._restore_btn.setToolTip(
+            '撤销最近一次增删卡片（可连按多级）：删掉的放回原位、插进去的撤掉')
         self._restore_btn.clicked.connect(self.restore_card)
         self._restore_btn.setEnabled(False)
         bh.addWidget(self._restore_btn)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 C：**行尾注释进表**（隐藏列 `Inline`）—— 见不变量 78。
 
 病根与"嵌套"那条**不是同一个**：`RenPyLexer._strip_inline_comment` 在**词法器**
@@ -10,6 +10,14 @@ C：**行尾注释进表**（隐藏列 `Inline`）—— 见不变量 78。
   · 多行逻辑语句（括号续行 / 反斜杠续行）不采集 —— 注释挂在哪一行说不清；
   · 一拍渲染出多行时不贴 —— 贴到第一行会变成"整个块"的注释；
   · 单元格被清洗过（有换行/控制字符）就丢掉 —— 残缺的注释不如没有。
+
+**收尾第 2 批**（2026-10-05，用户："这几个剩下的一并修复了吧"）又补了三处：
+
+  · `python:` **块体**里逐行的注释（块体是拿 `.text` 拼的，原来整块丢）；
+  · **括号续行**里的注释（`positions = [` … `]` 会被并成一条逻辑行，
+    所以 `LogicalLine.inline_comments` 是**逐物理行**的一张表）；
+  · **`if / elif / else` 头那一行**的注释（`if` 不是拍，它是拍上的条件 ——
+    存在 `Beat.cond_comment`，贴到这一拍渲染出来的 `if …:` 那一行）。
 """
 
 from __future__ import annotations
@@ -186,3 +194,98 @@ class TestRealProject:
         if not total:
             return                      # 本机没有真实项目
         assert kept == total, f'{total - kept}/{total} 条注释没贴上'
+
+
+BLOCK_SRC = '''label a:
+    python:
+        sequence_lengths = [5, 7]  # 每轮序列长度
+        debug = True  # 用于跳过暂停
+'''
+
+BRACKET_SRC = '''label a:
+    python:
+        positions = [
+            (100, 100),  # 第一行
+            (200, 200)   # 第二行
+        ]
+'''
+
+BACKSLASH_SRC = '''label a:
+    python:
+        total = 1 + \\
+            2  # 反斜杠续行里的注释
+'''
+
+IF_SRC = '''label a:
+    if is_title:            # 备注：主标题
+        e "标题"
+    elif is_sub:            # 备注：副标题
+        e "副标题"
+    else:                   # 备注：普通文本
+        e "正文"
+'''
+
+
+class TestBlockBodies:
+    """`python:` 块体里**逐行**的注释（收尾第 2 批）。"""
+
+    def test_line_notes_survive(self, tmp_path):
+        rpy = render_beats_to_rpy(_beats(BLOCK_SRC, tmp_path), label_name='a')
+        assert '# 每轮序列长度' in rpy, rpy
+        assert '# 用于跳过暂停' in rpy, rpy
+
+    def test_bracketed_continuation_notes_survive(self, tmp_path):
+        """括号续行会被并成一条逻辑行 —— 注释按**物理行**对齐贴回去。"""
+        rpy = render_beats_to_rpy(_beats(BRACKET_SRC, tmp_path), label_name='a')
+        assert '# 第一行' in rpy, rpy
+        assert '# 第二行' in rpy, rpy
+        first = next(ln for ln in rpy.splitlines() if '第一行' in ln)
+        assert '(100, 100)' in first, first
+
+    def test_backslash_continuation_keeps_its_single_note(self, tmp_path):
+        """
+        反斜杠续行是用**空格**拼成一条逻辑行的 —— 逐行对齐表因此用不上
+        （`inline_comments` 刻意留空），但拼出来的那一行**本身就是单行**，
+        注释跟着它走，所以那一条注释照样保住。
+
+        真正会丢的只有"一条逻辑行里挂了**多**条注释"：反斜杠拼法做不到
+        （拼完只有一行），括号续行才可能（那种走逐行表，见上一条用例）。
+        """
+        rpy = render_beats_to_rpy(_beats(BACKSLASH_SRC, tmp_path), label_name='a')
+        assert '# 反斜杠续行里的注释' in rpy, rpy
+        line = next(ln for ln in rpy.splitlines() if '反斜杠续行里的注释' in ln)
+        assert line.strip().startswith('$') and '1 +' in line, line
+
+
+class TestConditionNotes:
+    """`if / elif / else` 头那一行的注释：贴到渲染出来的 `if …:` 那一行。"""
+
+    def test_it_lands_on_the_if_lines(self, tmp_path):
+        rpy = render_beats_to_rpy(_beats(IF_SRC, tmp_path), label_name='a')
+        heads = [ln for ln in rpy.splitlines() if ln.strip().startswith('if ')]
+        assert len(heads) == 3, rpy
+        assert '# 备注：主标题' in heads[0], heads
+        assert '# 备注：副标题' in heads[1], heads
+        assert '# 备注：普通文本' in heads[2], heads
+
+    def test_the_table_path_keeps_them(self, tmp_path):
+        beats = _beats(IF_SRC, tmp_path)
+        xl = tmp_path / 'ch.xlsx'
+        export_beats_to_excel(beats, xl)
+        assert (render_beats_to_rpy(import_beats_from_excel(xl))
+                == render_beats_to_rpy(beats, label_name='a'))
+
+    def test_two_slots_in_one_cell_round_trip(self):
+        """同一拍上"自己那行的注释"与"条件行的注释"共用一个单元格，不许串。"""
+        from storygraph.story.beat_model import (compose_inline_cell,
+                                                 parse_inline_cell)
+        b = Beat(seq=1, label='a', text='x',
+                 inline_comment='# 自己的', cond_comment='# 条件的')
+        own, cond = parse_inline_cell(compose_inline_cell(b))
+        assert (own, cond) == ('# 自己的', '# 条件的')
+        # 只有条件注释时也要能解回来（前缀是唯一判据）
+        b2 = Beat(seq=1, label='a', text='x', cond_comment='# 只有条件的')
+        assert parse_inline_cell(compose_inline_cell(b2)) == ('', '# 只有条件的')
+        # 只有自己的注释：就是老格式，一个字都不多
+        b3 = Beat(seq=1, label='a', text='x', inline_comment='# 只有自己的')
+        assert compose_inline_cell(b3) == '# 只有自己的'

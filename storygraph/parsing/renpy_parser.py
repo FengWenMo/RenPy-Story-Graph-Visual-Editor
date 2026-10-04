@@ -385,6 +385,13 @@ class LogicalLine:
     #: ⚠ **只对单行逻辑语句有值**：多行逻辑语句（括号续行、`\` 续行）里
     #: "这条注释属于哪一行"说不清，硬记下来只会贴错地方 —— 那种情况留空。
     inline_comment: str = ''
+    #: **逐物理行的行尾注释**（与 `text.split('\n')` 一一对齐；没有的行是 `''`）。
+    #:
+    #: 括号续行（`positions = [` … `]`）会被 `_flatten` 并成**一条逻辑行**，
+    #: 而注释是**逐物理行**的 —— 单个 `inline_comment` 表达不了。
+    #: 只有"拼装方式保持逐行"时才填（反斜杠续行是用空格拼的 → 对齐丢了 → 留空：
+    #: 宁可少，也不要贴错行）。
+    inline_comments: list = field(default_factory=list)
 
 
 class RenPyLexer:
@@ -448,11 +455,13 @@ class RenPyLexer:
             # **注释的 `#` 被吃掉、变成了非法 ATL 代码**，产物跑不起来。
             # 消费方（CommentNode / pending_comments）本来就用 `.strip()` 取文本。
             if stripped.startswith('#'):
-                flat.append((raw, line_no, indent, True, ''))
+                flat.append((raw, line_no, indent, True, '', []))
                 i += 1
                 continue
 
             accumulated = raw
+            #: 逐行注释（与 `accumulated` 的行对齐）；拼装一旦不是逐行就清空
+            merge_notes = [self._inline_comment(raw)]
 
             if self._has_unclosed_triple(accumulated):
                 while i + 1 < n and self._has_unclosed_triple(accumulated):
@@ -473,6 +482,7 @@ class RenPyLexer:
                 accumulated = s[:-1]
                 i += 1
                 accumulated += ' ' + raw_lines[i].strip()
+                merge_notes = []          # 反斜杠续行用空格拼 → 对齐没了
 
             while i + 1 < n:
                 clean_for_count = self._strip_inline_comment(accumulated)
@@ -492,12 +502,16 @@ class RenPyLexer:
                 # （参数表、列表字面量）。用空格拼会把换行信息抹掉，
                 # 之后按行剥离行内注释时第一个 '#' 就会把后面全删掉。
                 accumulated += '\n' + raw_lines[i].rstrip()
+                # 这一物理行的行尾注释（括号续行是**逐行**拼的，所以对得上）
+                merge_notes.append(self._inline_comment(raw_lines[i]))
 
             # 先摘出**行尾注释原文**，再剥掉它（顺序不能反）
             inline = self._inline_comment(accumulated)
             accumulated = self._strip_inline_comment(accumulated)
-
-            flat.append((accumulated, line_no, indent, False, inline))
+            if len(merge_notes) != len(accumulated.split('\n')):
+                merge_notes = []          # 对齐不上就不填（宁可少也不要贴错）
+            flat.append((accumulated, line_no, indent, False, inline,
+                         merge_notes))
             i += 1
 
         return flat
@@ -629,6 +643,7 @@ class RenPyLexer:
                 filename=filename,
                 is_comment=is_comment,
                 inline_comment=inline,
+                inline_comments=list(item[5] if len(item) > 5 else []),
             )
             while len(stack) > 1 and stack[-1].indent >= indent:
                 stack.pop()
@@ -2182,8 +2197,16 @@ class RenPyParser:
                     # 自己那份 `inline_comment` 本来就在。
                     # 注释在 Python 里是合法行尾，进代码文本安全（语法检查也过）。
                     note = getattr(node, 'inline_comment', '') or ''
-                    if note:
+                    if note and '\n' not in text:
                         text = f'{text}  {note}'
+                    else:
+                        # 多行（括号续行）：逐行贴（`inline_comments` 与行对齐）
+                        parts = text.split('\n')
+                        notes = getattr(node, 'inline_comments', None) or []
+                        if len(notes) == len(parts):
+                            parts = [f'{x}  {nn}' if nn and x.strip() else x
+                                     for x, nn in zip(parts, notes)]
+                            text = '\n'.join(parts)
                     result.append(' ' * rel + text)
                 walk(node.subblock, base_indent)
 
@@ -2196,6 +2219,11 @@ class RenPyParser:
     # ---------- if 链消费 ----------
 
     def _consume_if_chain(self, lines: list, start_i: int,                          if_node: IfNode) -> int:
+        # `if / elif / else` **每一行自己的**行尾注释（收尾第 2 批）：
+        # 条件不是拍，注释只能按"分支"记 —— 与 `branches` 一一对齐。
+        # 动态属性：不让它进 AST 的 dataclass 契约。
+        if_node.branch_comments = [
+            getattr(lines[start_i], 'inline_comment', '') or '']
         j = start_i + 1
         base_indent = lines[start_i].indent
 
@@ -2218,6 +2246,8 @@ class RenPyParser:
                 if_node.branches.append(
                     (cond, self._parse_block(nxt.subblock))
                 )
+                if_node.branch_comments.append(
+                    getattr(nxt, 'inline_comment', '') or '')
                 j += 1
                 continue
 
@@ -2225,6 +2255,8 @@ class RenPyParser:
                 if_node.branches.append(
                     ('', self._parse_block(nxt.subblock))
                 )
+                if_node.branch_comments.append(
+                    getattr(nxt, 'inline_comment', '') or '')
                 j += 1
 
             break
@@ -2583,14 +2615,22 @@ class ParseResultBuilder:
 
     def _walk(self, nodes: list, current_label: str, result: ParseResult,
               accum_cond: str = '', menu_option: str = '',
-              nest_path: str = '', counters: dict = None):
+              nest_path: str = '', counters: dict = None,
+              cond_note: str = ''):
         #: 同 kind 兄弟块的**文档序**计数器（整个 label 共用一份）——
         #: `menu:2` 就是"这个 label 里第 2 个菜单块"，与按行扫出来的顺序一致。
         counters = counters if counters is not None else {}
         #: 当前 AST 节点的行尾注释（`add_stmt` 读它 —— 逐节点更新）
         cur_inline = ['']
+        #: 待消费的"条件行注释"（`if/elif/else` 头那一行；只给分支第一条语句）。
+        #: ⚠ 由**参数**seeded —— `_walk` 是递归的，每层都有自己的局部变量，
+        #: 在上层设一个局部量、指望下层的 `add_stmt` 读到，是读不到的
+        #: （第一版就是这么错的：AST 上 `branch_comments` 明明有值，产物里却没有）。
+        cond_inline = [cond_note or '']
 
         def add_stmt(stmt, path: str = None, inline: str = None):
+            # `cond_comment`：这一拍渲染出来的 `if …:` 那一行要贴的注释
+            # （来自 `if/elif/else` 头那一行）。**一次性**：只给本分支第一条。
             """
             收集语句，同时记下它属于哪个 label / 哪个菜单选项。
 
@@ -2633,6 +2673,9 @@ class ParseResultBuilder:
             # 行尾注释（C）：与 `nest_path` 一样是**动态属性**，不进内容指纹。
             # `inline` 用于"这一行的注释不在 AST 节点上"的情况（菜单选项行）。
             stmt.inline_comment = (cur_inline[0] if inline is None else inline)
+            if cond_inline[0]:
+                stmt.cond_comment = cond_inline[0]
+                cond_inline[0] = ''
             result.statements.append(stmt)
             result.statement_labels.append(current_label)
             result.statement_menu_options.append(menu_option)
@@ -2910,7 +2953,9 @@ class ParseResultBuilder:
                 # elif score>1: jump Y` 的第 2 条边条件写成 `score > 1`
                 # （比实际宽），图上标签会误导人、按图导出也会写错分支。
                 prev_conds = []
-                for cond, block in node.branches:
+                # `_bi` = 分支下标：取"这一分支自己那一行"的注释要用它，
+                # **不能**用 `len(prev_conds)`（那个列表在分支体里已 append，差一位）
+                for _bi, (cond, block) in enumerate(node.branches):
                     if cond:
                         child_cond = self._combine(accum_cond, cond)
                         if prev_conds:
@@ -2925,11 +2970,18 @@ class ParseResultBuilder:
                             if accum_cond else f"not ({neg})"
                         )
                     counters['if'] = counters.get('if', 0) + 1
+                    # 这一分支的注释（`if/elif/else` 头那一行）交给它第一条语句。
+                    # ⚠ 用 `_bi`（分支下标），**不能**用 `len(prev_conds)` ——
+                    # 那个列表在分支体里已经 append 过，会差一位（实测：第一分支
+                    # 拿到的是 `elif` 那行的注释）。
+                    _bcs = getattr(node, 'branch_comments', None) or []
                     self._walk(block, current_label, result, child_cond,
                                menu_option,
                                nest_path=join_nest(
                                    nest_path, f"if:{counters['if']}"),
-                               counters=counters)
+                               counters=counters,
+                               cond_note=(_bcs[_bi] if _bi < len(_bcs)
+                                          else ''))
 
     @staticmethod
     def _combine(c1: str, c2: str) -> str:

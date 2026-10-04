@@ -141,6 +141,7 @@ class TableSessionMixin:
         self.script_path = path
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。
         self.forget_undo()
+        self._struct_undo = []          # 结构撤销栈同理：索引全变了
         return len(self.beats)
 
     def insert_beat(self, idx: int = None, after: bool = True) -> dict:
@@ -169,6 +170,7 @@ class TableSessionMixin:
         beat = Beat(seq=0, label=str(getattr(template, 'label', '') or ''),
                     kind='say', text='')
         self.beats.insert(at, beat)
+        self._push_struct_undo(('insert', at))
         self._renumber()
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
@@ -186,6 +188,7 @@ class TableSessionMixin:
             return {'ok': False, 'error': '一章至少要留一拍', 'removed': None}
         removed = self.beats.pop(idx)
         self._last_removed = (idx, removed)
+        self._push_struct_undo(('delete', idx, removed))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': min(idx, len(self.beats) - 1),
@@ -198,9 +201,65 @@ class TableSessionMixin:
         at = max(0, min(int(idx), len(self.beats)))
         self.beats.insert(at, beat)
         self._last_removed = None
+        self._push_struct_undo(('insert', at))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': at, 'count': len(self.beats)}
+
+    #: 结构撤销栈最多留多少步（交互退路，不是版本控制）
+    STRUCT_UNDO_LIMIT = 50
+
+    def _push_struct_undo(self, op) -> None:
+        stack = getattr(self, '_struct_undo', None)
+        if stack is None:
+            self._struct_undo = stack = []
+        stack.append(op)
+        del stack[:-self.STRUCT_UNDO_LIMIT]     # 只留最近的
+
+    def can_undo_structural(self) -> bool:
+        return bool(getattr(self, '_struct_undo', None))
+
+    def struct_undo_depth(self) -> int:
+        return len(getattr(self, '_struct_undo', None) or ())
+
+    def undo_structural(self) -> dict:
+        """
+        撤销**最近一次结构编辑**（插卡或删卡），可连按多级。
+
+        与内容撤销（`undo()`）分开：
+          · `undo()` 回到"这一拍上一次保存"的内容；
+          · `undo_structural()` 退回"上一次增删卡片"这个**结构动作**。
+        互不影响：内容编辑不动结构栈；结构编辑清的是**内容**栈
+        （拍号变了，内容撤销记录对不上）。
+        """
+        stack = getattr(self, '_struct_undo', None)
+        if not stack:
+            return {'ok': False, 'error': '没有可撤销的结构操作', 'index': -1}
+        op = stack.pop()
+        kind = op[0]
+        if kind == 'insert':
+            at = int(op[1])
+            if not 0 <= at < len(self.beats):
+                return {'ok': False,
+                        'error': '落点已经不在了（可能被别的操作改过）',
+                        'index': -1}
+            self.beats.pop(at)
+            note = '撤销插卡'
+            index = min(at, max(0, len(self.beats) - 1))
+        elif kind == 'delete':
+            at = max(0, min(int(op[1]), len(self.beats)))
+            self.beats.insert(at, op[2])
+            note = '恢复删除'
+            index = at
+            if self._last_removed is not None and self._last_removed[1] is op[2]:
+                self._last_removed = None
+        else:
+            return {'ok': False, 'error': f'不认识的结构操作：{kind!r}',
+                    'index': -1}
+        self._renumber()
+        self.forget_undo()
+        return {'ok': True, 'error': '', 'index': index, 'note': note,
+                'count': len(self.beats), 'depth': len(stack)}
 
     def has_removed(self) -> bool:
         return self._last_removed is not None

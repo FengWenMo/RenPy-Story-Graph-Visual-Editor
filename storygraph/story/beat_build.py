@@ -189,6 +189,7 @@ class _BeatBuilder:
             beat.nest_path = stmt.nest_path
         # 行尾注释（C）同样转发；空串是合法值（这一行本来就没注释）
         beat.inline_comment = getattr(stmt, 'inline_comment', '') or ''
+        beat.cond_comment = getattr(stmt, 'cond_comment', '') or ''
         return beat
 
     def mark_stage(self, verb: str) -> None:

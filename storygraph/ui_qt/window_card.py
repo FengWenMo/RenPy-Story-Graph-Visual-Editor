@@ -176,7 +176,7 @@ class CardPageMixin:
         if QMessageBox.question(
                 self, '删除这张卡片',
                 f'删掉第 {idx + 1} 拍？\n\n{who}：{text}\n\n'
-                f'（只改内存里的章节；删完可以点「↩ 撤销删除」放回来，'
+                f'（只改内存里的章节；删完可以点「↩ 撤销结构操作」放回来，'
                 f'导出前不落盘）'
         ) != QMessageBox.Yes:
             return
@@ -188,11 +188,19 @@ class CardPageMixin:
         self._show_index(res['index'])
         self._sync_structural_buttons()
         self._log(f'[卡片] 已删除第 {idx + 1} 拍（{who}：{text}）——'
-                  f'还剩 {res["count"]} 拍；点「↩ 撤销删除」可以放回来')
+                  f'还剩 {res["count"]} 拍；点「↩ 撤销结构操作」可以放回来')
         self._status(f'🗑 已删除第 {idx + 1} 拍（还剩 {res["count"]} 拍）。')
     def restore_card(self):
-        """把刚删掉的那张卡片放回原位。"""
-        res = self._session.restore_last_removed()
+        """
+        撤销**最近一次结构编辑**（插卡或删卡，可连按多级）。
+
+        优先走结构撤销栈（`undo_structural`）；栈空时退回旧的单级
+        `restore_last_removed`（老表/老调用方仍能拿到那个行为）。
+        """
+        if self._session.can_undo_structural():
+            res = self._session.undo_structural()
+        else:
+            res = self._session.restore_last_removed()
         if not res.get('ok'):
             self._status(res.get('error') or '没有可恢复的卡片。')
             return
@@ -224,9 +232,10 @@ class CardPageMixin:
                   f'{count} 拍（结构由文件决定）')
 
     def _sync_structural_buttons(self):
-        """「撤销删除」只在真删过东西之后可用。"""
+        """「撤销结构操作」在**结构栈非空**（或还留着刚删的拍）时可用。"""
         for btn, on in ((getattr(self, '_restore_btn', None),
-                         self._session.has_removed()),
+                         self._session.can_undo_structural()
+                         or self._session.has_removed()),
                         (getattr(self, '_delete_btn', None),
                          len(self._session) > 1),
                         (getattr(self, '_insert_btn', None),
@@ -347,6 +356,9 @@ class CardPageMixin:
             self._status('还没有载入章节，没有可撤销的修改。')
             return
         if not self._session.has_undo(idx):
+            # ⚠ **刻意不退到结构撤销**（2026-10-05 定稿）：结构撤销只走
+            # 「撤销结构操作」那颗按钮 —— Ctrl+Z 按一下就把卡片删掉/放回来
+            # 太意外了（golden 快照第 56 步当场抓到：连按撤销会凭空多一张卡）。
             self._status('这一拍没有可撤销的修改'
                          '（撤销只能回到"上一次保存"之前）。')
             return

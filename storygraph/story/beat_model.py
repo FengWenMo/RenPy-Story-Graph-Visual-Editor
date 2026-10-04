@@ -404,6 +404,12 @@ class Beat:
     #: 这条路必然丢、改过的行走增量也丢。现在随隐藏列 `Inline` 走。
     #: 空串 = 这一行没有行尾注释（**不是"不知道"**：注释本来就是可选的）。
     inline_comment: str = ''
+    #: **条件行**（`if / elif / else` 头那一行）的行尾注释。
+    #:
+    #: 为什么单独一个槽：`if` 不是拍，它是拍上的条件 —— 这条注释要贴到这一拍
+    #: 渲染出来的 `if …:` 那一行，而不是它自己那行。与"自己那行的注释"
+    #: 共用一个单元格（`Inline`），用分隔符 + `@if ` 前缀消歧。
+    cond_comment: str = ''
     music: str = ''
     music_params: str = ''
     music_action: str = 'play'     # 'play' / 'queue' / 'stop'
@@ -472,7 +478,7 @@ class Beat:
             # 结构位：顶层写 `-`（**有信息**），不知道写空（老表兼容）——
             # 两者必须能分开，否则对拍会把"不知道"当成"在顶层"。
             ('-' if self.nest_path == '' else (self.nest_path or '')),
-            self.inline_comment or '',
+            compose_inline_cell(self),
         ])
 
     @classmethod
@@ -581,7 +587,9 @@ class Beat:
         # （`test_cleaning_is_recorded[Inline]` 当场抓到）。
         # 被清洗过 = 这一格本来不是一条干净的注释 → **丢掉**（不清洗过的才可信）。
         _inline = g('Inline')
-        beat.inline_comment = '' if 'Inline' in sanitized else _inline
+        if 'Inline' in sanitized:
+            _inline = ''          # 清洗过 = 不可信（同 `Nest` 的道理）
+        beat.inline_comment, beat.cond_comment = parse_inline_cell(_inline)
         (beat.raw, beat.code, beat.ordered,
          marked_blocks) = _split_code_cell(
              beat.code, expand_code_blocks(beat.code_blocks))
@@ -1272,6 +1280,12 @@ def unmask_code_block_markers(text: str) -> str:
 #: 与 `CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY` 同一套约定。
 FILE_BLOCK_SEP = '\ue003'
 
+#: `Inline` 单元格里"条件行注释"的**前缀与分隔**（见 `Beat.cond_comment`）。
+#: 自己的注释一定以 `#` 开头，所以 `@if ` 前缀不会撞。
+INLINE_COND_SEP = '\ue004'
+INLINE_COND_PREFIX = '@if '
+
+
 #: 文件级保真块在 Excel 里的**载体表名**（隐藏表，一行一行地存）。
 #:
 #: 为什么是表而不是隐藏列（2026-10-05 实测）：Excel 单元格上限 **32767 字符**，
@@ -1285,6 +1299,42 @@ FILE_BLOCK_HEADERS = ['块号', '行文本']
 #: 老版本的隐藏列名（那一版把整段塞进单元格）。**只读不写**：今天的表里
 #: 已经没有它，但那一版生成的表还得读得回来（见 `excel_import`）。
 LEGACY_FILE_BLOCK_COLUMN = 'FileBlocks'
+
+
+def compose_inline_cell(beat) -> str:
+    """
+    `Inline` 单元格：`自己那行的注释` [ SEP `@if 条件行的注释` ]。
+
+    为什么要塞进一格：两处注释都属于**同一拍**，而单元格是逐行属性 ——
+    再开一列只为装 4 行数据不值得（真实项目实测条件行注释共 4 处）。
+    自己的注释一定以 `#` 开头，`@if ` 前缀因此不会歧义。
+    """
+    own = str(getattr(beat, 'inline_comment', '') or '')
+    cond = str(getattr(beat, 'cond_comment', '') or '')
+    if not cond:
+        return own
+    return f'{own}{INLINE_COND_SEP}{INLINE_COND_PREFIX}{cond}' if own \
+        else f'{INLINE_COND_PREFIX}{cond}'
+
+
+def parse_inline_cell(value) -> tuple:
+    """`Inline` 单元格 → `(自己那行的注释, 条件行的注释)`（`compose_inline_cell` 的逆）。"""
+    text = str(value or '')
+    if not text:
+        return '', ''
+    if INLINE_COND_SEP in text:
+        own, cond = text.split(INLINE_COND_SEP, 1)
+    elif text.startswith(INLINE_COND_PREFIX):
+        # 只有条件注释（没有"自己那行"的注释）—— 前缀是唯一的判据
+        own, cond = '', text
+    else:
+        own, cond = text, ''
+    if cond.startswith(INLINE_COND_PREFIX):
+        cond = cond[len(INLINE_COND_PREFIX):]
+    elif cond and not own.startswith('#'):
+        # 只有一段、又不以 `#` 开头 → 那就是条件注释（前缀可能被手改掉）
+        own, cond = '', cond
+    return own, cond
 
 
 def file_blocks_to_rows(text) -> list:

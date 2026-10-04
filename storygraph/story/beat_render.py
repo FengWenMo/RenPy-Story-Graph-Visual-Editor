@@ -867,8 +867,10 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         # 正确做法是**无条件再加一层**：调用方负责"这一拍整体在哪一层"，
         # 这里负责"拍内部块体比条件头深一层"。两条职责分开之后，
         # 顶层与嵌套两条路都能出对。
+        # 条件行自己的注释贴到 `if …:` 那一行（收尾第 2 批）
+        cond_head = f"if {beat.condition}:{_cond_note(beat)}"
         return _attach_inline_note(
-            pre + [f"if {beat.condition}:"] + [
+            pre + [cond_head] + [
                 '    ' + ln if ln.strip() else '' for ln in lines
             ], beat)
     # **行尾注释**（C）：贴在这一拍的输出上（只在一拍一行、源语句也一行时贴，
@@ -2128,6 +2130,14 @@ def _inline_note(beat) -> str:
     if not note.startswith('#'):
         return ''
     if '\n' in note or '\r' in note:
+        return ''
+    return '  ' + note
+
+
+def _cond_note(beat) -> str:
+    """这一拍的**条件行**（`if …:`）要贴的注释（来自 `if/elif/else` 头那一行）。"""
+    note = str(getattr(beat, 'cond_comment', '') or '').strip()
+    if not note.startswith('#') or '\n' in note or '\r' in note:
         return ''
     return '  ' + note
 

@@ -155,6 +155,10 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         self._last_idx: Optional[int] = None
         #: 上一次删掉的卡片 `(原拍号, Beat)` —— 单级结构撤销用（见 restore_last_removed）
         self._last_removed = None
+        #: **结构撤销栈**（插卡 / 删卡，多级；见 `undo_structural`）。
+        #: 记的是"做了什么"而不是快照：`('insert', 落点)` / `('delete', 原拍号, Beat)`。
+        #: 有界（只留最近 50 次）—— 它是交互退路，不是版本控制。
+        self._struct_undo: list = []
         #: 角色↔剧本 linker（按需构建，见 `asset_linker()`）
         self._linker = None
         #: "生成物要不要自带 transform 定义段"的**缓存判定**
