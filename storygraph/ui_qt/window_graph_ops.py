@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.ui_qt.qt_args import drop_qt_bool
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
 from PySide6.QtCore import Qt, QTimer
@@ -339,6 +340,7 @@ class GraphOpsMixin:
 
         语义在 `EditorSession.save_layout`（格式与旧版逐字段一致）。
         """
+        target = drop_qt_bool(target, context='ui_qt.save_layout')
         if target is None:
             if self.graph is None or not getattr(self.graph, 'nodes', None):
                 self._status('剧情图是空的，没有布局可保存。')
@@ -366,6 +368,7 @@ class GraphOpsMixin:
 
         会先问一声 —— 图上的导入结果会被换掉（内存里，磁盘不动）。
         """
+        source = drop_qt_bool(source, context='ui_qt.load_layout')
         if source is None:
             start = str(self._project_root or Path.cwd())
             source, _ = QFileDialog.getOpenFileName(
@@ -405,16 +408,32 @@ class GraphOpsMixin:
         self._status(f'📂 已加载布局 {name}（{res["nodes"]} 块 / '
                      f'{res["edges"]} 线）')
         return res['path']
-    def export_control_flow(self, target=None, wrapper=None):
+    def export_control_flow(self, target=None, *, wrapper=None):
         """
         导出 Ren'Py 控制流脚本（每个模块一个 `<label>_control`）。
 
         用户 2026-10-04："我的旧版本有导出控制流图.rpy文件，label末尾加
         _control 的那个……现在这个新版本呢？"
+
+        `wrapper` 只许关键字传（`*`）：它是"要不要补 `_control`"的开关，
+        和 `target` 完全是两件事，位置传参串位没有任何好处。
+
+        ⚠ **`False` 那条老故事要更正**（2026-10-05 实测）：仓库根目录里那个
+        叫 `False` 的文件**确实**是这里写出来的，但**不是**下面两个菜单项干的
+        —— 菜单项写的是 `export_control_flow(wrapper=True/False)`，
+        **关键字传参按名字绑定**，`wrapper` 排第几位都不可能落进 `target`。
+        真凶是**按钮**那条接线（同一天修掉的）：`self._export_flow_btn.clicked.
+        connect(self.export_control_flow)` —— `clicked` 会发一个 `bool`，
+        它成了**第一个位置参数** → `target=False` → 下面 `if target is None:`
+        判不出来（`False is None` 是 False）→ 对话框被绕过 → `False` 当路径
+        送下去 → 工作目录里多出 `False` 这个文件。
+        （同类的还有 `save_layout` / `load_layout` / `add_node` / `add_edge`，
+        一并修了，并加了静态审计 + `drop_qt_bool` 兜底。）
         """
         if self.graph is None or not getattr(self.graph, 'nodes', None):
             self._status('剧情图是空的，没有可导出的控制流。')
             return ''
+        target = drop_qt_bool(target, context='ui_qt.export_control_flow')
         if target is None:
             start_dir = (self._project_root / 'game') if self._project_root \
                 else Path.cwd()

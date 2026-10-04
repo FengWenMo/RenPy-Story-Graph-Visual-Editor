@@ -40,6 +40,102 @@ python cli.py collab status                   # 协作（SQLite 后端 + Excel �
 
 `main.py` / `cli.py` 是**根目录垫片**，真实实现在 `storygraph/` 里，逻辑只有一份。
 
+## 三条已知边界（2026-10-05 已拓展）
+
+2026-10-04 的交付评审（`tools/journey_check.py` 端到端实测）列出三条**必须让
+用户知道**的边界。它们没有消失，但每一条都被往外推了一格 —— 下面是
+"当时是什么样 / 现在是什么样 / 拿什么守"。
+
+### ① `build` 在真实项目上"必然失败" → 现在出得来产物
+
+**当时**：`cli.py build <真实项目>` 必然 `exit=1`，报 **10 条
+`PYTHON_SYNTAX_ERROR`**，产物被门禁拦在门外。好处是安全（没写出坏脚本），
+坏处是构建这条路**不可用**。
+
+**根因不是产物坏了，是门禁自己假阳性**：`generation_guard._python_syntax_issues`
+把 `python:` 块体**一行一行**丢给编译器 ——
+
+```python
+positions = [                    # 单看这行：'[' was never closed
+    (200, 200), (600, 200),
+]                                # 单看这行：unmatched ']'
+for i, digit in enumerate(x):    # 单看这行：expected an indented block
+```
+
+而那 10 条逐条核对**全是假阳性**：把产物里 7 个 `python:` 块整块 `dedent`
+后编译，**一个都不错**。假阳性比漏报更坏 —— 它会让人照着假线索去改本来
+正确的代码。
+
+**现在**：块体**整块**编译、`$` 语句**整条**（括号平衡分组）编译。
+`cli.py build` 在真实项目上 `exit=0` 并写出 `story.generated.rpy`
+（`tools/journey_check.py` 第 5 步）。
+守卫：`tests/test_python_syntax_guard_granularity.py`（12 条假阳性形态 +
+5 条真错必须仍拦下），并用"打回逐行编译"变异验证过会红。
+
+### ② 第三类只在增量路径保住 → 命令行也能增量了
+
+**当时**：CLI 的 `table xlsx2rpy` 输入只有 `.xlsx`、**没有源 `.rpy`** →
+patcher 无源 → **永远全量** → 只能用于**新建**；改已有章节必须开 UI
+卡牌编辑器（它有 `script_path`）。
+
+**现在**：加 `--source <这一章原来的 .rpy>`，命令行与编辑器**等价** ——
+原文逐字节保留，只替换改过的那几行：
+
+```bash
+python cli.py table xlsx2rpy ch01.xlsx --source game/chapter/ch01.rpy --out game/chapter/ch01.rpy
+# 增量补丁：改动 1 行，原文其余部分（含 default / init python / transform）逐字节保留
+```
+
+**但"能增量"只解决一半**。补丁对不上时若静默退回全量，`--source X --out 新路径`
+的目标是**新的**、P0 那条手写护栏不适用 → 源里的 `define` / `init python`
+在产物里没了而退出码是 0（真实项目 `pomodorro.rpy` 实测丢 **37 处**）。
+所以新增门禁 `OPAQUE_LOST`：**顶层语句没进产物就拒写**，并把丢的
+行号 + 语句名列出来；`--force` 可越过（降级为 warn，**仍然报出来**）。
+
+守卫：`tests/test_cli_incremental_source.py`。
+
+### ③ 顶层内容整块静默消失 → **整个顶层区间**随表走，回到文件级
+
+**当时**：顶层（`label` 之外）的东西**不属于任何"拍"** —— `screen` / `style` /
+`init:` / `translate` 连 AST 节点都不产生（`_stmt_unmodeled` 直接跳过 +
+一条 warning），`define` / `default` / `image` / `transform` 虽然进了 AST，
+却只留下结构化字段、**原文已经不在**了。于是"表 → 新文件"这条纯全量路径上
+它们**整块消失，而且不报错**：
+
+```
+whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
+            → 产物 0 行（`def mole_click` / `mole_tick` / `mole_start` … 全没了）
+            而产物语法完全合法、门禁拦不住、游戏能跑但小游戏废了
+```
+
+这比 ① 危险得多：① 至少把人拦住了，③ 是**静默改数据**（契约 H1）。
+
+**现在**：解析器按**原文**把整个顶层区间收进 `ParseResult.file_blocks`
+（`TopLevelRegionNode`，不做建模、逐字带走），它随**第一张拍**走进 Excel，
+渲染时在**所有 label 之前**原样写回。
+载体是**隐藏表**「文件级保真」（`beat_model.FILE_BLOCK_SHEET`），
+不是隐藏列 —— 原因很实在：Excel 单元格上限 **32767 字符**，而真实文件的
+顶层区间轻松超过它（`ball_moving_game.rpy` 38492、`my_perferences.rpy` 50426），
+塞进单元格会被**静默截断**；表是一行一格存的，没有这个限制。
+
+真实项目实测（`tools/probe_opaque_fidelity.py`，**40 个文件逐个走纯全量**）：
+**顶层语句丢失 0 处**（改之前是 4 个文件 / 219 处）。`tools/journey_check.py`
+第 8 步现在两条路都报 `[PASS] … 丢 0/13 处`（改之前"全量 无 --source"丢 11/13）。
+
+守卫：`tests/test_file_level_opaque_blocks.py`（含"超长顶层区间往返不许被截断"、
+"块体为空不许写出半截 `init python:`"、"注释夹在缩进块中间时缩进不许算错"、
+"同一块被复制到两张拍上只写一次"、"编辑器导出必须指名道姓说出丢了哪一行"）。
+
+### 还剩什么（诚实清单）
+
+| 项 | 现状 |
+|---|---|
+| **行尾注释**（`x = 1  # 备注`） | 词法器层**刻意**剥掉（`RenPyLexer._strip_inline_comment`，有测试钉着），不在三条边界内；真实项目 minigame 共 7 行 |
+| 单行 `python:` 块被规范成 `$ x = 1` | 语义等价，产物形状变了（真实项目 1 处） |
+| ~~不给 `--source` 时的全量导出会丢顶层语句~~ | **已消除**（2026-10-05）：整个顶层区间随表保真，全量那条路实测 40 个文件丢 0 处；`OPAQUE_LOST` 门禁保留为**兜底**（哪条路又漏了会指名道姓） |
+| ~~`screen` / `style` / `default` 只有 python 类随表走~~ | **已消除**（同上）：`screen` / `style` / `init:` / `translate` / `define` / `default` / `image` / `transform` / 文件头注释全都逐字带走 |
+| **产物内部**的重复 label | 门禁只查"产物 vs 项目其他 .rpy"（`LABEL_COLLISION`），**同一个产物内部**的重名它看不出来。真实项目实测 46 个 label / 0 处重名（`tools/check_duplicate_labels.py`），但这是一条**已知缺口** |
+
 ## 目录结构
 
 ```
@@ -781,6 +877,53 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
     `raw`/`code` 两个池子里取用的）。两条都要满足，缺一个都会退回
     "raw 在前 code 在后"的兜底顺序。
 
+67. **顶层（label 之外）的东西也要跟着表走 —— 哪怕它不属于任何"拍"**
+    （2026-10-05，拓展交付评审的边界③）。
+
+    "表"的单位是**拍**，而 `init python:` / `default` / `screen` 全在
+    **顶层**：它们不进 Beats，于是"表 → 新文件"这条纯全量路径上
+    没有任何东西记得它们。症状是本仓库最贵的那一类 ——
+
+        whackamole.rpy  2 个顶层 `init python:` / 56 行游戏逻辑 → 产物 0 行，
+                        产物语法完全合法、门禁拦不住、游戏能跑但小游戏废了
+
+    （增量补丁那条路能保住，因为它"不动顶层"；但纯表路径没有源可补。）
+
+    落法是三层，**每一层都只做一件事**（2026-10-05 晚升级：从"只有
+    `python:` 类"扩到"**整个顶层区间**"）：
+
+      · `parsing`：`_top_level_region` 按**原文**收下 label 之外的一切
+        （`define` / `default` / `image` / `transform` / `screen` / `style` /
+        `init:` / `translate` / `init python` / 文件头注释 …），
+        包成 `TopLevelRegionNode` 追加进 AST —— 顶层行**不进 statements**
+        （进了就会变成一张"标签为空"的拍，被渲染进 `label start:` 里）；
+        分流靠"在不在 label 里"，不靠"这条语句建不建模"；
+      · `story`：`attach_file_blocks` 把它们挂到**第一张拍**上
+        （`Beat.file_blocks`）；纯定义文件（没有拍）会**造一张空拍**来携带 ——
+        `Beat.is_empty()` 认它算有内容，否则"刷新候选表"会静默删掉它；
+      · `beat_render`：`render_beats_to_rpy` 在**所有 label 之前**原样写出，
+        内容相同的块只写一次（重复定义会让后者覆盖前者）。
+
+    ⚠ **载体是隐藏表，不是隐藏列**（`FILE_BLOCK_SHEET`，2026-10-05 实测改的）：
+    Excel 单元格上限 **32767 字符**，而真实文件的顶层区间轻松超过它
+    （`ball_moving_game.rpy` 38492、`my_perferences.rpy` 50426），塞进列里
+    会被**静默截断**、还不报错 —— 而那正是这一条要消灭的东西。
+    表按"一行一格"存，没有长度上限。老表的隐藏列仍然**只读**兼容。
+
+    两个容易写错的地方（都被门禁/用例抓过，别再踩）：
+      · **顶格注释可以出现在缩进块中间**（Ren'Py/Python 都忽略整行注释的缩进，
+        真实项目 `ball_moving_game.rpy` 就是 `init python:` / `# 类/对象设置` /
+        `    class GridCell:`）→ 它必须**并入当前段**，否则块头丢了、产物里
+        出现悬空缩进；
+      · **基准缩进只看结构性行**（注释不算）→ 否则被那条顶格注释拉到 0，
+        去缩进失效，渲染后 `import random` 变 8 格 → **unexpected indent**。
+        这一条是 `PYTHON_SYNTAX_ERROR` 门禁拦下来的（`journey_check` 第 2b/5 步）。
+
+    为什么不是"全丢但报一声"：那是**二选一里较差的那个**，而保真是能做到的。
+    `OPAQUE_LOST` 门禁因此从"每次全量都拦人"退化成**兜底**：哪条路又漏了
+    才会响，并列出丢了哪几行。实测：`tools/probe_opaque_fidelity.py`
+    40 个真实文件走纯全量，顶层语句丢 **0 处**（改之前 4 个文件 / 219 处）。
+
     **还剩 3 条**（用 `tools/diagnose_losses.py` 逐条定位，带对家与 diff），
     **全部已定性为"工具判据的假阳性"，不是产物缺陷**：
 
@@ -808,6 +951,218 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
     回归用例 `test_blank_line_inside_a_python_block_survives`，
     并用"还原这两处"变异验证过它会红。
 
+68. **label 是硬边界：产物里的 label 集合必须与源一致**
+    （2026-10-05，组合面地狱测试 `tools/hell_test.py` 抓到）。
+
+    症状是本仓库最贵的那一类 —— **能跑、不报错、但游戏逻辑断了**：
+
+        label a:                 →      label start:
+            $ focusmode = False          pass
+            show screen home             return
+        label b:
+            e "后一句"
+
+    "孤儿指令段"（`$` / `show screen` / `pause` 这些**不落拍**的语句）在换
+    label 时没有落拍，被吸进**下一个 label** 的第一张拍 → label a 名下一张拍
+    都没有 → 渲染按拍分组时它**根本不出现**，渲染层退回 `label start:`。
+
+    真实项目实测（`tools/probe_label_fate_real.py`）：**51 个 label 丢 4 个**
+    —— beginstory / location / pomo_start / sr_about_render_test，其中
+    `location` 带 `call screen map`，是主循环节点。后果有两层：
+
+      · 所有 `jump X` **静默失效**；
+      · 产物里凭空多出一个 `label start`，而 `start` 是 Ren'Py 的游戏入口
+        → 合并进 `game/` 就是**重复 label，游戏起不来**。
+
+    修在三处，**缺一处都不行**：
+
+      · `beat_build.add()`：label 切换时先 `flush_stage_only()`（内容归属正确）；
+      · `_fill_empty_labels` / `_fill_labels_without_beats`：给"一张拍都没有"
+        的 label 补空拍（名字不丢；覆盖"只有 `return`"和"连语句都没有"两种）；
+      · `Beat.is_empty()`：把"只有 label 的空拍"当**结构锚点**（与 menu 锚点
+        同理）—— 否则它在 xlsx 往返里被 `_read_beats_from_ws` 当空行丢掉。
+
+    ⚠ **同一枚硬币的另一面**：不许**凭空造** label。修完上面之后又跑了一档
+    更严的验证（逐文件走完整 xlsx 往返），结果是 51 → **57**：6 个**纯定义
+    文件**（`transform.rpy` / `whackamole_images.rpy` / `generated_ui.rpy` /
+    `plottree.rpy` / `script0.rpy` / `script1.rpy`）—— 它们解析出 0 条语句、
+    0 个文件级块，**源文件里根本没有 label**，产物却各多一个
+    `label start: pass return`。根因是 `render_beats_to_rpy` 末尾的兜底
+    `if not emitted_labels and not file_texts`，已收紧成
+    `not emitted_labels and beats and any(not carrier)`：**有真拍却一个
+    label 都没输出**才兜底。
+
+    判据：`tools/probe_label_fate_xlsx.py`（**逐文件 + 完整 xlsx 往返**），
+    真实项目 **51 → 51，丢 0、多 0**；`probe_label_fate_real.py`
+    （不走 xlsx、全项目合并）同样是 51 → 51。
+
+    ⚠ 这一条的**变异验证**给了一课：最初写的两条空 label 用例在"改回旧实现"
+    时**全绿** —— 它们直接调渲染器、**不走 Excel**，而 `is_empty` 只在读表时
+    生效。**测试绿了不等于缺陷被钉住，必须走缺陷真正发生的那条路径。**
+
+69. **写字符串字面量时，控制字符也是要转义的**（2026-10-05）。
+
+    `Beat.text` 里存的是**真的**换行符（解析时把 `\n` 还原了），所以只转义
+    `\\` 和 `"` 会写出**物理换行**：
+
+        e "路径 C:\new\test"     →     e "路径 C:
+                                       ew\test"
+
+    产物**不可解析**，而且门禁看不出来（它不是 python 块）。Ren'Py 里 `\n`
+    是写台词的常用手法（强制换行），不是边缘情况。
+
+    修：`beat_render._quote` 补 `\n` / `\r` / `\t`（顺序是**先翻 `\\`
+    再转控制字符**），menu option 那条分支也从"手包一对引号"改成走 `_quote`。
+    回归：`tests/test_hell_findings.py::TestQuoteEscapesControlChars`。
+
+    ⚠ 配套教训：新加的"单行引号配平"检查把真实项目 14 条**三引号 docstring**
+    报成语法坏 —— 判据要先排除 `"""`。**假阳性比漏报更贵**：它会让一条检查
+    永远没法用来验收（这是第二次踩到，第一次是 `build` 的门禁粒度）。
+
+70. **单行列的单元格值必须是一行 —— 控制字符在进产物之前就压掉**
+    （2026-10-05，是上面第 69 条的**同一类、另一个出口**）。
+
+    第 69 条修的是"**字符串字面量**"那条出口（台词走 `_quote` 转义）。
+    但下面这些列是**裸 token** 出口 —— 值被逐字拼进一行代码，不经过转义：
+
+        Speaker 列 = 'ling<真换行>X'     →  ling
+                                           X "第一句"        ← **产物不可解析**
+        At      列 = 'left<真换行>right' →  show ling at left
+                                           right              ← 同上
+        Show    列 = 'ling<真换行>happy' → 被拆成 `show ling` + `show happy`
+                                           —— 能解析，但**立绘变成两张**
+
+    单元格里出现真换行是**真实可达**的：Excel 的 Alt+Enter、从别处粘一段
+    多行文本、脚本写表，都会留下它。**后两种最阴**：产物"能解析"，中途断行
+    产生的是一个看起来正常的短行，门禁（只查 Python 语法 / 图像名合法性 /
+    label 重名）拦不住。
+
+    处置：列契约本来就是"一行一个值"，所以**读写两侧**都过
+    `beat_model.sanitize_single_line_cell`：
+
+      · 控制字符（C0 + DEL）→ 一个空格；
+      · `Label` 额外去掉空白与冒号 —— 标签名里不允许它们，只压成空格会写出
+        `label a b:` 这个**语法错的标签头**（比断行更难查）。
+
+    清单是 `SINGLE_LINE_BEAT_FIELDS`（就写在 `BEAT_FIELDS` 旁边，**加列时
+    必须显式选一边**，由分区用例逼着做决定）。多行列 —— `Text` 台词 /
+    `Comment` 注释 / `Stage` 舞台 / `CodeBlock` 代码 —— **刻意不在清单里**：
+    它们的换行是**内容**（台词里 `\n` 是强制换行、Stage 一格多指令、
+    代码块多行），由 `_quote` 转义或按行渲染。
+    （文件级保真块原来也在这里，2026-10-05 挪去隐藏表了，见不变量 67。）
+
+    为什么写那一侧（`to_row`）也要压：**幂等**（`Notes` 那次不对称的坑），
+    以及 `openpyxl` 保存时会对 `\x0b` 这类控制字符直接抛
+    `IllegalCharacterError`（一个畸形值让"导出 Excel"整个崩掉，指不到哪一格）。
+
+    ⚠ **压平本身就是"改了用户的数据"**（`ling\nX` → `ling X`）：
+    产物确实能跑了，可值跟他在表里写的不一样了。本项目的立场是
+    **静默改数据比报错坏得多**（P0 就是这么定义的）——"救了用户却没告诉他"
+    同样属于这一条。所以清洗**必须留痕**：`Beat.sanitized_cells` 记下哪几格
+    被改过，然后三条路各说各的：
+
+      · `validate` → **W114**（聚合**一条**，不逐行刷屏）：体检面板与
+        `validate_all` 的调用方都能看到；
+      · `CompileResult.summary()` → 导出时一句话（`cli.py compile` /
+        `table xlsx2rpy` 那条命令行）；
+      · `EditorSession.export` 的 `note` → UI 那条路（"打开表 → 导出、
+        从不体检"的人只有这里会看到）。
+
+    ⚠ **留痕要放在所有 `g()` 之后**：结构化列（Scene / Show / At / With /
+    Hide / BGM / SFX / StageOrder / OpOrder / CodeBlocks 共 12 列）是在
+    `cls(...)` **之后**才读的。第一版把 `sanitized_cells` 赋在构造函数后面
+    那一行，这 12 列的留痕**全丢** —— 而 W114 只在"有留痕"时才报，
+    于是恰好是**最常被粘脏的那几列**（立绘 / 位置 / 音乐）静默无声。
+    抓它的是**参数化用例**（`test_cleaning_is_recorded[Show]` 等 12 条红）。
+
+    判据：`tests/test_cell_control_chars.py`（**115 条**）。用例表**由
+    `SINGLE_LINE_BEAT_FIELDS` 反推**，不手抄一份 —— 手抄的话"在清单里"
+    ≠"测过"（有人把某列挪出清单，测试不会红；现在参数化用例与分区用例会
+    **同时**红）。变异入口 `tools/mut_cell_sanitizer.py`（关掉清洗 →
+    **64 条红**）。真实项目探针 `tools/probe_cell_control_chars.py`
+    （逐列塞控制字符，走完整 xlsx 往返，产物必须能解析回来）。
+
+71. **原地导出成功之后，内存 := 磁盘**（2026-10-05，交付审查第 2 条缺口）。
+
+    `EditorSession.export` 写回的如果**就是它载入的那个文件**，就必须
+    重新解析它、用解析结果替换内存里的拍（`_reload_after_inplace_write`）。
+
+    为什么非做不可 —— 这是单人最常用的那条循环，而它曾经在第二次断掉：
+
+        改一句 → 导出 → 再改一句 → 再导出   ← `PATCH_FAILED：对位率不足`
+
+    根因：第一次写回之后**磁盘上是新内容**（补丁插了行、首行多了生成标记），
+    而内存拍的 `src_first/src_last` 还是**改动前**那份文件的；`_recover_ranges`
+    见"拍上已经有行号"就跳过重算 → 对位率掉到 0~50% → P0 那条"目标就是源文件"
+    的护栏拒写。用户看到的只有一句"对位率不足"，没有任何提示说"重载一下就好"。
+
+    为什么用"重新解析"而不是"按内容猜行号"（**先走过那条弯路**）：
+    第一版用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
+    它在最需要它的场景上**是错的** —— 解析器把"注释 / `call screen` +
+    紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出**交叠区间**
+    → 对位率 50%（whackamole 实测）。合并**本来就知道**每一拍写到了哪几行，
+    但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"三套坐标系的换算
+    （全仓最危险的一段），代价与风险都不划算。而"内存 := 解析(磁盘)"是
+    **零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
+
+    代价（明确接受）：拍的**粒度**可能变 —— 刚插的那张"只有注释/代码"的卡
+    会并进后面那张。**那正是重新打开这个文件会看到的**，只是把"下次打开
+    才发生的事"提前到现在；界面侧由 `resync_after_export` 跟着刷新列表
+    （拍数没变时不动，不打扰最常见的"改一句再导出"）。
+
+    判据：`tests/test_export_acceptance.py::test_7_two_in_place_exports_in_a_row`
+    （变异：去掉重新解析 → 产物丢掉 `default score` / `transform my_tf:`）+
+    `tests/test_qt_signal_wiring.py` 的两条列表跟随用例。
+
+72. **交付审查的三条缺口都以"让软件自己解决"收尾**（2026-10-05）。
+
+      · ① UI 导出说不出"丢了哪几行" → 把源文本交给 `OPAQUE_LOST` 门禁
+        （判据 3 条，含**反面对照**：保真时不许拦）；
+      · ② 只有注释/代码的拍对不上位 → 见不变量 71（零启发重对齐）；
+      · ③ 顶层内容只有 `python:` 类随表走 → 见不变量 67（整个顶层区间 + 隐藏表）。
+
+    共同点：**都不是"加一句更清楚的警告"**，而是把会出问题的那件事从根上
+    消掉；警告退到兜底。理由是本项目的既有立场 —— 提醒会被人习惯性忽略，
+    而"静默改数据"不能靠提醒兜住。
+
+73. **Qt 的 `bool` 不许被当成槽的参数 —— 接线、审计、兜底三层都要有**
+    （2026-10-05，追查根目录那个名叫 `False` 的文件）。
+
+    信号签名是 `clicked(bool checked = False)` / `triggered(bool checked = False)`
+    —— **槽的第一个位置参数**收到的就是这个 `False`。而这些槽的第一个参数
+    从来不是布尔（路径 / 画布坐标 / 节点 id）。后果分两种，**都真实发生过**：
+
+      · **静默走错分支**：`if target is None:`（不是 `if not target:`）判不出
+        `False` → "没给路径就弹另存为"被**绕过** → `False` 当路径送下去。
+        2026-10-04 就是这么在仓库根目录留下一个 178 字节、名叫 `False`
+        的控制流脚本（`docs/交付审查_2026-10-05.md` §8）；
+      · **当场炸**：`add_node(at=False)` → `float(False[0])` 抛 `TypeError`。
+
+    三层，缺一不可：
+
+      · **接线**：`clicked.connect(lambda: self.槽())`；工具栏统一走
+        `act()`（它内部包了一层 lambda）。**这一层是根本**；
+      · **审计**：`tools/audit_qt_signal_slots.py` —— 静态判据"不许裸
+        `connect(self.槽)`"，跨文件解析（槽常在别的 mixin 里），`act()`
+        那条包装也一起认。跑在 `tests/test_qt_signal_wiring.py` 里；
+      · **兜底**：`ui_qt.qt_args.drop_qt_bool(value, context=…)` —— 槽的入口
+        把 bool 当"没给"（**自愈**：该弹对话框就弹），并记一笔 `swallow`
+        （有痕迹、不打扰用户）。只丢**布尔**：别的错类型照旧往下走、该炸就炸
+        （会话层另有 `isinstance(target, (str, Path))` 硬护栏，绝不拿非路径碰磁盘）。
+
+    ⚠ **别把原因写成"`wrapper` 是第二个位置参数、它落进了 `target`"**
+    （有个报告和一份测试 docstring 都这么写过）：菜单项的调用是
+    `export_control_flow(wrapper=True/False)`，**关键字传参按名字绑定**，
+    位置排第几都不相关；那两行一直是对的。`wrapper` 改成关键字专用只是加固。
+
+    ⚠ 改签名要**扫全部调用方**：那次加固就把黄金快照驱动
+    （`_public(win, 'export_control_flow', str(cf), None)`）打断了，
+    `TypeError: takes from 1 to 2 positional arguments but 3 were given`。
+
+    判据：`tests/test_qt_signal_wiring.py::TestQtBoolIsNeverAnArgument`（5 条，
+    变异去掉兜底 → 4 红）+ `tests/test_control_flow_target.py`（判据层/签名层）
+    + 探针 `tools/probe_flow_export_bool.py`。
+
 ## 常见改动落点
 
 | 想做什么 | 改哪里 |
@@ -817,6 +1172,8 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |
 | 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` / `mark_code_blocks` + `story/beat_render.render_code_block` / `_render_marked_code_block` / `_python_block_indent`（见不变量 64/66） |
 | 改**隐藏列**（`StageOrder` / `OpOrder` / `CodeBlocks`） | `BEAT_FIELDS` 尾部 + `HIDDEN_BEAT_COLUMNS` + `Beat.to_row/from_row`（见不变量 66） |
+| 改**文件级保真块**（顶层 `define` / `screen` / `init python` / … 怎么带走） | `parsing/renpy_parser.py` 的 `_top_level_region` / `_region_chunk` / `TopLevelRegionNode` + `story/beat_model.py` 的 `FILE_BLOCK_SHEET` / `file_blocks_to_rows` / `file_blocks_from_rows` + `story/excel_export._write_file_blocks_sheet` + `story/excel_import._read_file_blocks` + `story/beat_build.attach_file_block_text`（见"三条已知边界"③） |
+| 改**顶层块的渲染形状**（块头 + 缩进 4） | `story/beat_model.render_file_block` / `join_file_blocks` + `story/beat_render._collect_file_blocks` |
 | 改**`call … from` / `show expression` / 空台词**的处理 | `story/beat_build._call_from_suffix` / `story/beat_model._parse_show_expression` / `parsing/renpy_parser.add_stmt`（见不变量 65） |
 | 改 Excel 长什么样 | `story/excel_export.py` |
 | 加一条门禁规则 | `story/generation_guard.py` |
@@ -838,6 +1195,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改**选择器格子的几何**（缩略图/文字/命中区） | `ui_qt/asset_picker.py` 的 `THUMB` + `CELL` —— **条目 sizeHint 必须一起设**（见不变量 40） |
 | 改**缩略图缓存或解码** | `app/thumbs.py`（内核）/ `ui_qt/thumb_loader.py`（Qt 调度） |
 | 加一个"要告诉用户的事" | `app/notify.py`（别在后端弹框） |
+| Qt 的 `clicked/triggered` 把 `bool` 喂进槽（路径/坐标/id 串位） | 预防：`tools/audit_qt_signal_slots.py`（不许裸 `connect(self.槽)`，`act()` 统一入口）+ 兜底：`ui_qt/qt_args.drop_qt_bool`（见不变量 73） |
 | 改**"被吞掉的错误"怎么记** | `core/safeguard.py`（`swallow(context, exc)` → 控制台/`report()`；见不变量 58） |
 | 改 **python op 怎么渲染成源码** | `story/beat_render.render_code_block`（两个生成器共用；标记只有 `core/statement.MARKER` 一处） |
 | 改 **哪些变量写 `default x = 0`** | `core/utils.declared_variables*`（见不变量 59） |

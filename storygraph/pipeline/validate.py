@@ -34,6 +34,7 @@ from pathlib import Path
 from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS, resolve_references
 from storygraph.core.vocabulary import ASSET_TYPE_ATTR as _TYPE_ATTR
 from storygraph.story.beat_model import (
+    BEAT_HEADERS,
     KIND_MENU_OPTION,
     split_hide_items,
     split_show_items,
@@ -325,7 +326,49 @@ def validate_level1(beats, registry=None,
                 f'条件 {b.condition!r} 看起来不是合法表达式', where,
                 '写成 love >= 5 这样的 Python 表达式'))
 
+    issues.extend(_cell_sanitize_issues(beats))
     return issues
+
+
+def _cell_sanitize_issues(beats) -> list:
+    """
+    **读表时被清洗过的单元格**要说出来（W114，2026-10-05 评审意见）。
+
+    背景：单行列（说话人/立绘/位置/…）的值会被逐字拼进一行代码，
+    单元格里的真换行漏出去就是**物理换行 —— 产物不可解析**。所以读表时
+    把控制字符压成了空格（见 `beat_model.SINGLE_LINE_BEAT_FIELDS`）。
+
+    但**压平本身就是"改了用户的数据"**：`ling\\nX` 变成 `ling X`。
+    产物确实能跑了，可值跟他在表里写的不一样了。本项目的立场是
+    **静默改数据比报错坏得多**（P0 就是这么定义的）——
+    "救了用户却没告诉他"同样属于这一条。
+
+    所以：清洗时在 `Beat.sanitized_cells` 上留痕，这里**汇总成一条**报出来
+    （一行一条会把整列粘贴弄成几十条噪音，而这条要的是"你哪几格脏了"）。
+
+    聚合而不是逐条：真实场景是"从别处粘了一列多行文本"，
+    那会一次脏几十行；逐条报会刷屏，人就不看了。
+    """
+    hits = [(b, list(getattr(b, 'sanitized_cells', None) or []))
+            for b in beats or []]
+    hits = [(b, cols) for b, cols in hits if cols]
+    if not hits:
+        return []
+
+    cols = sorted({c for _b, cs in hits for c in cs})
+    names = '、'.join(BEAT_HEADERS.get(c, c) for c in cols)
+    spots = []
+    for b, _cols in hits[:6]:
+        spots.append(getattr(b, 'line_id', '')
+                     or f'{getattr(b, "label", "")}.{getattr(b, "seq", 0):04d}')
+    more = f' 等 {len(hits)} 行' if len(hits) > len(spots) else ''
+    return [Issue(
+        L1, 'W114', WARNING,
+        f'{len(hits)} 行的单元格里有换行/制表符（列：{names}），'
+        f'读表时已按"一行一个值"压成空格 —— 产物能跑，但**值被改过**',
+        '、'.join(spots) + more,
+        '这些格本来不该有换行（多半是从别处粘进来的多行文本）：'
+        '核对一下值有没有被并到一起；单元格里 Alt+Enter 的换行在这里没有语义')]
 
 
 def _beat_asset_refs(beat) -> list:

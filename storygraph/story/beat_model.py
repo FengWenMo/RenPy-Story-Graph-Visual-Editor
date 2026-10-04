@@ -98,6 +98,98 @@ _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
 _HEADER_ALIASES.update({f: f for f in BEAT_FIELDS})
 
 
+#: **单行列**：这些列的值会被**逐字拼进一行代码**（`{说话人} "台词"` /
+#: `show {立绘} at {位置}`），所以它们的单元格里**不许有换行/制表符**。
+#:
+#: 为什么必须有这份清单（2026-10-05，P0-1 的同一类，另一个出口）：
+#: `_quote` 转义的是**字符串字面量**（台词）那条出口；而这些列是**裸 token**
+#: 出口，不经过任何转义。单元格里的真换行（Excel 的 Alt+Enter、从别处粘
+#: 一段多行文本、脚本写表）就直接变成产物里的**物理换行**：
+#:
+#:     Speaker 列 = 'ling\nX'      →      ling
+#:                                        X "第一句"        ← 产物不可解析
+#:     At      列 = 'left\nright'  →      show ling at left
+#:                                        right              ← 同上
+#:     Show    列 = 'ling\nhappy'  →      被拆成两条 show（`show ling` +
+#:                                        `show happy`）—— 能解析，但语义变了
+#:
+#: 后两种最阴：产物**能解析**，所以门禁拦不住（门禁只看"产物的 Python
+#: 语法/图像名/label 重名"，中途断行产生的是一个"看起来正常"的短行）。
+#:
+#: 处置口径：**读表时把控制字符压成空格**（列契约本来就是"一行一个值"），
+#: 于是"粘进来的多行值"退化成"用手打了空格"，产物始终是一行 ——
+#: 不静默丢内容，也不会写出跑不起来的脚本。
+#:
+#: 多行列（`Text` 台词 / `Comment` 注释 / `Stage` 舞台 / `CodeBlock` 代码 /
+#: `FileBlocks` 文件级块）**刻意不在**这份清单里：它们的换行是**内容**
+#: （台词里 `\n` 是强制换行；Stage 一格多指令；代码块多行），由 `_quote`
+#: 转义或按行渲染，不走这条处置。
+SINGLE_LINE_BEAT_FIELDS = (
+    'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Condition',
+    'Scene', 'Show', 'At', 'With', 'Hide',
+    'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
+    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks',
+)
+
+#: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]+')
+
+#: 标签名里**根本不允许**的字符：空白与冒号（`label <名字>:` 以它们收尾）。
+#: 只压成空格还不够 —— `label a b:` 是**语法错的标签头**，比断行更难查
+#: （它"看起来像"一个正常的 label 行，门禁也不管 label 名形态）。
+_LABEL_STRIP_RE = re.compile(r'[\s:]+')
+
+
+def _one_line(text: str) -> str:
+    """把值压成**一行**：控制字符 → 一个空格（见 `SINGLE_LINE_BEAT_FIELDS`）。"""
+    return _CONTROL_CHARS_RE.sub(' ', str(text or '')).strip()
+
+
+def sanitize_single_line_cell(field: str, value) -> str:
+    """
+    单行列的单元格值 → **能安全拼进一行代码**的形态。
+
+    两步，顺序固定：
+
+      1. 控制字符 → 空格（所有单行列）：断行、缩进错乱都是它引起的；
+      2. `Label` 再去掉空白与冒号：Ren'Py 的标签名里不允许它们，
+         留一个空格就写出 `label a b:` —— 一个语法错的标签头。
+
+    读写两侧（`from_row` / `to_row`）**必须都过这里**，否则往返不幂等
+    （`Notes` 那次不对称的坑）。
+    """
+    text = _one_line(value)
+    if field == 'Label':
+        return _LABEL_STRIP_RE.sub('', text)
+    return text
+
+
+def _flatten_single_line_cells(values: list) -> list:
+    """
+    `to_row` 的收尾：单行列按 `sanitize_single_line_cell` 清洗，
+    **与 `from_row` 对称**。
+
+    为什么写这一侧也要做（不只是读那一侧）：
+
+      · **幂等**：`from_row` 会压平，`to_row` 不压的话，
+        `Beat(speaker='a\\nb')` 往返一次就变样（`Notes` 那个不对称的坑
+        就是这么来的 —— 同一件事不许只有一头有出口）；
+      · `openpyxl` **保存时**会对 `\\x0b` 这种控制字符直接抛
+        `IllegalCharacterError` —— 不压平的话，一个来自畸形来源的值
+        会让"导出 Excel"整个崩掉，而错误信息完全指不到是哪一格。
+
+    行必须与 `BEAT_FIELDS` 一一对应：长度对不上说明有人加了列没同步
+    `to_row` —— 那时候**报错**比静默截断好（截断会让最后几列悄悄全空）。
+    """
+    if len(values) != len(BEAT_FIELDS):
+        raise ValueError(
+            f'to_row 写出的格子数（{len(values)}）与 BEAT_FIELDS'
+            f'（{len(BEAT_FIELDS)}）对不上 —— 加列/删列时两处要一起改')
+    return [sanitize_single_line_cell(f, v)
+            if (f in SINGLE_LINE_BEAT_FIELDS and isinstance(v, str)) else v
+            for f, v in zip(BEAT_FIELDS, values)]
+
+
 # 需要下拉框的列 -> 资产类型。
 # **下拉是"方便"，不是"牢笼"**：Excel 的数据验证只做提示、不拦截
 # （showErrorMessage=False），所以 `bg room@bgfit` 这种扩展写法照样能手打。
@@ -264,6 +356,27 @@ class Beat:
     #: 全被压到同一层（`mini_game1.rpy` 实测一个块拆出 53 条）。
     #: 兜底：这一列为空（老表 / 手工新建行）时，渲染层退回"按缩进推断"。
     code_blocks: list = field(default_factory=list)
+    #: 读表时**被清洗过**的列名（`sanitize_single_line_cell` 真的改了值）。
+    #:
+    #: 为什么要记下来（2026-10-05，评审意见）：清洗本身是**静默改数据** ——
+    #: 值里的换行被压成空格，产物能跑了，但**内容变了**。本项目的立场是
+    #: "静默改数据比报错坏得多"（P0 就是这么定义的），所以"救了用户"
+    #: 之后必须**告诉他**：`pipeline/validate` 据此报 W114，导出时
+    #: `CompileResult` 也带一句。
+    #:
+    #: 它是**运行时元数据**：不入表、不进 ContentHash（与 `src_first` 同类），
+    #: 所以 `to_row` 不收它 —— 收进去反而会让表里多出一列无人维护的仓库。
+    sanitized_cells: list = field(default_factory=list)
+    #: **文件级保真块**：顶层（label 之外）的一切 —— `define` / `default` /
+    #: `image` / `transform` / `screen` / `init python` / 文件头注释 …，
+    #: 渲染时原样回到**文件级**（在所有 label 之前），不参与"拍"的组装。
+    #:
+    #: 它挂在**第一张拍**上（见 `beat_build.attach_file_blocks`）—— 因为它必须
+    #: 跟着表走，而"表"的单位是拍。进出 Excel 走的是**隐藏表**
+    #: `FILE_BLOCK_SHEET`（不是隐藏列）：真实文件的顶层区间轻松超过 Excel
+    #: 单元格 32767 字符的上限，塞进单元格会被**静默截断**
+    #: （实测 38492 → 32767）。表是一行一行存的，没有这个限制。
+    file_blocks: str = ''
     music: str = ''
     music_params: str = ''
     music_action: str = 'play'     # 'play' / 'queue' / 'stop'
@@ -313,7 +426,7 @@ class Beat:
         if self.notes:
             comment = (f'{comment}\n{self.notes}'.strip()
                        if comment else self.notes)
-        return [
+        return _flatten_single_line_cells([
             self.line_id, self.seq, self.label, self.kind,
             self.speaker, comment, menu_caption_text(self.text),
             self.condition,
@@ -324,11 +437,12 @@ class Beat:
             bgm, bgm_params, sfx, sfx_params, self.voice,
             stage, compose_code_cell(self),
             self.content_hash,
-            # 隐藏列：源顺序 + 代码块结构。工具写、工具读，策划界面里看不到。
+            # 隐藏列：源顺序 + 代码块结构 + 文件级代码块。
+            # 工具写、工具读，策划界面里看不到。
             self.stage_order,
             self.op_order,
             compose_code_blocks_cell(self),
-        ]
+        ])
 
     @classmethod
     def from_row(cls, row: dict) -> 'Beat':
@@ -336,13 +450,24 @@ class Beat:
         row = {_HEADER_ALIASES.get(str(k).strip(), k):
                v for k, v in (row or {}).items()}
 
+        # 读表时被清洗过的列名（见 `Beat.sanitized_cells` 的 docstring）
+        sanitized: list = []
+
         def g(key, default=''):
             v = row.get(key, default)
             if v is None:
                 return default
             if isinstance(v, float) and v.is_integer():
                 v = int(v)
-            return str(v).strip()
+            text = str(v).strip()
+            # 单行列不许有换行（见 `SINGLE_LINE_BEAT_FIELDS`）：这些值会被
+            # 逐字拼进一行代码，控制字符漏出去就是产物里的物理换行。
+            if key not in SINGLE_LINE_BEAT_FIELDS:
+                return text
+            clean = sanitize_single_line_cell(key, text)
+            if clean != text:
+                sanitized.append(key)
+            return clean
 
         # 台词**逐字节原样**，首尾空白都不动。
         #
@@ -470,6 +595,17 @@ class Beat:
         # 两种来源下文本列都有一致的人话/原生写法，便于策划复核与二次编辑。
         beat.bgm = compose_audio_text(beat, 'music')
         beat.sfx = compose_audio_text(beat, 'sound')
+
+        # 记下"哪些格被清洗过"（见 `Beat.sanitized_cells`）：**清洗必须留痕**，
+        # 否则就是静默改数据 —— 值里的换行被压掉，人却不知道。
+        #
+        # ⚠ 必须放在**所有 `g()` 调用之后**：结构化列（Scene / Show /
+        # At / With / Hide / BGM / SFX / 两个内部顺序列 / CodeBlocks）
+        # 是在 `cls(...)` **之后**才读的。放在构造函数后面那一行，这 12 列
+        # 的留痕会全部丢掉 —— 而 W114 只在"有留痕"时才报，于是**恰好是
+        # 最常被粘脏的那几列**（立绘 / 位置 / 音乐）静默无声。
+        # （这条是参数化用例当场抓到的：`test_cleaning_is_recorded[Show]` 等 12 条红。）
+        beat.sanitized_cells = sorted(set(sanitized))
         return beat
 
     @property
@@ -553,7 +689,38 @@ class Beat:
         """
         if self.kind in (KIND_MENU, KIND_MENU_OPTION):
             return False
-        return not any((
+        # **label 锚点**（2026-10-05）：源文件里 `label X:` 后面没有任何
+        # 可建模的语句时（`return`、或 label 是空的），构建层会造一张
+        # **只有 label 的空拍**来保住名字（见 `beat_build._fill_empty_labels`
+        # / `_fill_labels_without_beats`）。
+        #
+        # 这张拍一行内容都没有，按"空行"丢掉它的后果比留着严重得多：
+        # 渲染层按拍分组出 label，一张拍都没有时会退回 `label start:`
+        # （见 `render_beats_to_rpy`）—— 于是
+        #
+        #   · 所有 `jump X` **静默失效**；
+        #   · 产物里凭空多出一个 `label start`，而 `start` 是 Ren'Py 的
+        #     游戏入口，项目里几乎必然已有一个 → **重复 label，起不来**。
+        #
+        # 与 menu 锚点同理：这一行是**结构**，不是内容。
+        if self.label and not self.has_content():
+            return False
+        # 文件级保真块也是"内容"（2026-10-05，拓展边界③）：
+        # 一个只有 `init python:` 的文件解析出**一张空拍**来携带它，
+        # 这一位不参与判空的话，`_read_beats_from_ws`（刷新候选表）
+        # 会把这行当空行丢掉 —— 于是"刷新一下下拉框"就静默删掉代码。
+        return not self.has_content() and not self.file_blocks
+
+    def has_content(self) -> bool:
+        """
+        这张拍**自己**有没有演出内容？（不看它携带的文件级保真块）
+
+        为什么要和 `is_empty()` 分开（2026-10-05，拓展边界③）：
+        纯 `init python:` 的文件会造一张空拍来携带代码，而这张拍在
+        **渲染分组**时不该产生一个空壳 label（源文件里根本没有 label）。
+        `render_beats_to_rpy` 用这一位把"只用来携带的拍"认出来。
+        """
+        return any((
             self.text, self.speaker, self.scene, self.show, self.hide,
             self.stage, self.bgm, self.sfx,
             self.music, self.sound, self.voice, self.notes,
@@ -1044,6 +1211,120 @@ def unmask_code_block_markers(text: str) -> str:
              for line in str(text or '').split('\n')]
     return '\n'.join(lines)
 
+
+
+#: 多个文件级保真块之间的分隔：一整行只放这个私用区字符。
+#: 私用区字符策划打不出来、也不是控制字符（`openpyxl` 拒收控制字符），
+#: 与 `CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY` 同一套约定。
+FILE_BLOCK_SEP = '\ue003'
+
+#: 文件级保真块在 Excel 里的**载体表名**（隐藏表，一行一行地存）。
+#:
+#: 为什么是表而不是隐藏列（2026-10-05 实测）：Excel 单元格上限 **32767 字符**，
+#: 而真实文件的顶层区间轻松超过它 —— `ball_moving_game.rpy` 38492、
+#: `my_perferences.rpy` 50426，写进单元格**静默截断**（读回只剩 32767），
+#: 于是"导出到新路径"丢东西、而且不报错。表没有这个限制，
+#: 一行只放一行文本，连"单个块本身就超长"也一起解决。
+FILE_BLOCK_SHEET = '文件级保真'
+FILE_BLOCK_HEADERS = ['块号', '行文本']
+
+#: 老版本的隐藏列名（那一版把整段塞进单元格）。**只读不写**：今天的表里
+#: 已经没有它，但那一版生成的表还得读得回来（见 `excel_import`）。
+LEGACY_FILE_BLOCK_COLUMN = 'FileBlocks'
+
+
+def file_blocks_to_rows(text) -> list:
+    """
+    文件级保真块的合并文本 → 隐藏表的行 `[(块号, 行文本), …]`（1-based 块号）。
+
+    块与块之间用 `FILE_BLOCK_SEP` 那一行分隔（`join_file_blocks` 写的），
+    这里按行拆开；**块内空行保留**（缩进块里的空行是内容）。
+    """
+    if not str(text or '').strip():
+        return []
+    rows = []
+    for bi, block in enumerate(split_file_blocks(text), start=1):
+        for ln in block.split('\n'):
+            rows.append((bi, ln))
+    return rows
+
+
+def file_blocks_from_rows(rows) -> str:
+    """隐藏表的行 → 合并文本（与 `file_blocks_to_rows` 严格互逆）。"""
+    groups: dict = {}
+    for bi, line in rows or ():
+        try:
+            key = int(bi)
+        except (TypeError, ValueError):
+            continue
+        groups.setdefault(key, []).append('' if line is None else str(line))
+    parts = []
+    for key in sorted(groups):
+        # **去掉块首尾的空行**（写表时 `split_file_blocks` 也是这么切的），
+        # 否则每往返一次就多一层空行。
+        body = groups[key]
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
+        if body:
+            parts.append('\n'.join(body))
+    return f'\n\n{FILE_BLOCK_SEP}\n\n'.join(parts)
+
+
+def render_file_block(header: str, code: str) -> str:
+    """
+    一个顶层保真块 → **文件级**的文本（块头 + 缩进 4 的块体）。
+
+    为什么缩进固定 4：`_collect_python_block` 已经把块体归一到"基准缩进 0"
+    （相对层级保住、绝对排版丢掉），文件级的块体就是比块头深一层 ——
+    Ren'Py 的块体一律按缩进认，4 是它的惯用宽度。
+
+    为什么不留行尾空白：块体里那些是作者的排版，不是语义；
+    留着的唯一后果是每次往返都产出一个 diff 块。
+    """
+    head = str(header or '').strip() or 'python:'
+    body = [('    ' + ln) if ln.strip() else ''
+            for ln in str(code or '').split('\n')]
+    return '\n'.join([head] + body).rstrip('\n')
+
+
+def join_file_blocks(blocks) -> str:
+    """
+    若干 `(header, code)` → 隐藏列文本（块之间空一行，人能读）。
+
+    **块体为空的"块头"要丢掉**：`init python:` / `screen foo():` 后面什么都不写
+    是 Ren'Py 的语法错误（它要求一个缩进块）。宁可不写，也不写出一个跑不起来的
+    半截块 —— 这条是测试抓到的（`test_empty_body_is_not_invented`）。
+
+    但**无块体的整句**要留下（2026-10-05，消掉"第三类内容会丢"那条缺口时
+    扩到这里）：顶层区间里绝大多数是 `define e = Character(…)` /
+    `default score = 0` / `# 注释` 这种**一行就是一条完整语句**的东西。
+    它们没有块体，却正是以前被整批丢掉的那一类。
+    判据因此从"块体非空"改成"**不以 `:` 收尾**，或者有块体"。
+    """
+    parts = []
+    for head, code in blocks or ():
+        if not str(head or '').strip():
+            continue
+        if not str(code or '').strip() and str(head).rstrip().endswith(':'):
+            continue                      # 半截块：宁可不写
+        parts.append(render_file_block(head, code))
+    return f'\n\n{FILE_BLOCK_SEP}\n\n'.join(parts)
+
+
+def join_file_block_parts(parts) -> str:
+    """若干**已渲染**的块文本 → 合并文本（`split_file_blocks` 的逆操作）。"""
+    keep = [str(p).strip('\n') for p in parts or () if str(p or '').strip()]
+    return f'\n\n{FILE_BLOCK_SEP}\n\n'.join(keep)
+
+
+def split_file_blocks(text) -> list:
+    """隐藏列文本 → 一段段文件级文本（渲染时逐段原样写出）。"""
+    raw = str(text or '')
+    if not raw.strip():
+        return []
+    return [p.strip('\n') for p in raw.split(FILE_BLOCK_SEP) if p.strip()]
 
 
 def compose_code_blocks_cell(beat: 'Beat') -> str:

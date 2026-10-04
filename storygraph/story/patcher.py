@@ -1391,6 +1391,18 @@ def patch_export(beats: list, source_path, generated_text: str,
     out_lines = list(orig_lines)
     blocks, raw_gen = _render_blocks(beats, indent, audit)
 
+    # 一个"渲染得出内容"的拍都没有 —— 与上面 `not beats` 是同一件事。
+    #
+    # 为什么还要单独判（2026-10-05，拓展边界③）：顶层 `init python:` 现在会
+    # 造一张**空拍**来携带"文件级保真块"（它不属于任何演出流，见
+    # `beat_build.attach_file_blocks`）。那张拍让 `beats` 非空，却永远对不上
+    # 任何源行 → 覆盖率 0%、`reasons` 却是空的 —— 调用方只拿到一个
+    # "没走增量"而**不知道为什么**（`test_empty_chapter_reason_is_distinct`
+    # 抓到的正是这个：那条"没有解析出任何拍"的原因必须继续说出来）。
+    if not any(gen for _i, _first, _last, gen, _b in blocks):
+        return PatchResult(generated_text, None, 0, 0, 0,
+                           reasons=['这一章没有解析出任何拍，无法增量'])
+
     matched = 0
     changed = 0
     stale = 0

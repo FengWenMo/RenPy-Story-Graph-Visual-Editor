@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.ui_qt.qt_args import drop_qt_bool
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
 from PySide6.QtCore import Qt, QTimer
@@ -194,6 +195,7 @@ class NodeEditMixin:
         if self.graph is None:
             from storygraph.graph.models import Graph
             self._set_graph(Graph())
+        at = drop_qt_bool(at, context='ui_qt.add_node')
         if at is None:
             center = self._canvas.mapToScene(
                 self._canvas.viewport().rect().center())
@@ -222,6 +224,7 @@ class NodeEditMixin:
             self._status('至少要有两个模块才能连线'
                          '（先用「➕ 导入章节 .rpy」加几章，或新建章节）。')
             return
+        from_id = drop_qt_bool(from_id, context='ui_qt.add_edge')
         if from_id is None:
             from_id = self._canvas.selected_node_id()
         dlg = AddEdgeDialog(self, nodes=self.graph.nodes, from_id=from_id,

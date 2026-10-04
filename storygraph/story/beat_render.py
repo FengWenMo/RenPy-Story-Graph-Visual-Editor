@@ -805,7 +805,9 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             todo('说话人', speaker, f"缺少资源 角色 '{speaker}'")
             speaker = ''
     if beat.kind == KIND_MENU_OPTION:
-        emit(f'"{beat.text}"', '台词', beat.text)
+        # 走 `_quote` 而不是手包一对引号：选项文字里可能有 `"` 或控制字符，
+        # 裸包会写出语法错的菜单（与上面 `adv_backslash` 同一个坑）。
+        emit(_quote(beat.text), '台词', beat.text)
     elif beat.kind == KIND_EXTEND:
         emit(f"extend {_quote(beat.text)}", '台词', beat.text)
     elif beat.text:
@@ -1814,10 +1816,32 @@ def _normalize_image_name(name: str) -> str:
 
 
 def _quote(text: str) -> str:
-    """Ren'Py 字符串字面量。含双引号时用单引号包。"""
+    """Ren'Py 字符串字面量。
+
+    三类字符必须转义，缺一类就会写出**语法错**的 .rpy：
+
+      · `\\` 和 `"` —— 字符串字面量的老规矩；
+      · **`\\n` / `\\t` / `\\r`** —— 值里这些是**真的**换行/制表符
+        （解析 .rpy 时已把 `\\n` 这类转义还原成了真字符），原样写出去
+        就会变成**物理换行**，把一条 say 断成两行半。
+
+    第三类是 2026-10-05 补的（地狱测试 `tools/hell_test.py` 的
+    `adv_backslash` 抓到）：`e "路径 C:\\new\\test"` 往返后变成
+
+        e "路径 C:
+        ew\\test"
+
+    ——产物直接不可解析。Ren'Py 里 `\\n` 是常用写法（强制换行），
+    所以这不是边缘情况。
+    """
     if text is None:
         return '""'
-    escaped = str(text).replace('\\', '\\\\').replace('"', '\\"')
+    escaped = (str(text)
+               .replace('\\', '\\\\')
+               .replace('\n', '\\n')
+               .replace('\r', '\\r')
+               .replace('\t', '\\t')
+               .replace('"', '\\"'))
     return f'"{escaped}"'
 
 
@@ -1924,6 +1948,42 @@ def make_symbols(registry=None, keywords=None):
 
 
 
+def _is_file_block_carrier(beat) -> bool:
+    """
+    这张拍**只**用来携带文件级保真块吗（自己没有演出内容）？
+
+    见 `render_beats_to_rpy` 里"只用来携带的拍不产生 label"那段：
+    纯 `init python:` 的文件没有 label，产物里也不该凭空多一个
+    空壳 `label start: pass return`。
+    """
+    if not getattr(beat, 'file_blocks', ''):
+        return False
+    checker = getattr(beat, 'has_content', None)
+    return (not checker()) if callable(checker) else False
+
+
+def _collect_file_blocks(beats: list) -> list:
+    """
+    从拍列表里收集**文件级保真块**（去重、保序）。
+
+    为什么要去重：块挂在第一张拍上（见 `beat_build.attach_file_blocks`），
+    而同一个 Beat 列表可能被渲染多次、也可能有人手工复制那一行 ——
+    重复写出 `init python:` 会**重复定义**（后者覆盖前者，行为可能变）。
+    内容相同就只写一次；内容不同则如实按顺序都写（那是两份定义）。
+    """
+    from storygraph.story.beat_model import split_file_blocks
+
+    out, seen = [], set()
+    for b in beats or ():
+        for part in split_file_blocks(getattr(b, 'file_blocks', '')):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(part)
+    return out
+
+
 def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
                         indent: str = '    ', registry=None,
                         symbols=None, trace: list = None,
@@ -1963,6 +2023,17 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
 
     out.append('')
 
+    # —— 文件级保真块（顶层 `init python:` 之类）——
+    #
+    # 2026-10-05，拓展边界③：这些块不属于任何"拍"，全量重生成本来会把它们
+    # **整块丢掉**（真实项目 `whackamole.rpy` 实测丢 56 行游戏逻辑，而产物
+    # 语法完全合法、门禁拦不住）。它们现在随拍带到这儿，在**所有 label
+    # 之前**原样写出 —— 与源文件里"定义在前、label 在后"的顺序一致。
+    file_texts = _collect_file_blocks(beats)
+    for text in file_texts:
+        out.append(text)
+        out.append('')
+
     groups = []
     if label_name:
         groups.append((label_name, list(beats)))
@@ -1979,11 +2050,50 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
             bucket.append(b)
         if bucket:
             groups.append((current, bucket))
-        if not groups:
-            groups.append(('start', []))
+        if not groups and label_name:
+            groups.append((label_name, []))
+        #
+        # **一张拍都没有、也没指定 label 名 → 不产生任何 label**
+        # （2026-10-05 修，`tools/probe_label_fate_xlsx.py` 抓到）。
+        #
+        # 旧写法是 `groups.append(('start', []))` —— 凭空造一个 label。
+        # 真实项目里 6 个**纯定义文件**中招（`transform.rpy` /
+        # `whackamole_images.rpy` / `generated_ui.rpy` / `plottree.rpy` /
+        # `script0.rpy` / `script1.rpy`）：它们只有 `transform` / `image` /
+        # `init python`，**源文件里根本没有 label**，产物里却各多出一个
+        #
+        #     label start:
+        #         pass
+        #         return
+        #
+        # 而 `start` 是 Ren'Py 的游戏入口 —— 这些产物一旦落进 `game/`，
+        # 就是**重复 label，游戏起不来**。
+        # 一个只有定义的文件**没有 label** 才是对的（Ren'Py 允许）。
+        #
+        # 注意这条与上面"空拍保住 label 名"是同一枚硬币的两面：
+        # 源文件里**有**的 label 必须留下来，**没有**的绝不能凭空造。
 
+    emitted_labels = 0
     for name, group in groups:
+        # **只用来携带文件级块的拍不产生 label**（2026-10-05，拓展边界③）。
+        #
+        # 纯 `init python:` 的文件会造一张空拍来携带代码（见
+        # `beat_build.attach_file_blocks`）。照常分组的话，产物里会多出一个
+        # **空壳** `label start: pass return` —— 而源文件里根本没有 label。
+        #
+        # 为什么这个空壳不好：把一个纯定义文件导出到 `game/`（`--out` 指到那）
+        # 时，它会与项目里真正的 `label start` 重名，Ren'Py 直接起不来
+        # （`LABEL_COLLISION` 门禁能拦住这一种，因为目标在 game/ 里）。
+        # 一个只做定义的文件**没有 label** 才是对的。
+        #
+        # ⚠ 实测口径（别把这条当成"防住了合并构建重名"）：全项目合并时
+        # 这些块通常挂在**第一张真拍**上（`attach_file_blocks`），
+        # 合成拍根本不出现 —— 真实项目产物 46 个 label / 0 处重名
+        # （`tools/check_duplicate_labels.py`）。
+        if group and all(_is_file_block_carrier(b) for b in group):
+            continue
         out.append(f"label {name}:")
+        emitted_labels += 1
         body = []
         # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：
         # 逐拍渲染会把 `menu:` 整块压成顺序语句，分支结构静默损坏。
@@ -2014,6 +2124,28 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
             out.extend(indent + ln if ln.strip() else '' for ln in body)
         else:
             out.append(indent + 'pass')
+        out.append(indent + 'return')
+        out.append('')
+
+    # 兜底 label 的判据（2026-10-05 收紧，`tools/probe_label_fate_xlsx.py`
+    # 抓到）：**只有"有真拍却一个 label 都没输出"时才补**。
+    #
+    # 旧判据是 `not emitted_labels and not file_texts` —— 于是
+    # **一张拍都没有**的纯定义文件也会得到 `label start: pass return`。
+    # 真实项目 6 个文件中招（`transform.rpy` / `whackamole_images.rpy` /
+    # `generated_ui.rpy` / `plottree.rpy` / `script0.rpy` / `script1.rpy`）：
+    # 它们解析出 **0 条语句、0 个文件级块**（`transform` / `image` 定义
+    # 还没进任何保真通道），产物里却各多出一个 `label start` ——
+    # 而 `start` 是 Ren'Py 的游戏入口，落进 `game/` 就是**重复 label**。
+    #
+    # 源文件里**没有** label 的文件，产物就该**没有** label。
+    # 与"空拍保住 label 名"（`beat_build._fill_*`）是同一枚硬币的两面。
+    if (not emitted_labels and beats
+            and any(not _is_file_block_carrier(b) for b in beats)):
+        # 有拍、但它们的 Label 列是空的（Excel 里新建的表常这样）
+        # → 照旧给一个能跑的兜底 label（没有这一条，产物没有入口）。
+        out.append('label start:')
+        out.append(indent + 'pass')
         out.append(indent + 'return')
         out.append('')
 

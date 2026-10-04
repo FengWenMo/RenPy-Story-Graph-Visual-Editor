@@ -1061,8 +1061,11 @@ class TestCodeBlocksColumn:
                                                    HIDDEN_BEAT_COLUMNS)
         assert 'CodeBlocks' in BEAT_FIELDS
         assert 'CodeBlocks' in HIDDEN_BEAT_COLUMNS
-        # "放远点"：排在最后一列
-        assert BEAT_FIELDS[-1] == 'CodeBlocks'
+        # "放远点"：内部元数据排在最后（`FileBlocks` 一度也是隐藏列，
+        # 2026-10-05 挪去隐藏表了 —— Excel 单元格 32767 的上限会静默截断
+        # 真实文件的顶层区间，见 `beat_model.FILE_BLOCK_SHEET`）
+        assert BEAT_FIELDS[-1] == 'CodeBlocks', BEAT_FIELDS
+        assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
 
     def test_encoding_is_human_readable(self):
         """区间编码要人能读（万一有人展开隐藏列）。"""

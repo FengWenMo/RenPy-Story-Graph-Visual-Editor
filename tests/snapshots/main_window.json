@@ -144,6 +144,17 @@
      "show": "",
      "speaker": "",
      "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
     }
    ]
   ],
@@ -525,6 +536,17 @@
      "show": "",
      "speaker": "",
      "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
     }
    ]
   ],
@@ -665,6 +687,17 @@
      "kind": "narration",
      "music": "",
      "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
      "scene": "",
      "show": "",
      "speaker": "",
@@ -976,6 +1009,17 @@
      "kind": "narration",
      "music": "",
      "raw": "jump ch01_end",
+     "scene": "",
+     "show": "",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "music": "",
+     "raw": "",
      "scene": "",
      "show": "",
      "speaker": "",

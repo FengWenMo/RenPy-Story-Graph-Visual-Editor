@@ -67,7 +67,7 @@ def _cmd_build(args) -> int:
     return 0 if result.ok else 1
 
 
-def _report_guard(result, out, stream=None) -> bool:
+def _report_guard(result, out, stream=None, source=None) -> bool:
     """
     打印生成门禁结论；被拦下返回 False（调用方据此给退出码 1）。
 
@@ -76,6 +76,10 @@ def _report_guard(result, out, stream=None) -> bool:
     否则 CI 看到 0 却拿不到产物，问题被吞掉。
     """
     stream = stream or sys.stderr
+    if not result.written and not result.guard_issues and not result.review_path:
+        # 空表那条路（`skip_empty`）：没有产物也没有门禁结论，
+        # 调用方按 `result.empty` 给退出码 2，这里不冒充"被拦下"。
+        return False
     if result.written:
         print(f'已生成脚本：{out}')
         return True
@@ -89,19 +93,56 @@ def _report_guard(result, out, stream=None) -> bool:
         # 这一条**有**逃生舱，而且和上面那条"坏脚本"的性质不同：
         # 不是产物有问题，是"目标是人手写的"。所以提示要分开给，
         # 否则用户会以为自己的产物坏了。
-        print('  目标是你手写的 .rpy，工具不敢覆盖它（会丢掉 default / '
-              'init python / transform）。', file=stream)
-        print('  确认要覆盖（或换个 --out 路径）时加 --force。', file=stream)
+        if result.used_patch:
+            # ⚠ 补丁成功时**必须说真话**（2026-10-05）：这一次是在原文上
+            # **合并**出来的，`default` / `init python` / `transform` 逐字保留，
+            # 一刀下去什么都不会丢。笼统地说"会丢掉这些"是假话，而它恰好
+            # 出现在最常见的那条路上（改自己章节里的一句台词、原地导出）。
+            print('  这次是**增量**：只替换改过的那几行，原文其余部分逐字保留。',
+                  file=stream)
+            print('  写入只会在首行加一条生成标记（工具据此认出自家产物），'
+                  '确认后加 --force 即可。', file=stream)
+        else:
+            print('  目标是你手写的 .rpy，工具不敢覆盖它（会丢掉 default / '
+                  'init python / transform）。', file=stream)
+            if not source:
+                # 2026-10-05 拓展边界②：以前这里**只**能建议 `--force`（= 明知会丢
+                # 东西还要覆盖）。现在还有一条**无损**的路：给出源 .rpy 让它增量合并
+                # —— 改一句台词就只改那一行，第三类内容原样留着。
+                # 这条路必须被说出来，否则用户只会看到"要么别改、要么全毁"。
+                print('  想保住 default / init python / transform：加 '
+                      '--source <这一章原来的 .rpy>，只增量改你改过的行。',
+                      file=stream)
+            print('  确认要覆盖（或换个 --out 路径）时加 --force。', file=stream)
     else:
         print('  （坏脚本落进 game/ 会让游戏起不来，所以门禁拒绝写入）',
               file=stream)
     return False
 
 
+def _report_incremental(result, stream=None) -> None:
+    """
+    把"这次走的是增量还是全量"报出来。
+
+    为什么必须报（拓展边界②的纪律）：退回全量意味着**第三类内容不在产物里**。
+    无头 CLI 上没人能看见这件事 —— 不说，就等于静默降级。
+
+    但**只在"本来该走增量"时才说**（`patch_attempted`）：没给 `--source`
+    时全量是正常默认，每次都喊一句只会让人开始忽略这类提示 ——
+    而那正是 `OPAQUE_LOST` 最需要被看见的时候。
+    """
+    stream = stream or sys.stdout
+    if result.used_patch:
+        print(f'增量补丁：改动 {result.changed_lines} 行，'
+              f'原文其余部分（含 default / init python / transform）逐字节保留',
+              file=stream)
+    elif result.patch_attempted and result.patch_note:
+        print(f'增量未采用（{result.patch_note}）→ 已按全量生成',
+              file=stream)
+
+
 def _cmd_table(args) -> int:
-    from storygraph.story.excel_import import import_beats_from_excel
     from storygraph.story.script_table import open_rpy_as_table
-    from storygraph.story.generation_guard import write_generation
 
     registry = _load_registry(args)
 
@@ -110,28 +151,26 @@ def _cmd_table(args) -> int:
         print(f'已生成剧本表：{out}')
         return 0
     if args.action == 'xlsx2rpy':
-        from storygraph.pipeline.compile import (compile_beats,
+        # 落盘逻辑全在 `pipeline.compile.compile_table`（2026-10-05 收口）。
+        # 这里以前自己又写了一遍 import + compile_beats + write_generation ——
+        # 与 `compile_table` 是同一件事的两份实现，于是新增的 `--source`
+        # （增量合并且保住第三类内容）得改两处，漏一处就是**静默退回全量**。
+        from storygraph.pipeline.compile import (compile_table,
                                                  format_compile_result)
 
-        beats = import_beats_from_excel(args.path, registry=registry)
-        if not beats:
-            print('剧本表为空', file=sys.stderr)
-            return 2
-        result = compile_beats(beats, registry=registry)
         out = Path(args.out) if args.out else \
             Path(args.path).with_suffix('.rpy')
-        # 落盘走生成门禁（以前这里直接 write_text，绕过了闸门）。
-        # `--force` 是逃生舱：明确要覆盖已存在的手写文件时才用
-        # （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
-        artifact = write_generation(result.rpy_text, out,
-                                    force=bool(getattr(args, 'force', False)))
-        result.written = artifact.written
-        result.out_path = artifact.out_path
-        result.review_path = artifact.review_path
-        result.guard_issues = list(artifact.blocking)
-
-        if not _report_guard(result, out):
+        _path, _sheet, result = compile_table(
+            args.path, rpy_path=out, registry=registry, write_sheet=False,
+            force=bool(getattr(args, 'force', False)),
+            source_path=getattr(args, 'source', None), skip_empty=True)
+        if result.empty:
+            print('剧本表为空', file=sys.stderr)
+            return 2
+        if not _report_guard(result, out,
+                             source=getattr(args, 'source', None)):
             return 1
+        _report_incremental(result)
         print()
         print(format_compile_result(result))
         return 0
@@ -300,15 +339,19 @@ def _cmd_compile(args) -> int:
     out = Path(args.out) if args.out else table_path.with_suffix('.rpy')
     # `--force` 是逃生舱：允许覆盖已存在的手写 .rpy
     # （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+    # `--source` 是**无损**那条路：给出这一章原来的 .rpy，走增量合并，
+    # 只改你改过的行，default / init python / transform 原样保留。
     _path, sheet, result = compile_table(
         table_path,
         rpy_path=out,
         registry=registry,
         write_sheet=bool(args.sheet) and not args.in_place_sheet,
-        force=bool(getattr(args, 'force', False)))
+        force=bool(getattr(args, 'force', False)),
+        source_path=getattr(args, 'source', None))
 
-    if not _report_guard(result, out):
+    if not _report_guard(result, out, source=getattr(args, 'source', None)):
         return 1
+    _report_incremental(result)
     if args.in_place_sheet:
         merge_export_sheet(table_path, result)
         print(f'编译结果已作为「Export_RenPy」表并入：{table_path}')
@@ -354,6 +397,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--out', default=None)
     sp.add_argument('--asset-dir', default=None, help='资源表目录')
     sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
+    sp.add_argument('--source', default=None,
+                    help='这一章原来的 .rpy；给了就走**增量合并**'
+                         '（只改你改过的行，default / init python / '
+                         'transform 原样保留）。改已有章节请用它 —— '
+                         '没有它就只能全量重生成，那会丢掉不进表的东西')
     sp.add_argument('--force', action='store_true',
                     help='目标已存在也允许覆盖（会丢掉 default/init python '
                          '等不进表的东西，明确知道自己在做什么时才用）')
@@ -365,6 +413,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--out', default=None, help='输出的 .rpy 路径')
     sp.add_argument('--asset-dir', default=None, help='资源表目录')
     sp.add_argument('--project', default=None, help='项目根目录（用于找资源表）')
+    sp.add_argument('--source', default=None,
+                    help='这一章原来的 .rpy；给了就走**增量合并**'
+                         '（保住 default / init python / transform）')
     sp.add_argument('--force', action='store_true',
                     help='目标已存在也允许覆盖（逃生舱，见上）')
     sp.add_argument('--sheet', action='store_true',

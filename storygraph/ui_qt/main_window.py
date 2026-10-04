@@ -1068,11 +1068,15 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._save_layout_btn = QPushButton('💾 保存布局(JSON)')
         self._save_layout_btn.setToolTip(
             '把手排好的块位置存成 .json（Ctrl+S）；格式与旧版一致')
-        self._save_layout_btn.clicked.connect(self.save_layout)
+        # ⚠ 包 lambda：`clicked` 会发一个 `bool`，直接 connect 会让它变成
+        # `save_layout(target=False)` —— "没给路径就弹另存为"那条分支走不到，
+        # 接着拿 `False` 当路径写文件（TypeError）。三处同理（见下面的
+        # `load_layout` / `export_control_flow`，以及工具栏的 `act()`）。
+        self._save_layout_btn.clicked.connect(lambda: self.save_layout())
         c1.addWidget(self._save_layout_btn)
         self._load_layout_btn = QPushButton('📂 加载布局')
         self._load_layout_btn.setToolTip('读回一份布局 .json（Ctrl+O）')
-        self._load_layout_btn.clicked.connect(self.load_layout)
+        self._load_layout_btn.clicked.connect(lambda: self.load_layout())
         c1.addWidget(self._load_layout_btn)
         rv.addLayout(c1)
         c2 = QHBoxLayout()
@@ -1092,7 +1096,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._export_flow_btn.setToolTip(
             '按图生成 Ren\'Py 控制流脚本：每个模块一个 `<label>_control`，'
             '里面 call 原 label，再按连线写 jump/call/菜单/条件')
-        self._export_flow_btn.clicked.connect(self.export_control_flow)
+        # 同上：`clicked` 的 bool 会变成 `target=False`，于是"没给路径就弹
+        # 「保存为」"那条分支走不到（拿 False 当路径 → TypeError）。
+        self._export_flow_btn.clicked.connect(lambda: self.export_control_flow())
         rv.addWidget(self._export_flow_btn)
         self._refresh_assets_btn = QPushButton('🔄 刷新下拉候选')
         self._refresh_assets_btn.setToolTip(
@@ -1186,7 +1192,18 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 用户 2026-10-03："只能够修改，不能增删，还是没用！"
         self._insert_btn = QPushButton('＋ 插入卡片')
         self._insert_btn.setToolTip('在当前这一拍后面插入一张空卡片（Ctrl+Insert）')
-        self._insert_btn.clicked.connect(self.insert_card)
+        # ⚠ **必须包一层 lambda**（2026-10-05 实测，用户报"两个按钮一模一样"）：
+        # `QPushButton.clicked` 的信号签名是 `clicked(bool checked = False)`，
+        # PySide 会把这个 bool **当成第一个位置参数**喂给槽函数 ——
+        # 直接 `connect(self.insert_card)` 等于每次都调
+        # `insert_card(after=False)`，也就是**"插到前面"**！
+        # 于是「插入卡片」与「插到前面」效果完全相同（用户的原话）。
+        #
+        # 为什么单测没抓到：`test_ui_qt` 里那两条是**直接调方法**
+        # （`window.insert_card(after=True)`），根本没经过信号 ——
+        # 缺陷在接线处，而用例绕开了接线（"测试绿了 ≠ 缺陷被钉住"）。
+        # 现在有 `test_every_button_slot_can_accept_the_clicked_bool` 守着这一类。
+        self._insert_btn.clicked.connect(lambda: self.insert_card(after=True))
         bh.addWidget(self._insert_btn)
         self._insert_before_btn = QPushButton('＋ 插到前面')
         self._insert_before_btn.setToolTip('在当前这一拍**前面**插入一张空卡片')
@@ -1280,7 +1297,18 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             守着这条规矩。快捷键写在 `tip` 里告诉用户即可。
             """
             a = QAction(text, self)
-            a.triggered.connect(fn)
+            # ⚠ **统一包一层**：`QAction.triggered` 的签名是
+            # `triggered(bool checked = False)`，PySide 会把这个 bool 当成
+            # **第一个位置参数**喂给槽函数。直接 `connect(fn)` 时，
+            # 回调形如 `add_node(at=None)` 的就会收到 `at=False` —— 于是
+            # "不给就放视野中央"那条分支永远走不到，`float(False[0])` 直接抛
+            # （用户看到的是"点了没反应"）。`add_edge(from_id=None)` 同理。
+            #
+            # 一处收口：工具栏回调**一律不收参数**（想拿 checked 就自己传
+            # lambda 进来）。这样以后往 `act(...)` 挂回调不会再踩同一个坑。
+            # 守卫：`tools/audit_qt_signal_slots.py`
+            # + `tests/test_qt_signal_wiring.py`。
+            a.triggered.connect(lambda _checked=False: fn())
             if tip:
                 a.setToolTip(tip)
             self._act_tb.addAction(a)

@@ -19,6 +19,7 @@ storygraph.story.generation_guard
 
 from __future__ import annotations
 import re
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -158,6 +159,102 @@ def ensure_generator_marker(text: str) -> str:
     return f'{GENERATOR_MARKER}\n\n{body}'
 
 
+# ---------------------------------------------------------------------------
+#  「第三类内容会不会丢」—— 全量生成的产物 vs 它原来的那一章
+# ---------------------------------------------------------------------------
+
+def _squash(line: str) -> str:
+    """去掉全部空白（比对用）——不要引进来 `patcher._squash`，那是同层的私有名。"""
+    return re.sub(r'\s+', '', str(line or ''))
+
+
+def top_level_chunks(text: str) -> list:
+    """
+    **顶层语句块**（不在任何 `label` 里的那部分）：`[(行号, [行…]), …]`。
+
+    为什么需要它（2026-10-05 拓展边界②的收尾）：全量重生成只认得"拍"，
+    而 `define` / `default` / `init python` / `transform` / `screen` / `image`
+    全在**顶层**，一行都留不下 —— 丢这些，游戏**起不来**。
+    增量补丁那条路之所以安全，正是因为它"不动顶层"；一旦补丁失败退回
+    全量，这件事就必须被**算出来**，不能靠人记得。
+
+    规则：
+      · 顶层 = 行首无缩进；
+      · 空行与 `#` 注释**不算**（文件头注释丢了不难看，不值得拦人 ——
+        "宁可少报"是这道门禁的既定口径）；
+      · `label x:` 及其块体跳过（那属于"拍"，由增量/全量各自负责）。
+    """
+    lines = str(text or '').splitlines()
+    out = []
+    i, n = 0, len(lines)
+    while i < n:
+        cur = lines[i]
+        s = cur.strip()
+        if not s or s.startswith('#') or cur[:1] in (' ', '\t'):
+            i += 1
+            continue
+        if re.match(r'^label\s', s):
+            i += 1
+            continue                       # label 块体交给"拍"那一层
+        chunk = [cur]
+        j = i + 1
+        while j < n:
+            nxt = lines[j]
+            if not nxt.strip() or nxt[:1] in (' ', '\t'):
+                chunk.append(nxt)
+                j += 1
+                continue
+            break
+        out.append((i + 1, chunk))
+        i = j
+    return out
+
+
+def opaque_loss(source_text, product_text) -> list:
+    """
+    源文件里**有、产物里没有**的顶层语句：`[(行号, 语句头), …]`。
+
+    这是"退回全量会不会毁东西"的**可计算判据**（拓展边界②的收尾）。
+    以前的判据只有 `would_destroy_opaque(target, source_path)` —— 它看的是
+    **目标**，回答"覆盖它会不会毁掉工具不认识的内容"。而 CLI 那条路
+    （`--source X --out 新路径`）里目标是新的、不存在，护栏放行，于是
+    **源文件里的 `define` / `init python` 在产物里悄悄没了**。
+
+    实测（`game/pomodorro/pomodorro.rpy`，真实项目）：补丁没配上 → 退回全量
+    → 产物里 `define t = Character("Roro", image="dororo")`、
+    `image dororo neutral = "..."` 等**整批消失**，而 CLI 退出码是 0。
+    这正是本仓库最贵的一类缺陷（契约 H1：静默改数据比报错坏得多）。
+
+    比对口径：顶层块的**每一行**（去空白）都要能在产物的某一行里找到。
+    宽松是刻意的 —— 产物可能重排、可能加缩进，只要东西还在就不算丢。
+    """
+    product = {_squash(ln) for ln in str(product_text or '').splitlines()}
+    product.discard('')
+    lost = []
+    for line_no, chunk in top_level_chunks(source_text):
+        sig = [_squash(ln) for ln in chunk
+               if ln.strip() and not ln.lstrip().startswith('#')]
+        if not sig:
+            continue
+        if any(item not in product for item in sig):
+            lost.append((line_no, chunk[0].strip()[:60]))
+    return lost
+
+
+def _make_opaque_lost_issue(lost: list, source_path=None) -> GuardIssue:
+    """把"顶层语句要丢"包成一条 block 级发现。"""
+    head = '、'.join(f'第 {n} 行 `{t}`' for n, t in lost[:3])
+    more = f'（共 {len(lost)} 处）' if len(lost) > 3 else ''
+    where = f'{source_path} ' if source_path else ''
+    return GuardIssue(
+        'OPAQUE_LOST', 'block',
+        f'{where}有 {len(lost)} 处顶层语句**没有出现在产物里**：{head}{more}。'
+        f'全量重生成只认得"拍"，`define` / `default` / `init python` / '
+        f'`transform` / `screen` 一行都留不下 —— 丢这些游戏**起不来**。'
+        f'要么加 `--source <这一章原来的 .rpy>` 走增量合并（原文逐字节保住），'
+        f'要么确认这些定义在别处也有、用 `--force` 再来一次。')
+
+
 @dataclass(frozen=True)
 class GuardIssue:
     """生成安全门禁的一条发现。"""
@@ -291,9 +388,56 @@ def _is_valid_ident(name: str) -> bool:
 
 
 
+#: 产物里 `python:` 块头的**合法形态**：`python:` / `init python:` /
+#: `init 1 python:` / `python early:` / `init python in store:`。
+#:
+#: 为什么不再只认 exactly `python:`（2026-10-05 拓展边界）：
+#:   · 顶层 `init python:` 现在会被保真带回产物（见 `ParseResult.file_blocks`），
+#:     它同样是"会被 Ren'Py 当 Python 编译的一段"，漏检等于把坏代码放行；
+#:   · 旧判据 `stripped == 'python:'` 对 `init python:` **完全不看**。
+_PY_BLOCK_HEAD_RE = re.compile(
+    r'^(?:init(?:\s+\d+)?\s+)?python(?:\s+early)?(?:\s+in\s+[\w.]+)?\s*:$')
+
+
+def _iter_python_blocks(lines: list):
+    """
+    产出产物里每一个 `python:` 块的 `(块头行号, 块头文本, 块体行列表)`。
+
+    块体 = 紧随其后、缩进**比块头更深**的所有行（含"后面还有块体行"的空行）。
+    空行的判据与 `beat_render._render_marked_code_block` 同口径：空行后面
+    还有块体行才算块内空行，否则它是块与下一段之间的分隔。
+    """
+    i, n = 0, len(lines)
+    while i < n:
+        head = lines[i].strip()
+        if not _PY_BLOCK_HEAD_RE.match(head):
+            i += 1
+            continue
+        base = len(lines[i]) - len(lines[i].lstrip())
+        body = []
+        j = i + 1
+        while j < n:
+            cur = lines[j]
+            if not cur.strip():
+                k = j
+                while k < n and not lines[k].strip():
+                    k += 1
+                if k < n and (len(lines[k]) - len(lines[k].lstrip())) > base:
+                    body.extend(lines[j:k])
+                    j = k
+                    continue
+                break
+            if (len(cur) - len(cur.lstrip())) <= base:
+                break
+            body.append(cur)
+            j += 1
+        yield i + 1, lines[i], body
+        i = max(j, i + 1)
+
+
 def _python_syntax_issues(text: str) -> list:
     """
-    产物里的 `$ …` / `python:` 块体，逐条过一遍 Python 编译器。
+    产物里的 `$ …` 语句与 `python:` 块体，各过一次 Python 编译器。
 
     为什么必须拦（P0，2026-10-05，真实项目 `script.rpy:93` 实测）：
 
@@ -304,51 +448,99 @@ def _python_syntax_issues(text: str) -> list:
     `tools/audit_roundtrip.py` 事后能看见，而**工具照样把文件写出去** ——
     和 P0 静默覆盖同一个性质：算出了"要出事"，却没拦住。
 
-    判据尽量窄，避免误报：
+    ⚠ **粒度必须是"整块 / 整条"，不是"逐行"**（2026-10-05 拓展边界①，
+    这次是**假阳性**把 `build` 卡死）：
 
-      · 只看 `$`/`$ ` 开头的行，以及 `python:` 块体里**比 `python:` 更深**
-        的行（块体结束 = 回到浅缩进或遇到新语句）；
-      · `#` 注释与空行跳过（Ren'Py 允许行尾注释，Python 也认）；
-      · **翻译/文本行里的引号不参与** —— 我们只编译"被当代码的那部分"。
+    第一版对 `python:` 块体**一行一行**编译，于是三件完全正常的事全被判成
+    "Python 语法错误"：
 
+        positions = [                       ← 多行语句的续行：单看第一行是
+            (200, 200), (600, 200),         ← `'[' was never closed`
+        ]                                   ← 单看最后一行是 `unmatched ']'`
+        for i, digit in enumerate(x):       ← 单看块头是
+            …                               ← `expected an indented block`
+
+    真实项目上实测：`build`（全项目合并）报出 **10 条 `PYTHON_SYNTAX_ERROR`**，
+    逐条核对**全是假阳性** —— 把产物里 7 个 `python:` 块整块 `dedent` 后
+    编译，**一个都不错**（复现入口：`tools/probe_python_block.py`，
+    它现在把这四档分开报：在 / 行内注释 / 规范成 `$` / **真丢代码**）。
+    后果是门禁把一份**完全合法**的产物拦在门外：`build` 在真实项目上
+    "必然失败"，且失败理由指向不存在的问题。
+
+    所以现在：
+
+      · `python:` 块体 → **整块**（`dedent` 后）一次编译，块层级/续行都是
+        Python 自己的语法，不再由我们逐行猜；
+      · `$ …` 语句 → **整条**（用 `beat_render` 的括号平衡分组，续行算同一条）
+        一次编译 —— 单行 `$ x = [` 同样会误报；
+      · 真的坏（块里混进 `window hide` 这种 Ren'Py 语句）**照样报**，
+        因为整块编译它就是个语法错误。
+
+    判据尽量窄，避免误报：`#` 注释与空行不参与编译（除非它们把块体切开）。
     编译不过就是 block：**这一份产物写进 game/ 会让游戏起不来**。
     """
     out = []
-    in_python = False
-    py_indent = 0
-    for i, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#'):
+    lines = text.splitlines()
+
+    for line_no, header, body in _iter_python_blocks(lines):
+        code = textwrap.dedent('\n'.join(body))
+        if not code.strip():
             continue
-        indent = len(line) - len(line.lstrip())
-        if stripped == 'python:':
-            in_python, py_indent = True, indent
+        try:
+            compile(code, '<generated>', 'exec')
+        except SyntaxError as exc:
+            at = line_no + max(1, int(exc.lineno or 1))
+            bad = (body[int(exc.lineno or 1) - 1].strip()
+                   if 0 < int(exc.lineno or 1) <= len(body) else '')
+            out.append(GuardIssue(
+                'PYTHON_SYNTAX_ERROR', 'block',
+                f'`{header.strip()}` 块体里的 Python 语法错误：{exc.msg}'
+                f'（第 {at} 行：`{bad}`）。这一块会让 Ren\'Py 加载脚本时'
+                f'直接报错，游戏起不来。常见原因：块体里混进了一句 '
+                f'Ren\'Py 语句（比如 `window hide` / `show screen x`），'
+                f'或者括号/缩进真的坏了。',
+                at))
+
+    for line_no, code in _iter_dollar_statements(lines):
+        if not code.strip() or code.lstrip().startswith('#'):
             continue
-        if in_python:
-            if indent <= py_indent:
-                in_python = False          # 块体结束，这一行按普通行继续判
-            else:
-                _check(out, stripped, i, 'python: 块体')
-                continue
-        if stripped.startswith('$'):
-            code = stripped[1:].strip()
-            if code and not code.startswith('#'):
-                _check(out, code, i, '`$` 语句')
+        try:
+            compile(code, '<generated>', 'exec')
+        except SyntaxError as exc:
+            out.append(GuardIssue(
+                'PYTHON_SYNTAX_ERROR', 'block',
+                f'`$` 语句里的 Python 语法错误：{exc.msg}'
+                f'（`{code.splitlines()[0].strip()}`）。这一行会让 Ren\'Py '
+                f'加载脚本时直接报错，游戏起不来。常见原因：作者手写了一句 '
+                f'Ren\'Py 语句（比如台词 `l oh "3"`）被当成了代码。',
+                line_no))
     return out
 
 
-def _check(out: list, code: str, line_no: int, where: str) -> None:
-    """编译一条（可能是多行剩下的单条）python，失败就记一条 block。"""
-    try:
-        compile(code, '<generated>', 'exec')
-    except SyntaxError as exc:
-        out.append(GuardIssue(
-            'PYTHON_SYNTAX_ERROR', 'block',
-            f'{where}里的 Python 语法错误：{exc.msg}'
-            f'（`{code}`）。这一行会让 Ren\'Py 加载脚本时直接报错，'
-            f'游戏起不来。常见原因：作者手写了一句 Ren\'Py 语句'
-            f'（比如台词 `l oh "3"`）被当成了代码。',
-            line_no))
+def _iter_dollar_statements(lines: list):
+    """
+    产出产物里每一条 `$ …` 语句的 `(行号, 代码)`；**续行算同一条**。
+
+    为什么不能逐行（见 `_python_syntax_issues`）：`$ x = [` 单看第一行是
+    `'[' was never closed`。分组复用 `beat_render._group_code_statements`
+    —— 那是"一条代码语句到哪里结束"的**唯一实现**（括号/引号平衡），
+    在这儿再写一份就是下一个漂移点。
+    """
+    from storygraph.story.beat_render import _group_code_statements
+
+    i, n = 0, len(lines)
+    while i < n:
+        head = lines[i].strip()
+        if not head.startswith('$'):
+            i += 1
+            continue
+        group = _group_code_statements(lines[i:])
+        chunk = group[0][0] if group else lines[i]
+        body = chunk.splitlines()
+        head_line = body[0].strip()
+        body[0] = head_line[2:] if head_line.startswith('$ ') else head_line[1:]
+        yield i + 1, textwrap.dedent('\n'.join(body))
+        i += max(1, len(body))
 
 
 def _image_refs(text: str) -> list:
@@ -539,7 +731,9 @@ def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
 
 
 def write_generation(text: str, out_path, *, review_on_block: bool = True,
-                     project_root=None, occupied=None, force: bool = False):
+                     project_root=None, occupied=None, force: bool = False,
+                     merged_from_source: bool = False, source_text=None,
+                     source_path=None):
     """
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
@@ -569,12 +763,37 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
       · 目标不存在 → 正常写（**新建文件是全量的正当用途**）；
       · `force=True` → 明确知道自己在做什么，放行（逃生舱 / CLI `--force`）。
 
+    `merged_from_source=True`（2026-10-05 拓展边界②）：**这份文本是在源
+    .rpy 上增量合并出来的**，它包含源文件的全部内容（含第三类）。此时那条
+    "目标已存在且无标记 → 拒写"的护栏必须**让路** —— 否则"用 CLI 增量修
+    一章已有剧情"永远会被自家护栏拦下，而这恰恰是**唯一安全**的改法：
+
+        全量重生成 → 丢掉 default / init python（危险，必须拦）
+        增量合并   → 原文逐字节保留，只换改过的那几行（安全，必须放行）
+
+    判据交给调用方（`pipeline.compile.merge_incrementally`）是因为**只有它
+    知道这份文本是怎么来的**；门禁自己看不出"全量"和"增量"的区别。
+    越过的**只有**这一条：`PYTHON_SYNTAX_ERROR` / `CJK_IN_IMAGE_TAG` /
+    `LABEL_COLLISION` 等"产物自己坏了"的门禁**一条都不越**。
+
+    `source_text`（2026-10-05，拓展边界②的收尾）：**这一章原文的全文**。
+    给了它，门禁就能**算出来**产物是不是丢了顶层语句（`opaque_loss`），
+    丢了就报 `OPAQUE_LOST` 并拒写。为什么必须有这一条：
+
+        `--source X --out 新路径` 时目标是**新的**，上面那条手写护栏
+        根本不适用 → 补丁失败退回全量 → 源里的 `define` / `init python`
+        在产物里没了，而退出码是 0（真实项目 `pomodorro.rpy` 实测）。
+
+    `force=True` 时 `OPAQUE_LOST` **降级为 warn**（不再是 block）：
+    它与 `HANDWRITTEN_TARGET` 同类 —— 说的不是"产物自己坏了"，
+    而是"这个目标配不上这份产物"，该由人拍板。其余 block 依旧不越。
+
     调用方要"先问后写"就直接用 `evaluate_generation` + 自己写，
     这个函数是给"已经确认过，但还要兜一层底"的路径用的。
     """
     out_path = Path(out_path)
     root = project_root or _guess_project_root(out_path)
-    if not force and _looks_handwritten(out_path):
+    if not force and not merged_from_source and _looks_handwritten(out_path):
         reason = ('目标已存在且不是工具生成的（没有生成标记），'
                   '拒绝覆盖手写 .rpy')
         blocking = [_make_blocking_issue(out_path, reason)]
@@ -596,6 +815,16 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         occupied = labels_in_danger(out_path, root, exclude={out_path})
     issues = generation_guard(text, out_path, project_root=root,
                               occupied_labels=occupied)
+    if source_text is not None:
+        lost = opaque_loss(source_text, text)
+        if lost:
+            issue = _make_opaque_lost_issue(lost, source_path)
+            if force:
+                # 逃生舱：人明确知道自己在做什么 —— 降级成 warn，
+                # 但**仍然报出来**（报告里看得见丢了几处）。
+                issue = GuardIssue(issue.code, 'warn', issue.message,
+                                   issue.line_no)
+            issues.append(issue)
     blocking = [i for i in issues if i.is_blocking]
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)

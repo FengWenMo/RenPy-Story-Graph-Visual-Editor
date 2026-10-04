@@ -242,6 +242,131 @@ def _scan_balanced_close(text: str, open_idx: int) -> int:
 #  第一层：Lexer
 # ====================================================================
 
+def _top_level_region(filepath) -> list:
+    """
+    源文件里 **label 之外**的全部内容 → `[(块头, 去基准缩进的块体, 起始行号)]`。
+
+    规则（刻意简单，因为要的是**逐字保真**，不是理解）：
+
+      · 顶层 = 行首没有缩进；
+      · 遇到 `label …:` → 跳过它**和它的块体**（那部分由"拍"负责）；
+      · 其余顶层行各自起一段，并把后面**缩进的行 + 空行**收进这一段
+        （即"这条语句/这个块"的正文）。
+
+    为什么用原文而不是 AST：见 `TopLevelRegionNode` 的 docstring ——
+    `screen` 这类带子块的语句**没进 AST**，`define` 这类进了 AST 但原文丢了。
+    要"一个字都不丢"，就只能按原文取。
+
+    缩进处理：块体按**最小缩进**整体归零（相对层级保留），渲染时再统一加 4
+    —— 与 `_collect_python_block` 同一套口径，两处都这么做才不会有哪一类
+    块在往返里越缩越深。
+    """
+    try:
+        raw = Path(filepath).read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    chunks: list = []
+    cur: list = []
+    cur_row = 0
+
+    def flush():
+        if cur:
+            chunks.append(_region_chunk(list(cur), cur_row))
+
+    i, n = 0, len(raw)
+    while i < n:
+        line = raw[i]
+        stripped = line.strip()
+        top = line[:1] not in (' ', '\t')
+        if not stripped:
+            if cur:
+                cur.append(line)              # 空行：留在当前段里（块内空行是内容）
+            i += 1
+            continue
+        if top and re.match(r'^label\s', stripped):
+            flush()                           # label 及其块体由"拍"负责
+            cur = []
+            i += 1
+            while i < n and (not raw[i].strip()
+                             or raw[i][:1] in (' ', '\t')):
+                i += 1
+            continue
+        if top and stripped.startswith('#'):
+            # 顶格**注释**：Ren'Py 里注释不参与缩进判断 —— 它可以出现在一个
+            # 缩进块的中间。真实项目就是这么写的：
+            #
+            #     init python:
+            #     # 类/对象设置          ← 顶格注释，仍在 init python 块里
+            #         class GridCell:
+            #
+            # 所以"块头以 `:` 结尾"的当前段遇到顶格注释要**收进来**；
+            # 否则块体会被劈成两段，渲染时丢掉 `init python:` 这个块头 →
+            # 产物里出现一段悬空的缩进（Ren'Py 直接报缩进错）。
+            if cur and _opens_a_block(cur[0].strip()):
+                cur.append(line)
+            else:
+                flush()
+                cur, cur_row = [line], i + 1
+            i += 1
+            continue
+        if top:
+            flush()
+            cur, cur_row = [line], i + 1        # 新的顶层语句起一段
+            i += 1
+            continue
+        if cur:
+            cur.append(line)                    # 缩进行属于当前段
+        i += 1
+    flush()
+    return chunks
+
+
+def _opens_a_block(header: str) -> bool:
+    """这一行是不是"带缩进块的块头"（以 `:` 收尾，且不是 `$` 语句）。"""
+    return bool(header) and header.endswith(':') and not header.startswith('$')
+
+
+def _region_chunk(body: list, line_no: int) -> tuple:
+    """
+    一段顶层原文 → `(块头, 去基准缩进的块体, 起始行号)`。
+
+    **基准缩进只看"结构性"的行 —— 整行注释不算**（2026-10-05，被门禁抓到）：
+    Ren'Py / Python 都忽略整行注释的缩进，真实项目里就有人写
+
+        init python:
+            import random
+        # 默认变量（会进入 store……）      ← 顶格注释，还在 init python 块里
+            def mole_cell(r, c):
+
+    第一版用"所有非空行的最小缩进"当基准 → 被那个顶格注释拉到 0 →
+    整块**不再去缩进**，渲染再加 4 之后 `import random` 变成 8 格、
+    注释变成 4 格 —— 产物里出现 **unexpected indent**，`init python:`
+    整块语法坏掉。是 `PYTHON_SYNTAX_ERROR` 门禁把它拦下来的
+    （`tools/journey_check.py` 第 2b/5 步），没有静默写出去。
+
+    缩进比基准还小的行（就是那种顶格注释）**原样保留、不切片** ——
+    否则 `ln[base:]` 会把注释文字本身切掉几个字。
+    """
+    head = body[0].strip()
+    rest = [ln.rstrip() for ln in body[1:]]
+    structural = [ln for ln in rest
+                  if ln.strip() and not ln.lstrip().startswith('#')]
+    ref = structural or [ln for ln in rest if ln.strip()]
+    if not ref:
+        return head, '', line_no
+    base = min(len(ln) - len(ln.lstrip()) for ln in ref)
+    out = []
+    for ln in rest:
+        if not ln.strip():
+            out.append('')
+        elif len(ln) - len(ln.lstrip()) >= base:
+            out.append(ln[base:])
+        else:
+            out.append(ln)                    # 顶格注释：原样带着
+    return head, '\n'.join(out).rstrip('\n'), line_no
+
+
 @dataclass
 class LogicalLine:
     text: str
@@ -486,6 +611,29 @@ class ASTNode:
 
 
 @dataclass
+class TopLevelRegionNode(ASTNode):
+    """
+    文件里 **label 之外**的那一整段（逐字、按原顺序）。
+
+    为什么要有这个节点（2026-10-05，消除交付审查的第 3 条缺口）：
+    以前只有顶层 `python:` 块会被保真带回（`PythonNode.header` → 第 3 条边界），
+    而 `screen` / `style` / `init:` / `translate` / 文件头注释**根本不在 AST 里**
+    （带子块的未建模块被 `_stmt_unmodeled` 跳过，只留一条 warning），
+    `define` / `default` / `image` / `transform` 虽然进了 AST，却只留下
+    结构化字段、**原文已经不在**了（`define e = Character(...)` 只记下角色）。
+
+    于是"全量重生成"这条路必然丢它们 —— 而它正是**导出到新路径**与
+    **补丁失败**两条路的必经之处。用户的诉求是"软件自己解决"，
+    所以这里**不做建模**：整段原文按顺序带出来，渲染时原样写回文件级。
+
+    与 `CodeBlock`（一拍之内的保真后门）同一个思路，作用域是整个文件。
+    `blocks` 是 `[(块头, 去基准缩进的块体, 起始行号)]`。
+    """
+
+    blocks: list = field(default_factory=list)
+
+
+@dataclass
 class LabelNode(ASTNode):
     name: str = ''
     block: list = field(default_factory=list)
@@ -565,6 +713,14 @@ class PythonNode(ASTNode):
     #: 导回去变成 `$ persistent.x= True` 会让每个 `$` 行都成一个 diff 块
     #: （用户："全量修改出来的东西，根本就没办法看"）。
     dollar_space: bool = True
+    #: `python:` 块的**块头原文**（`init python:` / `python early:` /
+    #: `python in store:` …）；单行 `$` 语句为空串。
+    #:
+    #: 为什么需要（2026-10-05，拓展边界③）：顶层 `init python:` 以前
+    #: 落到 `_stmt_unmodeled` 被**跳过**（只留一条 warning），于是
+    #: "这一章有顶层 python 块"这个事实根本不进模型 —— 下游没有任何东西
+    #: 记得它。记下块头之后，它能被原样带回去（见 `ParseResult.file_blocks`）。
+    header: str = ''
 
 
 @dataclass
@@ -872,7 +1028,13 @@ class RenPyParser:
     _RE_CALL_FROM = re.compile(r'\bfrom\s+([A-Za-z_]\w*)')
     _RE_RETURN = re.compile(r'^return\s*$')
     _RE_DOLLAR = re.compile(r'^\$\s*(.+)')
-    _RE_PYTHON = re.compile(r'^python(?:\s+[\w. ]+)?\s*:')
+    #: `python:` 块的**全部**块头形态：
+    #:   · label 内：`python:` / `python in store:`
+    #:   · 顶层：`init python:` / `init 1 python:` / `python early:`
+    #:     （`init [N]` 前缀 2026-10-05 加，见 `_stmt_python_block`：少了它
+    #:     顶层 `init python:` 会被当"未建模块"整块跳过）
+    _RE_PYTHON = re.compile(r'^(?:init(?:\s+\d+)?\s+)?python(?:\s+early)?'
+                            r'(?:\s+in\s+[\w.]+)?\s*:')
     _RE_SHOW_HEAD = re.compile(r'^show\s+')
     _RE_SCENE_HEAD = re.compile(r'^scene\s+')
     _RE_HIDE_HEAD = re.compile(r'^hide\s+')
@@ -928,7 +1090,17 @@ class RenPyParser:
         lexer = RenPyLexer()
         lines = lexer.tokenize(filepath)
         self.errors.extend(lexer.errors)
-        return self._parse_block(lines)
+        nodes = self._parse_block(lines)
+        # **顶层（label 之外）那一整段**：逐字带出来（见 `TopLevelRegionNode`）。
+        # 放在最后追加成一个节点是因为：AST 里根本没有"未建模的块语句"
+        # （`_stmt_unmodeled` 遇到带子块的直接跳过），而 `define` / `image`
+        # 这些虽然进了 AST，却只留下结构化字段、原文已经不在了 ——
+        # 只有按**原文**取那一段，才能保证"全量重生成"不丢东西。
+        region = _top_level_region(filepath)
+        if region:
+            nodes = list(nodes) + [TopLevelRegionNode(
+                filename=str(filepath), blocks=region)]
+        return nodes
 
     # ---------- 块解析 ----------
 
@@ -1299,16 +1471,28 @@ class RenPyParser:
         )
 
     def _stmt_python_block(self, line, text):
-        """`python:` 块。"""
-        if self._RE_PYTHON.match(text):
-            code = self._collect_python_block(line)
-            return PythonNode(
-                line_number=line.line_number,
-                indent=line.indent,
-                filename=line.filename,
-                code=code,
-            )
-        return self._NO_MATCH
+        """`python:` 块 —— 含**顶层**的 `init python:` / `python early:`。
+
+        2026-10-05（拓展边界③）：以前这里的正则只认 `python…:`，于是顶层
+        `init python:` 一路落到 `_stmt_unmodeled`，被当成"不在演出流内的
+        未建模块"**跳过**（只留一条 warning）。后果是 `.rpy → 表 → .rpy`
+        之后整块代码消失，而产物语法完全合法、门禁拦不住
+        （真实项目 `whackamole.rpy`：2 个块 / 56 行游戏逻辑没了）。
+
+        现在它产出 `PythonNode`（带块头原文），由 `ParseResultBuilder`
+        按"在不在 label 里"分流：label 内 → 拍；顶层 → `file_blocks`。
+        """
+        m = self._RE_PYTHON.match(text)
+        if not m:
+            return self._NO_MATCH
+        code = self._collect_python_block(line)
+        return PythonNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            code=code,
+            header=text[:m.end()].strip(),
+        )
 
     def _stmt_layeredimage(self, line, text):
         """`layeredimage`（合成立绘）。"""
@@ -2250,6 +2434,29 @@ class TranslationUnit:
 
 
 @dataclass
+class FileBlock:
+    """
+    **文件级保真块**：顶层（label 之外）的 `init python:` 之类整块代码。
+
+    为什么需要这个类型（2026-10-05，拓展边界③）：这些块**不属于任何"拍"**，
+    所以它们既不在 `statements` 里、也不在 Beats 里；以前连 AST 节点都不产生
+    （`_stmt_unmodeled` 直接跳过 + 一条 warning）。于是"表 → 新文件"这条
+    纯全量路径上，它们**整块消失而无人知晓**：
+
+        真实项目 `whackamole.rpy`：2 个顶层 `init python:` / 56 行游戏逻辑
+        （`def mole_click` / `mole_tick` / `mole_start` …）→ 产物 0 行，
+        而产物语法完全合法、门禁拦不住。
+
+    它只在**顶层**产生；label 里的 `python:` 走 `CodeBlock`（那是"拍"的一部分）。
+    """
+
+    header: str = ''            # 块头原文（`init python:` / `python early:`）
+    code: str = ''              # 块体：基准缩进已归一到 0
+    source_file: str = ''
+    source_line: int = 0
+
+
+@dataclass
 class ParseResult:
     characters: dict = field(default_factory=dict)
     dialogues: list = field(default_factory=list)
@@ -2278,6 +2485,9 @@ class ParseResult:
     # option_text / 表里的 Condition 语义），所以和 statement_labels
     # 一样用平行数组承载，避免污染 Statement 的相等与哈希契约。
     statement_menu_options: list = field(default_factory=list)
+    # 顶层（label 之外）的 `python:` 整块代码，`FileBlock` 列表。
+    # 见 `FileBlock` 的 docstring：不进 statements/Beats，但要能原样带回去。
+    file_blocks: list = field(default_factory=list)
 
 
 # ====================================================================
@@ -2553,11 +2763,30 @@ class ParseResultBuilder:
                     node.name, accum_cond,
                     source=(node.filename, node.line_number)))
 
+            elif isinstance(node, TopLevelRegionNode):
+                # **整个顶层区间**（label 之外的一切）→ 文件级保真块，
+                # 按原文顺序追加。见 `TopLevelRegionNode` 的 docstring。
+                for head, code, line_no in node.blocks or ():
+                    result.file_blocks.append(FileBlock(
+                        header=head, code=code,
+                        source_file=node.filename, source_line=line_no))
+
             elif isinstance(node, PythonNode):
-                add_stmt(Statement.make_python(
-                    node.code, accum_cond,
-                    source=(node.filename, node.line_number),
-                    dollar_space=getattr(node, 'dollar_space', True)))
+                # **顶层**的 `python:` / `init python:` 块**不进"拍"**。
+                #
+                # 2026-10-05：以前这里无条件 `add_stmt`，而顶层块根本没走到这儿
+                # （被 `_stmt_unmodeled` 跳过了）。进了 statements 就会变成一张
+                # "标签为空"的拍，被渲染进 `label start:` 里 —— 而它本该在
+                # **文件级**。
+                #
+                # 现在顶层内容统一由 `TopLevelRegionNode` 按**原文**带出
+                # （它连 `$ x = 1` 这种顶层单行也一并保真，不再多此一举），
+                # 所以这里只要不在 label 里就**直接跳过**，不重复带一份。
+                if current_label:
+                    add_stmt(Statement.make_python(
+                        node.code, accum_cond,
+                        source=(node.filename, node.line_number),
+                        dollar_space=getattr(node, 'dollar_space', True)))
 
             elif isinstance(node, CommentNode):
                 # 只保留 label 内的注释——顶层注释属于文件头/定义区，

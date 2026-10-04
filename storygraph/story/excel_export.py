@@ -136,11 +136,59 @@ def export_beats_to_excel(beats: list, output_path,
     # 舞台快照：把"每一拍舞台上是什么样 + 本拍变了什么"算出来另写两张表。
     # 文案不用再去脑补 scene/show/hide 叠加的结果（二）。
     _write_stage_snapshot_sheet(wb, beats)
+    # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：**另存一张隐藏表**，
+    # 因为它可能比 Excel 单元格的 32767 上限长得多（见 `_write_file_blocks_sheet`）。
+    _write_file_blocks_sheet(wb, beats)
     _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
 
     wb.save(output_path)
     return output_path
 
+
+
+def _write_file_blocks_sheet(wb, beats) -> None:
+    """
+    文件级保真块 → **隐藏表**（一行一行地存）。
+
+    为什么不放隐藏列（2026-10-05 实测，第一版就是那么写的、踩了）：
+    Excel 单元格上限 **32767 字符**，而真实文件的顶层区间轻松超过它 ——
+
+        ball_moving_game.rpy   38492 字符
+        my_perferences.rpy     50426 字符
+
+    写进单元格**静默截断**（读回只剩 32767），于是"导出到新路径"丢东西、
+    而且不报错 —— 正是这份代码要消灭的那一类缺陷。表没有这个限制，
+    而且**一行只放一行文本**，连"单个块本身就超长"也一起解决。
+
+    表整张隐藏：它是工具维护的搬运工，不是给人编辑的界面。
+    """
+    from storygraph.story.beat_model import (FILE_BLOCK_HEADERS,
+                                            FILE_BLOCK_SHEET,
+                                            file_blocks_to_rows,
+                                            join_file_block_parts,
+                                            split_file_blocks)
+
+    # 多个拍上的块（正常只有第一张拍有）按序合并、去重 —— 与渲染时的口径一致
+    seen, parts = set(), []
+    for b in beats or ():
+        for part in split_file_blocks(getattr(b, 'file_blocks', '')):
+            if part.strip() and part not in seen:
+                seen.add(part)
+                parts.append(part)
+    rows = file_blocks_to_rows(join_file_block_parts(parts))
+    if not rows:
+        return
+
+    ws = wb.create_sheet(FILE_BLOCK_SHEET)
+    ws.append(FILE_BLOCK_HEADERS)
+    for cell in ws[1]:
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 120
+    for bi, line in rows:
+        _append_text_row(ws, [bi, line])
+    ws.sheet_state = 'hidden'
 
 
 def _write_stage_snapshot_sheet(wb, beats):

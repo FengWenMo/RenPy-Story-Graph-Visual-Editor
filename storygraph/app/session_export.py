@@ -76,7 +76,10 @@ class ExportMixin:
     #: 宿主 `EditorSession.__init__` 初始化。
     #: 守卫：`tests/test_editor_session_mixin_contract.py`。
     REQUIRES = ('registry', 'compile', 'symbols', 'project_root',
-                'script_path', 'beats', '_transforms_decision')
+                'script_path', 'beats', '_transforms_decision',
+                # 原地写回之后要把内存重新对齐到磁盘（见
+                # `_reload_after_inplace_write`）—— 那是 `SessionTableMixin.load`。
+                'load')
 
     EXPORT_ENGINES = ('unity', 'godot', 'json', 'csv', 'renpy')
     def export_ir(self, engine: str, out_dir) -> dict:
@@ -242,6 +245,7 @@ class ExportMixin:
 
         text = result.rpy_text
         note = self._patch_note(text)
+        note['text_note'] = self._with_sanitize_note(note.get('text_note', ''))
         if note['used_patch']:
             text = note['text']
         elif note.get('blocking') and not force and would_destroy_opaque(
@@ -267,7 +271,14 @@ class ExportMixin:
             # 第二层护栏（`write_generation` 的 `HANDWRITTEN_TARGET`）仍然
             # 会兜住"凭空新建到别人的手写文件上"那种情况。
             return {'ok': False, 'path': target,
-                    'blocking': list(note['blocking']),
+                    'blocking': list(note['blocking']) + [
+                        # **给一条能走的路**（2026-10-05，验收时自己撞到的）：
+                        # 以前这里只有一句"对位率不足（N%）"—— 用户看着它
+                        # 不知道下一步做什么，而"重载这一章再导出"通常就能解决
+                        # （行号过期是主因，见 `_resync_source_ranges`）。
+                        '可以试：① 重新载入这一章再导出（行号过期是最常见的原因）；'
+                        '② 换个路径导出到 build/renpy/ 下对比一眼；'
+                        '③ 确认这一章的第三类内容在别处也有备份后，再明确要求覆盖。'],
                     'codes': ['PATCH_FAILED'],
                     'note': note['text_note'], 'todos': 0}
 
@@ -304,18 +315,113 @@ class ExportMixin:
         # 目标已存在且不是工具生成的，拒写）。它**必须被检查** ——
         # 不检查就回到当年那个形态：文件根本没写出去，却报告"导出成功"，
         # 用户以为产物在。`review_path` 指向留给人对比的副本。
+        #
+        # `source_text` 一并交过去，是为了让**丢失清单**精确到行
+        # （`OPAQUE_LOST`）：那条门禁的判据是"源里有、产物里没有的顶层语句"，
+        # 不给源它就无从说起。CLI 那条路早就传了（`compile.write_compiled`），
+        # 编辑器这条一直没传 —— 于是同样的事在 UI 里只能给一句笼统的警告
+        # （交付审查的第 1 条缺口）。
+        #
+        # 为什么现在"几乎不会触发"：顶层内容已经**随表保真**
+        # （`TopLevelRegionNode` + 隐藏表），全量重生成也带得走。
+        # 留着它是**兜底**：哪一天哪条路又漏了，这里会指名道姓地说出来。
         art = write_generation(text, target, project_root=self.project_root,
-                               force=force)
+                               force=force,
+                               source_text=self._source_text_for_guard(),
+                               source_path=self.script_path)
         if not art.written:
             return {'ok': False, 'path': target,
                     'blocking': [self._issue_message(i) for i in art.issues]
                                 or ['生成门禁拒绝写入'],
                     'codes': [str(getattr(i, 'code', '')) for i in art.issues],
                     'review_path': art.review_path,
-                    'note': note['text_note'], 'todos': 0}
+                    'note': note['text_note'], 'todos': 0,
+                    # 这一刀到底是不是"增量"（前端据此说**真话**，见
+                    # `ui_qt.window_export._confirm_force_overwrite`：
+                    # 补丁成功时"会丢掉 default/init python"那句话是**假的**）
+                    'used_patch': bool(note.get('used_patch'))}
+        # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
+        #
+        # 为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
+        # 写回之后磁盘上那一份已经是新内容（补丁插了行、首行多了生成标记），
+        # 而内存拍的 `src_first/src_last` 还是**改动前**那份文件的 →
+        # 第二次原地导出对位率掉到 0~50% → 补丁失败 → P0 那条"目标就是源文件"
+        # 的护栏拒写。用户看到 `PATCH_FAILED：对位率不足`，而它偏偏落在
+        # **最常用的那条循环**上：
+        #
+        #     改一句 → 导出 → 再改一句 → 再导出   ← 第二次就断
+        #
+        # 为什么是"重新解析"而不是"按内容猜行号"（先走错过一步，记下来）：
+        # 第一版我用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
+        # 它在最需要它的那个场景上**是错的** —— 解析器会把"注释 / `call screen`
+        # + 紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出交叠
+        # 区间 → 对位率 50%（实测 whackamole）。合并**本来知道**每一拍写到了
+        # 哪几行，但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"
+        # 三套坐标系的换算（全仓最危险的一段）。而"内存 := 解析(磁盘)"
+        # 是**零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
+        #
+        # 代价（可接受，而且本来就该如此）：若刚插了一张只有注释/代码的卡，
+        # 重载后它会与后面那张并成一张 —— **那正是重新打开这个文件会看到的**，
+        # 只是把"下次打开才发生的事"提前到了现在。
+        if art.written and self.script_path \
+                and Path(target) == Path(self.script_path):
+            self._reload_after_inplace_write()
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
                 'note': note['text_note'],
+                'used_patch': bool(note.get('used_patch')),
+                # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
+                'count': len(self.beats),
                 'todos': getattr(result, 'todo_count', 0)}
+
+    def _source_text_for_guard(self):
+        """
+        当前章节文件的原文（给 `write_generation` 算"丢了哪几行"用）。
+
+        读不到就返回 None：**门禁退化成"没有参照"而不是误报** ——
+        宁可少一条提示，也不能拿半份文本去指认"你丢了东西"。
+        """
+        p = getattr(self, 'script_path', None)
+        if not p:
+            return None
+        try:
+            return Path(p).read_text(encoding='utf-8')
+        except (OSError, UnicodeDecodeError) as e:
+            swallow('session_export._source_text_for_guard', e)
+            return None
+
+    def _reload_after_inplace_write(self) -> None:
+        """
+        原地写回之后把内存重新对齐到刚写出的那份文件（见调用点的说明）。
+
+        失败不抛（`swallow`）：同步不了最多是"下一次导出退回问一句"，
+        不该把已经成功的这一次导出变成异常。
+        """
+        from storygraph.core.safeguard import swallow
+        try:
+            self.load(self.script_path)
+        except Exception as e:                  # noqa: BLE001
+            swallow('session_export._reload_after_inplace_write', e)
+
+    def _with_sanitize_note(self, text: str) -> str:
+        """
+        把"读表时清洗过几个单元格"接到导出说明后面（2026-10-05 评审意见）。
+
+        为什么必须说：清洗本身是**静默改数据** —— 值里的换行被压成空格，
+        产物能跑了，但值跟他在表里写的不一样了。体检那条路由
+        `validate` 的 W114 兜；可是"直接导出、从不体检"的人走的正是这条 UI
+        路径，这里不说，他就永远不知道。
+
+        （`cli.py compile` / `table xlsx2rpy` 那条命令行走的是
+        `CompileResult.summary()`，同一句话在那边。）
+        """
+        n = sum(len(getattr(b, 'sanitized_cells', None) or [])
+                for b in (self.beats or ()))
+        if not n:
+            return text
+        extra = (f'读表时 {n} 个单元格里有换行/制表符，已按「一行一个值」'
+                 f'压成空格（**值被改过**，核对一下；体检里是 W114）')
+        return f'{text}；{extra}' if text else extra
+
     def _patch_note(self, text: str) -> dict:
         """
         试着走增量补丁。**补不上时不许装作"换了个写法"**（P0，2026-10-05）。

@@ -249,9 +249,16 @@ def _capture(win, project):
     rec('graph-after-load-layout', _graph_view(win))
 
     # 9. 控制流导出（写文件，只记"成不成 + 文件在不在"）
+    #
+    # ⚠ `wrapper` **只能关键字传**（2026-10-05 加固：它是"要不要补 `_control`"
+    # 的开关，和 `target` 是两件事，位置传参串位没有任何好处）。
+    # 这里原来写的是位置传参 `(str(cf), None)` —— 加固之后当场
+    # `TypeError: takes from 1 to 2 positional arguments but 3 were given`。
+    # 顺手记一笔：**改签名要扫全部调用方**（`grep 'export_control_flow('`），
+    # 否则改的人只看到"更安全了"，看不到别人已经断了。
     cf = project / 'build' / 'cf.rpy'
     rec('export_control_flow',
-        _public(win, 'export_control_flow', str(cf), None))
+        _public(win, 'export_control_flow', str(cf), wrapper=None))
     rec('cf-exists', cf.is_file())
 
     # 10. 图级撤销 / 重做（导入与布局加载都进历史栈）
@@ -284,13 +291,17 @@ def _first_node_id(win):
     return next(iter(nodes), None)
 
 
-def _public(win, name, *args):
+def _public(win, name, *args, **kwargs):
     """
     调一个**公开动作**，把它转成"可进快照的东西"。
 
     `name` 可以是 `show_index` 这种"去掉下划线后找不到"的 —— 所以先试原名，
     再试加一个下划线（`show_index` → `_show_index`）。这两个都是**前端自己
     也在调**的入口，不是拆分时会随内部结构变动的实现细节。
+
+    `**kwargs` 是给**只许关键字传**的参数留的（例：`export_control_flow`
+    的 `wrapper`）—— 位置传会当场 `TypeError`（2026-10-05 加固），
+    这类参数只能这么调。
     """
     fn = getattr(win, name, None)
     if not callable(fn):
@@ -298,7 +309,7 @@ def _public(win, name, *args):
     if not callable(fn):
         return {'ok': False, 'missing': True}
     try:
-        res = fn(*args)
+        res = fn(*args, **kwargs)
     except Exception as e:                # noqa: BLE001 - 捕获不该让测试崩
         return {'ok': False, 'error': type(e).__name__}
     if isinstance(res, dict):

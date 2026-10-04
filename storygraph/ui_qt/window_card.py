@@ -201,6 +201,28 @@ class CardPageMixin:
         self._sync_structural_buttons()
         self._log(f'[卡片] 已把删掉的卡片放回第 {res["index"] + 1} 拍')
         self._status(f'↩ 已恢复那一张卡片（第 {res["index"] + 1} 拍）。')
+    def resync_after_export(self, res: dict) -> None:
+        """
+        导出成功之后刷新卡片列表（2026-10-05）。
+
+        为什么需要：**原地导出**会把内存重新对齐到刚写出的那份文件
+        （行号与**粒度**都由解析器定，见 `session_export._reload_after_inplace_write`）
+        —— 刚插的那张"只有注释/代码"的卡可能和后面那张并成一张。
+        列表不刷新的话，界面还显示旧的那些行，用户点哪一张都对不上，
+        `_loaded_idx` 也可能越界。
+
+        只在"拍数真的变了"时才动：没变就别打扰 —— 刷新会丢掉用户
+        在列表里的选择状态，而"改一句台词再导出"是最常见的操作。
+        """
+        count = int(res.get('count') or 0) or len(self._session)
+        if count == self._list.count():
+            return
+        self._reload_list()
+        self._show_index(max(0, min(int(self._loaded_idx), count - 1)))
+        self._sync_structural_buttons()
+        self._log(f'[导出] 写回之后重新对齐到磁盘：'
+                  f'{count} 拍（结构由文件决定）')
+
     def _sync_structural_buttons(self):
         """「撤销删除」只在真删过东西之后可用。"""
         for btn, on in ((getattr(self, '_restore_btn', None),

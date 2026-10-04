@@ -125,34 +125,63 @@ BROKEN_SRC = (
 
 
 def _syntax_bad_python_lines(text: str) -> list:
-    """产物里 `$ …` 与 `python:` 块体里语法坏掉的行。"""
+    """
+    产物里语法坏掉的 `$ …` / `python:` 块。
+
+    ⚠ **粒度是"整块 / 整条"**（2026-10-05 与守卫同步修）：这份判据第一版
+    逐行编译块体，于是 `positions = [` / `for i in …:` 这种**正常**写法
+    全被判成语法错误 —— 与 `generation_guard._python_syntax_issues` 当初
+    把真实项目的 `build` 卡死是同一个错。测试自己写错判据比没有判据更坏：
+    它会逼着人去"修"一个不存在的 bug。
+    """
+    import textwrap
+
     bad = []
-    in_python = False
-    for i, ln in enumerate(text.splitlines(), 1):
-        stripped = ln.strip()
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        # —— `python:` 块：整块 dedent 后编译 ——
         if stripped == 'python:':
-            in_python = True
+            base = len(lines[i]) - len(lines[i].lstrip())
+            body = []
+            j = i + 1
+            while j < n and lines[j].strip() and \
+                    (len(lines[j]) - len(lines[j].lstrip())) > base:
+                body.append(lines[j])
+                j += 1
+            code = textwrap.dedent('\n'.join(body))
+            if code.strip():
+                try:
+                    compile(code, '<py>', 'exec')
+                except SyntaxError as e:
+                    bad.append((i + 1, body[0] if body else '', str(e)))
+            i = max(j, i + 1)
             continue
-        if in_python and ln[:1] not in (' ', '\t') and stripped:
-            in_python = False
-        if in_python and stripped:
+        # —— `$` 语句：续行算同一条（括号平衡）——
+        if stripped.startswith('$'):
+            chunk = [stripped[2:] if stripped.startswith('$ ')
+                     else stripped[1:]]
+            depth = _bracket_delta(chunk[0])
+            j = i + 1
+            while depth > 0 and j < n:
+                chunk.append(lines[j])
+                depth += _bracket_delta(lines[j])
+                j += 1
             try:
-                compile(stripped, '<py>', 'exec')
+                compile('\n'.join(chunk), '<py>', 'exec')
             except SyntaxError as e:
-                bad.append((i, ln, str(e)))
+                bad.append((i + 1, lines[i], str(e)))
+            i = max(j, i + 1)
             continue
-        if stripped.startswith('$') and not stripped.startswith('$ '):
-            try:
-                compile(stripped[1:], '<py>', 'exec')
-            except SyntaxError as e:
-                bad.append((i, ln, str(e)))
-            continue
-        if stripped.startswith('$ '):
-            try:
-                compile(stripped[2:], '<py>', 'exec')
-            except SyntaxError as e:
-                bad.append((i, ln, str(e)))
+        i += 1
     return bad
+
+
+def _bracket_delta(line: str) -> int:
+    """这一行的括号净变化（引号内与 `#` 之后不算）——与渲染层同口径。"""
+    from storygraph.story.beat_render import _bracket_delta as d
+    return d(line, '')
 
 
 class TestProductHasNoPythonSyntaxErrors:

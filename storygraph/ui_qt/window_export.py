@@ -60,7 +60,7 @@ class WindowExportMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider', '_report_swallowed', '_session', '_status', '_status_bar', '_swallow_mark', '_table_mtimes', 'apply_current_beat', 'graph')
+    REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider', '_report_swallowed', '_session', '_status', '_status_bar', '_swallow_mark', '_table_mtimes', 'apply_current_beat', 'graph', 'resync_after_export')
 
     def export_script(self):
         """导出这一章（编译 + 增量补丁 + 安全门禁，全在会话里）。"""
@@ -102,43 +102,66 @@ class WindowExportMixin:
             #
             # 默认按钮是**取消**（`QMessageBox.Cancel` 作 default），
             # 因为这一刀不可逆。
-            res = self._confirm_force_overwrite(path) or res
+            res = self._confirm_force_overwrite(
+                path, used_patch=bool(res.get('used_patch'))) or res
         if not res.get('ok'):
             blocking = res.get('blocking') or ['（未知原因）']
             QMessageBox.warning(self, '生成被门禁拦截', '\n'.join(blocking))
             self._report_swallowed(mark)
             return
         self._status_bar.set_dirty(False, str(res.get('path') or path))
+        # **原地导出之后内存会重新对齐到磁盘**（见
+        # `session_export._reload_after_inplace_write`）：拍的粒度可能变
+        # （只有注释/代码的卡会并进后面那张）→ 卡片列表要跟着刷新，
+        # 否则界面还显示旧的拍、点哪张都对不上。
+        self.resync_after_export(res)
         todos = res.get('todos') or 0
         warn = f'，缺资源 {todos} 处（见 TODO）' if todos else ''
         self._log(f'[导出] 已写入 {Path(path).name}'
                   f'（{res.get("note", "")}{warn}）')
         self._status(f'✔ 已导出 {Path(path).name}（{res.get("note", "")}{warn}）')
         self._report_swallowed(mark)
-    def _confirm_force_overwrite(self, path):
+    def _confirm_force_overwrite(self, path, used_patch=False):
         """
         「目标是你手写的文件，真的要覆盖吗？」—— 用户点"覆盖"才返回结果。
 
-        **说清会丢什么**，而不是一句"是否覆盖"：真正让人踩坑的是
-        "全量生成只认得拍"，`default` / `init python` / `transform`
-        一行都留不下（`docs/P0_静默全量覆盖_2026-10-03.md`）。
-        默认按钮是**取消**，因为这一刀不可逆。
+        **必须说清这一次到底会丢什么**（2026-10-05 实测修正）：
 
-        返回 `export` 的结果字典；用户取消则返回 None。
+          · `used_patch=True`（增量对上了）→ **什么都不会丢**：产物是在原文上
+            合并出来的（只换掉你改过的那几行），`default` / `init python` /
+            `transform` 逐字保留。唯一的变化是多一行生成标记。
+            旧文案在这里说"这些内容会全部消失"是**假话**，而它恰好出现在
+            最常见的那条路上（改自己章节里的一句台词、原地导出）。
+          · `used_patch=False`（退回全量重生成）→ 旧文案才是真的，照原样说。
+
+        默认按钮仍然是**取消**：目标终究是工具"不拥有"的手写文件，
+        "默认安全、明确覆盖"是用户定过的口径（P0 文档 §11），这里不改它，
+        只把话说准。
         """
         name = Path(path).name
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle('覆盖手写文件？')
         box.setText(f'{name} 看起来是**手写**的 .rpy（没有生成标记）。')
-        box.setInformativeText(
-            '继续导出会用"全量生成"重写它，而全量只认得剧本表里的拍 ——\n'
-            '`default` / `define` / `init python` / `transform` / `screen`\n'
-            '这些**不进表**的内容会全部消失，游戏可能起不来。\n\n'
-            '建议：改导出到 build/renpy/ 下的新路径，或先备份。')
+        if used_patch:
+            box.setInformativeText(
+                '但**这一次是增量**：产物是在原文上合并出来的，只替换你改过的'
+                '那几行 ——\n`default` / `define` / `init python` / `transform`'
+                ' / `screen` 这些不进表的内容**逐字保留**，不会丢。\n\n'
+                '唯一的区别：写回去之后首行会多一条生成标记（工具据此认出'
+                '"这是我写的文件"，以后不再拦你）。\n\n'
+                '想更稳一点：先导出到 build/renpy/ 下对比一眼再覆盖。')
+            box.button_text = '写入（增量，不会丢东西）'
+        else:
+            box.setInformativeText(
+                '继续导出会用"全量生成"重写它，而全量只认得剧本表里的拍 ——\n'
+                '`default` / `define` / `init python` / `transform` / `screen`\n'
+                '这些**不进表**的内容会全部消失，游戏可能起不来。\n\n'
+                '建议：改导出到 build/renpy/ 下的新路径，或先备份。')
+            box.button_text = '仍然覆盖'
         box.setStandardButtons(QMessageBox.Cancel | QMessageBox.Yes)
         box.setDefaultButton(QMessageBox.Cancel)
-        box.button(QMessageBox.Yes).setText('仍然覆盖')
+        box.button(QMessageBox.Yes).setText(box.button_text)
         box.button(QMessageBox.Cancel).setText('取消（推荐）')
         if box.exec() != QMessageBox.Yes:
             self._status('已取消导出（目标是你手写的文件）。')

@@ -144,3 +144,38 @@ class TestP0AcceptanceMatrix:
         res = s.export(project / 'build' / 'cjk.rpy', force=True)
         assert res['ok'] is False, res
         assert 'CJK_IN_IMAGE_TAG' in res['codes'], res['codes']
+
+    def test_7_two_in_place_exports_in_a_row(self, project):
+        """
+        **改一句 → 导出 → 再改一句 → 再导出**：第二次不许失败。
+
+        这是单人最常用的一条循环，而它曾经在第二次断掉（2026-10-05，
+        `tools/acceptance_workflow.py` 抓到）：
+
+          · 第一次写回之后，**磁盘上那一份**已经是新内容（补丁插了几行）；
+          · 而拍的 `src_first/src_last` 还是**改动前**那份文件的 →
+            对位率掉到 0~50% → 补丁失败 → "目标就是源文件"那条 P0 护栏拒写；
+          · 用户看到 `PATCH_FAILED：对位率不足`，而**没有任何提示说
+            "重载一下章节就好"**。
+
+        修法：原地导出成功后按刚写出的那份文件重贴行号
+        （`session_export._resync_source_ranges`）。
+        """
+        src = project / 'ch.rpy'
+        src.write_text(OPAQUE, encoding='utf-8')
+        s = _session(project, src)
+
+        s.beats[0].text = '第一次改'
+        assert s.export(src, force=True)['ok'] is True
+
+        s.beats[0].text = '第二次改'
+        res = s.export(src, force=True)
+        assert res['ok'] is True, f'第二次原地导出失败了：{res}'
+        assert 'PATCH_FAILED' not in res['codes'], res
+
+        body = src.read_text(encoding='utf-8')
+        assert '第二次改' in body, body
+        # 第三类内容在两次导出之后都还在（这才是"增量"的意义）
+        assert 'default score = 0' in body
+        assert 'init python:' in body
+        assert 'transform my_tf:' in body

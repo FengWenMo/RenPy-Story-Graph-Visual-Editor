@@ -171,8 +171,10 @@ class TestEditorSession:
         s = EditorSession(project_root=project)
         n = s.load(project / 'game' / 'script' / 'ch01.rpy')
         # 11 拍内容 + 1 张菜单拍（`menu:` 本身也要有拍，见 P0-1）
-        assert n == 12
-        assert len(s.beats) == 12
+        # + 1 张 `ch01_end` 的空拍（只有 `return` 的 label 也要有拍，
+        #   否则产物里没有这个 label → `jump ch01_end` 失效，见不变量 68）
+        assert n == 13
+        assert len(s.beats) == 13
         assert any(b.kind == 'menu' for b in s.beats), '菜单拍不能缺'
 
     def test_fields_projection(self, project):
@@ -262,9 +264,9 @@ class TestEditorSession:
 
 class TestMainWindow:
     def test_loads_chapter(self, window):
-        # 11 拍内容 + 1 张菜单拍（`menu:` 本身也要有拍，见 P0-1）
-        assert len(window.beats) == 12
-        assert window._pos.text() == '1 / 12'
+        # 11 拍内容 + 1 张菜单拍 + 1 张 `ch01_end` 空拍（见不变量 68）
+        assert len(window.beats) == 13
+        assert window._pos.text() == '1 / 13'
 
     def test_save_current_beat_writes_back(self, window):
         window._show_index(0)
@@ -583,7 +585,7 @@ class TestKeyboardIsPageScoped:
     def test_crumb_shows_where_you_are(self, window):
         window._set_page(window.PAGE_CARD)
         assert 'ch01.rpy' in window._crumb.text()
-        assert '/ 12' in window._crumb_hint.text()
+        assert '/ 13' in window._crumb_hint.text()
 
 
 class TestGraphScope:

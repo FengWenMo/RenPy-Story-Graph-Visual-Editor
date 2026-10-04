@@ -3,7 +3,7 @@
   [
    "load",
    "ok",
-   12
+   13
   ],
   [
    "beats",
@@ -230,6 +230,25 @@
      "raw": "jump ch01_end",
      "scene": "",
      "seq": 12,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_end",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 0,
      "show": "",
      "sound": "",
      "speaker": "",
@@ -500,6 +519,27 @@
    }
   ],
   [
+   "fields[12]",
+   "ok",
+   {
+    "BGM": "",
+    "CodeBlock": "",
+    "Comment": "",
+    "Expression": "",
+    "Kind": "say",
+    "Label": "ch01_end",
+    "Notes": "",
+    "Position": "",
+    "SFX": "",
+    "Scene": "",
+    "Speaker": "",
+    "Stage": "",
+    "Text": "",
+    "Voice": "",
+    "condition": ""
+   }
+  ],
+  [
    "cards[0]",
    "ok",
    [
@@ -612,6 +652,11 @@
    []
   ],
   [
+   "cards[12]",
+   "ok",
+   []
+  ],
+  [
    "frames",
    "ok",
    [
@@ -684,6 +729,12 @@
     {
      "__obj__": "StageFrame",
      "label": "ch01_class",
+     "speaker": "",
+     "text": ""
+    },
+    {
+     "__obj__": "StageFrame",
+     "label": "ch01_end",
      "speaker": "",
      "text": ""
     }
@@ -1028,7 +1079,7 @@
    "insert_beat",
    "ok",
    {
-    "count": 13,
+    "count": 14,
     "error": "",
     "index": 2,
     "label": "ch01",
@@ -1285,6 +1336,25 @@
      "text": "",
      "voice": "",
      "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_end",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 14,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
     }
    ]
   ],
@@ -1297,7 +1367,7 @@
    "delete_beat",
    "ok",
    {
-    "count": 12,
+    "count": 13,
     "error": "",
     "index": 1,
     "ok": true,
@@ -1321,7 +1391,7 @@
    "restore_last_removed",
    "ok",
    {
-    "count": 13,
+    "count": 14,
     "error": "",
     "index": 1,
     "ok": true
@@ -1571,6 +1641,25 @@
      "raw": "jump ch01_end",
      "scene": "",
      "seq": 13,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_end",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 14,
      "show": "",
      "sound": "",
      "speaker": "",
@@ -1911,6 +2000,25 @@
      "raw": "jump ch01_end",
      "scene": "",
      "seq": 13,
+     "show": "",
+     "sound": "",
+     "speaker": "",
+     "text": "",
+     "voice": "",
+     "with_": ""
+    },
+    {
+     "at": "",
+     "code": "",
+     "comment": "",
+     "condition": "",
+     "hide": "",
+     "kind": "say",
+     "label": "ch01_end",
+     "music": "",
+     "raw": "",
+     "scene": "",
+     "seq": 14,
      "show": "",
      "sound": "",
      "speaker": "",

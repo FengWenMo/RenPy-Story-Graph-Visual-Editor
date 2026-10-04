@@ -50,6 +50,12 @@ def import_beats_from_excel(path, registry=None) -> list:
     try:
         ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
         beats = _read_beats_from_ws(ws)
+        # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：在**隐藏表**里。
+        # 没有那张表时退回老版本的隐藏列（见 `_read_file_blocks`）。
+        blocks_text = _read_file_blocks(wb, ws)
+        if blocks_text:
+            from storygraph.story.beat_build import attach_file_block_text
+            beats = attach_file_block_text(beats, blocks_text)
         # 手工新加的行没有 LineId/ContentHash → 这里补上，
         # 让"Excel 前端 + 数据库后端"拿到的主键不空（八）
         assign_identity(beats)
@@ -57,6 +63,47 @@ def import_beats_from_excel(path, registry=None) -> list:
         return beats
     finally:
         wb.close()
+
+
+def _read_file_blocks(wb, ws) -> str:
+    """
+    文件级保真块：**优先读隐藏表**，读不到再退回老版本的隐藏列。
+
+    为什么要退回那一条（2026-10-05）：第一版把它们塞在隐藏列 `FileBlocks` 里，
+    而 Excel 单元格上限 32767 字符 —— 真实文件的顶层区间直接超限、被静默截断。
+    今天写出去的表已经没有那一列了（改走隐藏表），但**那一版生成的表**还可能
+    在用户手上，所以这里保留只读兜底；写侧不再产出它。
+    """
+    from storygraph.story.beat_model import (FILE_BLOCK_SHEET,
+                                            file_blocks_from_rows)
+
+    if FILE_BLOCK_SHEET in getattr(wb, 'sheetnames', ()):
+        sheet = wb[FILE_BLOCK_SHEET]
+        rows = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if not row or row[0] is None:
+                continue
+            rows.append((row[0], row[1] if len(row) > 1 else ''))
+        text = file_blocks_from_rows(rows)
+        if text.strip():
+            return text
+
+    # —— 老表兜底：隐藏列里那一整段（可能已被截断，但总比没有强）——
+    from storygraph.core.safeguard import swallow
+    from storygraph.story.beat_model import LEGACY_FILE_BLOCK_COLUMN
+    try:
+        headers = [c.value for c in ws[1]]
+    except Exception as e:                       # noqa: BLE001
+        swallow('excel_import._read_file_blocks.header', e)
+        return ''
+    if LEGACY_FILE_BLOCK_COLUMN not in headers:
+        return ''
+    col = headers.index(LEGACY_FILE_BLOCK_COLUMN) + 1
+    for r in range(2, ws.max_row + 1):
+        v = ws.cell(row=r, column=col).value
+        if v and str(v).strip():
+            return str(v)
+    return ''
 
 
 

@@ -255,6 +255,13 @@ class GraphSessionMixin:
         if not n_nodes:
             return {'ok': False, 'error': '剧情图是空的，没有可导出的控制流',
                     'path': str(target), 'labels': [], 'count': 0}
+        if not isinstance(target, (str, Path)):
+            # 2026-10-05：曾经有调用方把 `wrapper` 位置传进了 `target`，
+            # 于是 `str(False)` 被当路径，工作目录里多出一个名叫 `False`
+            # 的文件。落盘前先认路径——不是路径就别碰磁盘。
+            return {'ok': False,
+                    'error': f'导出路径不是路径：{target!r}（要给 .rpy 路径）',
+                    'path': '', 'labels': [], 'count': 0}
         try:
             export_to_renpy(graph, str(target), wrapper=wrapper)
         except Exception as e:                # noqa: BLE001

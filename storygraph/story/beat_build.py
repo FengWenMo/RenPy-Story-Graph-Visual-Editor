@@ -96,6 +96,9 @@ class _BeatBuilder:
         self.branch_edges: set = set()
         #: 落好的拍（`build()` 返回它）
         self.beats: list = []
+        #: **源文件里出现过的 label（按出现顺序）** —— 用来给"一张拍都没
+        #: 落到它名下"的 label 补空拍（见 `_fill_empty_labels`）。
+        self.label_order: list = []
 
     # ------------------------------------------------------------------
     #  状态操作（原来是闭包）
@@ -241,9 +244,27 @@ class _BeatBuilder:
 
     def add(self, stmt, stmt_label) -> None:
         """处理一条语句（原来是那个 538 行 for 循环的循环体）。"""
+        # **label 是硬边界**（2026-10-05 修，真实项目实测）。
+        #
+        # 攒着的"孤儿指令段"（`$ x` / `show screen` / `pause` / `play music`
+        # 这些**没有台词**的语句）在换 label 时必须先落拍，否则它们会被吸进
+        # **下一个 label 的第一张拍**里 —— 本 label 名下一张拍都没有，
+        # 渲染时按拍分组 → 产物里**整个 label 消失**，且不报任何错。
+        #
+        # 真实项目实测（`tools/probe_label_fate_real.py`）：
+        # 51 个 label 里丢 4 个 —— beginstory / location / pomo_start /
+        # sr_about_render_test。其中 `location` 带 `call screen map`，
+        # 是主循环节点；产物里没有它，所有 `jump location` 全部失效。
+        #
+        # `flush_stage_only()` 在这里是安全的：pending 空的时候它只重置、
+        # 不落拍（见它的 `pending_has_stage` 判据），所以不会凭空多出空拍。
+        if stmt_label and stmt_label != self.current_label:
+            self.flush_stage_only()
         if stmt_label:
             self.current_label = stmt_label
             self.pending.label = self.current_label
+            if stmt_label not in self.label_order:
+                self.label_order.append(stmt_label)
         kind = stmt.kind
         payload = stmt.payload or {}
         _ln = self.source_line_of(stmt)
@@ -638,9 +659,41 @@ class _BeatBuilder:
     #  收尾
     # ------------------------------------------------------------------
 
+    def _fill_empty_labels(self) -> None:
+        """
+        源文件里写了 `label X:` 却**一张拍都没落到它名下**的，补一张空拍。
+
+        不补会怎样：`render_beats_to_rpy` 是按拍分组出 label 的，一张拍都
+        没有时它退回 `label start:`（见那里的 `groups.append(('start', []))`）
+        —— **名字被静默改掉**，所有 `jump X` 失效，且不报任何错。
+
+        什么时候会一张拍都没有：
+
+          · `label X:` 后面全是"不落拍"的语句（`return` 就是）；
+          · `label X:` 是空 label（真实项目 51 个 label 里 0 例，但
+            `tools/hell_test.py` 的 `struct_empty_label` 就是照着它造的）。
+
+        插在哪：这个 label **后面那个 label 的第一张拍之前**（保住原文的
+        label 顺序）；后面没有了就放末尾。空拍没有内容，渲染出来只是一条
+        `label X:` —— 与源文件一致，不会凭空多出语句。
+        """
+        have = {b.label for b in self.beats}
+        for i, name in enumerate(self.label_order):
+            if name in have:
+                continue
+            idx = len(self.beats)
+            for nxt in self.label_order[i + 1:]:
+                if nxt in have:
+                    idx = next((j for j, b in enumerate(self.beats)
+                                if b.label == nxt), idx)
+                    break
+            self.beats.insert(idx, Beat(label=name))
+            have.add(name)
+
     def build(self) -> list:
         """落掉最后一拍 + 收尾（合成 DSL 文本 / 归位菜单体）。"""
         self.flush_stage_only()
+        self._fill_empty_labels()
         assign_identity(self.beats)
         # 标记"解析来的 Beat"：导出时图像名要逐字还原，不做下划线改写。
         for b in self.beats:
@@ -1267,10 +1320,110 @@ def _category_from_tag(tag: str) -> str:
 
 
 
+def attach_file_blocks(beats: list, blocks) -> list:
+    """
+    把**文件级保真块**（顶层 `init python:` 之类）挂到拍列表上。
+
+    2026-10-05，拓展边界③。为什么挂在**第一张拍**上：
+
+      · 这些块不属于任何"拍"，但"表"的单位是拍 —— 信息要跟着表走，
+        就只能搭在某一拍上；
+      · 搭第一张拍最稳：`to_row` / `from_row` 是逐行的，挂在中间任意一张
+        也一样，但第一张在"表被排序/筛选"时最不容易被理解错
+        （这一列整列隐藏，策划看不见，工具读回来只看"这些拍里有没有"）。
+
+    没有拍的时候（纯 `init python:` 文件）**造一张空拍来携带它** ——
+    否则信息无处安放，就会退回"整块消失"。这张空拍渲染时什么都不产出
+    （`Beat.is_empty()` 认 `file_blocks` 算有内容，所以不会被当空行丢掉），
+    `render_beats_to_rpy` 给的仍然是 `label start: pass return` + 文件级块，
+    与"没有拍"时的产物只多不少。
+
+    返回**新列表**（不改调用方传进来的那个）：调用方常常还要用原列表做别的。
+    """
+    from storygraph.story.beat_model import Beat, join_file_blocks
+
+    blocks = [(getattr(b, 'header', '') or '', getattr(b, 'code', '') or '')
+              for b in (blocks or ())]
+    return attach_file_block_text(beats, join_file_blocks(blocks))
+
+
+def attach_file_block_text(beats: list, text: str) -> list:
+    """
+    把**已经渲染好的**文件级保真块文本挂到拍列表上（表 → 拍那条路）。
+
+    与 `attach_file_blocks` 是同一件事的两半：那个接 `(块头, 块体)` 的列表，
+    这个接"从隐藏表读回来的整段文本"。挂载规则只有一处
+    （挂在第一张拍；一张拍都没有就造一张携带拍），见上面那段说明。
+    """
+    from storygraph.story.beat_model import Beat
+
+    text = str(text or '').strip('\n')
+    if not text:
+        return list(beats or ())
+    out = list(beats or ())
+    if not out:
+        return [Beat(seq=0, label='', file_blocks=text)]
+    first = out[0]
+    first.file_blocks = (f'{first.file_blocks}\n\n{text}'
+                         if first.file_blocks else text)
+    return out
+
+
 def beats_from_parse_result(parse_result, label: str = '') -> list:
-    """入口：ParseResult → Beat 列表。"""
-    return beats_from_statements(
+    """
+    入口：ParseResult → Beat 列表（并带上**文件级保真块**）。
+
+    顶层 `init python:` 不属于任何拍，但必须跟着表走 ——
+    见 `attach_file_blocks`（拓展边界③）。
+    """
+    beats = beats_from_statements(
         parse_result.statements,
         label=label,
         labels=getattr(parse_result, 'statement_labels', None),
     )
+    _fill_labels_without_beats(
+        beats, getattr(parse_result, 'labels', None) or {})
+    return attach_file_blocks(beats, getattr(parse_result, 'file_blocks', None))
+
+
+def _fill_labels_without_beats(beats: list, labels_info: dict) -> None:
+    """
+    源文件里**出现过**、但一张拍都没落到它名下的 label：补一张空拍。
+
+    与 `_BeatBuilder._fill_empty_labels` 是同一件事的两个入口：
+      · builder 那只管"有语句、但语句都不落拍"的 label（如 `return`）；
+      · 这只管**一条语句都没有**的 label（`label a:` 后面直接是 EOF
+        或下一个 label）—— 那种 label 连 statement 都没有，builder
+        根本看不见它（`pr.labels` 里有，`pr.statements` 里没有）。
+
+    为什么非补不可：不补的话渲染层在没有拍时会退回 `label start:`
+    （见 `render_beats_to_rpy`），于是产物里**凭空多出一个 `label start`**
+    —— 而 `start` 是 Ren'Py 的游戏入口，项目里几乎必然已有一个，
+    合并进 `game/` 就是**重复 label，游戏起不来**。
+    名字被静默改掉比内容丢失更坏：所有 `jump a` 失效，且不报错。
+
+    插在哪：源文件里它**后面第一条**拍之前（按源行号）；后面没有了就末尾。
+    """
+    if not labels_info:
+        return
+    have = {b.label for b in beats}
+    try:
+        order = sorted(labels_info.items(),
+                       key=lambda kv: (str(kv[1][0]), int(kv[1][1])))
+    except (TypeError, ValueError, IndexError):      # noqa: BLE001
+        order = list(labels_info.items())
+    for name, info in order:
+        if name in have:
+            continue
+        try:
+            lineno = int(info[1])
+        except (TypeError, ValueError, IndexError):   # noqa: BLE001
+            lineno = 0
+        idx = len(beats)
+        if lineno:
+            for j, b in enumerate(beats):
+                if getattr(b, 'src_first', 0) and b.src_first > lineno:
+                    idx = j
+                    break
+        beats.insert(idx, Beat(label=name))
+        have.add(name)

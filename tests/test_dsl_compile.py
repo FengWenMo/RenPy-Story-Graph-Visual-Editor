@@ -297,6 +297,12 @@ class TestSheetContract:
 
         三者都整列隐藏，策划的界面里看不到。注意它们和 26 列时代的
         `StageOrder` 不是一回事——那次它和结构化列并列出现。
+
+        ⚠ **文件级保真块不在这里**（2026-10-05 挪走了）：它一度也是隐藏列
+        （`FileBlocks`），但 Excel 单元格上限 32767 字符，而真实文件的顶层
+        区间轻松超限、写进去被**静默截断**（实测 38492 → 32767）。
+        现在走**隐藏表**「文件级保真」（见 `beat_model.FILE_BLOCK_SHEET`）——
+        表是按行存的，没有长度上限。
         """
         assert len(BEAT_FIELDS) == 24, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
@@ -315,12 +321,14 @@ class TestSheetContract:
         assert BEAT_FIELDS.index('Condition') < \
             BEAT_FIELDS.index('Scene'), '条件列应紧挨着台词，不该被赶到技术列区'
         assert 'Condition' not in HIDDEN_BEAT_COLUMNS
-        # 三列内部元数据在表里，但必须整列隐藏；且 `CodeBlocks` 要**排在最后**
-        # （用户明确要求"放远点"）
+        # 三列内部元数据在表里，但必须整列隐藏；**新增的要排在最末尾**
+        # （用户明确要求"放远点"），且先后顺序就是"加进来的顺序"。
         for col in ('StageOrder', 'OpOrder', 'CodeBlocks'):
             assert col in BEAT_FIELDS, col
             assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'
         assert BEAT_FIELDS[-1] == 'CodeBlocks', BEAT_FIELDS
+        # 文件级保真块**不许**再回到列里（它超长会被静默截断）
+        assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
         # 其余列的中文表头里不该出现它们，否则策划会去找那一列
         hidden_headers = [h for k, h in BEAT_HEADERS.items()
                           if k in ('StageOrder', 'OpOrder', 'CodeBlocks')]

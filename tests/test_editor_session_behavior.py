@@ -74,7 +74,12 @@ def _rpy_of(session, tmp_path, name='out.rpy') -> str:
 class TestLoadOnly:
     def test_load_count(self, session):
         s, _ = session
-        assert len(s.beats) == 12
+        # 11 拍内容 + 1 张菜单拍 + 1 张 `ch01_end` 的空拍。
+        # 最后那张是 2026-10-05 补的：`label ch01_end:` 后面只有一个 `return`，
+        # 而文件里有两条 `jump ch01_end` —— 不给它留一张拍，产物里就没有
+        # 这个 label（渲染层会退回 `label start:`），所有 jump 静默失效。
+        # 见 README 不变量 68 / `tests/test_hell_findings.py`。
+        assert len(s.beats) == 13
 
     def test_beat_fields_are_stable(self, session, tmp_path):
         """
