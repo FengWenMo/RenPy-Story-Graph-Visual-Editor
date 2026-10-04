@@ -1667,6 +1667,88 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
     `tools/probe_stage_code_source_order.py`（源码顺序 vs 渲染顺序的分布）、
     `tools/snapshot_beat_render.py`（改渲染前 dump 逐拍产物、改完 diff）。
 
+83. **编辑序列（第三轮地狱）× 三条编码缺陷**（2026-10-05）
+
+    第三轮地狱测试换了轴（`tools/hell_edit_rounds.py`）：前两轮都是"读一次、
+    渲染一次、比一次"，这一轮打**人在反复改**（原地导出 10 轮、内容步子只许动
+    那一两行、最后"不改任何东西再导出必须逐字节相同"）× **工具自己的编码**
+    （`Inline` 的 `\ue004` 分隔符 / `@if ` 前缀 / `Nest` 的 `>`）。
+    它打出三条，全部修完：
+
+    **(a) 菜单标题的转义必须自反**（`renpy_parser._scan_menu_header`）
+
+      `_quote(caption)` 会转义（真换行 → `\n`、`\` → `\\`），而标题那条路
+      **原样切片**：`menu "第一行\n第二行":` 读回来成了**字面量反斜杠 + n**，
+      再导出又转义一层 —— `\n` → `\\n` → `\\\\n`，**每渲染一次翻一倍**。
+      台词那条路一直是对的（`_pick_str` 内部调 `unescape_renpy_string`），
+      所以只有**标题**不对称（选项文案走 `_parse_menu_option` 的 `_pick_str`，
+      本来没问题）。影响不只是显示：标题里的 `\n` 强制换行退化成字面量，
+      而且那一行**每轮都变** → 增量的对位每轮都失败（注释丢失的上游）。
+
+      判据：`tests/test_renpy_parser.py` 两条（标题反转义）；
+      `tests/test_roundtrip_invariants.py::test_menu_caption_escapes_do_not_accumulate`
+      （往返 + **第二轮逐字节不动点**，三种转义形态）。
+
+    **(b) 位置不同的语句不许并进同一拍**
+        （`beat_build._BeatBuilder.struct_guard`）
+
+      这是这一轮最贵的一条。报到的形态是"选项文案带换行 → 第二轮选项体变
+      `pass`、丢内容"，探针（`tools/probe_body_leak.py`）打出的是同根因的更狠形态：
+
+          label a:
+              menu:
+                  "选项":
+                      show bg room      ← 路径 `menu:1>A`（选中才播）
+              e "体"                    ← 路径 `''`
+              return
+
+      两句**条件都是空串**，而 `branch_guard` 只比条件 → 并成**一张拍**；
+      一张拍只有一个结构位，`mark_struct` 写的是**最后那条**语句的路径 →
+      整拍变成顶层 → 产物成了
+
+          menu:
+              "选项":
+                  pass              ← 选项体被掏空
+          show bg room              ← **无条件执行**（选没选都会换背景）
+
+      对拍器**看不见**这一类：`_menu_member` 与 `Nest` 两份载体都被同一条语句
+      覆盖，两边"自洽"地说了同一个谎 —— 所以它只能由构建层挡。
+
+      修法：`struct_guard` —— 语句的块路径与当前拍不一致就**先落拍**
+      （与 `branch_guard` 同源；两边任一为 `None`（不知道）就不比）。
+      真实项目实测：守卫命中 **29 次**（都是"本来就该落拍"的边角，例如
+      选项行/分支头），**产物逐字节不变**（`render_hash` 8eea612fe151）
+      —— 它是安全网：专治真实数据里还没出现、但合成用例一打就中的形态。
+
+      判据：`tests/test_nest_column.py::TestAStatementCannotStealTheStructure`
+      （4 条：结构位、产物里仍在体内且无 `pass`、过表一致、
+      空体补的 `pass` 不许漏出去）。
+
+    **(c) `Inline` 分隔符只在 `SEP + '@if '` 组合处切**
+        （`beat_model.parse_inline_cell`）
+
+      `compose_inline_cell` 写出来的分隔符后面**永远紧跟** `@if `，所以
+      "组合"就是自反的判据；正文里**孤立**的 `\ue004`（粘贴带进来的）因此变成
+      **惰性字符**。从前只要见到分隔符就切 → 注释被劈成两半，后半还被当成
+      条件注释**贴到 `if` 行上**（错位，并污染下一格）。
+
+      ⚠ 仍然无解的一种：正文里带着**完整组合** `\ue004@if ` 且后面还有内容 ——
+      那与工具自己写出来的形状逐字相同，无从区分（U+E004 打不出来，
+      只有粘贴**本工具自己的单元格内容**才可能造出来）。
+
+      判据：`tests/test_inline_notes.py::test_a_lone_separator_in_the_body_is_inert`。
+
+    验收：`tools/hell_edit_rounds.py` **7 → 0**（A 对抗编码 3→0、A2 转义自反
+    4→0、B 连续编辑 10 轮 0、C 真实项目编辑 0）；全量 pytest **2433 → 2442**
+    （新增 9 条，**9 条在改前全红** —— 用 HEAD worktree 逐条验过，不是"写完就绿"）；
+    `tools/hell_nest_inline.py` 合成 17/17 + 真实项目 40 文件全绿；
+    `render_hash` 两条路仍逐字节相等（`8eea612fe151` / `8eea612fe151`）；
+    `audit_roundtrip` / `audit_real_project` / `acceptance_workflow` /
+    `torture_test` 与上一版**逐行一致**，`journey_check` 只差临时目录名。
+
+    取证工具：`tools/probe_round_escapes.py`（转义逐轮 `repr` 打出来）、
+    `tools/probe_body_leak.py`（漏出菜单的三种形态 + 第二轮多出来的行）。
+
 ## 常见改动落点
 
 | 想做什么 | 改哪里 |
@@ -1676,6 +1758,8 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改**拍内顺序**（舞台尾段 / 代码块 / 首个 `scene` 之后插代码） | `story/beat_render.render_beat_to_rpy` 的 `emit_stage_tail()` 位置 + `len(lines) > mark` 那条判据（见不变量 82a） |
 | 改**选项体归属**（哪个选项拿哪段块体） | `story/beat_render._menu_segments_by_path` + `core/nest_path.option_index`（键=位置；越界才退回顺序配对，见不变量 82b） |
 | 改**注释落在哪张拍上** | `story/beat_build._emit_comment`（必须过 `branch_guard`，见不变量 82c） |
+| 改**哪些语句能并进同一拍** | `story/beat_build._BeatBuilder` 的 `branch_guard`（条件不同）/ `struct_guard`（**位置**不同，见不变量 83b） |
+| 改**字符串转义**（渲染转义 / 解析反转义） | 渲染 `story/beat_render._quote`；解析 `parsing/renpy_parser.unescape_renpy_string`（`_pick_str` 会自动调，**手写切片的地方要自己调**，见不变量 83a） |
 | 改**条件减法**（里层 `if` 该不该再写外层条件） | `story/beat_render.strip_condition_context` + `_split_conjuncts` / `_bare_condition` / `_condition_atoms`（见不变量 82d） |
 | 改**嵌套/注释 harness 的判据** | `tools/hell_nest_inline.py`（N1 只比"菜单口径"，`§有意为之` 那份清单是口径真源） |
 | 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |

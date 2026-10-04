@@ -289,3 +289,33 @@ class TestConditionNotes:
         # 只有自己的注释：就是老格式，一个字都不多
         b3 = Beat(seq=1, label='a', text='x', inline_comment='# 只有自己的')
         assert compose_inline_cell(b3) == '# 只有自己的'
+
+    def test_a_lone_separator_in_the_body_is_inert(self):
+        """
+        正文里**孤立**的分隔符不许把注释劈开（2026-10-05 修，
+        `tools/hell_edit_rounds.py` 的 A 轴实测）。
+
+        只在 `SEP + '@if '` 这个组合处切：`compose_inline_cell` 写出来的
+        分隔符后面永远紧跟 `@if `，所以组合判据是自反的。U+E004 打不出来，
+        但**粘贴**可能带进来 —— 而劈开之后后半会被当成条件注释贴到 `if` 行上
+        （错位，还会污染下一格）。
+        """
+        from storygraph.story.beat_model import (INLINE_COND_SEP,
+                                                 compose_inline_cell,
+                                                 parse_inline_cell)
+        sep = INLINE_COND_SEP
+        body = f'# 正文里有分隔符{sep}后面还有字'
+        b = Beat(seq=1, label='a', text='x', inline_comment=body)
+        assert compose_inline_cell(b) == body, '没有条件注释时不该多写东西'
+        assert parse_inline_cell(compose_inline_cell(b)) == (body, '')
+
+        # 两个槽都在、且**两段正文都带孤立分隔符**：仍然要各归各位
+        b2 = Beat(seq=1, label='a', text='x',
+                  inline_comment=f'# 自己的{sep}尾巴',
+                  cond_comment=f'# 条件的{sep}尾巴')
+        own, cond = parse_inline_cell(compose_inline_cell(b2))
+        assert (own, cond) == (f'# 自己的{sep}尾巴', f'# 条件的{sep}尾巴')
+
+        # 手改掉前缀的老单元格：整段当成"自己的注释"，不再造出半个条件注释
+        assert parse_inline_cell(f'# 自己的{sep}后面还有字') == \
+            (f'# 自己的{sep}后面还有字', '')

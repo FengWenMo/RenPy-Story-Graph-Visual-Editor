@@ -129,6 +129,42 @@ class _BeatBuilder:
         self.pending = Beat(label=self.current_label)
         self.pending_has_stage = False
 
+    def struct_guard(self, stmt) -> None:
+        """
+        **结构守卫**：这条语句的**块路径**与当前拍不一致时，先把当前拍落下去。
+
+        为什么必须这样（2026-10-05，`tools/probe_body_leak.py` 实测）：
+        `branch_guard` 只比**条件**，而"条件相同、位置不同"的语句照样会被并进
+        同一拍 —— 一张拍只有一个结构位，而 `mark_struct` 写的是**最后那条**
+        语句的路径：
+
+            label a:
+                menu:
+                    "选项":
+                        show bg room      ← 路径 `menu:1>A`（选中才播）
+                e "体"                    ← 路径 `''`
+                return
+
+        两者条件都是空串 → 并成一拍 → 结构位被覆盖成 `''` → 渲染时
+        `show bg room` **漏出菜单、变成无条件执行**（选没选都会换背景），
+        选项体里只剩一句 `pass`。这是**静默改剧情**，而且对拍器看不见：
+        `_menu_member` 与 `Nest` 两份载体都被最后那条语句覆盖成同一个谎，
+        于是"两边自洽"。
+
+        空选项体补的 `pass` 是同一根因最显眼的形态：那条 `pass` 在体内，
+        却会被并进菜单外那张拍 → 产物里**多出一个顶层 `pass`**
+        （"第二轮 ≠ 第一轮"的来路之一）。
+
+        `None`（不知道 —— 手工构造的语句 / 老表）**不比**：与对拍器同一口径，
+        绝不拿"不知道"当"顶层"。
+        """
+        incoming = getattr(stmt, 'nest_path', None)
+        current = getattr(self.pending, 'nest_path', None)
+        if incoming is None or current is None:
+            return
+        if incoming != current:
+            self.flush_stage_only()
+
     def branch_guard(self, stmt) -> None:
         """
         **分支守卫**：舞台指令的条件与当前拍不一致时，先把当前拍落下去。
@@ -277,6 +313,11 @@ class _BeatBuilder:
         kind = stmt.kind
         payload = stmt.payload or {}
         _ln = self.source_line_of(stmt)
+
+        # **结构守卫**（2026-10-05，见 `struct_guard` 的说明）：
+        # 位置不同的语句不许并进同一拍 —— 否则整拍的结构位会被最后那条语句
+        # 覆盖，"在选项体里"的内容会漏到菜单外**无条件执行**。
+        self.struct_guard(stmt)
 
         # **行号归属**（2026-10-05 修）：
         # 只有"真的被这一拍吸收"的语句才把行号记进 `pending`。

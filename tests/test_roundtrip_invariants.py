@@ -662,6 +662,56 @@ class TestTextFidelityRoundtrip:
         original, produced, props = roundtrip(script, tmp_path, 'escape')
         assert_same_multiset(original, produced, props)
 
+    def test_menu_caption_escapes_do_not_accumulate(self, tmp_path):
+        """
+        **菜单标题**里的转义必须自反（2026-10-05 修）。
+
+        `tools/hell_edit_rounds.py` 的 A2 轴实测：标题里的 `\\n` 每导出一轮
+        就翻一倍 ——
+
+            第一轮: menu "第一行\\n第二行":
+            第二轮: menu "第一行\\\\n第二行":
+            第三轮: menu "第一行\\\\\\\\n第二行":
+
+        根因是渲染侧 `_quote` 转义了、解析侧 `_scan_menu_header` 原样切片
+        （台词那条路有 `_pick_str` 反转义，所以只有标题不对称）。
+        影响不只是显示：标题里的 `\\n` 强制换行退化成字面量，而且那一行
+        **每轮都变** → 增量的对位每轮都失败。
+        """
+        for stem, caption in (('cap_nl', r'第一行\n第二行'),
+                              ('cap_bs', r'路径 C:\\new'),
+                              ('cap_both', r'A\\nB\nC')):
+            script = ('label a:\n'
+                      f'    menu "{caption}":\n'
+                      '        "Yes":\n'
+                      '            e "体"\n'
+                      '    return\n')
+            _original, produced, props = roundtrip(script, tmp_path, stem)
+            assert_same_multiset(_original, produced, props)
+            # 渲染 → 再解析 → 再渲染：**逐字节**不动点
+            second = compile_beats(beats_from_statements(
+                produced.statements,
+                labels=produced.statement_labels)).rpy_text
+            assert second == props['rpy'], \
+                f'{stem}：第二轮变了\n{props["rpy"]}\n---\n{second}'
+
+    def test_option_text_escapes_do_not_accumulate(self, tmp_path):
+        """选项文案与台词同理（`_parse_menu_option` 用 `_pick_str`，本来是对的，
+        这条是**钉住**它别退化）。"""
+        for stem, opt in (('opt_nl', r'选项\n第二行'),
+                          ('opt_bs', r'路径 C:\\new')):
+            script = ('label a:\n'
+                      '    menu "标题":\n'
+                      f'        "{opt}":\n'
+                      '            e "体"\n'
+                      '    return\n')
+            original, produced, props = roundtrip(script, tmp_path, stem)
+            assert_same_multiset(original, produced, props)
+            second = compile_beats(beats_from_statements(
+                produced.statements,
+                labels=produced.statement_labels)).rpy_text
+            assert second == props['rpy'], f'{stem}：第二轮变了'
+
     def test_tight_dollar_survives_excel(self, tmp_path):
         """
         紧凑 `$x` 与 `$ x` 必须分别保真。

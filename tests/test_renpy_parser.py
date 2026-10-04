@@ -367,6 +367,36 @@ class TestStatementParsing:
         label = RenPyParser().parse(fp)[0]
         assert isinstance(label.block[0], MenuNode)
 
+    def test_menu_caption_is_unescaped(self, write_rpy):
+        """
+        菜单标题必须**反转义**（2026-10-05 修，`tools/hell_edit_rounds.py` 的
+        A2 轴实测：`\\n` → `\\\\n` → `\\\\\\\\n` 每轮翻一倍）。
+
+        渲染侧 `_quote` 把真换行写成 `\\n`、把 `\\` 写成 `\\\\`；解析侧若原样
+        切片，标题里的强制换行就退化成**字面量反斜杠 + n**，再导出又转义一层。
+        台词那条路一直是对的（`_pick_str` 内部反转义），只有标题不对称。
+        """
+        fp = write_rpy(
+            'label a:\n'
+            '    menu "第一行\\n第二行":\n'
+            '        "Yes":\n'
+            '            jump b\n'
+        )
+        label = RenPyParser().parse(fp)[0]
+        assert label.block[0].caption == '第一行\n第二行', \
+            repr(label.block[0].caption)
+
+    def test_menu_caption_backslash_is_unescaped(self, write_rpy):
+        fp = write_rpy(
+            'label a:\n'
+            '    menu "路径 C:\\\\new":\n'
+            '        "Yes":\n'
+            '            jump b\n'
+        )
+        label = RenPyParser().parse(fp)[0]
+        assert label.block[0].caption == '路径 C:\\new', \
+            repr(label.block[0].caption)
+
 
 # ------------------------------------------------------------------
 #  show / scene（FIX-47）

@@ -276,3 +276,99 @@ class TestACommentNeverStealsTheStructure:
         back = import_beats_from_excel(xl)
         assert (render_beats_to_rpy(back, label_name='t')
                 == render_beats_to_rpy(beats, label_name='t'))
+
+
+class TestAStatementCannotStealTheStructure:
+    """
+    **位置不同的语句不许并进同一拍**（2026-10-05 修，结构守卫）。
+
+    报到的形态是"选项文案带换行 → 第二轮选项体变 `pass`、丢内容"，
+    探针（`tools/probe_body_leak.py`）打出的是更狠的同根因：
+
+        label a:
+            menu:
+                "选项":
+                    show bg room      ← 路径 `menu:1>A`（选中才播）
+            e "体"                    ← 路径 `''`
+            return
+
+    两者**条件都是空串**，而 `branch_guard` 只比条件 → 并成一拍 →
+    整拍的 `Nest` 被最后那条语句覆盖成 `''` → 生效时
+
+        menu:
+            "选项":
+                pass              ← 选项体被掏空
+        show bg room              ← **无条件执行**（选没选都会换背景）
+
+    对拍器**看不见**这一类：`_menu_member` 与 `Nest` 都被同一条语句覆盖，
+    两份载体"自洽"地说了同一个谎。所以它得由构建层挡住（`struct_guard`）。
+    """
+
+    SRC = '''label a:
+    menu:
+        "选项":
+            show bg room
+    e "体"
+    return
+'''
+
+    def test_the_stage_stays_inside_the_option_body(self, tmp_path):
+        beats = _beats_of(self.SRC, tmp_path)
+        show = next(b for b in beats if b.show)
+        assert show.nest_path == 'menu:1>A', \
+            f'舞台指令漏出选项体了：{show.nest_path!r}'
+        assert show.text == '', '它不该被并进菜单外那句台词里'
+        say = next(b for b in beats if b.text == '体')
+        assert say.nest_path == ''
+
+    def test_the_product_keeps_it_conditional(self, tmp_path):
+        rpy = render_beats_to_rpy(_beats_of(self.SRC, tmp_path), label_name='a')
+        lines = [ln for ln in rpy.splitlines() if ln.strip()]
+        i_menu = next(i for i, ln in enumerate(lines) if ln.strip() == 'menu:')
+        i_body = next(i for i, ln in enumerate(lines)
+                      if 'show bg room' in ln)
+        i_say = next(i for i, ln in enumerate(lines) if ln.strip() == 'e "体"')
+        assert i_menu < i_body < i_say, rpy
+        # 选项体那一层缩进必须比 `menu:`/台词深（在体内，不在菜单外）
+        indent = len(lines[i_body]) - len(lines[i_body].lstrip())
+        assert indent >= 12, rpy
+        assert 'pass' not in rpy, f'选项体被掏空了：\n{rpy}'
+
+    def test_it_survives_the_excel_roundtrip(self, tmp_path):
+        beats = _beats_of(self.SRC, tmp_path)
+        xl = tmp_path / 'ch.xlsx'
+        export_beats_to_excel(beats, xl)
+        back = import_beats_from_excel(xl)
+        direct = render_beats_to_rpy(beats, label_name='a')
+        via_table = render_beats_to_rpy(back, label_name='a')
+        assert via_table == direct, f'{direct}\n---\n{via_table}'
+        # 过表那条路同样要**在体内**（缩进 ≥12 = menu 里选项体那一层）
+        body = next(ln for ln in via_table.splitlines() if 'show bg room' in ln)
+        assert len(body) - len(body.lstrip()) >= 12, via_table
+
+    def test_a_filler_pass_does_not_leak_out(self, tmp_path):
+        """
+        空选项体补的 `pass` 在**体内**，不许被并进菜单外那张拍 ——
+        它的形态是"第二轮凭空多出一个顶层 `pass`"（不动点过不去）。
+        """
+        src = ('label a:\n'
+               '    menu:\n'
+               '        "空的":\n'
+               '    e "体"\n'
+               '    return\n')
+        beats = _beats_of(src, tmp_path)
+        rpy = render_beats_to_rpy(beats, label_name='a')
+        again = render_beats_to_rpy(_beats_of(rpy, tmp_path), label_name='a')
+
+        def _norm(text: str) -> str:
+            lines = [ln.rstrip() for ln in text.splitlines()
+                     if not ln.startswith('# 由剧本表自动生成')]
+            while lines and not lines[0]:
+                lines.pop(0)
+            while lines and not lines[-1]:
+                lines.pop()
+            return '\n'.join(lines)
+
+        assert _norm(again) == _norm(rpy), f'{rpy}\n---\n{again}'
+        assert rpy.count('pass') == 1, rpy
+

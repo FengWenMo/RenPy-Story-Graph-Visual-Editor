@@ -1964,7 +1964,16 @@ class RenPyParser:
             end, closed = _skip_string(text, i)
             if not closed:
                 return None
-            caption = text[i + 1:end - 1]
+            # **必须反转义**（2026-10-05 修，`tools/hell_edit_rounds.py` 的
+            # A2 轴实测）：渲染侧 `_quote` 把真换行写成 `\n`、把 `\` 写成 `\\`，
+            # 这里若原样切片，`第一行\n第二行` 就会变成**字面量反斜杠 + n**；
+            # 再渲染一次又转义一层 → `\\n` → `\\\\n` …… 每导出一轮标题就变一次，
+            # 而"文本每轮都变"正是增量对位失败的上游。
+            #
+            # 台词那条路一直是对的（`_pick_str` 内部就反转义），所以只有
+            # **标题**这一处不对称。选项文案走 `_parse_menu_option` 的
+            # `_pick_str`，本来就没问题。
+            caption = unescape_renpy_string(text[i + 1:end - 1])
             i = end
             while i < len(text) and text[i] in ' \t':
                 i += 1

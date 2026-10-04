@@ -1318,12 +1318,31 @@ def compose_inline_cell(beat) -> str:
 
 
 def parse_inline_cell(value) -> tuple:
-    """`Inline` 单元格 → `(自己那行的注释, 条件行的注释)`（`compose_inline_cell` 的逆）。"""
+    """
+    `Inline` 单元格 → `(自己那行的注释, 条件行的注释)`（`compose_inline_cell` 的逆）。
+
+    **只在 `SEP + '@if '` 这个组合处切**（2026-10-05 修，
+    `tools/hell_edit_rounds.py` 的 A 轴实测）：`compose_inline_cell` 写出来的
+    分隔符后面**永远紧跟** `@if `，所以"组合"是自反的判据；正文里孤立的
+    `\\ue004`（粘贴带进来的）因此变成**惰性字符**，注释不会被劈成两半。
+
+    从前只要看到分隔符就切 ——
+
+        '# 正文里有分隔符\\ue004后面还有字'
+          → ('# 正文里有分隔符', '后面还有字')      ← 后半被当成条件注释、
+                                                     还会污染下一格
+
+    ⚠ 仍然无解的一种：正文里带着**完整组合** `\\ue004@if ` 且后面还有内容 ——
+    那与工具自己写出来的形状逐字相同，无从区分（U+E004 打不出来，
+    只有粘贴**本工具自己的单元格内容**才可能造出来）。
+    """
     text = str(value or '')
     if not text:
         return '', ''
-    if INLINE_COND_SEP in text:
-        own, cond = text.split(INLINE_COND_SEP, 1)
+    combo = INLINE_COND_SEP + INLINE_COND_PREFIX
+    if combo in text:
+        own, cond = text.split(combo, 1)
+        cond = INLINE_COND_PREFIX + cond
     elif text.startswith(INLINE_COND_PREFIX):
         # 只有条件注释（没有"自己那行"的注释）—— 前缀是唯一的判据
         own, cond = '', text
