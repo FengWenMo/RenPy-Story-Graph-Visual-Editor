@@ -273,6 +273,17 @@ def build_cases() -> list:
     ]
     cases.append(('scene_show_tag_attr', '\n'.join(names) + '\n'))
 
+    # ---- 【O2 复核】相邻两条 show，`with` 只属于第二条 -------------------
+    # 早先记录里的"`with_` 跨相邻 show 泄漏"，一直没量过。判据很简单：
+    # 产物必须与原文**逐字相同** —— `with dissolve` 只能贴在被写的那一行。
+    stage_with = [
+        'label t:',
+        '    show ling happy at left',
+        '    show ling angry at right with dissolve',
+        '    hide ling with fade',
+    ]
+    cases.append(('stage_with_adjacent', '\n'.join(stage_with) + '\n'))
+
     return cases
 
 

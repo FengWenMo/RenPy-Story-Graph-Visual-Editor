@@ -244,13 +244,29 @@ def _align_key(beat) -> tuple:
     """
     对齐用的身份键。**刻意不含台词正文** —— 正文正是会被编辑的东西。
 
-    留着的是低翻车率的特征：章节 / 类型 / 说话人 / 舞台指纹。
+    留着的是低翻车率的特征：章节 / 类型 / 说话人 / **条件** / 舞台指纹。
     纯旁白拍（都一样）依赖**顺序**对齐，那是对的：顺序没变时，
     换掉的只是正文，正是我们要做的事。
+
+    ⚠ **条件必须进键**（2026-10-05 修，O1 取证时抓到的真缺陷）：
+    同一章里两个分支的旁白拍在"类型/说话人/舞台"上完全一样，`difflib`
+    在**删掉一个**之后会把剩下那个配到**后面那一行**上 —— 实测
+
+        if love >= 5:          ← 这一拍还在（条件 love >= 5）
+            lyj "好感够高"
+        else:
+            lyj "好感不够"      ← 这一拍被删了
+
+    删完之后"好感够高"那一拍拿到的是 **else 那一行**的行号 →
+    补丁把台词写进 `else` 分支（**换了个分支 = 静默改剧情**），
+    而测试只断言"被删的台词不在了"，所以一直没人发现。
+    条件是对齐里**稳定且能区分分支**的特征（改台词不会动它），
+    进键之后这种"跨分支配错"就不可能发生。
     """
     return (str(getattr(beat, 'label', '') or ''),
             str(getattr(beat, 'kind', '') or ''),
             str(getattr(beat, 'speaker', '') or '').strip(),
+            str(getattr(beat, 'condition', '') or '').strip(),
             _stage_tokens(beat))
 
 
@@ -518,6 +534,26 @@ def _same_thing_unless_rewritten(old_body: str, new_body: str) -> bool:
     return False
 
 
+def _body_lines(gen_lines: list) -> list:
+    """
+    生成结果里**属于这一拍自己**的那几行 —— 去掉开头的结构行（`if …:`）。
+
+    为什么需要（2026-10-05 修增量 O1）：条件拍的生成结果是
+    `if 条件:` + 块体，而**块头不是拍**（`if` 是拍上的条件，它的行不在拍的
+    区间里）。拿"整拍"去和区间比行数，就永远是"生成 2 行、区间 1 行" ——
+    实测 `mini_game_dfinder.rpy`：改 `if` 体里一句旁白，对位守卫判"这一段不像
+    这一拍"，于是整章退回全量。
+
+    ⚠ 只去**开头连续的**结构行，且只认 `if` / `elif` / `else` ——
+    `menu "标题":` 那种是**菜单拍自己的内容**（标题就在这一行上），不能去；
+    `python:` 头也在拍的区间里（块体一起被吸收），同样不能去。
+    """
+    out = list(gen_lines or ())
+    while out and re.match(r'^(if|elif|else)\b', _norm(out[0])):
+        out.pop(0)
+    return out
+
+
 def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
                       exact_lines: list = None) -> bool:
     """
@@ -570,7 +606,10 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
         try:
             base = exact_lines if exact_lines is not None else old_lines
             old_n = [_norm(ln) for ln in (base or []) if str(ln).strip()]
-            gen_n = [_norm(ln) for ln in gen_lines if str(ln).strip()]
+            # 生成结果去掉**开头的结构行**再比行数（见 `_body_lines`）：
+            # 条件拍的 `if …:` 头不属于拍的区间，算进去就永远对不上。
+            gen_n = [_norm(ln) for ln in _body_lines(gen_lines)
+                     if str(ln).strip()]
             if len(old_n) == len(gen_n) and old_n:
                 ratio = difflib.SequenceMatcher(
                     None, '\n'.join(old_n), '\n'.join(gen_n)).ratio()
@@ -714,18 +753,36 @@ def _narration_slot_replaced(beat, first: int, last: int, old: list, gen: list,
     if _stage_tokens(beat) or (getattr(beat, 'raw', '') or '').strip() \
             or (getattr(beat, 'code', '') or '').strip():
         return False
-    if len([ln for ln in old if _norm(ln)]) != len([ln for ln in gen if ln]):
+    if len([ln for ln in old if _norm(ln)]) != len(
+            [ln for ln in _body_lines(gen) if str(ln).strip()]):
+        # 生成结果去掉**开头的结构行**（`if …:`）再比行数：块头不是这一拍的
+        # 内容（见 `_body_lines`），算进去就永远是"生成 2 行、区间 1 行"，
+        # 于是 `if` 体里改一句旁白必然退回全量（O1 实测 dfinder）。
         return False
     if len([ln for ln in old if _SAY_RE.match(_norm(ln))]) != 1:
         return False
     neighbours = []
-    for j, f, l, _g, _b in blocks:
-        if j == index or l < f:
+    # **只看紧邻的两块**（2026-10-05 修 O1）。
+    #
+    # 从前这里是"**文件里所有**别的块都算邻居"，于是"任何一块认不出自己"
+    # 就把这条兜底整体否掉 —— 真实项目 40 个文件里有 5 个因此永远退回全量
+    # （例如 `script.rpy`：唯一一块 `strict=False` 的是 60 行以外那张
+    # `menu:` 拍，它的区间只有块头行、本来就认不出自己）。
+    #
+    # 这条判据的本意（见 docstring）是"源文件**整体错位**时邻居会一起失守"
+    # —— 错位是整体性的，紧邻两块一样过不去，所以只看紧邻并不削弱它。
+    before = after = None
+    for blk in blocks:
+        j, f, l = blk[0], blk[1], blk[2]
+        if j == index or not f or l < f:
             continue
-        if l < first:
-            neighbours.append(j)
-        elif f > last:
-            neighbours.append(j)
+        if l < first and (before is None or l > before[2]):
+            before = blk
+        elif f > last and (after is None or f < after[1]):
+            after = blk
+    for blk in (before, after):
+        if blk is not None:
+            neighbours.append(blk[0])
     if not neighbours:
         return False
     return all(strict_of.get(j, False) for j in neighbours)
@@ -811,6 +868,19 @@ def _replace_matched(old_lines: list, gen_bodies: list,
         body = _norm(old_line)
         if body == _norm(pick):
             return old_line, False
+        # **`elif` / `else` 头不许被"展平"改写**（2026-10-05，增量 O1）。
+        #
+        # 整份渲染会把 `elif b:` / `else:` 展平成 `if not (a) and (b):`
+        # （A2 契约：IR 是语句流不是语句树），于是条件拍的行区间里那一行
+        # 与生成结果**逐字不同**。可它不是这一拍的内容 —— 只是**块头**：
+        # 用户改的是台词，凭什么顺手把作者的 `elif` 改掉？
+        # （实测 `pomodorro.rpy`：改一句台词动了 6 行，多出来的就是展平。）
+        #
+        # 条件**真被改过**时怎么办：`_verify_patch` 有一条"条件多重集必须
+        # 一致"的判据兜着 —— 展平推迟到全量重生成，而不是在这里悄悄改。
+        if _norm(old_line).startswith(('elif ', 'else:')) \
+                and _norm(pick).startswith('if '):
+            return old_line, False
         if _collapse(body) == _collapse(pick) or _squash(body) == _squash(pick):
             # **只差空白**（原文 `jc  "…"` 两个空格、生成器一个；或者
             # 原文 `xqlz"pass."` 没空格、生成器写 `xqlz "pass."`）：
@@ -822,6 +892,18 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             # **只差引号 / 转义**（原文 `'file "c:\\a.py", line 24'`、
             # 生成器 `"file \"c:\\\\a.py\", line 24"`）：Ren'Py 读出来是同一句，
             # 同样保留原文那一行 —— 这也是"没改就不许动文件"的一部分。
+            return old_line, False
+        # **原文那一行只是"生成结果 + 行尾注释"时也不许动**（2026-10-05 修 O1）。
+        #
+        # 一拍渲染成多行时，它自己的行尾注释本来就贴不回去（见不变量 78 的
+        # "有意为之"）——于是 `$ time = 1#1500` 的生成结果是 `$ time = 1`，
+        # 而下面那条"代码行按目标换正文"的通道会拿它去**改**这一行：
+        # 作者的注释被删掉，而且这次编辑根本没碰它。真实项目 `pomodorro.rpy`
+        # 三处（改一句台词却动了 6 行 → 触发"像退回全量却没说"的判据）。
+        #
+        # 判据：去掉**行尾注释**后与生成结果相同 → 保留原文（注释也是内容）。
+        if body.startswith(_norm(pick)) \
+                and body[len(_norm(pick)):].lstrip().startswith('#'):
             return old_line, False
         # 代码行：按**目标**配上了就允许换正文（这就是"改了一行脚本逻辑"）。
         # 以前代码行只和逐字相同的行配对，改一个数字就配不上 →
@@ -959,6 +1041,34 @@ def _content_lines(gen_bodies: list) -> list:
     return out
 
 
+def _has_new_content(gen_bodies: list, orig_set: set) -> bool:
+    """
+    这一拍的生成内容里，有**原文里根本没有**的行吗？
+
+    判据从"内容行（台词/舞台/音频）"扩到**整拍的所有非空行**（2026-10-05 修 O1）：
+
+        menu:                       ← 拍的行号区间指着这一行
+            "是时候和青一起学习了."   ← 标题正文在**下一行**
+
+    用户改标题 → 单拍生成行成了 `menu "改过的标题":` —— 它既不是 say、也不是
+    舞台/音频，旧判据（`_content_lines`）**看不见它** → `lost_new` 不触发 →
+    补丁报成功而标题没改（实测 `script_pomo.rpy`：`ok=True`、`changed=0`）。
+    这种"静默成功"比退回全量坏得多（用户以为改了），所以判据必须覆盖整拍。
+
+    反向的误伤有限：**没改过**的行本来就逐字在原文里（注释 / `$ code` /
+    `label` / `if` 头都对得上），只有"整份被手工改过导致这一拍对不上位"
+    才会命中 —— 那种情况本来就该退回全量。
+    """
+    for ln in gen_bodies or ():
+        n = _norm(ln)
+        if not n:
+            continue
+        if n in orig_set or _unescaped(n) in orig_set:
+            continue
+        return True
+    return False
+
+
 def _unescaped(line: str) -> str:
     """
     比对用的"语义形式"：去外层引号 + 去转义 + 空白归一。
@@ -977,6 +1087,64 @@ def _unescaped(line: str) -> str:
     while '\\\\' in s:                    # 连续两个反斜杠折成一个
         s = s.replace('\\\\', '\\')
     return re.sub(r'[ \t]+', ' ', s).strip()
+
+
+def _condition_reasons(new_beats: list, beats: list) -> list:
+    """
+    同一句台词的条件变了没有？返回原因列表（空 = 都对得上）。
+
+    判据按**内容身份**配对（label + 说话人 + 台词），不是全局多重集 ——
+    后者会被"源里还留着的其它拍"误伤（实测两条既有用例：控制流文件里
+    未参与编辑的 `jump` 拍、以及同文案出现在两个分支里）。
+    """
+    def _key(b):
+        return (b.label or '', (b.speaker or '').strip(),
+                (b.text or '').strip())
+
+    have: dict = {}
+    for b in new_beats:
+        if (b.text or '').strip():
+            have.setdefault(_key(b), []).append((b.condition or '').strip())
+    bad = []
+    for b in beats:
+        if not (b.text or '').strip():
+            continue
+        want = (b.condition or '').strip()
+        pool = have.get(_key(b)) or []
+        if want in pool:
+            pool.remove(want)                 # 一次匹配抵一次
+            continue
+        if pool:                              # 台词在、条件变了
+            bad.append((_key(b)[2][:16], want, pool[0]))
+    return bad
+
+
+def _verify_conditions(text: str, beats: list) -> list:
+    """补丁结果重新解析 → 条件对不对得上（`_condition_reasons` 的入口）。"""
+    try:
+        from storygraph.parsing.renpy_parser import (ParseResultBuilder,
+                                                     RenPyParser)
+        from storygraph.story.beat_build import beats_from_parse_result
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.rpy', delete=False,
+                                         encoding='utf-8') as fh:
+            fh.write(text)
+            tmp = Path(fh.name)
+        try:
+            new_beats = beats_from_parse_result(
+                ParseResultBuilder().build(RenPyParser().parse(tmp)))
+        finally:
+            try:
+                tmp.unlink()
+            except OSError as e:
+                swallow('patcher._verify_conditions', e)
+    except Exception as exc:                 # noqa: BLE001
+        return [f'条件校验：补丁结果解析失败：{exc}']
+    bad = _condition_reasons(new_beats, beats)
+    if bad:
+        return [f'{len(bad)} 处条件与要写的拍对不上'
+                f'（例：{bad[0]}）—— 条件改动走全量']
+    return []
 
 
 def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
@@ -1035,6 +1203,17 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
         reasons.append(f'{len(missing)} 句台词在补丁结果里找不到（例：'
                        f'{missing[0]!r}）')
 
+    # ②b **同一句台词的条件必须没变**（2026-10-05，增量 O1）。
+    #
+    # 为什么单独一条：条件**不是**"生成的一行" —— 它在产物里是 `if …:` 那一行，
+    # 而块头不属于拍的行区间（见 `_body_lines`），所以"生成内容都在产物里"
+    # 那条判据看不见它。用户改了「条件」列而增量补丁照写时，就会**报成功、
+    # 条件没改**（静默 no-op）。
+    cond_bad = _condition_reasons(new_beats, beats)
+    if cond_bad:
+        reasons.append(f'{len(cond_bad)} 处条件与要写的拍对不上'
+                       f'（例：{cond_bad[0]}）—— 条件改动走全量')
+
     # ③ 生成器要的内容行不许丢（错位改错行会在这里现形）
     #
     # 比对要**容忍结尾冒号**：菜单选项在源文件里是 `"A":`，而生成器
@@ -1051,10 +1230,17 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
     def _keys(line):
         out = set()
         n = _norm(line)
-        for k in (n, n.rstrip(':'), _unescaped(n), _unescaped(n).rstrip(':')):
-            if k:
-                out.add(k)
-                out.add(re.sub(r'\s+', '', k))
+        # ⚠ **顺序**：先 `rstrip(':')` 再 `_unescaped`（2026-10-05 修 O1）。
+        # 从前是"去冒号"与"去引号"各自独立地加一遍，于是**两个一起出现**
+        # 的形态对不上：原文 `'第一章':`（单引号 + 选项冒号）、生成器
+        # `"第一章"` → 生成侧算得出 `第一章`，原文那侧只有 `'第一章':`
+        # 与 `'第一章':`（去引号失败，因为它以 `:` 结尾）→ 判成"内容丢了"
+        # → `script.rpy` 整章退回全量（7 条菜单选项）。
+        for base in (n, n.rstrip(':')):
+            for k in (base, _unescaped(base)):
+                if k:
+                    out.add(k)
+                    out.add(re.sub(r'\s+', '', k))
         return {k for k in out if k}
 
     text_set = set()
@@ -1470,8 +1656,7 @@ def patch_export(beats: list, source_path, generated_text: str,
             # 实测（真实 chapter1_3）：插一张卡、连导两次，第二次报告
             # "增量补丁：改动 0 行"、产物里那句没了 —— 因为第一次导出把锚点
             # 写进了 `src_first`，第二次它就被当成"替换一行"处理了。
-            if any(ln not in orig_set and _unescaped(ln) not in orig_set
-                   for ln in _content_lines(gen)):
+            if _has_new_content(gen, orig_set):
                 lost_new += 1
             seen_ranges.append((first, last))
             continue
@@ -1548,6 +1733,13 @@ def patch_export(beats: list, source_path, generated_text: str,
         reasons.append(f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）')
     if text != original:
         reasons.extend(_verify_patch(text, original, beats, blocks))
+    else:
+        # **一个字都没改，也要查条件**（2026-10-05，O1 实测）。
+        #
+        # "改了条件、产物一个字节没动"恰好落在两条缝里：`changed_lines=0`
+        # → 走不进整体校验；而条件又不是"生成的一行" → 第三条判据也看不见它。
+        # 结果就是 `ok=True`、条件没改（静默 no-op）。
+        reasons.extend(_verify_conditions(text, beats))
 
     return PatchResult(text, source_path, matched, len(blocks), changed,
                        stale_beats=stale,

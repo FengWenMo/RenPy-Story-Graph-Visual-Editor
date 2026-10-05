@@ -475,6 +475,61 @@ class TestCrossKindOrder:
         assert voice < sound, f'voice 跑到 play sound 后面了：{lines}'
 
 
+class TestANativeStageLineKeepsItsVerbPosition:
+    """
+    一拍里"多条 `show` + 后面还有 `hide`"时，`hide` 不许被插到第二条 `show` 前面
+    （2026-10-05 修，导出缺陷清单 O2）。
+
+    形状：
+
+        show ling happy at left
+        show ling angry at right with dissolve   ← 复杂子句 → 住在 Stage 列
+        hide ling with fade
+
+    第二条 `show` 是"原生真迹"（`Stage` 列），过表之后它原本被**整块拖到
+    舞台尾段** —— 也就是所有 verb 之后 → 跑到 `hide` 后面：
+
+        show ling happy at left
+        hide ling with fade                 ← 收尾画面变了（该淡出的人还站着）
+        show ling angry at right with dissolve
+
+    修法：原文跟着它在结构化列里的**影子条目**走（`beat_build` 记
+    `_stage_native_raw`，`beat_render._stage_lines` 按条目位置逐字出），
+    于是它和别的舞台行一样排在自己的 verb 位上。
+    """
+
+    SRC = ('label t:\n'
+           '    show ling happy at left\n'
+           '    show ling angry at right with dissolve\n'
+           '    hide ling with fade\n')
+
+    def _lines(self, rpy: str) -> list:
+        return [ln.strip() for ln in rpy.splitlines()
+                if ln.strip() and not ln.startswith('#')
+                and ln.strip() not in ('label t:', 'return')]
+
+    def _two_paths(self, write_rpy, tmp_path):
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.story.beat_build import beats_from_parse_result
+        src = write_rpy(self.SRC, 'proj/game/st.rpy')
+        pr, _ = IncrementalRenPyAnalyzer().analyze(files=[src], graph=None)
+        direct = render_beats_to_rpy(beats_from_parse_result(pr))
+        table = tmp_path / 'st.xlsx'
+        open_rpy_as_table(src, table)
+        via_table = render_beats_to_rpy(import_beats_from_excel(table))
+        return self._lines(direct), self._lines(via_table)
+
+    def test_the_two_paths_agree(self, write_rpy, tmp_path):
+        direct, via_table = self._two_paths(write_rpy, tmp_path)
+        assert direct == via_table, f'{direct}\n---\n{via_table}'
+
+    def test_the_hide_stays_last(self, write_rpy, tmp_path):
+        _direct, via_table = self._two_paths(write_rpy, tmp_path)
+        assert via_table[0].startswith('show ling happy'), via_table
+        assert via_table[1].startswith('show ling angry'), via_table
+        assert via_table[2].startswith('hide ling'), via_table
+
+
 class TestCodeBlockStaysAfterTheWholeStage:
     """
     **代码块（`$ …`）不许跑到舞台指令前面**（2026-10-05 修）。

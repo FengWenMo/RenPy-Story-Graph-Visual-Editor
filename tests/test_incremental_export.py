@@ -325,6 +325,216 @@ class TestStringSpeakerSay:
         assert res.text == fp.read_text(encoding='utf-8'), res.text
 
 
+class TestO1AlignmentFixes:
+    """
+    增量对位那一批修复（2026-10-05，导出缺陷清单 O1）。
+
+    清单口径：40 个真实文件里先前有 **6 个**"只改一句台词"走不成增量、
+    退回全量重生成（58～425 行）。逐条查出来的病因**各不相同**，所以这里
+    一条一钉（每条都能单独变红）：
+
+      · 「旁白整句换写」那条兜底从前要求**文件里所有别的拍**都认得出自己 ——
+        任何一块认不出（例如菜单头那一拍，区间只有 `menu:` 一行）就整体否掉；
+      · 菜单拍的单拍渲染写出了占位符 `"\\x00menu"`，与整份产物对不上；
+      · `lost_new` 只比"内容行"，于是**改了菜单标题**会静默成功、标题没改；
+      · `$ time = 1#1500` 的行尾注释被"代码行换正文"顺手删掉；
+      · 单引号选项 `'A':` 与生成结果 `"A"` 在"去冒号 + 去引号"**同时**出现时对不上；
+      · `if` 体里的拍，生成结果多一行 `if …:`，对位守卫判"不是这一拍"；
+      · 删掉 `if/else` 里的一拍后，剩下的拍会被配到**另一个分支**的行上。
+    """
+
+    #: 远处有一个"认不出自己"的块（`menu:` 头 + 标题单独一行）——
+    #: 旧判据会因为它而否掉整份补丁
+    FAR_MENU = ('label ch01:\n'
+                '    "开场"\n'
+                '    menu:\n'
+                '        "标题行"\n'
+                '        "选项":\n'
+                '            jump ch01\n'
+                '    "收尾"\n'
+                '    return\n')
+
+    IF_BODY = ('label ch01:\n'
+               '    "开场"\n'
+               '    if game.victory:\n'
+               '        "赢了"\n'
+               '    else:\n'
+               '        "输了"\n'
+               '    return\n')
+
+    COND_MENU = ('label ch01:\n'
+                 '    "开场"\n'
+                 '    menu:\n'
+                 '        "标题行"\n'
+                 '        "选项":\n'
+                 '            jump ch01\n'
+                 '    return\n')
+
+    COMMENT_CODE = ('label ch01:\n'
+                    '    "第一句"\n'
+                    '    $ time = 1#1500\n'
+                    '    "第二句"\n'
+                    '    return\n')
+
+    QUOTED_OPTION = ("label ch01:\n"
+                     "    \"开场\"\n"
+                     "    menu:\n"
+                     "        '第一章':\n"
+                     "            jump ch01\n"
+                     "    return\n")
+
+    def _patch(self, write_rpy, src, edit=None):
+        from pathlib import Path
+        fp, beats = _beats_of(write_rpy, src)
+        if edit is not None:
+            edit(beats)
+        full = render_beats_to_rpy(beats)
+        return Path(fp), patch_export(beats, fp, full)
+
+    @staticmethod
+    def _changed_lines(before: str, after: str) -> list:
+        a, b = before.splitlines(), after.splitlines()
+        return [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+
+    def test_unrelated_block_does_not_kill_the_patch(self, write_rpy):
+        """
+        远处那块"认不出自己"的菜单拍**不许**连累这一句旁白的改写。
+
+        （整句换写会走到"旁白槽位被替换"那条兜底：它从前的邻居判据是
+        "文件里**所有**别的拍都认得出自己" —— 菜单头那一拍的区间只有
+        `menu:` 一行，本来就认不出自己 → 整份补丁被否。）
+        """
+        def edit(beats):
+            for b in beats:
+                if b.text == '收尾':
+                    b.text = '完全不同的一句'
+        fp, res = self._patch(write_rpy, self.FAR_MENU, edit)
+        assert res.ok, res.reasons
+        assert '完全不同的一句' in res.text, res.text
+        diff = self._changed_lines(fp.read_text(encoding='utf-8'), res.text)
+        assert len(diff) == 1, [(i, res.text.splitlines()[i]) for i in diff]
+
+    def test_new_content_check_covers_structure_lines(self):
+        """
+        `lost_new` 的判据必须覆盖**整拍**，不能只比"内容行"（台词/舞台/音频）。
+
+        菜单头那一行既不是台词、也不是舞台/音频 —— 改了标题时它是"有新内容"
+        的**唯一证据**：只比内容行 → 补丁报成功而标题没改
+        （真实项目 `script_pomo.rpy`：`ok=True`、`changed=0`、产物里还是旧标题）。
+        """
+        from storygraph.story.patcher import _has_new_content
+        orig = {'menu:', '"标题行":', '"选项":', 'jump ch01'}
+        assert _has_new_content(['    menu "改过的标题":'], orig)
+        # 没改的结构行不算"新内容"（它在原文里逐字存在，只是分行写法不同）
+        assert not _has_new_content(['    menu:', '        "标题行":'], orig)
+
+    def test_menu_head_single_beat_has_no_placeholder(self):
+        """
+        菜单拍的**单拍**渲染必须与整份产物给出同一个头（不许出
+        `MENU_NO_CAPTION` 占位符）——否则增量补丁的"生成内容都在产物里"
+        永远找不到那一行。
+        """
+        from storygraph.story.beat_model import Beat, KIND_MENU
+        from storygraph.story.beat_render import render_beat_to_rpy
+        no_cap = Beat(seq=1, label='a', kind=KIND_MENU, text='\x00menu')
+        assert [ln for ln in render_beat_to_rpy(no_cap) if ln.strip()] == ['menu:']
+        cap = Beat(seq=1, label='a', kind=KIND_MENU, text='标题')
+        assert 'menu "标题":' in render_beat_to_rpy(cap)
+
+    def test_caption_edit_never_reports_success_without_landing(self, write_rpy):
+        """
+        改了菜单标题：要么落进产物，要么**大声退回全量** ——
+        不许"报成功、标题没改"（旧实现 `ok=True`、`changed=0`）。
+        """
+        def edit(beats):
+            for b in beats:
+                if b.kind == 'menu':
+                    b.text = '改过的标题'
+        _fp, res = self._patch(write_rpy, self.COND_MENU, edit)
+        if res.ok:
+            assert '改过的标题' in res.text, res.text
+        else:
+            assert any('新增内容' in r or '找不到' in r for r in res.reasons), \
+                res.reasons
+
+    def test_trailing_comment_on_a_code_line_survives(self, write_rpy):
+        """`$ time = 1#1500` 的行尾注释是作者的，改别的行不许把它删掉。"""
+        def edit(beats):
+            for b in beats:
+                if b.text == '第一句':
+                    b.text = '第一句改过了'
+        fp, res = self._patch(write_rpy, self.COMMENT_CODE, edit)
+        assert res.ok, res.reasons
+        assert '$ time = 1#1500' in res.text, res.text
+        diff = self._changed_lines(fp.read_text(encoding='utf-8'), res.text)
+        assert len(diff) == 1, [(i, res.text.splitlines()[i]) for i in diff]
+
+    def test_single_quoted_option_is_not_reported_as_lost(self, write_rpy):
+        """`'第一章':`（单引号 + 选项冒号）与生成结果 `"第一章"` 是同一件事。"""
+        def edit(beats):
+            for b in beats:
+                if b.text == '开场':
+                    b.text = '开场改过了'
+        _fp, res = self._patch(write_rpy, self.QUOTED_OPTION, edit)
+        assert res.ok, res.reasons
+        assert "    '第一章':" in res.text, res.text
+
+    def test_a_narration_inside_an_if_body_still_lands(self, write_rpy):
+        """`if` 体的块头不是这一拍的内容 —— 改里面那句旁白照样要能落。"""
+        def edit(beats):
+            for b in beats:
+                if b.text == '输了':
+                    b.text = '输了改过了'
+        fp, res = self._patch(write_rpy, self.IF_BODY, edit)
+        assert res.ok, res.reasons
+        assert '输了改过了' in res.text, res.text
+        assert '    if game.victory:' in res.text, res.text
+        diff = self._changed_lines(fp.read_text(encoding='utf-8'), res.text)
+        assert len(diff) == 1, [(i, res.text.splitlines()[i]) for i in diff]
+
+    def test_deleting_a_branch_body_does_not_move_the_other_line(self, write_rpy):
+        """
+        删掉 `else` 体那一拍之后，`if` 体那句必须**还在自己的分支里**。
+
+        旧实现把它的行号配到了 `else` 那一行（对齐键不含条件，两个分支的旁白
+        长得一模一样，`difflib` 为了让后面的 `menu:` 对齐而配错了）→
+        台词**搬了个分支**还报成功（`TRICKY` 实测）。
+        """
+        from pathlib import Path
+        fp, beats = _beats_of(write_rpy, TRICKY)
+        beats = [b for b in beats if b.text != '好感不够']
+        for b in beats:
+            b.src_first = b.src_last = 0          # 模拟从表里读回来
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.ok, res.reasons
+        assert '好感不够' not in res.text, res.text
+        lines = res.text.splitlines()
+        i_if = next(i for i, ln in enumerate(lines)
+                    if ln.strip() == 'if love >= 5:')
+        i_say = next(i for i, ln in enumerate(lines) if '好感够高' in ln)
+        i_else = next((i for i, ln in enumerate(lines)
+                       if ln.strip() == 'else:'), None)
+        # 台词必须紧跟在 `if` 之后、**在 `else` 之前**
+        assert i_say > i_if, lines
+        assert i_else is None or i_say < i_else, lines
+
+    def test_a_real_condition_change_is_not_silently_dropped(self, write_rpy):
+        """
+        改「条件」列之后，增量补丁**不许**报成功 —— 块头不属于拍的行区间，
+        报成功就等于"条件没改"（静默 no-op）。退全量是正确结果。
+        """
+        def edit(beats):
+            for b in beats:
+                if b.text == '输了':
+                    b.condition = 'other_flag'
+        _fp, res = self._patch(write_rpy, self.IF_BODY, edit)
+        if res.ok:
+            assert 'other_flag' in res.text, \
+                f'报成功却没改条件：{res.text}'
+        else:
+            assert any('条件' in r for r in res.reasons), res.reasons
+
+
 class TestFailSafe:
     """
     **要么全对，要么完全不动**：任何可疑情况都必须退回全量，绝不写半对产物。

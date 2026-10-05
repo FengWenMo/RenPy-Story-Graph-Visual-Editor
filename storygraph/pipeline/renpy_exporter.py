@@ -56,6 +56,25 @@ def _from_suffix(edge) -> str:
         return ''
     return f' from {clause}'
 
+
+def _option_line(opt, condition: str, indent: str) -> str:
+    """
+    菜单选项那一行 —— **字符串转义走章节导出那一份规则**
+    （`beat_render.quote_string`，见 `_quote` 的说明）。
+
+    为什么不能自己包引号（2026-10-05 实测，清单 O4 的证据）：
+    控制流导出从前写的是 `f'"{opt}"'`，于是
+
+        option_text = '他说："你好"'  →  "他说："你好"":     ← 语法错
+        option_text = '第一行\\n第二行' →  "第一行 / 第二行":   ← 跨物理行字符串
+
+    两条都是**产物不可解析**。转义规则（`\\ " \n \r \t`）只有一份，
+    两个 .rpy 生成器必须共用它。
+    """
+    from storygraph.story.beat_render import quote_string
+    cond_str = f" if {condition}" if condition else ""
+    return f'{indent}{quote_string(opt)}{cond_str}:'
+
 def export_to_renpy(graph, filepath, wrapper=None):
     """
     把剧情图写成 Ren'Py 控制流脚本。
@@ -126,9 +145,8 @@ def export_to_renpy(graph, filepath, wrapper=None):
                 if not target_node:
                     continue
                 next_label = control_name(target_node.label_name)
-                opt = edge.option_text
-                cond_str = f" if {edge.condition}" if edge.condition else ""
-                lines.append(f'        "{opt}"{cond_str}:')
+                lines.append(_option_line(edge.option_text, edge.condition,
+                                          ' ' * 8))
                 lines.append(f"            {edge.type} {next_label}")
 
         elif menu_edges:
@@ -139,9 +157,8 @@ def export_to_renpy(graph, filepath, wrapper=None):
                     if not target_node:
                         continue
                     next_label = control_name(target_node.label_name)
-                    opt = edge.option_text
-                    cond_str = f" if {edge.condition}" if edge.condition else ""
-                    lines.append(f'        "{opt}"{cond_str}:')
+                    lines.append(_option_line(edge.option_text, edge.condition,
+                                              ' ' * 8))
                     lines.append(f"            {edge.type} {next_label}")
             else:
                 for idx, edge in enumerate(cond_edges):
@@ -163,9 +180,8 @@ def export_to_renpy(graph, filepath, wrapper=None):
                     if not target_node:
                         continue
                     next_label = control_name(target_node.label_name)
-                    opt = edge.option_text
-                    cond_str = f" if {edge.condition}" if edge.condition else ""
-                    lines.append(f'            "{opt}"{cond_str}:')
+                    lines.append(_option_line(edge.option_text, edge.condition,
+                                              ' ' * 12))
                     lines.append(f"                {edge.type} {next_label}")
 
         else:

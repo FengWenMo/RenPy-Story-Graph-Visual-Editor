@@ -899,13 +899,24 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         emit(_quote(beat.text), '台词', beat.text)
     elif beat.kind == KIND_EXTEND:
         emit(f"extend {_quote(beat.text)}", '台词', beat.text)
+    elif beat.kind == KIND_MENU:
+        # 菜单头。**必须与整份渲染（`render_menu_block`）给出同一个头** ——
+        # 从前这一支接在 `elif beat.text:` **后面**，于是"有标题/有占位符"
+        # 的菜单根本走不到这里（占位符 `MENU_NO_CAPTION` 是个真值字符串）：
+        # 单拍这条路写出字面量 `"\x00menu"`，而整份产物写的是 `menu:`。
+        # 两条路对不上 → 增量补丁的 `_verify_patch` 永远找不到那一行 →
+        # 真实项目 6 个文件退回全量（O1）。
+        from storygraph.story.beat_model import menu_caption_text
+        cap = menu_caption_text(beat.text)
+        if cap:
+            emit(f"menu {_quote(cap)}:", '菜单', cap)
+        elif beat.text:
+            emit('menu:', '菜单', '')
     elif beat.text:
         if speaker:
             emit(f"{speaker} {_quote(beat.text)}", '台词', beat.text)
         else:
             emit(_quote(beat.text), '台词', beat.text)
-    elif beat.kind == KIND_MENU and beat.text:
-        emit(_quote(beat.text), '台词', beat.text)
 
     if not lines:
         return pre
@@ -2202,11 +2213,21 @@ def _stage_lines(beat, name_resolver) -> dict:
     preserve = bool(getattr(beat, '_from_script', False))
 
     # 作者在 Stage 列手写的**原生真迹**：结构化列里那份只是 hydrate 留下的
-    # 影子（供舞台快照/校验用），**不能在这里再渲染一遍** —— 出脚本时
-    # 真迹由 Stage 尾段逐字输出（不做下划线改写，见 `test_roundtrip`）。
+    # 影子（供舞台快照/校验用），**不能拿它自己的编码再渲染一遍** —— 出脚本时
+    # 真迹由 `native_raw` 逐字输出（不做下划线改写，见 `test_roundtrip`）。
+    #
+    # ⚠ **为什么挂在条目上、而不是留给"舞台尾段"统一出**（2026-10-05 修 O2）：
+    # 尾段是"所有 verb 之后"的一整块，而原生指令有**自己的 verb 位**。
+    # `show A / show B with D（原生）/ hide A` 里，若 B 拖到尾巴上就会排到
+    # `hide` 后面 —— 收尾画面不同（该淡出的人还站在台上）。
+    # 上游 `beat_build._absorb_native` 因此把原文挂在条目上（`native_raw`），
+    # 这里在**它自己的位置**逐字出；尾段再出一次会被 `emitted_stage` 去掉。
     native_show = getattr(beat, '_stage_native_show', None) or frozenset()
     native_hide = getattr(beat, '_stage_native_hide', None) or frozenset()
     native_scene = getattr(beat, '_stage_native_scene', None)
+    native_scene_raw = str(getattr(beat, '_stage_native_scene_raw', '') or '')
+    #: `(verb, 影子编码) → 原文`：原生指令的**原文**要让它排在自己的 verb 位上。
+    native_raw = getattr(beat, '_stage_native_raw', None) or {}
 
     def art(name):
         return name if preserve else _emit_image_name(name, name_resolver)
@@ -2218,15 +2239,37 @@ def _stage_lines(beat, name_resolver) -> dict:
         scene_line = f"scene {art(beat.scene)}"
         if beat.scene_at:
             scene_line += f" at {beat.scene_at}"
+    elif native_scene_raw:
+        scene_line = native_scene_raw
+
+    #: 同一个 `native_raw` 可能被拆成多条影子（一格多指令那种），原文只许出一次。
+    seen_native: set = set()
+
+    if native_raw:
+        def _native_line(verb, part):
+            """这一条影子有没有对应的**原文**？有就记下来（只出一次）。"""
+            raw = str(native_raw.get((verb, part)) or '').strip()
+            if raw and raw not in seen_native:
+                seen_native.add(raw)
+                return raw
+            return ''
 
     show_lines = []
     for item in _split_show_items(beat.show):
+        part = show_item_part(item)
+        if native_raw:
+            raw = _native_line('show', part)
+            if raw:
+                show_lines.append(raw)
+                continue
+            if ('show', part) in native_raw:
+                continue                     # 这条影子的原文已经出过了
         if item.get('clause'):
-            if show_item_part(item) in native_show:
+            if part in native_show:
                 continue
             show_lines.append(f"show {item['clause']}")
             continue
-        if show_item_part(item) in native_show:
+        if part in native_show:
             continue
         if item.get('is_expression'):
             # `show expression holo("x") at i11 as q`：表达式本体**逐字**输出
@@ -2248,7 +2291,15 @@ def _stage_lines(beat, name_resolver) -> dict:
 
     hide_lines = []
     for item in _split_hide_items(beat.hide):
-        if hide_item_part(item) in native_hide:
+        part = hide_item_part(item)
+        if native_raw:
+            raw = _native_line('hide', part)
+            if raw:
+                hide_lines.append(raw)
+                continue
+            if ('hide', part) in native_raw:
+                continue                     # 这条影子的原文已经出过了
+        if part in native_hide:
             continue
         line = f"hide {art(item['image'])}"
         if item.get('with'):
@@ -2518,6 +2569,18 @@ def _quote(text: str) -> str:
                .replace('"', '\\"'))
     return f'"{escaped}"'
 
+
+
+#: 公共别名：**跨包使用就是契约**（`pipeline.renpy_exporter` 的"控制流导出"
+#: 也要把字符串写成 Ren'Py 字面量）。私有名跨包 import 是被禁止的
+#: （`tests/test_package_layering.py`），所以这里声明一份公开名 ——
+#: 与 `parsing.renpy_parser.image_path_from_expr` 同一套做法。
+#:
+#: 为什么必须共用（2026-10-05，O4 取证）：控制流导出自己手写
+#: `f'"{opt}"'`，于是选项文案里带 `"` 时写出 `"他说："你好"":`（语法错）、
+#: 带换行时写出**跨物理行**的字符串（产物不可解析）。转义规则只有一份，
+#: 两个生成器都得用这一份。
+quote_string = _quote
 
 
 def collect_used_transforms(beats: list) -> list:

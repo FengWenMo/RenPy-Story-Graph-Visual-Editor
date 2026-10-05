@@ -208,3 +208,51 @@ class TestExport:
         g.add_node('a', 0, 0)
         export_to_renpy(g, tmp_path / 'ok.rpy')
         assert notify_calls.of('info')
+
+
+class TestStringRulesAreShared:
+    """
+    **字符串转义只有一份规则**：控制流导出与章节导出必须写出同一行。
+
+    病根（2026-10-05，导出缺陷清单 O4 取证）：控制流导出自己手写
+    `f'"{opt}"'` —— 选项文案带 `"` 时写出 `"他说："你好"":`（**语法错**）、
+    带换行时写出**跨物理行**的字符串（产物不可解析）。章节那条路一直是对的
+    （`beat_render._quote` 转义 `\\ " \\n \\r \\t`）。
+
+    "两套 .rpy 生成器并存"本身是结构风险（清单 O4）；这一组把它收敛成
+    **可执行的契约**：同一段文本，两条路必须给出同一个字面量，而且产物
+    必须能被自己的解析器吃回去。
+    """
+
+    ADVERSARIAL = ['他说："你好"', '第一行\n第二行', 'C:\\new', 'a\tb',
+                   '带 # 号', '全　角', "单引号 ' 在里面", '正常的一句']
+
+    @staticmethod
+    def _menu_graph(opt):
+        g = Graph()
+        a = g.add_node('start', 0, 0)
+        b = g.add_node('end', 0, 0)
+        c = g.add_node('other', 0, 0)
+        g.add_edge(a, b, option_text=opt)
+        g.add_edge(a, c, option_text='No')
+        return g
+
+    def test_it_uses_the_same_quoting_rule_as_the_chapter_renderer(self, export):
+        from storygraph.story.beat_render import quote_string
+        for opt in self.ADVERSARIAL:
+            text = export(self._menu_graph(opt))
+            assert f'        {quote_string(opt)}:' in text, (opt, text)
+
+    def test_adversarial_option_text_never_breaks_the_script(self, tmp_path):
+        import re
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        for i, opt in enumerate(self.ADVERSARIAL):
+            out = tmp_path / f'opt{i}.rpy'
+            export_to_renpy(self._menu_graph(opt), out)
+            pr, _ = IncrementalRenPyAnalyzer().analyze(files=[out], graph=None)
+            errs = list(getattr(pr, 'errors', None) or [])
+            assert not errs, (opt, errs)
+            # 每行的引号成对（跨物理行字符串会让行内引号落单）
+            for ln in out.read_text(encoding='utf-8').splitlines():
+                body = re.sub(r'\\.', '', ln)
+                assert body.count('"') % 2 == 0, (opt, ln)

@@ -355,6 +355,7 @@ class _BeatBuilder:
             StatementKind.CALL: self._emit_jump_call,
             StatementKind.RETURN: self._emit_return,
         }.get(kind)
+        _n_before = len(self.beats)
         if handler is not None:
             absorbed, struct_done = handler(stmt, payload, _ln)
 
@@ -1027,16 +1028,24 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     #: 原生真迹 → 它在结构化列里留下的影子（用于"只渲染真迹"）
     native_show, native_hide = set(), set()
     native_scene = None
+    native_scene_raw = ''
+    #: `(verb, 影子编码) → 原文`（渲染时按条目查回原文，见 `beat_render._stage_lines`）
+    native_raw: dict = {}
 
     for op, (_intent, code, status) in zip(
             parsed.ops, compile_stage(beat.stage, symbols, audit)):
         if op.native:
             n_show, n_hide = len(show_items), len(hide_items)
             _absorb_native(op, show_items, hide_items, order)
-            native_show.update(show_item_part(it)
-                               for it in show_items[n_show:])
-            native_hide.update(hide_item_part(it)
-                               for it in hide_items[n_hide:])
+            for it in show_items[n_show:]:
+                part = show_item_part(it)
+                native_show.add(part)
+                # 影子 → 原文：渲染时按**这一条影子的编码**查回来
+                native_raw[('show', part)] = op.raw
+            for it in hide_items[n_hide:]:
+                part = hide_item_part(it)
+                native_hide.add(part)
+                native_raw[('hide', part)] = op.raw
             head = op.raw.split()[0] if op.raw.split() else ''
             if head == 'scene':
                 spec, _at, _w = _parse_native_stage_tail(
@@ -1046,6 +1055,9 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
                 with_ = _w or with_
                 if spec:
                     native_scene = (spec, _at or '')
+                    # 原生 `scene …` 的原文（同 `native_raw`：它得排在
+                    # **自己的 verb 位**上，不能整块拖到舞台尾段）
+                    native_scene_raw = op.raw
             elif head == 'with' and not with_:
                 parts = op.raw.split()
                 with_ = parts[1] if len(parts) > 1 else ''
@@ -1125,7 +1137,9 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     # 放在最后而不是逐条赋值，是为了让"没原生指令"时也能把上一轮残留清掉。
     for attr, val in (('_stage_native_show', frozenset(native_show)),
                       ('_stage_native_hide', frozenset(native_hide)),
-                      ('_stage_native_scene', native_scene)):
+                      ('_stage_native_scene', native_scene),
+                      ('_stage_native_scene_raw', native_scene_raw),
+                      ('_stage_native_raw', native_raw)):
         try:
             setattr(beat, attr, val)
         except Exception:                    # noqa: BLE001
@@ -1141,6 +1155,20 @@ def _absorb_native(op, show_items, hide_items, order):
     和"从语句流折叠"出来的写法保持同一种编码——否则同一张表里会出现
     两种 show 形态，后续比较、去重都要写两套。带 behind/as/onlayer/
     zorder/expression 的复杂子句原样保留。
+
+    ⚠ **影子条目带一份 `native_raw`**（作者那一行的原文，2026-10-05 修 O2）：
+    影子只是给快照/校验看的，出脚本时**必须用原文**（不做下划线改写）；
+    而原文究竟排在**哪个位置**，只有这张条目自己的位置知道 —— 从前渲染时
+    把它整块拖到"舞台尾段"（所有 verb 之后），于是
+
+        show ling happy at left
+        show ling angry at right with dissolve   ← 影子在结构化列里
+        hide ling with fade                      ← 逐字出，排在它的 verb 位
+
+    过表之后 `hide` 会插到第二条 `show` 前面（收尾画面不同）。
+    原文由 `_hydrate_stage` 记进 `beat._stage_native_raw`（**按条目编码查**，
+    见 `beat_render._stage_lines`）—— 不能挂在条目 dict 上：`beat.show` 最后
+    会被 `_join_show_items` 拼成**字符串**，dict 上的额外键活不过那一步。
     """
     head = op.raw.split()[0] if op.raw.split() else ''
     if head == 'show':
