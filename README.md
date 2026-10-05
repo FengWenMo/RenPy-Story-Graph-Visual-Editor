@@ -1882,6 +1882,53 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
     （当标题行用），模型里菜单标题没有 `who` 这一位，只保住可见文案（第二段）、
     **角色名会丢** —— 真实项目同样 0 处。
 
+86. **菜单行与行尾注释：配对键必须"认得出自己"**（2026-10-05，清单 O6）
+
+    清单 O6 记的是"裸 `menu:  # 备注` 那一章每次导出都退回全量"，报出来的
+    理由是 `1 句台词在补丁结果里找不到（例：'"\x00menu"'）`，并建议在自检里
+    跳过 `MENU_NO_CAPTION`。**按那个建议改会掩盖真病**：把产物摊开就能看到
+    多出一条**没有冒号的重复选项行**
+
+        menu:  # 备注：菜单
+            "一"  # 备注：左选项      ← 多出来的（新增通道插的）
+            "一":  # 备注：左选项      ← 原来那一行（"台词不许删"留着）
+
+    而占位符那条判据正是**抓住**它的网：多出来的行落在 `menu:` 后面 →
+    重新解析时变成了菜单**标题** → 占位符对不上 → 整份补丁被否。
+    跳过判据 = 把网撤掉，补丁反而会"成功"地写下重复行。
+
+    真病根是**配对键**（`patcher._line_key`）：源里写 `"选项":` —— 冒号是
+    `menu:` 块的**结构语法**，不是内容 —— 而单拍渲染（`render_beat_to_rpy`
+    的选项那一支）只写 `"选项"`。两个形状不同键 → 生成行走"新增内容"通道
+    被插进去。同一个病根还有第二张脸：**小幅改选项文案**（`"一"` → `"一。"`，
+    相似度过得了对位守卫）时配对失败 → 既不落也不报 → `ok=True`、
+    `changed=0`、**文案没变**（静默 no-op）。
+
+    修法（两面都要，缺一不可）：
+
+      · **A 面 · 键对得上**：单拍渲染的选项行**带上冒号**（与
+        `render_menu_block` 的 `label += ':'` 一致）；`_line_key` 用
+        `_OPTION_ROW_RE` 把 `"选项":`（**可带行尾注释**）认成"没有说话人的
+        台词行"，与 `"选项"` 同键。`_rewrite` 里再补一条：两个都是选项行时
+        **只比引号里的正文** —— 正文没变就保留原文那一行，别把作者的
+        `'第一章':` 顺手改成双引号（实测：改一句旁白动了 8 行）。
+      · **B 面 · 网留着**：`_verify_patch` 的"每一句台词都要在产物里"那条
+        **原样不动**（占位符仍然要求对上）—— 它就是抓"多出来的行变成标题"的网。
+
+    同一轮还连带抓到一条（`hell_edit_rounds` 轴 B 第 7 轮）：**带行尾注释的
+    台词行认不出自己是台词** —— 渲染器把注释贴回同一行（`e "台词"  # 备注`），
+    而 `_SAY_RE` 要求整行恰好是 `说话人 "正文"`，于是改正文时同样被插成两行。
+    判据：**身份一律在去掉行尾注释之后算**（`patcher._content_of`，复用同包的
+    `atl._strip_comment`，引号感知）；认不出形状的行仍然逐字比（保持保守）。
+
+    判据汇总：`tools/probe_placeholder_leak.py` 中招形状 **1 → 0**；
+    `hell_edit_rounds.py` 轴 B **4 处红 → 0**；
+    `tests/test_incremental_export.py::TestMenuRowsAndTheirNotes`（4 条，3 条
+    在 `008b1fa` 上变红）＋ 更新后的
+    `tests/test_script_table.py::TestRender::test_menu_option_renders_as_string`
+    （选项行 = `"选项A":`）；`render_hash.py` **未变**（`d9b0f2de26b5`）；
+    全量 pytest **2462 → 2466**。
+
 ## 常见改动落点
 
 | 想做什么 | 改哪里 |
@@ -1897,6 +1944,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改**条件减法**（里层 `if` 该不该再写外层条件） | `story/beat_render.strip_condition_context` + `_split_conjuncts` / `_bare_condition` / `_condition_atoms`（见不变量 82d） |
 | 改**嵌套/注释 harness 的判据** | `tools/hell_nest_inline.py`（N1 只比"菜单口径"，`§有意为之` 那份清单是口径真源） |
 | 改**菜单块（`menu:`）怎么生成** | `story/beat_render.py` 的 `split_beat_units` / `_take_menu_run` / `render_menu_block`（见不变量 60）；拍序归位在 `story/beat_build.order_menu_bodies` |
+| 改**菜单行 / 选项行的配对身份**（`"选项":`、行尾注释） | `story/patcher._line_key` + `_OPTION_ROW_RE` + `_content_of`；渲染侧 `story/beat_render.render_beat_to_rpy` 的选项那一支（**冒号必须带**，见不变量 86） |
 | 改**「代码」列怎么写/怎么读**（`python:` 块、多行语句、`$` 前缀） | `story/beat_model.py` 的 `_split_code_cell` / `_relative_indents` / `compose_code` / `mark_code_blocks` + `story/beat_render.render_code_block` / `_render_marked_code_block` / `_python_block_indent`（见不变量 64/66） |
 | 改**隐藏列**（`StageOrder` / `OpOrder` / `CodeBlocks`） | `BEAT_FIELDS` 尾部 + `HIDDEN_BEAT_COLUMNS` + `Beat.to_row/from_row`（见不变量 66） |
 | 改**文件级保真块**（顶层 `define` / `screen` / `init python` / … 怎么带走） | `parsing/renpy_parser.py` 的 `_top_level_region` / `_region_chunk` / `TopLevelRegionNode` + `story/beat_model.py` 的 `FILE_BLOCK_SHEET` / `file_blocks_to_rows` / `file_blocks_from_rows` + `story/excel_export._write_file_blocks_sheet` + `story/excel_import._read_file_blocks` + `story/beat_build.attach_file_block_text`（见"三条已知边界"③） |

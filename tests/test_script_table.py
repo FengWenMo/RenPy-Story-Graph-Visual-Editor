@@ -250,8 +250,16 @@ class TestRender:
         assert render_beat_to_rpy(Beat()) == []
 
     def test_menu_option_renders_as_string(self):
+        """
+        选项行 = `"文案":` —— **冒号是选项行的结构语法**，必须带上。
+
+        2026-10-05 改（清单 O6）：从前这里写的是不带冒号的 `"选项"`，
+        与整份渲染（`render_menu_block` 的 `label += ':'`）不一致 ——
+        增量对位是逐行配对，两个形状配不上 → 生成行被当"新增内容"插进去、
+        旧行又留着 → **重复的选项行**；小幅改选项文案时还会既不落也不报。
+        """
         beat = Beat(kind=KIND_MENU_OPTION, text='选项A')
-        assert render_beat_to_rpy(beat) == ['"选项A"']
+        assert render_beat_to_rpy(beat) == ['"选项A":']
 
     def test_extend_uses_extend(self):
         beat = Beat(kind=KIND_EXTEND, text='更多')

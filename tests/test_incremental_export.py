@@ -535,6 +535,106 @@ class TestO1AlignmentFixes:
             assert any('条件' in r for r in res.reasons), res.reasons
 
 
+class TestMenuRowsAndTheirNotes:
+    """
+    菜单行（`menu:` 头 / `"选项":` 行）与**行尾注释**（2026-10-05，清单 O6）。
+
+    清单 O6 记的现象是"裸 `menu:` 带行尾注释时该章每次导出都退回全量"，
+    报出来的理由是"1 句台词在补丁结果里找不到（例：`'\\x00menu'`）"。
+    按清单建议只改那句判据（跳过占位符）**会掩盖真正的病**：探针一摊开就看到
+    产物里多出一条**没有冒号的重复选项行**（`"一"  # 备注` 与
+    `"一":  # 备注` 并存），而正确产物应该只有后一条。
+
+    病根是**配对键**：源里写 `"选项":`（冒号是 `menu:` 块的结构语法），
+    单拍渲染从前只写 `"选项"` —— 两个形状不同键 → 生成行被当"新增内容"
+    插进去、旧行又因为"台词不许删"留着 → 重复行；同一处还会导致
+    **小幅改选项文案时既不落也不报**（静默 no-op）。
+
+    另一条（同一族，`hell_edit_rounds` 轴 B 第 7 轮抓到）：**带行尾注释的
+    台词行认不出自己是台词**（`_SAY_RE` 要求整行就是 `说话人 "正文"`），
+    改台词正文时同样会被插成两行。注释不是内容，身份要在去掉注释后算。
+    """
+
+    #: 裸 `menu:` 头 + 选项行**都带**行尾注释（O6 的中招形状）
+    NOTED_MENU = ('label t:\n'
+                  '    e "先说话"  # 备注：开场\n'
+                  '    menu:  # 备注：菜单\n'
+                  '        "一":  # 备注：左选项\n'
+                  '            e "选一"  # 备注：左台词\n'
+                  '    return\n')
+
+    #: 单引号选项行（引号写法属于作者，增量不许顺手统一成双引号）
+    QUOTED = ("label t:\n"
+              "    e \"开场\"\n"
+              "    menu:\n"
+              "        '第一章':\n"
+              "            jump t\n"
+              "    return\n")
+
+    def _patch(self, write_rpy, src, edit):
+        from pathlib import Path
+        fp, beats = _beats_of(write_rpy, src)
+        edit(beats)
+        return Path(fp), patch_export(beats, fp, render_beats_to_rpy(beats))
+
+    def test_a_menu_head_note_does_not_duplicate_the_option_row(self, write_rpy):
+        """O6 的形状：改别处的台词，产物**不许**多出一条选项行。"""
+        def edit(beats):
+            for b in beats:
+                if b.text == '先说话':
+                    b.text = '改过的台词'
+        fp, res = self._patch(write_rpy, self.NOTED_MENU, edit)
+        assert res.ok, res.reasons
+        assert '改过的台词' in res.text, res.text
+        lines = [ln.strip() for ln in res.text.splitlines() if ln.strip()]
+        rows = [ln for ln in lines if ln.startswith('"一"')]
+        assert len(rows) == 1, lines          # 只许有一条选项行
+        assert rows[0] == '"一":  # 备注：左选项', rows
+        assert '\x00' not in res.text, res.text
+        assert res.text.count('备注：左选项') == 1, res.text
+
+    def test_a_small_option_edit_lands(self, write_rpy):
+        """
+        小幅改选项文案（相似度过得了对位守卫）必须**真的落进产物** ——
+        从前是 `ok=True`、`changed=0`、文案没变（静默 no-op）。
+        """
+        def edit(beats):
+            for b in beats:
+                if b.kind in ('menu_option', 'MENU_OPTION'):
+                    b.text = '一。'
+        _fp, res = self._patch(write_rpy, self.NOTED_MENU, edit)
+        assert res.ok, res.reasons
+        assert '"一。":' in res.text, res.text
+        assert '"一":' not in res.text, res.text
+
+    def test_option_rows_keep_the_authors_quotes(self, write_rpy):
+        """改别处的台词，**不许**把作者的 `'第一章':` 顺手改成双引号。"""
+        from pathlib import Path
+        def edit(beats):
+            for b in beats:
+                if b.text == '开场':
+                    b.text = '开场改过了'
+        fp, res = self._patch(write_rpy, self.QUOTED, edit)
+        assert res.ok, res.reasons
+        assert "    '第一章':" in res.text, res.text
+        before = Path(fp).read_text(encoding='utf-8').splitlines()
+        after = res.text.splitlines()
+        diff = [i for i, (x, y) in enumerate(zip(before, after)) if x != y]
+        assert len(diff) == 1, [(i, after[i]) for i in diff]
+
+    def test_a_say_line_with_a_note_is_not_duplicated(self, write_rpy):
+        """带行尾注释的台词行：改正文要**替换**那一行，不是插一行新的。"""
+        def edit(beats):
+            for b in beats:
+                if b.text == '选一':
+                    b.text = '选一改过了'
+        _fp, res = self._patch(write_rpy, self.NOTED_MENU, edit)
+        assert res.ok, res.reasons
+        assert '"选一改过了"  # 备注：左台词' in res.text, res.text
+        assert res.text.count('备注：左台词') == 1, res.text
+        assert res.text.count('选一') == 1, res.text
+
+
 class TestFailSafe:
     """
     **要么全对，要么完全不动**：任何可疑情况都必须退回全量，绝不写半对产物。

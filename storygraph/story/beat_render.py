@@ -896,7 +896,16 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     if beat.kind == KIND_MENU_OPTION:
         # 走 `_quote` 而不是手包一对引号：选项文字里可能有 `"` 或控制字符，
         # 裸包会写出语法错的菜单（与上面 `adv_backslash` 同一个坑）。
-        emit(_quote(beat.text), '台词', beat.text)
+        #
+        # **冒号也要带上**（2026-10-05 修 O6 追到的根）：整份渲染
+        # （`render_menu_block`）写的是 `"选项":`，单拍这条路从前只写
+        # `"选项"` —— 增量对位是**逐行配对**，两个形状配不上，于是
+        #   · 选项行带行尾注释时：生成行被当"新增内容"插进去、旧行又留着
+        #     → **重复行**（`"一"  # 备注` + `"一":  # 备注`）；
+        #   · 小幅改选项文案时：既不落也不报 → **静默 no-op**。
+        # 冒号本来就是 `menu:` 块的结构语法（`render_menu_block` 也是这么写的），
+        # 单拍渲染没理由省掉它。
+        emit(_quote(beat.text) + ':', '菜单', beat.text)
     elif beat.kind == KIND_EXTEND:
         emit(f"extend {_quote(beat.text)}", '台词', beat.text)
     elif beat.kind == KIND_MENU:

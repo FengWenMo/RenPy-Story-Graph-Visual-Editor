@@ -472,6 +472,39 @@ def _parse_stage_body(body: str) -> tuple:
     return rest, '', ''
 
 
+#: 菜单选项行：`"选项":` / `'选项':` —— **后面可以跟行尾注释**。
+#:
+#: 为什么单开一条（2026-10-05 修 O6 追到的根）：单拍渲染（`render_beat_to_rpy`
+#: 的选项那一支）写出来的是**去掉冒号**的 `"选项"`，而源文件里是 `"选项":`
+#: （冒号是 `menu:` 块的结构语法）。配对/改写时这两者必须是"同一件事"，
+#: 否则 —— 实测两条都很坏 —— 选项行带行尾注释时生成行会被当"新增内容"
+#: **插进去**、旧行又留着 → **重复行**；小幅改选项文案时既不落也不报
+#: → **静默 no-op**。
+#:
+#: ⚠ 行尾注释也一起吃进来：选项行带注释时（`"去左边":  # 备注`）行**不是**
+#: 以冒号结尾的，只看"结尾是不是冒号"的写法认不出来（第一版就是这么漏的）。
+_OPTION_ROW_RE = re.compile(
+    r'^(?P<lit>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')\s*:\s*(?:#.*)?$')
+
+
+def _content_of(line: str) -> str:
+    """
+    这一行的**内容部分** —— 去掉行尾注释（`#` 在引号里不算注释）。
+
+    为什么要去掉再算身份（2026-10-05，修 O6 时**连带**抓到的真缺陷）：
+    渲染器会把行尾注释贴回同一行（`e "台词"  # 备注`），而 `_SAY_RE` 要求
+    整行恰好是 `说话人 "正文"` —— 带注释的台词行**永远认不出自己是台词**：
+    配对失败 → 生成行走"新增内容"通道被**插进去**、旧行又因为"台词不许删"
+    留着 → **同一句台词出现两遍**（`hell_edit_rounds` 轴 B 第 7 轮实测：
+    `e "第1轮台词"  # 备注：开场` 旁边多出一条同样的行）。
+
+    实现在**同一包**的 `atl._strip_comment`（引号感知）—— 不另写一份。
+    认不出形状的行仍然逐字比（含注释），保持保守。
+    """
+    from storygraph.story.atl import _strip_comment
+    return _strip_comment(line or '')
+
+
 def _line_key(body: str) -> tuple:
     """
     配对用的身份键（见 `_replace_matched` 的说明）。
@@ -488,18 +521,32 @@ def _line_key(body: str) -> tuple:
     `play music …` 配 `play music …`。其余（注释 / `if` / 菜单 / 未识别）
     一律 `('other', 原文)`：只和自己逐字相同的行配对 → **不会被替换**，
     也就不会被改坏。认不出的一律保守（配对失败 = 原文一个字不动）。
+
+    ⚠ 身份一律在**去掉行尾注释**之后算（见 `_content_of`）：注释不是内容，
+    而渲染器会把注释贴回同一行 —— 不去掉的话带注释的台词行认不出自己是台词。
     """
     s = (body or '').strip()
-    m = _SAY_RE.match(s)
+    bare = _content_of(s)
+    m = _SAY_RE.match(bare)
+    if not m:
+        # **菜单选项行**（`"选项":`，可带行尾注释）—— 见 `_OPTION_ROW_RE`：
+        # 摘掉冒号之后它就是一条**没有说话人的台词行**，与生成器写的
+        # `"选项"` 同键。只认"裸引号 + 冒号"这一种形状，绝不把
+        # `menu "标题":`（说话人位上是 `menu`）误判成台词。
+        mo = _OPTION_ROW_RE.match(s)
+        if mo is not None:
+            m = _SAY_RE.match(mo.group('lit'))
+            if m is not None and (m.group('who') or '').strip():
+                m = None
     if m:
         return ('say', (m.group('who') or '').strip())
-    if s.startswith('$'):
-        return ('code', _code_target(s))
-    m = _VERB_RE.match(s)
+    if bare.startswith('$'):
+        return ('code', _code_target(bare))
+    m = _VERB_RE.match(bare)
     if m:
         verb, rest = m.group('verb'), m.group('rest')
         if verb in _STAGE_VERBS:
-            spec = _parse_stage_body(s)[0]
+            spec = _parse_stage_body(bare)[0]
             return (verb, spec.split()[0] if spec.split() else '')
         chan = _CHAN_RE.match(rest.strip())
         return (verb, chan.group('chan') if chan else rest.strip())
@@ -693,13 +740,14 @@ def _head_of(body: str) -> tuple:
     → 一律不许增、不许删（老实报 unlanded，让调用方退回全量）。
     """
     s = _norm(body)
-    m = _SAY_RE.match(s)
+    bare = _content_of(s)                 # 注释不是内容（见 `_content_of`）
+    m = _SAY_RE.match(bare)
     if m:
         # 台词按**正文**比：换说话人＝同一句话，别把旧行留着又插一条新的
         return ('say', m.group('body'))
-    if s.startswith('$'):
-        return ('code', _code_target(s))
-    m = _VERB_RE.match(s)
+    if bare.startswith('$'):
+        return ('code', _code_target(bare))
+    m = _VERB_RE.match(bare)
     if m:
         rest = m.group('rest').split()
         return (m.group('verb'), rest[0] if rest else '')
@@ -866,7 +914,17 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     def _rewrite(old_line, pick):
         """原文那一行 → 生成器那一行（或保留原文）。返回 (行, 是否改了)。"""
         body = _norm(old_line)
-        if body == _norm(pick):
+        pick_body = _norm(pick)
+        if body == pick_body:
+            return old_line, False
+        # **菜单选项行**：冒号与行尾注释都不是内容 —— 只比引号里的正文。
+        # （正文没变 → 保留原文那一行：作者的引号写法 / 注释 / 空格都不动。
+        #   不这么做的话，一次无关编辑会把整章选项的单引号改成双引号：
+        #   真实 `script.rpy` 实测 —— 改一句旁白动了 8 行。）
+        mo_old = _OPTION_ROW_RE.match(body)
+        mo_new = _OPTION_ROW_RE.match(pick_body)
+        if mo_old is not None and mo_new is not None and _unescaped(
+                mo_old.group('lit')) == _unescaped(mo_new.group('lit')):
             return old_line, False
         # **`elif` / `else` 头不许被"展平"改写**（2026-10-05，增量 O1）。
         #
@@ -881,14 +939,15 @@ def _replace_matched(old_lines: list, gen_bodies: list,
         if _norm(old_line).startswith(('elif ', 'else:')) \
                 and _norm(pick).startswith('if '):
             return old_line, False
-        if _collapse(body) == _collapse(pick) or _squash(body) == _squash(pick):
+        if _collapse(body) == _collapse(pick_body) \
+                or _squash(body) == _squash(pick_body):
             # **只差空白**（原文 `jc  "…"` 两个空格、生成器一个；或者
             # 原文 `xqlz"pass."` 没空格、生成器写 `xqlz "pass."`）：
             # 保留原文那一行 —— 用户要的是"改一处只动一行"，不是"顺手把我的
             # 排版也改了"。Ren'Py 两种写法等价，改它没有任何好处，
             # 却会让每次导出的 diff 多出一堆"看起来没改"的行。
             return old_line, False
-        if _unescaped(body) == _unescaped(pick):
+        if _unescaped(body) == _unescaped(pick_body):
             # **只差引号 / 转义**（原文 `'file "c:\\a.py", line 24'`、
             # 生成器 `"file \"c:\\\\a.py\", line 24"`）：Ren'Py 读出来是同一句，
             # 同样保留原文那一行 —— 这也是"没改就不许动文件"的一部分。

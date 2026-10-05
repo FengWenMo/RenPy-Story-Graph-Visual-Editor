@@ -370,10 +370,12 @@ def run_edit_rounds(verbose: bool, tmp: Path, rounds: int = 10) -> list:
         prev = body
         act = ['text', 'show', 'caption', 'option', 'append', 'drop', 'undo'][r % 7]
         expect_structural = act in ('append', 'drop', 'undo')
+        expected = False          # 这一轮**真的改了东西**吗（见 E10）
         try:
             if act == 'text':
                 t = next(b for b in s.beats if (b.text or '').strip())
                 t.text = f'第{r}轮台词'
+                expected = True
             elif act == 'show':
                 t = next((b for b in s.beats if (b.show or '').strip()), None)
                 if t is None:
@@ -381,21 +383,31 @@ def run_edit_rounds(verbose: bool, tmp: Path, rounds: int = 10) -> list:
                     t.show = 'ling angry at center'
                 else:
                     t.show = 'ling angry at center'
+                expected = True
             elif act == 'caption':
                 # 菜单拍：它的 `text` 就是标题
+                menus = [b for b in s.beats if getattr(b, 'kind', '') == 'menu']
+                if verbose:
+                    print(f'   [caption 轮] 菜单拍 '
+                          f'{[(i, b.text, getattr(b, "nest_path", None)) for i, b in enumerate(menus)]}')
                 m = next((b for b in s.beats
                           if getattr(b, 'kind', '') == 'menu'), None)
                 if m is not None and not (m.text or '').startswith('\x00'):
                     m.text = f'第{r}轮标题'
+                    expected = True
+                elif verbose:
+                    print(f'   [caption 轮] 没改（text={m.text!r} 是占位符）')
             elif act == 'option':
                 o = next((b for b in s.beats
                           if getattr(b, 'kind', '') == 'menu_option'), None)
                 if o is not None:
                     o.text = f'第{r}轮选项'
+                    expected = True
             elif act == 'append':
                 idx = s.insert_beat(len(s.beats) - 1, after=True)['index']
                 s.beats[idx].text = f'第{r}轮插入'
                 inserted_idx = idx
+                expected = True
             elif act == 'drop':
                 if inserted_idx is not None:
                     s.delete_beat(inserted_idx)
@@ -416,6 +428,41 @@ def run_edit_rounds(verbose: bool, tmp: Path, rounds: int = 10) -> list:
                         f'导出被拒：{res.get("blocking") or res.get("error")}'))
             break
         body = f.read_text(encoding='utf-8')
+
+        # E10 **改动必须落地**（"报成功却什么都没改"是**反面的静默**）
+        #
+        # 用户 2026-10-05 修 O1/O2/O4 时顺线抓到两条"导出报成功、文件一个字没变"。
+        # 这类缺陷所有"产物对不对"的判据都抓不到 —— 产物**完全正确**，
+        # 只是**没改**。所以必须单独问一句：我刚才那一改，进文件了吗？
+        #
+        # ⚠ 只在**这一轮真的改了东西**时问（`expected`）：
+        #   第一版无条件断言 —— 而 `caption` 那一轮我的守卫因为菜单是
+        #   `MENU_NO_CAPTION` 占位符**根本没改**，于是"第2轮标题没出现"
+        #   被报成缺陷。判据不能要求自己没做的事。
+        want = {'text': f'第{r}轮台词', 'show': 'ling angry at center',
+                'caption': f'第{r}轮标题', 'option': f'第{r}轮选项',
+                'append': f'第{r}轮插入'}.get(act)
+        if expected and want and want not in body:
+            bad.append((f'B·第{r}轮', 'E10没落地',
+                        f'动作 {act} 报成功（{res.get("note")!r}），'
+                        f'但 {want!r} 没出现在文件里 —— 改动被吞了'))
+
+        # E11 **占位符不许污染"生成文本"**
+        #
+        # `MENU_NO_CAPTION`（`\x00menu`）是内部标记。它在**产物**里被 E9 挡着，
+        # 但它还会出现在**导出报告**里 —— 一旦生成文本里带着它，增量补丁必然
+        # "在原文里找不到这一行" → **退回全量**。这正是 O1
+        #（40 个真实文件里 6 个走不成增量）的一个具体成因：
+        # 真实项目 `mini_game_puzzle.rpy` 的 note 就是
+        # `1 条生成内容在补丁结果里找不到（例：'"\x00menu"'）`。
+        # ⚠ 判据要用**字面量** `x00menu`：note 里那句是 `'"\x00menu"'`
+        #   —— 六个可见字符（补丁用 repr 把 NUL 转义过了），不是真的 NUL 字节。
+        #   第一版查 `'\x00' in note` 因此一直不响（**假阴性**，又一条）。
+        note_text = str(res.get('note') or '')
+        if 'x00menu' in note_text or '\x00' in note_text:
+            bad.append((f'B·第{r}轮', 'E11占位符污染',
+                        f'占位符漏进了"生成文本"，增量因此必然失败：'
+                        f'{note_text[:80]!r}'))
 
         # E9 占位符不许漏进产物
         leaked = _placeholder_leak(body)
