@@ -36,6 +36,7 @@ from storygraph.core.vocabulary import ASSET_TYPE_ATTR as _TYPE_ATTR
 from storygraph.story.beat_model import (
     BEAT_HEADERS,
     KIND_MENU_OPTION,
+    is_literal_speaker,
     split_hide_items,
     split_show_items,
 )
@@ -231,7 +232,12 @@ def validate_level1(beats, registry=None,
         # 说话人未定义：角色表**明显不完整**时只给警告。
         # 否则"角色解析漏了一批（如 DynamicCharacter）"会翻成上千条
         # 错误把真正的问题埋掉——真实项目一次报了 1000+ 条就是这个原因。
-        if b.speaker and registry is not None \
+        #
+        # ⚠ **字符串字面量说话人**（`"系统" "提示"`）不查：它不是角色变量，
+        # 天然不在角色表里（2026-10-05 修 —— 否则每处这种写法都报一条
+        # "说话人不在资源表角色里"的假警）。
+        if b.speaker and not is_literal_speaker(b.speaker) \
+                and registry is not None \
                 and not resolve_references(b.speaker, registry, index):
             managed = _category_managed(registry, 'character')
             issues.append(Issue(

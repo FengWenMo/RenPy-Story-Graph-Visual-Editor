@@ -15,6 +15,7 @@ from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
 from storygraph.story.beat_build import hydrate_from_dsl
 from storygraph.story.beat_model import (
     assign_identity,
+    is_literal_speaker,
     _split_hide_items,
     _split_show_items,
 )
@@ -142,7 +143,9 @@ def find_unregistered_assets(beats: list, registry) -> list:
             found.append((asset_type, name))
 
     for beat in beats:
-        if beat.speaker:
+        # 字符串字面量说话人（`"系统" "提示"`）不是角色变量 —— 别把它当
+        # "未登记的角色"报出去、更别建议登记（2026-10-05 修）。
+        if beat.speaker and not is_literal_speaker(beat.speaker):
             check('character', beat.speaker)
         if beat.scene:
             check('image', _normalize_image_name(beat.scene))

@@ -532,6 +532,23 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
         touched = _touched_lines(original, now)
         stat['max_touched'] = max(stat['max_touched'], touched)
 
+        # E9/E6 **要在降级分支之前判**：退回全量的产物同样不许带占位符、
+        # 同样得能解析。（第一版把这两条放在 `continue` 后面，于是"降级"
+        # 那 6 个文件整个逃过了检查 —— 而补丁消息里恰好有一条 `"\\x00menu"`
+        # 的线索，差点被漏掉。）
+        leaked = _placeholder_leak(now)
+        if leaked:
+            bad.append((src.name, 'E9占位符',
+                        f'产物里有 MENU_NO_CAPTION 占位符：{leaked[:1]}'))
+        if _syntax_broken(now):
+            bad.append((src.name, 'E6自洽', f'有跨行字符串：'
+                                            f'{_syntax_broken(now)[:1]}'))
+        if not _unparseable(original, tmp / f'po_{src.stem}.rpy') \
+                and _unparseable(now, tmp / f'pe_{src.stem}.rpy'):
+            errs = _parse_errors(now, tmp / f'pe2_{src.stem}.rpy')
+            bad.append((src.name, 'E6自洽',
+                        f'原文能解析、产物不能：{errs[:2]}'))
+
         # E1：只许那一行变（±1）。超过 5 行 = 退回全量重生成
         if touched > 5:
             stat['degraded'] += 1
@@ -570,21 +587,6 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
         invented = [k for k in n_tails if k not in b_tails]
         if invented:
             bad.append((src.name, 'E3注释', f'凭空多出注释：{invented[:2]}'))
-
-        # E6：产物还得能跑 —— **与原文对照**（原文本来就解析不了的，不算导出弄坏的）
-        if _syntax_broken(now):
-            bad.append((src.name, 'E6自洽', f'有跨行字符串：'
-                                            f'{_syntax_broken(now)[:1]}'))
-        if not _unparseable(original, tmp / f'po_{src.stem}.rpy') \
-                and _unparseable(now, tmp / f'pe_{src.stem}.rpy'):
-            errs = _parse_errors(now, tmp / f'pe2_{src.stem}.rpy')
-            bad.append((src.name, 'E6自洽',
-                        f'原文能解析、产物不能：{errs[:2]}'))
-
-        leaked = _placeholder_leak(now)
-        if leaked:
-            bad.append((src.name, 'E9占位符',
-                        f'产物里有 MENU_NO_CAPTION 占位符：{leaked[:1]}'))
 
         if verbose:
             print(f'   · {src.name}: 动了 {touched} 行')

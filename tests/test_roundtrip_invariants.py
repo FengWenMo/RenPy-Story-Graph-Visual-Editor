@@ -712,6 +712,68 @@ class TestTextFidelityRoundtrip:
                 labels=produced.statement_labels)).rpy_text
             assert second == props['rpy'], f'{stem}：第二轮变了'
 
+
+class TestStringSpeakerSay:
+    """
+    **字符串说话人**：`"系统" "你已解锁…"`（2026-10-05 的 P0）。
+
+    Ren'Py 的 say 语句允许 `who` 是字符串字面量（一次性角色名）。`_RE_SAY`
+    的 who 组只认标识符，于是这种写法被当成"旁白 `"系统"`" ——
+    **真正的台词整句丢掉**，而且模型里就没有它，所以这一章**动过任何一处**，
+    增量补丁就会把那一行改写成残缺版本。
+
+    存法：`speaker` 存**带引号的原文切片**（转义原样保留），于是
+      · 渲染时逐字写回去（不能再套一层 `_quote`）；
+      · 与角色变量名天然分得开（`is_literal_speaker`），凡是要去角色表里查的
+        地方都跳过 —— 否则会写成 `# TODO: 缺少资源 角色 '"系统"'`。
+    """
+
+    SHAPES = {
+        'plain': '"系统" "这是一句系统提示"',
+        'escaped_quote': r'"系\"统" "带引号的名字"',
+        'backslash': r'"C:\\new" "路径提示"',
+        'single_quoted': "'系统' '单引号提示'",
+    }
+
+    def test_the_dialogue_survives_the_roundtrip(self, tmp_path):
+        from storygraph.story.beat_model import is_literal_speaker
+        for stem, line in self.SHAPES.items():
+            script = f'label a:\n    {line}\n    return\n'
+            original, produced, props = roundtrip(script, tmp_path, stem)
+            assert_same_multiset(original, produced, props)
+            beats = props['beats']
+            say = next(b for b in beats if b.text)
+            assert is_literal_speaker(say.speaker), (stem, say.speaker)
+            # **说话人逐字还在**（它必须原样写回去：`"系统"` / `'系统'`）
+            who = line.split(' ')[0]
+            assert who in props['rpy'], f'{stem}：{props["rpy"]}'
+            # 台词正文一个字都不少（文本按 `"` 重新引用，引号形态可以变）
+            assert line.split(' ', 1)[1].strip('\'"') in props['rpy'], \
+                f'{stem}：{props["rpy"]}'
+
+    def test_it_is_a_two_round_fixed_point(self, tmp_path):
+        for stem, line in self.SHAPES.items():
+            script = f'label a:\n    {line}\n    return\n'
+            _o, produced, props = roundtrip(script, tmp_path, stem)
+            second = compile_beats(beats_from_statements(
+                produced.statements,
+                labels=produced.statement_labels)).rpy_text
+            assert second == props['rpy'], f'{stem}：第二轮变了'
+
+    def test_a_plain_narration_is_still_a_narration(self, tmp_path):
+        """只有一个字符串的仍是旁白（别被"双字符串"那条路误收）。"""
+        script = 'label a:\n    "纯旁白一句"\n    return\n'
+        _o, _p, props = roundtrip(script, tmp_path, 'narration')
+        beat = next(b for b in props['beats'] if b.text)
+        assert beat.speaker == '', repr(beat.speaker)
+        assert beat.text == '纯旁白一句'
+
+    def test_an_identifier_speaker_is_not_a_literal(self, tmp_path):
+        script = 'label a:\n    e "普通台词"\n    return\n'
+        _o, _p, props = roundtrip(script, tmp_path, 'ident')
+        beat = next(b for b in props['beats'] if b.text)
+        assert beat.speaker == 'e'
+
     def test_tight_dollar_survives_excel(self, tmp_path):
         """
         紧凑 `$x` 与 `$ x` 必须分别保真。

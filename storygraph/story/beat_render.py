@@ -39,6 +39,7 @@ from storygraph.story.beat_model import (
     compose_code,
     hide_item_part,
     hide_item_parts,
+    is_literal_speaker,
     show_item_part,
     show_item_parts,
     unmask_code_block_markers,
@@ -881,7 +882,13 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
 
     # ---------------- 台词 ----------------
     speaker = beat.speaker
-    if speaker and audit is not None:
+    if speaker and is_literal_speaker(speaker):
+        # **字符串字面量说话人**（`"系统" "提示"`）：逐字原样出去。
+        # 它不是角色变量，**不能**去角色表里查 —— 查不到就会写成
+        # `# TODO: 缺少资源 角色 '"系统"'`，把真正的台词换成一句 TODO
+        # （2026-10-05 实测：这一条比"丢后半句"更狠，因为它连前半句都换掉）。
+        pass
+    elif speaker and audit is not None:
         from storygraph.story.dsl import TODO as _TODO
         if audit.character(speaker) == _TODO:
             todo('说话人', speaker, f"缺少资源 角色 '{speaker}'")

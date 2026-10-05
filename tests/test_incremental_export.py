@@ -243,6 +243,7 @@ class TestOneToOneReplacement:
         assert diff == [a.index('    lyj "第一句"')], \
             f'应当只差一行，实际差这些行：{[(a[i], b[i]) for i in diff]}'
 
+
     def test_show_attribute_edit_keeps_name_spelling(self, write_rpy):
         """
         `show ling close_happy` 不会被写成 `show ling_close_happy`
@@ -265,6 +266,63 @@ class TestOneToOneReplacement:
             return False
         fp, res = self._patch(write_rpy, TRICKY, edit)
         assert '    show ling serious' in res.text, res.text
+
+
+class TestStringSpeakerSay:
+    """
+    `"角色名" "台词"`（**字符串说话人**）不许被截断成 `"角色名"`。
+
+    2026-10-05 的 P0（真实项目 `character_gallery.rpy` 2 处）：
+
+        "系统" "你已解锁角色【万理】的人物介绍！"
+          → speaker='' + text='系统'          ← 后半句根本没进模型
+
+    触发面**比"改那一句"大得多**：模型里没有那句台词，所以这一章只要动过
+    **任何一处**，增量补丁就会把那一行改写成残缺的 `"系统"`。所以这里两条都钉：
+    解析层（模型里必须有那句正文）+ 文件层（改同一章的另一行，正文不许消失）。
+    """
+
+    SRC = ('# 文件头：必须保住\n'
+           'label sys_note:\n'
+           '    ling "开头一句"\n'
+           '    $ persistent.ready = True\n'
+           '    "系统" "这是一句系统提示"\n'
+           '    return\n')
+
+    def _patch(self, write_rpy, src, edit=None):
+        from pathlib import Path
+        fp, beats = _beats_of(write_rpy, src)
+        if edit is not None:
+            for b in beats:
+                if edit(b):
+                    break
+        full = render_beats_to_rpy(beats)
+        res = patch_export(beats, fp, full)
+        return Path(fp), res
+
+    def test_the_dialogue_is_in_the_model(self, write_rpy):
+        _fp, beats = _beats_of(write_rpy, self.SRC)
+        say = next((b for b in beats if '这是一句系统提示' in str(b.text or '')),
+                   None)
+        assert say is not None, \
+            f'模型里没有那句正文：{[(b.kind, b.speaker, b.text) for b in beats]}'
+        assert say.speaker == '"系统"', repr(say.speaker)
+
+    def test_editing_another_line_keeps_it_intact(self, write_rpy):
+        def edit(b):
+            if b.text == '开头一句':
+                b.text = '开头改过了'
+                return True
+            return False
+        fp, res = self._patch(write_rpy, self.SRC, edit)
+        text = res.text
+        assert '开头改过了' in text, text
+        # 那一行**逐字节**还在（残缺版本是 `    "系统"`）
+        assert '    "系统" "这是一句系统提示"' in text, text
+
+    def test_untouched_file_is_byte_identical(self, write_rpy):
+        fp, res = self._patch(write_rpy, self.SRC)
+        assert res.text == fp.read_text(encoding='utf-8'), res.text
 
 
 class TestFailSafe:

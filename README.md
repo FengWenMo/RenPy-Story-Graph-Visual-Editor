@@ -1749,6 +1749,62 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
     取证工具：`tools/probe_round_escapes.py`（转义逐轮 `repr` 打出来）、
     `tools/probe_body_leak.py`（漏出菜单的三种形态 + 第二轮多出来的行）。
 
+84. **字符串说话人（P0）：`"角色名" "台词"` 的后半句不许丢**（2026-10-05）
+
+    Ren'Py 的 say 语句允许 `who` 是**字符串字面量**（一次性角色名）：
+
+        "系统" "你已解锁角色【万理】的人物介绍！"
+
+    而 `_RE_SAY` 的 who 组只认标识符（`[A-Za-z_][\w.]*`），于是这种写法被
+    当成"旁白 `"系统"`" —— **真正的台词整句丢掉**：
+
+        speaker='' + text='系统'          ← 后半句根本没进模型
+
+    **为什么是 P0**（不是"改那一句才丢"）：模型里没有那句台词，所以
+    **这一章只要动过任何一处**，增量补丁就会把那一行改写成残缺的 `"系统"`。
+    真实项目 `character_gallery.rpy` 2 处（两个示例 label）：用户改同一章
+    第 110 行的 `call screen`，两句系统台词的正文一起没了。
+
+    修法三处（缺一不可）：
+
+      · **解析**（`parsing/renpy_parser.split_string_speaker`）：`who` 存
+        **带引号的原文切片**（`'"系统"'`，转义原样保留）、`what` 取第二个
+        字符串（反转义）。带引号存有两个好处：渲染时逐字写回去，以及
+        **与角色变量名天然分得开**；
+      · **渲染**（`beat_render.render_beat_to_rpy` 的台词那一段）：字面量
+        说话人**逐字输出**，并且**跳过角色表审计** —— 不跳的话会写成
+        `# TODO: 缺少资源 角色 '"系统"'`，把整句台词换成一句 TODO
+        （比原来的缺陷还狠）；
+      · **校验**（`pipeline/validate` 的 E102/W110、`story/excel_import` 的
+        角色登记建议）：字面量说话人**不查角色表**（它不是变量名），
+        否则每处这种写法都会报一条"说话人不在资源表角色里"的假警，
+        或者被当成"未登记的角色"。
+
+    判据：`tools/hell_cross_file.py` 的 **A8**（解析层"模型里必须有那句正文" +
+    文件层"改同一章另一行、正文不许消失"）**2 → 0**；
+    `tests/test_incremental_export.py::TestStringSpeakerSay`（3 条：模型里有正文、
+    改别处那一行逐字节还在、没改就逐字节不变）；
+    `tests/test_roundtrip_invariants.py::TestStringSpeakerSay`（4 条：四种形态
+    —— 裸引号 / 转义引号 / 反斜杠 / 单引号 —— 的语句多重集 + 两轮不动点，
+    外加"单字符串仍是旁白"这条边界）。最小复现：
+    `tools/probe_gallery_tail.py`（真实文件只读）。
+
+    验收：全量 pytest **2442 → 2449**（新增 7 条；其中**钉这条 P0 的 4 条改前全红**
+    —— 用 HEAD worktree 逐条验过，另 3 条是"两轮不动点 / 单字符串仍是旁白 /
+    标识符说话人不算字面量"的守卫，改前本来就绿）；
+    `render_hash` 两条路仍逐字节相等（`8eea612fe151` →
+    **`d9b0f2de26b5`**，差异**只有**那两句被救回来的台词，逐行核对过）；
+    `hell_cross_file` / `hell_edit_rounds` / `hell_nest_inline` / `hell_test` /
+    `probe_remaining3` 全绿；`journey_check` 的"文本"字数 29660 → **29686**
+    （+26 字 = 那两句正文），`audit_roundtrip` / `audit_real_project` /
+    `acceptance_workflow` / `torture_test` 逐行一致。
+
+    **仍然存在的已知边界**（同属"say 尾部"，`tools/probe_say_tail.py` 量过，
+    真实项目 **0 处**）：`e "x" with dissolve` / `… id line_001` 这类**尾从句**
+    既不入模型、也不进 raw，全量路径上会丢；`menu:` 里若写 `"系统" "提示"`
+    （当标题行用），模型里菜单标题没有 `who` 这一位，只保住可见文案（第二段）、
+    **角色名会丢** —— 真实项目同样 0 处。
+
 ## 常见改动落点
 
 | 想做什么 | 改哪里 |
@@ -1759,6 +1815,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改**选项体归属**（哪个选项拿哪段块体） | `story/beat_render._menu_segments_by_path` + `core/nest_path.option_index`（键=位置；越界才退回顺序配对，见不变量 82b） |
 | 改**注释落在哪张拍上** | `story/beat_build._emit_comment`（必须过 `branch_guard`，见不变量 82c） |
 | 改**哪些语句能并进同一拍** | `story/beat_build._BeatBuilder` 的 `branch_guard`（条件不同）/ `struct_guard`（**位置**不同，见不变量 83b） |
+| 改**说话人怎么写回产物**（字符串说话人 `"系统"` / 角色变量 `e`） | `parsing/renpy_parser.split_string_speaker` + `story/beat_model.is_literal_speaker` + `beat_render` 台词那一段（见不变量 84） |
 | 改**字符串转义**（渲染转义 / 解析反转义） | 渲染 `story/beat_render._quote`；解析 `parsing/renpy_parser.unescape_renpy_string`（`_pick_str` 会自动调，**手写切片的地方要自己调**，见不变量 83a） |
 | 改**条件减法**（里层 `if` 该不该再写外层条件） | `story/beat_render.strip_condition_context` + `_split_conjuncts` / `_bare_condition` / `_condition_atoms`（见不变量 82d） |
 | 改**嵌套/注释 harness 的判据** | `tools/hell_nest_inline.py`（N1 只比"菜单口径"，`§有意为之` 那份清单是口径真源） |

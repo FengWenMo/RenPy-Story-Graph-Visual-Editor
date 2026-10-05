@@ -273,6 +273,23 @@ KIND_EXTEND = 'extend'
 MENU_NO_CAPTION = '\x00menu'
 
 
+def is_literal_speaker(speaker) -> bool:
+    """
+    「说话人」这一格是**字符串字面量**（`"系统"`）还是角色变量名（`e`）？
+
+    Ren'Py 的 say 语句允许 `who` 是字符串字面量（一次性角色名）：
+    `"系统" "你已解锁角色【万理】的人物介绍！"`。解析侧把这种写法存成
+    **带引号的原文**（见 `renpy_parser.split_string_speaker`），于是：
+
+      · 渲染时**逐字写回去**（它已经是合法的源码片段，不能再套一层 `_quote`）；
+      · 它**不是**角色变量，凡是要去角色表里查的地方都得跳过 ——
+        否则会写出 `# TODO: 缺少资源 角色 '"系统"'`（把台词换掉）、
+        报"说话人不在资源表角色里"、或把 `"系统"` 当成可登记的角色。
+    """
+    text = str(speaker or '').strip()
+    return len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'")
+
+
 def menu_caption_text(text) -> str:
     """
     Beat.text → 菜单标题。

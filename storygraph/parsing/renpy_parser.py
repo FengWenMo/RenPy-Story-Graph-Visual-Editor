@@ -974,6 +974,43 @@ def _string_literal(text: str):
     return inner
 
 
+def split_string_speaker(text: str):
+    """
+    `"系统" "你已解锁…"` → `('"系统"', '你已解锁…')`；不是这个形态则 `None`。
+
+    为什么单开一条路（2026-10-05，P0 实测）：Ren'Py 的 say 语句允许 `who` 是
+    **字符串字面量**（一次性角色名，`"系统" "提示"` 这种写法完全合法）。
+    而 `_RE_SAY` 的 who 组只认标识符（`[A-Za-z_][\\w.]*`），于是这种写法被
+    当成"旁白 `"系统"`" —— **真正的台词整句丢掉**：
+
+        "系统" "你已解锁角色【万理】的人物介绍！"
+          → speaker='' + text='系统'          ← 后半句没了
+
+    触发面比"改那一句"大得多：模型里根本没有那句台词，所以**这一章只要动过
+    任何一处**，增量补丁就会把那一行改写成残缺的 `"系统"`
+    （真实项目 `character_gallery.rpy` 2 处，都在示例 label 里）。
+
+    返回的 `who_raw` 是**带引号的原文切片**（转义原样保留），这样：
+      · 渲染时逐字写回去，不需要"重新转义"；
+      · 与角色变量名（`e` / `jc`）天然分得开 —— 见 `beat_model.is_literal_speaker`。
+    """
+    text = str(text or '')
+    if not text or text[0] not in '"\'':
+        return None
+    end, closed = _skip_string(text, 0)
+    if not closed:
+        return None
+    i = end
+    while i < len(text) and text[i] in ' \t':
+        i += 1
+    if i >= len(text) or text[i] not in '"\'':
+        return None                      # 只有一个字符串 = 普通旁白
+    end2, closed2 = _skip_string(text, i)
+    if not closed2:
+        return None
+    return text[:end], unescape_renpy_string(text[i + 1:end2 - 1])
+
+
 def _image_path_from_expr(expr: str):
     """`image x = "images/a.png"` → 'images/a.png'；不是路径则 None。"""
     value = _string_literal(expr)
@@ -1730,6 +1767,18 @@ class RenPyParser:
 
     def _stmt_say(self, line, text):
         """台词（**兜底**：前面的分支都没接住，才算台词）。"""
+        # ① **字符串说话人**优先：`"系统" "提示"`（Ren'Py 合法写法）。
+        #    不先接住它，第二个字符串就被整句丢掉（见 `split_string_speaker`）。
+        pair = split_string_speaker(text)
+        if pair is not None:
+            who_raw, what = pair
+            return SayNode(
+                line_number=line.line_number,
+                indent=line.indent,
+                filename=line.filename,
+                who=who_raw,
+                what=what,
+            )
         m = self._RE_SAY.match(text)
         if not m:
             return self._NO_MATCH
@@ -2289,6 +2338,17 @@ class RenPyParser:
                 # 注释只能挂在这张选项节点上（动态属性，同 `nest_path` 的做法）
                 opt.inline_comment = getattr(line, 'inline_comment', '')
                 options.append(opt)
+                i += 1
+                continue
+
+            # 菜单块里的"裸字符串行"是**标题行**（Ren'Py 会把它显示成 caption）。
+            # `"系统" "提示"` 这种带字符串说话人的写法也要取**后一个**字符串 ——
+            # 取前一个会把可见文案换成角色名（模型里菜单标题没有 who 这一位，
+            # 属于已知边界，见 README 不变量 84）。
+            pair = split_string_speaker(text)
+            if pair is not None:
+                cap = pair[1]
+                caption = (caption + '\n' + cap) if caption else cap
                 i += 1
                 continue
 
