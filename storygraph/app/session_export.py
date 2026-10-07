@@ -46,6 +46,7 @@ from storygraph.app.stage import build_frames
 from storygraph.story.generation_guard import (ensure_generator_marker,
                                                evaluate_generation,
                                                labels_in_danger,
+                                               merging_onto,
                                                would_destroy_opaque,
                                                write_generation)
 
@@ -79,7 +80,15 @@ class ExportMixin:
                 'script_path', 'beats', '_transforms_decision',
                 # 原地写回之后要把内存重新对齐到磁盘（见
                 # `_reload_after_inplace_write`）—— 那是 `SessionTableMixin.load`。
-                'load')
+                'load',
+                # **"行号还新鲜吗"**（2026-10-05）：`_patch_note` 靠它决定要不要
+                # 把"拍的源行号可信"告诉补丁（`patch_export(trust_ranges=…)`，
+                # 见那边的说明：用户把一句话同时改成台词 + 换正文 + 加立绘时，
+                # 对位守卫的内容证据会全没）。实现与指纹都在 `SessionTableMixin`
+                # （`load` / `_fingerprint_of` 那一块）—— **由
+                # `test_editor_session_mixin_contract.py` 守着**，正是它当场
+                # 抓到了这次跨块调用没声明。
+                'source_unchanged')
 
     EXPORT_ENGINES = ('unity', 'godot', 'json', 'csv', 'renpy')
     def export_ir(self, engine: str, out_dir) -> dict:
@@ -276,9 +285,20 @@ class ExportMixin:
                         # 以前这里只有一句"对位率不足（N%）"—— 用户看着它
                         # 不知道下一步做什么，而"重载这一章再导出"通常就能解决
                         # （行号过期是主因，见 `_resync_source_ranges`）。
+                        #
+                        # ③ 的措辞 2026-10-05 夜改过：它从前说"再明确要求覆盖"，
+                        # 而这一条**根本没有"仍然覆盖"按钮**（`_overwritable`
+                        # 只放 `HANDWRITTEN_TARGET`）—— 用户按着这句话找按钮，
+                        # 找不到，就变成"为何阻止我替换旧文件"。说实话：
+                        # 这条路是**刻意**关掉的（见 `_patch_note` 的 docstring）。
                         '可以试：① 重新载入这一章再导出（行号过期是最常见的原因）；'
-                        '② 换个路径导出到 build/renpy/ 下对比一眼；'
-                        '③ 确认这一章的第三类内容在别处也有备份后，再明确要求覆盖。'],
+                        '② 导出到 build/renpy/ 下的新路径（新建不受这条限制），'
+                        '比对之后再把改好的那一章放回去；'
+                        '③ 原地覆盖这条路**是刻意关掉的**：补丁没配上时写出去'
+                        '就是丢内容（`default` / `init python` 会没）。'
+                        '若这一章的结构被手工改过（例如把菜单标题写到了 '
+                        '`menu:` 的下一行），增量补丁做不了这种两行合一行，'
+                        '先改回"一行一个结构"再导。'],
                     'codes': ['PATCH_FAILED'],
                     'note': note['text_note'], 'todos': 0}
 
@@ -300,7 +320,7 @@ class ExportMixin:
                                    exclude={target, self.script_path})
         issues = evaluate_generation(text, target,
                                      project_root=self.project_root,
-                                     occupied=occupied)
+                                     occupied=occupied, beats=self.beats)
         blocking = [i for i in issues if i.is_blocking]
         if blocking:
             # `force` **不**越过这几条：图像名非法 / label 重名 /
@@ -316,19 +336,37 @@ class ExportMixin:
         # 不检查就回到当年那个形态：文件根本没写出去，却报告"导出成功"，
         # 用户以为产物在。`review_path` 指向留给人对比的副本。
         #
+        # **增量对上了的时候，要把底稿路径交下去**（2026-10-05 实测修，
+        # 用户："明明只是增量的对一个卡片的修改……为何要阻止我拿新的文件
+        # 去替换旧的？"）：
+        #
+        # 护栏的判据是"首行有没有生成标记"，而**人自己写的章节文件一个
+        # 标记都没有** —— 于是"改一句台词、原地写回"这条最常用的路会被
+        # 自家护栏拦下：补丁明明对位 245/245、只改 1 行（逐字节无损），
+        # 却被判成"手写文件，拒绝覆盖"，用户只能看到一个
+        # 「覆盖手写文件？」的吓人对话框（默认按钮还是取消）。
+        #
+        # CLI 那条路（`pipeline.compile.write_compiled`）早就把底稿交下去了，
+        # 编辑器这条**漏了** —— 同一件事两处实现，漏的那处症状正是
+        # "UI 里没法原地增量导出"。现在两边都交**路径**而不是布尔，
+        # 门禁自己判"底稿是不是就是目标"（见 `generation_guard.merging_onto`），
+        # 调用方无法用一句"我走了增量"越过护栏。
+        #
         # `source_text` 一并交过去，是为了让**丢失清单**精确到行
         # （`OPAQUE_LOST`）：那条门禁的判据是"源里有、产物里没有的顶层语句"，
-        # 不给源它就无从说起。CLI 那条路早就传了（`compile.write_compiled`），
-        # 编辑器这条一直没传 —— 于是同样的事在 UI 里只能给一句笼统的警告
-        # （交付审查的第 1 条缺口）。
+        # 不给源它就无从说起。
         #
         # 为什么现在"几乎不会触发"：顶层内容已经**随表保真**
         # （`TopLevelRegionNode` + 隐藏表），全量重生成也带得走。
         # 留着它是**兜底**：哪一天哪条路又漏了，这里会指名道姓地说出来。
         art = write_generation(text, target, project_root=self.project_root,
                                force=force,
+                               merged_from_source=(self.script_path
+                                                   if note.get('used_patch')
+                                                   else None),
                                source_text=self._source_text_for_guard(),
-                               source_path=self.script_path)
+                               source_path=self.script_path,
+                               beats=self.beats)
         if not art.written:
             return {'ok': False, 'path': target,
                     'blocking': [self._issue_message(i) for i in art.issues]
@@ -336,10 +374,17 @@ class ExportMixin:
                     'codes': [str(getattr(i, 'code', '')) for i in art.issues],
                     'review_path': art.review_path,
                     'note': note['text_note'], 'todos': 0,
-                    # 这一刀到底是不是"增量"（前端据此说**真话**，见
+                    # 这一刀到底是不是"无损的增量"（前端据此说**真话**，见
                     # `ui_qt.window_export._confirm_force_overwrite`：
-                    # 补丁成功时"会丢掉 default/init python"那句话是**假的**）
-                    'used_patch': bool(note.get('used_patch'))}
+                    # 补丁成功时"会丢掉 default/init python"那句话是**假的**）。
+                    #
+                    # 判据与门禁同源（`merging_onto`）：只有"补丁对上了
+                    # **且**合并底稿就是目标"时才敢说"不会丢东西" ——
+                    # 编辑甲章、却往乙章的手写文件上写，是另一回事
+                    # （那份产物里没有乙章的任何内容），照旧说真话。
+                    'used_patch': (bool(note.get('used_patch'))
+                                   and merging_onto(target,
+                                                    self.script_path))}
         # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
         #
         # 为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
@@ -478,8 +523,24 @@ class ExportMixin:
                if self.script_path and Path(self.script_path).exists()
                else None)
         had_source = src is not None
+        # **行号新鲜吗？**（2026-10-05 用户实测报："我只调了一个卡片，都不能替换，
+        # 那就太搞用户心态了！"）——用户把一句旁白同时改成台词、换掉正文、
+        # 再加一张立绘时，对位守卫的内容证据（说话人/正文/图像名）一条都不剩，
+        # 只能判"错位"→ 整份拒绝。而编辑器这条路是**解析出来的行号**：
+        # 只要磁盘上那一份还是载入时那一份（`source_unchanged`），行号就是真迹，
+        # 可以放心按行号替换。
+        #
+        # ⚠ 只有编辑器这条路能保证这一点：表格那条路的行号是
+        # `recover_source_ranges` **现算的猜值**，那边必须继续依赖守卫
+        # （见 `patch_export` 的 `trust_ranges`）。
+        trust = False
         try:
-            res = patch_export(self.beats, src, text, registry=self.registry())
+            trust = bool(self.source_unchanged())
+        except Exception as e:               # noqa: BLE001 - 判不了就当不新鲜
+            swallow('session_export._patch_note.source_unchanged', e)
+        try:
+            res = patch_export(self.beats, src, text, registry=self.registry(),
+                               trust_ranges=trust)
             if res.ok:
                 return {'used_patch': True, 'text': res.text, 'blocking': [],
                         'had_source': had_source,

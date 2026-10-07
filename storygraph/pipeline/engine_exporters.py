@@ -24,7 +24,10 @@ IR 里每条 line 都带 LineId：这是存档、埋点、翻译、协作锁共�
 from __future__ import annotations
 
 import csv
+import io
 import json
+import os
+from contextlib import suppress
 from pathlib import Path
 
 from storygraph.story.stage_snapshot import stage_snapshots
@@ -240,11 +243,42 @@ def to_godot(ir: dict) -> dict:
     }
 
 
-GODOT_LOADER_SAMPLE = '''# dialogue_importer.gd —— 读 STORY_IR.json（由编辑器导出）
-# 用法：把本文件与 STORY_IR.json 放进项目，附到一个 Node 上即可。
+#: 产物**文件名**的唯一真源（"同一件事只许有一处实现"）。
+#:
+#: 为什么必须集中（2026-10-05 交付质检实测的缺陷）：Godot 那条路原先写
+#: `STORY_IR.json`，而上面第 307 行刚写过 `story_ir.json`。在 **Windows /
+#: macOS 这种大小写不敏感**的文件系统上，这两个名字**是同一个文件** ——
+#: 第二刀把引擎中立 IR 原地覆盖掉了，于是：
+#:
+#:     · `_write_json(to_godot(ir), …)` 之后目录里**根本没有中立 IR**，
+#:       而返回值却报了两个不同路径（消费者照单去读会读到错的那份）；
+#:     · 在**大小写敏感**的 Linux 上则反过来 —— 中立 IR 活着，但
+#:       `dialogue_importer.gd` 里写的 `res://STORY_IR.json` 与适配文件
+#:       同名不同物，两边行为**不一致**（同一份产物跨平台不一样）。
+#:
+#: 现在给 Godot 适配文件一个**独立**的名字，与 Unity 的
+#: `UnityDialogueData.json` 对齐（PascalCase + 引擎名），
+#: 并且加载器脚本里的路径**从同一个常量生成** —— 改名不会再漂移。
+#: 守卫：`tests/test_pipeline_batch.py::TestEngineExporters`
+#: （`test_no_two_product_names_collide_on_case_insensitive_fs` /
+#:  `test_godot_data_is_distinct_and_loader_points_at_it`）。
+NEUTRAL_IR_NAME = 'story_ir.json'
+UNITY_DATA_NAME = 'UnityDialogueData.json'
+UNITY_NOTES_NAME = 'UNITY_IMPORT.md'
+GODOT_DATA_NAME = 'GodotDialogueData.json'
+GODOT_LOADER_NAME = 'dialogue_importer.gd'
+CSV_NAME = 'story_lines.csv'
+
+#: 本适配产物与 Godot 加载器共用同一个**中立 IR**：适配文件是"给 GDScript
+#: 直接吃的扁平结构"，中立 IR 是"给自定义解析用的全量数据"，两份都要在。
+GODOT_LOADER_SAMPLE = '''# dialogue_importer.gd —— 读 GodotDialogueData.json（由编辑器导出）
+# 用法：把本文件与 GodotDialogueData.json 放进项目，附到一个 Node 上即可。
+#
+# 同目录下还有一份 `story_ir.json`（引擎中立 IR）：字段更全（含 stage 快照、
+# 资源清单、DSL 原文），需要自定义解析时用它。本加载器读的是**扁平适配版**。
 extends Node
 
-const IR_PATH := "res://STORY_IR.json"
+const IR_PATH := "res://GodotDialogueData.json"
 
 var lines_by_id: Dictionary = {}
 var labels: Dictionary = {}
@@ -252,7 +286,7 @@ var characters: Dictionary = {}
 
 func _ready() -> void:
     var f := FileAccess.open(IR_PATH, FileAccess.READ)
-    assert(f != null, "找不到 STORY_IR.json")
+    assert(f != null, "找不到 GodotDialogueData.json")
     var data: Dictionary = JSON.parse_string(f.get_as_text())
     for c in data.get("characters", []):
         characters[c["id"]] = c
@@ -280,6 +314,25 @@ func label_lines(label: String) -> Array:
 SUPPORTED_ENGINES = ('renpy', 'unity', 'godot', 'json', 'csv')
 
 
+def expected_files(engine: str) -> list:
+    """
+    某个引擎**应该**产出哪些文件（相对文件名，按写出顺序）。
+
+    为什么要有它（交付质检的教训）：上面那个大小写碰撞之所以能活到最后，
+    是因为没有任何一处把"这个引擎该出什么"写成可被断言的事实 ——
+    测试只查了 `story_ir.json` 存不存在，Unity 只数了 `len(files) >= 2`。
+    有了这张表，测试就能逐条对账，而不是挑几个名字抽查。
+    """
+    engine = (engine or 'json').lower()
+    if engine == 'csv':
+        return [CSV_NAME, NEUTRAL_IR_NAME]
+    if engine == 'unity':
+        return [NEUTRAL_IR_NAME, UNITY_DATA_NAME, UNITY_NOTES_NAME]
+    if engine == 'godot':
+        return [NEUTRAL_IR_NAME, GODOT_DATA_NAME, GODOT_LOADER_NAME]
+    return [NEUTRAL_IR_NAME]
+
+
 def export_ir(engine: str, beats, out_dir, registry=None,
               project: str = '', title: str = '') -> list:
     """
@@ -287,6 +340,9 @@ def export_ir(engine: str, beats, out_dir, registry=None,
 
     engine: renpy / unity / godot / json / csv
     renpy 由 script_table.write_beats_to_rpy 负责（这里只导出 IR + 清单）。
+
+    **返回的每个路径都指向一个真实存在的文件**（交付质检要求）：文件名全部
+    取自本模块顶部的常量，`expected_files()` 是同一份事实的另一种陈述。
     """
     engine = (engine or 'json').lower()
     if engine not in SUPPORTED_ENGINES:
@@ -299,37 +355,60 @@ def export_ir(engine: str, beats, out_dir, registry=None,
                           title=title)
     written = []
 
+    written.append(_write_json(ir, out_dir / NEUTRAL_IR_NAME))
+
     if engine == 'csv':
-        written.append(_write_csv(ir, out_dir / 'story_lines.csv'))
-        written.append(_write_json(ir, out_dir / 'story_ir.json'))
-        return written
-
-    written.append(_write_json(ir, out_dir / 'story_ir.json'))
-
-    if engine == 'unity':
+        written.append(_write_csv(ir, out_dir / CSV_NAME))
+    elif engine == 'unity':
         written.append(_write_json(to_unity(ir),
-                                   out_dir / 'UnityDialogueData.json'))
+                                   out_dir / UNITY_DATA_NAME))
         written.append(_write_text(
-            _unity_notes(ir), out_dir / 'UNITY_IMPORT.md'))
+            _unity_notes(ir), out_dir / UNITY_NOTES_NAME))
     elif engine == 'godot':
-        written.append(_write_json(to_godot(ir),
-                                   out_dir / 'STORY_IR.json'))
+        written.append(_write_json(to_godot(ir), out_dir / GODOT_DATA_NAME))
         written.append(_write_text(GODOT_LOADER_SAMPLE,
-                                   out_dir / 'dialogue_importer.gd'))
+                                   out_dir / GODOT_LOADER_NAME))
     return written
 
 
-def _write_json(obj, path) -> str:
+def _atomic_write(path, data, *, newline=None) -> str:
+    """
+    **先写临时文件再改名**：磁盘满/被中断/权限不足时，目标文件要么是旧的
+    完整版本、要么是新的完整版本，**绝不会是半截**。
+
+    为什么值得（交付质检加的）：产物是给 Unity/Godot/翻译公司/别的脚本
+    直接消费的 —— 一份**截断的 JSON 比没有文件更坏**：消费方读它会
+    得到"语法错误"，而人看到的是"导出成功过、文件明明在"。
+    引擎里其它落盘（`beat_render` / `write_generation`）走的是各自的
+    路径，这里只管**多引擎导出**这一块。
+
+    临时文件与目标**同目录**（`os.replace` 要求同卷才能原子改名），
+    并以 `.tmp` 结尾 —— 万一进程被杀，留下的是能被一眼认出的残留。
+    正常失败路径（改名失败）会**自己把临时文件清掉**：留着它，
+    下一次导出目录里就多一份 `story_ir.json.tmp`，用户会以为那是产物。
+    """
     path = Path(path)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2),
-                    encoding='utf-8')
+    tmp = path.with_name(path.name + '.tmp')
+    try:
+        with tmp.open('w', encoding='utf-8', newline=newline) as fh:
+            fh.write(data)
+        # Windows 上 `os.replace` 覆盖已存在文件是允许的（Posix 语义），
+        # 但如果目标正被别的程序独占打开（用户拿 Excel 开着那张表），
+        # 这里会抛 PermissionError —— 那是**该报出来**的失败，不吞。
+        os.replace(tmp, path)
+    except OSError:
+        with suppress(OSError):
+            tmp.unlink()
+        raise
     return str(path)
+
+
+def _write_json(obj, path) -> str:
+    return _atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=2))
 
 
 def _write_text(text: str, path) -> str:
-    path = Path(path)
-    path.write_text(text, encoding='utf-8')
-    return str(path)
+    return _atomic_write(path, text)
 
 
 def _write_csv(ir: dict, path) -> str:
@@ -338,18 +417,19 @@ def _write_csv(ir: dict, path) -> str:
     cols = ['line_id', 'label', 'seq', 'kind', 'speaker', 'speaker_name',
             'text', 'condition', 'scene', 'actors', 'music', 'sound',
             'voice', 'line_hash']
-    with path.open('w', encoding='utf-8-sig', newline='') as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for l in ir.get('lines', []):
-            row = []
-            for c in cols:
-                v = l.get(c, '')
-                if isinstance(v, list):
-                    v = '; '.join(str(x) for x in v)
-                row.append(v)
-            w.writerow(row)
-    return str(path)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for l in ir.get('lines', []):
+        row = []
+        for c in cols:
+            v = l.get(c, '')
+            if isinstance(v, list):
+                v = '; '.join(str(x) for x in v)
+            row.append(v)
+        w.writerow(row)
+    # Excel 要 BOM 才认 UTF-8（老规矩，`test_csv_has_utf8_bom_for_excel` 守着）
+    return _atomic_write(path, '\ufeff' + buf.getvalue(), newline='')
 
 
 def _unity_notes(ir: dict) -> str:

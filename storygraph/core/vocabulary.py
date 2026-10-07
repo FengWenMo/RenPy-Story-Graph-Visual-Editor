@@ -110,6 +110,126 @@ RENPY_BUILTIN_TRANSFORMS = frozenset({
 })
 
 
+# ==================================================================
+#  保真等级：Ren'Py 的**流程块头**
+# ==================================================================
+
+#: Ren'Py **标准流程块**：`while` / `for` 这类"工具认识它是什么、
+#: 但（截至 M1）不把它结构化建模"的语句头。
+#:
+#: 为什么要单独一份（2026-10-07，M1 真机实测）：
+#:
+#: 真实项目 `mini_game1.rpy:50` 有一个游戏主循环
+#:
+#:     while current_round < game_rounds:
+#:         call mini_game_round from _call_mini_game_round
+#:         $ current_round += 1
+#:
+#: 它以前**连头带块体被整块丢掉**（`_stmt_unmodeled` 对带子块的语句
+#: `return None`），全量重生成之后这个循环就没了。现在它走保真通道
+#: （`Beat.opaque`）逐字保留。
+#:
+#: 但它和"项目自定义的块"**不是一回事**，用户动作也不同：
+#:   · 标准流程块（T2）：内容安全，只是工具不替你结构化编辑
+#:     —— 该催的是**我们**把它建模；
+#:   · 自定义块（T3）：工具完全不懂 —— 该催的是**用户/程序**
+#:     用 `storygraph.rules.json` 或宿主 `register_statement` 告诉我们。
+#:
+#: 所以告警文案必须分得开，不能混成一句"工具不认识"。
+#: 分类是**纯函数**（只看语句头），因此解析层与门禁层可以各自调用
+#: 而不会漂移 —— 这也是它放 `core` 的原因：`parsing` 不许 import `story`
+#: （契约 H1 的依赖方向）。
+RENPY_FLOW_BLOCK_HEADS = frozenset({
+    # 循环
+    'while', 'for',
+    # 分支 / 结构
+    'if', 'elif', 'else', 'menu', 'label', 'return', 'pass',
+    # 定义式块（顶层居多，但 label 里也可能出现）
+    'init', 'python', 'screen', 'transform', 'image', 'layeredimage',
+    'style', 'translate', 'testcase', 'on', 'parallel', 'function', 'rpy',
+    'early', 'camera',
+})
+
+
+# ==================================================================
+#  语句头词表的**唯一真源**（M5，2026-10-07）
+# ==================================================================
+#
+# 为什么要有这一节：同一批"工具认识的语句头"从前在**三处**各写一份，
+# 口径不同、还都得记得同步（加一种语句要在三处补，迟早在某处漏）：
+#
+#   · `beat_render._RENPY_STATEMENT_HEADS`  —— 判"这行是 Ren'Py 原文，
+#     不许补 `$`"；
+#   · `project_conventions.KNOWN_STATEMENT_HEADS` —— 判"工具认不认识它"；
+#   · `project_conventions._CONTAINER_HEADS` —— 判"块体要不要原样跳过"。
+#
+# ⚠ **它们不能简单合并成一个集合** —— 三者的语义不同，差异是**刻意的**：
+# `beat_render` 那一份**必须排除** `if/elif/else/while/for`，因为它们在
+# `raw` 里出现时是**代码块的条件行**，当语句透传会把块结构弄坏
+# （第一版把 `while` 放进来，实测红了两个测试）。
+# 而 `: 认识吗` 那一份**必须包含**它们（那确实是 Ren'Py 语句头）。
+#
+# 所以这里的做法是：**公共内核只写一份**，各处的差异用"谁 = 内核 ± 显式增减"
+# 表达出来 —— 差异本身也变成可读的、有注释的事实。
+
+#: 「这行是 Ren'Py 语句原文」—— 判据是**动词白名单**。
+#: 使用者：`beat_render._RENPY_STATEMENT_HEADS`（防补 `$`）。
+RENPY_STATEMENT_VERBS = frozenset({
+    '$', 'python', 'with', 'pause', 'jump', 'call', 'play', 'queue', 'stop',
+    'scene', 'show', 'hide', 'voice', 'window', 'menu', 'return', 'pass',
+    'init', 'label', 'define', 'default', 'transform', 'image', 'extend',
+    'screen', 'nvl', 'camera', 'style', 'layeredimage', 'translate',
+    'renpy.', 'persistent.', 'config.', 'gui.', 'store.',
+    'narrator', 'voice_sustain',
+})
+
+#: 流程块头：**只**用来算"工具认不认识"，**不许**进上面那份动词表。
+RENPY_FLOW_HEADS = frozenset({'if', 'elif', 'else', 'while', 'for'})
+
+#: 声明式/子句式的语句头（脚本里以它们开头也算"工具认识"）。
+RENPY_DECLARATIVE_HEADS = frozenset({
+    'at', 'expression', 'character', 'audio', 'movie', 'side', 'onlayer',
+    'behind', 'zorder', 'as', 'block', 'on', 'parallel', 'function', 'key',
+    'timer', 'input', 'testcase', 'rpy', 'early',
+    # ⚠ 这三个**无点写法**（`renpy` / `persistent` / `store`）从前在
+    # `KNOWN_STATEMENT_HEADS` 里，收敛时必须留着 —— **不许出现"以前认识、
+    # 现在不认识"**（那会让覆盖度报告凭空多出几条噪声，用户以为退化了）。
+    # 收敛后新增的另外 7 个（`renpy.` / `persistent.` / `config.` / `gui.` /
+    # `store.` / `narrator` / `voice_sustain`）来自动词表：它们只会出现在
+    # python 块里，而那些块被 `RENPY_CONTAINER_HEADS` 整块跳过，
+    # 所以报告口径**实际没有变化**。
+    'renpy', 'persistent', 'store',
+})
+
+#: 工具**认识**的语句头全集（含流程块）。
+#: 使用者：`project_conventions.KNOWN_STATEMENT_HEADS`（算覆盖度）。
+RENPY_KNOWN_HEADS = (RENPY_STATEMENT_VERBS | RENPY_FLOW_HEADS
+                     | RENPY_DECLARATIVE_HEADS)
+
+#: 这些头**开一个"工具不编辑的块"**：块里的语句一律原样保留，不算"不认识"。
+#: 使用者：`project_conventions._CONTAINER_HEADS`。
+#: 不这么分的话，覆盖度报告会被 `add` / `text` / `vbox` 这类界面语句淹没
+#: （实测 203 种里绝大多数是这种噪声）。
+RENPY_CONTAINER_HEADS = frozenset({
+    'screen', 'layeredimage', 'transform', 'style', 'translate', 'python',
+    'init', 'image', 'define', 'default', 'on', 'parallel', 'function',
+    'testcase', 'rpy', 'early',
+})
+
+
+def statement_head_token(text: str) -> str:
+    """取一句话的**语句头**（第一个 token，去掉结尾的 `:`）。"""
+    s = str(text or '').strip()
+    if not s:
+        return ''
+    return s.split(None, 1)[0].rstrip(':').strip()
+
+
+def is_known_flow_block(text: str) -> bool:
+    """这个语句头是 Ren'Py 标准流程块吗（工具认识形状、但不建模）。"""
+    return statement_head_token(text) in RENPY_FLOW_BLOCK_HEADS
+
+
 #: 生成器写在产物**首行**的标记。
 #:
 #: 为什么它必须只有一份实现（2026-10-05）：两处要用它，而**方向相反** ——
@@ -129,4 +249,7 @@ __all__ = [
     'ASSET_TYPE_ATTR', 'AUDIO_TYPE_ATTR',
     'NON_ACTOR_TAGS', 'NON_ACTOR_SHOW_TARGETS', 'LAYER_CN_TAG',
     'RENPY_BUILTIN_TRANSFORMS', 'GENERATOR_MARKER',
+    'RENPY_FLOW_BLOCK_HEADS', 'statement_head_token', 'is_known_flow_block',
+    'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',
+    'RENPY_KNOWN_HEADS', 'RENPY_CONTAINER_HEADS',
 ]

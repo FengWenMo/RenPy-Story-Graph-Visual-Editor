@@ -320,33 +320,68 @@ class TestExportForceEscapeHatch:
     它只该越过 `HANDWRITTEN_TARGET` 这一条 ——
     产物自己坏了（语法错误 / 图像名非法 / label 重名）时，
     `force` **不许**把坏脚本写进 game/。
+
+    2026-10-05 改口（用户报"明明只是增量的改动，为何阻止我替换旧文件"）：
+    **原地写回自己那一章**不再走这条逃生舱 —— 增量合并且底稿就是目标时，
+    产物逐字节包含原文，护栏直接让路（见 `test_export_acceptance` 的 1a）。
+    `HANDWRITTEN_TARGET` 现在只在"要覆盖的是**别人的**手写文件"时出现，
+    下面这些用例照那个形状造。
     """
 
-    def _session_on_handwritten(self, tmp_path):
-        src = _make_src(tmp_path)
+    def _session_writing_over_someone_else(self, tmp_path):
+        """本章（ch.rpy）有源可增量；要写的是**另一个**手写文件。"""
+        src = _make_src(tmp_path)                 # ch.rpy（手写、有台词）
+        other = tmp_path / 'other.rpy'            # 别人的章节文件
+        other.write_text('default x = 1\n\nlabel other:\n    "别人的台词"\n',
+                         encoding='utf-8')
         s = EditorSession(project_root=tmp_path)
         s.script_path = src
         s.beats = _beats_of(src)
-        return s, src
+        return s, src, other
 
     def test_force_overwrites_the_handwritten_file(self, tmp_path):
-        s, src = self._session_on_handwritten(tmp_path)
-        blocked = s.export(src)
-        assert blocked['ok'] is False
+        s, _src, other = self._session_writing_over_someone_else(tmp_path)
+        blocked = s.export(other)
+        assert blocked['ok'] is False, blocked
         assert 'HANDWRITTEN_TARGET' in blocked['codes'], blocked['codes']
 
-        forced = s.export(src, force=True)
+        forced = s.export(other, force=True)
         assert forced['ok'] is True, forced
-        assert '原文台词' in src.read_text(encoding='utf-8')
 
     def test_blocked_result_carries_codes(self, tmp_path):
         """
         `codes` 是"能不能给用户一个覆盖按钮"的判据 —— 必须存在且可判。
         """
-        s, src = self._session_on_handwritten(tmp_path)
-        res = s.export(src)
+        s, _src, other = self._session_writing_over_someone_else(tmp_path)
+        res = s.export(other)
         assert res['codes'], '拦下了却没给 codes，前端无从判断能否覆盖'
         assert all(isinstance(c, str) and c for c in res['codes'])
+
+    def test_incremental_write_onto_the_source_is_not_blocked(self, tmp_path):
+        """
+        **原地增量写回自己这一章不再拦**（用户 2026-10-05 报的那条）。
+
+        形状就是用户的实际动作：打开自己手写的章节 → 改一句台词 →
+        导出到**原路径**。它必须是 ok=True 且 `used_patch=True` ——
+        不许弹「覆盖手写文件？」（那个对话框的默认按钮是取消，
+        用户的手感就是"工具不让我替换旧文件"）。
+        """
+        src = _make_src(tmp_path)
+        before = src.read_text(encoding='utf-8')
+        s = EditorSession(project_root=tmp_path)
+        s.script_path = src
+        s.beats = _beats_of(src)
+        s.beats[0].text = '改过的一句'
+
+        res = s.export(src)
+        assert res['ok'] is True, res
+        assert res['used_patch'] is True, res
+        assert 'HANDWRITTEN_TARGET' not in res['codes'], res
+        after = src.read_text(encoding='utf-8')
+        assert '改过的一句' in after
+        # 只多出生成标记（2 行）与替换掉的那一行
+        added = len(after.splitlines()) - len(before.splitlines())
+        assert added <= 2, f'原地增量写回动得太多了（多了 {added} 行）'
 
     def test_force_does_not_bypass_broken_product(self, tmp_path):
         """
@@ -385,25 +420,22 @@ class TestExportForceEscapeHatch:
         """
         **端到端走一遍 `export` 里"写被拦下"那条分支**。
 
-        为什么单独写这条：上面那些用例都在 `export` 的**前一关**
+        为什么单独写这条：别的用例都在 `export` 的**前一关**
         （补丁失败）就返回了，`write_generation` 的返回值根本没被读到 ——
         于是 `'blocking': [self._issue_message(i) …]` 里的手误
         （漏了 `self.`）能一路活到运行时才 `NameError`。
-        这条用例把目标设成**已存在的手写文件**，让补丁与语法门禁都通过，
+        这条用例把目标设成**别人的手写文件**（补丁对得上、语法门禁也过），
         真正走到 `art.written == False` 那条 return。
         """
-        src = _make_src(tmp_path)
-        before = src.read_text(encoding='utf-8')
-        s = EditorSession(project_root=tmp_path)
-        s.script_path = src
-        s.beats = _beats_of(src)
+        s, _src, other = self._session_writing_over_someone_else(tmp_path)
+        before = other.read_text(encoding='utf-8')
 
-        res = s.export(src)
+        res = s.export(other)
         assert res['ok'] is False, (
-            f'往手写文件写却没有报错：{res}')
+            f'往别人的手写文件写却没有报错：{res}')
         assert any('手写' in str(b) or 'HANDWRITTEN' in str(b)
                    for b in res['blocking']), res['blocking']
-        assert src.read_text(encoding='utf-8') == before, '文件被改写了'
+        assert other.read_text(encoding='utf-8') == before, '文件被改写了'
 
 
 # ==================================================================

@@ -305,6 +305,19 @@ def _cmd_collab(args) -> int:
     return 2
 
 
+def _cmd_selfcheck(args) -> int:
+    """
+    **打包后的自检**：跑一遍主链路（尤其是导出），把结论说出来。
+
+    为什么要做成命令（而不是只留 `StoryGraph.exe --selfcheck`）：
+    交付出去的是 exe，用户/CI 需要一个**不需要装 Python** 就能跑的
+    验证入口 —— 出问题时第一步就是"让用户跑一下自检，把输出发过来"。
+    无头、不碰用户文件（产物写在临时目录里）。
+    """
+    from storygraph import selfcheck
+    return selfcheck.main()
+
+
 def _load_registry(args):
     from storygraph.pipeline.build import load_asset_registry
     if not getattr(args, 'project', None):
@@ -424,6 +437,10 @@ def build_parser() -> argparse.ArgumentParser:
                     action='store_true',
                     help='把编译结果作为新表并进原工作簿（不碰 Beats）')
     sp.set_defaults(func=_cmd_compile)
+
+    sp = sub.add_parser('selfcheck',
+                        help='跑一遍主链路自检（打包后排查用，不碰用户文件）')
+    sp.set_defaults(func=_cmd_selfcheck)
 
     sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
     sp.add_argument('action',

@@ -47,7 +47,35 @@ from storygraph.ui_qt.status import Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 
-__all__ = ['WindowExportMixin']
+__all__ = ['WindowExportMixin', 'overwritable']
+
+
+def overwritable(res: dict) -> bool:
+    """
+    这次 block **可以**让用户选择"仍然覆盖"吗？
+
+    只有一条可以：`HANDWRITTEN_TARGET`（产物没问题，只是目标是人手写的）。
+    其余 block（`PYTHON_SYNTAX_ERROR` / `CJK_IN_IMAGE_TAG` /
+    `LABEL_COLLISION` …）是**产物本身坏了** —— 覆盖只会把坏脚本写进
+    `game/`，让游戏起不来。那几条一律不给逃生舱。
+
+    判据放在这里而不是写死在对话框里：`codes` 是 `EditorSession.export`
+    的公开契约，将来新增 block 代码时，"能不能覆盖"必须是个明确决定，
+    不能靠默认放行。
+
+    ⚠ **为什么从这个模块搬进来**（2026-10-05 用户实测报的"导出没反应"）：
+    它原来住在 `main_window.py`，而 P3-14 那次拆分把 `export_script`
+    搬到了本模块 —— 自由函数**不在** `REQUIRES` 契约里（那个守卫只静态扫
+    `self.*`），于是本模块引用了一个自己看不见的名字：
+
+        NameError: name '_overwritable' is not defined
+
+    触发条件恰好是"导出被拦下"这一条路（`if not res.get('ok') and
+    _overwritable(res)`）—— 而测试只直接调过那个函数，从没走这条分支。
+    症状是最糟的那种：**点了导出什么都不发生**（没有对话框、没有文件、
+    状态栏也不说话）。
+    """
+    return 'HANDWRITTEN_TARGET' in (res.get('codes') or [])
 
 
 class WindowExportMixin:
@@ -91,7 +119,7 @@ class WindowExportMixin:
             QMessageBox.critical(self, '导出失败', str(e))
             self._report_swallowed(mark)
             return
-        if not res.get('ok') and _overwritable(res):
+        if not res.get('ok') and overwritable(res):
             # **手写文件才给逃生舱**（方案 3，2026-10-05）。
             #
             # 为什么单独这一条：其余 block（图像名非法 / label 重名 /

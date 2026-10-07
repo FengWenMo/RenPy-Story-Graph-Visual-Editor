@@ -243,7 +243,7 @@ def _scan_balanced_close(text: str, open_idx: int) -> int:
 #  第一层：Lexer
 # ====================================================================
 
-def _top_level_region(filepath) -> list:
+def _top_level_region(filepath, lines=None) -> list:
     """
     源文件里 **label 之外**的全部内容 → `[(块头, 去基准缩进的块体, 起始行号)]`。
 
@@ -261,11 +261,18 @@ def _top_level_region(filepath) -> list:
     缩进处理：块体按**最小缩进**整体归零（相对层级保留），渲染时再统一加 4
     —— 与 `_collect_python_block` 同一套口径，两处都这么做才不会有哪一类
     块在往返里越缩越深。
+
+    `lines` 给了就**用它**（不再读盘）：`RenPyParser.parse()` 把"解析时读到的
+    那一份"传进来，于是 AST 行号与这段原文来自**同一个快照**。
+    三处各读一遍时，只要中间有人改了文件，行号与原文就会错位 —— 那是
+    "把 A 的内容写到 B 的位置"，比少保真一点危险得多（见 `core.cst`）。
     """
-    try:
-        raw = Path(filepath).read_text(encoding='utf-8').splitlines()
-    except (OSError, UnicodeDecodeError):
-        return []
+    if lines is None:
+        try:
+            lines = Path(filepath).read_text(encoding='utf-8').splitlines()
+        except (OSError, UnicodeDecodeError):
+            return []
+    raw = list(lines)
 
     chunks: list = []
     cur: list = []
@@ -304,7 +311,25 @@ def _top_level_region(filepath) -> list:
             # 所以"块头以 `:` 结尾"的当前段遇到顶格注释要**收进来**；
             # 否则块体会被劈成两段，渲染时丢掉 `init python:` 这个块头 →
             # 产物里出现一段悬空的缩进（Ren'Py 直接报缩进错）。
-            if cur and _opens_a_block(cur[0].strip()):
+            #
+            # ⚠ **但"块头以 `:` 收尾"不足以判定"**（2026-10-07 实测，
+            # `tools/audit_idempotence.py` 抓到 5 个真实文件中招）：
+            #
+            #     init python:
+            #         ...
+            #     # 全局人物页面 screen      ← 作者写的是**下一段的标题**
+            #     screen character_gallery_screen():
+            #
+            # 旧判据把它收进 `init python:` 的块体 → `render_file_block` 给
+            # 块体每行加 4 → **每导出一次就多缩进一层**（幂等破掉）。
+            #
+            # 语义上它**两边都合法**（注释不参与缩进判断），所以这不是"猜
+            # 语义"，而是按**排版意图**挑一种，并保证挑法是逐字稳定的。
+            # 判据用**向后看**：块体的定义就是"后面还有属于本块的缩进行"——
+            # 后面第一条**结构性**行（跳过空行与注释）缩进 → 收进块体；
+            # 顶格 / 到底 → 它属于下一段，自己起一段。
+            if (cur and _opens_a_block(cur[0].strip())
+                    and _followed_by_indented(raw, i + 1)):
                 cur.append(line)
             else:
                 flush()
@@ -320,12 +345,61 @@ def _top_level_region(filepath) -> list:
             cur.append(line)                    # 缩进行属于当前段
         i += 1
     flush()
-    return chunks
+    # ⚠ **生成标记是工具自己的产物，不是作者的内容**（2026-10-07 实测）。
+    #
+    # 不在这里摘掉它，它就跟着 `file_blocks` 走到渲染层，而渲染层**开头
+    # 又会加一条** → 产物里出现两条；用户再导一次，看到的是"工具在改我的
+    # 文件"。第一轮就 2 条，之后稳定在 2 条（不是无界增长，但**幂等已经破了**：
+    # "导出一次"与"再导出一次"结果不同）。
+    #
+    # 为什么敢直接丢：顶格行**各自起一段**，所以标记永远独占它那一段
+    # （注释不可能拥有缩进块）；丢掉它只少一段注释，渲染层会补回来。
+    from storygraph.core.vocabulary import GENERATOR_MARKER
+    return [c for c in chunks if c[0].strip() != GENERATOR_MARKER]
 
 
 def _opens_a_block(header: str) -> bool:
-    """这一行是不是"带缩进块的块头"（以 `:` 收尾，且不是 `$` 语句）。"""
-    return bool(header) and header.endswith(':') and not header.startswith('$')
+    """
+    这一行是不是"带缩进块的块头"（以 `:` 收尾，且不是 `$` 语句、**不是注释**）。
+
+    ⚠ **注释永远不开块**（2026-10-07 实测，`tools/audit_idempotence.py` 抓到）：
+
+    真实项目里有人用"注释掉整个块"的方式留档：
+
+        #label startpomodoro:
+        #    $ renpy.block_rollback()
+        #    menu:
+
+    第一句以 `:` 收尾 → 被判成块头 → **后面那一串顶格注释被当成它的块体
+    收进同一个 chunk**。而 `render_file_block` 会给块体的**每一行加 4 格
+    （因为块体按定义比块头深一层）** → 那串注释被推进去一层。
+    第二轮它们已经在 4 格上，判据再判一次……**每导出一轮就动一次**
+    （实测 6 个真实文件中招：`pomodorro.rpy` / `script_pomo.rpy` /
+    `character_gallery.rpy` / `credits_screen.rpy` / `eyes_tracker.rpy`）。
+    """
+    h = str(header or '').lstrip()
+    if not h or h.startswith('#'):
+        return False
+    return h.endswith(':') and not h.startswith('$')
+
+
+def _followed_by_indented(raw: list, start: int) -> bool:
+    """
+    `raw[start:]` 里第一条**结构性**行是不是缩进行？（`_top_level_region` 用）
+
+    "结构性"与 `_region_chunk` 同一口径：**空行与整行注释都不算结构**
+    （Ren'Py / Python 都忽略它们的缩进）。
+
+    这条判据回答的是："那个顶格注释**后面还有没有本块的块体**"——
+    有 → 它是块中间的注释；没有 → 它属于下一段（作者写的段落标题）。
+    返回 `False` 覆盖"后面只有注释/空行"与"到文件末尾"两种情况。
+    """
+    for j in range(start, len(raw)):
+        s = raw[j].strip()
+        if not s or s.startswith('#'):
+            continue
+        return raw[j][:1] in (' ', '\t')
+    return False
 
 
 def _region_chunk(body: list, line_no: int) -> tuple:
@@ -404,15 +478,24 @@ class RenPyLexer:
         self.errors: list = []
         self._current_file: str = ''
 
-    def tokenize(self, filepath) -> list:
+    def tokenize(self, filepath, text: Optional[str] = None) -> list:
+        """
+        源文件 → 逻辑行嵌套树。
+
+        `text` 给了就**不再读盘**（用调用方读到的那一份）：`RenPyParser.parse()`
+        依赖这一点让"词法看到的文本"与"顶层区间 / CST 真迹看到的文本"
+        是**同一份快照**。
+        """
         filepath = Path(filepath)
         self._current_file = str(filepath)
-        try:
-            raw_lines = filepath.read_text(encoding='utf-8').splitlines()
-        except Exception as e:
-            self.errors.append(f"读取失败 {filepath}: {e}")
-            return []
+        if text is None:
+            try:
+                text = filepath.read_text(encoding='utf-8')
+            except Exception as e:
+                self.errors.append(f"读取失败 {filepath}: {e}")
+                return []
 
+        raw_lines = text.splitlines()
         flat = self._flatten(raw_lines)
         return self._build_tree(flat, str(filepath))
 
@@ -653,6 +736,52 @@ class RenPyLexer:
         return root.subblock
 
 
+def _indent_of(text: str) -> int:
+    """这一行的缩进（字符数）。空行算 0。"""
+    return len(text) - len(text.lstrip(' \t'))
+
+
+def _shift_continuations(text: str, base: int) -> str:
+    """
+    多行文本 → **首行去缩进、续行相对 `base` 左移**（空行留空）。
+
+    ⚠ 分工写清楚，否则会双重计算（2026-10-07 实测踩到）：
+      · **首行**的缩进由**调用方的 `rel`** 负责（`rel = node.indent - base`），
+        所以这里只 `lstrip()` 首行 —— 不在这里减 base，减了就加两次；
+      · **续行**才减 `base`。`_flatten` 会把括号未闭合的多行语句并成**一条
+        逻辑行**（`text` 含 `\n`），而 `lstrip()` 对多行字符串**只作用于
+        第一行** → 续行的**绝对**缩进原样留下，被当成"更深一层"；
+        渲染时整块再加一次基准，于是**每导出一次缩进就长一截**：
+
+            原文 12 → 第一轮 20 → 第二轮 28 → 第三轮 36 …（实测 mini_game1.rpy）
+
+        那不是"排版漂移"那么轻：文件**永远在变** → 增量对位每轮都判
+        "文本变了" → 整份退回全量。
+        判据：`tests/test_roundtrip_idempotent.py`、`tools/audit_idempotence.py`。
+    """
+    parts = str(text or '').split('\n')
+    out = [parts[0].lstrip()]
+    for ln in parts[1:]:
+        if not ln.strip():
+            out.append('')
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        out.append(' ' * max(0, ind - base) + ln.lstrip())
+    return '\n'.join(out)
+
+
+def _dedent_block(lines: list) -> list:
+    """
+    整块**按最小缩进归零**（相对层级保留，空行留空）。
+
+    与 `_top_level_region` 同一套口径 —— 两处都这么做，
+    才不会有哪一类块在往返里越缩越深。
+    """
+    indents = [_indent_of(s) for s in lines if s.strip()]
+    base = min(indents) if indents else 0
+    return [s[base:] if s.strip() else '' for s in lines]
+
+
 # ====================================================================
 #  第二层：Parser —— AST
 # ====================================================================
@@ -884,6 +1013,104 @@ class RawNode(ASTNode):
     raw_kind: str = ''
 
 
+@dataclass
+class UnknownBlockNode(RawNode):
+    """
+    **未建模的带子块语句**（项目自定义的块语句，如 `mycue "闪电":`）。
+
+    为什么需要这个节点（2026-10-07，M1 止血）：
+
+    从前 `_stmt_unmodeled` 只接叶语句，**带子块的直接 `return None`** ——
+    只留一条没人看的 warning。而顶层兜底 `_top_level_region()` **只覆盖
+    label 之外**。于是 label 内的自定义块会走一条最坏的路径：
+
+        mycue "闪电" intensity=3:      ← 被 `_stmt_say` 抢先匹配成台词，
+            target = ling                 `intensity=3:` 与冒号一起丢掉
+            hold 0.5                  ← 块体整段消失
+
+    产物里长出**一句由 `mycue` 说的台词 `"闪电"`**，剧情被静默改掉
+    （`tests/test_unknown_block_preserved.py` 钉住了这个现场）。
+
+    现在是**整块保真**：头 + 块体逐字进保真通道，并按
+    `raw_kind='unknown_block'` 计数，好让门禁与体检报告说得出
+    "这几行工具只保真、不管辖"。
+
+    · `text`      = 整块的原文（行首基准缩进已归零，块体保留相对缩进）；
+    · `head`      = 头一行的原文（诊断用）；
+    · `block_raw` = 块体各行（诊断/报告用）。
+    """
+
+    head: str = ''
+    block_raw: list = field(default_factory=list)
+
+
+@dataclass
+class LoopNode(ASTNode):
+    """
+    循环块（`while` / `for`）—— **头行结构化 + 块体成语句**（D2 → T0，2026-10-07）。
+
+    真机来源：`sr_general/game/minigame/mini_game1.rpy:50` 的**游戏主循环**。
+
+    D2 时只做到一半：头行结构化、块体**逐字**（`body`）—— 因为 `Beat` 是
+    **扁平**的（一维语句流），表达不了"这一段会重复执行"。那时的等级是
+    `T0b`（内置 IR + 块体逐字），并留了一句"要真正结构化循环体，得给拍模型
+    加作用域"。
+
+    **2026-10-07 第三轮把作用域加上了**：块体现在由 `_parse_block` 正常解析成
+    语句（`body_nodes`），`ParseResultBuilder._walk` 给它们标上
+    `nest_path='…>loop:<n>'` —— 于是"这一拍在哪个循环里"变成了**随表走的结构位**
+    （隐藏列 `Nest`），渲染层据此把扁平拍重新归组成 `while …:` 块。
+
+    · `header`     = 头行原文；
+    · `body_nodes` = 块体的 **AST 节点**（结构化那条路）；
+    · `text`       = 头行原文（`text`/`header` 同值是刻意的：它俩一个是
+      "语句头 token 的投影"、一个是可编辑面，见 `Statement.make_loop`）。
+
+    ⚠ **没有"逐字块体副本"**：内容只活在块体那些语句里。留一份当兜底
+    看着保险，实际是第二套真相（渲染时选错 = 同一段剧情出去两遍或一遍都不出去）。
+    """
+
+    header: str = ''
+    body_nodes: list = field(default_factory=list)
+    text: str = ''
+
+
+@dataclass
+class CameraNode(ASTNode):
+    """
+    3D 舞台的 `camera` 语句 —— **头行结构化 + 块体逐字**（2026-10-07）。
+
+    官方语法（`3dstage.html`）是**带块**的：
+
+        camera:                 # 不给层名 = master
+            perspective True
+
+        camera background:      # 只对 background 这一层开 3D 舞台
+            perspective True
+
+        camera:
+            perspective True
+            xpos 0
+            linear 3.0 xpos 500
+
+    所以它是**流程块**，不是叶语句 —— `RENPY_FLOW_BLOCK_HEADS` 里一直有它，
+    但工具没建模：它落进 `_stmt_unmodeled` → `UnknownBlockNode`
+    （`raw_kind='known_block'`）→ 报告里进"**催我们建模**"那一桶（T2）。
+
+    这一层把欠账还掉，**边界与循环块（D2）完全相同**：头行（`camera <层名>:`
+    里的层名）结构化、可编辑、可校验；**块体逐字**（ATL 属性是 Transform 的
+    领域，工具不解释它）。于是等级是 `T0b` 而不是 `T0`。
+
+    · `header` = 头行原文；`layer` = 层名（空 = master，与 Ren'Py 一致）；
+    · `body`   = 块体各行（逐字、相对缩进）；`text` = 整块原文。
+    """
+
+    header: str = ''
+    layer: str = ''
+    body: list = field(default_factory=list)
+    text: str = ''
+
+
 # 字符串正则：双引号分支与单引号分支分离
 _STR_DQ = r'"((?:[^"\\]|\\.)*)"'
 _STR_SQ = r"'((?:[^'\\]|\\.)*)'"
@@ -1102,6 +1329,20 @@ class RenPyParser:
     """递归下降解析器：LogicalLine 树 → ASTNode 列表。"""
     # ---------- 简单前缀正则 ----------
     _RE_LABEL_HEAD = re.compile(r'^label(?=\s)')
+    #: 循环块头（`while <条件>:` / `for <目标> in <可迭代>:`，D2）。
+    #: 必须**以冒号收尾**：`for "台词"`（说话人恰好叫 `for`）与
+    #: `while "x"` 都不会误命中 —— 它们没有尾冒号。
+    _RE_LOOP_HEAD = re.compile(r'^(while|for)\b.*:\s*$')
+    #: 3D 舞台的 `camera` 块头：`camera:` / `camera background:`。
+    #:
+    #: 三条约束，每条都是被坑过才加的：
+    #   · **必须以冒号收尾** —— Ren'Py 的 `camera` 一定要带 ATL 块，
+    #     而 `camera "台词"`（说话人恰好叫 camera）没有尾冒号，不许误伤；
+    #   · 层名只认 `[\w.]+`（`master` / `background` / `screens`…）——
+    #     不认表达式，认不出就当没匹配上；
+    #   · 冒号前**不许有别的参数** —— `camera xpos 100:` 不是合法语法，
+    #     那种行宁可留给"未建模"通道（逐字保真）也不要猜。
+    _RE_CAMERA_HEAD = re.compile(r'^camera(?:\s+([\w.]+))?\s*:\s*$')
     _RE_IF_HEAD = re.compile(r'^if\s+')
     _RE_ELIF_HEAD = re.compile(r'^elif\s+')
     _RE_ELSE_HEAD = re.compile(r'^else\s*:')
@@ -1178,8 +1419,17 @@ class RenPyParser:
     def parse(self, filepath) -> list:
         self.errors = []
         self.warnings = []
+        # 源文件文本缓存**按一次 parse 的生命周期**清掉：解析器实例是复用的，
+        # 留着上一次的文本会让"同一路径被改写后再解析"读到旧内容
+        # （见 `_source_text` 的用途：未建模块按原文物理行取）。
+        self.__dict__.pop('_src_cache', None)
+        # **整份文件只读一次**（2026-10-07，CST 稳固性）：这一次读到的文本同时
+        # 喂给词法器、顶层区间、以及 CST 真迹的挂载（`IncrementalRenPyAnalyzer`
+        # 从 `source_texts()` 取走它）。三处各读一遍时，只要中间有人改了文件，
+        # **AST 的行号**与**原文切片**就不是同一份快照 → 真迹贴错行。
+        text = self._source_text(str(filepath))
         lexer = RenPyLexer()
-        lines = lexer.tokenize(filepath)
+        lines = lexer.tokenize(filepath, text=text)
         self.errors.extend(lexer.errors)
         nodes = self._parse_block(lines)
         # **顶层（label 之外）那一整段**：逐字带出来（见 `TopLevelRegionNode`）。
@@ -1187,11 +1437,22 @@ class RenPyParser:
         # （`_stmt_unmodeled` 遇到带子块的直接跳过），而 `define` / `image`
         # 这些虽然进了 AST，却只留下结构化字段、原文已经不在了 ——
         # 只有按**原文**取那一段，才能保证"全量重生成"不丢东西。
-        region = _top_level_region(filepath)
+        region = _top_level_region(
+            filepath, lines=text.splitlines() if text is not None else None)
         if region:
             nodes = list(nodes) + [TopLevelRegionNode(
                 filename=str(filepath), blocks=region)]
         return nodes
+
+    def source_texts(self) -> dict:
+        """
+        本次 `parse()` 读到的源文本 → `{路径: 文本}`（可能为空）。
+
+        **给 CST 挂载用**：真迹必须切自"解析时那一份"，不许再读一遍盘
+        （`core.cst.attach_spans` 的 `file_texts`）。拿不到某条路径就用
+        它自己的兜底读盘 —— 那正是我们要尽量避免的窗口，所以这里尽量给全。
+        """
+        return dict(self.__dict__.get('_src_cache', {}) or {})
 
     # ---------- 块解析 ----------
 
@@ -1765,8 +2026,94 @@ class RenPyParser:
             )
         return self._NO_MATCH
 
+    def _stmt_loop(self, line, text):
+        """
+        `while <条件>:` / `for <目标> in <可迭代>:` —— **T2 → T0b → T0**
+        （D2 起；2026-10-07 第三轮把块体也结构化）。
+
+        为什么要专门接住它（真机实测）：`sr_general/game/minigame/mini_game1.rpy:50`
+        的**游戏主循环**就是这个形状，而它以前连头带块体被整块丢掉。M1 之后它
+        进了保真通道（内容安全了），但报告里只能反反复复说"这是**给工具作者**
+        的待办" —— 一个**永远还不掉**的待办不是待办，是欠账。
+
+        D2 只做到一半：头行可编辑、块体仍是一坨逐字文本 —— 编剧还是改不到
+        循环体里那句台词。**这一轮把块体也解析成语句**（`body_nodes`）：那正是
+        "给拍模型加作用域"的第一步。作用域由 `_walk` 标的
+        `nest_path='…>loop:<n>'` 承载（随隐藏列 `Nest` 走），渲染层据此把
+        扁平拍重新归组成 `while …:` 块。
+
+        ⚠ 判据**必须以冒号收尾**：`for "台词"`（说话人恰好叫 `for`）与
+        `while "x"` 都**必须**仍然是台词（`tests/test_loop_model.py` 钉着）。
+        """
+        if not self._RE_LOOP_HEAD.match(text):
+            return self._NO_MATCH
+        return LoopNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            header=text,
+            # 块体 → AST 节点（**结构化那条路**）。`_parse_block` 与
+            # `if` / `menu` 分支用的是同一个入口，所以块体里的东西
+            # （台词 / `$` / 嵌套 if / 嵌套 menu / 未建模块）走的是**同一套**
+            # 解析与同一条保真通道 —— 不在这里另写一遍分派，
+            # 也不另外抄一份"逐字块体"（那是第二套真相）。
+            body_nodes=self._parse_block(line.subblock),
+            text=text,
+        )
+
+    def _stmt_camera(self, line, text):
+        """
+        3D 舞台的 `camera` 块 —— **将 T2 升到 T0b**（2026-10-07）。
+
+        为什么它算"欠账"：`RENPY_FLOW_BLOCK_HEADS` 里一直有 `camera`
+        （工具**认识**它是流程块），但没建模 —— 于是它落在
+        `raw_kind='known_block'` 那一桶，报告里被算成 **T2（只读）**，
+        并进了"**催我们建模**"的清单。而它和循环块一样，是**能接住的**：
+        头行只有"层名"一个语义位，块体是 ATL 属性（Transform 的领域）。
+
+        所以处理方式与 `while` / `for` 完全一致（**同一套约定，不发明第二套**）：
+        头行结构化（`CameraHeader` 列，可编辑、可校验）、块体逐字（`Opaque`）、
+        等级 `T0b` —— **不记 T0**：ATL 属性没有被结构化编辑。
+
+        ⚠ 官方语法（3dstage.html）：`camera` 后**只能**跟一个层名，然后必须
+        有块体（`perspective True` 之类）。所以判据是"以冒号收尾"，与
+        `for "台词"` 那条防误伤规则同源。
+        """
+        m = self._RE_CAMERA_HEAD.match(text)
+        if not m:
+            return self._NO_MATCH
+        block_lines = self._unknown_block_lines(line)
+        head_lines = len((line.text or '').split('\n'))
+        return CameraNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            header=text,
+            layer=(m.group(1) or ''),
+            body=block_lines[head_lines:],
+            text='\n'.join(block_lines),
+        )
+
     def _stmt_say(self, line, text):
         """台词（**兜底**：前面的分支都没接住，才算台词）。"""
+        # ⓿ **台词不许带块**（2026-10-07，M1 止血）。
+        #
+        #     `mycue "闪电" intensity=3:` 的长相与台词**一模一样**，
+        #     `_RE_SAY` 会把它读成"mycue 说了一句 闪电" —— 冒号与
+        #     `intensity=3:` 一起丢掉，紧随的块体整段消失，
+        #     产物里长出一句**不存在的台词**（静默改剧情）。
+        #
+        #     Ren'Py 的 say 语句**不可能**开块，所以"带子块"就是
+        #     "这不是台词"的硬证据：放弃匹配，交给 `_stmt_unmodeled`
+        #     变成 `UnknownBlockNode`（整块保真）。
+        #
+        #     判据要求子块里有**非注释**内容：只有注释被多缩进两格的
+        #     话（`e "台词"` 后面跟一行缩进歪掉的注释）不该改变语义。
+        if line.subblock and any(
+                (getattr(ln, 'text', '') or '').strip()
+                and not getattr(ln, 'is_comment', False)
+                for ln in line.subblock):
+            return self._NO_MATCH
         # ① **字符串说话人**优先：`"系统" "提示"`（Ren'Py 合法写法）。
         #    不先接住它，第二个字符串就被整句丢掉（见 `split_string_speaker`）。
         pair = split_string_speaker(text)
@@ -1810,11 +2157,19 @@ class RenPyParser:
     def _stmt_unmodeled(self, line, text):
         """未建模语句的兜底。
 
-        到这里还没被任何分支接住的叶语句，说明模型没覆盖它。与其
+        到这里还没被任何分支接住的语句，说明模型没覆盖它。与其
         静默丢弃（这正是"解析不够强大"的根源），不如原样保存：
         渲染时逐字回写，保证 rpy↔表格 往返不丢程序员的代码。
-        只收叶语句 —— 带子块的未知语句（screen/init/transform …）交给
-        上层忽略，避免只留头部、丢掉块体造成更严重的破坏。
+
+        **带子块的也要收**（2026-10-07，M1 止血）。从前这里
+        `return None` —— 只留一条没人看的 warning，于是 label 内的
+        自定义块连头带块体从模型里消失，全量重生成就把这段剧情丢了，
+        而门禁**无从得知**它存在过（内容没进任何通道）。现在整块
+        进保真通道（`UnknownBlockNode`），并按 `raw_kind` 计数，
+        好让门禁与体检报告说得出口。
+
+        ⚠ 这条与顶层那段是**同一枚硬币的两面**：顶层（label 之外）
+        由 `_top_level_region()` 按原文整段带出；label 之内由这里带出。
         """
         if not line.subblock:
             return RawNode(
@@ -1824,11 +2179,117 @@ class RenPyParser:
                 text=text,
                 raw_kind='unmodeled',
             )
-        self.warnings.append(
-            f"{line.filename}:{line.line_number}: "
-            f"未建模的块语句已跳过（不在演出流内）: {text[:40]!r}"
+        # 整块原文：头一行 + 块体，**整块最小缩进归零**（相对层级保留）——
+        # 与 `_top_level_region` 同一套口径。不能用 `line.indent` 当基准：
+        # 括号续行（`slots = [\n    "potion",\n]`）被 lexer 并成了**一条**
+        # 逻辑行，续行的缩进是**绝对**的，按首行缩进去切只会把续行留在
+        # 原地，往返一次就多缩一层（实测 12 → 16 空格）。
+        block_lines = self._unknown_block_lines(line)
+        head_lines = len((line.text or '').split('\n'))
+        # 保真通道**同一条**（`Beat.opaque`），但要不要"告状"要分开：
+        # `while` / `for` 这类是 Ren'Py 标准流程块（T2，工具认识形状），
+        # 项目自定义的是真的不懂（T3）。判据是纯函数，放 `core.vocabulary`
+        # ——两端各自调用不会漂移（见 `RENPY_FLOW_BLOCK_HEADS`）。
+        from storygraph.core.vocabulary import is_known_flow_block
+        return UnknownBlockNode(
+            line_number=line.line_number,
+            indent=line.indent,
+            filename=line.filename,
+            text='\n'.join(block_lines),
+            raw_kind=('known_block' if is_known_flow_block(text)
+                      else 'unknown_block'),
+            head=text,
+            block_raw=block_lines[head_lines:],
         )
-        return None
+
+    def _unknown_block_lines(self, line: LogicalLine) -> list:
+        """
+        一条带子块的未知语句 → **原文行**（整块最小缩进归零）。
+
+        优先**按原文物理行**取（`_raw_block_lines`），因为 AST 那条路
+        天然缺两样东西：
+
+          · **块内空行**：lexer 根本不产生对应的 `LogicalLine`，
+            走 AST 必然丢（实测 8 行块丢 1 行空行）；
+          · 括号续行的**绝对缩进**：lexer 把它们并成一条逻辑行，
+            只按首行缩进切，续行会原地不动 —— 往返一次多缩一层
+            （实测 12 → 16 空格）。
+
+        两条都是"吃内容/改排版"，而这一层的契约是**一个字都不许吃**。
+        原文取不到（读文件失败、行号对不上）才退回 AST 重建。
+        """
+        raw = self._raw_block_lines(line)
+        if raw is not None:
+            return raw
+        nodes: list = []
+
+        def walk(node) -> None:
+            nodes.extend(str(getattr(node, 'text', '') or '').split('\n'))
+            for sub in (getattr(node, 'subblock', None) or ()):
+                walk(sub)
+
+        walk(line)
+        return _dedent_block(nodes)
+
+    def _raw_block_lines(self, line: LogicalLine) -> Optional[list]:
+        """
+        按**原文物理行**取一整块（含空行、含续行），整块最小缩进归零。
+
+        基准缩进 = 头行的缩进；块体 = 之后所有更深的行，
+        中间的**空行**只有在"后面还有更深的行"时才算块体
+        （否则它是块与下一段之间的分隔）。这正是 Ren'Py 的块规则。
+
+        行号对不上（文件被改过 / 被别的进程写过）就返回 `None`，
+        由调用方退回 AST 重建 —— 宁可少保真一点，也不要**贴错原文**。
+        """
+        path = getattr(line, 'filename', '') or ''
+        if not path:
+            return None
+        try:
+            text = self._source_text(path)
+        except (OSError, UnicodeDecodeError):
+            return None
+        if text is None:
+            return None
+        lines = text.split('\n')
+        start = int(getattr(line, 'line_number', 0) or 0) - 1
+        if start < 0 or start >= len(lines):
+            return None
+        head = lines[start]
+        # 身份核对：行号上那一段必须**就是**这条语句的头一行。
+        if head.strip() != str(line.text or '').split('\n')[0].strip():
+            return None
+        base = len(head) - len(head.lstrip(' \t'))
+        out = [head]
+        i = start + 1
+        while i < len(lines):
+            cur = lines[i]
+            if not cur.strip():
+                j = i
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines) and _indent_of(lines[j]) > base:
+                    out.extend(lines[i:j])
+                    i = j
+                    continue
+                break
+            if _indent_of(cur) <= base:
+                break
+            out.append(cur)
+            i += 1
+        return _dedent_block(out)
+
+    def _source_text(self, path: str) -> Optional[str]:
+        """读源文件（**每份只读一次**；`parse()` 开头会清缓存）。"""
+        cache = self.__dict__.setdefault('_src_cache', {})
+        if path in cache:
+            return cache[path]
+        try:
+            text = Path(path).read_text(encoding='utf-8')
+        except (OSError, UnicodeDecodeError):
+            text = None
+        cache[path] = text
+        return text
 
     def _parse_statement(self, line: LogicalLine, text: str):
         """一条逻辑行 → AST 节点（按语句种类分派）。
@@ -1859,9 +2320,11 @@ class RenPyParser:
             20. `audio`
             21. `voice`
             22. `extend`
-            23. `say`
-            24. `transform`
-            25. `unmodeled`
+            23. `loop`（`while` / `for`）
+            24. `camera`（3D 舞台）
+            25. `say`
+            26. `transform`
+            27. `unmodeled`
 
         `_stmt_*` 返回 `self._NO_MATCH` 表示"这条语句我认不出，
         试下一个分支"；返回别的（含 `None`）表示"有结论了，
@@ -1932,6 +2395,12 @@ class RenPyParser:
         if node is not self._NO_MATCH:
             return node
         node = self._stmt_extend(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_loop(line, text)
+        if node is not self._NO_MATCH:
+            return node
+        node = self._stmt_camera(line, text)
         if node is not self._NO_MATCH:
             return node
         node = self._stmt_say(line, text)
@@ -2245,7 +2714,10 @@ class RenPyParser:
         def walk(nodes, base_indent):
             for node in nodes:
                 rel = max(0, node.indent - base_indent)
-                text = node.text.lstrip()
+                # **逐行**左移（不是 `lstrip()` 第一行）——见
+                # `_shift_to_base` 的说明：续行带着绝对缩进会被当成
+                # "更深一层"，每渲染一次就长一截。
+                text = _shift_continuations(node.text, base_indent)
                 if text.strip():
                     text = text.rstrip()
                     # **块体里这一行自己的行尾注释也要带上**（C 阶段的收尾）：
@@ -2645,6 +3117,14 @@ class ParseResult:
     # 顶层（label 之外）的 `python:` 整块代码，`FileBlock` 列表。
     # 见 `FileBlock` 的 docstring：不进 statements/Beats，但要能原样带回去。
     file_blocks: list = field(default_factory=list)
+    # **工具不认识的带子块语句**（label 之内）：`[{head, file, line, lines}]`。
+    #
+    # 为什么要单独记一份（2026-10-07，M1）：这些块的**内容**走保真通道，
+    # 但"工具不管辖它们"这件事必须**能数出来、能说出口** —— 体检报告要
+    # 回答编剧真正关心的问题："我剧本里用的哪一种结构，工具管不了？"
+    # 只统计 label 之内的：顶层（label 之外）由 `_top_level_region()`
+    # 整段按原文带出，不存在丢的风险。
+    unknown_blocks: list = field(default_factory=list)
 
 
 # ====================================================================
@@ -2988,8 +3468,56 @@ class ParseResultBuilder:
                         node.text, accum_cond,
                         source=(node.filename, node.line_number)))
 
+            elif isinstance(node, LoopNode):
+                # 循环块（D2/T0）：**头行一条语句 + 块体各一条语句**。
+                #
+                # 这里是"给拍模型加作用域"的落点：
+                #   · 头行自己一条 `LOOP` 语句，它的 `nest_path` 是**外层**
+                #     路径（循环头在父块里，不在自己里面 —— 与菜单头同款）；
+                #   · 块体用 `join_nest(…, f'loop:{n}')` 递归 walk，
+                #     于是"这一拍在哪个循环里"变成**随表走的结构位**。
+                # `counters` 与 `if`/`menu` 共用一份（label 内的文档序），
+                # 所以 `loop:2` 与按行扫出来的顺序一致。
+                #
+                # ⚠ 块体**不累积头行的条件**吗？累积的（`accum_cond` 原样传下去）。
+                # 这是与 `if` 分支**刻意不同**的一处：循环体不是"条件成立才执行
+                # 一次"，而是"条件成立才进入循环"，渲染层负责把这一层条件
+                # **写回循环头外面**并从块体拍上剥掉（见 `render_loop_block`），
+                # 否则每一句块体台词都会各自套一个 `if`。
+                if current_label:
+                    counters['loop'] = counters.get('loop', 0) + 1
+                    add_stmt(Statement.make_loop(
+                        node.header, text=node.text, walked=True,
+                        condition=accum_cond,
+                        source=(node.filename, node.line_number)))
+                    self._walk(
+                        node.body_nodes, current_label, result, accum_cond,
+                        menu_option,
+                        nest_path=join_nest(
+                            nest_path, f"loop:{counters['loop']}"),
+                        counters=counters)
+
+            elif isinstance(node, CameraNode):
+                # 3D 舞台的 `camera` 块（2026-10-07）：与循环块同一档 ——
+                # 头行（层名）结构化、块体（ATL 属性）逐字。
+                if current_label:
+                    add_stmt(Statement.make_camera(
+                        node.text, header=node.header, layer=node.layer,
+                        body=node.body, condition=accum_cond,
+                        source=(node.filename, node.line_number)))
+
             elif isinstance(node, RawNode):
                 if current_label:
+                    # **未建模块**先记一笔账（体检报告 / 门禁要用），
+                    # 内容照旧走下面同一条保真通道。见
+                    # `ParseResult.unknown_blocks` 的说明。
+                    if isinstance(node, UnknownBlockNode):
+                        result.unknown_blocks.append({
+                            'head': node.head,
+                            'file': node.filename,
+                            'line': node.line_number,
+                            'lines': len(node.block_raw) + 1,
+                        })
                     add_stmt(Statement.make_raw(
                         node.text, raw_kind=node.raw_kind,
                         condition=accum_cond,
@@ -3433,8 +3961,9 @@ class IncrementalRenPyAnalyzer:
     增量式双输出分析器。
 
     缓存策略：
-      · 缓存元组： (mtime, size, ast_nodes, errors, warnings)
+      · 缓存元组： (mtime, size, ast_nodes, errors, warnings, source_text)
       · mtime + size 未变 → 复用 AST 与错误/警告
+        （`source_text` 也一起复用：CST 真迹必须切自**解析时那一份**）
       · 已删除文件的缓存自动清理
       · 输出层（Graph / ParseResult / TU）每次全量重建
 
@@ -3469,6 +3998,8 @@ class IncrementalRenPyAnalyzer:
         all_ast = []
         all_errors = []
         all_warnings = []
+        #: 路径 → **解析时读到的那一份**源文本（CST 真迹只许切自它）
+        texts: dict = {}
 
         for fp_path, fp_key in unique_files:
             current_files.add(fp_key)
@@ -3484,16 +4015,24 @@ class IncrementalRenPyAnalyzer:
                 all_ast.extend(cached[2])
                 all_errors.extend(cached[3])
                 all_warnings.extend(cached[4])
+                cached_text = cached[5] if len(cached) > 5 else ''
+                if cached_text:
+                    texts[str(fp_path)] = cached_text
                 continue
 
             parser = RenPyParser()
             nodes = parser.parse(fp_path)
             file_errors = list(parser.errors)
             file_warnings = list(parser.warnings)
+            # **同一次读**：解析器读到的文本原样留下来喂 CST（别再读一遍盘）。
+            text = parser.source_texts().get(str(fp_path), '') or ''
+            if text:
+                texts[str(fp_path)] = text
             all_errors.extend(file_errors)
             all_warnings.extend(file_warnings)
             self._file_cache[fp_key] = (
-                st.st_mtime, st.st_size, nodes, file_errors, file_warnings
+                st.st_mtime, st.st_size, nodes, file_errors, file_warnings,
+                text
             )
             all_ast.extend(nodes)
 
@@ -3502,6 +4041,29 @@ class IncrementalRenPyAnalyzer:
                 del self._file_cache[k]
 
         parse_result = ParseResultBuilder().build(all_ast)
+        # **CST（D3，2026-10-07）**：给每条语句挂上"它在原文里的行区间 +
+        # 逐字原文 + 前导 trivia"。挂的是**动态属性**（不进 dataclass 的
+        # 相等/哈希 —— 那是一条全局契约，不能为一次保真改动去动它）。
+        #
+        # 失败/取不到就静默跳过：拿不到 CST 时一切退回 D3 之前，
+        # **没有降级风险**（这正是选动态属性的原因）。
+        try:
+            from storygraph.core.cst import attach_spans
+            # `texts` 是**解析时读到的同一份**（见上面那个循环）。
+            # 兜底：老式缓存（没有 text 那一位）/ 盘上新增的文件 → 读一次盘。
+            # 这条兜底是**已知窗口**：它读到的可能已经不是解析时那一份，
+            # 所以主路必须把 text 给全，别让它常态生效。
+            for fp_path, _fp_key in unique_files:
+                if str(fp_path) in texts:
+                    continue
+                try:
+                    texts[str(fp_path)] = fp_path.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError) as e:
+                    swallow('parsing.analyze.cst.read', e)
+            parse_result.cst_attached = attach_spans(
+                parse_result.statements, texts)
+        except Exception as e:                  # noqa: BLE001
+            swallow('parsing.analyze.attach_cst', e)
         parse_result.errors.extend(all_errors)
         parse_result.warnings.extend(all_warnings)
 

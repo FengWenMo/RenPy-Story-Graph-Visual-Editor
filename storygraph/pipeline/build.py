@@ -81,6 +81,14 @@ class BuildResult:
             tail += (f"\n生成门禁：{guard['blocking']} 条致命问题 —— "
                      f"产物**未写入目标路径**"
                      f"（已留 .blocked.rpy 供对照，见产物列表）")
+        # 非致命结论**逐条印出来**（M1）：一句"有 N 条警告"等于没说 ——
+        # 用户需要知道的是"哪几行工具不管辖"，因为那正是他要自己盯的地方。
+        for w in (guard.get('warnings') or ()):
+            tail += f'\n门禁提示：{w}'
+        # 项目声明的自定义语句（M3）：用户说过「你没有适应到它的自定义结构，
+        # 他会立即退出，因为工具没有用」—— 所以"工具知道哪些"必须说出来。
+        if guard.get('statements'):
+            tail += f'\n{guard["statements"]}'
         return f'{head}\n{tail}'
 
 
@@ -89,7 +97,7 @@ class BuildResult:
 # 这里继续 re-export，既有调用方（cli / story / 测试）无需改动。
 
 
-def load_asset_registry(project_root, asset_dir=None):
+def load_asset_registry(project_root, asset_dir=None, walk=None):
     """读资源表（不存在就返回 None，校验会相应降级为 L1/L2 为主）。"""
     project_root = Path(project_root)
     candidates = []
@@ -97,16 +105,33 @@ def load_asset_registry(project_root, asset_dir=None):
         candidates.append(Path(asset_dir))
     candidates += [project_root / 'asset_tables',
                     project_root / 'game' / 'asset_tables']
+    # ⚠ 只认**真表**：`*.bak.xlsx`（我们自己的备份）、`~$*.xlsx`（Excel 锁文件）
+    # 和 `*.broken-*.xlsx`（读不出来时挪到一边的坏文件）都不算"有表" ——
+    # 否则一个只放着备份的目录会让这里返回一张**空表**，于是永远不去建表、
+    # 打开项目看到 0 个资源（2026-10-05 实测）。
+    try:
+        from storygraph.assets.asset_registry import is_real_table_file
+    except Exception as e:                      # noqa: BLE001 - 极端情况退回宽判
+        swallow('pipeline.build.load_asset_registry.import', e)
+
+        def is_real_table_file(p):
+            return str(p).lower().endswith('.xlsx')
     for c in candidates:
-        if c.exists() and any(c.glob('*.xlsx')):
-            from storygraph.assets.asset_registry import load_hooks, parse_asset_tables
-            try:
-                return parse_asset_tables(
-                    c, hooks=load_hooks(project_root=project_root),
-                    project_root=project_root)
-            except Exception as e:
-                swallow('pipeline.build.load_asset_registry', e)
-                return None
+        try:
+            if c.exists() and any(is_real_table_file(p)
+                                  for p in c.glob('*.xlsx')):
+                from storygraph.assets.asset_registry import (load_hooks,
+                                                              parse_asset_tables)
+                try:
+                    return parse_asset_tables(
+                        c, hooks=load_hooks(project_root=project_root),
+                        project_root=project_root, walk=walk)
+                except Exception as e:
+                    swallow('pipeline.build.load_asset_registry', e)
+                    return None
+        except OSError as e:                    # noqa: BLE001
+            swallow('pipeline.build.load_asset_registry', e)
+            continue
     return None
 
 
@@ -214,11 +239,45 @@ def build_project(project_root, asset_dir=None, out_dir=None,
         # 漏在了门外。
         target = out_dir / 'story.generated.rpy'
         text = render_beats_to_rpy(beats, label_name=None, registry=registry)
-        artifact = write_generation(text, target, project_root=project_root)
+        artifact = write_generation(text, target, project_root=project_root,
+                                    beats=beats)
+        # 项目声明的自定义语句（M3）＋ **能力覆盖率**（元模型 A）：
+        # 「工具愿不愿意被教」「工具有多少是替得了你的」都要看得见。
+        # 这一步只读，失败也只少一行报告，不影响构建。
+        statements_text = ''
+        try:
+            from storygraph.story.statement_registry import (
+                StatementRegistry, format_capability_summary,
+                format_registry_report)
+            _reg = StatementRegistry.for_project(project_root)
+            statements_text = format_registry_report(_reg)
+            # 覆盖率用**这一轮真正编译过的拍**算 —— 它就是产物里的东西。
+            cap_text = format_capability_summary(beats=beats, registry=_reg)
+            if cap_text:
+                statements_text = f'{statements_text}\n{cap_text}'
+            # **原文真迹覆盖率**（CST，D3）：`cst_coverage` / `format_cst_report`
+            # 从前**只有单测在调**（悬空能力）—— 于是"真迹退化"（比如某类语句
+            # 拿不到逐字原文、或者更糟的贴错行）在生产里没人看得见。
+            # 放进构建报告，CI（`tools/journey_check.py` 走 CLI build）每次都会打。
+            _st = getattr(collected.get('parse_result'), 'statements', None) or []
+            if _st:
+                from storygraph.core.cst import cst_coverage, format_cst_report
+                statements_text = (
+                    f'{statements_text}\n'
+                    f'{format_cst_report(cst_coverage(_st), "语句")}')
+        except Exception as e:                  # noqa: BLE001
+            swallow('pipeline.build.statements_report', e)
         guard_info = {
             'written': artifact.written,
             'blocking': len(artifact.blocking),
             'issues': [i.format() for i in artifact.issues],
+            'statements': statements_text,
+            # **非致命的门禁结论也要留下**（M1，2026-10-07）：
+            # `UNMANAGED_BLOCK` / `KNOWN_UNMODELED_BLOCK` 是 warn ——
+            # 它们不拦导出，但"这几行不归工具管"必须**说出口**
+            # （用户 D1 的选择：透传 + 报警 + 报告必须出现）。
+            # 只放进 `issues` 是不够的：报告只打印计数，人就看不到内容。
+            'warnings': [i.format() for i in artifact.warnings],
         }
         artifacts.append(str(artifact.review_path or artifact.out_path))
         todo_count = sum(1 for ln in text.splitlines()

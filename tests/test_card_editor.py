@@ -29,9 +29,9 @@ import pytest
 from storygraph.app.beats import (
     apply_expression, apply_position, apply_sprite_rows,
     beat_expression_word, beat_position_word, beat_sprite_rows,
-    beat_to_fields, expression_choices, fields_to_beat,
-    inherited_state_hint, normalize_expression, normalize_position,
-    position_choices,
+    beat_to_fields, cards_to_show, expression_choices, fields_to_beat,
+    inherited_state_hint, kind_from_speaker, normalize_expression,
+    normalize_expression_words, normalize_position, position_choices,
 )
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 from storygraph.story.script_table import Beat, make_symbols, render_beats_to_rpy
@@ -137,7 +137,9 @@ class TestCardShape:
 class TestExpressionProjection:
     def test_read_expression_from_show(self, symbols):
         b = Beat(seq=1, label='t', text='x', show='ling happy@left')
-        assert beat_expression_word(b, symbols) == '开心'
+        # 2026-10-05 用户定调：内置词表只是**输入别名**；项目没声明过
+        # 就显示属性名（工具不假设项目用中文）
+        assert beat_expression_word(b, symbols) == 'happy'
 
     def test_lossy_word_falls_back_to_raw_attribute(self, symbols):
         """
@@ -166,13 +168,13 @@ class TestExpressionProjection:
 
     def test_read_position_from_show(self, symbols):
         b = Beat(seq=1, label='t', text='x', show='ling close_happy@left')
-        assert beat_position_word(b, symbols) == '左'
+        assert beat_position_word(b, symbols) == 'left'
 
     def test_position_falls_back_to_beat_at(self, symbols):
         """`show` 里没写 `@位置` 时用 Beat 的 at（面板只给一个位置格）。"""
         b = Beat(seq=1, label='t', text='x', show='ling close_happy',
                  at='left')
-        assert beat_position_word(b, symbols) == '左'
+        assert beat_position_word(b, symbols) == 'left'
 
     def test_no_sprite_means_empty(self, symbols):
         b = Beat(seq=1, label='t', text='x', show='')
@@ -250,7 +252,7 @@ class TestFieldMapping:
         # close_happy 反推不出无损的中文词（「开心」会丢 close_），
         # 所以这里显示原属性名——丑但准，见 test_lossy_word_falls_back…
         assert fields['Expression'] == 'close_happy'
-        assert fields['Position'] == '左'
+        assert fields['Position'] == 'left'
 
     def test_direct_beat_construction_is_not_wiped(self):
         """
@@ -492,8 +494,8 @@ class TestSpriteArray:
                  show='ling happy@left; mary smile@right; bob sad@center')
         rows = beat_sprite_rows(b, symbols)
         assert [r['tag'] for r in rows] == ['ling', 'mary', 'bob']
-        assert [r['position'] for r in rows] == ['左', '右', '中']
-        assert [r['expression'] for r in rows] == ['开心', '笑', '难过']
+        assert [r['position'] for r in rows] == ['left', 'right', 'center']
+        assert [r['expression'] for r in rows] == ['happy', 'smile', 'sad']
 
     def test_roundtrip_preserves_all_sprites(self, symbols):
         show = 'ling happy@left; mary smile@right; bob sad@center'
@@ -684,3 +686,225 @@ class TestChoices:
 
     def test_position_choices_nonempty_without_registry(self, symbols):
         assert position_choices(symbols), '至少要有内置位置词'
+
+
+# ==================================================================
+#  九、「类型」是说话人的投影（用户 2026-10-05 实测报）
+# ==================================================================
+
+class TestKindFollowsSpeaker:
+    """
+    用户原话：
+
+    > 明明卡牌编辑器内我已经编写了说话人，kind 仍然显示 narrator
+
+    解析器本来就是按说话人定 `say` / `narration`（见 `beat_build`），
+    卡片上只改「说话人」时也必须跟着重算 —— 否则高级区那一格写着
+    `narration`、左栏那一行还挂着 ☁，用户合理地以为"说话人没生效"。
+    """
+
+    def test_the_pair_is_a_projection_of_the_speaker(self):
+        assert kind_from_speaker('narration', 'ling') == 'say'
+        assert kind_from_speaker('narration', '') == 'narration'
+        assert kind_from_speaker('narration', '  ') == 'narration'
+        assert kind_from_speaker('say', 'ling') == 'say'
+
+    def test_it_never_downgrades(self):
+        """
+        **单向**：`say` + 空说话人**不**自动变 `narration`。
+
+        那条卡片此时会显示"[有台词但没有说话人 —— 导出后会变成旁白]"的提示，
+        而提示的判据正是 `kind not in ('narration', 'extend')` —— 一降级，
+        提示就把自己吞了，用户再也看不到"这句会变旁白"。
+        （`say` 也是表里没有 `Kind` 列时的默认值，见 `test_beat_editor`。）
+        """
+        assert kind_from_speaker('say', '') == 'say'
+        assert kind_from_speaker('say', '   ') == 'say'
+
+    def test_structural_kinds_are_not_touched(self):
+        """`menu` / `menu_option` / `extend` 的类型是**结构**，不是"谁在说"。"""
+        for k in ('menu', 'menu_option', 'extend'):
+            assert kind_from_speaker(k, 'ling') == k
+            assert kind_from_speaker(k, '') == k
+
+    def test_fields_to_beat_recomputes_it(self):
+        b = fields_to_beat({'Kind': 'narration', 'Speaker': 'ling',
+                            'Text': '我来说。'})
+        assert b.kind == 'say', f'填了说话人类型却没变：{b.kind!r}'
+
+    def test_session_apply_recomputes_it(self):
+        """会话那条路（卡片提交走的就是它）也必须重算。"""
+        from storygraph.app.editor import EditorSession
+        s = EditorSession(project_root=None)
+        s.beats = [Beat(seq=1, label='a', kind='narration', text='一句话')]
+        s.apply(0, {'Speaker': 'ling', 'Text': '一句话'})
+        assert s.beats[0].kind == 'say', s.beats[0].kind
+        # 左栏那一行的前缀也跟着变（☁ = 旁白）
+        assert s.list_entry(0)['prefix'] == ''
+
+
+# ==================================================================
+#  十、多属性立绘的往返**一个字都不许变**（用户 2026-10-05 实测报）
+# ==================================================================
+
+class _FuzzySymbols:
+    """
+    最小符号表，复刻真实项目里的**子串兜底**档：
+
+    项目把那张图登记成一条属性 `base_arms_akimbo_sigh`，于是
+    `attr_for('ling', 'base_arms_akimbo')` 与 `attr_for('ling', 'sigh')`
+    **都**返回 `base_arms_akimbo_sigh`（`Symbols.attr_for` 的第 3 档）。
+    """
+
+    MAP = {'base_arms_akimbo': 'base_arms_akimbo_sigh',
+           'sigh': 'base_arms_akimbo_sigh',
+           '无语': 'sigh',
+           '开心': 'happy'}
+
+    def attr_for(self, tag, word):
+        w = str(word or '').strip()
+        return self.MAP.get(w, w)
+
+
+class TestMultiAttributeSpritesSurviveTheRoundTrip:
+    """
+    用户报："明明已经添加了立绘，导出后对应的 show 却没有出现"。
+
+    摊开后是一类**静默改图像名**：作者写的是两个词
+    `show ling base_arms_akimbo sigh`，而逐词归一在子串兜底档上把两个词
+    都映射成了同一条属性：
+
+        ling base_arms_akimbo sigh  →  ling base_arms_akimbo_sigh base_arms_akimbo_sigh
+
+    图像名被改写 → 游戏里找不到这张立绘。触发点极隐蔽：**翻页 / 保存 /
+    导出都会先提交当前拍**，而提交就是"卡片 → show"这条路 —— 只要在那一拍
+    上待过，名字就被改了。
+    """
+
+    def test_two_words_are_never_merged_into_one(self):
+        out = normalize_expression_words('base_arms_akimbo sigh',
+                                        'ling base_arms_akimbo sigh',
+                                        _FuzzySymbols())
+        assert out == ['base_arms_akimbo', 'sigh'], (
+            f'两个词被并成一条属性了（图像名会被改写）：{out}')
+
+    def test_a_real_translation_still_happens(self):
+        """别把这条守卫修成"什么都不翻"：中文词仍然要翻成属性。"""
+        out = normalize_expression_words('开心 无语', 'ling happy sigh',
+                                        _FuzzySymbols())
+        assert out == ['happy', 'sigh'], out
+
+    def test_cards_to_show_keeps_the_authors_spec(self):
+        cards = [{'image': 'ling base_arms_akimbo sigh',
+                  'expression': 'base_arms_akimbo sigh',
+                  'position': 'i11', 'at': 'i11',
+                  'order_index': 0, 'extra_rows': []}]
+        assert cards_to_show(cards, _FuzzySymbols()) == \
+            'ling base_arms_akimbo sigh@i11', \
+            '卡片往返把作者的图像名改掉了'
+
+
+# ==================================================================
+#  十一、候选表要**项目通用**（用户 2026-10-05 实测报）
+# ==================================================================
+
+class _ProjectSymbols:
+    """
+    一个"不用中文做的项目"：角色表 / 图像属性全是英文，词表里什么都没声明。
+
+    正是用户那句"万一这个项目不用中文做怎么办？工具应是通用的"的形状。
+    """
+
+    def __init__(self):
+        from storygraph.assets.asset_registry import AssetRegistry
+        from storygraph.story.dsl import DEFAULT_EXPRESSIONS, DEFAULT_POSITIONS
+        self.registry = AssetRegistry()
+        self.registry.images = {
+            'ling_angry': {'ID': 'ling_angry', 'Tag': 'ling',
+                           'Attributes': 'angry'},
+            'ling_close_happy': {'ID': 'ling_close_happy', 'Tag': 'ling',
+                                 'Attributes': 'close_happy'},
+        }
+        self.registry.transforms = {
+            'i11': {'ID': 'i11', 'ATL': 'xpos 0.35'},
+            'd11': {'ID': 'd11', 'ATL': 'xpos 0.2'},
+        }
+        # 内置词表在场（工具自带的），但**项目一个词都没声明**
+        self.positions = dict(DEFAULT_POSITIONS)
+        self.expressions = dict(DEFAULT_EXPRESSIONS)
+        self.project_words = {'expression': set(), 'position': set()}
+
+    def attrs_of_tag(self, tag):
+        return ['angry', 'close_happy'] if tag == 'ling' else []
+
+    def expression_word_for(self, tag, attr):
+        return {'angry': '生气', 'close_happy': '开心'}.get(attr, '')
+
+    def position_word_for(self, transform):
+        return {'center': '中央', 'i11': ''}.get(transform, '')
+
+    def attr_for(self, tag, word):
+        # 项目词表把人话词映射到属性（`生气 → angry`）；其余原样
+        return {'生气': 'angry', '开心': 'close_happy'}.get(
+            str(word or '').strip(), str(word or '').strip())
+
+
+class TestChoicesAreProjectGeneric:
+    """
+    用户 2026-10-05（两条一起报）：
+
+    > ling 一开始有很多个表情，但是不知道为何切着切着就少了！最后不剩几个，
+    > 切不出生气！
+    > 那些中央等位置同理，我没有看见我的 i11……我怕函数名对不上！
+
+    病根同一条：候选表从前是**词表里的人话词**（`生气` / `中央`），而不是
+    项目真实的**属性名 / transform 名**（`angry` / `i11`）。后果有三：
+
+      · 没有词表条目的属性压根不在候选里（"少了"）；
+      · 当前值是属性名时它不在候选里 → 点 chip 走"固定当前值"那一支
+        → **点了没反应**（"切不出"）；
+      · 一个不用中文做的项目也会看到注入的中文词（"工具应是通用的"）。
+    """
+
+    def test_expressions_are_the_projects_attribute_names(self):
+        sym = _ProjectSymbols()
+        got = expression_choices(Beat(show='ling angry'), sym)
+        assert got == ['angry', 'close_happy'], (
+            f'候选里应当只有项目真实的属性名：{got}')
+
+    def test_the_current_value_is_always_in_the_choices(self):
+        """回归："切着切着就少了 / 切不出" —— 当前值必须在候选里，chip 才转得动。"""
+        sym = _ProjectSymbols()
+        for current in ('angry', 'close_happy'):
+            assert current in expression_choices(Beat(show=f'ling {current}'),
+                                                 sym), current
+
+    def test_positions_put_the_projects_own_transforms_first(self):
+        sym = _ProjectSymbols()
+        got = position_choices(sym)
+        assert got[:2] == ['d11', 'i11'], (
+            f'项目自己的 transform 必须排最前（否则被 limit 截掉）：{got[:6]}')
+        assert 'i11' in got, '用户的 i11 必须看得见'
+
+    def test_positions_do_not_inject_the_tools_chinese_words(self):
+        sym = _ProjectSymbols()
+        got = position_choices(sym)
+        assert '中央' not in got and '左' not in got, (
+            f'工具不该把自己的中文词塞进候选（项目没声明过）：{got[:6]}')
+        # 但内置位置的**真取值**在（那是 Ren'Py 认识的名字）
+        assert 'center' in got or 'left' in got, got[:8]
+
+    def test_the_display_does_not_prefer_the_tools_chinese_words(self):
+        """当前值显示：项目词表 → 真实名字；内置中文词不算"项目的说法"。"""
+        sym = _ProjectSymbols()
+        sym.positions = {'中央': 'center'}          # 只有内置词，项目没声明
+        assert beat_position_word(Beat(show='ling happy@center'), sym) == 'center'
+        sym.project_words['position'] = {'中央'}    # 项目自己声明了 → 显示人话
+        assert beat_position_word(Beat(show='ling happy@center'), sym) == '中央'
+
+    def test_expression_display_falls_back_to_the_attribute(self):
+        sym = _ProjectSymbols()
+        # 项目没声明词表 → 显示属性名（工具的内置中文词不冒充）
+        assert beat_expression_word(Beat(show='ling angry'), sym) == 'angry'
+        sym.project_words['expression'] = {'生气'}  # 项目声明了 → 显示它自己的词
+        assert beat_expression_word(Beat(show='ling angry'), sym) == '生气'

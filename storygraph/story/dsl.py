@@ -469,6 +469,19 @@ class Symbols:
         self.registry = registry
         self.positions = dict(DEFAULT_POSITIONS)
         self.expressions = dict(DEFAULT_EXPRESSIONS)
+        #: **项目自己在词表里声明过的**人话词（`{'expression': {...}, 'position': {...}}`）。
+        #:
+        #: 为什么要单独记（2026-10-05 用户实测报）：
+        #: > 如果你标中文人话词，那么你就要遇到一个问题：万一……这个项目不用中文
+        #: > 做怎么办？工具应是通用的！不应该只能做具体的项目！
+        #:
+        #: `positions` / `expressions` 是**内置词表 + 项目词表**的合并结果，
+        #: 界面从前直接拿它当候选 → 一个不用中文做的项目也会看到 `左` / `生气`。
+        #: 现在分得清"这是项目自己的说法"还是"工具的内置猜测"：
+        #:   · **候选**只给项目真实的名字（属性名 / transform 名）；
+        #:   · **显示当前值**时，只有项目自己声明过的词才优先显示（那是它的习惯）；
+        #:   · 内置词继续当**输入别名**（策划打 `生气` 照样能落到 `angry`）。
+        self.project_words = {'expression': set(), 'position': set()}
         self._by_var = {}
         self._by_name = {}
         self._attrs_by_tag = {}
@@ -480,8 +493,10 @@ class Symbols:
                       'expression': self.expressions}.get(category)
             if bucket is None:
                 continue
+            kind = 'position' if bucket is self.positions else 'expression'
             for word, mapped in (target or {}).items():
                 bucket[word] = mapped
+                self.project_words[kind].add(word)
 
         self._build()
 
@@ -694,6 +709,25 @@ class Symbols:
         return cands[0][1]
 
     # ---------- 图像 ----------
+
+    def image_rows_for(self, spec: str) -> list:
+        """
+        图像名 → 资源表里命中的那些行 `[(ID, row), …]`（走唯一解析链）。
+
+        给"从名字反查 tag"用（用户 2026-10-05："表情也调不了了，修复！"）：
+        卡片存的是下划线写法 `ling_angry`，要能从它读回真正的 `Tag='ling'`。
+        """
+        spec = (spec or '').strip()
+        if not spec or not self.has('image'):
+            return []
+        data = getattr(self.registry, 'images', {}) or {}
+        from storygraph.assets.asset_registry import resolve_references
+        out = []
+        for aid in resolve_references(spec, self.registry, self._get_index()):
+            row = data.get(aid)
+            if row is not None:
+                out.append((aid, row))
+        return out
 
     def image_ok(self, spec: str) -> bool:
         if not spec:

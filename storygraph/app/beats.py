@@ -21,6 +21,8 @@ storygraph.app.beats
 
 from __future__ import annotations
 
+import re
+
 from storygraph.core.safeguard import swallow
 from pathlib import Path
 from typing import Optional
@@ -30,6 +32,8 @@ from storygraph.assets.asset_registry import describe_asset
 from storygraph.story.beat_model import (
     Beat,
     KIND_MENU,
+    KIND_NARRATION,
+    KIND_SAY,
     MENU_NO_CAPTION,
     join_show_items,
     split_show_items,
@@ -40,6 +44,38 @@ from storygraph.story.beat_model import (
 )
 
 # ===================== 纯逻辑（可单测） =====================
+
+def kind_from_speaker(kind: str, speaker: str) -> str:
+    """
+    填了说话人 → 类型就是**台词**（`say`）。
+
+    为什么必须有这一条（用户 2026-10-05 实测报）：
+
+    > 明明卡牌编辑器内我已经编写了说话人，kind 仍然显示 narrator
+
+    解析器**本来就是**这么定的（`beat_build`：`kind = say if speaker else
+    narration`），但卡片上只改「说话人」那一格时没人重算它 —— 于是高级区
+    的「类型」还写着 `narration`（左栏那一行也还挂着 ☁），用户合理地以为
+    "我填的说话人没生效"。导出的台词其实是对的（渲染看 `speaker`），
+    但**看得见的字段在说谎**，而"看得见的和实际的不一致"比报错更贵。
+
+    ⚠ **刻意是单向的：不自动往下降级**（`say` + 空说话人 ≠ 自动变 narration）：
+
+      · 那张卡片此时会显示 **[有台词但没有说话人 —— 导出后会变成旁白]**
+        的提示条（`speaker_missing_warning`），而那条提示的判据正是
+        `kind not in ('narration', 'extend')` —— 一降级，提示就被自己吞掉，
+        用户再也看不到"这句会变旁白"；
+      · 表里没有 `Kind` 列时默认 `say` 是既有的迁移契约
+        （`tests/test_beat_editor.py::test_missing_kind_defaults_to_say`）。
+
+    单一真源放在这里：`fields_to_beat`（表单那条路）与
+    `TableSessionMixin.apply`（会话那条路）都调它，不各写一份。
+    """
+    k = str(kind or '').strip() or KIND_SAY
+    if k == KIND_NARRATION and str(speaker or '').strip():
+        return KIND_SAY
+    return k
+
 
 def search_assets(engine, query: str = '', asset_types=None, limit: int = 50):
     """按前缀/模糊搜索资产，返回 [(asset_type, asset_id), ...]。"""
@@ -87,8 +123,19 @@ def asset_preview_path(engine, asset_type: str, asset_id: str):
     """
     返回可用于预览的图片绝对路径（仅 image 类型且文件存在时）。
 
-    资产表的 Path 是相对项目根目录的，所以这里要靠 engine.project_root
-    拼回绝对路径；拼不出来就给 None，让调用方退化显示文字。
+    资产表的 Path 基准**五花八门**（`sr_general/game/images/x.png` /
+    `game/images/x.png` / `images/x.png`），所以路径解析必须走
+    `story.excel_export.resolve_thumb_source` —— 那是唯一真源
+    （Excel 导出与界面预览用同一套规则）。
+
+    ⚠ 2026-10-05 用户实测报"图片加载不完全/缺口大"，查出两条真因，这是第二条：
+
+      这条从前是 `Path(project_root) / rel` —— **只试一个基准**。真实项目里
+      有 74 条（`gui/dutui/**/RETURE.png`）的 Path 写作
+      `sr_general/game/gui/...`（多了一层项目目录名）→ 拼出来必然不存在 →
+      `None` → 选择器里那 74 格**永远只有文字、永远不出图**，
+      而且**没有任何提示**（看起来就像"还在加载"）。
+      换成 `resolve_thumb_source` 之后它们全都找得到。
     """
     if asset_type != 'image':
         return None
@@ -98,15 +145,63 @@ def asset_preview_path(engine, asset_type: str, asset_id: str):
     rel = (row.get('Path') or '').strip()
     if not rel:
         return None
+    root = getattr(engine, 'project_root', None)
     p = Path(rel)
-    if not p.is_absolute():
-        root = getattr(engine, 'project_root', None)
-        if root:
-            p = Path(root) / rel
+    if p.is_absolute():
+        try:
+            return p if p.exists() else None
+        except OSError:
+            return None
+    try:
+        from storygraph.story.excel_export import resolve_thumb_source
+        real = resolve_thumb_source(rel, root)
+        if real is not None:
+            return real
+    except Exception as e:                # noqa: BLE001 - 退回老的单基准
+        swallow('app.beats.asset_preview_path', e)
+    if root:
+        p = Path(root) / rel
     try:
         return p if p.exists() else None
     except OSError:
         return None
+
+
+#: "这是**身体件**、不是整张立绘"的属性名特征。
+#:
+#: 用户 2026-10-05 实测报（附截图）：
+#:
+#> 存在一个"无头骑士"的 bug（不是程序问题）……查真实项目是资源组件分离导致的
+#> ……你尝试修复它
+#:
+#: 真实项目把立绘拆成 **layeredimage 组件**（`show ye base_handdown happy`）：
+#: `base_handdown.png` 只有身体、没有头（实测头部区不透明像素 10935 vs
+#: 完整立绘 `happy.png` 的 37152）。旧解析按**第一个属性**查表，于是
+#: `base_handdown` 赢了、画出来就是个无头身体。
+_BODY_PART_RE = re.compile(
+    r'^(?:base|body|pose)\b|_mask$|_mask_|^(?:base|body|pose)_', re.I)
+
+
+def _is_body_part(name: str) -> bool:
+    """这个属性看起来是"身体/姿态件"（要和表情件叠起来才是完整立绘）吗？"""
+    return bool(_BODY_PART_RE.search(str(name or '').strip()))
+
+
+def preferred_image_attrs(rest) -> list:
+    """
+    立绘属性 → **查询优先顺序**（修"无头骑士"，2026-10-05）。
+
+    `show ye base_handdown happy` 里 `base_handdown` 是**身体件**
+    （实测 `ye/base_handdown.png` 头部区不透明像素 10935，而完整立绘
+    `ye/happy.png` 是 37152 —— 画出来就是用户报的"无头骑士"），
+    `happy` 才是**表情/整图**。
+
+    所以顺序：**先"不是身体件"的，从后往前**（表情通常写在最后），
+    再轮到身体件。调用方按这个顺序逐个查，第一个查得到的就是完整立绘。
+    """
+    rest = [str(r).strip() for r in (rest or []) if str(r).strip()]
+    return ([a for a in reversed(rest) if not _is_body_part(a)]
+            + [a for a in reversed(rest) if _is_body_part(a)])
 
 
 def lookup_image_id(images: dict, tag: str, rest: list) -> str:
@@ -238,6 +333,9 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
         b.speaker = (fields.get('Speaker') or '').strip()
     if 'Text' in fields:
         b.text = (fields.get('Text') or '').strip()
+    # **类型跟着说话人变**（见 `kind_from_speaker`）：只填说话人不改类型，
+    # 那一格就会一直写着 `narration`（用户实测报过）。
+    b.kind = kind_from_speaker(b.kind, b.speaker)
     # 菜单拍的标题留空 = "无标题菜单"，不是"没有菜单"：
     # 占位符必须补回来，否则 `menu:` 那一段会在渲染时整块消失
     # （见 `MENU_NO_CAPTION`）。表单里显示的是空串（见 `beat_to_fields`）。
@@ -577,16 +675,22 @@ def apply_sprite_rows(show: str, rows: list) -> str:
     return join_show_items(out + kept)
 
 
-def speaker_missing_warning(beat: Beat) -> str:
+def speaker_missing_warning(beat: Beat, symbols=None) -> str:
     """
-    有台词、却没有任何说话人 → 导出后就是旁白，这里说清楚。
+    这一拍的说话人**有问题**吗？有问题就把话说清楚（返回 '' 表示没问题）。
+
+    三种情形：
+
+      ① 有台词、却没有任何说话人 → 导出后就是旁白（用户 2026-09-28 报的
+         "幽灵旁白"：卡片上什么都没提示，空着也能点「下一句」）；
+      ② **说话人没登记**（2026-10-05 用户实测：填了 `lj`，而角色表里没有它）
+         → 渲染器按 D7 的纪律**丢掉这个说话人**，那一行按旁白写、另加一条
+         `# TODO: 缺少资源 角色 'lj'`。用户看到的是"我填的说话人凭空没了"
+         —— 必须当场说清楚，否则他只会觉得工具坏了；
+      ③ 其余 → 不吵。
 
     `extend` 例外：它本来就不带说话人（续上一句），渲染成 `extend "…"`。
-    旁白（`narration`）也例外——它**就是**旁白。
-
-    为什么要有这条（用户 2026-09-28 报"幽灵旁白"）：当时卡片上什么都没提示，
-    只看得出「说话人」是空的——而空着也能点「下一句」，错误就被带过去了。
-    宁可吵一点，也不要让"会变成旁白"的拍静默通过。
+    旁白（`narration`）也例外 —— 它**就是**旁白。
 
     返回 '' 表示不需要提示（调用方据此清掉提示条）。
     这里**只算文案**，怎么显示由前端决定（`app` 层不认识控件）。
@@ -594,6 +698,17 @@ def speaker_missing_warning(beat: Beat) -> str:
     if not (beat.text or '').strip():
         return ''
     if beat.speaker:
+        # ② 登记过吗？（与渲染器同一条判据：`Audit.character`）
+        if symbols is not None:
+            try:
+                from storygraph.story.dsl import TODO as _TODO, Audit
+                if Audit(symbols).character(str(beat.speaker).strip()) == _TODO:
+                    return (f'⚠ 角色 `{beat.speaker}` **没有登记** —— '
+                            f'导出会**丢掉这个说话人**（那一句按旁白写，'
+                            f'再补一条 `# TODO: 缺少资源 角色 \'{beat.speaker}\'`）。\n'
+                            f'   把它补进角色表，或双击右栏「参与角色」里的名字换一个。')
+            except Exception as e:            # noqa: BLE001 - 判不了就不吵
+                swallow('app.beats.speaker_missing_warning', e)
         return ''
     if beat.kind in ('narration', 'extend'):
         return ''
@@ -823,21 +938,139 @@ def _guess_image_tag(aid: str) -> str:
     return aid
 
 
-def position_choices(symbols, limit: int = 40) -> list:
-    """
-    位置词候选：内置/词表位置 + 项目里真实存在的自定义 transform。
+def _declared_words(symbols, kind: str) -> set:
+    """项目在词表里**自己声明过**的词（`'expression'` / `'position'`）。"""
+    return set(getattr(symbols, 'project_words', {}).get(kind, ()) or ())
 
-    自定义 transform 一定要带上——真实项目里 `i11`、`leftish` 这种
-    比 `left` 用得多，策划找不到它们就只能手打（用户抱怨过"变换选不到"）。
+
+def _expression_display(attr: str, tag: str, beat: Beat, symbols) -> str:
     """
-    out = []
-    for word in (getattr(symbols, 'positions', {}) or {}):
-        if word not in out:
-            out.append(word)
+    一个图像属性 → 卡片上显示的值。
+
+    **项目词表里的词优先，否则就是属性名本身**（2026-10-05 用户实测报）：
+
+    > 如果你标中文人话词，那么你就要遇到一个问题：万一……这个项目不用中文做
+    > 怎么办？工具应是通用的！
+
+    内置词表（工具自带的那批中文）是**输入别名**，不是项目的说法 ——
+    它不参与显示，也不参与候选。这条规矩同时保证**显示值与候选值一致**：
+    不一致的话 `choices.index(cur)` 会找不到当前值 → 点 chip 崩掉/没反应
+    （"切不出生气"就是这么来的）。
+    """
+    if not attr or symbols is None:
+        return attr
+    declared = _declared_words(symbols, 'expression')
+    if not declared:
+        return attr
+    try:
+        word = symbols.expression_word_for(tag, attr)
+    except Exception as e:                    # noqa: BLE001
+        swallow('app.beats._expression_display', e)
+        return attr
+    if not word or word not in declared:
+        return attr
+    # 自证无损：翻回来必须是同一个属性（见 `beat_expression_word`）
+    try:
+        if normalize_expression(word, beat, symbols) == attr:
+            return word
+    except Exception as e:                    # noqa: BLE001
+        swallow('app.beats._expression_display', e)
+    return attr
+
+
+def _position_display(transform: str, symbols) -> str:
+    """一个 transform → 卡片上显示的值（同 `_expression_display` 的规矩）。"""
+    if not transform or symbols is None:
+        return transform
+    declared = _declared_words(symbols, 'position')
+    if not declared:
+        return transform
+    try:
+        word = symbols.position_word_for(transform)
+    except Exception as e:                    # noqa: BLE001
+        swallow('app.beats._position_display', e)
+        return transform
+    return word if word in declared else transform
+
+
+def image_tag_of(spec: str, symbols) -> str:
+    """
+    图像名 → **image tag**（`ling_angry` 与 `ling angry` 都要给 `ling`）。
+
+    为什么需要（用户 2026-10-05："表情也调不了了，修复！"）：
+
+    卡片里存的是工具自己的**下划线写法**（`ling_angry`），而从前这里只做
+    `spec.split()[0]` —— 拿到的"tag"就是 `ling_angry`，`attrs_of_tag` 自然
+    一个都查不到 → **表情候选全空**、chip 点不动。
+
+    现在：有空格 → 第一段就是 tag；没空格 → 走**唯一真源**的引用解析，
+    从命中的那一行读出真正的 `Tag`（顺带避开"某行 ID 恰好叫 ling_angry
+    但没有 Tag"的劫持）。
+    """
+    spec = (spec or '').strip()
+    if not spec:
+        return ''
+    parts = spec.split()
+    if len(parts) > 1:
+        return parts[0]
+    if symbols is None:
+        return parts[0]
+    try:
+        # `Symbols` 里已经有索引（`_get_index`），解析不用重建
+        for aid, row in symbols.image_rows_for(spec):
+            tag = str((row or {}).get('Tag') or '').strip()
+            if tag:
+                return tag
+    except Exception as e:                        # noqa: BLE001 - 解析不了就退回原写法
+        swallow('app.beats.image_tag_of', e)
+    if '_' in spec:
+        # 退路：`ling_angry` → 猜前一段是 tag（先看这个 tag 表里认不认识）
+        try:
+            head = spec.split('_')[0]
+            if head and symbols.has_image_tag(head):
+                return head
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.beats.image_tag_of.head', e)
+    return parts[0]
+
+
+def position_choices(symbols, limit: int = 500) -> list:
+    """
+    位置候选：**项目自己的 transform 排最前**，然后才是内置位置。
+
+    用户 2026-10-05 实测报：
+
+    > 那些中央等位置同理，我没有看见我的 i11……我怕函数名对不上！
+
+    两处叠加（都在这条候选表上）：
+
+      · 顺序 + 截断：从前是"内置词表的**中文词**（19 个）→ 项目 transform"，
+        而 `limit=40` 一到就砍 —— 真实项目 146 个 transform 里 `i11` 排在
+        第 40 名之后，**永远看不见**；
+      · 通用性：`左` / `中央` 是**工具内置**的说法，一个不用中文做的项目
+        不该在候选里看到它们（见 `Symbols.project_words`）。
+
+    现在候选是**项目真实的名字**：项目的 transform（全部，按名字排序）+
+    内置位置那几个**真取值**（`left` / `center` / `right`…），
+    每一项再经 `_position_display`（项目词表声明过就显示它的词，否则显示
+    transform 名）。中文词仍然可用的**输入别名**（`normalize_position` 那条
+    通道），只是不再冒充候选 —— 写进脚本的永远是 transform 名，所以
+    "对不上"这件事在候选这一层就消失了。
+    """
+    names = []
     reg = getattr(symbols, 'registry', None)
     for name in sorted((getattr(reg, 'transforms', {}) or {})):
-        if name not in out:
-            out.append(name)
+        if name and name not in names:
+            names.append(name)
+    for _word, mapped in (getattr(symbols, 'positions', {}) or {}).items():
+        name = str(mapped or '').strip()
+        if name and name not in names:
+            names.append(name)
+    out = []
+    for name in names:
+        value = _position_display(name, symbols)
+        if value and value not in out:
+            out.append(value)
     return out[:limit]
 
 
@@ -857,6 +1090,17 @@ def beat_expression_word(beat: Beat, symbols=None) -> str:
     所以宁可给策划看 `close_happy`（丑但准），也不给人话（好看但会改演出）。
 
     无损标准：反推出的词经 `attr_for` 翻回来，必须**逐字等于**原属性。
+
+    ⚠ **还要是"项目自己声明过的词"**（2026-10-05 用户实测报）：
+
+    > 如果你标中文人话词，那么你就要遇到一个问题：万一……这个项目不用中文做
+    > 怎么办？工具应是通用的！
+
+    内置词表（`DEFAULT_EXPRESSIONS` 那批中文）是**输入别名**，不是项目的说法：
+    一个不用中文做的项目不该在卡片上看到「生气」。所以显示优先级是
+    **项目词表里的词 → 属性名本身**（内置词只用来解析输入）。
+    这同时修掉"切不出"那一半：候选现在就是属性名，显示与候选对得上，
+    点 chip 不会因为"当前值不在候选里"而卡住。
     """
     item = _first_show_item(beat)
     if not item:
@@ -865,54 +1109,80 @@ def beat_expression_word(beat: Beat, symbols=None) -> str:
     if len(parts) < 2:
         return ''
     tag, attrs = parts[0], parts[1:]
-    words = []
-    for attr in attrs:
-        word = ''
-        if symbols is not None:
-            try:
-                candidate = symbols.expression_word_for(tag, attr)
-            except Exception as e:
-                swallow('app.beats.beat_expression_word', e)
-                candidate = ''
-            # 自证无损：翻回来必须是同一个属性
-            if candidate:
-                try:
-                    if normalize_expression(candidate, beat, symbols) == attr:
-                        word = candidate
-                except Exception as e:
-                    swallow('app.beats.beat_expression_word', e)
-                    word = ''
-        words.append(word or attr)
-    return ' '.join(words)
+    return ' '.join(_expression_display(a, tag, beat, symbols) for a in attrs)
 
 
 def beat_position_word(beat: Beat, symbols=None) -> str:
-    """Beat → 位置词（如「左」）。立绘没写 `@位置` 时退回 Beat 的 `at`。"""
+    """
+    Beat → 位置（给卡片显示）。立绘没写 `@位置` 时退回 Beat 的 `at`。
+
+    ⚠ **默认显示 transform 名本身**（`d11` / `i11` / `center`），只有
+    **项目自己在词表里声明过**的说法才优先显示（2026-10-05 用户实测报）：
+
+    > 那些中央等位置同理，我没有看见我的 i11……我怕函数名对不上！
+
+    内置的中文位置词（`中央`）是**输入别名**，不是项目的说法。显示 `中央`
+    而脚本里写 `center` 正是"对不上"的来源 —— 现在是项目词表 → transform 名。
+    """
     item = _first_show_item(beat)
     if not item:
         return ''
     at = (item.get('at') or '').strip() or (getattr(beat, 'at', '') or '').strip()
     if not at or symbols is None:
         return at
-    try:
-        return symbols.position_word_for(at) or at
-    except Exception as e:
-        swallow('app.beats.beat_position_word', e)
-        return at
+    return _position_display(at, symbols)
 
 
-def expression_choices(beat: Beat, symbols, limit: int = 200) -> list:
+def spec_arg_choices_for(beat: Beat, statements) -> dict:
     """
-    当前立绘的**可选表情词**清单（给下拉/选择器用）。
+    这一拍的**自定义语句参数候选**：`{参数名: [候选值]}`（D1，2026-10-07）。
 
-    来源是 `symbols.attrs_of_tag(tag)`——即资源表里这个 tag 真正声明过的属性。
-    这比 `DEFAULT_EXPRESSIONS` 准：项目自己的表情命名才算数，
-    而且不会给出"这个角色根本没有的表情"。
+    给卡片编辑器用 —— 声明过参数形状的语句，值那一栏应当是**下拉**，
+    而不是让人凭记忆敲。没有声明（或这一拍不是自定义语句）就返回 `{}`：
+    **不猜候选**，猜出来的下拉会诱导人写出脚本里根本没有的值。
+
+    候选来自项目声明（`storygraph.rules.json` 的 `columns[].choices`
+    或宿主 `register_statement` 的对应声明），见
+    `story.statement_registry.spec_columns`。
+    """
+    name = str(getattr(beat, 'spec_name', '') or '')
+    if not name or not statements:
+        return {}
+    from storygraph.story.statement_registry import spec_columns
+    out = {}
+    for c in spec_columns(statements, name):
+        if c['choices']:
+            out[c['name']] = list(c['choices'])
+    return out
+
+
+def expression_choices(beat: Beat, symbols, limit: int = 500) -> list:
+    """
+    当前立绘的**可选表情**清单 = 资源表里这个 tag 真正声明过的**属性名**。
+
+    用户 2026-10-05 实测报：
+
+    > ling 一开始有很多个表情，但是不知道为何切着切着就少了！最后不剩几个，
+    > 切不出生气！
+
+    候选从前是**词表里的人话词**（`生气`）而不是属性名（`angry`），于是：
+
+      · **覆盖不全**：没有词表条目的属性（`base_arms_akimbo` / `blankface` /
+        `avoiding`…）压根不在候选里（"一开始有很多，切着切着就少了"）；
+      · **卡死**：一旦当前值是属性名（`angry` —— 例如从 `show ling angry` 读回来的），
+        它**不在候选里** → 点 chip 走"固定当前值"那一支 → **点了没反应**
+        （"切不出生气"）。实测连点 20 次，值一个字都没变。
+
+    现在候选就是项目真实的属性名（**写进脚本的那一串**），任何项目都通用；
+    人话词仍然能当**输入别名**用（`normalize_expression` 那条通道，项目自己在
+    词表里声明过的词还能优先显示，见 `Symbols.project_words`）。
     """
     item = _first_show_item(beat)
     if not item or symbols is None:
         return []
-    tag = (item.get('image') or '').split()[0] if item.get('image') else ''
+    tag = image_tag_of(str(item.get('image') or ''), symbols)
+    if not tag:
+        return []
     try:
         attrs = symbols.attrs_of_tag(tag)
     except Exception as e:
@@ -920,12 +1190,11 @@ def expression_choices(beat: Beat, symbols, limit: int = 200) -> list:
         return []
     out = []
     for attr in attrs[:limit]:
-        try:
-            word = symbols.expression_word_for(tag, attr)
-        except Exception as e:
-            swallow('app.beats.expression_choices', e)
-            word = ''
-        out.append(word or attr)
+        # 显示值与候选值**同源**（`_expression_display`）—— 不一致的话
+        # `choices.index(cur)` 找不到当前值，chip 会崩/卡（见上）。
+        value = _expression_display(str(attr or '').strip(), tag, beat, symbols)
+        if value and value not in out:
+            out.append(value)
     return out
 
 
@@ -1020,13 +1289,76 @@ def normalize_expression_words(expr: str, image: str, symbols) -> list:
     逐词归一则是无损往返：`base_arms_akimbo` 原样、`无语` → `sigh`。
 
     解析不出来的词原样保留（策划可能就是在写英文属性名）。
+
+    ⚠ **两个词被归一成同一个属性时，一个都不改**（2026-10-05 用户实测报：
+    "明明已经添加了立绘，导出后对应的 show 却没有出现"）。实测（`ch01`）：
+
+        show ling base_arms_akimbo sigh at i11      ← 作者写的
+        → cards_to_show（**没改任何东西**，只是读了再写）
+        show ling base_arms_akimbo_sigh base_arms_akimbo_sigh at i11
+
+    病根是 `Symbols.attr_for` 的最后一档（子串兜底）：项目里那张图登记成
+    `base_arms_akimbo_sigh`（一个属性），于是 `base_arms_akimbo` → 兜底命中
+    整条属性、`sigh` → 也命中同一条 —— 两个词合并成一条，图像名被改写，
+    **游戏里就找不到这张立绘了**（这正是用户说的"对应的 show 没出现"）。
+
+    判据（与 `beat_expression_word` 的"自证无损"同一条思路，但**逐词**判）：
+    归一化里那些"升级档"（下划线分词 / 子串兜底）**不许把两个词指向同一条
+    属性** —— 一旦撞车，就退回**词表的原话**（权威档），而不是让 `attr_for`
+    去猜：
+
+        ['base_arms_akimbo', '无语']   词表写的是 无语 → sigh
+          attr_for 第 3 档把 `base_arms_akimbo` 兜底成 `base_arms_akimbo_sigh`，
+          又把 `sigh`（词表原话）分词命中成同一条 → 两个词合并成一条，
+          图像名被改写（`ling base_arms_akimbo_sigh base_arms_akimbo_sigh`）。
+          退回词表原话 → `['base_arms_akimbo', 'sigh']` = **作者写的那一份**。
+
+    第一版写成"整组里有一个词被吃就整组原样"，结果把**中文词**留在了
+    `show` 里（`ling base_arms_akimbo 无语@i11`）—— 那是"中文漏进脚本"，
+    比原缺陷还糟（golden 快照当场抓到）。所以撞车时的退路是**词表原话**，
+    而不是"原来的词"。
     """
     words = [w for w in str(expr or '').split() if w]
     if not words:
         return []
     probe = Beat(seq=1, label='', text='', show=image or '')
-    return [a for a in (normalize_expression(w, probe, symbols)
-                        for w in words) if a]
+    mapped = [normalize_expression(w, probe, symbols) for w in words]
+    if _any_word_swallows_another(mapped):
+        plain = [_vocabulary_word(w, symbols) for w in words]
+        if all(plain) and not _any_word_swallows_another(plain):
+            return plain
+        # 词表也救不了（例如作者本来就写了两个一样的词）：
+        # 英文词（作者写的属性名）保持原样，中文词用词表原话。
+        return [w if w.isascii() else (p or m)
+                for w, p, m in zip(words, plain, mapped)]
+    return mapped
+
+
+def _any_word_swallows_another(values: list) -> bool:
+    """这组属性里有没有"一个吃掉另一个"（相等、或互相包含）？"""
+    vals = [v for v in values if v]
+    for i, a in enumerate(vals):
+        for j, b in enumerate(vals):
+            if i != j and (a == b or b in a or a in b):
+                return True
+    return False
+
+
+def _vocabulary_word(word: str, symbols) -> str:
+    """
+    词表里这条词的**原话**映射（`无语 → sigh`），不做 `attr_for` 的分词/子串升级。
+
+    为什么要单独取它：升级档在**单词**场景下有用（项目把属性命名成
+    `close_happy`，而词表写的是 `happy`），但在**多词**场景下会把两个词
+    指向同一条属性 —— 那时应当相信词表，而不是相信长度启发式。
+    """
+    table = getattr(symbols, 'expressions', None) or {}
+    try:
+        mapped = table.get(str(word or '').strip())
+    except Exception as e:                     # noqa: BLE001 - 词表形态不可控
+        swallow('app.beats._vocabulary_word', e)
+        mapped = None
+    return str(mapped or word or '')
 
 
 def normalize_position(word: str, symbols) -> str:

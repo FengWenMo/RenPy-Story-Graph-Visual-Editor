@@ -191,6 +191,33 @@ class StageAudio:
         self._last_key = None
 
 
+#: 合成立绘模型缓存：`项目根 -> LayerModel`（一个项目建一次，很便宜但要避免重复）
+_LAYER_MODEL_CACHE = {}
+
+
+def layer_model_for(project_root):
+    """
+    取这个项目的合成立绘模型（`LayerModel`）；没有就返回 None。
+
+    设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`。
+    ⚠ 按**项目根**缓存：同一个预览会话里表/脚本不会变；换了项目就是新键。
+    """
+    root = str(project_root or '')
+    if not root:
+        return None
+    if root in _LAYER_MODEL_CACHE:
+        return _LAYER_MODEL_CACHE[root]
+    model = None
+    try:
+        from storygraph.story.layered_model import load_layer_model
+        model = load_layer_model(root)
+    except Exception as e:                        # noqa: BLE001 - 认不出走老路
+        swallow('ui_qt.stage_preview.layer_model_for', e)
+        model = None
+    _LAYER_MODEL_CACHE[root] = model
+    return model
+
+
 class StageCanvas(QWidget):
     """
     舞台画布：一帧的画面。
@@ -263,7 +290,8 @@ class StageCanvas(QWidget):
             swallow('stage_preview.show_frame')
         assets = resolve_frame_assets(
             frame, self._images, self.project_root,
-            image_index(self.project_root))
+            image_index(self.project_root),
+            layer_model=layer_model_for(self.project_root))
         self._missing = list(assets.get('missing') or ())
         if assets.get('bg') is not None:
             self._request(('bg', idx), str(assets['bg']), self._on_bg,
@@ -309,7 +337,8 @@ class StageCanvas(QWidget):
         try:
             assets = resolve_frame_assets(
                 frame, self._images, self.project_root,
-                image_index(self.project_root))
+                image_index(self.project_root),
+            layer_model=layer_model_for(self.project_root))
         except Exception as e:                     # noqa: BLE001
             swallow('ui_qt.stage_preview.prefetch_frame', e)
             return
@@ -579,6 +608,19 @@ class StagePreviewWindow(QDialog):
         self._jump = QSpinBox()
         self._jump.setRange(1, max(1, len(self.frames)))
         self._jump.setFixedWidth(80)
+        # ⚠ **手输数字也要能跳**（用户 2026-10-05："手动输入那个拍无法直接
+        # 跳转到对应的拍场面"）。
+        #
+        # QSpinBox 的 `valueChanged` 在**敲键盘时**只对上下箭头/滚轮发；
+        # 手输一个数字后不按回车就什么都不发生（回车在某些焦点下也不触发），
+        # 用户看到的就是"输了没反应"。所以三条都接上：
+        #   · `editingFinished` —— 输完点别处/失焦/回车；
+        #   · `keyboardTracking(False)` + `valueChanged` —— 输完立刻跳（这是
+        #     真正常用的路径）；
+        #   · 外加"拍"按钮（原来就有）。
+        self._jump.setKeyboardTracking(False)
+        self._jump.valueChanged.connect(self._on_jump)
+        self._jump.editingFinished.connect(self._on_jump)
         bar.addWidget(self._jump)
         jump_btn = QPushButton('拍')
         jump_btn.clicked.connect(self._on_jump)
@@ -632,6 +674,15 @@ class StagePreviewWindow(QDialog):
         self._dlg.setText(f.text or '（这一拍没有台词）')
         self._summary.setText(self._summary_text(f, cues))
         self._pos.setText(f'{idx + 1} / {len(self.frames)}')
+        # **姿势改回普通但没 hide** → 在状态行上说清楚（用户 2026-10-05 报的
+        # "从 B 改到 A … 工具跟不上"）。只提示，不改脚本。
+        try:
+            hint = self._pose_hint(idx)
+            if hint:
+                self._summary.setText(
+                    (self._summary.text() + '　⚠ ' + hint).strip())
+        except Exception as e:                     # noqa: BLE001 - 提示失败不影响画面
+            swallow('ui_qt.stage_preview.show_frame.pose_hint', e)
         self._jump.setValue(idx + 1)
         self._prev.setEnabled(idx > 0)
         self._next.setEnabled(idx < len(self.frames) - 1)
@@ -694,6 +745,34 @@ class StagePreviewWindow(QDialog):
         if self.idx > 0:
             self.show_frame(self.idx - 1)
 
+    def pose_warnings(self):
+        """
+        "姿势改回普通但没 hide"的警告（用户 2026-10-05 报的那条）。
+
+        返回 `[(帧下标, problem), …]`；**只报告**，不改用户脚本
+        （自动补 `hide` 是设计文档里的 P4，默认不做）。
+        """
+        try:
+            from storygraph.story.layered_model import frame_pose_warnings
+            return frame_pose_warnings(
+                self.frames, layer_model_for(self.project_root))
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.stage_preview.pose_warnings', e)
+            return []
+
+    def _pose_hint(self, idx: int) -> str:
+        """这一拍有没有"改回空姿势但没 hide"的提示（没有就空串）。"""
+        cache = getattr(self, '_pose_warn_map', None)
+        if cache is None:
+            cache = {i: p for i, p in (self.pose_warnings() or [])}
+            self._pose_warn_map = cache
+        problem = cache.get(int(idx))
+        if not problem:
+            return ''
+        return (f'这一拍想把「{problem.get("from_label")}」改回'
+                f'「{problem.get("to_label")}」，但 `show` 改不回去 —— '
+                f'要先 `hide {problem.get("tag")}`。')
+
     def toggle_play(self):
         self.stop_play() if self._playing else self.start_play()
 
@@ -710,7 +789,17 @@ class StagePreviewWindow(QDialog):
         self._timer.stop()
 
     def _on_jump(self):
-        self.show_frame(self._jump.value() - 1)
+        """
+        跳到输入框里那一拍。
+
+        ⚠ `_jump.setValue()`（`show_frame` 里同步显示用）会**反过来**
+        触发 `valueChanged` → 又调到这里。目标拍与当前拍相同时**什么都不做**
+        （幂等），递归自然断掉 —— 不加这一句就是无限递归。
+        """
+        target = int(self._jump.value()) - 1
+        if target == int(getattr(self, 'idx', -1)):
+            return
+        self.show_frame(target)
 
     def _on_real(self, checked: bool):
         self._canvas.real_images = bool(checked)

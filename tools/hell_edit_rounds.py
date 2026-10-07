@@ -419,7 +419,13 @@ def run_edit_rounds(verbose: bool, tmp: Path, rounds: int = 10) -> list:
             break
 
         try:
-            res = s.export(f, force=True)
+            # **不许给 `force=True`**（2026-10-05 实测修）：这条轴从前带着
+            # force，于是 `HANDWRITTEN_TARGET` 那条护栏**从来没被它碰到过** ——
+            # 而用户按的正是"不加 force 的原地导出"：他会撞上
+            # 「覆盖手写文件？」对话框（默认按钮是取消），手感就是
+            # "只是增量的改了一张卡，为何阻止我替换旧文件"。
+            # 原地导出本该只动那一行、并且**一次就写进去**。
+            res = s.export(f)
         except Exception as exc:                        # noqa: BLE001
             bad.append((f'B·第{r}轮', 'E6自洽', f'导出抛异常：{exc!r}'))
             break
@@ -509,7 +515,7 @@ def run_edit_rounds(verbose: bool, tmp: Path, rounds: int = 10) -> list:
         from storygraph.app.editor import EditorSession
         s3 = EditorSession(project_root=f.parent)
         s3.load(f)
-        s3.export(f, force=True)
+        s3.export(f)
         body2 = f.read_text(encoding='utf-8')
     except Exception as exc:                            # noqa: BLE001
         bad.append(('B·冻结', 'E2不动点', f'再导出抛异常：{exc!r}'))
@@ -537,7 +543,9 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
         files = files[:limit]
     print(f'真实项目编辑：{len(files)} 个 .rpy')
     bad: list = []
-    stat = {'files': 0, 'edited': 0, 'max_touched': 0, 'degraded': 0}
+    stat = {'files': 0, 'edited': 0, 'max_touched': 0, 'degraded': 0,
+            'refused': 0}
+    refused: list = []
     work = tmp / 'real_edit'
     work.mkdir(parents=True, exist_ok=True)
 
@@ -566,13 +574,29 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
         stat['edited'] += 1
 
         try:
-            res = s.export(dst, force=True)
+            # 同上：不加 force —— 真实项目这条轴必须走用户那条路。
+            res = s.export(dst)
         except Exception as exc:                        # noqa: BLE001
             bad.append((src.name, 'E6自洽', f'export 抛异常：{exc!r}'))
             continue
         if not res.get('ok'):
-            bad.append((src.name, 'E7降级',
-                        f'导出被拒：{res.get("blocking") or res.get("error")}'))
+            # **"有原因地拒绝"不算失败，但必须报出来**（2026-10-05 校准）。
+            #
+            # 这一条以前带 `force=True`，于是补丁对不上时工具会把一份
+            # **全量重生成**覆盖到作者手写的章节上 —— 那正是 P0 禁止的事
+            # （`docs/P0_静默全量覆盖_2026-10-03.md`）。去掉 force 之后，
+            # 对不上的那一章会被**安全地拒绝**（文件一个字节不动），
+            # 这正是设计要的方向：`script_pomo.rpy` 就是那条已知的
+            # 设计边界（菜单标题写在 `menu:` 的下一行，2 行合 1 行）。
+            # 判据因此改成：
+            #   · 给了原因地拒绝 → 记 refused（照旧打印，数字继续可见）；
+            #   · **没说原因**就拒 / 说成功却没写 → 才是缺陷。
+            why = res.get('blocking') or res.get('error')
+            if not why:
+                bad.append((src.name, 'E7降级', '导出被拒却没给任何原因'))
+                continue
+            stat['refused'] += 1
+            refused.append((src.name, str(why[0])[:64]))
             continue
 
         now = dst.read_text(encoding='utf-8')
@@ -638,8 +662,11 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
         if verbose:
             print(f'   · {src.name}: 动了 {touched} 行')
 
+    for name, why in refused:
+        print(f'   · 安全拒绝（未写盘）：{name} —— {why}')
     print(f'  载入 {stat["files"]} 个 / 改过 {stat["edited"]} 个 / '
-          f'单次最多动 {stat["max_touched"]} 行 / 退回全量 {stat["degraded"]} 个')
+          f'单次最多动 {stat["max_touched"]} 行 / 退回全量 {stat["degraded"]} 个 / '
+          f'安全拒绝 {stat["refused"]} 个')
     return bad, stat
 
 

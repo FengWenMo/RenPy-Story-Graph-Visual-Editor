@@ -63,7 +63,9 @@ SRC = ('label a:\n'
        '    ling "第二句"\n')
 
 #: 多行列：换行是**内容**，刻意不在 `SINGLE_LINE_BEAT_FIELDS` 里
-MULTILINE_FIELDS = {'Text', 'Comment', 'Stage', 'CodeBlock', 'FileBlocks'}
+#: （`Opaque` = 工具不认识的块语句整块原文，换行是它的结构）
+MULTILINE_FIELDS = {'Text', 'Comment', 'Stage', 'CodeBlock', 'FileBlocks',
+                    'Opaque'}
 
 #: 这些列走的是**专门的解析路径**（不是 `g()`），所以"清洗留痕"那条不适用：
 #: `Seq` 直接 `int()` 解析，控制字符进不到产物里，也就没有"压成空格"这回事。

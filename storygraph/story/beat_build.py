@@ -351,6 +351,10 @@ class _BeatBuilder:
             StatementKind.PYTHON: self._emit_python,
             StatementKind.COMMENT: self._emit_comment,
             StatementKind.RAW: self._emit_raw,
+            StatementKind.LOOP: self._emit_loop,
+            # `camera`（3D 舞台）与循环块**同一档、同一套约定**：头行进
+            # 可编辑列、整块原文进 `opaque`（见 `CameraNode`）。
+            StatementKind.CAMERA: self._emit_camera,
             StatementKind.JUMP: self._emit_jump_call,
             StatementKind.CALL: self._emit_jump_call,
             StatementKind.RETURN: self._emit_return,
@@ -708,10 +712,123 @@ class _BeatBuilder:
         # 产物变成 `pause 0.1` 无条件执行、`if flag:` 整个消失。
         # 真实项目 81 条 unmodeled 里相当一部分是这种形状。
         self.branch_guard(stmt)
+        # **工具不认识的块语句 → 单独的保真列**（M1，2026-10-07）。
+        #
+        # 为什么不走上面那条 raw/CodeBlock 通道：「代码」列的渲染会**推断**
+        # （认不出的行补 `$`、整块还可能被包成 `python:`），而对一段工具
+        # 看不懂的自定义块，任何推断都是改剧情：
+        #
+        #     mycue "闪电" intensity=3:
+        #         target = ling          ← 补 `$` 就成了 `$ target = ling`
+        #
+        # `Beat.opaque` 的契约只有一句：**逐字写回**。
+        # 先 `flush_stage_only()` 让它**独占一张拍**：否则它会和同一张拍里
+        # 攒着的舞台/代码指令混在一起，渲染时的相对顺序就没有依据了
+        # （它自己在源码里的位置恰恰是"两句台词之间"，这个位置有意义）。
+        # **被声明过的自定义语句也走这一列**（M3，2026-10-07）：
+        # 叶形态（`mycue "x" intensity=3`）如果留在 raw 通道，会被
+        # `render_code_block` 的兜底补上 `$`（它不像台词、也不在动词白名单里）
+        # —— 与 M1 修的块形态是同一个坑，只是形状不同。
+        # 声明过就说明"工具有话说"，那就统一走"逐字写回"。
+        declared = payload.get('spec_name') or ''
+        if (payload.get('raw_kind') or '') in ('unknown_block',
+                                              'known_block') or declared:
+            self.flush_stage_only()
+            self.pending.condition = stmt.condition or ''
+            self.pending.opaque = _append_line(self.pending.opaque, text)
+            self.pending.spec_name = declared
+            if declared:
+                # 头行原文（M4）：T1 的**参数编辑面**。存的是**原样拷贝**，
+                # 渲染层靠"改没改"来决定要不要替换首行 —— 于是"没改就不动
+                # 一个字节"是结构上成立的，不靠调用方自觉。
+                self.pending.spec_head = next(
+                    (ln for ln in str(text).split('\n') if ln.strip()), '')
+            self.pending_has_stage = True
+            return True, False
         pending = self.pending
         pending.condition = stmt.condition or pending.condition
         pending.raw = _append_line(pending.raw, text)
         pending.ordered.extend(('raw', ln) for ln in _split_lines(text))
+        self.pending_has_stage = True
+        return True, False
+
+    def _emit_loop(self, stmt, payload, _ln):
+        """
+        循环块（`while` / `for`）—— **头行成组头，块体成普通拍**
+        （D2 起；2026-10-07 第三轮把块体也结构化）。
+
+        `payload['walked']` 决定走哪条路：
+
+          · `True`（**现在**的解析路径）：块体已经被解析成普通语句、带着
+            `nest_path='…>loop:n'` 排在后面 —— 这里只造一张**头拍**
+            （只有 `loop_header`，**没有 `opaque`**，与 `menu` 头拍同款）。
+            渲染层按结构位把它们重新归组成 `while …:` 块
+            （`beat_render.render_loop_block`），于是"循环体里的台词"
+            与普通台词一样可以逐行编辑 = **T0**。
+          · `False`（老表 / 兼容路）：块体只有逐字原文 —— 整块进 `opaque`，
+            头行进 `loop_header`，渲染时**逐字吐回**（= `T0b`，
+            与 M1/M4 那套"没改就不动一个字节"完全同款）。
+
+        ⚠ **`opaque` 在结构化那条路上必须是空的**：它是渲染层的分支判据
+        （`_is_loop_head` = 有头行、无整块原文）。带着 `opaque` 又带结构位
+        会把同一段内容写两遍（一遍逐字、一遍来自块体拍）—— 那是"静默改剧情"
+        里最难查的一种。
+        """
+        header = str(payload.get('header') or '')
+        walked = bool(payload.get('walked'))
+        if not walked:
+            text = (payload.get('text', '') or '').strip()
+            if not text:
+                return True, False
+            self.branch_guard(stmt)
+            self.flush_stage_only()
+            self.pending.condition = stmt.condition or ''
+            self.pending.opaque = _append_line(self.pending.opaque, text)
+            self.pending.loop_header = header
+            self.pending_has_stage = True
+            return True, False
+        if not header:
+            return True, False
+        self.branch_guard(stmt)
+        # 头拍直接落盘（与菜单头同一个理由：`pending` 里攒着的舞台指令
+        # 属于**循环之前**，必须在循环前面落下来）。
+        self.flush_stage_only()
+        self.seq += 1
+        head = self.with_src(Beat(
+            seq=self.seq, label=self.current_label,
+            condition=stmt.condition or '',
+            kind=KIND_NARRATION,
+            loop_header=header,
+        ), _ln)
+        # 循环头在**父块**里（组头不属于循环体本身）—— 与菜单头同款，
+        # 结构位显式写死，不让"按当前语句转发"那趟覆盖。
+        head.nest_path = getattr(stmt, 'nest_path', None)
+        head.inline_comment = getattr(stmt, 'inline_comment', '') or ''
+        self.beats.append(head)
+        # 循环是控制流边界：后面的 `extend` 不再属于循环前那句台词
+        self.last_speaker = ''
+        return False, True
+
+    def _emit_camera(self, stmt, payload, _ln):
+        """
+        `camera` 块（3D 舞台）：**头行进 `camera_header` + 整块原文进 `opaque`**。
+
+        与 `_emit_loop` **逐字同款**（同一套保真策略、同一个 `flush_stage_only`
+        让它独占一张拍）—— 不发明第二套规矩：渲染层靠"头行改没改"决定要不要
+        替换首行，所以"没改就不动一个字节"是结构上成立的。
+
+        为什么单独一个字段而不是复用 `loop_header`：两者的**校验**与**提示**
+        不同（循环头是条件表达式，camera 头是层名），混用一个字段以后没法
+        分开说；而渲染层的优先级链把它们并列即可（见 `beat_render.emit_opaque`）。
+        """
+        text = (payload.get('text', '') or '').strip()
+        if not text:
+            return True, False
+        self.branch_guard(stmt)
+        self.flush_stage_only()
+        self.pending.condition = stmt.condition or ''
+        self.pending.opaque = _append_line(self.pending.opaque, text)
+        self.pending.camera_header = str(payload.get('header') or '')
         self.pending_has_stage = True
         return True, False
 
@@ -1496,13 +1613,60 @@ def attach_file_block_text(beats: list, text: str) -> list:
     return out
 
 
-def beats_from_parse_result(parse_result, label: str = '') -> list:
+#: 解析器把"没被任何分支接住"的语句记成这几个 `raw_kind`。
+#: 只有它们**有可能**被项目声明认领 —— 见 `_has_unmodeled`。
+_UNMODELED_KINDS = frozenset({'unmodeled', 'unknown_block', 'known_block'})
+
+
+def _has_unmodeled(parse_result) -> bool:
+    """
+    这份 `ParseResult` 里**有没有**可能被认领的语句？
+
+    用来**短路注册表装配**（那要扫全项目找 CDS）。绝大多数章节一条都没有，
+    而装配是纯开销 —— 不加这个判断，全量测试从 10 分钟涨到 19 分钟。
+    """
+    for st in (getattr(parse_result, 'statements', None) or ()):
+        payload = getattr(st, 'payload', None)
+        if isinstance(payload, dict) and (
+                payload.get('raw_kind') or '') in _UNMODELED_KINDS:
+            return True
+    return False
+
+
+def beats_from_parse_result(parse_result, label: str = '',
+                            spec_registry=None) -> list:
     """
     入口：ParseResult → Beat 列表（并带上**文件级保真块**）。
 
     顶层 `init python:` 不属于任何拍，但必须跟着表走 ——
     见 `attach_file_blocks`（拓展边界③）。
+
+    `spec_registry`（M3）：项目声明过的自定义语句表（见
+    `story.statement_registry.StatementRegistry`）。给了就把"未建模"里
+    被声明过的那几条**认领**下来（打上 `payload['spec_name']`）——
+    它们从"工具不认识"（T3）升成"工具知道你是谁"（T1）。
+    不给就退回 M1 的口径（全部算未建模块）。
     """
+    # ⚠ **先短路**：没有任何"未建模"语句时不要去装配注册表 ——
+    # 装配要扫一遍全项目找 CDS，而那只有"真出现了自定义语句"才有意义。
+    # 实测（2026-10-07）：不短路时全量测试 10 分钟 → 19 分钟；
+    # 绝大多数项目/用例里一条未建模语句都没有，这一次扫描纯属白跑。
+    if spec_registry is None and _has_unmodeled(parse_result):
+        # 没显式给就从 `ParseResult` 反推项目根再装配（见
+        # `registry_for_parse_result` 的说明：8 个调用点，漏一处就是
+        # "那条路上的自定义语句又变成不认识"）。
+        try:
+            from storygraph.story.statement_registry import (
+                registry_for_parse_result)
+            spec_registry = registry_for_parse_result(parse_result)
+        except Exception as e:                # noqa: BLE001 - 装配失败不该影响出拍
+            swallow('story.beat_build.spec_registry', e)
+            spec_registry = None
+    if spec_registry:
+        from storygraph.story.statement_registry import (
+            annotate_spec_statements)
+        annotate_spec_statements(getattr(parse_result, 'statements', None),
+                                 spec_registry)
     beats = beats_from_statements(
         parse_result.statements,
         label=label,

@@ -51,7 +51,7 @@ def main() -> int:
     target = s.beats[0]
     print(f'\n目标拍 = [{0}] kind={target.kind!r} code={target.code!r}')
     target.code = 'persistent.wanli_unlocked = True  # 改过了'
-    res = s.export(dst, force=True)
+    res = s.export(dst)
     print(f'\nexport ok={res.get("ok")} note={res.get("note")!r}')
 
     before = src.read_text(encoding='utf-8').splitlines()

@@ -392,6 +392,26 @@ def resolve_stage_asset(name: str, images: dict, project_root=None,
     parts = spec.split()
     tag, rest = parts[0], parts[1:]
     if images:
+        # ⚠ **多属性时先试"表情件"**（2026-10-05 修"无头骑士"）：
+        #
+        # `show ye base_handdown happy` 里 `base_handdown` 是**身体件**
+        # （只有身体没有头），`lookup_image_id` 只看第一个属性 → 画出无头身体。
+        # 按"非身体件优先（从后往前）"逐个试，第一个查得到的才是完整立绘。
+        try:
+            from storygraph.app.beats import (lookup_image_id,
+                                              preferred_image_attrs)
+            wants = preferred_image_attrs(rest) if len(rest) > 1 else []
+            for attr in wants:
+                aid = lookup_image_id(images, tag, [attr])
+                if not aid:
+                    continue
+                row = images.get(aid) or {}
+                hit = _path_from_rel(str(row.get('Path') or '').strip(),
+                                     project_root)
+                if hit is not None:
+                    return hit
+        except Exception as e:                    # noqa: BLE001 - 桩环境
+            swallow('app.stage.resolve_stage_asset.order', e)
         try:
             aid = lookup_image_id(images, tag, rest)
         except Exception as e:                    # noqa: BLE001 - 桩环境
@@ -554,8 +574,37 @@ def image_index_lookup(spec: str, index: dict):
     return None
 
 
+def sprite_plan(frame, sprite, layer_model, images: dict, project_root=None):
+    """
+    一个立绘 → **合成计划**（`LayerPlan`）或 None。
+
+    设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`（P2）。
+    没有 `layeredimage` 声明 / 认不出 → 返回 None（调用方走今天的单图路径）。
+    """
+    if layer_model is None or not getattr(layer_model, 'images', None):
+        return None
+    try:
+        from storygraph.story.layered_model import resolve_layers
+        spec = ''
+        if isinstance(sprite, (list, tuple)) and len(sprite) >= 2:
+            spec = str(sprite[1] or '')
+        else:
+            spec = str(getattr(sprite, 'image', '') or '')
+        parts = spec.split()
+        if not parts:
+            return None
+        tag, attrs = parts[0], parts[1:]
+        if not layer_model.has(tag):
+            return None
+        plan = resolve_layers(layer_model, tag, attrs, project_root)
+        return plan if getattr(plan, 'layers', None) else None
+    except Exception as e:                        # noqa: BLE001 - 认不出就走老路
+        swallow('app.stage.sprite_plan', e)
+        return None
+
+
 def resolve_frame_assets(frame, images: dict, project_root=None,
-                         index: dict = None) -> dict:
+                         index: dict = None, layer_model=None) -> dict:
     """
     一帧要用到的真实图片路径：`{'bg':..., 'layers':..., 'sprites': [(布局, 路径)]}`。
 
@@ -574,9 +623,25 @@ def resolve_frame_assets(frame, images: dict, project_root=None,
 
     sprites = []
     missing = []
+    composed = {}
     for s in getattr(frame, 'sprites', []) or []:
         spec = getattr(s, 'image', '')
-        path = resolve(spec)
+        # ① **合成立绘优先**（有 layeredimage 声明的项目）：
+        #    按项目自己的 group/attribute + AlphaMask 蒙版叠出完整立绘。
+        #    合成不出来就往下走老路（单图），**绝不画错也不留白**。
+        path = None
+        plan = sprite_plan(frame, s, layer_model, images, project_root)
+        if plan is not None and getattr(plan, 'ok', False):
+            try:
+                from storygraph.app.layer_compose import compose_sprite
+                path = compose_sprite(plan)
+            except Exception as e:                # noqa: BLE001 - 合成失败走老路
+                swallow('app.stage.resolve_frame_assets.compose', e)
+                path = None
+            if path is not None:
+                composed[spec] = plan
+        if path is None:
+            path = resolve(spec)
         if path is None and spec and not resolve_solid_color(spec, images,
                                                              project_root):
             missing.append(spec)
@@ -593,7 +658,8 @@ def resolve_frame_assets(frame, images: dict, project_root=None,
         if layers is None and not resolve_solid_color(frame.layers, images,
                                                      project_root):
             missing.append(frame.layers)
-    return {'bg': bg, 'layers': layers, 'sprites': sprites, 'missing': missing}
+    return {'bg': bg, 'layers': layers, 'sprites': sprites,
+            'missing': missing, 'composed': composed}
 
 
 # ===================== 画出来（tkinter） =====================

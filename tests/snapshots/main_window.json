@@ -167,9 +167,24 @@
    {
     "keys": [
      "counts",
+     "created",
+     "created_counts",
+     "deduped",
+     "deduped_by_kind",
      "error",
      "ok",
-     "registry"
+     "registry",
+     "relinked",
+     "relinked_by_kind",
+     "removed",
+     "removed_by_kind",
+     "repair_error",
+     "repaired",
+     "sync_backup",
+     "sync_reconcile",
+     "synced",
+     "synced_by_kind",
+     "unusable"
     ],
     "ok": true
    }
@@ -401,7 +416,7 @@
      "music": "night",
      "raw": "",
      "scene": "bg classroom",
-     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "show": "ling base_arms_akimbo sigh@i11",
      "speaker": "e",
      "text": "早上好，昨晚睡得好吗？"
     },
@@ -567,7 +582,7 @@
      "music": "night",
      "raw": "",
      "scene": "bg classroom",
-     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "show": "ling base_arms_akimbo sigh@i11",
      "speaker": "e",
      "text": "早上好，昨晚睡得好吗？"
     },
@@ -889,7 +904,7 @@
      "music": "night",
      "raw": "",
      "scene": "bg classroom",
-     "show": "ling base_arms_akimbo_sigh base_arms_akimbo_sigh@i11",
+     "show": "ling base_arms_akimbo sigh@i11",
      "speaker": "e",
      "text": "早上好，昨晚睡得好吗？"
     },

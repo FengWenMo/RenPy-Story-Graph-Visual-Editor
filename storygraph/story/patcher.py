@@ -56,6 +56,7 @@ from __future__ import annotations
 from storygraph.core.safeguard import swallow
 import difflib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -448,11 +449,28 @@ def _set_insert_point(beat, prev_src, nxt_src=None, inserted_out: list = None,
 _SAY_RE = re.compile(
     r'^(?P<who>[A-Za-z_][\w.]*)?\s*(?P<q>"|\')(?P<body>.*)(?P=q)$')
 #: 舞台/音频行：动词 + 目标
+#:
+#: ⚠ `voice` 必须在这里（2026-10-05 修 p0）：它**不在**列表里时
+#: `voice "v_ling_01"` 会被 `_SAY_RE` 当成"说话人叫 voice 的台词"
+#: —— 开着句位配对时就会和真台词互相顶掉（见 `_line_key` 的说明）。
 _VERB_RE = re.compile(
-    r'^(?P<verb>show|hide|scene|play|stop|queue)\s+(?P<rest>.*)$')
+    r'^(?P<verb>show|hide|scene|play|stop|queue|voice)\s+(?P<rest>.*)$')
 _CHAN_RE = re.compile(r'^(?P<chan>music|sound|voice)\b')
 
 _STAGE_VERBS = ('show', 'hide', 'scene')
+
+#: Ren'Py 的**关键字**：不可能出现在"说话人"位上（角色变量不许叫这些名字）。
+#:
+#: 用途只有一个：**句位配对（`ignore_speaker`）不许把它们当成"说话人变了"**
+#: —— `extend "…"` / `menu "标题":` 的形状与 `lyj "台词"` 一样，一旦退化成
+#: `('say','')` 就会和真台词互相顶掉（`voice "x"` 已经踩过一次，见 `_line_key`）。
+_KEYWORD_SPEAKERS = frozenset({
+    'extend', 'voice', 'play', 'stop', 'queue', 'show', 'hide', 'scene',
+    'menu', 'nvl', 'window', 'pause', 'return', 'jump', 'call', 'label',
+    'if', 'elif', 'else', 'while', 'for', 'python', 'init', 'define',
+    'default', 'transform', 'screen', 'style', 'image', 'camera', 'with',
+    'at', 'as', 'behind', 'onlayer', 'zorder', 'pass', 'break', 'continue',
+})
 
 
 def _parse_stage_body(body: str) -> tuple:
@@ -505,7 +523,7 @@ def _content_of(line: str) -> str:
     return _strip_comment(line or '')
 
 
-def _line_key(body: str) -> tuple:
+def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
     """
     配对用的身份键（见 `_replace_matched` 的说明）。
 
@@ -517,16 +535,40 @@ def _line_key(body: str) -> tuple:
       · 其余：`('other', 原文)` —— 只和自己逐字相同的行配对
 
     台词配台词，而且**说话人必须一样**（`lyj "…"` 不会去配 `jc "…"`）。
-    `show ling …` 配 `show ling …`（tag 一样），`hide ye` 配 `hide ye`，
-    `play music …` 配 `play music …`。其余（注释 / `if` / 菜单 / 未识别）
-    一律 `('other', 原文)`：只和自己逐字相同的行配对 → **不会被替换**，
-    也就不会被改坏。认不出的一律保守（配对失败 = 原文一个字不动）。
+    `ignore_speaker=True` 时台词键退化成 `('say', '')` —— **句位配对**：
+    只用在"行号已被证明新鲜"的那条路上（`trust_ranges`），因为那时区间
+    本来就属于这一拍，用户把旁白改成台词（或换了说话人）不该导致配不上。
+    默认 False：认不出的一律保守（配对失败 = 原文一个字不动）。
 
     ⚠ 身份一律在**去掉行尾注释**之后算（见 `_content_of`）：注释不是内容，
     而渲染器会把注释贴回同一行 —— 不去掉的话带注释的台词行认不出自己是台词。
     """
     s = (body or '').strip()
     bare = _content_of(s)
+    # ⚠ **动词优先于"说话人 + 引号"**（2026-10-05 修 p0）：
+    # `voice "v_ling_01"` / `play sound "door"` 这种"动词 + 带引号的目标"
+    # 形状与 `lyj "台词"` **一模一样**，`_SAY_RE` 会把 `voice` 当说话人
+    # → 键算成 `('say', 'voice')`。从前无害（说话人不同 → 配不上），可一旦
+    # 开了句位配对（`ignore_speaker`，行号新鲜时），**所有台词键都变成
+    # `('say','')`** → 音频行与真台词互相配对 —— 实测把
+    # `m "还行，就是雨下了一整晚。"` 整行**换成了** `voice "v_ling_01"`。
+    #
+    # Ren'Py 里动词是关键字（角色变量不许叫 `voice`/`play`），所以
+    # "先认动词"不只更安全，也更接近语言本身的语义。
+    m = _VERB_RE.match(bare)
+    if m:
+        verb, rest = m.group('verb'), m.group('rest')
+        if verb in _STAGE_VERBS:
+            spec = _parse_stage_body(bare)[0]
+            return (verb, spec.split()[0] if spec.split() else '')
+        chan = _CHAN_RE.match(rest.strip())
+        if chan:
+            return (verb, chan.group('chan'))
+        # 目标**去掉引号**再当身份：`voice v_ling_01` 与 `voice "v_ling_01"`
+        # 是同一件事（生成器会补引号）—— 不归一的话它们配不上对，
+        # 生成器那行会被当"新内容"插进去 → 文件里多一条 `voice`。
+        return (verb, rest.strip().strip('"\'').split()[0]
+                if rest.strip().strip('"\'').split() else '')
     m = _SAY_RE.match(bare)
     if not m:
         # **菜单选项行**（`"选项":`，可带行尾注释）—— 见 `_OPTION_ROW_RE`：
@@ -539,21 +581,22 @@ def _line_key(body: str) -> tuple:
             if m is not None and (m.group('who') or '').strip():
                 m = None
     if m:
-        return ('say', (m.group('who') or '').strip())
+        who = (m.group('who') or '').strip()
+        # ⚠ **关键字不许被"句位配对"吞掉**（2026-10-05 修 p0）：
+        # `extend "…"` / `menu "标题":` 这类行的"说话人位"上是 Ren'Py 的
+        # **关键字**，不是角色名。`ignore_speaker` 只管"说话人换了也能配"，
+        # 绝不该让它们退化成 `('say','')` 去和真台词配对
+        # （同一形状的坑已经踩过一次：`voice "x"` 顶掉了 `m "台词"`）。
+        if ignore_speaker and who not in _KEYWORD_SPEAKERS:
+            who = ''
+        return ('say', who)
     if bare.startswith('$'):
         return ('code', _code_target(bare))
-    m = _VERB_RE.match(bare)
-    if m:
-        verb, rest = m.group('verb'), m.group('rest')
-        if verb in _STAGE_VERBS:
-            spec = _parse_stage_body(bare)[0]
-            return (verb, spec.split()[0] if spec.split() else '')
-        chan = _CHAN_RE.match(rest.strip())
-        return (verb, chan.group('chan') if chan else rest.strip())
     return ('other', s)
 
 
-def _same_thing_unless_rewritten(old_body: str, new_body: str) -> bool:
+def _same_thing_unless_rewritten(old_body: str, new_body: str,
+                                relax_speaker: bool = False) -> bool:
     """
     内容不同时，这一行**允许被替换**吗？
 
@@ -564,10 +607,24 @@ def _same_thing_unless_rewritten(old_body: str, new_body: str) -> bool:
         （词数不一致说明生成器把 `ling close_happy` 改写成了
          `ling_close_happy` —— 那是"把能跑的脚本改坏"，**不许换**）
       · 其余：不换
+
+    `relax_speaker=True`（2026-10-05，**只在行号已被证明新鲜时**）：
+    台词↔台词一律放行，**说话人变了也算**。用户实测那一刀就是
+    "把一句旁白改成 `lyj "…"` 并换掉正文" —— 说话人与正文同时变了，
+    严格判据下"不是同一件事"→ 不换 → 新台词落不了地 → 整份拒绝：
+
+        1 句台词在补丁结果里找不到（例：'AI真的拥有自我意识吗？我并不这么觉得'）
+
+    而那一行**就是这一拍自己的行**（行号是解析真迹）—— 该做的就是换掉它。
     """
     kind = _line_key(old_body)[0]
     if kind == 'say':
-        return _line_key(old_body) == _line_key(new_body)
+        if _line_key(old_body) == _line_key(new_body):
+            return True
+        if not relax_speaker:
+            return False
+        # 两边都是**同一槽位上的台词行**才放行（不能拿旁白去换一段舞台）
+        return _line_key(new_body)[0] == 'say'
     if kind in _STAGE_VERBS:
         if _line_key(old_body) != _line_key(new_body):
             return False
@@ -623,7 +680,41 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
     blob = '\n'.join(old_lines or [])
     if not blob.strip():
         return True                          # 空区间 = 新增拍的插入点
+    from storygraph.story.beat_model import MENU_NO_CAPTION, KIND_MENU_OPTION
     text = (getattr(beat, 'text', '') or '').strip()
+    if getattr(beat, 'kind', '') == KIND_MENU_OPTION:
+        # **选项行的身份是"它是一条选项行"**（2026-10-05 实测修，与下面
+        # 裸 `menu:` 那条同族）。
+        #
+        # 选项行的**文案正是用户改的那一位** —— `"去左边":` 改成
+        # `"第3轮选项":` 之后，新文案在原文里根本不存在；而这一拍没有
+        # 说话人、没有舞台，形状相似度那条兜底也被**注释对齐**拖到 0.6 以下
+        # （原文 `"去左边":               # 备注：左选项` 那一长串空格 vs
+        # 生成器的两个空格）→ 判"错位" → 文案不落地 → `lost_new` →
+        # 整章退回全量。症状与用户报的那条一样："只改一句，为什么全量"。
+        #
+        # 判据（引号 + 冒号，可带行尾注释，复用 `_OPTION_ROW_RE`）只回答
+        # "这一段是不是一条选项行"：**只改文案那种改动**因此能落地，
+        # 而错位到`menu:` / 台词 / 空行上的区间照样拦得住。
+        return any(_OPTION_ROW_RE.match(str(ln).strip())
+                   for ln in (old_lines or []))
+    if text == MENU_NO_CAPTION:
+        # **无标题菜单的身份是那一行 `menu:`，不是占位符**（2026-10-05 实测修）。
+        #
+        # `Beat.text` 在"菜单没有标题"时是占位符 `\x00menu`（见
+        # `MENU_NO_CAPTION`），而源文件里写的是 `menu:` —— 拿占位符去原文里
+        # 找永远找不到，于是**每一拍都少认一个**：带着裸 `menu:` 的章节里，
+        # 这一拍恒定判"错位"，对位率被它拖到 (n-1)/n。章节小的时候就掉到
+        # 90% 门槛之下 → `patch_export` 整份作废 → 原地导出被拒
+        # （用户看到的还是"只能全量导出"那种失败）。
+        #
+        # 实测形状（`tools/hell_edit_rounds.py` 轴 B 第 1 轮，7 拍 → 86%）：
+        # 只改一张卡的立绘，导不进去；把 force 去掉让它浮出来才看见。
+        #
+        # 为什么不是"占位符当没有内容、直接放行"：那会把这一拍的区间校验
+        # 整个关掉。渲染这一拍写出来的就是 `menu:` 那一行，所以要求原文段里
+        # 真有 `menu` 才是对的（错位的区间照样拦得住）。
+        return bool(re.search(r'(?m)^[ \t]*menu\b', blob))
     if text and text in blob:
         return True
     speaker = (getattr(beat, 'speaker', '') or '').strip()
@@ -741,16 +832,27 @@ def _head_of(body: str) -> tuple:
     """
     s = _norm(body)
     bare = _content_of(s)                 # 注释不是内容（见 `_content_of`）
+    # ⚠ **动词优先**（与 `_line_key` 同一条规矩，2026-10-05 修 p0）：
+    # `voice "v_ling_01"` 的"说话人"其实是关键字，不是角色名。不这么排的话，
+    # 原文 `voice v_ling_01` 与生成器补了引号的 `voice "v_ling_01"` 身份不同
+    # → 被判成"新内容" → 明明一个字都没改，也报"1 处新增内容没能落进产物"
+    # → 整份拒绝（`test_ui_qt` 加立绘那条实测踩到）。
+    m = _VERB_RE.match(bare)
+    if m:
+        rest = m.group('rest').split()
+        return (m.group('verb'),
+                rest[0].strip('"\'') if rest else '')
     m = _SAY_RE.match(bare)
     if m:
+        who = (m.group('who') or '').strip()
+        if who in _KEYWORD_SPEAKERS:
+            # 关键字行（`extend "…"` / `menu "标题":`）：归一到"哪件事"这一层，
+            # 别把整句正文当身份（同一件事的两种写法要能认出是同一件）。
+            return ('other', who)
         # 台词按**正文**比：换说话人＝同一句话，别把旧行留着又插一条新的
         return ('say', m.group('body'))
     if bare.startswith('$'):
         return ('code', _code_target(bare))
-    m = _VERB_RE.match(bare)
-    if m:
-        rest = m.group('rest').split()
-        return (m.group('verb'), rest[0] if rest else '')
     return ('other', ' '.join(s.split()[:2]))   # `call X from Y` / `jump X` …
 
 
@@ -860,7 +962,8 @@ def _flat_editable_range(old_lines: list) -> bool:
 
 
 def _replace_matched(old_lines: list, gen_bodies: list,
-                     allow_edit: bool = True, file_squash=None) -> tuple:
+                     allow_edit: bool = True, file_squash=None,
+                     relax_speaker: bool = False) -> tuple:
     """
     原文区间 → 新区间。
 
@@ -890,13 +993,13 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     """
     pool: dict = {}
     for idx, g in enumerate(gen_bodies):
-        pool.setdefault(_line_key(g), []).append(idx)
+        pool.setdefault(_line_key(g, relax_speaker), []).append(idx)
     used: set = set()
     #: `gen 下标 → 原文下标` 的配对（先贪心配对，再检查单调性）
     pair_of_gen: dict = {}
     pick_of_old: dict = {}
     for j, ln in enumerate(old_lines):
-        cand = pool.get(_line_key(_norm(ln))) or []
+        cand = pool.get(_line_key(_norm(ln), relax_speaker)) or []
         for idx in cand:
             if idx in used:
                 continue
@@ -969,7 +1072,7 @@ def _replace_matched(old_lines: list, gen_bodies: list,
         # 新内容既不落地也不报错（`$` 不属于内容行）→ **静默保持旧代码**。
         if body.startswith('$') and _norm(pick).startswith('$'):
             return _indent_of(old_line) + _norm(pick), True
-        if not _same_thing_unless_rewritten(body, pick):
+        if not _same_thing_unless_rewritten(body, pick, relax_speaker):
             return old_line, False            # 不是"同一件事" → 不许换
         return _indent_of(old_line) + _norm(pick), True   # 缩进只来自原文
 
@@ -1100,6 +1203,111 @@ def _content_lines(gen_bodies: list) -> list:
     return out
 
 
+def _loose(line: str) -> str:
+    """
+    比对用的**最宽形式**：去空白 + 去所有引号。
+
+    解决的是"同一件事、写法不同"这一类（都是真实项目里量很大的形态）：
+
+        `'3-1章':`            ↔  `"3-1章":`          （作者用单引号，渲染器用双引号）
+        `menu "标题":`         ↔  下一行的 `"标题"`     （菜单头被合并回一行）
+        `voice v_ling_01`     ↔  `voice "v_ling_01"` （渲染器补引号）
+
+    这些**不是"新内容"**：原文里已经有了，只是写法不同。用逐字比会把它们
+    判成"新增内容没能落进产物" → 整份拒绝（实测 `hell_edit_rounds` 真实项目轴：
+    `credits_screen.rpy` / `mini_game_dfinder.rpy` / `script.rpy` 都被误伤，
+    而那些拍用户**根本没碰**）。
+    """
+    return re.sub(r'[\s"\']+', '', _norm(line))
+
+
+def _literals(line: str) -> list:
+    """
+    这一行里的**引号字符串**（Ren'Py 的"内容"就藏在这些引号里）。
+
+    用途：判"这一行说的内容，文件里是不是已经有了" —— 菜单标题被合并回一行时
+    （生成 `menu "标题":` ← 原文下一行是 `lyj "标题"`），逐字比一定不同，
+    但**内容**是同一句。见 `_unpairable_new_content`。
+    """
+    out = []
+    for a, b in re.findall(r'"([^"\n]*)"|\'([^\'\n]*)\'', line or ''):
+        t = (a or b).strip()
+        if t:
+            out.append(t)
+    return out
+
+
+def _unpairable_new_content(gen_bodies: list, old_lines: list,
+                            file_squash=None, file_loose=None) -> bool:
+    """
+    这一拍的生成行里，有**"原文没有"、而且按配对规矩也落不了地**的吗？
+
+    与 `_replace_matched` 内部的插入准入（`_is_new_content`）**同一套判据**
+    —— 两处必须是同一条规矩，否则会自相矛盾：判据说"有新内容"，而配对那边
+    明明**配对成功、一个字都没改**。
+
+    实测（2026-10-05，`test_ui_qt` 加一张立绘那条）：原文 `voice v_ling_01`，
+    生成器补引号写成 `voice "v_ling_01"` —— `_has_new_content`（只比整行的
+    字面/外层引号）判它是"新内容" → 明明什么都没变，却报
+
+        1 处新增内容没能落进产物
+
+    → 整份拒绝（用户看到的就是"我只调了一个卡片，都不能替换"）。
+    这里的判据会先看**身份**（`_head_of`）：两边都是 `('voice', 'v_ling_01')`
+    → 早就在原文里 → 不算新内容。
+    """
+    old = list(old_lines or ())
+    old_heads = {_head_of(_norm(ln)) for ln in old if _norm(ln)}
+    old_squash = [_squash(ln) for ln in old if _squash(ln)]
+    #: 旧段的**语义形式**（去外层引号 + 去转义 + 去空白）——
+    #: 生成器会把 `'file "c:\\a.py"'` 写成 `"file \"c:\\\\a.py\""`：
+    #: 逐字比是两行，语义比是同一行。不这么比就会把"一个字都没改"判成
+    #: "新增内容没落地" → 整份拒绝（`hell_edit_rounds` 真实项目轴实测：
+    #: `chapter1_2.rpy` / `credits_screen.rpy` / `script.rpy` 等 7 个文件）。
+    old_bare = set()
+    old_loose = set()
+    for ln in old:
+        if not _norm(ln):
+            continue
+        b = _unescaped(ln)
+        old_bare.add(b)
+        old_bare.add(re.sub(r'\s+', '', b))
+        old_loose.add(_loose(ln))
+    for body in _body_lines(list(gen_bodies or ())):
+        s = _squash(body)
+        if not s or _head_of(body) in old_heads:
+            continue
+        bare = _unescaped(body)
+        if bare in old_bare or re.sub(r'\s+', '', bare) in old_bare:
+            continue                     # 只差引号 / 转义 → 早就在原文里
+        lo = _loose(body)
+        if lo and lo in old_loose:
+            continue                     # 最宽形式也相等 → 同一件事
+        # **整份文件里已经有的内容不算"新"**：菜单头被合并回一行
+        # （`menu "标题":` 对应原文下一行的 `"标题"`）这种形态，逐字比
+        # 一定对不上，但它本来就在文件里、用户也没碰过 —— 报成"没落地"
+        # 就是把整章判死（`credits_screen.rpy` 实测）。
+        if file_loose and lo and any(lo in fl or fl in lo
+                                     for fl in file_loose):
+            continue
+        # **内容（引号里的话）文件里已经有了** → 也不算新：菜单标题被并回一行
+        # 就是这一种（生成 `menu "标题":`，原文把标题写在下一行，还可能带说话人
+        # `lyj "标题"`）。逐字比必然不同，但用户**根本没碰**这一拍 ——
+        # 报成"没落地"就是把整章判死（`script.rpy` / `credits_screen.rpy` 实测）。
+        lits = _literals(body)
+        if lits and file_loose and all(
+                any(_loose(t) in fl for fl in file_loose) for t in lits):
+            continue
+        if _is_missing_note(body) and any(_mentions(body, o) for o in old):
+            continue
+        if any(s in so or so in s for so in old_squash):
+            continue
+        if file_squash and s in file_squash:
+            continue
+        return True
+    return False
+
+
 def _has_new_content(gen_bodies: list, orig_set: set) -> bool:
     """
     这一拍的生成内容里，有**原文里根本没有**的行吗？
@@ -1206,7 +1414,60 @@ def _verify_conditions(text: str, beats: list) -> list:
     return []
 
 
-def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
+def _audio_ident(line: str):
+    """
+    音频行的身份 `(动词, 通道)`；不是音频行返回 None。
+
+    与配对用的 `_line_key` **同源**（`('play','music')` / `('voice','')` …），
+    这样"能不能配对上"和"算不算同一条音频"用的是同一套判据。
+    """
+    key = _line_key(_norm(line))
+    if key and key[0] in ('play', 'stop', 'queue', 'voice'):
+        return key
+    return None
+
+
+def _written_speaker(beat, symbols) -> str:
+    """
+    渲染器**真正会写出去**的说话人 —— 校验必须用同一个算出来的值。
+
+    为什么（2026-10-05 用户实测报"我只调了一个卡片，都不能替换"）：
+    用户填了一个**没登记**的角色名（实测 `lj`），渲染器按既定纪律
+    （D7：缺资源就写 `# TODO: 缺少资源 角色 'lj'` 且不生成那条非法语句）
+    把说话人丢掉、正文按旁白写。于是产物里那句台词的 key 是
+    `(label, '', text)`，而校验拿 `(label, 'lj', text)` 去找 → 判"这句台词
+    找不到" → **整份补丁作废**：
+
+        1 句台词在补丁结果里找不到（例：'AI真的拥有自我意识吗？我不信，哈哈哈哈！'）
+
+    而那句台词其实**就在产物里**（探针一摊开就看得见）。两边用同一套判据
+    才不会互相打架 —— 这里照渲染器的规矩重算一遍（`beat_render` 里
+    `audit.character(...) == TODO` 那一支）。
+
+    字面量说话人（`"系统" "提示"`）不在角色表里查，照渲染器逐字写出去。
+    """
+    speaker = str(getattr(beat, 'speaker', '') or '').strip()
+    if not speaker or symbols is None:
+        return speaker
+    try:
+        from storygraph.story.beat_model import is_literal_speaker
+        if is_literal_speaker(speaker):
+            return speaker
+    except Exception as e:                    # noqa: BLE001
+        swallow('patcher._written_speaker.literal', e)
+    try:
+        # 与渲染器**同一套判据**：`Audit.character()` 回答的是
+        # "这个角色表里有没有这个名字"（没建角色表 → PASS，一律放行）。
+        from storygraph.story.dsl import TODO as _TODO, Audit
+        if Audit(symbols).character(speaker) == _TODO:
+            return ''
+    except Exception as e:                    # noqa: BLE001 - 判不了就当登记过
+        swallow('patcher._written_speaker', e)
+    return speaker
+
+
+def _verify_patch(text: str, original: str, beats: list, blocks: list,
+                  symbols=None) -> list:
     """
     补丁后的文本能解析、且**该有的东西一样不少**吗？返回不通过的原因列表。
 
@@ -1253,7 +1514,10 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
         t = (b.text or '').strip()
         if not t:
             continue
-        key = (b.label or '', b.speaker or '', t)
+        # 说话人用**渲染器会写出去的那个**（未登记的角色会被丢掉 + TODO，
+        # 见 `_written_speaker`）—— 否则"填了个没登记的角色名"会把整份补丁
+        # 判死，而产物里那句台词其实好好地在那儿。
+        key = (b.label or '', _written_speaker(b, symbols), t)
         if have.get(key, 0) <= 0:
             missing.append(t[:24])
         else:
@@ -1307,9 +1571,37 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list) -> list:
         text_set |= _keys(ln)
     out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in text.splitlines()]
     out_blobs = [b for b in out_blobs if b]
+    # ③b **音频行按"通道计数"容忍**（2026-10-05）。
+    #
+    # 音频行在配对里**永远不会被改写**（`_rewrite` 只放行 say 与舞台动词），
+    # 所以产物里保留的是**作者的写法**；而生成器会把它翻译成真实路径
+    # （`play music night` → `play music "music/night.ogg"` —— 那个翻译本身
+    # 是对的，Ren'Py 要的就是路径）。于是下面那条"每条生成行都要在产物里"
+    # 必然失败 → **整份补丁作废**：用户侧看到的是"我只改了一张卡，
+    # 却弹「1 条生成内容在补丁结果里找不到」"。
+    #
+    # 容忍判据取**同一个 (动词, 通道) 的条数**：产物里的条数不许比生成器
+    # 想要的少 —— "某条音乐凭空没了"仍然抓得住，"作者写 night、生成器写路径"
+    # 不再误伤。
+    audio_gen: Counter = Counter()
+    audio_out: Counter = Counter()
+    for _i, _f, _l, gen, _b in blocks:
+        for line in _content_lines(gen):
+            ident = _audio_ident(line)
+            if ident:
+                audio_gen[ident] += 1
+    for line in text.splitlines():
+        ident = _audio_ident(line)
+        if ident:
+            audio_out[ident] += 1
+    audio_tolerated = {k for k, n in audio_gen.items()
+                       if audio_out.get(k, 0) >= n}
     lost = []
     for _i, _first, _last, gen, _beat in blocks:
         for line in _content_lines(gen):
+            ident = _audio_ident(line)
+            if ident and ident in audio_tolerated:
+                continue
             keys = _keys(line)
             if keys & text_set:
                 continue
@@ -1359,8 +1651,13 @@ def _insert_points_for(beats, insert_ids, raw_gen: dict) -> tuple:
         point = int(getattr(beats[i], 'insert_anchor', 0) or 0) or \
             int(getattr(beats[i], 'src_first', 0) or 0)
         rows = list(raw_gen.get(i) or [])
-        if not point or not rows:
-            failed += 1                       # 没有锚点（文件头？）→ 不能安全插
+        if not rows:
+            # 渲染不出内容的新拍（结构补空拍）没有东西可插 ——
+            # **不算"找不到锚点"**：那会让整份补丁作废（见 `patch_export`
+            # 里"把结构补空拍从新卡片里摘出去"那段）。
+            continue
+        if not point:
+            failed += 1                       # 有内容却没有锚点（文件头？）→ 不能安全插
             continue
         anchors.setdefault(point, []).append(rows)
     return anchors, failed
@@ -1592,7 +1889,8 @@ def _render_blocks(beats: list, indent: str, audit):
 
 
 def patch_export(beats: list, source_path, generated_text: str,
-                 registry=None, symbols=None, indent: str = '    ') -> PatchResult:
+                 registry=None, symbols=None, indent: str = '    ',
+                 trust_ranges: bool = False) -> PatchResult:
     """
     把 `generated_text` 增量补进 `source_path`，返回合并后的全文。
 
@@ -1604,6 +1902,18 @@ def patch_export(beats: list, source_path, generated_text: str,
     否则单拍渲染的写法会和真实产物不一致（`ling happy` vs 中文 tag）
     —— 那就是"把能跑的脚本改坏"。没给 symbols 会从 registry 现推，
     与 `render_beats_to_rpy` 的做法一致。
+
+    `trust_ranges`（2026-10-05，用户实测报"我只调了一个卡片，都不能替换"）：
+    **调用方保证"拍上的行号就是从这份源文件解析出来的"**（会话核对过磁盘上
+    那一份没被外部改过，见 `EditorSession.source_unchanged`）。此时对位守卫
+    可以退成"行号可信"：把一句旁白改成台词、**同时**换掉正文、再加一张立绘时，
+    内容证据本来就全没了（说话人不在原文里、正文也不在），
+    旧判据只能判"错位" → 整份拒绝。
+
+    ⚠ 默认 `False`：**只有"能保证行号新鲜"的调用方才许传 True**。
+    表格那条路（`src_first` 是 `recover_source_ranges` 现算的）绝不许传 ——
+    那里的行号是猜出来的，守卫是它唯一的网。这也正是当年那次事故
+    （整体下移 1 行、259 行被改写）的入口。
     """
     source_path = Path(source_path) if source_path else None
     if source_path is None or not source_path.exists():
@@ -1648,6 +1958,22 @@ def patch_export(beats: list, source_path, generated_text: str,
         return PatchResult(generated_text, None, 0, 0, 0,
                            reasons=['这一章没有解析出任何拍，无法增量'])
 
+    # —— 把"结构补空拍"从新卡片里摘出去（2026-10-05 用户实测报的）——
+    #
+    # `label ch01_end:` + `return` 这种 label 会落下**一张什么都没有的拍**
+    # （解析器补的空拍，见 `beat_build`）。它没有源行号（`src_first == 0`），
+    # 于是被 `_insert_ids_of` 当成"编辑器里新插进来的卡片"；而它渲染不出
+    # 任何行 → `_insert_points_for` 认为"这张新卡片找不到插入位置" →
+    # **整份补丁作废** → 原地导出被拒。
+    #
+    # 症状正是用户报的那条："明明只是加了一张立绘（或改一句话），
+    # 却报『1 张新卡片找不到插入位置，无法安全地增量写入』"—— 而那个文件里
+    # 根本没有新卡片。真实例子：`tests/_ui_project.py` 的 `ch01`（13 拍，
+    # 尾部 `label ch01_end: return` 一张空拍）→ 加一条 show 就导不出去。
+    #
+    # 判据：**渲染不出任何行**的新拍既没有内容可插、也不该拦住别人。
+    insert_ids = {i for i in insert_ids if raw_gen.get(i)}
+
     matched = 0
     changed = 0
     stale = 0
@@ -1661,11 +1987,23 @@ def patch_export(beats: list, source_path, generated_text: str,
     usable = [blk for blk in blocks if blk[1] and blk[2] >= blk[1]]
     usable.sort(key=lambda t: t[1], reverse=True)
 
+    #: 对位率的**分母**：真的需要落地的拍（见 `PatchResult.coverage`）。
+    #:
+    #: 排除"既没有源行号、又渲染不出内容"的结构补空拍 —— 它们既不需要替换
+    #: 也不需要插入，算进分母只会让"只改一句台词"莫名其妙地掉到 90% 门槛
+    #: 以下（实测：13 拍的章节里一张 `label x: return` 的空拍把它压到 92%，
+    #: 三张就掉出门槛 → 整章退回全量，而那与用户的改动毫无关系）。
+    pending = sum(1 for _i, _first, _last, gen, _b in blocks
+                  if gen or (_first and _last >= _first))
+
     #: 原文里出现过的行（判定"这条内容是不是**新**的"用）
     orig_set = {_norm(ln) for ln in orig_lines}
     orig_set |= {_unescaped(x) for x in orig_set}
     #: 原文里出现过、且**去掉全部空白**的形式（增行的准入判据之一）
     orig_squash = {_squash(ln) for ln in orig_lines if _squash(ln)}
+    #: 原文里出现过的**最宽形式**（去空白 + 去引号）—— 用来判"这条内容
+    #: 文件里其实已经有了、只是写法不同"（见 `_loose` / `_unpairable_new_content`）
+    orig_loose = {_loose(ln) for ln in orig_lines if _loose(ln)}
 
     changed += 0                              # （占位：下面插完再统计）
     #: 每一拍"用**精确区间**也认得出自己"吗？（增删行 / 旁白整句换写的准入）
@@ -1706,6 +2044,29 @@ def patch_export(beats: list, source_path, generated_text: str,
                     changed += n_changed
                     out_lines[first - 1:last] = new_seg
                 continue
+            if trust_ranges and gen:
+                # 行号**已被证明新鲜**（会话核对过"磁盘上那一份 == 载入时那一份"）：
+                # 内容证据全没了不代表错位 —— 用户可以把一句旁白同时改台词、
+                # 改正文、再加一张立绘，Identity 判据当然一条都命中不了。
+                # 此时按行号替换，并且**按句位配对**（`relax_speaker`）：
+                # 旁白 → 台词（说话人从空变成 lj）也要配得上。
+                seen_ranges.append((first, last))
+                matched += 1
+                new_seg, n_changed, unlanded, _gd, _sk = _replace_matched(
+                    old, gen, allow_edit=True, file_squash=orig_squash,
+                    relax_speaker=True)
+                unlanded_total += len(unlanded)
+                if new_seg != old:
+                    changed += n_changed
+                    out_lines[first - 1:last] = new_seg
+                elif _unpairable_new_content(gen, old, orig_squash, orig_loose):
+                    # **行号可信 ≠ 一定配得上**：`menu:` → `menu "标题":` 那种
+                    # "换行"（标题本来写在下一行）不是换词，配对键不同 →
+                    # `_replace_matched` 什么都不做。此时必须**报出来**，
+                    # 否则就是"报成功、内容没写"的静默 no-op ——
+                    # `hell_edit_rounds` 真实项目轴在 `script_pomo.rpy` 上抓到过。
+                    lost_new += 1
+                continue
             stale += 1
             if not gen:
                 continue
@@ -1732,12 +2093,22 @@ def patch_export(beats: list, source_path, generated_text: str,
         #    生成器多出来的行会被当成"新内容"插进去 → 文件里出现重复行。
         #    错位时只做一对一替换（= 老行为：一个字节都不动）。
         strict = _range_looks_like(old, beat, gen, exact_lines=old)
+        # ⚠ **配对也要放松**（2026-10-05 用户实测第二刀）：
+        # 守卫常常会**通过**（舞台指纹还在：`scene bg bg` 那一行属于这一拍），
+        # 于是走的是这条正常路而不是上面那条可信分支 —— 而配对仍然按
+        # "说话人必须一样" → 用户"旁白 → 台词 + 换正文"那一刀**配对失败**、
+        # 新台词落不了地，产物报"台词找不到 / 生成内容找不到"。
+        # 行号已证明新鲜时，句位配对（`relax_speaker`）才对。
         new_seg, n_changed, unlanded, grown, shrunk = _replace_matched(
-            old, gen, allow_edit=strict, file_squash=orig_squash)
+            old, gen, allow_edit=strict, file_squash=orig_squash,
+            relax_speaker=trust_ranges)
         unlanded_total += len(unlanded)
         grown_total += grown
         shrunk_total += shrunk
         if new_seg == old:
+            if trust_ranges and _unpairable_new_content(gen, old, orig_squash, orig_loose):
+                # 行号可信却什么都没落地 → 必须报（绝不写"报成功、内容没写"）
+                lost_new += 1
             continue
         changed += n_changed
         out_lines[first - 1:last] = new_seg
@@ -1791,7 +2162,8 @@ def patch_export(beats: list, source_path, generated_text: str,
         # 少删一拍就会留下"表里没有、文件里还有"的幽灵台词。
         reasons.append(f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）')
     if text != original:
-        reasons.extend(_verify_patch(text, original, beats, blocks))
+        reasons.extend(_verify_patch(text, original, beats, blocks,
+                                    symbols=symbols))
     else:
         # **一个字都没改，也要查条件**（2026-10-05，O1 实测）。
         #
@@ -1800,7 +2172,7 @@ def patch_export(beats: list, source_path, generated_text: str,
         # 结果就是 `ok=True`、条件没改（静默 no-op）。
         reasons.extend(_verify_conditions(text, beats))
 
-    return PatchResult(text, source_path, matched, len(blocks), changed,
+    return PatchResult(text, source_path, matched, pending, changed,
                        stale_beats=stale,
                        unlanded_lines=unlanded_total,
                        dropped_beats=dropped,

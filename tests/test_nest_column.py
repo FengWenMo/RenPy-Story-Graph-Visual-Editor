@@ -97,9 +97,11 @@ class TestParserWritesThePath:
 
 class TestTheColumn:
     def test_column_is_hidden_single_line_and_last(self):
-        # `Inline`（C 阶段）排在 `Nest` 后面，所以这里只要求"在尾部三列里"
-        assert 'Nest' in BEAT_FIELDS[-3:], BEAT_FIELDS[-3:]
-        assert BEAT_FIELDS[-1] == 'Inline', BEAT_FIELDS
+        # `Inline`（C）/ `Opaque`（M1）/ `SpecName`（M3）/ `SpecHead`（M4）/
+        # `LoopHeader`（D2）/ `CameraHeader`（2026-10-07）依次排在 `Nest`
+        # 后面，所以这里只要求"在尾部几列里"，并钉住最新那一列是谁。
+        assert 'Nest' in BEAT_FIELDS[-8:], BEAT_FIELDS[-8:]
+        assert BEAT_FIELDS[-1] == 'CameraHeader', BEAT_FIELDS
         assert 'Nest' in HIDDEN_BEAT_COLUMNS
         assert 'Nest' in SINGLE_LINE_BEAT_FIELDS, '路径必须是一行'
         assert BEAT_HEADERS['Nest']

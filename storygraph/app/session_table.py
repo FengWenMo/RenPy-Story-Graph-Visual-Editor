@@ -139,10 +139,46 @@ class TableSessionMixin:
             b.stage = compose_stage_extra(b, symbols)
         hydrate_from_dsl(self.beats, symbols)
         self.script_path = path
+        # **记下"我这一份拍是从哪份字节解析出来的"**（2026-10-05 用户实测报：
+        # "我只调了一个卡片，都不能替换"）。拍的 `src_first` / `src_last` 是
+        # **运行期真迹**——只要磁盘上那份文件没变，它们就逐行可靠；
+        # 补丁那条路因此可以相信行号，而不是只靠"内容能不能对上"（用户把一句
+        # 旁白改成台词、同时加了一张立绘时，内容证据本来就全没了）。
+        # 文件要是被外部改过，指纹就对不上 → 退回保守的对位守卫（今天的默认）。
+        self._source_fingerprint = self._fingerprint_of(path)
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。
         self.forget_undo()
         self._struct_undo = []          # 结构撤销栈同理：索引全变了
         return len(self.beats)
+
+    @staticmethod
+    def _fingerprint_of(path):
+        """
+        `(大小, mtime_ns, sha1[:16])`；读不出来返回 None。
+
+        为什么三样都要：大小/mtime 便宜（绝大多数情况一眼就够），sha1 兜住
+        "改了内容又把 mtime 改回去"这种刻意情形（备份还原、编辑器另存）。
+        """
+        try:
+            p = Path(path)
+            st = p.stat()
+            import hashlib
+            digest = hashlib.sha1(p.read_bytes()).hexdigest()[:16]
+            return (int(st.st_size), int(st.st_mtime_ns), digest)
+        except OSError:
+            return None
+
+    def source_unchanged(self) -> bool:
+        """
+        磁盘上这一章还是"载入时那一份"吗？
+
+        `False` 时（读不出来、或真变了）调用方要退回**保守**的判据 ——
+        行号可能已经过期，只能靠内容对位（见 `patcher._range_looks_like`）。
+        """
+        fp = getattr(self, '_source_fingerprint', None)
+        if fp is None or not self.script_path:
+            return False
+        return self._fingerprint_of(self.script_path) == fp
 
     def insert_beat(self, idx: int = None, after: bool = True) -> dict:
         """
@@ -444,6 +480,11 @@ class TableSessionMixin:
                 b.kind = str(fields.get('Kind') or '').strip() or b.kind
             if 'Notes' in fields:
                 b.notes = str(fields.get('Notes') or '').strip()
+        # **类型是说话人的投影**（`say` / `narration` 这一对，见
+        # `app.beats.kind_from_speaker`）：用户只填说话人时，高级区那一格
+        # 也必须跟着变成 `say` —— 否则它一直显示 `narration`，用户会以为
+        # "我填的说话人没生效"（2026-10-05 实测报的）。
+        b.kind = B.kind_from_speaker(b.kind, b.speaker)
 
         if cards is not None:
             show = B.cards_to_show(cards, self.symbols)
@@ -463,6 +504,17 @@ class TableSessionMixin:
             hydrate_from_dsl([b], self.symbols)
         except Exception:                    # noqa: BLE001 - 与旧实现一致的兜底
             swallow('editor.apply')
+        # **舞台 verb 顺序跟着结构化列走**（2026-10-05 用户实测报："我已经保存
+        # 该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化"）：
+        # 卡片上加一张立绘只写 `beat.show`，而 `stage_order` 还停在 `'scene'`
+        # —— 舞台快照/预览从前只回放列出来的 verb → 看不到这个人（产物其实
+        # 是对的，渲染器会补齐）。读的时候两边现在都补齐（`Beat.stage_verbs`），
+        # 这里再把**随表走的列**写实，免得下一次从表回来的人又看到"这一拍
+        # 没有立绘"。
+        try:
+            b.sync_stage_order()
+        except Exception as e:                # noqa: BLE001 - 顺序列坏了不该拦住保存
+            swallow('editor.apply.sync_stage_order', e)
         return b
 
     def _apply_stage(self, b: Beat, fields: dict, stage_loaded):
@@ -484,6 +536,13 @@ class TableSessionMixin:
         为什么"空值"不算手改：把格子清空是很容易的误操作，而它的后果是
         抹掉这一拍的 scene/show/hide。语料里"我在 Stage 框里删光"不是
         一种需求，所以空值一律走重新投影（**永远不因为空 Stage 丢数据**）。
+
+        ⚠ **还得知道"载入时那一格是什么"才敢判手改**（2026-10-05 实测修）：
+        `stage_loaded=None` 时旧代码拿 `b.stage` 当基线，而界面显示的那一格
+        往往是**投影**（`beat.stage` 为空 → 显示 `compose_stage(...)`）——
+        两者不相等，于是"用户手改了 Stage"被误判，**这一拍刚加上的立绘
+        （`b.show`）会被整段清掉**。一个"没告诉过我们基线"的调用方，
+        没资格说这是人改的：那就老老实实走重新投影。
         """
         typed = None
         if 'Stage' in fields:                # 表单真的给了这一格（高级区展开）
@@ -491,7 +550,7 @@ class TableSessionMixin:
         loaded = (b.stage if stage_loaded is None
                   else str(stage_loaded or '')).strip()
 
-        if typed and typed != loaded:
+        if typed and stage_loaded is not None and typed != loaded:
             b.stage = typed
             for attr in ('scene', 'scene_at', 'show', 'hide', 'at',
                          'with_', 'transform', 'stage_order'):
@@ -542,6 +601,16 @@ class TableSessionMixin:
             return None
         b = self.beats[idx]
         data = {name: getattr(b, name, '') for name in _SNAPSHOT_FIELDS}
+        # `StageOrder` 是**派生列**（"结构化列里有的 verb 一定在里面"，
+        # 见 `Beat.stage_verbs`）。快照记它的**归一化**形式：保存时会对齐它
+        # （卡片加了立绘 → 顺序里补上 `show`），而"对齐"不是用户改动 ——
+        # 否则"什么都没改、点一下保存"会被判成改过（撤销按钮亮起来、
+        # 状态栏说"已保存"）。实测 `test_save_without_change_does_not_enable_undo`
+        # 当场红，正是这条。
+        try:
+            data['stage_order'] = b.merged_stage_order()
+        except Exception as e:                # noqa: BLE001 - 顺序列坏不该拦住快照
+            swallow('editor.snapshot.stage_order', e)
         data['ordered'] = copy.deepcopy(list(getattr(b, 'ordered', None) or []))
         return BeatSnapshot(idx=idx, data=data)
 

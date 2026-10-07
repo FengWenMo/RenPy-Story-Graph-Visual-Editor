@@ -83,7 +83,7 @@ def _probe_one(src: Path, tmp: Path, verbose: bool) -> dict:
             return {'file': src.name, 'skip': '没有带台词的拍'}
         old_text = target.text
         target.text = 'X改过的一句话X'
-        res = s.export(dst, force=True)
+        res = s.export(dst)
     finally:
         patcher._range_looks_like = orig_guard
         patcher._narration_slot_replaced = orig_slot

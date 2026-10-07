@@ -309,7 +309,15 @@ class TestSheetContract:
         现在走**隐藏表**「文件级保真」（见 `beat_model.FILE_BLOCK_SHEET`）——
         表是按行存的，没有长度上限。
         """
-        assert len(BEAT_FIELDS) == 26, BEAT_FIELDS
+        # 31 = 26 + `Opaque`（M1：工具不认识的块语句，原样透传）
+        #        + `SpecName`（M3：那条语句被谁声明过）
+        #        + `SpecHead`（M4：它的头行 —— T1 的参数编辑面）
+        #        + `LoopHeader`（D2：`while`/`for` 的头行）
+        #        + `CameraHeader`（3D 舞台 `camera` 的头行）
+        # ⚠ 数错这一条就说明"加了列没同步列契约"。注意**动态列**
+        # （`语句名·参数名`，每参数一列）不在 `BEAT_FIELDS` 里 ——
+        # 它们是按批拍的声明**追加在末尾**的，见 `beat_model._row_fields`。
+        assert len(BEAT_FIELDS) == 31, BEAT_FIELDS
         for col in ('Stage', 'BGM', 'SFX'):
             assert col in BEAT_FIELDS
         # 每列都挂得上下拉的"结构化编辑面"
@@ -328,11 +336,19 @@ class TestSheetContract:
         assert 'Condition' not in HIDDEN_BEAT_COLUMNS
         # 三列内部元数据在表里，但必须整列隐藏；**新增的要排在最末尾**
         # （用户明确要求"放远点"），且先后顺序就是"加进来的顺序"。
-        for col in ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline'):
+        for col in ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline',
+                    'Opaque', 'SpecName', 'SpecHead', 'LoopHeader',
+                    'CameraHeader'):
             assert col in BEAT_FIELDS, col
             assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'
-        # 顺序 = 加进来的顺序（`Nest` = 结构位 B 阶段一；`Inline` = 行尾注释 C）
-        assert BEAT_FIELDS[-3:] == ['CodeBlocks', 'Nest', 'Inline'], BEAT_FIELDS
+        # 顺序 = 加进来的顺序（`Nest` = 结构位 B 阶段一；`Inline` = 行尾注释 C；
+        # `Opaque` = 工具不认识的块语句原样透传 M1；
+        # `SpecName` = 那条语句被谁声明过 M3；`SpecHead` = 它的头行 M4；
+        # `LoopHeader` = `while`/`for` 的头行 D2；
+        # `CameraHeader` = 3D 舞台 `camera` 的头行 2026-10-07 第二轮）
+        assert BEAT_FIELDS[-8:] == ['CodeBlocks', 'Nest', 'Inline',
+                                    'Opaque', 'SpecName', 'SpecHead',
+                                    'LoopHeader', 'CameraHeader'], BEAT_FIELDS
         # 文件级保真块**不许**再回到列里（它超长会被静默截断）
         assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
         # 其余列的中文表头里不该出现它们，否则策划会去找那一列

@@ -38,6 +38,7 @@ from storygraph.story.excel_import import (find_unregistered_assets,
 from storygraph.story.generation_guard import (evaluate_generation,
                                               labels_in_danger,
                                               planned_output_path,
+                                              unmanaged_block_heads,
                                               write_generation)
 from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.patcher import patch_export
@@ -152,6 +153,12 @@ def export_table(table_path, registry=None, project_root=None,
 
     # —— 增量补丁优先（保住原文的注释与逐字节未改行）——
     note = ''
+    #: 这次合并的**底稿**（增量对上了才是路径，否则 None）。
+    #: 为什么要带出去（2026-10-05 实测修）：落盘那一步
+    #: （`apply_export` → `write_generation`）要靠它判断
+    #: "手写护栏让不让路" —— 少了它，增量产物写回**手写**文件时会被自己的
+    #: 护栏拦下，而报出来的错还是"检查文件是否被占用"（驴唇不对马嘴）。
+    merged_from = None
     try:
         src = _source_rpy(source_rpy, table_path)
         # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
@@ -160,6 +167,7 @@ def export_table(table_path, registry=None, project_root=None,
         res = patch_export(beats, src, text, registry=registry)
         if res.ok:
             text = res.text
+            merged_from = src
             note = (f'增量补丁：对位 {res.matched_beats}/{res.total_beats} 拍，'
                     f'实际改动 {res.changed_lines} 行')
             if getattr(res, 'unlanded_lines', 0):
@@ -180,9 +188,13 @@ def export_table(table_path, registry=None, project_root=None,
     occupied = labels_in_danger(target, project_root,
                                 exclude={target, table_path})
     issues = evaluate_generation(text, target, project_root=project_root,
-                                 occupied=occupied)
+                                 occupied=occupied, beats=beats)
     blocking = [i for i in issues if i.is_blocking]
     warnings = [i for i in issues if not i.is_blocking]
+    # 工具不认识的块语句（M1）：**结论必须随结果走到落盘那一步** ——
+    # `apply_export` 只拿得到这份 dict，拿不到 beat 对象，而门禁那条
+    # 判据（`UNMANAGED_BLOCK`）必须"说出口"，不许在这一跳上丢掉。
+    unmanaged_blocks = unmanaged_block_heads(beats, None)
 
     if blocking:
         # 拒写，但**不把产物丢掉**：另存一份 .blocked.rpy 供对比，
@@ -190,18 +202,22 @@ def export_table(table_path, registry=None, project_root=None,
         # 注意用 `write_generation(review_on_block=True)` 走同一套逻辑，
         # 不再手写副本 —— 副本命名规则只能有一个定义处。
         art = write_generation(text, target, review_on_block=True,
-                               project_root=project_root, occupied=occupied)
+                               project_root=project_root, occupied=occupied,
+                               beats=beats)
         return {
             'ok': False,
             'out_path': target,
             'beats': len(beats),
             'text': text,
             'note': note,
+            'used_patch': bool(merged_from),
+            'merged_from': merged_from,
             'blocking': [i.format() for i in blocking[:12]],
             'blocking_total': len(blocking),
             'warnings': [i.format() for i in warnings[:6]],
             'review_path': art.review_path,
             'unregistered': unregistered,
+            'unmanaged_blocks': unmanaged_blocks,
             'error': '',
         }
 
@@ -211,11 +227,14 @@ def export_table(table_path, registry=None, project_root=None,
         'beats': len(beats),
         'text': text,
         'note': note,
+        'used_patch': bool(merged_from),
+        'merged_from': merged_from,
         'blocking': [],
         'blocking_total': 0,
         'warnings': [i.format() for i in warnings[:6]],
         'review_path': None,
         'unregistered': unregistered,
+        'unmanaged_blocks': unmanaged_blocks,
         'error': '',
     }
 
@@ -226,17 +245,36 @@ def apply_export(result: dict, project_root=None) -> dict:
 
     刻意分成两步：前端要能"先看结果、问过用户、再落盘"（旧实现就是
     "先评、再问、最后写"——不在用户点头前落任何盘）。
+
+    **`merged_from` 必须往下传**（2026-10-05 实测修）：它是增量合并的底稿，
+    也就是那条"手写护栏让不让路"的唯一判据（见
+    `generation_guard.merging_onto`）。少了它，写回**手写**章节时产物会被
+    `HANDWRITTEN_TARGET` 拦下 —— 而这里从前把结论只写成
+    "检查文件是否被占用"，把"门禁拒绝覆盖"说成了"文件被占用"，
+    排查方向被彻底带偏。
     """
     target = Path(result['out_path'])
     art = write_generation(result.get('text') or '', target,
-                           review_on_block=True, project_root=project_root)
+                           review_on_block=True, project_root=project_root,
+                           merged_from_source=result.get('merged_from'),
+                           unmanaged_blocks=result.get('unmanaged_blocks'))
     out = dict(result)
     out['ok'] = bool(art.written)
     out['review_path'] = art.review_path
     out['written'] = bool(art.written)
     if not art.written and not result.get('blocking'):
-        out['error'] = f'写不出去：{art.out_path}（检查文件是否被占用）'
+        # 说**门禁给的那句**（手写目标 / 语法 / 重名…）；门禁没给结论
+        # （磁盘满、文件被占用）时才是原本那句。
+        why = '；'.join(_issue_text(i) for i in (art.issues or []))
+        out['error'] = (f'写不出去：{art.out_path}（{why}）' if why else
+                        f'写不出去：{art.out_path}（检查文件是否被占用）')
     return out
+
+
+def _issue_text(issue) -> str:
+    """门禁发现 → 一句给人看的话（`GuardIssue` 有 `.format()`，别的实现只有 `str`）。"""
+    fmt = getattr(issue, 'format', None)
+    return str(fmt() if callable(fmt) else issue)
 
 
 # ----------------------------------------------------------------------
@@ -306,6 +344,7 @@ def _empty(error: str, out_path=None) -> dict:
     return {
         'ok': False, 'out_path': Path(out_path) if out_path else None,
         'beats': 0, 'text': '', 'note': '',
+        'used_patch': False, 'merged_from': None,
         'blocking': [], 'blocking_total': 0, 'warnings': [],
         'review_path': None, 'unregistered': [], 'error': error,
     }

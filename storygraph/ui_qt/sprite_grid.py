@@ -24,7 +24,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
-from storygraph.app.beats import choices_for_image, uniform_sprite_position
+from storygraph.app.beats import (choices_for_image,
+                                  normalize_expression_words,
+                                  uniform_sprite_position)
 # `uniform_position_of` 以前在这里**又写了一份**（与 `app/session_table.py`
 # 里那份逐字节相同）—— 2026-10-05 收敛：它是"卡数组 → 整拍位置"的**唯一规则**，
 # 而 `apply()` 写回 `beat.at` 用的正是它。两份一旦漂移，
@@ -152,6 +154,14 @@ class SpriteCardWidget(QFrame):
         self._pos_btn.setStyleSheet(
             'padding:2px 6px;font-size:8pt;border-radius:8px;')
         self._pos_btn.clicked.connect(lambda: self._cycle('position'))
+        # **左键 = 换下一个；右键 = 可搜索的候选列表**（用户 2026-10-05：
+        # "既然变换如此多，那为什么不加个右键列表筛选跟搜索功能呢？"）——
+        # 真实项目 151 个位置候选，靠点 40 次才轮到 `i11` 不叫能用。
+        for _field, _btn in (('expression', self._expr_btn),
+                             ('position', self._pos_btn)):
+            _btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _btn.customContextMenuRequested.connect(
+                lambda _pos, f=_field: self._pick_from_list(f))
         chips.addStretch(1)
         chips.addWidget(self._expr_btn)
         chips.addWidget(self._pos_btn)
@@ -174,25 +184,51 @@ class SpriteCardWidget(QFrame):
         # 保存时**只写这一拍真正有的值**，点一下 chip 才会把它固定下来。
         if pos:
             self._pos_btn.setText(f'位置：{pos}')
-            self._pos_btn.setToolTip('这一拍自己写了位置')
+            self._pos_btn.setToolTip('这一拍自己写了位置。\n'
+                                     '左键 = 换下一个候选 · **右键 = 搜索选择**')
         elif inherited:
             self._pos_btn.setText(f'位置：{inherited}（继承）')
             self._pos_btn.setToolTip(
                 f'这一拍没写位置，屏幕上沿用的是更早那一拍的 `at {inherited}`。\n'
-                f'点一下即可把它固定到这一拍。')
+                f'点一下即可把它固定到这一拍。\n'
+                f'左键 = 换下一个候选 · **右键 = 搜索选择**')
         else:
             self._pos_btn.setText('位置：—')
-            self._pos_btn.setToolTip('这一拍没有位置（也没人可继承）')
+            self._pos_btn.setToolTip('这一拍没有位置（也没人可继承）。\n'
+                                     '左键 = 认第一个候选 · **右键 = 搜索选择**')
+        self._expr_btn.setToolTip('左键 = 换下一个候选 · **右键 = 搜索选择**'
+                                  '（候选就是项目里真实的属性名）')
         self.setProperty('speaking', 'true' if self.item.get('speaking') else 'false')
         self.style().unpolish(self)
         self.style().polish(self)
         self._load_thumb(spec)
+
+    def _thumb_bg(self) -> str:
+        """
+        缩略图底色：跟**选择器里那个"底色"开关**同一个偏好。
+
+        用户 2026-10-05："加一个背景切换颜色按钮，把白背景变成暗色背景，
+        防止有的照片被挡住" —— 白底/透明底的立绘画在浅色卡片上同样看不见，
+        所以卡片这边读同一个开关（一个开关，两个地方一起生效）。
+        """
+        try:
+            from storygraph.ui_qt.asset_picker import _load_dark_pref
+            return '#1e2024' if _load_dark_pref() else theme.t('bg.skeleton')
+        except Exception as e:                     # noqa: BLE001 - 读不到就用主题色
+            swallow('ui_qt.sprite_grid._thumb_bg', e)
+            return theme.t('bg.skeleton')
 
     def _load_thumb(self, spec):
         if self._loader is None or not spec:
             self._thumb.setText('＋')
             self._thumb.setToolTip('')
             return
+        try:
+            self._thumb.setStyleSheet(
+                f'background: {self._thumb_bg()};'
+                f'border-radius: {T.RADIUS["control"]}px;')
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.sprite_grid._load_thumb.bg', e)
         slot = ('card', id(self), spec)
         path = self._thumb_path(spec)
         tag = spec.split()[0]
@@ -266,11 +302,69 @@ class SpriteCardWidget(QFrame):
             return
         if not choices:
             return
-        nxt = choices[(choices.index(cur) + 1) % len(choices)]
-        self.item[field] = nxt
+        # **没有当前值时点一下 = 认第一个候选**（2026-10-05 用户实测报：
+        # "之前这个角色没有登场，位置无法选择设定和调整，整个都是空的，
+        # 也不知道会放哪儿"）。
+        #
+        # 全新加的那张立绘 `position == ''`，而下一行原本写的是
+        # `choices.index(cur)` —— 空串不在候选里 → **ValueError** → 异常在 Qt
+        # 槽里被吞掉 → 用户看到的就是"点了没反应"（表情 chip 同理：新卡的
+        # `expression` 也是空的）。这次改动让 chip 从"第一项"开始往前走。
+        if not cur:
+            nxt = choices[0]
+        else:
+            nxt = choices[(choices.index(cur) + 1) % len(choices)]
+        self._set_field(field, nxt)
+
+    def _set_field(self, field, value):
+        """
+        把某一格的值定下来（**左键换下一个、右键从列表里挑**共用这一条路）。
+
+        表情那格还要**同步图像名**（卡片标题显示的就等于会写进脚本的）：
+
+        用户 2026-10-05 实测报："还有就是这个表情，找不到 angry"：卡片标题写着
+        `ling angry`（那是 `item['image']`），而表情 chip 被点成了
+        `disappointed`（`item['expression']`）—— 保存时 `cards_to_show`
+        用 **tag + 表情** 拼图像名，于是脚本里写 `ling disappointed`，
+        **卡片却还显示 angry**：看得见的和写下去的不是一回事。
+
+        ⚠ 存**归一后的属性**，不是 chip 上那个人话词 —— 直接拼会把中文写进
+        图像名（`ling 无语`），而脚本里写的是 `ling base_arms_akimbo_sigh`
+        （`test_ui_qt` 当场抓到）。
+        """
+        self.item[field] = value
+        if field == 'expression':
+            tag = str(self.item.get('image') or '').split()
+            if tag:
+                attrs = normalize_expression_words(
+                    str(value), str(self.item.get('image') or ''), self._symbols)
+                self.item['image'] = ' '.join([tag[0]] + attrs) if attrs \
+                    else tag[0]
         self.refresh()
         if self._on_change is not None:
             self._on_change(self)
+
+    def _pick_from_list(self, field):
+        """
+        **右键 chip → 可搜索的候选列表**（用户 2026-10-05：
+
+        > 既然变换如此多，那为什么不加个右键列表筛选跟搜索功能呢？
+
+        真实项目的位置候选有 151 个（146 个自定义 transform + 内置位置），
+        靠"点一下换下一个"要按 40 次才轮到 `i11`。这里弹一个"输入即筛"的
+        弹窗（见 `ui_qt.choice_picker`），候选与左键那条路**同一份**
+        （`choices_for_image`）—— 两条路不可能给出不一样的名字。
+        """
+        from storygraph.ui_qt.choice_picker import choose_from
+        choices = list((choices_for_image(str(self.item.get('image') or ''),
+                                          self._symbols).get(field) or []))
+        if not choices:
+            return
+        label = '表情' if field == 'expression' else '位置'
+        value = choose_from(self, f'选择{label} —— 共 {len(choices)} 个候选',
+                            choices, str(self.item.get(field) or ''))
+        if value:
+            self._set_field(field, value)
 
     def mouseDoubleClickEvent(self, event):
         self.clicked.emit(self)

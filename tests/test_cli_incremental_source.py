@@ -62,8 +62,9 @@ OPAQUE_TOKENS = ('default score = 0', 'define e = Character("Eileen")',
                  'init python:', 'def helper(x):')
 
 
-def _write_chapter(tmp_path, text: str = CHAPTER) -> Path:
-    p = tmp_path / 'ch01.rpy'
+def _write_chapter(tmp_path, text: str = CHAPTER,
+                   name: str = 'ch01.rpy') -> Path:
+    p = tmp_path / name
     p.write_text(text, encoding='utf-8')
     return p
 
@@ -238,15 +239,35 @@ class TestGuardInteractions:
         target = _write_chapter(tmp_path)
         text = '# 由剧本表自动生成\n\n' + target.read_text(encoding='utf-8')
 
-        art = write_generation(text, target, merged_from_source=True)
+        # 交的是**底稿路径**（2026-10-05 实测修：以前这里传的是布尔 `True`，
+        # 于是"我走了增量"这句话本身就能越过护栏 —— 见下一条用例）。
+        art = write_generation(text, target, merged_from_source=target)
         assert art.written, '增量产物被手写护栏拦下了（边界②等于没做）'
+
+    def test_merged_claim_does_not_cover_someone_elses_file(self, tmp_path):
+        """
+        **底稿不是目标时，手写护栏照旧拦**（哪怕调用方说"这次是增量"）。
+
+        为什么单开一条（2026-10-05 实测修）：`merged_from_source` 从前是个
+        布尔，调用方声明一句"我走了增量"就能越过护栏 —— 而"编辑甲章、
+        把产物写到乙章的手写文件上"正是靠这条护栏挡住的：那份产物里有
+        甲章的全部内容，**却没有乙章的** `default` / `init python`。
+        """
+        from storygraph.story.generation_guard import write_generation
+        base = _write_chapter(tmp_path, name='ch01.rpy')
+        other = _write_chapter(tmp_path, name='ch02.rpy')
+        text = '# 由剧本表自动生成\n\n' + base.read_text(encoding='utf-8')
+
+        art = write_generation(text, other, merged_from_source=base)
+        assert not art.written, '乙章的手写文件被甲章的增量产物覆盖了'
+        assert [i.code for i in art.blocking] == ['HANDWRITTEN_TARGET']
 
     def test_merged_product_is_still_syntax_checked(self, tmp_path):
         """让路的**只有**手写那一条：产物自己坏了照样拦。"""
         from storygraph.story.generation_guard import write_generation
         target = _write_chapter(tmp_path)
         bad = '# 由剧本表自动生成\n\nlabel a:\n    $ l oh "3"\n'
-        art = write_generation(bad, target, merged_from_source=True)
+        art = write_generation(bad, target, merged_from_source=target)
         assert not art.written
         assert [i.code for i in art.blocking] == ['PYTHON_SYNTAX_ERROR']
 

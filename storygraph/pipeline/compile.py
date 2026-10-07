@@ -188,8 +188,9 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
 
       · **增量**（给了 `source_path` 且对位成功）→ 写合并后的全文，
         过一遍 `ensure_generator_marker`（护栏靠首行标记认自家产物），
-        再走 `write_generation(merged_from_source=True)` 让那条"手写护栏"
-        让路（原文一字未丢，覆盖它毁不掉任何东西）；
+        再把**底稿路径**交给 `write_generation(merged_from_source=…)`，
+        让那条"手写护栏"在"底稿就是目标"时让路（原文一字未丢，
+        覆盖它毁不掉任何东西）；
       · **全量**（新建文件 / 没给源 / 对位失败）→ 原样走 `write_generation`，
         该拦就拦（目标已存在的手写 .rpy 一律拒写）。
 
@@ -226,9 +227,12 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
             source_text = None
 
     artifact = write_generation(text, rpy_path, force=force,
-                                merged_from_source=inc.used_patch,
+                                merged_from_source=(source_path
+                                                    if inc.used_patch
+                                                    else None),
                                 source_text=source_text,
-                                source_path=source_path)
+                                source_path=source_path,
+                                beats=beats)
     result.written = artifact.written
     result.out_path = artifact.out_path
     result.review_path = artifact.review_path

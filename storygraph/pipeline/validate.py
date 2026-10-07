@@ -40,6 +40,10 @@ from storygraph.story.beat_model import (
     split_hide_items,
     split_show_items,
 )
+# 自定义语句头行的参数扫描：**唯一真源**在 `story/spec_args.py`
+# （导出摊列 / 读表折回头行 / 这里的校验三处共用一份；契约 H1 不许
+# `story` import `pipeline`，所以真源必须在 `story` 这一层）。
+from storygraph.story.spec_args import spec_arg_values
 
 from storygraph.core.safeguard import swallow
 
@@ -209,6 +213,14 @@ def validate_level1(beats, registry=None,
 
         # 空台词：`""`（清空对话框）是常见写法，警告即可；
         # 有说话人却空了台词，那才是明显的漏写 → 错误。
+        #
+        # ⚠ **结构头不是台词**（2026-10-07 实测，真机 +1 条假警）：
+        # 循环 / 相机的**组头拍**、以及未建模块的保真拍，自己都不带台词 ——
+        # 它们是**结构锚点**。不看 `loop_header` / `camera_header` / `opaque`
+        # 这三位，`while current_round < game_rounds:` 那一拍就会长得像一句
+        # 空台词，被报成"空台词行（`""`）"。
+        # （旧形态之所以没报，只是因为它把整块 `while` 和**后面那句台词**
+        #   并进了同一张拍 —— 那是另一个缺陷，不该被当成这里的挡箭牌。）
         empty_say = (b.kind in ('say', 'narration') and not b.text
                      and not b.comment and not b.raw and not b.code
                      and not b.sound and not b.voice and not b.music
@@ -216,6 +228,9 @@ def validate_level1(beats, registry=None,
                      and not getattr(b, 'stage', '')
                      and not getattr(b, 'bgm', '')
                      and not getattr(b, 'sfx', '')
+                     and not getattr(b, 'loop_header', '')
+                     and not getattr(b, 'camera_header', '')
+                     and not getattr(b, 'opaque', '')
                      and (b.music_action or '') != 'stop'
                      and (b.sound_action or '') != 'stop')
         if empty_say:
@@ -471,6 +486,76 @@ def _is_silent_char_excluded(cid: str, data: dict) -> bool:
 # ==================================================================
 #  L2：表内
 # ==================================================================
+
+#: 从自定义语句的头行里抽 `key=value`（值可以是引号串或裸 token）。
+#:
+#: ⚠ **唯一真源已经搬到 `story/spec_args.py`**（2026-10-07，"每参数一列"）：
+#: 同一个扫描器现在有三个消费者（导出摊列 / 读表折回头行 / 这里的校验），
+#: 而契约 H1 不许 `story` import `pipeline` —— 三份各写一遍迟早在某处漂移。
+#: 顶部已经 import 了它，`from storygraph.pipeline.validate import
+#: spec_arg_values` 的老调用方与单测照旧可用。
+
+
+def validate_spec_args(beats, statements=None, project_root=None) -> list:
+    """
+    自定义语句的**参数校验**（D1，2026-10-07）。
+
+    声明过的结构不校验，等于没声明 —— 项目写了 `columns` 却没人看，
+    那它只是一段注释。两条判据：
+
+      · `W120` —— 声明为 `required` 的参数在头行里**找不到**；
+      · `W121` —— 参数值不在声明的 `choices` 里。
+        ⚠ 它是**警告不是错误**：候选是"常见取值"，不是白名单 ——
+        项目随时可能写个新值，拦下来只会让人去关掉校验。
+
+    声明从 `storygraph.rules.json` 或宿主 `register_statement` 来；
+    都没有就一条不报（**少报胜过乱报**）。
+
+    ⚠ 读的是 `spec_head` 优先，而"每参数一列"的值在 `from_row` 里**已经
+    折进 `spec_head`** —— 所以改一格参数列，这里校验到的就是**改后**的值
+    （不需要在这里再去看那些动态列；看两处反而会有两套真相）。
+    """
+    from storygraph.story.statement_registry import (StatementRegistry,
+                                                     spec_columns)
+    if statements is None and project_root:
+        statements = StatementRegistry.for_project(project_root)
+    if not statements:
+        return []
+    issues = []
+    for b in (beats or ()):
+        name = str(getattr(b, 'spec_name', '') or '')
+        if not name:
+            continue
+        cols = spec_columns(statements, name)
+        if not cols:
+            continue
+        head = (str(getattr(b, 'spec_head', '') or '')
+                or str(getattr(b, 'opaque', '') or '').split('\n')[0])
+        vals = spec_arg_values(head)
+        where = (getattr(b, 'line_id', '')
+                 or f'{getattr(b, "label", "")}.{getattr(b, "seq", 0):04d}')
+        missing = [c['name'] for c in cols
+                   if c['required'] and c['name'] not in vals]
+        if missing:
+            issues.append(Issue(
+                L1, 'W120', WARNING,
+                f'自定义语句 {name} 缺少声明的必需参数：{"、".join(missing)}',
+                where,
+                f'声明写在 storygraph.rules.json / renpy.register_statement 里。'
+                f'头行现在是：{head}'))
+        for c in cols:
+            if not c['choices'] or c['name'] not in vals:
+                continue
+            if vals[c['name']] not in c['choices']:
+                issues.append(Issue(
+                    L1, 'W121', WARNING,
+                    f'自定义语句 {name} 的参数 {c["name"]}="'
+                    f'{vals[c["name"]]}" 不在声明的候选里',
+                    where,
+                    '候选是**常见取值**、不是白名单：确实要用新值就忽略这条。'
+                    '候选清单也写在导出表格那一格的注释里'))
+    return issues
+
 
 def validate_level2(beats, registry=None, menu_labels=None) -> list:
     issues = []
@@ -856,6 +941,8 @@ def validate_all(beats, registry=None, graph=None, script_warnings=None,
     """
     report = ValidationReport()
     report.extend(validate_level1(beats, registry, char_limit=char_limit))
+    # 自定义语句的参数（D1）：声明过的结构不校验，等于没声明。
+    report.extend(validate_spec_args(beats, project_root=project_root))
     report.extend(validate_level2(beats, registry, menu_labels=menu_labels))
     report.extend(validate_level3(beats, registry, graph,
                                   script_warnings, project_root,

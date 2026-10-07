@@ -64,7 +64,14 @@ def main(argv) -> int:
         n = s.load(chapter)
         print(f'① 打开章节：{n} 拍，标签 {sorted({b.label for b in s.beats})}')
 
-        # ② 调整一句台词 → 导出（**先拦一次**，用户确认后写入）
+        # ② 调整一句台词 → 导出（**原地增量写回，不该拦**）
+        #
+        # 2026-10-05 改口（用户实测报的）：这一步从前是"先拦一次、用户点
+        # 「写入（增量）」再写"（`export(chapter)` 然后 `force=True`）。
+        # 用户的原话是"明明只是增量的对一个卡片的修改……为何要阻止我拿新的
+        # 文件去替换旧的？" —— 增量合并出来的全文里，原文每个字节都还在
+        # （只换掉改过的那几行），覆盖它什么都不毁，所以那次拦是错的。
+        # 现在断言：**一次就写进去**，且仍然只动那一行。
         says = [b for b in s.beats if b.text.strip()]
         if not says:
             print('   （这一章没有台词可改，改用注释）')
@@ -74,22 +81,20 @@ def main(argv) -> int:
             target_beat = says[0]
             target_beat.text = target_beat.text + '（验收改动）'
 
-        gate = s.export(chapter)                 # 第一次：手写文件，默认拦下
-        print(f'②a 首次导出（未确认）：ok={gate["ok"]} codes={gate["codes"]}')
+        gate = s.export(chapter)                 # 原地写回：手写文件也不该拦
+        print(f'② 原地导出：ok={gate["ok"]} codes={gate["codes"]}')
         print(f'    note：{gate.get("note", "")[:80]}')
         print(f'    used_patch={gate.get("used_patch")}'
               f' → 前端据此说真话'
-              f'（{"这次是增量、不会丢东西" if gate.get("used_patch") else "会丢东西"}）')
-        untouched = chapter.read_text(encoding='utf-8') == original
-        print(f'    原文件{"逐字未动 ✓" if untouched else "被改了 ✗"}')
-        if gate['ok'] or not untouched:
+              f'（{"这次是增量、不会丢东西" if gate.get("used_patch") else "会丢东西"})')
+        if not gate['ok'] or not gate.get('used_patch'):
             ok = False
-            print('   ✗ 默认应当"拦下且不动文件"')
+            print('   ✗ 原地增量写回被拦下了（用户报的那条缺陷回来了）')
 
-        res = s.export(chapter, force=True)      # 用户点了「写入（增量）」
+        res = gate
         changed1 = chapter.read_text(encoding='utf-8')
         d1 = _diff(original, changed1)
-        print(f'②b 确认后写入：ok={res["ok"]}')
+        print(f'②b 写入结果：ok={res["ok"]}')
         print(f'   与原文差异 {len(d1)} 行（期望：标记 2 行 + 改的那一句）')
         for ln in d1[:6]:
             print(f'     {ln[:96]}')
@@ -111,7 +116,7 @@ def main(argv) -> int:
             ok = False
             print('   ✗ 插入方向不对')
         s.beats[ins['index']].text = '验收新插的一句'
-        res2 = s.export(chapter, force=True)
+        res2 = s.export(chapter)                 # 目标已带生成标记，不用 force
         changed2 = chapter.read_text(encoding='utf-8')
         lines = changed2.splitlines()
         pos_new = next((i for i, l in enumerate(lines) if '验收新插的一句' in l), -1)

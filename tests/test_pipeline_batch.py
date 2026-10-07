@@ -514,6 +514,96 @@ class TestEngineExporters:
             for f in files:
                 assert (out / __import__('pathlib').Path(f).name).exists()
 
+    # ---- 交付质检（2026-10-05）：产物文件名不许互相压掉 ----
+    #
+    # 背景：Godot 那条路原先写 `STORY_IR.json`，而它前面刚写过
+    # `story_ir.json` —— 在**大小写不敏感**的文件系统（Windows/macOS）上
+    # 这两个名字是同一个文件，第二刀把引擎中立 IR 原地覆盖掉。
+    # 更隐蔽的是：那时 `for f in files: assert ...exists()` **照样全绿**，
+    # 因为两条路径指向的就是那个唯一的文件。
+    # 所以判据必须是"**两个名字不是同一个文件**"，不能只查存在性。
+
+    def test_each_engine_matches_its_declared_file_set(self, beats_and_registry,
+                                                       tmp_path):
+        """产物集合必须与 `expected_files()` 逐条对上（不许多、不许少）。"""
+        from pathlib import Path as _P
+
+        from storygraph.pipeline.engine_exporters import (expected_files,
+                                                          export_ir)
+        beats, reg = beats_and_registry
+        for engine in ('renpy', 'unity', 'godot', 'json', 'csv'):
+            out = tmp_path / f'decl_{engine}'
+            files = export_ir(engine, beats, out, registry=reg, project='demo')
+            got = {_P(f).name for f in files}
+            want = set(expected_files(engine))
+            assert got == want, f'{engine}：产物 {got} != 声明 {want}'
+
+    def test_no_two_product_names_collide_on_case_insensitive_fs(
+            self, beats_and_registry, tmp_path):
+        """
+        **同一个引擎的两个产物名不许在大小写不敏感的文件系统上是同一个文件。**
+
+        这条是那个真实缺陷的守卫：Windows 上 `story_ir.json` 与
+        `STORY_IR.json` 会被判成同一个文件，导出后中立 IR 就没了。
+        """
+        import os
+        from pathlib import Path as _P
+
+        from storygraph.pipeline.engine_exporters import export_ir
+        beats, reg = beats_and_registry
+        for engine in ('renpy', 'unity', 'godot', 'json', 'csv'):
+            out = tmp_path / f'coll_{engine}'
+            files = [(_P(f)) for f in
+                     export_ir(engine, beats, out, registry=reg,
+                               project='demo')]
+            # (a) 两个名字在**大小写折叠**之后也不许等 —— 跨平台的静态判据
+            folded = [f.name.casefold() for f in files]
+            assert len(folded) == len(set(folded)), (
+                f'{engine}：产物名大小写折叠后重复 {folded} —— '
+                f'在 Windows/macOS 上会互相覆盖')
+            # (b) 落盘之后实际也必须真是不同文件
+            for i, a in enumerate(files):
+                for b in files[i + 1:]:
+                    assert not os.path.samefile(a, b), (
+                        f'{engine}：{a.name} 与 {b.name} 是同一个文件')
+
+    def test_godot_data_is_distinct_and_loader_points_at_it(
+            self, beats_and_registry, tmp_path):
+        """
+        Godot 适配数据是**独立一份**，且加载器 `res://` 路径指向真产物。
+
+        为什么连加载器一起断言：那个缺陷的另一半是"加载器里写死的路径
+        与真实文件名靠巧合对上"（Windows 大小写不敏感才碰巧能跑）。
+        路径必须来自同一份事实，改名时两边一起动。
+        """
+        import json
+        import re
+        from pathlib import Path as _P
+
+        from storygraph.pipeline.engine_exporters import export_ir
+        beats, reg = beats_and_registry
+        out = tmp_path / 'godot'
+        names = {_P(f).name
+                 for f in export_ir('godot', beats, out, registry=reg,
+                                    project='demo')}
+        # 中立 IR 与 Godot 适配数据**都要在**，而且不是同一份内容
+        assert 'story_ir.json' in names and 'GodotDialogueData.json' in names
+        neutral = json.loads((out / 'story_ir.json').read_text(encoding='utf-8'))
+        adapted = json.loads((out / 'GodotDialogueData.json')
+                             .read_text(encoding='utf-8'))
+        assert neutral != adapted, '适配文件把中立 IR 覆盖掉了（同内容）'
+        # 适配版是嵌套 stage；中立版是扁平字段
+        assert adapted['lines'][0]['stage']['background'] == 'bg classroom'
+        assert 'stage' not in neutral['lines'][0] or isinstance(
+            neutral['lines'][0].get('scene'), str)
+        # 加载器路径必须指向真产物
+        gd = (out / 'dialogue_importer.gd').read_text(encoding='utf-8')
+        paths = set(re.findall(r'"(res://[^"]+)"', gd))
+        assert paths, gd
+        for p in paths:
+            assert _P(p).name in names, (
+                f'加载器引用 {p}，但产物里没有这个文件（产物：{sorted(names)}）')
+
     def test_unity_import_doc_mentions_lineid(self, beats_and_registry,
                                              tmp_path):
         from pathlib import Path
@@ -535,6 +625,53 @@ class TestEngineExporters:
         beats, reg = beats_and_registry
         with pytest.raises(ValueError):
             export_ir('unreal', beats, tmp_path, registry=reg)
+
+    # ---- 交付质检（2026-10-05）：产物要么完整、要么不动 ----
+
+    def test_a_failed_write_does_not_truncate_the_old_file(
+            self, beats_and_registry, tmp_path):
+        """
+        **半截的产物比没有产物更坏。**
+
+        产物是给 Unity / Godot / 翻译公司直接消费的：被截断的 JSON 会让
+        消费方看到"语法错误"，而人看到的是"导出成功过、文件明明在"。
+        所以写盘必须"先写临时文件再改名"—— 失败时旧文件**原样不动**。
+
+        这里用"目标路径其实是个目录"来制造失败（`os.replace` 会抛），
+        比 mock 掉文件系统更接近真实（磁盘满/权限不足是同一条代码路径）。
+        """
+        from storygraph.pipeline.engine_exporters import _atomic_write
+
+        target = tmp_path / 'out.json'
+        target.mkdir()                        # 同名目录 → 改名一定失败
+        with pytest.raises(OSError):
+            _atomic_write(target, '{"a": 1}')
+        assert target.is_dir(), '失败时把目标目录动掉了'
+        # 也不许留下临时文件残渣
+        assert not list(tmp_path.glob('*.tmp')), list(tmp_path.glob('*.tmp'))
+
+    def test_atomic_write_keeps_old_content_until_replace(
+            self, beats_and_registry, tmp_path):
+        """成功路径：内容整体换掉，且不留 `.tmp` 残渣。"""
+        from storygraph.pipeline.engine_exporters import _atomic_write
+
+        target = tmp_path / 'out.txt'
+        _atomic_write(target, '第一版')
+        assert target.read_text(encoding='utf-8') == '第一版'
+        _atomic_write(target, '第二版')
+        assert target.read_text(encoding='utf-8') == '第二版'
+        assert not list(tmp_path.glob('*.tmp'))
+
+    def test_exports_never_leave_temp_files(self, beats_and_registry,
+                                           tmp_path):
+        """每个引擎导完之后目录里都不许有 `.tmp`。"""
+        from storygraph.pipeline.engine_exporters import export_ir
+        beats, reg = beats_and_registry
+        for engine in ('renpy', 'unity', 'godot', 'json', 'csv'):
+            out = tmp_path / f'clean_{engine}'
+            export_ir(engine, beats, out, registry=reg, project='demo')
+            leftovers = sorted(p.name for p in out.glob('*.tmp'))
+            assert not leftovers, f'{engine} 留下了临时文件：{leftovers}'
 
 
 # ------------------------------------------------------------------

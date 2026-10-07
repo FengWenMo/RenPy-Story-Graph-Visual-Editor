@@ -297,27 +297,37 @@ class AssetEngine:
         如果 asset_dir 中没有任何 xlsx 文件，调用 scan_assets 生成。
         已有表则不触碰（防止覆盖用户编辑）。
         生成的表路径相对 project_root，与 validate_registry 的路径拼接一致。
+
+        ⚠ 2026-10-05：**实现搬到 `assets.asset_registry.ensure_asset_tables`**
+        —— 卡片编辑器的「打开项目」也需要同一条行为（用户复制出来的项目里
+        `game/asset_tables/` 是空目录，那边从前只报"读不到资源表"）。
+        同一件事两套实现就会漂移，所以这里只留转发 + 事件。
         """
-        if self.asset_dir.exists():
-            # 有任何 xlsx 就认为用户已经配置过了，不覆盖
-            if any(self.asset_dir.glob('*.xlsx')):
-                return
-
+        if self.asset_dir.exists() and any(self.asset_dir.glob('*.xlsx')):
+            return
         try:
-            from storygraph.assets.asset_registry import scan_assets, write_asset_excel
+            from storygraph.assets.asset_registry import ensure_asset_tables
 
-            # scan_root 用 project_root，这样 Path 字段形如
-            # game/images/bg/bg_1.jpg，validate_registry 拼接时才找得到文件
-            assets = scan_assets(self.project_root, include_ui=True)
-            write_asset_excel(assets, self.asset_dir, split_by_category=False)
-
+            made = ensure_asset_tables(self.project_root,
+                                       asset_dir=self.asset_dir,
+                                       # 引擎自己会 sync 脚本里的角色定义
+                                       # （`_sync_character_definitions`，还带
+                                       # `_from_script` 标记）—— 表里先有
+                                       # `characters.xlsx` 会让它走表派那条路，
+                                       # 标记就丢了。见 `ensure_asset_tables`。
+                                       with_scripts=False)
+            if not made.get('ok'):
+                raise RuntimeError(made.get('error') or '未知原因')
+            if not made.get('created'):
+                return
+            c = made.get('counts') or {}
             self._emit(AssetEventType.ENGINE_NOTICE, {
                 'info': 'auto_scan_generated',
                 'message': (
-                    f"首次启动，已自动生成资产表到 {self.asset_dir} "
-                    f"（图片 {len(assets['images'])}，"
-                    f"音乐 {len(assets['audio']['music'])}，"
-                    f"音效 {len(assets['audio']['sound'])}）"
+                    f"首次启动，已自动生成资产表到 {made.get('path')} "
+                    f"（图片 {c.get('images', 0)}，"
+                    f"音乐 {c.get('music', 0)}，"
+                    f"音效 {c.get('sounds', 0)}）"
                 ),
             })
         except Exception as e:

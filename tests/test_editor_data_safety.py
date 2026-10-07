@@ -278,6 +278,66 @@ class TestApplyProjectionSafety:
         assert b.hide == 'cg03'
         assert b.scene == 'bg bg1'
 
+    def test_unknown_stage_baseline_never_wipes_the_new_sprite(self, session):
+        """
+        **没告诉我们"载入时那一格是什么"的调用方，不许触发清空那一刀**
+        （2026-10-05 实测修）。
+
+        旧代码在 `stage_loaded=None` 时拿 `b.stage` 当基线，而界面显示的
+        那一格常常是**投影**（`beat.stage` 为空 → 显示 `compose_stage(...)`）：
+        两者不相等 → 被误判成"用户手改了 Stage" → 这一拍刚加上的立绘
+        （`b.show`）连同 scene 一起被整段清掉。实测：
+
+            加一张立绘 → 提交 → show 变回 ''（立的绘没了，用户看不出为什么）
+
+        判据：**没有基线就没有"人改过"这件事** —— 老实走重新投影。
+        """
+        beat = Beat(label='c1', text='x', scene='bg black')
+        session.beats = [beat]
+        # 面板显示的那一格是**投影**（`compose_stage(b)`），而 `beat.stage` 是空
+        fields = session.fields(0)
+        assert fields['Stage'], '前置条件：这一格显示的是投影'
+        assert not beat.stage
+        cards = [{'image': 'mary smile', 'expression': '', 'position': '',
+                  'at': '', 'order_index': 0, 'extra_rows': []}]
+        b = session.apply(0, fields, cards=cards, advanced_open=True,
+                          stage_loaded=None)
+        assert b.show == 'mary smile', \
+            f'没给基线却把刚加的立绘清掉了：{b.show!r}'
+        assert b.scene == 'bg black'
+
+    def test_saving_a_sprite_moves_the_stage_digest_and_the_preview(self,
+                                                                    session):
+        """
+        用户 2026-10-05：
+
+        > 我已经保存该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化
+
+        这一拍的原文只有 `scene black`，所以 `stage_order` / `op_order` 是
+        `'scene'`；用户加了一张立绘（只写 `beat.show`）之后，**渲染器会补齐
+        缺的 verb**（产物里真有 `show`），而舞台快照 / 演出预览从前只回放
+        列出来的 verb → 「立绘：（台上没人）」。同一次保存两种真相。
+        """
+        session.beats = [Beat(label='a', kind='narration', text='一句',
+                              scene='black', stage_order='scene',
+                              op_order='scene')]
+        cards = [{'image': 'ling happy', 'expression': '', 'position': '中央',
+                  'at': '', 'order_index': 0, 'extra_rows': []}]
+        b = session.apply(0, session.fields(0), cards=cards,
+                          advanced_open=False, stage_loaded=None)
+        assert b.show == 'ling happy@center'
+
+        digest = session.stage_digest_text(0)
+        assert 'ling happy' in digest, f'当前舞台没显示刚加的立绘：\n{digest}'
+        assert '台上没人' not in digest
+
+        sprites = getattr(session.frames()[0], 'sprites', []) or []
+        assert any(str(getattr(s, 'image', '')).startswith('ling happy')
+                   for s in sprites), f'演出预览里没有这个人：{sprites!r}'
+
+        # 随表走的顺序列也写实了（下一次从表回来的人不会再看到"没有立绘"）
+        assert b.stage_order == 'scene,show', b.stage_order
+
     def test_stage_only_ops_survive_a_no_edit_roundtrip(self, session):
         """
         没改 Stage 时重投影，但"结构化列永远表达不了"的 `pause 1.0`

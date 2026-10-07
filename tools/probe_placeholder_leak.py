@@ -90,7 +90,7 @@ def main() -> int:
         gen = render_beats_to_rpy(s.beats)
         gen_menu = [ln for ln in gen.splitlines()
                     if 'menu' in ln or chr(0) in ln]
-        res = s.export(f, force=True)
+        res = s.export(f)
         note = str(res.get('note') or '')
         hit = 'x00menu' in note
         if hit:

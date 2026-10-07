@@ -85,7 +85,8 @@ from storygraph.ui_qt.thumb_loader import ThumbLoader
 # 由 `tests/test_main_window_mixins.py` 守。
 from storygraph.ui_qt.window_assets import WindowAssetsMixin
 from storygraph.ui_qt.window_card import CardPageMixin
-from storygraph.ui_qt.window_export import WindowExportMixin
+from storygraph.ui_qt.window_export import (WindowExportMixin,
+                                             overwritable as _overwritable)
 from storygraph.ui_qt.window_graph_ops import GraphOpsMixin
 from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
@@ -513,6 +514,25 @@ class BeatCardEditor(QWidget):
         """主区 + 高级区 + 额外控件**全部**字段的当前值（不看折叠状态）。"""
         return {n: self._get_value(n) for n in self._all_names()}
 
+    def set_kind(self, kind: str) -> None:
+        """
+        把（归一化后的）「类型」推回面板，**同时同步基线**（不制造"未保存"）。
+
+        为什么需要它：`say` / `narration` 这一对里，类型是**说话人的投影**
+        （见 `app.beats.kind_from_speaker`）。用户填了说话人之后，高级区
+        那一格必须立刻跟着变 —— 否则它一直写着 `narration`，用户合理地
+        以为"我填的说话人没生效"（2026-10-05 实测报的）。左栏那一行的
+        前缀（☁）同源，由 `refresh_list_row` 负责。
+        """
+        self._loading = True
+        try:
+            self._set_value('Kind', str(kind or ''))
+            if self._loaded_fields:
+                self._loaded_fields['Kind'] = str(kind or '')
+        finally:
+            self._loading = False
+        self.refresh_dirty()
+
     def is_modified(self) -> bool:
         """
         表单内容和"上一次保存"相比变了吗？（只管**表单字段**）
@@ -610,21 +630,10 @@ class BeatCardEditor(QWidget):
         self._grid.change.connect(hook)
 
 
-
-def _overwritable(res: dict) -> bool:
-    """
-    这次 block **可以**让用户选择"仍然覆盖"吗？
-
-    只有一条可以：`HANDWRITTEN_TARGET`（产物没问题，只是目标是人手写的）。
-    其余 block（`PYTHON_SYNTAX_ERROR` / `CJK_IN_IMAGE_TAG` /
-    `LABEL_COLLISION` …）是**产物本身坏了** —— 覆盖只会把坏脚本写进
-    `game/`，让游戏起不来。那几条一律不给逃生舱。
-
-    判据放在这里而不是写死在对话框里：`codes` 是 `EditorSession.export`
-    的公开契约，将来新增 block 代码时，"能不能覆盖"必须是个明确决定，
-    不能靠默认放行。
-    """
-    return 'HANDWRITTEN_TARGET' in (res.get('codes') or [])
+# `_overwritable` 已搬到 `window_export.py`（唯一的使用者在那儿，见那边的
+# 说明：自由函数不在 `REQUIRES` 契约里，搬 mixin 时漏了它 = 导出被拦下时
+# `NameError`、界面什么都不发生）。这里保留 `_overwritable` 这个名字，
+# 是因为它曾经是 `main_window` 的公共面（测试与文档都按那个名字引用）。
 
 
 class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
@@ -1048,6 +1057,14 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._analysis_btn.setToolTip('逐节点的剧情变量与区间明细')
         self._analysis_btn.clicked.connect(self.show_analysis)
         brow.addWidget(self._analysis_btn)
+        # 用户 2026-10-05："在「变量分析」右边加一个检查资源完整性的功能，
+        # 后出示检查报告"。
+        self._health_btn = QPushButton('📦 资源体检')
+        self._health_btn.setToolTip(
+            '检查资源表与项目资源是否一一对应（缺失 / 未登记 / 重复 / '
+            '指向 game 之外），并出示报告')
+        self._health_btn.clicked.connect(self.check_asset_health)
+        brow.addWidget(self._health_btn)
         brow.addStretch(1)
         rv.addLayout(brow)
 
@@ -1125,7 +1142,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 同时控制台仍然是这一栏里最大的一块（它要显示导入/分析的流水）。
         split.setSizes([1080, 340])
         try:
-            left.setMinimumWidth(200)
+            # ⚠ 从前这里写的是 `left`（**没有这个变量**，左边那一栏叫 `mid`）——
+            # NameError 被下面这个 `except Exception` 吞掉，于是"右栏最窄 300 /
+            # 最宽 420"这两条约束**从来没生效过**（用户看到的右栏宽度不受控）。
+            # 静态扫"引用了但本模块看不到的全局名"才把它抓出来。
+            mid.setMinimumWidth(200)
             right.setMinimumWidth(300)
             right.setMaximumWidth(420)
         except Exception:                     # noqa: BLE001
@@ -1354,6 +1375,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         tb_graph.addSeparator()
         act('🔎 检查逻辑问题', self.check_logic, '可达性 / 死分支；结论写在右侧并在图上标红')
         act('📊 变量分析', self.show_analysis, '逐节点的变量区间与操作明细（只读）')
+        act('📦 资源体检', self.check_asset_health,
+            '检查资源表与项目资源是否一一对应，并出示报告（只读）')
         act('🩺 项目体检', self.show_health, '三级校验，只读检查，不写盘')
         act('✎ 直接编辑单章', self._on_load,
             '不进剧情图，只把一章 .rpy 打开到卡片界面（改一章不想建图时用）')

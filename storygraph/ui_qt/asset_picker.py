@@ -16,20 +16,68 @@ storygraph.ui_qt.asset_picker
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem as _Item,
-                               QSplitter, QVBoxLayout, QWidget)
+                               QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from storygraph.app import picker as P
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
-from storygraph.ui_qt.thumb_loader import ThumbLoader
+from storygraph.ui_qt.thumb_loader import (PRIORITY_BACKGROUND, ThumbLoader)
 
 THUMB = (104, 74)
 #: 每格的尺寸（缩略图 + 文字位）。**条目也必须按它设 sizeHint** ——
 #: 只设 `setGridSize` 是不够的，见 `_load_items` 里的说明。
 CELL = QSize(THUMB[0] + 26, THUMB[1] + 44)
+
+#: 底色偏好（浅色 / 深色）存在这里 —— 用户切一次就该记住。
+SETTINGS_ORG = 'storygraph'
+SETTINGS_APP = 'editor'
+SETTING_DARK = 'picker/dark_tiles'
+
+#: 后台补齐：每次推进多少条 / 间隔多久（只在没有更要紧的请求时跑）。
+FILL_CHUNK = 40
+FILL_INTERVAL_MS = 220
+#: 一次打开最多补齐多少条（避免为了"全绿"把 CPU 烧几分钟）。
+FILL_BUDGET = 600
+
+
+def _settings():
+    """
+    底色偏好的存储。
+
+    ⚠ **做成可替换的工厂**（测试里换成临时 ini 文件）：
+
+      Windows 上 `QSettings.setPath(IniFormat, ...)` + `setDefaultFormat`
+      **不一定生效** —— 实测 `QSettings('storygraph','editor')` 仍然落在
+      注册表 `HKEY_CURRENT_USER\\Software\\storygraph\\editor`。测试直接建
+      对话框就会读写**用户真实的偏好**（把"深色"写进用户的配置）。
+      所以这里留一个注入点，测试用 `monkeypatch.setattr(
+      asset_picker, 'settings_factory', ...)` 换成临时文件。
+    """
+    return settings_factory()
+
+
+def settings_factory():
+    """默认存储：系统偏好（注册表 / ini 由 Qt 决定）。"""
+    return QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+
+def _load_dark_pref() -> bool:
+    """读"暗色底"偏好（读不到就用 False = 浅色）。"""
+    try:
+        return bool(_settings().value(SETTING_DARK, False, type=bool))
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.asset_picker._load_dark_pref', e)
+        return False
+
+
+def _save_dark_pref(dark: bool):
+    try:
+        _settings().setValue(SETTING_DARK, bool(dark))
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.asset_picker._save_dark_pref', e)
 
 
 class AssetPickerDialog(QDialog):
@@ -39,6 +87,11 @@ class AssetPickerDialog(QDialog):
     `want_image_spec=True` 时（选立绘/背景图用），确认后 `image_spec`
     给出可写进卡片的 `show` 片段（`ling happy`），否则给资产 ID。
     """
+
+    #: 预热缩略图的进度 / 结果 —— **必须定义在类上**：工作线程 emit，
+    #: Qt 会把它排队回这个对象所属的线程（GUI 线程），槽里才敢碰控件。
+    warm_progress = Signal(int, int)
+    warm_done = Signal(object)
 
     def __init__(self, parent=None, registry=None, project_root=None,
                  current: str = '', types=None, want_image_spec: bool = False,
@@ -55,6 +108,9 @@ class AssetPickerDialog(QDialog):
         self.selection = None
         self.image_spec = ''
         self._filter = ''
+        self._warming = False
+        self.warm_progress.connect(self._on_prewarm_progress)
+        self.warm_done.connect(self._on_prewarm_done)
         # 调度模型见 `ui_qt/thumb_loader.py`：**优先级队列**（自限流），
         # 选择器用 `focus()` 把"窗口内可见的"提到最前。
         self._loader = ThumbLoader(self, max_size=THUMB,
@@ -62,6 +118,9 @@ class AssetPickerDialog(QDialog):
         self._build()
         self._load_groups()
         self._preselect(current)
+        # 底色偏好要**开局就生效**（构造时 `toggled` 不会触发，
+        # 不显式调一次的话"记住的深色"要等用户再点一下才出现）。
+        self._on_bg_toggled(self._dark_tiles)
 
     # ------------------------------------------------------------------
 
@@ -80,6 +139,30 @@ class AssetPickerDialog(QDialog):
         self._search.setPlaceholderText('输入 ID 前缀 / 片段（留空显示全部）')
         self._search.textChanged.connect(self._on_search)
         top.addWidget(self._search, 1)
+        # **底色切换**（用户 2026-10-05：
+        # "先加一个背景切换颜色按钮，把白背景变成暗色背景，防止有的照片被挡住"）
+        #
+        # 很多立绘/背景是"白底 / 透明底"，画在浅色面板上等于看不见。
+        # 切一次就记住（QSettings），下次打开还是这个底色。
+        self._dark_tiles = _load_dark_pref()
+        self._bg_btn = QPushButton('◐ 底色：浅色')
+        self._bg_btn.setCheckable(True)
+        self._bg_btn.setChecked(self._dark_tiles)
+        self._bg_btn.setToolTip(
+            '切换缩略图底色（浅色 ⇄ 深色）。\n'
+            '白底 / 透明底的图在浅色上会被"挡住"，切深色就看得见。')
+        self._bg_btn.toggled.connect(self._on_bg_toggled)
+        top.addWidget(self._bg_btn, 0)
+        # **预热缩略图**（用户 2026-10-05："另外，可以做预热缩略图"）——
+        # 冷解码 384 ms/张 vs 缓存命中 2 ms，所以"先把这一批解好"是要紧事。
+        # 跑在后台线程，进度写在提示条上；关掉窗口就停（已解好的留在缓存里）。
+        self._warm_btn = QPushButton('⚡ 预热缩略图')
+        self._warm_btn.setToolTip(
+            '把这个项目所有立绘/CG 的缩略图**先解一遍**写进缓存。\n'
+            '冷解码 ~400ms/张，之后任何界面都是 ~2ms 命中。\n'
+            '可以随时关窗口中止（已解好的不会白费）。')
+        self._warm_btn.clicked.connect(self.start_prewarm)
+        top.addWidget(self._warm_btn, 0)
         root.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
@@ -118,6 +201,15 @@ class AssetPickerDialog(QDialog):
         # 滚动 → 补加载可见项的缩略图（只加载看得见的，见 `_load_visible_thumbs`）
         self._items.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._requested: set = set()
+        #: 已经**拿到图**的资产（提示条上的"已加载 N"；重复回填不重复计数）
+        self._loaded: set = set()
+        #: `asset_id → 真实文件路径`（'' = 没有文件）—— 避免反复 stat 磁盘
+        self._path_cache: dict = {}
+        self._no_image = 0
+        self._hint_total = 0
+        self._fill_cursor = 0
+        self._fill_deadline = 0
+        self._fill_timer = None
         split.addWidget(self._items)
         # —— 右：详情 ——
         right = QWidget()
@@ -150,6 +242,137 @@ class AssetPickerDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    # ------------------------------------------------------------------
+    #  底色（浅色 / 深色）
+    # ------------------------------------------------------------------
+
+    #: 深色底（用户要的"暗色背景"）与配套的文字色。
+    #: ⚠ 浅色那一边**必须用真实存在的 token**：`theme.t('bg.panel')` 不存在，
+    #: `theme.t` 对未知键返回哨兵色 `#FF00FF`（刻意刺眼），拿它当底色就是
+    #: 一片洋红。这里用 `bg.canvas`（面板底色）+ `text.primary`。
+    DARK_BG = '#1e2024'
+    DARK_FG = '#dfe3e8'
+
+    def _on_bg_toggled(self, dark: bool):
+        self._dark_tiles = bool(dark)
+        self._bg_btn.setText('◐ 底色：深色' if self._dark_tiles else '◐ 底色：浅色')
+        _save_dark_pref(self._dark_tiles)
+        self._apply_tile_bg()
+
+    def tile_background(self) -> str:
+        """当前网格底色（自检/测试用）。"""
+        return self.DARK_BG if self._dark_tiles else theme.t('bg.canvas')
+
+    def tile_foreground(self) -> str:
+        """当前网格文字色（深底必须配浅字，否则"换个方向看不见"）。"""
+        return self.DARK_FG if self._dark_tiles else theme.t('text.primary')
+
+    def _apply_tile_bg(self):
+        """
+        把底色画到网格上。
+
+        为什么用 stylesheet 而不是调色板：`QListWidget` 的 item 选中色/文字色
+        也要一起改，否则深底 + 深色文字＝更看不见（等于把问题换个方向）。
+        """
+        bg = self.tile_background()
+        fg = self.tile_foreground()
+        accent = theme.t('brand.primary')
+        try:
+            self._items.setStyleSheet(
+                f'QListWidget{{background:{bg};color:{fg};}}'
+                f'QListWidget::item{{color:{fg};}}'
+                f'QListWidget::item:selected{{background:{accent};color:#ffffff;}}')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.asset_picker._apply_tile_bg', e)
+
+    # ------------------------------------------------------------------
+    #  预热缩略图
+    # ------------------------------------------------------------------
+
+    def start_prewarm(self):
+        """
+        后台**把这个项目所有图片的缩略图先解一遍**（写进磁盘缓存）。
+
+        用户 2026-10-05：
+
+        > 另外，可以做预热缩略图
+
+        为什么值得一条显式的路：立绘/CG 冷解码 384–434 ms/张，而缓存命中
+        只要 2 ms；不预热就是用户在滚动时一张张等。真实项目 2816 张 ×
+        2 个尺寸，跑几分钟 —— 所以**必须有进度、必须能中止**（关窗口即停，
+        已解好的都留在缓存里）。
+
+        跑在 `QThreadPool` 的普通任务里（不占 GUI 线程）；进度、结果都通过
+        **类上定义的信号**回主线程（`warm_progress` / `warm_done`）。
+        """
+        if getattr(self, '_warming', False):
+            return
+        paths = []
+        seen = set()
+        # 只预热**当前这一类候选里**有图的那些（用户可能只在选立绘）
+        for i in range(self._items.count()):
+            it = self._items.item(i)
+            if it is None:
+                continue
+            atype, aid = it.data(Qt.UserRole)
+            if atype != 'image':
+                continue
+            p = self._image_path(aid)
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        if not paths:
+            self._hint.setText('这里面没有可预热的图片。')
+            return
+        from storygraph.app.prewarm import UI_THUMB_SIZES, prewarm
+        from PySide6.QtCore import QRunnable, QThreadPool
+
+        self._warming = True
+        self._warm_btn.setEnabled(False)
+        self._warm_btn.setText('⚡ 预热中…')
+        total = len(paths) * len(UI_THUMB_SIZES)
+        self._hint.setText(f'预热中… 0 / {total}')
+        dlg = self
+
+        class _Warm(QRunnable):
+            def run(self_inner):
+                def on_progress(done, all_):
+                    try:
+                        dlg.warm_progress.emit(done, all_)   # 排队回主线程
+                    except RuntimeError as e:                # 宿主已销毁
+                        swallow('ui_qt.asset_picker._Warm.progress', e)
+
+                try:
+                    res = prewarm(paths, on_progress=on_progress,
+                                  should_stop=lambda: not dlg._warming)
+                except Exception as e:                       # noqa: BLE001
+                    swallow('ui_qt.asset_picker._Warm.prewarm', e)
+                    res = {'done': 0, 'failed': 0, 'seconds': 0,
+                           'stopped': True, 'error': str(e)}
+                try:
+                    dlg.warm_done.emit(res)
+                except RuntimeError as e:                    # 宿主已销毁
+                    swallow('ui_qt.asset_picker._Warm.done', e)
+
+        QThreadPool.globalInstance().start(_Warm())
+
+    def _on_prewarm_progress(self, done: int, total: int):
+        self._hint.setText(f'预热中… {done} / {total}（可以继续用，'
+                           f'关窗口即中止）')
+
+    def _on_prewarm_done(self, res: dict):
+        self._warming = False
+        try:
+            self._warm_btn.setEnabled(True)
+            self._warm_btn.setText('⚡ 预热缩略图')
+        except Exception as e:                    # noqa: BLE001 - 控件没了
+            swallow('ui_qt.asset_picker._on_prewarm_done', e)
+        self._hint.setText(
+            f'预热完成：成功 {res.get("done", 0)} · 失败 {res.get("failed", 0)}'
+            f' · 用时 {res.get("seconds", 0)}s'
+            + ('（已中止）' if res.get('stopped') else '')
+            + ' —— 缩略图以后都是秒出')
 
     # ------------------------------------------------------------------
     #  数据
@@ -201,6 +424,10 @@ class AssetPickerDialog(QDialog):
         pairs = self._pairs()
         self._items.clear()
         self._requested = set()
+        self._no_image = 0
+        self._hint_total = 0
+        self._fill_cursor = 0
+        self._fill_done = 0
         # 候选整个换掉了：之前"还排在队里、没开始解"的那些不再需要
         # （正在解的会跑完并进缓存，切回去就是命中）。
         try:
@@ -212,8 +439,19 @@ class AssetPickerDialog(QDialog):
             # `ling happy`）——那才是写进卡片的值，比内部 ID
             # （`sr_general_Frame 26`）好认得多；其余类型显示资产 ID。
             # 完整信息（ID / 路径 / 属性）在 tooltip 里，不挤在格子里。
-            it = _Item(self._short_label(atype, aid))
+            label = self._short_label(atype, aid)
+            it = _Item(label)
             it.setData(Qt.UserRole, (atype, aid))
+            has_file = atype != 'image' or bool(self._image_path(aid))
+            if atype == 'image' and not has_file:
+                # **真的没有图**就当场说清楚（用户 2026-10-05："加载不完全"）。
+                #
+                # 从前这种条目和"还没解出来"长得一模一样（都是空格子），
+                # 于是"图还在解"与"这张图根本找不到"分不清 —— 用户只能
+                # 觉得"工具加载不全"。真实项目里那 74 条
+                # `gui/dutui/**/RETURE.png` 就是这一类（Path 多了一层项目
+                # 目录名，已在 `app.beats.asset_preview_path` 修掉）。
+                it.setText(f'{label}\n（没有图片文件）')
             # **条目矩形必须等于格子**（用户 2026-10-05：
             # 「想要选中图片，点击后没反应，显示并没有选中任何一条」）。
             #
@@ -232,11 +470,16 @@ class AssetPickerDialog(QDialog):
             # 行高 = 真实行高。
             it.setSizeHint(CELL)
             it.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
-            it.setToolTip(P.detail(self._registry, atype, aid,
-                                   self._project_root)[:400])
+            it.setToolTip(
+                f'{aid}\n资源表里登记了，但按 Path 找不到图片文件。'
+                if atype == 'image' and not has_file
+                else P.detail(self._registry, atype, aid,
+                              self._project_root)[:400])
             self._items.addItem(it)
-        n = len(pairs)
-        self._hint.setText(f'{n} 条' + ('（搜索中）' if self._filter else ''))
+            if atype == 'image' and not has_file:
+                self._no_image += 1
+        self._hint_total = len(pairs)
+        self._update_hint()
         # **只给看得见的格子请求缩略图**
         #
         # 用户 2026-10-05：
@@ -245,6 +488,77 @@ class AssetPickerDialog(QDialog):
         # 以前这里对**全部**候选（真实项目 2828 张）一次性 `request()` ——
         # 线程池被灌满、可见的那几个排在几千个后面，于是"半天不出图 + 一堆空格子"。
         self._load_visible_thumbs()
+        self._start_background_fill()
+
+    def _update_hint(self, searching: bool = None):
+        """
+        提示条：**加载进度 + 无图条数**。
+
+        为什么要写清楚（用户 2026-10-05："加载不完全"）：从前只有一行
+        "2890 条"，于是"图还在解""这张根本没有""要等多久"三件事全靠猜。
+        """
+        if searching is None:
+            searching = bool(self._filter)
+        n = self._hint_total or self._items.count()
+        parts = [f'{n} 条']
+        if searching:
+            parts.append('搜索中')
+        if n:
+            parts.append(f'已加载 {len(self._loaded)}')
+        if self._no_image:
+            parts.append(f'{self._no_image} 条没有图片文件')
+        if self._fill_pending():
+            parts.append('后台补齐中…')
+        self._hint.setText(' · '.join(parts))
+
+    # ------------------------------------------------------------------
+    #  后台补齐（"加载不完全"的另一半：让它自己补完）
+    # ------------------------------------------------------------------
+
+    def _fill_pending(self) -> bool:
+        """还有没请求过的图片格子吗（不含"根本没有图"的那些）。"""
+        return self._fill_cursor < self._items.count()
+
+    def _start_background_fill(self):
+        """
+        空闲时**逐块**把剩下的缩略图也排进队（`PRIORITY_BACKGROUND`）。
+
+        为什么要有它：只加载"看得见的"能保证出图快，但用户滚到哪儿都得等 ——
+        真正常用的几百张值得**提前**解好（用户 2026-10-05："加载不完全，
+        缺口大"）。所以可见的照旧优先，剩下的按 `FILL_CHUNK` 一块一块地排队，
+        每次只前进一步，把线程让给"正在看的那几张"。
+
+        `FILL_BUDGET` 是刹车：一次打开最多补这么多条，避免为了刷满网格
+        把 CPU 烧几分钟（真实项目大图冷解码 ~380 ms/张）。
+        """
+        if self._fill_timer is None:
+            self._fill_timer = QTimer(self)
+            self._fill_timer.setSingleShot(True)
+            self._fill_timer.timeout.connect(self._fill_step)
+        self._fill_deadline = min(self._items.count(), FILL_BUDGET)
+        self._fill_timer.start(FILL_INTERVAL_MS)
+
+    def _fill_step(self):
+        """补一块（优先级最低；`focus()` 一来就把它们压下去）。"""
+        if not self._items.count():
+            return
+        start = self._fill_cursor
+        end = min(self._items.count(), start + FILL_CHUNK)
+        for i in range(start, end):
+            it = self._items.item(i)
+            if it is None:
+                continue
+            atype, aid = it.data(Qt.UserRole)
+            if atype != 'image' or aid in self._requested:
+                continue
+            if not self._image_path(aid):
+                continue                          # 根本没有图：别浪费解码
+            self._requested.add(aid)
+            self._request_thumb(it, aid, priority=PRIORITY_BACKGROUND)
+        self._fill_cursor = end
+        self._update_hint()
+        if self._fill_pending() and self._fill_cursor < self._fill_deadline:
+            self._fill_timer.start(FILL_INTERVAL_MS)
 
     def _visible_range(self, extra_rows: int = 3, pad_rows: int = 1) -> tuple:
         """
@@ -357,19 +671,41 @@ class AssetPickerDialog(QDialog):
         """一格对应的 loader slot（请求与 `focus()` 必须用同一个）。"""
         return ('picker', id(item), asset_id)
 
-    def _request_thumb(self, item, asset_id):
-        """请求一张缩略图；返回它的 slot，没有图源时也返回 slot（只是不入队）。"""
+    def _image_path(self, asset_id):
+        """这条图片资产的**真实文件路径**（找不到返回 ''）—— 带记忆，别反复 stat。"""
+        if asset_id in self._path_cache:
+            return self._path_cache[asset_id]
+        path = ''
+        try:
+            path = str(P.thumbnail_path(self._registry, 'image', asset_id,
+                                        self._project_root) or '')
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.asset_picker._image_path', e)
+        if len(self._path_cache) > 20000:
+            self._path_cache.clear()
+        self._path_cache[asset_id] = path
+        return path
+
+    def _request_thumb(self, item, asset_id, priority=None):
+        """请求一张缩略图；没有图源时**什么都不做**（调用方已按 `_image_path`
+        判过，这里只是不再重复解析）。"""
         slot = self._slot_of(item, asset_id)
-        path = P.thumbnail_path(self._registry, 'image', asset_id,
-                                self._project_root)
+        path = self._image_path(asset_id)
         if not path:
             return slot
 
         def apply(pixmap, _p):
-            if pixmap is not None:
-                item.setIcon(pixmap)
+            if pixmap is None:
+                return
+            item.setIcon(pixmap)
+            # 进度条（"已加载 N"）：**只在第一次拿到图时**记一笔，重复回填
+            # （滚动来回）不重复计数。
+            if asset_id not in self._loaded:
+                self._loaded.add(asset_id)
+                self._update_hint()
 
-        self._loader.request(slot, str(path), apply, max_size=THUMB)
+        self._loader.request(slot, path, apply, max_size=THUMB,
+                             priority=priority)
         return slot
 
     def _show_detail(self):
@@ -378,6 +714,12 @@ class AssetPickerDialog(QDialog):
             self._detail.setText('（选中一条看详情）')
             return
         atype, aid = it.data(Qt.UserRole)
+        if atype == 'image' and not self._image_path(aid):
+            self._detail.setText(
+                f'[image] {aid}\n\n'
+                f'⚠ 资源表里登记了这一条，但按它的 Path 在项目里找不到图片文件。\n'
+                f'（不是"还在加载"—— 这一格永远不会有图。）')
+            return
         text = P.detail(self._registry, atype, aid, self._project_root)
         self._detail.setText(f'[{atype}] {aid}\n\n{text or "（无更多信息）"}')
 
@@ -421,6 +763,8 @@ class AssetPickerDialog(QDialog):
 
     def closeEvent(self, event):
         try:
+            if self._fill_timer is not None:
+                self._fill_timer.stop()
             self._loader.shutdown()
         except Exception:                    # noqa: BLE001
             swallow('asset_picker.closeEvent')

@@ -211,7 +211,7 @@ def run_engines(tmp: Path, verbose: bool) -> list:
         ir_path = None
         for p in files:
             if Path(p).name in ('story_ir.json', 'UnityDialogueData.json',
-                                'STORY_IR.json'):
+                                'GodotDialogueData.json'):
                 ir_path = Path(p)
         if ir_path is None:
             if verbose:
@@ -390,7 +390,7 @@ def run_real(tmp: Path, limit: int = 0) -> tuple:
             stat['ok'] += 1
             ir_name = {'json': 'story_ir.json',
                        'unity': 'UnityDialogueData.json',
-                       'godot': 'STORY_IR.json'}[engine]
+                       'godot': 'GodotDialogueData.json'}[engine]
             path = out / ir_name
             if not path.exists():
                 bad.append((f'{src.name}·{engine}', 'M9', f'没产出 {ir_name}'))

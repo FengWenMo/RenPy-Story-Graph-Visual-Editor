@@ -271,3 +271,66 @@ class TestComposeStageMatchesRenderer:
     def test_with_stays_on_the_scene_when_there_is_one(self):
         b = Beat(scene='bg room', show='ling happy', with_='dissolve')
         assert 'scene bg room with dissolve' in compose_stage(b)
+
+
+# ==================================================================
+#  五、顺序列不全时**看到的就是生成的**（用户 2026-10-05 实测报）
+# ==================================================================
+
+class TestStageVerbsInventTheMissingVerbs:
+    """
+    用户原话：
+
+    > 我已经保存该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化
+
+    卡片上加一张立绘只写 `beat.show`，而 `stage_order` / `op_order` 还是
+    解析时那一拍的 `'scene'`（原文只有 `scene black`）：
+
+      · **渲染器**会把漏掉的 stage verb 补在后面（"绝不因为顺序信息不全就
+        丢掉操作"）→ 产物里 `show ling angry at center` ✓
+      · **舞台快照 / 演出预览**从前只回放列出来的 verb → 「立绘：（台上没人）」
+
+    同一次保存两种真相 = "看到的 ≠ 生成的"（`compose_stage` 那条契约最贵的一类）。
+    现在两边共用 `Beat.stage_verbs`。
+    """
+
+    def test_missing_show_is_appended_to_the_order(self):
+        b = Beat(scene='black', show='ling angry', stage_order='scene',
+                 op_order='scene')
+        assert b.stage_verbs == ['scene', 'show']
+
+    def test_recorded_order_wins_over_the_fallback(self):
+        """顺序仍按记下来的真迹排（`hide` 在 `show` 前面就不许被重排）。"""
+        b = Beat(show='ling happy', hide='ling sad',
+                 stage_order='hide,show', op_order='hide,show')
+        assert b.stage_verbs == ['hide', 'show']
+
+    def test_no_order_info_falls_back_to_the_historical_order(self):
+        b = Beat(scene='bg room', show='ling happy', hide='cg03')
+        assert b.stage_verbs == ['scene', 'show', 'hide']
+
+    def test_sync_writes_it_back_without_losing_the_recorded_part(self):
+        b = Beat(scene='black', show='ling angry', stage_order='scene',
+                 op_order='scene')
+        assert b.sync_stage_order() == 'scene,show'
+        # 再同步一次不该翻倍
+        assert b.sync_stage_order() == 'scene,show'
+
+    def test_everything_without_content_is_not_invented(self):
+        b = Beat(scene='black', stage_order='scene', op_order='scene')
+        assert b.stage_verbs == ['scene'], '没有 show 就别凭空补一个'
+
+    def test_the_snapshot_and_the_renderer_agree(self, symbols):
+        """
+        端到端：顺序列停在 `'scene'`，但卡片上加了立绘 ——
+        **快照（当前舞台/预览的数据源）与产物必须都看到这个人**。
+        """
+        from storygraph.story.stage_snapshot import snapshot_rows
+        b = Beat(seq=1, label='a', kind='say', speaker='e', text='一句',
+                 scene='black', show='ling happy', stage_order='scene',
+                 op_order='scene')
+        row = snapshot_rows([b])[0]
+        assert 'ling happy' in row['actors'], (
+            f'快照没看到刚加的立绘：{row["actors"]!r}')
+        text = render_beats_to_rpy([b], label_name='a')
+        assert 'show ling happy' in text, text

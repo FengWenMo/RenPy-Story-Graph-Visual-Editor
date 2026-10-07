@@ -2968,3 +2968,202 @@ class TestNoTkinterInBackend:
         from _source_paths import module_source
         src = module_source('storygraph.ui_qt.theme').read_text(encoding='utf-8')
         assert 'import tkinter' not in src
+
+# ==================================================================
+#  十六、加了立绘 → 导出：`show` 必须真的落到文件里（用户 2026-10-05 实测报）
+# ==================================================================
+
+class TestAddingASpriteReachesTheFile:
+    """
+    用户报："明明已经添加了立绘，导出后对应的 show 却没有出现"。
+
+    摊开后是两个独立的缺陷（都在这一条路上）：
+
+      · **结构补空拍**（`label ch01_end: return`）被判成"新卡片找不到插入
+        位置" → 整份补丁作废 → 原地导出被拒（`ch01` 就长这样）；
+      · **导出被拦下那一条路**里 `_overwritable` 是个未定义的名字 →
+        `NameError` → 界面**什么都不发生**（连"被拦下了"都不说），
+        这才是用户看到的"没出现"。
+
+    这里走真 Qt、真点击、真落盘：加一张立绘 → 导出到**原文件** →
+    产物里必须有一条 `show`。
+    """
+
+    def _stub_dialogs(self, monkeypatch, target):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        monkeypatch.setattr(QFileDialog, 'getSaveFileName',
+                            staticmethod(lambda *a, **k: (str(target), '')))
+        for name in ('warning', 'critical', 'information'):
+            monkeypatch.setattr(QMessageBox, name,
+                                staticmethod(lambda *a, **k: QMessageBox.Ok))
+        monkeypatch.setattr(QMessageBox, 'question',
+                            staticmethod(lambda *a, **k: QMessageBox.Yes))
+
+    def test_the_sprite_lands_in_the_original_file(self, window, project,
+                                                   monkeypatch):
+        window.open_project_path(project)
+        # `ch01_class` 那一拍：只有一句台词，没有任何立绘（mary 从没登场过）
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if b.label == 'ch01_class' and b.kind == 'say')
+        window._show_index(idx)
+        # 「＋ 添加立绘」的取图回调（真跑会弹模态框，offscreen 下会卡住）
+        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
+                            lambda cur: 'mary smile')
+        window._panel._grid._on_add()
+        assert [c.item.get('image') for c in window._panel._grid._cards] == \
+            ['mary smile'], '加了立绘却没进网格'
+
+        target = Path(window._file_path)
+        self._stub_dialogs(monkeypatch, target)
+        window.export_script()                    # ← 从前这里 NameError
+
+        text = target.read_text(encoding='utf-8')
+        assert any(ln.strip() == 'show mary smile'
+                   for ln in text.splitlines()), (
+            '加了立绘，导出后文件里却没有这条 show：\n'
+            + '\n'.join(ln for ln in text.splitlines()
+                        if 'show ' in ln or 'label ch01' in ln))
+
+    def test_a_multi_attribute_sprite_is_not_renamed(self, window, project,
+                                                     monkeypatch):
+        """
+        作者写的 `show ling base_arms_akimbo sigh` 不许被卡片往返改名。
+
+        （真注册表里的子串兜底档会把两个词都映射成 `base_arms_akimbo_sigh`，
+        图像名被改写 → 游戏里找不到那张立绘。）
+        """
+        window.open_project_path(project)
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if 'base_arms_akimbo' in (b.show or ''))
+        window._show_index(idx)
+        original = window._session.beats[idx].show
+        assert original == 'ling base_arms_akimbo sigh@i11', original
+
+        # 提交这一拍（翻页 / 保存 / 导出都会先提交）
+        window.apply_current_beat()
+        assert window._session.beats[idx].show == original, (
+            f'卡片往返把图像名改掉了：{window._session.beats[idx].show!r}')
+
+    def test_a_fresh_sprite_card_can_set_its_position(self, window, project,
+                                                      monkeypatch):
+        """
+        **全新加的那张立绘，点「位置」chip 必须能设定**（用户 2026-10-05 报的）。
+
+        > 因为之前这个角色没有登场，位置无法选择设定和调整，整个都是空的,
+        > 也不知道会放哪儿
+
+        新卡 `position == ''`，而 `_cycle` 原本写的是 `choices.index(cur)` ——
+        空串不在候选里 → `ValueError` → 异常在 Qt 槽里被吞掉 → **点了没反应**
+        （表情 chip 同理，`expression` 也是空的）。
+        """
+        window.open_project_path(project)
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if b.kind == 'say' and not (b.show or '').strip())
+        window._show_index(idx)
+        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
+                            lambda cur: 'mary smile')
+        window._panel._grid._on_add()
+        card = window._panel._grid._cards[-1]
+        assert card.item['position'] == '' and card.item['expression'] == ''
+
+        # 点「位置」与「表情」：都必须真的设上值（从前是 ValueError 吞掉）
+        card._pos_btn.click()
+        assert card.item['position'], '新卡点位置 chip 没反应（还是空的）'
+        card._expr_btn.click()
+        assert card.item['expression'], '新卡点表情 chip 没反应（还是空的）'
+        # 再点一下 = 换下一个候选（不是卡住不动）
+        first = card.item['position']
+        card._pos_btn.click()
+        assert card.item['position'] != first, '第二次点位置 chip 没有换候选'
+
+    def test_saving_a_sprite_refreshes_the_stage_panel(self, window, project,
+                                                       monkeypatch):
+        """
+        按了 💾 之后，「当前舞台」那一块必须**当场**跟着变。
+
+        用户 2026-10-05："我已经保存该卡片了，可是当前舞台变化没有生效"。
+        那一块是**载入那一刻**算好写上去的（`set_stage_digest`），而加立绘
+        只改内存里的拍 —— 不重算的话，保存完它还写着「立绘：（台上没人）」，
+        用户当然以为没保存上。
+        """
+        window.open_project_path(project)
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if b.kind == 'say' and not (b.show or '').strip())
+        window._show_index(idx)
+        before = window._panel._stage_label.text()
+        assert 'mary smile' not in before
+
+        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
+                            lambda cur: 'mary smile')
+        window._panel._grid._on_add()
+        window.save_current_beat()
+
+        after = window._panel._stage_label.text()
+        assert 'mary smile' in after, (
+            f'保存后「当前舞台」没跟着变：\n  保存前：{before!r}\n'
+            f'  保存后：{after!r}')
+        assert '台上没人' not in after
+
+    def test_the_expression_chip_keeps_the_card_and_the_file_agreeing(
+            self, window, project, monkeypatch):
+        """
+        点表情 chip 之后，**卡片标题（= 会写进脚本的图像名）必须跟着变**。
+
+        用户 2026-10-05："还有就是这个表情，找不到 angry……" —— 卡片标题写着
+        `ling angry`（那是 `item['image']`），而表情 chip 被点成了
+        `disappointed`（`item['expression']`）。保存时 `cards_to_show` 用
+        **tag + 表情**拼图像名 → 脚本里写的是 `ling disappointed`，
+        **卡片却还显示 angry**：看得见的和写下去的不是一回事。
+        """
+        from storygraph.app.beats import cards_to_show
+        window.open_project_path(project)
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if b.kind == 'say' and not (b.show or '').strip())
+        window._show_index(idx)
+        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
+                            lambda cur: 'ling happy')
+        window._panel._grid._on_add()
+        card = window._panel._grid._cards[-1]
+        assert card.item['image'] == 'ling happy'
+
+        card._expr_btn.click()                    # 换一个表情
+        image = card.item['image']
+        assert card.item['expression'], '点了表情 chip 却没换到候选'
+        assert image != 'ling happy', \
+            '换了表情，卡片上的图像名却没跟着改（标题会显示旧的）'
+        # 卡片标题 = 图像名（用户看到的就是它），而且它**等于**会写进脚本的
+        assert card._name.text() == image, (
+            f'标题 {card._name.text()!r} 与图像名 {image!r} 不一致')
+        assert cards_to_show([card.item], window._session.symbols) == image, \
+            '卡片上显示的和会写进脚本的不是同一个图像名'
+
+    def test_the_kind_field_follows_the_speaker(self, window, project):
+        """
+        填了说话人 → 高级区那一格「类型」立刻显示 `say`（用户 2026-10-05 报的）。
+
+        只改数据层还不够：控件里若还是载入时的 `narration`，用户看到的仍然是
+        "说话人没生效" —— 而那是他**唯一**能判断"这句算台词还是旁白"的地方。
+
+        形状：一句**有台词的旁白**（Type=narration、说话人空），用户把说话人填上。
+        """
+        window.open_project_path(project)
+        idx = next(i for i, b in enumerate(window._session.beats)
+                   if (b.text or '').strip())
+        window._show_index(idx)
+        window._panel._toggle_adv()               # 高级区：类型那一格才写回
+        # 造出用户的起始状态：类型 narration、说话人空
+        window._panel._set_value('Kind', 'narration')
+        window._panel._set_value('Speaker', '')
+        window.save_current_beat()
+        assert window._session.beats[idx].kind == 'narration'
+
+        # 用户填上说话人 → 类型必须跟着变（数据 + 控件 + 基线）
+        window._panel._set_value('Speaker', 'e')
+        window.save_current_beat()
+
+        assert window._session.beats[idx].kind == 'say'
+        assert window._panel._get_value('Kind') == 'say', (
+            '数据层变了、控件还写着旧值 —— 用户会以为说话人没生效')
+        # 同步基线：类型是**跟着说话人**变的，不该因此显示"未保存"
+        assert not window._panel.is_modified(), \
+            f'类型同步把表单标成了未保存：{window._panel.collect_all_fields()}'

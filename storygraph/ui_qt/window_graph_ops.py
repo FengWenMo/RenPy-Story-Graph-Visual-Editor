@@ -25,6 +25,7 @@ storygraph.ui_qt.window_graph_ops.py
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -224,7 +225,24 @@ class GraphOpsMixin:
                 self.engine.project_root = self._project_root
             except Exception:                 # noqa: BLE001
                 swallow('main_window.open_project_path')
+        # **先把"正在读资源表"画出来再干活**（用户 2026-10-05："给程序干未响应了"）。
+        #
+        # 读表 + 扫盘 + 对账是**同步**跑的（真实项目优化后 ~1.8 秒，优化前 20 秒
+        # 以上）；不先让事件循环跑一圈的话，窗口在这一段里就是"未响应"的样子。
+        # 这里只做两件便宜的事：写状态栏 + `processEvents()` 让系统把窗口重绘。
+        try:
+            self._status(f'正在读资源表：{self._project_root} …')
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except Exception as e:                  # noqa: BLE001 - 画不出来也不该挡打开
+            swallow('main_window.open_project_path.status', e)
+        _t0 = time.perf_counter()
         res = self._session.load_assets()
+        _dt = time.perf_counter() - _t0
+        if _dt >= 0.5:                          # 慢就把耗时说出来（可诊断）
+            self._log(f'[资源] 读取 + 对齐资源表用了 {_dt:.1f} 秒'
+                      f'（扫描一次目录 + 读表 + 对账）')
         try:
             self._panel.set_symbols(self._session.symbols)
             self._refresh_asset_choices()
@@ -237,19 +255,201 @@ class GraphOpsMixin:
             self._status(msg)
             return res
         c = res['counts']
+        # **"没有表 → 我当场给你建了一张"必须说出来**（用户 2026-10-05 实测报：
+        # 复制出来的项目里 `game/asset_tables/` 是空目录，从前只报一句
+        # "读不到资源表（xlsx）"，用户不知道该怎么办）。建表是**写用户的项目**，
+        # 所以路径也要给出来 —— 他随时能去改。
+        if res.get('repaired') or res.get('repair_error'):
+            # **表在、但读不出来** → 已挪到一边 + 重建。用户 2026-10-05 实测报的
+            # "读不到资源表…自动新建也失败了：未知原因" 就是这一支：
+            # 真相是文件被 Excel 锁着/写坏了，而旧代码只说"找不到 + 未知原因"。
+            self._log(
+                f'[资源] ⚠ 资源表读不出来（{res.get("repair_error") or "未知原因"}）'
+                f'→ 已把坏文件**改名留档**：{"、".join(res["repaired"])}'
+                f'\n        （没删！想救回去就把它改名回 `images.xlsx`；'
+                f'也可以从 `*.bak.xlsx` 恢复）'
+                f'；并按项目内容重建了一张表。')
+        if res.get('created'):
+            cc = res.get('created_counts') or {}
+            self._log(
+                f'[项目] 没找到资源表 → 已按项目内容**新建**：'
+                f'图片 {cc.get("images", 0)} · 音乐 {cc.get("music", 0)} · '
+                f'音效 {cc.get("sounds", 0)} · 语音 {cc.get("voices", 0)}\n'
+                f'        写入：{res["created"]}'
+                f'（角色 / 变换来自脚本声明，改完表用「重读资源表」）')
+        elif res.get('synced') or res.get('removed'):
+            # **表已存在 → 自动对齐**（用户 2026-10-05 的目标：
+            # "若表已经存在，自动更新表中的资源，确保表与资源自动一一对应"、
+            # 以及后来补的那半句"我认为表应当实时反应实际资源的情况，
+            # 自动更新和增删！"）
+            bits = []
+            if res.get('synced'):
+                kinds = ' · '.join(f'{k} {v}'
+                                   for k, v in (res.get('synced_by_kind') or {})
+                                   .items() if v)
+                bits.append(f'补登 {res["synced"]} 条（{kinds}）')
+            if res.get('removed'):
+                kinds = ' · '.join(f'{k} {v}'
+                                   for k, v in (res.get('removed_by_kind') or {})
+                                   .items() if v)
+                bits.append(f'**自动删除 {res["removed"]} 条**'
+                            f'（文件已经不在：{kinds}）')
+            if res.get('relinked'):
+                kinds = ' · '.join(f'{k} {v}'
+                                   for k, v in (res.get('relinked_by_kind')
+                                                or {}).items() if v)
+                bits.append(f'**改指 {res["relinked"]} 条**'
+                            f'（原来指向另一份副本，现在指向本项目：{kinds}）')
+            if res.get('deduped'):
+                kinds = ' · '.join(f'{k} {v}'
+                                   for k, v in (res.get('deduped_by_kind')
+                                                or {}).items() if v)
+                bits.append(f'合并重复行 {res["deduped"]} 条（{kinds}）')
+            self._log(
+                f'[资源] 已按项目实际情况更新资源表：' + '；'.join(bits)
+                + (f'；写前备份 {res["sync_backup"]}'
+                   if res.get('sync_backup') else '')
+                + f'\n        表：{self._project_root}/game/asset_tables/'
+                  f'（表跟资源**一一对应**：盘上有的补进来、文件没了的删掉；'
+                  f'想留一行"还没出图"的资源就在它的 Notes 里写「占位」）')
+        # **删不掉的**（最典型：表正开在 Excel 里被锁着）才会留在这儿，
+        # 那时才需要说"已标为不可用"。用户 2026-10-05：
+        # > 如果不可用直接删了就行！
+        bad = res.get('unusable') or {}
+        if bad:
+            detail = ' · '.join(f'{k} {v}' for k, v in bad.items() if v)
+            self._log(
+                f'[资源] ⚠ 有 {sum(bad.values())} 条指向的文件**已经不在**、'
+                f'但**没能从表里删掉**（{detail}）—— 多半是这张表正开在 Excel 里'
+                f'（锁住了）。\n'
+                f'        在那之前它们被临时标为**不可用**（不进候选、解析不到）；'
+                f'关掉 Excel 再打开一次项目就会删掉。'
+                f'要留着当占位：在那一行 `Notes` 里写「占位」。')
         # 旧版的这一行原样搬回来（用户 2026-10-03："导入的时候没有反馈"）：
         # 图片/音乐/音效/语音/变换/角色的数量要看得见。
+        #
+        # ⚠ **数字的来源要说清**（2026-10-05 用户实测报："为何两个克隆出来的
+        # 项目并不一样？每次导入的时候你的表是不是没更新？？？"）：
+        # 这一行读的是**资源表**（用户可编辑的数据，工具从不自动改写），
+        # 而"没找到表 → 新建"那一次读的是**刚扫出来的磁盘内容**。
+        # 不说来源，用户就只能对着两个不同的数字猜。
+        src = ('刚按项目内容新建' if res.get('created') else '来自资源表')
         self._log(
             f'[项目] 已加载 {self._project_root.name}：'
             f'图片 {c["images"]} · 音乐 {c["music"]} · 音效 {c["sounds"]} · '
             f'语音 {c["voices"]} · 变换 {c["transforms"]} · 角色 {c["characters"]}'
-            f'（只影响资源表，剧情图不受影响）')
+            f'（数字{src}；只影响资源表，剧情图不受影响）')
+        self._report_asset_drift()
         self._status(
-            f'✔ 已打开项目 {self._project_root.name}（资源表）—— '
-            f'图片 {c["images"]} · 音乐 {c["music"]} · 音效 {c["sounds"]} · '
-            f'语音 {c["voices"]} · 角色 {c["characters"]}；'
-            f'剧情图**不受影响**，要加章节请用「➕ 导入章节 .rpy」')
+            (f'✔ 已打开项目 {self._project_root.name}'
+             + ('（资源表是**刚新建**的）' if res.get('created') else '')
+             + f' —— 图片 {c["images"]} · 音乐 {c["music"]} · '
+               f'音效 {c["sounds"]} · 语音 {c["voices"]} · '
+               f'角色 {c["characters"]}；'
+               f'剧情图**不受影响**，要加章节请用「➕ 导入章节 .rpy」'))
         return res
+
+    def check_asset_health(self):
+        """
+        「📦 资源体检」：查一遍**资源完整性**并出示报告（用户 2026-10-05）。
+
+        > 在「变量分析」右边加一个检查资源完整性的功能，后出示检查报告
+
+        报告本身复用变量分析那个只读对话框（可过滤、可复制）。
+        """
+        from storygraph.app.asset_report import format_asset_health
+        from storygraph.ui_qt.dialogs import AnalysisDialog
+        try:
+            report = self._session.asset_health_report()
+        except Exception as e:                    # noqa: BLE001 - 体检失败别崩
+            swallow('ui_qt.window_graph_ops.check_asset_health', e)
+            report = {'ok': False, 'error': str(e), 'problems': 0}
+        text = format_asset_health(report)
+        head = text.splitlines()[0] if text else ''
+        self._log(f'[资源] {head}')
+        try:
+            dlg = AnalysisDialog(self, title='资源体检报告', text=text)
+            dlg.exec()
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.window_graph_ops.check_asset_health.dialog', e)
+            self._status(head)
+        return report
+
+    def _report_asset_drift(self):
+        """
+        打开项目时对一次账：**表里没有、磁盘上却有**的资源要说出来。
+
+        用户 2026-10-05：
+
+        > 你确定这对吗？为何两个克隆出来的项目并不一样？
+        > 每次导入的时候你的表是不是没更新？？？
+
+        表的策略是"**用户的数据，工具不自动改写**"，所以漂移是正常的 ——
+        不正常的是**漂移看不见**：下拉候选少几条、缩略图缺几张，用户只会
+        以为工具坏了。这里把差值写进控制台并给出补救动作（就是既有的
+        「补登缺失资源」，写前自动备份）。
+        """
+        reg = self._session.assets_registry()
+        if reg is None or not self._project_root:
+            return
+        try:
+            # ⚠ **复用打开时已经算过的那次对账**（`load_assets` 里做的）。
+            #
+            # 这里从前自己又调一次 `compare_registry_to_disk(..., 没有 walk)` ——
+            # 用户 2026-10-05 报"给程序干未响应了"：`load_assets` 那次已经走索引
+            # （~0.4 秒），这次却按**老路**逐行 `resolve_thumb_source` +
+            # `Path.resolve()`，真实项目实测 **12 秒**，等于把优化全白做。
+            diff = {}
+            try:
+                diff = self._session.last_reconcile() or {}
+            except Exception as e:                # noqa: BLE001
+                swallow('ui_qt.window_graph_ops._report_asset_drift.cached', e)
+            if not diff:
+                from storygraph.assets.asset_registry import (
+                    FileWalkIndex, compare_registry_to_disk)
+                diff = compare_registry_to_disk(
+                    self._project_root, reg,
+                    walk=FileWalkIndex(self._project_root))
+        except Exception as e:                    # noqa: BLE001 - 对账失败不该挡打开
+            swallow('ui_qt.window_graph_ops._report_asset_drift', e)
+            return
+        unreg = diff.get('unregistered') or {}
+        total = sum(len(v) for v in unreg.values())
+        stale = int(diff.get('stale_paths') or 0)
+        outside = diff.get('outside_game') or {}
+        n_out = int(outside.get('count') or 0)
+        if not total and not stale and not n_out:
+            return
+        if n_out:
+            # **这条最容易被误读**（用户 2026-10-05："为何两个克隆出来的项目
+            # 并不一样？"）：表里的行指到本项目 `game/` 外面 —— 实测原项目
+            # 有 1386 行落在 `sr_general/**`，那是**另一份嵌套副本**。
+            # 不是"文件丢了"，而是"表引用的是别的目录"，必须分开说。
+            tops = '、'.join(f'{k}/ {v} 行'
+                             for k, v in sorted((outside.get('by_top') or {})
+                                                .items(),
+                                                key=lambda kv: -kv[1])[:3])
+            self._log(
+                f'[资源] ⚠ 表里有 {n_out} 行指向本项目 `game/` **之外**'
+                f'（{tops}）—— 那多半是**另一份副本**，或者 `tmp/` 这类'
+                f'临时目录（现在扫描时已经不看这些目录了）。\n'
+                f'        这些行不会自动清（删行属于你的数据）——要收拾就'
+                f'手动删掉它们，或改用**当前项目里**的那一份资源。')
+        bits = []
+        for key in ('images', 'music', 'sounds', 'voices'):
+            n = len(unreg.get(key) or [])
+            if n:
+                bits.append(f'{key} {n}')
+        if total:
+            sample = next((p for v in unreg.values() if v for p in v), '')
+            self._log(
+                f'[资源] ⚠ 资源表与项目内容不一致：磁盘上还有 {total} 个没登记'
+                f'（{" · ".join(bits)}）'
+                + (f'\n        例：{sample}' if sample else '')
+                + ' —— 用工具里的「补登缺失资源」补齐（写前自动备份 *.bak.xlsx）')
+        if stale:
+            self._log(f'[资源] ⚠ 表里有 {stale} 条指向的文件已经不在磁盘上了'
+                      f'（不影响的先放着，删行请手动改表）')
     def rescan_project(self):
         """
         重读资源表（xlsx 改过之后用）。**剧情图的节点与连线一律不动** ——

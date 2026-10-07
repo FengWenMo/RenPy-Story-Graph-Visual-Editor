@@ -54,19 +54,19 @@ def _stage_order(beat) -> list:
 
     没有 StageOrder（老表/手工新增行）时退化成 scene→show→hide，
     与 render_beat_to_rpy 的兜底一致。
+
+    ⚠ **2026-10-05 改用 `Beat.stage_verbs`**（用户实测报："我已经保存该卡片了，
+    可是当前舞台变化没有生效"）：从前这里只回放 `stage_order` / `op_order`
+    里**列出来的** verb，而卡片加一张立绘只写 `beat.show` —— `stage_order`
+    还停在 `'scene'`（解析时那一拍只有 `scene black`）→ 快照与预览都看不到
+    这个人，**而产物里其实有 `show`**（渲染器会补齐）。
+
+        "当前舞台：立绘（台上没人）"  ← 与产物、与卡片都不一致
+
+    现在与渲染器共用同一条规矩（见 `Beat.stage_verbs`）：结构化列里有的
+    verb 一定出现，顺序仍按记录的真迹排。
     """
-    order = [t.strip().lower() for t in (beat.stage_order or '').split(',')
-             if t.strip()]
-    if order:
-        return order
-    fallback = []
-    if beat.scene:
-        fallback.append('scene')
-    if beat.show:
-        fallback.append('show')
-    if beat.hide:
-        fallback.append('hide')
-    return fallback
+    return list(beat.stage_verbs)
 
 
 def _apply_show(actors: list, image: str, at: str, scene: str = ''):

@@ -1,8 +1,11 @@
-# dialogue_importer.gd —— 读 STORY_IR.json（由编辑器导出）
-# 用法：把本文件与 STORY_IR.json 放进项目，附到一个 Node 上即可。
+# dialogue_importer.gd —— 读 GodotDialogueData.json（由编辑器导出）
+# 用法：把本文件与 GodotDialogueData.json 放进项目，附到一个 Node 上即可。
+#
+# 同目录下还有一份 `story_ir.json`（引擎中立 IR）：字段更全（含 stage 快照、
+# 资源清单、DSL 原文），需要自定义解析时用它。本加载器读的是**扁平适配版**。
 extends Node
 
-const IR_PATH := "res://STORY_IR.json"
+const IR_PATH := "res://GodotDialogueData.json"
 
 var lines_by_id: Dictionary = {}
 var labels: Dictionary = {}
@@ -10,7 +13,7 @@ var characters: Dictionary = {}
 
 func _ready() -> void:
     var f := FileAccess.open(IR_PATH, FileAccess.READ)
-    assert(f != null, "找不到 STORY_IR.json")
+    assert(f != null, "找不到 GodotDialogueData.json")
     var data: Dictionary = JSON.parse_string(f.get_as_text())
     for c in data.get("characters", []):
         characters[c["id"]] = c

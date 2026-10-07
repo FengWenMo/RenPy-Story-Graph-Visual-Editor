@@ -19,6 +19,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from storygraph.core.statement import MARKER
+#: 「每参数一列」的列名判定（`语句名·参数名` / `语句名·参数名@位置号`）。
+#: 唯一真源在 `story/spec_args.py`（零项目内依赖），这里只 import 一个纯函数。
+from storygraph.story.spec_args import is_dynamic_column
 
 
 
@@ -75,6 +78,48 @@ BEAT_FIELDS = [
     # `Inline`：**行尾注释**（C）。它与 `Nest` 不同 —— 那是结构位，这是
     # 词法细节；两者都"工具维护 + 整列隐藏"。
     'Inline',
+    # `Opaque` = **工具不认识的块语句，原样透传**（M1，2026-10-07）。
+    #
+    # 为什么单独一列、而不是塞进「代码」列：`CodeBlock` 的渲染会**推断**
+    # （认不出就补 `$`，整块还可能被包成 `python:`）。对一段工具看不懂的
+    # 自定义块，任何推断都是**改剧情**：
+    #
+    #     mycue "闪电" intensity=3:
+    #         target = ling            ← 补 `$` 就变成 `$ target = ling`
+    #
+    # `Opaque` 这一列的契约只有一句：**逐字写回，一个字都不动**。
+    # 它整列隐藏 —— 它是"我们管不了"的记录，不是给策划填的字段。
+    'Opaque',
+    # `SpecName` = 这一拍那条自定义语句**被谁声明过**（M3，2026-10-07）。
+    #
+    # 它把 `Opaque` 从"工具不认识"升级成"工具知道你是谁"：
+    #   · 空   → 真·未声明（报告里要催）；
+    #   · 有值 → 项目用 `storygraph.rules.json` 或 `renpy.register_statement`
+    #            声明过 → **T1**，工具按通用行处理，不再报"不认识"。
+    # 随表走是为了让"声明过没有"这件事**在往返之后依然成立**。
+    'SpecName',
+    # `SpecHead` = 那条自定义语句的**头行原文**（M4，2026-10-07）。
+    #
+    # 为什么单独一列（而不是让策划去改 `Opaque` 里的一大段）：这是 T1a/T1b
+    # 的**参数编辑面** —— 头行装着"这条语句在干什么"（`mycue "闪电"
+    # intensity=3:`），块体才是"细节"。分开之后：
+    #   · 头行一格可改（编剧真能用）；
+    #   · 块体格仍是逐字原文（撞不到）；
+    #   · **没改时逐字节不变**（渲染层比对，见 `beat_render.emit_opaque`）。
+    'SpecHead',
+    # `LoopHeader` = 循环块（`while` / `for`）的**头行**（D2，2026-10-07）。
+    #
+    # 与 `SpecHead` 同款：头行可编辑可校验，块体逐字躺在 `Opaque` 里。
+    # 有了它，`while` / `for` 就从"工具认识形状但没建模"（T2）升到
+    # **T0b**（内置 IR + 块体逐字）—— 见 `core.capability`。
+    'LoopHeader',
+    # `CameraHeader` = 3D 舞台 `camera` 块的**头行**（2026-10-07）。
+    #
+    # 与 `LoopHeader` 同款：头行（`camera background:`）可编辑可校验，
+    # 块体（ATL 属性）逐字躺在 `Opaque` 里。有了它，`camera` 就从
+    # "工具认识形状但没建模"（T2，报告里进"催我们建模"那一桶）升到
+    # **T0b** —— 与 `while` / `for` 同一档、同一套约定。
+    'CameraHeader',
 ]
 
 
@@ -82,7 +127,8 @@ BEAT_FIELDS = [
 #: 隐藏（hidden=True）在 Excel/WPS 里都是"列被收起"而不是"没有这一列"，
 #: 数据照旧读写，所以往返不会丢——这是选隐藏列而非"不写这一列"的原因。
 HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest',
-                       'Inline')
+                       'Inline', 'Opaque', 'SpecName', 'SpecHead',
+                       'LoopHeader', 'CameraHeader')
 
 
 # 写进 Excel 的表头（中文）。策划只看中文；程序侧键名仍是英文，
@@ -102,6 +148,11 @@ BEAT_HEADERS = {
     'CodeBlocks': '代码块结构（内部）',
     'Nest': '结构位（内部）',
     'Inline': '行尾注释（内部）',
+    'Opaque': '原样块（内部）',
+    'SpecName': '声明来源（内部）',
+    'SpecHead': '自定义语句·头行（高级）',
+    'LoopHeader': '循环头行（内部）',
+    'CameraHeader': '相机头行（内部）',
 }
 
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
@@ -140,6 +191,7 @@ SINGLE_LINE_BEAT_FIELDS = (
     'Scene', 'Show', 'At', 'With', 'Hide',
     'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
     'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline',
+    'SpecName', 'SpecHead', 'LoopHeader', 'CameraHeader',
 )
 
 #: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。
@@ -175,7 +227,18 @@ def sanitize_single_line_cell(field: str, value) -> str:
     return text
 
 
-def _flatten_single_line_cells(values: list) -> list:
+def _row_fields(spec_fields=None) -> list:
+    """
+    `to_row` 的列契约 = 基础列 + 「每参数一列」的动态列（**唯一一处拼法**）。
+
+    写表的一侧（`excel_export` 的表头）必须用同一个函数取列，
+    否则表头行与数据行的列数会对不上 —— 那是"最后几列悄悄全空"
+    那一类静默缺陷（`_flatten_single_line_cells` 的长度断言会先吼）。
+    """
+    return list(BEAT_FIELDS) + [str(f) for f in (spec_fields or ())]
+
+
+def _flatten_single_line_cells(values: list, fields=None) -> list:
     """
     `to_row` 的收尾：单行列按 `sanitize_single_line_cell` 清洗，
     **与 `from_row` 对称**。
@@ -189,16 +252,24 @@ def _flatten_single_line_cells(values: list) -> list:
         `IllegalCharacterError` —— 不压平的话，一个来自畸形来源的值
         会让"导出 Excel"整个崩掉，而错误信息完全指不到是哪一格。
 
-    行必须与 `BEAT_FIELDS` 一一对应：长度对不上说明有人加了列没同步
-    `to_row` —— 那时候**报错**比静默截断好（截断会让最后几列悄悄全空）。
+    行必须与 `fields`（默认 `BEAT_FIELDS`）一一对应：长度对不上说明有人
+    加了列没同步 `to_row` —— 那时候**报错**比静默截断好（截断会让最后
+    几列悄悄全空）。
+
+    `fields` 是「**每参数一列**」（M4 第二阶段）加进来的：动态列名形如
+    `mycue·intensity`，不属于 `BEAT_FIELDS`，但**同样是单行列**（它们会被
+    折进语句头行那一行里）—— 所以判据是"在 `SINGLE_LINE_BEAT_FIELDS` 里
+    **或**根本不是基础列"。
     """
-    if len(values) != len(BEAT_FIELDS):
+    fields = list(BEAT_FIELDS if fields is None else fields)
+    if len(values) != len(fields):
         raise ValueError(
-            f'to_row 写出的格子数（{len(values)}）与 BEAT_FIELDS'
-            f'（{len(BEAT_FIELDS)}）对不上 —— 加列/删列时两处要一起改')
+            f'to_row 写出的格子数（{len(values)}）与列契约'
+            f'（{len(fields)}）对不上 —— 加列/删列时两处要一起改')
     return [sanitize_single_line_cell(f, v)
-            if (f in SINGLE_LINE_BEAT_FIELDS and isinstance(v, str)) else v
-            for f, v in zip(BEAT_FIELDS, values)]
+            if ((f in SINGLE_LINE_BEAT_FIELDS or f not in BEAT_FIELDS)
+                and isinstance(v, str)) else v
+            for f, v in zip(fields, values)]
 
 
 # 需要下拉框的列 -> 资产类型。
@@ -384,6 +455,30 @@ class Beat:
     #: 全被压到同一层（`mini_game1.rpy` 实测一个块拆出 53 条）。
     #: 兜底：这一列为空（老表 / 手工新建行）时，渲染层退回"按缩进推断"。
     code_blocks: list = field(default_factory=list)
+    #: **工具不认识的块语句**的整块原文（头行 + 块体，相对缩进保留）。
+    #:
+    #: 与 `raw` / `code` 分开存是刻意的：那两条通道的渲染会**推断**
+    #: （补 `$` / 包 `python:`），而对一段工具看不懂的自定义块，任何
+    #: 推断都是改剧情。这一列的渲染契约只有一句：**逐字写回**。
+    #:
+    #: 见 `beat_build._emit_raw` 的 `unknown_block` 分支与
+    #: `beat_render.render_beat_to_rpy` 的 `emit_opaque`。
+    opaque: str = ''
+    #: 这一拍的 `opaque` 是**被谁声明过**的自定义语句（M3）：
+    #: `''` = 真·未声明（T3，报告要催）；`'mycue'` = 声明过（T1，按通用行处理）。
+    #: 见 `story.statement_registry`。
+    spec_name: str = ''
+    #: 那条自定义语句的**头行原文**（M4）。它是 T1 的**参数编辑面**：
+    #: 策划改这一格就是改语句的参数；块体在 `opaque` 里逐字不动。
+    #: 渲染时**只有它真的变了**才替换首行（见 `beat_render.emit_opaque`），
+    #: 所以"没改 → 逐字节不变"是结构上成立的，不靠自觉。
+    spec_head: str = ''
+    #: 循环块（`while` / `for`）的**头行原文**（D2）。
+    #: 与 `spec_head` 同一套渲染约定：改了才替换、没改就逐字回原文。
+    loop_header: str = ''
+    #: 3D 舞台 `camera` 块的**头行原文**（2026-10-07）。
+    #: 与 `loop_header` 同款（并列，不混用一个字段）—— 见 `CameraHeader` 列。
+    camera_header: str = ''
     #: 读表时**被清洗过**的列名（`sanitize_single_line_cell` 真的改了值）。
     #:
     #: 为什么要记下来（2026-10-05，评审意见）：清洗本身是**静默改数据** ——
@@ -441,7 +536,71 @@ class Beat:
     # 下划线形态 `ling_base_arms_akimbo_close_happy`——那是把能跑的脚本改坏。
     _from_script: bool = False
 
-    def to_row(self, symbols=None) -> list:
+    def _head_field(self) -> str:
+        """
+        这一拍的**语句头原文放在哪个字段**（渲染层那套优先级，唯一一处）。
+
+        与 `beat_render.emit_opaque` 的取值顺序必须**完全一致**：
+        `spec_head`（项目声明的自定义语句）→ `loop_header`（`while`/`for`）
+        → `camera_header`（3D 舞台 `camera`）。不一致就会出现"参数列读的是
+        这个头、渲染用的是那个头"—— 改了没效果，而且看不出来。
+        """
+        for attr in ('spec_head', 'loop_header', 'camera_header'):
+            if str(getattr(self, attr, '') or '').strip():
+                return attr
+        return 'spec_head'
+
+    def statement_head(self) -> str:
+        """这一拍的语句头原文（没有头行 → 整块原文的首行，再没有就是空串）。"""
+        attr = self._head_field()
+        text = str(getattr(self, attr, '') or '')
+        if text.strip():
+            return text
+        return next((ln for ln in str(self.opaque or '').split('\n')
+                     if ln.strip()), '')
+
+    def spec_arg_cells(self, columns) -> list:
+        """
+        「每参数一列」的格子值（`columns` = 动态列名，或
+        `statement_registry.dynamic_spec_columns` 给的列描述）。
+
+        **值从头行解出来**（`spec_head` / `loop_header` / `camera_header` 优先，
+        其次 `opaque` 第一行）—— 单真源始终是头行，这里只是把它**摊成列**
+        给人改、给下拉用。认不出的列名 / 头行里没有的参数 → 空格子（**不猜**）。
+
+        位置参数（`camera·layer@0`）按**列名里的下标**取（`@0` = 第 0 个位置
+        参数），与 `key=value` 分开 —— 两套混在一起就会把 `camera background`
+        读成"有个名叫 background 的参数"。
+        """
+        from storygraph.story.spec_args import (parse_dynamic_full,
+                                                positional_values,
+                                                spec_arg_values)
+        base = self.statement_head()
+        vals = spec_arg_values(base)
+        pos = positional_values(base)
+        out = []
+        for col in columns or ():
+            header = col if isinstance(col, str) else str(col.get('header') or '')
+            _head, param, positional = parse_dynamic_full(header)
+            if not param:
+                out.append('')
+                continue
+            if positional is None and not isinstance(col, str):
+                # 列描述里带了位置号（`dynamic_spec_columns` 的产物）→ 以它为准
+                try:
+                    positional = (int(col['positional'])
+                                   if col.get('positional') is not None
+                                   else None)
+                except (TypeError, ValueError):
+                    positional = None
+            if positional is not None:
+                out.append(pos[positional]
+                           if 0 <= positional < len(pos) else '')
+            else:
+                out.append(vals.get(param, ''))
+        return out
+
+    def to_row(self, symbols=None, spec_fields=None) -> list:
         """
         写进 Excel 的一行。
 
@@ -449,6 +608,10 @@ class Beat:
         字段**合成** DSL 文本；给了符号表就尽量合成人话（`[显示] 凌跃捷
         开心 左`），合不成就保留原生写法（`show ling close_happy`）。
         两者都能被编译器原样吃回去，不会丢信息。
+
+        `spec_fields` 非空时把「每参数一列」的格子**追加在末尾**（M4 第二
+        阶段）。默认 `None` = 只有基础列 —— 老调用方（单测里满地的
+        `dict(zip(BEAT_FIELDS, beat.to_row()))`、协作库、UI）一个都不用改。
         """
         stage = self.stage or compose_stage_extra(self, symbols)
         # 音频列：文本列（beat.bgm / beat.sfx）是真相源，有就优先写它；
@@ -496,7 +659,19 @@ class Beat:
             # 两者必须能分开，否则对拍会把"不知道"当成"在顶层"。
             ('-' if self.nest_path == '' else (self.nest_path or '')),
             compose_inline_cell(self),
-        ])
+            # **整块原文**（工具不认识的块语句）。逐字进出，不做任何
+            # 归一化：它是"我们管不了、但绝不弄丢"的那一类。
+            self.opaque,
+            # 声明来源（M3）：空 = 未声明（T3），有值 = 已声明（T1）。
+            self.spec_name,
+            # 头行原文（M4）：T1 的参数编辑面。
+            self.spec_head,
+            # 循环头行（D2）：`while` / `for` 的参数编辑面。
+            self.loop_header,
+            # 相机头行（3D 舞台）：`camera [层名]:` 的参数编辑面。
+            self.camera_header,
+        ] + self.spec_arg_cells(spec_fields or ()),
+            fields=_row_fields(spec_fields))
 
     @classmethod
     def from_row(cls, row: dict) -> 'Beat':
@@ -582,6 +757,18 @@ class Beat:
         # 记进 ordered——否则 `$ f()` 与 `show screen`/`pause` 交替的演出
         # 会被排成"先全部 show/pause 再全部 $ f()"，导出的代码和源脚本不一样。
         beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
+        # 工具不认识的块语句：**整块原文**，走 `g_text`（不 strip）——
+        # 块体的相对缩进是它的**结构性内容**，压掉就重建不出块。
+        # 它刻意不在 `SINGLE_LINE_BEAT_FIELDS` 里（换行是内容）。
+        beat.opaque = g_text('Opaque')
+        # 声明来源（M3）：单行 token，走会清洗留痕的 `g`。
+        beat.spec_name = g('SpecName')
+        # 头行原文（M4）：单行列（一格一行可改）→ 也走会留痕的 `g`。
+        beat.spec_head = g('SpecHead')
+        # 循环头行（D2）：同上（单行列）。
+        beat.loop_header = g('LoopHeader')
+        # 相机头行（3D 舞台）：同上（单行列）。
+        beat.camera_header = g('CameraHeader')
         # 结构位（块路径）：`-` = 顶层（**有信息**）；空 = **不知道**
         # （老表 / 手工加的行）。两者必须分得开 —— 否则对拍会把"不知道"
         # 当成"在顶层"，凡是老表都天天假报。
@@ -675,6 +862,45 @@ class Beat:
         beat.bgm = compose_audio_text(beat, 'music')
         beat.sfx = compose_audio_text(beat, 'sound')
 
+        # —— 「每参数一列」：把**改了的那一格**折回头行（M4 第二阶段）——
+        #
+        # 动态列名形如 `mycue·intensity`（`key=value` 参数）或
+        # `camera·layer@0`（**位置**参数，下标进列名）。它们是
+        # **编辑面不是第二份数据**：折进头行之后，渲染 / 校验 / 协作 / 卡片
+        # 四条路都不需要知道"参数列"存在过 —— 它们看到的只是"头行变了"。
+        #
+        # 折到**哪一个字段**由 `_head_field()` 决定（与渲染层的优先级同源）：
+        # 循环头归 `loop_header`、相机头归 `camera_header`、声明的自定义语句归
+        # `spec_head` —— 折错字段就是"改了没效果"，而且看不出来。
+        #
+        # ⚠ 折进时用的是 `fold_dynamic_columns` 的**等式守卫**：值没变 → 头行
+        # 逐字节原样（"打开表再导出一个字节都不动"照旧成立）；`target="ling"`
+        # 这种带引号的原文也不会被吃掉引号；位置参数只替换那一个 token
+        # （绝不写成语义错的 `layer=background`）。
+        #
+        # ⚠ 动态格子也过 `sanitize_single_line_cell` 并**留痕**：它们最终会
+        # 被拼进一行语句，真换行漏出去就是产物里的物理换行。
+        from storygraph.story.spec_args import fold_dynamic_columns
+        dyn: dict = {}
+        for key, val in (row or {}).items():
+            if not is_dynamic_column(key):
+                continue
+            raw = '' if val is None else str(val)
+            clean = sanitize_single_line_cell(str(key), raw).strip()
+            if clean != raw.strip():
+                sanitized.append(str(key))
+            dyn[str(key)] = clean
+        if dyn:
+            target = beat._head_field()
+            base_head = str(getattr(beat, target, '') or '')
+            if not base_head:
+                base_head = next(
+                    (ln for ln in str(beat.opaque or '').split('\n')
+                     if ln.strip()), '')
+            folded = fold_dynamic_columns(base_head, dyn)
+            if folded != base_head:
+                setattr(beat, target, folded)
+
         # 记下"哪些格被清洗过"（见 `Beat.sanitized_cells`）：**清洗必须留痕**，
         # 否则就是静默改数据 —— 值里的换行被压掉，人却不知道。
         #
@@ -754,6 +980,70 @@ class Beat:
         for v in stage_seq[used:]:
             out.append(v)
         return out
+
+    @property
+    def stage_verbs(self) -> list:
+        """
+        这一拍的舞台 verb 顺序（`scene` / `show` / `hide`）——**缺的补齐**。
+
+        规矩与渲染器**同一条**（`beat_render.render_beat_to_rpy` 里那句
+        "绝不因为顺序信息不全就丢掉操作"），但从前只有渲染器照做，舞台快照
+        与演出预览只回放"列出来的" verb —— 于是同一次保存出现两种真相：
+
+            卡片上：立绘 ling angry（用户刚加上的）
+            当前舞台：立绘（台上没人）      ← 快照没看到 show
+            演出预览：台上没人              ← 同上
+            产物：`show ling angry at center` ← 渲染器补齐了，其实是对的
+
+        用户 2026-10-05 实测报的"我已经保存该卡片了，可是当前舞台变化没有生效，
+        并且舞台演出预览没有变化"就是它。触发条件很常见：卡片加/删立绘只改
+        `beat.show`，而 `stage_order` / `op_order` 还停在 `'scene'`
+        （解析时那一拍只有 `scene black`）。
+
+        "看到的 ≠ 生成的"是这一层最贵的一类缺陷（见 `compose_stage` 的契约），
+        所以判据只写一处，两个消费者共用。
+        """
+        recorded = [t for t in self.order_tokens
+                    if t in ('scene', 'show', 'hide')]
+        for verb in ('scene', 'show', 'hide'):
+            if verb not in recorded and str(getattr(self, verb, '') or '').strip():
+                recorded.append(verb)
+        return recorded
+
+    def merged_stage_order(self) -> str:
+        """
+        `stage_order` 的**归一化**形式：把 `stage_verbs` 里缺的 verb 补上
+        （**只算、不写回**）。
+
+        与 `sync_stage_order` 分开是为了让"归一化"能出现在**不改数据**的地方
+        （例如快照/指纹：对齐顺序列不算用户改动，见
+        `session_table.snapshot`）。
+        """
+        merged = [v.strip() for v in (self.stage_order or '').split(',')
+                  if v.strip()]
+        for verb in self.stage_verbs:
+            if verb not in merged:
+                merged.append(verb)
+        return ','.join(merged)
+
+    def sync_stage_order(self) -> str:
+        """
+        把 `stage_verbs` 写回 `StageOrder` 列（**只追加，绝不覆盖已有顺序**）。
+
+        为什么要写回（而不是只靠读的时候补齐）：`StageOrder` 是**随表走**的
+        列 —— 表里那个值如果永远少一个 `show`，下一次从表回来的人（或别的
+        消费者）看到的还是"这一拍没有立绘"。已有顺序是解析时的真迹
+        （`scene` 在 `Scene` 列，`Stage` 列推导不出来），所以只补不覆盖
+        ——与 `beat_build._hydrate_stage` 同一条规矩。
+        """
+        merged = [v.strip() for v in (self.stage_order or '').split(',')
+                  if v.strip()]
+        for verb in self.stage_verbs:
+            if verb not in merged:
+                merged.append(verb)
+        if merged:
+            self.stage_order = ','.join(merged)
+        return self.stage_order
 
     def is_empty(self) -> bool:
         """这一行没有任何内容（用户留空的行不该生成代码）。

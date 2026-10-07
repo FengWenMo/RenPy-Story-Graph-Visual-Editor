@@ -32,7 +32,9 @@ from pathlib import Path
 
 #: 转发（唯一实现在 story.excel_export；"Excel 导出"与"界面预览"
 #: 必须用同一套路径解析，否则同一张图两边找到的不是同一个文件）。
-from storygraph.story.excel_export import resolve_thumb_source, thumb_cache_dir  # noqa: F401
+from storygraph.story.excel_export import (resolve_thumb_source,  # noqa: F401
+                                           thumb_cache_dir,
+                                           thumb_cache_file)
 
 
 def cache_key(path, max_size, stamp=None) -> str:
@@ -120,13 +122,10 @@ def decode_sync(path, max_size, project_root=None):
     try:
         st = real.stat()
         key = cache_key(real, max_size, (int(st.st_mtime), st.st_size))
-        cdir = thumb_cache_dir()
-        if cdir is not None:
-            digest = hashlib.md5(key.encode('utf-8', 'replace')).hexdigest()
-            cache_file = cdir / (digest + '.png')
-            if cache_file.is_file():
-                with Image.open(cache_file) as cached:
-                    return cached.convert('RGBA').copy()
+        cache_file = thumb_cache_file(key, thumb_cache_dir())
+        if cache_file is not None and cache_file.is_file():
+            with Image.open(cache_file) as cached:
+                return cached.convert('RGBA').copy()
     except OSError:
         cache_file = None
 
@@ -142,6 +141,7 @@ def decode_sync(path, max_size, project_root=None):
             out = _downscale(im, max_size)
         if cache_file is not None:
             try:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
                 out.save(cache_file, 'PNG')
             except OSError as e:
                 swallow('thumbs.decode_sync', e)

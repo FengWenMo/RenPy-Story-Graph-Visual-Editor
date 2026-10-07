@@ -119,11 +119,26 @@ class StatementKind:
     # （`with dissolve` / `pause 1.0` / `window hide` / `call screen` …）。
     # 原样保存、原样回写——这是"容忍输入的编译器"不丢信息的关键。
     RAW = 'raw'
+    # 循环块：`while <条件>:` / `for <目标> in <可迭代>:`（D2，2026-10-07）。
+    #
+    # ⚠ 它是**部分建模**：头行结构化（`header`，可编辑、可校验），
+    # **块体逐字**（`body`）。要真正结构化循环体，得把扁平拍模型改成
+    # 带作用域的形式 —— 那是 `menu` 那次的规模。所以它的能力等级是
+    # `T0b`（内置 IR + 块体逐字），**不是 T0** —— 不许拿"接住了"
+    # 冒充"完全理解了"（见 `core.capability`）。
+    LOOP = 'loop'
+    # 3D 舞台的 `camera` 块（2026-10-07）：与 LOOP 同一档 —— **头行结构化
+    # （层名）+ 块体逐字（ATL 属性）**，所以能力等级是 `T0b` 而不是 `T0`。
+    #
+    # 为什么单独一个 kind 而不是复用 LOOP：语义不同（一个重复执行、一个改
+    # 相机），校验与 UI 提示要能分开说；而"渲染时没改就吐原文"那一套照旧
+    # 共用（`payload['text']` 就是对照物）。
+    CAMERA = 'camera'
     UNKNOWN = 'unknown'
 
     ALL = (SAY, EXTEND, SHOW, SCENE, HIDE, PLAY, VOICE,
            MENU, MENU_OPTION, JUMP, CALL, RETURN, PYTHON,
-           COMMENT, RAW, UNKNOWN)
+           COMMENT, RAW, LOOP, CAMERA, UNKNOWN)
 
 
 #: `content_hash` 的**十六进制位数**（唯一真源，见 `_compute_content_hash`）。
@@ -193,6 +208,11 @@ _HASH_FIELDS = {
     StatementKind.PYTHON:      (None, None),
     StatementKind.COMMENT:     (None, None),
     StatementKind.RAW:         (None, None),
+    # 循环的内容指纹由 `text`（整块原文）决定，但不进哈希结构：
+    # `header` / `body` 是 `text` 的**投影**，重复计入只会放大噪声。
+    StatementKind.LOOP:        (None, None),
+    # `camera` 同理（同一套：整块原文是真相，投影不进指纹）。
+    StatementKind.CAMERA:      (None, None),
 }
 
 
@@ -226,6 +246,8 @@ _FACTORY_FIELDS = {
     StatementKind.PYTHON:      ('code',),
     StatementKind.COMMENT:     ('text',),
     StatementKind.RAW:         ('text', 'raw_kind'),
+    StatementKind.LOOP:        ('text', 'header', 'walked'),
+    StatementKind.CAMERA:      ('text', 'header', 'layer', 'body'),
 }
 
 
@@ -586,6 +608,63 @@ class Statement:
         )
 
 
+    @classmethod
+    def make_loop(cls, header, text='', walked: bool = True,
+                  condition='', source=('', 0)):
+        """
+        循环块（`while` / `for`）—— **头行 + 块体**（D2 起，2026-10-07 升 T0）。
+
+        `header` = 头行原文（`while n < 3:`，可编辑、可校验）；
+        `text`   = 语句头 token 的投影（默认与 `header` 同值）；
+        `walked` = 块体是否**已经作为独立语句进了语句流**（作用域）。
+
+        为什么 `walked` 是一位显式标志，而不是"看块体空不空"：
+
+          · `walked=True`（**现在**的解析路径）：块体是 `_parse_block` 正常
+            解析出来的语句，各自带 `nest_path='…>loop:n'` 进流
+            （**可以像台词一样逐句编辑** = T0）；
+          · `walked=False`（**兼容路**：手工构造 / 老形态）：块体只有整块原文，
+            由调用方放进 `text`、渲染时逐字吐回去（= T0b）。
+            "空块体"（`while x: pass` 里 `pass` 也是一条语句）与"没走结构化"
+            是两件事，用长度判会混。
+
+        ⚠ 结构化那条路上**没有第二份块体副本**：内容只活在块体拍里。
+        留一份"逐字 body"当兜底看起来更保险，实际是**第二套真相** ——
+        渲染时要选一个，选错就是同一段剧情出去两遍或一遍都不出去。
+        """
+        return cls(
+            kind=StatementKind.LOOP,
+            payload={'text': text or header, 'header': header,
+                     'walked': bool(walked)},
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+    @classmethod
+    def make_camera(cls, text, header='', layer='', body=None, condition='',
+                    source=('', 0)):
+        """
+        3D 舞台的 `camera` 块（2026-10-07）—— **头行结构化 + 块体逐字**。
+
+        `text`   = 整块原文（逐字，渲染时**它就是真相**）；
+        `header` = 头行（`camera background:`，可编辑、可校验）；
+        `layer`  = 层名（空 = `master`，与 Ren'Py 默认一致）；
+        `body`   = 块体各行（逐字，相对缩进）。
+
+        与 `make_loop` 同一套约定（`text` 是"没改就直接吐原文"的对照物），
+        理由见 `StatementKind.CAMERA` 与 `CameraNode` 的 docstring。
+        """
+        return cls(
+            kind=StatementKind.CAMERA,
+            payload={'text': text, 'header': header, 'layer': layer,
+                     'body': list(body or ())},
+            condition=condition,
+            source=source,
+            content_hash='',
+        )
+
+
 def validate_statement(stmt: Statement) -> list:
     """
     校验 Statement 的 payload 是否完整。返回问题列表（字符串）。
@@ -615,6 +694,11 @@ def validate_statement(stmt: Statement) -> list:
         StatementKind.PYTHON:      ('code',),
         StatementKind.COMMENT:     ('text',),
         StatementKind.RAW:         ('text',),
+        # 循环体允许为空（`while x: pass` 之类的空块），所以只要求头行。
+        StatementKind.LOOP:        ('text', 'header'),
+        # `camera` 同理：头行是硬要求，块体可以为空（Ren'Py 里其实不允许，
+        # 但那是**校验**该报的事，不该在这里抛）。
+        StatementKind.CAMERA:      ('text', 'header'),
         StatementKind.UNKNOWN:     (),
     }
     for f in required.get(stmt.kind, ()):

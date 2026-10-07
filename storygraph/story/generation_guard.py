@@ -132,6 +132,38 @@ def would_destroy_opaque(target, source_path=None) -> bool:
     return _looks_handwritten(t)
 
 
+def merging_onto(out_path, source_path) -> bool:
+    """
+    这次增量合并的**底稿**，就是马上要写的那个文件吗？
+
+    这是"手写护栏要不要让路"的**唯一判据**（2026-10-05 实测修，见
+    `write_generation`）。为什么必须是"底稿 == 目标"而不是笼统的
+    "这次走了增量"：
+
+      · 底稿 == 目标（用户改自己这一章、原地写回）→ 合并出来的全文
+        **包含目标文件的全部内容**（改过的那几行除外）→ 覆盖它
+        **一个字节的非本拍内容都不会丢** → 放行是对的；
+      · 底稿 != 目标（编辑 ch01、把产物写到别人的手写 ch02 上）→
+        产物里有 ch01 的全部内容，**却没有 ch02 的**
+        `default` / `init python` → 覆盖会把 ch02 的定义全抹掉 →
+        **必须照旧拦下**。
+
+    第一版把这条判据交给调用方口头声明（`merged_from_source=True`），
+    于是"说走了增量"就能越过护栏 —— 上面第二种情况会被静默放行。
+    现在改成报**底稿路径**，由这里自己比，调用方无从搞错。
+
+    比对用 `Path` 相等（与 `would_destroy_opaque` 同一口径）：
+    两边都由调用方从同一来源取路径，不做 resolve —— 免得符号链接 /
+    大小写归一化把"同一个文件"判成两个。
+    """
+    if not source_path or not out_path:
+        return False
+    try:
+        return Path(source_path) == Path(out_path)
+    except TypeError:
+        return False
+
+
 def ensure_generator_marker(text: str) -> str:
     """
     保证产物首行是 `GENERATOR_MARKER`；已经有了就**一个字不动**。
@@ -729,7 +761,9 @@ def _image_refs(text: str) -> list:
 
 def generation_guard(text: str, out_path, *,
                      project_root=None,
-                     occupied_labels: set = None) -> list:
+                     occupied_labels: set = None,
+                     beats: list = None,
+                     unmanaged_blocks: list = None) -> list:
     """
     生成安全检查。**纯函数、不写盘、无 UI 依赖**，所以能被无头测试直接调用。
 
@@ -744,6 +778,15 @@ def generation_guard(text: str, out_path, *,
       · `UNRESOLVED_TODO`（warn）—— 生成结果里有 `# TODO: 缺少资源 …`。
         这条本身是设计内的兜底（编译不因缺资源而失败），
         它提醒的是"这份脚本还不完整，别当成成品发出去"。
+      · `UNMANAGED_BLOCK`（warn）—— 产物里有**工具不认识的块语句**
+        （项目自定义的块）。它们的**内容已经逐字保真**（M1：见
+        `Beat.opaque`），但工具**不管辖**它们：不校验、不渲染、不编辑。
+        这条存在的意义就是"**不许静默**"—— 以前这类块会连头带块体
+        从模型里消失，只留一条没人看的解析 warning，而门禁**无从得知**
+        它存在过（内容没进任何通道）。现在它必须**说出口**。
+
+    判断"有没有未建模块"要看 `beats`（产物文本里认不出来）：给了就报，
+    没给就退回"不检查"——宁可少报，也不要凭空猜出一堆假警报。
     """
     issues = []
     out_path = Path(out_path) if out_path else None
@@ -810,6 +853,43 @@ def generation_guard(text: str, out_path, *,
             f'{"…" if len(todo_lines) > 8 else ""} 行）：'
             f'这些语句没有被生成，脚本还不完整。'))
 
+    # —— 3b. 工具不认识的块语句（M1，2026-10-07）——
+    #
+    # **这条是"不许静默"的落地**：内容已经被 `Beat.opaque` 逐字保住了，
+    # 所以它不再是一条"丢内容"的告警，而是一条"这几行不归我管"的告知。
+    # 它是 warn 而不是 block：工具不认识 != 脚本坏了 —— 拦下导出只会
+    # 把用户赶回"工具没用"那一步（D1 的选择是"透传 + 报警 + 报告"）。
+    # **三种"原样透传"必须分开说**，因为它们指向完全不同的动作：
+    #   · declared  → 项目声明过（T1）：**工具知道你是谁**，按通用行处理，
+    #                 这条不报警（它已经被管理了）；
+    #   · custom    → 真没声明（T3）：催用户/程序写下来；
+    #   · standard  → `while`/`for` 这类标准流程块（T2）：工具认识形状，
+    #                 该催的是**我们**把它建模。
+    # 混成一句"工具不认识"会把人引向错误的修法（真机实测逼出来的）。
+    # `declared` 这一桶**刻意不报警**（T1 已经被管理了）；它在这里只是
+    # 用来把"声明过的"从 custom 里摘出去，所以取出来不用。
+    _declared, custom, standard = block_buckets(beats, unmanaged_blocks)
+    if custom:
+        shown = custom[:5]
+        more = f'（另 {len(custom) - 5} 处）' if len(custom) > 5 else ''
+        issues.append(GuardIssue(
+            'UNMANAGED_BLOCK', 'warn',
+            f'有 {len(custom)} 处**自定义块语句**，工具完全不懂它：'
+            f'{"；".join(shown)}{more}。'
+            f'内容已经原样保住、不会丢，但工具不会替你校验或重排它们 —— '
+            f'改到附近时请对着原文核对。'
+            f'想让它被管理：在项目里写 storygraph.rules.json，'
+            f'或让程序用 renpy.register_statement 声明它的形状。'))
+    if standard:
+        shown = standard[:5]
+        more = f'（另 {len(standard) - 5} 处）' if len(standard) > 5 else ''
+        issues.append(GuardIssue(
+            'KNOWN_UNMODELED_BLOCK', 'warn',
+            f'有 {len(standard)} 处**标准流程块**（{ "；".join(shown) }{more}）'
+            f'工具认识它的形状，但还没有把它结构化建模 —— '
+            f'它们原样透传、内容不会丢。这一条是**给我们**的待办，'
+            f'不是要你去改脚本。'))
+
     # —— 4. 产物位置：落在 Ren'Py 扫描目录里要提醒 ——
     # 只在"项目里真有 game/ 且产物确实写进它"时报：其余情况（临时目录、
     # 单测的 tmp_path、非 Ren'Py 项目）一律不报，否则会变成噪音。
@@ -868,14 +948,87 @@ def planned_output_path(table_path, script_path=None, project_root=None) -> Path
 
 
 
+def unmanaged_block_heads(beats, blocks) -> list:
+    """
+    「工具不认识的块语句」→ 头行清单（报告用，**每一项就是一处**）。
+
+    两个入口，因为调用方的信息形态不同：
+
+      · 有 `beats` 的（UI / CLI 生成）：从 `Beat.opaque` 取整块原文，
+        每张拍算一处，取它的第一行当标题；
+      · 只有文本的（`app.tables.apply_export` 拿不到 beat 对象，
+        只有 `export_table` 传下来的一份结论）：直接用现成的清单。
+
+    `blocks` 显式给了就**以它为准**（它是上游算好的、口径可追溯的那一份）。
+    """
+    if blocks is not None:
+        return [str(h) for h in blocks if str(h or '').strip()]
+    out = []
+    for b in (beats or ()):
+        text = str(getattr(b, 'opaque', '') or '')
+        if not text.strip():
+            continue
+        first = next((ln.strip() for ln in text.split('\n') if ln.strip()), '')
+        out.append(first or '(未命名的自定义块)')
+    return out
+
+
+def block_buckets(beats, blocks=None) -> tuple:
+    """
+    「原样透传的语句」分三桶：`(declared, custom, standard)`。
+
+    · `declared` —— 项目声明过的（`Beat.spec_name` 非空）→ **T1，不报警**；
+    · `standard` —— `while` / `for` 这类 Ren'Py 标准流程块（T2）；
+    · `custom`   —— 剩下的，工具真不懂（T3）。
+
+    只有 `beats` 才能给出"声明过没有"（那是逐拍的事实）；调用方只交了
+    一份头清单（`app.tables.apply_export` 那条路）时，`declared` 只能是空
+    —— 那时宁可把它算成 custom（**少报"已管理"，不假装已管理**）。
+    """
+    from storygraph.core.vocabulary import is_known_flow_block
+    if beats is None and blocks is None:
+        return [], [], []
+    if beats is None:
+        heads = [str(h) for h in blocks if str(h or '').strip()]
+        return [], [h for h in heads if not is_known_flow_block(h)], \
+            [h for h in heads if is_known_flow_block(h)]
+    declared, custom, standard = [], [], []
+    for b in beats:
+        text = str(getattr(b, 'opaque', '') or '')
+        if not text.strip():
+            continue
+        # 循环块（D2）与相机块（3D 舞台）已经**内置建模**（T0b：头行结构化、
+        # 块体逐字）—— 它们不再是"工具不管辖"，所以不进任何一桶。
+        # ⚠ 这个判据必须**跟着新建模的块类型一起加**：漏一处，报告就会一直
+        # 催我们去做一件已经做完的事（`while` 那次就是靠这条才闭嘴的）。
+        if (str(getattr(b, 'loop_header', '') or '')
+                or str(getattr(b, 'camera_header', '') or '')):
+            continue
+        head = next((ln.strip() for ln in text.split('\n') if ln.strip()), '')
+        name = str(getattr(b, 'spec_name', '') or '')
+        if name:
+            if name not in declared:
+                declared.append(name)
+        elif is_known_flow_block(head):
+            standard.append(head or '(未命名)')
+        else:
+            custom.append(head or '(未命名的自定义块)')
+    return declared, custom, standard
+
+
 def evaluate_generation(text: str, out_path, *, project_root=None,
-                        occupied: set = None) -> list:
+                        occupied: set = None, beats: list = None,
+                        unmanaged_blocks: list = None) -> list:
     """跑一遍生成门禁，返回问题清单。**纯函数、不写盘。**
 
     给"先看结果、问过用户再写"的调用方用（UI 的确认框就该是这个顺序）。
+
+    `beats` 给了才能报 `UNMANAGED_BLOCK`（工具不认识的块）——
+    那条判据只看产物文本认不出来，见 `generation_guard` 的说明。
     """
     return generation_guard(text, Path(out_path), project_root=project_root,
-                            occupied_labels=occupied)
+                            occupied_labels=occupied, beats=beats,
+                            unmanaged_blocks=unmanaged_blocks)
 
 
 
@@ -902,8 +1055,9 @@ def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
 
 def write_generation(text: str, out_path, *, review_on_block: bool = True,
                      project_root=None, occupied=None, force: bool = False,
-                     merged_from_source: bool = False, source_text=None,
-                     source_path=None):
+                     merged_from_source=None, source_text=None,
+                     source_path=None, beats=None,
+                     unmanaged_blocks=None):
     """
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
@@ -933,16 +1087,21 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
       · 目标不存在 → 正常写（**新建文件是全量的正当用途**）；
       · `force=True` → 明确知道自己在做什么，放行（逃生舱 / CLI `--force`）。
 
-    `merged_from_source=True`（2026-10-05 拓展边界②）：**这份文本是在源
-    .rpy 上增量合并出来的**，它包含源文件的全部内容（含第三类）。此时那条
-    "目标已存在且无标记 → 拒写"的护栏必须**让路** —— 否则"用 CLI 增量修
-    一章已有剧情"永远会被自家护栏拦下，而这恰恰是**唯一安全**的改法：
+    `merged_from_source`（2026-10-05 拓展边界②）：**这份文本是在哪个 .rpy 上
+    增量合并出来的**（底稿路径；没走增量就给 `None`）。底稿**就是**
+    `out_path` 本身时，那条"目标已存在且无标记 → 拒写"的护栏必须**让路** ——
+    否则"改一句台词、原地写回自己这一章"永远会被自家护栏拦下，而这恰恰是
+    **唯一安全**的改法：
 
         全量重生成 → 丢掉 default / init python（危险，必须拦）
         增量合并   → 原文逐字节保留，只换改过的那几行（安全，必须放行）
 
-    判据交给调用方（`pipeline.compile.merge_incrementally`）是因为**只有它
-    知道这份文本是怎么来的**；门禁自己看不出"全量"和"增量"的区别。
+    ⚠ **判据是"底稿 == 目标"，不是"这次走了增量"**（2026-10-05 实测修）：
+    编辑 ch01、把产物写到别人的手写 ch02 上时，产物里没有 ch02 的任何内容
+    —— 那种情况照旧拦（见 `merging_onto`）。所以这里收的是**路径**而不是
+    一个布尔：让调用方声明"我走了增量"就等于给它一把万能钥匙，而
+    `EditorSession.export` / `cli table xlsx2rpy` 两条路都会经过这里。
+
     越过的**只有**这一条：`PYTHON_SYNTAX_ERROR` / `CJK_IN_IMAGE_TAG` /
     `LABEL_COLLISION` 等"产物自己坏了"的门禁**一条都不越**。
 
@@ -963,7 +1122,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     """
     out_path = Path(out_path)
     root = project_root or _guess_project_root(out_path)
-    if not force and not merged_from_source and _looks_handwritten(out_path):
+    merged_onto_target = merging_onto(out_path, merged_from_source)
+    if not force and not merged_onto_target and _looks_handwritten(out_path):
         reason = ('目标已存在且不是工具生成的（没有生成标记），'
                   '拒绝覆盖手写 .rpy')
         blocking = [_make_blocking_issue(out_path, reason)]
@@ -984,7 +1144,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         # 根本不被扫描，与原文同名无害（见 labels_in_danger）。
         occupied = labels_in_danger(out_path, root, exclude={out_path})
     issues = generation_guard(text, out_path, project_root=root,
-                              occupied_labels=occupied)
+                              occupied_labels=occupied, beats=beats,
+                              unmanaged_blocks=unmanaged_blocks)
     if source_text is not None:
         lost = opaque_loss(source_text, text)
         if lost:
@@ -1068,7 +1229,7 @@ def write_beats_to_rpy(beats: list, output_path,
     # label 重名**只在产物会被 Ren'Py 扫描时**才算致命（见 labels_in_danger）。
     occupied = labels_in_danger(output_path, root, exclude={output_path})
     issues = generation_guard(text, output_path, project_root=root,
-                              occupied_labels=occupied)
+                              occupied_labels=occupied, beats=beats)
     blocking = [i for i in issues if i.is_blocking]
     if blocking:
         raise GenerationBlocked(output_path, blocking)

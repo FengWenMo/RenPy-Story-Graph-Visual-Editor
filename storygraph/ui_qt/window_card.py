@@ -258,16 +258,7 @@ class CardPageMixin:
                                 self._session.cards(idx))
         self._panel.set_speakers(self._session.characters(),
                                  self._session.beats[idx].speaker or '')
-        # 「有台词却没有说话人」→ 导出后会变成旁白，在这里就说清楚。
-        # 文案由 `app.beats.speaker_missing_warning` 算（前端只负责显示）。
-        from storygraph.app import beats as _beats
-        self._panel.set_note(
-            _beats.speaker_missing_warning(self._session.beats[idx]))
-        # 当前舞台（这一拍生效的状态）+ 继承上一拍的提示。
-        # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
-        self._panel.set_stage_digest(self._session.stage_digest_text(idx),
-                                     self._session.inherited_hint(idx))
-
+        self.refresh_derived_panels(idx)
         self._list.blockSignals(True)
         self._list.setCurrentRow(idx)
         self._list.blockSignals(False)
@@ -277,6 +268,41 @@ class CardPageMixin:
         self._sync_structural_buttons()
         # 相邻几拍的立绘先解进缓存（翻卡片不空等；见 `_prefetch_neighbours`）
         self._prefetch_neighbours(idx)
+
+    def refresh_derived_panels(self, idx: int = None):
+        """
+        重算这一拍的**只读派生面板**：警告条 / 当前舞台 / 继承提示。
+
+        为什么不只靠 `_show_index`（2026-10-05 用户实测报）：
+
+        > 我已经保存该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化
+
+        "当前舞台"是**载入那一刻**算好写上去的（`set_stage_digest`）。用户
+        加了一张立绘、按了 💾 —— 内存里的拍已经变了，可那一块还是载入时的
+        旧文案：「立绘：（台上没人）」。于是他合理地认为"保存没生效"，
+        而去点演出预览也一样（那个窗口读的是刚打开时的帧……见 `open_preview`）。
+
+        这些标签都是**只读**的（不碰输入控件），所以保存/提交之后重算一次
+        是安全的，不会把用户正在编辑的内容冲掉。
+        """
+        if idx is None:
+            idx = self._loaded_idx
+        if not self._session.has(idx):
+            return
+        from storygraph.app import beats as _beats
+        beat = self._session.beats[idx]
+        try:
+            # 「有台词却没有说话人」→ 导出后会变成旁白，在这里就说清楚。
+            # 说话人**没登记**时同理要说（否则导出会丢掉它，用户以为工具坏了）。
+            # 文案由 `app.beats.speaker_missing_warning` 算（前端只负责显示）。
+            self._panel.set_note(
+                _beats.speaker_missing_warning(beat, self._session.symbols))
+            # 当前舞台（这一拍生效的状态）+ 继承上一拍的提示。
+            # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
+            self._panel.set_stage_digest(self._session.stage_digest_text(idx),
+                                         self._session.inherited_hint(idx))
+        except Exception as e:                # noqa: BLE001 - 派生面板刷不动不该拦住保存
+            swallow('ui_qt.window_card.refresh_derived_panels', e)
     def _prefetch_neighbours(self, idx: int):
         """
         预取**相邻几拍**的立绘缩略图（用户 2026-10-05："卡牌界面图片加载慢"）。
@@ -306,13 +332,31 @@ class CardPageMixin:
         """表单 → 当前拍（语义在 `EditorSession.apply`，这里只递数据）。"""
         if not self._session.has(self._loaded_idx):
             return None
-        return self._session.apply(
+        beat = self._session.apply(
             self._loaded_idx,
             self._panel.collect_fields(),
             self._panel.sprite_cards(),
             advanced_open=self._panel.is_advanced_open(),
             # 载入时那一格的原文：会话靠它判断"用户手改了 Stage 没有"
             stage_loaded=self._panel.stage_loaded())
+        self._sync_kind_field(beat)
+        return beat
+
+    def _sync_kind_field(self, beat):
+        """
+        把归一化后的「类型」推回面板（说话人一改，那一格立刻跟着变）。
+
+        用户 2026-10-05："明明卡牌编辑器内我已经编写了说话人，kind 仍然
+        显示 narrator"。数据层已经会重算（`app.beats.kind_from_speaker`），
+        但控件里还是载入时的旧值 —— 那一格在骗人，而它恰好是用户唯一能
+        看到"这句算台词还是旁白"的地方。
+        """
+        if beat is None:
+            return
+        try:
+            self._panel.set_kind(getattr(beat, 'kind', ''))
+        except Exception as e:                  # noqa: BLE001 - 界面同步失败不该拦住导出
+            swallow('ui_qt.window_card._sync_kind_field', e)
     def save_current_beat(self):
         """
         **保存这张卡片的修改**（卡片上的 💾 按钮 / Ctrl+S / 工具栏同名按钮）。
@@ -333,8 +377,12 @@ class CardPageMixin:
 
         # 保存成功 = 表单内容成为新基线；列表那一行也要跟着变，
         # 否则左边还挂着旧台词，看起来像"没保存上"。
+        self._sync_kind_field(res['beat'])
         self._panel.reset_baseline()
         self.refresh_list_row(idx)
+        # 只读派生面板也要跟着变（当前舞台 / 继承提示 / 警告条）——
+        # 用户 2026-10-05："我已经保存该卡片了，可是当前舞台变化没有生效"。
+        self.refresh_derived_panels(idx)
         self._sync_undo_button()
         self._status_bar.set_dirty(True, self._file_path)
 

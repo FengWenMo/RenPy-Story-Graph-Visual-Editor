@@ -23,6 +23,8 @@ tests/test_incremental_export.py
 """
 
 import re
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -622,6 +624,61 @@ class TestMenuRowsAndTheirNotes:
         diff = [i for i, (x, y) in enumerate(zip(before, after)) if x != y]
         assert len(diff) == 1, [(i, after[i]) for i in diff]
 
+    def test_a_bare_menu_head_is_identity_enough(self, write_rpy):
+        """
+        **裸 `menu:`（无标题）那一拍的"身份"是那一行 `menu:`，不是占位符。**
+
+        2026-10-05 实测（`tools/hell_edit_rounds.py` 轴 B 第 1 轮，把
+        `force=True` 去掉之后才浮出来）：`Beat.text` 在无标题菜单上是
+        `MENU_NO_CAPTION`（`\\x00menu`），而对位守卫拿 `text` 去原文里找身份
+        —— 原文写的是 `menu:`，永远找不到。7 拍的章节因此恒定少认一拍
+        → 对位率 86% < 90% → 整份补丁作废 → **只改一张卡的立绘也导不进去**
+        （用户那个"只能全量导出"的另一半就是它）。
+
+        ⚠ 夹具必须是**注释对齐**的那种形状（`menu:` 后面一长串空格才到 `#`）：
+        我第一版用了 `menu:  # 备注`（只隔两个空格）—— 那样"旁白形状相似度"
+        那条兜底判据会歪打正着地救回来（相似度 1.0），**bug 不现形**。
+        真实文件里的行尾注释几乎都是对齐的，这个"不干净"才是常态。
+        """
+        from storygraph.story.beat_model import MENU_NO_CAPTION
+        from storygraph.story.patcher import _range_looks_like
+
+        #: 与 `hell_edit_rounds.py` 的 `EDIT_SRC` 同形（7 拍：1 菜单 + 2 选项
+        #: + 3 台词 + 1 立绘所在的那一拍）
+        ALIGNED_MENU = ('label a:\n'
+                        '    e "开场"                    # 备注：开场\n'
+                        '    menu:                       # 备注：菜单\n'
+                        '        "去左边":               # 备注：左选项\n'
+                        '            show ling happy at left\n'
+                        '            e "左边"            # 备注：左台词\n'
+                        '        "去右边":               # 备注：右选项\n'
+                        '            if flag:            # 备注：条件\n'
+                        '                e "右边"        # 备注：右台词\n'
+                        '    e "收尾"                    # 备注：收尾\n')
+
+        fp, beats = _beats_of(write_rpy, ALIGNED_MENU)
+        menu = next(b for b in beats if b.kind == 'menu')
+        assert menu.text == MENU_NO_CAPTION, menu.text
+
+        # ① 判据层：原文段里有 `menu` 就该认（对齐的注释也救不了它 → 修前红）
+        old = '    menu:                       # 备注：菜单'
+        assert _range_looks_like([old], menu, ['menu:  # 备注：菜单'],
+                                 exact_lines=[old])
+        # ② 错位的区间照样拦住（别把这一拍的守卫整条关掉）
+        assert not _range_looks_like(['    e "别处的台词"'], menu,
+                                     ['menu:  # 备注：菜单'])
+
+        # ③ 端到端：只改一拍的立绘 → 7 拍里不许有"错位"，整份补丁必须成立
+        def edit(bs):
+            for b in bs:
+                if (b.show or '').strip():
+                    b.show = 'ling angry at center'
+        _fp, res = self._patch(write_rpy, ALIGNED_MENU, edit)
+        assert res.stale_beats == 0, f'裸 menu: 那一拍又被判错位了：{res}'
+        assert res.coverage == 1.0, res.coverage
+        assert res.ok, res.reasons
+        assert 'show ling angry at center' in res.text, res.text
+
     def test_a_say_line_with_a_note_is_not_duplicated(self, write_rpy):
         """带行尾注释的台词行：改正文要**替换**那一行，不是插一行新的。"""
         def edit(beats):
@@ -635,10 +692,166 @@ class TestMenuRowsAndTheirNotes:
         assert res.text.count('选一') == 1, res.text
 
 
+class TestStructureFillerBeats:
+    """
+    **结构补空拍不许拖垮整份补丁**（用户 2026-10-05 实测报）。
+
+    用户报："明明已经添加了立绘，导出后对应的 show 却没有出现"。
+    最小复现是一张**空 label**：
+
+        label ch01_end:
+            return
+
+    解析器会给它补一张**什么都没有的拍**（结构补空拍）。它没有源行号
+    （`src_first == 0`），而"没有行号 = 编辑器里新插进来的卡片"这条判据
+    把它当成新卡片；它又渲染不出任何行 → `_insert_points_for` 判
+    "这张新卡片找不到插入位置" → **整份补丁作废**：
+
+        增量未采用：1 张新卡片找不到插入位置，无法安全地增量写入
+
+    于是"改一句话 / 加一张立绘"在任何带空 label 的章节里**永远导不进去**，
+    而那个文件里根本没有新卡片。（`tests/_ui_project.py` 的 `ch01` 就长这样：
+    13 拍、尾部 `label ch01_end: return` → 实测中招。）
+    """
+
+    #: 一张有内容的拍 + 一个空 label（补空拍）+ 终点 label
+    FILLER = ('label ch01:\n'
+              '    e "开场"  # 备注：开场\n'
+              '    return\n'
+              '\n'
+              'label ch01_end:\n'
+              '    return\n')
+
+    def test_a_filler_label_does_not_refuse_the_patch(self, write_rpy):
+        fp, beats = _beats_of(write_rpy, self.FILLER)
+        # 空 label 那一拍确实在，而且没有源行号
+        empty = [b for b in beats if not int(b.src_first or 0)]
+        assert empty, '前置条件：解析器应当为空 label 补一张空拍'
+
+        # 只改一句话（用户那条路）
+        for b in beats:
+            if b.text == '开场':
+                b.text = '开场改过了'
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.ok, f'带空 label 的章节导不出去：{res.reasons}'
+        assert res.inserted_beats == 0, '空拍不该被当成新卡片'
+        assert '开场改过了' in res.text, res.text
+
+    def test_the_new_show_still_lands(self, write_rpy):
+        """给已有的一拍**加一条 show**（用户那个动作）必须真的落进产物。"""
+        fp, beats = _beats_of(write_rpy, self.FILLER)
+        for b in beats:
+            if b.text == '开场':
+                b.show = 'mary smile'
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.ok, f'加了立绘却导不出去：{res.reasons}'
+        assert 'show mary smile' in res.text, res.text
+
+    def test_coverage_ignores_filler_beats(self, write_rpy):
+        """
+        对位率的**分母**也不许把空拍算进去 —— 否则章节里空 label 一多
+        （三张就把 13 拍压到 90% 门槛以下），"只改一句台词"会莫名其妙地
+        退回全量，而那与用户的改动毫无关系。
+        """
+        many = ('label a:\n    e "一"\n    return\n\n'
+                'label b:\n    return\n\nlabel c:\n    return\n\n'
+                'label d:\n    return\n\nlabel e:\n    return\n')
+        fp, beats = _beats_of(write_rpy, many)
+        for b in beats:
+            if b.text == '一':
+                b.text = '一改过了'
+        res = patch_export(beats, fp, render_beats_to_rpy(beats))
+        assert res.ok, f'空 label 一多就退回全量了：{res.reasons}'
+        assert res.coverage == 1.0, res.coverage
+
+
 class TestFailSafe:
     """
     **要么全对，要么完全不动**：任何可疑情况都必须退回全量，绝不写半对产物。
     """
+
+    def test_a_voice_line_is_not_a_dialogue_line(self):
+        """
+        `voice "v_ling_01"` **不是台词** —— 它有台词的长相，却是 Ren'Py 的关键字。
+
+        `_SAY_RE` 会把 `voice` 当说话人（`('say','voice')`）。从前无害
+        （说话人不同 → 配不上对），可一旦开了**句位配对**（`trust_ranges`：
+        说话人换了也要配），所有台词键都退化成 `('say','')` —— 音频行就和
+        真台词配了对，实测把
+
+            m "还行，就是雨下了一整晚。"
+
+        **整行换成了** `voice "v_ling_01"`：台词被吃掉，而且没人报错
+        （`_verify_patch` 只查"该有的在不在"，那条台词恰好被判成"原文里有"）。
+
+        判据是**动词优先**：`voice` 收进 `_VERB_RE`，`_line_key` / `_head_of`
+        都先认动词；另有 `_KEYWORD_SPEAKERS` 兜住其余关键字形状
+        （`extend "…"` / `menu "标题":`）—— 它们也不许被句位配对吞掉。
+
+        （变异：把 `voice` 从 `_VERB_RE` 去掉、或去掉关键字保护 → 本用例必红。）
+        """
+        from storygraph.story.patcher import _head_of, _line_key
+        # 生成器补引号、作者不写引号 —— 是**同一件事**
+        assert _line_key('voice "v_ling_01"') == \
+            _line_key('voice v_ling_01'), '同一条 voice 行两种写法身份不同'
+        assert _line_key('voice "v_ling_01"')[0] == 'voice'
+        assert _head_of('voice "v_ling_01"') == _head_of('voice v_ling_01')
+        # 句位配对也**不许**把它退化成台词键
+        assert _line_key('voice "v_ling_01"', ignore_speaker=True)[0] == 'voice'
+        # 关键字形状的"说话人位"（`extend`）同样不许被句位配对吞掉
+        assert _line_key('extend "续上一句"', ignore_speaker=True) == \
+            ('say', 'extend')
+        assert _line_key('m "台词"', ignore_speaker=True) == ('say', '')
+
+    def test_the_fixture_with_a_voice_line_keeps_its_dialogue(self, tmp_path):
+        """
+        端到端：真夹具里那一拍（`voice` + `show` + `play` + 台词同属一拍）
+        跑一遍可信补丁，台词必须**还在**、`voice` 也不许变成第二条。
+
+        （上一条钉判据，这一条钉症状 —— 两者都要，因为判据正确不等于
+        整条路正确：这一次就是"判据看着对、结果把台词顶掉了"。）
+        """
+        sys.path.insert(0, str(Path(__file__).parent))
+        from _ui_project import build_project
+        proj = build_project(tmp_path / 'proj')
+        src = proj / 'game' / 'script' / 'ch01.rpy'
+        beats = beats_from_parse_result(
+            ParseResultBuilder().build(RenPyParser().parse(src)))
+        res = patch_export(beats, src, render_beats_to_rpy(beats),
+                           trust_ranges=True)
+        assert res.ok, res.reasons
+        assert 'm "还行，就是雨下了一整晚。"' in res.text, (
+            '台词被顶掉了：\n' + res.text)
+        voice_lines = [ln for ln in res.text.splitlines()
+                       if ln.strip().startswith('voice ')]
+        assert len(voice_lines) == 1, (
+            f'voice 行变成了 {len(voice_lines)} 条（引号写法不同被当成两件事）：'
+            f'{voice_lines}')
+        assert voice_lines[0].strip() == 'voice v_ling_01', (
+            f'作者那行被改写成了 {voice_lines[0]!r}')
+
+    def test_a_trusted_range_that_cannot_pair_is_refused(self, write_rpy):
+        """
+        `trust_ranges=True`（行号已证明新鲜）**也**不许"报成功、内容没写"。
+
+        实测（`script_pomo.rpy`，真实项目）：菜单标题写在 `menu:` 的**下一行**
+        （Ren'Py 的合法写法），而拍的行号指向 `menu:` 那一行 —— 把标题改掉
+        是"换行"而不是"换词"，配对键不同 → `_replace_matched` 什么都不做。
+        不报出来就是静默 no-op：`hell_edit_rounds` 的真实项目轴当场抓到
+        "改的那句话没进产物"。
+        """
+        src = ('label a:\n'
+               '    menu:\n'
+               '        "是时候学习了."\n'
+               '        "开始":\n'
+               '            jump a\n')
+        fp, beats = _beats_of(write_rpy, src)
+        menu = next(b for b in beats if b.kind == 'menu')
+        menu.text = 'X改过的一句话X'
+        res = patch_export(beats, fp, render_beats_to_rpy(beats),
+                           trust_ranges=True)
+        assert not res.ok, f'配不上却报成功（静默 no-op）：{res}'
+        assert res.reasons, res
 
     def test_stale_ranges_never_change_the_file(self, write_rpy):
         """

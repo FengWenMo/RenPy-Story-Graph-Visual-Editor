@@ -37,6 +37,14 @@ BEAT_FIELDS = (
     'scene', 'show', 'hide', 'at', 'with_', 'music', 'sound', 'voice',
     'raw', 'code', 'stage', 'stage_order', 'op_order',
     'src_first', 'src_last', 'code_blocks',
+    # M1：工具不认识的块语句（整块原文，逐字进产物）
+    'opaque',
+    # M3：那条自定义语句被谁声明过（'' = 未声明）
+    'spec_name',
+    # M4：它的头行（T1 的参数编辑面）
+    'spec_head',
+    # D2：循环块的头行
+    'loop_header',
 )
 
 #: 真实项目里的"结构最复杂"的几段 —— 手写源码片段，**不依赖本机路径**，

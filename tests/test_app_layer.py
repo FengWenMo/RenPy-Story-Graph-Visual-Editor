@@ -115,7 +115,10 @@ class TestThumbs:
 
         first = thumbs.decode_sync(f, (60, 90), tmp_path)
         assert first is not None and first.size[0] <= 60
-        assert list(cache.glob('*.png')), '没有写磁盘缓存'
+        # ⚠ 缓存是**两级分片**的（`<ab>/<cd>/<digest>.png`，见
+        # `excel_export.thumb_cache_file`）：单目录堆到 14 万条之后
+        # 每次查找都在巨大索引里翻。所以这里必须 rglob。
+        assert list(cache.rglob('*.png')), '没有写磁盘缓存'
 
         calls = {'n': 0}
         real_open = pil.open

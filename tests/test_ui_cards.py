@@ -242,14 +242,17 @@ class TestSpriteRowsBarePosition:
 
     def test_bare_position_is_split_out(self):
         row = self._row('凌跃捷 开心 左')
+        # 2026-10-05 用户定调（"工具应是通用的"）：内置词表只是**输入别名**，
+        # 项目没声明过就显示真实名字 —— 这三条钉的是**拆词**语义
+        # （位置不能被当成表情），名字用真实值。
         assert row['expression'] == '开心', '裸词位置不能被当成表情'
         assert row['position'] == '左', '裸词位置必须被识别出来'
         assert row['image'] == '凌跃捷 开心', 'image 不该再含位置（chip 要分开显示）'
 
     def test_at_form_is_unchanged(self):
         row = self._row('ling happy@left')
-        assert row['expression'] == '开心'
-        assert row['position'] == '左'
+        assert row['expression'] == 'happy'
+        assert row['position'] == 'left'
 
     def test_non_position_tail_stays(self):
         """不是位置词的尾巴不能被当成位置削掉。"""

@@ -18,7 +18,8 @@ import ast
 import re
 from typing import Optional
 from storygraph.core.vocabulary import (GENERATOR_MARKER,
-                                        RENPY_BUILTIN_TRANSFORMS)
+                                        RENPY_BUILTIN_TRANSFORMS,
+                                        RENPY_STATEMENT_VERBS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
 from storygraph.core.nest_path import (body_chain, join_nest,
                                        option_index, option_key, split_nest)
@@ -202,14 +203,11 @@ def _looks_like_dialogue(line: str) -> bool:
 #:
 #: 只在**动词那一档**放宽，不做"整体像 Ren'Py 就透传"的猜测 ——
 #: 猜测那版（第一版）实测红了 13 个测试。
-_RENPY_STATEMENT_HEADS = frozenset({
-    '$', 'python', 'with', 'pause', 'jump', 'call', 'play', 'queue', 'stop',
-    'scene', 'show', 'hide', 'voice', 'window', 'menu', 'return', 'pass',
-    'init', 'label', 'define', 'default', 'transform', 'image', 'extend',
-    'screen', 'nvl', 'camera', 'style', 'layeredimage', 'translate',
-    'renpy.', 'persistent.', 'config.', 'gui.', 'store.',
-    'narrator', 'voice_sustain',
-})
+#: ⚠ **它是 `core.vocabulary.RENPY_STATEMENT_VERBS` 的别名**（M5 收敛）：
+#: 从前这一份在三个模块里各写一遍，口径不同还得记得同步。现在只有一份，
+#: 差异（"**刻意不含** `if/elif/else/while/for`"）写在 `core.vocabulary`
+#: 的说明里 —— 别在这里加 `while`，那会把 `python:` 块的条件行当语句透传。
+_RENPY_STATEMENT_HEADS = RENPY_STATEMENT_VERBS
 
 
 def _looks_like_renpy_statement(line: str) -> bool:
@@ -770,6 +768,48 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         for c in _render_code_block(compose_code(beat)):
             emit(c, '代码块', c)
 
+    # ---------------- 工具不认识的块语句（M1） ----------------
+    def emit_opaque():
+        """
+        `Beat.opaque` → 逐字写回，**一个字都不动**。
+
+        为什么不做任何推断（2026-10-07，M1）：
+
+          · 「代码」列那条路认不出语句就补 `$`（`render_code_block` 的
+            兜底），还会把整块缩进包成 `python:` —— 对一段工具**看不懂**
+            的自定义块，这两种推断都是在改剧情：
+            `target = ling` 变成 `$ target = ling`、「块体」变成「python 块」；
+          · 这里的契约只有一句：**原文什么样，产物什么样**。
+            块体的相对缩进是原文的真迹，外层缩进由
+            `render_beats_to_rpy` 统一加（`indent + ln`），所以这里只管吐。
+
+        空行**保留**（`_split_lines` 会吃掉它们，所以这里自己切）——
+        块体里的空行是作者排版的一部分。
+        """
+        text = str(getattr(beat, 'opaque', '') or '')
+        if not text.strip():
+            return
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        lines = text.split('\n')
+        # **头行可编辑**（M4，T1a/T1b 的参数编辑面）：
+        # `spec_head` 是头行的**原样拷贝**，所以"没改"时它与首行相同 ——
+        # 只有**真的不同**才替换。于是
+        #   没改 → 走原文（逐字节不变，与"精化/降级不改字节"一致）；
+        #   改了 → 生效（策划在这里改参数）。
+        # ⚠ 比对用 `strip()`：`spec_head` 是单行列，经过 `_one_line` 去过
+        # 首尾空白；直接比全文会把"首行末尾多几个空格"误判成"人改过了"，
+        # 于是第一次导出就悄悄改了别人的排版。
+        # 三个可能的编辑面（同一时刻只会有一个非空）：
+        # `spec_head`（项目声明的自定义语句）→ `loop_header`（`while`/`for`，D2）
+        # → `camera_header`（3D 舞台 `camera`，2026-10-07）。
+        head = (str(getattr(beat, 'spec_head', '') or '')
+                or str(getattr(beat, 'loop_header', '') or '')
+                or str(getattr(beat, 'camera_header', '') or ''))
+        if head and lines and head.strip() != lines[0].strip():
+            lines = [head] + lines[1:]
+        for ln in lines:
+            emit(ln.rstrip(), '原样块', ln.strip())
+
     # ---------------- 音频 ----------------
     # 音乐/音效列存的是**资产 ID / DSL 文本**（可下拉），参数单独一列；
     # 内部仍走同一套字段，停止/排队用「（停止音乐）」这类伪值表达。
@@ -821,10 +861,17 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     if tokens:
         # 老表/手工新增行可能只记了部分——把漏掉的 stage verb 按 StageOrder
         # 补在后面，**绝不因为顺序信息不全就丢掉操作**。
-        missed_stage = [v for v in ('scene', 'show', 'hide')
-                        if v not in tokens]
-        for v in missed_stage:
-            tokens.append(v)
+        #
+        # ⚠ 2026-10-05：这条规矩收进 `Beat.stage_verbs`（**唯一真源**）——
+        # 舞台快照/演出预览从前没照做，于是"卡片加了立绘、当前舞台却写着
+        # 台上没人"（用户实测报的）。这里改成问同一个属性，两边不可能再分叉；
+        # 行为不变（补进来的 verb 在对应列没内容时不产出行，见下面
+        # "真出了一行的 scene 才算数"那段）。
+        recorded = set(tokens)
+        for v in beat.stage_verbs:
+            if v not in recorded:
+                tokens.append(v)
+                recorded.add(v)
         for k in ('audio', 'voice'):
             if k not in tokens:
                 tokens.append(k)
@@ -873,10 +920,14 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         emit_stage_tail()
         if not code_done:
             emit_code()
+        # **原样块紧跟代码之后**（M1）：`beat_build` 让未建模块独占一张拍
+        # 并在台词之前落卡，所以"代码 → 原样块 → 台词"就是源码顺序。
+        emit_opaque()
     else:
         # 没有任何顺序信息（老表 / 直接构造的 Beat）：维持历史固定顺序
         emit_stage()
         emit_code()
+        emit_opaque()
         emit_audio()
         emit_voice()
 
@@ -928,6 +979,22 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             emit(_quote(beat.text), '台词', beat.text)
 
     if not lines:
+        # **落单的结构化循环头**（有头行、无整块原文、没被归组）：
+        # 结构位丢了（隐藏列 `Nest` 被清空 / 老工具写的表），这一块没法还原成
+        # 循环，但**内容不能因此消失** —— 块体那些拍还在流里，会照常渲染在
+        # 下面。这里给一句**显式 TODO**（`UNRESOLVED_TODO` 门禁会抓到），
+        # 让人看得见"结构降级了"。
+        #
+        # ⚠ 为什么不是 `while …:` + `pass`：那是**死循环**（`pass` 永远不改变
+        # 条件）—— 比"结构没还原"严重得多。宁可少一个 `while` 行，
+        # 也不要写出一份跑起来卡死的产物。
+        if not pre and _is_orphan_loop_head(beat):
+            emit(f'# TODO: 循环（'
+                 f'{str(getattr(beat, "loop_header", "") or "").strip()}）'
+                 f'的结构位缺失（隐藏列 Nest 被清空？）：这一块没能还原成 '
+                 f'while/for —— 内容还在下面，但结构变了',
+                 '循环', str(getattr(beat, 'loop_header', '') or ''), 'todo')
+            return _attach_inline_note(pre + lines, beat)
         return pre
 
     if beat.condition:
@@ -950,10 +1017,25 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             pre + [cond_head] + [
                 '    ' + ln if ln.strip() else '' for ln in lines
             ], beat)
+    if not lines and not pre and _is_orphan_loop_head(beat):
+        # 兜底（正常情况下上面那个 `if not lines` 已经处理）：条件拍那条路
+        # 会先返回，所以这里只是"两处都守一下"——判据见
+        # `_is_orphan_loop_head`，别在两处写不同的判据。
+        emit(f'# TODO: 循环（'
+             f'{str(getattr(beat, "loop_header", "") or "").strip()}）'
+             f'的结构位缺失：这一块没能还原成 while/for',
+             '循环', str(getattr(beat, 'loop_header', '') or ''), 'todo')
+        return _attach_inline_note(pre + lines, beat)
     # **行尾注释**（C）：贴在这一拍的输出上（只在一拍一行、源语句也一行时贴，
     # 见 `_inline_note`）。放在**这里**是因为它是"单拍渲染"的唯一出口 ——
     # 顶层（`render_beats_to_rpy`）、菜单头/选项行之外的所有拍都走它。
     return _attach_inline_note(pre + lines, beat)
+
+
+def _is_orphan_loop_head(beat) -> bool:
+    """这一拍是"落单的结构化循环头"吗（有头行、无整块原文、没被归组）？"""
+    return bool(str(getattr(beat, 'loop_header', '') or '')) \
+        and not str(getattr(beat, 'opaque', '') or '').strip()
 
 
 
@@ -1014,9 +1096,38 @@ def split_beat_units(beats: list, use_paths: bool = True) -> list:
                 run, i = by_path
             units.append(('menu', run))
             continue
+        if _is_loop_head(beats[i]):
+            # 结构化循环（2026-10-07）：头拍 + 结构位在 `loop:n` 里的那些拍
+            # = 一个 `while …:` 块。取不到结构位就**退回单拍**（渲染层会给
+            # 一句显式 TODO，见 `render_beat_to_rpy`）—— 宁可让人看见
+            # "这一块没还原成循环"，也不要静默把它拍平成顺序语句。
+            by_path = _take_block_run_by_path(beats, i, plan, 'loop')
+            if by_path is None:
+                units.append(('beat', [beats[i]]))
+                i += 1
+            else:
+                units.append(('loop', by_path[0]))
+                i = by_path[1]
+            continue
         units.append(('beat', [beats[i]]))
         i += 1
     return units
+
+
+def _is_loop_head(beat) -> bool:
+    """
+    这一拍是**结构化循环的组头**吗？
+
+    判据两条，缺一不可（与 `menu` 头拍的判据同源）：
+
+      · 有头行（`loop_header`）—— 老形态也有，所以单看它不够；
+      · **没有** `opaque` 整块原文 —— 有它就是"整块逐字"那条老路
+        （`emit_opaque` 会逐字吐回去，不能再按结构位归组，否则同一段内容
+        会出去两遍）。
+    """
+    if not str(getattr(beat, 'loop_header', '') or ''):
+        return False
+    return not str(getattr(beat, 'opaque', '') or '').strip()
 
 
 def _nest_plan(beats: list) -> dict:
@@ -1038,6 +1149,7 @@ def _nest_plan(beats: list) -> dict:
     """
     known: dict = {}
     menu_no: dict = {}
+    loop_no: dict = {}
     counters: dict = {}
     items = list(beats or ())
     for i, b in enumerate(items):
@@ -1050,21 +1162,28 @@ def _nest_plan(beats: list) -> dict:
             counters[label] = counters.get(label, 0) + 1
             n = _menu_number_from_path(items, i)
             menu_no[id(b)] = n if n else counters[label]
-    return {'known': known, 'menu_no': menu_no}
+        elif _is_loop_head(b):
+            counters[f'loop:{label}'] = counters.get(f'loop:{label}', 0) + 1
+            n = _block_number_from_path(items, i, 'loop')
+            loop_no[id(b)] = n if n else counters[f'loop:{label}']
+    return {'known': known, 'menu_no': menu_no, 'loop_no': loop_no}
 
 
-def _menu_number_from_path(beats: list, head_i: int):
+def _block_number_from_path(beats: list, head_i: int, seg: str):
     """
-    菜单头 `beats[head_i]` 的 `menu:n` 里的 `n`（从它子孙的块路径里读）。
+    组头拍的 `head_i` 的 `<seg>:n` 里的 `n`（从它子孙的块路径里读）。
 
-    读不到（空菜单 / 结构位不全）返回 `0`，调用方退回"数第几张"。
+    为什么不能"数第几张头拍"：`split_beat_units` 会被**递归**调用在子列表上
+    （循环体 / 选项体那一段拍），子列表里的局部次序与 label 的文档序对不上
+    —— 菜单那次就是这么切错的（见 `_nest_plan` 的 docstring）。
+    读不到（空块体 / 结构位不全）返回 `0`，调用方退回"数第几张"。
     """
     head = beats[head_i]
     head_path = getattr(head, 'nest_path', None)
     if head_path is None:
         return 0
     head_path = str(head_path)
-    want = f'{head_path}>menu:' if head_path else 'menu:'
+    want = f'{head_path}>{seg}:' if head_path else f'{seg}:'
     for b in beats[head_i + 1:]:
         path = getattr(b, 'nest_path', None)
         if path is None:
@@ -1072,9 +1191,56 @@ def _menu_number_from_path(beats: list, head_i: int):
         path = str(path)
         if not path.startswith(want):
             continue
-        seg = path[len(want):].split('>', 1)[0]
-        return int(seg) if seg.isdigit() else 0
+        token = path[len(want):].split('>', 1)[0]
+        return int(token) if token.isdigit() else 0
     return 0
+
+
+def _take_block_run_by_path(beats: list, start: int, plan: dict, seg: str):
+    """
+    结构位齐全时：`seg` 组 = **块路径落在同一棵子树里**的那些拍。
+
+    菜单（`seg='menu'`）与循环（`seg='loop'`）**共用这一份实现** —— 边界判据
+    只许有一处："少吞一拍 / 多吞一拍"都是静默改剧情（循环更狠：少吞 = 那一句
+    只执行一次，多吞 = 执行多次），复制一份判据就是给这类缺陷开第二条路。
+
+    与 `_take_menu_run_by_path` 的两点差异（都是刻意的）：
+
+      · 循环组**没有"选项行"这一层**（`while` 的头后面直接就是块体），所以
+        只按"在不在子树里"收；
+      · **掉队的拍照样收进来**（中间插了一张路径不在子树里的拍，但后面还有
+        本组的拍）—— 与菜单同款：宁可多收一张（它本来就在这个块的位置上），
+        也不要把块从中间劈成两半。
+
+    返回 `None` = 这一份用不了路径（调用方退回单拍 / 老推断）。
+    """
+    head = beats[start]
+    label = str(getattr(head, 'label', '') or '')
+    if not plan['known'].get(label):
+        return None
+    k = (plan.get(f'{seg}_no') or {}).get(id(head))
+    if not k:
+        return None
+    prefix = join_nest(getattr(head, 'nest_path', '') or '', f'{seg}:{k}')
+    run = [head]
+    i = start + 1
+    while i < len(beats):
+        if _under_nest(getattr(beats[i], 'nest_path', None), prefix):
+            run.append(beats[i])
+            i += 1
+            continue
+        # 不在子树里：后面还有本组的拍吗？（有 → 这是"掉队"的拍，一起收）
+        nxt = _next_under_nest(beats, i + 1, prefix)
+        if nxt is None:
+            break
+        run.extend(beats[i:nxt])
+        i = nxt
+    return run, i
+
+
+def _menu_number_from_path(beats: list, head_i: int):
+    """菜单头 `beats[head_i]` 的 `menu:n` 里的 `n`（见 `_block_number_from_path`）。"""
+    return _block_number_from_path(beats, head_i, 'menu')
 
 
 def _under_nest(path, prefix: str) -> bool:
@@ -1978,6 +2144,15 @@ def _render_menu_segments(run: list, segments: list, indent: str,
                         # 再整体加 `inner` → 头 inner / 选项 inner+4 / 体 inner+8
                         for ln in render_menu_block(group, indent='    ',
                                                     audit=audit, trace=trace))
+                elif kind == 'loop':
+                    # 循环同一个口径（2026-10-07）：头在 0 级、块体在 4 级，
+                    # 再整体加 `inner`。漏了这一支，**选项体里的循环**
+                    # （`test_loop_inside_menu_is_nested`）会整块消失 ——
+                    # 因为循环头拍自己没有 `opaque`，单拍渲染是空的。
+                    out.extend(
+                        inner + ln if ln.strip() else ''
+                        for ln in render_loop_block(group, indent='    ',
+                                                    audit=audit, trace=trace))
                 else:
                     out.extend(_indent_beat_lines(group[0], inner,
                                                   audit, trace))
@@ -2041,6 +2216,12 @@ def _render_unit_lines(beats: list, indent: str, audit, trace: list) -> list:
             # 改成自己显式补前缀（见 `_render_menu_segments` 里的 `_body_lines`），
             # 所以这里保持原样，别再动 —— 两个框架各按各的口径来。
             lines.extend(render_menu_block(group, indent=indent,
+                                           audit=audit, trace=trace))
+        elif kind == 'loop':
+            # 循环**同理**（2026-10-07）：`while` 整块也有自己的条件要写在
+            # 外面，也得靠 `render_loop_block` 递归 —— 漏了这一支，
+            # 循环在"认不出归属的拍"那条路上会退化成一句 TODO。
+            lines.extend(render_loop_block(group, indent=indent,
                                            audit=audit, trace=trace))
         else:
             lines.extend(_indent_beat_lines(group[0], indent, audit, trace))
@@ -2144,6 +2325,71 @@ def render_menu_block(run: list, indent: str = '    ',
                                   for ln in lines]
     return [lines[0]] + [ln for ln in lines[1:]]
 
+
+
+def render_loop_block(run: list, indent: str = '    ',
+                      audit=None, trace: list = None) -> list:
+    """
+    一个循环组（`while` / `for` 头拍 + 它的块体拍）→ 行（**不带外层缩进**）。
+
+    约定与 `render_menu_block` **一致**（同一套框架，不另立一套）：
+
+      · 头行在第 0 级、块体在 `indent` 那一级；调用方负责"这一块整体在哪一层"；
+      · 嵌套（循环里套菜单、菜单里套循环）由 `_render_block_body` 递归，
+        要几层有几层。
+
+    **整块自己的条件**（`if flag:` 里包 `while`）：解析时它是累积进头行拍的
+    `condition` 的，所以这里写在**循环外面**、整块再缩一层；同时把这一层条件
+    从块体拍上**剥掉**（`strip_condition_context`）—— 否则每一句块体台词都会
+    各套一个 `if flag:`（语义等价，但产物会越滚越多，条件滚雪球就是这么来的）。
+
+    空块体（`while x:` 后面什么都没有）补一行 `pass`：Ren'Py 要求缩进块非空，
+    否则整份产物解析不了。
+    """
+    if not run:
+        return []
+    head = run[0]
+    header = str(getattr(head, 'loop_header', '') or '').strip()
+    if not header:
+        return []
+    head_cond = str(getattr(head, 'condition', '') or '').strip()
+    body_beats = list(run[1:])
+    if head_cond:
+        body_beats = [
+            _with_condition(b, strip_condition_context(
+                str(getattr(b, 'condition', '') or '').strip(), head_cond))
+            for b in body_beats]
+    lines = [header + _inline_note(head)]
+    body = _render_block_body(body_beats, indent, audit, trace)
+    lines.extend(body or [indent + 'pass'])
+    if head_cond:
+        lines = [f'if {head_cond}:{_cond_note(head)}'] + [
+            '    ' + ln if ln.strip() else '' for ln in lines]
+    return lines
+
+
+def _render_block_body(beats_: list, prefix: str, audit, trace: list = None) -> list:
+    """
+    一串拍 → 已带 `prefix` 的行（**循环体 / 选项体共用的那一步**）。
+
+    三种单元各自递归：菜单走 `render_menu_block`、循环走 `render_loop_block`、
+    其余单拍走 `_indent_beat_lines`（它保住**拍内部**的相对缩进，比如条件拍的
+    块体要更深一层）。与 label 那一层是同一套单元划分（`split_beat_units`），
+    所以"循环里套菜单、菜单里套循环"不需要任何额外代码。
+    """
+    out: list = []
+    for kind, unit in split_beat_units(beats_):
+        if kind == 'menu':
+            out.extend(prefix + ln if ln.strip() else ''
+                       for ln in render_menu_block(unit, indent='    ',
+                                                   audit=audit, trace=trace))
+        elif kind == 'loop':
+            out.extend(prefix + ln if ln.strip() else ''
+                       for ln in render_loop_block(unit, indent='    ',
+                                                   audit=audit, trace=trace))
+        else:
+            out.extend(_indent_beat_lines(unit[0], prefix, audit, trace))
+    return out
 
 
 def _stage_op_covered(code, op, beat, show_parts, hide_parts) -> bool:
@@ -2708,6 +2954,13 @@ def _is_file_block_carrier(beat) -> bool:
     return (not checker()) if callable(checker) else False
 
 
+def _strip_generator_marker(text: str) -> str:
+    """把**生成标记行**从一段文件级原文里摘掉（其余行逐字不动）。"""
+    from storygraph.core.vocabulary import GENERATOR_MARKER
+    return '\n'.join(ln for ln in str(text or '').split('\n')
+                     if ln.strip() != GENERATOR_MARKER)
+
+
 def _collect_file_blocks(beats: list) -> list:
     """
     从拍列表里收集**文件级保真块**（去重、保序）。
@@ -2733,7 +2986,8 @@ def _collect_file_blocks(beats: list) -> list:
 def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
                         indent: str = '    ', registry=None,
                         symbols=None, trace: list = None,
-                        include_transforms: bool = True) -> str:
+                        include_transforms: bool = True,
+                        pose_hides: dict = None) -> str:
     """
     Beat 列表 → 完整 .rpy 文本。
 
@@ -2750,8 +3004,15 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
     给"项目里已经有 definitions.rpy 定义过这些 transform"的场合用 ——
     否则退回全量重生成会把同一批定义**重复写进章节文件**（用户 2026-10-05 实测：
     `chapter1_1` 151 行、`chapter3_1` 473 行差异主要就是这一段）。
+
+    `pose_hides`（P4）：`{拍序号: ['hide ye', …]}` —— 由
+    `story.pose_patch.plan_pose_hides()` 算出，**只在项目声明了
+    `hide_before_pose_switch` 时**才传进来。补的 `hide` 写在该拍**自己的
+    内容之前**，因此它仍然是"生成内容"，照旧走增量补丁的校验与备份。
     """
     from storygraph.story.dsl import Audit
+
+    pose_hides = dict(pose_hides or {})
 
     if symbols is None and registry is not None:
         symbols = make_symbols(registry)
@@ -2777,6 +3038,13 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
     # 之前**原样写出 —— 与源文件里"定义在前、label 在后"的顺序一致。
     file_texts = _collect_file_blocks(beats)
     for text in file_texts:
+        # **保险**：把生成标记从文件级块里摘掉（开头已经加了一条）。
+        # 为什么两道都要有：源头那道管"新解析的文件"，这道管**老表**里的
+        # `FileBlocks`（那是上一版工具存的、里面可能已经带着标记）。
+        # 只做源头的话，一张旧表导出的产物还是两条。
+        text = _strip_generator_marker(text)
+        if not text.strip():
+            continue
         out.append(text)
         out.append('')
 
@@ -2820,6 +3088,8 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         # 源文件里**有**的 label 必须留下来，**没有**的绝不能凭空造。
 
     emitted_labels = 0
+    #: 拍对象 → 原始下标（P4 的 `pose_hides` 按**拍序号**给）
+    idx_of = {id(b): i for i, b in enumerate(beats or ())}
     for name, group in groups:
         # **只用来携带文件级块的拍不产生 label**（2026-10-05，拓展边界③）。
         #
@@ -2844,8 +3114,22 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：
         # 逐拍渲染会把 `menu:` 整块压成顺序语句，分支结构静默损坏。
         for kind, unit in split_beat_units(group):
+            # P4：这一拍缺的 `hide`（改回空姿势要先隐藏）——
+            # 放在**这一拍自己的内容之前**，所以它是"生成内容"，
+            # 增量补丁照旧会校验它、备份它。
+            _hides = []
+            for _b in (unit or ()):
+                for _line in (pose_hides.get(idx_of.get(id(_b), -1), ())
+                              or ()):
+                    if _line and _line not in _hides:
+                        _hides.append(_line)
+            if _hides:
+                body.extend(_hides)
             if kind == 'menu':
                 body.extend(render_menu_block(unit, indent=indent,
+                                              audit=audit, trace=trace))
+            elif kind == 'loop':
+                body.extend(render_loop_block(unit, indent=indent,
                                               audit=audit, trace=trace))
             else:
                 body.extend(render_beat_to_rpy(unit[0], indent=indent,

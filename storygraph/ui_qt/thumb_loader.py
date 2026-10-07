@@ -25,7 +25,25 @@ from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 from storygraph.app.thumbs import cache_key, decode_sync, resolve_thumb_source
 
-CACHE_LIMIT = 64
+#: 内存缩略图缓存的**字节预算**（不是"多少张"）。
+#:
+#: 2026-10-05 实测：从前是 `CACHE_LIMIT = 64` **张**。真实项目的候选列表有
+#: 2816 张图，卡片缩略图 160×220 RGBA ≈ 140 KB/张 —— 64 张＝9 MB，
+#: 用户往下滚两屏就把前面的挤掉，滚回去**再解一次**（大图 380 ms/张）。
+#: 按字节算才是对的口径：104×74 的格子缩略图才 ~31 KB/张，64 MB 能装
+#: 两千张（几乎整个候选列表）；而立绘卡那种大缩略图自然少装一些。
+CACHE_BYTES_LIMIT = 64 * 1024 * 1024
+#: 兼容旧名（测试与自检看的是"能不能装下更多"，不再按张数）。
+CACHE_LIMIT = 4096
+
+
+def _pixmap_bytes(pixmap) -> int:
+    """一张 QPixmap 粗略占多少内存（宽×高×4 字节）。"""
+    try:
+        return max(0, int(pixmap.width()) * int(pixmap.height()) * 4)
+    except Exception as e:                        # noqa: BLE001 - 控件已销毁
+        swallow('ui_qt.thumb_loader._pixmap_bytes', e)
+        return 0
 
 #: 同时在解的张数上限。**为什么要自己限流**：`QThreadPool` 是先进先出的 ——
 #: 一屏一屏往下滚，几十上百个"用户早就滚过去、现在根本看不见"的任务排在
@@ -45,6 +63,9 @@ def default_max_in_flight() -> int:
 PRIORITY_FOCUS = 100
 PRIORITY_NORMAL = 10
 PRIORITY_BACKGROUND = 0
+
+#: 磁盘缓存清理**一个进程只排一次**（见 `ThumbLoader._schedule_cache_prune`）。
+_PRUNE_SCHEDULED = False
 
 
 def _pil_to_qimage(im) -> QImage:
@@ -162,11 +183,66 @@ class ThumbLoader(QObject):
         self._max_in_flight = (int(max_in_flight) if max_in_flight
                                else default_max_in_flight())
         self._cache: "OrderedDict[str, QPixmap]" = OrderedDict()
+        self._cache_bytes = 0                # 已缓存的字节数（见 CACHE_BYTES_LIMIT）
         self._want: dict = {}                # slot -> 想要什么（见类 docstring）
         self._running: dict = {}             # slot -> 正在解的那个 key
         self._seq = 0                        # 同优先级内"先来后到"
         self._shutting_down = False          # 关窗后工作线程要能看到（见 _Job.run）
         self.image_ready.connect(self._on_ready)
+        self._schedule_cache_prune()
+
+    # ------------------------------------------------------------------
+
+    def _schedule_cache_prune(self):
+        """
+        后台**清一次**磁盘缩略图缓存（**一个进程只跑一次**）。
+
+        真实项目跑几轮之后 `%TEMP%\\renpy_sge_thumbs` 里攒了 14 万个 PNG：
+        既占地方，又让每次缓存查找都在一张巨大的目录索引里翻。
+        清理是"可再生"的（最坏就是下次多解一次图），所以放在后台、
+        **不阻塞任何请求**。
+
+        ⚠ "一个进程只跑一次" 是硬要求：扫描本身有预算（见
+        `prune_thumb_cache`），但每构造一个 loader 就扫一遍仍然会把
+        测试和界面拖住（实测 pytest 卡住十几分钟）。
+        """
+        global _PRUNE_SCHEDULED
+        if _PRUNE_SCHEDULED:
+            return
+        _PRUNE_SCHEDULED = True
+        try:
+            from PySide6.QtCore import QRunnable, QThreadPool
+            from storygraph.story.excel_export import prune_thumb_cache
+
+            class _Prune(QRunnable):
+                def run(self_inner):
+                    try:
+                        prune_thumb_cache()
+                    except Exception as e:       # noqa: BLE001 - 清理失败不影响界面
+                        swallow('ui_qt.thumb_loader._Prune.run', e)
+
+            QThreadPool.globalInstance().start(_Prune())
+        except Exception as e:                # noqa: BLE001
+            swallow('ui_qt.thumb_loader._schedule_cache_prune', e)
+
+    def cache_bytes(self) -> int:
+        """内存缓存当前占多少字节（自检/调试用）。"""
+        return int(self._cache_bytes)
+
+    def _remember(self, key, pixmap):
+        """把一张缩略图放进内存缓存，并按**字节预算**淘汰最老的。"""
+        old = self._cache.pop(key, None)
+        if old is not None:
+            self._cache_bytes -= _pixmap_bytes(old)
+        self._cache[key] = pixmap
+        self._cache_bytes += _pixmap_bytes(pixmap)
+        while (self._cache and
+               (self._cache_bytes > CACHE_BYTES_LIMIT
+                or len(self._cache) > CACHE_LIMIT)):
+            _k, _v = self._cache.popitem(last=False)
+            self._cache_bytes -= _pixmap_bytes(_v)
+        if self._cache_bytes < 0:
+            self._cache_bytes = 0
 
     # ------------------------------------------------------------------
 
@@ -200,7 +276,7 @@ class ThumbLoader(QObject):
         photo = self._cache.get(key)
         if photo is not None:                 # 内存命中：0 延迟
             try:
-                self._cache.moveToEnd(key)
+                self._cache.moveToEnd(key)    # 命中 = 最近用过（LRU 尾部）
             except Exception:                # noqa: BLE001
                 swallow('thumb_loader.request')
             self._want.pop(slot, None)
@@ -365,13 +441,7 @@ class ThumbLoader(QObject):
             swallow('ui_qt.thumb_loader._on_ready', e)
             pixmap = None
         if pixmap is not None:
-            self._cache[key] = pixmap
-            try:
-                self._cache.moveToEnd(key)
-            except Exception:                # noqa: BLE001
-                swallow('thumb_loader._on_ready')
-            while len(self._cache) > CACHE_LIMIT:
-                self._cache.popitem(last=False)
+            self._remember(key, pixmap)
 
         if want is None or want['key'] != key:
             # 过期结果（同一 slot 已经有更新的想头）：只入缓存，不回填

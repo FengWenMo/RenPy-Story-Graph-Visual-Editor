@@ -288,7 +288,11 @@ def run_cross_file(verbose: bool, tmp: Path) -> list:
     game_work = _make_project(work, MF_SRC)
     for name in MF_SRC:
         f = game_work / name
-        _session(f, work).export(f, force=True)
+        # 本轮的原地导出**一律不加 `force`**（2026-10-05 实测修）：
+        # 从前处处带 force，等于把"手写护栏"整条绕过去了 —— 而用户按的
+        # 正是不加 force 的那一下，于是他撞上「覆盖手写文件？」对话框
+        # （默认按钮是取消）并报到"只是增量的改一张卡，为何阻止我替换旧文件"。
+        _session(f, work).export(f)
     cur = _snapshot(game_work)
     labels_base = set().union(*(_labels_in(t) for t in cur.values()))
     tgt_base = set().union(*(_jump_targets(t) for t in cur.values()))
@@ -306,7 +310,7 @@ def run_cross_file(verbose: bool, tmp: Path) -> list:
             continue
         old_line = f'"{t.text}"'
         t.text = f'改过-{name}'
-        res = s.export(f, force=True)
+        res = s.export(f)
         if not res.get('ok'):
             bad.append((f'A1 {name}', 'E导出',
                         f'导出被拒：{res.get("blocking") or res.get("error")}'))
@@ -360,7 +364,7 @@ def run_cross_file(verbose: bool, tmp: Path) -> list:
     for name in ('hub.rpy', 'c.rpy', 'b.rpy', 'a.rpy'):     # 故意换个顺序
         f = game_work / name
         s = _session(f, work)
-        s.export(f, force=True)
+        s.export(f)
     after_round2 = _snapshot(game_work)
     for name in cur:
         if after_round2[name] != cur[name]:
@@ -426,7 +430,7 @@ def run_cross_file(verbose: bool, tmp: Path) -> list:
     s2 = _session(f, ds)
     head = next(b for b in s2.beats if '开头一句' in str(b.text or ''))
     head.text = '开头改过了'
-    res2 = s2.export(f, force=True)
+    res2 = s2.export(f)
     now_sys = _read(f)
     if '这是一句系统提示' not in now_sys:
         bad.append(('A8 双字符串 say', 'E丢台词',
@@ -576,7 +580,8 @@ def run_real(verbose: bool, tmp: Path, limit: int = 0,
 
     work = tmp / 'real_mf'
     work.mkdir(parents=True, exist_ok=True)
-    stat = {'edited': 0, 'max_touched': 0, 'degraded': 0}
+    stat = {'edited': 0, 'max_touched': 0, 'degraded': 0, 'refused': 0}
+    refused: list = []
 
     for src in files:
         dst = work / src.name
@@ -589,10 +594,19 @@ def run_real(verbose: bool, tmp: Path, limit: int = 0,
         if t is None:
             continue
         t.text = 'Y跨文件改过Y'
-        res = s.export(dst, force=True)
+        res = s.export(dst)
         if not res.get('ok'):
-            bad.append((src.name, 'E导出',
-                        f'被拒：{res.get("blocking") or res.get("error")}'))
+            # 与 `hell_edit_rounds` 的口径一致（2026-10-05 校准）：这一条
+            # 以前带 `force=True`，于是补丁对不上时会把**全量重生成**
+            # 覆盖到作者手写的章节上（P0 明令禁止的那件事）。去掉 force 后
+            # 那类文件会被**安全地拒绝**（一个字节不动）—— 只要它给了原因，
+            # 就算"设计边界"，不算失败；不说原因地拒才是缺陷。
+            why = res.get('blocking') or res.get('error')
+            if not why:
+                bad.append((src.name, 'E导出', '被拒却没给任何原因'))
+                continue
+            stat['refused'] += 1
+            refused.append((src.name, str(why[0])[:64]))
             continue
         now = _read(dst)
         touched = _touched(original, now)
@@ -634,8 +648,10 @@ def run_real(verbose: bool, tmp: Path, limit: int = 0,
         if verbose:
             print(f'   · {src.name}: 动了 {touched} 行')
 
+    for name, why in refused:
+        print(f'   · 安全拒绝（未写盘）：{name} —— {why}')
     print(f'   改过 {stat["edited"]} 个 / 单次最多动 {stat["max_touched"]} 行 / '
-          f'退回全量 {stat["degraded"]} 个')
+          f'退回全量 {stat["degraded"]} 个 / 安全拒绝 {stat["refused"]} 个')
     return bad, stat
 
 

@@ -65,9 +65,166 @@ def _hide_columns(ws, names) -> None:
 
 
 
+def _resolve_statements(statements, output_path):
+    """
+    拿项目声明的语句注册表：显式给的优先，否则从产物路径**反推项目根**。
+
+    反推不出来（临时目录、非项目路径）就返回 `None` —— 少一条提示，
+    好过写错一处候选。
+    """
+    if statements is not None:
+        return statements
+    try:
+        from storygraph.story.statement_registry import (
+            StatementRegistry, root_of)
+        _root = root_of(output_path)
+        return StatementRegistry.for_project(_root) if _root else None
+    except Exception as e:                      # noqa: BLE001
+        from storygraph.core.safeguard import swallow
+        swallow('story.excel_export.spec_annotations', e)
+        return None
+
+
+def _annotate_spec_heads(ws, beats, statements) -> int:
+    """
+    给「自定义语句·头行」格子挂**候选注释**（D1，2026-10-07）。
+
+    为什么是**注释**而不是下拉：Excel 的数据验证是**按列**绑定的，而这些
+    参数名是**每条语句各不相同**的（`mycue` 有 `intensity`，`battle` 有
+    `difficulty`）—— 一列里装不下两套枚举。
+    做"每参数一列"就得让 `BEAT_FIELDS` 动态化，那是一次列契约变更，
+    不该混在这一次里（见文档 §5.4 的说明）。注释是当下**真能落地**的那一步：
+    鼠标一悬停就看到能填什么，而且不影响任何一格的数据。
+
+    ⚠ 2026-10-07 第二轮：「每参数一列 + 原生下拉」已经做了（见
+    `_write_spec_arg_columns`），所以这一格注释现在的职责只剩**兜底** ——
+    候选太长（Excel 内联下拉 255 字符上限）、或者这条声明只有头行没有
+    参数形状时，人还能从这里读到"能填什么"。
+
+    返回挂了注释的格子数（可测）。
+    """
+    if not statements:
+        return 0
+    try:
+        col = BEAT_FIELDS.index('SpecHead') + 1
+    except ValueError:                          # pragma: no cover - 列被删了
+        return 0
+    from openpyxl.comments import Comment
+    from storygraph.story.statement_registry import spec_columns
+    n = 0
+    for i, beat in enumerate(beats or (), start=2):
+        name = str(getattr(beat, 'spec_name', '') or '')
+        if not name:
+            continue
+        cols = spec_columns(statements, name)
+        if not cols:
+            continue
+        spec = statements.match(name)
+        title = f'这条语句由项目声明过：{name}'
+        if spec is not None and getattr(spec, 'label', ''):
+            title += f'（{spec.label}）'
+        lines = [title]
+        for c in cols:
+            piece = f'  {c["name"]}'
+            if c['label']:
+                piece += f'（{c["label"]}）'
+            if c['choices']:
+                piece += '：' + ' / '.join(c['choices'])
+            if c['required']:
+                piece += '  [必需]'
+            lines.append(piece)
+        lines.append('改这一格 = 改这条语句的参数；不改则逐字节原样导出。')
+        lines.append('（也可以改它自己那一列：上面那几列是一参数一列，'
+                     '带原生下拉。）')
+        cell = ws.cell(row=i, column=col)
+        cm = Comment('\n'.join(lines), 'storygraph')
+        cm.width = 320
+        cm.height = 150
+        cell.comment = cm
+        n += 1
+    return n
+
+
+#: Excel 数据验证里内联候选串的长度上限。
+#:
+#: 超了 Excel 会**直接拒绝**这个验证规则（表还是能存，但下拉没了、
+#: 或者更糟：整个文件的验证被 Excel 判为损坏）。官方口径是公式 255 字符，
+#: 这里留一点余量，超了就不挂下拉、退回注释（"少一个便利，不要坏一个文件"）。
+_MAX_INLINE_CHOICES = 240
+
+
+def _spec_choices_formula(choices) -> str:
+    """候选 → Excel 内联下拉的公式串（`"a,b,c"`）；放不下返回空串。"""
+    vals = [str(c).strip() for c in (choices or ()) if str(c).strip()]
+    if not vals:
+        return ''
+    # 候选里出现逗号/引号就没法内联表达（Excel 会误解），那种一律走注释
+    if any((',' in v) or ('"' in v) for v in vals):
+        return ''
+    formula = '"' + ','.join(vals) + '"'
+    return formula if len(formula) <= _MAX_INLINE_CHOICES else ''
+
+
+def _write_spec_arg_columns(ws, beats, statements, row_count: int) -> list:
+    """
+    「**每参数一列**」（M4 第二阶段）：把声明语句的参数摊成列 + 原生下拉。
+
+    返回写出去的列描述（`statement_registry.dynamic_spec_columns` 的形态），
+    调用方据此写表头、定列宽、挂验证。
+
+    为什么这次敢动列契约（上一次评审把它推后了）：`BEAT_FIELDS` 是
+    **基础列**，动态列**追加在末尾**、且只在"这一章真的用了某条声明语句"
+    时出现 —— 于是
+
+      · 没有声明的项目、没有声明的章节：表与从前**一模一样**（列数都不变）；
+      · `to_row` / `from_row` 的默认行为不变（老调用方一个都不用改）；
+      · 值**折回头行**，不新增第二份数据（见 `story/spec_args.py`）。
+
+    下拉是"方便"不是"牢笼"：`showErrorMessage=False`（与本项目其他下拉
+    一致），手打一个没声明的值照样能过 —— 候选是常见取值，不是白名单。
+    """
+    cols = []
+    if statements is not None:
+        from storygraph.story.statement_registry import dynamic_spec_columns
+        cols = dynamic_spec_columns(beats, statements)
+    if not cols:
+        return []
+    from openpyxl.worksheet.datavalidation import DataValidation
+    for idx, col in enumerate(cols):
+        letter = get_column_letter(len(BEAT_FIELDS) + idx + 1)
+        formula = _spec_choices_formula(col['choices'])
+        if formula:
+            dv = DataValidation(type='list', formula1=formula,
+                                allow_blank=True, showDropDown=False)
+            dv.showErrorMessage = False      # 手打新值不该被拦住
+            dv.promptTitle = col['header']
+            hint = (col['label'] or col['param'])
+            if col['required']:
+                hint += '（必需）'
+            dv.prompt = f'{hint} —— 从下拉里选，或直接写一个项目里在用的值'
+            ws.add_data_validation(dv)
+            dv.add(f'{letter}2:{letter}{max(row_count + 1, 200)}')
+            continue
+        # **兜底**：候选太长 / 带逗号（内联表达不了）→ 挂注释，别让
+        # "能填什么"无处可查（也不许为了便利去写一条 Excel 会拒收的规则）。
+        if not col['choices']:
+            continue
+        from openpyxl.comments import Comment
+        note = [f'{col["header"]}（{col["label"] or col["param"]}）的候选：']
+        note.extend(f'  · {c}' for c in col['choices'])
+        note.append('候选是常见取值、不是白名单：要写别的值直接写。')
+        for r in range(2, max(row_count + 1, 2) + 1):
+            cm = Comment('\n'.join(note), 'storygraph')
+            cm.width = 300
+            cm.height = 160
+            ws.cell(row=r, column=len(BEAT_FIELDS) + idx + 1).comment = cm
+    return cols
+
+
 def export_beats_to_excel(beats: list, output_path,
                           registry=None, include_dropdowns: bool = True,
-                          include_thumbnails: bool = False):
+                          include_thumbnails: bool = False,
+                          statements=None):
     """
     把 Beat 列表写成 Excel。
 
@@ -86,7 +243,24 @@ def export_beats_to_excel(beats: list, output_path,
     ws = wb.active
     ws.title = 'Beats'
 
-    ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS])
+    # 「每参数一列」（M4 第二阶段）的列契约 = **基础列 + 动态列**。
+    # 动态列必须在**写表头之前**算出来（表头与数据行的列数要一致，
+    # 见 `beat_model._row_fields`）。没有声明语句的项目 → 空列表 →
+    # 表与从前**逐列相同**：这是"新功能不许动老项目"的底线。
+    statements = _resolve_statements(statements, output_path)
+    spec_cols = []
+    # **不要求项目声明过语句**：`camera` 这类标准语句的形状由工具自己声明
+    # （`spec_args.BUILTIN_ARG_SCHEMAS`），没有 `rules.json` 也该有那一列。
+    try:
+        from storygraph.story.statement_registry import dynamic_spec_columns
+        spec_cols = dynamic_spec_columns(beats, statements)
+    except Exception as e:                      # noqa: BLE001
+        from storygraph.core.safeguard import swallow
+        swallow('story.excel_export.spec_columns', e)
+        spec_cols = []
+    spec_headers = [c['header'] for c in spec_cols]
+
+    ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS] + spec_headers)
     for cell in ws[1]:
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
@@ -101,7 +275,12 @@ def export_beats_to_excel(beats: list, output_path,
     # 留着还会让产物多出一层 `if True:`、让"过表"与"直接渲染"两份产物对不上。
     # 老表（有 `True`、没有 `Nest`）照样能读：渲染退回老推断，而它要的正是那些 `True`。
     for beat in beats:
-        _append_text_row(ws, beat.to_row(symbols))
+        _append_text_row(ws, beat.to_row(symbols, spec_fields=spec_headers))
+
+    # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
+    _annotate_spec_heads(ws, beats, statements)
+    # 每参数一列的**原生下拉**（M4 第二阶段）
+    _write_spec_arg_columns(ws, beats, statements, len(beats))
 
     # 列宽：台词最宽，技术列压窄。'ContentHash' 是协作指纹，给程序员看的，
     # 压到 12 并放到最后一列，避免它跟内容列抢视觉重心。
@@ -113,6 +292,12 @@ def export_beats_to_excel(beats: list, output_path,
               'ContentHash': 12}
     for i, name in enumerate(BEAT_FIELDS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(name, 16)
+    # 动态列（每参数一列）的列宽：按"参数名 + 候选"估，最少 14 ——
+    # 它们默认可见（要给人填、给下拉），不能像内部列那样压到 8。
+    for k, col in enumerate(spec_cols):
+        letter = get_column_letter(len(BEAT_FIELDS) + k + 1)
+        hint = max([len(col['param'])] + [len(c) for c in col['choices']] or [0])
+        ws.column_dimensions[letter].width = max(14, min(30, hint + 6))
     # 内部元数据列整列隐藏（见 HIDDEN_BEAT_COLUMNS 的说明）：
     # 数据照旧读写，只是不占策划的视线。
     _hide_columns(ws, HIDDEN_BEAT_COLUMNS)
@@ -121,7 +306,8 @@ def export_beats_to_excel(beats: list, output_path,
     ws.freeze_panes = 'G2'
     # 每行按内容估高：多行的 Stage/CodeBlock 不设高会被压成一行看不清
     _autosize_beat_rows(ws, len(beats))
-    ws.auto_filter.ref = f'A1:{get_column_letter(len(BEAT_FIELDS))}{max(len(beats) + 1, 2)}'
+    _last_col = get_column_letter(len(BEAT_FIELDS) + len(spec_cols))
+    ws.auto_filter.ref = f'A1:{_last_col}{max(len(beats) + 1, 2)}'
 
     if registry is not None and include_dropdowns:
         ranges = _write_candidate_sheets(wb, registry)
@@ -586,6 +772,115 @@ def thumb_cache_dir():
     return d
 
 
+def thumb_cache_file(key: str, base=None):
+    """
+    缓存键 → 磁盘上的缩略图路径（**两级分片**，两级都是键的哈希前缀）。
+
+    为什么不放在一个平目录里（2026-10-05 实测）：真实项目跑了几轮之后
+    `%TEMP%\\renpy_sge_thumbs` 里堆了 **140886 个 PNG**。NTFS 单目录上万条
+    之后，每次 `is_file()` 都要在那张巨大的索引里找 —— 命中缓存的"温解码"
+    也因此变慢，而这笔代价**每一张缩略图都要付一次**。
+    分片成 `<ab>/<cd>/<digest>.png` 之后每层最多几千条，查找恢复常数级。
+
+    `base` 不给就用 `thumb_cache_dir()`。**留这个参数是为了保住测试/调用方的
+    注入点**：`app.thumbs` 把 `thumb_cache_dir` 导进了自己的命名空间，
+    测试用 `monkeypatch.setattr(thumbs, 'thumb_cache_dir', ...)` 换目录 ——
+    这里若不接受 base，那条缝就断了（缓存会悄悄写到真实 %TEMP%）。
+
+    ⚠ 旧版平铺文件（`<digest>.png`）**不再被新键命中** —— 由
+    `prune_thumb_cache` 顺手清掉。
+    """
+    import hashlib
+    digest = hashlib.md5(str(key).encode('utf-8', 'replace')).hexdigest()
+    d = base if base is not None else thumb_cache_dir()
+    if d is None:
+        return None
+    return Path(d) / digest[:2] / digest[2:4] / (digest + '.png')
+
+
+def prune_thumb_cache(max_files: int = 20000, max_age_days: int = 45,
+                      extra_dirs=None, budget_s: float = 2.0,
+                      max_delete: int = 3000) -> int:
+    """
+    缩略图缓存**自我清理**：返回删掉的文件数。
+
+    两条线（先按年龄、再多退少补按数量）：
+
+      · 超过 `max_age_days` 没被用过的（mtime 老）→ 删；
+      · 仍然超过 `max_files` 的 → 从最老的开始删到线以下。
+
+    为什么要它（2026-10-05 实测）：缓存**从不过期也从不清理**，真实项目
+    跑几轮就攒到 14 万个文件、几百 MB，而且把一个临时目录塞满对用户是
+    "工具的锅"（系统清理工具也会来扫）。缓存本来就是**可再生的**，
+    删掉只是下次多花一次解码。
+
+    ⚠ **扫描必须有预算**（`budget_s`）：14 万条 `rglob + stat` 要十几秒，
+    而它是在后台线程跑的 —— 一旦每开一个面板就来一遍，测试和界面都会被
+    拖住（实测 pytest 直接卡住）。所以：
+
+      · 用 `os.scandir`（比 `Path.rglob` 快得多，`stat` 结果随条目带回）；
+      · 超过预算就**停止扫描**，只清已经收上来的那批（下一次再继续）；
+      · 调用方（`ui_qt.thumb_loader`）另外保证**一个进程只跑一次**。
+    """
+    import os
+    import time
+    removed = 0
+    try:
+        d = thumb_cache_dir()
+        if d is None:
+            return 0
+        roots = [d] + [Path(x) for x in (extra_dirs or ()) if x]
+        deadline = time.monotonic() + max(0.1, float(budget_s))
+        files = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            stack = [str(root)]
+            while stack:
+                if time.monotonic() > deadline:
+                    break
+                cur = stack.pop()
+                try:
+                    with os.scandir(cur) as it:
+                        for entry in it:
+                            if time.monotonic() > deadline:
+                                break
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    stack.append(entry.path)
+                                elif entry.name.endswith('.png'):
+                                    files.append((entry.stat().st_mtime,
+                                                  Path(entry.path)))
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+        if not files:
+            return 0
+        files.sort()                                  # 最老的在前
+        cutoff = time.time() - max(1, int(max_age_days)) * 86400
+        keep_tail = max(0, int(max_files))
+        # 过期的先删；剩下的仍然超标就从最老那头继续删
+        doomed = [p for (m, p) in files if m < cutoff]
+        rest = [p for (m, p) in files if m >= cutoff]
+        if len(rest) > keep_tail:
+            doomed.extend(rest[:len(rest) - keep_tail])
+        for p in doomed:
+            if removed >= max(0, int(max_delete)):
+                # **每次只删一批**：14 万个文件的 unlink 要几分钟，
+                # 一次性删完会把磁盘占满、把正在解码的那几张拖慢。
+                # 剩下的留给下一次会话（缓存是可再生的，不急）。
+                break
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                continue
+    except Exception as e:                            # noqa: BLE001
+        swallow('story.excel_export.prune_thumb_cache', e)
+    return removed
+
+
 
 #: 兼容旧名：`story.script_table` 门面以 `_resolve_thumb_source` 转发它；
 #: UI 侧的缩略图加载器走公开名（见 `ui/thumb_loader.py`）。
@@ -613,13 +908,9 @@ def _thumbnail_bytes(path, project_root=None):
         st = real.stat()
         key = '%s|%s|%s|%s' % (real, int(st.st_mtime), st.st_size,
                                _GALLERY_THUMB_PX)
-        import hashlib
-        digest = hashlib.md5(key.encode('utf-8', 'replace')).hexdigest()
-        cdir = thumb_cache_dir()
-        if cdir is not None:
-            cache_file = cdir / (digest + '.png')
-            if cache_file.is_file():
-                return cache_file.read_bytes()
+        cache_file = thumb_cache_file(key)
+        if cache_file is not None and cache_file.is_file():
+            return cache_file.read_bytes()
     except OSError:
         cache_file = None
     try:
@@ -640,6 +931,7 @@ def _thumbnail_bytes(path, project_root=None):
         return None
     if cache_file is not None:
         try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_bytes(data)
         except OSError as e:
             swallow('excel_export._thumbnail_bytes', e)

@@ -45,10 +45,10 @@
     "ok": true,
     "engine": "godot",
     "strict": false,
-    "generated_at": "2026-09-28T21:13:35",
+    "generated_at": "2026-10-05T18:00:24",
     "stats": {
       "scripts": [
-        "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\game\\script\\ch01.rpy"
+        "demo\\game\\script\\ch01.rpy"
       ],
       "lines": 4,
       "labels": 1,
@@ -64,9 +64,9 @@
       }
     },
     "artifacts": [
-      "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\godot\\story_ir.json",
-      "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\godot\\STORY_IR.json",
-      "D:\\千连万理\\Renpy_Story_Graph_Editor\\demo\\build\\godot\\dialogue_importer.gd"
+      "demo\\build\\godot\\story_ir.json",
+      "demo\\build\\godot\\GodotDialogueData.json",
+      "demo\\build\\godot\\dialogue_importer.gd"
     ],
     "guard": {}
   }
