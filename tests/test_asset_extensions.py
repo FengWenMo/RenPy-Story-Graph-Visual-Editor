@@ -211,11 +211,22 @@ class TestRenamePatch:
     def test_replaces_with_word_boundary(self, write_rpy):
         fp = write_rpy('show hero\nshow hero_happy\n')
         result = generate_rename_patch('hero', 'protagonist', [fp],
-                                       dry_run=False, backup=False)
+                                       dry_run=False, backup=False,
+                                       confirm=True)
         text = fp.read_text(encoding='utf-8')
         assert 'protagonist' in text
         assert 'hero_happy' in text
         assert result['modified']
+
+    def test_without_confirmation_writes_nothing(self, write_rpy):
+        """`dry_run=False` 也**不再**等于"会写"：必须 `confirm=True`（D3'）。"""
+        fp = write_rpy('show hero\n')
+        before = fp.read_text(encoding='utf-8')
+        result = generate_rename_patch('hero', 'x', [fp], dry_run=False,
+                                       backup=False)
+        assert result['ok'] is False and result['reason'] == 'needs_confirmation'
+        assert result['modified'] == []
+        assert fp.read_text(encoding='utf-8') == before
 
     def test_no_match_returns_empty(self, write_rpy):
         fp = write_rpy('nothing here\n')
@@ -229,7 +240,8 @@ class TestRenamePatch:
 
     def test_backup_created(self, write_rpy):
         fp = write_rpy('show hero\n')
-        generate_rename_patch('hero', 'x', [fp], dry_run=False, backup=True)
+        generate_rename_patch('hero', 'x', [fp], dry_run=False, backup=True,
+                              confirm=True)
         assert fp.with_suffix(fp.suffix + '.bak').exists()
 
 
@@ -422,7 +434,8 @@ class TestWorkspace:
                             asset_env['project_root'])
         ws.load(script_files=[script])
         result = ws.rename_asset_in_scripts('bgm_theme', 'theme_song',
-                                            [script], dry_run=False)
+                                            [script], dry_run=False,
+                                            confirm=True)
         assert 'theme_song' in script.read_text(encoding='utf-8')
         assert result['modified']
 

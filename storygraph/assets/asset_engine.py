@@ -42,6 +42,7 @@ from storygraph.assets.asset_events import (
     AssetEventType,
     AssetFileWatcher,
     ConfirmationGate,
+    ConfirmationRequest,
 )
 
 # 脚本解析可选依赖
@@ -72,37 +73,23 @@ class _Change:
 
 # ===================== 脚本重命名补丁 =====================
 
-def _apply_rename_patch(old_id: str, new_id: str,
-                        script_files: Iterable, backup: bool = True) -> dict:
-    """在脚本文件中替换 old_id -> new_id（词边界正则，避免部分匹配）。"""
-    pattern = re.compile(r'(?<![\w])' + re.escape(old_id) + r'(?![\w])')
-    modified = []
-    matched = []
+def _apply_rename_patch(old_id: str, new_id: str, script_files,
+                        backup: bool = True, confirm: bool = False) -> dict:
+    """
+    ⚠ 兼容壳：**真正的实现在 `asset_extensions`**（词边界重命名的唯一真源）。
 
-    for fp in script_files:
-        fp = Path(fp)
-        if not fp.exists():
-            continue
-        try:
-            text = fp.read_text(encoding='utf-8')
-        except Exception as e:
-            swallow('assets.asset_engine._apply_rename_patch', e)
-            continue
-        if not pattern.search(text):
-            continue
-        matched.append(str(fp))
-        if backup:
-            try:
-                shutil.copy2(fp, fp.with_suffix(fp.suffix + '.bak'))
-            except Exception as e:
-                swallow('asset_engine._apply_rename_patch', e)
-        try:
-            fp.write_text(pattern.sub(new_id, text), encoding='utf-8')
-            modified.append(str(fp))
-        except Exception as e:
-            swallow('asset_engine._apply_rename_patch', e)
+    `confirm=False`（默认）**不写盘** —— 只算 diff，把计划原样带回来
+    （`{'ok': False, 'reason': 'needs_confirmation', 'plan': …}`）。
+    这是用户 2026-10-08 定的 D3' 契约：**默认不碰用户的原始文件**，先看 diff、
+    确认后才写、写前留备份可回滚。
+    """
+    from storygraph.assets.asset_extensions import (apply_rename_patch,
+                                                    plan_rename_patch)
 
-    return {'modified': modified, 'matched_files': matched}
+    plan = plan_rename_patch(old_id, new_id, script_files)
+    res = apply_rename_patch(plan, confirm=confirm, backup=backup)
+    res.setdefault('plan', plan)
+    return res
 
 
 # ===================== 资产引擎 =====================
@@ -818,6 +805,16 @@ class AssetEngine:
                 continue
             refs = self._resolve_refs(ch.asset_id)
             request = self.gate.needs_confirmation(ch.kind, ref_count=len(refs))
+            if request is None and ch.kind == 'renamed' and refs and self.script_files:
+                # ⚠ **D3'（2026-10-08）**：一次改名会**改写用户的 .rpy** ——
+                # 那不能只看"引用数超没超阈值"（阈值内原来是**静默自动改**）。
+                # "会动用户文件"本身就构成要确认的理由。
+                request = ConfirmationRequest(
+                    reason='script_patch',
+                    summary=(f'重命名 {ch.asset_id} → {ch.new_id} 会改写脚本里的 '
+                             f'{len(refs)} 处引用'),
+                    details={'ref_count': len(refs), 'old_id': ch.asset_id,
+                             'new_id': ch.new_id})
             if request is not None:
                 pending.append((ch, request))
 
@@ -887,12 +884,21 @@ class AssetEngine:
             })
             return
 
-        result = _apply_rename_patch(
-            old_id=ch.asset_id,
-            new_id=ch.new_id,
-            script_files=self.script_files,
-            backup=True,
-        )
+        # —— 改名补丁：**先算 diff，确认后才写**（D3'，2026-10-08）——
+        # 默认**不碰用户的原始文件**：`apply_rename_patch` 在 `confirm=False`
+        # 时一个字节都不写，只把预览带回来。
+        from storygraph.assets.asset_extensions import (apply_rename_patch,
+                                                       plan_rename_patch)
+        plan = plan_rename_patch(ch.asset_id, ch.new_id, self.script_files)
+        result = apply_rename_patch(plan, confirm=bool(approved), backup=True)
+        if plan['files'] and not result['modified']:
+            # 有东西要改却一个字节都没写 → **必须说出口**，别让人以为改了
+            self._emit(AssetEventType.ENGINE_NOTICE, {
+                'info': 'rename_patch_skipped',
+                'message': (f'未确认：{ch.asset_id} → {ch.new_id} 会改写 '
+                            f'{len(plan["files"])} 个脚本 / '
+                            f'{plan["total_lines"]} 行 —— **没有改动任何文件**'),
+            })
 
         # 补丁后立即让缓存失效并重建引用，保证一致性
         if result['modified']:
@@ -907,6 +913,8 @@ class AssetEngine:
             'new_id': ch.new_id,
             'ref_count': len(refs),
             'modified_files': result['modified'],
+            'planned_files': plan['matched_files'],
+            'planned_lines': plan['total_lines'],
         })
 
     def _handle_removed(self, ch: _Change, refs: list, approved: bool = True):

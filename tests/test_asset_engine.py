@@ -426,11 +426,21 @@ class TestRenameApplication:
     def test_patch_replaces_word_boundary_only(self, write_rpy):
         fp = write_rpy('show hero\nshow hero_happy\n$ hero = 1\n')
         result = _apply_rename_patch('hero', 'protagonist', [fp],
-                                     backup=False)
+                                     backup=False, confirm=True)
         text = fp.read_text(encoding='utf-8')
         assert 'protagonist' in text
         assert 'hero_happy' in text          # 不应被部分替换
         assert result['modified'] == [str(fp)]
+
+    def test_patch_without_confirmation_writes_nothing(self, write_rpy):
+        """**默认不碰用户文件**（D3'）：没确认 → 一个字节都不写。"""
+        fp = write_rpy('show hero\n')
+        before = fp.read_text(encoding='utf-8')
+        result = _apply_rename_patch('hero', 'x', [fp], backup=False)
+        assert result['ok'] is False and result['reason'] == 'needs_confirmation'
+        assert result['modified'] == []
+        assert result['plan']['total_lines'] == 1      # 但**算出了**要改什么
+        assert fp.read_text(encoding='utf-8') == before
 
     def test_dry_run_does_not_write(self, write_rpy):
         """预览模式只能告诉我们哪些文件会变，不落盘。"""
@@ -445,7 +455,7 @@ class TestRenameApplication:
 
     def test_patch_backup_created(self, write_rpy):
         fp = write_rpy('show hero\n')
-        _apply_rename_patch('hero', 'x', [fp], backup=True)
+        _apply_rename_patch('hero', 'x', [fp], backup=True, confirm=True)
         assert fp.with_suffix(fp.suffix + '.bak').exists()
 
     def test_patch_missing_file_skipped(self, tmp_path):

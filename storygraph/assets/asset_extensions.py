@@ -340,61 +340,141 @@ class DependencyAnalyzer:
 
 
 # ===================== 4. 重命名 / 移动的脚本补丁 =====================
+#
+# **两段式契约（2026-10-08，用户 D3' 决策）**：默认**不碰用户的原始文件**。
+#
+#   ① `plan_rename_patch` —— 纯函数，算出"哪些文件、哪些行会变"，**不写盘**；
+#   ② `apply_rename_patch` —— **只有 `confirm=True` 才写**（否则原样退回计划）。
+#
+# 为什么要拆（而不是"算完就写"）：改 `.rpy` 是**不可逆地改别人的东西**。
+# "先展示 diff → 人确认 → 再写，且可回滚"是成熟范式（预演 / 审批 / 事务回滚），
+# 也与本项目 B1/B2 一贯口径一致（"要么全对要么完全不动"）。
+# `rollback_rename_patch` 用写前备份逐位还原。
+#
+# ⚠ 这是**唯一**的词边界重命名实现：`asset_engine._apply_rename_patch` 只是
+# 转发到这儿（此前两处各写了一遍）。
 
-def generate_rename_patch(
-    old_id: str,
-    new_id: str,
-    script_files: Iterable,
-    dry_run: bool = False,
-    backup: bool = True,
-) -> dict:
+def _rename_pattern(old_id: str):
+    """词边界匹配：`hero` 不匹配 `hero_happy`（避免部分匹配改坏别人的资源名）。"""
+    return re.compile(r'(?<![\w])' + re.escape(str(old_id)) + r'(?![\w])')
+
+
+def plan_rename_patch(old_id: str, new_id: str, script_files) -> dict:
     """
-    在脚本文件中把 old_id 的引用替换为 new_id。
-    使用词边界避免部分匹配（如 'hero' 不匹配 'hero_happy'）。
+    算改名补丁的**预览**（纯函数，绝不写盘）。
 
-    返回：
-        {
-          'modified':      [已修改文件路径],
-          'matched_files': [包含引用的文件路径],
-          'dry_run':       bool,
-        }
+    返回 `{'ok','old_id','new_id','files','matched_files','total_lines'}`；
+    `files[i]['changed']` 是 `[(行号, 旧行, 新行), …]`（行号 1 起，方便人对着看）。
     """
-    pattern = re.compile(r'(?<![\w])' + re.escape(old_id) + r'(?![\w])')
-    modified = []
-    matched_files = []
-
+    pattern = _rename_pattern(old_id)
+    files = []
     for fp in script_files:
         fp = Path(fp)
         if not fp.exists():
             continue
         try:
             text = fp.read_text(encoding='utf-8')
-        except Exception as e:
-            swallow('assets.asset_extensions.generate_rename_patch', e)
+        except Exception as e:                      # noqa: BLE001
+            swallow('assets.asset_extensions.plan_rename_patch', e)
             continue
         if not pattern.search(text):
             continue
-        matched_files.append(str(fp))
-        if dry_run:
-            continue
-        if backup:
-            backup_path = fp.with_suffix(fp.suffix + '.bak')
-            try:
-                shutil.copy2(fp, backup_path)
-            except Exception as e:
-                swallow('asset_extensions.generate_rename_patch', e)
-        new_text = pattern.sub(new_id, text)
-        try:
-            fp.write_text(new_text, encoding='utf-8')
-            modified.append(str(fp))
-        except Exception as e:
-            swallow('asset_extensions.generate_rename_patch', e)
-
+        new_text = pattern.sub(str(new_id), text)
+        changed = [(i, a, b)
+                   for i, (a, b) in enumerate(
+                       zip(text.splitlines(), new_text.splitlines()), 1)
+                   if a != b]
+        files.append({'path': str(fp), 'changed': changed,
+                      'old_text': text, 'new_text': new_text})
     return {
-        'modified': modified,
-        'matched_files': matched_files,
-        'dry_run': dry_run,
+        'ok': True,
+        'old_id': str(old_id), 'new_id': str(new_id),
+        'files': files,
+        'matched_files': [f['path'] for f in files],
+        'total_lines': sum(len(f['changed']) for f in files),
     }
+
+
+def apply_rename_patch(plan, *, confirm: bool = False,
+                       backup: bool = True) -> dict:
+    """
+    把预览写进磁盘 —— **`confirm=False` 时一个字节都不写**（返回 `needs_confirmation`）。
+
+    `backup=True`（默认）先把每个文件复制成 `<名>.bak`，供
+    `rollback_rename_patch` 逐位还原。
+    """
+    if not isinstance(plan, dict) or not plan.get('files'):
+        return {'ok': True, 'reason': 'nothing_to_do', 'modified': [],
+                'matched_files': list((plan or {}).get('matched_files') or []),
+                'backup_files': [], 'dry_run': not confirm}
+    if not confirm:
+        return {'ok': False, 'reason': 'needs_confirmation', 'modified': [],
+                'matched_files': list(plan.get('matched_files') or []),
+                'backup_files': [], 'dry_run': True, 'plan': plan}
+
+    modified, backups = [], []
+    for f in plan['files']:
+        fp = Path(f['path'])
+        if backup:
+            bak = fp.with_suffix(fp.suffix + '.bak')
+            try:
+                shutil.copy2(fp, bak)
+                backups.append(str(bak))
+            except Exception as e:                  # noqa: BLE001
+                swallow('assets.asset_extensions.apply_rename_patch.backup', e)
+        try:
+            fp.write_text(f['new_text'], encoding='utf-8')
+            modified.append(str(fp))
+        except Exception as e:                      # noqa: BLE001
+            swallow('assets.asset_extensions.apply_rename_patch', e)
+    return {'ok': True, 'reason': '', 'modified': modified,
+            'matched_files': list(plan.get('matched_files') or []),
+            'backup_files': backups, 'dry_run': False}
+
+
+def rollback_rename_patch(apply_result) -> dict:
+    """
+    用备份**逐位还原**（`apply_rename_patch` 的逆操作）。返回 `{'restored','failed'}`。
+
+    只认 `.bak`（写前那一份），不做任何"智能回推" —— 回滚必须是确定性的。
+    """
+    restored, failed = [], []
+    for bak in list((apply_result or {}).get('backup_files') or []):
+        bak = Path(bak)
+        target = Path(str(bak)[:-4])            # 去掉 `.bak`
+        try:
+            if bak.is_file():
+                shutil.copy2(bak, target)
+                restored.append(str(target))
+        except Exception as e:                      # noqa: BLE001
+            swallow('assets.asset_extensions.rollback_rename_patch', e)
+            failed.append(str(target))
+    return {'restored': restored, 'failed': failed}
+
+
+def generate_rename_patch(
+    old_id: str,
+    new_id: str,
+    script_files,
+    dry_run: bool = False,
+    backup: bool = True,
+    confirm: bool = False,
+) -> dict:
+    """
+    兼容门面：`plan_rename_patch` + `apply_rename_patch`。
+
+    返回形状保持老样子（`modified` / `matched_files` / `dry_run`），另多带
+    `plan` 与 `reason`。⚠ **`dry_run=False` 也不再等于"会写"** —— 要写必须
+    `confirm=True`（默认不碰用户文件，这是 D3' 定的契约）。
+    """
+    plan = plan_rename_patch(old_id, new_id, script_files)
+    if dry_run:
+        return {'modified': [], 'matched_files': plan['matched_files'],
+                'dry_run': True, 'ok': True, 'reason': 'dry_run', 'plan': plan}
+    res = apply_rename_patch(plan, confirm=confirm, backup=backup)
+    return {'modified': res['modified'], 'matched_files': res['matched_files'],
+            'dry_run': False, 'ok': res['ok'], 'reason': res['reason'],
+            'plan': plan}
 
 
 # ===================== 5. 自动补全 =====================
@@ -690,10 +770,17 @@ class AssetWorkspace:
         new_id: str,
         script_files: Iterable,
         dry_run: bool = False,
+        confirm: bool = False,
     ) -> dict:
-        """在脚本中批量替换 old_id -> new_id，返回执行摘要"""
+        """
+        在脚本中批量替换 old_id -> new_id，返回执行摘要。
+
+        ⚠ **`dry_run=False` 也不再等于"会写"**：要写必须 `confirm=True`
+        （D3' 契约 —— 默认不碰用户的原始文件，先看 diff 再确认）。
+        """
         return generate_rename_patch(
-            old_id, new_id, script_files, dry_run=dry_run, backup=True
+            old_id, new_id, script_files, dry_run=dry_run, backup=True,
+            confirm=confirm
         )
 
     def preview_rename(self, old_id: str, new_id: str,

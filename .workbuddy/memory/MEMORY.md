@@ -39,8 +39,8 @@
 
 ### ❌ 未做（真缺口；里程碑与验收见 `docs/路线图_长期目标_2026-10-08.md`）
 1. **两套 `.rpy` 生成器并存（D2，M1 🔵 进行中）**：`renpy_exporter.export_to_renpy`（控制流）与 `beat_render.render_beats_to_rpy`（剧本）**都在生产路径**。✅ 第一步已做：控制流导出改走 `write_generation(ensure_generator_marker(text), …)`（原来裸 `open(...,'w')` 绕过门禁）。☐ 待做：ownership 文档 + "唯一写盘入口"守卫。
-2. **`asset_engine._apply_rename_patch` 正则改写用户 `.rpy`（D3，M2 ⚪）**：⚠ 实测**当前不可达** —— `AssetEngine` 在 `ui_qt` 里从不构造（只被测试/直接 API 触发）→ 风险是**潜在**的。修法=M2（diff→确认→写）+ 决定 AssetEngine 是否接进 Qt。
-3. **Excel 前端上限（D4，M3 ⚪）**：`Stage` 列是**刻意多行列**且不在 `DROPDOWN_COLUMNS` → 无格级下拉；候选表整表重建；导出无增量。
+2. ~~`asset_engine._apply_rename_patch` 正则改写用户 `.rpy`~~ **已修（M2，2026-10-08）**：两段式契约 `plan_rename_patch`（纯，算 diff）→ `apply_rename_patch(confirm=…)`（**未确认零写**）→ `rollback_rename_patch`（逐位还原）；唯一真源在 `assets/asset_extensions.py`；引擎"会改脚本的改名"**一律**进批量确认。判据 `tests/test_hell_rename_confirm_gate.py`（11 条 + 突变验证）。⚠ 按 D3' **未接 Qt**。
+3. **Excel 前端上限（D4，M3 🔵 清单已定）**：`Stage` 是刻意多行列且不在 `DROPDOWN_COLUMNS` → 无格级下拉。**方案 B 已定**（每指令一列，复用 `spec_args`）：动词×序号建列（`舞台·显示`/`舞台·显示2`…），**顺序仍由 `StageOrder`/`OpOrder` 承载**，`Stage` 列降级为只读复合视图；落地顺序 pause→with→hide→scene→show。清单见路线图 M3-1。
 4. **坏味道（D5，M4 ⚪）**：`sync_asset_tables` 圈复杂 **133** / `renpy_parser` **4360 行** / `RenPyParser` **50 方法** / `noqa: BLE001` **336**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
 6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
