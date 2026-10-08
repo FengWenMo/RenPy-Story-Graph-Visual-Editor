@@ -75,7 +75,7 @@ def _option_line(opt, condition: str, indent: str) -> str:
     cond_str = f" if {condition}" if condition else ""
     return f'{indent}{quote_string(opt)}{cond_str}:'
 
-def export_to_renpy(graph, filepath, wrapper=None):
+def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
     """
     把剧情图写成 Ren'Py 控制流脚本。
 
@@ -222,11 +222,32 @@ def export_to_renpy(graph, filepath, wrapper=None):
                     lines.append("    return")
         lines.append("")
 
-    try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines))
+    text = '\n'.join(lines)
+    # ⚠ 落盘一律过**生成门禁**（契约 B1，2026-10-08 修）。
+    #
+    # 这里以前是裸 `open(filepath, 'w')` —— 等于把门禁漏在门外：控制流脚本
+    # 同样会进 `game/`，同样可能 ① 生成的 `xxx_control` 与项目里别的 .rpy
+    # label 重名（Ren'Py 把 game/ 下所有 .rpy 当同一个脚本，重名**游戏直接
+    # 起不来**）② 覆盖一个手写文件（把作者的 `default`/`define` 静默抹掉）。
+    # `write_generation` 会把产物首行写成 `GENERATOR_MARKER`（于是"再导出
+    # 一次"仍被放行），命中 block 级问题时**不写目标路径**、改写
+    # `<stem>.blocked.rpy` 供对照。
+    from storygraph.story.generation_guard import (ensure_generator_marker,
+                                                   write_generation)
+    # ⚠ **标记必须在写盘前确保**（`ensure_generator_marker`）：护栏靠"首行有没有
+    # 标记"判断已存在的文件是不是工具写的；不带标记的话，第二次导出会被判成
+    # "手写文件"而**必然失败**（"再导出一次"的正常操作被拦）。
+    artifact = write_generation(ensure_generator_marker(text), filepath,
+                                project_root=project_root)
+    if artifact.written:
         notify.info(f"控制流已写入 {filepath}\n"
                     f"请确保对应的剧本 label 末尾有 return。",
                     title="导出成功")
-    except Exception as e:
-        notify.error(str(e), title="导出失败")
+    else:
+        why = '；'.join(i.format() for i in (artifact.blocking or [])[:3])
+        notify.error(
+            f'控制流**没有**写进目标路径（生成的脚本会让游戏跑不起来）'
+            f'{("：" + why) if why else ""}\n'
+            f'对照副本：{artifact.review_path}',
+            title="导出被拦下")
+    return artifact

@@ -31,6 +31,7 @@ import re
 from contextlib import suppress
 from pathlib import Path
 
+from storygraph.core.safeguard import swallow
 from storygraph.story.stage_snapshot import stage_snapshots
 
 SCHEMA_VERSION = '1.0'
@@ -449,8 +450,10 @@ def export_ir(engine: str, beats, out_dir, registry=None,
         try:
             old = json.loads(neutral_path.read_text(encoding='utf-8'))
             ir = _merge_ir(old, ir)
-        except (OSError, ValueError, UnicodeDecodeError):
-            pass                       # 坏文件不挡新导出（会被下面覆盖成好的）
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            # 坏文件不挡新导出（下面会把它覆盖成好的）—— 但要**留痕**（M6：
+            # 全仓不许 `except: pass`，health_check 会抓）。
+            swallow('pipeline.engine_exporters.export_ir.merge', e)
     written = []
 
     written.append(_write_json(ir, neutral_path))

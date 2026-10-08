@@ -16,6 +16,8 @@ tests/test_exporter.py
 
 import pytest
 
+from pathlib import Path
+
 from storygraph.graph.models import Graph
 from storygraph.pipeline.renpy_exporter import export_to_renpy
 
@@ -172,9 +174,16 @@ class TestExport:
 
         判据：导出产物里那几行 == `beat_render.render_code_block` 的输出
         （带控制流那条路的 `multiline='python'` 取法）。
+
+        ⚠ **判据校准（2026-10-08）**：这里原来用 `'\\x01'` 当"紧凑 `$`"的
+        标记 —— 那是**过期**的（真标记 `core.statement.MARKER = '\\ue000'`，
+        `\\x01` 是更早的实现）。控制流导出接上生成门禁之后，产物里那个字面
+        `\\x01` 被 `PYTHON_SYNTAX_ERROR` 判成 block（**门禁是对的**：`.rpy`
+        里出现 `U+0001` 就是坏文件）。改用真标记。
         """
+        from storygraph.core.statement import MARKER
         from storygraph.story.beat_render import render_code_block
-        ops = ['love = 5', '\x01persistent.a = True', 'x = 1\ny = 2',
+        ops = ['love = 5', MARKER + 'persistent.a = True', 'x = 1\ny = 2',
                'with dissolve']
         g = Graph()
         g.add_node('a', 0, 0, operations=list(ops))
@@ -183,6 +192,39 @@ class TestExport:
             for ln in render_code_block(op, multiline='python'):
                 if str(ln).strip():
                     assert f'    {ln}' in text, (op, ln, text)
+        # 产物里**不许**出现控制字符（上一条判据换成真标记的副产品）
+        assert '\x01' not in text
+
+    def test_control_flow_export_goes_through_the_generation_gate(self,
+                                                                 tmp_path):
+        """
+        **控制流导出也要过生成门禁**（2026-10-08，契约 B1）。
+
+        它以前是裸 `open(path, 'w')` —— 于是"目标是一个手写 .rpy"时会被
+        静默覆盖（`default`/`define` 全丢），label 重名也不报。
+        """
+        out = tmp_path / 'handwritten.rpy'
+        out.write_text('# 我手写的\nlabel mine:\n    return\n', encoding='utf-8')
+        g = Graph()
+        g.add_node('a', 0, 0)
+        artifact = export_to_renpy(g, out)
+        assert artifact.written is False, '手写文件被覆盖了'
+        assert out.read_text(encoding='utf-8').startswith('# 我手写的'), \
+            '目标文件被改动了'
+        assert artifact.blocking, '拦下却没有任何 blocking 说明'
+        # 对照副本要留着（不然人没法看产物长什么样）
+        assert artifact.review_path and Path(artifact.review_path).is_file()
+
+    def test_control_flow_export_is_allowed_to_overwrite_its_own_output(
+            self, tmp_path):
+        """工具自己生成的产物**必须能再导出一次**（带生成标记 → 不判手写）。"""
+        out = tmp_path / 'gen.rpy'
+        g = Graph()
+        g.add_node('a', 0, 0)
+        first = export_to_renpy(g, out)
+        assert first.written is True
+        second = export_to_renpy(g, out)
+        assert second.written is True, '再导出一次被误判成手写文件'
 
     def test_missing_target_node_skipped(self, export):
         """指向不存在节点的边不应写出坏 label。"""

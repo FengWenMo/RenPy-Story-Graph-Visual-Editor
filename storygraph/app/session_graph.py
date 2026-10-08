@@ -263,11 +263,21 @@ class GraphSessionMixin:
                     'error': f'导出路径不是路径：{target!r}（要给 .rpy 路径）',
                     'path': '', 'labels': [], 'count': 0}
         try:
-            export_to_renpy(graph, str(target), wrapper=wrapper)
+            artifact = export_to_renpy(graph, str(target), wrapper=wrapper,
+                                       project_root=self.project_root)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'path': str(target),
                     'labels': [], 'count': 0}
-        # `export_to_renpy` 自己吞掉写盘异常（只 notify），所以要看文件在不在
+        # **门禁拦下**（label 重名 / 目标是手写文件…）时目标路径**不会被写**，
+        # 只写一份 `<stem>.blocked.rpy` 供对照 —— 这时必须报失败，不许报
+        # "导出成功"（B1：门禁的结论要走到调用方）。
+        if artifact is not None and not getattr(artifact, 'written', True):
+            why = '；'.join(i.format() for i in (artifact.blocking or [])[:3])
+            return {'ok': False,
+                    'error': ('生成的脚本会让游戏跑不起来，已拒写目标路径'
+                              + (f'（{why}）' if why else '')),
+                    'path': str(getattr(artifact, 'review_path', None) or target),
+                    'labels': [], 'count': 0}
         if not Path(target).is_file():
             return {'ok': False, 'error': '文件没有生成（写盘失败？）',
                     'path': str(target), 'labels': [], 'count': 0}
