@@ -40,7 +40,11 @@
 ### ❌ 未做（真缺口；里程碑与验收见 `docs/路线图_长期目标_2026-10-08.md`）
 1. **两套 `.rpy` 生成器并存（D2，M1 🔵 进行中）**：`renpy_exporter.export_to_renpy`（控制流）与 `beat_render.render_beats_to_rpy`（剧本）**都在生产路径**。✅ 第一步已做：控制流导出改走 `write_generation(ensure_generator_marker(text), …)`（原来裸 `open(...,'w')` 绕过门禁）。☐ 待做：ownership 文档 + "唯一写盘入口"守卫。
 2. ~~`asset_engine._apply_rename_patch` 正则改写用户 `.rpy`~~ **已修（M2，2026-10-08）**：两段式契约 `plan_rename_patch`（纯，算 diff）→ `apply_rename_patch(confirm=…)`（**未确认零写**）→ `rollback_rename_patch`（逐位还原）；唯一真源在 `assets/asset_extensions.py`；引擎"会改脚本的改名"**一律**进批量确认。判据 `tests/test_hell_rename_confirm_gate.py`（11 条 + 突变验证）。⚠ 按 D3' **未接 Qt**。
-3. **Excel 前端上限（D4，M3 🔵 清单已定）**：`Stage` 是刻意多行列且不在 `DROPDOWN_COLUMNS` → 无格级下拉。**方案 B 已定**（每指令一列，复用 `spec_args`）：动词×序号建列（`舞台·显示`/`舞台·显示2`…），**顺序仍由 `StageOrder`/`OpOrder` 承载**，`Stage` 列降级为只读复合视图；落地顺序 pause→with→hide→scene→show。清单见路线图 M3-1。
+3. **Excel 前端上限（D4，M3 🔵 已审查，待实现）**：`Stage` 是刻意多行列且不在 `DROPDOWN_COLUMNS`。**方案 B 已定**，且**审查推翻了两处假设**（见路线图 M3-0）：
+   · `Stage` **已是派生视图**（`compose_stage` 合成）→ "只读复合视图"是现状；
+   · ⚠ **`StageOrder`/`OpOrder` 实测都带逐次序号**（`show#0,show#1`）—— 不是纯 verb 列表；顺序载体=**`OpOrder`**；
+   · ⚠ **`pause`/`with X`/`jump` 走 `raw` 通道，刻意不进 `Stage`** → 第一刀**不能**选 pause；
+   · **"一格多指令"真身 = `Show`/`Hide` 的 `;` 多值**（真机 1–4 项/拍）→ **第一切片 = `Show` 摊列**（第 2+ 项占 `立绘2…`，绑图像候选 DV），**模型与渲染不动**（`beat.show` 仍 `;` 连接）→ 渲染风险 0。清单见路线图 M3-2。
 4. **坏味道（D5，M4 ⚪）**：`sync_asset_tables` 圈复杂 **133** / `renpy_parser` **4360 行** / `RenPyParser` **50 方法** / `noqa: BLE001` **336**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
 6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
