@@ -261,10 +261,66 @@ def build_project(project_root, asset_dir=None, out_dir=None,
             # 放进构建报告，CI（`tools/journey_check.py` 走 CLI build）每次都会打。
             _st = getattr(collected.get('parse_result'), 'statements', None) or []
             if _st:
-                from storygraph.core.cst import cst_coverage, format_cst_report
-                statements_text = (
-                    f'{statements_text}\n'
-                    f'{format_cst_report(cst_coverage(_st), "语句")}')
+                from storygraph.core.cst import (cst_coverage, format_cst_report,
+                                                 overlaps)
+                cst_line = format_cst_report(cst_coverage(_st), "语句")
+                # `cst_attached` 从前**只写不读**（悬空）：它记的是"这一轮给多少条
+                # 语句挂上了真迹"。读出来才对得上 —— 挂载数 < 语句数就说明有一类
+                # 语句拿不到原文（真迹退化），得看得见。
+                _pr = collected.get('parse_result')
+                attached = int(getattr(_pr, 'cst_attached', 0) or 0)
+                if attached:
+                    cst_line += (f'（本次挂载 {attached} 条'
+                                 f'{"，有 " + str(len(_st) - attached) + " 条没挂上" if attached < len(_st) else ""}）')
+                # **重叠 span = 写回时必然打架**（文件级内部缺陷）—— 从前 `overlaps()`
+                # 只在单测里跑；接进构建报告，CI 每次都会打。
+                bad = overlaps(_st)
+                if bad:
+                    cst_line += (f'\n🚫 CST 原文区间重叠 {len(bad)} 处 —— '
+                                 f'写回时这些行会互相覆盖（这是工具内部缺陷，'
+                                 f'请附上复现报告）')
+                statements_text = f'{statements_text}\n{cst_line}'
+                # **"工具不认识的东西"点名**（CST 第二步，2026-10-07）：
+                # 缺声明就自动降级（没有参数列、只有形状保真），但**必须说出口** ——
+                # 不然"表里少了几列"永远没人发现，直到有人手工对账。
+                # 名单与判据都在 `describe_statements`（`cli describe` 同一个真源），
+                # 这里只负责把它塞进构建报告。
+                from storygraph.story.statement_registry import (
+                    describe_statements)
+                # ⚠ 传的是 `project_root`，**不是** `collected['registry']` ——
+                # 那个是**资产**注册表（`AssetRegistry`），不是语句注册表；
+                # 传错了 `describe_statements` 会抛、被上面的 swallow 吞掉，
+                # 这一行就永远不出现（第一版就是这么"静默缺席"的）。
+                _d = describe_statements(project_root=project_root,
+                                         statements=_st)
+                _guess = [r for r in _d['statements']
+                          if r['source'] == 'shape-guess']
+                if _guess:
+                    names = '、'.join(f"{r['name']}×{r['occurrences']}"
+                                      for r in _guess[:8])
+                    more = '' if len(_guess) <= 8 else f'…（共 {len(_guess)} 个）'
+                    statements_text = (
+                        f'{statements_text}\n'
+                        f'⚠ 未声明（只靠形状猜）：{names}{more}'
+                        f' —— 工具不知道它们的参数/约束，表里也不会有'
+                        f'"每参数一列"。写进 storygraph.rules.json 的 statements，'
+                        f'或让代码里有 renpy.register_statement'
+                        f'（见 docs/设计_自定义结构发现与交互_2026-10-07.md）')
+                # **项目级"工具不认识的结构"**（`project_conventions` 的第三层）：
+                # 全仓扫描（含没进这一轮编译的文件），回答编剧真正关心的问题
+                # ——"我剧本里哪一种结构工具管不了"。这套三层机制（认形状 /
+                # 让它声明 / 不认识就明说）先前**零生产调用**；接进构建报告后
+                # CI 每次都会打，它设计要回答的那个问题才真的有人看见。
+                from storygraph.story.project_conventions import (
+                    unknown_statements)
+                _unk = unknown_statements(project_root)
+                if _unk:
+                    _uh = '、'.join(f'{k}×{v["count"]}'
+                                    for k, v in list(_unk.items())[:8])
+                    _um = '' if len(_unk) <= 8 else f'…（共 {len(_unk)} 种）'
+                    statements_text = (
+                        f'{statements_text}\n'
+                        f'⚠ 工具不认识的语句头（全仓扫描）：{_uh}{_um}')
         except Exception as e:                  # noqa: BLE001
             swallow('pipeline.build.statements_report', e)
         guard_info = {

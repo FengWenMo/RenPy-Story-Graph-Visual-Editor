@@ -20,6 +20,140 @@ import sys
 from pathlib import Path
 
 
+def _cmd_diff3(args) -> int:
+    """
+    **表 vs 源码**的拍级对账（只读）：`story/beat_merge.three_way`（设计文档 §5 第 6 步）。
+
+    为什么要有这条命令：导出/覆盖之前，"表里到底改了什么"现在只能靠肉眼
+    或全量重生成 —— 有了它就能先看一眼（**冲突时它是说出口的唯一地方**）。
+    口径：`base` = 源码、`right` = 源码（同一份）→ 表侧的改动都会落进
+    `left_changed` / `conflicts`；源码侧没动，所以不会出现假冲突。
+
+    `--json` 出机器读的那份（`Delta.to_dict()`），方便接进 CI 或界面提示。
+    """
+    import json as _json
+
+    from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+    from storygraph.story.beat_build import beats_from_parse_result
+    from storygraph.story.beat_merge import format_report, three_way
+    from storygraph.story.excel_import import import_beats_from_excel
+
+    src = Path(args.source)
+    if not src.is_file():
+        print(f'找不到源码文件：{src}', file=sys.stderr)
+        return 2
+    xlsx = Path(args.excel) if args.excel else src.with_suffix('.xlsx')
+    if not xlsx.is_file():
+        print(f'找不到表文件：{xlsx}（先用 `table rpy2xlsx` 生成）',
+              file=sys.stderr)
+        return 2
+    pr, _extra = IncrementalRenPyAnalyzer().analyze(files=[src], graph=None)
+    from_source = beats_from_parse_result(pr)
+    from_table = import_beats_from_excel(xlsx)
+    delta = three_way(from_source, from_table, from_source)
+    if args.json:
+        print(_json.dumps(delta.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f'源码：{src}\n表：  {xlsx}')
+        print(format_report(delta))
+    return 0 if delta.clean else 1
+
+
+def _cmd_learn(args) -> int:
+    """
+    **把一条结构"教给"工具**：写进 `storygraph.rules.json` 的 `statements`
+    （设计文档 `docs/设计_自定义结构发现与交互_2026-10-07.md` §5 第 3 步）。
+
+    为什么要有个命令（而不是只写文档）：设计的核心一句是
+    **"得知必须落成一份可评审的文件"** —— 手改 JSON 当然也行，但那是
+    "知道格式的人"才敢做的事；这个入口让"教一次"变成一条谁都能跑的指令，
+    而且它**拒绝覆盖坏清单**（见 `declare_statement`），
+    所以不会把用户手写的东西弄丢。
+
+    参数里的参数形状写成 `名字[:标签[:候选,逗号隔开]]`，可以给多个
+    （`--param intensity:强度:1,2,3 --param target:目标`）。
+    """
+    import json as _json
+
+    from storygraph.story.statement_registry import declare_statement
+
+    columns = []
+    for spec in (args.param or ()):
+        parts = str(spec).split(':')
+        col = {'name': parts[0].strip()}
+        if len(parts) > 1 and parts[1].strip():
+            col['label'] = parts[1].strip()
+        if len(parts) > 2 and parts[2].strip():
+            col['choices'] = [c.strip() for c in parts[2].split(',')
+                              if c.strip()]
+        if col['name']:
+            columns.append(col)
+    block = None
+    if args.block:
+        block = True
+    elif args.no_block:
+        block = False
+
+    res = declare_statement(args.project, args.name, label=args.label,
+                            columns=columns, block=block, docs=args.docs)
+    if args.json:
+        print(_json.dumps(res, ensure_ascii=False, indent=2))
+    elif res['ok']:
+        verb = '更新' if res['action'] == 'updated' else '新增'
+        print(f'{verb}声明：{args.name}'
+              + (f'（{len(columns)} 个参数）' if columns else '')
+              + f'\n  写进：{res["path"]}'
+              + f'\n  现在 `describe` 会把它算作 declared。')
+    else:
+        print(f'没有写：{res["reason"]}', file=sys.stderr)
+    return 0 if res['ok'] else 1
+
+
+def _cmd_describe(args) -> int:
+    """
+    **把"工具以为的自定义结构"摊开**（设计文档 §2.1 的第一档接口，只读）。
+
+    为什么要有这个命令（用户 2026-10-07 问："工具如何得知自定义结构、
+    怎么和程序员直接交互调节"）：
+
+      · 没有它，人只能猜"工具到底认不认我的 `mycue`、认成什么档、凭什么"；
+      · 有了它，**认知可 diff**：把输出存进版本库，
+        `git diff --exit-code 现状.json` 就能抓住
+        "代码改了（CDS）、工具的认知没跟上"这种漂移 —— 这正是设计文档里
+        "C 反射负责防漂移"那一条的落地形态。
+
+    它**只读**：不写任何文件（要"调节"就改 `storygraph.rules.json` 的
+    `statements` 或代码里的 `renpy.register_statement`，然后重跑它）。
+    """
+    import json as _json
+
+    from storygraph.story.statement_registry import describe_statements
+
+    data = describe_statements(project_root=args.project)
+    if args.json:
+        print(_json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    s = data['summary']
+    print(f"项目：{data['project']}")
+    print(f"见过的语句头 {s['heads']} 个（已声明 {s['declared_heads']} / "
+          f"只靠猜 {s['guessed_heads']}）")
+    print(f"需要动作的 {s['needs_action']} 个")
+    print()
+    print(f"{'语句':<18}{'来源':<14}{'保真':<6}{'次数':>6}  参数 / 说明")
+    for r in data['statements'][:args.limit]:
+        cols = '，'.join(c['name'] for c in r['columns']) or '—'
+        src = {'declared': '声明', 'host-registry': 'CDS',
+               'shape-guess': '猜的'}.get(r['source'], r['source'])
+        print(f"{r['name']:<18}{src:<14}{r['fidelity']:<6}"
+              f"{r['occurrences']:>6}  {cols}")
+        for w in r['warnings']:
+            print(f"{'':<18}⚠ {w}")
+    hidden = len(data['statements']) - args.limit
+    if hidden > 0:
+        print(f'…（还有 {hidden} 个，用 --limit 调）')
+    return 0
+
+
 def _cmd_validate(args) -> int:
     """
     只体检：**不写盘**。
@@ -391,6 +525,37 @@ def build_parser() -> argparse.ArgumentParser:
                         help='单句台词字数上限，仅作提醒（W101）；设为 0 关闭该检查')
         sp.add_argument('--no-strict', dest='strict', action='store_false',
                         help='有错误也继续出产物')
+
+    sp = sub.add_parser('describe',
+                        help='摊开"工具以为的自定义结构"（只读，可 diff）')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--json', action='store_true',
+                    help='输出 JSON（存进版本库就能 diff 出认知漂移）')
+    sp.add_argument('--limit', type=int, default=40,
+                    help='非 JSON 模式下最多列几条（默认 40）')
+    sp.set_defaults(func=_cmd_describe)
+
+    sp = sub.add_parser('diff3',
+                        help='表 vs 源码的拍级对账（只读，冲突会说出来）')
+    sp.add_argument('source', help='源码 .rpy 路径')
+    sp.add_argument('--excel', default='', help='表 xlsx（默认同名 .xlsx）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.set_defaults(func=_cmd_diff3)
+
+    sp = sub.add_parser('learn',
+                        help='把一条自定义结构"教给"工具（写进 rules.json）')
+    sp.add_argument('name', help='语句名（如 mycue）')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--label', default='', help='给策划看的标签（可中文）')
+    sp.add_argument('--param', action='append', default=[],
+                    help='参数形状：名字[:标签[:候选1,候选2]]，可重复')
+    sp.add_argument('--block', action='store_true', help='这条语句有块体')
+    sp.add_argument('--no-block', action='store_true', help='这条语句没有块体')
+    sp.add_argument('--docs', default='', help='一句话说明')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.set_defaults(func=_cmd_learn)
 
     sp = sub.add_parser('validate', help='只做三级校验')
     add_build_args(sp)

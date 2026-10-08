@@ -852,33 +852,100 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     # 代码块（CodeBlock 后门）不在 op_order 里，按历史契约紧跟舞台之后
     # 输出——它内部有更细的 `beat.ordered`（raw/code 交错）负责保真。
     # "紧跟舞台之后"包含**舞台尾段**（见下面 `emit_stage_tail()` 的位置）。
-    _verb_ops = {'scene': lambda: emit_stage_verbs(['scene']),
-                 'show': lambda: emit_stage_verbs(['show']),
-                 'hide': lambda: emit_stage_verbs(['hide']),
-                 'audio': emit_audio, 'voice': emit_voice}
+    # **逐条**输出（缺口 4，2026-10-07 修）：token 形如 `(verb, idx)`，
+    # `idx=None` = verb 级（老表 / 补齐）→ 整组输出；有下标 → **只出那一条**。
+    #
+    # 从前这里只按 **verb 名**分组（`('show', ...)` 就把该拍所有 show 一次出完），
+    # 于是"两条同名 verb 中间夹着别的"根本表达不出来：
+    #
+    #     show A / hide B / show C   →   show A / show C / hide B
+    #
+    # 顺序被改；`show A / hide A / show A` 更狠 —— 去重 + 分组之后最后那条
+    # show 没了，**收尾画面与作者要的相反**。
+    tokens = beat.op_tokens_full()
+    plan = beat.unified_plan() if tokens else None
+    #: 舞台行只算一次（`_stage_lines` 里有一堆字符串处理，别每个 token 重算）
+    _stage_cache: list = []
 
-    tokens = [t for t in beat.order_tokens if t in _verb_ops]
-    if tokens:
-        # 老表/手工新增行可能只记了部分——把漏掉的 stage verb 按 StageOrder
-        # 补在后面，**绝不因为顺序信息不全就丢掉操作**。
+    def _stage_lines_once():
+        if not _stage_cache:
+            _stage_cache.append(
+                _stage_lines(beat, _resolver_for(audit, name_resolver)))
+        return {k: list(v) for k, v in _stage_cache[0].items()}
+
+    #: 已经出过的舞台行（**按 (verb, 下标) 记账**，见 `_emit_stage_token`）
+    _emitted_idx: set = set()
+    if plan is not None:
+        # **一条真序列**（缺口 4 第八轮）：舞台动词 / raw 行 / code 行按源码顺序
+        # 逐条执行。代码通道**按段输出**——`python:` 块的块体必须整块出，
+        # 而块与块之间、以及块与非代码行之间可以插入舞台/raw 行。
         #
-        # ⚠ 2026-10-05：这条规矩收进 `Beat.stage_verbs`（**唯一真源**）——
-        # 舞台快照/演出预览从前没照做，于是"卡片加了立绘、当前舞台却写着
-        # 台上没人"（用户实测报的）。这里改成问同一个属性，两边不可能再分叉；
-        # 行为不变（补进来的 verb 在对应列没内容时不产出行，见下面
-        # "真出了一行的 scene 才算数"那段）。
-        recorded = set(tokens)
-        for v in beat.stage_verbs:
-            if v not in recorded:
-                tokens.append(v)
-                recorded.add(v)
+        # 为什么要分段：代码通道从前只有**一个槽位**（"紧跟第一条 scene"
+        # 或"舞台尾段之后"），于是 `hide screen map` 写在 `scene` 前面也会
+        # 跑到后面（真机 `pomodorro` / `chapter1_1` / `chapter1_4` /
+        # `script_pomo` 四个文件实测）。
+        code_run: list = []
+
+        def flush_code_run():
+            if not code_run:
+                return
+            for c in _render_code_block('\n'.join(code_run)):
+                emit(c, '代码块', c)
+            code_run.clear()
+
+        for kind, payload in plan:
+            if kind in ('scene', 'show', 'hide', 'with'):
+                flush_code_run()
+                _emit_stage_token(_stage_lines_once(), kind, payload, emit,
+                                  emitted_stage, _emitted_idx)
+            elif kind == 'raw':
+                flush_code_run()
+                # raw 行**逐字照出**（它是作者写的原生语句，不加 `$`、不缩进改写）
+                emit(payload, '代码块', payload)
+            elif kind == 'code':
+                code_run.append(payload)      # 攒成一段，遇到别的再落地
+            elif kind == 'blank':
+                # 块内空行（带块标记）**要跟着这一段一起出**；块外的空行照旧
+                # 不单独产出（`render_code_block` 本来就是按 `strip()` 判空的）。
+                if code_run and payload:
+                    code_run.append(payload)
+            elif kind == 'audio':
+                flush_code_run()
+                emit_audio()
+            elif kind == 'voice':
+                flush_code_run()
+                emit_voice()
+        flush_code_run()
+        _emit_leftover_stage(_stage_lines_once(), emit, emitted_stage,
+                            _emitted_idx)
+        # **舞台尾段 + 原样块照样要出**（第九轮修）：
+        # 序列里只有"舞台动词 / raw / code"这几类，而「舞台（高级）」列的原生
+        # 真迹与**未建模块**（`opaque`，例如 `camera …:` 的块体）不在序列里 ——
+        # 少这两个调用，`camera` 整条语句会**静默消失**
+        # （`test_session_apply_folds_parameter_keys` 当场红）。
+        emit_stage_tail()
+        emit_opaque()
+    elif tokens:
+        # **补齐 audio / voice**：老表/手工新增行可能只记了部分，
+        # **绝不因为顺序信息不全就丢掉操作**。
+        #
+        # ⚠ 2026-10-05：stage verb 的那条补齐规矩收进 `Beat.op_tokens_full()`
+        # （**唯一真源**，`stage_verbs` 同一个判据）—— 舞台快照/演出预览
+        # 从前没照做，于是"卡片加了立绘、当前舞台却写着台上没人"（用户实测报的）。
+        recorded = {v for v, _i in tokens}
         for k in ('audio', 'voice'):
-            if k not in tokens:
-                tokens.append(k)
+            if k not in recorded:
+                tokens.append((k, None))
         code_done = False
-        for t in tokens:
+        for verb, idx in tokens:
             mark = len(lines)
-            _verb_ops[t]()
+            if verb in ('scene', 'show', 'hide', 'with'):
+                _emit_stage_token(_stage_lines_once(), verb, idx, emit,
+                                  emitted_stage, _emitted_idx)
+            elif verb == 'audio':
+                emit_audio()
+            elif verb == 'voice':
+                emit_voice()
             # **"真出了一行的 scene"才算数**（2026-10-05 修）。
             #
             # `tokens` 上面被**补齐**过：`missed_stage` 把 `scene/show/hide`
@@ -891,10 +958,16 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             #
             # 判据改成"这一支真的往 `lines` 里加过行"：有背景时行为与从前
             # **逐字节一致**（真 scene 一定出了行），没背景时不再误触发。
-            if t == 'scene' and not code_done and len(lines) > mark:
+            if verb == 'scene' and not code_done and len(lines) > mark:
                 # 代码块跟在**第一条舞台指令**之后（历史位置）
                 emit_code()
                 code_done = True
+        # **兜底**：有内容却一条 token 都没点到的舞台行（"卡片加了立绘、
+        # 顺序列没跟着长"那种）**也要出**，位置放在所有 token 之后 ——
+        # 与从前的"补齐在末尾"同一个口径（`op_tokens_full` 已经补过 verb 级
+        # 的，这里收的是"同一个 verb 里多出来的那几条"）。
+        _emit_leftover_stage(_stage_lines_once(), emit, emitted_stage,
+                            _emitted_idx)
         # **舞台尾段必须排在代码块之前**（2026-10-05 修，真实项目
         # `chapter1_2.rpy` 拍 136/152 实测）。
         #
@@ -2603,6 +2676,62 @@ def _emit_stage_verbs(beat, stage_lines, verbs, emit, emitted=None) -> None:
     """按 `verbs` 顺序输出舞台行（每 verb 内部保持原顺序）。"""
     for v in verbs:
         for ln in stage_lines.get(v, ()):
+            if emitted is not None:
+                emitted.add(ln)
+            emit(ln, '舞台', ln)
+
+
+def _emit_stage_token(stage_lines: dict, verb: str, idx, emit,
+                      emitted: set = None, emitted_idx: set = None) -> None:
+    """
+    一条顺序 token → 舞台行（缺口 4 的落点）。
+
+    分两种 token：
+
+      · **有下标**（`show#1`，新表）：只出**那一条**（下标从 0 数）；
+      · **没下标**（`show`，老表 / 补齐）：把这个 verb **还没出过的**行
+        整组出掉（老行为：`show,hide` 这种 verb 级顺序仍然成立）。
+
+    ⚠ **去重必须按"下标"、不能按"内容"**（第一版就是按内容的，于是
+    `show ling happy` 写两遍只出一条）：
+
+      · `emitted_idx` = **这一条有没有出过**（`(verb, 下标)`）——
+        逐条 token 与兜底那一趟都看它，所以同一条不会出两遍；
+      · `emitted` = **这一行的文本有没有出过** —— 只给**舞台尾段**用
+        （`_render_stage_tail` 按文本跳过"结构化通道已经出过的那一行"，
+        否则原生影子会被写两遍）。
+
+    两个集合各管一件事：一个防"同一条出两遍"，一个防"同一个文本出两遍"。
+    合成一个就会出现"作者写两遍同样的 show，工具替他删一条"。
+    """
+    lines = list((stage_lines or {}).get(verb, ()) or ())
+    if not lines:
+        return
+    if idx is not None and 0 <= int(idx) < len(lines):
+        targets = [int(idx)]
+    else:
+        targets = [i for i in range(len(lines))
+                   if emitted_idx is None or (verb, i) not in emitted_idx]
+    for i in targets:
+        if emitted_idx is not None:
+            if (verb, i) in emitted_idx:
+                continue
+            emitted_idx.add((verb, i))
+        ln = lines[i]
+        if emitted is not None:
+            emitted.add(ln)
+        emit(ln, '舞台', ln)
+
+
+def _emit_leftover_stage(stage_lines: dict, emit, emitted: set = None,
+                         emitted_idx: set = None) -> None:
+    """**兜底**：还有没出过的舞台行就补在末尾（见 `render_beat_to_rpy`）。"""
+    for verb in ('scene', 'show', 'hide', 'with'):
+        for i, ln in enumerate((stage_lines or {}).get(verb, ()) or ()):
+            if emitted_idx is not None:
+                if (verb, i) in emitted_idx:
+                    continue
+                emitted_idx.add((verb, i))
             if emitted is not None:
                 emitted.add(ln)
             emit(ln, '舞台', ln)

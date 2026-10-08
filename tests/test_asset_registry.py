@@ -112,6 +112,40 @@ class TestScanAssets:
         assets = scan_assets(scan_root, audio_dirs=[extra])
         assert assets['audio']['music'] or assets['audio']['sound']
 
+    def test_custom_audio_dir_under_a_skipped_name_ancestor(self, tmp_path):
+        """
+        **项目外**的音频目录：路径里只要有叫 `temp`/`build`/`cache`/`logs` 的
+        祖先，从前整批音频会被丢掉（不在项目内 → 拿**绝对路径**逐段比，
+        命中 `_SKIP_SCAN_DIRS`）。
+
+        真实后果：项目放在 `D:\\build\\我的游戏\\…` 这种路径下，
+        音乐/音效**双双为空** —— 文案下拉里一个都选不到。
+
+        修法：比较基准换成**扫描的那个目录**（`adir`），无关祖先不参与判定。
+        """
+        root = tmp_path / 'build' / 'proj' / 'game'   # ← 祖先叫 build
+        (root / 'images').mkdir(parents=True)
+        (root / 'audio').mkdir(parents=True)
+        (root / 'audio' / 'bgm_theme.ogg').write_bytes(b'1')
+        extra = tmp_path / 'temp' / 'extra_audio'     # ← 祖先叫 temp
+        extra.mkdir(parents=True)
+        (extra / 'theme_song.mp3').write_bytes(b'1')
+
+        assets = scan_assets(root, audio_dirs=[extra])
+        assert {a['ID'] for a in assets['audio']['music']} == {'bgm_theme_song'}
+
+    def test_skip_dir_inside_the_audio_dir_still_filters(self, tmp_path):
+        """**修完不许把噪声过滤弄丢**：音频目录**里面**的 `build/` 照样跳过。"""
+        root = tmp_path / 'proj' / 'game'
+        (root / 'images').mkdir(parents=True)
+        extra = tmp_path / 'extra_audio'
+        (extra / 'build').mkdir(parents=True)
+        (extra / 'theme_song.mp3').write_bytes(b'1')
+        (extra / 'build' / 'leftover.mp3').write_bytes(b'1')
+
+        assets = scan_assets(root, audio_dirs=[extra])
+        assert {a['ID'] for a in assets['audio']['music']} == {'bgm_theme_song'}
+
     def test_scan_detects_voice_dir(self, tmp_path):
         """game/voice/ 与 game/audio/voice/ 应被识别为语音，不与音效混。"""
         root = tmp_path / 'game'

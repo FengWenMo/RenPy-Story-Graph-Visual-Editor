@@ -203,7 +203,10 @@ class TestAutoSyncExistingTable:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        # ⚠ 资源表表头已改**中文**（`ASSET_FIELD_LABELS`）→ 测试也要按**规范列名**
+        # 找列：`_sheet_headers` 把中文映射回 `ID`/`Path`（老表英文表头照样通过）。
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         ws.cell(row=2, column=headers.index('Notes') + 1, value='人工备注：留着')
         ws.cell(row=2, column=headers.index('Category') + 1, value='background')
         first_id = ws.cell(row=2, column=headers.index('ID') + 1).value
@@ -240,7 +243,8 @@ class TestAutoSyncExistingTable:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         # 把第 2 行的 ID 改成一个"别名"，Path 仍指向同一个文件
         ws.cell(row=2, column=headers.index('ID') + 1, value='aliased_id')
         wb.save(table)
@@ -310,7 +314,8 @@ class TestDeletedResourcesLeaveTheTable:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         ws.append(['manual_ghost', 'game/images/ghost.png', 'ghost', 'ghost',
                    'character', ''][:len(headers)])
         wb.save(table)
@@ -335,7 +340,8 @@ class TestDeletedResourcesLeaveTheTable:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         ws.append(['locked_ghost', 'game/images/locked.png', 'locked',
                    'locked', 'character', ''][:len(headers)])
         wb.save(table)
@@ -360,7 +366,8 @@ class TestDeletedResourcesLeaveTheTable:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         row = ['placeholder_bg', 'game/images/bg/not_yet.png', 'bg',
                'not_yet', 'background', '占位：等美术出图']
         ws.append(row[:len(headers)])
@@ -641,7 +648,8 @@ class TestAssetHealthReport:
         table = fake_project / 'game' / 'asset_tables' / 'images.xlsx'
         wb = openpyxl.load_workbook(table)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        from storygraph.assets.asset_registry import _sheet_headers as _sh
+        headers = _sh(ws)
         ws.append(['planned_bg', 'game/images/bg/planned.png', 'bg',
                    'planned', 'background', '占位：等美术'][:len(headers)])
         wb.save(table)

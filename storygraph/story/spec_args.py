@@ -338,16 +338,37 @@ def fold_arg_values(head, args, schema=None) -> str:
 # 本仓库对猜一贯不收（M8：硬对齐是猜），所以选后者：按**官方语法**写死形状，
 # `positional` = 第几个位置参数（0-based；头一个词是语句名、不算参数）。
 #
-# ⚠ 只写**语法上确定**的：`camera [层名]:`（3dstage.html：不给层名 = master）。
-# `choices` 一律留空 —— 层名是运行期概念（`config.layers` / `add_layer`），
+# ⚠ 只写**语法上确定**的：`camera [层名]:`（3dstage.html：不给层名 = master）、
+# `with <转场>`、`pause <秒>`、`window <show|hide|auto>`。
+#
+# `choices_from` = 候选来自**资源表的某一类**（`with` 的转场就是项目里真实存在的
+# 变换）—— 由 Excel 那侧绑到候选表（自伸缩、无 255 字符上限），不是内联一串
+# 会过期的值。**层名一律留空**：它是运行期概念（`config.layers` / `add_layer`），
 # 项目里没有任何地方声明过"有哪些层"，编一组候选就是诱导人写错。
-# `with` / `pause` / `window` **暂时不在这里**：它们现在走「代码」列那条路
-# （`Beat.raw` + `OpOrder`），给它们建列等于换渲染通道 —— 那是"相邻舞台指令
-# 过表翻序"那块风险区（记忆"已知缺口 4"），得单独一轮做。
+#
+# ⚠ `with` / `pause` / `window` 走的是**「代码」列**那条路（`Beat.raw` +
+# `beat.ordered`），不是 `opaque`：它们的参数列折回的是 raw 里**那一行**，
+# 而且必须**同步 `ordered`**（`_ordered_code_lines` 是"池行 == 记录行"才认，
+# 不同步就整份退回历史顺序 → 相邻指令翻序 = 记忆里的"缺口 4"）。
+# 一格装不下两条同类语句时（同一拍里两个 `pause`）**不猜**：那一格留空。
 BUILTIN_ARG_SCHEMAS = {
     'camera': [
         {'name': 'layer', 'label': '层名（空 = master）',
          'positional': 0, 'choices': [], 'required': False},
+    ],
+    'with': [
+        {'name': 'transition', 'label': '转场（项目里的变换）',
+         'positional': 0, 'choices': [], 'choices_from': 'transform',
+         'required': False},
+    ],
+    'pause': [
+        {'name': 'seconds', 'label': '秒数',
+         'positional': 0, 'choices': [], 'required': False},
+    ],
+    'window': [
+        {'name': 'action', 'label': '动作',
+         'positional': 0, 'choices': ['show', 'hide', 'auto'],
+         'required': False},
     ],
 }
 

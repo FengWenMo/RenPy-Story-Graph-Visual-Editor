@@ -1133,27 +1133,81 @@ def beat_position_word(beat: Beat, symbols=None) -> str:
     return _position_display(at, symbols)
 
 
-def spec_arg_choices_for(beat: Beat, statements) -> dict:
+def spec_arg_choices_for(beat: Beat, statements, registry=None) -> dict:
     """
-    这一拍的**自定义语句参数候选**：`{参数名: [候选值]}`（D1，2026-10-07）。
+    这一拍的**语句参数候选**：`{参数名: [候选值]}`（D1 / M4 第二阶段）。
 
-    给卡片编辑器用 —— 声明过参数形状的语句，值那一栏应当是**下拉**，
-    而不是让人凭记忆敲。没有声明（或这一拍不是自定义语句）就返回 `{}`：
-    **不猜候选**，猜出来的下拉会诱导人写出脚本里根本没有的值。
+    给卡片编辑器用 —— 有参数形状的语句，值那一栏应当是**下拉**，
+    而不是让人凭记忆敲。**没有候选就返回 `{}`**：不猜候选，猜出来的下拉
+    会诱导人写出脚本里根本没有的值。
 
-    候选来自项目声明（`storygraph.rules.json` 的 `columns[].choices`
-    或宿主 `register_statement` 的对应声明），见
-    `story.statement_registry.spec_columns`。
+    两档来源（与 Excel 那侧**同源**，都走 `statement_registry.arg_columns`）：
+
+      · 项目声明的自定义语句（`rules.json` 的 `columns[].choices`）；
+      · **标准语句的内置形状**（`camera` 层名 / `with` 转场 / `window` 动作 …）
+        —— `with` 的候选来自**资源表里真实存在的变换**（`choices_from`），
+        没有资源表就不给候选（宁可没有下拉，也不要编一串项目里没有的名字）。
     """
-    name = str(getattr(beat, 'spec_name', '') or '')
-    if not name or not statements:
-        return {}
-    from storygraph.story.statement_registry import spec_columns
-    out = {}
-    for c in spec_columns(statements, name):
-        if c['choices']:
-            out[c['name']] = list(c['choices'])
+    out: dict = {}
+    # ⚠ **不早退**：`statements` 与 `registry` 都为 None 时，内置形状表
+    # （`window` 的 show/hide/auto）照样要有候选 —— 那三条是工具自己声明的，
+    # 不需要项目声明，也不需要资源表。
+    for c in spec_arg_columns_of(beat, statements):
+        # ⚠ 两种形状别混：`spec_columns` 的 `name` **就是参数名**，而
+        # `dynamic_spec_columns` 的 `name` 是**语句名**、参数名在 `param`。
+        # 取参数名一律用 `param`-优先（第一版写成 `c['name']`，
+        # 于是返回的键成了语句名 `mycue` —— `test_card_choices_provider` 当场红）。
+        param = str(c.get('param') or c.get('name') or '')
+        if not param:
+            continue
+        choices = list(c.get('choices') or [])
+        source = str(c.get('choices_from') or '')
+        if source == 'transform' and registry is not None:
+            rows = getattr(registry, 'transforms', None) or {}
+            choices = sorted(str(k) for k in rows) or choices
+        if choices:
+            out[param] = choices
     return out
+
+
+def spec_arg_columns_of(beat: Beat, statements) -> list:
+    """这一拍**自己的**参数列描述（`dynamic_spec_columns([beat], …)`）。"""
+    try:
+        from storygraph.story.statement_registry import dynamic_spec_columns
+        return dynamic_spec_columns([beat], statements)
+    except Exception as e:                      # noqa: BLE001 - 卡片不该因此打不开
+        from storygraph.core.safeguard import swallow
+        swallow('app.beats.spec_arg_columns_of', e)
+        return []
+
+
+def spec_arg_fields_for(beat: Beat, statements) -> tuple:
+    """
+    卡片参数那一组要的 `(列描述, 当前值)`（`{列名: 值}`）。
+
+    值走 `Beat.spec_arg_cells` —— 与 Excel 的格子**同一个算法**，所以卡片上
+    看到的值与表里那格必然一致（两处各算一遍就会出现"表里是 A、卡片是 B"）。
+    """
+    cols = spec_arg_columns_of(beat, statements)
+    if not cols:
+        return [], {}
+    try:
+        cells = beat.spec_arg_cells(cols)
+    except Exception as e:                      # noqa: BLE001
+        from storygraph.core.safeguard import swallow
+        swallow('app.beats.spec_arg_fields_for', e)
+        return cols, {}
+    return cols, {c['header']: v for c, v in zip(cols, cells)}
+
+
+def apply_spec_arg_fields(beat: Beat, values: dict) -> list:
+    """
+    卡片上改过的参数 → 折进这一拍（**与 Excel 读表同一条路径**）。
+
+    返回被清洗过的列名（W114 留痕用，与 `from_row` 同一套语义）。
+    """
+    from storygraph.story.beat_model import fold_spec_arg_columns
+    return fold_spec_arg_columns(beat, values or {})
 
 
 def expression_choices(beat: Beat, symbols, limit: int = 500) -> list:

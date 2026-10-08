@@ -1,0 +1,241 @@
+{
+  "aliases": {
+    "At": "At",
+    "BGM": "BGM",
+    "BGMParams": "BGMParams",
+    "CameraHeader": "CameraHeader",
+    "CodeBlock": "CodeBlock",
+    "CodeBlocks": "CodeBlocks",
+    "Comment": "Comment",
+    "Condition": "Condition",
+    "ContentHash": "ContentHash",
+    "Hide": "Hide",
+    "Inline": "Inline",
+    "Kind": "Kind",
+    "Label": "Label",
+    "LineId": "LineId",
+    "LoopHeader": "LoopHeader",
+    "Nest": "Nest",
+    "OpOrder": "OpOrder",
+    "Opaque": "Opaque",
+    "SFX": "SFX",
+    "SFXParams": "SFXParams",
+    "Scene": "Scene",
+    "Seq": "Seq",
+    "Show": "Show",
+    "Speaker": "Speaker",
+    "SpecHead": "SpecHead",
+    "SpecName": "SpecName",
+    "Stage": "Stage",
+    "StageOrder": "StageOrder",
+    "Text": "Text",
+    "Voice": "Voice",
+    "With": "With",
+    "代码": "CodeBlock",
+    "代码块结构（内部）": "CodeBlocks",
+    "位置": "At",
+    "内容指纹": "ContentHash",
+    "原样块（内部）": "Opaque",
+    "台词": "Text",
+    "声明来源（内部）": "SpecName",
+    "序号": "Seq",
+    "循环头行（内部）": "LoopHeader",
+    "操作顺序（内部）": "OpOrder",
+    "条件": "Condition",
+    "注释": "Comment",
+    "相机头行（内部）": "CameraHeader",
+    "立绘": "Show",
+    "章节": "Label",
+    "类型": "Kind",
+    "结构位（内部）": "Nest",
+    "背景": "Scene",
+    "自定义语句·头行（高级）": "SpecHead",
+    "舞台顺序（内部）": "StageOrder",
+    "舞台（高级）": "Stage",
+    "行号": "LineId",
+    "行尾注释（内部）": "Inline",
+    "语音": "Voice",
+    "说话人": "Speaker",
+    "转场": "With",
+    "退场": "Hide",
+    "音乐": "BGM",
+    "音乐参数": "BGMParams",
+    "音效": "SFX",
+    "音效参数": "SFXParams"
+  },
+  "columns": [
+    {
+      "header": "行号",
+      "hidden": false,
+      "name": "LineId"
+    },
+    {
+      "header": "序号",
+      "hidden": false,
+      "name": "Seq"
+    },
+    {
+      "header": "章节",
+      "hidden": false,
+      "name": "Label"
+    },
+    {
+      "header": "类型",
+      "hidden": false,
+      "name": "Kind"
+    },
+    {
+      "header": "说话人",
+      "hidden": false,
+      "name": "Speaker"
+    },
+    {
+      "header": "注释",
+      "hidden": false,
+      "name": "Comment"
+    },
+    {
+      "header": "台词",
+      "hidden": false,
+      "name": "Text"
+    },
+    {
+      "header": "条件",
+      "hidden": false,
+      "name": "Condition"
+    },
+    {
+      "header": "背景",
+      "hidden": false,
+      "name": "Scene"
+    },
+    {
+      "header": "立绘",
+      "hidden": false,
+      "name": "Show"
+    },
+    {
+      "header": "位置",
+      "hidden": false,
+      "name": "At"
+    },
+    {
+      "header": "转场",
+      "hidden": false,
+      "name": "With"
+    },
+    {
+      "header": "退场",
+      "hidden": false,
+      "name": "Hide"
+    },
+    {
+      "header": "音乐",
+      "hidden": false,
+      "name": "BGM"
+    },
+    {
+      "header": "音乐参数",
+      "hidden": false,
+      "name": "BGMParams"
+    },
+    {
+      "header": "音效",
+      "hidden": false,
+      "name": "SFX"
+    },
+    {
+      "header": "音效参数",
+      "hidden": false,
+      "name": "SFXParams"
+    },
+    {
+      "header": "语音",
+      "hidden": false,
+      "name": "Voice"
+    },
+    {
+      "header": "舞台（高级）",
+      "hidden": false,
+      "name": "Stage"
+    },
+    {
+      "header": "代码",
+      "hidden": false,
+      "name": "CodeBlock"
+    },
+    {
+      "header": "内容指纹",
+      "hidden": false,
+      "name": "ContentHash"
+    },
+    {
+      "header": "舞台顺序（内部）",
+      "hidden": true,
+      "name": "StageOrder"
+    },
+    {
+      "header": "操作顺序（内部）",
+      "hidden": true,
+      "name": "OpOrder"
+    },
+    {
+      "header": "代码块结构（内部）",
+      "hidden": true,
+      "name": "CodeBlocks"
+    },
+    {
+      "header": "结构位（内部）",
+      "hidden": true,
+      "name": "Nest"
+    },
+    {
+      "header": "行尾注释（内部）",
+      "hidden": true,
+      "name": "Inline"
+    },
+    {
+      "header": "原样块（内部）",
+      "hidden": true,
+      "name": "Opaque"
+    },
+    {
+      "header": "声明来源（内部）",
+      "hidden": true,
+      "name": "SpecName"
+    },
+    {
+      "header": "自定义语句·头行（高级）",
+      "hidden": true,
+      "name": "SpecHead"
+    },
+    {
+      "header": "循环头行（内部）",
+      "hidden": true,
+      "name": "LoopHeader"
+    },
+    {
+      "header": "相机头行（内部）",
+      "hidden": true,
+      "name": "CameraHeader"
+    }
+  ],
+  "groups": {
+    "advanced": [
+      "SFX",
+      "CodeBlock",
+      "Label",
+      "Kind",
+      "Stage"
+    ],
+    "primary": [
+      "Speaker",
+      "Text",
+      "Scene",
+      "BGM",
+      "Voice",
+      "Comment"
+    ]
+  },
+  "version": 1
+}

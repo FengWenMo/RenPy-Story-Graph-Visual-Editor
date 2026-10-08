@@ -38,6 +38,63 @@ def _negate_cmp_op(op):
     return op
 
 
+def _int_literal_value(node):
+    """
+    常量节点的**整数值**；不是整数常量就返回 ``None``（浮点带小数 / 字符串 / 非常量）。
+
+    ⚠ 为什么必须是 ``None`` 而不是 ``int(0.5) == 0``（2026-10-08 修）：
+    区间分析按**整数域**做边界加减（`x < v` ⇒ `hi = v - 1`）。把 `0.5`
+    截断成 `0`，会把 `x = 0` 时**成立**的 `x < 0.5` 判成"不可能"——
+    那是"把可能说成不可能"，图上一条正常剧情会被标红"不可达"，
+    用户照着删掉剧情就断了。宁可保守（返回 None → 不施加约束），
+    也绝不许给错结论。
+
+    `True/False` 按 `1/0` 处理（Python 里 bool 是 int 子类，显式收下）；
+    `2.0` 这种"值恰好是整数"的浮点按 `2` 处理（不损失精度）。
+    """
+    if not isinstance(node, ast.Constant):
+        # 负/正常量字面量（`-1` / `+2`）解析成 UnaryOp —— 一样能取到整数值。
+        if isinstance(node, ast.UnaryOp) and isinstance(
+                node.op, (ast.USub, ast.UAdd)):
+            inner = _int_literal_value(node.operand)
+            if inner is None:
+                return None
+            return -inner if isinstance(node.op, ast.USub) else inner
+        return None
+    v = node.value
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and float(v).is_integer():
+        return int(v)
+    return None
+
+
+def _compare_pairs(node):
+    """
+    比较节点 → `[(left, op, right), ...]`（**链式比较拆成相邻对**）。
+
+    `0 < x < 10` 在 Python 的 AST 里是**一个** Compare，`ops` 有两项；
+    它的语义等价于 `0 < x and x < 10`。从前 `len(ops) != 1` 直接放弃
+    （保守 True）—— 于是"0 <= x < 3" 这种最常见的区间判断永远得不出结论。
+    拆成相邻对之后，`and` 语义就是逐对判/逐对收窄，**精确且仍可靠**。
+    """
+    pairs = []
+    left = node.left
+    for op, comp in zip(node.ops, node.comparators):
+        pairs.append((left, op, comp))
+        left = comp
+    return pairs
+
+
+def _flip_compare_pair(left_ast, op, right_ast):
+    """归一化到 `Name` 在左：`Constant <op> Name` → `Name <op'> Constant`。"""
+    if isinstance(right_ast, ast.Name) and not isinstance(left_ast, ast.Name):
+        return right_ast, _flip_cmp_op(op), left_ast
+    return left_ast, op, right_ast
+
+
 class ValueRange:
     def __init__(self, lo, hi):
         self.lo = lo
@@ -185,7 +242,9 @@ class IntervalEvaluator:
         if isinstance(val, bool):
             return ValueRange(int(val), int(val))
         if isinstance(val, (int, float)):
-            return ValueRange(int(val), int(val))
+            # 2026-10-08：**保留浮点数值**（原来 `int(0.5) == 0` 会把
+            # `$ love = 0.9` 抹成 0，随后 `if love > 0` 被误判成不可能）。
+            return ValueRange(val, val)
         return ValueRange(-math.inf, math.inf)
 
     def _eval_name(self, node):
@@ -348,7 +407,7 @@ def _ast_cond_possible(node, state):
         elif isinstance(node.op, ast.Or):
             return any(_ast_cond_possible(v, state) for v in node.values)
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return True
+        return _ast_cond_not_possible(node.operand, state)
     elif isinstance(node, ast.Compare):
         return _ast_compare_possible(node, state)
     if isinstance(node, ast.Constant):
@@ -356,29 +415,58 @@ def _ast_cond_possible(node, state):
     return True
 
 
+def _ast_cond_not_possible(operand, state):
+    """
+    `not X` 可能吗 —— 用**精确等价**改写，别再一律 `True`。
+
+    为什么不能一律 True：`not (x == 5)` 在 `x` 已被收窄到 `[5,5]` 时是
+    **不可能**的；说 True 会让"这一支永远走不到 / 下落风险"永远发现不了
+    （精度问题，不是可靠性问题）。下面每一条改写都是**逻辑等价**，
+    所以不会把"可能"说成"不可能"：
+
+      · `not (a and b)` = `not a or not b`（De Morgan）；
+      · `not (a or b)`  = `not a and not b`；
+      · `not not a`     = `a`；
+      · `not (x op v)`  = `x 反义op v`（`==`↔`!=`、`<`↔`>=` …）；
+      · 认不出的一律 `True`（保守）。
+    """
+    if isinstance(operand, ast.BoolOp):
+        vals = [_ast_cond_not_possible(v, state) for v in operand.values]
+        if isinstance(operand.op, ast.And):
+            return any(vals)                    # 否定的 and → or
+        if isinstance(operand.op, ast.Or):
+            return all(vals)                    # 否定的 or  → and
+    if isinstance(operand, ast.UnaryOp) and isinstance(operand.op, ast.Not):
+        return _ast_cond_possible(operand.operand, state)   # 双重否定
+    if isinstance(operand, ast.Compare):
+        negated = [_ast_compare_pair_possible(l, _negate_cmp_op(o), r, state)
+                   for l, o, r in _compare_pairs(operand)]
+        # 单比较 → 直接判；链式（本质是 and）取反 → 逐对可能性相"或"
+        return negated[0] if len(negated) == 1 else any(negated)
+    if isinstance(operand, ast.Constant):
+        return not bool(operand.value)
+    return True
+
+
 def _ast_compare_possible(node, state):
-    # 链式比较暂不处理（如 0 < x < 10）
-    if len(node.ops) != 1:
-        return True
+    # 链式比较 `0 < x < 10` == `0 < x and x < 10`：逐对判，全可能才可能。
+    return all(_ast_compare_pair_possible(l, o, r, state)
+               for l, o, r in _compare_pairs(node))
 
-    left_ast = node.left
-    op = node.ops[0]
-    right_ast = node.comparators[0]
 
-    # D1: 归一化到 Name 在左。Constant < Name 翻转为 Name > Constant
-    if isinstance(right_ast, ast.Name) and not isinstance(left_ast, ast.Name):
-        left_ast, right_ast = right_ast, left_ast
-        op = _flip_cmp_op(op)
+def _ast_compare_pair_possible(left_ast, op, right_ast, state):
+    left_ast, op, right_ast = _flip_compare_pair(left_ast, op, right_ast)
 
     if not isinstance(left_ast, ast.Name):
         return True
 
     left_name = left_ast.id
     rng = state.ranges.get(left_name, ValueRange(-math.inf, math.inf))
+    # 整数值的常量比较对象；非整数常量（0.5 等）→ None → 不施加约束（保守）。
+    val = _int_literal_value(right_ast)
 
     if isinstance(op, ast.Eq):
-        if isinstance(right_ast, ast.Constant) and isinstance(right_ast.value, (int, float)):
-            val = int(right_ast.value)
+        if val is not None:
             if rng.is_bottom() or rng.is_top():
                 return True
             if rng.lo > val or rng.hi < val:
@@ -391,8 +479,7 @@ def _ast_compare_possible(node, state):
                 return False
 
     elif isinstance(op, ast.NotEq):
-        if isinstance(right_ast, ast.Constant) and isinstance(right_ast.value, (int, float)):
-            val = int(right_ast.value)
+        if val is not None:
             if rng.lo == rng.hi == val:
                 return False
         elif isinstance(right_ast, ast.Name):
@@ -401,8 +488,7 @@ def _ast_compare_possible(node, state):
                 return False
 
     elif isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
-        if isinstance(right_ast, ast.Constant) and isinstance(right_ast.value, (int, float)):
-            val = int(right_ast.value)
+        if val is not None:
             if rng.is_bottom() or rng.is_top():
                 return True
             if isinstance(op, ast.Lt) and rng.lo >= val:
@@ -446,49 +532,55 @@ def apply_condition(state, cond_str):
 
 def _ast_apply_cond(node, state, polarity=True):
     if isinstance(node, ast.BoolOp):
-        if not polarity:
-            # D2: 未做 De Morgan 化，否定下的 And/Or 保守不施加约束
-            return True
-        if isinstance(node.op, ast.And):
+        # 语义归一（**De Morgan**，2026-10-08）：四种组合折成"与"/"或"两类，
+        # 子条件的极性沿用当前极性 ——
+        #   正 and / 负 or  → 「与」：逐条施加约束
+        #   正 or  / 负 and → 「或」：逐条试、成功者的区间合并
+        # 从前 `not` 一律 `return True`（不做 De Morgan），`not (a and b)`
+        # 这类条件永远收窄不了。折成上面两类既精确又可靠 —— De Morgan 是
+        # **等价改写**，不会引入错误结论。
+        and_like = (isinstance(node.op, ast.And) == bool(polarity))
+        if and_like:
             for v in node.values:
-                if not _ast_apply_cond(v, state, True):
+                if not _ast_apply_cond(v, state, polarity):
                     return False
             return True
-        elif isinstance(node.op, ast.Or):
-            original = state.copy()
-            involved_vars = set()
 
-            class VarCollector(ast.NodeVisitor):
-                def visit_Name(self, node):
-                    involved_vars.add(node.id)
-                    self.generic_visit(node)
+        # —— 「或」语义 ——
+        original = state.copy()
+        involved_vars = set()
 
-            collector = VarCollector()
-            for v in node.values:
-                collector.visit(v)
+        class VarCollector(ast.NodeVisitor):
+            def visit_Name(self, node):
+                involved_vars.add(node.id)
+                self.generic_visit(node)
 
-            merged_ranges = {}
-            any_success = False
-            for v in node.values:
-                branch_state = original.copy()
-                if _ast_apply_cond(v, branch_state, True):
-                    any_success = True
-                    for var in involved_vars:
-                        if var in branch_state.ranges:
-                            rng = branch_state.ranges[var]
-                            if var not in merged_ranges:
-                                merged_ranges[var] = rng.copy()
-                            else:
-                                merged_ranges[var] = merged_ranges[var].join(rng)
-            if any_success:
+        collector = VarCollector()
+        for v in node.values:
+            collector.visit(v)
+
+        merged_ranges = {}
+        any_success = False
+        for v in node.values:
+            branch_state = original.copy()
+            if _ast_apply_cond(v, branch_state, polarity):
+                any_success = True
                 for var in involved_vars:
-                    if var in merged_ranges:
-                        state.ranges[var] = merged_ranges[var]
-                    else:
-                        state.ranges[var] = ValueRange(-math.inf, math.inf)
-                return True
-            else:
-                return False
+                    if var in branch_state.ranges:
+                        rng = branch_state.ranges[var]
+                        if var not in merged_ranges:
+                            merged_ranges[var] = rng.copy()
+                        else:
+                            merged_ranges[var] = merged_ranges[var].join(rng)
+        if any_success:
+            for var in involved_vars:
+                if var in merged_ranges:
+                    state.ranges[var] = merged_ranges[var]
+                else:
+                    state.ranges[var] = ValueRange(-math.inf, math.inf)
+            return True
+        else:
+            return False
 
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         # D2: 翻转极性递归处理操作数
@@ -507,17 +599,23 @@ def _ast_apply_cond(node, state, polarity=True):
 
 
 def _ast_apply_compare(node, state, polarity=True):
-    if len(node.ops) != 1:
+    pairs = _compare_pairs(node)
+    if len(pairs) > 1:
+        if not polarity:
+            # 否定下的链式比较 = 若干条件相"或"（De Morgan）—— 施加约束
+            # 会不可靠，保守不收窄。
+            return True
+        # 正向下链式 = 逐对"与"：任一矛盾 → 整条不可行；否则逐对收窄。
+        for l, o, r in pairs:
+            if not _ast_apply_compare_pair(l, o, r, state, True):
+                return False
         return True
+    return _ast_apply_compare_pair(node.left, node.ops[0],
+                                   node.comparators[0], state, polarity)
 
-    left_ast = node.left
-    op = node.ops[0]
-    right_ast = node.comparators[0]
 
-    # D1: 归一化到 Name 在左
-    if isinstance(right_ast, ast.Name) and not isinstance(left_ast, ast.Name):
-        left_ast, right_ast = right_ast, left_ast
-        op = _flip_cmp_op(op)
+def _ast_apply_compare_pair(left_ast, op, right_ast, state, polarity=True):
+    left_ast, op, right_ast = _flip_compare_pair(left_ast, op, right_ast)
 
     # D2: 否定极性翻转运算符
     if not polarity:
@@ -533,17 +631,15 @@ def _ast_apply_compare(node, state, polarity=True):
     if rng.is_top() or rng.is_bottom():
         return True
     lo, hi = rng.lo, rng.hi
+    # 整数值的常量比较对象；非整数常量（0.5 等）→ None → 不收窄（保守）。
+    val = _int_literal_value(right_ast)
 
-    if (isinstance(op, ast.Eq) and isinstance(right_ast, ast.Constant)
-            and isinstance(right_ast.value, (int, float))):
-        val = int(right_ast.value)
+    if isinstance(op, ast.Eq) and val is not None:
         if lo > val or hi < val:
             return False
         state.ranges[left_name] = ValueRange(val, val)
 
-    elif (isinstance(op, ast.NotEq) and isinstance(right_ast, ast.Constant)
-            and isinstance(right_ast.value, (int, float))):
-        val = int(right_ast.value)
+    elif isinstance(op, ast.NotEq) and val is not None:
         if lo == hi == val:
             return False
         if val == lo:
@@ -557,10 +653,7 @@ def _ast_apply_compare(node, state, polarity=True):
             else:
                 return False
 
-    elif (isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
-            and isinstance(right_ast, ast.Constant)
-            and isinstance(right_ast.value, (int, float))):
-        val = int(right_ast.value)
+    elif isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) and val is not None:
         if isinstance(op, ast.Lt):
             hi = min(hi, val - 1)
         elif isinstance(op, ast.LtE):

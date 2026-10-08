@@ -496,6 +496,17 @@ def _is_silent_char_excluded(cid: str, data: dict) -> bool:
 #: spec_arg_values` 的老调用方与单测照旧可用。
 
 
+#: `W122` 认得出来的**语句动词**：只有头 token 落在这里面的行才参与
+#: "块体里允许写什么"的判定。裸 Python（`target = ling`）与认不出的写法
+#: 一律**放过** —— 它们的"头"是变量名，拿去比允许表只会误报。
+_BODY_VERB_HEADS = frozenset({
+    'scene', 'show', 'hide', 'with', 'pause', 'window', 'camera',
+    'play', 'stop', 'queue', 'voice', 'menu', 'if', 'elif', 'else',
+    'while', 'for', 'jump', 'call', 'return', 'python', 'pass',
+    'init', 'label', 'define', 'default', 'transform', 'screen',
+})
+
+
 def validate_spec_args(beats, statements=None, project_root=None) -> list:
     """
     自定义语句的**参数校验**（D1，2026-10-07）。
@@ -516,6 +527,7 @@ def validate_spec_args(beats, statements=None, project_root=None) -> list:
     （不需要在这里再去看那些动态列；看两处反而会有两套真相）。
     """
     from storygraph.story.statement_registry import (StatementRegistry,
+                                                     spec_body_allows,
                                                      spec_columns)
     if statements is None and project_root:
         statements = StatementRegistry.for_project(project_root)
@@ -554,6 +566,42 @@ def validate_spec_args(beats, statements=None, project_root=None) -> list:
                     where,
                     '候选是**常见取值**、不是白名单：确实要用新值就忽略这条。'
                     '候选清单也写在导出表格那一格的注释里'))
+        # `W122` —— **块体里出现了声明之外的语句**（设计文档 §2.3 第三条规则，
+        # 2026-10-07）。这是"结构级"约束（设计文档 §0 的 ②层）：语法形状能看出
+        # "有块体"，但看不出"这个块里允许写什么" —— 只能被声明
+        # （`body: {"allows": ["say","show"]}`）。
+        #
+        # ⚠ 判据刻意保守：**认不出头的行（裸 Python / `$` / 注释）一律放过**，
+        # 只在"这行有个明确的头、而它不在允许表里"时报警 —— 同 W121 的口径：
+        # 少报胜过乱报（报多了人就去关校验）。
+        allowed = spec_body_allows(statements, name)
+        body = str(getattr(b, 'opaque', '') or '')
+        if allowed and body.strip():
+            from storygraph.core.vocabulary import statement_head_token
+            for raw_line in body.split('\n')[1:]:      # 第 0 行是头行
+                line = raw_line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                head_tok = statement_head_token(line)
+                # **台词行**要归一成 `say`：`"台词"` 的头 token 就是那句话本身，
+                # `e "台词"` 的头是说话人变量 —— 两者在"块里允许写什么"这个问题上
+                # 都是台词（不然写了 `allows: ["say"]` 的项目会被自己人误报）。
+                if head_tok[:1] in ('"', "'") or '"' in line or "'" in line:
+                    head_tok = 'say'
+                # ⚠ **认不出的行放过**：裸 Python（`target = ling`）的头 token
+                # 是 `target` 这种"看着像头"的东西，拿去比允许表会误报。
+                # 所以只在头是**明确的 Ren'Py 语句动词**时才判（少报胜过乱报）。
+                if head_tok not in _BODY_VERB_HEADS:
+                    continue
+                if head_tok not in allowed:
+                    issues.append(Issue(
+                        L1, 'W122', WARNING,
+                        f'自定义语句 {name} 的块体里出现了声明之外的语句：'
+                        f'{head_tok}',
+                        where,
+                        f'声明的允许清单：{"、".join(allowed)}'
+                        f'（写在 storygraph.rules.json 的 body.allows）。'
+                        f'这一行是：{line}'))
     return issues
 
 

@@ -1731,7 +1731,9 @@
   [
    "check_variable_syntax-bad",
    "ok",
-   []
+   [
+    "第1行错误: x = = - invalid syntax"
+   ]
   ],
   [
    "save_layout",

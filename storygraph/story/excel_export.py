@@ -165,34 +165,61 @@ def _spec_choices_formula(choices) -> str:
     return formula if len(formula) <= _MAX_INLINE_CHOICES else ''
 
 
-def _write_spec_arg_columns(ws, beats, statements, row_count: int) -> list:
+#: 动态参数列的**唯一取法**（`spec_cols` 的算法在这里，写表头、定列宽、
+#: 挂验证三处都用它 —— 三份各算一次迟早不一致）。
+def dynamic_cols(beats, statements=None) -> list:
     """
-    「**每参数一列**」（M4 第二阶段）：把声明语句的参数摊成列 + 原生下拉。
+    这批拍需要的「每参数一列」列描述（`statement_registry` 的实现）。
 
-    返回写出去的列描述（`statement_registry.dynamic_spec_columns` 的形态），
-    调用方据此写表头、定列宽、挂验证。
+    `statements` 可以为 `None`：`with` / `pause` / `window` / `camera` 这类
+    **标准语句的形状由工具自己声明**，没有 `rules.json` 也该有那一列。
+    """
+    try:
+        from storygraph.story.statement_registry import dynamic_spec_columns
+        return dynamic_spec_columns(beats, statements)
+    except Exception as e:                      # noqa: BLE001
+        from storygraph.core.safeguard import swallow
+        swallow('story.excel_export.spec_columns', e)
+        return []
+
+
+def _write_spec_arg_columns(ws, beats, statements, row_count: int,
+                            ranges: dict = None, names: dict = None) -> list:
+    """
+    「**每参数一列**」（M4 第二阶段）：把语句参数摊成列 + 原生下拉。
+
+    返回写出去的列描述（`statement_registry.dynamic_spec_columns` 的形态）。
 
     为什么这次敢动列契约（上一次评审把它推后了）：`BEAT_FIELDS` 是
-    **基础列**，动态列**追加在末尾**、且只在"这一章真的用了某条声明语句"
-    时出现 —— 于是
+    **基础列**，动态列**追加在末尾**、且只在"这一章真的用了某条语句"
+    （声明过的，或 `with`/`pause`/`window`/`camera` 这类**已识别**的）时出现
+    —— 于是
 
-      · 没有声明的项目、没有声明的章节：表与从前**一模一样**（列数都不变）；
+      · 没有这些语句的章节：表与从前**一模一样**（列数都不变）；
       · `to_row` / `from_row` 的默认行为不变（老调用方一个都不用改）；
-      · 值**折回头行**，不新增第二份数据（见 `story/spec_args.py`）。
+      · 值**折回语句本身**（头行 / 「代码」列那一行），不新增第二份数据。
 
     下拉是"方便"不是"牢笼"：`showErrorMessage=False`（与本项目其他下拉
     一致），手打一个没声明的值照样能过 —— 候选是常见取值，不是白名单。
     """
-    cols = []
-    if statements is not None:
-        from storygraph.story.statement_registry import dynamic_spec_columns
-        cols = dynamic_spec_columns(beats, statements)
+    cols = dynamic_cols(beats, statements)
     if not cols:
         return []
+    names = names or {}
+    ranges = ranges or {}
     from openpyxl.worksheet.datavalidation import DataValidation
     for idx, col in enumerate(cols):
         letter = get_column_letter(len(BEAT_FIELDS) + idx + 1)
-        formula = _spec_choices_formula(col['choices'])
+        # ① **候选来自资源表**（`choices_from`）：直接绑到那张候选表的动态名称上
+        #    —— 自伸缩、没有 255 字符上限，项目加了一个变换这里立刻就有。
+        #    这一档优先于内联候选（`with` 的转场就是这样）。
+        source = str(col.get('choices_from') or '')
+        formula = names.get(source) if source else None
+        if not formula and source and source in ranges:
+            formula = ranges[source]
+        # ② 内联候选（`window` 的 show/hide/auto 这种固定取值）
+        if not formula:
+            formula = _spec_choices_formula(col['choices'])
         if formula:
             dv = DataValidation(type='list', formula1=formula,
                                 allow_blank=True, showDropDown=False)
@@ -248,16 +275,9 @@ def export_beats_to_excel(beats: list, output_path,
     # 见 `beat_model._row_fields`）。没有声明语句的项目 → 空列表 →
     # 表与从前**逐列相同**：这是"新功能不许动老项目"的底线。
     statements = _resolve_statements(statements, output_path)
-    spec_cols = []
-    # **不要求项目声明过语句**：`camera` 这类标准语句的形状由工具自己声明
-    # （`spec_args.BUILTIN_ARG_SCHEMAS`），没有 `rules.json` 也该有那一列。
-    try:
-        from storygraph.story.statement_registry import dynamic_spec_columns
-        spec_cols = dynamic_spec_columns(beats, statements)
-    except Exception as e:                      # noqa: BLE001
-        from storygraph.core.safeguard import swallow
-        swallow('story.excel_export.spec_columns', e)
-        spec_cols = []
+    # **不要求项目声明过语句**：`with` / `pause` / `window` / `camera` 这类
+    # 标准语句的形状由工具自己声明（`spec_args.BUILTIN_ARG_SCHEMAS`）。
+    spec_cols = dynamic_cols(beats, statements)
     spec_headers = [c['header'] for c in spec_cols]
 
     ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS] + spec_headers)
@@ -279,8 +299,6 @@ def export_beats_to_excel(beats: list, output_path,
 
     # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
     _annotate_spec_heads(ws, beats, statements)
-    # 每参数一列的**原生下拉**（M4 第二阶段）
-    _write_spec_arg_columns(ws, beats, statements, len(beats))
 
     # 列宽：台词最宽，技术列压窄。'ContentHash' 是协作指纹，给程序员看的，
     # 压到 12 并放到最后一列，避免它跟内容列抢视觉重心。
@@ -311,8 +329,12 @@ def export_beats_to_excel(beats: list, output_path,
 
     if registry is not None and include_dropdowns:
         ranges = _write_candidate_sheets(wb, registry)
-        _attach_dropdowns(ws, ranges, len(beats),
-                          names=_defined_names_for(ranges))
+        names = _defined_names_for(ranges)
+        _attach_dropdowns(ws, ranges, len(beats), names=names)
+        # 每参数一列的**原生下拉**（M4 第二阶段）。放这里是因为
+        # `choices_from`（`with` 的转场）要绑到**候选表**上，而候选表刚建好。
+        _write_spec_arg_columns(ws, beats, statements, len(beats),
+                                ranges=ranges, names=names)
         _write_keyword_sheet(wb, registry)
         # 资源图库：给策划"看图选 ID"用的派生视图（不是符号表）
         _write_asset_gallery(
@@ -320,6 +342,11 @@ def export_beats_to_excel(beats: list, output_path,
             project_root=(getattr(registry, 'project_root', None)
                           or _guess_project_root(output_path)),
             with_thumbnails=include_thumbnails)
+    else:
+        # 没有资源表（或明确关掉下拉）：**内联候选照样要挂** ——
+        # `window` 的 show/hide/auto 不依赖资源表，`with` 的项目变换那一路
+        # 挂不上就退回注释（`choices_from` 绑不到候选表时，下面会走注释兜底）。
+        _write_spec_arg_columns(ws, beats, statements, len(beats))
 
     # 舞台快照：把"每一拍舞台上是什么样 + 本拍变了什么"算出来另写两张表。
     # 文案不用再去脑补 scene/show/hide 叠加的结果（二）。

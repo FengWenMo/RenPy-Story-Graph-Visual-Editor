@@ -454,3 +454,137 @@ def test_positional_column_has_no_dropdown_when_choices_are_empty(tmp_path):
     letter = openpyxl.utils.get_column_letter(headers.index('camera·layer@0') + 1)
     assert not [dv for dv in ws.data_validations.dataValidation
                 if any(str(r).startswith(letter) for r in dv.sqref.ranges)]
+
+
+# ---------------------------------------------------------------------------
+#  ⑥ 叶语句（`with` / `pause` / `window`）：参数列折进**「代码」列那一行**
+# ---------------------------------------------------------------------------
+#
+# 这三条走的是「代码」列（`Beat.raw` + `beat.ordered`），**不是** `opaque`。
+# 为什么不把它们搬到 `opaque`（那样做参数列最简单）：搬过去就是**换渲染通道**
+# —— 它们现在与 `$` 代码按 `ordered` **交错**输出（`show screen` / `pause` /
+# `hide screen` / `$ …` 这种演出），换通道会动顺序，而顺序一错就是
+# "相邻舞台指令过表翻序"（记忆缺口 4，静默改演出）。
+#
+# 所以参数列折的是**那一行**，而且必须**同步 `ordered`**
+# （`_ordered_code_lines` 是"池行 == 记录行"才认，一处不同就整份退回历史顺序）。
+
+LEAF_SCRIPT = (
+    'label a:\n'
+    '    scene bg room\n'
+    '    with dissolve\n'
+    '    pause 1.0\n'
+    '    window hide\n'
+    '    e "台词"\n'
+)
+
+
+def _leaf_beats(tmp_path):
+    _root, src = _project(tmp_path, rules=None, script=LEAF_SCRIPT)
+    return _beats(src)
+
+
+def test_leaf_statements_get_one_column_per_parameter(tmp_path):
+    beats = _leaf_beats(tmp_path)
+    x = _export(tmp_path, beats, StatementRegistry.for_project(_root_of(tmp_path)))
+    headers, ws = _header_cells(x)
+    assert 'with·transition@0' in headers, headers
+    assert 'pause·seconds@0' in headers, headers
+    assert 'window·action@0' in headers, headers
+    vals = {}
+    for header in ('with·transition@0', 'pause·seconds@0', 'window·action@0'):
+        col = headers.index(header) + 1
+        vals[header] = [ws.cell(row=r, column=col).value
+                        for r in range(2, ws.max_row + 1)]
+    assert 'dissolve' in vals['with·transition@0'], vals
+    assert '1.0' in vals['pause·seconds@0'], vals
+    assert 'hide' in vals['window·action@0'], vals
+
+
+def test_window_action_column_has_an_inline_dropdown(tmp_path):
+    """`window` 的动作是**固定三个取值** → 内联下拉（不依赖资源表）。"""
+    beats = _leaf_beats(tmp_path)
+    x = _export(tmp_path, beats, StatementRegistry.for_project(_root_of(tmp_path)))
+    headers, ws = _header_cells(x)
+    letter = openpyxl.utils.get_column_letter(headers.index('window·action@0') + 1)
+    hits = [dv for dv in ws.data_validations.dataValidation
+            if any(str(r).startswith(letter) for r in dv.sqref.ranges)]
+    assert hits, [str(dv.sqref) for dv in ws.data_validations.dataValidation]
+    assert hits[0].formula1 == '"show,hide,auto"', hits[0].formula1
+
+
+def test_editing_a_leaf_parameter_keeps_the_line_order(tmp_path):
+    """
+    **改一个叶语句参数，不许动任何一行的顺序**（这是本轮的核心判据）。
+
+    夹具刻意做成"raw 与 code 交错"（`show screen` / `pause` / `hide screen` /
+    `$ …`）—— 真机手机消息那一段就是这个形状。改 `pause` 的值之后，
+    产物里这些行的**相对顺序必须一字不差**，而且逐行 diff 只允许一行不同。
+    """
+    script = ('label a:\n'
+              '    show screen msg\n'
+              '    pause 0.5\n'
+              '    $ msg_add("一")\n'
+              '    hide screen msg\n'
+              '    $ msg_add("二")\n')
+    _root, src = _project(tmp_path, rules=None, script=script)
+    beats = _beats(src)
+    x = _export(tmp_path, beats, StatementRegistry.for_project(_root_of(tmp_path)))
+
+    def _product(bs):
+        return render_beats_to_rpy(bs, label_name='a')
+
+    baseline = _product(import_beats_from_excel(x))
+    order = [ln.strip() for ln in baseline.split('\n') if ln.strip()]
+
+    headers, _ws = _header_cells(x)
+    row = [i for i, b in enumerate(beats) if 'pause' in (b.raw or '')][0]
+    _edit_cell(x, 'pause·seconds@0', '1.5', row=row)
+    changed = _product(import_beats_from_excel(x))
+
+    assert 'pause 1.5' in changed, changed
+    new_order = [ln.strip() for ln in changed.split('\n') if ln.strip()]
+    assert new_order == [t if t != 'pause 0.5' else 'pause 1.5' for t in order], (
+        f'顺序被改了：\n--- 改前 ---\n{baseline}\n--- 改后 ---\n{changed}')
+    diff = [i for i, (a, b) in enumerate(zip(baseline.split('\n'),
+                                             changed.split('\n'))) if a != b]
+    assert len(diff) == 1, [baseline.split('\n')[i] for i in diff]
+
+
+def test_untouched_leaf_columns_round_trip_byte_for_byte(tmp_path):
+    beats = _leaf_beats(tmp_path)
+    x = _export(tmp_path, beats, StatementRegistry.for_project(_root_of(tmp_path)))
+    back = import_beats_from_excel(x)
+    out = render_beats_to_rpy(back, label_name='a')
+    src_text = Path(_root_of(tmp_path) / 'game' / 'ch.rpy').read_text(
+        encoding='utf-8')
+    for ln in src_text.split('\n'):
+        if ln.strip() and not ln.strip().startswith('#'):
+            assert ln in out, f'没改却对不上：{ln!r}\n{out}'
+
+
+def test_two_identical_leaf_statements_in_one_beat_are_not_guessed(tmp_path):
+    """
+    一拍里**两条同类**叶语句（两个 `pause`）→ 那一格**留空**，改它也不生效。
+
+    一格装不下两条：挑一条改就是**改了另一条指令**。宁可这一格什么都不做
+    （用户想改可以直接改「代码」列）。
+    """
+    script = ('label a:\n'
+              '    pause 0.5\n'
+              '    pause 1.0\n'
+              '    e "台词"\n')
+    _root, src = _project(tmp_path, rules=None, script=script)
+    beats = _beats(src)
+    assert len(beats) == 1, [(b.raw, b.text) for b in beats]
+    x = _export(tmp_path, beats, StatementRegistry.for_project(_root_of(tmp_path)))
+    headers, ws = _header_cells(x)
+    col = headers.index('pause·seconds@0') + 1
+    assert not (ws.cell(row=2, column=col).value or ''), (
+        ws.cell(row=2, column=col).value)
+
+    _edit_cell(x, 'pause·seconds@0', '9.9', row=0)
+    back = import_beats_from_excel(x)
+    assert 'pause 0.5' in (back[0].raw or ''), back[0].raw
+    assert 'pause 1.0' in (back[0].raw or ''), back[0].raw
+    assert '9.9' not in (back[0].raw or ''), back[0].raw

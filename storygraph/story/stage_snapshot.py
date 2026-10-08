@@ -359,7 +359,31 @@ def stage_snapshots(beats: list) -> list:
                             'text': f'背景 → {new_image}'
                             if new_image else '背景 → （清空）'})
 
-        for verb in _stage_order(beat):
+        # ---- 舞台：**逐条**按顺序应用（缺口 4，2026-10-07）----
+        #
+        # 判据与渲染器**同一条**（`Beat.op_tokens_full`）。从前这里按
+        # **verb 分组**应用（先把所有 show 落上、再处理所有 hide），于是
+        #
+        #     show A / hide A / show A
+        #
+        # 的**当前舞台**是"台上没人"，而**产物**是"A 站着"：
+        # 预览/卡片与产物说法相反。这一条是**视觉复核截图**当场看出来的
+        # （`tools/shot_stage_order.py`：修后那一格仍写"（台上没人）"）。
+        show_items = _split_show_items(beat.show)
+        hide_items = _split_hide_items(beat.hide)
+        seen = {'show': 0, 'hide': 0}
+
+        def _pick(kind, items, idx):
+            """这一条 token → 实际要应用的条目（`idx=None` = 还没用过的那些）。"""
+            if idx is not None and 0 <= int(idx) < len(items):
+                seen[kind] = max(seen[kind], int(idx) + 1)
+                return [items[int(idx)]]
+            out = items[seen[kind]:]
+            seen[kind] = len(items)
+            return out
+
+        tokens = beat.op_tokens_full() or [(v, None) for v in _stage_order(beat)]
+        for verb, idx in tokens:
             if verb == 'scene':
                 image = (beat.scene or '').strip()
                 if image:
@@ -372,11 +396,11 @@ def stage_snapshots(beats: list) -> list:
                     state['actors'] = actors
                     state['scene'] = image
             elif verb == 'show':
-                for item in _split_show_items(beat.show):
+                for item in _pick('show', show_items, idx):
                     actors, _ch = _apply_show_verb(item, beat, actors, state)
                     changes.extend(_ch)
             elif verb == 'hide':
-                for item in _split_hide_items(beat.hide):
+                for item in _pick('hide', hide_items, idx):
                     actors, _ch = _apply_hide_verb(item, actors, state)
                     changes.extend(_ch)
                 state['actors'] = actors

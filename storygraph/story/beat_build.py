@@ -44,6 +44,59 @@ from storygraph.story.beat_model import (
 
 
 
+def _relative_continuation_indents(lines: list) -> list:
+    """
+    多行语句每一行的**相对缩进**：首行 0，续行 = 原缩进 − 续行的最小缩进。
+
+    多行语句（括号没收平）的续行里总有一行落在语句自身那一层（收尾的
+    `])` / `)`），拿它当基准减掉，就得到"相对于语句"的缩进 —— 渲染时
+    `_reindent` 铺回这几格，外层再补这一拍的层级（见 `_emit_raw`）。
+
+    单行返回 `[0]`；续行全在更深一层时基准取最小值（最坏是丢一点对齐，
+    但**每一轮得到同一个结果** = 幂等，对齐是次要的）。
+    """
+    if len(lines) < 2:
+        return [0] * len(lines)
+    indents = [len(ln) - len(ln.lstrip()) for ln in lines[1:] if ln.strip()]
+    base = min(indents) if indents else 0
+    out = [0]
+    for ln in lines[1:]:
+        if not ln.strip():
+            out.append(0)
+        else:
+            out.append(max(0, (len(ln) - len(ln.lstrip())) - base))
+    return out
+
+
+
+def _dedent_continuations(text: str) -> str:
+    """
+    ⚠ **已废弃、没有调用方**（留着是为了记住"这条死路"）：
+
+    曾经在**存储**时把续行的缩进去掉（存相对缩进），纯渲染幂等确实修好了，
+    但**过表那张路串了结构** —— 格子里的原文一改，`_split_code_cell` 靠
+    缩进/块标记分辨 raw 与 code 的判据就变了，`mini_game_dfinder.rpy`
+    的 `label` 与 `if` 块整体串位（Excel 幂等审计当场红）。
+
+    正解是**存原文不动、在渲染侧记相对缩进**（见
+    `_relative_continuation_indents` 与 `_emit_raw`）。这个函数不再被调用，
+    保留为一个"不要再犯"的路标。
+    """
+    lines = str(text or '').split('\n')
+    if len(lines) < 2:
+        return text
+    indents = [len(ln) - len(ln.lstrip()) for ln in lines[1:] if ln.strip()]
+    if not indents:
+        return text
+    base = min(indents)
+    if not base:
+        return text
+    out = [lines[0]] + [(ln[base:] if ln.strip() else ln)
+                        for ln in lines[1:]]
+    return '\n'.join(out)
+
+
+
 class _BeatBuilder:
     """
     把顺序语句流折叠成 Beat 序列的**状态机**（P3-12，2026-10-05）。
@@ -228,13 +281,41 @@ class _BeatBuilder:
         beat.cond_comment = getattr(stmt, 'cond_comment', '') or ''
         return beat
 
-    def mark_stage(self, verb: str) -> None:
-        """记录舞台指令在本拍中的出现顺序，供导出时保序。"""
+    def mark_stage(self, verb: str, index: int = 0) -> None:
+        """
+        记录舞台指令在本拍中的出现顺序，供导出时保序。
+
+        ⚠ **token 是"逐条"的：`show#0,hide#0,show#1`**（2026-10-07 修缺口 4）。
+
+        从前这里存的是**verb 名**且**同名去重**（`if verb not in order`），
+        于是顺序信息只有"哪些 verb、谁先谁后"，**同名 verb 无法表达两条**：
+
+            show A / hide B / show C
+            旧 token：show,hide          ← 第三条 show 根本没记
+            旧产物  ：show A / show C / hide B   ← 渲染器只能按 verb 分组
+
+        换成 `verb#<这一拍里第几条>` 之后，渲染器可以**逐条**还原，顺序与
+        条数都能保住（`show A / hide A / show A` 那种"收尾画面反了"的
+        形状就是被旧写法吃掉的）。
+        """
         order = (self.pending.stage_order.split(',')
                  if self.pending.stage_order else [])
-        if verb not in order:
-            order.append(verb)
+        token = f'{verb}#{int(index)}'
+        if token not in order:
+            order.append(token)
         self.pending.stage_order = ','.join(order)
+
+    def stage_tokens(self, verb: str) -> list:
+        """这一拍 `stage_order` 里某个 verb 已经记了几条（解析 token，含老格式）。"""
+        out = []
+        for tok in (self.pending.stage_order or '').split(','):
+            tok = tok.strip()
+            if not tok:
+                continue
+            head = tok.split('#', 1)[0]
+            if head == verb:
+                out.append(tok)
+        return out
 
     @staticmethod
     def with_src(beat, line_no):
@@ -251,23 +332,29 @@ class _BeatBuilder:
             beat.src_last = line_no
         return beat
 
-    def mark_op(self, token: str) -> None:
+    def mark_op(self, token: str, index: int = None) -> None:
         """
-        记录操作在本拍中的**verb 级**出现顺序，供导出时逐条还原。
+        记录操作在本拍中的**逐条**出现顺序，供导出时逐条还原。
 
-        存的是 verb（`scene` / `show` / `hide` / `audio` / `voice`），
-        不是类别。**这一点很关键**：
+        存的是 `verb#<第几条>`（`show#0` / `hide#1` / `audio` …）——
+        舞台 verb 走 `mark_stage` 同一套编号（同名 verb 的第几条）。
 
-        只记类别（`stage,audio`）时，渲染只能把整个舞台组一次输出，
-        得到"整块舞台 + 整块音频"，于是 `scene → play → show` 变成
-        `scene, show, play` —— `play` 被挤到 `show` 后面。
-        demo ch01 实测就是这样（`play music night` 原本在
-        `show eileen happy` 之前），而这属于**演出顺序被改**。
+        **为什么必须逐条**：只记 verb 名时，同一拍里两条 `show` 之间夹着一条
+        `hide` 就没法表达，渲染只能按 verb 分组输出，于是
 
-        audio / voice 同类只记一次：同一拍里两条 `play sound` 已经被
-        flush 拆成了两拍（见 PLAY 分支），所以不需要计数。
-        舞台 verb 按 `mark_stage` 的语义去重（同 verb 不重复记）。
+            show A / hide B / show C   →   show A / show C / hide B
+
+        演出顺序被改；而 `show A / hide A / show A`（作者要"最后显示"）会被
+        去重成 `show A / hide A` —— **收尾画面反了**（玩家看到的画面不同）。
+
+        audio / voice 同类只记一次：同一拍里两条 `play sound` 已经被 flush
+        拆成了两拍（见 PLAY 分支），所以不需要计数。
         """
+        token = str(token or '')
+        if not token:
+            return
+        if index is not None:
+            token = f'{token}#{int(index)}'
         order = (self.pending.op_order.split(',')
                  if self.pending.op_order else [])
         if token not in order:
@@ -554,8 +641,8 @@ class _BeatBuilder:
             pending.scene_at = _join_at_targets(payload['at'])
         pending.condition = stmt.condition or pending.condition
         self.pending_has_stage = True
-        self.mark_stage('scene')
-        self.mark_op('scene')
+        self.mark_stage('scene', 0)
+        self.mark_op('scene', 0)
         # 换景 = 换了说话语境，`extend` 的显示归属到此为止（见下）
         self.last_speaker = ''
         return True, False
@@ -567,7 +654,11 @@ class _BeatBuilder:
         items.append({'clause': _show_item_text(payload),
                       'image': payload.get('image', '') or '',
                       'at': ''})
-        pending.show = _join_show_items(items)
+        # **作者写两遍就得留两遍**（`dedup=False`，2026-10-07 修缺口 4）：
+        # 按内容去重会在 `show A / hide A / show A` 里吃掉最后那条 show
+        # —— **收尾画面与作者要的相反**。影子重复由 hydrate 那条路自己挡
+        # （见 `hydrate_from_dsl` 的 `dedup=True`）。
+        pending.show = _join_show_items(items, dedup=False)
         if payload.get('with_') and not payload.get('at') \
                 and id(stmt) not in self.branch_edges:
             # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里。
@@ -576,8 +667,8 @@ class _BeatBuilder:
             pending.with_ = payload['with_']
         pending.condition = stmt.condition or pending.condition
         self.pending_has_stage = True
-        self.mark_stage('show')
-        self.mark_op('show')
+        self.mark_stage('show', len(items) - 1)
+        self.mark_op('show', len(items) - 1)
         return True, False
 
     def _emit_hide(self, stmt, payload, _ln):
@@ -586,11 +677,11 @@ class _BeatBuilder:
         items = _split_hide_items(pending.hide)
         items.append({'image': payload.get('image', '') or '',
                       'with': payload.get('with_', '') or ''})
-        pending.hide = _join_hide_items(items)
+        pending.hide = _join_hide_items(items, dedup=False)
         pending.condition = stmt.condition or pending.condition
         self.pending_has_stage = True
-        self.mark_stage('hide')
-        self.mark_op('hide')
+        self.mark_stage('hide', len(items) - 1)
+        self.mark_op('hide', len(items) - 1)
         # 退场也算"说话人离开"：`A say → hide A → extend` 时，
         # 那句 extend 归属谁是不确定的（A 已经不在台上了）。
         # 宁可标成空（策划会去补），也不要安错人。
@@ -652,8 +743,15 @@ class _BeatBuilder:
         # 前后的代码指纹对不上（审计算一条丢失 + 一条新增）。
         lines = _split_code_lines(code)
         start = len(pending.ordered) + 1        # 1-based 行号
+        # ⚠ 令牌里的下标是**代码池里的第几条**（`_split_lines(pending.code)`，
+        # **不含空行**）—— 与渲染侧 `_ordered_code_lines` 用的池子同一个口径。
+        # 用 `start`（ordered 里的位置，含 raw 行）当基数会整体错位（第一版
+        # 就是这么错的：`show screen` 被吞进 python 块、`window hide` 消失）。
+        before = len(_split_lines(pending.code))
         pending.code = _append_line(pending.code, code)
         pending.ordered.extend(('code', ln) for ln in lines)
+        for i in range(len(_split_lines(code))):
+            self.mark_op('code', before + i)
         if len(lines) > 1:
             # **多行** = 它来自 `python:` 块（单行 `$ x` 只占一行）。
             # 记下它在格子里的行区间，写进隐藏列 `CodeBlocks` ——
@@ -747,8 +845,28 @@ class _BeatBuilder:
             return True, False
         pending = self.pending
         pending.condition = stmt.condition or pending.condition
+        # **raw 行逐条记令牌**（缺口 4 第八轮）：一条语句可能占多行，
+        # 令牌按**行**记（`raw#0`/`raw#1`…），这样"这条 raw 行夹在哪两条
+        # 舞台指令之间"就能逐条还原（从前 raw 与舞台是两条通道，
+        # 彼此之间只有槽位：真机 4 个文件命中）。
+        before = len(_split_lines(pending.raw))
         pending.raw = _append_line(pending.raw, text)
-        pending.ordered.extend(('raw', ln) for ln in _split_lines(text))
+        lines = _split_lines(text)
+        # **续行的缩进按"相对这条语句"记**（`ordered` 的第三位），
+        # 而**格子里的原文照旧逐字存**（`pending.raw` 不动）。
+        #
+        # 为什么这么分（2026-10-07 第九轮，真机 `mini_game_dfinder.rpy`）：
+        # 续行在文件里是绝对缩进（label 的 4 + 相对的 4 = 8），渲染时外面还会
+        # 按这一拍层级再补一次 → **每往返一轮多 4 个空格**（纯渲染幂等红）。
+        # 但**不能**改写格子里的原文：`_split_code_cell` 靠缩进/标记分辨
+        # raw 与 code，改了它过表就串结构（Excel 幂等红）。
+        # 所以在**渲染侧**做：记相对缩进，`_reindent` 按它铺回去，
+        # 外层再补这一拍的层级 —— 两边各管一半，闭环稳定。
+        rel = _relative_continuation_indents(lines)
+        pending.ordered.extend(
+            ('raw', ln, r) for ln, r in zip(lines, rel))
+        for i in range(len(lines)):
+            self.mark_op('raw', before + i)
         self.pending_has_stage = True
         return True, False
 
@@ -1211,13 +1329,29 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
         elif op.verb == 'pause':
             order.append('raw')
 
-    # 追加到结构化列已经填好的内容后面（高级列是"补充通道"）
+    # 追加到结构化列已经填好的内容后面（高级列是"补充通道"）。
+    #
+    # ⚠ **只追加"还没有的"影子，不动作者原有的条目**（2026-10-07 缺口 4）：
+    # 从前是"两边合起来按内容去重"，于是作者写两遍同样的 show/hide
+    # （`show A / hide A / show A` 那种交错）会被一起收掉 ——
+    # **收尾画面与作者要的相反**。现在的口径是：
+    #   · 作者原有的顺序与条数**逐条保留**（`beat.show` 不动）；
+    #   · 影子（Stage 列那一份，属于"同一条指令的另一种写法"）只在
+    #     结构化列里**没有同款**时才追加。
     if show_items:
-        beat.show = _join_show_items(_split_show_items(beat.show)
-                                     + show_items)
+        existing = _split_show_items(beat.show)
+        have = {show_item_part(it) for it in existing}
+        add = [it for it in show_items
+               if show_item_part(it) and show_item_part(it) not in have]
+        if add:
+            beat.show = _join_show_items(existing + add, dedup=False)
     if hide_items:
-        beat.hide = _join_hide_items(_split_hide_items(beat.hide)
-                                     + hide_items)
+        existing = _split_hide_items(beat.hide)
+        have = {hide_item_part(it) for it in existing}
+        add = [it for it in hide_items
+               if hide_item_part(it) and hide_item_part(it) not in have]
+        if add:
+            beat.hide = _join_hide_items(existing + add, dedup=False)
     if scene is not None:
         beat.scene = scene
     if at:

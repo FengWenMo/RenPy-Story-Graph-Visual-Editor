@@ -1532,11 +1532,10 @@ class TestBranchConditionsAreLogicallyCorrect:
         这是"逻辑正确"最硬的判据 —— 不是看字符串像不像，而是看
         `apply_condition` 在具体取值下判不判它可行。
 
-        注意一处**已知的保守**（`analysis._ast_apply_cond` 的 D2）：
-        "否定下的 And/Or" 不做 De Morgan 化，直接放行 —— 所以
-        `not ((score > 3) or (score > 1))` 这种 else 条件，分析器**不敢**
-        判它不可行。这是安全方向的保守（宁可不报"不可达"，也不误报），
-        所以下面只断言"能判的那些"，不假装它能判 else。
+        ⚠ **判据校准（2026-10-08）**：这里原来把"否定下的 And/Or 不做
+        De Morgan 化"记成一处**已知保守**（`not ((score>3) or (score>1))`
+        判不出不可行）。现在 `analysis._ast_apply_cond` **做了** De Morgan
+        （等价改写，仍可靠），于是 else 分支也能精确判死 —— 断言随之收紧。
         """
         from storygraph.graph.analysis import (ValueRange, VariableState,
                                                apply_condition)
@@ -1555,10 +1554,14 @@ class TestBranchConditionsAreLogicallyCorrect:
         assert possible('mid_end', 5) is False, 'score=5 不该走到 elif 分支'
         assert possible('good_end', 2) is False, 'score=2 不该走 if 分支'
         assert possible('good_end', 0) is False
-        # else 的否定式条件：分析器保守（D2），这里明确记录这个已知限制
+        # else = not((score>3) or (score>1))：
+        #   score=0 → (F or F) → not → 真 → 走 else；
+        #   score=2 → (F or T) → not → 假 → 不走；score=5 → (T or T) → 同样不走。
         assert possible('bad_end', 0) is True
-        assert possible('bad_end', 5) is True, \
-            '分析器对"否定下的 Or"是保守的（安全方向），不是条件写错'
+        assert possible('bad_end', 2) is False, \
+            'score=2 时 (2>1) 为真 → not(or) 为假 → 不该走 else'
+        assert possible('bad_end', 5) is False, \
+            'score=5 时 (5>3) 为真 → not(or) 为假 → 不该走 else'
 
     def test_menu_condition_gates_the_option(self, write_rpy):
         """`menu` 选项上的条件同样要能挡住不该走的分支。"""

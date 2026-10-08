@@ -145,6 +145,26 @@ _CONTENT_HEADS = frozenset({'extend', 'extend_'})
 _CONTAINER_HEADS = RENPY_CONTAINER_HEADS
 
 
+def _declared_heads(project_root) -> set:
+    """
+    项目**声明过**的语句头（`storygraph.rules.json` + `renpy.register_statement`）。
+
+    为什么要排除它们（2026-10-08）：`unknown_statements` 原来只认内置词表，
+    于是**用户已经声明过的**自定义语句照样被报成"工具不认识" —— 报告自己
+    打自己脸（`tests/test_build_report_undeclared.py` 抓到的）。声明过就是
+    认识，"不认识"必须排除它们。
+
+    走 `StatementRegistry.for_project`（带缓存，一次拿到清单+CDS 两来源）；
+    用**延迟 import** 避开与 `statement_registry` 的循环依赖。
+    """
+    try:
+        from storygraph.story.statement_registry import StatementRegistry
+        return set(StatementRegistry.for_project(project_root).names())
+    except Exception as e:                          # noqa: BLE001 - 读不出来就少排除
+        swallow('story.project_conventions._declared_heads', e)
+        return set()
+
+
 def unknown_statements(project_root, limit_examples: int = 3) -> dict:
     """
     扫全项目 `.rpy`，列出**工具不认识的语句头**：`{头: {count, examples}}`。
@@ -158,6 +178,7 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
     """
     root = Path(project_root)
     game = root / 'game' if (root / 'game').is_dir() else root
+    declared = _declared_heads(project_root)        # 声明过的 = 认识，不算
     out = {}
     for f in sorted(game.rglob('*.rpy')):
         try:
@@ -166,7 +187,11 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
             swallow('story.project_conventions.unknown_statements', e)
             continue
         skip_indent = None
+        depth = 0                               # 上一条语句还没闭合的括号层数
         for ln in lines:
+            if depth > 0:
+                depth = _bracket_depth(depth, ln)   # 续行：属于上一条语句
+                continue
             s = ln.strip()
             if not s or s.startswith('#'):
                 continue
@@ -176,12 +201,17 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
                     continue                        # 还在"不编辑的块"里
                 skip_indent = None
             head = _statement_head(s)
-            if not head:
-                continue
             if head in _CONTAINER_HEADS:
                 skip_indent = ind                   # 从这里开始整块跳过
                 continue
-            if head in KNOWN_STATEMENT_HEADS or head in _CONTENT_HEADS:
+            # 记下本行留下的未闭合括号 —— 后面的续行不能当成新的语句头。
+            # 真实项目实测：`show screen prompt("…", act=[` 的下一行
+            # `Call(...)` 曾被误报成"工具不认识的语句"。
+            depth = _bracket_depth(0, ln)
+            if not head:
+                continue
+            if (head in KNOWN_STATEMENT_HEADS or head in _CONTENT_HEADS
+                    or head in declared):
                 continue
             if head[0].isdigit():
                 continue
@@ -194,6 +224,52 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
 
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip(' \t'))
+
+
+#: 一层括号组（不含嵌套）——`(no_skip=True)`、`(1, 2)` 之类。
+_PAREN_GROUP_RE = re.compile(r'\([^()]*\)')
+
+
+def _strip_paren_groups(s: str) -> str:
+    """把 `(...)` 整段挖掉（反复挖到没有为止），用于"只看顶层有没有 `=`"。"""
+    prev = None
+    out = s
+    while out != prev:
+        prev = out
+        out = _PAREN_GROUP_RE.sub(' ', out)
+    return out
+
+
+def _bracket_depth(depth: int, line: str) -> int:
+    """
+    本行结束后**未闭合的 `([{` 层数**（跳过字符串与 `#` 注释）。
+
+    用途：多行语句的续行（`show screen prompt("…", act=[` 后面的
+    `Call(...)`）**不是新语句头** —— 不认这一点，会把续行里的 Python 调用
+    误报成"工具不认识的语句"（真实项目实测 2 条假阳性）。
+    """
+    quote = ''
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ''
+            i += 1
+            continue
+        if ch in '"\'':
+            quote = ch
+        elif ch == '#':
+            break
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth = max(0, depth - 1)
+        i += 1
+    return depth
 
 
 def _statement_head(text: str) -> str:
@@ -219,8 +295,11 @@ def _statement_head(text: str) -> str:
     if text.rstrip().endswith(':'):
         return head
     # 未知的"关键字语句"（`mycustomcue 'Thunder' intensity=3`）：
-    # 判据是**带具名参数** —— 台词 `e "…"` 没有 `=`，不会被误报。
-    if re.search(r'\b[A-Za-z_][\w]*\s*=', tail or ''):
+    # 判据是**带具名参数** —— 但 `=` 必须出现在**顶层**（括号之外）。
+    # ⚠ 台词可以带 say 参数：`jc "台词" (no_skip=True)` —— 那个 `=` 在
+    # `(...)` 里，挖掉括号组后再找，就不会把台词误报成语句头
+    # （真实项目实测的 2 条假阳性之一）。
+    if re.search(r'\b[A-Za-z_][\w]*\s*=', _strip_paren_groups(tail or '')):
         return head
     return ''
 

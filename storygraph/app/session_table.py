@@ -43,6 +43,7 @@ from storygraph.story.beat_build import (beats_from_parse_result,
 from storygraph.story.beat_render import make_symbols
 from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
                                          compose_stage_extra)
+from storygraph.story.spec_args import is_dynamic_column
 
 
 __all__ = ['TableSessionMixin', 'BeatSnapshot', 'uniform_position_of']
@@ -467,6 +468,20 @@ class TableSessionMixin:
             b.voice = str(fields.get('Voice') or '').strip()
         if 'Comment' in fields:
             b.comment = str(fields.get('Comment') or '').strip()
+
+        # **「每参数一列」的键**（`mycue·intensity` / `camera·layer@0` /
+        # `pause·seconds@0`）：卡片与 Excel 走**同一条折叠路径**
+        # （`beat_model.fold_spec_arg_columns`）—— 一份实现两处用，
+        # 卡片上改参数与在表里改参数的结果必然一致。
+        #
+        # 为什么放在 `advanced_open` 判断**之外**：这一组控件是跟着这一拍
+        # 的语句走的（有参数才出现），不像高级区那样会被折叠 ——
+        # 折叠起来的东西不写回是契约（见上面那段），而它一直可见。
+        _dyn = {k: v for k, v in fields.items()
+                if isinstance(k, str) and is_dynamic_column(k)}
+        if _dyn:
+            from storygraph.story.beat_model import fold_spec_arg_columns
+            fold_spec_arg_columns(b, _dyn)
 
         if advanced_open:
             if 'SFX' in fields:

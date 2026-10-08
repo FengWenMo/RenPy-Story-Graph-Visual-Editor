@@ -123,6 +123,23 @@ from storygraph.core.statement import (CONTENT_HASH_HEX, Statement,
                                        StatementKind)
 
 
+def read_source_text(path) -> str:
+    r"""
+    读一份源文件，并**吃掉开头的 UTF-8 BOM**（2026-10-08）。
+
+    为什么必须吃（实测）：带 BOM 的 `.rpy` 第一行是 `\ufefflabel a:`，
+    而标签判据是 `^label\b` —— 认不出来，于是整个文件的语句**一条都解析
+    不到**（静默全丢；用户只看到"导入后什么都没有"，没有任何报错）。
+    BOM 是编码标记、不是内容：剥掉它不改变任何一行的语义。
+
+    ⚠ 只在**最开头**剥一个 —— 正文中间出现 `\ufeff` 是作者的内容，不许动。
+    """
+    text = Path(path).read_text(encoding='utf-8')
+    if text.startswith('\ufeff'):
+        text = text[1:]
+    return text
+
+
 # ====================================================================
 #  模块级辅助：字符串 / 括号 / 顶层冒号扫描
 # ====================================================================
@@ -269,7 +286,7 @@ def _top_level_region(filepath, lines=None) -> list:
     """
     if lines is None:
         try:
-            lines = Path(filepath).read_text(encoding='utf-8').splitlines()
+            lines = read_source_text(filepath).splitlines()
         except (OSError, UnicodeDecodeError):
             return []
     raw = list(lines)
@@ -490,7 +507,7 @@ class RenPyLexer:
         self._current_file = str(filepath)
         if text is None:
             try:
-                text = filepath.read_text(encoding='utf-8')
+                text = read_source_text(filepath)
             except Exception as e:
                 self.errors.append(f"读取失败 {filepath}: {e}")
                 return []
@@ -2285,7 +2302,7 @@ class RenPyParser:
         if path in cache:
             return cache[path]
         try:
-            text = Path(path).read_text(encoding='utf-8')
+            text = read_source_text(path)
         except (OSError, UnicodeDecodeError):
             text = None
         cache[path] = text
@@ -4057,7 +4074,7 @@ class IncrementalRenPyAnalyzer:
                 if str(fp_path) in texts:
                     continue
                 try:
-                    texts[str(fp_path)] = fp_path.read_text(encoding='utf-8')
+                    texts[str(fp_path)] = read_source_text(fp_path)
                 except (OSError, UnicodeDecodeError) as e:
                     swallow('parsing.analyze.cst.read', e)
             parse_result.cst_attached = attach_spans(

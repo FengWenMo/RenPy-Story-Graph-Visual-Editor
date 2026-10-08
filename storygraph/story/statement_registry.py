@@ -53,6 +53,9 @@ class RegisteredStatement:
     #: M4 的投影字段（先占位，声明的照收不误）
     label: str = ''
     columns: list = field(default_factory=list)
+    #: **块体允许出现哪些语句**（头 token 列表；空 = 不校验）——`body.allows`。
+    #: 这是"结构级"约束（设计文档 §0 的 ②层）：语法形状猜不出来，只能被声明。
+    body_allows: list = field(default_factory=list)
     render: str = 'verbatim'
 
     @property
@@ -68,6 +71,7 @@ class RegisteredStatement:
                 'block': self.block, 'source': self.source,
                 'origin': self.origin, 'docs': self.docs,
                 'label': self.label, 'columns': list(self.columns),
+                'body_allows': list(self.body_allows),
                 'render': self.render}
 
 
@@ -118,6 +122,11 @@ def _from_manifest(data: dict, manifest_path: str) -> list:
             label=str(item.get('label') or ''),
             columns=[c for c in (item.get('columns') or ())
                      if isinstance(c, dict)],
+            # `body: {"allows": ["say","show",…]}` —— 结构级约束（②层）：
+            # 语法形状猜不出"这个块里允许写什么"，只能被声明。
+            body_allows=[str(x) for x in (
+                (item.get('body') or {}).get('allows') or ())
+                if str(x).strip()],
             render=str(item.get('render') or 'verbatim')))
     return out
 
@@ -539,7 +548,15 @@ def spec_arg_choices(registry, head: str, column: str = '') -> list:
 
 
 def spec_columns(registry, head: str) -> list:
-    """这条声明的**列描述**（M4）：`[{name, label, choices, required}]`。"""
+    """
+    这条声明的**列描述**（M4）：
+    `[{name, label, choices, required, positional, choices_from}]`。
+
+    `choices_from`（可选）：候选来自**资源表的某一类**（`'transform'` /
+    `'image'` / …），而不是内联的一串值 —— `with` 这种语句的候选就是项目里
+    真实存在的变换，让 Excel 直接绑到那张候选表上（自伸缩、没有 255 字符上限，
+    也不会因为项目加了一个变换就过时）。
+    """
     spec = registry.match(head) if registry else None
     if spec is None:
         return []
@@ -553,7 +570,9 @@ def spec_columns(registry, head: str) -> list:
         out.append({'name': name,
                     'label': str(col.get('label') or ''),
                     'choices': [str(c) for c in (col.get('choices') or ())],
-                    'required': bool(col.get('required'))})
+                    'required': bool(col.get('required')),
+                    'positional': col.get('positional'),
+                    'choices_from': str(col.get('choices_from') or '')})
     return out
 
 
@@ -605,13 +624,9 @@ def dynamic_spec_columns(beats, registry) -> list:
 
     heads: list = []
     for b in (beats or ()):
-        name = str(getattr(b, 'spec_name', '') or '').strip()
-        if not name:
-            # 标准语句：头行藏在哪一位由**渲染层那套优先级**决定
-            # （`spec_head` → `loop_header` → `camera_header` → `opaque` 首行）。
-            name = _beat_statement_head(b)
-        if name and name not in heads:
-            heads.append(name)
+        for name in _beat_statement_heads(b):
+            if name and name not in heads:
+                heads.append(name)
 
     out: list = []
     seen: set = set()
@@ -629,8 +644,34 @@ def dynamic_spec_columns(beats, registry) -> list:
     return out
 
 
+def _beat_statement_heads(beat) -> list:
+    """
+    这一拍贡献的**语句头**（保序去重）—— 一个拍可能有多个：
+
+      · **头行**那一个（声明的自定义语句 / 循环 / 相机）；
+      · 「代码」列里那些**叶语句**（`with` / `pause` / `window`，见
+        `beat_model.LEAF_ARG_HEADS`）—— 它们的参数列折的是 raw 里那一行，
+        不是头行（走 `opaque` 会**换渲染通道、动顺序**）。
+
+    `spec_name`（声明来源）优先：它才是"这条语句被谁声明过"的权威答案。
+    """
+    out: list = []
+    name = str(getattr(beat, 'spec_name', '') or '').strip()
+    if name:
+        out.append(name)
+    else:
+        head = _beat_statement_head(beat)
+        if head:
+            out.append(head)
+    from storygraph.story.beat_model import _leaf_heads_of
+    for head in _leaf_heads_of(beat):
+        if head not in out:
+            out.append(head)
+    return out
+
+
 def _beat_statement_head(beat) -> str:
-    """这一拍的**语句头**（标准语句那条路：从它的头行/整块原文里取）。"""
+    """这一拍的**语句头**（从它的头行 / 整块原文里取，不含「代码」列）。"""
     from storygraph.core.vocabulary import statement_head_token
     for attr in ('spec_head', 'loop_header', 'camera_header'):
         text = str(getattr(beat, attr, '') or '')
@@ -695,6 +736,279 @@ def _specs_of(registry) -> list:
         seen.add(spec.name)
         out.append(spec)
     return out
+
+
+def describe_statements(project_root=None, statements=None, registry=None,
+                        builtin_heads=None) -> dict:
+    """
+    **工具"以为"的自定义结构** → 可 diff 的 dict（设计文档 §2.1 第一档接口）。
+
+    为什么先要它（`docs/设计_自定义结构发现与交互_2026-10-07.md`）：
+    所有"人机对齐"的前提是**工具能把自己以为的东西摊开**。没有这一份，
+    人只能猜"工具到底认不认我的 `mycue`、认成什么档、凭什么"。
+
+    输出三段：
+
+      · `declared` / `cds` / `shape_guess`：**来源**（声明 = 主路径；
+        CDS = 反射防漂移；shape_guess = 形状检测，只做分类，**不当结构真源**）；
+      · `statements[]`：每个见过的头一条——名字/标签/有无块体/参数表
+        （`arg_columns`）/保真档（`capability_of`）/证据（文件:行 + 出现次数）/
+        告警（"只靠猜" / "声明与 CDS 不一致"）；
+      · `capability`：这一份脚本流的分级计数（与 `coverage_of_statements` 同源）。
+
+    ⚠ 它**只读**：不改任何数据、不写文件。要"调节"就改声明文件，然后重跑它。
+    """
+    from collections import defaultdict
+
+    from storygraph.core.capability import Coverage
+    from storygraph.core.vocabulary import statement_head_token
+
+    reg = registry
+    if reg is None and project_root:
+        reg = StatementRegistry.for_project(str(project_root))
+    if statements is None and project_root:
+        from storygraph.parsing.discover import discover_scripts
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        pr, _extra = IncrementalRenPyAnalyzer().analyze(
+            files=discover_scripts(str(project_root)), graph=None)
+        statements = list(getattr(pr, 'statements', ()) or ())
+    statements = list(statements or ())
+
+    specs = _specs_of(reg)
+    by_name = {}
+    for sp in specs:
+        for nm in sp.names:
+            by_name[nm] = sp
+
+    #: **只统计"自定义结构"那几类**（缺口 4/CST 的范围）：
+    #: `raw`（工具不认识的原生语句）/ `loop` / `camera`。
+    #:
+    #: ⚠ 第一版把**所有**语句都算进来，于是台词也成了"语句头"
+    #: （真机跑出 1634 个"头"，里面全是 `兄弟，再别说了。` 这种台词、
+    #: `#` 注释、`$` 代码行）—— 那是把"工具不认识的东西"与"本来就归工具管的
+    #: 东西"混成一锅。台词/舞台/代码/注释是**内置建模**的，不是自定义结构。
+    cst_kinds = ('raw', 'loop', 'camera')
+    seen: dict = {}
+    counts: dict = defaultdict(int)
+    # 每条"头"留一份**原文样例**（CST 真迹优先）—— `statement_text()` 是
+    # CST 的正式消费者（从前生产零调用）：报告里给人看"工具眼里的这一行
+    # 到底长什么样"，比只给一个头 token 有用得多。
+    from storygraph.core.cst import statement_text
+    for st in statements:
+        kind = getattr(st, 'kind', '') or ''
+        if kind not in cst_kinds:
+            continue
+        payload = getattr(st, 'payload', None)
+        payload = payload if isinstance(payload, dict) else {}
+        # 循环/相机没有"头行 token"（它们走自己的 kind），头就是 kind 本身。
+        head = (kind if kind in ('loop', 'camera')
+                else statement_head_token(payload.get('text') or ''))
+        if not head:
+            continue
+        counts[head] += 1
+        if head not in seen:
+            src = getattr(st, 'source', None)
+            loc = ''
+            if isinstance(src, (tuple, list)) and len(src) > 1:
+                loc = f'{Path(str(src[0])).name}:{src[1]}'
+            raw = statement_text(st) or str(payload.get('text') or '')
+            sample = next((ln.strip() for ln in raw.split('\n') if ln.strip()),
+                          '')
+            seen[head] = {'file': loc,
+                          'raw_kind': payload.get('raw_kind') or kind,
+                          'sample': sample[:120]}
+
+    cov = Coverage()
+    rows = []
+    known_builtin = set(builtin_heads or ())
+    for head, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if head in known_builtin:
+            continue
+        raw_kind = (seen.get(head) or {}).get('raw_kind') or ''
+        cap = capability_of(head, reg, raw_kind=raw_kind)
+        cov.counts[cap.level] = cov.count_of(cap.level) + cnt
+        sp = by_name.get(head)
+        # 来源三档 + 一档"官方/工具自己的"（2026-10-07）：
+        #   · 项目声明（rules / CDS）= 主路径；
+        #   · **官方语句**（`show` / `hide` / `call` …）与**工具自己建模**的
+        #     （`loop` / `camera`）以及**内置形状表**（`with`/`pause`/`window`）
+        #     → 'builtin'：它们不是"项目自定义结构"，**不该提示人去声明**
+        #     （第一版把 `show` 也提示成"只靠猜，请写进 rules.json" —— 那是噪声）；
+        #   · 剩下的才真是"只靠形状猜"。
+        builtin = (head in _builtin_schemas() or head in _known_heads()
+                   or head in ('loop', 'camera'))
+        if sp is not None:
+            source = sp.source                      # 'declared' | 'host-registry'
+        elif builtin:
+            source = 'builtin'
+        else:
+            source = 'shape-guess'
+        cols = []
+        for c in arg_columns(reg, head):
+            cols.append({'name': c.get('param') or c.get('name') or '',
+                         'label': c.get('label') or '',
+                         'positional': c.get('positional'),
+                         'choices': list(c.get('choices') or ()),
+                         'choices_from': c.get('choices_from') or ''})
+        warnings = []
+        if source == 'shape-guess':
+            warnings.append('只靠形状猜出来的：参数名/约束工具不知道'
+                            '（要让它知道，写进 storygraph.rules.json 的 '
+                            'statements，或让代码里有 renpy.register_statement）')
+        elif sp is not None and not cols:
+            warnings.append('已声明但没有参数形状 → 表里不会有"每参数一列"')
+        rows.append({
+            'name': head,
+            'label': (sp.label if sp is not None else '') or '',
+            'source': source,
+            'origin': (sp.origin if sp is not None else ''),
+            'declared': sp is not None,
+            'block': bool(sp.has_block) if sp is not None else None,
+            'columns': cols,
+            'fidelity': cap.level,
+            'fidelity_name': cap.level_name,
+            'provenance': cap.provenance,
+            'evidence_note': cap.evidence,
+            'escape': cap.escape,
+            'occurrences': cnt,
+            'file': (seen.get(head) or {}).get('file') or '',
+            # 原文样例（CST 真迹优先）—— 见循环里 `statement_text` 的说明。
+            'sample': (seen.get(head) or {}).get('sample') or '',
+            'warnings': warnings,
+        })
+
+    return {
+        'project': str(project_root or ''),
+        'registry': {
+            'declared': [s.to_dict() for s in specs],
+            'cds': [s.to_dict() for s in specs if s.source == 'host-registry'],
+        },
+        'statements': rows,
+        'capability': dict(cov.counts),
+        'summary': {
+            'heads': len(rows),
+            'declared_heads': sum(1 for r in rows if r['declared']),
+            'builtin_heads': sum(1 for r in rows if r['source'] == 'builtin'),
+            'guessed_heads': sum(1 for r in rows
+                                 if r['source'] == 'shape-guess'),
+            'needs_action': sum(1 for r in rows
+                                if r['source'] == 'shape-guess'),
+        },
+    }
+
+
+def spec_body_allows(registry, head: str) -> list:
+    """
+    某个**声明过的**自定义语句，它的块体里**允许出现哪些语句头**
+    （声明 `body: {"allows": [...]}`；没声明就返回空 = **不校验**）。
+
+    为什么这条只能是"声明"（设计文档 §0）：语法形状能看出"有块体"，
+    但看不出"这个块里允许写 `say`/`show` 还是只允许 `python`" ——
+    那是项目自己的约定，工具猜就是编。空列表 = 少报胜过乱报。
+    """
+    for sp in _specs_of(registry):
+        if head in sp.names:
+            return list(getattr(sp, 'body_allows', None) or ())
+    return []
+
+
+def declare_statement(project_root, name: str, label: str = '',
+                      columns=None, block=None, docs: str = '') -> dict:
+    """
+    **把一条"教给它"的结构落成声明**（设计文档 §5 第 3 步：
+    "教一次"入口 —— 人答的当场落成 `rules.json` 的 `statements`）。
+
+    为什么落盘才算数（设计文档 §1 那条最重要的约束）：只存在内存里的
+    "工具知道"不算知道 —— 程序员改代码、工具改内存，第二天就对不上。
+    这个函数是**唯一的写入口**：CLI（`storygraph.cli learn`）与将来的
+    表/卡片入口都调它，所以"教一次"的结果永远是可评审、可 diff、可回滚的。
+
+    行为（都写进判据）：
+
+      · **同名 = 更新**，不追加第二条（教两次不会变成两份声明）；
+      · 已有的其它键（`aliases` / `docs` / 顶层别的段）**原样保留**；
+      · `storygraph.rules.json` **不存在就新建**；
+      · ⚠ 文件存在但 **JSON 坏了 → 拒绝写**（返回 `ok=False`），
+        绝不拿我们这份覆盖掉用户手写的清单（那是不可逆的破坏）；
+      · `name` 为空 / 不是字符串 → 拒绝。
+
+    返回 `{'ok': bool, 'path': str, 'action': 'added'|'updated'|'refused',
+          'reason': str, 'entry': dict}`。
+
+    ⚠ 写回用 `json.dumps(indent=2, ensure_ascii=False)` —— 也就是说
+    **整份清单会被重新排版**（键顺序按原 dict 顺序保留）。值一个不改。
+    """
+    import json
+
+    from storygraph.core.safeguard import swallow as _swallow  # noqa: F401
+
+    name = str(name or '').strip()
+    if not name:
+        return {'ok': False, 'path': '', 'action': 'refused',
+                'reason': '语句名不能为空', 'entry': {}}
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'action': 'refused',
+                'reason': '没有项目根目录', 'entry': {}}
+    path = root / MANIFEST_NAMES[0]
+
+    data = {}
+    action = 'added'
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8') or '{}')
+        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': f'storygraph.rules.json 不是合法 JSON，'
+                              f'拒绝覆盖（{e}）', 'entry': {}}
+        if not isinstance(data, dict):
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': '清单顶层不是对象，拒绝覆盖', 'entry': {}}
+
+    items = data.get(MANIFEST_KEY)
+    if not isinstance(items, list):
+        items = []
+    entry = {'name': name}
+    if label:
+        entry['label'] = str(label)
+    if block is not None:
+        entry['block'] = bool(block)
+    if docs:
+        entry['docs'] = str(docs)
+    cols = []
+    for c in (columns or ()):
+        if isinstance(c, dict) and str(c.get('name') or '').strip():
+            cols.append(c)
+    if cols:
+        entry['columns'] = cols
+
+    out = []
+    replaced = False
+    for it in items:
+        same = (isinstance(it, dict) and str(it.get('name') or '').strip() == name)
+        if same and not replaced:
+            merged = dict(it)
+            merged.update(entry)
+            out.append(merged)
+            entry = merged
+            replaced = True
+            action = 'updated'
+            continue
+        out.append(it)
+    if not replaced:
+        out.append(entry)
+
+    data[MANIFEST_KEY] = out
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                        encoding='utf-8')
+    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
+        return {'ok': False, 'path': str(path), 'action': 'refused',
+                'reason': f'写不进去：{e}', 'entry': entry}
+    clear_cache()                               # 刚改完清单：装配缓存作废
+    return {'ok': True, 'path': str(path), 'action': action,
+            'reason': '', 'entry': entry}
 
 
 def format_registry_report(registry) -> str:

@@ -227,6 +227,177 @@ def sanitize_single_line_cell(field: str, value) -> str:
     return text
 
 
+#: 「叶语句参数列」：`with` / `pause` / `window` 这类**走「代码」列**的语句。
+#:
+#: 它们的文本活在 `Beat.raw`（多行单元格）里，所以"每参数一列"折的不是头行、
+#: 而是**那一行**。为什么不把它们搬到 `opaque`：搬过去就等于换渲染通道 ——
+#: 它们现在与 `$` 代码按 `beat.ordered` **交错**输出（`show screen` / `pause` /
+#: `hide screen` / `$ …` 这种手机消息演出），换通道会动顺序，
+#: 而顺序一错就是"相邻舞台指令过表翻序"（记忆缺口 4）。
+#:
+#: 判据（**不猜**）：
+#:   · 这一拍的 raw 行里，**恰好一行**的头是它 → 读/折那一行；
+#:   · 0 行 = 这一拍没有它（格子空）；≥2 行 = 一格装不下两条 → 格子也空，
+#:     绝不挑一条改（挑错就是改了另一条指令）。
+LEAF_ARG_HEADS = ('with', 'pause', 'window')
+
+
+def _leaf_raw_lines(beat) -> list:
+    """`Beat.raw` 的非空行（与 `_split_lines` **同一口径**，别另写一套）。"""
+    return _split_lines(getattr(beat, 'raw', ''))
+
+
+def _leaf_arg_value(beat, head: str, positional) -> str:
+    """
+    叶语句某一行的第 `positional` 个位置参数 → 值（**不唯一就返回空**）。
+
+    见 `LEAF_ARG_HEADS`：0 行或 ≥2 行都返回空 —— 空格子比"改错一条"好。
+    """
+    from storygraph.core.vocabulary import statement_head_token
+    from storygraph.story.spec_args import positional_values
+    if positional is None:
+        return ''
+    try:
+        idx = int(positional)
+    except (TypeError, ValueError):
+        return ''
+    hits = [ln for ln in _leaf_raw_lines(beat)
+            if statement_head_token(ln) == str(head or '')]
+    if len(hits) != 1:
+        return ''
+    vals = positional_values(hits[0])
+    return vals[idx] if 0 <= idx < len(vals) else ''
+
+
+def _fold_leaf_arg(beat, head: str, positional, value) -> bool:
+    """
+    把叶语句参数列的值折进 `Beat.raw` **那一行**，并**同步 `beat.ordered`**。
+
+    返回 `True` = 真的改了一行（`False` = 没这一行 / 不唯一 / 值没变）。
+
+    ⚠ **必须同步 `ordered`**：`_ordered_code_lines` 是"池里的行 == ordered
+    记录的行"才认，一处不同就整份退回历史顺序（raw 全在前、code 全在后）——
+    那是**静默改顺序**（`$` 跑到 `show` 前面），比"这一格没生效"严重得多。
+    ⚠ 重建 `Beat.raw` 时**按原始行结构拼**（不丢空行）：`raw` 本身也会被
+    `compose_code_cell` 走兜底路用，丢空行会让往返多一个 diff。
+    """
+    from storygraph.core.vocabulary import statement_head_token
+    from storygraph.story.spec_args import set_positional_arg
+    if positional is None:
+        return False
+    try:
+        idx = int(positional)
+    except (TypeError, ValueError):
+        return False
+    raw = str(getattr(beat, 'raw', '') or '')
+    if not raw.strip():
+        return False
+    lines = raw.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    hits = [i for i, ln in enumerate(lines)
+            if ln.strip() and statement_head_token(ln) == str(head or '')]
+    if len(hits) != 1:
+        return False
+    i = hits[0]
+    old = lines[i].rstrip()
+    new = set_positional_arg(old, idx, value)
+    if new == old:
+        return False
+    lines[i] = new
+    beat.raw = '\n'.join(lines)
+    beat.ordered = _sync_ordered_raw_line(beat, old, new)
+    return True
+
+
+def _sync_ordered_raw_line(beat, old: str, new: str) -> list:
+    """`ordered` 里那条 raw 记录的文本跟着改（**只改一条**，见 `_fold_leaf_arg`）。"""
+    fixed = []
+    done = False
+    for item in (getattr(beat, 'ordered', None) or ()):
+        try:
+            kind, line = item[0], item[1]
+        except (TypeError, ValueError, IndexError):
+            fixed.append(item)
+            continue
+        if (not done and kind == 'raw'
+                and unmask_code_block_markers(str(line)) == old):
+            fixed.append((kind, new) + tuple(item[2:]))
+            done = True
+            continue
+        fixed.append(item)
+    return fixed
+
+
+def _leaf_heads_of(beat) -> list:
+    """这一拍的 raw 行里出现的**叶语句头**（保序去重，只认 `LEAF_ARG_HEADS`）。"""
+    from storygraph.core.vocabulary import statement_head_token
+    out = []
+    for ln in _leaf_raw_lines(beat):
+        head = statement_head_token(ln)
+        if head in LEAF_ARG_HEADS and head not in out:
+            out.append(head)
+    return out
+
+
+def fold_spec_arg_columns(beat, values, sanitized: list = None) -> list:
+    """
+    `{动态列名: 值}` → **折进这一拍**（头行 / 「代码」列那一行）。
+
+    **卡片与 Excel 共用这一份实现**（唯一真源）：一份在 `Beat.from_row`，
+    一份在 `EditorSession.apply`（卡片编辑器）。两处各写一遍，迟早出现
+    "表里改参数生效、卡片里改不生效"这种最难查的分叉。
+
+    分派规则（见 `LEAF_ARG_HEADS` / `_head_field`）：
+
+      · 列的头 == 这一拍的语句头 → 折进**头行所在字段**（`spec_head` /
+        `loop_header` / `camera_header`）；
+      · 否则 → 当**叶语句**处理，折进 `Beat.raw` 里那一行（并同步 `ordered`）。
+
+    返回**被清洗过**的列名（`sanitize_single_line_cell` 真的改了值），
+    同时追加到 `sanitized`（W114 留痕的依据）。
+    """
+    from storygraph.core.vocabulary import statement_head_token
+    from storygraph.story.spec_args import fold_dynamic_columns, parse_dynamic_full
+    cleaned: list = []
+    dyn: dict = {}
+    for key, val in (values or {}).items():
+        if not is_dynamic_column(key):
+            continue
+        raw = '' if val is None else str(val)
+        clean = sanitize_single_line_cell(str(key), raw).strip()
+        if clean != raw.strip():
+            cleaned.append(str(key))
+            if sanitized is not None:
+                sanitized.append(str(key))
+        dyn[str(key)] = clean
+    if not dyn:
+        return cleaned
+    head_token = statement_head_token(beat.statement_head())
+    leaf: dict = {}
+    head_dyn: dict = {}
+    for key, value in dyn.items():
+        col_head, _param, _pos = parse_dynamic_full(key)
+        if col_head and col_head != head_token:
+            leaf[key] = value
+        else:
+            head_dyn[key] = value
+    # ① **叶语句**（`with`/`pause`/`window`）：折进 `Beat.raw` 那一行
+    #    （并同步 `ordered`）—— 不碰头行、不换渲染通道。
+    for key, value in leaf.items():
+        col_head, _param, pos = parse_dynamic_full(key)
+        _fold_leaf_arg(beat, col_head, pos, value)
+    # ② **头行语句**（声明的自定义语句 / 循环 / 相机）：折进那个字段。
+    if head_dyn:
+        target = beat._head_field()
+        base = str(getattr(beat, target, '') or '')
+        if not base:
+            base = next((ln for ln in str(beat.opaque or '').split('\n')
+                         if ln.strip()), '')
+        folded = fold_dynamic_columns(base, head_dyn)
+        if folded != base:
+            setattr(beat, target, folded)
+    return cleaned
+
+
 def _row_fields(spec_fields=None) -> list:
     """
     `to_row` 的列契约 = 基础列 + 「每参数一列」的动态列（**唯一一处拼法**）。
@@ -575,13 +746,15 @@ class Beat:
         from storygraph.story.spec_args import (parse_dynamic_full,
                                                 positional_values,
                                                 spec_arg_values)
+        from storygraph.core.vocabulary import statement_head_token
         base = self.statement_head()
+        base_head = statement_head_token(base)
         vals = spec_arg_values(base)
         pos = positional_values(base)
         out = []
         for col in columns or ():
             header = col if isinstance(col, str) else str(col.get('header') or '')
-            _head, param, positional = parse_dynamic_full(header)
+            head_name, param, positional = parse_dynamic_full(header)
             if not param:
                 out.append('')
                 continue
@@ -593,6 +766,16 @@ class Beat:
                                    else None)
                 except (TypeError, ValueError):
                     positional = None
+            if head_name and head_name != base_head:
+                # **叶语句**（`with`/`pause`/`window`）：它的行在 `Beat.raw` 里，
+                # 不在头行里（见 `LEAF_ARG_HEADS`）。这一拍没有它 / 有不只一条
+                # → 空格子（**不猜**）。
+                #
+                # ⚠ 判据是"列的头 ≠ 这一拍头行的头"，**不是**"头行非空且不同"：
+                # 叶语句所在的拍**根本没有头行**（它是 raw，不是 opaque），
+                # 写成"头行非空"就永远走不到这一支（第一版就是这么错的）。
+                out.append(_leaf_arg_value(self, head_name, positional))
+                continue
             if positional is not None:
                 out.append(pos[positional]
                            if 0 <= positional < len(pos) else '')
@@ -809,14 +992,18 @@ class Beat:
         beat.scene_at = _spec_at(g('Scene'))
         beat.at = g('At')
         beat.with_ = g('With')
+        # ⚠ `dedup=False`：**表里那一格就是作者写的顺序与条数**（2026-10-07
+        # 缺口 4）。按内容去重会把 `ling; ling` 收成一条 —— 那可能正是
+        # `show A / hide A / show A` 里语义关键的最后一条。
+        # 影子重复由 `hydrate_from_dsl` 那条路自己挡（它只追加"还没有的"）。
         beat.show = _join_show_items([
             {'clause': '', 'image': img, 'at': at}
             for img, at in _split_spec_list(g('Show'))
-        ])
+        ], dedup=False)
         beat.hide = _join_hide_items([
             {'image': img, 'with': w}
             for img, w in _split_spec_list(g('Hide'), sep='@')
-        ])
+        ], dedup=False)
         # 「舞台（高级）」列：结构化列表达不了的指令（复杂 show 子句、
         # 自带位置的立绘、带转场的退场）都在这里；hydrate 会把它并回
         # 结构化字段，渲染时再靠去重避免重复生成。读表时必须读它，否则
@@ -880,26 +1067,10 @@ class Beat:
         #
         # ⚠ 动态格子也过 `sanitize_single_line_cell` 并**留痕**：它们最终会
         # 被拼进一行语句，真换行漏出去就是产物里的物理换行。
-        from storygraph.story.spec_args import fold_dynamic_columns
-        dyn: dict = {}
-        for key, val in (row or {}).items():
-            if not is_dynamic_column(key):
-                continue
-            raw = '' if val is None else str(val)
-            clean = sanitize_single_line_cell(str(key), raw).strip()
-            if clean != raw.strip():
-                sanitized.append(str(key))
-            dyn[str(key)] = clean
-        if dyn:
-            target = beat._head_field()
-            base_head = str(getattr(beat, target, '') or '')
-            if not base_head:
-                base_head = next(
-                    (ln for ln in str(beat.opaque or '').split('\n')
-                     if ln.strip()), '')
-            folded = fold_dynamic_columns(base_head, dyn)
-            if folded != base_head:
-                setattr(beat, target, folded)
+        # ⚠ 动态格子也过 `sanitize_single_line_cell` 并**留痕**（在
+        # `fold_spec_arg_columns` 里）—— 它们最终会被拼进一行语句，
+        # 真换行漏出去就是产物里的物理换行。
+        fold_spec_arg_columns(beat, row, sanitized=sanitized)
 
         # 记下"哪些格被清洗过"（见 `Beat.sanitized_cells`）：**清洗必须留痕**，
         # 否则就是静默改数据 —— 值里的换行被压掉，人却不知道。
@@ -931,22 +1102,31 @@ class Beat:
     @property
     def order_tokens(self) -> list:
         """
-        本拍全部操作的**verb 级**顺序，用于逐条还原（保住同类内交错）。
+        本拍全部操作的**verb 名**顺序（老视图，同名 verb 去重）。
 
-        形如 `['scene', 'audio', 'show']`——这正是
-        `scene bg X / play music Y / show ling happy` 的源码顺序。
+        ⚠ **逐条**顺序要用 `op_tokens_full()`：这个视图表达不了"两条同名 verb
+        中间夹着别的"（缺口 4 的本体 —— `show A / hide B / show C` 会被渲染成
+        `show A / show C / hide B`）。这里保留它是因为快照 / 校验 / 指纹那些
+        消费者只关心"这一拍有哪几类操作"。
+        """
+        out = []
+        for verb, _idx in self.op_tokens_full():
+            if verb not in out:
+                out.append(verb)
+        return out
 
-        为什么不能只记类别（`stage,audio`）：那样渲染时会得到一个
-        "整块舞台 + 整块音频"，把 `play` 挤到 `show` 后面
-        （demo ch01 实测：`play music night` 原本在 `show eileen happy` 之前）。
-        只记类别 + 成组输出 = 顺序错了但看起来"差不多"，
-        而顺序本身是演出语义。
+    def op_tokens_full(self) -> list:
+        """
+        本拍全部操作的**逐条**顺序 → `[(verb, index | None)]`（缺口 4 的真源）。
 
-        兼容两种存法：
-          · **verb 级**（新）：`scene,audio,show` —— 直接用；
-          · **类别级**（老表）：`stage,audio` —— 用 `stage_order` 把
-            `stage` 展开成具体 verb，尽量还原。
-        完全没有顺序信息时返回空，让调用方走历史固定顺序。
+        `index=None` = 这条 token 是 **verb 级**的（老表 / 补齐）：渲染时按
+        "这个 verb 还没出过的那些行"整组输出；有下标时**只出那一条**。
+
+        兼容三种存法（从新到老）：`show#0`（逐条）/ `show`（verb 级）/
+        `stage`（类别级，用 `stage_order` 展开）。完全没有顺序信息 → 空。
+
+        补齐规矩与从前一致（**绝不因为顺序信息不全就丢掉操作**）：
+        有内容却没被任何 token 点到的 stage verb 追加在末尾。
         """
         raw = [t.strip() for t in (self.op_order or '').split(',') if t.strip()]
         if not raw and not (self.stage_order or '').strip():
@@ -954,31 +1134,41 @@ class Beat:
 
         stage_seq = [t.strip() for t in (self.stage_order or '').split(',')
                      if t.strip()]
-        out = []
+        out: list = []
         used = 0
         seen_audio = seen_voice = False
         for t in raw:
-            if t in ('scene', 'show', 'hide'):
-                out.append(t)
+            verb, idx = _split_op_token(t)
+            if verb in ('scene', 'show', 'hide', 'with'):
+                out.append((verb, idx))
                 used += 1
+            elif verb in ('raw', 'code'):
+                # **代码通道的逐条令牌**（缺口 4 第八轮）：它们不在
+                # `stage_order` 里，所以**不能**动 `used`（那个游标只数舞台）。
+                out.append((verb, idx))
             elif t == 'stage':
                 # 老格式：展开 StageOrder 里还没用掉的下一个 verb
                 if used < len(stage_seq):
-                    out.append(stage_seq[used])
+                    out.append(_split_op_token(stage_seq[used]))
                     used += 1
                 else:
                     for v in ('scene', 'show', 'hide'):
-                        if v not in out:
-                            out.append(v)
+                        if v not in [x[0] for x in out]:
+                            out.append((v, None))
             elif t == 'audio' and not seen_audio:
-                out.append('audio')
+                out.append(('audio', None))
                 seen_audio = True
             elif t == 'voice' and not seen_voice:
-                out.append('voice')
+                out.append(('voice', None))
                 seen_voice = True
-        # stage_order 里还剩的 verb 补在最后
-        for v in stage_seq[used:]:
-            out.append(v)
+        # stage_order 里还剩的 token 补在最后
+        for tok in stage_seq[used:]:
+            out.append(_split_op_token(tok))
+        # **补齐**：有内容却没被点到的 verb（卡片直接改结构化列那种）
+        recorded = [v for v, _i in out]
+        for verb in self.stage_verbs:
+            if verb not in recorded:
+                out.append((verb, None))
         return out
 
     @property
@@ -1003,8 +1193,16 @@ class Beat:
         "看到的 ≠ 生成的"是这一层最贵的一类缺陷（见 `compose_stage` 的契约），
         所以判据只写一处，两个消费者共用。
         """
-        recorded = [t for t in self.order_tokens
-                    if t in ('scene', 'show', 'hide')]
+        recorded = []
+        # ⚠ **不许读 `order_tokens` / `op_tokens_full`**：那条路反过来要问我
+        # 补齐（`op_tokens_full` 末尾用 `stage_verbs`），一问就成了无限递归
+        # （第一版就是这么炸的：`op_tokens_full` → `stage_verbs` →
+        # `order_tokens` → `op_tokens_full`）。这里直接读**原始 token 列**。
+        for src in (self.op_order, self.stage_order):
+            for tok in (src or '').split(','):
+                verb = _split_op_token(tok)[0]
+                if verb in ('scene', 'show', 'hide') and verb not in recorded:
+                    recorded.append(verb)
         for verb in ('scene', 'show', 'hide'):
             if verb not in recorded and str(getattr(self, verb, '') or '').strip():
                 recorded.append(verb)
@@ -1044,6 +1242,142 @@ class Beat:
         if merged:
             self.stage_order = ','.join(merged)
         return self.stage_order
+
+    def with_seq_items(self) -> list:
+        """
+        这一拍里**带令牌**的独立 `with X` 行（逐字，按出现顺序）。
+
+        ⚠ 第八轮起 `with X` 只是 `raw` 行的一个特例（统一走 `raw#n` 令牌），
+        这个属性保留是给**兼容/探针**用的：判定"哪些 raw 行被序列通道接管"
+        一律用 `raw_tokenized()`。
+        """
+        from storygraph.core.vocabulary import statement_head_token
+        return [ln for ln in self.raw_tokenized()
+                if statement_head_token(ln) == 'with']
+
+    def raw_tokenized(self) -> list:
+        """
+        带 `raw#n` 令牌的 raw 行（逐字，按出现顺序）——**这些行由序列通道出**。
+
+        与 `op_order` 里的 `raw#n` 一一对应；`op_order` 里没有 raw 令牌
+        （老表）时返回空 —— 那种表走历史行为（代码通道整块出），
+        不会丢行也不会重行。
+        """
+        n = sum(1 for t in (self.op_order or '').split(',')
+                if _split_op_token(t)[0] == 'raw')
+        if not n:
+            return []
+        return _split_lines(self.raw)[:n]
+
+    def raw_without_seq_with(self) -> list:
+        """
+        `Beat.raw` 里**不带令牌**的行（老表：全部；新表：通常为空）。
+
+        名字保留（渲染兜底那一路还在用），语义已从"只跳独立 `with`"扩到
+        "跳所有被序列通道接管的 raw 行"（缺口 4，第八轮）。
+        """
+        skip = self.raw_tokenized()
+        if not skip:
+            return _split_lines(self.raw)
+        rest = list(skip)
+        out = []
+        for ln in _split_lines(self.raw):
+            if rest and ln == rest[0]:
+                rest.pop(0)
+                continue
+            out.append(ln)
+        return out
+
+    def code_lines_with_kinds(self) -> Optional[list]:
+        """
+        代码通道（raw + code）的**逐条**顺序 → `[(kind, 带标记的行)]`。
+
+        `kind` ∈ `{'raw', 'code', 'blank'}`；`None` = 重建不出可信顺序
+        （表被手改过 / 老表没有 raw 令牌）→ 调用方走历史行为。
+        """
+        kinds: list = []
+        lines = _ordered_code_lines(self, skip_seq_with=False, kinds_out=kinds)
+        if lines is None or len(lines) != len(kinds):
+            return None
+        # **令牌是权威**（缺口 4 第九轮，真机 `mini_game_dfinder.rpy` 实测）：
+        # 过表时 `_split_code_cell` 会把**带缩进的续行**判成 `code`
+        # （缩进像代码），而 `op_order` 说它是 `raw#1`/`raw#2`。类型对不上，
+        # `unified_plan()` 就不肯猜（返回 None），于是**同一拍在"解析那条路"
+        # 与"过表那条路"渲染结果不同** → Excel 幂等审计当场红
+        # （纯渲染那条路是解析来的，所以它一直是绿的）。
+        #
+        # 行的**顺序**是可信的（`ordered` / 块标记给的），只有类型贴错了 ——
+        # 所以按令牌把类型重贴一遍（不改存储、不改块标记的坐标）。
+        want = [k for k, _i in self.op_tokens_full() if k in ('raw', 'code')]
+        if want and len(want) == len([k for k in kinds if k != 'blank']):
+            fixed = []
+            qi = 0
+            for k in kinds:
+                if k == 'blank':
+                    fixed.append('blank')
+                    continue
+                fixed.append(want[qi])
+                qi += 1
+            kinds = fixed
+        marked = mark_code_blocks(lines, getattr(self, 'code_blocks', None))
+        return list(zip(kinds, marked))
+
+    def unified_plan(self) -> Optional[list]:
+        """
+        一拍之内**一条真序列**的执行计划（缺口 4，第八轮）。
+
+            `[(kind, payload), …]`
+
+            stage  : `('scene'|'show'|'hide'|'with', 第几条 | None)`
+            audio  : `('audio', None)` / `('voice', None)`
+            raw    : `('raw', 逐字的行)`
+            code   : `('code', 带块标记的行)`
+            blank  : `('blank', '')`
+
+        `None` = **不可信**（老表没有 raw 令牌 / 表被手改过 / 序号对不上）——
+        调用方必须退回历史行为（代码通道整块出），**绝不猜**。
+
+        为什么要有它：舞台动词与 raw/code 从前是**两条通道**，各自保序、
+        彼此之间只有"槽位"（代码块跟在第一条 scene 之后 / 舞台尾段之后）。
+        于是 `hide screen map` 写在 `scene` 前面，产物里却跑到后面 ——
+        真机 `pomodorro` / `chapter1_1` / `chapter1_4` / `script_pomo`
+        四个文件实测。合成一条序列之后，渲染逐条执行：
+        **raw 行夹在舞台行之间的位置从此逐条还原**。
+        """
+        tokens = self.op_tokens_full()
+        if not tokens:
+            return None
+        if not any(kind in ('raw', 'code') for kind, _i in tokens):
+            return None                      # 老表：没有 raw/code 令牌
+        entries = self.code_lines_with_kinds()
+        if entries is None:
+            return None
+        plan: list = []
+        p = 0
+        for kind, idx in tokens:
+            if kind in ('raw', 'code'):
+                # 夹在中间的空行先落地（它们属于代码通道的排版）。
+                #
+                # ⚠ 带的是**打过标记的行**（`mark_code_blocks` 会给块内空行
+                # 也加上块标记）—— 块内空行靠那个标记才活得过
+                # `render_code_block` 的 `_split_lines`（它按 `strip()` 判空）。
+                # 第一版把空行写成 `''`，块内空行当场被吃掉
+                # （`test_blank_line_inside_a_python_block_survives` 抓住）。
+                while p < len(entries) and entries[p][0] == 'blank':
+                    plan.append(('blank', entries[p][1]))
+                    p += 1
+                if p >= len(entries) or entries[p][0] != kind:
+                    return None              # 序号对不上 → 不猜
+                plan.append((kind, entries[p][1]))
+                p += 1
+            else:
+                plan.append((kind, idx))
+        # 末尾剩余（应当只有空行；有别的条目就说明令牌不全 → 不猜）
+        for kind, line in entries[p:]:
+            if kind != 'blank':
+                return None
+            plan.append(('blank', line))
+        return plan
 
     def is_empty(self) -> bool:
         """这一行没有任何内容（用户留空的行不该生成代码）。
@@ -1512,7 +1846,7 @@ def compose_stage_extra(beat: 'Beat', symbols=None) -> str:
 
 
 
-def compose_code(beat: 'Beat') -> str:
+def compose_code(beat: 'Beat', skip_seq_with: bool = False) -> str:
     """
     CodeBlock = 原生语句（raw）+ python 代码（code），按源码交错顺序拼。
 
@@ -1520,6 +1854,12 @@ def compose_code(beat: 'Beat') -> str:
 
     有 `ordered` 时按**源码里的交错顺序**拼，并恢复每行的缩进
     （`ordered` 的第三位；见 `_relative_indents`）。
+
+    ⚠ `skip_seq_with=True` **只在"统一序列"真的接管了这些行**时才能用
+    （见 `Beat.unified_plan`）：那些 raw 行会由序列通道逐条出，这里再出一次
+    就重复了。**反过来更要命**：序列没接管却在这里跳过 = **整行消失**
+    （第一版默认 True，`window hide` / `hide screen prompt` 当场没了）。
+    所以默认 **False**（全出），只有明确知道"序列通道在跑"时才传 True。
 
     **每一行都带块标记**（见 `CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`）：
     「代码」列一个格子装多行文本，`python:` 块的边界在纯文本里表达不出来
@@ -1530,9 +1870,12 @@ def compose_code(beat: 'Beat') -> str:
 
     返回文本**不带整体缩进**（缩进由渲染层按上下文加）。
     """
-    lines = _ordered_code_lines(beat)
+    lines = _ordered_code_lines(beat, skip_seq_with=skip_seq_with)
     if lines is None:
-        lines = [ln for ln in _split_lines(beat.raw)]
+        # 兜底路也要跳过"由舞台通道出的独立 `with`"（见 `with_seq_items`）——
+        # 两处口径必须一致，否则同一行要么出两遍、要么一遍都不出。
+        lines = (list(beat.raw_without_seq_with()) if skip_seq_with
+                 else _split_lines(beat.raw))
         lines += [ln for ln in _split_lines(beat.code)]
     return '\n'.join(mark_code_blocks(lines,
                                       getattr(beat, 'code_blocks', None)))
@@ -1840,12 +2183,19 @@ def compose_code_cell(beat: 'Beat') -> str:
     块标记（`CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY`）**不写进这里**：
     它们承载的结构信息落在隐藏列 `CodeBlocks` 上，单元格里只留纯文本
     —— 策划/文案万一展开那一列，看到的还是能读的代码。
+
+    ⚠ `skip_seq_with=False`（**必须**）：独立 `with X` 那一行在渲染时由
+    舞台通道按位置出（见 `Beat.with_seq_items`），但**表里得留着它** ——
+    它是作者写的内容，也是"位置"的载体；写表时跳掉它，过一趟表回来
+    那一行就没了。
     """
-    return unmask_code_block_markers(compose_code(beat) or '')
+    return unmask_code_block_markers(
+        compose_code(beat, skip_seq_with=False) or '')
 
 
 
-def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
+def _ordered_code_lines(beat: 'Beat', skip_seq_with: bool = True,
+                        kinds_out: list = None) -> Optional[list]:
     """
     raw / code 按 `beat.ordered` 还原成交错行；无法可信还原时返回 None。
 
@@ -1873,9 +2223,17 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
     # 两个池子都按**逻辑语句**成组（`for …:\n    body` 是一个元素）：
     # `_split_code_cell` 写进 `code` 的就是逻辑语句，逐行比会对不上。
     pools = {'raw': [unmask_code_block_markers(ln)
-                     for ln in _split_lines(beat.raw)],
+                     for ln in (beat.raw_without_seq_with()
+                                if skip_seq_with else _split_lines(beat.raw))],
              'code': [unmask_code_block_markers(ln)
                       for ln in _split_lines(beat.code)]}
+    #: 由**序列通道**在它自己的位置上出的 raw 行（缺口 4）：
+    #: `ordered` 里那几条要跳过 —— 与池子那侧**同一口径**，否则
+    #: "池行 == ordered 记录行"当场失败、整份退回历史顺序。
+    #:
+    #: ⚠ `skip_seq_with=False`（**写表那条路**）时这里必须为空：那些行仍是
+    #: 作者写的内容，表里得留着（不然过一趟表回来就没了）。
+    skip_raw = list(beat.raw_tokenized()) if skip_seq_with else []
     pos = {'raw': 0, 'code': 0}
     out = []
     for item in ordered:
@@ -1898,13 +2256,24 @@ def _ordered_code_lines(beat: 'Beat') -> Optional[list]:
             # 产物变成 `python:` 里包含 `call screen …` → **语法错误**。
             #
             # 游标**不动**、只补一个空行：空行不参与"逐行取用"的配对。
+            if kinds_out is not None:
+                kinds_out.append('blank')
             out.append('')
+            continue
+        if kind == 'raw' and skip_raw and line == skip_raw[0]:
+            skip_raw.pop(0)                      # 交给序列通道，逐字照出
             continue
         i = pos[kind]
         if i >= len(pool) or pool[i] != line:
             return None
+        if kinds_out is not None:
+            kinds_out.append(kind)
         out.append(_reindent(line, indent))
         pos[kind] = i + 1
+    # 被序列通道接管的那几条也要记进 kinds（**顺序与 out 一致**：它们已经
+    # 从 out 里被摘掉了，所以这里只在 skip 为空时可能为空）。
+    if skip_raw:
+        return None
     # ordered 必须是"两个队列都恰好取完"，否则说明它不完整
     if pos['raw'] != len(pools['raw']) or pos['code'] != len(pools['code']):
         return None
@@ -2306,19 +2675,46 @@ def show_item_parts(text: str) -> set:
     return {p for p in (show_item_part(it) for it in _split_show_items(text)) if p}
 
 
-def _join_show_items(items: list) -> str:
+def _split_op_token(token: str) -> tuple:
+    """
+    `'show#1'` → `('show', 1)`；`'show'` → `('show', None)`（老格式 / 补齐）。
+
+    分隔符用 `#`：verb 名与下标都不含它，人肉读也清楚
+    （`show#0,hide#0,show#1` = "第 1 条 show、那条 hide、第 2 条 show"）。
+    认不出就**原样返回、下标为 None**（宁可走老路，也不要猜一个下标）。
+    """
+    text = str(token or '').strip()
+    if '#' not in text:
+        return text, None
+    verb, _sep, tail = text.rpartition('#')
+    if not verb or not tail.isdigit():
+        return text, None
+    return verb, int(tail)
+
+
+def _join_show_items(items: list, dedup: bool = True) -> str:
     """
     把多个 show 项拼成 `图像@变换; 图像2; cg x at y behind z`。
 
-    **同名同参数的去重**：`hydrate_from_dsl` 是"追加"语义（结构化列 +
-    高级列是同一条流水线的两段输入），而 Stage 列往往已经把结构化列的内容
-    原样写了一遍，于是 hydrate 会把同一条 show 又追加一次。不去重的话
-    导出会生成两遍 `show ling close_happy at i11`（重复执行转场）。
+    `dedup=True`（**影子通道**）：同名同参数的去重。
+    `hydrate_from_dsl` 是"追加"语义（结构化列 + 高级列是同一条流水线的两段
+    输入），而 Stage 列往往已经把结构化列的内容原样写了一遍，于是 hydrate
+    会把同一条 show 又追加一次。不去重的话导出会生成两遍
+    `show ling close_happy at i11`（重复执行转场）。
+
+    ⚠ `dedup=False`（**作者那条路**，2026-10-07 修缺口 4）：**作者写两遍就得留
+    两遍**。按内容去重会吃掉语义关键的那一条 ——
+
+        show ling happy / hide ling / show ling happy
+
+    去重后只剩一条 show + 一条 hide → **收尾画面是"被 hide 掉"**，
+    与作者要的"最后显示"相反。Ren'Py 语义上重复 show 是空操作，
+    所以"多留一行"没有代价，而"少留一行"有代价。
     """
     parts, seen = [], set()
     for it in items:
         part = show_item_part(it)
-        if not part or part in seen:
+        if not part or (dedup and part in seen):
             continue
         seen.add(part)
         parts.append(part)
@@ -2464,20 +2860,22 @@ def hide_item_parts(text: str) -> set:
     return {p for p in (hide_item_part(it) for it in _split_hide_items(text)) if p}
 
 
-def _join_hide_items(items: list) -> str:
+def _join_hide_items(items: list, dedup: bool = True) -> str:
     """
-    `hide` 项 → `ye; lan@dissolve`。**同样要做"同名同参数去重"**。
+    `hide` 项 → `ye; lan@dissolve`。**影子通道要"同名同参数去重"**。
 
     为什么必须去重（2026-09-30 真实数据实测）：`hydrate_from_dsl` 是追加
     语义，而 Stage 列常常把结构化列的内容原样又写了一遍。show 那条路早就
     有去重（见 `_join_show_items`），hide 这条**漏了**，于是同一条退场指令
     被吸两次就翻倍：`hide cg03` → `cg03; cg03`。**逐句校对必然踩中**
     （chapter1_3 实测 11 拍被改写）。
+
+    ⚠ `dedup=False`：**作者那条路**（见 `_join_show_items` 的说明）。
     """
     parts, seen = [], set()
     for it in items:
         part = hide_item_part(it)
-        if not part or part in seen:
+        if not part or (dedup and part in seen):
             continue
         seen.add(part)
         parts.append(part)

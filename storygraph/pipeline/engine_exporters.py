@@ -27,12 +27,39 @@ import csv
 import io
 import json
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 
 from storygraph.story.stage_snapshot import stage_snapshots
 
 SCHEMA_VERSION = '1.0'
+
+
+#: `jump <name>` / `call <name>` —— 一行里可能有多跳（`call screen` 不算接线）。
+_JUMP_RE = re.compile(r'^\s*(jump|call)\s+([A-Za-z_]\w*)', re.M)
+
+
+def jump_targets_of(beat) -> list:
+    """
+    这一拍引用的**跳转目标**（`jump` / `call` 的 label 名，保序去重）。
+
+    为什么要单独一个字段（2026-10-08 修）：适配层（Unity/Godot）只搬了
+    "台词/说话人/背景"这些**演出字段**，`jump`/`call` 活在 `raw`/`code` 里
+    没被搬过去 —— 换引擎后**接线断了**（真实项目 fixture 上量到 unity/godot
+    各丢 5~12 跳，`tools/hell_multi_engine.py`）。接线是叙事图最要紧的东西，
+    必须成为**一等字段**，不能只藏在原文里。
+    """
+    out = []
+    for src in (getattr(beat, 'raw', '') or '',
+                getattr(beat, 'code', '') or ''):
+        for m in _JUMP_RE.finditer(str(src)):
+            verb, name = m.group(1), m.group(2)
+            if verb == 'call' and name in ('screen', 'expression'):
+                continue
+            if name not in out:
+                out.append(name)
+    return out
 
 
 # ==================================================================
@@ -111,6 +138,11 @@ def build_neutral_ir(beats, registry=None, project: str = '',
             'comment': b.comment,
             'raw': b.raw,
             'code': b.code,
+            # 「结构位」（嵌套层级 / 选项归属）与「接线」（跳转目标）都是一等字段：
+            # 前者让别的引擎能重建菜单/条件树，后者让剧情图接得上
+            # （2026-10-08 修，见 `jump_targets_of`）。
+            'nest': getattr(b, 'nest_path', None) or '',
+            'targets': jump_targets_of(b),
             'line_hash': getattr(b, 'content_hash', '') or '',
         })
 
@@ -190,6 +222,8 @@ def to_unity(ir: dict) -> dict:
             'sfx': l['sound'],
             'sfxAction': l['sound_action'],
             'voice': l['voice'],
+            'nest': l.get('nest', ''),
+            'targets': list(l.get('targets') or []),
             'lineHash': l['line_hash'],
         } for l in ir.get('lines', [])],
         'assets': _unity_assets(ir.get('assets', {})),
@@ -225,10 +259,13 @@ def to_godot(ir: dict) -> dict:
             'line_id': l['line_id'],
             'label': l['label'],
             'seq': l['seq'],
+            'kind': l['kind'],
             'speaker_id': l['speaker'],
             'speaker_name': l['speaker_name'],
             'text': l['text'],
             'condition': l['condition'],
+            'nest': l.get('nest', ''),
+            'targets': list(l.get('targets') or []),
             'stage': {
                 'background': l['scene'],
                 'poses': l['actors'],
@@ -333,6 +370,57 @@ def expected_files(engine: str) -> list:
     return [NEUTRAL_IR_NAME]
 
 
+def _merge_by_key(old_items, new_items, key) -> list:
+    """按 `key` 去重合并（老的在前，新的补在后）。"""
+    out, seen = [], set()
+    for it in list(old_items or []) + list(new_items or []):
+        if not isinstance(it, dict):
+            continue
+        k = str(it.get(key) or '')
+        if k and k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
+
+
+def _merge_ir(old: dict, new: dict) -> dict:
+    """
+    把一份新的中立 IR **并进**已存在的那份（多章导同一目录时不覆盖）。
+
+    为什么必须合并（2026-10-08 修，`tools/hell_multi_engine.py` M8 实测）：
+    UI 是"选一个目录 → 导出当前这一章"，而 `export_ir` 写**固定文件名**
+    （`story_ir.json`）。40 章的项目里用户点四次，**后一章静默覆盖前一章**，
+    每次还都报"导出成功"。合并之后同一目录里的中立 IR 累积成"整部戏"。
+    """
+    if not isinstance(old, dict) or not old.get('lines'):
+        return new
+    merged = dict(new)
+    merged['project'] = old.get('project') or new.get('project', '')
+    merged['title'] = old.get('title') or new.get('title', '')
+    merged['lines'] = _merge_by_key(old.get('lines'), new.get('lines'),
+                                    'line_id')
+    merged['characters'] = _merge_by_key(old.get('characters'),
+                                         new.get('characters'), 'id')
+    merged['stage'] = _merge_by_key(old.get('stage'), new.get('stage'),
+                                    'line_id')
+    groups = set((old.get('assets') or {})) | set((new.get('assets') or {}))
+    merged['assets'] = {
+        g: _merge_by_key((old.get('assets') or {}).get(g),
+                         (new.get('assets') or {}).get(g), 'id')
+        for g in groups
+    } or new.get('assets', {})
+    lines = merged['lines']
+    merged['stats'] = {
+        'lines': len(lines),
+        'labels': len({l.get('label') for l in lines if l.get('label')}),
+        'characters': len(merged['characters']),
+        'spoken_lines': sum(1 for l in lines if l.get('text')),
+        'chars': sum(len(l.get('text') or '') for l in lines),
+    }
+    return merged
+
+
 def export_ir(engine: str, beats, out_dir, registry=None,
               project: str = '', title: str = '') -> list:
     """
@@ -343,6 +431,8 @@ def export_ir(engine: str, beats, out_dir, registry=None,
 
     **返回的每个路径都指向一个真实存在的文件**（交付质检要求）：文件名全部
     取自本模块顶部的常量，`expected_files()` 是同一份事实的另一种陈述。
+
+    ⚠ **同目录重复导出是"合并"不是"覆盖"**（2026-10-08）：见 `_merge_ir`。
     """
     engine = (engine or 'json').lower()
     if engine not in SUPPORTED_ENGINES:
@@ -353,9 +443,17 @@ def export_ir(engine: str, beats, out_dir, registry=None,
     out_dir.mkdir(parents=True, exist_ok=True)
     ir = build_neutral_ir(beats, registry=registry, project=project,
                           title=title)
+    neutral_path = out_dir / NEUTRAL_IR_NAME
+    # 目录里已经有一份中立 IR → 并进去（多章导同一目录不丢章节）。
+    if neutral_path.is_file():
+        try:
+            old = json.loads(neutral_path.read_text(encoding='utf-8'))
+            ir = _merge_ir(old, ir)
+        except (OSError, ValueError, UnicodeDecodeError):
+            pass                       # 坏文件不挡新导出（会被下面覆盖成好的）
     written = []
 
-    written.append(_write_json(ir, out_dir / NEUTRAL_IR_NAME))
+    written.append(_write_json(ir, neutral_path))
 
     if engine == 'csv':
         written.append(_write_csv(ir, out_dir / CSV_NAME))

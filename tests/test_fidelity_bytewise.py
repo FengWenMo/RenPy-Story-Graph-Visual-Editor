@@ -408,20 +408,19 @@ class TestCrossKindOrder:
         assert self.kinds(produced) == ['scene', 'play', 'show'], (
             f'play 被挤到 show 后面了：{self.kinds(produced)}\n{produced}')
 
-    def test_audio_between_two_shows_is_a_known_gap(self, write_rpy, tmp_path):
+    def test_audio_between_two_shows_is_kept(self, write_rpy, tmp_path):
         """
-        **已知局限**（钉住它，修好了这条会失败，提醒更新文档）：
-        一拍里有两个 `show` 且 `play` 夹在中间时，顺序还原不了 ——
-        `op_order` 是 verb **集合**（按首现排序），同 verb 的**实例**顺序丢失。
+        **原来的已知局限，2026-10-07 已修**（缺口 4 正面修）：
+        一拍里两个 `show` 且 `play` 夹在中间时，顺序**现在还原得回来**。
 
             show a x
             play music m      ← 夹在两个 show 之间
             show b y
 
-        产物会变成 `show a x; show b y; play music m`。
-        条数不错、画面终态一样，但"音乐在第几个立绘之后起"变了。
-        真实项目 `chapter1_3` / `chapter1_4` 实测都命中这一类。
-        要彻底修需记"每个舞台 verb 实例之间的音频位置"（即整拍语句级顺序）。
+        从前产物是 `show a x; show b y; play music m` —— 条数不错、终态一样，
+        但"音乐在第几个立绘之后起"变了（真实项目 `chapter1_3` / `chapter1_4`
+        都命中过）。修法是把顺序列从"verb 名 + 同名去重"换成**逐条**
+        token（`show#0,audio,show#1`，见 `Beat.op_tokens_full`）。
         """
         src = write_rpy(
             'label t:\n'
@@ -437,9 +436,8 @@ class TestCrossKindOrder:
         # 条数必须对（这是硬要求）
         from collections import Counter
         assert Counter(kinds) == Counter(['show', 'play', 'show'])
-        # 目前 play 会落在两个 show 之后 —— 已知局限
-        assert kinds == ['show', 'show', 'play'], \
-            f'这个局限似乎被修好了（太好了）——请更新文档：{kinds}'
+        # **顺序也要对**（就是这一条把上面那句"已知局限"钉死的）
+        assert kinds == ['show', 'play', 'show'], kinds
 
     def test_play_before_show_stays_before(self, write_rpy, tmp_path):
         """最直观的一条：`play music` 写在 `scene`/`show` 之前就得在前。"""

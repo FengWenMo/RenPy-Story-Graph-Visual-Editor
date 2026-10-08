@@ -263,14 +263,14 @@ class TestRealChapterSnapshot43:
 
     def test_beat_43_is_empty_and_explained(self):
         beats, rows = self._rows()
-        assert beats[42].stage_order == 'show,hide,scene'
+        assert beats[42].stage_order == 'show#0,hide#0,scene#0'
         r = rows[42]
         assert r['actors'] == ''
         assert '注：' in (r['display_changes'] or '')
 
     def test_beat_67_keeps_actor_and_has_no_note(self):
         beats, rows = self._rows()
-        assert beats[66].stage_order == 'hide,scene,show'
+        assert beats[66].stage_order == 'hide#0,scene#0,show#0'
         r = rows[66]
         assert r['actors'], 'scene 之后的 show 应该留在台上'
         assert '注：' not in (r['display_changes'] or '')
@@ -297,7 +297,7 @@ class TestStageOrderRoundTrip:
         back = import_beats_from_excel(tbl)
         target = [b for b in back if b.text == 'after']
         assert target, [b.text for b in back]
-        assert target[0].stage_order == 'hide,show', target[0].stage_order
+        assert target[0].stage_order == 'hide#0,show#0', target[0].stage_order
 
     def test_stage_order_column_exists_and_is_hidden(self, write_rpy, tmp_path):
         """

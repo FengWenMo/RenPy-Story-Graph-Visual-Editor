@@ -413,23 +413,38 @@ class GraphSessionMixin:
         }
     def check_variable_syntax(self, lines) -> list:
         """
-        「语法检查」（旧版变量对话框里就有这个按钮）：逐行喂给区间分析器，
-        把抛异常的行挑出来返回 `['第2行错误: xxx - ...']`（空列表 = 全过）。
+        「语法检查」（旧版变量对话框里就有这个按钮）：逐行过一遍 **Python
+        编译器**，把编译不过的行返回 `['第2行错误: x = = 5 - invalid syntax']`
+        （空列表 = 全过）。
 
-        **只校验，不改任何数据** —— 变量写错一个符号就会让整章的区间分析
-        跑偏，在写回之前先说一声比事后在图上看到一片红好。
+        ⚠ **2026-10-08 修**：这条路原来是"逐行喂 `analysis.apply_operation`，
+        捕获它抛的异常"。但 `apply_operation` **自己**吞掉 `SyntaxError`
+        并退化成正则（见它的 docstring：那正是为了"解析失败也别给出错误结论"），
+        于是 `except` 分支**永远不会进** —— 检查器对任何输入都返回空列表，
+        按钮永远显示"✔ N 行都能解析"。一个永远说没问题的检查器比没有更糟：
+        它会**教会作者不看它**。
+
+        现在的判据是"**这一行是不是合法的 Python 语句**"（这才是"语法检查"
+        的字面含义，也是策划写变量的真实需求）。**只查语法，不查语义** ——
+        `love += 1` 里 `love` 没定义是**运行期**的事，不算语法错误，
+        否则每写一行都要被红一下。`$` 前缀与整行注释按 Ren'Py 写法剥掉/跳过。
         """
-        from storygraph.graph.analysis import VariableState, apply_operation
+        import ast
+        # ⚠ 传**字符串**时按行拆 —— 不许 `list('x = 1')` 变成逐字符
+        # （`['x',' ','=',' ','1']`，那个孤零零的 `=` 会被报成语法错误）。
+        lines = lines.splitlines() if isinstance(lines, str) else lines
         errors = []
-        state = VariableState(['test'])
         for i, line in enumerate(list(lines or []), 1):
             text = str(line).strip()
-            if not text:
+            if not text or text.startswith('#'):
+                continue
+            code = text[1:].strip() if text.startswith('$') else text
+            if not code or code.startswith('#'):
                 continue
             try:
-                state = apply_operation(state, text)
-            except Exception as e:                # noqa: BLE001
-                errors.append(f'第{i}行错误: {text} - {e}')
+                ast.parse(code, mode='exec')
+            except SyntaxError as e:
+                errors.append(f'第{i}行错误: {text} - {e.msg}')
         return errors
     def import_chapters(self, files, graph=None) -> dict:
         """

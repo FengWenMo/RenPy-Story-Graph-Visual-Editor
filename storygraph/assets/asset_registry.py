@@ -96,6 +96,67 @@ class AssetRegistry:
 
 # ===================== Excel 读写 =====================
 
+#: 资源表列名：**内部规范键（英文）→ 中文表头**（用户 2026-10-07 要"改中文"）。
+#:
+#: 为什么内部键不改：`parse_asset_tables` / 改名 / 删行 / 搜索 / 合并
+#: 全按 `row['ID']`、`row['Path']` 取值，改内部键等于全仓库换契约。
+#: 做法是**只在读写边界翻译**：
+#:   · **写**：表头写中文（`write_dict_to_excel`）；
+#:   · **读**：中文表头映射回规范键（`_canon_field` / `_sheet_headers`）；
+#:   · 于是**老表（英文表头）继续能读**、新表是中文 —— 用户手上的表不用改名。
+ASSET_FIELD_LABELS = {
+    'ID': '编号',
+    'Path': '真实文件',
+    'Tag': '角色标签',
+    'Attributes': '表情',
+    'Category': '类别',
+    'Notes': '备注',
+    'Loop': '循环',
+    'Volume': '音量',
+    'ATL': 'ATL',
+    'Params': '参数',
+    'Doc': '说明',
+}
+
+#: 中文表头 → 规范键（读表时用）。**只认我们自己写出去的那些名字**，
+#: 用户手加的列（`Custom_xxx` / `内容编号`…）原样保留，绝不改写。
+ASSET_FIELD_ALIASES = {label: field
+                       for field, label in ASSET_FIELD_LABELS.items()}
+
+
+def _canon_field(name):
+    """表头 → 规范键（中文映射回英文；认不出就**原样返回**）。"""
+    if name is None:
+        return None
+    return ASSET_FIELD_ALIASES.get(str(name).strip(), name)
+
+
+def _sheet_headers(ws) -> list:
+    """
+    表头行 → **规范列名**（顺序 = 表里的列顺序）。
+
+    直接读 `ws[1]` 的地方都要用它：表头改成中文之后，`'ID' not in headers`
+    这类判据会全部落空（改名/删行**静默不生效**）。
+    """
+    return [_canon_field(c.value) for c in ws[1]]
+
+
+#: ⚠ **列顺序目前不动**（用户 2026-10-07 说"与内容编号换位置往前挪"，
+#: 但"内容编号"是哪一列还没确认）。
+#:
+#: 试过一版"顺序表 + 重排表头"（`Path` 提到 `ID` 前），**当场 4 条判据红**：
+#: 表头一重排，**按行追加的那些写入点**（固定按 `['ID','Path',…]` 写值）
+#: 就和表头错位了 —— 实测 ID 被读成 `game/images/bg/planned.png`
+#: （占位行的 ID 变成了路径）。结论：
+#:
+#:   **换位不是"改表头那一行"就能完成的**：要么把列顺序做成"头与行共用
+#:   同一份顺序表"（所有写入点都得跟着走），要么在写表时**按表头名逐列取值**
+#:   而不是按位置。两件事都比"改一行"大，得单独一轮做。
+#:
+#: 所以这一版**只交付中文表头**（已验证：老表照旧能读能改、6 处直接读
+#: `ws[1]` 的地方都改走 `_sheet_headers`）。换位等确认列名后再动。
+
+
 def read_excel_rows(file_path) -> list:
     """
     读取 Excel 首个 sheet，返回 [{header: value, ...}, ...]。
@@ -115,7 +176,8 @@ def read_excel_rows(file_path) -> list:
         return []
     wb = openpyxl.load_workbook(file_path, data_only=False)
     ws = wb.active
-    headers = [cell.value for cell in ws[1]]
+    # 表头中文 → 规范键（老表英文表头原样通过）—— 见 `_canon_field`。
+    headers = [_canon_field(cell.value) for cell in ws[1]]
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         if all(v is None for v in row):
@@ -137,15 +199,37 @@ _asset_append_row = append_text_row
 
 
 def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
-    """将 {id: row_dict} 写入 Excel。"""
+    """
+    将 {id: row_dict} 写入 Excel。
+
+    表头写**中文**（`ASSET_FIELD_LABELS`），取值仍按**规范键**
+    （`field_order` 是内部英文键；`row_data` 也是）——
+    所以"改成中文"只动了表头那一行，数据语义一个字节都没变（用户 2026-10-07）。
+
+    列顺序**不动**（用户 2026-10-07 后来确认：`编号`/`ID` 就是"本该藏起来的
+    那个工具内部用的东西，已经藏起来就不需要换位"）→ 这里改为**把 `ID` 列隐藏**：
+    策划看到的第一列就是 `真实文件`，效果与"换位"一样，但**零风险**
+    （隐藏列 openpyxl 照旧读得到，改名/删行/搜索都不受影响）。
+    """
     file_path = Path(file_path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(field_order)
+    ws.append([ASSET_FIELD_LABELS.get(f, f) for f in field_order])
     for _asset_id, row_data in data_dict.items():
         excel_row = [row_data.get(field, '') for field in field_order]
         _asset_append_row(ws, excel_row)
+    # **`ID`（编号）整列隐藏**（用户 2026-10-07："它就是那个本该藏起来、
+    # 没什么用的内部编号，已经藏起来就不需要换位了"）。
+    # 隐藏只是观感：openpyxl 读得到、`rename`/`delete`/搜索全不受影响。
+    try:
+        from openpyxl.utils import get_column_letter
+        col = get_column_letter(list(field_order).index('ID') + 1) \
+            if 'ID' in list(field_order) else ''
+        if col:
+            ws.column_dimensions[col].hidden = True
+    except Exception as e:                      # noqa: BLE001 - 隐藏失败不影响数据
+        swallow('assets.asset_registry.write_dict_to_excel.hide_id', e)
     wb.save(file_path)
 
 
@@ -280,10 +364,24 @@ def _path_under_skip_dir(path, scan_root) -> bool:
     """
     `_under_skip_dir` 的**安全版**：路径可能不在 `scan_root` 底下
     （音频目录允许在项目外），那时只拿绝对路径自己比。
+
+    ⚠ **调用方必须传"这个文件是被哪个目录扫进来的"那个目录**，不能一律传
+    项目根（2026-10-07 修，长期红的 `test_custom_audio_dirs` 就是它）：
+
+      · `scan_root` 内的文件 → 相对路径照旧 ✓；
+      · **项目外**的音频目录 → 相对路径算不出来，退回**绝对路径**逐段比，
+        于是路径里任何一段叫 `temp` / `build` / `cache` / `logs` … 都会命中
+        `_SKIP_SCAN_DIRS` 而被**整条丢掉** ——
+        实测 `…\\AppData\\Local\\Temp\\extra_audio\\theme_song.mp3` 里的
+        `Temp` 命中，音乐/音效**双双为空**；
+        真实项目只要放在 `D:\\build\\我的游戏\\…` 这种路径下，音频会**全部消失**。
+
+      传"扫描基准目录"（`adir` / `vdir`）之后：`build/` 这类子目录照样跳过
+      （它就在基准下面），而 `Temp` / `AppData` 这些**无关祖先**不再参与判定。
     """
     try:
         rel = Path(path).relative_to(scan_root)
-    except ValueError as e:                     # 不在项目内：按绝对路径比
+    except ValueError as e:                     # 不在基准目录内：按绝对路径比
         swallow('assets.asset_registry._path_under_skip_dir', e)
         rel = Path(path)
     return _under_skip_dir(rel)
@@ -732,7 +830,7 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 continue
             if _is_scan_noise(file.name):
                 continue
-            if _path_under_skip_dir(file, scan_root):
+            if _path_under_skip_dir(file, adir):
                 continue
             # 语音目录已经单独扫过，别再把同一个文件当作音效收一遍
             if _under_voice(file):
@@ -769,7 +867,7 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 continue
             if _is_scan_noise(file.name):
                 continue
-            if _path_under_skip_dir(file, scan_root):
+            if _path_under_skip_dir(file, vdir):
                 continue
             try:
                 rel_path = file.relative_to(scan_root)
@@ -1422,7 +1520,7 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        headers = _sheet_headers(ws)
         if 'ID' not in headers or 'Path' not in headers:
             return 0
         id_col = headers.index('ID') + 1
@@ -1472,7 +1570,7 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        headers = _sheet_headers(ws)
         if 'Path' not in headers:
             return 0
         pcol = headers.index('Path') + 1
@@ -1513,7 +1611,7 @@ def delete_rows_by_id(asset_dir, table_key: str, ids, backup: bool = True) -> in
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        headers = [c.value for c in ws[1]]
+        headers = _sheet_headers(ws)
         if 'ID' not in headers:
             return 0
         id_col = headers.index('ID') + 1
@@ -1931,13 +2029,16 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
                     ws = wb.active
                     # 按文件真实表头对齐追加，避免列错位（老文件可能
                     # 只有 ID/Path/Notes，新文件才有 ATL/Params…）
-                    headers = [c.value for c in ws[1]]
+                    headers = _sheet_headers(ws)
                     _asset_append_row(ws, [row.get(h, '') if h else '' for h in headers])
                 else:
                     wb = openpyxl.Workbook()
                     ws = wb.active
                     fields = _TABLE_FIELDS[asset_type]
-                    ws.append(fields)
+                    # ⚠ 新建表也要写**中文表头**（与 `write_dict_to_excel` 一致）：
+                    # 从前这里写英文 `fields`，于是"哪条路径建的表"决定了表头
+                    # 是中是英 —— 同一批表里两种表头，用户看着像坏了。
+                    ws.append([ASSET_FIELD_LABELS.get(f, f) for f in fields])
                     _asset_append_row(ws, [row.get(h, '') for h in fields])
                 wb.save(p)
             except Exception as e:
@@ -2007,7 +2108,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
         if path.exists():
             wb = openpyxl.load_workbook(path)
             ws = wb.active
-            headers = [c.value for c in ws[1]]
+            headers = _sheet_headers(ws)
             if not headers or all(h is None for h in headers):
                 headers = list(rows[0].keys())
                 ws.append(headers)

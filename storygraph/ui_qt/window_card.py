@@ -256,6 +256,7 @@ class CardPageMixin:
         self._session.mark_loaded(idx)
         self._panel.load_fields(self._session.fields(idx),
                                 self._session.cards(idx))
+        self._sync_spec_args(idx)
         self._panel.set_speakers(self._session.characters(),
                                  self._session.beats[idx].speaker or '')
         self.refresh_derived_panels(idx)
@@ -268,6 +269,41 @@ class CardPageMixin:
         self._sync_structural_buttons()
         # 相邻几拍的立绘先解进缓存（翻卡片不空等；见 `_prefetch_neighbours`）
         self._prefetch_neighbours(idx)
+
+    def _sync_spec_args(self, idx: int):
+        """
+        把这一拍的**语句参数**（列 + 当前值 + 候选）推给卡片那一组控件。
+
+        语义在 `app.beats.spec_arg_*`（与 Excel 的列**同源**），这里只递数据 ——
+        前端不认识"哪些语句有参数"这件事。
+
+        取注册表失败（非项目目录 / 读不成）时**不炸**：退化成"只有内置形状"
+        （`camera` / `with` / `pause` / `window` 由工具自己声明，不需要项目声明）。
+        """
+        from storygraph.app import beats as _beats
+        try:
+            beat = self._session.beats[idx]
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_card._sync_spec_args.beat', e)
+            return
+        statements = None
+        try:
+            root = getattr(self._session, 'project_root', None)
+            if root:
+                from storygraph.story.statement_registry import StatementRegistry
+                statements = StatementRegistry.for_project(str(root))
+        except Exception as e:                  # noqa: BLE001 - 没声明也要能显示内置形状
+            swallow('ui_qt.window_card._sync_spec_args.registry', e)
+            statements = None
+        try:
+            cols, values = _beats.spec_arg_fields_for(beat, statements)
+            registry = getattr(getattr(self._session, 'symbols', None),
+                               'registry', None)
+            choices = _beats.spec_arg_choices_for(beat, statements,
+                                                  registry=registry)
+            self._panel.set_spec_args(cols, values, choices)
+        except Exception as e:                  # noqa: BLE001 - 参数组刷不动不该拦住卡片
+            swallow('ui_qt.window_card._sync_spec_args', e)
 
     def refresh_derived_panels(self, idx: int = None):
         """

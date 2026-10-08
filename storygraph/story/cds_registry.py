@@ -294,18 +294,26 @@ def find_scripts(project_root) -> list:
     game = root / 'game' if (root / 'game').is_dir() else root
     out = []
     for p in sorted(game.rglob('*.rpy')):
-        # ⚠ **点号开头的目录一律跳过**（`.git` / `.pytest-tmp` / `.venv` …）。
-        # 只比 `_SKIP_DIRS` 里的全名会漏掉 `.pytest-tmp` —— 而它正是
-        # 测试沙箱的临时目录，里面可能有成百上千个小目录，rglob 一次就
-        # 把整个跑测试的时间拖长（实测全量 10 分钟 → 19 分钟的那一元）。
+        try:
+            rel = p.relative_to(game)
+        except ValueError:            # 理论上不会；真发生了就别猜
+            continue
+        rel_parts = rel.parts
+        # ⚠ **只看"扫描根之内"的目录段**（`rel_parts[:-1]` = 目录，末位是文件名）。
+        #
+        # 2026-10-08 修：原来是 `any(... for part in p.parts)` —— 拿**绝对路径**
+        # 逐段比。于是只要**祖先目录**里有一个以 `.` 开头（`.pip-tmp` / `.venv` /
+        # 用户把项目放在 `~/.games/mygame`），**整个项目的脚本全被跳过**：
+        # CDS 认不出来、自定义语句一条都发现不了，而且**没有任何报错**
+        # （表现为"这项目好像没声明过自定义语句"）。
+        # 项目根之外的目录名不归本函数管：只看根内。
         if any(part in _SKIP_DIRS or part.startswith('.')
-               for part in p.parts):
+               for part in rel_parts[:-1]):
             continue
         if p.name.endswith('.generated.rpy'):
             continue
         # 嵌套副本（子目录自带 game/）不是本项目的脚本
-        parts = list(p.relative_to(game).parts)
-        if 'game' in parts and parts[0] != 'game':
+        if 'game' in rel_parts and rel_parts[0] != 'game':
             continue
         out.append(p)
     return out

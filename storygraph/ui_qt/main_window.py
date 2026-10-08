@@ -127,6 +127,9 @@ class BeatCardEditor(QWidget):
         #: 载入时的整份字段（判断"表单被改脏了没有"，纯显示用）。
         self._loaded_fields: dict = {}
         self._loading = False
+        #: 「语句参数」那一组的控件：`{动态列名: 控件}`（跟着这一拍的语句走，
+        #: 没有参数就整组隐藏）。见 `set_spec_args`。
+        self._spec_widgets: dict = {}
         self._build(loader)
         self._connect_dirty_tracking()
 
@@ -268,6 +271,25 @@ class BeatCardEditor(QWidget):
         row4.addWidget(self._condition, 1)
         root.addLayout(row4)
 
+        # —— 语句参数（**跟着这一拍的语句走**；没有参数就整组隐藏）——
+        #
+        # 为什么要有这一组（用户 2026-10-07 的意见）：动态参数列**只在 Excel**
+        # 里做了，卡片上还是"候选注释"（`app.beats.spec_arg_choices_for`
+        # 一直是"只有测试在用"）。可编剧是**在卡片上写**的 —— 表里有下拉、
+        # 卡片上没有，等于这条能力只对着会开 Excel 的人。
+        #
+        # 这里一格一个参数：有候选就是**可编辑下拉**（手打新值照样能过，
+        # 与 Excel 的 `showErrorMessage=False` 同一条口径），没候选就是普通
+        # 输入框。值写回的路径与 Excel **完全同一条**
+        # （`app.beats.apply_spec_arg_fields` → `beat_model.fold_spec_arg_columns`），
+        # 所以"卡片上改"与"表里改"的结果必然一致。
+        self._spec_host = QWidget()
+        self._spec_form = QVBoxLayout(self._spec_host)
+        self._spec_form.setContentsMargins(0, 0, 0, 0)
+        self._spec_form.setSpacing(T.SPACE['xs'])
+        self._spec_host.setVisible(False)
+        root.addWidget(self._spec_host)
+
         # —— 高级区（可折叠）——
         self._adv_btn = QPushButton(self._adv_label())
         self._adv_btn.setProperty('variant', 'chip')
@@ -346,6 +368,83 @@ class BeatCardEditor(QWidget):
     def _adv_label(self) -> str:
         return (('▾' if self._adv_open else '▸')
                 + ' 高级区（代码 / Label / 类型 / Notes / Stage）')
+
+    # ---------- 语句参数那一组（`app.beats.spec_arg_*`） ----------
+
+    def set_spec_args(self, columns, values=None, choices=None):
+        """
+        按这一拍的语句重建「参数」那一组控件（没有参数 → 整组隐藏）。
+
+        `columns`  = `app.beats.spec_arg_columns_of` 的产物
+                     （`[{header, param, label, choices, positional, …}]`）；
+        `values`   = `{列名: 当前值}`（`app.beats.spec_arg_fields_for`）；
+        `choices`  = `{参数名: [候选]}`（`app.beats.spec_arg_choices_for`）。
+
+        为什么整组重建而不是复用控件：参数名是**每条语句各不相同**的
+        （`mycue` 有 `intensity`，`camera` 有 `layer`），复用就得处理
+        "上一拍那几格现在叫什么"——重建简单且不可能残留别人的参数。
+        """
+        values = dict(values or {})
+        choices = dict(choices or {})
+        self._loading = True
+        try:
+            while self._spec_form.count():
+                item = self._spec_form.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+                    continue
+                lay = item.layout()
+                if lay is not None:
+                    while lay.count():
+                        sub = lay.takeAt(0)
+                        sw = sub.widget()
+                        if sw is not None:
+                            sw.setParent(None)
+                    lay.deleteLater()
+            for header in list(getattr(self, '_spec_widgets', {}) or {}):
+                self._widgets.pop(header, None)
+            self._spec_widgets = {}
+            for col in (columns or ()):
+                header = str(col.get('header') or '')
+                if not header:
+                    continue
+                box = QHBoxLayout()
+                box.setSpacing(T.SPACE['xs'])
+                lab = QLabel(str(col.get('label') or col.get('param') or header))
+                lab.setProperty('role', 'caption')
+                lab.setMinimumWidth(72)
+                lab.setToolTip(f'{header}（改这一格 = 改这条语句的参数）')
+                box.addWidget(lab, 0)
+                opts = [str(o) for o in (choices.get(col.get('param'), ()) or ())]
+                if opts:
+                    w = QComboBox()
+                    w.setEditable(True)          # 手打新值照样能过（同 Excel）
+                    w.addItem('')
+                    w.addItems(opts)
+                    w.setToolTip('从下拉里选，或直接写一个项目里在用的值')
+                else:
+                    w = QLineEdit()
+                    w.setPlaceholderText('留空 = 不带这个参数')
+                self._spec_widgets[header] = w
+                self._widgets[header] = w         # `_set_value` / `_get_value` 复用
+                box.addWidget(w, 1)
+                self._spec_form.addLayout(box)
+            for header, w in self._spec_widgets.items():
+                value = str(values.get(header, '') or '')
+                if isinstance(w, QComboBox):
+                    w.setCurrentText(value)
+                else:
+                    w.setText(value)
+            self._spec_host.setVisible(bool(self._spec_widgets))
+        finally:
+            self._loading = False
+        self.refresh_dirty()
+
+    def _spec_values(self) -> dict:
+        """这一组控件当前的值（`{列名: 值}`）—— 与 Excel 的动态列**同名**。"""
+        return {h: self._get_value(h)
+                for h in (getattr(self, '_spec_widgets', None) or {})}
 
     def _toggle_adv(self):
         self._adv_open = not self._adv_open
@@ -491,6 +590,9 @@ class BeatCardEditor(QWidget):
         # 条件始终写回（有值就包 if，空就不是条件）——它一直可见，
         # 所以适用"始终可编辑就必须始终写回"那条规则。
         out['condition'] = self._get_value('condition')
+        # **语句参数**同理：它一直可见（有参数才出现），所以始终写回。
+        # 键与 Excel 的动态列**同名**，折叠走同一条路（见 `EditorSession.apply`）。
+        out.update(self._spec_values())
         return out
 
     # ---------- 保存 / 撤销 相关的状态 ----------
@@ -512,7 +614,9 @@ class BeatCardEditor(QWidget):
 
     def collect_all_fields(self) -> dict:
         """主区 + 高级区 + 额外控件**全部**字段的当前值（不看折叠状态）。"""
-        return {n: self._get_value(n) for n in self._all_names()}
+        out = {n: self._get_value(n) for n in self._all_names()}
+        out.update(self._spec_values())
+        return out
 
     def set_kind(self, kind: str) -> None:
         """
