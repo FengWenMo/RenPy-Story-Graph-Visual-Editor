@@ -5,6 +5,8 @@
 > 细节与复现见 `.workbuddy/memory/YYYY-MM-DD.md`。
 > ⚠ **2026-10-08 的教训**：这份清单曾长期滞后（两条"未修"其实早已修好）——
 > **引用状态前先实测**（跑 `tools/hell_*.py` / 对应 pytest），别信记忆里的 ✅/❌。
+>
+> **长期目标与里程碑（M1–M5）见 `docs/路线图_长期目标_2026-10-08.md`** —— 本文只留状态速览与契约。
 
 ---
 
@@ -35,13 +37,13 @@
 | 资源表中文表头 + `ID` 整列隐藏 | 用户 2026-10-07 定案（**换位不做**） |
 | 缩略图性能（分片缓存/字节上限/预热） | §E |
 
-### ❌ 未做（真缺口，按我的优先级排序）
-1. **两套 `.rpy` 生成器并存**：`pipeline/renpy_exporter.py` + `story/beat_render.render_beats_to_rpy` —— ownership 没显式化。方向已定：`merge(Graph 骨架, Excel 内容, CodeBlock)`，连接键 `LineId`。
-2. **`asset_engine._apply_rename_patch` 用正则改写用户 `.rpy`**（有 backup，但仍是"悄悄改别人脚本"）。
-3. **Excel 前端上限**：`Stage` 列**一格多指令、无格级下拉**（`Stage` 是故意的多行列）；候选表整表重建；导出无增量。
-4. **坏味道**：`sync_asset_tables` 圈复杂 **133** / `renpy_parser` **4360 行** / 上帝对象（`RenPyParser` 50 方法、`GraphCanvas` 45、`AssetEngine` 41）；`noqa: BLE001` **336** 处。
+### ❌ 未做（真缺口；里程碑与验收见 `docs/路线图_长期目标_2026-10-08.md`）
+1. **两套 `.rpy` 生成器并存（D2，M1 🔵 进行中）**：`renpy_exporter.export_to_renpy`（控制流）与 `beat_render.render_beats_to_rpy`（剧本）**都在生产路径**。✅ 第一步已做：控制流导出改走 `write_generation(ensure_generator_marker(text), …)`（原来裸 `open(...,'w')` 绕过门禁）。☐ 待做：ownership 文档 + "唯一写盘入口"守卫。
+2. **`asset_engine._apply_rename_patch` 正则改写用户 `.rpy`（D3，M2 ⚪）**：⚠ 实测**当前不可达** —— `AssetEngine` 在 `ui_qt` 里从不构造（只被测试/直接 API 触发）→ 风险是**潜在**的。修法=M2（diff→确认→写）+ 决定 AssetEngine 是否接进 Qt。
+3. **Excel 前端上限（D4，M3 ⚪）**：`Stage` 列是**刻意多行列**且不在 `DROPDOWN_COLUMNS` → 无格级下拉；候选表整表重建；导出无增量。
+4. **坏味道（D5，M4 ⚪）**：`sync_asset_tables` 圈复杂 **133** / `renpy_parser` **4360 行** / `RenPyParser` **50 方法** / `noqa: BLE001` **336**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
-6. **多引擎适配深度**：接线已修；未做 Unity/Godot 的运行时组件、资源映射、运行期验证。
+6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
 
 ### ❓ 待你决定
 - **D1** 缺口"嵌套≥3 层"的旧定案「树归 Graph 画布 / 句子级内容归 Excel」是否**撤销**（嵌套已修）。
