@@ -11,6 +11,13 @@ storygraph.story.beat_render
 
 原则：找不到资源只写 `# TODO: 缺少资源 …` 且**不生成**那条非法语句；
 图像名保留作者写法（`show eileen happy` 不改写成下划线形态）。
+
+**ownership（两条 `.rpy` 生成路径，职责不重叠 —— 2026-10-09 显式化）**：
+本模块产**完整剧本**（台词/舞台/音频），是 `build` / `compile` / `table` 三条
+生产路径的真源；`pipeline/renpy_exporter.export_to_renpy` 产**控制流骨架**
+（`<label>_control` + jump/call/menu），给"章节流转"用。两条路共用
+`render_code_block` 与 `quote_string`（**不许各写一份**），落盘都过
+`generation_guard.write_generation`。
 """
 
 from __future__ import annotations

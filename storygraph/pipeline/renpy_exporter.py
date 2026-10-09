@@ -1,4 +1,23 @@
-# renpy_exporter.py
+"""
+storygraph.pipeline.renpy_exporter
+==================================
+**剧情图 → Ren'Py 控制流脚本**（`<label>_control` + `jump`/`call`/`menu` 骨架）。
+
+**ownership（本仓库有两条 `.rpy` 生成路径，职责不重叠 —— 2026-10-09 显式化）**
+
+| 谁 | 产什么 | 谁在用 |
+|---|---|---|
+| **本模块** `export_to_renpy` | **控制流**：每个章节 label 的 `<label>_control` 包装 + 按边写 `jump`/`call`/`menu`；**不产台词、不产舞台** | UI「导出控制流 .rpy」（`app/session_graph.export_control_flow`） |
+| `story/beat_render.render_beats_to_rpy` | **完整剧本**：台词 / 舞台 / 音频 / 自定义 transform | `pipeline/build.py`、`pipeline/compile.py`、`app/tables.py`（三条生产路径） |
+
+两条路**共用同一套规则**，不许各写一份：
+  · `beat_render.render_code_block` —— python op 的渲染（含行首紧凑标记约定）；
+  · `beat_render.quote_string` —— 字符串转义（`\\ " \\n` 一份规则）。
+
+**落盘一律过 `story.generation_guard.write_generation`**（契约 B1）：控制流脚本
+同样会进 `game/`，同样可能 label 重名或覆盖手写文件。守卫
+`tests/test_single_write_entry.py`（登记表 + 定向判据）。
+"""
 from storygraph.core import notify
 
 from storygraph.core.safeguard import swallow

@@ -35,10 +35,13 @@
 | 块编辑器「语法检查」 | 逐行 `ast.parse`（原为恒真空转） |
 | BOM 文件解析 / `find_scripts` 静默失能 | 见 §五 新增契约 |
 | 资源表中文表头 + `ID` 整列隐藏 | 用户 2026-10-07 定案（**换位不做**） |
+| **改名补丁确认闸门（M2/D3）** | `plan`（纯）→`apply(confirm=)`（未确认零写）→`rollback`（逐位还原）；`test_hell_rename_confirm_gate.py` 11 条 + 突变 |
+| **立绘/退场摊列（M3-2/D4）** | `立绘2/立绘3…` 每格绑图像候选 DV；模型与渲染**未动**；`test_hell_show_split_columns.py` 22 条 + 真机渲染逐字不变 |
+| **落盘入口唯一性守卫（M1/D2）** | `test_single_write_entry.py`（AST 登记表 + 定向判据）+ 突变验证 |
 | 缩略图性能（分片缓存/字节上限/预热） | §E |
 
 ### ❌ 未做（真缺口；里程碑与验收见 `docs/路线图_长期目标_2026-10-08.md`）
-1. **两套 `.rpy` 生成器并存（D2，M1 🔵 进行中）**：`renpy_exporter.export_to_renpy`（控制流）与 `beat_render.render_beats_to_rpy`（剧本）**都在生产路径**。✅ 第一步已做：控制流导出改走 `write_generation(ensure_generator_marker(text), …)`（原来裸 `open(...,'w')` 绕过门禁）。☐ 待做：ownership 文档 + "唯一写盘入口"守卫。
+1. ~~两套 `.rpy` 生成器并存（D2，M1）~~ **已完成（2026-10-09）**：控制流导出改走 `write_generation(ensure_generator_marker(text), …)`；两个模块的 docstring 各自写明 ownership（控制流骨架 vs 完整剧本）+ 共用规则（`render_code_block`/`quote_string`）；新增 **"唯一写盘入口"守卫** `tests/test_single_write_entry.py`（AST 扫全包 14 处落盘点，每个必须在 `WRITERS` 登记表里说清写什么；突变验证 `tools/mut_write_entry.py`）。
 2. ~~`asset_engine._apply_rename_patch` 正则改写用户 `.rpy`~~ **已修（M2，2026-10-08）**：两段式契约 `plan_rename_patch`（纯，算 diff）→ `apply_rename_patch(confirm=…)`（**未确认零写**）→ `rollback_rename_patch`（逐位还原）；唯一真源在 `assets/asset_extensions.py`；引擎"会改脚本的改名"**一律**进批量确认。判据 `tests/test_hell_rename_confirm_gate.py`（11 条 + 突变验证）。⚠ 按 D3' **未接 Qt**。
 3. **Excel 前端上限（D4，M3 🔵 第一切片✅）**：`Stage` 是刻意多行列且不在 `DROPDOWN_COLUMNS`。**方案 B 已定并已落地第一切片**：
    · **`Show`/`Hide` 摊列**：原列只放**第 1 项**，第 2+ 项各占 `立绘2/立绘3…`、`退场2…`（追加末尾 + 每格绑图像候选 DV）。
