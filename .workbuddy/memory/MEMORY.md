@@ -6,7 +6,7 @@
 > ⚠ **2026-10-08 的教训**：这份清单曾长期滞后（两条"未修"其实早已修好）——
 > **引用状态前先实测**（跑 `tools/hell_*.py` / 对应 pytest），别信记忆里的 ✅/❌。
 >
-> **长期目标与里程碑（M1–M5）见 `docs/路线图_长期目标_2026-10-08.md`** —— 本文只留状态速览与契约。
+> **长期目标与里程碑（M1–M5 + M4-续「清空复杂度头部」8 项清单）见 `docs/路线图_长期目标_2026-10-08.md`** —— 本文只留状态速览与契约。
 
 ---
 
@@ -49,7 +49,7 @@
    · 判据 `tests/test_hell_show_split_columns.py`（22 条）+ `tools/probe_show_split_real.py`；验收：真机渲染逐字不变 / `audit_idempotence` 53/53 / `hell_edit_rounds` 0 失败 / 回归 594 passed。
    · ⚠ 两个**静默缺陷**已修：项数>格数时**放不下就不摊**（否则丢项）；**不摊时不许写摊列**（否则读回来重复）。
    · 审查另推翻两处旧假设：`Stage` **已是派生视图**（`compose_stage`）；⚠ `pause`/`with X`/`jump` 走 `raw` 通道**刻意不进 Stage**；顺序载体是 **`OpOrder`**（带 `show#0` 逐次序号）。
-4. **坏味道（D5，M4 🔵 已完成 8 个）**：`sync_asset_tables` **133→28**、`render_beat_to_rpy` **81→47**、`scan_assets` **74→8**、`renpy_parser._walk` **72→12**、`validate_level1` **63→5**、`patcher._replace_matched` **62→29** + `patch_export` **56→34**、`beat_build._hydrate_stage` **59→25**、`statement_registry.describe_statements` **56→31**（都已从 health_check 头部消失，阈值=50）。手法=**先录金标 → 纯结构拆分**（sync=表逐格+返回 dict；渲染=53 文件产物 hash；扫描=4 组合结果集；解析=整份 `ParseResult`；校验=完整问题清单×带/不带资源表；补丁=三路径逐文件；hydrate=整批拍快照；describe=真机+**合成项目**四种调用）。⚠ 关键教训：**只测真机会漏一半分支**（真机没有自定义声明 → 必须加合成用例）；金标要**归一化**+**能定位**；**splice 后旧下标失效**（用 AST `end_lineno`）；**换名只改代码段、字符串进出即落地**（连错两次）+ 搬完自检 `ast.Constant` 不许含 `acc.`；**搬走的块要补：局部 import、宿主函数的局部容器**（`rows`）；**替换区间别吃掉中间的语句**。
+4. **坏味道（D5，M4 🔵 已完成 10 个）**：`sync_asset_tables` **133→28**、`render_beat_to_rpy` **81→47**、`scan_assets` **74→8**、`renpy_parser._walk` **72→12**、`validate_level1` **63→5**、`patcher._replace_matched` **62→29** + `patch_export` **56→34**、`beat_build._hydrate_stage` **59→25**、`describe_statements` **56→31**、`_stage_lines` **51→28** + `render_beats_to_rpy` **45→24**。**长期目标**：清空 `health_check` 复杂度头部（每项 ≤50），剩 6 项清单见路线图 §六（`recover_source_ranges`(53)、`export_to_renpy`(46)、`asset_health_report`(47)、`_expand_node`(46)、`_ast_compare_pair_possible`(47)、`eventFilter`(46)）。手法=**先录金标 → 纯结构拆分**。⚠ 关键教训：**只测真机会漏一半分支**（要加合成用例）；金标要**归一化**+**能定位**；**splice 后旧下标失效**（用 AST `end_lineno`）；**换名只改代码段、字符串进出即落地**+搬完自检 `ast.Constant`；**搬走的块要补上所有来自宿主作用域的东西**（局部 import、宿主局部容器 `rows`、**被当参数传的闭包要改调用点名字**）；**定义在 `if` 里的闭包不能当参数传**（`UnboundLocalError`）；**替换区间别吃掉中间语句**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
 6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
 

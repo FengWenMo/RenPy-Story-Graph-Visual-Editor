@@ -2582,6 +2582,64 @@ def _resolver_for(audit, name_resolver=None):
 
 
 
+def _stage_show_lines(beat, art, native_raw, native_show, native_line) -> list:
+    """`_stage_lines` 的 show 行生成（M4 搬出，行为一字不改）。"""
+    show_lines = []
+    for item in _split_show_items(beat.show):
+        part = show_item_part(item)
+        if native_raw:
+            raw = native_line('show', part)
+            if raw:
+                show_lines.append(raw)
+                continue
+            if ('show', part) in native_raw:
+                continue                     # 这条影子的原文已经出过了
+        if item.get('clause'):
+            if part in native_show:
+                continue
+            show_lines.append(f"show {item['clause']}")
+            continue
+        if part in native_show:
+            continue
+        if item.get('is_expression'):
+            # `show expression holo("x") at i11 as q`：表达式本体**逐字**输出
+            # （它是 Python 代码，任何"改名"都是改坏），位置与 `as` 照结构化
+            # 字段出。`as` 不写的话原本挂在这个别名上的存档 / 演出会错位。
+            line = f"show expression {item['image']}"
+            if item.get('as_'):
+                line += f" as {item['as_']}"
+            at = (item.get('at') or '').strip() or (beat.at or '').strip()
+            if at:
+                line += f" at {at}"
+            show_lines.append(line)
+            continue
+        line = f"show {art(item['image'])}"
+        at = (item.get('at') or '').strip() or (beat.at or '').strip()
+        if at:
+            line += f" at {at}"
+        show_lines.append(line)
+    return show_lines
+
+def _stage_hide_lines(beat, art, native_hide, native_raw, native_line) -> list:
+    """`_stage_lines` 的 hide 行生成（M4 搬出，行为一字不改）。"""
+    hide_lines = []
+    for item in _split_hide_items(beat.hide):
+        part = hide_item_part(item)
+        if native_raw:
+            raw = native_line('hide', part)
+            if raw:
+                hide_lines.append(raw)
+                continue
+            if ('hide', part) in native_raw:
+                continue                     # 这条影子的原文已经出过了
+        if part in native_hide:
+            continue
+        line = f"hide {art(item['image'])}"
+        if item.get('with'):
+            line += f" with {item['with']}"
+        hide_lines.append(line)
+    return hide_lines
+
 def _stage_lines(beat, name_resolver) -> dict:
     """
     结构化列 → 按 verb 分组的舞台指令行 `{'scene': [...], 'show': [...], 'hide': [...]}`。
@@ -2624,66 +2682,21 @@ def _stage_lines(beat, name_resolver) -> dict:
     #: 同一个 `native_raw` 可能被拆成多条影子（一格多指令那种），原文只许出一次。
     seen_native: set = set()
 
-    if native_raw:
-        def _native_line(verb, part):
-            """这一条影子有没有对应的**原文**？有就记下来（只出一次）。"""
-            raw = str(native_raw.get((verb, part)) or '').strip()
-            if raw and raw not in seen_native:
-                seen_native.add(raw)
-                return raw
-            return ''
+    # ⚠ 以前这个闭包定义在 `if native_raw:` **里面** —— 那时它只被同一分支调用，
+    # 没问题；但 M4 把 show/hide 两个循环搬出去之后，它要**当参数传**，
+    # `native_raw` 为空时这个名字根本不存在 → `UnboundLocalError`。
+    # 改成无条件定义（空 `native_raw` 时它本来也只会返回 `''`，行为等价）。
+    def _native_line(verb, part):
+        """这一条影子有没有对应的**原文**？有就记下来（只出一次）。"""
+        raw = str((native_raw or {}).get((verb, part)) or '').strip()
+        if raw and raw not in seen_native:
+            seen_native.add(raw)
+            return raw
+        return ''
 
-    show_lines = []
-    for item in _split_show_items(beat.show):
-        part = show_item_part(item)
-        if native_raw:
-            raw = _native_line('show', part)
-            if raw:
-                show_lines.append(raw)
-                continue
-            if ('show', part) in native_raw:
-                continue                     # 这条影子的原文已经出过了
-        if item.get('clause'):
-            if part in native_show:
-                continue
-            show_lines.append(f"show {item['clause']}")
-            continue
-        if part in native_show:
-            continue
-        if item.get('is_expression'):
-            # `show expression holo("x") at i11 as q`：表达式本体**逐字**输出
-            # （它是 Python 代码，任何"改名"都是改坏），位置与 `as` 照结构化
-            # 字段出。`as` 不写的话原本挂在这个别名上的存档 / 演出会错位。
-            line = f"show expression {item['image']}"
-            if item.get('as_'):
-                line += f" as {item['as_']}"
-            at = (item.get('at') or '').strip() or (beat.at or '').strip()
-            if at:
-                line += f" at {at}"
-            show_lines.append(line)
-            continue
-        line = f"show {art(item['image'])}"
-        at = (item.get('at') or '').strip() or (beat.at or '').strip()
-        if at:
-            line += f" at {at}"
-        show_lines.append(line)
+    show_lines = _stage_show_lines(beat, art, native_raw, native_show, _native_line)
 
-    hide_lines = []
-    for item in _split_hide_items(beat.hide):
-        part = hide_item_part(item)
-        if native_raw:
-            raw = _native_line('hide', part)
-            if raw:
-                hide_lines.append(raw)
-                continue
-            if ('hide', part) in native_raw:
-                continue                     # 这条影子的原文已经出过了
-        if part in native_hide:
-            continue
-        line = f"hide {art(item['image'])}"
-        if item.get('with'):
-            line += f" with {item['with']}"
-        hide_lines.append(line)
+    hide_lines = _stage_hide_lines(beat, art, native_hide, native_raw, _native_line)
 
     # 转场挂在该拍最后一条舞台指令上（有背景就挂背景，否则挂最后一条立绘，
     # 都没有就单独成行）——Ren'Py 里 `scene X with D` 与
@@ -3163,6 +3176,84 @@ def _collect_file_blocks(beats: list) -> list:
     return out
 
 
+def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
+                        idx_of) -> int:
+    """
+    `render_beats_to_rpy` 的**分组输出循环**（M4 搬出，行为一字不改）。
+
+    每个 label 一段：菜单按**块**渲染（逐拍会把 `menu:` 压平）、
+    循环同理、其余逐拍；`pose_hides` 的补 hide 放在该拍内容**之前**。
+    返回输出了几个 label —— 调用方用它决定要不要补兜底 `label start`。
+    """
+    emitted_labels = 0
+    for name, group in groups:
+        # **只用来携带文件级块的拍不产生 label**（2026-10-05，拓展边界③）。
+        #
+        # 纯 `init python:` 的文件会造一张空拍来携带代码（见
+        # `beat_build.attach_file_blocks`）。照常分组的话，产物里会多出一个
+        # **空壳** `label start: pass return` —— 而源文件里根本没有 label。
+        #
+        # 为什么这个空壳不好：把一个纯定义文件导出到 `game/`（`--out` 指到那）
+        # 时，它会与项目里真正的 `label start` 重名，Ren'Py 直接起不来
+        # （`LABEL_COLLISION` 门禁能拦住这一种，因为目标在 game/ 里）。
+        # 一个只做定义的文件**没有 label** 才是对的。
+        #
+        # ⚠ 实测口径（别把这条当成"防住了合并构建重名"）：全项目合并时
+        # 这些块通常挂在**第一张真拍**上（`attach_file_blocks`），
+        # 合成拍根本不出现 —— 真实项目产物 46 个 label / 0 处重名
+        # （`tools/check_duplicate_labels.py`）。
+        if group and all(_is_file_block_carrier(b) for b in group):
+            continue
+        out.append(f"label {name}:")
+        emitted_labels += 1
+        body = []
+        # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：
+        # 逐拍渲染会把 `menu:` 整块压成顺序语句，分支结构静默损坏。
+        for kind, unit in split_beat_units(group):
+            # P4：这一拍缺的 `hide`（改回空姿势要先隐藏）——
+            # 放在**这一拍自己的内容之前**，所以它是"生成内容"，
+            # 增量补丁照旧会校验它、备份它。
+            _hides = []
+            for _b in (unit or ()):
+                for _line in (pose_hides.get(idx_of.get(id(_b), -1), ())
+                              or ()):
+                    if _line and _line not in _hides:
+                        _hides.append(_line)
+            if _hides:
+                body.extend(_hides)
+            if kind == 'menu':
+                body.extend(render_menu_block(unit, indent=indent,
+                                              audit=audit, trace=trace))
+            elif kind == 'loop':
+                body.extend(render_loop_block(unit, indent=indent,
+                                              audit=audit, trace=trace))
+            else:
+                body.extend(render_beat_to_rpy(unit[0], indent=indent,
+                                               audit=audit, trace=trace))
+        # **只去掉首尾的空行，中间的空行留着**（2026-10-05 修）。
+        #
+        # 旧写法是 `body = [ln for ln in body if ln.strip() != '']` ——
+        # 把**所有**空行都扔了。那对拍之间的空行无所谓（纯排版），
+        # 但对 `python:` 块内的空行是**实打实的内容丢失**：
+        # 实测 `mini_game_puzzle.rpy` 的多行调用里 `cols=3,` 与
+        # `grid_width=800,` 之间有一个空行，它被扔掉之后往返的逐行文本
+        # 就对不上（审计算一条丢失），而且作者手写的排版被改掉了。
+        #
+        # 为什么不能干脆全留：`render_beat_to_rpy` 的返回值里，
+        # 拍与拍之交可能有空行，全留会在 label 里堆出很多空行
+        # （每个拍之间一个），产物会很散。所以只trim首尾。
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
+        if body:
+            out.extend(indent + ln if ln.strip() else '' for ln in body)
+        else:
+            out.append(indent + 'pass')
+        out.append(indent + 'return')
+        out.append('')
+    return emitted_labels
+
 def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
                         indent: str = '    ', registry=None,
                         symbols=None, trace: list = None,
@@ -3267,75 +3358,10 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         # 注意这条与上面"空拍保住 label 名"是同一枚硬币的两面：
         # 源文件里**有**的 label 必须留下来，**没有**的绝不能凭空造。
 
-    emitted_labels = 0
     #: 拍对象 → 原始下标（P4 的 `pose_hides` 按**拍序号**给）
     idx_of = {id(b): i for i, b in enumerate(beats or ())}
-    for name, group in groups:
-        # **只用来携带文件级块的拍不产生 label**（2026-10-05，拓展边界③）。
-        #
-        # 纯 `init python:` 的文件会造一张空拍来携带代码（见
-        # `beat_build.attach_file_blocks`）。照常分组的话，产物里会多出一个
-        # **空壳** `label start: pass return` —— 而源文件里根本没有 label。
-        #
-        # 为什么这个空壳不好：把一个纯定义文件导出到 `game/`（`--out` 指到那）
-        # 时，它会与项目里真正的 `label start` 重名，Ren'Py 直接起不来
-        # （`LABEL_COLLISION` 门禁能拦住这一种，因为目标在 game/ 里）。
-        # 一个只做定义的文件**没有 label** 才是对的。
-        #
-        # ⚠ 实测口径（别把这条当成"防住了合并构建重名"）：全项目合并时
-        # 这些块通常挂在**第一张真拍**上（`attach_file_blocks`），
-        # 合成拍根本不出现 —— 真实项目产物 46 个 label / 0 处重名
-        # （`tools/check_duplicate_labels.py`）。
-        if group and all(_is_file_block_carrier(b) for b in group):
-            continue
-        out.append(f"label {name}:")
-        emitted_labels += 1
-        body = []
-        # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：
-        # 逐拍渲染会把 `menu:` 整块压成顺序语句，分支结构静默损坏。
-        for kind, unit in split_beat_units(group):
-            # P4：这一拍缺的 `hide`（改回空姿势要先隐藏）——
-            # 放在**这一拍自己的内容之前**，所以它是"生成内容"，
-            # 增量补丁照旧会校验它、备份它。
-            _hides = []
-            for _b in (unit or ()):
-                for _line in (pose_hides.get(idx_of.get(id(_b), -1), ())
-                              or ()):
-                    if _line and _line not in _hides:
-                        _hides.append(_line)
-            if _hides:
-                body.extend(_hides)
-            if kind == 'menu':
-                body.extend(render_menu_block(unit, indent=indent,
-                                              audit=audit, trace=trace))
-            elif kind == 'loop':
-                body.extend(render_loop_block(unit, indent=indent,
-                                              audit=audit, trace=trace))
-            else:
-                body.extend(render_beat_to_rpy(unit[0], indent=indent,
-                                               audit=audit, trace=trace))
-        # **只去掉首尾的空行，中间的空行留着**（2026-10-05 修）。
-        #
-        # 旧写法是 `body = [ln for ln in body if ln.strip() != '']` ——
-        # 把**所有**空行都扔了。那对拍之间的空行无所谓（纯排版），
-        # 但对 `python:` 块内的空行是**实打实的内容丢失**：
-        # 实测 `mini_game_puzzle.rpy` 的多行调用里 `cols=3,` 与
-        # `grid_width=800,` 之间有一个空行，它被扔掉之后往返的逐行文本
-        # 就对不上（审计算一条丢失），而且作者手写的排版被改掉了。
-        #
-        # 为什么不能干脆全留：`render_beat_to_rpy` 的返回值里，
-        # 拍与拍之交可能有空行，全留会在 label 里堆出很多空行
-        # （每个拍之间一个），产物会很散。所以只trim首尾。
-        while body and not body[0].strip():
-            body.pop(0)
-        while body and not body[-1].strip():
-            body.pop()
-        if body:
-            out.extend(indent + ln if ln.strip() else '' for ln in body)
-        else:
-            out.append(indent + 'pass')
-        out.append(indent + 'return')
-        out.append('')
+    emitted_labels = _emit_label_groups(groups, out, indent, audit,
+                                          trace, pose_hides, idx_of)
 
     # 兜底 label 的判据（2026-10-05 收紧，`tools/probe_label_fate_xlsx.py`
     # 抓到）：**只有"有真拍却一个 label 都没输出"时才补**。
