@@ -279,8 +279,14 @@ def export_beats_to_excel(beats: list, output_path,
     # 标准语句的形状由工具自己声明（`spec_args.BUILTIN_ARG_SCHEMAS`）。
     spec_cols = dynamic_cols(beats, statements)
     spec_headers = [c['header'] for c in spec_cols]
+    # 「每指令一列」摊列（M3-2，用户 D4' 方案 B）：立绘/退场的**多值**
+    # 摊成每项一列 —— 只有这样每一格才能挂上图像候选下拉（Excel 的数据
+    # 验证一个格子只认一个值）。上限 = 这批表里该列的**最大项数**；
+    # 九成拍只有一项 → 一个摊列都不加（表与从前逐列相同）。
+    extra_headers = _extra_headers_for(beats)
 
-    ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS] + spec_headers)
+    ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS]
+              + spec_headers + extra_headers)
     for cell in ws[1]:
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
@@ -295,7 +301,8 @@ def export_beats_to_excel(beats: list, output_path,
     # 留着还会让产物多出一层 `if True:`、让"过表"与"直接渲染"两份产物对不上。
     # 老表（有 `True`、没有 `Nest`）照样能读：渲染退回老推断，而它要的正是那些 `True`。
     for beat in beats:
-        _append_text_row(ws, beat.to_row(symbols, spec_fields=spec_headers))
+        _append_text_row(ws, beat.to_row(symbols, spec_fields=spec_headers,
+                                        extra_fields=extra_headers))
 
     # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
     _annotate_spec_heads(ws, beats, statements)
@@ -316,6 +323,10 @@ def export_beats_to_excel(beats: list, output_path,
         letter = get_column_letter(len(BEAT_FIELDS) + k + 1)
         hint = max([len(col['param'])] + [len(c) for c in col['choices']] or [0])
         ws.column_dimensions[letter].width = max(14, min(30, hint + 6))
+    # 摊列的列宽：一格一个立绘/退场项，跟 `Show`/`Hide` 差不多宽就够。
+    for k, _name in enumerate(extra_headers):
+        letter = get_column_letter(len(BEAT_FIELDS) + len(spec_headers) + k + 1)
+        ws.column_dimensions[letter].width = 22
     # 内部元数据列整列隐藏（见 HIDDEN_BEAT_COLUMNS 的说明）：
     # 数据照旧读写，只是不占策划的视线。
     _hide_columns(ws, HIDDEN_BEAT_COLUMNS)
@@ -330,7 +341,9 @@ def export_beats_to_excel(beats: list, output_path,
     if registry is not None and include_dropdowns:
         ranges = _write_candidate_sheets(wb, registry)
         names = _defined_names_for(ranges)
-        _attach_dropdowns(ws, ranges, len(beats), names=names)
+        _attach_dropdowns(ws, ranges, len(beats), names=names,
+                          extra_headers=extra_headers,
+                          spec_count=len(spec_headers))
         # 每参数一列的**原生下拉**（M4 第二阶段）。放这里是因为
         # `choices_from`（`with` 的转场）要绑到**候选表**上，而候选表刚建好。
         _write_spec_arg_columns(ws, beats, statements, len(beats),
@@ -1363,7 +1376,25 @@ def _read_beats_from_ws(ws) -> list:
 
 
 
-def _attach_dropdowns(ws, ranges: dict, row_count: int, names: dict = None):
+def _extra_headers_for(beats) -> list:
+    """
+    「每指令一列」摊列的表头（M3-2）：立绘/退场的第 2..n 项各占一列。
+
+    上限取**这批表里该列的最大项数** —— 九成拍只有一项，于是**一个摊列都不加**
+    （表与从前逐列相同，老项目零影响）。第 1 项仍留在 `Show`/`Hide` 原列。
+    """
+    from storygraph.story.beat_model import (HIDE_EXTRA_PREFIX,
+                                             SHOW_EXTRA_PREFIX,
+                                             extra_field_names,
+                                             hide_cell_parts, show_cell_parts)
+    n_show = max((len(show_cell_parts(b)) for b in beats), default=0)
+    n_hide = max((len(hide_cell_parts(b)) for b in beats), default=0)
+    return (extra_field_names(SHOW_EXTRA_PREFIX, n_show)
+            + extra_field_names(HIDE_EXTRA_PREFIX, n_hide))
+
+
+def _attach_dropdowns(ws, ranges: dict, row_count: int, names: dict = None,
+                      extra_headers=None, spec_count: int = 0):
     """
     给指定列挂上下拉验证。
 
@@ -1413,6 +1444,13 @@ def _attach_dropdowns(ws, ranges: dict, row_count: int, names: dict = None):
                 'BGM': '从音乐表选；停止/排队请选伪值',
                 'SFX': '从音效表选；停止/排队请选伪值',
                 'Voice': '从语音表选'}.get(col_name, '从资源表选择')
+        # 摊列生效时，原列只装**第 1 项** —— 提示必须跟着改，
+        # 否则它会教策划"多个用 ; 分隔"，那正好会把摊列绕回多值。
+        if extra_headers:
+            if col_name == 'Show':
+                hint = '第 1 个立绘（一格一个，后续项在右边的「立绘2…」列）'
+            elif col_name == 'Hide':
+                hint = '第 1 个退场（一格一个，后续项在「退场2…」列）'
         _add(letter, formula1, BEAT_HEADERS.get(col_name, col_name), hint)
 
     # 内联下拉（不依赖资源表）：类型、动作等固定取值
@@ -1423,6 +1461,25 @@ def _attach_dropdowns(ws, ranges: dict, row_count: int, names: dict = None):
         _add(get_column_letter(idx), '"' + ','.join(values) + '"',
              BEAT_HEADERS.get(col_name, col_name),
              ACTION_HINTS.get(col_name, '从下拉里选'))
+
+    # **摊列的原生下拉**（M3-2）—— 摊列的**目的**就在这一条：一格一项，
+    # 于是每一格都能绑图像候选（`Show` 格是多值，绑了也只能管整格）。
+    from storygraph.story.beat_model import (HIDE_EXTRA_PREFIX,
+                                             SHOW_EXTRA_PREFIX,
+                                             extra_index_of)
+    img_formula = names.get('image') or ranges.get('image')
+    for k, head in enumerate(extra_headers or ()):
+        idx = extra_index_of(head, SHOW_EXTRA_PREFIX)
+        what = '立绘'
+        if idx is None:
+            idx = extra_index_of(head, HIDE_EXTRA_PREFIX)
+            what = '退场'
+        if idx is None or not img_formula:
+            continue
+        letter = get_column_letter(len(BEAT_FIELDS) + int(spec_count or 0)
+                                   + k + 1)
+        _add(letter, img_formula, str(head),
+             f'第 {idx} 个{what}（一格一个；要位置写 图@变换）')
 
 
 

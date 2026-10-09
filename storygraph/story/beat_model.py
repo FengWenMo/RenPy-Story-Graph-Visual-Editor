@@ -398,15 +398,62 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None) -> list:
     return cleaned
 
 
-def _row_fields(spec_fields=None) -> list:
+def _row_fields(spec_fields=None, extra_fields=None) -> list:
     """
-    `to_row` 的列契约 = 基础列 + 「每参数一列」的动态列（**唯一一处拼法**）。
+    `to_row` 的列契约 = 基础列 + 动态列（**唯一一处拼法**）。
+
+    动态列有**两族**，都追加在末尾、顺序固定（先「每参数一列」，后「每指令一列」）：
+      · `spec_fields` —— 「每参数一列」（`mycue·intensity`，M4 第二阶段）；
+      · `extra_fields` —— 「每指令一列」（`立绘2`/`退场2`…，M3-2 摊列）。
 
     写表的一侧（`excel_export` 的表头）必须用同一个函数取列，
     否则表头行与数据行的列数会对不上 —— 那是"最后几列悄悄全空"
     那一类静默缺陷（`_flatten_single_line_cells` 的长度断言会先吼）。
     """
-    return list(BEAT_FIELDS) + [str(f) for f in (spec_fields or ())]
+    return (list(BEAT_FIELDS)
+            + [str(f) for f in (spec_fields or ())]
+            + [str(f) for f in (extra_fields or ())])
+
+
+# ---------------------------------------------------------------------------
+#  「每指令一列」：立绘 / 退场**摊列**（M3-2，用户 D4' 方案 B）
+# ---------------------------------------------------------------------------
+#
+# 为什么摊：Excel 的数据验证**一个格子只认一个值**，而 `立绘`/`退场` 列现在是
+# `a; b; c` 多值 —— 于是每一项都拿不到图像候选下拉。摊成"每指令一列"之后，
+# 每格绑一个候选，这正是 D4 要的收益。
+#
+# ⚠ **模型与渲染不动**：`beat.show` / `beat.hide` 仍是 `;` 连接的字符串，
+# `_stage_lines` / `compose_stage` 一行不改 —— 摊列只改 **Excel 面**。
+# 顺序不靠列位置，靠 `OpOrder`/`StageOrder`（C3）。
+
+SHOW_EXTRA_PREFIX = '立绘'
+HIDE_EXTRA_PREFIX = '退场'
+
+
+def extra_field_names(prefix: str, total) -> list:
+    """第 2..total 项的列名（**第 1 项留在 `Show`/`Hide` 原列**，不另造 `立绘1`）。"""
+    try:
+        n = int(total or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return [f'{prefix}{i}' for i in range(2, n + 1)]
+
+
+def extra_index_of(name, prefix: str):
+    """`立绘2` → 2；不是这一族返回 `None`。"""
+    m = re.match(rf'^{re.escape(prefix)}(\d+)$', str(name or '').strip())
+    return int(m.group(1)) if m else None
+
+
+def extra_columns_in(row, prefix: str) -> list:
+    """一行里属于这一族的摊列，**按序号升序**（`立绘2` 排在 `立绘10` 前）。"""
+    found = []
+    for key in (row or ()):
+        idx = extra_index_of(key, prefix)
+        if idx is not None:
+            found.append((idx, key))
+    return [k for _i, k in sorted(found)]
 
 
 def _flatten_single_line_cells(values: list, fields=None) -> list:
@@ -783,7 +830,7 @@ class Beat:
                 out.append(vals.get(param, ''))
         return out
 
-    def to_row(self, symbols=None, spec_fields=None) -> list:
+    def to_row(self, symbols=None, spec_fields=None, extra_fields=None) -> list:
         """
         写进 Excel 的一行。
 
@@ -822,14 +869,49 @@ class Beat:
         if self.notes:
             comment = (f'{comment}\n{self.notes}'.strip()
                        if comment else self.notes)
+        # —— 「每指令一列」摊列（M3-2）：本批表里有 `立绘n`/`退场n` 时，
+        # 原列**只放第 1 项**，第 2+ 项各占一列（每格一个候选 → 才挂得上
+        # 数据验证）。没有这些列时**行为与从前一字不差**（向后兼容）。
+        _names = [str(f) for f in (extra_fields or ())]
+        _show_parts = show_cell_parts(self)
+        _hide_parts = hide_cell_parts(self)
+        # ⚠ **放不下就别摊**（安全阀，2026-10-08）：摊列数 = 1（原列）+ 本族
+        # 摊列数。若这一拍的项**比格数还多**（表是手改过的 / 批次里漏算了
+        # 上限），照摊就会把多出来的项**悄悄丢掉** —— 那是"整个立绘凭空消失
+        # 且不报错"。所以判据是"**放得下才摊**"，放不下退回整格写法
+        # （读回来照样全在，只是这一行没享受摊列的下拉）。
+        _show_slots = 1 + sum(1 for n in _names
+                              if extra_index_of(n, SHOW_EXTRA_PREFIX))
+        _hide_slots = 1 + sum(1 for n in _names
+                              if extra_index_of(n, HIDE_EXTRA_PREFIX))
+        _show_split = _show_slots > 1 and len(_show_parts) <= _show_slots
+        _hide_split = _hide_slots > 1 and len(_hide_parts) <= _hide_slots
+        _show_cell = ((_show_parts[0] if _show_parts else '')
+                      if _show_split else '; '.join(_show_parts))
+        _hide_cell = ((_hide_parts[0] if _hide_parts else '')
+                      if _hide_split else '; '.join(_hide_parts))
+
+        def _extra_value(name: str) -> str:
+            # ⚠ **只有真摊了才写摊列**：没摊时原列已经装了**全部**项，
+            # 再往摊列里写一遍 → 读回来会**重复**（`a; b; c; d; b`）。
+            idx = extra_index_of(name, SHOW_EXTRA_PREFIX)
+            if idx is not None:
+                return (_show_parts[idx - 1]
+                        if _show_split and len(_show_parts) >= idx else '')
+            idx = extra_index_of(name, HIDE_EXTRA_PREFIX)
+            if idx is not None:
+                return (_hide_parts[idx - 1]
+                        if _hide_split and len(_hide_parts) >= idx else '')
+            return ''
+
         return _flatten_single_line_cells([
             self.line_id, self.seq, self.label, self.kind,
             self.speaker, comment, menu_caption_text(self.text),
             self.condition,
             compose_scene_cell(self),
-            compose_show_cell(self),
+            _show_cell,
             self.at, self.with_,
-            compose_hide_cell(self),
+            _hide_cell,
             bgm, bgm_params, sfx, sfx_params, self.voice,
             stage, compose_code_cell(self),
             self.content_hash,
@@ -853,8 +935,9 @@ class Beat:
             self.loop_header,
             # 相机头行（3D 舞台）：`camera [层名]:` 的参数编辑面。
             self.camera_header,
-        ] + self.spec_arg_cells(spec_fields or ()),
-            fields=_row_fields(spec_fields))
+        ] + self.spec_arg_cells(spec_fields or ())
+          + [_extra_value(n) for n in _names],
+            fields=_row_fields(spec_fields, extra_fields))
 
     @classmethod
     def from_row(cls, row: dict) -> 'Beat':
@@ -996,13 +1079,22 @@ class Beat:
         # 缺口 4）。按内容去重会把 `ling; ling` 收成一条 —— 那可能正是
         # `show A / hide A / show A` 里语义关键的最后一条。
         # 影子重复由 `hydrate_from_dsl` 那条路自己挡（它只追加"还没有的"）。
+        # ⚠ **摊列（M3-2）**：`立绘2/立绘3…`（`退场2…`）是**同一列的续项**，
+        # 必须按序号接在原列后面一起拆 —— 读表时少读它们就是**静默丢立绘**。
+        # 旧表（没有这些列）行为不变：整格还是 `;` 多值。
+        _show_cells = [g('Show')] + [g(k) for k in
+                                     extra_columns_in(row, SHOW_EXTRA_PREFIX)]
+        _hide_cells = [g('Hide')] + [g(k) for k in
+                                     extra_columns_in(row, HIDE_EXTRA_PREFIX)]
         beat.show = _join_show_items([
             {'clause': '', 'image': img, 'at': at}
-            for img, at in _split_spec_list(g('Show'))
+            for _cell in _show_cells
+            for img, at in _split_spec_list(_cell)
         ], dedup=False)
         beat.hide = _join_hide_items([
             {'image': img, 'with': w}
-            for img, w in _split_spec_list(g('Hide'), sep='@')
+            for _cell in _hide_cells
+            for img, w in _split_spec_list(_cell, sep='@')
         ], dedup=False)
         # 「舞台（高级）」列：结构化列表达不了的指令（复杂 show 子句、
         # 自带位置的立绘、带转场的退场）都在这里；hydrate 会把它并回
@@ -1646,18 +1738,16 @@ def compose_scene_cell(beat: 'Beat') -> str:
 
 
 
-def compose_show_cell(beat: 'Beat') -> str:
+def show_cell_parts(beat: 'Beat') -> list:
     """
-    立绘列：`ling happy`；自带位置写 `ling happy@left`。
+    立绘列会写出的**项**（逐项字符串，未 join）。
 
-    **这一列承载"自带位置的立绘"**（`图@位置`）。`compose_stage_extra`
-    不再重复写它——两者必须严格互补，见那里的说明。
+    与 `compose_show_cell` **同源**：`clause` 项（复杂子句 behind/onlayer/…）
+    归「舞台（高级）」列，这里**不含**它们 —— 两列必须严格互补（各写一份
+    就双写，读回来重复）。
 
-    （历史坑：这里曾经 `if item.get('at'): continue`，把带位置的立绘
-    整条跳过，指望「舞台（高级）」列兜底。结果是**位置信息在 Excel
-    往返里直接丢掉**：真实项目 `chapter1_4` 往返掉了 32 条带 `at` 的
-    show，而且和 `compose_stage_extra` 一起构成"两列各写一遍"的双写。
-    一列漏写 + 另一列重复写，是同一个根因的两面。）
+    拆出这个纯函数是为了 M3-2 的**摊列**：`Show` 放第 1 项、`立绘2/立绘3…`
+    各放后面几项。如果摊列另写一套过滤，两处判据迟早漂移。
     """
     parts = []
     for item in _split_show_items(beat.show):
@@ -1682,8 +1772,35 @@ def compose_show_cell(beat: 'Beat') -> str:
             parts.append(line)
             continue
         parts.append(f'{img}@{at}' if at else img)
-    return '; '.join(parts)
+    return parts
 
+
+def compose_show_cell(beat: 'Beat') -> str:
+    """
+    立绘列：`ling happy`；自带位置写 `ling happy@left`。
+
+    **这一列承载"自带位置的立绘"**（`图@位置`）。`compose_stage_extra`
+    不再重复写它——两者必须严格互补，见那里的说明。
+
+    （历史坑：这里曾经 `if item.get('at'): continue`，把带位置的立绘
+    整条跳过，指望「舞台（高级）」列兜底。结果是**位置信息在 Excel
+    往返里直接丢掉**：真实项目 `chapter1_4` 往返掉了 32 条带 `at` 的
+    show，而且和 `compose_stage_extra` 一起构成"两列各写一遍"的双写。
+    一列漏写 + 另一列重复写，是同一个根因的两面。）
+    """
+    return '; '.join(show_cell_parts(beat))
+
+
+
+def hide_cell_parts(beat: 'Beat') -> list:
+    """退场列会写出的**项**（与 `compose_hide_cell` 同源；M3-2 摊列用）。"""
+    parts = []
+    for item in _split_hide_items(beat.hide):
+        img = (item.get('image') or '').strip()
+        if not img:
+            continue
+        parts.append(f"{img}@{item['with']}" if item.get('with') else img)
+    return parts
 
 
 def compose_hide_cell(beat: 'Beat') -> str:
@@ -1695,13 +1812,7 @@ def compose_hide_cell(beat: 'Beat') -> str:
     而两列都写就会各输出一次，读回来变成
     `hide='e@dissolve; e@dissolve'`（实测到的重复退场）。
     """
-    parts = []
-    for item in _split_hide_items(beat.hide):
-        img = (item.get('image') or '').strip()
-        if not img:
-            continue
-        parts.append(f"{img}@{item['with']}" if item.get('with') else img)
-    return '; '.join(parts)
+    return '; '.join(hide_cell_parts(beat))
 
 
 
