@@ -1238,6 +1238,100 @@ def hydrate_from_dsl(beats: list, symbols) -> list:
 
 
 
+class _HydrateAcc:
+    """
+    `_collect_stage_acc` 的累加器（M4 拆 `_hydrate_stage` 时打包）。
+
+    十二个名字里五个是**集合/字典**（原生真迹），其余是这一拍的结构化结果 ——
+    打包成一个对象，循环里不会漏传一个。
+    """
+
+    __slots__ = ('at', 'hide_items', 'native_hide', 'native_raw', 'native_scene', 'native_scene_raw', 'native_show', 'order', 'scene', 'scene_at', 'show_items', 'with_')
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _collect_stage_acc(parsed, beat, symbols, audit, acc) -> None:
+    """
+    把「舞台（高级）」列的每个 op **并进累加器**（M4 从 `_hydrate_stage` 搬出）。
+
+    两条分支：
+      · **原生写法**（`op.native`）：逐字真迹，影子记进 `native_*`，渲染时
+        结构化列要跳过它（真迹由 Stage 自己出）；
+      · **方括号写法**：编译出来的 `show/hide/scene/…` 拆成影子。
+    判定细节与那些"为什么"见循环里的注释 —— 一个字都没改。
+    """
+    # ⚠ 这两行原先是 `_hydrate_stage` 的**局部 import**，循环搬到这儿
+    # 之后必须跟着过来（否则 `NameError: compile_stage is not defined`
+    # —— 判据当场抓到，见 `test_stage_projection`）。
+    from storygraph.story.beat_model import hide_item_part, show_item_part
+    from storygraph.story.dsl import compile_stage
+
+    for op, (_intent, code, status) in zip(
+            parsed.ops, compile_stage(beat.stage, symbols, audit)):
+        if op.native:
+            n_show, n_hide = len(acc.show_items), len(acc.hide_items)
+            _absorb_native(op, acc.show_items, acc.hide_items, acc.order)
+            for it in acc.show_items[n_show:]:
+                part = show_item_part(it)
+                acc.native_show.add(part)
+                # 影子 → 原文：渲染时按**这一条影子的编码**查回来
+                acc.native_raw[('show', part)] = op.raw
+            for it in acc.hide_items[n_hide:]:
+                part = hide_item_part(it)
+                acc.native_hide.add(part)
+                acc.native_raw[('hide', part)] = op.raw
+            head = op.raw.split()[0] if op.raw.split() else ''
+            if head == 'scene':
+                spec, _at, _w = _parse_native_stage_tail(
+                    op.raw[6:].strip())
+                acc.scene = spec or acc.scene
+                acc.scene_at = _at or acc.scene_at
+                acc.with_ = _w or acc.with_
+                if spec:
+                    acc.native_scene = (spec, _at or '')
+                    # 原生 `scene …` 的原文（同 `native_raw`：它得排在
+                    # **自己的 verb 位**上，不能整块拖到舞台尾段）
+                    acc.native_scene_raw = op.raw
+            elif head == 'with' and not acc.with_:
+                parts = op.raw.split()
+                acc.with_ = parts[1] if len(parts) > 1 else ''
+            continue
+
+        if op.verb == 'show':
+            if code.startswith('# TODO'):
+                continue
+            head = code.split(None, 1)[1] if ' ' in code else ''
+            spec, _at, _w = _parse_native_stage_tail(head)
+            if spec:
+                acc.show_items.append({'clause': '', 'image': spec,
+                                   'at': _at or ''})
+            acc.order.append('show')
+        elif op.verb == 'hide':
+            if code.startswith('# TODO'):
+                continue
+            head = code.split(None, 1)[1] if ' ' in code else ''
+            spec, _at, _w = _parse_native_stage_tail(head)
+            if spec:
+                acc.hide_items.append({'image': spec, 'with': _w or ''})
+            acc.order.append('hide')
+        elif op.verb == 'scene':
+            if code.startswith('# TODO'):
+                continue
+            head = code.split(None, 1)[1] if ' ' in code else ''
+            spec, _at, _w = _parse_native_stage_tail(head)
+            acc.scene = spec or acc.scene
+            acc.scene_at = _at or acc.scene_at
+            acc.with_ = _w or acc.with_
+            acc.order.append('scene')
+        elif op.verb == 'with':
+            acc.with_ = acc.with_ or op.with_
+        elif op.verb == 'pause':
+            acc.order.append('raw')
+
+
 def _hydrate_stage(beat, symbols, audit, parse_stage):
     """
     Stage DSL → beat.scene / show / hide / at / with_ / stage_order。
@@ -1255,79 +1349,12 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     from storygraph.story.dsl import compile_stage
 
     parsed = parse_stage(beat.stage)
-    show_items, hide_items, order = [], [], []
-    scene = None
-    at = ''            # 立绘的位置
-    scene_at = ''      # 背景自己的变换
-    with_ = ''
-    #: 原生真迹 → 它在结构化列里留下的影子（用于"只渲染真迹"）
-    native_show, native_hide = set(), set()
-    native_scene = None
-    native_scene_raw = ''
-    #: `(verb, 影子编码) → 原文`（渲染时按条目查回原文，见 `beat_render._stage_lines`）
-    native_raw: dict = {}
+    acc = _HydrateAcc(show_items=[], hide_items=[], order=[], scene=None,
+                       scene_at='', with_='', at='', native_show=set(),
+                       native_hide=set(), native_scene=None,
+                       native_scene_raw='', native_raw={})
 
-    for op, (_intent, code, status) in zip(
-            parsed.ops, compile_stage(beat.stage, symbols, audit)):
-        if op.native:
-            n_show, n_hide = len(show_items), len(hide_items)
-            _absorb_native(op, show_items, hide_items, order)
-            for it in show_items[n_show:]:
-                part = show_item_part(it)
-                native_show.add(part)
-                # 影子 → 原文：渲染时按**这一条影子的编码**查回来
-                native_raw[('show', part)] = op.raw
-            for it in hide_items[n_hide:]:
-                part = hide_item_part(it)
-                native_hide.add(part)
-                native_raw[('hide', part)] = op.raw
-            head = op.raw.split()[0] if op.raw.split() else ''
-            if head == 'scene':
-                spec, _at, _w = _parse_native_stage_tail(
-                    op.raw[6:].strip())
-                scene = spec or scene
-                scene_at = _at or scene_at
-                with_ = _w or with_
-                if spec:
-                    native_scene = (spec, _at or '')
-                    # 原生 `scene …` 的原文（同 `native_raw`：它得排在
-                    # **自己的 verb 位**上，不能整块拖到舞台尾段）
-                    native_scene_raw = op.raw
-            elif head == 'with' and not with_:
-                parts = op.raw.split()
-                with_ = parts[1] if len(parts) > 1 else ''
-            continue
-
-        if op.verb == 'show':
-            if code.startswith('# TODO'):
-                continue
-            head = code.split(None, 1)[1] if ' ' in code else ''
-            spec, _at, _w = _parse_native_stage_tail(head)
-            if spec:
-                show_items.append({'clause': '', 'image': spec,
-                                   'at': _at or ''})
-            order.append('show')
-        elif op.verb == 'hide':
-            if code.startswith('# TODO'):
-                continue
-            head = code.split(None, 1)[1] if ' ' in code else ''
-            spec, _at, _w = _parse_native_stage_tail(head)
-            if spec:
-                hide_items.append({'image': spec, 'with': _w or ''})
-            order.append('hide')
-        elif op.verb == 'scene':
-            if code.startswith('# TODO'):
-                continue
-            head = code.split(None, 1)[1] if ' ' in code else ''
-            spec, _at, _w = _parse_native_stage_tail(head)
-            scene = spec or scene
-            scene_at = _at or scene_at
-            with_ = _w or with_
-            order.append('scene')
-        elif op.verb == 'with':
-            with_ = with_ or op.with_
-        elif op.verb == 'pause':
-            order.append('raw')
+    _collect_stage_acc(parsed, beat, symbols, audit, acc)
 
     # 追加到结构化列已经填好的内容后面（高级列是"补充通道"）。
     #
@@ -1338,30 +1365,30 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     #   · 作者原有的顺序与条数**逐条保留**（`beat.show` 不动）；
     #   · 影子（Stage 列那一份，属于"同一条指令的另一种写法"）只在
     #     结构化列里**没有同款**时才追加。
-    if show_items:
+    if acc.show_items:
         existing = _split_show_items(beat.show)
         have = {show_item_part(it) for it in existing}
-        add = [it for it in show_items
+        add = [it for it in acc.show_items
                if show_item_part(it) and show_item_part(it) not in have]
         if add:
             beat.show = _join_show_items(existing + add, dedup=False)
-    if hide_items:
+    if acc.hide_items:
         existing = _split_hide_items(beat.hide)
         have = {hide_item_part(it) for it in existing}
-        add = [it for it in hide_items
+        add = [it for it in acc.hide_items
                if hide_item_part(it) and hide_item_part(it) not in have]
         if add:
             beat.hide = _join_hide_items(existing + add, dedup=False)
-    if scene is not None:
-        beat.scene = scene
-    if at:
-        beat.at = at
-    if scene_at:
-        beat.scene_at = scene_at
-    if with_:
-        beat.with_ = with_
+    if acc.scene is not None:
+        beat.scene = acc.scene
+    if acc.at:
+        beat.at = acc.at
+    if acc.scene_at:
+        beat.scene_at = acc.scene_at
+    if acc.with_:
+        beat.with_ = acc.with_
     dedup = []
-    for v in order:
+    for v in acc.order:
         if v in ('scene', 'show', 'hide') and v not in dedup:
             dedup.append(v)
     # ⚠ **不许覆盖**已有的 `stage_order`（2026-10-05 修，真实项目 17 处）：
@@ -1386,11 +1413,11 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
 
     # 记下"原生真迹"的影子：渲染时结构化列要跳过它们（真迹由 Stage 自己出）。
     # 放在最后而不是逐条赋值，是为了让"没原生指令"时也能把上一轮残留清掉。
-    for attr, val in (('_stage_native_show', frozenset(native_show)),
-                      ('_stage_native_hide', frozenset(native_hide)),
-                      ('_stage_native_scene', native_scene),
-                      ('_stage_native_scene_raw', native_scene_raw),
-                      ('_stage_native_raw', native_raw)):
+    for attr, val in (('_stage_native_show', frozenset(acc.native_show)),
+                      ('_stage_native_hide', frozenset(acc.native_hide)),
+                      ('_stage_native_scene', acc.native_scene),
+                      ('_stage_native_scene_raw', acc.native_scene_raw),
+                      ('_stage_native_raw', acc.native_raw)):
         try:
             setattr(beat, attr, val)
         except Exception:                    # noqa: BLE001
