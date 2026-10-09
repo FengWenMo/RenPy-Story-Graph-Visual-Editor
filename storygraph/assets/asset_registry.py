@@ -1143,6 +1143,280 @@ def _resolve_audio_source(rel, project_root=None, walk=None):
     return None
 
 
+def _reload_tables_and_diff(table_dir, root, walk, assets, tag: str):
+    """
+    删 / 改指 / 合并之后**重新读表并重算对账**（内存里的注册表已经过期）。
+
+    三处一模一样 → 收敛成一处（M4 重构：只为拆复杂度，行为一字不改）。
+    失败只留痕，**返回 `(None, None, None)`**，调用方按"保持原值"处理
+    —— 与从前"except 里什么都不赋"等价。
+    """
+    try:
+        registry = parse_asset_tables(
+            table_dir, hooks=load_hooks(project_root=root),
+            project_root=root, walk=walk)
+        diff = compare_registry_to_disk(root, registry, walk=walk,
+                                        assets=assets)
+        return registry, diff, (diff or {}).get('unregistered') or {}
+    except Exception as e:                      # noqa: BLE001
+        swallow(f'assets.asset_registry.sync_asset_tables.{tag}', e)
+        return None, None, None
+
+
+#: 资源表里"按文件一一对应"的四类（舞台/音频之外的都归这里）。
+_ASSET_KINDS = ('images', 'music', 'sounds', 'voices')
+
+
+def _junk_nested_paths(rows, mine_paths, nested_pref) -> list:
+    """
+    工具自己加过、**却指向嵌套副本**的那些 `Path`（纯函数）。
+
+    "嵌套副本"= 项目根下另有一份带 `game/` 的树（`walk.nested_prefixes()`）。
+    那些文件不属于本项目资源；行却是工具自己补登的（侧车记着）→ 该删。
+    用户**自己写的**行不在此列（不在侧车里就不动）。
+    """
+    mine = {norm_asset_path(p) for p in (mine_paths or [])}
+    if not mine or not nested_pref:
+        return []
+    out = []
+    for _aid, row in (rows or {}).items():
+        rel = str((row or {}).get('Path') or '')
+        low = norm_asset_path(rel)
+        if low in mine and any(low.startswith(p) for p in nested_pref):
+            out.append(rel)
+    return out
+
+
+def _missing_paths(rows, skip, kind_key, walk, root) -> list:
+    """
+    `Path` 解析不到真实文件的行（纯查询；人工占位行豁免）。
+
+    `skip` 是"上面已经删过的"（不重复报）。
+    """
+    from storygraph.story.excel_export import resolve_thumb_source
+
+    out = []
+    for _aid, row in (rows or {}).items():
+        rel = str((row or {}).get('Path') or '').strip()
+        if not rel or is_placeholder_row(row):
+            continue                            # 占位：允许没有文件
+        if rel in skip:
+            continue                            # 上面已经删了
+        if walk is not None:
+            real = walk.match(rel)
+        elif kind_key == 'images':
+            real = resolve_thumb_source(rel, root)
+        else:
+            real = _resolve_audio_source(rel, root)
+        if real is None:
+            out.append(rel)
+    return out
+
+
+def _sync_prune_stage(root, table_dir, registry, walk):
+    """
+    ❶ **自动删**：`Path` 解析不到真实文件的行跟着走。
+
+    两个例外（与用户 2026-10-05 的定案一致）：
+      · **人工占位**（`Notes`/`Doc` 写了占位…）留着；
+      · **工具自己加过、却指向"嵌套副本"** 的行一并删（只有侧车记着我加过的才删）。
+
+    返回 `(removed_by_kind, index, added_paths)`；顺手把删掉的从侧车摘掉。
+    """
+    index = _read_autoscan_index(table_dir)
+    added = index.get('added') or {}
+    removed_by_kind = {}
+    nested_pref = walk.nested_prefixes() if walk is not None else set()
+    for kind_key in _ASSET_KINDS:
+        rows = ((getattr(registry, kind_key, {}) or {})
+                if registry is not None else {})
+        if not rows:
+            continue
+        # ② 工具加过、却指向嵌套副本的行（判据见 `_junk_nested_paths`）
+        junk_nested = _junk_nested_paths(rows, added.get(kind_key),
+                                         nested_pref)
+        if junk_nested:
+            n = delete_rows_from_table(table_dir, kind_key, junk_nested,
+                                       backup=True)
+            if n:
+                removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
+                dead = set(junk_nested)
+                added[kind_key] = [p for p in (added.get(kind_key) or [])
+                                   if p not in dead]
+        gone = _missing_paths(rows, set(junk_nested), kind_key, walk, root)
+        if not gone:
+            continue
+        n = delete_rows_from_table(table_dir, kind_key, gone, backup=True)
+        if n:
+            removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
+        if added.get(kind_key):
+            dead = set(gone)
+            added[kind_key] = [p for p in added[kind_key] if p not in dead]
+    index['added'] = added
+    return removed_by_kind, index, added
+
+
+def _sync_relink_stage(root, table_dir, registry, walk):
+    """
+    ❷ **改指**：表里的行指向**嵌套副本**，而同一个资源在本项目 `game/` 里也有
+    一份 → 把 `Path` 改指到本项目里的那一份。
+
+    只有当 `walk` 认得嵌套前缀时才做（否则无从判断"副本"）。
+    ⚠ 判据用**路径尾巴**、不能用 ID（表里老行的 ID 是 `_base` 这种，扫出来是
+    `base`，对不上 —— 实测）。
+    """
+    relinked_by_kind = {}
+    game_dir = root / 'game'
+    if walk is None or not walk.nested_prefixes():
+        return relinked_by_kind
+    for kind_key in _ASSET_KINDS:
+        table_rows = ((getattr(registry, kind_key, {}) or {})
+                      if registry is not None else {})
+        if not table_rows:
+            continue
+        updates = {}
+        for aid, row in table_rows.items():
+            rel = str((row or {}).get('Path') or '').strip().replace('\\', '/')
+            if not rel or not walk.is_nested(rel):
+                continue
+            parts = [p for p in rel.split('/') if p not in ('', '.')]
+            cand = None
+            for i in range(1, len(parts)):       # 逐段剥前缀，找 `game/…`
+                probe = '/'.join(parts[i:])
+                if probe.lower().startswith('game/'):
+                    cand = probe
+                    break
+            if not cand:
+                continue
+            new_real = walk.match(cand)
+            if new_real is None:
+                continue                         # 本项目里没有这一份：不动
+            try:
+                Path(new_real).relative_to(game_dir)
+            except ValueError:
+                continue
+            updates[str(aid)] = cand
+        if updates:
+            n = update_table_paths(table_dir, kind_key, updates, backup=True)
+            if n:
+                relinked_by_kind[kind_key] = n
+    return relinked_by_kind
+
+
+def _sync_dedupe_stage(table_dir, registry):
+    """
+    ❸ **同一文件只留一行**：改指之后"原本指副本的那行"与"原本指本项目的那行"
+    会指向同一个文件 → 必须合并，否则"一一对应"反过来被破坏（实测改指 1386 行
+    会产生 ~1390 行重复）。占位行不动（它没有文件）。
+    """
+    deduped_by_kind = {}
+    for kind_key in _ASSET_KINDS:
+        rows = ((getattr(registry, kind_key, {}) or {})
+                if registry is not None else {})
+        if not rows:
+            continue
+        seen = {}
+        drop_ids = []
+        for aid, row in rows.items():
+            if is_placeholder_row(row):
+                continue                        # 占位行不动（它没有文件）
+            key = norm_asset_path((row or {}).get('Path'))
+            if not key:
+                continue
+            prev = seen.get(key)
+            if prev is None:
+                seen[key] = (aid, row)
+                continue
+            keep, drop = _prefer_row(prev, (aid, row))
+            seen[key] = keep
+            drop_ids.append(str(drop[0]))
+        if not drop_ids:
+            continue
+        n = delete_rows_by_id(table_dir, kind_key, drop_ids, backup=True)
+        if n:
+            deduped_by_kind[kind_key] = n
+    return deduped_by_kind
+
+
+def _sync_append_stage(root, table_dir, assets, unreg, diff, walk, added):
+    """
+    ❹ **补登**：磁盘上有、表里没有的 → 追加（`append_rows_to_table`），并记进
+    侧车（以后归工具管）。返回 `(added_by_kind, backup_names)`。
+
+    ⚠ **按解析后的真实文件判重**（不是按字符串）：表里可能写
+    `music/night.ogg`，扫出来是 `game/music/night.ogg` —— 字符串不等但是
+    同一个文件；只比字符串会给它写第二行（实测）。
+    """
+    from storygraph.story.excel_export import resolve_thumb_source
+
+    rows_by_kind = {
+        'images': assets.get('images') or [],
+        'music': (assets.get('audio') or {}).get('music') or [],
+        'sounds': (assets.get('audio') or {}).get('sound') or [],
+        'voices': assets.get('voices') or [],
+    }
+    have_resolved = (diff or {}).get('table_resolved') or {}
+    added_by_kind = {}
+    backups = []
+    for kind_key, missing_paths in unreg.items():
+        want = {norm_asset_path(p) for p in (missing_paths or []) if p}
+        rows = [r for r in rows_by_kind.get(kind_key) or []
+                if norm_asset_path(r.get('Path')) in want]
+        if not rows:
+            continue
+        already = set(have_resolved.get(kind_key) or ())
+        keep = []
+        for r in rows:
+            if walk is not None:
+                real = walk.match(r.get('Path'))
+            elif kind_key != 'images':
+                real = _resolve_audio_source(r.get('Path'), root)
+            else:
+                real = resolve_thumb_source(r.get('Path'), root)
+            if real is not None and str(Path(real).resolve()) in already:
+                continue                         # 这个文件已经在表里了
+            keep.append(r)
+        if not keep:
+            continue
+        n = append_rows_to_table(table_dir, kind_key, keep,
+                                 skip_paths=set(), backup=True)
+        if n:
+            added_by_kind[kind_key] = n
+            added.setdefault(kind_key, [])
+            for r in keep:
+                rp = str(r.get('Path') or '')
+                if rp and rp not in added[kind_key]:
+                    added[kind_key].append(rp)   # 记进侧车：以后归我管
+            bak = table_dir / (Path(_STANDARD_TABLES[kind_key]).stem
+                               + '.bak.xlsx')
+            if bak.is_file():
+                backups.append(bak.name)
+    return added_by_kind, backups
+
+
+def _sync_report(*, table_dir, registry, diff, repaired, repair_error,
+                 removed_by_kind=None, relinked_by_kind=None,
+                 deduped_by_kind=None, added_by_kind=None, backup: str = ''):
+    """带"删/改指/合并/补登"四项统计的返回体（原先两处各写一遍）。"""
+    removed_by_kind = removed_by_kind or {}
+    relinked_by_kind = relinked_by_kind or {}
+    deduped_by_kind = deduped_by_kind or {}
+    added_by_kind = added_by_kind or {}
+    return {'ok': True, 'created': '', 'table_dir': str(table_dir),
+            'added': sum(added_by_kind.values()), 'by_kind': added_by_kind,
+            'removed': sum(removed_by_kind.values()),
+            'removed_by_kind': removed_by_kind,
+            'relinked': sum(relinked_by_kind.values()),
+            'relinked_by_kind': relinked_by_kind,
+            'deduped': sum(deduped_by_kind.values()),
+            'deduped_by_kind': deduped_by_kind,
+            'backup': backup,
+            'unusable': _unusable_summary(registry),
+            'scanned': (diff or {}).get('disk') or {},
+            'reconcile': diff or {}, 'repaired': repaired,
+            'repair_error': repair_error, 'registry': registry}
+
+
 def sync_asset_tables(project_root, registry=None, asset_dir=None,
                       auto_append: bool = True, walk=None) -> dict:
     """
@@ -1229,173 +1503,47 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     #     用户明说"这个还没有出图"，见上一轮那条"这个允许"；
     #   · 删之前一定备份 `*.bak.xlsx`；删不掉（例如表在 Excel 里锁着）就
     #     退回"标为不可用"，并在结果里报出来（`unusable`）。
-    index = _read_autoscan_index(table_dir)
-    added_paths = index.get('added') or {}
-    removed_by_kind = {}
-    kind_attr = {'images': 'images', 'music': 'music',
-                 'sounds': 'sounds', 'voices': 'voices'}
-    nested_pref = walk.nested_prefixes() if walk is not None else set()
-    for kind_key in ('images', 'music', 'sounds', 'voices'):
-        rows = ((getattr(registry, kind_attr[kind_key], {}) or {})
-                if registry is not None else {})
-        if not rows:
-            continue
-        # ② **工具自己加过的、却指向"嵌套副本"的行**：那是"项目里的另一份
-        # 拷贝"，不是项目资源 —— 一并删掉（用户的 1386 行**自己写的**不在此列：
-        # 只有侧车记着我加过的才删）。实测这些行的 ID 会编成 `ling_angry`
-        # 这种"tag_attribute"写法，去跟真立绘抢解析。
-        mine = {norm_asset_path(p) for p in (added_paths.get(kind_key) or [])}
-        junk_nested = []
-        if mine and nested_pref:
-            for _aid, row in rows.items():
-                rel = str((row or {}).get('Path') or '')
-                low = norm_asset_path(rel)
-                if low in mine and any(low.startswith(p) for p in nested_pref):
-                    junk_nested.append(rel)
-        if junk_nested:
-            n = delete_rows_from_table(table_dir, kind_key, junk_nested,
-                                       backup=True)
-            if n:
-                removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
-                dead = set(junk_nested)
-                added_paths[kind_key] = [p for p in (added_paths.get(kind_key)
-                                                     or []) if p not in dead]
-        gone = []
-        for _aid, row in rows.items():
-            rel = str((row or {}).get('Path') or '').strip()
-            if not rel or is_placeholder_row(row):
-                continue                        # 占位：允许没有文件
-            if rel in junk_nested:
-                continue                        # 上面已经删了
-            if walk is not None:
-                real = walk.match(rel)
-            elif kind_key == 'images':
-                real = resolve_thumb_source(rel, root)
-            else:
-                real = _resolve_audio_source(rel, root)
-            if real is None:
-                gone.append(rel)
-        if not gone:
-            continue
-        n = delete_rows_from_table(table_dir, kind_key, gone, backup=True)
-        if n:
-            removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
-        if added_paths.get(kind_key):
-            dead = set(gone)
-            added_paths[kind_key] = [p for p in added_paths[kind_key]
-                                     if p not in dead]
+    # —— ❶ **自动删**：文件没了的行，跟着走 ——
+    #
+    # 用户 2026-10-05（看到"表里有 11 行指向的文件已经不在 → 已标为不可用"之后）：
+    #
+    # > 已经不在那这个东西实际上不需要啦！你自己自动删改表即可！
+    # > 之前就说表跟资源一一对应！如果不可用直接删了就行！
+    #
+    # 两个例外（人工占位留着；工具加过又指向嵌套副本的删掉）与备份规矩
+    # 都在 `_sync_prune_stage` 里 —— 这里只负责编排（M4 重构）。
+    removed_by_kind, index, added_paths = _sync_prune_stage(
+        root, table_dir, registry, walk)
     if removed_by_kind:
-        index['added'] = added_paths
         _write_autoscan_index(table_dir, index)
         # 删完要重新读表（内存里的注册表也过期了）
-        try:
-            registry = parse_asset_tables(
-                table_dir, hooks=load_hooks(project_root=root),
-                project_root=root, walk=walk)
-            diff = compare_registry_to_disk(root, registry, walk=walk,
-                                            assets=assets)
-            unreg = (diff or {}).get('unregistered') or {}
-        except Exception as e:                  # noqa: BLE001
-            swallow('assets.asset_registry.sync_asset_tables.reload', e)
+        _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
+                                             'reload')
+        if _r is not None:
+            registry, diff, unreg = _r, _d, _u
 
-    # —— ❷ **改指**：表里的行指向**嵌套副本**，而同一个资源在本项目
-    # `game/` 里也有一份 → 把 `Path` 改指到本项目里的那一份 ——
+    # —— ❷ **改指** + ❸ **合并重复** ——
     #
-    # 为什么现在才敢自动做：上一版试过，结果跟"自动补登"**打架**（ping-pong：
-    # 改指之后副本文件变成"未登记"→ 补登又加回来，未登记 239 → 1644）。
-    # 现在 `scan_assets` 已经把嵌套副本**排除在项目资源之外**，补登不会再碰
-    # 它们 —— 两条规则终于共用同一个"什么算项目资源"的定义。
+    # （为什么现在才敢自动改指：上一版试过，结果跟"自动补登"**打架** ——
+    #  ping-pong：改指之后副本文件变成"未登记"→ 补登又加回来，未登记
+    #  239 → 1644。现在 `scan_assets` 已经把嵌套副本**排除在项目资源之外**，
+    #  两条规则终于共用同一个"什么算项目资源"的定义。）
     #
-    # ⚠ 判据用**路径尾巴**，不能用 ID：表里老行的 ID 是 `_base` 这种，
-    # 扫出来却是 `base`，对不上（实测）。
-    relinked_by_kind = {}
-    deduped_by_kind = {}
-    game_dir = root / 'game'
+    # 两步都只在 `walk` 认得嵌套前缀时才做；判据与实现见各自的阶段函数
+    # （M4 重构：只为拆复杂度，行为一字不改）。
+    relinked_by_kind = _sync_relink_stage(root, table_dir, registry, walk)
+    if relinked_by_kind:
+        _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
+                                            'relink')
+        if _r is not None:
+            registry, diff, unreg = _r, _d, _u
     if walk is not None and walk.nested_prefixes():
-        for kind_key, attr in (('images', 'images'), ('music', 'music'),
-                               ('sounds', 'sounds'), ('voices', 'voices')):
-            table_rows = ((getattr(registry, attr, {}) or {})
-                          if registry is not None else {})
-            if not table_rows:
-                continue
-            updates = {}
-            for aid, row in table_rows.items():
-                rel = str((row or {}).get('Path') or '').strip() \
-                    .replace('\\', '/')
-                if not rel or not walk.is_nested(rel):
-                    continue
-                parts = [p for p in rel.split('/') if p not in ('', '.')]
-                cand = None
-                for i in range(1, len(parts)):   # 逐段剥前缀，找 `game/…`
-                    probe = '/'.join(parts[i:])
-                    if probe.lower().startswith('game/'):
-                        cand = probe
-                        break
-                if not cand:
-                    continue
-                new_real = walk.match(cand)
-                if new_real is None:
-                    continue                     # 本项目里没有这一份：不动
-                try:
-                    Path(new_real).relative_to(game_dir)
-                except ValueError:
-                    continue
-                updates[str(aid)] = cand
-            if updates:
-                n = update_table_paths(table_dir, kind_key, updates,
-                                       backup=True)
-                if n:
-                    relinked_by_kind[kind_key] = n
-        if relinked_by_kind:
-            try:
-                registry = parse_asset_tables(
-                    table_dir, hooks=load_hooks(project_root=root),
-                    project_root=root, walk=walk)
-                diff = compare_registry_to_disk(root, registry, walk=walk,
-                                                assets=assets)
-                unreg = (diff or {}).get('unregistered') or {}
-            except Exception as e:              # noqa: BLE001
-                swallow('assets.asset_registry.sync_asset_tables.relink', e)
-        # —— ❸ **同一文件只留一行**：改指之后"原本指副本的那行"与"原本指
-        # 本项目的那行"会指向同一个文件 → 必须合并成一行，否则"一一对应"
-        # 反过来被破坏（实测改指 1386 行会产生 ~1390 行重复）。
-        deduped_by_kind = {}
-        for kind_key, attr in (('images', 'images'), ('music', 'music'),
-                               ('sounds', 'sounds'), ('voices', 'voices')):
-            rows = ((getattr(registry, attr, {}) or {})
-                    if registry is not None else {})
-            if not rows:
-                continue
-            seen = {}
-            drop_ids = []
-            for aid, row in rows.items():
-                if is_placeholder_row(row):
-                    continue                    # 占位行不动（它没有文件）
-                key = norm_asset_path((row or {}).get('Path'))
-                if not key:
-                    continue
-                prev = seen.get(key)
-                if prev is None:
-                    seen[key] = (aid, row)
-                    continue
-                keep, drop = _prefer_row(prev, (aid, row))
-                seen[key] = keep
-                drop_ids.append(str(drop[0]))
-            if not drop_ids:
-                continue
-            n = delete_rows_by_id(table_dir, kind_key, drop_ids, backup=True)
-            if n:
-                deduped_by_kind[kind_key] = n
+        deduped_by_kind = _sync_dedupe_stage(table_dir, registry)
         if deduped_by_kind:
-            try:
-                registry = parse_asset_tables(
-                    table_dir, hooks=load_hooks(project_root=root),
-                    project_root=root, walk=walk)
-                diff = compare_registry_to_disk(root, registry, walk=walk,
-                                                assets=assets)
-                unreg = (diff or {}).get('unregistered') or {}
-            except Exception as e:              # noqa: BLE001
-                swallow('assets.asset_registry.sync_asset_tables.dedupe', e)
+            _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
+                                                 'dedupe')
+            if _r is not None:
+                registry, diff, unreg = _r, _d, _u
     else:
         deduped_by_kind = {}
 
@@ -1403,85 +1551,29 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
         baks = sorted({p.name for p in table_dir.glob('*.bak.xlsx')}
                       & {Path(_STANDARD_TABLES[k]).stem + '.bak.xlsx'
                          for k in removed_by_kind})
-        return {'ok': True, 'created': '', 'table_dir': str(table_dir),
-                'added': 0, 'by_kind': {}, 'removed':
-                    sum(removed_by_kind.values()),
-                'removed_by_kind': removed_by_kind,
-                'backup': '、'.join(baks),
-                'unusable': _unusable_summary(registry),
-                'relinked': sum(relinked_by_kind.values()),
-                'relinked_by_kind': relinked_by_kind,
-                'deduped': sum(deduped_by_kind.values()),
-                'deduped_by_kind': deduped_by_kind,
-                'scanned': (diff or {}).get('disk') or {},
-                'reconcile': diff or {}, 'repaired': repaired,
-                'repair_error': repair_error, 'registry': registry}
+        return _sync_report(table_dir=table_dir, registry=registry,
+                            diff=diff, repaired=repaired,
+                            repair_error=repair_error,
+                            removed_by_kind=removed_by_kind,
+                            relinked_by_kind=relinked_by_kind,
+                            deduped_by_kind=deduped_by_kind,
+                            backup='、'.join(baks))
 
     # （`assets` 已经在上面扫过一次了，这里直接用 —— 别再扫第二遍。）
-    rows_by_kind = {
-        'images': assets.get('images') or [],
-        'music': (assets.get('audio') or {}).get('music') or [],
-        'sounds': (assets.get('audio') or {}).get('sound') or [],
-        'voices': assets.get('voices') or [],
-    }
-    have_resolved = (diff or {}).get('table_resolved') or {}
-    added_by_kind = {}
-    backups = []
-    for kind_key, missing_paths in unreg.items():
-        want = {norm_asset_path(p) for p in (missing_paths or []) if p}
-        rows = [r for r in rows_by_kind.get(kind_key) or []
-                if norm_asset_path(r.get('Path')) in want]
-        if not rows:
-            continue
-        # ⚠ **按解析后的真实文件判重**（不是按字符串）。
-        #
-        # 表里可能是 `music/night.ogg`，而扫出来的是 `game/music/night.ogg`
-        # —— 字符串不等但是**同一个文件**。只比字符串就会给它写第二行
-        # （实测：`ui_project` 的夹具里 `night` 与 `bgm_night` 同时存在 →
-        #  `play music` 渲染成另一个写法 → 增量补丁对不上原文而整份拒绝）。
-        already = set(have_resolved.get(kind_key) or ())
-        keep = []
-        for r in rows:
-            if walk is not None:
-                real = walk.match(r.get('Path'))
-            elif kind_key != 'images':
-                real = _resolve_audio_source(r.get('Path'), root)
-            else:
-                real = resolve_thumb_source(r.get('Path'), root)
-            if real is not None and str(Path(real).resolve()) in already:
-                continue                     # 这个文件已经在表里了
-            keep.append(r)
-        if not keep:
-            continue
-        n = append_rows_to_table(table_dir, kind_key, keep,
-                                 skip_paths=set(), backup=True)
-        if n:
-            added_by_kind[kind_key] = n
-            added_paths.setdefault(kind_key, [])
-            for r in keep:
-                rp = str(r.get('Path') or '')
-                if rp and rp not in added_paths[kind_key]:
-                    added_paths[kind_key].append(rp)   # 记进侧车：以后归我管
-            bak = table_dir / (Path(_STANDARD_TABLES[kind_key]).stem
-                               + '.bak.xlsx')
-            if bak.is_file():
-                backups.append(bak.name)
+    # ❹ **补登**：磁盘上有、表里没有的 → 追加 + 记侧车。判重按**解析后的
+    # 真实文件**（不是按字符串）—— 细节都在 `_sync_append_stage`（M4 重构）。
+    added_by_kind, backups = _sync_append_stage(
+        root, table_dir, assets, unreg, diff, walk, added_paths)
     if added_by_kind:
         index['added'] = added_paths
         _write_autoscan_index(table_dir, index)
-    return {'ok': True, 'created': '', 'table_dir': str(table_dir),
-            'added': sum(added_by_kind.values()), 'by_kind': added_by_kind,
-            'removed': sum(removed_by_kind.values()),
-            'removed_by_kind': removed_by_kind,
-            'relinked': sum(relinked_by_kind.values()),
-            'relinked_by_kind': relinked_by_kind,
-            'deduped': sum(deduped_by_kind.values()),
-            'deduped_by_kind': deduped_by_kind,
-            'backup': '、'.join(sorted(set(backups))),
-            'unusable': _unusable_summary(registry),
-            'scanned': (diff or {}).get('disk') or {},
-            'reconcile': diff or {}, 'repaired': repaired,
-            'repair_error': repair_error, 'registry': registry}
+    return _sync_report(table_dir=table_dir, registry=registry, diff=diff,
+                        repaired=repaired, repair_error=repair_error,
+                        removed_by_kind=removed_by_kind,
+                        relinked_by_kind=relinked_by_kind,
+                        deduped_by_kind=deduped_by_kind,
+                        added_by_kind=added_by_kind,
+                        backup='、'.join(sorted(set(backups))))
 
 
 def _unusable_summary(registry) -> dict:
