@@ -627,6 +627,241 @@ def _is_scan_noise(filename: str) -> bool:
     return False
 
 
+def _scan_result(images, music, sound, voices) -> dict:
+    """`scan_assets` 的返回形状（原先四处各写一遍）。"""
+    return {
+        'images': list(images or []),
+        'audio': {'music': list(music or []), 'sound': list(sound or [])},
+        'voices': list(voices or []),
+    }
+
+
+def _music_row(stem: str, rel_posix: str) -> dict:
+    """音乐行（`bgm_` 前缀只补一次 —— 原来两处各写一遍，必须一致）。"""
+    return {'ID': f"bgm_{stem}" if not stem.startswith('bgm_') else stem,
+            'Path': rel_posix, 'Loop': True, 'Volume': 1.0, 'Notes': ''}
+
+
+def _sound_row(stem: str, rel_posix: str) -> dict:
+    """音效行（同上，`sfx_` 前缀只补一次）。"""
+    return {'ID': f"sfx_{stem}" if not stem.startswith('sfx_') else stem,
+            'Path': rel_posix, 'Notes': ''}
+
+
+def _is_under_any(file: Path, dirs) -> bool:
+    """`file` 是否落在 `dirs` 里任一目录下（语音目录单独扫过时用它去重）。"""
+    for d in dirs:
+        try:
+            file.relative_to(d)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _scan_images(items, include_ui, existing_image_ids) -> list:
+    """
+    图片扫描：扩展名/噪声/跳过目录/UI 过滤 → 归类 → tag → 唯一 ID。
+
+    ⚠ **tag 只有一个真源** = `_detect_image_tag`（2026-10-05 修）。
+    这里从前对 `category == 'character'` 另写了一套内联逻辑（找"含
+    character/char/sprite… 关键词的目录段"），于是：
+      `game/images/eileen/happy.png`（**没有** `characters/` 容器，最常见的
+      立绘布局）走的是内联那套 → 找不到关键词 → tag 退成文件名首段 `happy`
+      → 脚本里的 `show eileen happy` 解析不到它 → 整组立绘被报"未使用"。
+    两套实现必然漂移，所以直接把内联那套删掉。
+    """
+    out = []
+    for rel_low, file in items:
+        if file.suffix.lower() not in SUPPORTED_IMAGE_EXT:
+            continue
+        if _is_scan_noise(file.name):
+            continue
+        rel_path = Path(rel_low)
+        rel_str = rel_low
+
+        if _under_skip_dir(rel_path):
+            continue                            # tmp/ 之类的目录不是素材
+
+        if not include_ui:
+            if any(kw in rel_str
+                   for kw in ('gui', 'ui', 'dutui', 'interface', 'system')):
+                continue
+
+        category = _detect_category(rel_path)
+        parent_dirs = [Path(seg).name for seg in rel_low.split('/')[:-1]]
+        tag = _detect_image_tag(file, rel_path, category)
+        attributes = file.stem
+        unique_id = _make_unique_id(file.stem, parent_dirs, existing_image_ids)
+        out.append({
+            'ID': unique_id,
+            'Path': rel_path.as_posix(),
+            'Tag': tag,
+            'Attributes': attributes,
+            'Category': category,
+            'Notes': '',
+        })
+    return out
+
+
+def _scan_audio_from_index(items):
+    """
+    **有 `walk` 时音频全程从那一份索引里取**（一次遍历）：目录探测与文件枚举
+    都不再各走一遍树。返回 `(music, sound, voices)`。
+
+    语音目录（任意深度的 `voice/` / `voices/`）单独收，不混进音效候选。
+    """
+    music, sound, voices = [], [], []
+    for rel_low, file in items:
+        if file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
+            continue
+        if _is_scan_noise(file.name):
+            continue
+        rel_path = Path(rel_low)
+        if _under_skip_dir(rel_path):
+            continue
+        stem = file.stem
+        if any(p.lower() in ('voice', 'voices')
+               for p in rel_path.parts[:-1]):
+            voices.append({'ID': stem, 'Path': rel_path.as_posix(),
+                           'Notes': ''})
+            continue
+        if _classify_audio(rel_path) == 'music':
+            music.append(_music_row(stem, rel_path.as_posix()))
+        else:
+            sound.append(_sound_row(stem, rel_path.as_posix()))
+    return music, sound, voices
+
+
+def _scan_audio_from_dirs(audio_dirs, scan_root, voice_dirs) -> tuple:
+    """没给 `walk` 时的音频扫描（按目录列表 rglob）。返回 `(music, sound)`。"""
+    voice_resolved = [Path(d) for d in voice_dirs]
+    music, sound = [], []
+    for adir in audio_dirs:
+        adir = Path(adir)
+        if not adir.exists():
+            continue
+        for file in adir.rglob('*'):
+            if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
+                continue
+            if _is_scan_noise(file.name):
+                continue
+            if _path_under_skip_dir(file, adir):
+                continue
+            # 语音目录已经单独扫过，别再把同一个文件当作音效收一遍
+            if _is_under_any(file, voice_resolved):
+                continue
+            try:
+                rel_path = file.relative_to(scan_root)
+            except ValueError:
+                rel_path = file
+            stem = file.stem
+            if _classify_audio(rel_path) == 'music':
+                music.append(_music_row(stem, rel_path.as_posix()))
+            else:
+                sound.append(_sound_row(stem, rel_path.as_posix()))
+    return music, sound
+
+
+def _scan_voices_from_dirs(voice_dirs, scan_root) -> list:
+    """语音扫描（独立目录，不与音效混）。"""
+    out = []
+    for vdir in voice_dirs:
+        vdir = Path(vdir)
+        if not vdir.exists():
+            continue
+        for file in vdir.rglob('*'):
+            if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
+                continue
+            if _is_scan_noise(file.name):
+                continue
+            if _path_under_skip_dir(file, vdir):
+                continue
+            try:
+                rel_path = file.relative_to(scan_root)
+            except ValueError:
+                rel_path = file
+            out.append({'ID': file.stem, 'Path': rel_path.as_posix(),
+                        'Notes': ''})
+    return out
+
+
+def _detect_audio_dirs(scan_root) -> list:
+    """
+    音频目录自动探测：按**目录名**在任意深度认（`sfx` / `se` 这类写法也认）。
+
+    要同时看项目根和 Ren'Py 的 `game/` 目录 —— 真实项目里音频在
+    `game/audio/`、`game/music/`，只探根目录会全部漏掉，于是退化成
+    "整棵树 rglob"，全靠文件名猜音乐还是音效。
+
+    ⚠ 2026-10-05 实测修：以前这里只探**写死的几个名字**（`audio` / `music` /
+    `sounds` / `bgm`，且只在根与 `game/` 两层）—— 用户项目里
+    `game/gui/sfx/*.wav`（8 个音效）和 `game/pomodorro/music/*`（7 个音乐，
+    嵌在子模块里）**根本没进目录列表**，于是 49 个音频文件只扫出 34 个、
+    「音效 0」。认不到任何目录时才退回"整棵树"。
+    """
+    known = {'audio', 'music', 'bgm', 'sound', 'sounds', 'sfx', 'se',
+             'voice', 'voices'}
+    found = []
+    try:
+        for d in scan_root.rglob('*'):
+            try:
+                if d.is_dir() and d.name.lower() in known:
+                    found.append(d)
+            except OSError:
+                continue
+    except OSError as e:                    # noqa: BLE001 - 目录读不动就算了
+        swallow('assets.asset_registry.scan_assets.audio_dirs', e)
+    return found if found else [scan_root]
+
+
+def _detect_voice_dirs(scan_root) -> list:
+    """语音目录自动探测（语音常独立存放，不应混进音效候选）。"""
+    vcands = []
+    for base in (scan_root, scan_root / 'game'):
+        vcands += [base / 'voice', base / 'audio' / 'voice',
+                   base / 'voices', base / 'sound' / 'voice']
+    # 任意深度的 `voice/` / `voices/` 也算（`game/pomodorro/voice/` 这种）
+    known_voice = {'voice', 'voices'}
+    try:
+        for d in scan_root.rglob('*'):
+            try:
+                if d.is_dir() and d.name.lower() in known_voice:
+                    vcands.append(d)
+            except OSError:
+                continue
+    except OSError as e:                    # noqa: BLE001
+        swallow('assets.asset_registry.scan_assets.voice_dirs', e)
+    return [d for d in vcands if d.exists()]
+
+
+def _scan_file_items(scan_root, walk) -> list:
+    """
+    枚举 `(相对小写路径, Path)` —— 有索引走索引（**一次遍历**），否则自己 rglob。
+
+    ⚠ 用索引里**已经算好的相对路径**，别再逐文件 `Path.relative_to()`：
+    Windows 上一次 relative_to 要 0.34 ms，3273 张图实测 **2.3 秒**。
+    排序是为了**确定性**（遍历顺序随目录栈而变；同名文件靠
+    `_make_unique_id` 编后缀时，顺序不稳就会得到不同的 ID）。
+
+    ⚠⚠ **嵌套副本不算项目资源**（`sr_general/game/…`）：把它们扫进来会编出
+    `ling_angry` 这种 ID 去跟真正的"tag_attribute"抢解析，实测直接导致
+    "立绘不显示 + 表情调不了"。
+    """
+    if walk is not None:
+        return sorted(((rel, p) for rel, p in walk.files().items()
+                       if not walk.is_nested(rel)), key=lambda kv: kv[0])
+    items = []
+    for p in scan_root.rglob('*'):
+        if not p.is_file():
+            continue
+        try:
+            items.append((p.relative_to(scan_root).as_posix().lower(), p))
+        except ValueError:
+            continue
+    return items
+
+
 def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 voice_dirs=None, walk=None) -> dict:
     """
@@ -669,221 +904,38 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
     # ⚠ 有 `walk` 时这两段探测**整个跳过**：走索引那条路按**目录段名**判类型
     # （`_classify_audio` + `voice/` 段名），根本不需要目录列表；而这两个
     # `rglob` 在真实项目要白跑 1.9 秒（用户："太卡了"）。
+    # 音频/语音目录探测；⚠ 有 `walk` 时**整个跳过**：走索引那条路按
+    # **目录段名**判类型（`_classify_audio` + `voice/` 段名），不需要目录
+    # 列表；而这两个 `rglob` 在真实项目要白跑 1.9 秒（用户："太卡了"）。
     if audio_dirs is None and walk is None:
-        known = {'audio', 'music', 'bgm', 'sound', 'sounds', 'sfx', 'se',
-                 'voice', 'voices'}
-        found = []
-        try:
-            for d in scan_root.rglob('*'):
-                try:
-                    if d.is_dir() and d.name.lower() in known:
-                        found.append(d)
-                except OSError:
-                    continue
-        except OSError as e:                    # noqa: BLE001 - 目录读不动就算了
-            swallow('assets.asset_registry.scan_assets.audio_dirs', e)
-        audio_dirs = found if found else [scan_root]
-
-    # 语音目录自动探测（语音常独立存放，不应混进音效候选）
+        audio_dirs = _detect_audio_dirs(scan_root)
     if voice_dirs is None and walk is None:
-        vcands = []
-        for base in (scan_root, scan_root / 'game'):
-            vcands += [base / 'voice', base / 'audio' / 'voice',
-                       base / 'voices', base / 'sound' / 'voice']
-        # 任意深度的 `voice/` / `voices/` 也算（`game/pomodorro/voice/` 这种）
-        known_voice = {'voice', 'voices'}
-        try:
-            for d in scan_root.rglob('*'):
-                try:
-                    if d.is_dir() and d.name.lower() in known_voice:
-                        vcands.append(d)
-                except OSError:
-                    continue
-        except OSError as e:                    # noqa: BLE001
-            swallow('assets.asset_registry.scan_assets.voice_dirs', e)
-        voice_dirs = [d for d in vcands if d.exists()]
+        voice_dirs = _detect_voice_dirs(scan_root)
     voice_dirs = list(voice_dirs or [])
 
     existing_image_ids = set()
 
     # ---------- 图片扫描 ----------
-    #
-    # 有 walk（一次遍历的索引）就用它枚举 —— 原先这里自己 rglob 一遍，
-    # 音频/语音又各走一遍，真实项目**三遍树 ~3.8 秒**（用户："太卡了"）。
-    if walk is not None:
-        # ⚠ 用索引里**已经算好的相对路径**，别再逐文件 `Path.relative_to()`：
-        # Windows 上一次 relative_to 要 0.34 ms，3273 张图实测 **2.3 秒**。
-        # 排序是为了**确定性**（遍历顺序随目录栈而变；同名文件靠
-        # `_make_unique_id` 编后缀时，顺序不稳就会得到不同的 ID）。
-        #
-        # ⚠⚠ **嵌套副本不算项目资源**（`sr_general/game/…`）：把它们扫进来
-        # 会编出 `ling_angry` 这种 ID 去跟真正的"tag_attribute"抢解析，
-        # 实测直接导致"立绘不显示 + 表情调不了"。
-        _items = sorted(((rel, p) for rel, p in walk.files().items()
-                         if not walk.is_nested(rel)), key=lambda kv: kv[0])
-    else:
-        _items = []
-        for p in scan_root.rglob('*'):
-            if not p.is_file():
-                continue
-            try:
-                _items.append((p.relative_to(scan_root).as_posix().lower(), p))
-            except ValueError:
-                continue
-    for rel_low, file in _items:
-        if file.suffix.lower() not in SUPPORTED_IMAGE_EXT:
-            continue
-        if _is_scan_noise(file.name):
-            continue
-        rel_path = Path(rel_low)
-        rel_str = rel_low
-
-        if _under_skip_dir(rel_path):
-            continue                            # tmp/ 之类的目录不是素材
-
-        if not include_ui:
-            if any(kw in rel_str
-                   for kw in ('gui', 'ui', 'dutui', 'interface', 'system')):
-                continue
-
-        category = _detect_category(rel_path)
-        parent_dirs = [Path(seg).name for seg in rel_low.split('/')[:-1]]
-
-        # tag **只有一个真源** = `_detect_image_tag`（2026-10-05 修）。
-        #
-        # 这里从前对 `category == 'character'` 另写了一套内联逻辑（找"含
-        # character/char/sprite… 关键词的目录段"），于是：
-        #   `game/images/eileen/happy.png`（**没有** `characters/` 容器，最常见的
-        #   立绘布局）走的是内联那套 → 找不到关键词 → tag 退成文件名首段 `happy`
-        #   → 脚本里的 `show eileen happy` 解析不到它 → 整组立绘被报"未使用"。
-        # 两套实现必然漂移，所以直接把内联那套删掉。
-        tag = _detect_image_tag(file, rel_path, category)
-        attributes = file.stem
-
-        unique_id = _make_unique_id(file.stem, parent_dirs, existing_image_ids)
-        image_assets.append({
-            'ID': unique_id,
-            'Path': rel_path.as_posix(),
-            'Tag': tag,
-            'Attributes': attributes,
-            'Category': category,
-            'Notes': '',
-        })
+    # 文件清单只枚举**一次**（原先图片/音频/语音各 rglob 一遍，真实项目
+    # 三遍树 ~3.8 秒）；细节见 `_scan_file_items`。
+    _items = _scan_file_items(scan_root, walk)
+    image_assets = _scan_images(_items, include_ui,
+                                 existing_image_ids)
 
     # ---------- 音频扫描 ----------
     #
     # **有 `walk` 时全部从那一份索引里取**（一次遍历）：目录探测与文件枚举
     # 都不再各走一遍树。没给 walk 时保持老路（其它调用方/测试照旧）。
     if walk is not None:
-        for rel_low, file in _items:
-            if file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
-                continue
-            if _is_scan_noise(file.name):
-                continue
-            rel_path = Path(rel_low)
-            if _under_skip_dir(rel_path):
-                continue
-            stem = file.stem
-            # 语音目录（任意深度的 `voice/` / `voices/`）单独收
-            if any(p.lower() in ('voice', 'voices')
-                   for p in rel_path.parts[:-1]):
-                voice_assets.append({
-                    'ID': stem, 'Path': rel_path.as_posix(), 'Notes': '',
-                })
-                continue
-            if _classify_audio(rel_path) == 'music':
-                audio_music.append({
-                    'ID': f"bgm_{stem}" if not stem.startswith('bgm_')
-                          else stem,
-                    'Path': rel_path.as_posix(),
-                    'Loop': True, 'Volume': 1.0, 'Notes': '',
-                })
-            else:
-                audio_sound.append({
-                    'ID': f"sfx_{stem}" if not stem.startswith('sfx_')
-                          else stem,
-                    'Path': rel_path.as_posix(), 'Notes': '',
-                })
-        return {
-            'images': image_assets,
-            'audio': {'music': audio_music, 'sound': audio_sound},
-            'voices': voice_assets,
-        }
+        audio_music, audio_sound, voice_assets = _scan_audio_from_index(_items)
+        return _scan_result(image_assets, audio_music, audio_sound,
+                            voice_assets)
 
-    voice_dirs_resolved = [Path(d) for d in voice_dirs]
 
-    def _under_voice(file: Path) -> bool:
-        for vd in voice_dirs_resolved:
-            try:
-                file.relative_to(vd)
-                return True
-            except ValueError:
-                continue
-        return False
-
-    for adir in audio_dirs:
-        adir = Path(adir)
-        if not adir.exists():
-            continue
-        for file in adir.rglob('*'):
-            if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
-                continue
-            if _is_scan_noise(file.name):
-                continue
-            if _path_under_skip_dir(file, adir):
-                continue
-            # 语音目录已经单独扫过，别再把同一个文件当作音效收一遍
-            if _under_voice(file):
-                continue
-            try:
-                rel_path = file.relative_to(scan_root)
-            except ValueError:
-                rel_path = file
-            stem = file.stem
-            if _classify_audio(rel_path) == 'music':
-                audio_music.append({
-                    'ID': f"bgm_{stem}" if not stem.startswith('bgm_')
-                          else stem,
-                    'Path': rel_path.as_posix(),
-                    'Loop': True,
-                    'Volume': 1.0,
-                    'Notes': '',
-                })
-            else:
-                audio_sound.append({
-                    'ID': f"sfx_{stem}" if not stem.startswith('sfx_')
-                          else stem,
-                    'Path': rel_path.as_posix(),
-                    'Notes': '',
-                })
-
-    # ---------- 语音扫描（独立目录，不与音效混） ----------
-    for vdir in voice_dirs:
-        vdir = Path(vdir)
-        if not vdir.exists():
-            continue
-        for file in vdir.rglob('*'):
-            if not file.is_file() or file.suffix.lower() not in SUPPORTED_AUDIO_EXT:
-                continue
-            if _is_scan_noise(file.name):
-                continue
-            if _path_under_skip_dir(file, vdir):
-                continue
-            try:
-                rel_path = file.relative_to(scan_root)
-            except ValueError:
-                rel_path = file
-            voice_assets.append({
-                'ID': file.stem,
-                'Path': rel_path.as_posix(),
-                'Notes': '',
-            })
-
-    return {
-        'images': image_assets,
-        'audio': {'music': audio_music, 'sound': audio_sound},
-        'voices': voice_assets,
-    }
+    audio_music, audio_sound = _scan_audio_from_dirs(audio_dirs, scan_root,
+                                                    voice_dirs)
+    voice_assets = _scan_voices_from_dirs(voice_dirs, scan_root)
+    return _scan_result(image_assets, audio_music, audio_sound, voice_assets)
 
 
 # ===================== Excel 生成 =====================
