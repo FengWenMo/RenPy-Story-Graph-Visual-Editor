@@ -49,7 +49,7 @@
    · 判据 `tests/test_hell_show_split_columns.py`（22 条）+ `tools/probe_show_split_real.py`；验收：真机渲染逐字不变 / `audit_idempotence` 53/53 / `hell_edit_rounds` 0 失败 / 回归 594 passed。
    · ⚠ 两个**静默缺陷**已修：项数>格数时**放不下就不摊**（否则丢项）；**不摊时不许写摊列**（否则读回来重复）。
    · 审查另推翻两处旧假设：`Stage` **已是派生视图**（`compose_stage`）；⚠ `pause`/`with X`/`jump` 走 `raw` 通道**刻意不进 Stage**；顺序载体是 **`OpOrder`**（带 `show#0` 逐次序号）。
-4. **坏味道（D5，M4 🔵 第一个目标✅）**：`sync_asset_tables` 圈复杂 **133 → 28**（339→157 行，官方 health_check 头部里已消失）；手法=**先录金标再纯结构拆**。剩：`render_beat_to_rpy`(81) / `scan_assets`(74) / `renpy_parser._walk`(72) / `validate_level1`(63)；模块体积 `renpy_parser` 4360 行；`noqa BLE001` 336。
+4. **坏味道（D5，M4 🔵 已完成 2 个）**：`sync_asset_tables` **133→28**、`render_beat_to_rpy` **81→47**（health_check 头部里都不再带"该拆"标记，阈值=50）。手法=**先录金标 → 纯结构拆分**（sync 金标=表逐格+返回 dict；渲染金标=`probe_render_fingerprint` 53 文件产物 hash）。剩：`scan_assets`(74) / `renpy_parser._walk`(72) / `validate_level1`(63) / `patcher._replace_matched`(62)；模块体积 `renpy_parser` 4360 行；`noqa BLE001` 336。⚠ 教训：金标必须**归一化**（路径/set repr 顺序会随机漂移）+ 必须能**定位到文件**；大段搬移别用文本切片脚本（太脆），用**唯一锚点定向替换 + 每步跑金标**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
 6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
 

@@ -682,6 +682,204 @@ def _attach_inline_note(lines: list, beat) -> list:
     return [ln + note if i == target else ln for i, ln in enumerate(lines)]
 
 
+class _OrderCtx:
+    """
+    顺序编排要用到的**闭包与状态**（M4 抽取时打包）。
+
+    为什么打包而不是传 11 个参数：三个分支用的是**同一批**闭包
+    （`emit` / 分类输出 / 舞台行缓存…），参数列表一长就没人看得懂谁是谁，
+    也更容易在下一轮漏传一个。
+    """
+
+    __slots__ = ('beat', 'lines', 'emit', 'emit_audio', 'emit_voice',
+                 'emit_code', 'emit_stage_tail', 'emit_opaque',
+                 'stage_lines_once', 'emitted_stage', 'emitted_idx')
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _emit_in_source_order(ctx, plan) -> None:
+    """**一条真序列**（缺口 4 第八轮）：舞台动词 / raw 行 / code 行按源码顺序逐条执行。
+
+    代码通道**按段输出** —— `python:` 块的块体必须整块出，而块与块之间、
+    以及块与非代码行之间可以插入舞台/raw 行。
+
+    为什么要分段：代码通道从前只有**一个槽位**（"紧跟第一条 scene"或
+    "舞台尾段之后"），于是 `hide screen map` 写在 `scene` 前面也会跑到后面
+    （真机 `pomodorro` / `chapter1_1` / `chapter1_4` / `script_pomo` 实测）。
+    """
+    code_run: list = []
+
+    def flush_code_run():
+        if not code_run:
+            return
+        for c in _render_code_block('\n'.join(code_run)):
+            ctx.emit(c, '代码块', c)
+        code_run.clear()
+
+    for kind, payload in plan:
+        if kind in ('scene', 'show', 'hide', 'with'):
+            flush_code_run()
+            _emit_stage_token(ctx.stage_lines_once(), kind, payload, ctx.emit,
+                              ctx.emitted_stage, ctx.emitted_idx)
+        elif kind == 'raw':
+            flush_code_run()
+            # raw 行**逐字照出**（作者写的原生语句：不加 `$`、不缩进改写）
+            ctx.emit(payload, '代码块', payload)
+        elif kind == 'code':
+            code_run.append(payload)      # 攒成一段，遇到别的再落地
+        elif kind == 'blank':
+            # 块内空行（带块标记）**要跟着这一段一起出**；块外的空行照旧
+            # 不单独产出（`render_code_block` 本来就是按 `strip()` 判空的）。
+            if code_run and payload:
+                code_run.append(payload)
+        elif kind == 'audio':
+            flush_code_run()
+            ctx.emit_audio()
+        elif kind == 'voice':
+            flush_code_run()
+            ctx.emit_voice()
+    flush_code_run()
+    _emit_leftover_stage(ctx.stage_lines_once(), ctx.emit, ctx.emitted_stage,
+                         ctx.emitted_idx)
+    # **舞台尾段 + 原样块照样要出**（第九轮修）：
+    # 序列里只有"舞台动词 / raw / code"这几类，而「舞台（高级）」列的原生
+    # 真迹与**未建模块**（`opaque`，例如 `camera …:` 的块体）不在序列里 ——
+    # 少这两个调用，`camera` 整条语句会**静默消失**
+    # （`test_session_apply_folds_parameter_keys` 当场红）。
+    ctx.emit_stage_tail()
+    ctx.emit_opaque()
+
+
+def _emit_in_token_order(ctx, tokens) -> None:
+    """**按 token 顺序**输出（老表 / 手工新增行：只有 verb 级顺序）。"""
+    # **补齐 audio / voice**：老表/手工新增行可能只记了部分，
+    # **绝不因为顺序信息不全就丢掉操作**。
+    #
+    # ⚠ 2026-10-05：stage verb 的那条补齐规矩收进 `Beat.op_tokens_full()`
+    # （**唯一真源**，`stage_verbs` 同一个判据）—— 舞台快照/演出预览
+    # 从前没照做，于是"卡片加了立绘、当前舞台却写着台上没人"（用户实测报的）。
+    recorded = {v for v, _i in tokens}
+    for k in ('audio', 'voice'):
+        if k not in recorded:
+            tokens.append((k, None))
+    code_done = False
+    for verb, idx in tokens:
+        mark = len(ctx.lines)
+        if verb in ('scene', 'show', 'hide', 'with'):
+            _emit_stage_token(ctx.stage_lines_once(), verb, idx, ctx.emit,
+                              ctx.emitted_stage, ctx.emitted_idx)
+        elif verb == 'audio':
+            ctx.emit_audio()
+        elif verb == 'voice':
+            ctx.emit_voice()
+        # **"真出了一行的 scene"才算数**（2026-10-05 修）。
+        #
+        # `tokens` 上面被**补齐**过：`missed_stage` 把 `scene/show/hide`
+        # 里"op_order 没记的"一律追加到末尾，于是**没有背景的拍**
+        # 也会走过 `t == 'scene'` 这一支 —— 原来的判据只看 token 名字，
+        # 于是代码块被提前到那个**根本没出任何行**的 scene 位置，
+        # 落在舞台尾段**之前**（`chapter1_2.rpy` 拍 136/152 实测：
+        # `hide ye` / `show cg … behind ye` / `$ persistent…`，
+        # 过表后 `$` 跑到了 `show` 前面）。
+        #
+        # 判据改成"这一支真的往 `lines` 里加过行"：有背景时行为与从前
+        # **逐字节一致**（真 scene 一定出了行），没背景时不再误触发。
+        if verb == 'scene' and not code_done and len(ctx.lines) > mark:
+            # 代码块跟在**第一条舞台指令**之后（历史位置）
+            ctx.emit_code()
+            code_done = True
+    # **兜底**：有内容却一条 token 都没点到的舞台行（"卡片加了立绘、
+    # 顺序列没跟着长"那种）**也要出**，位置放在所有 token 之后 ——
+    # 与从前的"补齐在末尾"同一个口径（`op_tokens_full` 已经补过 verb 级
+    # 的，这里收的是"同一个 verb 里多出来的那几条"）。
+    _emit_leftover_stage(ctx.stage_lines_once(), ctx.emit, ctx.emitted_stage,
+                         ctx.emitted_idx)
+    # **舞台尾段必须排在代码块之前**（2026-10-05 修，真实项目
+    # `chapter1_2.rpy` 拍 136/152 实测）。
+    #
+    # 为什么：尾段（「舞台（高级）」列里的原生真迹）**属于舞台**，
+    # 而"没有顺序信息"那条路本来就是 `emit_stage()` → `emit_code()`
+    # （舞台在前）。这里原来把尾段放在 `emit_code()` **之后**，
+    # 于是**同一条指令**在两条路上的位置不一样：
+    #
+    #   · 解析来的拍：`_stage_native_show` 是空的（`beat.stage` 是
+    #     `compose_stage_extra` 从结构化列**合成**的），所以那行由
+    #     结构化通道在 verb 位置出，尾段被 `emitted_stage` 去重 —— 代码在后；
+    #   · 过表来的拍：`from_row` → `hydrate_from_dsl` 把它标成"原生影子"，
+    #     结构化通道**跳过**它，于是只能由尾段出 —— 代码在前。
+    #
+    # 产物因此不一样，而且**源码顺序被改**（那两拍原文是
+    # `hide ye` / `show cg … behind ye` / `$ persistent…`，过表后
+    # `$` 跑到了 `show` 前面）。修法就是让尾段回到舞台这一侧：
+    # 两条路都得到"动词 → 尾段 → 代码块"。
+    #
+    # 注意：`scene` 那条历史通道（代码紧跟第一条 scene）**不动**。
+    ctx.emit_stage_tail()
+    if not code_done:
+        ctx.emit_code()
+    # **原样块紧跟代码之后**（M1）：`beat_build` 让未建模块独占一张拍
+    # 并在台词之前落卡，所以"代码 → 原样块 → 台词"就是源码顺序。
+    ctx.emit_opaque()
+
+
+def _resolve_speaker(beat, audit, todo) -> str:
+    """
+    说话人：**字符串字面量**原样留；查不到角色的写一条 TODO 并降级成旁白。
+
+    ⚠ 字面量说话人（`"系统" "提示"`）**不能**去角色表里查 —— 查不到就会写成
+    `# TODO: 缺少资源 角色 '"系统"'`，把真正的台词换成一句 TODO
+    （2026-10-05 实测：比"丢后半句"更狠，因为它连前半句都换掉）。
+    """
+    speaker = beat.speaker
+    if speaker and is_literal_speaker(speaker):
+        return speaker
+    if speaker and audit is not None:
+        from storygraph.story.dsl import TODO as _TODO
+        if audit.character(speaker) == _TODO:
+            todo('说话人', speaker, f"缺少资源 角色 '{speaker}'")
+            return ''
+    return speaker
+
+
+def _emit_text_line(beat, speaker, emit) -> None:
+    """台词 / 选项行 / 菜单头 —— 单拍渲染里"那一行文本"的分发（M4 抽取）。"""
+    if beat.kind == KIND_MENU_OPTION:
+        # 走 `_quote` 而不是手包一对引号：选项文字里可能有 `"` 或控制字符，
+        # 裸包会写出语法错的菜单。
+        #
+        # **冒号也要带上**（2026-10-05 修 O6 追到的根）：整份渲染
+        # （`render_menu_block`）写的是 `"选项":`，单拍这条路从前只写
+        # `"选项"` —— 增量对位是**逐行配对**，两个形状配不上，于是
+        #   · 选项行带行尾注释时：生成行被当"新增内容"插进去、旧行又留着
+        #     → **重复行**（`"一"  # 备注` + `"一":  # 备注`）；
+        #   · 小幅改选项文案时：既不落也不报 → **静默 no-op**。
+        # 冒号本来就是 `menu:` 块的结构语法，单拍渲染没理由省掉它。
+        emit(_quote(beat.text) + ':', '菜单', beat.text)
+    elif beat.kind == KIND_EXTEND:
+        emit(f"extend {_quote(beat.text)}", '台词', beat.text)
+    elif beat.kind == KIND_MENU:
+        # 菜单头。**必须与整份渲染（`render_menu_block`）给出同一个头** ——
+        # 从前这一支接在 `elif beat.text:` **后面**，于是"有标题/有占位符"
+        # 的菜单根本走不到这里（占位符 `MENU_NO_CAPTION` 是个真值字符串）：
+        # 单拍这条路写出字面量 `"\x00menu"`，而整份产物写的是 `menu:`。
+        # 两条路对不上 → 增量补丁的 `_verify_patch` 永远找不到那一行 →
+        # 真实项目 6 个文件退回全量（O1）。
+        from storygraph.story.beat_model import menu_caption_text
+        cap = menu_caption_text(beat.text)
+        if cap:
+            emit(f"menu {_quote(cap)}:", '菜单', cap)
+        elif beat.text:
+            emit('menu:', '菜单', '')
+    elif beat.text:
+        if speaker:
+            emit(f"{speaker} {_quote(beat.text)}", '台词', beat.text)
+        else:
+            emit(_quote(beat.text), '台词', beat.text)
+
+
 def render_beat_to_rpy(beat: Beat, indent: str = '    ',
                        name_resolver=None, audit=None,
                        trace: list = None) -> list:
@@ -882,127 +1080,16 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
 
     #: 已经出过的舞台行（**按 (verb, 下标) 记账**，见 `_emit_stage_token`）
     _emitted_idx: set = set()
+    _ctx = _OrderCtx(
+        beat=beat, lines=lines, emit=emit, emit_audio=emit_audio,
+        emit_voice=emit_voice, emit_code=emit_code,
+        emit_stage_tail=emit_stage_tail, emit_opaque=emit_opaque,
+        stage_lines_once=_stage_lines_once, emitted_stage=emitted_stage,
+        emitted_idx=_emitted_idx)
     if plan is not None:
-        # **一条真序列**（缺口 4 第八轮）：舞台动词 / raw 行 / code 行按源码顺序
-        # 逐条执行。代码通道**按段输出**——`python:` 块的块体必须整块出，
-        # 而块与块之间、以及块与非代码行之间可以插入舞台/raw 行。
-        #
-        # 为什么要分段：代码通道从前只有**一个槽位**（"紧跟第一条 scene"
-        # 或"舞台尾段之后"），于是 `hide screen map` 写在 `scene` 前面也会
-        # 跑到后面（真机 `pomodorro` / `chapter1_1` / `chapter1_4` /
-        # `script_pomo` 四个文件实测）。
-        code_run: list = []
-
-        def flush_code_run():
-            if not code_run:
-                return
-            for c in _render_code_block('\n'.join(code_run)):
-                emit(c, '代码块', c)
-            code_run.clear()
-
-        for kind, payload in plan:
-            if kind in ('scene', 'show', 'hide', 'with'):
-                flush_code_run()
-                _emit_stage_token(_stage_lines_once(), kind, payload, emit,
-                                  emitted_stage, _emitted_idx)
-            elif kind == 'raw':
-                flush_code_run()
-                # raw 行**逐字照出**（它是作者写的原生语句，不加 `$`、不缩进改写）
-                emit(payload, '代码块', payload)
-            elif kind == 'code':
-                code_run.append(payload)      # 攒成一段，遇到别的再落地
-            elif kind == 'blank':
-                # 块内空行（带块标记）**要跟着这一段一起出**；块外的空行照旧
-                # 不单独产出（`render_code_block` 本来就是按 `strip()` 判空的）。
-                if code_run and payload:
-                    code_run.append(payload)
-            elif kind == 'audio':
-                flush_code_run()
-                emit_audio()
-            elif kind == 'voice':
-                flush_code_run()
-                emit_voice()
-        flush_code_run()
-        _emit_leftover_stage(_stage_lines_once(), emit, emitted_stage,
-                            _emitted_idx)
-        # **舞台尾段 + 原样块照样要出**（第九轮修）：
-        # 序列里只有"舞台动词 / raw / code"这几类，而「舞台（高级）」列的原生
-        # 真迹与**未建模块**（`opaque`，例如 `camera …:` 的块体）不在序列里 ——
-        # 少这两个调用，`camera` 整条语句会**静默消失**
-        # （`test_session_apply_folds_parameter_keys` 当场红）。
-        emit_stage_tail()
-        emit_opaque()
+        _emit_in_source_order(_ctx, plan)
     elif tokens:
-        # **补齐 audio / voice**：老表/手工新增行可能只记了部分，
-        # **绝不因为顺序信息不全就丢掉操作**。
-        #
-        # ⚠ 2026-10-05：stage verb 的那条补齐规矩收进 `Beat.op_tokens_full()`
-        # （**唯一真源**，`stage_verbs` 同一个判据）—— 舞台快照/演出预览
-        # 从前没照做，于是"卡片加了立绘、当前舞台却写着台上没人"（用户实测报的）。
-        recorded = {v for v, _i in tokens}
-        for k in ('audio', 'voice'):
-            if k not in recorded:
-                tokens.append((k, None))
-        code_done = False
-        for verb, idx in tokens:
-            mark = len(lines)
-            if verb in ('scene', 'show', 'hide', 'with'):
-                _emit_stage_token(_stage_lines_once(), verb, idx, emit,
-                                  emitted_stage, _emitted_idx)
-            elif verb == 'audio':
-                emit_audio()
-            elif verb == 'voice':
-                emit_voice()
-            # **"真出了一行的 scene"才算数**（2026-10-05 修）。
-            #
-            # `tokens` 上面被**补齐**过：`missed_stage` 把 `scene/show/hide`
-            # 里"op_order 没记的"一律追加到末尾，于是**没有背景的拍**
-            # 也会走过 `t == 'scene'` 这一支 —— 原来的判据只看 token 名字，
-            # 于是代码块被提前到那个**根本没出任何行**的 scene 位置，
-            # 落在舞台尾段**之前**（`chapter1_2.rpy` 拍 136/152 实测：
-            # `hide ye` / `show cg … behind ye` / `$ persistent…`，
-            # 过表后 `$` 跑到了 `show` 前面）。
-            #
-            # 判据改成"这一支真的往 `lines` 里加过行"：有背景时行为与从前
-            # **逐字节一致**（真 scene 一定出了行），没背景时不再误触发。
-            if verb == 'scene' and not code_done and len(lines) > mark:
-                # 代码块跟在**第一条舞台指令**之后（历史位置）
-                emit_code()
-                code_done = True
-        # **兜底**：有内容却一条 token 都没点到的舞台行（"卡片加了立绘、
-        # 顺序列没跟着长"那种）**也要出**，位置放在所有 token 之后 ——
-        # 与从前的"补齐在末尾"同一个口径（`op_tokens_full` 已经补过 verb 级
-        # 的，这里收的是"同一个 verb 里多出来的那几条"）。
-        _emit_leftover_stage(_stage_lines_once(), emit, emitted_stage,
-                            _emitted_idx)
-        # **舞台尾段必须排在代码块之前**（2026-10-05 修，真实项目
-        # `chapter1_2.rpy` 拍 136/152 实测）。
-        #
-        # 为什么：尾段（「舞台（高级）」列里的原生真迹）**属于舞台**，
-        # 而"没有顺序信息"那条路本来就是 `emit_stage()` → `emit_code()`
-        # （舞台在前）。这里原来把尾段放在 `emit_code()` **之后**，
-        # 于是**同一条指令**在两条路上的位置不一样：
-        #
-        #   · 解析来的拍：`_stage_native_show` 是空的（`beat.stage` 是
-        #     `compose_stage_extra` 从结构化列**合成**的），所以那行由
-        #     结构化通道在 verb 位置出，尾段被 `emitted_stage` 去重 —— 代码在后；
-        #   · 过表来的拍：`from_row` → `hydrate_from_dsl` 把它标成"原生影子"，
-        #     结构化通道**跳过**它，于是只能由尾段出 —— 代码在前。
-        #
-        # 产物因此不一样，而且**源码顺序被改**（那两拍原文是
-        # `hide ye` / `show cg … behind ye` / `$ persistent…`，过表后
-        # `$` 跑到了 `show` 前面）。修法就是让尾段回到舞台这一侧：
-        # 两条路都得到"动词 → 尾段 → 代码块"。
-        #
-        # 注意：`scene` 那条历史通道（代码紧跟第一条 scene）**不动** ——
-        # 那两种排法在两条路上是一致的（被跳过的尾段行落在代码之后，
-        # 与"结构化通道在 code 之后出它"同址）。
-        emit_stage_tail()
-        if not code_done:
-            emit_code()
-        # **原样块紧跟代码之后**（M1）：`beat_build` 让未建模块独占一张拍
-        # 并在台词之前落卡，所以"代码 → 原样块 → 台词"就是源码顺序。
-        emit_opaque()
+        _emit_in_token_order(_ctx, tokens)
     else:
         # 没有任何顺序信息（老表 / 直接构造的 Beat）：维持历史固定顺序
         emit_stage()
@@ -1012,51 +1099,8 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         emit_voice()
 
     # ---------------- 台词 ----------------
-    speaker = beat.speaker
-    if speaker and is_literal_speaker(speaker):
-        # **字符串字面量说话人**（`"系统" "提示"`）：逐字原样出去。
-        # 它不是角色变量，**不能**去角色表里查 —— 查不到就会写成
-        # `# TODO: 缺少资源 角色 '"系统"'`，把真正的台词换成一句 TODO
-        # （2026-10-05 实测：这一条比"丢后半句"更狠，因为它连前半句都换掉）。
-        pass
-    elif speaker and audit is not None:
-        from storygraph.story.dsl import TODO as _TODO
-        if audit.character(speaker) == _TODO:
-            todo('说话人', speaker, f"缺少资源 角色 '{speaker}'")
-            speaker = ''
-    if beat.kind == KIND_MENU_OPTION:
-        # 走 `_quote` 而不是手包一对引号：选项文字里可能有 `"` 或控制字符，
-        # 裸包会写出语法错的菜单（与上面 `adv_backslash` 同一个坑）。
-        #
-        # **冒号也要带上**（2026-10-05 修 O6 追到的根）：整份渲染
-        # （`render_menu_block`）写的是 `"选项":`，单拍这条路从前只写
-        # `"选项"` —— 增量对位是**逐行配对**，两个形状配不上，于是
-        #   · 选项行带行尾注释时：生成行被当"新增内容"插进去、旧行又留着
-        #     → **重复行**（`"一"  # 备注` + `"一":  # 备注`）；
-        #   · 小幅改选项文案时：既不落也不报 → **静默 no-op**。
-        # 冒号本来就是 `menu:` 块的结构语法（`render_menu_block` 也是这么写的），
-        # 单拍渲染没理由省掉它。
-        emit(_quote(beat.text) + ':', '菜单', beat.text)
-    elif beat.kind == KIND_EXTEND:
-        emit(f"extend {_quote(beat.text)}", '台词', beat.text)
-    elif beat.kind == KIND_MENU:
-        # 菜单头。**必须与整份渲染（`render_menu_block`）给出同一个头** ——
-        # 从前这一支接在 `elif beat.text:` **后面**，于是"有标题/有占位符"
-        # 的菜单根本走不到这里（占位符 `MENU_NO_CAPTION` 是个真值字符串）：
-        # 单拍这条路写出字面量 `"\x00menu"`，而整份产物写的是 `menu:`。
-        # 两条路对不上 → 增量补丁的 `_verify_patch` 永远找不到那一行 →
-        # 真实项目 6 个文件退回全量（O1）。
-        from storygraph.story.beat_model import menu_caption_text
-        cap = menu_caption_text(beat.text)
-        if cap:
-            emit(f"menu {_quote(cap)}:", '菜单', cap)
-        elif beat.text:
-            emit('menu:', '菜单', '')
-    elif beat.text:
-        if speaker:
-            emit(f"{speaker} {_quote(beat.text)}", '台词', beat.text)
-        else:
-            emit(_quote(beat.text), '台词', beat.text)
+    speaker = _resolve_speaker(beat, audit, todo)
+    _emit_text_line(beat, speaker, emit)
 
     if not lines:
         # **落单的结构化循环头**（有头行、无整块原文、没被归组）：
