@@ -610,22 +610,8 @@ def _image_path(text: str, image_format: str) -> str:
     return text
 
 
-def _expand_node(node, helpers, image_format, params, depth) -> list:
-    if node is None:
-        return []
-    if node.kind in ('const', 'name', 'add'):
-        val = _value_of(node, helpers, image_format, params, depth)
-        if isinstance(val, str) and val:
-            return [{'path': _image_path(val, image_format), 'mask': None,
-                     'crop': None, 'offset': None, 'note': ''}]
-        return [{'note': f'认不出的值：{_src_of(node)}'}]
-    if node.kind == 'tuple':
-        return []
-    if node.kind != 'call':
-        return [{'note': f'认不出的表达式：{_src_of(node)}'}]
-    name = node.value.split('.')[-1]
-    args = node.args
-    # 项目里的辅助函数：代入参数后重解析
+def _expand_helper_call(name, params, args, depth, helpers, image_format):
+    """`_expand_node` 里"命中 helpers（`resize`/`crop` 这类）"那一支（M4 搬出，行为一字不改）。返回展开结果。"""
     if name in helpers:
         fn = helpers[name]
         fn_params = dict(params)
@@ -647,22 +633,9 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
         out = expand_displayable(inner, helpers, image_format,
                                  fn_params, depth + 1)
         return out or [{'note': f'辅助函数 {name} 展开为空'}]
-    if name == 'AlphaMask' and len(args) >= 2:
-        img = _value_of(args[0], helpers, image_format, params, depth)
-        mask = _value_of(args[1], helpers, image_format, params, depth)
-        if isinstance(img, str) and isinstance(mask, str):
-            return [{'path': _image_path(img, image_format),
-                     'mask': _image_path(mask, image_format),
-                     'crop': None, 'offset': None, 'note': 'AlphaMask'}]
-        return [{'note': 'AlphaMask 的参数认不出'}]
-    if name in ('Crop', 'im.Crop') and len(args) >= 2:
-        box = _value_of(args[0], helpers, image_format, params, depth)
-        img = _value_of(args[1], helpers, image_format, params, depth)
-        if isinstance(img, str) and isinstance(box, tuple) and len(box) == 4:
-            return [{'path': _image_path(img, image_format), 'mask': None,
-                     'crop': tuple(int(v) for v in box), 'offset': None,
-                     'note': 'Crop'}]
-        return [{'note': 'Crop 的参数认不出'}]
+
+def _expand_composite_call(name, params, args, depth, helpers, image_format, idx):
+    """`Composite` / `LiveComposite` 那一支（M4 搬出，行为一字不改）。"""
     if name in ('Composite', 'LiveComposite'):
         out = []
         idx = 0
@@ -681,6 +654,45 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
                 out.append(layer)
             idx += 2
         return out or [{'note': f'{name} 没展开出层'}]
+
+def _expand_node(node, helpers, image_format, params, depth) -> list:
+    if node is None:
+        return []
+    if node.kind in ('const', 'name', 'add'):
+        val = _value_of(node, helpers, image_format, params, depth)
+        if isinstance(val, str) and val:
+            return [{'path': _image_path(val, image_format), 'mask': None,
+                     'crop': None, 'offset': None, 'note': ''}]
+        return [{'note': f'认不出的值：{_src_of(node)}'}]
+    if node.kind == 'tuple':
+        return []
+    if node.kind != 'call':
+        return [{'note': f'认不出的表达式：{_src_of(node)}'}]
+    name = node.value.split('.')[-1]
+    args = node.args
+    # 项目里的辅助函数：代入参数后重解析
+    if name in helpers:
+        return _expand_helper_call(name, params, args, depth,
+                                   helpers, image_format)
+    if name == 'AlphaMask' and len(args) >= 2:
+        img = _value_of(args[0], helpers, image_format, params, depth)
+        mask = _value_of(args[1], helpers, image_format, params, depth)
+        if isinstance(img, str) and isinstance(mask, str):
+            return [{'path': _image_path(img, image_format),
+                     'mask': _image_path(mask, image_format),
+                     'crop': None, 'offset': None, 'note': 'AlphaMask'}]
+        return [{'note': 'AlphaMask 的参数认不出'}]
+    if name in ('Crop', 'im.Crop') and len(args) >= 2:
+        box = _value_of(args[0], helpers, image_format, params, depth)
+        img = _value_of(args[1], helpers, image_format, params, depth)
+        if isinstance(img, str) and isinstance(box, tuple) and len(box) == 4:
+            return [{'path': _image_path(img, image_format), 'mask': None,
+                     'crop': tuple(int(v) for v in box), 'offset': None,
+                     'note': 'Crop'}]
+        return [{'note': 'Crop 的参数认不出'}]
+    if name in ('Composite', 'LiveComposite'):
+        return _expand_composite_call(name, params, args, depth,
+                                      helpers, image_format, idx)
     if name in ('Transform', 'Flatten', 'Scale') and args:
         out = _expand_node(args[0], helpers, image_format, params, depth)
         return [dict(ly, note=(ly.get('note') or '') + f'（{name} 未处理）')

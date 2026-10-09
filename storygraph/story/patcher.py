@@ -271,6 +271,53 @@ def _align_key(beat) -> tuple:
             _stage_tokens(beat))
 
 
+def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inserts, inserted_out, dropped_out, dropped):
+    """按 label 分组做内容对齐（SequenceMatcher）→ 给每拍行号 / 标记插入点 / 记被删的拍。返回配上的拍数（M4 搬出，行为一字不改）。"""
+    matched = 0
+    for name, group in new_groups.items():
+        pool = src_groups.get(name) or []
+        if not pool:
+            continue
+        sm = difflib.SequenceMatcher(
+            None, [_align_key(b) for b in pool],
+            [_align_key(b) for b in group], autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == 'equal':
+                for k in range(i2 - i1):
+                    if apply_ranges:
+                        _apply_range(group[j1 + k], pool[i1 + k])
+                    matched += 1
+            elif tag == 'replace':
+                # 成对的按位置给行号（正文改了、但对齐键相同的情况会走 equal；
+                # 走到这里多半是说话人/舞台也动了 —— 按顺序硬配，
+                # 后面的"对位守卫"与"整体校验"会把配错的挡下来）
+                pair = min(i2 - i1, j2 - j1)
+                for k in range(pair):
+                    if apply_ranges:
+                        _apply_range(group[j1 + k], pool[i1 + k])
+                    matched += 1
+                for k in range(j1 + pair, j2):
+                    if apply_ranges or apply_inserts:
+                        _set_insert_point(group[k],
+                                          pool[i2 - 1] if i2 > i1 else None,
+                                          inserted_out=inserted_out,
+                                          index=j1 + k)
+            elif tag == 'insert':
+                prev = pool[i1 - 1] if i1 > 0 else None
+                nxt = pool[i1] if i1 < len(pool) else None
+                for k in range(j1, j2):
+                    if apply_ranges or apply_inserts:
+                        _set_insert_point(group[k], prev, nxt,
+                                          inserted_out=inserted_out, index=k)
+            elif tag == 'delete':
+                # 源文件里有、表里没有 → 用户把这一拍删了。
+                # `dropped_out` 给的是**这些被删的源拍本身**（带
+                # `src_first/src_last`），调用方据此精确删行（2026-10-05）。
+                dropped.append(name)
+                if dropped_out is not None:
+                    dropped_out.extend(pool[i1:i2])
+    return matched
+
 def recover_source_ranges(beats: list, source_path,
                           apply_ranges: bool = True,
                           apply_inserts: bool = False,
@@ -362,48 +409,10 @@ def recover_source_ranges(beats: list, source_path,
 
     matched = 0
     dropped: list = []
-    for name, group in new_groups.items():
-        pool = src_groups.get(name) or []
-        if not pool:
-            continue
-        sm = difflib.SequenceMatcher(
-            None, [_align_key(b) for b in pool],
-            [_align_key(b) for b in group], autojunk=False)
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag == 'equal':
-                for k in range(i2 - i1):
-                    if apply_ranges:
-                        _apply_range(group[j1 + k], pool[i1 + k])
-                    matched += 1
-            elif tag == 'replace':
-                # 成对的按位置给行号（正文改了、但对齐键相同的情况会走 equal；
-                # 走到这里多半是说话人/舞台也动了 —— 按顺序硬配，
-                # 后面的"对位守卫"与"整体校验"会把配错的挡下来）
-                pair = min(i2 - i1, j2 - j1)
-                for k in range(pair):
-                    if apply_ranges:
-                        _apply_range(group[j1 + k], pool[i1 + k])
-                    matched += 1
-                for k in range(j1 + pair, j2):
-                    if apply_ranges or apply_inserts:
-                        _set_insert_point(group[k],
-                                          pool[i2 - 1] if i2 > i1 else None,
-                                          inserted_out=inserted_out,
-                                          index=j1 + k)
-            elif tag == 'insert':
-                prev = pool[i1 - 1] if i1 > 0 else None
-                nxt = pool[i1] if i1 < len(pool) else None
-                for k in range(j1, j2):
-                    if apply_ranges or apply_inserts:
-                        _set_insert_point(group[k], prev, nxt,
-                                          inserted_out=inserted_out, index=k)
-            elif tag == 'delete':
-                # 源文件里有、表里没有 → 用户把这一拍删了。
-                # `dropped_out` 给的是**这些被删的源拍本身**（带
-                # `src_first/src_last`），调用方据此精确删行（2026-10-05）。
-                dropped.append(name)
-                if dropped_out is not None:
-                    dropped_out.extend(pool[i1:i2])
+    matched = _recover_ranges_for_groups(new_groups, src_groups,
+                                            apply_ranges, apply_inserts,
+                                            inserted_out, dropped_out,
+                                            dropped)
     return matched, len(beats), len(dropped)
 
 

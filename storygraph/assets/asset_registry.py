@@ -1024,6 +1024,75 @@ def _quarantine_broken_tables(table_dir, reason: str = '') -> list:
     return moved
 
 
+def _table_paths_from_registry(registry, table_paths, missing, outside, root, game_dir, walk, resolve_thumb_source, outside_total):
+    """登记行 → `table_paths` / `missing` / `outside`（M4 从 `compare_registry_to_disk` 搬出，行为一字不改）。返回更新后的 `outside_total`。"""
+    for kind, attr in (('image', 'images'), ('music', 'music'),
+                       ('sound', 'sounds'), ('voice', 'voices')):
+        key = {'image': 'images', 'music': 'music', 'sound': 'sounds',
+               'voice': 'voices'}[kind]
+        bucket = set()
+        gone = []
+        for _aid, row in ((getattr(registry, attr, {}) or {}) if registry
+                          else {}).items():
+            rel = str((row or {}).get('Path') or '').strip()
+            if not rel:
+                continue
+            # ⚠ 有 `walk` 时**只查字典**：原先这里对每一行做
+            # `resolve_thumb_source`（逐个基准 `is_file()`）+ `Path.resolve()`
+            # —— 3123 行要上万次系统调用，实测这一步 **12.4 秒**，正是用户
+            # "程序干未响应了！太卡了"的元凶。见 `FileWalkIndex`。
+            if walk is not None:
+                real = walk.match(rel)
+            elif kind == 'image':
+                real = resolve_thumb_source(rel, root)
+            else:
+                real = _resolve_audio_source(rel, root)
+            if real is None:
+                gone.append(rel)
+                continue
+            bucket.add(str(real))
+            # **表里指到 `game/` 外面的行**：真实项目实测有 1386 行指向
+            # `sr_general/**`（**另一份嵌套副本**）—— 这就是"两个克隆数字
+            # 为什么不一样"的答案：表引用的是别的目录里的文件。
+            try:
+                Path(real).relative_to(game_dir)
+            except ValueError:
+                outside_total += 1
+                try:
+                    top = real.relative_to(root).parts[0]
+                except ValueError:
+                    top = str(real.drive or real.anchor or '')
+                outside[top] = outside.get(top, 0) + 1
+        table_paths[key] = bucket
+        if gone:
+            missing[key] = gone
+    return outside_total
+
+def _unregistered_from_disk(disk, table_paths, unregistered, root, walk, resolve_thumb_source):
+    """盘上有、表里没有的 → `unregistered`（M4 从 `compare_registry_to_disk` 搬出，行为一字不改）。"""
+    for key, paths in disk.items():
+        have = table_paths.get(key) or set()
+        extra = []
+        for rel in paths:
+            if not rel:
+                continue
+            if walk is not None:
+                real = walk.match(rel)
+            elif key == 'images':
+                real = resolve_thumb_source(rel, root)
+            else:
+                real = _resolve_audio_source(rel, root)
+            if real is None:
+                continue
+            # ⚠ 有 `walk` 时**别再 `resolve()`**：两边都出自同一份索引，
+            # 字符串本来就一致。实测这里的 `Path.resolve()` 3373 次要 **3.8 秒**
+            # （Windows 上 resolve 会摸文件系统）—— 这是"对账还要 4 秒"的元凶。
+            same = str(real) if walk is not None else str(Path(real).resolve())
+            if same not in have:
+                extra.append(str(rel))
+        if extra:
+            unregistered[key] = extra
+
 def compare_registry_to_disk(project_root, registry, include_ui=True,
                              walk=None, assets=None) -> dict:
     """
@@ -1067,46 +1136,9 @@ def compare_registry_to_disk(project_root, registry, include_ui=True,
     #: 表里指到 `game/` **外面**的行（`{顶层目录: 行数}`）—— 见下面注释
     outside = {}
     outside_total = 0
-    for kind, attr in (('image', 'images'), ('music', 'music'),
-                       ('sound', 'sounds'), ('voice', 'voices')):
-        key = {'image': 'images', 'music': 'music', 'sound': 'sounds',
-               'voice': 'voices'}[kind]
-        bucket = set()
-        gone = []
-        for _aid, row in ((getattr(registry, attr, {}) or {}) if registry
-                          else {}).items():
-            rel = str((row or {}).get('Path') or '').strip()
-            if not rel:
-                continue
-            # ⚠ 有 `walk` 时**只查字典**：原先这里对每一行做
-            # `resolve_thumb_source`（逐个基准 `is_file()`）+ `Path.resolve()`
-            # —— 3123 行要上万次系统调用，实测这一步 **12.4 秒**，正是用户
-            # "程序干未响应了！太卡了"的元凶。见 `FileWalkIndex`。
-            if walk is not None:
-                real = walk.match(rel)
-            elif kind == 'image':
-                real = resolve_thumb_source(rel, root)
-            else:
-                real = _resolve_audio_source(rel, root)
-            if real is None:
-                gone.append(rel)
-                continue
-            bucket.add(str(real))
-            # **表里指到 `game/` 外面的行**：真实项目实测有 1386 行指向
-            # `sr_general/**`（**另一份嵌套副本**）—— 这就是"两个克隆数字
-            # 为什么不一样"的答案：表引用的是别的目录里的文件。
-            try:
-                Path(real).relative_to(game_dir)
-            except ValueError:
-                outside_total += 1
-                try:
-                    top = real.relative_to(root).parts[0]
-                except ValueError:
-                    top = str(real.drive or real.anchor or '')
-                outside[top] = outside.get(top, 0) + 1
-        table_paths[key] = bucket
-        if gone:
-            missing[key] = gone
+    outside_total = _table_paths_from_registry(
+        registry, table_paths, missing, outside, root, game_dir,
+        walk, resolve_thumb_source, outside_total)
 
     if assets is None:
         assets = scan_assets(root, include_ui=include_ui, walk=walk)
@@ -1120,28 +1152,8 @@ def compare_registry_to_disk(project_root, registry, include_ui=True,
     }
     disk_counts = {k: len([p for p in v if p]) for k, v in disk.items()}
     unregistered = {}
-    for key, paths in disk.items():
-        have = table_paths.get(key) or set()
-        extra = []
-        for rel in paths:
-            if not rel:
-                continue
-            if walk is not None:
-                real = walk.match(rel)
-            elif key == 'images':
-                real = resolve_thumb_source(rel, root)
-            else:
-                real = _resolve_audio_source(rel, root)
-            if real is None:
-                continue
-            # ⚠ 有 `walk` 时**别再 `resolve()`**：两边都出自同一份索引，
-            # 字符串本来就一致。实测这里的 `Path.resolve()` 3373 次要 **3.8 秒**
-            # （Windows 上 resolve 会摸文件系统）—— 这是"对账还要 4 秒"的元凶。
-            same = str(real) if walk is not None else str(Path(real).resolve())
-            if same not in have:
-                extra.append(str(rel))
-        if extra:
-            unregistered[key] = extra
+    _unregistered_from_disk(disk, table_paths, unregistered,
+                             root, walk, resolve_thumb_source)
     return {
         'disk': disk_counts,
         'table': {k: len(v) for k, v in table_paths.items()},

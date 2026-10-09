@@ -77,6 +77,73 @@ class AssetRegistryMixin:
                    'transform': 'transforms', 'music': 'music',
                    'sound': 'sounds', 'voice': 'voices'}
 
+    def _ensure_tables_on_open(self, reg, created, created_counts, sync_info, walk, load_asset_registry):
+        """打开项目时「没有资源表就当场建一张」那一整段（M4 从 load_assets 搬出，行为一字不改）。返回更新后的 (reg, created, created_counts, sync_info)。"""
+        if reg is None:
+            # **没有资源表就当场建一张**（用户 2026-10-05 实测报）
+            #
+            # > 我拿另一个复制看了一下测出 bug 了，首次加载导入时项目无法读到
+            # > 资源表，应当立即创建对应的资源表
+            #
+            # 也覆盖"表在、但读不出来"（Excel 锁住 / 文件写坏）：那时
+            # `load_asset_registry` 返回 None，`ensure_asset_tables` 会把坏文件
+            # 挪到一边（`*.broken-<时间戳>.xlsx`，不删）再按项目内容重建。
+            from storygraph.assets.asset_registry import sync_asset_tables
+            made = sync_asset_tables(self.project_root, walk=walk)
+            sync_info = made                  # 成功路径也要能报到 repaired 等
+            created = made.get('created') or ''
+            created_counts = made.get('scanned') or {}
+            repaired = made.get('repaired') or []
+            repair_error = made.get('repair_error') or ''
+            if made.get('ok') and created:
+                try:
+                    reg = load_asset_registry(self.project_root,
+                                             walk=walk)
+                except Exception as e:        # noqa: BLE001
+                    swallow('app.session_assets.load_assets.reload', e)
+                    reg = None
+            if reg is None:
+                self._loaded_registry = None
+                why = made.get('error') or repair_error or '未知原因'
+                # ⚠ 这一支原来是**直接 return 一个错误字典**（从 `load_assets`
+                # 返回）。搬成函数之后必须用**元组**回去，否则调用方的
+                # 四元解包会拿到一个 dict（两条错误路径的判据当场红）。
+                # `_fail` 标记让调用方把这份字典原样返回。
+                return (None, created, created_counts, {'_fail': True, 'payload': {
+                    'ok': False,
+                    'error': f'资源表读不出来，自动重建也失败了：{why}',
+                    'counts': {}, 'created': created,
+                    'repaired': repaired, 'repair_error': repair_error}})
+        else:
+            # **表已经存在 → 自动把磁盘上没登记的资源补进去**，并把文件
+            # 已经不在的、**工具自己登记过**的行删掉（用户 2026-10-05 的目标：
+            # "若表已经存在，自动更新表中的资源，确保表与资源自动一一对应"、
+            # "我认为表应当实时反应实际资源的情况，自动更新和增删"）。
+            #
+            # ⚠ 只动工具自己登记过的行：人工写的（含占位）一律不动，
+            # 写前备份 `*.bak.xlsx`。
+            try:
+                from storygraph.assets.asset_registry import sync_asset_tables
+                sync_info = sync_asset_tables(self.project_root, registry=reg,
+                                              walk=walk)
+            except Exception as e:            # noqa: BLE001 - 对齐失败不该挡打开
+                swallow('app.session_assets.load_assets.sync', e)
+                sync_info = {}
+            if sync_info.get('added') or sync_info.get('removed') \
+                    or sync_info.get('created'):
+                # 表被补/被删/被重建过 → 内存里那份过期了，重新读一遍
+                try:
+                    again = load_asset_registry(self.project_root,
+                                               walk=walk)
+                    if again is not None:
+                        reg = again
+                except Exception as e:        # noqa: BLE001
+                    swallow('app.session_assets.load_assets.resync', e)
+            if sync_info.get('created'):
+                created = sync_info['created']
+                created_counts = sync_info.get('scanned') or {}
+        return reg, created, created_counts, sync_info
+
     def load_assets(self) -> dict:
         """
         「打开项目」：**只**重读资源表（xlsx）—— 图片 / 音乐 / 音效 /
@@ -116,64 +183,17 @@ class AssetRegistryMixin:
         created = ''
         created_counts = {}
         sync_info = {}
-        if reg is None:
-            # **没有资源表就当场建一张**（用户 2026-10-05 实测报）
-            #
-            # > 我拿另一个复制看了一下测出 bug 了，首次加载导入时项目无法读到
-            # > 资源表，应当立即创建对应的资源表
-            #
-            # 也覆盖"表在、但读不出来"（Excel 锁住 / 文件写坏）：那时
-            # `load_asset_registry` 返回 None，`ensure_asset_tables` 会把坏文件
-            # 挪到一边（`*.broken-<时间戳>.xlsx`，不删）再按项目内容重建。
-            from storygraph.assets.asset_registry import sync_asset_tables
-            made = sync_asset_tables(self.project_root, walk=walk)
-            sync_info = made                  # 成功路径也要能报到 repaired 等
-            created = made.get('created') or ''
-            created_counts = made.get('scanned') or {}
-            repaired = made.get('repaired') or []
-            repair_error = made.get('repair_error') or ''
-            if made.get('ok') and created:
-                try:
-                    reg = load_asset_registry(self.project_root,
-                                             walk=walk)
-                except Exception as e:        # noqa: BLE001
-                    swallow('app.session_assets.load_assets.reload', e)
-                    reg = None
-            if reg is None:
-                self._loaded_registry = None
-                why = made.get('error') or repair_error or '未知原因'
-                return {'ok': False,
-                        'error': f'资源表读不出来，自动重建也失败了：{why}',
-                        'counts': {}, 'created': created,
-                        'repaired': repaired, 'repair_error': repair_error}
-        else:
-            # **表已经存在 → 自动把磁盘上没登记的资源补进去**，并把文件
-            # 已经不在的、**工具自己登记过**的行删掉（用户 2026-10-05 的目标：
-            # "若表已经存在，自动更新表中的资源，确保表与资源自动一一对应"、
-            # "我认为表应当实时反应实际资源的情况，自动更新和增删"）。
-            #
-            # ⚠ 只动工具自己登记过的行：人工写的（含占位）一律不动，
-            # 写前备份 `*.bak.xlsx`。
-            try:
-                from storygraph.assets.asset_registry import sync_asset_tables
-                sync_info = sync_asset_tables(self.project_root, registry=reg,
-                                              walk=walk)
-            except Exception as e:            # noqa: BLE001 - 对齐失败不该挡打开
-                swallow('app.session_assets.load_assets.sync', e)
-                sync_info = {}
-            if sync_info.get('added') or sync_info.get('removed') \
-                    or sync_info.get('created'):
-                # 表被补/被删/被重建过 → 内存里那份过期了，重新读一遍
-                try:
-                    again = load_asset_registry(self.project_root,
-                                               walk=walk)
-                    if again is not None:
-                        reg = again
-                except Exception as e:        # noqa: BLE001
-                    swallow('app.session_assets.load_assets.resync', e)
-            if sync_info.get('created'):
-                created = sync_info['created']
-                created_counts = sync_info.get('scanned') or {}
+        # ⚠ **不许包 `if reg is None:`**：这一块是 `if reg is None: … **else:**
+        # （表已存在 → 自动对齐）`，包住调用会让 else 那支永远跑不到
+        # （`test_load_assets_reports_the_sync` 当场抓到）。
+        (reg, created, created_counts,
+         sync_info) = self._ensure_tables_on_open(
+            reg, created, created_counts, sync_info, walk,
+            load_asset_registry)
+        if sync_info.get('_fail'):
+            # 表读不出来、重建也失败 → 把那句话原样交给调用方（见那个 `_fail`
+            # 标记处的说明）。
+            return sync_info['payload']
         self._loaded_registry = reg
         self._asset_index = None          # 表变了 → 解析索引缓存作废
         #: 打开项目时**已经算过**的那份对账，给 UI 复用（别再自己算一遍：
@@ -199,6 +219,25 @@ class AssetRegistryMixin:
                 'repair_error': sync_info.get('repair_error') or '',
                 'sync_backup': sync_info.get('backup') or '',
                 'sync_reconcile': sync_info.get('reconcile') or {}}
+
+    def _scan_registered_rows(self, reg, kinds, placeholders, no_path, dup_paths, seen_paths, is_placeholder_row, norm_asset_path):
+        """登记行扫一遍：缺 Path / 占位行 / 重复 Path（M4 从 asset_health_report 搬出，行为一字不改）。"""
+        for key, attr in kinds:
+            for aid, row in (getattr(reg, attr, {}) or {}).items():
+                rel = str((row or {}).get('Path') or '').strip()
+                if not rel:
+                    no_path.append({'table': key, 'ID': aid})
+                    continue
+                if is_placeholder_row(row):
+                    placeholders.append({'table': key, 'ID': aid, 'Path': rel})
+                    continue
+                norm = norm_asset_path(rel)
+                if norm in seen_paths:
+                    dup_paths.append({'table': key, 'ID': aid,
+                                      'Path': rel,
+                                      'same_as': seen_paths[norm]})
+                else:
+                    seen_paths[norm] = aid
 
     def asset_health_report(self) -> dict:
         """
@@ -245,22 +284,9 @@ class AssetRegistryMixin:
                  ('sounds', 'sounds'), ('voices', 'voices'))
         placeholders, no_path, dup_paths = [], [], []
         seen_paths = {}
-        for key, attr in kinds:
-            for aid, row in (getattr(reg, attr, {}) or {}).items():
-                rel = str((row or {}).get('Path') or '').strip()
-                if not rel:
-                    no_path.append({'table': key, 'ID': aid})
-                    continue
-                if is_placeholder_row(row):
-                    placeholders.append({'table': key, 'ID': aid, 'Path': rel})
-                    continue
-                norm = norm_asset_path(rel)
-                if norm in seen_paths:
-                    dup_paths.append({'table': key, 'ID': aid,
-                                      'Path': rel,
-                                      'same_as': seen_paths[norm]})
-                else:
-                    seen_paths[norm] = aid
+        self._scan_registered_rows(reg, kinds, placeholders, no_path,
+                                    dup_paths, seen_paths,
+                                    is_placeholder_row, norm_asset_path)
         # ⚠ **占位行不算"文件丢了"**：它们是用户明说"还没有出图"的行，单独在
         # 第 ⑦ 段列。`compare_registry_to_disk` 不认识占位标记，所以这里按
         # Path 把它们从 `missing` 里挑掉 —— 实测漏了这一步，占位行会被报成

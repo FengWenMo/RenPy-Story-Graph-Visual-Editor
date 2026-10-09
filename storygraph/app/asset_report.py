@@ -30,6 +30,27 @@ def _samples(items, kind: str = 'path') -> list:
     return lines
 
 
+def _emit_custom_statement_section(stmts, cds, cds_error, out):
+    """把「项目自定义语句」那一段写进报告（M4 从 `format_asset_health` 搬出，行为一字不改）。"""
+    if stmts is not None or cds is not None or cds_error:
+        out.append('')
+        out.append('【⑧ 项目自定义语句（清单声明 + Ren\'Py CDS）】'
+                   '—— 这是**能力状态**，不算上面那类问题')
+        if cds_error:
+            out.append(f'    ⚠ 没读成：{cds_error}')
+        try:
+            if stmts is not None:
+                # 合并视图（M3）：优先级已经算好（清单覆盖宿主注册）。
+                from storygraph.story.statement_registry import (
+                    format_registry_report)
+                text = format_registry_report(stmts)
+            else:
+                from storygraph.story.cds_registry import format_cds_report
+                text = format_cds_report(cds or [])
+            out.append('    ' + text.replace('\n', '\n    '))
+        except Exception:                       # noqa: BLE001 - 报告不该因此失败
+            out.append(f'    （读到 {len(stmts or cds or [])} 条声明）')
+
 def format_asset_health(report: dict) -> str:
     """
     `asset_health_report()` 的结果 → 体检报告文本。
@@ -129,24 +150,7 @@ def format_asset_health(report: dict) -> str:
     stmts = report.get('statements')
     cds = report.get('cds')
     cds_error = report.get('cds_error') or ''
-    if stmts is not None or cds is not None or cds_error:
-        out.append('')
-        out.append('【⑧ 项目自定义语句（清单声明 + Ren\'Py CDS）】'
-                   '—— 这是**能力状态**，不算上面那类问题')
-        if cds_error:
-            out.append(f'    ⚠ 没读成：{cds_error}')
-        try:
-            if stmts is not None:
-                # 合并视图（M3）：优先级已经算好（清单覆盖宿主注册）。
-                from storygraph.story.statement_registry import (
-                    format_registry_report)
-                text = format_registry_report(stmts)
-            else:
-                from storygraph.story.cds_registry import format_cds_report
-                text = format_cds_report(cds or [])
-            out.append('    ' + text.replace('\n', '\n    '))
-        except Exception:                       # noqa: BLE001 - 报告不该因此失败
-            out.append(f'    （读到 {len(stmts or cds or [])} 条声明）')
+    _emit_custom_statement_section(stmts, cds, cds_error, out)
 
     out.append('')
     out.append('—— 说明 ——')

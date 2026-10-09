@@ -454,6 +454,59 @@ def _ast_compare_possible(node, state):
                for l, o, r in _compare_pairs(node))
 
 
+def _eq_pair_possible(val, rng, right_ast, state):
+    """`==` 的可达性判定（M4 搬出）。True/False = 有结论；**None = 无意见**，交给兜底。"""
+    if val is not None:
+        if rng.is_bottom() or rng.is_top():
+            return True
+        if rng.lo > val or rng.hi < val:
+            return False
+    elif isinstance(right_ast, ast.Name):
+        rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
+        if rng.is_bottom() or rng.is_top() or rng2.is_bottom() or rng2.is_top():
+            return True
+        if rng.hi < rng2.lo or rng.lo > rng2.hi:
+            return False
+    return None
+
+def _ne_pair_possible(val, rng, right_ast, state):
+    """`!=` 的可达性判定（M4 搬出）。同上：None = 无意见。"""
+    if val is not None:
+        if rng.lo == rng.hi == val:
+            return False
+    elif isinstance(right_ast, ast.Name):
+        rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
+        if rng.is_const() and rng2.is_const() and rng.lo == rng2.lo:
+            return False
+    return None
+
+def _order_pair_possible(op, val, rng, right_ast, state):
+    """`< <= > >=` 的可达性判定（M4 搬出）。同上：None = 无意见。"""
+    if val is not None:
+        if rng.is_bottom() or rng.is_top():
+            return True
+        if isinstance(op, ast.Lt) and rng.lo >= val:
+            return False
+        if isinstance(op, ast.LtE) and rng.lo > val:
+            return False
+        if isinstance(op, ast.Gt) and rng.hi <= val:
+            return False
+        if isinstance(op, ast.GtE) and rng.hi < val:
+            return False
+    elif isinstance(right_ast, ast.Name):
+        rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
+        if rng.is_bottom() or rng.is_top() or rng2.is_bottom() or rng2.is_top():
+            return True
+        if isinstance(op, ast.Lt) and rng.lo >= rng2.hi:
+            return False
+        if isinstance(op, ast.LtE) and rng.lo > rng2.hi:
+            return False
+        if isinstance(op, ast.Gt) and rng.hi <= rng2.lo:
+            return False
+        if isinstance(op, ast.GtE) and rng.hi < rng2.lo:
+            return False
+    return None
+
 def _ast_compare_pair_possible(left_ast, op, right_ast, state):
     left_ast, op, right_ast = _flip_compare_pair(left_ast, op, right_ast)
 
@@ -466,51 +519,14 @@ def _ast_compare_pair_possible(left_ast, op, right_ast, state):
     val = _int_literal_value(right_ast)
 
     if isinstance(op, ast.Eq):
-        if val is not None:
-            if rng.is_bottom() or rng.is_top():
-                return True
-            if rng.lo > val or rng.hi < val:
-                return False
-        elif isinstance(right_ast, ast.Name):
-            rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
-            if rng.is_bottom() or rng.is_top() or rng2.is_bottom() or rng2.is_top():
-                return True
-            if rng.hi < rng2.lo or rng.lo > rng2.hi:
-                return False
-
+        verdict = _eq_pair_possible(val, rng, right_ast, state)
     elif isinstance(op, ast.NotEq):
-        if val is not None:
-            if rng.lo == rng.hi == val:
-                return False
-        elif isinstance(right_ast, ast.Name):
-            rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
-            if rng.is_const() and rng2.is_const() and rng.lo == rng2.lo:
-                return False
-
+        verdict = _ne_pair_possible(val, rng, right_ast, state)
     elif isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
-        if val is not None:
-            if rng.is_bottom() or rng.is_top():
-                return True
-            if isinstance(op, ast.Lt) and rng.lo >= val:
-                return False
-            if isinstance(op, ast.LtE) and rng.lo > val:
-                return False
-            if isinstance(op, ast.Gt) and rng.hi <= val:
-                return False
-            if isinstance(op, ast.GtE) and rng.hi < val:
-                return False
-        elif isinstance(right_ast, ast.Name):
-            rng2 = state.ranges.get(right_ast.id, ValueRange(-math.inf, math.inf))
-            if rng.is_bottom() or rng.is_top() or rng2.is_bottom() or rng2.is_top():
-                return True
-            if isinstance(op, ast.Lt) and rng.lo >= rng2.hi:
-                return False
-            if isinstance(op, ast.LtE) and rng.lo > rng2.hi:
-                return False
-            if isinstance(op, ast.Gt) and rng.hi <= rng2.lo:
-                return False
-            if isinstance(op, ast.GtE) and rng.hi < rng2.lo:
-                return False
+        verdict = _order_pair_possible(op, val, rng, right_ast, state)
+    else:
+        verdict = None
+    return True if verdict is None else verdict
 
     return True
 

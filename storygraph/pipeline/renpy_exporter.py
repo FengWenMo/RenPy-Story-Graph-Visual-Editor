@@ -94,6 +94,123 @@ def _option_line(opt, condition: str, indent: str) -> str:
     cond_str = f" if {condition}" if condition else ""
     return f'{indent}{quote_string(opt)}{cond_str}:'
 
+def _export_control_node(nid, node, lines, graph, controller_style,
+                        control_name):
+    """
+    控制流图里**一个节点**的产物（M4 从 `export_to_renpy` 搬出）。
+
+    菜单边/条件边/无条件边三路；`_control` 节点不再 call 自己。
+    原来那个"跳过后面的边"的 `continue` 改成 `return`（等价）。
+    """
+    control_label = control_name(node.label_name)
+    lines.append(f"label {control_label}:")
+    for op in _operation_texts(node):
+        # **渲染 python op 只有一份规则**（`story.beat_render.render_code_block`）：
+        # 以前这里手写 `f"    $ {op}"`，而它不知道行首 `\x01`
+        # （= 原文是紧凑 `$code`）这个约定，于是把控制字符原样写进产物
+        # （实测：`$ ^Apersistent.lock_lst["cg01"]= True` → Ren'Py 不认）。
+        from storygraph.story.beat_render import render_code_block
+        for ln in render_code_block(op, multiline='python'):
+            lines.append(f"    {ln}" if str(ln).strip() else '')
+    # 控制流图里的 _control 节点**不要**再 call 自己：那一拍在控制流
+    # 里本来就由一条 call 边表示（自发的话会变成"call 两次"）。
+    if not controller_style:
+        lines.append(f"    call {node.label_name}")
+
+    out_edges = [e for e in graph.edges.values() if e.from_id == nid]
+    if not out_edges:
+        lines.append("    return")
+        lines.append("")
+        return
+
+    menu_edges = [e for e in out_edges if e.option_text]
+    cond_edges = [e for e in out_edges if not e.option_text and e.condition]
+    uncond_edges = [e for e in out_edges if not e.option_text and not e.condition]
+
+    if menu_edges and not cond_edges and not uncond_edges:
+        lines.append("    menu:")
+        for edge in menu_edges:
+            target_node = graph.nodes.get(edge.to_id)
+            if not target_node:
+                continue
+            next_label = control_name(target_node.label_name)
+            lines.append(_option_line(edge.option_text, edge.condition,
+                                      ' ' * 8))
+            lines.append(f"            {edge.type} {next_label}")
+
+    elif menu_edges:
+        if not cond_edges:
+            lines.append("    menu:")
+            for edge in menu_edges:
+                target_node = graph.nodes.get(edge.to_id)
+                if not target_node:
+                    continue
+                next_label = control_name(target_node.label_name)
+                lines.append(_option_line(edge.option_text, edge.condition,
+                                          ' ' * 8))
+                lines.append(f"            {edge.type} {next_label}")
+        else:
+            for idx, edge in enumerate(cond_edges):
+                target_node = graph.nodes.get(edge.to_id)
+                if not target_node:
+                    continue
+                next_label = control_name(target_node.label_name)
+                prefix = "if" if idx == 0 else "elif"
+                lines.append(f"    {prefix} {edge.condition}:")
+                lines.append(f"        {edge.type} {next_label}")
+
+            if uncond_edges:
+                lines.append("    # 警告：无条件跳转被忽略，因为存在菜单分支")
+
+            lines.append("    else:")
+            lines.append("        menu:")
+            for edge in menu_edges:
+                target_node = graph.nodes.get(edge.to_id)
+                if not target_node:
+                    continue
+                next_label = control_name(target_node.label_name)
+                lines.append(_option_line(edge.option_text, edge.condition,
+                                          ' ' * 12))
+                lines.append(f"                {edge.type} {next_label}")
+
+    else:
+        if cond_edges:
+            for idx, edge in enumerate(cond_edges):
+                target_node = graph.nodes.get(edge.to_id)
+                if not target_node:
+                    continue
+                next_label = control_name(target_node.label_name)
+                prefix = "if" if idx == 0 else "elif"
+                lines.append(f"    {prefix} {edge.condition}:")
+                lines.append(f"        {edge.type} {next_label}")
+            if uncond_edges:
+                lines.append("    else:")
+                for edge in uncond_edges:
+                    target_node = graph.nodes.get(edge.to_id)
+                    if not target_node:
+                        continue
+                    lines.append(
+                        f"        {edge.type} "
+                        f"{control_name(target_node.label_name)}"
+                        + _from_suffix(edge))
+        else:
+            if uncond_edges:
+                # **每一条都要写**：控制流节点天然有两条无条件边
+                # （call 原label + jump 下一个control），以前只写
+                # uncond_edges[0] → 那 4 条 jump 全被丢掉，
+                # 产物还是"看起来能跑"的（只是剧情不会往下走）。
+                for edge in uncond_edges:
+                    target_node = graph.nodes.get(edge.to_id)
+                    if not target_node:
+                        continue
+                    lines.append(
+                        f"    {edge.type} "
+                        f"{control_name(target_node.label_name)}"
+                        + _from_suffix(edge))
+            else:
+                lines.append("    return")
+    lines.append("")
+
 def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
     """
     把剧情图写成 Ren'Py 控制流脚本。
@@ -132,114 +249,8 @@ def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
     lines.append("")
 
     for nid, node in graph.nodes.items():
-        control_label = control_name(node.label_name)
-        lines.append(f"label {control_label}:")
-        for op in _operation_texts(node):
-            # **渲染 python op 只有一份规则**（`story.beat_render.render_code_block`）：
-            # 以前这里手写 `f"    $ {op}"`，而它不知道行首 `\x01`
-            # （= 原文是紧凑 `$code`）这个约定，于是把控制字符原样写进产物
-            # （实测：`$ ^Apersistent.lock_lst["cg01"]= True` → Ren'Py 不认）。
-            from storygraph.story.beat_render import render_code_block
-            for ln in render_code_block(op, multiline='python'):
-                lines.append(f"    {ln}" if str(ln).strip() else '')
-        # 控制流图里的 _control 节点**不要**再 call 自己：那一拍在控制流
-        # 里本来就由一条 call 边表示（自发的话会变成"call 两次"）。
-        if not controller_style:
-            lines.append(f"    call {node.label_name}")
-
-        out_edges = [e for e in graph.edges.values() if e.from_id == nid]
-        if not out_edges:
-            lines.append("    return")
-            lines.append("")
-            continue
-
-        menu_edges = [e for e in out_edges if e.option_text]
-        cond_edges = [e for e in out_edges if not e.option_text and e.condition]
-        uncond_edges = [e for e in out_edges if not e.option_text and not e.condition]
-
-        if menu_edges and not cond_edges and not uncond_edges:
-            lines.append("    menu:")
-            for edge in menu_edges:
-                target_node = graph.nodes.get(edge.to_id)
-                if not target_node:
-                    continue
-                next_label = control_name(target_node.label_name)
-                lines.append(_option_line(edge.option_text, edge.condition,
-                                          ' ' * 8))
-                lines.append(f"            {edge.type} {next_label}")
-
-        elif menu_edges:
-            if not cond_edges:
-                lines.append("    menu:")
-                for edge in menu_edges:
-                    target_node = graph.nodes.get(edge.to_id)
-                    if not target_node:
-                        continue
-                    next_label = control_name(target_node.label_name)
-                    lines.append(_option_line(edge.option_text, edge.condition,
-                                              ' ' * 8))
-                    lines.append(f"            {edge.type} {next_label}")
-            else:
-                for idx, edge in enumerate(cond_edges):
-                    target_node = graph.nodes.get(edge.to_id)
-                    if not target_node:
-                        continue
-                    next_label = control_name(target_node.label_name)
-                    prefix = "if" if idx == 0 else "elif"
-                    lines.append(f"    {prefix} {edge.condition}:")
-                    lines.append(f"        {edge.type} {next_label}")
-
-                if uncond_edges:
-                    lines.append("    # 警告：无条件跳转被忽略，因为存在菜单分支")
-
-                lines.append("    else:")
-                lines.append("        menu:")
-                for edge in menu_edges:
-                    target_node = graph.nodes.get(edge.to_id)
-                    if not target_node:
-                        continue
-                    next_label = control_name(target_node.label_name)
-                    lines.append(_option_line(edge.option_text, edge.condition,
-                                              ' ' * 12))
-                    lines.append(f"                {edge.type} {next_label}")
-
-        else:
-            if cond_edges:
-                for idx, edge in enumerate(cond_edges):
-                    target_node = graph.nodes.get(edge.to_id)
-                    if not target_node:
-                        continue
-                    next_label = control_name(target_node.label_name)
-                    prefix = "if" if idx == 0 else "elif"
-                    lines.append(f"    {prefix} {edge.condition}:")
-                    lines.append(f"        {edge.type} {next_label}")
-                if uncond_edges:
-                    lines.append("    else:")
-                    for edge in uncond_edges:
-                        target_node = graph.nodes.get(edge.to_id)
-                        if not target_node:
-                            continue
-                        lines.append(
-                            f"        {edge.type} "
-                            f"{control_name(target_node.label_name)}"
-                            + _from_suffix(edge))
-            else:
-                if uncond_edges:
-                    # **每一条都要写**：控制流节点天然有两条无条件边
-                    # （call 原label + jump 下一个control），以前只写
-                    # uncond_edges[0] → 那 4 条 jump 全被丢掉，
-                    # 产物还是"看起来能跑"的（只是剧情不会往下走）。
-                    for edge in uncond_edges:
-                        target_node = graph.nodes.get(edge.to_id)
-                        if not target_node:
-                            continue
-                        lines.append(
-                            f"    {edge.type} "
-                            f"{control_name(target_node.label_name)}"
-                            + _from_suffix(edge))
-                else:
-                    lines.append("    return")
-        lines.append("")
+        _export_control_node(nid, node, lines, graph,
+                             controller_style, control_name)
 
     text = '\n'.join(lines)
     # ⚠ 落盘一律过**生成门禁**（契约 B1，2026-10-08 修）。

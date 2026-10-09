@@ -62,6 +62,38 @@ class WindowKeyboardMixin:
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
     REQUIRES = ('PAGE_CARD', '_back_to_graph', '_canvas', '_delete_node', '_list', '_open_selected_in_card', '_page', '_text_input_has_focus', '_who', 'check_logic', 'delete_card', 'insert_card', 'load_layout', 'next_beat', 'prev_beat', 'redo_graph', 'save_current_beat', 'save_layout', 'undo_current_beat', 'undo_graph')
 
+    def _filter_structural_keys(self, event, key, mods, obj, on_card):
+        """结构页那批按键（回车/Delete/Ctrl+S…）—— eventFilter 里“不在卡片页”那一支（M4 搬出，行为一字不改）。块内**每条路径都 return**，所以外面直接 return 等价。"""
+        if not on_card:
+            # 结构页：回车 = 进选中模块的卡片；Delete = 删块
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self._open_selected_in_card()
+                return True
+            if key == Qt.Key_Delete:
+                nid = self._canvas.selected_node_id()
+                if nid is not None:
+                    self._delete_node(nid)
+                    return True
+            # 旧版结构页的 Ctrl+S / Ctrl+O（保存 / 加载布局）与 Ctrl+A（分析）——
+            # 「功能缺失那么多」里有它们，这里按页补回（卡片页的 Ctrl+S/Z 另算）。
+            if key == Qt.Key_S and mods & Qt.ControlModifier:
+                self.save_layout()
+                return True
+            if key == Qt.Key_O and mods & Qt.ControlModifier:
+                self.load_layout()
+                return True
+            if key == Qt.Key_A and mods & Qt.ControlModifier:
+                self.check_logic()
+                return True
+            # 图级撤销 / 重做（旧版 Ctrl+Z / Ctrl+Y）
+            if key == Qt.Key_Z and mods & Qt.ControlModifier:
+                self.undo_graph()
+                return True
+            if key == Qt.Key_Y and mods & Qt.ControlModifier:
+                self.redo_graph()
+                return True
+            return super().eventFilter(obj, event)
+
     def eventFilter(self, obj, event):
         """
         键盘契约（**必须真的装上**，见 `_install_shortcuts`）。
@@ -117,34 +149,7 @@ class WindowKeyboardMixin:
             return super().eventFilter(obj, event)
 
         if not on_card:
-            # 结构页：回车 = 进选中模块的卡片；Delete = 删块
-            if key in (Qt.Key_Return, Qt.Key_Enter):
-                self._open_selected_in_card()
-                return True
-            if key == Qt.Key_Delete:
-                nid = self._canvas.selected_node_id()
-                if nid is not None:
-                    self._delete_node(nid)
-                    return True
-            # 旧版结构页的 Ctrl+S / Ctrl+O（保存 / 加载布局）与 Ctrl+A（分析）——
-            # 「功能缺失那么多」里有它们，这里按页补回（卡片页的 Ctrl+S/Z 另算）。
-            if key == Qt.Key_S and mods & Qt.ControlModifier:
-                self.save_layout()
-                return True
-            if key == Qt.Key_O and mods & Qt.ControlModifier:
-                self.load_layout()
-                return True
-            if key == Qt.Key_A and mods & Qt.ControlModifier:
-                self.check_logic()
-                return True
-            # 图级撤销 / 重做（旧版 Ctrl+Z / Ctrl+Y）
-            if key == Qt.Key_Z and mods & Qt.ControlModifier:
-                self.undo_graph()
-                return True
-            if key == Qt.Key_Y and mods & Qt.ControlModifier:
-                self.redo_graph()
-                return True
-            return super().eventFilter(obj, event)
+            return self._filter_structural_keys(event, key, mods, obj, on_card)
 
         # Ctrl+S：与工具栏 action 的快捷键同一个落点（两处都能按，语义只有一份）
         if key == Qt.Key_S and mods & Qt.ControlModifier:
