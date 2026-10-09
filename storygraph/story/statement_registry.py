@@ -738,6 +738,76 @@ def _specs_of(registry) -> list:
     return out
 
 
+def _describe_rows(counts, seen, reg, by_name, known_builtin,
+                  cov) -> list:
+    """
+    `describe_statements` 的**报告行**（M4 从主函数搬出）。
+
+    每条头一行：来源四档（declared / host-registry / builtin /
+    shape-guess）、参数列、保真度、出现次数、原文样例、告警。
+    顺手把**能力覆盖**累加进 `cov`（调用方在返回里用它）。
+
+    ⚠ 这里的判定细节（为什么官方语句也算 builtin、为什么只对
+    `shape-guess` 提示"去声明"）见行内注释 —— 一个字都没改。
+    """
+    rows = []
+    for head, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if head in known_builtin:
+            continue
+        raw_kind = (seen.get(head) or {}).get('raw_kind') or ''
+        cap = capability_of(head, reg, raw_kind=raw_kind)
+        cov.counts[cap.level] = cov.count_of(cap.level) + cnt
+        sp = by_name.get(head)
+        # 来源三档 + 一档"官方/工具自己的"（2026-10-07）：
+        #   · 项目声明（rules / CDS）= 主路径；
+        #   · **官方语句**（`show` / `hide` / `call` …）与**工具自己建模**的
+        #     （`loop` / `camera`）以及**内置形状表**（`with`/`pause`/`window`）
+        #     → 'builtin'：它们不是"项目自定义结构"，**不该提示人去声明**
+        #     （第一版把 `show` 也提示成"只靠猜，请写进 rules.json" —— 那是噪声）；
+        #   · 剩下的才真是"只靠形状猜"。
+        builtin = (head in _builtin_schemas() or head in _known_heads()
+                   or head in ('loop', 'camera'))
+        if sp is not None:
+            source = sp.source                      # 'declared' | 'host-registry'
+        elif builtin:
+            source = 'builtin'
+        else:
+            source = 'shape-guess'
+        cols = []
+        for c in arg_columns(reg, head):
+            cols.append({'name': c.get('param') or c.get('name') or '',
+                         'label': c.get('label') or '',
+                         'positional': c.get('positional'),
+                         'choices': list(c.get('choices') or ()),
+                         'choices_from': c.get('choices_from') or ''})
+        warnings = []
+        if source == 'shape-guess':
+            warnings.append('只靠形状猜出来的：参数名/约束工具不知道'
+                            '（要让它知道，写进 storygraph.rules.json 的 '
+                            'statements，或让代码里有 renpy.register_statement）')
+        elif sp is not None and not cols:
+            warnings.append('已声明但没有参数形状 → 表里不会有"每参数一列"')
+        rows.append({
+            'name': head,
+            'label': (sp.label if sp is not None else '') or '',
+            'source': source,
+            'origin': (sp.origin if sp is not None else ''),
+            'declared': sp is not None,
+            'block': bool(sp.has_block) if sp is not None else None,
+            'columns': cols,
+            'fidelity': cap.level,
+            'fidelity_name': cap.level_name,
+            'provenance': cap.provenance,
+            'evidence_note': cap.evidence,
+            'escape': cap.escape,
+            'occurrences': cnt,
+            'file': (seen.get(head) or {}).get('file') or '',
+            # 原文样例（CST 真迹优先）—— 见循环里 `statement_text` 的说明。
+            'sample': (seen.get(head) or {}).get('sample') or '',
+            'warnings': warnings,
+        })
+    return rows
+
 def describe_statements(project_root=None, statements=None, registry=None,
                         builtin_heads=None) -> dict:
     """
@@ -819,63 +889,9 @@ def describe_statements(project_root=None, statements=None, registry=None,
                           'sample': sample[:120]}
 
     cov = Coverage()
-    rows = []
     known_builtin = set(builtin_heads or ())
-    for head, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-        if head in known_builtin:
-            continue
-        raw_kind = (seen.get(head) or {}).get('raw_kind') or ''
-        cap = capability_of(head, reg, raw_kind=raw_kind)
-        cov.counts[cap.level] = cov.count_of(cap.level) + cnt
-        sp = by_name.get(head)
-        # 来源三档 + 一档"官方/工具自己的"（2026-10-07）：
-        #   · 项目声明（rules / CDS）= 主路径；
-        #   · **官方语句**（`show` / `hide` / `call` …）与**工具自己建模**的
-        #     （`loop` / `camera`）以及**内置形状表**（`with`/`pause`/`window`）
-        #     → 'builtin'：它们不是"项目自定义结构"，**不该提示人去声明**
-        #     （第一版把 `show` 也提示成"只靠猜，请写进 rules.json" —— 那是噪声）；
-        #   · 剩下的才真是"只靠形状猜"。
-        builtin = (head in _builtin_schemas() or head in _known_heads()
-                   or head in ('loop', 'camera'))
-        if sp is not None:
-            source = sp.source                      # 'declared' | 'host-registry'
-        elif builtin:
-            source = 'builtin'
-        else:
-            source = 'shape-guess'
-        cols = []
-        for c in arg_columns(reg, head):
-            cols.append({'name': c.get('param') or c.get('name') or '',
-                         'label': c.get('label') or '',
-                         'positional': c.get('positional'),
-                         'choices': list(c.get('choices') or ()),
-                         'choices_from': c.get('choices_from') or ''})
-        warnings = []
-        if source == 'shape-guess':
-            warnings.append('只靠形状猜出来的：参数名/约束工具不知道'
-                            '（要让它知道，写进 storygraph.rules.json 的 '
-                            'statements，或让代码里有 renpy.register_statement）')
-        elif sp is not None and not cols:
-            warnings.append('已声明但没有参数形状 → 表里不会有"每参数一列"')
-        rows.append({
-            'name': head,
-            'label': (sp.label if sp is not None else '') or '',
-            'source': source,
-            'origin': (sp.origin if sp is not None else ''),
-            'declared': sp is not None,
-            'block': bool(sp.has_block) if sp is not None else None,
-            'columns': cols,
-            'fidelity': cap.level,
-            'fidelity_name': cap.level_name,
-            'provenance': cap.provenance,
-            'evidence_note': cap.evidence,
-            'escape': cap.escape,
-            'occurrences': cnt,
-            'file': (seen.get(head) or {}).get('file') or '',
-            # 原文样例（CST 真迹优先）—— 见循环里 `statement_text` 的说明。
-            'sample': (seen.get(head) or {}).get('sample') or '',
-            'warnings': warnings,
-        })
+    rows = _describe_rows(counts, seen, reg, by_name, known_builtin,
+                              cov)
 
     return {
         'project': str(project_root or ''),
