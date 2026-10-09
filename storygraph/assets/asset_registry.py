@@ -111,6 +111,8 @@ ASSET_FIELD_LABELS = {
     'Attributes': '表情',
     'Category': '类别',
     'Notes': '备注',
+    #: 角色别名（纯文字导入用，多值：`MOM|母亲|老妈`）——见 `_TABLE_FIELDS` 的说明
+    'Aliases': '别名',
     'Loop': '循环',
     'Volume': '音量',
     'ATL': 'ATL',
@@ -2132,8 +2134,14 @@ _STANDARD_TABLES = {
 }
 
 # 资源表写入时的字段顺序（用于"新建资产"追加一行）
+# ⚠ `Aliases`（别名，中文表头「别名」）是 2026-10-10 为**纯文字导入**加的：
+# 剧本里作者可能用"表里没有的第三种写法"（`MOM` 之于变量 `mm`）—— 那是**人写的映射**，
+# 只能显式配。它是**多值**列（`MOM|母亲|老妈`，`|` 或 `,` 分隔）。
+# 为什么放 `Notes` 之前：人写列挨着看；为什么**不**进 `_CHAR_IDENTITY_KEYS`：
+# 那个元组是**重命名识别**用的（"两边非空且不同就当成换了角色"），
+# 人一编辑别名就会被误判成"换角色" —— 人写字段不该参与身份比较。
 _TABLE_FIELDS = {
-    'character': ['ID', 'Name', 'Color', 'ImageTag', 'Notes'],
+    'character': ['ID', 'Name', 'Color', 'ImageTag', 'Aliases', 'Notes'],
     'image': ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'],
     # transform 增加 ATL/Params/Doc/Category：支持自定义变换（文档第四节），
     # 导出时按 ATL 生成 `transform id(params):` 代码块；Doc 是给文案看的

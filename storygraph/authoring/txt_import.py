@@ -100,35 +100,100 @@ def _norm_key(name: str) -> str:
 
 
 class CharacterMap:
-    """
+    r"""
     角色标识 → 角色变量 的映射（**唯一真源来自角色表**）。
 
-    `rows` 是 `AssetRegistry.characters` 那种形状：`{变量: {'ID','Name',…}}`。
+    `rows` 是 `AssetRegistry.characters` 那种形状：
+    `{变量: {'ID','Name','Aliases','ImageTag',…}}`。
+
+    ## 四层匹配（能自动的绝不让人配；**猜不准的一律不猜**）
+
+    | 层 | 判据 | 例 |
+    |---|---|---|
+    | L0 精确 | token == 角色变量 | `mm` |
+    | L1 归一 | 大小写/下划线/空格/角括号/引号归一 | `Mm`/`MM`/`m_m`/`「叶怀瑾」` |
+    | L2 显示名 | token == `Name` 列 | `妈妈`（变量是 `mm`） |
+    | L3 别名 | token ∈ `Aliases` 列（**多值**：`MOM\|母亲\|老妈`） | `MOM` |
+    | L4 | 都不中 → **报出来**（`lookup` 返回空） | `LINGDAO` |
+
+    ⚠ 为什么不猜：`LINGDAO ↔ ld` 之间**没有算法关系**（`ld` 既不是拼音也不是可推的缩写），
+    猜错就是**改剧情**（游戏里说话人换了人）。
     """
+
+    #: 层优先级（越小越强）：变量 > 显示名 > 别名
+    LAYER_RANK = {'variable': 0, 'display': 1, 'alias': 2}
 
     def __init__(self, rows=None):
         self.by_key = {}
+        self.layer_of = {}
         self.display = {}
+        #: 撞车清单：`(归一后的键, 已占用的角色, 后来的角色)` —— **不许静默取第一个**
+        self.conflicts = []
         for var, row in (rows or {}).items():
             row = row or {}
             var = str(row.get('ID') or var or '').strip()
             if not var:
                 continue
-            self.by_key[_norm_key(var)] = var
+            # L0/L1：变量名本身（`JC`/`jc`/`J_C` 都归一到同一个键）
+            self._add(_norm_key(var), var, 'variable')
             name = str(row.get('Name') or '').strip()
             if name:
                 self.display[var] = name
-                # 显示名也进索引（`「蒋忱」` → jc）：作者可能直接写名字
-                self.by_key.setdefault(_norm_key(name), var)
+                self._add(_norm_key(name), var, 'display')      # L2
+            for alias in split_aliases(row.get('Aliases')):
+                self._add(_norm_key(alias), var, 'alias')        # L3
+
+    def _add(self, key: str, var: str, layer: str) -> None:
+        if not key:
+            return
+        cur = self.by_key.get(key)
+        if cur is None:
+            self.by_key[key] = var
+            self.layer_of[key] = layer
+            return
+        if cur != var:
+            # 撞车：这个写法指到了两个角色 —— **报出来**（绝不静默取第一个），
+            # 但映射本身仍按"**强层赢**"定下来（显示名 > 别名），
+            # 否则用户看到的是"正名输给了别人的别名"，比报错更费解。
+            self.conflicts.append((key, cur, var))
+            if self.LAYER_RANK[layer] < self.LAYER_RANK.get(
+                    self.layer_of[key], 'alias'):
+                self.by_key[key] = var
+                self.layer_of[key] = layer
+        elif self.LAYER_RANK[layer] < self.LAYER_RANK.get(self.layer_of[key],
+                                                          'alias'):
+            self.layer_of[key] = layer      # 同一个角色：保留更强的来源
 
     def lookup(self, token: str):
-        """返回 `(变量, 命中方式)`；没命中返回 `(None, '')`。"""
+        """返回 `(变量, 命中层)`；没命中返回 `(None, '')`。"""
         key = _norm_key(token)
         if not key:
             return None, ''
-        if key in self.by_key:
-            return self.by_key[key], 'table'
-        return None, ''
+        var = self.by_key.get(key)
+        return (var, self.layer_of.get(key, '')) if var else (None, '')
+
+    def conflict_warnings(self) -> list:
+        """撞车 → 给人看的告警（同一个写法指到了两个角色）。"""
+        return [f'角色别名冲突："{key}" 同时指向 {a} 与 {b}'
+                f'（请到 characters.xlsx 的「别名」列里改掉一个）'
+                for key, a, b in self.conflicts]
+
+    def candidates(self, token: str) -> list:
+        """
+        未映射时给**候选**（让人挑，而不是我们猜）。
+
+        只按"前缀/子串"粗略提示，命中就列出来；列不出就返回空 —— 空也不算错，
+        S3 的界面会把整张角色表摊给用户挑。
+        """
+        key = _norm_key(token)
+        if not key:
+            return []
+        out = []
+        for k, var in self.by_key.items():
+            if k != key and (k.startswith(key) or key.startswith(k)):
+                if var not in out:
+                    out.append(var)
+        return sorted(out)[:8]
 
     def suggest_define(self, token: str) -> str:
         """
@@ -142,6 +207,22 @@ class CharacterMap:
         if re.match(r'^\d', var):
             var = 'c' + var
         return f'define {var} = Character("{token}")'
+
+
+#: 别名列的分隔符：`|` `,` `，` `、` `;` `；` 与空白都算（一个人可以有**多个**别名）
+_ALIAS_SPLIT_RE = re.compile(r'[|,，、;；\s]+')
+
+
+def split_aliases(value) -> list:
+    """
+    别名列 → 别名列表（**多值**）。
+
+    用户 2026-10-10："一个人可以有多个别名" —— `妈妈` / `Mom` / `MM` 都是同一个人，
+    所以这一列天然是列表，不是单值。空值/None 返回 `[]`。
+    """
+    if value is None:
+        return []
+    return [x.strip() for x in _ALIAS_SPLIT_RE.split(str(value)) if x.strip()]
 
 
 # ===================== 行型判定 =====================
@@ -299,6 +380,7 @@ class ConversionResult:
     suggested_defines: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     dropped: list = field(default_factory=list)        # 被丢掉的原文行（应当为空）
+    conflicts: list = field(default_factory=list)      # 别名撞车（不许静默取第一个）
 
     @property
     def ok(self) -> bool:
@@ -360,8 +442,14 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
     for no, raw in dropped:
         warnings.append(f'第 {no} 行没产出任何内容（原文：{raw.strip()[:40]}）')
     for token, n in sorted(unmapped.items()):
-        warnings.append(f'角色 "{token}" 不在角色表里（{n} 处）—— 产物里保留了它，'
-                        f'请把它加进 characters.xlsx，或在 txt 里改成表里的变量名')
+        hint = chars.candidates(token)
+        extra = f'；相近的角色：{"、".join(hint)}' if hint else ''
+        warnings.append(
+            f'角色 "{token}" 不在角色表里（{n} 处）—— 在 characters.xlsx 的'
+            f'「别名」列给它补一个别名（可写多个，用 | 分隔），'
+            f'或把 txt 里改成表里的变量名/显示名{extra}')
+    # 别名撞车：同一个写法指到两个角色 —— **报出来**，绝不静默取第一个
+    warnings.extend(chars.conflict_warnings())
 
     body = '\n'.join(out)
     head = f'label {label}:\n' if label else ''
@@ -383,7 +471,7 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
         rpy_text=text_out, label=label, lines=parsed, counts=counts,
         unmapped=unmapped,
         suggested_defines=[chars.suggest_define(t) for t in sorted(unmapped)],
-        warnings=warnings, dropped=dropped)
+        warnings=warnings, dropped=dropped, conflicts=list(chars.conflicts))
 
 
 def _escape(text: str) -> str:
