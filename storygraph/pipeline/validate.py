@@ -211,144 +211,185 @@ def validate_level1(beats, registry=None,
     for b in beats or []:
         where = getattr(b, 'line_id', '') or f"{b.label}.{b.seq:04d}"
 
-        # 空台词：`""`（清空对话框）是常见写法，警告即可；
-        # 有说话人却空了台词，那才是明显的漏写 → 错误。
-        #
-        # ⚠ **结构头不是台词**（2026-10-07 实测，真机 +1 条假警）：
-        # 循环 / 相机的**组头拍**、以及未建模块的保真拍，自己都不带台词 ——
-        # 它们是**结构锚点**。不看 `loop_header` / `camera_header` / `opaque`
-        # 这三位，`while current_round < game_rounds:` 那一拍就会长得像一句
-        # 空台词，被报成"空台词行（`""`）"。
-        # （旧形态之所以没报，只是因为它把整块 `while` 和**后面那句台词**
-        #   并进了同一张拍 —— 那是另一个缺陷，不该被当成这里的挡箭牌。）
-        empty_say = (b.kind in ('say', 'narration') and not b.text
-                     and not b.comment and not b.raw and not b.code
-                     and not b.sound and not b.voice and not b.music
-                     and not b.scene and not b.show and not b.hide
-                     and not getattr(b, 'stage', '')
-                     and not getattr(b, 'bgm', '')
-                     and not getattr(b, 'sfx', '')
-                     and not getattr(b, 'loop_header', '')
-                     and not getattr(b, 'camera_header', '')
-                     and not getattr(b, 'opaque', '')
-                     and (b.music_action or '') != 'stop'
-                     and (b.sound_action or '') != 'stop')
-        if empty_say:
-            if b.speaker:
-                issues.append(Issue(
-                    L1, 'E101', ERROR,
-                    f"说话人 '{b.speaker}' 有台词行但内容是空的", where,
-                    '补台词，或把这一行删掉'))
-            else:
-                issues.append(Issue(
-                    L1, 'W113', WARNING, '空台词行（`""`）', where,
-                    '常见用法是清空对话框；若是漏写就补上'))
-
-        # 说话人未定义：角色表**明显不完整**时只给警告。
-        # 否则"角色解析漏了一批（如 DynamicCharacter）"会翻成上千条
-        # 错误把真正的问题埋掉——真实项目一次报了 1000+ 条就是这个原因。
-        #
-        # ⚠ **字符串字面量说话人**（`"系统" "提示"`）不查：它不是角色变量，
-        # 天然不在角色表里（2026-10-05 修 —— 否则每处这种写法都报一条
-        # "说话人不在资源表角色里"的假警）。
-        if b.speaker and not is_literal_speaker(b.speaker) \
-                and registry is not None \
-                and not resolve_references(b.speaker, registry, index):
-            managed = _category_managed(registry, 'character')
-            issues.append(Issue(
-                L1, 'E102' if managed else 'W110',
-                ERROR if managed else WARNING,
-                f"说话人 '{b.speaker}' 不在资源表角色里", where,
-                '在 characters.xlsx 登记，或改成本表已有的角色变量名'
-                if managed else
-                '角色表还是空的：先「从脚本导入角色表」，再回来看这条'))
-
-        # 资产引用未登记
-        for atype, name, builtin_ok in _beat_asset_refs(b):
-            if _ref_ok(name, atype, registry, index, builtin_ok):
-                continue
-            managed = _category_managed(registry, atype)
-
-            # 图像：tag 存在且属性都声明过 → 正常（合成立绘的常见写法）
-            if atype == 'image' and registry is not None:
-                status = _image_ref_issue(name, registry, index)
-                if status is None:
-                    continue
-                if status == 'attrs':
-                    issues.append(Issue(
-                        L1, 'W111', WARNING,
-                        f"图片 '{name}' 的属性组合未在资源表声明"
-                        f"（tag 已存在）", where,
-                        '合成立绘按 tag+属性合成；如需精确管理可在'
-                        ' images.xlsx 登记该组合'))
-                    continue
-
-            # 音频：脚本写的是**文件路径**且文件不存在 → 警告。
-            # Ren'Py 对加载不到的音频只是静音 + 写日志，不会崩，
-            # 所以它不是"构建会失败"级别的错误。
-            if atype in ('music', 'sound', 'voice') and _looks_like_path(name):
-                issues.append(Issue(
-                    L1, 'W112', WARNING,
-                    f"音频 '{name}' 在资源表里找不到对应条目", where,
-                    '核对文件名/路径；Ren\'Py 会静音但日志会报错'))
-                continue
-
-            issues.append(Issue(
-                L1, 'E103' if managed else 'W110',
-                ERROR if managed else WARNING,
-                f"{atype} '{name}' 未登记", where,
-                '在对应资源表登记，或在候选表新增后刷新候选'
-                if managed else
-                '这类资产还没建资源表：建好后引用即可下拉选择'))
-
-        # 台词长度 / 文本标签
-        if b.text:
-            # char_limit <= 0 时关闭长度提醒（台词长短由作者把控，
-            # 不应作为硬性门槛——一行超过 60/120 字在长台词里很常见）。
-            if char_limit and len(b.text) > char_limit:
-                issues.append(Issue(
-                    L1, 'W101', WARNING,
-                    f'台词 {len(b.text)} 字，超过 UI 上限 {char_limit}', where,
-                    '拆成两拍，或调短（如不需要此提醒可把字符上限设为 0 关闭）'))
-            issues.extend(_check_text_tags(b.text, where))
-
-        # 音频动作取值（BGM / SFX 列里的 [音乐] / [音效] 编译出来的动作）
-        for col, val in (('BGM', b.music_action), ('SFX', b.sound_action)):
-            if val and val not in _VALID_ACTIONS:
-                issues.append(Issue(
-                    L1, 'W102', WARNING,
-                    f'{col} 列的动作 {val!r} 非法（应为 play/queue/stop）',
-                    where, '改成 play / queue / stop'))
-
-        # 音频参数写在没有音频的拍上
-        if b.music_params and not b.music and b.music_action != 'stop':
-            issues.append(Issue(
-                L1, 'W103', WARNING, 'BGM 列写了参数却没有音乐', where,
-                '补上音乐名，或清空参数'))
-        if b.sound_params and not b.sound:
-            issues.append(Issue(
-                L1, 'W104', WARNING, 'SFX 列写了参数却没有音效', where,
-                '补上音效名，或清空参数'))
-
-        # 同一拍里 scene 与 show 撞同一图像：顺序敏感，容易出错
-        scene_img = (b.scene or '').strip()
-        if scene_img:
-            for item in split_show_items(b.show):
-                if (item.get('image') or '').strip() == scene_img:
-                    issues.append(Issue(
-                        L1, 'W105', WARNING,
-                        f'scene 与 show 用了同一图像 {scene_img!r}', where,
-                        '确认 Stage 里的书写顺序是否符合本意'))
-
-        # 条件表达式肉眼可见的壳
-        if b.condition and not _looks_like_condition(b.condition):
-            issues.append(Issue(
-                L1, 'W107', WARNING,
-                f'条件 {b.condition!r} 看起来不是合法表达式', where,
-                '写成 love >= 5 这样的 Python 表达式'))
+        _l1_empty_say(b, where, issues)
+        _l1_speaker(b, where, registry, index, issues)
+        _l1_asset_refs(b, where, registry, index, issues)
+        _l1_text(b, where, char_limit, issues)
+        _l1_audio_actions(b, where, issues)
+        _l1_audio_params(b, where, issues)
+        _l1_scene_show_collision(b, where, issues)
+        _l1_condition(b, where, issues)
 
     issues.extend(_cell_sanitize_issues(beats))
     return issues
+
+def _l1_empty_say(b, where, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 空台词：`""`（清空对话框）是常见写法，警告即可；
+    # 有说话人却空了台词，那才是明显的漏写 → 错误。
+    #
+    # ⚠ **结构头不是台词**（2026-10-07 实测，真机 +1 条假警）：
+    # 循环 / 相机的**组头拍**、以及未建模块的保真拍，自己都不带台词 ——
+    # 它们是**结构锚点**。不看 `loop_header` / `camera_header` / `opaque`
+    # 这三位，`while current_round < game_rounds:` 那一拍就会长得像一句
+    # 空台词，被报成"空台词行（`""`）"。
+    # （旧形态之所以没报，只是因为它把整块 `while` 和**后面那句台词**
+    #   并进了同一张拍 —— 那是另一个缺陷，不该被当成这里的挡箭牌。）
+    empty_say = (b.kind in ('say', 'narration') and not b.text
+                 and not b.comment and not b.raw and not b.code
+                 and not b.sound and not b.voice and not b.music
+                 and not b.scene and not b.show and not b.hide
+                 and not getattr(b, 'stage', '')
+                 and not getattr(b, 'bgm', '')
+                 and not getattr(b, 'sfx', '')
+                 and not getattr(b, 'loop_header', '')
+                 and not getattr(b, 'camera_header', '')
+                 and not getattr(b, 'opaque', '')
+                 and (b.music_action or '') != 'stop'
+                 and (b.sound_action or '') != 'stop')
+    if empty_say:
+        if b.speaker:
+            issues.append(Issue(
+                L1, 'E101', ERROR,
+                f"说话人 '{b.speaker}' 有台词行但内容是空的", where,
+                '补台词，或把这一行删掉'))
+        else:
+            issues.append(Issue(
+                L1, 'W113', WARNING, '空台词行（`""`）', where,
+                '常见用法是清空对话框；若是漏写就补上'))
+
+
+
+def _l1_speaker(b, where, registry, index, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 说话人未定义：角色表**明显不完整**时只给警告。
+    # 否则"角色解析漏了一批（如 DynamicCharacter）"会翻成上千条
+    # 错误把真正的问题埋掉——真实项目一次报了 1000+ 条就是这个原因。
+    #
+    # ⚠ **字符串字面量说话人**（`"系统" "提示"`）不查：它不是角色变量，
+    # 天然不在角色表里（2026-10-05 修 —— 否则每处这种写法都报一条
+    # "说话人不在资源表角色里"的假警）。
+    if b.speaker and not is_literal_speaker(b.speaker) \
+            and registry is not None \
+            and not resolve_references(b.speaker, registry, index):
+        managed = _category_managed(registry, 'character')
+        issues.append(Issue(
+            L1, 'E102' if managed else 'W110',
+            ERROR if managed else WARNING,
+            f"说话人 '{b.speaker}' 不在资源表角色里", where,
+            '在 characters.xlsx 登记，或改成本表已有的角色变量名'
+            if managed else
+            '角色表还是空的：先「从脚本导入角色表」，再回来看这条'))
+
+
+
+def _l1_asset_refs(b, where, registry, index, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 资产引用未登记
+    for atype, name, builtin_ok in _beat_asset_refs(b):
+        if _ref_ok(name, atype, registry, index, builtin_ok):
+            continue
+        managed = _category_managed(registry, atype)
+
+        # 图像：tag 存在且属性都声明过 → 正常（合成立绘的常见写法）
+        if atype == 'image' and registry is not None:
+            status = _image_ref_issue(name, registry, index)
+            if status is None:
+                continue
+            if status == 'attrs':
+                issues.append(Issue(
+                    L1, 'W111', WARNING,
+                    f"图片 '{name}' 的属性组合未在资源表声明"
+                    f"（tag 已存在）", where,
+                    '合成立绘按 tag+属性合成；如需精确管理可在'
+                    ' images.xlsx 登记该组合'))
+                continue
+
+        # 音频：脚本写的是**文件路径**且文件不存在 → 警告。
+        # Ren'Py 对加载不到的音频只是静音 + 写日志，不会崩，
+        # 所以它不是"构建会失败"级别的错误。
+        if atype in ('music', 'sound', 'voice') and _looks_like_path(name):
+            issues.append(Issue(
+                L1, 'W112', WARNING,
+                f"音频 '{name}' 在资源表里找不到对应条目", where,
+                '核对文件名/路径；Ren\'Py 会静音但日志会报错'))
+            continue
+
+        issues.append(Issue(
+            L1, 'E103' if managed else 'W110',
+            ERROR if managed else WARNING,
+            f"{atype} '{name}' 未登记", where,
+            '在对应资源表登记，或在候选表新增后刷新候选'
+            if managed else
+            '这类资产还没建资源表：建好后引用即可下拉选择'))
+
+
+
+def _l1_text(b, where, char_limit, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 台词长度 / 文本标签
+    if b.text:
+        # char_limit <= 0 时关闭长度提醒（台词长短由作者把控，
+        # 不应作为硬性门槛——一行超过 60/120 字在长台词里很常见）。
+        if char_limit and len(b.text) > char_limit:
+            issues.append(Issue(
+                L1, 'W101', WARNING,
+                f'台词 {len(b.text)} 字，超过 UI 上限 {char_limit}', where,
+                '拆成两拍，或调短（如不需要此提醒可把字符上限设为 0 关闭）'))
+        issues.extend(_check_text_tags(b.text, where))
+
+
+
+def _l1_audio_actions(b, where, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 音频动作取值（BGM / SFX 列里的 [音乐] / [音效] 编译出来的动作）
+    for col, val in (('BGM', b.music_action), ('SFX', b.sound_action)):
+        if val and val not in _VALID_ACTIONS:
+            issues.append(Issue(
+                L1, 'W102', WARNING,
+                f'{col} 列的动作 {val!r} 非法（应为 play/queue/stop）',
+                where, '改成 play / queue / stop'))
+
+
+
+def _l1_audio_params(b, where, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 音频参数写在没有音频的拍上
+    if b.music_params and not b.music and b.music_action != 'stop':
+        issues.append(Issue(
+            L1, 'W103', WARNING, 'BGM 列写了参数却没有音乐', where,
+            '补上音乐名，或清空参数'))
+    if b.sound_params and not b.sound:
+        issues.append(Issue(
+            L1, 'W104', WARNING, 'SFX 列写了参数却没有音效', where,
+            '补上音效名，或清空参数'))
+
+
+
+def _l1_scene_show_collision(b, where, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 同一拍里 scene 与 show 撞同一图像：顺序敏感，容易出错
+    scene_img = (b.scene or '').strip()
+    if scene_img:
+        for item in split_show_items(b.show):
+            if (item.get('image') or '').strip() == scene_img:
+                issues.append(Issue(
+                    L1, 'W105', WARNING,
+                    f'scene 与 show 用了同一图像 {scene_img!r}', where,
+                    '确认 Stage 里的书写顺序是否符合本意'))
+
+
+
+def _l1_condition(b, where, issues) -> None:
+    """`validate_level1` 的一个检查块（原样搬出，只为拆复杂度）。"""
+    # 条件表达式肉眼可见的壳
+    if b.condition and not _looks_like_condition(b.condition):
+        issues.append(Issue(
+            L1, 'W107', WARNING,
+            f'条件 {b.condition!r} 看起来不是合法表达式', where,
+            '写成 love >= 5 这样的 Python 表达式'))
+
+
 
 
 def _cell_sanitize_issues(beats) -> list:
