@@ -49,7 +49,7 @@
    · 判据 `tests/test_hell_show_split_columns.py`（22 条）+ `tools/probe_show_split_real.py`；验收：真机渲染逐字不变 / `audit_idempotence` 53/53 / `hell_edit_rounds` 0 失败 / 回归 594 passed。
    · ⚠ 两个**静默缺陷**已修：项数>格数时**放不下就不摊**（否则丢项）；**不摊时不许写摊列**（否则读回来重复）。
    · 审查另推翻两处旧假设：`Stage` **已是派生视图**（`compose_stage`）；⚠ `pause`/`with X`/`jump` 走 `raw` 通道**刻意不进 Stage**；顺序载体是 **`OpOrder`**（带 `show#0` 逐次序号）。
-4. **坏味道（D5，M4 🔵 已完成 3 个）**：`sync_asset_tables` **133→28**、`render_beat_to_rpy` **81→47**、`scan_assets` **74→8**（三者都已从 health_check 复杂度头部消失，阈值=50）。手法=**先录金标 → 纯结构拆分**（sync=表逐格+返回 dict；渲染=53 文件产物 hash；扫描=4 组合结果集含嵌套副本排除）。剩：`renpy_parser._walk`(72) / `validate_level1`(63) / `patcher._replace_matched`(62) / `beat_build._hydrate_stage`(59)；模块体积 `renpy_parser` 4360 行。⚠ 教训：金标必须**归一化**（路径/set repr 顺序会随机漂移）+ 能**定位到文件**；**splice 后旧下标全失效**（要重新定位标记，注意 8 空格 vs 4 空格缩进的返回体）；抽出后要**复查死代码**。
+4. **坏味道（D5，M4 🔵 已完成 4 个）**：`sync_asset_tables` **133→28**、`render_beat_to_rpy` **81→47**、`scan_assets` **74→8**、`renpy_parser._walk` **72→12**（都已从 health_check 头部消失，阈值=50）。手法=**先录金标 → 纯结构拆分**（sync=表逐格+返回 dict；渲染=53 文件产物 hash；扫描=4 组合结果集；解析=**整份 ParseResult**）。剩：`validate_level1`(63) / `patcher._replace_matched`(62) / `beat_build._hydrate_stage`(59) / `patch_export`(57)；模块体积 `renpy_parser` 4422 行。⚠ 教训：金标要**归一化**+**能定位到文件**；**splice 后旧下标失效**（重定位；函数结束行用 AST `end_lineno`）；**换名要跳过关键字参数名**、**只改代码不碰注释/字符串**；**"重命名"与"搬运"分两步**（先统一成 `box.` 再 dedent 提方法，风险趋零）；抽出后**复查死代码**。
 5. **拍级三路合并**（设计文档 §5 第 6 步，明确"按需"）。
 6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件、资源映射、运行期验证未做。
 

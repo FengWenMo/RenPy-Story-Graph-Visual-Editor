@@ -3148,6 +3148,33 @@ class ParseResult:
 #  第三层：ParseResultBuilder
 # ====================================================================
 
+class _WalkCtx:
+    """
+    `ParseResultBuilder._walk` **一层递归**里的共享可变状态（M4 拆分时打包）。
+
+    为什么打包：这九样东西在 23 个分支里到处都是，而且 `counters` /
+    `cur_inline` / `cond_inline` 是**可变容器**（分支会就地把它们改掉）——
+    拆成一个个参数传，早晚漏传一个（而且漏传往往不报错，只是少收内容）。
+    """
+
+    __slots__ = ('builder', 'current_label', 'result', 'add_stmt', 'cur_inline',
+                 'cond_inline', 'accum_cond', 'menu_option', 'nest_path',
+                 'counters')
+
+    def __init__(self, builder, current_label, result, add_stmt, cur_inline,
+                 cond_inline, accum_cond, menu_option, nest_path, counters):
+        self.builder = builder
+        self.current_label = current_label
+        self.result = result
+        self.add_stmt = add_stmt
+        self.cur_inline = cur_inline
+        self.cond_inline = cond_inline
+        self.accum_cond = accum_cond
+        self.menu_option = menu_option
+        self.nest_path = nest_path
+        self.counters = counters
+
+
 class ParseResultBuilder:
     def build(self, ast_nodes: list) -> ParseResult:
         result = ParseResult()
@@ -3246,356 +3273,391 @@ class ParseResultBuilder:
             result.statement_labels.append(current_label)
             result.statement_menu_options.append(menu_option)
 
+        box = _WalkCtx(self, current_label, result, add_stmt,
+                       cur_inline, cond_inline, accum_cond,
+                       menu_option, nest_path, counters)
         for node in nodes:
-            # 行尾注释（C）：本节点这一行的注释，`add_stmt` 会读到它
-            cur_inline[0] = getattr(node, 'inline_comment', '')
-            if isinstance(node, LabelNode):
-                result.labels[node.name] = (node.filename, node.line_number)
-                self._walk(node.block, node.name, result)
+            self._dispatch_node(node, box)
 
-            elif isinstance(node, DefineNode):
-                if ParseResultBuilder._is_char_define(node):
-                    display = node.display_name
-                    if not display and node.name_var:
-                        display = result.string_defaults.get(node.name_var, '')
-                    result.characters[node.target] = CharacterDefinition(
-                        variable_name=node.target,
-                        display_name=display or node.target,
-                        color=node.color,
-                        what_color=node.what_color,
-                        image_tag=node.image_tag,
-                        name_var=node.name_var,
-                        source_file=node.filename,
-                        source_line=node.line_number,
-                        kind=node.kwargs.get('kind', ''),
-                        voice_tag=node.kwargs.get('voice_tag', ''),
-                        side_image=(node.kwargs.get('side_image')
-                                    or node.kwargs.get('side_image_prefix')
-                                    or ''),
-                        what_prefix=node.kwargs.get('what_prefix', ''),
-                        what_suffix=node.kwargs.get('what_suffix', ''),
-                        who_prefix=node.kwargs.get('who_prefix', ''),
-                        who_suffix=node.kwargs.get('who_suffix', ''),
-                        extra=dict(node.kwargs),
-                    )
+    def _dispatch_node(self, node, box):
+        """
+        `_walk` 的那条大分发（23 个 `isinstance`）—— **原样搬出来**，
+        只为拆复杂度；判据/注释/顺序一个字都没动。
 
-            elif isinstance(node, LayeredImageNode):
-                if node.name and node.name not in result.images:
-                    result.images[node.name] = {
-                        'name': node.name,
-                        'expr': node.image_format or '',
-                        'path': None,
-                        'solid': None,
-                        'layered': True,
-                        'attrs': list(node.attributes),
-                        'source_file': node.filename,
-                        'source_line': node.line_number,
-                    }
+        上下文（`add_stmt` / 行尾注释 / 条件注释 / 结构位…）全在 `box` 上：
+        它们是**逐层递归共享的可变状态**，必须显式传递，不能各留一份。
+        """
+        # 行尾注释（C）：本节点这一行的注释，`add_stmt` 会读到它
+        box.cur_inline[0] = getattr(node, 'inline_comment', '')
+        if isinstance(node, LabelNode):
+            self._w_label(node, box)
 
-            elif isinstance(node, ImageDefNode):
-                # 后声明的不覆盖先声明的（Ren'Py 里也是先定义先生效）
-                if node.name and node.name not in result.images:
-                    result.images[node.name] = {
-                        'name': node.name,
-                        'expr': node.expr,
-                        'path': _image_path_from_expr(node.expr),
-                        'solid': _image_solid_from_expr(node.expr),
-                        'source_file': node.filename,
-                        'source_line': node.line_number,
-                    }
-
-            elif isinstance(node, TransformNode):
-                # 后写的不覆盖先写的：同名 transform 以首次定义为准，
-                # 与 Ren'Py "先定义先生效" 的直觉一致，也避免重定义把
-                # 有注释的那份挤掉。
-                if node.name not in result.transforms:
-                    result.transforms[node.name] = TransformDefinition(
-                        name=node.name,
-                        params=node.params,
-                        body=node.body,
-                        doc=node.doc,
-                        source_file=node.filename,
-                        source_line=node.line_number,
-                    )
-
-            elif isinstance(node, SayNode):
-                result.dialogues.append(DialogueLine(
-                    character_var=node.who,
-                    text=node.what,
-                    label=current_label,
+        elif isinstance(node, DefineNode):
+            if ParseResultBuilder._is_char_define(node):
+                display = node.display_name
+                if not display and node.name_var:
+                    display = box.result.string_defaults.get(node.name_var, '')
+                box.result.characters[node.target] = CharacterDefinition(
+                    variable_name=node.target,
+                    display_name=display or node.target,
+                    color=node.color,
+                    what_color=node.what_color,
+                    image_tag=node.image_tag,
+                    name_var=node.name_var,
                     source_file=node.filename,
                     source_line=node.line_number,
-                ))
-                add_stmt(Statement.make_say(
-                    node.who, node.what, accum_cond,
-                    source=(node.filename, node.line_number)))
+                    kind=node.kwargs.get('kind', ''),
+                    voice_tag=node.kwargs.get('voice_tag', ''),
+                    side_image=(node.kwargs.get('side_image')
+                                or node.kwargs.get('side_image_prefix')
+                                or ''),
+                    what_prefix=node.kwargs.get('what_prefix', ''),
+                    what_suffix=node.kwargs.get('what_suffix', ''),
+                    who_prefix=node.kwargs.get('who_prefix', ''),
+                    who_suffix=node.kwargs.get('who_suffix', ''),
+                    extra=dict(node.kwargs),
+                )
 
-            elif isinstance(node, ExtendNode):
-                result.dialogues.append(DialogueLine(
-                    character_var='',
-                    text=node.text,
-                    label=current_label,
+        elif isinstance(node, LayeredImageNode):
+            if node.name and node.name not in box.result.images:
+                box.result.images[node.name] = {
+                    'name': node.name,
+                    'expr': node.image_format or '',
+                    'path': None,
+                    'solid': None,
+                    'layered': True,
+                    'attrs': list(node.attributes),
+                    'source_file': node.filename,
+                    'source_line': node.line_number,
+                }
+
+        elif isinstance(node, ImageDefNode):
+            # 后声明的不覆盖先声明的（Ren'Py 里也是先定义先生效）
+            if node.name and node.name not in box.result.images:
+                box.result.images[node.name] = {
+                    'name': node.name,
+                    'expr': node.expr,
+                    'path': _image_path_from_expr(node.expr),
+                    'solid': _image_solid_from_expr(node.expr),
+                    'source_file': node.filename,
+                    'source_line': node.line_number,
+                }
+
+        elif isinstance(node, TransformNode):
+            # 后写的不覆盖先写的：同名 transform 以首次定义为准，
+            # 与 Ren'Py "先定义先生效" 的直觉一致，也避免重定义把
+            # 有注释的那份挤掉。
+            if node.name not in box.result.transforms:
+                box.result.transforms[node.name] = TransformDefinition(
+                    name=node.name,
+                    params=node.params,
+                    body=node.body,
+                    doc=node.doc,
                     source_file=node.filename,
                     source_line=node.line_number,
-                ))
-                add_stmt(Statement.make_extend(
-                    node.text, accum_cond,
-                    source=(node.filename, node.line_number)))
+                )
 
-            elif isinstance(node, MenuNode):
-                if current_label:
-                    result.menu_labels.add(current_label)
-                if node.caption:
-                    result.dialogues.append(DialogueLine(
-                        character_var='',
-                        text=node.caption,
-                        label=current_label,
-                        source_file=node.filename,
-                        source_line=node.line_number,
-                    ))
-                # **MENU 语句一律产出**（2026-10-05 修 P0-1 的根因）。
-                #
-                # 以前只在 `node.caption` 非空时才 `add_stmt(make_menu(...))`，
-                # 于是**裸 `menu:`（没有标题）在语句流里完全不存在** ——
-                # 真实项目 7 处菜单全是这种写法，全部中招。后果一路往下传：
-                #
-                #   · 拍这一层看不到"这里有个菜单"（`beats_from_statements`
-                #     只能听 MENU 语句的），`menu_option` 拍于是成了孤立的
-                #     拍，渲染层把选项当裸旁白导出去；
-                #   · `validate_level2` 按 `menu_labels` 判"有选项却没 menu 行"，
-                #     计数与真实脚本对不上。
-                #
-                # 空 caption 是**合法**的菜单（Ren'Py 允许 `menu:` 无标题），
-                # 所以这里照常产出，由下游决定"空标题怎么显示"。
-                # MENU 语句的 condition = **包在 `menu:` 外面那一层的条件**。
-                #
-                # 为什么要单独算（2026-10-05 实测）：`accum_cond` 同时包含
-                # "外层 `if`"与"选项体累积条件"两种来源，而渲染层需要分清
-                #
-                #     if flag:            ← `if` 要写在 **menu 外面**
-                #         menu:
-                #             "A":
-                #                 jump a
-                #
-                #     menu:               ← `if` 要写在 **选项那一行**
-                #         "A" if flag:
-                #             jump a
-                #
-                # 判据：菜单**自身**的 `if` 会出现在"选项体最浅一层"的条件里
-                # （`_combine` 把它并进了选项体），因此
-                # `self._combine(accum_cond, opt.condition)` 就是承载它的值；
-                # 只有"外层 if"（与选项无关）才需要整块包住。
-                #
-                # 具体做法：选项自己的 condition 为空 → 那个累积值来自菜单
-                # 外面那一层 → 整块 `if`；否则菜单没有自己的 `if`。
-                menu_own_cond = ''
-                if node.options and all(
-                        not (getattr(o, 'condition', '') or '').strip()
-                        for o in node.options):
-                    menu_own_cond = accum_cond
-                add_stmt(Statement.make_menu(
-                    node.caption or '', menu_own_cond,
-                    source=(node.filename, node.line_number)))
-                counters['menu'] = counters.get('menu', 0) + 1
-                menu_path = join_nest(nest_path, f"menu:{counters['menu']}")
-                for _oi, opt in enumerate(node.options, start=1):
-                    result.dialogues.append(DialogueLine(
-                        character_var='',
-                        text=opt.text,
-                        label=current_label,
-                        source_file=opt.filename,
-                        source_line=opt.line_number,
-                        is_menu_option=True,
-                        menu_condition=opt.condition,
-                    ))
-                    # 选项行本身**在菜单里、不在任何选项体里** → 路径到菜单为止
-                    add_stmt(Statement.make_menu_option(
-                        opt.text, self._combine(accum_cond, opt.condition),
-                        source=(opt.filename, opt.line_number)), menu_path,
-                        inline=getattr(opt, 'inline_comment', ''))
-                    self._walk(opt.block, current_label, result,
-                               self._combine(accum_cond, opt.condition),
-                               opt.text,
-                               nest_path=join_nest(menu_path, option_key(_oi)),
-                               counters=counters)
+        elif isinstance(node, SayNode):
+            self._w_say(node, box)
 
-            elif isinstance(node, ShowNode):
-                add_stmt(Statement.make_show(
-                    node.image, at=node.at, as_=node.as_, with_=node.with_,
-                    zorder=node.zorder, onlayer=node.onlayer,
-                    behind=node.behind, is_expression=node.is_expression,
-                    condition=accum_cond,
-                    source=(node.filename, node.line_number)))
+        elif isinstance(node, ExtendNode):
+            self._w_extend(node, box)
 
-            elif isinstance(node, SceneNode):
-                add_stmt(Statement.make_scene(
-                    node.image, at=node.at, with_=node.with_,
-                    onlayer=node.onlayer,
-                    is_expression=node.is_expression,
-                    condition=accum_cond,
-                    source=(node.filename, node.line_number)))
+        elif isinstance(node, MenuNode):
+            self._w_menu(node, box)
 
-            elif isinstance(node, HideNode):
-                add_stmt(Statement.make_hide(
-                    node.image, with_=node.with_, condition=accum_cond,
-                    source=(node.filename, node.line_number)))
+        elif isinstance(node, ShowNode):
+            box.add_stmt(Statement.make_show(
+                node.image, at=node.at, as_=node.as_, with_=node.with_,
+                zorder=node.zorder, onlayer=node.onlayer,
+                behind=node.behind, is_expression=node.is_expression,
+                condition=box.accum_cond,
+                source=(node.filename, node.line_number)))
 
-            elif isinstance(node, AudioNode):
-                add_stmt(Statement.make_play(
-                    node.action, node.channel, node.name,
-                    loop=node.loop, fadein=node.fadein,
-                    fadeout=node.fadeout, condition=accum_cond,
-                    source=(node.filename, node.line_number)))
+        elif isinstance(node, SceneNode):
+            box.add_stmt(Statement.make_scene(
+                node.image, at=node.at, with_=node.with_,
+                onlayer=node.onlayer,
+                is_expression=node.is_expression,
+                condition=box.accum_cond,
+                source=(node.filename, node.line_number)))
 
-            elif isinstance(node, VoiceNode):
-                add_stmt(Statement.make_voice(
-                    node.name, accum_cond,
-                    source=(node.filename, node.line_number)))
+        elif isinstance(node, HideNode):
+            box.add_stmt(Statement.make_hide(
+                node.image, with_=node.with_, condition=box.accum_cond,
+                source=(node.filename, node.line_number)))
 
-            elif isinstance(node, TopLevelRegionNode):
-                # **整个顶层区间**（label 之外的一切）→ 文件级保真块，
-                # 按原文顺序追加。见 `TopLevelRegionNode` 的 docstring。
-                for head, code, line_no in node.blocks or ():
-                    result.file_blocks.append(FileBlock(
-                        header=head, code=code,
-                        source_file=node.filename, source_line=line_no))
+        elif isinstance(node, AudioNode):
+            box.add_stmt(Statement.make_play(
+                node.action, node.channel, node.name,
+                loop=node.loop, fadein=node.fadein,
+                fadeout=node.fadeout, condition=box.accum_cond,
+                source=(node.filename, node.line_number)))
 
-            elif isinstance(node, PythonNode):
-                # **顶层**的 `python:` / `init python:` 块**不进"拍"**。
-                #
-                # 2026-10-05：以前这里无条件 `add_stmt`，而顶层块根本没走到这儿
-                # （被 `_stmt_unmodeled` 跳过了）。进了 statements 就会变成一张
-                # "标签为空"的拍，被渲染进 `label start:` 里 —— 而它本该在
-                # **文件级**。
-                #
-                # 现在顶层内容统一由 `TopLevelRegionNode` 按**原文**带出
-                # （它连 `$ x = 1` 这种顶层单行也一并保真，不再多此一举），
-                # 所以这里只要不在 label 里就**直接跳过**，不重复带一份。
-                if current_label:
-                    add_stmt(Statement.make_python(
-                        node.code, accum_cond,
-                        source=(node.filename, node.line_number),
-                        dollar_space=getattr(node, 'dollar_space', True)))
+        elif isinstance(node, VoiceNode):
+            box.add_stmt(Statement.make_voice(
+                node.name, box.accum_cond,
+                source=(node.filename, node.line_number)))
 
-            elif isinstance(node, CommentNode):
-                # 只保留 label 内的注释——顶层注释属于文件头/定义区，
-                # 不属于任何演出流，混进表格反而会误导文案。
-                if current_label:
-                    add_stmt(Statement.make_comment(
-                        node.text, accum_cond,
-                        source=(node.filename, node.line_number)))
+        elif isinstance(node, TopLevelRegionNode):
+            # **整个顶层区间**（label 之外的一切）→ 文件级保真块，
+            # 按原文顺序追加。见 `TopLevelRegionNode` 的 docstring。
+            for head, code, line_no in node.blocks or ():
+                box.result.file_blocks.append(FileBlock(
+                    header=head, code=code,
+                    source_file=node.filename, source_line=line_no))
 
-            elif isinstance(node, LoopNode):
-                # 循环块（D2/T0）：**头行一条语句 + 块体各一条语句**。
-                #
-                # 这里是"给拍模型加作用域"的落点：
-                #   · 头行自己一条 `LOOP` 语句，它的 `nest_path` 是**外层**
-                #     路径（循环头在父块里，不在自己里面 —— 与菜单头同款）；
-                #   · 块体用 `join_nest(…, f'loop:{n}')` 递归 walk，
-                #     于是"这一拍在哪个循环里"变成**随表走的结构位**。
-                # `counters` 与 `if`/`menu` 共用一份（label 内的文档序），
-                # 所以 `loop:2` 与按行扫出来的顺序一致。
-                #
-                # ⚠ 块体**不累积头行的条件**吗？累积的（`accum_cond` 原样传下去）。
-                # 这是与 `if` 分支**刻意不同**的一处：循环体不是"条件成立才执行
-                # 一次"，而是"条件成立才进入循环"，渲染层负责把这一层条件
-                # **写回循环头外面**并从块体拍上剥掉（见 `render_loop_block`），
-                # 否则每一句块体台词都会各自套一个 `if`。
-                if current_label:
-                    counters['loop'] = counters.get('loop', 0) + 1
-                    add_stmt(Statement.make_loop(
-                        node.header, text=node.text, walked=True,
-                        condition=accum_cond,
-                        source=(node.filename, node.line_number)))
-                    self._walk(
-                        node.body_nodes, current_label, result, accum_cond,
-                        menu_option,
-                        nest_path=join_nest(
-                            nest_path, f"loop:{counters['loop']}"),
-                        counters=counters)
-
-            elif isinstance(node, CameraNode):
-                # 3D 舞台的 `camera` 块（2026-10-07）：与循环块同一档 ——
-                # 头行（层名）结构化、块体（ATL 属性）逐字。
-                if current_label:
-                    add_stmt(Statement.make_camera(
-                        node.text, header=node.header, layer=node.layer,
-                        body=node.body, condition=accum_cond,
-                        source=(node.filename, node.line_number)))
-
-            elif isinstance(node, RawNode):
-                if current_label:
-                    # **未建模块**先记一笔账（体检报告 / 门禁要用），
-                    # 内容照旧走下面同一条保真通道。见
-                    # `ParseResult.unknown_blocks` 的说明。
-                    if isinstance(node, UnknownBlockNode):
-                        result.unknown_blocks.append({
-                            'head': node.head,
-                            'file': node.filename,
-                            'line': node.line_number,
-                            'lines': len(node.block_raw) + 1,
-                        })
-                    add_stmt(Statement.make_raw(
-                        node.text, raw_kind=node.raw_kind,
-                        condition=accum_cond,
-                        source=(node.filename, node.line_number)))
-
-            elif isinstance(node, JumpNode):
-                add_stmt(Statement.make_jump(
-                    node.target, accum_cond,
-                    source=(node.filename, node.line_number)))
-
-            elif isinstance(node, CallNode):
-                add_stmt(Statement.make_call(
-                    node.target, accum_cond,
+        elif isinstance(node, PythonNode):
+            # **顶层**的 `python:` / `init python:` 块**不进"拍"**。
+            #
+            # 2026-10-05：以前这里无条件 `add_stmt`，而顶层块根本没走到这儿
+            # （被 `_stmt_unmodeled` 跳过了）。进了 statements 就会变成一张
+            # "标签为空"的拍，被渲染进 `label start:` 里 —— 而它本该在
+            # **文件级**。
+            #
+            # 现在顶层内容统一由 `TopLevelRegionNode` 按**原文**带出
+            # （它连 `$ x = 1` 这种顶层单行也一并保真，不再多此一举），
+            # 所以这里只要不在 label 里就**直接跳过**，不重复带一份。
+            if box.current_label:
+                box.add_stmt(Statement.make_python(
+                    node.code, box.accum_cond,
                     source=(node.filename, node.line_number),
-                    from_clause=getattr(node, 'from_clause', '')))
+                    dollar_space=getattr(node, 'dollar_space', True)))
 
-            elif isinstance(node, ReturnNode):
-                add_stmt(Statement.make_return(
-                    accum_cond,
+        elif isinstance(node, CommentNode):
+            # 只保留 label 内的注释——顶层注释属于文件头/定义区，
+            # 不属于任何演出流，混进表格反而会误导文案。
+            if box.current_label:
+                box.add_stmt(Statement.make_comment(
+                    node.text, box.accum_cond,
                     source=(node.filename, node.line_number)))
 
-            elif isinstance(node, IfNode):
-                # else 分支要写成 `not (前面的条件)`：以前直接给空条件，
-                # 导致"else 里的 jump/台词"在图上是无条件边、在表里
-                # Condition 列空白——和 GraphBuilder 的语义不一致。
-                # 现在两条路径（AST 图 / Statement 图）用同一套组合规则。
-                #
-                # **elif 也一样**：`if a / elif b / else` 的第 2 个分支隐含
-                # "a 没走"。以前只 AND 了 b 自己，于是 `if score>3: jump X /
-                # elif score>1: jump Y` 的第 2 条边条件写成 `score > 1`
-                # （比实际宽），图上标签会误导人、按图导出也会写错分支。
-                prev_conds = []
-                # `_bi` = 分支下标：取"这一分支自己那一行"的注释要用它，
-                # **不能**用 `len(prev_conds)`（那个列表在分支体里已 append，差一位）
-                for _bi, (cond, block) in enumerate(node.branches):
-                    if cond:
-                        child_cond = self._combine(accum_cond, cond)
-                        if prev_conds:
-                            neg = ' or '.join(f'({c})' for c in prev_conds)
-                            child_cond = (f"({child_cond}) and not ({neg})"
-                                          if child_cond else f"not ({neg})")
-                        prev_conds.append(cond)
-                    else:
-                        neg = ' or '.join(f'({c})' for c in prev_conds)
-                        child_cond = (
-                            f"({accum_cond}) and not ({neg})"
-                            if accum_cond else f"not ({neg})"
-                        )
-                    counters['if'] = counters.get('if', 0) + 1
-                    # 这一分支的注释（`if/elif/else` 头那一行）交给它第一条语句。
-                    # ⚠ 用 `_bi`（分支下标），**不能**用 `len(prev_conds)` ——
-                    # 那个列表在分支体里已经 append 过，会差一位（实测：第一分支
-                    # 拿到的是 `elif` 那行的注释）。
-                    _bcs = getattr(node, 'branch_comments', None) or []
-                    self._walk(block, current_label, result, child_cond,
-                               menu_option,
-                               nest_path=join_nest(
-                                   nest_path, f"if:{counters['if']}"),
-                               counters=counters,
-                               cond_note=(_bcs[_bi] if _bi < len(_bcs)
-                                          else ''))
+        elif isinstance(node, LoopNode):
+            # 循环块（D2/T0）：**头行一条语句 + 块体各一条语句**。
+            #
+            # 这里是"给拍模型加作用域"的落点：
+            #   · 头行自己一条 `LOOP` 语句，它的 `nest_path` 是**外层**
+            #     路径（循环头在父块里，不在自己里面 —— 与菜单头同款）；
+            #   · 块体用 `join_nest(…, f'loop:{n}')` 递归 walk，
+            #     于是"这一拍在哪个循环里"变成**随表走的结构位**。
+            # `counters` 与 `if`/`menu` 共用一份（label 内的文档序），
+            # 所以 `loop:2` 与按行扫出来的顺序一致。
+            #
+            # ⚠ 块体**不累积头行的条件**吗？累积的（`accum_cond` 原样传下去）。
+            # 这是与 `if` 分支**刻意不同**的一处：循环体不是"条件成立才执行
+            # 一次"，而是"条件成立才进入循环"，渲染层负责把这一层条件
+            # **写回循环头外面**并从块体拍上剥掉（见 `render_loop_block`），
+            # 否则每一句块体台词都会各自套一个 `if`。
+            if box.current_label:
+                box.counters['loop'] = box.counters.get('loop', 0) + 1
+                box.add_stmt(Statement.make_loop(
+                    node.header, text=node.text, walked=True,
+                    condition=box.accum_cond,
+                    source=(node.filename, node.line_number)))
+                self._walk(
+                    node.body_nodes, box.current_label, box.result, box.accum_cond,
+                    box.menu_option,
+                    nest_path=join_nest(
+                        box.nest_path, f"loop:{box.counters['loop']}"),
+                    counters=box.counters)
+
+        elif isinstance(node, CameraNode):
+            # 3D 舞台的 `camera` 块（2026-10-07）：与循环块同一档 ——
+            # 头行（层名）结构化、块体（ATL 属性）逐字。
+            if box.current_label:
+                box.add_stmt(Statement.make_camera(
+                    node.text, header=node.header, layer=node.layer,
+                    body=node.body, condition=box.accum_cond,
+                    source=(node.filename, node.line_number)))
+
+        elif isinstance(node, RawNode):
+            if box.current_label:
+                # **未建模块**先记一笔账（体检报告 / 门禁要用），
+                # 内容照旧走下面同一条保真通道。见
+                # `ParseResult.unknown_blocks` 的说明。
+                if isinstance(node, UnknownBlockNode):
+                    box.result.unknown_blocks.append({
+                        'head': node.head,
+                        'file': node.filename,
+                        'line': node.line_number,
+                        'lines': len(node.block_raw) + 1,
+                    })
+                box.add_stmt(Statement.make_raw(
+                    node.text, raw_kind=node.raw_kind,
+                    condition=box.accum_cond,
+                    source=(node.filename, node.line_number)))
+
+        elif isinstance(node, JumpNode):
+            box.add_stmt(Statement.make_jump(
+                node.target, box.accum_cond,
+                source=(node.filename, node.line_number)))
+
+        elif isinstance(node, CallNode):
+            box.add_stmt(Statement.make_call(
+                node.target, box.accum_cond,
+                source=(node.filename, node.line_number),
+                from_clause=getattr(node, 'from_clause', '')))
+
+        elif isinstance(node, ReturnNode):
+            box.add_stmt(Statement.make_return(
+                box.accum_cond,
+                source=(node.filename, node.line_number)))
+
+        elif isinstance(node, IfNode):
+            # else 分支要写成 `not (前面的条件)`：以前直接给空条件，
+            # 导致"else 里的 jump/台词"在图上是无条件边、在表里
+            # Condition 列空白——和 GraphBuilder 的语义不一致。
+            # 现在两条路径（AST 图 / Statement 图）用同一套组合规则。
+            #
+            # **elif 也一样**：`if a / elif b / else` 的第 2 个分支隐含
+            # "a 没走"。以前只 AND 了 b 自己，于是 `if score>3: jump X /
+            # elif score>1: jump Y` 的第 2 条边条件写成 `score > 1`
+            # （比实际宽），图上标签会误导人、按图导出也会写错分支。
+            self._w_if(node, box)
+
+    def _w_label(self, node, box):
+        """LabelNode 的处理（从 `_dispatch_node` 原样搬出）。"""
+        box.result.labels[node.name] = (node.filename, node.line_number)
+        self._walk(node.block, node.name, box.result)
+
+    def _w_say(self, node, box):
+        """SayNode 的处理（从 `_dispatch_node` 原样搬出）。"""
+        box.result.dialogues.append(DialogueLine(
+            character_var=node.who,
+            text=node.what,
+            label=box.current_label,
+            source_file=node.filename,
+            source_line=node.line_number,
+        ))
+        box.add_stmt(Statement.make_say(
+            node.who, node.what, box.accum_cond,
+            source=(node.filename, node.line_number)))
+
+    def _w_extend(self, node, box):
+        """ExtendNode 的处理（从 `_dispatch_node` 原样搬出）。"""
+        box.result.dialogues.append(DialogueLine(
+            character_var='',
+            text=node.text,
+            label=box.current_label,
+            source_file=node.filename,
+            source_line=node.line_number,
+        ))
+        box.add_stmt(Statement.make_extend(
+            node.text, box.accum_cond,
+            source=(node.filename, node.line_number)))
+
+    def _w_menu(self, node, box):
+        """MenuNode 的处理（从 `_dispatch_node` 原样搬出）。"""
+        if box.current_label:
+            box.result.menu_labels.add(box.current_label)
+        if node.caption:
+            box.result.dialogues.append(DialogueLine(
+                character_var='',
+                text=node.caption,
+                label=box.current_label,
+                source_file=node.filename,
+                source_line=node.line_number,
+            ))
+        # **MENU 语句一律产出**（2026-10-05 修 P0-1 的根因）。
+        #
+        # 以前只在 `node.caption` 非空时才 `add_stmt(make_menu(...))`，
+        # 于是**裸 `menu:`（没有标题）在语句流里完全不存在** ——
+        # 真实项目 7 处菜单全是这种写法，全部中招。后果一路往下传：
+        #
+        #   · 拍这一层看不到"这里有个菜单"（`beats_from_statements`
+        #     只能听 MENU 语句的），`menu_option` 拍于是成了孤立的
+        #     拍，渲染层把选项当裸旁白导出去；
+        #   · `validate_level2` 按 `menu_labels` 判"有选项却没 menu 行"，
+        #     计数与真实脚本对不上。
+        #
+        # 空 caption 是**合法**的菜单（Ren'Py 允许 `menu:` 无标题），
+        # 所以这里照常产出，由下游决定"空标题怎么显示"。
+        # MENU 语句的 condition = **包在 `menu:` 外面那一层的条件**。
+        #
+        # 为什么要单独算（2026-10-05 实测）：`accum_cond` 同时包含
+        # "外层 `if`"与"选项体累积条件"两种来源，而渲染层需要分清
+        #
+        #     if flag:            ← `if` 要写在 **menu 外面**
+        #         menu:
+        #             "A":
+        #                 jump a
+        #
+        #     menu:               ← `if` 要写在 **选项那一行**
+        #         "A" if flag:
+        #             jump a
+        #
+        # 判据：菜单**自身**的 `if` 会出现在"选项体最浅一层"的条件里
+        # （`_combine` 把它并进了选项体），因此
+        # `self._combine(accum_cond, opt.condition)` 就是承载它的值；
+        # 只有"外层 if"（与选项无关）才需要整块包住。
+        #
+        # 具体做法：选项自己的 condition 为空 → 那个累积值来自菜单
+        # 外面那一层 → 整块 `if`；否则菜单没有自己的 `if`。
+        menu_own_cond = ''
+        if node.options and all(
+                not (getattr(o, 'condition', '') or '').strip()
+                for o in node.options):
+            menu_own_cond = box.accum_cond
+        box.add_stmt(Statement.make_menu(
+            node.caption or '', menu_own_cond,
+            source=(node.filename, node.line_number)))
+        box.counters['menu'] = box.counters.get('menu', 0) + 1
+        menu_path = join_nest(box.nest_path, f"menu:{box.counters['menu']}")
+        for _oi, opt in enumerate(node.options, start=1):
+            box.result.dialogues.append(DialogueLine(
+                character_var='',
+                text=opt.text,
+                label=box.current_label,
+                source_file=opt.filename,
+                source_line=opt.line_number,
+                is_menu_option=True,
+                menu_condition=opt.condition,
+            ))
+            # 选项行本身**在菜单里、不在任何选项体里** → 路径到菜单为止
+            box.add_stmt(Statement.make_menu_option(
+                opt.text, self._combine(box.accum_cond, opt.condition),
+                source=(opt.filename, opt.line_number)), menu_path,
+                inline=getattr(opt, 'inline_comment', ''))
+            self._walk(opt.block, box.current_label, box.result,
+                       self._combine(box.accum_cond, opt.condition),
+                       opt.text,
+                       nest_path=join_nest(menu_path, option_key(_oi)),
+                       counters=box.counters)
+
+    def _w_if(self, node, box):
+        """IfNode 的处理（从 `_dispatch_node` 原样搬出）。"""
+        prev_conds = []
+        # `_bi` = 分支下标：取"这一分支自己那一行"的注释要用它，
+        # **不能**用 `len(prev_conds)`（那个列表在分支体里已 append，差一位）
+        for _bi, (cond, block) in enumerate(node.branches):
+            if cond:
+                child_cond = self._combine(box.accum_cond, cond)
+                if prev_conds:
+                    neg = ' or '.join(f'({c})' for c in prev_conds)
+                    child_cond = (f"({child_cond}) and not ({neg})"
+                                  if child_cond else f"not ({neg})")
+                prev_conds.append(cond)
+            else:
+                neg = ' or '.join(f'({c})' for c in prev_conds)
+                child_cond = (
+                    f"({box.accum_cond}) and not ({neg})"
+                    if box.accum_cond else f"not ({neg})"
+                )
+            box.counters['if'] = box.counters.get('if', 0) + 1
+            # 这一分支的注释（`if/elif/else` 头那一行）交给它第一条语句。
+            # ⚠ 用 `_bi`（分支下标），**不能**用 `len(prev_conds)` ——
+            # 那个列表在分支体里已经 append 过，会差一位（实测：第一分支
+            # 拿到的是 `elif` 那行的注释）。
+            _bcs = getattr(node, 'branch_comments', None) or []
+            self._walk(block, box.current_label, box.result, child_cond,
+                       box.menu_option,
+                       nest_path=join_nest(
+                           box.nest_path, f"if:{box.counters['if']}"),
+                       counters=box.counters,
+                       cond_note=(_bcs[_bi] if _bi < len(_bcs)
+                                  else ''))
+
+
 
     @staticmethod
     def _combine(c1: str, c2: str) -> str:
