@@ -89,4 +89,10 @@
 - **Qt 的 `QLabel`/`QCheckBox` 不渲染 Markdown**（`**…**` 会显示成星号）。
 - **`Statement.source` 是 `(路径, 行号)` 元组**，按纯路径取会得到垃圾样例。
 - **pytest 必须带 `--basetemp=<全新目录>`**，否则复用仓库内目录 → ~1589 ERROR（是否改配置 → D6）。
+- **全量耗时由 4 条真机金标主导**（`test_patch_golden` / `test_hydrate_golden` 各两条，
+  每条把 8GB 项目全流程跑两遍）：合计 **~730s / 30min**，且**同测试连跑方差 ±40%**
+  （实测 208s ↔ 290s，代码一字未改）。**别把这类波动当成回归** —— 先用 `--durations` 看头几名。
+- ⚠ **`.pip-tmp/` 会累积陈旧 basetemp**：**每次换 basetemp 名字就留下旧的**
+  （`pytest_full` / `final-*` / `pt_*` …每个 ~8.6k 文件）。实测已到 **1.91GB / 19 万文件**。
+  清它受沙箱批量删除守卫限制；**别用 `du`/`find` 扫它**（会跑很久甚至被 SIGTERM）。
 - 其余全部见 **`docs/契约速查_storygraph.md`**。
