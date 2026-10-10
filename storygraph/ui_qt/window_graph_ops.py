@@ -660,16 +660,22 @@ class GraphOpsMixin:
         root = self._project_root
         SR.clear_cache()
         discovered = SR.discover_undeclared(root)
-        reg = None
+        # ⚠ **语句注册表 ≠ 资产注册表**：`self._session.registry()` 给的是
+        # `AssetRegistry`（角色/立绘/音频），而这里要 `StatementRegistry`
+        # （项目声明的自定义语句）。第一版把前者喂给
+        # `format_registry_report` → `TypeError: 'AssetRegistry' object is not
+        # iterable` → **异常在 Qt 槽里被吞掉，症状就是"点了没反应"**（实测）。
         try:
-            reg = self._session.registry()
-        except Exception:                       # noqa: BLE001
-            swallow('main_window.learn_custom_statement.registry')
-        report = SR.format_registry_report(reg) if reg is not None else (
-            '（还没打开项目 / 读不到注册表 —— 声明列表要在打开项目后才会显示）')
+            reg = SR.StatementRegistry.for_project(root)
+        except Exception as e:                  # noqa: BLE001
+            swallow('main_window.learn_custom_statement.registry', e)
+            reg = None
+        report = (SR.format_registry_report(reg) if reg is not None else
+                  '（读不到 storygraph.rules.json —— 声明列表暂时显示不出来，'
+                  '但下面的"发现"仍然可用）')
 
         dlg = CustomStatementDialog(self, project_root=root,
-                                    declares=None, discovered=discovered,
+                                    discovered=discovered,
                                     registry_report=report)
         self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
                   + ('：' + '、'.join(r['head'] for r in discovered[:8])

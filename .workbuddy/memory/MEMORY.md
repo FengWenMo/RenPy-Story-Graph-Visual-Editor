@@ -379,6 +379,22 @@
   参数成为表格列、候选值成为下拉、**产物逐字节不变**。
 - ⚠ 两个 UI 坑：构造期 `_refresh_preview` 早于按钮创建（加守卫 + 建好后重刷）；
   Qt 的 QLabel/QCheckBox **不渲染 Markdown**（`**…**` 会显示成星号，出图才看见）。
+- ⚠⚠ **用户实测报的 bug（2026-10-10）**："打开项目后这个按钮点了没反应"。
+  根因：那条链里把**资产注册表**（`session.registry()` → `AssetRegistry`）当成
+  **语句注册表**喂给 `format_registry_report` → `TypeError` → **异常在 Qt 槽里
+  被吞掉** → 表面症状"点了毫无反应"。已改用
+  `StatementRegistry.for_project(root)`（全仓扫过：只有这一处混用）。
+  ⚠ **教训**：我原来只有"工具栏里有这个动作"的**存在性**判据 —— **存在 ≠ 能跑**。
+  现在有 `action.trigger()` 真跑一次的判据 + "两个 registry 不是一回事"的判据。
+- **服装/自定义块的两条正解**（用户问"swim_suit 怎么理解"）：
+  · **路 A（换衣服，推荐）**：服装 = 立绘的**属性** —— 图登记进 `images.xlsx`
+    （`Tag=角色`、`Attributes=swim_suit`）→ `attrs_of_tag` 出候选 →
+    和"表情"**共用同一个下拉池**（实测 `show lyj swim_suit` 逐字保留）。
+  · **路 B（自定义指令）**：`swim_suit lyj "泳装" intensity=3` 这种带参数的语句 →
+    「🧩 自定义模块」声明参数 → **卡片**里的一组控件
+    （`spec_arg_fields_for` / `spec_arg_choices_for`）+ **表格**动态列
+    （`swim_suit·pose`）。⚠ `fold_spec_arg_columns` 的键是**整列名**，
+    传裸参数名会静默无事发生。
 
 
 

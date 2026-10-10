@@ -198,6 +198,50 @@ def test_the_dialog_prefills_from_a_discovered_head(qapp, project):
     assert built['ok'] and built['name'] == 'swim_suit'
 
 
+def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
+    """
+    ⚠⚠ **用户实测报的 bug**："打开项目之后这个按钮无法点击 / 点了没反应"。
+
+    根因：那条链里把**资产注册表**（`session.registry()` → `AssetRegistry`）
+    当成**语句注册表**喂给了 `format_registry_report` →
+    `TypeError: 'AssetRegistry' object is not iterable` →
+    **异常在 Qt 槽里被吞掉**，表现就是"点了毫无反应"。
+
+    为什么以前没抓到：我只有一条"工具栏里有这个动作"的存在性判据 ——
+      **存在 ≠ 能跑**。这条判据真的 `trigger()` 一次，并且检查控制台里
+     **不许出现**"没写/失败/TypeError"这类字样（Qt 槽吞掉的异常在测试里
+      也看不出来，所以同时钉住"链上不许报错"）。
+    """
+    from PySide6.QtGui import QAction
+    from storygraph.ui_qt import dialog_learn
+
+    opened = []
+
+    class _FakeDialog:
+        def __init__(self, parent=None, project_root=None, declares=None,
+                     discovered=None, registry_report=''):
+            opened.append({'root': project_root, 'discovered': discovered,
+                           'report': registry_report})
+
+        def exec(self):
+            return 0                       # 等于"用户取消"
+
+    monkeypatch.setattr(dialog_learn, 'CustomStatementDialog', _FakeDialog)
+    logged = []
+    monkeypatch.setattr(ui_window, '_log', lambda m: logged.append(str(m)))
+
+    action = next(a for a in ui_window._tb_graph.actions()
+                  if '自定义模块' in a.text())
+    assert isinstance(action, QAction)
+    action.trigger()                       # **真的点**
+
+    assert opened, '点了没打开弹窗（用户报的那个 bug）'
+    assert opened[0]['report'] and 'iterable' not in opened[0]['report']
+    assert all(('失败' not in m and '没写' not in m and 'Traceback' not in m)
+               for m in logged), logged
+    assert any('扫出' in m for m in logged), logged
+
+
 def test_the_dialog_disables_writing_until_the_name_is_valid(qapp, project):
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     dlg = CustomStatementDialog(None, project_root=project, discovered=[])
@@ -308,3 +352,97 @@ def test_a_broken_manifest_is_refused_not_overwritten(project):
     res = SR.declare_statement(project, 'swim_suit')
     assert not res['ok'] and 'JSON' in res['reason']
     assert bad.read_text(encoding='utf-8') == '{ 这不是 JSON'
+
+
+# ==================== ⑤ "声明完在卡片里能编辑参数"（用户要的"编辑服装"） ====================
+
+def _beats_of(project):
+    from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+    from storygraph.story.beat_build import beats_from_parse_result
+    pr, _ = IncrementalRenPyAnalyzer().analyze(
+        files=[project / 'game' / 'ch.rpy'], graph=None)
+    reg = SR.registry_for_parse_result(pr)
+    SR.annotate_spec_statements(pr.statements, reg)
+    return beats_from_parse_result(pr), reg
+
+
+def test_the_card_editor_gets_the_declared_params(project):
+    """
+    用户："卡片编辑器内有没有自定义模块的显示？如果没有的话，那我还是无法编辑
+    服装啊？" —— **有**，但前提是**先声明**（没声明时它只当代码行躺着）。
+
+    卡片那一组控件的语义在 `app.beats.spec_arg_fields_for` /
+    `spec_arg_choices_for`（与表格列**同源**），这里按卡片实际拿到的数据断言。
+
+    ⚠ 两种情形都要钉（我第一版把两者搞混，断言当场红）：
+      · 头行里**写了**的参数 → 控件里就是它的值；
+      · 头行里**没写**的参数 → 空格子（`认不出就不猜`），但**列还在** ——
+        人可以在卡片里把它填上，填完就折回头行。
+    """
+    from storygraph.app import beats as _beats
+
+    SR.declare_statement(project, 'swim_suit', label='泳装切换',
+                         columns=[{'name': 'pose', 'label': '姿势',
+                                   'choices': ['happy', 'calm', 'sad']},
+                                  {'name': 'intensity', 'label': '强度',
+                                   'choices': ['1', '2', '3']}],
+                         docs='把角色切到泳装')
+    SR.clear_cache()
+    beats_, _reg = _beats_of(project)
+    stmts = SR.StatementRegistry.for_project(str(project))
+    target = next(b for b in beats_
+                  if getattr(b, 'spec_name', '') == 'swim_suit')
+
+    cols, values = _beats.spec_arg_fields_for(target, stmts)
+    headers = [c['header'] for c in cols]
+    assert headers == ['swim_suit·pose', 'swim_suit·intensity'], headers
+    # fixture 那一行是 `swim_suit lyj "泳装" intensity=3`（没写 pose）
+    assert values == {'swim_suit·pose': '',
+                      'swim_suit·intensity': '3'}, values
+    choices = _beats.spec_arg_choices_for(target, stmts)
+    assert choices['pose'] == ['happy', 'calm', 'sad'], choices
+    assert choices['intensity'] == ['1', '2', '3'], choices
+
+    # 卡片里把 pose 填成 happy + intensity 改成 9 → 折回头行
+    from storygraph.story.beat_model import fold_spec_arg_columns
+    fold_spec_arg_columns(target, {'swim_suit·pose': 'happy',
+                                   'swim_suit·intensity': '9'})
+    head = str(getattr(target, 'spec_head', '') or getattr(target, 'opaque', ''))
+    assert 'pose=happy' in head and 'intensity=9' in head, head
+
+
+def test_changing_a_param_changes_the_product(project):
+    """在卡片/表格里把 `intensity` 改成 9 → 产物那一行跟着变成 `intensity=9`。"""
+    from storygraph.story.beat_model import fold_spec_arg_columns
+    from storygraph.story.beat_render import render_beats_to_rpy
+
+    SR.declare_statement(project, 'swim_suit',
+                         columns=[{'name': 'intensity'}])
+    SR.clear_cache()
+    beats_, _reg = _beats_of(project)
+    target = next(b for b in beats_
+                  if getattr(b, 'spec_name', '') == 'swim_suit')
+    fold_spec_arg_columns(target, {'swim_suit·intensity': '9'})
+    out = render_beats_to_rpy(beats_)
+    assert '    swim_suit lyj "泳装" intensity=9' in out
+    assert 'intensity=3' not in out
+
+
+def test_the_statement_registry_is_not_the_asset_registry(ui_window):
+    """
+    ⚠⚠ 用户实测报的 bug（"按钮点了没反应"）的根因，**钉成判据防复发**：
+
+    `EditorSession.registry()` 给的是**资产注册表**（`AssetRegistry`），
+    而语句声明要的是 **`StatementRegistry`**。两都叫 "registry"，
+    传错了症状是 `TypeError` 在 Qt 槽里被吞掉 → 用户看到"点了毫无反应"。
+    """
+    from storygraph.story.statement_registry import StatementRegistry
+
+    asset_reg = ui_window._session.registry()
+    stmt_reg = StatementRegistry.for_project(str(ui_window._project_root))
+    assert not isinstance(asset_reg, StatementRegistry), (
+        '如果哪天 session.registry() 变成语句注册表，这条判据要跟着改 —— '
+        '但现在它确实不是，所以**不能**拿它喂 format_registry_report')
+    assert isinstance(stmt_reg, StatementRegistry)
+    # 报告函数只吃后者
+    assert 'iterable' not in SR.format_registry_report(stmt_reg)
