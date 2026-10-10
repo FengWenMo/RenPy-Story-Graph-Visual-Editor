@@ -1457,6 +1457,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   · 「导入章节」= 剧情图那条路：图里只有用户自己导入的章节。
         # 以前把两者写成一句话（"打开项目 → 建出结构图"），40 个脚本一次性
         # 灌进图里变成 51 个块 —— 用户："这还选个毛线啊！看都要看瞎了！"
+        act('🧩 自定义模块 / 语句', self.learn_custom_statement,
+            '教工具认识项目自己的写法（swim_suit / mycue 这类）：'
+            '先扫出"工具还不认识的写法"，勾一条、填上参数与候选值，'
+            '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉',
+            primary=True)
         act('📁 打开项目', self.open_project,
             '只加载资源表（xlsx：立绘 / 音乐 / 语音 / 变换 / 角色）'
             '与缩略图 —— **不往剧情图里放任何东西**')

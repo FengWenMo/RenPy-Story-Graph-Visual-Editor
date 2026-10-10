@@ -636,6 +636,76 @@ class GraphOpsMixin:
         # 没有 `graph` 键，别去取它（取到 None 会让下一个用图的人直接炸）。
         if self.graph is not None:
             self._report_missing_chapters(self.graph)
+    def learn_custom_statement(self):
+        """
+        「🧩 自定义模块 / 语句」：教工具认识项目自己的写法。
+
+        用户 2026-10-10："我并没有找到一个入口可以教这个工具学会我自定义的
+        项目模块……至少我想要个能够自定义的模块入口放在最上方"。
+
+        这条链的每一步都是既有能力，缺的只是入口：
+        扫项目找未声明写法 → 填声明 → `declare_statement`（唯一写入口）→
+        清单缓存作废 → 表格立刻多出参数列与候选值。
+        """
+        if not self._project_root:
+            QMessageBox.information(
+                self, '提示',
+                '先「📁 打开项目」—— 声明要写进项目根的 '
+                'storygraph.rules.json。')
+            return
+        from storygraph.authoring.learn_statement import declaration_preview
+        from storygraph.story import statement_registry as SR
+        from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+        root = self._project_root
+        SR.clear_cache()
+        discovered = SR.discover_undeclared(root)
+        reg = None
+        try:
+            reg = self._session.registry()
+        except Exception:                       # noqa: BLE001
+            swallow('main_window.learn_custom_statement.registry')
+        report = SR.format_registry_report(reg) if reg is not None else (
+            '（还没打开项目 / 读不到注册表 —— 声明列表要在打开项目后才会显示）')
+
+        dlg = CustomStatementDialog(self, project_root=root,
+                                    declares=None, discovered=discovered,
+                                    registry_report=report)
+        self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
+                  + ('：' + '、'.join(r['head'] for r in discovered[:8])
+                     if discovered else ''))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        built = dlg.result_declaration()
+        if not built.get('ok'):
+            for w in built.get('warnings') or []:
+                self._log(f'[自定义] ✕ {w}')
+            self._status('没写：' + '；'.join(built.get('warnings') or ['?']))
+            return
+        res = SR.declare_statement(root, built['name'], label=built['label'],
+                                   columns=built['columns'],
+                                   block=built['block'], docs=built['docs'])
+        if not res.get('ok'):
+            self._log(f'[自定义] ✕ 没写进清单：{res.get("reason")}')
+            self._status(f'没写：{res.get("reason")}')
+            return
+        for w in built.get('warnings') or []:
+            self._log(f'[自定义] ⚠ {w}')
+        verb = '更新' if res.get('action') == 'updated' else '新增'
+        self._log(f'[自定义] {verb}声明 {built["name"]}（'
+                  f'{len(built["columns"])} 个参数）→ {res.get("path")}')
+        self._log(declaration_preview(built, path=str(res.get('path') or '')))
+        # ⚠ 清缓存并重读：不清的话表格/提示还是旧的（声明"看起来没生效"）
+        SR.clear_cache()
+        try:
+            if hasattr(self._session, 'refresh_symbols'):
+                self._session.refresh_symbols()
+            self._refresh_asset_choices()
+        except Exception:                       # noqa: BLE001
+            swallow('main_window.learn_custom_statement.refresh')
+        self._status(f'✔ {verb}声明 {built["name"]}：'
+                     f'参数 {len(built["columns"])} 个已进表格列'
+                     f'（重新导入那几章即可看到效果）')
     def save_layout(self, target=None):
         """
         保存布局 JSON（Ctrl+S）。没给路径就弹「另存为」。

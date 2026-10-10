@@ -1027,6 +1027,69 @@ def declare_statement(project_root, name: str, label: str = '',
             'reason': '', 'entry': entry}
 
 
+def discover_undeclared(project_root, *, limit_files: int = 400,
+                        samples_limit: int = 8) -> list:
+    """
+    **从项目脚本里找出"工具还不认识的写法"** —— 用户要的那个起点
+    （2026-10-10："我并没有找到一个入口可以教这个工具学会我自定义的项目模块"）。
+
+    为什么需要它：`declare_statement()` 是**写**入口，可"该声明哪些名字"以前
+    只能靠人自己知道（或去 `describe` 里翻）。这个函数把项目扫一遍，
+    把**未建模语句的头**列出来，于是界面可以做成一屏"发现 → 勾选 → 教它"。
+
+    返回 `[{'head','count','samples':[(文件, 行号, 原文)],'block'}]`，
+    **按出现次数降序**（最常写的排最前）。
+
+    ⚠ 判据**照抄 `coverage_of_statements` 的口径**（不另立一套）：
+    `raw_kind` 在 `Statement.payload` 里、不是 beat 属性
+    （我第一版按 beat 属性取 → 恒为空 → 一个候选都发现不了，实测踩到）；
+    `loop`/`camera` 没有 `raw_kind`，要显式认（它们不是"不认识"）。
+
+    只读：不写盘、不改内存。
+    """
+    root = Path(project_root) if project_root else None
+    if root is None or not root.is_dir():
+        return []
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        files = list(discover_scripts(root))[:limit_files]
+    except Exception as e:                      # noqa: BLE001
+        swallow('statement_registry.discover_undeclared.discover', e)
+        return []
+    if not files:
+        return []
+    try:
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        pr, _graph = IncrementalRenPyAnalyzer().analyze(files=files, graph=None)
+    except Exception as e:                      # noqa: BLE001
+        swallow('statement_registry.discover_undeclared.parse', e)
+        return []
+    from storygraph.core.vocabulary import statement_head_token
+    reg = registry_for_parse_result(pr)
+    found: dict = {}
+    for st in (getattr(pr, 'statements', None) or ()):
+        payload = getattr(st, 'payload', None)
+        payload = payload if isinstance(payload, dict) else {}
+        raw_kind = payload.get('raw_kind') or ''
+        if getattr(st, 'kind', '') in ('loop', 'camera'):
+            raw_kind = getattr(st, 'kind')      # 与 coverage_of_statements 同源
+        if raw_kind not in UNMODELED_KINDS:
+            continue
+        text = str(payload.get('text') or '')
+        head = statement_head_token(text)
+        if not head or (reg is not None and reg.match(head) is not None):
+            continue
+        rec = found.setdefault(head, {'head': head, 'count': 0, 'samples': [],
+                                      'block': False})
+        rec['count'] += 1
+        if raw_kind in ('unknown_block', 'known_block'):
+            rec['block'] = True
+        if len(rec['samples']) < samples_limit:
+            where = str(getattr(st, 'source', '') or '')
+            rec['samples'].append((where, text.split('\n')[0][:80]))
+    return sorted(found.values(), key=lambda r: (-r['count'], r['head']))
+
+
 def format_registry_report(registry) -> str:
     """注册表（或 spec 列表）→ 人话（体检报告 / 导出结论用）。结论在第一条。"""
     specs = _specs_of(registry)
@@ -1053,7 +1116,8 @@ __all__ = ['MANIFEST_KEY', 'RegisteredStatement',
            'as_registered',
            'capability_of', 'classify_head', 'clear_cache',
            'coverage_of_beats', 'coverage_of_statements',
+           'declare_statement', 'describe_statements', 'discover_undeclared',
            'dynamic_spec_columns',
            'format_capability_summary',
            'format_registry_report', 'registry_for_parse_result', 'root_of',
-           'spec_arg_choices', 'spec_columns']
+           'spec_arg_choices', 'spec_body_allows', 'spec_columns']
