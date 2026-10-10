@@ -218,10 +218,12 @@ def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
     opened = []
 
     class _FakeDialog:
+        # ⚠ `**kw` 刻意留着：以后弹窗加参数（比如 `declared_groups`）时，
+        # 这条判据应该继续测"动作能不能跑通"，而不是因为签名变了就红。
         def __init__(self, parent=None, project_root=None, declares=None,
-                     discovered=None, registry_report=''):
+                     discovered=None, registry_report='', **kw):
             opened.append({'root': project_root, 'discovered': discovered,
-                           'report': registry_report})
+                           'report': registry_report, 'kw': kw})
 
         def exec(self):
             return 0                       # 等于"用户取消"
@@ -446,3 +448,29 @@ def test_the_statement_registry_is_not_the_asset_registry(ui_window):
     assert isinstance(stmt_reg, StatementRegistry)
     # 报告函数只吃后者
     assert 'iterable' not in SR.format_registry_report(stmt_reg)
+
+
+def test_every_panel_method_the_window_calls_really_exists(ui_window):
+    """
+    ⚠ 这条是"卡死"那个 bug 的守卫（2026-10-10 实测踩到）：
+
+    窗口只持有**面板**（`BeatCardEditor`），网格在它里面 —— 所以每个网格方法
+    都要在面板上**转一手**。我漏了 `set_choice_groups_provider` →
+    `'BeatCardEditor' object has no attribute …` → 异常落进 `load_script` 的
+    `except` → **`QMessageBox.critical` 模态弹窗** → 测试挂死、用户看到"卡住"。
+
+    做法：静态扫窗口源码里 `self._panel.xxx(` 的调用，逐个断言面板上真的有。
+    比"再多写一条用例"可靠 —— 漏的方法本来就不会被任何用例覆盖到。
+    """
+    import re
+    from pathlib import Path
+
+    panel = ui_window._panel
+    src = ''
+    pkg = Path(ROOT) / 'storygraph' / 'ui_qt'
+    for f in sorted(pkg.glob('window_*.py')) + [pkg / 'main_window.py']:
+        src += f.read_text(encoding='utf-8')
+    called = sorted(set(re.findall(r'self\._panel\.([A-Za-z_]\w*)\s*\(', src)))
+    assert called, '没扫到任何 self._panel.* 调用（判据本身失效了）'
+    missing = [m for m in called if not hasattr(panel, m)]
+    assert not missing, f'窗口调了面板上不存在的方法（会变成模态弹窗卡死）：{missing}'

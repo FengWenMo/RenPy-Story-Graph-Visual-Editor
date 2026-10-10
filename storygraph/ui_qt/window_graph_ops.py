@@ -676,17 +676,33 @@ class GraphOpsMixin:
 
         dlg = CustomStatementDialog(self, project_root=root,
                                     discovered=discovered,
-                                    registry_report=report)
+                                    registry_report=report,
+                                    declared_groups=(reg.attr_groups
+                                                     if reg is not None else []))
         self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
                   + ('：' + '、'.join(r['head'] for r in discovered[:8])
                      if discovered else ''))
         if dlg.exec() != QDialog.Accepted:
             return
+        # —— 词组（可选）：与语句声明一起写 ——
+        wrote_group = False
+        group_rows = dlg.groups_to_write()
+        if group_rows:
+            gres = SR.declare_attr_groups(root, group_rows)
+            if gres.get('ok'):
+                wrote_group = True
+                self._log(f'[自定义] 词组 {gres["count"]} 组 → {gres["path"]}')
+            else:
+                self._log(f'[自定义] ✕ 词组没写：{gres.get("reason")}')
         built = dlg.result_declaration()
         if not built.get('ok'):
             for w in built.get('warnings') or []:
                 self._log(f'[自定义] ✕ {w}')
-            self._status('没写：' + '；'.join(built.get('warnings') or ['?']))
+            if wrote_group:
+                self._status('词组写好了（语句声明没写：看控制台）')
+                self._after_learn_refresh()
+            else:
+                self._status('没写：' + '；'.join(built.get('warnings') or ['?']))
             return
         res = SR.declare_statement(root, built['name'], label=built['label'],
                                    columns=built['columns'],
@@ -701,17 +717,35 @@ class GraphOpsMixin:
         self._log(f'[自定义] {verb}声明 {built["name"]}（'
                   f'{len(built["columns"])} 个参数）→ {res.get("path")}')
         self._log(declaration_preview(built, path=str(res.get('path') or '')))
-        # ⚠ 清缓存并重读：不清的话表格/提示还是旧的（声明"看起来没生效"）
+        self._after_learn_refresh()
+        self._status(f'✔ {verb}声明 {built["name"]}：'
+                     f'参数 {len(built["columns"])} 个已进表格列'
+                     + ('；词组也写好了（立绘候选会分栏）' if wrote_group else '')
+                     + '（重新导入那几章即可看到效果）')
+
+    def _after_learn_refresh(self):
+        """
+        教完一条之后刷新：**清清单缓存** + 重算符号表 + 推词组给卡片。
+
+        ⚠ 不清缓存的话表格/提示/分栏还是旧的 —— 用户会看到"声明了但没生效"。
+        这也是 `set_choice_groups_provider` 那类方法必须存在的原因（缺一个就
+        变成模态弹窗卡死，见 `test_every_panel_method_the_window_calls_really_exists`）。
+        """
+        from storygraph.story import statement_registry as SR
         SR.clear_cache()
         try:
             if hasattr(self._session, 'refresh_symbols'):
                 self._session.refresh_symbols()
             self._refresh_asset_choices()
         except Exception:                       # noqa: BLE001
-            swallow('main_window.learn_custom_statement.refresh')
-        self._status(f'✔ {verb}声明 {built["name"]}：'
-                     f'参数 {len(built["columns"])} 个已进表格列'
-                     f'（重新导入那几章即可看到效果）')
+            swallow('main_window._after_learn_refresh.assets')
+        for name in ('_sync_choice_groups',):
+            fn = getattr(self, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:               # noqa: BLE001
+                    swallow('main_window._after_learn_refresh.groups')
     def save_layout(self, target=None):
         """
         保存布局 JSON（Ctrl+S）。没给路径就弹「另存为」。

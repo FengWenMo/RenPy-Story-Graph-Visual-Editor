@@ -32,7 +32,11 @@ from pathlib import Path
 from storygraph.core.safeguard import swallow
 
 #: 清单里声明自定义语句的键名（`storygraph.rules.json` 的顶层键）
+#: `storygraph.rules.json` 里放"语句声明"列表的键
 MANIFEST_KEY = 'statements'
+#: 清单里放**词组声明**的键（"服装 / 表情"这类分栏；见 `authoring.spec_groups`）
+ATTR_GROUPS_KEY = 'attr_groups'
+
 
 #: 清单文件名。与 `project_conventions.MANIFEST_NAMES` 是同一份约定
 #: （这里再写一遍是为了不让 `story` 内部互相 import；两处都有测试钉着）。
@@ -158,9 +162,13 @@ class StatementRegistry:
         hit = reg.match('mycue')      # → RegisteredStatement | None
     """
 
-    def __init__(self, declared=(), host=()):
+    def __init__(self, declared=(), host=(), attr_groups=()):
         self.declared = list(declared)
         self.host = list(host)
+        #: 项目声明的**词组**（`attr_groups`）—— 用于把候选分栏显示
+        #: （"服装 / 表情"这类）。见 `authoring.spec_groups`。
+        #: 空 = 项目没声明 → 调用方走原来的平铺候选，行为一字不变。
+        self.attr_groups = list(attr_groups)
         self._by_name = {}
         # **先装 host，再装 declared** —— 后者覆盖前者（优先级就落在这里，
         # 而不是散在调用方的 if 里）。
@@ -218,16 +226,20 @@ class StatementRegistry:
             hit = _CACHE.get(key)
             if hit is not None:
                 return hit
-        declared, host = [], []
+        declared, host, groups = [], [], []
         try:
             from storygraph.story.project_conventions import load_manifest
+            from storygraph.authoring.spec_groups import parse_attr_groups
             data, path, _warnings = load_manifest(project_root)
             if isinstance(data, dict):
                 declared = _from_manifest(data, path)
+                # 词组分栏：项目自己声明"有哪几组词"（`attr_groups`），
+                # 工具不写死"服装/表情"（用户 2026-10-10 的通用性要求）
+                groups = parse_attr_groups(data.get(ATTR_GROUPS_KEY))
         except Exception as e:                # noqa: BLE001
             swallow('story.statement_registry.for_project.manifest', e)
         host = _from_cds(project_root)
-        reg = cls(declared=declared, host=host)
+        reg = cls(declared=declared, host=host, attr_groups=groups)
         if use_cache:
             _CACHE[key] = reg
         return reg
@@ -1090,6 +1102,98 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
     return sorted(found.values(), key=lambda r: (-r['count'], r['head']))
 
 
+def declare_attr_groups(project_root, groups) -> dict:
+    """
+    **把"词组"写进清单**（`storygraph.rules.json` 的 `attr_groups`）。
+
+    用户 2026-10-10：
+
+    > 实际上需要分组显示……但因为我这个要求通用！所以一般人其实是没有服装这个
+    > 选项的！所以事实上应当通过 B 这个自定义模块，做到把服装跟表情这种东西分开！
+
+    所以词组和语句声明走**同一份清单、同一个写入口风格**：
+      · 同名 = 更新（教两次不会变成两组）；
+      · 其它键（`statements` / 用户自己加的）**原样保留**；
+      · 清单坏了 → **拒绝写**（绝不覆盖用户手写的东西）；
+      · `groups` 传空列表 = **清掉**该段（把分组关掉，回到平铺）。
+
+    返回 `{'ok','path','action','reason','count'}`。
+    """
+    import json
+
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'action': 'refused',
+                'reason': '没有项目根目录', 'count': 0}
+    clean = []
+    for g in (groups or ()):
+        item = g if isinstance(g, dict) else {}
+        name = str(item.get('name') or '').strip()
+        if not name:
+            continue
+        entry = {'name': name}
+        if str(item.get('label') or '').strip():
+            entry['label'] = str(item['label']).strip()
+        opts = [str(o).strip() for o in (item.get('options') or ())
+                if str(o).strip()]
+        if opts:
+            entry['options'] = opts
+        clean.append(entry)
+    if not clean:
+        return {'ok': False, 'path': '', 'action': 'refused',
+                'reason': '一个词组都没填（要清掉分组请用"清空分组"）',
+                'count': 0}
+
+    path = root / MANIFEST_NAMES[0]
+    data = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8') or '{}')
+        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': f'storygraph.rules.json 不是合法 JSON，'
+                              f'拒绝覆盖（{e}）', 'count': 0}
+        if not isinstance(data, dict):
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': '清单顶层不是对象，拒绝覆盖', 'count': 0}
+
+    existing = data.get(ATTR_GROUPS_KEY)
+    if not isinstance(existing, list):
+        existing = []
+    by_name = {}
+    order = []
+    for it in existing:                         # 保留原有顺序与其它字段
+        if not isinstance(it, dict) or not str(it.get('name') or '').strip():
+            continue
+        n = str(it['name']).strip()
+        if n in by_name:
+            continue
+        by_name[n] = dict(it)
+        order.append(n)
+    action = 'updated' if by_name else 'added'
+    for entry in clean:                         # 同名 = 合并更新
+        n = entry['name']
+        if n in by_name:
+            merged = dict(by_name[n])
+            merged.update(entry)
+            by_name[n] = merged
+            action = 'updated'
+        else:
+            by_name[n] = entry
+            order.append(n)
+    data[ATTR_GROUPS_KEY] = [by_name[n] for n in order]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                        encoding='utf-8')
+    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
+        return {'ok': False, 'path': str(path), 'action': 'refused',
+                'reason': f'写不进去：{e}', 'count': 0}
+    clear_cache()                               # 刚改完清单：装配缓存作废
+    return {'ok': True, 'path': str(path), 'action': action, 'reason': '',
+            'count': len(data[ATTR_GROUPS_KEY])}
+
+
 def format_registry_report(registry) -> str:
     """注册表（或 spec 列表）→ 人话（体检报告 / 导出结论用）。结论在第一条。"""
     specs = _specs_of(registry)
@@ -1110,13 +1214,14 @@ def format_registry_report(registry) -> str:
     return '\n'.join(lines)
 
 
-__all__ = ['MANIFEST_KEY', 'RegisteredStatement',
+__all__ = ['ATTR_GROUPS_KEY', 'MANIFEST_KEY', 'RegisteredStatement',
            'StatementRegistry',
            'UNMODELED_KINDS', 'annotate_spec_statements', 'arg_columns',
            'as_registered',
            'capability_of', 'classify_head', 'clear_cache',
            'coverage_of_beats', 'coverage_of_statements',
-           'declare_statement', 'describe_statements', 'discover_undeclared',
+           'declare_attr_groups', 'declare_statement', 'describe_statements',
+           'discover_undeclared',
            'dynamic_spec_columns',
            'format_capability_summary',
            'format_registry_report', 'registry_for_parse_result', 'root_of',

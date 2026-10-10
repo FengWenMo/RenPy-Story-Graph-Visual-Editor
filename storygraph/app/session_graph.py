@@ -546,6 +546,23 @@ class GraphSessionMixin:
                     return
         except Exception as e:                    # noqa: BLE001
             swallow('editor._reload_character_rows', e)
+    def declared_attr_groups(self) -> list:
+        """
+        项目声明的**词组**（`storygraph.rules.json` 的 `attr_groups`）。
+
+        用户 2026-10-10："实际上需要分组显示……因为我这个要求通用！所以一般人
+        其实是没有服装这个选项的" —— 所以这里**只是把项目的声明交给前端**，
+        工具一个组名都不认识；没声明就返回 `[]`（前端走平铺，行为一字不变）。
+        """
+        root = getattr(self, 'project_root', None)
+        if not root:
+            return []
+        try:
+            from storygraph.story.statement_registry import StatementRegistry
+            return list(StatementRegistry.for_project(str(root)).attr_groups)
+        except Exception as e:                    # noqa: BLE001
+            swallow('editor.declared_attr_groups', e)
+            return []
     def character_rows(self) -> dict:
         """
         当前角色表（`{变量: 行}`）—— 纯文字导入要用它判"这个写法是谁"。

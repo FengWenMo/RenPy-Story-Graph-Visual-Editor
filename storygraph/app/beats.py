@@ -1282,6 +1282,63 @@ def participants(engine, limit: int = 8) -> list:
     return [cid for cid, _row in ranked[:limit]]
 
 
+def expression_choice_groups(beat: Beat, symbols, groups=None,
+                            limit: int = 500) -> list:
+    """
+    当前立绘的可选**属性候选，按项目声明的词组分栏**。
+
+    用户 2026-10-10：
+
+    > 实际上需要分组显示……但因为我这个要求通用！所以一般人其实是没有服装这个
+    > 选项的！所以事实上应当通过 B 这个自定义模块，做到把服装跟表情这种东西分开！
+
+    所以"分不分栏、分哪几栏"**由项目在 `rules.json` 的 `attr_groups` 里声明**，
+    这里只是把声明套到真正存在的候选上（`expression_choices` 的同一份清单，
+    绝不另算一份）。返回 `[{'group','label','values'}]`。
+
+    ⚠ **没有声明（或声明了但一个词都没归到）→ 返回 `[]`** —— 调用方据此走原来
+    的平铺候选，于是不声明词组的项目行为**一个字节不变**。这条是通用性的底线：
+    一般人没有"服装"这个概念，他就不该看到任何分组。
+    """
+    from storygraph.authoring.spec_groups import group_choices
+    if not groups:
+        return []
+    values = expression_choices(beat, symbols, limit=limit)
+    return group_choices(values, groups)
+
+
+def expression_groups_for(tag: str, symbols, groups) -> list:
+    """
+    `(tag, 符号表, 项目声明的词组)` → `[{'name','label','values'}]`，
+    **值是界面显示值**（与 `choices_for_image` 的 `expression` 同一套
+    `_expression_display`）—— 否则下拉里会出现 `happy` 而候选里是「开心」，
+    两条路给出不一样的字面量（`expression_choices` 的 docstring 记着这个坑）。
+
+    `groups` 为空 → 返回 `[]`（调用方走平铺），这条是通用性底线。
+    """
+    from storygraph.authoring.spec_groups import group_values
+    if not groups or symbols is None or not tag:
+        return []
+    try:
+        attrs = [str(a or '').strip() for a in symbols.attrs_of_tag(tag)]
+    except Exception as e:                        # noqa: BLE001
+        swallow('app.beats.expression_groups_for', e)
+        return []
+    probe = Beat()
+    probe.show = str(tag)
+    out = []
+    for entry in group_values([a for a in attrs if a], groups):
+        vals = []
+        for attr in entry['values']:
+            shown = _expression_display(attr, tag, probe, symbols) or attr
+            if shown and shown not in vals:
+                vals.append(shown)
+        if vals:
+            out.append({'group': entry['name'], 'label': entry['label'],
+                        'values': vals})
+    return out
+
+
 def choices_for_image(image_spec: str, symbols) -> dict:
     """
     一张立绘的**可选表情/位置**（供卡片 chip 点一下换一个）。

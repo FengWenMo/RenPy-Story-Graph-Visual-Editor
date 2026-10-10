@@ -386,10 +386,23 @@
   `StatementRegistry.for_project(root)`（全仓扫过：只有这一处混用）。
   ⚠ **教训**：我原来只有"工具栏里有这个动作"的**存在性**判据 —— **存在 ≠ 能跑**。
   现在有 `action.trigger()` 真跑一次的判据 + "两个 registry 不是一回事"的判据。
-- **服装/自定义块的两条正解**（用户问"swim_suit 怎么理解"）：
+- **词组分组（2026-10-10 续）**：用户要求"服装/表情分开显示，但**要求通用**"→
+  口径是**主语是项目**：`rules.json` 的 `attr_groups` 声明"有哪几组词"，工具一个
+  组名都不认识。规则：逐字 / **整段词序列**（`swim_suit_glad` 归"服装"）/
+  **前缀通配 `swim_*`**（真机 1657 图必需）/ 兜底组；⚠ **不做子串包含**
+  （`unhappy` 不含 `happy`，`attr_for` 踩过的坑）。⚠ **没声明 = 完全平铺**
+  （判据钉住，这是通用性底线）。见 `2026-10-10g.md`。
+  · 写入口 `declare_attr_groups()`（同一份清单，同名=更新/坏清单拒写）；
+  · 应用层 `app.beats.expression_groups_for()`（值用**界面显示名**，与 chip 同源）；
+  · 界面：右键候选列表插不可点的**粗体组标题** + 「🧩 自定义模块」里一节**词组表**。
+  ⚠⚠ 面板 `BeatCardEditor` 少一个转发方法 → `AttributeError` → `QMessageBox`
+  **模态** → 测试挂死 / 用户看到"卡住"。守卫：
+  `test_every_panel_method_the_window_calls_really_exists`（静态扫 `self._panel.*`）。
+- **服装的两条正解**（与上面的词组分组配套；用户问"swim_suit 怎么理解"）：
   · **路 A（换衣服，推荐）**：服装 = 立绘的**属性** —— 图登记进 `images.xlsx`
     （`Tag=角色`、`Attributes=swim_suit`）→ `attrs_of_tag` 出候选 →
     和"表情"**共用同一个下拉池**（实测 `show lyj swim_suit` 逐字保留）。
+    → 想分开显示就用**词组分组**（`attr_groups`），不是新机制。
   · **路 B（自定义指令）**：`swim_suit lyj "泳装" intensity=3` 这种带参数的语句 →
     「🧩 自定义模块」声明参数 → **卡片**里的一组控件
     （`spec_arg_fields_for` / `spec_arg_choices_for`）+ **表格**动态列

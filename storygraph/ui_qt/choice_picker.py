@@ -17,6 +17,14 @@ storygraph.ui_qt.choice_picker
 过滤口径：去空白、**忽略大小写**、**子串匹配**（`i1` 能筛出 `i11`/`bi11`）；
 查询为空 → 全给。刻意不做模糊打分：候选就是"要写进脚本的名字"，
 排序必须稳定可预期（按传入顺序），否则用户找东西的手感每次都变。
+
+## 分组（用户 2026-10-10）
+
+> 实际上需要分组显示……但因为我这个要求通用！所以一般人其实是没有服装这个
+> 选项的！所以事实上应当通过 B 这个自定义模块，做到把服装跟表情这种东西分开！
+
+`groups` 给了就在列表里插**不可点的组标题**（`服装` / `表情`…），
+筛选时**空组连标题一起消失**。没给 `groups` 时行为与从前**完全一样**。
 """
 from __future__ import annotations
 
@@ -24,7 +32,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QVBoxLayout)
 
-__all__ = ['ChoicePickerDialog', 'choose_from', 'filter_choices']
+__all__ = ['ChoicePickerDialog', 'choose_from', 'filter_choices',
+           'filter_groups']
 
 
 def filter_choices(choices, query: str = '') -> list:
@@ -44,15 +53,36 @@ def filter_choices(choices, query: str = '') -> list:
     return [c for c in items if q in c.lower()]
 
 
+def filter_groups(groups, query: str = '') -> list:
+    """
+    分组候选 → 过滤后的分组（**纯函数**）：组内先筛，**空组整条丢掉**
+    （否则筛选结果里会剩一堆光秃秃的标题）。
+
+    输入 `[{'group','label','values'}]`；输出同形（顺序不变）。
+    """
+    out = []
+    for g in (groups or ()):
+        vals = filter_choices((g or {}).get('values'), query)
+        if not vals:
+            continue
+        out.append({'group': str((g or {}).get('group') or ''),
+                    'label': str((g or {}).get('label') or ''),
+                    'values': vals})
+    return out
+
+
 class ChoicePickerDialog(QDialog):
-    """一行筛选框 + 一个列表；双击/回车即选定。"""
+    """一行筛选框 + 一个列表；双击/回车即选定。给 `groups` 就带组标题。"""
 
     def __init__(self, parent=None, title: str = '选择', choices=None,
-                 current: str = ''):
+                 current: str = '', groups=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(360, 460)
-        self._all = [str(c) for c in (choices or [])]
+        #: **扁平候选**（无分组时用它；有分组时它是各组的并集，判"共几个"）
+        self._groups = [g for g in (groups or ()) if g.get('values')]
+        self._all = ([str(c) for c in (choices or ())] if not self._groups
+                     else [v for g in self._groups for v in g['values']])
         self.value = ''
 
         lay = QVBoxLayout(self)
@@ -82,12 +112,35 @@ class ChoicePickerDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _refill(self, query: str):
+        """
+        ⚠ **组标题必须是"选不中"的**：用 `Qt.ItemIsSelectable` 关掉、
+        文本里也不放真候选 —— 否则回车/双击会把 `服装` 当成值写进脚本。
+        """
         self._list.clear()
-        for name in filter_choices(self._all, query):
-            QListWidgetItem(name, self._list)
-        if self._list.count():
-            self._list.setCurrentRow(0)
-        self._hint.setText(f'{self._list.count()} / {len(self._all)} 个候选'
+        shown = 0
+        if self._groups:
+            for g in filter_groups(self._groups, query):
+                label = g['label'] or g['group'] or ''
+                if label:
+                    head = QListWidgetItem(f'── {label} ──')
+                    head.setFlags(Qt.NoItemFlags)          # 不可选
+                    # 粗体才像标题（灰色在浅色主题下几乎看不见 —— 出图才发现）
+                    font = head.font()
+                    font.setBold(True)
+                    head.setFont(font)
+                    self._list.addItem(head)
+                for name in g['values']:
+                    QListWidgetItem(name, self._list)
+                    shown += 1
+        else:
+            for name in filter_choices(self._all, query):
+                QListWidgetItem(name, self._list)
+                shown += 1
+        for row in range(self._list.count()):              # 跳过标题
+            if self._list.item(row).flags() & Qt.ItemIsSelectable:
+                self._list.setCurrentRow(row)
+                break
+        self._hint.setText(f'{shown} / {len(self._all)} 个候选'
                            f' —— 双击选定（Esc 取消）')
 
     def _select(self, current: str):
@@ -100,13 +153,13 @@ class ChoicePickerDialog(QDialog):
                 return
 
     def _accept_item(self, item):
-        if item is not None:
+        if item is not None and (item.flags() & Qt.ItemIsSelectable):
             self.value = item.text()
             self.accept()
 
     def _accept_current(self):
         item = self._list.currentItem()
-        if item is not None:
+        if item is not None and (item.flags() & Qt.ItemIsSelectable):
             self.value = item.text()
             self.accept()
 
@@ -118,10 +171,11 @@ class ChoicePickerDialog(QDialog):
         super().keyPressEvent(event)
 
 
-def choose_from(parent, title: str, choices, current: str = '') -> str:
-    """弹选择器；返回选中的名字（取消 → `''`）。"""
+def choose_from(parent, title: str, choices, current: str = '',
+                groups=None) -> str:
+    """弹选择器；返回选中的名字（取消 → `''`）。给了 `groups` 就分组显示。"""
     dlg = ChoicePickerDialog(parent, title=title, choices=choices,
-                             current=current)
+                             current=current, groups=groups)
     if dlg.exec() == QDialog.Accepted:
         return dlg.value
     return ''

@@ -68,6 +68,7 @@ BLOCKS = {
             'node_variables', 'set_node_variables', 'check_variable_syntax',
             'import_chapters', 'import_plain_text', 'character_rows',
             'apply_character_decisions', '_reload_character_rows',
+            'declared_attr_groups',
             'graph_files', 'drop_chapters',
             'analyze_graph_problems', '_split_analysis_warnings',
             'analyze_graph',

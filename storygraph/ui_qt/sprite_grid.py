@@ -99,16 +99,26 @@ class SpriteCardWidget(QFrame):
     remove_requested = Signal(object)
 
     def __init__(self, item: dict, symbols=None, loader=None,
-                 parent=None, on_change=None, on_resolve_path=None):
+                 parent=None, on_change=None, on_resolve_path=None,
+                 choice_groups=None, choice_groups_for=None):
         super().__init__(parent)
         self.item = dict(item or {})
         self._symbols = symbols
         self._loader = loader
         self._on_change = on_change
         self._on_resolve_path = on_resolve_path
+        #: 项目声明的词组（`{'expression': [{group,label,values}]}`）——
+        #: 只影响**右键候选列表的显示**；空 = 与从前一样平铺。
+        self._choice_groups = dict(choice_groups or {})
+        #: `tag -> [{'group','label','values'}]`（窗口注入；现取，见 `_groups_for`）
+        self._choice_groups_for = choice_groups_for
         self.setProperty('role', 'spriteCard')
         self._build()
         self.refresh()
+
+    def set_choice_groups(self, groups):
+        """窗口在（重新）读注册表后推过来：项目声明的词组分组。"""
+        self._choice_groups = dict(groups or {})
 
     # ------------------------------------------------------------------
 
@@ -354,6 +364,10 @@ class SpriteCardWidget(QFrame):
         靠"点一下换下一个"要按 40 次才轮到 `i11`。这里弹一个"输入即筛"的
         弹窗（见 `ui_qt.choice_picker`），候选与左键那条路**同一份**
         （`choices_for_image`）—— 两条路不可能给出不一样的名字。
+
+        **分组**（用户 2026-10-10）：项目在 `rules.json` 的 `attr_groups`
+        里声明了词组时，这里会在列表里插组标题（`服装` / `表情`）。
+        没声明 → 与从前一模一样（一个平铺列表）。
         """
         from storygraph.ui_qt.choice_picker import choose_from
         choices = list((choices_for_image(str(self.item.get('image') or ''),
@@ -361,10 +375,38 @@ class SpriteCardWidget(QFrame):
         if not choices:
             return
         label = '表情' if field == 'expression' else '位置'
-        value = choose_from(self, f'选择{label} —— 共 {len(choices)} 个候选',
-                            choices, str(self.item.get(field) or ''))
+        groups = list(self._groups_for(field))
+        value = choose_from(self,
+                            f'选择{label} —— 共 {len(choices)} 个候选'
+                            + (f'（{len(groups)} 组）' if groups else ''),
+                            choices, str(self.item.get(field) or ''),
+                            groups=groups)
         if value:
             self._set_field(field, value)
+
+    def _groups_for(self, field) -> list:
+        """
+        这一格要显示的**分组候选**（没有就返回空 → 平铺）。
+
+        ⚠ 分组值可能依赖"这张卡的 tag"（同一个词在不同角色下的显示名不同），
+        所以由窗口注入的 `choice_groups_for(tag)` **现取**，而不是提前算好一份
+        缓存 —— 缓存了就会出现"切了角色、下拉还是上一个人的词"。
+        """
+        if field != 'expression':
+            return []                        # 目前只有属性（表情/服装）要分栏
+        fn = self._choice_groups_for
+        if fn is None:
+            return []
+        tag = str(self.item.get('tag') or '').strip()
+        if not tag:
+            spec = str(self.item.get('image') or '').strip().split()
+            tag = spec[0] if spec else ''
+        try:
+            return list(fn(tag) or [])
+        except Exception as e:               # noqa: BLE001 - 分组拿不到就平铺
+            from storygraph.core.safeguard import swallow
+            swallow('ui_qt.sprite_grid._groups_for', e)
+            return []
 
     def mouseDoubleClickEvent(self, event):
         self.clicked.emit(self)
@@ -390,8 +432,32 @@ class SpriteGridWidget(QWidget):
         self._grid.setSpacing(T.SPACE['sm'])
         self._cards: list = []
         self._cols = 4
+        #: 项目声明的词组（空 = 平铺；见 `set_choice_groups`）
+        self._choice_groups: dict = {}
+        #: `tag -> 分组候选`（窗口注入；见 `set_choice_groups_provider`）
+        self._choice_groups_for = None
 
     # ------------------------------------------------------------------
+
+    def set_choice_groups(self, groups):
+        """
+        项目声明的**词组** → 每张卡。
+
+        用户 2026-10-10："实际上需要分组显示……因为我这个要求通用！" ——
+        所以这里只递数据：分不分栏由**项目声明**决定；空 = 平铺。
+        """
+        self._choice_groups = dict(groups or {})
+        for card in self._cards:
+            card.set_choice_groups(self._choice_groups)
+
+    def set_choice_groups_provider(self, fn):
+        """
+        注入 `tag -> [{'group','label','values'}]`（分组值可能依赖 tag 的
+        显示名，所以**现取**；见 `SpriteCardWidget._groups_for`）。
+        """
+        self._choice_groups_for = fn
+        for card in self._cards:
+            card._choice_groups_for = fn
 
     def set_symbols(self, symbols):
         self._symbols = symbols
@@ -456,7 +522,9 @@ class SpriteGridWidget(QWidget):
             card = SpriteCardWidget(it, symbols=self._symbols,
                                     loader=self._loader,
                                     on_change=self._on_card_change,
-                                    on_resolve_path=self._on_resolve_path)
+                                    on_resolve_path=self._on_resolve_path,
+                                    choice_groups=self._choice_groups,
+                                    choice_groups_for=self._choice_groups_for)
             card.remove_requested.connect(self._on_remove)
             card.clicked.connect(self._on_click)
             self._cards.append(card)

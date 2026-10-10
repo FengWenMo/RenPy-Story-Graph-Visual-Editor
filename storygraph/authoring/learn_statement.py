@@ -118,6 +118,47 @@ def build_declaration(name: str, label: str = '', docs: str = '',
             'columns': columns, 'warnings': warnings}
 
 
+def build_group(name: str, label: str = '', options=None) -> dict:
+    """
+    表单的一行 → 一条**词组声明**（`rules.json` 的 `attr_groups` 里的一项）。
+
+    与 `build_declaration` 同一个理由：表单数据最脏。这里：
+      · 组名必须合法（字母/数字/下划线，字母开头）—— 它是内部键；
+      · 候选词按通用分隔符切（`swim_suit, uniform 便装`）；
+      · 可以只写组名（`options` 空 = **兜底组**：没归到别的组的词都进这里）。
+    """
+    gname = str(name or '').strip()
+    if not gname:
+        return {'ok': False, 'name': '', 'label': '', 'options': [],
+                'warnings': ['词组名不能为空']}
+    if not _NAME_RE.match(gname):
+        return {'ok': False, 'name': gname, 'label': '', 'options': [],
+                'warnings': [f'词组名 "{gname}" 不是合法标识符'
+                             f'（只能字母/数字/下划线，且字母开头）']}
+    opts = parse_choices(options) if not isinstance(options, (list, tuple)) \
+        else parse_choices(list(options or ()))
+    return {'ok': True, 'name': gname, 'label': str(label or '').strip(),
+            'options': opts, 'warnings': []}
+
+
+def group_preview(groups) -> str:
+    """给人看的"这会写进清单的分组"。"""
+    rows = [g for g in (groups or ()) if g.get('ok')]
+    if not rows:
+        return '（还没填词组）'
+    lines = [f'写进 `attr_groups` 的 {len(rows)} 组：']
+    for g in rows:
+        if g['options']:
+            lines.append(f'  · {g["name"]}（{g["label"] or g["name"]}）：'
+                         f'{len(g["options"])} 个词 —— '
+                         + '、'.join(g['options'][:8])
+                         + ('…' if len(g['options']) > 8 else ''))
+        else:
+            lines.append(f'  · {g["name"]}（{g["label"] or g["name"]}）：'
+                         f'兜底（没归到别的组的词都进这里）')
+    return '\n'.join(lines)
+
+
 def declaration_preview(built: dict, path: str = '') -> str:
     """给人看的"这会写什么"（写盘前/后的确认文本）。"""
     if not built.get('ok'):
@@ -150,4 +191,5 @@ def declaration_preview(built: dict, path: str = '') -> str:
     return '\n'.join(lines)
 
 
-__all__ = ['build_declaration', 'declaration_preview', 'parse_choices']
+__all__ = ['build_declaration', 'build_group', 'declaration_preview',
+           'group_preview', 'parse_choices']

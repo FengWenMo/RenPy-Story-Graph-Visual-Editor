@@ -43,6 +43,8 @@ WRITERS = {
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
     'pipeline/build.py::build_project': '写构建报告 JSON',
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
+    'story/statement_registry.py::declare_attr_groups':
+        '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/excel_export.py::_thumbnail_bytes': '写缩略图缓存 png',
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',

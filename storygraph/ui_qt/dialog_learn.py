@@ -23,10 +23,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QSplitter,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QPlainTextEdit, QPushButton,
+                               QSplitter, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from storygraph.authoring.learn_statement import (build_declaration,
                                                   declaration_preview)
@@ -64,6 +64,43 @@ class _ParamsTable(QTableWidget):
         self.setCurrentCell(r, 0)
 
 
+class _GroupsTable(QTableWidget):
+    """词组表：组名 / 中文名 / 候选词（逗号分隔；留空 = 兜底组）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(0, 3, parent)
+        self.setHorizontalHeaderLabels(['词组名', '中文名（如 服装）',
+                                        '这一组有哪些词（留空 = 兜底）'])
+        self.verticalHeader().setVisible(False)
+        hh = self.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+
+    def rows(self) -> list:
+        out = []
+        for r in range(self.rowCount()):
+            def cell(c):
+                item = self.item(r, c)
+                return item.text() if item is not None else ''
+            out.append({'name': cell(0), 'label': cell(1), 'choices': cell(2)})
+        return out
+
+    def add_group(self, name: str = '', label: str = '', choices: str = ''):
+        r = self.rowCount()
+        self.insertRow(r)
+        for c, text in enumerate((name, label, choices)):
+            self.setItem(r, c, QTableWidgetItem(text))
+        self.setCurrentCell(r, 0)
+
+    def load_groups(self, groups):
+        """已有声明 → 填进表（打开时让用户看到现在是怎么分的）。"""
+        for g in (groups or ()):
+            self.add_group(getattr(g, 'name', '') or '',
+                           getattr(g, 'label', '') or '',
+                           '、'.join(getattr(g, 'options', []) or []))
+
+
 class CustomStatementDialog(QDialog):
     """
     教工具认识一条自定义写法。
@@ -73,7 +110,8 @@ class CustomStatementDialog(QDialog):
     """
 
     def __init__(self, parent=None, project_root=None, declares=None,
-                 discovered=None, registry_report: str = ''):
+                 discovered=None, registry_report: str = '',
+                 declared_groups=None):
         super().__init__(parent)
         self.setWindowTitle('自定义模块 —— 教工具认识项目自己的写法')
         theme.apply_to(self)
@@ -194,6 +232,39 @@ class CustomStatementDialog(QDialog):
         self.params.itemChanged.connect(self._refresh_preview)
         self._refresh_preview()
 
+        # —— 词组（分栏显示"服装 / 表情"这类）——
+        #
+        # 用户 2026-10-10："实际上需要分组显示……因为我这个要求通用！所以一般人
+        # 其实是没有服装这个选项的！所以事实上应当通过 B 这个自定义模块，
+        # 做到把服装跟表情这种东西分开！"
+        box_groups = QGroupBox('词组（可选）—— 把立绘候选分成"服装 / 表情"这样的栏')
+        gv = QVBoxLayout(box_groups)
+        gv.setSpacing(T.SPACE['xs'])
+        gv.addWidget(self._hint(
+            '这里**不预设任何组名**：你写"服装"就是服装，写"姿势"就是姿势。'
+            '词组名只是内部键，中文名才是界面上那一栏的字。'
+            '留空"候选词"的那一组 = 兜底（没归到别的组的词都进它）。'))
+        self.groups = _GroupsTable()
+        self.groups.setMaximumHeight(160)
+        self.groups.verticalHeader().setDefaultSectionSize(26)   # 别把中文挤掉
+        gv.addWidget(self.groups)
+        grow = QHBoxLayout()
+        add_g = QPushButton('＋ 加一组')
+        add_g.clicked.connect(lambda: self.groups.add_group())
+        rm_g = QPushButton('－ 删这一组')
+        rm_g.clicked.connect(self._remove_group)
+        grow.addWidget(add_g)
+        grow.addWidget(rm_g)
+        grow.addStretch(1)
+        self.write_groups = QCheckBox('把词组一起写进清单')
+        self.write_groups.setChecked(False)
+        self.write_groups.toggled.connect(self._refresh_preview)
+        grow.addWidget(self.write_groups)
+        gv.addLayout(grow)
+        self.groups.itemChanged.connect(self._refresh_preview)
+        rv.addWidget(box_groups)
+        self.groups.load_groups(declared_groups or [])
+
         split.addWidget(left)
         split.addWidget(right)
         split.setSizes([420, 560])
@@ -236,6 +307,25 @@ class CustomStatementDialog(QDialog):
         self.block.setChecked(bool(rec.get('block')))
         self._refresh_preview()
 
+    def _remove_group(self):
+        r = self.groups.currentRow()
+        if r >= 0:
+            self.groups.removeRow(r)
+            self._refresh_preview()
+
+    def built_groups(self) -> list:
+        """当前词组表 → 后端参数（`learn_statement.build_group`）。"""
+        from storygraph.authoring.learn_statement import build_group
+        return [build_group(row['name'], row['label'], row['choices'])
+                for row in self.groups.rows() if str(row.get('name') or '').strip()]
+
+    def groups_to_write(self) -> list:
+        """该写进清单的词组（没勾"一起写"就返回空）。"""
+        wg = getattr(self, 'write_groups', None)
+        if wg is None or not wg.isChecked():
+            return []
+        return [g for g in self.built_groups() if g.get('ok')]
+
     def built(self) -> dict:
         """当前表单 → 后端参数（纯函数；判据不在这里）。"""
         block = True if self.block.isChecked() else None
@@ -245,12 +335,19 @@ class CustomStatementDialog(QDialog):
 
     def _refresh_preview(self, *_a):
         built = self.built()
-        self.preview.setPlainText(declaration_preview(
-            built, path=str(self._root_path or '')))
-        # ⚠ 构造期就会调一次（表单初值要显示预览），那时按钮还没建出来
+        text = declaration_preview(built, path=str(self._root_path or ''))
+        # ⚠ 构造期/早期就会调（表单初值要显示预览），那时后面那些控件还没建出来
+        #    —— 所以一律走 `getattr` 守卫，末尾再刷一次（上次就是踩了这个坑）。
+        wg = getattr(self, 'write_groups', None)
+        if wg is not None and wg.isChecked():
+            from storygraph.authoring.learn_statement import group_preview
+            text += '\n\n' + group_preview(self.built_groups())
+        self.preview.setPlainText(text)
         btn = getattr(self, '_ok_btn', None)
         if btn is not None:
-            btn.setEnabled(bool(built.get('ok')))
+            # 勾了"一起写词组"时，允许**只写词组**（语句名可以是空的）
+            ok = bool(built.get('ok')) or bool(self.groups_to_write())
+            btn.setEnabled(ok)
 
     def result_declaration(self) -> dict:
         """按下去之后的最终参数（调用方拿去 `declare_statement`）。"""

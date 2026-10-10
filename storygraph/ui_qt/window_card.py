@@ -83,6 +83,7 @@ class CardPageMixin:
         try:
             n = self._session.load(target)
             self._panel.set_symbols(self._session.symbols)
+            self._sync_choice_groups()
             self._refresh_asset_choices()
             self._reload_list()
             self._show_index(0)
@@ -98,6 +99,37 @@ class CardPageMixin:
             QMessageBox.critical(self, '载入失败', str(e))
         finally:
             self._report_swallowed(mark)
+    def _sync_choice_groups(self):
+        """
+        把项目声明的**词组**接成立绘网格的分组候选（分栏显示"服装 / 表情"）。
+
+        用户 2026-10-10：
+
+        > 实际上需要分组显示……因为我这个要求通用！所以一般人其实是没有服装这个
+        > 选项的！所以事实上应当通过 B 这个自定义模块，做到把服装跟表情这种东西
+        > 分开！
+
+        所以：**分哪几栏由项目声明决定**（`rules.json` 的 `attr_groups`），
+        工具不写死任何组名；没声明 → 推空 → 网格走原来的平铺候选（一字不变）。
+        值是**界面显示值**（走 `expression_groups_for` 同一套翻译），
+        与 chip 上看到的字面量一致。
+        """
+        try:
+            groups = self._session.declared_attr_groups()
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_card._sync_choice_groups.declare', e)
+            groups = []
+        if not groups:
+            self._panel.set_choice_groups_provider(None)
+            return
+        from storygraph.app.beats import expression_groups_for
+        symbols = getattr(self._session, 'symbols', None)
+
+        def _for_tag(tag):
+            return expression_groups_for(str(tag or ''), symbols, groups)
+
+        # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
+        self._panel.set_choice_groups_provider(_for_tag)
     def _sync_graph_highlight(self):
         """卡片编辑器正开着的那一章 → 图上对应模块标成"当前"并居中。"""
         if self.graph is None or not self._session.script_path:

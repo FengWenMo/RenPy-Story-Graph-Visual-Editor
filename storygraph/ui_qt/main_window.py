@@ -517,6 +517,22 @@ class BeatCardEditor(QWidget):
         """注入"立绘 → 图片路径"解析器（路径真源是资源表，见 sprite_grid）。"""
         self._grid.set_path_resolver(resolver)
 
+    def set_choice_groups_provider(self, fn):
+        """
+        注入 `tag → 分组候选`（右键候选列表分栏显示"服装 / 表情"这类）。
+
+        ⚠ 面板是窗口唯一持有网格的对象，所以**每个网格方法都要在这里转一手**
+        （`set_symbols` / `set_path_resolver` 同）。漏了就是
+        `'BeatCardEditor' object has no attribute …`，而这个异常在
+        `load_script` 的 `except` 里会变成**模态弹窗** —— 测试挂住、用户看到卡死。
+        判据：`tests/test_custom_statement_entry.py` 里直接查面板有没有这个方法。
+        """
+        self._grid.set_choice_groups_provider(fn)
+
+    def set_choice_groups(self, groups):
+        """同上的直推版本（窗口一次性拿到全部词组时用）。"""
+        self._grid.set_choice_groups(groups)
+
     # —— 公共访问器（窗口不再摸私有属性）——
 
     def speaker(self) -> str:
