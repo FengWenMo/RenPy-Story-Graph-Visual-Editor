@@ -47,6 +47,12 @@ WRITERS = {
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':
         '改/删项目清单（移除一条声明；**先备份**到 storygraph.rules.backup/）',
+    'pipeline/engine_collect.py::write_facts':
+        '写 engine_facts.json（引擎事实快照 —— 不是 .rpy，不碰用户脚本）',
+    'pipeline/engine_collect.py::_write_probe':
+        '写**临时探针** zz_storygraph_probe.rpy（注入工程 → 跑一次引擎 → 连 .rpyc 一起删）。'
+        '**不是产物**，所以刻意不过 generation_guard（它只需要"有生成标记"，对探针没意义）；'
+        '代价由三件事兜住：固定文件名前缀、**同名非本工具写的就拒写**、采集完必删 + 清单比对',
     'story/excel_export.py::_thumbnail_bytes': '写缩略图缓存 png',
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',

@@ -459,6 +459,61 @@ def _load_registry(args):
     return load_asset_registry(args.project, getattr(args, 'asset_dir', None))
 
 
+def _cmd_engine_facts(args) -> int:
+    """
+    **采集引擎事实**（E1）：跑一次引擎，把图像 / 属性与**分组** / 兼容候选 /
+    transform / label / lint 报告一次拿全，写成 `engine_facts.json`。
+
+    为什么是 CLI 而不是只放界面里：它要被 **CI** 跑，还要能被脚本化对账
+    （facts 进版本库，diff 出来就是"引擎行为变了没有"）。
+
+    退出码：`0` = 采集可用；`1` = **采集不可用**（有 parse error / 探针没产出）。
+    ⚠ 后者**不是"没问题"** —— 采不到就等于没有依据，必须当失败（坑 4）。
+    """
+    from storygraph.core import engine_facts as EF
+    from storygraph.pipeline import engine_collect as EC
+
+    project = Path(args.project)
+    result = EC.collect(project, sdk=args.sdk, mode=args.mode,
+                        timeout=args.timeout)
+    facts = result['facts']
+    out_path = Path(args.out) if args.out else EF.facts_path(project)
+    EC.write_facts(out_path, facts)
+
+    coll = facts.get('collection') or {}
+    print(f'引擎事实：{out_path}')
+    print(f'  parse_clean    = {coll.get("parse_clean")}')
+    print(f'  probe_complete = {coll.get("probe_complete")}')
+    print(f'  lint 退出码     = {coll.get("lint_exit")}')
+    for key in EF.FACT_KEYS:
+        value = EF.value_of(facts, key)
+        n = len(value) if isinstance(value, (list, dict)) else 0
+        src = EF.source_of(facts, key) or '—'
+        print(f'  {key:<11}{n:>6} 条   来源 {src}')
+
+    lint = facts.get('lint') or {}
+    for bucket in ('parse_errors', 'semantic_errors', 'program_errors'):
+        rows = lint.get(bucket) or []
+        if rows:
+            print(f'  {bucket}：{len(rows)} 条（示例：{rows[0][:70]}）')
+    over = (facts.get('derived') or {}).get('overridden_builtins') or []
+    if over:
+        print(f'  ⚠ 覆盖了内置语句：{[o.get("name") for o in over]}'
+              '（覆盖=完全替换，形状不保证 —— N5）')
+    for c in facts.get('conflicts') or []:
+        print(f'  ⚠ 来源冲突：{c.get("field")} ← {c.get("sources")}')
+    if result['manifest_ok'] is False:
+        print('  ⚠ 采集前后 game/ 文本清单**不一致**（除 .rpyc 外本应一致）')
+    if result['removed']:
+        print(f'  已清理探针：{result["removed"]}')
+
+    if not result['ok']:
+        print(f'✗ 采集不可用：{result["reason"]}')
+        return 1
+    print('✓ 采集完成（事实可用）')
+    return 0
+
+
 def _cmd_compile(args) -> int:
     """
     演出表 → .rpy（**不做全局校验**）。
@@ -624,6 +679,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--note', default='')
     sp.add_argument('--force', action='store_true', help='忽略锁/冲突强制写入')
     sp.set_defaults(func=_cmd_collab)
+
+    sp = sub.add_parser('engine-facts',
+                        help='采集引擎事实（E1：lint + json-dump + 注入探针，一次运行）')
+    sp.add_argument('--project', default='.', help='项目根目录（含 game/）')
+    sp.add_argument('--sdk', default=None,
+                    help='Ren\'Py SDK 目录（默认按环境变量 '
+                         'STORYGRAPH_RENPY_SDK / 常见路径找）')
+    sp.add_argument('--out', default=None,
+                    help='输出 JSON（默认 <项目>/storygraph.engine_facts.json）')
+    sp.add_argument('--mode', default='in-place', choices=['in-place', 'copy'],
+                    help='in-place=只增删一个探针文件（默认，大项目用这个）；'
+                         'copy=整份拷到临时目录再采（小项目/测试用）')
+    sp.add_argument('--timeout', type=int, default=600,
+                    help='单次引擎命令超时（秒）')
+    sp.set_defaults(func=_cmd_engine_facts)
 
     return p
 
