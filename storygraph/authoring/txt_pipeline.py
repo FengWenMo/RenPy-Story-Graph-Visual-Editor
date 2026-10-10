@@ -135,13 +135,13 @@ def plan_target(project_root, source, label: str = '') -> Path:
 # ===================== 第一遍：规划（纯，不写盘） =====================
 
 def _read_source(path: Path) -> str:
-    """读输入：`.txt` 走既有解码链；`.docx` 明确报"还没做"（S4）。"""
+    """读输入：`.txt` 走既有解码链；`.docx` 走标准库抽取（S4）。"""
     suffix = path.suffix.lower()
     if suffix in TXT_SUFFIXES:
         return read_text_file(path)
     if suffix in DOCX_SUFFIXES:
-        raise NotImplementedError(
-            'docx 解析还没实现（S4）—— 现在请先存成 .txt 再导入')
+        from storygraph.authoring.docx_import import docx_text
+        return docx_text(path)
     raise ValueError(f'不支持的输入类型 {suffix or "(没有后缀)"}：{path.name}')
 
 
@@ -159,7 +159,7 @@ def build_plan(project_root, files, rows=None) -> Plan:
         path = Path(fp)
         try:
             text = _read_source(path)
-        except (NotImplementedError, ValueError, UnicodeDecodeError, OSError) as exc:
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
             plan.skipped.append((str(path), str(exc)))
             continue
         if root is None:

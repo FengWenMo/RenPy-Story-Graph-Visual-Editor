@@ -97,13 +97,28 @@ def test_two_files_never_share_one_target(tmp_path):
     assert 'chapter1_2.rpy' in targets and 'chapter1_2_2.rpy' in targets
 
 
-def test_docx_says_it_is_not_implemented_yet(tmp_path):
+def test_docx_now_goes_through_the_same_chain(tmp_path):
+    """S4：`.docx` 与 `.txt` 走**同一条**链路（只多一步"抽成文本"）。"""
     root = _project(tmp_path)
-    fp = tmp_path / 'a.docx'
-    fp.write_bytes(b'PK\x03\x04')
-    plan = TP.build_plan(root, [fp], ROWS)
-    assert not plan.files
-    assert 'docx' in plan.skipped[0][1]
+    from test_docx_import import _p, make_docx
+    fp = make_docx(tmp_path / '1-0初入大学-定稿.docx',
+                   _p('1.0 chapter0-0 初入大学'),
+                   _p('妈妈“跟妈客气啥”'))
+    res = TP.run(root, [fp], rows=ROWS, project_root=root)
+    assert res.ok, res.messages
+    out = root / 'game' / 'chapter0_0.rpy'
+    assert out in res.written
+    assert '    mm "跟妈客气啥"' in out.read_text(encoding='utf-8')
+
+
+def test_a_broken_docx_is_skipped_with_a_reason(tmp_path):
+    """读不出来的 `.docx` 要说清原因，不许静默变成空章节。"""
+    root = _project(tmp_path)
+    fp = tmp_path / 'x.docx'
+    fp.write_bytes(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + b'\x00' * 32)
+    res = TP.run(root, [fp], rows=ROWS, project_root=root)
+    assert not res.written
+    assert res.skipped and '另存为' in res.skipped[0][1]
 
 
 def test_a_clean_file_needs_no_decision(tmp_path):
