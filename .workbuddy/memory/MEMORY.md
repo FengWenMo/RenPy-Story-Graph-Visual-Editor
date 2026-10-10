@@ -16,7 +16,7 @@
 
 ## 〇、一页速览（2026-10-10 实测校准）
 
-### 🆕 纯文字导入（§七，2026-10-10 S1/S2 已完成）
+### 🆕 纯文字导入（§七，2026-10-10 S1/S2 已完成 · 对抗性检验已完成）
 `storygraph/authoring/txt_import.py`（**纯函数**：`.txt` → `.rpy` 文本，无副作用）。
 判据 **60 条**：`tests/test_txt_import.py`（23）+ `test_txt_import_hell.py`（37）+
 `test_txt_import_golden.py`（产物金标 `golden_txt_import_fingerprint.txt`）。
@@ -27,6 +27,8 @@
 - 关键判据：**静默丢行=0**、**中文旁白带引号不许当角色**（原版头号缺陷）、交错括号不错位、
   `【书名】` 不动、章节头只认**第一个非空行**、空体补 `pass`（与渲染器一致）。
 - ⏭ 待做：S3 接入 `EditorSession.import_chapters`（识别 txt/docx → 转 rpy → 走既有链路）、S4 docx。
+- **2026-10-10 对抗性检验**（生僻资料 / 大块代码 / `Ljk` vs `ljk` / 编码）抓到并修掉 6 处，
+  其中 2 处会**静默改剧情或在运行期崩** —— 详见 `2026-10-10.md` 与 **§七·契约**（本文件末）。
 
 ### 🆕 角色**别名列**（2026-10-10，提交 34135e5）
 `characters.xlsx` 新增「别名」列（内部键 `Aliases`，**多值**：`MOM|母亲|老妈`）。
@@ -251,3 +253,107 @@
 - **`pytest` 默认会炸**：不带 `--basetemp` 时 `addopts` 指向仓库内 `.pip-tmp/pytest`，复用即撞沙箱 → **~1589 ERROR**。（是否改配置 → **D6**）
 - **golden 重基线**：`tests/snapshots/editor_session.json`；改行为后 `STORYGRAPH_UPDATE_SNAPSHOTS=1` 跑一次，只改有意的那几条。
 - **走不动的探针**：`tools/probe_cst_snapshot.py`/`resolve_audio_path` 等一批"只有测试在用"的函数见 `health_check` 的死代码段。
+
+---
+
+## 七、纯文字导入 · 对抗性检验后的契约（2026-10-10，别改回去）
+
+> 实测与探针见 `2026-10-10.md`。判据：`tests/test_txt_import_adversarial.py`（37 条）
+> + `tests/test_txt_import{,_hell,_golden}.py` + `tests/test_character_aliases.py`。
+
+- **T1 归一化只能"找候选"，不许单独定论。** `_norm_key` 会丢大小写/下划线/空格；
+  表里同时有 `ljk` 与 `Ljk` 时旧实现把两行都写成 `ljk`（**静默改剧情**）。
+  现在的顺序：同层大小写撞车 → 该键进 `_shadowed` → **精确写法各归各家**，
+  任何不规范写法（`LJK`/`L_J_K`）返回 `Ambiguity`：**产物保留原文 + 报出来**，
+  绝不替人挑一个。⚠ 但**跨层**撞车（别名撞别人的显示名）仍按"**强层赢**"
+  （显示名 > 别名）+ 记 `Conflict` —— 用"精确写法压过归一"实现会打掉这条契约
+  （`test_character_aliases` 当场红）。
+- **T2 未映射 token = 产物里的未定义变量 = Ren'Py 运行期必崩。** 真机 5 章有 **23 处**
+  （`MOM`13/`A`4/`B`4/`LINGDAO`4/`JIAOGUAN`3/`XIAOYI`2/`BAOAN`3/`TJF`1）。每个未映射 token
+  **必须**额外报一条"会因未定义变量崩"。⚠ 未决（用户拍板）：保留原写法+告警（现状）
+  vs 产物顶部注入 `define X = Character("X")`。
+- **T3 说话人形状判据**：只认"**归一命中**"或"角色表非空 + `^[A-Z][A-Z0-9]{0,7}$`"。
+  不含下划线（下划线归一会丢 → `L_J_K` 命中 `ljk`）；≤8 字符（`LINGDAO2X` 当旁白）。
+  取舍已写在 docstring：认 `OK/USA`（会进未映射清单，可修）**优于**当旁白（丢说话人不留痕）。
+- **T4 整段 `.rpy` 被当纯文字**：逐行变旁白、`menu:`/`jump` 全成台词，旧版**零告警**。
+  现在 ≥3 行命中代码形状 → `ConversionResult.looks_like_script` + 告警（**只提示不改产物**）。
+- **T5 读文本先看 BOM。** `utf-8 → gbk` 链会把 UTF-16-LE 的 `J\x00C\x00` "成功"解成 GBK
+  → 整章乱码且**零告警**。现在：BOM 优先（UTF-16/32）→ utf-8 解出 NUL 视为失败 →
+  全失败抛 `UnicodeDecodeError`（带每一步的原因）。
+- **T6 候选（`candidates`）不许被单字符键污染**：真机有 `l`（「蓝」）→ `LINGDAO` 的
+  "相近角色"曾是 `l`（误导）。单字符键不参与前缀命中。
+- **T7 改这条路的判据是"产物一字未动 + 突变验证"**：
+  `tools/probe_txt_import_no_product_change.py`（`git show HEAD:` 加载旧模块逐章比 sha256）
+  + `tools/mut_txt_case_collision.py`（换回旧 `lookup` → 6 条变红）。
+  **只报"测试全过"不够**：往返/幂等判据对上面 T2/T4 这类缺陷**天然看不见**。
+
+## 八、2026-10-10 全量回归顺带抓到的两个既有真缺陷（已修）
+> 两条都是"搬运行漏了东西"（M4 那批重构），**在 HEAD 上复现过**（不是本轮引入）。
+> `tests/test_no_undefined_names.py` 是抓到它们的那张网 —— **别让它变红还放着不管**。
+
+- **U1 `patcher._is_new_content_row` 用了签名里没有的 `old_lines`** → 走到就是 `NameError`，
+  而那条判据正是"`# TODO: 缺少资源 …` 不许顶掉作者的 `play music` 行"。
+  修：补参数 + 调用点补传；判据 `test_patch_grow_shrink.TestNoUndefinedNames`。
+- **U2 `layered_model._expand_node` 给 `_expand_composite_call` 传了不存在的 `idx`**
+  → **任何 `Composite(...)` 都是 `NameError`**。修：删参数 + 调用点同步。
+  顺带修两处静默丢图层（`Composite((w,h), "only.png")` 整幅丢 / 缺位置时只剩一层）；
+  签名按 Ren'Py 8.5 官方文档核对。判据 `test_layered_model`（3 条）。
+  ⚠ 真机 `sr_general` 的 layered model 里 `Composite` **0 次** → 现真机不触发，
+  属"换项目就炸"的既有炸弹。
+
+---
+
+## 九、角色决策层（2026-10-10 续，用户拍板"A + 弹窗"）
+
+> 用户原话：**A**（保留+告警），但"在转换时搜索已定义的相似字符……写一个弹窗，
+> 问是不是已定义的这个角色？如果是，自动标上别名，如果不是，自动生成新角色
+> define 并输出"。详见 `2026-10-10b.md`。
+
+- **C1 新模块 `storygraph/authoring/char_decisions.py`（纯函数，判据 28 条）**：
+  `suggestions()`（候选 + **证据**：`case`/`sep`/`fuzzy`，≥60% 才展示）→
+  `plan_alias` / `plan_new_character`（**先算后果**）→ `apply_*_plans`（落盘）。
+- **C2 "问一句"就是安全边界**：字符串相似度分不清"同一个人写错"与"两个人像"，
+  所以判定交给人点；纯逻辑只负责"给候选 + 说清凭什么"。
+- **C3 ⚠ `LJK` 那一格必须拒绝**：token 与**变量名**只差大小写时，加别名会让该写法
+  变歧义（等于变量名本人）→ 必须报"改脚本写法或改变量名"，**不许自动标**。
+- **C4 ⚠ 不提供拼音/语义匹配**（试过又撤）：项目零拼音依赖，手写的 GB2312 首字母
+  表**实测不可信**（`吧`→a、`瑾`→z）。`MOM↔妈妈` 这类靠弹窗**手工挑选**兜住。
+- **C5 口径（用户拍板）**：新角色 **变量名/显示名默认 = token 原样**，可改；
+  新角色**追加进 `characters.xlsx`**（只追加不覆盖），`define` 交给既有同步链路
+  —— **不写进章节产物**（多章会重复 define）。
+- **C6 撞车判据只针对"即将新增的这位"**：直接看 `CharacterMap(probe).conflicts`
+  会把表里**本来就有的**撞车（`ljk`/`Ljk`）当成"新建也会撞" → 连 `lujk` + 全新
+  显示名都建不了（实测）。加别名另有判据：`_spelling_taken_by_others`
+  （"变量名已存在"在加别名时是**必然**的，不能当拒绝理由）。
+- **C7 写盘 API 的表键是复数**（`'characters'`），`_TABLE_FIELDS` 是单数。
+  拼错的键**以前静默返回 0** → 现在 `_table_file_name()` 唯一解析点 + 抛 `KeyError`。
+- **C8 弹窗 `storygraph/ui_qt/dialog_chars.py`**：一屏列完本轮所有未映射写法，
+  每行 = 动作下拉 + 候选（带证据）/新建输入 + **局部原因**；
+  "跳过"也必须带原因（否则用户以为是默认值，白试一轮）。判据 `test_dialog_chars.py`（11 条，offscreen）。
+- **C9 ⚠ "显示名对得上就是同一个人"是 L2 层，一直生效**（用户 2026-10-10 追问）：
+  txt 里直接写 `妈妈"…"` / `「蒋忱」"…"` → 自动映射 `mm`/`jc`，**不进弹窗**；
+  角括号/引号自动归一（`蒋忱` 与 `「蒋忱」` 都行）。真机表实测 16/16 命中。
+  ⚠ 与"`MOM`↔`妈妈` 算不出来"是**两件事**：后者是英文字母缩写，与中文显示名
+  没有任何字符对应，只能靠人点。**别把两者混为一谈**（我会混，写进记忆防再犯）。
+- **C10 弹窗下拉必须带显示名**（`mm（妈妈）`）：只给变量名等于让人猜；
+  全表兜底段也把"有中文显示名的"排前面（`aaa`/`dhyab` 这类拼出来的组合行沉底）。
+- **C11 S3 已接入（2026-10-10）**：`storygraph/authoring/txt_pipeline.py`
+  （纯逻辑，15 条判据）+ `EditorSession.import_plain_text`（会话）
+  + 工具栏「📝 导入纯文字章节」（UI，9 条判据含 Qt）。
+  **两遍**：规划（不写盘）→ 问角色 → 决定回表 → 重跑 → 过门禁落盘 → 导图。
+  ⚠ 只有两种结局：**产物干净**，或**什么都没写**。
+  · 落点 `<根>/game/<label>.rpy`；目标名**以章节头为准**（真机文件名与章节头差一位）；
+  · ⚠ **未确认角色 → 一个字节都不写**（未映射写法落盘 = 未定义变量 = 运行期崩）；
+  · ⚠ UI 那一步必须传**窗口自己的** `import_chapter_files`（`session.import_chapters`
+    只返回图、不装进界面 → 传错了图是空的，实测踩到）；
+  · ⚠ `dry_run` 的 `ok` 恒为 False（按定义没写东西），判据要看"有没有规划出文件"。
+- **C12 老资源表没有「别名」列时，写别名**以前**静默失败**（
+  `_update_row_cells` 遇到表头里没有的键直接跳过 → 返回成功、什么都没发生）。
+  现在 `append_rows_to_table` 把缺的列**补到末尾**（⚠ 只追加、**绝不挪动已有列**：
+  挪列会连带数据错位，别人也按列位置读表）。真机 `characters.xlsx` 就是这个情况。
+- ⏭ **S4（`.docx`）未做**（明确报"还没实现"，不静默）。
+  "同一写法在不同章指不同角色"**留了接口**（`Decision.by_file`），用户说先不做。
+
+
+
+
