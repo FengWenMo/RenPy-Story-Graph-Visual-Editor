@@ -156,6 +156,13 @@ class GraphSessionMixin:
     #: `missing_chapter_files` 要 `project_root`。
     REQUIRES = ('registry', 'refresh_symbols', 'project_root')
 
+    #: 引擎事实的缓存 —— **本 mixin 自己的状态**，所以声明在类体里。
+    #: 为什么不靠 `self.X = ...` 现造：契约守卫
+    #: （`tests/test_editor_session_mixin_contract.py`）把"类体里没声明、却被读"的
+    #: `self.X` 一律当成"宿主必须给的依赖"。缓存是自己的东西，不该混进 REQUIRES。
+    _engine_facts_stamp = None
+    _engine_facts_cache = None
+
     def save_layout(self, graph, target) -> dict:
         """
         把剧情图（含每个块的手工坐标）存成 JSON。
