@@ -1653,6 +1653,23 @@ def _unusable_summary(registry) -> dict:
     return out
 
 
+def _table_file_name(table_key: str) -> str:
+    """
+    资源表键 → 文件名（**唯一解析点**）。
+
+    ⚠ 键是**复数**（`'characters'`，见 `_STANDARD_TABLES`），而
+    `_TABLE_FIELDS` 用的是**单数**（`'character'`）—— 两套名字并存，实测踩到过：
+    调用方写 `'character'` → 老实现**静默返回 0**（以为写成功、其实什么都没发生）。
+    所以这里对"未知键"**出声**，而不是悄悄当 0。
+    """
+    key = str(table_key or '')
+    fname = _STANDARD_TABLES.get(key)
+    if not fname and key:
+        raise KeyError(f'未知资源表键 {key!r}；可用：{sorted(_STANDARD_TABLES)}'
+                       f'（注意是**复数**）')
+    return fname or ''
+
+
 def update_table_paths(asset_dir, table_key: str, updates: dict,
                        backup: bool = True) -> int:
     """
@@ -1668,7 +1685,7 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
     updates = {str(k): str(v) for k, v in (updates or {}).items() if k and v}
     if not updates:
         return 0
-    fname = _STANDARD_TABLES.get(str(table_key or ''))
+    fname = _table_file_name(table_key)
     if not fname:
         return 0
     path = Path(asset_dir) / fname
@@ -1718,7 +1735,7 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
     keys = {norm_asset_path(p) for p in (paths or ()) if p}
     if not keys:
         return 0
-    fname = _STANDARD_TABLES.get(str(table_key or ''))
+    fname = _table_file_name(table_key)
     if not fname:
         return 0
     path = Path(asset_dir) / fname
@@ -1759,7 +1776,7 @@ def delete_rows_by_id(asset_dir, table_key: str, ids, backup: bool = True) -> in
     keys = {str(i) for i in (ids or ()) if i}
     if not keys:
         return 0
-    fname = _STANDARD_TABLES.get(str(table_key or ''))
+    fname = _table_file_name(table_key)
     if not fname:
         return 0
     path = Path(asset_dir) / fname
@@ -2261,7 +2278,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
     返回 = 新增行数 + 被改写的单元格数。
     """
     table_key = str(table_key or '')
-    fname = _STANDARD_TABLES.get(table_key)
+    fname = _table_file_name(table_key)
     if not fname or not rows:
         return 0
     asset_dir = Path(asset_dir)
@@ -2276,6 +2293,23 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
             if not headers or all(h is None for h in headers):
                 headers = list(rows[0].keys())
                 ws.append(headers)
+            # ⚠ **老表没有这一列时，得先补列**（2026-10-10 实测踩到）：
+            # `_update_row_cells` 遇到"表头里没有的键"是**静默跳过**的，
+            # 于是"给真人项目加别名"整个动作**什么都没发生**（真机 `characters.xlsx`
+            # 是 2026-10-10 之前建的，只有 5 列：ID/Name/Color/ImageTag/Notes，
+            # 没有「别名」）。
+            #
+            # ⚠ 补列的规矩是**只追加在末尾、绝不挪动已有列**：
+            #   ① 挪列会连带数据一起挪（我第一版只改表头 → 整行错位，`Notes`
+            #      的备注跑到别列去）；
+            #   ② 就算连数据一起挪也是坏主意：表里的列位置是**别人写好的**，
+            #      按"模板顺序重排"等于替用户改表 —— 判据当场红
+            #      （`test_it_never_overwrites_a_hand_edited_row` 按列号找回那一行）。
+            #   ③ 也用不着 `insert_cols` 那种重家伙：追加到末尾最安全。
+            for key in rows[0].keys():
+                if key and key not in headers:
+                    headers.append(key)
+                    ws.cell(row=1, column=len(headers), value=key)
             row_of = {}
             id_col = headers.index('ID') + 1 if 'ID' in headers else 1
             for r in range(2, ws.max_row + 1):

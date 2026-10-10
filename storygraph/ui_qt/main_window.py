@@ -1463,6 +1463,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('➕ 导入章节 .rpy', self.import_chapters,
             '可多选；图里只出现你导入过的章节（累加，不覆盖已导入的）',
             primary=True)
+        act('📝 导入纯文字章节', self.import_plain_text,
+            '选 .txt（作者写的纯文字）→ 自动转成 .rpy 落进 game/ 并导入；'
+            '有认不出的角色写法会先问你一句（确认后写进 characters.xlsx）')
         act('🔁 重载已导入章节', self.reload_imported_chapters,
             '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（范围不变）')
         act('🔗 补全相关章节', self.complete_related_chapters,
