@@ -634,26 +634,55 @@ def _expand_helper_call(name, params, args, depth, helpers, image_format):
                                  fn_params, depth + 1)
         return out or [{'note': f'辅助函数 {name} 展开为空'}]
 
-def _expand_composite_call(name, params, args, depth, helpers, image_format, idx):
-    """`Composite` / `LiveComposite` 那一支（M4 搬出，行为一字不改）。"""
-    if name in ('Composite', 'LiveComposite'):
-        out = []
-        idx = 0
-        if args and args[0].kind == 'tuple':
-            idx = 1
-        while idx + 1 < len(args) + 1 and idx < len(args):
-            off = _value_of(args[idx], helpers, image_format, params, depth) \
-                if args[idx].kind == 'tuple' else None
-            img_node = args[idx + 1] if idx + 1 < len(args) else None
-            if img_node is None:
+def _expand_composite_call(name, params, args, depth, helpers, image_format):
+    """
+    `Composite` / `LiveComposite` 那一支（M4 搬出，行为一字不改）。
+
+    Ren'Py 的签名（2026-10-10 按官方文档核对 —— `Composite(size, *args)`）：
+
+        Composite((w, h), (x, y), 图, (x, y), 图, …)      # 位置在前
+        LiveComposite((w, h), (x, y), 图, (x, y), 图, …)  # 同上
+        Composite((w, h), (0, 0), 图)                     # 只有一个图层
+
+    ⚠ `idx` **不是**参数（2026-10-10 修）：搬出来时签名上挂了一个 `idx`，
+    调用点写的是 `..., idx)` —— 而那个作用域里根本没有 `idx`，
+    于是**任何** `Composite(...)` 都会 `NameError`（静态网
+    `tests/test_no_undefined_names.py` 抓到的）。函数内部本来就会自己算
+    `idx`，所以参数删掉、调用点同步。
+
+    ⚠ 顺带修掉两处"静默丢图层"（同一轮探针实测，真机 `definitions.rpy`
+    里一行就有 9 处 `Composite`，所以这不是理论边界）：
+      · `Composite((w,h), "a.png", "b.png")` → 只返回 `b.png`
+        （第一个位置被当成偏移量、第二个又当了图）；
+      · `Composite((w,h), "only.png")` → "没展开出层"（整幅图被丢掉）。
+    现在按"**位置缺省就是 (0,0) 的两两配对**"解析，认不出的一对**报告**而不是丢掉。
+    """
+    if name not in ('Composite', 'LiveComposite'):
+        return []
+    out = []
+    i = 0
+    if args and args[0].kind == 'tuple':
+        i = 1                                   # 跳过 `size`（画布尺寸，不是图层）
+    while i < len(args):
+        node = args[i]
+        pos = None
+        if node.kind == 'tuple':
+            pos = _value_of(node, helpers, image_format, params, depth)
+            i += 1
+            if i >= len(args):
+                out.append({'note': f'{name} 末尾多了一个位置元组，后面没有图'})
                 break
-            for layer in _expand_node(img_node, helpers, image_format,
-                                      params, depth):
-                if off and isinstance(off, tuple) and len(off) == 2:
-                    layer = dict(layer, offset=(int(off[0]), int(off[1])))
-                out.append(layer)
-            idx += 2
-        return out or [{'note': f'{name} 没展开出层'}]
+            node = args[i]
+        for layer in _expand_node(node, helpers, image_format, params, depth):
+            if isinstance(pos, tuple) and len(pos) == 2:
+                try:
+                    layer = dict(layer, offset=(int(pos[0]), int(pos[1])))
+                except (TypeError, ValueError) as exc:
+                    # 认不出的偏移量：**保留图层**（宁可位置不对，也不丢图）
+                    swallow('layered_model._expand_composite_call', exc)
+            out.append(layer)
+        i += 1
+    return out or [{'note': f'{name} 没展开出层'}]
 
 def _expand_node(node, helpers, image_format, params, depth) -> list:
     if node is None:
@@ -692,7 +721,7 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
         return [{'note': 'Crop 的参数认不出'}]
     if name in ('Composite', 'LiveComposite'):
         return _expand_composite_call(name, params, args, depth,
-                                      helpers, image_format, idx)
+                                      helpers, image_format)
     if name in ('Transform', 'Flatten', 'Scale') and args:
         out = _expand_node(args[0], helpers, image_format, params, depth)
         return [dict(ly, note=(ly.get('note') or '') + f'（{name} 未处理）')

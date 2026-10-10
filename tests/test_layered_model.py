@@ -164,6 +164,45 @@ class TestDisplayableExpansion:
         assert out and out[0].get('path') is None
         assert 'Frobnicate' in out[0]['note']
 
+    def test_composite_expands_instead_of_crashing(self):
+        """
+        ⚠ 2026-10-10 静态网（`test_no_undefined_names`）抓到的真缺陷：
+        `_expand_composite_call` 的签名上挂着一个 `idx`，调用点也写了 `..., idx)`
+        —— 可那个作用域里**根本没有 `idx`**，于是任何 `Composite(...)`
+        都是 `NameError`（而不是"展开失败"）。这条判据钉住"能展开、不抛"。
+
+        格式按官方文档：`Composite(size, (x,y), 图, (x,y), 图, …)`
+        —— 真机 `definitions.rpy` 里就是这个形状（一行文件里 9 处）。
+        """
+        from storygraph.story.layered_model import expand_displayable
+        out = expand_displayable(
+            'Composite((300, 600), (0, 0), "body.png", (50, 60), "face.png")',
+            {}, '')
+        assert [o.get('path') for o in out] == ['body.png', 'face.png'], out
+        assert [o.get('offset') for o in out] == [(0, 0), (50, 60)], out
+
+    def test_live_composite_expands_all_layers(self):
+        """真机 `effects.rpy`：`LiveComposite((1280,720), (0,0), "a", (0,0), "b")`。"""
+        from storygraph.story.layered_model import expand_displayable
+        out = expand_displayable(
+            'LiveComposite((1280, 720), (0, 0), "a.png", (0, 0), "b.png")',
+            {}, '')
+        assert [o.get('path') for o in out] == ['a.png', 'b.png'], out
+
+    def test_composite_with_a_single_layer_is_not_dropped(self):
+        """
+        ⚠ 旧实现把这一支整幅丢掉（返回"没展开出层"）：
+        位置元组后面只有一个图 → 循环条件 `idx + 1 < len(args) + 1` 直接不成立。
+
+        `offset` 是 `None`（= 没写位置）而不是 `(0,0)` —— 消费方把两者当同一件事
+        （`app/layer_compose.py` 里 `ly.get('offset') or (0, 0)`），
+        所以这里**不**假装我们知道坐标。
+        """
+        from storygraph.story.layered_model import expand_displayable
+        out = expand_displayable('Composite((300, 600), "only.png")', {}, '')
+        assert [o.get('path') for o in out] == ['only.png'], out
+        assert not out[0]['offset'], out
+
 
 # ----------------------------------------------------------------------
 #  ③ 叠层：按组选、按顺序叠

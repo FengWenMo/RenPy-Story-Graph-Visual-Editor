@@ -1033,7 +1033,8 @@ def _rewrite_line(old_line, pick, relax_speaker):
     return _indent_of(old_line) + _norm(pick), True   # 缩进只来自原文
 
 
-def _is_new_content_row(body: str, old_heads, old_squash, file_squash) -> bool:
+def _is_new_content_row(body: str, old_heads, old_squash, file_squash,
+                        old_lines) -> bool:
     """
     这条生成行是**真新内容**吗？（准入判据）
 
@@ -1162,7 +1163,8 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             if j is None:
                 body = _norm(g)
                 # 准入不过 → 不插（保持未落地，调用方据此退回全量，绝不写重复行）
-                if not _is_new_content_row(body, old_heads, old_squash, file_squash):
+                if not _is_new_content_row(body, old_heads, old_squash,
+                                           file_squash, old_lines):
                     continue
                 pad = _indent_of(old_lines[0]) if old_lines else ''
                 out.append(pad + body)

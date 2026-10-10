@@ -317,3 +317,44 @@ class TestFixedPoint:
         res2 = patch_export(again, second_path, render_beats_to_rpy(again))
         assert res2.ok, res2.reasons
         assert res2.text == first.text, '产物再导一次居然变了（不是不动点）'
+
+
+# ----------------------------------------------------------------------
+#  ⑦ 静态网抓到的真缺陷：准入判据里有一个**看不见的名字**
+# ----------------------------------------------------------------------
+
+class TestNoUndefinedNames:
+    """
+    `tests/test_no_undefined_names.py`（AST 静态网）在 2026-10-10 抓到：
+    `_is_new_content_row` 的**函数体**用了 `old_lines`，但签名里没有它。
+
+    后果不是"少一条判据"，而是**两个后果叠加**：
+      · 走到那一行 → `NameError`（补丁直接炸）；
+      · 更糟的是这条判据本来是"`# TODO: 缺少资源 …` 不许顶掉作者原有的行"
+        —— 也就是说，真到那一步，作者的音乐行会被 TODO 注释顶掉。
+
+    所以这里既钉住"不许炸"，也钉住"那条判据真的在起作用"。
+    """
+
+    def test_new_content_row_accepts_the_old_lines_it_needs(self):
+        from storygraph.story.patcher import _is_new_content_row
+        import inspect
+        params = inspect.signature(_is_new_content_row).parameters
+        assert 'old_lines' in params, (
+            '函数体用了 old_lines，签名里却没有 —— 走到那一行就是 NameError')
+
+    def test_a_todo_note_never_kills_the_authors_line(self):
+        """
+        `_is_new_content_row` 对"说明型 TODO + 原文里有同一个引用"必须返回
+        **False**（= 不许插），且**不许抛异常**。
+        """
+        from storygraph.story.patcher import _is_new_content_row, _squash
+        old_lines = ['    play music "bgm/找不到的曲子.mp3" fadein 1.0']
+        todo = "    # TODO: 缺少资源 音乐 'bgm/找不到的曲子.mp3'"
+        assert _is_new_content_row(
+            todo,
+            old_heads=set(),                       # 身份不撞（逼它走到那条分支）
+            old_squash=[_squash(l) for l in old_lines],
+            file_squash=[],
+            old_lines=old_lines) is False, 'TODO 说明被当成了新内容'
+
