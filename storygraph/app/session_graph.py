@@ -563,6 +563,67 @@ class GraphSessionMixin:
         except Exception as e:                    # noqa: BLE001
             swallow('editor.declared_attr_groups', e)
             return []
+    def engine_facts(self) -> dict:
+        """
+        **引擎事实**（E1 采出来的 `<项目>/storygraph.engine_facts.json`）。
+
+        为什么放会话里：一次打开只读一次盘（本仓库既有规矩：一次分析只读一次盘），
+        而界面每次刷新分组都会来问它。缓存**按文件指纹**（mtime+size）失效 ——
+        重新采集之后不用重开工程就能生效。
+
+        ⚠ **采不到 ≠ 引擎什么都没给**：
+        文件不在 / 读不动 / `is_collectable()` 为假（有 parse error、探针没产出）
+        → 一律返回 `{}`，调用方据此走**原来的老路**（行为一字不变）。
+        绝不把"没采到"当成"引擎没有这些分组"（坑 4）。
+        """
+        root = getattr(self, 'project_root', None)
+        if not root:
+            return {}
+        try:
+            from storygraph.core import engine_facts as EF
+            path = EF.facts_path(str(root))
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._engine_facts_stamp = None
+            self._engine_facts_cache = {}
+            return {}
+        if (getattr(self, '_engine_facts_stamp', None) == stamp
+                and getattr(self, '_engine_facts_cache', None) is not None):
+            return self._engine_facts_cache
+        data: dict = {}
+        try:
+            from storygraph.core import engine_facts as EF
+            loaded = EF.loads(path.read_text(encoding='utf-8'))
+            ok, _reason = EF.is_collectable(loaded)
+            if ok:
+                data = loaded
+        except Exception as e:                    # noqa: BLE001
+            swallow('editor.engine_facts', e)
+            data = {}
+        self._engine_facts_stamp = stamp
+        self._engine_facts_cache = data
+        return data
+
+    def engine_facts_warnings(self) -> list:
+        """
+        界面/报告要提醒的**引擎级警告**。目前两类（都来自实测）：
+
+          · **N2/N5**：项目用 `register_statement(<内置名>)` 覆盖了内置语句 ——
+            实测覆盖是**完全替换**（`pause` 的标准写法会直接报错），而 lint **默认一声不吭**。
+        """
+        facts = self.engine_facts()
+        if not facts:
+            return []
+        out = []
+        derived = facts.get('derived') or {}
+        for item in derived.get('overridden_builtins') or []:
+            name = str(item.get('name') or '')
+            if name:
+                out.append(f'项目的 `{name}` 覆盖了内置语句 —— '
+                           '覆盖是「完全替换」，工具对它的形状不保证（N2）')
+        return out
+
     def character_rows(self) -> dict:
         """
         当前角色表（`{变量: 行}`）—— 纯文字导入要用它判"这个写法是谁"。

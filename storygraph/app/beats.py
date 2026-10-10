@@ -675,6 +675,37 @@ def apply_sprite_rows(show: str, rows: list) -> str:
     return join_show_items(out + kept)
 
 
+def beat_group_conflicts(beat: Beat, facts) -> list:
+    """
+    **规则 N3**：这一拍的立绘里，**同一组被同时选中了两个属性** → 冲突清单。
+
+    `[{'tag','group','attrs'}, …]`，没有冲突就是 `[]`。
+
+    为什么必须由工具自己查（而不是等引擎报）：实测 `show lan happy sad`
+    （两个属性同属一组）时 **lint 退出码 0、引擎一声不吭** ——
+    这类冲突**不在 lint 的覆盖范围内**，只能靠引擎给的 group 自己算。
+    而 group 就在引擎事实里，所以这条检查的实现成本几乎为零。
+    """
+    from storygraph.core import engine_facts as EF
+    if not facts:
+        return []
+    out = []
+    try:
+        rows = beat_sprite_rows(beat)
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.beat_group_conflicts.rows', e)
+        return []
+    for row in rows:
+        spec = str(row.get('image') or '').strip()
+        toks = spec.split()
+        if len(toks) < 2:
+            continue                                # 只有 tag、没属性 → 不可能同组
+        tag, attrs = toks[0], toks[1:]
+        for hit in EF.group_conflicts(facts, tag, attrs):
+            out.append({'tag': tag, 'group': hit['group'], 'attrs': hit['attrs']})
+    return out
+
+
 def speaker_missing_warning(beat: Beat, symbols=None) -> str:
     """
     这一拍的说话人**有问题**吗？有问题就把话说清楚（返回 '' 表示没问题）。
@@ -1307,25 +1338,62 @@ def expression_choice_groups(beat: Beat, symbols, groups=None,
     return group_choices(values, groups)
 
 
-def expression_groups_for(tag: str, symbols, groups) -> list:
+def expression_groups_for(tag: str, symbols, groups, facts=None) -> list:
     """
-    `(tag, 符号表, 项目声明的词组)` → `[{'name','label','values'}]`，
+    `(tag, 符号表, 项目声明的词组)` → `[{'group','label','values'}]`，
     **值是界面显示值**（与 `choices_for_image` 的 `expression` 同一套
     `_expression_display`）—— 否则下拉里会出现 `happy` 而候选里是「开心」，
     两条路给出不一样的字面量（`expression_choices` 的 docstring 记着这个坑）。
 
     `groups` 为空 → 返回 `[]`（调用方走平铺），这条是通用性底线。
+
+    **E2（2026-10-10）：`facts` 给了就以引擎为准。**
+    分组与候选都来自引擎（`layeredimage` 的 group + 引擎枚举的属性），
+    `groups`（项目声明）**降级为"改名"覆盖层** —— 人只把 `outfit` 显示成「服装」。
+    实测依据：真机 `lan` 的组是 `outfit` / `expressions`，这本来就写在引擎里，
+    让人再声明一遍是重复劳动、还会两边打架。
+    ⚠ `facts` 为空（没采过）或引擎没给这个 tag 的分组 → **原路不变**（一字不改）。
     """
+    if not tag:
+        return []
+    probe = Beat()
+    probe.show = str(tag)
+
+    if facts:
+        from storygraph.core import engine_facts as EF
+        from storygraph.core.safeguard import swallow as _sw
+        try:
+            if EF.attributes_of(facts, str(tag)):
+                overlay = EF.rename_overlay(groups)
+                rows = EF.grouped_choices(facts, str(tag), overlay)
+            else:
+                rows = []
+        except Exception as e:                     # noqa: BLE001
+            _sw('app.beats.expression_groups_for.facts', e)
+            rows = []
+        if rows:
+            out = []
+            for entry in rows:
+                vals = []
+                for attr in entry['values']:
+                    shown = (_expression_display(attr, str(tag), probe, symbols)
+                             if symbols is not None else '') or attr
+                    if shown and shown not in vals:
+                        vals.append(shown)
+                if vals:
+                    out.append({'group': entry['group'], 'label': entry['label'],
+                                'values': vals})
+            if out:
+                return out
+
     from storygraph.authoring.spec_groups import group_values
-    if not groups or symbols is None or not tag:
+    if not groups or symbols is None:
         return []
     try:
         attrs = [str(a or '').strip() for a in symbols.attrs_of_tag(tag)]
     except Exception as e:                        # noqa: BLE001
         swallow('app.beats.expression_groups_for', e)
         return []
-    probe = Beat()
-    probe.show = str(tag)
     out = []
     for entry in group_values([a for a in attrs if a], groups):
         vals = []

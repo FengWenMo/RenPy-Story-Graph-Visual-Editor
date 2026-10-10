@@ -113,20 +113,32 @@ class CardPageMixin:
         工具不写死任何组名；没声明 → 推空 → 网格走原来的平铺候选（一字不变）。
         值是**界面显示值**（走 `expression_groups_for` 同一套翻译），
         与 chip 上看到的字面量一致。
+
+        **E2（2026-10-10）：引擎事实优先。**
+        采过 `engine_facts.json` 之后，分组与候选**都从引擎来**
+        （`layeredimage` 的 group + 引擎枚举的属性），项目声明**降级为"改名"**
+        （把 `outfit` 显示成「服装」）。真机实测：`lan` 的组本来就叫
+        `outfit` / `expressions` —— 再让人声明一遍是重复劳动，还会两边打架。
+        ⚠ 没采过（`facts` 为空）→ **原路一字不变**。
         """
         try:
             groups = self._session.declared_attr_groups()
         except Exception as e:                  # noqa: BLE001
             swallow('ui_qt.window_card._sync_choice_groups.declare', e)
             groups = []
-        if not groups:
+        try:
+            facts = self._session.engine_facts()
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_card._sync_choice_groups.facts', e)
+            facts = {}
+        if not groups and not facts:
             self._panel.set_choice_groups_provider(None)
             return
         from storygraph.app.beats import expression_groups_for
         symbols = getattr(self._session, 'symbols', None)
 
         def _for_tag(tag):
-            return expression_groups_for(str(tag or ''), symbols, groups)
+            return expression_groups_for(str(tag or ''), symbols, groups, facts)
 
         # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
         self._panel.set_choice_groups_provider(_for_tag)

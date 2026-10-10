@@ -221,6 +221,79 @@ def candidates_of(facts: dict, tag: str) -> list:
     return [str(v) for v in vals if str(v)]
 
 
+def grouped_choices(facts: dict, tag: str, rename=None) -> list:
+    """
+    引擎事实 → 界面用的**分组候选**：`[{'group', 'label', 'values'}, …]`。
+
+    这是 E2 的核心：**"下拉里放什么"由引擎决定，人一个都不用填。**
+
+    三条规则（都对着实测过的取舍）：
+      · **组的来源是引擎**（`layeredimage` 的 group），不是我们编的组名；
+      · **值 = 引擎枚举出的候选 ∩ 该组成员**，并**保持引擎给的顺序**（不重排 ——
+        引擎那份是"适合展示给用户"的顺序，重排等于把它的判断丢掉）；
+      · **`rename` 只做改名**（`{'outfit': '服装'}`）—— 这就是"定义表降级为覆盖层"的含义。
+      · 引擎有、但没归到任何组的候选 → 兜底一栏（`label` 为空 = 不显示标题），**绝不丢词**。
+    """
+    groups = groups_of(facts, tag)
+    cands = candidates_of(facts, tag)
+    rename = rename or {}
+    out = []
+    if groups:
+        for name, members in groups.items():
+            allowed = set(members)
+            values = [v for v in cands if v in allowed] if cands else list(members)
+            if not values:
+                continue
+            out.append({'group': name,
+                        'label': str(rename.get(name) or '') or name,
+                        'values': values})
+    covered = {v for entry in out for v in entry['values']}
+    rest = [v for v in cands if v not in covered]
+    if rest:
+        out.append({'group': '', 'label': str(rename.get('') or ''), 'values': rest})
+    return out
+
+
+def group_conflicts(facts: dict, tag: str, attrs) -> list:
+    """
+    **规则 N3**：同一个组里被**同时选中**的属性 → 冲突（`[{'group', 'attrs'}, …]`）。
+
+    为什么工具必须自己查：实测 `show lan happy sad`（两者同组）时
+    **lint exit 0、引擎一声不吭** —— 这类冲突 lint 不管，只能靠引擎给的 group 自己算。
+    """
+    groups = groups_of(facts, tag)
+    used = [str(a) for a in (attrs or []) if str(a)]
+    out = []
+    for name, members in groups.items():
+        allowed = set(members)
+        hit = [a for a in used if a in allowed]
+        if len(hit) >= 2:
+            out.append({'group': name, 'attrs': hit})
+    return out
+
+
+def rename_overlay(attr_groups) -> dict:
+    """
+    项目声明（`rules.json` 的 `attr_groups`）→ **只取改名**用的 `{组名: 中文名}`。
+
+    这就是"定义表降级为覆盖层"的具体含义：**分组结构由引擎给，人只改说法**
+    （把 `outfit` 显示成「服装」）。
+    ⚠ 声明里的 `options`（哪些词属于哪组）在本函数里**不参与** ——
+    那是旧机制；结构已经是引擎的事实，人再来"指定成员"就与引擎打架了。
+    """
+    out = {}
+    for entry in (attr_groups or ()):
+        if isinstance(entry, dict):
+            name = str(entry.get('name') or '')
+            label = str(entry.get('label') or '')
+        else:
+            name = str(getattr(entry, 'name', '') or '')
+            label = str(getattr(entry, 'label', '') or '')
+        if name and label:
+            out[name] = label
+    return out
+
+
 def narrow_problem(before, after) -> str:
     """
     收窄断言：`get_ordered_image_attributes(tag, (已选,))` 的结果必须满足
@@ -343,5 +416,6 @@ __all__ = [
     'FACT_KEYS', 'DERIVED_KEYS',
     'empty_facts', 'facts_path', 'validate_facts', 'is_collectable',
     'value_of', 'source_of', 'attributes_of', 'groups_of', 'candidates_of',
+    'grouped_choices', 'group_conflicts', 'rename_overlay',
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
 ]
