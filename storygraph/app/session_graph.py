@@ -456,6 +456,106 @@ class GraphSessionMixin:
             except SyntaxError as e:
                 errors.append(f'第{i}行错误: {text} - {e.msg}')
         return errors
+    def import_plain_text(self, files, graph=None, *, ask=None,
+                          decisions=None, dry_run=False,
+                          import_chapters=None) -> dict:
+        """
+        把**纯文字**（`.txt`，`.docx` 待 S4）转成章节导进来（S3）。
+
+        这条路的形状（每一步都有理由）：
+
+            .txt → `.rpy` 文本 →（**有认不出的写法就先问**）→ 过生成门禁落盘
+                 → `import_chapters`（复用既有链路：校验/门禁/剧情图）
+
+        ① **产物落在 `<项目根>/game/`**：作者的章节就该在 Ren'Py 会扫描的地方
+           （表格导出走 `build/renpy/`，两条路刻意分开）；
+        ② ⚠ **没确认角色就一个字都不写**：未映射写法落盘就是未定义变量，
+           Ren'Py 到那一句直接崩（真机 5 章有 23 处）—— 所以只有两种结局：
+           **产物干净**，或者**什么都没写**；
+        ③ **决定写回 `characters.xlsx`**（不是内存里的临时映射）：下次导入、
+           别的章节、以及项目里其他人打开这张表，看到的都是同一份映射；
+        ④ 目标**已存在且是手写**的 → 由 `write_generation` 拒绝（P0 护栏），
+           这里原样把原因带回去给人看。
+
+        `ask` 是"问一句"的回调（`callable(proposals) -> [决定] | None`）：
+        UI 传弹窗，CLI/测试传自己的实现；返回 `None` 表示"这次不决定" →
+        返回 `needs_decision=True` 且**不落盘**。
+
+        返回 dict（给 UI 看的一层壳，字段与 `ImportResult` 对齐）。
+        """
+        from storygraph.authoring import txt_pipeline as TP
+
+        root = getattr(self, 'project_root', None)
+        if not root:
+            return {'ok': False, 'error': '先选择项目根目录', 'written': [],
+                    'blocked': [], 'skipped': [], 'needs_decision': False,
+                    'proposals': [], 'messages': [], 'plan': None,
+                    'import_result': None, 'decisions': {}}
+
+        if import_chapters is None:
+            # 默认走会话自己的 `import_chapters`（**带上调用方给的那张图**，
+            # 否则调用方传进来的图不会被更新 —— 那是反直觉的返回式语义）。
+            import_chapters = lambda paths: self.import_chapters(paths, graph)  # noqa: E731
+        res = TP.run(root, files, rows=self.character_rows(),
+                     project_root=root, decisions=decisions, ask=ask,
+                     apply=(None if dry_run else self.apply_character_decisions),
+                     import_chapters=(None if dry_run else import_chapters),
+                     dry_run=dry_run)
+        # 落盘/导入之后，符号表与资源表都要跟着更新（说话人候选来自这里）
+        if res.written:
+            try:
+                self.refresh_symbols()
+            except Exception:                     # noqa: BLE001
+                swallow('editor.import_plain_text')
+        return {
+            'ok': res.ok, 'error': '', 'written': [str(p) for p in res.written],
+            'blocked': [(str(p), why) for p, why in res.blocked],
+            'skipped': [(str(p), why) for p, why in res.skipped],
+            'needs_decision': res.needs_decision, 'proposals': res.proposals,
+            'messages': list(res.messages), 'plan': res.plan,
+            'import_result': res.import_result, 'decisions': res.decisions,
+            'summary': res.summary,
+        }
+    def apply_character_decisions(self, proposals) -> dict:
+        """
+        把"未映射写法 → 角色"的决定写进 `characters.xlsx`（S3 的落地动作）。
+
+        ⚠ **写完必须重读角色表**：会话里那份 registry 是打开项目时载入的，
+        不重读的话"同一个写法"在下一次导入里**还会再问一遍**（实测踩到）。
+        这里只替换 `registry.characters`（就地改，让别的引用也看见），
+        不做整项目重扫 —— 那是"打开项目"的活，代价高得多。
+        """
+        from storygraph.authoring import char_decisions as CD
+        stats = CD.apply_decisions(CD.asset_dir_of(self.project_root),
+                                   proposals, self.character_rows())
+        if stats.get('ok'):
+            self._reload_character_rows()
+        return stats
+    def _reload_character_rows(self) -> None:
+        """只重读角色表那一张（写回决定之后用）。写不进去也只是过期，不崩。"""
+        try:
+            from storygraph.assets.asset_registry import parse_asset_tables
+            from storygraph.assets.asset_registry import asset_table_dirs
+            reg = self.registry()
+            if reg is None:
+                return
+            for d in asset_table_dirs(self.project_root) or ():
+                rows = parse_asset_tables(d).characters
+                if rows:
+                    reg.characters = rows
+                    return
+        except Exception as e:                    # noqa: BLE001
+            swallow('editor._reload_character_rows', e)
+    def character_rows(self) -> dict:
+        """
+        当前角色表（`{变量: 行}`）—— 纯文字导入要用它判"这个写法是谁"。
+
+        拿不到就返回空表（**不是**报错）：没有角色表时导入仍然能跑，
+        只是所有写法都会进"要人决定"那一栏（比猜一个安全）。
+        """
+        reg = self.registry()
+        rows = getattr(reg, 'characters', None)
+        return dict(rows) if rows else {}
     def import_chapters(self, files, graph=None) -> dict:
         """
         把用户选中的章节 `.rpy` 解析进剧情图（**累加**，不动没选中的章节）。

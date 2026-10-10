@@ -534,6 +534,108 @@ class GraphOpsMixin:
         self._report_missing_chapters(res['graph'])
         self._set_page(self.PAGE_GRAPH)
         return res
+    def import_plain_text(self):
+        """
+        「📝 导入纯文字章节」：`.txt`（作者写的纯文字）→ `.rpy` → 剧情图。
+
+        两遍（**这是安全的关键**，见 `session.import_plain_text`）：
+        第一遍只规划，遇到认不出的角色写法就弹「确认角色」；人点完决定
+        写进 `characters.xlsx`、**重跑转换**，第二遍才落盘。
+        没确认 → **一个字节都不写**（未定义变量在游戏里会直接崩）。
+        """
+        if not self._project_root:
+            QMessageBox.information(self, '提示',
+                                    '先「📁 打开项目」（章节要落进 game/ 里）。')
+            return
+        start = str(Path(self._project_root) / 'game')
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, '选择纯文字章节（可多选）', start,
+            '纯文字 (*.txt);;Word 文档 (*.docx);;所有文件 (*)')
+        if not paths:
+            return
+        # —— 第一遍：规划 + 问角色（不写盘）——
+        first = self._session.import_plain_text(paths, self.graph, dry_run=True)
+        # ⚠ dry_run 的 `ok` 恒为 False（它按定义什么都没写）—— 判据必须是
+        # "**有没有规划出文件**"，不能看 `ok`，否则这条链一次都不会往下走。
+        planned = getattr(first.get('plan'), 'files', None) or []
+        if not planned:
+            for _p, why in (first.get('skipped') or []):
+                self._log(f'[纯文字] ✕ {why}')
+            self._status(first.get('summary') or '没有可导入的文件（看控制台）')
+            return
+        self._show_plain_text_preview(first)
+
+        def _ask(proposals):
+            from storygraph.ui_qt.dialog_chars import CharDecisionDialog
+            dlg = CharDecisionDialog(self, proposals,
+                                     self._session.character_rows())
+            if dlg.exec() != QDialog.Accepted:
+                return None                     # 用户取消 → 什么都不写
+            return dlg.result_proposals()
+
+        # ⚠ 第二遍的导入走**本窗口的** `import_chapter_files`（它负责把图装进
+        # 窗口、进历史、写控制台）—— 直接调 session 只会拿到一个返回值，
+        # 图不会出现在界面上（实测踩到）。
+        res = self._session.import_plain_text(
+            paths, self.graph, ask=_ask,
+            import_chapters=self.import_chapter_files)
+        self._report_plain_text(res)
+
+    def _show_plain_text_preview(self, res):
+        """
+        先让人看见"要落哪几个文件、哪些写法要定、**哪些会被拦**"。
+
+        ⚠ 目标已存在的问题必须在**问之前**说清（实机实测）：真机项目里
+        `chapter0_0.rpy` 这些**已经存在**（作者手写的），全量生成会被
+        `LABEL_COLLISION` 拦下 —— 只在点完之后报"被拦了"，用户会以为工具坏了。
+        """
+        plan = res.get('plan')
+        targets = []
+        if plan is not None:
+            for f in plan.files:
+                targets.append(f.target)
+                state = '已存在（会被门禁拦下，见下）' if f.target.exists() \
+                    else '新建'
+                self._log(f'[纯文字] {f.source.name} → {f.target.name}'
+                          f'（label {f.label}；{state}）')
+        for _p, why in (res.get('skipped') or []):
+            self._log(f'[纯文字] ⚠ 跳过：{why}')
+        props = res.get('proposals') or []
+        if props:
+            self._log(f'[纯文字] 有 {len(props)} 种写法不在角色表里：'
+                      + '、'.join(p.token for p in props))
+        if targets and any(t.exists() for t in targets):
+            self._log('[纯文字] 目标已存在的文件：全量重生成**不会覆盖非工具生成的'
+                      '脚本**（B2/P0：它不认得 define/init python，覆盖会静默'
+                      '毁定义）。想改已有章节请用「导入章节 .rpy」+卡片编辑器；'
+                      '只想看产物可以先导出到别处。')
+
+    def _report_plain_text(self, res):
+        for msg in (res.get('messages') or []):
+            self._log(f'[纯文字] {msg}')
+        for path, why in (res.get('blocked') or []):
+            self._log(f'[纯文字] 🚫 {Path(path).name} 被门禁拦下：{why}')
+        written = res.get('written') or []
+        if not written:
+            why = ''
+            if res.get('blocked'):
+                why = ('（目标章节已经在项目里 —— 全量生成**不覆盖非工具生成的'
+                       '脚本**；见控制台）')
+            self._status(f'[纯文字] {res.get("summary") or "没有落盘"}{why}')
+            self._log('[纯文字] 一个文件都没写 —— 上面每一条都写清了原因。')
+            return
+        inner = res.get('import_result') or {}
+        self._set_page(self.PAGE_GRAPH)
+        self._status(
+            f'✔ 纯文字导入 {len(written)} 章：'
+            f'新增模块 {inner.get("added_nodes", 0)} 个 / '
+            f'连线 {inner.get("added_edges", 0)} 条')
+        self._log(f'[纯文字] 落盘：'
+                  + '、'.join(Path(p).name for p in written))
+        # ⚠ 图在**窗口**这一份（`self.graph`）—— `import_chapters` 的返回体里
+        # 没有 `graph` 键，别去取它（取到 None 会让下一个用图的人直接炸）。
+        if self.graph is not None:
+            self._report_missing_chapters(self.graph)
     def save_layout(self, target=None):
         """
         保存布局 JSON（Ctrl+S）。没给路径就弹「另存为」。
