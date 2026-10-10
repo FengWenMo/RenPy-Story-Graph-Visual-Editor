@@ -27,6 +27,9 @@ CLI 的 `learn` 在用它），缺的是**发现 + 入口**：
 from __future__ import annotations
 
 import re
+from pathlib import Path
+
+from storygraph.core.safeguard import swallow
 
 #: 参数名必须是合法标识符（Ren'Py 关键字参数的名字就是标识符）
 _NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
@@ -141,6 +144,224 @@ def build_group(name: str, label: str = '', options=None) -> dict:
             'options': opts, 'warnings': []}
 
 
+def suggest_shape(project_root, head: str, *, limit_files: int = 400,
+                  samples_limit: int = 6, min_choice_hits: int = 2) -> dict:
+    """
+    **从一个动作在项目里真实出现过的行，反推"它要填什么"**（纯函数）。
+
+    为什么这是"编剧也能懂"的技术支撑（用户 2026-10-10）：
+
+    > 而且你说的这个候选值其实非常繁琐！有多少动作我也不知道，都在表格内部的……
+
+    编剧不知道参数名、也说不清候选值。但他**已经写过**这个动作若干次 ——
+    那就别让他填，工具自己去数：
+
+      `swim_suit lyj "泳装" mood=happy` 出现 12 次
+        → 第 1 项取到 `lyj`/`林月见`…（若是角色 ID → 名字默认「角色」，候选=角色表）
+        → 第 2 项取到 `泳装`/`校服`…（**只出现一次的值不算候选**）
+        → 第 3 项：作者自己写了名字 `mood` → 直接用
+
+    返回::
+
+        {'head': 'swim_suit', 'found': True, 'occurrences': 12,
+         'items': [{'index': 0, 'kind': 'word'|'value'|'key'|'number',
+                    'name': '角色'|'mood'|'第1项', 'default_name': '角色',
+                    'renamed': bool, 'examples': ['林月见', …],
+                    'choices': ['林月见', …], 'choices_from': '角色表'|'项目里写过的值',
+                    'suggest_allowed': bool, 'hits': {值: 次数}}],
+         'samples': [{'file': 'ch01.rpy', 'line': 7, 'text': '…'}],
+         'files': ['ch01.rpy', …]}
+
+    ⚠ **猜不出就不猜**：名字是由 `kind` 决定的**保守默认**
+    （引号里的值 → 「内容」、裸词 → 「对象」、数字 → 「时长」、作者写了 `x=` → `x`），
+    绝不生成 `intensity` 这种**看着像真的、其实是我编的**英文名。
+    """
+    import re as _re
+    from collections import Counter
+
+    head = str(head or '').strip()
+    out = {'head': head, 'found': False, 'occurrences': 0, 'items': [],
+           'samples': [], 'files': [], 'role_names': []}
+    root = Path(project_root) if project_root else None
+    if not head or root is None or not root.is_dir():
+        return out
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        files = list(discover_scripts(root))[:limit_files]
+    except Exception as e:                       # noqa: BLE001
+        swallow('learn_statement.suggest_shape.discover', e)
+        return out
+
+    # 角色表：用来把"裸词"认成角色（候选直接给中文显示名）
+    role_names, role_ids, id_to_name = [], set(), {}
+    try:
+        from storygraph.pipeline.build import load_asset_registry
+        reg = load_asset_registry(root)
+        if reg is not None:
+            for cid, row in (getattr(reg, 'characters', {}) or {}).items():
+                cid = str(cid)
+                role_ids.add(cid)
+                shown = str((row or {}).get('Name')
+                            or (row or {}).get('DisplayName')
+                            or (row or {}).get('名字') or cid).strip()
+                shown = shown.strip('「」『』') or cid
+                id_to_name[cid] = shown
+                if shown and shown not in role_names:
+                    role_names.append(shown)
+            out['role_names'] = role_names
+    except Exception as e:                       # noqa: BLE001 - 没角色表也能用
+        swallow('learn_statement.suggest_shape.roles', e)
+
+    #: 一项的收集器。**键是位置下标** —— 同一个位置必须是同一项：
+    #: `outfit lyj …` / `outfit lxj …` 是**同一个第 1 项**（角色），
+    #: 我第一版按 `(位置, 名字)` 做键，于是 `lxj` 没被认成角色时
+    #: 又冒出一条"对象"，参数表里出现两个第 1 项（出图前当场看出来）。
+    slots: dict = {}
+
+    def slot(i, kind, name):
+        rec = slots.setdefault(i, {'index': i, 'kind': kind, 'name': name,
+                                   'default_name': name, 'examples': [],
+                                   'hits': Counter(), 'seen': set(),
+                                   'suggest_allowed': False, 'note': ''})
+        return rec
+
+    def note_kind(rec, kind, name, note=''):
+        """把这一位见过的"更像样的"形态记下来（key > 角色 > 内容 > 对象 > 数字）。"""
+        rank = {'key': 4, 'word-role': 3, 'value': 2, 'word': 1, 'number': 0}
+        cur = f'{rec["kind"]}-role' if rec.get('note') == '角色表' else rec['kind']
+        new = f'{kind}-role' if note == '角色表' else kind
+        if rank.get(new, 0) > rank.get(cur, 0):
+            rec['kind'] = kind
+            rec['name'] = name
+            rec['default_name'] = name
+            rec['note'] = note
+
+    occurrences = 0
+    for fp in files:
+        try:
+            lines = Path(fp).read_text(encoding='utf-8', errors='replace').splitlines()
+        except OSError:
+            continue
+        for lineno, raw in enumerate(lines, start=1):
+            text = raw.strip()
+            if not text or text.startswith('#'):
+                continue
+            tokens = _split_call_line(text)
+            if not tokens or tokens[0] != head:
+                continue
+            occurrences += 1
+            if len(out['samples']) < samples_limit:
+                out['samples'].append({'file': Path(fp).name, 'line': lineno,
+                                       'text': text[:80]})
+            if Path(fp).name not in out['files']:
+                out['files'].append(Path(fp).name)
+            for i, tok in enumerate(tokens[1:]):
+                kind, shown, key = tok
+                is_role = False
+                if kind == 'key':
+                    rec = slot(i, 'key', key)
+                    note_kind(rec, 'key', key)
+                    rec['suggest_allowed'] = True          # 作者自己写了名字
+                elif kind == 'number':
+                    rec = slot(i, 'number', f'第{i + 1}项')
+                    note_kind(rec, 'number', f'第{i + 1}项')
+                elif kind == 'value':
+                    rec = slot(i, 'value', '内容')
+                    note_kind(rec, 'value', '内容')
+                else:                                       # 裸词：可能是角色
+                    is_role = shown in role_ids or shown in role_names
+                    default = '角色' if is_role else '对象'
+                    rec = slot(i, 'word', default)
+                    note_kind(rec, 'word', default,
+                              '角色表' if is_role else '')
+                    if is_role:
+                        rec['suggest_allowed'] = True
+                # 角色那一项显示**中文名**（项目里写的是 ID，编剧看的是名字）
+                if is_role or (rec['note'] == '角色表'):
+                    shown = id_to_name.get(shown, shown)
+                rec['hits'][shown] += 1
+                rec['seen'].add(shown)
+    if not occurrences:
+        return out
+    out['found'] = True
+    out['occurrences'] = occurrences
+    for idx in sorted(slots):
+        rec = slots[idx]
+        examples = [v for v, _n in rec['hits'].most_common(6)]
+        rec['examples'] = examples
+        # ⚠ **只出现一次的值不算候选**：那更像笔误/一次性的写法，
+        #    拿它当"只能填这些"会把编剧的手脚捆住（用户原话：候选非常繁琐）
+        choices = [v for v, n in rec['hits'].most_common()
+                   if n >= max(2, int(min_choice_hits))]
+        rec['choices'] = choices[:24]
+        rec['choices_from'] = (rec['note'] if rec['note'] == '角色表'
+                               else ('项目里写过的值' if choices else ''))
+        rec['suggest_allowed'] = bool(rec['suggest_allowed'] and choices)
+        rec['hits'] = dict(rec['hits'].most_common(12))
+        rec.pop('seen', None)
+        out['items'].append(rec)
+    return out
+
+
+def _split_call_line(text: str) -> list:
+    """
+    一行脚本 → `[头, 项…]`；项是 `(kind, 显示值, 键名)`。
+
+    `kind`：`'key'`（`mood=happy` 的 `happy`）/ `'value'`（引号里的值）/
+    `'number'`（裸数字）/ `'word'`（裸词，可能是角色）。
+
+    刻意**不用** `shlex`：Ren'Py 台词里的引号/中文书名号/转义情况很多，
+    这里只需要"够用的分词"，宁可少切也不要切错（切错就是把编剧的台词拆坏）。
+    """
+    s = str(text or '').strip()
+    if not s or s.startswith('#'):
+        return []
+    out: list = []
+    i, n = 0, len(s)
+    while i < n and not s[i].isspace() and s[i] not in '"\'':
+        i += 1
+    out.append(s[:i])
+    while i < n:
+        while i < n and (s[i].isspace() or s[i] == ','):
+            i += 1
+        if i >= n:
+            break
+        key = ''
+        m = _KEY_RE.match(s, i)
+        if m:
+            key = m.group(1)
+            i = m.end()
+        if i < n and s[i] in '"\'':
+            quote = s[i]
+            i += 1
+            buf = []
+            while i < n and s[i] != quote:
+                buf.append(s[i])
+                i += 1
+            i += 1                                    # 吃掉收尾引号
+            kind = 'key' if key else 'value'
+            out.append((kind, ''.join(buf), key))
+            continue
+        j = i
+        while j < n and not s[j].isspace() and s[j] not in ',':
+            j += 1
+        token = s[i:j]
+        i = j
+        if not token:
+            continue
+        if key:
+            out.append(('key', token.rstrip(':'), key))
+        elif _NUM_RE.match(token):
+            out.append(('number', token.rstrip(':'), ''))
+        else:
+            out.append(('word', token.rstrip(':'), ''))
+    return out
+
+
+_KEY_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*')
+_NUM_RE = re.compile(r'^-?\d+(\.\d+)?$')
+
+
 def group_preview(groups) -> str:
     """给人看的"这会写进清单的分组"。"""
     rows = [g for g in (groups or ()) if g.get('ok')]
@@ -192,4 +413,4 @@ def declaration_preview(built: dict, path: str = '') -> str:
 
 
 __all__ = ['build_declaration', 'build_group', 'declaration_preview',
-           'group_preview', 'parse_choices']
+           'group_preview', 'parse_choices', 'suggest_shape']

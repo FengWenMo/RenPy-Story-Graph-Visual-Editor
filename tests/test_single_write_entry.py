@@ -45,6 +45,8 @@ WRITERS = {
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
     'story/statement_registry.py::declare_attr_groups':
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
+    'story/statement_registry.py::remove_statement':
+        '改/删项目清单（移除一条声明；**先备份**到 storygraph.rules.backup/）',
     'story/excel_export.py::_thumbnail_bytes': '写缩略图缓存 png',
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',

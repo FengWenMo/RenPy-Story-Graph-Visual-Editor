@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1039,8 +1040,198 @@ def declare_statement(project_root, name: str, label: str = '',
             'reason': '', 'entry': entry}
 
 
+def _is_builtin_head(head: str) -> bool:
+    """
+    这个语句头是**工具已经会**的吗（不该叫用户去声明）。
+
+    三类都算"会了"（用户 2026-10-10 截图里 `with`(39) / `window`(9) / `pause`
+    全出现在"待声明"里，把这条闸门补齐）：
+
+      ① Ren'Py 内置语句头（词表 `RENPY_KNOWN_HEADS`：`show/scene/with/play/…`）；
+      ② 流程块头（`if/menu/jump/…`，同上表里也有，但显式写清楚）；
+      ③ **工具自己声明过参数**的叶语句（`beat_model.LEAF_ARG_HEADS` =
+         `with/pause/window`）—— 它们连参数列都早就有了，更不该叫用户声明。
+    """
+    head = str(head or '').strip()
+    if not head:
+        return True
+    try:
+        from storygraph.core.vocabulary import (RENPY_CONTAINER_HEADS,
+                                                RENPY_KNOWN_HEADS)
+        from storygraph.story.beat_model import LEAF_ARG_HEADS
+    except Exception as e:                       # noqa: BLE001 - 判不出来就当不认识
+        swallow('story.statement_registry._is_builtin_head', e)
+        return False
+    return head in RENPY_KNOWN_HEADS or head in RENPY_CONTAINER_HEADS \
+        or head in LEAF_ARG_HEADS
+
+
+def _character_names(project_root) -> tuple:
+    """`(角色 ID 集合, 显示名集合)`（读不出就两个空集）。"""
+    ids, names = set(), set()
+    try:
+        from storygraph.pipeline.build import load_asset_registry
+        reg = load_asset_registry(project_root)
+        for cid, row in (getattr(reg, 'characters', {}) or {}).items():
+            ids.add(str(cid))
+            if str(cid).lower() not in ('narrator',):
+                names.add(str(cid))
+            for key in ('Name', 'DisplayName', '显示名', '名字'):
+                shown = str((row or {}).get(key) or '').strip()
+                if shown:
+                    names.add(shown.strip('「」『』'))
+    except Exception as e:                       # noqa: BLE001 - 没有角色表也能用
+        swallow('story.statement_registry._character_names', e)
+    return ids, names
+
+
+def _looks_like_dialogue(head: str, text: str, roles=()) -> str:
+    """
+    这行是不是**说话人+台词**（被解析器当成了裸语句）？
+
+    真项目实测（2026-10-10）：`l oh "3"` —— `l` 是角色表里「蓝」的 ID，
+    这一行就是台词"3"配表情 `oh`。所以判据**先问角色表**，
+    认出来了就**明确说这是台词**（不是"疑似写错"）。
+
+    ⚠ 我第一版只按"名字 ≤2 字符 + 行里有引号"判，于是把 `l oh "3"`
+    误诊成"说话人写错了" —— 骂错人比不提示更糟。现在分两层：
+
+      · 命中角色表 → 返回"这是台词"（**确定**，不是猜测）；
+      · 没命中、但名字极短且行里有引号 → 返回"像是台词/写法不对"（**存疑**）。
+    """
+    head = str(head or '').strip()
+    text = str(text or '')
+    if not head:
+        return ''
+    ids, names = roles if roles else (set(), set())
+    if head in ids or head in names or head.lower() in {i.lower() for i in ids}:
+        if '"' in text or "'" in text:
+            return (f'这一行是**台词**（"{head}" 是角色表里的角色），'
+                    f'不是动作；工具本该把它认成对白')
+    if len(head) > 2 or not text:
+        return ''
+    if '"' not in text and "'" not in text:
+        return ''
+    return (f'这一行**像是台词/写法不对**（名字 "{head}" 太短、行里有引号'
+            f'台词），不像一个动作 —— 也可能是角色表里没有这个角色')
+
+
+def declared_builtins(registry) -> list:
+    """
+    清单里**声明了、但它其实自带**的语句 → `[{'name','label','reason'}]`。
+
+    为什么要有：真项目根目录下真有一份被 v1 界面误导着写出来的
+    `{"name": "pause", ...}` —— `pause` 是 Ren'Py 内置语句（`pause 1.0`），
+    **根本不需要声明**。工具既然教错了，就得能把它指出来（并可一键移除）。
+    只读。
+    """
+    out = []
+    for spec in _specs_of(registry):
+        if not _is_builtin_head(spec.name):
+            continue
+        out.append({
+            'name': spec.name,
+            'label': spec.label or '',
+            'reason': f'"{spec.name}" 是 Ren\'Py 自带的语句（工具本来就认识），'
+                      f'不用声明；声明了也不会更聪明，只会让清单变难读',
+        })
+    return out
+
+
+def remove_statement(project_root, name: str) -> dict:
+    """
+    **把一条声明从清单里去掉**（先备份，可回退）。
+
+    为什么需要它：v1 界面把人教错了（让用户声明了内置的 `pause`），
+    那就要给一条体面的退路 —— 不能只让人手改 JSON。
+
+    契约（都与 `declare_statement` 同源）：
+      · **先备份**到 `<项目根>/storygraph.rules.backup/<名字>.<时间戳>.json`，
+        内容是**改之前**的整份清单（用户手写的东西不许不可逆地消失）；
+      · 去掉之后 `statements` 为空、**且没有别的段** → 删掉整个清单文件
+        （回退到"项目没声明"这个干净状态）；
+      · 还有别的段（`attr_groups` / 用户自己的键）→ 保留文件，只清那一条；
+      · 清单坏了 / 名字不在里面 → **如实说**，不猜、不改。
+
+    返回 `{'ok','path','removed','deleted_file','backup','reason'}`。
+    """
+    import json
+    from datetime import datetime
+
+    name = str(name or '').strip()
+    if not name:
+        return {'ok': False, 'path': '', 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': '语句名不能为空'}
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'removed': False,
+                'deleted_file': False, 'backup': '', 'reason': '没有项目根目录'}
+    path = root / MANIFEST_NAMES[0]
+    if not path.is_file():
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': f'没有 {MANIFEST_NAMES[0]}'}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8') or '{}')
+    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': '清单顶层不是对象，拒绝改动'}
+
+    items = data.get(MANIFEST_KEY)
+    items = items if isinstance(items, list) else []
+    kept = [it for it in items
+            if not (isinstance(it, dict)
+                    and str(it.get('name') or '').strip() == name)]
+    if len(kept) == len(items):
+        return {'ok': True, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': f'清单里本来就没有 "{name}"'}
+
+    # ① 先备份（改之前的内容）
+    backup = ''
+    try:
+        bdir = root / 'storygraph.rules.backup'
+        bdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        bpath = bdir / f'{MANIFEST_NAMES[0].replace(".json", "")}.{stamp}.json'
+        bpath.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
+        backup = str(bpath)
+    except Exception as e:                      # noqa: BLE001 - 备不了就不删
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '',
+                'reason': f'备份失败，为安全起见没有改动：{e}'}
+
+    # ② 还有别的段 → 保留文件；什么都没了 → 删文件
+    rest = {k: v for k, v in data.items() if k != MANIFEST_KEY}
+    empty_rest = all(not v for v in rest.values())
+    try:
+        if not kept and empty_rest:
+            path.unlink()
+            deleted = True
+        else:
+            data[MANIFEST_KEY] = kept
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                            encoding='utf-8')
+            deleted = False
+    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': backup,
+                'reason': f'写不进去：{e}（备份在 {backup}）'}
+    clear_cache()
+    return {'ok': True, 'path': str(path), 'removed': True,
+            'deleted_file': deleted, 'backup': backup, 'reason': ''}
+
+
 def discover_undeclared(project_root, *, limit_files: int = 400,
-                        samples_limit: int = 8) -> list:
+                        samples_limit: int = 8,
+                        include_suspect: bool = False,
+                        only_suspect: bool = False) -> list:
     """
     **从项目脚本里找出"工具还不认识的写法"** —— 用户要的那个起点
     （2026-10-10："我并没有找到一个入口可以教这个工具学会我自定义的项目模块"）。
@@ -1049,8 +1240,23 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
     只能靠人自己知道（或去 `describe` 里翻）。这个函数把项目扫一遍，
     把**未建模语句的头**列出来，于是界面可以做成一屏"发现 → 勾选 → 教它"。
 
-    返回 `[{'head','count','samples':[(文件, 行号, 原文)],'block'}]`，
-    **按出现次数降序**（最常写的排最前）。
+    返回 `[{'head','count','samples':[(文件, 行号, 原文)],'block','suspect',
+    'files':[文件名…]}]`，**按出现次数降序**（最常写的排最前）。
+
+    ⚠ **闸门**（用户 2026-10-10 截图评审后补的，之前没有 → 把 `with`/`window`/
+    `pause` 这些 Ren'Py 内置语句当成"工具还不认识"，甚至教用户写了一份
+    `pause` 声明）：
+
+      1. **工具已经会的**（`_is_builtin_head`：词表已知 ∪ 容器头 ∪
+         `with/pause/window` 这类工具自己声明过参数的叶语句）→ **不列**；
+      2. 语句头必须是合法标识符（首字符不能是数字/符号）；
+      3. **疑似写错的行**（`l oh "3"`：名字 ≤2 字符 **且** 行里有引号台词）
+         → 默认不列；`include_suspect=True` 时列出并带 `suspect` 原因
+         （它们走"疑似写错"那一栏，**不给人"声明"这个动作**）；
+      4. 已经在清单 / CDS 里声明过的 → 不算"还不认识"。
+
+    每条都带 `files`（来源文件清单）—— 真机里 `with` 那种高计数大多来自
+    Ren'Py 模板/界面文件（`screens.rpy`），要让人一眼看出"这是模板里的"。
 
     ⚠ 判据**照抄 `coverage_of_statements` 的口径**（不另立一套）：
     `raw_kind` 在 `Statement.payload` 里、不是 beat 属性
@@ -1078,6 +1284,8 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
         return []
     from storygraph.core.vocabulary import statement_head_token
     reg = registry_for_parse_result(pr)
+    # 角色表：判"这行其实是台词"要用它（否则会把 `l oh "3"` 误诊成写错）
+    roles = _character_names(root)
     found: dict = {}
     for st in (getattr(pr, 'statements', None) or ()):
         payload = getattr(st, 'payload', None)
@@ -1091,14 +1299,45 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
         head = statement_head_token(text)
         if not head or (reg is not None and reg.match(head) is not None):
             continue
+        # 闸门①（用户 2026-10-10）：**工具已经会的语句头一律不列** ——
+        # `with`/`window`/`pause` 全是 Ren'Py 内置，`with/pause/window` 更是
+        # 工具自己声明过参数的叶语句。把它们列出来会把人教错（真项目里就有
+        # 一份被误导写出来的 `pause` 声明）。
+        if _is_builtin_head(head):
+            continue
+        # 名字必须像个标识符（首字符不能是数字）。`$ renpy.notify(...)` 这类
+        # 会被切出 `$` 之类的东西，不是"作者自定义的写法"。
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', head):
+            continue
+        suspect = _looks_like_dialogue(head, text, roles)
+        if suspect and not include_suspect:
+            continue
+        if only_suspect and not suspect:
+            continue
         rec = found.setdefault(head, {'head': head, 'count': 0, 'samples': [],
-                                      'block': False})
+                                      'block': False, 'suspect': '',
+                                      'reason': '', 'files': []})
         rec['count'] += 1
         if raw_kind in ('unknown_block', 'known_block'):
             rec['block'] = True
+        if suspect and not rec['suspect']:
+            # `suspect` 与 `reason` 同源：前者给判据（真值），后者给人看（原话）
+            rec['suspect'] = suspect
+            rec['reason'] = suspect
+        # ⚠ `Statement.source` 是 **(路径, 行号)** 元组，不是纯路径 ——
+        # 直接 `Path(str(where)).name` 会得到 `ch01.rpy', 2)` 这种垃圾
+        # （判据当场抓到）。这里统一拆开：文件名进 `files`，行号进样例。
+        where = getattr(st, 'source', '') or ''
+        if isinstance(where, (tuple, list)):
+            src_file, src_line = (list(where) + ['', ''])[:2]
+        else:
+            src_file, src_line = where, ''
+        name = Path(str(src_file)).name if src_file else ''
+        if name and name not in rec['files']:
+            rec['files'].append(name)
         if len(rec['samples']) < samples_limit:
-            where = str(getattr(st, 'source', '') or '')
-            rec['samples'].append((where, text.split('\n')[0][:80]))
+            line = f'{name}:{src_line}' if src_line else name
+            rec['samples'].append((line, text.split('\n')[0][:80]))
     return sorted(found.values(), key=lambda r: (-r['count'], r['head']))
 
 
@@ -1220,9 +1459,11 @@ __all__ = ['ATTR_GROUPS_KEY', 'MANIFEST_KEY', 'RegisteredStatement',
            'as_registered',
            'capability_of', 'classify_head', 'clear_cache',
            'coverage_of_beats', 'coverage_of_statements',
-           'declare_attr_groups', 'declare_statement', 'describe_statements',
+           'declare_attr_groups', 'declare_statement', 'declared_builtins',
+           'describe_statements',
            'discover_undeclared',
            'dynamic_spec_columns',
            'format_capability_summary',
-           'format_registry_report', 'registry_for_parse_result', 'root_of',
+           'format_registry_report', 'registry_for_parse_result',
+           'remove_statement', 'root_of',
            'spec_arg_choices', 'spec_body_allows', 'spec_columns']

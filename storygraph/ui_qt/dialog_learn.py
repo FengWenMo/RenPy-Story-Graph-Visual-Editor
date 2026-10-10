@@ -241,7 +241,7 @@ class CustomStatementDialog(QDialog):
         gv = QVBoxLayout(box_groups)
         gv.setSpacing(T.SPACE['xs'])
         gv.addWidget(self._hint(
-            '这里**不预设任何组名**：你写"服装"就是服装，写"姿势"就是姿势。'
+            '这里不预设任何组名：你写"服装"就是服装，写"姿势"就是姿势。'
             '词组名只是内部键，中文名才是界面上那一栏的字。'
             '留空"候选词"的那一组 = 兜底（没归到别的组的词都进它）。'))
         self.groups = _GroupsTable()
