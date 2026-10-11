@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 
 from storygraph.authoring.learn_statement import (build_declaration,
                                                   declaration_preview)
+from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
@@ -125,10 +126,10 @@ class CustomStatementDialog(QDialog):
                                 T.SPACE['md'], T.SPACE['md'])
         root.setSpacing(T.SPACE['sm'])
         head = QLabel(
-            '项目里自己的写法（`swim_suit` / `mycue` 这类）默认逐字保留，'
-            '但工具不知道它是什么。在这里写一条声明，它就变成"认识的语句"：'
+            '项目里自己的写法（swim_suit / mycue 这类）默认逐字保留，'
+            '但工具不知道它是什么。在这里写一条声明，它就变成「认识的语句」：'
             '参数会成为表格里的列、候选值会成为下拉。'
-            '声明落在项目根的 `storygraph.rules.json`（可评审、可 diff）。')
+            '声明落在项目根的 storygraph.rules.json（可评审、可 diff）。')
         head.setWordWrap(True)
         root.addWidget(head)
 
@@ -163,9 +164,9 @@ class CustomStatementDialog(QDialog):
         if not self._discovered:
             lv.addWidget(self._hint(
                 '没发现未声明的写法 —— 要么项目里没有自定义语句，'
-                '要么它们**已经在清单或 CDS 里声明过**了（见下方）。'))
+                '要么它们已经在清单或 CDS 里声明过了（见下方）。'))
 
-        lv.addWidget(QLabel('② 已经声明过的（`rules.json` + 脚本里的 CDS）'))
+        lv.addWidget(QLabel('② 已经声明过的（rules.json + 脚本里的 CDS）'))
         self.declared = QPlainTextEdit()
         self.declared.setReadOnly(True)
         self.declared.setPlainText(self._registry_report
@@ -195,7 +196,7 @@ class CustomStatementDialog(QDialog):
         row2.addWidget(self.label, 1)
         rv.addLayout(row2)
 
-        self.block = QCheckBox('它后面跟一个块（`mycue "闪电":` 这种，'
+        self.block = QCheckBox('它后面跟一个块（mycue "闪电": 这种，'
                                '块体逐字保真）')
         rv.addWidget(self.block)
 
@@ -274,20 +275,35 @@ class CustomStatementDialog(QDialog):
         self._ok_btn = box.button(QDialogButtonBox.Ok)
         self._ok_btn.setText('写进 storygraph.rules.json')
         self._ok_btn.setProperty('variant', 'primary')
-        # ⭐ 「验证它能跑」（第三层）：点了才跑 —— 一次要几秒且需要 SDK
-        self.on_verify = on_verify
-        self._verify_btn = QPushButton('▶ 验证它能跑')
-        self._verify_btn.setToolTip(
-            '真跑一次引擎：找出用到这个写法的章节，注入证据，跑 `test`，'
-            '再**两把锁**判定（引擎报 PASSED 且证据文件真的存在）。'
-            '⚠ 没验证成 ≠ 失败 —— 我们会如实分成"通过 / 失败 / 没证明成"。')
-        self._verify_btn.setEnabled(bool(on_verify))
-        self._verify_btn.clicked.connect(self._do_verify)
-        box.addButton(self._verify_btn, QDialogButtonBox.ActionRole)
         box.button(QDialogButtonBox.Cancel).setText('取消（什么都不改）')
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         root.addWidget(box)
+
+        # ⭐ 「验证它能跑」（第三层）：单独一行（**放进主按钮盒会挤成一行**，
+        #    而且它需要一段说明 —— 那说明本身就是"工具不教错人"的一部分）。
+        #
+        # ⚠ 这段说明是**真机挖出来的硬事实**（引擎 `script.py:447-452`）：
+        #    `rules.json` 只让**我们的工具**认识这个写法；
+        #    **引擎**要靠项目自己的 `renpy.register_statement` ——
+        #    而且 `init python` 注册**赶不上解析期**（一组出错、后面全不解析），
+        #    所以"声明了却跑不起来"是常态，必须**当面说清**。
+        self.on_verify = on_verify
+        grow2 = QHBoxLayout()
+        self._verify_btn = QPushButton('▶ 验证它能跑')
+        self._verify_btn.clicked.connect(self._do_verify)
+        grow2.addWidget(self._verify_btn)
+        self._verify_hint = QLabel(
+            '真跑一次引擎：找出用到这个写法的章节 → 注入证据 → 跑 test → '
+            '两把锁判定（引擎报 PASSED 且证据文件真的存在）。'
+            '这里写声明只让「工具」认识它；要让「引擎」也认识，项目里还得有它的 '
+            'renpy.register_statement（注意：init python 里注册赶不上解析期）。'
+            '没验证成 ≠ 失败：我们会如实分成「通过 / 失败 / 没证明成」。')
+        self._verify_hint.setProperty('role', 'caption')
+        self._verify_hint.setWordWrap(True)
+        grow2.addWidget(self._verify_hint, 1)
+        rv.addLayout(grow2)
+        self.set_verify_available(bool(on_verify))
         # ⚠ 按钮建好之后**再刷一次**：构造早期那次刷新时按钮还不存在，
         # 于是"名字空着"这个初值状态没被同步到可用性上（实测：按钮一开始可点）。
         self._refresh_preview()
@@ -317,6 +333,22 @@ class CustomStatementDialog(QDialog):
         self.block.setChecked(bool(rec.get('block')))
         self._refresh_preview()
 
+    def set_verify_available(self, available: bool, reason: str = ''):
+        """
+        验证按钮的可用性（**能点就必须有反应**：不可用要灰化 + 写清为什么）。
+
+        `reason` 用来把"为什么不给你点"说清楚（例如"这个写法引擎不认识，
+        验证只会得到'没证明成'"）。
+        """
+        self._verify_btn.setEnabled(bool(available))
+        try:
+            if available:
+                self._verify_btn.setToolTip('点一下真跑一次引擎')
+            else:
+                self._verify_btn.setToolTip(
+                    reason or '这里暂时没法验证（需要 SDK 与真项目）')
+        except Exception as e:                  # noqa: BLE001 - 提示设不上不该炸
+            swallow('ui_qt.dialog_learn.set_verify_available.tooltip', e)
     def _do_verify(self):
         """
         「▶ 验证它能跑」：把当前填的动作名交给注入的回调（**跑引擎是它的事**）。
@@ -345,7 +377,7 @@ class CustomStatementDialog(QDialog):
             text = f'验证没做成：{type(e).__name__}: {e}'
         finally:
             self._verify_btn.setText('▶ 验证它能跑')
-            self._verify_btn.setEnabled(True)
+            self.set_verify_available(bool(self.on_verify))
         self.preview.setPlainText(str(text or ''))
     def _remove_group(self):
         r = self.groups.currentRow()

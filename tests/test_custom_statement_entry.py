@@ -497,6 +497,76 @@ def test_the_verify_button_calls_back_and_can_be_disabled(qapp, tmp_path):
     assert dlg2._verify_btn.isEnabled(), '跑完要恢复可点'
 
 
+def test_no_markdown_markers_in_widget_text(qapp, tmp_path):
+    """
+    ⭐ 规矩 N6 的自动判据：**Qt 不渲染 Markdown** ——
+    界面上出现 `**加粗**` 只会显示成一堆星号（我自己就犯过：
+    验证按钮的说明里带 `**两把锁**`，截图一看满屏星号）。
+
+    扫整个弹窗里所有控件的可见文字，发现 `**` 就报出来。
+    （反引号放宽：它在界面上读起来像"强调一个标识符"，无害；
+    `**` 则一定是 Markdown 习惯漏出来的。）
+    """
+    import re
+    from PySide6.QtWidgets import QLabel, QPushButton, QCheckBox
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[],
+                                on_verify=lambda head: 'ok')
+    bad = []
+    widgets = (dlg.findChildren(QLabel) + dlg.findChildren(QPushButton)
+               + dlg.findChildren(QCheckBox))       # findChildren 一次只收一个类型
+    for w in widgets:
+        texts = [w.text() if hasattr(w, 'text') else '',
+                 w.toolTip() if hasattr(w, 'toolTip') else '']
+        for t in texts:
+            if not t:
+                continue
+            if '**' in t:
+                bad.append(f'{type(w).__name__}: {t[:60]}')
+    assert not bad, ('Qt 不渲染 Markdown，这些文字会原样显示成星号：'
+                     + ' | '.join(bad))
+
+
+def test_no_markdown_markers_in_any_string_literal():
+    """
+    ⭐ 上面那条只扫"当前能显示出来的那段文字" —— 会**漏**掉暂时不显示的
+    （例如"没发现未声明的写法"那句，只有发现为空时才渲染，我截图里正好没显示，
+    判据就放过了它）。所以这里做一层**源码级**的兜底：
+    扫 `dialog_learn.py` 里所有字符串字面量，出现 `**` 就报。
+
+    （反引号不放宽在这一层：源码里反引号是给 Markdown 文档用的，
+    界面文字里出现它一定是习惯漏出来的 —— 但界面**确实有用反引号强调标识符**的，
+    所以只钉 `**`，反引号留给人工看。）
+    """
+    import ast
+    src = (ROOT / 'storygraph' / 'ui_qt' / 'dialog_learn.py').read_text(
+        encoding='utf-8')
+    tree = ast.parse(src)
+    # ⚠ 先排掉 **docstring** —— 那是给读代码的人看的（Markdown 是对的），
+    #   只有"会显示到界面上的字符串"才不许带 `**`
+    #   （我第一版没排，于是把模块/函数文档全报出来了 —— 判据自己太宽）。
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, 'body', None) or []
+            if body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and id(node) not in docstrings:
+            if '**' in node.value:
+                bad.append(f'第 {node.lineno} 行: {node.value[:50]}')
+    assert not bad, ('Qt 不渲染 Markdown；这些字符串里的 `**` 会原样显示：'
+                     + ' | '.join(bad))
+
+
 def test_every_panel_method_the_window_calls_really_exists(ui_window):
     """
     ⚠ 这条是"卡死"那个 bug 的守卫（2026-10-10 实测踩到）：

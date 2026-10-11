@@ -722,6 +722,18 @@ class GraphOpsMixin:
                 lines.append(f'证据文件：{verdict["evidence"]}')
             if verdict.get('reason'):
                 lines.append(f'原因：{verdict["reason"]}')
+            # ⚠ 验证不过时**顺手说清该怎么办**（否则用户只会看到"没证明成"）
+            if verified is not True:
+                lines.append('')
+                lines.append('怎么办：')
+                lines.append('  · 先看上面引擎原话 —— 若写着 `expected statement.`，'
+                             '说明**引擎不认识这个写法**：它需要项目里有一段 '
+                             '`renpy.register_statement("' + head + '", …)`。')
+                lines.append('  · ⚠ 注意 `init python` 里注册**赶不上解析期**'
+                             '（引擎一组解析出错、后面全不解析）—— '
+                             '这就是"声明了却跑不起来"的常见原因。')
+                lines.append('  · 引擎认识了、只是没跑到那一句时，'
+                             '把这一句放进某一章的正文再验一次。')
             for ln in (verdict.get('raw_tail') or [])[-6:]:
                 lines.append(f'  {ln}')
             return '\n'.join(lines)
