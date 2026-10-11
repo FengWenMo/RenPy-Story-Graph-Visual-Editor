@@ -22,7 +22,7 @@
 ## 怎么用
 
 ```bash
-python tools/build_fork_sdk.py        # 造到 .pip-tmp/fork_sdk_full（在 .gitignore 里）
+python tools/build_fork_sdk.py        # 默认造到**仓库外**：<仓库同级>/storygraph_fork_sdk
 python tools/hell_engine_oracle.py D4a D4b
 ```
 
@@ -30,15 +30,25 @@ python tools/hell_engine_oracle.py D4a D4b
 `D4b`（官方 SDK，同一工程）应当**报 `expected statement.`**。
 两者一起才证明"这条语句确实来自 fork，而不是标准语法"。
 
+环境变量 `STORYGRAPH_FORK_SDK` 可以改它的位置（两个脚本共用同一套解析）。
+
 ## 两个必须遵守的实现细节（都踩过）
 
 1. **`l.advance()` 必须调用。** 不推进 lexer，`parse_block` 的
    `while not l.eob` 会**死循环** → `MemoryError`（实测到过）。
 2. **必须返回真实 AST 节点**（`renpy.ast.Pass`），不能返回 `None`。
 
-## 为什么 SDK 本身不进版本库
+## 为什么 SDK 本身不进版本库、也不放在仓库里
 
-它是 **1.4GB 的第三方软件树**（有自己的 LICENSE）；提交进 git 会让仓库
-永久背上这个体积，且每次 SDK 升级再翻一倍。
-所以版本库里只放**"怎么造出来"**（本目录 + `build_fork_sdk.py`），
-造出来的东西落在 `.pip-tmp/`（已被 `.gitignore` 忽略）。
+它是 **1.45GB / 约 9000 个文件的第三方软件树**（有自己的 LICENSE）。所以：
+
+| 问题 | 做法 |
+|---|---|
+| 进 git？ | **不**。提交会让仓库永久背上这个体积，每次 SDK 升级再翻一倍。版本库里只放**"怎么造出来"**（本目录 + `build_fork_sdk.py`）。 |
+| 放在仓库里？ | **不**。已挪到**仓库同级**（`<仓库同级>/storygraph_fork_sdk`）。实测从仓库根 `rglob('*.py')` 要 **75–117 秒**（目录树里文件太多），放在仓库里会让一切"从仓库根走目录树"的操作变慢。 |
+| 为什么是同盘同级 | 这样搬移时 `mv` 是**改名**（实测 **2 秒**），不需要"拷贝 1.4G + 删 9000 个文件"（后者还会撞沙箱的批量删除守卫）。 |
+
+⚠ 如实说：挪出仓库后 `.py` 数从 862 降到 506，但**仓库根遍历仍然很慢** ——
+主因是 `.pip-tmp/` 里累积的**陈旧 basetemp**（每个约 8.6k 文件，合计约 17 万文件），
+不是这个 fork SDK。
+

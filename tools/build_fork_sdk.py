@@ -18,15 +18,18 @@
   · `tools/fork_sdk_patch/weather6_dispatch.py`（**补丁本身**，可 review 的一小段代码）。
 
 一条命令重建：
-    python tools/build_fork_sdk.py                 # 用默认 SDK，造到 .pip-tmp/fork_sdk_full
+    python tools/build_fork_sdk.py                 # 造到仓库外（同级 storygraph_fork_sdk）
     python tools/build_fork_sdk.py --sdk <目录> --out <目录>
 
-⚠ `.pip-tmp/` 在 `.gitignore` 里 —— 造出来的 SDK **不进版本库**，只在本机复跑用。
+⚠ 造出来的 SDK **不进版本库**、也**不放在仓库里**（1.45G / 约 9000 文件，
+放进去会让"从仓库根走目录树"的操作慢到几十秒）。位置可用环境变量
+`STORYGRAPH_FORK_SDK` 覆盖 —— 见 `fork_sdk_dir()`。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -42,7 +45,28 @@ SDK_CANDIDATES = (
     r'D:/software/renpy-8.4.1-sdk',
     r'C:/renpy',
 )
-DEFAULT_OUT = ROOT / '.pip-tmp' / 'fork_sdk_full'
+
+#: fork SDK 放哪：**仓库之外**（用环境变量 `STORYGRAPH_FORK_SDK` 可改）。
+#:
+#: 为什么默认在仓库的**同级目录**（而不是 `.pip-tmp/`）：
+#:   · 它是 **1.45GB / 约 9000 个文件**的第三方 SDK 树 —— 放在仓库里会让
+#:     一切"从仓库根走目录树"的操作变慢（实测从仓库根 `rglob('*.py')` **75 秒**，
+#:     而真正的解析只占 1.7 秒）；也让 `du`/`find` 这类命令难以使用。
+#:   · 放在**同一个盘符的同级目录**，搬移时 `mv` 是**改名**（毫秒级），
+#:     不需要"拷贝 1.4G + 删除 9000 个文件"。
+FORK_SDK_ENV = 'STORYGRAPH_FORK_SDK'
+
+
+def fork_sdk_dir() -> Path:
+    """fork SDK 的目录（环境变量优先，否则仓库同级）。**唯一取法** —— 两个脚本共用。"""
+    env = os.environ.get(FORK_SDK_ENV, '')
+    if env:
+        return Path(env)
+    return ROOT.parent / 'storygraph_fork_sdk'
+
+
+#: 兼容旧名（早先写在 `.pip-tmp/` 里）
+LEGACY_OUT = ROOT / '.pip-tmp' / 'fork_sdk_full'
 
 #: `renpy/parser.py` 里的锚点：`parse_statement` 拿到 loc 之后、分派之前。
 ANCHOR = "    # Store the current location.\n    loc = l.get_location()\n"
@@ -105,12 +129,17 @@ def verify(out: Path) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description='重建 fork 模拟 SDK（地狱测试 D4a 用）')
     ap.add_argument('--sdk', default=None, help='源 SDK 目录')
-    ap.add_argument('--out', default=str(DEFAULT_OUT), help='输出目录')
+    ap.add_argument('--out', default=None,
+                    help=f'输出目录（默认 {fork_sdk_dir()}；'
+                         f'也可用环境变量 {FORK_SDK_ENV} 指定）')
     args = ap.parse_args(argv)
 
     src = find_sdk(args.sdk)
-    out = Path(args.out)
+    out = Path(args.out) if args.out else fork_sdk_dir()
     print(f'源 SDK：{src}\n目标  ：{out}')
+    if out.exists() and out == LEGACY_OUT:
+        print(f'⚠ 目标还是旧位置（仓库内）：{out}\n'
+              f'  建议搬到仓库外：  mv "{out}" "{fork_sdk_dir()}"')
     copy_sdk(src, out)
     print('·', apply_patch(out))
     ok = verify(out)

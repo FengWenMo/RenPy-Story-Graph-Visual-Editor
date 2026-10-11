@@ -26,9 +26,15 @@ SDK_CANDIDATES = [
     r"D:/software/renpy-8.4.1-sdk",
 ]
 
-#: fork 模拟用的 SDK（由 build_fork_sdk 建好；缺失则该组用例跳过）
+#: fork 模拟用的 SDK（由 `tools/build_fork_sdk.py` 建好；缺失则该组用例跳过）
+#: ⚠ **放在仓库之外**（1.45G / 约 9000 文件）—— 取法与 `build_fork_sdk.fork_sdk_dir()`
+#: **同源**，避免两处各写一份默认路径。
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SDK_FORK = os.path.join(HERE, ".pip-tmp", "fork_sdk_full")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_fork_sdk import fork_sdk_dir, LEGACY_OUT       # noqa: E402
+
+SDK_FORK = str(LEGACY_OUT if LEGACY_OUT.is_dir() and not fork_sdk_dir().is_dir()
+               else fork_sdk_dir())
 
 # 每个用例：{名字: {"files": {相对 game/ 的文件名: 内容}, "note": 说明}}
 # 基础积木：与真机 sr_general 的 layeredimage 写法同形
