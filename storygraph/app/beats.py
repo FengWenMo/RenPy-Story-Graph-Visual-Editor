@@ -706,6 +706,37 @@ def beat_group_conflicts(beat: Beat, facts) -> list:
     return out
 
 
+def card_note(beat: Beat, symbols=None, facts=None) -> str:
+    """
+    卡片底部那条提示的**完整文案**（一句话，`；` 分隔）。纯函数，可单测。
+
+    为什么把"拼文案"放在这里而不是前端：这是本仓库的既有分工 ——
+    **语义层出文案，前端只负责显示**（`speaker_missing_warning` 就是这么做的）。
+    前端多拼一句，就多一处"两边说法不一致"的机会。
+
+    目前两句：
+      ① 有台词却没有说话人（导出会变成旁白）—— 原有行为；
+      ② **N3 同组冲突**：同一组里被同时选中两个属性。
+         ⚠ 为什么必须在这里说：实测 `show lan happy sad`（两者同组）
+         **lint 退出码 0、引擎一声不吭** —— 这类冲突 lint 不管，
+         只能靠引擎给的 group 自己算（`group_conflicts`）。
+    """
+    parts = []
+    try:
+        first = speaker_missing_warning(beat, symbols)
+        if first:
+            parts.append(first)
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.card_note.speaker', e)
+    try:
+        for hit in beat_group_conflicts(beat, facts):
+            parts.append(f"「{hit['tag']}」的 {hit['group']} 组里同时选了 "
+                         f"{'、'.join(hit['attrs'])}，引擎只认其中一个")
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.card_note.conflicts', e)
+    return '；'.join(parts)
+
+
 def speaker_missing_warning(beat: Beat, symbols=None) -> str:
     """
     这一拍的说话人**有问题**吗？有问题就把话说清楚（返回 '' 表示没问题）。

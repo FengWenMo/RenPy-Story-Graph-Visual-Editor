@@ -224,6 +224,38 @@ def _write_facts(root, **collection):
     return facts
 
 
+class TestCardNote:
+    """卡片底部那条提示 —— **文案由语义层拼**（前端只显示），所以这里能纯测。"""
+
+    def _beat(self, show, speaker='lyj', text=''):
+        b = beats.Beat()
+        b.show = show
+        b.speaker = speaker
+        b.text = text
+        return b
+
+    def test_same_group_conflict_is_in_the_note(self):
+        note = beats.card_note(self._beat('lan happy sad'), None,
+                               _facts(LAN_ATTRS, LAN_CANDS))
+        assert 'expressions' in note
+        assert 'happy' in note and 'sad' in note
+
+    def test_no_conflict_no_group_mention(self):
+        note = beats.card_note(self._beat('lan happy clothes2'), None,
+                               _facts(LAN_ATTRS, LAN_CANDS))
+        assert 'expressions' not in note and 'outfit' not in note
+
+    def test_without_facts_nothing_is_claimed(self):
+        note = beats.card_note(self._beat('lan happy sad'), None, None)
+        assert '组里同时选了' not in note
+
+    def test_parts_are_joined_with_a_separator(self):
+        """多句时用 `；` 连成一行（`set_note` 是一行 QLabel）。"""
+        note = beats.card_note(self._beat('lan happy sad'), None,
+                               _facts(LAN_ATTRS, LAN_CANDS))
+        assert '\n' not in note
+
+
 class TestSessionEngineFacts:
     def test_missing_file_is_empty(self, tmp_path):
         assert GraphSessionMixin.engine_facts(_Stub(tmp_path)) == {}

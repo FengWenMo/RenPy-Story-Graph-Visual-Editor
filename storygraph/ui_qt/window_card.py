@@ -133,6 +133,7 @@ class CardPageMixin:
             facts = {}
         if not groups and not facts:
             self._panel.set_choice_groups_provider(None)
+            self._warn_engine_facts_once()
             return
         from storygraph.app.beats import expression_groups_for
         symbols = getattr(self._session, 'symbols', None)
@@ -142,6 +143,24 @@ class CardPageMixin:
 
         # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
         self._panel.set_choice_groups_provider(_for_tag)
+        self._warn_engine_facts_once()
+
+    def _warn_engine_facts_once(self):
+        """
+        引擎级告警**只在打开项目时说一次**（N2/N5：项目覆盖了内置语句）。
+
+        为什么不塞进卡片那条 note：note 是"**这一拍**"的提示，跟着翻页刷新 ——
+        把项目级的告警放进去，就会每翻一页重复喊一遍，人很快就不看了。
+        """
+        if getattr(self, '_facts_warned', False):
+            return
+        self._facts_warned = True
+        try:
+            from storygraph.app import notify
+            for msg in self._session.engine_facts_warnings():
+                notify.warn(msg)
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_card._warn_engine_facts_once', e)
     def _sync_graph_highlight(self):
         """卡片编辑器正开着的那一章 → 图上对应模块标成"当前"并居中。"""
         if self.graph is None or not self._session.script_path:
@@ -374,9 +393,15 @@ class CardPageMixin:
         try:
             # 「有台词却没有说话人」→ 导出后会变成旁白，在这里就说清楚。
             # 说话人**没登记**时同理要说（否则导出会丢掉它，用户以为工具坏了）。
-            # 文案由 `app.beats.speaker_missing_warning` 算（前端只负责显示）。
-            self._panel.set_note(
-                _beats.speaker_missing_warning(beat, self._session.symbols))
+            # **N3 同组冲突**也在这里说（`show lan happy sad` 这种 —— lint 实测不报）。
+            # 文案整体由 `app.beats.card_note` 拼（前端只负责显示，不自己凑句子）。
+            facts = {}
+            try:
+                facts = self._session.engine_facts()
+            except Exception as e:            # noqa: BLE001
+                swallow('ui_qt.window_card.refresh_derived_panels.facts', e)
+            self._panel.set_note(_beats.card_note(
+                beat, self._session.symbols, facts))
             # 当前舞台（这一拍生效的状态）+ 继承上一拍的提示。
             # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
             self._panel.set_stage_digest(self._session.stage_digest_text(idx),
