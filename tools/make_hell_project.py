@@ -186,6 +186,17 @@ def main() -> int:
             p.unlink()
             print(f'  已剔除（它自己有 parse error，会挡住后面所有组）：{bad}')
 
+    # ⚠⚠ **必须一起拷人物表**（真机踩到）：`discover_undeclared` 靠它判断
+    #   "这一行是台词"（`lyj "台词"` 里的 `lyj` 是角色）—— 少了它，
+    #   攻击会报出"把人物当成未知写法"这个**假缺陷**（我第一版就这样，
+    #   差一点就去改工具的判定逻辑）。**地狱项目造假 → 攻击结论也假。**
+    tables = REAL / 'game' / 'asset_tables'
+    if tables.is_dir():
+        shutil.copytree(tables, OUT / 'game' / 'asset_tables',
+                        dirs_exist_ok=True)
+        n = sum(1 for _ in (OUT / 'game' / 'asset_tables').rglob('*.xlsx'))
+        print(f'  拷了人物表/资源表：{n} 个 xlsx（**不能省** —— 少了它攻击会误报）')
+
     # ② 再塞地狱
     for rel, (body, _why) in HOT_FILES.items():
         fp = OUT / rel

@@ -174,8 +174,15 @@ def is_collectable(facts) -> tuple:
     """
     coll = (facts or {}).get('collection') or {}
     if not coll.get('parse_clean'):
+        # ⚠ **必须说是哪儿**（地狱项目攻击抓到的）：只说"有 parse error"，
+        #   人不知道该去修哪个文件 —— 那就等于没说。指第一处（引擎也只报第一处）。
+        first = ''
+        rows = ((facts or {}).get('lint') or {}).get('parse_errors') or []
+        if rows:
+            first = '；第一处：' + str(rows[0]).strip()[:160]
         return False, ('工程未通过语法检查（有 parse error）：'
-                       '此时引擎的语义检查与探针**都不会跑**，事实不可用')
+                       '此时引擎的语义检查与探针**都不会跑**，事实不可用'
+                       + first)
     if not coll.get('probe_complete'):
         return False, '探针未产出事实（init 没跑完）：事实不可用'
     problems = validate_facts(facts)

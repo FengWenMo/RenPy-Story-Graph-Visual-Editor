@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import traceback
@@ -147,9 +148,14 @@ def a3():
         'selfcheck 与体检报告都能给出结论（哪怕是"不可用"）')
 def a4():
     out = []
-    p = subprocess.run([sys.executable, str(ROOT / 'storygraph' / 'cli.py'),
-                        'selfcheck'], capture_output=True, text=True,
-                       timeout=600, encoding='utf-8', errors='replace')
+    # ⚠ 必须 `-m storygraph.cli`（把包根带进 sys.path）；直接跑 `storygraph/cli.py`
+    #   会 `No module named 'storygraph'` 退 2 —— **那是攻击脚本自己的错**
+    #   （我第一版就这么写的，差点当成工具缺陷去修）。
+    env = dict(os.environ)
+    env['PYTHONPATH'] = str(ROOT)
+    p = subprocess.run([sys.executable, '-m', 'storygraph.cli', 'selfcheck'],
+                       capture_output=True, text=True, cwd=str(ROOT),
+                       timeout=600, encoding='utf-8', errors='replace', env=env)
     out.append(f'selfcheck exit={p.returncode}')
     for ln in (p.stdout or '').splitlines()[-3:]:
         out.append('  ' + ln[:110])
