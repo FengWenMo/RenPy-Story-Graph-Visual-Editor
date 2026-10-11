@@ -55,6 +55,13 @@ WRITERS = {
                                  '并尽力收紧文件权限',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
+    'ui_qt/window_graph_ops.py::_convert_text_chapter': '写**纯文字转出来的**章节脚本：'
+                                                        '`game/<label>.generated.rpy`。'
+                                                        '文件名带 `.generated` 一眼看出是'
+                                                        '工具生成的；转换本身是纯函数'
+                                                        '（`authoring/txt_import`），'
+                                                        '这里只负责落盘与把未映射的角色'
+                                                        '报到控制台（**不许静默**）',
     'story/statement_registry.py::declare_attr_groups':
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':

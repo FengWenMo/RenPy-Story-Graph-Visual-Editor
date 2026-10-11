@@ -471,14 +471,78 @@ class GraphOpsMixin:
             return
         self.open_project_path(self._project_root)
     def import_chapters(self):
-        """「➕ 导入章节 .rpy」：多选 → 累加进剧情图。"""
+        """
+        「➕ 导入章节」：**多选 → 累加进剧情图**。
+
+        ⭐ S3（2026-10-11 补做，路线图 §七）：**纯文字也能直接导入** ——
+        选 `.txt` 时先转成 `.rpy`（`authoring/txt_import.convert_text`），
+        再走**同一条**既有链路（落盘 → 过门禁 → 加进图）。
+        用户原话："纯文字 → 直接转换 + 导入，再也不用先手工转 .rpy"。
+
+        ⚠ 两条不许违反：
+          · **未映射的角色必须报出来**（不许静默取第一个 / 不许悄悄当旁白）；
+          · 转换产物写到 `game/<label>.generated.rpy`（与项目既有约定同名，
+            一眼能看出这是工具生成的）。
+        """
         start = str(Path(self._project_root or '.') / 'game')
         paths, _ = QFileDialog.getOpenFileNames(
-            self, '选择要导入剧情图的章节脚本（可多选）', start,
-            "Ren'Py 脚本 (*.rpy);;所有文件 (*)")
+            self, '选择要导入剧情图的章节（可多选）', start,
+            "章节脚本或纯文字 (*.rpy *.txt);;Ren'Py 脚本 (*.rpy);;"
+            "纯文字 (*.txt);;所有文件 (*)")
         if not paths:
             return
         self.import_chapter_files(paths)
+
+    def _convert_text_chapter(self, path: str) -> str:
+        """
+        `.txt` → `.rpy`（S3）：转换、报出未映射、落盘，返回**新文件的路径**。
+
+        失败返回空串（并把原因写进控制台）—— 调用方据此跳过它。
+        """
+        from storygraph.authoring import txt_import as T
+        try:
+            text = T.read_text_file(path)
+        except OSError as e:
+            self._log(f'[导入] 读不动 {Path(path).name}：{e}')
+            return ''
+        import re
+        res = T.convert_text(text, filename=Path(path).name,
+                             characters=self._character_map())
+        if not getattr(res, 'ok', False):
+            self._log(f'[导入] {Path(path).name} 转换没成功：'
+                      f'{getattr(res, "warnings", [])[:2]}')
+            return ''
+        # ⚠ 未映射/歧义**必须报**（用户原话要求"不许静默取第一个"）
+        for token, rows in (getattr(res, 'unmapped', {}) or {}).items():
+            self._log(f'[导入] ⚠ 不认识的角色写法：{token}'
+                      f'（出现 {len(rows) if hasattr(rows, "__len__") else "?"} 次）'
+                      f'—— 它会被当旁白；要认它请在角色表里加别名')
+        for item in (getattr(res, 'ambiguous', []) or [])[:3]:
+            self._log(f'[导入] ⚠ 有歧义：{str(item)[:80]}')
+        game_dir = Path(self._project_root or '.') / 'game'
+        label = str(getattr(res, 'label', '') or 'chapter')
+        out = game_dir / f'{re.sub(r"[^0-9A-Za-z_]", "_", label)}.generated.rpy'
+        try:
+            game_dir.mkdir(parents=True, exist_ok=True)
+            out.write_text(res.rpy_text, encoding='utf-8')
+        except OSError as e:
+            self._log(f'[导入] 写不出 {out.name}：{e}')
+            return ''
+        counts = getattr(res, 'counts', {}) or {}
+        self._log(f'[导入] {Path(path).name} → {out.name}'
+                  f'（{len(getattr(res, "lines", []) or [])} 行，'
+                  f'判读：{ {k: v for k, v in list(counts.items())[:4]} }）')
+        return str(out)
+
+    def _character_map(self):
+        """给转换器用的角色表（读不出来就给 `None` —— 那就只有大写缩写那条判据）。"""
+        try:
+            from storygraph.pipeline.build import load_asset_registry
+            reg = load_asset_registry(self._project_root)
+            return dict(getattr(reg, 'characters', {}) or {}) or None
+        except Exception as e:                      # noqa: BLE001 - 没表也能转
+            swallow('ui_qt.import_chapters.character_map', e)
+            return None
     def import_chapter_files(self, paths) -> dict:
         """
         把选中的 `.rpy` 加进剧情图（**累加**）。语义全在
@@ -488,6 +552,18 @@ class GraphOpsMixin:
         所以这里**逐个文件**报"来了几个模块 / 几条连线"，而不是只报一个总数。
         """
         old_graph = self.graph.copy() if self.graph is not None else None
+        # ⭐ S3：`.txt` 先转成 `.rpy` 再走同一条链路（转换产物写进 game/）
+        converted = []
+        for p in list(paths):
+            if str(p).lower().endswith(('.txt', '.text')):
+                out = self._convert_text_chapter(str(p))
+                paths = [x for x in paths if x != p]
+                if out:
+                    paths.append(out)
+                    converted.append(out)
+        if paths and not any(str(p).lower().endswith('.rpy') for p in paths):
+            self._log('[导入] 选中的文件都没转成功，先不导入')
+            return {'ok': False, 'error': '纯文字都没转成功'}
         res = self._session.import_chapters(paths, self.graph)
         if not res.get('ok'):
             msg = f'[导入] 失败：{res.get("error") or "未知原因"}'
