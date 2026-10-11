@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from storygraph.core import engine_facts as EF
+
 #: 每类问题最多列几条样例（报告是给人看的，不是日志倾倒场）
 SAMPLE = 8
 
@@ -117,6 +119,23 @@ def _emit_engine_unknown_section(unknown: dict, out: list) -> None:
         out.append(f'    …（还有 {len(unknown) - 10} 个角色，复制报告后搜「⑩」）')
 
 
+def _emit_undetermined_section(summary: dict, out: list) -> None:
+    """
+    「⑪ 扫描 vs 引擎：能不能问出结论」（第四层）。**没有就整段不出现**。
+
+    为什么必须有这一段（用户 2026-10-11 四层方案的第四层："诚实标记测不出来，
+    不当假绿"）：扫描发现的"工具不认识的写法"，**测不出来是常态** ——
+    未知写法本身就是 parse error，而 `init python`（注册 CDS 的地方）属于
+    后面的解析组（`renpy/script.py:447-452`），引擎连注册代码都没机会跑。
+    只显示"✅ 采集完成"就是假绿。
+    """
+    text = EF.format_undetermined(summary or {})
+    if not text:
+        return
+    out.append('')
+    out.extend(text.splitlines())
+
+
 def format_asset_health(report: dict) -> str:
     """
     `asset_health_report()` 的结果 → 体检报告文本。
@@ -218,6 +237,7 @@ def format_asset_health(report: dict) -> str:
     cds_error = report.get('cds_error') or ''
     _emit_custom_statement_section(stmts, cds, cds_error, out)
     _emit_engine_align_section(report.get('engine_align') or {}, out)
+    _emit_undetermined_section(report.get('engine_undetermined') or {}, out)
     _emit_engine_unknown_section(report.get('engine_unknown') or {}, out)
 
     out.append('')

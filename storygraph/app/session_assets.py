@@ -336,10 +336,13 @@ class AssetRegistryMixin:
         cds, cds_error = self._cds_rows()
         statements = self._statement_rows()
         engine_align = self._engine_align(reg)
+        # 第四层：把"测不出来的写法"也交给报告（**只出数据，文案在 app 层**）
+        engine_undetermined = self._undetermined()
         return {'ok': True, 'error': '', 'counts': counts,
                 'cds': cds, 'cds_error': cds_error,
                 'statements': statements,
                 'engine_align': engine_align,
+                'engine_undetermined': engine_undetermined,
                 'total_rows': sum(counts[k] for k in
                                   ('images', 'music', 'sounds', 'voices')),
                 'missing': missing, 'unregistered': unreg,
@@ -408,6 +411,21 @@ class AssetRegistryMixin:
             return _EF.table_vs_engine(facts, table_attrs)
         except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
             swallow('app.session_assets._engine_align', e)
+            return {}
+
+    def _undetermined(self) -> dict:
+        """
+        **第四层**：扫描发现、但**测不出来**的写法（纯读，交给报告渲染）。
+
+        ⚠ 这里只出**数据**（`engine_facts.undetermined_statements` 的分类结果），
+        文案在 `app/asset_report` 里拼 —— 与本仓既有分工一致
+        （会话出数据、app 层出文案）。
+        """
+        try:
+            from storygraph.core import engine_facts as _EF
+            return _EF.undetermined_statements(self.engine_facts())
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets._undetermined', e)
             return {}
 
     def last_reconcile(self):

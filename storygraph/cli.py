@@ -480,6 +480,34 @@ def _drift_text(drift: dict) -> str:
     return '\n'.join(out)
 
 
+def _undetermined_exit(facts, *, strict: bool) -> tuple:
+    """
+    **第四层的门禁**：把"测不出来的写法"折算成退出码（纯函数，可单测）。
+
+    返回 `(退出码, 提示文本)`：
+
+      · 有 `undetermined` 且 `--strict` → **1**（可修：要么把写法补进声明，
+        要么接受它测不出来）；提示文本说明为什么测不出来。
+      · 有 `undetermined` 但**没加 `--strict`** → **0**（不偷偷把 CI 变红），
+        但提示文本照样返回（让人看得见）。
+      · 没有 → `(0, '')`。
+
+    ⚠ 为什么不默认退 1：`undetermined` 的成因是**引擎的解析顺序**
+    （未知写法让后面的解析组都不跑，见 `renpy/script.py:447-452`），
+    不是这个项目"做错了什么"。默认变红会让门禁天天误报 ——
+    那正是"人会把它关掉"的来源。所以**只在 `--strict` 下当失败**。
+    """
+    from storygraph.core import engine_facts as EF
+    summary = EF.undetermined_statements(facts)
+    text = EF.format_undetermined(summary)
+    if not summary.get('undetermined'):
+        return 0, ''
+    n = len(summary['undetermined'])
+    note = (f'⚠ 有 {n} 个写法**测不出来**（既没被引擎确认，也没被否认）'
+            f'—— 它们不能当成"没问题"。')
+    return (1 if strict else 0), (note + '\n' + text)
+
+
 def _cmd_engine_facts(args) -> int:
     """
     **采集引擎事实**（E1）+ **漂移检测**（E3）。
@@ -513,7 +541,12 @@ def _cmd_engine_facts(args) -> int:
         drift = EF.diff_facts(base, cur)
         text = _drift_text(drift)
         print(text or '✅ 与基线一致：引擎行为没有变化。')
-        return 1 if text else 0
+        # 第四层：`--check-only` 也能报"测不出来的写法"（不需要 SDK）
+        code_u, note_u = _undetermined_exit(cur, strict=args.strict)
+        if note_u:
+            print()
+            print(note_u)
+        return 1 if (text or code_u) else 0
 
     result = EC.collect(project, sdk=args.sdk, mode=args.mode,
                         timeout=args.timeout)
@@ -560,6 +593,13 @@ def _cmd_engine_facts(args) -> int:
             print()
             print(drift_text)
 
+    # ---- 第四层：测不出来的写法，如实说（不当假绿）----
+    und_text = ''
+    code_u, und_text = _undetermined_exit(facts, strict=args.strict)
+    if und_text:
+        print()
+        print(und_text)
+
     # ---- 退出码（CI 门禁）----
     if not result['ok']:
         print(f'✗ 采集不可用（阻塞）：{result["reason"]}')
@@ -569,6 +609,9 @@ def _cmd_engine_facts(args) -> int:
         + len(lint.get('program_errors') or [])
     if drift_text:
         print('✓ 采集完成；但**检出了漂移**（需人工确认）')
+        return 1
+    if code_u:
+        print('✓ 采集完成；但**有测不出来的写法**（`--strict` 下算可修）')
         return 1
     if args.strict and n_fixable:
         print(f'✓ 采集完成；`--strict` 下有 {n_fixable} 条需修的问题')

@@ -253,6 +253,116 @@ def statement_shape(facts: dict, head: str) -> dict:
     return registered_statements(facts).get(str(head or '').strip(), {})
 
 
+def undetermined_statements(facts: dict) -> dict:
+    """
+    **第四层**：把"扫描发现了、但我们**测不出来**"的写法摊开（纯函数）。
+
+    为什么要单独一栏（用户 2026-10-11 的四层方案第四层："诚实标记测不出来，
+    不当假绿"）：扫描发现 N 个"工具不认识的写法"之后，**能不能问引擎**？
+    实测结论是**不能** —— 未知写法本身就是 parse error，而 `init python`
+    （注册 CDS 的地方）属于**后面的解析组**（`renpy/script.py:447-452`：
+    一组出错、后面全不解析），所以引擎连注册代码都没机会跑。
+
+    于是这些写法一律是"测不出来"，必须在报告里**显式说出来**；
+    只显示"✅ 采集完成"就是假绿。
+
+    返回::
+
+        {'total_scan': int,
+         'engine_known':   [{'head','count','why'}]   # 引擎答过：认识
+         'engine_unknown': [{'head','count','why'}]   # 引擎答过：不认识
+         'undetermined':   [{'head','count','why'}]}  # 没被回答 / 被跳过
+
+    ⚠ **两种"没数据"要分开**（这是真机跑出来的，我第一版搞混了）：
+
+      · **没有扫描段**（没采过 / 没跑扫描）→ 三栏全空、报告是空串（不宣称）；
+      · **有扫描段、但事实不可用**（项目有 parse error → `is_collectable` 为假）
+        → **必须说话**：那些写法就是 `undetermined`，而且理由是"这轮采集不可用
+        （引擎在第一处 parse error 停下）"。
+        ⚠ 我第一版把这两种一起返回空 —— 结果**恰好在最该报警的时候沉默了**
+        （真机 `ask=True` 跑出来 `total_scan=0`，当场发现）。
+    """
+    out = {'total_scan': 0, 'engine_known': [], 'engine_unknown': [],
+           'undetermined': []}
+    if not facts:
+        return out
+    rows = (facts.get('derived') or {}).get('undeclared_heads')
+    if not isinstance(rows, list):
+        return out
+    collectable, why_not = is_collectable(facts)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        head = str(row.get('head') or '')
+        if not head:
+            continue
+        out['total_scan'] += 1
+        item = {'head': head, 'count': int(row.get('count') or 0), 'why': ''}
+        known = row.get('engine_recognized') if collectable else None
+        if not collectable:
+            item['why'] = (f'**这轮采集不可用**（{why_not or "事实不可用"}）'
+                           f'—— 引擎在第一处 parse error 就停下了，问不到它')
+            out['undetermined'].append(item)
+        elif row.get('engine_skipped'):
+            item['why'] = ('这一轮**跳过了**（超过一次能问的条数）—— 没测过，'
+                           '不能当成"没问题"')
+            out['undetermined'].append(item)
+        elif known is True:
+            item['why'] = str(row.get('engine_summary') or '引擎认识它')
+            out['engine_known'].append(item)
+        elif known is False:
+            item['why'] = str(row.get('engine_error')
+                              or row.get('engine_summary') or '引擎不认识它')
+            out['engine_unknown'].append(item)
+        else:
+            why = str(row.get('engine_error') or '').strip()
+            item['why'] = why or (
+                '**没问成**：项目里有引擎不认识的写法时，引擎会在第一处 parse '
+                'error 停下（后面的解析组全不跑），所以问不到关于它的结论')
+            out['undetermined'].append(item)
+    for key in ('engine_known', 'engine_unknown', 'undetermined'):
+        out[key].sort(key=lambda r: (-r['count'], r['head']))
+    return out
+
+
+def format_undetermined(summary: dict) -> str:
+    """
+    第四层的汇总 → 人话（**没有内容就返回空串**：不宣称）。
+
+    规则 **N1** 要求扫描结果必须带上那句免责："以上是「我认出的」，
+    不代表项目里只有这些" —— 这里照抄，不另编说法。
+    """
+    summary = summary or {}
+    total = int(summary.get('total_scan') or 0)
+    if not total:
+        return ''
+    out = [f'【扫描 vs 引擎：能不能问出结论】扫描发现 {total} 个'
+           f'"工具还不认识的写法"']
+    und = summary.get('undetermined') or []
+    known = summary.get('engine_known') or []
+    unknown = summary.get('engine_unknown') or []
+    if known:
+        out.append(f'  · 引擎确认**认识**：{len(known)} 个'
+                   + '（' + '、'.join(f'{r["head"]}×{r["count"]}'
+                                     for r in known[:6]) + '）')
+    if unknown:
+        out.append(f'  · 引擎确认**不认识**：{len(unknown)} 个'
+                   + '（' + '、'.join(f'{r["head"]}×{r["count"]}'
+                                     for r in unknown[:6]) + '）')
+    if und:
+        out.append(f'  ⚠ **测不出来**：{len(und)} 个 —— 它们既没被引擎确认，'
+                   f'也没被否认（**不能当成"没问题"**）')
+        for r in und[:6]:
+            out.append(f'      {r["head"]}×{r["count"]}：{r["why"][:100]}')
+        if len(und) > 6:
+            out.append(f'      …另有 {len(und) - 6} 个')
+    out.append('  ⚠ 行为级验证（`testcase` + `test`）**这一层没覆盖**：'
+               '它在"能被 test 跑起来的完整工程"上才做得了（本机实测：'
+               '裸最小工程跑 `test` 会卡住）。**没覆盖 ≠ 通过。**')
+    out.append('  · 以上是「我认出的」，不代表项目里只有这些（N1）')
+    return '\n'.join(out)
+
+
 def candidates_of(facts: dict, tag: str) -> list:
     """
     某个 tag 的**合法候选**（引擎按"适合展示"排过序的那一份）。
@@ -683,4 +793,5 @@ __all__ = [
     'table_vs_engine', 'diff_facts',
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
     'registered_statements', 'statement_names', 'statement_shape',
+    'undetermined_statements', 'format_undetermined',
 ]
