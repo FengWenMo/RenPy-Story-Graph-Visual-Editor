@@ -287,28 +287,37 @@ def test_status_passed_alone_is_not_enough_without_the_evidence(tmp_path):
     assert '证据文件确实存在' in v2['summary'], v2
 
 
-def test_verdict_is_weak_but_honest_without_an_evidence_path():
-    """不传证据路径 → 只能信 `Status`，但**提示要写明"未做证据复核"**。"""
+def test_no_evidence_path_means_no_pass():
+    """
+    ⚠⚠ 产品级假绿（真机踩到）：`verify_behavior` 抽不出证据路径时，若退回
+    "只信 `Status`"，就会出现"**反例也报 verified=True**"。
+    ⇒ 没证据一律 `verified=None`（没证明成），并说明需要什么。
+    """
     passed = SP.read_test_status('[rpytest] Status: PASSED\n')
     v = SP.behavior_verdict(passed)
-    assert v['verified'] is True
-    assert '未做证据复核' in v['summary'], v
-def test_status_is_read_from_the_rpytest_report():
+    assert v['ok'] is True and v['verified'] is None, v
+    assert '没有可观察的证据' in v['reason'], v
+    assert '不足以判通过' in v['summary'], v
+def test_status_is_read_from_the_rpytest_report(tmp_path):
     text = '''[rpytest] Test cases :     3 |     1 passed |     0 xfailed |     0 failed
 [rpytest] Assertions :     1 |     1 passed |     0 xfailed |     0 failed
 [rpytest] Status: PASSED
 '''
     got = SP.read_test_status(text)
     assert got['status'] == 'PASSED' and got['cases'] == 1
-    assert SP.behavior_verdict(got)['verified'] is True
+    ev = tmp_path / 'hit.txt'
+    ev.write_text('hit', encoding='utf-8')
+    assert SP.behavior_verdict(got, evidence_path=ev)['verified'] is True
 
 
-def test_status_failed_carries_the_reason():
+def test_status_failed_carries_the_reason(tmp_path):
     text = ('renpy.test.types.RenpyTestAssertionError: failed: '
             '<Assert (game/zz.rpy:2)>\n[rpytest] Status: FAILED\n')
     got = SP.read_test_status(text)
     assert got['status'] == 'FAILED'
-    v = SP.behavior_verdict(got)
+    ev = tmp_path / 'hit.txt'
+    ev.write_text('hit', encoding='utf-8')
+    v = SP.behavior_verdict(got, evidence_path=ev)
     assert v['ok'] and v['verified'] is False
     assert 'AssertionError' in v['reason']
 
@@ -320,9 +329,9 @@ def test_a_missing_status_is_never_a_pass():
     """
     got = SP.read_test_status('Traceback (most recent call last):\nboom\n')
     assert got['status'] == ''
-    v = SP.behavior_verdict(got)
-    assert v['ok'] is False and v['verified'] is None
-    assert '没读到' in v['reason'] or '测不出来' in v['summary']
+    v = SP.behavior_verdict(got, evidence_path='')
+    assert v['verified'] is None, '没有任何证据 → 绝不判通过'
+    assert '证据' in v['reason'] or '证据' in v['summary']
 
 
 def test_test_needs_display_and_extra_dirs_are_documented():

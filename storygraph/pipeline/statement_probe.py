@@ -590,30 +590,36 @@ def behavior_verdict(status: dict, *, evidence_path='') -> dict:
          两条都满足才 `verified=True`；`Status=PASSED` 但证据不在 →
          **`verified=False`**（如实报"没证明成"）。
 
-    ⚠ 不传 `evidence_path` 时只能信 `Status` —— 调用方要么给证据路径，
-    要么知道自己在拿一个**弱结论**。
+    ⚠ **没给证据路径 → 不给"通过"**（真机踩过）：抽不出证据时如果退回"只信
+    `Status`"，就会出现"反例也报 verified=True"的**产品级假绿**。
+    所以这一档一律 `verified=None`（"没证明成"）+ 说明要什么才算。
     """
     st = str((status or {}).get('status') or '').upper()
     out = {'ok': False, 'reason': '', 'verified': None, 'summary': ''}
     ev = str(evidence_path or '')
-    if ev:
-        try:
-            exists = Path(ev).is_file()
-        except OSError as e:                    # noqa: BLE001 - 判不了就当不存在
-            swallow('pipeline.statement_probe.behavior_verdict.evidence', e)
-            exists = False
-        if not exists:
-            out.update({'ok': True, 'verified': False,
-                        'reason': f'证据文件不存在：{ev}',
-                        'summary': ('行为级**没证明成**：证据文件不存在'
-                                    '（说明那句没真的执行）—— '
-                                    '⚠ 即使 test 报 PASSED 也不能当通过')})
-            return out
+    if not ev:
+        out.update({'ok': True, 'verified': None,
+                    'reason': '没有可观察的证据（需要"只有真的执行了才会出现"的东西，'
+                              '例如写一个文件）',
+                    'summary': ('行为级**没证明成**：没有可观察的证据 —— '
+                                '⚠ 只凭 `Status` 不足以判通过（真机实测：'
+                                '条件不成立时它也可能报 PASSED）')})
+        return out
+    try:
+        exists = Path(ev).is_file()
+    except OSError as e:                        # noqa: BLE001 - 判不了就当不存在
+        swallow('pipeline.statement_probe.behavior_verdict.evidence', e)
+        exists = False
+    if not exists:
+        out.update({'ok': True, 'verified': False,
+                    'reason': f'证据文件不存在：{ev}',
+                    'summary': ('行为级**没证明成**：证据文件不存在'
+                                '（说明那句没真的执行）—— '
+                                '⚠ 即使 test 报 PASSED 也不能当通过')})
+        return out
     if st == 'PASSED':
         out.update({'ok': True, 'verified': True,
-                    'summary': '行为级验证通过（引擎报 PASSED'
-                               + ('，且证据文件确实存在' if ev else '；'
-                                  '⚠ 未做证据复核') + '）'})
+                    'summary': '行为级验证通过（引擎报 PASSED，且证据文件确实存在）'})
     elif st == 'FAILED':
         out.update({'ok': True, 'verified': False,
                     'reason': str((status or {}).get('reason') or ''),
@@ -623,6 +629,129 @@ def behavior_verdict(status: dict, *, evidence_path='') -> dict:
                             or '没拿到 `[rpytest] Status:`')
         out['summary'] = f'行为级**测不出来**：{out["reason"]}'
     return out
+
+
+def verify_behavior(project_root, label: str, *, evidence: str = '',
+                    sdk=None, timeout: int = TEST_TIMEOUT,
+                    evidence_path: str = '', mode: str = 'copy') -> dict:
+    """
+    **第三层的入口**：真跑一次 `test`，回答"那句到底有没有执行"。
+
+    这是给"教它"那条链用的：声明完一个动作之后，可以**当场验证**它真的能跑，
+    而不是只写一份文件就当学会了。
+
+    ## 与 `ask_engine` 的分工
+
+      · `ask_engine` 问"**引擎认不认**这个写法"（解析层，跑 `lint`）；
+      · `verify_behavior` 问"**它真的执行了吗**"（行为层，跑 `test`）。
+
+    ## 真机验证过的跑法（照抄，别改）
+
+      ① **永远在副本上跑**（`mode='copy'`）—— 而且要额外拷 `TEST_EXTRA_DIRS`
+         （`gui/` / `fonts/`），否则 `test` 起界面就崩；
+      ② `test` 需要**显示**（`TEST_NEEDS_DISPLAY`）—— 无头会真卡住，
+         所以拿不到就不假装能跑；
+      ③ `test` **跑完不自己退出** → **边读输出边看 `[rpytest] Status:`**，
+         见到就把进程收掉（拿 `subprocess.run(timeout=)` 等会误判成"卡住"）；
+      ④ 判定是**两把锁**（见 `behavior_verdict`）：引擎报 PASSED **且**
+         证据文件真的存在。
+
+    返回 `behavior_verdict(...)` 的结论，外加
+    `{'status', 'raw_tail', 'probe', 'exit': None, 'evidence': 路径}`。
+    """
+    root = Path(project_root) if project_root else None
+    empty = {'ok': False, 'reason': '', 'verified': None, 'summary': '',
+             'status': '', 'raw_tail': [], 'probe': '', 'evidence': ''}
+    if root is None or not (root / 'game').is_dir():
+        empty['reason'] = f'不是工程根（没有 game/）：{root}'
+        empty['summary'] = f'行为级**测不出来**：{empty["reason"]}'
+        return empty
+    from storygraph.pipeline.engine_collect import find_sdk
+    try:
+        sdk_path = find_sdk(sdk)
+    except FileNotFoundError as e:
+        empty['reason'] = str(e)
+        empty['summary'] = f'行为级**测不出来**：{e}'
+        return empty
+
+    src = behavior_probe_source(label, evidence=evidence,
+                                testcase='sg_behavior_check')
+    empty['probe'] = src
+    if not evidence_path:
+        evidence_path = _evidence_path(str(evidence or '').replace('\\', '/'))
+
+    tmp = None
+    work = root
+    if mode == 'copy':
+        tmp = Path(tempfile.mkdtemp(prefix='sg_behavior_copy_'))
+        work = _copy_for_ask(root, tmp)
+        for extra in TEST_EXTRA_DIRS:            # ← test 与 lint 要的不是同一批
+            s = root / 'game' / extra
+            if s.is_dir():
+                try:
+                    shutil.copytree(s, work / 'game' / extra,
+                                    dirs_exist_ok=True)
+                except OSError as e:             # noqa: BLE001
+                    swallow('pipeline.statement_probe.verify_behavior.extra', e)
+    try:
+        _write_ask(work / 'game' / f'{ASK_PREFIX}behavior.rpy', src)
+        out, tail = _run_test_capture(work, sdk_path, 'sg_behavior_check',
+                                      timeout)
+        status = read_test_status(out)
+        verdict = behavior_verdict(status, evidence_path=evidence_path)
+        verdict.update({'status': status.get('status') or '',
+                        'raw_tail': tail, 'probe': src,
+                        'evidence': evidence_path})
+        return verdict
+    except Exception as e:                       # noqa: BLE001 - 跑不起来就如实说
+        swallow('pipeline.statement_probe.verify_behavior', e)
+        empty['reason'] = f'{type(e).__name__}: {e}'
+        empty['summary'] = f'行为级**测不出来**：{empty["reason"]}'
+        return empty
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_test_capture(work: Path, sdk_path, case: str, timeout: int):
+    """
+    跑 `test` 并**在见到 `[rpytest] Status:` 时收手**（它自己不会退出）。
+
+    返回 `(输出全文, 末尾若干行)`。⚠ 超时也必须返回**已经读到的**输出 ——
+    那里面往往带着"为什么没跑完"。
+    """
+    from storygraph.pipeline.engine_collect import run_engine
+    # ⚠ 不能用 `run_engine`（它等进程结束）；`test` 跑完不退，得自己边读边收。
+    import subprocess
+    from storygraph.pipeline.engine_collect import _engine_python
+    cmd = [str(_engine_python(Path(sdk_path))),
+           str(Path(sdk_path) / 'renpy.py'), str(work), 'test', case]
+    env = dict(os.environ)
+    env.setdefault('SDL_VIDEODRIVER', os.environ.get('SDL_VIDEODRIVER', ''))
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='replace')
+    buf, started = [], _now()
+    try:
+        for line in p.stdout:
+            buf.append(line)
+            if _RPYTEST_STATUS.search(line):
+                break
+            if _now() - started > timeout:
+                break
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    text = ''.join(buf)
+    tail = [ln.rstrip('\n') for ln in buf if ln.strip()][-25:]
+    return text, tail
+
+
+def _now() -> float:
+    import time
+    return time.time()
 
 
 def _bare_variant(head: str) -> dict:
@@ -725,4 +854,5 @@ def _write_ask(target: Path, src: str) -> None:
 __all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
            'TEST_TIMEOUT', 'ask_engine', 'ask_filename', 'ask_many',
            'ask_variants', 'behavior_probe_source', 'behavior_verdict',
-           'read_test_status', 'read_verdict', 'summarize', 'variant_source']
+           'read_test_status', 'read_verdict', 'summarize', 'variant_source',
+           'verify_behavior']
