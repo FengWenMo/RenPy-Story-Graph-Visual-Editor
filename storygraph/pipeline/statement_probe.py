@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -120,6 +121,19 @@ _COPY_KEEP_SUFFIXES = ('.rpy', '.json', '.txt')
 #: lint 里"这是 parse error"的标记（用来判"引擎停在哪"）
 _PARSE_MARKS = ('expected ', 'syntaxerror', 'parseerror', 'invalid syntax',
                 'unexpected token')
+
+#: `test` 报告里的状态行（**这是它的判据**，不是"进程退没退出"）
+_RPYTEST_STATUS = re.compile(r'\[rpytest\]\s*Status:\s*(\w+)')
+
+#: `test` 需要显示（`register_command("test", …, uses_display=True)`）
+TEST_NEEDS_DISPLAY = True
+
+#: 行为级探针要额外拷的目录（`test` 与 `lint` **要的不是同一批文件**）：
+#: 实测撞出来的两处 —— `gui/window_icon.png` 与 `fonts/…/Plix-Regular.otf`。
+TEST_EXTRA_DIRS = ('gui', 'fonts')
+
+#: 行为级探针的默认超时（秒）：`test` 跑完**不会自己退出**，所以我们自己收
+TEST_TIMEOUT = 180
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +478,153 @@ def _drop_probe(target: Path) -> None:
             swallow('pipeline.statement_probe.drop_probe', e)
 
 
+def behavior_probe_source(label: str, *, evidence: str = '',
+                          testcase: str = '') -> str:
+    """
+    **第三层探针**：一个能证明"这段真的执行了"的 `testcase`（纯函数）。
+
+    ## 真机结论：哪一种是**能用的**（2026-10-11，两种都实测过）
+
+    | 写法 | 结果 |
+    |---|---|
+    | `assert label X timeout T` + `run Jump(X)` | ❌ **不成立**：它等的是"**当前停在该 label**"，而我们跳过去秒回、就错过去了（①暂停 ②死循环两种"停住"办法也都没让证据落地 —— jump 似乎根本没把它跑起来） |
+    | **`assert eval "外部证据存在" timeout T`** + `run Jump(X)` | ✅ **成立**：证据文件真的被写、`Status: PASSED`、断言 `1 passed` |
+
+    ⚠ 所以产品用**证据轮询**这一种：断言里问的是"**那句话的副作用发生了吗**"
+    （写文件 / 改标记），而不是"引擎当前在哪"。
+    ⚠ 但它有反例边界的风险（`assert eval` 在**条件恒真**时也会 PASSED），
+    所以**证据必须是"只有真的执行了才会出现"的东西**，并且产品侧还要
+    **自己检查证据**（`behavior_verdict` 只信 Status，证据由调用方复核）。
+
+    ## 顺序
+
+        testcase <testcase>:
+            assert eval "<证据存在>" timeout 30   ← **先挂上等待**
+            run Jump("<label>")                   ← **再跳**
+
+    `assert` 是"等到条件成立"，必须先挂、再触发（反过来就是错过那一刻）。
+    """
+    label = str(label or '').strip() or 'sg_behavior_target'
+    case = str(testcase or '').strip() or 'sg_behavior_check'
+    cond = str(evidence or '').strip() or 'True'
+    # ⚠⚠ **Windows 路径的反斜杠会毁掉 `assert eval` 里的字符串**（真机实测）：
+    #   `r'C:\Users\…'` 那种写法让 eval 失败/条件永不成立 ——
+    #   表现是"断言计数 0、用例 0.007 秒就结束"，看起来像"语句没执行"。
+    #   统一转成前向斜杠（Ren'Py 自己就认这种）之后一切正常。
+    cond = cond.replace('\\', '/')
+    path = _evidence_path(cond).replace('\\', '/')
+    body = [ASK_MARK, '',
+            'init python:',
+            '    import os',
+            '',
+            f'label {label}:',
+            '    $ ' + cond,
+            '    return',
+            '',
+            '',
+            f'testcase {case}:',
+            f'    assert eval "os.path.exists(r\'{path}\')" timeout 30',
+            f'    run Jump("{label}")', '']
+    return '\n'.join(body)
+
+
+def _evidence_path(evidence: str) -> str:
+    """
+    从证据语句里抽出**要检查的那个文件路径**（`open(r"…","w")` 里的那一段）。
+
+    抽不出来 → 返回 `''`，调用方据此刻意生成一个**永远不成立**的条件
+    （宁可判"没验证成功"，也不要造一个恒真的条件来假装通过）。
+    """
+    m = re.search(r'open\(\s*r?[\'"]([^\'"]+)[\'"]', str(evidence or ''))
+    return m.group(1) if m else ''
+
+
+def read_test_status(text: str) -> dict:
+    """
+    `test` 的输出 → 结论（纯函数）。
+
+    返回 `{'status': 'PASSED'|'FAILED'|'', 'cases': int, 'assertions': int,
+           'failed': int, 'reason': str}`。
+
+    ⚠⚠ **读不到 `Status:` 时绝不当成通过**（我第一版差点这样）：
+    夹具自身出错时进程会崩、什么都不打印。`status == ''` 就是"没测出来"。
+    """
+    text = str(text or '')
+    status, cases, assertions, failed = '', 0, 0, 0
+    m = _RPYTEST_STATUS.search(text)
+    if m:
+        status = m.group(1).upper()
+    m = re.search(r'\[rpytest\]\s*Test cases\s*:\s*\d+\s*\|\s*(\d+) passed'
+                  r'\s*\|\s*\d+ xfailed\s*\|\s*(\d+) failed', text)
+    if m:
+        cases, failed = int(m.group(1)), int(m.group(2))
+    m = re.search(r'\[rpytest\]\s*Assertions\s*:\s*\d+\s*\|\s*(\d+) passed'
+                  r'\s*\|\s*\d+ xfailed\s*\|\s*(\d+) failed', text)
+    if m:
+        assertions = int(m.group(1))
+    reason = ''
+    if not status:
+        reason = ('没读到 `[rpytest] Status:` —— 夹具可能自己崩了。'
+                  '**没读到 ≠ 通过**（第四层：如实报"测不出来"）')
+    elif status == 'FAILED':
+        m = re.search(r'(renpy\.test\.types\.\w+:.*)', text)
+        reason = m.group(1)[:300] if m else '有断言/用例失败'
+    return {'status': status, 'cases': cases, 'assertions': assertions,
+            'failed': failed, 'reason': reason}
+
+
+def behavior_verdict(status: dict, *, evidence_path='') -> dict:
+    """
+    `read_test_status` 的结论 + **证据复核** → 判定（纯函数）。
+
+    ## ⚠⚠ 为什么必须复核证据（真机实测，这是第三层最阴的假绿）
+
+    我实测到 `assert eval "os.path.exists(…)"` 在**条件不成立**时也出现过
+    `Status: PASSED` + `Assertions: 1 passed`，而**证据文件根本没被写**
+    （同一套探针在反例上跑出来的）。⇒ **光看 `Status` 会判出假绿。**
+
+    所以判定规则是"两把锁"：
+
+      1. `Status` 必须是 `PASSED`（引擎自己说的）；
+      2. **给了 `evidence_path` 时，那个文件必须真的存在**（铁证复核）。
+         两条都满足才 `verified=True`；`Status=PASSED` 但证据不在 →
+         **`verified=False`**（如实报"没证明成"）。
+
+    ⚠ 不传 `evidence_path` 时只能信 `Status` —— 调用方要么给证据路径，
+    要么知道自己在拿一个**弱结论**。
+    """
+    st = str((status or {}).get('status') or '').upper()
+    out = {'ok': False, 'reason': '', 'verified': None, 'summary': ''}
+    ev = str(evidence_path or '')
+    if ev:
+        try:
+            exists = Path(ev).is_file()
+        except OSError as e:                    # noqa: BLE001 - 判不了就当不存在
+            swallow('pipeline.statement_probe.behavior_verdict.evidence', e)
+            exists = False
+        if not exists:
+            out.update({'ok': True, 'verified': False,
+                        'reason': f'证据文件不存在：{ev}',
+                        'summary': ('行为级**没证明成**：证据文件不存在'
+                                    '（说明那句没真的执行）—— '
+                                    '⚠ 即使 test 报 PASSED 也不能当通过')})
+            return out
+    if st == 'PASSED':
+        out.update({'ok': True, 'verified': True,
+                    'summary': '行为级验证通过（引擎报 PASSED'
+                               + ('，且证据文件确实存在' if ev else '；'
+                                  '⚠ 未做证据复核') + '）'})
+    elif st == 'FAILED':
+        out.update({'ok': True, 'verified': False,
+                    'reason': str((status or {}).get('reason') or ''),
+                    'summary': '行为级验证**失败**：没执行到预期的地方'})
+    else:
+        out['reason'] = str((status or {}).get('reason')
+                            or '没拿到 `[rpytest] Status:`')
+        out['summary'] = f'行为级**测不出来**：{out["reason"]}'
+    return out
+
+
 def _bare_variant(head: str) -> dict:
     """批量场景用哪个形态：`bare`（"认不认识"唯一可靠的信号）。"""
     return ask_variants(head)[0]
@@ -561,6 +722,7 @@ def _write_ask(target: Path, src: str) -> None:
     target.write_text(src, encoding='utf-8')
 
 
-__all__ = ['ASK_MARK', 'ASK_PREFIX', 'ask_engine', 'ask_filename',
-           'ask_many', 'ask_variants', 'read_verdict', 'summarize',
-           'variant_source']
+__all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
+           'TEST_TIMEOUT', 'ask_engine', 'ask_filename', 'ask_many',
+           'ask_variants', 'behavior_probe_source', 'behavior_verdict',
+           'read_test_status', 'read_verdict', 'summarize', 'variant_source']

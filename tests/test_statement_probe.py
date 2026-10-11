@@ -207,7 +207,128 @@ def test_write_ask_refuses_to_overwrite_someone_elses_file(tmp_path):
     assert '别动我' in target.read_text(encoding='utf-8')
 
 
-# ==================== ⑤ 引擎被挡住时**不许编结论** ====================
+# ==================== ⑥ 第三层：行为级（`test`）====================
+
+def test_behavior_probe_normalizes_windows_paths():
+    """
+    ⚠⚠ 真机实测：**Windows 路径的反斜杠会毁掉 `assert eval` 里的字符串** ——
+    表现是"断言计数 0、用例 0.007 秒结束"，看起来像"语句没执行"。
+    统一转前向斜杠后：证据文件真的被写、断言 `1 passed`、1.9 秒 PASSED。
+    """
+    src = SP.behavior_probe_source(
+        'sg_target', evidence=r'open(r"C:\tmp\sg_hit.txt", "w").write("x")')
+    assert '\\' not in src, src
+    assert "os.path.exists(r'C:/tmp/sg_hit.txt')" in src, src
+
+
+def test_behavior_probe_polls_external_evidence():
+    """
+    ⚠⚠ 真机结论：**能用的形态是"轮询外部证据"**，不是 `assert label`。
+    （`assert label X` 等的是"当前停在该 label"，而跳过去秒回、会错过去 ——
+    真机实测：①暂停 ②死循环两种停住办法也不成立，证据文件都没落地；
+    只有 `assert eval "证据存在"` 那一种 Status=PASSED **且证据真的被写**。）
+    """
+    src = SP.behavior_probe_source(
+        'sg_target', evidence='open(r"C:/tmp/sg_hit.txt", "w").write("x")')
+    assert 'assert eval "os.path.exists(r\'C:/tmp/sg_hit.txt\')" timeout' in src, src
+    assert 'assert label' not in src, 'label 那种等不到（实测）'
+    assert 'run Jump("sg_target")' in src
+    # 顺序：先挂等待、再跳（反过来会错过那一刻）
+    assert src.index('assert eval') < src.index('run Jump('), src
+
+
+def test_behavior_probe_without_a_path_never_passes_by_accident():
+    """
+    ⚠ 抽不出证据路径时，**宁可造一个永不成立的条件** ——
+    绝不生成恒真条件来假装通过（那正是假绿）。
+    """
+    src = SP.behavior_probe_source('sg_target', evidence='sg_hit = True')
+    assert "os.path.exists(r'')" in src, src
+    assert SP._evidence_path('sg_hit = True') == ''
+
+
+def test_behavior_probe_asserts_before_jumping():
+    """
+    ⚠⚠ **顺序不能反**：`assert` 是"等到条件成立"，必须先挂上等待、再触发；
+    反过来就是错过那一刻（真机实测：`run` 在前时明明执行了也判 FAILED）。
+    """
+    src = SP.behavior_probe_source(
+        'sg_target', evidence='open(r"C:/tmp/x.txt", "w").write("x")')
+    assert src.index('assert eval') < src.index('run Jump('), src
+
+
+def test_behavior_probe_carries_external_evidence():
+    """证据要**外部可观察**（写文件）—— 这是"真的执行了"的铁证。"""
+    src = SP.behavior_probe_source(
+        'sg_target', evidence='open(r"C:/tmp/sg_hit.txt", "w").write("x")')
+    assert 'open(r"C:/tmp/sg_hit.txt", "w")' in src
+    assert src.count('label sg_target:') == 1
+
+
+def test_status_passed_alone_is_not_enough_without_the_evidence(tmp_path):
+    """
+    ⚠⚠ **第三层最阴的假绿**（真机实测）：`assert eval` 在条件**不成立**时
+    也出现过 `Status: PASSED` + `Assertions: 1 passed`，而**证据文件根本没被写**
+    （同一套探针在反例上跑出来的）。⇒ 判定必须"**两把锁**"：
+    引擎报 PASSED **且** 证据文件真的存在。
+    """
+    passed = SP.read_test_status('[rpytest] Status: PASSED\n')
+    missing = tmp_path / 'never.txt'
+    v = SP.behavior_verdict(passed, evidence_path=missing)
+    assert v['ok'] is True and v['verified'] is False, v
+    assert '证据文件不存在' in v['reason'], v
+    assert '不能当通过' in v['summary'], v
+
+    # 证据真的在 → 才算通过
+    real = tmp_path / 'hit.txt'
+    real.write_text('hit', encoding='utf-8')
+    v2 = SP.behavior_verdict(passed, evidence_path=real)
+    assert v2['verified'] is True, v2
+    assert '证据文件确实存在' in v2['summary'], v2
+
+
+def test_verdict_is_weak_but_honest_without_an_evidence_path():
+    """不传证据路径 → 只能信 `Status`，但**提示要写明"未做证据复核"**。"""
+    passed = SP.read_test_status('[rpytest] Status: PASSED\n')
+    v = SP.behavior_verdict(passed)
+    assert v['verified'] is True
+    assert '未做证据复核' in v['summary'], v
+def test_status_is_read_from_the_rpytest_report():
+    text = '''[rpytest] Test cases :     3 |     1 passed |     0 xfailed |     0 failed
+[rpytest] Assertions :     1 |     1 passed |     0 xfailed |     0 failed
+[rpytest] Status: PASSED
+'''
+    got = SP.read_test_status(text)
+    assert got['status'] == 'PASSED' and got['cases'] == 1
+    assert SP.behavior_verdict(got)['verified'] is True
+
+
+def test_status_failed_carries_the_reason():
+    text = ('renpy.test.types.RenpyTestAssertionError: failed: '
+            '<Assert (game/zz.rpy:2)>\n[rpytest] Status: FAILED\n')
+    got = SP.read_test_status(text)
+    assert got['status'] == 'FAILED'
+    v = SP.behavior_verdict(got)
+    assert v['ok'] and v['verified'] is False
+    assert 'AssertionError' in v['reason']
+
+
+def test_a_missing_status_is_never_a_pass():
+    """
+    ⚠⚠ 这是第三层最容易踩的假绿：**没读到 `Status:` 时绝不当通过**
+    （夹具自己崩了也可以什么都不打印）。真机第一版差点就这么放过。
+    """
+    got = SP.read_test_status('Traceback (most recent call last):\nboom\n')
+    assert got['status'] == ''
+    v = SP.behavior_verdict(got)
+    assert v['ok'] is False and v['verified'] is None
+    assert '没读到' in v['reason'] or '测不出来' in v['summary']
+
+
+def test_test_needs_display_and_extra_dirs_are_documented():
+    """`test` 要显示 + `gui/`/`fonts/`（真机撞出来的两处）—— 记在常量里防忘。"""
+    assert SP.TEST_NEEDS_DISPLAY is True
+    assert set(SP.TEST_EXTRA_DIRS) == {'gui', 'fonts'}
 
 def test_matching_parse_error_finds_the_blocking_file():
     """
