@@ -358,6 +358,46 @@ class TestExcelAnnotation:
         cell = self._export(tmp_path, _facts(LAN_ATTRS, LAN_CANDS), show='')
         assert cell.comment is None
 
+    def test_asset_tables_are_not_touched_at_all(self, tmp_path):
+        """
+        ⚠⚠ "提示放哪"那张表的**第一行**：**资源表一字不动**。
+
+        资源表 (images.xlsx / Candidates_*) 是**人工维护的资源登记**，
+        机器不往里写语义判断、也不加会漂移的列；候选表的下拉必须全量
+        （"一切以实际有的资源为准"）。所以导出剧本表时，
+        `game/asset_tables/` 下**一个字节都不许变**。
+
+        做法：先放一份"资源表"，记下**逐字节指纹**，导出后再比。
+        """
+        import hashlib
+        from storygraph.assets.asset_registry import _TABLE_FIELDS, write_dict_to_excel
+        from storygraph.story.beat_model import Beat
+        from storygraph.story.excel_export import export_beats_to_excel
+
+        adir = tmp_path / 'game' / 'asset_tables'
+        adir.mkdir(parents=True)
+        write_dict_to_excel(adir / 'images.xlsx', {
+            'lan_angry': {'ID': 'lan_angry', 'Path': 'game/images/lan_angry.png',
+                          'Tag': 'lan', 'Attributes': 'lan_angry',
+                          'Category': 'character'},
+        }, _TABLE_FIELDS['image'])
+        write_dict_to_excel(adir / 'Candidates_角色.xlsx',
+                            {'lan': {'ID': 'lan', '候选': 'happy,sad'}},
+                            ['ID', '候选'])
+
+        def snap():
+            return {p.name: hashlib.sha1(p.read_bytes()).hexdigest()
+                    for p in sorted(adir.glob('*.xlsx'))}
+
+        before = snap()
+        b = Beat()
+        b.show = 'lan happy lan_angry'
+        export_beats_to_excel([b], tmp_path / 't.xlsx',
+                              facts=_facts(LAN_ATTRS, LAN_CANDS))
+        after = snap()
+        assert before == after, '资源表 / 候选表被改动了 —— 那是红线'
+        assert len(before) == 2, before
+
 
 class TestTableVsEngine:
     """资源表 ↔ 引擎 的对账：**只报告，不删**（路线图 §8.9）。"""
