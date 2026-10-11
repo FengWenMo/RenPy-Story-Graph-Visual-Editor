@@ -67,9 +67,12 @@ class AssetRegistryMixin:
     #: （`test_editor_session_split.py` 会断言最终合成的类上全都有）。
     #:
     #: 这 7 个是**实测**出来的（`self.*` 静态扫一遍），不是凭印象写的：
-    #: 前 5 个是方法（由 `EditorSession` 的基建部分提供），
-    #: 后 2 个是**实例属性**（`EditorSession.__init__` 初始化，下面读写）。
+    #: 前 6 个是方法（由 `EditorSession` 的基建部分提供），
+    #: 后 3 个是**实例属性**（`EditorSession.__init__` 初始化，下面读写）。
+    #: `engine_facts`（E2 收尾）由 `GraphSessionMixin` 提供 —— 体检报告里的
+    #: "资源表 ↔ 引擎 对账"要读它，所以是本 mixin 的**宿主依赖**，必须声明。
     REQUIRES = ('registry', 'refresh_symbols', 'source', 'project_root',
+                'engine_facts',
                 '_transforms_decision', '_loaded_registry', '_linker')
 
     #: 资产种类 → 资源表字段名（与 `_write_candidate_sheets` 的映射同源）
@@ -347,9 +350,36 @@ class AssetRegistryMixin:
                               self.project_root).specs()]
         except Exception as e:                  # noqa: BLE001
             swallow('app.session_assets.asset_health_report.statements', e)
+        # —— 资源表 ↔ 引擎事实 对账（E2 收尾，2026-10-11）——
+        #
+        # **只报告，不删任何东西**（用户口径："一切以实际有的资源为标准"）。
+        # 表里有、引擎不认的（`mask` / `_ss_cut` 这类内部件）**仍然可选、仍然能导入**；
+        # 这一段只是把它们**列出来**，让人知道"选了它会怎样"。
+        # ⚠ 没采过引擎事实 → 这一段整个不出现（不宣称）。
+        engine_align = {}
+        try:
+            facts = self.engine_facts()
+            if facts:
+                from storygraph.core import engine_facts as _EF
+                table_attrs = {}
+                for _aid, row in (getattr(reg, 'images', {}) or {}).items():
+                    tag = str((row or {}).get('Tag') or '').strip()
+                    if not tag:
+                        continue
+                    raw = str((row or {}).get('Attributes') or '')
+                    words = [w.strip() for w in
+                             raw.replace('|', ',').replace('，', ',').split(',')]
+                    table_attrs.setdefault(tag, [])
+                    for word in words:
+                        if word and word not in table_attrs[tag]:
+                            table_attrs[tag].append(word)
+                engine_align = _EF.table_vs_engine(facts, table_attrs)
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets.asset_health_report.engine_align', e)
         return {'ok': True, 'error': '', 'counts': counts,
                 'cds': cds, 'cds_error': cds_error,
                 'statements': statements,
+                'engine_align': engine_align,
                 'total_rows': sum(counts[k] for k in
                                   ('images', 'music', 'sounds', 'voices')),
                 'missing': missing, 'unregistered': unreg,

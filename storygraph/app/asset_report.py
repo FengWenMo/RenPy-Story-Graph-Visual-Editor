@@ -51,6 +51,72 @@ def _emit_custom_statement_section(stmts, cds, cds_error, out):
         except Exception:                       # noqa: BLE001 - 报告不该因此失败
             out.append(f'    （读到 {len(stmts or cds or [])} 条声明）')
 
+def _emit_engine_align_section(align: dict, out: list) -> None:
+    """
+    「资源表 ↔ 引擎事实」对账（E2 收尾）。**没有就整段不出现**（不宣称）。
+
+    为什么这一段不改任何东西、也不建议删：
+    两个权威回答的是**两个不同问题** —— 文件系统答"什么东西**存在**"，
+    引擎声明答"什么东西**可选**"。表里有、引擎不认的（`mask` / `_ss_cut` 这类
+    内部件）**文件真实存在、仍然可选、仍然能导入**；
+    拿引擎的枚举去删候选，就会连"合法的、只是引擎还没认的"一起删掉。
+    """
+    if not align:
+        return
+    table_only = align.get('table_only') or {}
+    engine_only = align.get('engine_only') or {}
+    spelling = align.get('spelling_only') or {}
+    if not table_only and not engine_only and not spelling:
+        return
+    out.append('')
+    out.append('【⑨ 资源表 ↔ 引擎 对账】—— 这是**状态**，不是问题；'
+               '候选与导入仍以实际存在的资源为准')
+    n_s = sum(len(v) for v in spelling.values())
+    if n_s:
+        # ⚠ 真机逼出来的：不加这一桶，这个项目会报 175 项，其中 76 项只是
+        # `bg1.1` / `bg1_1` 这种写法差异 —— 那样的清单没人看，等于没有报告。
+        out.append(f'  · 只是写法不同（`bg1.1` vs `bg1_1` 这种，**不算差异**）：'
+                   f'{n_s} 项')
+    n_t = sum(len(v) for v in table_only.values())
+    n_e = sum(len(v) for v in engine_only.values())
+    out.append(f'  · 表里有、引擎不认：{n_t} 项'
+               '（多半是掩码/切图这类**内部件**；选了它引擎会报错，'
+               '但**不影响导入**）')
+    for tag, words in sorted(table_only.items())[:8]:
+        out.append(f'      {tag}: {"、".join(words[:10])}'
+                   + (' …' if len(words) > 10 else ''))
+    out.append(f'  · 引擎有、表里没登记：{n_e} 项'
+               '（引擎的名字是**脚本里的真名**，`show` 要用的就是它；'
+               '建议在资源表里补上）')
+    for tag, words in sorted(engine_only.items())[:8]:
+        out.append(f'      {tag}: {"、".join(words[:10])}'
+                   + (' …' if len(words) > 10 else ''))
+
+
+def _emit_engine_unknown_section(unknown: dict, out: list) -> None:
+    """
+    「⑩ 剧本里引擎不认的立绘属性」汇总（路线图 §8.9 的"报出来"）。**没有就整段不出现**。
+
+    与卡片那条逐拍提示（`card_note` → `beat_unknown_attrs`）**同源**，
+    这里只是汇总一次：一个项目到底有多少处会 lint 报错、集中在哪几个角色身上。
+    ⚠ **只是汇总**：这些属性仍然可选、仍然能导入（用户 2026-10-11 的口径）。
+    """
+    if not unknown:
+        return
+    n = sum(len(v) for v in unknown.values())
+    out.append('')
+    out.append(f'【⑩ 剧本里引擎不认的立绘属性】{n} 处、'
+               f'涉及 {len(unknown)} 个角色 —— 这是**提示**，不是"要删掉"')
+    out.append('    选了它们，`renpy lint` 会报 `\'lan xxx\' is not an image`；'
+               '但它们**文件真实存在、照样能选、照样能导入**。')
+    for tag, words in sorted(unknown.items(),
+                             key=lambda kv: (-len(kv[1]), kv[0]))[:10]:
+        out.append(f'    {tag}: {"、".join(words[:12])}'
+                   + (' …' if len(words) > 12 else ''))
+    if len(unknown) > 10:
+        out.append(f'    …（还有 {len(unknown) - 10} 个角色，复制报告后搜「⑩」）')
+
+
 def format_asset_health(report: dict) -> str:
     """
     `asset_health_report()` 的结果 → 体检报告文本。
@@ -151,6 +217,8 @@ def format_asset_health(report: dict) -> str:
     cds = report.get('cds')
     cds_error = report.get('cds_error') or ''
     _emit_custom_statement_section(stmts, cds, cds_error, out)
+    _emit_engine_align_section(report.get('engine_align') or {}, out)
+    _emit_engine_unknown_section(report.get('engine_unknown') or {}, out)
 
     out.append('')
     out.append('—— 说明 ——')

@@ -364,6 +364,17 @@ class GraphOpsMixin:
         except Exception as e:                    # noqa: BLE001 - 体检失败别崩
             swallow('ui_qt.window_graph_ops.check_asset_health', e)
             report = {'ok': False, 'error': str(e), 'problems': 0}
+        # 剧本里"引擎不认的属性"汇总（路线图 §8.9 的"报出来"）。
+        # ⚠ 语义在 app 层（`unknown_attrs_by_tag`，与卡片那条提示同源），
+        #    这里只是把**已载入的拍 + 已采到的事实**递给它 —— 前端不拼结论。
+        try:
+            from storygraph.app.beats import unknown_attrs_by_tag
+            facts = self._session.engine_facts()
+            beats = list(getattr(self._session, 'beats', None) or ())
+            if facts and report.get('ok'):
+                report['engine_unknown'] = unknown_attrs_by_tag(beats, facts)
+        except Exception as e:                    # noqa: BLE001 - 汇总失败不拦报告
+            swallow('ui_qt.window_graph_ops.check_asset_health.unknown', e)
         text = format_asset_health(report)
         head = text.splitlines()[0] if text else ''
         self._log(f'[资源] {head}')

@@ -459,6 +459,15 @@ def format_build_result(result: BuildResult) -> str:
         for a in result.artifacts:
             lines.append(f'  · {a}')
         lines.append('')
+    # ⚠ `guard['statements']` 一直在 `build_report.json` 里，却**从来没打印出来**
+    # （路线图 §8.9 的"报出来"待做项）：里面是"未声明（只靠形状猜）"、
+    # "工具不认识的语句头"、CST 真迹覆盖率 —— 恰恰是最该被人看见的结论。
+    stmts = (b.get('guard') or {}).get('statements') or ''
+    if stmts.strip():
+        lines.append('语句与能力：')
+        lines.extend(f'  {ln}' if ln.strip() else ''
+                     for ln in stmts.splitlines())
+        lines.append('')
     r = ValidationReport()
     r.issues = [Issue(**i) for i in result.report.get('issues', [])]
     lines.append(r.format(max_per_level=15))

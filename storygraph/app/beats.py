@@ -711,6 +711,19 @@ def _show_item_word(token: str) -> str:
     return str(token or '').split('@', 1)[0]
 
 
+def _show_item_attr(token: str) -> str:
+    """
+    show 里的一个词 → **纯属性名**（给"引擎认不认"用）。
+
+    比 `_show_item_word` 多剥一层：**末尾的 `:`**。
+    真机实测（2026-10-11）：`show ling heihei:` **跟一个 ATL 块**
+    （`zoom 0.15` / `yoffset 200` 那些缩进行），冒号是**块开始**，
+    不是属性的一部分 —— 不剥就会报出 `heihei:` 这种不存在的属性名，
+    还会把同一个属性拆成 `heihei` / `heihei:` 两条（汇总里当场看出来）。
+    """
+    return _show_item_word(token).rstrip(':').strip()
+
+
 def beat_unknown_attrs(beat: Beat, facts) -> list:
     """
     这一拍的立绘里，**引擎没认**的属性 → `[{'tag','attr'}, …]`（保序去重）。
@@ -732,7 +745,7 @@ def beat_unknown_attrs(beat: Beat, facts) -> list:
         return []
     out, seen = [], set()
     for row in rows:
-        toks = [w for w in (_show_item_word(t)
+        toks = [w for w in (_show_item_attr(t)
                             for t in str(row.get('image') or '').split()) if w]
         if len(toks) < 2:
             continue                            # 只有 tag、没属性 → 无从谈起
@@ -742,6 +755,49 @@ def beat_unknown_attrs(beat: Beat, facts) -> list:
                 seen.add((tag, attr))
                 out.append({'tag': tag, 'attr': attr})
     return out
+
+
+def unknown_attrs_by_tag(beats, facts,
+                         extra_pairs=()) -> dict:
+    """
+    **项目级汇总**：`{tag: [引擎未认的属性…]}`（纯函数）。
+
+    为什么要有它：`beat_unknown_attrs` 只回答"**这一拍**哪里不对"（卡片那条逐拍提示），
+    而"报出来"（路线图 §8.9 待做项）要的是**一个项目到底有多少处会 lint 报错、
+    集中在哪几个角色身上** —— 那才是能交给程序去看的清单。
+
+    `extra_pairs` 是"不在这一轮 beats 里、但也要算进去"的 `(tag, [属性…])`
+    （例如调用方手上现成的一批），由调用方给；这里不猜、不去读盘。
+
+    ⚠ 口径与 `beat_unknown_attrs` **完全一致**（同一条 `EF.unrecognized_attrs`）：
+    **只汇总、不过滤** —— 这些属性仍然可选、仍然能导入。
+    """
+    from storygraph.core import engine_facts as EF
+    if not facts:
+        return {}
+    pairs = []
+    for beat in (beats or ()):
+        try:
+            rows = beat_sprite_rows(beat)
+        except Exception as e:                          # noqa: BLE001
+            swallow('app.beats.unknown_attrs_by_tag.rows', e)
+            continue
+        per_tag: dict = {}
+        for row in rows:
+            toks = [w for w in (_show_item_attr(t)
+                                for t in str(row.get('image') or '').split()) if w]
+            if len(toks) < 2:
+                continue                            # 只有 tag、没属性 → 无从谈起
+            per_tag.setdefault(toks[0], [])
+            for attr in toks[1:]:
+                if attr not in per_tag[toks[0]]:
+                    per_tag[toks[0]].append(attr)
+        for tag, attrs in per_tag.items():
+            unknown = EF.unrecognized_attrs(facts, tag, attrs)
+            if unknown:
+                pairs.append((tag, unknown))
+    pairs.extend(list(extra_pairs or ()))
+    return EF.unrecognized_by_tag(pairs)
 
 
 def card_note(beat: Beat, symbols=None, facts=None) -> str:

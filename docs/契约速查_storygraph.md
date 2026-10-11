@@ -153,6 +153,17 @@
 - ⚠ **面板少一个转发方法 = `AttributeError` → `QMessageBox` 模态 → 测试挂死 / 用户看到"卡住"**。守卫 `test_every_panel_method_the_window_calls_really_exists`。
 - ⚠ **构造期 `_refresh_preview` 早于控件创建** → 一律 `getattr` 守卫 + 建好后重刷。
 
+### 六·补：两条**界面红线**（2026-10-11，都是用户实测踩出来的）
+1. **界面必须能干活，不能只"看着有"** —— 判据要**真的 `action.trigger()` 一次**，
+   并断言控制台不许出现"失败/没写/Traceback"。**"存在 ≠ 能跑"**
+   （用户原话："按钮无法点击！点击了也没有反应！"）。
+2. **能点就必须有反应**：卡死了就 `setEnabled(False)` + 灰化 + tooltip 写清原因，
+   **绝不允许"点下去什么都不发生"**。
+3. **用词说人话**（用户："我不会用！！！你更别提编剧了"）：界面文案里不许出现
+   `语句名`/`参数`/`候选值`/`describe`/`T1`/`rules.json` 这类实现者词汇；
+   一律走"动作名 / 要填什么 / 只能填这些 / 就这样，教会它"。
+   ⚠ **Qt 的 QLabel/QCheckBox 不渲染 Markdown** —— 文案里写 `**…**` 会原样显示成星号。
+
 ## 六b、⭐ 候选值的正解：Ren'Py 自带属性注册表（2026-10-10 实测）
 **别让人手填候选** —— 引擎自己会枚举。真机 `sr_general` **无魔改引擎、无 CDS**；
 `show lan clothes2 happy at i21` 是**标准**写法，`clothes2` 是 `layeredimage` 声明的**属性**。
