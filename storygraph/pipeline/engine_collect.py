@@ -351,7 +351,8 @@ def _derived_overridden_builtins(project_root) -> list:
     return out
 
 
-def _derived_undeclared_heads(project_root) -> list:
+def _derived_undeclared_heads(project_root, *, ask: bool = False,
+                              ask_limit: int = 12) -> list:
     """
     **扫描线**：这个项目里有哪些"工具还不认识的写法"。
 
@@ -362,7 +363,12 @@ def _derived_undeclared_heads(project_root) -> list:
       · 它也是**交给程序看的清单** —— 方案 §三/§九 说扫描要"喂给探针该测什么"：
         人拿着它去问程序"这几个写法是什么意思"，就是 ⑨ 三种回头的入口。
 
-    ⚠ 两条自我约束（都写进判据）：
+    `ask=True`（**可选、默认关**）时再走一步：把每个头**丢给引擎跑一遍**
+    （`statement_probe.ask_many`，一次 lint 问完一批），把引擎的结论挂在每一条上
+    （`engine_recognized` / `engine_error` / `engine_summary`）。
+    于是"这个写法引擎到底认不认"不再靠猜 —— **能让引擎回答的就不让人填**。
+
+    ⚠ 三条自我约束（都写进判据）：
       ① **只用 V2-1 之后的闸门版扫描器** —— 内置语句（`with`/`window`/`pause`…）
          和"台词被误读"的行**不进这份清单**（否则又是"工具在输出错误知识"）；
       ② 扫描器**只说我认出了 N 个**（规则 N1）—— 所以这里照抄
@@ -384,11 +390,48 @@ def _derived_undeclared_heads(project_root) -> list:
                     'count': int(rec.get('count') or 0),
                     'files': [str(f) for f in (rec.get('files') or [])][:8],
                     'block': bool(rec.get('block'))})
-    return sorted(out, key=lambda r: (-r['count'], r['head']))
+    out.sort(key=lambda r: (-r['count'], r['head']))
+    if ask and out:
+        _attach_engine_verdicts(project_root, out, ask_limit)
+    return out
+
+
+def _attach_engine_verdicts(project_root, rows: list, limit: int) -> None:
+    """
+    把"引擎认不认"挂在扫描结果上（就地改 `rows`）。**问不到就说问不到。**
+
+    ⚠ 这不是"猜"：结论来自引擎自己跑的 lint（`statement_probe`）。
+    但**采不到就不写结论**（`engine_recognized` 留空 + `engine_error` 说明），
+    与方案坑 4 同一条规矩。
+    """
+    try:
+        from storygraph.pipeline import statement_probe as SP
+        res = SP.ask_many(project_root, [r['head'] for r in rows],
+                          limit=limit)
+    except Exception as e:                       # noqa: BLE001 - 问不到不影响采集
+        swallow('pipeline.engine_collect.attach_verdicts', e)
+        for r in rows:
+            r['engine_error'] = f'{type(e).__name__}: {e}'
+        return
+    if not res.get('ok'):
+        for r in rows:
+            r['engine_error'] = str(res.get('reason') or '问不到')
+        return
+    for r in rows:
+        verdict = (res.get('results') or {}).get(r['head'])
+        if not verdict:
+            r['engine_skipped'] = True
+            continue
+        if verdict.get('recognized') is not None:
+            r['engine_recognized'] = bool(verdict['recognized'])
+        r['engine_summary'] = str(verdict.get('summary') or '')
+        if verdict.get('evidence'):
+            r['engine_error'] = str(verdict['evidence'][0])[:300]
 
 
 def collect(project_root, sdk=None, *, mode='in-place', out_path=None,
-            timeout=DEFAULT_TIMEOUT) -> dict:
+            timeout=DEFAULT_TIMEOUT, ask: bool = False,
+            ask_limit: int = 12) -> dict:
     """
     采一次，返回报告 dict（含 `facts` 与 `report`）。**不写盘**（写盘见 `write_facts`）。
 
@@ -414,7 +457,8 @@ def collect(project_root, sdk=None, *, mode='in-place', out_path=None,
         work = tmp / root.name
         shutil.copytree(root, work)
     try:
-        return _collect_at(work, sdk, out_path=out_path, timeout=timeout)
+        return _collect_at(work, sdk, out_path=out_path, timeout=timeout,
+                           ask=ask, ask_limit=ask_limit)
     except FileNotFoundError as e:
         # 找不到 SDK 是"采不了"，不是"程序坏了" —— 如实报成一次失败的采集
         return {'ok': False, 'reason': str(e), 'facts': EF.empty_facts(),
@@ -425,7 +469,8 @@ def collect(project_root, sdk=None, *, mode='in-place', out_path=None,
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT) -> dict:
+def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
+                ask: bool = False, ask_limit: int = 12) -> dict:
     sdk_path = find_sdk(sdk)
     engine_root = Path(sdk_path)
 
@@ -490,8 +535,9 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT) -> d
 
     # ③ 合并（每条带来源；两个来源不一致 → 进 conflicts，不静默挑一个）
     dump_loc = (dump_data or {}).get('location') or {} if isinstance(dump_data, dict) else {}
-    # 扫描线：这份清单**随事实一起进版本库**（方案 §四 的 derived.undeclared_heads）
-    undeclared = _derived_undeclared_heads(work)
+    # 扫描线：这份清单**随事实一起进版本库**（方案 §四 的 derived.undeclared_heads）；
+    # `ask=True` 时再让**引擎自己**回答"认不认这些写法"（能问引擎的就不让人填）
+    undeclared = _derived_undeclared_heads(work, ask=ask, ask_limit=ask_limit)
     payloads = {
         'images': [(EF.SRC_PROBE, probe_data.get('images'))],
         'tags': [(EF.SRC_PROBE, probe_data.get('tags'))],

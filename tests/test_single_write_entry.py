@@ -53,6 +53,10 @@ WRITERS = {
         '写**临时探针** zz_storygraph_probe.rpy（注入工程 → 跑一次引擎 → 连 .rpyc 一起删）。'
         '**不是产物**，所以刻意不过 generation_guard（它只需要"有生成标记"，对探针没意义）；'
         '代价由三件事兜住：固定文件名前缀、**同名非本工具写的就拒写**、采集完必删 + 清单比对',
+    'pipeline/statement_probe.py::_write_ask':
+        '写**临时探针** zz_storygraph_ask_*.rpy（与上面同一个道理，但只写进**轻量副本**：'
+        '只拷 .rpy/.json/.txt、跳过图像音频 —— 真机 8GB 项目整份 copytree 会把磁盘写满，'
+        '那是实测事故）。同样"同名非本工具写的就拒写"，跑完连 .rpyc 一起删',
     'story/excel_export.py::_thumbnail_bytes': '写缩略图缓存 png',
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',
