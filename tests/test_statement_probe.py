@@ -351,6 +351,48 @@ def test_record_behavior_keeps_the_three_states(tmp_path):
     assert '没读到' in got['sg_c']['why']
 
 
+def test_find_head_label_locates_the_enclosing_label(tmp_path):
+    """找出"用到这个写法的行"落在哪个 label 里（界面按钮要靠它定位）。"""
+    game = tmp_path / 'game'
+    game.mkdir(parents=True)
+    (game / 'a.rpy').write_text(
+        'label first:\n    lyj "hi"\n    return\n\n\n'
+        'label second:\n    weather rain\n    return\n', encoding='utf-8')
+    assert SP.find_head_label(tmp_path, 'weather') == 'second'
+    assert SP.find_head_label(tmp_path, 'lyj') == 'first'
+    assert SP.find_head_label(tmp_path, 'never_used') == ''
+    assert SP.find_head_label(tmp_path, '') == ''
+
+
+def test_inject_evidence_appends_inside_the_label(tmp_path):
+    """
+    证据要注入到**该 label 的块尾**（下一个顶层语句之前）——
+    注错位置就不是"这个 label 被执行过"的证据了。
+    """
+    game = tmp_path / 'game'
+    game.mkdir(parents=True)
+    f = game / 'a.rpy'
+    f.write_text('label t:\n    lyj "hi"\n    return\n\n'
+                 'label other:\n    return\n', encoding='utf-8')
+    got = SP._inject_evidence(tmp_path, 't', 'C:/tmp/ev.txt')
+    assert got == str(f)
+    text = f.read_text(encoding='utf-8')
+    assert text.index('ev.txt') < text.index('label other'), text
+    # 注入的那句确实在这个 label 的缩进块里
+    body = text.split('label t:')[1].split('label other')[0]
+    assert 'C:/tmp/ev.txt' in body, body
+
+
+def test_verify_head_says_so_when_the_head_is_unused(tmp_path):
+    """没找到用它的地方 → 如实说"验不了"，**不猜**。"""
+    game = tmp_path / 'game'
+    game.mkdir(parents=True)
+    (game / 'a.rpy').write_text('label t:\n    return\n', encoding='utf-8')
+    got = SP.verify_head(tmp_path, 'never_used')
+    assert got['ok'] is False and got['verified'] is None
+    assert '没找到' in got['reason'], got
+
+
 def test_test_needs_display_and_extra_dirs_are_documented():
     """`test` 要显示 + `gui/`/`fonts/`（真机撞出来的两处）—— 记在常量里防忘。"""
     assert SP.TEST_NEEDS_DISPLAY is True

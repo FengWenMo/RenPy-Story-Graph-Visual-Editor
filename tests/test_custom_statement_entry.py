@@ -450,6 +450,53 @@ def test_the_statement_registry_is_not_the_asset_registry(ui_window):
     assert 'iterable' not in SR.format_registry_report(stmt_reg)
 
 
+def test_the_verify_button_calls_back_and_can_be_disabled(qapp, tmp_path):
+    """
+    ⭐ 「▶ 验证它能跑」（第三层落地）：
+      · **没注入回调就灰化**（借用户的教训：界面必须能干活，能点就必须有反应）；
+      · 有回调时点了会调它，并把结论显示在预览区；
+      · 回调抛异常也不许炸窗口（验证是"可失败的动作"）。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    # ① 没回调 → 按钮灰化（不是"点下去什么都不发生"）
+    dlg0 = CustomStatementDialog(None, project_root=root, discovered=[])
+    assert not dlg0._verify_btn.isEnabled()
+
+    # ② 有回调 → 点了会调，结论显示出来
+    seen = []
+
+    def fake(head):
+        seen.append(head)
+        return '✅ 通过：引擎报 PASSED，且证据文件确实存在'
+
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[],
+                                on_verify=fake)
+    assert dlg._verify_btn.isEnabled()
+    dlg.name.setText('weather')
+    dlg._do_verify()
+    assert seen == ['weather'], seen
+    assert '通过' in dlg.preview.toPlainText(), dlg.preview.toPlainText()
+
+    # ③ 没填动作名 → 提示，而不是默默不动
+    dlg.name.setText('')
+    dlg._do_verify()
+    assert '先填' in dlg.preview.toPlainText(), dlg.preview.toPlainText()
+
+    # ④ 回调抛异常 → 显示失败原因，不炸
+    def boom(head):
+        raise RuntimeError('引擎没了')
+
+    dlg2 = CustomStatementDialog(None, project_root=root, discovered=[],
+                                 on_verify=boom)
+    dlg2.name.setText('weather')
+    dlg2._do_verify()
+    assert '引擎没了' in dlg2.preview.toPlainText()
+    assert dlg2._verify_btn.isEnabled(), '跑完要恢复可点'
+
+
 def test_every_panel_method_the_window_calls_really_exists(ui_window):
     """
     ⚠ 这条是"卡死"那个 bug 的守卫（2026-10-10 实测踩到）：

@@ -790,6 +790,130 @@ def record_behavior(facts: dict, name: str, verdict: dict) -> dict:
     return facts
 
 
+def verify_head(project_root, head: str, *, sdk=None,
+                timeout: int = TEST_TIMEOUT) -> dict:
+    """
+    **"这个动作到底有没有被执行过"** —— 给界面按钮用的入口（第三层落地）。
+
+    做法（全部真机验证过）：
+
+      1. 找出**第一条用到这个写法的行**在哪个 label 里
+         （`find_head_label`；找不到 → 如实说"没找到，验不了"）；
+      2. 在那个 label **末尾注入一句证据**（`record()` 写一个文件），
+         并造一个跳进该 label 的行为探针；
+      3. 跑 `verify_behavior` → 两把锁判定。
+
+    ⚠ **注意它证的是什么**：证的是"**这个 label 被执行到了**"，
+    而"那一句动作本身执行成功"由引擎在跑的时候自己保证 ——
+    如果那一句会崩，`test` 会红（`Status: FAILED`）。
+    所以结论 = "跑到过这一处 + 跑的时候没崩"。
+    """
+    out = {'ok': False, 'reason': '', 'verified': None, 'summary': '',
+           'label': '', 'status': '', 'evidence': '', 'raw_tail': []}
+    root = Path(project_root) if project_root else None
+    if root is None or not (root / 'game').is_dir():
+        out['reason'] = f'不是工程根（没有 game/）：{root}'
+        out['summary'] = f'行为级**测不出来**：{out["reason"]}'
+        return out
+    label = find_head_label(root, head)
+    if not label:
+        out['reason'] = (f'没找到用到 "{head}" 的 label —— 验不了'
+                         f'（先把这一句写进某一章，或者手工指定一个 label）')
+        out['summary'] = f'行为级**测不出来**：{out["reason"]}'
+        return out
+    out['label'] = label
+    tmp = Path(tempfile.mkdtemp(prefix='sg_verify_head_'))
+    ev = tmp / 'evidence.txt'
+    ev_posix = str(ev).replace('\\', '/')
+    work = _copy_for_ask(root, tmp / 'work')
+    try:
+        # 把证据注入到那个 label 的末尾（**副本里**）
+        target = _inject_evidence(work, label, ev_posix)
+        if not target:
+            out['reason'] = f'找不到 label "{label}" 所在文件，没法注入证据'
+            out['summary'] = f'行为级**测不出来**：{out["reason"]}'
+            return out
+        out['evidence'] = ev_posix
+        v = verify_behavior(work, label,
+                            evidence=f'open(r"{ev_posix}", "w").write("hit")',
+                            sdk=sdk, timeout=timeout, evidence_path=str(ev),
+                            mode='in-place')
+        v['label'] = label
+        return v
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def find_head_label(project_root, head: str, *, limit_files: int = 400) -> str:
+    """
+    第一条用到 `head` 的行落在**哪个 label** 里（找不到 → `''`）。纯读。
+
+    ⚠ 只用"最近见过的 `label X:`"来判断归属 —— 缩进不管（Ren'Py 的 label 都在
+    顶层）。宁可保守：找不到就返回空，让调用方如实说"验不了"。
+    """
+    head = str(head or '').strip()
+    root = Path(project_root) if project_root else None
+    if not head or root is None or not (root / 'game').is_dir():
+        return ''
+    label_re = re.compile(r'^label\s+([A-Za-z_][\w.]*)\s*(?:\(.*\))?\s*:')
+    head_re = re.compile(r'^\s*' + re.escape(head) + r'(?:\s|$)')
+    files = sorted(root.rglob('*.rpy'))[:limit_files]
+    for fp in files:
+        try:
+            text = fp.read_text(encoding='utf-8', errors='replace')
+        except OSError as e:                     # noqa: BLE001
+            swallow('pipeline.statement_probe.find_head_label', e)
+            continue
+        current = ''
+        for raw in text.splitlines():
+            m = label_re.match(raw)
+            if m:
+                current = m.group(1)
+                continue
+            if current and head_re.match(raw):
+                return current
+    return ''
+
+
+def _inject_evidence(work: Path, label: str, evidence_path: str) -> str:
+    """
+    在副本里把一句证据**追加到 `label` 的末尾**（返回被改的文件；失败 → `''`）。
+
+    ⚠ 只改**副本**（调用方保证）。注入方式是"在该 label 的块尾加一行 `$ …`"：
+    找到 label 行，然后往下走到**下一个顶层语句**，在那之前插入。
+    """
+    label_re = re.compile(r'^label\s+' + re.escape(label) + r'\s*(?:\(.*\))?\s*:')
+    line = f'    $ open(r"{evidence_path}", "w").write("hit")'
+    for fp in sorted(work.rglob('*.rpy')):
+        try:
+            lines = fp.read_text(encoding='utf-8',
+                                 errors='replace').splitlines()
+        except OSError as e:                     # noqa: BLE001
+            swallow('pipeline.statement_probe.inject_evidence.read', e)
+            continue
+        start = next((i for i, ln in enumerate(lines) if label_re.match(ln)),
+                     None)
+        if start is None:
+            continue
+        # 走到下一个**顶层**行（非空、非缩进）之前
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            s = lines[i]
+            if s.strip() and not s.startswith((' ', '\t')):
+                end = i
+                break
+        else:
+            end = len(lines)
+        lines[end:end] = ['', line]
+        try:
+            fp.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+            return str(fp)
+        except OSError as e:                     # noqa: BLE001
+            swallow('pipeline.statement_probe.inject_evidence.write', e)
+            return ''
+    return ''
+
+
 def _bare_variant(head: str) -> dict:
     """批量场景用哪个形态：`bare`（"认不认识"唯一可靠的信号）。"""
     return ask_variants(head)[0]
@@ -891,4 +1015,5 @@ __all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
            'TEST_TIMEOUT', 'ask_engine', 'ask_filename', 'ask_many',
            'ask_variants', 'behavior_probe_source', 'behavior_verdict',
            'read_test_status', 'read_verdict', 'record_behavior', 'summarize',
-           'variant_source', 'verify_behavior']
+           'variant_source', 'verify_behavior', 'verify_head',
+           'find_head_label']

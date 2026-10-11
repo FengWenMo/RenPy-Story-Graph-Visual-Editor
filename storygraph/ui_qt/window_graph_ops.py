@@ -685,11 +685,53 @@ class GraphOpsMixin:
                   '（读不到 storygraph.rules.json —— 声明列表暂时显示不出来，'
                   '但下面的"发现"仍然可用）')
 
+        def _on_verify(head: str) -> str:
+            """
+            「▶ 验证它能跑」（第三层）：**只在这里碰引擎**，界面只显示结论。
+
+            为什么不放界面里：跑一次要拷副本、跑 `test`（几秒到几十秒），
+            而"**两把锁**"（引擎 PASSED **且** 证据文件真的存在）这套判据在
+            `pipeline.statement_probe.verify_head` 里 —— 前端口径必须与它一致。
+            """
+            from storygraph.pipeline import statement_probe as SP
+            self._log(f'[验证] 开始验证「{head}」…')
+            verdict = SP.verify_head(root, head)
+            verified = verdict.get('verified')
+            # ⚠ 三态如实报：通过 / 失败 / **没证明成**（后者绝不并进"失败"）
+            if verified is True:
+                head_line = f'✅ 通过：{verdict.get("summary")}'
+            elif verified is False:
+                head_line = f'⚠ 失败：{verdict.get("summary")}'
+            else:
+                head_line = f'⚠ 没证明成：{verdict.get("summary")}'
+            self._log(f'[验证] {head} → {head_line}')
+            try:                                   # 记进事实（报告那行会跟着动）
+                facts = self._session.engine_facts()
+                if facts:
+                    SP.record_behavior(facts, f'sg_check_{head}', verdict)
+                    from storygraph.core import engine_facts as EF
+                    from storygraph.pipeline.engine_collect import write_facts
+                    write_facts(EF.facts_path(root), facts)
+                    self._log('[验证] 结论已记进引擎事实（体检报告那一行会跟着变）')
+            except Exception:                       # noqa: BLE001 - 记不上不影响验证
+                swallow('ui_qt.learn_custom_statement.record_behavior')
+            lines = [head_line]
+            if verdict.get('label'):
+                lines.append(f'用到的章节 label：{verdict["label"]}')
+            if verdict.get('evidence'):
+                lines.append(f'证据文件：{verdict["evidence"]}')
+            if verdict.get('reason'):
+                lines.append(f'原因：{verdict["reason"]}')
+            for ln in (verdict.get('raw_tail') or [])[-6:]:
+                lines.append(f'  {ln}')
+            return '\n'.join(lines)
+
         dlg = CustomStatementDialog(self, project_root=root,
                                     discovered=discovered,
                                     registry_report=report,
                                     declared_groups=(reg.attr_groups
-                                                     if reg is not None else []))
+                                                     if reg is not None else []),
+                                    on_verify=_on_verify)
         self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
                   + ('：' + '、'.join(r['head'] for r in discovered[:8])
                      if discovered else ''))

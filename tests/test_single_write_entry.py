@@ -57,6 +57,9 @@ WRITERS = {
         '写**临时探针** zz_storygraph_ask_*.rpy（与上面同一个道理，但只写进**轻量副本**：'
         '只拷 .rpy/.json/.txt、跳过图像音频 —— 真机 8GB 项目整份 copytree 会把磁盘写满，'
         '那是实测事故）。同样"同名非本工具写的就拒写"，跑完连 .rpyc 一起删',
+    'pipeline/statement_probe.py::_inject_evidence':
+        '往**副本**的某个 label 末尾注入一句证据（第三层行为验证用：证明那段真的执行了）。'
+        '⚠ 只改副本 —— 调用方 `verify_head` 保证先 copytree，真项目一个字节都不动',
     'story/excel_export.py::_thumbnail_bytes': '写缩略图缓存 png',
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',

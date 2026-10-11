@@ -22,11 +22,11 @@ build_declaration`（纯函数，有判据），写盘是 `declare_statement`（
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QPlainTextEdit, QPushButton,
-                               QSplitter, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QGroupBox, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QPlainTextEdit,
+                               QPushButton, QSplitter, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from storygraph.authoring.learn_statement import (build_declaration,
                                                   declaration_preview)
@@ -111,7 +111,7 @@ class CustomStatementDialog(QDialog):
 
     def __init__(self, parent=None, project_root=None, declares=None,
                  discovered=None, registry_report: str = '',
-                 declared_groups=None):
+                 declared_groups=None, on_verify=None):
         super().__init__(parent)
         self.setWindowTitle('自定义模块 —— 教工具认识项目自己的写法')
         theme.apply_to(self)
@@ -274,6 +274,16 @@ class CustomStatementDialog(QDialog):
         self._ok_btn = box.button(QDialogButtonBox.Ok)
         self._ok_btn.setText('写进 storygraph.rules.json')
         self._ok_btn.setProperty('variant', 'primary')
+        # ⭐ 「验证它能跑」（第三层）：点了才跑 —— 一次要几秒且需要 SDK
+        self.on_verify = on_verify
+        self._verify_btn = QPushButton('▶ 验证它能跑')
+        self._verify_btn.setToolTip(
+            '真跑一次引擎：找出用到这个写法的章节，注入证据，跑 `test`，'
+            '再**两把锁**判定（引擎报 PASSED 且证据文件真的存在）。'
+            '⚠ 没验证成 ≠ 失败 —— 我们会如实分成"通过 / 失败 / 没证明成"。')
+        self._verify_btn.setEnabled(bool(on_verify))
+        self._verify_btn.clicked.connect(self._do_verify)
+        box.addButton(self._verify_btn, QDialogButtonBox.ActionRole)
         box.button(QDialogButtonBox.Cancel).setText('取消（什么都不改）')
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
@@ -307,6 +317,36 @@ class CustomStatementDialog(QDialog):
         self.block.setChecked(bool(rec.get('block')))
         self._refresh_preview()
 
+    def _do_verify(self):
+        """
+        「▶ 验证它能跑」：把当前填的动作名交给注入的回调（**跑引擎是它的事**）。
+
+        为什么回调而不是在这里跑：这里只该管界面；跑引擎（拷副本、跑 `test`、
+        两把锁判定）在 `pipeline.statement_probe.verify_head`，由窗口注入。
+        结果由回调写进预览区 —— 用户在同一个窗口里就能看到结论。
+        """
+        fn = self.on_verify
+        if fn is None:
+            return
+        head = self.name.text().strip()
+        if not head:
+            self.preview.setPlainText('先填"动作名"，再验证 —— '
+                                      '验证要拿它去章节里找用到的地方。')
+            return
+        self._verify_btn.setEnabled(False)
+        self._verify_btn.setText('⏳ 正在跑引擎…')
+        self.preview.setPlainText(f'正在验证「{head}」：找出用到它的章节 → '
+                                  f'注入证据 → 跑 `test` → 两把锁判定…\n'
+                                  f'（要几秒到几十秒，请稍等）')
+        QApplication.processEvents()
+        try:
+            text = fn(head)
+        except Exception as e:                      # noqa: BLE001 - 验证不该炸窗口
+            text = f'验证没做成：{type(e).__name__}: {e}'
+        finally:
+            self._verify_btn.setText('▶ 验证它能跑')
+            self._verify_btn.setEnabled(True)
+        self.preview.setPlainText(str(text or ''))
     def _remove_group(self):
         r = self.groups.currentRow()
         if r >= 0:
