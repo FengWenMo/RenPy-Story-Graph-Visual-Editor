@@ -684,15 +684,7 @@ def verify_behavior(project_root, label: str, *, evidence: str = '',
     work = root
     if mode == 'copy':
         tmp = Path(tempfile.mkdtemp(prefix='sg_behavior_copy_'))
-        work = _copy_for_ask(root, tmp)
-        for extra in TEST_EXTRA_DIRS:            # ← test 与 lint 要的不是同一批
-            s = root / 'game' / extra
-            if s.is_dir():
-                try:
-                    shutil.copytree(s, work / 'game' / extra,
-                                    dirs_exist_ok=True)
-                except OSError as e:             # noqa: BLE001
-                    swallow('pipeline.statement_probe.verify_behavior.extra', e)
+        work = behavior_copy(root, tmp)          # ← 必须带 gui/fonts
     try:
         _write_ask(work / 'game' / f'{ASK_PREFIX}behavior.rpy', src)
         out, tail = _run_test_capture(work, sdk_path, 'sg_behavior_check',
@@ -825,7 +817,7 @@ def verify_head(project_root, head: str, *, sdk=None,
     tmp = Path(tempfile.mkdtemp(prefix='sg_verify_head_'))
     ev = tmp / 'evidence.txt'
     ev_posix = str(ev).replace('\\', '/')
-    work = _copy_for_ask(root, tmp / 'work')
+    work = behavior_copy(root, tmp / 'work')     # ← 必须带 gui/fonts（否则 test 崩）
     try:
         # 把证据注入到那个 label 的末尾（**副本里**）
         target = _inject_evidence(work, label, ev_posix)
@@ -912,6 +904,27 @@ def _inject_evidence(work: Path, label: str, evidence_path: str) -> str:
             swallow('pipeline.statement_probe.inject_evidence.write', e)
             return ''
     return ''
+
+
+def behavior_copy(root: Path, tmp: Path) -> Path:
+    """
+    **行为级专用**的副本：轻量副本 **+ `TEST_EXTRA_DIRS`**（`gui/` / `fonts/`）。
+
+    ⚠ 为什么必须单独一个函数（真机踩到的缺陷）：`lint` 只要 `.rpy` 文本，
+    而 `test` **要真的把游戏跑起来** —— 少了 `gui/` 会在起界面时崩：
+    `FileNotFoundError: Couldn't find file 'gui/window_icon.png'`。
+    我第一版给 `verify_behavior` 拷了、**忘了给 `verify_head` 拷**，
+    于是"点按钮验证"那条路永远报"没证明成"。抽成一个函数就不会再漏。
+    """
+    work = _copy_for_ask(root, tmp)
+    for extra in TEST_EXTRA_DIRS:
+        s = root / 'game' / extra
+        if s.is_dir():
+            try:
+                shutil.copytree(s, work / 'game' / extra, dirs_exist_ok=True)
+            except OSError as e:                 # noqa: BLE001
+                swallow('pipeline.statement_probe.behavior_copy.extra', e)
+    return work
 
 
 def _bare_variant(head: str) -> dict:
@@ -1016,4 +1029,4 @@ __all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
            'ask_variants', 'behavior_probe_source', 'behavior_verdict',
            'read_test_status', 'read_verdict', 'record_behavior', 'summarize',
            'variant_source', 'verify_behavior', 'verify_head',
-           'find_head_label']
+           'behavior_copy', 'find_head_label']
