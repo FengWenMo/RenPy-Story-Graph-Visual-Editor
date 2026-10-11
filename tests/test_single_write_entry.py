@@ -48,6 +48,13 @@ WRITERS = {
                                '`dry_run` 试算（只给 diff 不落盘）、写前留 `.bak`、'
                                '回执里如实报 `written`/`diff`/`backup`。'
                                '⚠ 资源表一个字不动（硬红线，判据钉住）',
+    'core/ai_settings.py::save': '写**用户自己的 AI 配置**（API key），位置在'
+                                 '**用户级目录**（`%LOCALAPPDATA%/StoryGraph/ai.json`，'
+                                 '`STORYGRAPH_AI_CONFIG` 可覆盖）——'
+                                 '⚠ **绝不写进项目仓库**（否则随 git 泄漏），'
+                                 '并尽力收紧文件权限',
+    'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
+                                  '只清这一个文件；清完界面改口（不静默）',
     'story/statement_registry.py::declare_attr_groups':
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':

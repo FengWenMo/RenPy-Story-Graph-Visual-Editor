@@ -647,6 +647,30 @@ class GraphOpsMixin:
         # 没有 `graph` 键，别去取它（取到 None 会让下一个用图的人直接炸）。
         if self.graph is not None:
             self._report_missing_chapters(self.graph)
+    def open_ai_key_dialog(self):
+        """
+        「🔑 AI 助手 · 填 API key」：**用户自己填 key**（用户 2026-10-11 的要求）。
+
+        > "工具是本地的，所以最好的做法是让别人跟其余用户自己填 api key，
+        >  最好打开之后能有一个地方点开，然后让用户输入 api key，
+        >  然后再让 ai 自行开始工作"
+
+        为什么写进**用户级**目录（不是项目里）：key 是**这台机器这个人**的，
+        跟着项目走会随 git 泄漏出去。存哪儿由 `core.ai_settings.config_path()`
+        决定（`%LOCALAPPDATA%/StoryGraph/ai.json`）。
+        """
+        from storygraph.core import ai_settings as AI
+        from storygraph.ui_qt.dialog_ai import AiKeyDialog
+        dlg = AiKeyDialog(self)
+        dlg.exec()
+        cfg = AI.load()
+        ready, why = AI.is_ready(cfg)
+        if ready:
+            self._log(f'[AI] 已配置 {cfg.get("provider")}'
+                      f'（key {AI.masked(cfg.get("api_key"))}）—— 可以开工了')
+        else:
+            self._log(f'[AI] 还没配好：{why}')
+
     def learn_custom_statement(self):
         """
         「🧩 自定义模块 / 语句」：教工具认识项目自己的写法。

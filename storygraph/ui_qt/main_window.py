@@ -1478,6 +1478,13 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '先扫出"工具还不认识的写法"，勾一条、填上参数与候选值，'
             '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉',
             primary=True)
+        # ⚠ 放在「自定义模块」**后面**：用户早先明确要求自定义模块入口在**最上方**
+        #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），
+        #   判据 `test_the_toolbar_entry_is_the_first_action` 钉着这一条。
+        act('🔑 AI 助手 · 填 API key', self.open_ai_key_dialog,
+            'key 只存在你这台机器上（不写进项目、不上传）。填一次就能让 AI 干活；'
+            '随时可以回来改或清掉。另：本工具也能作为 MCP server 被别的 AI 客户端连上'
+            '（那时 key 是那个客户端的）')
         act('📁 打开项目', self.open_project,
             '只加载资源表（xlsx：立绘 / 音乐 / 语音 / 变换 / 角色）'
             '与缩略图 —— **不往剧情图里放任何东西**')
