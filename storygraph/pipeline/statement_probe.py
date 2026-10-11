@@ -478,6 +478,29 @@ def _drop_probe(target: Path) -> None:
             swallow('pipeline.statement_probe.drop_probe', e)
 
 
+#: `lint`/`test` 输出里"引擎说这一行不认识"的形状：
+#: `File "game/x.rpy", line 12: expected statement.`
+_PARSE_LOC = re.compile(
+    r'File\s+"([^"]+)"\s*,\s*line\s+(\d+)\s*:\s*(expected\s+statement|'
+    r'invalid\s+syntax|syntax\s+error)', re.IGNORECASE)
+
+
+def first_parse_error(text: str) -> str:
+    """
+    从引擎输出里抽出**第一处**"这一行它不认识"的位置（纯函数，抽不到 → `''`）。
+
+    为什么要它（用户 2026-10-11："回到 UI"）：验证没通过时只显示"没证明成"，
+    人**不知道该去改哪儿**。引擎其实说得清清楚楚 ——
+    `File "game/hell_天气.rpy", line 12: expected statement.` —— 只是被埋在
+    几十行输出里。这里把它抬到结论最上面。
+    """
+    m = _PARSE_LOC.search(str(text or ''))
+    if not m:
+        return ''
+    path, line, what = m.group(1), m.group(2), m.group(3).strip()
+    return f'{path}:{line}（{what}）'
+
+
 def behavior_probe_source(label: str, *, evidence: str = '',
                           testcase: str = '') -> str:
     """
@@ -1029,4 +1052,4 @@ __all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
            'ask_variants', 'behavior_probe_source', 'behavior_verdict',
            'read_test_status', 'read_verdict', 'record_behavior', 'summarize',
            'variant_source', 'verify_behavior', 'verify_head',
-           'behavior_copy', 'find_head_label']
+           'behavior_copy', 'find_head_label', 'first_parse_error']

@@ -722,6 +722,14 @@ class GraphOpsMixin:
                 lines.append(f'证据文件：{verdict["evidence"]}')
             if verdict.get('reason'):
                 lines.append(f'原因：{verdict["reason"]}')
+            # ⭐ 把引擎说的**具体位置**抬到最前面（用户："回到 UI"）——
+            #   只显示"没证明成"，人不知道该去改哪儿；引擎其实说得清清楚楚。
+            where = SP.first_parse_error(' '.join(verdict.get('raw_tail') or []))
+            if where and verified is not True:
+                lines.append('')
+                lines.append(f'引擎说这一行它不认识：{where}')
+                lines.append('（先看那个文件那一行 —— 若这是你的自定义写法，'
+                             '项目里得有一段 renpy.register_statement 注册它）')
             # ⚠ 验证不过时**顺手说清该怎么办**（否则用户只会看到"没证明成"）
             if verified is not True:
                 lines.append('')

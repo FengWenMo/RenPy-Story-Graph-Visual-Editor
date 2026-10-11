@@ -209,6 +209,26 @@ def test_write_ask_refuses_to_overwrite_someone_elses_file(tmp_path):
 
 # ==================== ⑥ 第三层：行为级（`test`）====================
 
+def test_first_parse_error_surfaces_the_location():
+    """
+    ⭐ 用户："回到 UI" —— 验证没通过时只显示"没证明成"，人不知道该改哪儿；
+    引擎其实说得清清楚楚，只是被埋在几十行输出里。这个纯函数把它抬出来。
+    """
+    noisy = '''[rpytest] Starting test run
+File "game/hell_天气.rpy", line 12: expected statement.
+    天气 rain 强度=3
+[rpytest] Status: FAILED
+'''
+    got = SP.first_parse_error(noisy)
+    assert 'game/hell_天气.rpy:12' in got, got
+    assert 'expected statement' in got, got
+    # 抽不到就是空串（**不编**）
+    assert SP.first_parse_error('[rpytest] Status: PASSED') == ''
+    assert SP.first_parse_error('') == ''
+    # 别的形状也认（invalid syntax）
+    assert 'x.rpy:3' in SP.first_parse_error('File "x.rpy", line 3: invalid syntax')
+
+
 def test_behavior_probe_normalizes_windows_paths():
     """
     ⚠⚠ 真机实测：**Windows 路径的反斜杠会毁掉 `assert eval` 里的字符串** ——

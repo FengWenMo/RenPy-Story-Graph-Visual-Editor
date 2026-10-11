@@ -179,6 +179,16 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
     root = Path(project_root)
     game = root / 'game' if (root / 'game').is_dir() else root
     declared = _declared_heads(project_root)        # 声明过的 = 认识，不算
+    # ⭐ 程序侧的钩子（用户 2026-10-11 的原则："程序写一个验证函数，工具自动调用"）：
+    #   · `declarations()` 说的名字 → 也算"认识"；
+    #   · `validate_statement(head, 行)` 说 True → 这一行程序认了 → 不算"不认识"；
+    #   · 它说 None = **程序不管**（不能当成"程序说没问题"）。
+    #   程序不提供钩子时 `hooks.available=False`，这里的一切都不发生（零成本）。
+    from storygraph.story.host_hooks import load_host_hooks
+    hooks = load_host_hooks(project_root)
+    if hooks.available:
+        for d in hooks.declarations():
+            declared.add(str(d.get('name') or ''))
     out = {}
     for f in sorted(game.rglob('*.rpy')):
         try:
@@ -208,6 +218,20 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
             # 真实项目实测：`show screen prompt("…", act=[` 的下一行
             # `Call(...)` 曾被误报成"工具不认识的语句"。
             depth = _bracket_depth(0, ln)
+            # ⚠⚠ 2026-10-11（友好项目第二轮抓到的接线缺陷）：**工具的形状判据
+            #   认不出来的行，也必须让程序的验证函数看一眼** ——
+            #   因为 `mycue "打雷"` 与台词字面同形（§契约：同形只能问引擎/程序），
+            #   而"程序写一个验证函数"正是为这种情况准备的。
+            #   原来我在 `not head` 处直接 continue → 程序的验证函数**永远问不到**。
+            host_why = ''
+            if not head and hooks.available:
+                m0 = re.match(r'^([A-Za-z_][\w.]*)', s)
+                if m0:
+                    ok, host_why = hooks.validate(m0.group(1), s)
+                    if ok is True:
+                        continue                    # 程序认了这一行
+                    if ok is False:
+                        head = m0.group(1)          # 程序认这个写法，但说这行不对
             if not head:
                 continue
             if (head in KNOWN_STATEMENT_HEADS or head in _CONTENT_HEADS
@@ -215,7 +239,15 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
                 continue
             if head[0].isdigit():
                 continue
+            if hooks.available:
+                ok, why = hooks.validate(head, s)
+                if ok is True:
+                    continue                        # 程序认了这一行 → 不是"不认识"
+                host_why = host_why or (why if ok is False else '')
             bucket = out.setdefault(head, {'count': 0, 'examples': []})
+            if host_why and 'why' not in bucket:
+                # 程序给的理由（**原话**）—— 报告里要转述，别自己编
+                bucket['why'] = host_why
             bucket['count'] += 1
             if len(bucket['examples']) < limit_examples:
                 bucket['examples'].append(f'{f.name}: {s[:70]}')

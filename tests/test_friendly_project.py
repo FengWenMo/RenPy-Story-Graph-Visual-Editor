@@ -131,3 +131,106 @@ class TestFriendlyProject:
         clear_cache()
         assert 'mycue' not in StatementRegistry.for_project(root).names(), \
             'CDS 删了，工具还记着 —— 声明没跟着代码走'
+
+
+#: 程序侧的钩子（**第二轮**：用户原则里的"程序写一个验证函数，工具自动调用"）
+HOST_HOOK = '''"""程序提供的钩子（项目自己写；工具会找到并调用）。"""
+
+
+def declarations():
+    return [{'name': 'weather', 'label': '天气'}]
+
+
+def validate_statement(head, text):
+    if head == 'mycue':
+        return ('闪电' in text), 'mycue 只认「闪电」'
+    if head == 'weather':
+        return True, ''
+    return None          # 别的我不管
+'''
+
+
+class TestHostHooks:
+    """程序的验证函数：**工具自动调用**（零配置，放对文件名就行）。"""
+
+    def _project(self, tmp_path, hook=HOST_HOOK):
+        root = _friendly_project(tmp_path, cds=False)
+        if hook is not None:
+            (root / 'storygraph.host.py').write_text(hook, encoding='utf-8')
+        return root
+
+    def test_no_hook_means_nothing_happens(self, tmp_path):
+        """
+        ⚠ 第一条自我约束：**程序不给就不发生** —— 没有钩子时工具行为
+        与以前**一模一样**（不许凭空多一分依赖）。
+        """
+        from storygraph.story.host_hooks import load_host_hooks
+        hooks = load_host_hooks(self._project(tmp_path, hook=None))
+        assert hooks.available is False
+        assert hooks.declarations() == []
+        assert hooks.validate('mycue', 'mycue "闪电"') == (None, '')
+
+    def test_declarations_from_the_program_are_used(self, tmp_path):
+        """① 程序 `declarations()` 说的名字 → 工具当成"认识"（不用写 rules.json）。"""
+        from storygraph.story.project_conventions import unknown_statements
+        from storygraph.story.statement_registry import clear_cache
+        root = self._project(tmp_path)
+        (root / 'game' / 'ch02.rpy').write_text(
+            'label ch02:\n    weather rain 强度=3\n    return\n', encoding='utf-8')
+        clear_cache()
+        assert 'weather' not in unknown_statements(root), \
+            '程序已经用 declarations() 声明了 weather，工具还报"不认识"'
+
+    def test_validate_true_takes_the_head_off_the_report(self, tmp_path):
+        """
+        ② 程序的 `validate_statement()` 说 True → 这一行程序认了 →
+        不算"工具不认识"（**这就是"程序写一个验证函数"那一条**）。
+        """
+        from storygraph.story.project_conventions import unknown_statements
+        from storygraph.story.statement_registry import clear_cache
+        root = self._project(tmp_path)
+        clear_cache()
+        got = unknown_statements(root)
+        assert 'mycue' not in got, f'程序验证通过了，工具还报：{sorted(got)}'
+
+    def test_validate_false_still_reports_the_head(self, tmp_path):
+        """
+        ③ 程序说 **False**（"我认它，但这一行不对"）→ 工具**照样报出来**
+        （它有话要说，只是理由来自程序）。
+        """
+        from storygraph.story.project_conventions import unknown_statements
+        from storygraph.story.statement_registry import clear_cache
+        root = self._project(tmp_path)
+        (root / 'game' / 'ch01.rpy').write_text(
+            'label ch01:\n    mycue "打雷"\n    return\n', encoding='utf-8')
+        clear_cache()
+        assert 'mycue' in unknown_statements(root), \
+            '程序说这一行不对，工具却沉默了'
+
+    def test_a_broken_hook_never_breaks_the_tool(self, tmp_path):
+        """
+        ⚠ 第二条自我约束：**程序写的代码不许弄坏工具** ——
+        钩子语法错 / 抛异常 / 返回垃圾，一律只记下来，工具照常干活。
+        """
+        from storygraph.story.host_hooks import load_host_hooks
+        for bad in ('def validate_statement(:\n    ???',
+                    'raise RuntimeError("炸")',
+                    'def declarations():\n    return "不是列表"\n\n'
+                    'def validate_statement(head, text):\n'
+                    '    raise ValueError("炸")\n'):
+            root = _friendly_project(tmp_path / f'b{abs(hash(bad)) % 999}',
+                                     cds=False)
+            (root / 'storygraph.host.py').write_text(bad, encoding='utf-8')
+            hooks = load_host_hooks(root)
+            # 关键：**不抛异常**，而且失败有记录（报告里要看得见）
+            assert hooks.declarations() == []
+            assert hooks.validate('mycue', 'x')[0] is None
+            assert hooks.notes, f'钩子坏了却什么都没记：{bad[:30]!r}'
+
+    def test_validate_none_is_not_a_yes(self, tmp_path):
+        """④ `None`（程序不管）**绝不等于**"程序说没问题"—— 否则就是假绿。"""
+        from storygraph.story.host_hooks import load_host_hooks
+        hooks = load_host_hooks(self._project(tmp_path))
+        ok, why = hooks.validate('something_else', 'something_else x=1')
+        assert ok is None, '程序不管的东西被当成了"程序说通过"'
+        assert why == ''
