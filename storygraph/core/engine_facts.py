@@ -47,9 +47,13 @@ SRC_SCANNER = 'scanner'
 SRC_CONFLICT = 'conflict'
 
 #: 已知的事实键（校验只认这些；多出来的键**报出来**，不静默忽略）。
+#:
+#: ⭐ `statements`（2026-10-11 加，**第一层**）：引擎 `renpy.statements.registry`
+#: 的原样快照 —— "**你注册了什么**"由引擎直接回答，这是判"认不认识某个写法"
+#: 的**权威名单**（不再靠"看报错文本猜"）。
 FACT_KEYS = (
     'images', 'tags', 'attributes', 'candidates',
-    'transforms', 'screens', 'defines', 'labels', 'builtins',
+    'transforms', 'screens', 'defines', 'labels', 'builtins', 'statements',
 )
 
 #: `derived` 段（**工具自己算的**，与"引擎给的"分开，避免混为一谈）。
@@ -207,6 +211,46 @@ def groups_of(facts: dict, tag: str) -> dict:
         if attr not in out[name]:
             out[name].append(attr)
     return out
+
+
+def registered_statements(facts: dict) -> dict:
+    """
+    **第一层**：引擎注册过的自定义语句 → `{名字: {'block', 'has_parse', …}}`。
+
+    数据来自引擎自己的 `renpy.statements.registry`（探针原样快照）——
+    所以这是"**你注册了什么**"的**权威答案**，不是我们的推测。
+
+    ⚠ 三条不宣称：
+      · 没采过 / `is_collectable` 为假 → `{}`（**不猜**）；
+      · 探针取不到注册表（老引擎 / 魔改）→ `{}`（`facts` 里能看到
+        探针记下的 `statements_error`）；
+      · 这是**快照**：项目改过 CDS 之后要重采（指纹会变）。
+    """
+    if not facts:
+        return {}
+    ok, _reason = is_collectable(facts)
+    if not ok:
+        return {}
+    table = value_of(facts, 'statements', {}) or {}
+    if not isinstance(table, dict):
+        return {}
+    return {str(k): v for k, v in table.items() if isinstance(v, dict)}
+
+
+def statement_names(facts: dict) -> set:
+    """注册表里的名字集合（判"认不认识"用这一个就够）。"""
+    return set(registered_statements(facts))
+
+
+def statement_shape(facts: dict, head: str) -> dict:
+    """
+    某个写法在**引擎注册表**里的形状（没注册 → `{}`）。
+
+    这是"**要填什么**"最权威的来源：`block` 直接说明它带不带块
+    （`True` / `False` / `'possible'` / `'script'`）；`has_parse` 说明项目
+    给它写了自定义 parse —— 那就**别猜参数**，该去看项目那段代码。
+    """
+    return registered_statements(facts).get(str(head or '').strip(), {})
 
 
 def candidates_of(facts: dict, tag: str) -> list:
@@ -638,4 +682,5 @@ __all__ = [
     'unrecognized_by_tag',
     'table_vs_engine', 'diff_facts',
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
+    'registered_statements', 'statement_names', 'statement_shape',
 ]

@@ -101,6 +101,47 @@ init 999 python:
             lambda: len(renpy.statements.registry)
             if isinstance(renpy.statements.registry, dict) else None)
 
+        def _statements():
+            # ⭐ **第一层：直接问引擎"你注册了什么"**（2026-10-11）
+            #
+            # 这是判"认不认识某个写法"的**权威名单** —— 比"看 lint 报错文本猜"
+            # 可靠得多。真机实测（决定性的三个事实）：
+            #   · `renpy.statements.registry` 是 `{**元组键**: 记录}`，
+            #     键形如 `('play', 'music')` / `('pause',)` ——
+            #     **多词语句按词拆成元组**，渲染时用空格接起来才是"写法"；
+            #   · 它**不是普通 dict**（`isinstance(reg, dict)` 为假！
+            #     我第一版就是被这一条把整个注册表滤成了空 —— 所以这里用
+            #     **鸭子类型**（有 `.items()` 就当映射），不再 `isinstance`；
+            #   · 真机（最小工程）实测 23 条，`play music` / `pause` 都在里面 ——
+            #     连引擎**内置**语句也在，所以这一层比我们的词表更权威。
+            #
+            # ⚠ 只取"能安全读"的：函数**只看在不在**（`bool(callable(x))`），
+            #    绝不调用、也不把函数对象写进 json（那会直接崩）。
+            table = {}
+            reg = getattr(renpy.statements, 'registry', None)
+            items = getattr(reg, 'items', None)
+            if not callable(items):
+                return table
+            for key, rec in items():
+                name = ' '.join(str(x) for x in key) if isinstance(
+                    key, (tuple, list)) else str(key)
+                item = {'name': name}
+                for hook in ('parse', 'lint', 'execute', 'predict', 'next',
+                             'execute_init', 'label', 'warp', 'post_execute',
+                             'predict_next', 'execute_default'):
+                    fn = getattr(rec, hook, None)
+                    if fn is not None:
+                        item['has_' + hook] = bool(callable(fn))
+                for field in ('block', 'init', 'translatable', 'init_priority'):
+                    if hasattr(rec, field):
+                        value = getattr(rec, field)
+                        if isinstance(value, (str, bool, int, float)):
+                            item[field] = value
+                table[name] = item
+            return table
+
+        put('statements', _statements)
+
         def _attrs():
             table = {}
             for tag in (out.get('tags') or []):
@@ -547,6 +588,8 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
         'transforms': [(EF.SRC_JSON_DUMP, sorted(dump_loc.get('transform') or []))],
         'screens': [(EF.SRC_JSON_DUMP, sorted(dump_loc.get('screen') or []))],
         'defines': [(EF.SRC_JSON_DUMP, sorted(dump_loc.get('define') or []))],
+        # ⭐ 第一层：引擎自己的语句注册表（"你注册了什么"的权威名单）
+        'statements': [(EF.SRC_PROBE, probe_data.get('statements') or {})],
     }
     facts = EF.build_facts(
         payloads,
