@@ -1485,6 +1485,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             'key 只存在你这台机器上（不写进项目、不上传）。填一次就能让 AI 干活；'
             '随时可以回来改或清掉。另：本工具也能作为 MCP server 被别的 AI 客户端连上'
             '（那时 key 是那个客户端的）')
+        act('🤖 AI 助手', self.open_ai_panel,
+            '跟它说要干什么（例：看看项目里有哪些我不认识的写法）。'
+            '它会自己读项目、提议怎么改；**要写盘时会先弹窗给你看 diff**，'
+            '你点头它才写', primary=True)
         act('📁 打开项目', self.open_project,
             '只加载资源表（xlsx：立绘 / 音乐 / 语音 / 变换 / 角色）'
             '与缩略图 —— **不往剧情图里放任何东西**')

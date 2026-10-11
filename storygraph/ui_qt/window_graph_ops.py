@@ -647,6 +647,28 @@ class GraphOpsMixin:
         # 没有 `graph` 键，别去取它（取到 None 会让下一个用图的人直接炸）。
         if self.graph is not None:
             self._report_missing_chapters(self.graph)
+    def open_ai_panel(self):
+        """
+        「🤖 AI 助手」：跟模型说话，它自己调工具干活（用户 2026-10-11 的要求）。
+
+        ⚠ **写盘闸门在这个面板里**：模型要写清单时，弹窗给它看 diff，
+        人点头才写（闸门本体在 `ai/agent.py`，**代码强制**，不靠提示词）。
+        """
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from storygraph.ui_qt.panel_ai import AiPanel
+        root = getattr(self, 'project_root', '') or ''
+        if not root:
+            self._log('[AI] 先打开一个项目，它才知道要读哪儿')
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle('AI 助手')
+        dlg.resize(880, 640)
+        lay = QVBoxLayout(dlg)
+        panel = AiPanel(dlg, project_root=root)
+        lay.addWidget(panel)
+        dlg.exec()
+        self._log('[AI] 助手窗口已关闭')
+
     def open_ai_key_dialog(self):
         """
         「🔑 AI 助手 · 填 API key」：**用户自己填 key**（用户 2026-10-11 的要求）。
