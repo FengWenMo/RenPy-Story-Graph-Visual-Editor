@@ -170,6 +170,23 @@ class CustomStatementDialog(QDialog):
         pv.addWidget(rm)
         iv.addLayout(pv)
 
+        # ⭐⭐ 「试切」：用户卡死的第一步就是"这一行会被怎么切、语句名该填什么"。
+        #   这里让他**粘一行真实剧本**，当场看到它被切成几格、每格对应哪个列名。
+        cut_row = QHBoxLayout()
+        cut_row.addWidget(QLabel('拿一行真实剧本试试'))
+        self.sample = QLineEdit()
+        self.sample.setPlaceholderText('例：show 小明 泳装 开心 '
+                                       '（从剧本里粘一行最准）')
+        cut_row.addWidget(self.sample, 1)
+        self.cut_try = QPushButton('试切')
+        self.cut_try.clicked.connect(self._refresh_cut)
+        cut_row.addWidget(self.cut_try)
+        iv.addLayout(cut_row)
+        self.cut_view = QLabel()
+        self.cut_view.setWordWrap(True)
+        self.cut_view.setProperty('role', 'caption')
+        iv.addWidget(self.cut_view)
+
         # ⭐ 用户 2026-10-11 实测反馈后的重做（`ui_qt/param_cards.py`）：
         #   "表格太小了！多个参数还要下拉看……编剧仍然看不明白"
         #   → 三列表格换成**一行一张宽卡**（自带"删掉这一项"），
@@ -192,6 +209,7 @@ class CustomStatementDialog(QDialog):
         self.label.textChanged.connect(self._refresh_preview)
         self.docs.textChanged.connect(self._refresh_preview)
         self.block.toggled.connect(self._refresh_preview)
+        self.sample.textChanged.connect(self._refresh_cut)
         self._refresh_preview()
 
         # —— 词组（分栏显示"服装 / 表情"这类）——
@@ -383,6 +401,42 @@ class CustomStatementDialog(QDialog):
                                  docs=self.docs.text(), block=block,
                                  params=self.params.rows())
 
+    def _refresh_cut(self, *_a):
+        """
+        **试切**：把粘进来的那一行按当前格子切开，显示每格吃到什么。
+
+        ⚠ 这一段的唯一职责是**回答用户卡死的第一步**：
+        "语句名该填什么、这一行会被怎么切" —— 切成什么样，这里就显示什么样。
+        """
+        view = getattr(self, 'cut_view', None)
+        sample = getattr(self, 'sample', None)
+        if view is None or sample is None:
+            return
+        line = sample.text().strip()
+        if not line:
+            view.setText('粘一行真实剧本，点「试切」—— 就能看出你的格子切得对不对。')
+            return
+        try:
+            from storygraph.authoring import pattern as P
+            groups = {g.get('name'): {'label': getattr(g, 'label', ''),
+                                      'options': list(getattr(g, 'options', [])
+                                                      or [])}
+                      for g in (self.groups.rows() if hasattr(self, 'groups')
+                                else [])
+                      if isinstance(g, dict) and g.get('name')}
+            got = P.match_line(self.params.slots(), line, groups=groups)
+        except Exception as e:                      # noqa: BLE001 - 试切不许炸窗口
+            swallow('ui_qt.dialog_learn.refresh_cut', e)
+            view.setText(f'试切没做成：{type(e).__name__}: {e}')
+            return
+        if not got.get('ok'):
+            view.setText('⚠ 切不上：' + str(got.get('reason') or '顺序或关键字不对'))
+            return
+        cells = ' ｜ '.join(
+            f'{c["text"]}（{c["column"] or "固定"}）' for c in got['cells'])
+        view.setText('切出来是这样：' + cells
+                     + f'　—　共 {len(got["cells"])} 格')
+
     def _refresh_preview(self, *_a):
         built = self.built()
         text = declaration_preview(built, path=str(self._root_path or ''))
@@ -395,6 +449,8 @@ class CustomStatementDialog(QDialog):
         preview = getattr(self, 'preview', None)
         if preview is not None:
             preview.setPlainText(text)
+        # 试切跟着一起刷（顺序一变，"切出来什么样"立刻要跟着变）
+        self._refresh_cut()
         btn = getattr(self, '_ok_btn', None)
         if btn is not None:
             # 勾了"一起写词组"时，允许**只写词组**（语句名可以是空的）

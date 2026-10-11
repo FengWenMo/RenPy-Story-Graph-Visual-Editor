@@ -313,6 +313,66 @@ def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     assert dlg.groups.count() == 1, '勾开之后声明还在'
 
 
+def test_the_dialog_can_try_cutting_a_real_line(qapp, tmp_path):
+    """
+    ⭐⭐ **回答用户卡死的第一步**（程序员撞墙记录）：
+    "语句名该填什么、这一行会被怎么切" —— 粘一行真实剧本，当场看到切法。
+
+    验三件：① 切得对时显示每格+列名；② 顺序不对时**明确说切不上**；
+    ③ 每格有**类型**可选（变量 vs 枚举由人选，不靠猜）。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.params.clear()
+    dlg.params.add_param('show', '', '', kind='keyword')
+    dlg.params.add_param('小明', '角色', '', kind='variable')
+    dlg.params.add_param('泳装', '服装', '泳装,校服', kind='choice')
+    dlg.params.add_param('开心', '神态', '开心,害羞', kind='choice')
+    dlg.sample.setText('show 小明 泳装 开心')
+    dlg._refresh_cut()
+    text = dlg.cut_view.text()
+    assert '切出来是这样' in text, text
+    assert '角色' in text and '服装' in text and '神态' in text, text
+    assert '4 格' in text, text
+
+    # 顺序不对（把"服装/神态"两格换位置）→ **明确说切不上**，不是默默不动
+    slots = dlg.params.slots()
+    slots[2], slots[3] = slots[3], slots[2]
+    from storygraph.authoring import pattern as P
+    got = P.match_line(slots, 'show 小明 泳装 开心')
+    assert got['ok'] is False and got['reason']
+
+    # 没粘样例时要有**引导**（不是空白）
+    dlg.sample.clear()
+    dlg._refresh_cut()
+    assert '粘一行' in dlg.cut_view.text(), dlg.cut_view.text()
+
+
+def test_each_slot_has_a_kind_and_can_be_reordered(qapp, tmp_path):
+    """
+    用户卡点：① 凭什么知道 `小明` 是变量、`泳装` 是枚举 → **格子自己标类型**；
+    ② 竖排的三张卡凭什么对应那个顺序 → **顺序能调，而且确实生效**。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.params.clear()
+    dlg.params.add_param('小明', '角色', '', kind='variable')
+    dlg.params.add_param('泳装', '服装', '泳装', kind='choice')
+    rows = dlg.params.rows()
+    assert [r['kind'] for r in rows] == ['variable', 'choice'], rows
+    # 调顺序：第二格上移 → 顺序真的变了
+    card = dlg.params._cards[1]
+    dlg.params.move(card, -1)
+    assert [r['label'] for r in dlg.params.rows()] == ['服装', '角色']
+    # 到边界不出错（第一格再上移 = 什么都不做）
+    dlg.params.move(dlg.params._cards[0], -1)
+    assert [r['label'] for r in dlg.params.rows()] == ['服装', '角色']
+
+
 def test_the_dialog_carries_params_into_the_declaration(qapp, project):
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     dlg = CustomStatementDialog(None, project_root=project, discovered=[])

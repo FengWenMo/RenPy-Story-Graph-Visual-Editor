@@ -21,9 +21,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QPushButton, QScrollArea,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from storygraph.ui_qt import tokens as T
 
@@ -156,10 +156,12 @@ class ParamCard(_Card):
     说明文字一律走 **tooltip**，不占纵向空间（用户："多个参数还要下拉看"）。
     """
 
-    def __init__(self, on_change=None, on_remove=None, parent=None):
+    def __init__(self, on_change=None, on_remove=None, on_move=None,
+                 parent=None):
         super().__init__('这个动作要填的东西', parent)
         self._on_change = on_change
         self._on_remove = on_remove
+        self._on_move = on_move
         head = self._outer.itemAt(0)
         self._rm = QPushButton('删掉这一项')
         self._rm.setProperty('role', 'ghost')
@@ -173,12 +175,39 @@ class ParamCard(_Card):
         self._label = QLineEdit()
         self._label.setPlaceholderText('这一列给编剧看的中文名（可留空）')
         self._label.setToolTip('可留空。留空就用左边那串字当列名。')
-        self.field(0, '剧本里怎么写', self._name)
+        # ⭐ 2026-10-11（程序员撞墙记录）：**这一格是什么类型，由人选** ——
+        #   用户原话："工具怎么知道我填的是'变量'还是'固定文本'？"
+        #   答案就是这里：`固定关键字 / 任意变量 / 从这些里选 / 可选的固定段`。
+        self._kind = QComboBox()
+        for key, text in (('keyword', '固定关键字'), ('variable', '任意变量'),
+                          ('choice', '从这些里选'),
+                          ('optional', '可选的固定段')):
+            self._kind.addItem(text, key)
+        self._kind.setToolTip(
+            '固定关键字 = 剧本里必须原样出现这几个字（如 show / at）；\n'
+            '任意变量 = 谁都可以（如人物名）；\n'
+            '从这些里选 = 只能填你列的候选值；\n'
+            '可选的固定段 = 可出现可不出现的一段（如 at 位置）。')
+        self._kind.currentIndexChanged.connect(self._changed)
+        # ⭐ 顺序是可以调的（用户卡点：竖着排的三张卡凭什么对应那个顺序）
+        self._up = QPushButton('↑')
+        self._down = QPushButton('↓')
+        for btn, tip in ((self._up, '跟上一格换位置'),
+                         (self._down, '跟下一格换位置')):
+            btn.setProperty('role', 'ghost')
+            btn.setToolTip(tip)
+            btn.setFixedWidth(28)
+        self._up.clicked.connect(lambda: on_move(self, -1) if on_move else None)
+        self._down.clicked.connect(lambda: on_move(self, +1) if on_move else None)
+        self.field(0, '这一格是', self._kind)
+        self.field(1, '剧本里怎么写', self._name)
         tag = QLabel('表格那一列显示什么')
         tag.setProperty('role', 'fieldLabel')
         tag.setToolTip('可留空。给编剧看的中文列名（例如「强度」）。')
-        self.body.addWidget(tag, 0, 2)
-        self.body.addWidget(self._label, 0, 3)
+        self.body.addWidget(tag, 1, 2)
+        self.body.addWidget(self._label, 1, 3)
+        self.body.addWidget(self._up, 1, 4)
+        self.body.addWidget(self._down, 1, 5)
         self.body.setColumnStretch(1, 3)
         self.body.setColumnStretch(3, 2)
 
@@ -218,11 +247,19 @@ class ParamCard(_Card):
 
     # ---- 数据 ----
     def data(self) -> dict:
-        return {'name': self._name.text().strip(),
+        return {'kind': self._kind.currentData() or 'variable',
+                'text': self._name.text().strip(),
+                'name': self._name.text().strip(),
                 'label': self._label.text().strip(),
+                'column': self._label.text().strip(),
                 'choices': self._choices.text() if self._limit.isChecked() else ''}
 
-    def set_data(self, name: str = '', label: str = '', choices: str = ''):
+    def set_data(self, name: str = '', label: str = '', choices: str = '',
+                 kind: str = ''):
+        if kind:
+            idx = self._kind.findData(kind)
+            if idx >= 0:
+                self._kind.setCurrentIndex(idx)
         self._name.setText(str(name or ''))
         self._label.setText(str(label or ''))
         text = str(choices or '')
@@ -258,10 +295,11 @@ class ParamList(QScrollArea):
         self._on_change = on_change
 
     # ---- 对外（与旧表格同形）----
-    def add_param(self, name: str = '', label: str = '', choices: str = ''):
+    def add_param(self, name: str = '', label: str = '', choices: str = '',
+                  kind: str = 'variable'):
         card = ParamCard(on_change=self._on_change, on_remove=self._remove,
-                         parent=self._host)
-        card.set_data(name, label, choices)
+                         on_move=self.move, parent=self._host)
+        card.set_data(name, label, choices, kind)
         self._col.insertWidget(self._col.count() - 1, card)
         self._cards.append(card)
         card.focus()
@@ -283,6 +321,36 @@ class ParamList(QScrollArea):
         """删掉最后一张（旧的"删这一行"语义：表里选中的那行）。"""
         if self._cards:
             self._remove(self._cards[-1])
+
+    def move(self, card, delta: int):
+        """
+        把这一格**跟邻居换位置**（用户卡点："这 3 张卡凭什么对应那个顺序"）。
+
+        ⚠ 顺序是本设计里**唯一**决定"代码里长什么样"的东西 ——
+        所以必须能改，而且改完立刻能在「试切」里看出来。
+        """
+        if card not in self._cards:
+            return
+        i = self._cards.index(card)
+        j = i + int(delta)
+        if not (0 <= j < len(self._cards)):
+            return
+        self._cards[i], self._cards[j] = self._cards[j], self._cards[i]
+        self._col.removeWidget(card)
+        self._col.insertWidget(j, card)
+        if self._on_change:
+            self._on_change()
+
+    def slots(self) -> list:
+        """把卡片转成**位置序列**（喂给 `authoring.pattern` 做试切）。"""
+        out = []
+        for card in self._cards:
+            row = card.data()
+            out.append({'kind': row.get('kind') or 'variable',
+                        'text': row.get('name') or '',
+                        'column': row.get('label') or '',
+                        'choices': row.get('choices') or ''})
+        return out
 
     def _remove(self, card):
         if card in self._cards:
