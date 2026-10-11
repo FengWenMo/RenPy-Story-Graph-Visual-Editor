@@ -546,6 +546,8 @@ def _cmd_engine_facts(args) -> int:
         if note_u:
             print()
             print(note_u)
+        print()
+        print(EF.format_behavior_line(cur))
         return 1 if (text or code_u) else 0
 
     result = EC.collect(project, sdk=args.sdk, mode=args.mode,
@@ -599,6 +601,9 @@ def _cmd_engine_facts(args) -> int:
     if und_text:
         print()
         print(und_text)
+    # ⭐ 行为级那一条：验过几个 / 没证明成几个（**没验过就明说没覆盖**）
+    print()
+    print(EF.format_behavior_line(facts))
 
     # ---- 退出码（CI 门禁）----
     if not result['ok']:

@@ -754,6 +754,42 @@ def _now() -> float:
     return time.time()
 
 
+def record_behavior(facts: dict, name: str, verdict: dict) -> dict:
+    """
+    把一次行为验证的结论**记进事实**（就地改，返回 `facts`）。纯函数。
+
+    为什么要有它：`verify_behavior` 只是**跑一次**；报告要显示"验过几个"，
+    就必须有人把结论**落进 `facts['behavior']`**（采集/验证方调它）。
+    形状见 `core.engine_facts.behavior_facts`。
+
+    ⚠ `verified` 三态**原样保留**（`True`/`False`/`None`）——
+    `None`（没证明成）绝不折成 `False`。
+    """
+    if not isinstance(facts, dict) or not name:
+        return facts
+    # ⚠ 两个形状细节都是判据抓出来的：
+    #   ① 要走 **`facts['facts'][key]`** 这一层（`value_of` 读的是它）；
+    #   ② 每条要写成 `{'value': …, 'source': …}`。
+    #   我第一版写成"顶层 + 裸表"，读取端一个都读不到。
+    container = facts.get('facts')
+    if not isinstance(container, dict):
+        container = {}
+        facts['facts'] = container
+    entry = container.get('behavior')
+    if not isinstance(entry, dict) or 'value' not in entry:
+        entry = {'value': {}, 'source': 'probe'}
+        container['behavior'] = entry
+    table = entry.get('value')
+    if not isinstance(table, dict):
+        table = {}
+        entry['value'] = table
+    v = (verdict or {}).get('verified')
+    table[str(name)] = {'verified': None if v is None else bool(v),
+                        'why': str((verdict or {}).get('summary')
+                                   or (verdict or {}).get('reason') or '')[:300]}
+    return facts
+
+
 def _bare_variant(head: str) -> dict:
     """批量场景用哪个形态：`bare`（"认不认识"唯一可靠的信号）。"""
     return ask_variants(head)[0]
@@ -854,5 +890,5 @@ def _write_ask(target: Path, src: str) -> None:
 __all__ = ['ASK_MARK', 'ASK_PREFIX', 'TEST_EXTRA_DIRS', 'TEST_NEEDS_DISPLAY',
            'TEST_TIMEOUT', 'ask_engine', 'ask_filename', 'ask_many',
            'ask_variants', 'behavior_probe_source', 'behavior_verdict',
-           'read_test_status', 'read_verdict', 'summarize', 'variant_source',
-           'verify_behavior']
+           'read_test_status', 'read_verdict', 'record_behavior', 'summarize',
+           'variant_source', 'verify_behavior']

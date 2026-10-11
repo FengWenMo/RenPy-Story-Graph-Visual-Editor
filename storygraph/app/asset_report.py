@@ -238,6 +238,10 @@ def format_asset_health(report: dict) -> str:
     _emit_custom_statement_section(stmts, cds, cds_error, out)
     _emit_engine_align_section(report.get('engine_align') or {}, out)
     _emit_undetermined_section(report.get('engine_undetermined') or {}, out)
+    # ⭐ 行为级那一行（第三层验了几个）—— 没验过就明说"没覆盖（≠ 通过）"
+    facts = report.get('engine_facts') or {}
+    out.append('')
+    out.append(EF.format_behavior_line(facts).rstrip())
     _emit_engine_unknown_section(report.get('engine_unknown') or {}, out)
 
     out.append('')

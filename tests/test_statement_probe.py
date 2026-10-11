@@ -334,6 +334,23 @@ def test_a_missing_status_is_never_a_pass():
     assert '证据' in v['reason'] or '证据' in v['summary']
 
 
+def test_record_behavior_keeps_the_three_states(tmp_path):
+    """
+    ⚠ 记录时 `verified=None`（没证明成）**原样保留** —— 绝不折成 False
+    （"没证明"与"证明是错的"是两件事，第四层的核心口径）。
+    """
+    from storygraph.core import engine_facts as EF
+    facts = EF.empty_facts()
+    SP.record_behavior(facts, 'sg_a', {'verified': True, 'summary': '通过'})
+    SP.record_behavior(facts, 'sg_b', {'verified': False, 'summary': '证据不在'})
+    SP.record_behavior(facts, 'sg_c', {'verified': None, 'reason': '没读到'})
+    got = EF.behavior_facts(facts)
+    assert got['sg_a']['verified'] is True
+    assert got['sg_b']['verified'] is False
+    assert got['sg_c']['verified'] is None, 'None 不许折成 False'
+    assert '没读到' in got['sg_c']['why']
+
+
 def test_test_needs_display_and_extra_dirs_are_documented():
     """`test` 要显示 + `gui/`/`fonts/`（真机撞出来的两处）—— 记在常量里防忘。"""
     assert SP.TEST_NEEDS_DISPLAY is True

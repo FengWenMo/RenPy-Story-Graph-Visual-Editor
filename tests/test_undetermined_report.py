@@ -189,3 +189,58 @@ def test_health_report_has_no_section_without_data():
     from storygraph.app.asset_report import format_asset_health
     text = format_asset_health(_minimal_report())
     assert '能不能问出结论' not in text
+
+
+# ==================== ⑤ 行为级那一行（第四层口径跟上第三层） ====================
+
+def test_behavior_line_says_not_covered_when_nothing_was_verified():
+    """
+    一个都没验过 → **明说"这一层没覆盖"**，并且必须写清 **没覆盖 ≠ 通过**
+    （这是原来的口径，不能因为有了第三层就把它悄悄抹掉）。
+    """
+    text = EF.format_behavior_line({})
+    assert '没覆盖' in text and '没覆盖 ≠ 通过' in text, text
+
+
+def test_behavior_line_reports_counts_when_something_was_verified():
+    """验过 → 报"验过 N / 通过 / 失败 / 没证明成"，并列出名字。"""
+    facts = EF.build_facts(
+        {'behavior': [(EF.SRC_PROBE, {
+            'sg_ok': {'verified': True, 'why': '证据在'},
+            'sg_bad': {'verified': False, 'why': '证据文件不存在'},
+            'sg_meh': {'verified': None, 'why': '没读到 Status'},
+        })]},
+        collection={'parse_clean': True, 'probe_complete': True})
+    text = EF.format_behavior_line(facts)
+    assert '验过 3 个' in text, text
+    assert '通过 1 / 失败 1' in text, text          # 计数（`/` 分隔）
+    assert '没证明成** 1' in text, text
+    assert 'sg_ok' in text and 'sg_bad' in text and 'sg_meh' in text, text
+    assert '没覆盖' not in text, '验过了就不该再说"没覆盖"'
+
+
+def test_behavior_none_is_kept_distinct_from_false():
+    """
+    ⚠ `verified=None`（没证明成）**绝不折成 False**：
+    "没证明"与"证明是错的"是两件事（第四层的核心口径）。
+    """
+    facts = EF.build_facts(
+        {'behavior': [(EF.SRC_PROBE, {
+            'a': {'verified': None}, 'b': {'verified': False}})]},
+        collection={'parse_clean': True, 'probe_complete': True})
+    s = EF.behavior_summary(facts)
+    assert s['unverified'] == ['a'] and s['failed'] == ['b'], s
+    line = EF.format_behavior_line(facts)
+    assert '既不是通过也不是失败' in line, line
+
+
+def test_health_report_carries_the_behavior_line():
+    """体检报告里也要有这一行（否则报告口径还是旧的）。"""
+    from storygraph.app.asset_report import format_asset_health
+    text = format_asset_health(_minimal_report(engine_facts={}))
+    assert '行为级验证' in text and '没覆盖' in text, text
+    facts = EF.build_facts(
+        {'behavior': [(EF.SRC_PROBE, {'x': {'verified': True}})]},
+        collection={'parse_clean': True, 'probe_complete': True})
+    text2 = format_asset_health(_minimal_report(engine_facts=facts))
+    assert '验过 1 个' in text2, text2

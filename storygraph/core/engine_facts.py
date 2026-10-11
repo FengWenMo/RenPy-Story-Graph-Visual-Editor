@@ -54,6 +54,9 @@ SRC_CONFLICT = 'conflict'
 FACT_KEYS = (
     'images', 'tags', 'attributes', 'candidates',
     'transforms', 'screens', 'defines', 'labels', 'builtins', 'statements',
+    #: ⭐ **行为级**的验证结果（第三层）：`{查询名: {'verified', 'why'}}`。
+    #: `verified` 三态：`True` 证明了 / `False` 证明不成立 / **`None` 没证明成**。
+    'behavior',
 )
 
 #: `derived` 段（**工具自己算的**，与"引擎给的"分开，避免混为一谈）。
@@ -325,6 +328,41 @@ def undetermined_statements(facts: dict) -> dict:
     return out
 
 
+def format_behavior_line(facts: dict) -> str:
+    """
+    行为级那一行（**第四层的口径**）→ 人话。
+
+    · **一个都没验过** → 明说"这一层没覆盖"，并写清**没覆盖 ≠ 通过**
+      （原来的写法，保留）；
+    · **验过** → 报"验过 N —— 通过/失败/没证明成"，并把失败与
+      "没证明成"的**名字**列出来（`verified=None` 那档既不叫通过也不叫失败）。
+    """
+    """
+    行为级那一行（第四层口径）→ 人话。
+
+    · **一个都没验过** → 明说"这一层没覆盖"，并写清**没覆盖 ≠ 通过**
+      （这是原来的写法，保留）；
+    · **验过** → 报"已验 N / 没验 M"，并把失败与"没证明成"的**名字**列出来。
+    """
+    s = behavior_summary(facts)
+    if not s['total']:
+        return ('  ⚠ 行为级验证（`testcase` + `test`）**这一层没覆盖**：'
+                '它在"能被 test 跑起来的完整工程"上才做得了（本机实测：'
+                '裸最小工程跑 `test` 会卡住）。**没覆盖 ≠ 通过。**')
+    parts = [f'  · 行为级验证：验过 {s["total"]} 个 —— '
+             f'通过 {len(s["verified"])}'
+             f' / 失败 {len(s["failed"])}'
+             f' / **没证明成** {len(s["unverified"])}']
+    if s['verified']:
+        parts.append('      通过：' + '、'.join(s['verified'][:6]))
+    if s['failed']:
+        parts.append('      ⚠ 失败：' + '、'.join(s['failed'][:6]))
+    if s['unverified']:
+        parts.append('      ⚠ 没证明成（**既不是通过也不是失败**）：'
+                     + '、'.join(s['unverified'][:6]))
+    return '\n'.join(parts)
+
+
 def format_undetermined(summary: dict) -> str:
     """
     第四层的汇总 → 人话（**没有内容就返回空串**：不宣称）。
@@ -356,11 +394,62 @@ def format_undetermined(summary: dict) -> str:
             out.append(f'      {r["head"]}×{r["count"]}：{r["why"][:100]}')
         if len(und) > 6:
             out.append(f'      …另有 {len(und) - 6} 个')
-    out.append('  ⚠ 行为级验证（`testcase` + `test`）**这一层没覆盖**：'
-               '它在"能被 test 跑起来的完整工程"上才做得了（本机实测：'
-               '裸最小工程跑 `test` 会卡住）。**没覆盖 ≠ 通过。**')
     out.append('  · 以上是「我认出的」，不代表项目里只有这些（N1）')
     return '\n'.join(out)
+
+
+def behavior_facts(facts: dict) -> dict:
+    """
+    **第三层的事实**：查询语句的行为验证结果 → `{查询名: {'verified', 'why'}}`。
+
+    形状（采集/验证方写进 `facts['behavior']`）::
+
+        {'sg_check_weather': {'verified': True,  'why': '引擎报 PASSED，且证据存在'},
+         'sg_check_outfit':  {'verified': False, 'why': '证据文件不存在'},
+         'sg_check_demo':    {'verified': None,  'why': '没读到 Status'}}
+
+    ⚠ 三条不宣称（与注册表那一层同源）：
+      · 没采过 → `{}`；
+      · `verified=None`（没证明成）**保留为 None**，绝不折成 False
+        （"没证明"与"证明是错的"是两件事）；
+      · 坏条目跳过，不炸。
+    """
+    if not facts:
+        return {}
+    table = value_of(facts, 'behavior', {}) or {}
+    if not isinstance(table, dict):
+        return {}
+    out = {}
+    for name, rec in table.items():
+        if not isinstance(rec, dict):
+            continue
+        v = rec.get('verified')
+        out[str(name)] = {'verified': None if v is None else bool(v),
+                          'why': str(rec.get('why') or '')}
+    return out
+
+
+def behavior_summary(facts: dict) -> dict:
+    """
+    **第四层的口径**：行为级**验了几个 / 没验几个**（纯函数）。
+
+    返回 `{'verified': [名字…], 'failed': [名字…], 'unverified': [名字…],
+           'total': int}`。
+
+    ⚠ 三档分开：`verified=True`（证明了）/ `False`（证明不成立）/
+    `None`（**没证明成** —— 既不是"通过"也不是"失败"）。
+    """
+    table = behavior_facts(facts)
+    out = {'verified': [], 'failed': [], 'unverified': [], 'total': len(table)}
+    for name in sorted(table):
+        v = table[name]['verified']
+        if v is True:
+            out['verified'].append(name)
+        elif v is False:
+            out['failed'].append(name)
+        else:
+            out['unverified'].append(name)
+    return out
 
 
 def candidates_of(facts: dict, tag: str) -> list:
@@ -794,4 +883,5 @@ __all__ = [
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
     'registered_statements', 'statement_names', 'statement_shape',
     'undetermined_statements', 'format_undetermined',
+    'behavior_facts', 'behavior_summary',
 ]

@@ -56,10 +56,24 @@ v2 = SP.verify_behavior(work, 'sg_verify_ok', evidence='sg_noop = True',
 print(f"    status={v2['status']!r} verified={v2['verified']}")
 print(f"    {v2['summary']}")
 
+print('\n=== ③ 把验证结果记进事实 → 报告那一行长什么样')
+from storygraph.core import engine_facts as EF                        # noqa: E402
+facts = EF.empty_facts()
+facts.setdefault('facts', {})
+SP.record_behavior(facts, 'sg_verify_ok', v1)
+SP.record_behavior(facts, 'sg_verify_meh', v2)
+facts['collection'] = {'parse_clean': True, 'probe_complete': True}
+print(EF.format_behavior_line(facts))
+s = EF.behavior_summary(facts)
+print(f"    汇总：通过 {s['verified']} / 失败 {s['failed']} / "
+      f"没证明成 {s['unverified']}")
+
 print('\n=== 结论')
 print('    ① 期望 True  →', '✅' if v1['verified'] is True else '❌')
 print('    ② 期望 None（没证据 ⇒ 不给通过）→',
       '✅' if v2['verified'] is None else '❌')
+print('    ③ 报告能报出"验过 2 个"→',
+      '✅' if '验过 2 个' in EF.format_behavior_line(facts) else '❌')
 
 import shutil                                                     # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)

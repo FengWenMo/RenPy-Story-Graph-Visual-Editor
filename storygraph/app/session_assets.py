@@ -338,11 +338,18 @@ class AssetRegistryMixin:
         engine_align = self._engine_align(reg)
         # 第四层：把"测不出来的写法"也交给报告（**只出数据，文案在 app 层**）
         engine_undetermined = self._undetermined()
+        # ⭐ 行为级那一行（第三层验了几个）：渲染要的是 facts 本身
+        facts_for_report = {}
+        try:
+            facts_for_report = self.engine_facts() or {}
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets.asset_health_report.facts', e)
         return {'ok': True, 'error': '', 'counts': counts,
                 'cds': cds, 'cds_error': cds_error,
                 'statements': statements,
                 'engine_align': engine_align,
                 'engine_undetermined': engine_undetermined,
+                'engine_facts': facts_for_report,
                 'total_rows': sum(counts[k] for k in
                                   ('images', 'music', 'sounds', 'voices')),
                 'missing': missing, 'unregistered': unreg,
