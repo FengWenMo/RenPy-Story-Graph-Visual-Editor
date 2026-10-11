@@ -647,6 +647,13 @@ class ConversionResult:
     ambiguous: dict = field(default_factory=dict)
     #: 这份输入看起来像**已经写好的 .rpy**（不是纯文字）—— 强提示
     looks_like_script: list = field(default_factory=list)
+    #: ⚠ "看着像谁在说话，但我不认识这个名字"：`[{no, token, raw}]`。
+    #:
+    #: 2026-10-11 抓到的**静默缺陷**：`小明：谁啊？` 原来被安静地当成旁白，
+    #: `unmapped/warnings/dropped/ambiguous` **全空** —— 而编剧写的是"小明说"。
+    #: 本仓立场是"静默失败比报错坏得多"，所以**只报不猜**：这一行照旧是旁白，
+    #: 但必须让用户看见"这里有个我不认识的名字"。（只增字段，不动既有判据。）
+    suspect_speakers: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -766,6 +773,20 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
     body = '\n'.join(out)
     head = f'label {label}:\n' if label else ''
     text_out = f'{head}{body}\n'
+    # ⚠ **只增不改**的后扫描（2026-10-11 修静默缺陷）：
+    #   `小明：谁啊？` 这种"短名字 + 冒号 + 内容"的行，如果名字既不在 id、
+    #   也不在显示名/别名里，原来会被**安静地**当成旁白（用户看不到任何提示）。
+    #   这里只把它**报出来**（不改判读 —— 它真的可能只是旁白里带冒号）。
+    #   门槛故意保守：名字 ≤12 字、冒号后非空、且不是已知的旁白标记。
+    suspect = _suspect_speakers(parsed, chars)
+    if suspect:
+        warnings.append(
+            '⚠ 有 {n} 行**看着像谁在说话**，但这个名字不在角色表里（'
+            '它们被当成了旁白）：{sample} —— 要认它，去角色表里加别名；'
+            '不认就确认它是旁白'.format(
+                n=len(suspect),
+                sample='；'.join(f'第 {s["no"]} 行「{s["token"]}」'
+                                 for s in suspect[:5])))
     if mark_generated:
         # ⚠ 形状必须与 `render_beats_to_rpy` **逐字节一致**（实测对齐一次就够了）：
         #
@@ -784,7 +805,77 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
         unmapped=unmapped,
         suggested_defines=[chars.suggest_define(t) for t in sorted(unmapped)],
         warnings=warnings, dropped=dropped, conflicts=list(chars.conflicts),
-        ambiguous=ambiguous, looks_like_script=code_like)
+        ambiguous=ambiguous, looks_like_script=code_like,
+        suspect_speakers=suspect)
+
+
+#: "短名字 + 冒号 + 内容"（中英冒号都认；名字里不许有空格/标点）
+_SUSPECT_SPEAKER_RE = re.compile(
+    r'^\s*([^\s：:，。！？、,\.!?]{1,12})\s*[：:]\s*(\S.*)$')
+
+
+def _suspect_speakers(parsed, chars) -> list:
+    """
+    "看着像谁在说话，但我不认识"的那些行（**只报不猜**）。
+
+    判据保守（宁可少报，不可乱报）：
+      · 该行被判成了 `narration`（已识别出来的说话人不用管）；
+      · 形如 `名字：内容` / `名字: 内容`；
+      · 名字 ≤ 12 个字符、不含空格与标点；
+      · 名字**不在** id / 显示名 / 别名里。
+
+    ⚠ 返回值只用于**提示** —— 绝不因此改变这一行的判读
+    （`「旁白」：天亮了` 这类真的可能是旁白）。
+    """
+    known = set()
+    for attr in ('ids', 'names', 'aliases'):
+        value = getattr(chars, attr, None)
+        if isinstance(value, dict):
+            known.update(str(k) for k in value)
+            for v in value.values():
+                if isinstance(v, (list, tuple, set)):
+                    known.update(str(x) for x in v)
+                else:
+                    known.add(str(v))
+        elif isinstance(value, (list, tuple, set)):
+            known.update(str(x) for x in value)
+    known = {k.strip().lower() for k in known if str(k).strip()}
+    out = []
+    for line in parsed or ():
+        if getattr(line, 'kind', '') != 'narration':
+            continue
+        raw = str(getattr(line, 'raw', '') or '')
+        m = _SUSPECT_SPEAKER_RE.match(raw)
+        if not m:
+            continue
+        token = m.group(1).strip()
+        if not _looks_like_a_speaker_name(token, known):
+            continue
+        out.append({'no': int(getattr(line, 'no', 0) or 0), 'token': token,
+                    'raw': raw[:80]})
+    return out
+
+
+#: 说话人名字**长得像什么** —— 判据故意很紧（噪声会被人无视，那比不报更糟）：
+#:   · 2–6 个字符；
+#:   · 要么像标识符（`MOM` / `lyj2`），要么是 2–4 个汉字；
+#:   · 不含数字开头（`2条新消息` 是旁白）；
+#:   · 不含"说/曰/道/问/答/笑/消息"这类**旁白味儿**的字
+#:     （`一友曰`、`两室友笑曰` 都实测误报过，已排除）。
+_NARRATION_FLAVOUR = '说曰道问答笑消息的是了吗呢啊哦嗯'
+
+
+def _looks_like_a_speaker_name(token: str, known) -> bool:
+    token = str(token or '').strip()
+    if not token or len(token) > 6 or token.lower() in known:
+        return False
+    if token[0].isdigit():
+        return False
+    if any(ch in _NARRATION_FLAVOUR for ch in token):
+        return False
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', token):
+        return True                                  # 像变量名：MOM / lyj2
+    return bool(re.fullmatch(r'[\u4e00-\u9fff]{2,4}', token))
 
 
 def _escape(text: str) -> str:

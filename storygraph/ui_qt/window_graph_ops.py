@@ -519,6 +519,12 @@ class GraphOpsMixin:
                       f'—— 它会被当旁白；要认它请在角色表里加别名')
         for item in (getattr(res, 'ambiguous', []) or [])[:3]:
             self._log(f'[导入] ⚠ 有歧义：{str(item)[:80]}')
+        # ⚠ "看着像谁在说话，但我不认识这个名字" —— **必须报**（2026-10-11 修的静默缺陷：
+        #   `小明：谁啊？` 原来被安静当旁白，用户一个字都看不到）
+        for s in (getattr(res, 'suspect_speakers', []) or [])[:5]:
+            self._log(f'[导入] ⚠ 第 {s.get("no")} 行看着像「{s.get("token")}」在说话，'
+                      f'但这个名字不在角色表里 —— 它被当成了旁白。'
+                      f'要认它就去角色表加别名；不认就当它确实是旁白')
         game_dir = Path(self._project_root or '.') / 'game'
         label = str(getattr(res, 'label', '') or 'chapter')
         out = game_dir / f'{re.sub(r"[^0-9A-Za-z_]", "_", label)}.generated.rpy'

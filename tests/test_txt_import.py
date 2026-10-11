@@ -38,6 +38,37 @@ def _cm():
     return CharacterMap(CHARS)
 
 
+# ---------------- 看着像说话人的行（2026-10-11 修静默缺陷）----------------
+
+def test_a_speaker_shaped_line_with_an_unknown_name_is_reported():
+    """
+    ⭐⭐ **修掉的静默缺陷**：`小明：谁啊？` 原来被**安静地**当成旁白 ——
+    `unmapped / warnings / dropped / ambiguous` **全空**，用户一个字都看不到；
+    而编剧写的是"小明说" ⇒ 工具悄悄改掉了作者意图。
+
+    现在的规矩是"**只报不猜**"：这一行**照旧**是旁白（它真可能是），
+    但必须出现在 `suspect_speakers` 里，并进 `warnings` 的人话摘要。
+    """
+    chars = dict(CHARS)
+    chars['lyj'] = {'Name': '叶怀瑾'}            # 表里**没有**「小明」
+    res = convert_text('lyj：好。\n小明：谁啊？\n', characters=chars)
+    assert [s['token'] for s in res.suspect_speakers] == ['小明'], \
+        res.suspect_speakers
+    assert res.suspect_speakers[0]['no'] == 2
+    assert any('看着像谁在说话' in w for w in res.warnings), res.warnings
+    # ⚠ 判读**不许被改**（猜错了比不报更糟）
+    kinds = {ln.raw: ln.kind for ln in res.lines}
+    assert kinds['小明：谁啊？'] == 'narration'
+
+
+def test_known_speakers_and_plain_colon_sentences_are_not_flagged():
+    """别乱报：认识的说话人、以及**不像名字**的冒号句都不进 suspect。"""
+    chars = dict(CHARS)
+    chars['lyj'] = {'Name': '叶怀瑾'}
+    res = convert_text('lyj：好。\n今天要说的是：明天放假。\n', characters=chars)
+    assert res.suspect_speakers == [], res.suspect_speakers
+
+
 # ---------------- 括号 ----------------
 
 def test_brackets_become_comments_above_the_line():
