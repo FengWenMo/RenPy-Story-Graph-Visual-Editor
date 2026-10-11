@@ -43,6 +43,11 @@ WRITERS = {
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
     'pipeline/build.py::build_project': '写构建报告 JSON',
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
+    'mcp_surface.py::declare': 'MCP 的写入口 —— **自己不写盘**，只调上面那个唯一写入口'
+                               '（`declare_statement`）；额外做三件事：'
+                               '`dry_run` 试算（只给 diff 不落盘）、写前留 `.bak`、'
+                               '回执里如实报 `written`/`diff`/`backup`。'
+                               '⚠ 资源表一个字不动（硬红线，判据钉住）',
     'story/statement_registry.py::declare_attr_groups':
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':

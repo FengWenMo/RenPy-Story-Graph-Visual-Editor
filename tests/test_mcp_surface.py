@@ -149,10 +149,15 @@ def test_every_listed_tool_actually_exists():
                 f'清单说 {t["name"]} 已做，但 mcp_surface.{short} 不存在'
         else:
             blob = ' '.join(t.get('known_limits') or [])
-            assert '还没做' in blob, \
+            assert '还没做' in blob or '还没实现' in blob, \
                 f'{t["name"]} 只是规划，却没在 known_limits 里说清'
-            assert not callable(getattr(M, short, None)), \
-                f'{t["name"]} 已经是 planned，却又能调 —— 状态没跟上'
+            fn = getattr(M, short, None)
+            if fn is not None:
+                # 允许"诚实的占位"：能调，但必须**明确说没做**（不许假绿）
+                got = fn(ROOT / '.pip-tmp', ) if short == 'table_export' else None
+                if got is not None:
+                    assert got['ok'] is False, (t['name'], got)
+                    assert '还没' in got['reason'], got
 
 
 # ==================== ③ 八个薄封装：三态 + source + 绝不抛异常 ====================
@@ -250,6 +255,93 @@ def test_health_actually_reads_a_project_rather_than_always_failing(tmp_path):
     assert got['ok'] is True, got
     assert isinstance(got.get('findings'), list)
     assert 'severity' not in [f.get('id') for f in got['findings']]
+
+
+def test_declare_dry_run_writes_nothing_but_shows_the_diff(tmp_path):
+    """
+    ⭐ 第 4 步的第一条护栏：**模型该先试算**。
+    `dry_run=True` → 回执里 `written=[]`，但要**给出 diff**（人能看懂要改什么），
+    而且磁盘上的清单**一个字节都不许变**。
+    """
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    manifest = root / 'storygraph.rules.json'
+    got = M.declare(root, 'weather', label='天气', dry_run=True,
+                    params=[{'name': '强度', 'label': '强度'}])
+    assert got['dry_run'] is True and got['written'] == [], got
+    assert 'weather' in got['diff'], got['diff']
+    assert not manifest.exists(), 'dry_run 竟然写盘了'
+
+
+def test_declare_writes_and_hands_back_a_receipt(tmp_path):
+    """真写：回执必须说清**写了哪个文件**、diff 是什么、备份在哪。"""
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    got = M.declare(root, 'weather', label='天气')
+    assert got['ok'] is True, got
+    assert got['written'], '写了盘却没说是哪个文件'
+    assert str(root / 'storygraph.rules.json') in got['written']
+    assert got['diff'], '没给 diff'
+    assert got['action'] in ('added', 'updated'), got
+    # 真的落进去了（而且是可评审的 JSON）
+    import json
+    data = json.loads((root / 'storygraph.rules.json').read_text(encoding='utf-8'))
+    assert any(s.get('name') == 'weather' for s in data['statements'])
+
+
+def test_declare_refuses_a_bad_name_and_says_why(tmp_path):
+    """护栏：名字不合法 → `ok=False` + 原因（**不写盘**）。"""
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    for bad in ('', '9 bad', '   '):
+        got = M.declare(root, bad)
+        assert got['ok'] is False, (bad, got)
+        assert got['reason'], bad
+        assert got['written'] == [], bad
+
+
+def test_declare_never_touches_asset_tables(tmp_path):
+    """⭐⭐ **硬红线**：写声明的全过程里，资源表**一个字节都不许动**。"""
+    from openpyxl import Workbook
+    root = tmp_path / 'proj'
+    tables = root / 'game' / 'asset_tables'
+    tables.mkdir(parents=True)
+    wb = Workbook()
+    wb.active.title = 'images'
+    wb.active.append(['ID', 'Path'])
+    wb.active.append(['a', 'a.png'])
+    target = tables / 'images.xlsx'
+    wb.save(target)
+    before = target.read_bytes()
+    for name in ('weather', 'outfit'):
+        M.declare(root, name, label=name)
+    after = target.read_bytes()
+    assert before == after, '写声明竟然动了资源表'
+
+
+def test_table_export_is_honestly_not_implemented(tmp_path):
+    """
+    ⚠ 我第一版这里只"读了注册表、比了 mtime"就返回 `ok=True` —— **假绿**。
+    现在一律 `ok=False` + "还没实现"，能力清单里也标 `planned`。
+    """
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    got = M.table_export(root)
+    assert got['ok'] is False and '还没实现' in got['reason'], got
+    assert got['written'] == []
+    planned = {t['name'] for t in M.capabilities()['tools']
+               if t.get('status') == 'planned'}
+    assert 'storygraph_table_export' in planned, planned
+
+
+def test_both_write_tools_use_the_same_receipt_shape(tmp_path):
+    """⭐ 统一回执：两个写类工具（含未实现的占位）形状必须一致。"""
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    for got in (M.declare(root, 'weather'), M.table_export(root)):
+        for key in ('ok', 'source', 'reason', 'written', 'diff', 'backup',
+                    'dry_run'):
+            assert key in got, (key, got)
 
 
 def test_host_validate_reports_when_the_program_does_not_participate(tmp_path):

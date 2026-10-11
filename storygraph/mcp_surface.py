@@ -89,10 +89,16 @@ def capabilities() -> dict:
              'known_limits': ['`severity=unknown` 表示"测不出来"，**不是**没问题']},
             {'name': 'storygraph_declare', 'kind': 'write',
              'summary': '把一条声明写进 storygraph.rules.json（唯一写入口）',
-             'source': 'table', 'tri_state': False, 'status': 'planned',
+             'source': 'table', 'tri_state': False, 'status': 'done',
              'known_limits': ['只写清单文件；**不许**改资源表（硬红线）',
-                              '⚠ **还没做**（第 4 步）：现在调它会失败 —— '
-                              '不要承诺模型能用它写盘']},
+                              '`dry_run=True` 只算 diff 不写盘 —— '
+                              '**先试算给人看，再决定真写**',
+                              '回执必带 `written` / `diff` / `backup`']},
+            {'name': 'storygraph_table_export', 'kind': 'write',
+             'summary': '导出剧本表（**本步故意没做**，见 reason）',
+             'source': 'table+engine', 'tri_state': False, 'status': 'planned',
+             'known_limits': ['⚠ **还没做**：调它一律 `ok=False` + "还没实现"，'
+                              '别把它当成导出成功']},
         ],
         'hard_limits': [
             '引擎级：`init python` 里注册的写法**赶不上解析期**，'
@@ -358,6 +364,148 @@ def health(project_root) -> dict:
                        reason=f'体检没做成：{type(e).__name__}: {e}')
 
 
-__all__ = ['FALSE', 'TRUE', 'UNKNOWN', 'ask_engine', 'capabilities', 'discover',
-           'engine_facts', 'health', 'host_validate', 'project_context',
-           'registry_check', 'scan_unknown', 'verify_behavior']
+def _receipt(source, *, ok=True, reason='', written=None, diff='', backup='',
+             dry_run=False, **kw) -> dict:
+    """
+    ⭐ **统一的"改了什么"回执**（第 4 步的第一等公民）。
+
+    所有**写盘**的工具都返回同一种形状 —— 模型最需要知道的就是"你动了什么"：
+
+        {'ok', 'source', 'reason',
+         'written': [路径…],      # 真的被写的文件（空 = 什么都没改）
+         'diff': 文本,            # 改了什么（人能读、模型能引）
+         'backup': 路径,          # 备份在哪（能回滚）
+         'dry_run': bool}         # 这次只是试算，没写盘
+
+    ⚠ 绝不"写了但不说" —— 那是不可逆的破坏里最糟的一种。
+    """
+    out = {'ok': bool(ok), 'source': source, 'reason': str(reason or ''),
+           'written': list(written or ()), 'diff': str(diff or ''),
+           'backup': str(backup or ''), 'dry_run': bool(dry_run)}
+    out.update(kw)
+    return out
+
+
+def _manifest_path(project_root):
+    from storygraph.core import engine_facts as EF                  # noqa: F401
+    from storygraph.story.project_conventions import MANIFEST_NAMES
+    root = Path(project_root)
+    return root / MANIFEST_NAMES[0]
+
+
+def declare(project_root, name, *, label='', docs='', block=None, params=(),
+            dry_run=False) -> dict:
+    """
+    **把一个写法写进项目清单**（`storygraph.rules.json`，唯一写入口）。
+
+    这是 MCP 里**第一个会改盘的**工具，所以护栏最厚：
+
+      · `dry_run=True` → **只算 diff、不写盘**（回执里 `written=[]`）——
+        模型该先试算、给人看，再决定要不要真写；
+      · 真写时**先记 diff 与备份路径**，回执里必须有；
+      · 走的是**唯一写入口** `statement_registry.declare_statement`
+        （它自己负责"同名=更新""不覆盖手写清单""拒绝空名字"）；
+      · 只碰清单文件 —— **资源表一个字都不许动**（硬红线）。
+
+    返回 `_receipt(...)`（含 `action`：`added` / `updated` / `refused`）。
+    """
+    try:
+        from storygraph.authoring.learn_statement import build_declaration
+        from storygraph.story.statement_registry import (clear_cache,
+                                                         declare_statement)
+        built = build_declaration(name, label=label, docs=docs, block=block,
+                                  params=list(params or ()))
+        if not built.get('ok'):
+            return _receipt('table', ok=False,
+                            reason=str(built.get('reason') or '声明不合法'),
+                            action='refused', warnings=built.get('warnings'))
+        # ⚠ `declare_statement(project_root, name, label=…, columns=…, block=…,
+        #   docs=…)` 收的是**字段**，不是 entry 字典（我第一版当成 entry 传，
+        #   于是它报"语句名不能为空"—— 判据当场抓到）。
+        entry = {'name': built.get('name'), 'label': built.get('label'),
+                 'docs': built.get('docs'), 'block': built.get('block'),
+                 'columns': built.get('columns') or []}
+        path = _manifest_path(project_root)
+        before = path.read_text(encoding='utf-8') if path.is_file() else ''
+        if dry_run:
+            after = _preview_manifest(before, entry)
+            return _receipt('table', ok=True, written=[], dry_run=True,
+                            diff=_manifest_diff(before, after),
+                            reason='（试算：没有写盘）', action='would-write',
+                            warnings=built.get('warnings'))
+        backup = ''
+        if before:
+            bak = path.with_suffix(path.suffix + '.bak')
+            bak.write_text(before, encoding='utf-8')
+            backup = str(bak)
+        got = declare_statement(project_root, entry['name'], label=entry['label'],
+                                columns=entry['columns'],
+                                block=entry['block'], docs=entry['docs'])
+        clear_cache()
+        after = path.read_text(encoding='utf-8') if path.is_file() else ''
+        written = [str(path)] if got.get('ok') and after != before else []
+        return _receipt('table', ok=bool(got.get('ok')),
+                        reason=str(got.get('reason') or ''),
+                        written=written, backup=backup,
+                        diff=_manifest_diff(before, after),
+                        action=str(got.get('action') or ''),
+                        warnings=built.get('warnings'))
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.declare', e)
+        return _receipt('table', ok=False, reason=f'写清单出错：'
+                        f'{type(e).__name__}: {e}', action='refused')
+
+
+def _preview_manifest(before: str, entry: dict) -> str:
+    """试算：把这条声明并进清单文本（**不写盘**）。纯函数。"""
+    import json
+    try:
+        data = json.loads(before) if before.strip() else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    stmts = data.get('statements')
+    if not isinstance(stmts, list):
+        stmts = []
+    name = str(entry.get('name') or '')
+    stmts = [s for s in stmts if not (isinstance(s, dict)
+                                      and str(s.get('name')) == name)]
+    stmts.append(entry)
+    data['statements'] = stmts
+    return json.dumps(data, indent=2, ensure_ascii=False) + '\n'
+
+
+def _manifest_diff(before: str, after: str) -> str:
+    """两段清单文本的**行级 diff**（够用就好：只报增删的行）。纯函数。"""
+    if before == after:
+        return ''
+    old = set(before.splitlines())
+    new = set(after.splitlines())
+    lines = ['- ' + ln for ln in before.splitlines() if ln not in new][:20]
+    lines += ['+ ' + ln for ln in after.splitlines() if ln not in old][:20]
+    return '\n'.join(lines)
+
+
+def table_export(project_root, *, dry_run=False) -> dict:
+    """
+    导出剧本表 —— ⚠ **本步（第 4 步）故意没做**，只留这个诚实占位。
+
+    为什么宁可"没做"也不给个半成品：我第一版这里只"读了注册表、比了 mtime"
+    就返回 `ok=True, written=[]` —— 那是**假绿**（模型会以为导出成功了）。
+    本项目最忌这个（三处假绿都是同一形状），所以：
+
+      · 真要做，得把"beats → excel"这条链（`export_beats_to_excel`
+        + 候选表刷新 + 缩略图缓存）整条接进来，并给出**写了哪些文件**；
+      · 在那之前，这里一律 `ok=False` + `reason='还没实现'`，
+        能力清单里也标成 `planned`。
+    """
+    return _receipt('table+engine', ok=False, written=[],
+                    reason='还没实现（第 4 步只做了 declare）—— '
+                           '别把它当成"导出成功"')
+
+
+__all__ = ['FALSE', 'TRUE', 'UNKNOWN', 'ask_engine', 'capabilities', 'declare',
+           'discover', 'engine_facts', 'health', 'host_validate',
+           'project_context', 'registry_check', 'scan_unknown', 'table_export',
+           'verify_behavior']
