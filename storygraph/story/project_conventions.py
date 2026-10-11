@@ -299,7 +299,14 @@ def _statement_head(text: str) -> str:
     # ⚠ 台词可以带 say 参数：`jc "台词" (no_skip=True)` —— 那个 `=` 在
     # `(...)` 里，挖掉括号组后再找，就不会把台词误报成语句头
     # （真实项目实测的 2 条假阳性之一）。
-    if re.search(r'\b[A-Za-z_][\w]*\s*=', _strip_paren_groups(tail or '')):
+    #
+    # ⚠⚠ 2026-10-11 **地狱项目抓到的真缺陷**：这里的参数名原来只认 ASCII
+    #   （`\b[A-Za-z_][\w]*\s*=`），于是**中文参数名**的写法被整个丢弃 ——
+    #   实测 `weather rain 强度=3` → `_statement_head` 返回 `''` →
+    #   `unknown_statements()` 报 **0 种**，而项目里明明有未知写法。
+    #   **静默漏报**比误报危险得多（工具会说"你的写法我都认识"）。
+    #   中文项目里 `强度=3` 这种参数名太常见了，所以标识符必须认 Unicode 词字符。
+    if re.search(r'(?<![\w])\w+\s*=', _strip_paren_groups(tail or '')):
         return head
     return ''
 

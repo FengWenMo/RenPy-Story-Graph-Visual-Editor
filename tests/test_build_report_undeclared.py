@@ -72,6 +72,40 @@ def test_report_names_the_undeclared_head(tmp_path):
     assert 'mycue' not in text.split('未声明')[-1], text
 
 
+def test_a_chinese_parameter_name_is_not_dropped(tmp_path):
+    """
+    ⭐⭐ **地狱项目抓到的真缺陷**（2026-10-11）：
+
+    未知写法的判据原本是"带**具名参数**"，可那个正则只认 ASCII 标识符
+    （`\\b[A-Za-z_][\\w]*\\s*=`）—— 于是 **中文参数名**让整行被判成"不是语句"：
+
+        `weather rain 强度=3`  →  `_statement_head` 返回 `''`  →  **整行被丢掉**
+
+    后果是 **静默漏报**：`unknown_statements()` 报 0 种，
+    而项目里明明有工具不认识的写法 —— 工具会说"你的写法我都认识"。
+    中文项目里 `强度=3` 这种参数名太常见了，所以标识符必须认 Unicode 词字符。
+
+    ⚠ 同时钉住"台词不能被误报"（修这条时最容易顺手弄坏的地方）。
+    """
+    from storygraph.story.project_conventions import (_statement_head,
+                                                      unknown_statements)
+    # 中文具名参数 → 必须认出来
+    assert _statement_head('weather rain 强度=3') == 'weather'
+    assert _statement_head('swim_suit lyj intensity=3') == 'swim_suit'
+    # 台词（三种常见形态）→ 一个都不许当成语句头
+    for line in ('lyj "台词"', 'jc "台词" (no_skip=True)',
+                 'lyj happy "台词"', '"旁白"'):
+        assert _statement_head(line) == '', line
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True, exist_ok=True)
+    (root / 'game' / 'ch.rpy').write_text(
+        'label a:\n    weather rain 强度=3\n    return\n', encoding='utf-8')
+    got = unknown_statements(root)
+    assert 'weather' in got, f'中文参数名的写法被漏报了：{got}'
+    assert got['weather']['count'] == 1
+
+
 def test_report_stays_quiet_when_everything_is_declared(tmp_path):
     """都声明了就别报警（噪声会把真问题淹掉）。"""
     root = tmp_path / 'proj2'
