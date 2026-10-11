@@ -313,6 +313,52 @@ def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     assert dlg.groups.count() == 1, '勾开之后声明还在'
 
 
+def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
+    """
+    ⭐⭐ **用户卡点 1 的原话**：
+
+    > "我第一反应是填 show。但是等一下，show 是 Ren'Py 的原生指令！
+    >  如果我把 show 注册成自定义语句，会不会覆盖引擎原有的 show？
+    >  工具会怎么处理这个冲突？"
+
+    界面必须**当场回答**，而不是让人卡死。真机核过的答案是：
+    `rules.json` 里的声明**只影响工具**（表格列、下拉），**不碰引擎**；
+    真正替换引擎的是项目里的 `renpy.register_statement(...)`（CDS 覆盖内置 → N5 警告）。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    # 默认是"我们自己写的"（老行为不变）
+    assert dlg.statement_mode() == 'custom'
+    dlg.mode.setCurrentIndex(dlg.mode.findData('builtin'))
+    assert dlg.statement_mode() == 'builtin'
+    note = dlg.mode_note.text()
+    assert '不会动引擎' in note, note
+    assert 'register_statement' in note, note
+    # 选了"引擎自带"→ 从**下拉里挑**（不让人猜该填 show 还是 show 角色 服装）
+    # ⚠ 用 `isHidden()`：窗口没 show 时 `isVisible()` 恒为 False（判据自己的坑）
+    assert not dlg.builtin_name.isHidden(), '选了引擎自带却没露出下拉'
+    assert dlg.name.isHidden(), '两个输入框不该同时露着'
+    assert dlg.builtin_name.count() > 0, '引擎自带的写法列表是空的'
+    dlg.builtin_name.setCurrentText('show')
+    assert dlg.name.text() == 'show', '挑了下拉却没填进语句名'
+
+
+def test_builtin_mode_lists_real_engine_heads_not_a_hardcoded_sheet(qapp,
+                                                                   tmp_path):
+    """下拉要**问引擎**（`engine_facts` 的注册表）；读不到才退回工具词表。"""
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    heads = [dlg.builtin_name.itemText(i)
+             for i in range(dlg.builtin_name.count())]
+    assert heads, '一个都没有'
+    # 工具词表兜底时也必须有 show / say 这类基本写法
+    assert 'show' in heads or 'say' in heads, heads[:12]
+
+
 def test_the_dialog_can_try_cutting_a_real_line(qapp, tmp_path):
     """
     ⭐⭐ **回答用户卡死的第一步**（程序员撞墙记录）：

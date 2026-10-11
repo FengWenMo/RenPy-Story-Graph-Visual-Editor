@@ -123,12 +123,43 @@ class CustomStatementDialog(QDialog):
         rv.setSpacing(T.SPACE['sm'])
 
         rv.addWidget(QLabel('③ 填一条声明'))
+
+        # ⭐⭐ 2026-10-11（程序员撞墙记录 卡点 1）：
+        #   "我第一反应是填 show。但是等一下，show 是 Ren'Py 的原生指令！
+        #    如果我把 show 注册成自定义语句，会不会覆盖引擎原有的 show？"
+        #   —— 界面**必须在这里回答**，否则用户从第一步就卡死。
+        #   答案（真机核过）：`rules.json` 里的声明**只影响工具**（表格列、下拉），
+        #   **不碰引擎**；真正替换引擎的是项目里的 `renpy.register_statement(...)`
+        #   （CDS 覆盖内置 → 最高级警告 N5）。
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('你要教它认识的是'))
+        self.mode = QComboBox()
+        # ⚠ 顺序 = 默认项：**保持我们自己写的为默认**（老行为不变，既有的
+        #   发现→声明那条链子不受影响）；给引擎自带的写法加列放第二项，
+        #   但切换时的说明**照样当场给**（用户卡点 1 的答案）。
+        self.mode.addItem('我们自己的新写法', 'custom')
+        self.mode.addItem('引擎自带的写法（只给它加表格列）', 'builtin')
+        self.mode.currentIndexChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(self.mode, 1)
+        rv.addLayout(mode_row)
+        self.mode_note = self._hint('')
+        rv.addWidget(self.mode_note)
+
         row = QHBoxLayout()
         row.addWidget(QLabel('语句名'))
         self.name = QLineEdit()
         self.name.setPlaceholderText('例如 swim_suit（多个写法用空格分隔：'
                                      'mycue cue）')
         row.addWidget(self.name, 1)
+        # 选了"引擎自带"时，改从**下拉里挑**（不让人猜该填 show 还是 show 角色 服装）
+        self.builtin_name = QComboBox()
+        self.builtin_name.setEditable(True)
+        self.builtin_name.setToolTip('这些是引擎自己就有的写法；挑一个就行')
+        for head in self._engine_heads():
+            self.builtin_name.addItem(head)
+        self.builtin_name.currentTextChanged.connect(self._on_builtin_picked)
+        self.builtin_name.setVisible(False)
+        row.addWidget(self.builtin_name, 1)
         rv.addLayout(row)
 
         row2 = QHBoxLayout()
@@ -302,6 +333,8 @@ class CustomStatementDialog(QDialog):
         grow2.addWidget(self._verify_hint, 1)
         rv.addLayout(grow2)
         self.set_verify_available(bool(on_verify))
+        # ⚠ mode 的初值要刷一次（否则引擎自带的下拉/说明不会显示）
+        self._on_mode_changed()
         # ⚠ 按钮建好之后**再刷一次**：构造早期那次刷新时按钮还不存在，
         # 于是"名字空着"这个初值状态没被同步到可用性上（实测：按钮一开始可点）。
         self._refresh_preview()
@@ -400,6 +433,58 @@ class CustomStatementDialog(QDialog):
         return build_declaration(self.name.text(), label=self.label.text(),
                                  docs=self.docs.text(), block=block,
                                  params=self.params.rows())
+
+    def _engine_heads(self) -> list:
+        """
+        引擎自己就有的写法（给下拉用）—— **优先问引擎**，问不到退回词表。
+
+        ⚠ 不硬编一张清单：`engine_facts` 里那 23 条注册表才是权威
+        （它是真机快照，连内置语句都在里面）；读不到才用工具词表兜底。
+        """
+        heads = []
+        try:
+            from storygraph.core import engine_facts as EF
+            path = EF.facts_path(self._root_path) if self._root_path else None
+            if path is not None and path.is_file():
+                facts = EF.loads(path.read_text(encoding='utf-8'))
+                heads = sorted(EF.statement_names(facts))
+        except Exception as e:                      # noqa: BLE001 - 没事实也能用
+            swallow('ui_qt.dialog_learn.engine_heads', e)
+        if not heads:
+            from storygraph.core.vocabulary import RENPY_KNOWN_HEADS
+            heads = sorted(RENPY_KNOWN_HEADS)
+        return heads[:400]
+
+    def _on_mode_changed(self, *_a):
+        """切换"引擎自带 / 自己写的"：**把该说的话当场说清**（用户卡点 1）。"""
+        builtin = self.statement_mode() == 'builtin'
+        self.builtin_name.setVisible(builtin)
+        self.name.setVisible(not builtin)
+        if builtin:
+            self.mode_note.setText(
+                '挑一个引擎本来就有的写法（如 show）。放心：这里写的声明'
+                '只让「工具」多几列、多几个下拉，不会动引擎。'
+                '⚠ 真正会替换引擎的，是项目里的 renpy.register_statement —— '
+                '那是另一件事，工具会拿最高级警告报出来。')
+            if self.builtin_name.currentText():
+                self.name.setText(self.builtin_name.currentText())
+        else:
+            self.mode_note.setText(
+                '我们自己加的写法（如 swim_suit）。注意：这样只让「工具」认识它；'
+                '要让「引擎」也认识，项目里还得有一段 renpy.register_statement。')
+
+    def _on_builtin_picked(self, text: str):
+        if self.statement_mode() == 'builtin':
+            self.name.setText(str(text or ''))
+            self._refresh_preview()
+
+    def statement_mode(self) -> str:
+        """`builtin`（给引擎自带的写法加列）/ `custom`（新写法）。"""
+        getter = getattr(self, 'mode', None)
+        if getter is None:
+            return 'custom'
+        data = getter.currentData()
+        return str(data or 'custom')
 
     def _refresh_cut(self, *_a):
         """
