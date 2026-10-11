@@ -136,6 +136,112 @@ def _emit_undetermined_section(summary: dict, out: list) -> None:
     out.extend(text.splitlines())
 
 
+def health_dict(report: dict) -> dict:
+    """
+    ⭐ **体检的结构化版本**（**与文本同源**：一份数据，两种渲染）。
+
+    为什么要有它（用户 2026-10-11："补结构化体检"）：文本是给**人**看的；
+    MCP / 大模型要的是**机器能读**的东西 —— 让模型去解析中文散文，
+    既费 token 又必然出错。
+
+    ## "同源"怎么保证（不靠人盯）
+
+    这里**不重算任何东西** —— 只把 `format_asset_health` 用的**同一批字段**
+    整理成结构。所以两者**不可能**说出不同的结论：
+    判据 `tests/test_health_dict.py::test_dict_and_text_agree_on_the_numbers`
+    会逐项对一遍。
+
+    ## 返回形状（要点）
+
+    ::
+
+        {'ok': bool, 'error': str,
+         'problems': int,                     # 需要人处理的处数
+         'counts': {...},                     # 表里的条数
+         'findings': [                        # ★ 每一项都带 source 与严重度
+             {'id': 'missing', 'title': '表里有、磁盘上没有',
+              'count': 3, 'samples': [...], 'severity': 'fix', 'source': 'table'},
+             …],
+         'capability': {...},                 # 不是缺陷，是**能力状态**（⑧/⑩/⑪）
+         'notes': [...]}
+
+    ⚠ **`severity` 是给机器判断"要不要拦"用的**，不许省：
+      · `fix`      —— 需要人处理（表与资源对不上）；
+      · `info`     —— 只是状态（占位、"另一份副本"这类**合法**情况）；
+      · `unknown`  —— **测不出来**（例如引擎编译不过）—— 与"没问题"**不是一回事**。
+    """
+    report = report or {}
+    if not report.get('ok'):
+        return {'ok': False, 'error': str(report.get('error') or '未知原因'),
+                'problems': 0, 'counts': {}, 'findings': [],
+                'capability': {}, 'notes': []}
+    counts = dict(report.get('counts') or {})
+    findings = []
+
+    def _add(fid, title, rows, *, severity='fix', source='table'):
+        items = rows if isinstance(rows, list) else []
+        findings.append({'id': fid, 'title': title, 'count': len(items),
+                         'samples': items[:SAMPLE], 'severity': severity,
+                         'source': source})
+        return len(items)
+
+    for key, fid, title in (('missing', 'missing', '表里有、磁盘上没有'),
+                            ('unregistered', 'unregistered',
+                             '磁盘上有、表里没登记')):
+        groups = report.get(key) or {}
+        flat = [r for rows in groups.values() for r in (rows or [])]
+        _add(fid, title, flat,
+             severity='fix' if flat else 'info')
+    outside = report.get('outside_game') or {}
+    _add('outside_game', '表里的行指向本项目 game/ 之外',
+         [f'{k}/ × {v}' for k, v in (outside.get('by_top') or {}).items()],
+         severity='info')
+    _add('duplicate_ids', '同一个 ID 出现多次',
+         report.get('duplicate_ids') or [])
+    _add('duplicate_paths', '同一个文件登记了多行',
+         report.get('duplicate_paths') or [])
+    _add('no_path', '行里没写 Path', report.get('no_path') or [])
+    _add('placeholders', '人工占位（合法）', report.get('placeholders') or [],
+         severity='info')
+
+    # ---- 能力状态（**不是缺陷**）----
+    facts = report.get('engine_facts') or {}
+    summary = EF.undetermined_statements(facts)
+    behavior = EF.behavior_summary(facts)
+    capability = {
+        'statements': {
+            'declared': [str((s or {}).get('name') or '')
+                         for s in (report.get('statements') or [])],
+            'cds': len(report.get('cds') or []),
+            'cds_error': str(report.get('cds_error') or ''),
+            'source': 'scanner'},
+        'engine_align': report.get('engine_align') or {},
+        'undetermined': {
+            'total': len(summary.get('undetermined') or []),
+            'heads': [r['head'] for r in (summary.get('undetermined') or [])],
+            # ⚠ 有东西"测不出来"时严重度是 unknown —— **不是"没问题"**
+            'severity': 'unknown' if summary.get('undetermined') else 'info',
+            'source': 'engine'},
+        'behavior': {
+            'verified': behavior['verified'], 'failed': behavior['failed'],
+            'unverified': behavior['unverified'], 'total': behavior['total'],
+            'severity': 'unknown' if behavior['unverified'] else 'info',
+            'source': 'engine'},
+        'engine_unknown': {
+            'total': sum(int(v.get('count') or 0)
+                         for v in (report.get('engine_unknown') or {}).values()),
+            'severity': 'info', 'source': 'engine'},
+    }
+    notes = []
+    if not report.get('engine_facts'):
+        notes.append('这次没采引擎事实 —— 与引擎有关的那几项**没有结论**'
+                     '（不是"没问题"）')
+    return {'ok': True, 'error': '', 'problems': int(report.get('problems') or 0),
+            'counts': counts, 'findings': findings,
+            'capability': capability, 'notes': notes,
+            'source': 'table+engine'}
+
+
 def format_asset_health(report: dict) -> str:
     """
     `asset_health_report()` 的结果 → 体检报告文本。
@@ -253,4 +359,4 @@ def format_asset_health(report: dict) -> str:
     return '\n'.join(out)
 
 
-__all__ = ['format_asset_health', 'SAMPLE']
+__all__ = ['format_asset_health', 'health_dict', 'SAMPLE']
