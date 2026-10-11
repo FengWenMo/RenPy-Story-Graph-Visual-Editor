@@ -333,49 +333,9 @@ class AssetRegistryMixin:
         #
         # 它**不计入 `problems`**：这不是"表与资源对不上"那类缺陷，
         # 而是一条**能力状态**（项目声明了什么、工具接住了没有）。
-        cds, cds_error, statements = [], '', []
-        try:
-            from storygraph.story.cds_registry import scan_project_cds
-            cds = [s.to_dict() for s in scan_project_cds(self.project_root)]
-        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
-            swallow('app.session_assets.asset_health_report.cds', e)
-            cds_error = f'{type(e).__name__}: {e}'
-        # 合并视图（M3）：清单声明 + 宿主注册，**优先级已算好**。
-        # 报告给用户看的是这一份 —— 只列 CDS 会漏掉 `rules.json` 里的声明，
-        # 而"我明明写了清单为什么没生效"是这类功能最常见的困惑。
-        try:
-            from storygraph.story.statement_registry import StatementRegistry
-            statements = [s.to_dict() for s in
-                          StatementRegistry.for_project(
-                              self.project_root).specs()]
-        except Exception as e:                  # noqa: BLE001
-            swallow('app.session_assets.asset_health_report.statements', e)
-        # —— 资源表 ↔ 引擎事实 对账（E2 收尾，2026-10-11）——
-        #
-        # **只报告，不删任何东西**（用户口径："一切以实际有的资源为标准"）。
-        # 表里有、引擎不认的（`mask` / `_ss_cut` 这类内部件）**仍然可选、仍然能导入**；
-        # 这一段只是把它们**列出来**，让人知道"选了它会怎样"。
-        # ⚠ 没采过引擎事实 → 这一段整个不出现（不宣称）。
-        engine_align = {}
-        try:
-            facts = self.engine_facts()
-            if facts:
-                from storygraph.core import engine_facts as _EF
-                table_attrs = {}
-                for _aid, row in (getattr(reg, 'images', {}) or {}).items():
-                    tag = str((row or {}).get('Tag') or '').strip()
-                    if not tag:
-                        continue
-                    raw = str((row or {}).get('Attributes') or '')
-                    words = [w.strip() for w in
-                             raw.replace('|', ',').replace('，', ',').split(',')]
-                    table_attrs.setdefault(tag, [])
-                    for word in words:
-                        if word and word not in table_attrs[tag]:
-                            table_attrs[tag].append(word)
-                engine_align = _EF.table_vs_engine(facts, table_attrs)
-        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
-            swallow('app.session_assets.asset_health_report.engine_align', e)
+        cds, cds_error = self._cds_rows()
+        statements = self._statement_rows()
+        engine_align = self._engine_align(reg)
         return {'ok': True, 'error': '', 'counts': counts,
                 'cds': cds, 'cds_error': cds_error,
                 'statements': statements,
@@ -386,6 +346,69 @@ class AssetRegistryMixin:
                 'outside_game': outside, 'duplicate_ids': dup_ids,
                 'duplicate_paths': dup_paths, 'no_path': no_path,
                 'placeholders': placeholders, 'problems': problems}
+
+    def _cds_rows(self) -> tuple:
+        """
+        项目用 `renpy.register_statement` 声明的自定义语句 → `(rows, error)`。
+
+        **纯读、零风险**：不做这件事，"工具没适应我的结构"就永远说不清 ——
+        编剧看不到工具愿意被教，只会认为工具没用（用户原话）。
+        ⚠ 它**不计入 `problems`**：这不是"表与资源对不上"那类缺陷，
+        而是一条**能力状态**。
+        """
+        try:
+            from storygraph.story.cds_registry import scan_project_cds
+            return ([s.to_dict() for s in scan_project_cds(self.project_root)],
+                    '')
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets._cds_rows', e)
+            return ([], f'{type(e).__name__}: {e}')
+
+    def _statement_rows(self) -> list:
+        """
+        合并视图（M3）：清单声明 + 宿主注册，**优先级已算好**。
+
+        报告给用户看的是这一份 —— 只列 CDS 会漏掉 `rules.json` 里的声明，
+        而"我明明写了清单为什么没生效"是这类功能最常见的困惑。
+        """
+        try:
+            from storygraph.story.statement_registry import StatementRegistry
+            return [s.to_dict() for s in
+                    StatementRegistry.for_project(self.project_root).specs()]
+        except Exception as e:                  # noqa: BLE001
+            swallow('app.session_assets._statement_rows', e)
+            return []
+
+    def _engine_align(self, reg) -> dict:
+        """
+        **资源表 ↔ 引擎事实** 对账（E2 收尾，2026-10-11）。
+
+        **只报告，不删任何东西**（用户口径："一切以实际有的资源为标准"）。
+        表里有、引擎不认的（`mask` / `_ss_cut` 这类内部件）**仍然可选、仍然能导入**；
+        这里只是把它们**列出来**，让人知道"选了它会怎样"。
+        ⚠ 没采过引擎事实 → 返回空 dict，报告里那一段整个不出现（不宣称）。
+        """
+        try:
+            facts = self.engine_facts()
+            if not facts:
+                return {}
+            from storygraph.core import engine_facts as _EF
+            table_attrs = {}
+            for _aid, row in (getattr(reg, 'images', {}) or {}).items():
+                tag = str((row or {}).get('Tag') or '').strip()
+                if not tag:
+                    continue
+                raw = str((row or {}).get('Attributes') or '')
+                words = [w.strip() for w in
+                         raw.replace('|', ',').replace('，', ',').split(',')]
+                table_attrs.setdefault(tag, [])
+                for word in words:
+                    if word and word not in table_attrs[tag]:
+                        table_attrs[tag].append(word)
+            return _EF.table_vs_engine(facts, table_attrs)
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets._engine_align', e)
+            return {}
 
     def last_reconcile(self):
         """

@@ -192,54 +192,15 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
         swallow('learn_statement.suggest_shape.discover', e)
         return out
 
-    # 角色表：用来把"裸词"认成角色（候选直接给中文显示名）
-    role_names, role_ids, id_to_name = [], set(), {}
-    try:
-        from storygraph.pipeline.build import load_asset_registry
-        reg = load_asset_registry(root)
-        if reg is not None:
-            for cid, row in (getattr(reg, 'characters', {}) or {}).items():
-                cid = str(cid)
-                role_ids.add(cid)
-                shown = str((row or {}).get('Name')
-                            or (row or {}).get('DisplayName')
-                            or (row or {}).get('名字') or cid).strip()
-                shown = shown.strip('「」『』') or cid
-                id_to_name[cid] = shown
-                if shown and shown not in role_names:
-                    role_names.append(shown)
-            out['role_names'] = role_names
-    except Exception as e:                       # noqa: BLE001 - 没角色表也能用
-        swallow('learn_statement.suggest_shape.roles', e)
+    roles = _role_table(root)
+    out['role_names'] = list(roles['names'])
 
-    #: 一项的收集器。**键是位置下标** —— 同一个位置必须是同一项：
-    #: `outfit lyj …` / `outfit lxj …` 是**同一个第 1 项**（角色），
-    #: 我第一版按 `(位置, 名字)` 做键，于是 `lxj` 没被认成角色时
-    #: 又冒出一条"对象"，参数表里出现两个第 1 项（出图前当场看出来）。
     slots: dict = {}
-
-    def slot(i, kind, name):
-        rec = slots.setdefault(i, {'index': i, 'kind': kind, 'name': name,
-                                   'default_name': name, 'examples': [],
-                                   'hits': Counter(), 'seen': set(),
-                                   'suggest_allowed': False, 'note': ''})
-        return rec
-
-    def note_kind(rec, kind, name, note=''):
-        """把这一位见过的"更像样的"形态记下来（key > 角色 > 内容 > 对象 > 数字）。"""
-        rank = {'key': 4, 'word-role': 3, 'value': 2, 'word': 1, 'number': 0}
-        cur = f'{rec["kind"]}-role' if rec.get('note') == '角色表' else rec['kind']
-        new = f'{kind}-role' if note == '角色表' else kind
-        if rank.get(new, 0) > rank.get(cur, 0):
-            rec['kind'] = kind
-            rec['name'] = name
-            rec['default_name'] = name
-            rec['note'] = note
-
     occurrences = 0
     for fp in files:
         try:
-            lines = Path(fp).read_text(encoding='utf-8', errors='replace').splitlines()
+            lines = Path(fp).read_text(encoding='utf-8',
+                                       errors='replace').splitlines()
         except OSError:
             continue
         for lineno, raw in enumerate(lines, start=1):
@@ -255,40 +216,105 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
                                        'text': text[:80]})
             if Path(fp).name not in out['files']:
                 out['files'].append(Path(fp).name)
-            for i, tok in enumerate(tokens[1:]):
-                kind, shown, key = tok
-                is_role = False
-                if kind == 'key':
-                    rec = slot(i, 'key', key)
-                    note_kind(rec, 'key', key)
-                    rec['suggest_allowed'] = True          # 作者自己写了名字
-                elif kind == 'number':
-                    rec = slot(i, 'number', f'第{i + 1}项')
-                    note_kind(rec, 'number', f'第{i + 1}项')
-                elif kind == 'value':
-                    rec = slot(i, 'value', '内容')
-                    note_kind(rec, 'value', '内容')
-                else:                                       # 裸词：可能是角色
-                    is_role = shown in role_ids or shown in role_names
-                    default = '角色' if is_role else '对象'
-                    rec = slot(i, 'word', default)
-                    note_kind(rec, 'word', default,
-                              '角色表' if is_role else '')
-                    if is_role:
-                        rec['suggest_allowed'] = True
-                # 角色那一项显示**中文名**（项目里写的是 ID，编剧看的是名字）
-                if is_role or (rec['note'] == '角色表'):
-                    shown = id_to_name.get(shown, shown)
-                rec['hits'][shown] += 1
-                rec['seen'].add(shown)
+            _collect_slots(slots, tokens[1:], roles)
     if not occurrences:
         return out
     out['found'] = True
     out['occurrences'] = occurrences
+    out['items'] = _finish_slots(slots, min_choice_hits)
+    return out
+
+
+def _role_table(root) -> dict:
+    """
+    角色表 → `{'ids': set, 'names': set, 'id_to_name': {}}`（读不出就三个空）。
+
+    用途：把脚本里的**裸词**认成角色（`lyj` → 「凌跃捷」），
+    这样"第 1 项"的默认名字就可能是「角色」而不是「对象」，
+    候选里给的也是**编剧看得懂的中文名**。
+    """
+    ids, names, id_to_name = set(), [], {}
+    try:
+        from storygraph.pipeline.build import load_asset_registry
+        reg = load_asset_registry(root)
+        for cid, row in (getattr(reg, 'characters', {}) or {}).items():
+            cid = str(cid)
+            ids.add(cid)
+            shown = str((row or {}).get('Name')
+                        or (row or {}).get('DisplayName')
+                        or (row or {}).get('名字') or cid).strip()
+            shown = shown.strip('「」『』') or cid
+            id_to_name[cid] = shown
+            if shown and shown not in names:
+                names.append(shown)
+    except Exception as e:                       # noqa: BLE001 - 没角色表也能用
+        swallow('learn_statement._role_table', e)
+    return {'ids': ids, 'names': set(names), 'id_to_name': id_to_name}
+
+
+def _slot(slots: dict, i: int, kind: str, name: str) -> dict:
+    """
+    第 `i` 项的收集器。**键是位置下标** —— 同一个位置必须是同一项：
+    `outfit lyj …` / `outfit lxj …` 是**同一个第 1 项**（角色）。
+    我第一版按 `(位置, 名字)` 做键，于是 `lxj` 没被认成角色时又冒出一条"对象"，
+    参数表里出现两个第 1 项（出图前当场看出来）。
+    """
+    from collections import Counter
+    return slots.setdefault(i, {'index': i, 'kind': kind, 'name': name,
+                                'default_name': name, 'examples': [],
+                                'hits': Counter(), 'suggest_allowed': False,
+                                'note': ''})
+
+
+#: 形态优先级：作者自己写了名字 > 角色表里的角色 > 引号内容 > 裸词 > 数字。
+_KIND_RANK = {'key': 4, 'word-role': 3, 'value': 2, 'word': 1, 'number': 0}
+
+
+def _note_kind(rec: dict, kind: str, name: str, note: str = '') -> None:
+    """把这一位见过的"更像样的"形态记下来（同优先级不覆盖）。"""
+    cur = f'{rec["kind"]}-role' if rec.get('note') == '角色表' else rec['kind']
+    new = f'{kind}-role' if note == '角色表' else kind
+    if _KIND_RANK.get(new, 0) > _KIND_RANK.get(cur, 0):
+        rec['kind'] = kind
+        rec['name'] = name
+        rec['default_name'] = name
+        rec['note'] = note
+
+
+def _collect_slots(slots: dict, tokens, roles) -> None:
+    """一行脚本的各个项 → 累加进对应位置的收集器（**按位置**，与顺序无关）。"""
+    for i, tok in enumerate(tokens):
+        kind, shown, key = tok
+        is_role = False
+        if kind == 'key':
+            rec = _slot(slots, i, 'key', key)
+            _note_kind(rec, 'key', key)
+            rec['suggest_allowed'] = True             # 作者自己写了名字
+        elif kind == 'number':
+            rec = _slot(slots, i, 'number', f'第{i + 1}项')
+            _note_kind(rec, 'number', f'第{i + 1}项')
+        elif kind == 'value':
+            rec = _slot(slots, i, 'value', '内容')
+            _note_kind(rec, 'value', '内容')
+        else:                                          # 裸词：可能是角色
+            is_role = shown in roles['ids'] or shown in roles['names']
+            default = '角色' if is_role else '对象'
+            rec = _slot(slots, i, 'word', default)
+            _note_kind(rec, 'word', default, '角色表' if is_role else '')
+            if is_role:
+                rec['suggest_allowed'] = True
+        # 角色那一项显示**中文名**（项目里写的是 ID，编剧看的是名字）
+        if is_role or rec['note'] == '角色表':
+            shown = roles['id_to_name'].get(shown, shown)
+        rec['hits'][shown] += 1
+
+
+def _finish_slots(slots: dict, min_choice_hits: int) -> list:
+    """收集器 → 给界面看的项（例子、候选、来源、能不能限定）。"""
+    out = []
     for idx in sorted(slots):
         rec = slots[idx]
-        examples = [v for v, _n in rec['hits'].most_common(6)]
-        rec['examples'] = examples
+        rec['examples'] = [v for v, _n in rec['hits'].most_common(6)]
         # ⚠ **只出现一次的值不算候选**：那更像笔误/一次性的写法，
         #    拿它当"只能填这些"会把编剧的手脚捆住（用户原话：候选非常繁琐）
         choices = [v for v, n in rec['hits'].most_common()
@@ -298,8 +324,7 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
                                else ('项目里写过的值' if choices else ''))
         rec['suggest_allowed'] = bool(rec['suggest_allowed'] and choices)
         rec['hits'] = dict(rec['hits'].most_common(12))
-        rec.pop('seen', None)
-        out['items'].append(rec)
+        out.append(rec)
     return out
 
 
