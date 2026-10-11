@@ -215,6 +215,15 @@ class TestCrossBlockSharedState:
             if len(touched) < 2:
                 continue
             for key in readers:
+                # ⚠ **自己定义的**（本 mixin 类体里的方法/类属性）不算跨块耦合：
+                # `GraphSessionMixin.engine_facts` 是它自己的方法，
+                # `engine_facts_warnings` 调它不该被要求写进 REQUIRES
+                # （REQUIRES 的语义是"**宿主必须给我**的成员"）。
+                # 这与 `test_read_dependencies_are_declared` 的 `loads - own` 同一口径；
+                # 真正的跨块状态（如 `_transforms_decision`）不在任何人的 `own` 里，
+                # 所以这条守卫的力度不变。
+                if attr in SCAN[key]['own']:
+                    continue
                 if attr not in SCAN[key]['requires']:
                     problems.append(
                         f'{BLOCKS[key]} 读 self.{attr}'

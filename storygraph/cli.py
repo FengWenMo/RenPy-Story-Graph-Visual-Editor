@@ -459,21 +459,62 @@ def _load_registry(args):
     return load_asset_registry(args.project, getattr(args, 'asset_dir', None))
 
 
+def _drift_text(drift: dict) -> str:
+    """漂移报告 → 人话（E3）。空字符串 = 没有漂移。"""
+    if not drift or drift.get('same'):
+        return ''
+    out = ['检出**引擎行为变化**（这就是"漂移"）—— 与基线比：']
+    if drift.get('engine', {}).get('version'):
+        old, new = drift['engine']['version']
+        out.append(f'  · 引擎版本：{old} → {new}')
+    for key, items in sorted((drift.get('added') or {}).items()):
+        out.append(f'  · 新增 {key}：{items[:8]}'
+                   + (f' …共 {len(items)}' if len(items) > 8 else ''))
+    for key, items in sorted((drift.get('removed') or {}).items()):
+        out.append(f'  · 消失 {key}：{items[:8]}'
+                   + (f' …共 {len(items)}' if len(items) > 8 else ''))
+    for key in sorted((drift.get('changed') or {})):
+        out.append(f'  · {key}：结构变了')
+    out.append('  ⚠ 这不是"出错"——是**引擎/项目变了**。确认是有意改的就更新基线：')
+    out.append('    把新的 engine_facts.json 提交进版本库即可。')
+    return '\n'.join(out)
+
+
 def _cmd_engine_facts(args) -> int:
     """
-    **采集引擎事实**（E1）：跑一次引擎，把图像 / 属性与**分组** / 兼容候选 /
-    transform / label / lint 报告一次拿全，写成 `engine_facts.json`。
+    **采集引擎事实**（E1）+ **漂移检测**（E3）。
 
-    为什么是 CLI 而不是只放界面里：它要被 **CI** 跑，还要能被脚本化对账
-    （facts 进版本库，diff 出来就是"引擎行为变了没有"）。
+    退出码约定（给 CI 用，**这是本节的全部意义**）：
 
-    退出码：`0` = 采集可用；`1` = **采集不可用**（有 parse error / 探针没产出）。
-    ⚠ 后者**不是"没问题"** —— 采不到就等于没有依据，必须当失败（坑 4）。
+        0  一切正常（或：只有"不阻塞"的提示）
+        1  **可修**：检出漂移，或（加了 `--strict`）有语义/资源类问题
+        2  **阻塞**：parse error，或采集失败（**采不到 ≠ 没问题**，坑 4）
+
+    `--check-only` 不跑引擎，只比对两份现成的事实文件 —— **CI 里不需要 SDK**。
     """
     from storygraph.core import engine_facts as EF
     from storygraph.pipeline import engine_collect as EC
 
     project = Path(args.project)
+
+    if args.check_only:
+        # 只比对（无 SDK 也能跑；CI 用这条）
+        cur_path = Path(args.out) if args.out else EF.facts_path(project)
+        if not args.baseline:
+            print('--check-only 需要同时给 --baseline <基线 facts.json>',
+                  file=sys.stderr)
+            return 2
+        try:
+            cur = EF.loads(Path(cur_path).read_text(encoding='utf-8'))
+            base = EF.loads(Path(args.baseline).read_text(encoding='utf-8'))
+        except (OSError, ValueError) as e:
+            print(f'读事实文件失败：{e}', file=sys.stderr)
+            return 2
+        drift = EF.diff_facts(base, cur)
+        text = _drift_text(drift)
+        print(text or '✅ 与基线一致：引擎行为没有变化。')
+        return 1 if text else 0
+
     result = EC.collect(project, sdk=args.sdk, mode=args.mode,
                         timeout=args.timeout)
     facts = result['facts']
@@ -507,10 +548,33 @@ def _cmd_engine_facts(args) -> int:
     if result['removed']:
         print(f'  已清理探针：{result["removed"]}')
 
+    # ---- 漂移（E3）：与基线比 ----
+    drift_text = ''
+    if args.baseline:
+        try:
+            base = EF.loads(Path(args.baseline).read_text(encoding='utf-8'))
+            drift_text = _drift_text(EF.diff_facts(base, facts))
+        except (OSError, ValueError) as e:
+            print(f'  ⚠ 基线读不动，跳过漂移检测：{e}')
+        if drift_text:
+            print()
+            print(drift_text)
+
+    # ---- 退出码（CI 门禁）----
     if not result['ok']:
-        print(f'✗ 采集不可用：{result["reason"]}')
+        print(f'✗ 采集不可用（阻塞）：{result["reason"]}')
+        return 2
+    n_block = len(lint.get('parse_errors') or [])
+    n_fixable = len(lint.get('semantic_errors') or []) \
+        + len(lint.get('program_errors') or [])
+    if drift_text:
+        print('✓ 采集完成；但**检出了漂移**（需人工确认）')
         return 1
-    print('✓ 采集完成（事实可用）')
+    if args.strict and n_fixable:
+        print(f'✓ 采集完成；`--strict` 下有 {n_fixable} 条需修的问题')
+        return 1
+    print(f'✓ 采集完成（parse 错误 {n_block} / 需修 {n_fixable}'
+          + ('；未比基线' if not args.baseline else '；无漂移') + '）')
     return 0
 
 
@@ -693,6 +757,13 @@ def build_parser() -> argparse.ArgumentParser:
                          'copy=整份拷到临时目录再采（小项目/测试用）')
     sp.add_argument('--timeout', type=int, default=600,
                     help='单次引擎命令超时（秒）')
+    sp.add_argument('--baseline', default=None,
+                    help='基线 facts.json —— 给了就做**漂移检测**（E3）：'
+                         '与它比，检出差异时退 1')
+    sp.add_argument('--check-only', dest='check_only', action='store_true',
+                    help='**不跑引擎**，只比对现成的事实文件（CI 里不需要 SDK）')
+    sp.add_argument('--strict', action='store_true',
+                    help='语义/资源类问题（`is not an image` 等）也算失败（退 1）')
     sp.set_defaults(func=_cmd_engine_facts)
 
     return p

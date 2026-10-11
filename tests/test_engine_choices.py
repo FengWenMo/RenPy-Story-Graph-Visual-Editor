@@ -359,6 +359,200 @@ class TestExcelAnnotation:
         assert cell.comment is None
 
 
+class TestTableVsEngine:
+    """资源表 ↔ 引擎 的对账：**只报告，不删**（路线图 §8.9）。"""
+
+    def test_table_only_is_reported(self):
+        got = EF.table_vs_engine(_facts(LAN_ATTRS, LAN_CANDS),
+                                 {'lan': ['happy', 'mask', '_ss_cut']})
+        assert got['table_only'] == {'lan': ['mask', '_ss_cut']}
+
+    def test_engine_only_is_reported(self):
+        got = EF.table_vs_engine(_facts(LAN_ATTRS, LAN_CANDS),
+                                 {'lan': ['happy']})
+        assert 'clothes2' in got['engine_only']['lan']
+
+    def test_no_facts_no_claim(self):
+        assert EF.table_vs_engine(None, {'lan': ['x']}) == {}
+        assert EF.table_vs_engine({}, {'lan': ['x']}) == {}
+
+    def test_uncollectable_facts_no_claim(self):
+        bad = EF.build_facts({'attributes': [(EF.SRC_PROBE, LAN_ATTRS)]},
+                             collection={'parse_clean': True,
+                                         'probe_complete': False})
+        assert EF.table_vs_engine(bad, {'lan': ['x']}) == {}
+
+    def test_tag_the_engine_says_nothing_about_is_skipped(self):
+        got = EF.table_vs_engine(_facts(LAN_ATTRS, LAN_CANDS),
+                                 {'nobody': ['a', 'b']})
+        assert got == {'table_only': {}, 'engine_only': {},
+                       'spelling_only': {}}
+
+    def test_spelling_differences_are_not_counted_as_differences(self):
+        """真机逼出来的那一桶：`bg1.1` vs `bg1_1` **不算差异**（但也不丢）。
+
+        ⚠ 桶里**两边都留**（表里的 `bg1.1` 与引擎里的 `bg1_1`）——
+        这样人一眼能看到**配对关系**；只留一边就看不出跟谁重了。
+        """
+        got = EF.table_vs_engine(
+            _facts({'bg': [{'group': 'g', 'attribute': 'bg1_1'}]},
+                   {'bg': ['bg1_1']}),
+            {'bg': ['bg1.1']})
+        assert got['table_only'] == {} and got['engine_only'] == {}
+        assert sorted(got['spelling_only']['bg']) == ['bg1.1', 'bg1_1']
+
+    def test_spelling_bucket_never_hides_a_real_difference(self):
+        """写法归一**只用来消除假警报**，不许把真差异吞掉（契约 T1 的同款纪律）。"""
+        got = EF.table_vs_engine(
+            _facts({'bg': [{'group': 'g', 'attribute': 'bg1_1'}]},
+                   {'bg': ['bg1_1']}),
+            {'bg': ['bg1.1', 'mask']})
+        assert got['table_only'] == {'bg': ['mask']}
+        assert sorted(got['spelling_only']['bg']) == ['bg1.1', 'bg1_1']
+
+
+class TestDiffFacts:
+    """漂移报告（E3）：纯函数、不需要引擎 —— CI 里直接跑。"""
+
+    def _f(self, **kw):
+        payload = {k: [(EF.SRC_PROBE, v)] for k, v in kw.items()}
+        return EF.build_facts(payload, collection={'parse_clean': True,
+                                                   'probe_complete': True})
+
+    def test_identical_is_same(self):
+        a = self._f(labels=['start', 'end'])
+        assert EF.diff_facts(a, a)['same'] is True
+
+    def test_added_label(self):
+        d = EF.diff_facts(self._f(labels=['start']),
+                          self._f(labels=['start', 'end']))
+        assert d['same'] is False
+        assert d['added'] == {'labels': ['end']}
+
+    def test_removed_transform(self):
+        d = EF.diff_facts(self._f(transforms=['fade', 'dissolve']),
+                          self._f(transforms=['fade']))
+        assert d['removed'] == {'transforms': ['dissolve']}
+
+    def test_nested_attribute_drift_is_per_tag(self):
+        """映射型事实按 tag 展开 —— 报告能精确到"哪个角色多了哪个属性"。"""
+        d = EF.diff_facts(
+            self._f(attributes={'lan': [{'group': 'g', 'attribute': 'happy'}]}),
+            self._f(attributes={'lan': [{'group': 'g', 'attribute': 'happy'},
+                                        {'group': 'g', 'attribute': 'sad'}]}))
+        assert 'attributes.lan' in d['added']
+
+    def test_engine_version_change_counts_as_drift(self):
+        a = EF.build_facts({}, engine={'version': '8.4.1'},
+                           collection={'parse_clean': True,
+                                       'probe_complete': True})
+        b = EF.build_facts({}, engine={'version': '8.5.3'},
+                           collection={'parse_clean': True,
+                                       'probe_complete': True})
+        d = EF.diff_facts(a, b)
+        assert d['same'] is False
+        assert d['engine']['version'] == ('8.4.1', '8.5.3')
+
+
+class TestEngineAlignSection:
+    """体检报告里那一段（有才对；没有就整段不出现）。"""
+
+    def _report(self, align):
+        return {'ok': True, 'problems': 0, 'counts': {'images': 3},
+                'missing': {}, 'unregistered': {}, 'outside_game': {},
+                'duplicate_ids': [], 'duplicate_paths': [], 'no_path': [],
+                'placeholders': [], 'statements': [], 'cds': [],
+                'engine_align': align}
+
+    def test_section_appears_with_data(self):
+        from storygraph.app.asset_report import format_asset_health
+        text = format_asset_health(self._report(
+            {'table_only': {'lan': ['mask', '_ss_cut']}, 'engine_only': {}}))
+        assert '⑨ 资源表 ↔ 引擎 对账' in text
+        assert 'mask' in text
+        assert '不影响导入' in text          # 明说"不拦你"
+
+    def test_section_absent_without_data(self):
+        from storygraph.app.asset_report import format_asset_health
+        assert '⑨' not in format_asset_health(self._report({}))
+
+    def test_section_absent_when_nothing_to_say(self):
+        from storygraph.app.asset_report import format_asset_health
+        assert '⑨' not in format_asset_health(
+            self._report({'table_only': {}, 'engine_only': {},
+                          'spelling_only': {}}))
+
+    def test_spelling_bucket_is_a_count_not_a_list(self):
+        """写法差异只出一行计数 —— 不摊开成清单（否则又变成噪声）。"""
+        from storygraph.app.asset_report import format_asset_health
+        text = format_asset_health(self._report(
+            {'table_only': {}, 'engine_only': {},
+             'spelling_only': {'bg': ['bg1.1', 'bg1.2']}}))
+        assert '只是写法不同' in text and '2 项' in text
+        # 摊开成清单的样子是 `bg: bg1.1、bg1.2` —— 这种行不该出现
+        assert 'bg: bg1.1' not in text
+
+
+class TestCliDriftGate:
+    """E3 门禁：`engine-facts --check-only` 的**退出码约定**（CI 全靠它）。"""
+
+    def _facts_file(self, path, **kw):
+        payload = {k: [(EF.SRC_PROBE, v)] for k, v in kw.items()}
+        facts = EF.build_facts(payload, engine={'version': '8.5.3'},
+                               collection={'parse_clean': True,
+                                           'probe_complete': True})
+        path.write_text(EF.dumps(facts), encoding='utf-8')
+        return facts
+
+    def _run(self, argv):
+        from storygraph.cli import main
+        try:
+            return main(argv)
+        except SystemExit as e:                     # pragma: no cover
+            return int(e.code or 0)
+
+    def test_no_drift_exits_zero(self, tmp_path, capsys):
+        cur = tmp_path / 'cur.json'
+        base = tmp_path / 'base.json'
+        self._facts_file(cur, labels=['start'])
+        self._facts_file(base, labels=['start'])
+        code = self._run(['engine-facts', '--check-only',
+                          '--project', str(tmp_path),
+                          '--out', str(cur), '--baseline', str(base)])
+        assert code == 0
+        assert '没有变化' in capsys.readouterr().out
+
+    def test_drift_exits_one_and_prints_the_change(self, tmp_path, capsys):
+        cur = tmp_path / 'cur.json'
+        base = tmp_path / 'base.json'
+        self._facts_file(base, labels=['start'])
+        self._facts_file(cur, labels=['start', 'ending'])
+        code = self._run(['engine-facts', '--check-only',
+                          '--project', str(tmp_path),
+                          '--out', str(cur), '--baseline', str(base)])
+        assert code == 1
+        out = capsys.readouterr().out
+        assert 'ending' in out and '漂移' in out
+
+    def test_missing_baseline_is_blocking(self, tmp_path, capsys):
+        cur = tmp_path / 'cur.json'
+        self._facts_file(cur, labels=['start'])
+        code = self._run(['engine-facts', '--check-only',
+                          '--project', str(tmp_path), '--out', str(cur)])
+        assert code == 2
+        assert 'baseline' in capsys.readouterr().err
+
+    def test_broken_file_is_blocking(self, tmp_path, capsys):
+        cur = tmp_path / 'cur.json'
+        base = tmp_path / 'base.json'
+        cur.write_text('{ 不是 json', encoding='utf-8')
+        self._facts_file(base, labels=['start'])
+        code = self._run(['engine-facts', '--check-only',
+                          '--project', str(tmp_path),
+                          '--out', str(cur), '--baseline', str(base)])
+        assert code == 2
+
+
 class TestSessionEngineFacts:
     def test_missing_file_is_empty(self, tmp_path):
         assert GraphSessionMixin.engine_facts(_Stub(tmp_path)) == {}

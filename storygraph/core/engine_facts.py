@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 #: 事实文件的结构版本。**改结构就 +1**（读取方据此判断能不能认）。
@@ -330,6 +331,187 @@ def unrecognized_attrs(facts: dict, tag: str, attrs) -> list:
     return out
 
 
+#: 归一时抹掉的**记号**：`bg1.1` / `bg1_1` / `bg-1-1` 是同一个名字的三种写法。
+_SPELLING_SEP = re.compile(r'[\s._\-]+')
+
+
+def unrecognized_by_tag(items) -> dict:
+    """
+    `[(tag, [属性…]), …]` → `{tag: [引擎未认的属性…]}`（**纯函数**）。
+
+    为什么要有它：`unrecognized_attrs` 只回答"**这一格**里哪些没被认"，
+    而"报出来"（路线图 §8.9 待做的那一项）要的是**项目级汇总**：
+    一个项目到底有多少处会 lint 报错、集中在哪几个角色身上。
+
+    两条自我约束：
+      · 空的 tag / 空的属性一律不收（报告里不出现空行）；
+      · **保序去重**（同一个属性在同一个角色下只报一次）。
+
+    ⚠ **只是汇总，不做过滤** —— 这些属性**仍然可选、仍然能导入**
+    （用户 2026-10-11："一切以实际有的资源为准"）。
+    """
+    out: dict = {}
+    for item in (items or ()):
+        try:
+            tag = str((item or [None, None])[0] or '').strip()
+            attrs = (item or [None, None])[1] or ()
+        except (TypeError, IndexError):
+            continue
+        if not tag:
+            continue
+        bucket = out.setdefault(tag, [])
+        for attr in attrs:
+            word = str(attr or '').strip()
+            if word and word not in bucket:
+                bucket.append(word)
+    return {k: v for k, v in out.items() if v}
+
+
+def _norm_word(word: str) -> str:
+    """名字 → 归一形式（去大小写与 `.`/`_`/`-`/空格）。**只用来消除假警报。**"""
+    return _SPELLING_SEP.sub('', str(word or '')).lower()
+
+
+def table_vs_engine(facts: dict, table_attrs) -> dict:
+    """
+    资源表登记的 `{tag: [属性, …]}` 与**引擎事实**对账 → 差异。纯函数。
+
+    这是路线图 §八 四步时序里**第 ③ 步"对账"**的实现。**只报告，不删任何东西**：
+
+      · `table_only`   —— 表里有、引擎不认（`mask` / `_ss_cut` 这类**内部件**）；
+        ⚠ 它们**仍然可选、仍然能导入**（用户 2026-10-11 定的口径：
+        候选以**实际存在的资源**为准）—— 这里只是把它们**报出来**；
+      · `engine_only`  —— 引擎有、表里没登记（提示补登）；
+      · `spelling_only` —— **只是写法不同**（`bg1.1` vs `bg1_1`）→ **只计数、不算差异**，
+        但**照样留在数据里**（不丢信息，报告里明说"这不算差异"）。
+
+    ⚠ `spelling_only` 这一桶是**真机逼出来的**：不加它，`sr_general` 会报
+    **175 项**，其中 **76 项**只是写法差异 —— 一份 175 条的清单没人会看，
+    等于没有报告。归一**只用来消除假警报**（把"要紧的"从噪声里择出来），
+    **绝不拿来下"它们其实是同一个"的结论**（契约 T1：归一只能找候选）。
+
+    ⚠ 三条不宣称（与 `unrecognized_attrs` 同一族）：
+      没有事实 / `is_collectable` 为假 / **引擎对这个 tag 什么都没说** → 跳过这个 tag。
+    """
+    if not facts or not table_attrs:
+        return {}
+    ok, _reason = is_collectable(facts)
+    if not ok:
+        return {}
+    table_only: dict = {}
+    engine_only: dict = {}
+    spelling: dict = {}
+    for tag, words in (table_attrs or {}).items():
+        known = {str(a.get('attribute') or '')
+                 for a in attributes_of(facts, str(tag))}
+        known |= {str(v) for v in candidates_of(facts, str(tag))}
+        known.discard('')
+        if not known:
+            continue                      # 引擎没说过这个 tag → 不下结论
+        listed = [str(w) for w in (words or ()) if str(w)]
+        listed_norm = {_norm_word(w) for w in listed}
+        known_norm = {_norm_word(w) for w in known}
+        tbl, eng, spl = [], [], []
+        for word in listed:
+            if word in known:
+                continue
+            if _norm_word(word) in known_norm:
+                spl.append(word)          # 只是写法不同
+            else:
+                tbl.append(word)
+        for word in sorted(known):
+            if word in set(listed):
+                continue
+            if _norm_word(word) in listed_norm:
+                if word not in spl:
+                    spl.append(word)
+            else:
+                eng.append(word)
+        if tbl:
+            table_only[str(tag)] = tbl
+        if eng:
+            engine_only[str(tag)] = eng
+        if spl:
+            spelling[str(tag)] = spl
+    return {'table_only': table_only, 'engine_only': engine_only,
+            'spelling_only': spelling}
+
+
+def diff_facts(old, new) -> dict:
+    """
+    两份引擎事实 → **漂移报告**（E3）。纯函数，无需引擎、无需项目 —— CI 里能直接跑。
+
+    返回：
+        {
+          'same': bool,
+          'engine': {'version': (旧, 新)} or {},
+          'added':   {键: [新增的项…]},
+          'removed': {键: [消失的项…]},
+          'changed': {键: 'list' | 'scalar'},
+        }
+
+    为什么按"项"比而不是比整份 JSON：整份比只能告诉你"变了"，
+    而"**引擎多了哪些 transform / 哪些 label 不见了**"才是人能直接处理的东西。
+    映射型的事实（`attributes` / `candidates`）按 tag 展开成 `键=tag`，
+    所以漂移报告能精确到**哪个角色多了哪个属性**。
+    """
+    out = {'same': True, 'engine': {}, 'added': {}, 'removed': {}, 'changed': {}}
+    old_f = (old or {}).get('facts') or {}
+    new_f = (new or {}).get('facts') or {}
+
+    for key in FACT_KEYS:
+        a, b = _flat_value(old_f.get(key)), _flat_value(new_f.get(key))
+        if a is None and b is None:
+            continue
+        if a is None or b is None:
+            out['changed'][key] = 'list' if isinstance(b if b is not None else a,
+                                                       (list, dict)) else 'scalar'
+            out['same'] = False
+            continue
+        if isinstance(a, dict) or isinstance(b, dict):
+            for sub in sorted(set(a) | set(b)):
+                x, y = set(_as_set(a.get(sub))), set(_as_set(b.get(sub)))
+                if x != y:
+                    out['same'] = False
+                    if y - x:
+                        out['added'][f'{key}.{sub}'] = sorted(y - x)
+                    if x - y:
+                        out['removed'][f'{key}.{sub}'] = sorted(x - y)
+        else:
+            x, y = set(_as_set(a)), set(_as_set(b))
+            if x != y:
+                out['same'] = False
+                if y - x:
+                    out['added'][key] = sorted(y - x)
+                if x - y:
+                    out['removed'][key] = sorted(x - y)
+
+    old_v = ((old or {}).get('engine') or {}).get('version')
+    new_v = ((new or {}).get('engine') or {}).get('version')
+    if old_v and new_v and old_v != new_v:
+        out['engine']['version'] = (old_v, new_v)
+        out['same'] = False
+    return out
+
+
+def _flat_value(entry):
+    """事实条目 → 裸值（没有这条 → `None`；条目为空列表/空字典也算"有"）。"""
+    if entry is None:
+        return None
+    return _entry_value(entry)
+
+
+def _as_set(value):
+    """值 → 可比较的序列（列表/元组/集合原样；标量包成单元素）。"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(x) for x in value]
+    if isinstance(value, dict):
+        return [str(k) for k in value]
+    return [str(value)]
+
+
 def narrow_problem(before, after) -> str:
     """
     收窄断言：`get_ordered_image_attributes(tag, (已选,))` 的结果必须满足
@@ -453,5 +635,7 @@ __all__ = [
     'empty_facts', 'facts_path', 'validate_facts', 'is_collectable',
     'value_of', 'source_of', 'attributes_of', 'groups_of', 'candidates_of',
     'grouped_choices', 'group_conflicts', 'rename_overlay', 'unrecognized_attrs',
+    'unrecognized_by_tag',
+    'table_vs_engine', 'diff_facts',
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
 ]

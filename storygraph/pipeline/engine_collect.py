@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -350,6 +351,42 @@ def _derived_overridden_builtins(project_root) -> list:
     return out
 
 
+def _derived_undeclared_heads(project_root) -> list:
+    """
+    **扫描线**：这个项目里有哪些"工具还不认识的写法"。
+
+    为什么它要在**采集时**算一次（方案 §四 的 `derived.undeclared_heads`）：
+
+      · 扫描结果以前只活在界面里（打开项目才算），于是**没法进版本库、没法比对**；
+        采进 `engine_facts.json` 之后，它和"引擎事实"同生共死、可 diff；
+      · 它也是**交给程序看的清单** —— 方案 §三/§九 说扫描要"喂给探针该测什么"：
+        人拿着它去问程序"这几个写法是什么意思"，就是 ⑨ 三种回头的入口。
+
+    ⚠ 两条自我约束（都写进判据）：
+      ① **只用 V2-1 之后的闸门版扫描器** —— 内置语句（`with`/`window`/`pause`…）
+         和"台词被误读"的行**不进这份清单**（否则又是"工具在输出错误知识"）；
+      ② 扫描器**只说我认出了 N 个**（规则 N1）—— 所以这里照抄
+         `scan_disclaimer`，绝不宣称"项目里只有这些"；
+      ③ 扫不出来（解析失败等）→ **空列表**，绝不编。
+    """
+    try:
+        from storygraph.story.statement_registry import discover_undeclared
+        found = discover_undeclared(project_root)
+    except Exception as e:                       # noqa: BLE001 - 扫不动就不写
+        swallow('pipeline.engine_collect.undeclared_heads', e)
+        return []
+    out = []
+    for rec in (found or ()):
+        head = str(rec.get('head') or '')
+        if not head:
+            continue
+        out.append({'head': head,
+                    'count': int(rec.get('count') or 0),
+                    'files': [str(f) for f in (rec.get('files') or [])][:8],
+                    'block': bool(rec.get('block'))})
+    return sorted(out, key=lambda r: (-r['count'], r['head']))
+
+
 def collect(project_root, sdk=None, *, mode='in-place', out_path=None,
             timeout=DEFAULT_TIMEOUT) -> dict:
     """
@@ -453,6 +490,8 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT) -> d
 
     # ③ 合并（每条带来源；两个来源不一致 → 进 conflicts，不静默挑一个）
     dump_loc = (dump_data or {}).get('location') or {} if isinstance(dump_data, dict) else {}
+    # 扫描线：这份清单**随事实一起进版本库**（方案 §四 的 derived.undeclared_heads）
+    undeclared = _derived_undeclared_heads(work)
     payloads = {
         'images': [(EF.SRC_PROBE, probe_data.get('images'))],
         'tags': [(EF.SRC_PROBE, probe_data.get('tags'))],
@@ -471,6 +510,7 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT) -> d
                     'lint_exit': rc},
         lint=lint,
         derived={'overridden_builtins': overridden,
+                 'undeclared_heads': undeclared,
                  'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'},
     )
 
@@ -492,14 +532,28 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT) -> d
             'removed': removed, 'output': out, 'lint_exit': rc}
 
 
+_VERSION_LINE = re.compile(r"""^\s*version\s*=\s*(['"])(?P<v>[^'"]+)\1\s*$""")
+
+
 def _engine_version(engine_root: Path) -> str:
-    """引擎版本（认不出留空 —— 但空白版本会让"漂移检测"失去参照，所以尽力取）。"""
-    for rel in ('renpy/vc_version.py',):
-        p = engine_root / rel
-        if p.is_file():
-            for line in p.read_text(encoding='utf-8', errors='replace').splitlines():
-                if line.startswith('version_tuple'):
-                    return line.split('=', 1)[1].strip().strip('()')
+    """
+    引擎版本（取自 SDK 的 `renpy/vc_version.py`）。
+
+    ⚠ 只认**字面量**（`version = '8.5.3.26051504'`）—— 取不到就留空，
+    **不猜**。留空的代价是"引擎升级"这一种漂移检测不到（内容指纹仍在），
+    所以这里要如实：宁可空着，也不要写一个编出来的版本号。
+    （实测踩到：原先找的是 `version_tuple`，而它在 `__init__.py` 里是**算**出来的，
+      `vc_version.py` 里只有 `version = '…'` —— 于是版本一直是空的。）
+    """
+    path = Path(engine_root) / 'renpy' / 'vc_version.py'
+    try:
+        for line in path.read_text(encoding='utf-8',
+                                   errors='replace').splitlines():
+            m = _VERSION_LINE.match(line)
+            if m:
+                return m.group('v')
+    except OSError as e:
+        swallow('pipeline.engine_collect.engine_version', e)
     return ''
 
 
