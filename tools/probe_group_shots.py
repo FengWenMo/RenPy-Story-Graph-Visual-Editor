@@ -60,9 +60,16 @@ dlg2 = CustomStatementDialog(
         {'name': 'rest', 'label': '其他'}]))
 dlg2.name.setText('swim_suit')
 dlg2.label.setText('泳装切换')
+# ⚠ 出图要**多填几个参数** —— 用户抱怨的正是"多个参数还要下拉看"，
+#   一个参数看不出这个问题（旧版单参数时表格看着还行）。
+dlg2.params.clear()
 dlg2.params.add_param('intensity', '强度', '1,2,3')
+dlg2.params.add_param('expression', '表情', 'happy,shy,sigh,angry')
+dlg2.params.add_param('who', '对谁说', 'lyj,lan,xing')
 dlg2.write_groups.setChecked(True)
+dlg2.groups.clear()
 dlg2.groups.add_group('pose', '姿势', 'stand, sit')
+dlg2.groups.add_group('outfit', '服装', 'clothes2, swim_*')
 dlg2.show()
 app.processEvents()
 p2 = out / 'learn_dialog_groups.png'

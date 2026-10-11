@@ -23,83 +23,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPlainTextEdit,
-                               QPushButton, QSplitter, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QDialogButtonBox, QFrame, QGroupBox,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QPlainTextEdit, QPushButton, QScrollArea,
+                               QSplitter, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from storygraph.authoring.learn_statement import (build_declaration,
                                                   declaration_preview)
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
-
-
-class _ParamsTable(QTableWidget):
-    """参数表：名字 / 中文名 / 候选值（逗号分隔）。"""
-
-    def __init__(self, parent=None):
-        super().__init__(0, 3, parent)
-        self.setHorizontalHeaderLabels(['参数名', '中文名（可空）',
-                                        '候选值（可空，逗号分隔）'])
-        self.verticalHeader().setVisible(False)
-        hh = self.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-
-    def rows(self) -> list:
-        out = []
-        for r in range(self.rowCount()):
-            def cell(c):
-                item = self.item(r, c)
-                return item.text() if item is not None else ''
-            out.append({'name': cell(0), 'label': cell(1), 'choices': cell(2)})
-        return out
-
-    def add_param(self, name: str = '', label: str = '', choices: str = ''):
-        r = self.rowCount()
-        self.insertRow(r)
-        for c, text in enumerate((name, label, choices)):
-            self.setItem(r, c, QTableWidgetItem(text))
-        self.setCurrentCell(r, 0)
-
-
-class _GroupsTable(QTableWidget):
-    """词组表：组名 / 中文名 / 候选词（逗号分隔；留空 = 兜底组）。"""
-
-    def __init__(self, parent=None):
-        super().__init__(0, 3, parent)
-        self.setHorizontalHeaderLabels(['词组名', '中文名（如 服装）',
-                                        '这一组有哪些词（留空 = 兜底）'])
-        self.verticalHeader().setVisible(False)
-        hh = self.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-
-    def rows(self) -> list:
-        out = []
-        for r in range(self.rowCount()):
-            def cell(c):
-                item = self.item(r, c)
-                return item.text() if item is not None else ''
-            out.append({'name': cell(0), 'label': cell(1), 'choices': cell(2)})
-        return out
-
-    def add_group(self, name: str = '', label: str = '', choices: str = ''):
-        r = self.rowCount()
-        self.insertRow(r)
-        for c, text in enumerate((name, label, choices)):
-            self.setItem(r, c, QTableWidgetItem(text))
-        self.setCurrentCell(r, 0)
-
-    def load_groups(self, groups):
-        """已有声明 → 填进表（打开时让用户看到现在是怎么分的）。"""
-        for g in (groups or ()):
-            self.add_group(getattr(g, 'name', '') or '',
-                           getattr(g, 'label', '') or '',
-                           '、'.join(getattr(g, 'options', []) or []))
+from storygraph.ui_qt.param_cards import GroupList, ParamList
 
 
 class CustomStatementDialog(QDialog):
@@ -108,6 +43,10 @@ class CustomStatementDialog(QDialog):
 
     左侧 = **发现**（项目里还没声明、但脚本里真的在用的写法）；
     右侧 = 填写 + 预览。左边点一行会把名字填进右边（参数留空，人自己加）。
+
+    ⚠ 参数与词组**不再是表格**（用户 2026-10-11 实测："表格太小了！多个参数
+    还要下拉看……编剧仍然看不明白"）→ 换成 `ui_qt/param_cards.py` 的**宽卡片**：
+    一个参数一张卡、竖着排、候选值敲回车变成可点方块。
     """
 
     def __init__(self, parent=None, project_root=None, declares=None,
@@ -175,6 +114,9 @@ class CustomStatementDialog(QDialog):
         lv.addWidget(self.declared)
 
         # —— 右：填写 ——
+        # ⚠ 结构（用户 2026-10-11："多个参数还要下拉看"）：
+        #   顶部 4 行基本信息**固定**，下半部分（参数 + 词组）放进**滚动区**，
+        #   按钮条**固定在底** —— 这样加多少参数都不会把"写进清单"挤出屏幕。
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
@@ -207,30 +149,49 @@ class CustomStatementDialog(QDialog):
         row3.addWidget(self.docs, 1)
         rv.addLayout(row3)
 
+        # ---- 滚动区：参数 + 词组 ----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inner = QWidget()
+        iv = QVBoxLayout(inner)
+        iv.setContentsMargins(0, 0, 0, 0)
+        iv.setSpacing(T.SPACE['sm'])
+
         pv = QHBoxLayout()
-        pv.addWidget(QLabel('参数（会成为表格列；候选值成为下拉）'))
+        pv.addWidget(QLabel('这个动作要填的东西（一个一张卡，竖着排）'))
         pv.addStretch(1)
-        add = QPushButton('＋ 加一行')
+        add = QPushButton('＋ 加一个')
         add.clicked.connect(lambda: self.params.add_param())
-        rm = QPushButton('－ 删这一行')
+        rm = QPushButton('删掉最后一个')
         rm.clicked.connect(self._remove_param)
         pv.addWidget(add)
         pv.addWidget(rm)
-        rv.addLayout(pv)
+        iv.addLayout(pv)
 
-        self.params = _ParamsTable()
-        rv.addWidget(self.params, 1)
+        # ⭐ 用户 2026-10-11 实测反馈后的重做（`ui_qt/param_cards.py`）：
+        #   "表格太小了！多个参数还要下拉看……编剧仍然看不明白"
+        #   → 三列表格换成**一行一张宽卡**（自带"删掉这一项"），
+        #     候选值敲回车就变成可点的小方块（不用记逗号）。
+        self.params = ParamList(on_change=self._refresh_preview)
+        iv.addWidget(self.params, 1)
+        # 一进来就有一张空卡，省得人去想"要先点加号吗"
+        self.params.add_param()
 
+        # ⚠ 预览搬到**左栏底部**（原来在右栏、150px 高，把参数卡挤得只剩一卡多）
+        #   —— 用户抱怨"多个参数还要下拉看"，一半原因就是这个。
+        #   ⚠ `left` 是 QWidget，加东西要用它的布局 `lv`（不是 left.addWidget）。
+        lv.addWidget(QLabel('这样写对吗（右边一改，这里立刻变）'))
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
-        self.preview.setMaximumHeight(150)
-        rv.addWidget(self.preview)
+        self.preview.setMinimumHeight(120)
+        lv.addWidget(self.preview, 1)
 
         self.name.textChanged.connect(self._refresh_preview)
         self.label.textChanged.connect(self._refresh_preview)
         self.docs.textChanged.connect(self._refresh_preview)
         self.block.toggled.connect(self._refresh_preview)
-        self.params.itemChanged.connect(self._refresh_preview)
         self._refresh_preview()
 
         # —— 词组（分栏显示"服装 / 表情"这类）——
@@ -238,16 +199,21 @@ class CustomStatementDialog(QDialog):
         # 用户 2026-10-10："实际上需要分组显示……因为我这个要求通用！所以一般人
         # 其实是没有服装这个选项的！所以事实上应当通过 B 这个自定义模块，
         # 做到把服装跟表情这种东西分开！"
-        box_groups = QGroupBox('词组（可选）—— 把立绘候选分成"服装 / 表情"这样的栏')
+        #
+        # ⚠ 默认**收起**（用户 2026-10-11："多个参数还要下拉看"）：词组是高级功能，
+        #   一般人用不上 —— 收起后纵向空间全给参数卡，要分组时再点开。
+        #   注意 `declared_groups` 仍然照常填进去，勾开就能看到，不会丢。
+        box_groups = QGroupBox('词组（可选 · 高级）—— 把立绘候选分成"服装 / 表情"这样的栏')
+        box_groups.setCheckable(True)
+        # ⚠ `QGroupBox` 一旦 setCheckable，**默认就是勾上的** —— 不显式取消，
+        #   界面会显示"勾着但内容不见了"（判据当场抓到）。先取消，再连信号。
+        box_groups.setChecked(False)
         gv = QVBoxLayout(box_groups)
         gv.setSpacing(T.SPACE['xs'])
         gv.addWidget(self._hint(
-            '这里不预设任何组名：你写"服装"就是服装，写"姿势"就是姿势。'
-            '词组名只是内部键，中文名才是界面上那一栏的字。'
-            '留空"候选词"的那一组 = 兜底（没归到别的组的词都进它）。'))
-        self.groups = _GroupsTable()
-        self.groups.setMaximumHeight(160)
-        self.groups.verticalHeader().setDefaultSectionSize(26)   # 别把中文挤掉
+            '你写"服装"就是服装，写"姿势"就是姿势（中文名才是编剧看到的那栏字）。'
+            '留空候选词的那组 = 兜底。'))
+        self.groups = GroupList(on_remove_group=self._remove_group)
         gv.addWidget(self.groups)
         grow = QHBoxLayout()
         add_g = QPushButton('＋ 加一组')
@@ -262,14 +228,28 @@ class CustomStatementDialog(QDialog):
         self.write_groups.toggled.connect(self._refresh_preview)
         grow.addWidget(self.write_groups)
         gv.addLayout(grow)
-        self.groups.itemChanged.connect(self._refresh_preview)
-        rv.addWidget(box_groups)
+        self.groups_box = box_groups
+
+        def _toggle_groups(on: bool):
+            """
+            ⚠ `QGroupBox.setCheckable` **只画一个勾选框，不会自己收起内容** ——
+            必须真的显示/隐藏。收起时把最大高度压到一行，空间让给参数卡。
+            """
+            for w in (self.groups, add_g, rm_g, self.write_groups):
+                w.setVisible(bool(on))
+            box_groups.setMaximumHeight(16777215 if on else 30)
+        box_groups.toggled.connect(_toggle_groups)
+        _toggle_groups(False)                    # 默认收起
+        iv.addWidget(box_groups)
         self.groups.load_groups(declared_groups or [])
+
+        scroll.setWidget(inner)
+        rv.addWidget(scroll, 1)                  # 滚动区吃掉右栏剩余高度
 
         split.addWidget(left)
         split.addWidget(right)
-        split.setSizes([420, 560])
-        self.resize(1040, 640)
+        split.setSizes([400, 620])
+        self.resize(1100, 720)
 
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self._ok_btn = box.button(QDialogButtonBox.Ok)
@@ -318,10 +298,9 @@ class CustomStatementDialog(QDialog):
         return lab
 
     def _remove_param(self):
-        r = self.params.currentRow()
-        if r >= 0:
-            self.params.removeRow(r)
-            self._refresh_preview()
+        """删掉最后一张参数卡（卡片自带"删掉这一项"，这个是批量入口）。"""
+        self.params.remove_current()
+        self._refresh_preview()
 
     def _on_pick(self):
         """点左边的发现项 → 把名字填进右边（带块也顺手勾上）。"""
@@ -379,11 +358,10 @@ class CustomStatementDialog(QDialog):
             self._verify_btn.setText('▶ 验证它能跑')
             self.set_verify_available(bool(self.on_verify))
         self.preview.setPlainText(str(text or ''))
+
     def _remove_group(self):
-        r = self.groups.currentRow()
-        if r >= 0:
-            self.groups.removeRow(r)
-            self._refresh_preview()
+        self.groups.remove_current()
+        self._refresh_preview()
 
     def built_groups(self) -> list:
         """当前词组表 → 后端参数（`learn_statement.build_group`）。"""
@@ -414,7 +392,9 @@ class CustomStatementDialog(QDialog):
         if wg is not None and wg.isChecked():
             from storygraph.authoring.learn_statement import group_preview
             text += '\n\n' + group_preview(self.built_groups())
-        self.preview.setPlainText(text)
+        preview = getattr(self, 'preview', None)
+        if preview is not None:
+            preview.setPlainText(text)
         btn = getattr(self, '_ok_btn', None)
         if btn is not None:
             # 勾了"一起写词组"时，允许**只写词组**（语句名可以是空的）

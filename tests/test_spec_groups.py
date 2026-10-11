@@ -280,9 +280,11 @@ def test_the_dialog_carries_groups_into_the_declaration(qapp, tmp_path):
                                 declared_groups=parse_attr_groups([
                                     {'name': 'outfit', 'label': '服装',
                                      'options': ['swim_suit']}]))
-    # 已有声明会填进表（让人看到现在是怎么分的）
-    assert dlg.groups.rowCount() == 1
-    assert dlg.groups.item(0, 0).text() == 'outfit'
+    # 已有声明会填进来（让人看到现在是怎么分的）
+    # ⚠ 词组区已从"三列表格"换成"宽卡片"（用户 2026-10-11："表格太小了"）
+    #   → 判据跟着走新 API（`count()` / `rows()`），验的契约没变。
+    assert dlg.groups.count() == 1
+    assert dlg.groups.rows()[0]['name'] == 'outfit'
     # 没勾"一起写" → 不写
     assert dlg.groups_to_write() == []
     dlg.write_groups.setChecked(True)

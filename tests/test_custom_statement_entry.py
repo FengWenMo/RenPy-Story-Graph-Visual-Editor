@@ -254,6 +254,65 @@ def test_the_dialog_disables_writing_until_the_name_is_valid(qapp, project):
     assert not dlg._ok_btn.isEnabled()
 
 
+def test_params_are_cards_not_a_cramped_table(qapp, tmp_path):
+    """
+    ⭐ 用户 2026-10-11 的实测反馈就是判据：
+
+    > "表格太小了！多个参数还要下拉看……而且编剧仍然看不明白"
+
+    钉住三件事：
+      ① 参数区**不再是表格**（是竖排卡片列表）；
+      ② **不出现横向滚动**（多个参数只会往下排）；
+      ③ 候选值**不是逗号串**，是能点的小方块（编剧不用记分隔符）。
+    """
+    from PySide6.QtWidgets import QTableWidget
+    from PySide6.QtCore import Qt
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    from storygraph.ui_qt.param_cards import ParamList
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    assert isinstance(dlg.params, ParamList), '参数区不该再是表格'
+    assert not isinstance(dlg.params, QTableWidget)
+    assert dlg.params.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff, \
+        '多个参数只能往下排，绝不能要人横着拉'
+
+    # 加三个参数（多参数才是用户抱怨的场景）→ 三张卡，仍然不横向滚
+    dlg.params.clear()
+    for name, label, choices in (('intensity', '强度', '1,2,3'),
+                                 ('expression', '表情', 'happy,shy'),
+                                 ('who', '对谁说', 'lyj')):
+        dlg.params.add_param(name, label, choices)
+    assert dlg.params.count() == 3
+    rows = dlg.params.rows()
+    assert [r['name'] for r in rows] == ['intensity', 'expression', 'who']
+    # 候选值进去出来是同形（方块 ↔ 逗号串）
+    assert rows[0]['choices'] == '1,2,3', rows[0]
+    assert not dlg.params.horizontalScrollBar().isVisible()
+
+
+def test_group_section_is_collapsed_by_default(qapp, tmp_path):
+    """
+    词组是**高级功能**，默认收起（用户："多个参数还要下拉看"）——
+    收起后纵向空间全给参数卡；已有声明照样填进去，勾开就能看到。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    assert dlg.groups_box.isCheckable()
+    assert not dlg.groups_box.isChecked(), '默认该是收起的'
+    assert not dlg.groups.isVisible(), '收起时词组列表不该占空间'
+    # 已有声明仍然填着（勾开就能看到，不会丢）
+    dlg.groups.clear()
+    dlg.groups.add_group('outfit', '服装', 'clothes2')
+    assert dlg.groups.count() == 1
+    dlg.groups_box.setChecked(True)
+    assert dlg.groups.count() == 1, '勾开之后声明还在'
+
+
 def test_the_dialog_carries_params_into_the_declaration(qapp, project):
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     dlg = CustomStatementDialog(None, project_root=project, discovered=[])
