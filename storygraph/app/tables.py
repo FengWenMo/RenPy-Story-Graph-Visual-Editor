@@ -84,13 +84,18 @@ def table_changed_since(store: dict, table_path) -> bool:
 # ----------------------------------------------------------------------
 
 def generate_table(script_path, output_path=None, registry=None,
-                   project_root=None, with_thumbnails=True) -> dict:
+                   project_root=None, with_thumbnails=True,
+                   facts=None) -> dict:
     """
     把一个 .rpy 解析成演出表（同名 .xlsx）写盘。
 
     返回 {ok, table_path, error}。**不打开 Excel** —— 那是前端的事
     （`open_with_system_default` 在这里只提供能力，不主动调用：
     无头/测试环境不该被弹窗或外部程序打断）。
+
+    `facts`（引擎事实）给了就在「立绘」格挂批注，指出"这一格里有引擎没认的
+    属性"。⚠ **只提示、不过滤**：候选与下拉一律以实际存在的资源为准；
+    传 `None` → 一个批注都不挂（行为与从前一致）。
     """
     script_path = Path(script_path)
     if not script_path.exists():
@@ -99,7 +104,7 @@ def generate_table(script_path, output_path=None, registry=None,
     table_path = Path(output_path) if output_path else script_path.with_suffix('.xlsx')
     try:
         open_rpy_as_table(script_path, table_path, registry=registry,
-                          with_thumbnails=with_thumbnails)
+                          with_thumbnails=with_thumbnails, facts=facts)
     except Exception as e:                    # noqa: BLE001 - 报给前端
         return {'ok': False, 'table_path': table_path, 'error': str(e)}
     return {'ok': True, 'table_path': table_path, 'error': ''}

@@ -32,10 +32,17 @@ from storygraph.core import engine_facts as EF                        # noqa: E4
 
 
 def _facts(attrs, candidates):
+    """
+    一份**可用**的引擎事实（`collection` 两个闸门都为真）。
+
+    ⚠ 为什么必须带 `collection`：`unrecognized_attrs` 只在事实**可用**时才下结论 ——
+    这是"采不到就不宣称"那条规矩的落点（第一次写这批用例时正因漏了它而红，
+    是**判据自己错了**，不是实现错了）。
+    """
     return EF.build_facts({
         'attributes': [(EF.SRC_PROBE, attrs)],
         'candidates': [(EF.SRC_PROBE, candidates)],
-    })
+    }, collection={'parse_clean': True, 'probe_complete': True})
 
 
 LAN_ATTRS = {
@@ -254,6 +261,102 @@ class TestCardNote:
         note = beats.card_note(self._beat('lan happy sad'), None,
                                _facts(LAN_ATTRS, LAN_CANDS))
         assert '\n' not in note
+
+
+class TestUnrecognizedAttrs:
+    """**只标注、不过滤**（用户 2026-10-11 定的口径）。"""
+
+    def test_flags_only_the_unknown_one(self):
+        got = EF.unrecognized_attrs(_facts(LAN_ATTRS, LAN_CANDS), 'lan',
+                                    ['happy', 'lan_angry'])
+        assert got == ['lan_angry']
+
+    def test_known_attrs_are_not_flagged(self):
+        assert EF.unrecognized_attrs(_facts(LAN_ATTRS, LAN_CANDS), 'lan',
+                                     ['happy', 'clothes2']) == []
+
+    def test_no_facts_means_no_claim(self):
+        assert EF.unrecognized_attrs(None, 'lan', ['whatever']) == []
+        assert EF.unrecognized_attrs({}, 'lan', ['whatever']) == []
+
+    def test_uncollectable_facts_mean_no_claim(self):
+        """坑 4：采集不可用的事实不能拿来下结论。"""
+        bad = EF.build_facts({'attributes': [(EF.SRC_PROBE, LAN_ATTRS)]},
+                             collection={'parse_clean': True,
+                                         'probe_complete': False})
+        assert EF.unrecognized_attrs(bad, 'lan', ['lan_angry']) == []
+
+    def test_engine_silent_about_tag_means_no_claim(self):
+        """引擎对这个 tag 什么都没说 → **不下结论**（否则非 layeredimage 的 tag 全被误标）。"""
+        facts = _facts({'other': [{'group': 'g', 'attribute': 'x'}]},
+                       {'other': ['x']})
+        assert EF.unrecognized_attrs(facts, 'nobody', ['whatever']) == []
+
+
+class TestBeatUnknownAttrs:
+    def _beat(self, show):
+        b = beats.Beat()
+        b.show = show
+        return b
+
+    def test_reports_only_the_unknown(self):
+        got = beats.beat_unknown_attrs(self._beat('lan happy lan_angry'),
+                                       _facts(LAN_ATTRS, LAN_CANDS))
+        assert got == [{'tag': 'lan', 'attr': 'lan_angry'}]
+
+    def test_at_transform_is_not_an_attribute(self):
+        """`close_happy@i11` 里的 `i11` 是位置变换，不该被当成属性。"""
+        got = beats.beat_unknown_attrs(self._beat('lan happy@i11'),
+                                       _facts(LAN_ATTRS, LAN_CANDS))
+        assert got == []
+
+    def test_no_facts_no_claim(self):
+        assert beats.beat_unknown_attrs(self._beat('lan lan_angry'), None) == []
+
+
+class TestExcelAnnotation:
+    """剧本表**立绘格挂批注**：只提示，不改数据、不改下拉、不动资源表。"""
+
+    def _export(self, tmp_path, facts, show='lan happy lan_angry'):
+        from openpyxl import load_workbook
+        from storygraph.story.beat_model import Beat
+        from storygraph.story.excel_export import BEAT_FIELDS, export_beats_to_excel
+
+        b = Beat()
+        b.show = show
+        out = tmp_path / 't.xlsx'
+        export_beats_to_excel([b], out, facts=facts)
+        ws = load_workbook(out).active
+        col = BEAT_FIELDS.index('Show') + 1
+        return ws.cell(row=2, column=col)
+
+    def test_comment_is_attached_when_something_is_unknown(self, tmp_path):
+        cell = self._export(tmp_path, _facts(LAN_ATTRS, LAN_CANDS))
+        assert cell.comment is not None
+        text = cell.comment.text
+        assert 'lan_angry' in text
+        assert '不拦你' in text                # 明说"只是提示"
+
+    def test_cell_value_is_not_modified(self, tmp_path):
+        """**批注不改数据** —— 候选与导入仍以实际存在的资源为准。"""
+        cell = self._export(tmp_path, _facts(LAN_ATTRS, LAN_CANDS))
+        assert cell.value == 'lan happy lan_angry'
+
+    def test_no_facts_no_comment(self, tmp_path):
+        """没采过引擎事实 → 一个批注都不挂（行为与从前一字不变）。"""
+        cell = self._export(tmp_path, None)
+        assert cell.comment is None
+
+    def test_show_keywords_are_not_attributes(self, tmp_path):
+        """`show lan at center` 里的 `at` 是**关键字**，不是属性（实测踩到过）。"""
+        cell = self._export(tmp_path, _facts(LAN_ATTRS, LAN_CANDS),
+                            show='lan happy at center')
+        assert cell.comment is None
+
+    def test_empty_cell_gets_no_comment(self, tmp_path):
+        """⚠ 批注必须描述**它所在的那一格** —— 格子是空的就别说话。"""
+        cell = self._export(tmp_path, _facts(LAN_ATTRS, LAN_CANDS), show='')
+        assert cell.comment is None
 
 
 class TestSessionEngineFacts:

@@ -145,6 +145,93 @@ def _annotate_spec_heads(ws, beats, statements) -> int:
     return n
 
 
+#: `show` 语句里的**关键字**：它们后面跟的不是属性。
+#: ⚠ 不挡住它们，`show cg at center` 里的 `at` 会被当成属性报"引擎没认"（实测踩到）。
+_SHOW_KEYWORDS = frozenset({'at', 'with', 'as', 'behind', 'on', 'zorder'})
+
+
+def _unknown_show_words(show_text, facts) -> list:
+    """
+    一格 `show` 文本 → `[(tag, 属性), …]`：其中**引擎没认**的那些。
+
+    ⚠ 解析就地写、只依赖 `core` —— `story` 层**不能** import `app`
+    （契约 H1 的分层方向；`app/beats.py` 里有等价实现，那是给卡片用的）。
+
+    ⚠ 碰到 `at` / `with` / `as` / `behind` / `on` / `zorder` 就**停**：
+    它们后面是变换/图层，不是属性（`show cg at center` 的 `at` 不是属性）。
+    """
+    from storygraph.core import engine_facts as EF
+
+    out: list = []
+    for item in str(show_text or '').split(';'):
+        toks: list = []
+        for word in item.split():
+            if word in _SHOW_KEYWORDS:          # 关键字之后都不算属性
+                break
+            # `close_happy@i11` 里的 `@` 后面是**位置变换**，也不算属性
+            word = word.split('@', 1)[0]
+            if word:
+                toks.append(word)
+        if len(toks) < 2:
+            continue
+        tag, attrs = toks[0], toks[1:]
+        for attr in EF.unrecognized_attrs(facts, tag, attrs):
+            if (tag, attr) not in out:
+                out.append((tag, attr))
+    return out
+
+
+def _annotate_unknown_attrs(ws, beats, facts) -> int:
+    """
+    给「立绘」格挂**批注**：这一格里哪些属性**引擎没认**。
+
+    为什么是"批注"，而不是"过滤掉"或"另开一列"（2026-10-11 定的口径）：
+      · **候选以实际存在的资源为准** —— 资源表里有的、引擎不认的
+        （掩码 / 切图这类内部件）**照样可选、照样能导入**。
+        拿引擎的枚举去删候选，会把"合法的、只是引擎还没认的"一起删掉，
+        那正是"东西被错误过滤、无法导入"的来源；
+      · 但人要**知道**选了它会怎样（引擎会报
+        `'lan lan_angry' is not an image`）；
+      · 批注**不占列、不改任何一格的数据**，鼠标一悬停就看到 ——
+        与 `_annotate_spec_heads` 同一套做法（那条已经在用了）；
+      · **资源表一行都不动**：那是人工维护的资源登记，
+        机器不往里写"语义判断"（用户明确要求）。
+    ⚠ 事实不可用（没采过 / 采失败 / `is_collectable` 为假）→ **一个批注都不挂**。
+
+    返回挂了几格（可测）。
+    """
+    if not facts:
+        return 0
+    try:
+        col = BEAT_FIELDS.index('Show') + 1
+    except ValueError:                          # pragma: no cover - 列被删了
+        return 0
+    from openpyxl.comments import Comment
+
+    n = 0
+    for i, beat in enumerate(beats or (), start=2):
+        cell = ws.cell(row=i, column=col)
+        # ⚠ 从**这一格自己的内容**解析（不是从 `beat.show` 模型值）：
+        # 这一格可能是空的（那些项走别的列），拿模型值去挂批注就会
+        # "格子是空的、批注却在说别的东西"（实测踩到）。
+        hits = _unknown_show_words(cell.value, facts)
+        if not hits:
+            continue
+        lines = ['这一格里有引擎**没认**的属性：']
+        lines += [f'  {tag} {attr}' for tag, attr in hits[:8]]
+        if len(hits) > 8:
+            lines.append(f'  …另有 {len(hits) - 8} 项')
+        lines.append('可能是"文件在、但不是可选属性"（掩码 / 切图这类内部件）。')
+        lines.append('⚠ 只是提示：候选与导入**仍以实际存在的资源为准**，不拦你。')
+        lines.append(f'引擎会报 `\'{hits[0][0]} {hits[0][1]}\' is not an image`。')
+        cm = Comment('\n'.join(lines), 'storygraph')
+        cm.width = 340
+        cm.height = 130
+        cell.comment = cm
+        n += 1
+    return n
+
+
 #: Excel 数据验证里内联候选串的长度上限。
 #:
 #: 超了 Excel 会**直接拒绝**这个验证规则（表还是能存，但下拉没了、
@@ -251,7 +338,7 @@ def _write_spec_arg_columns(ws, beats, statements, row_count: int,
 def export_beats_to_excel(beats: list, output_path,
                           registry=None, include_dropdowns: bool = True,
                           include_thumbnails: bool = False,
-                          statements=None):
+                          statements=None, facts=None):
     """
     把 Beat 列表写成 Excel。
 
@@ -262,6 +349,11 @@ def export_beats_to_excel(beats: list, output_path,
     include_thumbnails：图库里的缩略图（给策划"看图选 ID"用）。
     **默认关**——首次导出要为每张图解码缩放（真实项目冷缓存实测 ~90s），
     CI / CLI 不该为此变慢。编辑器走后台线程并默认打开。
+
+    facts：**引擎事实**（`core.engine_facts` 那份）。给了就在「立绘」格上挂
+    批注，指出"这一格里有引擎没认的属性"。
+    ⚠ **只提示，绝不过滤**：候选与下拉内容一律以**实际存在的资源**为准
+    （用户 2026-10-11 定的口径）；`facts` 为空 → 一个批注都不挂，行为与从前一致。
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +398,9 @@ def export_beats_to_excel(beats: list, output_path,
 
     # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
     _annotate_spec_heads(ws, beats, statements)
+    # 「引擎没认的属性」→ 挂在**立绘格**的批注上（只提示、不过滤、不改数据）。
+    # 没采过引擎事实时 facts 为空 → 一个批注都不挂（行为与从前一致）。
+    _annotate_unknown_attrs(ws, beats, facts)
 
     # 列宽：台词最宽，技术列压窄。'ContentHash' 是协作指纹，给程序员看的，
     # 压到 12 并放到最后一列，避免它跟内容列抢视觉重心。

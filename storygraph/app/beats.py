@@ -706,6 +706,44 @@ def beat_group_conflicts(beat: Beat, facts) -> list:
     return out
 
 
+def _show_item_word(token: str) -> str:
+    """`close_happy@i11` → `close_happy`（`@` 后面是位置变换，**不算属性**）。"""
+    return str(token or '').split('@', 1)[0]
+
+
+def beat_unknown_attrs(beat: Beat, facts) -> list:
+    """
+    这一拍的立绘里，**引擎没认**的属性 → `[{'tag','attr'}, …]`（保序去重）。
+
+    ⚠ **只报告，绝不阻止**（用户 2026-10-11 定的口径）：
+    候选与导入**一律以实际存在的资源为准** —— 资源表里有的、引擎不认的
+    （掩码 / 切图这类内部件）**照样能选、照样能导入**；
+    这条只用来提示"选了它，引擎会报 `'lan lan_angry' is not an image'`"。
+    拿引擎的枚举去**删候选**就会把"合法的、只是引擎还没认的"一起删掉 ——
+    那正是"无法导入"的来源。
+    """
+    from storygraph.core import engine_facts as EF
+    if not facts:
+        return []
+    try:
+        rows = beat_sprite_rows(beat)
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.beat_unknown_attrs.rows', e)
+        return []
+    out, seen = [], set()
+    for row in rows:
+        toks = [w for w in (_show_item_word(t)
+                            for t in str(row.get('image') or '').split()) if w]
+        if len(toks) < 2:
+            continue                            # 只有 tag、没属性 → 无从谈起
+        tag, attrs = toks[0], toks[1:]
+        for attr in EF.unrecognized_attrs(facts, tag, attrs):
+            if (tag, attr) not in seen:
+                seen.add((tag, attr))
+                out.append({'tag': tag, 'attr': attr})
+    return out
+
+
 def card_note(beat: Beat, symbols=None, facts=None) -> str:
     """
     卡片底部那条提示的**完整文案**（一句话，`；` 分隔）。纯函数，可单测。
@@ -734,6 +772,16 @@ def card_note(beat: Beat, symbols=None, facts=None) -> str:
                          f"{'、'.join(hit['attrs'])}，引擎只认其中一个")
     except Exception as e:                          # noqa: BLE001
         swallow('app.beats.card_note.conflicts', e)
+    try:
+        # 引擎没认的属性：**只是提示**（候选与导入仍以实际资源为准，不拦）
+        unknown = beat_unknown_attrs(beat, facts)
+        for hit in unknown[:3]:
+            parts.append(f"「{hit['tag']}」里的 {hit['attr']} 引擎没认"
+                         "（可能是掩码/切图这类内部件，导出时它会报错）")
+        if len(unknown) > 3:
+            parts.append(f"另有 {len(unknown) - 3} 项引擎也没认")
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.card_note.unknown', e)
     return '；'.join(parts)
 
 

@@ -223,8 +223,17 @@ class WindowExportMixin:
             if not script:
                 return
 
+        # 引擎事实（可选）：给了才在「立绘」格挂"引擎没认的属性"批注。
+        # 取不到**不该让导出失败** —— 批注只是附加信息，空 dict = 一个都不挂。
+        facts = {}
+        try:
+            facts = self._session.engine_facts()
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.window_export.engine_facts', e)
+
         res = tables.generate_table(script, registry=self._registry_provider(),
-                                    project_root=self._project_root)
+                                    project_root=self._project_root,
+                                    facts=facts)
         if not res['ok']:
             QMessageBox.critical(self, '生成剧本表失败', res['error'])
             return

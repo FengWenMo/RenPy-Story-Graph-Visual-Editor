@@ -294,6 +294,42 @@ def rename_overlay(attr_groups) -> dict:
     return out
 
 
+def unrecognized_attrs(facts: dict, tag: str, attrs) -> list:
+    """
+    这些属性里，**引擎没认**的有哪些（`[属性, …]`，保序去重）。
+
+    用途（E2 · 2026-10-11）：**只做标注，绝不过滤**。
+    真机实测：资源表里有一批"文件真实存在、但不是可选立绘属性"的东西
+    （`mask` / `_ss_cut` / `lan_angry` …）——它们**照样可选、照样能导入**，
+    只是选之前该知道"引擎会用 `'lan lan_angry' is not an image` 报错"。
+    拿引擎的枚举去**删候选**，就会连"合法的、只是引擎还没认的"一起删掉 ——
+    那是"无法导入"的来源（用户 2026-10-11 明确否掉的方向）。
+
+    ⚠ 三条不宣称的规矩（**宁可不说，也不说错**）：
+      1. 没有事实（没采过 / `is_collectable` 为假）→ 返回 `[]`；
+      2. 引擎**对这个 tag 什么都没说**（属性和候选都空）→ 返回 `[]`
+         （否则每个非 layeredimage 的 tag 都会被误标成"未认"）；
+      3. 只比对，不推断。
+    """
+    if not facts:
+        return []
+    ok, _reason = is_collectable(facts)
+    if not ok:
+        return []
+    known = {str(a.get('attribute') or '')
+             for a in attributes_of(facts, str(tag))}
+    known |= {str(v) for v in candidates_of(facts, str(tag))}
+    known.discard('')
+    if not known:
+        return []
+    out = []
+    for attr in (attrs or ()):
+        word = str(attr or '')
+        if word and word not in known and word not in out:
+            out.append(word)
+    return out
+
+
 def narrow_problem(before, after) -> str:
     """
     收窄断言：`get_ordered_image_attributes(tag, (已选,))` 的结果必须满足
@@ -416,6 +452,6 @@ __all__ = [
     'FACT_KEYS', 'DERIVED_KEYS',
     'empty_facts', 'facts_path', 'validate_facts', 'is_collectable',
     'value_of', 'source_of', 'attributes_of', 'groups_of', 'candidates_of',
-    'grouped_choices', 'group_conflicts', 'rename_overlay',
+    'grouped_choices', 'group_conflicts', 'rename_overlay', 'unrecognized_attrs',
     'narrow_problem', 'merge_fact', 'build_facts', 'dumps', 'loads',
 ]

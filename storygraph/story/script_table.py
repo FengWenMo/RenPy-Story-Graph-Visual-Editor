@@ -326,7 +326,8 @@ def registry_from_parse_result(parse_result, base=None):
 # ===================== 一体化入口 =====================
 
 def open_rpy_as_table(script_file, output_path=None, registry=None,
-                      label: str = '', with_thumbnails: bool = False):
+                      label: str = '', with_thumbnails: bool = False,
+                      facts=None):
     """
     把一个 .rpy 模块解析成演出表：这是"用 Excel 打开 rpy"的正向路径。
 
@@ -357,7 +358,7 @@ def open_rpy_as_table(script_file, output_path=None, registry=None,
         b.bgm = b.bgm or compose_audio_text(b, 'music')
         b.sfx = b.sfx or compose_audio_text(b, 'sound')
     export_beats_to_excel(beats, output_path, registry=registry,
-                          include_thumbnails=with_thumbnails)
+                          include_thumbnails=with_thumbnails, facts=facts)
     return output_path
 
 
