@@ -42,16 +42,34 @@ split_string_speaker  <- 本模块定义
 
 ## 正确的拆法（三步，每步都能跑全量判据）
 
-1. **先搬数据模型**：把节点类（`ShowNode`/`HideNode`/`SayNode`/…，约 20 个）
-   与那几个纯 helper 搬进 **`parsing/renpy_nodes.py`**；
-   `renpy_parser.py` 改为 `from storygraph.parsing.renpy_nodes import *`（显式列出）。
-   ✅ 这一步**不改任何逻辑**，全量判据应当**一条不变**地过。
-2. **再搬一族方法**：`_StatementScreens` mixin 进 `parsing/renpy_parser_stmts.py`，
-   `from renpy_nodes import …`（此时**不再是循环**）；
-   `class RenPyParser(_StatementScreens):`。27 个方法**逐字照搬**（连注释）。
-   ✅ 判据仍应一条不变；`RenPyParser` 方法数降到 ~23（**低于 40**）。
-3. **顺手拆第二族**（可选）：`_parse_show_scene` / `_tokenize_show` /
+> **2026-10-11 进度**：**① ② 已完成**（提交 `665d748` / 见下一次提交）。
+> 结果：`RenPyParser` 从"最重类榜首（50 方法）"**消失**（已不在前三），
+> `renpy_parser.py` **4422 → 3444 行**（把"最长模块"让给了 `asset_registry.py` 3614）。
+> 全量判据与**解析金标指纹**全程不变。
+
+1. ✅ **先搬数据模型**：节点类与纯 helper 搬进 **`parsing/renpy_nodes.py`**
+   （实际搬了 **34 个定义 / 471 行**；`renpy_parser.py` 改为从那 import）。
+   ⚠ 实测两个坑：**(a)** 插入 import 的位置**要用 AST 找顶层 import** ——
+   按字面找会命中**模块文档字符串里**的示例（语法错误）；
+   **(b)** 依赖要**求传递闭包** —— `_skip_string` 还依赖 `_find_triple_end`，
+   只量一层就会 `NameError`。
+2. ✅ **再搬一族方法**：`StatementScreens` mixin 进
+   `parsing/renpy_parser_stmts.py`（27 方法 / 544 行，逐字照搬）；
+   `class RenPyParser(StatementScreens):`。
+   ⚠ 实测：`self._RE_*` 是 `RenPyParser` 的**类属性**，实例查找会沿 MRO 找到 ——
+   所以 mixin 里照写即可，**不必**把正则也搬过去。
+   ⚠ 提取脚本必须**先做闭包检查**（方法里引用的名字要么在 `renpy_nodes`、
+   要么是已 import 的模块），否则会产出坏文件；判断"模块级名字"要**按作用域**
+   （Load 减去该方法的绑定名，绑定名要含**嵌套函数的 `ast.arg`** ——
+   `_num(pat)` 的 `pat` 就是这么漏的）。
+   ⚠ 还有一处低级但致命的坑：**别把 `'=' * 72` 混进相邻字面量拼接**
+   （`'a' '=' * 72` 先拼成 `'a='` 再乘 72 → 整段重复）。
+3. ⏳ **顺手拆第二族**（可选）：`_parse_show_scene` / `_tokenize_show` /
    `_scan_arg_value` / `_parse_character_args` 等词法族进 `renpy_parser_lex.py`。
+   ⇒ 拆完这一族，`renpy_parser.py` 还剩 ~3000 行，可继续按同样办法分批。
+
+⚠ **还剩的账**：`health_check` 的"最大类 > 40"现在报的是 `GraphOpsMixin`（49），
+"最大模块 > 800"报的是 `asset_registry.py`（3614）—— 同一个办法可以继续用在它们身上。
 
 ## 纪律（别在拆的时候改逻辑）
 
