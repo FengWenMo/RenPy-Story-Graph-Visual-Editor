@@ -139,7 +139,66 @@ def test_old_flat_shape_is_still_accepted():
     assert simple[0]['kind'] == 'variable' and simple[0]['column'] == '强度'
 
 
+def test_the_sequence_lands_in_the_declaration_in_order():
+    """
+    ⭐⭐ **顺序必须真的落进声明**（不能只用来做试切）：
+    用户卡点"竖排的三张卡凭什么对应那个顺序" —— 现在顺序决定
+    ① `columns` 的排列 ② 存下来的 `pattern`（后端据此知道代码长什么样）。
+    ⚠ 而且**中文列名要保住**：那是我们自己表格的列，不是脚本参数，
+    不该套"必须是合法标识符"那套校验（旧校验会把「角色/服装」全丢掉）。
+    """
+    from storygraph.authoring.learn_statement import build_declaration
+    slots = [
+        {'kind': 'keyword', 'text': 'show'},
+        {'kind': 'variable', 'column': '角色'},
+        {'kind': 'choice', 'column': '服装', 'options': ['泳装', '校服']},
+        {'kind': 'optional', 'text': 'at', 'column': '位置'},
+    ]
+    built = build_declaration('show', label='出场', pattern=slots)
+    assert built['ok'], built
+    assert [c['name'] for c in built['columns']] == ['角色', '服装', '位置'], \
+        built['columns']
+    assert built['columns'][1]['choices'] == ['泳装', '校服']
+    assert [s['kind'] for s in built['pattern']] == [
+        'keyword', 'variable', 'choice', 'optional']
+    # 把最后两格换个位置 → 列顺序跟着换（顺序是有意义的）
+    swapped = [slots[0], slots[1], slots[3], slots[2]]
+    assert [c['name'] for c in
+            build_declaration('show', pattern=swapped)['columns']] == [
+        '角色', '位置', '服装']
+
+
+def test_without_a_pattern_the_product_is_unchanged():
+    """⚠ **只增不改**：没给 `pattern` 时，产物与以前一模一样（老判据压在这上面）。"""
+    from storygraph.authoring.learn_statement import build_declaration
+    old = build_declaration('swim_suit', label='泳装',
+                            params=[{'name': 'intensity', 'label': '强度',
+                                     'choices': '1,2,3'}])
+    assert 'pattern' not in old, '没给 pattern 却多出了一个键'
+    assert [c['name'] for c in old['columns']] == ['intensity']
+
+
+def test_the_sequence_is_persisted_into_the_manifest():
+    """后端要把 `pattern` 存进清单（否则下次打开就丢了顺序与类型）。"""
+    import json
+    from storygraph.authoring.learn_statement import build_declaration
+    from storygraph.story.statement_registry import declare_statement
+    slots = [{'kind': 'keyword', 'text': 'show'},
+             {'kind': 'variable', 'column': '角色'}]
+    built = build_declaration('show', label='出场', pattern=slots)
+    got = declare_statement(ROOT / '.pip-tmp' / 'pat_decl_tmp', 'show',
+                            label='出场', columns=built['columns'],
+                            pattern=built.get('pattern'))
+    assert got['ok'], got
+    data = json.loads((ROOT / '.pip-tmp' / 'pat_decl_tmp'
+                       / 'storygraph.rules.json').read_text(encoding='utf-8'))
+    entry = data['statements'][0]
+    assert [s['kind'] for s in entry['pattern']] == ['keyword', 'variable']
+    assert [c['name'] for c in entry['columns']] == ['角色']
+
+
 def test_indices_and_kind_labels_are_for_the_ui():
+
     """界面要用的人话标签在（`固定关键字 / 任意变量 / 从这些里选 / 可选的固定段`）。"""
     assert P.KIND_LABELS['keyword'] == '固定关键字'
     assert P.KIND_LABELS['variable'] == '任意变量'

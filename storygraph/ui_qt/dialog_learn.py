@@ -429,10 +429,13 @@ class CustomStatementDialog(QDialog):
 
     def built(self) -> dict:
         """当前表单 → 后端参数（纯函数；判据不在这里）。"""
+        # ⭐ 把**位置序列**一起交出去（顺序 + 类型 + 中文列名）——
+        #   它是代码里长什么样的唯一依据，不能只用来做试切。
         block = True if self.block.isChecked() else None
         return build_declaration(self.name.text(), label=self.label.text(),
                                  docs=self.docs.text(), block=block,
-                                 params=self.params.rows())
+                                 params=self.params.rows(),
+                                 pattern=self.params.slots())
 
     def _engine_heads(self) -> list:
         """

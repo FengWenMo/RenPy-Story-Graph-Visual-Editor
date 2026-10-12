@@ -942,7 +942,8 @@ def spec_body_allows(registry, head: str) -> list:
 
 
 def declare_statement(project_root, name: str, label: str = '',
-                      columns=None, block=None, docs: str = '') -> dict:
+                      columns=None, block=None, docs: str = '',
+                      pattern=None) -> dict:
     """
     **把一条"教给它"的结构落成声明**（设计文档 §5 第 3 步：
     "教一次"入口 —— 人答的当场落成 `rules.json` 的 `statements`）。
@@ -1010,6 +1011,12 @@ def declare_statement(project_root, name: str, label: str = '',
             cols.append(c)
     if cols:
         entry['columns'] = cols
+    # ⭐ **位置序列**（2026-10-11）：格子有顺序、有类型 —— 那是"代码里长什么样"的
+    #   唯一依据（用户撞墙记录："竖着排的三张卡凭什么对应那个顺序"）。
+    #   ⚠ 只增不改：没给 `pattern` 时，清单产物与以前**逐字节一样**。
+    slots = [s for s in (pattern or ()) if isinstance(s, dict) and s.get('kind')]
+    if slots:
+        entry['pattern'] = slots
 
     out = []
     replaced = False
