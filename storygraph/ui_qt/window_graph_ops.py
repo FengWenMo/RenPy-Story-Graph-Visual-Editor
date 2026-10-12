@@ -493,52 +493,39 @@ class GraphOpsMixin:
             return
         self.import_chapter_files(paths)
 
-    def _convert_text_chapter(self, path: str) -> str:
+    def _import_plain_text(self, files: list):
         """
-        `.txt` → `.rpy`（S3）：转换、报出未映射、落盘，返回**新文件的路径**。
+        **纯文字 / Word 章节**导入（S3/S4）：调会话那条正式链路，并把结果说人话。
 
-        失败返回空串（并把原因写进控制台）—— 调用方据此跳过它。
+        ⚠ 这条路的关键语义（都在 `import_plain_text` 里，我不重写）：
+          未确认角色 ⇒ **一个字都不写**（未定义变量会让 Ren'Py 崩）；
+          确认的决定**写回 characters.xlsx**（下次不用再问）。
+        这里只负责：把"要确认什么"摆给人看，以及把结果念出来。
         """
-        from storygraph.authoring import txt_import as T
-        try:
-            text = T.read_text_file(path)
-        except OSError as e:
-            self._log(f'[导入] 读不动 {Path(path).name}：{e}')
-            return ''
-        import re
-        res = T.convert_text(text, filename=Path(path).name,
-                             characters=self._character_map())
-        if not getattr(res, 'ok', False):
-            self._log(f'[导入] {Path(path).name} 转换没成功：'
-                      f'{getattr(res, "warnings", [])[:2]}')
-            return ''
-        # ⚠ 未映射/歧义**必须报**（用户原话要求"不许静默取第一个"）
-        for token, rows in (getattr(res, 'unmapped', {}) or {}).items():
-            self._log(f'[导入] ⚠ 不认识的角色写法：{token}'
-                      f'（出现 {len(rows) if hasattr(rows, "__len__") else "?"} 次）'
-                      f'—— 它会被当旁白；要认它请在角色表里加别名')
-        for item in (getattr(res, 'ambiguous', []) or [])[:3]:
-            self._log(f'[导入] ⚠ 有歧义：{str(item)[:80]}')
-        # ⚠ "看着像谁在说话，但我不认识这个名字" —— **必须报**（2026-10-11 修的静默缺陷：
-        #   `小明：谁啊？` 原来被安静当旁白，用户一个字都看不到）
-        for s in (getattr(res, 'suspect_speakers', []) or [])[:5]:
-            self._log(f'[导入] ⚠ 第 {s.get("no")} 行看着像「{s.get("token")}」在说话，'
-                      f'但这个名字不在角色表里 —— 它被当成了旁白。'
-                      f'要认它就去角色表加别名；不认就当它确实是旁白')
-        game_dir = Path(self._project_root or '.') / 'game'
-        label = str(getattr(res, 'label', '') or 'chapter')
-        out = game_dir / f'{re.sub(r"[^0-9A-Za-z_]", "_", label)}.generated.rpy'
-        try:
-            game_dir.mkdir(parents=True, exist_ok=True)
-            out.write_text(res.rpy_text, encoding='utf-8')
-        except OSError as e:
-            self._log(f'[导入] 写不出 {out.name}：{e}')
-            return ''
-        counts = getattr(res, 'counts', {}) or {}
-        self._log(f'[导入] {Path(path).name} → {out.name}'
-                  f'（{len(getattr(res, "lines", []) or [])} 行，'
-                  f'判读：{ {k: v for k, v in list(counts.items())[:4]} }）')
-        return str(out)
+        def ask(proposals):
+            """
+            问"这些写法指哪个角色"。⚠ 先只**如实念出来**并返回 `None`
+            （= 这次不决定 → 会话保证不落盘），把弹窗留给下一轮做。
+            宁可不写，也不替人猜。
+            """
+            for item in (proposals or [])[:8]:
+                token = (item.get('token') if isinstance(item, dict)
+                         else str(item))
+                self._log(f'[导入] 要你确认：「{token}」指哪个角色？'
+                          f'（认不出就先去 characters.xlsx 加别名）')
+            return None
+
+        res = self._session.import_plain_text(files, self.graph, ask=ask)
+        for msg in (res.get('messages') or [])[:8]:
+            self._log(f'[导入] {msg}')
+        if res.get('needs_decision'):
+            self._log('[导入] ⚠ 有角色没确认 —— **这次一个字节都没写**；'
+                      '在 characters.xlsx 的「别名」列补上，再导一次')
+        elif res.get('ok'):
+            self._log(f'[导入] 纯文字/Word：写了 {len(res.get("written") or [])} 个文件')
+        else:
+            self._log(f'[导入] 没成：{res.get("error") or res.get("reason") or "未知"}')
+        return res
 
     def _character_map(self):
         """给转换器用的角色表（读不出来就给 `None` —— 那就只有大写缩写那条判据）。"""
@@ -558,18 +545,19 @@ class GraphOpsMixin:
         所以这里**逐个文件**报"来了几个模块 / 几条连线"，而不是只报一个总数。
         """
         old_graph = self.graph.copy() if self.graph is not None else None
-        # ⭐ S3：`.txt` 先转成 `.rpy` 再走同一条链路（转换产物写进 game/）
-        converted = []
-        for p in list(paths):
-            if str(p).lower().endswith(('.txt', '.text')):
-                out = self._convert_text_chapter(str(p))
-                paths = [x for x in paths if x != p]
-                if out:
-                    paths.append(out)
-                    converted.append(out)
-        if paths and not any(str(p).lower().endswith('.rpy') for p in paths):
-            self._log('[导入] 选中的文件都没转成功，先不导入')
-            return {'ok': False, 'error': '纯文字都没转成功'}
+        # ⭐ S3/S4：`.txt / .docx` 走**会话里那条正式链路**
+        #   `EditorSession.import_plain_text`（S3 早就实现了，**只是界面从没调它**）。
+        #   ⚠ 我第一版在这儿自己写了一份 `_convert_text_chapter` —— 那是**重复实现**，
+        #   而且漏了会话那条路的关键语义（未确认角色就**一个字都不写**、
+        #   决定写回 characters.xlsx、过生成门禁、复用 import_chapters）。
+        #   已删掉重复实现，改调正式入口（docx 也因此自动支持）。
+        plain = [p for p in paths
+                 if str(p).lower().endswith(('.txt', '.text', '.docx'))]
+        if plain:
+            paths = [p for p in paths if p not in plain]
+            self._import_plain_text(plain)
+        if not paths:
+            return {'ok': True, 'imported': 0}
         res = self._session.import_chapters(paths, self.graph)
         if not res.get('ok'):
             msg = f'[导入] 失败：{res.get("error") or "未知原因"}'

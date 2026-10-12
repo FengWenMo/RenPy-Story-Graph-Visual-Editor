@@ -313,6 +313,46 @@ def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     assert dlg.groups.count() == 1, '勾开之后声明还在'
 
 
+def test_plain_text_import_goes_through_the_session_entry(ui_window):
+    """
+    ⭐⭐ **S3/S4 缺的那一环**（2026-10-11 发现）：`EditorSession.import_plain_text`
+    早就实现了（含 `.docx`、含"未确认角色就一个字都不写"、决定写回 characters.xlsx），
+    **只是界面从没调它** —— 我第一版还在界面里自己写了一份转换器，那是**重复实现**。
+
+    这条钉住：`.txt/.docx` 一律走**会话那条正式链路**，界面不自己造一套。
+    """
+    win = ui_window
+    called = {}
+    sess = win._session
+
+    class _Stop(Exception):
+        """哨兵：记完调用就中止 —— 免得去满足导入后处理的一堆字段契约。"""
+
+    def fake_plain(files, graph=None, *, ask=None, **kw):
+        called['files'] = list(files)
+        called['has_ask'] = callable(ask)
+        called['ask_result'] = ask([{'token': 'MOM'}]) if ask else None
+        return {'ok': False, 'needs_decision': True, 'written': [],
+                'messages': ['要确认 MOM']}
+
+    def fake_chapters(paths, graph=None):
+        called['chapters'] = list(paths)
+        raise _Stop
+
+    sess.import_plain_text = fake_plain
+    sess.import_chapters = fake_chapters
+    win._log = lambda *_a, **_k: None
+    try:
+        win.import_chapter_files(['a.txt', 'b.docx', 'c.rpy'])
+    except _Stop:
+        pass
+    assert called.get('files') == ['a.txt', 'b.docx'], called
+    assert called.get('chapters') == ['c.rpy'], '纯文字之外的才走 .rpy 那条'
+    assert called.get('has_ask') is True, '没把"问一句"的回调给会话'
+    # ⚠ 回调返回 None = **这次不决定**（会话保证不落盘）—— 界面不许替人猜
+    assert called.get('ask_result') is None
+
+
 def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
     """
     ⭐⭐ **用户卡点 1 的原话**：
