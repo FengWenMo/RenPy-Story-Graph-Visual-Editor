@@ -27,22 +27,49 @@ from storygraph.core.vocabulary import (
 from storygraph.excel.cells import append_text_row, set_text
 
 from storygraph.core.safeguard import swallow
+from storygraph.assets.asset_registry_constants import (  # 2026-10-11 拆分
+    SUPPORTED_IMAGE_EXT,
+    SUPPORTED_AUDIO_EXT,
+    CATEGORY_KEYWORDS,
+    ASSET_FIELD_LABELS,
+    _asset_set_text,
+    _asset_append_row,
+    _UI_WORDS,
+    _UI_SUFFIXES,
+    _CHARACTER_CONTAINER_WORDS,
+    _GENERIC_IMAGE_ROOTS,
+    _BG_WORDS,
+    _CG_WORDS,
+    _BG_NAME_RE,
+    _CG_NAME_RE,
+    _UI_NAME_RE,
+    _BG_NAME_HINTS,
+    _CG_NAME_HINTS,
+    _UI_NAME_HINTS,
+    _NON_CHARACTER_FIRST_WORDS,
+    _SKIP_SCAN_DIRS,
+    _GENERIC_IMAGE_DIRS,
+    _MUSIC_DIR_NAMES,
+    _SOUND_DIR_NAMES,
+    _SOUND_NAME_HINTS,
+    _MUSIC_NAME_HINTS,
+    _ASSET_KINDS,
+    _STANDARD_TABLES,
+    _TABLE_FIELDS,
+    _PLACEHOLDER_MARKS,
+    _COLOR_PATTERN,
+    _SHOW_STOP_WORDS,
+    _RE_SHOW_LINE,
+    _RE_AUDIO_LINE,
+    _RE_AT_TRANSFORM,
+    _RE_WITH_TRANSITION,
+    _RE_VOICE_LINE,
+    _AUDIO_ID_PREFIXES,
+)
 
 
 # ===================== 常量 =====================
-SUPPORTED_IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
-SUPPORTED_AUDIO_EXT = {'.ogg', '.mp3', '.wav', '.m4a', '.flac', '.aac', '.opus'}
 
-CATEGORY_KEYWORDS = {
-    'background': ['bg', 'background', 'backdrop', 'scene'],
-    'cg': ['cg', 'event', 'cutscene', 'illust'],
-    'character': ['character', 'char', 'sprite', 'avatar', 'portrait',
-                  'figure', 'people'],
-    'ui': ['gui', 'ui', 'dutui', 'interface', 'system', 'icon', 'button',
-           'menu'],
-    'music': ['bgm', 'music', 'theme', 'loop', 'ost'],
-    'sound': ['sfx', 'sound', 'effect', 'se', 'voice', 'click', 'hit'],
-}
 
 
 # ===================== 数据结构 =====================
@@ -104,21 +131,6 @@ class AssetRegistry:
 #:   · **写**：表头写中文（`write_dict_to_excel`）；
 #:   · **读**：中文表头映射回规范键（`_canon_field` / `_sheet_headers`）；
 #:   · 于是**老表（英文表头）继续能读**、新表是中文 —— 用户手上的表不用改名。
-ASSET_FIELD_LABELS = {
-    'ID': '编号',
-    'Path': '真实文件',
-    'Tag': '角色标签',
-    'Attributes': '表情',
-    'Category': '类别',
-    'Notes': '备注',
-    #: 角色别名（纯文字导入用，多值：`MOM|母亲|老妈`）——见 `_TABLE_FIELDS` 的说明
-    'Aliases': '别名',
-    'Loop': '循环',
-    'Volume': '音量',
-    'ATL': 'ATL',
-    'Params': '参数',
-    'Doc': '说明',
-}
 
 #: 中文表头 → 规范键（读表时用）。**只认我们自己写出去的那些名字**，
 #: 用户手加的列（`Custom_xxx` / `内容编号`…）原样保留，绝不改写。
@@ -196,8 +208,6 @@ def read_excel_rows(file_path) -> list:
 # 安全写单元格的唯一实现在 `storygraph.excel.cells` —— 这段逻辑曾在这里、
 # script_table、compile 三处各写一份（行为已开始漂移）。保留别名，调用点写法不变。
 
-_asset_set_text = set_text
-_asset_append_row = append_text_row
 
 
 def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
@@ -267,78 +277,24 @@ def _segment_is_ui(segment: str) -> bool:
 
 
 #: UI 目录的**精确词元**（含 `dutui` 拆不开时靠后缀兜）
-_UI_WORDS = frozenset({
-    'gui', 'ui', 'ux', 'interface', 'interfaces', 'system', 'systems',
-    'icon', 'icons', 'button', 'buttons', 'menu', 'menus', 'hud', 'skin',
-    'skins', 'widget', 'widgets', 'overlay', 'overlays', 'cursor', 'cursors',
-    'font', 'fonts', 'frame', 'frames', 'panel', 'panels', 'dialog',
-    'dialogs', 'slider', 'sliders', 'scrollbar', 'scrollbars', 'checkbox',
-    'checkboxs', 'window', 'windows', 'title', 'titles', 'logo', 'logos',
-    'badge', 'badges', 'bar', 'bars', 'phone', 'phones', 'screen', 'screens',
-    'center', 'centers', 'gallery', 'galleries', 'menu_ui', 'dutui',
-})
 #: UI 目录的**词尾**（复合词：`dutui` / `charactercenter` / `mainmenu`）
-_UI_SUFFIXES = ('gui', 'ui', 'hud', 'center', 'screen', 'menu', 'button',
-                'icon', 'skin', 'widget', 'panel', 'frame', 'slider', 'bar')
 
 #: 立绘目录的**精确词元**（`characters/ling/` 这种）
-_CHARACTER_CONTAINER_WORDS = frozenset({
-    'character', 'characters', 'char', 'chars', 'sprite', 'sprites',
-    'portrait', 'portraits', 'figure', 'figures', 'actor', 'actors',
-    'tachie', 'standing',
-})
 
 #: "图片根"目录名：它们的**直接子目录**按角色目录看
 #: （`images/eileen/happy.png` → 角色 eileen）
-_GENERIC_IMAGE_ROOTS = frozenset({
-    'images', 'image', 'img', 'imgs', 'graphics', 'assets', 'art', 'pics',
-    'pictures',
-})
 #: 背景 / CG 目录的精确词元
-_BG_WORDS = frozenset({'bg', 'bgs', 'background', 'backgrounds', 'backdrop',
-                       'backdrops', 'scene', 'scenes'})
-_CG_WORDS = frozenset({'cg', 'cgs', 'event', 'events', 'cutscene',
-                       'cutscenes', 'illust', 'illusts', 'illustration',
-                       'illustrations', 'gallery', 'galleries'})
 
 #: 文件名里的**弱线索**（只在没有任何目录语义时才用）
 #:
 #: 背景那条允许**连写**（`bgbed.jpg` / `bgforest.jpg` —— 实测迷你游戏里
 #: 全是这种写法），但排掉 `bgm`（那是音乐目录/文件）。
-_BG_NAME_RE = re.compile(r'^(bg(?!m)|backdrop|background)([a-z\d_\-. ]|$)')
-_CG_NAME_RE = re.compile(r'^(cg|cutscene|event)([\d_\-. ]|$)')
 #: 界面/流程类文件名（`start_menu_glamour.jpg` 这种菜单底图）
-_UI_NAME_RE = re.compile(
-    r'^(start|main|title|titles|menu|settings|config|preference|load|save'
-    r'|gameover|game_over|credits|splash|pause|confirm|dialog)'
-    r'([\d_\-. ]|$)')
-_BG_NAME_HINTS = ('bg_', '_bg', 'background', 'backdrop')
-_CG_NAME_HINTS = ('cg_', '_cg', 'cutscene')
-_UI_NAME_HINTS = ('ui_', '_ui', 'icon_', '_icon', 'button_', '_button',
-                  'btn_', '_btn', 'gui_', '_gui')
 
 #: 平铺文件名首段**不是**角色名的那些词（`images/bg_1.jpg` / `icon_x.png`）
 #:
 #: 第二组是**界面/流程用的词**（`start_menu_glamour.jpg` 是迷你游戏的菜单底图，
 #: 不是谁的立绘）：实测把它们当角色名会造出 `start` 这种不存在的 tag。
-_NON_CHARACTER_FIRST_WORDS = frozenset(
-    set(_BG_WORDS) | set(_CG_WORDS) | set(_UI_WORDS) | {
-        'bgm', 'music', 'sfx', 'sound', 'sound_effect', 'se', 'voice',
-        'photo', 'pic', 'pics', 'img', 'imgs', 'image', 'screenshot',
-        'clipboard', 'snipaste', 'test', 'tmp', 'temp', 'new', 'old',
-        'copy', 'sprite', 'sprites', 'texture', 'textures', 'effect',
-        'effects', 'logo', 'map', 'item', 'items', 'prop', 'props',
-        # —— 界面 / 流程 / 系统 ——
-        'start', 'menu', 'main', 'title', 'titles', 'titlemenu', 'splash',
-        'settings', 'config', 'preference', 'preferences', 'option',
-        'options', 'load', 'save', 'pause', 'quit', 'exit', 'gameover',
-        'game_over', 'credits', 'about', 'help', 'tutorial', 'back', 'next',
-        'prev', 'previous', 'close', 'open', 'yes', 'no', 'ok', 'cancel',
-        'confirm', 'warning', 'error', 'info', 'notice', 'hint', 'tip',
-        'frame', 'panel', 'box', 'line', 'bar', 'label', 'note', 'card',
-        'cards', 'list', 'grid', 'table', 'page', 'tab', 'tabs', 'arrow',
-        'cursor', 'shadow', 'mask', 'overlay', 'layer', 'filter', 'blur',
-    })
 
 
 #: 扫描时**整目录跳过**的名字：这些不是游戏素材。
@@ -346,12 +302,6 @@ _NON_CHARACTER_FIRST_WORDS = frozenset(
 #: 实测（2026-10-05，用户克隆）：`tmp/` 里有 11 张 `about_collection_smoke.png`
 #: 之类的临时截图被当成资源收进表，于是"指向 `game/` 之外的行"多出 12 条，
 #: 每次对账都在报噪声。Ren'Py 的素材在 `game/` 下，项目根上只放工程文件。
-_SKIP_SCAN_DIRS = frozenset({
-    'tmp', 'temp', 'temporary', '.git', '.svn', '.hg', '__pycache__',
-    'node_modules', '.venv', 'venv', 'env', 'saves', 'cache', '.cache',
-    '.pytest_cache', '.mypy_cache', '.idea', '.vscode', 'build',
-    '.workbuddy', 'logs', 'log',
-})
 
 
 def _under_skip_dir(rel_path: Path) -> bool:
@@ -462,12 +412,6 @@ def _detect_category(rel_path: Path) -> str:
 
 # 图片目录里"只是容器、不含语义"的名字：它们不能当 image tag 用
 # （`images/eileen/happy.png` 的 tag 是 eileen 而不是 images）。
-_GENERIC_IMAGE_DIRS = frozenset({
-    'game', 'images', 'image', 'img', 'imgs', 'assets', 'asset', 'graphics',
-    'sprite', 'sprites', 'characters', 'character', 'char', 'chars',
-    'pics', 'pic', 'pictures', 'picture', 'figure', 'figures', 'art',
-    'portrait', 'portraits', 'avatar', 'avatars', 'story', 'data',
-})
 
 
 def _normalize_tag(name: str) -> str:
@@ -546,18 +490,9 @@ def _detect_image_tag(file: Path, rel_path: Path, category: str) -> str:
 # 音频用途判定的目录白名单。目录名比文件名可靠得多：
 # `audio/night.ogg` 是首曲子，但文件名里既没有 bgm 也没有 music，
 # 旧实现一律判成"音效"——于是 Music 下拉里空空如也，文案根本选不到音乐。
-_MUSIC_DIR_NAMES = {'music', 'bgm', 'bgm_music', 'ost', 'soundtrack',
-                    'bgm_music_box'}
-_SOUND_DIR_NAMES = {'sound', 'sounds', 'sfx', 'se', 'effect', 'effects',
-                    'ampl', 'noise'}
 
 # 文件名里的"用途线索"。音效线索优先判定：`sfx_xxx.ogg` 就算放在
 # music/ 目录下也是音效，名字比目录更具体。
-_SOUND_NAME_HINTS = ('sfx', 'se_', '_se', 'sound', 'effect', 'click', 'hit',
-                     'voice', 'button', 'ui_', 'impact', 'step', 'door',
-                     'noise', 'beep', 'alarm', 'switch')
-_MUSIC_NAME_HINTS = ('bgm', 'music', 'theme', 'ost', 'song', 'loop',
-                     'soundtrack')
 
 
 def _classify_audio(rel_path: Path) -> str:
@@ -1230,7 +1165,6 @@ def _reload_tables_and_diff(table_dir, root, walk, assets, tag: str):
 
 
 #: 资源表里"按文件一一对应"的四类（舞台/音频之外的都归这里）。
-_ASSET_KINDS = ('images', 'music', 'sounds', 'voices')
 
 
 def _junk_nested_paths(rows, mine_paths, nested_pref) -> list:
@@ -2141,14 +2075,6 @@ def load_hooks(config_path=None, project_root=None):
 # ===================== Excel 解析 =====================
 
 # 标准表定义：(registry 属性名, 文件名)
-_STANDARD_TABLES = {
-    'characters': 'characters.xlsx',
-    'images': 'images.xlsx',
-    'transforms': 'transforms.xlsx',
-    'music': 'music.xlsx',
-    'sounds': 'sounds.xlsx',
-    'voices': 'voices.xlsx',
-}
 
 # 资源表写入时的字段顺序（用于"新建资产"追加一行）
 # ⚠ `Aliases`（别名，中文表头「别名」）是 2026-10-10 为**纯文字导入**加的：
@@ -2157,17 +2083,6 @@ _STANDARD_TABLES = {
 # 为什么放 `Notes` 之前：人写列挨着看；为什么**不**进 `_CHAR_IDENTITY_KEYS`：
 # 那个元组是**重命名识别**用的（"两边非空且不同就当成换了角色"），
 # 人一编辑别名就会被误判成"换角色" —— 人写字段不该参与身份比较。
-_TABLE_FIELDS = {
-    'character': ['ID', 'Name', 'Color', 'ImageTag', 'Aliases', 'Notes'],
-    'image': ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'],
-    # transform 增加 ATL/Params/Doc/Category：支持自定义变换（文档第四节），
-    # 导出时按 ATL 生成 `transform id(params):` 代码块；Doc 是给文案看的
-    # 一句话说明（表格下拉里选中它就显示这句）。
-    'transform': ['ID', 'Path', 'ATL', 'Params', 'Doc', 'Category', 'Notes'],
-    'music': ['ID', 'Path', 'Loop', 'Volume', 'Notes'],
-    'sound': ['ID', 'Path', 'Notes'],
-    'voice': ['ID', 'Path', 'Notes'],
-}
 
 # 资产类型 → 集合属性名：已收敛到 `storygraph.core.vocabulary.ASSET_TYPE_ATTR`
 # （顶部以 `_TYPE_ATTR` 别名导入）。别再就地写第二份——2026-09-28 之前
@@ -2403,8 +2318,6 @@ def norm_asset_path(value) -> str:
 #:     不给解析、编译时按缺资源处理）；工具自己加的行还会被自动移除；
 #:   · **有**占位标记 → 用户明知文件还没有/不要了，留着占位 →
 #:     仍然**可用**（能选、能写进卡片），只是编译时照旧按"缺资源"提示。
-_PLACEHOLDER_MARKS = ('占位', 'placeholder', '待补', '计划', 'planned',
-                      'todo', 'wip')
 
 
 #: 兼容内部旧写法（本模块里以前叫 _norm_asset_path）。
@@ -2521,7 +2434,6 @@ def parse_asset_tables(asset_dir, hooks=None, project_root=None,
 
 # ===================== 校验 =====================
 
-_COLOR_PATTERN = re.compile(r'^#(?:[0-9a-fA-F]{3}){1,2}$')
 
 
 class FileWalkIndex:
@@ -2767,21 +2679,9 @@ def validate_registry(registry: AssetRegistry, project_root, walk=None):
 # 不破坏既有 import 面）。
 
 # show / scene / hide 之后用来切分"图像名"与关键字的分界符
-_SHOW_STOP_WORDS = frozenset({
-    'at', 'as', 'with', 'behind', 'onlayer', 'zorder', 'expression',
-})
 
-_RE_SHOW_LINE = re.compile(
-    r'^\s*(?P<verb>show|scene|hide)\s+(?P<rest>.*?)\s*$', re.MULTILINE)
-_RE_AUDIO_LINE = re.compile(
-    r'^\s*(?:play|queue|stop)\s+(?P<channel>music|sound|audio)\s+'
-    r'["\']?(?P<name>[\w.]+)', re.MULTILINE)
-_RE_AT_TRANSFORM = re.compile(r'\bat\s+(?P<name>[\w.]+)')
-_RE_WITH_TRANSITION = re.compile(r'\bwith\s+(?P<name>[\w.]+)')
 # voice 两种写法：字符串路径（voice "voice/a.ogg"）或裸变量/ID（voice v_001）。
 # 之前这条正则路径完全没收 voice，导致语音资产永远显示"未使用"。
-_RE_VOICE_LINE = re.compile(
-    r'^\s*voice\s+(?:["\'](?P<q>[^"\']+)["\']|(?P<w>[\w.]+))', re.MULTILINE)
 
 
 def is_dynamic_image_spec(spec: str) -> bool:
@@ -2886,8 +2786,6 @@ def image_alias_index(registry: AssetRegistry) -> dict:
 
 # 扫描资产时会给音频自动加的前缀。脚本里通常不带这些前缀
 # （`play music night`），所以解析时要能剥掉。
-_AUDIO_ID_PREFIXES = ('bgm_', 'bgm ', 'sfx_', 'sfx ', 'se_', 'se ',
-                      'voice_', 'voice ', 'mus_', 'mus ', 'v_')
 
 
 def audio_aliases(aid: str, row: dict) -> set:

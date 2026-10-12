@@ -1,8 +1,19 @@
-# 重构方案：把 `renpy_parser.py` 拆开（4422 行 / 50 方法的类）
+# 重构方案：拆分两个大模块（`renpy_parser.py` / `asset_registry.py`）
 
-> `tools/health_check.py` 长期报："最大模块 4422 行 > 800 ｜ 最大类 50 方法 > 40"。
-> 2026-10-11 量过依赖，**没有在这轮硬拆**（理由写在最后）——
-> 这份文档把方案钉死，让下一次是**机械劳动**而不是重新设计。
+> `tools/health_check.py` 长期报"最大模块 > 800 行 / 最大类 > 40 方法"。
+> 这份文档把**已做的、量出来的、下一步怎么做**钉死，
+> 让后续每次都是**机械劳动**而不是重新设计。
+>
+> **进度一览（2026-10-11）**
+>
+> | 目标 | 之前 | 现在 | 状态 |
+> |---|---|---|---|
+> | `renpy_parser.py` | 4422 行 | **3444 行** | ✅ 第①②步做完 |
+> | `RenPyParser` 类 | 50 方法（榜首） | 不在前三 | ✅ |
+> | `asset_registry.py` | 3614 行 | **3512 行** | 🟡 第①步（常量层）做完 |
+> | `health_check` 当前榜首 | — | 模块 3614（改写后为 3512）/ 类 49（`GraphOpsMixin`） | 🟡 继续 |
+>
+> ⚠ **没有调过 `health_check` 的阈值** —— 指标没全绿就是没全绿（改阈值是指标作弊）。
 
 ## 现状（量出来的，不是估的）
 
@@ -85,3 +96,41 @@ split_string_speaker  <- 本模块定义
 放**单独一轮**（预计一次搬家 + 两次全量判据）。它与"给用户加能力"无关，
 所以优先级低于用户可见的缺口 —— 但比"一直挂着不管"好：方案在这儿，
 下次谁做都是机械劳动。
+
+## 附：`asset_registry.py` 的实测闭包（决定搬法）
+
+`asset_registry.py` 3614 行的构成（量出来的）：类只占 368 行，
+**模块级函数 2711 行 / 87 个**，常量 145 行。所以该搬的是**函数族**。
+
+先用 `.pip-tmp/closure_asset_registry.py` 量三个候选族的**传递闭包**：
+
+| 候选族 | 初选 | 闭包大小 | 闭包行数 |
+|---|---|---|---|
+| xlsx 表读写族（`parse_asset_tables` / `append_rows_to_table` / `write_asset_excel` / `ensure_asset_tables` / `sync_asset_tables` / `register_missing_assets`） | 6 | **100 个定义** | 2352 |
+| 扫描族（`scan_assets` / `compare_registry_to_disk` / `_detect_category` / `_detect_image_tag` / `FileWalkIndex`） | 5 | 49 个定义 | 979 |
+| 语句引用族（`references_from_statements` / `describe_asset` / `register_missing_assets`） | 3 | 55 个定义 | 989 |
+
+⇒ **三个族的闭包都被同一批常量拉大**（`SUPPORTED_*` / `_BG_*` / `_CG_*` /
+`CATEGORY_KEYWORDS` / `ASSET_FIELD_*` …）。所以顺序是：
+
+1. ✅ **先搬常量层** → `assets/asset_registry_constants.py`
+   （**37 个常量 / 141 行**；搬完 3614 → **3512 行**）。
+   ⚠ 两个实测坑：**(a)** 判据要严 —— 引用的名字只能是"另一个常量 / import 来的 /
+   内置"，我第一版只查"是否引用本模块函数"，于是 `_asset_set_text = set_text`
+   （`set_text` 是 **import 来的**）被误搬 → `NameError`；
+   **(b)** 新模块**必须自带那条 import**，而且要用**换行 join**
+   （`''.join(...)` 会把两条 import 挤成一行 `...set_textimport re`）。
+   ⚠ 剩下 3 个"看着像常量其实不是"的留在原地并在脚本里点名：
+   `ASSET_FIELD_ALIASES`（推导式里用了 `field`/`label`）、
+   `_is_real_table_file`（= 函数）、`_norm_asset_path`（= 函数）。
+2. ⏳ **再搬扫描族**（闭包 49 个定义 / 979 行 —— 常量搬走后会变小）。
+3. ⏳ 最后搬 xlsx 表读写族。
+
+## 附：继续往下拆的顺序建议（按"闭包 / 风险"排序）
+
+| 模块 | 行数 | 建议 |
+|---|---|---|
+| `assets/asset_registry.py` | 3512 | 按上面 2 → 3 继续（机械劳动） |
+| `story/beat_render.py` | 3388 | 同法：先量闭包，先搬常量/叶子层 |
+| `story/beat_model.py` | 3115 | 同上 |
+| `ui_qt/window_graph_ops.py`（`GraphOpsMixin` 49 方法） | — | ⚠ Qt mixin，风险比纯函数高：先确认契约判据（`test_main_window_mixins` 已在管重名），再一族一族搬 |
