@@ -1538,6 +1538,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._pos.setAlignment(Qt.AlignCenter)
         tb_card.addWidget(self._pos)
         self._next_action = act('下一拍 ▶', self.next_beat, 'Enter / Alt+↓')
+        # ⭐ 「只改台词」快捷路径（用户 2026-09-28 要的，本轮补做）：
+        #   一句一句跳，跳过没有台词的拍；**不藏列表**（藏了下标就与拍错位，
+        #   那是"存错拍"级别的隐患）—— 见 `CardPageMixin.next_dialogue`。
+        act('💬 下一句台词 ▶', self.next_dialogue,
+            '跳到下一拍**有台词**的，并把光标放进台词框（快速过一遍台词用）')
         act('⤓ 导出 .rpy', self.export_script, '生成/增量补丁写回（过安全门禁）')
         act('⤒ 从剧本表写回', self.export_from_table,
             '选一张演出表 .xlsx → 写回 .rpy（导出前会先给你看门禁结论）')

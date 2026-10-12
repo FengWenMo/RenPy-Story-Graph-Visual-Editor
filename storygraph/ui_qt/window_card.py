@@ -307,6 +307,55 @@ class CardPageMixin:
                          len(self._session) > 0)):
             if btn is not None:
                 btn.setEnabled(bool(on))
+    def next_dialogue(self):
+        """
+        「下一句台词 ▶」—— 用户 2026-09-28 要的**只改台词**快捷路径（本轮补做）。
+
+        用户要的是"快速过一遍台词"：一句一句跳，不必每次都在列表里找。
+        ⚠ **不做列表过滤**（把没有台词的拍藏起来）：卡片下标要映射到
+        `session.beats[idx]`，一旦过滤，下标与实际拍就对不上 ——
+        那是"存错拍"级别的隐患，比"找不到"严重得多。
+        所以这里只**移动选中**，列表一个都不藏。
+        """
+        beats = getattr(self._session, 'beats', None) or []
+        if not beats:
+            self._status('这一章还没载入拍')
+            return
+        # ⚠ 别用 `... or -1`：`self._idx == 0` 是**合法的第一拍**，
+        #   而 `0` 是 falsy —— 会被悄悄换成 -1（判据当场抓到，害我少跳一拍）。
+        cur = getattr(self, '_idx', -1)
+        start = max(int(-1 if cur is None else cur) + 1, 0)
+        for i in range(start, len(beats)):
+            if self._has_dialogue(beats[i]):
+                self._show_index(i)
+                self._focus_dialogue()
+                self._status(f'第 {i + 1} 句台词（共 {len(beats)} 拍）')
+                return
+        # 后面没有了 → **说清楚**，不许默默不动（能点就必须有反应）
+        self._status('后面没有台词了 —— 这是最后一句')
+
+    @staticmethod
+    def _has_dialogue(beat) -> bool:
+        """这一拍有没有台词（谁说了句话）。"""
+        if beat is None:
+            return False
+        kind = getattr(beat, 'kind', '')
+        name = getattr(kind, 'name', '') or str(kind)
+        text = str(getattr(beat, 'text', '') or '').strip()
+        if not text:
+            return False
+        return name.upper() in ('SAY', 'EXTEND') or bool(
+            str(getattr(beat, 'speaker', '') or '').strip())
+
+    def _focus_dialogue(self):
+        """把光标放进台词框（跳过去就能直接打字）。"""
+        panel = getattr(self, '_panel', None)
+        for name in ('text', '_text', 'text_edit'):
+            widget = getattr(panel, name, None) if panel is not None else None
+            if widget is not None and hasattr(widget, 'setFocus'):
+                widget.setFocus()
+                return
+
     def _show_index(self, idx: int):
         if not self._session.has(idx):
             self._idx = -1
