@@ -581,8 +581,15 @@ class CustomStatementDialog(QDialog):
         if view is None or sample is None:
             return
         line = sample.text().strip()
+        # ⭐ **先报毛病，再谈切不切得上**（2026-10-12 接线）：
+        #   `pattern.problems_of` 的文档自己写着"**界面直接显示**，不用自己拼"，
+        #   而全仓只有它自己引用了它 —— 界面从没调过（又一个"实现了没接线"）。
+        #   人最容易卡住的正是这里：某格选了"从这些里选"却**没填候选值**、
+        #   或者一格都没挂词组 —— 这时试切**可能照样成功**，于是人不知道为什么不好使。
+        problems = self._slot_problems()
         if not line:
-            view.setText('粘一行真实剧本，点「试切」—— 就能看出你的格子切得对不对。')
+            hint = '粘一行真实剧本，点「试切」—— 就能看出你的格子切得对不对。'
+            view.setText(hint + (('\n' + problems) if problems else ''))
             return
         try:
             from storygraph.authoring import pattern as P
@@ -598,12 +605,40 @@ class CustomStatementDialog(QDialog):
             view.setText(f'试切没做成：{type(e).__name__}: {e}')
             return
         if not got.get('ok'):
-            view.setText('⚠ 切不上：' + str(got.get('reason') or '顺序或关键字不对'))
+            view.setText('⚠ 切不上：' + str(got.get('reason') or '顺序或关键字不对')
+                         + (('\n' + problems) if problems else ''))
             return
         cells = ' ｜ '.join(
             f'{c["text"]}（{c["column"] or "固定"}）' for c in got['cells'])
+        # ⚠ 切得上**不代表**没问题（例：枚举格没填候选值时照样能切）——
+        #   所以毛病单独再说一遍，别让人以为"绿了就没事"。
         view.setText('切出来是这样：' + cells
-                     + f'　—　共 {len(got["cells"])} 格')
+                     + f'　—　共 {len(got["cells"])} 格'
+                     + (('\n' + problems) if problems else ''))
+
+    def _slot_problems(self) -> str:
+        """
+        把格子本身的毛病汇总成人话（`pattern.problems_of` 的**界面接线**）。
+
+        ⚠ 为什么必须显示：这些毛病**不会**让试切失败 —— 试切绿了人却不知道为什么
+        不好使，正是用户反复卡住的地方。返回空串表示没毛病。
+        """
+        params = getattr(self, 'params', None)
+        if params is None:
+            return ''
+        try:
+            from storygraph.authoring import pattern as P
+            rows = [{'kind': s.get('kind'), 'text': s.get('text'),
+                     'column': s.get('column'), 'group': s.get('group'),
+                     'choices': s.get('choices')}
+                    for s in params.slots()]
+            items = list(P.problems_of(rows) or [])
+        except Exception as e:                      # noqa: BLE001 - 汇总不许炸窗口
+            swallow('ui_qt.dialog_learn.slot_problems', e)
+            return ''
+        if not items:
+            return ''
+        return '这几点也顺手看看：' + '；'.join(str(x) for x in items[:5])
 
     def _refresh_preview(self, *_a):
         built = self.built()
