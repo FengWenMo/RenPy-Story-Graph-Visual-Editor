@@ -266,7 +266,7 @@ class CustomStatementDialog(QDialog):
         gv.addWidget(self.groups)
         grow = QHBoxLayout()
         add_g = QPushButton('＋ 加一组')
-        add_g.clicked.connect(lambda: self.groups.add_group())
+        add_g.clicked.connect(self._add_group)
         rm_g = QPushButton('－ 删这一组')
         rm_g.clicked.connect(self._remove_group)
         grow.addWidget(add_g)
@@ -278,6 +278,9 @@ class CustomStatementDialog(QDialog):
         grow.addWidget(self.write_groups)
         gv.addLayout(grow)
         self.groups_box = box_groups
+        # ⭐ **词组表一变，每一格的下拉跟着变**（用户卡点 5：词组到底怎么用 ——
+        #   它就是"这一格的候选值从哪来"，所以必须挂在格子上、并跟着表走）
+        self._sync_groups_to_slots()
 
         def _toggle_groups(on: bool):
             """
@@ -410,8 +413,14 @@ class CustomStatementDialog(QDialog):
             self.set_verify_available(bool(self.on_verify))
         self.preview.setPlainText(str(text or ''))
 
+    def _add_group(self):
+        """加一组 → 立刻同步到每一格的下拉（不然新词组在格子上看不到）。"""
+        self.groups.add_group()
+        self._sync_groups_to_slots()
+
     def _remove_group(self):
         self.groups.remove_current()
+        self._sync_groups_to_slots()
         self._refresh_preview()
 
     def built_groups(self) -> list:
@@ -488,6 +497,25 @@ class CustomStatementDialog(QDialog):
             return 'custom'
         data = getter.currentData()
         return str(data or 'custom')
+
+    def _sync_groups_to_slots(self, *_a):
+        """
+        把词组名喂给每一格的下拉（**词组是"这一格的候选值从哪来"，不是独立表格**）。
+
+        用户卡点 5 原话："「词组（可选·高级）」是什么鬼……如果我要用 swim_suit
+        来匹配 泳装，我该写在哪？" —— 答：词组里一行 `泳装 → swim_suit`，
+        然后在**那一格**上挂这个词组。
+        """
+        params = getattr(self, 'params', None)
+        groups = getattr(self, 'groups', None)
+        if params is None or groups is None:
+            return
+        try:
+            names = [str(r.get('name') or '') for r in groups.rows()
+                     if str(r.get('name') or '').strip()]
+            params.set_groups(names)
+        except Exception as e:                      # noqa: BLE001 - 不许炸窗口
+            swallow('ui_qt.dialog_learn.sync_groups', e)
 
     def _refresh_cut(self, *_a):
         """

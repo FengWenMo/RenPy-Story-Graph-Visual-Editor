@@ -188,7 +188,17 @@ class ParamCard(_Card):
             '任意变量 = 谁都可以（如人物名）；\n'
             '从这些里选 = 只能填你列的候选值；\n'
             '可选的固定段 = 可出现可不出现的一段（如 at 位置）。')
+        self._kind.currentIndexChanged.connect(self._on_kind_changed)
         self._kind.currentIndexChanged.connect(self._changed)
+        # ⭐ 词组**挂在格子上**（用户撞墙记录 卡点 5：
+        #   "「词组（可选·高级）」是什么鬼……如果我要用 swim_suit 来匹配 泳装，
+        #    我该写在哪？"）
+        #   答案：这一格选「从这些里选」时，就在这儿挑一个词组当候选来源 ——
+        #   词组里存着"中文词 ↔ 内部写法"（泳装 → swim_suit）。
+        self._group = QComboBox()
+        self._group.setToolTip('候选值从哪个词组来（词组里能写"中文词 → 内部写法"）')
+        self._group.currentIndexChanged.connect(self._changed)
+        self._group.setVisible(False)
         # ⭐ 顺序是可以调的（用户卡点：竖着排的三张卡凭什么对应那个顺序）
         self._up = QPushButton('↑')
         self._down = QPushButton('↓')
@@ -217,12 +227,16 @@ class ParamCard(_Card):
         self._limit.setToolTip('不勾 = 编剧随便写；勾了 = 只能从你列的里面挑。')
         self._limit.toggled.connect(self._on_limit_toggled)
         self.body.addWidget(self._limit, 1, 1)
-        self.body.addWidget(self._choices, 2, 0, 1, 4)
+        self.body.addWidget(self._group, 2, 0, 1, 2)
+        self.body.addWidget(self._choices, 2, 2, 1, 2)
         self._choices.setVisible(False)
 
         for w in (self._name, self._label):
             w.textChanged.connect(self._changed)
         self._refresh_title()
+
+    def _on_kind_changed(self, *_a):
+        self._group.setVisible(self._kind.currentData() == 'choice')
 
     def _on_limit_toggled(self, on: bool):
         self._choices.setVisible(bool(on))
@@ -248,6 +262,7 @@ class ParamCard(_Card):
     # ---- 数据 ----
     def data(self) -> dict:
         return {'kind': self._kind.currentData() or 'variable',
+                'group': self._group.currentData() or '',
                 'text': self._name.text().strip(),
                 'name': self._name.text().strip(),
                 'label': self._label.text().strip(),
@@ -255,11 +270,16 @@ class ParamCard(_Card):
                 'choices': self._choices.text() if self._limit.isChecked() else ''}
 
     def set_data(self, name: str = '', label: str = '', choices: str = '',
-                 kind: str = ''):
+                 kind: str = '', group: str = ''):
         if kind:
             idx = self._kind.findData(kind)
             if idx >= 0:
                 self._kind.setCurrentIndex(idx)
+        if group:
+            j = self._group.findData(group)
+            if j >= 0:
+                self._group.setCurrentIndex(j)
+        self._on_kind_changed()
         self._name.setText(str(name or ''))
         self._label.setText(str(label or ''))
         text = str(choices or '')
@@ -292,14 +312,21 @@ class ParamList(QScrollArea):
         self._col.addStretch(1)
         self.setWidget(self._host)
         self._cards = []
+        self._groups = []                  # 最近一次同步过来的词组名
         self._on_change = on_change
 
     # ---- 对外（与旧表格同形）----
     def add_param(self, name: str = '', label: str = '', choices: str = '',
-                  kind: str = 'variable'):
+                  kind: str = 'variable', group: str = ''):
         card = ParamCard(on_change=self._on_change, on_remove=self._remove,
                          on_move=self.move, parent=self._host)
-        card.set_data(name, label, choices, kind)
+        card.set_data(name, label, choices, kind, group)
+        if self._groups:                     # 新建的卡也要能看到已有词组
+            card._group.blockSignals(True)
+            for gname in self._groups:
+                if card._group.findData(gname) < 0:
+                    card._group.addItem(gname, gname)
+            card._group.blockSignals(False)
         self._col.insertWidget(self._col.count() - 1, card)
         self._cards.append(card)
         card.focus()
@@ -341,12 +368,39 @@ class ParamList(QScrollArea):
         if self._on_change:
             self._on_change()
 
+    def set_groups(self, groups):
+        """
+        把当前词组名喂给每一格的下拉（**词组表变了要跟着变**）。
+
+        ⚠ 这一格已经在用的词组**不能丢**（哪怕它暂时不在表里）——
+        保住当前值，免得人一切换就白填。
+        """
+        names = [str(g) for g in (groups or ()) if str(g).strip()]
+        self._groups = list(names)          # 记住，好给**后来新建的卡**用
+        for card in self._cards:
+            combo = getattr(card, '_group', None)
+            if combo is None:
+                continue
+            keep = combo.currentData() or ''
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem('（不挂词组）', '')
+            for name in names:
+                combo.addItem(name, name)
+            idx = combo.findData(keep)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+            if keep and idx < 0:                # 表里暂时没有 → 也保住它
+                combo.addItem(keep, keep)
+                combo.setCurrentIndex(combo.findData(keep))
+
     def slots(self) -> list:
-        """把卡片转成**位置序列**（喂给 `authoring.pattern` 做试切）。"""
+        """把卡片转成**位置序列**（喂给 `authoring.pattern` 做试切/落进声明）。"""
         out = []
         for card in self._cards:
             row = card.data()
             out.append({'kind': row.get('kind') or 'variable',
+                        'group': row.get('group') or '',
                         'text': row.get('name') or '',
                         'column': row.get('label') or '',
                         'choices': row.get('choices') or ''})

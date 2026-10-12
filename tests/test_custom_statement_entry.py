@@ -353,6 +353,42 @@ def test_plain_text_import_goes_through_the_session_entry(ui_window):
     assert called.get('ask_result') is None
 
 
+def test_groups_are_attached_to_the_slot_that_needs_them(qapp, tmp_path):
+    """
+    ⭐⭐ **用户卡点 5 原话**：
+    > "「词组（可选·高级）」是什么鬼：我作为程序员，猜这可能是正则表达式的
+    >  捕获组，或者是枚举的分类。但我完全没有输入正则表达式的地方！
+    >  如果我要用 swim_suit 来匹配 泳装，我该写在哪？"
+
+    答：词组**不是**独立表格 —— 它是"**这一格的候选值从哪来**"。
+    所以：① 建了词组，格子的下拉里就能选到；② 选了之后，试切会用这个词组的候选值；
+    ③ 删/加词组，格子上的下拉**跟着变**。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    # ① 建一个词组「服装」，候选值：泳装 / 校服
+    dlg.groups.clear()
+    dlg.groups.add_group('outfit', '服装', '泳装,校服')
+    dlg._sync_groups_to_slots()
+    # ② 那一格（枚举）的下拉里能选到它
+    dlg.params.clear()
+    dlg.params.add_param('泳装', '服装', '泳装,校服', kind='choice')
+    card = dlg.params._cards[0]
+    combo = card._group
+    assert combo.findData('outfit') >= 0, '格子上选不到刚建的那个词组'
+    combo.setCurrentIndex(combo.findData('outfit'))
+    # ③ 交出去的序列里带着这个词组 → 试切/落进声明都能用上
+    slots = dlg.params.slots()
+    assert slots[0]['group'] == 'outfit', slots
+    assert slots[0]['kind'] == 'choice'
+    # ④ 删掉词组 → 格子上的下拉跟着变（但**当前值不许丢**）
+    dlg.groups.clear()
+    dlg._sync_groups_to_slots()
+    assert dlg.params.slots()[0]['group'] == 'outfit', '切一下就白填了'
+
+
 def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
     """
     ⭐⭐ **用户卡点 1 的原话**：
