@@ -486,5 +486,86 @@ def declaration_preview(built: dict, path: str = '') -> str:
     return '\n'.join(lines)
 
 
-__all__ = ['build_declaration', 'build_group', 'declaration_preview',
-           'group_preview', 'parse_choices', 'suggest_shape']
+def choice_sources(project_root, head: str = '') -> list:
+    """
+    这一格的候选值**可以从项目里白拿** —— 返回"来源清单"，让人挑一个。
+
+    用户 2026-10-12 的原话：
+
+    > 另外就是过于繁琐了……我的真实项目内有无数个表情！我不可能将它们
+    > 一个个输入进去！我希望它能够做到识别并自己录入（当我说这是表情的时候，
+    > 能够自动导入相关类别……）不然要填到猴年马月？
+
+    三个来源，各自有各自的道理 —— ⚠ **工具仍然不猜"这一格是不是表情"**，
+    它只把"项目里到底有哪些值能拿"摆出来，挑哪个由人点：
+
+      · **立绘属性 · 引擎的组**：真机事实里**引擎自己分好的组**
+        （实测 `lan` 的组是 `outfit` / `expressions`）——
+        这才是"表情全集"的正解：不用手打，也不用我们猜；
+      · **角色表**：资产表里的角色（ID 与显示名都给，编剧认得的是后者）；
+      · **项目里真实用过的值**：这个动作在脚本里出现过的值（≥2 次才算，
+        单次出现更像笔误 —— 与 `suggest_shape` 同一条规矩）。
+
+    返回 `[{'key','label','values','source','count'}]`；**认不出就空**
+    （没采过引擎事实、没资产表都只是少一项，不是报错）。
+    """
+    out: list = []
+    root = Path(project_root) if project_root else None
+    if root is None or not root.is_dir():
+        return out
+
+    # ① 立绘属性：真机事实里引擎自己分的组（跨 tag 合并去重 —— 表情通常是通用的）
+    try:
+        from storygraph.core import engine_facts as EF
+        path = EF.facts_path(root)
+        if path is not None and path.is_file():
+            facts = EF.loads(path.read_text(encoding='utf-8'))
+            table = EF.value_of(facts, 'attributes', {}) or {}
+            merged: dict = {}
+            for tag in (table.keys() if isinstance(table, dict) else ()):
+                for gname, vals in (EF.groups_of(facts, str(tag)) or {}).items():
+                    bucket = merged.setdefault(str(gname or ''), [])
+                    for v in vals or ():
+                        if str(v) and str(v) not in bucket:
+                            bucket.append(str(v))
+            for gname, vals in sorted(merged.items()):
+                if vals:
+                    out.append({'key': f'attr:{gname}',
+                                'label': f'立绘属性 · {gname or "未分组"}',
+                                'values': vals, 'source': '引擎事实',
+                                'count': len(vals)})
+    except Exception as e:                       # noqa: BLE001 - 没事实不算错
+        swallow('learn_statement.choice_sources.facts', e)
+
+    # ② 角色表（编剧认得的是显示名，所以给显示名）
+    try:
+        names = sorted(_role_table(root)['names'])
+        if names:
+            out.append({'key': 'roles', 'label': '角色表',
+                        'values': names, 'source': '资产表',
+                        'count': len(names)})
+    except Exception as e:                       # noqa: BLE001
+        swallow('learn_statement.choice_sources.roles', e)
+
+    # ③ 这个动作在真实脚本里用过的值
+    try:
+        if str(head or '').strip():
+            shape = suggest_shape(root, head)
+            vals: list = []
+            for item in (shape.get('items') or ()):
+                for v in (item.get('choices') or ()):
+                    if v not in vals:
+                        vals.append(v)
+            if vals:
+                out.append({'key': 'used',
+                            'label': f'项目里用过的值（{head}）',
+                            'values': vals, 'source': '真实脚本',
+                            'count': len(vals)})
+    except Exception as e:                       # noqa: BLE001
+        swallow('learn_statement.choice_sources.used', e)
+    return out
+
+
+__all__ = ['build_declaration', 'build_group', 'choice_sources',
+           'declaration_preview', 'group_preview', 'parse_choices',
+           'suggest_shape']

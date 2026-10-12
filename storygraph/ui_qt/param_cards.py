@@ -20,12 +20,20 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+import re
 
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QPushButton, QScrollArea, QSizePolicy,
+                               QVBoxLayout, QWidget)
+
+from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
+
+#: 候选值分隔符 —— 与后端 `learn_statement.parse_choices` **同一套**
+#: （中英文逗号、顿号、分号、竖线、空白）。用户"一次粘一大段"时就靠它全收下。
+_SEP_RE = re.compile(r'[,，、;；|\s]+')
 
 
 class ChipEdit(QWidget):
@@ -49,8 +57,29 @@ class ChipEdit(QWidget):
                                       '不填 = 编剧能随便写')
         self._edit.returnPressed.connect(self._commit)
         self._edit.textEdited.connect(self._maybe_split)
+        # ⚠⚠ 2026-10-12 实测修复（用户报"按了回车没反应"）：`QLineEdit` 收到
+        #   Return 时是 `event->ignore()`（Qt 为了让"对话框里回车 = 确定"生效），
+        #   于是这个按键**冒到 QDialog**，把 Ok 按钮（autoDefault）点了 ——
+        #   实测症状：候选值刚加进去、**整个弹窗立刻被 accept 关掉**，
+        #   还会顺着 `exec()==Accepted` 走写盘。这里装一道过滤器把它吃掉。
+        self._edit.installEventFilter(self)
         outer.addWidget(self._edit)
         self._chips = []
+
+    def eventFilter(self, obj, event):              # noqa: N802 - Qt 接口
+        """
+        回车只用来"加一个候选值"，**绝不许它冒到弹窗去点默认按钮**。
+
+        为什么不用 `returnPressed` 一手包办：它的连接照样在（下面 `_commit`），
+        但事件本身会继续传播；只有在这里 `accept()` 才能既收下候选值、
+        又拦住那次传播。（判据：`test_chip_edit_return_does_not_close_dialog`）
+        """
+        if (obj is self._edit and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            self._commit()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
 
     # ---- 内部 ----
     def _maybe_split(self, text: str):
@@ -64,10 +93,17 @@ class ChipEdit(QWidget):
                 return
 
     def _commit(self):
+        """
+        回车 → **一次收下所有值**（不是"只收一个"）。
+
+        ⚠ 2026-10-12 用户实测："我就只能填一个候选值，填不了多个"。
+        分隔符跟后端同一套（`，,、;；|` 与空白），所以"粘一大段 / 打一串 /
+        粘多行"都能一次变成方块 —— 这也是"项目里一堆表情"最省事的入口。
+        """
         value = self._edit.text().strip()
         if not value:
             return
-        for part in value.replace('，', ',').split(','):
+        for part in _SEP_RE.split(value):
             if part.strip():
                 self._add_chip(part.strip())
         self._edit.clear()
@@ -102,6 +138,17 @@ class ChipEdit(QWidget):
         for part in str(text or '').replace('，', ',').split(','):
             if part.strip():
                 self._add_chip(part.strip())
+
+    def add_values(self, values):
+        """
+        **一次倒进一批候选值**（「⚡ 导入候选」用）—— 自动去重，不覆盖已有的。
+
+        为什么不复用 `set_text`：导入是"加上去"，不是"换掉我现在写的"。
+        """
+        for v in (values or ()):
+            s = str(v).strip()
+            if s:
+                self._add_chip(s)
 
 
 class _Card(QFrame):
@@ -157,12 +204,26 @@ class ParamCard(_Card):
     """
 
     def __init__(self, on_change=None, on_remove=None, on_move=None,
-                 parent=None):
+                 sources_provider=None, parent=None):
         super().__init__('这个动作要填的东西', parent)
         self._on_change = on_change
         self._on_remove = on_remove
         self._on_move = on_move
+        self._sources_provider = sources_provider
         head = self._outer.itemAt(0)
+        # ⭐ 2026-10-12（用户："我的真实项目内有无数个表情！不可能一个个输入"）：
+        #   候选值能从项目里**白拿**（引擎分好的立绘属性 / 角色表 / 真正用过的值），
+        #   入口放卡头 —— 手填只是"改改它拿来的"。
+        self._import = QPushButton('⚡ 导入候选')
+        self._import.setProperty('role', 'ghost')
+        self._import.setToolTip(
+            '候选值不用手打：从项目里一次倒进来\n'
+            '· 立绘属性（引擎自己分好的组，如 expressions）\n'
+            '· 角色表\n'
+            '· 这个动作在脚本里真正用过的值')
+        self._import.clicked.connect(self._on_import)
+        self._import.setVisible(False)
+        head.addWidget(self._import)
         self._rm = QPushButton('删掉这一项')
         self._rm.setProperty('role', 'ghost')
         self._rm.setToolTip('这个动作不需要填它')
@@ -226,22 +287,70 @@ class ParamCard(_Card):
         self._limit = QCheckBox('只能填这些（限定候选）')
         self._limit.setToolTip('不勾 = 编剧随便写；勾了 = 只能从你列的里面挑。')
         self._limit.toggled.connect(self._on_limit_toggled)
-        self.body.addWidget(self._limit, 1, 1)
-        self.body.addWidget(self._group, 2, 0, 1, 2)
+        # ⚠⚠ 2026-10-12 实测修复（用户报"按了没反应"）：这两行原来都把控件
+        #   放进 `(1, 1)` —— 而那格已经是「剧本里怎么写」的输入框，
+        #   **两个控件叠在同一格里**（offscreen 渲染确认：输入框里套着一个
+        #   复选框，点击命中上层那个，输入框根本填不进去）。
+        #   重排为：`_group` 跟「这一格是」同排（它只在"从这些里选"时出现，
+        #   本来就是"这一格是什么"的一部分）；`_limit` 跟候选值同排
+        #   （它管的就是候选值显不显示）。行数不变，语义更贴。
+        self.body.addWidget(self._group, 0, 2, 1, 2)
+        self.body.addWidget(self._limit, 2, 0, 1, 2)
         self.body.addWidget(self._choices, 2, 2, 1, 2)
         self._choices.setVisible(False)
 
         for w in (self._name, self._label):
             w.textChanged.connect(self._changed)
         self._refresh_title()
+        self._on_kind_changed()      # 导入按钮的显隐要跟着"这一格是"的初值
 
     def _on_kind_changed(self, *_a):
-        self._group.setVisible(self._kind.currentData() == 'choice')
+        is_choice = self._kind.currentData() == 'choice'
+        self._group.setVisible(is_choice)
+        # 「⚡ 导入候选」只对枚举格有意义（别的格没有候选值这回事）
+        btn = getattr(self, '_import', None)
+        if btn is not None:
+            btn.setVisible(is_choice)
 
     def _on_limit_toggled(self, on: bool):
         self._choices.setVisible(bool(on))
         if on:
             self._choices.setFocus()
+        self._changed()
+
+    def _on_import(self):
+        """
+        「⚡ 导入候选」：把项目里**能拿到的候选值**摆出来，挑一个倒进这一格。
+
+        ⚠ 工具**不猜**"这一格是不是表情"（那是语义，猜错改剧情）——
+        它只列"项目里到底有哪些值、从哪来"，点哪个由人决定。
+        来源清单（纯函数）在 `authoring.learn_statement.choice_sources`。
+        """
+        menu = QMenu(self)
+        rows = []
+        try:
+            if self._sources_provider is not None:
+                rows = list(self._sources_provider() or [])
+        except Exception as e:                       # noqa: BLE001 - 导入不该炸卡片
+            swallow('ui_qt.param_cards._on_import', e)
+            rows = []
+        if not rows:
+            act = menu.addAction('（项目里还没读到可导入的值 —— 先「打开项目」；'
+                                 '"立绘属性"要先跑过一次引擎体检）')
+            act.setEnabled(False)
+        else:
+            for r in rows:
+                act = menu.addAction(f'{r.get("label")}'
+                                     f'（{r.get("count", 0)} 个）')
+                act.setData(list(r.get('values') or []))
+        chosen = menu.exec(self._import.mapToGlobal(
+            self._import.rect().bottomLeft()))
+        if chosen is None or not chosen.data():
+            return
+        self._choices.add_values(chosen.data())
+        # 导进来就是"只能填这些"——不勾上的话候选白导（只有勾了才进表格下拉）
+        self._limit.setChecked(True)
+        self._choices.setVisible(True)
         self._changed()
 
     def _changed(self):
@@ -300,7 +409,7 @@ class ParamList(QScrollArea):
     所以调用方、判据、以及"填进已有声明"那条路都不用改。
     """
 
-    def __init__(self, parent=None, on_change=None):
+    def __init__(self, parent=None, on_change=None, sources_provider=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
@@ -314,19 +423,27 @@ class ParamList(QScrollArea):
         self._cards = []
         self._groups = []                  # 最近一次同步过来的词组名
         self._on_change = on_change
+        self._sources_provider = sources_provider    # 「⚡ 导入候选」的来源
 
     # ---- 对外（与旧表格同形）----
     def add_param(self, name: str = '', label: str = '', choices: str = '',
                   kind: str = 'variable', group: str = ''):
         card = ParamCard(on_change=self._on_change, on_remove=self._remove,
-                         on_move=self.move, parent=self._host)
+                         on_move=self.move,
+                         sources_provider=self._sources_provider,
+                         parent=self._host)
         card.set_data(name, label, choices, kind, group)
-        if self._groups:                     # 新建的卡也要能看到已有词组
-            card._group.blockSignals(True)
-            for gname in self._groups:
-                if card._group.findData(gname) < 0:
-                    card._group.addItem(gname, gname)
-            card._group.blockSignals(False)
+        # ⚠⚠ 2026-10-12 修的 bug（用户："这个框是下拉框！但是怎么点击都没反应"）：
+        #   这一段原来被 `if self._groups:` 包着 —— 项目里**一个词组都没声明**时
+        #   `_groups` 是空列表，于是每张新卡的下拉**一项都没有**（点开是空白，
+        #   看起来就是坏的）。这里无条件补兜底项，「不挂词组」永远是第一项。
+        card._group.blockSignals(True)
+        card._group.clear()
+        card._group.addItem('（不挂词组）', '')
+        for gname in self._groups:
+            if card._group.findData(gname) < 0:
+                card._group.addItem(gname, gname)
+        card._group.blockSignals(False)
         self._col.insertWidget(self._col.count() - 1, card)
         self._cards.append(card)
         card.focus()

@@ -832,3 +832,150 @@ def test_every_panel_method_the_window_calls_really_exists(ui_window):
     assert called, '没扫到任何 self._panel.* 调用（判据本身失效了）'
     missing = [m for m in called if not hasattr(panel, m)]
     assert not missing, f'窗口调了面板上不存在的方法（会变成模态弹窗卡死）：{missing}'
+
+
+# ============ ⑥ 参数卡的布局与输入（2026-10-12 用户实测报的 bug） ============
+
+def test_no_two_widgets_share_a_grid_cell_in_a_param_card(qapp):
+    """
+    ⚠⚠ 用户 2026-10-12 实测报的 bug：**「剧本里怎么写」那一格点不动、打字没反应**。
+
+    根因：`_limit` 复选框被放进 `(1, 1)` —— 而那格已经是「剧本里怎么写」的
+    输入框，**两个控件叠在同一格**（渲染出来是"输入框里套着一个复选框"，
+    点下去命中的是压在上层的复选框）。
+
+    判据用"扫网格"而不是"断言某控件在某坐标"：前者是**不变量**
+    （以后怎么改布局都不会误报），后者一改设计就失效。
+    """
+    from storygraph.ui_qt.param_cards import ParamCard
+
+    card = ParamCard()
+    grid = card.body
+    seen = {}
+    for i in range(grid.count()):
+        row, col, _rs, _cs = grid.getItemPosition(i)
+        w = grid.itemAt(i).widget()
+        seen.setdefault((row, col), []).append(type(w).__name__ if w else '?')
+    dup = {k: v for k, v in seen.items() if len(v) > 1}
+    assert not dup, f'这些网格里叠了多个控件（人点不到下面那个）：{dup}'
+
+
+def test_chip_edit_return_does_not_close_the_dialog(qapp):
+    """
+    ⚠⚠ 同一轮用户报的"按了没反应" —— 另一半根因在这里。
+
+    `QLineEdit` 收到 Return 是 `event->ignore()`（Qt 为了让"对话框里回车 = 确定"
+    生效），按键于是冒到 `QDialog`，把 Ok（autoDefault）点了 →
+    **候选值刚加上、整个弹窗立刻被 accept 关掉**。
+
+    这不只是"难用"：`learn_custom_statement` 里 `exec() == Accepted` 的下一句
+    就是 `declare_statement`（**写盘**）—— 等于"在候选值框里按一下回车
+    就写了 rules.json"。
+
+    判据两件：候选值收下了；**弹窗还开着**。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
+    from storygraph.ui_qt.param_cards import ChipEdit
+
+    dlg = QDialog()
+    lay = QVBoxLayout(dlg)
+    chip = ChipEdit()
+    lay.addWidget(chip)
+    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    box.accepted.connect(dlg.accept)
+    box.rejected.connect(dlg.reject)
+    lay.addWidget(box)
+    dlg.show()
+    chip._edit.setFocus()
+
+    QTest.keyClicks(chip._edit, 'swim_suit')
+    QTest.keyClick(chip._edit, Qt.Key_Return)
+    assert chip.text() == 'swim_suit', '回车没把候选值收成方块'
+    assert dlg.isVisible(), '回车把弹窗按掉了 —— 会顺着 exec()==Accepted 误写盘'
+
+    # 中文候选值（用户上一轮想加的正是"泳装"）也得走同一条路
+    chip._edit.setText('泳装')
+    QTest.keyClick(chip._edit, Qt.Key_Return)
+    assert chip.text() == 'swim_suit,泳装', chip.text()
+    assert dlg.isVisible(), '中文候选值那次把弹窗按掉了'
+    dlg.close()
+
+
+def test_chip_edit_takes_a_whole_paste_at_once(qapp):
+    """
+    ⚠ 用户 2026-10-12："我就只能填一个候选值，填不了多个"。
+
+    定死：回车**一次收下所有**（分隔符与后端 `parse_choices` **同一套**）——
+    "粘一大段 / 打一串 / 粘多行"都行，不必一个个回车。
+    顺带钉住**前后端同源**：界面收 5 个，写下去也必须是 5 个
+    （若哪天两边分隔符走散，就会"界面看着 5 个、清单里只剩 1 个"）。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from storygraph.authoring.learn_statement import parse_choices
+    from storygraph.ui_qt.param_cards import ChipEdit
+
+    spot = 'swim_suit uniform、casual;formal|home'
+    ce = ChipEdit()
+    ce.show()
+    ce._edit.setFocus()
+    ce._edit.setText(spot)
+    QTest.keyClick(ce._edit, Qt.Key_Return)
+    got = ce.text().split(',')
+    assert got == ['swim_suit', 'uniform', 'casual', 'formal', 'home'], got
+    assert parse_choices(spot) == got, \
+        '前后端分隔符不一致：界面收下了 5 个，写进清单时会变少'
+
+
+def test_chip_edit_add_values_appends_not_replaces(qapp):
+    """「⚡ 导入候选」是**加上去**，不是把人已经写的那几个换掉（重复的自动跳过）。"""
+    from storygraph.ui_qt.param_cards import ChipEdit
+
+    ce = ChipEdit()
+    ce.set_text('swim_suit')
+    ce.add_values(['happy', 'calm', 'swim_suit'])
+    assert ce.text() == 'swim_suit,happy,calm', ce.text()
+
+
+def test_the_card_offers_project_sourced_candidates(qapp, tmp_path):
+    """
+    用户 2026-10-12："我的真实项目内有无数个表情！我不可能将它们一个个输入
+    进去！我希望它能够做到识别并自己录入。"
+
+    这里钉**入口真的接上了来源**：卡片上有「⚡ 导入候选」，清单来自
+    `choice_sources(项目根, 语句名)`（立绘属性按引擎分组 / 角色表 / 用过的值）。
+    真机实测（`D:\\千连万理\\RenPyTest\\sr_general`）：`expressions` 组一次
+    就能倒出 **68 个**属性 —— 这就是"表情全集"。
+
+    ⚠ **不钉"它自动猜到这格是表情"** —— 工具不猜语义（猜错是改剧情），
+    它只把来源摆出来，点哪个由人定。
+    """
+    from storygraph.authoring.learn_statement import choice_sources
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.params.clear()
+    card = dlg.params.add_param('', '表情', '', kind='choice')
+    assert hasattr(card, '_import'), '卡上没有「⚡ 导入候选」入口'
+    assert card._import.isVisibleTo(card), '枚举格上"导入候选"该露出来'
+    assert dlg.params._sources_provider is not None, '来源没接到卡片上'
+    assert dlg._choice_sources() == choice_sources(root, ''), '接线断了'
+    # 非枚举格没有"候选值"这回事 → 入口藏起来
+    card._kind.setCurrentIndex(card._kind.findData('variable'))
+    assert not card._import.isVisibleTo(card)
+
+
+def test_choice_sources_is_empty_not_invented(tmp_path):
+    """
+    ⭐ 通用性底线：项目里**什么都没采过**时，来源清单是**空的** ——
+    绝不凭空编一份"可能的候选"（少了是保守，编了是骗人）。
+    """
+    from storygraph.authoring.learn_statement import choice_sources
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    assert choice_sources(root) == []

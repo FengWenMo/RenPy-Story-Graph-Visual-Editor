@@ -68,15 +68,29 @@ def _tokens(line: str, *, options=()) -> list:
                    key=len, reverse=True)
     if not words:
         return [text]
-    out, i = [], 0
+    out, i, buf = [], 0, ''
     while i < len(text):
         hit = next((w for w in words if text.startswith(w, i)), '')
         if hit:
+            if buf:                        # 攒下来的"切不出候选"的一段先交出去
+                out.append(buf)
+                buf = ''
             out.append(hit)
             i += len(hit)
         else:
-            out.append(text[i])
+            buf += text[i]
             i += 1
+        # ⚠⚠ 2026-10-12 修掉的 bug（用户实测截图）：这里原来是
+        #   `out.append(text[i]); i += 1` —— **逐字切**。后果：
+        #   没有任何候选值匹配的整段（如试切只写 `show`）会被切成
+        #   's','h','o','w'，**恰好填满 4 个格子**，界面于是显示
+        #   "切出来是这样：s（固定）｜h（角色）｜o（服装）｜w（表情）"
+        #   —— 一个**假成功**，比报错危险得多（人会以为格子对了）。
+        #   这与本函数自己的注释（"切不出来就不硬切"）直接矛盾，现在按注释办：
+        #   把"切不出候选"的连续字**攒成一段**交出去（`show` → 1 个词），
+        #   界面就会如实说"切不上"，而不是编一个满分的答案。
+    if buf:
+        out.append(buf)
     return out
 
 

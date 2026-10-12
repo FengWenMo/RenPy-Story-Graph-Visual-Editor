@@ -21,7 +21,7 @@ build_declaration`（纯函数，有判据），写盘是 `declare_statement`（
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFrame, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -222,7 +222,11 @@ class CustomStatementDialog(QDialog):
         #   "表格太小了！多个参数还要下拉看……编剧仍然看不明白"
         #   → 三列表格换成**一行一张宽卡**（自带"删掉这一项"），
         #     候选值敲回车就变成可点的小方块（不用记逗号）。
-        self.params = ParamList(on_change=self._refresh_preview)
+        # ⭐ 2026-10-12：候选值还能**从项目里白拿**（用户："我的真实项目内有无
+        #   数个表情！不可能一个个输入"）—— 来源由 `_choice_sources` 提供，
+        #   卡片只负责把清单摆出来（工具不猜"这格是不是表情"）。
+        self.params = ParamList(on_change=self._refresh_preview,
+                                sources_provider=self._choice_sources)
         iv.addWidget(self.params, 1)
         # 一进来就有一张空卡，省得人去想"要先点加号吗"
         self.params.add_param()
@@ -307,6 +311,12 @@ class CustomStatementDialog(QDialog):
         self._ok_btn = box.button(QDialogButtonBox.Ok)
         self._ok_btn.setText('写进 storygraph.rules.json')
         self._ok_btn.setProperty('variant', 'primary')
+        # ⚠⚠ 2026-10-12（用户实测）：回车**不许**等于"确定"——
+        #   `learn_custom_statement` 里 `exec() == Accepted` 的下一句就是
+        #   `declare_statement`（**写盘**）。按钮是 autoDefault 时，在任何
+        #   输入框里按一下回车都会走这条路 = "顺手按个回车就把清单写了"。
+        self._ok_btn.setAutoDefault(False)
+        box.button(QDialogButtonBox.Cancel).setAutoDefault(False)
         box.button(QDialogButtonBox.Cancel).setText('取消（什么都不改）')
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
@@ -341,8 +351,35 @@ class CustomStatementDialog(QDialog):
         # ⚠ 按钮建好之后**再刷一次**：构造早期那次刷新时按钮还不存在，
         # 于是"名字空着"这个初值状态没被同步到可用性上（实测：按钮一开始可点）。
         self._refresh_preview()
+        # ⚠ 2026-10-12（用户实测）：输入框里回车 = **焦点去下一格**
+        #   （能一路往下填），而不是"什么都没发生"。候选值那个框**不在这里**
+        #   —— 它的回车是"加一个候选"（`param_cards.ChipEdit` 自己装了过滤器）。
+        for w in (self.name, self.label, self.docs, self.sample):
+            w.installEventFilter(self)
 
     # ---------------- 内部 ----------------
+
+    def eventFilter(self, obj, event):              # noqa: N802 - Qt 接口
+        """
+        ⚠ 2026-10-12（用户实测"回车按了没反应 / 没有下一个"）：
+
+        两件事一起定规矩 ——
+          · 普通输入框里回车 = **焦点去下一格**（一路往下填），回车终于有语义；
+          · `self.sample`（拿一行真实剧本）回车 = **直接试切**（比跳走更贴意图）；
+          · 底部按钮已 `setAutoDefault(False)`，所以回车**再也不会**触发
+            `accept()` —— 那在 `learn_custom_statement` 里等于顺手写盘。
+
+        候选值输入框不走这里（它的回车是"加一个候选"，见 `param_cards`）。
+        """
+        if (event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            if obj is getattr(self, 'sample', None):
+                self._refresh_cut()
+            else:
+                self.focusNextChild()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _hint(text: str) -> QLabel:
@@ -445,6 +482,21 @@ class CustomStatementDialog(QDialog):
                                  docs=self.docs.text(), block=block,
                                  params=self.params.rows(),
                                  pattern=self.params.slots())
+
+    def _choice_sources(self) -> list:
+        """
+        「⚡ 导入候选」的来源清单 —— 交给卡片显示（**卡片不碰后端**）。
+
+        为什么把这层放在弹窗、不放在卡片里：卡片是纯界面（判据少、好测），
+        而"来源怎么取"是纯函数 `authoring.learn_statement.choice_sources`
+        （引擎事实 / 资产表 / 真实脚本）—— 两边各管各的事。
+        """
+        try:
+            from storygraph.authoring.learn_statement import choice_sources
+            return choice_sources(self._root_path, self.name.text().strip())
+        except Exception as e:                      # noqa: BLE001 - 取不到就空
+            swallow('ui_qt.dialog_learn.choice_sources', e)
+            return []
 
     def _engine_heads(self) -> list:
         """
