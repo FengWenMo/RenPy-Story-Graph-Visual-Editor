@@ -44,3 +44,6 @@ print('lookup(MOM) 用 session 表 =', CharacterMap(s.character_rows()).lookup('
 print('lookup(MOM) 用 reload 表  =', CharacterMap(rows2).lookup('MOM'))
 plan2 = TP.build_plan(copy, [fp], rows2)
 print('重跑后还剩   =', [p.token for p in TP.proposals_for(plan2, rows2)])
+
+# ⚠ 跑完删掉副本（2026-10-11：漏了清理，TEMP 里堆了 46.9GB 的 sr_general）
+shutil.rmtree(tmp, ignore_errors=True)

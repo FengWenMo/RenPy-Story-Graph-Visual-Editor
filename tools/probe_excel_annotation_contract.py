@@ -135,3 +135,6 @@ for row in range(2, max(ws1.max_row, ws2.max_row) + 1):
     same.append(a == b)
 print(f'=== ⑤ 带事实 vs 不带事实：Show 列 {sum(same)}/{len(same)} 格一致'
       f' → {"✅ 批注不改数据" if all(same) else "❌ 数据被改了"}')
+
+# ⚠ 跑完删掉副本（2026-10-11：漏了清理，TEMP 里堆了 46.9GB 的 sr_general）
+shutil.rmtree(work.parent, ignore_errors=True)

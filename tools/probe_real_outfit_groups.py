@@ -99,3 +99,10 @@ print('  EditorSession.declared_attr_groups =',
       [(g.name, g.label) for g in s.declared_attr_groups()])
 print('\n清单文件：', work / 'storygraph.rules.json')
 print((work / 'storygraph.rules.json').read_text(encoding='utf-8')[:400])
+
+# ⚠⚠ 跑完**必须删掉副本**：2026-10-11 实测这条探针漏了清理，
+#   TEMP 里堆了 6 份 3.6GB 的 `sr_general`，一共吃掉 **46.9GB** 磁盘 ——
+#   与本仓早先那次"把 C 盘写满"是同一类事故。
+#   纪律：**探针跑完，临时目录要为 0 个**（有静态判据钉这一条）。
+shutil.rmtree(work.parent, ignore_errors=True)
+print('（副本已删）', work.parent)

@@ -72,3 +72,6 @@ print()
 print('=== 不带事实时（不该出现这一段）')
 text2 = format_asset_health({**report, 'engine_unknown': {}})
 print('  出现【⑩ =', '【⑩' in text2)
+
+# ⚠ 跑完删掉副本（2026-10-11：漏了清理，TEMP 里堆了 46.9GB 的 sr_general）
+shutil.rmtree(work.parent, ignore_errors=True)

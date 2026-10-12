@@ -79,3 +79,6 @@ for p in res['written']:
     if 'define' in text:
         print('   ⚠ 产物里有 define：', Path(p).name)
 print(f'往返逐字节：{len(res["written"]) - bad}/{len(res["written"])} 一致')
+
+# ⚠ 跑完删掉副本（2026-10-11：漏了清理，TEMP 里堆了 46.9GB 的 sr_general）
+shutil.rmtree(tmp, ignore_errors=True)

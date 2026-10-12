@@ -92,3 +92,6 @@ for p in res['written']:
     if unknown:
         print('   ⚠ 产物里还有认不出的说话人：', Path(p).name, unknown)
 print('（没有上一条 = 所有说话人都能对上角色）')
+
+# ⚠ 跑完删掉副本（2026-10-11：漏了清理，TEMP 里堆了 46.9GB 的 sr_general）
+shutil.rmtree(tmp, ignore_errors=True)
