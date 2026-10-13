@@ -31,33 +31,32 @@
 9. **本工具不猜语义**。"这句话是什么意思"永远由人标注；工具只做发现、展示、检索。（M 不变量）
 10. **含中文/转义的复现一律写 `.py`** —— `python -c` 经 Bash 传参会改坏样本（曾"复现"出不存在的 P0）。（H4）
 
-## 二、状态速览（2026-10-10）
+## 二、状态速览（2026-10-13）
 
-**最近 7 个工作片（都已完成并提交）**
+> 文档已经在 2026-10-13 整理过：`docs/` 只留 4 份现行 + 一份 `docs/开发日志.md`；历史稿在 `docs/archive/`。
+
+**最近的工作片（都已落地）**
 | 片 | 内容 | 判据 |
 |---|---|---|
-| ⭐ **E1 引擎事实采集** | **一次运行**（`lint --error-code` + `--json-dump` + 注入探针）产出 `engine_facts.json`；纯层 `core/engine_facts.py` + 采集器 `pipeline/engine_collect.py` + CLI `engine-facts` | `tests/test_engine_facts.py` **42 条**；**真机 15/15 验收**（12 秒） |
-| 纯文字导入 S1~S4 | `.txt`/`.docx` → `.rpy`（纯函数，真机 5 章产物与 `render_beats_to_rpy` **逐字节一致**） | `test_txt_import*.py` 60 条 + 金标 |
-| 角色**别名列** | `characters.xlsx` 新增「别名」（多值 `MOM\|母亲`）；四层匹配 L0变量→L1归一→L2显示名→L3别名→L4报出来 | `test_character_aliases.py` 22 条 |
-| 角色决策层 | 未映射写法 → 弹窗问"是不是已定义的这个？"；`LJK` 那格**必须拒绝** | `test_char_decisions` 28 + `test_dialog_chars` 11 |
-| 自定义模块入口 | 工具栏最上方「🧩 自定义模块」+ 发现未声明写法 + 填声明 → 写 `rules.json` | `test_custom_statement_entry.py` 26 条 |
-| 词组分组 | 项目用 `attr_groups` 声明"有哪几组词"；工具**不写死组名**；没声明=完全平铺 | `test_spec_groups.py` 20 条 |
-| **V2-1 闸门（当前 HEAD `d107208`）** | 内置语句（`with/window/pause`）不再被当成"工具还不认识"；已声明的内置语句可**一键移除** | `test_discover_gates.py` 30 条，真项目 3→0 |
-
-**进行中**：V2 设计稿 `docs/archive/设计_自定义动作界面_v2_编剧版_2026-10-10.md`（V2-1 ✅ / V2-2 反推核心已通 / V2-3 弹窗重做、V2-4 动作清单页、V2-5 卡片主路径 **⏸ 等用户看设计稿**）。
-**本轮新增**：`docs/archive/设计_让工具认识自定义写法_说人话版_2026-10-10.md`（说人话的总体设计稿）+ `docs/契约速查_storygraph.md`（契约分册）。
+| ⭐ **E1/E2/E3 引擎事实** | 一次运行（`lint --error-code` + `--json-dump` + 注入探针）产出 `engine_facts.json`（每条带 `source`）；候选由引擎枚举；漂移检测三档退出码 | `test_engine_facts.py` / `test_engine_choices.py`；真机 **15/15** |
+| 纯文字导入 S1~S4 | `.txt` / `.docx` → `.rpy`（纯函数；真机 5 章产物与 `render_beats_to_rpy` **逐字节一致**） | `test_txt_import*.py` + 金标 |
+| 角色别名列 / 角色决策层 | 别名四层匹配（L0–L3 + 报出来）；未映射写法 → 弹窗问"是不是已定义的这个？" | `test_character_aliases.py` / `test_char_decisions.py` |
+| **自定义动作弹窗 v4** | `param_cards.py` 已删 → `param_editor.py` + `column_editor.py` + `flow.py`；三个页签、**同屏一条滚动区**；"词组"改名**候选分栏** | `test_custom_statement_entry.py` |
+| 内置语句参数格 | `show` 等内置语句也能在卡片长参数格；`merge_builtin_columns`（内置形状一列不动，声明的就地改、新名字追加） | `test_builtin_statement_columns.py` |
+| 会话记忆 | `core/session_store.py` + `ui_qt/window_state.py`；存 `%LOCALAPPDATA%`，**绝不写进项目仓库** | `test_session_memory.py` |
+| 立绘卡"一维一格" | 服装 + 表情各占一格，点一下只换那一维的词 | `test_sprite_slots.py` |
 
 **❌ 真缺口**（里程碑与验收见路线图）
-1. ~~两套 `.rpy` 生成器并存~~ **已完成（10-09）**：统一走 `write_generation` + 「唯一写盘入口」守卫。
-2. ~~`asset_engine._apply_rename_patch` 正则改写用户脚本~~ **已修（M2）**：`plan`(纯)→`apply(confirm=)`(未确认零写)→`rollback`（逐位还原）。⚠ 按 D3' **未接 Qt**。
-3. **Excel 前端上限（D4）**：`Show`/`Hide` **摊列**已落地；模型与渲染**未动**。判据 `test_hell_show_split_columns.py` 22 条。
-4. **坏味道（D5）**：**复杂度头部已清空**（顶格 47）。剩两类：最大模块 >800（`renpy_parser` 4422 / `asset_registry` 3572 / `beat_render` 3388 / `beat_model` 3115）、最大类 >40 方法（`RenPyParser` 50）。脚手架 `tools/_extract.py`。
-5. **拍级三路合并**（按需）。6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件未做。
+1. ~~两套 `.rpy` 生成器并存~~ **已完成**：统一走 `write_generation` + 「唯一写盘入口」守卫。
+2. ~~`asset_engine._apply_rename_patch` 正则改写用户脚本~~ **已修**：`plan`(纯)→`apply(confirm=)`(未确认零写)→`rollback`。⚠ 按 D3' **未接 Qt**。
+3. **Excel 前端上限（D4）**：`Show`/`Hide` 摊列已落地；模型与渲染未动。
+4. **坏味道（D5）**：复杂度头部已清空（顶格 47）。剩：最大模块 `renpy_parser` **3442** / `beat_model` 3121 / `beat_render` 2923 / `asset_registry` 2648；最大类 `GraphOpsMixin` 49 方法。脚手架 `tools/_extract.py`。
+5. **拍级三路合并**（按需）。6. **多引擎适配深度（M5 ⚪）**：接线/结构位已修；运行时组件未做。7. **G4 运行时组件**（Unity/Godot 真正播放的代码）：中立 IR 那半已完成。
 
 **❓ 待用户决定**：D1 旧定案"树归 Graph / 句子归 Excel"是否撤销｜D2 两套生成器是否收敛｜D3 rename patch 是否接 Qt｜D4 Stage 格级下拉做不做｜D5 坏味道是否进"练习课题"｜D6 `pytest.ini` `--basetemp` 改成不炸（裸 `pytest` 必炸 ~1589 ERROR）｜D7 多引擎是否加深｜D8 提交策略。
 
 ## 三、仓库与运行
-- 包：`storygraph/{core,excel,parsing,assets,story,pipeline,graph,ui_qt,app,collab,authoring}`
+- 包：`storygraph/{core,excel,parsing,assets,story,pipeline,graph,ui_qt,app,collab,authoring,ai,mcp}`
 - 入口：根 `main.py`/`cli.py` → `storygraph.main`/`storygraph.cli`（`cli.py selfcheck` 走主链路）
 - 依赖：openpyxl（必需）+ Pillow（可选）+ PySide6（UI）；`legacy/` 不参与构建
 - 工具：静态体检 `tools/health_check.py`；幂等审计 `tools/audit_idempotence.py`；动态 `tools/hell_*.py`；交付就绪 `tools/journey_check.py`
