@@ -89,6 +89,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('root', nargs='?', default=DEFAULT_REAL)
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--only', default='',
+                    help='只看文件名里含这个子串的脚本（triage 用，例：flipcard）')
     ap.add_argument('--excel', action='store_true',
                     help='走"拍 → 表 → 拍"那条路（慢，但那是产品主路）')
     ap.add_argument('-v', '--verbose', action='store_true')
@@ -99,6 +101,8 @@ def main() -> int:
         print(f'项目根不存在：{root}')
         return 2
     scripts = discover_scripts(root)
+    if args.only:
+        scripts = [p for p in scripts if args.only in Path(p).name]
     if args.limit:
         scripts = scripts[:args.limit]
     render = _render_via_excel if args.excel else _render

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
 from storygraph.parsing.renpy_nodes import (
     AudioNode,
     CallNode,
@@ -331,6 +332,27 @@ class StatementScreens:
         if not self._RE_SCENE_HEAD.match(text):
             return self._NO_MATCH
         parsed = self._parse_show_scene(text, is_scene=True)
+        # ⚠⚠ **认不出就原样抄**（2026-10-15，用户审核指出 —— 铁律 #3）：
+        #   `SceneNode` 只携带 image / at / with_ / onlayer / is_expression，
+        #   **没有 `as_` / `zorder` / `behind` 三个载体**（`Beat` 侧也没有，
+        #   渲染器没有东西可发射）。自从 `_SCENE_KEYWORDS` 与 show 同口径之后
+        #   （官方语法：scene 取同一批 properties），这三个字段会被**算出来再丢掉**：
+        #
+        #     改前：`scene bg behind x` → image='bg behind x'（切错，但**错得可见**）
+        #     若不管：`scene bg behind x` → image='bg'、behind=['x'] 被丢（**丢得无声**）
+        #
+        #   "丢得无声"是保真性最忌讳的那一档，所以这里**宁可认不出**：
+        #   只要有这三个字段就返回 `_NO_MATCH` → 整行落进 `raw` 通道**逐字保留**
+        #   （渲染时原样吐回，一个字节不动）。
+        #
+        # ⚠ 真机命中数：`scene … as/behind/zorder` **0 次** —— 所以"通用性"的损失是 0。
+        #   等哪天真要结构化这三个字段，再把这条口径翻回来（要动
+        #   SceneNode + Statement payload + Beat + 渲染，五处起）。
+        #   判据：`tests/test_show_clause_words.py::test_scene_的_as_behind_zorder_
+        #   走逐字通道不丢字`（往返逐字节相同）。
+        if parsed and (parsed['as_'] or parsed['behind']
+                       or parsed['zorder'] is not None):
+            return self._NO_MATCH
         if parsed and parsed['image']:
             for w in parsed['warnings']:
                 self.warnings.append(
@@ -359,6 +381,17 @@ class StatementScreens:
         if mw:
             with_ = mw.group(1)
             rest = rest[:mw.start()].strip()
+        # ⚠⚠ **认不出就原样抄**（2026-10-15，同 `_stmt_scene` 那条）：
+        #   官方 `hide` 的子句只有 `onlayer`（+ `with`），而 `HideNode`
+        #   只携带 image / with_ —— **没有 `onlayer` 载体**。不管的话
+        #   `hide bg onlayer master` 会把 `onlayer master` 当成图像名的一部分
+        #   → 变成一条**假断链**（`bg onlayer master` 查不到）。
+        #   所以：尾部只要出现**任何 show/scene/hide 子句词**（at/as/with/behind/
+        #   onlayer/zorder），就 `_NO_MATCH` → 整行落 `raw` **逐字保留**。
+        #   真机 `hide … onlayer/zorder/behind/at/as` 命中 0 次，通用性损失是 0。
+        if any(tok.rstrip(',') in SHOW_CLAUSE_KEYWORDS
+               for tok in rest.split()):
+            return self._NO_MATCH
         return HideNode(
             line_number=line.line_number,
             indent=line.indent,

@@ -460,42 +460,39 @@ class TestShowScene:
         assert node.with_ == 'fade'
         assert node.onlayer == 'master'
 
-    def test_scene_takes_the_same_clauses_as_show(self, write_rpy):
+    def test_scene_with_as_behind_zorder_is_kept_verbatim(self, write_rpy):
         """
-        `scene` 取与 `show` **同一批**子句（含 `as`）—— 官方原文
-        "the scene statement takes the same properties as the show statement"。
+        `scene` 的 `as` / `behind` / `zorder` 三个子句**整行走逐字通道**，不丢字。
 
-        ⚠⚠ **2026-10-15 重校准**：这条从前叫 `test_scene_ignores_as`，断言
-        `scene bg as x` 的 image 是 `'bg as x'`（"scene 不支持 as，作为 image 的
-        一部分保留"）。**引擎实测推翻了它**（Ren'Py 8.5.3）：
+        ⚠⚠ **2026-10-15 两次校准，过程值得留着**：
 
-            image bg = Solid("#f00")
-            scene bg as x            ← 零报错
-            scene bg zorder 3        ← 零报错
-            scene bg behind nothing  ← 零报错
-            scene bg onlayer master  ← 零报错
+        1. 这条从前叫 `test_scene_ignores_as`，断言 `scene bg as x` 的 image 是
+           `'bg as x'`（"scene 不支持 as，作为 image 的一部分保留"）。**引擎推翻了它**
+           —— Ran'Py 8.5.3 lint：`scene bg as x` / `zorder 3` / `behind nothing`
+           在 `image bg` 已定义时**零报错**，而 lint 报的是**全名**
+           （对照 `scene totally missing` → `'totally missing' is not an image.`；
+           `scene totally_missing as q` → `'totally_missing'` ⇒ `as q` 被切掉了）。
+           所以 `_SCENE_KEYWORDS` 改成与 show 同口径。
+        2. 同口径之后出现**更坏的副作用**（用户审核指出）：`SceneNode` 只携带
+           image / at / with_ / onlayer / is_expression，**没有 `as_`/`zorder`/
+           `behind` 的载体** → 这三个字段**算出来再丢掉** ——
+           "错得可见"变成了"**丢得无声**"。于是 `_stmt_scene` 改成：
+           有这三个字段就 `_NO_MATCH` → 整行落 `raw` **逐字保留**（铁律 #3
+           "认不出就原样抄"）。
 
-        而 lint 报的是**全名**（对照：`scene totally missing` → 报
-        `'totally missing' is not an image.`；`scene totally_missing as q` → 报
-        `'totally_missing' is not an image.`，即 `as q` **确实被当子句切掉了**）。
-        既然图片名解析成了光秃秃的 `bg`、且引擎零报错，`as` 就是 scene 的子句。
-        旧断言等于把 `as x` 吃进图片名 —— 那会让 `scene bg as x` 去查一个
-        名叫 `bg as x` 的资产，必然查不到（假断链）。
+        判据就是**逐字节往返**（真机这三样命中 0 次，所以用合成行钉）。
         """
-        fp = write_rpy('label a:\n    scene bg as x\n')
-        node = RenPyParser().parse(fp)[0].block[0]
-        assert node.image == 'bg', (
-            'scene 把 `as x` 吃进图片名了 —— `scene bg as x` 会去查一个名叫 '
-            '`bg as x` 的资产，必然查不到（假断链）', node.image)
-        # ⚠ **本轮发现、未修**（真机 `scene … as …` 出现 0 次，单独定）：
-        #   `_parse_show_scene` 是算出了 `as_` 的，而 `SceneNode` **不携带**它
-        #   （`renpy_parser_stmts._stmt_scene` 只传 image/at/with_/onlayer），
-        #   于是 `scene bg as x` 的 `as x` 在产物里**静默丢失**。
-        #   修它要动"SceneNode + Statement payload + 渲染"三处，
-        #   与本轮"收词表 / 修假断链"不同类 —— 记在这里免得被忘掉。
-        assert not hasattr(node, 'as_'), (
-            '`SceneNode` 现在携带 as_ 了 —— 那条"静默丢失"的待办可以划掉，'
-            '并把这条判据改成断言 as_ == "x"')
+        for text in ('scene bg as x', 'scene bg behind x at left',
+                     'scene bg zorder 3'):
+            fp = write_rpy(f'label a:\n    {text}\n')
+            p = RenPyParser()
+            p.parse(fp)
+            node = p.parse(fp)[0].block[0]
+            assert not isinstance(node, SceneNode), (
+                f'{text!r} 又走结构化 SceneNode 了 —— 它的 as_/behind/zorder '
+                f'没有载体，会静默丢字', type(node).__name__)
+            assert getattr(node, 'text', None) == text, (
+                f'{text!r} 没有被逐字保留', getattr(node, 'text', None))
 
 
 # ------------------------------------------------------------------

@@ -139,6 +139,37 @@ def test_语句那条路也不产生假断链(write_rpy):
                 '引入型关键字钻进了 SHOW/SCENE/HIDE 的 image', spec)
 
 
+def test_scene_的_as_behind_zorder_走逐字通道不丢字(write_rpy):
+    """
+    ⚠⚠ 铁律 #3（**认不出就原样抄**）：`scene` 的 `as` / `behind` / `zorder`
+    三个子句**整行原样吐回**，一个字节不动。
+
+    为什么（2026-10-15 用户审核指出）：`_SCENE_KEYWORDS` 与 show 同口径之后，
+    这三个字段会被 `_parse_show_scene` **算出来**，而 `SceneNode`（以及
+    `Statement.payload` / `Beat`）**没有它们的载体** → 算出来再丢掉 ——
+    那就把原来的"切错但错得可见"变成了"**丢得无声**"。
+
+    所以 `_stmt_scene` 改成：有这三个字段就 `_NO_MATCH` → 整行落 `raw`。
+    判据是**往返逐字节相同**（渲染一轮、再渲染一轮都不许变）。
+    """
+    from storygraph.story.beat_build import beats_from_parse_result
+    from storygraph.story.beat_render import render_beats_to_rpy
+
+    lines = ['scene bg as x', 'scene bg behind x at left', 'scene bg zorder 3']
+    body = ('label a:\n' + ''.join(f'    {ln}\n' for ln in lines)
+            + '    return\n')
+    fp = write_rpy(body, 'ch.rpy')
+    pr, _ = IncrementalRenPyAnalyzer().analyze(files=[fp], graph=None)
+    out = render_beats_to_rpy(beats_from_parse_result(pr))
+    for ln in lines:
+        assert ln in out, ('这一行没有被逐字带出来', ln, out)
+    # 再渲染一轮也不许变（真机审计同一把尺：导出一次与再导出一次逐字节相同）
+    fp2 = write_rpy(out, 'ch2.rpy')
+    pr2, _ = IncrementalRenPyAnalyzer().analyze(files=[fp2], graph=None)
+    out2 = render_beats_to_rpy(beats_from_parse_result(pr2))
+    assert out2 == out, ('第二轮变了', out, out2)
+
+
 # =====================================================================
 #  说话人关键字：`narrator` 必须当说话人（不能并进"保留字"）
 # =====================================================================
