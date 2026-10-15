@@ -22,6 +22,7 @@ import importlib.util
 
 from storygraph.core.vocabulary import (
     ASSET_TYPE_ATTR as _TYPE_ATTR,
+    NON_ACTOR_SHOW_TARGETS,
     RENPY_BUILTIN_TRANSFORMS,
 )
 from storygraph.excel.cells import append_text_row, set_text
@@ -2201,6 +2202,14 @@ def extract_script_references(text: str) -> list:
         spec = _extract_image_spec(m.group('rest'))
         if not spec or spec.lower() == 'expression':
             continue
+        # ⚠⚠ **非图像目标**（`screen` / `layer` / `movie` / `text`…）不是本项目的
+        #   图像资产（2026-10-15 接线：`NON_ACTOR_SHOW_TARGETS` 在 `core.vocabulary`
+        #   里**定义了、导出了、却从没有任何地方用过** —— "概念有了、线没接"）。
+        #   不挡的话 `show screen msg_dialogue` 会变成一条**假断链**；
+        #   真机实测这条路产出 110 条，而它是**无条件跟跑**的
+        #   （Statement 优先 + 正则补覆盖不到的地方），所以那是真缺陷。
+        if spec.split()[0].lower() in NON_ACTOR_SHOW_TARGETS:
+            continue
         clean = spec.replace('"', '')
         # 运行时表达式 / 带 ATL 的块头 / 函数调用 → 不是静态资产引用
         if is_dynamic_image_spec(clean):
@@ -2265,7 +2274,13 @@ def references_from_statements(statements) -> list:
             spec = (payload.get('image') or '').strip()
             loc = loc_of(st)
             is_expr = bool(payload.get('is_expression'))
-            if spec and not is_expr and not is_dynamic_image_spec(spec):
+            # ⚠⚠ **非图像目标不是本项目的图像资产**（2026-10-15 接线）：
+            #   `show layer master` / `show text "…"` 会走到这一支
+            #   （`show screen` 更早被 `_stmt_screen_op` 拦成 `raw`）。
+            #   实测它们会变成 `unresolved['image']` 里的假断链。
+            #   ⚠ 只挡**图像引用**那一条 —— 后面的 `at` / `with` 变换引用照收。
+            if (spec and not is_expr and not is_dynamic_image_spec(spec)
+                    and spec.split()[0].lower() not in NON_ACTOR_SHOW_TARGETS):
                 clean = spec.replace('"', '')
                 refs.append(('image', clean,
                              tuple(_image_spec_candidates(clean)), loc))

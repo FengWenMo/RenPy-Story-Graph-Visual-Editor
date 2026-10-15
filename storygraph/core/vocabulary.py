@@ -63,9 +63,19 @@ NON_ACTOR_TAGS = frozenset({
     'splash',
 })
 
-#: `show X ...` 里 X **不是图像名**的写法（Screen Language / 图层操作）：
-#: `show screen msg` / `show layer master` / `show expression F(x)`。
+#: `show X ...` 里 X **不是本项目图像资产**的写法（Screen Language / 图层操作）：
+#: `show screen msg` / `show layer master` / `show expression F(x)` /
+#: `show text "居中"` / `show movie`。
 #: 它们不参与"图像引用"判定，也永远不算立绘。
+#:
+#: ⚠ 与 `SHOW_INTRO_KEYWORDS` 是**两个概念、内容不同、别互相替换**：
+#:   那个是"**语法**上替换图像名的关键字"（三个）；这一份更宽 ——
+#:   `text` / `movie` 在官方语法里是**预定义 displayable 当图名**（不是引入型），
+#:   但它们同样不是本项目的图像资产，去查资源表必然查不到。
+#: 使用者：`assets/asset_registry` 的两条引用抽取（Statement 路径 + 正则兜底）。
+#: ⚠⚠ **2026-10-15 之前它是"定义了、导出了、却没有任何地方用过"的** ——
+#:   于是 `show screen msg_dialogue` 被当成图像名，变成一条假断链
+#:   （真机实测 110 条，见 `.workbuddy/memory/2026-10-15.md`）。现在线接上了。
 NON_ACTOR_SHOW_TARGETS = frozenset({
     'screen', 'layer', 'expression', 'movie', 'text',
 })
@@ -259,6 +269,30 @@ SHOW_CLAUSE_KEYWORDS = frozenset({
 SHOW_INTRO_KEYWORDS = frozenset({'expression', 'screen', 'layer'})
 
 
+#: 不可能出现在"**说话人**"位上的 Ren'Py 语句关键字（角色变量不许叫这些名字）。
+#:
+#: 使用者：`story/patcher._KEYWORD_SPEAKERS` —— 句位配对（`ignore_speaker`）
+#: 不许把它们当成"说话人变了"（`extend "…"` / `menu "标题":` 的形状与
+#: `lyj "台词"` 一样，退化成同一身份就会和真台词互相顶掉）。
+#:
+#: ⚠⚠ **`narrator` 必须排除在外**：官方文档（dialogue.html）说明它是
+#:   "say statements without a character name 用的那个 `Character`"，且
+#:   **特殊角色可以被重定义** → **它能当说话人**。并进来会让
+#:   `narrator "A"` 与 `narrator "B"` 得到同一个身份 → **静默丢行**。
+#:   同理 `RENPY_DECLARATIVE_HEADS` 里的 `character` / `audio` / `movie` /
+#:   `key` / `timer` / `input` / `side` 都不是保留字（可以是角色变量），
+#:   所以这一份**只从动词表 + 流程块头 + show 子句词**取。
+#:
+#: ⚠ 本轮**只统一口径、不改口径**：下面那两处减法是"这一份从前就没有它们"，
+#:   加进来会改句位配对的行为（要单独定）。真源是那三个内核集合。
+RESERVED_STATEMENT_KEYWORDS = (
+    (RENPY_STATEMENT_VERBS | RENPY_FLOW_HEADS | SHOW_CLAUSE_KEYWORDS
+     | {'break', 'continue'})
+    - {'narrator', '$', 'voice_sustain', 'layeredimage', 'translate'}
+    - {w for w in RENPY_STATEMENT_VERBS if w.endswith('.')}
+)
+
+
 def statement_head_token(text: str) -> str:
     """取一句话的**语句头**（第一个 token，去掉结尾的 `:`）。"""
     s = str(text or '').strip()
@@ -295,4 +329,5 @@ __all__ = [
     'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',
     'RENPY_KNOWN_HEADS', 'RENPY_CONTAINER_HEADS',
     'SHOW_CLAUSE_KEYWORDS', 'SHOW_INTRO_KEYWORDS',
+    'RESERVED_STATEMENT_KEYWORDS',
 ]

@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import re
-from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
+from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
+                                        SHOW_INTRO_KEYWORDS)
 from storygraph.excel.cells import append_text_row, set_text
 import re
 
@@ -176,12 +177,16 @@ _COLOR_PATTERN = re.compile(r'^#(?:[0-9a-fA-F]{3}){1,2}$')
 
 #: show/scene/hide 的剩余部分里"图像名**到哪里为止**"。
 #: **唯一真源**在 `core.vocabulary`（2026-10-15 收重复）。
-#: ⚠ 这一份**多一个 `expression`**：`show expression <表达式>` 本来**就没有图像名**
-#: （tag 未定义，除非另给 `as`），切出空串才对。
-#: 而 `screen` / `layer` 同样是引入型关键字、却**没**收进来 ——
-#: 于是 `show screen foo` 现在会把 `screen` 当成图像名。要不要一起收属于**改口径**，
-#: 留作待办（见 `.workbuddy/memory/2026-10-15.md`）。
-_SHOW_STOP_WORDS = SHOW_CLAUSE_KEYWORDS | {'expression'}
+#:
+#: ⚠⚠ 这一份从前把 `expression` 加进来了、却**漏了 `screen` 与 `layer`** ——
+#: 于是 `show screen msg_dialogue` / `hide screen map` 会被切出
+#: `screen msg_dialogue` 当图像名 → 变成一条**假断链**。
+#: 真机实测（2026-10-15）：**正则兜底那条路**因此产出 **110 条**假断链
+#: （`unresolved['image']` 126 条里 110 条是 `screen …`），而那条路是无条件
+#: 跟跑的（`build.collect_report` / `asset_engine._rebuild_references`
+#: 都做"Statement 优先 + 正则补覆盖不到的地方"）—— 所以这是真缺陷、不是理论问题。
+#: 现在三个引入型关键字一起收进来（`SHOW_INTRO_KEYWORDS`），与规范集同源。
+_SHOW_STOP_WORDS = SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS
 
 _RE_SHOW_LINE = re.compile(
     r'^\s*(?P<verb>show|scene|hide)\s+(?P<rest>.*?)\s*$', re.MULTILINE)

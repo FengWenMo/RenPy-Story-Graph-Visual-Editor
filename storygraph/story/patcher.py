@@ -54,6 +54,7 @@ storygraph.story.patcher
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.vocabulary import RESERVED_STATEMENT_KEYWORDS
 import difflib
 import re
 from collections import Counter
@@ -473,13 +474,13 @@ _STAGE_VERBS = ('show', 'hide', 'scene')
 #: 用途只有一个：**句位配对（`ignore_speaker`）不许把它们当成"说话人变了"**
 #: —— `extend "…"` / `menu "标题":` 的形状与 `lyj "台词"` 一样，一旦退化成
 #: `('say','')` 就会和真台词互相顶掉（`voice "x"` 已经踩过一次，见 `_line_key`）。
-_KEYWORD_SPEAKERS = frozenset({
-    'extend', 'voice', 'play', 'stop', 'queue', 'show', 'hide', 'scene',
-    'menu', 'nvl', 'window', 'pause', 'return', 'jump', 'call', 'label',
-    'if', 'elif', 'else', 'while', 'for', 'python', 'init', 'define',
-    'default', 'transform', 'screen', 'style', 'image', 'camera', 'with',
-    'at', 'as', 'behind', 'onlayer', 'zorder', 'pass', 'break', 'continue',
-})
+#:
+#: ⚠ 2026-10-15：集合本体收敛到 `core.vocabulary.RESERVED_STATEMENT_KEYWORDS`
+#: （唯一真源里写明了**为什么必须排除 `narrator`**：官方文档说它是"没有角色名的
+#: say 语句用的那个 Character"、特殊角色可重定义 → **它能当说话人**；
+#: 并进来会让两条不同旁白撞键 → **静默丢行**）。
+#: 本轮的收敛**只统一口径、不改口径**：生效集合与从前逐字相同。
+_KEYWORD_SPEAKERS = RESERVED_STATEMENT_KEYWORDS
 
 
 def _parse_stage_body(body: str) -> tuple:

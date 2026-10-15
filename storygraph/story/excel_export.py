@@ -148,13 +148,12 @@ def _annotate_spec_heads(ws, beats, statements) -> int:
 
 #: `show` 语句里的**关键字**：它们后面跟的不是属性。
 #: ⚠ 不挡住它们，`show cg at center` 里的 `at` 会被当成属性报"引擎没认"（实测踩到）。
-#   ⚠ 两处**显式的差异**（2026-10-15 收重复到 `core.vocabulary`）：
-#     · `+ onlayer` —— 这一份从前**漏了**它（真词漏了）：补上之后
-#       `show cg onlayer overlay` 不再把 `onlayer` 报成"引擎没认的属性"；
-#     · `+ on` —— 这一份从前的写法，**其余三份都没有**；真机里 `show … on …`
-#       出现 0 次、也查不到它出自哪一版语法，所以**既不删也不推广**
-#       （删它属于改口径，要单独定）。
-_SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS | {'on'}
+#   ⚠ 2026-10-15：**`on` 已删** —— 官方 show 语法里没有它（`show_statement` 的
+#     子句是 as/onlayer/at/behind/with，外加同族 zorder），真机里
+#     `show … on …` 出现 **0 次**；它是 `62dfaa2`（"E2 第三切片：候选与资源表
+#     对齐"）首次写下这一行时**顺手带的、无任何依据**。留一个无依据的成员
+#     正是这批词表各自漂移的成因，所以在这里删掉（行为上真机不可见）。
+_SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS
 
 
 def _unknown_show_words(show_text, facts) -> list:

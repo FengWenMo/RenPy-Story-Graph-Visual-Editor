@@ -106,7 +106,13 @@ Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
-from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
+from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
+                                        SHOW_INTRO_KEYWORDS)
+
+#: `show <这些> …` **没有图像名**（屏幕 / 图层操作，不是图像引用）。
+#: 从官方语法来的真源里取，只排掉 `expression` —— 那个走 `is_expression` 那条路
+#: （它的"图像名"是后面的 Python 表达式，语义不同）。
+_NO_IMAGE_INTRO = SHOW_INTRO_KEYWORDS - {'expression'}
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -986,15 +992,13 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
 
     # show / scene 解析用的关键字集合 —— **唯一真源**在 `core.vocabulary`
     # （2026-10-15 收重复，见那里的 §`show`/`scene`/`hide` 子句关键字）。
-    # 这里只表达**差异**：
     #
-    # ⚠ 现状**未改口径**：官方语法说 scene 取与 show 同一批 properties
-    #   （`as` / `behind` / `zorder` 也是子句），而这一份只认 at/with/onlayer。
-    #   于是 `scene bg behind x` 的 `behind x` 会被当成图像名的一部分。
-    #   拓宽它属于**改口径**（某个真叫 `behind` 的属性就不能再用了），
-    #   不在"收重复"这一轮里动 —— 留作待办，见 `.workbuddy/memory/2026-10-15.md`。
+    # ⚠ `scene` **与 show 同口径**（2026-10-15 改）：官方原文
+    #   "the scene statement takes the same properties as the show statement"
+    #   —— 从前这一份只认 at/with/onlayer，于是 `scene bg behind x` 会把
+    #   `behind x` 当成图像名的一部分（真机 0 次，所以行为不可见）。
     _SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS
-    _SCENE_KEYWORDS = SHOW_CLAUSE_KEYWORDS - {'as', 'behind', 'zorder'}
+    _SCENE_KEYWORDS = SHOW_CLAUSE_KEYWORDS
 
     _RE_POS_ARG = re.compile(r'^\s*' + _STR)
 
@@ -1664,6 +1668,21 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             rest = rest[len('expression '):].lstrip()
         elif rest == 'expression':
             result['is_expression'] = True
+            rest = ''
+        elif rest.split(None, 1)[:1] and rest.split(None, 1)[0] in _NO_IMAGE_INTRO:
+            # ⚠⚠ `show layer X` / `show screen X` —— **没有图像名**
+            # （2026-10-15 加，用户审核指出）。它们是**图层/屏幕操作**，
+            # 不是图像引用；`X` 不是本项目的图像资产。
+            #
+            # 与 `_stmt_screen_op` 对 `show screen` 的处理**同口径**：这里让
+            # image 保持空串 → `_stmt_show` 走 `_NO_MATCH` → 整行落进 `raw`
+            # （逐字保真）。`show screen` 更早被 `_stmt_screen_op` 拦走，
+            # 这一支主要管 `show layer`。
+            #
+            # ⚠ 为什么必须挡：不挡的话 `_parse_show_scene('show layer master')`
+            # 会给出 image='layer master' → `references_from_statements` 把它
+            # 当图像引用 → `registry.unresolved['image']` 里多一条**假断链**
+            # （实测踩到：`layer master` / `text Centered text` 都进来了）。
             rest = ''
 
         tokens = cls._tokenize_show(rest)
