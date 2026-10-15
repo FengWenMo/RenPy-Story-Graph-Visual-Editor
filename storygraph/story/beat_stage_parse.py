@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import re
 
+from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
+
 _NATIVE_TAIL_RE = re.compile(
     r'^(?P<spec>.+?)(?:\s+at\s+(?P<at>[\w.]+))?'
     r'(?:\s+with\s+(?P<with>[\w.]+))?$')
 
-_SHOW_ARG_KEYWORDS = frozenset(
-    {'at', 'as', 'with', 'behind', 'onlayer', 'zorder'})
+#: 图像名**到哪里为止** —— **唯一真源**在 `core.vocabulary`（2026-10-15 收重复）。
+_SHOW_ARG_KEYWORDS = SHOW_CLAUSE_KEYWORDS
 
 def _clause_image(clause: str) -> str:
     """从一个 show 子句（已去掉前导 'show '）里取出图像名。"""

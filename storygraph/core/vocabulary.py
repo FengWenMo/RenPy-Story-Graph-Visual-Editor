@@ -217,6 +217,48 @@ RENPY_CONTAINER_HEADS = frozenset({
 })
 
 
+# ==================================================================
+#  `show` / `scene` / `hide` 子句关键字的**唯一真源**（2026-10-15）
+# ==================================================================
+#
+# 依据**官方语法**（displaying_images.html）：
+#
+#     show_statement -> "show" "expression" simple_expression
+#                       ( "as" name )? ( "onlayer" name )?
+#                       ( "at" transform_list )? ( "behind" name_list )?
+#                       ( "with" simple_expression )?
+#
+# 外加同一族的 `zorder`（docs: "zorder Takes an integer"）；docs 还明说
+# **scene 取与 show 同一批 properties**、`hide` 只有 `onlayer`。
+#
+# 为什么要有这一节：这批词从前在**四处**各写一份，口径已经不同 ——
+#
+#   · `parsing/renpy_parser._SHOW_KEYWORDS`          = 规范集
+#   · `story/beat_stage_parse._SHOW_ARG_KEYWORDS`    = 规范集（纯重复）
+#   · `story/excel_export._SHOW_KEYWORDS`            = 有 `on`、**漏了 `onlayer`**（真词漏了）
+#   · `assets/asset_registry_constants._SHOW_STOP_WORDS` = 规范集 + `expression`
+#   · `story/generation_guard` 的 stopwords          = 规范集 − `at`（它本来就用在 `at` 之后）
+#
+# 现在**内核只写一份**，各处的差异用"**内核 ± 显式增减**"表达出来
+# —— 与上面「语句头词表」那一节同一套做法：差异本身也变成可读、有注释的事实。
+#
+# ⚠ 这一节**只统一口径，不改口径**：各处改写后**生效的集合与从前逐字相同**
+#   （除了 `excel_export` 补回漏掉的 `onlayer` —— 那是"真词漏了"，
+#   让 `show cg onlayer overlay` 里的 `onlayer` 不再被当成属性报错）。
+#   发现但**没动**的口径分歧，都在各自站点上写明理由（见下）。
+
+#: 图像名之后**哪些词算子句** —— 既是"图像名到哪里为止"，也是"这些词后面不是属性"。
+SHOW_CLAUSE_KEYWORDS = frozenset({
+    'at', 'as', 'with', 'behind', 'onlayer', 'zorder',
+})
+
+#: `show` 的**引入型**关键字：它们**替换**图像名，后面跟的不是图名 ——
+#: `show expression <表达式>` / `show screen <屏幕名>` / `show layer <层名>`。
+#: 使用者：`authoring/learn_statement._NOT_A_VALUE`（反推参数名时它们不是"值"）、
+#: `assets` 那侧（`show expression …` 本来就没有图像名 → 切出来是空）。
+SHOW_INTRO_KEYWORDS = frozenset({'expression', 'screen', 'layer'})
+
+
 def statement_head_token(text: str) -> str:
     """取一句话的**语句头**（第一个 token，去掉结尾的 `:`）。"""
     s = str(text or '').strip()
@@ -252,4 +294,5 @@ __all__ = [
     'RENPY_FLOW_BLOCK_HEADS', 'statement_head_token', 'is_known_flow_block',
     'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',
     'RENPY_KNOWN_HEADS', 'RENPY_CONTAINER_HEADS',
+    'SHOW_CLAUSE_KEYWORDS', 'SHOW_INTRO_KEYWORDS',
 ]

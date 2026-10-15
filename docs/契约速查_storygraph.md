@@ -2279,3 +2279,37 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
   ② **引号只在读值那一侧去掉**（试切报的是切出来的原文）。
 - 判据：`tests/test_assign_tokens_single_source.py` —— 把上面两条分岔钉住，
   再长出新分岔就会红；并逐字核 `_claim` 等于分配器的 `candidates` 结果。
+
+---
+
+## §单源：`show` / `scene` / `hide` 子句关键字（2026-10-15）
+
+**铁律**：这批词**只有一份** —— `core.vocabulary`：
+
+- `SHOW_CLAUSE_KEYWORDS = {'at','as','with','behind','onlayer','zorder'}`
+  （依据官方语法 `show_statement -> "show" "expression" simple_expression
+  ( "as" name )? ( "onlayer" name )? ( "at" … )? ( "behind" … )? ( "with" … )?`
+  ＋ 同族 `zorder`；docs 明说 **scene 取同一批 properties**）
+- `SHOW_INTRO_KEYWORDS = {'expression','screen','layer'}`
+  （**引入型**：替换图像名，后面跟的不是图名）
+
+从前这批词在**五处**各写一份、口径已经不同（`excel_export` 有 `on` 却**漏了
+`onlayer`**；`renpy_parser` 的 scene 集更窄；`learn_statement` 手抄一份还缺 `zorder`）。
+现在各站只写"**内核 ± 显式增减**"，差异本身成为可读、有注释的事实：
+
+| 站点 | 现在 |
+|---|---|
+| `parsing/renpy_parser._SHOW_KEYWORDS` | `SHOW_CLAUSE_KEYWORDS` |
+| `parsing/renpy_parser._SCENE_KEYWORDS` | `SHOW_CLAUSE_KEYWORDS - {as,behind,zorder}` |
+| `story/beat_stage_parse._SHOW_ARG_KEYWORDS` | `SHOW_CLAUSE_KEYWORDS` |
+| `story/excel_export._SHOW_KEYWORDS` | `SHOW_CLAUSE_KEYWORDS \| {on}` |
+| `assets/asset_registry_constants._SHOW_STOP_WORDS` | `SHOW_CLAUSE_KEYWORDS \| {expression}` |
+| `story/generation_guard` stopwords | `SHOW_CLAUSE_KEYWORDS - {at}` |
+| `authoring/learn_statement._NOT_A_VALUE` | `SHOW_CLAUSE_KEYWORDS \| SHOW_INTRO_KEYWORDS \| {True,False,None}` |
+
+⚠ **没动的三处口径分歧**（都写在站点注释里，要动得先拍板 —— 它们都是"改口径"）：
+`_SCENE_KEYWORDS` 比 show 窄（`scene bg behind x` 会把 `behind x` 当图像名）；
+`screen`/`layer` 没进 assets 的 stop words（`show screen foo` 会把 `screen` 当图像名）；
+`patcher._KEYWORD_SPEAKERS` 是**另一类**重复（"不可能当说话人的语句关键字"，
+与 `RENPY_STATEMENT_VERBS` 也重叠）。
+

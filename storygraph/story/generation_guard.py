@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 from storygraph.core.safeguard import swallow
-from storygraph.core.vocabulary import GENERATOR_MARKER
+from storygraph.core.vocabulary import (GENERATOR_MARKER,
+                                        SHOW_CLAUSE_KEYWORDS)
 from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.paths import (
     _guess_project_root,
@@ -818,7 +819,9 @@ def generation_guard(text: str, out_path, *,
         if 'at' not in parts:
             continue
         after_at = parts[parts.index('at') + 1:]
-        stopwords = ('with', 'behind', 'onlayer', 'zorder', 'as')
+        # 变换列表到哪里为止 —— **唯一真源**在 `core.vocabulary`（2026-10-15 收重复）。
+        # ⚠ 这一份**刻意不含 `at`**：它本来就用在 `at` 之后，`at` 不会再出现。
+        stopwords = SHOW_CLAUSE_KEYWORDS - {'at'}
         spec = []
         for tok in after_at:
             if tok in stopwords:

@@ -21,7 +21,8 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
-from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
+from storygraph.core.vocabulary import (RENPY_BUILTIN_TRANSFORMS,
+                                        SHOW_CLAUSE_KEYWORDS)
 
 from storygraph.story.beat_build import hydrate_from_dsl
 from storygraph.story.beat_model import (
@@ -147,7 +148,13 @@ def _annotate_spec_heads(ws, beats, statements) -> int:
 
 #: `show` 语句里的**关键字**：它们后面跟的不是属性。
 #: ⚠ 不挡住它们，`show cg at center` 里的 `at` 会被当成属性报"引擎没认"（实测踩到）。
-_SHOW_KEYWORDS = frozenset({'at', 'with', 'as', 'behind', 'on', 'zorder'})
+#   ⚠ 两处**显式的差异**（2026-10-15 收重复到 `core.vocabulary`）：
+#     · `+ onlayer` —— 这一份从前**漏了**它（真词漏了）：补上之后
+#       `show cg onlayer overlay` 不再把 `onlayer` 报成"引擎没认的属性"；
+#     · `+ on` —— 这一份从前的写法，**其余三份都没有**；真机里 `show … on …`
+#       出现 0 次、也查不到它出自哪一版语法，所以**既不删也不推广**
+#       （删它属于改口径，要单独定）。
+_SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS | {'on'}
 
 
 def _unknown_show_words(show_text, facts) -> list:

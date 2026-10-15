@@ -106,6 +106,7 @@ Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -983,11 +984,17 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_EXTEND_HEAD = re.compile(r'^extend(?=\s|["\'])')
     _RE_EXTEND_STR = re.compile(r'^extend\s*' + _STR)
 
-    # show / scene 解析用的关键字集合
-    _SHOW_KEYWORDS = frozenset(
-        {'at', 'as', 'with', 'behind', 'onlayer', 'zorder'}
-    )
-    _SCENE_KEYWORDS = frozenset({'at', 'with', 'onlayer'})
+    # show / scene 解析用的关键字集合 —— **唯一真源**在 `core.vocabulary`
+    # （2026-10-15 收重复，见那里的 §`show`/`scene`/`hide` 子句关键字）。
+    # 这里只表达**差异**：
+    #
+    # ⚠ 现状**未改口径**：官方语法说 scene 取与 show 同一批 properties
+    #   （`as` / `behind` / `zorder` 也是子句），而这一份只认 at/with/onlayer。
+    #   于是 `scene bg behind x` 的 `behind x` 会被当成图像名的一部分。
+    #   拓宽它属于**改口径**（某个真叫 `behind` 的属性就不能再用了），
+    #   不在"收重复"这一轮里动 —— 留作待办，见 `.workbuddy/memory/2026-10-15.md`。
+    _SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS
+    _SCENE_KEYWORDS = SHOW_CLAUSE_KEYWORDS - {'as', 'behind', 'zorder'}
 
     _RE_POS_ARG = re.compile(r'^\s*' + _STR)
 

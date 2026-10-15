@@ -30,6 +30,8 @@ import re
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
+                                        SHOW_INTRO_KEYWORDS)
 
 #: 参数名必须是合法标识符（Ren'Py 关键字参数的名字就是标识符）
 _NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
@@ -912,10 +914,8 @@ def choice_sources(project_root, head: str = '') -> list:
 #: —— 那条断言是**被噪声撑起来的**（10 个候选里有 4 个根本不是角色）。
 #: 所以这一版两件事一起修：词表补上引入型关键字，角色格的候选**并上整张角色表**
 #: （让 `>=10` 由真实资源满足，而不是由噪声满足）。
-_NOT_A_VALUE = frozenset({
-    'at', 'with', 'behind', 'onlayer', 'as', 'True', 'False', 'None',
-    'expression', 'screen', 'layer',
-})
+_NOT_A_VALUE = frozenset(
+    SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS | {'True', 'False', 'None'})
 
 
 def _is_not_a_value(word) -> bool:

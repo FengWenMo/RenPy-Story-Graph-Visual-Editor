@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
 from storygraph.excel.cells import append_text_row, set_text
 import re
 
@@ -173,9 +174,14 @@ _PLACEHOLDER_MARKS = ('占位', 'placeholder', '待补', '计划', 'planned',
 
 _COLOR_PATTERN = re.compile(r'^#(?:[0-9a-fA-F]{3}){1,2}$')
 
-_SHOW_STOP_WORDS = frozenset({
-    'at', 'as', 'with', 'behind', 'onlayer', 'zorder', 'expression',
-})
+#: show/scene/hide 的剩余部分里"图像名**到哪里为止**"。
+#: **唯一真源**在 `core.vocabulary`（2026-10-15 收重复）。
+#: ⚠ 这一份**多一个 `expression`**：`show expression <表达式>` 本来**就没有图像名**
+#: （tag 未定义，除非另给 `as`），切出空串才对。
+#: 而 `screen` / `layer` 同样是引入型关键字、却**没**收进来 ——
+#: 于是 `show screen foo` 现在会把 `screen` 当成图像名。要不要一起收属于**改口径**，
+#: 留作待办（见 `.workbuddy/memory/2026-10-15.md`）。
+_SHOW_STOP_WORDS = SHOW_CLAUSE_KEYWORDS | {'expression'}
 
 _RE_SHOW_LINE = re.compile(
     r'^\s*(?P<verb>show|scene|hide)\s+(?P<rest>.*?)\s*$', re.MULTILINE)
