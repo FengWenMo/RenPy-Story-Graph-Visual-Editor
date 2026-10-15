@@ -115,6 +115,12 @@ class WindowKeyboardMixin:
             self._canvas.set_space_down(False)
             self._canvas.cancel_interaction()
             return super().eventFilter(obj, event)
+        # **别人的输入上下文（弹出的对话框）在忙，一个键都不许抢**（2026-10-12）：
+        # 从前这条判断在下面（只挡"别人家的窗口"，挡不住**自己开的对话框**），
+        # 于是候选弹窗里的回车被当成"下一拍 / 进卡片"吃掉 —— 用户看到的是
+        # "回车按了没反应"。放在最前面：空格 / Ctrl+S / Esc 一视同仁地放行。
+        if not self._belongs_to_this_input_tree(obj):
+            return super().eventFilter(obj, event)
         # 空格 = "按住可平移画布"（旧版绑在整窗上）。必须在**窗口级**跟踪：
         # 画布的 `keyPressEvent` 只在它有键盘焦点时才收到，而用户按空格时
         # 焦点往往在工具栏/右栏 —— 那就是"空格+左键没反应"的原因。
@@ -134,7 +140,10 @@ class WindowKeyboardMixin:
             return super().eventFilter(obj, event)
         # 别人家的窗口（弹出的对话框、下拉列表）在忙，不抢键。
         # 但**本窗口的控件树**要放行 —— 台词框就在这棵树里。
-        if not self._event_belongs_here(obj):
+        # ⚠ 真正那条判断已经提到最前面（`_belongs_to_this_input_tree`，对话框与它的
+        # 子控件都算"别人的上下文"）。这里这行是**同一判据的第二次询问**，
+        # 留着只为 `_event_belongs_here` 这个名字仍有调用点（它在对外方法表里）。
+        if not self._belongs_to_this_input_tree(obj):
             return super().eventFilter(obj, event)
 
         key = event.key()
@@ -209,22 +218,57 @@ class WindowKeyboardMixin:
         self.prev_beat()
         return True
     def _event_belongs_here(self, obj) -> bool:
-        """这个按键事件是不是属于本窗口的控件树？（弹出对话框不算）"""
+        """
+        这个按键事件是不是属于本窗口的输入上下文？（弹出的对话框不算）
+
+        ⚠ 2026-10-12 起它就是 `_belongs_to_this_input_tree` 的**别名**：
+        从前这里那段"往上找 `parentWidget`"会把**我们自己开的对话框**也算进来，
+        于是主窗口把弹窗里的回车当成"下一拍"吃掉（用户报"按了没反应"）。
+        名字留着是因为它出现在对外方法表（`tools/_extract_window.py`）。
+        """
+        return self._belongs_to_this_input_tree(obj)
+    def _belongs_to_this_input_tree(self, obj) -> bool:
+        """
+        事件源是不是**本窗口自己的输入上下文**（子控件树 + 弹出件）——**对话框不算**。
+
+        为什么必须单独判这一条（2026-10-12 用户实测报："选一次就回车这个回车的
+        输入存在问题！按了没反应"）：
+
+            `ChoicePickerDialog(parent=卡片)` 的 `parentWidget()` 是主窗口，
+            但它**自己是一个窗口**。`_event_belongs_here` 那段"往上找 parentWidget"
+            于是把弹窗（以及它里面的筛选框）认成"本窗口的控件树" →
+            `eventFilter` 把弹窗里的**回车**当成"下一拍 / 进卡片"吃掉 →
+            弹窗一声不吭，看着就是"按了没反应"。
+
+        ⚠ **判定为什么用 `w.window()` + 窗口类型**（两版都写错过，全靠判据当场抓住）：
+          · 只看"父链里有没有 MainWindow" → 对话框的子控件也算本窗口的 → **回车被吃**；
+          · 只看"先撞到哪个 window" → 组合框下拉的 `QFrame` 也是窗口 → 被误判成外人
+            → 下拉里按方向键就翻拍（`test_combo_popup_still_belongs` 抓到的）。
+
+        正确的问法：**这个控件所在的那个"窗口"是不是我，或者是不是我的弹出件** ——
+        `QWidget.window()` 一路找到最近的窗口祖先，而窗口类型要用
+        **`windowType()`**（实测：`windowFlags() & Qt.Popup` 对普通 `QDialog`
+        也返回真 —— `Qt.WindowType` 的枚举值与 `Qt.WindowTypeMask` 的按位与
+        在这套 API 上不可混用，第一版就是这么错的）。
+
+        判据：`tests/test_choice_picker.py` 的 `TestDialogKeysAreNotStolen` /
+        `TestInputTreeRule`。
+        """
         try:
             w = obj if isinstance(obj, QWidget) else None
             if w is None:
                 return False
-            if w is self or self.isAncestorOf(w):
+            win = w.window()
+            if win is None or win is self:
+                return True                 # 本窗口自己的控件 / 下拉 / 菜单
+            # 弹出件（组合框下拉、菜单、tooltip）：它是本窗口的一部分 → 照管。
+            if win.windowType() in (Qt.Popup, Qt.ToolTip, Qt.SplashScreen,
+                                    Qt.Desktop):
                 return True
-            # 组合框的下拉列表 / 卡片里的子控件：往上找有没有本窗口
-            p = w.parentWidget()
-            while p is not None:
-                if p is self:
-                    return True
-                p = p.parentWidget()
+            # 其余的窗口（我们自己的对话框、别人的窗口）→ **一个键都不许抢**。
             return False
         except Exception as e:                       # noqa: BLE001
-            swallow('ui_qt.window_keyboard._event_belongs_here', e)
+            swallow('ui_qt.window_keyboard._belongs_to_this_input_tree', e)
             return False
     def _install_shortcuts(self):
         """

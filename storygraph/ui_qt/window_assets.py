@@ -60,7 +60,34 @@ class WindowAssetsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', '_ensure_registry', '_project_root', '_registry_provider', '_session')
+    REQUIRES = ('ASSET_FIELD_KINDS', '_ensure_registry', '_panel',
+                '_project_root', '_registry_provider', '_session')
+
+    def set_assets_ready(self, ready: bool):
+        """
+        「现在判得了'这张立绘在不在'了吗」—— 项目打开 / 资源表读完之后说一声。
+
+        用户 2026-10-13：
+
+        > 如果在卡牌编辑器内打开时，若找不到对应的文件，我希望你能给出提示
+        > （不必是弹窗，直接在立绘那里显示没有）
+
+        ⚠ **为什么要有这个开关**（而不是"找不到就说没有"）：项目**还没打开**时
+        路径解析必然失败（`game/images/...` 那条兜底路要有项目根才走得通）——
+        那时把每张立绘都写成"没有"是**假警报**，比不提示更糟。
+
+        ⚠ **通用性**：这里只传"判得了吗"这一个事实，**不传任何具体项目的东西**
+        （没有角色名、没有组名、没有一个字是某个项目的特例）。判定规则全在
+        `SpriteCardWidget._load_thumb` 里那一条通用的"路径解析不出来"。
+        """
+        panel = getattr(self, '_panel', None)
+        grid = getattr(panel, '_grid', None) if panel is not None else None
+        if grid is None:
+            return
+        try:
+            grid.set_assets_ready(bool(ready))
+        except Exception as e:                      # noqa: BLE001 - 不该拦任何操作
+            swallow('ui_qt.window_assets.set_assets_ready', e)
 
     def _pick_image(self, current: str) -> str:
         """挑一张立绘图（走 Qt 版资产选择器）。取消或没有资源表返回 ''。"""

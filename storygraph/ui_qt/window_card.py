@@ -101,7 +101,7 @@ class CardPageMixin:
             self._report_swallowed(mark)
     def _sync_choice_groups(self):
         """
-        把项目声明的**词组**接成立绘网格的分组候选（分栏显示"服装 / 表情"）。
+        把项目声明的**候选分栏**接成立绘网格的分组候选（分栏显示"服装 / 表情"）。
 
         用户 2026-10-10：
 
@@ -140,6 +140,14 @@ class CardPageMixin:
 
         def _for_tag(tag):
             return expression_groups_for(str(tag or ''), symbols, groups, facts)
+
+        # **把两份原料挂在函数上**（2026-10-12）：卡片要"一维一格"时得知道
+        # 引擎的分组与候选（`app.beats.attr_slot_rows`），但网格那套注入通道
+        # 只传得下一个可调用对象。挂属性 = **不新增一个"要记得转发"的方法** ——
+        # 转发层漏一个方法的代价是模态弹窗（见 `main_window.set_choice_groups_provider`
+        # 的注释，那个坑真踩过）。
+        _for_tag.attr_groups = list(groups or ())
+        _for_tag.engine_facts = facts if isinstance(facts, dict) else {}
 
         # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
         self._panel.set_choice_groups_provider(_for_tag)
@@ -450,7 +458,8 @@ class CardPageMixin:
             except Exception as e:            # noqa: BLE001
                 swallow('ui_qt.window_card.refresh_derived_panels.facts', e)
             self._panel.set_note(_beats.card_note(
-                beat, self._session.symbols, facts))
+                beat, self._session.symbols, facts,
+                project_root=getattr(self._session, 'project_root', None)))
             # 当前舞台（这一拍生效的状态）+ 继承上一拍的提示。
             # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
             self._panel.set_stage_digest(self._session.stage_digest_text(idx),

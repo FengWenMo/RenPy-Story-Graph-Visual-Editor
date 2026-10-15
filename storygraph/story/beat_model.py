@@ -346,7 +346,41 @@ def _leaf_heads_of(beat) -> list:
     return out
 
 
-def fold_spec_arg_columns(beat, values, sanitized: list = None) -> list:
+def _declared_pattern_for_head(head: str):
+    """
+    **已解析不了**（保留为占位，返回 `None`）—— 见下面 `_pattern_from_beat`。
+
+    ⚠ 为什么留着一个"永远返回 None"的函数：它曾经想按语句头去
+    `StatementRegistry` 查格子，而 `for_project()` **没有项目根就返回空表**
+    （`key = str(project_root or ''); if not key: return cls()`），
+    于是它**永远查不到**、还悄悄多了一次全项目扫描。真正好用的那条路是
+    `_pattern_from_beat`：**读值那一侧本来就已经拿到格子了**，
+    记在拍上即可，不必再查一遍。
+    """
+    return None
+
+
+def _pattern_from_beat(beat):
+    """
+    这一拍**读值/摊列时用的那套格子**（没有 → `None`）。
+
+    为什么这样传（2026-10-14 定）：
+
+      · 折回要按"格子区间"整段换值（多值格 / 可选段），**没有格子就只能
+        退回位置号**那套 —— 那是"只换掉第一个词、旧值留在原地"的根源；
+      · 而格子**读值那一侧早就有了**（`spec_arg_cells(columns)` 的入参就是
+        它）—— 让 `spec_arg_cells` 顺手记在拍上，折回直接用；
+      · 比"按语句头去注册表查"直得多：注册表要项目根、要扫 CDS、要缓存，
+        而且 `show`/`camera` 这种内置头**本来就没有声明**（查也查不到）。
+
+    ⚠ 找不到就返回 `None`：**绝不编一套格子出来**（不猜）。
+    """
+    rows = getattr(beat, '_spec_pattern', None)
+    return list(rows) if rows else None
+
+
+def fold_spec_arg_columns(beat, values, sanitized: list = None,
+                          pattern=None) -> list:
     """
     `{动态列名: 值}` → **折进这一拍**（头行 / 「代码」列那一行）。
 
@@ -396,14 +430,120 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None) -> list:
     # ② **头行语句**（声明的自定义语句 / 循环 / 相机）：折进那个字段。
     if head_dyn:
         target = beat._head_field()
-        base = str(getattr(beat, target, '') or '')
+        # ⚠⚠ **`show` 要用 `statement_head()` 取 base，不能用字段原文**
+        #   （2026-10-13 实测修，这是"格子长出来但一改就少一个词"的真根因）。
+        #
+        # `positional_tokens()` **总是把第一个词当语句头跳过**。而 `Beat.show`
+        # 存的是动作名**后面**那一串（`'lan swim_suit happy'`）—— 拿它当 base，
+        # 跳掉的就是 `lan` 本身，于是整排左移：
+        #   `'lan swim_suit happy'` 改第 0 格 → `'lan ling happy'`（`swim_suit` 没了）。
+        # `statement_head()` 会把 `show ` 补回来（`'show lan swim_suit happy'`），
+        # 跳掉的才是真正的语句头，位置号从此对齐（与读值那一侧同一口径）。
+        # 写回之前再把前缀摘掉（见下面那段）。
+        base = (str(beat.statement_head() or '') if target == 'show'
+                else str(getattr(beat, target, '') or ''))
         if not base:
             base = next((ln for ln in str(beat.opaque or '').split('\n')
                          if ln.strip()), '')
-        folded = fold_dynamic_columns(base, head_dyn)
-        if folded != base:
+        # ⚠ **自己解析"这一拍用的是哪套格子"**（2026-10-14 修，中期两条的真根因）：
+        #   折回要按**字符区间**整段换（多值格 / 可选段），而区间要靠
+        #   `pattern` 才认得出来 —— 以前这个参数**没人传**（只有 `pattern=`
+        #   的调用方才有），于是折回静默退回"位置号"那套：
+        #     · 多值格只换掉第一个词 → `mypose happy smile sad at left`；
+        #     · 可选段的旧值留在原地 → `mypose happy sad smile at left`。
+        #   格子由**读值那一侧记在拍上**（`spec_arg_cells` → `_spec_pattern`），
+        #   比让每个调用方记得传可靠（`EditorSession.apply` 就是漏传的那个）。
+        if not pattern:
+            pattern = _pattern_from_beat(beat)
+        # ⚠⚠ **格子认领要用"摘掉动作名之后"的那一段**（2026-10-14 实测修，
+        #   这是"折回按格子换值"最后一个坑）：
+        #
+        #   读值那一侧（`spec_arg_cells`）传给格子认领的是 `stripped`
+        #   （`'happy sad at left'`，动作名已经摘掉，因为那一格不属于任何格子）；
+        #   而折回这一侧手上是 `base`（`'mypose happy sad at left'`，带动作名）。
+        #   两边**口径不同** → 同一套格子算出**不同的区间**：
+        #     带动作名时第 0 格抢到 `mypose`、第 1 格（多值）算成 `'happy sad'`
+        #     → 改「表情」会把 `happy sad` 整段换掉（`mypose smile at left`）。
+        #
+        #   所以折回也先摘掉动作名、折完再补回去 —— **与读值同一口径**
+        #   （这正是白盒判据要防的"两套口径"）。
+        fold_base, head_prefix = base, ''
+        if pattern:
+            head_word = str(statement_head_token(base) or '')
+            words = str(base or '').split()
+            if head_word and words and words[0] == head_word:
+                split_at = str(base).index(head_word) + len(head_word)
+                head_prefix = str(base)[:split_at]
+                fold_base = str(base)[split_at:].lstrip()
+        folded = fold_dynamic_columns(fold_base, head_dyn)
+        # ⚠ **把"格子"一起交给折回那一侧**（2026-10-13 修）：多值格与可选段
+        #   按位置号换是错的（只换第一个词 / 根本没有号）—— 有格子才能按
+        #   "这一格在行里的字符区间"整段换。见 `spec_args.set_slot_value`。
+        if pattern:
+            folded = fold_dynamic_columns(fold_base, dict(head_dyn,
+                                                          __pattern__=list(pattern)))
+            if head_prefix and folded != fold_base:
+                folded = f'{head_prefix} {folded}'.strip()
+        # ⚠⚠ **`show` 那一支要把动作名摘掉再写回**（2026-10-13 实测修）。
+        #
+        # `Beat.show` 存的是动作名**后面**那一串（`'lan swim_suit happy'`），
+        # 而折回时我们手上的 `base` 是**语句头原文**（`statement_head()` 补过
+        # `show ` 前缀）。不摘的话字段会变成 `'show ling swim_suit happy'`，
+        # 渲染那一侧再加一次前缀 → 写出 `show show ling …`（语法错）。
+        # 别的头字段（`spec_head`/`loop_header`/`camera_header`）存的就是**整串**，
+        # 所以只有 `show` 需要这一下。
+        #
+        # ⚠ 判断"要不要写回"必须拿**原值**比（下面这个 `original`），
+        #   不能拿 `base` —— 第一版把 `base` 重绑成了摘完前缀的新串，
+        #   于是 `folded != base` 变成"折回来的串 vs 摘过的串"，
+        #   判据错乱、值被写成了残串（实测 `'ling happy'`：`swim_suit` 直接没了）。
+        original = str(getattr(beat, target, '') or '')
+        if target == 'show' and folded != base:
+            token = str(base or '').split()[0] if str(base or '').split() else ''
+            body = str(folded or '')
+            if token and body.split() and body.split()[0] == token:
+                folded = body[len(token):].lstrip()
+        if folded != original:
             setattr(beat, target, folded)
     return cleaned
+
+
+#: `Beat.show` / `Beat.hide` 这类"多值字段"的分隔符（`show a; show b` → `'a; b'`）。
+#: 与 `beat_render` / `excel_export` 的摊列口径同源（一处定义，别处别再写字面量）。
+_MULTI_VALUE_SEP = ';'
+
+
+def _cmd_count(text: str) -> int:
+    """
+    多值字段里有**几条**指令（`'a; b'` → 2，`'a'` → 1，空 → 0）。
+
+    只按 `;` 切、并丢掉空段 —— 与渲染层把 `;` 当分隔符的既有口径一致
+    （分隔符在**引号串里面**的极端情况这里不处理：那种真值走的是
+    "每指令一列"那条路，本函数只决定"要不要长参数格"，宁可不长）。
+    """
+    return len([p for p in str(text or '').split(_MULTI_VALUE_SEP) if p.strip()])
+
+
+def _pattern_slot_index_for(columns, param: str, label: str = ''):
+    """
+    列（`param` / `label`）↔ 声明里**第几格**（认不出 → `None`）。
+
+    ⚠ 这条映射是"按格子认领词"的入口：列名对不上格子就退回位置号那套
+    （那套在 keyword / 多值 / 可选段上会错，所以能对上就一定用这条）。
+    """
+    pattern_rows = [c.get('pattern') for c in (columns or ())
+                    if isinstance(c, dict) and c.get('pattern')]
+    if not pattern_rows:
+        return None
+    want = {str(param or '').strip(), str(label or '').strip()} - {''}
+    for i, slot in enumerate(pattern_rows[0]):
+        if not isinstance(slot, dict):
+            continue
+        keys = {str(slot.get('column') or '').strip(),
+                str(slot.get('text') or '').strip()} - {''}
+        if want & keys:
+            return i
+    return None
 
 
 def _row_fields(spec_fields=None, extra_fields=None) -> list:
@@ -762,24 +902,55 @@ class Beat:
     # 下划线形态 `ling_base_arms_akimbo_close_happy`——那是把能跑的脚本改坏。
     _from_script: bool = False
 
+    #: 语句头原文可能住的字段（顺序 = 渲染层那套优先级，唯一一处）。
+    #:
+    #: ⚠ `show` 排在**最后**（2026-10-13 用户要求"连 show 这种内置语句也能在卡片上
+    #: 长出参数格"）：`show` 是**被显式建模**的内置语句，它的行进的是 `Beat.show`
+    #: （`'lan swim_suit happy'`，**不含动作名**）。排在最后，是为了不让它抢走
+    #: 声明过的自定义语句 / 循环头 / 相机头 —— 那些字段非空时头就是它们。
+    _HEAD_FIELDS = ('spec_head', 'loop_header', 'camera_header', 'show')
+
     def _head_field(self) -> str:
         """
         这一拍的**语句头原文放在哪个字段**（渲染层那套优先级，唯一一处）。
 
         与 `beat_render.emit_opaque` 的取值顺序必须**完全一致**：
         `spec_head`（项目声明的自定义语句）→ `loop_header`（`while`/`for`）
-        → `camera_header`（3D 舞台 `camera`）。不一致就会出现"参数列读的是
-        这个头、渲染用的是那个头"—— 改了没效果，而且看不出来。
+        → `camera_header`（3D 舞台 `camera`）→ `show`（内置 `show`）。
+        不一致就会出现"参数列读的是这个头、渲染用的是那个头"——
+        改了没效果，而且看不出来。
         """
-        for attr in ('spec_head', 'loop_header', 'camera_header'):
+        for attr in self._HEAD_FIELDS:
             if str(getattr(self, attr, '') or '').strip():
                 return attr
         return 'spec_head'
 
     def statement_head(self) -> str:
-        """这一拍的语句头原文（没有头行 → 整块原文的首行，再没有就是空串）。"""
+        """
+        这一拍的语句头原文（没有头行 → 整块原文的首行，再没有就是空串）。
+
+        ⚠ `show` 那一支要**把动作名补回去**：`Beat.show` 里存的是动作名
+        **后面**那一串（`'lan swim_suit happy'`），而"语句头原文"是
+        `'show lan swim_suit happy'` —— 少了 `show ` 这两个字，
+        `Beat.spec_arg_cells` 就取不到值（实测：格子长出来了、但全是空的）。
+
+        ⚠⚠ **多值拍（`show a; show b` → `Beat.show = 'a; b'`）返回空串**：
+        那种拍一格对多行，参数格**怎么映射都是猜**。2026-10-13 实测：
+        按单行去折会**静默改数据** ——
+        `'lan swim_suit happy; ling uniform calm'` 改了第一格的「人物」之后
+        变成 `'ling swim_suit happy; uniform calm'`（第二行的 `ling` 没了，
+        因为 `positional_tokens` 把整串当一个 token 序列，位置号全错）。
+
+        返回空白 = `arg_columns` 拿不到头 → **这一拍不长参数格**（不猜）。
+        "每指令一列"（立绘2/立绘3…）本来就有自己的列，一次一张立绘卡 ——
+        那条路管多值拍，这条路管单值拍，互不重叠。
+        """
         attr = self._head_field()
         text = str(getattr(self, attr, '') or '')
+        if attr == 'show':
+            if _cmd_count(text) > 1:
+                return ''
+            return f'show {text.strip()}' if text.strip() else ''
         if text.strip():
             return text
         return next((ln for ln in str(self.opaque or '').split('\n')
@@ -800,16 +971,70 @@ class Beat:
         """
         from storygraph.story.spec_args import (parse_dynamic_full,
                                                 positional_values,
-                                                spec_arg_values)
+                                                spec_arg_values,
+                                                head_is_a_pattern_slot,
+                                                slot_value_map,
+                                                pattern_slot_values)
         from storygraph.core.vocabulary import statement_head_token
         base = self.statement_head()
         base_head = statement_head_token(base)
-        vals = spec_arg_values(base)
-        pos = positional_values(base)
+        # ⚠⚠ 格子不对应动作名时，**位置参数要从动作名之后数**（2026-10-13 实测修）：
+        #   声明里只有「人物 / 服装 / 神态」几格，而脚本行是
+        #   `show lan swim_suit happy` —— 不摘掉动作名，位置 0 就成了 `show`
+        #   （「人物」空）而位置 1 成了 `lan`（「服装」= lan），**整排错位**。
+        #   ⚠ 摘的必须是**语句头 token**（`show` / `camera`），不是"第一个词" ——
+        #     `positional_tokens` 自己会跳过第一个词当语句头，摘错一个就整体左移
+        #     （第一版摘成 `' '.join(split()[1:])`，于是 `lan` 被当成头吃掉）。
+        stripped = str(base or '')
+        dropped_head = False
+        if not head_is_a_pattern_slot(base, columns):
+            head_word = statement_head_token(base)
+            text = str(base or '').strip()
+            if head_word and text.split() and text.split()[0] == head_word:
+                stripped = text[len(head_word):].lstrip()
+                dropped_head = True
+        vals = spec_arg_values(stripped)
+        # ⚠ 摘掉动作名之后，**第一个词就是第一个参数** —— 不能再让
+        #   `positional_tokens` 跳一次"语句头"（实测：那会让整排左移一格）。
+        pos = positional_values(stripped, skip_head=not dropped_head)
+        # ⚠⚠ **优先按格子认领词**（2026-10-13 第三次修正）：位置号那套数不准 ——
+        #   `keyword` 格（固定几个字）**不占位置号却确实吃掉一个词**，
+        #   于是出现"三格只对一格"。`slot_value_map` 是按格子顺序认领，认得准。
+        #
+        # 形状：`by_slot = {列名或显示名: 词}` —— **下面每一格都先问它**
+        # （它以前算完就扔了，见 `tests/test_hell_custom_module.py` 的白盒判据
+        # `test_the_card_reader_uses_the_declared_pattern_not_a_recount`）。
+        by_slot: dict = {}
+        pattern_rows = [c.get('pattern') for c in (columns or ())
+                        if isinstance(c, dict) and c.get('pattern')]
+        # ⚠ **记在拍上**：折回那一侧（`fold_spec_arg_columns`）要靠它按
+        #   "格子区间"整段换值。不记的话它只能退回位置号那套 ——
+        #   多值格只换掉第一个词、可选段的旧值留在原地（2026-10-14 实测）。
+        self._spec_pattern = list(pattern_rows[0]) if pattern_rows else []
+        if pattern_rows:
+            try:
+                by_slot = slot_value_map(stripped, pattern_rows[0])
+            except Exception as e:                  # noqa: BLE001 - 认不出就退回位置号
+                from storygraph.core.safeguard import swallow as _sw
+                _sw('story.beat_model.spec_arg_cells.slot_values', e)
+                by_slot = {}
         out = []
         for col in columns or ():
             header = col if isinstance(col, str) else str(col.get('header') or '')
             head_name, param, positional = parse_dynamic_full(header)
+            # ⚠⚠ **这一列可能有好几个名字**（2026-10-14 修）：声明里的
+            #   `columns[].name`（`who`）与 `pattern[].column`（`角色`）**常常不同**
+            #   —— 前者是给程序/表头的键，后者是格子上写的那个名字。
+            #   而 `by_slot` 是**按格子上的名字**给的，只拿 `param` 去查会查空，
+            #   于是有格子的语句在卡片上**全靠位置号**（多值格/可选段当场错）。
+            #   所以把这一列可能的名字都收齐，按"格子上的名字优先"去试。
+            col_names = [str(col.get('column') or '').strip()
+                         if isinstance(col, dict) else '']
+            col_names += [str(col.get('label') or '').strip()
+                          if isinstance(col, dict) else '',
+                          param, str(col.get('name') or '').strip()
+                          if isinstance(col, dict) else '']
+            col_names = [n for n in col_names if n]
             if not param:
                 out.append('')
                 continue
@@ -831,9 +1056,49 @@ class Beat:
                 # 写成"头行非空"就永远走不到这一支（第一版就是这么错的）。
                 out.append(_leaf_arg_value(self, head_name, positional))
                 continue
+            # ⚠⚠ **先问"格子认领法"**（2026-10-13 修：它以前算完就扔了，
+            #   而且只写在 `positional is not None` 那一支里 —— 于是
+            #   **可选段（没有位置号）那格永远走不到这里**，恒空）。
+            #   位置号那套在三种形态上必然错：
+            #     · `keyword` 格（固定几个字）吃掉一个词却不占号 → 整排串位；
+            #     · **多值格**（"这一格可以有多个"）占两个词的宽度、只算一个号；
+            #     · **可选段**（`at left`）在位置号里**根本没有号** → 那一格恒空。
+            #   所以这一段提在 `if positional` **之前**：只要这一列能对上格子，
+            #   一律以格子认领为准（那与"试切"是同一套口径）。
+            slot_idx = _pattern_slot_index_for(
+                columns, param,
+                str(col.get('label') or '') if isinstance(col, dict) else '')
+            if slot_idx is not None and pattern_rows:
+                # ⚠ 依次试**这一列可能的所有名字** + **它在声明格子里的列名**
+                #   （`by_slot` 是按后者给的；而 `columns[].name` 与
+                #   `pattern[].column` 在真机里常常不同：`who` vs `角色`）。
+                slot_col = ''
+                if 0 <= slot_idx < len(pattern_rows[0]):
+                    slot_col = str(pattern_rows[0][slot_idx].get('column')
+                                   or '').strip()
+                hit = next((by_slot[n] for n in [*col_names, slot_col]
+                            if n and by_slot.get(n)), None)
+                if hit is not None and str(hit).strip():
+                    out.append(str(hit))
+                    continue
             if positional is not None:
-                out.append(pos[positional]
-                           if 0 <= positional < len(pos) else '')
+                # ⚠ 具名的（`mood=happy`）—— 那种**不进位置序列**
+                named = vals.get(param, '') if param else ''
+                if named != '':
+                    out.append(named)
+                    continue
+                # ⚠ **keyword 格（固定几个字）自己的文字不算值**：
+                #   它确实吃掉一个词，所以后面那些格的位置号会跟着往后挪；
+                #   直接按位置号取，就会把**关键字本身**当成值填进旁边的格子。
+                keyword_texts = {str(c.get('text') or '').strip()
+                                 for c in (columns or ()) if isinstance(c, dict)
+                                 and str(c.get('kind') or '') == 'keyword'
+                                 and str(c.get('text') or '').strip()}
+                own = str(col.get('text') or '').strip() if isinstance(col, dict) else ''
+                word = pos[positional] if 0 <= positional < len(pos) else ''
+                if word in keyword_texts and word != own:
+                    word = ''                    # 那是隔壁关键字格吃掉的词
+                out.append(word)
             else:
                 out.append(vals.get(param, ''))
         return out

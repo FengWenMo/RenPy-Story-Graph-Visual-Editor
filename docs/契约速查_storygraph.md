@@ -420,6 +420,36 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
   白追了十几分钟）。排查这类"明明改了却不变"的问题，先
   `Remove-Item -Recurse storygraph/**/__pycache__`。
 
+## 十三、候选 / 限死 / 多值（2026-10-13 用户第二次实测退回）
+
+用户："这个仍然切不上！有一个巨大的 bug……" —— 底下是三件独立的事，全是真 bug：
+
+- ⚠⚠ **"填了候选"不等于"限死"**（"切不上"的真凶）：`pattern` 的 `choice`
+  只要候选非空就要求词必须在候选里 —— 于是用户贴了一串角色名之后，
+  剧本里任何**没列进去**的角色都判切不上。现在加 `limit`（缺省 `False`）：
+  **只有显式勾了"编剧只能从下面这些里选"才封闭**。存量声明没有这个键
+  → 一律按"候选只是建议"（**不因为存量声明判人写错**）。
+- ⚠⚠ **列名空着不等于这格要丢**：`learn_statement.build_declaration` 只认 `name`
+  （旧形状的"剧本里怎么写"），而界面把列名放在 `label` → **整列被静默丢掉**
+  （用户："我明明定义了三个参数……它反馈出来的只有一个参数"）。现在 `name` 空就用
+  `label`；两个都空才丢，而且**必须报出第几格**。
+- **`multi`：A 段可以有多个**（用户："A 是默认的，也就是可填可不填的……
+  但是它不是一段，它允许有多个！"）。真机依据 `show lan happy sad`：
+  同一格吃多个词。`pattern` 加 `multi`（缺省 `False`），`match_line` 里
+  **贪心到底 + 回溯到 0 个词**（否则会抢走后面那格的词）。
+- ⚠ **字段卡只剩一个名字**：`"剧本里怎么写"` **删掉**（用户："在编剧眼里……
+  剧本就是'角色'……你让我填根本就不合理"）。现在只有
+  `这一列叫什么（编剧看到的）`；`_key` / `_fixed_text` 只在读存量时保留。
+- ⚠ **候选必须按"真实有的资源"给**：新增 `learn_statement.layeredimage_groups`
+  读项目里的 `layeredimage`，**按立绘分开**给来源
+  （`lan 的 outfit` = `clothes2` / `base_hand_up`；`hanfu_base` 属于 `xing`）——
+  用户："lan 实际上没有 hanfu_base 这种选项……必须以真实的有的资源为准"。
+  合并的那份（全部角色）保留但排后面；`<tag>_cc` 与本体完全相同时不重复列。
+- ⚠ **记忆没有 UI**：用户否掉了第一版的菜单（"我让你自动打开！而不是加个 UI……
+  更不需要我手动点击说打开上次项目！那跟我手动打开项目有什么区别？？？"）——
+  现在读到记录就自动打开并在**控制台打一行**"已自动读取项目：…"，
+  没有就空白打开、一个字都不多说。
+
 ---
 
 ## 附录 A · 已知边界（诚实清单）
@@ -2221,3 +2251,31 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
     `tests/test_script_table.py::TestRender::test_menu_option_renders_as_string`
     （选项行 = `"选项A":`）；`render_hash.py` **未变**（`d9b0f2de26b5`）；
     全量 pytest **2462 → 2466**。
+
+---
+
+## §单源：一行词 → 每格占哪几个词（`assign_tokens`）· 2026-10-15
+
+> 抽它的理由：这件事此前有**三套并行实现** —— `pattern.match_line` 的递归回溯、
+> `story/spec_args._claim` 的单趟认领、`story/spec_args.slot_value_map` 又把
+> `_claim` 抄了一遍（换返回形状）。规则已经漂移过，用户看到的那种
+> **"试切说切上了、卡片读出来不一样"** 就是它。
+
+**铁律**：分配规则**只有一份** —— `authoring/pattern.assign_tokens(tokens, slots,
+*, groups=None, policy='order-first')`。`match_line`（试切）与 `_claim`
+（读值那一侧）都只是它的**薄转发**；`slot_value_map` 不再自己走一遍格子。
+
+- 返回：`{'spans': {第几格: (词起点, 词终点)}, 'used', 'bad_kw', 'rejected',
+  'unfilled', 'policy'}` —— `spans` 里**没有**的格子 = 没认领到（调用方显示空格子）。
+- 规则（**甲 = 书写顺序**）：`keyword` 逐字相等（否则记 `bad_kw`）；`optional`
+  出现就吃两个词；`multi` **长的先试、取第一个"让后面每一格也都还能吃到词"的长度**
+  （`_can_allocate` 做可行性判定；**一个都不吃**也是合法解）；`choice` 勾了 `limit`
+  就只认候选（否则记 `rejected`）；其余吃一个词。
+- **失败分四类**，一律"报出来"而不是"猜"：`bad_kw`（关键字对不上）/
+  `rejected`（勾了限死来了外词）/ `unfilled`（该吃词却没词）/ 没人认领的词
+  （`used` 之后那些）。
+- **两处明写的分岔**（`pattern.POLICIES`，不再是"两套代码各写一遍"）：
+  ① 枚举格的**候选跳过** —— 试切 `order-first`、读值 `candidates`；
+  ② **引号只在读值那一侧去掉**（试切报的是切出来的原文）。
+- 判据：`tests/test_assign_tokens_single_source.py` —— 把上面两条分岔钉住，
+  再长出新分岔就会红；并逐字核 `_claim` 等于分配器的 `candidates` 结果。

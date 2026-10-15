@@ -18,7 +18,7 @@ storygraph.ui_qt.qt_args
   · **静默走错分支**：这些槽的判据是 `if target is None:`，而 `False is None`
     是 `False` → "没给路径就弹另存为"那条分支**走不到**，`False` 被当成路径
     一路送下去。2026-10-04 就是这么在仓库根目录留下一个名叫 `False` 的文件
-    （178 字节的控制流脚本；`docs/交付审查_2026-10-05.md` 里有它的内容与时间戳）；
+    （178 字节的控制流脚本；`docs/archive/交付审查_2026-10-05.md` 里有它的内容与时间戳）；
   · **当场炸**：`add_node(at=False)` → `float(False[0])` 抛 `TypeError`；
     `Path(False).is_file()` 同样抛。
 

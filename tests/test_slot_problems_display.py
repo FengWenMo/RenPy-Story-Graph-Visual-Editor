@@ -8,12 +8,15 @@
 本仓这一模式已出现多次：S3/S4、候选搜索、5 秒回放、这个）。
 
 为什么必须显示：这些毛病**不会让试切失败** —— 试切绿了、人却不知道为什么
-不好使，正是用户反复卡住的地方。实测 `problems_of` 对"枚举格没填候选值"
-报的是人话：
+不好使，正是用户反复卡住的地方。
 
-    第 2 格："从这些里选"要么给候选值，要么挂一个词组
+⚠⚠ **2026-10-13 改**：以前"选了「从这些里选」却没给候选值"算毛病，
+于是界面逼人去贴一串候选；贴了之后旧代码又把那一格变成**封闭枚举**，
+真实剧本里任何没列进去的词都判"切不上"（用户："这个仍然切不上！"）。
 
-用户截图里那三张卡（全是 choice、候选空着）拿到的就是这句 —— 他之前收不到。
+现在：**没给候选不算毛病**（候选只是下拉里的备选），
+真正自相矛盾的是"**勾了「只能选这些」却一个候选都没给**" ——
+这一组判据钉的就是这条新口径。
 """
 
 from __future__ import annotations
@@ -35,13 +38,37 @@ def dlg(qapp, tmp_path):
     return CustomStatementDialog(None, project_root=root, discovered=[])
 
 
-def test_a_choice_slot_without_candidates_is_reported(dlg):
-    """⭐ 用户卡住的那一格：选了「从这些里选」却既没候选值、也没挂词组。"""
+def _locked_choice(dlg, column: str):
+    """
+    造一格"**勾了只能选这些、却没给候选**"的格子（= 现在唯一算毛病的形态）。
+
+    `add_param('', 列名, '', kind='choice')` 之后把那个勾打开 ——
+    界面上它就是那个复选框。
+    """
+    card = dlg.params.add_param('', column, '', kind='choice')
+    card._limit.setChecked(True)
+    return card
+
+
+def test_a_locked_choice_slot_without_candidates_is_reported(dlg):
+    """⭐ 勾了"只能选这些"却既没候选值、也没挂分栏 —— 这是自相矛盾。"""
+    dlg.params.clear()
+    _locked_choice(dlg, '服装')
+    text = dlg._slot_problems()
+    assert '候选' in text, text
+    assert '第 1 格' in text, text
+
+
+def test_a_plain_choice_slot_without_candidates_is_fine(dlg):
+    """
+    ⭐ **没给候选 = "随便写"**，不是毛病（2026-10-13 的新口径）。
+
+    旧口径在这里报一句红，逼人去贴候选；贴了之后那一格变成封闭枚举，
+    真实剧本里别的值全判"切不上" —— 这条钉住那个坑不再回来。
+    """
     dlg.params.clear()
     dlg.params.add_param('', '服装', '', kind='choice')
-    text = dlg._slot_problems()
-    assert '候选值' in text or '词组' in text, text
-    assert '第 1 格' in text, text
+    assert dlg._slot_problems() == '', dlg._slot_problems()
 
 
 def test_a_clean_slot_list_says_nothing(dlg):
@@ -55,40 +82,44 @@ def test_a_clean_slot_list_says_nothing(dlg):
 def test_problems_show_even_when_the_cut_succeeds(dlg):
     """
     ⭐⭐ **核心**：切得上**不代表**没问题 ——
-    枚举格没填候选值时试切照样能成功，所以毛病必须**单独再说一遍**，
-    否则人看到"绿的"就以为没事了。
+    毛病必须**单独再说一遍**，否则人看到"绿的"就以为没事了。
+
+    ⚠ 2026-10-13 改：这条原来用"勾了限死却没给候选"当那个毛病，而那条
+    现在**会让试切失败**（限死 = 谁也不许通过）—— 那就不是"切得上但有毛病"了。
+    所以这里换一个**不影响切**的毛病：**同一列名写了两次**
+    （两格都叫「角色」）—— 切得好好的，但那一列在表里会打架。
     """
     dlg.params.clear()
     dlg.params.add_param('show', '', '', kind='keyword')
     dlg.params.add_param('小明', '角色', '', kind='variable')
-    dlg.params.add_param('', '服装', '', kind='choice')     # 候选空着
-    dlg.sample.setText('show 小明 泳装')
+    dlg.params.add_param('小美', '角色', '', kind='variable')   # 重名
+    dlg.sample.setText('show 小明 小美')
     dlg._refresh_cut()
     text = dlg.cut_view.text()
     assert '切出来是这样' in text, text          # 试切确实成功了
-    assert '候选值' in text or '词组' in text, text   # 但毛病也说了
+    assert '重名' in text or '两次' in text, text   # 但毛病也说了
 
 
 def test_problems_show_when_nothing_is_pasted_yet(dlg):
     """还没粘样例行时也给提示（人正站在这一步，最需要它）。"""
     dlg.params.clear()
-    dlg.params.add_param('', '服装', '', kind='choice')
+    _locked_choice(dlg, '服装')
     dlg.sample.clear()
     dlg._refresh_cut()
     text = dlg.cut_view.text()
-    assert '粘一行' in text and '候选值' in text, text
+    assert '粘一行' in text and '候选' in text, text
 
 
 def test_problems_show_alongside_a_failed_cut(dlg):
     """切不上时，两条信息都要在（别用一个盖掉另一个）。"""
     dlg.params.clear()
     dlg.params.add_param('show', '', '', kind='keyword')
-    dlg.params.add_param('', '服装', '', kind='choice')
+    _locked_choice(dlg, '服装')
     dlg.sample.setText('hide 小明')
     dlg._refresh_cut()
     text = dlg.cut_view.text()
     assert '切不上' in text, text
-    assert '候选值' in text or '词组' in text, text
+    assert '候选' in text, text
 
 
 def test_this_wiring_is_reachable_from_the_ui_source():

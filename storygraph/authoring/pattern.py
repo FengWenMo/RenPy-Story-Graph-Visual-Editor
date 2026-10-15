@@ -104,7 +104,7 @@ def parse_pattern(raw) -> list:
     out = []
     for i, item in enumerate(raw or ()):
         slot = {'kind': '', 'text': '', 'column': '', 'group': '',
-                'options': [], 'problems': []}
+                'options': [], 'limit': False, 'multi': False, 'problems': []}
         if isinstance(item, dict):
             kind = str(item.get('kind') or '').strip()
             slot['text'] = str(item.get('text') or '').strip()
@@ -115,6 +115,15 @@ def parse_pattern(raw) -> list:
             if isinstance(opts, str):
                 opts = [o.strip() for o in opts.replace('，', ',').split(',')]
             slot['options'] = [str(o).strip() for o in opts if str(o).strip()]
+            # ⚠ `limit`（2026-10-13 加）：**候选到底限不限死**。
+            #   缺省 `False` —— 老声明（没有这个键）也一律按"候选只是建议"处理，
+            #   这正是修"切不上"的那一半：存量声明不会因为候选不全而判人写错。
+            slot['limit'] = bool(item.get('limit'))
+            # ⚠ `multi`（2026-10-13 加）：这一格**可以吃多个词**。
+            #   真机依据：`show lan happy sad` 的 `happy sad` 是同一格
+            #   （`layeredimage` 的 `expressions` 组可以有多个属性）。
+            #   缺省 `False` —— 老声明一个字不变。
+            slot['multi'] = bool(item.get('multi'))
             # ⚠ **旧形状**（`{'name','label','choices'}`）要继续认（判据压着）：
             #   旧 `name` 是"剧本里怎么写的那串字" ⇒ 对应新模型的**固定关键字**；
             #   旧 `label` 是表格列名 ⇒ `column`；旧 `choices` ⇒ `options`。
@@ -137,8 +146,13 @@ def parse_pattern(raw) -> list:
             slot['problems'].append('固定段得写清是哪个字')
         if kind in ('variable', 'choice', 'optional') and not slot['column']:
             slot['problems'].append('这一格要有个列名（表格里显示什么）')
-        if kind == 'choice' and not (slot['options'] or slot['group']):
-            slot['problems'].append('"从这些里选"要么给候选值，要么挂一个词组')
+        if kind == 'choice' and slot['limit'] \
+                and not (slot['options'] or slot['group']):
+            # ⚠ "从这些里选"**没给候选不算毛病**（2026-10-13 改）：候选是下拉里的
+            #   备选，不是必填项 —— 没候选就等于"随便写"。旧版在这里报一句红，
+            #   逼人去贴一串候选；贴了之后旧代码又把那一格变成封闭枚举
+            #   （→ "切不上"）。只有**显式勾了"只能选这些"却没给候选**才真矛盾。
+            slot['problems'].append('勾了"只能选这些"，却一个候选都没给')
         out.append(slot)
     return out
 
@@ -147,6 +161,179 @@ def _cell(slot: dict, text: str) -> dict:
     return {'kind': slot['kind'], 'text': text, 'column': slot.get('column', ''),
             'group': slot.get('group', ''), 'ok': True}
 
+
+#: 枚举格遇到"候选里的词出现在后面"时怎么办（`assign_tokens` 的 `policy`）。
+#:
+#: · `'order-first'`（**甲，默认**）：按书写顺序吃**当前**这个词。试切那一侧用。
+#: · `'candidates'`：若**后面**出现了候选里的词，跳过中间那些去认它
+#:   （把候选当"词典"消歧）。读值那一侧的历史口径。
+#:
+#: ⚠⚠ 两种策略**只在这一处会分岔**（枚举格后面还跟着别的会吃词的格子、
+#:   而候选词出现在更后面）。这条分岔由判据
+#:   `test_assign_tokens_single_source.py` 钉住，防止它再长出新分岔。
+POLICIES = ('order-first', 'candidates')
+
+
+def _can_allocate(tokens, slots, si: int, ti: int, groups) -> bool:
+    """
+    `slots[si:]` 从 `tokens[ti:]` 起**能不能全部吃到词**（纯判定，无副作用）。
+
+    为什么要它：多值格（"这一格可以有多个"）到底该吃几个词，**不看自己看后面**
+    —— 真机 `show lan happy sad` 的「服装」只该吃 `happy`，因为「表情」还要一个词；
+    而 `show lan clothes2 happy shy` 里它该吃 `clothes2 happy`（后面只差一个）。
+    没有这个判定就只能"贪心吃满"，于是后面那格永远是空的（**假成功**）。
+    """
+    if si >= len(slots):
+        return True
+    slot = slots[si]
+    kind = str(slot.get('kind') or 'variable')
+    text = str(slot.get('text') or '').strip()
+    if kind == 'keyword':
+        return (ti < len(tokens) and tokens[ti] == text
+                and _can_allocate(tokens, slots, si + 1, ti + 1, groups))
+    if kind == 'optional':
+        if (ti + 1 < len(tokens) and tokens[ti] == text
+                and tokens[ti + 1] not in ('', ':')):
+            if _can_allocate(tokens, slots, si + 1, ti + 2, groups):
+                return True
+        return _can_allocate(tokens, slots, si + 1, ti, groups)
+    allowed = _allowed_of(slot, groups)
+    if kind == 'choice' and slot.get('limit') and not allowed:
+        return False                       # 勾了限死却没候选 → 谁也不能通过
+    if slot.get('multi'):
+        stop = {str(s.get('text') or '').strip() for s in slots[si + 1:]
+                if str(s.get('kind') or '') in ('keyword', 'optional')}
+        stop.discard('')
+        end = ti
+        while end < len(tokens) and tokens[end] not in stop:
+            end += 1
+        return any(_can_allocate(tokens, slots, si + 1, ti + n, groups)
+                   for n in range(end - ti, -1, -1))
+    if ti >= len(tokens):
+        return False
+    if (kind == 'choice' and slot.get('limit') and allowed
+            and tokens[ti] not in allowed):
+        return False
+    return _can_allocate(tokens, slots, si + 1, ti + 1, groups)
+
+
+def _allowed_of(slot, groups) -> list:
+    """这一格的候选：格子自己写的 + 它的词组给的。"""
+    out = [str(o) for o in (slot.get('options') or ())]
+    g = groups.get(str(slot.get('group') or ''))
+    if isinstance(g, dict):
+        out += [str(o) for o in (g.get('options') or ())]
+    return out
+
+
+def assign_tokens(tokens, slots, *, groups=None,
+                  policy: str = 'order-first') -> dict:
+    """
+    **一行词 → 每格占哪几个词** —— 这件事的**唯一一份实现**。
+
+    为什么要有它（2026-10-15 抽，对应路线图 D5 的"坏味道"）：
+    在此之前，这件事有**三套并行实现**，规则已经漂移过：
+
+      · `pattern.match_line`  —— 试切，递归回溯、会"切不上"；
+      · `story/spec_args._claim`              —— 卡片读值那一侧的单趟认领；
+      · `story/spec_args.slot_value_map`      —— 又把 `_claim` 抄了一遍。
+
+    漂移的后果正是用户看到的那种自相矛盾："**试切说切上了、卡片读出来不一样**"。
+    现在只有这一份；`match_line` 与 `_claim` 都只是它的**薄转发**，
+    分别拿它多出来的 `bad_kw` / `rejected` / `used` 去说人话。
+
+    规则（**甲 = 书写顺序**，与 `pattern` 模块的既有口径一致）：
+      · `keyword`：必须**逐字相等**才吃（对不上记 `bad_kw`，是硬失败）；
+      · `optional`：`下一个词 == 它的字` → 吃**两个**词（`at left`），否则跳过；
+      · `multi`：**长的先试**，取第一个"让后面每一格也都还能吃到词"的长度
+        （判据见 `_can_allocate`）；一个都不吃也是合法解；
+      · `choice`：勾了 `limit` 就只认候选里的词（否则记 `rejected`）；
+        `policy='candidates'` 时允许跳到后面出现的候选词；
+      · 其余：吃一个词。
+      · `multi` **不许吃后面格子的固定字**（否则 `mypose happy sad at left`
+        会把 `at left` 一起吃进「表情」）。
+
+    返回::
+
+        {'spans': {第几格: (词起点, 词终点)},   # 终点不含；没认领到的不在里面
+         'used': 吃到第几个词（后面的都是没人认领的）,
+         'bad_kw': 第几格的关键字对不上（或 None）,
+         'rejected': 第几格勾了"只能选这些"却来了候选外的词（或 None）,
+         'policy': 用了哪一档}
+    """
+    tokens = list(tokens or ())
+    slots = [dict(s) for s in (slots or ()) if isinstance(s, dict)]
+    groups = groups or {}
+    spans: dict = {}
+    ti = 0
+    bad_kw = None
+    rejected = None
+    #: **该吃词却没吃到**的格子（普通变量/枚举格）—— 它跟"没人认领的词"是两回事：
+    #: 前者是"这一行少了那一格该有的词"（真失败），后者是"多出来了"。
+    #: ⚠ 多值格与可选段**不算**：前者"一个都不吃"本来合法，后者"不出现"也合法。
+    unfilled: list = []
+    for si, slot in enumerate(slots):
+        kind = str(slot.get('kind') or 'variable')
+        text = str(slot.get('text') or '').strip()
+        # ---- 固定关键字：必须**逐字相等** ----
+        if kind == 'keyword':
+            if ti < len(tokens) and tokens[ti] == text:
+                spans[si] = (ti, ti + 1)
+                ti += 1
+            elif bad_kw is None:
+                bad_kw = si
+            continue
+        # ---- 可选段：`at 位置` —— 出现就吃两个词，不出现就跳过 ----
+        if kind == 'optional':
+            if (ti + 1 < len(tokens) and tokens[ti] == text
+                    and tokens[ti + 1] not in ('', ':')):
+                spans[si] = (ti, ti + 2)
+                ti += 2
+            continue
+        allowed = _allowed_of(slot, groups)
+        # ---- 可重复的格子（`multi`）----
+        if slot.get('multi'):
+            stop = {str(s.get('text') or '').strip() for s in slots[si + 1:]
+                    if str(s.get('kind') or '') in ('keyword', 'optional')}
+            stop.discard('')
+            most = ti
+            while most < len(tokens) and tokens[most] not in stop:
+                if (kind == 'choice' and slot.get('limit') and allowed
+                        and tokens[most] not in allowed):
+                    break
+                most += 1
+            chosen = None
+            for n in range(most - ti, -1, -1):
+                if _can_allocate(tokens, slots, si + 1, ti + n, groups):
+                    chosen = n
+                    break
+            if chosen is None:
+                chosen = most - ti          # 后面本来就不够 → 尽力吃满
+            if chosen:
+                spans[si] = (ti, ti + chosen)
+            ti += chosen
+            continue
+        # ---- 勾了限死却一个候选都没给 = 前后矛盾，谁也不能通过 ----
+        if kind == 'choice' and slot.get('limit') and not allowed:
+            if rejected is None:
+                rejected = si
+            continue
+        if ti >= len(tokens):
+            unfilled.append(si)        # 这一格该吃词却没词了（调用方显示空格子）
+            continue
+        if kind == 'choice' and policy == 'candidates' and allowed:
+            hit = next((t for t in tokens[ti:] if t in allowed), None)
+            if hit is not None:
+                ti = tokens.index(hit, ti)
+        if (kind == 'choice' and slot.get('limit') and allowed
+                and tokens[ti] not in allowed):
+            if rejected is None:
+                rejected = si
+            continue
+        spans[si] = (ti, ti + 1)
+        ti += 1
+    return {'spans': spans, 'used': ti, 'bad_kw': bad_kw,
+            'rejected': rejected, 'unfilled': unfilled, 'policy': policy}
 
 def match_line(pattern, line, *, groups=None) -> dict:
     """
@@ -160,8 +347,9 @@ def match_line(pattern, line, *, groups=None) -> dict:
          'missing': [第几格没吃到东西…],
          'reason': 人话（不 ok 时说明卡在哪）}
 
-    ⚠ 匹配是**带回溯**的：`optional` 段允许"这次没出现"。
-    一路贪心是错的 —— 会把 `show a at left` 的 `at` 当变量吃掉。
+    ⚠ 分配规则**不在这里** —— 它只有一份，见 `assign_tokens`（2026-10-15 抽出）。
+    这里只做三件"试切"独有的事：把 tokens 交出去、把结果**对齐到格子下标**
+    （缺席的格留一个空格子）、把"切不上"说成**人话**。
     """
     slots = parse_pattern(pattern)
     groups = groups or {}
@@ -179,59 +367,43 @@ def match_line(pattern, line, *, groups=None) -> dict:
             options.append(s['text'])
     tokens = _tokens(line, options=options)
 
-    def walk(si: int, ti: int):
-        """从第 si 格、第 ti 个词开始尝试；成功返回 (cells, ti)，失败 None。"""
-        if si == len(slots):
-            return ([], ti)
-        slot = slots[si]
-        kind = slot['kind']
-        # ---- 固定关键字：必须一模一样 ----
-        if kind == 'keyword':
-            if ti < len(tokens) and tokens[ti] == slot['text']:
-                rest = walk(si + 1, ti + 1)
-                if rest:
-                    return ([_cell(slot, tokens[ti])] + rest[0], rest[1])
-            return None
-        # ---- 可选段：`at 位置` —— **出现就吃两个词（关键字+值），不出现就跳过** ----
-        #   ⚠ 只有一条路（一路贪心）是错的：那样 `at` 会被变量格吃掉。
-        #   这里**两条路都试**（回溯），先试"出现"。
-        if kind == 'optional':
-            if (ti + 1 < len(tokens) and tokens[ti] == slot['text']
-                    and tokens[ti + 1] != ''):
-                rest = walk(si + 1, ti + 2)
-                if rest:
-                    eaten = f'{tokens[ti]} {tokens[ti + 1]}'
-                    return ([_cell(slot, eaten)] + rest[0], rest[1])
-            return walk(si + 1, ti)                   # 这次不出现
-        # ---- 变量 / 枚举：吃一个词 ----
-        if ti >= len(tokens):
-            return None
-        word = tokens[ti]
-        if kind == 'choice':
-            allowed = list(slot.get('options') or [])
-            g = groups.get(slot.get('group') or '')
-            if isinstance(g, dict):
-                allowed.extend(g.get('options') or [])
-            if allowed and word not in allowed:
-                return None                            # 不在候选里 → 不是这一格
-        rest = walk(si + 1, ti + 1)
-        if rest:
-            return ([_cell(slot, word)] + rest[0], rest[1])
-        return None
-
-    got = walk(0, 0)
-    if got is None:
-        # 失败要说清"卡在第几格"，而不是只说"不匹配"
-        return {'ok': False, 'cells': [], 'leftover': tokens, 'missing': [],
-                'reason': '这一行跟你的格子对不上 —— 检查顺序、关键字写法，'
-                          '或者是不是少了/多了哪一段'}
-    cells, used = got
-    return {'ok': used >= len(tokens), 'cells': cells,
-            'leftover': tokens[used:],
-            'missing': [i for i, c in enumerate(cells) if not str(c['text']).strip()],
-            'reason': '' if used >= len(tokens) else
-                      f'后面还有 {len(tokens) - used} 个词没人认领：'
-                      + ' '.join(tokens[used:])}
+    got = assign_tokens(tokens, slots, groups=groups, policy='order-first')
+    spans, used = got['spans'], got['used']
+    # ⚠⚠ **按格子下标归位**（2026-10-13 修）：缺席的格子（空的多值格 / 缺席的
+    #   可选段）**也要产出一个空格子**，否则 `cells` 比 `pattern` 短、下标整体
+    #   错位 —— 界面说"第 N 格没吃到"会指着**另一个格子**（人越改越错），
+    #   卡片按格子取值那侧也跟着串位。
+    cells = []
+    for i in range(len(slots)):
+        span = spans.get(i)
+        cells.append(_cell(slots[i],
+                           ' '.join(tokens[span[0]:span[1]]) if span else ''))
+    leftover = tokens[used:]
+    ok = (got['bad_kw'] is None and got['rejected'] is None
+          and not got['unfilled'] and used >= len(tokens))
+    if ok:
+        reason = ''
+    elif got['bad_kw'] is not None:
+        i = got['bad_kw']
+        reason = (f'第 {i + 1} 格要的关键字是「{slots[i]["text"]}」，'
+                  f'这一行里对不上 —— 检查顺序、关键字写法')
+    elif got['rejected'] is not None:
+        i = got['rejected']
+        reason = (f'第 {i + 1} 格勾了"只能从这些里选"，'
+                  f'而这一行里的词不在候选里')
+    elif leftover:
+        reason = (f'后面还有 {len(leftover)} 个词没人认领：'
+                  + ' '.join(leftover))
+    else:
+        i = got['unfilled'][0]
+        name = str(slots[i].get('column') or slots[i].get('text') or '').strip()
+        reason = (f'第 {i + 1} 格（{name or "这一格"}）该有一个词，'
+                  f'但这一行里没有 —— 检查顺序、关键字写法，'
+                  f'或者是不是少了哪一段')
+    return {'ok': ok, 'cells': cells, 'leftover': leftover,
+            'missing': [i for i, c in enumerate(cells)
+                        if not str(c['text']).strip()],
+            'reason': reason}
 
 
 def columns_of(pattern) -> list:
@@ -255,13 +427,33 @@ def groups_used(pattern) -> list:
 
 
 def problems_of(pattern) -> list:
-    """把所有格子的毛病汇总成**人话**清单（界面直接显示，不用自己拼）。"""
+    """
+    把所有格子的毛病汇总成**人话**清单（界面直接显示，不用自己拼）。
+
+    ⚠ 除了每格自己的毛病，还查一条**跨格**的：**列名重名**
+    （2026-10-13 加）。两个格子叫同一个列名时，切行照样切得出来，
+    但它们在卡片/表里是**同一列** → 两个值互相覆盖，而人看不出来。
+    这种"切得上、但结果不对"的毛病正是这个函数存在的理由。
+    """
+    parsed = parse_pattern(pattern)
     out = []
-    for i, s in enumerate(parse_pattern(pattern), 1):
+    for i, s in enumerate(parsed, 1):
         for p in s.get('problems') or []:
             out.append(f'第 {i} 格：{p}')
+    seen: dict = {}
+    for i, s in enumerate(parsed, 1):
+        name = str(s.get('column') or '').strip()
+        if not name:
+            continue
+        if name in seen:
+            out.append(f'第 {seen[name]} 格与第 {i} 格**重名**（都叫「{name}」）——'
+                       f'它们在卡片与表里是同一列，两个值会互相覆盖；'
+                       f'改掉其中一个的名字')
+        else:
+            seen[name] = i
     return out
 
 
-__all__ = ['KIND_LABELS', 'SLOT_KINDS', 'columns_of', 'groups_used',
+__all__ = ['KIND_LABELS', 'POLICIES', 'SLOT_KINDS', 'assign_tokens',
+           'columns_of', 'groups_used',
            'match_line', 'parse_pattern', 'problems_of']

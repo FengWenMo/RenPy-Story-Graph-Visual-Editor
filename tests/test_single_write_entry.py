@@ -53,6 +53,13 @@ WRITERS = {
                                  '`STORYGRAPH_AI_CONFIG` 可覆盖）——'
                                  '⚠ **绝不写进项目仓库**（否则随 git 泄漏），'
                                  '并尽力收紧文件权限',
+    'core/session_store.py::save': '写**会话记忆**（上次的项目 / 最近列表 / 各项目布局），'
+                                   '位置同上**用户级目录**'
+                                   '（`%LOCALAPPDATA%/StoryGraph/session.json`，'
+                                   '`STORYGRAPH_SESSION_CONFIG` 可覆盖）——'
+                                   '⚠ **绝不写进项目仓库**（那会进 git diff、多人协作互相打架）。'
+                                   '原子替换（先写 `.tmp` 再 `os.replace`），'
+                                   '写失败只记台账、绝不拦退出',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
     'story/statement_registry.py::declare_attr_groups':

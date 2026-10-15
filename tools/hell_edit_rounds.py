@@ -584,7 +584,7 @@ def run_real_edit(verbose: bool, tmp: Path, limit: int = 0) -> tuple:
             #
             # 这一条以前带 `force=True`，于是补丁对不上时工具会把一份
             # **全量重生成**覆盖到作者手写的章节上 —— 那正是 P0 禁止的事
-            # （`docs/P0_静默全量覆盖_2026-10-03.md`）。去掉 force 之后，
+            # （`docs/archive/P0_静默全量覆盖_2026-10-03.md`）。去掉 force 之后，
             # 对不上的那一章会被**安全地拒绝**（文件一个字节不动），
             # 这正是设计要的方向：`script_pomo.rpy` 就是那条已知的
             # 设计边界（菜单标题写在 `menu:` 的下一行，2 行合 1 行）。

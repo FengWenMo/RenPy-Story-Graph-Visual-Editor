@@ -420,7 +420,7 @@ def compile_table(table_path, rpy_path=None, registry=None,
     `force=True`（2026-10-05 补，方案 3 的逃生舱）：目标已存在的手写 `.rpy`
     也允许覆盖。**默认拒绝** —— 全量生成只认得"拍"，
     `default` / `init python` / `transform` 一行都留不下
-    （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+    （见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
     """
     from storygraph.story.excel_import import import_beats_from_excel
 

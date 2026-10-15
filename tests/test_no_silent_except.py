@@ -181,7 +181,7 @@ class TestNoSilentWideExcept:
         assert total >= 250, (
             f'全项目宽捕获只剩 {total} 处（2026-10-05 是 258）—— '
             f'如果是有意把某些收窄成具体异常，请更新这条下限并在 '
-            f'docs/问题清单与优化路线_2026-10-03.md 里记一笔')
+            f'docs/archive/问题清单与优化路线_2026-10-03.md 里记一笔')
 
     def test_swallow_import_is_present_where_used(self):
         """

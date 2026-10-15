@@ -305,7 +305,7 @@ def build_project(project_root, asset_dir=None, out_dir=None,
                         f' —— 工具不知道它们的参数/约束，表里也不会有'
                         f'"每参数一列"。写进 storygraph.rules.json 的 statements，'
                         f'或让代码里有 renpy.register_statement'
-                        f'（见 docs/设计_自定义结构发现与交互_2026-10-07.md）')
+                        f'（见 docs/archive/设计_自定义结构发现与交互_2026-10-07.md）')
                 # **项目级"工具不认识的结构"**（`project_conventions` 的第三层）：
                 # 全仓扫描（含没进这一轮编译的文件），回答编剧真正关心的问题
                 # ——"我剧本里哪一种结构工具管不了"。这套三层机制（认形状 /

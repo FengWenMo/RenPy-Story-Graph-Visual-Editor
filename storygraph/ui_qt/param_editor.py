@@ -1,0 +1,714 @@
+"""
+`storygraph.ui_qt.param_editor` —— 「一个动作要填什么」的**字段编辑器**。
+=====================================================================
+
+这是 2026-10-13 重写的版本，**替代**旧的 `ui_qt/param_cards.py`。
+旧文件被整个删掉（用户原话）：
+
+> 我之前不是说了让你把这个子界面删了重写吗？？？不要再在原来的地方缝补了！
+> 整个删了重写！
+
+## 它解决的两个界面问题（都是用户实测报的）
+
+1. **"选的一多就把后面那个变量挤出窗口"**
+   → 旧版卡内用 6 列网格（一张空卡的最小宽 **480 px**）+ 候选方块横排不折行，
+   而横向滚动是关掉的，于是内容只能被裁。现在：卡内**单列堆叠**，
+   方块走 `FlowRow`（**折行**），空卡最小宽 **188 px**、方块再多也不涨。
+
+2. **"这两个滚动条是何意味啊"**
+   → 旧版 `FieldList` 自己是 `QScrollArea`，外面弹窗又套了一个滚动区 = **两条**。
+   现在 `FieldList` 是**纯 QWidget**，滚动只由外层那一个滚动区负责。
+
+## 命名（用户："你这不应该叫词组！你换个名字！"）
+
+旧词 **词组**（`attr_groups`）废弃，界面上叫 **「候选分栏」**：
+
+| 概念 | 界面上的说法 | 用途 |
+|---|---|---|
+| 一组候选值 | **一栏** | 把下拉里的候选分成「服装」「神态」这样的栏 |
+| 组的内部名（`outfit`） | **分栏标识** | 写进清单的键，程序用 |
+| 组的中文名（`服装`） | **这一栏显示成** | 编剧在下拉里看到的分栏标题 |
+
+⚠ 立绘属性（`show ye base_handdown happy`）的分栏**来自引擎**
+（`layeredimage` 的 `group`），那种情况**不需要在这里建栏** ——
+这里建栏只对"自定义动作的参数候选"有意义。
+"""
+
+from __future__ import annotations
+
+import re
+
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout,
+                               QLabel, QLineEdit, QMenu, QPushButton,
+                               QSizePolicy, QVBoxLayout, QWidget)
+
+from storygraph.core.safeguard import swallow
+from storygraph.ui_qt import tokens as T
+from storygraph.ui_qt.flow import FlowRow
+
+#: 候选值分隔符 —— 与后端 `learn_statement.parse_choices` **同一套**
+#: （中英文逗号、顿号、分号、竖线、空白）。用户"一次粘一大段"时就靠它全收下。
+_SEP_RE = re.compile(r'[,，、;；|\s]+')
+
+
+class ValueChips(QWidget):
+    """
+    候选值输入：**敲回车 / 逗号就变成一个可点的小方块**（不用记分隔符）。
+
+    用户原话（2026-10-11）："候选值要打逗号"太麻烦；
+    （2026-10-12）："我就只能填一个候选值，填不了多个" → 回车**一次收下所有**。
+
+    `text()` 给回逗号分隔的串（与后端契约一致）；`set_text()` 反向填。
+    """
+
+    def __init__(self, parent=None, on_change=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(T.SPACE['xs'])
+        # ⚠ **必须折行**：横排布局的最小宽 = 所有方块之和，候选一多就把卡片
+        #   （进而整窗）顶宽，而这里不提供横向滚动 → 后面那列字被挤出窗口。
+        self._row = FlowRow(spacing=T.SPACE['xs'])
+        outer.addWidget(self._row)
+        self._edit = QLineEdit()
+        self._edit.setPlaceholderText('填一个就回车（例：泳装 ／ 校服）；'
+                                      '不填 = 编剧能随便写')
+        self._edit.returnPressed.connect(self._commit)
+        self._edit.textEdited.connect(self._maybe_split)
+        # ⚠⚠ 实测修复（用户报"按了回车没反应"）：`QLineEdit` 收到 Return 是
+        #   `event->ignore()`（Qt 为了让"对话框里回车 = 确定"生效），按键于是冒到
+        #   `QDialog`，把 Ok（autoDefault）点了 → **候选值刚加上、弹窗立刻被关掉**，
+        #   还会顺着 `exec()==Accepted` 走写盘。这里装一道过滤器把它吃掉。
+        self._edit.installEventFilter(self)
+        outer.addWidget(self._edit)
+        self._values: list = []
+        self._on_change = on_change
+
+    # ---- 事件 ----
+    def eventFilter(self, obj, event):              # noqa: N802 - Qt 接口
+        """回车只用来"加候选值"，**绝不许它冒到弹窗去点默认按钮**。"""
+        if (obj is self._edit and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            self._commit()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _maybe_split(self, text: str):
+        """打了逗号（中英文都认）就把前面那段变成方块 —— 迁就旧习惯。"""
+        for sep in (',', '，'):
+            if sep in text:
+                head, _, tail = text.partition(sep)
+                if head.strip():
+                    self.add_values([head.strip()])
+                self._edit.setText(tail)
+                return
+
+    def _commit(self):
+        """回车 → **一次收下所有值**（不是"只收一个"）。"""
+        value = self._edit.text().strip()
+        if not value:
+            return
+        self.add_values([p for p in _SEP_RE.split(value) if p.strip()])
+        self._edit.clear()
+
+    # ---- 对外 ----
+    def set_height_source(self):
+        """
+        让"我的高度"跟着**内部折行布局**走。
+
+        为什么需要（2026-10-13 实测）：`QWidget` 当容器时 Qt 认不出里面的布局，
+        `sizeHint()` 是 0×0 —— 方块加进去了却**一个都看不见**。
+        这里把高度交给 `FlowRow.heightForWidth()`（它知道折了几行）。
+        """
+        row = self._row
+
+        def _hfw(width: int) -> int:
+            margins = self.contentsMargins()
+            inner = max(40, int(width) - margins.left() - margins.right())
+            return row.heightForWidth(inner) + self._edit.sizeHint().height() \
+                + T.SPACE['xs'] + margins.top() + margins.bottom()
+
+        self.heightForWidth = _hfw            # type: ignore[assignment]
+        self.hasHeightForWidth = lambda: True  # type: ignore[assignment]
+
+    def sizeHint(self) -> QSize:                 # noqa: N802 - Qt 接口
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), 240), max(hint.height(), 56))
+
+    def text(self) -> str:
+        return ','.join(self._values)
+
+    @property
+    def _chips(self) -> list:
+        """旧名（判据里还在用 `chip._chips`）。"""
+        return self._values
+
+    def values(self) -> list:
+        return list(self._values)
+
+    def set_text(self, text: str):
+        self._values = []
+        for part in str(text or '').replace('，', ',').split(','):
+            s = part.strip()
+            if s and s not in self._values:
+                self._values.append(s)
+        self._rebuild()
+
+    def add_values(self, values):
+        """
+        **一次倒进一批**（「⚡ 从项目里拿」用）—— 去重、**追加**不覆盖。
+
+        为什么不复用 `set_text`：导入是"加上去"，不是"换掉我现在写的"。
+        """
+        added = False
+        for v in (values or ()):
+            s = str(v).strip()
+            if s and s not in self._values:
+                self._values.append(s)
+                added = True
+        if added:
+            self._rebuild()
+        return added
+
+    def _remove(self, value: str):
+        if value in self._values:
+            self._values.remove(value)
+        self._rebuild()
+
+    def _rebuild(self):
+        self._row.clear()
+        for value in self._values:
+            chip = QPushButton(f'{value}  ✕')
+            chip.setProperty('role', 'chip')
+            chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            chip.setToolTip('点一下去掉这个候选值')
+            chip.clicked.connect(lambda _=False, v=value: self._remove(v))
+            self._row.add(chip)
+        self.updateGeometry()
+        if self._on_change is not None:
+            try:
+                self._on_change()
+            except Exception as e:                   # noqa: BLE001 - 通知失败不该炸
+                swallow('ui_qt.param_editor.ValueChips.changed', e)
+
+
+class FieldCard(QFrame):
+    """
+    **一个「要填的东西」一张卡** —— 单列堆叠，标签在上、控件在下。
+
+    顺序就是"人怎么读它"（也是 `pattern` 里的顺序）：
+
+        这一格是                  [ 从这些里选 ▾ ]
+        这一列叫什么（编剧看到的）  [ 角色         ]
+        ☐ 编剧只能从下面这些里选
+        [ 泳装 ✕ ] [ 校服 ✕ ]
+        [ 填一个就回车 ]
+
+    ⚠⚠ **"剧本里怎么写"这个字段被删掉了**（2026-10-13 用户否掉）：
+
+    > 就是这个剧本里怎么写这就很令人误会……我不填这个，剧本里怎么写与我这个
+    > 结构有什么关系吗？你让我填吧……你又只给一行！比如说角色有 lan ye mm dhy 等……
+    > 这些不可能全对应上！所以这个你让我填根本就不合理！编剧也不知道啊？？？
+    > 而且这文字又很令人误会了！剧本里怎么写？在编剧眼里……剧本就是"角色"……
+
+    说得对，所以现在**只有一个名字**：`这一列叫什么（编剧看到的）`。
+    它同时当"表格列名"用（内部键就用它自己）—— 于是：
+
+      · 不用再让任何人回答"代码里那串字是什么"（编剧答不出来，也不该问）；
+      · 值到底长什么样由**试切/真实项目**回答，不由这个字段回答。
+
+    卡头右侧：`分栏：服装（自动认的）` + `⚡ 从项目里拿` + `↑ ↓` + `删掉这一格`。
+    """
+
+    def __init__(self, on_change=None, on_remove=None, on_move=None,
+                 sources_provider=None, parent=None):
+        super().__init__(parent)
+        self.setProperty('role', 'card')
+        self.setFrameShape(QFrame.NoFrame)
+        self._on_change = on_change
+        self._on_remove = on_remove
+        self._sources_provider = sources_provider
+        #: 这一格**自动认到**的分栏（`FieldList.match_column` 算出来的）
+        self._column = ''
+        self._columns_changed = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(T.SPACE['md'], T.SPACE['sm'],
+                                 T.SPACE['md'], T.SPACE['sm'])
+        outer.setSpacing(T.SPACE['xs'])
+
+        head = QHBoxLayout()
+        head.setSpacing(T.SPACE['xs'])
+        self._title = QLabel('这一格要填的东西')
+        self._title.setProperty('role', 'cardTitle')
+        self._title.setWordWrap(True)
+        head.addWidget(self._title, 1)
+        self._column_hint = QLabel()
+        self._column_hint.setProperty('role', 'caption')
+        self._column_hint.setToolTip(
+            '这一格的候选属于哪一栏（把下拉里的候选分组用，例如「服装」）。\n'
+            '按"这一格的名字 / 显示成什么"自动认；认不出就不显示。')
+        head.addWidget(self._column_hint)
+        self._pick_btn = QPushButton('⚡ 从项目里拿')
+        self._pick_btn.setProperty('role', 'ghost')
+        self._pick_btn.setToolTip(
+            '候选值不用手打：从项目里一次倒进来\n'
+            '· 立绘属性（引擎自己分好的组，如 expressions）\n'
+            '· 角色表\n'
+            '· 这个动作在脚本里真正用过的值')
+        self._pick_btn.clicked.connect(self._on_import)
+        self._pick_btn.setVisible(False)
+        head.addWidget(self._pick_btn)
+        self._up = QPushButton('↑')
+        self._down = QPushButton('↓')
+        for btn, tip in ((self._up, '跟上一格换位置'), (self._down, '跟下一格换位置')):
+            btn.setProperty('role', 'ghost')
+            btn.setToolTip(tip)
+            btn.setFixedWidth(28)
+        self._up.clicked.connect(lambda: on_move(self, -1) if on_move else None)
+        self._down.clicked.connect(lambda: on_move(self, +1) if on_move else None)
+        head.addWidget(self._up)
+        head.addWidget(self._down)
+        self._rm = QPushButton('删掉这一格')
+        self._rm.setProperty('role', 'ghost')
+        self._rm.setToolTip('这个动作不需要填它')
+        self._rm.clicked.connect(lambda: on_remove(self) if on_remove else None)
+        head.addWidget(self._rm)
+        outer.addLayout(head)
+
+        # ---- 单列堆叠的字段（**没有多列网格**）----
+        self._kind = QComboBox()
+        for key, text in (('keyword', '固定几个字（如 show / at）'),
+                          ('variable', '谁都可以（如人物名）'),
+                          ('choice', '从这些里选（枚举）'),
+                          ('optional', '可出现可不出现的一段')):
+            self._kind.addItem(text, key)
+        self._kind.setToolTip(
+            '固定几个字 = 剧本里必须原样出现这几个字；\n'
+            '谁都可以 = 任意值（人物名、数字…）；\n'
+            '从这些里选 = 编剧只能从你列的候选值里挑；\n'
+            '可出现可不出现 = 这一段有时写有时不写（如 at 位置）。')
+        self._kind.currentIndexChanged.connect(self._on_kind_changed)
+        self._kind.currentIndexChanged.connect(self._changed)
+        # ⚠ **只有一个名字**（"剧本里怎么写"已删，见类 docstring）。
+        #   它放的是**编剧看到的那一列叫什么**（例：角色 / 服装 / 神态）。
+        self._name = QLineEdit()
+        self._name.setPlaceholderText('编剧看到的列名，例：角色 / 服装 / 神态')
+        self._name.setToolTip(
+            '这一格在表格/卡片上叫什么。\n'
+            '填「角色」就够 —— 不用去管代码里那串字长什么样，'
+            '那由「试切」和项目里真实的资源告诉你。')
+        self._name.textChanged.connect(self._changed)
+        self._name.textChanged.connect(self._column_maybe_changed)
+        #: 兼容视图：`label` 与 `_name` 现在**同源**（老代码读 `card._label`）。
+        self._label = self._name
+        #: ⚠ **内部键（旧形状的 `name`）**：只在读存量声明时非空。
+        #:   它不进界面（用户明确说"剧本里怎么写"让人误会），但**写回时保留** ——
+        #:   否则"中文列名"会悄悄替换掉项目原有的英文键（那是一次静默的数据改写）。
+        self._key = ''
+        self._limit = QCheckBox('编剧只能从下面这些里选')
+        self._limit.setToolTip('不勾 = 编剧随便写（候选只是下拉里的备选）；'
+                               '勾了 = 只能从你列的候选里挑。')
+        self._limit.toggled.connect(self._on_limit_toggled)
+        # ⚠ 「可以有多个」（2026-10-13 用户指出的 A/B/C）：
+        #   > 你去查查服装的 A B C 定义……A 是默认的，也就是可填可不填的，
+        #   > 它的默认字符为空字符！但是它不是一段，它**允许有多个**！
+        #   > 你这个"可填可不填"的根本就没多段的选择！
+        #   真机依据：`show lan happy sad` 里 `happy sad` 是**同一格**
+        #   （`layeredimage lan` 的 expressions 组可以有多个属性）。
+        self._multi = QCheckBox('这一格可以有多个（例：happy sad）')
+        self._multi.setToolTip(
+            '勾上 = 这一格可以连着写好几个词（空格分隔），试切会把它们都收进来。\n'
+            '真机例子：`show lan happy sad` —— 一句里同时给两个表情属性。')
+        self._multi.toggled.connect(self._changed)
+        self._values = ValueChips(on_change=self._changed)
+
+        self._field('这一格是', self._kind)
+        self._field('这一列叫什么（编剧看到的）', self._name)
+        self._stack_add(self._multi)
+        self._stack_add(self._limit)
+        self._stack_add(self._values)
+        self._values.setVisible(False)
+        # ⚠ `ValueChips` 是**普通 QWidget 当容器**（不用重写容器控件）——
+        #   Qt 认不出"它里面是布局"，`sizeHint()` 于是变成 0×0，
+        #   方块加进去了却不显示（实测：加了 8 个方块，界面一个都看不见）。
+        #   显式喂进去：高度 = 内容折行后的高度，宽度 = 可伸展。
+        self._values.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._values.setMinimumHeight(56)
+        self._values.set_height_source()
+        self._on_kind_changed()
+        self._refresh_title()
+
+    # ---- 内部 ----
+    def _field(self, label: str, widget: QWidget):
+        tag = QLabel(label)
+        tag.setProperty('role', 'fieldLabel')
+        tag.setWordWrap(True)
+        self._stack_add(tag)
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._stack_add(widget)
+
+    @property
+    def body(self):
+        """
+        旧名（判据 `test_no_two_widgets_share_a_grid_cell_in_a_param_card`
+        扫的是 `card.body`）。新版的卡身是**单列**布局，物理上不可能叠格。
+        """
+        return self.layout()
+
+    def _stack_add(self, widget: QWidget):
+        lay = self.layout()
+        lay.addWidget(widget)
+
+    def _on_kind_changed(self, *_a):
+        is_choice = self._kind.currentData() == 'choice'
+        self._pick_btn.setVisible(is_choice)
+        if not is_choice:
+            self._limit.setChecked(False)
+            self._values.setVisible(False)
+
+    def _on_limit_toggled(self, on: bool):
+        self._values.setVisible(bool(on))
+        if on:
+            self._values._edit.setFocus()
+        self._changed()
+
+    def _changed(self, *_a):
+        self._refresh_title()
+        if self._on_change:
+            self._on_change()
+
+    def _column_maybe_changed(self, *_a):
+        fn = getattr(self, '_columns_changed', None)
+        if fn is not None:
+            try:
+                fn()
+            except Exception as e:                   # noqa: BLE001 - 重算不该炸
+                swallow('ui_qt.param_editor.FieldCard.rematch', e)
+
+    def _refresh_title(self):
+        text = self._name.text().strip()
+        self.set_title(text or '这一格要填的东西')
+
+    def set_title(self, text: str):
+        self._title.setText(text)
+
+    def _on_import(self):
+        """「⚡ 从项目里拿」：把项目里**真正有**的候选摆出来，挑一个倒进这一格。
+
+        ⚠ 工具**不猜**"这一格是不是表情"（那是语义，猜错改剧情）——
+        它只列"项目里到底有哪些值、从哪来"，点哪个由人决定。
+        """
+        menu = QMenu(self)
+        rows = []
+        try:
+            if self._sources_provider is not None:
+                rows = list(self._sources_provider() or [])
+        except Exception as e:                       # noqa: BLE001 - 导入不该炸卡片
+            swallow('ui_qt.param_editor.FieldCard.import', e)
+            rows = []
+        if not rows:
+            act = menu.addAction('（项目里还没读到可导入的值 —— 先「打开项目」；'
+                                 '"立绘属性"要先跑过一次引擎体检）')
+            act.setEnabled(False)
+        else:
+            for r in rows:
+                act = menu.addAction(f'{r.get("label")}'
+                                     f'（{r.get("count", 0)} 个）')
+                act.setData(list(r.get('values') or []))
+        chosen = menu.exec(self._pick_btn.mapToGlobal(
+            self._pick_btn.rect().bottomLeft()))
+        if chosen is None or not chosen.data():
+            return
+        self._values.add_values(chosen.data())
+        # 拿进来就是"只能填这些"——不勾上候选白拿（只有勾了才进下拉）
+        self._limit.setChecked(True)
+        self._values.setVisible(True)
+        self._changed()
+
+    # ---- 分栏标注（自动认，不是下拉）----
+    def set_column(self, column: str):
+        """
+        把"这一格的候选属于哪一栏"标在卡头。
+
+        用户 2026-10-12：
+        > 如果你所谓的"词组"只是给变量一个名字的话……那你不应该弄一个下拉，
+        > 你应该就在原地，就在旁边标注
+
+        所以这里是**标注**：`FieldList.match_column` 按"这一格的名字 / 显示名"
+        自动认；认不出就整条藏起来（不写"无"、不占地方）。
+        """
+        self._column = str(column or '')
+        self._column_hint.setText(f'分栏：{self._column}' if self._column else '')
+        self._column_hint.setVisible(bool(self._column))
+
+    def column_of(self) -> str:
+        return str(self._column or '')
+
+    # ---- 旧名字的别名（判据与旧调用点还在用"group / import / choices"这套字）----
+    def group_of(self) -> str:
+        return self.column_of()
+
+    @property
+    def _import(self):
+        return self._pick_btn
+
+    @property
+    def _choices(self):
+        return self._values
+
+    @property
+    def _group_hint(self):
+        """旧名（判据里还在用 `card._group_hint`）——就是卡头那行分栏标注。"""
+        return self._column_hint
+
+    # ---- 数据 ----
+    def data(self) -> dict:
+        """
+        这一格 → 后端参数。
+
+        ⚠⚠ **候选与"限死"是两件事**（2026-10-13 用户实测修）：
+
+        > 这个仍然切不上！有一个巨大的 bug……
+
+        真凶：旧版只要候选非空就把 `kind` 报成 `choice`，而 `choice` 在
+        `pattern` 里是**封闭枚举**（值必须在候选里）—— 于是用户在「角色」里
+        贴了一串角色名之后，剧本里任何一个**没列进去**的角色都判"切不上"，
+        而界面只会说"检查顺序或关键字写法"。真实项目的资源一直在变，
+        封闭枚举本来就该是**显式选择**的结果，不是"填了候选"的副作用。
+
+        现在：`kind` 只由「这一格是」决定（`variable` 就是任意值）；
+        候选进 `options`，`limit` 单独告诉后端"这一格是不是封闭枚举"。
+        """
+        name = self._name.text().strip()
+        is_fixed = self._kind.currentData() == 'keyword'
+        # ⚠ "列名"取哪一个：**存量从宽、新建从严**。
+        #   · 存量（`set_data` 给过 `label`）→ 那个 `label` 就是列名，
+        #     界面上字段显示它只是"看得见"，不改变它是谁；
+        #   · 用户新建的格子 → 界面上那唯一的字段就是列名。
+        #   这条让旧调用方 `add_param('intensity', '强度', …)` 仍然产出
+        #   `{'name': 'intensity', 'label': '强度'}`（判据压着），
+        #   而新界面里"只有列名"（用户要的那个简化）。
+        column = self._display_name or name
+        return {'kind': self._kind.currentData() or 'variable',
+                'group': self.column_of(),
+                'text': (self._fixed_text or name) if is_fixed else '',
+                'name': self._key or name,
+                'label': column,
+                'column': column,
+                'choices': self._values.text(),
+                'limit': bool(self._limit.isChecked()),
+                'multi': bool(self._multi.isChecked())}
+
+    def set_data(self, name: str = '', label: str = '', choices: str = '',
+                 kind: str = '', group: str = '', **extra):
+        if kind:
+            idx = self._kind.findData(kind)
+            if idx >= 0:
+                self._kind.setCurrentIndex(idx)
+        self._on_kind_changed()
+        # ⚠ 两个来源都认，**显示名优先**：
+        #   · `label` = 老的"这一列显示成什么"（存量声明与旧调用方都在这边）；
+        #   · `name`  = 界面上唯一那个字段（`data()` 里与 `label` 同源），
+        #               也是旧调用方传的第一个参数。
+        #   显示名优先，于是"「小明」这一格显示成「角色」"这种老数据仍然
+        #   显示成「角色」（而不是把内部键推到编剧眼前）。
+        self._name.setText(str(label or name or ''))
+        #: 存量声明的**内部键**（旧 `name`）。它不进界面，但**写回时保留** ——
+        #: 否则"中文列名"会悄悄替换掉项目原有的英文键（一次静默的数据改写）。
+        self._key = str(name or '').strip()
+        #: 存量声明的**显示名**（旧 `label`）。非空 = 这一格是从存量读来的，
+        #: 那一刻的"列名"就该是它（界面上那个字段显示它，但不改变它是谁）。
+        self._display_name = str(label or '').strip()
+        #: 存量声明里"代码里必须出现的那串字"（`text`，只有固定段用）。
+        self._fixed_text = str(name or '').strip()
+        text = str(choices or '')
+        self._values.set_text(text)
+        # 已有声明里本来就有候选 → 自动展开（不然人会以为丢了）。
+        # ⚠ **但不自动勾"只能从这些里选"** —— 存量候选多半是"建议清单"，
+        #   一勾上就把存量剧本判成"切不上"（上面那个 bug 的另一半）。
+        self._limit.setChecked(False)
+        self._values.setVisible(bool(text.strip()))
+        # ⚠ `multi`（"可以有多个"）**照存量恢复** —— 它不像候选那样会被误解成
+        #   封闭枚举，而是纯粹的语法事实（真机里 `happy sad` 就是一格两个词）。
+        try:
+            self._multi.setChecked(bool((extra or {}).get('multi')))
+        except Exception as e:                      # noqa: BLE001 - 恢复不了就用缺省
+            swallow('ui_qt.param_editor.FieldCard.set_data.multi', e)
+        if group:
+            self.set_column(group)
+
+    def focus(self):
+        self._name.setFocus()
+
+
+class FieldList(QWidget):
+    """
+    字段卡的**竖向列表** —— ⚠ **不是** `QScrollArea`（那是"两条滚动条"的来源）。
+
+    滚动一律由外层那一个滚动区负责；这里只负责竖着排。
+
+    对外接口与旧版同形（`add_field` / `rows` / `clear` / `count` / `slots` /
+    `set_columns` / `move`），所以弹窗与判据的接线不用改。
+    """
+
+    def __init__(self, parent=None, on_change=None, sources_provider=None):
+        super().__init__(parent)
+        self._col = QVBoxLayout(self)
+        self._col.setContentsMargins(0, 0, 0, 0)
+        self._col.setSpacing(T.SPACE['sm'])
+        self._col.addStretch(1)
+        self._cards: list = []
+        #: 当前分栏表 `[(分栏标识, 这一栏显示成, [候选词…])…]`
+        self._columns: list = []
+        self._on_change = on_change
+        self._sources_provider = sources_provider
+
+    # ---- 分栏 ----
+    @property
+    def _groups(self) -> list:
+        """旧名（判据里还在用 `params._groups`）——就是分栏表。"""
+        return self._columns
+
+    def columns(self) -> list:
+        return list(self._columns)
+
+    def set_columns(self, columns):
+        """
+        分栏表变了 → **重算每一格的标注**（`match_column`）。
+
+        `columns` 收 `[(标识, 显示名, [候选词…])…]`；旧的"只给一串名字"也认。
+        """
+        norm = []
+        for c in (columns or ()):
+            if isinstance(c, (list, tuple)):
+                key = str(c[0] or '').strip()
+                shown = str(c[1] or '').strip() if len(c) > 1 else ''
+                opts = [str(o).strip() for o in (c[2] if len(c) > 2 else ()) or ()
+                        if str(o).strip()]
+            else:
+                key, shown, opts = str(c or '').strip(), '', []
+            if key:
+                norm.append((key, shown, opts))
+        self._columns = norm
+        self.rematch()
+
+    def match_column(self, name: str, shown: str) -> str:
+        """
+        这一格属于哪一栏 —— **自动认**（名字 / 显示名对得上就算）。
+
+        理由（用户 2026-10-12）："就在原地，就在旁边标注，而不是下拉一个展开"。
+        规则要能解释、且**宁可不认**：
+          1. 这一格的名字或显示名，**逐字等于**某一栏的标识；
+          2. 或等于它声明过的候选词；
+          3. 或等于它的显示名；
+          4. 都不中 → `''`（界面什么都不显示 —— 不是每个项目都有「服装」）。
+        """
+        tokens = [str(t or '').strip() for t in (name, shown) if str(t or '').strip()]
+        if not tokens:
+            return ''
+        for key, label, opts in self._columns:
+            if key in tokens or (label and label in tokens):
+                return key
+            for opt in opts:
+                if opt in tokens:
+                    return key
+        return ''
+
+    def rematch(self):
+        for card in self._cards:
+            row = card.data()
+            card.set_column(self.match_column(str(row.get('name') or ''),
+                                              str(row.get('label') or '')))
+
+    # ---- 卡片 ----
+    def add_field(self, name: str = '', label: str = '', choices: str = '',
+                  kind: str = 'variable', group: str = '', **extra):
+        card = FieldCard(on_change=self._on_change, on_remove=self._remove,
+                         on_move=self.move,
+                         sources_provider=self._sources_provider, parent=self)
+        card._columns_changed = self.rematch
+        card.set_data(name, label, choices, kind, group, **extra)
+        if not group:
+            card.set_column(self.match_column(name, label))
+        self._col.insertWidget(self._col.count() - 1, card)
+        self._cards.append(card)
+        card.focus()
+        if self._on_change:
+            self._on_change()
+        return card
+
+    def rows(self) -> list:
+        """卡片 → 后端参数（`build_declaration` 吃这个）。"""
+        out = []
+        for card in self._cards:
+            row = dict(card.data())
+            # ⚠ `limit` 不是列的一部分（它是"候选限不限死"），不进 `columns`
+            #   ——由 `slots()` 报给 `pattern`。这里摘掉免得写进 rules.json 的列里。
+            row.pop('limit', None)
+            out.append(row)
+        return out
+
+    def count(self) -> int:
+        return len(self._cards)
+
+    def clear(self):
+        for card in list(self._cards):
+            self._remove(card, notify=False)
+        if self._on_change:
+            self._on_change()
+
+    def remove_current(self):
+        if self._cards:
+            self._remove(self._cards[-1])
+
+    def move(self, card, delta: int):
+        """
+        把这一格**跟邻居换位置** —— 顺序是"代码里长什么样"的唯一依据
+        （改完立刻能在「试切」里看出来）。
+        """
+        if card not in self._cards:
+            return
+        i = self._cards.index(card)
+        j = i + int(delta)
+        if not (0 <= j < len(self._cards)):
+            return
+        self._cards[i], self._cards[j] = self._cards[j], self._cards[i]
+        self._col.removeWidget(card)
+        self._col.insertWidget(j, card)
+        if self._on_change:
+            self._on_change()
+
+    def slots(self) -> list:
+        """卡片 → **位置序列**（喂给 `authoring.pattern` 做试切/落进声明）。"""
+        out = []
+        for card in self._cards:
+            row = card.data()
+            out.append({'kind': row.get('kind') or 'variable',
+                        'group': row.get('group') or '',
+                        'text': row.get('name') or '',
+                        'column': row.get('label') or '',
+                        'choices': row.get('choices') or '',
+                        # ⚠ "限死"与"可以有多个"都是**显式**的（见 `FieldCard.data`）：
+                        #   不报上去 = 后端按"候选只是建议 / 一格一个词"处理。
+                        'limit': bool(row.get('limit')),
+                        'multi': bool(row.get('multi'))})
+        return out
+
+    def _remove(self, card, notify: bool = True):
+        if card in self._cards:
+            self._cards.remove(card)
+        card.setParent(None)
+        card.deleteLater()
+        if notify and self._on_change:
+            self._on_change()
+
+    # ---- 旧名字的别名（判据与旧调用点还在用 `add_param` / `_cards`）----
+    def add_param(self, name: str = '', label: str = '', choices: str = '',
+                  kind: str = 'variable', group: str = ''):
+        return self.add_field(name, label, choices, kind, group)
+
+
+__all__ = ['FieldCard', 'FieldList', 'ValueChips']

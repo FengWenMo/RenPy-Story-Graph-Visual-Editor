@@ -206,20 +206,24 @@ def fold_spec_args(head, args) -> str:
 # 的那些 token"按顺序列出来（含引号串，整串算一个）。**谁对应谁**由调用方
 # 声明的 schema 决定 —— 声明了就编辑，没声明就一个都不碰。
 
-def positional_tokens(head) -> list:
+def positional_tokens(head, skip_head: bool = True) -> list:
     """
     语句头之外的**位置参数** token → `[(起, 止, 原文), …]`（`止` 不含）。
 
-    跳过四样东西：头一个词（语句名）、`key=value`（有名字的参数）、
-    行尾的块标记 `:`、以及空串以外的一切空白。
+    跳过四样东西：头一个词（语句名，`skip_head=True` 时）、`key=value`
+    （有名字的参数）、行尾的块标记 `:`、以及空串以外的一切空白。
     引号串**整串算一个**（`mycue "闪电"` 里那是一个参数，不是两个词）。
+
+    ⚠ `skip_head=False`（2026-10-13 加）：调用方**已经把动作名摘掉了**时用 ——
+    这时第一个词就是**第一个参数**（`show` 摘下后的 `lan`），再跳一次就整体左移
+    （实测：`人物` 那格读成了 `swim_suit`）。
     """
     text = strip_block_colon(head)
     out: list = []
     i, n = 0, len(text)
     named_spans = [(m.start(0), m.end(0)) for m in iter_kv_text(text)]
     in_named = lambda pos: any(a <= pos < b for a, b in named_spans)  # noqa: E731
-    first = True
+    first = bool(skip_head)
     while i < n:
         if text[i].isspace():
             i += 1
@@ -252,9 +256,290 @@ def positional_tokens(head) -> list:
     return out
 
 
-def positional_values(head) -> list:
-    """位置参数的值（已去引号），按出现顺序。"""
-    return [_unquote(tok) for _s, _e, tok in positional_tokens(head)]
+def positional_values(head, skip_head: bool = True) -> list:
+    """位置参数的值（已去引号），按出现顺序（`skip_head=False` 见 `positional_tokens`）。"""
+    return [_unquote(tok) for _s, _e, tok in positional_tokens(head,
+                                                               skip_head=skip_head)]
+
+
+def head_is_a_pattern_slot(head, pattern) -> bool:
+    """
+    动作名**自己在格子里**吗？（`head` = 整条语句头原文，`pattern` = 声明的格子）
+
+    这一条决定"位置参数从哪个数起"（2026-10-13 实测修，用户现场）：
+
+        A. 格子只有「人物 / 服装 / 表情」，动作名 `show` **不在格子里**
+           → 粘 `show lan swim_suit happy` 时，`show` 之后的**第一个参数**
+             才是「人物」→ 数位置参数前要把动作名摘掉；
+        B. 格子第一格就是"固定几个字 `show`"（用户可能的另一种填法）
+           → 动作名**占一格**，位置参数从它开始数，**不能**摘。
+
+    ⚠ 只认"头一个格子、而且是 keyword、文字正好等于动作名"——其余一律当 A
+    （**不猜**别的形态）。
+    """
+    text = strip_block_colon(str(head or '')).strip()
+    if not text:
+        return False
+    first = text.split()[0]
+    for raw in (pattern or ()):
+        if not isinstance(raw, dict):
+            return False                    # 旧形状（字符串列名）→ 当 A
+        kind = str(raw.get('kind') or '')
+        slot_text = str(raw.get('text') or '').strip()
+        return kind == 'keyword' and slot_text == first
+    return False
+
+
+#: 走格子认领词时，**会吃掉一个词**的格子类型（2026-10-13 抽出这一条真源）。
+#:
+#: ⚠ `optional` **不在里面**：它"可出现可不出现"，吃不吃词取决于下一格 ——
+#:   读值那一侧（`pattern_slot_values`）单独判；数位置号时按"不吃"处理。
+#: ⚠ 这张表与"谁敢占位置号"是**同一件事** —— 关键字格也吃词、也占号，
+#:   否则读值就会把关键字本身当成旁边那格的值（实测：三格只对一格）。
+WALK_KINDS = ('value', 'variable', 'choice', 'keyword')
+
+
+def pattern_slot_values(head, pattern, options=None) -> dict:
+    """
+    **拿声明的格子去认领这一行的词** → `{第 i 格: 词}`（只认领得出的才在里面）。
+
+    为什么要有它（2026-10-13 实测的第三次修正）：位置号（`@0/@1`）那套算法
+    **数不准**——`keyword` 格（固定几个字）**不占位置号却确实吃掉一个词**：
+
+        show lan swim_suit happy
+        [人物=任意] [swim_suit=固定] [happy=从这些选]
+        实测：位置号法把 `swim_suit` 给了「人物」，把 `happy` 给了「惊喜」…
+              （用户现场就是"三格只对一格"）
+
+    所以这里不再"算下标"，而是**按格子顺序认领词**：
+      · `keyword` 格：词必须**逐字相等**才认领（认领后吃掉它）；
+      · `variable` / `choice` 格：吃掉一个词；
+      · `multi` 格（"这一格可以有多个"）：吃掉**连续的一串词**，但
+        **不吃后面格子的固定字**（`keyword.text` / `optional.text`）——
+        否则 `mypose happy sad at left` 会把 `at left` 一起吃进「表情」；
+      · `optional` 格：下一个词等于它的文字就吃掉两个词，否则跳过
+        （**读值也要认它** —— 2026-10-13 修：以前这里跳过，于是「位置」
+        那一格永远空着，人以为剧本里没写位置）。
+      · 认不出的格子 -> 不放进结果（调用方显示空格子，**不猜**）。
+
+    ⚠ `head` 传的是"**动作名之后**"的部分（调用方已经摘掉动作名）。
+    """
+    # ⚠⚠ 这一段**整段重写**过（2026-10-13）：原来的写法在"多值格 + 可选段"
+    #   同时出现时会串位（多值格只吃到一个词 / 可选段读成空）。重写的原则没变：
+    #   **按格子顺序认领词**，只是把"能吃几个"写得更直白：
+    #     1. `keyword`：必须逐字相等；
+    #     2. `optional`：下一个词正好是它的字 → 吃两个字；
+    #     3. `multi`：连续吃到"下一个词属于后面某格的固定字"或"吃不动"为止；
+    #     4. `choice`：候选里的词**优先**（不要求它就在当前位置，中间隔着的
+    #        词留给后面的格子）；候选外的词也认（候选 ≠ 限死，见 `limit`）；
+    #     5. 其它：吃一个词。
+    #   ⚠ 认领不出来时**不放进结果**（调用方显示空格子，不猜）。
+    tokens = [t for t in str(strip_block_colon(head or '')).split() if t]
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    # ⚠⚠ **与 `slot_value_map` 同一份实现**（2026-10-13 的决定）：
+    #   这两处以前各写一遍"顺序认领"，两套口径 → 卡片显示的值与试切切出来的
+    #   值会对不上（多值格尤其明显）。现在只保留 `slot_value_map` 一份。
+    by_column = slot_value_map(head, slots, options=options)
+    result: dict = {}
+    for i, slot in enumerate(slots):
+        keys = [str(slot.get('column') or '').strip()]
+        if str(slot.get('kind') or '') == 'optional':
+            keys.append(f"{keys[0]}+{str(slot.get('text') or '').strip()}")
+        keys.append(str(slot.get('text') or '').strip())
+        hit = next((by_column[k] for k in keys
+                    if k and by_column.get(k)), None)
+        if hit is not None:
+            result[i] = hit
+    return result
+
+
+def _claim(head, pattern) -> dict:
+    """
+    **顺序认领器** —— 一行 + 一串格子 → `{第 i 格: 词}`。
+
+    ⚠⚠ 2026-10-15 起它是 `authoring.pattern.assign_tokens` 的**薄转发**。
+    在此之前，"把一行词分配到格子"这件事在仓库里有**三套并行实现**
+    （`pattern.match_line` 的递归回溯 / 这里的单趟认领 / `slot_value_map`
+    又抄了一遍），规则漂移过 —— 用户看到的"试切说切上了、卡片读出来不一样"
+    就是它。现在分配规则**只有那一份**，这里只负责切词与返回形状。
+
+    策略用 `'candidates'`：**读值那一侧的历史口径** —— 枚举格允许"跳过中间那些
+    词、去认后面出现的候选"（把候选当词典用）。试切那一侧用 `'order-first'`
+    （按书写顺序吃当前这个词）；两种策略的分岔点写在 `assign_tokens` 的
+    `POLICIES` 上，并由判据钉住，不再靠"两套代码各写一遍"。
+    """
+    from storygraph.authoring.pattern import assign_tokens
+    tokens = [t for t in str(strip_block_colon(head or '')).split() if t]
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    got = assign_tokens(tokens, slots, policy='candidates')
+    return {i: ' '.join(tokens[a:b]) for i, (a, b) in got['spans'].items()}
+
+
+def slot_span(head, pattern, index) -> tuple:
+    """
+    第 `index` 格在 `head` 里的**字符区间** `(start, end, text)`（认不出 → `('', '', '')`）。
+
+    为什么要"区间"而不是"位置号"（2026-10-13 实测）：
+      · **多值格**（"这一格可以有多个"，`mypose happy sad`）占**两个词的宽度** ——
+        按位置号只会换掉第一个词，`sad` 留在原地 → 一行里出现
+        `mypose smile sad`（谁也没想要）；
+      · **可选段**（`at left`）在位置号那套里**没有号**，于是那一格永远写不回去。
+
+    找法是"认领出来的那段原文，在行里按**整词**出现的位置"：
+    只在恰好处出现一次才给区间（出现多次 / 找不到 → 认不出，**不猜**）。
+    """
+    text = str(strip_block_colon(head or ''))
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return '', '', ''
+    if not (0 <= idx < len(slots)):
+        return '', '', ''
+    # ⚠⚠ **先按格子直查**（2026-10-14 修，这是折回"整段换值"最后一块）。
+    #
+    # `slot_value_map` 的键是**格子上的列名**（`角色` / `服装`），
+    # 而调用方手上的列可能叫**另一个名字**（声明里 `columns[].name` = `who`）
+    # —— 于是"按列名查"会**查空或查错**：
+    #   · 查空 → 区间认不出 → 兜底去**追加**（实测行尾多一个值
+    #     `swim_suit lyj "泳装" mood=happy 校服`）；
+    #   · 更糟的是**假命中**（拿 `角色` 查到了关键字的键），
+    #     于是连兜底都走不到、区间还算错。
+    # `_claim` 是**按格子顺序**认领原文的，对"列叫什么名字"完全不敏感 ——
+    # 所以它才是这一侧的真源（与读值那一侧的 `slot_value_map` 同一套走法）。
+    slot = slots[idx]
+    value = _unquote(str(_claim(text, slots).get(idx) or '').strip())
+    if not value:
+        # 兜底：按列名查（`_claim` 认不出时才走这里，**不猜**）
+        m = slot_value_map(text, slots)
+        keys = [str(slot.get('column') or '').strip()]
+        if str(slot.get('kind') or '') == 'optional':
+            keys.append(f"{keys[0]}+{str(slot.get('text') or '').strip()}")
+        keys.append(str(slot.get('text') or '').strip())
+        value = next((str(m[k]).strip() for k in keys if k and m.get(k)), '')
+    if not value:
+        return '', '', ''
+    # ⚠⚠ **按词扫一遍找这一段**（2026-10-14 定稿，不再用正则找边界）。
+    #
+    #   用正则找"整词边界"连着错了两版：行上是 `"泳装"`，而那一格的**值**
+    #   （去了引号）是 `泳装` —— 值的左右两边是**引号**不是空白，
+    #   `(?<!\S)` 匹配不到 → 区间认不出 → 兜底去**追加**，
+    #   实测行尾多出一个值（`swim_suit lyj "泳装" mood=happy 校服`）。
+    #   引号、书名号、破折号…… 靠枚举"哪些字符算边界"永远会漏。
+    #
+    #   所以直接**按空白切词**（与 `spec_arg_values` / `positional_tokens`
+    #   同一套词法），把每个词的原文区间记下来，再找"**去引号之后等于这个值**
+    #   的那些词"；多词的值（`at left`）按**连续几个词**匹配。
+    #   一个词都不多、一个词都不少 —— 认不出就返回空（**不猜**）。
+    words: list = []                              # [(start, end, raw)]
+    pos = 0
+    for tok in str(text or '').split():
+        at = text.find(tok, pos)
+        if at < 0:
+            break
+        words.append((at, at + len(tok), tok))
+        pos = at + len(tok)
+    needle = str(value or '').split()
+    if not needle:
+        return '', '', ''
+    for i in range(len(words) - len(needle) + 1):
+        span = words[i:i + len(needle)]
+        joined_raw = ' '.join(w[2] for w in span)
+        joined_val = ' '.join(_unquote(w[2]) for w in span)
+        if joined_val == ' '.join(needle) or joined_raw == ' '.join(needle):
+            return span[0][0], span[-1][1], value
+    return '', '', ''
+
+
+def set_slot_value(head, pattern, index, value) -> str:
+    """
+    第 `index` 格 → `value`（按**区间**换；认不出区间就退回位置号那套）。
+
+    ⚠ 值没变 → **逐字节原样**（与 `set_spec_arg` / `set_positional_arg` 同一条约定：
+    "打开表再导出一个字节都不动"）。值为空 → 把那一格删掉。
+    """
+    text = str(head or '')
+    new_value = str(value if value is not None else '').strip()
+    start, end, old = slot_span(text, pattern, index)
+    if not start and not end:
+        # 区间认不出（值本来就不在行里 / 出现多次）→ **追加/删除**都别硬来：
+        # 非空值追加在尾冒号之前，空值什么都不做（不猜）。
+        if not new_value:
+            return text
+        return set_positional_arg(
+            text, _positional_index_of(pattern, index), new_value)
+    if old == new_value:
+        return text                             # ← 没改：逐字节原样
+    if not new_value:
+        cut = start
+        while cut > 0 and text[cut - 1] in ' \t':
+            cut -= 1
+        return text[:cut] + text[end:].lstrip(' \t')
+    return text[:start] + new_value + text[end:]
+
+
+def _positional_index_of(pattern, index) -> int:
+    """
+    第 `index` 格 ↔ 它前面**占位置号**的格子有几个（`keyword`/多值也占）。
+
+    ⚠ 这是"区间认不出"时的**兜底**（与 `statement_registry._declared_positionals`
+    同一套走法），认得出区间时根本用不到它。
+    """
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    return sum(1 for s in slots[:max(0, int(index))]
+               if str(s.get('kind') or '') in WALK_KINDS)
+
+
+def slot_value_map(head, pattern, options=None) -> dict:
+    """
+    **每一格去认领最贴近它的那段词** → `{列名或显示名: 词}`。
+
+    ⚠⚠ 规则（2026-10-13 把地狱测试的三处期望放在一起才看清）：
+
+        [人物] [表情(multi)] [可选段 at 位置]
+        happy sad          → 人物=happy、表情=sad           ← 表情只拿"它这一段"里的
+        happy sad at left  → 人物=happy、表情=sad、位置=at left
+        happy              → 人物=happy、表情=（空）
+
+    也就是**贪心 + 让位**：每一格拿"最近的、属于它的"词；
+    `multi` 格把**连续的一段**收进来，但**遇到后面格子的固定字就让位**
+    （`at`）；前一层（`person`）拿不到的，才轮到它。
+
+    ⚠ 与 `pattern.match_line`（试切那一路）**同一套口径**：那边是"带回溯的
+    顺序走法"（能给出"切不上"和"哪一格没吃到"），这边是"给值"（更宽松，
+    因为卡片只是把值显示出来给人改）。
+    """
+    tokens = [t for t in str(strip_block_colon(head or '')).split() if t]
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    # ⚠⚠ **分配规则不在这里**（2026-10-15 抽，见 `pattern.assign_tokens`）。
+    #   这一段以前是**第三份**拷贝 —— 与 `_claim` 同一套规则抄了一遍、只是
+    #   返回形状不同；两处一起漂移的代价就是"试切说切上了、卡片读出来不一样"。
+    #   现在只保留"按格子取词 → 去引号 → 挂到列名/原文键上"这一层。
+    spans = _claim(head, slots)
+    out: dict = {}
+    for si, slot in enumerate(slots):
+        got = str(spans.get(si) or '').strip()
+        if not got:
+            continue
+        # ⚠⚠ **去掉引号**（2026-10-13 修，步骤 1 的②）：真机 `swim_suit lyj "泳装"`
+        #   里那一格的值是 `泳装`，不是 `"泳装"` —— 卡片上带着引号显示、
+        #   编剧一改就写出 `""泳装""`。`positional_values` 那侧一直走 `_unquote`，
+        #   这一侧漏了（两套实现并行的又一个代价）。
+        value = _unquote(got)
+        if not value:
+            continue
+        kind = str(slot.get('kind') or 'variable')
+        column = str(slot.get('column') or '').strip()
+        text = str(slot.get('text') or '').strip()
+        if column:
+            out.setdefault(column, value)
+        if text and kind == 'optional':
+            # 可选段的**原文键**（`C+at`）也放一份：`slot_span` 要按原文找区间
+            out.setdefault(f'{column}+{text}', value)
+            out.setdefault(text, value)
+        elif text and kind == 'keyword':
+            out.setdefault(text, value)
+    return out
 
 
 def _replace_span(text: str, start: int, end: int, piece: str) -> str:
@@ -409,8 +694,17 @@ def parse_dynamic_full(header) -> tuple:
     """
     列名 → `(语句名, 参数名, 位置号 | None)`；不是动态列 → `('', '', None)`。
 
-    ⚠ 只认**恰好一个**分隔符、且两段都是标识符：`a·b·c` 不是我们的列名
-    （宁可认不出，也不要把别人的列当成自己的 —— 认错一列会把值折进错误的参数里）。
+    ⚠ 只认**恰好一个**分隔符、且两段都非空、**两边都不含分隔符**：
+    `a·b·c` 不是我们的列名（宁可认不出，也不要把别人的列当成自己的 ——
+    认错一列会把值折进错误的参数里）。
+
+    ⚠⚠ **参数名可以是中文**（2026-10-13 实测修，用户现场）：
+    这里以前用 `[A-Za-z_]\\w*` 卡两段，于是 `show·人物@0`、`show·服装@1`
+    这种列名**认不出来** → 卡片上那几格**永远是空的**（而界面还显示
+    "列：人物/服装/神态"，看着一切正常）。
+    病根与 `learn_statement` 里那个"中文列名被丢掉"是**同一个**：
+    把"脚本具名参数"的标识符规则套到了**表格列名**上。
+    列名是我们自己的列，中文天经地义；**只要不是空、并且不含分隔符**就认。
     """
     text = str(header or '').strip()
     positional = None
@@ -424,8 +718,16 @@ def parse_dynamic_full(header) -> tuple:
     h, p = (part.strip() for part in text.split(SPEC_COLUMN_SEP))
     if not h or not p:
         return '', '', None
-    if (not re.fullmatch(r'[A-Za-z_]\w*', h)
-            or not re.fullmatch(r'[A-Za-z_]\w*', p)):
+    # ⚠ 两段**都不许以数字开头**（`1bad·x` / `a·1bad` 不是我们的列名 ——
+    #   那是别人的表头），但**允许中文**（`show·人物@0` 是我们自己的列，见下）。
+    if h[0].isdigit() or p[0].isdigit():
+        return '', '', None
+    # ⚠⚠ **左边那段必须是 ASCII 标识符**（2026-10-13 实测）：语句名是**代码里**的
+    #   写法（`show` / `mycue` / `camera`），永远是 ASCII；而右边那段是**我们自己的
+    #   表格列名**，中文天经地义（`show·人物@0`）。
+    #   不加这一条，`SpecHead` 的中文表头「自定义语句·头行（高级）」会被当成
+    #   动态列（`·` 正好在中间）—— 实测：它污染了"干净章节一列都不多"那条判据。
+    if not re.fullmatch(r'[A-Za-z_]\w*', h):
         return '', '', None
     return h, p, positional
 
@@ -485,16 +787,86 @@ def fold_dynamic_columns(row, values) -> str:
     等式守卫）；清空 → 删掉那个参数。
     """
     text = str(row or '')
+    raw_pattern = list(values.get('__pattern__') or ()) if isinstance(values, dict) \
+        else []
     for header, value in (values or {}).items():
+        if header == '__pattern__':
+            continue
         _head, param, positional = parse_dynamic_full(header)
         if not param:
             continue
         clean = '' if value is None else str(value).strip()
+        # ⚠⚠ **有多值 / 可选段时按"格子区间"换**（2026-10-13 修）：
+        #   位置号只会换掉第一个词，`mypose happy sad` 改成 smile 会留下
+        #   `mypose smile sad`（谁也没想要）；而可选段（`at left`）在位置号
+        #   里根本没有号，永远写不回去。认得出格子的区间就按区间换。
+        if raw_pattern:
+            # ⚠ 列名可能是 `outfit`（声明里的 `columns[].name`）而格子叫
+            #   `服装` —— `_pattern_slot_index_for` 会回落到 `@N`，
+            #   所以这里要把**整段列名**（含 `@N`）传进去，不能只传 `param`。
+            idx = _pattern_slot_index_for(raw_pattern, header)
+            if idx is None:
+                idx = _pattern_slot_index_for(raw_pattern, param)
+            if idx is not None:
+                span = slot_span(text, raw_pattern, idx)
+                if span[0] or span[1]:
+                    text = set_slot_value(text, raw_pattern, idx, clean)
+                    continue
+        # ⚠⚠ **带位置号的列，也可能在行里是 `key=value`**（2026-10-13 实测修）：
+        #   位置号是按"格子顺序"发给**每一格**的（关键字格也吃词，见
+        #   `statement_registry._declared_positionals`），但关键字格在脚本里写成
+        #   `mood=happy` —— 那种**不是位置参数**。按位置号去替换就成了
+        #   `… mood=happy shy`（把新值**追加**到行尾，实测现场）。
+        #   判据：这一行里**真的有这个 `param=`** 就按具名参数写回。
+        if positional is not None and _has_named_param(text, param):
+            text = set_spec_arg(text, param, clean)
+            continue
         if positional is not None:
             text = set_positional_arg(text, positional, clean)
         else:
             text = set_spec_arg(text, param, clean)
     return text
+
+
+def _pattern_slot_index_for(pattern, param: str):
+    """
+    列名（`param`）↔ 声明里第几格（认不出 → `None`）。
+
+    ⚠⚠ **带 `@N` 的列名必须能用**（2026-10-14 修，这是折回"整段换值"最后一块）：
+    声明里 `columns[].name`（`outfit`）与 `pattern[].column`（`服装`）**常常不同**
+    —— 前者进表头、后者写在格子上。只按名字对，`outfit` 对不上 `服装`，
+    于是 `idx` 是 `None` → **跳过区间那一支**、直接走位置号 →
+    值被**追加**到行尾（实测 `swim_suit lyj "泳装" mood=happy 校服`）。
+
+    所以名字对不上时**回落到 `@N`**：`dynamic_spec_columns` 发的 `@N` 就是
+    格子的下标（见 `statement_registry._declared_positionals`），
+    它与 `pattern` 的下标**同一套**。这条兜底只对"有位置号的列"生效。
+    """
+    want = str(param or '').strip()
+    if not want:
+        return None
+    slots = [s for s in (pattern or ()) if isinstance(s, dict)]
+    for i, slot in enumerate(slots):
+        keys = {str(slot.get('column') or '').strip(),
+                str(slot.get('text') or '').strip()} - {''}
+        if want in keys:
+            return i
+    # 名字对不上 → 试"这一列是不是第 N 格"（`名字@N` 或纯数字都认）
+    tail = want.rsplit('@', 1)[-1] if '@' in want else (
+        want if want.isdigit() else '')
+    if str(tail).isdigit():
+        at = int(tail)
+        if 0 <= at < len(slots):
+            return at
+    return None
+
+
+def _has_named_param(text: str, param: str) -> bool:
+    """这一行里有没有 `<param>=` 这个**具名参数**？（有就按 `key=value` 写回）"""
+    want = str(param or '').strip()
+    if not want:
+        return False
+    return any(str(m.group(1) or '') == want for m in iter_kv_text(str(text or '')))
 
 
 __all__ = [
@@ -504,6 +876,8 @@ __all__ = [
     'set_spec_arg', 'fold_spec_args', 'builtin_columns',
     'positional_tokens', 'positional_values', 'set_positional_arg',
     'fold_arg_values', 'fold_dynamic_columns',
+    'slot_value_map', 'slot_span', 'set_slot_value', 'pattern_slot_values',
+    'head_is_a_pattern_slot', 'WALK_KINDS',
     'dynamic_column_name', 'parse_dynamic_column', 'parse_dynamic_full',
     'is_dynamic_column',
     'dynamic_headers', 'fold_dynamic_cells',

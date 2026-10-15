@@ -800,7 +800,96 @@ def unknown_attrs_by_tag(beats, facts,
     return EF.unrecognized_by_tag(pairs)
 
 
-def card_note(beat: Beat, symbols=None, facts=None) -> str:
+def silent_default_attrs(beat: Beat, layer_model=None, project_root=None,
+                         only_groups=None) -> list:
+    """
+    这一拍的立绘里，**写了却被引擎忽略**的属性 → `[{'tag','group','attr',
+    'used'}, …]`（保序去重）。
+
+    为什么必须有这条提示（2026-10-12 实测，正是用户问的"为什么不报"的那一半）：
+
+        `show ye base_handdown gratified angry`
+          → `gratified` / `angry` **同属 `expressions` 组**，叠层语义取
+            **声明靠前的那个**，另一个**静默丢掉** ——
+          → 而实测 lint 对这类冲突**一声不吭**（`exit 0`），所以只能工具自己算。
+
+    与 `beat_group_conflicts`（N3）的分工：那条说"你同组选了两个"，
+    这条说清"**具体哪个被顶掉了**"；两者都在卡片那条提示里出现。
+
+    ⚠ **只报真的被丢的**：一个词**单独**出现时不可能被顶掉（那正是它被采用）；
+    真正要看的是"同组写了 ≥2 个，其中哪些没进 `attrs_chosen`"。与
+    `beat_unknown_attrs` 同一条口径：**只报告，绝不阻止**，也绝不改用户写的东西。
+
+    ⚠⚠ **`only_groups`**（2026-10-12 实测的省法）：没给就直接返回 `[]` ——
+    "同组写了两个"这件事 `beat_group_conflicts` 几微秒就能算出来（纯属事实查表），
+    而"谁被顶掉"要读项目里的 `layeredimage`（**首次 0.28 s**，见
+    `layered_model.load_layer_model_cached`）。卡片每翻一页都调我这里，
+    所以**先问 N3、有冲突才算** —— 没有同组冲突的拍，一次磁盘都不摸。
+
+    ⚠ **认不出就返回 `[]`**：没给 `layer_model`、也没给 `project_root`（拿不到
+    项目里的 `layeredimage`）时**不猜** —— 宁可不说，也不说错。
+    """
+    if not only_groups:
+        return []
+    try:
+        from storygraph.story.layered_model import (load_layer_model_cached,
+                                                    resolve_layers)
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.silent_default_attrs.import', e)
+        return []
+    model = layer_model
+    if model is None:
+        if not project_root:
+            return []
+        try:
+            model = load_layer_model_cached(project_root)
+        except Exception as e:                      # noqa: BLE001
+            swallow('app.beats.silent_default_attrs.model', e)
+            return []
+    if model is None or not (model.images or {}):
+        return []
+    out, seen = [], set()
+    try:
+        rows = beat_sprite_rows(beat)
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.silent_default_attrs.rows', e)
+        return []
+    for row in rows:
+        toks = [w for w in (_show_item_attr(t)
+                            for t in str(row.get('image') or '').split()) if w]
+        if len(toks) < 2:
+            continue
+        tag, attrs = toks[0], toks[1:]
+        img = (model.images or {}).get(tag)
+        if img is None:
+            continue
+        try:
+            plan = resolve_layers(model, tag, attrs)
+        except Exception as e:                      # noqa: BLE001
+            swallow('app.beats.silent_default_attrs.resolve', e)
+            continue
+        # ⚠ 用 `attrs_chosen`（**真正采纳**的那些），不是 `attrs_used`（输入回显）
+        # —— 同一组写了两个词时两者才分得开，见 `LayerPlan.attrs_chosen` 的注释。
+        used = set(plan.attrs_chosen or ())
+        for group in img.groups:
+            if str(group.name or '') not in only_groups:
+                continue                    # 这一组没有"同组写了两个" → 免查
+            declared = [a for a in attrs if a in group.attrs]
+            if len(declared) < 2:
+                continue        # 0 个：本来就没写；1 个：不可能被顶掉
+            for attr in declared:
+                if attr in used:
+                    continue
+                key = (tag, attr)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({'tag': tag, 'group': group.name or '', 'attr': attr,
+                            'used': [a for a in attrs if a in used]})
+    return out
+
+
+def card_note(beat: Beat, symbols=None, facts=None, project_root=None) -> str:
     """
     卡片底部那条提示的**完整文案**（一句话，`；` 分隔）。纯函数，可单测。
 
@@ -816,6 +905,7 @@ def card_note(beat: Beat, symbols=None, facts=None) -> str:
          只能靠引擎给的 group 自己算（`group_conflicts`）。
     """
     parts = []
+    conflicts: list = []
     try:
         first = speaker_missing_warning(beat, symbols)
         if first:
@@ -823,7 +913,8 @@ def card_note(beat: Beat, symbols=None, facts=None) -> str:
     except Exception as e:                          # noqa: BLE001
         swallow('app.beats.card_note.speaker', e)
     try:
-        for hit in beat_group_conflicts(beat, facts):
+        conflicts = list(beat_group_conflicts(beat, facts))
+        for hit in conflicts:
             parts.append(f"「{hit['tag']}」的 {hit['group']} 组里同时选了 "
                          f"{'、'.join(hit['attrs'])}，引擎只认其中一个")
     except Exception as e:                          # noqa: BLE001
@@ -838,6 +929,18 @@ def card_note(beat: Beat, symbols=None, facts=None) -> str:
             parts.append(f"另有 {len(unknown) - 3} 项引擎也没认")
     except Exception as e:                          # noqa: BLE001
         swallow('app.beats.card_note.unknown', e)
+    try:
+        # **写了却被引擎静默丢掉**的属性（同组里的第二个词）——
+        # ⚠ 只在**真有同组冲突**时才去读项目里的 `layeredimage`（首次 0.28 s）：
+        # 没有冲突的拍（绝大多数）一次磁盘都不摸。见 `silent_default_attrs`。
+        groups = {str(h.get('group') or '') for h in conflicts}
+        for hit in silent_default_attrs(beat, project_root=project_root,
+                                        only_groups=groups)[:2]:
+            rest = '、'.join(hit['used']) or '默认的那一个'
+            parts.append(f"「{hit['tag']}」里的 {hit['attr']} 没生效"
+                         f"（{hit['group']} 组里引擎用的是 {rest}）")
+    except Exception as e:                          # noqa: BLE001
+        swallow('app.beats.card_note.silent', e)
     return '；'.join(parts)
 
 
@@ -1540,6 +1643,173 @@ def expression_groups_for(tag: str, symbols, groups, facts=None) -> list:
             out.append({'group': entry['name'], 'label': entry['label'],
                         'values': vals})
     return out
+
+
+def _symbols_project_root(symbols):
+    """
+    符号表 → 项目根（认不出返回 `None`）。
+
+    `Symbols` 自己不带 `project_root`，但它拿着 `registry`（`AssetRegistry`
+    在 `parse_asset_tables` 里被赋了 `project_root`）—— 所以这里两级都试。
+    **认不出就说认不出**：调用方据此不猜（`attr_slot_rows` 退回老路）。
+    """
+    root = getattr(symbols, 'project_root', None)
+    if root:
+        return root
+    reg = getattr(symbols, 'registry', None)
+    return getattr(reg, 'project_root', None) if reg is not None else None
+
+
+def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
+                   layer_model=None) -> list:
+    """
+    一个立绘 spec → **按引擎分组的一维一格**行（`[{'group','label','value',
+    'display','options','other'}, …]`）。
+
+    用户 2026-10-12 实测报的缺口（`show ye base_handdown gratified`）：
+
+    > 它明明就有两个动作……可是为什么编辑器不报呢？如果它不报的话……那么我就
+    > 永远无法调节 show base_handdown+表情了，我就永远只能调默认的了
+
+    病根不在"认不认识"（引擎两个属性都认、也不同组、不冲突），而在**卡片只有一个
+    表情格**：那一个格子里塞了"服装 + 表情"两个词，于是
+      · 当前值（`'base_handdown gratified'`）**不在**候选表里（候选是单个词）
+        → 点 chip 走"固定当前值"那一支，**看不出任何反应**；
+      · 从下拉里挑一个词 → `tag + 那个词` 重拼整张图，**服装被吃掉**
+        （`show ye base_handdown gratified` → `show ye gratified`）。
+
+    修法：**维度由引擎给**（`layeredimage` 的 group），工具一个组名都不写死 ——
+    `outfit` / `expressions` 各自一个格子，点哪格只**替换那一格的那个词**。
+
+    分组的来源有两档，先引擎后项目：
+      1. **引擎事实**（`engine_facts.json` 的 group + 引擎枚举的属性）——
+         真源，实测 `ye` 给的正是 `outfit` / `expressions`；
+      2. 引擎事实没有时，退回 `layered_model`（直接读项目里的 `layeredimage`）。
+
+    ⚠ **三处刻意的"不宣称 / 不乱动"**：
+      · `groups`（项目在 `rules.json` 里声明的词组）只当**改名层**用，不参与分组
+        ——结构已经写在引擎里，人再来指定成员就会两边打架（与 `rename_overlay`
+        同一条口径）；
+      · **可操作的维度不到 2 条 → 返回 `[]`**：`show ling happy`（只有一条维度
+        有值）走原来那条单格老路，于是这类项目**行为一个字节不变**（通用性底线，
+        与 `expression_choice_groups` / `group_choices` 同规矩）。而
+        `ye base_handdown gratified` 有两条维度有值 → 一维一格；
+      · `extras`：**不属于任何引擎组的词原样留着**（`base_handdown_mask` /
+        `_hd_cut` 这类内部件 —— 实测资源表里真有它们）。我们不认识它们，但
+        **别人的东西一个字节都不许丢**。
+    """
+    spec = str(image_spec or '').strip()
+    toks = [t for t in (_show_item_attr(t) for t in spec.split()) if t]
+    if len(toks) < 2 or symbols is None:
+        return []
+    tag, attrs = toks[0], toks[1:]
+    group_rows = []
+    try:
+        if facts:
+            from storygraph.core import engine_facts as EF
+            overlay = EF.rename_overlay(groups)
+            group_rows = list(EF.grouped_choices(facts, tag, overlay) or [])
+    except Exception as e:                        # noqa: BLE001 - 引擎事实坏掉不该炸卡片
+        swallow('app.beats.attr_slot_rows.facts', e)
+        group_rows = []
+    if not group_rows:
+        # 没采过引擎事实 / 引擎没给这个 tag 的分组 → 退回项目里的 `layeredimage`
+        # 声明（同一份结构，只是从 `.rpy` 现读）。
+        try:
+            model = layer_model
+            if model is None:
+                from storygraph.story.layered_model import load_layer_model_cached
+                root = _symbols_project_root(symbols)
+                model = load_layer_model_cached(root) if root else None
+            img = (model.images or {}).get(tag) if model is not None else None
+            if img is not None:
+                buckets: dict = {}
+                for g in img.groups:
+                    names = [n for n in g.attrs if n and n not in buckets]
+                    buckets.setdefault(g.name or '', [])
+                    for n in names:
+                        if n not in buckets[g.name or '']:
+                            buckets[g.name or ''].append(n)
+                group_rows = [{'group': k, 'label': k, 'values': v}
+                              for k, v in buckets.items() if v]
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.beats.attr_slot_rows.layers', e)
+            group_rows = []
+    if not group_rows:
+        return []
+    # 当前值 → 每一维当前选中的那个词（一个词只归一组，先命中的组拿走 —— 与
+    # `grouped_choices` 的"值 = 该组成员"同口径）。
+    taken = set()
+    slots = []
+    for entry in group_rows:
+        vals = [str(v) for v in (entry.get('values') or ()) if str(v)]
+        cur = next((a for a in attrs if a in vals and a not in taken), '')
+        if cur:
+            taken.add(cur)
+        slots.append({'group': str(entry.get('group') or ''),
+                      'label': str(entry.get('label') or '')
+                               or str(entry.get('group') or ''),
+                      'value': cur, 'options': vals})
+    # **可操作的维度 < 2 → 老路**（`show ling happy` 这类：一个词、一个格子）。
+    if len([s for s in slots if s['value']]) < 2:
+        return []
+    # 不属于任何引擎组的词（掩码/切图这类内部件，实测项目里真有）原样留着。
+    known = {v for s in slots for v in s['options']}
+    extras = [a for a in attrs if a and a not in known]
+    for slot in slots:
+        probe = Beat(seq=1, label='', text='',
+                     show=' '.join([tag] + ([slot['value']]
+                                            if slot['value'] else [])))
+        slot['display'] = (_expression_display(slot['value'], tag, probe, symbols)
+                           if slot['value'] else '')
+        # **其它维度的词原样保留**（点一格不许吃掉另一格）——点它时用这一份去合成。
+        slot['other'] = [a for a in attrs if a and a != slot['value']]
+        slot['extras'] = list(extras)
+    return slots
+
+
+def _replace_attr_word(attrs, old: str, new: str) -> list:
+    """
+    把 `attrs` 里的 `old` **原位**换成 `new`（没有 `old` 就追加到末尾）。
+
+    为什么原位：Ren'Py 的 `show ye base_handdown happy` 是作者写的顺序，
+    换表情不该让服装突然跳到后面去（往返 diff 越小越好）。
+    """
+    out = [a for a in (attrs or ()) if a and a != new]
+    if old and old in out:
+        out[out.index(old)] = new
+        return out
+    return out + [new]
+
+
+def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
+                    groups=None, facts=None, layer_model=None) -> str:
+    """
+    **只换一个维度的词**，其余维度原样保留 → 新的 `show` spec。
+
+    这是"点一下服装 chip，表情不丢"的唯一实现点（用户 2026-10-12 的原始诉求）。
+    认不出这个维度 / 这张图没有多条维度 → 原样返回 `image_spec`（宁可不改，
+    也不猜着改 —— 猜错就是演出事故）。
+    """
+    spec = str(image_spec or '').strip()
+    rows = attr_slot_rows(spec, symbols, groups=groups, facts=facts,
+                          layer_model=layer_model)
+    hit = next((r for r in rows if r['group'] == str(group or '')), None)
+    if hit is None:
+        return spec
+    toks = spec.split()
+    tag = toks[0] if toks else ''
+    if not tag:
+        return spec
+    value = str(value or '').strip()
+    attrs = _replace_attr_word(toks[1:], hit['value'], value)
+    # **不认识的词留在原位**（`base_handdown_mask` / `_hd_cut` 这类内部件）——
+    # 一维一格只负责换它认识的那一维，其余一个字节都不动。
+    attrs = [a for a in attrs if a and a != value]
+    if value:
+        attrs = attrs + [value]
+    out = [tag] + attrs
+    return ' '.join(out)
 
 
 def choices_for_image(image_spec: str, symbols) -> dict:

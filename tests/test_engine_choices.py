@@ -678,3 +678,204 @@ class TestAgainstRealFacts:
         assert got, '真机 lan 应当能直接给出分组候选'
         total = sum(len(g['values']) for g in got)
         assert total >= 5, total
+
+
+# ---------------------------------------------------------------------------
+#  一维一格（2026-10-12）：`show ye base_handdown gratified` 的两个词
+# ---------------------------------------------------------------------------
+
+class _SlotSym:
+    """
+    最小符号表：够 `attr_slot_rows` 用（`attrs_of_tag` + 项目根）。
+
+    ⚠ `attrs_of_tag` 给的是**资源表的全部属性**（含 `base_handdown_mask`
+    这类内部件）—— 真机就是这个形状，所以判据也照这个形状造。
+    """
+
+    def __init__(self, table, project_root=None, words=None):
+        self._t = table
+        self.registry = type('R', (), {'project_root': project_root})()
+        self.project_root = project_root
+        self.expressions = dict(words or {})
+        self.project_words = {'expression': set(self.expressions),
+                              'position': set()}
+
+    def attrs_of_tag(self, tag):
+        return list(self._t.get(tag) or [])
+
+    def expression_word_for(self, tag, attr):
+        return ''
+
+
+#: 真机 `ye` 的形状：两个组（`outfit` 2 个值 / `expressions` 3 个值），
+#: 外加两个不属于任何组的内部件（掩码 / 切图）。
+YE_ATTRS = {
+    'ye': [{'group': 'expressions', 'attribute': 'ahah'},
+           {'group': 'expressions', 'attribute': 'gratified'},
+           {'group': 'expressions', 'attribute': 'happy'},
+           {'group': 'outfit', 'attribute': 'base_handdown'},
+           {'group': 'outfit', 'attribute': 'base_swimsuit'}],
+}
+#: 引擎给的候选顺序（`gratified` 排在 `happy` 前，姿势词排在表情后面 —— 与真机一致）。
+#: ⚠ `base_handdown_mask` 这类内部件**不在候选里**（真机就是这样：`candidates`
+#: 是引擎枚举的"可显示属性"，掩码/切图进不去）。
+YE_CANDS = {'ye': ['ahah', 'gratified', 'happy',
+                   'base_handdown', 'base_swimsuit']}
+YE_SYM = {'ye': ['ahah', 'gratified', 'happy', 'base_handdown',
+                 'base_swimsuit', 'base_handdown_mask', '_hd_cut']}
+
+
+def _ye_sym(project_root=None):
+    return _SlotSym(YE_SYM, project_root=project_root)
+
+
+def _ye_facts():
+    return _facts(YE_ATTRS, YE_CANDS)
+
+
+class TestAttrSlotRows:
+    def test_two_dimensions_become_two_slots(self):
+        """用户原始诉求：`base_handdown` + 表情 = **两格**，不是挤在一个格子里。
+
+        ⚠ 顺序**跟着引擎给的分组顺序**走（真机 `ye` 是 `expressions` 在前）——
+        工具不重排，重排等于把引擎"适合展示的顺序"丢掉。
+        """
+        rows = beats.attr_slot_rows('ye base_handdown gratified', _ye_sym(),
+                                    facts=_ye_facts())
+        assert [r['group'] for r in rows] == ['expressions', 'outfit'], rows
+        assert [r['value'] for r in rows] == ['gratified', 'base_handdown']
+
+    def test_each_slot_offers_its_own_group_only(self):
+        """服装那一格的候选里**不该混进表情**（反之亦然）。"""
+        rows = beats.attr_slot_rows('ye base_handdown happy', _ye_sym(),
+                                    facts=_ye_facts())
+        by_group = {r['group']: r for r in rows}
+        assert by_group['outfit']['options'] == ['base_handdown', 'base_swimsuit']
+        assert 'happy' in by_group['expressions']['options']
+        assert 'base_handdown' not in by_group['expressions']['options']
+
+    def test_one_word_is_the_old_single_chip(self):
+        """**通用性底线**：一个词 → 走老路（`show ling happy` 行为一字不变）。"""
+        assert beats.attr_slot_rows('ye happy', _ye_sym(),
+                                    facts=_ye_facts()) == []
+
+    def test_unknown_tag_falls_back(self):
+        assert beats.attr_slot_rows('bg1.1', _ye_sym(),
+                                    facts=_ye_facts()) == []
+
+    def test_without_facts_and_layers_it_claims_nothing(self):
+        """没采过引擎事实、也读不到项目里的 `layeredimage` → **不猜**。"""
+        assert beats.attr_slot_rows('ye base_handdown gratified', _ye_sym()) == []
+
+    def test_engine_facts_beat_the_project_declaration(self):
+        """声明只当改名层：`outfit` → 「服装」，结构仍由引擎给。"""
+        rows = beats.attr_slot_rows(
+            'ye base_handdown gratified', _ye_sym(), groups=[_Group('outfit', '服装')],
+            facts=_ye_facts())
+        outfit = next(r for r in rows if r['group'] == 'outfit')
+        assert outfit['label'] == '服装'
+
+    def test_mask_words_are_preserved_as_extras(self):
+        """**不认识的词一个字节都不丢**（`base_handdown_mask` 这类内部件）。"""
+        rows = beats.attr_slot_rows('ye base_handdown base_handdown_mask gratified',
+                                    _ye_sym(), facts=_ye_facts())
+        assert rows, '两个维度都在 → 应当给格子'
+        assert rows[0]['extras'] == ['base_handdown_mask'], rows[0]
+
+
+class TestApplyAttrSlot:
+    def test_switching_expression_keeps_the_outfit(self):
+        """**这一条就是用户那个 bug**：换表情不许把 `base_handdown` 吃掉。"""
+        got = beats.apply_attr_slot('ye base_handdown gratified', 'expressions',
+                                    'ahah', symbols=_ye_sym(),
+                                    facts=_ye_facts())
+        assert 'base_handdown' in got and 'gratified' not in got, got
+        assert got.split()[0] == 'ye'
+
+    def test_switching_outfit_keeps_the_expression(self):
+        got = beats.apply_attr_slot('ye base_handdown gratified', 'outfit',
+                                    'base_swimsuit', symbols=_ye_sym(),
+                                    facts=_ye_facts())
+        assert 'gratified' in got and 'base_swimsuit' in got, got
+        assert 'base_handdown' not in got.split(), got
+
+    def test_clearing_the_outfit_drops_only_that_word(self):
+        got = beats.apply_attr_slot('ye base_handdown gratified', 'outfit', '',
+                                    symbols=_ye_sym(), facts=_ye_facts())
+        assert got == 'ye gratified', got
+
+    def test_unknown_group_changes_nothing(self):
+        """认不出的维度 → **原样返回**（宁可不改，也不猜着改）。"""
+        spec = 'ye base_handdown gratified'
+        assert beats.apply_attr_slot(spec, 'nope', 'x', symbols=_ye_sym(),
+                                     facts=_ye_facts()) == spec
+
+    def test_single_chip_spec_is_left_alone(self):
+        """只有一格时这条路**不许**动它（老路由 `_set_field` 负责）。"""
+        assert beats.apply_attr_slot('ye happy', 'expressions', 'ahah',
+                                     symbols=_ye_sym(),
+                                     facts=_ye_facts()) == 'ye happy'
+
+
+class TestSilentDefaultAttrs:
+    """
+    "写了却被引擎丢掉"的那一半 —— 用户问的正是"为什么不报"。
+
+    ⚠ 这条**要 `layer_model` 才查**（不像别的检查只靠引擎事实）：因为"谁顶掉谁"
+    是叠层语义。给不出模型 → **一个字都不说**（与 `unrecognized_attrs` 同规矩）。
+    ⚠ 还要求**先有 N3 同组冲突**（`only_groups`）：卡片每翻一页都调它，而没冲突
+    的拍占绝大多数 —— 那一条路**一次磁盘都不该摸**。
+    """
+
+    def _model(self, tmp_path):
+        from storygraph.story.layered_model import load_layer_model
+        game = tmp_path / 'game'
+        game.mkdir(parents=True, exist_ok=True)
+        (game / 'defs.rpy').write_text(
+            'layeredimage lan:\n'
+            '    group expressions:\n'
+            '        attribute ahah:\n'
+            '            "a.png"\n'
+            '        attribute happy default:\n'
+            '            "h.png"\n'
+            '        attribute sad:\n'
+            '            "s.png"\n'
+            '    group outfit:\n'
+            '        attribute clothes2:\n'
+            '            "c.png"\n', encoding='utf-8')
+        return load_layer_model(tmp_path)
+
+    def _beat(self, show):
+        b = beats.Beat()
+        b.show = show
+        return b
+
+    def test_second_word_in_one_group_is_reported(self, tmp_path):
+        """`show lan sad ahah`：同组两个 → 引擎只用**声明靠前**的那个。"""
+        model = self._model(tmp_path)
+        got = beats.silent_default_attrs(self._beat('lan sad ahah'),
+                                         layer_model=model,
+                                         only_groups={'expressions'})
+        assert got and got[0]['attr'] in ('sad', 'ahah'), got
+        assert got[0]['tag'] == 'lan'
+
+    def test_across_groups_nothing_is_reported(self, tmp_path):
+        model = self._model(tmp_path)
+        assert beats.silent_default_attrs(self._beat('lan sad clothes2'),
+                                          layer_model=model,
+                                          only_groups={'expressions'}) == []
+
+    def test_without_a_model_nothing_is_claimed(self):
+        assert beats.silent_default_attrs(self._beat('lan sad ahah'),
+                                          only_groups={'expressions'}) == []
+
+    def test_without_a_conflict_group_nothing_is_looked_up(self):
+        """**省法**：没有同组冲突 → 连模型都不去建（返回 `[]`）。"""
+        assert beats.silent_default_attrs(self._beat('lan sad ahah'),
+                                          only_groups=set()) == []
+
+    def test_card_note_stays_quiet_without_a_project_root(self):
+        note = beats.card_note(self._beat('lan sad ahah'), None,
+                               _facts(LAN_ATTRS, LAN_CANDS))
+        assert '没生效' not in note
+

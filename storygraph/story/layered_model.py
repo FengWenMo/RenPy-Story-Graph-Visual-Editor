@@ -3,7 +3,7 @@
 ================================
 **合成立绘（layeredimage）的通用模型**。
 
-设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`。
+设计文档：`docs/archive/设计_合成立绘合成与姿势切换_2026-10-05.md`。
 
 为什么要有这个模块（用户 2026-10-05）：
 
@@ -125,7 +125,14 @@ class LayerPlan:
     pose: str = ''                     # 当前姿势值（'' = 普通/无姿势）
     pose_options: list = field(default_factory=list)
     pose_labels: dict = field(default_factory=dict)
+    #: **输入**的属性（原样回显 —— 调用方据此知道"我给了什么"）。
     attrs_used: list = field(default_factory=list)
+    #: **真正被采纳**的属性（同一个组里只有"声明靠前的那个"进得来）。
+    #:
+    #: ⚠ 为什么必须与 `attrs_used` 分开（2026-10-12）：`show ye happy sad`
+    #: 这类"同组写了两个"时，`attrs_used` 里两个都在 —— 拿它判"谁被顶掉了"
+    #: 永远判不出来（第一版就是这么写的，被自己的判据当场抓住）。
+    attrs_chosen: list = field(default_factory=list)
 
     def paths(self) -> list:
         return [ly.get('path') for ly in self.layers if ly.get('path')]
@@ -960,6 +967,66 @@ def load_layer_model(project_root) -> LayerModel:
     return model
 
 
+#: `项目根 -> (指纹, LayerModel)`。**为什么必须缓存**（2026-10-12 实测）：
+#: 真机 `sr_general` 建一次要 **0.28 s**（54 个 `.rpy` + 姿势表），而卡片每刷新
+#: 一拍都会问一次"这个属性是不是被同组顶掉了"（`app.beats.silent_default_attrs`）
+#: —— 不缓存就是每翻一页卡 0.28 s。
+_LAYER_MODEL_CACHE: dict = {}
+
+
+def clear_layer_model_cache() -> None:
+    """清掉合成立绘模型缓存（判据 / 换项目时用）。"""
+    _LAYER_MODEL_CACHE.clear()
+
+
+def layer_model_stamp(project_root) -> tuple:
+    """
+    轻量指纹 `(文件数, 最新 mtime_ns)` —— 用来判"模型还能不能用"。
+
+    实测（真实项目）：54 个脚本、全量 stat **0.066 s**，比重新建模型（0.28 s）
+    便宜 4 倍；而"改了 `layeredimage` 不重开编辑器就看不到"是不能接受的，
+    所以这里用指纹失效，而不是"一次会话只读一次盘"。
+    认不出 / 读不动 → 返回 `()`（调用方据此**每次都重建**，宁可慢也不给旧数据）。
+    """
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        files = list(discover_scripts(project_root))
+        newest = 0
+        for fp in files:
+            try:
+                mtime = Path(fp).stat().st_mtime_ns
+            except OSError:
+                continue
+            newest = max(newest, mtime)
+        return (len(files), newest)
+    except Exception as e:                      # noqa: BLE001 - 指纹算不出就不缓存
+        swallow('story.layered_model.layer_model_stamp', e)
+        return ()
+
+
+def load_layer_model_cached(project_root) -> LayerModel:
+    """
+    `load_layer_model` 的**带指纹缓存**版本（界面/卡片那条路走它）。
+
+    ⚠ 两档诚实行为：
+      · 指纹算不出来 → **不走缓存**（每次重建）——宁可慢，也不给一份可能是旧的
+        结构去下结论；
+      · 项目根为空 → 原样返回 `load_layer_model('')` 的结果（与从前一致）。
+    """
+    root = str(project_root or '')
+    if not root:
+        return load_layer_model(project_root)
+    stamp = layer_model_stamp(root)
+    if stamp:
+        hit = _LAYER_MODEL_CACHE.get(root)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+    model = load_layer_model(root)
+    if stamp:
+        _LAYER_MODEL_CACHE[root] = (stamp, model)
+    return model
+
+
 def resolve_layers(model: LayerModel, tag: str, attrs, project_root=None) -> LayerPlan:
     """
     `tag + 属性集合` → 该怎么叠（`LayerPlan`）。
@@ -1000,6 +1067,7 @@ def resolve_layers(model: LayerModel, tag: str, attrs, project_root=None) -> Lay
         for name, attr in group.attrs.items():
             if name.lower() in lset:
                 chosen = attr
+                plan.attrs_chosen.append(name)
                 break
         if chosen is None:
             chosen = next((a for a in group.attrs.values() if a.default), None)
@@ -1151,4 +1219,6 @@ __all__ = ['LayerAttr', 'LayerGroup', 'LayeredImage', 'LayerPlan',
            'LayerModel', 'parse_layeredimages', 'parse_helper_functions',
            'parse_expr', 'expand_displayable', 'evaluate_condition',
            'parse_pose_tables', 'load_layer_model', 'resolve_layers',
+           'load_layer_model_cached', 'layer_model_stamp',
+           'clear_layer_model_cache',
            'pose_switch_problem', 'frame_pose_warnings']

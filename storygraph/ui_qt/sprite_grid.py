@@ -24,7 +24,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
-from storygraph.app.beats import (choices_for_image,
+from storygraph.app.beats import (apply_attr_slot, attr_slot_rows,
+                                  choices_for_image,
                                   normalize_expression_words,
                                   uniform_sprite_position)
 # `uniform_position_of` 以前在这里**又写了一份**（与 `app/session_table.py`
@@ -100,25 +101,55 @@ class SpriteCardWidget(QFrame):
 
     def __init__(self, item: dict, symbols=None, loader=None,
                  parent=None, on_change=None, on_resolve_path=None,
-                 choice_groups=None, choice_groups_for=None):
+                 choice_groups=None, choice_groups_for=None,
+                 assets_ready: bool = False):
         super().__init__(parent)
         self.item = dict(item or {})
         self._symbols = symbols
         self._loader = loader
         self._on_change = on_change
         self._on_resolve_path = on_resolve_path
-        #: 项目声明的词组（`{'expression': [{group,label,values}]}`）——
-        #: 只影响**右键候选列表的显示**；空 = 与从前一样平铺。
+        #: **现在有没有"判得了"的底子**（项目打开过 / 资源表读过）。
+        #:
+        #: 用户 2026-10-13："如果在卡牌编辑器内打开时，若找不到对应的文件，
+        #: 我希望你能给出提示（不必是弹窗，直接在立绘那里显示没有）"。
+        #: ⚠ 反过来同样重要（**通用性**）：项目都没打开时谁也判不了 ——
+        #: 那时**不许**把每张立绘都写成"没有"（那是假警报，比不提示更糟）。
+        self._assets_ready = bool(assets_ready)
+        #: 这次画出来的是"没有 / 读不出"吗（`_mark_missing` 维护）
+        self._missing = False
+        #: 项目声明的候选分栏（`[{'name','label','options'}]`）——**只当改名层**
+        #: （`outfit` → 「服装」）；分组结构本身来自引擎，见 `_slot_rows`。
         self._choice_groups = dict(choice_groups or {})
         #: `tag -> [{'group','label','values'}]`（窗口注入；现取，见 `_groups_for`）
         self._choice_groups_for = choice_groups_for
+        #: **一维一格**的 chip（引擎分组：`outfit` / `expressions`…）；
+        #: 空 = 这张图只有一条维度，走从前的单格老路（`sprite_grid.attr_slot_rows`）
+        self._slot_btns: list = []
         self.setProperty('role', 'spriteCard')
         self._build()
         self.refresh()
 
     def set_choice_groups(self, groups):
-        """窗口在（重新）读注册表后推过来：项目声明的词组分组。"""
+        """窗口在（重新）读注册表后推过来：项目声明的候选分栏分组。"""
         self._choice_groups = dict(groups or {})
+
+    def set_assets_ready(self, ready: bool):
+        """
+        「现在判得了吗」—— 项目打开 / 资源表读完之后置真，然后**重画缩略图**。
+
+        为什么要重画：项目是**后**打开的（卡片先画出来），那时缩略图已经画成
+        "没有"了；不重画的话那个提示会一直挂着（反过来也一样：真的缺图，
+        但项目刚打开、提示还没出来）。
+        """
+        ready = bool(ready)
+        if ready == self._assets_ready:
+            return
+        self._assets_ready = ready
+        try:
+            self._load_thumb(str(self.item.get('image') or ''))
+        except Exception as e:                     # noqa: BLE001 - 重画失败不该炸卡片
+            swallow('ui_qt.sprite_grid.set_assets_ready', e)
 
     # ------------------------------------------------------------------
 
@@ -155,11 +186,15 @@ class SpriteCardWidget(QFrame):
         chips = QHBoxLayout()
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(4)
-        self._expr_btn = QPushButton()
-        self._expr_btn.setProperty('variant', 'chip')
-        self._expr_btn.setStyleSheet(
-            'padding:2px 6px;font-size:8pt;border-radius:8px;')
-        self._expr_btn.clicked.connect(lambda: self._cycle('expression'))
+        # 属性 chip（表情 / 服装…）**个数不固定**（一个引擎分组一个），
+        # 所以放在一个子布局里、由 `_rebuild_slot_chips` 现造。
+        self._chips = chips
+        self._slot_box = QWidget()
+        self._slot_lay = QHBoxLayout(self._slot_box)
+        self._slot_lay.setContentsMargins(0, 0, 0, 0)
+        self._slot_lay.setSpacing(4)
+        chips.addStretch(1)
+        chips.addWidget(self._slot_box)
         self._pos_btn = QPushButton()
         self._pos_btn.setStyleSheet(
             'padding:2px 6px;font-size:8pt;border-radius:8px;')
@@ -167,17 +202,123 @@ class SpriteCardWidget(QFrame):
         # **左键 = 换下一个；右键 = 可搜索的候选列表**（用户 2026-10-05：
         # "既然变换如此多，那为什么不加个右键列表筛选跟搜索功能呢？"）——
         # 真实项目 151 个位置候选，靠点 40 次才轮到 `i11` 不叫能用。
-        for _field, _btn in (('expression', self._expr_btn),
-                             ('position', self._pos_btn)):
-            _btn.setContextMenuPolicy(Qt.CustomContextMenu)
-            _btn.customContextMenuRequested.connect(
-                lambda _pos, f=_field: self._pick_from_list(f))
-        chips.addStretch(1)
-        chips.addWidget(self._expr_btn)
+        self._pos_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._pos_btn.customContextMenuRequested.connect(
+            lambda _pos: self._pick_from_list('position'))
         chips.addWidget(self._pos_btn)
         chips.addStretch(1)
         lay.addLayout(chips)
         lay.addStretch(1)
+        self._rebuild_slot_chips()
+
+    def _new_expr_btn(self, text: str = '') -> QPushButton:
+        """造一个属性 chip（表情 / 服装…同一套样式与交互）。"""
+        btn = QPushButton(text)
+        btn.setProperty('variant', 'chip')
+        btn.setStyleSheet('padding:2px 6px;font-size:8pt;border-radius:8px;')
+        btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        btn.customContextMenuRequested.connect(lambda _pos: self._pick_from_list('expression'))
+        return btn
+
+    def _rebuild_slot_chips(self, rows=None):
+        """
+        按**引擎分组**重建属性 chip：一维一格（用户 2026-10-12）。
+
+        从前只有**一个**表情格，于是 `show ye base_handdown gratified` 的两个词
+        挤在同一格里：当前值（两个词）不在候选表里 → 点 chip 静默无效；从下拉里
+        挑一个词又会把另一个维度吃掉（详见 `beats.attr_slot_rows` 的 docstring）。
+
+        现在：`[服装: base_handdown] [表情: gratified] [位置: —]`，
+        点哪格只换那一格的词。
+
+        ⚠ 只有一条维度时**完全走老路**（一个 `表情：xxx` chip）——
+        `show ling happy` 这类项目的行为与从前一字不差。
+        """
+        rows = self._slot_rows() if rows is None else list(rows or ())
+        for btn in self._slot_btns:
+            btn.setParent(None)
+            btn.deleteLater()
+        self._slot_btns = []
+        while self._slot_lay.count():
+            item = self._slot_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        if not rows:
+            self._expr_btn = self._new_expr_btn()
+            self._expr_btn.clicked.connect(lambda: self._cycle('expression'))
+            self._slot_lay.addWidget(self._expr_btn)
+            self._slot_box.show()
+            return
+        self._expr_btn = None
+        for row in rows:
+            group = str(row.get('group') or '')
+            btn = self._new_expr_btn()
+            btn.clicked.connect(lambda _=False, g=group: self._cycle_slot(g))
+            self._slot_lay.addWidget(btn)
+            self._slot_btns.append(btn)
+        self._slot_box.show()
+
+    def _slot_rows(self) -> list:
+        """
+        这一格的**引擎分组行**（一维一格）；拿不到就 `[]`（→ 老路）。
+
+        ⚠ **不新增注入通道**：窗口已经把 `set_choice_groups_provider(_for_tag)`
+        接好了，`_for_tag` 上挂着 `attr_groups` / `facts` / `engine_facts` 三个
+        属性（见 `window_card._sync_choice_groups`）。这里只读它们 —— 少一个方法
+        就少一处"忘了转发"的机会（`main_window` 的转发层就踩过这个坑）。
+        """
+        provider = self._choice_groups_for
+        if provider is None:
+            return []
+        spec = str(self.item.get('image') or '').strip()
+        if not spec:
+            return []
+        facts = getattr(provider, 'engine_facts', None) or {}
+        groups = getattr(provider, 'attr_groups', None) or []
+        try:
+            return list(attr_slot_rows(spec, self._symbols, groups=groups,
+                                       facts=facts) or [])
+        except Exception as e:               # noqa: BLE001 - 分组拿不到就走老路
+            swallow('ui_qt.sprite_grid._slot_rows', e)
+            return []
+
+    def _cycle_slot(self, group: str):
+        """点某一维的 chip → **只换那一维的词**，其它维度原样保留。"""
+        rows = self._slot_rows()
+        hit = next((r for r in rows if str(r.get('group') or '') == str(group or '')), None)
+        if hit is None:
+            return
+        opts = list(hit.get('options') or [])
+        cur = str(hit.get('value') or '')
+        if not opts:
+            return
+        # 当前值不在候选里（项目自定义写法）→ 第一次点 = **固定住它**（值不变），
+        # 与位置 chip 同一条规矩：绝不悄悄改掉一个我们认不出的值。
+        if cur and cur not in opts:
+            self._set_slot_value(group, cur)
+            return
+        if not cur:
+            nxt = opts[0]
+        else:
+            nxt = opts[(opts.index(cur) + 1) % len(opts)]
+        self._set_slot_value(group, nxt)
+
+    def _set_slot_value(self, group: str, value: str):
+        """某一维换成 `value` → 合成新的 `image`（其余维度不丢）→ 通知窗口重投影。"""
+        spec = str(self.item.get('image') or '').strip()
+        provider = self._choice_groups_for
+        facts = getattr(provider, 'engine_facts', None) or {}
+        groups = getattr(provider, 'attr_groups', None) or []
+        try:
+            new = apply_attr_slot(spec, group, value, symbols=self._symbols,
+                                  groups=groups, facts=facts)
+        except Exception as e:               # noqa: BLE001 - 认不出就别改
+            swallow('ui_qt.sprite_grid._set_slot_value', e)
+            return
+        if new and new != spec:
+            self._apply_image_spec(new)
 
     # ------------------------------------------------------------------
 
@@ -187,7 +328,28 @@ class SpriteCardWidget(QFrame):
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
         inherited = str(self.item.get('inherited_at') or '').strip()
-        self._expr_btn.setText(f'表情：{expr or "—"}')
+        # 一维一格（引擎分组）；只有一条维度时 `rows` 为空 → 回到单个表情格。
+        rows = self._slot_rows()
+        if rows and len(rows) != len(self._slot_btns):
+            # 维度个数变了（换图 / 引擎事实重采）→ **先重建再写字**，
+            # 否则新造的按钮会空着（第一版就踩了：先 zip 后 rebuild）。
+            self._rebuild_slot_chips(rows)
+        if rows:
+            for btn, row in zip(self._slot_btns, rows):
+                shown = str(row.get('display') or row.get('value') or '') or '—'
+                btn.setText(f"{row.get('label') or row.get('group') or '属性'}：{shown}")
+                btn.setToolTip(
+                    f"这一段是引擎的 `{row.get('group')}` 组"
+                    f"（共 {len(row.get('options') or [])} 个候选）。\n"
+                    '左键 = 换下一个 · **右键 = 搜索选择**\n'
+                    '点它只改这一维，其余维度（服装/表情/…）原样保留。')
+        else:
+            if getattr(self, '_expr_btn', None) is None or self._slot_btns:
+                self._rebuild_slot_chips([])
+            self._expr_btn.setText(f'表情：{expr or "—"}')
+            self._expr_btn.setToolTip(
+                '左键 = 换下一个候选 · **右键 = 搜索选择**'
+                '（候选就是项目里真实的属性名）')
         # 位置**继承**自更早的拍（Ren'Py 的 `at` 是持续状态）时也要显示出来 ——
         # 用户 2026-10-03："明明说了在 i11，卡片上却是空的"。
         # 标一个「继承」是为了不让人以为"这一拍自己写了这个位置"：
@@ -206,8 +368,6 @@ class SpriteCardWidget(QFrame):
             self._pos_btn.setText('位置：—')
             self._pos_btn.setToolTip('这一拍没有位置（也没人可继承）。\n'
                                      '左键 = 认第一个候选 · **右键 = 搜索选择**')
-        self._expr_btn.setToolTip('左键 = 换下一个候选 · **右键 = 搜索选择**'
-                                  '（候选就是项目里真实的属性名）')
         self.setProperty('speaking', 'true' if self.item.get('speaking') else 'false')
         self.style().unpolish(self)
         self.style().polish(self)
@@ -232,6 +392,7 @@ class SpriteCardWidget(QFrame):
         if self._loader is None or not spec:
             self._thumb.setText('＋')
             self._thumb.setToolTip('')
+            self._mark_missing(False)
             return
         try:
             self._thumb.setStyleSheet(
@@ -243,12 +404,24 @@ class SpriteCardWidget(QFrame):
         path = self._thumb_path(spec)
         tag = spec.split()[0]
         if not path:
-            self._thumb.setText(tag)
+            # ⚠ 判不了（项目还没打开）时**不许**说"没有" —— 那是假警报。
+            #   这时照旧显示 tag 名（一眼看得出"还没解析"，不吓人）。
+            if not self._assets_ready:
+                self._thumb.setText(tag)
+                self._thumb.setToolTip(
+                    f'{spec}\n（还没打开项目 —— 打开项目之后才能判断这张图在不在）')
+                self._mark_missing(False)
+                return
+            # ⭐ 用户要的那一条：**直接在立绘那里显示"没有"**（不弹窗）。
+            self._thumb.setText('没有')
             self._thumb.setToolTip(
                 f'找不到这张图：{spec}\n'
-                f'（资源表里没有，按 game/images/{tag}/ 也没猜出来；'
-                f'检查文件名或补进资源表）')
+                f'（资源表里没有，脚本的 image 声明里也没有；'
+                f'按 game/images/{tag}/ 也没猜出来）\n'
+                f'检查文件名、或把它补进资源表 / 用 image 声明一下')
+            self._mark_missing(True)
             return
+        self._mark_missing(False)
 
         # 先给"正在加载"的可见反馈：立绘 1500×2200、CG 更大，解码要时间。
         # 用户 2026-10-03："有立绘时图片一开始没有显示" —— 以前这里只是
@@ -266,20 +439,74 @@ class SpriteCardWidget(QFrame):
             if pixmap is not None:
                 self._thumb.setPixmap(pixmap)
                 self._thumb.setToolTip(f'{spec}\n{path}')
+                self._mark_missing(False)
             else:
-                self._thumb.setText(tag)
-                self._thumb.setToolTip(f'这张图读不出来（可能损坏或格式不支持）：\n{path}')
+                # ⚠ 路径找到了、图却读不出来（损坏 / 格式不支持）：这与"找不到"
+                #   是**两件事**，提示必须分开（否则人会去改文件名，而问题在文件本身）。
+                self._thumb.setText('读不出')
+                self._thumb.setToolTip(
+                    f'这张图读不出来（可能损坏或格式不支持）：\n{path}')
+                self._mark_missing(True)
+        self._mark_missing(False)
         self._thumb.setText(f'{tag} …')
         self._thumb.setToolTip(f'正在加载：{path}')
         self._loader.request(slot, str(path), apply,
                              max_size=(THUMB_W, THUMB_H),
                              placeholder=loading)
 
+    def _mark_missing(self, missing: bool):
+        """
+        立绘格子的"**没有**"状态 —— 换底色 + 换个字符色，**不弹窗、不拦人**。
+
+        ⚠ 为什么要有这个方法（不是直接 `setText`）：同一个"没有"要能被**清掉**。
+        项目是后打开的（卡片先画出来），打开之后 `set_assets_ready(True)` 会重画；
+        重画成功时这里把警告底色收回去 —— 否则一张好图会一直顶着红底。
+
+        颜色一律走 `tokens` / `theme`（本仓不许在 UI 里写死颜色）。
+        """
+        self._missing = bool(missing)
+        try:
+            if missing:
+                # ⚠ 用**警告**色（`state.warning`）而不是错误色：缺一张图
+                #   不是"出错了、你干不了活"，而是"这里缺东西，看一眼"。
+                self._thumb.setStyleSheet(
+                    f"background: {theme.t('state.warningBg')};"
+                    f"color: {theme.t('state.warning')};"
+                    f"border: 1px dashed {theme.t('border.dashed')};"
+                    f"border-radius: {T.RADIUS['control']}px;")
+            else:
+                self._thumb.setStyleSheet(
+                    f"background: {theme.t('bg.skeleton')};"
+                    f"border-radius: {T.RADIUS['control']}px;")
+        except Exception as e:                     # noqa: BLE001 - 画不出警告色也别炸
+            swallow('ui_qt.sprite_grid.mark_missing', e)
+
     def _thumb_path(self, spec):
         """立绘 image spec → 磁盘路径（规则在 `resolve_sprite_thumb_path`）。"""
         return resolve_sprite_thumb_path(
             spec, self._on_resolve_path,
             getattr(self._loader, 'project_root', None))
+
+    def _apply_image_spec(self, spec: str):
+        """
+        新的 image spec 落进这一格（**同步 `expression` 与 `image`**）。
+
+        为什么必须同步（用户 2026-10-05 实测报"表情找不到 angry"）：卡片标题写的
+        是 `item['image']`，而保存时走的是 `cards_to_show`（tag + `expression`）——
+        两者不同步，就会"看到的和写下去的不是一回事"。
+
+        ⚠ 换一维时**整串属性一起存**（`base_handdown gratified`），不拆：
+        `cards_to_show` 本来就是逐词归一后原样写回，拆成两处存只会又出现
+        "一处知道服装、另一处不知道"的旧问题。
+        """
+        parts = [p for p in str(spec or '').split() if p]
+        if not parts:
+            return
+        self.item['image'] = ' '.join(parts)
+        self.item['expression'] = ' '.join(parts[1:])
+        self.refresh()
+        if self._on_change is not None:
+            self._on_change(self)
 
     def _cycle(self, field):
         """
@@ -288,11 +515,20 @@ class SpriteCardWidget(QFrame):
         候选由 `app.beats.choices_for_image` 给出 —— 拿这一张卡自己的
         image spec 去问符号表，问不到就什么都不做。
 
+        ⚠ **这张图有多条维度（引擎分组）时，`expression` 那一格由
+        `_cycle_slot` 负责**（一维一格）—— 老路只认**单个**词，多词一定
+        "当前值不在候选里" → 点一下静默无效（用户 2026-10-12 实测）。
+
         位置那一格有个特例：显示的是**继承**来的值（更早那一拍的 `at`），
         而候选表里往往没有这个写法（项目自定义 transform 如 `i11`）。
         这时第一次点 = **把它固定到这一拍**（值不变，但从此写进这一拍），
         而不是硬跳到候选表的第一项把位置改掉。
         """
+        if field == 'expression':
+            rows = self._slot_rows()
+            if rows:
+                self._cycle_slot(str(rows[0].get('group') or ''))
+                return
         opts = choices_for_image(str(self.item.get('image') or ''),
                                  self._symbols)
         choices = list(opts.get(field) or [])
@@ -348,6 +584,12 @@ class SpriteCardWidget(QFrame):
             if tag:
                 attrs = normalize_expression_words(
                     str(value), str(self.item.get('image') or ''), self._symbols)
+                # ⚠ **别在这里丢维度**（2026-10-12 实测的现场）：
+                #   `show ye base_handdown gratified` 挑一个 `angry` →
+                #   从这里拼出 `ye angry`，**抱臂姿势被静默吃掉**。
+                #   所以只把 `expression` 交给这条老路时，`image` 的其余词要留住：
+                #   多词 spec 一律由 `_apply_image_spec` / `apply_attr_slot` 走
+                #   "一维一格"那条路（见 `_cycle` / `_pick_from_list`）。
                 self.item['image'] = ' '.join([tag[0]] + attrs) if attrs \
                     else tag[0]
         self.refresh()
@@ -366,10 +608,19 @@ class SpriteCardWidget(QFrame):
         （`choices_for_image`）—— 两条路不可能给出不一样的名字。
 
         **分组**（用户 2026-10-10）：项目在 `rules.json` 的 `attr_groups`
-        里声明了词组时，这里会在列表里插组标题（`服装` / `表情`）。
+        里声明了候选分栏时，这里会在列表里插组标题（`服装` / `表情`）。
         没声明 → 与从前一模一样（一个平铺列表）。
+
+        **多条维度时**（2026-10-12）：候选是**完整路径**（`base_handdown
+        gratified`），按服装分栏 —— 因为只给一个词根本没法和另一个维度组合；
+        选中的是整串，直接落成 `image`（其余维度随选中项一起，不会丢）。
         """
         from storygraph.ui_qt.choice_picker import choose_from
+        if field == 'expression':
+            rows = self._slot_rows()
+            if rows:
+                self._pick_slot_combo(rows)
+                return
         choices = list((choices_for_image(str(self.item.get('image') or ''),
                                           self._symbols).get(field) or []))
         if not choices:
@@ -383,6 +634,47 @@ class SpriteCardWidget(QFrame):
                             groups=groups)
         if value:
             self._set_field(field, value)
+
+    def _pick_slot_combo(self, rows: list):
+        """
+        **多维度**图的右键候选：把每一维的候选**合成完整 spec** 再分栏。
+
+        实测（sr_general）：`ye` 有 `outfit`(2) × `expressions`(18) →
+        36 条，按服装分两栏。这比"给一堆单词、挑一个就把别的维度吃掉"有用；
+        也给了一条把作者手写的组合**原样点回来**的路。
+        """
+        from storygraph.ui_qt.choice_picker import choose_from
+        spec = str(self.item.get('image') or '').strip()
+        tag = (spec.split() or [''])[0]
+        if not tag:
+            return
+        facts = getattr(self._choice_groups_for, 'engine_facts', None) or {}
+        groups = getattr(self._choice_groups_for, 'attr_groups', None) or []
+        grouped = []
+        for row in rows:
+            vals = []
+            for opt in (row.get('options') or ()):
+                try:
+                    full = apply_attr_slot(spec, row.get('group'), opt,
+                                           symbols=self._symbols,
+                                           groups=groups, facts=facts)
+                except Exception as e:        # noqa: BLE001
+                    swallow('ui_qt.sprite_grid._pick_slot_combo', e)
+                    continue
+                if full and full not in vals:
+                    vals.append(full)
+            if vals:
+                grouped.append({'group': str(row.get('group') or ''),
+                                'label': str(row.get('label') or ''), 'values': vals})
+        if not grouped:
+            return
+        value = choose_from(
+            self,
+            f"选择立绘组合 —— {sum(len(g['values']) for g in grouped)} 条"
+            f"（{len(grouped)} 组）",
+            [v for g in grouped for v in g['values']], spec, groups=grouped)
+        if value:
+            self._apply_image_spec(value)
 
     def _groups_for(self, field) -> list:
         """
@@ -432,16 +724,30 @@ class SpriteGridWidget(QWidget):
         self._grid.setSpacing(T.SPACE['sm'])
         self._cards: list = []
         self._cols = 4
-        #: 项目声明的词组（空 = 平铺；见 `set_choice_groups`）
+        #: 项目声明的候选分栏（空 = 平铺；见 `set_choice_groups`）
         self._choice_groups: dict = {}
         #: `tag -> 分组候选`（窗口注入；见 `set_choice_groups_provider`）
         self._choice_groups_for = None
+        #: 「现在判得了吗」（见 `set_assets_ready`）—— 传给每一张卡
+        self._assets_ready = False
 
     # ------------------------------------------------------------------
 
+    def set_assets_ready(self, ready: bool):
+        """
+        项目打开 / 资源表读完之后说一声：**现在判得了"这张图在不在"了**。
+
+        用户 2026-10-13 要的"找不到就在立绘那里显示没有"必须建立在
+        "判得了"之上 —— 项目还没打开时谁也判不了，那时把每张立绘写成
+        "没有"是**假警报**（`SpriteCardWidget._load_thumb` 里那条分支）。
+        """
+        self._assets_ready = bool(ready)
+        for card in self._cards:
+            card.set_assets_ready(self._assets_ready)
+
     def set_choice_groups(self, groups):
         """
-        项目声明的**词组** → 每张卡。
+        项目声明的**候选分栏** → 每张卡。
 
         用户 2026-10-10："实际上需要分组显示……因为我这个要求通用！" ——
         所以这里只递数据：分不分栏由**项目声明**决定；空 = 平铺。
@@ -524,7 +830,8 @@ class SpriteGridWidget(QWidget):
                                     on_change=self._on_card_change,
                                     on_resolve_path=self._on_resolve_path,
                                     choice_groups=self._choice_groups,
-                                    choice_groups_for=self._choice_groups_for)
+                                    choice_groups_for=self._choice_groups_for,
+                                    assets_ready=self._assets_ready)
             card.remove_requested.connect(self._on_remove)
             card.clicked.connect(self._on_click)
             self._cards.append(card)
@@ -559,7 +866,8 @@ class SpriteGridWidget(QWidget):
                  'extra_rows': []},
                 symbols=self._symbols, loader=self._loader,
                 on_change=self._on_card_change,
-                on_resolve_path=self._on_resolve_path))
+                on_resolve_path=self._on_resolve_path,
+                assets_ready=self._assets_ready))
             self._cards[-1].remove_requested.connect(self._on_remove)
             self._cards[-1].clicked.connect(self._on_click)
             self._layout()
@@ -579,12 +887,10 @@ class SpriteGridWidget(QWidget):
         if self._on_pick_image is not None:
             spec = self._on_pick_image(card.item.get('image') or '')
             if spec:
-                card.item['image'] = spec
-                # 把新图的属性同步进表情（与 tkinter 版 `_sync_expression_from_spec` 同语义）
-                parts = spec.split()
-                if len(parts) > 1:
-                    card.item['expression'] = ' '.join(parts[1:])
-                card.refresh()
+                # 把新图的属性同步进表情，并**把几条维度重新算一遍**
+                # （`_apply_image_spec` → `refresh` → `_slot_rows`），
+                # 于是换图之后 chip 个数跟着新图的分组走。
+                card._apply_image_spec(spec)
                 self.change.emit(self)
 
     def _on_card_change(self, _card):

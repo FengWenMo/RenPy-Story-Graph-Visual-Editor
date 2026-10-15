@@ -846,7 +846,7 @@ class TestCustomTransformRoundtrip:
     """
     P2-4：**自定义 transform 的链路到底是通的吗**。
 
-    清单（`docs/问题清单与优化路线_2026-10-03.md` 第一批第 3 项）问的是这个。
+    清单（`docs/archive/问题清单与优化路线_2026-10-03.md` 第一批第 3 项）问的是这个。
     复验结论：**通，但不是走 `beat.transform`** ——
 
       · 每个立绘自己的变换（`show eileen happy at leftish`）走 `beat.at`，

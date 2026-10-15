@@ -474,14 +474,14 @@ class TableSessionMixin:
         # （`beat_model.fold_spec_arg_columns`）—— 一份实现两处用，
         # 卡片上改参数与在表里改参数的结果必然一致。
         #
-        # 为什么放在 `advanced_open` 判断**之外**：这一组控件是跟着这一拍
-        # 的语句走的（有参数才出现），不像高级区那样会被折叠 ——
-        # 折叠起来的东西不写回是契约（见上面那段），而它一直可见。
-        _dyn = {k: v for k, v in fields.items()
-                if isinstance(k, str) and is_dynamic_column(k)}
-        if _dyn:
-            from storygraph.story.beat_model import fold_spec_arg_columns
-            fold_spec_arg_columns(b, _dyn)
+        # ⚠⚠ **折的时机被挪到了这个方法的最末尾**（2026-10-13 实测修）：
+        #   放在这里会被后面的 `cards_to_show` / `hydrate_from_dsl` 盖回去
+        #   （实测：`show·人物@0` 改成 `ling`，保存后又变回 `lan`）。
+        #   真正的调用点在 `return b` 之前，见那里的长注释。
+        #
+        # 为什么不受 `advanced_open` 影响：这一组控件是跟着这一拍的语句走的
+        # （有参数才出现），不像高级区那样会被折叠 —— 折叠起来的东西不写回
+        # 是契约（见上面那段），而它一直可见。
 
         if advanced_open:
             if 'SFX' in fields:
@@ -530,7 +530,33 @@ class TableSessionMixin:
             b.sync_stage_order()
         except Exception as e:                # noqa: BLE001 - 顺序列坏了不该拦住保存
             swallow('editor.apply.sync_stage_order', e)
+        # ⚠⚠ **语句参数必须在这一切之后再折**（2026-10-13 实测修）。
+        #
+        # 现场（用户要求"连 show 这种内置语句也能在卡片上长出参数格"）：
+        # 卡片上把 `show·人物@0` 从 `lan` 改成 `ling`，保存后 `Beat.show` 又变回
+        # `lan swim_suit happy` —— **一个字都没生效**。
+        #
+        # 根因是**顺序**：动态列在上面（第 480 行那一支）就折好了，可紧接着
+        #   · `cards_to_show(cards)` 会用**立绘卡**重建整个 `Beat.show`；
+        #   · `hydrate_from_dsl` 会再从 `show` 反推一遍结构化字段；
+        # 两件事都把刚折进去的参数**盖回原样**。而 `show` 的参数格恰恰就是
+        # `Beat.show` 这一格 —— 于是"卡片上能改、但改了不算"。
+        #
+        # 动态列是**用户刚在这一格上亲手改的字**，它比"从立绘卡/DSL 推出来的"
+        # 更权威，所以放在最后折。（放在这里也顺带让 `sanitized_cells` 的留痕
+        # 与"最终内容"一致。）
+        self._fold_dynamic_columns(b, fields)
         return b
+
+    @staticmethod
+    def _fold_dynamic_columns(b: Beat, fields: dict):
+        """把「每参数一列」的那些键折进这一拍（见上面那段顺序说明）。"""
+        _dyn = {k: v for k, v in (fields or {}).items()
+                if isinstance(k, str) and is_dynamic_column(k)}
+        if not _dyn:
+            return
+        from storygraph.story.beat_model import fold_spec_arg_columns
+        fold_spec_arg_columns(b, _dyn)
 
     def _apply_stage(self, b: Beat, fields: dict, stage_loaded):
         """

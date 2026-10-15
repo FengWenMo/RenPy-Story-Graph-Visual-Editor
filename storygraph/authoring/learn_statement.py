@@ -33,8 +33,24 @@ from storygraph.core.safeguard import swallow
 
 #: 参数名必须是合法标识符（Ren'Py 关键字参数的名字就是标识符）
 _NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-#: 语句名：允许**空格分隔的多个词**（与 CDS 的 `name="a b"` 同形，后端会拆成别名）
-_STMT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\s+[A-Za-z_][A-Za-z0-9_]*)*$')
+
+#: 语句名：**允许中文，但每段必须以"字母"开头**（2026-10-14 收紧一次）。
+#:
+#: 真机里 `renpy.register_statement("泳装切换")` 是**合法**的，而这个工具的
+#: 用户就是中文项目（界面全中文、实例是 `show 小明 泳装 开心`）。
+#: 旧版是 ASCII-only，于是中文动作名**当场被拒收**、连"待声明"列表都进不去 ——
+#: 用户看到的是"这个模块根本用不了"。
+#:
+#: ⚠ 但**不能一路放宽成 `^\w+…$`**：那样 `9bad` / `_x` 也会被收，
+#: 而它们是真的语法错（旧判据 `test_build_declaration_refuses_a_bad_statement_name`
+#: 与 `test_mcp_surface.py::test_declare_refuses_a_bad_name_and_says_why` 钉着）。
+#: `[^\W\d_]` = "**任意 Unicode 字母**"（吃中文、不吃数字/下划线）——
+#: 与之前 `[A-Za-z_]` 的口径一致，只是把"字母"的含义还给了 Unicode。
+#: ⚠ 仍然不许空格以外的东西（`(` / `=` / `"` 这些是**真**语法错，
+#: 由 `_STMT_BAD_CHARS` 兜）。
+_STMT_RE = re.compile(r'^[^\W\d_]\w*(\s+[^\W\d_]\w*)*$', re.UNICODE)
+#: 语句名里的**分隔符**（`_STMT_RE` 只管形状，这里管"哪些字不能用"）
+_STMT_BAD_CHARS = ('"', "'", '(', ')', '=', ':', ',', '#', '\\')
 #: 候选值分隔符：`,，、;；|` 与空白
 _CHOICE_SPLIT_RE = re.compile(r'[,，、;；|\s]+')
 
@@ -81,29 +97,46 @@ def build_declaration(name: str, label: str = '', docs: str = '',
         return {'ok': False, 'name': '', 'label': '', 'docs': '',
                 'block': block, 'columns': [],
                 'warnings': ['语句名不能为空']}
-    if not _STMT_RE.match(name):
+    if not _STMT_RE.match(name) or any(c in name for c in _STMT_BAD_CHARS):
         return {'ok': False, 'name': name, 'label': '', 'docs': '',
                 'block': block, 'columns': [],
-                'warnings': [f'"{name}" 不是合法的语句名（只能是字母/数字/下划线，'
-                             f'多个词用空格分隔）']}
+                'warnings': [f'"{name}" 不是合法的语句名（用词 + 空格；'
+                             f'不能用引号/括号/等号/冒号/逗号/井号）']}
     columns = []
     seen = set()
     for row in (params or ()):
         if not isinstance(row, dict):
             continue
         cname = str(row.get('name') or '').strip()
+        # ⚠⚠ **`name` 就是"编剧看到的列名"**（2026-10-13 改）。
+        #
+        # 用户："我就不填那个可选的中文名，也不填剧本里怎么写……它反馈出来的
+        # 只有一个参数！"—— 根因是这里只认 `name`：界面把"列名"放在 `label`
+        # 里（那是主字段），`name` 留空 → 这一列被**静默丢掉**（连警告都没有），
+        # 三个格子只剩一个。现在两者同源，`name` 空就用 `label`。
+        if not cname:
+            cname = str(row.get('label') or row.get('column') or '').strip()
         # 容忍"顺手把等号也写进去"：`intensity=3` / `intensity = 3`
         if '=' in cname:
             cname = cname.split('=', 1)[0].strip()
-            warnings.append(f'参数名里带了 `=`：已按 "{cname}" 处理')
+            warnings.append(f'列名里带了 `=`：已按 "{cname}" 处理')
         if not cname:
+            # ⚠ **不许静默丢**（旧版就是静默的，用户看到的是"只剩一个参数"）：
+            #   说不出"哪一格"就只能报个数，但一定要说。
+            warnings.append(f'第 {len(columns) + 1} 格没有列名 —— '
+                            f'这一格**没写进**声明（卡片上不会出现它）。'
+                            f'给它起个名字（编剧看到的那个，例如「角色」）再写一次')
             continue
-        if not _NAME_RE.match(cname):
-            warnings.append(f'参数名 "{cname}" 不是合法标识符 —— 这一行**没写进**'
-                            f'声明（表里不会出现这一列）')
-            continue
+        # ⚠⚠ 这里**不许**再套"合法标识符"校验（2026-10-13 实测修）：
+        #   这一格是**表格列名**，不是脚本里的具名参数 —— 中文（「人物」「服装」
+        #   「神态」）天经地义。旧校验把中文列名整条丢掉，于是：
+        #     界面三个格子全填好 → 声明里**一列都没有** → 试切永远"切不上"，
+        #     而界面还在旁边写着"参数名 人物 不是合法标识符"（用户当场看出来了）。
+        #   ⚠ 与本文件下面 `pattern` 那段的注释本来是**同一条规矩**，
+        #     实现却漏改了这一处 —— 这就是"注释对了、代码没跟上"的典型。
+        #   仍然只做两件事：去重、剥掉顺手写的 `=`。
         if cname in seen:
-            warnings.append(f'参数 "{cname}" 写了两次 —— 只保留第一次')
+            warnings.append(f'列 "{cname}" 写了两次 —— 只保留第一次')
             continue
         seen.add(cname)
         col = {'name': cname}
@@ -123,7 +156,9 @@ def build_declaration(name: str, label: str = '', docs: str = '',
     slots = []
     if pattern:
         from storygraph.authoring.pattern import parse_pattern
-        for slot in parse_pattern(pattern):
+        raw_list = list(pattern)
+        for i, slot in enumerate(parse_pattern(pattern)):
+            raw_slot = raw_list[i] if i < len(raw_list) else None
             item = {'kind': slot['kind']}
             if slot.get('text'):
                 item['text'] = slot['text']
@@ -133,6 +168,21 @@ def build_declaration(name: str, label: str = '', docs: str = '',
                 item['group'] = slot['group']
             if slot.get('options'):
                 item['options'] = slot['options']
+            # ⚠⚠ **`limit` / `multi` 必须一起写下来**（2026-10-13 修）。
+            #
+            # 这两个键是修"切不上"（候选≠限死）和"A 段可以有多个"时加的，
+            # **读**的那一侧全都认（`parse_pattern` / `WALK_KINDS` / 卡片），
+            # 只有这里漏了 —— 于是"只在半边生效"：
+            #   · 编剧勾了「编剧只能从下面这些里选」→ 试切是对的 →
+            #     点"写进清单" → **勾选蒸发** → 她以为自己限死过；
+            #   · 勾了「这一格可以有多个」→ 存下来变成一格一个词。
+            #
+            # ⚠ 写**输入里真的给过的**（含显式的 `False`）——
+            #   "说过 false"和"没说"在语义上是两件事，往返要保真；
+            #   而**整个键都没给**时不写，旧的产物因此逐字节不变。
+            for key in ('limit', 'multi'):
+                if isinstance(raw_slot, dict) and key in raw_slot:
+                    item[key] = bool(slot.get(key))
             slots.append(item)
         # ⚠ 列名**不套脚本参数那套标识符校验**：这两件事不是一回事 ——
         #   脚本里的具名参数（`intensity=3`）必须是合法标识符，
@@ -224,6 +274,10 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
     ⚠ **猜不出就不猜**：名字是由 `kind` 决定的**保守默认**
     （引号里的值 → 「内容」、裸词 → 「对象」、数字 → 「时长」、作者写了 `x=` → `x`），
     绝不生成 `intensity` 这种**看着像真的、其实是我编的**英文名。
+
+    ⚠ 一行的切片由 `_split_call_line` 负责，其中 `(…)` / `[…]` / `{…}` 里的
+    一整段算**一个词** —— `show expression Text("…", color=X)` 里的 `color=`
+    是 **Python 调用的关键字参数**，不是这条语句的参数（见 `_scan_bare_end`）。
     """
     import re as _re
     from collections import Counter
@@ -242,7 +296,7 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
         return out
 
     roles = _role_table(root)
-    out['role_names'] = list(roles['names'])
+    out['role_names'] = list(roles['display_names'])
 
     slots: dict = {}
     occurrences = 0
@@ -270,17 +324,23 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
         return out
     out['found'] = True
     out['occurrences'] = occurrences
-    out['items'] = _finish_slots(slots, min_choice_hits)
+    out['items'] = _finish_slots(slots, min_choice_hits,
+                                 cast_names=roles['display_names'])
     return out
 
 
 def _role_table(root) -> dict:
     """
-    角色表 → `{'ids': set, 'names': set, 'id_to_name': {}}`（读不出就三个空）。
+    角色表 → `{'ids': set, 'names': set, 'id_to_name': {}, 'display_names': []}`
+    （读不出就四个空）。
 
     用途：把脚本里的**裸词**认成角色（`lyj` → 「凌跃捷」），
     这样"第 1 项"的默认名字就可能是「角色」而不是「对象」，
     候选里给的也是**编剧看得懂的中文名**。
+
+    ⚠ `display_names`（2026-10-15 加）是**有序**的显示名列表 ——
+    `names` 是 `set`，拿它当候选来源会得到**每次运行都不一样**的顺序。
+    `suggest_shape` 的「角色格候选并上整张角色表」用它，保证顺序稳定。
     """
     ids, names, id_to_name = set(), [], {}
     try:
@@ -298,7 +358,8 @@ def _role_table(root) -> dict:
                 names.append(shown)
     except Exception as e:                       # noqa: BLE001 - 没角色表也能用
         swallow('learn_statement._role_table', e)
-    return {'ids': ids, 'names': set(names), 'id_to_name': id_to_name}
+    return {'ids': ids, 'names': set(names), 'id_to_name': id_to_name,
+            'display_names': list(names)}
 
 
 def _slot(slots: dict, i: int, kind: str, name: str) -> dict:
@@ -358,8 +419,29 @@ def _collect_slots(slots: dict, tokens, roles) -> None:
         rec['hits'][shown] += 1
 
 
-def _finish_slots(slots: dict, min_choice_hits: int) -> list:
-    """收集器 → 给界面看的项（例子、候选、来源、能不能限定）。"""
+def _finish_slots(slots: dict, min_choice_hits: int, cast_names=None) -> list:
+    """
+    收集器 → 给界面看的项（例子、候选、来源、能不能限定）。
+
+    `cast_names` = 角色表的**显示名**（有序，2026-10-15 加）。
+
+    ⚠⚠ 识别成「角色」的那一格（`note == '角色表'`），候选要**并上整张角色表**
+    —— 这正是 `suggest_shape` docstring 写死的口径（"若是角色 ID → 候选=角色表"），
+    而旧实现只给"在这条语句的行里出现过 ≥2 次的值"。差别在真机上很难看：
+
+      · 候选中混着 `screen` / `image` 这类**语句关键字**（`show screen …`）
+        和 `cg` / `bg_1` 这类图标签 —— 一个叫「角色」的格子却给人这些；
+      · 真机 28 个角色里只冒出 10 个（都是碰巧在 `show` 行里出现够多次的）。
+
+    用户 2026-10-13 的原话是"**必须以真实的有的资源为准**"，所以这里按角色表补。
+    """
+    cast: list = []
+    seen_cast: set = set()
+    for nm in (cast_names or ()):
+        nm = str(nm or '').strip()
+        if nm and nm not in seen_cast and not _is_not_a_value(nm):
+            seen_cast.add(nm)
+            cast.append(nm)
     out = []
     for idx in sorted(slots):
         rec = slots[idx]
@@ -368,10 +450,23 @@ def _finish_slots(slots: dict, min_choice_hits: int) -> list:
         #    拿它当"只能填这些"会把编剧的手脚捆住（用户原话：候选非常繁琐）
         choices = [v for v, n in rec['hits'].most_common()
                    if n >= max(2, int(min_choice_hits))]
-        rec['choices'] = choices[:24]
-        rec['choices_from'] = (rec['note'] if rec['note'] == '角色表'
+        # ⚠ 只滤 **choices**（下拉里给人挑的那些）；**examples 不滤** ——
+        #   那是"这一位长什么样"的证据，而角色的 ID 完全可能就叫 `at`/`with`
+        #   （第一版连 examples 一起滤，于是"给 show 推角色名"那条当场变红）。
+        picked = [v for v in choices if not _is_not_a_value(v)]
+        is_role = rec['note'] == '角色表'
+        if is_role:
+            # 角色格：**并上整张角色表**。"项目里写过的值"排在前面 ——
+            # 它们是这条语句真的用过的，先给人看见（也保证 `lan`/`ling`/`ye`
+            # 这些立绘 tag 稳定出现在前面：它们不在角色表里，只在这份 hits 里）。
+            for nm in cast:
+                if nm not in picked:
+                    picked.append(nm)
+        # 上限：角色表可以很长（真机 28），给它更宽的天花板，别把角色截掉。
+        rec['choices'] = picked[:(64 if is_role else 24)]
+        rec['choices_from'] = (rec['note'] if is_role
                                else ('项目里写过的值' if choices else ''))
-        rec['suggest_allowed'] = bool(rec['suggest_allowed'] and choices)
+        rec['suggest_allowed'] = bool(rec['suggest_allowed'] and rec['choices'])
         rec['hits'] = dict(rec['hits'].most_common(12))
         out.append(rec)
     return out
@@ -386,6 +481,10 @@ def _split_call_line(text: str) -> list:
 
     刻意**不用** `shlex`：Ren'Py 台词里的引号/中文书名号/转义情况很多，
     这里只需要"够用的分词"，宁可少切也不要切错（切错就是把编剧的台词拆坏）。
+
+    ⚠⚠ **括号里的东西算同一个词**（2026-10-15 加，见 `_scan_bare_end`）：
+    `Text("…", color=X)` / `prompt("…", act=[…])` 里那些 `key=` 是 **Python
+    调用的关键字参数**，不是这条语句的参数 —— 混进来的后果见那条判据。
     """
     s = str(text or '').strip()
     if not s or s.startswith('#'):
@@ -416,9 +515,7 @@ def _split_call_line(text: str) -> list:
             kind = 'key' if key else 'value'
             out.append((kind, ''.join(buf), key))
             continue
-        j = i
-        while j < n and not s[j].isspace() and s[j] not in ',':
-            j += 1
+        j = _scan_bare_end(s, i)
         token = s[i:j]
         i = j
         if not token:
@@ -434,6 +531,78 @@ def _split_call_line(text: str) -> list:
 
 _KEY_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*')
 _NUM_RE = re.compile(r'^-?\d+(\.\d+)?$')
+
+#: 括号配对表（`_scan_bare_end` / `_skip_balanced` 用）。
+_OPENERS = '([{'
+_CLOSERS = {')': '(', ']': '[', '}': '{'}
+
+
+def _scan_bare_end(s: str, i: int) -> int:
+    """
+    从 `s[i]` 起扫一个**裸词**，返回它的结束下标（不含）。
+
+    ⚠⚠ 2026-10-15 加：**括号里的一整段算同一个词**（`(…)` / `[…]` / `{…}`，
+    连里面的引号一起吃）。为什么必须这样 —— 实测真机 `game/screens.rpy`：
+
+        show expression Text("SEIREN PROJECT", color="#89c7fe", size=60, bold=True) as title:
+
+    `color=` / `size=` / `bold=` 是 **Python 函数调用的关键字参数**，与 `show`
+    语句毫无关系。旧写法按空白/逗号切词，于是它们被当成 `show` 的具名参数 →
+    反推出 `color` / `size` / `bold` 三个**看着像真的**参数名；编剧点
+    「从项目里拿」照着写，得到的是一堆语法正确的**噪声**。
+    同理 `show screen prompt("…", act=[…])` 里的 `act`。
+
+    括号**不配对**（多行语句的前半截，`… act=[`）就一路吃到行尾 ——
+    宁可少切，也不要切错（与这个模块一贯的"切错就是把编剧的台词拆坏"同一条）。
+    """
+    n = len(s)
+    j = i
+    while j < n:
+        c = s[j]
+        if c in _OPENERS:
+            j = _skip_balanced(s, j)
+            continue
+        if c.isspace() or c == ',':
+            break
+        if c in '"\'':
+            j += 1
+            while j < n:
+                if s[j] == '\\':
+                    j += 2
+                    continue
+                if s[j] == c:
+                    break
+                j += 1
+            j += 1
+            continue
+        j += 1
+    return min(j, n)
+
+
+def _skip_balanced(s: str, i: int) -> int:
+    """从 `s[i]`（一个开括号）跳到**配对的闭括号之后**；不配对 → 行尾。"""
+    stack = [s[i]]
+    j = i + 1
+    n = len(s)
+    while j < n and stack:
+        c = s[j]
+        if c in '"\'':
+            j += 1
+            while j < n:
+                if s[j] == '\\':
+                    j += 2
+                    continue
+                if s[j] == c:
+                    break
+                j += 1
+            j += 1
+            continue
+        if c in _OPENERS:
+            stack.append(c)
+        elif c in _CLOSERS and _CLOSERS[c] == stack[-1]:
+            stack.pop()
+        j += 1
+    return min(j, n)
 
 
 def group_preview(groups) -> str:
@@ -486,6 +655,117 @@ def declaration_preview(built: dict, path: str = '') -> str:
     return '\n'.join(lines)
 
 
+def layeredimage_groups(project_root, limit_files: int = 400) -> dict:
+    """
+    项目里**每个立绘（tag）自己**有哪些组、每组有哪些属性 —— `{tag: {组: [值]}}`。
+
+    为什么要它（2026-10-13 用户实测）：
+
+    > 参数与参数之间实际上是有关联的……比如 lan 实际上没有 hanfu_base 这种选项……
+    > 而 hanfu_base 内又不会有那么多种表情……但是我可选是从项目内批量导入的，
+    > 不会排除这些情况……必须以真实的有的资源为准，你自己去看看真实项目内的定义！
+
+    实测真机 `definitions.rpy`：
+
+        layeredimage lan:  group expressions (18) / group outfit → clothes2, base_hand_up
+        layeredimage ling: group expressions (28) / group outfit → base_swimsuit, base_arms_akimbo
+        layeredimage ye:   group expressions (18) / group outfit → base_handdown, base_swimsuit
+
+    `hanfu_base` **确实不属于 lan** —— 而"跨 tag 合并"那份清单会把它们混在一起，
+    于是填进去的候选里有根本不能用的值。所以这里**按 tag 分开**给。
+
+    ⚠ 这是**尽力而为的粗读**（只认 `layeredimage <名>:` 与它下面缩进的
+    `group <名>` / `attribute <名>`）—— 它比"合并清单"准得多，但**不解析条件**
+    （`group outfit when clothes2` 那种 `when` 只记下来不用）。真正的条件求值
+    是引擎的事（见 `engine_facts` 那条路），这里只回答"这个 tag 定义了哪些值"。
+
+    ⚠ 真机里 `<tag>_cc`（角色卡预览用的复制品）与本体**组和值完全一样**
+    （实测 `lan_cc` == `lan`）—— 那种重复项**不返回**（否则来源清单直接翻倍，
+    22 条里有一半是重复的）。判据：同名去掉 `_cc` 之后还有本体，就跳过它。
+    """
+    root = Path(project_root) if project_root else None
+    out: dict = {}
+    if root is None or not root.is_dir():
+        return out
+    try:
+        files = sorted(root.rglob('*.rpy'))[:int(limit_files)]
+    except Exception as e:                       # noqa: BLE001 - 扫不动就当没有
+        swallow('learn_statement.layeredimage_groups.glob', e)
+        return out
+    import re
+    # ⚠⚠ **块头允许缩进**（2026-10-13 修）。第一版写的是
+    #   `line.startswith('layeredimage')` + `head_re = ^layeredimage…`，
+    #   于是 `init 10:` / `if persistent.use_new_art:` **里面**定义的立绘
+    #   一个都读不到 —— 真机的 5 个恰好都在顶层，所以真机看不出来；
+    #   换个项目（"按条件换一套立绘"是常态）候选就**全空**。
+    # ⚠ tag **允许中文**（`layeredimage 幽灵:`）—— 这个工具的客户是中文项目，
+    #   只认 ASCII 等于把 `幽灵` 的候选整块丢掉（不报错、恒空）。
+    #
+    # ⚠⚠ **行尾不许用 `$` 锚**（这是我自己当场踩的坑）：真机的 `.rpy` 是
+    #   **CRLF**，`'layeredimage lan:\r'` 里那个 `\r` 会让 `…:\s*$` 匹配失败 ——
+    #   5 个立绘里只有文件末尾那个（没有尾随 CR）活着。
+    #   所以：**逐行先 `rstrip()`**，并且匹配式里**不写行尾锚**。
+    head_re = re.compile(r'^(\s*)layeredimage\s+(\S+?)\s*:')
+    for fp in files:
+        try:
+            text = fp.read_text(encoding='utf-8', errors='replace')
+        except Exception as e:                   # noqa: BLE001 - 单个文件读不动就跳过
+            swallow('learn_statement.layeredimage_groups.read', e)
+            continue
+        #: 当前块头的**缩进宽度**（用它判"块结束了没"）——
+        #  缩进比它浅/相等 = 出了这个块。0 表示顶层。
+        head_indent = None
+        tag = None
+        group = None
+        for raw_line in text.splitlines():
+            line = raw_line.rstrip()             # ⚠ 去掉 `\r` / 尾随空白（见上）
+            m = head_re.match(line)
+            if m:
+                tag = m.group(2)
+                group = None
+                head_indent = len(m.group(1).replace('\t', '    '))
+                out.setdefault(tag, {})
+                continue
+            if tag is None:
+                continue
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip(' \t'))
+            indent = len(line[:indent].replace('\t', '    '))
+            if indent <= head_indent:
+                tag, group = None, None        # 出了这个块
+                continue
+            # ⚠⚠ **组名与属性名后面可以跟别的字**（2026-10-13 第二次修）。
+            #
+            # 真机的写法是：
+            #     group expressions when not clothes2 and not base_hand_up:
+            #     group outfit when clothes2 or base_hand_up:
+            #
+            # 即"组名 + `when` 条件 + 冒号"。第一版我写成
+            # `group\s+(\S+?)\s*:`（要求名字**紧跟**冒号）—— 于是真机 5 个立绘
+            # 的组**一个都没读到**（`qing` 之所以有值，只是因为它那个组恰好没写
+            # `when`）。所以这里取"`group` 后面的**第一个词**"就够，
+            # 后面跟 `when …` 还是直接跟 `:` 都不管（条件求值是引擎的事）。
+            g = re.match(r'\s*group\s+([^\s:]+)', line)
+            if g:
+                group = g.group(1)
+                out[tag].setdefault(group, [])
+                continue
+            a = re.match(r'\s*attribute\s+([^\s:]+)', line)
+            if a and group:
+                val = a.group(1)
+                if val not in out[tag][group]:
+                    out[tag][group].append(val)
+    # 丢掉 `<tag>_cc` 这种"本体的复制品"（判据见 docstring）
+    cleaned = {}
+    for tag, groups in out.items():
+        base = tag[:-3] if tag.endswith('_cc') else ''
+        if base and base in out and out[base] == groups:
+            continue
+        cleaned[tag] = groups
+    return {k: v for k, v in cleaned.items() if v}
+
+
 def choice_sources(project_root, head: str = '') -> list:
     """
     这一格的候选值**可以从项目里白拿** —— 返回"来源清单"，让人挑一个。
@@ -496,12 +776,17 @@ def choice_sources(project_root, head: str = '') -> list:
     > 一个个输入进去！我希望它能够做到识别并自己录入（当我说这是表情的时候，
     > 能够自动导入相关类别……）不然要填到猴年马月？
 
-    三个来源，各自有各自的道理 —— ⚠ **工具仍然不猜"这一格是不是表情"**，
+    来源清单 —— ⚠ **工具仍然不猜"这一格是不是表情"**，
     它只把"项目里到底有哪些值能拿"摆出来，挑哪个由人点：
 
-      · **立绘属性 · 引擎的组**：真机事实里**引擎自己分好的组**
-        （实测 `lan` 的组是 `outfit` / `expressions`）——
-        这才是"表情全集"的正解：不用手打，也不用我们猜；
+      · **某个立绘自己的组**（`lan 的 outfit` / `lan 的 expressions`…）：
+        直接读项目里的 `layeredimage`（见 `layeredimage_groups`）——
+        ⚠ 这是**2026-10-13 新增的、也是该优先点的那一份**：用户实测指出
+        "lan 根本没有 hanfu_base 这个选项"，而下面那份合并清单会把
+        **所有角色**的属性混在一起（于是候选里有根本不能用的值）；
+      · **立绘属性 · 引擎的组（全部角色合并）**：真机事实里引擎自己分好的组，
+        跨 tag 合并去重 —— **仍然保留**（有些项目只有一个 tag，或人就是想要全集），
+        但它不再排在第一位（先给"按角色"的，再给这个）；
       · **角色表**：资产表里的角色（ID 与显示名都给，编剧认得的是后者）；
       · **项目里真实用过的值**：这个动作在脚本里出现过的值（≥2 次才算，
         单次出现更像笔误 —— 与 `suggest_shape` 同一条规矩）。
@@ -514,7 +799,32 @@ def choice_sources(project_root, head: str = '') -> list:
     if root is None or not root.is_dir():
         return out
 
-    # ① 立绘属性：真机事实里引擎自己分的组（跨 tag 合并去重 —— 表情通常是通用的）
+    # ⓪ **按立绘分开**（最准的一份：不会把别的角色的属性混进来）
+    try:
+        table = layeredimage_groups(root)
+        for tag in sorted(table):
+            # ⚠⚠ `<tag>_cc` 这种"角色卡预览用的复制品"**必须标出来**
+            #   （2026-10-13 修）：它与本体不同的那一份会照样进清单，于是并排出现
+            #
+            #       lan  的 expressions（18 个）
+            #       lan_cc 的 expressions（16 个）
+            #
+            #   而 `lan_cc` **不是剧本里能写的图片 tag** —— 编剧按"名字像"点它，
+            #   候选里就混进这套预览专用的值。只把 label 写清"它是副本"，
+            #   不改任何判定（本体照样在、少了两个表情的副本也必须留着）。
+            base = tag[:-3] if tag.endswith('_cc') else ''
+            shown = f'{tag}（{base} 的副本）' if base else tag
+            for gname in sorted(table[tag]):
+                vals = table[tag][gname]
+                if vals:
+                    out.append({'key': f'layer:{tag}:{gname}',
+                                'label': f'{shown} 的 {gname}（{len(vals)} 个）',
+                                'values': vals, 'source': '项目里的立绘定义',
+                                'count': len(vals)})
+    except Exception as e:                       # noqa: BLE001 - 读不到不算错
+        swallow('learn_statement.choice_sources.layeredimage', e)
+
+    # ① 立绘属性：真机事实里引擎自己分的组（跨 tag 合并去重 —— 保留，但排后面）
     try:
         from storygraph.core import engine_facts as EF
         path = EF.facts_path(root)
@@ -531,7 +841,8 @@ def choice_sources(project_root, head: str = '') -> list:
             for gname, vals in sorted(merged.items()):
                 if vals:
                     out.append({'key': f'attr:{gname}',
-                                'label': f'立绘属性 · {gname or "未分组"}',
+                                'label': f'立绘属性 · {gname or "未分组"}'
+                                         f'（全部角色 · {len(vals)} 个）',
                                 'values': vals, 'source': '引擎事实',
                                 'count': len(vals)})
     except Exception as e:                       # noqa: BLE001 - 没事实不算错
@@ -556,14 +867,69 @@ def choice_sources(project_root, head: str = '') -> list:
                 for v in (item.get('choices') or ()):
                     if v not in vals:
                         vals.append(v)
+            # ⚠⚠ **先滤掉"不是值"的东西**（2026-10-14 修）：
+            #   Ren'Py 语句里有一批**修饰词**（`at` / `with` / `behind` /
+            #   `onlayer` / `as`）与**注释残渣**（`#…`）—— 它们会被当成
+            #   "这一位置用过的值"收进来。用户点「从项目里拿」灌进某一格时，
+            #   下拉里就出现根本不能填的值（真机实测 `show` 的 used 里有 `at`）。
+            #   ⚠ 只在**跨位置混合**的这一份里滤：按立绘分开的那些是真值。
+            vals = [v for v in vals if not _is_not_a_value(v)]
             if vals:
                 out.append({'key': 'used',
-                            'label': f'项目里用过的值（{head}）',
+                            # ⚠ 标签必须**说明它是混的**：这一份把所有位置的值
+                            #   合在一起，工具**不可能**知道哪一格该拿哪一份
+                            #   （用户 2026-10-13 的现场就是"灌进来一半不能用"）。
+                            'label': f'项目里用过的值（{head} · 各位置混在一起）',
                             'values': vals, 'source': '真实脚本',
                             'count': len(vals)})
     except Exception as e:                       # noqa: BLE001
         swallow('learn_statement.choice_sources.used', e)
     return out
+
+
+#: **不是候选值**的东西（Ren'Py 的**语法词** + 注释残渣）。
+#:
+#: 依据：这些词在语句里是**结构词**，不是"某一格的值" ——
+#: `show lan happy at left with dissolve` 里 `at`/`with` 是语法，
+#: `left`/`dissolve` 才是值。
+#:
+#: 两类：
+#:   · **修饰型关键字**（跟在图名后面）：`at` / `with` / `behind` /
+#:     `onlayer` / `as`（官方语法 `show_statement -> "show" name
+#:     ( "as" name )? ( "onlayer" name )? ( "at" … )? ( "behind" … )?
+#:     ( "with" … )?`）；
+#:   · **引入型关键字**（替换图名，2026-10-15 加）：`expression` /
+#:     `screen` / `layer` —— `show expression <expr>`（表达式）/ `show screen
+#:     <屏幕名>` / `show layer <层名>` 三个都是**独立语句形式**，
+#:     它们后面的东西不是图名，本身也不可能是图名。
+#:
+#: ⚠⚠ **修正一条错诊断**（2026-10-15）。旧注释写"加 `expression`/`screen`
+#: 会误伤真机里一个**真叫这个名字的角色 ID**" —— 实测那是**错的**：
+#: `_role_table(真机)` 的 28 个 id/name 里既没有 `screen` 也没有 `expression`
+#: （对照实验见 `.workbuddy/memory/2026-10-15.md`）。
+#: 当年"当场变红"的真因是：滤掉它们之后角色格候选从 10 掉到 8，
+#: 撞上了 `test_suggests_character_names_for_show` 那条 `len(choices) >= 10`
+#: —— 那条断言是**被噪声撑起来的**（10 个候选里有 4 个根本不是角色）。
+#: 所以这一版两件事一起修：词表补上引入型关键字，角色格的候选**并上整张角色表**
+#: （让 `>=10` 由真实资源满足，而不是由噪声满足）。
+_NOT_A_VALUE = frozenset({
+    'at', 'with', 'behind', 'onlayer', 'as', 'True', 'False', 'None',
+    'expression', 'screen', 'layer',
+})
+
+
+def _is_not_a_value(word) -> bool:
+    """这个词是不是"根本不是值"（修饰词 / 注释残渣 / 空）？"""
+    w = str(word or '').strip()
+    if not w:
+        return True
+    if w in _NOT_A_VALUE:
+        return True
+    if w.startswith('#'):                        # 行内注释
+        return True
+    if w.endswith(')') or w.startswith('('):     # 括号残渣（`True)`）
+        return True
+    return False
 
 
 __all__ = ['build_declaration', 'build_group', 'choice_sources',

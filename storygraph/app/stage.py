@@ -578,7 +578,7 @@ def sprite_plan(frame, sprite, layer_model, images: dict, project_root=None):
     """
     一个立绘 → **合成计划**（`LayerPlan`）或 None。
 
-    设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`（P2）。
+    设计文档：`docs/archive/设计_合成立绘合成与姿势切换_2026-10-05.md`（P2）。
     没有 `layeredimage` 声明 / 认不出 → 返回 None（调用方走今天的单图路径）。
     """
     if layer_model is None or not getattr(layer_model, 'images', None):

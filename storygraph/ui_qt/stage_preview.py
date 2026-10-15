@@ -191,31 +191,26 @@ class StageAudio:
         self._last_key = None
 
 
-#: 合成立绘模型缓存：`项目根 -> LayerModel`（一个项目建一次，很便宜但要避免重复）
-_LAYER_MODEL_CACHE = {}
-
-
 def layer_model_for(project_root):
     """
     取这个项目的合成立绘模型（`LayerModel`）；没有就返回 None。
 
-    设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`。
-    ⚠ 按**项目根**缓存：同一个预览会话里表/脚本不会变；换了项目就是新键。
+    设计文档：`docs/archive/设计_合成立绘合成与姿势切换_2026-10-05.md`。
+
+    ⚠ 缓存已**收敛到** `story.layered_model.load_layer_model_cached`（带**文件指纹**
+    失效）：实测真机建一次 0.28 s，而卡片每刷新一拍都要问一次 ——
+    所以缓存必须能失效（从前这里那份"一次会话只读一次盘"的缓存做不到）。
+    这里保留函数名只为不改调用点；**新的调用点请直接用那个函数**。
     """
     root = str(project_root or '')
     if not root:
         return None
-    if root in _LAYER_MODEL_CACHE:
-        return _LAYER_MODEL_CACHE[root]
-    model = None
     try:
-        from storygraph.story.layered_model import load_layer_model
-        model = load_layer_model(root)
+        from storygraph.story.layered_model import load_layer_model_cached
+        return load_layer_model_cached(root)
     except Exception as e:                        # noqa: BLE001 - 认不出走老路
         swallow('ui_qt.stage_preview.layer_model_for', e)
-        model = None
-    _LAYER_MODEL_CACHE[root] = model
-    return model
+        return None
 
 
 class StageCanvas(QWidget):

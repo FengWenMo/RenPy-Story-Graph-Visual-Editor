@@ -62,7 +62,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_canvas', '_console', '_ensure_registry', '_file_path', '_history', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_status', 'clear_console', 'engine', 'graph')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_canvas', '_console', '_ensure_registry', '_file_path', '_history', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_status', 'clear_console', 'engine', 'graph', 'set_assets_ready')
 
     def _show_analysis_text(self, text: str):
         """
@@ -248,6 +248,15 @@ class GraphOpsMixin:
             self._refresh_asset_choices()
         except Exception:                       # noqa: BLE001
             swallow('main_window.open_project_path')
+        # ⚠ **打开项目之后才判得了"这张立绘图在不在"**（2026-10-13）：
+        #   项目根定了，`game/images/...` 那条兜底猜路才走得通；在那之前
+        #   每张立绘都只会是"还没解析"，那时报"没有"就是假警报。
+        #   所以**打开项目本身**（不管资源表读不读得到）就把这个事实说一声 ——
+        #   用户要的是"文件在不在"，不是"资源表全不全"。
+        try:
+            self.set_assets_ready(True)
+        except Exception as e:                  # noqa: BLE001 - 说不了也不该拦打开
+            swallow('main_window.open_project_path.assets_ready', e)
         if not res.get('ok'):
             msg = (f'[项目] 读不到资源表：{res.get("error") or "未知原因"}'
                    f'（剧情图不受影响；下拉候选会是空的）')
@@ -873,22 +882,22 @@ class GraphOpsMixin:
                      if discovered else ''))
         if dlg.exec() != QDialog.Accepted:
             return
-        # —— 词组（可选）：与语句声明一起写 ——
+        # —— 候选分栏（可选）：与语句声明一起写 ——
         wrote_group = False
         group_rows = dlg.groups_to_write()
         if group_rows:
             gres = SR.declare_attr_groups(root, group_rows)
             if gres.get('ok'):
                 wrote_group = True
-                self._log(f'[自定义] 词组 {gres["count"]} 组 → {gres["path"]}')
+                self._log(f'[自定义] 分栏 {gres["count"]} 组 → {gres["path"]}')
             else:
-                self._log(f'[自定义] ✕ 词组没写：{gres.get("reason")}')
+                self._log(f'[自定义] ✕ 分栏没写：{gres.get("reason")}')
         built = dlg.result_declaration()
         if not built.get('ok'):
             for w in built.get('warnings') or []:
                 self._log(f'[自定义] ✕ {w}')
             if wrote_group:
-                self._status('词组写好了（语句声明没写：看控制台）')
+                self._status('分栏写好了（语句声明没写：看控制台）')
                 self._after_learn_refresh()
             else:
                 self._status('没写：' + '；'.join(built.get('warnings') or ['?']))
@@ -909,12 +918,12 @@ class GraphOpsMixin:
         self._after_learn_refresh()
         self._status(f'✔ {verb}声明 {built["name"]}：'
                      f'参数 {len(built["columns"])} 个已进表格列'
-                     + ('；词组也写好了（立绘候选会分栏）' if wrote_group else '')
+                     + ('；候选分栏也写好了（下拉里会分栏显示）' if wrote_group else '')
                      + '（重新导入那几章即可看到效果）')
 
     def _after_learn_refresh(self):
         """
-        教完一条之后刷新：**清清单缓存** + 重算符号表 + 推词组给卡片。
+        教完一条之后刷新：**清清单缓存** + 重算符号表 + 把分栏推给卡片。
 
         ⚠ 不清缓存的话表格/提示/分栏还是旧的 —— 用户会看到"声明了但没生效"。
         这也是 `set_choice_groups_provider` 那类方法必须存在的原因（缺一个就

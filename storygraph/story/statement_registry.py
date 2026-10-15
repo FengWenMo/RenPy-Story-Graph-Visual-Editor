@@ -61,6 +61,14 @@ class RegisteredStatement:
     #: **块体允许出现哪些语句**（头 token 列表；空 = 不校验）——`body.allows`。
     #: 这是"结构级"约束（设计文档 §0 的 ②层）：语法形状猜不出来，只能被声明。
     body_allows: list = field(default_factory=list)
+    #: **有序格子**（`pattern`：`[{kind,text,column,group,options}…]`）。
+    #:
+    #: ⚠ 2026-10-12 补：它以前**只在磁盘上**（`rules.json`），没进注册表对象，
+    #: 于是"第几格 = 第几个位置参数"这件事在读取侧完全丢了 ——
+    #: 实测后果：`swim_suit lyj "泳装" mood=happy` 在**卡片编辑器**里
+    #: `角色`/`服装` 两格是**空的**（只有 `mood=happy` 认得出）。
+    #: 现在它跟着声明一起流到 `spec_columns`（`_declared_positionals`）。
+    pattern: list = field(default_factory=list)
     render: str = 'verbatim'
 
     @property
@@ -77,6 +85,7 @@ class RegisteredStatement:
                 'origin': self.origin, 'docs': self.docs,
                 'label': self.label, 'columns': list(self.columns),
                 'body_allows': list(self.body_allows),
+                'pattern': [dict(s) for s in (self.pattern or ())],
                 'render': self.render}
 
 
@@ -132,6 +141,9 @@ def _from_manifest(data: dict, manifest_path: str) -> list:
             body_allows=[str(x) for x in (
                 (item.get('body') or {}).get('allows') or ())
                 if str(x).strip()],
+            # ⚠ 有序格子必须一起收进来（否则读取侧推不出"第几格 = 第几个位置参数"）
+            pattern=[dict(s) for s in (item.get('pattern') or ())
+                     if isinstance(s, dict)],
             render=str(item.get('render') or 'verbatim')))
     return out
 
@@ -569,10 +581,22 @@ def spec_columns(registry, head: str) -> list:
     `'image'` / …），而不是内联的一串值 —— `with` 这种语句的候选就是项目里
     真实存在的变换，让 Excel 直接绑到那张候选表上（自伸缩、没有 255 字符上限，
     也不会因为项目加了一个变换就过时）。
+
+    ⚠⚠ **位置参数号从声明自己的格子顺序推出来**（2026-10-12 修的实测 bug）：
+
+        `swim_suit lyj "泳装" mood=happy`      ← 作者写的（前两个是位置参数）
+        卡片编辑器里：`角色` 空、`服装` **空**、`神态` = happy
+
+    根因：列描述里的 `positional` **只有显式写了才有**，而界面（弹窗）
+    存下来的是 `pattern`（有序格子），没人把"第几格 = 第几个位置参数"写进列里。
+    于是 `Beat.spec_arg_cells` 只能去 `key=value` 里找值 —— 位置参数全部落空。
+    这里按**声明自己的顺序**补上位置号（第 0 个可填格 = 位置 0，依此类推）；
+    显式写了 `positional` 的仍然以它为准。
     """
     spec = registry.match(head) if registry else None
     if spec is None:
         return []
+    positions = _declared_positionals(spec)
     out = []
     for col in (spec.columns or ()):
         if not isinstance(col, dict):
@@ -580,12 +604,79 @@ def spec_columns(registry, head: str) -> list:
         name = str(col.get('name') or '').strip()
         if not name:
             continue
+        pos = col.get('positional')
+        if pos is None:
+            pos = positions.get(name)
         out.append({'name': name,
                     'label': str(col.get('label') or ''),
                     'choices': [str(c) for c in (col.get('choices') or ())],
                     'required': bool(col.get('required')),
-                    'positional': col.get('positional'),
+                    'positional': pos,
                     'choices_from': str(col.get('choices_from') or '')})
+    return out
+
+
+def _declared_positionals(spec) -> dict:
+    """
+    `{列名: 位置号}` —— 按声明的**格子顺序走一遍**，数出每一格是第几个位置参数。
+
+    ⚠⚠ **2026-10-13 第三次修正：位置号必须"走格子数"，不能"只数可填格"。**
+
+    前两版都栽在同一件事上：`keyword` 格（固定几个字，如 `swim_suit`）
+    **不占位置号、却确实吃掉一个词**。只数可填格的话：
+
+        show lan swim_suit happy
+        [人物=任意] [swim_suit=固定] [happy=从这些选]
+        → 人物@0、happy@1      ← 数出来的
+        → 实际读值：pos=[lan, swim_suit, happy]
+          · 人物@0 → lan          ✅
+          · happy@1 → swim_suit   ❌（把关键字本身当成了值，"三格只对一格"）
+
+    现在按**与读值同一套**的走法编号（`spec_args.WALK_KINDS`）：
+    每吃一个词就 +1，关键字格也吃词、也占号。于是 happy 会拿到 @2，
+    读值就是 `happy`。
+
+    认不出（没有 `pattern` / 旧形状）就返回 `{}`，调用方退回旧规则（**不猜**）。
+    """
+    try:
+        from storygraph.authoring.pattern import parse_pattern
+        from storygraph.story.spec_args import WALK_KINDS
+    except Exception as e:                       # noqa: BLE001 - 认不出就不补
+        swallow('story.statement_registry.declared_positionals.import', e)
+        return {}
+    slots = [s for s in parse_pattern(getattr(spec, 'pattern', None) or ())
+             if isinstance(s, dict)]
+    if not slots:
+        return {}
+    cols = [c for c in (getattr(spec, 'columns', None) or ())
+            if isinstance(c, dict) and str(c.get('name') or '').strip()]
+    out: dict = {}
+    used = set()
+    token_index = 0
+    for slot in slots:
+        kind = str(slot.get('kind') or '')
+        if kind not in WALK_KINDS:
+            continue                             # optional 之类：跳过（不算词）
+        keys = {str(slot.get('column') or '').strip(),
+                str(slot.get('text') or '').strip()} - {''}
+        hit = None
+        for col in cols:
+            if id(col) in used:
+                continue
+            if keys & {str(col.get('name') or '').strip(),
+                       str(col.get('label') or '').strip()}:
+                hit = col
+                break
+        if hit is None:
+            rest = [c for c in cols if id(c) not in used]
+            if rest:
+                hit = rest[0]                    # 顺序兜底（1:1 对位）
+        if hit is not None:
+            used.add(id(hit))
+            name = str(hit.get('name') or '').strip()
+            if name and name not in out:
+                out[name] = token_index
+        token_index += 1
     return out
 
 
@@ -598,6 +689,45 @@ def _builtin_schemas() -> dict:
     return BUILTIN_ARG_SCHEMAS
 
 
+def merge_builtin_columns(builtin, declared) -> list:
+    """
+    把**声明**的列合到**内置**的形状上：同名的按声明，**别的全都留着**。
+
+    用户 2026-10-13（原话）：
+
+    > 连 show 这种内置语句也能在卡片上长出参数格，具体做法是这样的：
+    > 本来就默认存在且有的，那就保留，只改后面加进去的，加了什么，就长个什么
+    > 参数，没必要全部都更新
+
+    所以规则只有两条，**没有任何"全量更新"**：
+
+      1. **保留**：内置形状里的每一列都在（顺序也不动）；
+      2. **追加 / 就地改**：声明里同名的列**替换**那一列（于是"就是我加的那一格"
+         可以一直改）；新名字的列**追加在后面**（加了什么就长什么）。
+
+    ⚠ 为什么不能"声明在场就整个换成声明的"（那正是修之前的行为）：
+    内置形状是**工具对官方语法的既有认识**（`camera` 的层名、`with` 的转场、
+    `window` 的动作、`pause` 的秒数）—— 只因为你想多一个格子就把它抹掉，
+    等于"加一列"顺手"删三列"，而界面不会提醒你。
+    """
+    out = [dict(c) for c in (builtin or ())]
+    index = {str(c.get('name') or ''): i for i, c in enumerate(out)}
+    for col in (declared or ()):
+        if not isinstance(col, dict):
+            continue
+        name = str(col.get('name') or '').strip()
+        if not name:
+            continue
+        item = dict(col)
+        item['name'] = name
+        if name in index:
+            out[index[name]] = item
+        else:
+            index[name] = len(out)
+            out.append(item)
+    return out
+
+
 def arg_columns(registry, head: str) -> list:
     """
     这个语句头的**参数列形状**：项目声明优先，其次内置表，都没有就空。
@@ -605,12 +735,17 @@ def arg_columns(registry, head: str) -> list:
     与 `spec_columns` 的区别：那个只认**声明过**的自定义语句（契约是
     "没声明就返回空"，M4 的判据钉着）；这里多一档"标准语句由**我们**声明形状"
     （`camera` 的层名 —— 官方语法确定，不是猜）。
+
+    ⚠ **两条路合并，不是二选一**（2026-10-13 用户要求）：内置形状里本来就有的
+    列一律保留，声明里多出来的**追加**在后面（见 `merge_builtin_columns`）。
+    所以"给 `camera` 再加一格"不会把它的「层名」弄丢。
     """
-    cols = spec_columns(registry, head)
-    if cols:
-        return cols
+    declared = spec_columns(registry, head)
     from storygraph.story.spec_args import builtin_columns
-    return builtin_columns(head)
+    builtin = builtin_columns(head)
+    if not declared:
+        return builtin
+    return merge_builtin_columns(builtin, declared)
 
 
 def dynamic_spec_columns(beats, registry) -> list:
@@ -653,8 +788,32 @@ def dynamic_spec_columns(beats, registry) -> list:
             out.append({'header': header, 'name': name, 'param': col['name'],
                         'label': col['label'], 'choices': list(col['choices']),
                         'required': col['required'],
-                        'positional': col.get('positional')})
+                        'positional': col.get('positional'),
+                        # ⚠ **把声明的格子也带出去**（2026-10-13 实测加）：
+                        #   读值那一侧（`Beat.spec_arg_cells`）要靠它"按格子认领词"。
+                        #   位置号那套数不准 —— `keyword` 格（固定几个字）**不占
+                        #   位置号却吃掉一个词**，于是「人物/服装/神态」三格里
+                        #   只对一格。每一条列都带同一份（读值只取第一份）。
+                        'pattern': _declared_pattern(registry, name)})
     return out
+
+
+def _declared_pattern(registry, head: str) -> list:
+    """
+    这条声明在清单里存的**有序格子**（`pattern`）—— 没有就返回 `[]`。
+
+    为什么要有它（2026-10-13 实测修）：读值那一侧要靠"格子顺序"认领词
+    （见 `spec_args.slot_value_map`），而列描述此前**不带格子** →
+    卡片上「人物/服装/神态」三格只对一格（关键字格吃掉的那个词被算到隔壁）。
+    认不出就返回 `[]`（调用方退回位置号，**不猜**）。
+    """
+    try:
+        spec = registry.match(head) if registry is not None else None
+        return [dict(s) for s in (getattr(spec, 'pattern', None) or ())
+                if isinstance(s, dict)]
+    except Exception as e:                      # noqa: BLE001 - 认不出就不带
+        swallow('story.statement_registry.declared_pattern', e)
+        return []
 
 
 def _beat_statement_heads(beat) -> list:
@@ -683,13 +842,38 @@ def _beat_statement_heads(beat) -> list:
     return out
 
 
+#: `_beat_statement_head` 依次看的字段：**头行原文住在这里**。
+#:
+#: ⚠ `show` 是 2026-10-13 加进来的（用户："连 show 这种内置语句也能在卡片上长出
+#: 参数格"）。`show` 是**被显式建模**的内置语句 —— 它的行进的是 `Beat.show`
+#: （`'lan swim_suit happy'`，**不含动作名**），既不在 `opaque` 里、也没有
+#: `spec_head`。所以在那之前，"你声明了 show"**永远建不出列**：
+#: `_beat_statement_head` 返回空 → `arg_columns` 拿不到头 → 卡片一个格子都不长。
+#: 字段名与顺序照 `Beat._head_field()` 与 `LEAF_ARG_HEADS` 的既有口径。
+_HEAD_FIELDS = ('spec_head', 'loop_header', 'camera_header', 'show')
+
+
 def _beat_statement_head(beat) -> str:
     """这一拍的**语句头**（从它的头行 / 整块原文里取，不含「代码」列）。"""
     from storygraph.core.vocabulary import statement_head_token
-    for attr in ('spec_head', 'loop_header', 'camera_header'):
+    for attr in _HEAD_FIELDS:
         text = str(getattr(beat, attr, '') or '')
-        if text.strip():
-            return statement_head_token(text)
+        if not text.strip():
+            continue
+        if attr == 'show':
+            # ⚠ `Beat.show` 存的是**动作名后面**那一串（见 `Beat.statement_head`），
+            #   所以它的头就是字面量 `show`，不能拿内容去 `token` 化
+            #   （那会把 `lan` 当成语句名）。
+            #
+            # ⚠⚠ **多值拍（`show a; show b`）不给头**（2026-10-13 实测修）：
+            #   那种拍一格对多行，参数格怎么映射都是猜 —— 按单行去折会**静默改
+            #   数据**（实测：`'lan swim_suit happy; ling uniform calm'` 改了第一格
+            #   之后第二行的 `ling` 没了）。判断交给 `Beat.statement_head()`
+            #   （那里是唯一真源，别在这边另写一份），空 → 这一拍不长参数格。
+            if not str(beat.statement_head() or '').strip():
+                return ''
+            return 'show'
+        return statement_head_token(text)
     first = next((ln for ln in str(getattr(beat, 'opaque', '') or '').split('\n')
                   if ln.strip()), '')
     return statement_head_token(first)
@@ -826,7 +1010,7 @@ def describe_statements(project_root=None, statements=None, registry=None,
     """
     **工具"以为"的自定义结构** → 可 diff 的 dict（设计文档 §2.1 第一档接口）。
 
-    为什么先要它（`docs/设计_自定义结构发现与交互_2026-10-07.md`）：
+    为什么先要它（`docs/archive/设计_自定义结构发现与交互_2026-10-07.md`）：
     所有"人机对齐"的前提是**工具能把自己以为的东西摊开**。没有这一份，
     人只能猜"工具到底认不认我的 `mycue`、认成什么档、凭什么"。
 

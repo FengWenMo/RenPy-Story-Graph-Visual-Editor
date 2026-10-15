@@ -348,7 +348,7 @@ def menu_structure(text) -> dict:
     `{label 名: 菜单结构指纹}` —— 每个 label 的每个菜单、每个选项体的形状。
 
     这是"**结构位有没有被压平**"的可计算判据（交付审查的 A 档止血，
-    方案见 `docs/嵌套与行尾注释_修复方案_2026-10-05.md`）。
+    方案见 `docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md`）。
 
     为什么只比菜单、不比全部嵌套：
       · **纯 `if` 嵌套**在全量路径上走"条件合取"近似（`if a:` 里套 `if b:`
@@ -437,7 +437,7 @@ def nest_conflict_warnings(beats, source_path=None) -> list:
         f'（`"选项": pass` + 内容提到菜单外）。'
         f'这一版渲染仍按老推断走（B 阶段一只双写不切换）——'
         f'先照这条线索核对那几拍，方案见 '
-        f'docs/嵌套与行尾注释_修复方案_2026-10-05.md')]
+        f'docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md')]
 
 
 def _make_structure_issue(lost: list, source_path=None) -> GuardIssue:
@@ -454,7 +454,7 @@ def _make_structure_issue(lost: list, source_path=None) -> GuardIssue:
         f'内容提到菜单外面 → 玩家选没选都会执行）。'
         f'如果这是你有意改的结构，忽略本条；如果不是，'
         f'加 `--source <这一章原来的 .rpy>` 走增量，别走全量。'
-        f'（方案见 docs/嵌套与行尾注释_修复方案_2026-10-05.md）')
+        f'（方案见 docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md）')
 
 
 @dataclass(frozen=True)
@@ -1076,7 +1076,7 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     2026-09-28 修：以前这里写死 `project_root=None`，**等于把这条门禁关了**。
 
     **"目标已存在"护栏**（P0，2026-10-05，见
-    `docs/P0_静默全量覆盖_2026-10-03.md`）：
+    `docs/archive/P0_静默全量覆盖_2026-10-03.md`）：
 
       目标已存在 **且** 首行不含工具生成标记 → 判为**手写文件**，拒绝覆盖。
       理由是"全量重生成只认得拍"：`default` / `define` / `init python` /

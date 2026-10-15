@@ -3,7 +3,7 @@ tests/test_layered_model.py
 ===========================
 **合成立绘（layeredimage）通用模型** + **空姿势必须 hide**。
 
-设计文档：`docs/设计_合成立绘合成与姿势切换_2026-10-05.md`
+设计文档：`docs/archive/设计_合成立绘合成与姿势切换_2026-10-05.md`
 
 ⚠ 通用性护栏（设计文档 6.3）：这里的 fixture **一个真实项目的名字都不用**
 —— 角色叫 `alpha`/`beta`，属性叫 `mood`/`tall`，蒙版叫 `_cut`/`_keep`，

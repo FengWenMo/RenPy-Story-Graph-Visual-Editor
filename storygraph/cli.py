@@ -62,7 +62,7 @@ def _cmd_diff3(args) -> int:
 def _cmd_learn(args) -> int:
     """
     **把一条结构"教给"工具**：写进 `storygraph.rules.json` 的 `statements`
-    （设计文档 `docs/设计_自定义结构发现与交互_2026-10-07.md` §5 第 3 步）。
+    （设计文档 `docs/archive/设计_自定义结构发现与交互_2026-10-07.md` §5 第 3 步）。
 
     为什么要有个命令（而不是只写文档）：设计的核心一句是
     **"得知必须落成一份可评审的文件"** —— 手改 JSON 当然也行，但那是
@@ -652,7 +652,7 @@ def _cmd_compile(args) -> int:
     registry = _load_registry(args)
     out = Path(args.out) if args.out else table_path.with_suffix('.rpy')
     # `--force` 是逃生舱：允许覆盖已存在的手写 .rpy
-    # （见 `docs/P0_静默全量覆盖_2026-10-03.md`）。
+    # （见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
     # `--source` 是**无损**那条路：给出这一章原来的 .rpy，走增量合并，
     # 只改你改过的行，default / init python / transform 原样保留。
     _path, sheet, result = compile_table(

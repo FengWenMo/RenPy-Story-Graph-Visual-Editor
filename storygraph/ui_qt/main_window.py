@@ -89,6 +89,7 @@ from storygraph.ui_qt.window_export import (WindowExportMixin,
                                              overwritable as _overwritable)
 from storygraph.ui_qt.window_graph_ops import GraphOpsMixin
 from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
+from storygraph.ui_qt.window_state import WindowStateMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
 
 
@@ -530,7 +531,7 @@ class BeatCardEditor(QWidget):
         self._grid.set_choice_groups_provider(fn)
 
     def set_choice_groups(self, groups):
-        """同上的直推版本（窗口一次性拿到全部词组时用）。"""
+        """同上的直推版本（窗口一次性拿到全部分栏时用）。"""
         self._grid.set_choice_groups(groups)
 
     # —— 公共访问器（窗口不再摸私有属性）——
@@ -758,14 +759,14 @@ class BeatCardEditor(QWidget):
 
 class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                    WindowExportMixin, WindowAssetsMixin,
-                   WindowKeyboardMixin, QMainWindow):
+                   WindowKeyboardMixin, WindowStateMixin, QMainWindow):
     """
     Qt 版主窗口 —— **两页**：剧情结构图（第一屏）→ 卡片编辑器（点进模块才进）。
 
     **职责拆分**（P3-14，2026-10-05）
     --------------------------------
     原本是 3452 行 / 126 个成员的上帝对象（`EditorSession` 的另一半）。
-    现在六块各住一个文件，全部做成 mixin —— **调用方一行都不用改**
+    现在七块各住一个文件，全部做成 mixin —— **调用方一行都不用改**
     （这是搬家不是改契约：菜单、工具栏、信号、`open_editor` 全都没动）：
 
       · `GraphOpsMixin`（`window_graph_ops.py`，38）——
@@ -777,7 +778,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
       · `WindowExportMixin`（`window_export.py`，10）——
         导出落盘 / 体检 / 舞台预览 / 剧本表；
       · `WindowAssetsMixin`（`window_assets.py`，3）—— 图片与下拉候选；
-      · `WindowKeyboardMixin`（`window_keyboard.py`，5）—— 键盘与快捷键。
+      · `WindowKeyboardMixin`（`window_keyboard.py`，5）—— 键盘与快捷键；
+      · `WindowStateMixin`（`window_state.py`，8）—— **会话记忆**
+        （下次打开回到上次那个项目 + 摆回布局，2026-10-13 用户要求）。
 
     **本类自己留 36 个成员**，全是"界面骨架 + 页切换 + 谁都要用的工具"：
     三个页构建器（`_build*`）、`_set_page` / `_update_crumb` /
@@ -890,6 +893,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._table_mtimes: dict = {}
         #: 当前页（`QStackedWidget` 的索引；`_set_page` 维护）
         self._page = self.PAGE_GRAPH
+        # ⚠ **命令行的意图要先记下来，再 `_build()`**（2026-10-13）：
+        #   `_build()` 会建菜单，而菜单要读"上次的项目"给勾选框定状态；
+        #   而 `_boot`（第一个事件循环回合）里的会话记忆要能回答
+        #   "命令行是不是已经明确指定了项目/章节"—— 那个判断就靠这两个属性。
+        #   放到 `_build()` 之后设，就是"恢复跑完了才知道命令行给了什么"。
+        self._pending_script = Path(script_path) if script_path else None
         self.setWindowTitle('剧情编辑器 · 剧情结构图 + 卡片界面')
         self.resize(1600, 950)
         self._build()
@@ -898,7 +907,6 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #: 需要"构造完就能用"，否则得先跑一次事件循环才知道载没载上。
         #: `goto_card=False`：带了章节参数也**先停在结构页**（用户明确要求
         #: 第一屏是剧情树），章节内容已经在会话里，双击模块即可进去。
-        self._pending_script = Path(script_path) if script_path else None
         if self._pending_script is not None:
             self.load_script(self._pending_script, goto_card=False)
         QTimer.singleShot(0, self._boot)
@@ -978,8 +986,36 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         **静默弹回结构页**（用户在第一个回合内做的跳转全部作废）。
         页号、空状态、剧情树现在都在 `_build` 末尾同步定好了；
         这里只把导航可用性对一次会话状态。
+
+        ⚠ **会话记忆的恢复就挂在这一步**（2026-10-13）：它读盘、开项目、载章节、
+        摆布局 —— 全在第一个事件循环回合里做，所以构造窗口的人拿到的是一个
+        完整可用的窗口，而不是"先空着、一会儿自己变"。
+        `_boot` 里已经不再碰页号（见下），所以恢复出来的页号也不会被弹回去。
         """
         self._sync_nav()
+        self._boot_restore_session()
+
+    def _boot_restore_session(self):
+        """
+        启动时"按记忆回到上次那个项目"——**只在命令行什么都没给时**。
+
+        为什么加这条门（两条都很实在）：
+          · `main_qt` 已经把项目/章节从命令行喂进来了 —— 那是用户的**明确指定**，
+            不能被"上次那个"盖掉（否则 `StoryGraph.exe 某项目 某章` 会先开
+            上次的项目、再开你指的，白读一遍资源表还算轻的）；
+          · 打包自检（`selfcheck.py` 用 `open_editor(None, None, None, None)`
+            建窗口）也走这里 —— 记忆坏了绝不能让自检跟着红。
+
+        `STORYGRAPH_NO_SESSION=1` 可整趟关掉（自动化 / "今天想空着开"）。
+        """
+        from storygraph.core import session_store as SS
+        if not SS.enabled():
+            return
+        if getattr(self, '_pending_script', None) is not None:
+            return
+        if getattr(self, '_project_root', None):
+            return
+        self.restore_session()
 
     def _set_graph(self, graph, keep_view=None):
         """
@@ -1070,6 +1106,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         outer.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
                                  T.SPACE['sm'], T.SPACE['sm'])
         split = QSplitter(Qt.Horizontal)
+        # ⚠ 存成实例属性：**会话记忆要摆回分栏宽度**（`window_state.py`）。
+        #   以前只在局部变量里，退出时谁也拿不到它 —— 布局也就无从记起。
+        self._split_graph = split
         outer.addWidget(split)
 
         # —— 左：结构图（画布）+ 缩放条 ——
@@ -1408,6 +1447,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         split.addWidget(right)
 
         split.setSizes([260, 900])
+        self._split_card = split          # 同上：会话记忆要摆回它
         outer.addWidget(split, 1)
         return page
 
@@ -1473,12 +1513,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   · 「导入章节」= 剧情图那条路：图里只有用户自己导入的章节。
         # 以前把两者写成一句话（"打开项目 → 建出结构图"），40 个脚本一次性
         # 灌进图里变成 51 个块 —— 用户："这还选个毛线啊！看都要看瞎了！"
-        act('🧩 自定义模块 / 语句', self.learn_custom_statement,
+        act('🧩 自定义动作', self.learn_custom_statement,
             '教工具认识项目自己的写法（swim_suit / mycue 这类）：'
             '先扫出"工具还不认识的写法"，勾一条、填上参数与候选值，'
             '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉',
             primary=True)
-        # ⚠ 放在「自定义模块」**后面**：用户早先明确要求自定义模块入口在**最上方**
+        # ⚠ 放在「自定义动作」**后面**：用户早先明确要求这个入口在**最上方**
         #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），
         #   判据 `test_the_toolbar_entry_is_the_first_action` 钉着这一条。
         act('🔑 AI 助手 · 填 API key', self.open_ai_key_dialog,
@@ -1927,6 +1967,14 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             swallow('main_window._status')
 
     def closeEvent(self, event):
+        # ⚠ **先把记忆落下来再拆自己**（2026-10-13）：`save_session_state()`
+        #   要读分栏尺寸、页号、当前章节 —— 那些都还活着的时候才读得到。
+        #   放到下面那组"摘掉自己"之后就晚了（窗口在关，控件可能已经不可用）。
+        #   失败只记台账：退出路径上绝不因为"没记住"而弹错、也绝不拦关闭。
+        try:
+            self.save_session_state()
+        except Exception as e:                      # noqa: BLE001
+            swallow('main_window.closeEvent.save_session', e)
         # 自己摘掉应用级事件过滤器：不摘的话，窗口关了过滤器还活着，
         # 之后（同一进程里的下一个窗口 / 测试用例）按键会被死人接走。
         for fn in (lambda: self._remove_shortcuts(),
@@ -1944,7 +1992,30 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 ScriptTableEditorWindowQt = MainWindowQt
 
 
-def open_editor(engine, script_path=None, project_root=None, graph=None):
+def open_editor(engine, script_path=None, project_root=None, graph=None, *,
+                restore: bool = True):
+    """
+    建窗口并显示（**程序入口用这个**）。
+
+    `restore=True`（默认）：**按记忆回到上次那个项目**（用户 2026-10-13：
+    "当第二次打开时自动读取之前打开过的那个项目"）。它与命令行参数的关系是：
+
+      · 命令行**给了**项目或章节 → 不恢复（那是明确指定，不能被"上次"盖掉）；
+      · 什么都没给 → 恢复；`STORYGRAPH_NO_SESSION=1` 或记忆里
+        `auto_open=false` 也能整趟关掉。
+
+    ⚠ 恢复跑在窗口显示之后的第一个事件循环回合里（`_boot`），
+    所以**不会拖慢第一屏**，也不会让"构造完就能用"的调用方看到半成品
+    （测试与脚本大多直接 `MainWindowQt(...)`，那条路本来就不恢复）。
+    """
     win = MainWindowQt(engine, script_path, project_root, graph)
     win.show()
+    if not restore:
+        return win
+    if script_path or project_root:
+        return win                      # 命令行说了算
+    if getattr(win, '_restore_on_boot', True):
+        # 恢复已经在 `_boot` 里排好了（`QTimer.singleShot(0, …)`）——
+        # 这里不再催一次，免得同一个项目被读两遍资源表。
+        pass
     return win

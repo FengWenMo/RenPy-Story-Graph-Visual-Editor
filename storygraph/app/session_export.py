@@ -11,7 +11,7 @@ storygraph.app.session_export
 
 这一块里有**这个项目最危险的一段代码**（`export` + `_patch_note`）——
 它管着"patch 失败不许静默退回全量覆盖"那个 P0
-（`docs/P0_静默全量覆盖_2026-10-03.md`）。所以它既是"最独立的一块"，
+（`docs/archive/P0_静默全量覆盖_2026-10-03.md`）。所以它既是"最独立的一块"，
 也是**最不能动坏的一块**；搬的时候一个字都没改，只是换了住址。
 
 职责边界
@@ -244,7 +244,7 @@ class ExportMixin:
         **必须由用户显式确认过**（见 `ui_qt.main_window.export_script` 的
         "覆盖手写文件？"对话框）—— 全量生成只认得"拍"，
         `default` / `init python` / `transform` 一行都留不下
-        （`docs/P0_静默全量覆盖_2026-10-03.md`）。
+        （`docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
         """
         target = Path(target)
         result = self.compile()
@@ -458,7 +458,7 @@ class ExportMixin:
         if not n:
             return ''
         return (f'；⚠ 结构列与老推断有 {n} 条拍对不上'
-                f'（`NEST_CONFLICT`，见 docs/嵌套与行尾注释_修复方案_2026-10-05.md）')
+                f'（`NEST_CONFLICT`，见 docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md）')
 
     def _reload_after_inplace_write(self) -> None:
         """
@@ -497,7 +497,7 @@ class ExportMixin:
         """
         试着走增量补丁。**补不上时不许装作"换了个写法"**（P0，2026-10-05）。
 
-        为什么原来是 P0（见 `docs/P0_静默全量覆盖_2026-10-03.md`）：
+        为什么原来是 P0（见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）：
         以前补丁失败时这里返回 `{'used_patch': False, 'text': text}` ——
         也就是"用全量文本接着写"。而**全量生成只认得"拍"**，
         `default` / `define` / `init python` / `transform` / `screen`

@@ -36,6 +36,37 @@ if str(TESTS_DIR) not in sys.path:
 
 
 # ------------------------------------------------------------------
+#  会话记忆的隔离（**autouse**：没有它，跑测试会改你真实的最近项目表）
+# ------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_real_session_memory():
+    """
+    跑测试时**不许**读写真实的 `%LOCALAPPDATA%/StoryGraph/session.json`。
+
+    为什么必须 autouse（不是"想要就加"）：窗口在 `closeEvent` 里落一次记忆，
+    而测试会造**几百个**临时项目当窗口（`tmp_path` 每次都不一样）——
+    没有这道闸，跑一次全量测试就会把你真实的"最近打开的项目"灌满
+    临时目录，还会把你自己的项目挤出列表（实测：`ui_window` 夹具一 close
+    就写一次）。这类污染**当时不报错**，只在你下次开工具时突然发现"记忆坏了"。
+
+    ⚠ 关的是"自动写"这件事本身（`session_store.set_enabled(False)`），
+    **不是**换个路径假装隔离 —— 要测记忆的用例自己用
+    `tests/test_session_memory.py` 里的 `store` 夹具（它给一个显式的临时文件），
+    并在需要时显式 `set_enabled(True)`。这样"测记忆的用例"和
+    "别的用例别碰记忆"两件事互不干扰。
+    """
+    from storygraph.core import session_store as SS
+
+    before = SS.enabled()
+    SS.set_enabled(False)
+    try:
+        yield
+    finally:
+        SS.set_enabled(before)
+
+
+# ------------------------------------------------------------------
 #  夹具
 # ------------------------------------------------------------------
 

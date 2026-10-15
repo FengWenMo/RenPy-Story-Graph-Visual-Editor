@@ -396,11 +396,23 @@ class TestSpriteThumbPath:
             '真解不出来时反而没说原因'
 
     def test_missing_image_says_why_instead_of_pretending(self, qapp):
-        card = self._card('nobody x', resolver=lambda spec: None)
-        card._loader = type('L', (), {'project_root': None,
-                                      'request': lambda *a, **k: None})()
+        """
+        ⭐ 找不到时说清原因，而**不是**把 tag 名显示出来假装正常
+        （2026-10-13 加强：判得了之后格子上要直接写「没有」）。
+
+        ⚠ `assets_ready=True` 是**前提**：项目还没打开时谁也判不了，
+        那时不许说"没有"（见 `tests/test_sprite_missing_hint.py`）。
+        """
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+        card = SpriteCardWidget(
+            {'image': 'nobody x', 'expression': '', 'position': '', 'at': '',
+             'speaking': False, 'order_index': 0, 'extra_rows': []},
+            loader=type('L', (), {'project_root': None,
+                                  'request': lambda *a, **k: None})(),
+            on_resolve_path=lambda _s: None, assets_ready=True)
         card._load_thumb('nobody x')
         assert '找不到' in card._thumb.toolTip(), card._thumb.toolTip()
+        assert '没有' in card._thumb.text(), card._thumb.text()
 
 
 class TestPositionChip:

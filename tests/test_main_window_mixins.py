@@ -53,6 +53,7 @@ BLOCKS = {
     'window_export': 'WindowExportMixin',
     'window_assets': 'WindowAssetsMixin',
     'window_keyboard': 'WindowKeyboardMixin',
+    'window_state': 'WindowStateMixin',
 }
 
 #: 主类**刻意留下**的成员（键是名字，值是"为什么留"）。
@@ -73,6 +74,7 @@ KEEP = {
     '_build_graph_page': '第 0 页构建',
     '_build_card_page': '第 1 页构建',
     '_build_toolbars': '两组工具栏',
+    '_boot_restore_session': '启动时按记忆恢复（并在命令行给了参数时不恢复）',
     '_set_page': '页切换',
     '_focus_into_card_page': '页切换配套',
     '_sync_action_states': '全局动作可用性',

@@ -42,20 +42,39 @@ def test_order_is_the_list_order_not_a_guess():
     assert [c['text'] for c in got['cells']] == ['show', '小明', '泳装', '开心']
     assert [c['column'] for c in got['cells']] == ['', '角色', '服装', '神态']
     # 把"服装/神态"两格换个位置 → 原来那行就切不出来了（顺序是有意义的）
-    swapped = [SHOW_PATTERN[0], SHOW_PATTERN[1], SHOW_PATTERN[3], SHOW_PATTERN[2]]
+    # ⚠ 这里给枚举格加 `limit`（限死）：不限死的话两格都能吃 `泳装`，
+    #   顺序就"看不出来"了 —— 而这条判据要钉的正是**顺序有意义**。
+    swapped = [{**s, 'limit': True}
+               for s in (SHOW_PATTERN[0], SHOW_PATTERN[1],
+                         SHOW_PATTERN[3], SHOW_PATTERN[2])]
     assert P.match_line(swapped, 'show 小明 泳装 开心',
                         groups=GROUPS)['ok'] is False
 
 
 def test_kind_tells_variable_from_enum():
-    """② `小明` 是变量、`泳装` 是枚举 —— 靠**格子自己的类型**，不靠猜。"""
+    """
+    ② `小明` 是变量、`泳装` 是枚举 —— 靠**格子自己的类型**，不靠猜。
+
+    ⚠⚠ **2026-10-13 改**（用户实测："这个仍然切不上！有一个巨大的 bug"）：
+    旧版只要候选非空就当**封闭枚举**，于是"贴了一串角色名"之后，剧本里任何
+    没列进去的角色都判切不上。现在候选**只是下拉里的备选**，只有显式
+    （`limit: True`，界面上的"编剧只能从下面这些里选"）才限死。
+    所以这里**两条都要钉**：不限死时未知值照吃，限死时才拒绝。
+    """
     kinds = [s['kind'] for s in P.parse_pattern(SHOW_PATTERN)]
     assert kinds == ['keyword', 'variable', 'choice', 'choice']
-    # 枚举格**认候选值**：写个不在候选里的词 → 切不出来（并指出这是问题）
-    bad = P.match_line(SHOW_PATTERN, 'show 小明 龙袍 开心', groups=GROUPS)
-    assert bad['ok'] is False
+    # 不限死（缺省）：候选外的词**照吃** —— 这才是"候选只是建议"
+    open_enum = P.match_line(SHOW_PATTERN, 'show 小明 龙袍 开心', groups=GROUPS)
+    assert open_enum['ok'] is True, open_enum
+    assert open_enum['cells'][2]['text'] == '龙袍'
     # 变量格什么都能吃
     assert P.match_line(SHOW_PATTERN, 'show 小红 泳装 开心',
+                        groups=GROUPS)['ok'] is True
+    # 显式限死 → 候选外的词才切不出来
+    locked = [{**s, 'limit': True} for s in SHOW_PATTERN]
+    assert P.match_line(locked, 'show 小明 龙袍 开心',
+                        groups=GROUPS)['ok'] is False
+    assert P.match_line(locked, 'show 小明 泳装 开心',
                         groups=GROUPS)['ok'] is True
 
 
@@ -82,10 +101,19 @@ def test_optional_segment_may_be_absent_and_is_not_eaten_as_a_variable():
     assert with_at['ok'], with_at
     assert with_at['cells'][-1]['kind'] == 'optional'
     assert 'at' in with_at['cells'][-1]['text']
-    # 不出现 → 照样匹配
+    # 不出现 → 照样匹配，而且**那一格仍然在**（空着）
+    #
+    # ⚠ 2026-10-13 改：以前这里断言 `len(cells) == 4`（缺席的可选段**不产出格子**）。
+    #   那会让 `cells` 的下标与 `pattern` 错位 —— 界面说"第 N 格没吃到"时
+    #   会指着**另一个格子**（人越改越错），卡片按格子取值那侧也跟着串位。
+    #   现在缺席的格子**留一个空格子**，`len(cells) == len(pattern)` 恒成立。
     without = P.match_line(pat, 'show 小明 泳装 开心', groups=GROUPS)
     assert without['ok'], without
-    assert len(without['cells']) == 4
+    assert len(without['cells']) == len(pat), (
+        'cells 与 pattern 下标错位', [(c['column'], c['text'])
+                                      for c in without['cells']])
+    assert without['cells'][-1]['kind'] == 'optional'
+    assert without['cells'][-1]['text'] == ''
 
 
 def test_chinese_without_spaces_is_best_effort_and_never_wrong_silently():
@@ -104,17 +132,25 @@ def test_chinese_without_spaces_is_best_effort_and_never_wrong_silently():
 
 
 def test_problems_are_reported_in_plain_language():
-    """坏格子要**用人话说清**（界面直接显示；不出现 schema 这类词）。"""
+    """
+    坏格子要**用人话说清**（界面直接显示；不出现 schema 这类词）。
+
+    ⚠ 2026-10-13 改：`choice` 没给候选**不再算毛病**（候选是备选，不是必填）——
+    现在算毛病的是"**勾了限死却一个候选都没给**"（那才是真的自相矛盾）。
+    """
     bad = P.parse_pattern([
-        {'kind': 'keyword'},                     # 没说固定哪个字
-        {'kind': 'choice', 'column': '服装'},     # 枚举却没候选值/词组
+        {'kind': 'keyword'},                            # 没说固定哪个字
+        {'kind': 'choice', 'column': '服装', 'limit': True},   # 限死却没候选
         {'kind': 'nonsense', 'column': 'x'},
     ])
     probs = P.problems_of(bad)
     assert any('固定段' in p for p in probs), probs
-    assert any('候选值' in p or '词组' in p for p in probs), probs
+    assert any('候选' in p for p in probs), probs
     blob = ' '.join(probs)
     assert 'schema' not in blob.lower() and 'JSON' not in blob
+    # 没给候选、也没限死 → **不是毛病**（它就是"随便写"）
+    fine = P.parse_pattern([{'kind': 'choice', 'column': '服装'}])
+    assert P.problems_of(fine) == [], P.problems_of(fine)
 
 
 def test_columns_and_groups_are_derived_in_order():

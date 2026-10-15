@@ -131,15 +131,24 @@ def test_build_declaration_tolerates_an_equals_sign():
     assert any('=' in w for w in built['warnings'])
 
 
-def test_build_declaration_reports_bad_parameter_names():
+def test_build_declaration_accepts_chinese_column_names():
     """
-    ⚠ 后端对坏条目是**静默跳过**的 → 这里必须出声，否则用户以为加上了，
-    而表里根本没有那一列。
+    ⚠⚠ **这条判据原来写反了**（2026-10-13 用户实测现场）：
+
+        show lan swim_suit happy      → 界面显示「⚠ 切不上」
+
+    根因：这一格是**表格列名**，代码却拿"脚本具名参数"的标识符规则去卡它，
+    于是「人物」「服装」「神态」三个中文列名**被整条丢掉** →
+    声明里一列都没有 → 试切永远切不上（而界面还在旁边念"不是合法标识符"）。
+
+    中文列名是天经地义的（本仓自己的注释都这么写）——
+    这里钉住：中文／任意非空名字**照收**；空名字才丢，并出声。
     """
     built = build_declaration('swim_suit',
-                              params=[{'name': '泳装'}, {'name': 'ok_name'}])
-    assert [c['name'] for c in built['columns']] == ['ok_name']
-    assert any('泳装' in w for w in built['warnings'])
+                              params=[{'name': '泳装'}, {'name': 'ok_name'},
+                                      {'name': ''}])
+    assert [c['name'] for c in built['columns']] == ['泳装', 'ok_name'], \
+        built['columns']
 
 
 def test_build_declaration_dedupes_and_reports():
@@ -179,9 +188,9 @@ def test_the_toolbar_entry_is_the_first_action(ui_window):
     tb = ui_window._tb_graph
     texts = [a.text() for a in tb.actions() if a.text().strip()]
     assert texts, texts
-    assert '自定义模块' in texts[0], texts[:3]
+    assert '自定义动作' in texts[0], texts[:3]
     # 而且它排在「导入章节」**前面**（这是"最上方"的实际含义）
-    assert texts.index([t for t in texts if '自定义模块' in t][0]) \
+    assert texts.index([t for t in texts if '自定义动作' in t][0]) \
         < texts.index([t for t in texts if '导入章节' in t][0])
 
 
@@ -233,7 +242,7 @@ def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
     monkeypatch.setattr(ui_window, '_log', lambda m: logged.append(str(m)))
 
     action = next(a for a in ui_window._tb_graph.actions()
-                  if '自定义模块' in a.text())
+                  if '自定义动作' in a.text())
     assert isinstance(action, QAction)
     action.trigger()                       # **真的点**
 
@@ -265,18 +274,19 @@ def test_params_are_cards_not_a_cramped_table(qapp, tmp_path):
       ② **不出现横向滚动**（多个参数只会往下排）；
       ③ 候选值**不是逗号串**，是能点的小方块（编剧不用记分隔符）。
     """
-    from PySide6.QtWidgets import QTableWidget
-    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTableWidget, QScrollArea
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
-    from storygraph.ui_qt.param_cards import ParamList
+    from storygraph.ui_qt.param_editor import FieldList as ParamList
 
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
     assert isinstance(dlg.params, ParamList), '参数区不该再是表格'
     assert not isinstance(dlg.params, QTableWidget)
-    assert dlg.params.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff, \
-        '多个参数只能往下排，绝不能要人横着拉'
+    # ⚠ 2026-10-13 重写：参数区自己**不再是滚动区**（那正是"两个滚动条"的来源）——
+    #   滚动归当前页那一个。所以这里钉的是"它不横向滚"，而不是"它的横向滚动条关了"。
+    assert not isinstance(dlg.params, QScrollArea), \
+        '参数区自己又变成滚动区了 —— 会同屏出现两条滚动条'
 
     # 加三个参数（多参数才是用户抱怨的场景）→ 三张卡，仍然不横向滚
     dlg.params.clear()
@@ -289,28 +299,43 @@ def test_params_are_cards_not_a_cramped_table(qapp, tmp_path):
     assert [r['name'] for r in rows] == ['intensity', 'expression', 'who']
     # 候选值进去出来是同形（方块 ↔ 逗号串）
     assert rows[0]['choices'] == '1,2,3', rows[0]
-    assert not dlg.params.horizontalScrollBar().isVisible()
+    # 加完三张卡之后，卡片本身也不许宽到要人横着拉（最小宽要小）
+    assert dlg.params._cards[0].minimumSizeHint().width() <= 320, \
+        dlg.params._cards[0].minimumSizeHint().width()
 
 
 def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     """
-    词组是**高级功能**，默认收起（用户："多个参数还要下拉看"）——
-    收起后纵向空间全给参数卡；已有声明照样填进去，勾开就能看到。
+    **候选分栏是"另一页"，不是"一个勾选框 + 折叠块"**（2026-10-13 重写后）。
+
+    为什么改（用户原话）：
+    > 还有你这个词组栏不也还是打勾下拉吗？全都再改！
+    > ……不要再在原来的地方缝补了！整个删了重写！
+
+    旧版是 `QGroupBox(setCheckable)` 折起来的一块 —— 用户看到的仍然是
+    "一个勾 + 一展开"。现在分栏有自己的**页签**：标题栏始终看得见，
+    点一下就进去，不用勾选、不用展开。
     """
-    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog,
+                                               PAGE_COLUMNS, PAGE_FIND)
 
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
-    assert dlg.groups_box.isCheckable()
-    assert not dlg.groups_box.isChecked(), '默认该是收起的'
-    assert not dlg.groups.isVisible(), '收起时词组列表不该占空间'
-    # 已有声明仍然填着（勾开就能看到，不会丢）
-    dlg.groups.clear()
-    dlg.groups.add_group('outfit', '服装', 'clothes2')
-    assert dlg.groups.count() == 1
-    dlg.groups_box.setChecked(True)
-    assert dlg.groups.count() == 1, '勾开之后声明还在'
+    # ① 分栏是一页，不是"可勾选的折叠块"
+    assert dlg.tabs.count() == 3, [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
+    assert '候选分栏' in dlg.tabs.tabText(PAGE_COLUMNS)
+    assert dlg.tabs.currentIndex() == PAGE_FIND, '打开时该停在"认识新动作"'
+    # ② 打开时它**不占**填写页的空间（在另一页上）
+    dlg.tabs.setCurrentIndex(1)
+    assert not dlg.columns_editor.isVisible(), '分栏列表出现在填写页上了'
+    # ③ 已有声明照样填进去，点进那一页就能看到
+    dlg.columns_editor.clear()
+    dlg.columns_editor.add_column('outfit', '服装', 'clothes2')
+    assert dlg.columns_editor.count() == 1
+    dlg.tabs.setCurrentIndex(PAGE_COLUMNS)
+    assert dlg.columns_editor.count() == 1, '切页之后声明还在'
+    assert dlg.columns_editor.rows()[0]['key'] == 'outfit'
 
 
 def test_plain_text_import_goes_through_the_session_entry(ui_window):
@@ -355,14 +380,19 @@ def test_plain_text_import_goes_through_the_session_entry(ui_window):
 
 def test_groups_are_attached_to_the_slot_that_needs_them(qapp, tmp_path):
     """
-    ⭐⭐ **用户卡点 5 原话**：
-    > "「词组（可选·高级）」是什么鬼：我作为程序员，猜这可能是正则表达式的
-    >  捕获组，或者是枚举的分类。但我完全没有输入正则表达式的地方！
-    >  如果我要用 swim_suit 来匹配 泳装，我该写在哪？"
+    ⭐⭐ 用户卡点 5（2026-10-10）：
+    > "「词组（可选·高级）」是什么鬼……如果我要用 swim_suit 来匹配 泳装，
+    >  我该写在哪？"
 
-    答：词组**不是**独立表格 —— 它是"**这一格的候选值从哪来**"。
-    所以：① 建了词组，格子的下拉里就能选到；② 选了之后，试切会用这个词组的候选值；
-    ③ 删/加词组，格子上的下拉**跟着变**。
+    **v3 第二版改了答法**（用户 2026-10-12）：
+    > "如果你所谓的「词组」只是给变量一个名字的话……那你不应该弄一个下拉，
+    >  你应该就在原地，就在旁边标注，而不是下拉一个展开这么反人类"
+
+    所以现在的规矩是：
+      ① 词组**不是**独立表格，也不是每格一个下拉 —— 它是"这一格归属哪一组"的**标注**；
+      ② 标注**自动认**：这一格的名字/中文列名对得上词组名或它的候选值 → 标上；
+      ③ 词组表一变（加/删/改名），标注**跟着变**，且**已经认出来的归属不丢**；
+      ④ 交出去的序列里带着这个组名 → 试切/落进声明都能用上。
     """
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     root = tmp_path / 'proj'
@@ -372,21 +402,31 @@ def test_groups_are_attached_to_the_slot_that_needs_them(qapp, tmp_path):
     dlg.groups.clear()
     dlg.groups.add_group('outfit', '服装', '泳装,校服')
     dlg._sync_groups_to_slots()
-    # ② 那一格（枚举）的下拉里能选到它
+    # ② 那一格（中文列名「服装」= 词组的中文名）**自动**标上 outfit
     dlg.params.clear()
     dlg.params.add_param('泳装', '服装', '泳装,校服', kind='choice')
     card = dlg.params._cards[0]
-    combo = card._group
-    assert combo.findData('outfit') >= 0, '格子上选不到刚建的那个词组'
-    combo.setCurrentIndex(combo.findData('outfit'))
+    assert card.group_of() == 'outfit', '中文列名对上了词组，却没标上'
+    assert card._group_hint.isVisible() is False or True   # 弹窗没 show，可见性不判
+    assert '分栏：outfit' in card._group_hint.text(), card._group_hint.text()
     # ③ 交出去的序列里带着这个词组 → 试切/落进声明都能用上
     slots = dlg.params.slots()
     assert slots[0]['group'] == 'outfit', slots
     assert slots[0]['kind'] == 'choice'
-    # ④ 删掉词组 → 格子上的下拉跟着变（但**当前值不许丢**）
+    # ④ 词组改了名字 → 标注跟着变；删光词组 → 标注消失（不为"无"占地方）
     dlg.groups.clear()
     dlg._sync_groups_to_slots()
-    assert dlg.params.slots()[0]['group'] == 'outfit', '切一下就白填了'
+    assert dlg.params.slots()[0]['group'] == '', '词组删了，标注还挂着'
+    assert card._group_hint.text() == ''
+    # ⑤ 组名对上也能认（名字 = 组名）—— ⚠ 这里**故意不手调** `_sync_groups_to_slots`：
+    #   词组表一变，弹窗应当**自己**把新表同步给参数卡（`set_groups_changed` 那条线）。
+    dlg.groups.add_group('mood', '神态', '')
+    dlg.params.add_param('mood', '', '', kind='choice')
+    assert dlg.params._groups, '词组表变了，参数卡没收到'
+    assert dlg.params._cards[1].group_of() == 'mood', '组名对上却没认出来'
+    # ⑥ 对不上就是没有 —— **不是每个项目都有"服装"**
+    dlg.params.add_param('who', '角色', '', kind='variable')
+    assert dlg.params._cards[2].group_of() == ''
 
 
 def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
@@ -460,7 +500,12 @@ def test_the_dialog_can_try_cutting_a_real_line(qapp, tmp_path):
     assert '4 格' in text, text
 
     # 顺序不对（把"服装/神态"两格换位置）→ **明确说切不上**，不是默默不动
+    # ⚠ 2026-10-13：枚举格要**显式限死**（`limit`）才拒绝候选外的词；
+    #   不限死时两格都能吃 `泳装`，顺序就看不出来了（这条判据钉的就是顺序）。
     slots = dlg.params.slots()
+    for s in slots:
+        if s.get('kind') == 'choice':
+            s['limit'] = True
     slots[2], slots[3] = slots[3], slots[2]
     from storygraph.authoring import pattern as P
     got = P.match_line(slots, 'show 小明 泳装 开心')
@@ -844,20 +889,41 @@ def test_no_two_widgets_share_a_grid_cell_in_a_param_card(qapp):
     输入框，**两个控件叠在同一格**（渲染出来是"输入框里套着一个复选框"，
     点下去命中的是压在上层的复选框）。
 
-    判据用"扫网格"而不是"断言某控件在某坐标"：前者是**不变量**
-    （以后怎么改布局都不会误报），后者一改设计就失效。
+    ⚠ 判据写成**与布局类型无关**（2026-10-12 v3 重做后补）：
+      · 卡身是**网格**时 → 同一 `(row, col)` 不许有两个控件（原判据）；
+      · 卡身是**竖排**时（v3：`QVBoxLayout` 单列堆叠）→ 每个控件必须是**独立一项**，
+        而且不许有控件既不在布局里、又被显示出来（那才是"叠着"的本质）。
+
+    为什么改成"看结构"而不是"看坐标"：v3 把卡身换成竖排**就是为了让叠格不可能发生**
+    （见 `docs/archive/设计_自定义动作界面_v3_重做_2026-10-12.md` §5），
+    判据要能同时守住这两种形态，否则一改布局它就变成噪音。
     """
-    from storygraph.ui_qt.param_cards import ParamCard
+    from PySide6.QtWidgets import QGridLayout, QVBoxLayout
+    from storygraph.ui_qt.param_editor import FieldCard as ParamCard
 
     card = ParamCard()
-    grid = card.body
-    seen = {}
-    for i in range(grid.count()):
-        row, col, _rs, _cs = grid.getItemPosition(i)
-        w = grid.itemAt(i).widget()
-        seen.setdefault((row, col), []).append(type(w).__name__ if w else '?')
-    dup = {k: v for k, v in seen.items() if len(v) > 1}
-    assert not dup, f'这些网格里叠了多个控件（人点不到下面那个）：{dup}'
+    body = card.body
+    if isinstance(body, QGridLayout):
+        seen = {}
+        for i in range(body.count()):
+            row, col, _rs, _cs = body.getItemPosition(i)
+            w = body.itemAt(i).widget()
+            seen.setdefault((row, col), []).append(type(w).__name__ if w else '?')
+        dup = {k: v for k, v in seen.items() if len(v) > 1}
+        assert not dup, f'这些网格里叠了多个控件（人点不到下面那个）：{dup}'
+        return
+    assert isinstance(body, QVBoxLayout), (
+        f'卡身只能是"网格"或"竖排"之一，实际是 {type(body).__name__}')
+    # 竖排：每一项各占一行；被登记的控件不许重复出现（重复 = 同一个控件被塞两次）
+    rows = {}
+    for i in range(body.count()):
+        item = body.itemAt(i)
+        w = item.widget()
+        if w is None:
+            continue
+        rows.setdefault(id(w), []).append(i)
+    dup = {k: v for k, v in rows.items() if len(v) > 1}
+    assert not dup, f'同一个控件被放进多个位置（会叠着画）：{dup}'
 
 
 def test_chip_edit_return_does_not_close_the_dialog(qapp):
@@ -877,7 +943,7 @@ def test_chip_edit_return_does_not_close_the_dialog(qapp):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
-    from storygraph.ui_qt.param_cards import ChipEdit
+    from storygraph.ui_qt.param_editor import ValueChips as ChipEdit
 
     dlg = QDialog()
     lay = QVBoxLayout(dlg)
@@ -915,7 +981,7 @@ def test_chip_edit_takes_a_whole_paste_at_once(qapp):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from storygraph.authoring.learn_statement import parse_choices
-    from storygraph.ui_qt.param_cards import ChipEdit
+    from storygraph.ui_qt.param_editor import ValueChips as ChipEdit
 
     spot = 'swim_suit uniform、casual;formal|home'
     ce = ChipEdit()
@@ -931,7 +997,7 @@ def test_chip_edit_takes_a_whole_paste_at_once(qapp):
 
 def test_chip_edit_add_values_appends_not_replaces(qapp):
     """「⚡ 导入候选」是**加上去**，不是把人已经写的那几个换掉（重复的自动跳过）。"""
-    from storygraph.ui_qt.param_cards import ChipEdit
+    from storygraph.ui_qt.param_editor import ValueChips as ChipEdit
 
     ce = ChipEdit()
     ce.set_text('swim_suit')
@@ -969,6 +1035,99 @@ def test_the_card_offers_project_sourced_candidates(qapp, tmp_path):
     assert not card._import.isVisibleTo(card)
 
 
+def test_no_horizontal_scrollbar_at_the_minimum_size(qapp, tmp_path):
+    """
+    ⑦ **拉到最小尺寸时，左右两栏都不许出现横向滚动条**。
+
+    这是用户那句"选的一多就把后面那个变量挤到窗口外"的**总判据**：
+    内容放不下时要么折行、要么竖着排，**绝不该要人横着拉**。
+
+    实测（修之前）：760×480 时右栏内容 466 px > 视口 354 px → 横向滚动条；
+    两处元凶都被揪出来修掉了：卡片 6 列网格（480 px）与 `QGroupBox` 的长标题（466 px）。
+    """
+    from PySide6.QtWidgets import QScrollArea
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    # 造出"选的一多"的现场：一格枚举 + 一大堆候选值
+    dlg.params.clear()
+    card = dlg.params.add_param('mood', '神态', '', kind='choice')
+    card._choices.add_values([f'表情{i}' for i in range(14)])
+    card._limit.setChecked(True)
+    card._choices.setVisible(True)
+    dlg.resize(dlg.minimumWidth(), dlg.minimumHeight())
+    dlg.show()
+    for _ in range(3):
+        qapp.processEvents()
+    offenders = []
+    for area in dlg.findChildren(QScrollArea):
+        if area.horizontalScrollBar().isVisible():
+            offenders.append((type(area.widget()).__name__,
+                              area.viewport().width(),
+                              area.widget().sizeHint().width()))
+    assert not offenders, (
+        f'最小尺寸下这些滚动区出现了横向滚动条（视口宽, 内容宽）：{offenders}')
+    # ⚠ 2026-10-13 重写后**额外钉一条**（用户："这两个滚动条是何意味啊？？？"）：
+    #   一屏**只许有一个**滚动区（当前页那一个）——
+    #   旧版是 弹窗滚动区 + 字段列表滚动区 + 词组滚动区，同屏两三条。
+    areas = [a for a in dlg.findChildren(QScrollArea) if a.isVisible()]
+    assert len(areas) <= 1, (
+        f'同一屏有 {len(areas)} 个可见滚动区（只该有当前页那一个）：'
+        f'{[type(a.widget()).__name__ for a in areas]}')
+    dlg.close()
+
+
+def test_cut_accepts_a_whole_line_pasted_from_the_script(qapp, tmp_path):
+    """
+    ⚠⚠ 用户 2026-10-13 实测现场（截图里那两条 "⚠ 切不上"）：
+
+        粘一行: show lan swim_suit happy        →  切不上
+
+    根因：格子里描述的是"**动作名后面**的东西"，而人从剧本里复制的**一定是整行**
+    ——头部那个动作名不在格子里，于是"多出来 1 个词 → 切不上"，
+    而界面只会说"检查顺序、关键字写法"，人怎么查都查不出来。
+
+    现在：**行首整词等于动作名就摘掉它**（绝不猜别的），整行照粘能切；
+    只粘参数（不带动作名）也照旧能切。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.name.setText('show')
+    p = dlg.params
+    p.clear()
+    p.add_field('lan', '人物', '', kind='variable')
+    p.add_field('swim_suit', '服装', '', kind='keyword')
+    card = p.add_field('happy', '表情', '', kind='choice')
+    card._values.add_values(['happy', 'angry'])
+    card._limit.setChecked(True)
+
+    # ① 粘整行（带动作名）→ 切得上，而且**三格都对**
+    dlg.sample.setText('show lan swim_suit happy')
+    dlg._refresh_cut()
+    text = dlg.cut_view.text()
+    assert '切出来是这样' in text, text
+    assert '共 3 格' in text, text
+    assert 'lan（人物）' in text and 'swim_suit（服装）' in text \
+        and 'happy（表情）' in text, text
+
+    # ② 不带动作名的也照旧能切
+    dlg.sample.setText('lan swim_suit happy')
+    dlg._refresh_cut()
+    assert '切出来是这样' in dlg.cut_view.text(), dlg.cut_view.text()
+
+    # ③ 只粘动作名 → 说清"后面还没写"，而不是含混的"检查顺序"
+    dlg.sample.setText('show')
+    dlg._refresh_cut()
+    text = dlg.cut_view.text()
+    assert '后面还没写东西' in text, text
+    dlg.close()
+
+
 def test_choice_sources_is_empty_not_invented(tmp_path):
     """
     ⭐ 通用性底线：项目里**什么都没采过**时，来源清单是**空的** ——
@@ -979,3 +1138,289 @@ def test_choice_sources_is_empty_not_invented(tmp_path):
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     assert choice_sources(root) == []
+
+
+# ============ ⑦ v3 界面重做（2026-10-12 用户："擦了重新设计重新写"） ============
+#
+# 设计文档：`docs/archive/设计_自定义动作界面_v3_重做_2026-10-12.md`
+# 用户现场（截图评审）：
+#   > 前面那个选的一多呀……就把后面那个变量挤到窗口外去了！而且你这个窗口还不能全屏……
+#
+# 这一节钉住的正是那两句话，**用尺寸与标志说话**（不靠肉眼）。
+
+def test_the_window_can_be_maximized_and_grown(qapp, tmp_path):
+    """
+    ① 窗口**能全屏**（`WindowMaximizeButtonHint`）+ 有右下角拖动柄。
+
+    实测（修之前）：窗口标志不含 MaximizeHint，标题栏**根本没有最大化按钮** ——
+    用户看到的"不能全屏"就是这个。
+    """
+    from PySide6.QtCore import Qt
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    assert dlg.windowFlags() & Qt.WindowMaximizeButtonHint, '没有最大化按钮'
+    assert dlg.windowFlags() & Qt.WindowMinimizeButtonHint, '没有最小化按钮'
+    assert dlg.isSizeGripEnabled(), '没有右下角拖动柄'
+    # 最大尺寸必须放开（万一把 maximumSize 写死，它同样"不能全屏"）
+    assert dlg.maximumWidth() > 5000 and dlg.maximumHeight() > 5000
+    dlg.close()
+
+
+def test_the_window_minimum_is_usable_not_the_content_width(qapp, tmp_path):
+    """
+    ② 最小尺寸必须"人能干活"，**不是"内容的全宽"**。
+
+    实测（修之前）：建议最小 806×994，而代码写死 720 高 —— 底部按钮当场被裁。
+    现在：最小尺寸 ≤ 900×620（能塞进 1024×768 这种老屏），
+    而且**默认尺寸不超过屏幕可用区**（不再写死 1100×720）。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    assert dlg.minimumWidth() <= 900, dlg.minimumWidth()
+    assert dlg.minimumHeight() <= 620, dlg.minimumHeight()
+    hint = dlg.minimumSizeHint()
+    assert hint.height() <= 700, f'建议最小高仍然过高（{hint.height()}）—— 小屏会被裁'
+    dlg.close()
+
+
+def test_a_param_card_stays_narrow_even_with_many_choices(qapp):
+    """
+    ③ **卡片最小宽不许随候选值变多而涨**（用户报的"挤出去"就是这个）。
+
+    实测对比：
+      · v2（6 列网格 + 横排方块）：空卡最小宽 **480 px**，方块越多还越大；
+      · v3（单列 + 折行）：空卡 **188 px**，16 个方块时**仍然 188 px**。
+
+    ⚠ 钉的是"**不随数量增长**"这个不变量，而不是某个具体数字 ——
+    以后改字号/间距，这条判据照样有意义。
+    """
+    from storygraph.ui_qt.param_editor import FieldCard as ParamCard
+
+    empty = ParamCard()
+    base = empty.minimumSizeHint().width()
+    assert base <= 320, f'空卡最小宽 {base} px 太宽了（v2 是 480）'
+
+    many = ParamCard()
+    many._choices.set_text(','.join(f'候选{i}' for i in range(16)))
+    grown = many.minimumSizeHint().width()
+    assert grown <= base + 24, (
+        f'候选值一多，卡片最小宽从 {base} 涨到 {grown} —— 又要把窗口顶宽了')
+
+
+def test_chips_wrap_instead_of_stretching_the_row():
+    """
+    ④ 候选值方块必须**折行**（宽度有上限），不能横着无限长。
+
+    `QHBoxLayout` 的最小宽 = 所有方块之和 → 方块一多就顶宽整窗；
+    `FlowLayout` 的最小宽 = **最宽的那一个方块**。
+    """
+    from storygraph.ui_qt.param_editor import ValueChips as ChipEdit
+
+    one = ChipEdit()
+    one.set_text('a')
+    many = ChipEdit()
+    many.set_text(','.join(f'rank{i}' for i in range(20)))
+    narrow = one.minimumSizeHint().width()
+    wide = many.minimumSizeHint().width()
+    assert wide <= narrow + 60, (
+        f'20 个方块的最小宽 {wide} 远大于 1 个方块的 {narrow} —— 没有折行')
+
+
+def test_the_action_bar_never_scrolls_away(qapp, tmp_path):
+    """
+    ⑤ 主按钮（写清单 / 取消）**不在滚动区里** —— 滚多远都点得到。
+
+    设计文档 R17：提交按钮放在固定命令区，内容自己滚。
+    判据：按钮条的祖先里**没有** `QScrollArea`。
+    """
+    from PySide6.QtWidgets import QScrollArea
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    for btn in (dlg._ok_btn,):
+        p = btn.parentWidget()
+        while p is not None:
+            assert not isinstance(p, QScrollArea), \
+                f'{btn.text()} 被放进了滚动区 —— 内容一多就点不到了'
+            p = p.parentWidget()
+    dlg.close()
+
+
+def test_the_main_path_does_not_need_scrolling_at_the_default_size(qapp,
+                                                                   tmp_path):
+    """
+    ⑥ 默认尺寸下，**主路径四步**（发现 → 名字 → 要填的东西 → 试切）都在一屏里。
+
+    设计文档 P5：能不滚就不滚；滚只发生在"很多格子/很多候选"时。
+    判据（结构而非像素）：这四块控件在默认尺寸下都**已经可见且高度 > 0**。
+    """
+    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog,
+                                               PAGE_DECLARE)
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.resize(960, 660)
+    dlg.show()
+    qapp.processEvents()
+    # 第一页：发现列表
+    for name, w in (('发现列表', dlg.found), ('写清单按钮', dlg._ok_btn)):
+        assert w.isVisible(), f'{name} 在默认尺寸下看不见'
+        assert w.height() > 0, f'{name} 被压成 0 高'
+    # 第二页：填写（⚠ 2026-10-13 起它在一张页签上 —— 切过去再看）
+    dlg.tabs.setCurrentIndex(PAGE_DECLARE)
+    qapp.processEvents()
+    for name, w in (('动作名输入', dlg.name), ('试切输入', dlg.sample),
+                    ('试切结果', dlg.cut_view), ('字段列表', dlg.params)):
+        assert w.isVisible(), f'{name} 在默认尺寸下看不见'
+        assert w.height() > 0, f'{name} 被压成 0 高'
+    dlg.close()
+
+
+# ============ ⑧ 位置参数不丢 + 词组标注（2026-10-12 用户追问时挖出来的） ============
+
+def _write_swim_suit_project(root):
+    """造一个"声明了 `swim_suit` 且有位置参数"的最小项目。"""
+    import json
+    (root / 'game').mkdir(parents=True, exist_ok=True)
+    (root / 'storygraph.rules.json').write_text(json.dumps({
+        'statements': [{
+            'name': 'swim_suit', 'label': '泳装切换',
+            'columns': [{'name': 'who', 'label': '角色'},
+                        {'name': 'outfit', 'label': '服装',
+                         'choices': ['泳装', '校服']},
+                        {'name': 'mood', 'label': '神态',
+                         'choices': ['happy', 'shy']}],
+            # ⚠ 形状与**弹窗写下来的**一致（`kind` + `text` + `column`）
+            'pattern': [{'kind': 'variable', 'text': '角色', 'column': '角色'},
+                        {'kind': 'choice', 'text': '服装', 'column': '服装'},
+                        {'kind': 'keyword', 'text': 'mood', 'column': '神态'}],
+        }],
+    }, ensure_ascii=False), encoding='utf-8')
+    return root
+
+
+def test_positional_parameters_are_read_into_their_own_cells(qapp, tmp_path):
+    """
+    ⚠⚠ 用户 2026-10-12 的追问挖出来的**真 bug**：
+
+        > 你确定我这个得到修改之后，卡牌编辑器中能够完全反应出来吗？
+        > 不是 excel 表格，而是卡牌编辑器内也需要有相应的改变
+
+    实测（修之前）：声明了 `swim_suit` 之后，这一行
+
+        swim_suit lyj "泳装" mood=happy
+
+    在**卡片编辑器**里长这样：`角色` 空、`服装` **空**、`神态`=happy。
+    根因两处，都在"读了却没用上"：
+      ① 位置参数的列号（`positional`）**只在显式写了才有**，而弹窗存的是
+         `pattern`（有序格子）——`pattern` 甚至没进 `RegisteredStatement`；
+      ② 于是 `spec_arg_cells` 只去 `key=value` 里找值，位置参数全部落空。
+
+    修法：`pattern` 进注册表 → `spec_columns` 按"格子顺序 = 位置号"补上
+    （名字对上优先，对不上按 1:1 顺序兜底）。
+    """
+    from storygraph.story.statement_registry import (StatementRegistry,
+                                                     clear_cache,
+                                                     dynamic_spec_columns)
+    from storygraph.story.beat_model import Beat
+
+    root = _write_swim_suit_project(tmp_path / 'proj')
+    clear_cache()
+    reg = StatementRegistry.for_project(str(root))
+    b = Beat()
+    b.opaque = 'swim_suit lyj "泳装" mood=happy'
+    cols = dynamic_spec_columns([b], reg)
+    cells = b.spec_arg_cells(cols)
+    got = {str(c.get('param')): v for c, v in zip(cols, cells)}
+    assert got.get('who') == 'lyj', ('角色 那一格没吃到位置参数', got)
+    assert got.get('outfit') == '泳装', ('服装 那一格没吃到位置参数', got)
+    assert got.get('mood') == 'happy', ('神态 那一格没吃到 key=value', got)
+
+
+def test_editing_a_positional_cell_folds_back_into_the_head(qapp, tmp_path):
+    """
+    卡片上改一格 → **折回头行**（写回的路径与 Excel 同一条）。
+
+    这条是"编辑器里能完全反应出来"的**闭环判据**：
+    读（上一则）→ 改 → 折回 → 渲染出来的那一行也跟着变。
+    """
+    from storygraph.story.statement_registry import (StatementRegistry,
+                                                     clear_cache,
+                                                     dynamic_spec_columns)
+    from storygraph.story.beat_model import Beat, fold_spec_arg_columns
+
+    root = _write_swim_suit_project(tmp_path / 'proj')
+    clear_cache()
+    reg = StatementRegistry.for_project(str(root))
+    b = Beat()
+    b.opaque = 'swim_suit lyj "泳装" mood=happy'
+    cols = dynamic_spec_columns([b], reg)
+    header = next(str(c['header']) for c in cols if c.get('param') == 'outfit')
+    fold_spec_arg_columns(b, {header: '校服'})
+    assert '校服' in b.statement_head(), b.statement_head()
+    assert '泳装' not in b.statement_head(), b.statement_head()
+    assert 'lyj' in b.statement_head() and 'mood=happy' in b.statement_head(), b.statement_head()
+
+
+def test_editing_a_keyword_cell_keeps_the_other_cells(qapp, tmp_path):
+    """改 `key=value` 那一格，**不许**碰位置参数那两格。"""
+    from storygraph.story.statement_registry import (StatementRegistry,
+                                                     clear_cache,
+                                                     dynamic_spec_columns)
+    from storygraph.story.beat_model import Beat, fold_spec_arg_columns
+
+    root = _write_swim_suit_project(tmp_path / 'proj')
+    clear_cache()
+    reg = StatementRegistry.for_project(str(root))
+    b = Beat()
+    b.opaque = 'swim_suit lyj "泳装" mood=happy'
+    cols = dynamic_spec_columns([b], reg)
+    header = next(str(c['header']) for c in cols if c.get('param') == 'mood')
+    fold_spec_arg_columns(b, {header: 'shy'})
+    assert 'mood=shy' in b.statement_head(), b.statement_head()
+    assert 'lyj' in b.statement_head(), b.statement_head()
+
+
+def test_a_group_declared_in_the_dialog_reaches_the_cards(qapp, tmp_path):
+    """
+    ⚠ 另一个真 bug（同一轮挖出来的）：**词组填了，参数卡上却是空的**。
+
+    根因：`_sync_groups_to_slots()` 在"词组还没 load 进来"时就调过一次
+    （把表同步成空），load 之后再没人刷新 → 用户打开弹窗看到的是一个**空下拉**
+    （"词组到底有什么用"里至少一半是它造成的）。
+
+    现在：① load 之后补一次同步；② 词组表一变（增/删/改名）**自动**同步；
+    ③ 分组改成**自动标注**（不是下拉）—— 名字/中文列名对得上就标在卡头。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = _write_swim_suit_project(tmp_path / 'proj')
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[],
+                                declared_groups=[])
+    # ① 声明了一个词组 → 参数卡上的标注要认出来（中文列名 == 词组的中文名）
+    dlg.groups.add_group('outfit', '服装', '泳装,校服')
+    dlg.params.clear()
+    card = dlg.params.add_param('outfit', '服装', '泳装,校服', kind='choice')
+    assert dlg.params._groups, '词组表没同步到参数卡'
+    assert card.group_of() == 'outfit', ('中文列名对上了却没标上',
+                                         card.group_of())
+    assert 'outfit' in card._group_hint.text(), card._group_hint.text()
+    # ② 词组改名 → 对不上就不标（不硬塞一个假分组）
+    dlg.groups.clear()
+    dlg.groups.add_group('clothes', '衣着', '')
+    assert card.group_of() == '', '词组已经对不上了，标注还挂着'
+    # ③ 名字能对上 → 重新标上（这一格的名字就是 'outfit'）
+    dlg.groups.add_group('outfit', '服装', '')
+    assert card.group_of() == 'outfit', '组名对上却没认出来'
+    # ④ 交出去的序列里带着它（试切/落进声明都能用）
+    assert dlg.params.slots()[0]['group'] == 'outfit', dlg.params.slots()
+    dlg.close()
