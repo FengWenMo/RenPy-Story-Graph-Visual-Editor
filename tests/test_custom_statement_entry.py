@@ -1151,6 +1151,131 @@ def test_批量导入窗口一次收下一整批(qapp, tmp_path):
     assert chips.text().count('泳装') == 1, chips.text()
 
 
+def test_没列名的格子必须当场看得见(qapp, tmp_path):
+    """
+    ⚠⚠ **这条钉的是一次静默数据丢失**（用户 2026-10-16 实测现场）。
+
+    用户把角色表（一屏的人名）倒进第 1 格、表情属性倒进第 2 格，只有一格
+    填了列名 → 按确定后另外两格**被后端静默丢掉**，预览里只写
+    "参数：无（只逐字透传）"，人当场问："你这个到底怎么判断的？第一列明明
+    就是角色表啊……？"
+
+    所以现在的口径：**没列名 = 这一格会被丢掉 → 不许按确定**，
+    而且必须在卡片上、预览最上面同时看得见"是哪一格、怎么补"。
+    """
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.name.setText('show')
+    dlg.params.clear()
+    good = dlg.params.add_param('', '角色', '', kind='choice')
+    bad = dlg.params.add_param('', '', '', kind='choice')
+    bad._limit.setChecked(True)
+    bad._values.add_values(['叶怀瑾', '凌跃婕', '教官'])
+
+    assert good.needs_a_column_name() is False, '填了「角色」的那格不该被判缺名'
+    assert bad.needs_a_column_name() is True
+    assert bad._name_warning.isVisibleTo(bad), '缺列名的警告没显示在卡上'
+    assert dlg.missing_name_cards() == [bad]
+
+    dlg._refresh_preview()
+    text = dlg.preview.toPlainText()
+    assert '没起名字' in text, text
+    assert '第 1 格' in text, text
+    assert '会被丢掉' in text or '不会写进去' in text, text
+    assert not dlg._ok_btn.isEnabled(), '有格子会被丢掉，还能按确定'
+
+    # 补上名字 → 立刻放行（不用重开窗口）
+    bad._name.setText('服装')
+    assert bad.needs_a_column_name() is False
+    assert not bad._name_warning.isVisibleTo(bad)
+    dlg._refresh_preview()
+    assert dlg._ok_btn.isEnabled(), '补了名字还是不让写'
+    assert '没起名字' not in dlg.preview.toPlainText()
+    # 而且那一格真的进了声明（不是只有提示好看）
+    cols = [c['name'] for c in dlg.result_declaration()['columns']]
+    assert cols == ['角色', '服装'], cols
+
+
+def test_没名字的格子删掉就不拦了(qapp, tmp_path):
+    """空白的"还没想好"格子很常见 —— 删掉它就该放行（不能把人卡死）。"""
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.name.setText('show')
+    dlg.params.clear()
+    dlg.params.add_param('', '', '', kind='choice')
+    dlg._refresh_preview()
+    # 空卡**不算**缺名字（它没内容可丢），所以确定键不该被它锁死；
+    # 但它要在预览里如实说出来"不会写进去"。
+    assert dlg.missing_name_cards() == []
+    assert dlg._ok_btn.isEnabled(), '一张还没填的空卡就把确定键锁死了'
+    assert '空的' in dlg.preview.toPlainText(), dlg.preview.toPlainText()
+    # 真往里填了东西（又没名字）→ 拦
+    card = dlg.params._cards[0]
+    card._limit.setChecked(True)
+    card._values.add_values(['泳装'])
+    dlg._refresh_preview()
+    assert dlg.missing_name_cards() == [card]
+    assert not dlg._ok_btn.isEnabled(), '有内容却没列名，还能按确定（会被静默丢掉）'
+    # 删掉那一格 → 放行
+    dlg.params.remove_current()
+    dlg._refresh_preview()
+    assert dlg.missing_name_cards() == []
+    assert dlg._ok_btn.isEnabled(), '删掉那一格之后还是不让写'
+
+
+def test_导入一组候选之后列名可以一键填上(qapp, tmp_path):
+    """
+    "缺列名"不该只报错 —— 人已经用鼠标点了「从项目里拿」，工具手上就有
+    一个**现成的名字**（刚导入的那组来源），一键填上就行。
+
+    这条把真"点一下菜单"的整条路走完：`QMenu.exec` 换成"模拟用户点了
+    「角色表」那一项"（模态菜单在测试里点不动）。
+    """
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QMenu
+
+    from storygraph.ui_qt.param_editor import FieldCard
+
+    card = FieldCard()
+    card._kind.setCurrentIndex(card._kind.findData('choice'))
+    card._limit.setChecked(True)
+    card._import.setVisible(True)
+    card._sources_provider = lambda: [
+        {'label': '角色表', 'count': 3, 'values': ['叶怀瑾', '凌跃婕', '教官']}]
+
+    assert card.needs_a_column_name() is True       # 还没有名字
+
+    # ⚠ 不点真模态菜单（`QMenu.exec` 在 C++ 侧调用，猴子补丁不可靠）——
+    #   替换的是 `pick_source_action()` 这一层：它返回用户点的那一项。
+    #   这里**故意用真的 QMenu/QAction** 造一项（保住 `text()` / `data()` 两个契约）。
+    menu = QMenu(card)
+    action = menu.addAction('角色表（3 个）')
+    action.setData(['叶怀瑾', '凌跃婕', '教官'])
+    assert isinstance(action, QAction)
+    orig_pick = card.pick_source_action
+    card.pick_source_action = lambda: action
+    try:
+        card._on_import()
+    finally:
+        card.pick_source_action = orig_pick
+
+    assert card._values.values() == ['叶怀瑾', '凌跃婕', '教官'], card._values.text()
+    # 名字建议来自刚导入的这组来源 → 一键填上 → 缺名警告消失
+    assert card._name_suggest.isVisibleTo(card), '卡上没有"用「角色表」当列名"的入口'
+    assert '角色表' in card._name_suggest.text()
+    card._name_suggest.click()
+    assert card._name.text() == '角色表'
+    assert card.needs_a_column_name() is False
+    assert not card._name_warning.isVisibleTo(card)
+    assert card.data()['name'] == '角色表'
+
+
 def test_no_horizontal_scrollbar_at_the_minimum_size(qapp, tmp_path):
     """
     ⑦ **拉到最小尺寸时，左右两栏都不许出现横向滚动条**。

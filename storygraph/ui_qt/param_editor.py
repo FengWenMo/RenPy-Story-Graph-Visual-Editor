@@ -439,13 +439,16 @@ class FieldCard(QFrame):
     """
 
     def __init__(self, on_change=None, on_remove=None, on_move=None,
-                 sources_provider=None, parent=None):
+                 sources_provider=None, parent=None, on_missing_change=None):
         super().__init__(parent)
         self.setProperty('role', 'card')
         self.setFrameShape(QFrame.NoFrame)
         self._on_change = on_change
         self._on_remove = on_remove
         self._sources_provider = sources_provider
+        #: ⚠ "缺列名"状态一变就要让外面知道（弹窗据此**挡住确定键**）——
+        #:   否则用户辛苦导入的候选会被后端**静默丢掉**（见 `_refresh_name_warning`）。
+        self._missing_changed = on_missing_change
         #: 这一格**自动认到**的分栏（`FieldList.match_column` 算出来的）
         self._column = ''
         self._columns_changed = None
@@ -461,6 +464,23 @@ class FieldCard(QFrame):
         self._title.setProperty('role', 'cardTitle')
         self._title.setWordWrap(True)
         head.addWidget(self._title, 1)
+        #: ⚠ **缺列名要当场看得见**（2026-10-16 用户实测的坑）：从前没名字这一格
+        #:   会被后端"静默丢掉"，用户只在控制台里看见一句"参数：无"，人当场懵。
+        self._name_warning = QLabel()
+        self._name_warning.setProperty('role', 'caption')
+        self._name_warning.setStyleSheet('color: #B3261E;')
+        # ⚠ **必须折行**：不折行时这一句会把卡头最小宽撑到 391 px
+        #   （`test_a_param_card_stays_narrow_even_with_many_choices` 当场变红）。
+        #   完整解释放在预览里（`dialog_learn._missing_name_notice`）。
+        self._name_warning.setWordWrap(True)
+        head.addWidget(self._name_warning)
+        #: 一键把"建议的列名"填进去（分栏自动认到的名字 / 刚导入的那组来源）
+        self._name_suggest = QPushButton()
+        self._name_suggest.setProperty('role', 'ghost')
+        self._name_suggest.setToolTip('把建议的名字填进「这一列叫什么」')
+        self._name_suggest.clicked.connect(self._use_suggested_name)
+        head.addWidget(self._name_suggest)
+        self._name_suggestion = ''
         self._column_hint = QLabel()
         self._column_hint.setProperty('role', 'caption')
         self._column_hint.setToolTip(
@@ -524,6 +544,11 @@ class FieldCard(QFrame):
         #:   它不进界面（用户明确说"剧本里怎么写"让人误会），但**写回时保留** ——
         #:   否则"中文列名"会悄悄替换掉项目原有的英文键（那是一次静默的数据改写）。
         self._key = ''
+        #: 存量声明里"代码里必须出现的那串字"（`set_data` 会填）——
+        #: ⚠ 在这里先立好：`_refresh_title()` 在建卡过程中就会问
+        #: `has_content()`，那时 `set_data` 还没跑（AttributeError 实测踩到）。
+        self._fixed_text = ''
+        self._display_name = ''
         self._limit = QCheckBox('编剧只能从下面这些里选')
         self._limit.setToolTip('不勾 = 编剧随便写（候选只是下拉里的备选）；'
                                '勾了 = 只能从你列的候选里挑。')
@@ -615,6 +640,82 @@ class FieldCard(QFrame):
     def _refresh_title(self):
         text = self._name.text().strip()
         self.set_title(text or '这一格要填的东西')
+        self._refresh_name_warning()
+
+    # ---- 缺列名（别静默丢格子）----
+    def has_content(self) -> bool:
+        """
+        这一格**填过东西吗**（有内容才会"被丢掉 = 真丢数据"）。
+
+        "空卡"是常态（一进来就有一格、加了两格还没想好）—— 那种格子没名字
+        也不该拦着人写，只是它不会进声明（后端行为，界面上给个提醒就够）。
+        """
+        if str(self._key or '').strip() or str(self._fixed_text or '').strip():
+            return True
+        if str(self._name.text()).strip():
+            return True
+        # ⚠ 建卡过程中 `_refresh_title()` 会先跑一次（那时 `_values` 还没建好），
+        #   所以这里一律用 getattr 兜底。
+        values = getattr(self, '_values', None)
+        if values is not None and values.values():
+            return True
+        return bool(getattr(self, '_limit', None) is not None
+                    and self._limit.isChecked()
+                    or getattr(self, '_multi', None) is not None
+                    and self._multi.isChecked())
+
+    def needs_a_column_name(self) -> bool:
+        """
+        这一格会不会被后端**丢掉**，而且**丢掉的是人填过的东西**？
+
+        对的是 `learn_statement.build_declaration` 那段（读 `name` → 空就退
+        `label`/`column` → 还空就"这一格没写进声明"）。用户 2026-10-16 的现场
+        正是"倒好一屏候选、只有一格填了名字" → 另外两格的候选被**静默丢掉**。
+
+        ⚠ 只判"**有内容**且没名字"：空白的格子（还没想好）不该把确定键锁死，
+        它只是不会进声明 —— 那种在界面上给个浅色提醒即可。
+        """
+        if not self.has_content():
+            return False
+        return not self._resolved_column_name()
+
+    def _resolved_column_name(self) -> str:
+        """与后端同一套口径：内部键 → 界面上的列名。"""
+        return str(self._key or self._name.text() or '').strip()
+
+    def missing_name_hint(self) -> str:
+        """给外面看的一句话（弹窗把它汇总成"这几格还没起名字"）。"""
+        return self._name_suggestion or '例如：角色 / 服装 / 神态'
+
+    def _use_suggested_name(self):
+        if self._name_suggestion:
+            self._name.setText(self._name_suggestion)
+            self._name.setFocus()
+
+    def _refresh_name_warning(self):
+        """
+        ⚠ **只在"会真正丢东西"时报警**（有内容 + 没列名）。
+
+        为什么不给"空白格"也常驻一句提示（试过，实测否决）：卡头多一个
+        常驻 label 会把**空卡最小宽从 320 顶到 352 px**
+        （`test_a_param_card_stays_narrow_even_with_many_choices` 当场变红）——
+        而 320 px 那个窄度正是用户要的（"选的一多就把后面那个变量挤出窗口"）。
+        空白格的事由预览那一行说清（`dialog_learn._missing_name_notice`）。
+        """
+        missing = self.needs_a_column_name()
+        self._name_warning.setText('⚠ 没起名字（会和候选一起丢掉）' if missing else '')
+        self._name_warning.setStyleSheet('color: #B3261E;')
+        self._name_warning.setVisible(missing)
+        self._name_suggest.setText(
+            f'用「{self._name_suggestion}」当列名' if missing and self._name_suggestion
+            else '')
+        self._name_suggest.setVisible(bool(missing and self._name_suggestion))
+        fn = getattr(self, '_missing_changed', None)
+        if fn is not None:
+            try:
+                fn()
+            except Exception as e:                   # noqa: BLE001 - 通知失败不该炸
+                swallow('ui_qt.param_editor.FieldCard.missingChanged', e)
 
     def set_title(self, text: str):
         self._title.setText(text)
@@ -628,15 +729,13 @@ class FieldCard(QFrame):
             swallow('ui_qt.param_editor.FieldCard.import', e)
         return []
 
-    def _on_import(self):
-        """「⚡ 从项目里拿」：把项目里**真正有**的候选摆出来，挑一个倒进这一格。
+    def pick_source_action(self):
+        """
+        弹出"从项目里拿"菜单，返回用户点的那一项（`QAction`），取消返回 None。
 
-        ⚠ 工具**不猜**"这一格是不是表情"（那是语义，猜错改剧情）——
-        它只列"项目里到底有哪些值、从哪来"，点哪个由人决定。
-
-        ⚠ 一格可以填多个值的时候，这条路太慢（真机 `expressions` 一次 68 个）——
-        那时该走 `ValueChips.open_batch_import`（可以勾好几组一起倒）。
-        所以这里多加一行指路，而不是把菜单堆成一棵勾选树。
+        ⚠ 单列一个方法是**为了可测**：模态菜单在测试里点不动（`QMenu.exec`
+        是 PySide6 侧调用的），所以判据替换的是这一层 —— 见
+        `tests/test_custom_statement_entry.py::test_导入一组候选之后列名可以一键填上`。
         """
         menu = QMenu(self)
         rows = self._project_sources()
@@ -654,10 +753,28 @@ class FieldCard(QFrame):
                 act = menu.addAction(f'{r.get("label")}'
                                      f'（{r.get("count", 0)} 个）')
                 act.setData(list(r.get('values') or []))
-        chosen = menu.exec(self._pick_btn.mapToGlobal(
+        return menu.exec(self._pick_btn.mapToGlobal(
             self._pick_btn.rect().bottomLeft()))
+
+    def _on_import(self):
+        """「⚡ 从项目里拿」：把项目里**真正有**的候选摆出来，挑一个倒进这一格。
+
+        ⚠ 工具**不猜**"这一格是不是表情"（那是语义，猜错改剧情）——
+        它只列"项目里到底有哪些值、从哪来"，点哪个由人决定。
+
+        ⚠ 一格可以填多个值的时候，这条路太慢（真机 `expressions` 一次 68 个）——
+        那时该走 `ValueChips.open_batch_import`（可以勾好几组一起倒）。
+        所以这里多加一行指路，而不是把菜单堆成一棵勾选树。
+        """
+        chosen = self.pick_source_action()
         if chosen is None or not chosen.data():
             return
+        # 刚导入的这组来源的名字，就是最好的"列名建议"
+        # （真机实测：`expressions` 组倒出来 68 个，用户接着要起的就是"神态"那种名）
+        label = str(chosen.text() or '').split('（', 1)[0].strip()
+        if label:
+            self._name_suggestion = label
+            self._refresh_name_warning()
         self._values.add_values(chosen.data())
         # 拿进来就是"只能填这些"——不勾上候选白拿（只有勾了才进下拉）
         self._limit.setChecked(True)
@@ -679,6 +796,10 @@ class FieldCard(QFrame):
         self._column = str(column or '')
         self._column_hint.setText(f'分栏：{self._column}' if self._column else '')
         self._column_hint.setVisible(bool(self._column))
+        # 自动认到的分栏名就是最好的"列名建议"（「服装」这种）
+        if self._column and not self._name_suggestion:
+            self._name_suggestion = self._column
+        self._refresh_name_warning()
 
     def column_of(self) -> str:
         return str(self._column or '')
@@ -790,7 +911,8 @@ class FieldList(QWidget):
     `set_columns` / `move`），所以弹窗与判据的接线不用改。
     """
 
-    def __init__(self, parent=None, on_change=None, sources_provider=None):
+    def __init__(self, parent=None, on_change=None, sources_provider=None,
+                 on_missing_change=None):
         super().__init__(parent)
         self._col = QVBoxLayout(self)
         self._col.setContentsMargins(0, 0, 0, 0)
@@ -801,6 +923,19 @@ class FieldList(QWidget):
         self._columns: list = []
         self._on_change = on_change
         self._sources_provider = sources_provider
+        #: 任一格的"缺列名"状态变了就回调（弹窗据此挡住确定键）
+        self._on_missing_change = on_missing_change
+
+    # ---- 缺列名（会被后端丢掉的格子）----
+    def missing_name_cards(self) -> list:
+        """
+        哪些格子**会被后端丢掉**（没有列名）。
+
+        用户 2026-10-16 实测现场：三格都倒好候选了，只有一格填了名字 →
+        另外两格被 `build_declaration` 静默丢掉，预览里却只写"参数：无"。
+        所以弹窗必须**在按确定之前**把这些格子摆出来。
+        """
+        return [c for c in self._cards if c.needs_a_column_name()]
 
     # ---- 分栏 ----
     @property
@@ -864,7 +999,8 @@ class FieldList(QWidget):
                   kind: str = 'variable', group: str = '', **extra):
         card = FieldCard(on_change=self._on_change, on_remove=self._remove,
                          on_move=self.move,
-                         sources_provider=self._sources_provider, parent=self)
+                         sources_provider=self._sources_provider, parent=self,
+                         on_missing_change=self._on_missing_change)
         card._columns_changed = self.rematch
         card.set_data(name, label, choices, kind, group, **extra)
         if not group:

@@ -308,7 +308,8 @@ class CustomStatementDialog(QDialog):
 
         # ⚠ **不是** QScrollArea（那会变成第二条滚动条）——纯竖向容器
         self.params = FieldList(on_change=self._refresh_preview,
-                                sources_provider=self._choice_sources)
+                                sources_provider=self._choice_sources,
+                                on_missing_change=self._refresh_preview)
         lay.addWidget(self.params)
         self.params.add_field()          # 一进来就有一格，省得人想"要先点加号吗"
 
@@ -693,9 +694,63 @@ class CustomStatementDialog(QDialog):
             return ''
         return '这几点也顺手看看：' + '；'.join(str(x) for x in items[:5])
 
+    def missing_name_cards(self) -> list:
+        """**会被后端丢掉的格子**（没列名）—— 一个都不许静默丢。"""
+        params = getattr(self, 'params', None)
+        fn = getattr(params, 'missing_name_cards', None)
+        if fn is None:
+            return []
+        try:
+            return list(fn() or [])
+        except Exception as e:                      # noqa: BLE001 - 查询不该炸窗口
+            swallow('ui_qt.dialog_learn.missingNameCards', e)
+            return []
+
+    def _missing_name_notice(self) -> str:
+        """
+        把"哪几格没名字"写成给人看的一句话（放在预览**最上面**）。
+
+        用户 2026-10-16 现场：三格都倒好候选了，只有一格填了名字 →
+        另外两格被静默丢掉，而预览底部那句提醒被长文本淹掉了，人只看到
+        "参数：无（只逐字透传）"，当场问"你这个到底怎么判断的？"。
+        """
+        cards = self.missing_name_cards()
+        blanks = self.blank_cards()
+        if not cards and not blanks:
+            return ''
+        lines = []
+        if cards:
+            lines.append(f'⚠ 有 {len(cards)} 格还没起名字 —— 按确定也不会写进去，'
+                         f'里面的候选会一起丢掉：')
+            for i, card in enumerate(cards, 1):
+                hint = str(getattr(card, 'missing_name_hint', lambda: '')() or '')
+                lines.append(f'  · 第 {i} 格'
+                             + (f'（建议用「{hint}」）' if hint else ''))
+            lines.append('  在「这一列叫什么（编剧看到的）」里填一个名字，'
+                         '例如「角色」「服装」「神态」—— 名字只是表格上的列名，'
+                         '不用管代码里那串字。')
+        if blanks:
+            lines.append(f'（另外 {len(blanks)} 格还是空的，不会写进去 —— '
+                         f'要留空就随它，要加就填上。）')
+        return '\n'.join(lines)
+
+    def blank_cards(self) -> list:
+        """还没填内容的格子（不多嘴拦人，但要让他在预览里看得见）。"""
+        params = getattr(self, 'params', None)
+        cards = list(getattr(params, '_cards', None) or ())
+        out = []
+        for card in cards:
+            fn = getattr(card, 'has_content', None)
+            if fn is not None and not fn():
+                out.append(card)
+        return out
+
     def _refresh_preview(self, *_a):
         built = self.built()
         text = declaration_preview(built, path=str(self._root_path or ''))
+        notice = self._missing_name_notice()
+        if notice:
+            text = notice + '\n\n' + text
         wc = getattr(self, 'write_columns', None)
         if wc is not None and wc.isChecked():
             from storygraph.authoring.learn_statement import group_preview
@@ -707,6 +762,10 @@ class CustomStatementDialog(QDialog):
         btn = getattr(self, '_ok_btn', None)
         if btn is not None:
             ok = bool(built.get('ok')) or bool(self.groups_to_write())
+            # ⚠ 缺列名的格子会被后端丢掉 —— 那是**静默的数据丢失**，
+            #   所以这里必须挡住确定键（人补上名字，或者把这一格删掉）。
+            if self.missing_name_cards():
+                ok = False
             btn.setEnabled(ok)
 
     # ---- 验证 ----
