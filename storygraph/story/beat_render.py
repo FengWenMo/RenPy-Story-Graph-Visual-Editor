@@ -672,9 +672,22 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         # 顶层与嵌套两条路都能出对。
         # 条件行自己的注释贴到 `if …:` 那一行（收尾第 2 批）
         cond_head = f"if {beat.condition}:{_cond_note(beat)}"
+        # ⚠⚠ **注释归块体内，不排在 `if` 头前面**（2026-10-15 修，真机
+        #    `mini_game_flipcard.rpy` 实测 —— 它同时是那条"不幂等"的根因）。
+        #
+        # 为什么可以这样断定：**能跟条件拍并进同一拍的注释，一定来自分支内部**。
+        # `if` 之前的注释带的是**外层**条件（通常是空串），与分支条件不同 →
+        # `beat_build.branch_guard` 会把它落成**自己那一拍**。所以"这一拍有条件
+        # 且有注释"这个组合，只可能来自"注释写在分支体里"。
+        #
+        # 从前把 `pre` 拼在 `cond_head` **前面**，后果是把分支内的注释
+        # **提到 `if` 之前、缩进也从 8 掉到 4**（分支归属当场丢失）；
+        # 更糟的是产物再解析时它归属到上一拍 → 第 2 轮又换位置 →
+        # `audit_idempotence` 报"第 1→2 轮变形（不幂等）"。
+        inner = pre + lines
         return _attach_inline_note(
-            pre + [cond_head] + [
-                '    ' + ln if ln.strip() else '' for ln in lines
+            [cond_head] + [
+                '    ' + ln if ln.strip() else '' for ln in inner
             ], beat)
     if not lines and not pre and _is_orphan_loop_head(beat):
         # 兜底（正常情况下上面那个 `if not lines` 已经处理）：条件拍那条路

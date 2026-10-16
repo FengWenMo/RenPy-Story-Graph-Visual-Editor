@@ -790,6 +790,27 @@ class _BeatBuilder:
         if not text:
             return True, False
         self.branch_guard(stmt)
+        # ⚠⚠ **条件也要转发到拍上**（2026-10-15 修，真机 `mini_game_flipcard.rpy`
+        #    第 395-396 行实测）。`branch_guard` 只负责"条件不同就落拍、开新拍"，
+        #    它**不写条件** —— 而别的发射器（舞台/透传）紧接着都会写
+        #    `pending.condition = stmt.condition or pending.condition`，只有这里漏了。
+        #
+        # 漏掉的后果（**注释漂出分支**）：分支内的注释会成一张
+        # `condition=''` 而 `nest_path='if:2'` 的孤立拍 ——
+        # 结构位说"它在 if 里"，条件却是空的。渲染时
+        # `render_beat_to_rpy` 把注释无条件放在**该拍最前面**（`pre`），
+        # 而这一拍排在 if 那拍**之前** → 注释被**提到 `if` 之前、
+        # 缩进也从 8 掉到 4**（分支归属当场丢失）。
+        #
+        # 更糟的是它**一轮之内不稳定**：产物里注释已经在 `if` 前面了，
+        # 再解析时它归属到**上一拍**，于是第 2 轮又换一个位置 ——
+        # 真机 `audit_idempotence` 因此报 `mini_game_flipcard.rpy` 不幂等
+        # （第 410/411 行两行互换）。
+        #
+        # 补上条件之后，这条注释与**分支体条件相同** → 紧接着的分支体语句
+        # 不会再触发 `branch_guard` 落拍 → 二者并进**同一拍** →
+        # 渲染出来正是 `if …:` + 体内的注释 + 体内的代码（与原文同序同缩进）。
+        self.pending.condition = stmt.condition or self.pending.condition
         self.pending.comment = _append_line(self.pending.comment, text)
         self.pending_has_stage = True
         return True, False
