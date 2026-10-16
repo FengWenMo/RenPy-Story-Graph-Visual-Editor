@@ -116,6 +116,54 @@ class TestSlotChips:
         card._set_slot_value('outfit', 'base_handdown')
         assert card.item['image'] == 'ye happy base_handdown', card.item['image']
 
+    def test_without_engine_facts_it_falls_back_to_the_layeredimage(
+            self, qapp, tmp_path):
+        """
+        ⚠⚠ **用户 2026-10-16 报的"粘在一起了"就是这个**：
+
+        没采过引擎事实（`facts={}`）时，从前 `window_card._sync_choice_groups`
+        直接 `set_choice_groups_provider(None)` → 卡片走单格 → 两个词粘在
+        一个 chip 里（`表情：ye base_handdown gratified`）。
+        但这时候**项目自己的 `layeredimage` 就写着分组** —— 那一档必须走得到。
+
+        判据：只给项目根（没有引擎事实）→ 照样一维一格。
+        """
+        game = tmp_path / 'game'
+        game.mkdir(parents=True, exist_ok=True)
+        (game / 'defs.rpy').write_text(
+            'layeredimage ye:\n'
+            "    image_format 'images/ye/{image}.png'\n"
+            '    group expressions:\n'
+            '        attribute gratified default:\n'
+            "            'gratified'\n"
+            '    group outfit:\n'
+            '        attribute base_handdown default:\n'
+            "            'base_handdown'\n",
+            encoding='utf-8')
+
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+        item = {'image': 'ye base_handdown gratified',
+                'expression': 'base_handdown gratified', 'position': '',
+                'at': '', 'speaking': False, 'order_index': 0, 'extra_rows': []}
+
+        def _for_tag(_tag):
+            return []
+        _for_tag.attr_groups = []
+        _for_tag.engine_facts = {}                 # ← 没采过
+        _for_tag.project_root = str(tmp_path)      # ← 但有项目
+
+        card = SpriteCardWidget(item, symbols=_Sym(), choice_groups_for=_for_tag)
+        card._loader = None
+        card.refresh()
+        texts = [b.text() for b in card._slot_btns]
+        assert len(texts) == 2, ('还是一格（粘在一起）', texts)
+        assert any('gratified' in t for t in texts), texts
+        assert any('base_handdown' in t for t in texts), texts
+        # 点服装那一格 → 表情不许丢（走上同一条路）
+        card._set_slot_value('outfit', 'base_swimsuit')
+        assert 'gratified' in card.item['image'], card.item['image']
+        assert 'base_swimsuit' in card.item['image'], card.item['image']
+
     def test_no_provider_means_the_old_path(self, qapp):
         card = _card('ye base_handdown gratified', provider=False)
         assert card._slot_btns == []

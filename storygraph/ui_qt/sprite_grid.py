@@ -281,9 +281,25 @@ class SpriteCardWidget(QFrame):
             return []
         facts = getattr(provider, 'engine_facts', None) or {}
         groups = getattr(provider, 'attr_groups', None) or []
+        # ⚠ 2026-10-16：没有引擎事实时，`attr_slot_rows` 要退回项目自己的
+        #   `layeredimage` —— 那条路**必须知道项目根**，所以窗口把它挂在
+        #   provider 上（`window_card._sync_choice_groups`）。从前这里不传，
+        #   于是"没采过引擎事实"的项目永远退回单格（用户报的"粘在一起了"）。
+        layer_model = getattr(provider, 'layer_model', None)
+        if layer_model is None:
+            root = getattr(provider, 'project_root', None)
+            if root:
+                try:
+                    from storygraph.story.layered_model import (
+                        load_layer_model_cached)
+                    layer_model = load_layer_model_cached(root)
+                except Exception as e:       # noqa: BLE001 - 读不到就走老路
+                    swallow('ui_qt.sprite_grid._slot_rows.layers', e)
+                    layer_model = None
         try:
             return list(attr_slot_rows(spec, self._symbols, groups=groups,
-                                       facts=facts) or [])
+                                       facts=facts,
+                                       layer_model=layer_model) or [])
         except Exception as e:               # noqa: BLE001 - 分组拿不到就走老路
             swallow('ui_qt.sprite_grid._slot_rows', e)
             return []
@@ -315,9 +331,19 @@ class SpriteCardWidget(QFrame):
         provider = self._choice_groups_for
         facts = getattr(provider, 'engine_facts', None) or {}
         groups = getattr(provider, 'attr_groups', None) or []
+        layer_model = getattr(provider, 'layer_model', None)
+        if layer_model is None and getattr(provider, 'project_root', None):
+            try:
+                from storygraph.story.layered_model import (
+                    load_layer_model_cached)
+                layer_model = load_layer_model_cached(provider.project_root)
+            except Exception as e:           # noqa: BLE001 - 读不到就按老路
+                swallow('ui_qt.sprite_grid._set_slot_value.layers', e)
+                layer_model = None
         try:
             new = apply_attr_slot(spec, group, value, symbols=self._symbols,
-                                  groups=groups, facts=facts)
+                                  groups=groups, facts=facts,
+                                  layer_model=layer_model)
         except Exception as e:               # noqa: BLE001 - 认不出就别改
             swallow('ui_qt.sprite_grid._set_slot_value', e)
             return

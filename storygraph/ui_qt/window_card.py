@@ -119,7 +119,11 @@ class CardPageMixin:
         （`layeredimage` 的 group + 引擎枚举的属性），项目声明**降级为"改名"**
         （把 `outfit` 显示成「服装」）。真机实测：`lan` 的组本来就叫
         `outfit` / `expressions` —— 再让人声明一遍是重复劳动，还会两边打架。
-        ⚠ 没采过（`facts` 为空）→ **原路一字不变**。
+        ⚠ 没采过引擎事实（`facts` 为空）时，**一维一格仍然要能工作** ——
+        判据退回项目自己的 `layeredimage`（`app.beats.attr_slot_rows` 里有这一档，
+        2026-10-16 实测报的"粘在一起了"就是因为从前这里直接 `return` 掉了，
+        那一档永远走不到）。所以现在**总是**注入 `_for_tag`（可以是空的），
+        让网格自己按"有没有引擎事实 / 有没有 layeredimage"去决定。
         """
         try:
             groups = self._session.declared_attr_groups()
@@ -131,23 +135,22 @@ class CardPageMixin:
         except Exception as e:                  # noqa: BLE001
             swallow('ui_qt.window_card._sync_choice_groups.facts', e)
             facts = {}
-        if not groups and not facts:
-            self._panel.set_choice_groups_provider(None)
-            self._warn_engine_facts_once()
-            return
         from storygraph.app.beats import expression_groups_for
         symbols = getattr(self._session, 'symbols', None)
 
         def _for_tag(tag):
             return expression_groups_for(str(tag or ''), symbols, groups, facts)
 
-        # **把两份原料挂在函数上**（2026-10-12）：卡片要"一维一格"时得知道
+        # **把原料挂在函数上**（2026-10-12）：卡片要"一维一格"时得知道
         # 引擎的分组与候选（`app.beats.attr_slot_rows`），但网格那套注入通道
         # 只传得下一个可调用对象。挂属性 = **不新增一个"要记得转发"的方法** ——
         # 转发层漏一个方法的代价是模态弹窗（见 `main_window.set_choice_groups_provider`
         # 的注释，那个坑真踩过）。
         _for_tag.attr_groups = list(groups or ())
         _for_tag.engine_facts = facts if isinstance(facts, dict) else {}
+        #: ⚠ 2026-10-16：把**项目根**也挂上 —— 没有引擎事实时，`attr_slot_rows`
+        #:   要退回项目自己的 `layeredimage`（它自己按项目根建/读模型缓存）。
+        _for_tag.project_root = getattr(self._session, 'project_root', None)
 
         # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
         self._panel.set_choice_groups_provider(_for_tag)
