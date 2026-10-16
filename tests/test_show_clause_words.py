@@ -42,18 +42,37 @@ from storygraph.story import excel_export as EE                      # noqa: E40
 #  ① 词表：一处真源
 # =====================================================================
 
-def test_各站只写内核加减_不再各抄一份():
+def test_词表只有一份_剩下的都是显式语义():
+    """
+    ⚠ 2026-10-16（用户排期 C 项）把这件事**收口**了：
+    从前各站各自定义 `_SHOW_KEYWORDS` / `_SHOW_ARG_KEYWORDS` / `_SCENE_KEYWORDS`
+    —— 即使只是"同一份集合的别名"，也给了下一次漂移一个落脚点
+    （历史上正是这么漂的：`excel_export` 漏过 `onlayer`、多过 `on`）。
+    现在**切分本体只有一处**（`classify_show_words`），三个别名表已删。
+
+    剩下的消费点只许声明**语义**，不许再拿集合去 split 目标：
+      · `asset_registry_constants._SHOW_STOP_WORDS` = 规范集 + 引入型（取词边界）
+      · `learn_statement._NOT_A_VALUE`             = 上面 + 布尔字面量（取词边界）
+      · `generation_guard` 的 stopwords            = 规范集 − `at`（`at` 之后）
+    """
     canon = set(V.SHOW_CLAUSE_KEYWORDS)
     intro = set(V.SHOW_INTRO_KEYWORDS)
     assert canon == {'at', 'as', 'with', 'behind', 'onlayer', 'zorder'}, sorted(canon)
     assert intro == {'expression', 'screen', 'layer'}, sorted(intro)
-    # 规范集：三处都是原样
-    assert set(RenPyParser._SHOW_KEYWORDS) == canon
-    assert set(BSP._SHOW_ARG_KEYWORDS) == canon
-    assert set(EE._SHOW_KEYWORDS) == canon, (
-        '`on` 没有官方依据（官方 show 语法里没有它）、真机 0 次 —— '
-        '不该留在表里', sorted(EE._SHOW_KEYWORDS))
-    # 显式增减的两处
+
+    # ① 三个"别名表"必须真的不在了（它们没有任何理由存在）
+    assert not hasattr(RenPyParser, '_SHOW_KEYWORDS'), (
+        '`_SHOW_KEYWORDS` 又回来了 —— 它是同一份集合的第二个名字')
+    assert not hasattr(RenPyParser, '_SCENE_KEYWORDS'), (
+        '`_SCENE_KEYWORDS` 又回来了 —— scene 与 show 同口径由分类器的 '
+        '`intros=` 参数表达')
+    assert not hasattr(BSP, '_SHOW_ARG_KEYWORDS'), (
+        '`_SHOW_ARG_KEYWORDS` 又回来了 —— 它只是同一份集合的第二个名字')
+    assert not hasattr(EE, '_SHOW_KEYWORDS'), (
+        '`_SHOW_KEYWORDS` 又回来了 —— `on` 没有官方依据、真机 0 次，'
+        '当年就是这张表漂的')
+
+    # ② 剩下的两处"取词边界"仍是内核 ± 显式增减
     assert set(ARC._SHOW_STOP_WORDS) == canon | intro, sorted(ARC._SHOW_STOP_WORDS)
     assert set(LS._NOT_A_VALUE) == (canon | intro
                                     | {'True', 'False', 'None'}), (
@@ -63,6 +82,140 @@ def test_各站只写内核加减_不再各抄一份():
         encoding='utf-8')
     assert 'SHOW_CLAUSE_KEYWORDS - {\'at\'}' in src, (
         'generation_guard 的 stopwords 又自己写了一份')
+
+
+# ---------------------------------------------------------------------
+#  一处实现：**所有**消费 show 词的站点都走 `classify_show_words`
+# ---------------------------------------------------------------------
+
+#: 这些文件的"切分动作"必须由真源提供。
+#: 判据是**行为的**：拿同一批形状去问每一站，答案必须与分类器一致。
+_SPLIT_SITES = [
+    'storygraph/parsing/renpy_parser.py',
+    'storygraph/story/beat_stage_parse.py',
+    'storygraph/story/excel_export.py',
+    'storygraph/assets/asset_registry.py',
+]
+
+
+def test_切分口径只有一份_四站都调分类器():
+    """
+    ⚠⚠ **这才是 C 项要防的病**：光把词表收成一份不够 —— 以前每个站点还各写
+    一遍"拿集合去 split()"的循环（`_clause_image` / `_extract_image_spec` /
+    `_parse_show_scene` 的 while / `_unknown_show_words` 的 for），
+    于是"改一处忘一处"照样复发。
+    判据（源码层，简单但有效）：这四处都必须出现 `classify_show_words` 或
+    `tokenize_show_words` 的调用；并且**不许**再出现"`in ...KEYWORDS` 然后 break"
+    的本地切分标志。
+    """
+    for rel in _SPLIT_SITES:
+        text = (ROOT / rel).read_text(encoding='utf-8')
+        assert 'classify_show_words' in text or 'tokenize_show_words' in text, (
+            f'{rel} 没有走分类器真源')
+
+    # 反向：本轮删掉的那些"本地切分标志"不许回来
+    for rel, needle in (
+            ('storygraph/story/beat_stage_parse.py', 'for w in clause.split():'),
+            ('storygraph/assets/asset_registry.py', 'if low in _SHOW_STOP_WORDS:'),
+            ('storygraph/story/excel_export.py', 'if word in _SHOW_KEYWORDS:'),
+    ):
+        text = (ROOT / rel).read_text(encoding='utf-8')
+        assert needle not in text, f'{rel} 又出现本地切分：{needle}'
+
+
+def test_四站对同一批形状给出同一个目标():
+    """
+    行为层对照：同一批真机形状，四站算出的"**图像名**"必须与真源一致。
+
+    形状取自真机（`D:/千连万理/RenPyTest/sr_general`）：
+      · 多段图像名 + 子句：`lan happy at left with dissolve`
+      · 逗号分隔的 `at` 列表：`lan at i11, i12`
+      · 括号里的逗号（**Python 元组**）：`image puzzle_path at Transform(xysize=(1920, 1080))`
+      · 引入型（**没有图像名**）：`screen msg_dialogue` / `layer master` /
+        `expression holo("x") at y`
+    """
+    from storygraph.assets.asset_registry import _extract_image_spec
+    from storygraph.story.excel_export import _unknown_show_words
+
+    image_cases = {
+        'lan happy at left with dissolve': 'lan happy',
+        'lan at i11, i12': 'lan',
+        'image puzzle_path at Transform(xysize=(1920, 1080))': 'image puzzle_path',
+    }
+    for text, target in image_cases.items():
+        assert V.classify_show_words(text).target == target, text
+        assert _extract_image_spec(text) == target, ('asset_registry', text)
+        r = RenPyParser._parse_show_scene('show ' + text, False)
+        assert (r or {}).get('image', '') == target, ('renpy_parser', text, r)
+        assert _unknown_show_words('show ' + text, {}) == [], ('excel_export', text)
+
+    # 引入型：**没有图像名** —— 资产那条路必须给空串（否则真机 110 条假断链）
+    for text in ('screen msg_dialogue', 'layer master'):
+        roles = V.classify_show_words(text)
+        assert roles.intro_kind != 'image', (text, roles)
+        assert _extract_image_spec(text) == '', ('asset_registry', text)
+        r = RenPyParser._parse_show_scene('show ' + text, False)
+        assert (r or {}).get('image', '') == '', ('renpy_parser', text, r)
+        assert _unknown_show_words('show ' + text, {}) == [], ('excel_export', text)
+
+    # `expression <表达式>` 是**另一件事**：它的"图像名"就是那个 Python 表达式
+    # （`is_expression=True`），只是**查不到资产**，所以不算"没有目标"。
+    # 资产那一侧照样要挡住（`is_dynamic_image_spec` + `intro_kind != 'image'`）。
+    text = 'expression holo("x") at y'
+    roles = V.classify_show_words(text)
+    assert roles.intro_kind == 'expression', roles
+    assert roles.target == 'holo("x")' and roles.clause('at') == ['y'], roles
+    assert _extract_image_spec(text) == '', ('asset_registry', text)
+    r = RenPyParser._parse_show_scene('show ' + text, False)
+    assert (r or {}).get('image') == 'holo("x")' and r.get('is_expression'), r
+    assert r.get('at') == ['y'], r
+    assert _unknown_show_words('show ' + text, {}) == [], ('excel_export', text)
+
+
+def test_表达式里的逗号一个都不许丢():
+    """
+    ⚠⚠ **这条是"产物能不能跑"级别**（真机 `screens.rpy:1439` 实测）：
+
+        show expression Text("SEIREN PROJECT", color="#89c7fe", size=60, bold=True) as title:
+
+    表达式里的逗号是 **Python 参数分隔符**。分词真源会把深度>0 的逗号留在
+    同一个 token 里，但"去掉词末尾的逗号"这一步如果贪心（`rstrip(',')` 之类），
+    就会把 `bold=True)` 之前的逗号也啃掉 → `Text("SEIREN PROJECT" color=…)`
+    —— **一个 Python 语法错误**，产物直接跑不起来。
+
+    所以判据是**逐字**：目标必须与原文里那段表达式**一个字不差**。
+    """
+    expr = 'Text("SEIREN PROJECT", color="#89c7fe", size=60, bold=True)'
+    text = f'expression {expr} as title:'
+    roles = V.classify_show_words(text)
+    assert roles.intro_kind == 'expression', roles
+    assert roles.target == expr, ('表达式被啃了', roles.target)
+    assert roles.clause('as') == 'title:', roles
+
+    # 带参调用 + `at` 子句：逗号在参数里，子句照样要切出来
+    text2 = 'expression holo(path, "lan base", (1920, 1080)) at i11'
+    roles2 = V.classify_show_words(text2)
+    assert roles2.target == 'holo(path, "lan base", (1920, 1080))', roles2
+    assert roles2.clause('at') == ['i11'], roles2
+
+    # 端到端：原样进 → 原样出（`renpy_parser` 这一站的 dict）
+    r = RenPyParser._parse_show_scene('show ' + text, False)
+    assert r['image'] == expr and r['is_expression'] and r['as_'] == 'title:', r
+
+
+def test_舞台片段那一站刻意不看引入型():
+    """
+    ⚠ `beat_stage_parse._clause_image` 切的是"**舞台片段**"（`beat.show` 那一格），
+    不是"资产引用"—— 所以它**刻意**把 `screen msg` 整段当一个名字
+    （`intros=()`）。这是"与从前逐字相同"的口径，不许顺手改；
+    资产那一侧要"空串"由 `asset_registry` 自己看 `intro_kind` 决定。
+    """
+    from storygraph.story.beat_stage_parse import _clause_image
+
+    assert _clause_image('screen msg_dialogue') == 'screen msg_dialogue'
+    assert _clause_image('layer master') == 'layer master'
+    assert _clause_image('cg cg02 at t behind ye') == 'cg cg02'
+    assert _clause_image('expression holo("x") at y') == 'expression holo("x")'
 
 
 # =====================================================================
@@ -77,10 +230,13 @@ def test_show_的子句照旧():
 
 
 def test_scene_取与_show_同一批子句():
-    """官方原文：`the scene statement takes the same properties as the show statement`。"""
-    assert set(RenPyParser._SCENE_KEYWORDS) == set(V.SHOW_CLAUSE_KEYWORDS), (
-        'scene 的子句集比 show 窄 —— `scene bg behind x` 会把 `behind x` '
-        '当成图像名的一部分', sorted(RenPyParser._SCENE_KEYWORDS))
+    """官方原文：`the scene statement takes the same properties as the show statement`。
+
+    ⚠ 2026-10-16：断言从"两张表相等"改成**行为**（`_SCENE_KEYWORDS` 已删）——
+    scene 与 show 同口径这件事现在由分类器的 `intros=` 参数表达，
+    真正要守的是"`scene bg behind x` 不许把 `behind x` 吃进图像名"。
+    """
+    assert V.classify_show_words('bg behind x at left').target == 'bg'
     r = RenPyParser._parse_show_scene('scene bg behind x at left', is_scene=True)
     assert r['image'] == 'bg', ('behind 被吃进图像名了', r)
     assert r['behind'] == ['x'] and r['at'] == ['left'], r

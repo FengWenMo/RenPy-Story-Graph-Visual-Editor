@@ -186,6 +186,13 @@ _COLOR_PATTERN = re.compile(r'^#(?:[0-9a-fA-F]{3}){1,2}$')
 #: 跟跑的（`build.collect_report` / `asset_engine._rebuild_references`
 #: 都做"Statement 优先 + 正则补覆盖不到的地方"）—— 所以这是真缺陷、不是理论问题。
 #: 现在三个引入型关键字一起收进来（`SHOW_INTRO_KEYWORDS`），与规范集同源。
+#:
+#: ⚠⚠ **2026-10-16（用户排期 C 项）**：它从前还是
+#: `_extract_image_spec` 里那句"遇到它就 break"的**切分口径**；那份循环已经删掉，
+#: 切分本体交给 `core.vocabulary.classify_show_words`（分词用 `tokenize_show_words`）。
+#: 这一份现在只回答**一个问题**："这个词根本不可能是一个参数值/图像名"——
+#: 也就是"取词边界"。**别再拿它去 split() 目标**（那正是这次要根治的重复）。
+#: 判据：`tests/test_show_clause_words.py`。
 _SHOW_STOP_WORDS = SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS
 
 _RE_SHOW_LINE = re.compile(

@@ -914,6 +914,9 @@ def choice_sources(project_root, head: str = '') -> list:
 #: —— 那条断言是**被噪声撑起来的**（10 个候选里有 4 个根本不是角色）。
 #: 所以这一版两件事一起修：词表补上引入型关键字，角色格的候选**并上整张角色表**
 #: （让 `>=10` 由真实资源满足，而不是由噪声满足）。
+#: ⚠⚠ **2026-10-16（用户排期 C 项）**：这一份只回答"这个词根本不可能是一个值"
+#: （反推参数名时的取词边界）。**切分/判定目标**由
+#: `core.vocabulary.classify_show_words` 一处负责 —— 别再在这里写 split() 口径。
 _NOT_A_VALUE = frozenset(
     SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS | {'True', 'False', 'None'})
 

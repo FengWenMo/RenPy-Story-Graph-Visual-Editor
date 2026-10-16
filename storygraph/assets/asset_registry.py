@@ -24,6 +24,7 @@ from storygraph.core.vocabulary import (
     ASSET_TYPE_ATTR as _TYPE_ATTR,
     NON_ACTOR_SHOW_TARGETS,
     RENPY_BUILTIN_TRANSFORMS,
+    classify_show_words,
 )
 from storygraph.excel.cells import append_text_row, set_text
 
@@ -59,7 +60,6 @@ from storygraph.assets.asset_registry_constants import (  # 2026-10-11 拆分
     _TABLE_FIELDS,
     _PLACEHOLDER_MARKS,
     _COLOR_PATTERN,
-    _SHOW_STOP_WORDS,
     _RE_SHOW_LINE,
     _RE_AUDIO_LINE,
     _RE_AT_TRANSFORM,
@@ -1880,14 +1880,30 @@ def _image_spec_candidates(spec: str) -> list:
 
 
 def _extract_image_spec(rest: str) -> str:
-    """从 show/scene/hide 的剩余部分里切出图像名，遇到关键字即停。"""
-    parts = []
-    for tok in rest.split():
-        low = tok.lower().rstrip(',')
-        if low in _SHOW_STOP_WORDS:
-            break
-        parts.append(tok.rstrip(','))
-    return ' '.join(parts)
+    """
+    从 show/scene/hide 的剩余部分里切出图像名，遇到关键字即停。
+
+    ⚠⚠ 2026-10-16（用户排期 C 项）：**切分本体交给
+    `core.vocabulary.classify_show_words`** —— 从前这里自己写了一遍
+    "遇到 `_SHOW_STOP_WORDS` 就 break"的循环（还要自己处理大小写与结尾逗号），
+    与 `beat_stage_parse` / `excel_export` / `renpy_parser` / `learn_statement`
+    各写一遍是同一个口径的六份拷贝。
+
+    返回值语义与从前逐字一致：**普通图像名才返回**；
+    `show screen X` / `show layer Y` / `show expression …` 这类**没有图像名**
+    （引入型关键字自己就是目标）→ 返回 `''`，调用方据此跳过。
+
+    ⚠ 行尾注释先剥掉：`scene white with Dissolve(1.5) #白色转场`（真机
+    `screens.rpy:1448`）在**旧循环**里是"注释恰好排在 `with` 后面"才没进
+    图像名的；换成 tokenizer 之后注释会黏在最后一个词后面 —— 不剥就会
+    把 `#白色转场` 当成名字的一部分。这是"取代之后仍然逐字一致"必须补的一步。
+    """
+    text = str(rest or '')
+    hash_at = text.find('#')
+    if hash_at >= 0:
+        text = text[:hash_at]
+    roles = classify_show_words(text)
+    return '' if roles.intro_kind != 'image' else roles.target
 
 
 def _normalize_spec(s) -> str:

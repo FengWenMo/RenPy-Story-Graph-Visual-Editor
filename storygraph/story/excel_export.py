@@ -22,7 +22,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 from storygraph.core.vocabulary import (RENPY_BUILTIN_TRANSFORMS,
-                                        SHOW_CLAUSE_KEYWORDS)
+                                        classify_show_words)
 
 from storygraph.story.beat_build import hydrate_from_dsl
 from storygraph.story.beat_model import (
@@ -146,14 +146,14 @@ def _annotate_spec_heads(ws, beats, statements) -> int:
     return n
 
 
-#: `show` 语句里的**关键字**：它们后面跟的不是属性。
-#: ⚠ 不挡住它们，`show cg at center` 里的 `at` 会被当成属性报"引擎没认"（实测踩到）。
-#   ⚠ 2026-10-15：**`on` 已删** —— 官方 show 语法里没有它（`show_statement` 的
-#     子句是 as/onlayer/at/behind/with，外加同族 zorder），真机里
-#     `show … on …` 出现 **0 次**；它是 `62dfaa2`（"E2 第三切片：候选与资源表
-#     对齐"）首次写下这一行时**顺手带的、无任何依据**。留一个无依据的成员
-#     正是这批词表各自漂移的成因，所以在这里删掉（行为上真机不可见）。
-_SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS
+# ⚠ 2026-10-16：`_SHOW_KEYWORDS` 那张表**已删**。
+#   它从前是"`_unknown_show_words` 自己拿一个集合去 split()"的产物；
+#   现在切分与"哪个词是什么角色"全在 `core.vocabulary.classify_show_words`
+#   一处。历史教训（保留在案，免得有人又想加回来一张表）：
+#     · 它曾经抄着一份规范集、**漏了 `onlayer`**；
+#     · 又曾经多带一个 `on`（官方 show 语法里根本没有、真机 0 次），
+#       那是 `62dfaa2`"E2 第三切片"顺手带的、无任何依据 ——
+#       留一个无依据的成员正是这批词表各自漂移的成因。
 
 
 def _unknown_show_words(show_text, facts) -> list:
@@ -163,17 +163,24 @@ def _unknown_show_words(show_text, facts) -> list:
     ⚠ 解析就地写、只依赖 `core` —— `story` 层**不能** import `app`
     （契约 H1 的分层方向；`app/beats.py` 里有等价实现，那是给卡片用的）。
 
-    ⚠ 碰到 `at` / `with` / `as` / `behind` / `on` / `zorder` 就**停**：
+    ⚠ 碰到 `at` / `with` / `as` / `behind` / `onlayer` / `zorder` 就**停**：
     它们后面是变换/图层，不是属性（`show cg at center` 的 `at` 不是属性）。
+
+    ⚠⚠ 2026-10-16（用户排期 C 项）：这里从前自己写了一遍"碰到关键字就 break"
+    的循环 —— 现在**切分本体交给 `core.vocabulary.classify_show_words`**，
+    调用方只声明"引入型目标（`show screen X` / `show layer Y` / `show expression …`）
+    **没有立绘属性**可言，直接跳过"。
     """
     from storygraph.core import engine_facts as EF
 
     out: list = []
     for item in str(show_text or '').split(';'):
+        roles = classify_show_words(item)
+        if roles.intro_kind != 'image':
+            # 非图像目标：没有"立绘属性"这件事（真机 112 行 `show screen …`）
+            continue
         toks: list = []
-        for word in item.split():
-            if word in _SHOW_KEYWORDS:          # 关键字之后都不算属性
-                break
+        for word in roles.target.split():
             # `close_happy@i11` 里的 `@` 后面是**位置变换**，也不算属性
             word = word.split('@', 1)[0]
             if word:

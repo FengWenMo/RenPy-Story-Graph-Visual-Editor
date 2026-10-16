@@ -256,6 +256,18 @@ RENPY_CONTAINER_HEADS = frozenset({
 #   （除了 `excel_export` 补回漏掉的 `onlayer` —— 那是"真词漏了"，
 #   让 `show cg onlayer overlay` 里的 `onlayer` 不再被当成属性报错）。
 #   发现但**没动**的口径分歧，都在各自站点上写明理由（见下）。
+#
+# ⚠⚠ **2026-10-16 收口（用户排期 C 项）**：光收词表还不够 —— 上面那五处
+#   各有一份"**拿集合去 split()**"的循环，于是"改一处忘一处"还会复发。
+#   现在切分与"哪个词是什么角色"只有一处实现：`classify_show_words`（下面），
+#   分词真源是 `tokenize_show_words`。上面列的 `_SHOW_KEYWORDS` /
+#   `_SHOW_ARG_KEYWORDS` / `_SCENE_KEYWORDS` **三个别名表已删**
+#   （它们只是同一份集合的第二名字，"看起来像真源、其实没人用"）。
+#   剩下的消费点一律只声明**语义**：
+#     · `asset_registry_constants._SHOW_STOP_WORDS` —— "这些词不可能是参数值"
+#     · `learn_statement._NOT_A_VALUE`             —— 同上（多两个布尔字面量）
+#     · `generation_guard` 的 stopwords            —— `at` 之后的变换名边界
+#   判据见 `tests/test_show_clause_words.py` 的 §一处实现。
 
 #: 图像名之后**哪些词算子句** —— 既是"图像名到哪里为止"，也是"这些词后面不是属性"。
 SHOW_CLAUSE_KEYWORDS = frozenset({
@@ -264,9 +276,277 @@ SHOW_CLAUSE_KEYWORDS = frozenset({
 
 #: `show` 的**引入型**关键字：它们**替换**图像名，后面跟的不是图名 ——
 #: `show expression <表达式>` / `show screen <屏幕名>` / `show layer <层名>`。
-#: 使用者：`authoring/learn_statement._NOT_A_VALUE`（反推参数名时它们不是"值"）、
-#: `assets` 那侧（`show expression …` 本来就没有图像名 → 切出来是空）。
+#:
+#: ⚠ 与 `NON_ACTOR_SHOW_TARGETS` **不是一个概念**（那个更宽：`text` / `movie`
+#:   在官方语法里是**预定义 displayable 当图名**，不是引入型）。
+#:
+#: 使用者：读目标的一侧是 `classify_show_words`（下面）；另有两个站点按
+#: "这些词根本不可能是参数值"的**另一层**语义各用一份
+#: `SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS`
+#: （`learn_statement._NOT_A_VALUE`、`asset_registry_constants._SHOW_STOP_WORDS`）
+#: —— 那是"取词边界"，不是本分类器。
 SHOW_INTRO_KEYWORDS = frozenset({'expression', 'screen', 'layer'})
+
+
+# ------------------------------------------------------------------
+#  `classify_show_words`：show / scene / hide 那句话里的词**各是什么角色**
+# ------------------------------------------------------------------
+#
+#  为什么必须有它（2026-10-16，用户排期 C 项）：同一件事从前**六个站点各写一遍**
+#  "拿一个集合去 split()"。词表已经收敛成上面两份真源（2026-10-15），
+#  但**切分口径**仍然各写一遍 —— 于是"改一处忘一处"的下一次复发只是时间问题。
+#  与 `authoring/pattern.assign_tokens`（10-15 收"一行词 → 每格占哪几个词"）
+#  同一套路：**消掉第二份口径，而不是去加固每一份**。
+#
+#  这一份是**纯函数**：不 import 任何 story / parsing 层的东西，只认这两份词表。
+#  它回答四个问题：
+#    · `target`     —— 图像名（或引入型关键字后面那个表达式）
+#    · `intro_kind` —— 这个目标是什么形态（见下）
+#    · `clauses`    —— 子句关键字 → 它吃掉的词（`at` / `behind` 可以是多个）
+#    · `words`      —— 原句里的每一个词，按角色分好（给"按位置看"的调用方）
+#
+#  `intro_kind` 有五种取值：
+#    · `'image'`         —— 普通图像名（`show lan happy at left`）
+#    · `'expression'`    —— `expression <Python 表达式>`（**目标就是那个表达式**，
+#                          遇到子句关键字才停；`as` / `at` 照样要切出来）
+#    · `'screen'` / `'layer'` —— `show screen X` / `show layer Y`：**没有图像名**
+#                          （`target` 就是 X / Y 本身，调用方按"非图像资产"处理）
+#    · `'none'`          —— 后面什么都没有（`show expression` / `show layer`）
+#    · `'unknown-intro'` —— 切不出普通目标、却也不是已知引入型（`show zorder 3`）。
+#                          调用方按铁律 #3"认不出就原样抄"处理 —— 落 `raw`，绝不猜。
+#
+#  ⚠ 口径**逐字对齐**于它取代的那段 `renpy_parser._parse_show_scene` 循环：
+#    逗号是分隔符、不算目标的一部分（`show bg room, night` → target `bg room`）；
+#    `at` / `behind` 吃到下一个子句关键字为止（逗号只当分隔符、不进值）；
+#    其余子句各吃一个词；`as` 重复时**后一个赢**（与从前一致）。
+#    这不是"顺手改口径"，是取代的**前提**。
+
+_SHOW_MULTI_CLAUSES = frozenset({'at', 'behind'})
+
+_SHOW_KIND_BY_INTRO = {'expression': 'expression', 'screen': 'screen',
+                       'layer': 'layer'}
+
+
+def _strip_show_comma(tok: str) -> str:
+    """去掉一个 show 词**末尾**的顶层逗号（`room,` → `room`）。
+
+    ⚠⚠ 只许剥**末尾**那一个，**token 内部的逗号一个字都不许动**：
+      · 括号里的逗号是 Python 参数分隔符 —— `Text("SEIREN PROJECT",
+        color="#89c7fe")` 是**一个** token（分词真源里深度>0 的逗号不分词），
+        把内部逗号剥掉就变成 `Text("SEIREN PROJECT" color="#89c7fe")`，
+        **一个 Python 语法错误**、产物直接跑不起来（真机 `screens.rpy:1439` 实测）；
+      · 引号里的逗号同理。
+    所以这里**不看后面的内容**、只 `removesuffix(',')` 一次。
+    """
+    return tok[:-1] if tok.endswith(',') else tok
+
+
+def tokenize_show_words(text: str, *, keep_commas: bool = True) -> list:
+    """
+    `show` / `scene` / `hide` 目标部分的**分词真源**（2026-10-16 收重复）。
+
+    从前这份实现住在 `parsing/renpy_parser._tokenize_show`；现在 core 里放一份、
+    那边只叫它 —— 因为 `classify_show_words`（下面）必须用**同一把刀**切词，
+    否则"括号里的逗号不算分隔符"这类细节就会在两者之间漂移
+    （实测：真机 `show image puzzle_path at Transform(xysize=(1920, 1080))`
+    用朴素的 `str.split()` 会切出 `Transform(xysize=(1920,` —— 一个语法错误，
+    再拼回去产物直接跑不起来）。
+
+    规则：
+      · 空格分隔；
+      · 逗号是独立 token（**只在括号外/引号外**）；
+      · 引号字符串不切分（`expression "a b.png"` 里整个引号串是一个 token）；
+      · `(...)` / `[...]` / `{...}` 里的逗号留住（`Transform(xysize=(1920, 1080))`）。
+
+    `keep_commas=False` 时连**独立**的逗号也不吐出来（那些调用方只想看词）。
+    """
+    text = str(text or '')
+    tokens = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in ' \t':
+            i += 1
+            continue
+        if c == ',':
+            if keep_commas:
+                tokens.append(',')
+            i += 1
+            continue
+        if c in ('"', "'"):
+            quote = c
+            start = i
+            i += 1
+            while i < n:
+                if text[i] == '\\':
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            tokens.append(text[start:i])
+            continue
+        # 普通 token：一路吃到空格或**顶层**逗号；括号里的逗号留住
+        start = i
+        depth = 0
+        while i < n:
+            ch = text[i]
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                if depth:
+                    depth -= 1
+            elif depth == 0 and (ch in ' \t,'):
+                break
+            i += 1
+        tokens.append(text[start:i])
+    return tokens
+
+
+class ShowWordRoles(tuple):
+    """
+    `classify_show_words` 的结果。故意做成 **NamedTuple 风格**：
+
+      · 可以 `.target` / `.clauses['at']` 按名字取（可读）；
+      · 也能像元组一样解包 `target, intro, clauses, words = …`（省事）；
+      · `result.as_dict()` 还原成普通字典（习惯 dict 的调用方不用改）。
+
+    ⚠ 它**不是** `dict` 的子类（是 `tuple` 的），所以没有 `result['target']`
+      那种取法 —— 要字典请显式调 `as_dict()`：`dict(tuple)` 会把四个字段
+      当成"键值对"解读并在解包时炸掉，那种隐式转换宁可没有。
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, target: str, intro_kind: str, clauses: dict, words: list):
+        return super().__new__(
+            cls, (target, intro_kind, dict(clauses), list(words)))
+
+    @property
+    def target(self) -> str:
+        return self[0]
+
+    @property
+    def intro_kind(self) -> str:
+        return self[1]
+
+    @property
+    def clauses(self) -> dict:
+        return self[2]
+
+    @property
+    def words(self) -> list:
+        return self[3]
+
+    def clause(self, name: str, default=''):
+        """取一个子句的值：多个取列表，单个取字符串，没有取 `default`。"""
+        return self.clauses.get(name, default)
+
+    def as_dict(self) -> dict:
+        """还原成普通字典：`{'target':…, 'intro_kind':…, 'clauses':…, 'words':…}`。"""
+        return {'target': self.target, 'intro_kind': self.intro_kind,
+                'clauses': dict(self.clauses), 'words': list(self.words)}
+
+    def __repr__(self) -> str:
+        return (f'ShowWordRoles(target={self.target!r}, '
+                f'intro_kind={self.intro_kind!r}, clauses={self.clauses!r}, '
+                f'words={self.words!r})')
+
+
+def classify_show_words(text: str, *, intros=None) -> ShowWordRoles:
+    """
+    把 `show` / `scene` / `hide` 的剩余部分（动词之后那一段）拆成词的角色。
+
+    参数
+    ----
+    text
+        动词之后的原文（`'lan happy at left with dissolve'`）；
+        也可以整行传（`'show lan happy'`）—— 函数自己吃掉句首动词。
+    intros
+        把**首个词**认成"引入型关键字"的集合，默认 `SHOW_INTRO_KEYWORDS`。
+        `scene` 传 `SHOW_INTRO_KEYWORDS - {'expression'}` 就是"expression 走
+        普通目标那条路"。
+
+    返回值见 `ShowWordRoles` 与上面那节注释。**纯函数、无副作用**。
+    """
+    intro_words = SHOW_INTRO_KEYWORDS if intros is None else frozenset(intros)
+    raw = [w for w in tokenize_show_words(text, keep_commas=False) if w]
+    if raw and raw[0] in ('show', 'scene', 'hide'):
+        raw = raw[1:]
+    if not raw:
+        return ShowWordRoles('', 'none', {}, [])
+
+    words: list = []
+    clauses: dict = {}
+    target_parts: list = []
+    intro_kind = 'image'
+
+    i = 0
+    n = len(raw)
+    while i < n:
+        tok = raw[i]
+
+        if tok in SHOW_CLAUSE_KEYWORDS:
+            words.append((tok, 'clause'))
+            i += 1
+            values = []
+            if tok in _SHOW_MULTI_CLAUSES:
+                # `at a, b` / `behind x, y`：吃到下一个子句关键字为止。
+                # 独立逗号已经在切词时被丢掉（`keep_commas=False`），
+                # 值里的逗号与旧循环**逐字一致**。
+                while i < n and raw[i] not in SHOW_CLAUSE_KEYWORDS:
+                    values.append(raw[i])
+                    words.append((raw[i], 'value'))
+                    i += 1
+            else:
+                # 其余子句各吃**一个**词（`as qing` / `with dissolve` /
+                # `onlayer master` / `zorder 3`）。
+                if i < n and raw[i] not in SHOW_CLAUSE_KEYWORDS:
+                    values.append(raw[i])
+                    words.append((raw[i], 'value'))
+                    i += 1
+            clauses[tok] = (values if tok in _SHOW_MULTI_CLAUSES
+                            else (values[0] if values else ''))
+            continue
+
+        if not target_parts and not clauses:
+            # 目标位的**第一个词**：只有这里才看引入型关键字
+            if tok in intro_words:
+                intro_kind = _SHOW_KIND_BY_INTRO.get(tok, 'expression')
+                words.append((tok, 'intro'))
+                i += 1
+                if intro_kind == 'expression':
+                    # `expression <Python 表达式>`：表达式里可以有空格、括号、
+                    # 引号，一直到**子句关键字**为止都算目标本体（与
+                    # `beat_stage_parse._parse_show_expression` 同口径）。
+                    while i < n and raw[i] not in SHOW_CLAUSE_KEYWORDS:
+                        target_parts.append(raw[i])
+                        words.append((raw[i], 'target'))
+                        i += 1
+                else:
+                    # `screen` / `layer`：后面**一个词**是屏幕/层的名字
+                    if i < n and raw[i] not in SHOW_CLAUSE_KEYWORDS:
+                        target_parts.append(raw[i])
+                        words.append((raw[i], 'target'))
+                        i += 1
+                continue
+
+        # 普通目标：图像名可以多段（`bg room night`），遇到子句关键字为止
+        target_parts.append(tok)
+        words.append((tok, 'target'))
+        i += 1
+
+    target = ' '.join(_strip_show_comma(p) for p in target_parts)
+    target = ' '.join(target.split())
+
+    if intro_kind == 'image' and not target:
+        # 普通目标为空：要么后面什么都没有，要么第一个词就是子句关键字
+        # （`show zorder 3` 这种可疑形状）—— 绝不猜，交给调用方落 raw。
+        intro_kind = 'none' if not clauses else 'unknown-intro'
+
+    return ShowWordRoles(target, intro_kind, clauses, words)
 
 
 #: 不可能出现在"**说话人**"位上的 Ren'Py 语句关键字（角色变量不许叫这些名字）。
@@ -329,5 +609,6 @@ __all__ = [
     'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',
     'RENPY_KNOWN_HEADS', 'RENPY_CONTAINER_HEADS',
     'SHOW_CLAUSE_KEYWORDS', 'SHOW_INTRO_KEYWORDS',
+    'tokenize_show_words', 'ShowWordRoles', 'classify_show_words',
     'RESERVED_STATEMENT_KEYWORDS',
 ]

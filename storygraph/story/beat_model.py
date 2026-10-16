@@ -24,7 +24,6 @@ from storygraph.core.statement import MARKER
 from storygraph.story.spec_args import is_dynamic_column
 from storygraph.story.beat_stage_parse import (  # 2026-10-12 拆分
     _NATIVE_TAIL_RE,
-    _SHOW_ARG_KEYWORDS,
     _clause_image,
     _parse_show_expression,
     _split_hide_items,

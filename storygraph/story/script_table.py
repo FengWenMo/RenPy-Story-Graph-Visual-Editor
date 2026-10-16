@@ -58,7 +58,6 @@ from storygraph.story.beat_model import (  # noqa: F401
     _HEADER_ALIASES,
     _NATIVE_TAIL_RE,
     _RENPY_STATEMENT_HEADS,
-    _SHOW_ARG_KEYWORDS,
     _append_line,
     assign_identity,
     _audio_params,

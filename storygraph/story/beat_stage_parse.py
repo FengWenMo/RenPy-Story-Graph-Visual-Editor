@@ -20,23 +20,36 @@ from __future__ import annotations
 
 import re
 
-from storygraph.core.vocabulary import SHOW_CLAUSE_KEYWORDS
+from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
+                                        SHOW_INTRO_KEYWORDS,
+                                        classify_show_words)
 
 _NATIVE_TAIL_RE = re.compile(
     r'^(?P<spec>.+?)(?:\s+at\s+(?P<at>[\w.]+))?'
     r'(?:\s+with\s+(?P<with>[\w.]+))?$')
 
-#: 图像名**到哪里为止** —— **唯一真源**在 `core.vocabulary`（2026-10-15 收重复）。
-_SHOW_ARG_KEYWORDS = SHOW_CLAUSE_KEYWORDS
+#: `show` 片段里"这段话里有没有子句/引入型关键字"的**边界集**
+#: （唯一真源在 `core.vocabulary`）—— `_split_show_items` 用它做分支判断。
+#: ⚠ 2026-10-16：切分本体已经交给 `classify_show_words`；
+#:   `_SHOW_ARG_KEYWORDS` 那个"同一份集合的第二个名字"**已删**。
+_SHOW_CHUNK_WORDS = SHOW_CLAUSE_KEYWORDS | SHOW_INTRO_KEYWORDS
+
 
 def _clause_image(clause: str) -> str:
-    """从一个 show 子句（已去掉前导 'show '）里取出图像名。"""
-    parts = []
-    for w in clause.split():
-        if w in _SHOW_ARG_KEYWORDS:
-            break
-        parts.append(w.rstrip(','))
-    return ' '.join(parts)
+    """从一个 show 子句（已去掉前导 'show '）里取出**图像名**。
+
+    ⚠⚠ 2026-10-16：**切分本体交给 `core.vocabulary.classify_show_words`** ——
+    从前这里自己写了一遍"遇到关键字就 break"的循环，与 `renpy_parser` /
+    `excel_export` / `asset_registry` / `learn_statement` 各写一遍是同一个
+    口径的六份拷贝（用户排期 C 项）。
+
+    ⚠ `intros=()` 是**刻意**的（口径与从前逐字相同）：本函数切的是
+    "舞台片段"（`beat.show` 那一格，可能是 `screen msg` 这种写法），
+    不是"资产引用"。引入型关键字（`screen` / `layer` / `expression`）
+    只有在**资产那一侧**才表示"没有图像名"（`asset_registry` 那站自己看
+    `intro_kind`）；这里照旧把 `screen msg` 整段当一个名字，避免悄悄改口径。
+    """
+    return classify_show_words(clause, intros=()).target
 
 def _split_show_items(text: str) -> list:
     """
@@ -73,7 +86,7 @@ def _split_show_items(text: str) -> list:
                 items.append(item)
                 continue
             items.append({'clause': '', 'image': image, 'at': at.strip()})
-        elif any(w in _SHOW_ARG_KEYWORDS for w in part.split()):
+        elif any(w in _SHOW_CHUNK_WORDS for w in part.split()):
             items.append({'clause': part, 'image': _clause_image(part),
                           'at': ''})
         else:

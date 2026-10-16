@@ -106,13 +106,16 @@ Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
-from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
-                                        SHOW_INTRO_KEYWORDS)
+from storygraph.core.vocabulary import (SHOW_INTRO_KEYWORDS,
+                                        classify_show_words,
+                                        tokenize_show_words)
 
-#: `show <这些> …` **没有图像名**（屏幕 / 图层操作，不是图像引用）。
-#: 从官方语法来的真源里取，只排掉 `expression` —— 那个走 `is_expression` 那条路
-#: （它的"图像名"是后面的 Python 表达式，语义不同）。
-_NO_IMAGE_INTRO = SHOW_INTRO_KEYWORDS - {'expression'}
+# ⚠ 2026-10-16：这里原来还有一份 `_NO_IMAGE_INTRO = SHOW_INTRO_KEYWORDS -
+#   {'expression'}` —— 它是"哪几个引入型关键字意味着**没有图像名**"的
+#   第二份口径（`_parse_show_scene` 自己判断用）。现在这件事由
+#   `classify_show_words` 的 `intro_kind` 统一回答（`screen` / `layer`
+#   → 没有图像名；`expression` → 走 `is_expression`，语义不同），
+#   `scene` 的差异由 `intros=` 参数表达，所以那一份**已删**。
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -990,15 +993,14 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_EXTEND_HEAD = re.compile(r'^extend(?=\s|["\'])')
     _RE_EXTEND_STR = re.compile(r'^extend\s*' + _STR)
 
-    # show / scene 解析用的关键字集合 —— **唯一真源**在 `core.vocabulary`
-    # （2026-10-15 收重复，见那里的 §`show`/`scene`/`hide` 子句关键字）。
-    #
-    # ⚠ `scene` **与 show 同口径**（2026-10-15 改）：官方原文
-    #   "the scene statement takes the same properties as the show statement"
-    #   —— 从前这一份只认 at/with/onlayer，于是 `scene bg behind x` 会把
-    #   `behind x` 当成图像名的一部分（真机 0 次，所以行为不可见）。
-    _SHOW_KEYWORDS = SHOW_CLAUSE_KEYWORDS
-    _SCENE_KEYWORDS = SHOW_CLAUSE_KEYWORDS
+    # ⚠ 2026-10-16：这里的 `_SHOW_KEYWORDS` / `_SCENE_KEYWORDS` **两张别名表已删**。
+    #   它们存在的唯一理由是"`_parse_show_scene` 自己要拿一个集合去 split()"；
+    #   现在切词与角色判定全在 `core.vocabulary.classify_show_words` 一处，
+    #   留着这两份就又是"看起来像真源、其实没人用"的第二口径 ——
+    #   正是这次（用户排期 C 项）要根治的病。
+    #   `scene` 与 `show` 同口径这件事改由分类器的 `intros=` 参数表达
+    #   （官方原文："the scene statement takes the same properties as
+    #   the show statement"；见 `_parse_show_scene`）。
 
     _RE_POS_ARG = re.compile(r'^\s*' + _STR)
 
@@ -1566,72 +1568,22 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     @staticmethod
     def _tokenize_show(rest: str) -> list:
         """
-        把 show/scene 语句的目标部分分词。
-        · 空格分隔
-        · 逗号作为独立 token（**只在括号外**，见下）
-        · 引号字符串不切分（'show expression "a b.png"' 中
-          '"a b.png"' 是一个 token）
+        把 show/scene 语句的目标部分分词。保留这个方法是**为了既有调用点与测试**。
 
-        **括号里的逗号不算分隔符**（2026-10-05 修）：`at` 的目标可以是一个
-        Python 表达式 ——
+        ⚠⚠ **实现已搬到 `core.vocabulary.tokenize_show_words`**（2026-10-16，用户排期
+        C 项）：同一把刀必须同时给 `classify_show_words` 用 —— 否则
+        "括号里的逗号不算分隔符"这类细节会在两者之间漂移。实测过的后果：
+        用朴素的 `str.split()` 切 `show image puzzle_path at
+        Transform(xysize=(1920, 1080))` 会切出 `Transform(xysize=(1920,` ——
+        再拼回去就是**一个 Python 语法错误**、产物直接跑不起来。
 
-            show image puzzle_path at Transform(xysize=(1920, 1080))
-
-        `(1920, 1080)` 里那个逗号是**元组的分隔符**。以前无脑当 token 切，
-        于是 `at` 收成 `['Transform(xysize=(1920', '1080))']`，
-        再拼回去（`beat_path` 用空格连接多目标）就变成
-
-            show image puzzle_path at Transform(xysize=(1920 1080))
-
-        —— **一个 Python 语法错误**，产物直接跑不起来。逗号被吃掉这件事
-        连往返多重集断言都看不出来（它把 `at` 列表归一化了，两边"一样"），
-        所以只能靠"产物里必须逐字含 `Transform(xysize=(1920, 1080))`"
-        这种断言把它钉住（见 `TestCustomTransformRoundtrip`）。
-
-        括号深度只在 token 内部累计：到空格/顶层逗号就结束，不会把
-        后续 token 吞进来。
+        规则（真源里的 docstring 有完整说明）：
+          · 空格分隔；
+          · 逗号是独立 token（**只在括号外/引号外**）；
+          · 引号字符串不切分；
+          · `(...)` / `[...]` / `{...}` 里的逗号留住。
         """
-        tokens = []
-        i = 0
-        n = len(rest)
-        while i < n:
-            c = rest[i]
-            if c in ' \t':
-                i += 1
-                continue
-            if c == ',':
-                tokens.append(',')
-                i += 1
-                continue
-            if c in ('"', "'"):
-                quote = c
-                start = i
-                i += 1
-                while i < n:
-                    if rest[i] == '\\':
-                        i += 2
-                        continue
-                    if rest[i] == quote:
-                        i += 1
-                        break
-                    i += 1
-                tokens.append(rest[start:i])
-                continue
-            # 普通 token：一路吃到空格或**顶层**逗号；括号里的逗号留住
-            start = i
-            depth = 0
-            while i < n:
-                ch = rest[i]
-                if ch in '([{':
-                    depth += 1
-                elif ch in ')]}':
-                    if depth:
-                        depth -= 1
-                elif depth == 0 and (ch in ' \t,'):
-                    break
-                i += 1
-            tokens.append(rest[start:i])
-        return tokens
+        return tokenize_show_words(rest)
 
     @classmethod
     def _parse_show_scene(cls, text: str, is_scene: bool):
@@ -1644,6 +1596,17 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
 
         warnings 为字符串列表，元素不含 filename:line 前缀，
         由调用层负责拼接位置信息。
+
+        ⚠⚠ **切词与"哪个词是什么角色"全部交给
+        `core.vocabulary.classify_show_words`**（2026-10-16，用户排期 C 项）。
+        从前这里自己写了一遍"拿关键字集合去 split()"的循环 —— 与
+        `beat_stage_parse` / `excel_export` / `asset_registry` /
+        `learn_statement` 各写一遍是**同一个口径的六份拷贝**。
+        本函数现在只做**翻译**：把分类器给的角色表拼成下面这个 dict 形状
+        （调用方 `_stmt_show` / `_stmt_scene` / `_stmt_hide` 与测试都按它取字段）。
+
+        `show screen X` / `show layer Y` 这一支**没有图像名** →
+        `_stmt_show` 走 `_NO_MATCH` → 整行落 `raw`（逐字保真）。
         """
         prefix = 'scene' if is_scene else 'show'
         m = re.match(r'^' + prefix + r'\s+', text)
@@ -1663,86 +1626,32 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             'warnings': [],
         }
 
-        if rest.startswith('expression '):
+        roles = classify_show_words(
+            rest,
+            # `scene expression x` 在引擎里是合法写法（scene 没有引入型关键字），
+            # 所以 scene 那条路把 `expression` 当普通目标 —— 与从前逐字一致。
+            intros=(SHOW_INTRO_KEYWORDS - {'expression'} if is_scene
+                    else SHOW_INTRO_KEYWORDS))
+
+        if roles.intro_kind in ('screen', 'layer', 'unknown-intro'):
+            # 没有图像名（`show layer master` / `show screen X` / `show zorder 3`）：
+            # 原样落 raw，绝不猜。
+            return result
+
+        if roles.intro_kind == 'expression':
             result['is_expression'] = True
-            rest = rest[len('expression '):].lstrip()
-        elif rest == 'expression':
-            result['is_expression'] = True
-            rest = ''
-        elif rest.split(None, 1)[:1] and rest.split(None, 1)[0] in _NO_IMAGE_INTRO:
-            # ⚠⚠ `show layer X` / `show screen X` —— **没有图像名**
-            # （2026-10-15 加，用户审核指出）。它们是**图层/屏幕操作**，
-            # 不是图像引用；`X` 不是本项目的图像资产。
-            #
-            # 与 `_stmt_screen_op` 对 `show screen` 的处理**同口径**：这里让
-            # image 保持空串 → `_stmt_show` 走 `_NO_MATCH` → 整行落进 `raw`
-            # （逐字保真）。`show screen` 更早被 `_stmt_screen_op` 拦走，
-            # 这一支主要管 `show layer`。
-            #
-            # ⚠ 为什么必须挡：不挡的话 `_parse_show_scene('show layer master')`
-            # 会给出 image='layer master' → `references_from_statements` 把它
-            # 当图像引用 → `registry.unresolved['image']` 里多一条**假断链**
-            # （实测踩到：`layer master` / `text Centered text` 都进来了）。
-            rest = ''
-
-        tokens = cls._tokenize_show(rest)
-        keywords = cls._SCENE_KEYWORDS if is_scene else cls._SHOW_KEYWORDS
-
-        image_parts = []
-        i = 0
-        n = len(tokens)
-        while i < n:
-            tok = tokens[i]
-            if tok == ',':
-                i += 1
-                continue
-            if tok in keywords:
-                kw = tok
-                i += 1
-                # 跳过紧跟的逗号
-                while i < n and tokens[i] == ',':
-                    i += 1
-
-                if kw == 'at':
-                    # 一个或多个标识符，逗号分隔；遇下一个关键字停止
-                    while i < n and tokens[i] not in keywords:
-                        if tokens[i] != ',':
-                            result['at'].append(tokens[i])
-                        i += 1
-                elif kw == 'as':
-                    if i < n and tokens[i] not in keywords:
-                        result['as_'] = tokens[i]
-                        i += 1
-                elif kw == 'with':
-                    if i < n and tokens[i] not in keywords:
-                        result['with_'] = tokens[i]
-                        i += 1
-                elif kw == 'onlayer':
-                    if i < n and tokens[i] not in keywords:
-                        result['onlayer'] = tokens[i]
-                        i += 1
-                elif kw == 'behind':
-                    while (i < n and tokens[i] != ','
-                           and tokens[i] not in keywords):
-                        result['behind'].append(tokens[i])
-                        i += 1
-                        if i < n and tokens[i] == ',':
-                            i += 1
-                elif kw == 'zorder':
-                    if i < n and tokens[i] not in keywords:
-                        val = tokens[i]
-                        try:
-                            result['zorder'] = int(val)
-                        except ValueError:
-                            result['warnings'].append(
-                                f'zorder 值无效: {val!r}'
-                            )
-                        i += 1
-            else:
-                image_parts.append(tok)
-                i += 1
-
-        result['image'] = ' '.join(image_parts)
+        result['image'] = roles.target
+        result['at'] = list(roles.clause('at', []))
+        result['as_'] = roles.clause('as') or ''
+        result['with_'] = roles.clause('with') or ''
+        result['onlayer'] = roles.clause('onlayer') or ''
+        result['behind'] = list(roles.clause('behind', []))
+        zorder = roles.clauses.get('zorder')
+        if zorder:
+            try:
+                result['zorder'] = int(zorder)
+            except ValueError:
+                result['warnings'].append(f'zorder 值无效: {zorder!r}')
         return result
 
     # ---------- python: 块收集 ----------
