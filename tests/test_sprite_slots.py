@@ -13,7 +13,8 @@
   · 从下拉里挑一个词 → `tag + 那个词` 重拼 → **服装被吃掉**。
 
 修法：维度由**引擎分组**给，一维一格。这里钉住卡片的四条落地：
-  ① 两个维度 → 两个 chip；一个维度 → 一个表情 chip（老路一字不变）；
+  ① **引擎给了几个组就几个 chip**（2026-10-16 收紧）：一个词写的拍也有服装格
+     —— 那一格显示 `—`，点一下才固定到这一拍。认不出引擎分组的项目走老路；
   ② 点服装那格 → **表情不丢**；
   ③ 点表情那格 → **服装不丢**；
   ④ 右键候选 = **完整路径**（`base_handdown gratified`），按服装分栏。
@@ -94,11 +95,26 @@ class TestSlotChips:
         assert any('base_handdown' in t for t in texts), texts
         assert any('gratified' in t for t in texts), texts
 
-    def test_one_dimension_keeps_the_single_expression_chip(self, qapp):
-        """**通用性底线**：`show ye happy` 这类项目行为一字不变。"""
+    def test_one_dimension_still_gets_every_engine_group(self, qapp):
+        """
+        ⚠⚠ **口径改了**（2026-10-16 用户实测报的 bug）：
+
+        > 我明明配置了全局的 show 表情……为何一张卡片有服装，另一张卡片却没有啊？
+
+        从前这条断言"一个词 → 退回单个表情 chip"（`_slot_btns == []`），
+        于是 `ye happy` 连**服装格都没有**、`ye base_handdown gratified` 却有两格
+        —— 同一套配置，卡片之间不一致。
+        现在：引擎给了 ≥2 个组 → 每组一格；这一拍没写的维度显示 `—`
+        （点一下才固定到这一拍），候选照样给全。
+        """
         card = _card('ye happy')
-        assert card._slot_btns == []
-        assert card._expr_btn.text() == '表情：happy'
+        labels = [b.text() for b in card._slot_btns]
+        assert len(labels) == 2, labels
+        assert labels[0].endswith('happy'), labels
+        assert labels[1].endswith('—'), ('没写的维度该显示 —', labels)
+        # 点一下空格子 → 补上第一个候选，且**不吃掉表情**
+        card._set_slot_value('outfit', 'base_handdown')
+        assert card.item['image'] == 'ye happy base_handdown', card.item['image']
 
     def test_no_provider_means_the_old_path(self, qapp):
         card = _card('ye base_handdown gratified', provider=False)

@@ -231,8 +231,12 @@ class SpriteCardWidget(QFrame):
         现在：`[服装: base_handdown] [表情: gratified] [位置: —]`，
         点哪格只换那一格的词。
 
-        ⚠ 只有一条维度时**完全走老路**（一个 `表情：xxx` chip）——
-        `show ling happy` 这类项目的行为与从前一字不差。
+        ⚠ 2026-10-16 口径改了：**建不建格看"引擎给了几个组"**，不看
+        "这一拍写了几个词"。从前 `show ling happy`（一个词）会退回老路、
+        连服装格都没有，于是同一套配置的卡片之间不一致
+        （用户原话："为何一张卡片有服装，另一张卡片却没有啊？？？"）。
+        现在引擎给了 ≥2 个组就每组一格；认不出引擎分组/项目没有
+        `layeredimage` 时才走老路（`rows == []`）。
         """
         rows = self._slot_rows() if rows is None else list(rows or ())
         for btn in self._slot_btns:
@@ -336,13 +340,20 @@ class SpriteCardWidget(QFrame):
             self._rebuild_slot_chips(rows)
         if rows:
             for btn, row in zip(self._slot_btns, rows):
-                shown = str(row.get('display') or row.get('value') or '') or '—'
-                btn.setText(f"{row.get('label') or row.get('group') or '属性'}：{shown}")
-                btn.setToolTip(
-                    f"这一段是引擎的 `{row.get('group')}` 组"
-                    f"（共 {len(row.get('options') or [])} 个候选）。\n"
-                    '左键 = 换下一个 · **右键 = 搜索选择**\n'
-                    '点它只改这一维，其余维度（服装/表情/…）原样保留。')
+                shown = str(row.get('display') or row.get('value') or '')
+                btn.setText(
+                    f"{row.get('label') or row.get('group') or '属性'}："
+                    f"{shown or '—'}")
+                tip = (f"这一段是引擎的 `{row.get('group')}` 组"
+                       f"（共 {len(row.get('options') or [])} 个候选）。\n"
+                       '左键 = 换下一个 · **右键 = 搜索选择**\n'
+                       '点它只改这一维，其余维度（服装/表情/…）原样保留。')
+                if not shown:
+                    # ⚠ 空着的那一格要说清它**不是坏了**：这一拍自己没写这一维，
+                    #   画面上按引擎的默认走；点一下才把它固定到这一拍。
+                    tip = (f"这一拍**没写** `{row.get('group')}` 这一维"
+                           f"（画面上按引擎的默认走，不是坏了）。\n" + tip)
+                btn.setToolTip(tip)
         else:
             if getattr(self, '_expr_btn', None) is None or self._slot_btns:
                 self._rebuild_slot_chips([])

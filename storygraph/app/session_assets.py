@@ -626,6 +626,53 @@ class AssetRegistryMixin:
             self._transforms_decision = None  # 资源表变了 → 判定重算
         return res
 
+    def _composed_sprite_path(self, image_spec: str):
+        """
+        `ling close_happy base_swimsuit` → **叠好的那张图**的路径（叠不出来 None）。
+
+        为什么要它（用户 2026-10-16）：
+        > 我换了服装，但显然你的图片没有跟着随即切换……还是原来那张……不合理！
+
+        根因不是"图没换"，是**解析出来就是同一个文件**：多属性那一支一次只试
+        一个属性、命中即返回（当年为修"无头骑士"改的），于是第二维永远被吃掉。
+        正确做法是按项目自己的 `layeredimage` 分组（身体件 + 脸件）叠起来 ——
+        仓库里已经有这件（`app/layer_compose.compose_sprite`），只是**预览这条
+        路没用上**（演出预览那条路 `stage.resolve_frame_assets` 早在用了）。
+
+        ⚠ 两条诚实退化：
+          · 项目没有 `layeredimage` 声明 / 认不出这个 tag → 返回 None，
+            调用方走原来的单图路径（**老项目一个字节不变**）；
+          · 只有一层（单图立绘）→ `compose_sprite` 直接返回原图，零成本。
+        """
+        root = getattr(self, 'project_root', None)
+        if not root:
+            return None
+        try:
+            parts = str(image_spec or '').split()
+            if not parts:
+                return None
+            # ⚠ 一个词也照样试（`lan happy` 这种：表情有了、服装走引擎默认）——
+            #   分层项目里"一个词"同样要叠出完整立绘，不能退回单张表情件
+            #   （那正是当年"无头骑士"那个坑的另一面）。
+            #   没有 `layeredimage` 声明的 tag（`cg cg03` / `bg room`）会在下面
+            #   被 `model.has(tag)` 挡掉 → 老路，一个字都不改。
+            from storygraph.story.layered_model import (load_layer_model_cached,
+                                                        resolve_layers)
+            model = load_layer_model_cached(root)
+            tag, attrs = parts[0], parts[1:]
+            if model is None or not getattr(model, 'images', None) \
+                    or not model.has(tag):
+                return None
+            plan = resolve_layers(model, tag, attrs, root)
+            if not getattr(plan, 'ok', False):
+                return None
+            from storygraph.app.layer_compose import compose_sprite
+            path = compose_sprite(plan)
+            return path if path is not None else None
+        except Exception as e:                    # noqa: BLE001 - 合成不了走老路
+            swallow('app.session_assets.composed_sprite_path', e)
+            return None
+
     def _resolve_asset_ids(self, name: str) -> list:
         """
         `名字 → 资产 ID` 列表（走唯一真源 `resolve_references`），带索引缓存。
@@ -666,6 +713,20 @@ class AssetRegistryMixin:
         if not spec or self.registry() is None:
             return None
         try:
+            # ⚠⚠ **分层合成优先**（2026-10-16 用户实测报的"换了服装图不变"）。
+            #
+            # 这个项目（以及 Ren'Py 的 `layeredimage` 写法）里立绘是**分层**的：
+            # 身体件（`outfit`: base_swimsuit / base_arms_akimbo）与脸件
+            # （`expressions`: close_happy …）各是一张图，**必须叠起来**才是完整立绘。
+            #
+            # 从前这里在"多个属性"那一支**一次只试一个词、命中即 return**，
+            # 于是 `ling close_happy base_swimsuit` 永远命中 `close_happy.png`
+            # ——换服装（那一个词）**结果必然不变**，user 看到的就是"图没跟着换"。
+            # 现在先按项目自己的 `layeredimage` 结构叠（`compose_sprite` 有落盘缓存，
+            # 键含**每一层**的路径与 mtime/size，所以换哪一维都会重合成）。
+            composed = self._composed_sprite_path(spec)
+            if composed is not None:
+                return composed
             from storygraph.app.beats import lookup_image_id
             reg = self.registry()
             images = getattr(reg, 'images', {}) or {}

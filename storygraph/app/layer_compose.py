@@ -29,8 +29,21 @@ _CACHE_SUBDIR = 'composed'
 
 
 def _sig(plan) -> str:
-    """层列表 → 稳定签名（含 mtime/size，源图改了要重合成）。"""
-    parts = []
+    """
+    层列表 → 稳定签名（含 mtime/size，源图改了要重合成）。
+
+    ⚠⚠ **属性选择也算进签名**（2026-10-16 用户实担心的那个坑）：
+    "换服装仍可能命中旧缓存"。同一个组里两个取值完全可能解到**同一张图**
+    （`group outfit` 的两个值指向同一个文件、或某一层被条件跳过），
+    那时只按"层路径 + mtime"算签名会给它们**同一个缓存文件** ——
+    换了维度、路径却一模一样，界面看不出变化。
+
+    所以签名包含 `plan.attrs_used` / `plan.attrs_chosen`：**选了什么**本身就是
+    合成结果的一部分。源图没变、层没变、但选法变了 → 重新合成。
+    幂等性不受影响（同一组属性 → 同一份签名 → 命中同一张缓存）。
+    """
+    parts = [f'attr:{a}' for a in (getattr(plan, 'attrs_used', None) or ())]
+    parts += [f'chose:{a}' for a in (getattr(plan, 'attrs_chosen', None) or ())]
     for ly in plan.layers or ():
         for key in ('path', 'mask'):
             p = ly.get(key)

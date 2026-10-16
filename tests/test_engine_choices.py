@@ -754,10 +754,25 @@ class TestAttrSlotRows:
         assert 'happy' in by_group['expressions']['options']
         assert 'base_handdown' not in by_group['expressions']['options']
 
-    def test_one_word_is_the_old_single_chip(self):
-        """**通用性底线**：一个词 → 走老路（`show ling happy` 行为一字不变）。"""
-        assert beats.attr_slot_rows('ye happy', _ye_sym(),
-                                    facts=_ye_facts()) == []
+    def test_one_word_still_gets_every_engine_group(self):
+        """
+        ⚠⚠ **口径改了**（2026-10-16 用户实测报的 bug）：
+
+        > 我明明配置了全局的 show 表情……为何一张卡片有服装，另一张卡片却没有啊？
+
+        从前这里断言"一个词 → 返回 `[]` 走单格老路"，于是同一个 tag：
+          · `ye base_handdown happy`（两个词）→ 两格；
+          · `ye happy`（一个词）→ **一个格都没有**，服装根本改不了。
+        现在判据是"**引擎给了几个组**"：≥2 个组就每个组一格，这一拍没写的维度
+        值是空的（界面显示 `—`），点一下才把它固定到这一拍。
+        """
+        rows = beats.attr_slot_rows('ye happy', _ye_sym(), facts=_ye_facts())
+        assert [r['group'] for r in rows] == ['expressions', 'outfit'], rows
+        assert rows[0]['value'] == 'happy'
+        assert rows[1]['value'] == '', '没写服装那一维不是"没有格"，是"格空着"'
+        assert rows[1]['options'] == ['base_handdown', 'base_swimsuit']
+        # 没有引擎事实、也读不到 layeredimage 的项目照旧不给格（老路一字不变）
+        assert beats.attr_slot_rows('ye happy', _ye_sym()) == []
 
     def test_unknown_tag_falls_back(self):
         assert beats.attr_slot_rows('bg1.1', _ye_sym(),
@@ -810,10 +825,16 @@ class TestApplyAttrSlot:
         assert beats.apply_attr_slot(spec, 'nope', 'x', symbols=_ye_sym(),
                                      facts=_ye_facts()) == spec
 
-    def test_single_chip_spec_is_left_alone(self):
-        """只有一格时这条路**不许**动它（老路由 `_set_field` 负责）。"""
+    def test_one_word_spec_can_still_switch_its_dimension(self):
+        """
+        一个词的拍现在**也有格**了 → 换表情能生效，且**不会顺手加上一个服装词**
+        （这一拍自己没写服装，就不该凭空多一个 —— 与"只写这一拍真有的值"同规矩）。
+        """
         assert beats.apply_attr_slot('ye happy', 'expressions', 'ahah',
                                      symbols=_ye_sym(),
+                                     facts=_ye_facts()) == 'ye ahah'
+        # 认不出的维度照旧原样返回
+        assert beats.apply_attr_slot('ye happy', 'nope', 'x', symbols=_ye_sym(),
                                      facts=_ye_facts()) == 'ye happy'
 
 

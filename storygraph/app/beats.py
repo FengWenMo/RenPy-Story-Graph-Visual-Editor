@@ -1690,10 +1690,18 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
       · `groups`（项目在 `rules.json` 里声明的词组）只当**改名层**用，不参与分组
         ——结构已经写在引擎里，人再来指定成员就会两边打架（与 `rename_overlay`
         同一条口径）；
-      · **可操作的维度不到 2 条 → 返回 `[]`**：`show ling happy`（只有一条维度
-        有值）走原来那条单格老路，于是这类项目**行为一个字节不变**（通用性底线，
-        与 `expression_choice_groups` / `group_choices` 同规矩）。而
-        `ye base_handdown gratified` 有两条维度有值 → 一维一格；
+      · ⚠⚠ **建不建格看"引擎给了几个组"，不看"这一拍写了几个词"**
+        （2026-10-16 改，用户实测报的"有的卡有服装格、有的没有"）：
+        从前是"有值的维度不到 2 条 → 返回 `[]`"（`show ling happy` 走单格老路），
+        于是**同一套立绘配置，卡片之间不一致**：
+          · `ling close_happy base_swimsuit`（写了两个词）→ 两格；
+          · `ling happy` / `lan happy`（只写一个词）→ 一个格都没有，服装改不了。
+        用户原话："我明明配置了全局的 show 表情……为何一张卡片有服装，
+        另一张卡片却没有啊？？？"
+        现在：**引擎给了 ≥2 个组就每个组都建一格**，这一拍没写的维度显示
+        `—`（点一下才把它固定到这一拍）—— 与"位置：i11（继承）"那条规矩统一。
+        ⚠ 通用性底线**仍在**：没有引擎事实、也读不到项目 `layeredimage`
+        （`group_rows` 为空）的项目照旧返回 `[]` 走老路，一个字节不变；
       · `extras`：**不属于任何引擎组的词原样留着**（`base_handdown_mask` /
         `_hd_cut` 这类内部件 —— 实测资源表里真有它们）。我们不认识它们，但
         **别人的东西一个字节都不许丢**。
@@ -1735,7 +1743,10 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
         except Exception as e:                    # noqa: BLE001
             swallow('app.beats.attr_slot_rows.layers', e)
             group_rows = []
-    if not group_rows:
+    # ⚠ **组数才是判据**（≥2 个组 → 一维一格；1 个组或认不出 → 老路）。
+    #   从前这里判的是"有值的维度数"，于是"只写了一个词的拍"一个格都没有，
+    #   同一套配置的卡片之间不一致（用户 2026-10-16 实测报的）。
+    if len(group_rows) < 2:
         return []
     # 当前值 → 每一维当前选中的那个词（一个词只归一组，先命中的组拿走 —— 与
     # `grouped_choices` 的"值 = 该组成员"同口径）。
@@ -1750,9 +1761,6 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
                       'label': str(entry.get('label') or '')
                                or str(entry.get('group') or ''),
                       'value': cur, 'options': vals})
-    # **可操作的维度 < 2 → 老路**（`show ling happy` 这类：一个词、一个格子）。
-    if len([s for s in slots if s['value']]) < 2:
-        return []
     # 不属于任何引擎组的词（掩码/切图这类内部件，实测项目里真有）原样留着。
     known = {v for s in slots for v in s['options']}
     extras = [a for a in attrs if a and a not in known]
