@@ -39,17 +39,56 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout,
-                               QLabel, QLineEdit, QMenu, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QPlainTextEdit,
+                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt.flow import FlowRow
 
 #: 候选值分隔符 —— 与后端 `learn_statement.parse_choices` **同一套**
-#: （中英文逗号、顿号、分号、竖线、空白）。用户"一次粘一大段"时就靠它全收下。
-_SEP_RE = re.compile(r'[,，、;；|\s]+')
+#: （中英文逗号、顿号、分号、竖线）。
+#: ⚠ 它**不含空白**：中文候选值里带空格是正常的（"洛丽塔 长裙"），
+#:   在"一格只能填一个"的场景里按空格切就会把一个值切成两个。
+_SEP_RE = re.compile(r'[,，、;；|]+')
+
+#: 分隔符的**超集** —— 只给"这一格可以有多个"用（2026-10-16 用户提的
+#: "能多选就必须能批量导入候选"）。多选格里的值本来就是"一个个词"，
+#: 空格/换行/制表符都是**排版**而不是值的一部分，所以这时它们才算分隔符。
+#: 于是"一行一个 / 空格分隔 / 逗号分隔 / 直接粘一大段"全都收得下。
+_BATCH_SEP_RE = re.compile(r'[,，、;；|\s]+')
+
+
+def split_candidate_values(text: str, *, multi: bool = False) -> list:
+    """
+    候选值输入框里那段文字 → 候选值列表（去空、保序去重）。
+
+    两种口径（**由"这一格可以有多个"决定**，用户 2026-10-16）：
+
+      · `multi=False`（一格一个值）：只认**真分隔符**
+        （`,` `，` `、` `;` `；` `|`）与换行 —— 空格**不算**，
+        所以"洛丽塔 长裙"是**一个**候选值。
+      · `multi=True`（一格可以多个值）：空格/换行/制表符**都算**分隔符 ——
+        "粘一大段"直接全收下（用户原话："能多选的时候就必须要有批量导入候选"）。
+
+    ⚠ 这是"界面收词"的口径，不是"清单怎么存"的口径：
+    存下去仍是后端 `parse_choices` 那一套（逗号串）。
+    """
+    raw = str(text or '')
+    if not multi:
+        # 换行在单值场景里也只可能是"想分多条"，照样当分隔符
+        raw = raw.replace('\n', ',').replace('\r', ',')
+        pattern = _SEP_RE
+    else:
+        pattern = _BATCH_SEP_RE
+    out = []
+    for part in pattern.split(raw):
+        s = part.strip()
+        if s and s not in out:
+            out.append(s)
+    return out
 
 
 class ValueChips(QWidget):
@@ -57,25 +96,47 @@ class ValueChips(QWidget):
     候选值输入：**敲回车 / 逗号就变成一个可点的小方块**（不用记分隔符）。
 
     用户原话（2026-10-11）："候选值要打逗号"太麻烦；
-    （2026-10-12）："我就只能填一个候选值，填不了多个" → 回车**一次收下所有**。
+    （2026-10-12）："我就只能填一个候选值，填不了多个" → 回车**一次收下所有**；
+    （2026-10-16）："这个你没有给我加批量导入……当能够多选的时候就必须要有
+    批量导入候选" → 参数 `multi` 决定收词口径，并露出「📋 批量粘贴一大段…」。
 
     `text()` 给回逗号分隔的串（与后端契约一致）；`set_text()` 反向填。
     """
 
-    def __init__(self, parent=None, on_change=None):
+    def __init__(self, parent=None, on_change=None, *, multi: bool = False):
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(T.SPACE['xs'])
+        #: "这一格可以有多个值" —— 由卡片在勾选框变化时同步（`set_multi`）。
+        #: 它决定"空格算不算分隔符"（见 `split_candidate_values`）。
+        self._multi = bool(multi)
         # ⚠ **必须折行**：横排布局的最小宽 = 所有方块之和，候选一多就把卡片
         #   （进而整窗）顶宽，而这里不提供横向滚动 → 后面那列字被挤出窗口。
         self._row = FlowRow(spacing=T.SPACE['xs'])
         outer.addWidget(self._row)
         self._edit = QLineEdit()
-        self._edit.setPlaceholderText('填一个就回车（例：泳装 ／ 校服）；'
-                                      '不填 = 编剧能随便写')
+        self._edit.setPlaceholderText(self._placeholder_text())
         self._edit.returnPressed.connect(self._commit)
         self._edit.textEdited.connect(self._maybe_split)
+        #: 批量导入入口（**勾了"可以有多个"才露出来**，见 `set_multi`）：
+        #: 一行一个 / 空格分隔 / 直接粘一大段都能收。
+        self._batch_btn = QPushButton('📋 批量粘贴一大段…')
+        self._batch_btn.setProperty('role', 'ghost')
+        self._batch_btn.setToolTip(
+            '一次粘一批候选值：一行一个、或空格/逗号分隔都行。\n'
+            '不勾"可以有多个"时只有一个值，所以这个入口藏起来。')
+        self._batch_btn.clicked.connect(self.open_batch_import)
+        outer.addWidget(self._batch_btn)
+        self._batch_btn.setVisible(self._multi)
+        self._hint = QLabel('✅ 批量模式：一行一个 / 空格分隔 / 直接粘一大段，'
+                            '回车一次全收下')
+        self._hint.setProperty('role', 'caption')
+        self._hint.setWordWrap(True)
+        outer.addWidget(self._hint)
+        self._hint.setVisible(self._multi)
+        #: 批量导入对话框的"从项目里拿"来源（由卡片注入同一份 provider）
+        self._sources_provider = None
         # ⚠⚠ 实测修复（用户报"按了回车没反应"）：`QLineEdit` 收到 Return 是
         #   `event->ignore()`（Qt 为了让"对话框里回车 = 确定"生效），按键于是冒到
         #   `QDialog`，把 Ok（autoDefault）点了 → **候选值刚加上、弹窗立刻被关掉**，
@@ -96,7 +157,11 @@ class ValueChips(QWidget):
         return super().eventFilter(obj, event)
 
     def _maybe_split(self, text: str):
-        """打了逗号（中英文都认）就把前面那段变成方块 —— 迁就旧习惯。"""
+        """打了逗号（中英文都认）就把前面那段变成方块 —— 迁就旧习惯。
+
+        ⚠ 只认逗号：空格**不能**即时分词，否则"洛丽塔 长裙"这种带空格的
+        单个候选值还没打完就被切走了。
+        """
         for sep in (',', '，'):
             if sep in text:
                 head, _, tail = text.partition(sep)
@@ -105,12 +170,40 @@ class ValueChips(QWidget):
                 self._edit.setText(tail)
                 return
 
+    def _placeholder_text(self) -> str:
+        if self._multi:
+            return ('一行一个、空格分隔都行（例：happy sad 或 泳装 校服）；'
+                    '回车一次全收下')
+        return ('填一个就回车（例：泳装 ／ 校服）；值里可以有空格；'
+                '不填 = 编剧能随便写')
+
+    def set_multi(self, on: bool):
+        """
+        同步"这一格可以有多个"（`FieldCard._multi` 勾选框）。
+
+        为什么要有这个方法（用户 2026-10-16）：
+        > 当能够多选的时候就必须要有批量导入候选
+
+        勾上之后：① 空格/换行**才算**分隔符（一行一个 / 粘一大段）；
+        ② 露出「📋 批量粘贴一大段…」入口与那行说明。
+        """
+        on = bool(on)
+        if on == self._multi:
+            return
+        self._multi = on
+        self._edit.setPlaceholderText(self._placeholder_text())
+        self._batch_btn.setVisible(on)
+        self._hint.setVisible(on)
+
+    def is_multi(self) -> bool:
+        return self._multi
+
     def _commit(self):
         """回车 → **一次收下所有值**（不是"只收一个"）。"""
         value = self._edit.text().strip()
         if not value:
             return
-        self.add_values([p for p in _SEP_RE.split(value) if p.strip()])
+        self.add_values(split_candidate_values(value, multi=self._multi))
         self._edit.clear()
 
     # ---- 对外 ----
@@ -149,11 +242,15 @@ class ValueChips(QWidget):
         return list(self._values)
 
     def set_text(self, text: str):
-        self._values = []
-        for part in str(text or '').replace('，', ',').split(','):
-            s = part.strip()
-            if s and s not in self._values:
-                self._values.append(s)
+        """
+        反向填（存量声明 / 旧调用点传进来的分隔串）。
+
+        ⚠ 2026-10-16：切分改走 `split_candidate_values` —— 从前这里只认逗号，
+        而 `ColumnCard.set_data` 传的是**顿号串**（`'泳装、校服'`）→
+        整串变成一个方块（"读出来的和写下去的不一样"）。现在
+        逗号/顿号/分号/竖线/换行都认，且**多选格才算空格**。
+        """
+        self._values = split_candidate_values(text, multi=self._multi)
         self._rebuild()
 
     def add_values(self, values):
@@ -171,6 +268,116 @@ class ValueChips(QWidget):
         if added:
             self._rebuild()
         return added
+
+    # ---- 批量导入（勾了「可以有多个」才露出来）----
+    def project_sources(self) -> list:
+        """给批量对话框用的"从项目里拿"清单（与卡片那枚 ⚡ 同一份来源）。"""
+        try:
+            if self._sources_provider is not None:
+                return list(self._sources_provider() or [])
+        except Exception as e:                       # noqa: BLE001 - 导入不该炸卡片
+            swallow('ui_qt.param_editor.ValueChips.sources', e)
+        return []
+
+    def open_batch_import(self) -> list:
+        """
+        批量导入候选值：**左边粘一大段、右边从项目里勾**。
+
+        用户 2026-10-16：
+        > 这个你没有给我加批量导入……当能够多选的时候就必须要有批量导入候选
+
+        为什么"多选"才要（而不是所有格都摆出来）：一格只能填一个值的时候，
+        批量入口没有意义（收下 10 个也只会用一个）；而**多选格**恰恰是
+        "候选越多越好"的地方（真机 `expressions` 组一次就能倒出 68 个）。
+
+        返回**这次导入收下的值**（去重后真正加进去的那批；取消则空列表）。
+        """
+        values = self._batch_import_dialog()
+        if not values:
+            return []
+        added = self.add_values(values)
+        return list(values) if added else []
+
+    def _batch_import_dialog(self) -> list:
+        """
+        弹出批量导入窗，返回用户挑中的值（**未经去重**）。
+
+        ⚠ 单独一个方法是为了**可测**：模态窗在测试里点不动（`QDialog.exec`
+        是 C++ 槽，猴子补丁不可靠），所以判据替换的是这一层（见
+        `tests/test_custom_statement_entry.py::test_批量导入窗口一次收下一整批`）。
+        """
+        from dataclasses import dataclass
+        dlg = QDialog(self)
+        dlg.setWindowTitle('批量导入候选值')
+        dlg.resize(720, 480)
+        col = QVBoxLayout(dlg)
+        col.setSpacing(T.SPACE['sm'])
+
+        tip = QLabel('粘一大段也行：一行一个、空格分隔、逗号分隔都认；'
+                     '去空、去重，**追加**到已有候选后面。')
+        tip.setProperty('role', 'caption')
+        tip.setWordWrap(True)
+        col.addWidget(tip)
+
+        text = QPlainTextEdit()
+        text.setPlaceholderText('例：\n泳装\n校服 汉服\nhappy sad')
+        col.addWidget(text, 1)
+
+        sources = self.project_sources()
+        listed = []
+        if sources:
+            head = QLabel('或者从项目里勾（可以多选）：')
+            head.setProperty('role', 'caption')
+            col.addWidget(head)
+            listed = QListWidget()
+            listed.setSelectionMode(QListWidget.MultiSelection)
+            for r in sources:
+                label = str(r.get('label') or '')
+                values = [str(v) for v in (r.get('values') or [])]
+                item = QListWidgetItem(f'{label}（{len(values)} 个）')
+                item.setData(Qt.UserRole, values)
+                item.setToolTip('、'.join(values[:40])
+                                + ('…' if len(values) > 40 else ''))
+                listed.addItem(item)
+            listed.setMaximumHeight(140)
+            col.addWidget(listed)
+
+            all_btn = QPushButton('全选')
+            all_btn.setProperty('role', 'ghost')
+            all_btn.clicked.connect(listed.selectAll)
+            col.addWidget(all_btn)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton('导入')
+        ok.setProperty('role', 'primary')
+        cancel = QPushButton('取消')
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        col.addLayout(row)
+
+        @dataclass
+        class _Pick:
+            values: list = None            # type: ignore[assignment]
+
+        pick = _Pick([])
+
+        def do_import():
+            vals = split_candidate_values(text.toPlainText(), multi=True)
+            for item in (listed.selectedItems() if listed else ()):
+                vals.extend(str(v) for v in (item.data(Qt.UserRole) or []))
+            pick.values = vals
+            dlg.accept()
+
+        ok.clicked.connect(do_import)
+        cancel.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return []
+        return list(pick.values)
+
+    def set_sources_provider(self, provider):
+        """接上"从项目里拿"的来源（卡片把同一份 provider 注入进来）。"""
+        self._sources_provider = provider
 
     def _remove(self, value: str):
         if value in self._values:
@@ -202,9 +409,18 @@ class FieldCard(QFrame):
 
         这一格是                  [ 从这些里选 ▾ ]
         这一列叫什么（编剧看到的）  [ 角色         ]
+        ☐ 这一格可以有多个（例：happy sad）
         ☐ 编剧只能从下面这些里选
         [ 泳装 ✕ ] [ 校服 ✕ ]
-        [ 填一个就回车 ]
+        [ 一行一个、空格分隔都行 ]      ← 勾了"多个"就是这个口径
+        [ 📋 批量粘贴一大段… ]          ← 勾了"多个"才露出来
+
+    ⚠⚠ **勾了「可以有多个」= 换一副收词口径**（用户 2026-10-16：
+    "当能够多选的时候就必须要有批量导入候选"）：
+
+      · 不勾：一格**一个值** → 空格不算分隔符（"洛丽塔 长裙"是一个候选值）；
+      · 勾了：一格**可以多个** → 空格/换行都算分隔符，并露出批量入口
+        （真机 `expressions` 组一次 68 个，一个个敲不现实）。
 
     ⚠⚠ **"剧本里怎么写"这个字段被删掉了**（2026-10-13 用户否掉）：
 
@@ -324,6 +540,14 @@ class FieldCard(QFrame):
             '真机例子：`show lan happy sad` —— 一句里同时给两个表情属性。')
         self._multi.toggled.connect(self._changed)
         self._values = ValueChips(on_change=self._changed)
+        # ⚠ 「可以有多个」不只是个标志：它同时决定**候选值怎么收词**
+        #   （空格算不算分隔符）、并露出批量导入入口（用户 2026-10-16：
+        #   "当能够多选的时候就必须要有批量导入候选"）。
+        #   必须在 `_values` 建好**之后**接 —— 别把顺序写反了。
+        self._multi.toggled.connect(self._values.set_multi)
+        self._values.set_multi(self._multi.isChecked())
+        #: 批量导入对话框要的"从项目里拿"来源（与卡片那枚 ⚡ 同一份）
+        self._values.set_sources_provider(self._project_sources)
 
         self._field('这一格是', self._kind)
         self._field('这一列叫什么（编剧看到的）', self._name)
@@ -395,20 +619,32 @@ class FieldCard(QFrame):
     def set_title(self, text: str):
         self._title.setText(text)
 
+    def _project_sources(self) -> list:
+        """读一遍"从项目里拿"的来源（卡片与批量对话框共用这一处）。"""
+        try:
+            if self._sources_provider is not None:
+                return list(self._sources_provider() or [])
+        except Exception as e:                       # noqa: BLE001 - 导入不该炸卡片
+            swallow('ui_qt.param_editor.FieldCard.import', e)
+        return []
+
     def _on_import(self):
         """「⚡ 从项目里拿」：把项目里**真正有**的候选摆出来，挑一个倒进这一格。
 
         ⚠ 工具**不猜**"这一格是不是表情"（那是语义，猜错改剧情）——
         它只列"项目里到底有哪些值、从哪来"，点哪个由人决定。
+
+        ⚠ 一格可以填多个值的时候，这条路太慢（真机 `expressions` 一次 68 个）——
+        那时该走 `ValueChips.open_batch_import`（可以勾好几组一起倒）。
+        所以这里多加一行指路，而不是把菜单堆成一棵勾选树。
         """
         menu = QMenu(self)
-        rows = []
-        try:
-            if self._sources_provider is not None:
-                rows = list(self._sources_provider() or [])
-        except Exception as e:                       # noqa: BLE001 - 导入不该炸卡片
-            swallow('ui_qt.param_editor.FieldCard.import', e)
-            rows = []
+        rows = self._project_sources()
+        if self._multi.isChecked():
+            act = menu.addAction('📋 批量导入（可勾多组 / 粘一大段）…')
+            act.triggered.connect(
+                lambda _=False: self._values.open_batch_import())
+            menu.addSeparator()
         if not rows:
             act = menu.addAction('（项目里还没读到可导入的值 —— 先「打开项目」；'
                                  '"立绘属性"要先跑过一次引擎体检）')

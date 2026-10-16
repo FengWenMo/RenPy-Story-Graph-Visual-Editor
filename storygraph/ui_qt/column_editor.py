@@ -65,8 +65,12 @@ class ColumnCard(QFrame):
         self._shown = QLineEdit()
         self._shown.setPlaceholderText('这一栏显示成（编剧看到的，例：服装）')
         self._shown.setToolTip('编剧在下拉里看到的分栏标题。')
-        self._values = ValueChips()
-        self._values.setToolTip('留空 = 这一栏是兜底栏：没归到别的栏的词都进它。')
+        # ⚠ 「一栏有哪些词」本来就是**一批**（多个值），所以直接开多选口径：
+        #   空格/换行算分隔符、露出「📋 批量粘贴一大段…」（用户 2026-10-16：
+        #   "当能够多选的时候就必须要有批量导入候选"）。
+        self._values = ValueChips(multi=True)
+        self._values.setToolTip('留空 = 这一栏是兜底栏：没归到别的栏的词都进它。\n'
+                                '可以一次粘一大段（一行一个 / 空格分隔都行）。')
 
         self._field('分栏标识（内部用）', self._key)
         self._field('这一栏显示成', self._shown)

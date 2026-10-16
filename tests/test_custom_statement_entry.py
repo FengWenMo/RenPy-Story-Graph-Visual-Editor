@@ -977,6 +977,11 @@ def test_chip_edit_takes_a_whole_paste_at_once(qapp):
     "粘一大段 / 打一串 / 粘多行"都行，不必一个个回车。
     顺带钉住**前后端同源**：界面收 5 个，写下去也必须是 5 个
     （若哪天两边分隔符走散，就会"界面看着 5 个、清单里只剩 1 个"）。
+
+    ⚠ 2026-10-16 口径收紧：**空格只在"这一格可以有多个"时才算分隔符**。
+    单值格（一格只填一个值）里"洛丽塔 长裙"是一个候选值，不能被空格切开 ——
+    所以这条判据改用 `multi=True` 的那个形状（与后端 `parse_choices`
+    同源的那一串本来也只在多选格里才有意义）。
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -984,7 +989,7 @@ def test_chip_edit_takes_a_whole_paste_at_once(qapp):
     from storygraph.ui_qt.param_editor import ValueChips as ChipEdit
 
     spot = 'swim_suit uniform、casual;formal|home'
-    ce = ChipEdit()
+    ce = ChipEdit(multi=True)
     ce.show()
     ce._edit.setFocus()
     ce._edit.setText(spot)
@@ -1033,6 +1038,117 @@ def test_the_card_offers_project_sourced_candidates(qapp, tmp_path):
     # 非枚举格没有"候选值"这回事 → 入口藏起来
     card._kind.setCurrentIndex(card._kind.findData('variable'))
     assert not card._import.isVisibleTo(card)
+
+
+def test_多选格的候选值收词口径(qapp):
+    """
+    用户 2026-10-16：
+    > 这个你没有给我加批量导入……当能够多选的时候就必须要有批量导入候选
+
+    用户 2026-10-16 给的现场：一格候选（服装），勾了「这一格可以有多个」，
+    但输入框只会"填一个就回车" —— 真机 `expressions` 组一次就有 **68 个**
+    属性，一个个敲不现实。
+
+    这里钉住"收词口径"这一层（界面上的入口见下一条）：
+
+      · 不勾多选 → 一格是**一个值** → 空格**不算**分隔符
+        （"洛丽塔 长裙"是一个候选值，不能被切成两个）；
+      · 勾了多选 → 一格可以有多个词、也可以一次倒一大批 →
+        空格/换行/逗号都算分隔符（"粘一大段"直接全收下）。
+    """
+    from storygraph.ui_qt.param_editor import split_candidate_values
+
+    # ---- 单值口径：空格是值的一部分（中文候选值里带空格很正常）----
+    assert split_candidate_values('洛丽塔 长裙') == ['洛丽塔 长裙']
+    assert split_candidate_values('洛丽塔 长裙, 泳装') == ['洛丽塔 长裙', '泳装']
+    assert split_candidate_values('泳装\n校服') == ['泳装', '校服']   # 换行仍算分隔
+    # ---- 多选口径：空格/换行都算分隔符（一行一个 / 粘一大段）----
+    assert split_candidate_values('happy sad 泳装 校服', multi=True) == [
+        'happy', 'sad', '泳装', '校服']
+    assert split_candidate_values('happy\nsad', multi=True) == ['happy', 'sad']
+    assert split_candidate_values('泳装、校服；汉服|home', multi=True) == [
+        '泳装', '校服', '汉服', 'home']
+    # 去空、保序去重
+    assert split_candidate_values(' a  a ,, b ', multi=True) == ['a', 'b']
+
+
+def test_卡片上勾了多选就露出批量导入(qapp, tmp_path):
+    """
+    勾上「这一格可以有多个」→ 候选值那格必须**换一副收词口径**并露出批量入口：
+
+      · 占位提示要说清"一行一个 / 空格分隔都行"；
+      · 「📋 批量粘贴一大段…」按钮露出来（不勾时藏起来）；
+      · 输入框里粘一大段，**一次回车全收下**（空格也是分隔符）。
+    """
+    from storygraph.authoring.learn_statement import choice_sources
+    from storygraph.ui_qt.dialog_learn import CustomStatementDialog
+
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    dlg = CustomStatementDialog(None, project_root=root, discovered=[])
+    dlg.params.clear()
+    card = dlg.params.add_param('', '服装', '', kind='choice')
+    card._limit.setChecked(True)          # 候选值这一块本身要先露出来
+    chips = card._choices
+
+    # 不勾多选：批量入口藏起来，值里的空格保留
+    assert not chips._batch_btn.isVisibleTo(chips), '没勾多选就摆批量入口，是噪音'
+    assert not chips._hint.isVisibleTo(chips)
+    chips._edit.setText('洛丽塔 长裙')
+    chips._commit()
+    assert chips.text() == '洛丽塔 长裙', chips.text()
+
+    # 勾上多选：入口露出来 + 收词口径换成"批量"
+    card._multi.setChecked(True)
+    assert chips._batch_btn.isVisibleTo(chips), '勾了多选还没批量导入入口'
+    assert chips._hint.isVisibleTo(chips)
+    chips._edit.setText('happy sad 泳装 校服')
+    chips._commit()
+    assert chips.text().endswith('happy,sad,泳装,校服'), chips.text()
+    # 写下去的就是界面看到的（后端 `parse_choices` 同一套分隔符）
+    assert parse_choices(card.data()['choices'])[-4:] == [
+        'happy', 'sad', '泳装', '校服'], card.data()['choices']
+    # 批量对话框的"从项目里拿"来源与卡片那枚 ⚡ 同源
+    assert chips.project_sources() == choice_sources(root, ''), '来源没接上'
+
+
+def test_批量导入窗口一次收下一整批(qapp, tmp_path):
+    """
+    「📋 批量粘贴一大段…」的真身：**粘一大段 + 从项目里勾多组**，一次全倒进去。
+
+    这里不点真窗口（模态会卡住测试）：把 `QDialog.exec` 换成"模拟用户点了导入"，
+    递进去的就是 `_commit_batch` 一定会读的那两处 —— 粘贴框、以及勾中的来源。
+    """
+    from storygraph.ui_qt.param_editor import FieldCard
+
+    card = FieldCard()
+    card._kind.setCurrentIndex(card._kind.findData('choice'))
+    card._multi.setChecked(True)
+    card._values.set_sources_provider(lambda: [
+        {'label': '立绘属性（expressions）', 'count': 3,
+         'values': ['happy', 'sad', 'angry']},
+        {'label': '角色表', 'count': 2, 'values': ['lan', 'ye']},
+    ])
+    chips = card._values
+
+    # ⚠ 不点真模态窗（`QDialog.exec` 是 C++ 槽，补丁不可靠）：替换的是
+    #   `_batch_import_dialog` 这一层 —— 它返回的就是"用户挑中的那批值"。
+    #   于是这条判据钉的是**接线**：那批值要真的进方块、且是**追加**。
+    picked = ['泳装', '校服', '汉服', 'happy', 'lan', '泳装']
+    orig_dialog = chips._batch_import_dialog
+    chips._batch_import_dialog = lambda: list(picked)
+    try:
+        got = chips.open_batch_import()
+    finally:
+        chips._batch_import_dialog = orig_dialog
+
+    assert '泳装' in got and '校服' in got and '汉服' in got, got
+    assert 'happy' in got and 'lan' in got, got
+    assert chips.text().split(',')[:3] == ['泳装', '校服', '汉服'], chips.text()
+    # 追加不覆盖：已经在卡上的候选值一个都不能丢
+    chips._edit.setText('泳装')
+    chips._commit()
+    assert chips.text().count('泳装') == 1, chips.text()
 
 
 def test_no_horizontal_scrollbar_at_the_minimum_size(qapp, tmp_path):
