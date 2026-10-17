@@ -178,7 +178,7 @@ class TestHostHooks:
         (root / 'game' / 'ch02.rpy').write_text(
             'label ch02:\n    weather rain 强度=3\n    return\n', encoding='utf-8')
         clear_cache()
-        assert 'weather' not in unknown_statements(root), \
+        assert 'weather' not in unknown_statements(root, trust=True), \
             '程序已经用 declarations() 声明了 weather，工具还报"不认识"'
 
     def test_validate_true_takes_the_head_off_the_report(self, tmp_path):
@@ -190,7 +190,7 @@ class TestHostHooks:
         from storygraph.story.statement_registry import clear_cache
         root = self._project(tmp_path)
         clear_cache()
-        got = unknown_statements(root)
+        got = unknown_statements(root, trust=True)
         assert 'mycue' not in got, f'程序验证通过了，工具还报：{sorted(got)}'
 
     def test_validate_false_still_reports_the_head(self, tmp_path):
@@ -204,7 +204,7 @@ class TestHostHooks:
         (root / 'game' / 'ch01.rpy').write_text(
             'label ch01:\n    mycue "打雷"\n    return\n', encoding='utf-8')
         clear_cache()
-        assert 'mycue' in unknown_statements(root), \
+        assert 'mycue' in unknown_statements(root, trust=True), \
             '程序说这一行不对，工具却沉默了'
 
     def test_a_broken_hook_never_breaks_the_tool(self, tmp_path):
@@ -221,7 +221,7 @@ class TestHostHooks:
             root = _friendly_project(tmp_path / f'b{abs(hash(bad)) % 999}',
                                      cds=False)
             (root / 'storygraph.host.py').write_text(bad, encoding='utf-8')
-            hooks = load_host_hooks(root)
+            hooks = load_host_hooks(root, trust=True)
             # 关键：**不抛异常**，而且失败有记录（报告里要看得见）
             assert hooks.declarations() == []
             assert hooks.validate('mycue', 'x')[0] is None
@@ -230,7 +230,7 @@ class TestHostHooks:
     def test_validate_none_is_not_a_yes(self, tmp_path):
         """④ `None`（程序不管）**绝不等于**"程序说没问题"—— 否则就是假绿。"""
         from storygraph.story.host_hooks import load_host_hooks
-        hooks = load_host_hooks(self._project(tmp_path))
+        hooks = load_host_hooks(self._project(tmp_path), trust=True)
         ok, why = hooks.validate('something_else', 'something_else x=1')
         assert ok is None, '程序不管的东西被当成了"程序说通过"'
         assert why == ''

@@ -390,8 +390,9 @@ def export_beats_to_excel(beats: list, output_path,
     # 九成拍只有一项 → 一个摊列都不加（表与从前逐列相同）。
     extra_headers = _extra_headers_for(beats)
 
-    ws.append([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS]
-              + spec_headers + extra_headers)
+    headers = ([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS]
+               + spec_headers + extra_headers)
+    ws.append(headers)
     for cell in ws[1]:
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
@@ -405,9 +406,13 @@ def export_beats_to_excel(beats: list, output_path,
     # （块路径）随表走、渲染器也按它建树（见不变量 75/76），这一位就多余了；
     # 留着还会让产物多出一层 `if True:`、让"过表"与"直接渲染"两份产物对不上。
     # 老表（有 `True`、没有 `Nest`）照样能读：渲染退回老推断，而它要的正是那些 `True`。
+    long_rows = []            # [(行号, 字段, 逐行文本)] —— 超长格搬去保真表
     for beat in beats:
-        _append_text_row(ws, beat.to_row(symbols, spec_fields=spec_headers,
-                                        extra_fields=extra_headers))
+        row = beat.to_row(symbols, spec_fields=spec_headers,
+                          extra_fields=extra_headers)
+        row, extra_long = _spill_long_cells(row, headers, beat)
+        long_rows.extend(extra_long)
+        _append_text_row(ws, row)
 
     # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
     _annotate_spec_heads(ws, beats, statements)
@@ -475,6 +480,9 @@ def export_beats_to_excel(beats: list, output_path,
     # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：**另存一张隐藏表**，
     # 因为它可能比 Excel 单元格的 32767 上限长得多（见 `_write_file_blocks_sheet`）。
     _write_file_blocks_sheet(wb, beats)
+    # 超长文本：同一个问题（单元格装不下）的**另一个现场** —— 逐拍的格
+    # （台词/注释/代码/舞台/条件…）也可能超过 32767（见 `CELL_TEXT_LIMIT`）。
+    _write_long_text_sheet(wb, long_rows)
     _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
 
     wb.save(output_path)
@@ -525,6 +533,85 @@ def _write_file_blocks_sheet(wb, beats) -> None:
     for bi, line in rows:
         _append_text_row(ws, [bi, line])
     ws.sheet_state = 'hidden'
+
+
+def _spill_long_cells(row, headers, beat):
+    """
+    把**超长的格值**从行里搬走：格里留"预览 + 标记"，真身交给保真表。
+
+    返回 `(改过的行, [(行号, 字段, 逐行文本), …])`。没超限的行**原样返回**。
+
+    为什么不是"报错拒绝"（用户 2026-10-16 拍板）：超长演出是**合理需求**
+    （整段旁白 / 系统提示 / 长独白），工具该把它存下来，而不是设个上限。
+    """
+    from storygraph.story.beat_model import split_long_text
+
+    out = list(row)
+    extra = []
+    lid = str(getattr(beat, 'line_id', '') or '')
+    for i, value in enumerate(out):
+        preview, lines = split_long_text(value)
+        if lines is None:
+            continue
+        out[i] = preview
+        label = headers[i] if i < len(headers) else f'#{i + 1}'
+        extra.append((lid, str(label), lines))
+    return out, extra
+
+
+def _write_long_text_sheet(wb, long_rows) -> None:
+    """
+    超长文本 → **隐藏表**（一行一格，不受 32767 限制）。
+
+    与 `_write_file_blocks_sheet` 同一套办法（同一个病：单元格装不下）。
+    整张隐藏：它是工具维护的搬运工，不是给人编辑的界面 ——
+    策划看到的是台词格里的**预览 + 一句"全文见保真表"**。
+    """
+    from storygraph.story.beat_model import LONG_TEXT_HEADERS, LONG_TEXT_SHEET
+
+    if not long_rows:
+        return
+    ws = wb.create_sheet(LONG_TEXT_SHEET)
+    ws.append(LONG_TEXT_HEADERS)
+    for cell in ws[1]:
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 6
+    ws.column_dimensions['D'].width = 120
+    for lid, label, chunks in long_rows:
+        for i, chunk in enumerate(chunks):
+            _append_text_row(ws, [lid, label, i, chunk])
+    ws.sheet_state = 'hidden'
+
+
+def _read_long_text(wb) -> dict:
+    """
+    读保真表 → `{(行号, 字段): 全文}`（`_write_long_text_sheet` 的逆）。
+
+    没有那张表（老表 / 本文本没超长）→ 空 dict，行为与从前逐字相同。
+    ⚠ 片段**按序号拼**（不依赖表里的行序：用户可能动过那张表）。
+    """
+    from storygraph.story.beat_model import (LONG_TEXT_SHEET,
+                                             join_long_text_parts)
+
+    if LONG_TEXT_SHEET not in getattr(wb, 'sheetnames', ()):
+        return {}
+    parts = {}
+    for row in wb[LONG_TEXT_SHEET].iter_rows(min_row=2, values_only=True):
+        if not row or row[0] is None:
+            continue
+        lid = str(row[0])
+        label = str(row[1]) if len(row) > 1 and row[1] is not None else ''
+        try:
+            idx = int(row[2]) if len(row) > 2 and row[2] is not None else 0
+        except (TypeError, ValueError):
+            idx = 0
+        chunk = '' if len(row) < 4 or row[3] is None else str(row[3])
+        parts.setdefault((lid, label), []).append((idx, chunk))
+    return {k: join_long_text_parts([c for _, c in sorted(v)])
+            for k, v in parts.items()}
 
 
 def _write_stage_snapshot_sheet(wb, beats):
@@ -1453,7 +1540,7 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
     try:
         if '舞台快照' in wb.sheetnames:
             del wb['舞台快照']
-        beats = _read_beats_from_ws(ws)
+        beats = _read_beats_from_ws(ws, strict_long_text=False)
         hydrate_from_dsl(beats, make_symbols(registry))
         _write_stage_snapshot_sheet(wb, beats)
     except Exception as e:
@@ -1464,10 +1551,62 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
 
 
 
-def _read_beats_from_ws(ws) -> list:
-    """从已打开的 Beats 工作表读回 Beat（refresh 内部用）。"""
+def _restore_long_text(row_dict: dict, long_text: dict, lid_label: str,
+                       conflicts: list = None) -> None:
+    """
+    格子里只有"预览 + 标记"时，从保真表取回**全文**（就地改 `row_dict`）。
+
+    ⚠ 按 `(行号, 字段标签)` 取 —— 与写侧 `_spill_long_cells` 同一把钥匙。
+    `long_text` 为空（老表 / 没超长）时**一个字节都不动**。
+
+    ⚠⚠ **预览格被改过 → 不覆盖，记进 `conflicts`**（P1-3，2026-10-17）：
+
+    写侧留下的预览是**确定**的（`全文[:200] + 标记`），所以读侧能逐字
+    验算。对不上只有两种可能，而两种都不能自动处理：
+
+      · 照旧用全文覆盖 → 用户的编辑**静默消失**（实测：把预览改成
+        "USER EDIT …⟪全文见…⟫"，导入后 'USER EDIT' 一个字都不剩）；
+      · 直接用改过的预览 → 40000 字全文在下次导出时**静默截成 200 字**。
+
+    所以这里只**拒绝还原并报告**，由 `_read_beats_from_ws` 抛
+    `LongTextPreviewEdited`，让人把那一格改回去（或删掉标记）。
+    """
+    from storygraph.story.beat_model import (LONG_TEXT_MARK,
+                                             LONG_TEXT_PREVIEW)
+
+    if not long_text:
+        return
+    lid = str(row_dict.get(lid_label) or '')
+    for label, value in list(row_dict.items()):
+        if not isinstance(value, str) or LONG_TEXT_MARK not in value:
+            continue
+        full = long_text.get((lid, label))
+        if full is None:
+            continue
+        expected = str(full)[:LONG_TEXT_PREVIEW] + LONG_TEXT_MARK
+        if value != expected:
+            if conflicts is not None:
+                conflicts.append({'line_id': lid, 'field': label,
+                                  'length': len(str(full))})
+            continue
+        row_dict[label] = full
+
+
+def _read_beats_from_ws(ws, long_text: dict = None,
+                        strict_long_text: bool = True) -> list:
+    """
+    从已打开的 Beats 工作表读回 Beat（refresh / import 内部用）。
+
+    `strict_long_text=True`（默认）：预览格被改过时抛
+    `LongTextPreviewEdited`（见 `_restore_long_text`）—— 导入必须停下来，
+    否则不是吃掉编辑就是截断全文。`refresh_candidate_sheets` 这类**派生视图**
+    的刷新传 False（它不改内容，没必要为一张预览拦住整次刷新）。
+    """
     headers = [c.value for c in ws[1]]
+    lid_label = next((str(h) for h in headers if str(h) == '行号'), '行号')
+    long_text = long_text if long_text is not None else {}
     beats = []
+    conflicts: list = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         if all(v is None or str(v).strip() == '' for v in row):
             continue
@@ -1476,9 +1615,20 @@ def _read_beats_from_ws(ws) -> list:
             if header is None:
                 continue
             row_dict[str(header)] = row[i] if i < len(row) else None
+        _restore_long_text(row_dict, long_text, lid_label, conflicts)
         beat = Beat.from_row(row_dict)
         if not beat.is_empty():
             beats.append(beat)
+    if conflicts and strict_long_text:
+        from storygraph.story.beat_model import LongTextPreviewEdited
+        raise LongTextPreviewEdited(conflicts)
+    # **排序权威 = Seq**（P0-3）：Excel 里按说话人排序 / 拖动行之后，行顺序
+    # 与 Seq 会打架；渲染只认列表顺序，不修就会静默改剧情。同 label 连续段
+    # 内按 Seq 重排（缺号行留在原位），并在第一拍上留一条 W203 的提示。
+    from storygraph.story.chapter import order_beats_by_seq
+    beats, seq_notes = order_beats_by_seq(beats)
+    if seq_notes and beats:
+        beats[0].runtime_notes.extend(seq_notes)
     assign_identity(beats)
     return beats
 

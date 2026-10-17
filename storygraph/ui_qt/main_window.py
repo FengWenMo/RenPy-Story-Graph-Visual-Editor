@@ -1513,10 +1513,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   · 「导入章节」= 剧情图那条路：图里只有用户自己导入的章节。
         # 以前把两者写成一句话（"打开项目 → 建出结构图"），40 个脚本一次性
         # 灌进图里变成 51 个块 —— 用户："这还选个毛线啊！看都要看瞎了！"
-        act('🧩 自定义动作', self.learn_custom_statement,
+        act('🧩 自定义模块 / 语句', self.learn_custom_statement,
             '教工具认识项目自己的写法（swim_suit / mycue 这类）：'
             '先扫出"工具还不认识的写法"，勾一条、填上参数与候选值，'
-            '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉',
+            '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉。'
+            '第③页管候选分栏，第④页能查看/删除/重置已经声明的东西。',
             primary=True)
         # ⚠ 放在「自定义动作」**后面**：用户早先明确要求这个入口在**最上方**
         #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），

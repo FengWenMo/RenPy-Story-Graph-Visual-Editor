@@ -219,7 +219,10 @@ def test_groups_are_read_from_the_manifest(tmp_path):
     reg = SR2.StatementRegistry.for_project(root)
     assert [g.name for g in reg.attr_groups] == ['outfit']
     assert reg.match('swim_suit') is not None, '词组与语句声明共存'
-    assert '服装' in SR2.format_registry_report(reg) or True   # 报告不强求
+    # ⚠ 2026-10-18：这里原来是 `... or True`（永真），于是"报告里看不到分栏"
+    #   一直没被测出来。现在报告必须**真的**带上分栏。
+    report = SR2.format_registry_report(reg)
+    assert '服装' in report and 'outfit' in report, report
 
 
 def test_no_manifest_means_no_groups(tmp_path):

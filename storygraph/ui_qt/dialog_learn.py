@@ -51,10 +51,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPlainTextEdit,
+                               QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy,
                                QTabWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
@@ -72,6 +75,7 @@ from storygraph.ui_qt.column_editor import ColumnList
 PAGE_FIND = 0
 PAGE_DECLARE = 1
 PAGE_COLUMNS = 2
+PAGE_MANAGE = 3
 
 
 class CustomStatementDialog(QDialog):
@@ -81,13 +85,15 @@ class CustomStatementDialog(QDialog):
                  discovered=None, registry_report: str = '',
                  declared_groups=None, on_verify=None):
         super().__init__(parent)
-        self.setWindowTitle('自定义动作 —— 教工具认识剧本里的新写法')
+        self.setWindowTitle('自定义模块 / 语句 —— 教工具认识剧本里的新写法')
         theme.apply_to(self)
         self._root_path = project_root
         self._declares = list(declares or [])
         self._discovered = list(discovered or [])
         self._registry_report = registry_report or ''
         self.on_verify = on_verify
+        #: 用户在弹窗里删/改过清单没有（取消时调用方据此刷新界面）
+        self.changed = False
 
         # ⭐ 内容会长（格子多少、候选多少都随人填），所以窗口必须可缩放 + 可最大化；
         #   Qt 的 QDialog **默认没有最大化按钮**，必须显式给这个标志。
@@ -105,7 +111,8 @@ class CustomStatementDialog(QDialog):
             '项目里自己的写法（swim_suit / mycue 这类）默认逐字保留，'
             '但工具不知道它是什么。在这里教它一条，它就变成「认识的语句」：'
             '参数会成为表格里的列、候选值会成为下拉。'
-            '声明落在项目根的 storygraph.rules.json（可评审、可 diff）。')
+            '声明落在项目根的 storygraph.rules.json（可评审、可 diff）。'
+            '已经声明过的东西在「④ 已有声明」里能看、能删、能重置。')
         top.setWordWrap(True)
         root.addWidget(top)
 
@@ -118,6 +125,7 @@ class CustomStatementDialog(QDialog):
         self.tabs.addTab(self._build_find_page(), '① 认识新动作')
         self.tabs.addTab(self._build_declare_page(), '② 填一条声明')
         self.tabs.addTab(self._build_columns_page(), '③ 候选分栏')
+        self.tabs.addTab(self._build_manage_page(), '④ 已有声明（查看 / 删除）')
         # 已有声明（`attr_groups`）→ 填进分栏页，让人看到"现在是怎么分的"
         self.columns_editor.load_columns(declared_groups or [])
 
@@ -162,6 +170,7 @@ class CustomStatementDialog(QDialog):
         self._sync_columns_to_fields()
         self._on_mode_changed()
         self._refresh_preview()
+        self._refresh_manage()
 
     # ==================================================================
     #  页 1：发现
@@ -394,6 +403,7 @@ class CustomStatementDialog(QDialog):
             '一栏三件事：分栏标识（写进清单的键）/ 这一栏显示成（编剧看到的字）/ '
             '这一栏有哪些词（留空 = 兜底栏，没归到别的栏的词都进它）。'))
         self.columns_editor = ColumnList(on_change=self._sync_columns_to_fields)
+        self.columns_editor.set_known_keys(self._project_group_keys())
         lay.addWidget(self.columns_editor)
         tools = FlowRow(spacing=T.SPACE['xs'])
         add = QPushButton('＋ 加一栏')
@@ -402,10 +412,18 @@ class CustomStatementDialog(QDialog):
         rm.clicked.connect(self._remove_column)
         tools.add(add)
         tools.add(rm)
-        self.write_columns = QCheckBox('把分栏一起写进清单')
+        self.write_columns = QCheckBox('把分栏一起写进清单（空 = 不改动已有分栏）')
         self.write_columns.setChecked(False)
         self.write_columns.toggled.connect(self._refresh_preview)
         tools.add(self.write_columns)
+        # 只改分栏、不教新语句的入口（没有它，用户想单独调分栏只能先编一条
+        # 假声明 —— 用户 2026-10-18 报的"建立之后没法管理"）。
+        self._save_columns_btn = QPushButton('💾 只保存候选分栏')
+        self._save_columns_btn.setToolTip(
+            '把这一页的栏整段替换进清单：删掉的栏会真的消失（先备份）。'
+            '不需要先填一条语句声明。')
+        self._save_columns_btn.clicked.connect(self._save_columns_now)
+        tools.add(self._save_columns_btn)
         lay.addWidget(tools)
         lay.addStretch(1)
         scroll.setWidget(inner)
@@ -417,6 +435,295 @@ class CustomStatementDialog(QDialog):
         self.write_groups = self.write_columns
         self.groups_box = self.tabs          # 旧版这里是"可勾选的折叠块"
         return page
+
+    # ==================================================================
+    #  页 4：已有声明（查看 / 删除 / 重置）
+    # ==================================================================
+
+    def _project_group_keys(self) -> list:
+        """项目里真实存在的立绘组名（分栏标识不该让人盲填）。"""
+        try:
+            from storygraph.authoring.learn_statement import project_group_keys
+            return project_group_keys(self._root_path)
+        except Exception as e:                  # noqa: BLE001 - 读不到就空
+            swallow('ui_qt.dialog_learn.project_group_keys', e)
+            return []
+
+    def _build_manage_page(self) -> QWidget:
+        """
+        **项目清单里现在到底写着什么** —— 以及删/清/重置的入口。
+
+        用户 2026-10-18：
+        "你给了个 rules.json 建立，却又不给删除重置，并且用户根本看不到
+         自定义模块究竟定义了个什么。"
+        """
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
+                               T.SPACE['sm'], T.SPACE['sm'])
+        lay.setSpacing(T.SPACE['sm'])
+        head = QLabel('④ 项目清单里现在写着什么')
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        lay.addWidget(_hint(
+            '这里显示的是 `storygraph.rules.json` 的实际内容（语句声明 + '
+            '候选分栏），以及会自动保留的其它键。删除/清空都会先把整份清单'
+            '备份到 `storygraph.rules.backup/`，可以回退。'))
+        self._manage_path = QLabel('')
+        self._manage_path.setWordWrap(True)
+        self._manage_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(self._manage_path)
+        self.manage_view = QPlainTextEdit()
+        self.manage_view.setReadOnly(True)
+        self.manage_view.setMinimumHeight(150)
+        lay.addWidget(self.manage_view, 1)
+
+        lay.addWidget(QLabel('要删除的语句（选中一条，再点删除）'))
+        self.manage_list = QListWidget()
+        self.manage_list.setMaximumHeight(110)
+        lay.addWidget(self.manage_list)
+
+        tools = FlowRow(spacing=T.SPACE['xs'])
+        self._manage_del = QPushButton('🗑 删除选中的语句')
+        self._manage_del.clicked.connect(self._delete_selected_statement)
+        tools.add(self._manage_del)
+        self._manage_clear_groups = QPushButton('🧹 清空候选分栏')
+        self._manage_clear_groups.clicked.connect(self._clear_groups)
+        tools.add(self._manage_clear_groups)
+        self._manage_reset = QPushButton('♻ 重置所有自定义声明…')
+        self._manage_reset.clicked.connect(self._reset_all)
+        tools.add(self._manage_reset)
+        lay.addWidget(tools)
+        self._manage_status = QLabel('')
+        self._manage_status.setWordWrap(True)
+        self._manage_status.setProperty('role', 'caption')
+        lay.addWidget(self._manage_status)
+        return page
+
+    # ---- 清单视图 ----
+    def _registry_now(self):
+        from storygraph.story import statement_registry as SR
+        return SR, SR.StatementRegistry.for_project(self._root_path)
+
+    def _registry_report_now(self) -> str:
+        """把"现在清单里有什么"拼成人话（页 1 的只读框 + 页 4 共用）。"""
+        if not self._root_path:
+            return '还没有打开项目。'
+        try:
+            SR, reg = self._registry_now()
+            text = SR.format_registry_report(reg)
+            groups = list(reg.attr_groups or ())
+            if groups:
+                text += '\n\n候选分栏（attr_groups）：\n'
+                for g in groups:
+                    words = (f'{len(g.options)} 个词' if g.options else '兜底栏')
+                    text += f'  · {g.title()}（{g.name}）：{words}\n'
+            else:
+                text += '\n\n候选分栏：没有声明（立绘属性候选是平铺的）。'
+            return text.rstrip()
+        except Exception as e:                      # noqa: BLE001 - 读不出来就说清楚
+            swallow('ui_qt.dialog_learn.registry_report_now', e)
+            return f'读不到清单：{type(e).__name__}: {e}'
+
+    def _refresh_manage(self):
+        """重画"已有声明"页（只读列表 + 三个危险按钮的可用性）。"""
+        if not hasattr(self, 'manage_view'):
+            return
+        if not self._root_path:
+            self.manage_view.setPlainText('还没有打开项目。')
+            self._manage_path.setText('')
+            for b in (self._manage_del, self._manage_clear_groups,
+                      self._manage_reset):
+                b.setEnabled(False)
+            return
+        from storygraph.story import statement_registry as SR
+        from storygraph.story.project_conventions import load_manifest
+        try:
+            reg = SR.StatementRegistry.for_project(self._root_path)
+            data, path, warns = load_manifest(self._root_path)
+        except Exception as e:                      # noqa: BLE001
+            swallow('ui_qt.dialog_learn.refresh_manage', e)
+            self.manage_view.setPlainText(f'读不到清单：{type(e).__name__}: {e}')
+            return
+        manifest_path = Path(path) if path else (
+            Path(self._root_path) / SR.MANIFEST_NAMES[0])
+        declared = list(reg.declared or ())
+        host = list(reg.host or ())
+        groups = list(reg.attr_groups or ())
+        lines = [f'清单文件：{manifest_path}',
+                 '状态：' + ('存在' if manifest_path.is_file()
+                             else '不存在（项目没有自定义声明）'), '']
+        lines.append(f'语句声明（{len(declared)} 条）')
+        if declared:
+            for s in declared:
+                cols = len(getattr(s, 'columns', []) or [])
+                label = f'（{s.label}）' if getattr(s, 'label', '') else ''
+                lines.append(f'  · {s.name}{label} —— {cols} 个参数')
+        else:
+            lines.append('  （没有）')
+        if host:
+            lines.append('')
+            lines.append(f'脚本里的 CDS（{len(host)} 条，清单里删不掉）：')
+            for s in host:
+                lines.append(f'  · {s.name}（{s.origin or "脚本"}）')
+        lines.append('')
+        lines.append(f'候选分栏（{len(groups)} 栏）')
+        if groups:
+            for g in groups:
+                words = f'{len(g.options)} 个词' if g.options else '兜底栏'
+                lines.append(f'  · {g.title()}（标识 {g.name}）—— {words}')
+        else:
+            lines.append('  （没有）')
+        others = ([k for k in data if k not in (SR.MANIFEST_KEY,
+                                               SR.ATTR_GROUPS_KEY)]
+                  if isinstance(data, dict) else [])
+        if others:
+            lines.append('')
+            lines.append('其它键（原样保留，不会被删）：' + '、'.join(others))
+        if warns:
+            lines.append('')
+            lines.append('清单告警：' + '；'.join(str(w) for w in warns))
+        self.manage_view.setPlainText('\n'.join(lines))
+        self._manage_path.setText(f'清单：{manifest_path}')
+
+        self.manage_list.clear()
+        for s in declared:
+            cols = len(getattr(s, 'columns', []) or [])
+            item = QListWidgetItem(
+                f'{s.name}' + (f'（{s.label}）' if getattr(s, 'label', '') else '')
+                + f' —— {cols} 个参数')
+            item.setData(Qt.UserRole, s.name)
+            self.manage_list.addItem(item)
+        self._manage_del.setEnabled(bool(declared))
+        self._manage_clear_groups.setEnabled(bool(groups))
+        self._manage_reset.setEnabled(bool(declared or groups))
+        # 页 1 的只读框同步（用户不必来回切页才能看见）
+        report = self._registry_report_now()
+        self._registry_report = report
+        if hasattr(self, 'declared'):
+            self.declared.setPlainText(report)
+
+    def _after_manifest_change(self, reload_columns: bool = False):
+        self.changed = True
+        if reload_columns:
+            try:
+                _SR, reg = self._registry_now()
+                self.columns_editor.clear()
+                self.columns_editor.load_columns(reg.attr_groups)
+                self._sync_columns_to_fields()
+            except Exception as e:                  # noqa: BLE001
+                swallow('ui_qt.dialog_learn.reload_columns', e)
+        self._refresh_preview()
+        self._refresh_manage()
+
+    # ---- 删除 / 清空 / 重置 ----
+    def _delete_selected_statement(self):
+        item = self.manage_list.currentItem() if hasattr(self, 'manage_list') else None
+        if item is None:
+            self._manage_status.setText('先在列表里选中一条要删的语句。')
+            return
+        name = str(item.data(Qt.UserRole) or '')
+        if QMessageBox.question(
+                self, '从清单删除一条声明',
+                f'从 storygraph.rules.json 删掉「{name}」？\n\n'
+                f'会先把整份清单备份到 storygraph.rules.backup/；'
+                f'其它声明与其它键原样保留。'
+        ) != QMessageBox.Yes:
+            return
+        from storygraph.story import statement_registry as SR
+        res = SR.remove_statement(self._root_path, name)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '没删成', res.get('reason') or '未知错误')
+            self._manage_status.setText('✕ ' + (res.get('reason') or '没删成'))
+            return
+        extra = f'（清单空了，文件已删）' if res.get('deleted_file') else ''
+        self._manage_status.setText(
+            f'🗑 已从清单删除「{name}」{extra}。备份：{res.get("backup") or "（没有改动）"}')
+        self._after_manifest_change()
+
+    def _clear_groups(self):
+        from storygraph.story import statement_registry as SR
+        try:
+            _SR, reg = self._registry_now()
+            count = len(reg.attr_groups or ())
+        except Exception as e:                      # noqa: BLE001
+            swallow('ui_qt.dialog_learn.clear_groups.count', e)
+            count = 0
+        if QMessageBox.question(
+                self, '清空候选分栏',
+                f'把 {count} 栏候选分栏从清单里全部删掉？\n\n'
+                f'语句声明与其它键原样保留；会先备份整份清单。'
+        ) != QMessageBox.Yes:
+            return
+        res = SR.clear_attr_groups(self._root_path)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '没清成', res.get('reason') or '未知错误')
+            self._manage_status.setText('✕ ' + (res.get('reason') or '没清成'))
+            return
+        self._manage_status.setText(
+            f'🧹 已清空 {res.get("count", 0)} 栏候选分栏。'
+            f'备份：{res.get("backup") or "（没有改动）"}')
+        self._after_manifest_change(reload_columns=True)
+
+    def _reset_all(self):
+        from storygraph.story import statement_registry as SR
+        try:
+            _SR, reg = self._registry_now()
+            n_st = len(reg.declared or ())
+            n_gr = len(reg.attr_groups or ())
+        except Exception as e:                      # noqa: BLE001
+            swallow('ui_qt.dialog_learn.reset_all.count', e)
+            n_st = n_gr = 0
+        if QMessageBox.question(
+                self, '重置自定义声明',
+                f'清空清单里的 {n_st} 条语句声明与 {n_gr} 栏候选分栏？\n\n'
+                f'`host_hooks` 或你自己加的其它键会原样保留；'
+                f'会先备份整份清单。'
+        ) != QMessageBox.Yes:
+            return
+        res = SR.reset_declarations(self._root_path)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '没重置成', res.get('reason') or '未知错误')
+            self._manage_status.setText('✕ ' + (res.get('reason') or '没重置成'))
+            return
+        extra = '（清单空了，文件已删）' if res.get('deleted_file') else ''
+        self._manage_status.setText(
+            f'♻ 已清空 {res.get("statements", 0)} 条声明与 '
+            f'{res.get("groups", 0)} 栏分栏{extra}。'
+            f'备份：{res.get("backup") or "（没有改动）"}')
+        self._after_manifest_change(reload_columns=True)
+
+    def _save_columns_now(self):
+        """只保存候选分栏（不要求先填一条语句声明）。"""
+        if not self._root_path:
+            QMessageBox.information(self, '提示', '先打开项目（清单要写进项目根）。')
+            return
+        rows = self.built_groups()
+        bad = [r for r in rows if not r.get('ok')]
+        if bad:
+            QMessageBox.warning(
+                self, '分栏有问题',
+                '\n'.join(w for r in bad for w in (r.get('warnings') or ['分栏名不合法'])))
+            return
+        clean = [{'name': r['name'], 'label': r.get('label', ''),
+                  'options': list(r.get('options') or ()),
+                  'split': bool(r.get('split'))} for r in rows]
+        if QMessageBox.question(
+                self, '保存候选分栏',
+                f'用当前 {len(clean)} 栏替换清单里的候选分栏？\n\n'
+                f'删掉的栏会从 rules.json 真正移除（先备份）。'
+        ) != QMessageBox.Yes:
+            return
+        from storygraph.story import statement_registry as SR
+        res = SR.declare_attr_groups(self._root_path, clean, replace=True,
+                                     clear=True)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '没存成', res.get('reason') or '未知错误')
+            self._manage_status.setText('✕ ' + (res.get('reason') or '没存成'))
+            return
+        self._manage_status.setText(
+            f'💾 已保存 {res.get("count", 0)} 栏候选分栏（整段替换）。')
+        self._after_manifest_change(reload_columns=True)
 
     # ==================================================================
     #  行为
@@ -556,16 +863,43 @@ class CustomStatementDialog(QDialog):
     def built_groups(self) -> list:
         """分栏表 → 后端参数（`learn_statement.build_group`）。"""
         from storygraph.authoring.learn_statement import build_group
-        return [build_group(row['key'], row['shown'], row['values'])
+        return [build_group(row['key'], row['shown'], row['values'],
+                            split=bool(row.get('split')))
                 for row in self.columns_editor.rows()
                 if str(row.get('key') or '').strip()]
 
+    def group_problems(self) -> list:
+        """当前分栏页里**不合法**的项（主 OK 与"只保存分栏"都要先看它）。"""
+        out = []
+        for r in self.built_groups():
+            if not r.get('ok'):
+                out.extend(r.get('warnings') or ['分栏名不合法'])
+        return out
+
     def groups_to_write(self) -> list:
-        """该写进清单的分栏（没勾"一起写"就返回空）。"""
+        """该写进清单的分栏（没勾"一起写"就返回空；**非法项不在这里静默吞掉**）。"""
         wc = getattr(self, 'write_columns', None)
         if wc is None or not wc.isChecked():
             return []
         return [g for g in self.built_groups() if g.get('ok')]
+
+    def accept(self):
+        """
+        ⚠ 主 OK 的守门（2026-10-18）：
+
+          · 勾了"把分栏一起写进清单"但有非法栏 → **不许关窗**，逐条说清；
+          · 分栏为空 → 照常关窗，但调用方**不会**写空列表（不会清空已有分栏）。
+        """
+        if getattr(self, 'write_columns', None) is not None \
+                and self.write_columns.isChecked():
+            problems = self.group_problems()
+            if problems:
+                QMessageBox.warning(
+                    self, '分栏有问题，先改一下',
+                    '下面这些栏不会被写进清单（改了再按确定）：\n\n'
+                    + '\n'.join(f'· {p}' for p in problems))
+                return
+        super().accept()
 
     # ---- 表单 → 声明 ----
     def built(self) -> dict:

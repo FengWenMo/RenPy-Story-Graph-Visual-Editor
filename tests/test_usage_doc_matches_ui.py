@@ -110,9 +110,9 @@ def test_every_documented_button_really_exists_in_the_ui():
 
 
 def test_the_doc_covers_the_three_main_entries():
-    """三件事都要在说明里：AI 助手 / 自定义动作 / 纯文字导入。"""
+    """三件事都要在说明里：AI 助手 / 自定义模块 / 纯文字导入。"""
     text = DOC.read_text(encoding='utf-8')
-    for topic in ('🤖 AI 助手', '🧩 自定义动作', '导入章节'):
+    for topic in ('🤖 AI 助手', '🧩 自定义模块 / 语句', '导入章节'):
         assert topic in text, f'说明里没写「{topic}」'
 
 

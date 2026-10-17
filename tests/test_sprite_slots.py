@@ -177,6 +177,129 @@ class TestSlotChips:
         assert 'base_swimsuit' in card.item['image'], card.item['image']
         assert card.item['expression'] == card.item['image'].split(' ', 1)[1]
 
+    def test_switching_to_the_same_group_count_rewires_the_chips(self, qapp):
+        """
+        ⚠⚠ **P0-2（2026-10-18 审计）**：从 `outfit,expressions` 换到
+        `expressions,outfit` —— 组数一样，但按钮闭包还绑着旧组名：
+        点第一个「表情」实际改的是服装（静默改错数据）。
+        """
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+
+        def _facts_for(tag, groups):
+            attrs = {tag: [{'group': g, 'attribute': a}
+                           for g, vals in groups for a in vals]}
+            cands = {tag: [a for _g, vals in groups for a in vals]}
+            return EF.build_facts({
+                'attributes': [(EF.SRC_PROBE, attrs)],
+                'candidates': [(EF.SRC_PROBE, cands)],
+            }, collection={'parse_clean': True, 'probe_complete': True})
+
+        alpha = _facts_for('alpha', [('outfit', ['uniform', 'swimsuit']),
+                                     ('expressions', ['happy', 'sad'])])
+        beta = _facts_for('beta', [('expressions', ['happy', 'sad']),
+                                   ('outfit', ['uniform', 'swimsuit'])])
+        state = {'facts': alpha}
+
+        def _for_tag(_tag):
+            return []
+        _for_tag.attr_groups = []
+        _for_tag.engine_facts = alpha
+
+        item = {'image': 'alpha uniform happy', 'expression': 'uniform happy',
+                'position': '', 'at': '', 'speaking': False,
+                'order_index': 0, 'extra_rows': []}
+        card = SpriteCardWidget(item, symbols=_Sym(),
+                                choice_groups_for=_for_tag)
+        card._loader = None
+        card.refresh()
+        assert [s[0] for s in card._slot_signature] == \
+            ['outfit', 'expressions'], card._slot_signature
+
+        # 换图：组数没变，但顺序/标签变了
+        card.item['image'] = 'beta happy uniform'
+        card.item['expression'] = 'happy uniform'
+        _for_tag.engine_facts = beta
+        card.refresh()
+        assert [s[0] for s in card._slot_signature] == \
+            ['expressions', 'outfit'], card._slot_signature
+        texts = [b.text() for b in card._slot_btns]
+        assert texts[0].startswith('属性 1：'), texts
+
+        # 点第一个 chip（表情）—— 只许改表情，服装必须留着
+        card._slot_btns[0].click()
+        assert 'uniform' in card.item['image'], card.item['image']
+        assert 'happy' not in card.item['image'], card.item['image']
+        assert 'sad' in card.item['image'], card.item['image']
+
+    def test_unlabeled_engine_group_hides_the_internal_name(self, qapp):
+        """没有项目改名时，标题不许直接显示 `outfit` / `expressions`。"""
+        card = _card('ye base_handdown happy')
+        texts = [b.text() for b in card._slot_btns]
+        assert texts, '没有建出格子'
+        assert not any('outfit' in t or 'expressions' in t for t in texts), texts
+        assert all(t.startswith('属性 ') for t in texts), texts
+        # 内部组名仍然能在 tooltip 里查到（排错要用，不是给人当标题）
+        assert 'outfit' in ' '.join(b.toolTip() for b in card._slot_btns)
+
+    def test_added_card_keeps_the_group_provider(self, qapp):
+        """「＋ 添加立绘」造的新卡**也要**有分组注入（否则只有「表情：—」）。"""
+        from storygraph.ui_qt.sprite_grid import SpriteGridWidget
+
+        grid = SpriteGridWidget(
+            symbols=_Sym(),
+            on_pick_image=lambda _spec: 'ye base_handdown happy')
+        provider = _provider('ye')
+        grid.set_choice_groups_provider(provider)
+        grid._on_add()
+        assert grid._cards, '没加进卡'
+        card = grid._cards[-1]
+        assert card._choice_groups_for is provider, '新卡丢了分组注入'
+        assert card._slot_rows(), '新卡算不出分组行'
+        assert len(card._slot_btns) == 2, [b.text() for b in card._slot_btns]
+
+    def test_tag_only_card_still_shows_the_outfit_chip(self, qapp):
+        """
+        只有 `show ye`（这一拍没写属性）时也要有服装格 —— 用户 2026-10-18：
+        "卡片编辑器内服装不显示"。空着的那一格点一下才固定到这一拍。
+        """
+        card = _card('ye')
+        texts = [b.text() for b in card._slot_btns]
+        assert len(texts) == 2, texts
+        assert texts[1].endswith('—'), texts
+        card._set_slot_value('outfit', 'base_handdown')
+        assert card.item['image'] == 'ye base_handdown', card.item['image']
+
+    def test_layered_fallback_chip_uses_the_declared_label(self, qapp, tmp_path):
+        """
+        **用户 2026-10-18 的原始复现**：项目把 `outfit` 的编剧名定义成「服装」，
+        卡片上却还显示 `outfit` —— 改名层在"没有引擎事实、退回 layeredimage"
+        这条路上被漏掉了。
+        """
+        from types import SimpleNamespace
+
+        from storygraph.authoring.spec_groups import AttrGroup
+        from storygraph.ui_qt.sprite_grid import SpriteCardWidget
+
+        img = SimpleNamespace(groups=[
+            SimpleNamespace(name='outfit', attrs=['swim_suit', 'uniform'])])
+        model = SimpleNamespace(images={'lan': img})
+        item = {'image': 'lan', 'expression': '', 'position': '', 'at': '',
+                'speaking': False, 'order_index': 0, 'extra_rows': []}
+
+        def _for_tag(_tag):
+            return []
+        _for_tag.attr_groups = [AttrGroup(name='outfit', label='服装')]
+        _for_tag.engine_facts = {}
+        _for_tag.layer_model = model
+
+        card = SpriteCardWidget(item, symbols=_Sym(), choice_groups_for=_for_tag)
+        card._loader = None
+        card.refresh()
+        texts = [b.text() for b in card._slot_btns]
+        assert len(texts) == 1, texts
+        assert texts[0].startswith('服装：'), texts
+        assert 'outfit' not in texts[0], ('卡片又显示了内部组名', texts)
+
     def test_changing_the_expression_keeps_the_outfit(self, qapp):
         card = _card('ye base_handdown gratified')
         card._set_slot_value('expressions', 'ahah')

@@ -31,6 +31,7 @@ from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.paths import (
     _guess_project_root,
     inside_game_dir,
+    write_text_atomic,
 )
 
 
@@ -1135,7 +1136,7 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
             out_path.parent.mkdir(parents=True, exist_ok=True)
             if review_on_block:
                 review = out_path.with_suffix('.blocked.rpy')
-                review.write_text(text, encoding='utf-8')
+                write_text_atomic(review, text)
         except OSError:
             review = None
         _publish_blocked(out_path, blocking, review)
@@ -1169,13 +1170,16 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if blocking and review_on_block:
             review = out_path.with_suffix('.blocked.rpy')
-            review.write_text(text, encoding='utf-8')
+            write_text_atomic(review, text)
             _publish_blocked(out_path, blocking, review)
             return GeneratedArtifact(out_path, review, False, issues)
         if blocking:
             _publish_blocked(out_path, blocking, None)
             return GeneratedArtifact(out_path, None, False, issues)
-        out_path.write_text(text, encoding='utf-8')
+        # **原子写 + 保留换行 + 写前备份**（P1-2）：目标就是游戏脚本，
+        # `write_text` 的"先截断再写"在崩溃/占用时会留下半截文件，
+        # 而 Windows 上它还会把 LF 全翻成 CRLF（违背"逐字节保真"）。
+        write_text_atomic(out_path, text, backup=True)
         return GeneratedArtifact(out_path, None, True, issues)
     except OSError:
         # 写不出去（权限/占用）不该把门禁结论一起吞掉
@@ -1238,5 +1242,5 @@ def write_beats_to_rpy(beats: list, output_path,
         raise GenerationBlocked(output_path, blocking)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(text, encoding='utf-8')
+    write_text_atomic(output_path, text, backup=True)
     return str(output_path)

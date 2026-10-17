@@ -33,23 +33,31 @@ from pathlib import Path
 #: 已发布定义的默认位置（进版本库；CI 与 `--check` 都看它）
 DEFAULT_PATH = Path('docs') / 'schema.json'
 
-#: 定义格式版本：**改结构时才动**（改列不改它）
-SCHEMA_VERSION = 1
+#: 定义格式版本：**改结构时才动**（改列不改它）。
+#: v2（2026-10-17）：列上多了 snapshot / fingerprint / collab / single_line
+#: 四个旗标 —— 它们决定"这一列进不进撤销快照 / 内容指纹 / 协作 payload"，
+#: 是调研里"字段契约散在五处"那一条的收敛结果（见 `story.beat_fields`）。
+SCHEMA_VERSION = 2
 
 
 def beat_schema() -> dict:
     """现有常量 → 一份可 diff 的拍表定义（纯汇总，不改任何行为）。"""
     from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
+    from storygraph.story.beat_fields import COLUMN_SPECS
     from storygraph.story.beat_model import (
-        BEAT_FIELDS, BEAT_HEADERS, HIDDEN_BEAT_COLUMNS, _HEADER_ALIASES)
+        BEAT_HEADERS, HIDDEN_BEAT_COLUMNS, _HEADER_ALIASES)
 
     hidden = set(HIDDEN_BEAT_COLUMNS)
     columns = []
-    for name in BEAT_FIELDS:
+    for spec in COLUMN_SPECS:
         columns.append({
-            'name': name,
-            'header': BEAT_HEADERS.get(name, name),
-            'hidden': name in hidden,
+            'name': spec.name,
+            'header': BEAT_HEADERS.get(spec.name, spec.name),
+            'hidden': spec.name in hidden,
+            'snapshot': spec.snapshot,
+            'fingerprint': spec.fingerprint,
+            'collab': spec.collab,
+            'single_line': spec.single_line,
         })
     return {
         'version': SCHEMA_VERSION,

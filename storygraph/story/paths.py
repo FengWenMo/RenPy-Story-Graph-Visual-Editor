@@ -9,7 +9,70 @@ storygraph.story.paths
 """
 
 from __future__ import annotations
+import os
 from pathlib import Path
+
+from storygraph.core.safeguard import swallow
+
+
+def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
+                      backup: bool = False) -> Path:
+    """
+    把文本**逐字节**写进 `path`：保留换行、原子替换、可选备份。
+
+    为什么不能用 `Path.write_text(text, encoding='utf-8')`（P1-2，2026-10-16
+    调研实锤）：
+
+      · **换行会被改**：Windows 上 `newline=None` 会把每个 `\\n` 翻成 `\\r\\n`。
+        本项目反复承诺"打开 → 导出逐字节不变"，而真实写盘会把 LF 文件
+        整体改成 CRLF —— 审计不出来，diff 满天飞；
+      · **不是原子写**：`write_text` 先截断再写。进程崩溃、磁盘满、权限中断
+        （杀毒/同步盘占着）都会留下**半截文件**，而目标路径就是游戏脚本。
+
+    做法：
+      1. 同目录临时文件（`.<名字>.tmp-<pid>`，保证 `os.replace` 是同一个卷）；
+      2. `open(..., newline='')` 写，**不做任何换行翻译**；
+      3. `flush` + `os.fsync`，确保内容真的落盘；
+      4. 目标已存在且 `backup=True` → 先写一份 `<名字>.bak`；
+      5. `os.replace` 原子替换（Windows/POSIX 都保证"要么旧、要么新"）。
+
+    失败时删掉临时文件再把异常抛回去；绝不留下半截目标。
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f'.{target.name}.tmp-{os.getpid()}')
+    try:
+        with open(tmp, 'w', encoding=encoding, newline='') as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if backup and target.exists():
+            bak = target.with_name(target.name + '.bak')
+            # 备份用二进制复制：**逐字节**保留原文（换行、BOM、编码都不动）
+            btmp = bak.with_name(f'.{bak.name}.tmp-{os.getpid()}')
+            try:
+                with open(target, 'rb') as src, open(btmp, 'wb') as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                os.replace(btmp, bak)
+            finally:
+                try:
+                    btmp.unlink()
+                except OSError as e:               # noqa: BLE001 - 清理临时文件
+                    swallow('story.paths.write_text_atomic.cleanup_bak', e)
+        os.replace(tmp, target)
+    except OSError as e:                            # noqa: BLE001 - 清理后原样抛出
+        try:
+            tmp.unlink()
+        except OSError as e2:                       # noqa: BLE001 - 清理临时文件
+            swallow('story.paths.write_text_atomic.cleanup_tmp', e2)
+        raise
+    return target
 
 
 

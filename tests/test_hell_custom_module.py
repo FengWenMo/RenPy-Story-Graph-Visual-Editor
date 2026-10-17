@@ -1105,10 +1105,101 @@ class TestSuggestShapeNames:
             [(it['index'], it['kind'], it['name'], it['note'])
              for it in shape['items']])
         assert shape['items'][0]['choices_from'] == '角色表', shape['items'][0]
-        assert shape['items'][0]['choices'] == ['凌跃捷', '林月见'], (
-            '角色候选给的不是编剧认得的中文显示名', shape['items'][0]['choices'])
+        # ⚠ 2026-10-18 **判据改了**：候选必须是**脚本里要写的变量名/tag**
+        #   （`lyj`），不是只给编剧看的显示名（「凌跃捷」）——
+        #   给显示名会让 `show lan …` 在 pattern 的封闭枚举里判"切不上"，
+        #   而编剧根本不知道脚本里该写哪个词。显示名降级为 `labels`。
+        assert shape['items'][0]['choices'] == ['lyj', 'lxj'], (
+            '角色候选不是脚本真源（变量名），编剧照着填会切不上',
+            shape['items'][0]['choices'])
+        assert shape['items'][0]['labels'] == {
+            'lyj': '凌跃捷', 'lxj': '林月见'}, shape['items'][0]['labels']
         assert shape['items'][1]['choices'] == ['泳装', '校服'], shape['items'][1]
         assert shape['items'][2]['choices'] == ['happy', 'shy'], shape['items'][2]
+
+    def test_role_choices_are_the_words_the_script_must_write(self, tmp_path):
+        """
+        **用户 2026-10-18 的原始复现**：角色表有显示名「蓝」，但脚本里要写
+        `lan`；候选给显示名时，`pattern` 的封闭枚举会把 `show lan …` 判成
+        "切不上"。
+        """
+        from storygraph.authoring import pattern as P
+        from storygraph.authoring.learn_statement import suggest_shape
+
+        root = write_custom_project(tmp_path / 'proj', [], game_files={
+            'ch01.rpy': (
+                'label start:\n'
+                '    show lan swim_suit happy\n'
+                '    show lan swim_suit happy\n'
+                '    show ling uniform calm\n'
+                '    return\n'),
+        })
+        write_character_table(root, {
+            'lan': {'ID': 'lan', 'Name': '蓝'},
+            'ling': {'ID': 'ling', 'Name': '灵'},
+        })
+        shape = suggest_shape(str(root), 'show')
+        role = next(it for it in shape['items'] if it.get('note') == '角色表')
+        assert role['choices'][:2] == ['lan', 'ling'], role['choices']
+        assert role['labels']['lan'] == '蓝', role['labels']
+
+        # 界面会把这一格做成"只能从下面这些里选"（limit=True）——
+        # 用变量名当候选才切得动剧本里的真行。
+        pattern = [{'kind': 'keyword', 'text': 'show'},
+                   {'kind': 'choice', 'column': '角色', 'group': 'roles',
+                    'options': role['choices'], 'limit': True}]
+        groups = {'roles': {'label': '角色', 'options': role['choices']}}
+        got = P.match_line(pattern, 'show lan', groups=groups)
+        assert got['ok'], got
+
+    def test_show_uses_imagetag_while_custom_statements_use_variables(self,
+                                                                     tmp_path):
+        """
+        **三套名字**（2026-10-18）：变量名 `lan`、显示名「蓝」、立绘 tag
+        `lan_tag`。`show` 要写 tag；自定义动作（`swim_suit lyj …`）写变量名。
+        之前两者都只给变量名，于是真正能跑的 `show lan_tag` 被判"切不上"。
+        """
+        from storygraph.authoring import pattern as P
+        from storygraph.authoring.learn_statement import (choice_sources,
+                                                          suggest_shape)
+
+        root = write_custom_project(tmp_path / 'proj', [], game_files={
+            'ch01.rpy': (
+                'label start:\n'
+                '    show lan_tag swim_suit happy\n'
+                '    show lan_tag swim_suit happy\n'
+                '    show ling_tag uniform calm\n'
+                '    swim_suit lan "泳装"\n'
+                '    swim_suit lan "泳装"\n'
+                '    return\n'),
+        })
+        write_character_table(root, {
+            'lan': {'ID': 'lan', 'Name': '蓝', 'ImageTag': 'lan_tag'},
+            'ling': {'ID': 'ling', 'Name': '灵', 'ImageTag': 'ling_tag'},
+        })
+        shape = suggest_shape(str(root), 'show')
+        role = next(it for it in shape['items'] if it.get('note') == '角色表')
+        assert role['choices'][:2] == ['lan_tag', 'ling_tag'], role['choices']
+        assert role['labels']['lan_tag'] == '蓝', role['labels']
+
+        show_src = {s['key']: s for s in choice_sources(str(root), 'show')}
+        assert show_src['roles']['values'][:2] == ['lan_tag', 'ling_tag'], \
+            show_src['roles']
+        custom_src = {s['key']: s
+                      for s in choice_sources(str(root), 'swim_suit')}
+        assert custom_src['roles']['values'][:2] == ['lan', 'ling'], \
+            custom_src['roles']
+
+        # 界面把这一格做成"只能从下面这些里选"：tag 通过、变量名被拒。
+        pattern = [{'kind': 'keyword', 'text': 'show'},
+                   {'kind': 'choice', 'column': '角色', 'group': 'roles',
+                    'options': role['choices'], 'limit': True}]
+        groups = {'roles': {'label': '角色', 'options': role['choices']}}
+        assert P.match_line(pattern, 'show lan_tag',
+                            groups=groups)['ok'], '有效的 show tag 被判切不上'
+        assert not P.match_line(pattern, 'show lan',
+                                groups=groups)['ok'], \
+            '角色变量名被当成了有效的 show tag'
 
     def test_the_fallback_name_is_honest_when_there_is_no_character_table(self,
                                                                          tmp_path):

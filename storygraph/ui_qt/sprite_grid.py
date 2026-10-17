@@ -243,6 +243,9 @@ class SpriteCardWidget(QFrame):
             btn.setParent(None)
             btn.deleteLater()
         self._slot_btns = []
+        #: 上一回画出来的「组名 + 标题」签名 —— **换图后组数相同、组名不同**
+        #: 也必须重建按钮（否则闭包还指着旧组名，点表情改的是服装）。
+        self._slot_signature = []
         while self._slot_lay.count():
             item = self._slot_lay.takeAt(0)
             w = item.widget()
@@ -254,6 +257,7 @@ class SpriteCardWidget(QFrame):
             self._expr_btn.clicked.connect(lambda: self._cycle('expression'))
             self._slot_lay.addWidget(self._expr_btn)
             self._slot_box.show()
+            self._slot_signature = []
             return
         self._expr_btn = None
         for row in rows:
@@ -262,6 +266,9 @@ class SpriteCardWidget(QFrame):
             btn.clicked.connect(lambda _=False, g=group: self._cycle_slot(g))
             self._slot_lay.addWidget(btn)
             self._slot_btns.append(btn)
+        self._slot_signature = [
+            (str(r.get('group') or ''), str(r.get('label') or ''))
+            for r in rows]
         self._slot_box.show()
 
     def _slot_rows(self) -> list:
@@ -303,6 +310,17 @@ class SpriteCardWidget(QFrame):
         except Exception as e:               # noqa: BLE001 - 分组拿不到就走老路
             swallow('ui_qt.sprite_grid._slot_rows', e)
             return []
+
+    def _fallback_label(self) -> str:
+        """
+        没有引擎分组时那唯一一个 chip 的标题。
+
+        项目**声明过分栏**（`attr_groups`）却认不出引擎结构时，那个格子里的词
+        可能既不是表情也不是服装 —— 叫「属性」比硬说「表情」诚实（用户
+        2026-10-18："服装与动作混为一谈"）。没声明过的项目保持原来的「表情」。
+        """
+        groups = getattr(self._choice_groups_for, 'attr_groups', None) or []
+        return '属性' if groups else '表情'
 
     def _cycle_slot(self, group: str):
         """点某一维的 chip → **只换那一维的词**，其它维度原样保留。"""
@@ -360,9 +378,12 @@ class SpriteCardWidget(QFrame):
         inherited = str(self.item.get('inherited_at') or '').strip()
         # 一维一格（引擎分组）；只有一条维度时 `rows` 为空 → 回到单个表情格。
         rows = self._slot_rows()
-        if rows and len(rows) != len(self._slot_btns):
-            # 维度个数变了（换图 / 引擎事实重采）→ **先重建再写字**，
-            # 否则新造的按钮会空着（第一版就踩了：先 zip 后 rebuild）。
+        signature = [(str(r.get('group') or ''), str(r.get('label') or ''))
+                     for r in rows]
+        if rows and signature != self._slot_signature:
+            # ⚠ 判据是**组名+标题的签名**，不是"个数"：同一张图换成
+            #   `expressions,outfit` 顺序的另一套时，两个按钮的文字都更新了，
+            #   可旧闭包还绑着旧组名 —— 点"表情"实际改的是服装（静默改数据）。
             self._rebuild_slot_chips(rows)
         if rows:
             for btn, row in zip(self._slot_btns, rows):
@@ -383,7 +404,7 @@ class SpriteCardWidget(QFrame):
         else:
             if getattr(self, '_expr_btn', None) is None or self._slot_btns:
                 self._rebuild_slot_chips([])
-            self._expr_btn.setText(f'表情：{expr or "—"}')
+            self._expr_btn.setText(f'{self._fallback_label()}：{expr or "—"}')
             self._expr_btn.setToolTip(
                 '左键 = 换下一个候选 · **右键 = 搜索选择**'
                 '（候选就是项目里真实的属性名）')
@@ -904,7 +925,9 @@ class SpriteGridWidget(QWidget):
                 symbols=self._symbols, loader=self._loader,
                 on_change=self._on_card_change,
                 on_resolve_path=self._on_resolve_path,
-                assets_ready=self._assets_ready))
+                assets_ready=self._assets_ready,
+                choice_groups=self._choice_groups,
+                choice_groups_for=self._choice_groups_for))
             self._cards[-1].remove_requested.connect(self._on_remove)
             self._cards[-1].clicked.connect(self._on_click)
             self._layout()

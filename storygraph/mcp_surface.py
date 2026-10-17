@@ -79,10 +79,18 @@ def capabilities() -> dict:
                  '**两把锁**：引擎报 PASSED **且**证据文件真的存在',
                  '`Status: PASSED` 单独**不算**通过（`assert eval` 假命题也 PASSED）',
                  '需要显示后端 + 副本里要有 `gui/`、`fonts/`']},
-            {'name': 'storygraph_host_validate', 'kind': 'judge',
-             'status': 'done', 'summary': '调程序自己写的验证函数（storygraph.host.py）',
+            {'name': 'storygraph_host_validate', 'kind': 'execute',
+             'status': 'done',
+             'summary': '调程序自己写的验证函数（storygraph.host.py）'
+                        '—— **会执行项目代码**，默认不执行',
              'source': 'host', 'tri_state': True,
-             'known_limits': ['程序**不管**的东西返回 `null`（≠ 程序说通过）']},
+             'known_limits': [
+                 '程序**不管**的东西返回 `null`（≠ 程序说通过）',
+                 '这是**任意代码执行**入口（exec，不是沙箱）：默认拒绝，'
+                 '需项目 `storygraph.rules.json` 写 '
+                 '`{"host_hooks": {"trust": true}}` 或调用时传 `trust=true`',
+                 '未授权时 `available=false` + `denied=true`，'
+                 '`reason` 会写清怎么授权']},
             {'name': 'storygraph_health', 'kind': 'read',
              'status': 'done', 'summary': '体检（结构化 + 文本两种渲染，同源）',
              'source': 'table+engine', 'tri_state': True,
@@ -326,11 +334,22 @@ def verify_behavior(project_root, head, *, sdk=None,
                        reason=f'行为验证出错：{type(e).__name__}: {e}')
 
 
-def host_validate(project_root, head, text) -> dict:
-    """调**程序自己写的**验证函数（`storygraph.host.py`）。`None` = 程序不管。"""
+def host_validate(project_root, head, text, trust=None) -> dict:
+    """
+    调**程序自己写的**验证函数（`storygraph.host.py`）。`None` = 程序不管。
+
+    ⚠ 这会**执行项目代码**（任意代码执行入口），所以默认不执行：
+    `trust=True` 或项目 `storygraph.rules.json` 授权后才跑（见 host_hooks）。
+    """
     from storygraph.story.host_hooks import load_host_hooks
-    hooks = load_host_hooks(project_root)
+    hooks = load_host_hooks(project_root, trust=trust)
     if not hooks.available:
+        if getattr(hooks, 'denied', False):
+            return _result('none', ok=True, verified=None, available=False,
+                           denied=True,
+                           reason='发现了 storygraph.host.py，但**未授权执行**'
+                                  '（这是可执行入口，默认不跑）',
+                           notes=hooks.notes)
         return _result('none', ok=True, verified=None, available=False,
                        reason='项目没有提供 storygraph.host.py（程序不参与判断）')
     ok, why = hooks.validate(head, text)

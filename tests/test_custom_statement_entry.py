@@ -188,9 +188,9 @@ def test_the_toolbar_entry_is_the_first_action(ui_window):
     tb = ui_window._tb_graph
     texts = [a.text() for a in tb.actions() if a.text().strip()]
     assert texts, texts
-    assert '自定义动作' in texts[0], texts[:3]
+    assert '自定义模块' in texts[0], texts[:3]
     # 而且它排在「导入章节」**前面**（这是"最上方"的实际含义）
-    assert texts.index([t for t in texts if '自定义动作' in t][0]) \
+    assert texts.index([t for t in texts if '自定义模块' in t][0]) \
         < texts.index([t for t in texts if '导入章节' in t][0])
 
 
@@ -242,7 +242,7 @@ def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
     monkeypatch.setattr(ui_window, '_log', lambda m: logged.append(str(m)))
 
     action = next(a for a in ui_window._tb_graph.actions()
-                  if '自定义动作' in a.text())
+                  if '自定义模块' in a.text())
     assert isinstance(action, QAction)
     action.trigger()                       # **真的点**
 
@@ -251,6 +251,47 @@ def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
     assert all(('失败' not in m and '没写' not in m and 'Traceback' not in m)
                for m in logged), logged
     assert any('扫出' in m for m in logged), logged
+
+
+def test_main_ok_with_empty_groups_does_not_clear_the_manifest(
+        ui_window, ui_project, monkeypatch):
+    """
+    **P0-5（2026-10-18 审计）**：主 OK + 勾了"把分栏一起写进清单"、但当前没有
+    可写分栏 → 不许把已有 `attr_groups` 整段清空。窗口层这条判据直接钉住。
+    """
+    import json
+    from PySide6.QtWidgets import QDialog
+    from storygraph.story import statement_registry as SR
+    from storygraph.ui_qt import dialog_learn
+
+    manifest = ui_project / 'storygraph.rules.json'
+    manifest.write_text(json.dumps({
+        'attr_groups': [{'name': 'outfit', 'label': '服装',
+                         'options': ['泳装']}],
+    }, ensure_ascii=False, indent=2), encoding='utf-8')
+    before = manifest.read_text(encoding='utf-8')
+    SR.clear_cache()
+
+    class _FakeDialog:
+        changed = False
+
+        def __init__(self, *a, **kw):
+            self.write_columns = type('W', (), {'isChecked': lambda _s: True})()
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def groups_to_write(self):
+            return []
+
+        def result_declaration(self):
+            return {'ok': False, 'warnings': ['测试用：不写语句']}
+
+    monkeypatch.setattr(dialog_learn, 'CustomStatementDialog', _FakeDialog)
+    ui_window._project_root = ui_project
+    ui_window.learn_custom_statement()
+    assert manifest.read_text(encoding='utf-8') == before, \
+        '没有分栏时把已有 attr_groups 清空了'
 
 
 def test_the_dialog_disables_writing_until_the_name_is_valid(qapp, project):
@@ -317,14 +358,16 @@ def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     点一下就进去，不用勾选、不用展开。
     """
     from storygraph.ui_qt.dialog_learn import (CustomStatementDialog,
-                                               PAGE_COLUMNS, PAGE_FIND)
+                                               PAGE_COLUMNS, PAGE_FIND,
+                                               PAGE_MANAGE)
 
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
-    # ① 分栏是一页，不是"可勾选的折叠块"
-    assert dlg.tabs.count() == 3, [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
+    # ① 分栏是一页，不是"可勾选的折叠块"；另有一页专管"已有声明"
+    assert dlg.tabs.count() == 4, [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
     assert '候选分栏' in dlg.tabs.tabText(PAGE_COLUMNS)
+    assert '已有声明' in dlg.tabs.tabText(PAGE_MANAGE)
     assert dlg.tabs.currentIndex() == PAGE_FIND, '打开时该停在"认识新动作"'
     # ② 打开时它**不占**填写页的空间（在另一页上）
     dlg.tabs.setCurrentIndex(1)
@@ -336,6 +379,11 @@ def test_group_section_is_collapsed_by_default(qapp, tmp_path):
     dlg.tabs.setCurrentIndex(PAGE_COLUMNS)
     assert dlg.columns_editor.count() == 1, '切页之后声明还在'
     assert dlg.columns_editor.rows()[0]['key'] == 'outfit'
+    # ④ 「从引擎组里拆出来」是通用开关（不是 outfit/pose 特判）
+    dlg.columns_editor.add_column('pose', '动作', 'stand,wave', split=True)
+    row = dlg.columns_editor.rows()[-1]
+    assert row['split'] is True, row
+    assert dlg.built_groups()[-1]['split'] is True, dlg.built_groups()[-1]
 
 
 def test_plain_text_import_goes_through_the_session_entry(ui_window):

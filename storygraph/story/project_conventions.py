@@ -165,7 +165,8 @@ def _declared_heads(project_root) -> set:
         return set()
 
 
-def unknown_statements(project_root, limit_examples: int = 3) -> dict:
+def unknown_statements(project_root, limit_examples: int = 3,
+                       trust=None) -> dict:
     """
     扫全项目 `.rpy`，列出**工具不认识的语句头**：`{头: {count, examples}}`。
 
@@ -175,6 +176,10 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
 
     这样报告回答的才是编剧真正关心的问题：
     "**我剧本里用的哪一种结构，工具管不了？**"
+
+    `trust`：是否允许执行项目里的 `storygraph.host.py`（**任意代码执行**
+    入口）。默认 `None` = 按 `host_hooks.trust_decision` 的规则（默认拒绝，
+    需项目清单或环境变量授权）。扫描器不会因为"只是只读"就替用户跑代码。
     """
     root = Path(project_root)
     game = root / 'game' if (root / 'game').is_dir() else root
@@ -184,8 +189,11 @@ def unknown_statements(project_root, limit_examples: int = 3) -> dict:
     #   · `validate_statement(head, 行)` 说 True → 这一行程序认了 → 不算"不认识"；
     #   · 它说 None = **程序不管**（不能当成"程序说没问题"）。
     #   程序不提供钩子时 `hooks.available=False`，这里的一切都不发生（零成本）。
+    #   ⚠ `trust`：项目钩子是**任意代码执行**入口，默认不跑（见 host_hooks
+    #     的"信任边界"）。扫描这种只读场景也必须显式授权 —— 不因为"只是
+    #     扫一下"就替用户执行别人的代码。
     from storygraph.story.host_hooks import load_host_hooks
-    hooks = load_host_hooks(project_root)
+    hooks = load_host_hooks(project_root, trust=trust)
     if hooks.available:
         for d in hooks.declarations():
             declared.add(str(d.get('name') or ''))

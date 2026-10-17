@@ -364,9 +364,10 @@ def test_host_validate_uses_the_program_answer(tmp_path):
         '    if head == "weather":\n'
         '        return ("强度" in text), "天气必须写强度"\n'
         '    return None\n', encoding='utf-8')
-    yes = M.host_validate(root, 'weather', 'weather rain 强度=3')
+    yes = M.host_validate(root, 'weather', 'weather rain 强度=3', trust=True)
     assert yes['verified'] is True and yes['source'] == 'host'
-    no = M.host_validate(root, 'weather', 'weather rain')
+    no = M.host_validate(root, 'weather', 'weather rain', trust=True)
     assert no['verified'] is False and '强度' in no['why']
-    other = M.host_validate(root, 'something_else', 'something_else x=1')
+    other = M.host_validate(root, 'something_else', 'something_else x=1',
+                            trust=True)
     assert other['verified'] is None, 'None（程序不管）不许折成通过/不通过'

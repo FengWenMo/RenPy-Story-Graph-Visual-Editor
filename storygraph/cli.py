@@ -360,6 +360,7 @@ def _cmd_collab(args) -> int:
         res = cs.push(db, args.sheet, actor=args.user, force=args.force)
         print(f"新增 {len(res['added'])}，更新 {len(res['updated'])}，"
               f"未变 {len(res['unchanged'])}，"
+              f"复活 {len(res.get('revived') or ())}，"
               f"冲突 {len(res['conflicts'])}，被拒 {len(res['rejected'])}")
         for c in res['conflicts']:
             print(f"  冲突 {c['line_id']}（库里 rev {c['db_revision']} > "

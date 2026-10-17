@@ -60,7 +60,7 @@ def test_written_headers_are_chinese(tmp_path):
         raw = [c.value for c in wb.active[1]]
     finally:
         wb.close()
-    assert raw == ['编号', '真实文件', '角色标签', '表情', '类别', '备注'], raw
+    assert raw == ['编号', '真实文件', '标签', '立绘属性', '类别', '备注'], raw
     # **`编号`(ID) 整列隐藏**（用户 2026-10-07 定案：它就是那个"本该藏起来、
     # 没什么用的内部编号"；藏起来 = 与"换位往前挪"同样效果、零风险）。
     wb2 = openpyxl.load_workbook(p)

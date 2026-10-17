@@ -71,7 +71,9 @@ storygraph/
 │   ├── asset_engine.py     编排层：目录变化 → 重载 → 同步进表格
 │   └── asset_extensions.py / asset_completion.py
 ├── story/      剧本表与 DSL
-│   ├── beat_model.py       Beat 数据结构 + 列契约 + 单元格编解码 ← 加列改这里
+│   ├── beat_fields.py      **字段契约唯一真源**（FieldSpec：列/快照/指纹/协作 payload）
+│   ├── beat_model.py       Beat 数据结构 + 单元格编解码（列定义从 beat_fields 派生）
+│   ├── chapter.py          章节文档（拍 + 顶层保真块）+ Seq 排序权威
 │   ├── beat_build.py       .rpy / DSL → Beat
 │   ├── beat_render.py      Beat → Ren'Py 代码（代码块族在 beat_render_code.py）
 │   ├── excel_export.py     Beat → Excel（主表 + 派生视图 + 图库/缩略图）

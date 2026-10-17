@@ -226,8 +226,10 @@ def test_a_new_character_decision_creates_a_row_without_a_sprite(tmp_path):
     res = TP.run(root, [fp], rows=ROWS, project_root=root, ask=_ask)
     assert res.ok, res.messages
     from openpyxl import load_workbook
+    from storygraph.assets.asset_registry import _sheet_headers
     ws = load_workbook(root / 'game' / 'asset_tables' / 'characters.xlsx').active
-    headers = [c.value for c in ws[1]]
+    # 表头现在是中文（`显示名` / `立绘 tag（show 用）`），先映射回规范键
+    headers = _sheet_headers(ws)
     got = {r[0]: dict(zip(headers, r)) for r in ws.iter_rows(values_only=True)
            if r and r[0]}
     assert 'BAOAN' in got

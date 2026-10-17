@@ -255,6 +255,16 @@ class CardPageMixin:
         ) != QMessageBox.Yes:
             return
         res = self._session.delete_beat(idx)
+        if not res.get('ok') and res.get('can_cascade'):
+            # 块头（菜单/循环/选项体）带着块体：先问"要不要连块体一起删"。
+            n = int(res.get('blocked_count') or 0)
+            if QMessageBox.question(
+                    self, '删除整块',
+                    f'{res.get("error") or "这是块的开头"}'
+                    f'\n\n要连着块体一起删掉吗？（共 {n + 1} 拍）'
+            ) != QMessageBox.Yes:
+                return
+            res = self._session.delete_beat(idx, cascade=True)
         if not res.get('ok'):
             self._status(res.get('error') or '删除失败')
             return

@@ -77,14 +77,27 @@ def _truncate(text: str) -> str:
 
 
 def execute(name: str, args: dict, *, project_root, approve=None,
-            events: list = None) -> dict:
+            events: list = None, emit=None) -> dict:
     """
     执行**一次**工具调用（含写盘闸门）。返回回执 dict（形状同 `mcp_surface`）。
 
     ⚠ 闸门在**这里**，不在提示词里（见模块文档第 1 条）。
+
+    `emit`：事件出口（面板实时渲染用）。从前这里只 `events.append`，
+    而 `run_agent` 转发"最近 3 条里的 gate"那段**是空循环**（`pass`），
+    于是面板永远收不到 gate 事件，批准对话框也就无从弹起。
+    现在闸门事件走 `emit`，一次也不漏。
     """
     from storygraph import mcp_surface as M
     events = events if events is not None else []
+
+    def _emit(ev):
+        # 有面板出口就交给它（它会同时收进 events 列表）；没有就直接塞
+        if emit is not None:
+            emit(ev)
+        else:
+            events.append(ev)
+
     short = str(name or '').replace('storygraph_', '')
     fn = getattr(M, short, None)
     if not callable(fn):
@@ -96,15 +109,15 @@ def execute(name: str, args: dict, *, project_root, approve=None,
         approved = False
         args['dry_run'] = True                     # ← 先强制试算
         preview = fn(**args)
-        events.append({'kind': 'gate', 'tool': short, 'args': args,
-                       'preview': preview})
+        _emit({'kind': 'gate', 'tool': short, 'args': args,
+               'preview': preview})
         if approve is not None:
             try:
                 approved = bool(approve(short, args, preview))
             except Exception as e:                 # noqa: BLE001 - 人给的钩子出错
                 swallow('ai.agent.execute.approve', e)
-                events.append({'kind': 'error',
-                               'reason': f'批准钩子出错：{type(e).__name__}: {e}'})
+                _emit({'kind': 'error',
+                       'reason': f'批准钩子出错：{type(e).__name__}: {e}'})
                 approved = False
         if not approved:
             preview['reason'] = (str(preview.get('reason') or '')
@@ -172,10 +185,7 @@ def run_agent(project_root, messages: list, cfg=None, *, transport=None,
                   'arguments': call['arguments']})
             got = execute(call['name'], call['arguments'],
                           project_root=project_root, approve=approve,
-                          events=events)
-            for ev in events[-3:]:                  # 闸门事件也转发给面板
-                if ev.get('kind') == 'gate' and ev not in events[:-3]:
-                    pass
+                          events=events, emit=emit)
             emit({'kind': 'tool_result', 'name': call['name'], 'result': got})
             convo.append({'role': 'tool', 'tool_call_id': call['id'],
                           'content': _truncate(json.dumps(got, ensure_ascii=False,

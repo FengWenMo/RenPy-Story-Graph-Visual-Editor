@@ -41,7 +41,10 @@ from storygraph.app import beats as B
 from storygraph.story.beat_build import (beats_from_parse_result,
                                          hydrate_from_dsl, stage_only_ops)
 from storygraph.story.beat_render import make_symbols
+from storygraph.story.chapter import ChapterDocument
+from storygraph.story.chapter_tree import ChapterTreeError
 from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
+                                         SNAPSHOT_FIELDS,
                                          compose_stage_extra)
 from storygraph.story.spec_args import is_dynamic_column
 
@@ -51,17 +54,16 @@ __all__ = ['TableSessionMixin', 'BeatSnapshot', 'uniform_position_of']
 
 #: 撤销快照要装的字段。
 #:
-#: 选取原则：**所有会进渲染 / 进 Excel 的标量**（少一个，撤销就会留下
-#: 半新半旧的状态），加上 `ordered`（在 `snapshot()` 里单独深拷贝）。
-#: 刻意不含 `src_first` / `src_last`（增量导出的源文件行号）与
+#: **不再手写**（2026-10-17）：由 `story.beat_fields.SNAPSHOT_FIELDS` 派生 ——
+#: 同一份 `FieldSpec` 表同时决定列、快照、指纹与协作 payload。
+#: 从前这里是一张手写清单，漏了 `spec_head` / `loop_header` /
+#: `camera_header` / `opaque` / `nest_path` / `code_blocks` /
+#: `inline_comment` / `cond_comment` / `file_blocks` —— 改了这些字段后
+#: 快照指纹不变、撤销按钮不亮、restore 把它们留在新值上。
+#:
+#: 仍然刻意不含 `src_first` / `src_last`（增量导出的源文件行号）与
 #: `_from_script`：撤销一次字段编辑不该改动"这一拍在源文件的哪几行"。
-_SNAPSHOT_FIELDS = (
-    'seq', 'label', 'line_id', 'content_hash', 'condition', 'comment',
-    'kind', 'speaker', 'text', 'scene', 'stage', 'bgm', 'sfx',
-    'show', 'hide', 'at', 'scene_at', 'with_', 'transform', 'stage_order',
-    'op_order', 'raw', 'code', 'music', 'music_params', 'music_action',
-    'sound', 'sound_params', 'sound_action', 'voice', 'notes',
-)
+_SNAPSHOT_FIELDS = SNAPSHOT_FIELDS
 
 
 @dataclass
@@ -84,7 +86,7 @@ class BeatSnapshot:
         """
         快照内容的指纹（用来判"这次保存到底改了没有"）。
 
-        **不能拿 `Beat.content_hash` 当判据**：那是**持久化**字段
+        **不能拿 `Beat.beat_fingerprint` 当判据**：那是**持久化**字段
         （进 Excel 的「内容指纹」列、用于协作冲突检测），只在
         `_assign_identity` 时重算 —— 编辑之后它还是旧值，于是
         "改了内容却判成没变"（正好是这个功能的判据要避免的事）。
@@ -121,7 +123,43 @@ class TableSessionMixin:
     #: 本 mixin 要求宿主（或其它 mixin）提供的成员。
     REQUIRES = ('beats', 'symbols', 'script_path', 'registry',
                 'refresh_symbols', 'has', '_renumber', 'forget_undo',
-                '_last_saved', '_last_idx', '_last_removed')
+                '_last_saved', '_last_idx', '_last_removed', 'chapter')
+
+    # ------------------------------------------------------------------
+    #  章节级真源：顶层保真块（P0-2）
+    # ------------------------------------------------------------------
+    def _chapter_doc(self) -> ChapterDocument:
+        """
+        取本章文档对象；没有（老调用方 / 单测直接塞 `beats`）就**懒建**。
+
+        `chapter` 在 `EditorSession.__init__` 里有默认值，但会话也可能
+        被测试直接构造后替换 `beats` —— 懒建让两条路都安全。
+        """
+        doc = getattr(self, 'chapter', None)
+        if not isinstance(doc, ChapterDocument):
+            doc = ChapterDocument.from_beats(
+                getattr(self, 'beats', None) or (),
+                source_path=getattr(self, 'script_path', None))
+            self.chapter = doc
+        if doc.beats is not self.beats:
+            # 会话替换了拍列表（解析 / 导入 / 直接赋值）：文档跟着换，
+            # 并把拍上带来的顶层块收编进来（sync 的第一条方向）。
+            doc.adopt(self.beats)
+        return doc
+
+    def _sync_chapter(self):
+        """
+        把章节真源与拍上的传输副本对齐。**每次结构编辑之后都要调**。
+
+        为什么必须集中成一个方法：从前"顶层块挂在第一拍上"这条约定散在
+        `attach_file_blocks` / Excel 导出 / 渲染三处，谁都没负责"删除第一拍
+        之后怎么办"。现在只有一个写入口（`ChapterDocument.sync`）。
+        """
+        return self._chapter_doc().sync()
+
+    def chapter_file_blocks(self) -> str:
+        """当前章节的顶层保真块（文档级真源，与第一拍在不在无关）。"""
+        return self._chapter_doc().file_blocks
 
     def load(self, path) -> int:
         """
@@ -139,6 +177,11 @@ class TableSessionMixin:
         for b in self.beats:
             b.stage = compose_stage_extra(b, symbols)
         hydrate_from_dsl(self.beats, symbols)
+        #: **章节真源**：顶层 `init python` / `default` / `define` … 从"第一张拍
+        #: 的附属字段"升成章节级（2026-10-17，P0-2）。`from_beats` 会把拍上
+        #: 带来的块收编进来，再把传输副本挂回第一拍（幂等）。
+        self.chapter = ChapterDocument.from_beats(self.beats,
+                                                  source_path=path)
         self.script_path = path
         # **记下"我这一份拍是从哪份字节解析出来的"**（2026-10-05 用户实测报：
         # "我只调了一个卡片，都不能替换"）。拍的 `src_first` / `src_last` 是
@@ -206,15 +249,22 @@ class TableSessionMixin:
         template = self.beats[pos]
         beat = Beat(seq=0, label=str(getattr(template, 'label', '') or ''),
                     kind='say', text='')
-        self.beats.insert(at, beat)
+        doc = self._chapter_doc()
+        at = doc.insert_beat(beat, at)
+        self.beats = doc.beats
+        self._sync_chapter()                  # 插到第一张之前也不许丢顶层块
         self._push_struct_undo(('insert', at))
         self._renumber()
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
                 'label': beat.label, 'count': len(self.beats)}
-    def delete_beat(self, idx: int) -> dict:
+    def delete_beat(self, idx: int, cascade: bool = False) -> dict:
         """
         删掉第 idx 张卡片，返回 `{ok, index, removed, count}`。
+
+        `cascade=True`：明确"删整块"—— 块头（菜单/循环/选项体）连同整棵
+        子树一起删；默认只删单拍，块头带块体时**拒绝**（`blocked=has_children`），
+        把"要不要连块体一起删"交回给人确认。
 
         **只改内存**：落盘仍要按「⤓ 导出」，所以误删的退路是
         `restore_last_removed()`（单级）或重新载入这一章。
@@ -223,20 +273,70 @@ class TableSessionMixin:
             return {'ok': False, 'error': '这一拍不存在', 'removed': None}
         if len(self.beats) <= 1:
             return {'ok': False, 'error': '一章至少要留一拍', 'removed': None}
-        removed = self.beats.pop(idx)
-        self._last_removed = (idx, removed)
-        self._push_struct_undo(('delete', idx, removed))
+        doc = self._chapter_doc()
+        try:
+            removed = doc.remove_beat_at(idx, cascade=cascade)
+        except ChapterTreeError as e:
+            # 块头带着块体：删掉它会把选项/循环体变成块外的普通拍 —— 拒绝。
+            return {'ok': False, 'error': str(e), 'removed': None,
+                    'count': len(self.beats), 'blocked': e.kind,
+                    'blocked_count': e.count,
+                    'can_cascade': e.kind == 'has_children'}
+        self.beats = doc.beats
+        # **删除携带拍 ≠ 删除章节级顶层块**（P0-2）：`ChapterDocument` 是真源，
+        # 这里把文档里的块重新下发给新的第一拍。没有这一步，删掉第一张卡
+        # 就等于把 `init python` / `default` 整块丢掉。
+        self._sync_chapter()
+        self._last_removed = (idx, list(removed))
+        self._push_struct_undo(('delete', idx, list(removed)))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': min(idx, len(self.beats) - 1),
-                'removed': removed, 'count': len(self.beats)}
+                'removed': removed[0] if removed else None,
+                'count': len(self.beats)}
+
+    def move_beat(self, src: int, dst: int) -> dict:
+        """
+        把第 `src` 拍移到扁平位置 `dst`（移动后的下标）。
+
+        结构由 `ChapterDocument.tree` 决定：**块头不许搬**（会把块体留在原地）；
+        跨块移动会重写这一拍的结构位（`nest_path`）与条件，不会留下"路径还是
+        旧块"的拍。移动操作进结构撤销栈，可撤。
+        """
+        if not self.has(src):
+            return {'ok': False, 'error': '这一拍不存在', 'index': src}
+        beat = self.beats[src]
+        old_path = getattr(beat, 'nest_path', None)
+        old_cond = str(getattr(beat, 'condition', '') or '')
+        doc = self._chapter_doc()
+        try:
+            new_index = doc.move_beat(src, dst)
+        except ChapterTreeError as e:
+            return {'ok': False, 'error': str(e), 'index': src,
+                    'blocked': e.kind}
+        self.beats = doc.beats
+        self._push_struct_undo(('move', src, new_index, beat, old_path,
+                                old_cond))
+        self._renumber()
+        self.forget_undo()
+        return {'ok': True, 'error': '', 'index': new_index,
+                'count': len(self.beats)}
+
     def restore_last_removed(self) -> dict:
         """把**上一次删掉的那张卡片**插回原位（单级撤销）。"""
         if self._last_removed is None:
             return {'ok': False, 'error': '没有可恢复的卡片', 'index': -1}
-        idx, beat = self._last_removed
+        idx, removed = self._last_removed
+        beats = (list(removed) if isinstance(removed, (list, tuple))
+                 else [removed])
+        if not beats:
+            return {'ok': False, 'error': '没有可恢复的卡片', 'index': -1}
         at = max(0, min(int(idx), len(self.beats)))
-        self.beats.insert(at, beat)
+        self.beats[at:at] = beats
+        doc = self._chapter_doc()
+        doc.adopt(self.beats)                  # 按拍上原有结构位重建树
+        self.beats = doc.beats
+        self._sync_chapter()                  # 恢复的拍不许把顶层块带重
         self._last_removed = None
         self._push_struct_undo(('insert', at))
         self._renumber()
@@ -274,25 +374,49 @@ class TableSessionMixin:
             return {'ok': False, 'error': '没有可撤销的结构操作', 'index': -1}
         op = stack.pop()
         kind = op[0]
+        doc = self._chapter_doc()
         if kind == 'insert':
             at = int(op[1])
             if not 0 <= at < len(self.beats):
                 return {'ok': False,
                         'error': '落点已经不在了（可能被别的操作改过）',
                         'index': -1}
-            self.beats.pop(at)
+            try:
+                doc.remove_beat_at(at)
+            except ChapterTreeError as e:
+                return {'ok': False, 'error': str(e), 'index': -1}
+            self.beats = doc.beats
             note = '撤销插卡'
             index = min(at, max(0, len(self.beats) - 1))
         elif kind == 'delete':
             at = max(0, min(int(op[1]), len(self.beats)))
-            self.beats.insert(at, op[2])
+            removed = list(op[2]) if isinstance(op[2], (list, tuple)) else [op[2]]
+            self.beats[at:at] = removed
+            doc.adopt(self.beats)
+            self.beats = doc.beats
             note = '恢复删除'
             index = at
-            if self._last_removed is not None and self._last_removed[1] is op[2]:
+            if self._last_removed is not None and self._last_removed[0] == at:
                 self._last_removed = None
+        elif kind == 'move':
+            src, new_index = int(op[1]), int(op[2])
+            beat, old_path, old_cond = op[3], op[4], op[5]
+            try:
+                doc.move_beat(new_index, src)
+            except ChapterTreeError as e:
+                return {'ok': False, 'error': str(e), 'index': -1}
+            # 跨块移动会重写结构位/条件；撤销要连它们一起还原，再按 beat
+            # 上的旧值重建树（节点 path 也跟着回来）。
+            beat.nest_path = old_path
+            beat.condition = old_cond
+            doc._rebuild_tree()
+            self.beats = doc.beats
+            note = '撤销移动'
+            index = src
         else:
             return {'ok': False, 'error': f'不认识的结构操作：{kind!r}',
                     'index': -1}
+        self._sync_chapter()                # 结构撤销同样不许把顶层块弄丢
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': index, 'note': note,
@@ -633,15 +757,20 @@ class TableSessionMixin:
         """
         给第 idx 拍拍一张快照（撤销/比较用）。越界返回 None。
 
-        只装**标量字段** + `ordered`（后者是 raw/code 的交错顺序，
-        丢了会把 `$ f()` 与 `show screen` 的交替演出排乱）。
-        其它状态（`src_first` 等增量导出用的行号、`_from_script` 标记）
-        刻意**不进快照**：撤销一次编辑不该改掉它们在源文件里的位置。
+        装**所有会进渲染 / 会持久化的字段**（`_SNAPSHOT_FIELDS`，由
+        `story.beat_fields` 单表派生），其中 `ordered` / `code_blocks` 是
+        列表、按深拷贝存（`$ f()` 与 `show screen` 的交替顺序丢了会把演出
+        排乱）。其它状态（`src_first` 等增量导出用的行号、`_from_script`
+        标记）刻意**不进快照**：撤销一次编辑不该改掉它们在源文件里的位置。
         """
         if not self.has(idx):
             return None
         b = self.beats[idx]
-        data = {name: getattr(b, name, '') for name in _SNAPSHOT_FIELDS}
+        # `copy.deepcopy`：`code_blocks` / `ordered` 是**可变列表**。只做浅拷贝的话，
+        # 快照和拍会共享同一个列表 —— 之后拍上原地 append 一次，快照也跟着变，
+        # 撤销就撤不回去了（`ordered` 从前单独 deepcopy，别的列表没有）。
+        data = {name: copy.deepcopy(getattr(b, name, ''))
+                for name in _SNAPSHOT_FIELDS}
         # `StageOrder` 是**派生列**（"结构化列里有的 verb 一定在里面"，
         # 见 `Beat.stage_verbs`）。快照记它的**归一化**形式：保存时会对齐它
         # （卡片加了立绘 → 顺序里补上 `show`），而"对齐"不是用户改动 ——
@@ -663,6 +792,9 @@ class TableSessionMixin:
         for name, value in snap.data.items():
             if name == 'ordered':
                 b.ordered = copy.deepcopy(list(value or []))
+            elif isinstance(value, list):
+                # `code_blocks` 等列表字段：还原的是**副本**，不是快照里那份
+                setattr(b, name, copy.deepcopy(value))
             else:
                 setattr(b, name, value)
         # 还原出来的 stage 已经和结构化字段一致 → 标记"吸过"，
@@ -690,7 +822,7 @@ class TableSessionMixin:
             · `changed=False` 表示内容一个字节都没变（含"翻页顺带提交"）。
 
         判"改没改"用的是**保存前后两份快照的指纹**（见
-        `BeatSnapshot.fingerprint`），而不是 `Beat.content_hash` ——
+        `BeatSnapshot.fingerprint`），而不是 `Beat.beat_fingerprint` ——
         后者是持久化字段，编辑后还是旧值，拿它当判据会把"改了"判成"没变"。
         """
         if not self.has(idx):

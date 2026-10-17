@@ -207,6 +207,30 @@ def test_gate_event_is_emitted_so_the_panel_can_ask(tmp_path):
     assert events[0]['preview']['diff']
 
 
+def test_gate_event_reaches_the_panel_callback(tmp_path):
+    """
+    闸门事件必须**实时**送到 `on_event`（面板靠它弹批准框）。
+
+    从前 `run_agent` 里有一段空循环（`for ev in events[-3:]: ... pass`），
+    gate 事件只进了本地列表，面板永远收不到 —— 批准对话框也就无从弹起。
+    现在 `execute(emit=...)` 是唯一出口，这里直接钉住它。
+    """
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    seen = []
+    events = []
+
+    def collect(ev):                 # 面板侧：既收进列表，也转给 UI
+        events.append(ev)
+        seen.append(ev)
+
+    A.execute('storygraph_declare', {'name': 'weather'}, project_root=root,
+              approve=None, events=events, emit=collect)
+    assert [e['kind'] for e in seen] == ['gate'], seen
+    # 不重复也不丢：两个列表看到的是同一批事件
+    assert events == seen
+
+
 # ==================== ③ 循环：有界、可读、key 不外泄 ====================
 
 def _scripted(replies):

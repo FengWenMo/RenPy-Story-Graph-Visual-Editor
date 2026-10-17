@@ -222,7 +222,8 @@ def build_declaration(name: str, label: str = '', docs: str = '',
     return out
 
 
-def build_group(name: str, label: str = '', options=None) -> dict:
+def build_group(name: str, label: str = '', options=None,
+                split: bool = False) -> dict:
     """
     表单的一行 → 一条**词组声明**（`rules.json` 的 `attr_groups` 里的一项）。
 
@@ -242,7 +243,7 @@ def build_group(name: str, label: str = '', options=None) -> dict:
     opts = parse_choices(options) if not isinstance(options, (list, tuple)) \
         else parse_choices(list(options or ()))
     return {'ok': True, 'name': gname, 'label': str(label or '').strip(),
-            'options': opts, 'warnings': []}
+            'options': opts, 'split': bool(split), 'warnings': []}
 
 
 def suggest_shape(project_root, head: str, *, limit_files: int = 400,
@@ -267,8 +268,9 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
         {'head': 'swim_suit', 'found': True, 'occurrences': 12,
          'items': [{'index': 0, 'kind': 'word'|'value'|'key'|'number',
                     'name': '角色'|'mood'|'第1项', 'default_name': '角色',
-                    'renamed': bool, 'examples': ['林月见', …],
-                    'choices': ['林月见', …], 'choices_from': '角色表'|'项目里写过的值',
+                    'renamed': bool, 'examples': ['lan', …],
+                    'choices': ['lan', …], 'choices_from': '角色表'|'项目里写过的值',
+                    'labels': {'lan': '蓝'},
                     'suggest_allowed': bool, 'hits': {值: 次数}}],
          'samples': [{'file': 'ch01.rpy', 'line': 7, 'text': '…'}],
          'files': ['ch01.rpy', …]}
@@ -299,6 +301,10 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
 
     roles = _role_table(root)
     out['role_names'] = list(roles['display_names'])
+    # `show/scene/hide` 的"角色"格是**立绘 tag**；其它语句是角色变量名。
+    out['role_ids'] = role_values_for(head, roles)
+    out['role_tags'] = sorted(roles.get('tags') or ())
+    cast_labels = {v: role_label_for(v, roles) for v in out['role_ids']}
 
     slots: dict = {}
     occurrences = 0
@@ -321,30 +327,65 @@ def suggest_shape(project_root, head: str, *, limit_files: int = 400,
                                        'text': text[:80]})
             if Path(fp).name not in out['files']:
                 out['files'].append(Path(fp).name)
-            _collect_slots(slots, tokens[1:], roles)
+            _collect_slots(slots, tokens[1:], roles, head=head)
     if not occurrences:
         return out
     out['found'] = True
     out['occurrences'] = occurrences
     out['items'] = _finish_slots(slots, min_choice_hits,
-                                 cast_names=roles['display_names'])
+                                 cast_ids=out['role_ids'],
+                                 cast_labels=cast_labels)
     return out
+
+
+def project_group_keys(project_root) -> list:
+    """
+    项目里**真实存在**的立绘组名（引擎事实 + `layeredimage`），排序去重。
+
+    用途：分栏标识不该让人盲填 —— 用户 2026-10-18 把「服装」填进"分栏标识"，
+    `build_group` 判非法、主 OK 路径又静默过滤，结果清单里什么都没写、卡片
+    仍显示引擎的 `outfit`。这个列表让界面可以直接给出**能用**的键。
+    """
+    root = Path(project_root) if project_root else None
+    if root is None or not root.is_dir():
+        return []
+    keys: set = set()
+    try:
+        table = layeredimage_groups(root)
+        for groups in (table or {}).values():
+            keys.update(str(k) for k in (groups or {}) if str(k).strip())
+    except Exception as e:                       # noqa: BLE001 - 读不到不算错
+        swallow('learn_statement.project_group_keys.layers', e)
+    try:
+        from storygraph.core import engine_facts as EF
+        path = EF.facts_path(root)
+        if path is not None and path.is_file():
+            facts = EF.loads(path.read_text(encoding='utf-8'))
+            for tag in (EF.value_of(facts, 'attributes', {}) or {}):
+                keys.update(str(k) for k in (EF.groups_of(facts, str(tag)) or {})
+                            if str(k).strip())
+    except Exception as e:                       # noqa: BLE001
+        swallow('learn_statement.project_group_keys.facts', e)
+    return sorted(keys)
 
 
 def _role_table(root) -> dict:
     """
-    角色表 → `{'ids': set, 'names': set, 'id_to_name': {}, 'display_names': []}`
-    （读不出就四个空）。
+    角色表 → `{'ids','names','id_to_name','name_to_id','tags','id_to_tag',
+    'tag_to_id','tag_to_name','display_names'}`（读不出就全空）。
 
-    用途：把脚本里的**裸词**认成角色（`lyj` → 「凌跃捷」），
-    这样"第 1 项"的默认名字就可能是「角色」而不是「对象」，
-    候选里给的也是**编剧看得懂的中文名**。
+    用途：把脚本里的**裸词**认成角色（`lyj` → 「凌跃捷」），并区分三套名字：
 
-    ⚠ `display_names`（2026-10-15 加）是**有序**的显示名列表 ——
-    `names` 是 `set`，拿它当候选来源会得到**每次运行都不一样**的顺序。
-    `suggest_shape` 的「角色格候选并上整张角色表」用它，保证顺序稳定。
+      · **变量名 / 角色 ID**（`lan`）—— 自定义语句里通常写这个；
+      · **显示名**（`岚`）—— 只给编剧看；
+      · **立绘 tag**（`lan_tag`，`ImageTag`）—— `show / scene / hide` 要写这个。
+
+    ⚠ 2026-10-18：之前只收变量名与显示名，于是 `show` 的角色候选给 `lan`，
+    真正能跑的 `show lan_tag …` 反而被判"切不上"。
     """
     ids, names, id_to_name = set(), [], {}
+    name_to_id: dict = {}
+    tags, id_to_tag, tag_to_id, tag_to_name = set(), {}, {}, {}
     try:
         from storygraph.pipeline.build import load_asset_registry
         reg = load_asset_registry(root)
@@ -356,12 +397,47 @@ def _role_table(root) -> dict:
                         or (row or {}).get('名字') or cid).strip()
             shown = shown.strip('「」『』') or cid
             id_to_name[cid] = shown
+            name_to_id.setdefault(shown, cid)
             if shown and shown not in names:
                 names.append(shown)
+            # `ImageTag` 可能为空（老表）→ 退回角色变量名（与 `show` 的旧行为一致）
+            tag = str((row or {}).get('ImageTag')
+                      or (row or {}).get('tag') or '').strip() or cid
+            id_to_tag[cid] = tag
+            tags.add(tag)
+            tag_to_id.setdefault(tag, cid)
+            tag_to_name[tag] = shown
     except Exception as e:                       # noqa: BLE001 - 没角色表也能用
         swallow('learn_statement._role_table', e)
     return {'ids': ids, 'names': set(names), 'id_to_name': id_to_name,
+            'name_to_id': name_to_id, 'tags': tags, 'id_to_tag': id_to_tag,
+            'tag_to_id': tag_to_id, 'tag_to_name': tag_to_name,
             'display_names': list(names)}
+
+
+#: 这些语句的第一个词是**立绘 tag**（不是角色变量名）。
+_IMAGE_TAG_HEADS = ('show', 'scene', 'hide')
+
+
+def _uses_image_tags(head) -> bool:
+    return str(head or '').strip() in _IMAGE_TAG_HEADS
+
+
+def role_values_for(head, roles) -> list:
+    """
+    某个语句的「角色」格该用哪套值：`show/scene/hide` → **立绘 tag**；
+    其它自定义语句 → **角色变量名**。
+    """
+    if _uses_image_tags(head):
+        return sorted(str(t) for t in (roles.get('tags') or roles['ids']) if t)
+    return sorted(str(i) for i in (roles.get('ids') or ()) if i)
+
+
+def role_label_for(value, roles) -> str:
+    """值 → 显示名（tag 与变量名两种都能查；查不到返回空）。"""
+    value = str(value or '')
+    return str((roles.get('tag_to_name') or {}).get(value)
+               or (roles.get('id_to_name') or {}).get(value) or '')
 
 
 def _slot(slots: dict, i: int, kind: str, name: str) -> dict:
@@ -393,8 +469,12 @@ def _note_kind(rec: dict, kind: str, name: str, note: str = '') -> None:
         rec['note'] = note
 
 
-def _collect_slots(slots: dict, tokens, roles) -> None:
+def _collect_slots(slots: dict, tokens, roles, head: str = '') -> None:
     """一行脚本的各个项 → 累加进对应位置的收集器（**按位置**，与顺序无关）。"""
+    show_like = _uses_image_tags(head)
+    ids = roles.get('ids') or set()
+    names = roles.get('names') or set()
+    tags = roles.get('tags') or set()
     for i, tok in enumerate(tokens):
         kind, shown, key = tok
         is_role = False
@@ -409,23 +489,54 @@ def _collect_slots(slots: dict, tokens, roles) -> None:
             rec = _slot(slots, i, 'value', '内容')
             _note_kind(rec, 'value', '内容')
         else:                                          # 裸词：可能是角色
-            is_role = shown in roles['ids'] or shown in roles['names']
+            is_role = shown in ids or shown in names or shown in tags
+            if is_role:
+                shown = _role_value_for_script(shown, roles, show_like)
             default = '角色' if is_role else '对象'
             rec = _slot(slots, i, 'word', default)
             _note_kind(rec, 'word', default, '角色表' if is_role else '')
             if is_role:
                 rec['suggest_allowed'] = True
-        # 角色那一项显示**中文名**（项目里写的是 ID，编剧看的是名字）
-        if is_role or rec['note'] == '角色表':
-            shown = roles['id_to_name'].get(shown, shown)
+        # ⚠ 角色那一项存**脚本里真正要写的那个词**：
+        #   `show/scene/hide` → 立绘 tag（`lan_tag`）；其它语句 → 变量名（`lan`）。
+        #   拿显示名（「岚」）当候选，`pattern` 的封闭枚举会把真行判成"切不上"。
         rec['hits'][shown] += 1
 
 
-def _finish_slots(slots: dict, min_choice_hits: int, cast_names=None) -> list:
+def _role_value_for_script(shown, roles, show_like: bool) -> str:
+    """把脚本里见到的角色裸词 → **脚本真源**（tag 或变量名）。"""
+    shown = str(shown or '')
+    ids = roles.get('ids') or set()
+    names = roles.get('names') or set()
+    tags = roles.get('tags') or set()
+    id_to_tag = roles.get('id_to_tag') or {}
+    tag_to_id = roles.get('tag_to_id') or {}
+    name_to_id = roles.get('name_to_id') or {}
+    if show_like:
+        if shown in tags:
+            return shown
+        if shown in ids:
+            return str(id_to_tag.get(shown, shown))
+        if shown in names:
+            cid = name_to_id.get(shown, shown)
+            return str(id_to_tag.get(cid, cid))
+        return shown
+    if shown in ids:
+        return shown
+    if shown in tags:
+        return str(tag_to_id.get(shown, shown))
+    if shown in names:
+        return str(name_to_id.get(shown, shown))
+    return shown
+
+
+def _finish_slots(slots: dict, min_choice_hits: int, cast_ids=None,
+                  cast_labels=None) -> list:
     """
     收集器 → 给界面看的项（例子、候选、来源、能不能限定）。
 
-    `cast_names` = 角色表的**显示名**（有序，2026-10-15 加）。
+    `cast_ids` = 角色表的**变量名 / tag**（有序，脚本真源）。
+    `cast_labels` = `{变量名: 显示名}`（只用于界面标签，**不参与匹配**）。
 
     ⚠⚠ 识别成「角色」的那一格（`note == '角色表'`），候选要**并上整张角色表**
     —— 这正是 `suggest_shape` docstring 写死的口径（"若是角色 ID → 候选=角色表"），
@@ -439,11 +550,11 @@ def _finish_slots(slots: dict, min_choice_hits: int, cast_names=None) -> list:
     """
     cast: list = []
     seen_cast: set = set()
-    for nm in (cast_names or ()):
-        nm = str(nm or '').strip()
-        if nm and nm not in seen_cast and not _is_not_a_value(nm):
-            seen_cast.add(nm)
-            cast.append(nm)
+    for cid in (cast_ids or ()):
+        cid = str(cid or '').strip()
+        if cid and cid not in seen_cast and not _is_not_a_value(cid):
+            seen_cast.add(cid)
+            cast.append(cid)
     out = []
     for idx in sorted(slots):
         rec = slots[idx]
@@ -461,13 +572,17 @@ def _finish_slots(slots: dict, min_choice_hits: int, cast_names=None) -> list:
             # 角色格：**并上整张角色表**。"项目里写过的值"排在前面 ——
             # 它们是这条语句真的用过的，先给人看见（也保证 `lan`/`ling`/`ye`
             # 这些立绘 tag 稳定出现在前面：它们不在角色表里，只在这份 hits 里）。
-            for nm in cast:
-                if nm not in picked:
-                    picked.append(nm)
+            for cid in cast:
+                if cid not in picked:
+                    picked.append(cid)
         # 上限：角色表可以很长（真机 28），给它更宽的天花板，别把角色截掉。
         rec['choices'] = picked[:(64 if is_role else 24)]
         rec['choices_from'] = (rec['note'] if is_role
                                else ('项目里写过的值' if choices else ''))
+        # 显示名只用于界面标签（`蓝（lan）`），**绝不参与匹配/写盘**。
+        labels = {v: str((cast_labels or {}).get(v) or '')
+                  for v in rec['choices']}
+        rec['labels'] = {k: v for k, v in labels.items() if v and v != k}
         rec['suggest_allowed'] = bool(rec['suggest_allowed'] and rec['choices'])
         rec['hits'] = dict(rec['hits'].most_common(12))
         out.append(rec)
@@ -850,13 +965,20 @@ def choice_sources(project_root, head: str = '') -> list:
     except Exception as e:                       # noqa: BLE001 - 没事实不算错
         swallow('learn_statement.choice_sources.facts', e)
 
-    # ② 角色表（编剧认得的是显示名，所以给显示名）
+    # ② 角色表：`show/scene/hide` 给**立绘 tag**，其它语句给**变量名**
+    #    （两者都只给"脚本里真正要写的那个词"；显示名降级为标签）。
     try:
-        names = sorted(_role_table(root)['names'])
-        if names:
-            out.append({'key': 'roles', 'label': '角色表',
-                        'values': names, 'source': '资产表',
-                        'count': len(names)})
+        roles = _role_table(root)
+        values = role_values_for(head, roles)
+        if values:
+            label = ('角色表（立绘 tag —— show 里写这个）'
+                     if _uses_image_tags(head)
+                     else '角色表（变量名 —— 剧本里写这个）')
+            out.append({'key': 'roles', 'label': label,
+                        'values': values,
+                        'labels': {v: role_label_for(v, roles)
+                                   for v in values},
+                        'source': '资产表', 'count': len(values)})
     except Exception as e:                       # noqa: BLE001
         swallow('learn_statement.choice_sources.roles', e)
 

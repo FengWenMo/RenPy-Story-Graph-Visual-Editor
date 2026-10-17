@@ -166,6 +166,12 @@ class AssetRegistry:
 #: 用户手加的列（`Custom_xxx` / `内容编号`…）原样保留，绝不改写。
 ASSET_FIELD_ALIASES = {label: field
                        for field, label in ASSET_FIELD_LABELS.items()}
+#: 旧中文表头**继续能读**（用户手上的表不用改名）——
+#: `Tag` / `Attributes` 在 2026-10-18 改了更准确的中文名。
+ASSET_FIELD_ALIASES.update({
+    '角色标签': 'Tag',
+    '表情': 'Attributes',          # 旧表头（其实装的是所有立绘属性）
+})
 
 
 def _canon_field(name):

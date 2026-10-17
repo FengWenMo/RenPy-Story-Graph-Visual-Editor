@@ -5,7 +5,8 @@ storygraph.story.beat_model
 
 一个 Beat = 一行演出（"一句台词 + 这一拍要做的事"）。这里放三样东西：
 
-  · 列契约：`BEAT_FIELDS`（列顺序唯一真源）、中文表头、下拉列、老表迁移列名
+  · 列契约：`BEAT_FIELDS`（**定义**在 `beat_fields.py`，这里只是再导出）、
+    中文表头、下拉列、老表迁移列名
   · `Beat`：数据类本体（`to_row` / `from_row` 逐列对应）
   · 单元格原语：`compose_*` 把结构化字段写成格内文本，`_split_*` 反向拆开
 
@@ -36,170 +37,24 @@ from storygraph.story.beat_stage_parse import (  # 2026-10-12 拆分
 
 # ===================== 数据结构 =====================
 
-BEAT_FIELDS = [
-    'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Comment', 'Text',
-    # Condition 紧跟在 Text 后面（不是塞在最后一列）：它是**台词的修饰符**
-    # ——"这句话在什么条件下才出现"，策划读表时和 Text 是同一眼的。
-    # 2026-10-05 补：这一列**此前根本不存在**，于是 `Beat.condition`
-    # 在 `to_row` / `from_row` 里两头都没有出口 —— `.rpy → .rpy` 看起来
-    # 正常（渲染层 `beat_render` 一直是对的），可**一经过 Excel 往返，
-    # 所有 if / 菜单条件全被抹平**（真实项目 `mini_game1` 实测 7 条 → 0 条，
-    # if 行 5 → 1，分支变成顺序执行）。加列会改变 `BEAT_FIELDS` 的下标，
-    # 所以必须同时迁 `HIDDEN_BEAT_COLUMNS` 的隐藏列定位（见下）。
-    'Condition',
-    'Scene', 'Show', 'At', 'With', 'Hide',
-    'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
-    'Stage', 'CodeBlock', 'ContentHash',
-    # StageOrder 放在最后并**隐藏整列**：它记录"这一拍先 hide 再 show"
-    # 这类**源顺序**，属于运行时语义（`hide X` + `show X` = 重置立绘，
-    # 反序会把立绘藏掉），不该由策划填。但也不能丢——丢了就退回
-    # `scene→show→hide` 兜底，顺序变了演出就变了。
-    #
-    # 为什么是隐藏列而不是另开元数据表：它是**逐行**属性，藏在同一行上
-    # 才能跟着复制/拖动/排序走；另开一张表一被手改就错位。
-    # 用户 2026-09-28 拍板：「由工具维护，不暴露给策划」。
-    'StageOrder',
-    # OpOrder = 本拍**全部操作**（舞台/音乐/音效/语音）按源码出现的顺序。
-    # 为什么还需要它（StageOrder 不够）：舞台指令之间能靠 StageOrder 保序，
-    # 但**跨类别**的相对顺序没人记——`play music X` 写在 `show Y` 之前时，
-    # 渲染固定按"舞台→音频→语音"输出，音频就跑到立绘后面去了。
-    # 这在同一次交互里不改变最终画面，但回放/时间轴看起来是错的顺序。
-    'OpOrder',
-    # CodeBlocks = 「代码」列里**哪些行构成 `python:` 块**（行号区间）。
-    #
-    # 放在最末尾、**整列隐藏**（用户 2026-10-05：「新增的列放远点，甚至可默认
-    # 隐藏，因为事实上策划和文案不需要」）。它纯属工具维护的内部结构：
-    #
-    #   · 「代码」列一个格子装的是**多行文本**，`python:` 块的边界在纯文本里
-    #     **表达不出来** —— 一格里混着多条语句时（`$ a` / `$ b` / `python: c`）
-    #     读回来无从知道哪几行属于同一个块；
-    #   · 猜错的代价是**静默改语义**：整个块被拆成一条条 `$` 语句之后，
-    #     `for` / `if` 的嵌套体全被压到同一层（真实项目 `mini_game1.rpy`
-    #     一个块拆出 53 条，`for` 里的 `if` 直接变成顺序执行）。
-    'CodeBlocks',
-    # `Nest`：**结构位**（块路径，见 `Beat.nest_path`，B 阶段一）。
-    # 它与 `_menu_member` 是**同一个信息的两份载体**：后者只活在 .rpy 侧、
-    # 一进 Excel 就没了；前者随表走，于是"这条拍属于哪个选项"在表格往返
-    # 之后仍然说得清（现在只用来**对拍**，阶段二才让渲染改用）。
-    'Nest',
-    # `Inline`：**行尾注释**（C）。它与 `Nest` 不同 —— 那是结构位，这是
-    # 词法细节；两者都"工具维护 + 整列隐藏"。
-    'Inline',
-    # `Opaque` = **工具不认识的块语句，原样透传**（M1，2026-10-07）。
-    #
-    # 为什么单独一列、而不是塞进「代码」列：`CodeBlock` 的渲染会**推断**
-    # （认不出就补 `$`，整块还可能被包成 `python:`）。对一段工具看不懂的
-    # 自定义块，任何推断都是**改剧情**：
-    #
-    #     mycue "闪电" intensity=3:
-    #         target = ling            ← 补 `$` 就变成 `$ target = ling`
-    #
-    # `Opaque` 这一列的契约只有一句：**逐字写回，一个字都不动**。
-    # 它整列隐藏 —— 它是"我们管不了"的记录，不是给策划填的字段。
-    'Opaque',
-    # `SpecName` = 这一拍那条自定义语句**被谁声明过**（M3，2026-10-07）。
-    #
-    # 它把 `Opaque` 从"工具不认识"升级成"工具知道你是谁"：
-    #   · 空   → 真·未声明（报告里要催）；
-    #   · 有值 → 项目用 `storygraph.rules.json` 或 `renpy.register_statement`
-    #            声明过 → **T1**，工具按通用行处理，不再报"不认识"。
-    # 随表走是为了让"声明过没有"这件事**在往返之后依然成立**。
-    'SpecName',
-    # `SpecHead` = 那条自定义语句的**头行原文**（M4，2026-10-07）。
-    #
-    # 为什么单独一列（而不是让策划去改 `Opaque` 里的一大段）：这是 T1a/T1b
-    # 的**参数编辑面** —— 头行装着"这条语句在干什么"（`mycue "闪电"
-    # intensity=3:`），块体才是"细节"。分开之后：
-    #   · 头行一格可改（编剧真能用）；
-    #   · 块体格仍是逐字原文（撞不到）；
-    #   · **没改时逐字节不变**（渲染层比对，见 `beat_render.emit_opaque`）。
-    'SpecHead',
-    # `LoopHeader` = 循环块（`while` / `for`）的**头行**（D2，2026-10-07）。
-    #
-    # 与 `SpecHead` 同款：头行可编辑可校验，块体逐字躺在 `Opaque` 里。
-    # 有了它，`while` / `for` 就从"工具认识形状但没建模"（T2）升到
-    # **T0b**（内置 IR + 块体逐字）—— 见 `core.capability`。
-    'LoopHeader',
-    # `CameraHeader` = 3D 舞台 `camera` 块的**头行**（2026-10-07）。
-    #
-    # 与 `LoopHeader` 同款：头行（`camera background:`）可编辑可校验，
-    # 块体（ATL 属性）逐字躺在 `Opaque` 里。有了它，`camera` 就从
-    # "工具认识形状但没建模"（T2，报告里进"催我们建模"那一桶）升到
-    # **T0b** —— 与 `while` / `for` 同一档、同一套约定。
-    'CameraHeader',
-]
-
-
-#: 这些列整列隐藏（工具维护的内部元数据，策划不该看见也不该填）。
-#: 隐藏（hidden=True）在 Excel/WPS 里都是"列被收起"而不是"没有这一列"，
-#: 数据照旧读写，所以往返不会丢——这是选隐藏列而非"不写这一列"的原因。
-HIDDEN_BEAT_COLUMNS = ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest',
-                       'Inline', 'Opaque', 'SpecName', 'SpecHead',
-                       'LoopHeader', 'CameraHeader')
-
-
-# 写进 Excel 的表头（中文）。策划只看中文；程序侧键名仍是英文，
-# 读取时通过 _HEADER_ALIASES 把中文表头映射回键名，两边都不别扭。
-BEAT_HEADERS = {
-    'LineId': '行号', 'Seq': '序号', 'Label': '章节', 'Kind': '类型',
-    'Speaker': '说话人', 'Comment': '注释', 'Text': '台词',
-    'Condition': '条件',
-    'Scene': '背景', 'Show': '立绘', 'At': '位置', 'With': '转场',
-    'Hide': '退场',
-    'BGM': '音乐', 'BGMParams': '音乐参数', 'SFX': '音效',
-    'SFXParams': '音效参数', 'Voice': '语音',
-    'Stage': '舞台（高级）', 'CodeBlock': '代码',
-    'ContentHash': '内容指纹',
-    'StageOrder': '舞台顺序（内部）',
-    'OpOrder': '操作顺序（内部）',
-    'CodeBlocks': '代码块结构（内部）',
-    'Nest': '结构位（内部）',
-    'Inline': '行尾注释（内部）',
-    'Opaque': '原样块（内部）',
-    'SpecName': '声明来源（内部）',
-    'SpecHead': '自定义语句·头行（高级）',
-    'LoopHeader': '循环头行（内部）',
-    'CameraHeader': '相机头行（内部）',
-}
-
-_HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
-# 兼容英文表头（旧表 / 程序自己生成的表）
-_HEADER_ALIASES.update({f: f for f in BEAT_FIELDS})
-
-
-#: **单行列**：这些列的值会被**逐字拼进一行代码**（`{说话人} "台词"` /
-#: `show {立绘} at {位置}`），所以它们的单元格里**不许有换行/制表符**。
-#:
-#: 为什么必须有这份清单（2026-10-05，P0-1 的同一类，另一个出口）：
-#: `_quote` 转义的是**字符串字面量**（台词）那条出口；而这些列是**裸 token**
-#: 出口，不经过任何转义。单元格里的真换行（Excel 的 Alt+Enter、从别处粘
-#: 一段多行文本、脚本写表）就直接变成产物里的**物理换行**：
-#:
-#:     Speaker 列 = 'ling\nX'      →      ling
-#:                                        X "第一句"        ← 产物不可解析
-#:     At      列 = 'left\nright'  →      show ling at left
-#:                                        right              ← 同上
-#:     Show    列 = 'ling\nhappy'  →      被拆成两条 show（`show ling` +
-#:                                        `show happy`）—— 能解析，但语义变了
-#:
-#: 后两种最阴：产物**能解析**，所以门禁拦不住（门禁只看"产物的 Python
-#: 语法/图像名/label 重名"，中途断行产生的是一个"看起来正常"的短行）。
-#:
-#: 处置口径：**读表时把控制字符压成空格**（列契约本来就是"一行一个值"），
-#: 于是"粘进来的多行值"退化成"用手打了空格"，产物始终是一行 ——
-#: 不静默丢内容，也不会写出跑不起来的脚本。
-#:
-#: 多行列（`Text` 台词 / `Comment` 注释 / `Stage` 舞台 / `CodeBlock` 代码 /
-#: `FileBlocks` 文件级块）**刻意不在**这份清单里：它们的换行是**内容**
-#: （台词里 `\n` 是强制换行；Stage 一格多指令；代码块多行），由 `_quote`
-#: 转义或按行渲染，不走这条处置。
-SINGLE_LINE_BEAT_FIELDS = (
-    'LineId', 'Seq', 'Label', 'Kind', 'Speaker', 'Condition',
-    'Scene', 'Show', 'At', 'With', 'Hide',
-    'BGM', 'BGMParams', 'SFX', 'SFXParams', 'Voice',
-    'ContentHash', 'StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline',
-    'SpecName', 'SpecHead', 'LoopHeader', 'CameraHeader',
+#: 列契约 / 表头 / 隐藏列 / 单行列 / 快照 / 指纹 —— **唯一真源在
+#: `story.beat_fields`**（2026-10-17 收敛）。这里只做模块级别名：
+#: 从前它们是手写在本文件里的，而快照、哈希、协作又各自抄一份字段清单，
+#: 每加一个字段要同步五六处，漏一处就"某条路径静默丢字段"（见该模块 docstring）。
+#: 列顺序 = `BEAT_FIELDS`，**一条都不许在这里另写**。
+from storygraph.story.beat_fields import (  # noqa: E402
+    BEAT_FIELDS,
+    BEAT_HEADERS,
+    FINGERPRINT_FIELDS,
+    HIDDEN_BEAT_COLUMNS,
+    SINGLE_LINE_BEAT_FIELDS,
+    SNAPSHOT_FIELDS,
+    stable_value,
 )
+
+#: 中文表头 → 列名（`from_row` 读表时用）；同时兼容英文表头（旧表）。
+_HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
+_HEADER_ALIASES.update({f: f for f in BEAT_FIELDS})
 
 #: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。
 _CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]+')
@@ -744,8 +599,10 @@ def menu_caption_text(text) -> str:
 class Beat:
     """一个演出单元：说这句话时，舞台上是什么样。
 
-    **Excel 那一面是 21 列**（见 BEAT_FIELDS）：20 列结构化编辑面 + 1 列
-    **隐藏**的 `StageOrder`。演出相关的是：
+    **Excel 那一面是 31 列**（见 `BEAT_FIELDS`，定义在 `beat_fields.py`）：
+    21 列编辑面 + 10 列隐藏元数据（`StageOrder` / `OpOrder` / `CodeBlocks` /
+    `Nest` / `Inline` / `Opaque` / `SpecName` / `SpecHead` / `LoopHeader` /
+    `CameraHeader`）。演出相关的是：
 
         场景 / 立绘 / 位置 / 转场 / 退场      每列一个值，各挂词表下拉
         音乐 / 音效                          各自的「参数」列放 fadein 之类
@@ -775,7 +632,14 @@ class Beat:
     # 稳定身份 + 内容指纹：协作（DB 主键/锁）与翻译单元要用，
     # 详细理由见 assign_identity。
     line_id: str = ''
-    content_hash: str = ''
+    #: **拍内容指纹**（10 位 hex）。与 `Statement.content_hash`（16 位、
+    #: 翻译单元身份）**同名不同义**，所以 2026-10-17 改名区分开
+    #: （旧名 `content_hash` 仍是可读写的兼容属性，见下面那个 property）。
+    #:
+    #: 语义：这条拍**现在长什么样**。凡是会改产物或表的字段都进它
+    #: （字段集 = `beat_fields.FINGERPRINT_FIELDS`）；`line_id` / `seq` /
+    #: 指纹自己刻意不进。
+    beat_fingerprint: str = ''
     condition: str = ''
     comment: str = ''
     kind: str = KIND_SAY
@@ -855,6 +719,12 @@ class Beat:
     #: 它是**运行时元数据**：不入表、不进 ContentHash（与 `src_first` 同类），
     #: 所以 `to_row` 不收它 —— 收进去反而会让表里多出一列无人维护的仓库。
     sanitized_cells: list = field(default_factory=list)
+    #: **导入期的自动处置留痕**（运行时元数据，不入表/不进指纹）。
+    #:
+    #: 目前唯一的生产者：Excel 导入发现"行顺序与 `Seq` 不一致"时按 Seq
+    #: 重排（P0-3），在这里留一句"工具替你重排了" —— `pipeline.validate`
+    #: 报 W203。没有它的话，按说话人排序/拖动行就会**静默改剧情顺序**。
+    runtime_notes: list = field(default_factory=list)
     #: **文件级保真块**：顶层（label 之外）的一切 —— `define` / `default` /
     #: `image` / `transform` / `screen` / `init python` / 文件头注释 …，
     #: 渲染时原样回到**文件级**（在所有 label 之前），不参与"拍"的组装。
@@ -900,6 +770,21 @@ class Beat:
     # 导出时必须逐字还回去；不能因为"资源表里查不到这个组合"就改写成
     # 下划线形态 `ling_base_arms_akimbo_close_happy`——那是把能跑的脚本改坏。
     _from_script: bool = False
+
+    @property
+    def content_hash(self) -> str:
+        """
+        `beat_fingerprint` 的**兼容别名**（旧代码 / 旧测试还在用它）。
+
+        ⚠ 新代码请用 `beat_fingerprint`：`Statement.content_hash` 是
+        **16 位、翻译单元身份**，这里是 **10 位、拍内容指纹** ——
+        同名不同义曾让人把两者当成同一个东西（调研 P0-4）。
+        """
+        return self.beat_fingerprint
+
+    @content_hash.setter
+    def content_hash(self, value) -> None:
+        self.beat_fingerprint = value
 
     #: 语句头原文可能住的字段（顺序 = 渲染层那套优先级，唯一一处）。
     #:
@@ -1186,7 +1071,7 @@ class Beat:
             _hide_cell,
             bgm, bgm_params, sfx, sfx_params, self.voice,
             stage, compose_code_cell(self),
-            self.content_hash,
+            self.beat_fingerprint,
             # 隐藏列：源顺序 + 代码块结构 + 文件级代码块。
             # 工具写、工具读，策划界面里看不到。
             self.stage_order,
@@ -1280,7 +1165,7 @@ class Beat:
             seq=seq,
             label=g('Label'),
             line_id=g('LineId'),
-            content_hash=g('ContentHash'),
+            beat_fingerprint=g('ContentHash'),
             # 条件（`if …:` 走哪一支）：与 Text 同样保真，是**语义**不是排版
             condition=g('Condition'),
             comment=comment,
@@ -2331,6 +2216,86 @@ FILE_BLOCK_HEADERS = ['块号', '行文本']
 LEGACY_FILE_BLOCK_COLUMN = 'FileBlocks'
 
 
+#: Excel 单元格的**字符串硬上限**（xlsx 规范）—— 超了 openpyxl 就**静默截断**。
+#:
+#: 文件级保真块早就为这件事改走 `FILE_BLOCK_SHEET` 了，但**逐拍的那些格**
+#: （台词 / 注释 / 代码 / 舞台 / 条件…）**一直没人管**。2026-10-16 第七轮地狱测试
+#: （载体攻击）把它量了出来：一段 40000 字的独白导出后只剩 **32767** 字、
+#: 读回 32767、编译产物 32767 —— **3187 字消失且零警告**；下次"导出回 .rpy"
+#: 会带着截断文本覆盖原文（真源被静默改坏）。
+#:
+#: 用户拍板（2026-10-16）：**不许设这个上限** —— 超长演出是合理需求
+#: （整段旁白 / 系统提示 / 长独白），所以**不是**"报错拒绝"，而是
+#: **照样存下来**：超过就搬到 `LONG_TEXT_SHEET`（一行一格，无上限）。
+CELL_TEXT_LIMIT = 32767
+
+#: 超长文本的**保真表**（隐藏，一行一格）—— 与 `FILE_BLOCK_SHEET` 同一套办法，
+#: 因为它是同一个问题（单元格装不下）的另一个现场。
+LONG_TEXT_SHEET = '长文本保真'
+LONG_TEXT_HEADERS = ['行号', '字段', '序号', '片段']
+
+#: 保真表里**每一格**放多少字符。必须**严格小于** `CELL_TEXT_LIMIT` ——
+#: 因为"一行一格"只解决了"行数多"，**解决不了"单行本身太长"**：
+#: 40000 字没有换行的那一段塞进一格照样被截断（实测踩到）。
+#: 所以按**整段**切块、带序号，拼回来是按序相连（不做换行/分行的还原，
+#: 那样反而会引入误差）。
+LONG_TEXT_CHUNK = 30000
+
+#: 单元格里留给人的**预览长度**：表还要能读，不能整格变成一句"见附表"。
+LONG_TEXT_PREVIEW = 200
+
+#: 认出"这一格的真身在保真表里"的标记。挑一对生僻括号，且**不含 `#`**
+#: （注释列的值本身以 `#` 开头，标记不能跟它混）。
+LONG_TEXT_MARK = '⟪全文见「长文本保真」表⟫'
+
+
+class LongTextPreviewEdited(ValueError):
+    """
+    超长文本的**预览格被人改过**，但标记还在（P1-3）。
+
+    为什么是错误而不是"照旧用保真表的全文覆盖"：那会把用户的编辑**静默
+    吃掉**（40000 字全文赢，预览格里的改动消失且不报错）。反过来直接
+    用改过的预览也不行：全文（几千/几万字）会在下一次导出时被**静默截成
+    200 字**。两种静默都不接受，所以停下来让人选。
+
+    修法（错误信息里会写）：把那一格改回原文预览，或者把标记删掉
+    （= 明确放弃全文，只保留新写的短文本）。
+    """
+
+    def __init__(self, conflicts):
+        self.conflicts = list(conflicts or ())
+        lines = ['超长文本的预览格被改动过（「长文本保真」表里的全文和格内预览对不上）：']
+        for c in self.conflicts[:8]:
+            lines.append(f"  · 第 {c.get('line_id') or '?'} 行 · "
+                         f"{c.get('field') or '?'} 格（全文 {c.get('length', 0)} 字）")
+        if len(self.conflicts) > 8:
+            lines.append(f'  … 另有 {len(self.conflicts) - 8} 处')
+        lines.append('这两条路都**不能自动选**：直接覆盖会吃掉你的编辑，'
+                     '直接用预览会把全文截断。')
+        lines.append('请二选一：① 把那一格恢复成原文预览；'
+                     '② 删掉格里的「⟪全文见…⟫」标记（= 明确只保留新写的文本）。')
+        super().__init__('\n'.join(lines))
+
+
+def split_long_text(value) -> tuple:
+    """
+    一个格值 → `(留在格子里的预览 + 标记, 保真表的片段列表)`。
+
+    **没超限就一个字节都不动**：返回 `(原值, None)`。
+    """
+    s = '' if value is None else str(value)
+    if len(s) <= CELL_TEXT_LIMIT:
+        return value, None
+    chunks = [s[i:i + LONG_TEXT_CHUNK]
+              for i in range(0, len(s), LONG_TEXT_CHUNK)]
+    return s[:LONG_TEXT_PREVIEW] + LONG_TEXT_MARK, chunks
+
+
+def join_long_text_parts(chunks) -> str:
+    """保真表的片段（**按序号排好**）→ 原字符串（`split_long_text` 的逆）。"""
+    return ''.join('' if c is None else str(c) for c in (chunks or ()))
+
+
 def compose_inline_cell(beat) -> str:
     """
     `Inline` 单元格：`自己那行的注释` [ SEP `@if 条件行的注释` ]。
@@ -3184,7 +3149,7 @@ def assign_identity(beats: list):
         if not b.line_id:
             label = b.label or 'start'
             b.line_id = f"{label}.{b.seq:04d}"
-        b.content_hash = _beat_content_hash(b)
+        b.beat_fingerprint = _beat_content_hash(b)
 
 
 
@@ -3196,18 +3161,18 @@ def _beat_content_hash(beat: 'Beat') -> str:
     "改了内容"判成"未变"，静默丢改动。
     """
     import hashlib
-    parts = [
-        beat.kind, beat.speaker, beat.text, beat.scene, beat.show, beat.hide,
-        beat.at, beat.scene_at, beat.with_, beat.transform, beat.stage_order,
-        beat.raw, beat.code,
-        # raw/code 的交错顺序也算内容：顺序变了演出就变了
-        repr(getattr(beat, 'ordered', None) or []),
-        beat.music, beat.music_params, beat.music_action,
-        beat.sound, beat.sound_params, beat.sound_action, beat.voice,
-        beat.condition, beat.comment,
-        beat.stage, beat.bgm, beat.sfx,
-    ]
-    blob = '\x1f'.join('' if p is None else str(p) for p in parts)
+
+    #: **字段集只来自 `beat_fields.FINGERPRINT_FIELDS`**（2026-10-17 收敛）。
+    #: 从前这里是一张手写清单，漏掉了 `spec_head` / `loop_header` /
+    #: `camera_header` / `opaque` / `nest_path` / `code_blocks` /
+    #: `inline_comment` / `cond_comment` / `file_blocks` —— 于是改这些字段后
+    #: `save()` 判"没变"、协作 push 判 `unchanged`，改动静默不落库。
+    #:
+    #: `src_first` / `src_last` / `_from_script` / `sanitized_cells` 仍然刻意
+    #: 不在里面（运行时元数据，不得影响内容身份）。
+    parts = [stable_value(getattr(beat, attr, ''))
+             for attr in FINGERPRINT_FIELDS]
+    blob = '\x1f'.join(parts)
     return hashlib.md5(blob.encode('utf-8')).hexdigest()[:10]
 
 

@@ -144,6 +144,8 @@ class ValueChips(QWidget):
         self._edit.installEventFilter(self)
         outer.addWidget(self._edit)
         self._values: list = []
+        #: 值 → 显示名（只用于芯片的**标签**：`蓝（lan）`）；`text()` 永远只写值。
+        self._labels: dict = {}
         self._on_change = on_change
 
     # ---- 事件 ----
@@ -241,7 +243,7 @@ class ValueChips(QWidget):
     def values(self) -> list:
         return list(self._values)
 
-    def set_text(self, text: str):
+    def set_text(self, text: str, labels=None):
         """
         反向填（存量声明 / 旧调用点传进来的分隔串）。
 
@@ -249,16 +251,26 @@ class ValueChips(QWidget):
         而 `ColumnCard.set_data` 传的是**顿号串**（`'泳装、校服'`）→
         整串变成一个方块（"读出来的和写下去的不一样"）。现在
         逗号/顿号/分号/竖线/换行都认，且**多选格才算空格**。
+
+        `labels`：`{值: 显示名}`（例如 `{'lan': '蓝'}`）。只影响芯片怎么显示，
+        **不影响 `text()` 写出去的内容**。
         """
+        self._labels = dict(labels or {})
         self._values = split_candidate_values(text, multi=self._multi)
         self._rebuild()
 
-    def add_values(self, values):
+    def add_values(self, values, labels=None):
         """
         **一次倒进一批**（「⚡ 从项目里拿」用）—— 去重、**追加**不覆盖。
 
         为什么不复用 `set_text`：导入是"加上去"，不是"换掉我现在写的"。
+
+        `labels` 见 `set_text`：`{'lan': '蓝'}` 让芯片显示 `蓝（lan）`，
+        但写进声明的仍是 `lan`（脚本真源）。
         """
+        if labels:
+            self._labels.update({str(k): str(v) for k, v in labels.items()
+                                 if v})
         added = False
         for v in (values or ()):
             s = str(v).strip()
@@ -382,15 +394,20 @@ class ValueChips(QWidget):
     def _remove(self, value: str):
         if value in self._values:
             self._values.remove(value)
+        self._labels.pop(value, None)
         self._rebuild()
 
     def _rebuild(self):
         self._row.clear()
         for value in self._values:
-            chip = QPushButton(f'{value}  ✕')
+            label = str(self._labels.get(value) or '').strip()
+            shown = f'{label}（{value}）' if label and label != value else value
+            chip = QPushButton(f'{shown}  ✕')
             chip.setProperty('role', 'chip')
             chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            chip.setToolTip('点一下去掉这个候选值')
+            chip.setToolTip(
+                f'剧本里要写：{value}' + (f'\n显示名：{label}' if label else '')
+                + '\n点一下去掉这个候选值')
             chip.clicked.connect(lambda _=False, v=value: self._remove(v))
             self._row.add(chip)
         self.updateGeometry()
@@ -752,7 +769,9 @@ class FieldCard(QFrame):
             for r in rows:
                 act = menu.addAction(f'{r.get("label")}'
                                      f'（{r.get("count", 0)} 个）')
-                act.setData(list(r.get('values') or []))
+                # 值 + 显示名一起带过去：芯片显示 `蓝（lan）`，写盘只写 `lan`。
+                act.setData({'values': list(r.get('values') or []),
+                             'labels': dict(r.get('labels') or {})})
         return menu.exec(self._pick_btn.mapToGlobal(
             self._pick_btn.rect().bottomLeft()))
 
@@ -769,13 +788,19 @@ class FieldCard(QFrame):
         chosen = self.pick_source_action()
         if chosen is None or not chosen.data():
             return
+        data = chosen.data()
+        if isinstance(data, dict):
+            values = list(data.get('values') or [])
+            labels = dict(data.get('labels') or {})
+        else:                                  # 旧调用点：裸列表
+            values, labels = list(data), None
         # 刚导入的这组来源的名字，就是最好的"列名建议"
         # （真机实测：`expressions` 组倒出来 68 个，用户接着要起的就是"神态"那种名）
         label = str(chosen.text() or '').split('（', 1)[0].strip()
         if label:
             self._name_suggestion = label
             self._refresh_name_warning()
-        self._values.add_values(chosen.data())
+        self._values.add_values(values, labels=labels)
         # 拿进来就是"只能填这些"——不勾上候选白拿（只有勾了才进下拉）
         self._limit.setChecked(True)
         self._values.setVisible(True)

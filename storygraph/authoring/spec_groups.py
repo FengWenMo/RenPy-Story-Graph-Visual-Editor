@@ -52,6 +52,11 @@ class AttrGroup:
     name: str = ''
     label: str = ''
     options: list = field(default_factory=list)
+    #: **从引擎组里拆出来**（2026-10-18）：引擎常把"动作/姿势"和"服装"塞进
+    #: 同一个 `group outfit`；只改名拆不开它们。`split=True` 时这一栏按
+    #: `options` 从引擎组里**取走**这些词，单独成一格（只影响卡片/候选，
+    #: 不改引擎语义）。默认 False = 只改名（旧行为不变）。
+    split: bool = False
 
     @property
     def is_rest(self) -> bool:
@@ -83,7 +88,8 @@ def parse_attr_groups(raw) -> list:
             if s and s not in opts:
                 opts.append(s)
         out.append(AttrGroup(name=name, label=str(item.get('label') or ''),
-                             options=opts))
+                             options=opts,
+                             split=bool(item.get('split'))))
     return out
 
 

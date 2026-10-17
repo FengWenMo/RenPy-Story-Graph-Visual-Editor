@@ -40,6 +40,16 @@ ATTRS = ('_stage_native_show', '_stage_native_hide', '_stage_native_scene',
 
 def _snapshot(beat) -> dict:
     rec = {'row': [str(x) for x in beat.to_row()]}
+    # ⚠ **ContentHash 不算 hydrate 的输出**：它是内容指纹，算法在
+    # 2026-10-17 收敛字段契约时**有意**改了输入集（P0-4：补上 spec_head /
+    # opaque / code_blocks / file_blocks 等）。把它留在快照里，这张
+    # "hydrate 结果"的金标会因为一次哈希升级整批变红，掩盖真正要抓的
+    # "某类 op 并少了/并重了"。指纹本身另有 `test_content_hash_*` 守。
+    try:
+        from storygraph.story.beat_model import BEAT_FIELDS
+        rec['row'][BEAT_FIELDS.index('ContentHash')] = ''
+    except (ImportError, ValueError):
+        pass
     for a in ATTRS:
         v = getattr(beat, a, None)
         if isinstance(v, (set, frozenset)):

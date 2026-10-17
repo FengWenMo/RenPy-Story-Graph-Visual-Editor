@@ -255,7 +255,7 @@ class CollabDialog(_BaseDialog):
             return
         r = res.get('result') or {}
         self._say(f'✔ 已提交：新增 {r.get("added")} / 更新 {r.get("updated")} / '
-                  f'未变 {r.get("unchanged")}')
+                  f'未变 {r.get("unchanged")} / 复活 {r.get("revived")}')
         for key in ('conflicts', 'rejected'):
             rows = r.get(key) or []
             if rows:

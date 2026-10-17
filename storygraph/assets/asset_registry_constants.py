@@ -36,10 +36,16 @@ CATEGORY_KEYWORDS = {
 ASSET_FIELD_LABELS = {
     'ID': '编号',
     'Path': '真实文件',
-    'Tag': '角色标签',
-    'Attributes': '表情',
+    'Tag': '标签',
+    'Attributes': '立绘属性',
     'Category': '类别',
     'Notes': '备注',
+    #: 角色表：`Name` 是**显示名**（编剧看到的），`ImageTag` 才是 `show` 要写的 tag。
+    #: 2026-10-18：之前这两个键没有中文表头，角色表第一眼只剩「编号(隐藏) + Name」，
+    #: 于是看起来"角色表只显示角色名称"，没人知道 `show` 该写 `lan_tag`。
+    'Name': '显示名',
+    'ImageTag': '立绘 tag（show 用）',
+    'Color': '颜色',
     #: 角色别名（纯文字导入用，多值：`MOM|母亲|老妈`）——见 `_TABLE_FIELDS` 的说明
     'Aliases': '别名',
     'Loop': '循环',

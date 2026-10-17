@@ -32,12 +32,12 @@ PKG = ROOT / 'storygraph'
 
 #: 允许直接落盘的地方 —— 每个都要说明**写的是什么**。
 WRITERS = {
-    'story/generation_guard.py::write_generation':
-        '**唯一的 .rpy 落盘点**（门禁本体：写产物 / 写 .blocked.rpy 副本）',
-    'story/generation_guard.py::write_beats_to_rpy':
-        '门禁模块内的薄封装（同样走门禁，不是旁路）',
-    'assets/asset_extensions.py::apply_rename_patch':
-        "改名补丁写回用户 .rpy —— 只在**显式确认**后（D3'/M2 的确认闸门）",
+    'story/paths.py::write_text_atomic':
+        '**原子写原语**（唯一实现）：临时文件 + fsync + os.replace，'
+        '`newline=""` 保留换行。它**不是旁路** —— 就是 '
+        '`generation_guard.write_generation` / `write_beats_to_rpy` /'
+        '改名补丁（`asset_extensions.apply_rename_patch`）落盘时调的那一处'
+        '（P1-2：从前 `write_text` 会改 CRLF、且非原子）。',
     'app/session_graph.py::save_layout': '写布局 JSON（不是脚本）',
     'assets/asset_extensions.py::save': '写扩展配置 JSON',
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
@@ -66,6 +66,11 @@ WRITERS = {
         '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':
         '改/删项目清单（移除一条声明；**先备份**到 storygraph.rules.backup/）',
+    'story/statement_registry.py::_backup_manifest':
+        '把改之前的整份 rules.json 备份到 storygraph.rules.backup/'
+        '（不是写 .rpy；清空/重置前先留退路）',
+    'story/statement_registry.py::_write_manifest_after_removal':
+        '清空/重置声明时写回规则清单（只剩空段则删文件；**先备份**）',
     'pipeline/engine_collect.py::write_facts':
         '写 engine_facts.json（引擎事实快照 —— 不是 .rpy，不碰用户脚本）',
     'pipeline/engine_collect.py::_write_probe':

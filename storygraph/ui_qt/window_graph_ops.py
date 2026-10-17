@@ -49,6 +49,33 @@ from storygraph.ui_qt.status import Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 
+def format_character_ranking(rows) -> list:
+    """
+    【角色台词量】的行 → 人话。
+
+    数据源（`character_script_linker`）给的是
+    `{'variable_name','display_name','dialogue_count','label_count'}`，
+    而旧代码读的是 `name/character/count/lines` —— 键全不存在，
+    每一行都显示 `None：None`（2026-10-18 审计 P1-4）。
+    """
+    out = []
+    for row in (rows or ()):
+        if not isinstance(row, dict):
+            out.append(f'  {row}')
+            continue
+        name = str(row.get('display_name') or row.get('name')
+                   or row.get('character') or row.get('variable_name') or '?')
+        var = str(row.get('variable_name') or row.get('character') or '')
+        count = row.get('dialogue_count')
+        if count is None:
+            count = row.get('count')
+        if count is None:
+            count = row.get('lines', 0)
+        shown = f'{name}（{var}）' if var and var != name else name
+        out.append(f'  {shown}：{count}')
+    return out
+
+
 __all__ = ['GraphOpsMixin']
 
 
@@ -880,18 +907,32 @@ class GraphOpsMixin:
         self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
                   + ('：' + '、'.join(r['head'] for r in discovered[:8])
                      if discovered else ''))
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        if not accepted:
+            # 用户可能在「④ 已有声明」页里已经删/清过清单（那些动作是立即写盘的）
+            if getattr(dlg, 'changed', False):
+                self._after_learn_refresh()
+                self._status('清单已经改过了（在弹窗里删除/保存的）—— 表格会按新声明刷新。')
             return
         # —— 候选分栏（可选）：与语句声明一起写 ——
+        # ⚠ 勾了「把分栏一起写进清单」且**有栏**才整段替换：编辑器里删掉的栏
+        #   要真的消失。**没有栏时什么都不写** —— 空列表不能当成"清空"，
+        #   否则"只想加一条语句声明"会把项目已有的分栏整段删掉
+        #   （2026-10-18 审到的事故；清空只走第④页那个显式按钮）。
         wrote_group = False
-        group_rows = dlg.groups_to_write()
-        if group_rows:
-            gres = SR.declare_attr_groups(root, group_rows)
-            if gres.get('ok'):
-                wrote_group = True
-                self._log(f'[自定义] 分栏 {gres["count"]} 组 → {gres["path"]}')
+        if getattr(dlg, 'write_columns', None) is not None \
+                and dlg.write_columns.isChecked():
+            group_rows = dlg.groups_to_write()
+            if not group_rows:
+                self._log('[自定义] 当前没有可写分栏 —— 未改动清单里的候选分栏'
+                          '（要清空请到第④页「清空候选分栏」）')
             else:
-                self._log(f'[自定义] ✕ 分栏没写：{gres.get("reason")}')
+                gres = SR.declare_attr_groups(root, group_rows, replace=True)
+                if gres.get('ok'):
+                    wrote_group = True
+                    self._log(f'[自定义] 分栏 {gres["count"]} 组 → {gres["path"]}')
+                else:
+                    self._log(f'[自定义] ✕ 分栏没写：{gres.get("reason")}')
         built = dlg.result_declaration()
         if not built.get('ok'):
             for w in built.get('warnings') or []:
@@ -1148,12 +1189,7 @@ class GraphOpsMixin:
         tops = res.get('top_characters') or []
         if tops:
             lines.append('【角色台词量】')
-            for row in tops:
-                if isinstance(row, dict):
-                    lines.append(f'  {row.get("name") or row.get("character")}：'
-                                 f'{row.get("count") or row.get("lines")}')
-                else:
-                    lines.append(f'  {row}')
+            lines.extend(format_character_ranking(tops))
         for title, key in (('未定义角色', 'undefined'),
                            ('没出过场的角色', 'unused_characters'),
                            ('未使用的资产', 'unused_assets'),

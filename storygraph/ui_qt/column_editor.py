@@ -26,8 +26,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QMenu, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
@@ -62,6 +63,14 @@ class ColumnCard(QFrame):
         self._key = QLineEdit()
         self._key.setPlaceholderText('分栏标识（内部用，例：outfit）')
         self._key.setToolTip('写进清单的键，程序用。字母/数字/下划线。')
+        #: 项目里真实存在的引擎组名（由弹窗注入）——给人一个**能用**的键，
+        #: 而不是让编剧盲填「服装」后静默失败（2026-10-18）。
+        self._known_keys: list = []
+        self._pick_key = QPushButton('项目里的组…')
+        self._pick_key.setProperty('role', 'ghost')
+        self._pick_key.setToolTip('从项目 `layeredimage` / 引擎事实里读到的组名中选一个')
+        self._pick_key.clicked.connect(self._show_known_keys)
+        self._pick_key.setVisible(False)
         self._shown = QLineEdit()
         self._shown.setPlaceholderText('这一栏显示成（编剧看到的，例：服装）')
         self._shown.setToolTip('编剧在下拉里看到的分栏标题。')
@@ -73,8 +82,21 @@ class ColumnCard(QFrame):
                                 '可以一次粘一大段（一行一个 / 空格分隔都行）。')
 
         self._field('分栏标识（内部用）', self._key)
+        self._key_row = QHBoxLayout()
+        self._key_row.setContentsMargins(0, 0, 0, 0)
+        self._key_row.addWidget(self._pick_key)
+        self.layout().addLayout(self._key_row)
         self._field('这一栏显示成', self._shown)
         self._field('这一栏有哪些词（留空 = 兜底栏）', self._values)
+        #: 引擎常把动作/姿势并进 `outfit` 组 —— 只改名拆不开；
+        #: 勾上 = 按上面的词从引擎组里取走，单独成一格（只影响卡片/候选）。
+        self._split = QCheckBox('从引擎组里拆出来（引擎把动作并进服装时用）')
+        self._split.setToolTip(
+            '只有引擎把两类词塞进同一个 group（例如 outfit 里既有泳装又有 '
+            'stand/wave）时才需要勾。\n勾上后：上面这些词归这一栏，其余归引擎原组；'
+            '不改引擎语义，只改卡片上的格子。')
+        self._split.toggled.connect(self._notify)
+        self.layout().addWidget(self._split)
 
         #: 任何一个字改了都要通知外面（字段卡上的「分栏：xxx」标注要跟着变）
         self._on_changed = None
@@ -114,20 +136,52 @@ class ColumnCard(QFrame):
     def set_title(self, text: str):
         self._title.setText(text)
 
+    def set_known_keys(self, keys):
+        """项目里真实存在的引擎组名 —— 有的话露出「项目里的组…」按钮。"""
+        self._known_keys = [str(k).strip() for k in (keys or ())
+                            if str(k).strip()]
+        self._pick_key.setVisible(bool(self._known_keys))
+        if self._known_keys:
+            self._key.setToolTip(
+                '写进清单的键，程序用。\n项目里现有的组名：'
+                + '、'.join(self._known_keys[:12])
+                + ('…' if len(self._known_keys) > 12 else '')
+                + '\n⚠ 要让卡片把 `outfit` 显示成「服装」，这里的键必须是 `outfit`。')
+
+    def known_keys(self) -> list:
+        return list(self._known_keys)
+
+    def apply_known_key(self, key):
+        self._key.setText(str(key or ''))
+
+    def _show_known_keys(self):
+        if not self._known_keys:
+            return
+        menu = QMenu(self)
+        for key in self._known_keys:
+            act = menu.addAction(key)
+            act.triggered.connect(
+                lambda _=False, k=key: self.apply_known_key(k))
+        menu.exec(self._pick_key.mapToGlobal(
+            self._pick_key.rect().bottomLeft()))
+
     def data(self) -> dict:
         return {'key': self._key.text().strip(),
                 'name': self._key.text().strip(),        # 旧形状别名
                 'shown': self._shown.text().strip(),
                 'label': self._shown.text().strip(),     # 旧形状别名
                 'values': self._values.text(),
-                'choices': self._values.text()}          # 旧形状别名
+                'choices': self._values.text(),          # 旧形状别名
+                'split': self._split.isChecked()}
 
-    def set_data(self, key: str = '', shown: str = '', values: str = ''):
+    def set_data(self, key: str = '', shown: str = '', values: str = '',
+                 split: bool = False):
         self._key.setText(str(key or ''))
         self._shown.setText(str(shown or ''))
         # 旧调用点传的是逗号串（`'泳装,校服'`）—— 统一成顿号更贴中文习惯，
         # `ValueChips` 两种分隔符都认。
         self._values.set_text(str(values or '').replace(',', '、'))
+        self._split.setChecked(bool(split))
         self._refresh_title()
 
 
@@ -147,12 +201,21 @@ class ColumnList(QWidget):
         self._col.addStretch(1)
         self._cards: list = []
         self._on_change = on_change
+        self._known_keys: list = []
 
-    def add_column(self, key: str = '', shown: str = '', values: str = ''):
+    def set_known_keys(self, keys):
+        self._known_keys = [str(k).strip() for k in (keys or ())
+                            if str(k).strip()]
+        for card in self._cards:
+            card.set_known_keys(self._known_keys)
+
+    def add_column(self, key: str = '', shown: str = '', values: str = '',
+                   split: bool = False):
         card = ColumnCard(on_remove=self._remove, parent=self)
+        card.set_known_keys(self._known_keys)
         #: ⚠ 顺序要紧：`set_data` 会触发 textChanged，回调必须**在那之前**接好
         card._on_changed = self._notify
-        card.set_data(key, shown, values)
+        card.set_data(key, shown, values, split)
         self._col.insertWidget(self._col.count() - 1, card)
         self._cards.append(card)
         self._notify()
@@ -180,11 +243,13 @@ class ColumnList(QWidget):
         for c in (columns or ()):
             if isinstance(c, dict):
                 self.add_column(str(c.get('name') or ''), str(c.get('label') or ''),
-                                '、'.join(str(x) for x in (c.get('options') or ())))
+                                '、'.join(str(x) for x in (c.get('options') or ())),
+                                bool(c.get('split')))
             else:
                 self.add_column(getattr(c, 'name', '') or '',
                                 getattr(c, 'label', '') or '',
-                                '、'.join(getattr(c, 'options', []) or []))
+                                '、'.join(getattr(c, 'options', []) or []),
+                                bool(getattr(c, 'split', False)))
 
     def _remove(self, card):
         if card in self._cards:

@@ -61,10 +61,13 @@
 
 ## F. Excel / 表格
 - **F1** 安全写单元格唯一实现=`excel.cells`。
-- **F2** `beat_model.BEAT_FIELDS` 是列顺序唯一真源。动态列（`语句名·参数名`）追加末尾。`_row_fields()` 是"基础+动态"唯一拼法。加基础列同步六处（`BEAT_FIELDS`/`BEAT_HEADERS`/`HIDDEN_BEAT_COLUMNS`/`SINGLE_LINE_BEAT_FIELDS`/`to_row`/`from_row`）。
+- **F2** 列顺序唯一真源=`story/beat_fields.py` 的 `FieldSpec` 表（2026-10-17 收敛）。`BEAT_FIELDS`/`BEAT_HEADERS`/`HIDDEN_BEAT_COLUMNS`/`SINGLE_LINE_BEAT_FIELDS`/`SNAPSHOT_FIELDS`/`FINGERPRINT_FIELDS`/`schema.py` 全由它派生；新增字段=在表里加一行（标好 excel/collab/snapshot/fingerprint）+ 同步 `to_row`/`from_row` 的编解码。守卫 `tests/test_beat_field_contract.py`：Beat 上多一个字段没登记就红。
 - **F3** `Stage`/`BGM`/`SFX` 格内是 DSL：方括号原生写法直通。
 - **F4/F5/F6** `import_beats_from_excel` 一律 hydrate；`LineId` 是协作主键；`ContentHash` 每次重算；`dsl.normalize_text` 只归一分隔符绝不动 `，（）`。
 - **F7** 单行列单元格不许有换行（P0）：`SINGLE_LINE_BEAT_FIELDS`+`sanitize_single_line_cell` 读写两侧都过。多行列（台词/注释/Stage/Code/FileBlocks）刻意豁免。守卫 `test_cell_control_chars.py`。
+- **F8** **章节级顶层块**（`init python`/`default`/`define`…）真源=`story.chapter.ChapterDocument.file_blocks`；拍上的只是传输副本。删/插/恢复/撤销结构都过 `_sync_chapter()`（幂等）。守卫 `test_chapter_document.py`（删第一拍不许丢 `init python`）。
+   **整章结构树**（2026-10-18）：`ChapterDocument.tree`（`story.chapter_tree`）把场景→if/循环/菜单/选项体→拍建成真源；`beats` 是 `tree.flatten()` 的投影。增删移拍走树：块头带块体时默认**拒绝**，必须 `cascade=True` 才删整块；删完 `undo_structural()` 能按原 `nest_path` 放回。守卫 `test_chapter_tree.py`。
+- **F9** **排序权威=`Seq`**（P0-3）：Excel 导入按 Seq 重排（只排正号、缺号行留在原位、重复不猜），并在第一拍留 `runtime_notes` → validate 报 W203。渲染/导出仍按列表顺序；要改剧情顺序请改「序号」列。守卫 `test_chapter_document.py::TestExcelImportUsesSeq`。
 
 ## G. UI
 - **G1** 界面只从 `ui.tokens` 取色值/字号/间距；缩略图一律 `ui.thumb_loader`（禁 UI 线程同步解码）。
@@ -202,6 +205,16 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
 1. **程序不给就不发生**（没有文件 → 行为与以前一模一样）；
 2. **程序写的代码不许弄坏工具**（异常只记进 `notes`，工具照常干活）；
 3. **`None`（程序不管）≠ 程序说通过** —— 分不开就是假绿。
+4. **默认不执行项目代码**（2026-10-17 补，`exec` 不是沙箱）：这是任意代码
+   执行入口。授权三选一：调用参数 `trust=True` / 环境变量
+   `STORYGRAPH_TRUST_HOST_HOOKS=1` / 项目 `storygraph.rules.json` 写
+   `{"host_hooks": {"trust": true}}`。未授权 → `available=false, denied=true`
+   + 说清怎么授权（不是"程序没提供"）。守卫 `tests/test_host_hook_trust.py`。
+5. **授权后也在子进程里跑**（2026-10-18 补）：`host_worker.py` 用
+   `python -I` 起独立进程；加载/`declarations`/`validate` 各有超时（20/20/10s），
+   单行响应上限 8 MiB、stderr 只留最后 64 KiB。超时/崩溃/洪水输出只杀子进程，
+   工具拿到 `None` + `notes`，**绝不假装通过**。守卫 `test_host_hook_isolation.py`。
+   ⚠ 这是稳定性隔离，**不是安全沙箱**（子进程仍有当前用户的文件/网络权限）。
 
 ⚠ **接线要求**：工具的形状判据**认不出的行**（`mycue "打雷"` 与台词同形），
 **也必须先问程序的验证函数**（否则那函数永远问不到，等于白写）。
@@ -572,10 +585,14 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
 5. **生成门禁是最后一道闸**：`write_generation` / `write_beats_to_rpy`。
    命中 block 级问题（中文图像名、产物落进 `game/` 时 label 重名）就**不写目标
    路径**，改写 `<stem>.blocked.rpy`。所有落盘路径都必须过它。
+   **落盘原语=`story.paths.write_text_atomic`**（2026-10-17，P1-2）：同目录临时
+   文件 → `newline=''` 写（**不许把 LF 翻成 CRLF**）→ fsync → `.bak` →
+   `os.replace`。禁用 `Path.write_text` 直接写 `.rpy`。守卫 `test_atomic_write.py`。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
-7. **`BEAT_FIELDS` 是列顺序唯一真源**（24 列 = 21 列编辑面 + 3 列隐藏元数据），
-   `Beat.to_row/from_row` 必须逐列对应。`Condition` 是**语义列**（不是排版列）：
+7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
+   定义在 `story/beat_fields.py`（不再手写第二份），`Beat.to_row/from_row`
+   必须逐列对应。`Condition` 是**语义列**（不是排版列）：
    它 2026-10-05 从"已被收敛掉的旧列"里**加回来**了 —— 没有它，
    `Beat.condition` 在进出 Excel 时没有任何出口，所有 `if` / 菜单条件会在
    往返里被静默抹平（实测真实项目一条章节 7 条条件 → 0 条）。

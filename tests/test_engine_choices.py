@@ -58,8 +58,9 @@ LAN_CANDS = {'lan': ['happy', 'clothes2', 'base_hand_up', 'sad', 'zero_shot']}
 class AttrGroup:
     """项目声明的词组（与 `authoring.spec_groups.AttrGroup` 同形）。"""
 
-    def __init__(self, name, label, options=()):
+    def __init__(self, name, label, options=(), split=False):
         self.name, self.label, self.options = name, label, list(options)
+        self.split = bool(split)
 
     def title(self):
         return self.label or self.name or '（未命名）'
@@ -261,6 +262,24 @@ class TestCardNote:
         note = beats.card_note(self._beat('lan happy sad'), None,
                                _facts(LAN_ATTRS, LAN_CANDS))
         assert '\n' not in note
+
+    def test_character_variable_is_flagged_with_the_real_image_tag(self):
+        """
+        用户 2026-10-18："编剧不知道 lan 这个变量在程序里不是这么定义的"。
+        `show lan` 而资源表里立绘 tag 是 `lan_tag` → 提示真 tag，**不改写法**。
+        """
+        class _Sym:
+            def has_image_tag(self, tag):
+                return tag == 'lan_tag'
+
+            def actor_image_tag(self, tag):
+                return 'lan_tag' if tag == 'lan' else ''
+
+        note = beats.card_note(self._beat('lan happy'), _Sym(), None)
+        assert '角色变量' in note and 'lan_tag' in note, note
+        # 已经是真 tag → 不吵
+        assert 'lan_tag' not in beats.card_note(
+            self._beat('lan_tag happy'), _Sym(), None)
 
 
 class TestUnrecognizedAttrs:
@@ -790,12 +809,104 @@ class TestAttrSlotRows:
         outfit = next(r for r in rows if r['group'] == 'outfit')
         assert outfit['label'] == '服装'
 
+    def test_split_group_takes_action_words_out_of_the_outfit_group(self):
+        """
+        **用户 2026-10-18 的核心诉求**：引擎把 `stand/wave` 塞进 `outfit`，
+        项目声明 `pose/动作 split=true` → 卡片要出现「动作」格，而不是把动作
+        词混在「服装」下拉里。不改引擎语义，只改卡片/候选。
+        """
+        facts = _facts(
+            {'mix': [{'group': 'outfit', 'attribute': 'swim_suit'},
+                     {'group': 'outfit', 'attribute': 'uniform'},
+                     {'group': 'outfit', 'attribute': 'stand'},
+                     {'group': 'outfit', 'attribute': 'wave'},
+                     {'group': 'expressions', 'attribute': 'happy'}]},
+            {'mix': ['swim_suit', 'uniform', 'stand', 'wave', 'happy']})
+        groups = [_Group('pose', '动作', ['stand', 'wave'], split=True)]
+        rows = beats.attr_slot_rows('mix swim_suit stand', _ye_sym(),
+                                    groups=groups, facts=facts)
+        by_group = {r['group']: r for r in rows}
+        assert by_group['outfit']['options'] == ['swim_suit', 'uniform'], rows
+        assert by_group['pose']['options'] == ['stand', 'wave'], rows
+        assert by_group['pose']['label'] == '动作'
+        # 点「动作」只换动作词，服装不许丢
+        got = beats.apply_attr_slot('mix swim_suit stand', 'pose', 'wave',
+                                    symbols=_ye_sym(), groups=groups,
+                                    facts=facts)
+        assert got == 'mix swim_suit wave', got
+
+    def test_without_split_the_action_words_stay_in_outfit(self):
+        """默认仍是"只改名"（旧项目行为不变）：`pose` 声明不参与分格。"""
+        facts = _facts(
+            {'mix': [{'group': 'outfit', 'attribute': 'swim_suit'},
+                     {'group': 'outfit', 'attribute': 'stand'}]},
+            {'mix': ['swim_suit', 'stand']})
+        groups = [_Group('pose', '动作', ['stand'])]
+        rows = beats.attr_slot_rows('mix swim_suit stand', _ye_sym(),
+                                    groups=groups, facts=facts)
+        assert [r['group'] for r in rows] == ['outfit'], rows
+        assert 'stand' in rows[0]['options']
+
     def test_mask_words_are_preserved_as_extras(self):
         """**不认识的词一个字节都不丢**（`base_handdown_mask` 这类内部件）。"""
         rows = beats.attr_slot_rows('ye base_handdown base_handdown_mask gratified',
                                     _ye_sym(), facts=_ye_facts())
         assert rows, '两个维度都在 → 应当给格子'
         assert rows[0]['extras'] == ['base_handdown_mask'], rows[0]
+
+    def test_tag_only_still_gets_every_group(self):
+        """`show ye`（这一拍一个属性都没写）也要有格子 —— 否则用户没法补服装。"""
+        rows = beats.attr_slot_rows('ye', _ye_sym(), facts=_ye_facts())
+        assert [r['group'] for r in rows] == ['expressions', 'outfit'], rows
+        assert [r['value'] for r in rows] == ['', '']
+        assert rows[1]['options'] == ['base_handdown', 'base_swimsuit']
+
+    def test_one_engine_group_is_still_a_slot(self):
+        """只有一个引擎组时也要建这一格（不能退回写死的「表情」）。"""
+        facts = _facts({'solo': [{'group': 'pose', 'attribute': 'wave'}]},
+                       {'solo': ['wave']})
+        rows = beats.attr_slot_rows('solo wave', _ye_sym(), facts=facts,
+                                    groups=[_Group('pose', '动作')])
+        assert [r['group'] for r in rows] == ['pose'], rows
+        assert rows[0]['label'] == '动作', rows[0]
+        assert rows[0]['value'] == 'wave'
+
+    def test_layered_fallback_uses_the_declared_label(self):
+        """
+        没有引擎事实、只有项目 `layeredimage` 时，**改名层也要生效**：
+        组名是 `outfit`，但项目声明「服装」—— 卡片上不许再显示 `outfit`
+        （用户 2026-10-18 的原始复现）。
+        """
+        from types import SimpleNamespace
+
+        img = SimpleNamespace(groups=[
+            SimpleNamespace(name='outfit', attrs=['swim_suit', 'uniform'])])
+        model = SimpleNamespace(images={'lan': img})
+        rows = beats.attr_slot_rows('lan', _ye_sym(),
+                                    groups=[_Group('outfit', '服装')],
+                                    layer_model=model)
+        assert len(rows) == 1, rows
+        assert rows[0]['group'] == 'outfit'
+        assert rows[0]['label'] == '服装', rows[0]
+        assert rows[0]['value'] == ''
+        assert rows[0]['options'] == ['swim_suit', 'uniform']
+
+    def test_declared_groups_are_the_last_structure_fallback(self):
+        """
+        没有引擎事实、也没有 `layeredimage` 时，项目在 `rules.json` 里声明的
+        分栏就是唯一结构来源 —— 否则"我明明定义了服装"在卡片上永远不出现。
+        """
+        groups = [_Group('outfit', '服装', ['base_handdown', 'base_swimsuit']),
+                  _Group('expressions', '表情', ['happy', 'gratified'])]
+        rows = beats.attr_slot_rows('ye base_handdown happy', _ye_sym(),
+                                    groups=groups)
+        assert [r['group'] for r in rows] == ['outfit', 'expressions', ''], rows
+        assert [r['label'] for r in rows[:2]] == ['服装', '表情'], rows
+        assert rows[0]['value'] == 'base_handdown'
+        assert rows[1]['value'] == 'happy'
+        # ⚠ 没归到任何声明组的词**不许消失**（`spec_groups` 的契约）——
+        #   它们留在最后那个没有标题的组里，卡片上显示成「属性：…」。
+        assert set(rows[2]['options']) == {'ahah', '_hd_cut'}, rows[2]
 
 
 class TestApplyAttrSlot:

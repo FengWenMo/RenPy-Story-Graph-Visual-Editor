@@ -143,6 +143,11 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
                              if project_root is not None else None)
         self.script_path: Optional[Path] = None
         self.beats: List[Beat] = []
+        #: **章节级真源**（顶层 `init python` / `default` / `define` …）。
+        #: 拍上的 `file_blocks` 只是给渲染/Excel 的传输副本 —— 见
+        #: `story.chapter.ChapterDocument`（P0-2：删第一拍不许丢顶层块）。
+        from storygraph.story.chapter import ChapterDocument
+        self.chapter = ChapterDocument()
         self.symbols = None
         #: 「打开项目」读进来的资源表（xlsx）。**只服务资源侧**
         #: （下拉候选 / 缩略图 / 参与角色 / 资产选择器），与剧情图无关。
@@ -254,6 +259,11 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
 
     def compile(self):
         """编译当前 beats（返回编译结果对象，不落盘）。"""
+        # 渲染器读的是拍列表（`Beat.file_blocks` 是传输副本），所以编译前
+        # 必须把章节真源下发一次 —— 哪怕有人绕过增删卡直接改了 `self.beats`。
+        sync = getattr(self, '_sync_chapter', None)
+        if callable(sync):
+            sync()
         from storygraph.pipeline.compile import compile_beats
         return compile_beats(self.beats, registry=self.registry(),
                              include_transforms=self.should_write_transforms())

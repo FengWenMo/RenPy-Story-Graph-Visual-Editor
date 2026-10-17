@@ -68,7 +68,11 @@ _SCHEMAS = {
     'verify_behavior': {'type': 'object', 'properties': {
         'head': {'type': 'string'}}, 'required': ['head']},
     'host_validate': {'type': 'object', 'properties': {
-        'head': {'type': 'string'}, 'text': {'type': 'string'}},
+        'head': {'type': 'string'}, 'text': {'type': 'string'},
+        'trust': {'type': 'boolean',
+                  'description': 'true = 明确信任并执行项目里的 '
+                                 'storygraph.host.py（任意代码执行入口；'
+                                 '默认不执行）'}},
         'required': ['head', 'text']},
     'health': {'type': 'object', 'properties': {}, 'required': []},
     'project_context': {'type': 'object', 'properties': {}, 'required': []},

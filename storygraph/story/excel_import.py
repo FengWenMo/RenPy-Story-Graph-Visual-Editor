@@ -20,7 +20,7 @@ from storygraph.story.beat_model import (
     _split_show_items,
 )
 from storygraph.story.beat_render import _normalize_image_name, make_symbols
-from storygraph.story.excel_export import _read_beats_from_ws
+from storygraph.story.excel_export import _read_beats_from_ws, _read_long_text
 
 
 
@@ -50,7 +50,11 @@ def import_beats_from_excel(path, registry=None) -> list:
     wb = openpyxl.load_workbook(path, data_only=False)
     try:
         ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
-        beats = _read_beats_from_ws(ws)
+        # 超长文本（>32767）的真身在**隐藏表**里，格子里只有"预览 + 标记" ——
+        # 这里先把那张表读成 `{(行号, 字段): 全文}`，读行时按同一把钥匙还原
+        # （见 `beat_model.CELL_TEXT_LIMIT`）。没有那张表 → 空 dict → 行为不变。
+        long_text = _read_long_text(wb)
+        beats = _read_beats_from_ws(ws, long_text=long_text)
         # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：在**隐藏表**里。
         # 没有那张表时退回老版本的隐藏列（见 `_read_file_blocks`）。
         blocks_text = _read_file_blocks(wb, ws)

@@ -704,6 +704,17 @@ def validate_level2(beats, registry=None, menu_labels=None) -> list:
                 f"label '{label}' 有 {count} 个菜单选项却没有 menu 行",
                 label, '补一行 menu（Caption 填提示语）或用 jump 代替'))
 
+    # 导入期"工具替你做了什么"（目前是 Excel 行序按 Seq 重排，P0-3）。
+    # 必须报出来：重排本身安全，但"我拖动的那一行没生效"必须让人知道，
+    # 否则他会以为工具在随机改顺序。
+    for b in beats:
+        for note in (getattr(b, 'runtime_notes', None) or ()):
+            issues.append(Issue(
+                L2, 'W203', WARNING, str(note),
+                getattr(b, 'line_id', '') or getattr(b, 'label', ''),
+                '这是导入时按「序号」列做的自动排序；要改剧情顺序，'
+                '请直接改「序号」列（只拖动行 / 按别的列排序不会生效）'))
+
     return issues
 
 

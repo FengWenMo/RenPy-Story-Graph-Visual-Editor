@@ -267,6 +267,25 @@ def clear_cache() -> None:
     _CACHE.clear()
 
 
+def manifest_path(project_root) -> Path:
+    """
+    清单**实际所在**的路径（项目根或 `game/`，已有的那份优先）。
+
+    为什么要有（2026-10-18 审计 P1-5）：读走 `find_manifest`（两处都认），
+    写却一律 `root / 'storygraph.rules.json'` —— 清单在 `game/` 下的项目
+    能看见声明，但删/清/重置/写入全部失败或写到**另一个文件**。
+    新建仍默认项目根（与历史行为一致）。
+    """
+    root = Path(project_root) if project_root else Path('.')
+    for p in (root / MANIFEST_NAMES[0], root / 'game' / MANIFEST_NAMES[0]):
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return root / MANIFEST_NAMES[0]
+
+
 def root_of(script_path) -> str:
     """
     从脚本路径反推**项目根**。**推不出来返回 `''`**（不是"退回父目录"）。
@@ -1164,7 +1183,7 @@ def declare_statement(project_root, name: str, label: str = '',
     if root is None:
         return {'ok': False, 'path': '', 'action': 'refused',
                 'reason': '没有项目根目录', 'entry': {}}
-    path = root / MANIFEST_NAMES[0]
+    path = manifest_path(root)
 
     data = {}
     action = 'added'
@@ -1358,7 +1377,7 @@ def remove_statement(project_root, name: str) -> dict:
     if root is None:
         return {'ok': False, 'path': '', 'removed': False,
                 'deleted_file': False, 'backup': '', 'reason': '没有项目根目录'}
-    path = root / MANIFEST_NAMES[0]
+    path = manifest_path(root)
     if not path.is_file():
         return {'ok': False, 'path': str(path), 'removed': False,
                 'deleted_file': False, 'backup': '',
@@ -1532,7 +1551,8 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
     return sorted(found.values(), key=lambda r: (-r['count'], r['head']))
 
 
-def declare_attr_groups(project_root, groups) -> dict:
+def declare_attr_groups(project_root, groups, *, replace: bool = False,
+                        clear: bool = False) -> dict:
     """
     **把"词组"写进清单**（`storygraph.rules.json` 的 `attr_groups`）。
 
@@ -1545,7 +1565,16 @@ def declare_attr_groups(project_root, groups) -> dict:
       · 同名 = 更新（教两次不会变成两组）；
       · 其它键（`statements` / 用户自己加的）**原样保留**；
       · 清单坏了 → **拒绝写**（绝不覆盖用户手写的东西）；
-      · `groups` 传空列表 = **清掉**该段（把分组关掉，回到平铺）。
+      · `groups` 传空列表 = 拒绝（要清空请用 `clear_attr_groups`）。
+
+    `replace=True`（2026-10-18，界面"保存候选分栏"用）：**整段替换** ——
+    编辑器里删掉的那一栏真的会从清单消失（默认的 merge 语义做不到删除）。
+    replace 会**先备份**。
+
+    ⚠⚠ `replace=True` + 空列表 **默认不清空**：必须再显式传 `clear=True`。
+    这是 2026-10-18 审到的事故（主 OK 勾了"把分栏一起写进清单"、而当前没有
+    可写分栏时，把项目已有的分组整段删了）—— 清空是破坏性动作，只能由
+    明确的按钮/参数发起。
 
     返回 `{'ok','path','action','reason','count'}`。
     """
@@ -1564,17 +1593,28 @@ def declare_attr_groups(project_root, groups) -> dict:
         entry = {'name': name}
         if str(item.get('label') or '').strip():
             entry['label'] = str(item['label']).strip()
+        if item.get('split'):
+            entry['split'] = True
         opts = [str(o).strip() for o in (item.get('options') or ())
                 if str(o).strip()]
         if opts:
             entry['options'] = opts
         clean.append(entry)
     if not clean:
+        if replace and clear:
+            res = clear_attr_groups(project_root)
+            if res.get('ok') and not res.get('removed'):
+                return {'ok': True, 'path': res.get('path', ''),
+                        'action': 'unchanged', 'reason': '', 'count': 0}
+            res = dict(res)
+            res['action'] = 'cleared'
+            return res
         return {'ok': False, 'path': '', 'action': 'refused',
-                'reason': '一个词组都没填（要清掉分组请用"清空分组"）',
+                'reason': ('一个词组都没填。要清空已有分栏请用'
+                           '「清空候选分栏」（replace 空列表不会清空）'),
                 'count': 0}
 
-    path = root / MANIFEST_NAMES[0]
+    path = manifest_path(root)
     data = {}
     if path.is_file():
         try:
@@ -1586,6 +1626,41 @@ def declare_attr_groups(project_root, groups) -> dict:
         if not isinstance(data, dict):
             return {'ok': False, 'path': str(path), 'action': 'refused',
                     'reason': '清单顶层不是对象，拒绝覆盖', 'count': 0}
+
+    if replace:
+        # 整段替换 = 会删掉编辑器里已经去掉的那些栏，必须先留退路。
+        try:
+            if path.is_file():
+                _backup_manifest(root, path)
+        except Exception as e:                  # noqa: BLE001 - 备不了就不删
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': f'备份失败，为安全起见没有改动：{e}', 'count': 0}
+        # 整段替换时，**同名条目里用户手写的未知字段原样保留**（`when` /
+        # 备注 / 以后新增的键）—— 只换编辑器认识的那三样（name/label/options）。
+        old_entries = data.get(ATTR_GROUPS_KEY)
+        old_by_name = {}
+        if isinstance(old_entries, list):
+            for it in old_entries:
+                if isinstance(it, dict) and str(it.get('name') or '').strip():
+                    old_by_name[str(it['name']).strip()] = it
+        merged = []
+        for entry in clean:
+            old = old_by_name.get(entry['name'], {})
+            extra = {k: v for k, v in old.items()
+                     if k not in ('name', 'label', 'options')}
+            extra.update(entry)
+            merged.append(extra)
+        data[ATTR_GROUPS_KEY] = merged
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                            encoding='utf-8')
+        except Exception as e:                  # noqa: BLE001
+            return {'ok': False, 'path': str(path), 'action': 'refused',
+                    'reason': f'写不进去：{e}', 'count': 0}
+        clear_cache()
+        return {'ok': True, 'path': str(path), 'action': 'replaced',
+                'reason': '', 'count': len(clean)}
 
     existing = data.get(ATTR_GROUPS_KEY)
     if not isinstance(existing, list):
@@ -1624,10 +1699,160 @@ def declare_attr_groups(project_root, groups) -> dict:
             'count': len(data[ATTR_GROUPS_KEY])}
 
 
+def _backup_manifest(root: Path, path: Path) -> str:
+    """把清单**改之前**的整份内容备份到 `storygraph.rules.backup/`。"""
+    from datetime import datetime
+
+    bdir = root / 'storygraph.rules.backup'
+    bdir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    bpath = bdir / f'{path.stem}.{stamp}.json'
+    bpath.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
+    return str(bpath)
+
+
+def _write_manifest_after_removal(path: Path, data: dict) -> bool:
+    """清单里只剩空段 → 删文件；还有别的段 → 写回。返回是否删了文件。"""
+    import json
+
+    if all(not v for v in data.values()):
+        path.unlink()
+        return True
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                    encoding='utf-8')
+    return False
+
+
+def clear_attr_groups(project_root) -> dict:
+    """
+    **把「候选分栏」整段清掉**（先备份，可回退）。
+
+    为什么需要它（用户 2026-10-18）：
+    "你给了个 rules.json 建立，却又不给删除重置" —— 分栏页可以把每一栏删掉，
+    但写回时 `declare_attr_groups([])` 会拒绝，于是**删不干净**。这个入口是
+    "清空分组"（不是"删掉整个清单"：`statements` / `host_hooks` 等其它段原样
+    保留）。
+
+    返回 `{'ok','path','removed','deleted_file','backup','count','reason'}`。
+    """
+    import json
+
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': '没有项目根目录'}
+    path = manifest_path(root)
+    if not path.is_file():
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': f'没有 {MANIFEST_NAMES[0]}（本来就没有分组）'}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8') or '{}')
+    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': '清单顶层不是对象，拒绝改动'}
+    old = data.get(ATTR_GROUPS_KEY)
+    if not isinstance(old, list) or not old:
+        return {'ok': True, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': '清单里本来就没有 attr_groups'}
+    try:
+        backup = _backup_manifest(root, path)
+    except Exception as e:                      # noqa: BLE001 - 备不了就不删
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': '', 'count': 0,
+                'reason': f'备份失败，为安全起见没有改动：{e}'}
+    rest = {k: v for k, v in data.items() if k != ATTR_GROUPS_KEY}
+    try:
+        deleted = _write_manifest_after_removal(path, rest)
+    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
+        return {'ok': False, 'path': str(path), 'removed': False,
+                'deleted_file': False, 'backup': backup, 'count': 0,
+                'reason': f'写不进去：{e}（备份在 {backup}）'}
+    clear_cache()
+    return {'ok': True, 'path': str(path), 'removed': True,
+            'deleted_file': deleted, 'backup': backup, 'count': len(old),
+            'reason': ''}
+
+
+def reset_declarations(project_root) -> dict:
+    """
+    **重置项目清单里的自定义声明**（`statements` + `attr_groups` 两段）。
+
+    ⚠ 不是删整个文件：`host_hooks.trust` 或用户自己加的键**原样保留**；
+    只有"删完什么都不剩"时才删文件（回到"项目没声明"的干净状态）。
+    改之前整份备份到 `storygraph.rules.backup/`。
+
+    返回 `{'ok','path','statements','groups','deleted_file','backup','reason'}`。
+    """
+    import json
+
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': '没有项目根目录'}
+    path = manifest_path(root)
+    if not path.is_file():
+        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': f'没有 {MANIFEST_NAMES[0]}'}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8') or '{}')
+    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
+        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': '清单顶层不是对象，拒绝改动'}
+    st = data.get(MANIFEST_KEY)
+    gr = data.get(ATTR_GROUPS_KEY)
+    n_st = len(st) if isinstance(st, list) else 0
+    n_gr = len(gr) if isinstance(gr, list) else 0
+    if not n_st and not n_gr:
+        return {'ok': True, 'path': str(path), 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': '清单里没有 statements / attr_groups'}
+    try:
+        backup = _backup_manifest(root, path)
+    except Exception as e:                      # noqa: BLE001
+        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': '',
+                'reason': f'备份失败，为安全起见没有改动：{e}'}
+    rest = {k: v for k, v in data.items()
+            if k not in (MANIFEST_KEY, ATTR_GROUPS_KEY)}
+    try:
+        deleted = _write_manifest_after_removal(path, rest)
+    except Exception as e:                      # noqa: BLE001
+        return {'ok': False, 'path': str(path), 'statements': n_st,
+                'groups': n_gr, 'deleted_file': False, 'backup': backup,
+                'reason': f'写不进去：{e}（备份在 {backup}）'}
+    clear_cache()
+    return {'ok': True, 'path': str(path), 'statements': n_st,
+            'groups': n_gr, 'deleted_file': deleted, 'backup': backup,
+            'reason': ''}
+
+
 def format_registry_report(registry) -> str:
     """注册表（或 spec 列表）→ 人话（体检报告 / 导出结论用）。结论在第一条。"""
     specs = _specs_of(registry)
+    groups = list(getattr(registry, 'attr_groups', ()) or ())
     if not specs:
+        if groups:
+            lines = [f'项目没有语句声明；候选分栏（attr_groups）有 '
+                     f'{len(groups)} 栏：']
+            for g in groups:
+                words = (f'{len(g.options)} 个词' if g.options else '兜底栏')
+                lines.append(f'  · {g.title()}（{g.name}）：{words}')
+            return '\n'.join(lines)
         return ('项目**没有声明**任何自定义语句：既没有 `renpy.register_statement`'
                 '（CDS），`storygraph.rules.json` 里也没有 `statements` 段。'
                 '自定义结构若想被工具管理，从这两处任选一处写下来即可。')
@@ -1641,6 +1866,12 @@ def format_registry_report(registry) -> str:
             extra.append(s.docs)
         where = f'  {s.origin}' if s.origin else ''
         lines.append(f'  · {s.name}（{"；".join(extra)}）{where}')
+    if groups:
+        lines.append('')
+        lines.append(f'候选分栏（attr_groups）：{len(groups)} 栏')
+        for g in groups:
+            words = (f'{len(g.options)} 个词' if g.options else '兜底栏')
+            lines.append(f'  · {g.title()}（{g.name}）：{words}')
     return '\n'.join(lines)
 
 
@@ -1648,13 +1879,13 @@ __all__ = ['ATTR_GROUPS_KEY', 'MANIFEST_KEY', 'RegisteredStatement',
            'StatementRegistry',
            'UNMODELED_KINDS', 'annotate_spec_statements', 'arg_columns',
            'as_registered',
-           'capability_of', 'classify_head', 'clear_cache',
+           'capability_of', 'classify_head', 'clear_attr_groups', 'clear_cache',
            'coverage_of_beats', 'coverage_of_statements',
            'declare_attr_groups', 'declare_statement', 'declared_builtins',
            'describe_statements',
            'discover_undeclared',
-           'dynamic_spec_columns',
-           'format_capability_summary',
-           'format_registry_report', 'registry_for_parse_result',
-           'remove_statement', 'root_of',
+           'dynamic_spec_columns', 'format_capability_summary',
+           'format_registry_report', 'manifest_path',
+           'registry_for_parse_result',
+           'remove_statement', 'reset_declarations', 'root_of',
            'spec_arg_choices', 'spec_body_allows', 'spec_columns']

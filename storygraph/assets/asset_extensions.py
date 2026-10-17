@@ -423,7 +423,12 @@ def apply_rename_patch(plan, *, confirm: bool = False,
             except Exception as e:                  # noqa: BLE001
                 swallow('assets.asset_extensions.apply_rename_patch.backup', e)
         try:
-            fp.write_text(f['new_text'], encoding='utf-8')
+            # **原子写 + 保留换行**（P1-2）：这里也是 `.rpy` 落盘点。
+            # `Path.write_text` 在 Windows 上会把整个文件翻成 CRLF，而且
+            # 先截断再写 —— 改一个名字却可能留下半截脚本。
+            # 备份上面已经用 `shutil.copy2` 做过（逐字节），所以这里 backup=False。
+            from storygraph.story.paths import write_text_atomic
+            write_text_atomic(fp, f['new_text'], backup=False)
             modified.append(str(fp))
         except Exception as e:                      # noqa: BLE001
             swallow('assets.asset_extensions.apply_rename_patch', e)
