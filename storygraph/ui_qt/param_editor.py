@@ -591,7 +591,29 @@ class FieldCard(QFrame):
         #: 批量导入对话框要的"从项目里拿"来源（与卡片那枚 ⚡ 同一份）
         self._values.set_sources_provider(self._project_sources)
 
-        self._field('这一格是', self._kind)
+        # ⚠⚠ **固定段必须能写清"是哪几个字"**（2026-10-17 用户现场：
+        #   `show lan base_swimsuit happy` 判"切不上"，预览里却列着这些候选）。
+        #
+        #   真凶：`可出现可不出现的一段` / `固定几个字` 这两种类型**没有输入框**
+        #   —— 旧代码拿"列名"当固定字（`固定几个字` 勉强能用，但列名会变成
+        #   `show`），而 `可出现可不出现` 的 `text` **恒为空**：它在切行时
+        #   **一个词都吃不掉、也不报错**，于是后面的格子整体错位，
+        #   最后由"表情"的候选把 `base_swimsuit` 判成"候选外"——
+        #   界面上一句话都没提真正的原因（第 2 格是死的）。
+        #   同一个字段还解释了另一件事：`at left` 这类可选段必须先有 `at`。
+        self._literal = QLineEdit()
+        self._literal.setPlaceholderText(
+            '剧本里必须原样出现的字，例：show / at / play')
+        self._literal.setToolTip(
+            '这一格在剧本里**原样出现**的那几个字（不是列名）。\n'
+            '例：`show lan at left` 里，可选段的固定字是 `at`，'
+            '`left` 才是它的值。')
+        self._literal.textChanged.connect(self._changed)
+        self._literal_label = QLabel('这一格固定是哪几个字')
+        self._literal_label.setProperty('role', 'fieldLabel')
+        self._literal_label.setWordWrap(True)
+        self._stack_add(self._literal_label)
+        self._stack_add(self._literal)
         self._field('这一列叫什么（编剧看到的）', self._name)
         self._stack_add(self._multi)
         self._stack_add(self._limit)
@@ -629,8 +651,13 @@ class FieldCard(QFrame):
         lay.addWidget(widget)
 
     def _on_kind_changed(self, *_a):
-        is_choice = self._kind.currentData() == 'choice'
+        kind = self._kind.currentData()
+        is_choice = kind == 'choice'
+        is_fixed = kind in ('keyword', 'optional')
         self._pick_btn.setVisible(is_choice)
+        # 只有"原样出现的几个字"才需要那个输入框（其余类型它没有意义）
+        self._literal.setVisible(is_fixed)
+        self._literal_label.setVisible(is_fixed)
         if not is_choice:
             self._limit.setChecked(False)
             self._values.setVisible(False)
@@ -668,6 +695,9 @@ class FieldCard(QFrame):
         也不该拦着人写，只是它不会进声明（后端行为，界面上给个提醒就够）。
         """
         if str(self._key or '').strip() or str(self._fixed_text or '').strip():
+            return True
+        literal = getattr(self, '_literal', None)
+        if literal is not None and str(literal.text()).strip():
             return True
         if str(self._name.text()).strip():
             return True
@@ -865,7 +895,8 @@ class FieldCard(QFrame):
         候选进 `options`，`limit` 单独告诉后端"这一格是不是封闭枚举"。
         """
         name = self._name.text().strip()
-        is_fixed = self._kind.currentData() == 'keyword'
+        kind = self._kind.currentData() or 'variable'
+        is_fixed = kind in ('keyword', 'optional')
         # ⚠ "列名"取哪一个：**存量从宽、新建从严**。
         #   · 存量（`set_data` 给过 `label`）→ 那个 `label` 就是列名，
         #     界面上字段显示它只是"看得见"，不改变它是谁；
@@ -874,9 +905,12 @@ class FieldCard(QFrame):
         #   `{'name': 'intensity', 'label': '强度'}`（判据压着），
         #   而新界面里"只有列名"（用户要的那个简化）。
         column = self._display_name or name
-        return {'kind': self._kind.currentData() or 'variable',
+        return {'kind': kind,
+                # ⚠ 固定段的"原样出现的字"**只从它自己的输入框来**。
+                #   以前 `keyword` 拿列名兜底（于是列名被迫写成 `show`）、
+                #   `optional` 恒空（死格）—— 两件事都在这里收口。
+                'text': self._literal.text().strip() if is_fixed else '',
                 'group': self.column_of(),
-                'text': (self._fixed_text or name) if is_fixed else '',
                 'name': self._key or name,
                 'label': column,
                 'column': column,
@@ -906,13 +940,25 @@ class FieldCard(QFrame):
         self._display_name = str(label or '').strip()
         #: 存量声明里"代码里必须出现的那串字"（`text`，只有固定段用）。
         self._fixed_text = str(name or '').strip()
+        # ⚠ 固定段的字**显示在自己的输入框里**（以前它藏在"列名"里）。
+        #   存量形状 `{'name': 'show'}` 的 `name` 就是那串字 → 照它填；
+        #   显式给了 `text` 时以 `text` 为准（新形状）。
+        kind_now = self._kind.currentData()
+        if kind_now in ('keyword', 'optional'):
+            self._literal.setText(str((extra or {}).get('text')
+                                      or self._fixed_text or ''))
+        else:
+            self._literal.clear()
         text = str(choices or '')
         self._values.set_text(text)
         # 已有声明里本来就有候选 → 自动展开（不然人会以为丢了）。
         # ⚠ **但不自动勾"只能从这些里选"** —— 存量候选多半是"建议清单"，
         #   一勾上就把存量剧本判成"切不上"（上面那个 bug 的另一半）。
         self._limit.setChecked(False)
-        self._values.setVisible(bool(text.strip()))
+        # ⚠ 只有「从这些里选」才露出候选 —— 可选段/固定段露出来会让人以为
+        #   "这些候选能左右试切"（用户正是被这句话误导的）。
+        self._values.setVisible(bool(text.strip())
+                                and self._kind.currentData() == 'choice')
         # ⚠ `multi`（"可以有多个"）**照存量恢复** —— 它不像候选那样会被误解成
         #   封闭枚举，而是纯粹的语法事实（真机里 `happy sad` 就是一格两个词）。
         try:
@@ -1085,7 +1131,10 @@ class FieldList(QWidget):
             row = card.data()
             out.append({'kind': row.get('kind') or 'variable',
                         'group': row.get('group') or '',
-                        'text': row.get('name') or '',
+                        # ⚠ 固定段交**它自己那串字**（不是列名、也不是内部键）。
+                        #   以前这里交 `name`：`可出现可不出现` 的 `name` 是键、
+                        #   常常为空 → 这一格在 `pattern` 里彻底失配（死格）。
+                        'text': row.get('text') or '',
                         'column': row.get('label') or '',
                         'choices': row.get('choices') or '',
                         # ⚠ "限死"与"可以有多个"都是**显式**的（见 `FieldCard.data`）：

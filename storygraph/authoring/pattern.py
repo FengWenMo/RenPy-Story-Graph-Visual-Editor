@@ -143,7 +143,7 @@ def parse_pattern(raw) -> list:
                 kind = 'variable'
         slot['kind'] = kind
         if kind in ('keyword', 'optional') and not slot['text']:
-            slot['problems'].append('固定段得写清是哪个字')
+            slot['problems'].append('固定段得写清是哪个字（不然这一格永远对不上）')
         if kind in ('variable', 'choice', 'optional') and not slot['column']:
             slot['problems'].append('这一格要有个列名（表格里显示什么）')
         if kind == 'choice' and slot['limit'] \
@@ -268,6 +268,8 @@ def assign_tokens(tokens, slots, *, groups=None,
     ti = 0
     bad_kw = None
     rejected = None
+    #: 被"限死"挡下的那个词（界面据此说清"哪个词、哪一格、它本来是谁的"）
+    rejected_word = ''
     #: **该吃词却没吃到**的格子（普通变量/枚举格）—— 它跟"没人认领的词"是两回事：
     #: 前者是"这一行少了那一格该有的词"（真失败），后者是"多出来了"。
     #: ⚠ 多值格与可选段**不算**：前者"一个都不吃"本来合法，后者"不出现"也合法。
@@ -317,6 +319,7 @@ def assign_tokens(tokens, slots, *, groups=None,
         if kind == 'choice' and slot.get('limit') and not allowed:
             if rejected is None:
                 rejected = si
+                rejected_word = tokens[ti] if ti < len(tokens) else ''
             continue
         if ti >= len(tokens):
             unfilled.append(si)        # 这一格该吃词却没词了（调用方显示空格子）
@@ -329,11 +332,13 @@ def assign_tokens(tokens, slots, *, groups=None,
                 and tokens[ti] not in allowed):
             if rejected is None:
                 rejected = si
+                rejected_word = tokens[ti]
             continue
         spans[si] = (ti, ti + 1)
         ti += 1
     return {'spans': spans, 'used': ti, 'bad_kw': bad_kw,
-            'rejected': rejected, 'unfilled': unfilled, 'policy': policy}
+            'rejected': rejected, 'rejected_word': rejected_word,
+            'unfilled': unfilled, 'policy': policy}
 
 def match_line(pattern, line, *, groups=None) -> dict:
     """
@@ -385,12 +390,19 @@ def match_line(pattern, line, *, groups=None) -> dict:
         reason = ''
     elif got['bad_kw'] is not None:
         i = got['bad_kw']
-        reason = (f'第 {i + 1} 格要的关键字是「{slots[i]["text"]}」，'
-                  f'这一行里对不上 —— 检查顺序、关键字写法')
+        if not str(slots[i].get('text') or '').strip():
+            # 空固定段：说"对不上"等于让人去猜一个**根本不存在的字**。
+            reason = (f'第 {i + 1} 格是「固定几个字 / 可出现可不出现」，'
+                      f'但没写"是哪几个字" —— 这一格永远对不上')
+        else:
+            reason = (f'第 {i + 1} 格要的关键字是「{slots[i]["text"]}」，'
+                      f'这一行里对不上 —— 检查顺序、关键字写法')
     elif got['rejected'] is not None:
         i = got['rejected']
+        word = str(got.get('rejected_word') or '')
         reason = (f'第 {i + 1} 格勾了"只能从这些里选"，'
-                  f'而这一行里的词不在候选里')
+                  f'而这一行里的词不在候选里'
+                  + (f'（挡下的是「{word}」）' if word else ''))
     elif leftover:
         reason = (f'后面还有 {len(leftover)} 个词没人认领：'
                   + ' '.join(leftover))
@@ -403,6 +415,7 @@ def match_line(pattern, line, *, groups=None) -> dict:
     return {'ok': ok, 'cells': cells, 'leftover': leftover,
             'missing': [i for i, c in enumerate(cells)
                         if not str(c['text']).strip()],
+            'rejected': got['rejected'], 'rejected_word': got['rejected_word'],
             'reason': reason}
 
 

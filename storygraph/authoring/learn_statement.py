@@ -740,6 +740,28 @@ def group_preview(groups) -> str:
     return '\n'.join(lines)
 
 
+def _shape_words(slot: dict) -> str:
+    """
+    一个格子**是什么**（一行人话，给预览用）。
+
+    为什么预览要列类型（2026-10-17 用户现场）：预览只列"候选"时，
+    `可出现可不出现的一段` 看上去跟 `从这些里选` 一模一样 —— 而它的固定字
+    没填时**一个词都吃不掉**，于是人对着候选反复改，永远改不对。
+    """
+    kind = str(slot.get('kind') or '')
+    text = str(slot.get('text') or '').strip()
+    if kind == 'keyword':
+        return f'固定「{text}」' if text else '固定（没填字！）'
+    if kind == 'optional':
+        return f'可选「{text}」' if text else '可选（没填字！）'
+    bits = []
+    if kind == 'choice':
+        bits.append('只能选这些' if slot.get('limit') else '从候选里选')
+    if slot.get('multi'):
+        bits.append('可多个')
+    return '，'.join(bits)
+
+
 def declaration_preview(built: dict, path: str = '') -> str:
     """给人看的"这会写什么"（写盘前/后的确认文本）。"""
     if not built.get('ok'):
@@ -756,13 +778,34 @@ def declaration_preview(built: dict, path: str = '') -> str:
     else:
         lines.append('  带块：未指定（后端按 possible 处理）')
     cols = built.get('columns') or []
+    #: 每个格子到底是什么 —— **预览必须与试切用同一份事实**（2026-10-17）：
+    #: 用户的原话是"预览里明明列着 base_swimsuit，试切却说不认识"。
+    #: 当时第 2 格是「可出现可不出现」，而预览只列候选、不列类型 ——
+    #: 于是"候选有"被读成"这一格能用"，人只能反复改候选。
+    shape_by_column = {}
+    for s in (built.get('pattern') or ()):
+        if not isinstance(s, dict):
+            continue
+        shape = _shape_words(s)
+        for alias in (str(s.get('column') or '').strip(),
+                      str(s.get('text') or '').strip()):
+            if alias and alias not in shape_by_column:
+                shape_by_column[alias] = shape
     if cols:
         lines.append(f'  参数 {len(cols)} 个：')
         for c in cols:
             ch = '，'.join(c.get('choices') or [])
+            shape = (shape_by_column.get(str(c['name']).strip())
+                     or shape_by_column.get(str(c.get('label') or '').strip())
+                     or '')
             lines.append(f'    · {c["name"]}'
                          + (f'（{c["label"]}）' if c.get('label') else '')
-                         + (f' 候选：{ch}' if ch else ''))
+                         + (f' · {shape}' if shape else '')
+                         # 固定段/可选段的"候选"没有任何意义（切行时根本不看），
+                         # 列出来只会让人以为"这些值能决定切不切得上" ——
+                         # 那正是用户现场被误导的地方。
+                         + (f' 候选：{ch}' if ch and not shape.startswith(
+                             ('可选', '固定')) else ''))
     else:
         lines.append('  参数：无（只逐字透传）')
     if built.get('warnings'):

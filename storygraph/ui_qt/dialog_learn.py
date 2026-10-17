@@ -942,8 +942,24 @@ class CustomStatementDialog(QDialog):
         #   不把它摘掉，试切就永远"多出来 1 个词 → 切不上"，
         #   而界面还只会说"检查顺序、关键字写法"（人怎么查都查不出来）。
         #   ⚠ 只在**开头整词等于动作名**时摘一个词，绝不猜别的。
+        #
+        #   ⚠⚠ 2026-10-17 补：**格子自己就是那个固定字时不许摘**。
+        #   现在的界面能声明"固定几个字"了，`动作` 格常常就是 `show`；
+        #   再摘一次等于把它的词偷走 → 第 1 格永远对不上（人会更懵）。
+        try:
+            from storygraph.authoring import pattern as P
+            slots = self.params.slots()
+            groups = self._cut_groups()
+        except Exception as e:                      # noqa: BLE001 - 试切不许炸窗口
+            swallow('ui_qt.dialog_learn.refresh_cut.prepare', e)
+            view.setText(f'试切没做成：{type(e).__name__}: {e}')
+            return
         head = self.name.text().strip()
-        if head and line.split() and line.split()[0] == head:
+        first = slots[0] if slots else {}
+        pattern_wants_head = (str(first.get('kind') or '') in ('keyword', 'optional')
+                              and str(first.get('text') or '').strip() == head)
+        if (head and not pattern_wants_head and line.split()
+                and line.split()[0] == head):
             line = ' '.join(line.split()[1:])
             if not line:
                 view.setText('只在行首看到了动作名「' + head + '」—— '
@@ -951,13 +967,7 @@ class CustomStatementDialog(QDialog):
                              + (('\n' + problems) if problems else ''))
                 return
         try:
-            from storygraph.authoring import pattern as P
-            groups = {g.get('name'): {'label': getattr(g, 'label', ''),
-                                      'options': list(getattr(g, 'options', []) or [])}
-                      for g in (self.built_groups() if hasattr(self, 'columns_editor')
-                                else [])
-                      if isinstance(g, dict) and g.get('name')}
-            got = P.match_line(self.params.slots(), line, groups=groups)
+            got = P.match_line(slots, line, groups=groups)
         except Exception as e:                      # noqa: BLE001 - 试切不许炸窗口
             swallow('ui_qt.dialog_learn.refresh_cut', e)
             view.setText(f'试切没做成：{type(e).__name__}: {e}')
@@ -965,14 +975,60 @@ class CustomStatementDialog(QDialog):
         if not got.get('ok'):
             # ⚠ 光说"检查顺序"等于让人瞎猜（用户实测："为什么切不上呢？"）——
             #   把**具体是哪个词没人认领 / 第几格没吃到东西**念出来。
+            # ⚠ 死格那句话已经在 `_why_not` 里说过了，别再让 `problems` 念一遍
+            #   （同一句在同一个框里出现两次，人会以为界面出错了）。
+            dead = any(str(s.get('kind') or '') in ('keyword', 'optional')
+                       and not str(s.get('text') or '').strip() for s in slots)
+            extra = self._slot_problems(skip=('固定段得写清',) if dead else ())
             view.setText('⚠ 切不上：' + self._why_not(got)
-                         + (('\n' + problems) if problems else ''))
+                         + (('\n' + extra) if extra else ''))
             return
         cells = ' ｜ '.join(f'{c["text"]}（{c["column"] or "固定"}）'
                             for c in got['cells'])
         view.setText('切出来是这样：' + cells
                      + f'　—　共 {len(got["cells"])} 格'
                      + (('\n' + problems) if problems else ''))
+
+    def _cut_groups(self) -> dict:
+        """
+        试切用的候选表 —— **就是人眼前那一份**（分栏页里写的）。
+
+        为什么要单独一层（2026-10-17 用户现场：预览里列着候选、试切却说"候选外"）：
+          · 旧代码拿 `built_groups()` 现造字典，而 `build_group()` 会**校验**
+            组名（必须是合法标识符）—— 编剧把栏目写成中文（「服装」）时它返回
+            `ok=False, name=''`，于是这一栏的候选**被静默丢掉**；
+          · 旧代码还用 `getattr(g, 'label', '')` 读一个 dict（恒为 `''`）——
+            典型的"写得像对、其实没接上"。
+        试切是**解释工具**，不是写盘校验：候选越全越好，绝不该比界面少。
+        """
+        out: dict = {}
+        editor = getattr(self, 'columns_editor', None)
+        if editor is None:
+            return out
+        try:
+            rows = list(editor.rows() or ())
+        except Exception as e:                      # noqa: BLE001 - 读不到就不加分栏
+            swallow('ui_qt.dialog_learn.cut_groups', e)
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get('key') or '').strip()
+            shown = str(row.get('shown') or '').strip()
+            # ⚠ 用**与写盘同一个**分隔符口径（`,` `，` `、` 空白都算）——
+            #   `load_columns` 恰恰是用「、」把已有候选拼进去的，手写 split(',')
+            #   会把 `base_swimsuit、clothes2` 当成一个候选（= 又一种"看不见的
+            #   对不上"）。这里不猜别的：认不出就当一个值。
+            from storygraph.authoring.learn_statement import parse_choices
+            opts = list(parse_choices(row.get('values')) or ())
+            if not (key or shown):
+                continue
+            entry = {'label': shown or key, 'options': opts}
+            # 两个名字都认：格子上的「分栏」可能是键，也可能被认成了显示名
+            for alias in (key, shown):
+                if alias:
+                    out.setdefault(alias, entry)
+        return out
 
     def _why_not(self, got: dict) -> str:
         """
@@ -985,13 +1041,71 @@ class CustomStatementDialog(QDialog):
         现在：剩哪些词 → 直接念出来，还顺手比一下就差在哪。
         """
         slots = self.params.slots() if getattr(self, 'params', None) else []
+        try:
+            from storygraph.authoring import pattern as P
+            parsed = P.parse_pattern(slots)
+        except Exception as e:                      # noqa: BLE001 - 诊断不许炸窗口
+            swallow('ui_qt.dialog_learn.why_not.parse', e)
+            parsed = [dict(s) for s in slots if isinstance(s, dict)]
         leftover = [str(w) for w in (got.get('leftover') or []) if str(w)]
         missing = list(got.get('missing') or [])
         parts = []
+        # ① 死格（永远对不上的固定段）—— 它比"候选外"更接近真正原因
+        #
+        #   ⚠⚠ 2026-10-17 用户现场：`show lan base_swimsuit happy` 判"切不上"，
+        #   而预览里明明列着这两个词。真凶是第 2 格选了「可出现可不出现的一段」
+        #   —— 旧版那类格子**没有"是哪几个字"的输入框**，`text` 恒为空：
+        #   它一个词都吃不掉、也不报错，于是后面的格子整体错位，最后由"表情"
+        #   的候选背锅（人只会去改候选，改错地方）。
+        for i, s in enumerate(parsed, 1):
+            kind = str(s.get('kind') or '')
+            if kind not in ('keyword', 'optional'):
+                continue
+            if str(s.get('text') or '').strip():
+                continue
+            label = str(s.get('column') or '').strip()
+            kind_name = ('可出现可不出现的一段' if kind == 'optional'
+                         else '固定几个字')
+            parts.append(
+                f'第 {i} 格' + (f'「{label}」' if label else '')
+                + f'是「{kind_name}」，却没写"是哪几个字" —— 这一格永远对不上，'
+                  f'还会把后面的格子整体挤错位（先补上它）')
+        # ② 被"限死"挡下的词：说清是哪一格、有多少候选、它本来是谁的
+        if got.get('rejected') is not None:
+            try:
+                rej = int(got['rejected'])
+            except (TypeError, ValueError):
+                rej = -1
+            if 0 <= rej < len(parsed):
+                s = parsed[rej]
+                word = str(got.get('rejected_word') or '')
+                label = str(s.get('column') or s.get('text') or '').strip()
+                cands = list(s.get('options') or [])
+                who = f'第 {rej + 1} 格' + (f'「{label}」' if label else '')
+                if not cands:
+                    parts.append(f'{who}勾了"只能从这里选"，但一个候选都没给 '
+                                 f'—— 这一格谁都不可能通过（先填候选，'
+                                 f'或取消那个勾）')
+                else:
+                    msg = (f'{who}的 {len(cands)} 个候选里没有'
+                           + (f'「{word}」' if word else '这个词'))
+                    owners = [j for j, t in enumerate(parsed)
+                              if j != rej and word
+                              and word in (t.get('options') or [])]
+                    if owners:
+                        j = owners[0]
+                        o = parsed[j]
+                        oname = str(o.get('column') or o.get('text') or '').strip()
+                        msg += (f'；但它就是第 {j + 1} 格'
+                                + (f'「{oname}」' if oname else '')
+                                + '的候选 —— 检查这两格的顺序，'
+                                  '或那一格的类型选错了')
+                    parts.append(msg)
         if leftover:
             parts.append('这些词没人认领：' + '、'.join(leftover[:6])
                          + ('…' if len(leftover) > 6 else ''))
-        if missing:
+        explained = got.get('rejected') is not None
+        if missing and not explained:
             names = []
             for i in missing:
                 try:
@@ -1005,12 +1119,13 @@ class CustomStatementDialog(QDialog):
         # ⚠ 兜底也要说人话：`match_line` 有时只在 `reason` 里说细节（例如
         #   "第 2 格要的关键字是 `at`，这里是 `swim_suit`"）——那种句子比
         #   我们上面的概述更准，一起带上。
+        #   ⚠ 但"候选外"那句已经由上面第 ② 段说得更具体了，再念一遍是噪声。
         reason = str(got.get('reason') or '')
-        if reason and parts[0] != reason:
+        if reason and not explained and reason not in parts:
             parts.append(reason)
         return '；'.join(parts)
 
-    def _slot_problems(self) -> str:
+    def _slot_problems(self, skip=()) -> str:
         """格子本身的毛病汇总成人话（`pattern.problems_of` 的界面接线）。"""
         params = getattr(self, 'params', None)
         if params is None:
@@ -1024,6 +1139,9 @@ class CustomStatementDialog(QDialog):
         except Exception as e:                      # noqa: BLE001 - 汇总不许炸窗口
             swallow('ui_qt.dialog_learn.slot_problems', e)
             return ''
+        if skip:
+            items = [x for x in items
+                     if not any(str(k) in str(x) for k in skip)]
         if not items:
             return ''
         return '这几点也顺手看看：' + '；'.join(str(x) for x in items[:5])
