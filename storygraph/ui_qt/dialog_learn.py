@@ -142,6 +142,10 @@ class CustomStatementDialog(QDialog):
         self._editing = None           # 正在编辑的那条（None = 新语句）
         self._loading = False          # 正在往表单里灌数据（别当成"人改了"）
         self._baseline = ''            # 打开表单时的样子（判"改过没有"）
+        #: 角色表读一次就存这儿（`_roles_cached`）：读它要读整张资产表
+        self._roles_cache = None
+        #: 载入声明时被换成"剧本真源"的格子（`_refresh_role_note` 据此出提示）
+        self._role_fixes: list = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -427,6 +431,12 @@ class CustomStatementDialog(QDialog):
         self._form_sub = _hint('')
         head.addWidget(self._form_sub, 1)
         lay.addLayout(head)
+        #: 「候选被换成了剧本真源」的提示（只在真的换过时出现 —— 见
+        #: `_refresh_role_note`）。⚠ 放在**页顶**：格子卡一多，这一声放在
+        #: 列表底下就等于没说话（真机三张卡就把视口占满了）。
+        self._role_fix_note = _hint('')
+        self._role_fix_note.setVisible(False)
+        lay.addWidget(self._role_fix_note)
 
         # —— 1. 它以哪个词开头 ——
         lay.addWidget(_step(1, '它以哪个词开头'))
@@ -1008,12 +1018,72 @@ class CustomStatementDialog(QDialog):
         self._refresh_form_head()
         self._refresh_preview()
 
+    def _roles_cached(self) -> dict:
+        """
+        角色表读**一次**（`learn_statement.role_table`）—— 真机首次 ~600 ms。
+
+        ⚠ 必须缓存：`_choices_for_script` 每格调一次、`_why_not` 又会被
+          `sample.textChanged` 逐字调一次（输入时每个按键都会走到），
+          不缓存就是"打字卡一下"。
+        ⚠ 只在弹窗打开期间有效：角色表在弹窗关着的时候才可能被别处改。
+        """
+        cache = getattr(self, '_roles_cache', None)
+        if cache is not None:
+            return cache
+        try:
+            from storygraph.authoring.learn_statement import role_table
+            cache = role_table(self._root_path) or {}
+        except Exception as e:                  # noqa: BLE001 - 没表就当没有
+            swallow('ui_qt.dialog_learn.roles_cached', e)
+            cache = {}
+        self._roles_cache = cache
+        return cache
+
+    def _choices_for_script(self, values, head: str, where: str = ''):
+        """
+        候选值 → **剧本里要写的那种写法**（+ 显示名标签）。逗号串 / 标签给 `add_field`。
+
+        ⚠⚠ 为什么在**载入**时就要换（2026-10-18 用户现场）：
+
+        > 明明它只是换成变量名又不认得了……
+
+        角色表里同一个人有三种写法：变量名（`l`）、显示名（`蓝`）、立绘 tag
+        （`lan`）。旧版把**显示名**写进了声明（`rules.json` 的 `choices`），
+        于是：剧本里的 `show lan …` 在封闭枚举里判"切不上"，而卡片的下拉
+        又会把 `蓝` 写回脚本 —— 两处都是同一个错值。
+
+        只做**查表**（`learn_statement.role_candidates_for`），认不出是角色的
+        值一个字都不动（「服装」「表情」那两格与角色表无关）。换掉之后仍然把
+        显示名当**标签**交给芯片（`蓝（lan）`），编剧不至于对着一串 `dhy` 发懵。
+        """
+        items = list(values or ())
+        head = str(head or '')
+        try:
+            from storygraph.authoring.learn_statement import role_candidates_for
+            got = role_candidates_for(self._root_path, head, items,
+                                      roles=self._roles_cached())
+        except Exception as e:                  # noqa: BLE001 - 换不了就原样
+            swallow('ui_qt.dialog_learn.choices_for_script', e)
+            return '、'.join(str(v) for v in items), None
+        changed = dict(got.get('changed') or {})
+        if changed:
+            self._role_fixes.append({'where': str(where or ''),
+                                     'changed': changed,
+                                     'before': int(got.get('asked') or 0),
+                                     'after': len(got.get('values') or ())})
+        labels = dict(got.get('labels') or {}) or None
+        return '、'.join(str(v) for v in (got.get('values') or ())), labels
+
     def _fill_params(self, decl):
         """声明 → 格子卡（顺序与类型都照 `pattern`；没有 pattern 就照 columns）。"""
         self.params.clear()
+        #: 载入时被换成"剧本真源"的格子（`_refresh_role_note` 据此出提示）
+        self._role_fixes = []
         if decl is None:
             self.params.add_field()
+            self._refresh_role_note()
             return
+        head = self.name.text().strip()
         slots = [s for s in (getattr(decl, 'pattern', None) or ())
                  if isinstance(s, dict)]
         if not slots:
@@ -1023,12 +1093,14 @@ class CustomStatementDialog(QDialog):
                     continue
                 name = str(col.get('name') or '')
                 label = str(col.get('label') or '') or name
-                choices = '、'.join(str(x) for x in (col.get('choices') or ()))
                 kind = 'choice' if col.get('choices') else 'variable'
-                self.params.add_field(name=name, label=label,
-                                      choices=choices, kind=kind)
+                choices, labels = self._choices_for_script(
+                    col.get('choices'), head, label)
+                self.params.add_field(name=name, label=label, kind=kind,
+                                      choices=choices, labels=labels)
             if not (getattr(decl, 'columns', None) or ()):
                 self.params.add_field()
+            self._refresh_role_note()
             return
         for slot in slots:
             kind = str(slot.get('kind') or 'variable')
@@ -1040,10 +1112,45 @@ class CustomStatementDialog(QDialog):
             #   交给语句头决定默认（见 `pattern.with_optional_defaults`）。
             if 'required' in slot:
                 extra['required'] = bool(slot.get('required'))
+            choices, labels = self._choices_for_script(
+                slot.get('options'), head, column)
             self.params.add_field(
                 name=column or text, label=column, kind=kind,
-                choices='、'.join(str(x) for x in (slot.get('options') or ())),
-                **extra)
+                choices=choices, labels=labels, **extra)
+        self._refresh_role_note()
+
+    def _refresh_role_note(self):
+        """
+        把"候选被换成了剧本真源"这件事**说出来**（别做静默的数据改写）。
+
+        文案要点：换了哪一格、换了几个、举一例、以及"保存才会写回清单"。
+        """
+        lab = getattr(self, '_role_fix_note', None)
+        if lab is None:
+            return
+        fixes = list(getattr(self, '_role_fixes', ()) or ())
+        if not fixes:
+            lab.setText('')
+            lab.setVisible(False)
+            return
+        parts = []
+        for f in fixes[:3]:
+            # 例子优先挑**中文显示名**那几条（`蓝 → lan`）—— 人一眼就对得上；
+            # `??? → u` 这种也照实给出来，但不占前三样例的位置。
+            pairs = list(f['changed'].items())
+            pairs.sort(key=lambda kv: (not _has_cjk(kv[0]),))
+            pairs = pairs[:3]
+            sample = '、'.join(f'{a} → {b}' for a, b in pairs)
+            if len(f['changed']) > 3:
+                sample += '…'
+            where = f'「{f["where"]}」' if f['where'] else '一格'
+            parts.append(f'{where}的候选写的是角色表里的另一种写法，'
+                         f'已换成剧本里要写的那个词（{sample}；'
+                         f'{f["before"]} → {f["after"]} 个）')
+        lab.setText('⚠ ' + '；'.join(parts)
+                    + '。保存后写回项目清单 —— 不保存的话，卡片下拉里挑出来的'
+                      '还是显示名（写进脚本跑不起来）。')
+        lab.setVisible(True)
 
     def _signature(self) -> str:
         """当前表单的"指纹" —— 用来判"改过没有"（不靠一堆信号接线）。"""
@@ -1685,6 +1792,22 @@ class CustomStatementDialog(QDialog):
                                 + (f'「{oname}」' if oname else '')
                                 + '的候选 —— 检查这两格的顺序，'
                                   '或那一格的类型选错了')
+                    elif word:
+                        # ⚠ 同一个人的**另一种写法**（2026-10-18 用户现场：
+                        #   "明明它只是换成变量名又不认得了"）：`lan` 是「蓝」的
+                        #   立绘 tag，而候选里写的是显示名「蓝」。这不是"顺序错"，
+                        #   是候选存了**脚本里不能写的那一种写法** —— 说出来。
+                        try:
+                            from storygraph.authoring.learn_statement import (
+                                explain_role_spelling)
+                            why = explain_role_spelling(
+                                self._root_path, self.name.text(), word, cands,
+                                roles=self._roles_cached())
+                        except Exception as e:      # noqa: BLE001 - 解释不许炸
+                            swallow('ui_qt.dialog_learn.why_not.role', e)
+                            why = ''
+                        if why:
+                            msg += '；' + why
                     parts.append(msg)
         # ⚠⚠ 2026-10-17：`reason` 现在**精确到词**（"第 3 个词「dirty」没人认领"），
         #   所以"这些词没人认领：dirty"那行概述就成了重复 —— 有它就不再念一遍。
@@ -2017,6 +2140,11 @@ def _field_label(text: str) -> QLabel:
     lab.setProperty('role', 'fieldLabel')
     lab.setWordWrap(True)
     return lab
+
+
+def _has_cjk(text: str) -> bool:
+    """这句里有没有汉字？（只用来挑"举哪个例子"更像人话）"""
+    return any('\u4e00' <= ch <= '\u9fff' for ch in str(text or ''))
 
 
 def _step(number: int, title: str) -> QWidget:

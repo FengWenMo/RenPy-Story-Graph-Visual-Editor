@@ -2434,6 +2434,47 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
 值里带空格的候选，把那个勾去掉。
 判据：`tests/test_custom_statement_entry.py::test_从这些里选就有批量导入_多选只换收词口径`。
 
+### 角色的三种写法：候选必须是**剧本真源**（2026-10-18）
+
+用户原话（截图里试切报"第 1 格「角色」的 28 个候选里没有「lan」"）：
+
+> 啧……还是有问题！明明它只是换成变量名又不认得了……
+
+**事实**：角色表里同一个人有三种写法，**用途各不相同**：
+
+| 写法 | 例子 | 出现在哪 |
+|---|---|---|
+| 变量名（`ID`） | `l` | 自定义语句的参数（`swim_suit l "泳装"`）、角色表的主键 |
+| 显示名（`Name`） | `蓝` | 编剧眼前（Excel、下拉、芯片） |
+| 立绘 tag（`ImageTag`） | `lan` | `show / scene / hide` 里**唯一能写**的那个词 |
+
+**铁律**：声明里的 `choices`（候选）只能是**剧本里真要写的那个词**（tag 或
+变量名），显示名**只是标签**（芯片显示 `蓝（lan）`、写盘只有 `lan`）。
+
+为什么以前只错了一半、后果却比"切不上"更重：候选会进卡片的**下拉**
+（`app.beats.spec_arg_choices_for` 直接读 `columns[].choices`），于是从下拉里
+挑一个就把**显示名**写进了脚本（`show 蓝 …` —— Ren'Py 里没有这个 tag）。
+
+- **导入**（`choice_sources` / `suggest_shape`）：`show/scene/hide` 给 tag、
+  其它语句给变量名，显示名降级为 `labels`（`90f6328` 起）。
+- **载入存量声明**（`dialog_learn._fill_params` → `learn_statement.
+  role_candidates_for`）：旧版写进去的显示名在这里**换回真源**，并**明说**
+  （`_role_fix_note`：哪一格、换了几条、举一例、"保存才写回清单"）。
+  不换就是两处错：试切切不上 + 下拉把显示名写进脚本。
+- **只查表、不猜**：认不出是角色的值一个字都不动（「服装」「表情」的候选
+  与角色表无关）；已经是真源的值也不动（不制造"我什么都改了"的假象）。
+- **去重有据**：两个人共用一个 tag（真机 `narrator` 与 `n` 都是 `narrator`）
+  时只留第一个，丢掉的记进 `dropped`。
+- **换不掉要说清**（`explain_role_spelling`）：人自己手打的显示名候选走到
+  `rejected` 时，`_why_not` 会说"「lan」是「蓝」的立绘 tag，而候选里写的是他的
+  显示名「蓝」"——而不是把人往"改顺序"上带。
+- **成本**：读角色表要读整张资产表（真机 ~600 ms 首次 / ~240 ms 之后）——
+  弹窗里 `role_table(root)` **读一次缓存**（`_roles_cached`），
+  `role_candidates_for` / `explain_role_spelling` 都收 `roles=` 复用。
+- 判据：`tests/test_role_candidates_script_truth.py`（16 条：三种写法归一 /
+  自定义语句给变量名 / 非角色候选不动 / 没表不动 / 共用 tag 去重 / 书名号 /
+  载入后试切切得上 / 保存写回真源 / 换不掉时说清是同一个人）。
+
 ---
 
 ## §单源：`show` / `scene` / `hide` 子句关键字（2026-10-15）

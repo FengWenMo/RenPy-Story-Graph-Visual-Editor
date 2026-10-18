@@ -1083,7 +1083,11 @@ class FieldCard(QFrame):
         else:
             self._literal.clear()
         text = str(choices or '')
-        self._values.set_text(text)
+        # ⚠ `labels`（2026-10-18）：`{值: 显示名}` —— 芯片显示 `蓝（lan）`，
+        #   写进声明的仍只有值（脚本真源）。它来自角色表：候选被换成 tag/变量名
+        #   之后，编剧还得看得懂那一串 `lan` / `dhy` 是谁
+        #   （`learn_statement.role_candidates_for` 那一路的返回）。
+        self._values.set_text(text, labels=(extra or {}).get('labels'))
         # 已有声明里本来就有候选 → 自动展开（不然人会以为丢了）。
         # ⚠ **但不自动勾"只能从这些里选"** —— 存量候选多半是"建议清单"，
         #   一勾上就把存量剧本判成"切不上"（上面那个 bug 的另一半）。

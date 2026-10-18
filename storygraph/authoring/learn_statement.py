@@ -440,6 +440,157 @@ def role_label_for(value, roles) -> str:
                or (roles.get('id_to_name') or {}).get(value) or '')
 
 
+def _role_script_word(word, roles, show_like: bool) -> str:
+    """
+    一个词是不是角色表里的某个人？是 → **剧本里真要写的那个词**；不是 → `''`。
+
+    ⚠ 认的是**三种写法都算**（变量名 / 显示名 / 立绘 tag）：
+      它们指的是同一个人，只是出现在不同地方（表里、编剧眼前、脚本里）。
+    ⚠ 显示名在表里可能带书名号（`「蒋忱」`）—— 比之前先剥掉（与
+      `_split_call_line` 见到的那种写法同源）。
+    """
+    w = str(word or '').strip().strip('「」『』').strip()
+    if not w:
+        return ''
+    ids = roles.get('ids') or set()
+    names = roles.get('names') or set()
+    tags = roles.get('tags') or set()
+    if w not in ids and w not in names and w not in tags:
+        return ''
+    return _role_value_for_script(w, roles, show_like)
+
+
+def role_table(project_root, *, roles=None) -> dict:
+    """
+    读一次角色表（`_role_table` 的公开入口）。
+
+    ⚠ **这一步不便宜**（要读整张资产表：真机 ~600 ms 首次 / ~240 ms 之后）——
+      界面调它必须自己缓存，别在每个按键上读一遍。
+      传 `roles=` 就已经是"算好了的那一份"，这里直接还回去。
+    """
+    if roles:
+        return roles
+    root = Path(project_root) if project_root else None
+    if root is None or not root.is_dir():
+        return {}
+    try:
+        return _role_table(root)
+    except Exception as e:                       # noqa: BLE001 - 没表就当没有
+        swallow('learn_statement.role_table', e)
+        return {}
+
+
+def role_candidates_for(project_root, head, values, *, roles=None) -> dict:
+    """
+    一组候选值 → **剧本里该写的那一种写法**（顺带给出显示名标签）。
+
+    为什么要有这一步（2026-10-18 用户现场）：
+
+    > 明明它只是换成变量名又不认得了……
+
+    角色表里同一个人有**三种写法**：变量名（`l`）、显示名（`蓝`）、
+    立绘 tag（`lan`）。`show` 里能写的只有 tag，自定义语句里写的是变量名，
+    而编剧认得的是显示名。于是"候选表里是显示名、剧本里是 tag"这件事
+    看起来像"工具不认"，其实是**候选表存的不是脚本真要写的那个词** ——
+    更糟的是：候选会进卡片的下拉（`spec_arg_choices_for`），人从下拉里挑一个
+    就等于把显示名写进脚本（`show 蓝 …`，Ren'Py 里没有这个 tag）。
+
+    ⚠ 只做**查表**，不猜：一个值认不出是角色就**原样留着**（服装/表情那两格
+      的候选本来就跟角色表无关，这条路对它们一个字都不动）。
+    ⚠ 认出来的值**保持原有顺序**，并且**去重**：两个人共用一个 tag 时
+      （真机 `narrator` 与 `n` 的 tag 都是 `narrator`）只留第一个。
+    ⚠ `roles=`（2026-10-18）：界面已经读过表就传进来（`role_table` 的缓存），
+      否则每个格子都会把整张资产表重读一遍（真机 3 格 = 1.8 s）。
+
+    返回 `{'values': [...], 'labels': {值: 显示名}, 'changed': {旧值: 新值},
+    'dropped': [...]}` —— `labels` 只给界面看（芯片显示 `蓝（lan）`），
+    写盘永远是 `values`（脚本真源）。
+    """
+    raw = parse_choices(values)
+    out = {'values': [], 'labels': {}, 'changed': {}, 'dropped': [],
+           'asked': len(raw), 'role_table': False}
+    if not raw:
+        return out
+    got = role_table(project_root, roles=roles)
+    if not (got.get('ids') or got.get('tags')):
+        out['values'] = list(raw)               # 没角色表 → 一个字都不动
+        return out
+    out['role_table'] = True
+    show_like = _uses_image_tags(head)
+    seen: set = set()
+    for item in raw:
+        canon = _role_script_word(item, got, show_like)
+        value = canon or item
+        if value in seen:
+            out['dropped'].append(item)
+            continue
+        seen.add(value)
+        out['values'].append(value)
+        if canon:
+            shown = role_label_for(value, got)
+            if shown and shown != value:
+                out['labels'][value] = shown
+            if canon != item:
+                out['changed'][item] = canon
+    return out
+
+
+def _role_word_kind(word, roles, show_like: bool) -> str:
+    """这个词是哪个"名字"（只用于把人话说清：立绘 tag / 变量名 / 显示名）。"""
+    w = str(word or '').strip().strip('「」『』').strip()
+    if w and w in (roles.get('tags') or set()):
+        return '立绘 tag'
+    if w and w in (roles.get('ids') or set()):
+        return '变量名'
+    if w and w in (roles.get('names') or set()):
+        return '显示名'
+    return ''
+
+
+def explain_role_spelling(project_root, head, word, candidates, *,
+                          roles=None) -> str:
+    """
+    「剧本里的这个词」与「候选里的那个值」是不是**同一个人的不同写法**？
+
+    返回一句人话（空串 = 不是这种情况）。用途只有一个：把"切不上"从
+    "工具不认这个词"翻译成"候选里存的是他的另一种写法"。
+
+    用户 2026-10-18 现场：
+    > 明明它只是换成变量名又不认得了……
+
+    真凶是候选表存了**显示名**（`蓝`），而剧本里写的是**立绘 tag**（`lan`）——
+    两者是同一个人，但后者才是脚本能跑的写法。
+
+    ⚠ `roles=` 同 `role_candidates_for`：这一句会被"试切"逐字调用，
+      别每次都去读资产表。
+    """
+    w = str(word or '').strip().strip('「」『』').strip()
+    if not w:
+        return ''
+    roles = role_table(project_root, roles=roles)
+    if not (roles.get('ids') or roles.get('tags')):
+        return ''
+    show_like = _uses_image_tags(head)
+    canon = _role_script_word(w, roles, show_like)
+    if not canon:
+        return ''                               # 这个词不是角色 → 不解释
+    kind_word = _role_word_kind(w, roles, show_like)
+    shown = role_label_for(canon, roles) or w
+    for cand in (candidates or ()):
+        c = str(cand or '').strip()
+        if not c or c == w:
+            continue
+        other = _role_script_word(c, roles, show_like)
+        if other != canon:
+            continue
+        kind_cand = _role_word_kind(c, roles, show_like)
+        if kind_cand and kind_word and kind_cand != kind_word:
+            return (f'「{w}」是「{shown}」的{kind_word}，而候选里写的是他的'
+                    f'{kind_cand}「{c}」—— 候选要填剧本里真写的那个词'
+                    f'（点「⚡ 从项目里导入候选」重导一次「角色表」就行）')
+    return ''
+
+
 def _slot(slots: dict, i: int, kind: str, name: str) -> dict:
     """
     第 `i` 项的收集器。**键是位置下标** —— 同一个位置必须是同一项：
