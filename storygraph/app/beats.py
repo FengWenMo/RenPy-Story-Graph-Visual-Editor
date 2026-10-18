@@ -32,6 +32,7 @@ from storygraph.assets.asset_registry import describe_asset
 from storygraph.story.beat_model import (
     Beat,
     KIND_MENU,
+    KIND_MENU_OPTION,
     KIND_NARRATION,
     KIND_SAY,
     MENU_NO_CAPTION,
@@ -1031,7 +1032,11 @@ def speaker_missing_warning(beat: Beat, symbols=None) -> str:
             except Exception as e:            # noqa: BLE001 - 判不了就不吵
                 swallow('app.beats.speaker_missing_warning', e)
         return ''
-    if beat.kind in ('narration', 'extend'):
+    if beat.kind in ('narration', 'extend', KIND_MENU, KIND_MENU_OPTION):
+        # `menu` / `menu_option` 例外（2026-10-19，P1-3 收尾时顺手抓到）：
+        # 这两类拍的「台词」格装的是**菜单标题 / 选项文案**，本来就不该有
+        # 说话人（引擎的菜单选项行只有 `"文案" [if cond]:`）。从前这里照样
+        # 弹"没有说话人 → 会变成旁白"，等于教人去点一个不存在的开关。
         return ''
     return ('⚠ 这一拍有台词但没有说话人 —— 导出后会变成**旁白**。\n'
             f'   kind={beat.kind!r}，请确认这句是谁说的；'

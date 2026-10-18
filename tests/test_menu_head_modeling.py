@@ -204,3 +204,21 @@ def test_advanced_fields_expose_the_menu_head():
 
     assert 'MenuName' in ADVANCED_FIELDS
     assert 'MenuArgs' in ADVANCED_FIELDS
+
+
+def test_menu_beats_do_not_warn_about_a_missing_speaker():
+    """
+    菜单拍 / 选项拍的「台词」格是**标题 / 选项文案**，本来就没有说话人。
+
+    从前卡片底部照样弹"这一拍有台词但没有说话人 —— 导出后会变成旁白，
+    把「类型」改成 narration" —— 那是教人去点一个不存在的开关
+    （2026-10-19，做菜单头建模时的截图里一眼看到）。
+    """
+    from storygraph.app.beats import speaker_missing_warning
+
+    assert speaker_missing_warning(
+        Beat(kind=KIND_MENU, text='要选哪一条？')) == ''
+    assert speaker_missing_warning(
+        Beat(kind=KIND_MENU_OPTION, text='选项 A')) == ''
+    # 普通台词照样要吵（否则真正的幽灵旁白就没人管了）
+    assert speaker_missing_warning(Beat(kind='say', text='没人说的话'))

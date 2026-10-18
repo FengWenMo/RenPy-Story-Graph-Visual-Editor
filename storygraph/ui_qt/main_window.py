@@ -533,8 +533,11 @@ class BeatCardEditor(QWidget):
         root.addWidget(self._note_label)
 
     def _adv_label(self) -> str:
+        # 标签里列的是"这里**能改什么**"。2026-10-19 补上菜单头
+        # （`menu 名(args):` 的名与参数）—— 不写进来，人不会知道菜单拍
+        # 也能改这两样（它们只出现在菜单拍上）。
         return (('▾' if self._adv_open else '▸')
-                + ' 高级区（代码 / Label / 类型 / Notes / Stage / 台词后缀）')
+                + ' 高级区（代码 / Label / 类型 / Notes / Stage / 台词后缀 / 菜单头）')
 
     # ---------- 语句条 + 舞台收放（2026-10-18）----------
 

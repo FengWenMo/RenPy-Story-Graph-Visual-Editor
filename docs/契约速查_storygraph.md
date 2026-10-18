@@ -2547,6 +2547,10 @@ menu_statement(l, loc):
 - 标签语义不变：`menu 名:` **不**替代 `label`，它只是多了一条可跳转入口。
 - 判据：`tools/probe_menu_head.py`（结构 / 头行逐字节 / 幂等 / **真 SDK lint**
   五形态全过）、`tests/test_menu_head_modeling.py`。
+- 卡片层两条配套（2026-10-19）：`menu` / `menu_option` 拍的「台词」格**不是
+  台词**（是标题 / 选项文案），所以 `speaker_missing_warning` 对这两类**不报**
+  "没有说话人 → 会变旁白"；高级区标题里要写出「菜单头」，否则没人知道
+  那两格能改。
 
 ### 三条"平台期"约束（改代码前先读）
 
