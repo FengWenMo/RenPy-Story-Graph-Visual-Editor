@@ -352,7 +352,7 @@ def _write_spec_arg_columns(ws, beats, statements, row_count: int,
 def export_beats_to_excel(beats: list, output_path,
                           registry=None, include_dropdowns: bool = True,
                           include_thumbnails: bool = False,
-                          statements=None, facts=None):
+                          statements=None, facts=None, source_file=None):
     """
     把 Beat 列表写成 Excel。
 
@@ -368,6 +368,11 @@ def export_beats_to_excel(beats: list, output_path,
     批注，指出"这一格里有引擎没认的属性"。
     ⚠ **只提示，绝不过滤**：候选与下拉内容一律以**实际存在的资源**为准
     （用户 2026-10-11 定的口径）；`facts` 为空 → 一个批注都不挂，行为与从前一致。
+
+    source_file（2026-10-19，审计 P1-1）：这一章摊成表之前的 `.rpy`。
+    给了就写进隐藏的「表信息」表，导回时 `compile_table` 据此**自动走增量**
+    （没改的行逐字节保住），用户不必知道 `--source` 这个参数。
+    不给（手工新建、协作库导出）→ 不写那张表，行为与从前完全一致。
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,6 +493,14 @@ def export_beats_to_excel(beats: list, output_path,
     # （台词/注释/代码/舞台/条件…）也可能超过 32767（见 `CELL_TEXT_LIMIT`）。
     _write_long_text_sheet(wb, long_rows)
     _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
+    # **来源信息**（2026-10-19，审计 P1-1）：这张表是从哪一份 .rpy 摊出来的。
+    # 导回时靠它自动走增量（见 `table_meta` 的 docstring）——
+    # 全量重生成会重排整份文件，而这件事完全可以不发生。
+    try:
+        from storygraph.story.table_meta import write_meta
+        write_meta(wb, source_file=source_file)
+    except Exception as e:                     # noqa: BLE001 - 元信息不该拦住出表
+        swallow('excel_export.export_beats_to_excel.meta', e)
 
     wb.save(output_path)
     return output_path

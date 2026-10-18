@@ -10,6 +10,11 @@ storygraph.app.tables —— **剧本表（Excel）工作流**，框架无关。
     而表在 game/ 里 —— Ren'Py 把 game/ 下所有 .rpy 当同一个脚本，
     产物和原文抢同一批 label（一次真实事故）。现在一律走
     `planned_output_path` → `<项目根>/build/renpy/`。
+
+    ⚠ 2026-10-19（审计 P1-7）：**写回这一章自己的 .rpy 是另一件事** ——
+    那是原地更新原文（增量合并，没改的行逐字节保留），不是"在 game/ 里
+    多生一个文件"。判据是"有没有底稿"：给了 `source_rpy` 就写回它，
+    没有才落 `build/renpy/`。上面那条事故防的是**第二份**脚本。
   · **优先增量补丁**。用户 2026-09-28 的原话："保留注释，全量修改出来的
     东西，根本就没办法看！！！"实测真实章节：全量与原文相似度 0.9246、
     丢 18 行 / 多 13 行；增量 0.9947、零丢失零多出。
@@ -152,8 +157,23 @@ def export_table(table_path, registry=None, project_root=None,
             swallow('app.tables.export_table', e)
             unregistered = []
 
-    target = Path(out_path) if out_path else planned_output_path(
-        table_path, script_path=source_rpy, project_root=project_root)
+    # **默认写回这一章自己的 .rpy**（2026-10-19，审计 P1-7 收尾）：
+    # 调用方**指名**了底稿，就说明"用户在改这一章"——从前这里仍然落到
+    # `build/renpy/`，于是表格里改完的台词**永远到不了游戏**（审计原话：
+    # "写回落到 build/renpy/，不改原章节"）。
+    #
+    # 只有"表旁边恰好有个同名 .rpy"（`_source_rpy` 的兜底）**不算指名**：
+    # 那条路只拿来走增量，产物仍旧落 build/ —— 往 game/ 里写东西必须由人
+    # 明确指认是哪一个章节（P0：多一份抢 label 的脚本，游戏起不来）。
+    explicit_src = bool(source_rpy)
+    src_for_patch = _source_rpy(source_rpy, table_path)
+    if out_path:
+        target = Path(out_path)
+    elif explicit_src and src_for_patch is not None:
+        target = Path(src_for_patch)
+    else:
+        target = planned_output_path(table_path, script_path=source_rpy,
+                                     project_root=project_root)
     text = render_beats_to_rpy(beats, label_name=None, registry=registry)
 
     # —— 增量补丁优先（保住原文的注释与逐字节未改行）——
@@ -165,7 +185,7 @@ def export_table(table_path, registry=None, project_root=None,
     #: 护栏拦下，而报出来的错还是"检查文件是否被占用"（驴唇不对马嘴）。
     merged_from = None
     try:
-        src = _source_rpy(source_rpy, table_path)
+        src = src_for_patch
         # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
         # 否则生成写法会不一致（`ling happy` 被写成中文 tag / 下划线形态），
         # 那就是"把能跑的脚本改坏"。
@@ -192,8 +212,21 @@ def export_table(table_path, registry=None, project_root=None,
     # 于是写到 build/ 也被拒写（用户 2026-09-28 实测）。
     occupied = labels_in_danger(target, project_root,
                                 exclude={target, table_path})
+    # 有底稿就把原文交给门禁（2026-10-19，审计 P1-7）：写回**原文件**时，
+    # "补丁没配上、产物里少了 `default` / `init python`"必须由 `OPAQUE_LOST`
+    # 拦下 —— 目标不是新路径，那条"手写护栏"在这条路上给不出结论。
+    source_text = None
+    if src_for_patch is not None:
+        try:
+            from storygraph.story.source_style import read_text
+            source_text = read_text(src_for_patch)[0]
+        except (OSError, UnicodeDecodeError):
+            source_text = None
     issues = evaluate_generation(text, target, project_root=project_root,
-                                 occupied=occupied, beats=beats)
+                                 occupied=occupied, beats=beats,
+                                 source_text=source_text,
+                                 source_path=(str(src_for_patch)
+                                              if src_for_patch else None))
     blocking = [i for i in issues if i.is_blocking]
     warnings = [i for i in issues if not i.is_blocking]
     # 工具不认识的块语句（M1）：**结论必须随结果走到落盘那一步** ——

@@ -2876,13 +2876,22 @@ def _split_code_cell(cell: str, block_lines=None) -> tuple:
     # 记成逻辑行就取不上、整条 ordered 作废（实测：退回"raw 在前 code 在后"
     # 的兜底顺序，`$ game = 1` 跑到 `show screen` 后面去了）。
     kinds = []
-    for group, _marked in _group_logical_lines(
+    for group, marked in _group_logical_lines(
             list(zip(plain, [f[0] for f in in_block]))):
         first = group.split('\n', 1)[0].strip()
         if not first:
             kinds.append('blank')
+        elif marked:
+            # **在 `python:` 块里的一律是代码**（2026-10-19）：块标记是
+            # 权威。少了这一条，块里的裸字符串（docstring / 表达式语句）
+            # 会被下面那条"像不像台词"的判据判成 raw，整个块被劈开。
+            kinds.append('code')
         elif first.startswith('$') or (
                 not _looks_like_renpy_statement(first)
+                # 台词：`e "…"` / `"旁白"`（菜单块里的带说话人标题就是这种）。
+                # 少了这一条，它在读表时会被判成 python，整行从 `raw` 消失
+                # （2026-10-19，审计 P1-A）。
+                and not _looks_like_say_line(first)
                 and not first.endswith(':') and not _is_bare_renpy_verb(first)):
             kinds.append('code')
         else:
@@ -3008,6 +3017,49 @@ def _is_bare_renpy_verb(line: str) -> bool:
     """`pause` / `with dissolve` 这类没有参数也成立的裸语句（别被当 python）。"""
     head = line.split(None, 1)[0] if line.split() else ''
     return head.rstrip(':') in _RENPY_STATEMENT_HEADS
+
+
+#: say 语句的**说话人前缀**：`e ` / `m.lin ` / 空（旁白）。
+_RE_SAY_WHO = re.compile(r'^(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s+)?')
+
+
+def _looks_like_say_line(text: str) -> bool:
+    """
+    这一行像一条 **say 语句**（`e "…"` / `"旁白"` / `e "…" with dissolve`）吗？
+
+    为什么需要（2026-10-19，审计 P1-A）：菜单块里"不是选项"的合法语句
+    （例如**带说话人的菜单标题**）存在 `Beat.raw` 里，而写进「代码」格
+    读回来时要按文本重新分类。旧判据只认语句头白名单，`s` 不在里面 →
+    这一行被判成 python，`Beat.raw` 变空 → **整行消失**。真机
+    `the_question/script.rpy:99`（`s "Sure, but what's a \"visual novel?\""`）
+    就是这么丢的；它只在"从 xlsx 走全量"那条路上丢，直接解析 → 渲染
+    看不出来（所以上一轮没抓到）。
+
+    只认"引号紧跟（可选）名字"的形态，尾巴只允许 say 的修饰语 ——
+    `print("x")` / `f"…"` / `a = "…"` / `"a" + b` 都不会被误认。
+    """
+    s = str(text or '').strip()
+    if not s:
+        return False
+    m = _RE_SAY_WHO.match(s)
+    rest = s[m.end():]
+    if not rest or rest[0] not in '"\'':
+        return False
+    quote = rest[0]
+    i, n = 1, len(rest)
+    while i < n:
+        c = rest[i]
+        if c == '\\':                  # 转义引号（`\"`）不结束字符串
+            i += 2
+            continue
+        if c == quote:
+            break
+        i += 1
+    if i >= n:                         # 引号没闭合：不是一句台词（更像坏代码）
+        return False
+    tail = rest[i + 1:].strip()
+    return (not tail
+            or tail.startswith(('with ', 'id ', '(', 'nointeract', '#')))
 
 
 

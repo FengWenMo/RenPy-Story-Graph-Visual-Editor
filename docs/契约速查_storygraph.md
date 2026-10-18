@@ -2558,6 +2558,46 @@ menu_statement(l, loc):
   理由：不进表 = 下拉里选不到、`show 名` 被报缺资源。`image 名 = 表达式`
   那条路不受影响（先登记的赢）。
 
+### 闸门 ⑥：P1 收尾的四条硬判据（2026-10-19）
+
+体检 §10.2 那轮核销留下 2 条"部分" + 1 条"无效" + 1 条"未验"。这一节把它们
+变成可复跑的判据 —— **判据不看提交信息，只看行为**。
+
+1. **不给 `--source` 也不许重排整份文件。**
+   `rpy → xlsx` 时把源路径写进隐藏表「表信息」（`story/table_meta.py`），
+   `compile_table` 读不到 `--source` 就自动接上它走增量。
+   - 判据：`tools/audit_full_path.py`（刻意不给 `--source`）——
+     `sr_general` 55/55、`the_question` 5/5、`tutorial` 24/24 逐字节相同。
+   - 只认**真实存在**的来源文件；表搬走 / 源被删 → 当没有来源（行为与从前一致）。
+   - 不用文档属性：Excel 另存与我们自己的"刷新候选"都会重写工作簿。
+
+2. **「代码」格读回来时，台词行是 raw 不是 python。**
+   `s "…"` / `"旁白"` 是 say 语句；旧判据只认语句头白名单，于是菜单块里
+   "带说话人的标题"被判成 python、`Beat.raw` 变空、**整行消失**
+   （真机 `the_question/script.rpy:99`）。判据：`_looks_like_say_line`
+   （引号紧跟可选名字，尾巴只允许 `with` / `id` / `(` / `nointeract` / 注释）。
+   `print("x")` / `a = "x"` / `"a" + b` 仍判 code。
+
+3. **写完必须重载；写回目标必须是人指认过的那一章。**
+   - `export_table(source_rpy=…)` 指名了底稿 → 默认产物就是它；
+     "表旁边恰好有同名 .rpy"不算指名，产物仍落 `build/renpy/`。
+   - 写回原文件时 `evaluate_generation(source_text=…)` 必须拿到原文，
+     否则补丁没配上时 `default` / `init python` 会静默消失。
+   - 写成功后 `session.load()` + 重建卡片列表（不重载 = 下一次编辑拿过期行号）。
+
+4. **报告里的字段不许反推。**
+   `engine_lint.ran` 取 `LintReport.ran`，不许用"有没有 ENGINE_ issue"反推 ——
+   通过时没有 issue，反推会写 `ran=false`（闸门开着、报告说没跑）。
+
+### 闸门 ⑥ 的两条配套（同一批）
+
+- **`init -N python:` 也是 python 块**：`init [N]` 的 N 允许负数和浮点
+  （`init -1 python:` 是常见写法）。只认 `\d+` 会让它变成
+  `UnknownBlockNode` —— 字节保真没问题，但构建报告会假报"工具不认识的语句头"。
+- **「只看有变化的拍」的判据是 `StageFrame.changes`**（与「舞台快照」的
+  「本拍变化」同一份文字），不是 `frame_summary`（后者永远至少含
+  `#N · line_id` → 恒真，等于没有这个开关）。
+
 ### 三条"平台期"约束（改代码前先读）
 
 1. **判据要对着引擎**：工具自己前后一致 ≠ 产物能跑。任何"生成 .rpy 的新路径"

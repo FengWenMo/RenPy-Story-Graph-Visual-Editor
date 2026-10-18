@@ -680,6 +680,18 @@ class StagePreviewWindow(QDialog):
         bar.addWidget(self._sound_cb)
         self._only_cb = QCheckBox('只看有变化的拍')
         self._only_cb.toggled.connect(self._on_only)
+        # 这一章**一拍舞台变化都没有**时，勾上它不会发生任何事 —— 那就
+        # 直接置灰并说清楚原因（"点了没反应"比没有这个开关更让人困惑）。
+        _n_change = sum(1 for f in self.frames if self._has_change(f))
+        if self.frames and not _n_change:
+            self._only_cb.setEnabled(False)
+            self._only_cb.setToolTip(
+                '这一章没有任何舞台变化（没有换景 / 换立绘 / 换音乐），'
+                '所以这个开关无事可做。')
+        else:
+            self._only_cb.setToolTip(
+                f'只留有舞台变化的拍（这一章 {_n_change} / {len(self.frames)} 拍）。\n'
+                '判据与「舞台快照」表的「本拍变化」是同一份文字。')
         bar.addWidget(self._only_cb)
         bar.addStretch(1)
         self._pos = QLabel('')
@@ -905,12 +917,10 @@ class StagePreviewWindow(QDialog):
 
     @staticmethod
     def _has_change(f) -> bool:
-        from storygraph.app.stage import frame_summary
-        try:
-            return bool(frame_summary(f))
-        except Exception as e:                    # noqa: BLE001
-            swallow('ui_qt.stage_preview._has_change', e)
-            return True
+        # 判据收在 `app.stage.has_stage_change`（**同一个真源**，可无头测）：
+        # 从前这里用 `frame_summary(f)`，而摘要永远含 `#N · line_id` → 恒真。
+        from storygraph.app.stage import has_stage_change
+        return has_stage_change(f)
 
     # ------------------------------------------------------------------
 

@@ -295,18 +295,20 @@ def _cmd_table(args) -> int:
 
         # 默认输出：给了 `--source` 就**写回那一章**（2026-10-18，审计 P1-7
         # "写回不闭环"）—— 从前默认是 xlsx 旁边的同名 .rpy，产物落不到
-        # 原章节上，用户还得自己搬。没给 --source（新建）才用表名。
+        # 原章节上，用户还得自己搬。没给 `--source` 就交给 `compile_table`：
+        # 表里记着来源（隐藏表「表信息」）时它同样写回那一章，否则落表旁边。
         if args.out:
             out = Path(args.out)
         elif getattr(args, 'source', None):
             out = Path(args.source)
         else:
-            out = Path(args.path).with_suffix('.rpy')
+            out = None
         _path, _sheet, result = compile_table(
             args.path, rpy_path=out, registry=registry, write_sheet=False,
             force=bool(getattr(args, 'force', False)),
             source_path=getattr(args, 'source', None), skip_empty=True,
             engine_lint=not bool(getattr(args, 'no_engine_lint', False)))
+        out = Path(_path)
         if result.empty:
             print('剧本表为空', file=sys.stderr)
             return 2
@@ -661,13 +663,14 @@ def _cmd_compile(args) -> int:
 
     registry = _load_registry(args)
     # 与 `table xlsx2rpy` 同一条口径（2026-10-18，审计 P1-7）：给了 --source
-    # 就默认**写回那一章**，否则输出到表旁边。
+    # 就默认**写回那一章**；都没给就让 compile_table 用"表里记的来源"，
+    # 没有来源才落到表旁边。
     if args.out:
         out = Path(args.out)
     elif getattr(args, 'source', None):
         out = Path(args.source)
     else:
-        out = table_path.with_suffix('.rpy')
+        out = None
     # `--force` 是逃生舱：允许覆盖已存在的手写 .rpy
     # （见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
     # `--source` 是**无损**那条路：给出这一章原来的 .rpy，走增量合并，
@@ -679,6 +682,7 @@ def _cmd_compile(args) -> int:
         write_sheet=bool(args.sheet) and not args.in_place_sheet,
         force=bool(getattr(args, 'force', False)),
         source_path=getattr(args, 'source', None))
+    out = Path(_path)
 
     if not _report_guard(result, out, source=getattr(args, 'source', None)):
         return 1

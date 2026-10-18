@@ -296,6 +296,28 @@ def frame_summary(frame: StageFrame) -> str:
     return ' · '.join(b for b in bits if b)
 
 
+def has_stage_change(frame: StageFrame) -> bool:
+    """
+    这一拍的**舞台**真的变了什么吗（预览的「只看有变化的拍」判据）。
+
+    ⚠ 2026-10-19（审计 P1-8 收尾）：判据从前是 `bool(frame_summary(f))`，
+    而摘要**永远**至少含 `#N · line_id` —— 于是恒为 True，那个勾选框
+    什么也没做（审计原话："仍是空实现"）。
+
+    现在只看 `changes` —— 它和「舞台快照」表的「本拍变化」是**同一份文字**
+    （`stage_snapshot._render_changes`），所以"预览里留下的拍"与"表里标了
+    变化的拍"必然一致。
+
+    刻意**不看台词**：一句纯对话没有改变舞台，它不是这一项要留下的东西；
+    这也正是这张表存在的意义（几百拍里只看真正换景/换人/换声的那几拍）。
+    """
+    try:
+        return bool(str(getattr(frame, 'changes', '') or '').strip())
+    except Exception as e:                   # noqa: BLE001 - 判不了就别藏拍
+        swallow('app.stage.has_stage_change', e)
+        return True
+
+
 # ===================== 真实素材解析（纯函数，可无头测） =====================
 #
 # 为什么要单独一层：预览要画真图，就必须回答"这个图像名对应磁盘上哪张图"。

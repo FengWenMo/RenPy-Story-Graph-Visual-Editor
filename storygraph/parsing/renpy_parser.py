@@ -1086,11 +1086,20 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_DOLLAR = re.compile(r'^\$\s*(.+)')
     #: `python:` 块的**全部**块头形态：
     #:   · label 内：`python:` / `python in store:`
-    #:   · 顶层：`init python:` / `init 1 python:` / `python early:`
-    #:     （`init [N]` 前缀 2026-10-05 加，见 `_stmt_python_block`：少了它
-    #:     顶层 `init python:` 会被当"未建模块"整块跳过）
-    _RE_PYTHON = re.compile(r'^(?:init(?:\s+\d+)?\s+)?python(?:\s+early)?'
-                            r'(?:\s+in\s+[\w.]+)?\s*:')
+    #:   · 顶层：`init python:` / `init 1 python:` / `init -1 python:` /
+    #:     `init 1.5 python:` / `python early:`
+    #:
+    #: `init [N]` 前缀 2026-10-05 加，见 `_stmt_python_block`：少了它
+    #: 顶层 `init python:` 会被当"未建模块"整块跳过。
+    #:
+    #: **N 允许负数和浮点**（2026-10-19，审计 P1-3c 收尾）：`init -1 python:`
+    #: 是 Ren'Py 的常见写法（负数优先级先执行），而旧正则只认 `\d+` ——
+    #: 于是它在 AST 里是 `UnknownBlockNode`：字节保真没问题（顶层区间那条
+    #: 后门照样带得回去），但工具把它当"不认识的语句"，构建报告里会假报
+    #: "工具不认识的语句头"，也没法按 python 块分类。
+    _RE_PYTHON = re.compile(
+        r'^(?:init(?:\s+-?\d+(?:\.\d+)?)?\s+)?python(?:\s+early)?'
+        r'(?:\s+in\s+[\w.]+)?\s*:')
     _RE_SHOW_HEAD = re.compile(r'^show\s+')
     _RE_SCENE_HEAD = re.compile(r'^scene\s+')
     _RE_HIDE_HEAD = re.compile(r'^hide\s+')

@@ -275,18 +275,35 @@ def opaque_loss(source_text, product_text) -> list:
     return lost
 
 
-def _make_opaque_lost_issue(lost: list, source_path=None) -> GuardIssue:
-    """把"顶层语句要丢"包成一条 block 级发现。"""
+def _make_opaque_lost_issue(lost: list, source_path=None,
+                            source_given: bool = False) -> GuardIssue:
+    """
+    把"顶层语句要丢"包成一条 block 级发现。
+
+    `source_given`（2026-10-19，审计 P1-10）：用户**给过** `--source` 却说
+    "加 --source" 是驴唇不对马嘴 —— 他要走的就是那条路，没走成的是
+    **对位**。两种情形给两句不同的话：
+      · 没给源 → 告诉他怎么走增量（这条路能保住东西）；
+      · 给了源但对不上 → 告诉他先对齐（重新载入这一章 / 手工改过就改回去）。
+    """
     head = '、'.join(f'第 {n} 行 `{t}`' for n, t in lost[:3])
     more = f'（共 {len(lost)} 处）' if len(lost) > 3 else ''
     where = f'{source_path} ' if source_path else ''
+    if source_given:
+        hint = ('你给的那份**底稿**（命令行 `--source` / 界面里选中的章节）'
+                '没能和表对上，**不是"没给底稿"** —— 所以这些行没有原文可保。'
+                '先重新载入这一章再导出；若这一章的结构被手工改过'
+                '（增删了行、把菜单标题挪了行），先改回"一行一个结构"。')
+    else:
+        hint = ('要么指定这一章的 .rpy 走增量合并'
+                '（命令行 `--source`；界面里先选中这个章节再导出），'
+                '要么确认这些定义在别处也有、用 `--force` 再来一次。')
     return GuardIssue(
         'OPAQUE_LOST', 'block',
         f'{where}有 {len(lost)} 处顶层语句**没有出现在产物里**：{head}{more}。'
         f'全量重生成只认得"拍"，`define` / `default` / `init python` / '
         f'`transform` / `screen` 一行都留不下 —— 丢这些游戏**起不来**。'
-        f'要么加 `--source <这一章原来的 .rpy>` 走增量合并（原文逐字节保住），'
-        f'要么确认这些定义在别处也有、用 `--force` 再来一次。')
+        + hint)
 
 
 # ---------------------------------------------------------------------------
@@ -964,6 +981,13 @@ class GeneratedArtifact:
     review_path: 'Path | None'
     written: bool
     issues: list
+    #: 这一次落盘前的**引擎 lint 结论**（`pipeline.engine_lint.LintReport`）。
+    #: 没跑（`engine_lint=False` / 没有 SDK / 抛了）就是 None。
+    #:
+    #: 为什么要带出来（2026-10-19，审计 P2-B）：构建报告从前用
+    #: "有没有 ENGINE_ 开头的 issue"反推"跑没跑"——lint **通过了**就没有
+    #: issue，于是报告写 `ran=false`。闸门是开的，报告在"通过"这一侧说假话。
+    engine_lint: object = None
 
     @property
     def blocking(self) -> list:
@@ -1065,17 +1089,30 @@ def block_buckets(beats, blocks=None) -> tuple:
 
 def evaluate_generation(text: str, out_path, *, project_root=None,
                         occupied: set = None, beats: list = None,
-                        unmanaged_blocks: list = None) -> list:
+                        unmanaged_blocks: list = None,
+                        source_text: str = None,
+                        source_path=None) -> list:
     """跑一遍生成门禁，返回问题清单。**纯函数、不写盘。**
 
     给"先看结果、问过用户再写"的调用方用（UI 的确认框就该是这个顺序）。
 
     `beats` 给了才能报 `UNMANAGED_BLOCK`（工具不认识的块）——
     那条判据只看产物文本认不出来，见 `generation_guard` 的说明。
+
+    `source_text`（2026-10-19，审计 P1-7）：这一章的**原文**。给了就能
+    报 `OPAQUE_LOST`（顶层语句要丢）—— "写回原文件"那条路必须有这一条，
+    否则补丁没配上时，`default` / `init python` 会静默消失（从前是
+    写 build/ 才显得安全；现在默认写回原章节，判据必须跟上）。
     """
-    return generation_guard(text, Path(out_path), project_root=project_root,
-                            occupied_labels=occupied, beats=beats,
-                            unmanaged_blocks=unmanaged_blocks)
+    issues = generation_guard(text, Path(out_path), project_root=project_root,
+                              occupied_labels=occupied, beats=beats,
+                              unmanaged_blocks=unmanaged_blocks)
+    if source_text is not None:
+        lost = opaque_loss(source_text, text)
+        if lost:
+            issues.append(_make_opaque_lost_issue(
+                lost, source_path, source_given=bool(source_path)))
+    return issues
 
 
 
@@ -1198,7 +1235,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     if source_text is not None:
         lost = opaque_loss(source_text, text)
         if lost:
-            issue = _make_opaque_lost_issue(lost, source_path)
+            issue = _make_opaque_lost_issue(lost, source_path,
+                                            source_given=bool(source_path))
             if force:
                 # 逃生舱：人明确知道自己在做什么 —— 降级成 warn，
                 # 但**仍然报出来**（报告里看得见丢了几处）。
@@ -1215,10 +1253,12 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     # 而"引擎能不能解析这个产物"从来没进过判据 —— P0-1~P0-6 全是
     # "引擎会报、工具不会报"的错，于是"全绿"与"跑不起来"同时成立。
     # 只把**语法**错误当阻塞；语义错误（缺图缺角色）要项目上下文，只 warn。
+    _lint = None
     if engine_lint:
         try:
             from storygraph.pipeline.engine_lint import lint_text
             _rep = lint_text(text, ignore_heads=lint_ignore_heads)
+            _lint = _rep
             if _rep.ran and not _rep.ok:
                 issues.append(GuardIssue(
                     'ENGINE_PARSE_ERROR', 'block',
@@ -1250,18 +1290,18 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
             review = out_path.with_suffix('.blocked.rpy')
             write_text_atomic(review, write_text_value)
             _publish_blocked(out_path, blocking, review)
-            return GeneratedArtifact(out_path, review, False, issues)
+            return GeneratedArtifact(out_path, review, False, issues, _lint)
         if blocking:
             _publish_blocked(out_path, blocking, None)
-            return GeneratedArtifact(out_path, None, False, issues)
+            return GeneratedArtifact(out_path, None, False, issues, _lint)
         # **原子写 + 保留换行 + 写前备份**（P1-2）：目标就是游戏脚本，
         # `write_text` 的"先截断再写"在崩溃/占用时会留下半截文件，
         # 而 Windows 上它还会把 LF 全翻成 CRLF（违背"逐字节保真"）。
         write_text_atomic(out_path, write_text_value, backup=True)
-        return GeneratedArtifact(out_path, None, True, issues)
+        return GeneratedArtifact(out_path, None, True, issues, _lint)
     except OSError:
         # 写不出去（权限/占用）不该把门禁结论一起吞掉
-        return GeneratedArtifact(out_path, None, False, issues)
+        return GeneratedArtifact(out_path, None, False, issues, _lint)
 
 
 

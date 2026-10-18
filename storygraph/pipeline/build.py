@@ -336,6 +336,9 @@ def build_project(project_root, asset_dir=None, out_dir=None,
                         f'⚠ 工具不认识的语句头（全仓扫描）：{_uh}{_um}')
         except Exception as e:                  # noqa: BLE001
             swallow('pipeline.build.statements_report', e)
+        # 引擎 lint 的**原始结论**（`LintReport` 或 None）。报告里的 `ran`
+        # 从它取 —— 不能拿"有没有 ENGINE_ issue"反推（见下面 P2-B 的说明）。
+        _lint_rep = getattr(artifact, 'engine_lint', None)
         guard_info = {
             'written': artifact.written,
             'blocking': len(artifact.blocking),
@@ -343,9 +346,16 @@ def build_project(project_root, asset_dir=None, out_dir=None,
             'statements': statements_text,
             # **引擎 lint**：这一轮到底跑没跑、结论是什么（审计 P1-9：
             # "构建不跑引擎 lint"是六条 P0 能顺利"构建成功"的根因）。
+            #
+            # ⚠ `ran` 必须取**报告自己的字段**（2026-10-19，审计 P2-B）：
+            # 从前写成 `any(i.code.startswith('ENGINE_') ...)`，而 lint
+            # **通过**时没有任何 ENGINE_ issue → 报告写 `ran=false`。
+            # 闸门开着，报告却在"通过"这一侧说假话。
             'engine_lint': {
                 'requested': bool(engine_lint),
-                'ran': any(i.code.startswith('ENGINE_') for i in artifact.issues),
+                'ran': bool(getattr(_lint_rep, 'ran', False)),
+                'ok': bool(getattr(_lint_rep, 'ok', True)),
+                'reason': str(getattr(_lint_rep, 'reason', '') or ''),
                 'issues': [i.format() for i in artifact.issues
                            if i.code.startswith('ENGINE_')],
             },

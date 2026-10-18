@@ -88,7 +88,13 @@ class WindowExportMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider', '_report_swallowed', '_session', '_status', '_status_bar', '_swallow_mark', '_table_mtimes', 'apply_current_beat', 'graph', 'resync_after_export')
+    #:
+    #: `_reload_list`（2026-10-19，审计 P1-7 收尾）：从剧本表写回**本章**之后
+    #: 要把左边卡片列表重建 —— 内存已经从磁盘重载，列表还挂着旧的行。
+    REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider',
+                '_reload_list', '_report_swallowed', '_session', '_status',
+                '_status_bar', '_swallow_mark', '_table_mtimes',
+                'apply_current_beat', 'graph', 'resync_after_export')
 
     def export_script(self):
         """导出这一章（编译 + 增量补丁 + 安全门禁，全在会话里）。"""
@@ -319,6 +325,19 @@ class WindowExportMixin:
                   f'（{done["beats"]} 个演出单元）')
         self._status(f'✔ 已由剧本表写回 {Path(done["out_path"]).name}'
                      f'（{done["beats"]} 个演出单元）')
+        # **写回闭环**（2026-10-19，审计 P1-7 收尾）：现在默认写回的就是
+        # 这一章自己的 .rpy，写完之后内存必须重新对齐到刚写出的那份文件 ——
+        # 否则界面上还是旧内容，下一次编辑又拿着过期行号去对位
+        # （那正是"补丁对不上、退回全量、注释全丢"的起点）。
+        try:
+            cur = getattr(self._session, 'script_path', None)
+            if cur and Path(done['out_path']).resolve() == Path(cur).resolve():
+                self._session.load(cur)
+                self._reload_list()
+                self._status(f'✔ 已写回并重新载入 {Path(cur).name}'
+                             f'（{done["beats"]} 个演出单元）')
+        except Exception as e:                    # noqa: BLE001 - 同步失败不影响已写出的文件
+            swallow('ui_qt.window_export.reload_after_write', e)
     def _source_rpy_for_table(self, table_path):
         """
         增量补丁的底稿 .rpy。

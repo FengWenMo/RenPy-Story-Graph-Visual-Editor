@@ -357,7 +357,9 @@ def open_rpy_as_table(script_file, output_path=None, registry=None,
         b.bgm = b.bgm or compose_audio_text(b, 'music')
         b.sfx = b.sfx or compose_audio_text(b, 'sound')
     export_beats_to_excel(beats, output_path, registry=registry,
-                          include_thumbnails=with_thumbnails, facts=facts)
+                          include_thumbnails=with_thumbnails, facts=facts,
+                          # 表里记下来源：导回时自动走增量（审计 P1-1）
+                          source_file=str(script_file))
     return output_path
 
 

@@ -466,9 +466,28 @@ def compile_table(table_path, rpy_path=None, registry=None,
     from storygraph.story.excel_import import import_beats_from_excel
 
     table_path = Path(table_path)
+    # **表记着自己的来源**（2026-10-19，审计 P1-1）：`rpy → xlsx` 时把源路径
+    # 写进隐藏表「表信息」，导回时在这里自动接上 —— 用户不给 `--source`
+    # 也走增量（没改的行逐字节保住），不会把整份文件重排一遍。
+    #
+    # 只认**真实存在的文件**（`table_meta.source_of` 会验）：表被拷到别的
+    # 机器、源文件删了 → 当没有来源，行为与从前完全一致。
+    if source_path is None:
+        try:
+            from storygraph.story.table_meta import source_of as _source_of
+            source_path = _source_of(table_path)
+        except Exception as e:                 # noqa: BLE001 - 元信息读不到就退回全量
+            from storygraph.core.safeguard import swallow
+            swallow('pipeline.compile.table_meta', e)
+            source_path = None
+
     beats = import_beats_from_excel(table_path, registry=registry)
     if rpy_path is None:
-        rpy_path = table_path.with_suffix('.rpy')
+        # 有来源 → **默认写回那一章**（与 CLI `xlsx2rpy --source` 同一条口径）。
+        # 从前默认 `table.with_suffix('.rpy')`，而表常常就在 `game/` 里 ——
+        # 那会在 game/ 下多出一份抢同一批 label 的脚本（真实事故的形态）。
+        rpy_path = Path(source_path) if source_path else \
+            table_path.with_suffix('.rpy')
     rpy_path = Path(rpy_path)
 
     if not beats and skip_empty:
