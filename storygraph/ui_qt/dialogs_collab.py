@@ -30,6 +30,41 @@ from storygraph.ui_qt import tokens as T
 
 __all__ = ['CollabConflictDialog', 'conflict_choices']
 
+#: 两栏里每边最多显示多少字（**只是显示**：提交的永远是全文）。
+#:
+#: 为什么要截（2026-10-18）：Excel 的上限是 32767 字，一句 3 万字的独白
+#: 完全合法 —— 但两栏并排放两块 3 万字的 QLabel，窗口会被撑到屏幕外，
+#: 而人要做的决定其实与"多长"无关（选哪边）。所以显示开头一段，
+#: 后面写清"共 N 字 · 看全文"，全文放进一个可滚动的只读窗口。
+#: 用户的话："一条 3w 多字，整个屏幕估计都装不下。"
+DISPLAY_LIMIT = 300
+
+
+def _split_display(text: str) -> tuple:
+    """`(显示用文本, 总字数)` —— 没超就原样，超了给开头 + 省略号。"""
+    t = str(text or '')
+    if len(t) <= DISPLAY_LIMIT:
+        return t, len(t)
+    return t[:DISPLAY_LIMIT].rstrip() + ' …', len(t)
+
+
+class _FullTextDialog(QDialog):
+    """「看全文」：只读、可滚动。改内容请用「自己拼一版」。"""
+
+    def __init__(self, title: str, text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(720, 420)
+        lay = QVBoxLayout(self)
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(str(text or ''))
+        lay.addWidget(view, 1)
+        box = QDialogButtonBox(QDialogButtonBox.Close)
+        box.rejected.connect(self.reject)
+        box.accepted.connect(self.accept)
+        lay.addWidget(box)
+
 
 def _name_of(c) -> str:
     """对方的称呼（没记名字就叫 TA —— 不编一个）。"""
@@ -73,11 +108,22 @@ class _FieldRow(QWidget):
                                   T.SPACE['sm'], T.SPACE['sm'])
             head = QLabel('你写的' if role == 'mine' else 'TA 写的')
             head.setProperty('role', 'caption')
-            body = QLabel(text or '（空）')
+            shown, total = _split_display(text)
+            body = QLabel(shown or '（空）')
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextSelectableByMouse)
             bl.addWidget(head)
             bl.addWidget(body)
+            if total > DISPLAY_LIMIT:
+                # 只显示开头，但**提交的是全文**：这句话必须写出来，
+                # 否则人会以为"留下的是这 300 字"。
+                more = QPushButton(f'共 {total:,} 字 · 看全文')
+                more.setFlat(True)
+                more.setProperty('role', 'link')
+                more.setCursor(Qt.PointingHandCursor)
+                more.clicked.connect(
+                    lambda _=False, t=text, n=role: self._show_full(t, n))
+                bl.addWidget(more, 0, Qt.AlignLeft)
             bl.addWidget(rb, 0, Qt.AlignLeft)
             row.addWidget(box, 1)
             rb.setProperty('side', role)
@@ -85,6 +131,11 @@ class _FieldRow(QWidget):
         lay.addLayout(row)
         self._rb_theirs.setChecked(True)          # 默认 = 较新的那份（TA）
         self._mine, self._theirs = mine, theirs
+
+    def _show_full(self, text, role):
+        who = '你写的' if role == 'mine' else 'TA 写的'
+        dlg = _FullTextDialog(f'{who}（全文）', text, self)
+        dlg.exec()
 
     # ---- 选择 ----
 

@@ -1292,7 +1292,9 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
     Excel 单元格上限 **32767 字符**，而真实文件的顶层区间轻松超过它
     （`ball_moving_game.rpy` 38492、`my_perferences.rpy` 50426），塞进列里
     会被**静默截断**、还不报错 —— 而那正是这一条要消灭的东西。
-    表按"一行一格"存，没有长度上限。老表的隐藏列仍然**只读**兼容。
+    表按"一行一格"存：**整段**没有上限（6000 行照样写），**单行**仍受
+    32767 约束（`CellTextTooLong`，一行三万字的 `init python` 该拆成多行）。
+    老表的隐藏列仍然**只读**兼容。
 
     两个容易写错的地方（都被门禁/用例抓过，别再踩）：
       · **顶格注释可以出现在缩进块中间**（Ren'Py/Python 都忽略整行注释的缩进，
@@ -2664,3 +2666,39 @@ menu_statement(l, loc):
 
 8. **`menu 名(x):` 紧贴写法不修**（已知边界）：引擎两种都收、工具从不生成紧贴形态、
    只影响"手写 + 全量路径"。修它要给 Beat 加一列记"名字后面有没有空格"，收益接近零。
+
+9. **32767 是硬上限，全工具一个数、一种处置（2026-10-18）**：
+   `core.cell_limits.CELL_TEXT_LIMIT = 32767`（`beat_model` 再导出同一个名字）。
+   - 写表侧：`excel.cells.set_text` **写之前就查**，超了抛 `CellTextTooLong`，
+     信息点名「行 · 字段 · 多少字 · 多出多少字」，**半个文件都不留**。
+   - 不做"搬进隐藏表「长文本保真」"：那条路把一行 payload 撑到 64KB，
+     协作的 `BasePayload` 抄进单元格照样被截成 32767（JSON 断在 char 592），
+     第二次协作起字段级合并全部退化。用户拍板改回单元格上限。
+   - 老表里那张「长文本保真」**只读兼容**（`_read_long_text` / `_restore_long_text`）：
+     读得回来，但再导出会被闸门拦住 → 那句该拆成几拍。
+   - 卡片编辑器在**保存那一刻**就拦（`CardPageMixin._too_long_fields` + 字数条提示），
+     不等导出才打回。
+   - 判决网：`tests/test_cell_limit_alignment.py`（13 条，含边界 32767/32768）、
+     `tests/test_hell_carrier_attack.py::test_超长台词不再静默截断_而是明确报错`。
+
+10. **文件级保真块住独立表，不进行 payload（schema 2，2026-10-18）**：
+    `file_blocks(label, text, updated_by, updated_at)` —— **整库一份**
+    （键 = `LIBRARY_BLOCKS`，空串；`label` 列留着兼容早期按章节分的行）。
+    - 根因：`FileBlocks` 曾经塞进"第一拍"的 payload，一行 64KB →
+      `BasePayload` 被 Excel 截断 → 第二次协作起字段级合并失效。
+    - 为什么不是"一章一份"：Excel 的「文件级保真」表里只有 `块号 + 行文本`，
+      没有章节信息，读回来只能挂"第一张拍"；而 pull 出去的拍序与送回来的
+      可能不同 → 同一段被登记到两个章节名下 → 再渲染就是**两份 init python**
+      （真机当天就踩到；`test_two_pushes_do_not_duplicate_the_blocks` 守着）。
+    - `pull` / `export_ir_from_db` 把它**挂回第一拍**（渲染读拍列表）；
+      `push` 空文本不动库里那份（真删顶层块请改 `.rpy`）。
+    - 老库自动迁移：`connect()` 里一次性搬走 payload 里的 `FileBlocks`，
+      `meta.file_blocks_split` 记住"搬过了"。
+    - 判决网：`tests/test_collab_second_round.py`（11 条，第 2、3 次协作的字段级合并）。
+
+11. **`BasePayload` 永远塞得进一个单元格（2026-10-18）**：
+    `_base_cell_text()` 先试原文 JSON；超过预算（`CELL_TEXT_LIMIT - 1500`）
+    就改存**每字段 sha1 摘要**（`{'__hashes__': {field: '\ue006…'}}`）。
+    - 三方合并只问"这一格还是我拉取时那样吗"—— 相等性判断，摘要就够，
+      合并语义**一字不差**；冲突界面本来就不显示 base。
+    - 连摘要都放不下 → 写空 + 明确报"这份表没有基线"，**绝不写半个 JSON**。

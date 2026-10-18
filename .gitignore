@@ -24,6 +24,8 @@ build_out/
 *.blocked.rpy
 *.export.xlsx
 *.rpy.bak
+# 探针产物（`tools/probe_*.py` 每次重建；里面常有几十 MB 的 xlsx / 日志）
+tools/out_*/
 
 # ==================================================================
 #  PyInstaller 打包（exe 约 140 MB，绝不能进版本库）

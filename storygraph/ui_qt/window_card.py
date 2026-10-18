@@ -613,6 +613,22 @@ class CardPageMixin:
             self._panel.set_kind(getattr(beat, 'kind', ''))
         except Exception as e:                  # noqa: BLE001 - 界面同步失败不该拦住导出
             swallow('ui_qt.window_card._sync_kind_field', e)
+    def _too_long_fields(self) -> list:
+        """
+        卡片上有哪些格超过 Excel 单元格上限（32767）？`[(字段, 字数), …]`
+
+        **在输入端就拦**（2026-10-18，用户拍板"改回 excel 的单元格上限"）：
+        等导出时才报错，用户已经在卡片里写了一万字、还以为是编辑器卡了。
+        这里给的是同一份判据（`core.cell_limits`），只是更早、更近地说。
+        """
+        from storygraph.core.cell_limits import CELL_TEXT_LIMIT
+
+        out = []
+        for name, value in self._panel.collect_all_fields().items():
+            if isinstance(value, str) and len(value) > CELL_TEXT_LIMIT:
+                out.append((name, len(value)))
+        return out
+
     def save_current_beat(self):
         """
         **保存这张卡片的修改**（卡片上的 💾 按钮 / Ctrl+S / 工具栏同名按钮）。
@@ -623,6 +639,20 @@ class CardPageMixin:
         idx = self._loaded_idx
         if not self._session.has(idx):
             self._status('还没有载入章节，没什么可保存。')
+            return None
+        over = self._too_long_fields()
+        if over:
+            from storygraph.core.cell_limits import CELL_TEXT_LIMIT
+
+            names = '、'.join(f'「{n}」{k} 字' for n, k in over[:4])
+            QMessageBox.warning(
+                self, '这一格装不进 Excel',
+                f'{names}\n\n'
+                f'Excel 一个单元格最多 {CELL_TEXT_LIMIT} 字，超了会被静默截断，'
+                f'所以工具不会替你存。\n'
+                f'把这一句拆成几拍（比如按段落切成两张卡），再保存。')
+            self._status(f'没有保存：{len(over)} 格超过单元格上限 '
+                         f'{CELL_TEXT_LIMIT} 字')
             return None
         res = self._session.save(
             idx,

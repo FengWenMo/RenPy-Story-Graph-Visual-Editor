@@ -25,12 +25,24 @@ from __future__ import annotations
 from typing import Iterable
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.cell_limits import (CELL_TEXT_LIMIT, CellTextTooLong,
+                                          over_limit)
 
 
 def set_text(ws, row, col, value):
     """
     写一个单元格，**强制按文本存储**（见模块 docstring）。返回该单元格。
+
+    ⚠ **最后一公里的 32767 闸门**（2026-10-18）：超过 Excel 单元格上限的
+    字符串**不写**，直接抛 `CellTextTooLong`。理由见 `core.cell_limits`：
+    写下去会被 openpyxl 静默截断，而"少了几千字还零警告"是本项目最不能
+    接受的一类缺陷。调用方（`excel_export`）会先按行 / 字段做一次带
+    行号的检查，这里只兜底 —— 任何一条漏网的写路径都不会把内容写残。
     """
+    if over_limit(value):
+        raise CellTextTooLong([{'where': f'{ws.title}!R{row}C{col}',
+                                'field': '', 'length': len(str(value))}],
+                              where=f'写 {ws.title} 的第 {row} 行第 {col} 列')
     cell = ws.cell(row=row, column=col)
     cell.value = value
     if isinstance(value, str) and value.startswith('='):

@@ -37,6 +37,8 @@ from storygraph.story.beat_model import (
     assign_identity,
 )
 from storygraph.story.beat_render import make_symbols
+from storygraph.core.cell_limits import (ensure_fit, over_limit,
+                                          row_offenders)
 from storygraph.story.paths import _guess_project_root
 from storygraph.excel.cells import set_text as _set_text
 from storygraph.excel.cells import append_text_row as _append_text_row
@@ -412,12 +414,21 @@ def export_beats_to_excel(beats: list, output_path,
     # （块路径）随表走、渲染器也按它建树（见不变量 75/76），这一位就多余了；
     # 留着还会让产物多出一层 `if True:`、让"过表"与"直接渲染"两份产物对不上。
     # 老表（有 `True`、没有 `Nest`）照样能读：渲染退回老推断，而它要的正是那些 `True`。
-    long_rows = []            # [(行号, 字段, 逐行文本)] —— 超长格搬去保真表
+    # **32767 硬闸门**（2026-10-18）：先把这批拍逐格量一遍，有超长的就
+    # 一次性点名报出来（行 + 字段 + 多出多少字），**一个格都不写**。
+    # 从前的做法是"搬进隐藏表「长文本保真」"，那条路把一行 64KB 的怪数据
+    # 塞进了协作库的 `BasePayload`，第二次协作起字段级合并全部退化 ——
+    # 用户拍板改回 Excel 单元格上限（见 `core.cell_limits`）。
+    rows, offenders = [], []
     for beat in beats:
         row = beat.to_row(symbols, spec_fields=spec_headers,
                           extra_fields=extra_headers)
-        row, extra_long = _spill_long_cells(row, headers, beat)
-        long_rows.extend(extra_long)
+        offenders.extend(row_offenders(row, headers,
+                                       where=str(getattr(beat, 'line_id', '')
+                                                 or '')))
+        rows.append(row)
+    ensure_fit(offenders, where='Beats 表')
+    for row in rows:
         _append_text_row(ws, row)
 
     # 自定义语句的头行候选（D1）：注册表在上面已经反推过了。
@@ -487,11 +498,9 @@ def export_beats_to_excel(beats: list, output_path,
     # 文案不用再去脑补 scene/show/hide 叠加的结果（二）。
     _write_stage_snapshot_sheet(wb, beats)
     # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：**另存一张隐藏表**，
-    # 因为它可能比 Excel 单元格的 32767 上限长得多（见 `_write_file_blocks_sheet`）。
+    # 一行一格。它**不是**为了绕开 32767 —— 一段完整顶层文本装不进一个格子是
+    # 结构问题（"一格一行文本"才是对的形态）；**单行**超过 32767 照样报错。
     _write_file_blocks_sheet(wb, beats)
-    # 超长文本：同一个问题（单元格装不下）的**另一个现场** —— 逐拍的格
-    # （台词/注释/代码/舞台/条件…）也可能超过 32767（见 `CELL_TEXT_LIMIT`）。
-    _write_long_text_sheet(wb, long_rows)
     _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
     # **来源信息**（2026-10-19，审计 P1-1）：这张表是从哪一份 .rpy 摊出来的。
     # 导回时靠它自动走增量（见 `table_meta` 的 docstring）——
@@ -518,8 +527,12 @@ def _write_file_blocks_sheet(wb, beats) -> None:
         my_perferences.rpy     50426 字符
 
     写进单元格**静默截断**（读回只剩 32767），于是"导出到新路径"丢东西、
-    而且不报错 —— 正是这份代码要消灭的那一类缺陷。表没有这个限制，
-    而且**一行只放一行文本**，连"单个块本身就超长"也一起解决。
+    而且不报错 —— 正是这份代码要消灭的那一类缺陷。
+
+    ⚠ 这张表**不是**"无上限"的通道（2026-10-18 更正）：它解决的是
+    "一整段顶层文本装不进**一个**格子"，形态是"一行一格"。**单行**超过
+    32767 照样发 `CellTextTooLong` —— 一行三万字的 `init python` 本来也
+    该拆成多行，而不是塞进一个格子里让 Excel 去截。
 
     表整张隐藏：它是工具维护的搬运工，不是给人编辑的界面。
     """
@@ -539,6 +552,10 @@ def _write_file_blocks_sheet(wb, beats) -> None:
     rows = file_blocks_to_rows(join_file_block_parts(parts))
     if not rows:
         return
+    ensure_fit([{'where': f'顶层第 {bi} 块', 'field': '行文本',
+                 'length': len(str(line))}
+                for bi, line in rows if over_limit(line)],
+               where='「文件级保真」表')
 
     ws = wb.create_sheet(FILE_BLOCK_SHEET)
     ws.append(FILE_BLOCK_HEADERS)
@@ -552,60 +569,12 @@ def _write_file_blocks_sheet(wb, beats) -> None:
     ws.sheet_state = 'hidden'
 
 
-def _spill_long_cells(row, headers, beat):
-    """
-    把**超长的格值**从行里搬走：格里留"预览 + 标记"，真身交给保真表。
-
-    返回 `(改过的行, [(行号, 字段, 逐行文本), …])`。没超限的行**原样返回**。
-
-    为什么不是"报错拒绝"（用户 2026-10-16 拍板）：超长演出是**合理需求**
-    （整段旁白 / 系统提示 / 长独白），工具该把它存下来，而不是设个上限。
-    """
-    from storygraph.story.beat_model import split_long_text
-
-    out = list(row)
-    extra = []
-    lid = str(getattr(beat, 'line_id', '') or '')
-    for i, value in enumerate(out):
-        preview, lines = split_long_text(value)
-        if lines is None:
-            continue
-        out[i] = preview
-        label = headers[i] if i < len(headers) else f'#{i + 1}'
-        extra.append((lid, str(label), lines))
-    return out, extra
-
-
-def _write_long_text_sheet(wb, long_rows) -> None:
-    """
-    超长文本 → **隐藏表**（一行一格，不受 32767 限制）。
-
-    与 `_write_file_blocks_sheet` 同一套办法（同一个病：单元格装不下）。
-    整张隐藏：它是工具维护的搬运工，不是给人编辑的界面 ——
-    策划看到的是台词格里的**预览 + 一句"全文见保真表"**。
-    """
-    from storygraph.story.beat_model import LONG_TEXT_HEADERS, LONG_TEXT_SHEET
-
-    if not long_rows:
-        return
-    ws = wb.create_sheet(LONG_TEXT_SHEET)
-    ws.append(LONG_TEXT_HEADERS)
-    for cell in ws[1]:
-        cell.fill = _HEADER_FILL
-        cell.font = _HEADER_FONT
-    ws.column_dimensions['A'].width = 14
-    ws.column_dimensions['B'].width = 12
-    ws.column_dimensions['C'].width = 6
-    ws.column_dimensions['D'].width = 120
-    for lid, label, chunks in long_rows:
-        for i, chunk in enumerate(chunks):
-            _append_text_row(ws, [lid, label, i, chunk])
-    ws.sheet_state = 'hidden'
-
-
 def _read_long_text(wb) -> dict:
     """
-    读保真表 → `{(行号, 字段): 全文}`（`_write_long_text_sheet` 的逆）。
+    读保真表 → `{(行号, 字段): 全文}`（**老表的只读兼容**）。
+
+    ⚠ 2026-10-18 起写侧不再产出这张表（见 `core.cell_limits`），
+    但用户手上那一版工具生成的文件还在，所以读法保留。
 
     没有那张表（老表 / 本文本没超长）→ 空 dict，行为与从前逐字相同。
     ⚠ 片段**按序号拼**（不依赖表里的行序：用户可能动过那张表）。
@@ -1795,8 +1764,8 @@ def _restore_long_text(row_dict: dict, long_text: dict, lid_label: str,
     """
     格子里只有"预览 + 标记"时，从保真表取回**全文**（就地改 `row_dict`）。
 
-    ⚠ 按 `(行号, 字段标签)` 取 —— 与写侧 `_spill_long_cells` 同一把钥匙。
-    `long_text` 为空（老表 / 没超长）时**一个字节都不动**。
+    ⚠ 按 `(行号, 字段标签)` 取 —— 与老版本写侧（已删除的 `_spill_long_cells`）
+    同一把钥匙。`long_text` 为空（老表 / 没超长）时**一个字节都不动**。
 
     ⚠⚠ **预览格被改过 → 不覆盖，记进 `conflicts`**（P1-3，2026-10-17）：
 

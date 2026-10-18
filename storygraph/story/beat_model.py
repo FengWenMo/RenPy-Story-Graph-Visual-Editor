@@ -2360,28 +2360,36 @@ LEGACY_FILE_BLOCK_COLUMN = 'FileBlocks'
 
 #: Excel 单元格的**字符串硬上限**（xlsx 规范）—— 超了 openpyxl 就**静默截断**。
 #:
-#: 文件级保真块早就为这件事改走 `FILE_BLOCK_SHEET` 了，但**逐拍的那些格**
-#: （台词 / 注释 / 代码 / 舞台 / 条件…）**一直没人管**。2026-10-16 第七轮地狱测试
-#: （载体攻击）把它量了出来：一段 40000 字的独白导出后只剩 **32767** 字、
-#: 读回 32767、编译产物 32767 —— **3187 字消失且零警告**；下次"导出回 .rpy"
-#: 会带着截断文本覆盖原文（真源被静默改坏）。
+#: 唯一真源搬到了 `core.cell_limits`（那里同时放着"超了怎么办"的判据：
+#: **明确报错**，不截断、不搬隐藏表）。这里保留这个名字是因为
+#: 文档 / 测试 / 旧代码都按 `beat_model.CELL_TEXT_LIMIT` 引用它。
 #:
-#: 用户拍板（2026-10-16）：**不许设这个上限** —— 超长演出是合理需求
-#: （整段旁白 / 系统提示 / 长独白），所以**不是**"报错拒绝"，而是
-#: **照样存下来**：超过就搬到 `LONG_TEXT_SHEET`（一行一格，无上限）。
-CELL_TEXT_LIMIT = 32767
+#: 口径变更史（两次反转都记在这里，免得下一个人再翻一遍）：
+#:
+#:   · 2026-10-16：40000 字独白被静默截成 32767（3187 字消失、零警告）——
+#:     当时的处置是"**不设上限**，超长搬进 `LONG_TEXT_SHEET` 隐藏表"；
+#:   · 2026-10-18：那条路自己长出了新病 —— 一行 payload 64KB，协作的
+#:     `BasePayload` 抄进单元格照样被截成 32767（JSON 在 char 592 断），
+#:     第二次协作起字段级合并全部退化。用户拍板："算了……还是把字数改回
+#:     excel 的单元格上限吧……不然太容易出问题了（一条 3w 多字，整个屏幕
+#:     估计都装不下）"。
+#:
+#: 所以现在是**硬闸门**：`excel.cells.set_text` 写格之前就查，
+#: 超了抛 `CellTextTooLong`（点名到行 + 字段 + 多出多少字）。
+from storygraph.core.cell_limits import (CELL_TEXT_LIMIT,  # noqa: E402,F401
+                                          CellTextTooLong,
+                                          ensure_fit,
+                                          over_limit,
+                                          row_offenders)
 
-#: 超长文本的**保真表**（隐藏，一行一格）—— 与 `FILE_BLOCK_SHEET` 同一套办法，
-#: 因为它是同一个问题（单元格装不下）的另一个现场。
+#: 超长文本的**保真表**（隐藏，一行一格）—— 老表**只读兼容**。
+#:
+#: ⚠ 2026-10-18 起**不再产出**：写侧宁可直接报错，也不把一行文本搬进
+#: 另一个地方（那会造出 Excel 装不下、协作 payload 撑爆的怪数据）。
+#: 但这张表还在用户手上的老文件里，所以读侧（`_read_long_text` /
+#: `_restore_long_text`）原样保留 —— 一把钥匙，两种方向。
 LONG_TEXT_SHEET = '长文本保真'
 LONG_TEXT_HEADERS = ['行号', '字段', '序号', '片段']
-
-#: 保真表里**每一格**放多少字符。必须**严格小于** `CELL_TEXT_LIMIT` ——
-#: 因为"一行一格"只解决了"行数多"，**解决不了"单行本身太长"**：
-#: 40000 字没有换行的那一段塞进一格照样被截断（实测踩到）。
-#: 所以按**整段**切块、带序号，拼回来是按序相连（不做换行/分行的还原，
-#: 那样反而会引入误差）。
-LONG_TEXT_CHUNK = 30000
 
 #: 单元格里留给人的**预览长度**：表还要能读，不能整格变成一句"见附表"。
 LONG_TEXT_PREVIEW = 200
@@ -2419,22 +2427,13 @@ class LongTextPreviewEdited(ValueError):
         super().__init__('\n'.join(lines))
 
 
-def split_long_text(value) -> tuple:
-    """
-    一个格值 → `(留在格子里的预览 + 标记, 保真表的片段列表)`。
-
-    **没超限就一个字节都不动**：返回 `(原值, None)`。
-    """
-    s = '' if value is None else str(value)
-    if len(s) <= CELL_TEXT_LIMIT:
-        return value, None
-    chunks = [s[i:i + LONG_TEXT_CHUNK]
-              for i in range(0, len(s), LONG_TEXT_CHUNK)]
-    return s[:LONG_TEXT_PREVIEW] + LONG_TEXT_MARK, chunks
-
-
 def join_long_text_parts(chunks) -> str:
-    """保真表的片段（**按序号排好**）→ 原字符串（`split_long_text` 的逆）。"""
+    """
+    保真表的片段（**按序号排好**）→ 原字符串（老表的读法，只读兼容）。
+
+    ⚠ 写侧已经没有对应的 `split_long_text` 了（2026-10-18 起不再产出那张表，
+    见 `CELL_TEXT_LIMIT` 的注释）。读侧留着它，是为了让**老文件**读得回来。
+    """
     return ''.join('' if c is None else str(c) for c in (chunks or ()))
 
 

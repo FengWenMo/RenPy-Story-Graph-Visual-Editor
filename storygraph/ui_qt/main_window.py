@@ -1110,19 +1110,32 @@ class BeatCardEditor(QWidget):
 
         为什么不算空白：中文台词几乎不空格，而写作时敲的换行/缩进
         不该被算成"内容"（否则排版一改，字数就跳）。
+
+        两条线，**不是同一条**（2026-10-18）：
+
+          · 200 字（`CHAR_WARN`）= 进游戏**对话框可能溢出**的提醒（软）；
+          · 32767 字（`CELL_TEXT_LIMIT`）= Excel 单元格**装不下**的硬上限，
+            导出会被拒绝 —— 这里提前说，别让人写到三万字才被打回。
         """
-        text = self._text.toPlainText()
-        n = len(''.join(str(text or '').split()))
-        if not n:
-            self._char_label.setText('')
-            return
-        if n > self.CHAR_WARN:
+        from storygraph.core.cell_limits import CELL_TEXT_LIMIT
+
+        text = str(self._text.toPlainText() or '')
+        raw = len(text)
+        n = len(''.join(text.split()))
+        if raw > CELL_TEXT_LIMIT:
+            self._char_label.setText(
+                f'{raw} 字 —— 超过 Excel 单元格上限 {CELL_TEXT_LIMIT}，'
+                f'这样存不进表；拆成几拍')
+            self._char_label.setProperty('role', 'warn')
+        elif n > self.CHAR_WARN:
             self._char_label.setText(
                 f'{n} 字 —— 超过 {self.CHAR_WARN} 字，游戏里可能溢出对话框')
             self._char_label.setProperty('role', 'warn')
-        else:
+        elif n:
             self._char_label.setText(f'{n} 字')
             self._char_label.setProperty('role', 'caption')
+        else:
+            self._char_label.setText('')
         try:
             self._char_label.style().unpolish(self._char_label)
             self._char_label.style().polish(self._char_label)

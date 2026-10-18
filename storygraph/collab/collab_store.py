@@ -30,6 +30,7 @@ collab_store.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -39,10 +40,17 @@ from pathlib import Path
 from storygraph.core.safeguard import swallow
 from storygraph.story.beat_fields import BEAT_FIELDS
 from storygraph.story.beat_model import Beat, assign_identity
+from storygraph.core.cell_limits import CELL_TEXT_LIMIT
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
-SCHEMA_VERSION = 1
+#: 库结构版本。
+#:
+#: 2（2026-10-18）：`FileBlocks` 从**行 payload** 搬进独立表 `file_blocks`。
+#: 为什么：一行的 payload 里塞 64KB 的顶层文本，Excel 的 `BasePayload`
+#: 单元格（上限 32767）抄不下 → JSON 在 char 592 断掉 → 第二次协作起
+#: 字段级合并全部退化。文件级数据本来就不属于任何一拍。
+SCHEMA_VERSION = 2
 
 STATUS_DRAFT = 'draft'
 STATUS_REVIEW = 'in_review'
@@ -101,6 +109,12 @@ CREATE TABLE IF NOT EXISTS assets (
     updated_at   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (asset_type, asset_id)
 );
+CREATE TABLE IF NOT EXISTS file_blocks (
+    label      TEXT PRIMARY KEY,
+    text       TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       TEXT NOT NULL,
@@ -132,6 +146,9 @@ def connect(db_path):
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),))
+        # 老库（schema 1）：`FileBlocks` 还在每行 payload 里 → 搬到独立表。
+        # 幂等：搬过一次就在 `meta` 里记一笔，之后的 connect 不再全表扫。
+        _migrate_file_blocks(conn)
         yield conn
         conn.commit()
     finally:
@@ -168,6 +185,10 @@ def _audit(conn, actor, action, line_id='', detail=''):
 # ==================================================================
 
 #: 章节级字段在 payload 里的键（不在 `BEAT_FIELDS` 里，没有 Excel 列）。
+#:
+#: ⚠ 2026-10-18 起**不再写进 payload**（schema 2）：它是文件级数据，一行
+#: 一拍带着它走 = 一行 64KB，Excel 的 `BasePayload` 抄不下。现在住在
+#: `file_blocks` 表里（整库一份）。这个名字只剩"读老库"一个用途。
 _FILE_BLOCKS_KEY = 'FileBlocks'
 
 
@@ -192,11 +213,13 @@ def _beat_to_payload(beat: Beat) -> dict:
 
     现在的契约：**payload 的键 = `BEAT_FIELDS`**，值 = 写进 Excel 那一格
     的东西。Excel 能往返的，协作库就能往返（同一段编解码器，不可能漂移）。
-    `file_blocks` 没有列，单独放进 `FileBlocks` 键。
+
+    `file_blocks` **不在 payload 里**（2026-10-18，schema 2）：它是文件级
+    数据，从前塞进"第一拍"的 payload，一行 64KB —— pull 时那段 JSON 写进
+    `BasePayload` 单元格被 Excel 截成 32767，第二次协作起字段级合并全部
+    退化。现在它住 `file_blocks` 表（整库一份），payload 回到几百字节。
     """
-    row = dict(zip(BEAT_FIELDS, beat.to_row()))
-    row[_FILE_BLOCKS_KEY] = beat.file_blocks
-    return row
+    return dict(zip(BEAT_FIELDS, beat.to_row()))
 
 
 def beat_from_payload(payload: dict) -> Beat:
@@ -211,6 +234,8 @@ def beat_from_payload(payload: dict) -> Beat:
     payload = dict(payload or {})
     file_blocks = payload.pop(_FILE_BLOCKS_KEY, '')
     beat = Beat.from_row(payload)
+    # 老库（schema 1）的 payload 里可能还带着它；新库由 `_attach_file_blocks`
+    # 从 `file_blocks` 表补上（那里才是真源）。
     beat.file_blocks = str(file_blocks or '')
     return beat
 
@@ -218,6 +243,138 @@ def beat_from_payload(payload: dict) -> Beat:
 def _payload_from_beat(beat: Beat) -> dict:
     """兼容旧名字（`_beat_to_payload` 的别名）。"""
     return _beat_to_payload(beat)
+
+
+# ==================================================================
+#  文件级保真块（整库一份）—— schema 2 起独立成表
+# ==================================================================
+#
+# 为什么必须是**表**而不是行里一个键（2026-10-18 实测）：
+#
+#   库刚 import-ir   → 每行 payload 中位数 622 字符
+#   某人 push 一次   → book.0045 的 payload 69,341 字符（FileBlocks 64,000）
+#   第二次 pull      → BasePayload 单元格被 Excel 截成 32,767，JSON 断在 char 592
+#   再 push          → base=None → 退化两方比较 → 字段级明细全没了
+#
+# 一行 64KB 的文件级数据 + 一个 32767 的单元格上限 = 第二次协作必然坏。
+# 而"顶层 define/screen/init"是**文件级**的：它不属于任何一拍，也不属于
+# 任何一章 —— 渲染时它写在所有 label 之前一次。
+#
+# 所以这里是**一整库一份**（`LIBRARY_BLOCKS` 那一个键），而不是一章一份。
+# 为什么不做"一章一份"（试过，当天就翻了）：Excel 的「文件级保真」表里
+# 没有章节信息（`块号 + 行文本`），读回来只能挂到"第一张拍"上；而 pull
+# 出去的拍序与送回来的可能不同（admi… ↔ sr_about_render_test），于是同一
+# 段文本会被登记到两个章节名下 —— 再渲染就是**两份 init python**。
+
+#: `file_blocks` 表里"整库一份"那一行的键（空串 = 不绑任何章节）。
+LIBRARY_BLOCKS = ''
+
+
+def _merged_blocks(beats) -> str:
+    """这批拍上的顶层块 → 合并文本（按拍序、去重，与渲染同口径）。"""
+    from storygraph.story.beat_model import (join_file_block_parts,
+                                             split_file_blocks)
+
+    seen, parts = set(), []
+    for b in beats or ():
+        for part in split_file_blocks(str(getattr(b, 'file_blocks', '') or '')):
+            if part.strip() and part not in seen:
+                seen.add(part)
+                parts.append(part)
+    return join_file_block_parts(parts)
+
+
+def _store_file_blocks(conn, beats, actor: str = '') -> int:
+    """
+    push 之后：把这批拍带来的顶层块写进 `file_blocks`（整库一份）。
+
+    空文本 → **不动库里那份**：那张隐藏表是工具维护的搬运工，用户删掉它
+    多半只是"另存丢了"，不代表"我要删 init python"。真删顶层块请改
+    `.rpy` —— 那才是它的真源。
+    """
+    text = _merged_blocks(beats)
+    if not text.strip():
+        return 0
+    conn.execute(
+        'INSERT INTO file_blocks(label, text, updated_by, updated_at) '
+        'VALUES(?,?,?,?) ON CONFLICT(label) DO UPDATE SET '
+        'text=excluded.text, updated_by=excluded.updated_by, '
+        'updated_at=excluded.updated_at',
+        (LIBRARY_BLOCKS, text, actor or '', _now()))
+    return 1
+
+
+def load_file_blocks(conn) -> dict:
+    """`file_blocks` 表 → `{键: 合并文本}`（新库只有一个键：`LIBRARY_BLOCKS`）。"""
+    return {str(r['label']): str(r['text'] or '')
+            for r in conn.execute('SELECT label, text FROM file_blocks')}
+
+
+def _attach_file_blocks(beats, blocks: dict) -> list:
+    """
+    `{键: 文本}` → 挂在**第一张拍**上（渲染器与 Excel 导出读拍列表）。
+
+    为什么挂第一拍：`Beat.file_blocks` 是**传输副本**，真源是
+    `ChapterDocument.file_blocks`（见 `story.chapter`）。挂哪一拍只影响
+    "谁能把它带出去"；挂第一拍是既有契约（渲染器按拍序收集），而且
+    **不会因为删掉某一张拍而丢** —— 每次都是从表里取一份新的挂上去。
+
+    老库兼容：以前按章节名分过行（schema 2 的早期版本），那就按章节名挂。
+    """
+    if not blocks:
+        return beats
+    text = str(blocks.get(LIBRARY_BLOCKS) or '')
+    if text.strip() and beats:
+        beats[0].file_blocks = text
+        return beats
+    first = {}
+    for b in beats:
+        first.setdefault(str(getattr(b, 'label', '') or ''), b)
+    for label, value in blocks.items():
+        beat = first.get(str(label))
+        if beat is not None and str(value or '').strip():
+            beat.file_blocks = str(value)
+    return beats
+
+
+def _migrate_file_blocks(conn) -> None:
+    """
+    schema 1 的库：`FileBlocks` 还在某一行 payload 里 → 搬进 `file_blocks`。
+
+    幂等：`meta.file_blocks_split` 记一笔，之后不再全表扫。
+    老数据里同一段块可能同时挂在多张拍上（复制粘贴/撤销恢复），
+    这里按块去重合并成一份。
+    """
+    done = conn.execute(
+        "SELECT value FROM meta WHERE key='file_blocks_split'").fetchone()
+    if done and str(done[0]) == '1':
+        return
+    rows = conn.execute('SELECT line_id, label, payload FROM beats').fetchall()
+    changed = []
+    for r in rows:
+        try:
+            payload = json.loads(r['payload'] or '{}')
+        except (TypeError, ValueError):
+            continue
+        if _FILE_BLOCKS_KEY not in payload:
+            continue
+        text = str(payload.pop(_FILE_BLOCKS_KEY) or '')
+        changed.append((json.dumps(payload, ensure_ascii=False), r['line_id'],
+                        text))
+    for payload_text, lid, _text in changed:
+        conn.execute('UPDATE beats SET payload=? WHERE line_id=?',
+                     (payload_text, lid))
+    merged = _merged_blocks([Beat(file_blocks=text) for _p, _l, text in changed])
+    if merged.strip():
+        conn.execute(
+            'INSERT INTO file_blocks(label, text, updated_by, updated_at) '
+            'VALUES(?,?,?,?) ON CONFLICT(label) DO UPDATE SET text=excluded.text',
+            (LIBRARY_BLOCKS, merged, '', _now()))
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) "
+                 "VALUES('file_blocks_split', '1')")
+    if changed:
+        _audit(conn, '', 'migrate_file_blocks', '',
+               {'rows': len(changed), 'chars': len(merged)})
 
 
 def _apply_row_identity(beat: Beat, row) -> Beat:
@@ -254,12 +411,15 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
         rows = conn.execute(
             'SELECT * FROM beats WHERE deleted = 0 ORDER BY label, seq'
         ).fetchall()
+        blocks = load_file_blocks(conn)
 
     beats = [_apply_row_identity(beat_from_payload(json.loads(r['payload'])), r)
              for r in rows]
     for b in beats:
         b.line_id = b.line_id or ''
     assign_identity(beats)
+    # 章节级顶层块：从**独立表**补回拍上（payload 里已经没有它了）
+    _attach_file_blocks(beats, blocks)
 
     out = Path(sheet_path)
     export_beats_to_excel(beats, out, registry=registry)
@@ -275,10 +435,12 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
     #: 用它而不是数据库里的 revision 号当 base：revision 只能说"变没变"，
     #: 说不出"哪个字段变了" —— 而后者才决定两条改动打不打架。
     base_by_id = {b.line_id: _beat_to_payload(b) for b in beats}
+    base_forms = {'full': 0, 'hashed': 0, 'none': 0}
     for r in rows:
         lid = r['line_id']
-        base_json = json.dumps(base_by_id.get(lid) or json.loads(r['payload']),
-                               ensure_ascii=False)
+        base_json, how = _base_cell_text(base_by_id.get(lid)
+                                         or json.loads(r['payload']))
+        base_forms[how] = base_forms.get(how, 0) + 1
         ws.append([lid, r['revision'], r['locked_by'] or '',
                    r['status'], r['updated_by'], r['updated_at'], base_json])
     # 拉取时间（两方比较降级时要说"这份表是什么时候的"）
@@ -290,8 +452,9 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
 
     with connect(db_path) as conn:
         _audit(conn, actor, 'pull', '', {'sheet': str(out),
-                                        'rows': len(beats)})
-    return {'sheet': str(out), 'rows': len(beats)}
+                                        'rows': len(beats),
+                                        'base_forms': base_forms})
+    return {'sheet': str(out), 'rows': len(beats), 'base_forms': base_forms}
 
 
 def read_collab_sheet(sheet_path) -> dict:
@@ -355,6 +518,74 @@ def _parse_base(raw):
     return got if isinstance(got, dict) and got else None
 
 
+# ==================================================================
+#  基线：**一定能塞进一个单元格**（2026-10-18，B 轮）
+# ==================================================================
+#
+# 事故：`BasePayload` 是 `json.dumps(整行 payload)` —— 一句 3 万字的台词，
+# 加上 JSON 的引号/换行转义就顶到 32767，Excel **静默截断**（实测 char 592
+# 就断了），`_parse_base` 拿到半个 JSON → `None` → 退化两方比较 →
+# 字段级合并从此失效（"第二次协作起就坏"）。
+#
+# 修法：基线只需要回答**一个**问题 —— "这个字段还是我拉取时那样吗"。
+# 那是**相等性**判断，哈希就能答，而且固定长度、永远塞得下。
+# 所以：JSON 装得下就存原文（人可读、可排查）；
+#       装不下就存「每字段 sha1」，合并语义**一字不差**（仍按字段三方比较）。
+# 冲突界面从来不显示 base（用户 2026-10-19 定的），所以摘要化不损失任何
+# 用户可见信息。
+
+#: 摘要基线的形状：`{'__hashes__': {'Text': '…', 'Speaker': '…'}}`
+BASE_HASHES_KEY = '__hashes__'
+#: 字段摘要的标记前缀（私用区字符 —— 策划打不出来，不会与正文混淆）。
+HASH_TAG = '\ue006'
+#: `BasePayload` 单元格的预算。必须**明显小于** `CELL_TEXT_LIMIT`：
+#: 单元格上限是硬红线的最后一道，不该让基线贴着它走。
+BASE_CELL_BUDGET = CELL_TEXT_LIMIT - 1500
+
+
+def _field_hash(value) -> str:
+    """字段值 → 定长摘要（`HASH_TAG` + 16 位 hex）。"""
+    text = '' if value is None else str(value)
+    return HASH_TAG + hashlib.sha1(text.encode('utf-8')).hexdigest()[:16]
+
+
+def _base_cell_text(payload) -> tuple:
+    """
+    一行 payload → 写进 `BasePayload` 单元格的 JSON。返回 `(文本, 形态)`。
+
+    形态：`'full'`（原文，能读）/ `'hashed'`（每字段摘要）/ `'none'`（连摘要都放不下）。
+
+    ⚠ 绝不再返回"会被截断的半个 JSON"：`'none'` 时写空字符串，push 会
+    明确报"这份表没有这一行的基线"，比拿半截 JSON 去猜好一万倍。
+    """
+    full = {k: _norm_value(v) for k, v in (payload or {}).items()
+            if k not in _MERGE_SKIP}
+    text = json.dumps(full, ensure_ascii=False)
+    if len(text) <= BASE_CELL_BUDGET:
+        return text, 'full'
+    text = json.dumps({BASE_HASHES_KEY: {k: _field_hash(v)
+                                         for k, v in full.items()}},
+                      ensure_ascii=False)
+    if len(text) <= BASE_CELL_BUDGET:
+        return text, 'hashed'
+    return '', 'none'
+
+
+def _base_same(base_entry, value) -> bool:
+    """基线里的这一项 == 现在的值吗（摘要基线和原文基线都认）。"""
+    b = '' if base_entry is None else str(base_entry)
+    v = '' if value is None else str(value)
+    if b.startswith(HASH_TAG):
+        return _field_hash(v) == b
+    return b == v
+
+
+def _payload_matches_base(base, payload) -> bool:
+    """整行是否**与基线逐字段相同**（摘要基线也认）。"""
+    b, p = _norm_payload(base), _norm_payload(payload)
+    return all(_base_same(b.get(k, ''), p.get(k, '')) for k in p)
+
+
 def read_pulled_at(sheet_path) -> str:
     """协作信息表里记的拉取时间（空 = 老表 / 没有）。"""
     import openpyxl
@@ -403,10 +634,24 @@ def _norm_value(value) -> str:
 
 
 def _norm_payload(payload) -> dict:
-    """整行 payload → `{列: 字符串}`（只留列契约里的键，附带 FileBlocks）。"""
+    """
+    整行 payload → `{列: 字符串}`（只留列契约里的键）。
+
+    两种形状都认：
+
+      · 原文基线 `{'Text': '台词…', …}`（老表 / 短行）；
+      · 摘要基线 `{'__hashes__': {'Text': '\\ue006…', …}}`（长行，
+        见 `_base_cell_text`）—— 拆开内层，值保持"摘要 token"，
+        比较时由 `_base_same` 认。
+
+    ⚠ `FileBlocks` **不在列契约里**（2026-10-18，schema 2 起住独立表）：
+    老 payload 里残留的那一个键不参与比较，否则会凭空多出"每行都变了"。
+    """
     payload = payload or {}
+    if BASE_HASHES_KEY in payload:
+        payload = payload.get(BASE_HASHES_KEY) or {}
     out = {}
-    for key in list(BEAT_FIELDS) + [_FILE_BLOCKS_KEY]:
+    for key in BEAT_FIELDS:
         if key in _MERGE_SKIP:
             continue
         out[key] = _norm_value(payload.get(key))
@@ -432,6 +677,9 @@ def merge_payloads(base, mine, theirs) -> tuple:
     ⚠ 判据是**字段**不是整行：A 改台词、B 改同一行的音乐，从前整行拒绝，
     现在两处都静默合进来。真正的冲突只剩"同一句的同一格两边各写了一个版本"。
 
+    ⚠ `b` 可能是**摘要**（长行的基线存成 `\\ue006 + sha1`）：相等性判断走
+    `_base_same`，语义与原文基线完全一致（摘要只用来比"变没变"）。
+
     返回 `(merged, conflicts)`；`conflicts` 每项 `{'field','base','mine','theirs'}`
     —— 界面按**字段**显示（比 git 的 hunk 精确，也不用给编剧看 base）。
     """
@@ -444,9 +692,9 @@ def merge_payloads(base, mine, theirs) -> tuple:
         b, m, t = base.get(key, ''), mine.get(key, ''), theirs.get(key, '')
         if m == t:
             merged[key] = m
-        elif m == b:
+        elif _base_same(b, m):
             merged[key] = t
-        elif t == b:
+        elif _base_same(b, t):
             merged[key] = m
         else:
             conflicts.append({'field': key, 'base': b, 'mine': m, 'theirs': t})
@@ -517,6 +765,9 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
 
     with connect(db_path) as conn:
         ensure_user(conn, actor)
+        # 章节级顶层块：**不进 payload**（那正是"第二次协作就坏"的根因），
+        # 从拍上收下来存进 `file_blocks`（只增改、不删，见函数说明）。
+        _store_file_blocks(conn, beats, actor)
         existing = {r['line_id']: r for r in
                     conn.execute('SELECT * FROM beats').fetchall()}
         # TA 在我拉取之后新插的行：库里有、我的基线里没有。
@@ -591,7 +842,7 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
             # 但有了 base 就能分清"我真的要它回来"和"我手上还是删除前那份旧表"。
             if row['deleted']:
                 if (not force and base_payload is not None
-                        and _payload_equal(base_payload, payload)):
+                        and _payload_matches_base(base_payload, payload)):
                     result['skipped_stale'].append(lid)
                     continue
                 conn.execute(
@@ -742,7 +993,7 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
                 base_payload = (base.get(lid) or {}).get('base')
                 if not force and base_payload is not None:
                     theirs_payload = json.loads(row['payload'])
-                    if not _payload_equal(theirs_payload, base_payload):
+                    if not _payload_matches_base(base_payload, theirs_payload):
                         result['kept'].append({
                             'line_id': lid, 'label': row['label'],
                             'updated_by': row['updated_by'],
@@ -1163,13 +1414,16 @@ def _refresh_collab_rows(db_path, sheet_path, line_ids) -> int:
                 r = ws.max_row + 1
                 ws.cell(row=r, column=lid_col, value=lid)
             payload = json.loads(row['payload'])
+            # 基线走同一个函数：长行自动存摘要，**永远塞得进单元格**
+            # （从前这里直接 json.dumps，一行 64KB 就被 Excel 截成半个 JSON）
+            base_json, _how = _base_cell_text(payload)
             values = {
                 'Revision': int(row['revision']),
                 'LockedBy': row['locked_by'] or '',
                 'Status': row['status'],
                 'UpdatedBy': row['updated_by'],
                 'UpdatedAt': row['updated_at'],
-                'BasePayload': json.dumps(payload, ensure_ascii=False),
+                'BasePayload': base_json,
             }
             for key, value in values.items():
                 c = col.get(key)
@@ -1330,7 +1584,10 @@ def export_ir_from_db(db_path):
             'SELECT * FROM beats WHERE deleted=0 ORDER BY label, seq'
         ).fetchall()
         assets = conn.execute('SELECT * FROM assets').fetchall()
+        blocks = load_file_blocks(conn)
     beats = [_apply_row_identity(beat_from_payload(json.loads(r['payload'])), r)
              for r in rows]
     assign_identity(beats)
+    # 顶层块住独立表（`file_blocks`）：渲染器读拍列表，所以要挂回第一拍
+    _attach_file_blocks(beats, blocks)
     return beats, [dict(a) for a in assets]

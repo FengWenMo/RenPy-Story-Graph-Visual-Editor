@@ -134,3 +134,48 @@ class TestCustomMerge:
         dlg._custom_merge(0)
         assert seen['text'].strip(), '「自己拼一版」不许给空框'
         assert seen['text'] == 'TA 写的', seen['text']
+
+
+class TestAThirtyThousandCharacterLineFitsOnScreen:
+    """
+    用户 2026-10-18："一条 3w 多字，整个屏幕估计都装不下。"
+
+    32767 是 Excel 的上限，不是**屏幕**的上限：一句 3 万字的独白合法，
+    但两栏各放一块 3 万字的 QLabel，窗口会被撑到屏幕外，而人只是要选一边。
+    """
+
+    def _dlg(self, mine, theirs):
+        from storygraph.ui_qt.dialogs_collab import CollabConflictDialog
+        return CollabConflictDialog(None, [_conflict(mine=mine, theirs=theirs)])
+
+    def test_each_side_shows_only_the_beginning(self, qapp):
+        long = '甲' * 30000
+        d = self._dlg(long, long)
+        try:
+            from PySide6.QtWidgets import QLabel, QPushButton
+            labels = [w.text() for w in d.findChildren(QLabel)]
+            buttons = [w.text() for w in d.findChildren(QPushButton)]
+            longest = max((len(t) for t in labels), default=0)
+            assert longest <= 400, f'有一格显示了 {longest} 字，屏幕放不下'
+            assert any('共 30,000 字' in t for t in buttons), (
+                f'截断了却没说总字数 / 全文在哪：{buttons}')
+        finally:
+            d.close()
+
+    def test_the_choice_still_carries_the_full_text(self, qapp):
+        mine, theirs = '甲' * 30000, '乙' * 30000
+        d = self._dlg(mine, theirs)
+        try:
+            d.accept()
+            assert d.resolutions[0]['values'] == {'Text': 'theirs'}
+            assert d._rows[0]['fields']['Text']._theirs == theirs
+            assert d._rows[0]['fields']['Text']._mine == mine
+        finally:
+            d.close()
+
+    def test_short_text_is_shown_whole(self, qapp):
+        from storygraph.ui_qt.dialogs_collab import DISPLAY_LIMIT, _split_display
+        assert _split_display('短句') == ('短句', 2)
+        shown, total = _split_display('长' * (DISPLAY_LIMIT + 1))
+        assert total == DISPLAY_LIMIT + 1
+        assert len(shown) <= DISPLAY_LIMIT + 2 and shown.endswith('…')

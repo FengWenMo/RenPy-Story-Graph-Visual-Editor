@@ -228,71 +228,61 @@ def test_rpy_里本来就有也走一遍表(tmp_path, write_rpy, payload):
         f'走一趟表就变了：{payload!r} → {getattr(after, "text", None)!r}')
 
 
-def test_超长台词照样存得住_不许截断(tmp_path, write_rpy):
+def test_超长台词不再静默截断_而是明确报错(tmp_path, write_rpy):
     """
-    ✅ **已修（2026-10-16）** —— 超长台词不再静默截断，**上限取消**。
+    ⚠ **口径在 2026-10-18 反转了一次**（两段都读一遍再动这段代码）：
 
-    用户拍板："不要设置这个上限，超长感觉可以被允许" —— 所以修法**不是**
-    "报错拒绝"，而是**照样存下来**：格子里留**预览 + 标记**，
-    真身搬进隐藏表「长文本保真」（一行一格，没有 32767 限制）——
-    与 `文件级保真` 表同一套办法（同一个病：单元格装不下）。
+    2026-10-16（第七轮地狱测试当场抓到）：40000 字 → 格子里只剩 32767、
+    读回 32767、编译产物 32767，**3187 字消失且零警告**。当时的处置是
+    "不许设上限"：格子里放「200 字预览 + 标记」，全文搬进隐藏表
+    「长文本保真」。
 
-    之前是红的（第七轮地狱测试当场抓到）：40000 字 → 格子里只剩 32767、
-    读回 32767、编译产物 32767，**3187 字消失且零警告**。
+    2026-10-18：那条路把一行 payload 撑到 64KB，协作的 `BasePayload`
+    抄进单元格照样被截成 32767（JSON 断在 char 592），**第二次协作起
+    字段级合并全部退化**。用户拍板：
 
-    判据：往返**逐字相同**；且表里那张保真表真的存在、拼回来就是全文。
+    > 算了……还是把字数改回 excel 的单元格上限吧……不然太容易出问题了
+
+    所以现在的判据是**一条**：任何一格 > 32767 → 明确报错（不截断、
+    不搬隐藏表、不写半个文件）；≤ 32767 → 逐字往返，表结构与从前一致。
     """
     import openpyxl
 
-    from storygraph.story.beat_model import (LONG_TEXT_MARK, LONG_TEXT_SHEET,
-                                             join_long_text_parts,
-                                             CELL_TEXT_LIMIT)
+    from storygraph.core.cell_limits import CELL_TEXT_LIMIT, CellTextTooLong
+    from storygraph.story.beat_model import LONG_TEXT_SHEET
     from storygraph.story.excel_import import import_beats_from_excel
     from storygraph.pipeline.compile import compile_beats
 
-    # 变异对照：没超限的行为必须**与从前逐字相同**（不许为了修它改了老路径）
+    # —— 上限之内：一个字都不能少，也不许多一张表 ——
     ok_text = 'K' * 30000
     fp_ok = write_rpy(f'label a:\n    e "{ok_text}"\n    return\n', 'ok.rpy')
     x_ok = tmp_path / 'ok.xlsx'
     export_beats_to_excel(_beats(fp_ok), x_ok, include_dropdowns=False)
-    ok_sheet = openpyxl.load_workbook(x_ok)
-    assert LONG_TEXT_SHEET not in ok_sheet.sheetnames, (
-        '没超限也建了保真表 —— 老表的结构不该变')
+    wb_ok = openpyxl.load_workbook(x_ok)
+    try:
+        assert LONG_TEXT_SHEET not in wb_ok.sheetnames, (
+            '没超限却建了「长文本保真」表 —— 写侧不该再产出那张表')
+        cell_ok = str(wb_ok['Beats'].cell(row=2, column=_CELL['Text']).value or '')
+        assert len(cell_ok) == len(ok_text), (
+            f'30000 字被改动了：格子里 {len(cell_ok)} 字')
+    finally:
+        wb_ok.close()
     back_ok = [b for b in import_beats_from_excel(x_ok)
                if str(getattr(b, 'text', ''))]
-    ok_same = bool(back_ok) and back_ok[0].text == ok_text
-    assert ok_same, '30000 字没过上限却也变了 —— 先查这个'
+    assert back_ok and back_ok[0].text == ok_text, '30000 字往返变了'
+    assert ok_text in compile_beats(back_ok).rpy_text
 
-    # —— 主角：40000 字 ——
-    long_text = 'L' * 40000
+    # —— 超过上限：明确报错，**文件都不留** ——
+    long_text = 'L' * (CELL_TEXT_LIMIT + 5000)
     fp = write_rpy(f'label a:\n    e "{long_text}"\n    return\n', 'l.rpy')
     x = tmp_path / 'l.xlsx'
-    export_beats_to_excel(_beats(fp), x, include_dropdowns=False)
-    wb = openpyxl.load_workbook(x)
-    assert LONG_TEXT_SHEET in wb.sheetnames, (
-        '超长文本没有进「长文本保真」表 —— 它一定会被单元格截断')
-    cell_v = str(wb['Beats'].cell(row=2, column=_CELL['Text']).value or '')
-    assert LONG_TEXT_MARK in cell_v and len(cell_v) <= CELL_TEXT_LIMIT, (
-        '格子里没有留下"预览 + 标记"', cell_v[:40], len(cell_v))
-    sheet_rows = [(r[0], r[1], int(r[2] or 0),
-                   '' if len(r) < 4 or r[3] is None else str(r[3]))
-                  for r in wb[LONG_TEXT_SHEET].iter_rows(min_row=2,
-                                                         values_only=True)
-                  if r and r[0] is not None]
-    joined = join_long_text_parts([c for _, _, _, c in
-                                   sorted(sheet_rows, key=lambda x: x[2])])
-    joined_same = (joined == long_text)
-    assert joined_same, (
-        '保真表里拼回来就不是全文了：%d 字 vs %d 字'
-        % (len(joined), len(long_text)))
-    back = [b for b in import_beats_from_excel(x)
-            if str(getattr(b, 'text', ''))]
-    same = bool(back) and back[0].text == long_text
-    assert same, (
-        '读回来不是全文：%s 字（原文 %d 字）'
-        % ([len(str(b.text)) for b in back], len(long_text)))
-    rpy = compile_beats(back).rpy_text
-    assert long_text in rpy, '编译产物里没有全文（%d 字）' % len(rpy)
+    with pytest.raises(CellTextTooLong) as err:
+        export_beats_to_excel(_beats(fp), x, include_dropdowns=False)
+    msg = str(err.value)
+    assert str(len(long_text)) in msg, msg
+    assert '台词' in msg, msg
+    assert '拆' in msg, msg
+    assert not x.exists(), '报错了还留下半个表 —— 那等于"看起来成功了"'
 
 def test_注释列尾随空格被规范化_已知(tmp_path, write_rpy):
     """
