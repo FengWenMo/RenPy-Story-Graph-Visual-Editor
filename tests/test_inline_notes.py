@@ -31,13 +31,17 @@ from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
+#: ⚠ 最后一行是 `stop music`，不是裸 `stop`（2026-10-18）：`stop` **必须**带
+#: 声道，裸写是 Ren'Py 语法错 —— 引擎闸门 fail-closed 之后这份样本当场被拦
+#: （`stop requires a channel`）。从前它是"闸门放行 + 产物跑不起来"，
+#: 而这条用例只想测注释，不该顺带携带一个坏语法。
 SRC = '''label a:
     e "顶层"                       # 备注：顶层台词
     menu:
         "选项 A":                  # 备注：菜单选项
             e "选项体"              # 备注：选项体里
     jump other                     # 备注：跳转
-    stop                           # 备注：停
+    stop music                     # 备注：停
 '''
 
 REAL_PROJECT = Path(r'D:\千连万理\RenPyTest\sr_general')

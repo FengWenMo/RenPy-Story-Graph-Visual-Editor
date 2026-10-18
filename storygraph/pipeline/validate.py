@@ -31,7 +31,9 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from storygraph.assets.asset_registry import RENPY_BUILTIN_TRANSFORMS, resolve_references
+from storygraph.assets.asset_registry import (RENPY_BUILTIN_TRANSFORMS,
+                                              is_template_path,
+                                              resolve_references)
 from storygraph.core.vocabulary import ASSET_TYPE_ATTR as _TYPE_ATTR
 from storygraph.story.beat_model import (
     BEAT_HEADERS,
@@ -834,12 +836,19 @@ def validate_level3(beats, registry=None, graph=None,
                 '确认是尚未出场，还是小游戏/UI 用的静默角色'))
 
     # 资源表登记了但文件不存在
+    #
+    # ⚠ **模板路径不参与对账**（2026-10-18，真机 E302 误报）：`{image}` 这种
+    # 路里带占位符的行，文件名是运行时拼的，永远不可能 `exists()` ——
+    # 判据只有一处（`asset_registry.is_template_path`），占位行同理
+    # （`is_placeholder_row`）。
     if project_root:
         missing = []
         for attr in ('images', 'music', 'sounds', 'voices'):
             for aid, row in (getattr(registry, attr, {}) or {}).items():
                 rel = (row or {}).get('Path')
-                if rel and not resolve_asset_path(project_root, rel):
+                if not rel or is_template_path(rel):
+                    continue
+                if not resolve_asset_path(project_root, rel):
                     missing.append(f'{aid}({rel})')
         if missing:
             issues.append(Issue(

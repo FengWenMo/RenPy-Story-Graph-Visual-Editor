@@ -314,6 +314,15 @@ _PARSE_MARK = ('expected ', 'KeyError', 'SyntaxError', 'ParseError')
 _SEMANTIC_MARK = ('is not an image', 'is not loadable', 'not the prefix of',
                   'ambiguous', 'is not defined')
 
+#: 引擎**加载/编译时抛异常**的报错行（`File "game/a.rpy", line 4: …`）。
+#:
+#: 2026-10-18：这一种**不看措辞** —— 出处就是"脚本没读进去"，一律阻塞。
+#: 从前它靠 `_PARSE_MARK` 那 4 个词去认，`'{' was never closed` 认不出 →
+#: 掉进 `program_errors`（"可修"那一桶，不阻塞）。与 build 闸门同一根因
+#: （`engine_lint` 那边已改成按出处判，见 §14.3）。
+_RE_EXC_LINE = re.compile(
+    r'^File\s+"[^"]+"\s*,\s*line\s+\d+\s*:\s*')
+
 
 def classify_lint(text: str, clean: bool = True) -> dict:
     """
@@ -325,6 +334,9 @@ def classify_lint(text: str, clean: bool = True) -> dict:
 
     `clean=False`（有 `errors.txt`）时，输出里的报错一律归到 parse —— 因为那时
     引擎是**中止**的，语义检查没跑，"没有语义错误"本身不可信。
+
+    ⚠ 判据的顺序有意义（2026-10-18）：`File "…", line N:` 是**异常**，
+    先认它；剩下的 `game/x.rpy:N` 才是检查意见，按措辞分语义 / 程序两桶。
     """
     parse_errors, semantic, program = [], [], []
     for line in (text or '').splitlines():
@@ -333,6 +345,9 @@ def classify_lint(text: str, clean: bool = True) -> dict:
             continue
         is_report = ('.rpy' in s or s.startswith('File ')) and ':' in s
         if not is_report:
+            continue
+        if _RE_EXC_LINE.match(s):
+            parse_errors.append(s)      # 加载/编译抛异常：引擎根本没读进去
             continue
         if any(m in s for m in _SEMANTIC_MARK):
             (semantic if clean else parse_errors).append(s)

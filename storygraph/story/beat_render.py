@@ -2812,23 +2812,49 @@ def _strip_generator_marker(text: str) -> str:
 
 def _collect_file_blocks(beats: list) -> list:
     """
-    从拍列表里收集**文件级保真块**（去重、保序）。
+    从拍列表里收集**文件级保真块**（保序；整段重复只收一次）。
 
-    为什么要去重：块挂在第一张拍上（见 `beat_build.attach_file_blocks`），
-    而同一个 Beat 列表可能被渲染多次、也可能有人手工复制那一行 ——
-    重复写出 `init python:` 会**重复定义**（后者覆盖前者，行为可能变）。
-    内容相同就只写一次；内容不同则如实按顺序都写（那是两份定义）。
+    ⚠ **不许按内容去重**（2026-10-18，`cli.py build` 真机 P0）。
+
+    旧写法把 `part.strip()` 当去重键，凡是"内容一样"的块只写第一条。
+    真实项目 `screens.rpy` 的顶层区间里，内容相同但**位置不同**的块有：
+
+        · 8 条单独成行的 `}`  —— 每一条闭合一个不同的字典字面量
+        · 33 条 `##`           —— 每个小节的标题行
+        · 12 条 `#####…` 横线  —— 章节分隔
+        · 若干条重复的注释行    —— 被注释掉的那段 screen 示例
+
+    于是产物里 8 个 `}` 只剩 1 个：`define bubble.expand_area = {` 没了闭合，
+    Ren'Py 加载直接 `SyntaxError`。更隐蔽的是那 33 条 `##` 与 12 条横线 ——
+    它们不影响语法，只是把文件结构悄悄抹平了（`audit_byte_exact` 走的是
+    增量补丁，碰不到这些行，所以四轮保真体检全是绿灯）。
+
+    去重的**唯一**合法理由是"同一份块被挂了两次"：
+
+      · 有人手工复制了带隐藏块的那一行（两张拍各带一份同一段）；
+      · 表里同一段块被登记了两次（`X + 块分隔符 + X`）。
+
+    两种都是**整段相同**，所以判据是"这一段与上一段完全相同"，
+    而不是"这一条以前出现过"。整段相同意味着文字一字不差，丢掉重复的
+    那一份不会少任何内容；而单条相同只说明"同一个符号在文件里出现了
+    两次"，那是作者的结构，不是重复。
+
+    ⚠ `beat_build.attach_file_block_text` 的追加用的是普通空行（`\n\n`），
+    两段会并成**一段**，这一层分辨不出来。现状没有活路径会调它两次；
+    真要防，得在**追加那一侧**判重（那是"同一份数据别存两遍"，不是渲染的事）。
     """
     from storygraph.story.beat_model import split_file_blocks
 
-    out, seen = [], set()
+    out, prev = [], None
     for b in beats or ():
-        for part in split_file_blocks(getattr(b, 'file_blocks', '')):
-            key = part.strip()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            out.append(part)
+        parts = split_file_blocks(getattr(b, 'file_blocks', ''))
+        if not parts:
+            continue
+        key = tuple(p.strip() for p in parts)
+        if key == prev:
+            continue                      # 整段重复（同一份块被挂了两次）
+        prev = key
+        out.extend(parts)
     return out
 
 

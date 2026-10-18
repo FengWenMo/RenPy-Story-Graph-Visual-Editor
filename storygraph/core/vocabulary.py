@@ -158,6 +158,12 @@ RENPY_FLOW_BLOCK_HEADS = frozenset({
     'init', 'python', 'screen', 'transform', 'image', 'layeredimage',
     'style', 'translate', 'testcase', 'on', 'parallel', 'function', 'rpy',
     'early', 'camera',
+    # 舞台指令的 **ATL 块形式**（2026-10-18）：`show eileen at right:` 后面
+    # 缩进的那几行是 Transform 属性。工具**没有** ATL 载体（`ShowNode` 只存
+    # 头行），所以整块走逐字保真 —— 但它不是"项目自定义语句"，是 Ren'Py
+    # 标准写法，该算 T2（认识形状、没建模），不该催用户去"教"工具。
+    # 真机 `sr_general` 一轮 build 35 处；没有这一条时全落进"工具不认识"。
+    'show', 'scene',
 })
 
 

@@ -513,8 +513,8 @@ def _missing_paths(rows, skip, kind_key, walk, root) -> list:
     out = []
     for _aid, row in (rows or {}).items():
         rel = str((row or {}).get('Path') or '').strip()
-        if not rel or is_placeholder_row(row):
-            continue                            # 占位：允许没有文件
+        if not rel or is_missing_allowed(row):
+            continue                            # 占位 / 模板：允许没有文件
         if rel in skip:
             continue                            # 上面已经删了
         if walk is not None:
@@ -1647,6 +1647,41 @@ def is_placeholder_row(row) -> bool:
     return any(mark in low for mark in _PLACEHOLDER_MARKS)
 
 
+#: **模板路径**里的占位符：`cc_preview/lan/{image}.png` 的 `{image}`。
+#: 只认"一个名字"那么长的内容 —— 免得把正则里的 `{2,3}` 之类误当模板。
+_RE_TEMPLATE_PATH = re.compile(r'\{[A-Za-z_][\w .-]*\}')
+
+
+def is_template_path(path) -> bool:
+    """
+    这个 `Path` 是**模板**吗（含 `{image}` 这类占位符，不对应某一个文件）？
+
+    2026-10-18，真机 `sr_general` 的资源表里有 5 行：
+
+        cc_preview/lan/{image}.png
+        cc_preview/ling/{image}.png
+        …
+
+    它们**永远**解析不到真实文件：文件名是运行时才拼出来的。可所有"文件
+    在不在"的判据都拿 `Path` 去 `exists()`，于是同一个东西被判成四种错：
+
+      · 构建报告 **E302「源文件不存在」**（用户看到的那条）；
+      · 资源体检把行列进"表里有、磁盘上没有"；
+      · 资源同步**把行删掉**（`_missing_paths` 的"自动删"会连行一起清走）；
+      · 行被标成 `unusable` → 选资产时看不见它（模板本来就不该被逐个选，
+        但"不存在"是错的理由）。
+
+    判据只放这一处：**认得出是模板** ⇒ 不拿它跟磁盘对账。
+    """
+    return bool(_RE_TEMPLATE_PATH.search(str(path or '')))
+
+
+def is_missing_allowed(row) -> bool:
+    """这一行"没有对应文件"是否是**合法**的（人工占位 / 模板路径）。"""
+    row = row or {}
+    return is_placeholder_row(row) or is_template_path(row.get('Path'))
+
+
 def _row_file_exists(kind: str, row, project_root=None, walk=None) -> bool:
     """这一行的 `Path` 在磁盘上真的存在吗（`kind` 是 `image` / `music` …）？"""
     rel = str((row or {}).get('Path') or '').strip()
@@ -1771,8 +1806,8 @@ def _mark_unusable(registry, project_root, walk=None):
     for kind, attr in (('image', 'images'), ('music', 'music'),
                        ('sound', 'sounds'), ('voice', 'voices')):
         for aid, row in (getattr(registry, attr, {}) or {}).items():
-            if is_placeholder_row(row):
-                continue                        # 人工占位：允许没有文件
+            if is_missing_allowed(row):
+                continue                        # 人工占位 / 模板：允许没有文件
             if _row_file_exists(kind, row, project_root, walk=walk):
                 continue
             registry.unusable[attr][aid] = \
@@ -1786,14 +1821,16 @@ def validate_registry(registry: AssetRegistry, project_root, walk=None):
 
     for img_id, data in registry.images.items():
         p = data.get('Path')
-        if p and not _row_file_exists('image', data, project_root, walk=walk):
+        if p and not is_template_path(p) and \
+                not _row_file_exists('image', data, project_root, walk=walk):
             registry.warnings.append(f"图片 '{img_id}' 文件不存在: {p}")
 
     for type_key in ('music', 'sounds', 'voices'):
         for aid, data in getattr(registry, type_key).items():
             p = data.get('Path')
-            if p and not _row_file_exists(type_key.rstrip('s'), data,
-                                          project_root, walk=walk):
+            if p and not is_template_path(p) and \
+                    not _row_file_exists(type_key.rstrip('s'), data,
+                                         project_root, walk=walk):
                 registry.warnings.append(f"{type_key} '{aid}' 文件不存在: {p}")
 
     image_tags = {d.get('Tag') for d in registry.images.values() if d.get('Tag')}

@@ -45,6 +45,21 @@ from storygraph.story.beat_model import (
 
 
 
+#: 除「注释」列之外**算内容**的那些位（`Beat.has_content` 的同一批 + `opaque`）。
+#: `has_content` 不看 `opaque`（它那句 docstring 说的是"自己有没有演出内容"，
+#: 而整块逐字原文在它眼里不算），这里必须看 —— 保真语句就是内容。
+_NON_COMMENT_CONTENT = (
+    'text', 'speaker', 'scene', 'show', 'hide', 'stage', 'bgm', 'sfx',
+    'music', 'sound', 'voice', 'notes', 'raw', 'code', 'opaque', 'file_blocks',
+)
+
+
+def _only_comment(beat) -> bool:
+    """这张拍**除了注释**什么都没有吗（专门为一条注释刚开出来那张）？"""
+    return not any(str(getattr(beat, f, '') or '').strip()
+                   for f in _NON_COMMENT_CONTENT)
+
+
 def _relative_continuation_indents(lines: list) -> list:
     """
     多行语句每一行的**相对缩进**：首行 0，续行 = 原缩进 − 续行的最小缩进。
@@ -907,6 +922,18 @@ class _BeatBuilder:
         # 不会再触发 `branch_guard` 落拍 → 二者并进**同一拍** →
         # 渲染出来正是 `if …:` + 体内的注释 + 体内的代码（与原文同序同缩进）。
         self.pending.condition = stmt.condition or self.pending.condition
+        # ⚠ **注释不许挂在"已经写完的保真块"上**（2026-10-18，幂等 P1）。
+        #
+        # `show icon:` 这类整块逐字保留的语句落进 pending 之后，
+        # `pending.opaque` 已经有值。它后面再出现的注释行，在源文件里属于
+        # **下一条**语句；不落拍的话它会挂在保真块那张拍上，渲染时被印到
+        # 保真块**上面**，下一轮解析又挂回更前一张拍 —— 每轮往上跳一格
+        # （真机 `screens.rpy`：第 2 轮与第 1 轮不同，`audit_idempotence` 红）。
+        #
+        # 与上面 `branch_guard` 那条同一个道理：注释的**归属**必须让它
+        # 和自己修饰的那条语句待在一起，而不是留在上一段里。
+        if str(getattr(self.pending, 'opaque', '') or '').strip():
+            self.flush_stage_only()
         self.pending.comment = _append_line(self.pending.comment, text)
         self.pending_has_stage = True
         return True, False
@@ -955,7 +982,34 @@ class _BeatBuilder:
         declared = payload.get('spec_name') or ''
         if (payload.get('raw_kind') or '') in ('unknown_block',
                                               'known_block') or declared:
-            self.flush_stage_only()
+            # ⚠ **注释要跟着它后面那条语句走**（2026-10-18，幂等 P1）。
+            #
+            # `flush_stage_only()` 会把"攒着的舞台指令"连同**挂在上面的注释**
+            # 一起落拍。而那条注释在源文件里位于舞台指令**之后**、这条保真
+            # 语句**之前**：
+            #
+            #     scene white_bg
+            #     # 显示图标          ← 解析时挂在 scene 那张拍上
+            #     show icon:          ← 保真语句：flush 会把注释带到前一张拍
+            #         zoom 0.5
+            #
+            # 不搬走的话，产物里注释被印在前一条**舞台指令上面**；再解析时
+            # 它又挂到更前一张拍 …… 每渲染一轮往上跳一拍。
+            # 真机 `screens.rpy` 上 `audit_idempotence` 当场红（第 2 轮与第 1
+            # 轮不同）。搬到新拍之后，"注释 → 它修饰的那条语句"这个位置就
+            # 稳定了。
+            carry = str(getattr(self.pending, 'comment', '') or '')
+            if carry and _only_comment(self.pending):
+                # 这张拍**就是**为这条注释开的那一张（注释后面紧跟保真语句）
+                # —— 不用落拍，直接让它顺带承载这条语句。
+                # 不判断的话会落下一张**空拍**：真机 `splashscreen` 因此多出
+                # 一行"空台词"（W113），表格里也凭空多一行。
+                pass
+            else:
+                self.pending.comment = ''
+                self.flush_stage_only()
+                if carry:
+                    self.pending.comment = carry
             self.pending.condition = stmt.condition or ''
             self.pending.opaque = _append_line(self.pending.opaque, text)
             # **原样语句也要有自己的顺序位**（2026-10-18 修）。

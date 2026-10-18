@@ -272,6 +272,7 @@ class AssetRegistryMixin:
         from storygraph.assets.asset_registry import (FileWalkIndex,
                                                       compare_registry_to_disk,
                                                       is_placeholder_row,
+                                                      is_template_path,
                                                       norm_asset_path)
         from collections import Counter
         try:
@@ -294,10 +295,14 @@ class AssetRegistryMixin:
         # 第 ⑦ 段列。`compare_registry_to_disk` 不认识占位标记，所以这里按
         # Path 把它们从 `missing` 里挑掉 —— 实测漏了这一步，占位行会被报成
         # "表里有、磁盘上没有"（测试当场抓到）。
+        #
+        # 同一条也适用于**模板行**（`cc_preview/lan/{image}.png`）：文件名是
+        # 运行时拼的，永远对不上磁盘（2026-10-18，真机 E302 同一根因）。
         ph_paths = set()
         for key, attr in kinds:
             for _aid, row in (getattr(reg, attr, {}) or {}).items():
-                if is_placeholder_row(row):
+                if is_placeholder_row(row) or is_template_path(
+                        (row or {}).get('Path')):
                     rel = str((row or {}).get('Path') or '').strip()
                     if rel:
                         ph_paths.add(rel.lower().replace('\\', '/'))

@@ -1032,6 +1032,27 @@ def _shift_embedded_indent(text: str, delta: int) -> str:
     return '\n'.join(out)
 
 
+#: **有块体载体的节点**：只有这几种能"带头行 + 保住块体"。
+#:
+#: 由 `RenPyParser._parse_statement` 的守卫使用：一条语句带了非注释子块，
+#: 却解析成**别的**节点 → 说明模型里没有它的块体位置，必须整块逐字保真
+#: （见那段 docstring 与 `tests/test_leaf_blocks_are_not_swallowed.py`）。
+#:
+#: 加新建模的块类型时**必须同时加进这里**，否则它一出生就会被降级成保真块
+#: （不会丢内容，但会白白丢掉可编辑性 —— 那种红是"能力回退"，测试收得住）。
+_BLOCK_CARRYING_NODES = (
+    LabelNode, MenuNode, MenuOptionNode, IfNode, PythonNode, TransformNode,
+    LayeredImageNode, LoopNode, CameraNode, UnknownBlockNode,
+)
+
+
+def _has_real_subblock(line) -> bool:
+    """子块里**有没有非注释内容**（纯注释的缩进不改变语义判定）。"""
+    return any((getattr(ln, 'text', '') or '').strip()
+               and not getattr(ln, 'is_comment', False)
+               for ln in (getattr(line, 'subblock', None) or ()))
+
+
 class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_parser_stmts 里
     """递归下降解析器：LogicalLine 树 → ASTNode 列表。"""
     # ---------- 简单前缀正则 ----------
@@ -1366,7 +1387,6 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     #: （例如 `if` 条件缺顶层冒号，那时要**就此结束**、不能继续试别的分支，
     #: 否则一句坏掉的 `if` 会被后面的 `_stmt_say` 当成台词吃掉）。
     _NO_MATCH = object()
-
     # ------------------------------------------------------------------
     #  语句分派（每个分支一个方法；原来是 375 行的扁平 if 链）
     #
@@ -1494,6 +1514,33 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         return text
 
     def _parse_statement(self, line: LogicalLine, text: str):
+        """`_parse_statement_core` 的**带块守卫**（2026-10-18，build P0）。
+
+        `show eileen at right:` + 缩进块是 Ren'Py 合法的 ATL 写法，`scene` /
+        `image` 同理。可这些 `_stmt_*` 分支只认**头行**，模型里也没有块体
+        载体 —— 于是块体被**静默丢掉**，产物里剩一个空头的 `show …:`：
+
+            show lan agreeable at right:
+            with dissolve            ← 块体（zoom / yoffset）去哪了？
+
+        Ren'Py 加载时报 `show statement expects a non-empty block.`
+        （真机 `sr_general` 一轮 build 就 35 处；以前被引擎闸门的 fail-open
+        判成语义提示放行，所以只看得见第一个 `}` 那个语法错）。
+
+        判据是**结构**而不是措辞：解析出来的节点**有没有块体载体**。有
+        （`menu` / `if` / 循环 / `camera` / `transform` / `layeredimage` /
+        未建模块）→ 照常；没有 → 这一条其实是"工具不认识的块语句"，
+        整块交给 `_stmt_unmodeled` 逐字保真（`UnknownBlockNode`）。
+        换句话说：**看不懂就别拆**，拆一半比不拆危险。
+        """
+        node = self._parse_statement_core(line, text)
+        if (node is not None and line.subblock
+                and _has_real_subblock(line)
+                and not isinstance(node, _BLOCK_CARRYING_NODES)):
+            return self._stmt_unmodeled(line, text)
+        return node
+
+    def _parse_statement_core(self, line: LogicalLine, text: str):
         """一条逻辑行 → AST 节点（按语句种类分派）。
 
         每个分支各自住在 `_stmt_*` 里（P3-12 拆的：原本是 375 行 /

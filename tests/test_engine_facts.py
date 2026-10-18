@@ -248,6 +248,19 @@ class TestClassifyLint:
         assert got['semantic_errors'] == []
         assert len(got['parse_errors']) == 1
 
+    def test_exception_line_is_parse_whatever_the_wording(self):
+        """`File "…", line N:` 是**加载/编译抛异常** —— 不看措辞，一律阻塞。
+
+        2026-10-18：`'{' was never closed` 不在 `_PARSE_MARK` 那 4 个词里，
+        从前掉进 `program_errors`（"可修"，不阻塞）。构建闸门那边同一个
+        根因已经改成按出处判（`engine_lint`），这里也要一致。
+        """
+        text = ('File "game/a.rpy", line 13850: \'{\' was never closed\n'
+                'define x = {\n')
+        got = EC.classify_lint(text, clean=True)
+        assert len(got['parse_errors']) == 1, got
+        assert not got['program_errors'], got
+
 
 class TestFindSdk:
     def test_raises_with_actionable_message(self, monkeypatch):

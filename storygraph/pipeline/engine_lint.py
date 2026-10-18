@@ -36,16 +36,39 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: lint 里"这是语法错误"的标志词（与 `engine_collect._PARSE_MARK` 同源，
-#: 但这里**只认语法**：语义类（缺图缺角色）要项目上下文，临时工程查不准）。
-_PARSE_MARK = ('expected ', 'SyntaxError', 'ParseError', 'is not a keyword',
-               'Unexpected indentation', 'unexpected indent',
-               'expected an indented block', 'end of line expected',
-               'unexpected end of line')
+#: 引擎**加载 / 编译阶段抛异常**的报错行：
+#:
+#:     File "game/script.rpy", line 13850: '{' was never closed
+#:     File "game/script.rpy", line 3: style property xxx is not known.
+#:
+#: 出处是引擎的异常渲染（`renpy.error`），**不是** lint 的检查报告 ——
+#: 也就是说"脚本根本没读进去"。不管那句话长什么样，产物都加载不了，
+#: 一律算**阻塞**（2026-10-18，P1：从前靠 8 个措辞去猜，`'{' was never
+#: closed` 猜漏了 → 判成语义、`ok=True`、闸门放行）。
+_RE_EXC_LINE = re.compile(
+    r'^File\s+"(?P<file>[^"]+)"\s*,\s*line\s+(?P<line>\d+)\s*:\s*(?P<msg>.*)$')
 
-#: `File "game/script.rpy", line 4: expected ':' not found.` 这类报告头
-_RE_REPORT = re.compile(r'^(?:File\s+")?(?P<file>[^":]+\.rpy)"?'
-                        r'(?:,)?\s*line\s+(?P<line>\d+)\s*:\s*(?P<msg>.*)$')
+#: 引擎 **lint 检查**自己的报错行（脚本已经读进去了）：
+#:
+#:     game/script.rpy:12 'bg room' is not an image.
+#:
+#: 这些是"缺图 / 缺角色 / 跳转目标不存在 / 音频缺失 / 样式建议"——
+#: 要项目上下文，临时工程里本来就查不准 ⇒ **不阻塞**，只作为语义提示。
+_RE_CHECK_LINE = re.compile(r'^(?P<file>[^:\n]*\.rpy):(?P<line>\d+)\s+'
+                            r'(?P<msg>\S.*)$')
+
+#: 引擎在 lint 期间**崩了**（`init python` 抛异常等）：输出里有 traceback 帧，
+#: 但没有任何 `File "…", line N:` 形式的报错行。这种产物加载即崩，
+#: 同样是阻塞 —— 判据不能只看"有没有那句话"。
+#:
+#: Ren'Py 的 traceback **不打** Python 那句 `Traceback (most recent call
+#: last)`：它自己渲染成一串 `File "game/script.rpy", line 2, in script`
+#: —— 注意行号后面是**逗号**（`in <函数>`），与异常报错的冒号是两种形状。
+_RE_FRAME = re.compile(r'^File\s+"[^"]+"\s*,\s*line\s+\d+\s*,\s*in\s+\S+')
+
+#: traceback 最后那行异常（`ZeroDivisionError: division by zero`）
+_RE_EXC_TAIL = re.compile(
+    r'^(?P<type>[A-Za-z_][\w.]*(?:Error|Exception|Exit))\s*:\s*(?P<msg>.*)$')
 
 
 @dataclass
@@ -105,23 +128,43 @@ def classify(text: str, *, source_text: str = '',
     """
     lint 输出 → `(parse_errors, semantic_errors)`。
 
-    只把**语法类**报错算进 parse；并且跳过项目自定义语句头（假阳性）。
+    判据是**出处**，不是措辞（2026-10-18，P1：闸门 fail-open）。
 
-    判据要"能定位到源码行"：Ren'Py 的格式是
+    引擎只会用两种带行号的格式报事，两者含义完全不同：
 
-        File "game/script.rpy", line 4: expected ':' not found.
-            menu "caption":
-                 ^
+      · `File "game/script.rpy", line 12: '{' was never closed`
+        —— 加载 / 编译时**抛了异常**，脚本没读进去 ⇒ **阻塞**。
+        它可能是 Python 编译错（`'{' was never closed`）、Ren'Py 语句错
+        （`expected ':' not found.`）、样式属性不认识 …
+        旧写法列了 8 个"像语法错"的词去匹配，`'{' was never closed` 不在
+        里面 → 归进 `semantic_errors` → 只 warn、`ok=True`、闸门放行，
+        而那份产物 Ren'Py 根本加载不了。**措辞清单永远漏，出处不会漏。**
 
-    报错行之后那两行才是源码片段 —— 用它判断这是不是一句自定义语句。
+      · `game/script.rpy:12 'bg room' is not an image.`
+        —— 脚本读进去了，这是 lint **检查**的意见（缺图 / 缺角色 /
+        跳转目标不存在 / 音频缺失 …）。要项目上下文，临时工程里查不准
+        ⇒ 不算阻塞，只报给人看。
+
+    还有第三种：输出里有 traceback、却没有上面任何一条带行号的报错
+    （`init python` 把 lint 跑崩了）。那种产物加载即崩，同样阻塞。
+
+    报错行之后的两行是源码片段 —— 用它可以判断"这是不是一句项目声明的
+    自定义语句"（`ignore_heads`）：临时工程里没 `renpy.register_statement`，
+    引擎会把 `mycue …` 报成 `expected statement.`，那是假阳性。
     """
     ignore = {str(h).strip() for h in (ignore_heads or ()) if str(h).strip()}
     src_lines = str(source_text or '').splitlines()
     lines = str(text or '').splitlines()
     parse_errors, semantic = [], []
     for i, line in enumerate(lines):
-        m = _RE_REPORT.match(line.strip())
-        if not m:
+        s = line.strip()
+        m = _RE_EXC_LINE.match(s)
+        if m is None:
+            m = _RE_CHECK_LINE.match(s)
+            if m is None:
+                continue
+            semantic.append(f'第 {int(m.group("line"))} 行：'
+                            f'{m.group("msg").strip()}')
             continue
         msg = m.group('msg').strip()
         no = int(m.group('line'))
@@ -132,12 +175,33 @@ def classify(text: str, *, source_text: str = '',
             snippet = src_lines[no - 1].strip()
         if _head_of(snippet) in ignore:
             continue          # 项目声明的自定义语句 —— 临时工程不认，不算错
-        shown = f'第 {no} 行：{msg}'
-        if any(mark in msg for mark in _PARSE_MARK):
-            parse_errors.append(shown)
-        else:
-            semantic.append(shown)
+        parse_errors.append(f'第 {no} 行：{msg}')
+    crash = _load_crash(text)
+    if crash and not parse_errors:
+        parse_errors.append(crash)
     return parse_errors, semantic
+
+
+def _load_crash(raw: str) -> str:
+    """
+    引擎在 lint 期间**崩了**吗？崩了就返回那句异常，否则返回空串。
+
+    为什么要单独判：`init python` 抛异常时引擎**不会**中止 lint —— 它打印
+    traceback、继续做语义检查、退出码还是 0（`error_reported` 只在 `report()`
+    里置位）。于是"产物一进游戏就崩"会被闸门当成"语法通过"。
+
+    判据是**有没有 traceback 帧**（`File "…", line N, in <函数>`）。这一种
+    形状只出现在"引擎自己抛了异常"时，lint 的检查报告永远是
+    `game/script.rpy:N msg`（冒号，没有帧）。
+    """
+    lines = [ln.strip() for ln in str(raw or '').splitlines() if ln.strip()]
+    if not any(_RE_FRAME.match(ln) for ln in lines):
+        return ''
+    for ln in reversed(lines):
+        m = _RE_EXC_TAIL.match(ln)
+        if m:
+            return f'引擎 lint 期间抛异常（产物加载即崩）：{ln}'
+    return '引擎 lint 期间抛异常（产物加载即崩，原文见 lint 输出）'
 
 
 def lint_text(text: str, *, ignore_heads=(), sdk=None,

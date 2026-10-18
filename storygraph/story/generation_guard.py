@@ -1269,7 +1269,9 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
             elif _rep.ran and _rep.semantic_errors:
                 issues.append(GuardIssue(
                     'ENGINE_LINT_WARN', 'warn',
-                    '引擎 lint 有语义提示（不影响解析）：'
+                    f'引擎 lint 有 {len(_rep.semantic_errors)} 条语义提示'
+                    '（不影响解析；临时工程里没有项目素材，缺图 / 缺音频'
+                    '属预期）：'
                     + '；'.join(_rep.semantic_errors[:3])))
         except Exception as e:                  # noqa: BLE001 - lint 是增强，不拖垮导出
             swallow('generation_guard.engine_lint', e)

@@ -235,10 +235,13 @@ def test_loop_no_longer_reported_as_unmanaged(tmp_path):
 @pytest.mark.skipif(not REAL.is_dir(), reason='换机 skip')
 def test_real_project_reaches_full_coverage():
     """
-    真机：那个游戏主循环的**块体也结构化**之后，覆盖率仍是 100%，
-    而且它不再是 `T0b`（"只有头行可编辑"那一档）。
+    真机：**没有一条语句是"工具不认识"的**（T3 = 0），循环块也不再是 T0b。
 
-    这是这一项的对外指标 —— 也是它值得做的理由。
+    ⚠ 2026-10-18 起，可编辑覆盖率**不再是 100%**：`show …:` 的 ATL 块形式
+    （真机 35 处）没有块体载体，整块改走逐字保真（T2）—— 从前它们被算成
+    T0，可渲染时块体是**丢掉**的（产物 `show …:` 空块，Ren'Py 直接报
+    `show statement expects a non-empty block.`）。所以 100% 是假的，
+    98% 才是真的：那 2% 是"看得懂形状、逐字抄对"，不是"接不住"。
     """
     from storygraph.parsing.discover import discover_scripts
     from storygraph.story.statement_registry import coverage_of_beats
@@ -246,7 +249,10 @@ def test_real_project_reaches_full_coverage():
     pr, _ = az.analyze(files=discover_scripts(REAL), graph=None)
     beats = beats_from_parse_result(pr)
     cov = coverage_of_beats(beats)
-    assert cov.ratio == 1.0, cov.to_dict()
+    assert cov.count_of(cap.T3) == 0, cov.counts
+    #: 仅剩的不可编辑项：`show …:` 的 ATL 块（真机 35 处，逐字保真）
+    assert cov.counts.get(cap.T2, 0) == 35, cov.counts
+    assert cov.ratio >= 0.98, cov.to_dict()
     assert cov.count_of(cap.T0B) == 0, cov.counts
     text = cap.format_capability_report(cov)
-    assert text.splitlines()[0].startswith('工具可编辑覆盖率 100.0%'), text
+    assert text.splitlines()[0].startswith('工具可编辑覆盖率 98.0%'), text
