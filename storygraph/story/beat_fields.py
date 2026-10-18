@@ -144,6 +144,34 @@ COLUMN_SPECS = (
     FieldSpec('CameraHeader', 'camera_header', header='相机头行（内部）',
               hidden=True, single_line=True,
               note='3D 舞台 camera 块的头行。'),
+    #: 台词**引号串之后**的合法子句（`(what_color="#f00")` / `with` / `id` /
+    #: `nointeract`）。2026-10-18 追加：从前它被 `_RE_SAY` 静默吃掉，
+    #: 真机 `script_pomo.rpy` 的 `jc "…" (no_skip=True)` 导出后括号没了。
+    FieldSpec('SayTail', 'say_tail', header='台词后缀（内部）',
+              hidden=True, single_line=True,
+              note='台词的样式/控制子句，原样写回；空 = 普通台词。'),
+    #: `label 名(参数…):` 的参数表。2026-10-18 追加：从前解析器把参数
+    #: "扫过去"就扔了，产物成 `label 名:` —— 而 `call 名(...)` 是原样保真的，
+    #: 于是调用方传参、被调方不收，Ren'Py 报"参数过多"，游戏起不来。
+    FieldSpec('LabelHeader', 'label_header', header='label 参数（内部）',
+              hidden=True, single_line=True,
+              note='label 的参数表原文（含括号），只记在该 label 的第一张拍上。'),
+    #: `menu` 头行上的**菜单名**与**参数表**（2026-10-19，审计 P1-3 收尾）。
+    #:
+    #: 从前 `menu (nvl=True):` / `menu choice_menu:` 让 `_scan_menu_header`
+    #: 直接放弃 → 整块掉进「原样块」：字节一个不丢，但**选项不在拍里**
+    #: （卡片上整段菜单消失，策划改不了其中任何一句），而且那是个「可跳转
+    #: 的 label」这个结构事实也丢了。现在两样各占一格，选项重新是可编辑的拍。
+    #:
+    #: 两列都隐藏：它们是**程序面**的结构（`screen=` / `nvl=` / 跳转用的名），
+    #: 与 `SpecHead` / `LoopHeader` / `CameraHeader` 同一档；但在卡片的高级区
+    #: 里能改（`ADVANCED_FIELDS`），也照样读得回来、写得进 Excel。
+    FieldSpec('MenuName', 'menu_name', header='菜单名（内部）',
+              hidden=True, single_line=True,
+              note='`menu 名(args):` 的 `名`。它是真 label（jump/call 能跳进来）。'),
+    FieldSpec('MenuArgs', 'menu_args', header='菜单参数（内部）',
+              hidden=True, single_line=True,
+              note='`menu 名(args):` 的 `(args)` 原文（含括号），喂给菜单 screen。'),
 )
 
 

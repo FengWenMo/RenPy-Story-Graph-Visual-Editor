@@ -12,10 +12,11 @@
 
 这一份判据管三件事：
 
-  ① **同一口径**：策略不冲突的形状上，"试切"与"读值"必须给出**逐格相同**的分配；
-  ② **分岔只有两处、而且都是明写的**（见 `DIVERGENCE`）：枚举格的"候选跳过"、
-     以及"引号只在读值侧去掉"。它们写在 `pattern.POLICIES` 与函数说明里，
-     由本文件钉住 —— 再长出新分岔就会被抓；
+  ① **同一口径**：任何形状上，"试切"与"读值"必须给出**逐格相同**的分配；
+  ② **没有第二种策略**（2026-10-17 第二轮攻击删掉了 `POLICIES`）：枚举格的
+     "候选跳过"进了代价表，两侧共用一份。**引号那一处更早就没有了** ——
+     2026-10-17 起引号在**词法层**（`pattern._atoms`）统一去掉，两侧看到的是
+     同一批词（"`base swimsuit` 是一个词"只有一份实现）；
   ③ **失败信号是"报告"而不是"猜"**：关键字对不上 / 勾了限死来了外词 /
      有格子没词 / 有词没人认领，四类各自报出来。
 """
@@ -24,6 +25,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -48,12 +51,14 @@ AGREE_CASES = [
       {'kind': 'optional', 'text': 'at', 'column': '位置'}],
      'lan happy sad at left',
      {'人物': 'lan', '表情': 'happy sad', '位置': 'at left'}),
-    # 多值格**可以一个都不吃**，不许抢后面那格的词（甲：先到先得）
+    # 多值格**可以一个都不吃**；但"这个词是谁的候选"说了算（2026-10-17）：
+    # `happy` 是「表情」自己的候选 → 它就该归「表情」。旧期望 `{'人物': 'happy'}`
+    # 是"位置先行"的产物（谁在前面谁拿走），那正是"角色吃掉服装词"的同款。
     ([{'kind': 'variable', 'column': '人物'},
       {'kind': 'choice', 'column': '表情', 'options': ['happy', 'sad'],
        'multi': True}],
      'happy',
-     {'人物': 'happy'}),
+     {'表情': 'happy'}),
     # 多值格后面还有**会吃词**的格子 → 它要让位（甲，这条以前两侧不一致）
     ([{'kind': 'variable', 'column': '人物'},
       {'kind': 'choice', 'column': '服装', 'options': ['happy', 'sad'],
@@ -94,38 +99,59 @@ def test_试切与读值在策略不冲突的形状上逐格相同():
             line, SA.slot_value_map(line, pattern), want)
 
 
-def test_分岔一_枚举格的候选跳过_而且写在_policy_上():
-    """试切按书写顺序，读值把候选当词典 —— **同一分配器、两个 policy**。"""
+def test_没有第二种策略_两侧对同一行给出同一个答案():
+    """
+    ⚠⚠ 2026-10-17 第二轮攻击：**`policy` 已经删掉**（原 `POLICIES` 两档）。
+
+    以前"枚举格的候选跳过"只存在于读值那一侧（`'candidates'`），试切那一侧
+    用 `'order-first'` —— 于是同一行能给出**不同的格子值**：
+
+        试切（界面显示的）        ：服装 = junk
+        卡片（存进库里的）        ：服装 = base_swimsuit
+
+    用户盯着试切那一栏改顺序，改的是 `junk` 那个位置，库里存的却是另一套。
+    现在"跳过垃圾词去认自己的候选"进了**代价表**，两处逐字同源。
+
+    这一行（`小明 龙袍 泳装`）—— 老口径下这**正是两套策略分岔的那一行**：
+    试切说 `服装=龙袍`、卡片说 `服装=泳装`。现在只有一份实现，答案统一为
+    **`服装 = 泳装`**（`泳装` 是这一格写明的候选，`龙袍` 谁也不认识、晾着被点名），
+    因为"跳过 `龙袍`"（`SKIP_JUNK + SKIP_WORD` = 4）比"吃下它、让 `泳装`
+    没人认领"（`COST_OFFLIST` 5 + `SKIP_WORD` 3 = 8）便宜。
+    """
     pattern = [{'kind': 'variable', 'column': '角色'},
                {'kind': 'choice', 'column': '服装', 'options': ['泳装', '校服']}]
     line = '小明 龙袍 泳装'
     trial = _trial_cells(pattern, line)
-    assert trial == {'角色': '小明', '服装': '龙袍'}, trial
-    assert P.match_line(pattern, line)['ok'] is False     # `泳装` 没人认领
-    assert _read_cells(pattern, line, {'角色', '服装'}) == {'角色': '小明',
-                                                          '服装': '泳装'}
-    tokens = line.split()
-    assert P.assign_tokens(tokens, pattern,
-                           policy='order-first')['spans'] == {0: (0, 1),
-                                                              1: (1, 2)}
-    assert P.assign_tokens(tokens, pattern,
-                           policy='candidates')['spans'] == {0: (0, 1),
-                                                             1: (2, 3)}
-    assert set(P.POLICIES) == {'order-first', 'candidates'}
+    read = _read_cells(pattern, line, {'角色', '服装'})
+    assert trial == read == {'角色': '小明', '服装': '泳装'}, (trial, read)
+    assert P.match_line(pattern, line)['ok'] is False      # `泳装` 没人认领
+    assert not hasattr(P, 'POLICIES'), '两种策略的残留常量还在'
+    with pytest.raises(TypeError):
+        P.assign_tokens(line.split(), P.parse_pattern(pattern),
+                        policy='candidates')
 
 
-def test_分岔二_引号只在读值那一侧去掉():
-    """试切报的是**切出来的原文**（带引号），读值给的是**编剧改的值**（去引号）。"""
+def test_分岔二_引号在词法层统一去掉_两侧只有一个答案():
+    """
+    ⚠ 2026-10-17 **这一处分岔被取消了**。
+
+    旧口径：试切报"切出来的原文"（带引号 `"泳装"`），读值报去引号的值 ——
+    同一行两个答案，正是"试切说切上了、卡片读出来不一样"的同款。
+
+    现在引号归**词法层**（`pattern._atoms`）：两侧拿到的是同一批词，
+    `"base swimsuit"` 是一个词、且**不带引号**（带引号的值会被原样写回 `.rpy`，
+    变成 `show lan ""泳装""` —— 比切不上更危险，因为它报成功）。
+    """
     pattern = [{'kind': 'variable', 'column': '人物'},
                {'kind': 'variable', 'column': '内容'}]
     line = 'lyj "泳装"'
-    assert _trial_cells(pattern, line) == {'人物': 'lyj', '内容': '"泳装"'}
+    assert _trial_cells(pattern, line) == {'人物': 'lyj', '内容': '泳装'}
     assert _read_cells(pattern, line, {'人物', '内容'}) == {'人物': 'lyj',
                                                           '内容': '泳装'}
 
 
 def test_读值这一侧确实是转发到同一个分配器():
-    """`_claim` 不许再有自己的规则 —— 它必须逐字等于分配器的 `candidates` 结果。"""
+    """`_claim` 不许再有自己的规则 —— 它必须逐字等于分配器的结果。"""
     cases = [(p, ln) for p, ln, _w in AGREE_CASES]
     cases.append(([{'kind': 'variable', 'column': '角色'},
                    {'kind': 'choice', 'column': '服装',
@@ -134,8 +160,7 @@ def test_读值这一侧确实是转发到同一个分配器():
         slots = P.parse_pattern(pattern)
         tokens = line.split()
         want = {i: ' '.join(tokens[a:b]) for i, (a, b)
-                in P.assign_tokens(tokens, slots,
-                                   policy='candidates')['spans'].items()}
+                in P.assign_tokens(tokens, slots)['spans'].items()}
         assert SA._claim(line, slots) == want, (line, SA._claim(line, slots),
                                                want)
 

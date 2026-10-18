@@ -21,6 +21,8 @@ Qt 版**舞台演出预览**：把这一章按卡片效果"播"出来。
 
 from __future__ import annotations
 
+import time
+
 from storygraph.core.safeguard import swallow
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -247,6 +249,42 @@ class StageCanvas(QWidget):
         #: 这一帧**脚本里写了、磁盘上找不到**的素材名（缺图要显眼地说出来）
         self._missing: list = []
         self._layer_pix = None
+        #: **转场淡入**（2026-10-18，审计 P1-8"无转场"）：1.0 = 不透明。
+        #: `with dissolve/fade` 的那一拍从 0.15 淡到 1（350ms），硬切直接 1。
+        self._fade_alpha = 1.0
+        self._fade_started = 0.0
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(16)
+        self._fade_timer.timeout.connect(self._tick_fade)
+
+    # ------------------------------------------------------------------
+
+    def begin_transition(self, fade: bool) -> None:
+        """
+        这一拍切过去时要不要淡入（`with dissolve` / `with fade`）。
+
+        为什么不是"真播那个转场"：转场是引擎的渲染语义（ATL + shader），
+        在 Qt 里重写一遍必然对不上。预览的目标是"让人看出这里有一次
+        **渐变**换景"，所以只做淡入这一件事，并且**只对渐变类转场**做 ——
+        硬切必须看起来像硬切，否则"我明明写的是硬切"会看不出来。
+        """
+        if not fade:
+            self._fade_alpha = 1.0
+            self._fade_timer.stop()
+            return
+        self._fade_alpha = 0.15
+        self._fade_started = time.monotonic()
+        self._fade_timer.start()
+
+    def _tick_fade(self) -> None:
+        try:
+            elapsed = time.monotonic() - self._fade_started
+            self._fade_alpha = min(1.0, 0.15 + 0.85 * (elapsed / 0.35))
+            if self._fade_alpha >= 1.0:
+                self._fade_timer.stop()
+            self.update()
+        except Exception:                      # noqa: BLE001 - 定时器里不许抛
+            self._fade_timer.stop()
 
     # ------------------------------------------------------------------
 
@@ -393,6 +431,8 @@ class StageCanvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # 转场淡入：整帧按 `_fade_alpha` 铺（硬切时恒为 1.0）
+            p.setOpacity(max(0.0, min(1.0, float(self._fade_alpha))))
             w, h = self.width(), self.height()
             f = self._frame
 
@@ -570,6 +610,10 @@ class StagePreviewWindow(QDialog):
         # 对话框
         self._dlg = QLabel('')
         self._dlg.setWordWrap(True)
+        # **RichText**：台词里的 `{color=…}` / `{b}` / `{i}` 要**画出来**
+        # （2026-10-18，审计 P1-8"台词标签不解析"）。从前直接 setText 原文，
+        # 预览里看到的是 `{color=#ff0000}红{/color}` 这样的源码。
+        self._dlg.setTextFormat(Qt.RichText)
         self._dlg.setMinimumHeight(52)
         self._dlg.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._dlg.setStyleSheet(
@@ -666,9 +710,22 @@ class StagePreviewWindow(QDialog):
             swallow('ui_qt.stage_preview.show_frame', e)
             cues = {}
         self._who.setText(f.speaker or '　')
-        self._dlg.setText(f.text or '（这一拍没有台词）')
+        self._dlg.setText(_dialogue_html(f))
         self._summary.setText(self._summary_text(f, cues))
         self._pos.setText(f'{idx + 1} / {len(self.frames)}')
+        # **按拍定速**（2026-10-18，审计 P1-8"固定 900ms"）：
+        # 长台词还没看完就跳、纯舞台变化又干等 —— 时长由这一拍自己说了算
+        # （`StageFrame.duration_ms`：pause 秒数 → 字数估算 → 600ms）。
+        try:
+            self._timer.setInterval(int(getattr(f, 'duration_ms', PLAY_MS)))
+        except Exception:                     # noqa: BLE001 - 老 frame 没这个属性
+            self._timer.setInterval(PLAY_MS)
+        # **转场**（P1-8"无转场"）：`with dissolve/fade` 的那一拍淡入，
+        # 硬切的不淡 —— 这样"换景"和"换立绘"在预览里看起来不一样。
+        try:
+            self._canvas.begin_transition(bool(getattr(f, 'fades', False)))
+        except Exception:                     # noqa: BLE001
+            swallow('ui_qt.stage_preview.show_frame.transition')
         # **姿势改回普通但没 hide** → 在状态行上说清楚（用户 2026-10-05 报的
         # "从 B 改到 A … 工具跟不上"）。只提示，不改脚本。
         try:
@@ -883,6 +940,29 @@ class StagePreviewWindow(QDialog):
         except Exception:                    # noqa: BLE001
             swallow('stage_preview.closeEvent')
         super().closeEvent(event)
+
+
+def _dialogue_html(frame) -> str:
+    """
+    这一拍的台词 → 预览用的 HTML（**解析 Ren'Py 文字标签**）。
+
+    2026-10-18，审计 P1-8："台词标签不解析" —— 从前 `QLabel.setText(原文)`，
+    预览里看到的是 `{color=#ff0000}红{/color} 色的字` 这样的**源码**。
+
+    转换器与卡片预览**同一份**（`main_window.renpy_text_to_html`）：
+    两处各写一套迟早漂移（一处认 `{size}`、另一处不认，同一句话在卡片上
+    和预览里长得不一样）。只多一步 `\\n → <br>`：QLabel 的富文本不认换行。
+    """
+    text = str(getattr(frame, 'text', '') or '')
+    if not text:
+        return '（这一拍没有台词）'
+    try:
+        from storygraph.ui_qt.main_window import renpy_text_to_html
+        html, _has = renpy_text_to_html(text)
+    except Exception as e:               # noqa: BLE001 - 转不了就显示原文
+        swallow('ui_qt.stage_preview._dialogue_html', e)
+        return text
+    return html.replace('\n', '<br>')
 
 
 def open_preview(parent, frames, registry=None, project_root=None,

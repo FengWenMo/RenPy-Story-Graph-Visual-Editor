@@ -31,7 +31,8 @@ def _spec_of(beat) -> str:
     if not show:
         return ''
     # 一拍可能写了多个 `show`（`show a x; show b y`）——只看第一个 tag 的那串
-    first = show.split(';')[0].strip()
+    from storygraph.core.vocabulary import split_stage_items
+    first = (split_stage_items(show) or [''])[0].strip()
     return first
 
 

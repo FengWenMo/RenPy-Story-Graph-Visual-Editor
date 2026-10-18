@@ -100,7 +100,13 @@ PRIMARY_FIELDS = ['Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
 #: 老表里的 `Notes` 列**仍然读得回来**（`Beat.from_row` 把它并进
 #: `Comment`，绝不丢字）—— 这条兼容链路没动，见
 #: `tests/test_editor_session_mixin_contract.py` 的 `TestFieldContract`。
-ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage']
+ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage', 'SayTail',
+                   # 菜单头（2026-10-19）：`menu 名(args):` 的两段。
+                   # 只在菜单拍上有值；其它拍空着（写回是 no-op）。
+                   # 放进高级区而不是主区：它们是程序面的结构（screen 参数 /
+                   # 跳转用的名字），不是每一拍都会碰的东西。
+                   'MenuName', 'MenuArgs']
+
 
 
 class EditorSession(TableSessionMixin, GraphSessionMixin,

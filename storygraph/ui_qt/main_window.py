@@ -61,6 +61,65 @@ from __future__ import annotations
 from storygraph.core.safeguard import swallow
 from pathlib import Path
 
+import re
+
+#: Ren'Py 文字标签：`{color=#f00}` / `{/color}` / `{i}` / `{w=0.5}` …
+_RENPY_TAG_RE = re.compile(r'\{([^{}]*)\}')
+#: 预览认得的颜色值（只放行"看着像颜色"的东西 —— 预览是 HTML）
+_PREVIEW_COLOR_RE = re.compile(r'^(?:#[0-9a-fA-F]{3,8}|rgba?\([\d\s.,%]+\))$')
+
+
+def renpy_text_to_html(text: str) -> tuple:
+    """
+    Ren'Py 台词 →（预览用 HTML，是否含标签）。
+
+    只认最常用的几种：`color` / `b` / `i` / `u` / 绝对 `size`。
+    其余标签（`{w}` / `{p}` / `{nw}` / `{alpha=…}`…）**剥掉不显示**
+    （它们不改变"截一张静态图看到的样子"），`[变量]` 原样留字。
+    先转义再拼标签：文本里出现 `<` 也只是普通字符。
+    """
+    from html import escape as _esc
+
+    src = str(text or '')
+    if '{' not in src:
+        return _esc(src), False
+    out = []
+    pos = 0
+    has_tag = False
+    for m in _RENPY_TAG_RE.finditer(src):
+        out.append(_esc(src[pos:m.start()]))
+        pos = m.end()
+        tag = m.group(1).strip()
+        if not tag:
+            continue
+        closing = tag.startswith('/')
+        name = (tag[1:] if closing else tag).strip().lower()
+        base = name.split('=', 1)[0].strip()
+        if base in ('b', 'i', 'u'):
+            out.append(f'</{base}>' if closing else f'<{base}>')
+            has_tag = True
+        elif base == 'color':
+            if closing:
+                out.append('</span>')
+            else:
+                val = name.split('=', 1)[1].strip().strip('"\'')
+                if _PREVIEW_COLOR_RE.match(val):
+                    out.append(f'<span style="color:{val}">')
+                # 颜色不是合法值 → 不产出 style（但标签本身算数：
+                # 预览会出来，让人看得见"这句带样式"，而 Ren'Py 不报错）
+                has_tag = True
+        elif base == 'size':
+            if closing:
+                out.append('</span>')
+            else:
+                val = name.split('=', 1)[1].strip()
+                if val.isdigit():
+                    out.append(f'<span style="font-size:{int(val)}px">')
+                has_tag = True
+    out.append(_esc(src[pos:]))
+    return ''.join(out), has_tag
+
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QTextCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
@@ -147,6 +206,71 @@ class BeatCardEditor(QWidget):
                                 T.SPACE['md'], T.SPACE['md'])
         root.setSpacing(T.SPACE['sm'])
 
+        # —— 语句条：**这一拍是什么**（2026-10-18）——
+        #
+        # 为什么要有它：卡片从前**假设每一拍都是一句台词**。于是一条
+        # `play_music track=bgm file="bgm/theme.ogg"` 或者 `styled "红色" "#ff0000"`
+        # 在界面上长成"一个空的说话人 + 一个空的台词框 + 一张空立绘网格"，
+        # 而它真正能改的那几格（参数）被埋在卡片最底下 —— 要滚过一整屏
+        # 与它无关的东西才看得到。用户 2026-10-18：**"不是每个写法都跟 show
+        # 一样与图片相关"**（有的可能是声音、是文字），排版得跟着内容走。
+        self._stmt_bar = QFrame()
+        self._stmt_bar.setObjectName('statementBar')
+        self._stmt_bar.setProperty('role', 'card')
+        bar = QVBoxLayout(self._stmt_bar)
+        bar.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
+                               T.SPACE['sm'], T.SPACE['sm'])
+        bar.setSpacing(2)
+        self._stmt_title = QLabel('')
+        self._stmt_title.setProperty('role', 'section')
+        self._stmt_title.setWordWrap(True)
+        bar.addWidget(self._stmt_title)
+        self._stmt_head = QLabel('')
+        self._stmt_head.setProperty('role', 'caption')
+        self._stmt_head.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._stmt_head.setWordWrap(True)
+        self._stmt_head.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        bar.addWidget(self._stmt_head)
+        self._stmt_bar.setVisible(False)
+        root.addWidget(self._stmt_bar)
+
+        #: 这一拍里**工具没建模、但会原样执行**的那些行（`play ambience` /
+        #: `show screen` / 自定义块）—— 它们不属于任何一格，从前只躺在
+        #: 折叠着的高级区里，卡片看起来像"什么都没有"。
+        #:
+        #: ⚠ **不放进语句条**（2026-10-18）：台词拍也可能有这种行
+        #: （`play ambience` 后面紧跟一句台词就是同一拍），而语句条在没有
+        #: 语句时是隐藏的 —— 放进去就会跟着一起消失。
+        self._loose_label = QLabel('')
+        self._loose_label.setProperty('role', 'caption')
+        self._loose_label.setWordWrap(True)
+        self._loose_label.setVisible(False)
+        root.addWidget(self._loose_label)
+
+        # —— 语句参数（**跟着这一拍的语句走**；没有参数就整组隐藏）——
+        #
+        # ⚠ 位置在**台词之前**（2026-10-18 挪上来的）：语句拍的参数就是它的
+        # 正文，而台词是可选的附加物。放在台词下面那版实测要滚一整屏才看得见。
+        #
+        # 为什么要有这一组（用户 2026-10-07 的意见）：动态参数列**只在 Excel**
+        # 里做了，卡片上还是"候选注释"（`app.beats.spec_arg_choices_for`
+        # 一直是"只有测试在用"）。可编剧是**在卡片上写**的 —— 表里有下拉、
+        # 卡片上没有，等于这条能力只对着会开 Excel 的人。
+        #
+        # 这里一格一个参数：有候选就是**可编辑下拉**（手打新值照样能过，
+        # 与 Excel 的 `showErrorMessage=False` 同一条口径），没候选就是普通
+        # 输入框。值写回的路径与 Excel **完全同一条**
+        # （`app.beats.apply_spec_arg_fields` → `beat_model.fold_spec_arg_columns`），
+        # 所以"卡片上改"与"表里改"的结果必然一致。
+        self._spec_host = QWidget()
+        self._spec_form = QVBoxLayout(self._spec_host)
+        self._spec_form.setContentsMargins(0, 0, 0, 0)
+        self._spec_form.setSpacing(T.SPACE['xs'])
+        self._spec_host.setVisible(False)
+        #: `{列名: 颜色小方块}`（值是颜色时才建，见 `set_spec_args`）
+        self._spec_swatches: dict = {}
+        root.addWidget(self._spec_host)
+
         # —— 说话人 ——（一行，右边留白，视觉上"标签 + 值"）
         row1 = QHBoxLayout()
         row1.setSpacing(T.SPACE['sm'])
@@ -175,6 +299,65 @@ class BeatCardEditor(QWidget):
         self._char_label.setAlignment(Qt.AlignRight)
         root.addWidget(self._char_label)
 
+        # —— 内联标签**预览**（2026-10-18）——
+        #
+        # Ren'Py 的文字样式写在台词里：`{color=#f00}红{/color}` /
+        # `{i}斜{/i}` / `{b}粗{/b}`。用户在卡片上看到的是**源码**（那是正确的：
+        # 他改的就是源码），但"这句话最终长什么样"只能进游戏才知道 ——
+        # 于是这里给一行真·富文本预览。只在文本里**确实有标签**时出现，
+        # 平时不占版面。
+        self._rich_preview = QLabel('')
+        self._rich_preview.setObjectName('richPreview')
+        self._rich_preview.setTextFormat(Qt.RichText)
+        self._rich_preview.setWordWrap(True)
+        self._rich_preview.setProperty('role', 'caption')
+        self._rich_preview.setVisible(False)
+        root.addWidget(self._rich_preview)
+        # 输入时实时更新预览（只在这句话真有标签时才显示）
+        self._text.textChanged.connect(self._refresh_rich_preview)
+
+        # —— 台词后缀（`(what_color="#f00")` / `with` / `id`）：真有时才露 ——
+        #
+        # 它就是"给这句台词上色/加样式"那一类写法。从前它在导出时被静默
+        # 吃掉（`_RE_SAY` 只 match 到引号），现在它有自己的隐藏列
+        # （`SayTail`），高级区里能改；这里再给一行**看得见**的提示，
+        # 免得"这句台词带样式"这件事只存在于折叠区里。
+        self._say_tail_label = QLabel('')
+        self._say_tail_label.setProperty('role', 'caption')
+        self._say_tail_label.setWordWrap(True)
+        self._say_tail_label.setVisible(False)
+        root.addWidget(self._say_tail_label)
+
+        # —— 舞台（**没有改动时只占一行**）——
+        #
+        # 用户 2026-10-18：不是每个写法都跟图片相关。一条 `play_music` 或
+        # `styled "红色" "#f00"` 的拍，舞台那三块（立绘网格 / 当前舞台 /
+        # 背景·音乐·语音）**一个字都没有**，却占了整整一屏 —— 真正能改的
+        # 参数反而要滚过去找。所以：没有舞台内容 → 收成一行说明 + 一个
+        # 「改舞台」按钮；有内容 → 与从前一模一样。
+        self._stage_has = True          # 载入前不收起（构造期间没有"这一拍"）
+        self._stage_open = False
+        self._stage_toggle = QPushButton('＋ 改舞台（背景 / 立绘 / 音乐）')
+        self._stage_toggle.setProperty('variant', 'chip')
+        self._stage_toggle.setFlat(True)
+        self._stage_toggle.setToolTip('这一拍没有舞台改动。点开可以加立绘、'
+                                      '换背景、放音乐。')
+        self._stage_toggle.clicked.connect(self._toggle_stage)
+        self._stage_toggle.setVisible(False)
+        root.addWidget(self._stage_toggle, 0, Qt.AlignLeft)
+        self._stage_empty = QLabel('舞台：这一拍没有改动（背景 / 立绘 / '
+                                   '音乐都沿用上一拍）')
+        self._stage_empty.setProperty('role', 'caption')
+        self._stage_empty.setWordWrap(True)
+        self._stage_empty.setVisible(False)
+        root.addWidget(self._stage_empty)
+
+        self._stage_box = QWidget()
+        stage_lay = QVBoxLayout(self._stage_box)
+        stage_lay.setContentsMargins(0, 0, 0, 0)
+        stage_lay.setSpacing(T.SPACE['xs'])
+        root.addWidget(self._stage_box)
+
         # —— 立绘网格 ——
         head = QHBoxLayout()
         head.setSpacing(T.SPACE['xs'])
@@ -183,22 +366,22 @@ class BeatCardEditor(QWidget):
         hint.setProperty('role', 'caption')
         head.addWidget(hint, 0)
         head.addStretch(1)
-        root.addLayout(head)
+        stage_lay.addLayout(head)
         self._grid = SpriteGridWidget(symbols=self._symbols, loader=loader,
                                       on_pick_image=self._on_pick_image)
-        root.addWidget(self._grid)
+        stage_lay.addWidget(self._grid)
 
         # —— 当前舞台（这一拍生效的状态）——
         # 用户 2026-10-03："为何不写明现在的舞台情况是什么样的，旧版明明都有"
         # 旧版预览面板用的是 `stage_snapshot.stage_digest`，卡片搬 Qt 时没接上。
-        root.addWidget(self._section('当前舞台（这一拍生效）'))
+        stage_lay.addWidget(self._section('当前舞台（这一拍生效）'))
         self._stage_label = QLabel('')
         self._stage_label.setProperty('role', 'note')
         self._stage_label.setWordWrap(True)
         self._stage_label.setFont(QFont(T.FONTS['mono'][0],
                                         T.FONTS['mono'][1]))
         self._stage_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        root.addWidget(self._stage_label)
+        stage_lay.addWidget(self._stage_label)
 
         # —— 背景 / 音乐 / 语音（**两行**：背景一行，音乐 + 语音一行）——
         # 每格 = 下拉候选（从**资源表**来）+ 「选择…」按钮（打开资产选择器）。
@@ -240,9 +423,9 @@ class BeatCardEditor(QWidget):
                 row.addLayout(box, 1)
             return holder
 
-        root.addWidget(_asset_row([('Scene', '背景')], 'assetRowScene'))
-        root.addWidget(_asset_row([('BGM', '音乐'), ('Voice', '语音')],
-                                  'assetRowAudio'))
+        stage_lay.addWidget(_asset_row([('Scene', '背景')], 'assetRowScene'))
+        stage_lay.addWidget(_asset_row([('BGM', '音乐'), ('Voice', '语音')],
+                                       'assetRowAudio'))
 
         # —— 备注 ——
         row3 = QHBoxLayout()
@@ -272,24 +455,7 @@ class BeatCardEditor(QWidget):
         row4.addWidget(self._condition, 1)
         root.addLayout(row4)
 
-        # —— 语句参数（**跟着这一拍的语句走**；没有参数就整组隐藏）——
-        #
-        # 为什么要有这一组（用户 2026-10-07 的意见）：动态参数列**只在 Excel**
-        # 里做了，卡片上还是"候选注释"（`app.beats.spec_arg_choices_for`
-        # 一直是"只有测试在用"）。可编剧是**在卡片上写**的 —— 表里有下拉、
-        # 卡片上没有，等于这条能力只对着会开 Excel 的人。
-        #
-        # 这里一格一个参数：有候选就是**可编辑下拉**（手打新值照样能过，
-        # 与 Excel 的 `showErrorMessage=False` 同一条口径），没候选就是普通
-        # 输入框。值写回的路径与 Excel **完全同一条**
-        # （`app.beats.apply_spec_arg_fields` → `beat_model.fold_spec_arg_columns`），
-        # 所以"卡片上改"与"表里改"的结果必然一致。
-        self._spec_host = QWidget()
-        self._spec_form = QVBoxLayout(self._spec_host)
-        self._spec_form.setContentsMargins(0, 0, 0, 0)
-        self._spec_form.setSpacing(T.SPACE['xs'])
-        self._spec_host.setVisible(False)
-        root.addWidget(self._spec_host)
+        # —— 语句参数组已经挪到卡片顶部（见上面的 `_spec_host`）——
 
         # —— 高级区（可折叠）——
         self._adv_btn = QPushButton(self._adv_label())
@@ -368,18 +534,148 @@ class BeatCardEditor(QWidget):
 
     def _adv_label(self) -> str:
         return (('▾' if self._adv_open else '▸')
-                + ' 高级区（代码 / Label / 类型 / Notes / Stage）')
+                + ' 高级区（代码 / Label / 类型 / Notes / Stage / 台词后缀）')
+
+    # ---------- 语句条 + 舞台收放（2026-10-18）----------
+
+    def _toggle_stage(self):
+        """「改舞台」：把收起来的舞台块展开/再收起。"""
+        self._stage_open = not self._stage_open
+        self._apply_stage_visibility()
+
+    def _apply_stage_visibility(self):
+        """按"这一拍有没有舞台内容 / 用户是不是手动展开了"决定显不显示。"""
+        show = bool(self._stage_has or self._stage_open)
+        self._stage_box.setVisible(show)
+        self._stage_empty.setVisible(not show)
+        self._stage_toggle.setVisible(not show)
+        if not show:
+            self._stage_toggle.setText('＋ 改舞台（背景 / 立绘 / 音乐）')
+
+    @staticmethod
+    def _has_stage_content(fields: dict, cards: list) -> bool:
+        """
+        这一拍**有舞台内容**吗（立绘 / 背景 / 音乐 / 音效 / 语音 / 舞台指令）？
+
+        `Stage` 那一格是结构化列的**投影**（`compose_stage`），所以它非空
+        就等于"这一拍有 scene/show/hide/with"——不必再逐列判。
+        """
+        if cards:
+            return True
+        for key in ('Scene', 'BGM', 'SFX', 'Voice', 'Stage'):
+            if str((fields or {}).get(key, '') or '').strip():
+                return True
+        return False
+
+    def _set_statement(self, statement, loose):
+        """填顶部的「语句条」+ 下面那行"原样行"提示（各自独立显隐）。"""
+        info = dict(statement or {})
+        name = str(info.get('name') or '').strip()
+        label = str(info.get('label') or '').strip()
+        head = str(info.get('head') or '').strip()
+        rows = [str(x).strip() for x in (loose or ()) if str(x).strip()]
+        # —— 原样行（与语句条无关：台词拍也可能有）——
+        if rows:
+            # **全列出来**（2026-10-18 改）：从前只说第一行 + "共 N 行"，
+            # 一张拍里同时挂着 `pause` / `with` / `window hide` / 自定义块体时，
+            # 人只看得到 `pause 1.0 hard` —— 另外四行"会发生什么"是看不见的。
+            # 这些行都会**原样执行**，所以它们属于"这一拍是什么"的一部分。
+            # 太多时截到 6 行，并明说还有几行（高级区里能看全）。
+            shown = rows[:6]
+            text = '这一拍还会原样执行：\n' + '\n'.join(f'· {r}' for r in shown)
+            if len(rows) > len(shown):
+                text += f'\n… 还有 {len(rows) - len(shown)} 行'
+            text += '\n（这些行在「高级区 · 代码」里改）'
+            self._loose_label.setText(text)
+            self._loose_label.setToolTip('\n'.join(rows))
+            self._loose_label.setVisible(True)
+        else:
+            self._loose_label.setText('')
+            self._loose_label.setVisible(False)
+        # —— 语句条 ——
+        if not name:
+            self._stmt_bar.setVisible(False)
+            self._stmt_title.setText('')
+            self._stmt_head.setText('')
+            self._text.setPlaceholderText('这一拍要说的台词…')
+            return
+        title = f'◆ {name}'
+        if label:
+            title += f' · {label}'
+        if not head:
+            title += '（这一拍是一条语句，不是台词）'
+        self._stmt_title.setText(title)
+        # 原文那行**折行显示**（2026-10-18）：项目声明的语句可以很长
+        # （七八个参数 + 中文备注），单行 QLabel 会被窗口**静默截断** ——
+        # 而这一行是"这一拍到底写了什么"的唯一凭据，看不见就等于没有。
+        self._stmt_head.setText(f'原文：{head}' if head else '')
+        self._stmt_head.setWordWrap(True)
+        self._stmt_head.setToolTip(head)
+        self._stmt_head.setVisible(bool(head))
+        self._text.setPlaceholderText('这一拍还可以说一句台词（可选）…')
+        self._stmt_bar.setVisible(True)
+
+    #: 颜色值（`#rrggbb` / `#rgb` / `rgb()`）—— 那一格旁边给个色块，
+    #: 否则 `#ff0000` 对编剧只是一串乱码（用户 2026-10-18 说的"有色字体"）。
+    _COLOR_RE = re.compile(r'^(?:#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$')
+
+    def _make_swatch(self, value: str):
+        """给颜色值做一个小色块（不是颜色 → 不建）。"""
+        if not self._COLOR_RE.match(str(value or '').strip()):
+            return None
+        sw = QFrame()
+        sw.setObjectName('colorSwatch')
+        sw.setFixedSize(14, 14)
+        self._paint_swatch(sw, value)
+        return sw
+
+    @staticmethod
+    def _paint_swatch(sw, value: str):
+        color = str(value or '').strip()
+        sw.setProperty('color', color)
+        sw.setStyleSheet(f'background:{color}; border:1px solid #666;'
+                         f' border-radius:3px;')
+        sw.setToolTip(f'这一格的值是颜色：{color}')
+
+    # ---------- 内联标签预览（`{color=…}` / `{i}` / `{b}`） ----------
+
+    def _refresh_rich_preview(self):
+        """
+        台词框里的 Ren'Py 文字标签 → 一行**真·富文本预览**。
+
+        为什么（用户 2026-10-18："自定义块我可以要求一句话中只有部分关键词
+        变色"）：卡片上看到的是源码 `{color=#ff0000}红{/color}` —— 那是**对的**
+        （他改的就是源码），但"这句最终长什么样"只能进游戏才知道。真机里
+        标签写错（少了 `{/color}`、颜色拼错）是很常见的，而它**不报错**，
+        只是那句话在游戏里颜色不对。预览能把这件事提前到编辑时。
+
+        只在**确实有标签**时显示；没有标签的普通台词不占版面。
+        """
+        try:
+            raw = self._text.toPlainText() if hasattr(self, '_text') else ''
+        except Exception as e:                   # noqa: BLE001 - 界面不该因此炸
+            swallow('ui_qt.main_window._refresh_rich_preview', e)
+            raw = ''
+        html, has_tag = renpy_text_to_html(raw)
+        self._rich_preview.setText(html if has_tag else '')
+        self._rich_preview.setVisible(bool(has_tag))
+        if has_tag:
+            self._rich_preview.setToolTip(
+                '这是这句话在游戏里的样子（只预览 color / b / i / u / size，'
+                '其余标签与 [变量] 不在预览里展开）')
 
     # ---------- 语句参数那一组（`app.beats.spec_arg_*`） ----------
-
-    def set_spec_args(self, columns, values=None, choices=None):
+    def set_spec_args(self, columns, values=None, choices=None,
+                      statement=None, loose=None):
         """
         按这一拍的语句重建「参数」那一组控件（没有参数 → 整组隐藏）。
 
         `columns`  = `app.beats.spec_arg_columns_of` 的产物
-                     （`[{header, param, label, choices, positional, …}]`）；
+                     （`[{header, param, label, choices, positional, multi}]`）；
         `values`   = `{列名: 当前值}`（`app.beats.spec_arg_fields_for`）；
-        `choices`  = `{参数名: [候选]}`（`app.beats.spec_arg_choices_for`）。
+        `choices`  = `{参数名: [候选]}`（`app.beats.spec_arg_choices_for`）；
+        `statement`= `{'name','label','head'}`（这一拍是哪条语句；空 = 台词拍）；
+        `loose`    = 这一拍里工具没建模、但**会原样执行**的行（顶部那条提示用）。
 
         为什么整组重建而不是复用控件：参数名是**每条语句各不相同**的
         （`mycue` 有 `intensity`，`camera` 有 `layer`），复用就得处理
@@ -406,31 +702,103 @@ class BeatCardEditor(QWidget):
             for header in list(getattr(self, '_spec_widgets', {}) or {}):
                 self._widgets.pop(header, None)
             self._spec_widgets = {}
+            self._spec_swatches = {}
+            # **按"这一格属于哪条语句"分组**（2026-10-18）。
+            #
+            # 为什么必须分组：一张拍可以同时带着好几条语句 —— 声明过的
+            # `mycue …`、它的块体、跟在后面的 `pause 1.0` / `with fade` /
+            # `window hide`。这些语句的参数列会一起长出来，从前**没有任何
+            # 归属标记**，卡片上就是"内容 / 强度 / 秒数 / 转场 / 动作"一串，
+            # 人根本不知道「秒数」改的是哪一行。一条语句一组、组前写明那一行
+            # （原文），才谈得上"自适应排版"。
+            groups: list = []
             for col in (columns or ()):
-                header = str(col.get('header') or '')
-                if not header:
-                    continue
-                box = QHBoxLayout()
-                box.setSpacing(T.SPACE['xs'])
-                lab = QLabel(str(col.get('label') or col.get('param') or header))
-                lab.setProperty('role', 'caption')
-                lab.setMinimumWidth(72)
-                lab.setToolTip(f'{header}（改这一格 = 改这条语句的参数）')
-                box.addWidget(lab, 0)
-                opts = [str(o) for o in (choices.get(col.get('param'), ()) or ())]
-                if opts:
-                    w = QComboBox()
-                    w.setEditable(True)          # 手打新值照样能过（同 Excel）
-                    w.addItem('')
-                    w.addItems(opts)
-                    w.setToolTip('从下拉里选，或直接写一个项目里在用的值')
-                else:
-                    w = QLineEdit()
-                    w.setPlaceholderText('留空 = 不带这个参数')
-                self._spec_widgets[header] = w
-                self._widgets[header] = w         # `_set_value` / `_get_value` 复用
-                box.addWidget(w, 1)
-                self._spec_form.addLayout(box)
+                key = str(col.get('name') or '')
+                if not groups or groups[-1][0] != key:
+                    groups.append((key, []))
+                groups[-1][1].append(col)
+            multi = len(groups) > 1
+            loose_lines = [str(x).strip() for x in (loose or ())
+                           if str(x).strip()]
+            stmt_name = str((statement or {}).get('name') or '').strip()
+            stmt_head = str((statement or {}).get('head') or '').strip()
+
+            def _caption_of(name: str) -> str:
+                """这一组的标题：优先用**源码里那一行**，其次才是语句名。"""
+                if name and name == stmt_name and stmt_head:
+                    # 头行末尾的 `:` 属于"块开始"，当标题时去掉（少一点噪声）
+                    return stmt_head[:-1].rstrip() if stmt_head.endswith(':') \
+                        else stmt_head
+                for line in loose_lines:
+                    if line.split(None, 1)[0:1] == [name]:
+                        return line
+                return name
+
+            for gname, gcols in groups:
+                if multi:
+                    cap = QLabel(f'◆ {_caption_of(gname)}')
+                    cap.setProperty('role', 'caption')
+                    cap.setToolTip(
+                        f'下面这几格改的是这一行：{_caption_of(gname)}')
+                    cap.setStyleSheet('margin-top:4px; font-weight:600;')
+                    self._spec_form.addWidget(cap)
+                for col in gcols:
+                    header = str(col.get('header') or '')
+                    if not header:
+                        continue
+                    box = QHBoxLayout()
+                    box.setSpacing(T.SPACE['xs'])
+                    lab = QLabel(str(col.get('label') or col.get('param') or header))
+                    lab.setProperty('role', 'caption')
+                    lab.setMinimumWidth(72)
+                    # **这一格是位置参数还是具名参数**（2026-10-18）：
+                    # 两者在脚本里的写法不同（`se` vs `gain=-6`），而卡片上
+                    # 长得一模一样 —— 人改错了只会得到一条"参数过多"的报错。
+                    # 提示写进 tooltip，不占版面。
+                    _pos = col.get('positional')
+                    if _pos is None:
+                        lab.setToolTip(
+                            f'{header}（具名参数，脚本里写成 '
+                            f'{col.get("param")}=值）')
+                    else:
+                        lab.setToolTip(
+                            f'{header}（位置参数：按顺序写，第 {int(_pos) + 1} 位）')
+                    box.addWidget(lab, 0)
+                    opts = [str(o) for o in (choices.get(col.get('param'), ()) or ())]
+                    value = str(values.get(header, '') or '')
+                    # 颜色值：先给色块，再给输入框（色块跟着输入实时变）
+                    sw = self._make_swatch(value)
+                    if sw is not None:
+                        self._spec_swatches[header] = sw
+                        box.addWidget(sw, 0)
+                    if opts:
+                        w = QComboBox()
+                        w.setEditable(True)          # 手打新值照样能过（同 Excel）
+                        w.addItem('')
+                        w.addItems(opts)
+                        w.setToolTip('从下拉里选，或直接写一个项目里在用的值')
+                    else:
+                        w = QLineEdit()
+                        w.setPlaceholderText('留空 = 不带这个参数')
+                    if sw is not None:
+                        # 实时跟着输入变（不重建控件，光标不会被冲掉）
+                        if isinstance(w, QComboBox):
+                            w.editTextChanged.connect(
+                                lambda text, s=sw: self._paint_swatch(s, text))
+                        else:
+                            w.textChanged.connect(
+                                lambda text, s=sw: self._paint_swatch(s, text))
+                    self._spec_widgets[header] = w
+                    self._widgets[header] = w         # `_set_value` / `_get_value` 复用
+                    box.addWidget(w, 1)
+                    if col.get('multi'):
+                        # "这一格能装好几个词"（多音轨 / 多声部）：**说出来**，
+                        # 否则人只会填一个，而另一个在脚本里其实也能写。
+                        more = QLabel('可写多个（空格分隔）')
+                        more.setProperty('role', 'caption')
+                        more.setToolTip('例：`se se2` —— 这一格能连着写多个值')
+                        box.addWidget(more, 0)
+                    self._spec_form.addLayout(box)
             for header, w in self._spec_widgets.items():
                 value = str(values.get(header, '') or '')
                 if isinstance(w, QComboBox):
@@ -440,6 +808,18 @@ class BeatCardEditor(QWidget):
             self._spec_host.setVisible(bool(self._spec_widgets))
         finally:
             self._loading = False
+        self._set_statement(statement, loose)
+        # ⚠⚠ **参数格是"载入"的一部分**（2026-10-18 修）：
+        #   它们是在 `load_fields` **之后**才建出来的（`_sync_spec_args`），
+        #   于是 `_loaded_fields` 里没有这几个键 → `is_modified()` 一上来就真
+        #   → 卡片右下角写着"有未保存的改动"、💾 亮着（截图当场看到）。
+        #   这里把**这一拍的**参数值并进基线（上一拍留下的那些键先删掉）。
+        if self._loaded_fields:
+            from storygraph.story.spec_args import is_dynamic_column
+            for stale in [k for k in self._loaded_fields
+                          if is_dynamic_column(k)]:
+                self._loaded_fields.pop(stale, None)
+            self._loaded_fields.update(self._spec_values())
         self.refresh_dirty()
 
     def _spec_values(self) -> dict:
@@ -591,6 +971,17 @@ class BeatCardEditor(QWidget):
                                    for n in self._all_names()}
             # Stage 那一格的原文单独记一份（判"手改过没有"要用它）
             self._stage_loaded = str(fields.get('Stage', '') or '')
+            # 舞台块收不收起来：跟着**这一拍有没有舞台内容**走（每次载入重判，
+            # 手动展开状态也复位 —— 翻到下一拍时不该继承上一拍的展开）。
+            self._stage_has = self._has_stage_content(fields, sprite_items)
+            self._stage_open = False
+            self._apply_stage_visibility()
+            # 台词后缀：有才提示（它就是"给这句台词上色/加样式"那一类写法）
+            tail = str(fields.get('SayTail', '') or '').strip()
+            self._say_tail_label.setText(
+                f'这句台词带后缀（文字样式 / 控制）：{tail}'
+                f' —— 在「高级区 · 台词后缀」里改' if tail else '')
+            self._say_tail_label.setVisible(bool(tail))
         finally:
             self._loading = False
         self.refresh_dirty()
@@ -1513,11 +1904,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   · 「导入章节」= 剧情图那条路：图里只有用户自己导入的章节。
         # 以前把两者写成一句话（"打开项目 → 建出结构图"），40 个脚本一次性
         # 灌进图里变成 51 个块 —— 用户："这还选个毛线啊！看都要看瞎了！"
-        act('🧩 自定义模块 / 语句', self.learn_custom_statement,
+        act('🧩 自定义语句', self.learn_custom_statement,
             '教工具认识项目自己的写法（swim_suit / mycue 这类）：'
-            '先扫出"工具还不认识的写法"，勾一条、填上参数与候选值，'
-            '写进 storygraph.rules.json —— 之后参数就是表格列、候选就是下拉。'
-            '第③页管候选分栏，第④页能查看/删除/重置已经声明的东西。',
+            '先扫出"工具还不认识的写法"，挑一个、说清它后面跟什么，'
+            '粘一行剧本切一下看看，保存就写进 storygraph.rules.json —— '
+            '之后这些格就是表格列、候选值就是下拉。'
+            '候选分栏与项目清单（删除 / 重置）在同一个弹窗里。',
             primary=True)
         # ⚠ 放在「自定义动作」**后面**：用户早先明确要求这个入口在**最上方**
         #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），

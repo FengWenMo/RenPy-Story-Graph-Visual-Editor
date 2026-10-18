@@ -33,6 +33,7 @@ from storygraph.story.beat_model import (
     _join_hide_items,
     _join_show_items,
     _parse_native_stage_tail,
+    _show_clause_args,
     _show_item_text,
     _split_hide_items,
     _split_lines,
@@ -182,6 +183,22 @@ class _BeatBuilder:
         self.pending = Beat(label=self.current_label)
         self.pending_has_stage = False
 
+    def take_inline_comment(self, stmt) -> None:
+        """
+        ~~这一行的行尾注释 → 「注释」列~~（**已不再用于舞台/音频行**）。
+
+        2026-10-18 的结论：更好的做法是**尽量保持行尾**，只在"贴不上"时才
+        另起一行 —— 判据放在渲染侧（`beat_render._attach_inline_note`），
+        因为"这一拍最终会渲染成几行"只有那里知道。
+        这里保留方法给 `$` 那条路用（`_emit_python` 把注释并进代码之后，
+        用 `self._inline_taken` 告诉 `mark_struct` 别再转一份）。
+        """
+        note = (getattr(stmt, 'inline_comment', '') or '').strip()
+        if not note.startswith('#'):
+            return
+        self.pending.comment = _append_line(self.pending.comment, note)
+        self._inline_taken = True
+
     def struct_guard(self, stmt) -> None:
         """
         **结构守卫**：这条语句的**块路径**与当前拍不一致时，先把当前拍落下去。
@@ -255,7 +272,7 @@ class _BeatBuilder:
             self.flush_stage_only()
 
     @staticmethod
-    def mark_struct(beat, stmt):
+    def mark_struct(beat, stmt, take_inline: bool = True):
         """
         把**结构位**从语句转发到拍上：这一拍属于某个菜单块吗？
 
@@ -276,8 +293,21 @@ class _BeatBuilder:
         # 所以判据是"语句上有没有这一位"（`None` = 手工构造的语句 = 不知道）。
         if getattr(stmt, 'nest_path', None) is not None:
             beat.nest_path = stmt.nest_path
-        # 行尾注释（C）同样转发；空串是合法值（这一行本来就没注释）
-        beat.inline_comment = getattr(stmt, 'inline_comment', '') or ''
+        # 行尾注释（C）同样转发；空串是合法值（这一行本来就没注释）。
+        #
+        # ⚠ **空串不许覆盖已有的那句**（2026-10-18 修）：一拍可以攒好几条语句
+        # （`scene #A` / `show #B` / 台词），而 `inline_comment` 只有一位 ——
+        # 从前每次 `mark_struct` 都无条件赋值，于是**只有最后一条语句**的注释
+        # 活下来（后面紧跟一句没注释的台词就全军覆没）。现在：
+        #   · 新注释非空 → 上一句先挪进「注释」列（保住字），自己占这一位；
+        #   · 新注释为空 → 保留已有的（它属于这一拍，不是被覆盖的理由）。
+        # 渲染侧再决定贴行尾还是另起一行（`_attach_inline_note`）。
+        note = (getattr(stmt, 'inline_comment', '') or '') if take_inline else ''
+        if note:
+            prev = str(getattr(beat, 'inline_comment', '') or '').strip()
+            if prev and prev != note:
+                beat.comment = _append_line(beat.comment, prev)
+            beat.inline_comment = note
         beat.cond_comment = getattr(stmt, 'cond_comment', '') or ''
         return beat
 
@@ -447,6 +477,7 @@ class _BeatBuilder:
             StatementKind.RETURN: self._emit_return,
         }.get(kind)
         _n_before = len(self.beats)
+        self._inline_taken = False        # 每条语句重置（见 `take_inline_comment`）
         if handler is not None:
             absorbed, struct_done = handler(stmt, payload, _ln)
 
@@ -471,7 +502,8 @@ class _BeatBuilder:
         # Statement 没有这一位，Beat 上也不会凭空多出一个假的 `False`，
         # 渲染层因此能正确退回"按条件推断"。
         if not struct_done:
-            self.mark_struct(self.pending, stmt)
+            self.mark_struct(self.pending, stmt,
+                             take_inline=not self._inline_taken)
 
     # ------------------------------------------------------------------
     #  各 kind 的分支（原来在 for 循环里）
@@ -502,6 +534,9 @@ class _BeatBuilder:
         speaker = payload.get('speaker', '') or ''
         pending.speaker = speaker
         pending.text = payload.get('text', '') or ''
+        # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id` /
+        # `nointeract`。跟着这句台词走 —— 它就是这句台词的**样式**。
+        pending.say_tail = payload.get('tail', '') or ''
         pending.kind = KIND_SAY if speaker else KIND_NARRATION
         pending.condition = stmt.condition or pending.condition
         self.seq += 1
@@ -520,7 +555,11 @@ class _BeatBuilder:
         # 所以这里要把 last_speaker 清空，不能让它继承更早那个角色
         # （否则旁白续写会被安上说话人，把旁白变成台词）。
         self.last_speaker = speaker
-        return False, False             # 已经落在上面那张卡上了
+        # `struct_done=True`：这一拍**已经**在上面 `mark_struct` 过了。
+        # 返回 False 会让 `add()` 再对**新的空 pending** 标一次 —— 从前无害
+        # （每次都无条件覆盖），但行尾注释改成"空串不覆盖"之后，那句注释会
+        # 被复制到**下一拍**（`e "hi" #备注` 之后那句旁白也挂上同一句注释）。
+        return False, True             # 已经落在上面那张卡上了
 
     def _emit_extend(self, stmt, payload, _ln):
         self.seq += 1
@@ -550,7 +589,7 @@ class _BeatBuilder:
         self.beats.append(pending)
         self.pending = Beat(label=self.current_label)
         self.pending_has_stage = False
-        return False, False             # 已经落在上面那张卡上了
+        return False, True              # 已经落在上面那张卡上了（同理，见 SAY）
 
     def _emit_menu(self, stmt, payload, _ln):
         caption = payload.get('caption', '') or ''
@@ -589,12 +628,23 @@ class _BeatBuilder:
             condition=stmt.condition or '',
             kind=KIND_MENU,
             text=caption or MENU_NO_CAPTION,
+            # 菜单名 / 参数表（2026-10-19，审计 P1-3 收尾）。从前带名或带参数的
+            # `menu` 头整块掉进「原样块」：一个字节不丢，但**选项不在拍里**
+            # —— 卡片上整段菜单消失，策划改不了其中任何一句。
+            menu_name=str(payload.get('name') or ''),
+            menu_args=str(payload.get('args') or ''),
         ), _ln)
         # 菜单拍**不算**选项体（`_menu_member=False`）：它是组头。
         # 结构位必须在这里显式写死，不能让循环末尾那趟"按当前语句"的
         # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，
         # 组头会被标成 True，菜单组就从头断开了。
         menu_beat._menu_member = False
+        # 菜单块里那些"不是选项"的合法语句（`set seen` / `$ x = 1`）：
+        # 逐字存进「代码」格（`raw`），渲染时紧跟 `menu:` 之后原样回写。
+        # 存 `raw` 而不是动态属性，是为了过 Excel 表也不丢。
+        _extras = payload.get('extras') or ()
+        if _extras:
+            menu_beat.raw = '\n'.join(str(x) for x in _extras)
         # 菜单头在**父块**里（组头不属于任何选项体）
         menu_beat.nest_path = getattr(stmt, 'nest_path', None)
         menu_beat.inline_comment = getattr(stmt, 'inline_comment', '') or ''
@@ -659,12 +709,28 @@ class _BeatBuilder:
         # —— **收尾画面与作者要的相反**。影子重复由 hydrate 那条路自己挡
         # （见 `hydrate_from_dsl` 的 `dedup=True`）。
         pending.show = _join_show_items(items, dedup=False)
-        if payload.get('with_') and not payload.get('at') \
-                and id(stmt) not in self.branch_edges:
+        _w = payload.get('with_') or ''
+        if _w and not payload.get('at') and id(stmt) not in self.branch_edges:
             # 简单 show 的 with 提到拍级；复杂 show 的 with 已在子句里。
             # **分支最后一条**不提（见 `branch_edges`）：那会让块外的
             # 指令也被套上这个过渡，并让产物多出独立的 `with` 行。
-            pending.with_ = payload['with_']
+            #
+            # ⚠ 一拍只有一个拍级转场（`Beat.with_`），而"两条指令各有自己的
+            # 转场"是极常见的写法（2026-10-18 实测）：
+            #
+            #     scene bg room with Fade(1, 0, 1)
+            #     show e happy with dissolve
+            #
+            # 从前这里直接覆盖 → `with Fade(1,0,1)` **静默消失**，换景变成
+            # 硬切（演出节奏全变，产物能跑、不报错）。拍级转场已经被别的
+            # 指令占用时，把这一条**留在 show 自己的子句里**：
+            # `show e happy with dissolve` 本来就是合法写法，两条转场各归各位。
+            if not pending.with_ or pending.with_ == _w:
+                pending.with_ = _w
+            else:
+                items[-1] = {**items[-1],
+                             'clause': _show_clause_args({**payload, 'with_': _w})}
+                pending.show = _join_show_items(items, dedup=False)
         pending.condition = stmt.condition or pending.condition
         self.pending_has_stage = True
         self.mark_stage('show', len(items) - 1)
@@ -712,7 +778,12 @@ class _BeatBuilder:
             pending.sound_action = action
             pending.sound_params = params
         self.pending_has_stage = True
-        self.mark_op('audio')
+        # ⚠ **逐通道记序**（2026-10-18）：从前一律记成 `audio`，而
+        #   `mark_op` 会去重 → 一拍里"music + 中间夹着别的行 + sound"只剩
+        #   一个 `audio` token，渲染时两个通道一起出，中间那行被挤到后面：
+        #   实测 `play music / play ambience / play sound` →
+        #   `play music / play sound / play ambience`（顺序被改）。
+        self.mark_op('music' if channel == 'music' else 'sound')
         pending.condition = stmt.condition or pending.condition
         return True, False
 
@@ -732,6 +803,15 @@ class _BeatBuilder:
         code = (payload.get('code', '') or '').strip()
         if not code:
             return True, False
+        # **单行语句的行尾注释跟着代码走**（2026-10-18）：一拍只有一位
+        # `inline_comment`，而 `$ x = 1  # 备注` 后面紧跟一句台词时，两行会
+        # 并进同一张拍，台词那次的 `mark_struct` 把注释覆盖成空 —— 备注静默
+        # 消失。并进代码文本之后它随「代码」格走（过表也活），且
+        # `_attach_inline_note` 见到行尾已有 `#` 不会重复贴。
+        _note = (getattr(stmt, 'inline_comment', '') or '').strip()
+        if _note.startswith('#') and '\n' not in code and '#' not in code:
+            code = f'{code}  {_note}'
+            self._inline_taken = True
         # 条件不同就不能合并：一拍只有一个条件，合并会让
         # `if A: $ x` / `elif B: $ y` 里 `y` 的代码在 `A` 不成立时
         # 也执行（与舞台指令同一个根因，见 `branch_guard`）。
@@ -742,7 +822,23 @@ class _BeatBuilder:
         # 参数列表中间时（`drag_puzzle(` 里就有），丢了会让往返
         # 前后的代码指纹对不上（审计算一条丢失 + 一条新增）。
         lines = _split_code_lines(code)
-        start = len(pending.ordered) + 1        # 1-based 行号
+        # ⚠ `ordered` 里**还有 `opaque`（原样块）**，而原样块是**另一条通道**
+        # （渲染时由 `emit_opaque` 单独出，不进 `compose_code`）。所以
+        # `code_blocks` 的下标不能用 `len(pending.ordered)` —— 那会把原样块
+        # 的行数算进去，整块区间整体后移。
+        #
+        # 后果是**产物语法错**（2026-10-18 实测官方 tutorial）：
+        #
+        #     example input hide:          ← opaque
+        #         python: ...
+        #     python:                      ← code，块区间成了 (2,3)
+        #         if y: z()
+        #
+        # 渲染时第 1 行 `if y:` 没拿到块标记 → 补 `$` 成 `$ if y:`，
+        # 第 2 行 `    z()` 拿到 OPEN → 包成 `python:`，块被劈成两半。
+        # 正确下标 = **raw 行数 + code 池行数**（两者才是 `compose_code`
+        # 的那份列表），与 `mark_op` 用的 `before` 同一口径。
+        start = len(_split_lines(pending.raw)) + len(_split_lines(pending.code)) + 1
         # ⚠ 令牌里的下标是**代码池里的第几条**（`_split_lines(pending.code)`，
         # **不含空行**）—— 与渲染侧 `_ordered_code_lines` 用的池子同一个口径。
         # 用 `start`（ordered 里的位置，含 raw 行）当基数会整体错位（第一版
@@ -819,6 +915,11 @@ class _BeatBuilder:
         text = (payload.get('text', '') or '').strip()
         if not text:
             return True, False
+        # 原生行的行尾注释也走「注释」列（`pause 0.5 # 等一下`）。
+        # 不并进 `raw` 文本：`_fold_leaf_arg` 会按参数位置重写那一行，
+        # 行尾挂着 `#` 时重写的边界就说不清了（注释被当成一个词）。
+        # ⚠ 必须排在 `branch_guard` **之后**：它可能先落一张拍，注释要跟着
+        # 真正承载这一行的那张拍走。
         # **分支守卫**（与舞台指令同源，2026-10-05 实测补上）：
         # 透传语句（`pause 0.1` / `show screen` / `window hide` …）
         # 也有条件 —— 以前这里既不看条件、也不落条件，于是
@@ -831,6 +932,8 @@ class _BeatBuilder:
         # 产物变成 `pause 0.1` 无条件执行、`if flag:` 整个消失。
         # 真实项目 81 条 unmodeled 里相当一部分是这种形状。
         self.branch_guard(stmt)
+        # 行尾注释要跟着**真正承载这一行的那张拍**走（`branch_guard` 可能
+        # 刚换过 pending）。放在它之后。
         # **工具不认识的块语句 → 单独的保真列**（M1，2026-10-07）。
         #
         # 为什么不走上面那条 raw/CodeBlock 通道：「代码」列的渲染会**推断**
@@ -855,6 +958,19 @@ class _BeatBuilder:
             self.flush_stage_only()
             self.pending.condition = stmt.condition or ''
             self.pending.opaque = _append_line(self.pending.opaque, text)
+            # **原样语句也要有自己的顺序位**（2026-10-18 修）。
+            #
+            # 从前它只进 `opaque`，不进 `ordered` —— 于是同一拍里**跟在它后面**
+            # 的代码/原生行（`$ renpy.pause(0.5)` / `window hide`）成了序列里的
+            # 第一项，渲染时排到它**前面**：
+            #
+            #     sfx_mix se se2 "se/a.ogg"      →   $ renpy.pause(0.5)
+            #     $ renpy.pause(0.5)                 sfx_mix se se2 "se/a.ogg"
+            #
+            # 音效与停顿的时间关系当场反过来（而且产物能跑、不报错）。
+            # 记一个 `opaque#0` 令牌，渲染层就在**它自己的位置**吐这段原文。
+            self.pending.ordered.append(('opaque', 0))
+            self.mark_op('opaque', 0)
             self.pending.spec_name = declared
             if declared:
                 # 头行原文（M4）：T1 的**参数编辑面**。存的是**原样拷贝**，
@@ -981,6 +1097,7 @@ class _BeatBuilder:
             condition=stmt.condition or '',
             kind=KIND_NARRATION,
             raw=f"{stmt.kind} {target}"
+                f"{_call_args_middle(stmt.kind, payload)}"
                 f"{_call_from_suffix(stmt.kind, payload)}",
         ), _ln), stmt))
         # 控制流走了，后面的 extend 不再属于任何已说话的 Beat
@@ -1084,6 +1201,20 @@ def beats_from_statements(statements: Iterable[Statement],
     return builder.build()
 
 
+def _call_args_middle(kind: str, payload: dict) -> str:
+    """
+    `call X(1, two=True)` 里 `X` 后面那截参数表（不是 call / 没有参数 → 空串）。
+
+    2026-10-18（审计 P0-4）：`Statement.payload['args']` 一直有值（解析器收了），
+    而拼 Raw 文本这一行从前把它忘了 —— 产物成了裸 `call X`，被调方声明了参数
+    就**运行时**报错（引擎 lint 不查这个，所以门禁也拦不住）。
+    """
+    if str(kind) != StatementKind.CALL:
+        return ''
+    args = str(payload.get('args', '') or '').strip()
+    return args
+
+
 def _call_from_suffix(kind: str, payload: dict) -> str:
     """
     `call X from Y` 的 ` from Y` 尾巴（不是 call、或没有 from 就走空串）。
@@ -1141,16 +1272,25 @@ def order_menu_bodies(beats: list) -> list:
         if beats[i].kind != KIND_MENU:
             i += 1
             continue
+        label = beats[i].label
         j = i + 1
-        while j < n and beats[j].kind == KIND_MENU_OPTION:
+        while (j < n and beats[j].kind == KIND_MENU_OPTION
+               and beats[j].label == label):
             j += 1
         if j == i + 1:
             # 这个菜单一张选项拍都没有（`menu:` 后面直接跟块外内容）→ 不动
             i += 1
             continue
-        # 组尾：从 j 起，直到出现下一张 menu 拍
+        # 组尾：从 j 起，直到出现下一张 menu 拍**或换了一个 label**
+        # （2026-10-18 修：从前只找"下一张 menu 拍"，于是**跨 label**
+        #  把别的章节的拍也卷进来重排 —— 真机 `tutorial` 实测：
+        #  `styles_menu` 的菜单组一路吃到 `indepth_text.rpy` 的拍，
+        #  重排后同一个 `label styles_menu:` 被输出 4 次、`menu:` 头
+        #  与选项体分家，产物直接过不了引擎 lint（`expected statement.`）。
+        #  这个缺陷一直存在，是"构建开始跑引擎 lint"（P1-9）才把它照出来的。）
         k = j
-        while k < n and beats[k].kind != KIND_MENU:
+        while (k < n and beats[k].kind != KIND_MENU
+               and beats[k].label == label):
             k += 1
         beats[i + 1:k] = _cluster_option_order(list(beats[i + 1:k]))
         i = k
@@ -1856,7 +1996,30 @@ def beats_from_parse_result(parse_result, label: str = '',
     )
     _fill_labels_without_beats(
         beats, getattr(parse_result, 'labels', None) or {})
+    _attach_label_headers(
+        beats, getattr(parse_result, 'label_params', None) or {})
     return attach_file_blocks(beats, getattr(parse_result, 'file_blocks', None))
+
+
+def _attach_label_headers(beats: list, params: dict) -> None:
+    """
+    `label 名(参数…):` 的参数表 → **该 label 的第一张拍**（2026-10-18）。
+
+    为什么记在拍上（而不是另开一份"章节级"数据）：渲染是按拍分组出
+    `label 名:` 的，拍是唯一随表走的载体；挂在第一张拍最稳（与
+    `file_blocks` 同一个理由，删中间拍不会把它删掉）。
+    """
+    if not params:
+        return
+    done = set()
+    for b in beats:
+        name = getattr(b, 'label', '') or ''
+        if not name or name in done:
+            continue
+        if name in params:
+            b.label_header = str(params[name] or '')
+        done.add(name)
+
 
 
 def _fill_labels_without_beats(beats: list, labels_info: dict) -> None:
@@ -1900,3 +2063,4 @@ def _fill_labels_without_beats(beats: list, labels_info: dict) -> None:
                     break
         beats.insert(idx, Beat(label=name))
         have.add(name)
+

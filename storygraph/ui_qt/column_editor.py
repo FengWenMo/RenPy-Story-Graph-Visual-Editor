@@ -61,8 +61,8 @@ class ColumnCard(QFrame):
         outer.addLayout(head)
 
         self._key = QLineEdit()
-        self._key.setPlaceholderText('分栏标识（内部用，例：outfit）')
-        self._key.setToolTip('写进清单的键，程序用。字母/数字/下划线。')
+        self._key.setPlaceholderText('键名（英文，例：outfit）')
+        self._key.setToolTip('写进项目清单的那个键，程序用。字母/数字/下划线。')
         #: 项目里真实存在的引擎组名（由弹窗注入）——给人一个**能用**的键，
         #: 而不是让编剧盲填「服装」后静默失败（2026-10-18）。
         self._known_keys: list = []
@@ -72,7 +72,7 @@ class ColumnCard(QFrame):
         self._pick_key.clicked.connect(self._show_known_keys)
         self._pick_key.setVisible(False)
         self._shown = QLineEdit()
-        self._shown.setPlaceholderText('这一栏显示成（编剧看到的，例：服装）')
+        self._shown.setPlaceholderText('显示名（下拉里看到的，例：服装）')
         self._shown.setToolTip('编剧在下拉里看到的分栏标题。')
         # ⚠ 「一栏有哪些词」本来就是**一批**（多个值），所以直接开多选口径：
         #   空格/换行算分隔符、露出「📋 批量粘贴一大段…」（用户 2026-10-16：
@@ -81,13 +81,13 @@ class ColumnCard(QFrame):
         self._values.setToolTip('留空 = 这一栏是兜底栏：没归到别的栏的词都进它。\n'
                                 '可以一次粘一大段（一行一个 / 空格分隔都行）。')
 
-        self._field('分栏标识（内部用）', self._key)
+        self._field('键名（程序用）', self._key)
         self._key_row = QHBoxLayout()
         self._key_row.setContentsMargins(0, 0, 0, 0)
         self._key_row.addWidget(self._pick_key)
         self.layout().addLayout(self._key_row)
-        self._field('这一栏显示成', self._shown)
-        self._field('这一栏有哪些词（留空 = 兜底栏）', self._values)
+        self._field('显示名（编剧看到的）', self._shown)
+        self._field('这一栏的候选值（留空 = 兜底栏）', self._values)
         #: 引擎常把动作/姿势并进 `outfit` 组 —— 只改名拆不开；
         #: 勾上 = 按上面的词从引擎组里取走，单独成一格（只影响卡片/候选）。
         self._split = QCheckBox('从引擎组里拆出来（引擎把动作并进服装时用）')

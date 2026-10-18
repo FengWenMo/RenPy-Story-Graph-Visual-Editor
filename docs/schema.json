@@ -13,13 +13,17 @@
     "Inline": "Inline",
     "Kind": "Kind",
     "Label": "Label",
+    "LabelHeader": "LabelHeader",
     "LineId": "LineId",
     "LoopHeader": "LoopHeader",
+    "MenuArgs": "MenuArgs",
+    "MenuName": "MenuName",
     "Nest": "Nest",
     "OpOrder": "OpOrder",
     "Opaque": "Opaque",
     "SFX": "SFX",
     "SFXParams": "SFXParams",
+    "SayTail": "SayTail",
     "Scene": "Scene",
     "Seq": "Seq",
     "Show": "Show",
@@ -31,12 +35,14 @@
     "Text": "Text",
     "Voice": "Voice",
     "With": "With",
+    "label 参数（内部）": "LabelHeader",
     "代码": "CodeBlock",
     "代码块结构（内部）": "CodeBlocks",
     "位置": "At",
     "内容指纹": "ContentHash",
     "原样块（内部）": "Opaque",
     "台词": "Text",
+    "台词后缀（内部）": "SayTail",
     "声明来源（内部）": "SpecName",
     "序号": "Seq",
     "循环头行（内部）": "LoopHeader",
@@ -52,6 +58,8 @@
     "自定义语句·头行（高级）": "SpecHead",
     "舞台顺序（内部）": "StageOrder",
     "舞台（高级）": "Stage",
+    "菜单参数（内部）": "MenuArgs",
+    "菜单名（内部）": "MenuName",
     "行号": "LineId",
     "行尾注释（内部）": "Inline",
     "语音": "Voice",
@@ -342,6 +350,42 @@
       "name": "CameraHeader",
       "single_line": true,
       "snapshot": true
+    },
+    {
+      "collab": true,
+      "fingerprint": true,
+      "header": "台词后缀（内部）",
+      "hidden": true,
+      "name": "SayTail",
+      "single_line": true,
+      "snapshot": true
+    },
+    {
+      "collab": true,
+      "fingerprint": true,
+      "header": "label 参数（内部）",
+      "hidden": true,
+      "name": "LabelHeader",
+      "single_line": true,
+      "snapshot": true
+    },
+    {
+      "collab": true,
+      "fingerprint": true,
+      "header": "菜单名（内部）",
+      "hidden": true,
+      "name": "MenuName",
+      "single_line": true,
+      "snapshot": true
+    },
+    {
+      "collab": true,
+      "fingerprint": true,
+      "header": "菜单参数（内部）",
+      "hidden": true,
+      "name": "MenuArgs",
+      "single_line": true,
+      "snapshot": true
     }
   ],
   "groups": {
@@ -350,7 +394,10 @@
       "CodeBlock",
       "Label",
       "Kind",
-      "Stage"
+      "Stage",
+      "SayTail",
+      "MenuName",
+      "MenuArgs"
     ],
     "primary": [
       "Speaker",

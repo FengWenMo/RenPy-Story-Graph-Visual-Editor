@@ -801,14 +801,18 @@ class GraphOpsMixin:
 
     def learn_custom_statement(self):
         """
-        「🧩 自定义模块 / 语句」：教工具认识项目自己的写法。
+        「🧩 自定义语句」：教工具认识项目自己的写法。
 
         用户 2026-10-10："我并没有找到一个入口可以教这个工具学会我自定义的
         项目模块……至少我想要个能够自定义的模块入口放在最上方"。
 
         这条链的每一步都是既有能力，缺的只是入口：
-        扫项目找未声明写法 → 填声明 → `declare_statement`（唯一写入口）→
-        清单缓存作废 → 表格立刻多出参数列与候选值。
+        扫项目找未声明写法 → 在弹窗里说清它后面跟什么 → 试切 → 保存
+        （`declare_statement`，唯一写入口）→ 清单缓存作废 →
+        表格立刻多出参数列与候选值。
+
+        ⚠ 2026-10-18 第六版起，**写盘在弹窗里**（见下面的分叉），这里只负责
+        "它到底改了什么"的记账 + 刷新。
         """
         if not self._project_root:
             QMessageBox.information(
@@ -816,7 +820,6 @@ class GraphOpsMixin:
                 '先「📁 打开项目」—— 声明要写进项目根的 '
                 'storygraph.rules.json。')
             return
-        from storygraph.authoring.learn_statement import declaration_preview
         from storygraph.story import statement_registry as SR
         from storygraph.ui_qt.dialog_learn import CustomStatementDialog
 
@@ -907,60 +910,46 @@ class GraphOpsMixin:
         self._log(f'[自定义] 扫出 {len(discovered)} 个还没声明的写法'
                   + ('：' + '、'.join(r['head'] for r in discovered[:8])
                      if discovered else ''))
-        accepted = dlg.exec() == QDialog.Accepted
-        if not accepted:
-            # 用户可能在「④ 已有声明」页里已经删/清过清单（那些动作是立即写盘的）
-            if getattr(dlg, 'changed', False):
-                self._after_learn_refresh()
-                self._status('清单已经改过了（在弹窗里删除/保存的）—— 表格会按新声明刷新。')
+        dlg.exec()
+        # ⚠ 2026-10-18 第六版：**写盘在弹窗里**（`CustomStatementDialog._save_statement`）。
+        #   这里只负责"它到底改了什么"的记账 + 刷新。
+        #
+        #   为什么改成这样：旧版是 `exec() == Accepted` 之后由这里写 ——
+        #     ① 保存失败只出现在控制台，界面上"按下去好像没反应"；
+        #     ② 想连着教三条要开三次窗；
+        #     ③ 更要命的是这里**漏传了 `pattern`**（格子的类型/顺序/多选全丢），
+        #        因为"表单 → 声明"的产物要跨文件再传一遍，迟早漏。
+        #   现在只有一处写，判据也钉在那一处（`tests/test_custom_statement_manage.py`）。
+        if not getattr(dlg, 'changed', False):
+            self._log('[自定义] 没有改动项目清单')
             return
-        # —— 候选分栏（可选）：与语句声明一起写 ——
-        # ⚠ 勾了「把分栏一起写进清单」且**有栏**才整段替换：编辑器里删掉的栏
-        #   要真的消失。**没有栏时什么都不写** —— 空列表不能当成"清空"，
-        #   否则"只想加一条语句声明"会把项目已有的分栏整段删掉
-        #   （2026-10-18 审到的事故；清空只走第④页那个显式按钮）。
-        wrote_group = False
-        if getattr(dlg, 'write_columns', None) is not None \
-                and dlg.write_columns.isChecked():
-            group_rows = dlg.groups_to_write()
-            if not group_rows:
-                self._log('[自定义] 当前没有可写分栏 —— 未改动清单里的候选分栏'
-                          '（要清空请到第④页「清空候选分栏」）')
-            else:
-                gres = SR.declare_attr_groups(root, group_rows, replace=True)
-                if gres.get('ok'):
-                    wrote_group = True
-                    self._log(f'[自定义] 分栏 {gres["count"]} 组 → {gres["path"]}')
-                else:
-                    self._log(f'[自定义] ✕ 分栏没写：{gres.get("reason")}')
-        built = dlg.result_declaration()
-        if not built.get('ok'):
-            for w in built.get('warnings') or []:
-                self._log(f'[自定义] ✕ {w}')
-            if wrote_group:
-                self._status('分栏写好了（语句声明没写：看控制台）')
-                self._after_learn_refresh()
-            else:
-                self._status('没写：' + '；'.join(built.get('warnings') or ['?']))
-            return
-        res = SR.declare_statement(root, built['name'], label=built['label'],
-                                   columns=built['columns'],
-                                   block=built['block'], docs=built['docs'])
-        if not res.get('ok'):
-            self._log(f'[自定义] ✕ 没写进清单：{res.get("reason")}')
-            self._status(f'没写：{res.get("reason")}')
-            return
-        for w in built.get('warnings') or []:
-            self._log(f'[自定义] ⚠ {w}')
-        verb = '更新' if res.get('action') == 'updated' else '新增'
-        self._log(f'[自定义] {verb}声明 {built["name"]}（'
-                  f'{len(built["columns"])} 个参数）→ {res.get("path")}')
-        self._log(declaration_preview(built, path=str(res.get('path') or '')))
+        records = list(getattr(dlg, 'saved', []) or [])
+        for rec in records:
+            kind = str(rec.get('kind') or '')
+            if kind == 'statement':
+                self._log(f'[自定义] {rec.get("verb") or "写入"}声明 '
+                          f'{rec.get("name")}（{rec.get("columns", 0)} 个参数）'
+                          f' → {rec.get("path")}')
+            elif kind == 'groups':
+                self._log(f'[自定义] 候选分栏 {rec.get("count", 0)} 栏'
+                          f' → {rec.get("path")}')
+            elif kind == 'delete':
+                self._log(f'[自定义] 已从清单删除声明 {rec.get("name")}')
+            elif kind == 'reset':
+                self._log('[自定义] 已重置自定义声明（其它键保留）')
         self._after_learn_refresh()
-        self._status(f'✔ {verb}声明 {built["name"]}：'
-                     f'参数 {len(built["columns"])} 个已进表格列'
-                     + ('；候选分栏也写好了（下拉里会分栏显示）' if wrote_group else '')
-                     + '（重新导入那几章即可看到效果）')
+        n_stmt = sum(1 for r in records if r.get('kind') == 'statement')
+        n_grp = sum(1 for r in records if r.get('kind') == 'groups')
+        n_del = sum(1 for r in records if r.get('kind') == 'delete')
+        parts = []
+        if n_stmt:
+            parts.append(f'{n_stmt} 条语句')
+        if n_grp:
+            parts.append(f'{n_grp} 次分栏')
+        if n_del:
+            parts.append(f'删掉 {n_del} 条')
+        self._status('✔ 项目清单已更新（' + '、'.join(parts or ['有改动']) +
+                     '）—— 重新导入那几章即可看到效果')
 
     def _after_learn_refresh(self):
         """

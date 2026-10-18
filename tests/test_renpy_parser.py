@@ -14,7 +14,7 @@ from storygraph.parsing.renpy_parser import (
     LogicalLine, LabelNode, DefineNode, SayNode, ExtendNode,
     MenuNode, MenuOptionNode, IfNode, JumpNode, CallNode,
     ReturnNode, PythonNode, ShowNode, SceneNode,
-    CommentNode, RawNode,
+    CommentNode, RawNode, UnknownBlockNode,
     ParseResultBuilder, GraphBuilder, TranslationUnitGenerator,
     IncrementalRenPyAnalyzer, parse_renpy_file, parse_translation_files,
     _skip_string, _scan_toplevel_colon, _scan_balanced_close,
@@ -357,7 +357,23 @@ class TestStatementParsing:
         label = RenPyParser().parse(fp)[0]
         assert label.block[0].caption == 'Choose\nPrompt line'
 
-    def test_menu_with_args(self, write_rpy):
+    def test_menu_with_args_is_modeled(self, write_rpy):
+        """
+        `menu (a, b):` —— **带参数的菜单头**：名/参数都建模，选项照常成块。
+
+        ⚠ 契约演变（要连着读，否则会以为谁改坏了）：
+
+          · 2026-10-18（审计 P1-3 第一版）：模型里没有"菜单参数"这一位，
+            渲染只会写 `menu:` → 参数被**静默丢掉**。当时的修法是"宁可整块
+            进 `UnknownBlockNode`（逐字写回），换一个字节都不丢"；
+          · 2026-10-19（P1-3 收尾）：`MenuName` / `MenuArgs` 两格补齐，
+            参数有地方放了 —— 于是**回到 `MenuNode`**，而且这次是
+            "既不丢字节、又不丢可编辑性"：选项重新成为可编辑的拍。
+
+        真机对照：`sr_general` 与 `the_question` 里 0 处 `menu (…)`，
+        官方 `tutorial` 有 1 处**带名**菜单（`demo_transitions_menu`）——
+        它从前整块不可见，现在是 1 张菜单拍 + 7 张选项拍。
+        """
         fp = write_rpy(
             'label a:\n'
             '    menu (a, b):\n'
@@ -365,7 +381,11 @@ class TestStatementParsing:
             '            jump b\n'
         )
         label = RenPyParser().parse(fp)[0]
-        assert isinstance(label.block[0], MenuNode)
+        node = label.block[0]
+        assert isinstance(node, MenuNode), node
+        assert node.args == '(a, b)'
+        assert node.name == ''
+        assert [o.text for o in node.options] == ['Yes']
 
     def test_menu_caption_is_unescaped(self, write_rpy):
         """

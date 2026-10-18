@@ -156,6 +156,39 @@ class StageFrame:
     sound: str = ''
     voice: str = ''
     changes: str = ''           # 本拍变化（和快照表同一份文字）
+    #: 这一拍的**转场**（`with dissolve` 里的 `dissolve`；空 = 硬切）。
+    #: 2026-10-18（审计 P1-8"无转场"）：预览据此做交叉淡入。
+    with_: str = ''
+    #: 这一拍的**停顿秒数**（`pause 1.5` / `pause 1.5 hard`；0 = 没写）。
+    #: 预览据此决定自动播放停多久 —— 从前固定 900ms，长台词一闪而过。
+    pause: float = 0.0
+
+    @property
+    def duration_ms(self) -> int:
+        """
+        自动播放时这一拍该停多久（毫秒）。
+
+        判据顺序（都是"脚本里写得出来的东西"，不猜节奏）：
+          ① 有 `pause N` → N 秒（那是作者明确写的停顿）；
+          ② 有台词 → 按字数估（中文按字、西文按词的速度都落在
+             每字 60~100ms 这个量级），夹在 [700, 6000] 之间；
+          ③ 纯舞台变化（没有台词）→ 600ms（够看清切了什么）。
+        """
+        if self.pause and self.pause > 0:
+            return max(200, int(self.pause * 1000))
+        text = self.text or ''
+        if text:
+            return max(700, min(6000, 500 + len(text) * 70))
+        return 600
+
+    @property
+    def fades(self) -> bool:
+        """这一拍是不是**渐变**类转场（`dissolve` / `fade` / `Fade(…)`）。"""
+        name = str(self.with_ or '').strip().lower()
+        if not name:
+            return False
+        return any(k in name for k in ('dissolve', 'fade', 'dissolve',
+                                       'flash', 'pixellate'))
 
     @property
     def dialogue(self) -> str:
@@ -225,8 +258,30 @@ def build_frames(beats: list, registry=None, transform_index=None,
             music=row.get('music', '') or '',
             sound=row.get('sound', '') or '',
             voice=row.get('voice', '') or '',
-            changes=row.get('display_changes', '') or ''))
+            changes=row.get('display_changes', '') or '',
+            with_=str(getattr(beat, 'with_', '') or ''),
+            pause=_pause_seconds_of(beat)))
     return frames
+
+
+def _pause_seconds_of(beat) -> float:
+    """
+    这一拍有没有 `pause N`（秒）。
+
+    为什么从 `raw` 里读而不是加字段：`pause` 现在走的是"原生语句"通道
+    （`raw` 里逐字存着），加一个 Beat 字段会动表契约（列/指纹/快照）。
+    这里只取第一个 `pause` 的数字 —— 拍里写第二条 pause 的情况极少，
+    而"停多久"只是预览节奏，不影响产物。
+    """
+    import re as _re
+    text = str(getattr(beat, 'raw', '') or '')
+    m = _re.search(r'(?m)^\s*pause\s+(\d+(?:\.\d+)?)', text)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def frame_summary(frame: StageFrame) -> str:

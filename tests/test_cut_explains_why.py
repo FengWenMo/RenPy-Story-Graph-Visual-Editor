@@ -66,9 +66,16 @@ def test_可选段没写固定字时先骂这一格_而不是骂候选(dlg):
     assert '切不上' in text, text
     assert '没写"是哪几个字"' in text, text
     assert '永远对不上' in text, text
-    # 不再一上来就把锅甩给第 3 格的候选
-    assert '第 3 格「表情」' in text, text
-    assert text.index('第 2 格') < text.index('第 3 格'), text
+    # 不再一上来就把锅甩给第 3 格的候选：先说第 2 格（死格），再说**那个词**
+    #
+    # ⚠ 2026-10-17 第二轮攻击后这一行的**分配**变了：语义层允许"跳过垃圾词
+    #   去认自己的候选"，于是 `表情` 拿到 `happy`、`base_swimsuit` 真的没人认领
+    #   （旧口诀是让 `表情` 整个空着、由"候选外"背锅）。原因没变、还更准：
+    #   先点名死格，再点名**第 3 个词**，不再提第 3 格的候选。
+    assert '第 2 格' in text, text
+    assert text.index('第 2 格') < text.index('第 3 个词'), text
+    assert 'base_swimsuit' in text and '没人认领' in text, text
+    assert '表情' not in text.split('；')[0], text
 
 
 def test_可选段填上固定字就能切(dlg):
@@ -140,6 +147,10 @@ def test_被限死挡下的词要指出它属于哪一格(dlg):
     dlg.params.add_param('角色', '角色', 'lan', kind='choice')
     face = dlg.params.add_param('表情', '表情', 'afraid', kind='choice')
     face._limit.setChecked(True)
+    # ⚠ 2026-10-18 起 `show` 的**属性格默认可不填**（`show ye happy` 在真实项目
+    #   里出现 11 次，Ren'Py 的属性本来就可选）。而这一条钉的是"被限死挡下时
+    #   怎么说" —— 必须让这一格**明确必填**，否则它空着就合法，根本轮不到"挡下"。
+    face._optional.setChecked(False)
     dlg.params.add_param('服装', '服装', 'base_swimsuit', kind='choice')
 
     text = _cut(dlg, 'show lan base_swimsuit happy')
@@ -174,6 +185,31 @@ def test_分栏里的候选照样用于试切_即使组名不是合法标识符(
     text = _cut(dlg, 'show base_swimsuit')
     assert '切出来是这样' in text, text
     assert 'base_swimsuit（服装）' in text, text
+
+
+def test_候选外的值必须在界面上看得出来(dlg):
+    """
+    `pattern._cell` 的 `ok` 以前**恒真**，于是"值不在候选里"在界面上没有位置放：
+    人看到的是一排绿格子，库里存下一条不存在的服装/表情。
+
+    ⚠ 这一条钉的是**接线**（`_cell.ok` → 试切那一行），不是分配规则：
+      纯函数那边 `test_cut_tokenizer_attack2::test_值不在候选里时格子必须能被标出来`
+      管 `ok` 算得对不对，这里管它有没有**真的显示出来**。
+    """
+    dlg.params.add_param('角色', '角色', 'lan,lyj', kind='choice')
+    outfit = dlg.params.add_param('服装', '服装', 'base_swimsuit',
+                                  kind='choice')
+    # ⚠ 同上（2026-10-18）：属性格默认"可不填"之后，空着是免费的（0 点），
+    #   于是 DP 不会再为了标黄去接一个候选外的词 —— 那本来就只是"建议"。
+    #   这一条钉的是"**必填格**吃到了候选外的值时，界面要看得出来"，所以明确必填。
+    outfit._optional.setChecked(False)
+    dlg.params.add_param('表情', '表情', 'happy', kind='choice')
+
+    text = _cut(dlg, 'show lan 校服 happy')
+    assert '切出来是这样' in text, text
+    assert '校服（服装，不在候选里）' in text, text
+    # 候选里的值仍然是干净的（别把每个格子都标上）
+    assert 'happy（表情）' in text, text
 
 
 # ==================== ⑤ 纯函数那一侧 ====================

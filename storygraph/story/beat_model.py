@@ -322,7 +322,20 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
         #   所以折回也先摘掉动作名、折完再补回去 —— **与读值同一口径**
         #   （这正是白盒判据要防的"两套口径"）。
         fold_base, head_prefix = base, ''
-        if pattern:
+        # ⚠⚠ **动作名自己在格子里时不许摘**（2026-10-18 修，与读值同一判据）。
+        #
+        # 读值那一侧用的是 `head_is_a_pattern_slot(base, pattern)`：声明里
+        # 第一格是"固定几个字 `chorus`"时，**整行**（含动作名）交给认领器。
+        # 折回这一侧从前**无条件摘掉第一个词**，于是同一套格子算出不同的区间：
+        #
+        #     chorus lan ling "一起说"        ← 人物格是"可以有多个"
+        #     读值：人物 = `lan ling`        ✅
+        #     折回（摘掉 chorus）：人物 = `ling`  → 改它只换 `ling`，
+        #     实测 `chorus lan lan "一起说"`（多出来一个词，语句坏了）
+        #
+        # 判据必须与读值**逐字同源**，否则两边永远在互相拆台。
+        from storygraph.story.spec_args import head_is_a_pattern_slot
+        if pattern and not head_is_a_pattern_slot(base, pattern):
             head_word = str(statement_head_token(base) or '')
             words = str(base or '').split()
             if head_word and words and words[0] == head_word:
@@ -595,6 +608,33 @@ def menu_caption_text(text) -> str:
         return ''
     return text if text.strip() else ''
 
+
+def menu_head_text(beat) -> str:
+    """
+    菜单头那一行的正文：`menu` / `menu 名` / `menu (args)` / `menu 名 (args)`。
+
+    **唯一一份**（2026-10-19，审计 P1-3 收尾）—— 两条渲染路径
+    （整份 `render_menu_block` 与单拍 `_emit_text_line`）必须给出同一个头，
+    否则增量补丁的逐行对位永远配不上（P0-2 就是从这种"两处各写一份"来的）。
+
+    拼法（与源文件逐字节相同的那几种形态）：
+      · 都没有      → `menu`
+      · 只有名      → `menu 名`
+      · 只有参数    → `menu (args)`
+      · 名 + 参数   → `menu 名 (args)`
+
+    紧贴写法（`menu 名(x)`）会被**规范化成一个空格** —— 引擎等价
+    （`parse_arguments` 直接匹配 `(`），且我们从不生成无空格形态。
+    """
+    name = str(getattr(beat, 'menu_name', '') or '').strip()
+    args = str(getattr(beat, 'menu_args', '') or '').strip()
+    head = 'menu'
+    if name:
+        head += ' ' + name
+    if args:
+        head += ' ' + args
+    return head
+
 @dataclass
 class Beat:
     """一个演出单元：说这句话时，舞台上是什么样。
@@ -629,6 +669,13 @@ class Beat:
     """
     seq: int = 0
     label: str = ''
+    #: `label 名(参数…):` 的**参数表原文**（含括号），记在这个 label 的
+    #: 第一张拍上（2026-10-18）。
+    #:
+    #: 为什么必须有：解析器从前把参数"扫过去"就扔了，产物成 `label 名:`；
+    #: 而 `call 名(...)` 是原样保真的 —— 调用方照旧传参、被调方却不收，
+    #: Ren'Py 报"参数过多"，游戏起不来。参数是**接口**，不是排版细节。
+    label_header: str = ''
     # 稳定身份 + 内容指纹：协作（DB 主键/锁）与翻译单元要用，
     # 详细理由见 assign_identity。
     line_id: str = ''
@@ -645,6 +692,17 @@ class Beat:
     kind: str = KIND_SAY
     speaker: str = ''
     text: str = ''
+    #: 台词那个引号串**之后**的合法子句：`(what_color="#f00")` / `with dissolve`
+    #: / `id foo` / `nointeract`（2026-10-18）。
+    #:
+    #: 为什么它必须存在：这些子句就是**文字样式**（颜色/字号/不能跳过），
+    #: 而从前的 `_RE_SAY` 只 `match()` 到引号，后面剩的全被**静默丢掉** ——
+    #: 真机 `script_pomo.rpy` 有一句 `jc "…" (no_skip=True)`，导出后括号没了：
+    #: 产物还能跑，只是"不能跳过"这个设计无声消失。
+    #:
+    #: 它是**隐藏列**（`SayTail`，跟在 `CameraHeader` 之后追加）：
+    #: 随表走、进快照、进指纹，卡片上在「高级区」里可见可改。
+    say_tail: str = ''
     scene: str = ''
     # —— DSL 文本列（策划写这里）——
     stage: str = ''
@@ -708,6 +766,17 @@ class Beat:
     #: 3D 舞台 `camera` 块的**头行原文**（2026-10-07）。
     #: 与 `loop_header` 同款（并列，不混用一个字段）—— 见 `CameraHeader` 列。
     camera_header: str = ''
+    #: `menu` 头上的**菜单名**（`menu choice_menu:` 的 `choice_menu`）。
+    #:
+    #: 它不是装饰：Ren'Py 的 `menu_statement` 会为这个名字产出一条
+    #: `ast.Label`，所以它是 **`jump` / `call` 的真跳转目标**。
+    #: 从前解析器不认这种头，整块只能走「原样块」通道 —— 字节不丢，
+    #: 但选项不在拍里（2026-10-19，审计 P1-3 收尾）。
+    menu_name: str = ''
+    #: `menu` 头上的**参数表原文**（含括号，`menu (nvl=True):` 的 `(nvl=True)`）。
+    #: 原样写回：`parse_arguments` 把它变成传给菜单 screen 的参数，
+    #: 丢掉就是"菜单样式静默变了"。
+    menu_args: str = ''
     #: 读表时**被清洗过**的列名（`sanitize_single_line_cell` 真的改了值）。
     #:
     #: 为什么要记下来（2026-10-05，评审意见）：清洗本身是**静默改数据** ——
@@ -861,6 +930,40 @@ class Beat:
                                                 pattern_slot_values)
         from storygraph.core.vocabulary import statement_head_token
         base = self.statement_head()
+        # ⚠⚠ **先取声明里的格子，再判"动作名在不在格子里"**（2026-10-18 修）。
+        #
+        # 从前这里是 `head_is_a_pattern_slot(base, columns)` —— 传的是**列**，
+        # 而那个函数要的是**格子**（`{'kind': 'keyword', 'text': 'show'}`）。
+        # 列里没有 `kind`，于是它**永远返回 False** → 头一个词总被摘掉 →
+        # 只要声明的第一格是"固定几个字"（`show` / `mycue`），
+        # `slot_value_map` 就少收到一个词，**整排值左移一格**：
+        #
+        #     mycue "闪电" intensity=3          ← 声明：[mycue=固定] [标题] [强度]
+        #     实测：标题 = intensity=3、强度 = （空）
+        #
+        # 也就是"三格只对上两格"那个老毛病的**同一个根**在中段又长了一遍。
+        pattern_rows = [c.get('pattern') for c in (columns or ())
+                        if isinstance(c, dict) and c.get('pattern')]
+        pattern = pattern_rows[0] if pattern_rows else []
+        # ⚠⚠ **格子先规范化再交给认领器**（2026-10-18 修）。
+        #
+        # 声明里存的是**写入时的形状**（`choices` / `multi` / `required`），
+        # 而词法层（`pattern.assign_tokens` / `spec_args.slot_value_map`）
+        # 读的是规范化之后的 `options` / `limit` / `multi`。直接喂生的，
+        # "这一格可以有多个"会被**静默忽略**：
+        #
+        #     chorus lan ling "一起说"     ← 人物格用 `choices` 存的候选
+        #     实测：人物 = `lan`、内容 = `ling`   （多值格只吃一个词，后面串位）
+        #
+        # `parse_pattern` 是那条**唯一**的规范化入口（界面、试切都走它）。
+        if pattern:
+            try:
+                from storygraph.authoring.pattern import parse_pattern
+                pattern = [dict(s) for s in parse_pattern(pattern)
+                           if isinstance(s, dict)]
+            except Exception as e:              # noqa: BLE001 - 认不出就用原样
+                from storygraph.core.safeguard import swallow as _sw
+                _sw('story.beat_model.spec_arg_cells.normalize', e)
         base_head = statement_head_token(base)
         # ⚠⚠ 格子不对应动作名时，**位置参数要从动作名之后数**（2026-10-13 实测修）：
         #   声明里只有「人物 / 服装 / 神态」几格，而脚本行是
@@ -871,7 +974,7 @@ class Beat:
         #     （第一版摘成 `' '.join(split()[1:])`，于是 `lan` 被当成头吃掉）。
         stripped = str(base or '')
         dropped_head = False
-        if not head_is_a_pattern_slot(base, columns):
+        if not head_is_a_pattern_slot(base, pattern):
             head_word = statement_head_token(base)
             text = str(base or '').strip()
             if head_word and text.split() and text.split()[0] == head_word:
@@ -889,15 +992,13 @@ class Beat:
         # （它以前算完就扔了，见 `tests/test_hell_custom_module.py` 的白盒判据
         # `test_the_card_reader_uses_the_declared_pattern_not_a_recount`）。
         by_slot: dict = {}
-        pattern_rows = [c.get('pattern') for c in (columns or ())
-                        if isinstance(c, dict) and c.get('pattern')]
         # ⚠ **记在拍上**：折回那一侧（`fold_spec_arg_columns`）要靠它按
         #   "格子区间"整段换值。不记的话它只能退回位置号那套 ——
         #   多值格只换掉第一个词、可选段的旧值留在原地（2026-10-14 实测）。
-        self._spec_pattern = list(pattern_rows[0]) if pattern_rows else []
-        if pattern_rows:
+        self._spec_pattern = list(pattern) if pattern else []
+        if pattern:
             try:
-                by_slot = slot_value_map(stripped, pattern_rows[0])
+                by_slot = slot_value_map(stripped, pattern)
             except Exception as e:                  # noqa: BLE001 - 认不出就退回位置号
                 from storygraph.core.safeguard import swallow as _sw
                 _sw('story.beat_model.spec_arg_cells.slot_values', e)
@@ -916,8 +1017,18 @@ class Beat:
                          if isinstance(col, dict) else '']
             col_names += [str(col.get('label') or '').strip()
                           if isinstance(col, dict) else '',
-                          param, str(col.get('name') or '').strip()
-                          if isinstance(col, dict) else '']
+                          param]
+            # ⚠⚠ **`col['name']` 在动态列里是"语句名"，不是列名**（2026-10-18 修）。
+            #   把它当列名去查 `by_slot`，凡是对不上格子的列都会落到
+            #   `by_slot[语句名]`（= 关键字格吃到的那个词）：
+            #
+            #       多轨音效  [sfx_mix=固定] [声道] [文件] [可选段 gain]
+            #       实测：音量那格显示成 `sfx_mix`（明明是空的）
+            #
+            #   所以只有当它确实不是语句名时才算一个候选名字。
+            _nm = str(col.get('name') or '').strip() if isinstance(col, dict) else ''
+            if _nm and _nm != str(head_name or '').strip():
+                col_names.append(_nm)
             col_names = [n for n in col_names if n]
             if not param:
                 out.append('')
@@ -952,13 +1063,13 @@ class Beat:
             slot_idx = _pattern_slot_index_for(
                 columns, param,
                 str(col.get('label') or '') if isinstance(col, dict) else '')
-            if slot_idx is not None and pattern_rows:
+            if slot_idx is not None and pattern:
                 # ⚠ 依次试**这一列可能的所有名字** + **它在声明格子里的列名**
                 #   （`by_slot` 是按后者给的；而 `columns[].name` 与
                 #   `pattern[].column` 在真机里常常不同：`who` vs `角色`）。
                 slot_col = ''
-                if 0 <= slot_idx < len(pattern_rows[0]):
-                    slot_col = str(pattern_rows[0][slot_idx].get('column')
+                if 0 <= slot_idx < len(pattern):
+                    slot_col = str(pattern[slot_idx].get('column')
                                    or '').strip()
                 hit = next((by_slot[n] for n in [*col_names, slot_col]
                             if n and by_slot.get(n)), None)
@@ -1092,6 +1203,12 @@ class Beat:
             self.loop_header,
             # 相机头行（3D 舞台）：`camera [层名]:` 的参数编辑面。
             self.camera_header,
+            # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id`。
+            self.say_tail,
+            # label 参数表（2026-10-18）：`label 名(flag=True):` 的 `(flag=True)`。
+            self.label_header,
+            # 菜单头（2026-10-19）：`menu 名(args):` 的 `名` 与 `(args)`。
+            self.menu_name, self.menu_args,
         ] + self.spec_arg_cells(spec_fields or ())
           + [_extra_value(n) for n in _names],
             fields=_row_fields(spec_fields, extra_fields))
@@ -1192,6 +1309,15 @@ class Beat:
         beat.loop_header = g('LoopHeader')
         # 相机头行（3D 舞台）：同上（单行列）。
         beat.camera_header = g('CameraHeader')
+        # 台词后缀（2026-10-18）：单行列 —— 它会被逐字拼在台词引号之后，
+        # 所以换行必须被压掉（`g` 会清洗并留痕，见 W114）。
+        beat.say_tail = g('SayTail')
+        # label 参数表（2026-10-18）：单行列（它会逐字接在 `label 名` 之后）。
+        beat.label_header = g('LabelHeader')
+        # 菜单头（2026-10-19）：`menu 名(args):` 的 `名` 与 `(args)`。
+        # 都是单行列 —— 它们会被逐字拼成一行头（换行漏出去就是语法错）。
+        beat.menu_name = g('MenuName')
+        beat.menu_args = g('MenuArgs')
         # 结构位（块路径）：`-` = 顶层（**有信息**）；空 = **不知道**
         # （老表 / 手工加的行）。两者必须分得开 —— 否则对拍会把"不知道"
         # 当成"在顶层"，凡是老表都天天假报。
@@ -1395,6 +1521,11 @@ class Beat:
                 # **代码通道的逐条令牌**（缺口 4 第八轮）：它们不在
                 # `stage_order` 里，所以**不能**动 `used`（那个游标只数舞台）。
                 out.append((verb, idx))
+            elif verb == 'opaque':
+                # **原样语句的位置令牌**（2026-10-18）：未建模/已声明的自定义
+                # 语句有自己的 `ordered` 位，否则它后面那些 `$`/原生行会被
+                # 排到它前面（时间顺序反了）。
+                out.append((verb, idx))
             elif t == 'stage':
                 # 老格式：展开 StageOrder 里还没用掉的下一个 verb
                 if used < len(stage_seq):
@@ -1407,6 +1538,10 @@ class Beat:
             elif t == 'audio' and not seen_audio:
                 out.append(('audio', None))
                 seen_audio = True
+            elif t in ('music', 'sound') and t not in [v for v, _i in out]:
+                # **逐通道**的音频 token（2026-10-18）：一拍里 music 与 sound
+                # 之间夹着别的行时，只有这样才表达得出"谁在前面"。
+                out.append((t, None))
             elif t == 'voice' and not seen_voice:
                 out.append(('voice', None))
                 seen_voice = True
@@ -1596,7 +1731,7 @@ class Beat:
         tokens = self.op_tokens_full()
         if not tokens:
             return None
-        if not any(kind in ('raw', 'code') for kind, _i in tokens):
+        if not any(kind in ('raw', 'code', 'opaque') for kind, _i in tokens):
             return None                      # 老表：没有 raw/code 令牌
         entries = self.code_lines_with_kinds()
         if entries is None:
@@ -1604,6 +1739,10 @@ class Beat:
         plan: list = []
         p = 0
         for kind, idx in tokens:
+            if kind == 'opaque':
+                # 原样语句不占**代码池**的行（它有自己的列），只占位置。
+                plan.append(('opaque', None))
+                continue
             if kind in ('raw', 'code'):
                 # 夹在中间的空行先落地（它们属于代码通道的排版）。
                 #
@@ -1838,7 +1977,10 @@ def _split_spec_list(text: str, sep: str = '@') -> list:
     同一个符号，两列各自的直觉含义。
     """
     out = []
-    for part in (text or '').replace('\n', ';').split(';'):
+    # ⚠ 切片一律走 `split_stage_items`（引号/括号里的 `;` 不是分隔符）——
+    #   `show expression holo("a;b")` 从前会被这里切成两条语句。
+    from storygraph.core.vocabulary import split_stage_items
+    for part in split_stage_items(str(text or '').replace('\n', ';')):
         part = part.strip()
         if not part:
             continue
@@ -2589,6 +2731,11 @@ def _ordered_code_lines(beat: 'Beat', skip_seq_with: bool = True,
             return None
         pool = pools.get(kind)
         if pool is None:
+            if kind == 'opaque':
+                # 原样语句的位置标记（2026-10-18）：它不占代码池的行，
+                # 只是"我在这里"的占位 —— 跳过它继续还原交错顺序，
+                # 不能让一条 `opaque#0` 把整份序列判成不可信。
+                continue
             return None
         line = unmask_code_block_markers(line)
         if not line.strip():
@@ -2883,7 +3030,7 @@ def _fmt_seconds(v) -> str:
 
 
 def _audio_params(payload: dict) -> str:
-    """把音频参数（loop/fadein/fadeout）还原成可回写的后缀文本。"""
+    """把音频参数（loop/fadein/fadeout + 未建模的其余参数）还原成可回写的后缀文本。"""
     parts = []
     if payload.get('loop'):
         parts.append('loop')
@@ -2893,6 +3040,11 @@ def _audio_params(payload: dict) -> str:
         parts.append(f"fadein {_fmt_seconds(fi)}")
     if fo:
         parts.append(f"fadeout {_fmt_seconds(fo)}")
+    # 未建模参数（`volume 0.5` / `if_changed` …）**逐字**跟在后头：
+    # 全是关键字参数，顺序在 Ren'Py 里没有意义，丢一个才是真丢。
+    extra = ' '.join(str(payload.get('extra') or '').split())
+    if extra:
+        parts.append(extra)
     return ' '.join(parts)
 
 
@@ -3206,11 +3358,49 @@ def _split_code_lines(text) -> list:
 
 
 
+_RE_ASSIGN_HEAD = re.compile(
+    r'^([A-Za-z_]\w*)\s*(?:[-+*/%&|^]|//|\*\*|<<|>>)?=(?!=)')
+
+#: 这些语句头**本身就有 `=` 写法**（`define x = 1` / `style foo`…），
+#: 所以"像赋值"不能作为"这是 python"的证据。
+_HEADS_WITH_EQUALS = frozenset({
+    'define', 'default', 'style', 'image', 'transform', 'screen', 'label',
+    'init', 'translate', 'layeredimage', 'camera',
+})
+
+
+def is_python_assignment(line: str) -> bool:
+    """
+    这一行是不是**python 赋值**（`menu = nvl_menu` / `x += 1`）。
+
+    为什么需要它（2026-10-18，官方 tutorial 实测）：
+
+        $ menu = nvl_menu        → 产物成了 `menu = nvl_menu`
+
+    `menu` 是个 Ren'Py 语句头，于是"像语句就原样透传、不补 `$`"那条判据
+    把这一行当成了 menu 语句 —— 引擎读它直接语法错。而**语句头后面跟一个
+    赋值号**只可能是 python（除非那个语句本身就有 `=` 写法，见
+    `_HEADS_WITH_EQUALS`）。
+
+    ⚠ 两个实现曾经各写一遍（`beat_model` 与 `beat_render_code`），
+    改一处漏一处就是"这条路修了、那条路还错"。判据收成这一个函数。
+    """
+    text = str(line or '').strip()
+    m = _RE_ASSIGN_HEAD.match(text)
+    return bool(m) and m.group(1) not in _HEADS_WITH_EQUALS
+
+
 def _looks_like_renpy_statement(line: str) -> bool:
     """这行代码像"一条 Ren'Py 语句"（而不是裸的 python 表达式）。"""
-    head = line.split(None, 1)[0] if line.split() else ''
+    text = str(line or '')
+    head = text.split(None, 1)[0] if text.split() else ''
     head = head.rstrip(':')
-    return head in _RENPY_STATEMENT_HEADS
+    if head not in _RENPY_STATEMENT_HEADS:
+        return False
+    # **赋值语句一定是 python**（见 `is_python_assignment` 的说明）。
+    if is_python_assignment(text):
+        return False
+    return True
 
 
 

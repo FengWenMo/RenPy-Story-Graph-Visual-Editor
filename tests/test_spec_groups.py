@@ -288,9 +288,9 @@ def test_the_dialog_carries_groups_into_the_declaration(qapp, tmp_path):
     #   → 判据跟着走新 API（`count()` / `rows()`），验的契约没变。
     assert dlg.groups.count() == 1
     assert dlg.groups.rows()[0]['name'] == 'outfit'
-    # 没勾"一起写" → 不写
-    assert dlg.groups_to_write() == []
-    dlg.write_groups.setChecked(True)
+    # ⚠ 2026-10-18 第六版：取消"把分栏一起写进清单"那个勾选框 ——
+    #   分栏有自己那一页的保存按钮，语句的保存**永不碰分栏**
+    #   （两套保存语义共用一个确定键，正是旧版"到底写了没写"的混乱来源）。
     got = dlg.groups_to_write()
     assert [g['name'] for g in got] == ['outfit']
     assert got[0]['options'] == ['swim_suit']
@@ -303,17 +303,28 @@ def test_the_dialog_carries_groups_into_the_declaration(qapp, tmp_path):
     assert not bad['ok'] and bad['warnings']
 
 
-def test_the_dialog_can_write_groups_only(qapp, tmp_path):
-    """只写词组（语句名留空）也要能按下去 —— 用户可能只想分栏。"""
+def test_the_dialog_can_write_groups_only(qapp, tmp_path, monkeypatch):
+    """
+    只写分栏（语句名留空）也要能存 —— 用户可能只想分栏。
+
+    ⚠ 现在走的是**分栏页自己的保存键**（`_save_columns_now`），
+    不是"语句的保存键顺带把分栏写掉"。
+    """
+    from PySide6.QtWidgets import QMessageBox
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
-    assert not dlg._ok_btn.isEnabled()
+    assert not dlg._ok_btn.isEnabled(), '没有语句时不该能"保存语句"'
     dlg.groups.add_group('outfit', '服装', 'swim_suit')
-    dlg.write_groups.setChecked(True)
-    assert dlg._ok_btn.isEnabled(), '只写词组时按钮该是可点的'
-    assert dlg.groups_to_write() and not dlg.result_declaration()['ok']
+    monkeypatch.setattr(QMessageBox, 'question',
+                        staticmethod(lambda *a, **k: QMessageBox.Yes))
+    dlg._save_columns_now()
+    import json
+    data = json.loads((root / 'storygraph.rules.json').read_text(encoding='utf-8'))
+    assert [g['name'] for g in data['attr_groups']] == ['outfit']
+    assert 'statements' not in data, '只保存分栏却写了语句'
+    assert dlg.changed is True
 
 
 def test_session_hands_the_groups_to_the_frontend(tmp_path):

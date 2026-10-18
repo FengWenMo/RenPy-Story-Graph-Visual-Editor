@@ -188,9 +188,9 @@ def test_the_toolbar_entry_is_the_first_action(ui_window):
     tb = ui_window._tb_graph
     texts = [a.text() for a in tb.actions() if a.text().strip()]
     assert texts, texts
-    assert '自定义模块' in texts[0], texts[:3]
+    assert '自定义语句' in texts[0], texts[:3]
     # 而且它排在「导入章节」**前面**（这是"最上方"的实际含义）
-    assert texts.index([t for t in texts if '自定义模块' in t][0]) \
+    assert texts.index([t for t in texts if '自定义语句' in t][0]) \
         < texts.index([t for t in texts if '导入章节' in t][0])
 
 
@@ -242,7 +242,7 @@ def test_the_toolbar_action_actually_opens_the_dialog(ui_window, monkeypatch):
     monkeypatch.setattr(ui_window, '_log', lambda m: logged.append(str(m)))
 
     action = next(a for a in ui_window._tb_graph.actions()
-                  if '自定义模块' in a.text())
+                  if '自定义语句' in a.text())
     assert isinstance(action, QAction)
     action.trigger()                       # **真的点**
 
@@ -345,41 +345,51 @@ def test_params_are_cards_not_a_cramped_table(qapp, tmp_path):
         dlg.params._cards[0].minimumSizeHint().width()
 
 
-def test_group_section_is_collapsed_by_default(qapp, tmp_path):
+def test_候选分栏是列表页上的一等入口_不是折叠块(qapp, tmp_path):
     """
-    **候选分栏是"另一页"，不是"一个勾选框 + 折叠块"**（2026-10-13 重写后）。
+    **候选分栏随时可达，但不是"一个勾选框 + 折叠块"**。
 
-    为什么改（用户原话）：
+    为什么有这条（两轮用户原话）：
     > 还有你这个词组栏不也还是打勾下拉吗？全都再改！
     > ……不要再在原来的地方缝补了！整个删了重写！
 
-    旧版是 `QGroupBox(setCheckable)` 折起来的一块 —— 用户看到的仍然是
-    "一个勾 + 一展开"。现在分栏有自己的**页签**：标题栏始终看得见，
-    点一下就进去，不用勾选、不用展开。
+    2026-10-18 第六版把"页签"也换掉了：现在是一个**列表页**（哪些写法还不认识 /
+    已经认识哪些）+ 下钻的编辑页，候选分栏与项目清单是列表页上**一直看得见**
+    的两个入口 —— 不用勾、不用展开、也不用先编一条假语句才能进去。
     """
-    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog,
-                                               PAGE_COLUMNS, PAGE_FIND,
-                                               PAGE_MANAGE)
+    from PySide6.QtWidgets import QGroupBox
+    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog, PAGE_FORM,
+                                               PAGE_GROUPS, PAGE_LIST,
+                                               PAGE_MANIFEST)
 
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
-    # ① 分栏是一页，不是"可勾选的折叠块"；另有一页专管"已有声明"
-    assert dlg.tabs.count() == 4, [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
-    assert '候选分栏' in dlg.tabs.tabText(PAGE_COLUMNS)
-    assert '已有声明' in dlg.tabs.tabText(PAGE_MANAGE)
-    assert dlg.tabs.currentIndex() == PAGE_FIND, '打开时该停在"认识新动作"'
-    # ② 打开时它**不占**填写页的空间（在另一页上）
-    dlg.tabs.setCurrentIndex(1)
-    assert not dlg.columns_editor.isVisible(), '分栏列表出现在填写页上了'
-    # ③ 已有声明照样填进去，点进那一页就能看到
+    # ① 打开时停在列表页（"工具还不认识哪些写法" —— 这才是人进来要找的）
+    assert dlg.pages.count() == 4
+    assert dlg.pages.currentIndex() == PAGE_LIST
+    # ② 入口**一直在**（不是勾选框、不是折叠块）
+    assert dlg._groups_btn.isVisibleTo(dlg), '候选分栏入口不见了'
+    assert dlg._manifest_btn.isVisibleTo(dlg), '项目清单入口不见了'
+    assert not dlg.findChildren(QGroupBox), '又用回了可折叠的 QGroupBox'
+    # ③ 分栏**不占**编辑页的空间（它在自己那一页上）
+    dlg.name.setText('swim_suit')
+    dlg.pages.setCurrentIndex(PAGE_FORM)
+    assert not dlg.columns_editor.isVisibleTo(dlg), '分栏列表出现在编辑页上了'
+    # ④ 点进去就能用，切页之后声明还在
     dlg.columns_editor.clear()
     dlg.columns_editor.add_column('outfit', '服装', 'clothes2')
     assert dlg.columns_editor.count() == 1
-    dlg.tabs.setCurrentIndex(PAGE_COLUMNS)
+    dlg._go(PAGE_GROUPS)
+    assert dlg.pages.currentIndex() == PAGE_GROUPS
+    assert dlg.columns_editor.isVisibleTo(dlg)
     assert dlg.columns_editor.count() == 1, '切页之后声明还在'
     assert dlg.columns_editor.rows()[0]['key'] == 'outfit'
-    # ④ 「从引擎组里拆出来」是通用开关（不是 outfit/pose 特判）
+    # ⑤ 清单页也是一个真页面（不是弹一个只读框）
+    dlg._go(PAGE_MANIFEST)
+    assert dlg.pages.currentIndex() == PAGE_MANIFEST
+    assert dlg.manage_view.isVisibleTo(dlg)
+    # ⑥ 「从引擎组里拆出来」是通用开关（不是 outfit/pose 特判）
     dlg.columns_editor.add_column('pose', '动作', 'stand,wave', split=True)
     row = dlg.columns_editor.rows()[-1]
     assert row['split'] is True, row
@@ -488,6 +498,11 @@ def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
     界面必须**当场回答**，而不是让人卡死。真机核过的答案是：
     `rules.json` 里的声明**只影响工具**（表格列、下拉），**不碰引擎**；
     真正替换引擎的是项目里的 `renpy.register_statement(...)`（CDS 覆盖内置 → N5 警告）。
+
+    2026-10-18 第六版：**取消了"自己写的 / 引擎自带的"那个二选一下拉** ——
+    它让同一件事多了两步（先选类别、再从另一个下拉里选词），而人要做的
+    只是"把那个词写上"。现在只有一个开头词输入框，下面那行字按你写的词
+    当场回答上面那个问题。
     """
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     root = tmp_path / 'proj'
@@ -495,32 +510,41 @@ def test_the_dialog_answers_whether_show_overrides_the_engine(qapp, tmp_path):
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
     # 默认是"我们自己写的"（老行为不变）
     assert dlg.statement_mode() == 'custom'
-    dlg.mode.setCurrentIndex(dlg.mode.findData('builtin'))
+    assert '引擎' in dlg.mode_note.text(), dlg.mode_note.text()
+    # 写一个引擎本来就有的词 → 同一行字换成"不会动引擎"的答案
+    dlg.name.setText('show')
     assert dlg.statement_mode() == 'builtin'
     note = dlg.mode_note.text()
     assert '不会动引擎' in note, note
     assert 'register_statement' in note, note
-    # 选了"引擎自带"→ 从**下拉里挑**（不让人猜该填 show 还是 show 角色 服装）
-    # ⚠ 用 `isHidden()`：窗口没 show 时 `isVisible()` 恒为 False（判据自己的坑）
-    assert not dlg.builtin_name.isHidden(), '选了引擎自带却没露出下拉'
-    assert dlg.name.isHidden(), '两个输入框不该同时露着'
-    assert dlg.builtin_name.count() > 0, '引擎自带的写法列表是空的'
-    dlg.builtin_name.setCurrentText('show')
-    assert dlg.name.text() == 'show', '挑了下拉却没填进语句名'
+    # 写一个项目自己的词 → 提醒"引擎还不认识它，要在项目里注册"
+    dlg.name.setText('swim_suit')
+    assert dlg.statement_mode() == 'custom'
+    assert 'register_statement' in dlg.mode_note.text(), dlg.mode_note.text()
 
 
-def test_builtin_mode_lists_real_engine_heads_not_a_hardcoded_sheet(qapp,
-                                                                   tmp_path):
-    """下拉要**问引擎**（`engine_facts` 的注册表）；读不到才退回工具词表。"""
+def test_the_head_field_completes_real_engine_heads(qapp, tmp_path):
+    """
+    补全词表要**问引擎**（`engine_facts` 的注册表）；读不到才退回工具词表。
+
+    为什么不是"一个下拉"：下拉只能选，不能写。项目自己的写法（`swim_suit`）
+    正是"引擎不知道、要人来写"的那一类 —— 把它和引擎自带混在一个下拉里，
+    人要么选不到、要么以为自己只能从里面挑。
+    """
+    from PySide6.QtCore import Qt
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     dlg = CustomStatementDialog(None, project_root=root, discovered=[])
-    heads = [dlg.builtin_name.itemText(i)
-             for i in range(dlg.builtin_name.count())]
-    assert heads, '一个都没有'
+    completer = dlg.name.completer()
+    assert completer is not None, '开头词没有补全'
+    words = []
+    model = completer.completionModel()
+    for row in range(model.rowCount()):
+        words.append(model.index(row, 0).data(Qt.DisplayRole))
+    assert words, '补全词表是空的'
     # 工具词表兜底时也必须有 show / say 这类基本写法
-    assert 'show' in heads or 'say' in heads, heads[:12]
+    assert 'show' in words or 'say' in words, words[:12]
 
 
 def test_the_dialog_can_try_cutting_a_real_line(qapp, tmp_path):
@@ -1120,13 +1144,20 @@ def test_多选格的候选值收词口径(qapp):
     assert split_candidate_values(' a  a ,, b ', multi=True) == ['a', 'b']
 
 
-def test_卡片上勾了多选就露出批量导入(qapp, tmp_path):
+def test_从这些里选就有批量导入_多选只换收词口径(qapp, tmp_path):
     """
-    勾上「这一格可以有多个」→ 候选值那格必须**换一副收词口径**并露出批量入口：
+    「📋 批量粘贴一大段…」**只要这一格能列候选就有** —— 用户 2026-10-18：
 
-      · 占位提示要说清"一行一个 / 空格分隔都行"；
-      · 「📋 批量粘贴一大段…」按钮露出来（不勾时藏起来）；
-      · 输入框里粘一大段，**一次回车全收下**（空格也是分隔符）。
+      > 为什么只有可以选多个时才让我批量选择？明明从这些里选也应当有
+      > 批量导入按钮
+
+    他说得对：候选表的长短与"这一格能装几个"是两件事 —— 真机
+    `expressions` 组一次 68 个，而那一格（表情）一格只装一个也常见。
+    所以现在 `multi` 只决定**收词口径**（空格算不算分隔符），
+    **不再决定入口在不在**。
+
+    ⚠ 判据改口径（2026-10-18）：旧版钉的是"不勾多选就藏起来"，
+      那正是用户点名的毛病。
     """
     from storygraph.authoring.learn_statement import choice_sources
     from storygraph.ui_qt.dialog_learn import CustomStatementDialog
@@ -1139,17 +1170,18 @@ def test_卡片上勾了多选就露出批量导入(qapp, tmp_path):
     card._limit.setChecked(True)          # 候选值这一块本身要先露出来
     chips = card._choices
 
-    # 不勾多选：批量入口藏起来，值里的空格保留
-    assert not chips._batch_btn.isVisibleTo(chips), '没勾多选就摆批量入口，是噪音'
-    assert not chips._hint.isVisibleTo(chips)
+    # 不勾多选：入口**照样在**，但收词口径是"一格一个值"，空格算值的一部分
+    assert chips._batch_btn.isVisibleTo(chips), '从这些里选就该有批量导入入口'
+    assert chips._hint.isVisibleTo(chips), '口径说明也要跟着在'
+    assert '空格算值的一部分' in chips._hint.text(), chips._hint.text()
     chips._edit.setText('洛丽塔 长裙')
     chips._commit()
     assert chips.text() == '洛丽塔 长裙', chips.text()
 
-    # 勾上多选：入口露出来 + 收词口径换成"批量"
+    # 勾上多选：入口不变，收词口径换成"批量"（空格也是分隔符）
     card._multi.setChecked(True)
-    assert chips._batch_btn.isVisibleTo(chips), '勾了多选还没批量导入入口'
-    assert chips._hint.isVisibleTo(chips)
+    assert chips._batch_btn.isVisibleTo(chips), '勾了多选当然还要入口'
+    assert '空格分隔' in chips._hint.text(), chips._hint.text()
     chips._edit.setText('happy sad 泳装 校服')
     chips._commit()
     assert chips.text().endswith('happy,sad,泳装,校服'), chips.text()
@@ -1546,13 +1578,16 @@ def test_the_action_bar_never_scrolls_away(qapp, tmp_path):
 def test_the_main_path_does_not_need_scrolling_at_the_default_size(qapp,
                                                                    tmp_path):
     """
-    ⑥ 默认尺寸下，**主路径四步**（发现 → 名字 → 要填的东西 → 试切）都在一屏里。
+    ⑥ 默认尺寸下，**主路径**（列表 → 开头词 → 要填的格 → 试切 → 保存）都在一屏里。
 
     设计文档 P5：能不滚就不滚；滚只发生在"很多格子/很多候选"时。
-    判据（结构而非像素）：这四块控件在默认尺寸下都**已经可见且高度 > 0**。
+    判据（结构而非像素）：这些控件在默认尺寸下都**已经可见且高度 > 0**。
+
+    ⚠ 2026-10-18 第六版：整件事被拆成"列表页"和"编辑页"两页了，所以这里
+    按页各查一遍 —— 一页里挤进全部四步正是旧版"滚动条打架"的来源。
     """
-    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog,
-                                               PAGE_DECLARE)
+    from storygraph.ui_qt.dialog_learn import (CustomStatementDialog, PAGE_FORM,
+                                               PAGE_LIST)
 
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
@@ -1560,17 +1595,23 @@ def test_the_main_path_does_not_need_scrolling_at_the_default_size(qapp,
     dlg.resize(960, 660)
     dlg.show()
     qapp.processEvents()
-    # 第一页：发现列表
-    for name, w in (('发现列表', dlg.found), ('写清单按钮', dlg._ok_btn)):
+    # 列表页：发现列表 + 两个入口 + 关闭键
+    assert dlg.pages.currentIndex() == PAGE_LIST
+    for name, w in (('发现列表', dlg.found), ('已经认识的', dlg.known),
+                    ('教这个词按钮', dlg._teach_btn), ('关闭键', dlg._close_btn)):
         assert w.isVisible(), f'{name} 在默认尺寸下看不见'
         assert w.height() > 0, f'{name} 被压成 0 高'
-    # 第二页：填写（⚠ 2026-10-13 起它在一张页签上 —— 切过去再看）
-    dlg.tabs.setCurrentIndex(PAGE_DECLARE)
+    # 编辑页：开头词 → 格子 → 试切 → 保存
+    dlg.name.setText('swim_suit')
+    dlg._go(PAGE_FORM)
     qapp.processEvents()
-    for name, w in (('动作名输入', dlg.name), ('试切输入', dlg.sample),
-                    ('试切结果', dlg.cut_view), ('字段列表', dlg.params)):
+    for name, w in (('开头词输入', dlg.name), ('试切输入', dlg.sample),
+                    ('试切结果', dlg.cut_view), ('格子列表', dlg.params),
+                    ('保存键', dlg._ok_btn)):
         assert w.isVisible(), f'{name} 在默认尺寸下看不见'
         assert w.height() > 0, f'{name} 被压成 0 高'
+    # ⚠ 关窗会问"这条还没保存" —— 判据里没有人能回答，先把基线对齐（= 当成已保存）
+    dlg._baseline = dlg._signature()
     dlg.close()
 
 

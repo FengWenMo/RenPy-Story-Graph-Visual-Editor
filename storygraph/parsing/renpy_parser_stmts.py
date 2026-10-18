@@ -43,8 +43,71 @@ from storygraph.parsing.renpy_nodes import (
     _pick_str,
     _scan_balanced_close,
     _scan_toplevel_colon,
+    _skip_string,
     split_string_speaker,
 )
+
+
+def _say_tail(text: str, pos: int) -> str:
+    """
+    台词那个引号串**之后**还剩什么（去掉行尾注释；只有空白 → 空串）。
+
+    行尾注释不算内容：`e "嗨"  # 这里要给个特写` 是**一句台词 + 一行注释**，
+    注释由注释通道自己收，不能因为它在就把这句降级成原样行。
+    """
+    rest = str(text or '')[max(0, int(pos)):].strip()
+    if not rest or rest.startswith('#'):
+        return ''
+    # 去掉行尾注释（`(no_skip=True)  # 别忘了`）：只在**引号外**找 `#`，
+    # 而这里剩下的部分可能含引号（`("#f00")`），所以先按字符串跳一遍。
+    i, n = 0, len(rest)
+    while i < n:
+        ch = rest[i]
+        if ch in ('"', "'"):
+            i, _closed = _skip_string(rest, i)
+            continue
+        if ch == '#':
+            return rest[:i].strip()
+        i += 1
+    return rest
+
+
+def _say_clause(tail: str) -> bool:
+    """
+    这段尾巴是 Ren'Py 的**合法 say 子句**吗？
+
+    只认四种（写死，不猜）：
+      · `(kwargs)` —— 角色参数覆盖，`(what_color="#f00")` 就是"给这句台词上色"；
+      · `with <转场>`；
+      · `id <名字>`（翻译/语音标识）；
+      · `nointeract`。
+    其余一律不算 —— 那说明这一行根本不是台词（见 `_stmt_say` 的 ⓪）。
+    """
+    t = str(tail or '').strip()
+    if not t:
+        return True
+    if t.startswith('('):
+        close = _scan_balanced_close(t, 0)
+        return close != -1 and not t[close + 1:].strip()
+    if t == 'nointeract':
+        return True
+    m = re.match(r'^(?:with|id)\s+\S+$', t)
+    return bool(m)
+
+
+def _after_second_string(text: str) -> int:
+    """`"系统" "提示"` 里**第二个**字符串闭合之后的索引（认不出 → len(text)）。"""
+    text = str(text or '')
+    end, closed = _skip_string(text, 0)
+    if not closed:
+        return len(text)
+    i = end
+    while i < len(text) and text[i] in ' \t':
+        i += 1
+    if i >= len(text):
+        return len(text)
+    end2, closed2 = _skip_string(text, i)
+    return end2 if closed2 else len(text)
 
 
 class StatementScreens:
@@ -113,19 +176,22 @@ class StatementScreens:
         return node
 
     def _stmt_menu(self, line, text):
-        """menu 块头。"""
+        """menu 块头（`menu [名] [(参数)]:` —— 三样都建模，见 `MenuNode`）。"""
         m_menu = self._RE_MENU_HEAD.match(text)
         if not m_menu:
             return self._NO_MATCH
-        header_caption = self._scan_menu_header(text, m_menu)
-        if header_caption is None:
+        head = self._scan_menu_header(text, m_menu)
+        if head is None:
             return self._NO_MATCH
+        header_caption, header_name, header_args = head
         node = MenuNode(
             line_number=line.line_number,
             indent=line.indent,
             filename=line.filename,
+            name=header_name,
+            args=header_args,
         )
-        sub_caption, node.options = self._parse_menu(line.subblock)
+        sub_caption, node.options, node.extras = self._parse_menu(line.subblock)
         if header_caption and sub_caption:
             node.caption = header_caption + '\n' + sub_caption
         else:
@@ -206,10 +272,21 @@ class StatementScreens:
         )
 
     def _stmt_call(self, line, text):
-        """静态调用（含 `call X from Y` 的存档点标识）。"""
+        """静态调用（含 `call X from Y` 的存档点标识与 `call X(…)` 的参数）。"""
         m = self._RE_CALL.match(text)
         if not m:
             return self._NO_MATCH
+        # `call foo(1, two=True) from _call_foo`：参数表**必须留住**
+        # （2026-10-18，审计 P0-4）。认不出配平的括号就不吞（宁可原样落 raw）。
+        args = ''
+        i = m.end()
+        while i < len(text) and text[i] in ' \t':
+            i += 1
+        if i < len(text) and text[i] == '(':
+            close = _scan_balanced_close(text, i)
+            if close == -1:
+                return self._NO_MATCH
+            args = text[i:close + 1]
         return CallNode(
             line_number=line.line_number,
             indent=line.indent,
@@ -219,6 +296,7 @@ class StatementScreens:
             # call 时靠它区分存档属于哪一处）。丢了它对老存档不友好。
             from_clause=(self._RE_CALL_FROM.search(text).group(1)
                          if self._RE_CALL_FROM.search(text) else ''),
+            args=args,
         )
 
     def _stmt_return(self, line, text):
@@ -232,17 +310,32 @@ class StatementScreens:
         return self._NO_MATCH
 
     def _stmt_dollar(self, line, text):
-        """`$ python` 单行。"""
+        """`$ python` 单行（含**括号续行**）。"""
         m = self._RE_DOLLAR.match(text)
         if not m:
             return self._NO_MATCH
         # `$ x` 与 `$x` 都合法；记下原文写法，导出时原样还回去
         raw_after = text[1:]
+        # ⚠ 2026-10-18 修：这里从前用 `m.group(1)`，而 `_RE_DOLLAR` 是
+        # `^\$\s*(.+)` —— `.+` **不跨行**，于是 logical-line 层好不容易
+        # 合并进来的括号续行被截掉：
+        #
+        #     $ y = (
+        #         1 + 2
+        #       )
+        #
+        # 解析出来只剩 `y = (`，产物是一句**语法错误**的 `$ y = (`。
+        # 括号续行在真实工程里很常见（`renpy.pause(\n    1.0,\n    hard=True)`）。
+        # 合并结果（`text`）里已经带着换行与续行缩进，直接整段取走；
+        # 续行的**绝对缩进**要相对这一行的缩进左移，否则渲染时整块再加一次
+        # 基准，每导出一次就多缩一截（与 `_shift_continuations` 同一条口径）。
+        from storygraph.parsing.renpy_parser import _shift_continuations
+        code = _shift_continuations(raw_after.strip(), line.indent)
         return PythonNode(
             line_number=line.line_number,
             indent=line.indent,
             filename=line.filename,
-            code=m.group(1).strip(),
+            code=code,
             dollar_space=bool(raw_after[:1].isspace()),
         )
 
@@ -439,6 +532,17 @@ class StatementScreens:
             except ValueError:
                 return 0.0
 
+        # **没建模的其余参数**（2026-10-18）：从前只认 fadein/fadeout/loop，
+        # `play sound "x" volume 0.5` 的 `volume 0.5` 在往返里静默消失 ——
+        # 音量调整没了，产物照样"能跑"，没有任何提示。这里把已建模的词
+        # 从 rest 里剜掉，剩下的**逐字**带走（`if_changed` / `pan` /
+        # `relative_volume` / `noloop`… 全都不需要工具理解）。
+        extra = rest
+        extra = re.sub(r'\bfadein\s+[^\s,]+', ' ', extra)
+        extra = re.sub(r'\bfadeout\s+[^\s,]+', ' ', extra)
+        extra = re.sub(r'\bloop\b', ' ', extra)
+        extra = ' '.join(extra.split())
+
         return AudioNode(
             line_number=line.line_number,
             indent=line.indent,
@@ -449,6 +553,7 @@ class StatementScreens:
             fadein=_num(r'\bfadein\s+([\d.]+)'),
             fadeout=_num(r'\bfadeout\s+([\d.]+)'),
             loop=bool(re.search(r'\bloop\b', rest)),
+            extra=extra,
         )
 
     def _stmt_voice(self, line, text):
@@ -547,6 +652,31 @@ class StatementScreens:
 
     def _stmt_say(self, line, text):
         """台词（**兜底**：前面的分支都没接住，才算台词）。"""
+        # ⓪ **台词不许带"尾巴"**（2026-10-18，P0：静默删代码）。
+        #
+        #     Ren'Py 的 say 语句到那个引号串就**结束**了。`_RE_SAY` 只
+        #     `match()` 到引号为止，后面还剩什么都**没看** —— 于是
+        #
+        #         e "嗨" with dissolve        →  e "嗨"
+        #         e "嗨" id foo               →  e "嗨"
+        #         e "嗨" (what_color="#f00")  →  e "嗨"
+        #         styled "红色" "#ff0000" 32  →  styled "红色"   ← 颜色/字号没了
+        #
+        #     最后一行正是"文字类自定义语句"的典型长相（花字：内容 + 颜色 +
+        #     字号），而它在导出时**一声不响**丢掉两个参数 —— 剧本还是能跑，
+        #     只是颜色和字号没了，谁也不会立刻发现。
+        #
+        #     判据：引号串之后**只允许空白、注释、或四种合法 say 子句**
+        #     （`(kwargs)` / `with` / `id` / `nointeract`，见 `_say_clause`）。
+        #     合法子句照旧算台词，但**尾巴要跟着走**（`SayNode.tail` →
+        #     `Beat.say_tail` → 原样写回）；别的东西 → 这一行不是台词，
+        #     交回 `_stmt_unmodeled`（`RawNode`）**逐字保真**；
+        #     如果项目声明过这个语句，`annotate_spec_statements` 会当场把它
+        #     认领成 `spec_name` → 卡片上就长出那几格参数。
+        #
+        #     ⚠ 代价（写在这里，免得下一个人以为是疏忽）：`e "嗨" with dissolve`
+        #     这类合法尾巴现在会**保留**（不再丢），但它仍是台词；真正被降级
+        #     成原样行的是"引号后面还跟着别的东西"（`styled "红色" "#f00" 32`）。
         # ⓿ **台词不许带块**（2026-10-07，M1 止血）。
         #
         #     `mycue "闪电" intensity=3:` 的长相与台词**一模一样**，
@@ -565,20 +695,37 @@ class StatementScreens:
                 and not getattr(ln, 'is_comment', False)
                 for ln in line.subblock):
             return self._NO_MATCH
+        # ⓪′ **带 Python 字符串前缀的不是台词**（2026-10-18，审计 P0-6）。
+        #
+        #     `u"统一"` / `r"…"` / `b"…"`：Ren'Py 的 say 只接受 who? + 裸字符串
+        #     字面量，前缀式**引擎不认**（SDK lint：`expected statement.`）。
+        #     而 `_RE_SAY` 的 who 组是个标识符正则，于是 `u` 被当成**说话人**、
+        #     产物成了 `u "统一"` —— 一句凭空的"角色 u 说『统一』"，语义被静默
+        #     改掉。原文既然是错的（GIGO），工具的义务只有一条：**不要改它**。
+        #     放弃匹配 → `_stmt_unmodeled` → 逐字保真。
+        if self._RE_SAY_PREFIX.match(text):
+            return self._NO_MATCH
         # ① **字符串说话人**优先：`"系统" "提示"`（Ren'Py 合法写法）。
         #    不先接住它，第二个字符串就被整句丢掉（见 `split_string_speaker`）。
         pair = split_string_speaker(text)
         if pair is not None:
             who_raw, what = pair
+            tail = _say_tail(text, _after_second_string(text))
+            if not _say_clause(tail):
+                return self._NO_MATCH
             return SayNode(
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
                 who=who_raw,
                 what=what,
+                tail=tail,
             )
         m = self._RE_SAY.match(text)
         if not m:
+            return self._NO_MATCH
+        tail = _say_tail(text, m.end())
+        if not _say_clause(tail):
             return self._NO_MATCH
         who = m.group(1) or ''
         if who in self._IGNORED_SAY_HEADS:
@@ -590,6 +737,7 @@ class StatementScreens:
             filename=line.filename,
             who=who,
             what=what,
+            tail=tail,
         )
 
     def _stmt_transform(self, line, text):

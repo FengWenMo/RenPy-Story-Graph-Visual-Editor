@@ -405,6 +405,69 @@ def tokenize_show_words(text: str, *, keep_commas: bool = True) -> list:
     return tokens
 
 
+def split_stage_items(text: str) -> list:
+    r"""
+    按**顶层** `;` 切舞台子句 —— 引号 / 括号里的 `;` **不算分隔符**。
+
+    为什么要有这一份（2026-10-18，P0-5）：
+
+        show expression holo("a;b")
+
+    从前所有消费点都用 `str.split(';')` 硬切，于是一条语句被撕成两条：
+
+        show expression holo("a
+        show b")
+
+    —— 产物**语法错误**（引擎直接 parse error），而且再解析一遍会变成别的
+    东西（不幂等）。分号在表达式里一点都不罕见（`Text("a;b")`、
+    `renpy.notify("1;2")`），而 `expression` 恰恰是程序最常用的逃生舱。
+
+    口径（与 `tokenize_show_words` 同源，都用"跳过引号、数括号"这两条）：
+      · `"…"` / `'…'` 里的 `;` 不动（认转义）；
+      · `(...)` / `[...]` / `{...}` 里的 `;` 不动；
+      · 只在**顶层**的 `;` 处分段；空段（`a;;b` / 末尾的分号）丢掉。
+
+    返回**已 strip** 的段（不含空串）。
+    """
+    text = str(text or '')
+    parts = []
+    buf = []
+    i = 0
+    n = len(text)
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            while i < n:
+                c = text[i]
+                buf.append(c)
+                if c == '\\' and i + 1 < n:
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                if c == quote:
+                    break
+            continue
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            if depth:
+                depth -= 1
+        elif ch == ';' and depth == 0:
+            parts.append(''.join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append(''.join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
 class ShowWordRoles(tuple):
     """
     `classify_show_words` 的结果。故意做成 **NamedTuple 风格**：
@@ -609,6 +672,7 @@ __all__ = [
     'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',
     'RENPY_KNOWN_HEADS', 'RENPY_CONTAINER_HEADS',
     'SHOW_CLAUSE_KEYWORDS', 'SHOW_INTRO_KEYWORDS',
-    'tokenize_show_words', 'ShowWordRoles', 'classify_show_words',
+    'tokenize_show_words', 'split_stage_items', 'ShowWordRoles',
+    'classify_show_words',
     'RESERVED_STATEMENT_KEYWORDS',
 ]

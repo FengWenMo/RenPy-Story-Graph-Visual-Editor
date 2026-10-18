@@ -1178,10 +1178,16 @@ class TestCodeBlocksColumn:
         # 真实文件的顶层区间，见 `beat_model.FILE_BLOCK_SHEET`）
         # `Nest`（结构位，B 阶段一）/ `Inline`（行尾注释，C）/
         # `Opaque`（M1）/ `SpecName`（M3）/ `SpecHead`（M4）/
-        # `LoopHeader`（D2）/ `CameraHeader`（3D 舞台）排在后面。
-        assert BEAT_FIELDS[-8:] == ['CodeBlocks', 'Nest', 'Inline',
-                                    'Opaque', 'SpecName', 'SpecHead',
-                                    'LoopHeader', 'CameraHeader'], BEAT_FIELDS
+        # `LoopHeader`（D2）/ `CameraHeader`（3D 舞台）/
+        # `SayTail`（台词后缀，2026-10-18）/
+        # `LabelHeader`（`label 名(参数…):` 的参数表，2026-10-18）/
+        # `MenuName` / `MenuArgs`（`menu 名(args):` 的菜单头，2026-10-19）
+        # 排在后面 —— **加列只能加在末尾**（老表按列下标定位隐藏列）。
+        assert BEAT_FIELDS[-12:] == ['CodeBlocks', 'Nest', 'Inline',
+                                     'Opaque', 'SpecName', 'SpecHead',
+                                     'LoopHeader', 'CameraHeader',
+                                     'SayTail', 'LabelHeader',
+                                     'MenuName', 'MenuArgs'], BEAT_FIELDS
         assert 'Nest' in HIDDEN_BEAT_COLUMNS
         assert 'FileBlocks' not in BEAT_FIELDS, BEAT_FIELDS
 

@@ -22,7 +22,8 @@ import re
 
 from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
                                         SHOW_INTRO_KEYWORDS,
-                                        classify_show_words)
+                                        classify_show_words,
+                                        split_stage_items)
 
 _NATIVE_TAIL_RE = re.compile(
     r'^(?P<spec>.+?)(?:\s+at\s+(?P<at>[\w.]+))?'
@@ -67,7 +68,7 @@ def _split_show_items(text: str) -> list:
     （`at i11`）会在写表时丢掉（真实项目 `script.rpy` 实测 5 条）。
     """
     items = []
-    for part in (text or '').split(';'):
+    for part in split_stage_items(text):
         part = part.strip()
         if not part:
             continue
@@ -158,7 +159,7 @@ def _split_hide_items(text: str) -> list:
     """`ye; lan@dissolve` -> [{'image': 'ye', 'with': ''},
                              {'image': 'lan', 'with': 'dissolve'}]"""
     items = []
-    for part in (text or '').split(';'):
+    for part in split_stage_items(text):
         part = part.strip()
         if not part:
             continue

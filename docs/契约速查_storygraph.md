@@ -90,6 +90,9 @@
 ## K. 自定义块（M1）
 - **K1** 未知块语句一律走 `Beat.opaque`（走 raw/`CodeBlock` 会推断补 `$`/包 `python:`→改剧情）。
 - **K2** 台词不许带块：`mycue "闪电" intensity=3:` 与 `lyj"台词"` 长相同；判据子块有非注释内容→`_NO_MATCH` 交未建模兜底。
+- **K2b** 台词**只到引号为止**（2026-10-18，P0）：引号串之后只允许空白 / 行尾注释 / 四种合法 say 子句（`(kwargs)` `with` `id` `nointeract`，见 `_say_clause`）。别的都说明"这不是台词"→ `_NO_MATCH` → 未建模（逐字保真）+ 若声明过则认领成 `spec_name`。
+  - 从前的伤口：`_RE_SAY` 只 `match()` 到引号，`styled "红色" "#ff0000" 32` → 颜色/字号**静默消失**；`e "嗨" with dissolve` 同理。金标 `test_parse_golden` 当时把这堆垃圾一起冻住了。
+  - 合法子句**跟着走**：`SayNode.tail` → `Statement.payload['tail']`（非空才写，否则全项目 say 的 content_hash 都会变）→ `Beat.say_tail`（隐藏列 `SayTail`，追加在 `CameraHeader` 之后）→ 渲染拼在引号后面。真机 `script_pomo.rpy` 的 `jc "…" (no_skip=True)` 因此才第一次逐字节往返。
 - **K3** 取块按原文物理行（`_raw_block_lines`）；行号对不上退回 AST 重建；`parse()` 开头清 `_src_cache`。
 - **K4** 门禁两码都 warn 不拦导出：`UNMANAGED_BLOCK`/`KNOWN_UNMODELED_BLOCK`；分类真源=`core.vocabulary.is_known_flow_block()`。
 - **K5** 门禁结论**逐条**印（`BuildResult.summary()`）；落盘三处调用方都要交 `beats`。
@@ -147,7 +150,7 @@
 - **C13 `.docx` 用标准库** `zipfile`+`xml.etree`（零新依赖）；段落→一行、`<w:br/>`→一行、表格每格成行、**超链接与文本框里的文字也要抽**；**不做语义猜测**。`.docx` 与 `.txt` 同一条链路（判据：同文字两路产物逐字节相同）。
 - **C11 S3 入口**：`EditorSession.import_plain_text` + 工具栏「📝 导入纯文字章节」。**两遍**：规划（不写盘）→问角色→决定回表→重跑→过门禁落盘→导图。**未确认角色 → 一个字节都不写**。UI 那一步必须传**窗口自己的** `import_chapter_files`。
 
-## 六、自定义模块入口 · 契约（2026-10-10）
+## 六、自定义语句入口 · 契约（2026-10-10）
 - **发现** `statement_registry.discover_undeclared(root)`（纯、只读）。⚠ 判据照抄 `coverage_of_statements`：`raw_kind` 在 `Statement.payload` 里（**不是 beat 属性**）。
 - **V2-1 闸门**：`_is_builtin_head()`（词表已知 ∪ 容器头 ∪ `LEAF_ARG_HEADS`(`with/pause/window`)）→ **不列**；语句头须合法标识符；`_looks_like_dialogue()` **先问角色表**（`l oh "3"` 是台词不是"你写错了"）；`declared_builtins()` 指认"内置语句不用声明"；`remove_statement()` **先备份**再移除。真项目"待认识"列表 **3 → 0**。
 - **表单纯函数** `authoring/learn_statement.build_declaration()`：`intensity=3`→按 `intensity` 处理并报出；中文/非法参数名→**丢掉并报**；重复项只留一次；没勾"带块"不写 `block` 键。
@@ -163,9 +166,22 @@
    （用户原话："按钮无法点击！点击了也没有反应！"）。
 2. **能点就必须有反应**：卡死了就 `setEnabled(False)` + 灰化 + tooltip 写清原因，
    **绝不允许"点下去什么都不发生"**。
-3. **用词说人话**（用户："我不会用！！！你更别提编剧了"）：界面文案里不许出现
-   `语句名`/`参数`/`候选值`/`describe`/`T1`/`rules.json` 这类实现者词汇；
-   一律走"动作名 / 要填什么 / 只能填这些 / 就这样，教会它"。
+3. **用词说人话，一个东西只有一个名字**（2026-10-18 第六版重定，**取代**原来那份
+   "动作名 / 要填什么"的说法）。术语表（界面上一律用右列，代码里可以保留左列）：
+
+   | 代码 | 界面 |
+   |---|---|
+   | statement | **语句** |
+   | head | **开头词** |
+   | slot / param | **格**（第 N 格） |
+   | column | **列名**（"表格里这一列叫什么"） |
+   | choices | **候选值** |
+   | attr_groups | **候选分栏**（键名 / 显示名 / 候选值） |
+   | manifest | **项目清单**（项目根的 `storygraph.rules.json`） |
+
+   **界面上不许再出现**：`动作名` / `写法` / `模块`（指语句时）/ `词组` /
+   `实现者词汇`（`describe`/`T1`/`两把锁`）/ `写进 storygraph.rules.json`。
+   判据：`tests/test_custom_statement_ux6.py` 里那两条"术语"判据（扫控件文字）。
    ⚠ **Qt 的 QLabel/QCheckBox 不渲染 Markdown** —— 文案里写 `**…**` 会原样显示成星号。
    （2026-10-11 补了**两条自动判据**防再犯：控件级扫弹窗里所有控件的文字；
    源码级扫 `dialog_learn.py` 里**非 docstring** 的字符串字面量。
@@ -357,7 +373,7 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
 - ⚠ 两条都属于同一类毛病：**后端实现了，界面没接线**。判据要**端到端**（真开窗口、
   真改控件、真看结果），只 mock 掉中间层是永远测不到的。
 
-## 十、自定义动作弹窗 v4 · 整个重写（2026-10-13）
+## 十、自定义语句弹窗 · 布局契约（v4 重写 → **v6 信息架构重做**，2026-10-18）
 用户第三条退回意见（看完 v3 截图）：
 > 这两个滚动条是何意味啊？？？还有你这个词组栏不也还是打勾下拉吗？全都再改！
 > 不要再在原来的地方缝补了！整个删了重写！……你这不应该叫词组！你换个名字！
@@ -366,11 +382,10 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
   `ui_qt/param_editor.py`（`FieldCard`/`FieldList`/`ValueChips`）+
   `ui_qt/column_editor.py`（`ColumnCard`/`ColumnList`）+
   `ui_qt/flow.py`（`FlowLayout`/`FlowRow`，两处共用）；`dialog_learn.py` 重写。
-- **一屏只有一条滚动区**（结构保证）：弹窗 = **三个页签**
-  （① 认识新动作 ② 填一条声明 ③ 候选分栏），字段列表与分栏列表都是**纯 QWidget**
+- **一屏只有一条滚动区**（结构保证）：字段列表与分栏列表都是**纯 QWidget**
   （它们自己不再是 `QScrollArea`）。判据钉"同屏可见滚动区 ≤ 1 个"。
 - **改名**：界面上一律 **候选分栏**（旧名"词组"彻底不用）：
-  `分栏标识`（键）/ `这一栏显示成`（编剧看到的字）/ `这一栏有哪些词`（留空=兜底）。
+  `键名`（程序用的键）/ `显示名`（编剧看到的字）/ `这一栏的候选值`（留空=兜底）。
 - ⚠ **QWidget 当布局容器必须自己喂 `sizeHint`/`heightForWidth`**：
   `ValueChips` 第一版没喂 → `sizeHint()` 是 0×0 → **方块加进去了却一个都看不见**。
 - ⚠ **别用 PowerShell `Set-Content -Encoding UTF8` 改源码**：它写 BOM（`U+FEFF`），
@@ -378,6 +393,35 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
   `[System.IO.File]::WriteAllBytes` 且不带 BOM；最好直接用编辑工具改。
 - **入口名统一成「🧩 自定义动作」**（工具栏 + 弹窗标题 + 文档三处一致，
   判据 `tests/test_usage_doc_matches_ui.py` 钉着）。
+
+### 十·补：v6 —— **页签换成"列表 → 编辑"两页**（2026-10-18）
+用户："运用UI设计和用户体验的角度重构一下自定义模块的UI界面，去除令人疑惑的表述，
+保证策划/程序逻辑清晰明了，操作方便，层次合理……不再旧有基础上改。"
+
+**旧四页签的病**：① 认识新动作 / ② 填一条声明 / ③ 候选分栏 / ④ 已有声明 ——
+编号暗示"四步"，实际 ① 和 ② 是一件事的两半（选词 → 描述）、③ 是 ② 的一个属性、
+④ 是管理；点 ① 的行会**自动跳** ②，编号更假。同一个东西还有四个名字
+（动作 / 写法 / 语句 / 模块），主按钮直接把文件名写上去。
+
+- **两页 + 两个项目级页**：`PAGE_LIST`（哪些还不认识 / 已经认识哪些）→
+  `PAGE_FORM`（下钻编辑，左上角「← 返回列表」）；`PAGE_GROUPS`（候选分栏）与
+  `PAGE_MANIFEST`（项目清单）从列表页底部进。`dlg.pages` 是 `QStackedWidget`，
+  下标常量 `PAGE_*` 在 `dialog_learn` 顶部。
+- **一处写盘**（P0）：保存由弹窗自己做（`_save_statement` / `_save_columns_now` /
+  `_delete_current_statement`），`saved` 记账、主窗口只负责刷新与写日志。
+  ⚠ 旧链路 `declare_statement(...)` 在 `window_graph_ops` 里调用时**漏传 `pattern`**
+  —— 格子的类型/顺序/多选/可不填**全丢**，只有 `columns` 活下来。
+  判据 `test_保存这条语句会把格子的类型和顺序一起写下去` 直接读磁盘上的清单。
+- **类型下拉曾经是孤儿控件**（P0）：`FieldCard._kind` 从来**没被加进任何布局**，
+  于是「固定的字 / 从候选值里选 / 可选段」在界面上**选不了**（判据一直用
+  `add_param(kind=…)` 直接塞，所以从没红过）。现在它在卡内第一行，
+  判据从**控件树**上守（`test_类型下拉必须真的在界面上`）。
+- **"从候选值里选"就该看见候选值**：旧版还要再勾「编剧只能从下面这些里选」
+  才露出输入框 —— 而那两件事不是一回事（候选池 vs 允不允许写池外的词）。
+- **卡头带序号**（第 N 格）—— 试切报的"第 2 格"要能一眼对上。
+- **离开未保存的编辑页会问一句**（保存 / 不保存 / 留在这里）；窗口没显示时不问
+  （那时没有"人"能回答，模态框会让调用方永远卡住）。
+- 判据：`tests/test_custom_statement_ux6.py`（一处写盘 / 层次 / 术语 / 滚动区）。
 
 ## 十一、会话记忆（`core/session_store.py` + `ui_qt/window_state.py`，2026-10-13）
 
@@ -2279,23 +2323,114 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
 > **"试切说切上了、卡片读出来不一样"** 就是它。
 
 **铁律**：分配规则**只有一份** —— `authoring/pattern.assign_tokens(tokens, slots,
-*, groups=None, policy='order-first')`。`match_line`（试切）与 `_claim`
-（读值那一侧）都只是它的**薄转发**；`slot_value_map` 不再自己走一遍格子。
+*, groups=None)`。`match_line`（试切）与 `_claim`（读值那一侧）都只是它的
+**薄转发**；`slot_value_map` 不再自己走一遍格子。
 
 - 返回：`{'spans': {第几格: (词起点, 词终点)}, 'used', 'bad_kw', 'rejected',
-  'unfilled', 'policy'}` —— `spans` 里**没有**的格子 = 没认领到（调用方显示空格子）。
-- 规则（**甲 = 书写顺序**）：`keyword` 逐字相等（否则记 `bad_kw`）；`optional`
-  出现就吃两个词；`multi` **长的先试、取第一个"让后面每一格也都还能吃到词"的长度**
-  （`_can_allocate` 做可行性判定；**一个都不吃**也是合法解）；`choice` 勾了 `limit`
-  就只认候选（否则记 `rejected`）；其余吃一个词。
+  'unfilled', 'leftover', 'values', 'exact'}` —— `spans` 里**没有**的格子 =
+  没认领到（调用方显示空格子）。
+- 规则：`keyword` 逐字相等（否则记 `bad_kw`）；`optional` 出现就吃两个词
+  （固定字前面夹的垃圾词可以跳过）；`multi` 吃一串**连续的自家人**，
+  **一个都不吃**也是合法解；`choice` 勾了 `limit` 就只认候选（否则记
+  `rejected`）；其余吃一个词。**所有取值格**都可以跳过前面那些
+  **谁也不认识的词**去认自己的候选（代价 `SKIP_JUNK + SKIP_WORD`）。
+- 代价表（`_tok_cost`）：自己的候选 0 / 随便写的格子吃自由文本 2 /
+  随便写的格子**借**别人写明的候选 8 / 闭枚举格吃候选外的词 5（"值不在候选里"，
+  界面把那一格标黄）/ 闭枚举格**抢**别人写明的候选 20（比"空着 7 + 晾着 3"
+  贵，于是**永远不会**被选中）/ 必填格空着 7 / 晾着一个词 3。
+  `multi` 从第 2 个词起每个 +2。
 - **失败分四类**，一律"报出来"而不是"猜"：`bad_kw`（关键字对不上）/
   `rejected`（勾了限死来了外词）/ `unfilled`（该吃词却没词）/ 没人认领的词
-  （`used` 之后那些）。
-- **两处明写的分岔**（`pattern.POLICIES`，不再是"两套代码各写一遍"）：
-  ① 枚举格的**候选跳过** —— 试切 `order-first`、读值 `candidates`；
-  ② **引号只在读值那一侧去掉**（试切报的是切出来的原文）。
-- 判据：`tests/test_assign_tokens_single_source.py` —— 把上面两条分岔钉住，
-  再长出新分岔就会红；并逐字核 `_claim` 等于分配器的 `candidates` 结果。
+  （`leftover`）。
+- **分岔为零**（2026-10-17 第二轮攻击删掉 `POLICIES`）：以前试切用
+  `order-first`、读值用 `candidates`，同一行能给出**不同的格子值**；
+  现在"候选跳过"进了代价表，两处**一个答案**。引号也在更早就统一到了词法层。
+- 判据：`tests/test_assign_tokens_single_source.py`（两侧逐格相同 + `_claim`
+  逐字等于分配器）、`tests/test_cut_tokenizer_attack2.py`（第二轮攻击：
+  不许偷词 / 不许两侧分岔 / 写回补引号 / 格子 `ok` 按候选算 /
+  脏 `word_offset` 不许炸）。
+
+### 空引号 = 占位 + 输入错误（2026-10-18 第三轮攻击）
+
+**铁律两条**：
+
+1. `""` / `''` / `"   "` **不是**"这一格留空"的合法写法 —— Ren'Py 里它是
+   **空属性名**，跑不起来。想留空就别写那个词（`show lan happy` → 服装空）。
+2. 但它**占住那个位置**：`_atoms` 产出 `{'empty': True}` 的词，词流里是
+   `pattern.EMPTY_TOKEN`（`'\x00'`），于是后面的值**一格都不许前移**。
+
+- 以前 `_atoms` 里 `if text:` 把它连同毛病一起丢掉 → `show lan "" base_swimsuit
+  happy` 变成 3 个词对 3 个值格 → `服装=base_swimsuit`、`表情=happy`，**还报绿灯**。
+- 分配：空引号**不许跳过**（跳过就是前移），认领它代价 0 = "这一格这一行没有值"。
+  `assign_tokens` 两趟：第一趟问清空引号落在哪一格；那一格标 **dead**（不吃词、
+  不占位、`exact` 永远为假），它的候选词对别人不再是"抢"（`_tok_cost` 的 `dead`）
+  但**谁都不许跳过** → `base_swimsuit` 按位置落到「表情」、`happy` 算多出来的。
+- **谁死由位置定，不由代价定**（2026-10-18 第四轮攻击修）：空引号对谁都免费、
+  `multi` 格"不吃"也免费，于是 DP 会把它**推给下一格** —— 只「服装」multi 时
+  `show lan "" base_swimsuit happy` 排成"表情死、服装=base_swimsuit"，
+  **值整体左移一格**。现在轮到取值格而下一个词是空引号时，`_spans` 里这一格
+  **只有"吃掉它"一个分支**；`keyword` / `optional` 不强制（空引号不是关键字匹配，
+  `at 位置` 本来能整段缺席）。判据：`tests/test_cut_dead_positions.py`。
+- **死格的候选词是"没人要"的**（同上）：`_tok_cost` 对"只属于死格"的词返回
+  `COST_UNKNOWN`（2）而不是 `COST_OFFLIST`（5）—— 否则必填格接得住（5 < 7+3）、
+  多值格接不住（5 > 0+3），同一句话在"服装 multi / 不 multi"下给出两组格子值。
+  仍然属于某个**活格**的词照旧算"抢"（20）。
+  判据：`test_cut_dead_positions.py::test_死格的候选词对别人是自由文本_不是候选外`。
+- 读值/写回同一份：`_claim` 给 `{服装: ''}`；`slot_span` 用
+  `pattern.token_spans` 落到那对引号上，改那一格 = **换掉它**
+  （`show lan "" happy` → `show lan base_swimsuit happy`，不再把 `""` 留在行里）。
+  ⚠ 值没变仍然**逐字节原样**（清空一个已经是空引号的格子不会顺手删掉它）。
+- 报错：`match_line` 的 `reason` 先点名"空引号「…」—— 引号里没有值，
+  Ren'Py 会把它当成空属性名；删掉它，或者把它改成那一格真正的值"，
+  并给出 `lex_problem` 供界面把它**排在第一位**（它是病根，"哪个词没人认领"
+  只是后果）。
+- **词号按人敲的空格数**：`_tokens_meta` 给每个词带上 `words`（人敲的第几个词）
+  与 `n_words`。以前拿词的下标当词号，`show 小明泳装` 会报"第 4 个词"
+  （这一行只有 2 个词）。
+- 判据：`tests/test_cut_empty_quote.py`（16 条）、`tests/test_cut_tokenizer_edge.py`
+  （空引号那条口径 2026-10-18 改为"占位"，旧版钉的是"必须消失"）、
+  `tests/test_cut_dead_positions.py`（9 条：谁是 dead 由位置定 / 死格候选词
+  对别人是自由文本 / 三种 multi 形状与参照系逐格相同）。
+
+### 属性格「可填可不填」（2026-10-18 用户现场）
+
+**事实**（`sr_general` 的 `layeredimage lan` + 真实剧本）：`show` 是
+`show <tag> [属性…]`，**属性全是可选的** —— `show ye happy`（没写服装）出现 11 次、
+`show ling at bounce_once:` 一个属性都没有。编辑器把
+`show ye base_handdown happy` 拆成「角色｜服装｜表情」，于是"没写服装"被当成
+"少了一个词"，试切报"第 2 格该有一个词" —— 对着一条**完全合法**的行让人改。
+
+- **格子级开关**：`pattern` 的 `required`（缺省 `True`，老声明一个字不变）。
+  `required=False` → `_spans` 里"一个都不吃"免费（同 `multi`），`_report` 也不把它
+  算进 `unfilled`。
+- **默认从语句头来**：`pattern.with_optional_defaults(slots, head)` ——
+  `show/scene/hide` 的**属性格**（第一个取值格之后的取值格）补 `required=False`；
+  第一个取值格是立绘 tag，仍然必填；别的语句**一个字都不改**（自定义语句的参数
+  可能是必填的）。只补缺：格子自己写明了 `required` 就照它。
+- **"只补缺"的判据是 `_required_set`，不是"键在不在"**（2026-10-18 第五轮）：
+  `parse_pattern` 会给每格补 `required`（缺省 `True`），于是"人说的 True"与
+  "补出来的 True"长得一样 —— 以前用 `'required' not in slot` 判，结果默认值
+  **跟着入口顺序变**：传原始 dict 补得上，传 `parse_pattern` 过的补不上，而
+  读盘/卡片/`match_line` 拿到的**都是** parse 过的（等于默认从没生效过）。
+  `_required_set` 只记"这句话是谁说的"，不参与分配，落盘时摘掉
+  （清单里存的是具体值，读回来"键在 = 说过的"，语义自动成立）。
+- **界面**：卡片上「这一格可以不填（不写就用默认）」；**只有人动过**这个勾，
+  `data()` 才写出 `required`（"没说" ≠ "说了必填"）。预览里显示成
+  `从候选里选，可不填`。
+- 判据：`tests/test_cut_optional_slots.py`（19 条：默认写法能切上 / 不许因此抢词 /
+  必填的照旧报 / 三种立绘语句 / 自定义语句不动 / 空引号仍按位置 dead / 界面往返）。
+
+### 批量导入入口不再跟着"可以有多个"藏（2026-10-18）
+
+用户原话：
+
+> 为什么只有可以选多个时才让我批量选择？明明从这些里选也应当有批量导入按钮
+
+「📋 批量粘贴一大段…」现在**只要这一格能列候选就有**；`multi` 只决定
+**收词口径**（空格算不算分隔符、占位提示），不再决定入口在不在。
+批量弹窗默认按"一大段清单"收（空格也算分隔），要保留「洛丽塔 长裙」这种
+值里带空格的候选，把那个勾去掉。
+判据：`tests/test_custom_statement_entry.py::test_从这些里选就有批量导入_多选只换收词口径`。
 
 ---
 
@@ -2329,4 +2464,96 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
 `screen`/`layer` 没进 assets 的 stop words（`show screen foo` 会把 `screen` 当图像名）；
 `patcher._KEYWORD_SPEAKERS` 是**另一类**重复（"不可能当说话人的语句关键字"，
 与 `RENPY_STATEMENT_VERBS` 也重叠）。
+
+
+---
+
+## 附：2026-10-18「产物正确性」四道闸门（体检报告结案时立的）
+
+> 体检的结论是"骨架对、纪律好，但**产物正确性这一环没有闸门**"。
+> 这一节把补上的判据写死，免得下一次又靠"测试全绿"自欺。
+
+### 闸门 ①：逐字节保真（往返一个字节都不动）
+
+判据（**唯一口径**，`tools/batch_eval.py`）：
+
+```
+rpy → xlsx → rpy --source
+产物剥掉「首行 GENERATOR_MARKER + 它后面那一个空行」后，与原文逐行相等
+```
+
+- 真机基线：`sr_general` **55/55**、官方 `tutorial` **234/234**（写盘文件）。
+- **载体风格是内容的一部分**：BOM 与 CRLF 由 `story/source_style.py` 读时记住、
+  写盘还原。`Path.read_text()` 的换行翻译、`write_text()` 的平台换行都**不许**
+  出现在落盘路径上（`write_text_atomic(newline='')` 是唯一写口）。
+- **没有可编辑内容的文件（纯 define/screen/init）→ 原样透传**
+  （`PatchResult.passthrough=True`）：不写、不加标记、一个字节都不动。
+  绝不许"退回全量重生成" —— 那会把顶层块重排。
+
+### 闸门 ②：引擎 lint（产物引擎读不读得了）
+
+`pipeline/engine_lint.lint_text()`：产物 → 最小工程 → SDK `lint`。
+
+- **只把语法错误当阻塞**；语义错（缺图/缺角色）只 warn —— 它需要完整项目上下文。
+- 项目声明的自定义语句要进 `ignore_heads`（临时工程没有 `register_statement`，
+  否则 `mycue …` 会被误判成语法错）。
+- **没有 SDK 必须如实报"没跑"**（`LintReport.ran=False`），绝不假装通过。
+- 默认开启的入口：`cli build`、`cli table/compile`、界面导出。
+
+### 闸门 ③：菜单标题 / 块结构（语法域）
+
+- `menu` 头**只接受** `menu [label] [(args)]:` —— **不接受字符串**。
+  标题是块里的一行裸字符串；带说话人的标题（`e "…"`）整行进 `extras`。
+- **注释不关闭块**：词法建树时注释不参与缩进比较（永不压栈），归属由
+  "下一句所在的块 / 自己的缩进"决定。
+- `order_menu_bodies` 的菜单组**不许跨 label**（跨了就会把别的章节的拍卷进来
+  重排，产物里同一个 label 出现多次）。
+
+### 闸门 ④：表格之间的"引用"（不是"候选"）
+
+「资源引用（活）」表：除行号外**每一格是公式**（`VLOOKUP` / `COUNTIF`）。
+
+- **Beats 主表不许出现公式格**：引用是旁路视图；公式格被手改一次，
+  连接就没了，而且没人会知道。
+- 新增落盘点必须在 `tests/test_single_write_entry.py` 的 `WRITERS` 里登记
+  并写清"写的是什么"；写 `.rpy` 的只许走 `generation_guard.write_generation`。
+
+### 闸门 ⑤：菜单头 `menu [名] [(参数)]:`（2026-10-19 收尾 P1-3）
+
+引擎的权威语法（`renpy/parser.py: menu_statement`）：
+
+```python
+menu_statement(l, loc):
+    label = l.label_name()          # ← 「名」，可以没有
+    l.set_global_label(label)
+    arguments = parse_arguments(l)  # ← 「(参数)」，可以没有
+    l.require(":")
+```
+
+所以四种合法形态是 `menu:` / `menu 名:` / `menu (args):` / `menu 名 (args):`。
+关键事实：**「名」是一条真 label**（`menu_statement` 会为它产出 `ast.Label`），
+`jump 名` / `call 名` 都跳得进来 —— 它不是装饰，丢了就是"跳转目标没了"。
+
+- 模型：`MenuNode.name/args` → `Statement.payload['name'/'args']`（非空才写）→
+  `Beat.menu_name/menu_args`（隐藏列 `MenuName` / `MenuArgs`，追加在 `LabelHeader` 之后）。
+- **不进 `content_hash`**（`_HASH_FIELDS[MENU]` 只含 caption，`extras` 同理）：
+  换写法不该让全项目菜单的 hash 一起变；但**进拍指纹**
+  （`BEAT_FIELD_SPECS` 里两列都 `fingerprint=True`）—— 那才是"要重写文件"的判据。
+- 头行**只有一份拼法**：`beat_model.menu_head_text()`。整份渲染
+  （`_render_menu_segments`）与单拍渲染（`_emit_text_line`）都必须用它 ——
+  两处各写一份正是 P0-2 的来源。
+- **唯一一处不逐字节**：紧贴写法 `menu 名(x):` 会规范化成一个空格
+  （引擎两种都收，我们从不生成紧贴形态）；其余四种形态逐字节相同。
+- 标签语义不变：`menu 名:` **不**替代 `label`，它只是多了一条可跳转入口。
+- 判据：`tools/probe_menu_head.py`（结构 / 头行逐字节 / 幂等 / **真 SDK lint**
+  五形态全过）、`tests/test_menu_head_modeling.py`。
+
+### 三条"平台期"约束（改代码前先读）
+
+1. **判据要对着引擎**：工具自己前后一致 ≠ 产物能跑。任何"生成 .rpy 的新路径"
+   都要能被闸门 ② 覆盖。
+2. **写回的区间/行号只有一份真源**：`code_blocks` 用"raw + code 池"计行，
+   `ordered` 里还有 `opaque`（不进 `compose_code`）—— 混用就是块被劈开。
+3. **"看起来像语句"不是语句**：`menu = nvl_menu` 是 python 赋值；
+   判据在 `beat_model.is_python_assignment`（渲染层与构建层共用一份）。
 

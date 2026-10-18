@@ -488,17 +488,53 @@ class TableSessionMixin:
             swallow('app.session_table._effective_positions', e)
             return {}
     def list_entry(self, idx: int) -> dict:
-        """章节列表要用的一行摘要（前缀图标 / 说话人 / 台词预览）。"""
+        """
+        章节列表要用的一行摘要（前缀图标 / 说话人 / 台词预览）。
+
+        **语句拍**（自定义语句 / `camera` / 循环头）从前一律显示成
+        「（无台词）」—— 一条 `play_music …`、一条 `sfx_mix …`、一条
+        `styled …` 在左边列表里**长得一模一样**，人要点进去才知道哪条是哪条
+        （2026-10-18 用户点名"不是每个写法都跟 show 一样与图片相关"）。
+        现在把那几个键一起带出去（`statement` / `statement_label` /
+        `statement_head`），由前端决定怎么排版；`text` 仍然是**台词**
+        （不是台词拍就是空），老调用方一个都不用改。
+        """
         b = self.beats[idx]
         prefix = {'narration': '☁', 'menu': '⚑', 'menu_option': '➜'}.get(
             getattr(b, 'kind', ''), '')
+        statement = str(getattr(b, 'spec_name', '') or '').strip()
+        head = str(getattr(b, 'spec_head', '') or '').strip()
+        if not statement:
+            head = str(getattr(b, 'camera_header', '') or '').strip()
+            statement = 'camera' if head else ''
+        if not statement:
+            head = str(getattr(b, 'loop_header', '') or '').strip()
+            statement = head.split()[0] if head.split() else ''
         return {
             'index': idx,
             'who': (getattr(b, 'speaker', '') or '').strip(),
             'prefix': prefix,
             'text': (getattr(b, 'text', '') or '').strip() or '（无台词）',
             'line_id': getattr(b, 'line_id', '') or '',
+            'statement': statement,
+            'statement_head': head,
+            'statement_label': self._statement_label(statement),
         }
+
+    def _statement_label(self, name: str) -> str:
+        """语句名 → 项目给它起的人话标签（读不到就空串，不猜）。"""
+        if not name:
+            return ''
+        try:
+            from storygraph.story.statement_registry import StatementRegistry
+            root = getattr(self, 'project_root', None)
+            if not root:
+                return ''
+            spec = StatementRegistry.for_project(str(root)).match(name)
+            return str(getattr(spec, 'label', '') or '')
+        except Exception as e:                     # noqa: BLE001 - 标签只是锦上添花
+            swallow('app.session_table._statement_label', e)
+            return ''
     def inherited_hint(self, idx: int) -> str:
         """继承提示（背景/音乐沿用上一拍时给策划的提示）。"""
         if not self.has(idx):
@@ -611,14 +647,40 @@ class TableSessionMixin:
             if 'SFX' in fields:
                 b.sfx = str(fields.get('SFX') or '').strip()
             if 'CodeBlock' in fields:
-                b.code = str(fields.get('CodeBlock') or '').strip()
-                b.raw = ''
+                # ⚠⚠ **没改就别动**（2026-10-18 修）。
+                #
+                # 《代码》那一格是 `raw` + `code` 两份内容**拼出来给人看的**，
+                # 而 `raw` 里那些行还带着"它是不是原生语句"的分类（`ordered`）。
+                # 无条件写回（并把 `raw` 清空）等于**把分类丢掉**：
+                # `code_lines_with_kinds()` 于是对不上 → `unified_plan()` 返回
+                # `None` → 渲染退回"按 verb 分组"那条老路 →
+                #
+                #     play music / play ambience / play sound / stop ambience
+                #     保存一次卡片之后变成
+                #     play music / play sound / play ambience / stop ambience
+                #
+                # **顺序被改**，而用户只是打开了卡片、什么都没改。
+                # 判据：只有这一格**真的和显示值不同**时才写回。
+                new_code = str(fields.get('CodeBlock') or '').strip()
+                if new_code != str(B.compose_code(b) or '').strip():
+                    b.code = new_code
+                    b.raw = ''
             if 'Label' in fields:
                 b.label = str(fields.get('Label') or '').strip() or b.label
             if 'Kind' in fields:
                 b.kind = str(fields.get('Kind') or '').strip() or b.kind
             if 'Notes' in fields:
                 b.notes = str(fields.get('Notes') or '').strip()
+            # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id`。
+            # 它在高级区里，所以**只有展开时才写回**（收起 ≠ 清空）。
+            if 'SayTail' in fields:
+                b.say_tail = str(fields.get('SayTail') or '').strip()
+            # 菜单头（2026-10-19）：`menu 名(args):` 的名与参数表。
+            # 同样在高级区里 —— 收起时不动（收起 ≠ 清空）。
+            if 'MenuName' in fields:
+                b.menu_name = str(fields.get('MenuName') or '').strip()
+            if 'MenuArgs' in fields:
+                b.menu_args = str(fields.get('MenuArgs') or '').strip()
         # **类型是说话人的投影**（`say` / `narration` 这一对，见
         # `app.beats.kind_from_speaker`）：用户只填说话人时，高级区那一格
         # 也必须跟着变成 `say` —— 否则它一直显示 `narration`，用户会以为

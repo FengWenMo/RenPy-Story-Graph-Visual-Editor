@@ -204,13 +204,19 @@ def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,
 def build_project(project_root, asset_dir=None, out_dir=None,
                   engine: str = 'renpy', strict: bool = False,
                   char_limit: int = DEFAULT_CHAR_LIMIT,
-                  registry=None, write_report: bool = True) -> BuildResult:
+                  registry=None, write_report: bool = True,
+                  engine_lint: bool = True) -> BuildResult:
     """
     跑完一整条流水线。返回 BuildResult（含可 json 化的 report）。
 
     strict 默认 **False**：构建不因"某句台词引用了还没登记的资产"而失败。
     缺资源只在生成的脚本里留 `# TODO: 缺少资源 …`——构建照常出产物。
     要拿校验当 CI 门禁用 `cli.py validate`（或显式 strict=True）。
+
+    `engine_lint`（2026-10-18，审计 P1-9）：**默认开**。落盘前把产物丢给
+    Ren'Py SDK 的 `lint` 读一遍；引擎读不了（语法错）就**不写目标文件**。
+    这一条就是审计说的"第一优先"：P0-1~P0-6 全是"引擎会报、工具不会报"的
+    错，因为构建从来不跑引擎。没有 SDK 时自动跳过并在报告里如实写明。
     """
     project_root = Path(project_root)
     out_dir = Path(out_dir) if out_dir else project_root / 'build_out'
@@ -239,8 +245,15 @@ def build_project(project_root, asset_dir=None, out_dir=None,
         # 漏在了门外。
         target = out_dir / 'story.generated.rpy'
         text = render_beats_to_rpy(beats, label_name=None, registry=registry)
+        # 引擎闸门：产物能不能被 Ren'Py 读进去（2026-10-18，审计 P1-9）。
+        # 只拦**语法**错；语义缺资源已有自己的 TODO 通道。
+        _lint_heads = ()
+        if engine_lint:
+            from storygraph.pipeline.engine_lint import declared_heads_near
+            _lint_heads = declared_heads_near(project_root)
         artifact = write_generation(text, target, project_root=project_root,
-                                    beats=beats)
+                                    beats=beats, engine_lint=engine_lint,
+                                    lint_ignore_heads=_lint_heads)
         # 项目声明的自定义语句（M3）＋ **能力覆盖率**（元模型 A）：
         # 「工具愿不愿意被教」「工具有多少是替得了你的」都要看得见。
         # 这一步只读，失败也只少一行报告，不影响构建。
@@ -328,6 +341,14 @@ def build_project(project_root, asset_dir=None, out_dir=None,
             'blocking': len(artifact.blocking),
             'issues': [i.format() for i in artifact.issues],
             'statements': statements_text,
+            # **引擎 lint**：这一轮到底跑没跑、结论是什么（审计 P1-9：
+            # "构建不跑引擎 lint"是六条 P0 能顺利"构建成功"的根因）。
+            'engine_lint': {
+                'requested': bool(engine_lint),
+                'ran': any(i.code.startswith('ENGINE_') for i in artifact.issues),
+                'issues': [i.format() for i in artifact.issues
+                           if i.code.startswith('ENGINE_')],
+            },
             # **非致命的门禁结论也要留下**（M1，2026-10-07）：
             # `UNMANAGED_BLOCK` / `KNOWN_UNMODELED_BLOCK` 是 warn ——
             # 它们不拦导出，但"这几行不归工具管"必须**说出口**

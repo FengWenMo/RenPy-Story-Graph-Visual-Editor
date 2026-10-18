@@ -82,9 +82,19 @@ QPushButton[variant="primary"] {{
     border: 1px solid {c('brand.primary')};
 }}
 QPushButton[variant="primary"]:hover {{ background: {c('brand.primaryHover')}; }}
+/* ⚠ 变体规则排在 `:disabled` 后面会把它盖掉 —— 于是"按不动的主按钮"
+   看起来和能按的一模一样（用户点了没反应）。这里给变体补一条灰化。 */
+QPushButton[variant="primary"]:disabled {{
+    background: {c('bg.disabled')}; color: {c('text.tertiary')};
+    border: 1px solid {c('border.default')};
+}}
 QPushButton[variant="danger"] {{
     background: {c('state.error')}; color: {c('brand.onPrimary')};
     border: 1px solid {c('state.error')};
+}}
+QPushButton[variant="danger"]:disabled {{
+    background: {c('bg.disabled')}; color: {c('text.tertiary')};
+    border: 1px solid {c('border.default')};
 }}
 
 /* ---------- 列表 ---------- */
@@ -185,6 +195,54 @@ QCheckBox::indicator {{
 QCheckBox::indicator:checked {{
     background: {c('brand.primary')};
     border: 1px solid {c('brand.primary')};
+}}
+
+/* ---------- 卡片 / 表单（对话框里的"一格一张卡"）---------- */
+/* 以前 `role=card` / `cardTitle` / `fieldLabel` 三个 role 只在代码里写着，
+   QSS 里**一个都没有** —— 于是"卡片"其实只是白底上的一段文字，分不出块。
+   这里补上：卡片有底色和描边，标题加粗，字段标签用次级色。 */
+QFrame[role="card"] {{
+    background: {c('bg.surface')};
+    border: 1px solid {c('border.default')};
+    border-radius: {T.RADIUS['card']}px;
+}}
+QFrame[role="card"][active="true"] {{
+    border: 1px solid {c('brand.primary')};
+}}
+QLabel[role="cardTitle"] {{
+    color: {c('text.primary')};
+    font-weight: bold;
+}}
+QLabel[role="fieldLabel"] {{
+    color: {c('text.secondary')};
+}}
+QLabel[role="stepTitle"] {{
+    color: {c('text.primary')};
+    font-weight: bold;
+}}
+/* 步骤序号：小圆牌。固定 20×20 由布局保证，这里只管长相。 */
+QLabel[role="step"] {{
+    background: {c('brand.subtle')};
+    color: {c('brand.primary')};
+    border-radius: 10px;
+    font-weight: bold;
+}}
+
+/* ---------- 对话框外壳：标题区 / 动作条 ---------- */
+QFrame[role="dialogHeader"] {{
+    background: {c('bg.surface')};
+    border: none;
+    border-bottom: 1px solid {c('border.default')};
+}}
+QFrame[role="actionBar"] {{
+    background: {c('bg.surface')};
+    border: none;
+    border-top: 1px solid {c('border.default')};
+}}
+QLabel[role="panelTitle"] {{
+    color: {c('text.primary')};
+    font-weight: bold;
+    font-size: {T.FONTS['panelTitle'][1]}pt;
 }}
 
 /* ---------- 数字输入 ---------- */

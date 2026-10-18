@@ -747,16 +747,56 @@ def _iter_dollar_statements(lines: list):
         i += max(1, len(body))
 
 
+def _python_block_line_numbers(text: str) -> set:
+    r"""
+    产物里**哪些行在 `python:` / `init python:` 块体里**（1-based 行号）。
+
+    为什么门禁需要它（2026-10-18，官方 tutorial 实测）：
+
+        init python:
+            ...
+            hide = False        ← 一行普通的 python 赋值
+
+    `_image_refs` 看到行首是 `hide ` 就当成了 `hide` 语句，图像名取到
+    `= False` → 报 `CJK_IN_IMAGE_TAG`（block）→ **构建被自家门禁拦下**，
+    而被拦的产物其实是合法的。门禁误报比漏报更贵：它会让人开始绕过门禁。
+
+    判据只看缩进（与 Ren'Py 的块语法一致）：块头行 `… python:` 之后，
+    缩进更深的行都算块体；回到同一层或更浅就出块。
+    """
+    inside = set()
+    base = None                      # 当前 python 块的块头缩进
+    for i, line in enumerate(str(text or '').splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if base is not None and indent <= base:
+            base = None
+        if base is not None:
+            inside.add(i)
+        if stripped.endswith('python:') and (
+                stripped == 'python:' or stripped.startswith('init ')
+                or stripped.startswith('python ')):
+            base = indent if base is None else base
+    return inside
+
+
 def _image_refs(text: str) -> list:
-    """抽出生成文本里所有的 show/hide/scene 图像名（跳过注释行）。"""
+    """抽出生成文本里所有的 show/hide/scene 图像名（跳过注释行与 python 块）。"""
     refs = []
+    in_python = _python_block_line_numbers(text)
     for i, line in enumerate(text.splitlines(), start=1):
         s = line.strip()
-        if not s or s.startswith('#'):
+        if not s or s.startswith('#') or i in in_python:
             continue
         m = _STAGE_VERB_RE.match(line)
         if m:
-            refs.append(_ImageRef(m.group(2), m.group(3), i))
+            image = m.group(3)
+            # `hide = False` 这种**python 赋值**不是舞台指令（见上）。
+            if image.startswith('='):
+                continue
+            refs.append(_ImageRef(m.group(2), image, i))
     return refs
 
 
@@ -792,6 +832,9 @@ def generation_guard(text: str, out_path, *,
     """
     issues = []
     out_path = Path(out_path) if out_path else None
+    #: 哪些行在 `python:` 块体里（舞台/变换名扫描要跳过它们，见
+    #: `_python_block_line_numbers` 的说明）。
+    _PY_BLOCK_LINES = _python_block_line_numbers(text)
 
     # —— 0. 产物里的 Python 语法（P0，2026-10-05）——
     # 放在最前面：这是**唯一**一类"Ren'Py 连加载都加载不了"的错误，
@@ -814,7 +857,7 @@ def generation_guard(text: str, out_path, *,
     # 一个都没有（`at 左边`）才说明这是自由文本混进了代码。
     for i, line in enumerate(text.splitlines(), start=1):
         s = line.strip()
-        if not s or s.startswith('#'):
+        if not s or s.startswith('#') or i in _PY_BLOCK_LINES:
             continue
         parts = line.split()
         if 'at' not in parts:
@@ -1061,7 +1104,9 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
                      project_root=None, occupied=None, force: bool = False,
                      merged_from_source=None, source_text=None,
                      source_path=None, beats=None,
-                     unmanaged_blocks=None):
+                     unmanaged_blocks=None,
+                     engine_lint: bool = False,
+                     lint_ignore_heads=()):
     """
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
@@ -1165,12 +1210,45 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         structure = structure_loss(source_text, text)
         if structure:
             issues.append(_make_structure_issue(structure, source_path))
+    # **引擎闸门**（2026-10-18，审计 P1-9 / 修复顺序第一条）：把产物真的丢给
+    # Ren'Py 的 `lint` 读一遍。工具自己的三层校验验的是"内部前后一致"，
+    # 而"引擎能不能解析这个产物"从来没进过判据 —— P0-1~P0-6 全是
+    # "引擎会报、工具不会报"的错，于是"全绿"与"跑不起来"同时成立。
+    # 只把**语法**错误当阻塞；语义错误（缺图缺角色）要项目上下文，只 warn。
+    if engine_lint:
+        try:
+            from storygraph.pipeline.engine_lint import lint_text
+            _rep = lint_text(text, ignore_heads=lint_ignore_heads)
+            if _rep.ran and not _rep.ok:
+                issues.append(GuardIssue(
+                    'ENGINE_PARSE_ERROR', 'block',
+                    '引擎读不了这份产物（SDK lint）：'
+                    + '；'.join(_rep.parse_errors[:3])
+                    + (f'（共 {len(_rep.parse_errors)} 处）'
+                       if len(_rep.parse_errors) > 3 else '')))
+            elif _rep.ran and _rep.semantic_errors:
+                issues.append(GuardIssue(
+                    'ENGINE_LINT_WARN', 'warn',
+                    '引擎 lint 有语义提示（不影响解析）：'
+                    + '；'.join(_rep.semantic_errors[:3])))
+        except Exception as e:                  # noqa: BLE001 - lint 是增强，不拖垮导出
+            swallow('generation_guard.engine_lint', e)
     blocking = [i for i in issues if i.is_blocking]
+    # **载体风格**（2026-10-18，审计 P0-1）：源文件带 BOM / CRLF 时，产物必须
+    # 按同一副样子写回去（否则"打开再导出"每个字节都变：审计实测官方
+    # `tutorial` 23 个脚本全是 CRLF + BOM）。只在**落盘这一层**做一次 ——
+    # 门禁看到的仍是干净的 LF 文本（它要按行解析），而
+    # `write_text_atomic` 用 `newline=''` 写，不会再翻译任何东西。
+    write_text_value = text
+    _style_source = source_path or merged_from_source
+    if _style_source:
+        from storygraph.story.source_style import detect as _detect_style
+        write_text_value = _detect_style(_style_source).apply(text)
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if blocking and review_on_block:
             review = out_path.with_suffix('.blocked.rpy')
-            write_text_atomic(review, text)
+            write_text_atomic(review, write_text_value)
             _publish_blocked(out_path, blocking, review)
             return GeneratedArtifact(out_path, review, False, issues)
         if blocking:
@@ -1179,7 +1257,7 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         # **原子写 + 保留换行 + 写前备份**（P1-2）：目标就是游戏脚本，
         # `write_text` 的"先截断再写"在崩溃/占用时会留下半截文件，
         # 而 Windows 上它还会把 LF 全翻成 CRLF（违背"逐字节保真"）。
-        write_text_atomic(out_path, text, backup=True)
+        write_text_atomic(out_path, write_text_value, backup=True)
         return GeneratedArtifact(out_path, None, True, issues)
     except OSError:
         # 写不出去（权限/占用）不该把门禁结论一起吞掉

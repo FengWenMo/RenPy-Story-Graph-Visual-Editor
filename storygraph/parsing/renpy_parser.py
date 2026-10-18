@@ -256,9 +256,27 @@ def _top_level_region(filepath, lines=None) -> list:
             flush()                           # label 及其块体由"拍"负责
             cur = []
             i += 1
-            while i < n and (not raw[i].strip()
-                             or raw[i][:1] in (' ', '\t')):
-                i += 1
+            # ⚠ **顶格注释不结束 label**（2026-10-18，审计 P0-3）。
+            #
+            # 从前这里的判据只有"空行 / 缩进行"—— 于是 label 体中间那条
+            # **顶格注释**（Ren'Py 完全合法、真机 `whackamole.rpy` 就这么写）
+            # 把 label 的"跳过区间"截断了：注释与它后面的缩进代码被当成
+            # 顶层区域收走，渲染时被搬到文件最前面 → 产物里
+            # `Unexpected indentation at start of file`。
+            #
+            # 语义上注释不参与缩进判断：只要**后面还有本块的缩进行**，
+            # 它就仍属于块内（与 `_followed_by_indented` 同一口径）。
+            # 反之（后面是顶格语句 / 到文件末尾）它是"下一段的标题"，
+            # 留给下面那个 comment 分支自己起一段。
+            while i < n:
+                s = raw[i].strip()
+                if not s or raw[i][:1] in (' ', '\t'):
+                    i += 1
+                    continue
+                if s.startswith('#') and _followed_by_indented(raw, i + 1):
+                    i += 1
+                    continue
+                break
             continue
         if top and stripped.startswith('#'):
             # 顶格**注释**：Ren'Py 里注释不参与缩进判断 —— 它可以出现在一个
@@ -675,6 +693,43 @@ class RenPyLexer:
         root = LogicalLine(text='', line_number=0, indent=-1,
                            filename=filename)
         stack = [root]
+        #: **注释不参与建树深度**（2026-10-18，P0-3）。
+        #:
+        #: 从前每读一行都先 `while stack[-1].indent >= indent: pop` ——
+        #: 顶格注释会把当前块**整段关掉**，于是
+        #:
+        #:     label start:
+        #:         python:
+        #:             import random
+        #:     # 顶格注释              ← indent 0，弹空到根
+        #:             def f():       ← 成了注释的子节点（顶格！）
+        #:                 return 1
+        #:         e "after"
+        #:
+        #: 变成"注释 + `def f()` 在文件顶层、`label start:` 被挪到末尾"。
+        #: 这不是排版漂移，是**脚本结构被重排**（产物里出现悬空缩进，
+        #: 引擎直接报 `Unexpected indentation at start of file`）。
+        #:
+        #: 正确语义：Ren'Py / Python 都**忽略注释的缩进** —— 一条注释
+        #: 不可能关闭一个块。所以注释先**攒着**，等下一个真语句来了再定归属
+        #: （挂上去但不压栈：注释永远不会有子节点）。
+        #:
+        #: 归属判据（两条，缺一不可）：
+        #:   ① 注释**比下一句浅**（`c.indent < indent`，且下一句在块里）
+        #:      → 它属于"下一句所在的那个块"（P0-3 的顶格注释就靠这条）；
+        #:   ② 否则按**注释自己的缩进**挂到最深的、比它浅的已打开块上
+        #:      —— `python:` 块里缩进 12 的注释仍留在 python 块里，
+        #:      不会因为下一句 `else:` 缩进 4 就跳到 label 层（真机
+        #:      `mini_game1.rpy` 实测：那样会把 `else:` 判成"孤立块"，
+        #:      `if/elif/else` 链当场断掉）。
+        pending_comments: list = []
+
+        def _deepest_open(limit: int):
+            """当前栈里最深的、缩进**严格小于** `limit` 的节点。"""
+            for cand in reversed(stack):
+                if cand.indent < limit:
+                    return cand
+            return stack[0]
 
         for item in flat:
             text, line_no, indent, is_comment = item[:4]
@@ -688,10 +743,30 @@ class RenPyLexer:
                 inline_comment=inline,
                 inline_comments=list(item[5] if len(item) > 5 else []),
             )
+            if is_comment:
+                pending_comments.append(node)
+                continue
+            if pending_comments:
+                # ① 的"下一句所在块"：**弹栈之前**先算出来（弹完就没了）
+                post_parent = _deepest_open(indent)
+                for c in pending_comments:
+                    if indent > 0 and c.indent < indent:
+                        post_parent.subblock.append(c)
+                    else:
+                        _deepest_open(c.indent).subblock.append(c)
+                pending_comments = []
             while len(stack) > 1 and stack[-1].indent >= indent:
                 stack.pop()
             stack[-1].subblock.append(node)
             stack.append(node)
+
+        # 文件末尾的注释：没有"下一条真语句"可依，按它们自己的缩进找父块
+        # （与从前的行为一致）——但同样**不压栈**。
+        if pending_comments:
+            base = min(c.indent for c in pending_comments)
+            while len(stack) > 1 and stack[-1].indent >= base:
+                stack.pop()
+            stack[-1].subblock.extend(pending_comments)
 
         return root.subblock
 
@@ -940,10 +1015,27 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_ELIF_HEAD = re.compile(r'^elif\s+')
     _RE_ELSE_HEAD = re.compile(r'^else\s*:')
     _RE_MENU_HEAD = re.compile(r'^menu\b')
+    #: `menu` 头上的**菜单名**（`menu choice_menu:` / `menu .local:`）。
+    #:
+    #: 形状对齐 Ren'Py 的 `Lexer.label_name()`：一个标识符（可带 `.` 前缀
+    #: 表示"本 label 内的局部菜单"）。**不认关键字**（`menu hide:` 不是
+    #: 合法写法）—— 但这里刻意不查关键字表：真出现那种行，把它当名字
+    #: 原样写回，与源文件逐字节相同，错的是源文件、不是我们。
+    _RE_MENU_NAME = re.compile(r'\.?[^\W\d]\w*')
     # 角色定义两种写法都收：define 是常量，default 是可存档变量
     _RE_DEFINE = re.compile(
         r'^(?:define|default)\s+([\w.]+)\s*=\s*(.+)$', re.DOTALL)
-    _RE_SAY = re.compile(r'^([A-Za-z_][\w.]*)?\s*' + _STR)
+    _RE_SAY = re.compile(r'^([^\W\d]\w*(?:\.[^\W\d]\w*)*)?\s*' + _STR)
+    #: Python 字符串前缀（`u"…"` / `r"…"` / `b"…"` / `br"…"`）紧贴引号。
+    #:
+    #: ⚠ 这不是台词（2026-10-18，审计 P0-6）：
+    #:   · 引擎**不认**它 —— SDK 8.5 lint 对 `u"统一"` 报
+    #:     `expected statement.`（Ren'Py 的 say 只接受 who? + 裸字符串字面量）；
+    #:   · 而工具从前把 `u` 当成**说话人**，产物成了 `u "统一"` —— 一句
+    #:     凭空出现的"角色 u 说『统一』"，语义被静默改掉。
+    #: 它必须**逐字原样**留住（这行本来就是作者的原文，引擎报错是引擎的事），
+    #: 所以识别它之后 `_stmt_say` 主动放弃，交给 `_stmt_unmodeled` 的保真通道。
+    _RE_SAY_PREFIX = re.compile(r'^[rRuUbBfF]{1,2}(?=["\'])')
     _RE_JUMP_EXPR = re.compile(r'^jump\s+expression\b')
     _RE_CALL_EXPR = re.compile(r'^call\s+expression\b')
     _RE_CALL_SCREEN = re.compile(r'^call\s+screen\b')
@@ -1508,22 +1600,38 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             filename=line.filename,
             name=name,
         )
+        # `label 名(参数…):` —— **参数表必须留住**（2026-10-18）。
+        # 从前这里只是"扫过去"（`i = close + 1`），参数被丢掉，产物成了
+        # `label 名:`。而 `call 名(...)` 是原样保真的 —— 于是调用方照旧传参，
+        # 被调方却不收：Ren'Py 直接报"参数过多"，游戏起不来。
+        # 单独存 `params`（不带括号），渲染时接在名字后面。
+        label_head = text[m.end():].strip()
+        if '(' in label_head:
+            node.params = label_head[label_head.index('('):].strip()
+            if node.params.endswith(':'):
+                node.params = node.params[:-1].rstrip()
         node.block = self._parse_block(line.subblock)
         return node
 
     # ---------- menu 头扫描 ----------
 
     @classmethod
-    def _scan_menu_header(cls, text: str, m) -> Optional[str]:
+    def _scan_menu_header(cls, text: str, m):
         """
-        扫描 menu 头，返回 caption 字符串（无 caption 时返回空串）；
-        不是合法 menu 头则返回 None。
+        扫描 menu 头，返回 `(caption, name, args)`；不是合法 menu 头则返回 None。
 
-        支持的合法形式：
+        支持的合法形式（= `renpy/parser.py: menu_statement` 的语法）：
             menu:
+            menu 名:
             menu (args):
-            menu "caption":
+            menu 名(args):                 ← 2026-10-19 起**认了**（见下）
+            menu "caption":                ← 引擎其实不收，见下
             menu "caption" (args):
+
+        返回三元组的语义：
+          · `caption` —— 头行上的字符串（空 = 没有）；
+          · `name`    —— 菜单名（`ast.Label` 的源，**是 jump 目标的真 label**）；
+          · `args`    —— 参数表原文（含括号，保持原样）。
         """
         i = m.end()
         while i < len(text) and text[i] in ' \t':
@@ -1549,17 +1657,38 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                 i += 1
 
         if i < len(text) and text[i] == ':':
-            return caption
+            return (caption, '', '')
+
+        # **菜单名**（`menu choice_menu:`）：Ren'Py 的 `l.label_name()`
+        # 只认标识符（可带点），不认关键字以外的任何东西。这里用同一个
+        # 形状 —— 认不出就当"不是 menu 头"，交回通用语句通道（不猜）。
+        name = ''
+        m_name = cls._RE_MENU_NAME.match(text, i)
+        if m_name:
+            name = m_name.group(0)
+            i = m_name.end()
+            while i < len(text) and text[i] in ' \t':
+                i += 1
+            if i < len(text) and text[i] == ':':
+                return (caption, name, '')
 
         if i < len(text) and text[i] == '(':
             close = _scan_balanced_close(text, i)
             if close == -1:
                 return None
+            args = text[i:close + 1]
             j = close + 1
             while j < len(text) and text[j] in ' \t':
                 j += 1
             if j < len(text) and text[j] == ':':
-                return caption
+                # **带参数 / 带名的 menu 头**现在**建模**了（2026-10-19，
+                # 审计 P1-3 收尾）。从前这里 `return None`：参数被静默丢掉
+                # （渲染固定写 `menu:`），整块只能走未建模通道 ——
+                # 逐字保真，但选项在卡片里**看不见也改不了**。
+                #
+                # 现在 `name` / `args` 各有一格（`MenuName` / `MenuArgs`），
+                # 选项重新成为可编辑的拍，头行照原样写回。
+                return (caption, name, args)
 
         return None
 
@@ -1715,7 +1844,12 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                 walk(node.subblock, base_indent)
 
         if line.subblock:
-            base_indent = min(child.indent for child in line.subblock)
+            # 块体基准缩进**不看注释**（2026-10-18，P0-3）：注释的缩进在
+            # Ren'Py / Python 里没有语义，顶格注释（indent 0）若参与取最小值，
+            # 整块代码会被当成"相对 0 缩进"，渲染时再叠一层就是悬空缩进。
+            base_indent = min(
+                (c.indent for c in line.subblock if not c.is_comment),
+                default=0)
             walk(line.subblock, base_indent)
 
         return '\n'.join(result)
@@ -1772,6 +1906,8 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     def _parse_menu(self, lines: list) -> tuple:
         caption = ''
         options = []
+        #: 块里认不出的行（`set seen` / `$ x = 1` …）——**绝不丢**。
+        extras = []
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -1788,13 +1924,20 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                 continue
 
             # 菜单块里的"裸字符串行"是**标题行**（Ren'Py 会把它显示成 caption）。
-            # `"系统" "提示"` 这种带字符串说话人的写法也要取**后一个**字符串 ——
-            # 取前一个会把可见文案换成角色名（模型里菜单标题没有 who 这一位，
-            # 属于已知边界，见 README 不变量 84）。
+            # ⚠ 但**带说话人的那种不是裸字符串**（2026-10-18 审计 P1-3 的连带）：
+            #
+            #       menu:
+            #           e "Would you like to hear about rollback?"
+            #
+            # 官方 `tutorial_playing.rpy:71` 就是这么写的（角色说标题）。
+            # 从前这里取**后一个字符串**当 caption，说话人 `e` 被丢掉 ——
+            # 产物成了裸 `"Would you like…"`，**每次导出都把角色从标题里抹掉**
+            # （而且还是增量补丁失败的原因：生成行在原文里找不到）。
+            # 模型里菜单标题没有"谁说的"这一位，所以整行进 `extras`
+            # （逐字保真，渲染时原样吐在 `menu:` 之后、选项之前）。
             pair = split_string_speaker(text)
             if pair is not None:
-                cap = pair[1]
-                caption = (caption + '\n' + cap) if caption else cap
+                extras.append(text)
                 i += 1
                 continue
 
@@ -1802,14 +1945,27 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             if m:
                 who = m.group(1) or ''
                 if who not in self._IGNORED_SAY_HEADS:
-                    cap = _pick_str(m, 2, 3)
-                    caption = (caption + '\n' + cap) if caption else cap
+                    if who:
+                        # `e "标题"`：带说话人 → 整行逐字保留（同上）。
+                        extras.append(text)
+                    else:
+                        cap = _pick_str(m, 2, 3)
+                        caption = (caption + '\n' + cap) if caption else cap
                 i += 1
                 continue
 
+            # ⚠ 2026-10-18：这里从前是 `i += 1` —— **静默丢弃**。
+            # `menu:` 块里除了选项、还有合法语句（`set seen` 最典型，
+            # 它决定这个菜单要不要记"已读"）。丢掉它 = 玩法记账变了，
+            # 而产物语法完全正确。整块（含子块）逐字收进 `extras`，
+            # 渲染时在 `menu:` 之后原样吐回。
+            if line.subblock:
+                extras.extend(self._unknown_block_lines(line))
+            elif text:
+                extras.append(text)
             i += 1
 
-        return caption, options
+        return caption, options, extras
 
     def _parse_menu_option(self, line: LogicalLine,
                            text: str) -> Optional[MenuOptionNode]:
@@ -2064,6 +2220,10 @@ class ParseResult:
     characters: dict = field(default_factory=dict)
     dialogues: list = field(default_factory=list)
     labels: dict = field(default_factory=dict)
+    #: `label 名(参数…):` 的参数表原文：`{名字: '(flag=True)'}`。
+    #: 丢了它，`call 名(...)` 的实参无处可去（Ren'Py 报"参数过多"，
+    #: 而 `call 名(...)` 本身是**原样保真**的 —— 两头对不上）。
+    label_params: dict = field(default_factory=dict)
     # 脚本里自定义的 transform：{name: TransformDefinition}
     transforms: dict = field(default_factory=dict)
     # 脚本里 `image name = expr` 声明的图像：{image_name: {...}}
@@ -2139,8 +2299,57 @@ class ParseResultBuilder:
         # `default x_name = "..."`，而它可能出现在 define 之后。
         self._collect_string_defaults(ast_nodes, result)
         self._walk(ast_nodes, '', result)
+        self._drop_file_block_comments(result)
         self._compute_counts(result)
         return result
+
+    @staticmethod
+    def _drop_file_block_comments(result: ParseResult) -> None:
+        """
+        已经被**文件级保真块**覆盖的注释，不许再算一条语句（否则渲染两遍）。
+
+        为什么会有重叠（2026-10-18）：`_top_level_region` 按"顶层行 + 后面的
+        缩进行"切块，于是
+
+            #init python:              ← 顶层注释起一段
+                # 添加打地鼠游戏入口      ← 缩进注释被收进这一段
+
+        而**缩进注释在语义上仍然是它上面那个 label 的块体**（注释不参与缩进
+        判断，也没有"注释块"这回事），`_build_tree` 会把它挂进 `label …:`
+        的体里。两边都收 ⇒ 产物里同一行注释出现**两次**（真机
+        `script.rpy` 实测），而逐字节保真审计看不见它（工具自己前后一致）。
+
+        判据：注释语句的 (文件, 行号) 落在任一 `FileBlock` 的覆盖区间里
+        → 丢掉那条语句。文件块仍然逐字带着它（渲染一次，位置在原处）。
+        """
+        spans: dict = {}
+        for fb in result.file_blocks or ():
+            start = int(getattr(fb, 'source_line', 0) or 0)
+            code = str(getattr(fb, 'code', '') or '')
+            if start <= 0:
+                continue
+            spans.setdefault(str(getattr(fb, 'source_file', '') or ''),
+                             []).append((start, start + len(code.splitlines())))
+        if not spans:
+            return
+
+        def covered(stmt) -> bool:
+            file, line = (stmt.source or ('', 0))[:2]
+            return any(a <= int(line) <= b
+                       for a, b in spans.get(str(file or ''), ()))
+
+        keep = [i for i, st in enumerate(result.statements)
+                if not (st.kind == StatementKind.COMMENT and covered(st))]
+        if len(keep) == len(result.statements):
+            return
+        total = len(result.statements)
+        result.statements = [result.statements[i] for i in keep]
+        # 两个平行数组**必须同进同退**（漏一个 = 语句与 label 错位，
+        # 那是"把 A 的内容写到 B 的位置"级别的错）。
+        for name in ('statement_labels', 'statement_menu_options'):
+            seq = getattr(result, name, None)
+            if isinstance(seq, list) and len(seq) == total:
+                setattr(result, name, [seq[i] for i in keep])
 
     @staticmethod
     def _is_char_define(node) -> bool:
@@ -2348,7 +2557,8 @@ class ParseResultBuilder:
             box.add_stmt(Statement.make_play(
                 node.action, node.channel, node.name,
                 loop=node.loop, fadein=node.fadein,
-                fadeout=node.fadeout, condition=box.accum_cond,
+                fadeout=node.fadeout, extra=getattr(node, 'extra', ''),
+                condition=box.accum_cond,
                 source=(node.filename, node.line_number)))
 
         elif isinstance(node, VoiceNode):
@@ -2453,7 +2663,8 @@ class ParseResultBuilder:
             box.add_stmt(Statement.make_call(
                 node.target, box.accum_cond,
                 source=(node.filename, node.line_number),
-                from_clause=getattr(node, 'from_clause', '')))
+                from_clause=getattr(node, 'from_clause', ''),
+                args=getattr(node, 'args', '')))
 
         elif isinstance(node, ReturnNode):
             box.add_stmt(Statement.make_return(
@@ -2475,6 +2686,8 @@ class ParseResultBuilder:
     def _w_label(self, node, box):
         """LabelNode 的处理（从 `_dispatch_node` 原样搬出）。"""
         box.result.labels[node.name] = (node.filename, node.line_number)
+        if getattr(node, 'params', ''):
+            box.result.label_params[node.name] = node.params
         self._walk(node.block, node.name, box.result)
 
     def _w_say(self, node, box):
@@ -2488,7 +2701,8 @@ class ParseResultBuilder:
         ))
         box.add_stmt(Statement.make_say(
             node.who, node.what, box.accum_cond,
-            source=(node.filename, node.line_number)))
+            source=(node.filename, node.line_number),
+            tail=getattr(node, 'tail', '')))
 
     def _w_extend(self, node, box):
         """ExtendNode 的处理（从 `_dispatch_node` 原样搬出）。"""
@@ -2557,6 +2771,12 @@ class ParseResultBuilder:
             menu_own_cond = box.accum_cond
         box.add_stmt(Statement.make_menu(
             node.caption or '', menu_own_cond,
+            extras=list(getattr(node, 'extras', None) or ()),
+            # 菜单名 / 参数表（2026-10-19，审计 P1-3 收尾）：从前这两样
+            # 让整块掉进"未建模"通道 —— 一个字节不丢，但选项在卡片里
+            # 彻底看不见。现在它们各占一格，选项重新成为可编辑的拍。
+            name=getattr(node, 'name', '') or '',
+            args=getattr(node, 'args', '') or '',
             source=(node.filename, node.line_number)))
         box.counters['menu'] = box.counters.get('menu', 0) + 1
         menu_path = join_nest(box.nest_path, f"menu:{box.counters['menu']}")

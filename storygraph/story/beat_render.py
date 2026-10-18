@@ -74,7 +74,21 @@ from storygraph.story.beat_render_code import (  # 2026-10-12 拆分
 # ===================== Beat -> rpy =====================
 
 def _needs_quote(name: str) -> bool:
-    return bool(name) and not re.match(r'^[A-Za-z_][\w.]*$', name)
+    """
+    这个引用**必须**写成字符串字面量吗？
+
+    ⚠ 2026-10-18 修：正则从前是 `^[A-Za-z_][\\w.]*$`（**允许点号**），
+    于是 `play music "a.ogg"` / `voice "v.ogg"` / `queue music "b.ogg"`
+    都被写成裸的 `a.ogg` —— 而在 Ren'Py 里 `a.ogg` 是**表达式**
+    （`a` 的 `.ogg` 属性），运行到这里就是 `NameError`：整条语句从
+    "播这段音乐"变成了"游戏崩溃"。真实项目的音频名多半带目录
+    （`bgm/夜晚.mp3`）带了斜杠才侥幸加引号；**不带目录的文件名**
+    一律中招（`voice` 几乎全是不带目录的）。
+
+    点号从来不是"可以裸写"的理由：变量形式的引用（`play music current`）
+    是**纯标识符**，没有点；带点的只会是文件名。
+    """
+    return bool(name) and not re.match(r'^[A-Za-z_]\w*$', name)
 
 
 
@@ -210,11 +224,21 @@ def _attach_inline_note(lines: list, beat) -> list:
     if len(lines) > 1:
         heads = [ln for ln in lines[:-1] if ln.strip()]
         if not heads or not all(ln.rstrip().endswith(':') for ln in heads):
-            return lines
+            # ⚠ **贴不上不等于可以丢**（2026-10-18 修）：多行拍里"注释原本
+            # 挂哪一行"确实说不清（贴错比不贴更坏），但**丢字**比贴错更坏。
+            # 所以退一步：单独一行 `# …` 放在这一拍**最前面** —— 位置从行尾
+            # 挪到头顶，字一个不少。真机 3 行（`scene … #白色转场` 这种
+            # 多行拍）从前是直接消失的。
+            return [_comment_line(note)] + lines
         target = len(lines) - 1
     if '#' in lines[target]:
         return lines                      # 这一行已经有注释了，别叠
     return [ln + note if i == target else ln for i, ln in enumerate(lines)]
+
+
+def _comment_line(note: str) -> str:
+    """`'  # 备注'` → `'# 备注'`（独立注释行；缩进由调用方补）。"""
+    return note.strip()
 
 
 class _OrderCtx:
@@ -228,7 +252,8 @@ class _OrderCtx:
 
     __slots__ = ('beat', 'lines', 'emit', 'emit_audio', 'emit_voice',
                  'emit_code', 'emit_stage_tail', 'emit_opaque',
-                 'stage_lines_once', 'emitted_stage', 'emitted_idx')
+                 'stage_lines_once', 'emitted_stage', 'emitted_idx',
+                 'audio_done')
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -263,6 +288,11 @@ def _emit_in_source_order(ctx, plan) -> None:
             flush_code_run()
             # raw 行**逐字照出**（作者写的原生语句：不加 `$`、不缩进改写）
             ctx.emit(payload, '代码块', payload)
+        elif kind == 'opaque':
+            # 原样语句（未建模 / 项目声明的自定义语句）在**它自己的顺序位**上
+            # 逐字吐出（2026-10-18）：否则跟在它后面的 `$`/原生行会排到前面。
+            flush_code_run()
+            ctx.emit_opaque()
         elif kind == 'code':
             code_run.append(payload)      # 攒成一段，遇到别的再落地
         elif kind == 'blank':
@@ -273,10 +303,19 @@ def _emit_in_source_order(ctx, plan) -> None:
         elif kind == 'audio':
             flush_code_run()
             ctx.emit_audio()
+        elif kind in ('music', 'sound'):
+            # 逐通道（2026-10-18）：只出这一个通道，别的通道在它自己的位置出。
+            flush_code_run()
+            ctx.emit_audio(kind)
         elif kind == 'voice':
             flush_code_run()
             ctx.emit_voice()
     flush_code_run()
+    # **补齐**：这一拍有内容、却没有任何 token 点到的通道（老表 / 手改过的行）
+    # 也要出 —— 与"绝不因为顺序信息不全就丢掉操作"同一条规矩。
+    for _ch in ('music', 'sound'):
+        if _ch not in (getattr(ctx, 'audio_done', None) or ()):
+            ctx.emit_audio(_ch)
     _emit_leftover_stage(ctx.stage_lines_once(), ctx.emit, ctx.emitted_stage,
                          ctx.emitted_idx)
     # **舞台尾段 + 原样块照样要出**（第九轮修）：
@@ -298,7 +337,17 @@ def _emit_in_token_order(ctx, tokens) -> None:
     # 从前没照做，于是"卡片加了立绘、当前舞台却写着台上没人"（用户实测报的）。
     recorded = {v for v, _i in tokens}
     for k in ('audio', 'voice'):
+        # `audio` 是**老格式**（两个通道一起出）：新表已经有 `music`/`sound`
+        # 逐通道 token 时不能再补一个 `audio`，否则两个通道会各出两遍。
+        if k == 'audio' and ({'music', 'sound'} & recorded):
+            continue
         if k not in recorded:
+            tokens.append((k, None))
+    # ⚠ **逐通道 token 的补齐**（2026-10-18）：老表里只有 verb 级 `audio`
+    #   （上面那条会补上），新表里是 `music` / `sound` 各一条 —— 缺哪个补哪个，
+    #   与"绝不因为顺序信息不全就丢掉操作"同一条规矩。
+    for k in ('music', 'sound'):
+        if k in recorded and k not in {v for v, _i in tokens}:
             tokens.append((k, None))
     code_done = False
     for verb, idx in tokens:
@@ -308,8 +357,13 @@ def _emit_in_token_order(ctx, tokens) -> None:
                               ctx.emitted_stage, ctx.emitted_idx)
         elif verb == 'audio':
             ctx.emit_audio()
+        elif verb in ('music', 'sound'):
+            ctx.emit_audio(verb)
         elif verb == 'voice':
             ctx.emit_voice()
+        elif verb == 'opaque':
+            # 原样语句的位置令牌（2026-10-18）：在它自己该出现的地方吐。
+            ctx.emit_opaque()
         # **"真出了一行的 scene"才算数**（2026-10-05 修）。
         #
         # `tokens` 上面被**补齐**过：`missed_stage` 把 `scene/show/hide`
@@ -402,17 +456,39 @@ def _emit_text_line(beat, speaker, emit) -> None:
         # 单拍这条路写出字面量 `"\x00menu"`，而整份产物写的是 `menu:`。
         # 两条路对不上 → 增量补丁的 `_verify_patch` 永远找不到那一行 →
         # 真实项目 6 个文件退回全量（O1）。
-        from storygraph.story.beat_model import menu_caption_text
+        from storygraph.story.beat_model import menu_caption_text, menu_head_text
         cap = menu_caption_text(beat.text)
+        # 头行**与整份渲染同一个函数**（`menu_head_text`）：`menu` / `menu 名` /
+        # `menu (args)` / `menu 名 (args)` —— 两处各写一份正是 P0-2 的来源。
+        _head = menu_head_text(beat) + ':'
         if cap:
-            emit(f"menu {_quote(cap)}:", '菜单', cap)
+            # ⚠ 标题**写在块里**，不写在 `menu` 头上（2026-10-18，审计 P0-2）。
+            #
+            # Ren'Py 的 `menu` 头只接受 `menu [label] [(args)]:` —— **不接受
+            # 字符串**。而解析器会把块内的裸字符串行（caption）合并进头部，
+            # 渲染时照着写出去，于是官方示例里最常见的那种写法
+            #
+            #     menu:
+            #         "As soon as she catches my eye, I decide..."
+            #
+            # 被导出成 `menu "As soon as…":`，引擎直接：
+            #     expected ':' not found.
+            # 产物**过不了 lint**，而工具自己不会发现（构建不跑引擎）。
+            emit(_head, '菜单', '')
+            for cap_line in str(cap).split('\n'):
+                emit('    ' + _quote(cap_line), '菜单', cap_line)
         elif beat.text:
-            emit('menu:', '菜单', '')
+            emit(_head, '菜单', '')
     elif beat.text:
+        # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id` /
+        # `nointeract` —— 原样拼在引号后面，与解析时逐字对称。
+        # 空 = 普通台词，产物与从前**逐字节相同**。
+        tail = str(getattr(beat, 'say_tail', '') or '').strip()
+        suffix = f' {tail}' if tail else ''
         if speaker:
-            emit(f"{speaker} {_quote(beat.text)}", '台词', beat.text)
+            emit(f"{speaker} {_quote(beat.text)}{suffix}", '台词', beat.text)
         else:
-            emit(_quote(beat.text), '台词', beat.text)
+            emit(f"{_quote(beat.text)}{suffix}", '台词', beat.text)
 
 
 def render_beat_to_rpy(beat: Beat, indent: str = '    ',
@@ -509,6 +585,9 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
             emit(c, '代码块', c)
 
     # ---------------- 工具不认识的块语句（M1） ----------------
+    #: 原样块只许出一次（令牌位与收尾兜底都会调用 `emit_opaque`）
+    _opaque_done: list = []
+
     def emit_opaque():
         """
         `Beat.opaque` → 逐字写回，**一个字都不动**。
@@ -527,8 +606,9 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         块体里的空行是作者排版的一部分。
         """
         text = str(getattr(beat, 'opaque', '') or '')
-        if not text.strip():
+        if not text.strip() or _opaque_done:
             return
+        _opaque_done.append(True)
         text = text.replace('\r\n', '\n').replace('\r', '\n')
         lines = text.split('\n')
         # **头行可编辑**（M4，T1a/T1b 的参数编辑面）：
@@ -561,8 +641,12 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     if not beat.sound:
         _fill_audio_from_cells(beat, 'sound', beat.sfx, beat.sound_params)
 
-    def emit_audio():
-        _render_audio_from_fields(beat, emit, audit)
+    def emit_audio(only: str = ''):
+        if only:
+            _audio_done.add(only)
+        else:
+            _audio_done.update(('music', 'sound'))
+        _render_audio_from_fields(beat, emit, audit, only=only)
 
     def emit_voice():
         if not beat.voice:
@@ -604,6 +688,8 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
     # show 没了，**收尾画面与作者要的相反**。
     tokens = beat.op_tokens_full()
     plan = beat.unified_plan() if tokens else None
+    #: 已经出过的音频通道（补齐用：`music` / `sound`）
+    _audio_done: set = set()
     #: 舞台行只算一次（`_stage_lines` 里有一堆字符串处理，别每个 token 重算）
     _stage_cache: list = []
 
@@ -620,7 +706,7 @@ def render_beat_to_rpy(beat: Beat, indent: str = '    ',
         emit_voice=emit_voice, emit_code=emit_code,
         emit_stage_tail=emit_stage_tail, emit_opaque=emit_opaque,
         stage_lines_once=_stage_lines_once, emitted_stage=emitted_stage,
-        emitted_idx=_emitted_idx)
+        emitted_idx=_emitted_idx, audio_done=_audio_done)
     if plan is not None:
         _emit_in_source_order(_ctx, plan)
     elif tokens:
@@ -1712,7 +1798,7 @@ def _render_menu_segments(run: list, segments: list, indent: str,
     顶层调用传 `indent=''`、`opt_indent='    '`（`menu:` 顶格）。
     嵌套调用由 `_render_unit_lines` 按当前层级给足两者。
     """
-    from storygraph.story.beat_model import menu_caption_text
+    from storygraph.story.beat_model import menu_caption_text, menu_head_text
 
     lines = []
 
@@ -1723,12 +1809,23 @@ def _render_menu_segments(run: list, segments: list, indent: str,
                           'code': line, 'status': status})
 
     caption = menu_caption_text(run[0].text)
-    head = f"{indent}menu"
-    if caption:
-        head += ' ' + _quote(caption)
-    head += ':'
+    # 头行是**共用的**一份拼法（`menu_head_text`）：单拍渲染与整份渲染必须
+    # 给出同一个头，否则增量补丁的逐行对位永远配不上（P0-2 的教训）。
+    head = f"{indent}{menu_head_text(run[0])}:"
     head += _inline_note(run[0])
     emit(head, '菜单', caption)
+    # ⚠ 标题写在**块里**（2026-10-18，审计 P0-2）：`menu` 头只接受
+    # `menu [label] [(args)]:`，字符串会被引擎判 `expected ':' not found.`。
+    # 多行标题逐行写成裸字符串（Ren'Py 把每一句都当标题行）。
+    if caption:
+        for cap_line in str(caption).split('\n'):
+            emit(opt_indent + _quote(cap_line), '菜单', cap_line)
+
+    # `menu:` 块里除选项以外的语句（`set seen` / `$ x = 1` …）：
+    # 原样吐回，位置就在选项之前（它们本来也写在选项之前）。
+    for _ex in _split_lines(getattr(run[0], 'raw', '') or ''):
+        if _ex.strip():
+            emit(opt_indent + _ex.strip(), '菜单', _ex.strip())
 
     for seg in segments:
         opt, body, foreign = (seg + [[], []])[:3] if len(seg) < 3 else seg
@@ -2384,17 +2481,28 @@ def _render_stage_from_fields(beat, emit, name_resolver, audit,
 
 
 
-def _render_audio_from_fields(beat, emit, audit=None) -> None:
+def _render_audio_from_fields(beat, emit, audit=None, only: str = '') -> None:
     """
     音频字段 → play/queue/stop 语句。
 
     `audit` 非空时用它把**资产 ID 翻成真实文件路径**（`spring` →
     `"bgm/spring.mp3"`），并把查不到的引用写成 `# TODO: 缺少资源 …`
     而不是生成一条播不响的语句。
+
+    `only`（`'music'` / `'sound'`）：**只出这一个通道**。
+
+    为什么需要它（2026-10-18）：一拍里可以同时有 `play music` 和
+    `play sound`，而它们之间还夹着别的行（`play ambience` 这种未建模声道、
+    `show screen`…）。从前这两个通道**永远一起出**（token 是 verb 级
+    `audio`），于是"夹在中间那一行"的位置表达不出来 —— 实测
+    `play music / play ambience / play sound` 导出成了
+    `play music / play sound / play ambience`（顺序被改）。
     """
     for channel, name, params, action, label in (
             ('music', beat.music, beat.music_params, beat.music_action, '音乐'),
             ('sound', beat.sound, beat.sound_params, beat.sound_action, '音效')):
+        if only and channel != only:
+            continue
         if not name and action not in ('stop', 'queue'):
             continue
         if action == 'stop':
@@ -2724,6 +2832,25 @@ def _collect_file_blocks(beats: list) -> list:
     return out
 
 
+def _label_params(group, name: str = '') -> str:
+    """
+    这一组拍对应的 label 头参数（`(flag=True)`）；没有就返回空串。
+
+    参数表由 `beat_build._attach_label_headers` 记在该 label 的**第一张拍**上。
+    渲染时只在**组头**读它，而且要求这一拍的 `label` 就是**正在输出的这个名字**
+    —— 调用方用 `label_name=` 把多段拍挤进一个 label 时（单章替换），
+    不能把别的 label 的参数表安到这个头上。
+    """
+    for b in group or ():
+        head = str(getattr(b, 'label_header', '') or '').strip()
+        if not head:
+            continue
+        if name and str(getattr(b, 'label', '') or '') != name:
+            continue
+        return head if head.startswith('(') else f'({head})'
+    return ''
+
+
 def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
                         idx_of) -> int:
     """
@@ -2752,7 +2879,7 @@ def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
         # （`tools/check_duplicate_labels.py`）。
         if group and all(_is_file_block_carrier(b) for b in group):
             continue
-        out.append(f"label {name}:")
+        out.append(f"label {name}{_label_params(group, name)}:")
         emitted_labels += 1
         body = []
         # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：

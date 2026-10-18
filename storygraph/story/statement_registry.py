@@ -616,10 +616,47 @@ def spec_columns(registry, head: str) -> list:
     if spec is None:
         return []
     positions = _declared_positionals(spec)
+    multi = _declared_multi(spec)
+    cols = [c for c in (spec.columns or ()) if isinstance(c, dict)]
+    if not cols:
+        # ⚠⚠ **只有格子、没有列**的声明也要能编辑（2026-10-18）。
+        #
+        # 界面（`build_declaration`）同时写 `columns` 与 `pattern`，但手写的
+        # / 早期版本的 `storygraph.rules.json` 可能只写了 `pattern` ——
+        # 那时卡片上**一格都不出现**（声明明明说了"后面跟这几个词"），
+        # 而人只会看到"我声明了，参数却不存在"。
+        # 从格子推列是**机械**的（格子本来就是这条语句的形状声明）：
+        # 每一格只要有列名（`column`）就是一列，候选直接照抄。
+        cols = []
+        try:
+            from storygraph.authoring.pattern import parse_pattern
+            slots = parse_pattern(getattr(spec, 'pattern', None) or ()) or ()
+        except Exception as e:                   # noqa: BLE001 - 认不出就不建列
+            swallow('story.statement_registry.spec_columns.pattern', e)
+            slots = ()
+        for slot in slots:
+            # ⚠ **关键字格不建列**（2026-10-18）：它是"固定几个字"，
+            # 值就是那句话本身 —— 建一列等于让改参数的人**把语句名改掉**
+            # （折回时按位置号替换第 0 个词 → `sfx_mix` 变了，整条语句废掉）。
+            if str(slot.get('kind') or '') == 'keyword':
+                continue
+            # ⚠ **可选段用"脚本里那个词"当列名**（2026-10-18）：`gain=-6` 里
+            #   写回时用的是 `gain`（`set_spec_arg` 按列名拼 `<名>=<值>`），
+            #   而「音量」只是给人看的标签。用列名拼就会写出 `音量=-6`
+            #   —— 一个脚本里根本不存在的参数（引擎当场报错）。
+            _kind = str(slot.get('kind') or '')
+            name = str((slot.get('text') if _kind == 'optional'
+                        else slot.get('column')) or '').strip()
+            label = str(slot.get('column') or name).strip()
+            if not name or any(str(c.get('name')) == name for c in cols):
+                continue
+            item = {'name': name, 'label': label,
+                    'choices': [str(c) for c in (slot.get('options') or ())]}
+            if slot.get('multi'):
+                item['multi'] = True
+            cols.append(item)
     out = []
-    for col in (spec.columns or ()):
-        if not isinstance(col, dict):
-            continue
+    for col in cols:
         name = str(col.get('name') or '').strip()
         if not name:
             continue
@@ -631,7 +668,32 @@ def spec_columns(registry, head: str) -> list:
                     'choices': [str(c) for c in (col.get('choices') or ())],
                     'required': bool(col.get('required')),
                     'positional': pos,
+                    # "这一格能装好几个词"（多音轨 / 多声部）：卡片据此给提示
+                    'multi': bool(col.get('multi')) or name in multi,
                     'choices_from': str(col.get('choices_from') or '')})
+    return out
+
+
+def _declared_multi(spec) -> set:
+    """
+    `{列名}` —— 哪些格子在声明里标了"可以有多个"（`pattern[].multi`）。
+
+    为什么要单独算：`columns[].` 里没有这一位（界面把它存在格子上），
+    而卡片/表格要据此决定"这一格能不能连写多个词"。
+    认不出（没有 pattern）→ 空集，行为与从前一样。
+    """
+    try:
+        from storygraph.authoring.pattern import parse_pattern
+    except Exception as e:                       # noqa: BLE001 - 认不出就不标
+        swallow('story.statement_registry.declared_multi.import', e)
+        return set()
+    out: set = set()
+    for slot in (parse_pattern(getattr(spec, 'pattern', None) or ()) or ()):
+        if not isinstance(slot, dict) or not slot.get('multi'):
+            continue
+        name = str(slot.get('column') or '').strip()
+        if name:
+            out.add(name)
     return out
 
 
@@ -669,6 +731,16 @@ def _declared_positionals(spec) -> dict:
         return {}
     cols = [c for c in (getattr(spec, 'columns', None) or ())
             if isinstance(c, dict) and str(c.get('name') or '').strip()]
+    if not cols:
+        # 只有格子、没有列的声明（2026-10-18）：位置号照样要算 —— 否则
+        # `spec_arg_cells` 只能退回"按 key=value 找"，位置参数**整排空着**。
+        # 与 `spec_columns` 的推导同源：格子上的列名就是列名。
+        seen_cols: set = set()
+        for slot in slots:
+            name = str(slot.get('column') or '').strip()
+            if name and name not in seen_cols:
+                seen_cols.add(name)
+                cols.append({'name': name, 'label': name})
     out: dict = {}
     used = set()
     token_index = 0
@@ -686,7 +758,19 @@ def _declared_positionals(spec) -> dict:
                        str(col.get('label') or '').strip()}:
                 hit = col
                 break
-        if hit is None:
+        if hit is None and kind != 'keyword':
+            # ⚠⚠ **固定字格不许"顺序兜底"拿走一列**（2026-10-18 第五轮攻击修，P0）。
+            #
+            # 声明里 `pattern` 有固定字格（`swim_suit` / `mood`），而 `columns`
+            # 只列取值列（这是**最常见**的写法：固定字不是参数、不该有列）时，
+            # 兜底会把这个固定字格跟「人物」配成一对 —— 于是：
+            #
+            #     人物@0（本该 @1）、服装@1、心情@2
+            #
+            # `@N` 又按"第几格"去用 → 改「人物」时改的是**语句名本身**：
+            # 实测 `swim_suit lyj "泳装" mood=happy` → `lyj happy "泳装" mood=happy`
+            # （动作词没了，整条语句变成一个不存在的语句）。
+            # 固定字只有**名字对得上**时才认领一列（人真的给它建了列）。
             rest = [c for c in cols if id(c) not in used]
             if rest:
                 hit = rest[0]                    # 顺序兜底（1:1 对位）
@@ -808,6 +892,9 @@ def dynamic_spec_columns(beats, registry) -> list:
                         'label': col['label'], 'choices': list(col['choices']),
                         'required': col['required'],
                         'positional': col.get('positional'),
+                        # "这一格能装好几个词"（2026-10-18）：卡片据此在那一格
+                        # 旁边写"可写多个（空格分隔）"，Excel 侧目前不看它。
+                        'multi': bool(col.get('multi')),
                         # ⚠ **把声明的格子也带出去**（2026-10-13 实测加）：
                         #   读值那一侧（`Beat.spec_arg_cells`）要靠它"按格子认领词"。
                         #   位置号那套数不准 —— `keyword` 格（固定几个字）**不占
@@ -1217,7 +1304,16 @@ def declare_statement(project_root, name: str, label: str = '',
     # ⭐ **位置序列**（2026-10-11）：格子有顺序、有类型 —— 那是"代码里长什么样"的
     #   唯一依据（用户撞墙记录："竖着排的三张卡凭什么对应那个顺序"）。
     #   ⚠ 只增不改：没给 `pattern` 时，清单产物与以前**逐字节一样**。
-    slots = [s for s in (pattern or ()) if isinstance(s, dict) and s.get('kind')]
+    #
+    #   ⚠⚠ **`_required_set` 不许进清单**（2026-10-18 第五轮）：
+    #     它只是 `pattern.parse_pattern` 用来区分"人说的 required"与"默认补的
+    #     required"的内部标记（见 `with_optional_defaults`）。清单里存的是**具体的**
+    #     `required` 值，读回来时"键在 = 说过的"，语义自动成立 ——
+    #     把内部标记写进用户要读、要 diff、要手改的 `storygraph.rules.json`
+    #     只是噪声。
+    slots = [{k: v for k, v in s.items() if k != '_required_set'}
+             for s in (pattern or ())
+             if isinstance(s, dict) and s.get('kind')]
     if slots:
         entry['pattern'] = slots
 

@@ -139,11 +139,23 @@ def test_a_multi_slot_swallows_several_words():
     ⭐⭐ 真机：`show lan happy sad` 的 `happy sad` 是**同一格**。
 
     用户："A 是默认的，也就是可填可不填的……但是它不是一段，它允许有多个！"
+
+    ⚠⚠ 2026-10-17 修（方向纠正）：这条原来把 `multi` 挂在「服装」上，然后要求
+      服装 = `happy` —— 可 `happy` 是**表情**的候选（同文件那张 layeredimage
+      里它在 `expressions` 组），服装那一组只有 `clothes2` / `base_hand_up`。
+      于是旧期望测试的其实是"多值格把邻居的词焊进自己值里"，正是用户这次投诉的
+      那件事。现在改成用**两个都属于服装的词**来证明"可多个"还活着
+      （真机形状 `happy sad` 同一格，由 `THREE` 那组判据覆盖）。
     """
-    got = P.match_line(MULTI_PATTERN, 'show lan happy sad')
+    # ① 两个都属于它 → 全吃
+    got = P.match_line(MULTI_PATTERN, 'show lan clothes2 base_hand_up sad')
     assert got['ok'], got
-    assert [(c['column'], c['text']) for c in got['cells']] == \
-        [('', 'show'), ('角色', 'lan'), ('服装', 'happy'), ('表情', 'sad')]
+    assert [(c['column'], c['text']) for c in got['cells']] == [
+        ('', 'show'), ('角色', 'lan'), ('服装', 'clothes2 base_hand_up'),
+        ('表情', 'sad')], got['cells']
+    # ② 只吃属于它的那一串，邻居的词一个都不动
+    got2 = P.match_line(MULTI_PATTERN, 'show lan clothes2 happy sad')
+    assert got2['cells'][2]['text'] == 'clothes2', got2['cells']
 
 
 def test_a_multi_slot_may_be_empty_and_does_not_steal():
@@ -156,9 +168,9 @@ def test_a_multi_slot_may_be_empty_and_does_not_steal():
     assert got['ok'], got
     assert [(c['column'], c['text']) for c in got['cells']] == \
         [('', 'show'), ('角色', 'lan'), ('服装', ''), ('表情', 'happy')]
-    # 两个词都属于它时，它该全吃
-    got2 = P.match_line(MULTI_PATTERN, 'show lan clothes2 happy shy')
-    assert got2['cells'][2]['text'] == 'clothes2 happy', got2['cells']
+    # 两个词都属于它时，它该全吃（两个都是服装那一组的，不是表情的）
+    got2 = P.match_line(MULTI_PATTERN, 'show lan clothes2 base_hand_up shy')
+    assert got2['cells'][2]['text'] == 'clothes2 base_hand_up', got2['cells']
 
 
 def test_multi_is_off_by_default():

@@ -968,12 +968,13 @@ def _beats_snapshot_issues(beats) -> list:
 
 def _stage_specs_of(beat) -> list:
     """这一拍舞台指令里出现的图像名（立绘 / 退场 / 背景）。"""
+    from storygraph.core.vocabulary import split_stage_items
     out = []
-    for raw in (beat.show or '').split(';'):
+    for raw in split_stage_items(beat.show or ''):
         item = raw.strip()
         if item:
             out.append(item.split('@')[0].strip())
-    for raw in (beat.hide or '').split(';'):
+    for raw in split_stage_items(beat.hide or ''):
         item = raw.strip()
         if item:
             out.append(item.split('@')[0].strip())

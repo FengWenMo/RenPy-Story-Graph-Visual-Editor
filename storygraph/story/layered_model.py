@@ -519,7 +519,7 @@ def expand_displayable(expr, helpers: dict, image_format: str = '',
     `params` 是已知实参（展开辅助函数时用）。`depth` 防递归。
     """
     if depth > 6:
-        return [{'note': f'展开太深，放弃：{str(expr)[:60]}'}]
+        return [{'note': f'展开太深，放弃：{str(expr)[:60]}', 'error': True}]
     params = params or {}
     src = str(expr or '').strip()
     if not src:
@@ -636,10 +636,11 @@ def _expand_helper_call(name, params, args, depth, helpers, image_format):
                 fn_params[pname] = v
         inner = _return_expr(fn['body'])
         if not inner:
-            return [{'note': f'辅助函数 {name} 里没有可解析的 return'}]
+            return [{'note': f'辅助函数 {name} 里没有可解析的 return',
+                 'error': True}]
         out = expand_displayable(inner, helpers, image_format,
                                  fn_params, depth + 1)
-        return out or [{'note': f'辅助函数 {name} 展开为空'}]
+        return out or [{'note': f'辅助函数 {name} 展开为空', 'error': True}]
 
 def _expand_composite_call(name, params, args, depth, helpers, image_format):
     """
@@ -677,7 +678,8 @@ def _expand_composite_call(name, params, args, depth, helpers, image_format):
             pos = _value_of(node, helpers, image_format, params, depth)
             i += 1
             if i >= len(args):
-                out.append({'note': f'{name} 末尾多了一个位置元组，后面没有图'})
+                out.append({'note': f'{name} 末尾多了一个位置元组，后面没有图',
+                        'error': True})
                 break
             node = args[i]
         for layer in _expand_node(node, helpers, image_format, params, depth):
@@ -689,7 +691,7 @@ def _expand_composite_call(name, params, args, depth, helpers, image_format):
                     swallow('layered_model._expand_composite_call', exc)
             out.append(layer)
         i += 1
-    return out or [{'note': f'{name} 没展开出层'}]
+    return out or [{'note': f'{name} 没展开出层', 'error': True}]
 
 def _expand_node(node, helpers, image_format, params, depth) -> list:
     if node is None:
@@ -699,11 +701,11 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
         if isinstance(val, str) and val:
             return [{'path': _image_path(val, image_format), 'mask': None,
                      'crop': None, 'offset': None, 'note': ''}]
-        return [{'note': f'认不出的值：{_src_of(node)}'}]
+        return [{'note': f'认不出的值：{_src_of(node)}', 'error': True}]
     if node.kind == 'tuple':
         return []
     if node.kind != 'call':
-        return [{'note': f'认不出的表达式：{_src_of(node)}'}]
+        return [{'note': f'认不出的表达式：{_src_of(node)}', 'error': True}]
     name = node.value.split('.')[-1]
     args = node.args
     # 项目里的辅助函数：代入参数后重解析
@@ -717,7 +719,7 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
             return [{'path': _image_path(img, image_format),
                      'mask': _image_path(mask, image_format),
                      'crop': None, 'offset': None, 'note': 'AlphaMask'}]
-        return [{'note': 'AlphaMask 的参数认不出'}]
+        return [{'note': 'AlphaMask 的参数认不出', 'error': True}]
     if name in ('Crop', 'im.Crop') and len(args) >= 2:
         box = _value_of(args[0], helpers, image_format, params, depth)
         img = _value_of(args[1], helpers, image_format, params, depth)
@@ -725,7 +727,7 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
             return [{'path': _image_path(img, image_format), 'mask': None,
                      'crop': tuple(int(v) for v in box), 'offset': None,
                      'note': 'Crop'}]
-        return [{'note': 'Crop 的参数认不出'}]
+        return [{'note': 'Crop 的参数认不出', 'error': True}]
     if name in ('Composite', 'LiveComposite'):
         return _expand_composite_call(name, params, args, depth,
                                       helpers, image_format)
@@ -735,7 +737,7 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
                 for ly in out]
     if name == 'Null':
         return []
-    return [{'note': f'不认识的 displayable：{name}'}]
+    return [{'note': f'不认识的 displayable：{name}', 'error': True}]
 
 
 def _src_of(node) -> str:
@@ -1079,8 +1081,25 @@ def resolve_layers(model: LayerModel, tag: str, attrs, project_root=None) -> Lay
                                                img.image_format,
                                                {'image': chosen.name}),
                             project_root))
-    plan.ok = bool(plan.layers) and not all(
-        ly.get('note') and not ly.get('path') for ly in plan.layers)
+    # **部分失败也算失败**（2026-10-18，审计 P1-5）。
+    #
+    # 从前判据是"有层，且不是**全部**层都只是 note" —— 于是一张四层立绘里
+    # 只要有一层认不出（`AlphaMask` 里用了没见过的写法、或者图找不到），
+    # `ok` 仍是 True，调用方就**不会退回老路**：画出来是一张**缺胳膊**的
+    # 立绘，而不是"这张我认不出"。缺一块的立绘比"没画"更误导人 ——
+    # 用户会以为项目里的资源就长这样。
+    #
+    # 判据收紧成"每一层都真的落到文件、且没有任何 unresolved"：
+    #   · 层里带 `note` = 那一层没解析出来（`expand_displayable` 的兜底）；
+    #   · `path is None` = 文件找不到；
+    #   · `plan.unresolved` = 有组的条件认不出（可能整组被错跳过）。
+    # 判据用 `error`（展开/找文件失败时由 `expand_displayable` /
+    # `_abs_layers` 显式打上），**不是** `note` —— `note` 也会写
+    # "这是 AlphaMask" 这种正常说明。
+    _bad_layers = [ly for ly in plan.layers
+                   if not ly.get('path') or ly.get('error')]
+    plan.ok = (bool(plan.layers) and not _bad_layers
+               and not plan.unresolved)
     return plan
 
 
@@ -1096,6 +1115,10 @@ def _abs_layers(layers, project_root) -> list:
             real = _resolve_path(rel, project_root)
             if real is None:
                 ly['note'] = (ly.get('note') or '') + f'（找不到 {rel}）'
+                # **记成"这一层没成"**（2026-10-18，审计 P1-5）：调用方靠
+                # 它判断"要不要退回老路"。文件找不到时，光有 note 不够 ——
+                # note 也被用来写"这是 AlphaMask"这种**正常**说明。
+                ly['error'] = True
                 if key == 'path':
                     ly['path'] = None
             else:

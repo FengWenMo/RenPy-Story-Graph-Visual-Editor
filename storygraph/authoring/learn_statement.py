@@ -182,7 +182,7 @@ def build_declaration(name: str, label: str = '', docs: str = '',
             # ⚠ 写**输入里真的给过的**（含显式的 `False`）——
             #   "说过 false"和"没说"在语义上是两件事，往返要保真；
             #   而**整个键都没给**时不写，旧的产物因此逐字节不变。
-            for key in ('limit', 'multi'):
+            for key in ('limit', 'multi', 'required'):
                 if isinstance(raw_slot, dict) and key in raw_slot:
                     item[key] = bool(slot.get(key))
             slots.append(item)
@@ -759,6 +759,11 @@ def _shape_words(slot: dict) -> str:
         bits.append('只能选这些' if slot.get('limit') else '从候选里选')
     if slot.get('multi'):
         bits.append('可多个')
+    if kind in ('variable', 'choice') and not slot.get('required', True):
+        # 用户 2026-10-18：`show ye happy` 里的「服装」**可填可不填**
+        # （Ren'Py 的属性本来就是可选的）。预览必须把这条说出来，
+        # 否则人看到"没写服装"只会以为是自己漏了。
+        bits.append('可不填')
     return '，'.join(bits)
 
 

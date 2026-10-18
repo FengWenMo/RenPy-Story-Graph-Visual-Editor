@@ -194,7 +194,8 @@ def _cmd_build(args) -> int:
 
     result = build_project(
         args.project, asset_dir=args.asset_dir, out_dir=args.out,
-        engine=args.engine, strict=args.strict, char_limit=args.char_limit)
+        engine=args.engine, strict=args.strict, char_limit=args.char_limit,
+        engine_lint=not bool(getattr(args, 'no_engine_lint', False)))
     print(format_build_result(result))
     if result.report_path:
         print(f'\n报告：{result.report_path}')
@@ -292,12 +293,20 @@ def _cmd_table(args) -> int:
         from storygraph.pipeline.compile import (compile_table,
                                                  format_compile_result)
 
-        out = Path(args.out) if args.out else \
-            Path(args.path).with_suffix('.rpy')
+        # 默认输出：给了 `--source` 就**写回那一章**（2026-10-18，审计 P1-7
+        # "写回不闭环"）—— 从前默认是 xlsx 旁边的同名 .rpy，产物落不到
+        # 原章节上，用户还得自己搬。没给 --source（新建）才用表名。
+        if args.out:
+            out = Path(args.out)
+        elif getattr(args, 'source', None):
+            out = Path(args.source)
+        else:
+            out = Path(args.path).with_suffix('.rpy')
         _path, _sheet, result = compile_table(
             args.path, rpy_path=out, registry=registry, write_sheet=False,
             force=bool(getattr(args, 'force', False)),
-            source_path=getattr(args, 'source', None), skip_empty=True)
+            source_path=getattr(args, 'source', None), skip_empty=True,
+            engine_lint=not bool(getattr(args, 'no_engine_lint', False)))
         if result.empty:
             print('剧本表为空', file=sys.stderr)
             return 2
@@ -651,7 +660,14 @@ def _cmd_compile(args) -> int:
         return 2
 
     registry = _load_registry(args)
-    out = Path(args.out) if args.out else table_path.with_suffix('.rpy')
+    # 与 `table xlsx2rpy` 同一条口径（2026-10-18，审计 P1-7）：给了 --source
+    # 就默认**写回那一章**，否则输出到表旁边。
+    if args.out:
+        out = Path(args.out)
+    elif getattr(args, 'source', None):
+        out = Path(args.source)
+    else:
+        out = table_path.with_suffix('.rpy')
     # `--force` 是逃生舱：允许覆盖已存在的手写 .rpy
     # （见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
     # `--source` 是**无损**那条路：给出这一章原来的 .rpy，走增量合并，
@@ -735,6 +751,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--engine', default='renpy',
                     choices=['renpy', 'unity', 'godot', 'json', 'csv'],
                     help='目标引擎（默认 renpy）')
+    sp.add_argument('--no-engine-lint', dest='no_engine_lint',
+                    action='store_true',
+                    help='不跑 SDK lint（默认**跑**：产物能不能被引擎解析，'
+                         '现在是一条构建门禁。没有 SDK 时自动跳过并如实说明）')
     sp.set_defaults(func=_cmd_build)
 
     sp = sub.add_parser('table', help='单文件 .rpy ↔ .xlsx')
@@ -751,6 +771,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--force', action='store_true',
                     help='目标已存在也允许覆盖（会丢掉 default/init python '
                          '等不进表的东西，明确知道自己在做什么时才用）')
+    sp.add_argument('--no-engine-lint', dest='no_engine_lint',
+                    action='store_true',
+                    help='不跑 SDK lint（默认跑：这是唯一能挡住'
+                         '"产物过不了引擎"的闸门）')
     sp.set_defaults(func=_cmd_table)
 
     sp = sub.add_parser('compile',

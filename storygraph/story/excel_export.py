@@ -174,7 +174,8 @@ def _unknown_show_words(show_text, facts) -> list:
     from storygraph.core import engine_facts as EF
 
     out: list = []
-    for item in str(show_text or '').split(';'):
+    from storygraph.core.vocabulary import split_stage_items
+    for item in split_stage_items(str(show_text or '')):
         roles = classify_show_words(item)
         if roles.intro_kind != 'image':
             # 非图像目标：没有"立绘属性"这件事（真机 112 行 `show screen …`）
@@ -462,6 +463,9 @@ def export_beats_to_excel(beats: list, output_path,
         _write_spec_arg_columns(ws, beats, statements, len(beats),
                                 ranges=ranges, names=names)
         _write_keyword_sheet(wb, registry)
+        # **活引用**（2026-10-18，审计 P1-6）：Beats ⇄ 资源表的真公式视图。
+        # 放在候选表之后（要引用它们），不依赖 UI，也不改 Beats 的列契约。
+        _live_ref_sheet(wb, beats, ranges)
         # 资源图库：给策划"看图选 ID"用的派生视图（不是符号表）
         _write_asset_gallery(
             wb, registry,
@@ -807,6 +811,16 @@ def _write_usage_sheet(wb, registry, beats, has_candidates: bool):
                                                 '人话或原生写法都行'),
         ('代码 CodeBlock', '程序区', '程序', '原样抄进脚本的逃生舱，不解析不校验'),
         ('内容指纹 ContentHash', '程序区', '协作', '自动重算，别改'),
+        # 下面几列都是**隐藏列**（工具读写，策划平时看不见），
+        # 列在这里是为了"表里到底有哪些格子"能一句句说清。
+        ('label 参数 LabelHeader', '程序区', '程序',
+         '`label 名(flag=True):` 的参数表；只记在该 label 的第一张拍上'),
+        ('台词后缀 SayTail', '高级区', '程序',
+         '台词引号后的样式子句（`(what_color="#f00")` / `with` / `id`）；空 = 普通台词'),
+        ('菜单名 MenuName', '高级区', '程序',
+         '`menu 名(args):` 的「名」。它是真 label —— `jump` / `call` 能跳进这个菜单'),
+        ('菜单参数 MenuArgs', '高级区', '程序',
+         '`menu 名(args):` 的「(args)」原文（含括号），喂给菜单 screen；空 = 裸 `menu:`'),
     ]
     for row in rows:
         _append_text_row(ws, list(row))
@@ -1341,6 +1355,163 @@ def _defined_names_for(ranges: dict) -> dict:
     """已在工作簿里登记过名称的资产类型 → 名称（供挂下拉时优先使用）。"""
     return {t: _NAME_BY_TYPE[t] for t in ranges if t in _NAME_BY_TYPE}
 
+
+
+def _beat_col(name: str) -> str:
+    """`BEAT_FIELDS` 里的列名 → Excel 列字母（`Speaker` → `E`）。"""
+    from openpyxl.utils import get_column_letter
+    return get_column_letter(BEAT_FIELDS.index(name) + 1)
+
+
+def _sheet_of_ref(ref: str) -> str:
+    """`"'Candidates_角色'!$A$3:$A$20"` → `"Candidates_角色"`。"""
+    return str(ref or '').split('!')[0].strip().strip("'")
+
+
+def _live_ref_sheet(wb, beats, ranges: dict) -> None:
+    """
+    「资源引用（活）」—— Beats ⇄ 资源表之间的**真公式**（2026-10-18，审计 P1-6）。
+
+    为什么需要它（审计原话）："下拉是**候选**，不是**引用**：改资源表，
+    Beats 里已写的值不会跟着变（0 个公式）"。于是"表格之间相互引用"
+    只是看起来像，实际是一堆死值。
+
+    这张表的每一格都是**公式**（除了行号），两种连接：
+
+      · **Beats → 资源表**：`VLOOKUP(说话人, Candidates_角色!A:C, 2, FALSE)`
+        —— 资源表里把"说明"（显示名 / 路径）改掉，这张表**立刻**跟着变；
+        这是"引用"而不是"候选"的可验证形态；
+      · **资源表 → Beats**：`COUNTIF(Beats!$E:$E, "lj")`
+        —— 每个资源被多少拍引用，改 Beats 立即重算。策划删资源前
+        先看这一列就知道会不会删断。
+
+    ⚠ 刻意**不**把 Beats 自己的格子改成公式：那会让"编辑值"变成
+    "覆盖公式"，一次手滑就丢连接。引用是**旁路视图**，不是把主表变成
+    电子表格程序。
+    """
+    cols = {name: _beat_col(name) for name in
+            ('Label', 'Speaker', 'Text', 'Scene', 'Show', 'At',
+             'BGM', 'SFX', 'Voice')}
+    ws = wb.create_sheet('资源引用（活）')
+    ws.cell(row=1, column=1).value = (
+        '↓ 这张表除了行号，**全部是公式**（不是死值）：改左边资源表、'
+        '或改 Beats，这里的显示名 / 路径 / 引用次数会立刻重算。')
+    headers = ['行号', '章节', '说话人', '说话人（资源表）', '台词',
+               '背景', '背景文件', '立绘', '立绘文件', '位置',
+               '音乐', '音乐文件', '音效', '音效文件', '语音', '语音文件']
+    for col, head in enumerate(headers, start=1):
+        ws.cell(row=2, column=col).value = head
+        ws.cell(row=2, column=col).fill = _HEADER_FILL
+        ws.cell(row=2, column=col).font = _HEADER_FONT
+
+    sheet_char = _sheet_of_ref((ranges or {}).get('character', ''))
+    sheet_img = _sheet_of_ref((ranges or {}).get('image', ''))
+    sheet_music = _sheet_of_ref((ranges or {}).get('music', ''))
+    sheet_sound = _sheet_of_ref((ranges or {}).get('sound', ''))
+    sheet_voice = _sheet_of_ref((ranges or {}).get('voice', ''))
+
+    def look(sheet, cell_ref):
+        if not sheet:
+            return '""'
+        return f'IFERROR(VLOOKUP({cell_ref},{sheet}!$A:$C,3,FALSE),"")'
+
+    def look_desc(sheet, cell_ref):
+        if not sheet:
+            return '""'
+        return f'IFERROR(VLOOKUP({cell_ref},{sheet}!$A:$C,2,FALSE),"")'
+
+    r = 3
+    for i, beat in enumerate(beats, start=1):
+        src = i + 1                      # Beats 里这一拍的行号
+        ws.cell(row=r, column=1).value = getattr(beat, 'line_id', '') or ''
+        formulas = [
+            f'=IFERROR(Beats!${cols["Label"]}{src},"")',
+            f'=IFERROR(Beats!${cols["Speaker"]}{src},"")',
+            '=' + look_desc(sheet_char, f'$C{r}'),
+            f'=IFERROR(Beats!${cols["Text"]}{src},"")',
+            f'=IFERROR(Beats!${cols["Scene"]}{src},"")',
+            '=' + look(sheet_img, f'$F{r}'),
+            f'=IFERROR(Beats!${cols["Show"]}{src},"")',
+            '=' + look(sheet_img, f'$H{r}'),
+            f'=IFERROR(Beats!${cols["At"]}{src},"")',
+            f'=IFERROR(Beats!${cols["BGM"]}{src},"")',
+            '=' + look(sheet_music, f'$K{r}'),
+            f'=IFERROR(Beats!${cols["SFX"]}{src},"")',
+            '=' + look(sheet_sound, f'$M{r}'),
+            f'=IFERROR(Beats!${cols["Voice"]}{src},"")',
+            '=' + look(sheet_voice, f'$O{r}'),
+        ]
+        for col, formula in enumerate(formulas, start=2):
+            ws.cell(row=r, column=col).value = formula
+        r += 1
+    for col, w in zip('ABCDEFGHIJKLMNOP',
+                      (12, 14, 12, 20, 40, 18, 26, 22, 26, 12,
+                       16, 24, 16, 24, 14, 24)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = 'C3'
+
+    # ---- 第二块：资源 → 被引用次数（公式重算）----
+    r += 1
+    ws.cell(row=r, column=1).value = (
+        '↓ 资源被引用次数：改 Beats 就重算。删资源前先看这里 —— 不是 0 的'
+        '资源还有人在用。')
+    r += 1
+    for col, head in enumerate(('资源表', 'ID', '说明', '被引用次数'), start=1):
+        cell = ws.cell(row=r, column=col)
+        cell.value = head
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+    used_col = {'character': cols['Speaker'],
+                'image': cols['Show'],
+                'transform': cols['At'],
+                'music': cols['BGM'],
+                'sound': cols['SFX'],
+                'voice': cols['Voice']}
+    rows_of = []
+    for kind in ('character', 'image', 'transform', 'music', 'sound', 'voice'):
+        if not (ranges or {}).get(kind):
+            continue
+        data = _asset_data_of(wb, _sheet_of_ref(ranges[kind]))
+        for aid, desc in data:
+            rows_of.append((kind, aid, desc))
+    for kind, aid, desc in rows_of:
+        r += 1
+        ws.cell(row=r, column=1).value = _KIND_CN.get(kind, kind)
+        # ID / 说明是**资源表那边的值**：用公式引用，改资源表立即跟着变
+        sheet = _sheet_of_ref(ranges[kind])
+        ws.cell(row=r, column=2).value = (
+            f'=IFERROR(VLOOKUP("{aid}",{sheet}!$A:$C,1,FALSE),"{aid}")')
+        ws.cell(row=r, column=3).value = (
+            f'=IFERROR(VLOOKUP($B{r},{sheet}!$A:$C,2,FALSE),"")')
+        col = used_col[kind]
+        if kind == 'character':
+            # 说话人是**整格一个 ID** → 精确匹配
+            ws.cell(row=r, column=4).value = (
+                f'=COUNTIF(Beats!${col}:${col},$B{r})')
+        else:
+            # 图像/音频/位置在 Beats 里是"一个格里多个词" → 包含匹配
+            ws.cell(row=r, column=4).value = (
+                f'=COUNTIF(Beats!${col}:${col},"*"&$B{r}&"*")')
+    return ws
+
+
+_KIND_CN = {'character': '角色', 'image': '图片', 'transform': '变换',
+            'music': '音乐', 'sound': '音效', 'voice': '语音'}
+
+
+def _asset_data_of(wb, sheet_name: str) -> list:
+    """从候选表里读回 `[(ID, 说明)]`（只读 A/B 两列，第 3 行起）。"""
+    try:
+        ws = wb[sheet_name]
+    except KeyError:
+        return []
+    out = []
+    for row in ws.iter_rows(min_row=3, min_col=1, max_col=2, values_only=True):
+        aid = str(row[0] or '').strip()
+        if not aid:
+            continue
+        out.append((aid, str(row[1] or '')))
+    return out
 
 
 def _write_candidate_sheets(wb, registry) -> dict:

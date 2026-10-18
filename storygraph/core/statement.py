@@ -398,8 +398,14 @@ class Statement:
     # ---------- 工厂方法 ----------
 
     @classmethod
-    def make_say(cls, speaker, text, condition='', source=('', 0)):
+    def make_say(cls, speaker, text, condition='', source=('', 0), tail=''):
         payload = {'speaker': speaker, 'text': text}
+        # ⚠ **只有真有时才写**（2026-10-18）：`_compute_content_hash` 算的是
+        # 整个 payload —— 给每一句台词都塞一个 `tail=''`，会让**全项目**
+        # 每一条 say 的内容哈希都变一次（快照/协作/金标一起红），
+        # 而它们其实一个字节都没变。
+        if tail:
+            payload['tail'] = str(tail)
         return cls(
             kind=StatementKind.SAY,
             payload=payload,
@@ -472,7 +478,7 @@ class Statement:
 
     @classmethod
     def make_play(cls, action, channel, name, loop=False,
-                  fadein=0.0, fadeout=0.0,
+                  fadein=0.0, fadeout=0.0, extra='',
                   condition='', source=('', 0)):
         payload = {
             'action': action,      # 'play' / 'queue' / 'stop'
@@ -482,6 +488,11 @@ class Statement:
             'fadein': float(fadein or 0.0),
             'fadeout': float(fadeout or 0.0),
         }
+        # 只在**真有**未建模参数时才加这个键：空值不入 payload，
+        # 免得所有 `play …` 的 content_hash 一起变（金标会无谓地抖）。
+        if str(extra or '').strip():
+            # 未建模参数的原文（`volume 0.5` 等）：原样回写，不改一个字节。
+            payload['extra'] = str(extra).strip()
         return cls(
             kind=StatementKind.PLAY,
             payload=payload,
@@ -502,8 +513,34 @@ class Statement:
         )
 
     @classmethod
-    def make_menu(cls, caption, condition='', source=('', 0)):
+    def make_menu(cls, caption, condition='', extras=(), source=('', 0),
+                  name='', args=''):
+        """
+        `menu [名] [(参数)]:` 一条语句。
+
+        `name` / `args`（2026-10-19，审计 P1-3 收尾）：
+          · `name` 是**真 label**（Ren'Py 的 `menu_statement` 会为它产出一条
+            `ast.Label`，所以 `jump 名` / `call 名` 跳得进来）；
+          · `args` 是**参数表原文**（含括号，`parse_arguments` 把它变成传给
+            菜单 screen 的参数）。
+
+        两者都**不进 `content_hash`**：`_HASH_FIELDS[MENU]` 只含 caption，
+        而 `extras` 同样不在里面。理由与前一条注释相同 —— 换一种写法不该
+        让所有菜单的 hash 一起变（那会打乱增量对位与翻译单元 ID）。
+        它们改的是产物、必须进拍指纹（`BEAT_FIELD_SPECS` 里的
+        `MenuName`/`MenuArgs` 都 `fingerprint=True`），那才是"改了要重写
+        文件"的判据。
+        """
         payload = {'caption': caption}
+        # 菜单块里除选项以外的合法语句（`set seen` …）：逐字保留、原样回写。
+        # 只有真有时才入 payload（否则所有菜单的 content_hash 一起变）。
+        _extras = [str(x) for x in (extras or ()) if str(x).strip()]
+        if _extras:
+            payload['extras'] = _extras
+        if str(name or '').strip():
+            payload['name'] = str(name).strip()
+        if str(args or '').strip():
+            payload['args'] = str(args).strip()
         return cls(
             kind=StatementKind.MENU,
             payload=payload,
@@ -536,10 +573,16 @@ class Statement:
         )
 
     @classmethod
-    def make_call(cls, target, condition='', source=('', 0), from_clause=''):
+    def make_call(cls, target, condition='', source=('', 0), from_clause='',
+                  args=''):
+        payload = {'target': target, 'from_clause': from_clause}
+        # ⚠ 只有真有时才写（同 `make_say` 的 tail）：不给每一句 call 塞一个
+        # 空键，免得动到既有 payload 形状。
+        if args:
+            payload['args'] = str(args)
         return cls(
             kind=StatementKind.CALL,
-            payload={'target': target, 'from_clause': from_clause},
+            payload=payload,
             condition=condition,
             source=source,
             content_hash='',

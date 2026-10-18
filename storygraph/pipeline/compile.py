@@ -127,6 +127,9 @@ class IncrementalOutcome:
     reason: str = ''
     changed_lines: int = 0
     coverage: float = 0.0
+    #: **原样透传**：这一章没有可编辑的拍（纯定义 / 屏幕 / init 文件）。
+    #: `text` 就是源文全文，写盘那一层应当"不写"或"原样复制"。
+    passthrough: bool = False
 
 
 def merge_incrementally(beats: list, generated_text: str, source_path=None,
@@ -172,7 +175,8 @@ def merge_incrementally(beats: list, generated_text: str, source_path=None,
     if res.ok:
         return IncrementalOutcome(res.text, True, '',
                                   changed_lines=res.changed_lines,
-                                  coverage=res.coverage)
+                                  coverage=res.coverage,
+                                  passthrough=bool(res.passthrough))
     reason = '；'.join(res.reasons) or f'对位率不足（{res.coverage:.0%}）'
     return IncrementalOutcome(generated_text, False, reason,
                               coverage=res.coverage)
@@ -180,7 +184,8 @@ def merge_incrementally(beats: list, generated_text: str, source_path=None,
 
 def write_compiled(result: CompileResult, rpy_path, *, beats=None,
                    source_path=None, registry=None, symbols=None,
-                   force: bool = False) -> CompileResult:
+                   force: bool = False,
+                   engine_lint: bool = False) -> CompileResult:
     """
     把编译结果落盘 —— **表 → .rpy 的唯一落盘口**。
 
@@ -211,6 +216,31 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
         write_generation,
     )
 
+    # **原样透传**（2026-10-18，审计 P1-1）：这一章没有一处可编辑的拍
+    # （纯 `define` / `screen` / `init python` 文件）。表里没有内容能改它，
+    # 所以产物只能是原文 —— 不写、不加标记、一个字节都不动。
+    #
+    # 为什么不走"报失败 → 退回全量"：全量重生成只认得拍，会把顶层块整段
+    # 重排（每条语句之间插空行、行尾空格被删、CRLF → LF）。真机
+    # `definitions.rpy` 1120 行变 1288 行，而用户**一处都没改**。
+    if inc.passthrough:
+        from storygraph.story.source_style import detect as _detect_style
+        from storygraph.story.paths import write_text_atomic
+        target = Path(rpy_path)
+        src = Path(source_path)
+        if target.resolve() != src.resolve():
+            # 目标是另一条路径：原样复制（含 BOM / 换行），不经过任何渲染。
+            try:
+                write_text_atomic(target, _detect_style(src).apply(inc.text))
+            except OSError:
+                result.written = False
+                return result
+        result.written = True
+        result.out_path = str(target)
+        result.patch_note = ('这一章没有可编辑的拍（纯定义 / 屏幕 / init 文件），'
+                            '原文逐字节保留')
+        return result
+
     if inc.used_patch:
         text = ensure_generator_marker(inc.text)
     else:
@@ -222,17 +252,27 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     source_text = None
     if source_path:
         try:
-            source_text = Path(source_path).read_text(encoding='utf-8')
+            # 读源走 `source_style`：剥 BOM、换行统一成 LF。门禁按行比
+            # （`opaque_loss`），带 BOM 的第一行会与产物对不上 → 误报
+            # "丢了顶层语句"（2026-10-18 审计 P0-1 的连带修）。
+            from storygraph.story.source_style import read_text as _read_src
+            source_text = _read_src(source_path)[0]
         except (OSError, UnicodeDecodeError):
             source_text = None
 
+    _lint_heads = ()
+    if engine_lint:
+        from storygraph.pipeline.engine_lint import declared_heads_near
+        _lint_heads = declared_heads_near(rpy_path)
     artifact = write_generation(text, rpy_path, force=force,
                                 merged_from_source=(source_path
                                                     if inc.used_patch
                                                     else None),
                                 source_text=source_text,
                                 source_path=source_path,
-                                beats=beats)
+                                beats=beats,
+                                engine_lint=engine_lint,
+                                lint_ignore_heads=_lint_heads)
     result.written = artifact.written
     result.out_path = artifact.out_path
     result.review_path = artifact.review_path
@@ -395,7 +435,8 @@ def _fill_export_sheet(ws, result, openpyxl, Font, PatternFill, Alignment):
 def compile_table(table_path, rpy_path=None, registry=None,
                   label_name=None, write_sheet: bool = True,
                   sheet_path=None, force: bool = False,
-                  source_path=None, skip_empty: bool = False) -> tuple:
+                  source_path=None, skip_empty: bool = False,
+                  engine_lint: bool = False) -> tuple:
     """
     一步到位：演出表 → (.rpy, 编译结果表)。
 
@@ -436,7 +477,7 @@ def compile_table(table_path, rpy_path=None, registry=None,
 
     result = compile_beats(beats, registry=registry, label_name=label_name)
     write_compiled(result, rpy_path, beats=beats, source_path=source_path,
-                   registry=registry, force=force)
+                   registry=registry, force=force, engine_lint=engine_lint)
 
     sheet = None
     if write_sheet:

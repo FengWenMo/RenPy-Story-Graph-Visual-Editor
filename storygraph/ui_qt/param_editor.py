@@ -114,27 +114,31 @@ class ValueChips(QWidget):
         # ⚠ **必须折行**：横排布局的最小宽 = 所有方块之和，候选一多就把卡片
         #   （进而整窗）顶宽，而这里不提供横向滚动 → 后面那列字被挤出窗口。
         self._row = FlowRow(spacing=T.SPACE['xs'])
-        outer.addWidget(self._row)
         self._edit = QLineEdit()
         self._edit.setPlaceholderText(self._placeholder_text())
         self._edit.returnPressed.connect(self._commit)
         self._edit.textEdited.connect(self._maybe_split)
-        #: 批量导入入口（**勾了"可以有多个"才露出来**，见 `set_multi`）：
-        #: 一行一个 / 空格分隔 / 直接粘一大段都能收。
+        #: 批量导入入口（**凡是能列候选的格子都有**，见 `set_multi`）：
+        #: 一行一个 / 逗号分隔 / 直接粘一大段都能收。
+        #:
+        #: ⚠ 2026-10-18 用户纠正（原话）：
+        #:   > 为什么只有可以选多个时才让我批量选择？明明从这些里选也应当有
+        #:   > 批量导入按钮
+        #:   他说得对：「从这些里选」正是候选最多的地方（真机 `expressions`
+        #:   组一次 68 个），而"多选"说的是**这一格能装几个**，不是"候选有几个"。
+        #:   两件事以前被一个勾选框绑在一起，于是单值格只能一个个敲。
         self._batch_btn = QPushButton('📋 批量粘贴一大段…')
         self._batch_btn.setProperty('role', 'ghost')
         self._batch_btn.setToolTip(
-            '一次粘一批候选值：一行一个、或空格/逗号分隔都行。\n'
-            '不勾"可以有多个"时只有一个值，所以这个入口藏起来。')
+            '一次粘一批候选值：一行一个、逗号分隔、空格分隔都行。\n'
+            '「这一格可以有多个」只影响收词口径（空格算不算分隔），'
+            '不影响这个入口。')
         self._batch_btn.clicked.connect(self.open_batch_import)
-        outer.addWidget(self._batch_btn)
-        self._batch_btn.setVisible(self._multi)
-        self._hint = QLabel('✅ 批量模式：一行一个 / 空格分隔 / 直接粘一大段，'
-                            '回车一次全收下')
+        self._batch_btn.setVisible(True)
+        self._hint = QLabel(self._hint_text())
         self._hint.setProperty('role', 'caption')
         self._hint.setWordWrap(True)
-        outer.addWidget(self._hint)
-        self._hint.setVisible(self._multi)
+        self._hint.setVisible(True)
         #: 批量导入对话框的"从项目里拿"来源（由卡片注入同一份 provider）
         self._sources_provider = None
         # ⚠⚠ 实测修复（用户报"按了回车没反应"）：`QLineEdit` 收到 Return 是
@@ -142,7 +146,17 @@ class ValueChips(QWidget):
         #   `QDialog`，把 Ok（autoDefault）点了 → **候选值刚加上、弹窗立刻被关掉**，
         #   还会顺着 `exec()==Accepted` 走写盘。这里装一道过滤器把它吃掉。
         self._edit.installEventFilter(self)
+        # ⚠ 顺序也是文案（2026-10-18 截图当场看出来的）：
+        #   旧顺序是 方块 → **一个满宽灰按钮** → 说明 → 输入框，
+        #   那个按钮长得跟输入框一样、还夹在说明和输入之间，人会以为"这里是
+        #   第二个输入框"。现在：方块（已有值）→ 输入框（就写这里）→
+        #   一行小字（收词口径）→ 按钮（要一次粘一大段才点）。
+        outer.addWidget(self._row)
         outer.addWidget(self._edit)
+        outer.addWidget(self._hint)
+        self._batch_row = FlowRow(spacing=T.SPACE['xs'])
+        self._batch_row.add(self._batch_btn)
+        outer.addWidget(self._batch_row)
         self._values: list = []
         #: 值 → 显示名（只用于芯片的**标签**：`蓝（lan）`）；`text()` 永远只写值。
         self._labels: dict = {}
@@ -173,29 +187,33 @@ class ValueChips(QWidget):
                 return
 
     def _placeholder_text(self) -> str:
+        """输入框里那句"怎么填" —— 分隔符由下面那行小字说，这里只说来干嘛。"""
         if self._multi:
-            return ('一行一个、空格分隔都行（例：happy sad 或 泳装 校服）；'
-                    '回车一次全收下')
-        return ('填一个就回车（例：泳装 ／ 校服）；值里可以有空格；'
-                '不填 = 编剧能随便写')
+            return '填一个或粘一段，回车收下'
+        return '填一个，回车收下（值里可以有空格）'
+
+    def _hint_text(self) -> str:
+        """输入框下面那行小字 —— 只说**收词口径**（按"这一格能装几个"换）。"""
+        if self._multi:
+            return '粘一大段也行：一行一个 / 空格分隔 / 逗号分隔，回车一次全收下'
+        return ('粘一大段也行：一行一个 / 逗号分隔（空格算值的一部分，'
+                '如「洛丽塔 长裙」）')
 
     def set_multi(self, on: bool):
         """
         同步"这一格可以有多个"（`FieldCard._multi` 勾选框）。
 
-        为什么要有这个方法（用户 2026-10-16）：
-        > 当能够多选的时候就必须要有批量导入候选
-
-        勾上之后：① 空格/换行**才算**分隔符（一行一个 / 粘一大段）；
-        ② 露出「📋 批量粘贴一大段…」入口与那行说明。
+        它只管**收词口径**（空格算不算分隔符、占位提示怎么写）——
+        「📋 批量粘贴一大段…」入口**不再跟着它藏**（用户 2026-10-18：
+        "明明从这些里选也应当有批量导入按钮"）：单值格的候选表一样可以很长
+        （真机 `expressions` 组 68 个），一个个敲不现实。
         """
         on = bool(on)
         if on == self._multi:
             return
         self._multi = on
         self._edit.setPlaceholderText(self._placeholder_text())
-        self._batch_btn.setVisible(on)
-        self._hint.setVisible(on)
+        self._hint.setText(self._hint_text())
 
     def is_multi(self) -> bool:
         return self._multi
@@ -298,9 +316,11 @@ class ValueChips(QWidget):
         用户 2026-10-16：
         > 这个你没有给我加批量导入……当能够多选的时候就必须要有批量导入候选
 
-        为什么"多选"才要（而不是所有格都摆出来）：一格只能填一个值的时候，
-        批量入口没有意义（收下 10 个也只会用一个）；而**多选格**恰恰是
-        "候选越多越好"的地方（真机 `expressions` 组一次就能倒出 68 个）。
+        用户 2026-10-18 纠正了范围：
+        > 为什么只有可以选多个时才让我批量选择？明明从这些里选也应当有批量导入按钮
+
+        所以入口对**所有能列候选的格子**都摆出来（`ValueChips` 只在
+        「从这些里选」时可见）；`multi` 只决定粘进来的空格算不算分隔符。
 
         返回**这次导入收下的值**（去重后真正加进去的那批；取消则空列表）。
         """
@@ -325,8 +345,8 @@ class ValueChips(QWidget):
         col = QVBoxLayout(dlg)
         col.setSpacing(T.SPACE['sm'])
 
-        tip = QLabel('粘一大段也行：一行一个、空格分隔、逗号分隔都认；'
-                     '去空、去重，**追加**到已有候选后面。')
+        tip = QLabel('粘一大段也行：一行一个 / 逗号分隔 / 空格分隔；'
+                     '去空、去重，追加到已有候选后面。')
         tip.setProperty('role', 'caption')
         tip.setWordWrap(True)
         col.addWidget(tip)
@@ -334,6 +354,12 @@ class ValueChips(QWidget):
         text = QPlainTextEdit()
         text.setPlaceholderText('例：\n泳装\n校服 汉服\nhappy sad')
         col.addWidget(text, 1)
+        # ⚠ 批量粘贴默认按"一大段清单"收（空格也算分隔）—— 真机的候选表
+        #   （`expressions` 组 68 个）多是空格/换行混排的。要保留
+        #   「洛丽塔 长裙」这种**值里带空格**的候选，就把这个勾去掉。
+        space = QCheckBox('空格也算分隔（关掉它 = 保留「洛丽塔 长裙」这种带空格的值）')
+        space.setChecked(True)
+        col.addWidget(space)
 
         sources = self.project_sources()
         listed = []
@@ -375,7 +401,8 @@ class ValueChips(QWidget):
         pick = _Pick([])
 
         def do_import():
-            vals = split_candidate_values(text.toPlainText(), multi=True)
+            vals = split_candidate_values(text.toPlainText(),
+                                          multi=bool(space.isChecked()))
             for item in (listed.selectedItems() if listed else ()):
                 vals.extend(str(v) for v in (item.data(Qt.UserRole) or []))
             pick.values = vals
@@ -427,10 +454,11 @@ class FieldCard(QFrame):
         这一格是                  [ 从这些里选 ▾ ]
         这一列叫什么（编剧看到的）  [ 角色         ]
         ☐ 这一格可以有多个（例：happy sad）
+        ☐ 这一格可以不填（不写就用默认）
         ☐ 编剧只能从下面这些里选
         [ 泳装 ✕ ] [ 校服 ✕ ]
         [ 一行一个、空格分隔都行 ]      ← 勾了"多个"就是这个口径
-        [ 📋 批量粘贴一大段… ]          ← 勾了"多个"才露出来
+        [ 📋 批量粘贴一大段… ]          ← 能列候选就有（2026-10-18 用户纠正）
 
     ⚠⚠ **勾了「可以有多个」= 换一副收词口径**（用户 2026-10-16：
     "当能够多选的时候就必须要有批量导入候选"）：
@@ -480,6 +508,9 @@ class FieldCard(QFrame):
         self._title = QLabel('这一格要填的东西')
         self._title.setProperty('role', 'cardTitle')
         self._title.setWordWrap(True)
+        #: 第几格（`FieldList` 在增删/换位之后会重排）—— 试切说"第 2 格"时，
+        #: 人要能一眼对上卡上那个数字，而不是自己数。
+        self._ordinal = 0
         head.addWidget(self._title, 1)
         #: ⚠ **缺列名要当场看得见**（2026-10-16 用户实测的坑）：从前没名字这一格
         #:   会被后端"静默丢掉"，用户只在控制台里看见一句"参数：无"，人当场懵。
@@ -494,7 +525,7 @@ class FieldCard(QFrame):
         #: 一键把"建议的列名"填进去（分栏自动认到的名字 / 刚导入的那组来源）
         self._name_suggest = QPushButton()
         self._name_suggest.setProperty('role', 'ghost')
-        self._name_suggest.setToolTip('把建议的名字填进「这一列叫什么」')
+        self._name_suggest.setToolTip('把建议的名字填进「表格里这一列叫什么」')
         self._name_suggest.clicked.connect(self._use_suggested_name)
         head.addWidget(self._name_suggest)
         self._name_suggestion = ''
@@ -504,7 +535,7 @@ class FieldCard(QFrame):
             '这一格的候选属于哪一栏（把下拉里的候选分组用，例如「服装」）。\n'
             '按"这一格的名字 / 显示成什么"自动认；认不出就不显示。')
         head.addWidget(self._column_hint)
-        self._pick_btn = QPushButton('⚡ 从项目里拿')
+        self._pick_btn = QPushButton('⚡ 从项目里导入候选')
         self._pick_btn.setProperty('role', 'ghost')
         self._pick_btn.setToolTip(
             '候选值不用手打：从项目里一次倒进来\n'
@@ -533,28 +564,36 @@ class FieldCard(QFrame):
 
         # ---- 单列堆叠的字段（**没有多列网格**）----
         self._kind = QComboBox()
-        for key, text in (('keyword', '固定几个字（如 show / at）'),
-                          ('variable', '谁都可以（如人物名）'),
-                          ('choice', '从这些里选（枚举）'),
-                          ('optional', '可出现可不出现的一段')):
+        for key, text in (('keyword', '固定的字（剧本里必须原样出现）'),
+                          ('variable', '任意文字（人名、数字…）'),
+                          ('choice', '从候选值里选'),
+                          ('optional', '固定的字 + 一个值（如 at left，可整段省略）')):
             self._kind.addItem(text, key)
         self._kind.setToolTip(
-            '固定几个字 = 剧本里必须原样出现这几个字；\n'
-            '谁都可以 = 任意值（人物名、数字…）；\n'
-            '从这些里选 = 编剧只能从你列的候选值里挑；\n'
-            '可出现可不出现 = 这一段有时写有时不写（如 at 位置）。')
+            '固定的字 = 剧本里必须原样出现这几个字（如 show / at）；\n'
+            '任意文字 = 谁都可以（人物名、数字…）；\n'
+            '从候选值里选 = 编剧只能从你列的候选值里挑；\n'
+            '固定的字 + 一个值 = 两件事合起来的一段，例如 at left（整段可以不写）。')
+        # ⚠ 下拉的宽度**不许**跟着最长那一条涨：卡片最小宽一旦被它顶到
+        #   320 px 以上，"选的一多就把后面的字挤出去"会换个地方复发
+        #   （`test_a_param_card_stays_narrow_even_with_many_choices` 当场红）。
+        self._kind.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._kind.setMinimumContentsLength(10)
         self._kind.currentIndexChanged.connect(self._on_kind_changed)
         self._kind.currentIndexChanged.connect(self._changed)
         # ⚠ **只有一个名字**（"剧本里怎么写"已删，见类 docstring）。
         #   它放的是**编剧看到的那一列叫什么**（例：角色 / 服装 / 神态）。
         self._name = QLineEdit()
-        self._name.setPlaceholderText('编剧看到的列名，例：角色 / 服装 / 神态')
+        self._name.setPlaceholderText('例：角色 / 服装 / 神态')
         self._name.setToolTip(
-            '这一格在表格/卡片上叫什么。\n'
+            '这一格在表格里那一列叫什么。\n'
             '填「角色」就够 —— 不用去管代码里那串字长什么样，'
-            '那由「试切」和项目里真实的资源告诉你。')
+            '那由「试一下」和项目里真实的资源告诉你。')
         self._name.textChanged.connect(self._changed)
         self._name.textChanged.connect(self._column_maybe_changed)
+        #: 人改了"表格里这一列叫什么" → 存量声明里那个**显示名**就不再代表它了
+        self._name.textChanged.connect(self._on_name_edited)
         #: 兼容视图：`label` 与 `_name` 现在**同源**（老代码读 `card._label`）。
         self._label = self._name
         #: ⚠ **内部键（旧形状的 `name`）**：只在读存量声明时非空。
@@ -576,11 +615,25 @@ class FieldCard(QFrame):
         #   > 你这个"可填可不填"的根本就没多段的选择！
         #   真机依据：`show lan happy sad` 里 `happy sad` 是**同一格**
         #   （`layeredimage lan` 的 expressions 组可以有多个属性）。
-        self._multi = QCheckBox('这一格可以有多个（例：happy sad）')
+        self._multi = QCheckBox('可以连着写多个（例：happy sad）')
         self._multi.setToolTip(
             '勾上 = 这一格可以连着写好几个词（空格分隔），试切会把它们都收进来。\n'
             '真机例子：`show lan happy sad` —— 一句里同时给两个表情属性。')
         self._multi.toggled.connect(self._changed)
+        # ⚠ 「这一格可以不填」（2026-10-18 用户现场）：
+        #   > 默认写法会报告切不上……实际上服装那一栏可填可不填……
+        #   > 不填就是默认写法，你可以去真实项目内查看一下定义。
+        #   真机依据（`sr_general` 的 `layeredimage lan` + 真实剧本）：
+        #   `show ye happy`（没写服装）出现 11 次、`show ling at bounce_once`
+        #   一个属性都没有 —— Ren'Py 的属性**本来就是可选的**。
+        #   ⚠ 只有**人动过**这个勾选框，`data()` 才会写出 `required`：
+        #     "没说"由语句头决定默认（`pattern.with_optional_defaults`）。
+        self._optional = QCheckBox('这一格可以不填（不写就用默认）')
+        self._optional.setToolTip(
+            '勾上 = 这一格空着也算写对了（`show ye happy` 里没写服装）。\n'
+            '不勾 = 这一格必须有值，缺了会报"第几格该有一个词"。')
+        self._req_touched = False
+        self._optional.toggled.connect(self._on_optional_toggled)
         self._values = ValueChips(on_change=self._changed)
         # ⚠ 「可以有多个」不只是个标志：它同时决定**候选值怎么收词**
         #   （空格算不算分隔符）、并露出批量导入入口（用户 2026-10-16：
@@ -612,11 +665,30 @@ class FieldCard(QFrame):
         self._literal_label = QLabel('这一格固定是哪几个字')
         self._literal_label.setProperty('role', 'fieldLabel')
         self._literal_label.setWordWrap(True)
+
+        # ⚠⚠ **类型下拉必须是界面上的东西**（2026-10-18 第六版当场抓到的 P0）：
+        #   它以前**从来没有被加进任何布局** —— 于是"这一格是"根本选不了，
+        #   人只能拿到"任意文字"，`固定几个字` / `从候选里选` / 可选段
+        #   在界面上**无路可走**（判据一直用 `add_param(kind=…)` 直接塞，
+        #   所以从来没红过）。现在它在第一行，紧挨着"这一格是"。
+        kind_row = QHBoxLayout()
+        kind_row.setSpacing(T.SPACE['xs'])
+        kind_tag = QLabel('这一格是')
+        kind_tag.setProperty('role', 'fieldLabel')
+        kind_row.addWidget(kind_tag)
+        self._kind.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        kind_row.addWidget(self._kind, 1)
+        self.layout().addLayout(kind_row)
         self._stack_add(self._literal_label)
         self._stack_add(self._literal)
-        self._field('这一列叫什么（编剧看到的）', self._name)
-        self._stack_add(self._multi)
-        self._stack_add(self._limit)
+        self._field('表格里这一列叫什么', self._name)
+        # 三个约束放**同一行**（窄了自动折行）—— 竖着排三行会把每张卡撑得很高，
+        # 两格就要滚屏（用户 2026-10-11 报的就是"多个参数还要下拉看"）。
+        self._checks = FlowRow(spacing=T.SPACE['md'])
+        self._checks.add(self._multi)
+        self._checks.add(self._optional)
+        self._checks.add(self._limit)
+        self._stack_add(self._checks)
         self._stack_add(self._values)
         self._values.setVisible(False)
         # ⚠ `ValueChips` 是**普通 QWidget 当容器**（不用重写容器控件）——
@@ -658,15 +730,48 @@ class FieldCard(QFrame):
         # 只有"原样出现的几个字"才需要那个输入框（其余类型它没有意义）
         self._literal.setVisible(is_fixed)
         self._literal_label.setVisible(is_fixed)
-        if not is_choice:
+        # 「可以不填」只对**取值格**有意义：固定段/可选段的缺席由它自己的类型决定。
+        if getattr(self, '_optional', None) is not None:
+            self._optional.setVisible(not is_fixed)
+        # ⚠ 选了「从候选值里选」就该**直接看见候选值**（2026-10-18）：
+        #   旧版要再勾一个「编剧只能从下面这些里选」才露出输入框 ——
+        #   可那两件事根本不是一回事（候选池 vs 允不允许写池外的词），
+        #   于是"我要给这一格列候选"在界面上找不到入口。
+        if is_choice:
+            self._values.setVisible(True)
+        else:
             self._limit.setChecked(False)
             self._values.setVisible(False)
 
     def _on_limit_toggled(self, on: bool):
-        self._values.setVisible(bool(on))
+        """「只能从候选里选」= 封闭枚举；它**不再决定候选输入框露不露**。"""
         if on:
+            self._values.setVisible(True)
             self._values._edit.setFocus()
         self._changed()
+
+    def _on_optional_toggled(self, on: bool):
+        #: 人动过 = 这是**明确的**意思，`data()` 从此把它写出去；
+        #: 没动过 = "没说"，由语句头决定默认（show/scene/hide 的属性格可空）。
+        self._req_touched = True
+        self._changed()
+
+    def set_optional_default(self, on: bool):
+        """
+        （弹窗用）把「可以不填」恢复成**默认**状态。
+
+        ⚠ 只改"没被人动过"的格子：人明确勾/取消过的，一个都不许覆盖
+          （否则打开 `show` 的对话框就把人设的"这一格必须填"悄悄改掉）。
+        """
+        if self._req_touched:
+            return
+        # ⚠ 必须挡信号：`setChecked` 会发 `toggled`，那会把 `_req_touched`
+        #   置真 —— 默认就变成了"人说过的话"，以后再也改不动了。
+        was = self._optional.blockSignals(True)
+        try:
+            self._optional.setChecked(bool(on))
+        finally:
+            self._optional.blockSignals(was)
 
     def _changed(self, *_a):
         self._refresh_title()
@@ -681,10 +786,32 @@ class FieldCard(QFrame):
             except Exception as e:                   # noqa: BLE001 - 重算不该炸
                 swallow('ui_qt.param_editor.FieldCard.rematch', e)
 
+    def _on_name_edited(self, text: str):
+        """
+        人动了"表格里这一列叫什么" → 存量声明里那个**显示名**作废。
+
+        为什么需要（2026-10-18 重做时抓到）：`data()` 里 `column = _display_name or name`
+        —— `_display_name` 是"从存量声明读来的显示名"，它一旦被 `set_data` 填上，
+        之后**在界面上怎么改都不生效**（改的是 `name`，写出去的是 `_display_name`）。
+        没打开过"编辑已有语句"时看不出来；现在能编辑了，它就是"改了没反应"。
+        """
+        if self._display_name and str(text or '').strip() != self._display_name:
+            self._display_name = ''
+
     def _refresh_title(self):
-        text = self._name.text().strip()
-        self.set_title(text or '这一格要填的东西')
+        name = self._name.text().strip()
+        prefix = f'第 {self._ordinal} 格' if self._ordinal else ''
+        if name:
+            text = f'{prefix} · {name}' if prefix else name
+        else:
+            text = f'{prefix}（还没起名字）' if prefix else '这一格要填的东西'
+        self.set_title(text)
         self._refresh_name_warning()
+
+    def set_ordinal(self, number: int):
+        """告诉这张卡"你是第几格"（`FieldList` 在增删/换位后统一重排）。"""
+        self._ordinal = max(0, int(number))
+        self._refresh_title()
 
     # ---- 缺列名（别静默丢格子）----
     def has_content(self) -> bool:
@@ -905,18 +1032,24 @@ class FieldCard(QFrame):
         #   `{'name': 'intensity', 'label': '强度'}`（判据压着），
         #   而新界面里"只有列名"（用户要的那个简化）。
         column = self._display_name or name
-        return {'kind': kind,
-                # ⚠ 固定段的"原样出现的字"**只从它自己的输入框来**。
-                #   以前 `keyword` 拿列名兜底（于是列名被迫写成 `show`）、
-                #   `optional` 恒空（死格）—— 两件事都在这里收口。
-                'text': self._literal.text().strip() if is_fixed else '',
-                'group': self.column_of(),
-                'name': self._key or name,
-                'label': column,
-                'column': column,
-                'choices': self._values.text(),
-                'limit': bool(self._limit.isChecked()),
-                'multi': bool(self._multi.isChecked())}
+        out = {'kind': kind,
+               # ⚠ 固定段的"原样出现的字"**只从它自己的输入框来**。
+               #   以前 `keyword` 拿列名兜底（于是列名被迫写成 `show`）、
+               #   `optional` 恒空（死格）—— 两件事都在这里收口。
+               'text': self._literal.text().strip() if is_fixed else '',
+               'group': self.column_of(),
+               'name': self._key or name,
+               'label': column,
+               'column': column,
+               'choices': self._values.text(),
+               'limit': bool(self._limit.isChecked()),
+               'multi': bool(self._multi.isChecked())}
+        # ⚠ `required` **只在人动过勾选框时**才写（2026-10-18）：
+        #   没动过 = "没说"，由语句头决定默认（`show/scene/hide` 的属性格可空，
+        #   见 `pattern.with_optional_defaults`）。写一个猜出来的值等于替人拍板。
+        if self._req_touched:
+            out['required'] = not self._optional.isChecked()
+        return out
 
     def set_data(self, name: str = '', label: str = '', choices: str = '',
                  kind: str = '', group: str = '', **extra):
@@ -965,6 +1098,16 @@ class FieldCard(QFrame):
             self._multi.setChecked(bool((extra or {}).get('multi')))
         except Exception as e:                      # noqa: BLE001 - 恢复不了就用缺省
             swallow('ui_qt.param_editor.FieldCard.set_data.multi', e)
+        # ⚠ `required`（"可填可不填"，2026-10-18）：存量声明可能没有这个键 ——
+        #   那时恢复成"没动过"（`_req_touched=False`），由语句头决定默认；
+        #   给了就按给的恢复并标成"动过"（界面 → 声明 → 界面 往返保真）。
+        _extra = extra or {}
+        if 'required' in _extra:
+            self._req_touched = True
+            self._optional.setChecked(not bool(_extra.get('required')))
+        else:
+            self._req_touched = False
+            self._optional.setChecked(False)
         if group:
             self.set_column(group)
 
@@ -1078,10 +1221,18 @@ class FieldList(QWidget):
             card.set_column(self.match_column(name, label))
         self._col.insertWidget(self._col.count() - 1, card)
         self._cards.append(card)
+        self._renumber()
         card.focus()
         if self._on_change:
             self._on_change()
         return card
+
+    def _renumber(self):
+        """给每张卡重排"第 N 格"（试切报错里的序号要能对上卡上的数字）。"""
+        for i, card in enumerate(self._cards, 1):
+            fn = getattr(card, 'set_ordinal', None)
+            if fn is not None:
+                fn(i)
 
     def rows(self) -> list:
         """卡片 → 后端参数（`build_declaration` 吃这个）。"""
@@ -1091,6 +1242,8 @@ class FieldList(QWidget):
             # ⚠ `limit` 不是列的一部分（它是"候选限不限死"），不进 `columns`
             #   ——由 `slots()` 报给 `pattern`。这里摘掉免得写进 rules.json 的列里。
             row.pop('limit', None)
+            # `required` 同理：它是**格子**的属性（试切/落盘用），不是列属性。
+            row.pop('required', None)
             out.append(row)
         return out
 
@@ -1121,6 +1274,7 @@ class FieldList(QWidget):
         self._cards[i], self._cards[j] = self._cards[j], self._cards[i]
         self._col.removeWidget(card)
         self._col.insertWidget(j, card)
+        self._renumber()
         if self._on_change:
             self._on_change()
 
@@ -1129,25 +1283,48 @@ class FieldList(QWidget):
         out = []
         for card in self._cards:
             row = card.data()
-            out.append({'kind': row.get('kind') or 'variable',
-                        'group': row.get('group') or '',
-                        # ⚠ 固定段交**它自己那串字**（不是列名、也不是内部键）。
-                        #   以前这里交 `name`：`可出现可不出现` 的 `name` 是键、
-                        #   常常为空 → 这一格在 `pattern` 里彻底失配（死格）。
-                        'text': row.get('text') or '',
-                        'column': row.get('label') or '',
-                        'choices': row.get('choices') or '',
-                        # ⚠ "限死"与"可以有多个"都是**显式**的（见 `FieldCard.data`）：
-                        #   不报上去 = 后端按"候选只是建议 / 一格一个词"处理。
-                        'limit': bool(row.get('limit')),
-                        'multi': bool(row.get('multi'))})
+            slot = {'kind': row.get('kind') or 'variable',
+                    'group': row.get('group') or '',
+                    # ⚠ 固定段交**它自己那串字**（不是列名、也不是内部键）。
+                    #   以前这里交 `name`：`可出现可不出现` 的 `name` 是键、
+                    #   常常为空 → 这一格在 `pattern` 里彻底失配（死格）。
+                    'text': row.get('text') or '',
+                    'column': row.get('label') or '',
+                    'choices': row.get('choices') or '',
+                    # ⚠ "限死"与"可以有多个"都是**显式**的（见 `FieldCard.data`）：
+                    #   不报上去 = 后端按"候选只是建议 / 一格一个词"处理。
+                    'limit': bool(row.get('limit')),
+                    'multi': bool(row.get('multi'))}
+            # ⚠ `required` **只在人动过勾选框时**才带出去（同 `data()`）：
+            #   没带 = "没说"，交给 `pattern.with_optional_defaults` 按语句头定。
+            if 'required' in row:
+                slot['required'] = bool(row['required'])
+            out.append(slot)
         return out
+
+    def set_optional_defaults(self, on: bool):
+        """
+        （弹窗用）给"属性格"设默认的**可填可不填** —— 只动没被人碰过的格子。
+
+        `on=True`（`show` / `scene` / `hide`）时，**第一个取值格之后**的取值格
+        默认勾上「这一格可以不填」：第一个取值格是立绘 tag（`show lan …`），
+        没有它这一行不成立；后面的属性格 Ren'Py 本来就允许整段不写。
+        """
+        seen_value = False
+        for card in self._cards:
+            kind = card._kind.currentData() or 'variable'
+            if kind in ('keyword', 'optional'):
+                continue
+            is_attr = seen_value
+            seen_value = True
+            card.set_optional_default(bool(on and is_attr))
 
     def _remove(self, card, notify: bool = True):
         if card in self._cards:
             self._cards.remove(card)
         card.setParent(None)
         card.deleteLater()
+        self._renumber()
         if notify and self._on_change:
             self._on_change()
 

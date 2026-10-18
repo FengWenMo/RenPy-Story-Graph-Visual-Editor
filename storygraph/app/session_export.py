@@ -224,6 +224,20 @@ class ExportMixin:
         """
         return str(getattr(issue, 'message', None) or issue)
     def default_output_path(self) -> Path:
+        """
+        导出对话框的**默认路径**。
+
+        ⚠ 2026-10-18（审计 P1-7"写回不闭环"）：从前**总是** `build/renpy/
+        <stem>.generated.rpy` —— 于是策划改完卡片、导出，原章节文件**一动
+        不动**，还得自己把产物搬回去。审计原话："写回落到 build/renpy/，
+        不重载编辑器、不改原章节"。
+
+        现在：**这一章有源文件就默认原地写回**（增量合并 + 安全门禁：
+        对位成功时逐字节保留、只换改过的行；对不上时门禁会拦，绝不静默
+        覆盖）。没有源文件（新建章节）才落到 `build/renpy/`。
+        """
+        if self.script_path:
+            return Path(self.script_path)
         stem = self.script_path.stem if self.script_path else 'out'
         base = (self.project_root or Path('.')) / 'build' / 'renpy'
         return base / f'{stem}.generated.rpy'
@@ -366,7 +380,13 @@ class ExportMixin:
                                                    else None),
                                source_text=self._source_text_for_guard(),
                                source_path=self.script_path,
-                               beats=self.beats)
+                               beats=self.beats,
+                               # **引擎闸门**（2026-10-18，审计 P1-9）：
+                               # 界面导出同样是"写进游戏工程"的动作，
+                               # 必须与 CLI 走同一道判据 —— 产物引擎读不了
+                               # 就不写，改留 `.blocked.rpy` 给人对照。
+                               engine_lint=True,
+                               lint_ignore_heads=self._declared_stmt_heads())
         if not art.written:
             return {'ok': False, 'path': target,
                     'blocking': [self._issue_message(i) for i in art.issues]
@@ -437,6 +457,23 @@ class ExportMixin:
         except (OSError, UnicodeDecodeError) as e:
             swallow('session_export._source_text_for_guard', e)
             return None
+
+    def _declared_stmt_heads(self):
+        """
+        这个项目声明过的自定义语句名（引擎闸门的**豁免清单**）。
+
+        为什么需要：引擎闸门在一个最小工程里跑 lint，那里没有
+        `renpy.register_statement`，于是项目自己的 `mycue …` 会被报成
+        `expected statement.` —— 假阳性。拿到声明清单就只跳过这些头，
+        其余语法错照拦。拿不到就返回空集（宁可严一点，不放过真错）。
+        """
+        try:
+            from storygraph.pipeline.engine_lint import declared_heads_near
+            return declared_heads_near(getattr(self, 'script_path', None)
+                                       or getattr(self, 'project_root', None))
+        except Exception as e:                  # noqa: BLE001
+            swallow('session_export._declared_stmt_heads', e)
+            return set()
 
     def _nest_conflict_count(self) -> int:
         """结构列 vs 老推断不一致的拍数（B 阶段一的对拍结论）。"""

@@ -435,13 +435,19 @@ class TestO1AlignmentFixes:
         菜单拍的**单拍**渲染必须与整份产物给出同一个头（不许出
         `MENU_NO_CAPTION` 占位符）——否则增量补丁的"生成内容都在产物里"
         永远找不到那一行。
+
+        ⚠ 2026-10-18（审计 P0-2）：`menu` 头**不许带字符串** —— Ren'Py 的
+        语法是 `menu [label] [(args)]:`，`menu "标题":` 会被引擎判
+        `expected ':' not found.`。标题是块里的一行裸字符串，两条渲染路
+        都必须写成 `menu:` + 缩进一层的 `"标题"`。
         """
         from storygraph.story.beat_model import Beat, KIND_MENU
         from storygraph.story.beat_render import render_beat_to_rpy
         no_cap = Beat(seq=1, label='a', kind=KIND_MENU, text='\x00menu')
         assert [ln for ln in render_beat_to_rpy(no_cap) if ln.strip()] == ['menu:']
         cap = Beat(seq=1, label='a', kind=KIND_MENU, text='标题')
-        assert 'menu "标题":' in render_beat_to_rpy(cap)
+        assert [ln for ln in render_beat_to_rpy(cap) if ln.strip()] == [
+            'menu:', '    "标题"']
 
     def test_caption_edit_never_reports_success_without_landing(self, write_rpy):
         """
@@ -1454,11 +1460,25 @@ class TestEditedBeatActuallyLands:
         final = res.text if res.ok else full
         assert gone not in final, f'删掉的台词还在产物里：{gone!r}'
 
-    def test_empty_chapter_reason_is_distinct(self, write_rpy):
-        """纯 init/python 文件没有拍 —— 原因要与"没有源文件"分开报。"""
-        fp = write_rpy('init python:\n    x = 1\n', 'proj/game/pure.rpy')
+    def test_empty_chapter_is_passed_through_verbatim(self, write_rpy):
+        """
+        纯 init/python 文件没有拍 —— **原样透传**，不是"报失败退回全量"。
+
+        2026-10-18（审计 P1-1）改了契约：从前这里 `ok=False` + 一句
+        "没有解析出任何拍"，调用方于是退回**全量重生成** —— 而全量只认得拍，
+        顶层块会被整段重排（每条语句之间插空行、行尾空格被删、CRLF→LF）。
+        真机 `definitions.rpy` 1120 行变 1288 行，用户一处都没改。
+
+        现在：表里没有可编辑的内容 ⇒ 产物就是原文，`passthrough=True`，
+        写盘那一层**一个字节都不写**。判据钉在"文本与原文相等"上
+        （不是钉某个实现细节）。
+        """
+        src = 'init python:\n    x = 1\n'
+        fp = write_rpy(src, 'proj/game/pure.rpy')
         beats = beats_from_parse_result(
             ParseResultBuilder().build(RenPyParser().parse(fp)))
         res = patch_export(beats, fp, 'generated')
-        assert not res.ok
-        assert any('没有解析出任何拍' in r for r in res.reasons), res.reasons
+        assert res.ok, res.reasons
+        assert res.passthrough
+        assert res.text == src
+        assert res.changed_lines == 0

@@ -296,6 +296,16 @@ def beat_to_fields(beat: Beat, symbols=None) -> dict:
         'CodeBlock': compose_code(beat),
         'Comment': beat.comment,
         'Notes': beat.notes,
+        # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id` /
+        # `nointeract` —— 台词那一行的样式子句，空 = 普通台词。
+        'SayTail': getattr(beat, 'say_tail', '') or '',
+        # 菜单头（2026-10-19）：`menu 名(args):` 的两段。空 = 裸 `menu:`。
+        # 只在菜单拍上有意义，其它拍恒为空串（表单照样收，写回是 no-op）。
+        #
+        # 为什么必须进表单：这两样从前让整块菜单掉进「原样块」—— 卡片上
+        # 整段消失，策划连选项都看不到（审计 P1-3 收尾）。
+        'MenuName': getattr(beat, 'menu_name', '') or '',
+        'MenuArgs': getattr(beat, 'menu_args', '') or '',
     }
 
 
@@ -352,15 +362,30 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     if 'Voice' in fields:
         b.voice = (fields.get('Voice') or '').strip()
     if 'CodeBlock' in fields:
-        b.code = (fields.get('CodeBlock') or '').strip()
-        # raw 已经并入 CodeBlock（唯一的"保真后门"），这里不再单独维护
-        b.raw = ''
+        # ⚠ 与 `EditorSession.apply` 同一条守卫（2026-10-18）：这一格是
+        #   `raw` + `code` 拼出来的显示值，**没改就别写回** —— 写回会把
+        #   "哪些行是原生语句"的分类（`ordered`）冲掉，渲染顺序随之改写。
+        _new = (fields.get('CodeBlock') or '').strip()
+        if _new != str(compose_code(b) or '').strip():
+            b.code = _new
+            # raw 已经并入 CodeBlock（唯一的"保真后门"），这里不再单独维护
+            b.raw = ''
     if 'Comment' in fields:
         b.comment = (fields.get('Comment') or '').strip()
     # 「备注」列已经取消（并入注释，见 Beat.from_row 的老表迁移）。
     # 这里再兜一次：旧 Beat / 旧表带来的 notes 绝不能静默丢掉。
     if 'Notes' in fields:
         b.notes = (fields.get('Notes') or '').strip()
+    # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id` ——
+    # 与 `EditorSession.apply` 同一条键名（高级区里那一格）。
+    if 'SayTail' in fields:
+        b.say_tail = (fields.get('SayTail') or '').strip()
+    # 菜单头（2026-10-19）：`menu 名(args):` 的两段。
+    # 键存在才改（与其它列同一判据）—— 空串 = 主动清成裸 `menu:`。
+    if 'MenuName' in fields:
+        b.menu_name = (fields.get('MenuName') or '').strip()
+    if 'MenuArgs' in fields:
+        b.menu_args = (fields.get('MenuArgs') or '').strip()
     if b.notes:
         b.comment = f'{b.comment}\n{b.notes}'.strip() if b.comment else b.notes
         b.notes = ''
@@ -982,6 +1007,16 @@ def speaker_missing_warning(beat: Beat, symbols=None) -> str:
     这里**只算文案**，怎么显示由前端决定（`app` 层不认识控件）。
     """
     if not (beat.text or '').strip():
+        # ④ **填了说话人、却没有台词** → 说话人哪也去不了（2026-10-18）。
+        #
+        # 语句拍（`play_music …` / `styled …`）在卡片上也有说话人那一格。
+        # 人填了 `lan`、按保存，产物里**一个字都没多** —— 因为渲染只对
+        # "有台词"的拍写 `lan "…"`。用户看到的是"我填的说话人不见了"，
+        # 与 ② 是同一类"静默丢弃"，只是来路不同。
+        if str(beat.speaker or '').strip():
+            return (f'⚠ 这一拍填了说话人 `{beat.speaker}`，但**没有台词** —— '
+                    f'说话人不会写进脚本（它只属于台词那一行）；'
+                    f'要让这句话有人物就写一句台词，否则把说话人清掉')
         return ''
     if beat.speaker:
         # ② 登记过吗？（与渲染器同一条判据：`Audit.character`）

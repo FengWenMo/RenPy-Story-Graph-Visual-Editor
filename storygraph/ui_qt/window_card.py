@@ -50,6 +50,60 @@ from storygraph.ui_qt.thumb_loader import ThumbLoader
 __all__ = ['CardPageMixin']
 
 
+def _statement_of(beat, statements) -> dict:
+    """
+    「这一拍是哪条语句」→ `{'name','label','head'}`（台词拍 → `{}`）。
+
+    三种来源，**顺序即优先级**：
+
+      · `spec_name` —— 项目声明过的自定义语句（T1，卡片能改参数的就是它）；
+      · `camera_header` —— 3D 舞台的 `camera …:`（头行可编辑）；
+      · `loop_header` —— `while` / `for`（块头行可编辑）。
+
+    为什么卡片需要它：这几种拍**没有台词**，从前在卡片上就是一张空白的
+    对话卡（说话人 + 空台词框 + 空立绘网格），人看不出这一拍到底在干什么。
+    """
+    name = str(getattr(beat, 'spec_name', '') or '').strip()
+    head = str(getattr(beat, 'spec_head', '') or '').strip()
+    if not name:
+        head = str(getattr(beat, 'camera_header', '') or '').strip()
+        name = 'camera' if head else ''
+    if not name:
+        head = str(getattr(beat, 'loop_header', '') or '').strip()
+        name = (head.split()[0] if head.split() else '')
+    if not name:
+        return {}
+    label = ''
+    try:
+        spec = statements.match(name) if statements is not None else None
+        label = str(getattr(spec, 'label', '') or '')
+    except Exception as e:                      # noqa: BLE001 - 没有标签也能显示
+        swallow('ui_qt.window_card._statement_of.label', e)
+    return {'name': name, 'label': label, 'head': head}
+
+
+def _loose_lines(beat) -> list:
+    """
+    这一拍里**工具没建模、但会原样执行**的行（卡片顶部要说得出口）。
+
+    为什么需要（2026-10-18）：一条 `play ambience "amb/wind.ogg"`（项目自定义
+    声道）或 `show screen map` 既不是台词、也不进任何结构化列 —— 它躺在
+    「代码」格里，而那一格在**折叠着的高级区**里。于是卡片上看起来
+    "这一拍什么都没有"，人根本不知道该去哪里改。
+
+    取的是 `raw`（代码格里原生的那些行）与 `opaque`（整块原样行），
+    去掉已经由语句条显示的那条头行（否则同一行说两遍）。
+    """
+    head = str(getattr(beat, 'spec_head', '') or '').strip()
+    out: list = []
+    for src in (getattr(beat, 'raw', ''), getattr(beat, 'opaque', '')):
+        for line in str(src or '').splitlines():
+            text = line.strip()
+            if text and text != head and text not in out:
+                out.append(text)
+    return out
+
+
 class CardPageMixin:
     """
     卡片页那一半：载入单章 / 拍列表 / 导航 / 增删卡片 / 卡片级撤销。
@@ -195,11 +249,34 @@ class CardPageMixin:
         for cid in self._session.participants():
             self._who.addItem(QListWidgetItem(cid))
     def _make_item(self, i) -> QListWidgetItem:
-        e = self._session.list_entry(i)
-        item = QListWidgetItem(
-            f"{i + 1:>3} {e['prefix']}{e['who']}：{e['text'][:24]}")
+        item = QListWidgetItem(self._row_text(self._session.list_entry(i)))
         item.setData(Qt.UserRole, i)
         return item
+
+    @staticmethod
+    def _row_text(e: dict) -> str:
+        """
+        左边列表那一行的**字**（2026-10-18：语句拍不再显示成"（无台词）"）。
+
+        一条语句拍显示成
+
+             3 ◆ play_music · 播放音乐  track=bgm file="bgm/theme.ogg"
+
+        而不是「3 ：（无台词）」—— 后者让所有非台词的拍在列表里长得一样，
+        人得一张张点进去才知道哪条是哪条。
+
+        ⚠ 记号用 `◆` 而不是 `⚙`（2026-10-18 截图当场看出来的）：`⚙`(U+2699)
+          在微软雅黑里没有字形，界面上是个豆腐块 `□`。
+        """
+        head = str(e.get('statement_head') or '')
+        if head:
+            name = str(e.get('statement') or '')
+            rest = head[len(name):].strip() if head.startswith(name) else head
+            label = str(e.get('statement_label') or '')
+            tail = f' · {label}' if label else ''
+            return f"{int(e.get('index', 0)) + 1:>3} ◆ {name}{tail}  {rest}"
+        return (f"{int(e.get('index', 0)) + 1:>3} "
+                f"{e['prefix']}{e['who']}：{e['text'][:24]}")
     def refresh_list_row(self, i: int):
         """
         单独重画列表里的第 i 行（保存一拍之后调用）。
@@ -216,7 +293,7 @@ class CardPageMixin:
         e = self._session.list_entry(i)
         self._list.blockSignals(True)
         try:
-            item.setText(f"{i + 1:>3} {e['prefix']}{e['who']}：{e['text'][:24]}")
+            item.setText(self._row_text(e))
             item.setData(Qt.UserRole, i)
         finally:
             self._list.blockSignals(False)
@@ -434,7 +511,10 @@ class CardPageMixin:
                                'registry', None)
             choices = _beats.spec_arg_choices_for(beat, statements,
                                                   registry=registry)
-            self._panel.set_spec_args(cols, values, choices)
+            self._panel.set_spec_args(
+                cols, values, choices,
+                statement=_statement_of(beat, statements),
+                loose=_loose_lines(beat))
         except Exception as e:                  # noqa: BLE001 - 参数组刷不动不该拦住卡片
             swallow('ui_qt.window_card._sync_spec_args', e)
 

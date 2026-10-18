@@ -89,6 +89,14 @@ class PatchResult:
     shrunk_lines: int = 0
     #: 校验不通过的原因（空 = 通过）。**非空时 `text` 不可用。**
     reasons: list = field(default_factory=list)
+    #: **原样透传**（2026-10-18）：这一章一张能渲染的拍都没有 ——
+    #: 纯 `define` / `screen` / `init python` 文件，表里没有一处可编辑。
+    #: 此时 `text` 就是原文，调用方应当**一个字节都不写**（或原样复制到新路径）。
+    #:
+    #: 为什么不是"报失败退回全量"：全量重生成会把顶层块重排
+    #: （每条语句之间插空行、行尾空格被删、CRLF 变 LF）—— 真机
+    #: `definitions.rpy` 1120 行变 1288 行，而用户**一处都没改**。
+    passthrough: bool = False
 
     @property
     def coverage(self) -> float:
@@ -227,12 +235,13 @@ def _is_protected(line: str) -> bool:
 
 def _stage_tokens(beat) -> tuple:
     """这一拍的舞台"指纹"：图像名/退场名/背景。**不含台词正文**。"""
+    from storygraph.core.vocabulary import split_stage_items
     out = []
-    for raw in (getattr(beat, 'show', '') or '').split(';'):
+    for raw in split_stage_items(getattr(beat, 'show', '') or ''):
         raw = raw.split('@')[0].strip()
         if raw:
             out.append(raw)
-    for raw in (getattr(beat, 'hide', '') or '').split(';'):
+    for raw in split_stage_items(getattr(beat, 'hide', '') or ''):
         raw = raw.split('@')[0].strip()
         if raw:
             out.append('hide:' + raw)
@@ -2070,7 +2079,17 @@ def patch_export(beats: list, source_path, generated_text: str,
         from storygraph.story.beat_render import make_symbols
         symbols = make_symbols(registry)
     try:
-        original = source_path.read_text(encoding='utf-8')
+        # ⚠ 读源必须走 `source_style`（2026-10-18，审计 P0-1）：
+        #   `Path.read_text(encoding='utf-8')` 会把开头的 BOM 留成正文第一个
+        #   字符。合并产物在**首行之前**插了生成标记，于是 BOM 落到第二行行首：
+        #
+        #       # 由剧本表自动生成 …
+        #       \ufeff# This file demonstrates…
+        #
+        #   那一行不再是注释，引擎直接 `expected statement.`（官方 tutorial
+        #   23 个文件全带 BOM，全中）。BOM 由写盘那一层按风格还原。
+        from storygraph.story.source_style import read_text as _read_source
+        original, _style = _read_source(source_path)
     except (OSError, UnicodeDecodeError) as exc:
         return PatchResult(generated_text, None, 0, len(beats), 0,
                            reasons=[f'源文件读不了：{exc}'])
@@ -2097,8 +2116,16 @@ def patch_export(beats: list, source_path, generated_text: str,
     # "没走增量"而**不知道为什么**（`test_empty_chapter_reason_is_distinct`
     # 抓到的正是这个：那条"没有解析出任何拍"的原因必须继续说出来）。
     if not any(gen for _i, _first, _last, gen, _b in blocks):
-        return PatchResult(generated_text, None, 0, 0, 0,
-                           reasons=['这一章没有解析出任何拍，无法增量'])
+        # **没有可渲染内容的文件**（纯定义 / 屏幕 / `init python` 文件）：
+        # 表里没有一处可编辑的拍 ⇒ 产物只能是原文本身。
+        #
+        # 从前这里报"无法增量" → 调用方退回**全量重生成** → 顶层块被重排
+        # （每两条语句之间插一个空行、行尾空格被删、连续空行被压成一个）：
+        # 真机 `definitions.rpy` 原文 1120 行 → 产物 1288 行，
+        # `sr_general` 55 个文件里 31 个有 diff —— 而用户**一处都没改**。
+        # 现在直接**原样透传**：没得改的东西，一个字节都不动。
+        return PatchResult(original, source_path, len(beats), len(beats), 0,
+                           passthrough=True)
 
     # —— 把"结构补空拍"从新卡片里摘出去（2026-10-05 用户实测报的）——
     #

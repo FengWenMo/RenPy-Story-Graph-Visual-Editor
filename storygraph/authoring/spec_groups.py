@@ -200,7 +200,7 @@ def group_report(groups) -> str:
     if not groups:
         return ('项目**没有声明**词组：立绘属性候选是一个平铺列表。'
                 '想让"服装 / 表情"这类分开显示，在 `storygraph.rules.json` 的 '
-                '`attr_groups` 里写一组即可（或者用「🧩 自定义模块」里的分组页）。')
+                '`attr_groups` 里写一组即可（或者用「🧩 自定义语句」里的「候选分栏」页）。')
     lines = [f'项目声明了 {len(groups)} 个词组：']
     for g in groups:
         if g.is_rest:

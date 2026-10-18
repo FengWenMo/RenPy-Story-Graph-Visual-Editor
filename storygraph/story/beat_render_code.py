@@ -109,6 +109,12 @@ def _looks_like_renpy_statement(line: str) -> bool:
     s = str(line or '').strip()
     if not s:
         return False
+    # **赋值语句一定不是 Ren'Py 语句**（2026-10-18）：`menu = nvl_menu` 的
+    # 头是 `menu`，从前这里判 True → 不补 `$` → 引擎把整行当 menu 语句读，
+    # 直接语法错。判据与 `beat_model.is_python_assignment` **同一份**。
+    from storygraph.story.beat_model import is_python_assignment
+    if is_python_assignment(s):
+        return False
     head = s.split(None, 1)[0].rstrip(':')
     if head in _RENPY_STATEMENT_HEADS:
         return True

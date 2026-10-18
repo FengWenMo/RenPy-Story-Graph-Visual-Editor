@@ -126,12 +126,22 @@ class TestRendering:
         assert any(ln.startswith('jump other') for ln in lines), rpy
 
     def test_a_multi_line_beat_gets_no_note(self):
-        """一拍渲染出两行 → 不贴（贴到第一行会变成整个块的注释）。"""
+        """
+        一拍渲染出两行 → **不贴到任何一行**（贴错比不贴更坏）。
+
+        ⚠ 2026-10-18 改口径：不贴 ≠ 丢掉。多行拍贴不上时，注释**单独成行**
+        放在这一拍最前面 —— 位置从行尾挪到头顶，字一个不少。
+        （从前这里是 `assert '# 备注' not in rpy`，等于把"丢字"钉成了契约。）
+        """
         b = Beat(seq=1, label='a', kind='say', speaker='e', text='台词',
                  inline_comment='# 备注')
         b.show = 'ling happy'          # 会让这一拍多渲染出 show 那行
         rpy = render_beats_to_rpy([b], label_name='a')
-        assert '# 备注' not in rpy, rpy
+        assert '# 备注' in rpy, rpy
+        assert 'show ling happy  # 备注' not in rpy, '贴错了行'
+        assert '"台词"  # 备注' not in rpy, '贴错了行'
+        # 独立一行，且在 show 之前
+        assert rpy.index('# 备注') < rpy.index('show ling happy'), rpy
 
     def test_the_table_path_keeps_them(self, tmp_path):
         """**这条才是重点**：全量（表那条路）以前必丢，现在保住。"""

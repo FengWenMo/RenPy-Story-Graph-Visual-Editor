@@ -102,6 +102,18 @@ def inside_game_dir(out_path, project_root=None) -> bool:
 
 
 
+def project_root_of(path):
+    """
+    从一个**产物路径**反推项目根（含 `game/` 的那一级）—— 公开入口。
+
+    与 `_guess_project_root` 是同一份实现：那个名字是**旧调用点的私有约定**，
+    但跨包（`pipeline.engine_lint` 要做"项目声明过的自定义语句"豁免）
+    也需要它 —— 于是给一个**不带下划线**的公开名，而不是让别的包去取私有名
+    （`tests/test_package_layering.py` 就是拦这个的）。
+    """
+    return _guess_project_root(path)
+
+
 def _guess_project_root(out_path=None):
     """
     从一个**产物路径**反推项目根（含 `game/` 的那一级）。

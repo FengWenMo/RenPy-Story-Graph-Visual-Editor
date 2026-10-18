@@ -27,6 +27,10 @@ FINGERPRINT_FIELDS = (
     'stage', 'raw', 'code', 'opaque', 'condition', 'stage_order', 'op_order',
     'spec_name', 'spec_head', 'loop_header', 'camera_header', 'nest_path',
     'music', 'music_params', 'sound', 'sound_params', 'name',
+    # 2026-10-19 补：这三样都会改产物，漏一个就是"改了却判成没变"，
+    # 三方对账会**静默丢掉**一次改动（与 `beat_fields` 里那句
+    # "凡是会改产物或表内容的都要在"同一条判据）。
+    'say_tail', 'label_header', 'menu_name', 'menu_args',
 )
 
 

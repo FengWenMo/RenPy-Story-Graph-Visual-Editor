@@ -92,6 +92,11 @@ class TransformDef:
     params: list = field(default_factory=list)
     defaults: dict = field(default_factory=dict)
     body: list = field(default_factory=list)      # 顶层语句（已去掉缩进）
+    #: `on show:` / `on hide:` 等**事件块**的属性行（2026-10-18，审计 P1-4）。
+    #:
+    #: 它们不是"动画中间态"：`on show:` 是"显示完之后停在哪"，
+    #: 最后一帧才是可见的静止态（ATL 顺序执行）。
+    on_blocks: dict = field(default_factory=dict)
 
     def bind(self, args: list, kwargs: dict) -> dict:
         """调用实参 → `{参数名: 表达式字符串}`（缺的用定义里的默认值）。"""
@@ -149,8 +154,21 @@ def parse_transforms(text: str) -> dict:
     源码文本 → `{transform 名: TransformDef}`。
 
     只认 Ren'Py 的 `transform <名>[(参数)]:` 形式；**只收顶层语句**
-    （缩进 == 定义行 + 4）——`on show:` / `parallel:` 里的动画帧不是
-    "停下来时的样子"，收进来会把位置算成动画的中间态。
+    （缩进 == 定义行 + 4）——`block:` 里的动画帧不是"停下来时的样子"，
+    收进来会把位置算成动画的中间态。
+
+    ⚠ 2026-10-18（审计 P1-4"on show 整块忽略"）：**`on show:` 例外**。
+    它不是"动画中间态"，而是"这一下显示完之后停在哪" —— `on show:` 里
+    最后一帧的属性就是**可见的静止态**。从前整块跳过，于是
+
+        transform slide_in:
+            on show:
+                xoffset -120
+                linear .3 xoffset 0
+
+    算出来的位置是"什么都没设"（退回首字母猜）。现在把它收进
+    `TransformDef.on_blocks['show']`，由 `_from_def` 优先采用
+    （**最后一帧赢**，因为 ATL 是顺序执行的）。
     """
     out: dict = {}
     lines = str(text or '').splitlines()
@@ -165,6 +183,7 @@ def parse_transforms(text: str) -> dict:
         indent = len(m.group('indent').expandtabs(4))
         params, defaults = _split_params(m.group('params') or '')
         body = []
+        on_blocks: dict = {}
         i += 1
         while i < len(lines):
             line = lines[i]
@@ -176,13 +195,36 @@ def parse_transforms(text: str) -> dict:
             if here <= indent:
                 break                       # 下一个顶层定义 / 语句
             if here == indent + 4:
-                # 块头（`on show:` / `parallel:` / `block:`）不是属性语句 ——
-                # 它自己的内容在更深一层，这里不要
-                if not stripped.rstrip().endswith(':'):
-                    body.append(stripped.strip())
+                head = stripped.strip()
+                if not head.rstrip().endswith(':'):
+                    body.append(head)
+                else:
+                    # 块头（`on show:` / `on hide:` / `parallel:` / `block:`）
+                    # 记下名字；`on <事件>` 的子块**要收**（见 docstring）。
+                    key = head.rstrip().rstrip(':').strip()
+                    j = i + 1
+                    sub = []
+                    while j < len(lines):
+                        sub_line = lines[j]
+                        sub_stripped = _strip_comment(sub_line)
+                        if not sub_stripped.strip():
+                            j += 1
+                            continue
+                        sub_here = len(sub_line[:len(sub_line)
+                                               - len(sub_line.lstrip())]
+                                       .expandtabs(4))
+                        if sub_here <= here:
+                            break
+                        # 只取**子块的第一层**（再深的是它自己的嵌套块）
+                        if sub_here == here + 4:
+                            sub.append(sub_stripped.strip())
+                        j += 1
+                    if key.startswith('on '):
+                        on_blocks.setdefault(key[3:].strip(), []).extend(sub)
             i += 1
         out[name] = TransformDef(name=name, params=params,
-                                 defaults=defaults, body=body)
+                                 defaults=defaults, body=body,
+                                 on_blocks=on_blocks)
     return out
 
 
@@ -457,7 +499,8 @@ def _from_def(defn: TransformDef, args_env: dict, index, screen,
         再逐行收集属性；**定位/缩放类后面的覆盖前面的**（= 最终静止态）。
     """
     body = list(defn.body or [])
-    if not body:
+    on_show = list((defn.on_blocks or {}).get('show') or ())
+    if not body and not on_show:
         return None
 
     if len(body) == 1:
@@ -482,16 +525,27 @@ def _from_def(defn: TransformDef, args_env: dict, index, screen,
 
     subs = dict(defn.defaults or {})
     subs.update({k: v for k, v in (args_env or {}).items() if v is not None})
+
+    def collect(lines: list, into: dict) -> None:
+        for line in lines:
+            text = str(line)
+            for name, expr in subs.items():
+                text = re.sub(r'\b%s\b' % re.escape(name), _fmt(expr), text)
+            for prop, value in _props_of(text):
+                if prop in _POSITIONAL_PROPS:
+                    into[prop] = value       # 后面的覆盖前面的（最终静止态）
+                else:
+                    into.setdefault(prop, value)
+
+    # `on show:` 的**最后一帧**是玩家看到的静止态（2026-10-18，审计 P1-4：
+    # 从前整块忽略 → 位置退回首字母猜）。它设过的属性**赢**；
+    # 顶层 body 只补它没设的（`xalign 0.5` + on show 只动 xoffset 时两都要）。
     props: dict = {}
-    for line in body:
-        text = str(line)
-        for name, expr in subs.items():
-            text = re.sub(r'\b%s\b' % re.escape(name), _fmt(expr), text)
-        for prop, value in _props_of(text):
-            if prop in _POSITIONAL_PROPS:
-                props[prop] = value          # 后面的覆盖前面的（最终静止态）
-            else:
-                props.setdefault(prop, value)
+    collect(on_show, props)
+    rest: dict = {}
+    collect(body, rest)
+    for key, value in rest.items():
+        props.setdefault(key, value)
     if not props:
         return None
     return _from_props(props, {}, screen, f'atl:{defn.name}')

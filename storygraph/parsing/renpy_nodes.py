@@ -169,6 +169,9 @@ class TopLevelRegionNode(ASTNode):
 class LabelNode(ASTNode):
     name: str = ''
     block: list = field(default_factory=list)
+    #: `label 名(参数…):` 的参数表原文（含括号，如 `(flag=True)`）。
+    #: 丢了它，`call 名(...)` 的实参就无处可去（Ren'Py 报"参数过多"）。
+    params: str = ''
 
 @dataclass
 class DefineNode(ASTNode):
@@ -193,6 +196,13 @@ class DefineNode(ASTNode):
 class SayNode(ASTNode):
     who: str = ''
     what: str = ''
+    #: 台词那个引号串**之后**的合法子句（`(what_color="#f00")` / `with`
+    #: / `id x` / `nointeract`）—— 原样保留、原样写回。
+    #:
+    #: 为什么非要留（2026-10-18）：这些子句是**文字的样式**（颜色/字号/
+    #: 语音标签/不能跳过），丢掉它等于"给台词加的颜色导出后没了"。
+    #: 空的尾巴 = 普通台词（绝大多数），此时产物与从前逐字节相同。
+    tail: str = ''
 
 @dataclass
 class ExtendNode(ASTNode):
@@ -201,7 +211,26 @@ class ExtendNode(ASTNode):
 @dataclass
 class MenuNode(ASTNode):
     caption: str = ''
+    #: `menu` 头上的**菜单名**（`menu choice_menu:` 的 `choice_menu`）。
+    #:
+    #: 为什么必须留（2026-10-19，审计 P1-3 的第二半）：Ren'Py 的
+    #: `menu` 语法是 `menu [名] [(参数)]:`，**名是一个真 label**
+    #: （`renpy/parser.py` 的 `menu_statement` 会为它产出一条 `ast.Label`）
+    #: —— 也就是 `jump 名` / `call 名` 都能跳到这个菜单。
+    #: 从前解析器不认这个形式（`_scan_menu_header` 直接放弃），整块掉进
+    #: 「原样块（opaque）」：一个字节不丢，但**选项在卡片里彻底看不见**，
+    #: 策划改不了这个菜单的任何一句。
+    name: str = ''
+    #: `menu` 头上的**参数表原文**（含括号，`menu (nvl=True):` 的
+    #: `(nvl=True)`）。原样保留、原样写回：它会被 `parse_arguments`
+    #: 变成传给菜单 screen 的参数，丢掉就是"菜单样式静默变了"。
+    args: str = ''
     options: list = field(default_factory=list)
+    #: 菜单块里那些**不是选项、也不是标题**的行，逐字保留
+    #: （`set seen` / `$ flags.x = 1` …）。Ren'Py 允许它们在 `menu:` 块里，
+    #: 从前 `_parse_menu` 遇到就 `i += 1` —— 静默丢弃（`set seen` 丢了，
+    #: 这个菜单的"已读"记账就没了，产物能跑、行为悄悄变了）。
+    extras: list = field(default_factory=list)
 
 @dataclass
 class MenuOptionNode(ASTNode):
@@ -222,6 +251,13 @@ class CallNode(ASTNode):
     target: str = ''
     #: `call X from Y` 的 `Y`（空 = 没写）
     from_clause: str = ''
+    #: `call X(1, two=True)` 的**参数表原文**（含括号，空 = 没写）。
+    #:
+    #: 为什么必须留（2026-10-18，审计 P0-4）：从前解析器把括号"扫过去"就扔，
+    #: 产物成了裸 `call X`。被调方声明了参数、调用方不传 → Ren'Py **运行到
+    #: 这一句就报参数错误**，而工具一声不响。方向还是不可逆的语义收缩
+    #: （参数是**接口**，不是排版细节）—— 与 `label 名(参数…)` 同一条规矩。
+    args: str = ''
 
 @dataclass
 class ReturnNode(ASTNode):
@@ -319,6 +355,16 @@ class AudioNode(ASTNode):
     fadein: float = 0.0
     fadeout: float = 0.0
     loop: bool = False
+    #: 工具**没建模**的其余参数，逐字保留（`volume 0.5` / `if_changed` /
+    #: `pan 0.3` / `relative_volume 0.4` …）。
+    #:
+    #: 为什么必须留（2026-10-18 实测）：从前只认 fadein/fadeout/loop，
+    #: 其余参数在"解析→拍→导出"里**静默消失** ——
+    #: `play sound "s.ogg" volume 0.5` 出来是 `play sound "s.ogg"`，
+    #: 那次调整音量的演出效果就没了，且没有任何提示。
+    #: 参数顺序在 Ren'Py 里无意义（全是关键字参数），所以统一追加在
+    #: 已建模参数之后，既不改变语义也不丢字。
+    extra: str = ''
 
 @dataclass
 class VoiceNode(ASTNode):
