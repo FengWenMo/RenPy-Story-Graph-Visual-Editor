@@ -109,6 +109,10 @@ class AssetPickerDialog(QDialog):
         self.image_spec = ''
         self._filter = ''
         self._warming = False
+        #: `asset_id → AtlBlock | None`（'image 名:' 块形式的只读定位；非 ATL 为 None）
+        self._atl_cache: dict = {}
+        #: 当前详情对应的源文件位置 `(path, line)`；没有 = 「打开源文件」置灰
+        self._detail_loc = None
         self.warm_progress.connect(self._on_prewarm_progress)
         self.warm_done.connect(self._on_prewarm_done)
         # 调度模型见 `ui_qt/thumb_loader.py`：**优先级队列**（自限流），
@@ -225,6 +229,16 @@ class AssetPickerDialog(QDialog):
         self._detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._detail.setProperty('role', 'note')
         rl.addWidget(self._detail, 1)
+        # **打开源文件**（用户 2026-10-19，A1）：ATL 块形式的图没有贴图可看，
+        # 唯一有价值的动作是"把定义它的那几行原文摆出来"，第二有价值的是
+        # "直接跳过去改"。只在当前这条**定位得到源文件**时才可点。
+        self._open_btn = QPushButton('打开源文件')
+        self._open_btn.setToolTip(
+            '用系统默认的代码编辑器打开定义这一块的 .rpy，并定位到块头那一行。\n'
+            '（ATL 块形式没法在表里编辑：改它等于改代码。）')
+        self._open_btn.setEnabled(False)
+        self._open_btn.clicked.connect(self._open_source)
+        rl.addWidget(self._open_btn, 0)
         right.setMinimumWidth(200)
         right.setMaximumWidth(300)
         split.addWidget(right)
@@ -425,6 +439,7 @@ class AssetPickerDialog(QDialog):
         self._items.clear()
         self._requested = set()
         self._no_image = 0
+        self._atl_tiles = 0
         self._hint_total = 0
         self._fill_cursor = 0
         self._fill_done = 0
@@ -443,15 +458,22 @@ class AssetPickerDialog(QDialog):
             it = _Item(label)
             it.setData(Qt.UserRole, (atype, aid))
             has_file = atype != 'image' or bool(self._image_path(aid))
+            atl = self._atl_block(aid) if atype == 'image' else None
             if atype == 'image' and not has_file:
-                # **真的没有图**就当场说清楚（用户 2026-10-05："加载不完全"）。
-                #
-                # 从前这种条目和"还没解出来"长得一模一样（都是空格子），
-                # 于是"图还在解"与"这张图根本找不到"分不清 —— 用户只能
-                # 觉得"工具加载不全"。真实项目里那 74 条
-                # `gui/dutui/**/RETURE.png` 就是这一类（Path 多了一层项目
-                # 目录名，已在 `app.beats.asset_preview_path` 修掉）。
-                it.setText(f'{label}\n（没有图片文件）')
+                if atl is not None:
+                    # **ATL 块形式**（`_atl`）：`Path` 本来就是空的（贴图在块里），
+                    # 写成"没有图片文件"是在报一个不存在的错 —— 用户 2026-10-19：
+                    # "卡片看不见"（只剩一句假警报）。这里直接说清它是什么。
+                    it.setText(f'{label}\n（ATL 定义，无贴图）')
+                else:
+                    # **真的没有图**就当场说清楚（用户 2026-10-05："加载不完全"）。
+                    #
+                    # 从前这种条目和"还没解出来"长得一模一样（都是空格子），
+                    # 于是"图还在解"与"这张图根本找不到"分不清 —— 用户只能
+                    # 觉得"工具加载不全"。真实项目里那 74 条
+                    # `gui/dutui/**/RETURE.png` 就是这一类（Path 多了一层项目
+                    # 目录名，已在 `app.beats.asset_preview_path` 修掉）。
+                    it.setText(f'{label}\n（没有图片文件）')
             # **条目矩形必须等于格子**（用户 2026-10-05：
             # 「想要选中图片，点击后没反应，显示并没有选中任何一条」）。
             #
@@ -470,14 +492,20 @@ class AssetPickerDialog(QDialog):
             # 行高 = 真实行高。
             it.setSizeHint(CELL)
             it.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
-            it.setToolTip(
-                f'{aid}\n资源表里登记了，但按 Path 找不到图片文件。'
-                if atype == 'image' and not has_file
-                else P.detail(self._registry, atype, aid,
-                              self._project_root)[:400])
+            if atype == 'image' and not has_file and atl is None:
+                it.setToolTip(
+                    f'{aid}\n资源表里登记了，但按 Path 找不到图片文件。')
+            else:
+                # ATL 行的详情里就是块体原文，别在 400 字处切断（块体常超）
+                cap = 2000 if atl is not None else 400
+                it.setToolTip(P.detail(self._registry, atype, aid,
+                                       self._project_root)[:cap])
             self._items.addItem(it)
             if atype == 'image' and not has_file:
-                self._no_image += 1
+                if atl is not None:
+                    self._atl_tiles += 1
+                else:
+                    self._no_image += 1
         self._hint_total = len(pairs)
         self._update_hint()
         # **只给看得见的格子请求缩略图**
@@ -507,6 +535,10 @@ class AssetPickerDialog(QDialog):
             parts.append(f'已加载 {len(self._loaded)}')
         if self._no_image:
             parts.append(f'{self._no_image} 条没有图片文件')
+        if self._atl_tiles:
+            # 这一类**本来就没有贴图**（ATL 块形式，贴图在块里）：
+            # 不单列的话它会被算进上面那句"没有图片文件"，变成假警报。
+            parts.append(f'{self._atl_tiles} 条是 ATL 定义（无贴图）')
         if self._fill_pending():
             parts.append('后台补齐中…')
         self._hint.setText(' · '.join(parts))
@@ -708,20 +740,68 @@ class AssetPickerDialog(QDialog):
                              priority=priority)
         return slot
 
+    def _atl_block(self, asset_id):
+        """
+        这一条图片是不是 **ATL 块形式**？是就返回 `AtlBlock`（含块体 + 定位），
+        否则 `None`。
+
+        结果按 `asset_id` 记住：网格滚动 / 重新选中会反复问，而它每次都读磁盘。
+        （缓存只活在这个对话框里 —— 源文件改了，重开对话框就是新的。）
+        """
+        if asset_id in self._atl_cache:
+            return self._atl_cache[asset_id]
+        blk = None
+        try:
+            from storygraph.assets.atl_block import block_of_row, is_atl_row
+            row = P.row_of(self._registry, 'image', asset_id, self._project_root)
+            if row is not None and is_atl_row(row):
+                blk = block_of_row(row, self._project_root)
+        except Exception as e:                     # noqa: BLE001 - 不该拦选择
+            swallow('ui_qt.asset_picker._atl_block', e)
+        if len(self._atl_cache) > 20000:
+            self._atl_cache.clear()
+        self._atl_cache[asset_id] = blk
+        return blk
+
     def _show_detail(self):
         it = self._items.currentItem()
         if it is None:
             self._detail.setText('（选中一条看详情）')
+            self._detail_loc = None
+            self._open_btn.setEnabled(False)
             return
         atype, aid = it.data(Qt.UserRole)
+        self._detail_loc = None
+        blk = self._atl_block(aid) if atype == 'image' else None
+        if blk is not None:
+            # ATL 块形式：详情 = 块体原文 + 行号（`app.beats.asset_detail`
+            # 已经把"读不到"的原因写成了一句人话）。
+            self._detail.setText(
+                f'[image] {aid}\n\n'
+                + (P.detail(self._registry, atype, aid, self._project_root)
+                   or '（无更多信息）'))
+            if blk.found and blk.file:
+                self._detail_loc = (blk.file, blk.line)
+            self._open_btn.setEnabled(bool(self._detail_loc))
+            return
         if atype == 'image' and not self._image_path(aid):
             self._detail.setText(
                 f'[image] {aid}\n\n'
                 f'⚠ 资源表里登记了这一条，但按它的 Path 在项目里找不到图片文件。\n'
                 f'（不是"还在加载"—— 这一格永远不会有图。）')
+            self._open_btn.setEnabled(False)
             return
         text = P.detail(self._registry, atype, aid, self._project_root)
         self._detail.setText(f'[{atype}] {aid}\n\n{text or "（无更多信息）"}')
+        self._open_btn.setEnabled(False)
+
+    def _open_source(self):
+        """「打开源文件」：用系统默认代码编辑器打开并定位到块头那一行。"""
+        loc = self._detail_loc
+        if not loc:
+            return
+        from storygraph.graph.editor_utils import open_file_at_line
+        open_file_at_line(loc[0], loc[1])
 
     def _on_search(self, text):
         self._filter = (text or '').strip()

@@ -115,7 +115,10 @@ def test_confirmed_write_matches_the_preview_byte_for_byte(tmp_path):
     preview = plan['files'][0]['new_text']
     res = apply_rename_patch(plan, confirm=True, backup=True)
     assert res['ok'] is True and res['modified'] == [str(script)]
-    assert script.read_text(encoding='utf-8') == preview, '写进去的与预览不一致'
+    # **按字节比**（2026-10-19，E2）：预览现在保留原文件的换行（`newline=''`），
+    # 而 `read_text` 会把 CRLF 折成 LF —— 用它比等于要求"写回时把换行改掉"，
+    # 那正是这次修掉的 bug（Windows 上整份 .rpy 会显示成全文件改动）。
+    assert script.read_bytes() == preview.encode('utf-8'), '写进去的与预览不一致'
     # 词边界仍然成立
     text = script.read_text(encoding='utf-8')
     assert 'protagonist' in text and 'hero_happy' in text

@@ -296,6 +296,27 @@ def frame_summary(frame: StageFrame) -> str:
     return ' · '.join(b for b in bits if b)
 
 
+def placement_notes(frame: StageFrame) -> list:
+    """
+    这一拍里**位置是猜的**有哪些 → `['ling happy：这个 transform 含 parallel，位置是猜的']`。
+
+    用户 2026-10-19（B1）：
+
+    > 现在的问题不是"算不出"，是"算不出还不说"，那比算错更糟。
+
+    只报"不可靠"的那些（`Placement.uncertain` 非空）；有把握时返回空表 ——
+    到处标警告等于没警告。纯函数（不碰 Qt），横条与测试共用这一份文字。
+    """
+    out = []
+    for s in list(getattr(frame, 'sprites', ()) or ()):
+        note = str(getattr(getattr(s, 'place', None), 'uncertain', '') or '').strip()
+        if not note:
+            continue
+        who = str(getattr(s, 'image', '') or getattr(s, 'tag', '') or '').strip()
+        out.append(f'{who}：{note}' if who else note)
+    return out
+
+
 def has_stage_change(frame: StageFrame) -> bool:
     """
     这一拍的**舞台**真的变了什么吗（预览的「只看有变化的拍」判据）。

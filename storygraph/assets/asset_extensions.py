@@ -373,7 +373,11 @@ def plan_rename_patch(old_id: str, new_id: str, script_files) -> dict:
         if not fp.exists():
             continue
         try:
-            text = fp.read_text(encoding='utf-8')
+            # **保留换行读**（`newline=''`）：Windows 上 `read_text` 会把 CRLF
+            # 折成 LF，再写回去就整份文件都变了 —— 而这个项目反复承诺
+            # "打开 → 写回逐字节不变"（`story.paths.write_text_atomic` 同一口径）。
+            with open(fp, 'r', encoding='utf-8', newline='') as fh:
+                text = fh.read()
         except Exception as e:                      # noqa: BLE001
             swallow('assets.asset_extensions.plan_rename_patch', e)
             continue

@@ -648,6 +648,12 @@ def _write_stage_snapshot_sheet(wb, beats):
 
     rows = snapshot_rows(beats)
 
+    # 重算前先把旧的两张删掉：`create_sheet` 遇到同名会造出「舞台快照1」，
+    # 而"刷新派生视图"正是反复调这里的地方（用户 2026-10-19，D1）。
+    for _name in ('舞台快照', '演出时间轴'):
+        if _name in wb.sheetnames:
+            del wb[_name]
+
     # ---- 表 1：舞台快照（全量，带变化着色）----
     ws = wb.create_sheet('舞台快照')
     # 状态列分成 背景 / 立绘 / CG·图层 / 音乐 / 音效 / 语音 六块。
@@ -731,7 +737,29 @@ def _write_stage_snapshot_sheet(wb, beats):
             c.alignment = Alignment(vertical='top', wrap_text=True)
     tl.freeze_panes = 'A2'
     tl.auto_filter.ref = f'A1:F{max(tl.max_row, 2)}'
+    # ---- 表头写「生成于 …」（D1）：派生视图**必须**说清自己是什么时候的 ----
+    _stamp_view(ws, len(headers))
+    _stamp_view(tl, 6)
     return ws
+
+
+#: 派生视图右上角那句"我是什么时候算的"（用户 2026-10-19，D1）：
+#: 不写的话，表里写的东西看起来和真值一样权威 —— 而它只是**导出那一刻**的
+#: 推导结果；脚本/表格改了之后它不会自己变。
+VIEW_STAMP_PREFIX = '生成于 '
+
+
+def _stamp_view(ws, after_column: int) -> None:
+    """在表头右侧空一列的位置写「生成于 …（改了脚本/表后点刷新派生视图）」。"""
+    from datetime import datetime
+
+    cell = ws.cell(row=1, column=after_column + 1)
+    cell.value = (f'{VIEW_STAMP_PREFIX}{datetime.now().strftime("%Y-%m-%d %H:%M")}'
+                  '（只读视图：改了脚本或表之后点「刷新派生视图」重算）')
+    cell.font = _INHERITED_FONT
+    cell.alignment = Alignment(vertical='center', wrap_text=False)
+    ws.column_dimensions[cell.column_letter].width = max(
+        12, int(ws.column_dimensions[cell.column_letter].width or 12))
 
 
 
@@ -1722,8 +1750,6 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
 
     # 顺手把舞台快照重算一遍，让它在候选刷新后跟演出表保持一致
     try:
-        if '舞台快照' in wb.sheetnames:
-            del wb['舞台快照']
         beats = _read_beats_from_ws(ws, strict_long_text=False)
         hydrate_from_dsl(beats, make_symbols(registry))
         _write_stage_snapshot_sheet(wb, beats)
@@ -1731,6 +1757,35 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
         swallow('excel_export.refresh_candidate_sheets', e)
 
     wb.save(table_path)
+    return table_path
+
+
+def refresh_stage_views(table_path, registry=None) -> Path:
+    """
+    只重算两张**派生视图**（「舞台快照」「演出时间轴」），不动 Beats 一格。
+
+    为什么要有这个入口（用户 2026-10-19，D1）：
+
+    > 舞台快照/时间轴是"本拍 = 上一拍剩下的 + 本拍变化"，这是递推……
+    > 所以要补的不是公式化，是让快照不骗人。
+
+    "不骗人" = 表头写生成时间（`_stamp_view`）+ 一个**显式**重算入口。
+    没有它的时候，改了脚本或表格之后那两张表还是旧的，而它长得和真值一样。
+    """
+    table_path = Path(table_path)
+    wb = openpyxl.load_workbook(table_path)
+    try:
+        ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
+        beats = _read_beats_from_ws(ws, strict_long_text=False)
+        try:
+            hydrate_from_dsl(beats, make_symbols(registry)
+                             if registry is not None else None)
+        except Exception as e:                    # noqa: BLE001 - 原文也能推导
+            swallow('excel_export.refresh_stage_views.hydrate', e)
+        _write_stage_snapshot_sheet(wb, beats)
+        wb.save(table_path)
+    finally:
+        wb.close()
     return table_path
 
 

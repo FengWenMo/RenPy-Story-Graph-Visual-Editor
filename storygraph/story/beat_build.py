@@ -1745,6 +1745,10 @@ def apply_script_definitions(registry, parse_result) -> dict:
                               + '；ATL 定义（贴图写在块里，看源文件）').lstrip('；'),
                     '_from_script': True,
                     '_atl': True,
+                    # 只读定位要用的两个字段：`assets.atl_block` 直接读它们，
+                    # 不用再回头解析 Notes 里的 `文件:行号`（那是给人看的）。
+                    '_source_file': info.get('source_file') or '',
+                    '_source_line': info.get('source_line') or 0,
                 }
                 added['images'] += 1
             continue

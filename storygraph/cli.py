@@ -372,13 +372,26 @@ def _cmd_collab(args) -> int:
         print(f"新增 {len(res['added'])}，更新 {len(res['updated'])}，"
               f"未变 {len(res['unchanged'])}，"
               f"复活 {len(res.get('revived') or ())}，"
+              f"自动合并 {len(res.get('merged') or ())}，"
               f"冲突 {len(res['conflicts'])}，被拒 {len(res['rejected'])}")
+        # **工具替你做了什么，必须说**（"自动合并要报告"）
+        print('  ' + cs.auto_merge_summary(res))
         for c in res['conflicts']:
-            print(f"  冲突 {c['line_id']}（库里 rev {c['db_revision']} > "
-                  f"你基于的 rev {c['base_revision']}，"
-                  f"最后改于 {c['updated_by']}）")
+            kind = str(c.get('kind') or '')
+            if kind == 'fields':
+                fields = '、'.join(cs.field_label(f.get('field'))
+                                  for f in (c.get('fields') or ()))
+                print(f"  你和 {c.get('updated_by') or 'TA'} 改了同一句 "
+                      f"{c['line_id']}（{fields}）—— 在编辑器里选一个留下的版本")
+                continue
+            print(f"  冲突 {c.get('line_id') or c.get('label') or ''}"
+                  f"（库里 rev {c.get('db_revision', 0)} > "
+                  f"你基于的 rev {c.get('base_revision', 0)}，"
+                  f"最后改于 {c.get('updated_by') or ''}）")
         for r in res['rejected']:
             print(f"  拒绝 {r['line_id']}：{r['reason']}")
+        for k in (res.get('kept') or ())[:5]:
+            print(f"  {k.get('hint')}")
         if res['conflicts'] or res['rejected']:
             print('先 pull 同步、或与对方沟通后用 --force 覆盖')
             return 1

@@ -74,6 +74,11 @@ _WARPERS = {'linear', 'ease', 'easein', 'easeout', 'pause', 'repeat',
 #: 这些属性按"**后面的覆盖前面的**"取（一行行读下来 = 时间线，取最终态）
 _POSITIONAL_PROPS = ('xcenter', 'xpos', 'xalign', 'ypos', 'yalign', 'ycenter',
                      'xoffset', 'yoffset', 'zoom')
+#: 出现在顶层 = 动画帧（不是静止属性）→ 位置只能算"猜"（B1；算准是 B2）
+_ANIM_WARPERS = {'linear', 'ease', 'easein', 'easeout', 'pause', 'repeat',
+                 'choice', 'animation', 'time', 'event', 'function'}
+#: 块头里出现这些 = 动画/并行块 —— 里面的属性没进最终态
+_ANIM_BLOCKS = {'block', 'animation', 'contains'}
 
 _TRANSFORM_RE = re.compile(r'^(?P<indent>\s*)transform\s+(?P<name>[A-Za-z_]\w*)'
                            r'\s*(?:\((?P<params>[^)]*)\))?\s*:\s*$')
@@ -97,6 +102,14 @@ class TransformDef:
     #: 它们不是"动画中间态"：`on show:` 是"显示完之后停在哪"，
     #: 最后一帧才是可见的静止态（ATL 顺序执行）。
     on_blocks: dict = field(default_factory=dict)
+    #: **"这个位置是猜的"的原因**（空 = 有把握）。
+    #:
+    #: 为什么需要它（用户 2026-10-19，B1）：`parallel:` 里的属性**没有参与计算**
+    #: （只在 `_WARPERS` 里当关键字跳过），`block:` / 关键帧则是动画序列 ——
+    #: 只写在里面的位置会退回首字母启发。问题不是"算不出"，而是
+    #: **"算不出还不说"**：预览把猜出来的 x 画得跟真位置一样。
+    #: 这里只记原因；算准是 B2 的事。
+    uncertain: str = ''
 
     def bind(self, args: list, kwargs: dict) -> dict:
         """调用实参 → `{参数名: 表达式字符串}`（缺的用定义里的默认值）。"""
@@ -184,6 +197,7 @@ def parse_transforms(text: str) -> dict:
         params, defaults = _split_params(m.group('params') or '')
         body = []
         on_blocks: dict = {}
+        flags: list = []                    # "位置是猜的"的原因（B1）
         i += 1
         while i < len(lines):
             line = lines[i]
@@ -197,6 +211,8 @@ def parse_transforms(text: str) -> dict:
             if here == indent + 4:
                 head = stripped.strip()
                 if not head.rstrip().endswith(':'):
+                    if _first_token(head) in _ANIM_WARPERS:
+                        flags.append('关键帧')
                     body.append(head)
                 else:
                     # 块头（`on show:` / `on hide:` / `parallel:` / `block:`）
@@ -221,10 +237,20 @@ def parse_transforms(text: str) -> dict:
                         j += 1
                     if key.startswith('on '):
                         on_blocks.setdefault(key[3:].strip(), []).extend(sub)
+                        # `on show: repeat` 永远不停 → 没有"静止态"可言
+                        if any(_first_token(x) in ('repeat', 'pause', 'event',
+                                                   'time', 'choice', 'function')
+                               for x in sub):
+                            flags.append('关键帧')
+                    elif key == 'parallel' or key.startswith('parallel'):
+                        flags.append('parallel')
+                    elif key in _ANIM_BLOCKS:
+                        flags.append('关键帧')
             i += 1
         out[name] = TransformDef(name=name, params=params,
                                  defaults=defaults, body=body,
-                                 on_blocks=on_blocks)
+                                 on_blocks=on_blocks,
+                                 uncertain='/'.join(dict.fromkeys(flags)))
     return out
 
 
@@ -352,6 +378,12 @@ def _eval_node(node, env: dict):
     raise ValueError('unsupported')
 
 
+def _first_token(line: str) -> str:
+    """一行 ATL 的第一个词（`linear .3 xpos 1` → `linear`）。"""
+    parts = str(line or '').split()
+    return parts[0] if parts else ''
+
+
 def _props_of(line: str) -> list:
     """
     一行 ATL → `[(属性, 值表达式), …]`。
@@ -407,11 +439,28 @@ class Placement:
     yanchor: float = 1.0
     yoffset: float = 0.0
     source: str = 'center'          # atl:<名> / word / letter / center
+    #: 位置**不可靠**时的一句人话（空 = 有把握）。见 `TransformDef.uncertain`。
+    #: 预览横条原样显示它 —— "算不出还不说"比算错更糟（用户 2026-10-19，B1）。
+    uncertain: str = ''
 
     @property
     def from_atl(self) -> bool:
         """这个位置是从项目 transform 里**真算出来**的吗？"""
         return str(self.source).startswith('atl')
+
+
+def uncertain_note(reason: str) -> str:
+    """
+    `parallel/关键帧` → 给用户看的一句话（预览横条用）。
+
+    空原因返回空串（"有把握"时**不许**多嘴 —— 到处标警告等于没警告）。
+    """
+    reason = str(reason or '').strip()
+    if not reason:
+        return ''
+    # 中文原因不留空格（"含关键帧"），拉丁词留一个（"含 parallel"）
+    sep = ' ' if reason[:1].isascii() else ''
+    return f'这个 transform 含{sep}{reason}，位置是猜的'
 
 
 def _guess_x(name: str) -> tuple:
@@ -448,6 +497,9 @@ def placement_of(name: str, index: Optional[dict] = None, registry=None,
     if defn is not None and _depth < 6:
         got = _from_def(defn, {}, index, (width, height), _depth)
         if got is not None:
+            # 算出来了，但定义里有 parallel/关键帧 → 结果只是"能算的那部分"
+            got.uncertain = got.uncertain or uncertain_note(
+                getattr(defn, 'uncertain', ''))
             return got
 
     # 2) 资源表里的 ATL 字面量（老路径）
@@ -466,7 +518,13 @@ def placement_of(name: str, index: Optional[dict] = None, registry=None,
 
     # 3)/4)/5) 词与启发
     x, source = _guess_x(name)
-    return Placement(x=x, source=source)
+    place = Placement(x=x, source=source)
+    if defn is not None and getattr(defn, 'uncertain', ''):
+        # 定义里有 parallel/关键帧，而且**一个能算的属性都没落到最终态** ——
+        # 这时位置是按名字猜的，必须说出来（这正是用户报的那个场景）。
+        place.uncertain = (uncertain_note(defn.uncertain)
+                           .replace('位置是猜的', '位置是按名字猜的'))
+    return place
 
 
 def _fmt(value) -> str:
@@ -521,6 +579,8 @@ def _from_def(defn: TransformDef, args_env: dict, index, screen,
                     bound[key] = number
             got = _from_def(callee, bound, index, screen, depth + 1)
             if got is not None:
+                got.uncertain = got.uncertain or uncertain_note(
+                    getattr(callee, 'uncertain', ''))
                 return got
 
     subs = dict(defn.defaults or {})

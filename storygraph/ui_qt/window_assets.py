@@ -89,6 +89,25 @@ class WindowAssetsMixin:
         except Exception as e:                      # noqa: BLE001 - 不该拦任何操作
             swallow('ui_qt.window_assets.set_assets_ready', e)
 
+    def open_asset_rename_dialog(self):
+        """
+        「资源改名」：把新名字**传播到脚本里的所有引用处**（E2，2026-10-19）。
+
+        用户原话：
+
+        > 真正缺的是"资源表改名之后，Beats 里的旧值怎么办"……
+        > 让改名能一键传播到所有引用处，并且能回滚。
+
+        入口只做两件事：确保资源表在（候选要读它）、把对话框打开；
+        真正的预览 / 应用 / 回滚全在 `dialog_asset_rename` + 会话方法里。
+        """
+        if not self._ensure_registry():
+            return
+        from storygraph.ui_qt.dialog_asset_rename import AssetRenameDialog
+        dlg = AssetRenameDialog(self, session=self._session,
+                                registry=self._registry_provider())
+        dlg.exec()
+
     def _pick_image(self, current: str) -> str:
         """挑一张立绘图（走 Qt 版资产选择器）。取消或没有资源表返回 ''。"""
         from storygraph.ui_qt.asset_picker import pick_image

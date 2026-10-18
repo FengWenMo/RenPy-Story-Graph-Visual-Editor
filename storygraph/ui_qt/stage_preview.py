@@ -783,6 +783,13 @@ class StagePreviewWindow(QDialog):
             swallow('ui_qt.stage_preview._summary_text', e)
             base = ''
         extra = [str(n) for n in ((cues or {}).get('notes') or ())]
+        # **位置是猜的**（用户 2026-10-19，B1）：`parallel` / 关键帧里的属性没进
+        # 最终态，`x` 是启发式猜的 —— 画得跟真位置一样而不说，比算错更糟。
+        try:
+            from storygraph.app.stage import placement_notes
+            extra.extend('⚠ ' + str(n) for n in (placement_notes(f) or ()))
+        except Exception as e:                    # noqa: BLE001 - 标注失败不影响画面
+            swallow('ui_qt.stage_preview._summary_text.placement_notes', e)
         try:
             miss = self._canvas.missing_assets()
         except Exception as e:                    # noqa: BLE001

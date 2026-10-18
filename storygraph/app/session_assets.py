@@ -778,3 +778,61 @@ class AssetRegistryMixin:
         except Exception as e:                    # noqa: BLE001
             swallow('app.session_assets.path_of_image', e)
             return None
+
+    # ---- 改名传播（E2，2026-10-19）--------------------------------------
+    #
+    # 资源表里把 `ling_happy` 改成 `ling_smile` 之后，**脚本里那一串旧名字
+    # 不会跟着变** —— 游戏里就变成"找不到图"。补丁本实现早就有
+    # （`asset_extensions.plan/apply/rollback_rename_patch`，词边界匹配 +
+    # 写前备份 + 可回滚），但它一直没接进界面，所以用户根本用不到。
+    #
+    # 三个方法刻意是**两段式**：预览（不写盘）→ 应用（`confirm=True` 才写）
+    # → 回滚（按 `.bak` 逐位还原）。界面只负责问人。
+
+    def asset_rename_plan(self, old_id: str, new_id: str) -> dict:
+        """算改名补丁预览（**一个字节都不写**）。"""
+        from storygraph.assets.asset_extensions import plan_rename_patch
+        from storygraph.parsing.discover import discover_scripts
+
+        root = self.project_root
+        if root is None:
+            return {'ok': False, 'error': '先打开一个项目', 'files': [],
+                    'matched_files': [], 'total_lines': 0}
+        old_id = str(old_id or '').strip()
+        new_id = str(new_id or '').strip()
+        if not old_id or not new_id:
+            return {'ok': False, 'error': '旧名和新名都要填', 'files': [],
+                    'matched_files': [], 'total_lines': 0}
+        if old_id == new_id:
+            return {'ok': False, 'error': '新旧名字一样，没什么可改的',
+                    'files': [], 'matched_files': [], 'total_lines': 0}
+        try:
+            plan = plan_rename_patch(old_id, new_id,
+                                     discover_scripts(Path(root)))
+        except Exception as e:                    # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'files': [],
+                    'matched_files': [], 'total_lines': 0}
+        plan['ok'] = True
+        plan['error'] = ''
+        return plan
+
+    def asset_rename_apply(self, plan) -> dict:
+        """应用预览（**只有这里会写盘**；默认先备份 `.bak`）。"""
+        from storygraph.assets.asset_extensions import apply_rename_patch
+
+        try:
+            res = apply_rename_patch(plan, confirm=True, backup=True)
+        except Exception as e:                    # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'modified': [],
+                    'backup_files': []}
+        res['error'] = ''
+        return res
+
+    def asset_rename_rollback(self, applied) -> dict:
+        """回滚（按写前 `.bak` 逐位还原）。"""
+        from storygraph.assets.asset_extensions import rollback_rename_patch
+
+        try:
+            return rollback_rename_patch(applied)
+        except Exception as e:                    # noqa: BLE001
+            return {'restored': [], 'failed': [], 'error': str(e)}

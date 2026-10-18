@@ -107,6 +107,10 @@ def asset_detail(engine, asset_type: str, asset_id: str) -> str:
 
     重点是 transform：选中 `leftish` 时要能看到"靠左站"那句注释，
     而不是只有一串 xpos——不然文案根本不知道该选哪个变换。
+
+    `image 名:` 的 **ATL / 块形式**（`_atl`）同样：贴图写在块里，`Path` 是空的，
+    只给一句"没有图片文件"等于没说 —— 这里把**块体原文 + 源文件行号**摆出来
+    （只读；正确的编辑方式是在编辑器里打开 `.rpy`，见 `assets.atl_block`）。
     """
     row = asset_row(engine, asset_type, asset_id)
     if row is None:
@@ -117,7 +121,30 @@ def asset_detail(engine, asset_type: str, asset_id: str) -> str:
         if atl:
             described += '\n\nATL:\n' + '\n'.join(
                 '    ' + l.strip() for l in atl.splitlines() if l.strip())
+    elif asset_type == 'image' and _is_atl_image(row):
+        described += _atl_image_detail(engine, row)
     return described
+
+
+def _is_atl_image(row) -> bool:
+    """这一条是不是"ATL 块形式"（`image 名:` + 块体，贴图在块里）。"""
+    from storygraph.assets.atl_block import is_atl_row
+    return is_atl_row(row)
+
+
+def _atl_image_detail(engine, row) -> str:
+    """ATL 块形式的详情文字：块体 + `文件:行号`（读不到就明说为什么）。"""
+    from storygraph.assets.atl_block import ATL_NOTE_MARK, block_of_row
+
+    blk = block_of_row(row, getattr(engine, 'project_root', None))
+    if blk.found:
+        return (f'\n\n{ATL_NOTE_MARK}（贴图写在块里，只读）：\n'
+                + blk.text()
+                + f'\n—— {blk.location()}')
+    hint = blk.reason or '读不到块体'
+    if blk.line:
+        hint += f'（表里记的是 {blk.location()}）'
+    return f'\n\n{ATL_NOTE_MARK}（贴图写在块里，只读）：\n    ⚠ {hint}'
 
 
 def asset_preview_path(engine, asset_type: str, asset_id: str):

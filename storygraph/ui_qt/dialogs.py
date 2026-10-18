@@ -254,12 +254,45 @@ class CollabDialog(_BaseDialog):
             self._say(f'提交失败：{res.get("error")}')
             return
         r = res.get('result') or {}
-        self._say(f'✔ 已提交：新增 {r.get("added")} / 更新 {r.get("updated")} / '
-                  f'未变 {r.get("unchanged")} / 复活 {r.get("revived")}')
-        for key in ('conflicts', 'rejected'):
-            rows = r.get(key) or []
-            if rows:
-                self._say(f'   ⚠ {key}（{len(rows)}）：{rows[:5]}')
+        from storygraph.collab.collab_store import auto_merge_summary
+        self._say(f'✔ 已提交：新增 {len(r.get("added") or ())} / '
+                  f'更新 {len(r.get("updated") or ())} / '
+                  f'未变 {len(r.get("unchanged") or ())} / '
+                  f'复活 {len(r.get("revived") or ())}')
+        # **工具替她做了什么，必须说**（用户 2026-10-19："自动合并要报告"）
+        self._say(f'   {auto_merge_summary(r)}')
+        kept = r.get('kept') or []
+        if kept:
+            self._say(f'   ⚠ 你删过、但对方改过的 {len(kept)} 句已保留：'
+                      + '；'.join(str(k.get('hint') or '') for k in kept[:3]))
+        rejected = r.get('rejected') or []
+        if rejected:
+            self._say(f'   ⚠ 被锁着没法提交 {len(rejected)} 句：'
+                      + '；'.join(str(x.get('reason') or '') for x in rejected[:3]))
+
+        conflicts = [c for c in (r.get('conflicts') or ())
+                     if str(c.get('kind') or '') == 'fields']
+        others = [c for c in (r.get('conflicts') or ())
+                  if str(c.get('kind') or '') != 'fields']
+        if conflicts:
+            # **两栏 + 三个按钮**（不是三栏 diff）：用户 2026-10-19 的口径
+            from storygraph.ui_qt.dialogs_collab import CollabConflictDialog
+            dlg = CollabConflictDialog(self, conflicts)
+            if dlg.exec() == QDialog.Accepted and dlg.resolutions:
+                done = self._session.collab_resolve(
+                    self.db_path.text(), self.sheet_path.text(), actor,
+                    dlg.resolutions)
+                rr = done.get('result') or {}
+                if not done.get('ok'):
+                    self._say(f'   ✗ 应用选择失败：{done.get("error")}')
+                else:
+                    self._say(f'   ✔ 已应用 {len(rr.get("applied") or ())} 句的选择'
+                              + (f'，两句都留 {len(rr.get("both_kept") or ())} 处'
+                                 if rr.get('both_kept') else ''))
+                    for err in (rr.get('errors') or ())[:3]:
+                        self._say(f'   ⚠ {err.get("line_id")}：{err.get("error")}')
+        for c in others:
+            self._say(f'   ⚠ {c.get("hint") or c.get("kind")}')
 
     def _status(self):
         res = self._session.collab_status(self.db_path.text())

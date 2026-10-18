@@ -366,6 +366,34 @@ class WindowExportMixin:
             self._status(f'已刷新 {Path(table_path).name} 的下拉候选。')
         except Exception as e:                    # noqa: BLE001
             self._status(f'刷新候选失败（不影响导出）：{e}')
+
+    def refresh_stage_views(self):
+        """
+        「刷新派生视图」：只重算「舞台快照」「演出时间轴」，不动 Beats。
+
+        用户 2026-10-19（D1）：递推型视图不该公式化，但**必须**有生成时间和
+        显式重算入口 —— 否则表里写的东西看起来和真值一样权威，其实只是
+        导出那一刻的推导结果。
+        """
+        from storygraph.app import tables
+        start = str(Path(self._project_root or '.') / 'game')
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择要重算派生视图的剧本表（.xlsx）', start,
+            'Excel 工作簿 (*.xlsx);;所有文件 (*)')
+        if not path:
+            return
+        try:
+            from storygraph.story.excel_export import refresh_stage_views
+            registry = None
+            try:
+                registry = self._registry_provider()
+            except Exception as e:                # noqa: BLE001 - 没有资源表也能重算
+                swallow('ui_qt.window_export.refresh_stage_views.registry', e)
+            refresh_stage_views(path, registry)
+            tables.remember_table_mtime(self._table_mtimes, Path(path))
+            self._status('已重算「舞台快照」「演出时间轴」（表头写着生成时间）。')
+        except Exception as e:                    # noqa: BLE001
+            QMessageBox.warning(self, '刷新派生视图失败', str(e))
     def _show_unregistered(self, unregistered):
         """演出表里引用了、但资源表未登记的资产 —— 提示文案去登记。"""
         from storygraph.ui_qt.dialogs import AnalysisDialog

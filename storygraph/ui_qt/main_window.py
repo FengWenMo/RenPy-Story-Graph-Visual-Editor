@@ -1953,6 +1953,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('📦 资源体检', self.check_asset_health,
             '检查资源表与项目资源是否一一对应，并出示报告（只读）')
         act('🩺 项目体检', self.show_health, '三级校验，只读检查，不写盘')
+        act('✏️ 资源改名', self.open_asset_rename_dialog,
+            '资源表改了名字之后，把脚本里的旧名字按词边界换掉。\n'
+            '先看预览（哪些文件、哪几行）→ 确认后写盘（自动备份 .bak）→ 可一键回滚。')
         act('✎ 直接编辑单章', self._on_load,
             '不进剧情图，只把一章 .rpy 打开到卡片界面（改一章不想建图时用）')
         act('🔄 重读资源表', self.rescan_project,
@@ -1982,6 +1985,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('⤓ 导出 .rpy', self.export_script, '生成/增量补丁写回（过安全门禁）')
         act('⤒ 从剧本表写回', self.export_from_table,
             '选一张演出表 .xlsx → 写回 .rpy（导出前会先给你看门禁结论）')
+        act('🔄 刷新派生视图', self.refresh_stage_views,
+            '只重算「舞台快照」「演出时间轴」两张只读表（不动 Beats 一格）。\n'
+            '这两张是递推推导出来的，改了脚本/表格后不会自己变 —— '
+            '表头会写着它是哪一刻生成的。')
         act('🎬 演出预览', self.open_stage_preview, '按卡片效果"跑起来"')
         act('❓ 使用说明', self.show_help, '操作说明与快捷键（独立窗口，不占界面）')
 

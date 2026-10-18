@@ -51,8 +51,21 @@ STATUSES = (STATUS_DRAFT, STATUS_REVIEW, STATUS_APPROVED)
 
 # push/pull 时携带协作状态的工作表名（不污染 Beats 表的列）
 COLLAB_SHEET = '协作信息'
+#: 协作信息表的列。
+#:
+#: `BasePayload` 是**拉取那一刻这一行的完整内容**（2026-10-19，C1 三方合并的 base）。
+#: 为什么装进 Excel 而不是数据库：每个人拉取的时间不同，"你那时的基线"只有
+#: **你手上这份表**知道；装进文件里，复制/改名/另存都不会丢。老版本 Excel 另存
+#: 丢掉隐藏表 → 读不到 base → 降级成两方比较（并明确告知），见 `push`。
 COLLAB_FIELDS = ['LineId', 'Revision', 'LockedBy', 'Status', 'UpdatedBy',
-                 'UpdatedAt']
+                 'UpdatedAt', 'BasePayload']
+#: 上面那一列的名字（读表时按它取）
+BASE_FIELD = 'BasePayload'
+#: 协作信息表左下角的"拉取时间"标记（与行数据同表，避免多一张 sheet）
+PULLED_AT_KEY = 'PulledAt'
+
+#: 三方合并**不比**的列：身份（LineId）和派生值（ContentHash 写库时重算）
+_MERGE_SKIP = ('LineId', 'ContentHash')
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -258,10 +271,20 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
         del wb[COLLAB_SHEET]
     ws = wb.create_sheet(COLLAB_SHEET)
     ws.append(COLLAB_FIELDS)
+    #: 每一行"拉取时它长什么样" = 三方合并的 base（见 `COLLAB_FIELDS` 注释）。
+    #: 用它而不是数据库里的 revision 号当 base：revision 只能说"变没变"，
+    #: 说不出"哪个字段变了" —— 而后者才决定两条改动打不打架。
+    base_by_id = {b.line_id: _beat_to_payload(b) for b in beats}
     for r in rows:
-        ws.append([r['line_id'], r['revision'], r['locked_by'] or '',
-                   r['status'], r['updated_by'], r['updated_at']])
-    for col, w in zip('ABCDEF', (16, 10, 14, 12, 14, 20)):
+        lid = r['line_id']
+        base_json = json.dumps(base_by_id.get(lid) or json.loads(r['payload']),
+                               ensure_ascii=False)
+        ws.append([lid, r['revision'], r['locked_by'] or '',
+                   r['status'], r['updated_by'], r['updated_at'], base_json])
+    # 拉取时间（两方比较降级时要说"这份表是什么时候的"）
+    ws.cell(row=ws.max_row + 2, column=1, value=PULLED_AT_KEY)
+    ws.cell(row=ws.max_row, column=2, value=_now())
+    for col, w in zip('ABCDEFG', (16, 10, 14, 12, 14, 20, 60)):
         ws.column_dimensions[col].width = w
     wb.save(out)
 
@@ -272,7 +295,12 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
 
 
 def read_collab_sheet(sheet_path) -> dict:
-    """读协作信息表 → {line_id: {'revision': int, 'locked_by': str, 'status': str}}"""
+    """
+    读协作信息表 → `{line_id: {'revision', 'locked_by', 'status', 'base'}}`。
+
+    `base` 是**拉取那一刻这一行的 payload**（老表没有这一列 → `None`）。
+    `None` 不等于"没变"：它表示"这份表说不清基线"，`push` 会降级成两方比较。
+    """
     import openpyxl
 
     sheet_path = Path(sheet_path)
@@ -294,8 +322,8 @@ def read_collab_sheet(sheet_path) -> dict:
             # Excel 里手敲的 ID 常常带着首尾空格（复制粘贴/输入法）：
             # 不归一就会"这一行查不到基线"，看起来像工具在乱报冲突。
             lid = str(lid).strip()
-            if not lid:
-                continue
+            if not lid or lid == PULLED_AT_KEY:
+                continue          # 表尾那行是"拉取时间"标记，不是数据行
             try:
                 revision = int(data.get('Revision') or 0)
             except (TypeError, ValueError) as e:     # noqa: BLE001 - 手改坏了当没基线
@@ -305,43 +333,204 @@ def read_collab_sheet(sheet_path) -> dict:
                 'revision': revision,
                 'locked_by': str(data.get('LockedBy') or ''),
                 'status': str(data.get('Status') or STATUS_DRAFT),
+                'base': _parse_base(data.get(BASE_FIELD)),
             }
         return out
     finally:
         wb.close()
 
 
-def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
-    """
-    Excel（前端）→ 数据库。
+def _parse_base(raw):
+    """`BasePayload` 单元格 → dict（空 / 坏 JSON → `None` = 没有基线）。"""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        got = json.loads(text)
+    except (TypeError, ValueError) as e:          # noqa: BLE001 - 手改坏了当没基线
+        swallow('collab_store._parse_base', e)
+        return None
+    return got if isinstance(got, dict) and got else None
 
-    冲突规则（都不静默覆盖）：
-      · 行被别人锁着          → 拒（除非 force）
-      · **没有协作基线**      → 拒（除非 force）：普通导出表没有
-        「协作信息」工作表，库里的 revision 无从比较 —— 从前 `base_rev and …`
-        把"没有基线"当成"不用检查"，于是任何普通导出表都能**盲覆盖**别人的
-        改动（2026-10-17 修，见 `tests/test_collab_roundtrip.py`）
-      · 库里的 revision 比你拉取时更新 → 冲突，列出来让人先看 diff
-      · 你在 Excel 新建的行    → 直接插入
-      · 软删除的行又出现在表里 → **复活**（`deleted=0` + 审计），
-        不是 `unchanged`
-    返回 {'added','updated','unchanged','revived','conflicts','rejected'}
+
+def read_pulled_at(sheet_path) -> str:
+    """协作信息表里记的拉取时间（空 = 老表 / 没有）。"""
+    import openpyxl
+
+    sheet_path = Path(sheet_path)
+    if not sheet_path.exists():
+        return ''
+    wb = openpyxl.load_workbook(sheet_path, data_only=True)
+    try:
+        if COLLAB_SHEET not in wb.sheetnames:
+            return ''
+        ws = wb[COLLAB_SHEET]
+        for row in ws.iter_rows(values_only=True):
+            if row and str(row[0] or '').strip() == PULLED_AT_KEY:
+                return str(row[1] or '').strip() if len(row) > 1 else ''
+        return ''
+    finally:
+        wb.close()
+
+
+#: 字段名 → 给人看的名字（冲突界面按**字段**说事，比整行 precise）
+FIELD_LABELS = {
+    'Text': '台词', 'Speaker': '说话人', 'Kind': '类型', 'Comment': '备注',
+    'Condition': '条件', 'Scene': '场景', 'Show': '显示', 'At': '位置',
+    'With': '转场', 'Hide': '隐藏', 'BGM': '音乐', 'BGMParams': '音乐参数',
+    'SFX': '音效', 'SFXParams': '音效参数', 'Voice': '语音', 'Stage': '舞台',
+    'CodeBlock': '代码块', 'StageOrder': '舞台顺序', 'OpOrder': '操作顺序',
+    'CodeBlocks': '代码边界', 'Nest': '结构位', 'Inline': '行内',
+    'Opaque': '保真块', 'SpecName': '语句名', 'SpecHead': '语句头',
+    'LoopHeader': '循环头', 'CameraHeader': '相机头', 'SayTail': '行尾',
+    'LabelHeader': '章节头', 'MenuName': '菜单名', 'MenuArgs': '菜单参数',
+    'Seq': '序号', 'Label': '章节', 'FileBlocks': '文件级保真',
+}
+
+
+def field_label(field: str) -> str:
+    """字段 → 中文名（没有登记就原样返回 —— 不假装认识）。"""
+    return FIELD_LABELS.get(str(field or ''), str(field or ''))
+
+
+def _norm_value(value) -> str:
+    """payload 里的一个值 → 可比的形式（`None` 与 `''` 是同一种"空"）。"""
+    if value is None:
+        return ''
+    return str(value)
+
+
+def _norm_payload(payload) -> dict:
+    """整行 payload → `{列: 字符串}`（只留列契约里的键，附带 FileBlocks）。"""
+    payload = payload or {}
+    out = {}
+    for key in list(BEAT_FIELDS) + [_FILE_BLOCKS_KEY]:
+        if key in _MERGE_SKIP:
+            continue
+        out[key] = _norm_value(payload.get(key))
+    return out
+
+
+def _payload_equal(a, b) -> bool:
+    """两行内容一样吗（按列契约比，不比派生列）。"""
+    return _norm_payload(a) == _norm_payload(b)
+
+
+def merge_payloads(base, mine, theirs) -> tuple:
+    """
+    字段级三方合并（2026-10-19，C1）。
+
+    对每个字段 f：
+
+        m == t → 取 m        （两边改成一样）
+        m == b → 取 t        （只有对方改）
+        t == b → 取 m        （只有我改）
+        否则   → 冲突        （两边都改了同一字段，算法替不了人）
+
+    ⚠ 判据是**字段**不是整行：A 改台词、B 改同一行的音乐，从前整行拒绝，
+    现在两处都静默合进来。真正的冲突只剩"同一句的同一格两边各写了一个版本"。
+
+    返回 `(merged, conflicts)`；`conflicts` 每项 `{'field','base','mine','theirs'}`
+    —— 界面按**字段**显示（比 git 的 hunk 精确，也不用给编剧看 base）。
+    """
+    base = _norm_payload(base)
+    mine = _norm_payload(mine)
+    theirs = _norm_payload(theirs)
+    merged = {}
+    conflicts = []
+    for key in mine:                      # 键集合 = 列契约（三边同源）
+        b, m, t = base.get(key, ''), mine.get(key, ''), theirs.get(key, '')
+        if m == t:
+            merged[key] = m
+        elif m == b:
+            merged[key] = t
+        elif t == b:
+            merged[key] = m
+        else:
+            conflicts.append({'field': key, 'base': b, 'mine': m, 'theirs': t})
+            merged[key] = m               # 占位：有冲突时这一行不写库
+    return merged, conflicts
+
+
+def auto_merge_summary(result: dict) -> str:
+    """
+    push 结果 → 一句人话（"自动合并了 N 行 / M 处；K 句要你决定"）。
+
+    为什么必须报（用户 2026-10-19）：
+
+    > git merge 成功也会说"自动合并了 N 个文件"。这个反馈不能省，
+    > 否则用户不知道工具替她做了什么。
+    """
+    merged = len(result.get('merged') or ())
+    fields = int(result.get('auto_merged_fields') or 0)
+    conflicts = len([c for c in (result.get('conflicts') or ())
+                     if str(c.get('kind') or 'fields') != 'structure'])
+    parts = []
+    if merged:
+        parts.append(f'自动合并了 {merged} 行 / {fields} 处')
+    if conflicts:
+        parts.append(f'{conflicts} 句要你决定')
+    if result.get('degraded'):
+        parts.append('这份表没有基线，只能比谁新（不能自动合并）')
+    if not parts:
+        return '没有需要合并的改动'
+    return '；'.join(parts)
+
+
+def push(db_path, sheet_path, actor: str, force: bool = False,
+         only=None) -> dict:
+    """
+    Excel（前端）→ 数据库。**冲突判据 = 字段级三方比较**（2026-10-19，C1）。
+
+    规则：
+      · 行被别人锁着            → 拒（除非 force）
+      · 有 base（拉取时的 payload）→ 逐字段三方合并：
+          只有一方改的字段**静默合进来**；两边都改同一格才算冲突，列出来。
+      · 没有 base（老表 / 隐藏表被 Excel 另存丢掉）→ **降级成两方比较**：
+          库里的 revision 比你拉取时新就拒绝，并明确说"这次只能比谁新"。
+      · 你在 Excel 新建的行      → 插入；与 TA 新插的行**同位置**（同 Label+Seq）
+          → 冲突（可以"两句都留"）
+      · 表里没有的行            → 软删除；但 TA 改过的那句**保留**并记一条
+        "你删过这句"（默认不丢别人的字）
+      · 软删除的行又出现在表里   → 若你没改过它（= 旧表），不复活；改过才复活
+      `only=[...]`：**部分提交** —— 只写这些行，也不扫删除（其余的回头再说）。
+
+    返回 `{'added','updated','unchanged','revived','merged','kept',
+    'skipped_stale','conflicts','rejected','auto_merged_fields'}`。
     """
     beats = import_beats_from_excel(sheet_path)
     assign_identity(beats)
     base = read_collab_sheet(sheet_path)
     has_baseline_sheet = bool(base)
+    #: 表里有行、但**没有一行带内容基线** = 旧版 Excel 另存把 BasePayload 丢了。
+    #: 这时只能比谁新（降级），并且必须把这件事说出来。
+    has_any_base = any(bool(v.get('base')) for v in base.values())
+    only_set = ({str(x).strip() for x in only if str(x).strip()}
+                if only else None)
 
     result = {'added': [], 'updated': [], 'unchanged': [], 'revived': [],
-              'conflicts': [], 'rejected': []}
+              'merged': [], 'kept': [], 'skipped_stale': [],
+              'conflicts': [], 'rejected': [], 'auto_merged_fields': 0,
+              'degraded': False}
 
     with connect(db_path) as conn:
         ensure_user(conn, actor)
         existing = {r['line_id']: r for r in
                     conn.execute('SELECT * FROM beats').fetchall()}
+        # TA 在我拉取之后新插的行：库里有、我的基线里没有。
+        # 用它来判断"两边各插一行在同一个位置"。
+        ta_inserted = {}
+        for lid, r in existing.items():
+            if r['deleted'] or lid in base:
+                continue
+            ta_inserted[(str(r['label'] or ''), int(r['seq'] or 0))] = r
 
         for beat in beats:
             lid = beat.line_id
+            if only_set is not None and lid not in only_set:
+                continue
             row = existing.get(lid)
             if row is not None:
                 # 空 Label / 0 号 Seq 是"这一格没填"，不是"改成空/改成 0"：
@@ -358,6 +547,23 @@ def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
             chash = beat.beat_fingerprint
 
             if row is None:
+                # **同位置各插一行**（2026-10-19，C3）：不静默排成两行同 Seq
+                slot = (str(beat.label or ''), int(beat.seq or 0))
+                clash = ta_inserted.get(slot)
+                if clash is not None and not force:
+                    _audit(conn, actor, 'conflict_insert', lid,
+                           {'theirs': clash['line_id'], 'seq': slot[1]})
+                    result['conflicts'].append({
+                        'kind': 'insert_same_slot', 'reason': 'insert_same_slot',
+                        'line_id': lid, 'label': slot[0], 'seq': slot[1],
+                        'theirs_line_id': clash['line_id'],
+                        'updated_by': clash['updated_by'],
+                        'mine': payload,
+                        'theirs': json.loads(clash['payload']),
+                        'hint': '你和 TA 在同一个位置各插了一句 —— '
+                                '可以"两句都留"（自动排成一前一后）',
+                    })
+                    continue
                 conn.execute(
                     'INSERT INTO beats(line_id,label,seq,payload,content_hash,'
                     'status,revision,updated_by,updated_at) '
@@ -378,10 +584,16 @@ def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
                     {'line_id': lid, 'reason': f'被 {locker} 锁定'})
                 continue
 
-            # **软删除的行又出现在表里 = 用户要它回来**（2026-10-17 修：
-            # 从前 UPDATE 不把 deleted 置回 0，push 还可能是 `unchanged`，
-            # 于是"加回来"的行下次 pull 又消失）。
+            theirs_payload = json.loads(row['payload'])
+            base_payload = (base.get(lid) or {}).get('base')
+
+            # **软删除的行又出现在表里**：老表是"用户要它回来"，
+            # 但有了 base 就能分清"我真的要它回来"和"我手上还是删除前那份旧表"。
             if row['deleted']:
+                if (not force and base_payload is not None
+                        and _payload_equal(base_payload, payload)):
+                    result['skipped_stale'].append(lid)
+                    continue
                 conn.execute(
                     'UPDATE beats SET deleted=0, payload=?, content_hash=?, '
                     'label=?, seq=?, revision=revision+1, updated_by=?, '
@@ -402,37 +614,107 @@ def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
                 result['unchanged'].append(lid)
                 continue
 
-            # **没有基线 = 不许覆盖**（P1-1）。判据不是"base_rev 为真"，
-            # 而是"协作信息表里真有这一行、且 revision > 0"。
+            # ---------- 有 base：字段级三方合并 ----------
+            if not force and base_payload is not None:
+                merged, field_conflicts = merge_payloads(base_payload, payload,
+                                                         theirs_payload)
+                if field_conflicts:
+                    _audit(conn, actor, 'conflict_fields', lid,
+                           {'fields': [c['field'] for c in field_conflicts],
+                            'db_revision': row['revision']})
+                    result['conflicts'].append({
+                        'kind': 'fields', 'reason': 'fields',
+                        'line_id': lid, 'label': row['label'],
+                        'db_revision': row['revision'],
+                        'updated_by': row['updated_by'],
+                        'fields': field_conflicts,
+                        'mine': payload, 'theirs': theirs_payload,
+                        'base': base_payload,
+                        'hint': '你和 TA 改了同一句的同一格 —— 选一个，或者两句都留',
+                    })
+                    continue
+                if _payload_equal(merged, theirs_payload):
+                    # 合出来就是库里那份 = 我其实没改动任何要写的东西
+                    result['unchanged'].append(lid)
+                    continue
+                got = _write_merged(conn, lid, row['revision'], merged,
+                                    actor, payload, theirs_payload)
+                if got is None:
+                    result['conflicts'].append({
+                        'kind': 'race', 'reason': 'race', 'line_id': lid,
+                        'label': row['label'], 'db_revision': row['revision'],
+                        'updated_by': row['updated_by'], 'fields': [],
+                        'mine': payload, 'theirs': theirs_payload,
+                        'base': base_payload,
+                        'hint': '库在你合并的这一刻又被改了 —— 重新提交一次就好',
+                    })
+                    continue
+                result['updated'].append(lid)
+                if got:
+                    # `merged` = `updated` 里"确实从对方那里合进了字段"的那些
+                    # （只调了顺序、内容全是自己写的 → 只算 updated）
+                    result['merged'].append(lid)
+                    result['auto_merged_fields'] += got
+                continue
+
+            # ---------- 没有 base：两方比较（降级，明确告知） ----------
             base_row = base.get(lid) or {}
             base_rev = int(base_row.get('revision') or 0)
             if not force and (not has_baseline_sheet or base_rev <= 0):
                 _audit(conn, actor, 'conflict_no_baseline', lid,
                        {'db_revision': row['revision']})
+                result['degraded'] = True
                 result['conflicts'].append({
-                    'line_id': lid,
-                    'label': row['label'],
+                    'kind': 'no_baseline', 'reason': 'no_baseline',
+                    'line_id': lid, 'label': row['label'],
                     'db_revision': row['revision'],
                     'base_revision': 0,
                     'updated_by': row['updated_by'],
-                    'reason': 'no_baseline',
-                    'hint': '这份表不是 pull 出来的（没有「协作信息」表，'
-                            '或这一行不在表里）：先 pull 一份再改；'
-                            '确实要整表覆盖请用 --force',
+                    'fields': [], 'mine': payload, 'theirs': theirs_payload,
+                    'base': {},
+                    'hint': '这份表没有基线（不是 pull 出来的，或用旧版 Excel '
+                            '另存丢了「协作信息」表）：这次只能比谁新，'
+                            '不能自动合。先 pull 一份再改；确实要整表覆盖请用 --force',
                 })
                 continue
+            if not force and not has_any_base:
+                # 表在、revision 也在，但**每一行的内容基线**没了（旧版 Excel
+                # 另存会丢隐藏列）。这时只能比谁新：
+                #   · 库里 revision 没动 → 我的改动是唯一改动，写下去是安全的；
+                #   · 库里动过 → 说不清两边改了哪儿，必须人看。
+                result['degraded'] = True
+                if row['revision'] > base_rev:
+                    _audit(conn, actor, 'conflict_no_base_payload', lid,
+                           {'db_revision': row['revision'],
+                            'base_revision': base_rev})
+                    result['conflicts'].append({
+                        'kind': 'no_baseline', 'reason': 'no_baseline',
+                        'line_id': lid, 'label': row['label'],
+                        'db_revision': row['revision'],
+                        'base_revision': base_rev,
+                        'updated_by': row['updated_by'],
+                        'fields': [], 'mine': payload,
+                        'theirs': theirs_payload, 'base': {},
+                        'hint': '这份表没有每一行的基线内容（「协作信息」里 '
+                                'BasePayload 不见了，可能用旧版 Excel 另存过）：'
+                                '这次只能比谁新，不能自动合并。先 pull 一份再改，'
+                                '或确认后覆盖（--force）',
+                    })
+                    continue
             if not force and row['revision'] > base_rev:
                 _audit(conn, actor, 'conflict', lid,
                        {'db_revision': row['revision'],
                         'base_revision': base_rev})
                 result['conflicts'].append({
-                    'line_id': lid,
-                    'label': row['label'],
+                    'kind': 'revision', 'reason': 'revision',
+                    'line_id': lid, 'label': row['label'],
                     'db_revision': row['revision'],
                     'base_revision': base_rev,
                     'updated_by': row['updated_by'],
-                    'reason': 'revision',
-                    'hint': '库里的版本比你拉取时新：先 pull 并比对，'
+                    'fields': [], 'mine': payload, 'theirs': theirs_payload,
+                    'base': {},
+                    'hint': '这份表没有这一行的基线内容（老表）：只能比谁新 —— '
+                            '库里的版本比你拉取时新。先 pull 并比对，'
                             '或用 --force 覆盖',
                 })
                 continue
@@ -447,20 +729,457 @@ def push(db_path, sheet_path, actor: str, force: bool = False) -> dict:
                                                 'meta_only': row['content_hash'] == chash})
             result['updated'].append(lid)
 
-        # 表里没有的行 = 被删掉了 → 标记软删除（保留审计）
-        sheet_ids = {b.line_id for b in beats}
-        for lid, row in existing.items():
-            if row['deleted'] or lid in sheet_ids:
-                continue
-            if row['locked_by'] and row['locked_by'] != actor and not force:
-                continue
-            conn.execute('UPDATE beats SET deleted=1, updated_by=?, '
-                         'updated_at=?, revision=revision+1 WHERE line_id=?',
-                         (actor, _now(), lid))
-            _audit(conn, actor, 'delete', lid, {})
+        # 表里没有的行 = 被删掉了。**但别人改过的那些要留住**（C3）：
+        # 你删的是你看到的那一版，TA 后来写的字不该跟着消失。
+        if only_set is None:
+            sheet_ids = {b.line_id for b in beats}
+            labels_kept = {}
+            for lid, row in existing.items():
+                if row['deleted'] or lid in sheet_ids:
+                    continue
+                if row['locked_by'] and row['locked_by'] != actor and not force:
+                    continue
+                base_payload = (base.get(lid) or {}).get('base')
+                if not force and base_payload is not None:
+                    theirs_payload = json.loads(row['payload'])
+                    if not _payload_equal(theirs_payload, base_payload):
+                        result['kept'].append({
+                            'line_id': lid, 'label': row['label'],
+                            'updated_by': row['updated_by'],
+                            'reason': 'deleted_by_you_but_changed',
+                            'hint': f'你删过 {lid}，但 {row["updated_by"] or "TA"} '
+                                    '改过它 —— 已保留对方的修改'
+                                    '（确实要删请用 --force）',
+                        })
+                        labels_kept[str(row['label'] or '')] = \
+                            labels_kept.get(str(row['label'] or ''), 0) + 1
+                        continue
+                conn.execute('UPDATE beats SET deleted=1, updated_by=?, '
+                             'updated_at=?, revision=revision+1 WHERE line_id=?',
+                             (actor, _now(), lid))
+                _audit(conn, actor, 'delete', lid, {})
+            # **整段删除 + 对方在里面加了句子** = 结构冲突（要人）：
+            # 保住数据，但明确告诉人"你删的这段里对方动过 N 句"。
+            for label, n in labels_kept.items():
+                if n < 2:
+                    continue
+                result['conflicts'].append({
+                    'kind': 'structure', 'reason': 'structure',
+                    'line_id': '', 'label': label, 'kept': n,
+                    'updated_by': '',
+                    'hint': f'你删了「{label}」这一段，但里面 {n} 句对方改过 —— '
+                            '已经全部保留。确实要整段删掉请用 --force 重新提交',
+                    'fields': [], 'mine': {}, 'theirs': {}, 'base': {},
+                })
 
     return result
 
+
+def _write_merged(conn, lid, base_revision, merged, actor, mine, theirs):
+    """
+    把合出来的行写进库（**带 revision CAS**：`WHERE revision=?`）。
+
+    返回"从对方那里合进来的字段数"；`rowcount == 0` 表示库在这一刻又变了
+    （别人抢在前面写了同一行）→ 返回 `None`，调用方报冲突让人刷新重试。
+    从前 `UPDATE ... WHERE line_id=?` 没有 CAS：两个人同时 push 时后写的
+    静默覆盖前写的，审计里还写着"更新成功"。
+    """
+    beat = beat_from_payload(merged)
+    beat.line_id = lid
+    payload = _beat_to_payload(beat)
+    cur = conn.execute(
+        'UPDATE beats SET payload=?, content_hash=?, label=?, seq=?, '
+        'deleted=0, revision=revision+1, updated_by=?, updated_at=? '
+        'WHERE line_id=? AND revision=?',
+        (json.dumps(payload, ensure_ascii=False), beat.beat_fingerprint,
+         beat.label, beat.seq, actor, _now(), lid, int(base_revision)))
+    if cur.rowcount == 0:
+        return None
+    mine_n = _norm_payload(mine)
+    merged_n = _norm_payload(payload)
+    taken = sum(1 for k, v in merged_n.items() if v != mine_n.get(k, ''))
+    _audit(conn, actor, 'merge', lid,
+           {'revision': int(base_revision) + 1, 'fields_from_theirs': taken})
+    return taken
+
+# ==================================================================
+#  冲突处理：把界面上的选择落地（C2）
+# ==================================================================
+
+def resolve_conflicts(db_path, sheet_path, actor: str, resolutions) -> dict:
+    """
+    把「你和 TA 改了同一句」里用户的选择写回库 + 本地表（**部分提交**）。
+
+    `resolutions` 每项：
+
+        {'line_id': 'ch01.0002', 'kind': 'fields',
+         'values': {'Text': 'mine' | 'theirs' | '最终文本', …}}
+        {'line_id': 'ch01.0002', 'kind': 'keep_both',
+         'order': 'mine_first' | 'theirs_first'}
+        {'line_id': 'ch01.0100', 'kind': 'insert_both', 'order': …,
+         'theirs_line_id': '…'}          # 两边同位置各插一行 → 两句都留
+        {'line_id': 'ch01.0100', 'kind': 'insert_drop'}   # 用对方那行，我的不留
+
+    为什么要"部分"（用户 2026-10-19）：
+
+    > 有 3 处冲突、200 行自动合并成功时，应该允许"先把这 200 行提交，
+    > 3 处回头再说"。不能因为一处台词打架，整个人的工作都卡住。
+
+    所以这里**只碰被解决的那几行**：写库（带 revision CAS）+ 把最终值写回
+    本地 Excel 那一行 + 刷新「协作信息」里的 Revision / BasePayload。
+    最后一步不能省 —— 否则下一次 push 会拿旧基线再报一次同样的冲突。
+    """
+    sheet_path = Path(sheet_path)
+    base = read_collab_sheet(sheet_path)
+    local = {b.line_id: b for b in import_beats_from_excel(sheet_path)}
+
+    result = {'applied': [], 'both_kept': [], 'errors': [], 'skipped': [],
+              'local_rows': {}}          # line_id → 最终 payload（写回 Excel 用）
+
+    with connect(db_path) as conn:
+        ensure_user(conn, actor)
+        rows = {r['line_id']: r
+                for r in conn.execute('SELECT * FROM beats').fetchall()}
+        for res in resolutions or ():
+            lid = str(res.get('line_id') or '').strip()
+            kind = str(res.get('kind') or 'fields')
+            if kind in ('insert_both', 'insert_drop'):
+                got = _resolve_insert(conn, res, local, actor)
+                if got.get('error'):
+                    result['errors'].append({'line_id': lid,
+                                             'error': got['error']})
+                elif kind == 'insert_drop':
+                    result['skipped'].append(lid)
+                    _drop_local_row(sheet_path, lid)
+                else:
+                    result['applied'].append(lid)
+                    result['local_rows'][lid] = got['payload']
+                continue
+            row = rows.get(lid)
+            if row is None:
+                result['errors'].append(
+                    {'line_id': lid, 'error': '库里没有这一行（可能已被删除）'})
+                continue
+            beat = local.get(lid)
+            if beat is None:
+                result['errors'].append(
+                    {'line_id': lid, 'error': '本地表里已经没有这一行（先 pull 一份）'})
+                continue
+            mine = _beat_to_payload(beat)
+            theirs = json.loads(row['payload'])
+            base_payload = (base.get(lid) or {}).get('base') or {}
+            kind = str(res.get('kind') or 'fields')
+
+            if kind == 'keep_both':
+                got = _keep_both(conn, lid, row, mine, theirs,
+                                 str(res.get('order') or 'mine_first'), actor)
+                if got is None:
+                    result['errors'].append(
+                        {'line_id': lid, 'error': '库在你提交的这一刻又变了 —— 重新来一次'})
+                    continue
+                result['both_kept'].append(got)
+                result['local_rows'][lid] = got['kept']
+                result['local_rows'][got['dup_line_id']] = got['dup']
+                continue
+
+            merged, conflicts = merge_payloads(base_payload, mine, theirs)
+            values = res.get('values') or {}
+            undecided = []
+            for c in conflicts:
+                choice = str(values.get(c['field'], '') or '')
+                if choice == 'mine':
+                    merged[c['field']] = c['mine']
+                elif choice == 'theirs':
+                    merged[c['field']] = c['theirs']
+                elif choice:
+                    merged[c['field']] = choice      # 自己拼的文本
+                else:
+                    undecided.append(field_label(c['field']))
+            if undecided:
+                result['errors'].append(
+                    {'line_id': lid,
+                     'error': f'还没决定：{"、".join(undecided)}'})
+                continue
+            out = beat_from_payload(merged)
+            out.line_id = lid
+            payload = _beat_to_payload(out)
+            cur = conn.execute(
+                'UPDATE beats SET payload=?, content_hash=?, label=?, seq=?, '
+                'deleted=0, revision=revision+1, updated_by=?, updated_at=? '
+                'WHERE line_id=? AND revision=?',
+                (json.dumps(payload, ensure_ascii=False), out.beat_fingerprint,
+                 out.label, out.seq, actor, _now(), lid, int(row['revision'])))
+            if cur.rowcount == 0:
+                result['errors'].append(
+                    {'line_id': lid, 'error': '库在你提交的这一刻又变了 —— 重新来一次'})
+                continue
+            _audit(conn, actor, 'resolve', lid,
+                   {'picked': {c['field']: str(values.get(c['field'], ''))
+                               for c in conflicts}})
+            result['applied'].append(lid)
+            result['local_rows'][lid] = payload
+
+    # 本地表：写回最终值；协作信息：刷新 revision / base
+    touched = list(result['local_rows'])
+    if touched:
+        _write_local_rows(sheet_path, result['local_rows'])
+        _refresh_collab_rows(db_path, sheet_path, touched)
+    return result
+
+
+def _keep_both(conn, lid, row, mine, theirs, order, actor):
+    """
+    「两句都留」：原行留一份，另一份作为**新的一行**插在它后面。
+
+    `order='mine_first'` → 原行 = 我的，新行 = TA 的；`theirs_first` 反之。
+    新行的 Seq = 原 Seq + 1，并把它后面同 Label 的行**整体顺延**一位 ——
+    不这么做两行会撞在同一个 Seq 上，pull 出来的顺序说不准。
+    """
+    keep_mine = (order != 'theirs_first')
+    kept = _norm_payload(mine if keep_mine else theirs)
+    dup = _norm_payload(theirs if keep_mine else mine)
+
+    label = str(row['label'] or kept.get('Label') or '')
+    try:
+        seq = int(row['seq'] or kept.get('Seq') or 0)
+    except (TypeError, ValueError):
+        seq = 0
+    beat = beat_from_payload(kept)
+    beat.line_id = lid
+    beat.label = label or beat.label
+    beat.seq = seq or beat.seq
+    kept_payload = _beat_to_payload(beat)
+    cur = conn.execute(
+        'UPDATE beats SET payload=?, content_hash=?, label=?, seq=?, '
+        'deleted=0, revision=revision+1, updated_by=?, updated_at=? '
+        'WHERE line_id=? AND revision=?',
+        (json.dumps(kept_payload, ensure_ascii=False), beat.beat_fingerprint,
+         beat.label, beat.seq, actor, _now(), lid, int(row['revision'])))
+    if cur.rowcount == 0:
+        return None
+
+    new_seq = seq + 1
+    if label:
+        conn.execute('UPDATE beats SET seq = seq + 1 WHERE label=? AND seq>=?',
+                     (label, new_seq))
+    new_lid = _unique_line_id(conn, lid)
+    dup['LineId'] = new_lid
+    dup['Seq'] = str(new_seq)
+    dup['Label'] = label or dup.get('Label', '')
+    dbeat = beat_from_payload(dup)
+    dbeat.line_id = new_lid
+    dbeat.label = dup['Label']
+    dbeat.seq = new_seq
+    dup_payload = _beat_to_payload(dbeat)
+    conn.execute(
+        'INSERT INTO beats(line_id,label,seq,payload,content_hash,status,'
+        'revision,updated_by,updated_at) VALUES(?,?,?,?,?,?,1,?,?)',
+        (new_lid, dbeat.label, new_seq,
+         json.dumps(dup_payload, ensure_ascii=False), dbeat.beat_fingerprint,
+         STATUS_DRAFT, actor, _now()))
+    _audit(conn, actor, 'keep_both', lid,
+           {'dup': new_lid, 'order': order, 'seq': new_seq})
+    return {'line_id': lid, 'dup_line_id': new_lid, 'seq': new_seq,
+            'kept': kept_payload, 'dup': dup_payload}
+
+
+def _unique_line_id(conn, lid: str) -> str:
+    """给"两句都留"的新行找个没人用的 LineId（`ch01.0002~2`、`~3`…）。"""
+    for i in range(2, 100):
+        cand = f'{lid}~{i}'
+        got = conn.execute('SELECT 1 FROM beats WHERE line_id=?', (cand,)).fetchone()
+        if got is None:
+            return cand
+    return f'{lid}~{_now().replace(":", "")}'
+
+
+def _resolve_insert(conn, res, local, actor) -> dict:
+    """
+    「两边在同一个位置各插了一行」的两种落地。
+
+    · `insert_both`：我的新行**也**进库，排在我/TA 那行旁边（另一行顺延）；
+    · `insert_drop`：用 TA 那行，我的新行不进库（本地也要删掉，
+      否则下一次 push 会再报同一个位置）。
+    """
+    lid = str(res.get('line_id') or '').strip()
+    beat = (local or {}).get(lid)
+    if beat is None:
+        return {'error': '本地表里没有这一行'}
+    kind = str(res.get('kind') or '')
+    if kind == 'insert_drop':
+        _audit(conn, actor, 'insert_drop', lid, {})
+        return {'dropped': lid}
+    theirs_lid = str(res.get('theirs_line_id') or '').strip()
+    other = conn.execute('SELECT * FROM beats WHERE line_id=?',
+                         (theirs_lid,)).fetchone() if theirs_lid else None
+    if other is None:
+        return {'error': 'TA 的那一行已经不在了（可能被删）'}
+    label = str(other['label'] or '')
+    try:
+        base_seq = int(other['seq'] or 0)
+    except (TypeError, ValueError):
+        base_seq = 0
+    order = str(res.get('order') or 'mine_first')
+    new_seq = base_seq if order == 'mine_first' else base_seq + 1
+    conn.execute('UPDATE beats SET seq = seq + 1 WHERE label=? AND seq>=?',
+                 (label, new_seq))
+    beat.line_id = lid
+    beat.label = label or beat.label
+    beat.seq = new_seq
+    payload = _beat_to_payload(beat)
+    conn.execute(
+        'INSERT INTO beats(line_id,label,seq,payload,content_hash,status,'
+        'revision,updated_by,updated_at) VALUES(?,?,?,?,?,?,1,?,?)',
+        (lid, beat.label, new_seq, json.dumps(payload, ensure_ascii=False),
+         beat.beat_fingerprint, STATUS_DRAFT, actor, _now()))
+    _audit(conn, actor, 'insert_both', lid,
+           {'near': theirs_lid, 'order': order, 'seq': new_seq})
+    return {'payload': payload, 'seq': new_seq}
+
+
+def _drop_local_row(sheet_path, lid: str) -> bool:
+    """把本地表里的某一行删掉（`insert_drop`：用 TA 的那行，我的不留）。"""
+    import openpyxl
+
+    path = Path(sheet_path)
+    if not path.exists():
+        return False
+    wb = openpyxl.load_workbook(path)
+    try:
+        ws = wb['Beats']
+        cols = _sheet_headers_by_field(ws)
+        id_col = cols.get('LineId')
+        if not id_col:
+            return False
+        for r in range(2, ws.max_row + 1):
+            if str(ws.cell(row=r, column=id_col).value or '').strip() == lid:
+                ws.delete_rows(r)
+                wb.save(path)
+                return True
+        return False
+    finally:
+        wb.close()
+
+
+def _sheet_headers_by_field(ws) -> dict:
+    """`{BEAT_FIELDS 的键: 列号}`（按表头文字匹配；动态列自然不在里面）。"""
+    from storygraph.story.beat_fields import BEAT_HEADERS
+    want = {str(BEAT_HEADERS.get(f, f)): f for f in BEAT_FIELDS}
+    out = {}
+    for cell in ws[1]:
+        key = want.get(str(cell.value or '').strip())
+        if key and key not in out:
+            out[key] = cell.column
+    return out
+
+
+def _row_of_line_id(ws, col: int, lid: str):
+    """Beats 表里 LineId = lid 的那一行号（找不到 None）。"""
+    for r in range(2, ws.max_row + 1):
+        if str(ws.cell(row=r, column=col).value or '').strip() == lid:
+            return r
+    return None
+
+
+def _write_local_rows(sheet_path, payloads: dict) -> int:
+    """
+    把最终 payload 写回本地 Excel 的对应行。
+
+    只改**列契约里的那几格**，不重排、不重建工作簿 —— 用户在这份表上
+    还有别的没提交的改动，整表重写会把它们冲掉（这正是"部分提交"要避免的）。
+    行不存在（`keep_both` 的新行）→ 追加到末尾。
+    """
+    if not payloads:
+        return 0
+    import openpyxl
+
+    wb = openpyxl.load_workbook(sheet_path)
+    try:
+        ws = wb['Beats']
+        cols = _sheet_headers_by_field(ws)
+        id_col = cols.get('LineId')
+        if not id_col:
+            return 0
+        n = 0
+        for lid, payload in payloads.items():
+            r = _row_of_line_id(ws, id_col, lid)
+            if r is None:
+                r = ws.max_row + 1
+            for field, col in cols.items():
+                value = payload.get(field)
+                if field == 'Seq':
+                    try:
+                        value = int(value or 0)
+                    except (TypeError, ValueError):
+                        value = 0
+                ws.cell(row=r, column=col, value='' if value is None else value)
+            n += 1
+        wb.save(sheet_path)
+        return n
+    finally:
+        wb.close()
+
+
+def _refresh_collab_rows(db_path, sheet_path, line_ids) -> int:
+    """
+    刷新「协作信息」里那几行的 Revision / BasePayload（= 新的基线）。
+
+    不刷新的后果很具体：下次 push 时本地还是旧 base，同一个字段会被再判
+    一次"两边都改了"—— 用户刚选过的东西又冒出来，等于没解决。
+    """
+    if not line_ids:
+        return 0
+    import openpyxl
+
+    with connect(db_path) as conn:
+        rows = {}
+        for lid in line_ids:
+            got = conn.execute('SELECT * FROM beats WHERE line_id=?',
+                               (str(lid),)).fetchone()
+            if got is not None:
+                rows[lid] = got
+    if not rows:
+        return 0
+
+    wb = openpyxl.load_workbook(Path(sheet_path))
+    try:
+        if COLLAB_SHEET not in wb.sheetnames:
+            return 0
+        ws = wb[COLLAB_SHEET]
+        headers = [str(c.value or '').strip() for c in ws[1]]
+        col = {h: i + 1 for i, h in enumerate(headers) if h}
+        lid_col = col.get('LineId')
+        if not lid_col:
+            return 0
+        index = {}
+        for r in range(2, ws.max_row + 1):
+            lid = str(ws.cell(row=r, column=lid_col).value or '').strip()
+            if lid:
+                index[lid] = r
+        n = 0
+        for lid, row in rows.items():
+            r = index.get(lid)
+            if r is None:
+                r = ws.max_row + 1
+                ws.cell(row=r, column=lid_col, value=lid)
+            payload = json.loads(row['payload'])
+            values = {
+                'Revision': int(row['revision']),
+                'LockedBy': row['locked_by'] or '',
+                'Status': row['status'],
+                'UpdatedBy': row['updated_by'],
+                'UpdatedAt': row['updated_at'],
+                'BasePayload': json.dumps(payload, ensure_ascii=False),
+            }
+            for key, value in values.items():
+                c = col.get(key)
+                if c:
+                    ws.cell(row=r, column=c, value=value)
+            n += 1
+        wb.save(sheet_path)
+        return n
+    finally:
+        wb.close()
 
 # ==================================================================
 #  锁

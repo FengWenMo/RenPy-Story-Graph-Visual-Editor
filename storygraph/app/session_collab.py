@@ -47,12 +47,26 @@ class CollabMixin:
             return {'ok': False, 'error': str(e), 'result': {}}
         return {'ok': True, 'error': '', 'result': res or {}}
     def collab_push(self, db_path, sheet_path, actor: str,
-                    force: bool = False) -> dict:
-        """Excel（前端）→ 数据库；冲突/被锁一律不静默覆盖。"""
+                    force: bool = False, only=None) -> dict:
+        """Excel（前端）→ 数据库；冲突/被锁一律不静默覆盖。
+
+        `only`：**部分提交** —— 只写这些 LineId（其余冲突回头再说）。
+        """
         from storygraph.collab.collab_store import push
         try:
             res = push(Path(db_path), Path(sheet_path), actor=actor,
-                       force=force)
+                       force=force, only=only)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'result': {}}
+        return {'ok': True, 'error': '', 'result': res or {}}
+
+    def collab_resolve(self, db_path, sheet_path, actor: str,
+                       resolutions) -> dict:
+        """把「你和 TA 改了同一句」里用户的选择落地（写库 + 写回本地表）。"""
+        from storygraph.collab.collab_store import resolve_conflicts
+        try:
+            res = resolve_conflicts(Path(db_path), Path(sheet_path),
+                                    actor=actor, resolutions=resolutions)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'result': {}}
         return {'ok': True, 'error': '', 'result': res or {}}
