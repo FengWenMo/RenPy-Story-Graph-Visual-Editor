@@ -1729,6 +1729,25 @@ def apply_script_definitions(registry, parse_result) -> dict:
         if not image_id:
             continue
         tag, attrs = _split_image_name(name)
+        if info.get('atl'):
+            # **ATL / 块形式**的图像声明（`image logo blink:` + 块体，
+            # 2026-10-19）：贴图在块里，可能一个都没有（纯 ATL 动画），
+            # 也可能有好几层 —— 所以 `Path` 留空，`Notes` 说清去哪看。
+            # 为什么必须进表：不进表就选不到、`show 名` 还会被报成缺资源。
+            if image_id not in registry.images:
+                registry.images[image_id] = {
+                    'ID': image_id,
+                    'Path': '',
+                    'Tag': tag,
+                    'Attributes': attrs,
+                    'Category': _category_from_tag(tag),
+                    'Notes': (_source_note(info)
+                              + '；ATL 定义（贴图写在块里，看源文件）').lstrip('；'),
+                    '_from_script': True,
+                    '_atl': True,
+                }
+                added['images'] += 1
+            continue
         row = {
             'ID': image_id,
             'Path': info.get('path') or '',

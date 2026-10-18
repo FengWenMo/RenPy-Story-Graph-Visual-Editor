@@ -361,6 +361,37 @@ def _opens_a_block(header: str) -> bool:
     return h.endswith(':') and not h.startswith('$')
 
 
+def _register_atl_image(result, header, filename, line_no) -> None:
+    """
+    `image 名:` + 块体（**ATL / 块形式**的图像声明）→ 资源清单里也登记一条。
+
+    为什么（2026-10-19，审计 P1-3 最后一小块）：这种写法一直只是"逐字保真"
+    （整块进「文件级保真」），于是资源表里**没有这个图**：策划在「立绘」下拉
+    里选不到它，`show 名` 还会被当成"缺资源"。真机对照：`sr_general` 3 处、
+    官方 `tutorial` 10 处（`image logo blink:` / `image concert:` …）。
+
+    只登记**名字**（`path` 留空、`atl=True`）：块里的贴图可能一个都没有
+    （纯 ATL 动画），也可能是好几个 layer —— 猜一个"主贴图"只会写错，
+    所以由"资源表"那一层显示成"ATL 定义（贴图看源文件）"。
+    `_RE_IMAGE_DEF`（`image 名 = 表达式`）那条路不受影响（先登记的先赢）。
+    """
+    m = _RE_IMAGE_ATL_HEAD.match(str(header or '').strip())
+    if not m:
+        return
+    name = ' '.join(m.group('name').split())
+    if not name or name in result.images:
+        return
+    result.images[name] = {
+        'name': name,
+        'expr': '',
+        'path': '',
+        'solid': None,
+        'atl': True,
+        'source_file': filename,
+        'source_line': line_no,
+    }
+
+
 def _followed_by_indented(raw: list, start: int) -> bool:
     """
     `raw[start:]` 里第一条**结构性**行是不是缩进行？（`_top_level_region` 用）
@@ -878,6 +909,14 @@ _STR_DQ = r'"((?:[^"\\]|\\.)*)"'
 _STR_SQ = r"'((?:[^'\\]|\\.)*)'"
 _STR = f'(?:{_STR_DQ}|{_STR_SQ})'
 
+#: `image <名字>:`（**ATL / 块形式**：贴图写在块里）的块头。
+#:
+#: 为什么放在模块级：顶层区间（`_register_atl_image`）与解析器类
+#: （`RenPyParser._RE_IMAGE_ATL`）都要用它，两处各写一份迟早漂移。
+#: 名字允许带空格（`logo blink` = tag + 属性）；**不许有 `=`**
+#: （那是另一种写法 `image 名 = 表达式`，由 `_RE_IMAGE_DEF` 管）。
+_RE_IMAGE_ATL_HEAD = re.compile(r'^image\s+(?P<name>[^\s=:][^=:]*?)\s*:\s*$')
+
 # 音频语句里的"参数词"：出现它们说明后面不是资产名
 
 # 翻译文件用的命名组版本
@@ -1060,6 +1099,16 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     # `image <名字> = <表达式>`：名字允许带空格（`bg bg1_1`）
     _RE_IMAGE_DEF = re.compile(
         r'^image\s+(?P<name>[^\s=][^=]*?)\s*=\s*(?P<rhs>.+)$')
+    # `image <名字>:`（**ATL / 块形式**：贴图写在块里）
+    #   image logo blink:
+    #       "logo.png"
+    #       xpos 100
+    #   · 名字允许带空格（`logo blink` = tag + 属性），与 `_RE_IMAGE_DEF` 同口径；
+    #   · 必须**没有 `=`**（那是上面那一条），且冒号在行尾（带块体）。
+    # 与 `_register_atl_image` 共用**同一个**正则（模块级 `_RE_IMAGE_ATL_HEAD`）：
+    # 那一层在顶层区间里扫块头，这一层给 `_stmt_image_def` 之外的地方用 ——
+    # 两处各写一份，迟早有一处认不出带空格的图名。
+    _RE_IMAGE_ATL = _RE_IMAGE_ATL_HEAD
     # `layeredimage <tag>:`（合成立绘）
     _RE_LAYEREDIMAGE = re.compile(r'^layeredimage\s+([\w.]+)')
     # layeredimage 块里声明属性的写法
@@ -2573,6 +2622,12 @@ class ParseResultBuilder:
                 box.result.file_blocks.append(FileBlock(
                     header=head, code=code,
                     source_file=node.filename, source_line=line_no))
+                # ATL 形式的图像声明（`image 名:` + 块体）**也进资源清单**
+                # （2026-10-19，审计 P1-3 的最后一小块）：它从前只是"逐字
+                # 保真"，于是 资源表 里没有这个图 —— 策划在「立绘」下拉里
+                # 选不到它，`show 名` 还会被报成"缺资源"。
+                # 真机对照：`sr_general` 3 处、官方 `tutorial` 10 处。
+                _register_atl_image(box.result, head, node.filename, line_no)
 
         elif isinstance(node, PythonNode):
             # **顶层**的 `python:` / `init python:` 块**不进"拍"**。

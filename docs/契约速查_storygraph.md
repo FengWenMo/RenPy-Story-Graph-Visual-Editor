@@ -2551,6 +2551,12 @@ menu_statement(l, loc):
   台词**（是标题 / 选项文案），所以 `speaker_missing_warning` 对这两类**不报**
   "没有说话人 → 会变旁白"；高级区标题里要写出「菜单头」，否则没人知道
   那两格能改。
+- **`image 名:`（ATL / 块形式）也进资源表**（2026-10-19）：顶层区间扫块头
+  （`_RE_IMAGE_ATL_HEAD`，与 `RenPyParser._RE_IMAGE_ATL` 同一份正则），
+  登记 `{name, path:'', atl:True}`；`apply_script_definitions` 落成
+  `Path=''` + `_atl=True` 的资源行（`Notes` 注明"贴图写在块里"）。
+  理由：不进表 = 下拉里选不到、`show 名` 被报缺资源。`image 名 = 表达式`
+  那条路不受影响（先登记的赢）。
 
 ### 三条"平台期"约束（改代码前先读）
 

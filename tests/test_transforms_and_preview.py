@@ -380,6 +380,58 @@ class TestCharacterParsingRich:
 # F. P0：image tag ↔ 资产 ID 映射
 # ------------------------------------------------------------------
 
+class TestAtlImageEntersTheAssetRegistry:
+    """
+    `image 名:` + 块体（ATL 形式）也必须进资源表（2026-10-19，审计 P1-3 收尾）。
+
+    这块从前只是"逐字保真"（整块进「文件级保真」），于是资源表里没有这个图：
+    策划在「立绘」下拉里选不到它，`show 名` 还会被当成"缺资源"。
+    真机对照：`sr_general` 3 处、官方 `tutorial` 10 处。
+    """
+
+    SRC = (
+        'image logo blink:\n'
+        '    "logo.png"\n'
+        '    xpos 100\n'
+        '\n'
+        'label start:\n'
+        '    show logo blink\n'
+        '    return\n'
+    )
+
+    def test_parse_registers_the_name(self, write_rpy):
+        res = _parse(write_rpy, self.SRC)
+        assert 'logo blink' in res.images
+        info = res.images['logo blink']
+        assert info['atl'] is True
+        assert info['path'] == '', '块里可能没有贴图，别猜一个主贴图'
+        assert info['source_line'] == 1
+
+    def test_registry_row_has_no_path_but_says_why(self, write_rpy):
+        from storygraph.story.beat_build import apply_script_definitions
+
+        reg = AssetRegistry()
+        added = apply_script_definitions(reg, _parse(write_rpy, self.SRC))
+        assert added['images'] >= 1
+        assert 'logo_blink' in reg.images
+        row = reg.images['logo_blink']
+        assert row['Path'] == ''
+        assert row['Tag'] == 'logo' and row['Attributes'] == 'blink'
+        assert row['_atl'] is True
+        assert 'ATL' in row['Notes'], '要看得出"贴图在块里"'
+
+    def test_equal_form_is_untouched(self, write_rpy):
+        """`image 名 = 表达式` 那条路照旧（Path 有值、没有 `_atl`）。"""
+        from storygraph.story.beat_build import apply_script_definitions
+
+        src = 'image eileen happy = "eileen_happy.png"\n'
+        reg = AssetRegistry()
+        apply_script_definitions(reg, _parse(write_rpy, src))
+        row = reg.images['eileen_happy']
+        assert row['Path'] == 'eileen_happy.png'
+        assert not row.get('_atl')
+
+
 class TestImageTagIdMapping:
     def _reg(self):
         """一个真实的立绘目录结构：eileen/ 下多张表情。"""
