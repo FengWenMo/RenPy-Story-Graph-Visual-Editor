@@ -169,15 +169,27 @@ def _check_export() -> str:
             return f'export() 被拦下：{r.get("blocking")}'
         if not target.is_file():
             return 'export() 报告成功，但目标文件不在磁盘上'
-        first = target.read_text(encoding='utf-8').splitlines()[0]
-        if '由剧本表自动生成' not in first:
+        body = target.read_text(encoding='utf-8')
+        first = body.splitlines()[0] if body else ''
+        if r.get('untouched'):
+            # **零改动往返**：表里一个字没改 → 产物按 P1-1 刻意**不插生成标记**，
+            # 它给的保证比"有标记"更强 —— 与源文逐字节相同。
+            #
+            # 这一条从前是个永久红：判据写死"首行必须有标记"，而零改动那条路
+            # （`session_export.export` 的 zero-change 分支）从 2026-10-19 起
+            # 就刻意不插。自检没人跑时看不出来，打包后第一次 `--selfcheck`
+            # 就报"产物缺少生成标记（首行：default score = 0）"。
+            # **尺子要跟合同对齐**：两种通过形态分开判。
+            if body != src.read_text(encoding='utf-8'):
+                return ('零改动导出的副本与源文件不一致'
+                        f'（首行：{first[:40]}）')
+        elif '由剧本表自动生成' not in first:
             return f'产物缺少生成标记（首行：{first[:40]}）'
         # 第二遍必须还能导出（自家产物不许被自己的护栏拦下）
         if not s.export(target).get('ok'):
             return '第二次导出自己的产物被拦下（生成标记没生效）'
 
         # --- 第三类内容必须活下来（这是导出最贵的失败）---
-        body = target.read_text(encoding='utf-8')
         for token in ('default score = 0', 'init python:'):
             if token not in body:
                 return f'产物丢了顶层内容：`{token}`'
