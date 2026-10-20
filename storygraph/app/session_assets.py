@@ -602,6 +602,22 @@ class AssetRegistryMixin:
         except Exception as e:                     # noqa: BLE001
             swallow('app.session_assets.asset_overview', e)
             out['top_characters'] = []
+        # **维度置信度**（2026-10-20）：资源表里的维度有多少是"表里写的"、
+        # 多少是"按引擎事实/文件名猜的"。猜的那些是结构化的软肋，
+        # 概览里必须能看见，不然"一维一格"会让人误以为全都可靠。
+        try:
+            from storygraph.assets.asset_dimensions import group_metadata
+            reg = self.registry()
+            rows = list((getattr(reg, 'images', {}) or {}).values())
+            meta = group_metadata(rows)
+            groups = sum(len(g) for g in meta.values())
+            guessed = sum(1 for g in meta.values()
+                          for entry in g.values() if entry.get('guessed'))
+            out['dimension_confidence'] = {'groups': groups,
+                                           'guessed': guessed}
+        except Exception as e:                # noqa: BLE001 - 统计失败不影响概览
+            swallow('app.session_assets.asset_overview.dimensions', e)
+            out['dimension_confidence'] = {}
         # 大列表只给前 N 条（界面是给人看的，不是 dump）
         for key in ('unused_assets', 'broken', 'undefined'):
             if isinstance(out.get(key), list) and len(out[key]) > 200:

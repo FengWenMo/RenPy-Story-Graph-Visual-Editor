@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import openpyxl                                            # noqa: E402
 
 from storygraph.assets.asset_dimensions import (            # noqa: E402
-    dimensions_of_row, enrich_image_rows, format_dimensions, split_values)
+    DIMENSION_CONFIDENCE, dimensions_of_row, enrich_image_rows,
+    explain_dimensions, format_dimensions, group_metadata, split_values)
 from storygraph.assets.asset_registry import (              # noqa: E402
     AssetRegistry, backfill_dimension_columns, read_excel_rows, scan_assets,
     write_asset_excel)
@@ -371,3 +372,131 @@ def test_format_dimensions_is_readable():
         {'group': 'outfit', 'value': 'base_swimsuit'},
         {'group': 'expressions', 'value': 'happy'},
     ]) == 'outfit=base_swimsuit；expressions=happy'
+
+
+class TestConfidence:
+    """
+    置信度（2026-10-20，"结构化再细一层"）。
+
+    用户目标里点了"置信度"：**猜出来的维度和表里写死的维度不能长得一样**。
+    每一维现在带 `source`（explicit/value/fact/layeredimage/unknown）和
+    `confidence`，剥过 tag 前缀的再打折。
+    """
+
+    def _meta(self, row, **kw):
+        return dimensions_of_row(row, facts=kw.pop('facts', _facts()),
+                                 meta=True, **kw)
+
+    def test_explicit_group_is_full_confidence(self):
+        row = {'Tag': 'ling', 'Group': 'expressions', 'Value': 'happy',
+               'Path': 'images/ling_happy.png'}
+        dims = self._meta(row)
+        assert dims[0]['group'] == 'expressions'
+        assert dims[0]['source'] == 'explicit'
+        assert dims[0]['confidence'] == 1.0
+
+    def test_fact_group_is_high_but_not_certain(self):
+        dims = self._meta({'Tag': 'ling', 'Attributes': 'happy'})
+        assert dims[0]['source'] == 'fact'
+        assert dims[0]['confidence'] == DIMENSION_CONFIDENCE['fact'] == 0.9
+
+    def test_layeredimage_group_scores_lower_than_engine_facts(self):
+        class _Group:
+            name = 'outfit'
+            attrs = {'base_swimsuit': 'x'}
+
+        class _Img:
+            groups = [_Group()]
+
+        class _Model:
+            images = {'ling': _Img()}
+
+        dims = dimensions_of_row({'Tag': 'ling', 'Attributes': 'base_swimsuit'},
+                                 facts={}, layer_model=_Model(), meta=True)
+        assert dims[0]['group'] == 'outfit'
+        assert dims[0]['source'] == 'layeredimage'
+        assert dims[0]['confidence'] == 0.8
+
+    def test_value_column_is_more_trusted_than_attributes(self):
+        dims = self._meta({'Tag': 'ling', 'Value': 'happy'})
+        assert dims[0]['source'] == 'value'
+        assert dims[0]['confidence'] == 0.95
+
+    def test_stripping_the_tag_prefix_lowers_confidence(self):
+        dims = self._meta({'Tag': 'ling', 'Attributes': 'ling_happy'})
+        assert dims[0]['value'] == 'happy' and dims[0]['stripped'] is True
+        assert dims[0]['confidence'] == 0.7, '剥前缀是判断，要打折'
+
+    def test_unknown_group_is_low_confidence_and_empty(self):
+        dims = self._meta({'Tag': 'ling', 'Attributes': 'mystery_word'})
+        assert dims[0]['group'] == ''
+        assert dims[0]['source'] == 'unknown'
+        assert dims[0]['confidence'] == 0.15
+
+    def test_plain_dimensions_keep_the_old_shape(self):
+        """`meta=False` 时返回的还是 `{group, value}` —— 老调用方不受影响。"""
+        row = {'Tag': 'ling', 'Attributes': 'happy'}
+        assert dimensions_of_row(row, facts=_facts()) == [
+            {'group': 'expressions', 'value': 'happy'}]
+
+    def test_enrich_keeps_the_meta_for_downstream(self):
+        rows = [{'Tag': 'ling', 'Attributes': 'happy'}]
+        enrich_image_rows(rows, facts=_facts(), load_project_context=False)
+        assert rows[0]['_dim_meta'][0]['confidence'] == 0.9
+
+    def test_ir_asset_manifest_carries_attribute_meta(self):
+        from types import SimpleNamespace
+
+        from storygraph.pipeline.engine_exporters import build_neutral_ir
+        from storygraph.story.beat_model import Beat, assign_identity
+
+        reg = SimpleNamespace(
+            images={'ling happy': {
+                'Path': 'images/ling_happy.png', 'Tag': 'ling',
+                'Group': 'expressions', 'Value': 'happy',
+                '_dims': [{'group': 'expressions', 'value': 'happy'}],
+                '_dim_meta': [{'group': 'expressions', 'value': 'happy',
+                               'source': 'explicit', 'confidence': 1.0,
+                               'stripped': False}],
+            }},
+            music={}, sounds={}, voices={}, transforms={}, characters={})
+        beats = [Beat(seq=1, label='a', text='hi')]
+        assign_identity(beats)
+        ir = build_neutral_ir(beats, registry=reg, project='demo')
+        asset = ir['assets']['images'][0]
+        assert asset['attributes'] == {'expressions': 'happy'}
+        meta = asset['attribute_meta'][0]
+        assert meta['source'] == 'explicit' and meta['confidence'] == 1.0
+
+
+class TestGroupMetadata:
+    """"分组元数据"：这一组值是怎么来的、能不能信。"""
+
+    def test_explicit_groups_are_certain(self):
+        rows = [{'Tag': 'ling', 'Group': 'expressions', 'Value': 'happy',
+                 'Path': 'images/ling_happy.png'}]
+        meta = group_metadata(rows, facts=_facts())['ling']['expressions']
+        assert meta['values'] == ['happy']
+        assert meta['sources'] == ['explicit']
+        assert meta['confidence'] == 1.0 and meta['guessed'] is False
+
+    def test_stripped_prefix_marks_the_group_as_guessed(self):
+        rows = [{'Tag': 'ling', 'Attributes': 'ling_happy'}]
+        meta = group_metadata(rows, facts=_facts())['ling']['expressions']
+        assert meta['guessed'] is True, '剥过前缀的维度不能当"确定"'
+        assert meta['confidence'] == 0.7
+
+    def test_group_confidence_is_the_weakest_member(self):
+        rows = [
+            {'Tag': 'ling', 'Attributes': 'happy'},           # fact 0.9
+            {'Tag': 'ling', 'Attributes': 'ling_sad'},        # 剥前缀 0.7
+        ]
+        meta = group_metadata(rows, facts=_facts())['ling']['expressions']
+        assert meta['values'] == ['happy', 'sad']
+        assert meta['confidence'] == 0.7
+        assert meta['guessed'] is True
+        assert set(meta['sources']) == {'fact'}
+
+    def test_unknown_groups_are_not_reported(self):
+        rows = [{'Tag': 'ling', 'Attributes': 'mystery_word'}]
+        assert group_metadata(rows, facts=_facts()) == {}

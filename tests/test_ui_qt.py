@@ -2094,6 +2094,10 @@ class TestSilentFailuresAreVisible:
         assert res['ok'], res
         assert isinstance(res['statistics'], dict)
         assert 'top_characters' in res and 'unused_assets' in res
+        # 维度置信度（2026-10-20）：概览里要能看出"有多少维是猜的"
+        dims = res.get('dimension_confidence')
+        assert isinstance(dims, dict), res
+        assert dims.get('groups', 0) >= dims.get('guessed', 0) >= 0
 
     def test_asset_overview_without_registry_says_so(self, window):
         res = window._session.asset_overview()

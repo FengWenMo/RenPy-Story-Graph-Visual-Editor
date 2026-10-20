@@ -203,20 +203,44 @@ def _is_nested_under_tag(path, tag: str) -> bool:
     return any(p == tag for p in parts)
 
 
-def dimensions_of_row(row: dict, facts=None, layer_model=None,
-                      strip_prefix: bool = True) -> list:
-    """
-    一行 → `[{'group': …, 'value': …}, …]`（保序去重）。
+#: 维度来源 → 置信度（0..1）。
+#:
+#: 数字**不是概率**，是排序刻度：谁的结论更可信。用户 2026-10-20 的目标里
+#: 点了"置信度"——因为"猜出来的维度"和"表里写死的维度"看起来一样，
+#: 下游（立绘卡/校验/多引擎）没法区别对待。现在每一维都带 `source`，
+#: 猜的那一档明码标价。
+DIMENSION_CONFIDENCE = {
+    'explicit': 1.0,       # 表里 Group + Value 都写了
+    'value': 0.95,         # Value 是表里写的，维度从引擎事实查出来
+    'fact': 0.9,           # 引擎事实（storygraph.engine_facts.json）
+    'layeredimage': 0.8,   # 项目 layeredimage
+    'unknown': 0.15,       # 认不出维度（**不猜**）
+}
 
-    · 显式 `Group` + 单值 → 用显式维度；
-    · 否则按引擎事实 / `layeredimage` 查每个值的维度；
-    · 查不到 → `group=''`（**认不出**，不是"顶层"）。
-    · `strip_prefix=False` / 文件在 `<tag>/` 目录下 → **不去 tag 前缀**
-      （嵌套布局的文件名就是属性名）。
+#: 剥过 tag 前缀的维度要打折：''剥对了吗''本身是一个判断。
+STRIPPED_PENALTY = 0.2
+
+
+def explain_dimensions(row: dict, facts=None, layer_model=None,
+                       strip_prefix: bool = True) -> list:
+    """
+    一行 → `[{'group', 'value', 'source', 'confidence', 'stripped'}]`。
+
+    与 `dimensions_of_row` 同一套判据，只是**把依据也带出来**：
+
+      · `explicit`：表里 `Group`/`Value` 是人写的（1.0）；
+      · `value`：`Value` 是人写的，维度由引擎事实分组（0.95）；
+      · `fact`：维度来自引擎事实（0.9）；
+      · `layeredimage`：维度来自项目 `layeredimage`（0.8）；
+      · `unknown`：认不出（0.15，`group` 为空 —— 不猜）；
+      · 任何一档只要**剥过 tag 前缀**，置信度再减 0.2（最低 0.1）。
     """
     row = row or {}
     tag = str(row.get('Tag') or '').strip()
-    known = group_map_for_tag(tag, facts=facts, layer_model=layer_model)
+    # 分开取两份映射：报告里要区分"引擎事实"和"layeredimage"这两档。
+    fact_map = _fact_group_map(facts or {}, tag)
+    model_map = {} if fact_map else _model_group_map(layer_model, tag)
+    known = fact_map or model_map
     raw_values = row_values(row)
     explicit = row_group(row)
     # `Value` 列是**人/表写下的最终值**：不再做去 tag 前缀的推断
@@ -225,16 +249,54 @@ def dimensions_of_row(row: dict, facts=None, layer_model=None,
     allow_strip = bool(strip_prefix) and not _is_nested_under_tag(
         row.get('Path'), tag)
     out = []
-    for value in raw_values:
+    for raw in raw_values:
+        value = raw
+        stripped = False
         if allow_strip and value not in protected:
-            value = _strip_tag_prefix(value, tag, known)
+            got = _strip_tag_prefix(value, tag, known)
+            stripped = got != value
+            value = got
         group = explicit if (explicit and len(raw_values) == 1) else ''
+        source = 'explicit' if group else ''
+        value_is_written = raw in protected
         if not group:
-            group = known.get(value, '')
-        item = {'group': group, 'value': value}
-        if item not in out:
+            if value in fact_map:
+                group = fact_map[value]
+                source = 'value' if value_is_written else 'fact'
+            elif value in model_map:
+                group = model_map[value]
+                source = 'value' if value_is_written else 'layeredimage'
+        if not group:
+            source = 'unknown'
+        confidence = DIMENSION_CONFIDENCE.get(source, DIMENSION_CONFIDENCE[
+            'unknown'])
+        if stripped:
+            confidence = max(0.1, confidence - STRIPPED_PENALTY)
+        item = {'group': group, 'value': value, 'source': source,
+                'confidence': round(confidence, 2), 'stripped': stripped}
+        if all((d['group'], d['value']) != (group, value) for d in out):
             out.append(item)
     return out
+
+
+def dimensions_of_row(row: dict, facts=None, layer_model=None,
+                      strip_prefix: bool = True, meta: bool = False) -> list:
+    """
+    一行 → `[{'group': …, 'value': …}, …]`（保序去重）。
+
+    · 显式 `Group` + 单值 → 用显式维度；
+    · 否则按引擎事实 / `layeredimage` 查每个值的维度；
+    · 查不到 → `group=''`（**认不出**，不是"顶层"）。
+    · `strip_prefix=False` / 文件在 `<tag>/` 目录下 → **不去 tag 前缀**
+      （嵌套布局的文件名就是属性名）。
+    · `meta=True` → 每项额外带 `source` / `confidence` / `stripped`
+      （见 `explain_dimensions`；置信度要参与判断时用它）。
+    """
+    dims = explain_dimensions(row, facts=facts, layer_model=layer_model,
+                              strip_prefix=strip_prefix)
+    if meta:
+        return dims
+    return [{'group': d['group'], 'value': d['value']} for d in dims]
 
 
 def enrich_image_rows(rows, project_root=None, facts=None, layer_model=None,
@@ -269,6 +331,9 @@ def enrich_image_rows(rows, project_root=None, facts=None, layer_model=None,
         if not dims:
             continue
         row['_dims'] = dims
+        # 置信度也留着：下游（多引擎资产清单）要能说清"这一维是猜的还是写的"。
+        row['_dim_meta'] = dimensions_of_row(
+            row, facts=facts, layer_model=layer_model, meta=True)
         attrs = [d['value'] for d in dims if d.get('value')]
         if attrs:
             merged = list(row.get('_attrs') or ())
@@ -376,6 +441,52 @@ def grouped_dimensions(rows) -> dict:
     return out
 
 
+def group_metadata(rows, facts=None, layer_model=None) -> dict:
+    """
+    图片行 → `{tag: {group: {values, sources, confidence, guessed}}}`。
+
+    "分组元数据"（2026-10-20）：光有 `{维度: 值}` 不够 —— 下游要知道
+    **这一组是怎么来的、能不能信**：
+
+      · `values`：这一组里出现过的值（保序去重）；
+      · `sources`：`explicit` / `value` / `fact` / `layeredimage`；
+      · `confidence`：组内**最低**的那一维（有一维是猜的，整组不可全信）；
+      · `guessed`：有维度是猜的（`unknown` 或剥过 tag 前缀或 < 0.7）。
+
+    ⚠ 只收**认得出**的组；认不出维度的值仍在 `attribute_values` 里，
+    由 `dimensions_by_tag` / IR 的 `attribute_values` 带着，不在这里丢。
+    """
+    out: dict = {}
+    for row in list(rows or ()):
+        if not isinstance(row, dict):
+            continue
+        tag = str(row.get('Tag') or '').strip()
+        if not tag:
+            continue
+        meta = row.get('_dim_meta')
+        if not meta:
+            meta = dimensions_of_row(row, facts=facts,
+                                     layer_model=layer_model, meta=True)
+        for d in (meta or ()):
+            group = str((d or {}).get('group') or '')
+            value = str((d or {}).get('value') or '')
+            if not group or not value:
+                continue
+            entry = out.setdefault(tag, {}).setdefault(group, {
+                'values': [], 'sources': [], 'confidence': 1.0,
+                'guessed': False})
+            if value not in entry['values']:
+                entry['values'].append(value)
+            source = str(d.get('source') or 'unknown')
+            if source not in entry['sources']:
+                entry['sources'].append(source)
+            entry['confidence'] = min(entry['confidence'],
+                                      float(d.get('confidence') or 0.0))
+            if d.get('stripped') or float(d.get('confidence') or 0.0) < 0.7:
+                entry['guessed'] = True
+    return {tag: groups for tag, groups in out.items() if groups}
+
+
 def same_group_conflicts(dims, used) -> list:
     """
     一组维度 + 实际写出来的属性 → `[{'group','attrs'}, …]`。
@@ -418,5 +529,7 @@ __all__ = [
     'split_values', 'row_values', 'row_group',
     'group_map_for_tag', 'dimensions_of_row', 'enrich_image_rows',
     'load_project_facts', 'load_layer_model', 'dimensions_by_tag',
-    'grouped_dimensions', 'same_group_conflicts', 'format_dimensions',
+    'grouped_dimensions', 'group_metadata', 'same_group_conflicts',
+    'format_dimensions', 'DIMENSION_CONFIDENCE', 'STRIPPED_PENALTY',
+    'explain_dimensions',
 ]

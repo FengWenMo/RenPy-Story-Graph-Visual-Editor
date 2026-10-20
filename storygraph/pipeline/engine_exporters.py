@@ -340,11 +340,17 @@ def _asset_manifest(registry) -> dict:
                 # expressions: happy}`。别的引擎要的是"这一维选了什么"，
                 # 不是一串只能靠猜词边界的属性名。
                 # 认不出维度的词放 `attribute_values`，**一个都不丢**。
+                meta_dims = []
                 try:
                     dims = row.get('_dims') or dimensions_of_row(row)
+                    # 置信度（2026-10-20）：维度是"表里写的"还是"猜的"，
+                    # 目标引擎要能区别对待 —— `attribute_meta` 带 source/confidence。
+                    meta_dims = row.get('_dim_meta') or dimensions_of_row(
+                        row, meta=True)
                 except Exception as e:            # noqa: BLE001
                     swallow('pipeline.engine_exporters.dimensions', e)
                     dims = []
+                    meta_dims = []
                 grouped: dict = {}
                 loose: list = []
                 for d in (dims or ()):
@@ -366,6 +372,13 @@ def _asset_manifest(registry) -> dict:
                     entry['attributes'] = grouped
                 if loose:
                     entry['attribute_values'] = loose
+                if meta_dims:
+                    entry['attribute_meta'] = [
+                        {'group': str(d.get('group') or ''),
+                         'value': str(d.get('value') or ''),
+                         'source': str(d.get('source') or ''),
+                         'confidence': float(d.get('confidence') or 0.0)}
+                        for d in meta_dims]
                 if row.get('Group') not in (None, ''):
                     entry['group'] = row['Group']
                 if row.get('Value') not in (None, ''):

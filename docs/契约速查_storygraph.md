@@ -3138,3 +3138,67 @@ JsonUtility 不支持 `Dictionary`，但支持结构体数组，所以形状应�
   解析 DSL，只是这份产物没给；
 - 报告不做"重要性排序"（都是没带，谈不上谁更重要）；
 - 不改 `to_unity()` 的既有字段结构（JsonUtility 的约束见 §16.5）。
+
+
+# §19 资产维度再细一层：来源 + 置信度 + 分组元数据（2026-10-20）
+
+§16.1 把 `{维度: 值}` 做出来了，但它有一个软肋：**猜出来的维度和表里写死的
+维度长得一模一样**。`ling_happy` 剥掉前缀得到 `expressions=happy`，和作者
+亲手在 `Group`/`Value` 里写的 `expressions=happy`，下游（立绘卡 / 校验 /
+多引擎）分不出来。用户本轮目标点的"置信度"就是这件事。
+
+## 19.1 每一维都带来源
+
+`assets/asset_dimensions.py` 新增 `explain_dimensions()`，
+`dimensions_of_row(..., meta=True)` 转调它：
+
+| `source` | `confidence` | 什么时候 |
+|---|---|---|
+| `explicit` | 1.00 | 表里 `Group` + `Value` 都写了（人写的） |
+| `value` | 0.95 | `Value` 是人写的，维度由引擎事实分组 |
+| `fact` | 0.90 | 维度来自 `storygraph.engine_facts.json` |
+| `layeredimage` | 0.80 | 维度来自项目 `layeredimage` |
+| `unknown` | 0.15 | 认不出（`group` 为空 —— **仍然不猜**） |
+
+**剥过 tag 前缀的再减 0.2**（最低 0.1）：`ling_happy` → `happy` 是一次
+推断，"剥对了吗"本身要打折。`meta=False` 时返回的还是 `{group, value}`，
+老调用方一行都不用改。
+
+数字不是概率，是**排序刻度**：1.0 / 0.9 / 0.8 只回答"谁更可信"。
+
+## 19.2 分组元数据：整组按最弱的一维算
+
+`group_metadata(rows)` → `{tag: {group: {values, sources, confidence, guessed}}}`：
+
+- `values` 这一组出现过的值（保序去重）；
+- `sources` 这一组用过哪些来源；
+- `confidence` = 组内**最低**的那一维（有一维是猜的，整组不可全信）；
+- `guessed` = 有维度 `unknown` / 剥过前缀 / 置信度 < 0.7。
+
+只收认得出的组；认不出的值仍在 `attribute_values` 里，不在这里"消失"。
+
+## 19.3 往下游接
+
+- **IR**：图片资源条目新增 `attribute_meta: [{group,value,source,confidence}]`
+  （`pipeline/engine_exporters._asset_manifest`）。Unity 适配层目前不带它 ——
+  §18 的损失报告会列出来（`attribute_meta` 与 `attributes` 并列）。
+- **概览**：`Session.asset_overview()` 多一个
+  `dimension_confidence={groups, guessed}`；「资产统计」窗口多一行
+  `【维度】N 组，其中 M 组是猜的（低置信度）`。
+- **缓存**：`enrich_image_rows` 顺手存 `_dim_meta`，下游不用重算。
+
+## 19.4 判据（`tests/test_asset_dimensions.py` 新增 13 条）
+
+- 五种来源各自的 `source` / `confidence`；
+- 剥前缀 → `stripped=True` 且 0.7；
+- 认不出 → `group=''`、`unknown`、0.15；
+- `meta=False` 的返回形状不变（老调用方不受影响）；
+- `group_metadata` 的组级置信度取最弱、`guessed` 传导；
+- IR 的 `attribute_meta` 真的带出 `source/confidence`。
+
+## 19.5 边界
+
+- 置信度**只用于排序和提示**，不参与"自动改表"：低置信度不等于错；
+- UI 目前只显示"多少组是猜的"；立绘卡按置信度分色是下一步；
+- Unity 侧要拿到这些元数据，得按 §18.2 的下一步做 `AttributePair[]`
+  （JsonUtility 不支持 Dictionary，但支持结构体数组）。

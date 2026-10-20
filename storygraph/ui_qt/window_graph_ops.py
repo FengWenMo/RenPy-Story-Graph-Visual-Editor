@@ -1190,6 +1190,10 @@ class GraphOpsMixin:
             lines.append('【分类】')
             for key, value in list(cats.items())[:20]:
                 lines.append(f'  {key}：{value}')
+        dims = res.get('dimension_confidence') or {}
+        if dims.get('groups'):
+            lines.append(f'【维度】{dims["groups"]} 组，其中 '
+                         f'{dims.get("guessed", 0)} 组是猜的（低置信度）')
         tops = res.get('top_characters') or []
         if tops:
             lines.append('【角色台词量】')
