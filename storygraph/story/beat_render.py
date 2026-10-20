@@ -28,7 +28,7 @@ from storygraph.core.vocabulary import (GENERATOR_MARKER,
                                         RENPY_BUILTIN_TRANSFORMS,
                                         RENPY_STATEMENT_VERBS)
 from storygraph.core.statement import is_tight_dollar, strip_marker
-from storygraph.core.nest_path import (body_chain, join_nest,
+from storygraph.core.nest_path import (join_nest,
                                        option_index, option_key, split_nest)
 
 from storygraph.story.beat_model import (
@@ -834,12 +834,14 @@ def split_beat_units(beats: list, use_paths: bool = True) -> list:
     菜单组从一张 `menu` 拍开始（见 `_take_menu_run` 的边界判据），
     其余每张拍自成一个单元——渲染行为与以前完全一致。
 
-    `use_paths=False` 强制走**老推断**（`_menu_member` / 条件 / 行号）：
-    对拍器要用它算"老路本来会怎么摆"，否则就成了拿路径比路径
-    （见 `nest_placement_conflicts`）。
+    `use_paths=False` 强制走**老推断**（`_menu_member` / 条件 / 行号）。
+    ⚠ 2026-10-19 起它**不再是产品路径的第二个真源**：结构位（`Nest`）齐全时
+    一律以路径为准；这个开关只留给"老表没有结构位"的兼容测试与回归对照。
+    两套判断曾经并存，`the_question` 的 `jump` 选项体证明老推断会摆错
+    （结构列 `menu:1>B`，老推断摆到顶层）—— 对拍器已随旧口径一起删除。
     """
     beats = list(beats or ())
-    # **结构位齐不齐**逐 label 判（B 阶段二）：齐了就让块路径说了算，
+    # **结构位齐不齐**逐 label 判：齐了就让块路径说了算，
     # 否则那一份整份退回老推断 —— 混着用会出现"半截菜单"，而多吞/少吞
     # 一拍都是静默的剧情错误（见 `_take_menu_run` 的 docstring）。
     plan = _nest_plan(beats) if use_paths else {'known': {}, 'menu_no': {}}
@@ -1170,145 +1172,6 @@ def _in_menu_body(beat, run: list, cur_idx) -> bool:
     expected = _expected_body_condition(run[cur_idx], run[0].condition)
     return (beat.condition or '').strip() == expected
 
-
-
-
-def _group_by_label(beats: list) -> list:
-    """按 label 分组（保持文档序）。块路径里的菜单序号是**label 内**数的。"""
-    order, buckets = [], {}
-    for b in beats or ():
-        name = str(getattr(b, 'label', '') or '')
-        if name not in buckets:
-            buckets[name] = []
-            order.append(name)
-        buckets[name].append(b)
-    return [(n, buckets[n]) for n in order]
-
-
-def _actual_chains(group: list, counter: list, parent_chain: tuple) -> dict:
-    """
-    老推断把这一组拍**实际**摆到了哪条选项体链上：`{id(拍): 链}`。
-
-    与渲染**同源**：`split_beat_units` 切菜单组、`_menu_segments` 切选项体；
-    选项体里再套菜单时**递归**（计数器接着数，所以嵌套菜单的序号与解析器
-    的文档序一致）。认不出归属的拍（`_is_menu_foreign`）算**父层** ——
-    它们渲染时本来就被摆在菜单外（带一句显式警告）。
-    """
-    chains: dict = {}
-    # ⚠ **必须 `use_paths=False`**：这里要算的是"**老推断**会把它摆在哪"，
-    # 拿路径再算一遍就成了自证（永远一致），对拍器也就没用了。
-    for kind, unit in split_beat_units(group, use_paths=False):
-        if kind != 'menu':
-            for b in unit:
-                chains[id(b)] = parent_chain
-            continue
-        counter[0] += 1
-        n = counter[0]
-        for oi, (opt, body, foreign) in enumerate(
-                _menu_segments(unit, use_paths=False), start=1):
-            if opt is None:
-                continue
-            chains[id(opt)] = parent_chain          # 选项行在菜单层
-            chain = parent_chain + ((n, option_key(oi)),)
-            body_beats = [b for _pos, b, _why in body]
-            for b in body_beats:
-                chains[id(b)] = chain
-            for _pos, b, _why in foreign:
-                # **认不出归属 = 老推断不知道**，不是"摆在菜单外"（2026-10-05）：
-                # 记成 `parent_chain` 会让对拍器把它当成"结构位说谎"，
-                # 而嵌套菜单正是它认不出的那一类 —— 那是**能力边界**，
-                # 报出来只会制造假阳性。`None` = 不知道，对拍器跳过。
-                chains[id(b)] = None
-            # 选项体里可能还有嵌套菜单 → 递归
-            for bid, c in _actual_chains(body_beats, counter, chain).items():
-                chains[bid] = c
-        for b in unit:                              # 菜单头等杂项拍
-            chains.setdefault(id(b), parent_chain)
-    return chains
-
-
-def nest_placement_conflicts(beats: list) -> list:
-    """
-    **对拍器**（B 阶段一）：结构列（`Nest`）说的位置 vs 老推断**实际**摆的位置。
-
-    返回 `[(label, 拍序号, 结构列说的链, 实际摆的链), …]`，只报不一致的。
-
-    为什么要有它：`menu` 在 Ren'Py 里是**嵌套块**，而拍是扁平的 ——
-    "这条拍属于哪个选项"以前只有两个信息源：
-      · `_menu_member`（.rpy 侧，**进不了 Excel**）；
-      · `Condition` 串 + 行号（表格侧 —— 只有 1 bit：在选项体里 / 不在，
-        分不出**哪个**选项、也分不出多深；选项体一复杂信号就塌）。
-    `Nest` 列是第三个、也是最完整的那个。这一版**不改任何行为**
-    （渲染仍然走老推断），只把"两者不一致"说出来 —— 全绿之后，
-    阶段二才让渲染改用结构列。
-
-    ⚠ 只对**整份结构位都已知**的 label 判（`nest_path is None` = 老表 /
-    手工加的行）。拿"不知道"当"在顶层"会天天假报，而假阳性比漏报更贵。
-    """
-    conflicts: list = []
-    for name, group in _group_by_label(beats):
-        if any(getattr(b, 'nest_path', None) is None for b in group):
-            continue
-        # ⚠ **这个 label 里有嵌套菜单 → 整份跳过**（2026-10-05）。
-        #
-        # 老推断（`_menu_member` / 条件 / 行号）的能力上限是 1 bit：
-        # "这一拍在某个选项体里 / 不在"，分不出是哪一层的**哪个**选项。
-        # 选项体里再套一层菜单时它**整份**都不可信 —— 不只是嵌套那几拍：
-        # 它会把嵌套那一层当成外层菜单的选项，于是**嵌套菜单之后**的拍
-        # （`e "后"`，路径 `menu:1>A`）也被算到那个假选项里（实测
-        # `minimal_nested_menu`：4 处"不一致"，结构列全对）。
-        #
-        # 所以判据限定在"没有嵌套菜单"的 label 上（真实项目 40 个文件全是
-        # 这一类，那里它被验证过、也确实抓到过东西）。嵌套那几层由渲染侧的
-        # 判据管：`tools/hell_nest_inline.py` 的 N1/N2/N3 与
-        # `tests/test_nested_menu_render.py`。
-        if any(str(getattr(b, 'nest_path', '') or '').count('menu:') >= 2
-               for b in group):
-            continue
-        actual = _actual_chains(group, [0], ())
-        for i, b in enumerate(group):
-            path = getattr(b, 'nest_path', '') or ''
-            claim = body_chain(path)
-            got = actual.get(id(b), ())
-            if got is None:
-                # 老推断**认不出**这一拍的归属（见 `_actual_chains` 的 foreign）；
-                # "不知道"不等于"不一致"，跳过（嵌套菜单就是这一类）。
-                continue
-            # ⚠ **老推断做不到嵌套菜单，所以不对嵌套形态判"不一致"**
-            # （2026-10-05，`minimal_nested_menu` 实测）。
-            #
-            # 它的能力上限是"这一拍在某个选项体里 / 不在"这 1 bit
-            # （`_menu_member` 进不了 Excel、`Condition` 也只有 1 bit）：
-            # 选项体里再套一层菜单时，它要么把那一层的选项行当成**外层菜单**
-            # 的选项，要么把菜单头算成"顶层" —— 而结构列全是对的。
-            # 那不是"结构位说谎"，是**它没有这个能力**；拿它当判据只制造假阳性
-            # （假阳性比漏报更贵）。
-            #
-            # 判据：这一拍处在**嵌套菜单的上下文**里吗 —— 看它自己的块路径
-            # 有没有**两个及以上** `menu:` 段，或者它本身就是一张**在块里的**
-            # 菜单头（`KIND_MENU` 且路径非空 = 嵌在别人体内）。
-            # 嵌套那几层由渲染侧的判据管：`tools/hell_nest_inline.py` 的
-            # N1 结构守恒 / N2 不动点 / N3 两路一致，以及
-            # `tests/test_nested_menu_render.py`。
-            nested_ctx = (path.count('menu:') >= 2
-                          or (b.kind == KIND_MENU and bool(path)))
-            if nested_ctx or len(claim) >= 2 or len(got) >= 2:
-                continue
-            if claim != got:
-                conflicts.append((name, i, claim, got))
-    return conflicts
-
-
-def _last_option(run: list):
-    """
-    这一组菜单里**当前生效**的选项的条件。
-
-    取最后一张拍的条件（而不是最后一张 `menu_option` 的条件）：
-    Excel 回导之后选项体的条件与选项条件相同、甚至被补成 `True`，
-    此时"当前选项的上下文条件"就是那个值。取选项自己的条件会让
-    "选项无条件"的体永远对不上（两边都是空串时又人人相等）。
-    """
-    return run[-1] if run else run
 
 
 

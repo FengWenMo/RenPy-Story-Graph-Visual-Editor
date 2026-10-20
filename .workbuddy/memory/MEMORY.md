@@ -86,3 +86,21 @@
   （`pytest_full` / `final-*` / `pt_*` …每个 ~8.6k 文件）。实测已到 **1.91GB / 19 万文件**。
   清它受沙箱批量删除守卫限制；**别用 `du`/`find` 扫它**（会跑很久甚至被 SIGTERM）。
 - 其余全部见 **`docs/契约速查_storygraph.md`**。
+
+## 六、2026-10-19 三件地基（已落地的状态）
+
+- **资产维度结构化**：图片表追加 `Group`（维度）/`Value`（属性值），
+  `Attributes` 降为兼容列；引擎事实 → `layeredimage` 两档归组，回填只填空白。
+  入口 `storygraph/assets/asset_dimensions.py`；判据 `tests/test_asset_dimensions.py`。
+- **`NEST_CONFLICT` 收口**：结构位（`Nest`）是唯一结构真源；对拍器
+  `nest_placement_conflicts` / `_actual_chains` / `body_chain` 已删。
+  `the_question` 的 `jump` 选项体证明老推断会摆错；`audit_byte_exact` 52/52。
+- **协作三件小事**：SQLite WAL + busy_timeout + 写连接 `BEGIN IMMEDIATE`；
+  锁租约（`locked_until`，默认 15 分钟，过期可接手并留审计）；
+  成员角色 `viewer/editor/owner`（schema 3）。判据 `tests/test_collab_lease_roles.py`。
+- **跨 Unity 第一片**：IR schema 1.1 增加 `structure`（path/kind/known）
+  与 `timeline`（按作者顺序的 scene/show/hide/with/audio/voice 事件）；
+  Unity 适配摊平成标量 + 数组，附 `docs/unity/StoryIr.cs`。**不是播放器**：
+  条件求值/菜单 UI/资源地址仍归 Unity。判据 `tests/test_unity_timeline.py`。
+- **并行纪律**：文档只追加（`docs/契约速查_storygraph.md` §16），
+  提交按文件分组，避免卷进另一会话的未完成改动。

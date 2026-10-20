@@ -178,6 +178,8 @@ class AssetPanelData:
                     row.get('Path', ''),
                     row.get('Tag', ''),
                     row.get('Attributes', ''),
+                    row.get('Group', ''),
+                    row.get('Value', ''),
                     row.get('Name', ''),
                     row.get('Notes', ''),
                 ]).lower()

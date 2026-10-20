@@ -271,7 +271,51 @@ class ExportMixin:
         note['text_note'] = self._with_sanitize_note(note.get('text_note', ''))
         if note['used_patch']:
             text = note['text']
-        elif note.get('blocking') and not force and would_destroy_opaque(
+
+        # —— **一个字节都没改 → 不写、不加标记**（2026-10-19，修 P1-1）——
+        #
+        # 与 CLI 那条路（`pipeline.compile.write_compiled`）同一条判据：
+        # 零改动往返从前会被 `ensure_generator_marker` 插进 2 行标记，
+        # 于是"表里一个字没改、产物逐字节还原"永远差 2 行。
+        # 目标就是源文件时连写都不写（mtime 也不动）；目标在别处时
+        # 按源文的载体风格原样复制 —— 复制品仍是作者那份文件。
+        if note.get('used_patch') and self.script_path:
+            try:
+                from storygraph.story.source_style import detect as _style_of
+                from storygraph.story.source_style import read_text as _read_src
+                from storygraph.story.paths import write_text_atomic as _write
+                if text == _read_src(self.script_path)[0]:
+                    tgt = Path(target)
+                    same_path = (tgt.resolve()
+                                 == Path(self.script_path).resolve())
+                    may_skip = True
+                    if same_path:
+                        pass                # 原地往返：连写都不写（mtime 不动）
+                    elif not tgt.exists():
+                        # 新路径：原样复制（新文件是"新建"的正当用途）
+                        _write(tgt, _style_of(self.script_path).apply(text))
+                    elif _read_src(tgt)[0] != text:
+                        # ⚠ **目标里是另一份东西**（别人的手写文件、别的章节）
+                        # —— 零改动也不是"可以不问就覆盖"的理由。
+                        # 交给下面的门禁：它会报 HANDWRITTEN_TARGET，
+                        # 由用户决定要不要 force。
+                        may_skip = False
+                    if may_skip:
+                        return {'ok': True, 'path': target, 'blocking': [],
+                                'codes': [],
+                                'note': (note['text_note']
+                                         + '这一份与源文件逐字节相同：'
+                                           '**文件没有被改动**'),
+                                'used_patch': True, 'untouched': True,
+                                'count': len(self.beats),
+                                'todos': getattr(result, 'todo_count', 0)}
+            except (OSError, UnicodeDecodeError) as e:
+                # 读不到源就照老路走（过门禁），别把导出弄挂
+                swallow('session_export.zero_change_check', e)
+
+        # `used_patch` 与 `blocking` 互斥（补丁成功就不会有 blocking），
+        # 所以这里是独立的 `if`，不是上面那个零改动分支的 `elif`。
+        if note.get('blocking') and not force and would_destroy_opaque(
                 target, self.script_path):
             # **补丁失败 + 覆盖它会毁掉不进表的东西 = 拒绝写盘**（P0，2026-10-05）。
             #
@@ -431,12 +475,8 @@ class ExportMixin:
         if art.written and self.script_path \
                 and Path(target) == Path(self.script_path):
             self._reload_after_inplace_write()
-        # 对拍（B 阶段一）：结构列 vs 老推断。放**重载之后**算 —— 重载会把
-        # 结构列一起读回来（它就是随表走的），算的是"磁盘上这一份"的账。
-        nest_notes = self._nest_conflict_notes()
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
-                'note': note['text_note'] + nest_notes,
-                'structure_conflicts': self._nest_conflict_count(),
+                'note': note['text_note'],
                 'used_patch': bool(note.get('used_patch')),
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
                 'count': len(self.beats),
@@ -475,28 +515,6 @@ class ExportMixin:
             swallow('session_export._declared_stmt_heads', e)
             return set()
 
-    def _nest_conflict_count(self) -> int:
-        """结构列 vs 老推断不一致的拍数（B 阶段一的对拍结论）。"""
-        from storygraph.story.beat_render import nest_placement_conflicts
-        try:
-            return len(nest_placement_conflicts(self.beats))
-        except Exception as e:                  # noqa: BLE001
-            swallow('session_export._nest_conflict_count', e)
-            return 0
-
-    def _nest_conflict_notes(self) -> str:
-        """
-        把对拍结论接进导出说明（有才加，没有就是空串）。
-
-        为什么走 `note` 而不是弹框：这是一条**给开发者/细心人的线索**
-        （渲染仍按老推断，产物大概率没问题），不该打断策划的导出流程。
-        """
-        n = self._nest_conflict_count()
-        if not n:
-            return ''
-        return (f'；⚠ 结构列与老推断有 {n} 条拍对不上'
-                f'（`NEST_CONFLICT`，见 docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md）')
-
     def _reload_after_inplace_write(self) -> None:
         """
         原地写回之后把内存重新对齐到刚写出的那份文件（见调用点的说明）。
@@ -524,10 +542,24 @@ class ExportMixin:
         """
         n = sum(len(getattr(b, 'sanitized_cells', None) or [])
                 for b in (self.beats or ()))
-        if not n:
+        # `类型` 列填了工具不认的值（2026-10-19，修 P1-2）：`Beat.kind` 会被
+        # 收成 `say`，那一拍**看着导出成功、其实不是他填的那个类型**。
+        # 与 CLI 那条路同一句话（`CompileResult.summary` 里）。
+        from storygraph.story.beat_model import unknown_kinds
+        bad = unknown_kinds(self.beats or ())
+        notes = []
+        if n:
+            notes.append(f'读表时 {n} 个单元格里有换行/制表符，已按「一行一个值」'
+                         f'压成空格（**值被改过**，核对一下；体检里是 W114）')
+        if bad:
+            sample = '、'.join(f'[{lid or "?"}]「{k}」' for lid, k in bad[:3])
+            notes.append(f'**类型列有 {len(bad)} 行填了工具不认的值**（{sample}'
+                         + ('…' if len(bad) > 3 else '')
+                         + '）：这些行不会按你填的类型渲染，请改成 say / '
+                           'narration / menu / menu_option / extend')
+        if not notes:
             return text
-        extra = (f'读表时 {n} 个单元格里有换行/制表符，已按「一行一个值」'
-                 f'压成空格（**值被改过**，核对一下；体检里是 W114）')
+        extra = '；'.join(notes)
         return f'{text}；{extra}' if text else extra
 
     def _patch_note(self, text: str) -> dict:

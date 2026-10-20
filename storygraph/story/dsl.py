@@ -42,6 +42,7 @@ from storygraph.core.vocabulary import (
 )
 
 from storygraph.core.safeguard import swallow
+from storygraph.assets.asset_dimensions import dimensions_by_tag
 
 # ---------------------------------------------------------------------------
 # 词表：把"人话"映射成 Ren'Py 认识的东西。
@@ -485,6 +486,10 @@ class Symbols:
         self._by_var = {}
         self._by_name = {}
         self._attrs_by_tag = {}
+        #: 结构化的维度：`{tag: [{'group', 'value'}, …]}`（2026-10-19）。
+        #: 来源是资源表的 `Group`/`Value` 列；老表没有时按 `Attributes`
+        #: 逐词展开（`group=''`）—— 行为与从前一致，只是多了一个入口。
+        self._dims_by_tag = {}
         self._index = index
 
         for category, target in (keywords or {}).items():
@@ -528,6 +533,8 @@ class Symbols:
             for a in (row.get('_attrs') or []):
                 if a and a not in attrs:
                     attrs.append(a)
+        self._dims_by_tag = dimensions_by_tag(
+            (getattr(reg, 'images', {}) or {}).values())
 
     def _get_index(self):
         if self._index is None and self.registry is not None:
@@ -585,6 +592,45 @@ class Symbols:
 
     def attrs_of_tag(self, tag: str) -> list:
         return list(self._attrs_by_tag.get((tag or '').strip(), []))
+
+    def dimensions_of_tag(self, tag: str) -> list:
+        """
+        这个 tag 的**结构化维度**：`[{'group', 'value'}, …]`。
+
+        与 `attrs_of_tag` 的区别：后者只有词，前者说清"这个词属于哪一维"
+        （`outfit=base_swimsuit` / `expressions=happy`）。老表没有结构化列时
+        每个词仍然回来，只是 `group=''` —— 调用方据此走老路，不会更差。
+        """
+        tag = (tag or '').strip()
+        return [dict(d) for d in self._dims_by_tag.get(tag, [])]
+
+    def dimension_groups_of_tag(self, tag: str) -> dict:
+        """
+        `{维度: [值, …]}`（只收**认得出**的维度；按首次出现顺序）。
+
+        这是"一维一格"与"同组不能选两个"共用的结构来源；认不出返回 `{}`，
+        调用方**不许**把 `{}` 当成"没有维度"以外的任何结论。
+        """
+        out: dict = {}
+        for item in self.dimensions_of_tag(tag):
+            group = str(item.get('group') or '')
+            value = str(item.get('value') or '')
+            if not group or not value:
+                continue
+            bucket = out.setdefault(group, [])
+            if value not in bucket:
+                bucket.append(value)
+        return out
+
+    def same_group_conflicts(self, tag: str, used) -> list:
+        """
+        同组同时选了两个属性 → `[{'group','attrs'}, …]`（只报告，不改写）。
+
+        与 `engine_facts.group_conflicts` 同一语义；差别是它不要求采过引擎
+        事实 —— 资源表里的 `Group` 列就是那一份结构的副本。
+        """
+        from storygraph.assets.asset_dimensions import same_group_conflicts
+        return same_group_conflicts(self.dimensions_of_tag(tag), used)
 
     def has_image_tag(self, tag: str) -> bool:
         """资源表里存在这个 image tag 吗（Ren'Py 的 `show <tag> <属性>`）。"""

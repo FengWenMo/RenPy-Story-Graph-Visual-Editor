@@ -34,7 +34,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -50,7 +50,45 @@ from storygraph.story.excel_import import import_beats_from_excel
 #: 为什么：一行的 payload 里塞 64KB 的顶层文本，Excel 的 `BasePayload`
 #: 单元格（上限 32767）抄不下 → JSON 在 char 592 断掉 → 第二次协作起
 #: 字段级合并全部退化。文件级数据本来就不属于任何一拍。
-SCHEMA_VERSION = 2
+#:
+#: 3（2026-10-19，协作三件小事）：
+#:   · `beats.locked_until` —— 锁**租约**的到期时间（不再"一锁到永久"）；
+#:   · `users.role` —— 成员权限（viewer / editor / owner）；
+#:   · 连接层启用 WAL + `busy_timeout`，写事务用 `BEGIN IMMEDIATE`。
+SCHEMA_VERSION = 3
+
+#: 等锁多久（秒）。SQLite 在多进程并发写时默认 5 秒就抛
+#: `database is locked`；团队协作的写事务都是毫秒级，30 秒足够且不会让人白等。
+DB_TIMEOUT_SECONDS = 30.0
+#: `PRAGMA busy_timeout` 的毫秒数（与 `DB_TIMEOUT_SECONDS` 同一档）。
+BUSY_TIMEOUT_MS = 30_000
+
+#: 锁租约默认时长（秒）。15 分钟：够改一段台词/一页表，又不至于
+#: 一个人下班没解锁就让整章永远写不进去。
+LOCK_LEASE_SECONDS = 15 * 60
+
+#: 成员角色。**默认 editor**（与既有行为兼容：老库里的成员照样能 push）。
+ROLE_OWNER = 'owner'
+ROLE_EDITOR = 'editor'
+ROLE_VIEWER = 'viewer'
+ROLES = (ROLE_OWNER, ROLE_EDITOR, ROLE_VIEWER)
+ROLE_LABELS = {ROLE_OWNER: '所有者', ROLE_EDITOR: '编辑',
+               ROLE_VIEWER: '只读'}
+
+#: 角色 → 允许的动作。只做**最小可用**的三档：
+#:   · viewer 只读（pull / status 照样能看）；
+#:   · editor 能改（push / lock / 状态 / 资产）；
+#:   · owner 额外能强制覆盖与改成员角色。
+#: `approve` 目前与 `status` 同权（editor 也能把状态置 approved）——
+#: 这是 2026-10-19 之前的既有行为，先不收紧，只把"只读"这一档立起来。
+_ROLE_ACTIONS = {
+    ROLE_OWNER: frozenset({'read', 'push', 'lock', 'unlock', 'renew',
+                           'status', 'approve', 'assets', 'force',
+                           'manage'}),
+    ROLE_EDITOR: frozenset({'read', 'push', 'lock', 'unlock', 'renew',
+                            'status', 'approve', 'assets', 'force'}),
+    ROLE_VIEWER: frozenset({'read'}),
+}
 
 STATUS_DRAFT = 'draft'
 STATUS_REVIEW = 'in_review'
@@ -83,6 +121,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS users (
     id           TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
+    role         TEXT NOT NULL DEFAULT 'editor',
     created_at   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS beats (
@@ -96,6 +135,7 @@ CREATE TABLE IF NOT EXISTS beats (
     revision     INTEGER NOT NULL DEFAULT 1,
     locked_by    TEXT,
     locked_at    TEXT,
+    locked_until TEXT,
     updated_by   TEXT NOT NULL DEFAULT '',
     updated_at   TEXT NOT NULL DEFAULT '',
     deleted      INTEGER NOT NULL DEFAULT 0
@@ -134,15 +174,78 @@ def _now() -> str:
 #  连接与建库
 # ==================================================================
 
+def _configure_connection(conn) -> None:
+    """
+    连接级 PRAGMA。**WAL + busy_timeout 是"会丢数据 → 会冲突"的第一道闸**：
+      · WAL 让读写不互相堵（读事务不再挡住写）；
+      · busy_timeout 让并发写等待而不是立刻抛 `database is locked`；
+      · `synchronous=NORMAL` 是 WAL 下的常规取舍（掉电最多丢最后一笔提交，
+        不至于把库写坏）；
+      · `foreign_keys=ON` 目前没有外键，但打开它避免以后加表时静默不生效。
+    ⚠ WAL 在网络盘 / 只读介质上可能失败：失败**不让整个连接挂掉**，
+    照旧用默认 journal（这时 busy_timeout 仍然生效）。
+    """
+    try:
+        conn.execute(f'PRAGMA busy_timeout={int(BUSY_TIMEOUT_MS)}')
+    except sqlite3.Error as e:                  # noqa: BLE001 - 老 SQLite 也不该炸
+        swallow('collab_store.configure.busy_timeout', e)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+    except sqlite3.Error as e:                  # noqa: BLE001 - 网络盘/只读
+        swallow('collab_store.configure.wal', e)
+    try:
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA foreign_keys=ON')
+    except sqlite3.Error as e:                  # noqa: BLE001
+        swallow('collab_store.configure.pragmas', e)
+
+
+def _table_columns(conn, table: str) -> set:
+    """表的列名集合（`PRAGMA table_info`；表名只来自本模块的常量）。"""
+    try:
+        return {str(r[1]) for r in conn.execute(f'PRAGMA table_info({table})')}
+    except sqlite3.Error as e:                  # noqa: BLE001
+        swallow('collab_store.table_columns', e)
+        return set()
+
+
+def _migrate_schema(conn) -> None:
+    """
+    schema 2 → 3 的**增量迁移**（幂等）。
+
+    只加列、不改老列：老库照常打开；新列有默认值（role=editor /
+    locked_until=NULL，NULL 表示"按 locked_at + 租约推"）。
+    """
+    beat_cols = _table_columns(conn, 'beats')
+    if beat_cols and 'locked_until' not in beat_cols:
+        conn.execute('ALTER TABLE beats ADD COLUMN locked_until TEXT')
+    user_cols = _table_columns(conn, 'users')
+    if user_cols and 'role' not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT "
+                     "NOT NULL DEFAULT 'editor'")
+
+
 @contextmanager
-def connect(db_path):
-    """打开数据库（自动建表），用完提交并关闭。"""
+def connect(db_path, write: bool = False):
+    """
+    打开数据库（自动建表/迁移），用完提交并关闭。
+
+    `write=True`：进入时立刻 `BEGIN IMMEDIATE` 拿写锁。
+      · 协作里"读一下再写"的操作（push / lock / 状态机）必须用它 ——
+        否则两个进程可以同时读到旧 revision，然后各写各的（CAS 失效）；
+      · 纯读（status / pull）用默认的 `write=False`，WAL 下不挡别人写。
+    """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=DB_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     try:
+        _configure_connection(conn)
         conn.executescript(_DDL)
+        if write:
+            # 先把写锁拿到手：DDL 之后、任何"读-改-写"之前。
+            conn.execute('BEGIN IMMEDIATE')
+        _migrate_schema(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),))
@@ -155,20 +258,36 @@ def connect(db_path):
         conn.close()
 
 
-def init_db(db_path, users=()) -> Path:
-    """建库并登记成员（角色：文案/策划/程序）。"""
-    with connect(db_path) as conn:
+def init_db(db_path, users=(), owner: str = '') -> Path:
+    """
+    建库并登记成员。
+
+    `owner` 为空时：**第一个成员**自动成为 owner（新库总得有人能管权限）；
+    老库已有 owner 时不重复指定。角色只是最小三档，见 `ROLES`。
+    """
+    with connect(db_path, write=True) as conn:
         for u in users:
             ensure_user(conn, u)
+        target = str(owner or '')
+        if not target and users:
+            target = str(users[0] or '')
+        if target and not _has_owner(conn):
+            _set_role(conn, target, ROLE_OWNER)
     return Path(db_path)
 
 
-def ensure_user(conn, user_id: str, display_name: str = '') -> None:
+def ensure_user(conn, user_id: str, display_name: str = '',
+                role: str = '') -> None:
     if not user_id:
         return
+    role = role if role in ROLES else ROLE_EDITOR
     conn.execute(
-        'INSERT OR IGNORE INTO users(id, display_name, created_at) '
-        'VALUES(?,?,?)', (user_id, display_name or user_id, _now()))
+        'INSERT OR IGNORE INTO users(id, display_name, role, created_at) '
+        'VALUES(?,?,?,?)', (user_id, display_name or user_id, role, _now()))
+    if display_name:
+        conn.execute('UPDATE users SET display_name=? WHERE id=? AND '
+                     "(display_name='' OR display_name=id)",
+                     (display_name, user_id))
 
 
 def _audit(conn, actor, action, line_id='', detail=''):
@@ -178,6 +297,156 @@ def _audit(conn, actor, action, line_id='', detail=''):
         (_now(), actor or '', action, line_id or '',
          json.dumps(detail, ensure_ascii=False) if not isinstance(detail, str)
          else detail))
+
+
+# ==================================================================
+#  成员角色（最小三档：viewer / editor / owner）
+# ==================================================================
+
+def role_of(conn, user_id: str) -> str:
+    """成员角色（没登记的成员 → 空串；调用方按 `editor` 兜底）。"""
+    row = conn.execute('SELECT role FROM users WHERE id=?',
+                       (str(user_id or ''),)).fetchone()
+    if row is None:
+        return ''
+    role = str(row['role'] or '')
+    return role if role in ROLES else ROLE_EDITOR
+
+
+def _has_owner(conn) -> bool:
+    row = conn.execute(
+        'SELECT 1 FROM users WHERE role=? LIMIT 1', (ROLE_OWNER,)).fetchone()
+    return row is not None
+
+
+def _set_role(conn, user_id: str, role: str) -> None:
+    """直接改角色（不做权限判断；权限在 `set_role` 那层）。"""
+    if role not in ROLES:
+        raise ValueError(f'角色只能是 {"/".join(ROLES)}')
+    ensure_user(conn, user_id)
+    conn.execute('UPDATE users SET role=? WHERE id=?', (role, user_id))
+
+
+def set_role(db_path, member: str, role: str, actor: str = '') -> dict:
+    """
+    改成员角色（只有 owner 能改；**新库无 owner** 时允许第一次认领）。
+
+    为什么留"无 owner 可认领"：schema 2 的老库里所有成员都是默认 editor，
+    没有这个口子就永远没人能设第一个 owner —— 迁移后权限会死锁。
+    """
+    member = str(member or '').strip()
+    role = str(role or '').strip()
+    if not member:
+        return {'ok': False, 'reason': '要指定成员（--member）'}
+    if role not in ROLES:
+        return {'ok': False, 'reason': f'角色只能是 {"/".join(ROLES)}'}
+    with connect(db_path, write=True) as conn:
+        ensure_user(conn, actor or member)
+        if _has_owner(conn):
+            caller = role_of(conn, actor or member) or ROLE_EDITOR
+            if not _can(caller, 'manage'):
+                return {'ok': False,
+                        'reason': f'只有所有者能改成员角色（你是 {caller}）'}
+        _set_role(conn, member, role)
+        _audit(conn, actor or member, 'set_role', member,
+               {'role': role})
+    return {'ok': True, 'member': member, 'role': role}
+
+
+def members(db_path) -> list:
+    """成员清单：`[{'id','display_name','role','role_label'}]`。"""
+    with connect(db_path) as conn:
+        rows = [dict(r) for r in conn.execute(
+            'SELECT id, display_name, role, created_at FROM users '
+            'ORDER BY id').fetchall()]
+    for r in rows:
+        role = str(r.get('role') or ROLE_EDITOR)
+        r['role'] = role if role in ROLES else ROLE_EDITOR
+        r['role_label'] = ROLE_LABELS.get(r['role'], r['role'])
+    return rows
+
+
+def _actor_role(conn, actor: str) -> str:
+    """调用者角色：未登记先按默认 editor 登记（保持既有"首次出现即成员"）。"""
+    ensure_user(conn, actor)
+    return role_of(conn, actor) or ROLE_EDITOR
+
+
+def _can(role: str, action: str) -> bool:
+    return action in _ROLE_ACTIONS.get(role or ROLE_EDITOR, frozenset())
+
+
+# ==================================================================
+#  锁租约（lease）
+# ==================================================================
+
+def _parse_ts(value):
+    """ISO 时间串 → datetime（认不出返回 None；只用于租约判断）。"""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _lease_deadline(row, now=None):
+    """
+    这一行的锁什么时候到期：
+      · 有 `locked_until` → 用它；
+      · 老库只有 `locked_at` → `locked_at + LOCK_LEASE_SECONDS`；
+      · 两个都没有 → None（**保守**：当作没过期，宁可让人问一句）。
+    """
+    if row is None:
+        return None
+    keys = row.keys() if hasattr(row, 'keys') else ()
+    if 'locked_until' in keys:
+        until = _parse_ts(row['locked_until'])
+        if until is not None:
+            return until
+    if 'locked_at' in keys:
+        at = _parse_ts(row['locked_at'])
+        if at is not None:
+            return at + timedelta(seconds=LOCK_LEASE_SECONDS)
+    return None
+
+
+def lock_state(row, now=None) -> dict:
+    """
+    锁的展示状态：`{'locked','owner','until','expires_in','expired'}`。
+
+    `expires_in` 为负 = 已过期；None = 不知道（没有时间戳）。
+    """
+    now = now or datetime.now()
+    owner = str((row or {})['locked_by'] or '') if row else ''
+    if not owner:
+        return {'locked': False, 'owner': '', 'until': '',
+                'expires_in': None, 'expired': False}
+    deadline = _lease_deadline(row, now)
+    until = deadline.isoformat(timespec='seconds') if deadline else ''
+    expires_in = (int((deadline - now).total_seconds())
+                  if deadline is not None else None)
+    return {'locked': True, 'owner': owner, 'until': until,
+            'expires_in': expires_in,
+            'expired': bool(deadline is not None and expires_in is not None
+                            and expires_in <= 0)}
+
+
+def _lock_is_free_for(row, actor: str) -> tuple:
+    """
+    这一行的锁对 `actor` 是不是"可写"：`(可以写, 原因)`。
+
+    过期的锁**不阻塞**别人（这正是租约的意义）；但审计里要留一笔，
+    不能让人以为"锁还在"。
+    """
+    owner = str((row or {})['locked_by'] or '')
+    if not owner or owner == actor:
+        return True, ''
+    state = lock_state(row)
+    if state['expired']:
+        return True, f"{owner} 的锁已过期（{state['until']}）"
+    return False, f'被 {owner} 锁定'
 
 
 # ==================================================================
@@ -763,8 +1032,17 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
               'conflicts': [], 'rejected': [], 'auto_merged_fields': 0,
               'degraded': False}
 
-    with connect(db_path) as conn:
-        ensure_user(conn, actor)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        # **成员权限**（2026-10-19）：viewer 只读；force 只有 owner 能用。
+        if not _can(role, 'force' if force else 'push'):
+            why = (f'只读成员不能 push（你是 {role}）'
+                   if not force else
+                   f'只读成员不能强制写入（你是 {role}）')
+            result.update({'ok': False, 'error': why, 'permission_denied': True,
+                           'role': role})
+            _audit(conn, actor, 'push_permission_denied', '', {'why': why})
+            return result
         # 章节级顶层块：**不进 payload**（那正是"第二次协作就坏"的根因），
         # 从拍上收下来存进 `file_blocks`（只增改、不删，见函数说明）。
         _store_file_blocks(conn, beats, actor)
@@ -826,14 +1104,21 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
                 result['added'].append(lid)
                 continue
 
-            # 锁：别人锁着就不能改（force 只该在明确沟通过后使用）
+            # 锁：别人锁着就不能改；**过期租约不再阻塞**（force 只该在
+            # 明确沟通过后使用，且 force 本身已经限定 owner）。
             locker = row['locked_by']
-            if locker and locker != actor and not force:
-                _audit(conn, actor, 'push_rejected_locked', lid,
-                       {'locked_by': locker})
-                result['rejected'].append(
-                    {'line_id': lid, 'reason': f'被 {locker} 锁定'})
-                continue
+            if not force:
+                free, why = _lock_is_free_for(row, actor)
+                if not free:
+                    _audit(conn, actor, 'push_rejected_locked', lid,
+                           {'locked_by': locker})
+                    result['rejected'].append(
+                        {'line_id': lid, 'reason': why})
+                    continue
+                if locker and locker != actor:
+                    # 过期锁被越过：留痕，但不当成"抢锁"（租约本来就允许）
+                    _audit(conn, actor, 'push_lock_expired', lid,
+                           {'locked_by': locker, 'why': why})
 
             theirs_payload = json.loads(row['payload'])
             base_payload = (base.get(lid) or {}).get('base')
@@ -988,7 +1273,8 @@ def push(db_path, sheet_path, actor: str, force: bool = False,
             for lid, row in existing.items():
                 if row['deleted'] or lid in sheet_ids:
                     continue
-                if row['locked_by'] and row['locked_by'] != actor and not force:
+                free, _why = _lock_is_free_for(row, actor)
+                if not free and not force:
                     continue
                 base_payload = (base.get(lid) or {}).get('base')
                 if not force and base_payload is not None:
@@ -1087,8 +1373,12 @@ def resolve_conflicts(db_path, sheet_path, actor: str, resolutions) -> dict:
     result = {'applied': [], 'both_kept': [], 'errors': [], 'skipped': [],
               'local_rows': {}}          # line_id → 最终 payload（写回 Excel 用）
 
-    with connect(db_path) as conn:
-        ensure_user(conn, actor)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'push'):
+            result['errors'].append(
+                {'line_id': '', 'error': f'只读成员不能解决冲突（你是 {role}）'})
+            return result
         rows = {r['line_id']: r
                 for r in conn.execute('SELECT * FROM beats').fetchall()}
         for res in resolutions or ():
@@ -1439,62 +1729,141 @@ def _refresh_collab_rows(db_path, sheet_path, line_ids) -> int:
 #  锁
 # ==================================================================
 
-def lock(db_path, line_id: str, actor: str, note: str = '') -> dict:
-    with connect(db_path) as conn:
-        ensure_user(conn, actor)
-        row = conn.execute('SELECT locked_by FROM beats WHERE line_id=?',
-                           (line_id,)).fetchone()
+def _lease_until(ttl=None) -> tuple:
+    """`(现在, 到期时间 ISO)` —— 租约时长的**唯一算法**。"""
+    seconds = int(ttl or LOCK_LEASE_SECONDS)
+    seconds = max(60, seconds)                 # 低于 1 分钟的租约没有意义
+    now = datetime.now()
+    return now, (now + timedelta(seconds=seconds)).isoformat(timespec='seconds')
+
+
+def lock(db_path, line_id: str, actor: str, note: str = '',
+         ttl: int = 0) -> dict:
+    """
+    锁一行（**带租约**，默认 `LOCK_LEASE_SECONDS` = 15 分钟）。
+
+    租约的意义：一个人下班没解锁，不至于让整章永远写不进去。别人可以
+    **越过过期锁**写入/上锁，但审计里会留一笔；没过期时照旧拒绝。
+    """
+    _, until = _lease_until(ttl)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'lock'):
+            return {'ok': False, 'reason': f'只读成员不能上锁（你是 {role}）',
+                    'permission_denied': True}
+        row = conn.execute(
+            'SELECT locked_by, locked_at, locked_until FROM beats '
+            'WHERE line_id=?', (line_id,)).fetchone()
         if row is None:
             return {'ok': False, 'reason': f'没有这一行：{line_id}'}
-        if row['locked_by'] and row['locked_by'] != actor:
-            return {'ok': False, 'reason': f"已被 {row['locked_by']} 锁定"}
-        conn.execute('UPDATE beats SET locked_by=?, locked_at=? '
-                     'WHERE line_id=?', (actor, _now(), line_id))
+        state = lock_state(row)
+        if state['locked'] and state['owner'] != actor and not state['expired']:
+            return {'ok': False,
+                    'reason': f"已被 {state['owner']} 锁定（"
+                              f"{state['expires_in']} 秒后到期）",
+                    'expires_in': state['expires_in']}
+        if state['locked'] and state['owner'] != actor and state['expired']:
+            _audit(conn, actor, 'lock_takeover_expired', line_id,
+                   {'previous_owner': state['owner'], 'until': state['until']})
+        conn.execute('UPDATE beats SET locked_by=?, locked_at=?, '
+                     'locked_until=? WHERE line_id=?',
+                     (actor, _now(), until, line_id))
         _audit(conn, actor, 'lock', line_id, note)
-    return {'ok': True, 'line_id': line_id, 'owner': actor}
+    return {'ok': True, 'line_id': line_id, 'owner': actor,
+            'expires_at': until, 'lease_seconds': int(ttl or LOCK_LEASE_SECONDS)}
+
+
+def renew_lock(db_path, line_id: str, actor: str, ttl: int = 0) -> dict:
+    """续租（只有持锁人；锁已经过期时允许原持锁人续上）。"""
+    _, until = _lease_until(ttl)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'renew'):
+            return {'ok': False, 'reason': f'只读成员不能续租（你是 {role}）'}
+        row = conn.execute(
+            'SELECT locked_by, locked_at, locked_until FROM beats '
+            'WHERE line_id=?', (line_id,)).fetchone()
+        if row is None:
+            return {'ok': False, 'reason': f'没有这一行：{line_id}'}
+        owner = str(row['locked_by'] or '')
+        if owner and owner != actor:
+            return {'ok': False, 'reason': f'锁属于 {owner}，不能替别人续租'}
+        if not owner:
+            return {'ok': False, 'reason': '这一行没有锁，先上锁'}
+        conn.execute('UPDATE beats SET locked_at=?, locked_until=? '
+                     'WHERE line_id=?', (_now(), until, line_id))
+        _audit(conn, actor, 'lock_renew', line_id, {'until': until})
+    return {'ok': True, 'line_id': line_id, 'owner': actor,
+            'expires_at': until}
 
 
 def unlock(db_path, line_id: str, actor: str, force: bool = False) -> dict:
-    with connect(db_path) as conn:
-        row = conn.execute('SELECT locked_by FROM beats WHERE line_id=?',
-                           (line_id,)).fetchone()
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'unlock'):
+            return {'ok': False, 'reason': f'只读成员不能解锁（你是 {role}）'}
+        if force and not _can(role, 'force'):
+            return {'ok': False,
+                    'reason': f'只读成员不能强制解锁（你是 {role}）'}
+        row = conn.execute(
+            'SELECT locked_by, locked_at, locked_until FROM beats '
+            'WHERE line_id=?', (line_id,)).fetchone()
         if row is None:
             return {'ok': False, 'reason': f'没有这一行：{line_id}'}
-        if row['locked_by'] and row['locked_by'] != actor and not force:
-            return {'ok': False, 'reason': f"锁属于 {row['locked_by']}"}
-        conn.execute('UPDATE beats SET locked_by=NULL, locked_at=NULL '
-                     'WHERE line_id=?', (line_id,))
+        state = lock_state(row)
+        if (state['locked'] and state['owner'] != actor and not force
+                and not state['expired']):
+            return {'ok': False, 'reason': f"锁属于 {state['owner']}"}
+        conn.execute('UPDATE beats SET locked_by=NULL, locked_at=NULL, '
+                     'locked_until=NULL WHERE line_id=?', (line_id,))
         _audit(conn, actor, 'unlock', line_id, {'force': force})
     return {'ok': True, 'line_id': line_id}
 
 
-def lock_range(db_path, label: str, actor: str) -> dict:
-    """整章上锁：一个文案认领一整章时最省事的方式。"""
-    with connect(db_path) as conn:
-        ensure_user(conn, actor)
+def lock_range(db_path, label: str, actor: str, ttl: int = 0) -> dict:
+    """整章上锁：一个文案认领一整章时最省事的方式（同样带租约）。"""
+    _, until = _lease_until(ttl)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'lock'):
+            return {'label': label, 'locked': [], 'skipped': [],
+                    'ok': False, 'reason': f'只读成员不能上锁（你是 {role}）'}
         ids = [r['line_id'] for r in conn.execute(
             'SELECT line_id FROM beats WHERE label=? AND deleted=0', (label,))]
         locked, skipped = [], []
         for lid in ids:
-            row = conn.execute('SELECT locked_by FROM beats WHERE line_id=?',
-                               (lid,)).fetchone()
-            if row['locked_by'] and row['locked_by'] != actor:
+            row = conn.execute(
+                'SELECT locked_by, locked_at, locked_until FROM beats '
+                'WHERE line_id=?', (lid,)).fetchone()
+            state = lock_state(row)
+            if (state['locked'] and state['owner'] != actor
+                    and not state['expired']):
                 skipped.append(lid)
                 continue
-            conn.execute('UPDATE beats SET locked_by=?, locked_at=? '
-                         'WHERE line_id=?', (actor, _now(), lid))
+            conn.execute('UPDATE beats SET locked_by=?, locked_at=?, '
+                         'locked_until=? WHERE line_id=?',
+                         (actor, _now(), until, lid))
             locked.append(lid)
         _audit(conn, actor, 'lock_range', label,
                {'locked': len(locked), 'skipped': len(skipped)})
-    return {'label': label, 'locked': locked, 'skipped': skipped}
+    return {'label': label, 'locked': locked, 'skipped': skipped,
+            'expires_at': until}
 
 
 def locks(db_path) -> list:
+    """当前锁列表（含租约状态：`expired` / `expires_in`）。"""
     with connect(db_path) as conn:
-        return [dict(r) for r in conn.execute(
-            'SELECT b.line_id, b.label, b.locked_by, b.locked_at, b.status '
+        rows = [dict(r) for r in conn.execute(
+            'SELECT b.line_id, b.label, b.locked_by, b.locked_at, '
+            'b.locked_until, b.status '
             'FROM beats b WHERE b.locked_by IS NOT NULL AND b.deleted=0 '
             'ORDER BY b.label, b.seq').fetchall()]
+    for r in rows:
+        state = lock_state(r)
+        r['expires_in'] = state['expires_in']
+        r['expired'] = state['expired']
+        r['lease_until'] = state['until']
+    return rows
 
 
 # ==================================================================
@@ -1504,7 +1873,12 @@ def locks(db_path) -> list:
 def set_status(db_path, line_id: str, status: str, actor: str) -> dict:
     if status not in STATUSES:
         return {'ok': False, 'reason': f'状态只能是 {"/".join(STATUSES)}'}
-    with connect(db_path) as conn:
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        action = 'approve' if status == STATUS_APPROVED else 'status'
+        if not _can(role, action):
+            return {'ok': False,
+                    'reason': f'只读成员不能改状态（你是 {role}）'}
         cur = conn.execute('UPDATE beats SET status=?, updated_by=?, '
                            'updated_at=?, revision=revision+1 '
                            'WHERE line_id=?', (status, actor, _now(), line_id))
@@ -1519,8 +1893,12 @@ def upsert_assets(db_path, registry, actor: str = '') -> int:
     if registry is None:
         return 0
     count = 0
-    with connect(db_path) as conn:
-        ensure_user(conn, actor)
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        if not _can(role, 'assets'):
+            _audit(conn, actor, 'assets_permission_denied', '',
+                   {'role': role})
+            return 0
         for attr, kind in (('images', 'image'), ('music', 'music'),
                            ('sounds', 'sound'), ('voices', 'voice'),
                            ('transforms', 'transform'),
@@ -1541,7 +1919,7 @@ def upsert_assets(db_path, registry, actor: str = '') -> int:
 
 
 def status_summary(db_path) -> dict:
-    """协作总览：谁锁了多少、各状态多少、最近改了什么。"""
+    """协作总览：谁锁了多少、各状态多少、最近改了什么、成员是什么角色。"""
     with connect(db_path) as conn:
         total = conn.execute(
             'SELECT COUNT(*) c FROM beats WHERE deleted=0').fetchone()['c']
@@ -1554,6 +1932,10 @@ def status_summary(db_path) -> dict:
                 'WHERE deleted=0 AND locked_by IS NOT NULL '
                 'GROUP BY locked_by').fetchall():
             by_owner[r['locked_by']] = r['c']
+        lock_rows = conn.execute(
+            'SELECT locked_by, locked_at, locked_until FROM beats '
+            'WHERE deleted=0 AND locked_by IS NOT NULL').fetchall()
+        expired_total = sum(1 for r in lock_rows if lock_state(r)['expired'])
         recent = [dict(r) for r in conn.execute(
             'SELECT ts, actor, action, line_id, detail FROM audit '
             'ORDER BY id DESC LIMIT 20').fetchall()]
@@ -1565,12 +1947,17 @@ def status_summary(db_path) -> dict:
             'FROM beats WHERE deleted=0 GROUP BY label ORDER BY label'
         ).fetchall()]
         users = [dict(r) for r in conn.execute(
-            'SELECT id, display_name FROM users ORDER BY id').fetchall()]
+            'SELECT id, display_name, role FROM users ORDER BY id').fetchall()]
+    for u in users:
+        role = str(u.get('role') or ROLE_EDITOR)
+        u['role'] = role if role in ROLES else ROLE_EDITOR
+        u['role_label'] = ROLE_LABELS.get(u['role'], u['role'])
     return {
         'lines': total,
         'by_status': by_status,
         'locked_by': by_owner,
         'locked_total': sum(by_owner.values()),
+        'expired_locks': expired_total,
         'labels': labels,
         'users': users,
         'recent': recent,

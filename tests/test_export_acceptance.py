@@ -229,19 +229,21 @@ class TestP0AcceptanceMatrix:
 
     def test_4_re_exporting_the_same_path_is_idempotent(self, project):
         """
-        连导三次都要成功。
+        连导三次都要成功，而且零改动的那一份**逐字节等于源文**。
 
-        补丁那条路产出的首行是**源文件的首行**，所以必须由
-        `ensure_generator_marker` 补上标记 —— 否则第二次会被自己的
-        护栏当成"手写文件"拒写（实测踩过）。
+        2026-10-19 改口径（P1-1）：从前这里断言首行是生成标记 —— 那是
+        为了让第二次导出别被自己的手写护栏拦下。现在零改动往返**根本不
+        插标记**（标记就是那 2 行多余内容），护栏改看"目标是不是源文的
+        逐字节复制品"（`_copy_of_source`）。所以这里的判据变成：
+        产物与源文逐字节相同，且连导三次仍然成功。
         """
         src = project / 'ch.rpy'
         src.write_text(OPAQUE, encoding='utf-8')
         s = _session(project, src)
         new = project / 'build' / 'out.rpy'
         assert s.export(new)['ok'] is True
-        head = new.read_text(encoding='utf-8').splitlines()[0]
-        assert head.startswith('# 由剧本表自动生成'), head
+        assert new.read_text(encoding='utf-8') == OPAQUE, \
+            '零改动往返必须逐字节等于源文（不许插生成标记）'
         for n in (2, 3):
             assert s.export(new)['ok'] is True, f'第 {n} 次失败'
 

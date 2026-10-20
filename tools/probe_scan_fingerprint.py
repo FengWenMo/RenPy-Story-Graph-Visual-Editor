@@ -35,8 +35,26 @@ def _rel(p, root: Path) -> str:
         return s.replace('\\', '/')
 
 
+#: 指纹只认**分类相关**的字段。2026-10-19：从前把整行 `str(dict)` 拿去排序，
+#: 于是任何新列（`Group` / `Value`）都会让金标红 —— 那不是"归类变了"，
+#: 只是"多了一列"。金标要盯的是"这个文件进没进表、归到哪个类、tag/属性是什么"。
+_CORE_FIELDS = ('ID', 'Path', 'Tag', 'Attributes', 'Category', 'Name',
+                'Loop', 'Volume')
+
+
+def _norm_item(item, root: Path) -> str:
+    """一行 → 只含核心字段的稳定字符串（路径相对化）。"""
+    if not isinstance(item, dict):
+        return _rel(item, root)
+    payload = {k: item.get(k) for k in _CORE_FIELDS
+               if item.get(k) not in (None, '')}
+    if payload.get('Path'):
+        payload['Path'] = _rel(payload['Path'], root)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 def _norm_list(items, root: Path) -> list:
-    return sorted(_rel(x, root) for x in (items or []))
+    return sorted(_norm_item(x, root) for x in (items or []))
 
 
 def _digest(res: dict, root: Path) -> dict:

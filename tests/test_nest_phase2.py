@@ -12,8 +12,8 @@ B 阶段二：**渲染器优先用结构列建树** —— 见不变量 76。
      （`tools/render_hash.py` 实测 40 个文件、两条路逐字节一致）；
   ② **老推断摆错的地方要修对**：`menu>if` 这种"选项体里有第二条语句 / 嵌套块"
      的形状，以前会产出 `"选项": pass` + 内容提到菜单外（**选没选都会执行**）；
-  ③ **对拍器仍要有意义**：它算"老推断会怎么摆"时必须**显式走老路**
-     （`use_paths=False`），否则成了拿路径比路径、永远 0 冲突。
+  ③ **老推断只在整份 label 没有结构位时兜底**：2026-10-19 收口后
+     对拍器已删，`use_paths=False` 只留给兼容测试与回归对照。
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ from storygraph.story import beat_render as br
 from storygraph.story.beat_build import beats_from_parse_result
 from storygraph.story.beat_model import (Beat, KIND_MENU, KIND_MENU_OPTION,
                                          KIND_NARRATION)
-from storygraph.story.beat_render import (nest_placement_conflicts,
-                                          render_beats_to_rpy)
+from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
@@ -221,14 +220,11 @@ class TestFallbackKeepsTheOldBehaviour:
         old = _menu_unit(beats, use_paths=False)
         assert ([b.seq for b in _menu_unit(stripped)] == [b.seq for b in old])
 
-    def test_the_comparator_still_sees_the_old_way(self, tmp_path):
+    def test_no_second_oracle_remains(self):
         """
-        对拍器在"结构列齐了、但老推断会摆错"的形状上**必须报** ——
-        这就是它作为阶段三（退掉 `stamp_menu_bodies`）安全网的价值。
+        2026-10-19 收口：删掉对拍器后，产品里不再有"老推断 vs 结构位"
+        的第二套判断；老推断只在整份 label 没有结构位时兜底。
         """
-        beats = _beats(MENU_THEN_IF, tmp_path)
-        # 手工把选项体里那两拍的路径改成"在顶层"（模拟表里的结构位被改坏）
-        for b in beats:
-            if b.nest_path and '>A' in b.nest_path:
-                b.nest_path = ''
-        assert nest_placement_conflicts(beats), '对拍器没看出"表里说的"不对'
+        from storygraph.story import beat_render
+        assert not hasattr(beat_render, 'nest_placement_conflicts')
+        assert not hasattr(beat_render, '_actual_chains')

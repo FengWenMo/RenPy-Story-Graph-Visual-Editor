@@ -38,6 +38,11 @@ ASSET_FIELD_LABELS = {
     'Path': '真实文件',
     'Tag': '标签',
     'Attributes': '立绘属性',
+    #: **维度结构化**（2026-10-19，资产维度第 1 项）：
+    #: `Group` = 引擎维度（`outfit` / `expressions`），`Value` = 该维度下的
+    #: 一个属性。`Attributes` 保留为兼容列（老表 / 一行多属性的脚本声明）。
+    'Group': '维度',
+    'Value': '属性值',
     'Category': '类别',
     'Notes': '备注',
     #: 角色表：`Name` 是**显示名**（编剧看到的），`ImageTag` 才是 `show` 要写的 tag。
@@ -166,7 +171,10 @@ _STANDARD_TABLES = {
 
 _TABLE_FIELDS = {
     'character': ['ID', 'Name', 'Color', 'ImageTag', 'Aliases', 'Notes'],
-    'image': ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'],
+    # `Group` / `Value` 追加在**末尾**（不改老列的位置：现有编辑/备份/测试
+    # 都按列号或列名取 Notes；新列只增不改）。
+    'image': ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes',
+              'Group', 'Value'],
     # transform 增加 ATL/Params/Doc/Category：支持自定义变换（文档第四节），
     # 导出时按 ATL 生成 `transform id(params):` 代码块；Doc 是给文案看的
     # 一句话说明（表格下拉里选中它就显示这句）。

@@ -407,8 +407,11 @@ def structure_loss(source_text, product_text) -> list:
         或在卡片编辑器里往选项体里插了一张卡。
     只看"源 vs 产物"分不出这两者。而"假阳性比漏报更贵"（本项目既有立场）——
     拦错一次就会让人学会忽略这条警告。所以：**报出来、别拦**。
-    等结构位进了表（方案 B），判据就能变成"产物 vs 表里说的结构"，
-    那时才可以升成 block。
+
+    ⚠ 2026-10-19 起「结构位」（`Nest`）已是表里的**唯一结构真源**：
+    渲染在路径齐全时直接按路径建树，不再与"老推断"对拍。这条警告保留，
+    因为它比的是"**源文本 vs 产物文本**" —— 即使表里结构对，产物仍可能
+    在别的环节被压平；它管结果，和结构位管过程并不重复。
     """
     src = menu_structure(source_text)
     if not src:
@@ -421,42 +424,6 @@ def structure_loss(source_text, product_text) -> list:
         if sig != prod[label]:
             lost.append((label, sig, prod[label]))
     return lost
-
-
-def nest_conflict_warnings(beats, source_path=None) -> list:
-    """
-    结构列（`Nest`）vs 老推断不一致 → 一条 **warn** 级发现（B 阶段一）。
-
-    与 A 档的 `STRUCTURE_LOST` 分工**不同、互补**：
-      · `STRUCTURE_LOST` 比的是"源文本 vs 产物文本" —— 它管**结果**，
-        但没有源可比时就不说话；
-      · 这一条比的是"**结构列说这条拍在哪** vs **老推断把它摆在哪**" ——
-        它管**过程**，逐拍、指名道姓，而且**表格往返之后照样有效**
-        （`Nest` 随表走，`_menu_member` 走不了）。
-
-    两者都是 warn：这一版**不改行为**（渲染仍按老推断），对拍只是把不一致
-    说出来。等它对真实项目全绿（已实测 40 个文件 0 处），阶段二才让渲染
-    改用结构列；那时这条警告才会变成"表坏了"的信号。
-    """
-    if not beats:
-        return []
-    from storygraph.story.beat_render import nest_placement_conflicts
-    conflicts = nest_placement_conflicts(beats)
-    if not conflicts:
-        return []
-    name, idx, claim, got = conflicts[0]
-    more = f'（共 {len(conflicts)} 条拍）' if len(conflicts) > 1 else ''
-    where = f'{source_path} ' if source_path else ''
-    return [GuardIssue(
-        'NEST_CONFLICT', 'warn',
-        f'{where}结构列与老推断对不上{more}：`{name}` 第 {idx + 1} 条拍 —— '
-        f'结构列说 {"顶层" if not claim else claim}，'
-        f'老推断摆在 {"顶层" if not got else got}。'
-        f'说明"这条拍属于哪个选项"两套判断不一致；产物很可能把选项体压平了'
-        f'（`"选项": pass` + 内容提到菜单外）。'
-        f'这一版渲染仍按老推断走（B 阶段一只双写不切换）——'
-        f'先照这条线索核对那几拍，方案见 '
-        f'docs/archive/嵌套与行尾注释_修复方案_2026-10-05.md')]
 
 
 def _make_structure_issue(lost: list, source_path=None) -> GuardIssue:
@@ -1137,13 +1104,38 @@ def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
     return occupied_labels(project_root=project_root, exclude=exclude)
 
 
+def _copy_of_source(out_path, source_text) -> bool:
+    """
+    目标里那一份，是不是**这一章源文的逐字节复制品**？
+
+    为什么需要（2026-10-19，修 P1-1）：零改动往返不再插生成标记了 ——
+    标记本身就是"零改动却改了文件"的那 2 行。可"没改就复制到新路径"
+    的那份产物因此也没有标记，下一次**真有改动**再导出到同一路径时，
+    手写护栏会把它当成别人的文件拒写。
+
+    判据极窄：内容与传给门禁的 `source_text` 一模一样才算。用户若在
+    复制品上手改过，内容就不再相等 → 照旧按"手写文件"拦。
+    """
+    if not source_text:
+        return False
+    p = Path(out_path)
+    if not p.exists():
+        return False
+    try:
+        from storygraph.story.source_style import read_text as _read
+        return _read(p)[0] == source_text
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def write_generation(text: str, out_path, *, review_on_block: bool = True,
                      project_root=None, occupied=None, force: bool = False,
                      merged_from_source=None, source_text=None,
                      source_path=None, beats=None,
                      unmanaged_blocks=None,
                      engine_lint: bool = False,
-                     lint_ignore_heads=()):
+                     lint_ignore_heads=(),
+                     lint_project_root=None):
     """
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
@@ -1209,7 +1201,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     out_path = Path(out_path)
     root = project_root or _guess_project_root(out_path)
     merged_onto_target = merging_onto(out_path, merged_from_source)
-    if not force and not merged_onto_target and _looks_handwritten(out_path):
+    if not force and not merged_onto_target and not _copy_of_source(
+            out_path, source_text) and _looks_handwritten(out_path):
         reason = ('目标已存在且不是工具生成的（没有生成标记），'
                   '拒绝覆盖手写 .rpy')
         blocking = [_make_blocking_issue(out_path, reason)]
@@ -1257,7 +1250,15 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     if engine_lint:
         try:
             from storygraph.pipeline.engine_lint import lint_text
-            _rep = lint_text(text, ignore_heads=lint_ignore_heads)
+            # `project_root` / `source_path`（2026-10-19 修 P0-2）：临时工程
+            # 只有这一份产物，屏幕类脚本里的 `gui.*` / 角色定义全都不在，
+            # 引擎在 init 阶段就 NameError —— 而那是**上下文缺失**，不是
+            # 产物坏了（真实 `screens.rpy` 3938 行、只多 2 行标记被拒）。
+            # 传项目根让它抽一份 define 骨架；`source_path` 要从骨架里排掉，
+            # 否则这份文件自己的 define 会替它把丢掉的声明补上。
+            _rep = lint_text(text, ignore_heads=lint_ignore_heads,
+                             project_root=lint_project_root or root,
+                             source_path=source_path or out_path)
             _lint = _rep
             if _rep.ran and not _rep.ok:
                 issues.append(GuardIssue(
@@ -1266,13 +1267,14 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
                     + '；'.join(_rep.parse_errors[:3])
                     + (f'（共 {len(_rep.parse_errors)} 处）'
                        if len(_rep.parse_errors) > 3 else '')))
-            elif _rep.ran and _rep.semantic_errors:
+            elif _rep.ran and (_rep.semantic_errors or _rep.context_note):
                 issues.append(GuardIssue(
                     'ENGINE_LINT_WARN', 'warn',
-                    f'引擎 lint 有 {len(_rep.semantic_errors)} 条语义提示'
-                    '（不影响解析；临时工程里没有项目素材，缺图 / 缺音频'
-                    '属预期）：'
-                    + '；'.join(_rep.semantic_errors[:3])))
+                    (f'引擎 lint 有 {len(_rep.semantic_errors)} 条语义提示'
+                     '（不影响解析；临时工程里没有项目素材，缺图 / 缺音频'
+                     '属预期）：'
+                     + '；'.join(_rep.semantic_errors[:3]))
+                    if _rep.semantic_errors else _rep.context_note))
         except Exception as e:                  # noqa: BLE001 - lint 是增强，不拖垮导出
             swallow('generation_guard.engine_lint', e)
     blocking = [i for i in issues if i.is_blocking]

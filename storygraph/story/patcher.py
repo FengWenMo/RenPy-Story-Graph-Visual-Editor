@@ -281,9 +281,15 @@ def _align_key(beat) -> tuple:
             _stage_tokens(beat))
 
 
-def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inserts, inserted_out, dropped_out, dropped):
-    """按 label 分组做内容对齐（SequenceMatcher）→ 给每拍行号 / 标记插入点 / 记被删的拍。返回配上的拍数（M4 搬出，行为一字不改）。"""
+def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inserts, inserted_out, dropped_out, dropped, positions=None):
+    """按 label 分组做内容对齐（SequenceMatcher）→ 给每拍行号 / 标记插入点 / 记被删的拍。返回配上的拍数（M4 搬出）。
+
+    `positions`：`{id(beat): 全局下标}`。`inserted_out` 收的必须是**全局**下标
+    （调用方拿去 `beats` 里取），而这里遍历的是**组内**列表 —— 不映射就会
+    在多 label 章节里指错拍（2026-10-19 修，见 `recover_source_ranges`）。
+    """
     matched = 0
+    positions = positions or {}
     for name, group in new_groups.items():
         pool = src_groups.get(name) or []
         if not pool:
@@ -311,14 +317,16 @@ def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inser
                         _set_insert_point(group[k],
                                           pool[i2 - 1] if i2 > i1 else None,
                                           inserted_out=inserted_out,
-                                          index=j1 + k)
+                                          index=positions.get(id(group[k]),
+                                                              j1 + k))
             elif tag == 'insert':
                 prev = pool[i1 - 1] if i1 > 0 else None
                 nxt = pool[i1] if i1 < len(pool) else None
                 for k in range(j1, j2):
                     if apply_ranges or apply_inserts:
                         _set_insert_point(group[k], prev, nxt,
-                                          inserted_out=inserted_out, index=k)
+                                          inserted_out=inserted_out,
+                                          index=positions.get(id(group[k]), k))
             elif tag == 'delete':
                 # 源文件里有、表里没有 → 用户把这一拍删了。
                 # `dropped_out` 给的是**这些被删的源拍本身**（带
@@ -419,10 +427,16 @@ def recover_source_ranges(beats: list, source_path,
 
     matched = 0
     dropped: list = []
+    # `inserted_out` 收的是**全局下标**（`patch_export` 拿它去 `beats` 里取），
+    # 而分组对齐里拿到的是**组内下标** —— 多 label 的章节（真实 `pomodorro`
+    # 有 10 个 label）里两者差着一个偏移，插入点会指到别的拍上：
+    # 新卡片被当成"替换"，原文那一行反被顶掉（实测插入一拍 → 全量退回，
+    # 且 verify 报"某句台词在补丁结果里找不到"）。2026-10-19 修。
+    positions = {id(b): i for i, b in enumerate(beats)}
     matched = _recover_ranges_for_groups(new_groups, src_groups,
                                             apply_ranges, apply_inserts,
                                             inserted_out, dropped_out,
-                                            dropped)
+                                            dropped, positions=positions)
     return matched, len(beats), len(dropped)
 
 
@@ -614,6 +628,60 @@ def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
     return ('other', s)
 
 
+def _say_parts(body: str):
+    """
+    台词行 → `(说话人, 引号里的正文)`；不是台词行 → `None`。
+
+    与 `_line_key` 同源，但**只认"能安全换说话人"的那一种台词行**，
+    所以额外排掉两类：
+
+      · **菜单选项行** `"选项":` —— 它的"正文"是选项文案，把说话人塞进去
+        会写坏菜单结构（`yhj "选项":` 不再是选项）；
+      · **关键字行**（`extend "…"` / `menu "标题":`）—— 它们的"说话人位"
+        上是 Ren'Py 关键字，不是角色名。
+
+    剩下的才是"`说话人 "台词"`"这一种：换掉说话人，语句还是同一句。
+    """
+    s = (body or '').strip()
+    bare = _content_of(s)
+    if _VERB_RE.match(bare):
+        return None
+    if _OPTION_ROW_RE.match(s):
+        return None
+    m = _SAY_RE.match(bare)
+    if not m:
+        return None
+    who = (m.group('who') or '').strip()
+    if who in _KEYWORD_SPEAKERS:
+        return None
+    return who, m.group('body')
+
+
+def _speaker_swap_ok(old_body: str, new_body: str) -> bool:
+    """
+    **只有说话人变了、正文一字不差**吗？（2026-10-19，修 P0-1）
+
+    为什么单开一条判据：`_line_key` 给台词算的身份是 `('say', 说话人)` ——
+    "说话人一样才允许换正文"是防"把 A 的台词写到 B 头上"的纪律。
+    可用户**就是想换说话人**时，新行 `yhj "…"` 与原文 `jc "…"` 键不同、
+    配不上对 → 原文一个字不动、报告"改动 0 行"、退出码 0（真实项目
+    4/4 复现）。纪律执行得太彻底，反而把一个正常操作吞掉了。
+
+    这一条把"同一句话、只换说话人"单独放行：正文（引号里那一串）
+    必须逐字相同，只是 `who` 不同。**认不出、正文有一字之差就不放行**
+    —— 那时用户是在改台词或换一句话，仍然走 `relax_speaker` 那条老路。
+    """
+    a = _say_parts(old_body)
+    b = _say_parts(new_body)
+    if not a or not b:
+        return False
+    if a[0] == b[0]:
+        return False
+    if not (a[1].strip() and b[1].strip()):
+        return False
+    return _unescaped(a[1]) == _unescaped(b[1])
+
+
 def _same_thing_unless_rewritten(old_body: str, new_body: str,
                                 relax_speaker: bool = False) -> bool:
     """
@@ -639,6 +707,10 @@ def _same_thing_unless_rewritten(old_body: str, new_body: str,
     kind = _line_key(old_body)[0]
     if kind == 'say':
         if _line_key(old_body) == _line_key(new_body):
+            return True
+        # **同一句话换了说话人**（2026-10-19 修 P0-1）：正文逐字相同、
+        # 只有 who 变了 —— 这正是"改说话人"那一刀，必须放行。
+        if _speaker_swap_ok(old_body, new_body):
             return True
         if not relax_speaker:
             return False
@@ -1144,6 +1216,29 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             pick_of_old[j] = idx
             break
 
+    # —— ② **同一句话、只换说话人**的第二轮配对（2026-10-19 修 P0-1）——
+    #
+    # 第一轮按 `('say', 说话人)` 配对：说话人一改，键就不同 → 配不上 →
+    # 生成行成了"没落地"，原文一个字不动、报告"改动 0 行"。
+    # 可"正文一字不差、只有说话人变了"正是用户点下拉要做的事 ——
+    # 这时配对是**确定的**（同一区间里同一句话，不存在第二个候选），
+    # 不需要任何语义猜测，也不该被"认不出就保守"挡掉。
+    #
+    # ⚠ 与 `relax_speaker` 分开：那条要"行号已证明新鲜"，这条只要求
+    # **正文逐字相同** —— 比行号判据更强，表格那条路也能安全用。
+    free_gen = [k for k in range(len(gen_bodies)) if k not in used]
+    if free_gen:
+        for j, ln in enumerate(old_lines):
+            if j in pick_of_old:
+                continue
+            for pos, idx in enumerate(free_gen):
+                if _speaker_swap_ok(_norm(ln), gen_bodies[idx]):
+                    used.add(idx)
+                    pair_of_gen[idx] = j
+                    pick_of_old[j] = idx
+                    del free_gen[pos]
+                    break
+
     out: list = []
     changed = 0
     grown = 0
@@ -1155,8 +1250,16 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     # 单调性：只有"配对顺序和渲染顺序一致"时才敢按渲染顺序合并（否则会重排原文）
     order = [pair_of_gen[i] for i in sorted(pair_of_gen)]
     monotonic = all(order[t] < order[t + 1] for t in range(len(order) - 1))
+    # **结构头不算这一拍的内容**（2026-10-19，修 pomodorro "改注释 0 段"）：
+    # 条件拍的渲染结果是 `if 条件:` + 块体，而块头不在拍的行区间里。
+    # 从前拿**整串**去判"平整区间"，一有 `if` 就判不平整 → 增删通道整个关掉
+    # → 用户给一句 if 里的旁白加**注释**（注释是单独一行）时什么都不落地，
+    # 报告"改动 0 行"。判平整时先摘掉开头的结构行，插入循环也跳过它们
+    # （那几行不是这一拍的内容，插进去就是重复块头）。
+    body_gen = _body_lines(gen_bodies)
+    head_prefix = len(gen_bodies) - len(body_gen)
     editable = (allow_edit and monotonic and _flat_editable_range(old_lines)
-                and _flat_editable_range(gen_bodies))
+                and _flat_editable_range(body_gen))
     old_heads = {_head_of(_norm(ln)) for ln in old_lines if _norm(ln)}
     gen_heads = {_head_of(_norm(g)) for g in gen_bodies if _norm(g)}
     old_squash = [_squash(ln) for ln in old_lines if _squash(ln)]
@@ -1169,6 +1272,8 @@ def _replace_matched(old_lines: list, gen_bodies: list,
 
         cursor = 0
         for idx, g in enumerate(gen_bodies):
+            if idx < head_prefix:
+                continue                  # `if …:` 头不是这一拍的内容（见上）
             j = pair_of_gen.get(idx)
             if j is None:
                 body = _norm(g)
@@ -1334,6 +1439,39 @@ def _unpairable_new_content(gen_bodies: list, old_lines: list,
             continue
         if file_squash and s in file_squash:
             continue
+        return True
+    return False
+
+
+def _lost_content(unlanded: list, file_squash: set, file_loose: set) -> bool:
+    """
+    这一拍有**内容行既没落地、整份原文里也没有**吗？（2026-10-19 修 P0-1）
+
+    与 `_unpairable_new_content` 的分工：
+      · 那个问"是不是新内容"，用 `_head_of`（台词按正文）—— 换说话人时
+        头相同，所以它答"不是新的"，然后整件事就落在缝里；
+      · 这个只问一件事：**这一行内容在产物里到底有没有**。没有 → 这一拍
+        被静默 no-op 了，必须报（`lost_new` → 退回全量并说明原因）。
+
+    ⚠ 比对的是**整份文件**，不是这一拍的区间：菜单标题一类会因为解析器
+    把它和 `menu:` 头并成一行而"落在别的拍里"，按区间比会把一次零改动
+    往返判成丢失（实测 7 个既有用例当场红）。区间里找不到但文件里确实
+    有这一句 → 不算丢。
+
+    只认内容行（台词 / 舞台 / 音频），注释与结构行不算 —— 那些没落地是
+    正常的（拍内注释本来就贴不回去）。
+    """
+    if not unlanded:
+        return False
+    for g in unlanded:
+        n = _norm(g)
+        if not n or _is_missing_note(n):
+            continue
+        if _line_key(n)[0] not in ('say', 'show', 'hide', 'scene',
+                                   'play', 'stop', 'queue'):
+            continue
+        if _squash(n) in file_squash or _loose(n) in file_loose:
+            continue                     # 文件里已经有这一行 → 没丢
         return True
     return False
 
@@ -1693,6 +1831,53 @@ def _insert_points_for(beats, insert_ids, raw_gen: dict) -> tuple:
     return anchors, failed
 
 
+def _deletion_empties_block(orig_lines: list, first: int, last: int) -> bool:
+    """
+    删掉 `[first, last]` 之后，上一级块会**变成空块**吗？（2026-10-19 修 P1-3）
+
+    真实事故（`pomodorro.rpy`，删一拍）：
+
+        if breakline == 1:
+            "我需要休息一下."      ← 表里删掉了这一拍
+        elif breakline == 2:
+
+    上一版只看"区间里有没有块头"，于是照删不误 —— 产物在 `elif` 那一行
+    `expected statement`（引擎判据实测第 232 行）。门禁拦住了，没写坏文件，
+    但结论是"退回全量"，而不是"这一刀不敢增量"。
+
+    判据：被删区间的上一行（跳过空行）是块头、且比区间更深；
+    再往下扫，**块体里没有一行活着**（先遇到 dedent = 块结束）→ 空块。
+    """
+    if first < 2 or first > len(orig_lines):
+        return False
+
+    def _transparent(line: str) -> bool:
+        """空行 / 纯注释：Ren'Py 眼里不算块体语句。"""
+        body = _norm(line).strip()
+        return not body or body.startswith('#')
+
+    idx = first - 2
+    while idx >= 0 and _transparent(orig_lines[idx]):
+        idx -= 1
+    if idx < 0:
+        return False
+    head = orig_lines[idx]
+    if not _content_of(_norm(head)).rstrip().endswith(':'):
+        return False
+    head_ind = len(_indent_of(head))
+    if head_ind >= len(_indent_of(orig_lines[first - 1])):
+        return False                       # 上一行不是这一段的"父块头"
+    for j in range(first - 1, len(orig_lines)):
+        ln = orig_lines[j]
+        if _transparent(ln):
+            continue                       # 空行 / 注释救不了空块
+        if len(_indent_of(ln)) <= head_ind:
+            return True                    # 块已经结束，里面一行都不剩
+        if not (first - 1 <= j <= last - 1):
+            return False                   # 还有别的块体行活着
+    return True
+
+
 def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
     """
     被删掉的源拍 → 可以安全删除的区间列表。
@@ -1725,6 +1910,11 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
         body = [_norm(x) for x in orig_lines[first - 1:last]]
         if any(_BLOCK_HEAD_RE.match(x) for x in body if x):
             delete_failed += 1                # 含块头 → 会删坏结构
+            continue
+        if _deletion_empties_block(orig_lines, first, last):
+            # 删完上一级块会空（`if x:` 下面一行都没有）→ 引擎读不了。
+            # 宁可整章退回全量，也不写出 `expected statement`（P1-3）。
+            delete_failed += 1
             continue
         if any(first <= t_last and last >= t_first
                for t_first, t_last in taken if t_first and t_last >= t_first):
@@ -1968,6 +2158,9 @@ def _patch_walk_blocks(st) -> None:
                 if new_seg != old:
                     st.changed += n_changed
                     st.out_lines[first - 1:last] = new_seg
+                elif _lost_content(unlanded, st.orig_squash, st.orig_loose):
+                    # 一对一替换也没接住这句话 → 报出来，别静默保持原文
+                    st.lost_new += 1
                 continue
             if st.trust_ranges and gen:
                 # 行号**已被证明新鲜**（会话核对过"磁盘上那一份 == 载入时那一份"）：
@@ -1984,7 +2177,10 @@ def _patch_walk_blocks(st) -> None:
                 if new_seg != old:
                     st.changed += n_changed
                     st.out_lines[first - 1:last] = new_seg
-                elif _unpairable_new_content(gen, old, st.orig_squash, st.orig_loose):
+                elif _unpairable_new_content(gen, old, st.orig_squash,
+                                             st.orig_loose) \
+                        or _lost_content(unlanded, st.orig_squash,
+                                         st.orig_loose):
                     # **行号可信 ≠ 一定配得上**：`menu:` → `menu "标题":` 那种
                     # "换行"（标题本来写在下一行）不是换词，配对键不同 →
                     # `_replace_matched` 什么都不做。此时必须**报出来**，
@@ -2031,8 +2227,11 @@ def _patch_walk_blocks(st) -> None:
         st.grown_total += grown
         st.shrunk_total += shrunk
         if new_seg == old:
-            if st.trust_ranges and _unpairable_new_content(gen, old, st.orig_squash, st.orig_loose):
-                # 行号可信却什么都没落地 → 必须报（绝不写"报成功、内容没写"）
+            if _lost_content(unlanded, st.orig_squash, st.orig_loose) or (
+                    st.trust_ranges
+                    and _unpairable_new_content(gen, old, st.orig_squash,
+                                                st.orig_loose)):
+                # 什么都没落地 → 必须报（绝不写"报成功、内容没写"）
                 st.lost_new += 1
             continue
         st.changed += n_changed

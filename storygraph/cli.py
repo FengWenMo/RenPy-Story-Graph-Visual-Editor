@@ -223,6 +223,15 @@ def _report_guard(result, out, stream=None, source=None) -> bool:
         print(f'  {issue.format()}', file=stream)
     if result.review_path:
         print(f'  已留副本供对照：{result.review_path}', file=stream)
+    if any(getattr(i, 'code', '') == 'ENGINE_PARSE_ERROR'
+           for i in result.guard_issues):
+        # **表改了、文件没改** —— 这个状态必须说清楚（2026-10-19，P1-3）。
+        # 用户此刻手里是"表里删了一拍、文件里还在"的两份东西，而报告只写
+        # "门禁拦下"：他既不知道该信哪份，也不知道怎么退回去。
+        print('  源文件没有被改动：它仍是导出前的样子（表里的这次改动没有生效）。',
+              file=stream)
+        print('  修好表里出问题的那几行后重新导出即可；想回到原样，'
+              '把这次改动撤销（改回原值）再导一次。', file=stream)
     codes = {getattr(i, 'code', '') for i in result.guard_issues}
     if 'HANDWRITTEN_TARGET' in codes:
         # 这一条**有**逃生舱，而且和上面那条"坏脚本"的性质不同：
@@ -268,9 +277,15 @@ def _report_incremental(result, stream=None) -> None:
     """
     stream = stream or sys.stdout
     if result.used_patch:
-        print(f'增量补丁：改动 {result.changed_lines} 行，'
-              f'原文其余部分（含 default / init python / transform）逐字节保留',
-              file=stream)
+        if getattr(result, 'untouched', False):
+            # 零改动往返：以前这里报"改动 0 行"却把文件重写了一遍（还多插
+            # 2 行生成标记）。现在是真的没碰 —— 说清楚，别让人以为写过了。
+            print('增量补丁：0 行改动，原文逐字节相同（文件没有被改动）',
+                  file=stream)
+        else:
+            print(f'增量补丁：改动 {result.changed_lines} 行，'
+                  f'原文其余部分（含 default / init python / transform）逐字节保留',
+                  file=stream)
     elif result.patch_attempted and result.patch_note:
         print(f'增量未采用（{result.patch_note}）→ 已按全量生成',
               file=stream)
@@ -341,10 +356,12 @@ def _cmd_collab(args) -> int:
 
     if action == 'init':
         users = [u for u in (args.users or '').split(',') if u.strip()]
-        cs.init_db(db, users=users)
+        cs.init_db(db, users=users, owner=args.owner)
         print(f'已建库：{db}')
         if users:
             print('成员：' + '，'.join(users))
+            print('角色：' + '，'.join(
+                f"{m['id']}[{m['role_label']}]" for m in cs.members(db)))
         print('下一步：collab pull 把库导出成 Excel 交给文案；')
         print('        collab push 把改好的 Excel 写回库。')
         return 0
@@ -404,6 +421,12 @@ def _cmd_collab(args) -> int:
         if s['locked_by']:
             print('持锁人：' + '，'.join(f'{k} {v} 行'
                                       for k, v in s['locked_by'].items()))
+        if s.get('expired_locks'):
+            print(f"其中 {s['expired_locks']} 行锁已过期（别人可以接手）")
+        if s.get('users'):
+            print('成员：' + '，'.join(
+                f"{u['id']}[{u.get('role_label') or u.get('role') or '编辑'}]"
+                for u in s['users']))
         if s['labels']:
             print('按章：')
             for l in s['labels']:
@@ -417,15 +440,43 @@ def _cmd_collab(args) -> int:
                 print(f"  {r['ts']} {r['actor']} {r['action']} {r['line_id']}")
         return 0
 
+    if action == 'renew':
+        res = cs.renew_lock(db, args.line_id, args.user, ttl=args.ttl)
+        print(f"已续租到 {res.get('expires_at')}" if res['ok']
+              else f"失败：{res['reason']}")
+        return 0 if res['ok'] else 1
+
+    if action == 'role':
+        if not args.member:
+            print('role 需要 --member 指定成员', file=sys.stderr)
+            return 2
+        res = cs.set_role(db, args.member, args.role, actor=args.user)
+        print(f"已把 {res['member']} 设为 {res['role']}" if res['ok']
+              else f"失败：{res['reason']}")
+        return 0 if res['ok'] else 1
+
+    if action == 'members':
+        for m in cs.members(db):
+            print(f"{m['id']}\t{m['role_label']}（{m['role']}）"
+                  f"\t{m.get('display_name') or ''}")
+        return 0
+
     if action == 'lock':
         if args.label:
-            res = cs.lock_range(db, args.label, args.user)
+            res = cs.lock_range(db, args.label, args.user, ttl=args.ttl)
+            if res.get('ok') is False:
+                print(f"失败：{res.get('reason') or '权限不足'}")
+                return 1
             print(f"已锁 {len(res['locked'])} 行"
                   + (f"，跳过 {len(res['skipped'])} 行（别人持有）"
                      if res['skipped'] else ''))
             return 0
-        res = cs.lock(db, args.line_id, args.user, note=args.note or '')
-        print('已上锁' if res['ok'] else f"失败：{res['reason']}")
+        res = cs.lock(db, args.line_id, args.user, note=args.note or '',
+                      ttl=args.ttl)
+        if res['ok']:
+            print(f"已上锁（租约到 {res.get('expires_at')}）")
+        else:
+            print(f"失败：{res['reason']}")
         return 0 if res['ok'] else 1
 
     if action == 'unlock':
@@ -819,18 +870,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
     sp.add_argument('action',
                     choices=['init', 'pull', 'push', 'status', 'lock',
-                             'unlock', 'approve', 'import-ir'])
+                             'unlock', 'renew', 'role', 'members',
+                             'approve', 'import-ir'])
     sp.add_argument('--db', default=None, help='数据库路径（默认 <项目>/collab.db）')
     sp.add_argument('--project', default='.', help='项目根目录')
     sp.add_argument('--asset-dir', default=None)
     sp.add_argument('--sheet', default=None, help='Excel 路径')
     sp.add_argument('--user', default='anonymous', help='你的成员 ID')
     sp.add_argument('--users', default='', help='init 时登记的成员，逗号分隔')
+    sp.add_argument('--owner', default='',
+                    help='init 时的所有者（默认第一个成员）')
     sp.add_argument('--line-id', dest='line_id', default='')
     sp.add_argument('--label', default='', help='lock 时按整章上锁')
     sp.add_argument('--status', default='in_review',
                     choices=['draft', 'in_review', 'approved'])
     sp.add_argument('--note', default='')
+    sp.add_argument('--member', default='', help='role 动作要改的成员 ID')
+    sp.add_argument('--role', default='editor',
+                    choices=['viewer', 'editor', 'owner'],
+                    help='role 动作的目标角色（默认 editor）')
+    sp.add_argument('--ttl', type=int, default=0,
+                    help='锁租约秒数（默认 900；低于 60 按 60）')
     sp.add_argument('--force', action='store_true', help='忽略锁/冲突强制写入')
     sp.set_defaults(func=_cmd_collab)
 

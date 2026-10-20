@@ -23,9 +23,9 @@
      注释不许翻倍、缩进不许漂移、`elif` 不许越展越乱。
   N3 **两路一致** —— 直接渲染的产物 `R1` 与"全量 Excel 往返"后的产物 `R2`
      **逐字节**相等。表这条路上任何一处丢字段，它都会红。
-  N4 **对拍器全绿** —— `nest_placement_conflicts()` 必须为空：结构列说的位置
-     与老推断（`_menu_member` / 条件 / 行号）摆的位置，**两套独立机制必须一致**。
-     这条比 N1 更狠：它抓的是"两边都自洽、但互相矛盾"。
+  N4 **结构位齐全** —— 有源行号的拍必须都带 `Nest`（结构位是唯一结构真源）。
+      ⚠ 2026-10-19 收口：对拍器（`nest_placement_conflicts`）已删，
+      不再有"老推断 vs 结构位"的第二套判断。
   N5 **注释不翻倍、不错位** —— 每条注释在产物里**至多一次**，且 `R2` 与 `R1`
      的注释**逐行同址**（不是"都还在"就算过）。
   N6 **产物自洽** —— 产物能被自己的解析器吃回去且 0 错、无可跨物理行的字符串。
@@ -82,8 +82,7 @@ from storygraph.core.nest_path import option_key, split_nest
 from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
 from storygraph.pipeline.compile import merge_incrementally
 from storygraph.story.beat_build import beats_from_parse_result
-from storygraph.story.beat_render import (nest_placement_conflicts,
-                                          render_beats_to_rpy)
+from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
@@ -426,11 +425,13 @@ def run_case(name: str, src: str, tmp: Path, verbose: bool) -> list:
     if not beats:
         return [('解析', '一张拍都没有')]
 
-    # N4 对拍器全绿
-    conflicts = nest_placement_conflicts(beats)
-    if conflicts:
-        bad.append(('N4对拍', f'{len(conflicts)} 处结构列与老推断不一致：'
-                              f'{conflicts[:3]}'))
+    # N4 结构位齐全（对拍器已删，只查"有源行号却不知道结构"）
+    missing = [b for b in beats
+               if getattr(b, 'nest_path', None) is None
+               and getattr(b, 'src_first', 0)]
+    if missing:
+        bad.append(('N4结构位', f'{len(missing)} 拍有源行号却没有 Nest：'
+                              f'{[(b.kind, b.label) for b in missing[:3]]}'))
 
     r1 = render_beats_to_rpy(beats)
     if _unterminated(r1):
@@ -556,9 +557,13 @@ def run_real(verbose: bool) -> list:
                 stat['nested_menu'] += 1
                 stat['nested_files'].add(p.name)
 
-        conf = nest_placement_conflicts(beats)
-        if conf:
-            bad.append((p.name, 'N4对拍', f'{len(conf)} 处：{conf[:2]}'))
+        missing = [b for b in beats
+                   if getattr(b, 'nest_path', None) is None
+                   and getattr(b, 'src_first', 0)]
+        if missing:
+            bad.append((p.name, 'N4结构位',
+                        f'{len(missing)} 拍有源行号却没有 Nest：'
+                        f'{[(b.kind, b.label) for b in missing[:2]]}'))
 
         notes = [b.inline_comment for b in beats
                  if getattr(b, 'inline_comment', '')]

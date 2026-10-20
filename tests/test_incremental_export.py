@@ -500,31 +500,33 @@ class TestO1AlignmentFixes:
         diff = self._changed_lines(fp.read_text(encoding='utf-8'), res.text)
         assert len(diff) == 1, [(i, res.text.splitlines()[i]) for i in diff]
 
-    def test_deleting_a_branch_body_does_not_move_the_other_line(self, write_rpy):
+    def test_deleting_the_only_body_of_a_branch_is_refused(self, write_rpy):
         """
-        删掉 `else` 体那一拍之后，`if` 体那句必须**还在自己的分支里**。
+        删掉 `else` 体唯一那一句 → 增量**不许删**（2026-10-19 修 P1-3）。
 
-        旧实现把它的行号配到了 `else` 那一行（对齐键不含条件，两个分支的旁白
-        长得一模一样，`difflib` 为了让后面的 `menu:` 对齐而配错了）→
-        台词**搬了个分支**还报成功（`TRICKY` 实测）。
+        删完之后是：
+
+            else:
+            <空行>
+            menu:
+
+        引擎读到这里就是 `expected statement.`（真实项目 `pomodorro.rpy`
+        第 232 行实测）。门禁会拦下整份产物 —— 但那时**表已经改了、
+        文件没改**，用户手里是两份对不上的东西。
+
+        现在在**计划阶段**就判"这刀不敢删"：`ok=False` → 调用方退回全量
+        重生成（产物有效、改动照样落地），并且原因里写明是哪一类不安全。
         """
-        from pathlib import Path
         fp, beats = _beats_of(write_rpy, TRICKY)
         beats = [b for b in beats if b.text != '好感不够']
         for b in beats:
-            b.src_first = b.src_last = 0          # 模拟从表里读回来
+            b.src_first = b.src_last = 0
         res = patch_export(beats, fp, render_beats_to_rpy(beats))
-        assert res.ok, res.reasons
-        assert '好感不够' not in res.text, res.text
-        lines = res.text.splitlines()
-        i_if = next(i for i, ln in enumerate(lines)
-                    if ln.strip() == 'if love >= 5:')
-        i_say = next(i for i, ln in enumerate(lines) if '好感够高' in ln)
-        i_else = next((i for i, ln in enumerate(lines)
-                       if ln.strip() == 'else:'), None)
-        # 台词必须紧跟在 `if` 之后、**在 `else` 之前**
-        assert i_say > i_if, lines
-        assert i_else is None or i_say < i_else, lines
+        assert res.dropped_beats >= 1, '删掉的拍没被检测出来'
+        assert res.removed_lines == 0, '不许真的删（会留下空块）'
+        assert not res.ok, '拒绝时必须 ok=False，让调用方退回全量'
+        assert any('删除不安全' in r for r in res.reasons), res.reasons
+        assert res.text == fp.read_text(encoding='utf-8'), '拒绝时一个字都不许动'
 
     def test_a_real_condition_change_is_not_silently_dropped(self, write_rpy):
         """
@@ -912,11 +914,14 @@ class TestFailSafe:
 
     def test_deleted_beat_is_reported(self, write_rpy):
         """
-        表里删掉一拍：**现在真的会删掉那几行**（2026-10-05 实现增量删行）。
+        表里删掉一拍：**能安全删的才删**，删不得的必须报出来（不许静默）。
 
-        以前这里断言"必须退回全量"——那是"不支持删行"时代的契约。
-        现在的契约是：删掉的行必须**真的从产物里消失**，而且其余部分
-        一个字节不动（下面的 `test_deleted_beat_keeps_everything_else`）。
+        2026-10-19 改（P1-3）：这里删的是 `else` 体唯一那一句 —— 删掉会
+        留下空块（引擎 `expected statement`）。所以现在的正确结果是
+        "检测到删了拍、但不敢动行 → `ok=False` + 退全量"，而不是从前那条
+        "真的删掉那一行"（那会写出坏脚本，只靠门禁在落盘前兜住）。
+        平整区里"真删"由 `test_deleting_a_flat_beat_does_not_move_the_other_lines`
+        守着。
         """
         fp, beats = _beats_of(write_rpy, TRICKY)
         beats = [b for b in beats if b.text != '好感不够']
@@ -925,9 +930,10 @@ class TestFailSafe:
         full = render_beats_to_rpy(beats)
         res = patch_export(beats, fp, full)
         assert res.dropped_beats >= 1, '删掉的拍没被检测出来'
-        assert res.removed_lines >= 1, '没有真的删行'
-        assert '好感不够' not in res.text, '删掉的台词还在产物里'
-        assert res.ok, f'删行被否掉：{res.reasons}'
+        assert res.removed_lines == 0, '这一刀不许真的删（会留下空块）'
+        assert any('删除不安全' in r for r in res.reasons), res.reasons
+        assert not res.ok, '拒绝时必须 ok=False（调用方据此退回全量）'
+        assert '好感不够' in res.text, '拒绝时一个字都不许动'
 
 
 class TestRangeRecovery:

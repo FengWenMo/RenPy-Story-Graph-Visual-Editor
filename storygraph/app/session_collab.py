@@ -58,7 +58,11 @@ class CollabMixin:
                        force=force, only=only)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'result': {}}
-        return {'ok': True, 'error': '', 'result': res or {}}
+        # push 在**权限拒绝**时会带 `ok=False`（正常冲突不带 ok）；
+        # 转发层不能把它吞成成功。
+        return {'ok': bool((res or {}).get('ok', True)),
+                'error': (res or {}).get('error', '') or '',
+                'result': res or {}}
 
     def collab_resolve(self, db_path, sheet_path, actor: str,
                        resolutions) -> dict:
@@ -70,11 +74,43 @@ class CollabMixin:
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'result': {}}
         return {'ok': True, 'error': '', 'result': res or {}}
-    def collab_init(self, db_path, users=()) -> dict:
-        """建库并登记成员（角色：文案 / 策划 / 程序）。"""
+    def collab_init(self, db_path, users=(), owner: str = '') -> dict:
+        """建库并登记成员（角色：只读 / 编辑 / 所有者）。"""
         from storygraph.collab.collab_store import init_db
         try:
-            path = init_db(Path(db_path), users=tuple(users or ()))
+            path = init_db(Path(db_path), users=tuple(users or ()),
+                           owner=owner)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'path': str(db_path)}
         return {'ok': True, 'error': '', 'path': str(path)}
+
+    def collab_members(self, db_path) -> dict:
+        """成员 + 角色（只读 / 编辑 / 所有者）。"""
+        from storygraph.collab.collab_store import members
+        try:
+            rows = members(Path(db_path))
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'members': []}
+        return {'ok': True, 'error': '', 'members': rows}
+
+    def collab_set_role(self, db_path, member: str, role: str,
+                        actor: str = '') -> dict:
+        """改成员角色（只有所有者能改；新库无所有者时允许第一次认领）。"""
+        from storygraph.collab.collab_store import set_role
+        try:
+            res = set_role(Path(db_path), member, role, actor=actor)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e)}
+        return {'ok': bool(res.get('ok')), 'error': res.get('reason', ''),
+                'result': res}
+
+    def collab_renew_lock(self, db_path, line_id: str, actor: str,
+                          ttl: int = 0) -> dict:
+        """续租一行锁（租约到点前续上，别人就还能被挡在外面）。"""
+        from storygraph.collab.collab_store import renew_lock
+        try:
+            res = renew_lock(Path(db_path), line_id, actor, ttl=ttl)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e)}
+        return {'ok': bool(res.get('ok')), 'error': res.get('reason', ''),
+                'result': res}

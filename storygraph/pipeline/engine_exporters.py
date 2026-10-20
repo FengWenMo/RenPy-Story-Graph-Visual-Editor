@@ -32,13 +32,156 @@ from contextlib import suppress
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.story.beat_model import split_hide_items, split_show_items
 from storygraph.story.stage_snapshot import stage_snapshots
 
-SCHEMA_VERSION = '1.0'
+SCHEMA_VERSION = '1.1'          # 1.1（2026-10-19）：+ structure / timeline
 
 
 #: `jump <name>` / `call <name>` —— 一行里可能有多跳（`call screen` 不算接线）。
 _JUMP_RE = re.compile(r'^\s*(jump|call)\s+([A-Za-z_]\w*)', re.M)
+
+
+def structure_of(beat) -> dict:
+    """
+    这一拍的**结构上下文**（给 Unity/Godot 重建 if / menu / loop 用）。
+
+    2026-10-19（跨引擎第一片）：此前只有 `nest` 一列字符串，别的引擎拿到
+    `menu:1>B` 不知道它是什么；这里补 `kind`（`if` / `menu` / `loop` /
+    `option`）与 `known`（`False` = 老表不知道，别拿它当"顶层"）。
+    """
+    path = getattr(beat, 'nest_path', None)
+    known = path is not None
+    text = str(path or '')
+    kind = ''
+    if text:
+        last = text.split('>')[-1]
+        if ':' in last:
+            kind = last.split(':', 1)[0]
+        elif last:
+            kind = 'option'              # 选项体的位置键（A/B/…）
+    elif getattr(beat, 'kind', '') == 'menu_option':
+        kind = 'option'
+    return {'path': text, 'kind': kind, 'known': bool(known)}
+
+
+def timeline_of(beat) -> list:
+    """
+    这一拍的**演出时间轴**：按作者写的顺序列出舞台/音频/转场操作。
+
+    为什么需要（跨引擎第一片）：Unity 侧只拿到 `scene` / `poses` / `bgm`
+    这类"最终值"不够 —— 它不知道 `show` 和 `hide` 谁先谁后、`with`
+    转场挂在哪一步。这里把 `Beat.op_tokens_full()`（与 Ren'Py 渲染器
+    同一条顺序真源）摊成扁平的 `[{op,target,…,order}]`。
+
+    认不出的操作**不丢**：没被任何 token 点到的字段会补在末尾；
+    `raw`/`code` 仍然原样留在 line 上，不在这里猜语义。
+    """
+    show_items = [i for i in split_show_items(getattr(beat, 'show', '')) if i]
+    hide_items = [i for i in split_hide_items(getattr(beat, 'hide', '')) if i]
+    scene = str(getattr(beat, 'scene', '') or '')
+    scene_at = str(getattr(beat, 'scene_at', '') or '')
+    with_ = str(getattr(beat, 'with_', '') or '')
+    at = str(getattr(beat, 'at', '') or '')
+    transform = str(getattr(beat, 'transform', '') or '')
+    events: list = []
+    emitted = set()
+
+    def push(op, target='', **extra):
+        item = {'op': str(op), 'target': str(target or ''),
+                'order': len(events)}
+        item.update({k: str(v or '') for k, v in extra.items()})
+        events.append(item)
+
+    def emit_show(idx=None):
+        items = ([show_items[idx]] if idx is not None
+                 and 0 <= idx < len(show_items) else show_items)
+        for it in items:
+            if not it or not str(it.get('image') or ''):
+                continue
+            key = ('show', str(it.get('image') or ''))
+            if key in emitted:
+                continue
+            emitted.add(key)
+            push('show', it.get('image'), at=it.get('at'),
+                 clause=it.get('clause'), transition=it.get('with'))
+
+    def emit_hide(idx=None):
+        items = ([hide_items[idx]] if idx is not None
+                 and 0 <= idx < len(hide_items) else hide_items)
+        for it in items:
+            if not it or not str(it.get('image') or ''):
+                continue
+            key = ('hide', str(it.get('image') or ''))
+            if key in emitted:
+                continue
+            emitted.add(key)
+            push('hide', it.get('image'), transition=it.get('with'))
+
+    # **顺序真源**：`op_tokens_full()` 与 Ren'Py 渲染器同源；拿不到就按字段补。
+    tokens = []
+    try:
+        tokens = list(beat.op_tokens_full() or ())
+    except Exception as e:                    # noqa: BLE001 - 手工构造的拍可能没有
+        swallow('pipeline.engine_exporters.timeline_tokens', e)
+    for verb, idx in tokens:
+        if verb == 'scene' and scene and ('scene', scene) not in emitted:
+            emitted.add(('scene', scene))
+            push('scene', scene, at=scene_at)
+        elif verb == 'show':
+            emit_show(idx)
+        elif verb == 'hide':
+            emit_hide(idx)
+        elif verb == 'with' and with_ and ('with', with_) not in emitted:
+            emitted.add(('with', with_))
+            push('with', with_)
+        elif verb in ('music', 'sound', 'audio'):
+            action = (getattr(beat, 'music_action', '') if verb == 'music'
+                      else getattr(beat, 'sound_action', ''))
+            target = (getattr(beat, 'music', '') if verb == 'music'
+                      else getattr(beat, 'sound', ''))
+            params = (getattr(beat, 'music_params', '') if verb == 'music'
+                      else getattr(beat, 'sound_params', ''))
+            if target and (verb, target) not in emitted:
+                emitted.add((verb, target))
+                push(verb, target, action=action, params=params)
+        elif verb == 'voice':
+            voice = str(getattr(beat, 'voice', '') or '')
+            if voice and ('voice', voice) not in emitted:
+                emitted.add(('voice', voice))
+                push('voice', voice)
+
+    # —— 补齐：有内容却没被 token 点到的操作（绝不因为顺序不全就丢）——
+    if scene and ('scene', scene) not in emitted:
+        push('scene', scene, at=scene_at)
+    for it in show_items:
+        if it and it.get('image'):
+            key = ('show', str(it.get('image')))
+            if key not in emitted:
+                emit_show(show_items.index(it))
+    for it in hide_items:
+        if it and it.get('image'):
+            key = ('hide', str(it.get('image')))
+            if key not in emitted:
+                emit_hide(hide_items.index(it))
+    if with_ and ('with', with_) not in emitted:
+        push('with', with_)
+    music = str(getattr(beat, 'music', '') or '')
+    if music and ('music', music) not in emitted:
+        push('music', music, action=getattr(beat, 'music_action', ''),
+             params=getattr(beat, 'music_params', ''))
+    sound = str(getattr(beat, 'sound', '') or '')
+    if sound and ('sound', sound) not in emitted:
+        push('sound', sound, action=getattr(beat, 'sound_action', ''),
+             params=getattr(beat, 'sound_params', ''))
+    voice = str(getattr(beat, 'voice', '') or '')
+    if voice and ('voice', voice) not in emitted:
+        push('voice', voice)
+    if at:
+        push('at', at)
+    if transform:
+        push('transform', transform)
+    return events
 
 
 def jump_targets_of(beat) -> list:
@@ -74,12 +217,15 @@ def build_neutral_ir(beats, registry=None, project: str = '',
 
     结构：
       {
-        "schema": "renpy-story-ir/1.0",
+        "schema": "renpy-story-ir/1.1",
         "project": "...", "title": "...",
         "characters": [{"id","name","color","image_tag","voice_tag"}...],
         "lines": [ {line_id,label,seq,kind,speaker,speaker_name,text,
                     condition,scene,actors[],music,music_action,
                     sound,sound_action,voice,comment,raw,code,
+                    structure:{path,kind,known},
+                    timeline:[{op,target,at,clause,transition,action,
+                               params,order}...],
                     source:{file,line}} ... ],
         "assets": {"images":[{id,path,tag,category}...], "music":[...], ...},
         "stage": [ {line_id,scene,actors,music} ... ],
@@ -143,6 +289,10 @@ def build_neutral_ir(beats, registry=None, project: str = '',
             # 前者让别的引擎能重建菜单/条件树，后者让剧情图接得上
             # （2026-10-08 修，见 `jump_targets_of`）。
             'nest': getattr(b, 'nest_path', None) or '',
+            # 跨引擎第一片（2026-10-19）：结构上下文 + 演出时间轴。
+            # `structure.known=False` = 老表不知道这一拍在哪，别当顶层。
+            'structure': structure_of(b),
+            'timeline': timeline_of(b),
             'targets': jump_targets_of(b),
             'line_hash': getattr(b, 'content_hash', '') or '',
         })
@@ -171,6 +321,8 @@ def build_neutral_ir(beats, registry=None, project: str = '',
 def _asset_manifest(registry) -> dict:
     if registry is None:
         return {}
+    from storygraph.assets.asset_dimensions import dimensions_of_row
+    from storygraph.core.safeguard import swallow
     out = {}
     for attr, kind in (('images', 'image'), ('music', 'music'),
                        ('sounds', 'sound'), ('voices', 'voice'),
@@ -182,6 +334,41 @@ def _asset_manifest(registry) -> dict:
             for key in ('Path', 'Tag', 'Category', 'Loop', 'Volume'):
                 if row.get(key) not in (None, ''):
                     entry[key.lower()] = row[key]
+            if kind == 'image':
+                # **结构化维度**（2026-10-19）：`{outfit: base_swimsuit,
+                # expressions: happy}`。别的引擎要的是"这一维选了什么"，
+                # 不是一串只能靠猜词边界的属性名。
+                # 认不出维度的词放 `attribute_values`，**一个都不丢**。
+                try:
+                    dims = row.get('_dims') or dimensions_of_row(row)
+                except Exception as e:            # noqa: BLE001
+                    swallow('pipeline.engine_exporters.dimensions', e)
+                    dims = []
+                grouped: dict = {}
+                loose: list = []
+                for d in (dims or ()):
+                    group = str((d or {}).get('group') or '')
+                    value = str((d or {}).get('value') or '')
+                    if not value:
+                        continue
+                    if group:
+                        # 一个维度只该有一个值；若表里写了两个（W115 的
+                        # 现场），**第一个进结构化字段，其余进 loose** ——
+                        # 绝不静默丢词。
+                        if group not in grouped:
+                            grouped[group] = value
+                        elif value not in loose:
+                            loose.append(value)
+                    elif value not in loose:
+                        loose.append(value)
+                if grouped:
+                    entry['attributes'] = grouped
+                if loose:
+                    entry['attribute_values'] = loose
+                if row.get('Group') not in (None, ''):
+                    entry['group'] = row['Group']
+                if row.get('Value') not in (None, ''):
+                    entry['value'] = row['Value']
             if row.get('Doc'):
                 entry['doc'] = row['Doc']
             rows.append(entry)
@@ -224,6 +411,14 @@ def to_unity(ir: dict) -> dict:
             'sfxAction': l['sound_action'],
             'voice': l['voice'],
             'nest': l.get('nest', ''),
+            # 结构上下文 + 演出时间轴（2026-10-19，跨引擎第一片）。
+            # 刻意**摊平**：`structure` 拆成三个标量，`timeline` 是
+            # 扁平对象数组（JsonUtility 能反序列化；不要嵌套字典）。
+            'structurePath': (l.get('structure') or {}).get('path', ''),
+            'structureKind': (l.get('structure') or {}).get('kind', ''),
+            'structureKnown': bool((l.get('structure') or {}).get('known')),
+            'timeline': list(l.get('timeline') or []),
+            'transition': l.get('with', ''),
             'targets': list(l.get('targets') or []),
             'lineHash': l['line_hash'],
         } for l in ir.get('lines', [])],
@@ -266,6 +461,9 @@ def to_godot(ir: dict) -> dict:
             'text': l['text'],
             'condition': l['condition'],
             'nest': l.get('nest', ''),
+            'structure': l.get('structure') or {},
+            'timeline': list(l.get('timeline') or []),
+            'transition': l.get('with', ''),
             'targets': list(l.get('targets') or []),
             'stage': {
                 'background': l['scene'],
@@ -540,7 +738,8 @@ def _unity_notes(ir: dict) -> str:
 
 产物：
 - `UnityDialogueData.json` —— 用 `JsonUtility.FromJson<DialogueData>(text)` 直接读。
-  字段全部是标量或 `string[]`，没有嵌套字典（JsonUtility 不支持）。
+  字段是标量、`string[]` 或 `TimelineEvent[]`；**没有嵌套字典**
+  （JsonUtility 不支持 Dictionary）。
 - `story_ir.json` —— 引擎中立 IR（更完整，含 stage 快照与资源清单），
   需要自定义解析时用它。
 
@@ -550,12 +749,19 @@ def _unity_notes(ir: dict) -> str:
 ## 建议的 C# 结构
 
 ```csharp
+[Serializable] public class TimelineEvent {{
+    public string op, target, at, clause, transition, action, params;
+    public int order;               // 同一条 line 内按它排序
+}}
 [Serializable] public class DialogueLine {{
     public string lineId, label, kind, speakerId, speakerName, text,
                   condition, background, bgm, bgmAction, sfx, sfxAction,
-                  voice, lineHash;
+                  voice, transition, lineHash,
+                  structurePath, structureKind;
+    public bool structureKnown;     // false = 老表不知道，别当"顶层"
     public int seq;
-    public string[] poses;
+    public string[] poses, targets;
+    public TimelineEvent[] timeline;
 }}
 [Serializable] public class DialogueCharacter {{
     public string id, displayName, color, imageTag, voiceTag;
@@ -570,6 +776,19 @@ def _unity_notes(ir: dict) -> str:
     public DialogueAsset[] assets;
 }}
 ```
+
+## 演出时间轴（2026-10-19 第一片）
+
+- `timeline[]` 是**作者写的顺序**：`op` 可能是
+  `scene` / `show` / `hide` / `with` / `music` / `sound` / `voice` / `at` /
+  `transform`；`order` 从 0 递增，同一行内按它排序。
+- `show` 的 `target` 是图像名（`eileen happy`），`at` 是位置/变换，
+  `transition` 挂在操作上；`music` / `sound` 的 `action` 是
+  `play` / `queue` / `stop`，`params` 是原样参数串。
+- `structurePath` 是块路径（`menu:1>B`），`structureKind` 是
+  `if` / `menu` / `loop` / `option`；**只有 `structureKnown=true` 才可信**。
+- `condition` 是累积条件；`targets` 是 `jump` / `call` 的接线。
+- 这一片**不是播放器**：条件求值、菜单 UI、立绘合成仍由 Unity 侧实现。
 
 ## 两点约定
 

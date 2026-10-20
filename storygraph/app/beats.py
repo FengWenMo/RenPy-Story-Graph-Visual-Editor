@@ -1715,7 +1715,25 @@ def expression_groups_for(tag: str, symbols, groups, facts=None) -> list:
 
     from storygraph.authoring.spec_groups import group_values
     if not groups or symbols is None:
-        return []
+        # 没有项目声明时，资源表里的结构化维度仍然可用（2026-10-19）。
+        # 它比"平铺候选"多一件事：下拉能按维度分栏（服装 / 表情），
+        # 而且不要求项目采过引擎事实。
+        dims = {}
+        try:
+            dims = symbols.dimension_groups_of_tag(tag)
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.beats.expression_groups_for.dims', e)
+        out = []
+        for group, attrs in (dims or {}).items():
+            vals = []
+            for attr in attrs:
+                shown = (_expression_display(attr, str(tag), probe, symbols)
+                         if symbols is not None else '') or attr
+                if shown and shown not in vals:
+                    vals.append(shown)
+            if vals:
+                out.append({'group': group, 'label': group, 'values': vals})
+        return out
     try:
         attrs = [str(a or '').strip() for a in symbols.attrs_of_tag(tag)]
     except Exception as e:                        # noqa: BLE001
@@ -1841,6 +1859,22 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
                               for k, v in buckets.items() if v]
         except Exception as e:                    # noqa: BLE001
             swallow('app.beats.attr_slot_rows.layers', e)
+            group_rows = []
+    if not group_rows and symbols is not None:
+        # 第四档（2026-10-19）：**资源表自带的结构化维度**。
+        # 没有引擎事实、也读不到 `layeredimage` 的项目，`Group`/`Value`
+        # 列就是唯一结构来源 —— 一维一格不再依赖"引擎采过没有"。
+        # 只在 **≥2 个维度**时接管：一个维度的老项目继续走单格老路，
+        # 一个字节不变（通用性底线）。
+        try:
+            dims = symbols.dimension_groups_of_tag(tag)
+            if len([g for g in dims if g]) >= 2:
+                group_rows = [{'group': k,
+                               'label': overlay.get(k) or k,
+                               'values': list(v)}
+                              for k, v in dims.items() if k and v]
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.beats.attr_slot_rows.dims', e)
             group_rows = []
     if not group_rows and groups:
         # 第三档：**项目自己声明的分栏**（`rules.json` 的 `attr_groups`）。

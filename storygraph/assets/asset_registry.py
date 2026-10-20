@@ -711,12 +711,14 @@ def _sync_append_stage(root, table_dir, assets, unreg, diff, walk, added):
 
 def _sync_report(*, table_dir, registry, diff, repaired, repair_error,
                  removed_by_kind=None, relinked_by_kind=None,
-                 deduped_by_kind=None, added_by_kind=None, backup: str = ''):
+                 deduped_by_kind=None, added_by_kind=None, backup: str = '',
+                 dimensions=None):
     """带"删/改指/合并/补登"四项统计的返回体（原先两处各写一遍）。"""
     removed_by_kind = removed_by_kind or {}
     relinked_by_kind = relinked_by_kind or {}
     deduped_by_kind = deduped_by_kind or {}
     added_by_kind = added_by_kind or {}
+    dimensions = dimensions or {}
     return {'ok': True, 'created': '', 'table_dir': str(table_dir),
             'added': sum(added_by_kind.values()), 'by_kind': added_by_kind,
             'removed': sum(removed_by_kind.values()),
@@ -726,6 +728,9 @@ def _sync_report(*, table_dir, registry, diff, repaired, repair_error,
             'deduped': sum(deduped_by_kind.values()),
             'deduped_by_kind': deduped_by_kind,
             'backup': backup,
+            # 维度结构化回填：`{'filled','columns_added','saved'}`。
+            # 新列只追加在末尾，老列/人的值不动（见 backfill_dimension_columns）。
+            'dimensions': dimensions,
             'unusable': _unusable_summary(registry),
             'scanned': (diff or {}).get('disk') or {},
             'reconcile': diff or {}, 'repaired': repaired,
@@ -802,6 +807,13 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     # ⚠ **磁盘只扫一次**，对账和补登共用（原先各扫一次：真实项目 2 × 0.2 秒
     # 是小事，但它们各自还会再走一遍索引里的 5854 个文件）。
     assets = scan_assets(root, include_ui=True, walk=walk)
+    # 新补登的行也要带维度：否则它们在表里是"Value=整串文件名、Group 空"，
+    # 要等下一次打开才被 `parse_asset_tables` 补上。
+    try:
+        from storygraph.assets.asset_dimensions import enrich_image_rows
+        enrich_image_rows(assets.get('images') or [], project_root=root)
+    except Exception as e:                      # noqa: BLE001
+        swallow('assets.asset_registry.sync.enrich', e)
     diff = (compare_registry_to_disk(root, registry, walk=walk, assets=assets)
             if registry is not None else {})
     unreg = (diff or {}).get('unregistered') or {}
@@ -862,6 +874,13 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     else:
         deduped_by_kind = {}
 
+    # —— ❹ 维度结构化回填 ——
+    # 只填空白的 `Group` / `Value`（新列追加在末尾），写前备份。
+    # 放在删/改指/合并之后：那几步会换掉 registry 的行，回填要用最新的。
+    dimensions = {}
+    if registry is not None:
+        dimensions = backfill_dimension_columns(table_dir, registry.images)
+
     if not auto_append or not unreg:
         baks = sorted({p.name for p in table_dir.glob('*.bak.xlsx')}
                       & {Path(_STANDARD_TABLES[k]).stem + '.bak.xlsx'
@@ -872,6 +891,7 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                             removed_by_kind=removed_by_kind,
                             relinked_by_kind=relinked_by_kind,
                             deduped_by_kind=deduped_by_kind,
+                            dimensions=dimensions,
                             backup='、'.join(baks))
 
     # （`assets` 已经在上面扫过一次了，这里直接用 —— 别再扫第二遍。）
@@ -888,6 +908,7 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                         relinked_by_kind=relinked_by_kind,
                         deduped_by_kind=deduped_by_kind,
                         added_by_kind=added_by_kind,
+                        dimensions=dimensions,
                         backup='、'.join(sorted(set(backups))))
 
 
@@ -969,6 +990,91 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
         swallow('assets.asset_registry.update_table_paths', e)
         return 0
     return changed
+
+
+def backfill_dimension_columns(asset_dir, rows, backup: bool = True) -> dict:
+    """
+    把**已经算出来的维度**写回 `images.xlsx` 的 `Group` / `Value` 列。
+
+    只填**空白格**：人写过的 `Group` / `Value`、`Attributes`、其它列
+    一个字节都不动；写前照旧 `*.bak.xlsx`。
+
+    为什么需要它（2026-10-19）：老表的 `Attributes` 是整串文件名，
+    维度只在内存里算出来。不写回表，下一次打开又得重算，而且"表里还是
+    一坨"这个用户可见的问题没有解决。新列追加在**末尾**，老列位置不变
+    （按列号取 Notes 的既有代码不受影响）。
+
+    返回 `{'ok', 'filled', 'columns_added', 'saved', 'error'}`。
+    """
+    path = Path(asset_dir) / 'images.xlsx'
+    if not path.is_file():
+        return {'ok': False, 'filled': 0, 'columns_added': [], 'saved': False,
+                'error': f'没有 {path.name}'}
+    by_id = ({str(k): v for k, v in (rows or {}).items()}
+             if isinstance(rows, dict) else
+             {str((r or {}).get('ID') or ''): r for r in (rows or ())})
+    changed = 0
+    added = []
+    try:
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb.active
+            headers = _sheet_headers(ws)
+            if 'ID' not in headers:
+                return {'ok': False, 'filled': 0, 'columns_added': [],
+                        'saved': False, 'error': '表里没有 ID 列'}
+            id_col = headers.index('ID') + 1
+            group_col = (headers.index('Group') + 1
+                         if 'Group' in headers else None)
+            value_col = (headers.index('Value') + 1
+                         if 'Value' in headers else None)
+            if group_col is None:
+                group_col = ws.max_column + 1
+                ws.cell(row=1, column=group_col,
+                        value=ASSET_FIELD_LABELS.get('Group', 'Group'))
+                added.append('Group')
+            if value_col is None:
+                value_col = ws.max_column + 1
+                ws.cell(row=1, column=value_col,
+                        value=ASSET_FIELD_LABELS.get('Value', 'Value'))
+                added.append('Value')
+            if not added and not any(
+                    row.get('Group') or row.get('Value')
+                    for row in by_id.values() if isinstance(row, dict)):
+                # 没有新列、也没有可填的值：一个字节都不写（不制造无意义备份）
+                return {'ok': True, 'filled': 0, 'columns_added': [],
+                        'saved': False, 'error': ''}
+            from storygraph.assets.asset_dimensions import dimensions_of_row
+            for r in range(2, ws.max_row + 1):
+                aid = ws.cell(row=r, column=id_col).value
+                row = by_id.get(str(aid or ''))
+                if not isinstance(row, dict):
+                    continue
+                dims = row.get('_dims') or dimensions_of_row(row)
+                if len(dims) != 1:
+                    continue                       # 一行多属性：一格放不下
+                group = str((dims[0] or {}).get('group') or '')
+                value = str((dims[0] or {}).get('value') or '')
+                if group and not str(
+                        ws.cell(row=r, column=group_col).value or '').strip():
+                    set_text(ws, r, group_col, group)
+                    changed += 1
+                if value and not str(
+                        ws.cell(row=r, column=value_col).value or '').strip():
+                    set_text(ws, r, value_col, value)
+                    changed += 1
+            if changed or added:
+                if backup:
+                    _backup_table(path)
+                wb.save(path)
+        finally:
+            wb.close()
+    except Exception as e:                      # noqa: BLE001 - 写不动就当没写
+        swallow('assets.asset_registry.backfill_dimension_columns', e)
+        return {'ok': False, 'filled': changed, 'columns_added': added,
+                'saved': False, 'error': f'{type(e).__name__}: {e}'}
+    return {'ok': True, 'filled': changed, 'columns_added': added,
+            'saved': bool(changed or added), 'error': ''}
 
 
 def delete_rows_from_table(asset_dir, table_key: str, paths,
@@ -1221,7 +1327,14 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
                 swallow('assets.asset_registry.ensure_asset_tables.parse', e)
             repaired = _quarantine_broken_tables(found, parse_error)
             target = Path(found)
-            assets = scan_assets(root, include_ui=include_ui, walk=walk)
+            from storygraph.assets.asset_dimensions import (
+                enrich_image_rows, load_layer_model, load_project_facts)
+            facts = load_project_facts(root)
+            model = load_layer_model(root)
+            assets = scan_assets(root, include_ui=include_ui, walk=walk,
+                                 facts=facts, layer_model=model)
+            enrich_image_rows(assets.get('images') or [], facts=facts,
+                              layer_model=model, load_project_context=False)
             write_asset_excel(assets, target, split_by_category=False)
             extra = (_write_script_tables(root, target) if with_scripts
                      else {'characters': 0, 'transforms': 0})
@@ -1244,6 +1357,12 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
         else:
             target = root / 'asset_tables'
         assets = scan_assets(root, include_ui=include_ui)
+        from storygraph.assets.asset_dimensions import (
+            enrich_image_rows, load_layer_model, load_project_facts)
+        facts = load_project_facts(root)
+        model = load_layer_model(root)
+        enrich_image_rows(assets.get('images') or [], facts=facts,
+                          layer_model=model, load_project_context=False)
         write_asset_excel(assets, target, split_by_category=False)
         # 角色 / 变换只能从**脚本声明**里来（`scan_assets` 扫的是文件）
         extra = (_write_script_tables(root, target) if with_scripts
@@ -1297,7 +1416,8 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
                     existing, a, ['Path', 'Tag', 'Attributes', 'Category'])
             write_dict_to_excel(
                 file_path, new_data,
-                ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'])
+                ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes',
+                 'Group', 'Value'])
     else:
         file_path = output_dir / 'images.xlsx'
         existing = {r['ID']: r for r in read_excel_rows(file_path) if r.get('ID')}
@@ -1307,7 +1427,8 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
                 existing, a, ['Path', 'Tag', 'Attributes', 'Category'])
         write_dict_to_excel(
             file_path, new_data,
-            ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes'])
+            ['ID', 'Path', 'Tag', 'Attributes', 'Category', 'Notes',
+             'Group', 'Value'])
 
     # ---------- 音乐 ----------
     music_file = output_dir / 'music.xlsx'
@@ -1536,8 +1657,15 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
             #      按"模板顺序重排"等于替用户改表 —— 判据当场红
             #      （`test_it_never_overwrites_a_hand_edited_row` 按列号找回那一行）。
             #   ③ 也用不着 `insert_cols` 那种重家伙：追加到末尾最安全。
+            # ⚠ **内部键（下划线开头）永远不写进表**（2026-10-19 修）：
+            # 扫描行现在带 `_dims` / `_attrs` / `_dim_groups` 等运行期字段，
+            # 从前这里"看到新键就补列"，于是 `_dims` 被当表头、值
+            # `[{'group':…}]` 被写进单元格 → openpyxl 直接抛
+            # "Cannot convert ... to Excel"，整次补登失败。
             for key in rows[0].keys():
-                if key and key not in headers:
+                if not key or str(key).startswith('_'):
+                    continue
+                if key not in headers:
                     headers.append(key)
                     ws.cell(row=1, column=len(headers), value=key)
             row_of = {}
@@ -1596,7 +1724,8 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
         else:
             wb = openpyxl.Workbook()
             ws = wb.active
-            headers = list(rows[0].keys())
+            headers = [k for k in rows[0].keys()
+                       if k and not str(k).startswith('_')]
             ws.append(headers)
             seen = set(skip_paths or ())
             for row in rows:
@@ -1774,6 +1903,17 @@ def parse_asset_tables(asset_dir, hooks=None, project_root=None,
             post_hook(registry)
         except Exception as e:
             registry.warnings.append(f"post_process_registry 钩子异常 {e}")
+
+    # ---------- 维度结构化（2026-10-19） ----------
+    # 把一行图片的 `Attributes` 展开成 `{维度: 属性}`：引擎事实优先，
+    # 项目 `layeredimage` 兜底；认不出就留空，**不猜**。
+    # 结果挂在行上（`_dims` / `_attrs` / `_dim_groups`），并填空白的
+    # `Group` / `Value`（只填空白，不覆盖人写过的值）。
+    try:
+        from storygraph.assets.asset_dimensions import enrich_image_rows
+        enrich_image_rows(registry.images, project_root=project_root)
+    except Exception as e:                      # noqa: BLE001 - 规则坏了不该读不出表
+        registry.warnings.append(f'维度结构化失败：{type(e).__name__}: {e}')
 
     validate_registry(registry, project_root, walk=walk)
     # 记住来路：资源图库要按 Path 去磁盘上取缩略图，得知道基准目录。
@@ -2022,12 +2162,18 @@ def image_aliases(aid: str, row: dict) -> set:
 
     tag = _normalize_spec(row.get('Tag'))
     attrs = _normalize_spec(row.get('Attributes'))
+    value = _normalize_spec(row.get('Value'))
     name = _normalize_spec(row.get('Name'))
 
     if tag:
         out.add(tag)
     if attrs:
         out.add(attrs)
+    # 结构化列 `Value`：老表没有它（None/空），这里对老表零影响；
+    # 新表里它是"去掉 tag 前缀后的真属性"，`eileen_happy` 也能靠
+    # `tag + value` 解析回来（`_normalize_spec` 把下划线归一成空格）。
+    if value:
+        out.add(value)
     if name:
         out.add(name)
     if tag and attrs:
@@ -2035,6 +2181,8 @@ def image_aliases(aid: str, row: dict) -> set:
         # Attributes 自带 tag 前缀时（eileen_happy），再去掉一层前缀
         if attrs.startswith(tag + ' '):
             out.add(attrs[len(tag) + 1:])
+    if tag and value:
+        out.add(f'{tag} {value}')
     return {a for a in out if a}
 
 
@@ -2495,6 +2643,14 @@ def describe_asset(asset_type: str, row: dict) -> str:
             parts.append(category_labels.get(g('Category'), g('Category')))
         if g('Tag'):
             parts.append(f"tag={g('Tag')}")
+        # **维度化说明**（2026-10-19）：`outfit=base_swimsuit；expressions=happy`
+        # 比一整串属性更能让人确认"这是哪一维的图"。
+        dims = row.get('_dims') or []
+        if dims:
+            from storygraph.assets.asset_dimensions import format_dimensions
+            shown = format_dimensions(dims)
+            if shown:
+                parts.append(f'维度 {shown}')
         if g('Attributes'):
             parts.append(f"属性={g('Attributes')}")
         if g('Path'):

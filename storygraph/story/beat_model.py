@@ -551,6 +551,34 @@ ACTION_HINTS = {
             'menu_option=菜单选项 / extend=接着上一句',
 }
 
+#: 读表时 `类型` 列**认得**的值（渲染器真的会分派的那几种）。
+#:
+#: 为什么要有白名单（2026-10-19，修 P1-2）：`类型` 填「旁白」这种中文
+#: 不会报错 —— 渲染器一个分支都不命中，那一拍的内容**悄悄不落地**，
+#: 报告只说"改动 0 行"。表里写着一个值、产物里是另一回事，中间没有任何
+#: 信号。这里只做**发现与点名**，绝不替用户翻译（认不出的就是认不出）。
+KNOWN_BEAT_KINDS = frozenset(ACTION_COLUMNS['Kind']) | frozenset({
+    'raw', 'code', 'opaque', 'blank', 'python', 'loop', 'notes',
+    'scene', 'show', 'hide', 'with', 'audio', 'music', 'sound', 'voice',
+})
+
+
+def unknown_kinds(beats) -> list:
+    """
+    表里 `类型` 列那些**工具不认**的值 → `[(行号, 原值), …]`。
+
+    空值不算（那是"没填"，由内容列自己决定渲染成什么）。
+
+    ⚠ 读**原值**（`kind_raw`）而不是 `Beat.kind`：后者已经被收成 `say` 了
+    （见 `Beat.kind_raw` 的说明）—— 拿它判永远"合法"。
+    """
+    out = []
+    for b in beats or ():
+        raw = str(getattr(b, 'kind_raw', '') or '').strip()
+        if raw and raw not in KNOWN_BEAT_KINDS:
+            out.append((getattr(b, 'line_id', '') or '', raw))
+    return out
+
 
 KIND_SAY = 'say'
 
@@ -788,6 +816,13 @@ class Beat:
     #: 它是**运行时元数据**：不入表、不进 ContentHash（与 `src_first` 同类），
     #: 所以 `to_row` 不收它 —— 收进去反而会让表里多出一列无人维护的仓库。
     sanitized_cells: list = field(default_factory=list)
+    #: 读表时 `类型` 列的**原值**（2026-10-19，修 P1-2）。
+    #:
+    #: `Beat.kind` 对不认识的值一律收成 `say` —— 于是「类型=旁白」这种错值
+    #: 既不报错也不落地，报告只说"改动 0 行"。这里把原文记下来，
+    #: `compile_beats` 用 `unknown_kinds` 点名。运行时元数据：不入表、
+    #: 不进指纹、不进协作库（它不是内容，是输入里的错）。
+    kind_raw: str = ''
     #: **导入期的自动处置留痕**（运行时元数据，不入表/不进指纹）。
     #:
     #: 目前唯一的生产者：Excel 导入发现"行顺序与 `Seq` 不一致"时按 Seq
@@ -1268,6 +1303,7 @@ class Beat:
             seq = 0
 
         kind = g('Kind') or KIND_SAY
+        kind_raw = g('Kind')
         if kind not in (KIND_SAY, KIND_NARRATION, KIND_MENU,
                         KIND_MENU_OPTION, KIND_EXTEND):
             kind = KIND_SAY
@@ -1291,6 +1327,7 @@ class Beat:
             text=g_text('Text'),
             code=g('CodeBlock') or g('Raw'),
             voice=g('Voice'),
+            kind_raw=kind_raw,
         )
         # CodeBlock 单元格里 raw 与 code 是混着写的（一个格子装两样）。
         # 读回来时按"看起来像不像一条 Ren'Py 语句"重新分类，并把交错顺序

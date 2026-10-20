@@ -213,6 +213,15 @@ INTERNAL_SPECS = (
     FieldSpec('RuntimeNotes', 'runtime_notes', collab=False,
               snapshot=False, fingerprint=False,
               note='导入时的自动处置留痕，由 validate 报 W203。'),
+    #: **`类型` 列的原始写法**（2026-10-19，修 P1-2）。
+    #:
+    #: `Beat.kind` 会把不认识的值**收成 `say`**（渲染器得有东西可走），
+    #: 于是「类型=旁白」这种错值从此无声无息：产物看起来"一个字没改"，
+    #: 报告只说"改动 0 行"。这里把原文留着，只为**点名**——
+    #: 不入表、不进快照/指纹、不进协作库：它不是内容，是输入里的错。
+    FieldSpec('KindRaw', 'kind_raw', collab=False,
+              snapshot=False, fingerprint=False,
+              note='读表时 `类型` 列的原值；工具不认时由报告点名。'),
 )
 
 

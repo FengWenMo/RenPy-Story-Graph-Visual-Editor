@@ -84,8 +84,8 @@ WRITERS = {
     'pipeline/statement_probe.py::_inject_evidence':
         '往**副本**的某个 label 末尾注入一句证据（第三层行为验证用：证明那段真的执行了）。'
         '⚠ 只改副本 —— 调用方 `verify_head` 保证先 copytree，真项目一个字节都不动',
-    'pipeline/engine_lint.py::lint_text':
-        '写**一次性临时工程**（`game/script.rpy` = 待检文本 + 空 options.rpy），'
+    'pipeline/engine_lint.py::_lint_once':
+        '写**一次性临时工程**（`game/script.rpy` = 待检文本 + 空 options.rpy + 可选的 define 骨架），'
         '只为了让 SDK `lint` 读它一遍；`TemporaryDirectory` 退出即整目录删除。'
         '⚠ 不是产物、不进用户项目、不覆盖任何东西 —— 刻意不过 generation_guard'
         '（这道闸门本身就是"产物能不能被引擎读"的判据，让它再去过一遍门禁会成环）',

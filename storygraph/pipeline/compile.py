@@ -76,6 +76,11 @@ class CompileResult:
     #: `validate` 的 W114 兜；但"直接导出、从不体检"的人（`cli.py compile`
     #: / 编辑器导出）也得看见，所以这里再报一次。
     sanitized_cells: int = 0
+    #: **这一次一个字节都没改**（增量结果与源文逐字节相同）→ 文件没有被触碰
+    #: （2026-10-19，修 P1-1："零改动往返"从前会被插入 2 行生成标记）。
+    untouched: bool = False
+    #: 读表时 `类型` 列填了工具不认的值（行号 + 原值）—— 见 `invalid_kinds`。
+    invalid_kinds: list = field(default_factory=list)
 
     @property
     def todo_count(self) -> int:
@@ -96,11 +101,23 @@ class CompileResult:
             text += ('\n读表时 %d 个单元格里有换行/制表符，已按「一行一个值」'
                      '压成空格（**值被改过**，核对一下；体检里是 W114）'
                      % self.sanitized_cells)
-        if self.used_patch:
+        if self.invalid_kinds:
+            # `类型` 填了工具不认的值 → 那一拍渲染不出来（内容会悄悄不落地）。
+            # 点名到行，并把人话的几条合法值写出来 —— 从前只报"改动 0 行"。
+            sample = '、'.join(f'[{lid or "?"}]「{k}」'
+                              for lid, k in self.invalid_kinds[:3])
+            text += (f'\n**类型列有 {len(self.invalid_kinds)} 行填了工具不认的值**'
+                     f'（{sample}'
+                     + ('…' if len(self.invalid_kinds) > 3 else '')
+                     + '）：这些行不会渲染，请改成 say / narration / menu / '
+                       'menu_option / extend（旁白请留空或写 narration）')
+        if self.untouched:
+            text += '\n这一份与源文件逐字节相同：**文件没有被改动**（0 行改动）'
+        if self.used_patch and not self.untouched:
             text += (f"\n增量补丁：只改了 {self.changed_lines} 行，"
                      f"原文其余部分（含 default / init python / transform）"
                      f"逐字节保留")
-        elif self.patch_attempted:
+        elif self.patch_attempted and not self.used_patch:
             text += f"\n增量未采用（{self.patch_note}）"
         if self.guard_issues:
             text += (f"\n生成门禁：{len(self.guard_issues)} 条致命问题，"
@@ -108,6 +125,10 @@ class CompileResult:
             if self.review_path:
                 text += (f"（已留 {getattr(self.review_path, 'name', '')} "
                          f"供对照）")
+            # 表改了、文件没改 —— 两句都要说（2026-10-19，P1-3）
+            text += ('\n源文件仍然是导出前的样子：表里的这次改动**没有生效**。'
+                     '改好表里对应的行再导一次即可；想回到原样，把那次改动'
+                     '撤销（改回原值）再导一次。')
         for w in self.guard_warnings:
             text += f"\n{w.format()}"
         return text
@@ -241,11 +262,6 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
                             '原文逐字节保留')
         return result
 
-    if inc.used_patch:
-        text = ensure_generator_marker(inc.text)
-    else:
-        text = result.rpy_text
-
     # 给了源就把原文交给门禁：它要**算**"这一份产物是不是丢了顶层语句"
     # （`define` / `init python` / `transform` …）。补丁没配上时，这是
     # 唯一能拦住"静默退回全量"的地方 —— 目标是新路径时手写护栏不适用。
@@ -260,10 +276,65 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
         except (OSError, UnicodeDecodeError):
             source_text = None
 
+    # —— **一个字节都没改 → 不写**（2026-10-19，修 P1-1）——
+    #
+    # 从前这条路照样要走 `ensure_generator_marker`：零改动往返被插进
+    # 2 行生成标记（`# 由剧本表自动生成…` + 空行），于是"表里一个字没改、
+    # 产物逐字节还原"这个最硬的判据永远差 2 行（实测 22/55 个文件全栽在这）。
+    #
+    # 判据是**内容相等**，不是"改动行数 == 0"：后者只是计数，前者才是
+    # 用户会看到的那个事实。目标就是源文件时**连写都不写**（mtime 也不动）；
+    # 目标是别的路径时按源文的载体风格原样复制，同样不加标记 ——
+    # 复制品还是"作者的那份文件"，不该被认成工具产物。
+    if inc.used_patch and source_text is not None and inc.text == source_text:
+        from storygraph.story.source_style import detect as _detect_style
+        from storygraph.story.source_style import read_text as _read_style
+        from storygraph.story.paths import write_text_atomic
+        target = Path(rpy_path)
+        # ⚠ 零改动 ≠ 可以不问就覆盖别人：目标是**另一份东西**（别人的手写
+        # 文件 / 别的章节）时，照旧交给门禁（HANDWRITTEN_TARGET 由人拍板）。
+        overwritable = (target.resolve() == Path(source_path).resolve()
+                        or not target.exists())
+        if not overwritable:
+            try:
+                overwritable = _read_style(target)[0] == inc.text
+            except (OSError, UnicodeDecodeError):
+                overwritable = False
+        if overwritable:
+            if (target.resolve() != Path(source_path).resolve()
+                    and not target.exists()):
+                try:
+                    write_text_atomic(
+                        target, _detect_style(source_path).apply(inc.text))
+                except OSError:
+                    result.written = False
+                    return result
+            result.written = True
+            result.out_path = str(target)
+            result.untouched = True
+            return result
+
+    if inc.used_patch:
+        text = ensure_generator_marker(inc.text)
+    else:
+        text = result.rpy_text
+
     _lint_heads = ()
     if engine_lint:
         from storygraph.pipeline.engine_lint import declared_heads_near
         _lint_heads = declared_heads_near(rpy_path)
+    # **引擎 lint 的上下文根**（2026-10-19，修 P0-2）：产物常常写到临时
+    # 目录 / 别的路径，从 `rpy_path` 推不出项目根 —— 那就拿不到项目的
+    # `define` 骨架，`screens.rpy` 这类脚本会在 init 阶段 NameError 被误拒。
+    # 源 .rpy 一定在项目里，从它反推最可靠。
+    _lint_root = None
+    if engine_lint and source_path:
+        try:
+            from storygraph.story.paths import project_root_of as _root_of
+            _lint_root = _root_of(source_path)
+        except Exception as e:                 # noqa: BLE001 - 推不出来就用兜底
+            from storygraph.core.safeguard import swallow
+            swallow('pipeline.compile.lint_root', e)
     artifact = write_generation(text, rpy_path, force=force,
                                 merged_from_source=(source_path
                                                     if inc.used_patch
@@ -272,19 +343,13 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
                                 source_path=source_path,
                                 beats=beats,
                                 engine_lint=engine_lint,
-                                lint_ignore_heads=_lint_heads)
+                                lint_ignore_heads=_lint_heads,
+                                lint_project_root=_lint_root)
     result.written = artifact.written
     result.out_path = artifact.out_path
     result.review_path = artifact.review_path
     result.guard_issues = list(artifact.blocking)
     result.guard_warnings = list(artifact.warnings)
-    # **对拍**（B 阶段一）：结构列说的位置 vs 老推断实际摆的位置。
-    # 行为零变化（渲染仍按老推断），只是把不一致说出来 —— 逐拍、指名道姓，
-    # 而且表格往返之后照样有效（`Nest` 随表走）。
-    if beats:
-        from storygraph.story.generation_guard import nest_conflict_warnings
-        result.guard_warnings += nest_conflict_warnings(
-            beats, source_path=source_path)
     return result
 
 
@@ -357,9 +422,14 @@ def compile_beats(beats: list, registry=None, symbols=None,
     # 否则"救了用户却没告诉他"= 静默改数据（见 `CompileResult.sanitized_cells`）。
     sanitized = sum(len(getattr(b, 'sanitized_cells', None) or [])
                     for b in beats)
+    # `类型` 列填了工具不认的值（2026-10-19，修 P1-2）：那一拍一个渲染分支
+    # 都命中不了，内容会**悄悄不落地**。这里只点名，不改值、不猜语义。
+    from storygraph.story.beat_model import unknown_kinds
+    invalid_kinds = unknown_kinds(beats)
 
     return CompileResult(rows=rows, rpy_text=rpy_text, labels=labels,
-                         sanitized_cells=sanitized)
+                         sanitized_cells=sanitized,
+                         invalid_kinds=invalid_kinds)
 
 
 # ---------------------------------------------------------------------------

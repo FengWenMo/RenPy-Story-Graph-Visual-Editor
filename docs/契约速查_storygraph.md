@@ -2743,3 +2743,178 @@ menu_statement(l, loc):
     - 三方合并只问"这一格还是我拉取时那样吗"—— 相等性判断，摘要就够，
       合并语义**一字不差**；冲突界面本来就不显示 base。
     - 连摘要都放不下 → 写空 + 明确报"这份表没有基线"，**绝不写半个 JSON**。
+
+---
+
+# §15 增量路径：两条 P0 + 三条 P1 的修正（2026-10-19）
+
+> 出处：`docs/P0保真测试_增量路径_2026-10-19.md`（真机 `sr_general`，55 脚本 /
+> 20,568 行）。**改口径的三条**（P0-1 / P1-1 / P1-3）都在这里写明为什么。
+
+## 15.1 P0-1 只换说话人也要落地（`patcher._speaker_swap_ok`）
+
+- **现状**：`_line_key` 的台词键是 `('say', 说话人)`，"说话人一样才允许换正文"。
+  表格里把 `jc` 改成 `yhj` → 键不同 → 配不上 → 原文一字不动、报告"改动 0 行"、
+  退出码 0（4/4 复现）。
+- **修法**：配对加**第二轮**：正文（引号里那一串）逐字相同、只有 `who` 不同
+  → 认定"同一句话换了说话人"，允许替换。`_same_thing_unless_rewritten` 同步放行。
+- **边界**（都必须拒）：菜单选项行（`"选项":` 的正文是选项文案）、
+  关键字行（`extend` / `menu` 的说话人位不是角色名）、正文有一字之差。
+- **为什么不用 `trust_ranges`**：表格那条路的行号是 `recover_source_ranges`
+  猜出来的（契约 B5）。"正文逐字相同"是比行号更强的证据，不需要动那条纪律。
+- **出声**：`_lost_content` —— 生成的内容行既没落地、**整份原文里也没有**
+  → `lost_new` → 退回全量并说明。比对用整份文件（不是这一拍的区间）：
+  菜单标题一类会被解析器并进 `menu:` 头，按区间比会把零改动往返判成丢失。
+
+## 15.2 P0-2 引擎闸门要有项目上下文（`engine_lint.declaration_context`）
+
+- **现状**：最小工程只有产物本身。`screens.rpy` 的 `style …: language gui.language`
+  / `properties gui.button_properties(…)` 在 init 阶段读 `gui.*` —— 那些值在
+  `gui.rpy` 的 `define` 里。缺了它们引擎抛 `NameError`，闸门判"引擎读不了"，
+  而产物内容 100% 等于原文（3938→3940 行，0 删除，只多 2 行标记）。
+- **修法**：扫 `game/**.rpy` 的**顶格 `define`**（右值必须是合法 Python 表达式），
+  拼成 `init -100 python:`，每条一个 `try/except`。为什么 try：
+  `define x = ParallaxTransform(…)` 依赖项目 `init python` 里的名字，骨架不该
+  因此把整次 lint 拖崩。
+- **骨架永不背锅**：报错行落在 `00_sg_context.rpy` 上 → 不算产物的错；
+  骨架把 init 弄崩（帧全在骨架里）→ 去掉骨架重跑，用重跑的结论并把
+  "这次没有上下文"写进 `LintReport.context_note`。
+- **要排掉被 lint 的那份源文件**（`exclude=source_path`）：否则它自己的
+  `define` 会替它把"丢失的声明"补上，等于掩盖真问题。
+- **`transform` 不能抽**：`transform x:` 必须有块体，单独一行就是语法错。
+- 代价：一次骨架构建 = 读一遍项目的 `.rpy`（真机 54 文件，毫秒级）；lint 本身
+  耗时不变（实测 8.0s vs 8.9s）。
+
+## 15.3 P1-1 零改动往返不写盘（`compile.write_compiled` / `session_export.export`）
+
+- **现状**：增量结果与源文逐字节相同，但仍走 `ensure_generator_marker` →
+  文件头多 2 行（标记 + 空行），"零改动逐字节还原"永远差 2 行（22/55 文件）。
+- **修法**：`inc.text == 源文` → **目标就是源文件时连写都不写**（mtime 不动）；
+  目标在别处时按源文载体风格**原样复制**，同样不加标记。
+- **护栏配套**（`generation_guard._copy_of_source`）：没有标记的复制品，下一次
+  真有改动再导到同一路径时会被手写护栏拒写。所以"目标已存在、内容与
+  `source_text` 逐字节相同"也放行 —— 它是一份复制品，不是别人的手写文件；
+  用户在复制品上手改过 → 内容不再相等 → 照旧拦。
+- 报告口径：`CompileResult.untouched` → CLI 说"0 行改动，原文逐字节相同
+  （文件没有被改动）"，而不是"只改了 0 行"。
+
+## 15.4 P1-2 `类型` 列非法值要点名（`beat_model.unknown_kinds` / `kind_raw`）
+
+- **现状**：`Beat.from_row` 把不认识的 `类型` 一律收成 `say`，于是「旁白」
+  既不报错也不落地，报告只说"改动 0 行"。
+- **修法**：`Beat.kind_raw` 留原值（运行时元数据：不入表、不进快照/指纹/协作库），
+  `compile_beats` 用 `unknown_kinds` 收集 → `CompileResult.invalid_kinds` →
+  报告点名 `[行号]「原值」` 并列出合法值。UI 导出走 `_with_sanitize_note` 同一句话。
+- **不做的**：不替用户翻译（「旁白」→ `narration`）。契约 M 不变量：工具不猜语义。
+
+## 15.5 P1-3 删空块的计划阶段拦截（`patcher._deletion_empties_block`）
+
+- **现状**：删掉 `if breakline == 1:` 体里唯一那一拍 → 产物 `expected statement`
+  （`pomodorro.rpy` 第 232 行）。门禁拦住了，但表已改、文件没改，用户不知道怎么办。
+- **修法**：删除计划里多加一条准入：上一行（跳过空行与纯注释）是块头、
+  且删完之后块体里**没有一行活着** → 判"这刀不敢删" → `ok=False` →
+  调用方退回全量重生成（产物有效，改动照样落地）。
+- 空行与纯注释**救不了空块**（Ren'Py 眼里它们不是语句），扫描时视为透明。
+- 门禁拦下时的说法也要给退路：CLI 与 `CompileResult.summary` 都写明
+  "源文件没有被改动：它仍是导出前的样子" + "改好表再导一次 / 撤销这次改动再导"。
+
+## 15.6 顺带修掉：多 label 章节的插入点下标
+
+`_recover_ranges_for_groups` 把**组内下标**当全局下标塞进 `inserted_out`。
+`pomodorro.rpy` 有 10 个 label：插入一拍时插入点指到别的组的拍上 → 新卡片
+走"替换"通道、把原文那一行顶掉 → `_verify_patch` 报"某句台词在补丁结果里
+找不到" → 退回全量（实测 60 段）。现在用 `{id(beat): 全局下标}` 映射。
+
+## 15.7 判决网
+
+- `tests/test_incremental_p0_fixes.py`（10 条：说话人 / 删除拒绝 / 全局下标 /
+  非法类型 / 骨架 / 零改动往返）。
+- 改口径的两条既有用例已同步：`test_incremental_export.py` 的
+  `test_deleting_the_only_body_of_a_branch_is_refused` / `test_deleted_beat_is_reported`，
+  `test_export_acceptance.py::test_4_re_exporting_the_same_path_is_idempotent`
+  （从前断言首行必须有生成标记，现在断言逐字节等于源文）。
+
+---
+
+# §16 三件地基：资产维度 / NEST 收口 / 协作三件小事（2026-10-19）
+
+> 用户排期：①资产维度结构化 → ②`NEST_CONFLICT` 收口 → ③协作三件小事；
+> 多引擎继续降权。本节的每条都配了可复跑的判据。
+
+## 16.1 资产维度结构化（`assets/asset_dimensions.py`）
+
+- **数据模型**：图片表新增两列（追加在**末尾**，老列位置不动）：
+  `Group`（维度，如 `outfit` / `expressions`）与 `Value`（该维度下的一个属性，
+  如 `base_swimsuit`）。`Attributes` 保留为**兼容列**：老表、老代码、
+  "一行登记多个属性"的脚本声明照样能读。
+- **结构来源三档**：引擎事实（`storygraph.engine_facts.json` 的
+  `attributes`）→ 项目 `layeredimage`（延迟 import，不走反向顶层依赖）→
+  认不出就留空。**不写死组名**，也不猜。
+- **不再无脑拆词**：`base_handdown` 是一个属性；只按空白/逗号/顿号/分号/
+  竖线分词。平铺文件名只在"剥完的前缀确实是已知属性"时才去 tag 前缀
+  （`eileen_happy` → `happy`；`lan_angry` 整体已知就保留）。
+- **回填只填空白**：`backfill_dimension_columns` 给老表追加两列并填空格，
+  写前 `*.bak.xlsx`；人写过的值、`Attributes`、其它列一个字节不动。
+- **下游接线**：
+  - `Symbols.dimensions_of_tag` / `dimension_groups_of_tag`；
+  - 立绘卡第四档结构来源（没有引擎事实也能一维一格，≥2 个维度才接管）；
+  - 下拉（`expression_groups_for`）按维度分栏；
+  - 校验新增 **W115**：同一维度同时选两个值（引擎 lint 不管这类）；
+  - 多引擎 IR 的资产清单带 `{维度: 值}`；同组多个值时第一个进 `attributes`、
+    其余进 `attribute_values`（绝不静默丢词）。
+- 判据：`tests/test_asset_dimensions.py`（22 条）。
+
+## 16.2 `NEST_CONFLICT` 收口：**留结构位、删对拍器**
+
+- **现场**：`the_question/script.rpy:28-37` 的选项体只有一条 `jump`。
+  表格往返后 `_menu_member` 没了、`Condition` 也是空串，老推断把 `jump`
+  摆到**顶层**；结构列写的是 `menu:1>B`。实测渲染：结构列对（`jump` 在
+  选项体里，且缩进正确）。
+- **定案**：`Nest`（结构位）是**唯一结构真源**。渲染在路径齐全时直接按
+  路径建树；老推断只在"整份 label 都没有结构位"（老表）时兜底。
+- **删掉的东西**：`beat_render.nest_placement_conflicts`、`_actual_chains`、
+  `core.nest_path.body_chain`、`generation_guard.nest_conflict_warnings`、
+  `compile.py` 的对拍调用、`session_export` 的 `structure_conflicts` 字段与
+  说明。测试里凡是"对拍器应报/不应报"的断言都改成"路径权威"的断言。
+- 判据：`tests/test_nest_column.py::TestPathAuthority`（`jump` 选项体往返
+  仍在体内；对拍器已不存在）、`tests/test_nest_phase2.py`。
+
+## 16.3 协作三件小事（`collab/collab_store.py`，schema 3）
+
+- **WAL + busy_timeout**：连接统一 `PRAGMA journal_mode=WAL`、
+  `busy_timeout=30000`、`synchronous=NORMAL`、`foreign_keys=ON`；
+  写操作（push / lock / 状态机 / 资产）用 `connect(write=True)`，
+  进入即 `BEGIN IMMEDIATE` —— "读一下再写"的 CAS 不再被两个进程同时读到
+  旧 revision。WAL 在网络盘/只读介质失败时**不炸连接**（退回默认 journal）。
+- **锁租约**：`beats.locked_until`（schema 3 新增），默认 15 分钟。
+  `lock(ttl=)` / `renew_lock` / `locks()` 返回 `expired` 与 `expires_in`；
+  别人的锁**过期后可接手**（`lock_takeover_expired` 审计），没过期照旧拒；
+  push 越过过期锁时记 `push_lock_expired`，不当成抢锁。
+- **成员权限**：`users.role`（schema 3 新增，默认 `editor`）三档
+  `viewer` / `editor` / `owner`：只读成员 pull/status 照常，但 push、锁、
+  改状态一律拒；owner 额外能改角色。老库没有 owner 时允许**第一次认领**
+  （否则迁移后权限死锁）。CLI 新增 `collab members` / `collab role` /
+  `collab renew`，`collab init --owner`、`--ttl`。
+- 判据：`tests/test_collab_lease_roles.py`（15 条）；
+  既有 `test_collab_merge` / `roundtrip` / `second_round` 全绿。
+
+## 16.4 并行协作纪律（给同时改 bug 的另一个 AI 留位置）
+
+- 本轮只动"三件地基"相关文件；`docs` 只**追加**本节，不重写既有章节。
+- 提交按文件分组（资产 / NEST / 协作 / 文档），不 `git add -A`；
+  提交前回读 diff，避免把并行会话的未完成改动卷进来。
+
+## 16.5 跨 Unity 第一片（IR schema 1.1）
+
+- 中立 IR 的 `lines[]` 新增：
+  - `structure = {path, kind, known}`：块路径 + `if/menu/loop/option`；
+    `known=false` 表示老表不知道，**别当顶层**；
+  - `timeline = [{op,target,at,clause,transition,action,params,order}]`：
+    `scene/show/hide/with/music/sound/voice/at/transform` 的**作者顺序**，
+    `order` 从 0 递增；没被顺序 token 点到的字段补在末尾，绝不丢。
+- Unity 适配摊平成 `structurePath` / `structureKind` / `structureKnown`
+  + `timeline[]`（JsonUtility 的"标量 + 数组"约束不变）；Godot 保留嵌套。
+- `UNITY_IMPORT.md` 与 `docs/unity/StoryIr.cs` 是同一份字段契约。
+- **不是播放器**：条件求值、菜单 UI、立绘合成、资源地址映射仍归 Unity 工程。
+- 判据：`tests/test_unity_timeline.py`（5 条）、
+  `tools/hell_multi_engine.py`（五引擎/多文件/真实项目 0 处）。

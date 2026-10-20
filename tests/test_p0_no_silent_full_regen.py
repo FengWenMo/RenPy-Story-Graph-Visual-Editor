@@ -270,15 +270,12 @@ class TestExportChecksTheWriteResult:
         这条是上一版漏掉的真实 bug（我手测时才发现）：
         补丁那条路产出的首行是**源文件的首行**，所以写出去的文件
         **没有生成标记** → 第二次导出被判成"手写文件"拒绝覆盖：
+        修法是落盘前统一补标记。
 
-            第 1 次 ok=True    第 2 次 ok=False（"目标已存在且不是工具生成的"）
-
-        根因是"标记只在全量渲染时写"。修法：`export` 在落盘前统一过一遍
-        `ensure_generator_marker`。
-
-        `TestFullRegenGuard::test_allows_overwriting_its_own_output` 只测了
-        `write_generation` 那一层（我喂进去的文本自带标记，所以它没暴露），
-        **必须有一条经过 `export` 的**才算覆盖到真实路径。
+        2026-10-19 改口径（P1-1）：**零改动往返不再补标记** —— 标记是
+        "零改动却改了文件"的那 2 行。所以现在守的是另一条等价契约：
+        产物与源文**逐字节相同**，且连导三次都成功（没有标记也不会被
+        "手写护栏"误伤：`_copy_of_source` 认"内容等于底稿"的复制品）。
         """
         src = _make_src(tmp_path)
         s = EditorSession(project_root=tmp_path)
@@ -288,9 +285,8 @@ class TestExportChecksTheWriteResult:
 
         first = s.export(target)
         assert first['ok'] is True, first
-        head = target.read_text(encoding='utf-8').splitlines()[0]
-        assert MARKER in head, (
-            f'产物首行没有生成标记，再导出必然被自己的护栏拦下：{head!r}')
+        assert target.read_text(encoding='utf-8') == src.read_text(
+            encoding='utf-8'), '零改动往返必须逐字节等于源文（不许插生成标记）'
 
         for n in (2, 3):
             again = s.export(target)

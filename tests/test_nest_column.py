@@ -1,15 +1,16 @@
 """
-结构位（`Nest` 列）与**对拍器** —— B 阶段一，见不变量 75。
+结构位（`Nest` 列）—— **唯一结构真源**（2026-10-19 收口）。
 
-阶段一的目标只有一句话：**把"这条拍属于哪个选项"写进表、并且证明它和老推断
-处处一致**。这一步**不改任何行为**（渲染仍按老推断走），因为刚验收过的
-往返契约不该在同一轮里被换掉。
+历史：B 阶段一曾把"这条拍属于哪个选项"同时写进表和解析器，再用对拍器
+（`nest_placement_conflicts`）证明两者处处一致。`the_question` 的
+`jump` 选项体证明老推断会摆错（结构列 `menu:1>B`，老推断摆到顶层），
+于是 2026-10-19 定案：**留结构位、删对拍器**。渲染在路径齐全时直接按
+结构位建树；老推断只在"整份 label 都没有结构位"（老表）时兜底。
 
 三层各测一遍：
   · **解析器**：`Statement.nest_path` 的取值（块路径 DSL）；
   · **列**：`Nest` 随 Excel 往返（含"顶层"与"不知道"必须分得开）；
-  · **对拍器**：`nest_placement_conflicts` —— 一致时不报、不一致时报到拍级，
-    而且**只对结构位齐全的 label 判**（老表整份跳过，绝不拿"不知道"当"顶层"）。
+  · **路径权威**：往返之后 `jump` 仍在选项体里；对拍器已不存在。
 """
 
 from __future__ import annotations
@@ -24,8 +25,7 @@ from storygraph.story.beat_build import beats_from_parse_result
 from storygraph.story.beat_model import (BEAT_FIELDS, BEAT_HEADERS,
                                          SINGLE_LINE_BEAT_FIELDS, Beat,
                                          HIDDEN_BEAT_COLUMNS)
-from storygraph.story.beat_render import (nest_placement_conflicts,
-                                          render_beats_to_rpy)
+from storygraph.story.beat_render import render_beats_to_rpy
 from storygraph.story.excel_export import export_beats_to_excel
 from storygraph.story.excel_import import import_beats_from_excel
 
@@ -143,70 +143,94 @@ class TestTheColumn:
         assert [b.nest_path for b in back] == WANT_PATHS
 
 
-class TestComparator:
-    def test_consistent_source_is_silent(self, tmp_path):
-        assert nest_placement_conflicts(_beats_of(SRC, tmp_path)) == []
+class TestPathAuthority:
+    """
+    **2026-10-19 收口**：结构位是唯一结构真源，老推断不再当第二套判据。
 
-    def test_unknown_structure_skips_the_whole_label(self, tmp_path):
-        """老表（没有结构位）→ 整份跳过，**不许**报。"""
-        beats = _beats_of(SRC, tmp_path)
-        for b in beats:
-            b.nest_path = None
-        assert nest_placement_conflicts(beats) == []
+    背景（`the_question` 实测）：选项体里只有一条 `jump` 时，表格往返之后
+    `_menu_member` 没了、`Condition` 也是空的 —— 老推断把它摆到**顶层**，
+    而结构列写的是 `menu:1>B`。哪个对？**结构列对**：渲染出来的
+    `jump` 确实在选项体里。旧的对拍器（`nest_placement_conflicts`）就是
+    拿"会摆错的那一套"去质疑结构位，已随旧口径一起删除。
+    """
 
-    def test_a_lying_column_is_reported_per_beat(self, tmp_path):
+    def test_no_second_oracle_exists(self):
+        from storygraph.story import beat_render
+        assert not hasattr(beat_render, 'nest_placement_conflicts')
+        assert not hasattr(beat_render, '_actual_chains')
+
+    def test_jump_only_option_body_stays_inside_after_roundtrip(self, tmp_path):
         """
-        结构列说'这条拍不在任何选项体里'，而老推断把它摆进了选项体 → 报出来。
-
-        （现实里方向通常相反 —— 表丢了结构、产物把选项体压平；两个方向都算
-        "两套判断不一致"，所以都要报。）
+        `the_question/script.rpy:28-37` 的最小复刻：菜单标题 + 两个只含
+        `jump` 的选项体。表格往返之后，`jump` 必须在**选项体里面**。
         """
-        beats = _beats_of(SRC, tmp_path)
-        body = next(b for b in beats if b.text == '体 1')
-        body.nest_path = ''                       # 谎称在顶层
-        conf = nest_placement_conflicts(beats)
-        assert conf, '谎报的结构位没被抓到'
-        name, idx, claim, got = conf[0]
-        assert name == 'a'
-        assert claim == () and got == ((1, 'A'),), (claim, got)
-
-    def test_excel_roundtrip_keeps_the_comparison_honest(self, tmp_path):
-        """表格往返之后（`_menu_member` 已经没了）对拍仍然一致。"""
-        beats = _beats_of(SRC, tmp_path)
+        src = ('label start:\n'
+               '    menu:\n'
+               '\n'
+               '        "As soon as she catches my eye, I decide...":\n'
+               '\n'
+               '        "To ask her right away.":\n'
+               '\n'
+               '            jump rightaway\n'
+               '\n'
+               '        "To ask her later.":\n'
+               '\n'
+               '            jump later\n')
+        beats = _beats_of(src, tmp_path)
         xl = tmp_path / 'ch.xlsx'
         export_beats_to_excel(beats, xl)
         back = import_beats_from_excel(xl)
         assert all(getattr(b, '_menu_member', None) is None for b in back), \
-            '前提：往返之后老那位就没了'
-        assert nest_placement_conflicts(back) == []
+            '前提：表格往返之后老推断的信息没了'
+        rpy = render_beats_to_rpy(back, label_name='start')
+        lines = rpy.splitlines()
+        i = next(n for n, ln in enumerate(lines) if ln.strip() == 'menu:')
+        body = [ln.strip() for ln in lines[i + 1:] if ln.strip()]
+        # 两个选项行 + 两个 jump，且 jump 的缩进必须比选项行深
+        jump_lines = [ln for ln in lines[i + 1:] if 'jump rightaway' in ln]
+        assert len(jump_lines) == 1, rpy
+        opt = next(n for n, ln in enumerate(lines)
+                   if ln.strip() == '"To ask her right away.":')
+        jump = lines.index(jump_lines[0])
+        assert jump > opt, rpy
+        assert len(lines[jump]) - len(lines[jump].lstrip()) > \
+            len(lines[opt]) - len(lines[opt].lstrip()), rpy
+
+    def test_a_malformed_top_level_path_is_not_silently_lost(self, tmp_path):
+        """
+        路径**自相矛盾**时（菜单组中间出现一条顶层路径）不能静默丢拍：
+        渲染退回老推断把它收进选项体，至少内容还在。
+
+        这不是"第二套判断"复活：只有在这一份 label 的路径**根本解释不通**
+        （菜单跨度里夹着顶层拍）时才会走到；`the_question` 那种
+        "路径完整、老推断会摆错"的形状**不会**触发它（见上一条）。
+        """
+        beats = _beats_of(SRC, tmp_path)
+        body = next(b for b in beats if b.text == '体 1')
+        body.nest_path = ''                       # 人为制造自相矛盾
+        rpy = render_beats_to_rpy(beats, label_name='a')
+        assert 'e "体 1"' in rpy, rpy
 
 
 @pytest.mark.skipif(not REAL_PROJECT.exists(), reason='真实项目不在本机')
 class TestRealProjectAgrees:
-    """
-    **阶段一的验收判据**：40 个真实文件里，老推断与结构列**处处一致**。
-
-    全绿 → 阶段二（让渲染改用结构列）才是安全的；有一条不一致就得先查清
-    是"解析器记错"还是"老推断摆错"。
-    """
+    """真实项目的结构位必须**每拍都有**（没有路径 = 没法用路径建树）。"""
 
     def test_every_beat_agrees_and_has_a_path(self):
         files = sorted(f for f in (REAL_PROJECT / 'game').rglob('*.rpy')
                        if not f.name.endswith('.generated.rpy'))
-        conflicts, missing = [], []
+        missing = []
         for f in files:
             pr, _ = IncrementalRenPyAnalyzer().analyze(files=[f], graph=None)
             beats = beats_from_parse_result(pr)
             if not beats:
                 continue
-            conflicts += [(f.name, c) for c in nest_placement_conflicts(beats)]
             # 有源码行号、却没有结构位 = 解析器漏记（携带拍本来就没有源语句，
             # 不算）
             missing += [(f.name, b.kind, b.label) for b in beats
                         if getattr(b, 'nest_path', None) is None
                         and getattr(b, 'src_first', 0)]
         assert not missing, f'这些拍有源行号却没有结构位：{missing[:5]}'
-        assert not conflicts, f'老推断与结构列对不上：{conflicts[:5]}'
 
 
 class TestACommentNeverStealsTheStructure:
@@ -305,8 +329,9 @@ class TestAStatementCannotStealTheStructure:
                 pass              ← 选项体被掏空
         show bg room              ← **无条件执行**（选没选都会换背景）
 
-    对拍器**看不见**这一类：`_menu_member` 与 `Nest` 都被同一条语句覆盖，
-    两份载体"自洽"地说了同一个谎。所以它得由构建层挡住（`struct_guard`）。
+    这条缺陷**不是**"对拍器漏报"：`_menu_member` 与 `Nest` 都被同一条语句
+    覆盖，两份载体"自洽"地说了同一个谎；对拍器已删，这类由构建层挡住
+    （`struct_guard`）。
     """
 
     SRC = '''label a:

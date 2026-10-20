@@ -216,6 +216,7 @@ def validate_level1(beats, registry=None,
         _l1_empty_say(b, where, issues)
         _l1_speaker(b, where, registry, index, issues)
         _l1_asset_refs(b, where, registry, index, issues)
+        _l1_image_dimension_conflicts(b, where, registry, index, issues)
         _l1_text(b, where, char_limit, issues)
         _l1_audio_actions(b, where, issues)
         _l1_audio_params(b, where, issues)
@@ -325,6 +326,45 @@ def _l1_asset_refs(b, where, registry, index, issues) -> None:
             if managed else
             '这类资产还没建资源表：建好后引用即可下拉选择'))
 
+
+
+def _l1_image_dimension_conflicts(b, where, registry, index, issues) -> None:
+    """
+    同一维度里**同时选了两个属性** → W115（只警告，不拦构建）。
+
+    为什么工具必须自己查（`engine_facts.group_conflicts` 的同一结论）：
+    `show lan happy sad` 两者同组时 **lint exit 0、引擎一声不吭** ——
+    它不会报错，只按声明顺序取一个，另一个静默失效。
+
+    这里的数据源是资源表的结构化维度（`Group`/`Value`），所以**没采过
+    引擎事实的项目也能查**；老表没有结构列 → 不猜、不报（宁缺勿假）。
+    """
+    if registry is None or index is None:
+        return
+    from storygraph.assets.asset_dimensions import same_group_conflicts
+    for item in split_show_items(b.show):
+        spec = str((item or {}).get('image') or '').strip()
+        parts = [p for p in spec.split() if p]
+        if len(parts) < 3:
+            continue                          # tag + 至少两个属性才可能同组冲突
+        tag = parts[0]
+        ids = resolve_references(tag, registry, index)
+        row = None
+        for aid in (ids or ()):
+            candidate = (registry.images or {}).get(aid) or {}
+            if str(candidate.get('Tag') or '').strip() == tag:
+                row = candidate
+                break
+        if row is None:
+            continue
+        dims = row.get('_dims') or []
+        for conflict in same_group_conflicts(dims, parts[1:]):
+            attrs = '、'.join(conflict.get('attrs') or ())
+            issues.append(Issue(
+                L1, 'W115', WARNING,
+                f"图片 '{spec}' 在同一个维度「{conflict.get('group')}」里"
+                f"选了 {attrs}（引擎只会取一个，另一个不生效）", where,
+                '同一维度只留一个值；要同时出现请换到别的维度，或拆成两条 show'))
 
 
 def _l1_text(b, where, char_limit, issues) -> None:

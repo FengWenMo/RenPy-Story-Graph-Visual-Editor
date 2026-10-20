@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from storygraph.assets.asset_registry_constants import SUPPORTED_IMAGE_EXT, SUPPORTED_AUDIO_EXT, CATEGORY_KEYWORDS, ASSET_FIELD_LABELS, _asset_set_text, _asset_append_row, _UI_WORDS, _UI_SUFFIXES, _CHARACTER_CONTAINER_WORDS, _GENERIC_IMAGE_ROOTS, _BG_WORDS, _CG_WORDS, _BG_NAME_RE, _CG_NAME_RE, _UI_NAME_RE, _BG_NAME_HINTS, _CG_NAME_HINTS, _UI_NAME_HINTS, _NON_CHARACTER_FIRST_WORDS, _SKIP_SCAN_DIRS, _GENERIC_IMAGE_DIRS, _MUSIC_DIR_NAMES, _SOUND_DIR_NAMES, _SOUND_NAME_HINTS, _MUSIC_NAME_HINTS, _ASSET_KINDS, _STANDARD_TABLES, _TABLE_FIELDS, _PLACEHOLDER_MARKS, _COLOR_PATTERN, _SHOW_STOP_WORDS, _RE_SHOW_LINE, _RE_AUDIO_LINE, _RE_AT_TRANSFORM, _RE_WITH_TRANSITION, _RE_VOICE_LINE, _AUDIO_ID_PREFIXES
 from storygraph.core.safeguard import swallow
+from storygraph.assets.asset_dimensions import dimensions_of_row
 from storygraph.assets.asset_registry_constants import (
     CATEGORY_KEYWORDS,
     SUPPORTED_AUDIO_EXT,
@@ -338,7 +339,8 @@ def _is_under_any(file: Path, dirs) -> bool:
             continue
     return False
 
-def _scan_images(items, include_ui, existing_image_ids) -> list:
+def _scan_images(items, include_ui, existing_image_ids, facts=None,
+                 layer_model=None) -> list:
     """
     图片扫描：扩展名/噪声/跳过目录/UI 过滤 → 归类 → tag → 唯一 ID。
 
@@ -370,15 +372,27 @@ def _scan_images(items, include_ui, existing_image_ids) -> list:
         category = _detect_category(rel_path)
         parent_dirs = [Path(seg).name for seg in rel_low.split('/')[:-1]]
         tag = _detect_image_tag(file, rel_path, category)
-        attributes = file.stem
-        unique_id = _make_unique_id(file.stem, parent_dirs, existing_image_ids)
+        # **维度结构化**（2026-10-19）：一行 = 一张图层文件。
+        # `Group`/`Value` 能算就算（引擎事实 → layeredimage），算不出就留空；
+        # `Attributes` 仍是兼容列，但要写**去掉 tag 前缀后的属性**，不再塞
+        # 整个文件名（`eileen_happy` → `happy`）。推断只在能确认时做，
+        # 见 `asset_dimensions._strip_tag_prefix`。
+        stem = file.stem
+        dims = dimensions_of_row({'Tag': tag, 'Attributes': stem,
+                                  'Path': rel_path.as_posix()},
+                                 facts=facts, layer_model=layer_model)
+        value = dims[0]['value'] if len(dims) == 1 else stem
+        group = dims[0]['group'] if len(dims) == 1 else ''
+        unique_id = _make_unique_id(stem, parent_dirs, existing_image_ids)
         out.append({
             'ID': unique_id,
             'Path': rel_path.as_posix(),
             'Tag': tag,
-            'Attributes': attributes,
+            'Attributes': value,
             'Category': category,
             'Notes': '',
+            'Group': group,
+            'Value': value,
         })
     return out
 
@@ -535,7 +549,8 @@ def _scan_file_items(scan_root, walk) -> list:
     return items
 
 def scan_assets(scan_root, include_ui=True, audio_dirs=None,
-                voice_dirs=None, walk=None) -> dict:
+                voice_dirs=None, walk=None, facts=None,
+                layer_model=None) -> dict:
     """
     扫描目录下的资产，返回：
     {
@@ -592,7 +607,8 @@ def scan_assets(scan_root, include_ui=True, audio_dirs=None,
     # 三遍树 ~3.8 秒）；细节见 `_scan_file_items`。
     _items = _scan_file_items(scan_root, walk)
     image_assets = _scan_images(_items, include_ui,
-                                 existing_image_ids)
+                                 existing_image_ids, facts=facts,
+                                 layer_model=layer_model)
 
     # ---------- 音频扫描 ----------
     #

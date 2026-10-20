@@ -175,24 +175,25 @@ class TestTableRemembersItsSource:
 
     def test_cli_defaults_to_the_recorded_source(self, tmp_path, capsys):
         """
-        `table xlsx2rpy <表>`（**不给 --out / --source**）→ 写回表里记的那一章，
+        `table xlsx2rpy <表>`（**不给 --out / --source**）→ 认表里记的那一章，
         而且没改的行一个字节不动。
 
-        这是审计 P1-1 那个场景的命令行形态。
+        这是审计 P1-1 那个场景的命令行形态。2026-10-19 改口径（P1-1）：
+        零改动往返**不再插生成标记**（那正是"零改动却改了文件"的 2 行），
+        所以这里的最强判据是"文件逐字节没变"，而不是"多了一行标记"。
         """
         from storygraph.cli import main
-        from storygraph.story.generation_guard import GENERATOR_MARKER
 
         src, xlsx = self._make(tmp_path)
         before = src.read_text(encoding='utf-8')
+        before_bytes = src.read_bytes()
         code = main(['table', 'xlsx2rpy', str(xlsx),
                      '--no-engine-lint'])
         log = capsys.readouterr()
         assert code == 0, log.out + log.err
-        after = src.read_text(encoding='utf-8')
-        assert after.startswith(GENERATOR_MARKER), '没写回这一章'
-        body = after[len(GENERATOR_MARKER):].lstrip('\n')
-        assert body == before, '写回时把原文重排了（P1-1 的正身）'
+        assert src.read_bytes() == before_bytes, \
+            '零改动往返却改写了文件（或多个生成标记）'
+        assert src.read_text(encoding='utf-8') == before
 
 
 # ======================================================================

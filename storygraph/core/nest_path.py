@@ -76,27 +76,3 @@ def option_index(key) -> int:
 def split_nest(path) -> list:
     """``'if:1>menu:2>A'`` → ``['if:1', 'menu:2', 'A']``（空路径 → ``[]``）。"""
     return [s for s in str(path or '').split('>') if s]
-
-
-def body_chain(path) -> tuple:
-    """
-    这一条路径落在**哪条选项体链**里：``((菜单序, 选项键), …)``（由外到内）。
-
-    ``'if:1>menu:2>A>if:3'`` → ``((2, 'A'),)``；
-    菜单头 / 选项行 / 块外（``'if:1'`` / ``'if:1>menu:2'`` / ``''``）→ ``()``。
-
-    只有"``menu:<n>`` 段后面**紧跟**一个非块段"才算进了选项体 ——
-    这正是"选项行在菜单里、但不在任何选项体里"与"选项体的内容"的分界。
-    """
-    segs = split_nest(path)
-    chain: list = []
-    for i, seg in enumerate(segs):
-        if not seg.startswith('menu:'):
-            continue
-        nxt = segs[i + 1] if i + 1 < len(segs) else ''
-        if nxt and not (nxt.startswith('menu:') or nxt.startswith('if:')):
-            try:
-                chain.append((int(seg.split(':', 1)[1]), nxt))
-            except ValueError:
-                continue
-    return tuple(chain)
