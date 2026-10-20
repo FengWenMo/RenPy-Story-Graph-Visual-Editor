@@ -32,6 +32,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.pipeline.ir_loss import LOSS_REPORT_NAME, report_markdown
 from storygraph.story.beat_model import split_hide_items, split_show_items
 from storygraph.story.stage_snapshot import stage_snapshots
 
@@ -471,6 +472,7 @@ def to_godot(ir: dict) -> dict:
                 'bgm': l['music'],
                 'bgm_action': l['music_action'],
                 'sfx': l['sound'],
+                'sfx_action': l['sound_action'],
                 'voice': l['voice'],
             },
             'line_hash': l['line_hash'],
@@ -563,9 +565,11 @@ def expected_files(engine: str) -> list:
     if engine == 'csv':
         return [CSV_NAME, NEUTRAL_IR_NAME]
     if engine == 'unity':
-        return [NEUTRAL_IR_NAME, UNITY_DATA_NAME, UNITY_NOTES_NAME]
+        return [NEUTRAL_IR_NAME, UNITY_DATA_NAME, UNITY_NOTES_NAME,
+                LOSS_REPORT_NAME.format(engine='unity')]
     if engine == 'godot':
-        return [NEUTRAL_IR_NAME, GODOT_DATA_NAME, GODOT_LOADER_NAME]
+        return [NEUTRAL_IR_NAME, GODOT_DATA_NAME, GODOT_LOADER_NAME,
+                LOSS_REPORT_NAME.format(engine='godot')]
     return [NEUTRAL_IR_NAME]
 
 
@@ -663,10 +667,17 @@ def export_ir(engine: str, beats, out_dir, registry=None,
                                    out_dir / UNITY_DATA_NAME))
         written.append(_write_text(
             _unity_notes(ir), out_dir / UNITY_NOTES_NAME))
+        # **损失报告**：这一份 IR 里哪些字段 Unity 侧没有（§18）。
+        written.append(_write_text(
+            report_markdown(ir, 'unity'),
+            out_dir / LOSS_REPORT_NAME.format(engine='unity')))
     elif engine == 'godot':
         written.append(_write_json(to_godot(ir), out_dir / GODOT_DATA_NAME))
         written.append(_write_text(GODOT_LOADER_SAMPLE,
                                    out_dir / GODOT_LOADER_NAME))
+        written.append(_write_text(
+            report_markdown(ir, 'godot'),
+            out_dir / LOSS_REPORT_NAME.format(engine='godot')))
     return written
 
 
@@ -742,6 +753,9 @@ def _unity_notes(ir: dict) -> str:
   （JsonUtility 不支持 Dictionary）。
 - `story_ir.json` —— 引擎中立 IR（更完整，含 stage 快照与资源清单），
   需要自定义解析时用它。
+- `IR_LOSS-unity.md` —— **损失报告**：这一份 IR 里哪些字段 Unity 侧没有
+  （DSL 源码 / 原始行 / 策划备注 / 立绘站位 / BGM 参数……）。
+  接之前先看它：里面列的东西不会自己出现在 Unity 这边。
 
 数据规模：{n.get('lines', 0)} 行演出 / {n.get('labels', 0)} 个 label /
 {n.get('characters', 0)} 个角色 / 文本 {n.get('chars', 0)} 字。

@@ -119,8 +119,28 @@ class ExportMixin:
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'engine': engine, 'out_dir': str(out_dir),
                     'files': [], 'error': str(e)}
+        # **损失报告**（§18）：适配层没搬过去的字段，回执里也要说一句。
+        # IR 是纯内存构造（不碰磁盘），重算一遍比把 IR 从文件读回来更稳。
+        loss = {}
+        if engine in ('unity', 'godot'):
+            try:
+                from storygraph.pipeline.engine_exporters import (
+                    build_neutral_ir)
+                from storygraph.pipeline.ir_loss import summarize
+                loss = summarize(build_neutral_ir(
+                    self.beats, registry=self.registry(),
+                    project=str(self.project_root or ''),
+                    title=Path(self.script_path).stem
+                    if self.script_path else ''), engine)
+            except Exception as e:            # noqa: BLE001 - 报告失败不影响导出
+                swallow('session_export.export_ir.loss', e)
+                loss = {}
         return {'ok': True, 'engine': engine, 'out_dir': str(out_dir),
-                'files': [str(f) for f in (files or [])], 'error': ''}
+                'files': [str(f) for f in (files or [])],
+                'loss': {'count': len(loss.get('losses') or []),
+                         'by_scope': loss.get('by_scope') or {},
+                         'notes': loss.get('notes') or []},
+                'error': ''}
     def frames(self) -> list:
         """
         整章的舞台帧（供预览窗口播放）。

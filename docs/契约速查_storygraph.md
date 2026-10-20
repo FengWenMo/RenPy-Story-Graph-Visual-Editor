@@ -3057,3 +3057,84 @@ SDK 用"项目所在 SDK"优先（`<sdk>/the_question` 的祖父目录），
 - **转场中间帧**不做：`with dissolve` 只影响预览的交叉淡入；
 - **自定义 say screen**（bubble / nvl / 完全重写布局）不在第一版范围，
   `GuiProfile.screen_say_custom` 会记下"这项目改过 say"，但只按标准模板画。
+
+
+# §18 多引擎损失报告：导出成功 ≠ 导全了（2026-10-20）
+
+用户本轮目标里有一句"增强多引擎 IR 与适配（校验 / **损失报告** / 更多引擎）"。
+
+§16.5 把 Unity 第一片做出来了，但导出回执只说"成功"。一份
+`story_ir.json` 的行级字段有三十来个，Unity 适配层有 8 个没搬
+（DSL 源码 / 原始行 / 策划备注 / 立绘站位 / 转场参数 / DSL 舞台原文……）
+—— 用户根本不知道没过去，接 Unity 的人会以为"跟编辑器里看到的一样"。
+
+## 18.1 只做对账，不改数据
+
+`storygraph/pipeline/ir_loss.py`：
+
+- 中立 IR **一个字段都不删**（它仍是全量事实）；
+- 适配层 `to_unity()` / `to_godot()` 实际带走的字段写在
+  `LINE_FIELD_MAP` / `ASSET_FIELD_MAP` 里（`''` = 明确不带）；
+- 对账结果 → `FieldLoss(scope, field, label, count, examples)`；
+- 报告落盘到导出目录：`IR_LOSS-unity.md` / `IR_LOSS-godot.md`
+  （`LOSS_REPORT_NAME`），`expected_files()` 同步声明这两个文件名。
+
+报告的骨架：
+
+```
+# IR 损失报告 · unity
+- 行：128，资源：340
+| 字段 | 含义 | 数量 | 例子 |
+| `code` | DSL 源码 | 128 | a.0001、a.0002 |
+| `attributes` | 维度结构（{组: 值}） | 340 | e happy |
+## 提醒（不算字段丢失）
+- 17 行台词带 Ren'Py 标签（{color=…} / {w}），IR 只保留原文…
+- 3 行的嵌套位置未知（老表没有结构位）…
+## 怎么补
+（改 to_<engine>() 之后同步映射表）
+```
+
+## 18.2 当前实测：两个引擎各丢什么
+
+| 字段 | Unity | Godot | 说明 |
+|---|---|---|---|
+| `code` / `raw` / `comment` | 丢 | 丢 | DSL 源码、原始行、策划备注 |
+| `at` / `transform` | 丢 | 丢 | 立绘站位（只有 `poses` 顺序） |
+| `stage`（DSL 原文） | 丢 | 丢 | 快照已经算好，原文仍在中立 IR |
+| `music_params` / `sound_params` | 丢 | 丢 | `fadein 1.0` 这类参数 |
+| `attributes` / `attribute_values` | 丢 | **带** | §16.1 的维度结构化成果；Godot 原样带 assets |
+| `loop` / `volume` | 丢 | 带 | 资源行上的播放属性 |
+
+顺手补了一条真缺陷：Godot 的 `stage` 里原来没有 `sfx_action`（Unity 有
+`sfxAction`），同一个项目两边行为不一致 —— 现在补上并有测试。
+
+**下一步（本轮没做，先在报告里点名）**：把资源的 `attributes` 接进 Unity。
+JsonUtility 不支持 `Dictionary`，但支持结构体数组，所以形状应该是
+`AttributePair[] { group, value }`；同时要改 `docs/unity/StoryIr.cs` 与
+`UNITY_IMPORT.md`（同一份字段契约）。在那之前，报告会一直列着这一条 ——
+这就是它存在的意义：不假装导全了。
+
+## 18.3 回执与 UI 也要说
+
+- `Session.export_ir()` 返回值多一个 `loss = {count, by_scope, notes}`；
+- 「更多 → 导出到其他引擎」的状态栏写 `✔ 已导出 unity 格式（4 个文件）· 损失 4 类字段`，
+  控制台逐条列 `code×128（line）` 并指向 `IR_LOSS-unity.md`；
+- `UNITY_IMPORT.md` 的产物清单里加了这条报告，写明"接之前先看它"。
+
+## 18.4 判据（`tests/test_ir_loss.py`，13 条）
+
+- 适配器没带的字段**必须**出现在报告里（`code/raw/comment/at/transform/
+  music_params/sound_params/stage`）；
+- 适配器带了的字段**不许**误报（`structure` 被摊成三个标量，算带过去）；
+- **漂移守卫**：IR 里每个非空字段，要么在报告里，要么在 `to_unity()`
+  的产物里真能找到；适配器加了字段却忘改映射表 → 测试红；
+- 资源维度：Unity 丢 `attributes` 必须点名，Godot 不丢；
+- `renpy` / `json` / `csv` 直接用中立 IR → 没有适配层，报告为空；
+- 导出目录里真的有 `IR_LOSS-unity.md`，且 `expected_files()` 与产物集合完全一致。
+
+## 18.5 边界
+
+- 报告说的是"**适配层没带**"，不是"目标引擎做不到"：Unity 当然可以自己
+  解析 DSL，只是这份产物没给；
+- 报告不做"重要性排序"（都是没带，谈不上谁更重要）；
+- 不改 `to_unity()` 的既有字段结构（JsonUtility 的约束见 §16.5）。

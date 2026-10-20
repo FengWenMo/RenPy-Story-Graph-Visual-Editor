@@ -2033,9 +2033,13 @@ class TestMoreToolsWiredToUi:
         assert res['ok'], res
         assert (out / 'story_ir.json').is_file()
         assert '[导出]' in window._console.toPlainText() or True
-        # unity 会多写两份（引擎数据 + 导入说明）
+        # unity 会多写两份（引擎数据 + 导入说明）+ 一份损失报告（§18）
         res2 = window._session.export_ir('unity', tmp_path / 'unity')
         assert res2['ok'] and len(res2['files']) >= 2
+        assert (tmp_path / 'unity' / 'IR_LOSS-unity.md').is_file(), \
+            '导出 Unity 没写损失报告'
+        assert res2['loss']['count'] >= 1, res2.get('loss')
+        assert any(Path(f).name == 'IR_LOSS-unity.md' for f in res2['files'])
 
     def test_export_ir_rejects_unknown_engine(self, window):
         res = window._session.export_ir('nintendo', window._project_root or '.')

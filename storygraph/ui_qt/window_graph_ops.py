@@ -1157,7 +1157,22 @@ class GraphOpsMixin:
         names = '、'.join(Path(f).name for f in res['files'][:4])
         self._log(f'[导出] {engine}：{len(res["files"])} 个文件 → '
                   f'{res["out_dir"]}（{names}）')
-        self._status(f'✔ 已导出 {engine} 格式（{len(res["files"])} 个文件）')
+        loss = res.get('loss') or {}
+        count = int(loss.get('count') or 0)
+        if count:
+            # **损失报告**（§18）：导出成功不等于导全了。适配层没搬的字段
+            # 必须在这里说一句，否则用户以为 Unity 那边和编辑器一样。
+            fields = []
+            for scope, rows in (loss.get('by_scope') or {}).items():
+                for row in rows:
+                    fields.append(f'{row.get("field")}×{row.get("count")}'
+                                  f'（{scope}）')
+            self._log('[导出] 损失报告：' + '、'.join(fields[:12])
+                      + f'；详见 IR_LOSS-{engine}.md')
+            self._status(f'✔ 已导出 {engine} 格式（{len(res["files"])} 个文件）'
+                         f' · 损失 {count} 类字段')
+        else:
+            self._status(f'✔ 已导出 {engine} 格式（{len(res["files"])} 个文件）')
         return res['out_dir']
     def show_asset_overview(self):
         """资产 / 角色统计（只读）→ 写进控制台 + 弹一个可滚动的明细窗。"""

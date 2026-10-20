@@ -1758,6 +1758,11 @@
     "files": [
      "<PROJ>\\snap_out\\story_ir.json"
     ],
+    "loss": {
+     "by_scope": {},
+     "count": 0,
+     "notes": []
+    },
     "ok": true,
     "out_dir": "<PROJ>\\snap_out"
    }
