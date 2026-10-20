@@ -324,10 +324,20 @@ class CardPageMixin:
         beat = self._session.beats[idx]
         who = str(getattr(beat, 'speaker', '') or '') or '（旁白）'
         text = (str(getattr(beat, 'text', '') or '')[:60] or '（没有台词）')
+        # **删掉的是几行？**（用户 2026-10-21：源码塞在「代码」那一格里，
+        # Excel 只有一行高，人看不见自己删了 7 行代码 + 1 句台词）
+        preview = self._delete_preview(idx)
+        if preview and preview.get('ok') is False \
+                and not preview.get('can_cascade'):
+            # 删不了（只剩一拍 / 这一拍不存在）：**别弹那个"要删几行"的框**，
+            # 否则用户确认完才被告知删不了。
+            self._status(preview.get('error') or '这一拍删不了。')
+            return
         if QMessageBox.question(
                 self, '删除这张卡片',
-                f'删掉第 {idx + 1} 拍？\n\n{who}：{text}\n\n'
-                f'（只改内存里的章节；删完可以点「↩ 撤销结构操作」放回来，'
+                f'删掉第 {idx + 1} 拍？\n\n{who}：{text}'
+                + self._delete_line_note(preview) +
+                f'\n\n（只改内存里的章节；删完可以点「↩ 撤销结构操作」放回来，'
                 f'导出前不落盘）'
         ) != QMessageBox.Yes:
             return
@@ -335,12 +345,15 @@ class CardPageMixin:
         if not res.get('ok') and res.get('can_cascade'):
             # 块头（菜单/循环/选项体）带着块体：先问"要不要连块体一起删"。
             n = int(res.get('blocked_count') or 0)
+            wide = self._delete_preview(idx, cascade=True)
             if QMessageBox.question(
                     self, '删除整块',
                     f'{res.get("error") or "这是块的开头"}'
                     f'\n\n要连着块体一起删掉吗？（共 {n + 1} 拍）'
+                    + self._delete_line_note(wide)
             ) != QMessageBox.Yes:
                 return
+            preview = wide
             res = self._session.delete_beat(idx, cascade=True)
         if not res.get('ok'):
             self._status(res.get('error') or '删除失败')
@@ -348,9 +361,50 @@ class CardPageMixin:
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
-        self._log(f'[卡片] 已删除第 {idx + 1} 拍（{who}：{text}）——'
+        lines = int(preview.get('lines') or 0)
+        tail = f'，产物里少了 {lines} 行（{self._lines_brief(preview)}）' \
+            if lines > 1 else ''
+        self._log(f'[卡片] 已删除第 {idx + 1} 拍（{who}：{text}）{tail} ——'
                   f'还剩 {res["count"]} 拍；点「↩ 撤销结构操作」可以放回来')
-        self._status(f'🗑 已删除第 {idx + 1} 拍（还剩 {res["count"]} 拍）。')
+        self._status(f'🗑 已删除第 {idx + 1} 拍{tail}（还剩 {res["count"]} 拍）。')
+
+    # ---------------- 删除前"要丢几行" ----------------
+
+    def _delete_preview(self, idx: int, cascade: bool = False) -> dict:
+        """问会话"删这一拍会让产物少什么"；算不出来就返回空（不拦操作）。"""
+        try:
+            return self._session.delete_preview(idx, cascade=cascade) or {}
+        except Exception as e:                    # noqa: BLE001 - 预览失败不拦删除
+            swallow('ui_qt.window_card._delete_preview', e)
+            return {}
+
+    @staticmethod
+    def _lines_brief(preview: dict) -> str:
+        """`前两行…` 的短版本（状态栏／控制台用，一行说完）。"""
+        head = [str(x) for x in (preview.get('head') or ())]
+        if not head:
+            return '多行'
+        brief = ' ／ '.join(head[:2])
+        if int(preview.get('lines') or 0) > len(head):
+            brief += ' …'
+        return brief
+
+    def _delete_line_note(self, preview: dict) -> str:
+        """
+        确认框里那段"要丢几行"。
+
+        单行拍的多数情况返回空串（不打扰）；多行拍把**前两行原文**摆出来 ——
+        "8 行"是数字，`$ renpy.block_rollback()` 才是人能认出来的东西。
+        """
+        lines = int(preview.get('lines') or 0)
+        if lines <= 1:
+            return ''
+        head = [str(x) for x in (preview.get('head') or ())]
+        more = lines - len(head)
+        body = '\n'.join('    ' + h for h in head)
+        tail = f'\n    …（其余 {more} 行）' if more > 0 else ''
+        return f'\n\n⚠ 这一拍在产物里是 **{lines} 行**（不是 1 行）：\n{body}{tail}'
+
     def restore_card(self):
         """
         撤销**最近一次结构编辑**（插卡或删卡，可连按多级）。

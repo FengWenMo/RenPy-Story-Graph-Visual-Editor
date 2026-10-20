@@ -154,6 +154,7 @@ KEEP = {
     '_focus_into_card_page': '页切换的配套',
     '_sync_action_states': '全局动作可用性（它读的东西最多）',
     '_update_crumb': '面包屑',
+    '_beat_lines_hint': '面包屑的一部分：这一拍在产物里占几行',
     '_back_to_graph': '回结构页',
     '_open_selected_in_card': '页切换 + 载入，两头都碰',
     '_on_zoom_changed': '画布缩放 → 状态栏',

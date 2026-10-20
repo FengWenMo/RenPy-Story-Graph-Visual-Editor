@@ -256,9 +256,9 @@ class TestUnknownRoleFailsClosed:
     一个被手改成 `role='admin'`（或迁移写坏）的成员会被**当成 editor 放行**
     改内容。权限判断的方向必须是"认不出就少给"。
 
-    ⚠ 空串（**没登记**的成员 → 调用方兜底 editor）是另一回事：那是"本地单人
-    第一次打开"的老语义，和"库里有这条人、但角色是乱码"完全不同 ——
-    两者从前都落在 editor 上，这才是漏洞的形状。
+    ⚠ "没登记"是另一回事（2026-10-21 收口）：`role_of` 现在要求调用方
+    **明写** `default=…`——本地单人那条口子（未登记 = editor）只存在于
+    调用点，不再是一个隐含的 `or ROLE_EDITOR`。
     """
 
     def test_unknown_role_returns_viewer(self, tmp_path):
@@ -268,8 +268,8 @@ class TestUnknownRoleFailsClosed:
                 'INSERT INTO users(id, display_name, role, created_at) '
                 'VALUES(?,?,?,?)', ('eve', 'eve', 'admin', cs._now()))
         with cs.connect(db) as conn:
-            assert cs.role_of(conn, 'eve') == cs.ROLE_VIEWER, (
-                '认不出的角色被当成了 editor（fail-open）')
+            assert cs.role_of(conn, 'eve', default=cs.ROLE_EDITOR) \
+                == cs.ROLE_VIEWER, '认不出的角色被当成了 editor（fail-open）'
 
     def test_unknown_role_cannot_manage_members(self, tmp_path):
         db, _ = _seed(tmp_path)
@@ -291,8 +291,91 @@ class TestUnknownRoleFailsClosed:
         roles = {m['id']: m['role'] for m in cs.members(db)}
         assert roles['eve'] == cs.ROLE_VIEWER
 
-    def test_unregistered_user_still_gets_no_role(self, tmp_path):
-        """没登记的人仍然是空串（本地单人那条口子不许被这条改动误伤）。"""
+    def test_unregistered_user_gets_the_callers_default(self, tmp_path):
+        """
+        没登记的人 → **调用方明写的那个 default**（本地单人那条口子）。
+
+        从前是"空串 + 各处 `or ROLE_EDITOR`"：忘补一处就静默变只读。
+        现在不写 `default=` 直接 TypeError，写了才生效。
+        """
         db, _ = _seed(tmp_path)
         with cs.connect(db) as conn:
-            assert cs.role_of(conn, 'nobody-yet') == ''
+            assert cs.role_of(conn, 'nobody-yet',
+                              default=cs.ROLE_EDITOR) == cs.ROLE_EDITOR
+            assert cs.role_of(conn, 'nobody-yet',
+                              default=cs.ROLE_VIEWER) == cs.ROLE_VIEWER
+            # 默认值也认不出 → 最小权限（不因为调用方写错就放行）
+            assert cs.role_of(conn, 'nobody-yet',
+                              default='admin') == cs.ROLE_VIEWER
+
+    def test_the_default_argument_is_mandatory(self, tmp_path):
+        """**类型上**绕不过去：漏了 `default` 是 TypeError，不是安静的错误答案。"""
+        db, _ = _seed(tmp_path)
+        with cs.connect(db) as conn:
+            with pytest.raises(TypeError):
+                cs.role_of(conn, 'nobody-yet')
+
+
+class TestOwnerClaim:
+    """
+    "无 owner 时可认领"：迁移必需，但必须**只用一次**、并且说出来。
+
+    这不是安全边界（工具没有认证，`--user` 默认 anonymous，谁都能传名字）。
+    能做的有两件事：审计留痕 + 让调用方明说"这是本库第一次认领"。
+    """
+
+    def _no_owner_db(self, tmp_path, users=('alice', 'bob')):
+        """
+        一个**既没有 owner、又有成员**的库（schema 2 老库迁移后的样子）。
+
+        ⚠ `init_db(owner='')` 会自动把**第一个成员**提成 owner（新库总得
+        有人能管），所以这里必须自己插成员 —— 否则测不到认领那条路。
+        """
+        db = tmp_path / 'c.db'
+        cs.init_db(db)
+        with cs.connect(db, write=True) as conn:
+            for u in users:
+                cs.ensure_user(conn, u)
+            assert cs._has_owner(conn) is False
+        return db
+
+    def test_first_claim_is_flagged_once(self, tmp_path):
+        db = self._no_owner_db(tmp_path)
+        with cs.connect(db) as conn:
+            assert cs._has_owner(conn) is False
+        first = cs.set_role(db, 'alice', 'owner', actor='alice')
+        assert first['ok'] and first['claimed'] is True, first
+        # 第二次：已经有 owner 了，bob 不是 owner → 被拦
+        second = cs.set_role(db, 'bob', 'owner', actor='bob')
+        assert second['ok'] is False, second
+        assert '所有者' in second['reason']
+
+    def test_the_claim_is_written_to_the_audit(self, tmp_path):
+        """认领要留痕：审计里有 `set_role`，detail 里 `claimed: true`。"""
+        db = self._no_owner_db(tmp_path, users=('alice',))
+        cs.set_role(db, 'alice', 'owner', actor='alice')
+        with cs.connect(db) as conn:
+            rows = [dict(r) for r in conn.execute(
+                'SELECT actor, action, detail FROM audit ORDER BY ts').fetchall()]
+        claims = [r for r in rows if r['action'] == 'set_role'
+                  and '"claimed": true' in str(r['detail'])]
+        assert claims, rows
+        assert claims[0]['actor'] == 'alice'
+
+    def test_owner_state_reports_the_truth(self, tmp_path):
+        """"本库尚无所有者"必须是查得出来的事实，不是等出事才发现。"""
+        db = self._no_owner_db(tmp_path)
+        st = cs.owner_state(db)
+        assert st['has_owner'] is False and st['members'] == 2, st
+        cs.set_role(db, 'alice', 'owner', actor='alice')
+        st = cs.owner_state(db)
+        assert st['has_owner'] is True and st['owner'] == 'alice', st
+
+    def test_empty_role_in_the_db_shows_as_viewer(self, tmp_path):
+        """库里 `role=''` 是脏值：清单显示"只读"，与拦截口径一致。"""
+        db = tmp_path / 'c.db'
+        cs.init_db(db, users=['alice', 'bob'], owner='alice')
+        with cs.connect(db, write=True) as conn:
+            conn.execute("UPDATE users SET role='' WHERE id='bob'")
+        roles = {m['id']: m['role'] for m in cs.members(db)}
+        assert roles['bob'] == cs.ROLE_VIEWER, roles

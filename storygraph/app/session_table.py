@@ -258,6 +258,92 @@ class TableSessionMixin:
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
                 'label': beat.label, 'count': len(self.beats)}
+    def delete_preview(self, idx: int, cascade: bool = False) -> dict:
+        """
+        删这一拍会让**产物**少什么（几行、前几行是什么）—— **不改任何状态**。
+
+        为什么需要（用户 2026-10-21 实测）：
+
+        > breakend.0027 这一拍包含 7 行代码 + 1 句台词……删这一拍就是删 8 行，
+        > -8+2=-6，数目完全对。所以数据是对的，问题是**人看不见**：这一拍的
+        > 源码写在表里「代码」那一格，而 Excel 单元格默认只有一行高，滚动时
+        > 根本看不出里面塞了 7 行。
+
+        确认框从前只写"谁：台词"，而删掉的可能是 8 行（7 行代码 + 1 句台词）。
+        这里按**与导出一模一样的渲染路径**算出那几行，交给界面原样说出来 ——
+        不比改作用域便宜得更划算的东西了：它直接对上"不许静默丢行"。
+
+        返回 `{ok, count, lines, head, beats, blocked, blocked_count,
+        can_cascade, error}`；`head` 是前几行（最多 3 行，已去掉缩进）。
+        """
+        from copy import copy
+
+        empty = {'ok': False, 'error': '', 'count': 0, 'lines': 0, 'head': [],
+                 'beats': [], 'blocked': '', 'blocked_count': 0,
+                 'can_cascade': False}
+        if not self.has(idx):
+            return dict(empty, error='这一拍不存在')
+        if len(self.beats) <= 1:
+            # 与 `delete_beat` 同一条规矩：预览也不许说"能删"然后真删时被拒
+            return dict(empty, error='一章至少要留一拍')
+        try:
+            # **在副本上试删**：`from_beats` 不复制列表，直接拿 self.beats 建
+            # 文档会在真文档上动结构（预览不许有副作用）。
+            temp = ChapterDocument.from_beats(
+                [copy(b) for b in self.beats],
+                source_path=getattr(self, 'script_path', None))
+            removed = temp.remove_beat_at(int(idx), cascade=bool(cascade))
+        except ChapterTreeError as e:
+            return dict(empty, error=str(e), blocked=e.kind,
+                        blocked_count=int(getattr(e, 'count', 0) or 0),
+                        can_cascade=e.kind == 'has_children')
+        except Exception as e:                    # noqa: BLE001 - 预览失败不拦操作
+            swallow('app.session_table.delete_preview', e)
+            return dict(empty, error='算不出这一拍会删掉什么')
+
+        rows, head, total = [], [], 0
+        for beat in removed:
+            lines = self.rendered_lines_of(beat)
+            total += len(lines)
+            for ln in lines:
+                if len(head) < 3:
+                    head.append(str(ln).strip())
+            rows.append({
+                'line_id': str(getattr(beat, 'line_id', '') or ''),
+                'speaker': str(getattr(beat, 'speaker', '') or ''),
+                'text': str(getattr(beat, 'text', '') or '')[:60],
+                'lines': len(lines),
+            })
+        return {'ok': True, 'error': '', 'count': len(removed),
+                'lines': total, 'head': head, 'beats': rows,
+                'blocked': '', 'blocked_count': 0, 'can_cascade': False}
+
+    def rendered_lines_of(self, beat) -> list:
+        """
+        这一拍在**产物**里是哪些行（与导出同一条渲染路径，不另写一套）。
+
+        `deepcopy` 是必须的：`hydrate_from_dsl` 会往拍上写结构化字段，
+        而这里只是"预览会删掉什么"，绝不许改到用户手里那一拍。
+        """
+        from copy import deepcopy
+
+        try:
+            probe = deepcopy(beat)
+        except Exception as e:                    # noqa: BLE001 - 拷不动就原地渲染
+            swallow('app.session_table.rendered_lines_of.copy', e)
+            probe = beat
+        try:
+            from storygraph.story.beat_build import hydrate_from_dsl
+            hydrate_from_dsl([probe], getattr(self, 'symbols', None))
+        except Exception as e:                    # noqa: BLE001 - 不 hydrate 也要给行
+            swallow('app.session_table.rendered_lines_of.hydrate', e)
+        try:
+            from storygraph.story.beat_render import render_beat_to_rpy
+            return list(render_beat_to_rpy(probe))
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_table.rendered_lines_of.render', e)
+            return []
+
     def delete_beat(self, idx: int, cascade: bool = False) -> dict:
         """
         删掉第 idx 张卡片，返回 `{ok, index, removed, count}`。

@@ -427,6 +427,10 @@ def _cmd_collab(args) -> int:
             print('成员：' + '，'.join(
                 f"{u['id']}[{u.get('role_label') or u.get('role') or '编辑'}]"
                 for u in s['users']))
+        # 所有者是**事实**，不是暗示：没有 owner 的库谁都能认领一次。
+        st = cs.owner_state(db)
+        print('所有者：' + (st['owner'] if st['has_owner']
+                        else '**还没有**（任何成员可认领一次）'))
         if s['labels']:
             print('按章：')
             for l in s['labels']:
@@ -451,9 +455,26 @@ def _cmd_collab(args) -> int:
             print('role 需要 --member 指定成员', file=sys.stderr)
             return 2
         res = cs.set_role(db, args.member, args.role, actor=args.user)
-        print(f"已把 {res['member']} 设为 {res['role']}" if res['ok']
-              else f"失败：{res['reason']}")
-        return 0 if res['ok'] else 1
+        if not res['ok']:
+            print(f"失败：{res['reason']}")
+            return 1
+        print(f"已把 {res['member']} 设为 {res['role']}")
+        if res.get('claimed'):
+            # **说出来**：工具没有认证，"谁先认领谁就是所有者"是事实，
+            # 但别让人以为这库一直是有主的（审计里已记 claimed=true）。
+            print('⚠ 这是本库**第一次**认领所有者（此前没有 owner）——'
+                  '已写入审计。'
+                  f'（之后想换人，得由 owner 用 role --member … --role owner）')
+        return 0
+
+    if action == 'owner':
+        st = cs.owner_state(db)
+        if st['has_owner']:
+            print(f"所有者：{st['owner']}（成员 {st['members']} 人）")
+        else:
+            print(f"本库**尚无所有者**（成员 {st['members']} 人）："
+                  '谁先用 role --member <自己> --role owner 认领，谁就是所有者。')
+        return 0
 
     if action == 'members':
         for m in cs.members(db):
@@ -870,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
     sp.add_argument('action',
                     choices=['init', 'pull', 'push', 'status', 'lock',
-                             'unlock', 'renew', 'role', 'members',
+                             'unlock', 'renew', 'role', 'owner', 'members',
                              'approve', 'import-ir'])
     sp.add_argument('--db', default=None, help='数据库路径（默认 <项目>/collab.db）')
     sp.add_argument('--project', default='.', help='项目根目录')

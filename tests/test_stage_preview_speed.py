@@ -241,3 +241,55 @@ class TestPreviewSpeed:
             w.stop_play()
         assert w.idx >= 1, '播放没往前走（被渲染卡住了）'
         w.close()
+
+
+# ==================================================================
+#  三、无头 / CI：真实画面也要能自动验（用户 2026-10-21）
+# ==================================================================
+
+class TestHeadlessRendering:
+    """
+    "无头环境出不了图、一直被'正在渲染…'占住，CI 只能覆盖算法层"。
+
+    根因不是渲染坏了，是**等法不对**：正常播放走后台线程 + Qt 信号，
+    结果要事件循环转起来才回到 GUI 线程；"构造完立刻断言"当然永远没有图。
+    同步那条路是 `StageCanvas.render_now()` —— 这里钉住它，CI 从此能看像素。
+    """
+
+    def test_render_now_produces_a_real_picture_without_an_event_loop(
+            self, qapp, ui_project):
+        from storygraph.app.editor import EditorSession
+        from storygraph.ui_qt import tokens as T
+        from storygraph.ui_qt.stage_preview import StageCanvas
+
+        s = EditorSession(project_root=ui_project)
+        s.load(str(ui_project / 'game' / 'script' / 'ch01.rpy'))
+        frames = s.frames()
+        canvas = StageCanvas(None, project_root=ui_project, engine_render=True)
+        canvas.resize(896, 504)
+
+        got = canvas.render_now(frames[0], 0)      # **不转事件循环**
+        assert got is not None and got.image is not None, \
+            '同步渲染没出图（CI 就永远只能测算法层）'
+        assert canvas._rendered_pix is not None
+        assert not canvas.is_pending()
+
+        shot = canvas.grab().toImage()
+        px = shot.pixelColor(shot.width() // 4, shot.height() // 4)
+        assert px.name().lower() != QColor(
+            T.t('stage.letterbox')).name().lower(), \
+            f'画出来还是底板色（{px.name()}）'
+
+    def test_render_now_reports_warnings_headlessly(self, qapp, ui_project):
+        """缺图名单在无头下也拿得到（横条上那条警告不是只在真机上有效）。"""
+        from storygraph.app.editor import EditorSession
+        from storygraph.ui_qt.stage_preview import StageCanvas
+
+        s = EditorSession(project_root=ui_project)
+        s.load(str(ui_project / 'game' / 'script' / 'ch01.rpy'))
+        frames = s.frames()
+        canvas = StageCanvas(None, project_root=ui_project, engine_render=True)
+        canvas.resize(896, 504)
+        canvas.render_now(frames[0], 0)
+        assert isinstance(canvas.render_warnings(), list)
+

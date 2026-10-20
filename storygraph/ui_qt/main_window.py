@@ -2105,8 +2105,27 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._crumb.setText(f'剧情结构 › {name or "（未载入）"}')
             self._crumb_hint.setText(
                 f'第 {i + 1 if i >= 0 else 0} / {n} 拍'
+                f'{self._beat_lines_hint(i)}'
                 f'　·　改完按「💾 保存这一拍」，'
                 f'「← 返回剧情结构」回第一屏')
+
+    def _beat_lines_hint(self, idx: int) -> str:
+        """
+        当前这一拍在**产物**里占几行（`（产物 8 行）`；一行拍不显示）。
+
+        用户 2026-10-21：一拍可能渲染成 7 行代码 + 1 句台词，而表里那些行
+        都塞在「代码」那一格里 —— Excel 单元格只有一行高，看不出来。
+        所以至少在这一拍被选中时说出来（一拍 ~0.3ms，不用缓存）。
+        """
+        try:
+            if idx < 0 or idx >= len(self._session):
+                return ''
+            beat = self._session.beats[idx]
+            n = len(self._session.rendered_lines_of(beat))
+        except Exception as e:                    # noqa: BLE001 - 提示失败不影响导航
+            swallow('main_window._beat_lines_hint', e)
+            return ''
+        return f'（产物 {n} 行）' if n > 1 else ''
 
     def _back_to_graph(self):
         """

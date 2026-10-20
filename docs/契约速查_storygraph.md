@@ -3564,3 +3564,95 @@ RuntimeWarning），表现为"画面永远停在正在渲染" —— 最难查�
 "真实引擎截图校准"仍是另一条路（那要起 Ren'Py 本体），这里优化的是
 `app.stage_render` 的离屏合成。
 
+---
+
+# 24. 删一拍要看得见"少了几行"；`role_of` 收口；无头也能验真实画面（2026-10-21）
+
+用户拿真机跑了四个场景（`D:\tmp\p0\scope_*.py`），结论是这两个取舍都对，
+并且把**真正该改的地方**指了出来：
+
+> 决策 1 的真风险：不在作用域，在**粒度可见性**……
+> breakend.0027 这一拍包含 7 行代码 + 1 句台词……数据是对的，问题是人看不见。
+
+## 24.1 删除报告：从"谁：台词"到"产物里少 8 行"
+
+一拍可能渲染成多行（真机 `sr_general/game/pomodorro`：45 拍里 **32 拍**多于
+1 行，最多 17 行）。那些行都塞在表的「代码」/「原文」那一格里，Excel 单元格
+只有一行高 —— 人看不见自己删了什么。
+
+会话层新增两个方法（`app/session_table.py`）：
+
+| 方法 | 作用 |
+|---|---|
+| `rendered_lines_of(beat)` | 这一拍在产物里是**哪些行**（`deepcopy` 后 `hydrate_from_dsl` + `render_beat_to_rpy`，与导出同一条路，**不改用户的拍**） |
+| `delete_preview(idx, cascade=False)` | 试删一次（在**副本**文档上），返回 `{ok, count, lines, head, beats, blocked, can_cascade}` |
+
+界面三处（`ui_qt/window_card.py` + `main_window.py`）：
+
+1. **确认框**：多行拍会写「⚠ 这一拍在产物里是 **8 行**（不是 1 行）」+
+   前两行原文 + 「…（其余 N 行）」；单行拍**不加噪音**；
+2. **删完的日志/状态栏**：「已删除第 27 拍（jc：…），产物里少了 8 行
+   （$ renpy.block_rollback() ／ hide screen hidden_timer …）」；
+3. **面包屑**：选中一拍时写「（产物 N 行）」（一拍 ~0.3ms，不缓存）。
+
+判据 `tests/test_delete_visibility.py`（8 条）：会话层算得对/无副作用/块头、
+确认框真的写了、单行不加噪音、删完日志留着数字、面包屑显示/不显示。
+
+## 24.2 `role_of` 收口：未登记不再是"空串 + 各处自己补"
+
+用户的诊断（一字不差地照着改了）：
+
+> `role_of` 用空串表示"未登记"，而"空串 = editor"这个决定散在三处兜底：
+> `_can()` 里 `role or ROLE_EDITOR`、两处调用点 `role_of(...) or ROLE_EDITOR`、
+> `ensure_user` 的 `role if role in ROLES else ROLE_EDITOR`。
+
+现在：
+
+```python
+ROLE_UNREGISTERED = 'unregistered'      # 不在 ROLES 里 → 拿去 _can 就是只读
+def role_of(conn, user_id, *, default): ...   # default 必填（漏了 TypeError）
+def _can(role, action): return action in _ROLE_ACTIONS.get(str(role or ''), frozenset())
+```
+
+- "未登记算什么人"只能写在**调用点**（两处都是 `default=ROLE_EDITOR`，
+  本地单人那条老口子）；
+- `default` 本身认不出 → `viewer`（调用方写错也不放行）；
+- `members()` 里 `role or ROLE_EDITOR` 也改了：库里 `role=''` 是**脏值**，
+  清单显示"只读"，与拦截口径一致（从前显示"编辑"、实际按只读拦）。
+
+判据：`role_of` 必填参数（TypeError）、未登记给 default、default 非法 → viewer、
+空串角色在清单里显示只读。
+
+## 24.3 「无 owner 可认领」：只用一次 + 留痕 + 说得出来
+
+用户的前提摆得很清楚（工具**没有认证**）：`--user` 默认 `anonymous`
+（`cli.py:879`）、`ensure_user` 默认 `editor`（`collab_store.py:283`）——
+所以"陌生人第一次 push 就是 editor"不是漏洞，是**没有身份**这个前提的结果。
+能做的只有三件：
+
+1. **只可能一次**：认领后 `_has_owner` 恒真，那条路自动关闭；
+2. **留痕**：`set_role` 的审计 detail 里带 `claimed: true`（谁、给谁、何时）；
+3. **说出来**：回执带 `claimed=True`；CLI `role` 打印
+   「⚠ 这是本库**第一次**认领所有者」；新增 `collab owner` 动作 + `status`
+   里一行「所有者：**还没有**（任何成员可认领一次）」。
+
+`owner_state(db) -> {'has_owner','owner','members'}` 是那个"事实"的查询接口。
+
+## 24.4 无头 / CI：真实画面能自动验了
+
+用户："「引擎排版」在无头环境出不了图，一直被'正在渲染…'占住。"
+
+根因**不是渲染坏了**，是等法不对：正常播放走后台线程 + Qt 信号，结果要
+事件循环转起来才回到 GUI 线程；"构造完立刻断言"的无头测试当然永远没有图。
+同步那条路是 `StageCanvas.render_now(frame, idx)` —— 已在模块 docstring 里写明，
+并用 `TestHeadlessRendering` 钉住：不转事件循环也能出图，`grab()` 后的像素
+不是底板色，缺图 warnings 也拿得到。
+
+## 24.5 记一笔（没改的）
+
+`表信息` **只记来源文件、不记覆盖了哪些 label**。现在是"读源文件现算"
+（实测四个场景都成立）。已在 `story/table_meta.py` 的 docstring 里写明：
+别把它优化成"按记录集合拼产物"，源文件的 label 会被手工改；真要那样做，
+前提是先对账"记录的集合 vs 文件里真实集合"，对不上必须**说出来**。
+
+

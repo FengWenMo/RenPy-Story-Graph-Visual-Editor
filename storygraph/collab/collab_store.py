@@ -75,6 +75,15 @@ ROLES = (ROLE_OWNER, ROLE_EDITOR, ROLE_VIEWER)
 ROLE_LABELS = {ROLE_OWNER: '所有者', ROLE_EDITOR: '编辑',
                ROLE_VIEWER: '只读'}
 
+#: "这个人**还没登记**" —— 没这一行时 `role_of` 返回它（2026-10-21 收口）。
+#:
+#: 为什么不是空串：空串是个普通字符串，谁都可以 `or ROLE_EDITOR` 一下、
+#: 也可以忘了补 —— 于是**同一份返回值在不同消费点含义不同**（`_can` 里
+#: 空串 = editor，别处空串 = 只读），这正是"同一件事在不同地方不一样"。
+#: 现在"未登记"只有一个名字，而且它**不在 `ROLES` 里**：直接拿去 `_can`
+#: 就是只读（fail-closed）；想放行必须显式 `role_of(..., default=ROLE_EDITOR)`。
+ROLE_UNREGISTERED = 'unregistered'
+
 #: 角色 → 允许的动作。只做**最小可用**的三档：
 #:   · viewer 只读（pull / status 照样能看）；
 #:   · editor 能改（push / lock / 状态 / 资产）；
@@ -303,22 +312,28 @@ def _audit(conn, actor, action, line_id='', detail=''):
 #  成员角色（最小三档：viewer / editor / owner）
 # ==================================================================
 
-def role_of(conn, user_id: str) -> str:
+def role_of(conn, user_id: str, *, default: str) -> str:
     """
-    成员角色：**没登记的成员 → 空串**（调用方按 `editor` 兜底，
-    那是"本地单人第一次打开"的老语义）；**登记了但角色认不出 → `viewer`**。
+    成员角色。**三种返回，含义各不相同**（2026-10-21 收口）：
 
-    为什么认不出要降到最小权限（2026-10-20 修，P3）：从前这里
-    `return role if role in ROLES else ROLE_EDITOR` —— 一个被手改成
-    `role='admin'`（或迁移写坏）的成员会被**当成 editor**放行改内容。
-    权限判断的方向必须是"认不出就少给"，不是"认不出就多给"：
-    空串（未登记）那条口子是给本地单人用的，和"库里有这条人但角色是乱码"
-    完全不是一回事。
+      · 登记了、角色合法 → 那个角色（owner / editor / viewer）；
+      · 登记了、但角色是脏值（手改 `role='admin'`、迁移写坏）→ `viewer`。
+        认不出就少给，**永不**因为脏值放行；
+      · **没登记** → `default`，由调用方**明写**是谁。
+
+    `default` 是**必填的 keyword-only 参数**，不是装饰：从前这里返回空串、
+    再靠 `_can` / 两个调用点各自 `or ROLE_EDITOR` 兜底 —— 忘写一处就静默
+    变成只读（或者反过来悄悄多给权限）。现在"未登记算什么人"只能写在
+    调用点上，漏了是 `TypeError`，不是一个安静的错误答案。
+
+    两个调用点都是 `default=ROLE_EDITOR`（本地单人第一次打开 = 老语义），
+    与 `_can`（认不出的角色 = 什么都不能）**各管一段**，不再互相注释对方。
     """
     row = conn.execute('SELECT role FROM users WHERE id=?',
                        (str(user_id or ''),)).fetchone()
     if row is None:
-        return ''
+        want = str(default or '')
+        return want if want in ROLES else ROLE_VIEWER
     role = str(row['role'] or '')
     return role if role in ROLES else ROLE_VIEWER
 
@@ -343,6 +358,11 @@ def set_role(db_path, member: str, role: str, actor: str = '') -> dict:
 
     为什么留"无 owner 可认领"：schema 2 的老库里所有成员都是默认 editor，
     没有这个口子就永远没人能设第一个 owner —— 迁移后权限会死锁。
+
+    ⚠ 这个口子**不是安全边界**（工具没有认证：`--user` 默认 anonymous，
+    谁都能传任意名字）。它能做的只有两件事：把"谁在什么时候认领的"
+    写进审计（`set_role`，detail 里带 `claimed: true`），并且回执里带
+    `claimed=True` 让调用方**说出来** —— 别让人以为"这库一直是有主的"。
     """
     member = str(member or '').strip()
     role = str(role or '').strip()
@@ -350,17 +370,44 @@ def set_role(db_path, member: str, role: str, actor: str = '') -> dict:
         return {'ok': False, 'reason': '要指定成员（--member）'}
     if role not in ROLES:
         return {'ok': False, 'reason': f'角色只能是 {"/".join(ROLES)}'}
+    had_owner = claimed = False
     with connect(db_path, write=True) as conn:
         ensure_user(conn, actor or member)
-        if _has_owner(conn):
-            caller = role_of(conn, actor or member) or ROLE_EDITOR
+        had_owner = _has_owner(conn)
+        if had_owner:
+            caller = role_of(conn, actor or member, default=ROLE_EDITOR)
             if not _can(caller, 'manage'):
                 return {'ok': False,
                         'reason': f'只有所有者能改成员角色（你是 {caller}）'}
         _set_role(conn, member, role)
+        # 第一次认领（本库此前没有 owner）单记一笔：**只可能发生一次** ——
+        # 之后 `_has_owner` 恒真，认领这条路就关了。审计里带 `claimed`，
+        # 查"这库是谁、什么时候认领的"一条就够，不用再翻别的表。
+        claimed = bool(not had_owner and role == ROLE_OWNER)
         _audit(conn, actor or member, 'set_role', member,
-               {'role': role})
-    return {'ok': True, 'member': member, 'role': role}
+               {'role': role, 'claimed': claimed})
+    return {'ok': True, 'member': member, 'role': role, 'claimed': claimed}
+
+
+def owner_state(db_path) -> dict:
+    """
+    本库有没有所有者（`{'has_owner','owner','members'}`）。
+
+    给"本库尚无所有者：谁先认领谁就是"这句话用的 —— 那是**事实**，
+    不该等到有人越权了才发现。工具没有认证，所以这里只报状态、不假装安全。
+    """
+    try:
+        with connect(db_path) as conn:
+            row = conn.execute(
+                'SELECT id FROM users WHERE role=? ORDER BY id LIMIT 1',
+                (ROLE_OWNER,)).fetchone()
+            n = conn.execute('SELECT COUNT(*) AS n FROM users').fetchone()
+    except Exception as e:                        # noqa: BLE001 - 读不到就当没库
+        swallow('collab_store.owner_state', e)
+        return {'has_owner': False, 'owner': '', 'members': 0}
+    return {'has_owner': row is not None,
+            'owner': str(row['id']) if row is not None else '',
+            'members': int((n['n'] if n is not None else 0) or 0)}
 
 
 def members(db_path) -> list:
@@ -375,20 +422,34 @@ def members(db_path) -> list:
             'SELECT id, display_name, role, created_at FROM users '
             'ORDER BY id').fetchall()]
     for r in rows:
-        role = str(r.get('role') or ROLE_EDITOR)
+        # **空串也是脏值**（从前这里 `or ROLE_EDITOR`，于是库里 role='' 的
+        # 成员在清单上显示"编辑"、实际按只读拦 —— 正是要避免的那种不一致）
+        role = str(r.get('role') or '')
         r['role'] = role if role in ROLES else ROLE_VIEWER
         r['role_label'] = ROLE_LABELS.get(r['role'], r['role'])
     return rows
 
 
 def _actor_role(conn, actor: str) -> str:
-    """调用者角色：未登记先按默认 editor 登记（保持既有"首次出现即成员"）。"""
+    """
+    调用者角色：未登记先按默认 editor 登记（保持既有"首次出现即成员"）。
+
+    这就是 `role_of(default=...)` 存在的意义：**哪条路把"未登记"当 editor**
+    写在这一行里，`role_of` 自己不再猜。
+    """
     ensure_user(conn, actor)
-    return role_of(conn, actor) or ROLE_EDITOR
+    return role_of(conn, actor, default=ROLE_EDITOR)
 
 
 def _can(role: str, action: str) -> bool:
-    return action in _ROLE_ACTIONS.get(role or ROLE_EDITOR, frozenset())
+    """
+    这个角色能不能做这件事。
+
+    **认不出的角色（含 `ROLE_UNREGISTERED`、空串）→ 什么都不能**：
+    权限判断的方向是"认不出就少给"，所以这里没有 `or ROLE_EDITOR`。
+    未登记该算什么人由 `role_of(..., default=…)` 的调用点决定，见那里。
+    """
+    return action in _ROLE_ACTIONS.get(str(role or ''), frozenset())
 
 
 # ==================================================================
