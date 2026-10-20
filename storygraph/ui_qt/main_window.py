@@ -1927,6 +1927,20 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '之后这些格就是表格列、候选值就是下拉。'
             '候选分栏与项目清单（删除 / 重置）在同一个弹窗里。',
             primary=True)
+        # ⭐ 「导出」在最上面那一栏（用户 2026-10-21：
+        #    "导出应当放在最上面那一栏……因为太常用了"）。
+        #
+        #   它跟"现在在哪一页"**无关** —— 导的是**已载入的那一章**，所以两页
+        #   顶部都有它。位置也有讲究：这条工具栏在窄窗口里会溢出进「»」菜单
+        #   （实测 1500px 宽时装不下，需要 2349px），排在后面的按钮等于不存在；
+        #   所以它排在第一个（「🧩 自定义语句」之后，用户 2026-10-10 要求那个
+        #   入口在最上方，判据 `test_the_toolbar_entry_is_the_first_action`）。
+        self._export_action = act('⤓ 导出 .rpy', self.export_script,
+                                  '把这一章写回磁盘（编译 + 增量补丁 + 安全门禁）。\n'
+                                  '最常用的落盘动作：**两页顶部都有它**，'
+                                  '不用先回卡片页。\n'
+                                  '路径默认是这张表该去的地方，可以改到 build/ 下先看一眼。',
+                                  primary=True)
         # ⚠ 放在「自定义动作」**后面**：用户早先明确要求这个入口在**最上方**
         #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），
         #   判据 `test_the_toolbar_entry_is_the_first_action` 钉着这一条。
@@ -1981,6 +1995,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                                 '回到第一屏（Esc）')
         self._save_action = act('💾 保存这一拍', self.save_current_beat,
                                 '把卡片改动提交到当前拍（Ctrl+S）', primary=True)
+        # ⭐ 同一条理由（用户 2026-10-21）：导出太常用，紧跟「保存」，
+        #   不排在「下一句台词」后面 —— 那条位置在窄窗口里会溢进「»」。
+        act('⤓ 导出 .rpy', self.export_script,
+            '生成/增量补丁写回（过安全门禁）\n'
+            '与结构页顶部那个是同一个动作：两页都能直接导出',
+            primary=True)
         self._undo_action = act('↩ 撤销修改', self.undo_current_beat,
                                 '恢复成上一次保存时的样子（Ctrl+Z，只这一拍）')
         self._prev_action = act('◀ 上一拍', self.prev_beat, 'Alt+↑')
@@ -1995,7 +2015,6 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   那是"存错拍"级别的隐患）—— 见 `CardPageMixin.next_dialogue`。
         act('💬 下一句台词 ▶', self.next_dialogue,
             '跳到下一拍**有台词**的，并把光标放进台词框（快速过一遍台词用）')
-        act('⤓ 导出 .rpy', self.export_script, '生成/增量补丁写回（过安全门禁）')
         act('⤒ 从剧本表写回', self.export_from_table,
             '选一张演出表 .xlsx → 写回 .rpy（导出前会先给你看门禁结论）')
         act('🔄 刷新派生视图', self.refresh_stage_views,

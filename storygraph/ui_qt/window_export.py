@@ -99,7 +99,10 @@ class WindowExportMixin:
     def export_script(self):
         """导出这一章（编译 + 增量补丁 + 安全门禁，全在会话里）。"""
         if not len(self._session):
-            self._status('没有可导出的内容。')
+            # 这个动作现在两页顶部都有（用户 2026-10-21），所以**结构页上点了
+            # 也要说清"差哪一步"** —— 不能只有一句"没有可导出的内容"。
+            self._status('还没有载入章节：先在图上双击一个模块进卡片页'
+                         '（或点「✎ 直接编辑单章」）载入一章，再导出。')
             return
         mark = self._swallow_mark()
         self.apply_current_beat()

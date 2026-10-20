@@ -1072,7 +1072,15 @@ class TestStagePreview:
                                   sound=False)
 
     def test_shows_first_frame(self, app, project):
+        """
+        打开就显示第一拍。
+
+        ⚠ 第一帧现在排在**下一个事件循环回合**（用户 2026-10-21："很难加载"：
+        构造 + gui 解析 + 首帧合成 ≈ 0.5~1.2 秒全发生在窗口出来之前）。
+        所以这里先转一个回合 —— 判据本身没变：打开就有第 1 拍。
+        """
         w = self._window(app, project)
+        app.processEvents()
         assert w.idx == 0
         assert w._pos.text() == f'1 / {len(w.frames)}'
         w.close()
@@ -1234,13 +1242,72 @@ class TestStagePreview:
                                                                project):
         """
         引擎排版模式下没有"逐张立绘解码"这个中间态：整帧要么在合成、
-        要么已经好了。合成期间**不许贴上一帧**（那会让人以为这拍就是这样）。
+        要么已经好了。合成期间 `_rendered_pix` **必须是 None**（它只代表
+        "这一拍画好了"），画面靠 `_last_good_pix` 顶着 —— 见下一条。
         """
         w = self._window(app, project)
         assert w._canvas.engine_render
         w.show_frame(0)
         assert w._canvas._render_pending, '没有进入"整帧合成中"状态'
         assert w._canvas._rendered_pix is None, '还没合成完就贴了画面'
+        w.close()
+
+    def test_a_pending_frame_keeps_the_last_picture_instead_of_blacking_out(
+            self, app, project):
+        """
+        **用户 2026-10-21 报的问题**："连续播放时速度不够常常变黑屏"。
+
+        从前：换一拍就把上一张清掉、`_paint_engine` 也刻意"不画上一帧"，
+        于是每拍都是"黑屏 → 图"。现在：这一拍还在合成时，**上一张顶着**，
+        右下角一个小角标说明"正在渲染这一拍"，图到了自然顶上来。
+
+        判据是**像素**（不是标志位）：还没渲染过任何一帧时画出来是深色底板
+        （那是"真的没东西可画"），一旦有过一帧，再翻到没画好的那一拍，
+        画面里就还是那张图 —— 中间那块像素不是底板色。
+        """
+        from storygraph.ui_qt import tokens as T
+
+        import time
+
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        w = self._window(app, project)
+        canvas = w._canvas
+        assert canvas.engine_render
+
+        # ① 一帧都没画过：底板 + 一行说明（这是唯一该黑的时候）
+        w.show_frame(0)
+        assert canvas._rendered_pix is None and canvas._last_good_pix is None
+        empty = canvas.grab().toImage()
+        # 取样点避开正中央（那里有一行"正在按引擎排版渲染…"的字）
+        mid = empty.pixelColor(empty.width() // 4, empty.height() // 4)
+        from PySide6.QtGui import QColor
+        assert mid.name().lower() == QColor(
+            T.t('stage.letterbox')).name().lower(), \
+            f'连一帧都没有的时候应该是底板色，实际 {mid.name()}'
+
+        # ② 等第一帧真的画好
+        deadline = time.monotonic() + 5.0
+        while canvas._rendered_pix is None and time.monotonic() < deadline:
+            loop = QEventLoop()
+            QTimer.singleShot(30, loop.quit)
+            loop.exec()
+        assert canvas._rendered_pix is not None, '第一帧没渲染出来'
+
+        # ③ 翻到**最后一拍**（它还在排队 —— 提前合成只到后 4 拍）：
+        #    这时画布必须马上画上一张顶着，而不是黑一下
+        assert len(w.frames) > 5, '这条判据要一章够长的脚本'
+        last = len(w.frames) - 1
+        canvas.show_frame(w.frames[last], last)      # 不给 ahead：必定还没画好
+        assert canvas._rendered_pix is None, '这一拍不该已经画好（那就没测到）'
+        assert canvas._last_good_pix is not None
+        assert canvas.is_pending()
+        shot = canvas.grab().toImage()
+        # 取一块**避开正中央那行说明和右下角角标**的区域
+        px = shot.pixelColor(shot.width() // 4, shot.height() // 4)
+        assert px.name().lower() != QColor(
+            T.t('stage.letterbox')).name().lower(), \
+            f'换拍时黑屏了（像素 {px.name()} 就是底板色）'
         w.close()
 
     def test_audio_notes_are_shown_on_the_status_line(self, app, project):
@@ -1252,16 +1319,69 @@ class TestStagePreview:
         assert note in text, text
         assert w._summary_text(f, {}) == w._summary_text(f, None)
 
-    def test_next_frames_are_prefetched(self, app, project):
+    def test_engine_mode_prefetches_the_next_renders(self, app, project):
         """
-        翻到下一拍之前就把它要用的图解起来 —— 这是"不再有加载框一闪"的机制。
+        引擎排版模式下，"预取"是**提前合成整帧**（不是提前解素材）。
 
-        不预取的话，每一拍第一次显示都要现解（大盘立绘 300～600ms），
-        那段时间只能看着占位框。
+        用户 2026-10-21："一拍一拍渲染太慢了！……连续播放时速度不够"。
+        翻到某一拍时往后几拍就该开始合成 —— 轮到它们时只是贴上去。
+        """
+        from storygraph.ui_qt import stage_preview as SP
+
+        import time
+
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        w = self._window(app, project)
+        assert w._canvas.engine_render
+        w.show_frame(0)
+        deadline = time.monotonic() + 8.0
+        want = min(len(w.frames), 1 + min(SP.ENGINE_AHEAD, 2))
+        while time.monotonic() < deadline and \
+                sum(1 for f in w.frames[:want]
+                    if w._canvas._cache_get(f) is not None) < want:
+            loop = QEventLoop()
+            QTimer.singleShot(30, loop.quit)
+            loop.exec()
+        cached = [i for i, f in enumerate(w.frames[:want])
+                  if w._canvas._cache_get(f) is not None]
+        assert len(cached) >= 2, f'往后几拍没有提前合成：缓存 {cached}'
+        w.close()
+
+    def test_revisiting_a_beat_uses_the_rendered_cache(self, app, project):
+        """
+        回过已经画过的拍时**不再重算**（`app.stage_render` 一拍 25~300ms，
+        来回翻就是每翻一次等一次）。缓存命中必须**同步**出图。
+        """
+        import time
+
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        w = self._window(app, project)
+        canvas = w._canvas
+        w.show_frame(0)
+        deadline = time.monotonic() + 8.0
+        while canvas._rendered_pix is None and time.monotonic() < deadline:
+            loop = QEventLoop()
+            QTimer.singleShot(30, loop.quit)
+            loop.exec()
+        assert canvas._rendered_pix is not None
+        first = canvas._rendered_pix
+        w.show_frame(1) if len(w.frames) > 1 else None
+        w.show_frame(0)
+        assert canvas._rendered_pix is not None, '回到画过的拍还要等一下（没命中缓存）'
+        assert canvas._rendered_pix.cacheKey() == first.cacheKey()
+        w.close()
+
+    def test_diagram_mode_prefetches_images(self, app, project):
+        """
+        示意图模式（引擎排版关闭）仍然预解**下一拍要用的图**：
+        那条路上图是一张张解出来的，预解就是"不再有加载框一闪"的机制。
         """
         from storygraph.app.stage import image_index, resolve_frame_assets
 
         w = self._window(app, project)
+        w._canvas.engine_render = False          # 旧路径
         calls = []
         w._canvas._loader.prefetch = lambda path, size=None: calls.append(
             str(path))

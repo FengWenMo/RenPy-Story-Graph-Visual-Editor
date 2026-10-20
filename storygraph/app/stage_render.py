@@ -267,6 +267,60 @@ def _mtime(path) -> int:
         return 0
 
 
+@lru_cache(maxsize=8)
+def _image_cached(path: str, mtime: int):
+    """
+    只读一次盘的 RGBA 图（文本框底图 / 名条底图这种"每拍都一样"的素材）。
+
+    为什么需要：`_draw_say` 从前**每一拍**都 `Image.open` + `convert('RGBA')`
+    一次文本框底图（真机上的 textbox.png 是整屏宽、1080p 级别）。播放时
+    一拍一次，纯属白读；缓存按 `(路径, mtime)` 失效 —— 作者改了底图照样生效。
+    """
+    if not _PIL_OK:
+        return None
+    try:
+        with Image.open(path) as src:
+            return src.convert('RGBA')
+    except Exception as e:                    # noqa: BLE001 - 坏图不炸预览
+        swallow('stage_render.image_cached', e)
+        return None
+
+
+@lru_cache(maxsize=16)
+def _nine_slice_cached(path: str, mtime: int, w: int, h: int, borders: tuple):
+    """`_nine_slice` 的缓存版（名条底图每拍一样，九宫格切一次就够）。"""
+    img = _image_cached(path, mtime)
+    if img is None:
+        return None
+    try:
+        return _nine_slice(img, int(w), int(h), borders)
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.nine_slice_cached', e)
+        return None
+
+
+def _fill(canvas, color):
+    """
+    整屏刷一个颜色（`color` 收 Ren'Py 写法 `#rrggbb`，也收现成的 RGBA 元组）。
+
+    **不透明时**走 `paste`：逐像素直写，比"造一张整屏 RGBA 再 alpha 混合"
+    快一个量级（1920×1080 每帧都要刷底色，这是实打实的一拍一次）。
+    半透明色仍然必须 `alpha_composite`（直写会把底下的层抠掉）。
+
+    ⚠ 元组**不能**走 `_color`：它按字符串解析（`str((0,0,0,255))` 认不出，
+    会落到白色 fallback —— 黑场会变成白屏，是最难查的那种"看起来没坏"）。
+    """
+    if isinstance(color, (tuple, list)):
+        vals = list(color)
+        rgba = tuple(vals[:3]) + ((vals[3],) if len(vals) > 3 else (255,))
+    else:
+        rgba = _color(color)
+    if rgba[3] >= 255:
+        canvas.paste(tuple(rgba[:3]), (0, 0, canvas.width, canvas.height))
+    else:
+        canvas.alpha_composite(Image.new('RGBA', canvas.size, rgba))
+
+
 def _paste(canvas, img, left: float, top: float, alpha: float = 1.0):
     """把 RGBA 图按屏幕坐标叠上去（自动裁掉画面外部分）。"""
     if img is None:
@@ -345,7 +399,7 @@ def _box_for(spec, at, ctx, natural):
 def _draw_background(canvas, frame, ctx, result):
     scene = str(getattr(frame, 'scene', '') or '')
     if not scene:
-        canvas.alpha_composite(Image.new('RGBA', canvas.size, (0, 0, 0, 255)))
+        _fill(canvas, (0, 0, 0, 255))
         return
     color = None
     path = _resolve_path(scene, ctx)
@@ -370,10 +424,9 @@ def _draw_background(canvas, frame, ctx, result):
                 _paste(canvas, img, left, top)
                 return
     if color:
-        canvas.alpha_composite(Image.new('RGBA', canvas.size,
-                                         _color(color)))
+        _fill(canvas, color)
         return
-    canvas.alpha_composite(Image.new('RGBA', canvas.size, (18, 18, 24, 255)))
+    _fill(canvas, (18, 18, 24, 255))
     if scene:
         result.warnings.append(f'背景找不到：{scene}')
         result.missing.append(scene)
@@ -459,6 +512,17 @@ def _draw_layers(canvas, frame, ctx, result):
 # ----------------------------------------------------------------------
 #  文本框 / 名条 / 台词
 # ----------------------------------------------------------------------
+
+def _borders_key(borders) -> tuple:
+    """`Frame(...)` 的边框值 → 可哈希的键（`lru_cache` 只认不可变参数）。"""
+    try:
+        vals = tuple(borders or (0, 0, 0, 0))
+    except TypeError:
+        return (0, 0, 0, 0)
+    if len(vals) < 4:
+        vals = (vals + (0, 0, 0, 0))[:4]
+    return tuple(float(v) for v in vals[:4])
+
 
 def _nine_slice(img, w: int, h: int, borders):
     """把 `Frame(...)` 底图缩放到 w×h（四角不拉伸）。"""
@@ -615,12 +679,8 @@ def _draw_say(canvas, frame, ctx, result):
 
     # 文本框底图：`Image(...)` 不拉伸，底边居中（模板 screens.rpy 的写法）
     if profile.textbox_image:
-        try:
-            with Image.open(profile.textbox_image) as src:
-                tb = src.convert('RGBA')
-        except Exception as e:              # noqa: BLE001
-            swallow('stage_render.textbox', e)
-            tb = None
+        tb = _image_cached(str(profile.textbox_image),
+                          _mtime(profile.textbox_image))
         if tb is not None:
             x = (sw - tb.width) / 2.0
             y = top + th - tb.height
@@ -652,14 +712,12 @@ def _draw_say(canvas, frame, ctx, result):
         x -= box_w * xalign
         y = top + float(profile.values.get('name_ypos') or 0)
         if profile.namebox_image:
-            try:
-                with Image.open(profile.namebox_image) as src:
-                    nb = src.convert('RGBA')
-                nb = _nine_slice(nb, int(box_w), int(box_h),
-                                 profile.values.get('namebox_borders'))
+            nb = _nine_slice_cached(
+                str(profile.namebox_image), _mtime(profile.namebox_image),
+                int(box_w), int(box_h),
+                _borders_key(profile.values.get('namebox_borders')))
+            if nb is not None:
                 _paste(canvas, nb, x, y)
-            except Exception as e:          # noqa: BLE001
-                swallow('stage_render.namebox', e)
         else:
             _paste(canvas, Image.new('RGBA', (int(box_w), int(box_h)),
                                      (0, 0, 0, 170)), x, y)

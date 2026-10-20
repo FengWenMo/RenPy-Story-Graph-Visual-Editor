@@ -15,13 +15,25 @@ Qt 版**舞台演出预览**：把这一章按卡片效果"播"出来。
       「只看有变化的拍」 + 键盘(←/→/空格/Home/End)。
 
 为什么要防"上一帧的图贴到这一帧"：异步解码回来时帧可能已经翻了，
-所以每个请求都带 **帧号+序号**，回来时对不上就丢弃 —— 否则"预览在骗人"，
-比没有预览更糟。
+所以每个请求都带 **帧号（`id(frame)`）+ 代号**，回来时对不上就丢弃 ——
+否则"预览在骗人"，比没有预览更糟。
+
+**引擎排版的播放性能**（2026-10-21，用户："一拍一拍渲染太慢……常常变黑屏"）
+--------------------------------------------------------------------
+一台真机上合成一帧是 25~300ms（首次碰到大盘立绘要解码缩图，1 秒级）。
+从前每一拍都现合成、还把上一张清掉 —— 播放就成了"黑一下、图一下"。
+现在三件事叠起来：
+
+  1. **往后提前合成**（`ENGINE_AHEAD`）：轮到那一拍时图已经在缓存里；
+  2. **帧缓存**（`FRAME_CACHE_SIZE`）：来回翻、重播都是 0 延迟；
+  3. **不黑屏**：这一拍还没好时画上一张顶着 + 右下角"正在渲染"角标
+     （`_last_good_pix`；真正渲染失败才不拿旧图骗人）。
 """
 
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 
 from storygraph.core.safeguard import swallow
 from PySide6.QtCore import (QObject, QRunnable, QThreadPool, Qt, QTimer,
@@ -49,6 +61,23 @@ PLAY_MS = 900          # 自动播放间隔；节奏仅示意，不代表真实�
 PREFETCH_AHEAD = 2
 #: 预取队列的上限（跳来跳去时别把线程池塞满）
 PREFETCH_QUEUE_LIMIT = 40
+
+#: 「引擎排版」往后再**提前合成**几拍（用户 2026-10-21：
+#: "一拍一拍渲染太慢了！……连续播放时速度不够常常变黑屏"）。
+#:
+#: 为什么不是 2：一张 1920×1080 的整帧合成在真机上是 25~300ms（首次碰到
+#: 大立绘还要解码缩图，1 秒级）。一拍按 600ms 算，往后 4 拍 = 2.4 秒的余量，
+#: 播放时那一拍**早就画好了**；翻页时也多算了 3 张没人看的，但那点后台 CPU
+#: 换的是"按下去立刻有图"。
+ENGINE_AHEAD = 4
+#: 引擎排版的渲染线程数（两个就够：再多是在抢 GIL，收益接近 0）
+ENGINE_THREADS = 2
+#: 渲染结果缓存多少帧。一张 896×504 的 pixmap ≈ 1.8MB，32 张 ≈ 58MB ——
+#: 够覆盖"来回翻、播放完再放一遍"，又不至于把大项目的内存吃掉。
+FRAME_CACHE_SIZE = 32
+#: "正在渲染"角标延迟多少秒才出现。25ms 的合成如果也闪一下角标，
+#: 播放时就是每拍闪一次 —— 比不显示更吵。只给"真的等到人"的那种慢渲染看。
+BADGE_DELAY = 0.25
 
 
 def _is_stale_frame_slot(slot, idx) -> bool:
@@ -220,7 +249,65 @@ def layer_model_for(project_root):
 class _RenderSignals(QObject):
     """工作线程 → GUI 线程的唯一通道（Qt 信号跨线程自动排队）。"""
 
-    done = Signal(int, object)
+    #: `key, 代号, QImage|None, warnings, missing`
+    #:
+    #: ⚠ `key` 是 `id(frame)`（64 位），**必须**用 `qint64`：写成 `int` 时
+    #: PySide 按 32 位 C++ int 检查，真机上的对象地址直接 OverflowError，
+    #: 结果一个字都没有回调到 GUI 线程（画面永远停在"正在渲染"）。
+    done = Signal('qint64', int, object, object, object)
+
+
+class _Gate:
+    """
+    "这一批渲染任务还算不算数"的门闩（GUI 线程写，工作线程读）。
+
+    **为什么不是让工作线程回读控件**：从非 GUI 线程碰 `QWidget` 的任何东西
+    都是未定义行为（哪怕只读一个属性）。这里只共享一个纯 Python 对象，
+    GIL 保证 `int` 读写的原子性 —— 排到队尾的任务发现自己过期就**直接返回**，
+    不再白算一张没人看的 1920×1080（连续翻页时那是成吨的 CPU）。
+    """
+
+    __slots__ = ('gen',)
+
+    def __init__(self):
+        self.gen = 0
+
+
+def _frame_key(frame) -> int:
+    """
+    一帧的缓存键（**同一个 frame 对象**在窗口生命期内不会变）。
+
+    `line_id` 不行：同一章里"只看有变化的拍"过滤后下标会变，而对象不变；
+    内容哈希更不行（每拍都要重算一遍 1080p 的指纹，比渲染还贵）。
+    """
+    return id(frame)
+
+
+def _result_to_qimage(result, target=None):
+    """
+    `RenderResult`（PIL）→ `QImage`（**可以在工作线程里做**）。
+
+    `QImage` 是少数允许在 GUI 线程外构造/缩放的 Qt 类型（`QPixmap` 不行，
+    所以那个转换留在 GUI 线程）。顺手缩到控件尺寸：一是省掉每帧 8MB 的
+    跨线程拷贝，二是每帧 paint 不用再做一次平滑缩放（转场时 60fps 重绘）。
+    """
+    img = getattr(result, 'image', None)
+    if img is None:
+        return None
+    try:
+        img = img.convert('RGBA')
+        qimg = QImage(img.tobytes('raw', 'RGBA'), img.width, img.height,
+                      4 * img.width, QImage.Format.Format_RGBA8888).copy()
+        if target:
+            tw, th = int(target[0]), int(target[1])
+            if tw > 0 and th > 0 and (qimg.width(), qimg.height()) != (tw, th):
+                qimg = qimg.scaled(tw, th,
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+        return qimg
+    except Exception as e:                    # noqa: BLE001 - 转不了就退回示意图
+        swallow('stage_preview.result_to_qimage', e)
+        return None
 
 
 class _RenderJob(QRunnable):
@@ -229,21 +316,31 @@ class _RenderJob(QRunnable):
 
     为什么必须后台：这是用户打开预览的第一秒，主线程卡 2 秒 = 窗口白屏、
     点不动。渲染失败也只回一个 `None`，由 GUI 退回旧画布，绝不崩。
+
+    `gen` 是排队那一刻的代号：任务真正开跑时先看一眼门闩 —— 用户在排队期间
+    已经翻到别的拍了，这一张就没必要算（连续按方向键时省掉的正是这些）。
     """
 
-    def __init__(self, token: int, signals, frame, project_root, registry,
-                 profile, transform_index, screen):
+    def __init__(self, signals, gate, gen, key, frame, project_root, registry,
+                 profile, transform_index, screen, target):
         super().__init__()
-        self.token = token
         self.signals = signals
+        self.gate = gate
+        self.gen = int(gen)
+        self.key = int(key)
         self.frame = frame
         self.project_root = project_root
         self.registry = registry
         self.profile = profile
         self.transform_index = transform_index
         self.screen = screen
+        self.target = target
+        self.setAutoDelete(True)
 
     def run(self):
+        if self.gate.gen != self.gen:
+            return                            # 过期任务：一个字都不算
+        got = None
         try:
             got = R.render_frame(
                 self.frame, project_root=self.project_root,
@@ -252,8 +349,14 @@ class _RenderJob(QRunnable):
         except Exception as e:                    # noqa: BLE001 - 后台绝不炸
             swallow('stage_preview.render_job', e)
             got = None
+        # 转换/缩放**也在工作线程里做**：1920×1080 RGBA 的跨线程搬运
+        # 是每帧十几毫秒的主线程开销，正好卡在"换拍"那一瞬间。
+        qimg = _result_to_qimage(got, self.target)
+        warnings = list(getattr(got, 'warnings', []) or [])
+        missing = list(getattr(got, 'missing', []) or [])
         try:
-            self.signals.done.emit(self.token, got)
+            self.signals.done.emit(self.key, self.gen, qimg,
+                                   warnings, missing)
         except RuntimeError as e:
             # 窗口已经关了：信号对象随控件销毁，emit 会 RuntimeError。
             # 这是"正常收尾"，不该炸后台线程；但也要留痕（swallow 计数）。
@@ -293,14 +396,30 @@ class StageCanvas(QWidget):
         self._registry = None
         self._profile = None
         self._transform_index = None
-        self._pool = QThreadPool.globalInstance()
+        #: 渲染队列**独占**一个线程池（不跟缩略图/预取抢 `globalInstance`）：
+        #: 一是队列顺序 = 播放顺序（先这一拍，再往后几拍），二是翻页时
+        #: `clear()` 能精确丢掉"还没开跑"的那些。两个线程：一张几百万像素的
+        #: 立绘解码时，第二个线程还能接着把下一拍算出来。
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(ENGINE_THREADS)
         self._render_signals = _RenderSignals(self)
         self._render_signals.done.connect(self._on_render_done)
+        self._gate = _Gate()
+        #: 代号：每次换拍 +1。迟到的结果对不上就丢弃（防"上一帧的图贴到这一帧"）。
         self._render_token = 0
         self._rendered_pix = None
+        #: **上一张画好的图**：这一拍还在渲染时先顶着它（不再黑屏）。
+        self._last_good_pix = None
+        #: 这一拍渲染失败了（这时**不拿上一拍顶着** —— 那是在骗人）
+        self._render_failed = False
+        #: 渲染好的帧缓存 `{id(frame): (pixmap, warnings, missing)}`（LRU）。
+        self._cache: OrderedDict = OrderedDict()
         self._render_result = None
         self._render_warnings: list = []
         self._render_pending = False
+        #: 这一拍照样还没画好的起始时刻（角标只在**等得久**时出现，
+        #: 不然快机器上每拍都闪一下小角标，比不显示还吵）
+        self._pending_since = 0.0
         self._images: dict = {}
         self._loader = ThumbLoader(self, max_size=SPRITE_MAX,
                                    project_root=project_root)
@@ -372,14 +491,24 @@ class StageCanvas(QWidget):
 
     def shutdown(self):
         try:
+            self._pool.clear()               # 没开跑的任务别再启动
+        except Exception:                    # noqa: BLE001
+            swallow('stage_preview.shutdown')
+        try:
             self._loader.shutdown()
         except Exception:                    # noqa: BLE001
             swallow('stage_preview.shutdown')
 
     # ------------------------------------------------------------------
 
-    def show_frame(self, frame, idx: int):
-        """切到某一帧：**先清空旧的贴图**，再异步取新的。"""
+    def show_frame(self, frame, idx: int, ahead=()):
+        """
+        切到某一帧：**先清空旧的贴图**，再异步取新的。
+
+        `ahead`：`[(frame, idx), …]` —— 往后几拍，**提前**在后台合成。
+        引擎排版模式下这是"连续播放不黑屏"的关键：轮到那一拍时图已经在手里
+        （`app.stage_render` 一次 25~300ms，等它现算就是一段黑）。
+        """
         self._frame = frame
         self._frame_idx = idx
         self._bg_pix = None
@@ -390,11 +519,16 @@ class StageCanvas(QWidget):
         self._missing = []
         self.update()
         if frame is None:
+            # 空场：连"上一拍"也不该留着（那会是一张跟当前状态无关的图）
+            self._rendered_pix = None
+            self._last_good_pix = None
+            self._render_pending = False
+            self._render_failed = False
             return
         # 引擎排版：整帧由 `app.stage_render` 合成，**必须**用真图
         # （"真实贴图"关掉时也不该白屏 —— 那个开关只对旧示意图有意义）。
         if self.engine_render:
-            self._request_engine_render(frame, idx)
+            self._request_engine_render(frame, idx, ahead)
             return                           # 引擎排版：不再逐张取图
         if not self.real_images:
             return
@@ -435,16 +569,78 @@ class StageCanvas(QWidget):
 
     # ------------------------------------------------------------------
 
-    def _request_engine_render(self, frame, idx: int):
-        """后台合成这一帧；旧结果立即作废（防止"上一帧的图贴到这一帧"）。"""
+    def _request_engine_render(self, frame, idx: int, ahead=()):
+        """
+        后台合成这一帧（顺手把往后几拍也排上）。
+
+        三条老毛病一起治（用户 2026-10-21："一拍一拍渲染太慢……常常变黑屏"）：
+
+          1. **不再把上一张清掉**。从前这里 `self._rendered_pix = None`，
+             加上 `_paint_engine` 又"不画上一帧"，于是每翻一拍就是一次黑屏；
+             现在上一张顶着，画面上多一个"渲染中"的小角标。
+          2. **缓存命中就直接出图**（来回翻、播放完再放一遍都是 0 延迟）。
+          3. **往后提前合成**（`ahead`）：播放时图早就画好了，轮到它只是贴上去。
+        """
+        self._ensure_engine_context()
         self._render_token += 1
-        token = self._render_token
-        self._render_pending = True
-        self._rendered_pix = None
+        gen = self._render_token
+        self._gate.gen = gen
+        self._render_failed = False
         self._render_result = None
         self._render_warnings = []
         self._missing = []
-        self.update()
+        hit = self._cache_get(frame)
+        if hit is not None:
+            # 命中：立刻有画面（这条路上没有"加载中"这个状态）
+            self._rendered_pix, warnings, missing = hit
+            self._render_warnings = list(warnings)
+            self._missing = list(missing)
+            self._render_pending = False
+            self._last_good_pix = self._rendered_pix
+            self.update()
+            try:
+                self.rendered.emit(True)
+            except RuntimeError as e:
+                swallow('stage_preview.render_done.emit', e)
+        else:
+            # 还没画好：`_rendered_pix` 只代表"**这一拍**的图"，所以清空；
+            # 画面靠 `_last_good_pix`（上一拍）顶着 —— 见 `_paint_engine`。
+            self._rendered_pix = None
+            self._render_pending = True
+            self._pending_since = time.monotonic()
+            self.update()
+        # 排队：**这一拍第一**，然后往后几拍（已在缓存里的不再排）
+        want = [(frame, idx)]
+        for item in ahead or ():
+            try:
+                f2, i2 = item
+            except (TypeError, ValueError):
+                continue
+            want.append((f2, i2))
+        self._queue(want, gen)
+
+    def _queue(self, want, gen: int):
+        """把"想要的帧"按顺序塞进渲染队列（旧的排队任务先丢掉）。"""
+        try:
+            self._pool.clear()               # 还没开跑的旧任务：作废
+        except Exception:                    # noqa: BLE001
+            swallow('stage_preview.queue')
+        size = (max(1, self.width()), max(1, self.height()))
+        seen = set()
+        for frame, _idx in want:
+            if frame is None:
+                continue
+            key = _frame_key(frame)
+            if key in seen or key in self._cache:
+                continue
+            seen.add(key)
+            self._pool.start(_RenderJob(
+                self._render_signals, self._gate, gen, key, frame,
+                self.project_root, self._registry, self._profile,
+                self._transform_index, self.screen, size))
+
+    def _ensure_engine_context(self):
+        """`gui` 排版参数 / transform 表：只读一次盘（放 GUI 线程也就 60ms 以内）。"""
         if self._profile is None:
             try:
                 from storygraph.story.renpy_gui import load_gui_profile
@@ -460,44 +656,77 @@ class StageCanvas(QWidget):
             except Exception as e:            # noqa: BLE001
                 swallow('stage_preview.scan_transforms', e)
                 self._transform_index = {}
-        job = _RenderJob(token, self._render_signals, frame,
-                         self.project_root, self._registry, self._profile,
-                         self._transform_index, self.screen)
-        self._pool.start(job)
 
-    def _on_render_done(self, token: int, result):
-        if token != self._render_token:
-            return                            # 已经翻到别的帧了，丢弃
+    # ---------------- 帧缓存 ----------------
+
+    def _cache_get(self, frame):
+        """`(pixmap, warnings, missing)` 或 None（命中会把这一条挪到最近使用）。"""
+        if frame is None:
+            return None
+        key = _frame_key(frame)
+        got = self._cache.get(key)
+        if got is not None:
+            # 刚取到的键一定还在（`OrderedDict` 只在 GUI 线程里动）
+            self._cache.move_to_end(key)
+        return got
+
+    def _cache_put(self, key: int, pix, warnings, missing):
+        self._cache[key] = (pix, list(warnings or ()), list(missing or ()))
+        self._cache.move_to_end(key)             # 新进来的算"最近使用"
+        while len(self._cache) > FRAME_CACHE_SIZE:
+            self._cache.popitem(last=False)      # 丢掉最久没用的那一帧
+
+    def cached_frames(self) -> int:
+        """已经渲染好、随时能贴的帧数（测试/诊断用）。"""
+        return len(self._cache)
+
+    def is_pending(self) -> bool:
+        """这一拍还在后台合成（画面上暂时是上一拍的图 + 角标）。"""
+        return bool(self._render_pending)
+
+    def _on_render_done(self, key: int, gen: int, qimg, warnings, missing):
+        """
+        后台结果回来了。
+
+        **先入缓存，再判"是不是当前这一拍"** —— 提前合成的那些拍结果同样是
+        有效的（轮到它时就是命中），只是不该动画面。
+        """
+        pix = None
+        if qimg is not None:
+            try:
+                pix = QPixmap.fromImage(qimg)
+            except Exception as e:            # noqa: BLE001
+                swallow('stage_preview.render_done', e)
+                pix = None
+        if pix is not None:
+            self._cache_put(key, pix, warnings, missing)
+        cur = self._frame
+        if cur is None or _frame_key(cur) != key:
+            return                            # 不是当前这一拍：只进缓存
+        if gen != self._render_token:
+            return                            # 这一拍已经被翻过去了
         self._render_pending = False
-        self._render_result = result
-        self._render_warnings = list(getattr(result, 'warnings', []) or [])
-        self._missing = list(getattr(result, 'missing', []) or [])
-        self._rendered_pix = self._to_pixmap(result)
+        self._render_warnings = list(warnings or ())
+        self._missing = list(missing or ())
+        self._render_failed = pix is None
+        self._rendered_pix = pix
+        if pix is not None:
+            self._last_good_pix = pix
         self.update()
         try:
-            self.rendered.emit(self._rendered_pix is not None)
+            self.rendered.emit(pix is not None)
         except RuntimeError as e:
             swallow('stage_preview.render_done.emit', e)
 
-    @staticmethod
-    def _to_pixmap(result):
-        if result is None or getattr(result, 'image', None) is None:
-            return None
-        try:
-            img = result.image.convert('RGBA')
-            data = img.tobytes('raw', 'RGBA')
-            qimg = QImage(data, img.width, img.height, 4 * img.width,
-                          QImage.Format.Format_RGBA8888).copy()
-            return QPixmap.fromImage(qimg)
-        except Exception as e:                # noqa: BLE001
-            swallow('stage_preview.to_pixmap', e)
-            return None
-
     def render_now(self, frame, idx: int):
-        """同步渲染一帧（测试/无头用；正式播放走后台线程）。"""
+        """同步渲染一帧（测试/无头用；正式播放走后台队列）。"""
+        self._ensure_engine_context()
         self._render_token += 1
-        token = self._render_token
-        self._rendered_pix = None
+        gen = self._render_token
+        self._gate.gen = gen
+        self._frame = frame
+        self._frame_idx = idx
+        self._render_failed = False
         self._render_pending = True
         try:
             got = R.render_frame(
@@ -507,8 +736,17 @@ class StageCanvas(QWidget):
         except Exception as e:                # noqa: BLE001
             swallow('stage_preview.render_now', e)
             got = None
-        self._on_render_done(token, got)
+        if got is not None:
+            self._render_result = got
+        self._on_render_done(
+            _frame_key(frame), gen, _result_to_qimage(got, self._pix_target()),
+            list(getattr(got, 'warnings', []) or []),
+            list(getattr(got, 'missing', []) or []))
         return got
+
+    def _pix_target(self):
+        """渲染结果缩到多大（= 控件当前尺寸；缓存键里不带它，尺寸变了就重贴）。"""
+        return (max(1, self.width()), max(1, self.height()))
 
     def missing_assets(self) -> list:
         """这一帧**脚本里写了、磁盘上找不到**的素材名（横条上要显眼地写出来）。"""
@@ -520,8 +758,12 @@ class StageCanvas(QWidget):
 
         优先级是 `PRIORITY_BACKGROUND`：**预取永远不许挡住当前这一帧** ——
         正在解的那几张先出图，空下来的线程才轮到预取。
+
+        ⚠ 引擎排版模式下**不走这条路**：那边每一拍是一张合成好的整帧，
+        预解素材不会让合成变快（合成自己按需解码），却会跟渲染线程抢 CPU ——
+        引擎模式的"预取"是 `show_frame(ahead=…)`，见 `_queue`。
         """
-        if frame is None or not self.real_images:
+        if frame is None or not self.real_images or self.engine_render:
             return
         try:
             if self._prefetch_queued() > PREFETCH_QUEUE_LIMIT:
@@ -678,12 +920,18 @@ class StageCanvas(QWidget):
         """
         画离屏合成的一帧：等比缩放、留黑边（与全屏播放的 letterbox 一致）。
 
-        还没渲染完时**不画上一帧**（旧画面会让人以为这拍就是这样）；
-        画一块深色 + 一行说明，首次 2 秒也知道在等什么。
+        这一拍的图还没合成好时，**先顶着上一张**（右下角一个小角标说明"这是
+        上一拍、还在渲染"）。从前这里刻意"不画上一帧"，结果是每翻一拍都黑一下
+        —— 用户 2026-10-21："连续播放时速度不够常常变黑屏"。
+        真正渲染失败（`_render_failed`）时才不拿旧图骗人：那种情况画深色 + 说明。
         """
         p.setOpacity(max(0.0, min(1.0, float(self._fade_alpha))))
         w, h = self.width(), self.height()
         pix = self._rendered_pix
+        stale = False
+        if (pix is None or pix.isNull()) and not self._render_failed:
+            pix = self._last_good_pix        # 上一拍先顶着（不黑屏）
+            stale = pix is not None and not pix.isNull()
         if pix is None or pix.isNull():
             p.fillRect(0, 0, w, h, QColor(T.t('stage.letterbox')))
             p.setPen(QPen(QColor(T.t('stage.textDim'))))
@@ -692,9 +940,46 @@ class StageCanvas(QWidget):
                 '这一帧渲染不出来（横条上写了原因）'
             p.drawText(0, 0, w, h, Qt.AlignCenter, msg)
             return
+        # 缓存里的图已经缩到控件尺寸了，这里 scale 恒为 1；只有窗口尺寸
+        # 变过才会再缩一次（`KeepAspectRatio` 保证不变形）。
         scale = min(w / max(1, pix.width()), h / max(1, pix.height()))
         dw, dh = int(pix.width() * scale), int(pix.height() * scale)
         p.drawPixmap((w - dw) // 2, (h - dh) // 2, dw, dh, pix)
+        # 角标只在**真的等久了**才出现：缓存命中 / 提前合成好的拍根本不该闪它
+        waited = time.monotonic() - float(self._pending_since or 0.0)
+        if (stale or self._render_pending) and self._pending_since \
+                and waited > BADGE_DELAY:
+            self._paint_rendering_badge(p, w, h)
+
+    def _paint_rendering_badge(self, p, w: int, h: int):
+        """
+        右上角那个"正在渲染"的小角标。
+
+        放**右上**而不是右下：Ren'Py 的对话框在底部，右下角正好压着台词。
+        它不挡画面、不闪，只是别让人把"上一拍的图"当成这一拍。
+        """
+        try:
+            text = '◌ 正在渲染这一拍…'
+            font = QFont(theme.font_family(), theme.font_pt('caption'))
+            p.setFont(font)
+            fm = p.fontMetrics()
+            pad = 6
+            room = max(60, int(w) - 24)
+            tw = min(room, fm.horizontalAdvance(text) + pad * 2)
+            text = fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                                 max(20, tw - pad * 2))
+            th = fm.height() + pad
+            x, y = int(w) - tw - 8, 8
+            p.save()
+            p.setOpacity(0.82)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(T.t('stage.speakerBg')))
+            p.drawRoundedRect(x, y, tw, th, 4, 4)
+            p.setPen(QPen(QColor(T.t('stage.textDim'))))
+            p.drawText(x + pad, y + pad + fm.ascent(), text)
+            p.restore()
+        except Exception:                    # noqa: BLE001 - paint 里绝不外抛
+            swallow('stage_preview.paint_badge')
 
     def _draw_block(self, p, s, rect, loading: bool = False):
         """
@@ -769,8 +1054,29 @@ class StagePreviewWindow(QDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(PLAY_MS)
         self._timer.timeout.connect(self.next_frame)
+        #: 第一拍是不是已经画过（见 `_show_initial_frame`）
+        self._started = False
         if self.frames:
-            self.show_frame(0)
+            # **先让窗口自己画出来**，第一帧的排版/合成放到下一个事件循环回合。
+            #
+            # 用户 2026-10-21："很难加载"。实测：构造 + gui.rpy 解析 +
+            # transform 扫描 + 首帧合成 ≈ 0.5~1.2 秒，全发生在 `show()` 之前 ——
+            # 那段时间屏幕上**什么都没有**。现在窗口立刻出来（画布上是
+            # "正在按引擎排版渲染…"），重活在这一回合之外做。
+            QTimer.singleShot(0, self._show_initial_frame)
+
+    def _show_initial_frame(self):
+        """第一个事件循环回合才画第一拍（有人先 call 了 show_frame 就不动）。"""
+        if self._started or not self.frames:
+            return
+        try:
+            # 先把画布上那句"正在按引擎排版渲染…"**真的画到屏幕上**再干活 ——
+            # 否则 gui.rpy 解析（冷缓存 ~100ms）会挡在这之前，用户看到的
+            # 还是"窗口刚出来就卡住"。窗口还没 show 时这句是空操作。
+            self._canvas.repaint()
+        except Exception as e:                    # noqa: BLE001
+            swallow('stage_preview.show_initial_frame', e)
+        self.show_frame(0)
 
     # ------------------------------------------------------------------
 
@@ -908,6 +1214,7 @@ class StagePreviewWindow(QDialog):
     # ------------------------------------------------------------------
 
     def show_frame(self, idx: int):
+        self._started = True                 # 有人画过了：延迟的那次就别再抢
         if not self.frames:
             self._canvas.show_frame(None, -1)
             self._who.setText('')
@@ -918,7 +1225,15 @@ class StagePreviewWindow(QDialog):
         idx = max(0, min(int(idx), len(self.frames) - 1))
         self.idx = idx
         f = self.frames[idx]
-        self._canvas.show_frame(f, idx)
+        # 引擎排版：把**往后几拍**一起交给画布提前合成（播放时那一拍早就好了）。
+        ahead = []
+        if self._engine:
+            for step in range(1, ENGINE_AHEAD + 1):
+                j = idx + step
+                if j >= len(self.frames):
+                    break
+                ahead.append((self.frames[j], j))
+        self._canvas.show_frame(f, idx, ahead=ahead)
         # 声音：BGM 持续、音效/语音一次性（同一帧重画不重放 —— 见 StageAudio）
         cues = {}
         try:
