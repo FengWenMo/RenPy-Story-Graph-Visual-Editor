@@ -403,7 +403,9 @@ class CardPageMixin:
         more = lines - len(head)
         body = '\n'.join('    ' + h for h in head)
         tail = f'\n    …（其余 {more} 行）' if more > 0 else ''
-        return f'\n\n⚠ 这一拍在产物里是 **{lines} 行**（不是 1 行）：\n{body}{tail}'
+        # ⚠ 这里**不用 Markdown 的 `**`**：`QMessageBox` 只认纯文本/HTML，
+        # 星号会原样显示（截图里就是 `**8 行**`），比不加粗更难看。
+        return f'\n\n⚠ 这一拍在产物里是 {lines} 行（不是 1 行）：\n{body}{tail}'
 
     def restore_card(self):
         """
