@@ -3079,6 +3079,10 @@ SDK 用"项目所在 SDK"优先（`<sdk>/the_question` 的祖父目录），
 - 报告落盘到导出目录：`IR_LOSS-unity.md` / `IR_LOSS-godot.md`
   （`LOSS_REPORT_NAME`），`expected_files()` 同步声明这两个文件名。
 
+> **对账的前提是"同一份 IR"**：多章导同一目录时文件名是固定的，
+> 合并规则（同一个 `line_id` **以最后一次导出为准**，同一章里被删掉的行
+> 也要跟着消失）见 §22.1。那一层错了，这份报告会对着一份旧数据算得很干净。
+
 报告的骨架：
 
 ```
@@ -3349,3 +3353,118 @@ pytest 里**没有一条用例执行 `selfcheck`**（`test_single_write_entry.py
 [通过] Qt 界面可构建
 结论：全部通过     exit=0
 ```
+
+# §22 一轮"报成功但没写进去"的清扫（2026-10-20）
+
+用户拿真机 `chapter0_0.rpy`（245 拍）跑了一遍导出，报了 8 条。它们的共同点
+不是"崩了"，而是**每一处都说成功**：回执 `ok: true`、状态栏 ✔、
+`IR_CHECK.md` 写着"0 错 0 警告"、损失报告也正常 —— 而内容没写进去。
+
+| 级别 | 问题 | 症状 |
+|---|---|---|
+| P0 | 改一句再导同一目录，IR / Unity 里还是旧句 | 回执成功、自检 0 错 |
+| P1 | 自检在坏 IR 上先崩，`IR_CHECK.md` 出不来 | `TypeError: string indices…` |
+| P1 | 损失报告对 `assets` 形状不防御 | `AttributeError: 'list'…` |
+| P1 | 回执分不清"自检没跑成"和"零错误" | `error_count: 0` |
+| P2 | 单值 `Attributes` 与 `Value` 不一致时被静默丢弃 | `{Value:happy, Attributes:angry}` → 只剩 `happy` |
+| P2 | 多值行上显式 `Group` 整列失效 | `outfit=base` 掉到 0.15（unknown） |
+| P3 | stage 覆盖率漏报 | 孤儿 id 被算进"已覆盖" |
+| P3 | `role_of` 认不出角色时兜底成 editor | fail-open |
+| P3 | 字体 / 图片索引缓存不含 mtime | 换字体、加图要重启 |
+
+## 22.1 P0：合并的规则是"同 key 用旧值"
+
+`_merge_by_key` 从前是"老的先占位、同 key 的新条目 `continue` 跳过"。
+而 `line_id` 是 `label.序号`（`beat_model.assign_identity`）——**改一句台词
+不会换 id**，于是"改完再导一次"恰好落在"用旧值"上。
+
+更坏的是它**自洽**：`story_ir.json` 旧 → `UnityDialogueData.json` 从它生成
+也旧 → `IR_CHECK.md` 对这份旧数据算 0 错 → 状态栏 ✔。链路上没有任何一处
+会说"你刚才那一改没生效"。
+
+修法两条（缺一不可）：
+
+| 规则 | 为什么 |
+|---|---|
+| 同 key 留**新**那一份（原地替换，位置不变） | "再导一次"= 按现在的表重写这一章 |
+| `new` 里出现的 `label` 就是"这一章被重导了"：那一章里**新一份没有的 `line_id` 删掉** | 只按 id 合并只能"改"不能"删"；删掉的台词会永远留在 IR（和目标引擎）里，而编辑器里早没了 |
+
+合并单位是**章**（`label`），靠的是 `line_id = label.序号` 这个既有约定。
+别的章原样保留（多章导同一目录不丢章节，M8 那条老判据不回退）。
+
+边界：**换 label 名**（重命名章节）之后，旧章的行会被当成"另一章"留着 ——
+这需要项目级的全量同步，不在这一层。判据见
+`tests/test_reexport_same_dir.py`（9 条：改句 / 原地替换 / 删行 / 两章累积 /
+只重导一章不动别章 / 同份导出内重复 id / 磁盘上坏 IR / 回执 2 条）。
+
+## 22.2 P1：自检在坏数据上必须先诊断、不许先崩
+
+`ir_validate` 的存在意义是"诊断坏 IR"，但它的适配分支调 `to_unity(ir)`，
+而适配器直接 `l['line_id']`：`lines` 是字符串时抛 `TypeError`。它在
+`export_ir` 的写盘流程里 —— 于是**坏 IR 让整次导出失败**，`IR_CHECK.md`
+根本落不下来，而这份报告正是"告诉用户哪里坏了"的唯一出口。
+
+现在三道：
+
+1. 适配器是**总函数**（`_rows` / `_scalar` / `_strings` / `_mapping`）：
+   形状不对收敛成空值，让自检去报 `E-IR-LINE-SHAPE` / `E-AD-UNITY-KEYS`；
+2. 损失报告的 `assets` 走 `_asset_rows`：不是对象 → 空，不再 `.values()`；
+3. `export_ir` 写报告这一步单独兜底：连自检自己崩了也写一份
+   `crash_report`（代码 `E-IR-CHECK-CRASH`），报告第一句是
+   "**自检没跑成**，别把这份当成零问题"。
+
+## 22.3 P1：回执里的"自检"栏现在有状态
+
+`session_export.export_ir` 外面包着 `try`，异常一吞，回执里
+`error_count` 就是 0 —— "没跑成"和"干净"长得一模一样。现在回执多两个键：
+
+```
+"check": {"status": "ok" | "failed", "error": "…", "error_count": …, …}
+```
+
+`status != "ok"` 时状态栏说的是"⚠ 已导出 · 自检没跑成，别当成没问题"，
+不再是 ✔。
+
+## 22.4 P2：两列打架不许静默丢；多值行也不许丢显式维度
+
+① `row_values` 把"单个词的 `Attributes`"当 `Value` 的兼容镜像整格跳过。
+镜像和真值不一致时它就不是镜像了：`{Value:'happy', Attributes:'angry'}`
+里 `angry` 一个字不提。判据换成**同名才算镜像**：不同名一律留着，
+并标 `source="conflict"`（置信度 0.5），`IR_CHECK.md` 报
+`W-IR-DIM-CONFLICT`（**不**混进"这些维度是猜的"）。
+
+② `explain_dimensions` 只在 `len(raw_values)==1` 时才认显式 `Group`：
+`{Group:'outfit', Value:'base', _attrs:['happy']}` 里人写的 `outfit=base`
+整列失效、掉到 0.15。现在显式 `Group` 只对**人写的那一对**（`Group`+`Value`）
+负责：`base` 仍是 `explicit` 1.0，脚本带出来的 `happy` 仍按引擎事实查
+（**不**硬塞进 `outfit`），认不出的词照旧 `unknown`。
+
+## 22.5 P3：三条小的
+
+| 位置 | 从前 | 现在 |
+|---|---|---|
+| `ir_validate._check_stage` | `len(seen) < len(line_ids)`，孤儿也算一"拍" | 只数**落在 `line_ids` 里**的快照；缺的 id 写进例子 |
+| `collab_store.role_of` | `role if role in ROLES else ROLE_EDITOR` | 认不出 → `viewer`（最小权限）；**空串**（未登记）不变，`members()` 显示同口径 |
+| `stage.image_index` / `renpy_gui._CACHE` | 按项目根永久缓存 | 目录指纹 + 复核节流（1.5s）/ 字体探测路径复核：加图、换字体不必重启 |
+
+`role_of` 那条的方向：**认不出就少给**。空串（本地单人第一次打开 → editor）
+是另一条口子，和"库里有这条人但角色是乱码"完全不是一回事 ——
+两者从前都落在 editor 上，这才是漏洞的形状。
+
+## 22.6 现跑
+
+```
+P0 探针（真机 chapter0_0.rpy，245 拍）
+  第一遍  AI真的拥有自我意识吗？
+  改成    【改过的台词】→ 再导同一目录
+  第二遍  story_ir.json      = 【改过的台词】
+          UnityDialogueData.json = 【改过的台词】      结论：通过
+
+P1 探针（8 种坏形状 × 3 个引擎 × 2 份报告）
+  0 例崩溃；4 个引擎导出后 IR_CHECK.md 都在；磁盘上放坏 IR 再导也不崩
+```
+
+新增判据 35 条：`test_reexport_same_dir.py` 9 条、`test_ir_validate.py` 10 条、
+`test_asset_dimensions.py` 7 条、`test_collab_lease_roles.py` 4 条、
+`test_stage_preview.py` 2 条、`test_renpy_gui_profile.py` 3 条。
+真实项目多引擎（54 个 `.rpy` × 3 引擎 = 162 次导出）：丢文本 0、丢跳转 0。

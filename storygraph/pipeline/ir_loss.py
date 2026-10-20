@@ -207,6 +207,41 @@ def _blank(value) -> bool:
     return False
 
 
+def _line_rows(ir) -> list:
+    """IR 里的行（只留对象）。**坏形状按空处理** —— 报告不许因坏数据崩。"""
+    lines = ir.get('lines') if isinstance(ir, dict) else None
+    if not isinstance(lines, (list, tuple)):
+        return []
+    return [l for l in lines if isinstance(l, dict)]
+
+
+def _asset_groups(ir) -> dict:
+    """IR 的 `assets`（`{分组: [条目]}`）；不是对象 → 空。"""
+    assets = ir.get('assets') if isinstance(ir, dict) else None
+    return assets if isinstance(assets, dict) else {}
+
+
+def _asset_rows(ir) -> list:
+    """
+    所有资源条目（只留对象）。
+
+    ⚠ 从前这里是 `(ir.get('assets') or {}).values()` —— `assets` 是 list 时
+    `AttributeError: 'list' object has no attribute 'values'`，
+    而它跑在 `export_ir` 的写盘流程里：**一条坏资产让整次导出失败**，
+    连损失报告都出不来（2026-10-20 修，P1）。
+    """
+    rows = []
+    for items in _asset_groups(ir).values():
+        if isinstance(items, (list, tuple)):
+            rows.extend(a for a in items if isinstance(a, dict))
+    return rows
+
+
+def _asset_count(ir) -> int:
+    return sum(len(items) for items in _asset_groups(ir).values()
+               if isinstance(items, (list, tuple)))
+
+
 def field_losses(ir: dict, engine: str) -> list:
     """中立 IR vs `engine` 适配器 → `[FieldLoss]`（按字段聚合）。"""
     engine = str(engine or '').lower()
@@ -215,7 +250,7 @@ def field_losses(ir: dict, engine: str) -> list:
     line_map = LINE_FIELD_MAP.get(engine)
     if line_map is None:
         return []
-    lines = [l for l in (ir.get('lines') or []) if isinstance(l, dict)]
+    lines = _line_rows(ir)
     out = []
 
     def collect(scope: str, rows: list, keep, labels):
@@ -240,33 +275,28 @@ def field_losses(ir: dict, engine: str) -> list:
 
     asset_map = ASSET_FIELD_MAP.get(engine)
     if asset_map is not None:
-        assets = []
-        for group_rows in (ir.get('assets') or {}).values():
-            assets.extend([a for a in (group_rows or []) if isinstance(a, dict)])
-        collect('asset', assets, set(asset_map), ASSET_FIELD_LABELS)
+        collect('asset', _asset_rows(ir), set(asset_map), ASSET_FIELD_LABELS)
     return out
 
 
 def _notes(ir: dict) -> list:
     """不算"字段丢失"，但目标引擎要自己处理的事（报告里的提醒）。"""
     notes = []
-    lines = [l for l in (ir.get('lines') or []) if isinstance(l, dict)]
+    lines = _line_rows(ir)
     tagged = [l for l in lines if _TAG_RE.search(str(l.get('text') or ''))]
     if tagged:
         notes.append(
             f'{len(tagged)} 行台词带 Ren\'Py 标签（如 {{color=…}} / {{w}}），'
             'IR 只保留原文，目标引擎要自己解析或原样显示。')
     unknown = [l for l in lines
-               if (l.get('structure') or {}).get('known') is False]
+               if isinstance(l.get('structure'), dict)
+               and l['structure'].get('known') is False]
     if unknown:
         notes.append(
             f'{len(unknown)} 行的嵌套位置未知（老表没有结构位），'
             '适配层会写成 structureKnown=false，别把它们当顶层。')
-    no_path = []
-    for group_rows in (ir.get('assets') or {}).values():
-        for a in (group_rows or []):
-            if isinstance(a, dict) and not str(a.get('path') or '').strip():
-                no_path.append(str(a.get('id') or ''))
+    no_path = [str(a.get('id') or '') for a in _asset_rows(ir)
+               if not str(a.get('path') or '').strip()]
     if no_path:
         notes.append(f'{len(no_path)} 条资源没有 `Path`（导出后目标引擎加载不到）。')
     return notes
@@ -278,12 +308,10 @@ def summarize(ir: dict, engine: str) -> dict:
     by_scope = {}
     for loss in losses:
         by_scope.setdefault(loss.scope, []).append(loss.as_dict())
-    lines = len(ir.get('lines') or [])
-    assets = sum(len(v or ()) for v in (ir.get('assets') or {}).values())
     return {
         'engine': str(engine or '').lower(),
-        'lines': lines,
-        'assets': assets,
+        'lines': len(_line_rows(ir)),
+        'assets': _asset_count(ir),
         'losses': [l.as_dict() for l in losses],
         'by_scope': by_scope,
         'notes': _notes(ir),

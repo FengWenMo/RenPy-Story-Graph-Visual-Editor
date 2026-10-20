@@ -246,3 +246,53 @@ class TestRoles:
         export_beats_to_excel(beats, out)
         res = cs.push(db, out, actor='bob', force=True)
         assert res['updated'], res
+
+
+class TestUnknownRoleFailsClosed:
+    """
+    认不出的角色按**最小权限**处理（2026-10-20 修，P3）。
+
+    从前 `role_of` 是 `return role if role in ROLES else ROLE_EDITOR`：
+    一个被手改成 `role='admin'`（或迁移写坏）的成员会被**当成 editor 放行**
+    改内容。权限判断的方向必须是"认不出就少给"。
+
+    ⚠ 空串（**没登记**的成员 → 调用方兜底 editor）是另一回事：那是"本地单人
+    第一次打开"的老语义，和"库里有这条人、但角色是乱码"完全不同 ——
+    两者从前都落在 editor 上，这才是漏洞的形状。
+    """
+
+    def test_unknown_role_returns_viewer(self, tmp_path):
+        db, _ = _seed(tmp_path)
+        with cs.connect(db, write=True) as conn:
+            conn.execute(
+                'INSERT INTO users(id, display_name, role, created_at) '
+                'VALUES(?,?,?,?)', ('eve', 'eve', 'admin', cs._now()))
+        with cs.connect(db) as conn:
+            assert cs.role_of(conn, 'eve') == cs.ROLE_VIEWER, (
+                '认不出的角色被当成了 editor（fail-open）')
+
+    def test_unknown_role_cannot_manage_members(self, tmp_path):
+        db, _ = _seed(tmp_path)
+        with cs.connect(db, write=True) as conn:
+            conn.execute(
+                'INSERT INTO users(id, display_name, role, created_at) '
+                'VALUES(?,?,?,?)', ('eve', 'eve', 'root', cs._now()))
+        res = cs.set_role(db, 'bob', 'viewer', actor='eve')
+        assert res['ok'] is False, res
+        assert '所有者' in res['reason']
+
+    def test_members_list_matches_enforcement(self, tmp_path):
+        """清单说"编辑"、实际按只读拦，是最难查的那种不一致。"""
+        db, _ = _seed(tmp_path)
+        with cs.connect(db, write=True) as conn:
+            conn.execute(
+                'INSERT INTO users(id, display_name, role, created_at) '
+                'VALUES(?,?,?,?)', ('eve', 'eve', 'superuser', cs._now()))
+        roles = {m['id']: m['role'] for m in cs.members(db)}
+        assert roles['eve'] == cs.ROLE_VIEWER
+
+    def test_unregistered_user_still_gets_no_role(self, tmp_path):
+        """没登记的人仍然是空串（本地单人那条口子不许被这条改动误伤）。"""
+        db, _ = _seed(tmp_path)
+        with cs.connect(db) as conn:
+            assert cs.role_of(conn, 'nobody-yet') == ''

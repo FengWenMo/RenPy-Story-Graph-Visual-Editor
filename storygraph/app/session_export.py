@@ -142,18 +142,25 @@ class ExportMixin:
                     title=Path(self.script_path).stem
                     if self.script_path else '')
             check = summarize_check(ir, engine)
+            check['status'] = 'ok'
             if engine in ('unity', 'godot'):
                 from storygraph.pipeline.ir_loss import summarize
                 loss = summarize(ir, engine)
         except Exception as e:            # noqa: BLE001 - 报告失败不影响导出
             swallow('session_export.export_ir.report', e)
-            loss, check = {}, {}
+            # **"没跑成"必须和"零错误"长得不一样**（2026-10-20 修，P1）：
+            # 从前这里只吞掉异常，回执里 `error_count` 就是 0 —— 用户看到
+            # "自检 0 错"，其实是自检根本没跑完。并行的 `IR_CHECK.md` 可能
+            # 是上一次导出的旧报告，两份"看起来都没事"。
+            loss, check = {}, {'status': 'failed', 'error': str(e)}
         return {'ok': True, 'engine': engine, 'out_dir': str(out_dir),
                 'files': [str(f) for f in (files or [])],
                 'loss': {'count': len(loss.get('losses') or []),
                          'by_scope': loss.get('by_scope') or {},
                          'notes': loss.get('notes') or []},
-                'check': {'error_count': int(check.get('error_count') or 0),
+                'check': {'status': str(check.get('status') or 'ok'),
+                          'error': str(check.get('error') or ''),
+                          'error_count': int(check.get('error_count') or 0),
                           'warning_count': int(
                               check.get('warning_count') or 0),
                           'by_code': check.get('by_code') or {},

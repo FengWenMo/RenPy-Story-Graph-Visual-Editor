@@ -28,8 +28,9 @@ from storygraph.pipeline.engine_exporters import (            # noqa: E402
     SCHEMA_VERSION, build_neutral_ir, expected_files, export_ir,
     to_unity)
 from storygraph.pipeline.ir_validate import (                 # noqa: E402
-    CHECK_REPORT_NAME, KNOWN_SCHEMA_VERSIONS, LOW_CONFIDENCE,
-    check_adapter, check_ir, report_markdown, summarize, write_report)
+    CHECK_REPORT_NAME, CRASH_CODE, KNOWN_SCHEMA_VERSIONS, LOW_CONFIDENCE,
+    check_adapter, check_ir, crash_report, report_markdown, summarize,
+    write_report)
 from storygraph.story.beat_model import Beat, assign_identity  # noqa: E402
 
 
@@ -329,6 +330,125 @@ class TestReportAndExport:
         assert errors == [], [i.as_dict() for i in errors]
         summary = summarize(ir)
         assert summary['error_count'] == 0
+
+
+class TestBadShapesDoNotCrashTheChecker:
+    """
+    坏 IR 是自检**要诊断的对象**，不许成为自检的崩溃点（2026-10-20 修，P1）。
+
+    用户实测：`report_markdown({'lines': 'nope'}, 'unity')` 抛
+    `TypeError: string indices must be integers`；`{'assets': ['x']}` 抛
+    `AttributeError: 'list' object has no attribute 'values'`。它俩都在
+    `export_ir` 的写盘流程里 —— 于是坏 IR 让整次导出失败，`IR_CHECK.md`
+    根本落不下来，而这份报告正是"告诉用户哪里坏了"的唯一出口。
+    """
+
+    BAD = [
+        ('lines 是字符串', {'lines': 'nope'}),
+        ('assets 是数组', {'assets': ['x']}),
+        ('lines 里混了字符串', {'lines': ['x', {'line_id': 'a.0001'}]}),
+        ('characters 不是数组', {'characters': 'nope', 'lines': []}),
+        ('stage 不是数组', {'lines': [], 'stage': 'nope'}),
+        ('structure 不是对象', {'lines': [{'line_id': 'a', 'structure': 'x'}]}),
+        ('整个 IR 是数组', [1, 2, 3]),
+    ]
+
+    def test_report_is_written_for_every_bad_shape(self):
+        for name, ir in self.BAD:
+            for engine in ('', 'unity', 'godot'):
+                text = report_markdown(ir, engine)
+                assert '自检' in text, f'{name}/{engine}：报告是空的'
+
+    def test_summarize_never_says_clean_on_bad_shapes(self):
+        for name, ir in self.BAD:
+            for engine in ('unity', 'godot'):
+                assert summarize(ir, engine)['error_count'] >= 1, (
+                    f'{name}/{engine}：坏数据竟然"零错误"')
+
+    def test_bad_shape_is_named_in_the_report(self):
+        assert 'E-IR-LINES-SHAPE' in report_markdown({'lines': 'nope'}, 'unity')
+
+    def test_export_survives_a_bad_ir_already_on_disk(self, tmp_path):
+        """目录里已经躺着一份坏 IR → 导出照样跑完，报告照样写出来。"""
+        beats = [_beat()]
+        assign_identity(beats)
+        out = tmp_path / 'bad_on_disk'
+        out.mkdir()
+        (out / 'story_ir.json').write_text('{"lines": "nope"}',
+                                           encoding='utf-8')
+        files = export_ir('unity', beats, out, project='demo')
+        assert CHECK_REPORT_NAME in {Path(f).name for f in files}
+        assert (out / CHECK_REPORT_NAME).is_file()
+
+    def test_adapter_crash_becomes_a_reported_error(self, monkeypatch):
+        """自检的适配分支崩了 → 记一条 `E-IR-CHECK-CRASH`，不是静默 0 错。"""
+        import storygraph.pipeline.engine_exporters as EE
+
+        def boom(_ir):
+            raise RuntimeError('适配器没跑成')
+
+        monkeypatch.setattr(EE, 'to_unity', boom)
+        summary = summarize(_ir(), 'unity')
+        assert 'E-IR-CHECK-CRASH' in summary['by_code'], summary['by_code']
+        assert summary['error_count'] >= 1
+
+    def test_crash_report_says_the_check_did_not_run(self):
+        text = crash_report('unity', RuntimeError('内部错误'))
+        assert CRASH_CODE in text
+        assert '内部错误' in text
+        assert '没跑成' in text, '报告必须先说清"这不是零问题"'
+
+
+class TestStageCoverage:
+    """
+    覆盖率只数**真对上**的拍（2026-10-20 修，P3）。
+
+    从前数的是 `len(seen)`，而孤儿 id 也被 `seen.add` 了：
+    "2 拍 + 1 合法快照 + 1 孤儿"会算出 `len(seen) == len(line_ids)`，
+    于是**漏报**"有拍没快照"。两条结论互相抵消，等于没有这条检查。
+    """
+
+    def _stage(self, *ids):
+        return [{'line_id': i, 'scene': '', 'actors': [], 'music': ''}
+                for i in ids]
+
+    def test_orphan_does_not_count_as_coverage(self):
+        lines = [_line(line_id='a.0001'), _line(line_id='a.0002', seq=2)]
+        ir = _ir(lines=lines, stage=self._stage('a.0001', 'a.9999'))
+        codes = {i.code for i in check_ir(ir)}
+        assert 'E-IR-STAGE-ORPHAN' in codes
+        assert 'W-IR-STAGE-MISSING' in codes, (
+            '孤儿被算成"已覆盖"，覆盖率不足没报出来')
+
+    def test_full_coverage_is_silent(self):
+        lines = [_line(line_id='a.0001'), _line(line_id='a.0002', seq=2)]
+        ir = _ir(lines=lines, stage=self._stage('a.0001', 'a.0002'))
+        codes = {i.code for i in check_ir(ir)}
+        assert 'W-IR-STAGE-MISSING' not in codes
+        assert 'E-IR-STAGE-ORPHAN' not in codes
+
+    def test_missing_ids_are_named(self):
+        lines = [_line(line_id='a.0001'), _line(line_id='a.0002', seq=2)]
+        ir = _ir(lines=lines, stage=self._stage('a.0001'))
+        hits = [i for i in check_ir(ir) if i.code == 'W-IR-STAGE-MISSING']
+        assert hits and 'a.0002' in hits[0].examples[0], hits[0].as_dict()
+
+
+class TestDimensionConflicts:
+    def test_conflicting_columns_are_not_called_guessed(self):
+        """`Attributes` 与 `Value` 打架 → 单独一条代码，不混进"猜的"。"""
+        assets = {'images': [{
+            'id': 'ling_happy',
+            'attributes': {'expressions': 'happy'},
+            'attribute_values': ['angry'],
+            'attribute_meta': [
+                {'group': 'expressions', 'value': 'happy',
+                 'source': 'value', 'confidence': 0.95},
+                {'group': 'expressions', 'value': 'angry',
+                 'source': 'conflict', 'confidence': 0.5}]}]}
+        codes = {i.code for i in check_ir(_ir(assets=assets))}
+        assert 'W-IR-DIM-CONFLICT' in codes
+        assert 'W-IR-DIM-GUESSED' not in codes
 
 
 def checkbox_text(path: Path) -> str:

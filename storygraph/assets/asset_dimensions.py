@@ -78,20 +78,26 @@ def row_values(row: dict) -> list:
     属性词吞掉（脚本声明行 `image ling happy sad` 一行有多个属性）。
     所以规则是：
 
-      · 有 `Value` → 先收 `Value`；`Attributes` 若还有**多个**词，再并进来
-        （单个词的 `Attributes` 视为老兼容镜像，不重复收）；
+      · 有 `Value` → 先收 `Value`；`Attributes` 里**还没收过的词**逐个并进来；
       · 没有 `Value` → 按 `Attributes` 拆；
       · 最后并入脚本声明的 `_attrs`。
+
+    ⚠ 从前这里是"`Attributes` 只有一个词就当成 `Value` 的老兼容镜像，
+    整格跳过"。可镜像和真值不一致时它就不是镜像了：
+    `{Value: 'happy', Attributes: 'angry'}` 会**静默丢掉** `angry` ——
+    用户只改老列（或只改新列）时，产物安静地用另一列，而模块开头写着
+    "一个都不丢"（2026-10-20 修，P2）。现在判据换成"同名才算镜像"：
+    与 `Value` 不同的词一律留着，并在 `explain_dimensions` 里标成
+    `conflict`（两列打架，谁都别当确定值）。
     """
     row = row or {}
     value_tokens = split_values(row.get(VALUE_FIELD))
     attr_tokens = split_values(row.get('Attributes'))
     if value_tokens:
         values = list(value_tokens)
-        if len(attr_tokens) > 1:
-            for word in attr_tokens:
-                if word not in values:
-                    values.append(word)
+        for word in attr_tokens:
+            if word not in values:
+                values.append(word)
     else:
         values = list(attr_tokens)
     for attr in (row.get('_attrs') or ()):
@@ -99,6 +105,26 @@ def row_values(row: dict) -> list:
         if word and word not in values:
             values.append(word)
     return values
+
+
+def attributes_conflict(row: dict) -> dict:
+    """
+    `Value` 与 `Attributes` **各写了一个值、而且不是同一个** → `{value, attributes}`。
+
+    两列都写着"这一行是哪个属性"时，人其实说了一次半：
+    新列说 `happy`，老列说 `angry`。这时既不吞掉老列（`row_values` 会
+    两个都留），也不能说"这两个都可信" —— 所以单独给一个判据，
+    让 `explain_dimensions` 标 `source='conflict'`、
+    让 `IR_CHECK.md` 报 `W-IR-DIM-CONFLICT`。
+    两边写同一个词 / 只有一边写 → 空 dict（没有冲突）。
+    """
+    row = row or {}
+    value_tokens = split_values(row.get(VALUE_FIELD))
+    attr_tokens = split_values(row.get('Attributes'))
+    if len(value_tokens) == 1 and len(attr_tokens) == 1 \
+            and value_tokens[0] != attr_tokens[0]:
+        return {'value': value_tokens[0], 'attributes': attr_tokens[0]}
+    return {}
 
 
 def row_group(row: dict) -> str:
@@ -215,6 +241,7 @@ DIMENSION_CONFIDENCE = {
     'fact': 0.9,           # 引擎事实（storygraph.engine_facts.json）
     'layeredimage': 0.8,   # 项目 layeredimage
     'unknown': 0.15,       # 认不出维度（**不猜**）
+    'conflict': 0.5,       # 两列写着两个不同的值（都留着，都别当确定值）
 }
 
 #: 剥过 tag 前缀的维度要打折：''剥对了吗''本身是一个判断。
@@ -232,6 +259,8 @@ def explain_dimensions(row: dict, facts=None, layer_model=None,
       · `value`：`Value` 是人写的，维度由引擎事实分组（0.95）；
       · `fact`：维度来自引擎事实（0.9）；
       · `layeredimage`：维度来自项目 `layeredimage`（0.8）；
+      · `conflict`：`Attributes` 与 `Value` 各写了一个不同的值（0.5，
+        **两个词都留着**，但谁都别当确定值）；
       · `unknown`：认不出（0.15，`group` 为空 —— 不猜）；
       · 任何一档只要**剥过 tag 前缀**，置信度再减 0.2（最低 0.1）。
     """
@@ -245,7 +274,10 @@ def explain_dimensions(row: dict, facts=None, layer_model=None,
     explicit = row_group(row)
     # `Value` 列是**人/表写下的最终值**：不再做去 tag 前缀的推断
     # （推断只用于老 `Attributes` 里的整文件名 / 脚本声明的词）。
-    protected = set(split_values(row.get(VALUE_FIELD)))
+    value_tokens = split_values(row.get(VALUE_FIELD))
+    protected = set(value_tokens)
+    # 两列打架时，是 `Attributes` 那个词不可信（`Value` 仍是人写的最终值）。
+    conflict_word = attributes_conflict(row).get('attributes', '')
     allow_strip = bool(strip_prefix) and not _is_nested_under_tag(
         row.get('Path'), tag)
     out = []
@@ -256,7 +288,14 @@ def explain_dimensions(row: dict, facts=None, layer_model=None,
             got = _strip_tag_prefix(value, tag, known)
             stripped = got != value
             value = got
-        group = explicit if (explicit and len(raw_values) == 1) else ''
+        # 显式 `Group` 只对**人写的那一对**（`Group` + `Value`）负责。
+        # 多值行里脚本/老列带出来的第二个词，不该把 `outfit=base` 一起拖成
+        # "认不出、0.15"（2026-10-20 修，P2：人写的和猜的被混成同一档，
+        # 恰好抵消了置信度的用处）。
+        explicit_here = bool(explicit) and (
+            len(raw_values) == 1
+            or (len(value_tokens) == 1 and raw in protected))
+        group = explicit if explicit_here else ''
         source = 'explicit' if group else ''
         value_is_written = raw in protected
         if not group:
@@ -266,8 +305,10 @@ def explain_dimensions(row: dict, facts=None, layer_model=None,
             elif value in model_map:
                 group = model_map[value]
                 source = 'value' if value_is_written else 'layeredimage'
-        if not group:
-            source = 'unknown'
+            else:
+                source = 'unknown'
+            if conflict_word and raw == conflict_word:
+                source = 'conflict'
         confidence = DIMENSION_CONFIDENCE.get(source, DIMENSION_CONFIDENCE[
             'unknown'])
         if stripped:
@@ -526,7 +567,7 @@ def format_dimensions(dims) -> str:
 
 __all__ = [
     'GROUP_FIELD', 'VALUE_FIELD',
-    'split_values', 'row_values', 'row_group',
+    'split_values', 'row_values', 'row_group', 'attributes_conflict',
     'group_map_for_tag', 'dimensions_of_row', 'enrich_image_rows',
     'load_project_facts', 'load_layer_model', 'dimensions_by_tag',
     'grouped_dimensions', 'group_metadata', 'same_group_conflicts',

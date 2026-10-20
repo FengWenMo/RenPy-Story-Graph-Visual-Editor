@@ -304,13 +304,23 @@ def _audit(conn, actor, action, line_id='', detail=''):
 # ==================================================================
 
 def role_of(conn, user_id: str) -> str:
-    """成员角色（没登记的成员 → 空串；调用方按 `editor` 兜底）。"""
+    """
+    成员角色：**没登记的成员 → 空串**（调用方按 `editor` 兜底，
+    那是"本地单人第一次打开"的老语义）；**登记了但角色认不出 → `viewer`**。
+
+    为什么认不出要降到最小权限（2026-10-20 修，P3）：从前这里
+    `return role if role in ROLES else ROLE_EDITOR` —— 一个被手改成
+    `role='admin'`（或迁移写坏）的成员会被**当成 editor**放行改内容。
+    权限判断的方向必须是"认不出就少给"，不是"认不出就多给"：
+    空串（未登记）那条口子是给本地单人用的，和"库里有这条人但角色是乱码"
+    完全不是一回事。
+    """
     row = conn.execute('SELECT role FROM users WHERE id=?',
                        (str(user_id or ''),)).fetchone()
     if row is None:
         return ''
     role = str(row['role'] or '')
-    return role if role in ROLES else ROLE_EDITOR
+    return role if role in ROLES else ROLE_VIEWER
 
 
 def _has_owner(conn) -> bool:
@@ -354,14 +364,19 @@ def set_role(db_path, member: str, role: str, actor: str = '') -> dict:
 
 
 def members(db_path) -> list:
-    """成员清单：`[{'id','display_name','role','role_label'}]`。"""
+    """
+    成员清单：`[{'id','display_name','role','role_label'}]`。
+
+    认不出的角色**按 viewer 显示**（与 `role_of` 的判据一致）：
+    清单说"编辑"、实际按只读拦，是最难查的那种不一致。
+    """
     with connect(db_path) as conn:
         rows = [dict(r) for r in conn.execute(
             'SELECT id, display_name, role, created_at FROM users '
             'ORDER BY id').fetchall()]
     for r in rows:
         role = str(r.get('role') or ROLE_EDITOR)
-        r['role'] = role if role in ROLES else ROLE_EDITOR
+        r['role'] = role if role in ROLES else ROLE_VIEWER
         r['role_label'] = ROLE_LABELS.get(r['role'], r['role'])
     return rows
 

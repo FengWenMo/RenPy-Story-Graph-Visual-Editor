@@ -33,7 +33,9 @@ storygraph.app.stage
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -640,29 +642,83 @@ def _path_from_rel(rel: str, project_root):
     return None
 
 
-#: 磁盘索引缓存：`{项目根: {小写文件名: 路径}}`。**每项目只建一次**。
+#: 磁盘索引缓存：`{项目根: (目录指纹, 建索引的时间, {小写文件名: 路径})}`。
+#:
+#: 从前只按项目根缓存、**永不失效**：用户往 `game/images/` 里丢一张新图，
+#: 预览还是"找不到这张图"，得重启编辑器（2026-10-20 修，P3）。
+#: 现在带"目录指纹 + 复核间隔"：
+#:   · 加/删/改名文件会让**所在目录**的 mtime 变 → 指纹变 → 重建索引；
+#:   · 指纹只看目录（几百个），不 stat 几千张图 —— 那正是这个缓存要省掉的开销；
+#:   · 复核有 `refresh_seconds` 节流：`show_frame` 每拍都问一次，
+#:     不能每拍都走一遍目录树（`refresh_seconds=0` 可强制复核，测试用它）。
 _IMAGE_INDEX_CACHE: dict = {}
 
+#: 索引复核间隔（秒）。一秒半之内连续翻拍不会重复扫目录。
+_IMAGE_INDEX_REFRESH = 1.5
 
-def image_index(project_root) -> dict:
+
+def _dirs_signature(roots, limit: int = 600) -> tuple:
+    """
+    图片目录的**目录指纹**：`((目录, mtime_ns), …)`（排序后）。
+
+    只走目录、不 stat 文件：加一张图会让它所在目录的 mtime 变。
+    有界（600 个目录）：项目大到大这个数，索引本来就该重建。
+    """
+    sig = []
+    seen = 0
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+        except OSError:
+            continue
+        stack = [root]
+        while stack and seen < limit:
+            cur = stack.pop()
+            seen += 1
+            try:
+                sig.append((str(cur), cur.stat().st_mtime_ns))
+                entries = list(os.scandir(cur))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                except OSError:
+                    continue
+    sig.sort()
+    return tuple(sig)
+
+
+def image_index(project_root, refresh_seconds: float = None) -> dict:
     """
     项目里的图片索引（`bg6.2` / `bg6_2` → 真实文件）。
 
     **有界**：只在已知的图片目录里递归一次（`game/images/**`），跳过
-    `gui/`（界面素材，几千张，与演出无关），结果按项目缓存。
+    `gui/`（界面素材，几千张，与演出无关）。
     这不是"猜"，而是"表里没有、但文件确实在"时的兜底 ——
     找不到就老实说找不到，绝不编一个路径出来。
+
+    `refresh_seconds`：多久复核一次目录指纹（默认 1.5 秒；**0 = 每次都查**）。
+    新加的图不必重启就能被看见，翻拍时又不会每拍扫一遍目录树。
     """
     if not project_root:
         return {}
     key = str(project_root)
-    got = _IMAGE_INDEX_CACHE.get(key)
-    if got is not None:
-        return got
-    from pathlib import Path
-    idx: dict = {}
     roots = [Path(project_root) / 'game' / 'images',
              Path(project_root) / 'images']
+    wait = _IMAGE_INDEX_REFRESH if refresh_seconds is None else float(
+        refresh_seconds)
+    now = time.monotonic()
+    got = _IMAGE_INDEX_CACHE.get(key)
+    if got is not None and now - got[1] < wait:
+        return got[2]
+    sig = _dirs_signature(roots)
+    if got is not None and got[0] == sig:
+        _IMAGE_INDEX_CACHE[key] = (sig, now, got[2])
+        return got[2]
+    idx: dict = {}
     exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
     try:
         for root in roots:
@@ -677,7 +733,7 @@ def image_index(project_root) -> dict:
                 idx.setdefault(f.stem.lower(), str(f))
     except OSError as e:
         swallow('stage.image_index', e)
-    _IMAGE_INDEX_CACHE[key] = idx
+    _IMAGE_INDEX_CACHE[key] = (sig, now, idx)
     return idx
 
 

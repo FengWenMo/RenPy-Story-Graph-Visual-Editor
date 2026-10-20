@@ -1174,6 +1174,14 @@ class GraphOpsMixin:
         check = res.get('check') or {}
         errs = int(check.get('error_count') or 0)
         warns = int(check.get('warning_count') or 0)
+        if check.get('status') == 'failed':
+            # 自检**没跑成**和"零错误"必须分开说：前者什么也没保证。
+            detail = str(check.get('error') or '')
+            self._log(f'[导出] IR 自检没跑成：{detail}（IR_CHECK.md 写的可能是'
+                      f'更早那份报告）')
+            self._status(f'⚠ 已导出 {engine} 格式（{len(res["files"])} 个文件）'
+                         f' · 自检没跑成，别当成"没问题"')
+            return res['out_dir']
         if errs or warns:
             level = '错误' if errs else '警告'
             self._log(f'[导出] IR 自检：{errs} 个错误 / {warns} 个警告'

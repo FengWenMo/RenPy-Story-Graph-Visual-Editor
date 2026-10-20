@@ -1757,6 +1757,7 @@
      "by_code": {
       "W-IR-STRUCTURE-UNKNOWN": 1
      },
+     "error": "",
      "error_count": 0,
      "issues": [
       {
@@ -1770,6 +1771,7 @@
        "scope": "line"
       }
      ],
+     "status": "ok",
      "warning_count": 1
     },
     "engine": "json",

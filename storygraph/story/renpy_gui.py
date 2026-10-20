@@ -133,6 +133,12 @@ class GuiProfile:
     #: "字不是那个字"必须说出来，否则看起来"像"的排版其实是假的。
     fonts_substituted: list = field(default_factory=list)
     screen_say_custom: bool = False
+    #: **缓存复核用**：查字体时看过哪些项目内路径、当时在不在（`(路径, True/False)`）。
+    #:
+    #: 缓存键只含 `.rpy` 的 mtime —— 作者按提示把字体丢进 `game/fonts/` 时，
+    #: 没有任何 `.rpy` 变化，缓存永远命中，预览只好一直用替代字体（字宽/字形
+    #: 都和真机不一样），得重启编辑器（2026-10-20 修，P3）。
+    font_probe: tuple = ()
 
     # ---- 便于渲染器读的强类型属性 ----
     @property
@@ -372,27 +378,53 @@ def _sdk_roots(project_root: Path) -> list:
     return out
 
 
+def _font_probe_paths(project_root: Path, rel: str) -> list:
+    """
+    字体在**项目内**会被查的路径（含不存在的那几个）。
+
+    两个用途，必须是同一份事实：
+      · `_font_candidates` 按这个顺序取第一个存在的（最像引擎的优先）；
+      · `GuiProfile.font_probe` 把"在不在"记下来，缓存命中时复核 ——
+        字体文件出现/消失不该靠重启才看见。
+
+    为什么不含 SDK / Windows 字体：引擎装好之后那两处不会在会话中途变；
+    多查它们只会拖慢每次取 profile 的路。
+    """
+    rel = str(rel or '').strip().strip('"\'')
+    if not rel:
+        return []
+    name = Path(rel).name
+    out = []
+    for base in (project_root / 'game', project_root):
+        out.append(base / rel)
+    # Ren'Py 项目的字体约定目录：作者"把字体丢进去"最常落在这里。
+    for base in (project_root / 'game', project_root):
+        for sub in ('fonts', 'gui', 'sdk-fonts'):
+            out.append(base / sub / name)
+    return out
+
+
 def _font_candidates(project_root: Path, rel: str):
     """
     字体候选路径，按"最像引擎"的顺序：
       1. 项目内的相对路径（作者自己带的字体）；
-      2. 项目目录里的同名文件；
-      3. SDK 的 `renpy/common` / `gui` / `sdk-fonts` —— 引擎真正的兜底；
-      4. Windows 系统字体（最后手段，会记 warning）。
+      2. 项目目录里的同名文件（含 `game/fonts` 等约定目录）；
+      3. 项目 `game/` 下任意位置的同名文件（旧行为，兜底）；
+      4. SDK 的 `renpy/common` / `gui` / `sdk-fonts` —— 引擎真正的兜底；
+      5. Windows 系统字体（最后手段，会记 warning）。
     """
     rel = str(rel or '').strip().strip('"\'')
     if not rel:
         return []
     out = []
-    for base in (project_root / 'game', project_root):
-        p = base / rel
-        if p.is_file():
+    for p in _font_probe_paths(project_root, rel):
+        if p not in out and p.is_file():
             out.append(p)
     name = Path(rel).name
     game = project_root / 'game'
     try:
         for p in sorted(game.rglob(name))[:5]:
-            if p.is_file():
+            if p.is_file() and p not in out:
                 out.append(p)
     except OSError as e:
         swallow('renpy_gui.rglob_font', e)
@@ -408,6 +440,20 @@ def _font_candidates(project_root: Path, rel: str):
         if p.is_file():
             out.append(p)
     return out
+
+
+def _font_probe_ok(profile) -> bool:
+    """缓存命中前复核：字体文件还在/还是不在（不一致就重建 profile）。"""
+    probe = getattr(profile, 'font_probe', ())
+    if not probe:
+        return True
+    for path, existed in probe:
+        try:
+            if Path(path).is_file() != bool(existed):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _find_file(project_root: Path, rel: str) -> Optional[str]:
@@ -586,7 +632,9 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     key = (str(root), stamp, id(registry))
     if not force:
         got = _CACHE.get(key)
-        if got is not None:
+        # 字体文件也是缓存的一部分：只比 `.rpy` 的 mtime 会让"刚丢进来的字体"
+        # 一直看不见（见 `GuiProfile.font_probe`）。
+        if got is not None and _font_probe_ok(got):
             return got
 
     texts = {}
@@ -648,6 +696,15 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
             Path(name_rel).name.lower():
         used = Path(profile.name_font_path).name
         profile.fonts_substituted.append(f'{name_rel} → {used}')
+
+    # 记下"字体查过哪些路径、当时在不在"：缓存命中时复核（见 font_probe）。
+    probe = []
+    for rel in (font_rel, name_rel):
+        for p in _font_probe_paths(root, rel):
+            item = (str(p), p.is_file())
+            if item not in probe:
+                probe.append(item)
+    profile.font_probe = tuple(probe)
 
     # 背景图
     custom, backgrounds = _parse_say_screen(texts)

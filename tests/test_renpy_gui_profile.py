@@ -194,6 +194,49 @@ class TestCharacters:
         assert p.character_for('unknown', '不存在').id == 'unknown'
 
 
+class TestFontCacheInvalidation:
+    """
+    **字体文件**也是缓存的一部分（2026-10-20 修，P3）。
+
+    缓存键只含 `.rpy` 的 mtime。作者按 warning 的提示把缺的字体丢进
+    `game/fonts/` 时，没有任何一个 `.rpy` 变化 → 缓存永远命中，
+    预览只好一直用替代字体（字宽/字形都和真机不一样），得重启编辑器。
+    真机味道：`sr_general` 用的是 `Plix-Regular.otf`，换成雅黑后
+    "Sylvie" 从 88px 变成 82px —— 字号一样，字不是那个字。
+    """
+
+    def test_a_font_added_later_is_picked_up_without_force(self, tmp_path):
+        proj = _project(tmp_path)
+        first = load_gui_profile(proj)
+        assert any('does-not-exist' in w for w in first.warnings), (
+            '基线：这个项目本来就缺字体')
+
+        font = proj / 'game' / 'fonts' / 'does-not-exist.ttf'
+        font.parent.mkdir(parents=True, exist_ok=True)
+        font.write_bytes(b'\x00' * 16)
+        again = load_gui_profile(proj)          # 不 force = 再开一次预览
+        assert again.text_font_path == str(font), (
+            '刚丢进来的字体没生效 —— 缓存没复核字体文件')
+        assert not any('does-not-exist' in w for w in again.warnings)
+
+    def test_a_font_removed_later_falls_back_again(self, tmp_path):
+        proj = _project(tmp_path)
+        font = proj / 'game' / 'fonts' / 'does-not-exist.ttf'
+        font.parent.mkdir(parents=True, exist_ok=True)
+        font.write_bytes(b'\x00' * 16)
+        assert load_gui_profile(proj).text_font_path == str(font)
+
+        font.unlink()
+        back = load_gui_profile(proj)
+        assert back.text_font_path != str(font), '字体没了还在用它'
+        assert any('does-not-exist' in w for w in back.warnings)
+
+    def test_unchanged_fonts_still_hit_the_cache(self, tmp_path):
+        """没变就别重建（预览每开一次都要取 profile）。"""
+        proj = _project(tmp_path)
+        assert load_gui_profile(proj) is load_gui_profile(proj)
+
+
 class TestRealProjectIfPresent:
     def test_sr_general_reads_1920_and_plix(self):
         root = Path(r'D:\千连万理\RenPyTest\sr_general')

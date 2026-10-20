@@ -302,6 +302,32 @@ class TestStageAssetResolution:
         assert image_index_lookup('bg room', {}) is None
         assert image_index_lookup('', {'room': 'x'}) is None
 
+    def test_a_new_image_shows_up_without_restart(self, tmp_path):
+        """
+        索引缓存带**目录指纹**：加一张图不必重启编辑器（2026-10-20 修，P3）。
+
+        从前只按项目根缓存、永不失效 —— 用户丢一张新图进 `game/images/`，
+        预览还是那句"找不到这张图"，只能重启。
+        """
+        from storygraph.app.stage import image_index
+        self._proj(tmp_path, 'game/images/bg/room.png')
+        idx = image_index(tmp_path, refresh_seconds=0)
+        assert 'room' in idx and 'newbg' not in idx
+        self._proj(tmp_path, 'game/images/bg/newbg.png')
+        again = image_index(tmp_path, refresh_seconds=0)
+        assert 'newbg' in again, '新加的图没进索引 —— 又得重启了'
+
+    def test_repeated_calls_hit_the_cache(self, tmp_path):
+        """
+        播放时每拍都会问一次索引 → 默认路径**不许**每次都扫目录树。
+
+        身份相同 = 用的还是那份 dict（没有重建）。
+        """
+        from storygraph.app.stage import image_index
+        self._proj(tmp_path, 'game/images/bg/room.png')
+        first = image_index(tmp_path)
+        assert image_index(tmp_path) is first
+
 
 class TestScriptImageDeclarations:
     """

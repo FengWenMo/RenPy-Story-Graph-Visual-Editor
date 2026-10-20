@@ -33,6 +33,12 @@ storygraph.pipeline.ir_validate
 
 边界：**非阻塞**。错误只报告，不拦导出 —— 用户可能就是要拿这份数据去
 排查；但回执会写"自检 2 错"，不会让它悄悄出去。
+
+**坏数据是自检要诊断的对象，不是它的崩溃点**（2026-10-20 补）：
+`lines` / `assets` 形状不对时报告照样生成（`E-IR-LINES-SHAPE` 等）；
+适配产物检查崩了记一条 `E-IR-CHECK-CRASH`；连自检自己都崩了，
+`export_ir` 也会写一份 `crash_report`——"自检没跑成"和"零问题"必须
+长得不一样。
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.safeguard import swallow
 from storygraph.story.paths import write_text_atomic
 
 #: 自检报告文件名。**每个引擎都会写**：中立 IR 是每次导出都有的产物，
@@ -62,6 +69,10 @@ MARKUP_CHARS = ('{', '[')
 
 #: 低于这个置信度的维度算"猜的"（§19 的刻度：explicit 1.0 / unknown 0.15）。
 LOW_CONFIDENCE = 0.7
+
+#: 自检**自己**崩了时用的代码（不是 IR 的问题，是自检的问题）。
+#: 与 `export_ir` 写的 `crash_report` 是同一件事的两个入口。
+CRASH_CODE = 'E-IR-CHECK-CRASH'
 
 _SCHEMA_RE = re.compile(r'^' + re.escape(SCHEMA_PREFIX) + r'(\d+\.\d+)$')
 
@@ -276,6 +287,7 @@ def _check_stage(ir, line_ids, out) -> None:
         out.add('error', 'E-IR-STAGE-SHAPE', 'stage 不是数组', 'stage')
         return
     seen = set()
+    covered = set()          # **落在 line_ids 里**的快照（才算"这一拍有快照"）
     dup_reported = set()
     for idx, row in enumerate(stage):
         if not isinstance(row, dict):
@@ -296,11 +308,16 @@ def _check_stage(ir, line_ids, out) -> None:
             if line_ids and sid not in line_ids:
                 out.add('error', 'E-IR-STAGE-ORPHAN',
                         'stage 指向一个不存在的 line_id', 'stage', sid)
-    if line_ids and len(seen) < len(line_ids):
-        missing = len(line_ids) - len(seen)
+            else:
+                covered.add(sid)
+    # 覆盖率只数**真对上**的：从前数的是 `seen`，孤儿 id 也算一"拍"，
+    # 于是"2 拍 + 1 合法 + 1 孤儿"会因为 `len(seen) == len(line_ids)` 而
+    # **漏报**覆盖率不足（2026-10-20 修，P3）。
+    missing = sorted(set(line_ids or ()) - covered) if line_ids else []
+    if missing:
         out.add('warning', 'W-IR-STAGE-MISSING',
                 '有拍没有 stage 快照（跨章合并时正常，但目标引擎得兜底）',
-                'stage', f'{missing} 拍')
+                'stage', f'{len(missing)} 拍：' + '、'.join(missing[:3]))
 
 
 def _check_assets(ir, out) -> None:
@@ -334,7 +351,7 @@ def _check_assets(ir, out) -> None:
 
 
 def _check_dimensions(item, aid, out) -> None:
-    """§19 的置信度：带结构化维度却没有元数据 / 元数据是猜的。"""
+    """§19 的置信度：带结构化维度却没有元数据 / 元数据是猜的 / 两列打架。"""
     meta = item.get('attribute_meta')
     attrs = item.get('attributes')
     if attrs and not meta:
@@ -344,7 +361,7 @@ def _check_dimensions(item, aid, out) -> None:
         return
     if not isinstance(meta, list):
         return
-    low = []
+    low, conflicts = [], []
     for row in meta:
         if not isinstance(row, dict):
             continue
@@ -353,8 +370,18 @@ def _check_dimensions(item, aid, out) -> None:
         except (TypeError, ValueError):
             confidence = 0.0
         source = str(row.get('source') or '')
-        if confidence < LOW_CONFIDENCE or source == 'unknown':
-            low.append(f'{row.get("group") or "?"}={row.get("value") or "?"}')
+        here = f'{row.get("group") or "?"}={row.get("value") or "?"}'
+        # `conflict`（0.5）不是"猜的"：表里两列**确实写着**两个值，
+        # 只是不一致。混进 W-IR-DIM-GUESSED 会让人以为是"猜错了"。
+        if source == 'conflict':
+            conflicts.append(here)
+        elif confidence < LOW_CONFIDENCE or source == 'unknown':
+            low.append(here)
+    if conflicts:
+        out.add('warning', 'W-IR-DIM-CONFLICT',
+                '`Attributes` 与 `Value` 两列写的不是同一个值'
+                '（两条都留着，但分不清哪条是真的）',
+                'asset', f'{aid}: {", ".join(conflicts[:3])}')
     if low:
         out.add('warning', 'W-IR-DIM-GUESSED',
                 '这些维度是猜的（低置信度），排版/筛选别当确定值',
@@ -465,14 +492,26 @@ def summarize(ir, engine: str = '') -> dict:
     自检结果的可回执形态：`{error_count, warning_count, issues, by_code}`。
 
     `engine` 给了就顺带检查适配产物（Unity 才会真的多出结论）。
+
+    **适配产物检查自己崩了要算一条错误**（2026-10-20 修，P1）：从前这里
+    直接调 `to_unity(ir)`，坏形状的 IR 会抛出去 —— 而 `session_export`
+    外面包着 `try`，异常一吞，回执里 `error_count` 就是 0。
+    "没跑成"和"干净"在回执上长得一样，这是这个仓库最忌讳的一类谎。
     """
     issues = check_ir(ir)
     if engine:
-        from storygraph.pipeline.engine_exporters import to_godot, to_unity
-        if str(engine).lower() == 'unity':
-            issues += check_adapter('unity', to_unity(ir))
-        elif str(engine).lower() == 'godot':
-            issues += check_adapter('godot', to_godot(ir))
+        try:
+            from storygraph.pipeline.engine_exporters import (to_godot,
+                                                              to_unity)
+            if str(engine).lower() == 'unity':
+                issues += check_adapter('unity', to_unity(ir))
+            elif str(engine).lower() == 'godot':
+                issues += check_adapter('godot', to_godot(ir))
+        except Exception as e:                # noqa: BLE001 - 崩了也算一条错误
+            swallow('pipeline.ir_validate.summarize.adapter', e)
+            issues.append(Issue(
+                'error', CRASH_CODE,
+                f'适配产物检查没跑成（{type(e).__name__}：{e}）', 'adapter'))
     errors = [i for i in issues if i.level == 'error']
     warnings = [i for i in issues if i.level != 'error']
     by_code = {}
@@ -485,6 +524,35 @@ def summarize(ir, engine: str = '') -> dict:
         'issues': [i.as_dict() for i in issues],
         'by_code': by_code,
     }
+
+
+def crash_report(engine: str, exc: BaseException) -> str:
+    """
+    自检崩了时写的报告（保证 `IR_CHECK.md` **一定**存在）。
+
+    为什么要有它：`export_ir` 的最后一步是写这份报告。从前那一步会抛 ——
+    于是坏 IR 的目录里**没有** `IR_CHECK.md`，用户只看到"导出失败"，
+    而真正的原因（哪一段数据形状不对）谁也没说。
+    这份报告说三件事：自检没跑成、崩在哪、以及"别把它当成零问题"。
+    """
+    title = f'# 中立 IR 自检 · {engine}' if engine else '# 中立 IR 自检'
+    detail = f'{type(exc).__name__}：{exc}'
+    return '\n'.join([
+        title, '',
+        '- 错误 1 · 警告 0',
+        '',
+        '> **自检没跑成**：这一份报告不是"数据没问题"，而是"检查这一份的'
+        '时候崩了"。在修好之前，别把这份 IR 当成已校验的产物。', '',
+        '## 错误', '',
+        '| 代码 | 说明 | 数量 | 例子 |', '|---|---|---|---|',
+        f'| `{CRASH_CODE}` | 自检自身抛出异常（IR 形状太坏 / 自检有 bug） '
+        f'| 1 | {detail} |', '',
+        '## 怎么查', '',
+        f'- 先看异常：`{detail}`；',
+        '- 再拿 `story_ir.json` 过一遍 JSON 校验（对象/数组/键名是否如'
+        '`build_neutral_ir` 的文档所述）；',
+        '- 自检的判据在 `storygraph/pipeline/ir_validate.py`，'
+        '用例在 `tests/test_ir_validate.py`。', ''])
 
 
 def report_markdown(ir, engine: str = '') -> str:

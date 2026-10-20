@@ -34,6 +34,7 @@ from pathlib import Path
 from storygraph.core.safeguard import swallow
 from storygraph.pipeline.ir_loss import LOSS_REPORT_NAME, report_markdown
 from storygraph.pipeline.ir_validate import (CHECK_REPORT_NAME,
+                                             crash_report as check_crashed,
                                              report_markdown as check_report)
 from storygraph.story.beat_model import split_hide_items, split_show_items
 from storygraph.story.stage_snapshot import stage_snapshots
@@ -396,6 +397,40 @@ def _asset_manifest(registry) -> dict:
 #  2. 适配器
 # ==================================================================
 
+def _rows(value) -> list:
+    """
+    `lines` / 资源分组这种"应该是一组对象"的值 → 只留 `dict`。
+
+    适配器必须是**总函数**（2026-10-20 修，P1）：IR 是外部数据（别人手改过、
+    老版本写的、或者生成时就坏了）。从前 `to_unity({'lines': 'nope'})` 直接
+    `TypeError: string indices must be integers`，而它在 `export_ir` 的写盘
+    流程里（自检报告要调它）—— 于是**坏 IR 让整次导出崩掉**，
+    `IR_CHECK.md` 出不来，用户拿不到任何"哪里坏了"的信息。
+    现在一律收敛成空值，让自检去报 `E-IR-LINE-SHAPE` / `E-AD-UNITY-KEYS`。
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def _scalar(value, default=''):
+    """标量字段原样保留；对象/数组/None 降级成默认值（适配产物只要标量）。"""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return default
+
+
+def _strings(value) -> list:
+    """字符串数组字段（`poses` / `targets`）：非数组 → 空，元素一律转字符串。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(v) for v in value if isinstance(v, (str, int, float))]
+
+
+def _mapping(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def to_unity(ir: dict) -> dict:
     """
     Unity 适配：扁平、字段名英文小驼峰、无嵌套字典。
@@ -403,96 +438,110 @@ def to_unity(ir: dict) -> dict:
     目标是 `JsonUtility.FromJson<DialogueData>(json)` 能直接吃下去，
     所以数组元素只能是"标量字段 + 字符串数组"。
     """
+    ir = _mapping(ir)
     return {
-        'schema': ir.get('schema', ''),
-        'project': ir.get('project', ''),
+        'schema': _scalar(ir.get('schema')),
+        'project': _scalar(ir.get('project')),
         'characters': [{
-            'id': c['id'], 'displayName': c['name'], 'color': c['color'],
-            'imageTag': c['image_tag'], 'voiceTag': c['voice_tag'],
-        } for c in ir.get('characters', [])],
+            'id': _scalar(c.get('id')),
+            'displayName': _scalar(c.get('name')),
+            'color': _scalar(c.get('color')),
+            'imageTag': _scalar(c.get('image_tag')),
+            'voiceTag': _scalar(c.get('voice_tag')),
+        } for c in _rows(ir.get('characters'))],
         'lines': [{
-            'lineId': l['line_id'],
-            'label': l['label'],
-            'seq': l['seq'],
-            'kind': l['kind'],
-            'speakerId': l['speaker'],
-            'speakerName': l['speaker_name'],
-            'text': l['text'],
-            'condition': l['condition'],
-            'background': l['scene'],
-            'poses': l['actors'],
-            'bgm': l['music'],
-            'bgmAction': l['music_action'],
-            'sfx': l['sound'],
-            'sfxAction': l['sound_action'],
-            'voice': l['voice'],
-            'nest': l.get('nest', ''),
+            'lineId': _scalar(l.get('line_id')),
+            'label': _scalar(l.get('label')),
+            'seq': _scalar(l.get('seq'), 0),
+            'kind': _scalar(l.get('kind')),
+            'speakerId': _scalar(l.get('speaker')),
+            'speakerName': _scalar(l.get('speaker_name')),
+            'text': _scalar(l.get('text')),
+            'condition': _scalar(l.get('condition')),
+            'background': _scalar(l.get('scene')),
+            'poses': _strings(l.get('actors')),
+            'bgm': _scalar(l.get('music')),
+            'bgmAction': _scalar(l.get('music_action')),
+            'sfx': _scalar(l.get('sound')),
+            'sfxAction': _scalar(l.get('sound_action')),
+            'voice': _scalar(l.get('voice')),
+            'nest': _scalar(l.get('nest')),
             # 结构上下文 + 演出时间轴（2026-10-19，跨引擎第一片）。
             # 刻意**摊平**：`structure` 拆成三个标量，`timeline` 是
             # 扁平对象数组（JsonUtility 能反序列化；不要嵌套字典）。
-            'structurePath': (l.get('structure') or {}).get('path', ''),
-            'structureKind': (l.get('structure') or {}).get('kind', ''),
-            'structureKnown': bool((l.get('structure') or {}).get('known')),
-            'timeline': list(l.get('timeline') or []),
-            'transition': l.get('with', ''),
-            'targets': list(l.get('targets') or []),
-            'lineHash': l['line_hash'],
-        } for l in ir.get('lines', [])],
+            'structurePath': _scalar(_mapping(l.get('structure')).get('path')),
+            'structureKind': _scalar(_mapping(l.get('structure')).get('kind')),
+            'structureKnown': bool(_mapping(l.get('structure')).get('known')),
+            'timeline': _rows(l.get('timeline')),
+            'transition': _scalar(l.get('with')),
+            'targets': _strings(l.get('targets')),
+            'lineHash': _scalar(l.get('line_hash')),
+        } for l in _rows(ir.get('lines'))],
         'assets': _unity_assets(ir.get('assets', {})),
     }
 
 
 def _unity_assets(assets: dict) -> list:
-    """Unity 侧更习惯一个扁平的资源数组（配合 Addressables key）。"""
+    """
+    Unity 侧更习惯一个扁平的资源数组（配合 Addressables key）。
+
+    `assets` 坏了（不是对象 / 分组不是数组 / 条目不是对象）→ 跳过错的那一层，
+    不抛：这份列表是给 Addressables 的，少一条比整份读不出来强。
+    """
     rows = []
-    for group, items in (assets or {}).items():
-        for it in items:
+    for group, items in _mapping(assets).items():
+        for it in _rows(items):
             rows.append({
-                'id': it.get('id', ''),
-                'type': it.get('type', group.rstrip('s')),
-                'path': it.get('path', ''),
-                'tag': it.get('tag', ''),
-                'category': it.get('category', ''),
-                'doc': it.get('doc', ''),
+                'id': _scalar(it.get('id')),
+                'type': _scalar(it.get('type'),
+                                str(group or '').rstrip('s')),
+                'path': _scalar(it.get('path')),
+                'tag': _scalar(it.get('tag')),
+                'category': _scalar(it.get('category')),
+                'doc': _scalar(it.get('doc')),
             })
     return rows
 
 
 def to_godot(ir: dict) -> dict:
     """Godot 适配：保留嵌套（GDScript 的 JSON.parse 能吃），key 用 snake_case。"""
+    ir = _mapping(ir)
     return {
-        'schema': ir.get('schema', ''),
-        'project': ir.get('project', ''),
+        'schema': _scalar(ir.get('schema')),
+        'project': _scalar(ir.get('project')),
         'characters': [{
-            'id': c['id'], 'display_name': c['name'], 'color': c['color'],
-            'image_tag': c['image_tag'], 'voice_tag': c['voice_tag'],
-        } for c in ir.get('characters', [])],
+            'id': _scalar(c.get('id')),
+            'display_name': _scalar(c.get('name')),
+            'color': _scalar(c.get('color')),
+            'image_tag': _scalar(c.get('image_tag')),
+            'voice_tag': _scalar(c.get('voice_tag')),
+        } for c in _rows(ir.get('characters'))],
         'lines': [{
-            'line_id': l['line_id'],
-            'label': l['label'],
-            'seq': l['seq'],
-            'kind': l['kind'],
-            'speaker_id': l['speaker'],
-            'speaker_name': l['speaker_name'],
-            'text': l['text'],
-            'condition': l['condition'],
-            'nest': l.get('nest', ''),
-            'structure': l.get('structure') or {},
-            'timeline': list(l.get('timeline') or []),
-            'transition': l.get('with', ''),
-            'targets': list(l.get('targets') or []),
+            'line_id': _scalar(l.get('line_id')),
+            'label': _scalar(l.get('label')),
+            'seq': _scalar(l.get('seq'), 0),
+            'kind': _scalar(l.get('kind')),
+            'speaker_id': _scalar(l.get('speaker')),
+            'speaker_name': _scalar(l.get('speaker_name')),
+            'text': _scalar(l.get('text')),
+            'condition': _scalar(l.get('condition')),
+            'nest': _scalar(l.get('nest')),
+            'structure': _mapping(l.get('structure')),
+            'timeline': _rows(l.get('timeline')),
+            'transition': _scalar(l.get('with')),
+            'targets': _strings(l.get('targets')),
             'stage': {
-                'background': l['scene'],
-                'poses': l['actors'],
-                'bgm': l['music'],
-                'bgm_action': l['music_action'],
-                'sfx': l['sound'],
-                'sfx_action': l['sound_action'],
-                'voice': l['voice'],
+                'background': _scalar(l.get('scene')),
+                'poses': _strings(l.get('actors')),
+                'bgm': _scalar(l.get('music')),
+                'bgm_action': _scalar(l.get('music_action')),
+                'sfx': _scalar(l.get('sound')),
+                'sfx_action': _scalar(l.get('sound_action')),
+                'voice': _scalar(l.get('voice')),
             },
-            'line_hash': l['line_hash'],
-        } for l in ir.get('lines', [])],
-        'assets': ir.get('assets', {}),
+            'line_hash': _scalar(l.get('line_hash')),
+        } for l in _rows(ir.get('lines'))],
+        'assets': _mapping(ir.get('assets')),
     }
 
 
@@ -588,12 +637,46 @@ def expected_files(engine: str) -> list:
     return [NEUTRAL_IR_NAME, CHECK_REPORT_NAME]
 
 
-def _merge_by_key(old_items, new_items, key) -> list:
-    """按 `key` 去重合并（老的在前，新的补在后）。"""
+def _merge_by_key(old_items, new_items, key, replace_scope=None) -> list:
+    """
+    按 `key` 合并：**老的定顺序，新的定内容**。
+
+      · 同一 key → 留**新**那一份（"再导一次"就是把这一章按现在的表重写）；
+      · 新 key → 追加在老条目后面（多章导同一目录不丢章节）；
+      · `replace_scope(old_item) -> bool`：老条目属于**本次重导的那一章**、
+        而新一份里已经没有它 → 删掉（表里删了一行，IR 里也必须消失）。
+
+    为什么"同 key 用新值"是底线（2026-10-20 真机实测，P0）：从前这里把老条目
+    放前面、同 key 的新条目**直接跳过**。而 `line_id` 是 `label.序号`
+    （`beat_model.assign_identity`）—— **改一句台词不会换 id**，于是
+    "改完再导一次"恰好落在"同 key 用旧值"上：`story_ir.json` 与
+    `UnityDialogueData.json` 里还是旧台词，`IR_CHECK.md` 对这份**自洽的旧
+    数据**算出来"0 错 0 警告"，回执 `ok: True`。这比报错更坏 ——
+    用户以为改动已经导出去了。
+    """
+    new_rows = [it for it in (new_items or []) if isinstance(it, dict)]
+    new_by_key: dict = {}
+    for it in new_rows:
+        k = str(it.get(key) or '')
+        if k:
+            # 同一份导出里 key 重复：以**最后一条**为准（同"最后一次导出为准"）。
+            new_by_key[k] = it
     out, seen = [], set()
-    for it in list(old_items or []) + list(new_items or []):
+    for it in (old_items or []):
         if not isinstance(it, dict):
             continue
+        k = str(it.get(key) or '')
+        if k and k in seen:
+            continue
+        if k and k in new_by_key:
+            seen.add(k)
+            out.append(new_by_key[k])
+            continue
+        if replace_scope is not None and replace_scope(it):
+            continue
+        seen.add(k)
+        out.append(it)
+    for it in new_rows:
         k = str(it.get(key) or '')
         if k and k in seen:
             continue
@@ -610,18 +693,47 @@ def _merge_ir(old: dict, new: dict) -> dict:
     UI 是"选一个目录 → 导出当前这一章"，而 `export_ir` 写**固定文件名**
     （`story_ir.json`）。40 章的项目里用户点四次，**后一章静默覆盖前一章**，
     每次还都报"导出成功"。合并之后同一目录里的中立 IR 累积成"整部戏"。
+
+    **合并的单位是"章"，不是"行"**（2026-10-20 修，P0）：`new` 里出现了
+    哪些 `label`，就认为"这一章被重导了" —— 那一章的行/快照以 `new` 为准：
+
+      · 同一 `line_id` → 用 `new` 的内容（改台词不会换 id，见下方 `_merge_by_key`）；
+      · `new` 里没有、但属于这一章的 `line_id` → **删掉**（表里删了行）；
+      · 别的章 → 原样保留（多章累积）。
+
+    只按 `line_id` 合并是不够的：那只能"改"，不能"删"—— 删掉的台词会永远
+    留在 IR（和目标引擎）里，而编辑器里已经看不到了。按 `label` 划章靠的是
+    `line_id = label.序号`（`beat_model.assign_identity`）这个既有约定。
     """
     if not isinstance(old, dict) or not old.get('lines'):
         return new
     merged = dict(new)
+    new_lines = [l for l in (new.get('lines') or []) if isinstance(l, dict)]
+    # 本次导出覆盖了哪些章（`label`）。空集合 = 这一份没有行 → 不删任何东西。
+    new_labels = {str(l.get('label') or '') for l in new_lines
+                  if str(l.get('label') or '')}
+    old_label_of = {}
+    for row in (old.get('lines') or []):
+        if isinstance(row, dict):
+            old_label_of[str(row.get('line_id') or '')] = str(
+                row.get('label') or '')
+
+    def _line_in_scope(row) -> bool:
+        return str(row.get('label') or '') in new_labels
+
+    def _stage_in_scope(row) -> bool:
+        # 快照行只有 `line_id`：用**老 IR 里的** label 反查（别现拆 id）。
+        label = old_label_of.get(str(row.get('line_id') or '')) or ''
+        return bool(label) and label in new_labels
+
     merged['project'] = old.get('project') or new.get('project', '')
     merged['title'] = old.get('title') or new.get('title', '')
     merged['lines'] = _merge_by_key(old.get('lines'), new.get('lines'),
-                                    'line_id')
+                                    'line_id', _line_in_scope)
     merged['characters'] = _merge_by_key(old.get('characters'),
                                          new.get('characters'), 'id')
     merged['stage'] = _merge_by_key(old.get('stage'), new.get('stage'),
-                                    'line_id')
+                                    'line_id', _stage_in_scope)
     groups = set((old.get('assets') or {})) | set((new.get('assets') or {}))
     merged['assets'] = {
         g: _merge_by_key((old.get('assets') or {}).get(g),
@@ -697,8 +809,18 @@ def export_ir(engine: str, beats, out_dir, registry=None,
     # 快照指向不存在的行 / Unity 产物里的嵌套字典）。放在最后写：
     # Unity 的适配产物已经生成，检查能连"适配器是否违反 JsonUtility 约束"
     # 一起覆盖。每个引擎都写 —— 中立 IR 是每次导出都有的产物。
-    written.append(_write_text(check_report(ir, engine),
-                               out_dir / CHECK_REPORT_NAME))
+    #
+    # **自检自己崩了也必须留下报告**（2026-10-20 修，P1）：从前这里直接调，
+    # 坏形状的 IR 会让 `to_unity` 抛 TypeError → 整次导出崩在最后一步，
+    # 目录里连 `IR_CHECK.md` 都没有。自检的价值就是"诊断坏数据"，
+    # 它自己成了崩溃点等于这个功能不存在。现在写一份"自检没跑成"的报告：
+    # 错误照样算一条，看得到、查得着。
+    try:
+        check_text = check_report(ir, engine)
+    except Exception as e:                    # noqa: BLE001 - 报告不许反噬产物
+        swallow('pipeline.engine_exporters.export_ir.check', e)
+        check_text = check_crashed(engine, e)
+    written.append(_write_text(check_text, out_dir / CHECK_REPORT_NAME))
     return written
 
 
@@ -751,7 +873,9 @@ def _write_csv(ir: dict, path) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(cols)
-    for l in ir.get('lines', []):
+    # `_rows`：坏 IR 里 `lines` 是字符串 / 有条目不是对象时别崩在这里 ——
+    # 这份 CSV 是给翻译公司和表格工具的，能出一行是一行。
+    for l in _rows(_mapping(ir).get('lines')):
         row = []
         for c in cols:
             v = l.get(c, '')

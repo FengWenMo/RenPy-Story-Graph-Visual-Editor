@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import openpyxl                                            # noqa: E402
 
 from storygraph.assets.asset_dimensions import (            # noqa: E402
-    DIMENSION_CONFIDENCE, dimensions_of_row, enrich_image_rows,
-    explain_dimensions, format_dimensions, group_metadata, split_values)
+    DIMENSION_CONFIDENCE, attributes_conflict, dimensions_of_row,
+    enrich_image_rows, explain_dimensions, format_dimensions, group_metadata,
+    row_values, split_values)
 from storygraph.assets.asset_registry import (              # noqa: E402
     AssetRegistry, backfill_dimension_columns, read_excel_rows, scan_assets,
     write_asset_excel)
@@ -500,3 +501,85 @@ class TestGroupMetadata:
     def test_unknown_groups_are_not_reported(self):
         rows = [{'Tag': 'ling', 'Attributes': 'mystery_word'}]
         assert group_metadata(rows, facts=_facts()) == {}
+
+
+class TestColumnConflictAndExplicitGroup:
+    """
+    两列打架 + 多值行上的显式 `Group`（2026-10-20 修，P2）。
+
+    ① 从前"`Attributes` 只有一个词"被当成 `Value` 的老兼容**镜像整格跳过**：
+       `{Value:'happy', Attributes:'angry'}` 里 `angry` 一个字不提。
+       镜像和真值不一致时它就不是镜像了 —— 用户只改老列（或只改新列）时，
+       产物会**安静地用另一列**，而模块开头写着"一个都不丢"。
+
+    ② `explain_dimensions` 只在"这一行只有一个值"时才认显式 `Group`：
+       `{Group:'outfit', Value:'base_swimsuit', _attrs:['happy']}` 里人写的
+       `outfit=base_swimsuit` 整列失效、置信度掉到 0.15（unknown）——
+       人写的和猜的混成同一档，恰好抵消了这次加置信度的目的。
+    """
+
+    def test_differing_attributes_word_is_kept(self):
+        row = {'Tag': 'ling', 'Value': 'happy', 'Attributes': 'angry'}
+        assert row_values(row) == ['happy', 'angry'], '老列的那个词被静默丢了'
+
+    def test_same_word_is_still_a_mirror(self):
+        row = {'Tag': 'ling', 'Value': 'happy', 'Attributes': 'happy'}
+        assert row_values(row) == ['happy']
+
+    def test_conflict_is_detected_only_when_both_columns_disagree(self):
+        assert attributes_conflict(
+            {'Tag': 'ling', 'Value': 'happy', 'Attributes': 'angry'}) == {
+                'value': 'happy', 'attributes': 'angry'}
+        assert attributes_conflict({'Tag': 'ling', 'Value': 'happy'}) == {}
+        assert attributes_conflict(
+            {'Tag': 'ling', 'Value': 'happy', 'Attributes': 'happy sad'}) == {}
+
+    def test_conflict_word_is_labelled_and_priced(self):
+        dims = explain_dimensions(
+            {'Tag': 'ling', 'Value': 'happy', 'Attributes': 'angry'},
+            facts=_facts())
+        by_value = {d['value']: d for d in dims}
+        assert by_value['happy']['source'] == 'value'
+        assert by_value['angry']['source'] == 'conflict'
+        assert by_value['angry']['confidence'] == DIMENSION_CONFIDENCE[
+            'conflict']
+
+    def test_explicit_group_survives_a_multi_value_row(self):
+        row = {'Tag': 'ling', 'Group': 'outfit', 'Value': 'base_swimsuit',
+               '_attrs': ['happy']}
+        by_value = {d['value']: d for d in explain_dimensions(
+            row, facts=_facts())}
+        assert by_value['base_swimsuit']['group'] == 'outfit'
+        assert by_value['base_swimsuit']['source'] == 'explicit'
+        assert by_value['base_swimsuit']['confidence'] == 1.0, (
+            '人写的维度被第二个词拖成了"猜的"')
+        # 脚本带出来的那个词仍按引擎事实查，**不是**被硬塞进 outfit
+        assert by_value['happy']['group'] == 'expressions'
+        assert by_value['happy']['source'] == 'fact'
+
+    def test_explicit_group_does_not_swallow_a_word_it_cannot_place(self):
+        row = {'Tag': 'ling', 'Group': 'outfit', 'Value': 'base_swimsuit',
+               '_attrs': ['mystery']}
+        by_value = {d['value']: d for d in explain_dimensions(
+            row, facts=_facts())}
+        assert by_value['mystery']['group'] == ''
+        assert by_value['mystery']['source'] == 'unknown'
+
+    def test_manifest_keeps_both_columns_and_the_conflict(self):
+        """进 IR 的资产清单里两个词都在，且冲突被标出来（`attribute_meta`）。"""
+        from types import SimpleNamespace
+
+        from storygraph.pipeline.engine_exporters import build_neutral_ir
+
+        row = {'ID': 'ling_happy', 'Tag': 'ling', 'Value': 'happy',
+               'Attributes': 'angry', 'Path': 'images/ling_happy.png'}
+        enrich_image_rows([row], facts=_facts(), load_project_context=False)
+        reg = SimpleNamespace(images={'ling_happy': row}, characters={},
+                              music={}, sounds={}, voices={},
+                              transforms={})
+        entry = build_neutral_ir([], registry=reg)['assets']['images'][0]
+        assert entry['attributes'] == {'expressions': 'happy'}
+        assert 'angry' in (entry.get('attribute_values') or []), (
+            '打架的那个词没进 IR —— 等于静默丢了')
+        sources = {m['value']: m['source'] for m in entry['attribute_meta']}
+        assert sources['angry'] == 'conflict'
