@@ -56,8 +56,48 @@ DEFAULT_SCREEN = (1920, 1080)
 
 #: 位置词 → 归一化 x（与 `app.stage._POSITION_X` 同源；这里只做兜底）
 _WORD_X = {
-    'left': 0.2, 'center': 0.5, 'centre': 0.5, 'right': 0.8,
+    'left': 0.0, 'center': 0.5, 'centre': 0.5, 'right': 1.0,
     'truecenter': 0.5, 'leftish': 0.2, 'close': 0.5, 'closeup': 0.5,
+}
+#: Ren'Py 内置 transform → 精确位置属性（2026-10-20，B2）。
+#:
+#: 逐条抄 SDK 的 `renpy/common/00definitions.rpy`（`transform left: …`），
+#: 不是按名字猜：
+#:
+#:   · `left/right/center` **同时**有 `ypos 1.0 yanchor 1.0` —— 立绘是
+#:     "站在画面底边"的，不是贴顶。少抄这一半，矮图会整体上移一整段
+#:     （734 高的图差 14px，400 高的图差 320px）；
+#:   · `offscreenleft` 是 `xpos 0 xanchor 1`（整张图在左边界外面），
+#:     不是 `xalign -0.5`（那是"图的一半露在屏幕外"）；
+#:   · `top` 是 `xpos .5 xanchor .5 ypos 0 yanchor 0`。
+#:
+#: 2026-10-20 用真机截图实测过三条：`noat` 顶边 20px（720-700）、
+#: `at top` 顶边 0、`at left` 顶边 20 且左边 0。
+_BUILTIN_PROPS = {
+    'default': [('xpos', '0.5'), ('xanchor', '0.5'),
+                ('ypos', '1.0'), ('yanchor', '1.0')],
+    'left': [('xpos', '0.0'), ('xanchor', '0.0'),
+             ('ypos', '1.0'), ('yanchor', '1.0')],
+    'right': [('xpos', '1.0'), ('xanchor', '1.0'),
+              ('ypos', '1.0'), ('yanchor', '1.0')],
+    'center': [('xpos', '0.5'), ('xanchor', '0.5'),
+               ('ypos', '1.0'), ('yanchor', '1.0')],
+    'truecenter': [('xpos', '0.5'), ('xanchor', '0.5'),
+                   ('ypos', '0.5'), ('yanchor', '0.5')],
+    'topleft': [('xpos', '0.0'), ('xanchor', '0.0'),
+                ('ypos', '0.0'), ('yanchor', '0.0')],
+    'topright': [('xpos', '1.0'), ('xanchor', '1.0'),
+                 ('ypos', '0.0'), ('yanchor', '0.0')],
+    'top': [('xpos', '0.5'), ('xanchor', '0.5'),
+            ('ypos', '0.0'), ('yanchor', '0.0')],
+    'bottomleft': [('xpos', '0.0'), ('xanchor', '0.0'),
+                   ('ypos', '1.0'), ('yanchor', '1.0')],
+    'bottomright': [('xpos', '1.0'), ('xanchor', '1.0'),
+                    ('ypos', '1.0'), ('yanchor', '1.0')],
+    'offscreenleft': [('xpos', '0.0'), ('xanchor', '1.0'),
+                      ('ypos', '1.0'), ('yanchor', '1.0')],
+    'offscreenright': [('xpos', '1.0'), ('xanchor', '0.0'),
+                       ('ypos', '1.0'), ('yanchor', '1.0')],
 }
 #: 自定义命名的首字母启发（`i11` 偏内 / `f11` 偏外 …）
 _LETTER_X = {'l': 0.25, 'r': 0.75, 'c': 0.5, 'i': 0.35, 'f': 0.65}
@@ -102,6 +142,13 @@ class TransformDef:
     #: 它们不是"动画中间态"：`on show:` 是"显示完之后停在哪"，
     #: 最后一帧才是可见的静止态（ATL 顺序执行）。
     on_blocks: dict = field(default_factory=dict)
+    #: **按源码顺序**排好的语句/块（2026-10-20，B2）。
+    #:
+    #: 每一项是 `('stmt', 行)` 或 `('on'|'parallel'|'block'|'animation'|
+    #: 'choice'|'repeat'|'contains', 子行列表)`。从前 `body` 与
+    #: `on_blocks` 分开收，**顺序丢了** —— `xpos 100` / `parallel:` /
+    #: `xpos 300` 会被算成 100。真实 ATL 是顺序执行的，最终态必须按顺序叠。
+    sequence: list = field(default_factory=list)
     #: **"这个位置是猜的"的原因**（空 = 有把握）。
     #:
     #: 为什么需要它（用户 2026-10-19，B1）：`parallel:` 里的属性**没有参与计算**
@@ -197,7 +244,8 @@ def parse_transforms(text: str) -> dict:
         params, defaults = _split_params(m.group('params') or '')
         body = []
         on_blocks: dict = {}
-        flags: list = []                    # "位置是猜的"的原因（B1）
+        sequence: list = []
+        flags: list = []                    # 真正"算不准"的原因（B2）
         i += 1
         while i < len(lines):
             line = lines[i]
@@ -211,9 +259,13 @@ def parse_transforms(text: str) -> dict:
             if here == indent + 4:
                 head = stripped.strip()
                 if not head.rstrip().endswith(':'):
-                    if _first_token(head) in _ANIM_WARPERS:
-                        flags.append('关键帧')
                     body.append(head)
+                    sequence.append(('stmt', [head]))
+                    token = _first_token(head)
+                    # `repeat` / `event` / `function` 让"停下来时在哪"没有
+                    # 唯一答案；`linear` / `easein` 之类**有**唯一的终点。
+                    if token in ('repeat', 'event', 'function'):
+                        flags.append(token)
                 else:
                     # 块头（`on show:` / `on hide:` / `parallel:` / `block:`）
                     # 记下名字；`on <事件>` 的子块**要收**（见 docstring）。
@@ -236,20 +288,37 @@ def parse_transforms(text: str) -> dict:
                             sub.append(sub_stripped.strip())
                         j += 1
                     if key.startswith('on '):
-                        on_blocks.setdefault(key[3:].strip(), []).extend(sub)
-                        # `on show: repeat` 永远不停 → 没有"静止态"可言
-                        if any(_first_token(x) in ('repeat', 'pause', 'event',
-                                                   'time', 'choice', 'function')
-                               for x in sub):
-                            flags.append('关键帧')
+                        event = key[3:].strip()
+                        on_blocks.setdefault(event, []).extend(sub)
+                        sequence.append(('on', [event, *sub]))
+                        for x in sub:
+                            if _first_token(x) in ('repeat', 'event', 'function'):
+                                flags.append(_first_token(x))
                     elif key == 'parallel' or key.startswith('parallel'):
-                        flags.append('parallel')
-                    elif key in _ANIM_BLOCKS:
-                        flags.append('关键帧')
+                        # B2：parallel 的每条分支都作用在同一个基态上，
+                        # 末态 = 各分支属性的并集（同属性后者覆盖）——
+                        # 这是**能算准**的，不再标"猜的"。
+                        sequence.append(('parallel', [*sub]))
+                    elif key in ('block', 'animation'):
+                        # 顺序执行的帧序列：最后一帧就是停下来时的样子。
+                        sequence.append((key, [*sub]))
+                    elif key == 'choice':
+                        sequence.append(('choice', [*sub]))
+                        flags.append('choice')
+                    elif key == 'contains':
+                        # `contains` 是"这个 transform 里还画了什么"，
+                        # 不改父级的位置；位置照样能算准。
+                        sequence.append(('contains', [*sub]))
+                    elif key == 'repeat':
+                        sequence.append(('repeat', [*sub]))
+                        flags.append('repeat')
+                    elif key.startswith('function'):
+                        sequence.append(('function', [*sub]))
+                        flags.append('function')
             i += 1
         out[name] = TransformDef(name=name, params=params,
                                  defaults=defaults, body=body,
-                                 on_blocks=on_blocks,
+                                 on_blocks=on_blocks, sequence=sequence,
                                  uncertain='/'.join(dict.fromkeys(flags)))
     return out
 
@@ -442,6 +511,58 @@ class Placement:
     #: 位置**不可靠**时的一句人话（空 = 有把握）。见 `TransformDef.uncertain`。
     #: 预览横条原样显示它 —— "算不出还不说"比算错更糟（用户 2026-10-19，B1）。
     uncertain: str = ''
+    #: 以下四个是**Ren'Py 的写法语义**（2026-10-20，B2）：
+    #: 整数 = 像素、小数 = 屏幕比例。`x`/`x_px` 不能表达这个差别，
+    #: 画真实画面时必须知道，否则 `xpos 0.5` 会被当成半像素。
+    xpos_frac: bool = True
+    ypos_frac: bool = True
+    xanchor_frac: bool = True
+    yanchor_frac: bool = True
+    #: `xzoom` / `yzoom`（`zoom` 同时设两个；旧字段 `zoom` 仍等于 xzoom）。
+    xzoom: float = 1.0
+    yzoom: float = 1.0
+    alpha: float = 1.0
+    rotate: float = 0.0
+
+    def box(self, natural, screen=DEFAULT_SCREEN) -> Optional[tuple]:
+        """
+        真实图像尺寸 + 本位置 → 屏幕上的 `(left, top, w, h)`（虚拟像素）。
+
+        这是 Ren'Py `Transform` 的定位公式，**只做这一件事**：
+          · 尺寸 = 原图 × zoom；
+          · `pos` 是"锚点要落在哪"，`anchor` 是"图像自己的哪个点"；
+          · 小数 = 屏幕/图像比例，整数 = 像素；
+          · `offset` 最后加。
+
+        返回 `None` = 没有算出来的位置（调用方该退回示意图，而不是画到角上）。
+        """
+        if not natural or len(natural) < 2:
+            return None
+        try:
+            nw, nh = float(natural[0]), float(natural[1])
+        except (TypeError, ValueError):
+            return None
+        if nw <= 0 or nh <= 0:
+            return None
+        sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen else DEFAULT_SCREEN
+        sw, sh = max(1.0, float(sw)), max(1.0, float(sh))
+        w, h = nw * float(self.xzoom or 1.0), nh * float(self.yzoom or 1.0)
+        if self.x_px is None:
+            # 老字段（按名字猜的归一化中心）兜底：把 x 当中心。
+            left = self.x * sw - float(self.xanchor or 0.5) * w
+        else:
+            pos = float(self.x_px) * sw if self.xpos_frac else float(self.x_px)
+            anchor = (float(self.xanchor) * w if self.xanchor_frac
+                      else float(self.xanchor))
+            left = pos + float(self.xoffset or 0.0) - anchor
+        if self.y_px is None:
+            top = sh - h                    # 老行为：没有纵向信息就贴底
+        else:
+            pos = float(self.y_px) * sh if self.ypos_frac else float(self.y_px)
+            anchor = (float(self.yanchor) * h if self.yanchor_frac
+                      else float(self.yanchor))
+            top = pos + float(self.yoffset or 0.0) - anchor
+        return left, top, w, h
 
     @property
     def from_atl(self) -> bool:
@@ -487,7 +608,13 @@ def placement_of(name: str, index: Optional[dict] = None, registry=None,
     """
     name = str(name or '').strip()
     if not name:
-        return Placement(source='center')
+        # `show x`（没有 `at`）→ `config.default_transform`，也就是
+        # 00definitions.rpy 里的 `transform default`：**水平居中、贴底**。
+        # 真机实测（2026-10-20，720 高的窗口 + 700 高的立绘）顶边在 20px。
+        return Placement(x=0.5, source='default',
+                         x_px=0.5, xpos_frac=True, xanchor=0.5,
+                         y_px=1.0, ypos_frac=True, yanchor=1.0,
+                         y_kind='align')
     width, height = (tuple(screen) + (1920, 1080))[:2]
     width = max(1, int(width))
     height = max(1, int(height))
@@ -497,31 +624,37 @@ def placement_of(name: str, index: Optional[dict] = None, registry=None,
     if defn is not None and _depth < 6:
         got = _from_def(defn, {}, index, (width, height), _depth)
         if got is not None:
-            # 算出来了，但定义里有 parallel/关键帧 → 结果只是"能算的那部分"
-            got.uncertain = got.uncertain or uncertain_note(
-                getattr(defn, 'uncertain', ''))
             return got
 
-    # 2) 资源表里的 ATL 字面量（老路径）
+    # 2) Ren'Py 内置 transform（`left` / `right` / `truecenter` …）
+    builtin = _BUILTIN_PROPS.get(name.lower())
+    if builtin:
+        got = _from_props_ordered(builtin, {}, (width, height),
+                                  f'builtin:{name.lower()}')
+        if got is not None:
+            got.source = 'word'          # 老调用方只认 word/letter/center
+            return got
+
+    # 3) 资源表里的 ATL 字面量（老路径）
     if registry is not None:
         row = (getattr(registry, 'transforms', {}) or {}).get(name) or {}
         atl = str(row.get('ATL') or '')
         if atl:
-            props = {}
+            props = []
             for line in atl.splitlines() or [atl]:
-                for prop, value in _props_of(line):
-                    props.setdefault(prop, value)
+                props.extend(_props_of(line))
             if props:
-                got = _from_props(props, {}, (width, height), f'atl:{name}')
+                got = _from_props_ordered(props, {}, (width, height),
+                                          f'atl:{name}')
                 if got is not None and got.x_px is not None:
                     return got
 
-    # 3)/4)/5) 词与启发
+    # 4)/5) 词与启发
     x, source = _guess_x(name)
     place = Placement(x=x, source=source)
     if defn is not None and getattr(defn, 'uncertain', ''):
-        # 定义里有 parallel/关键帧，而且**一个能算的属性都没落到最终态** ——
-        # 这时位置是按名字猜的，必须说出来（这正是用户报的那个场景）。
+        # 定义里确实没有唯一末态（repeat/function/choice），而且一个能算的
+        # 属性都没落到最终态 —— 这时位置是按名字猜的，必须说出来。
         place.uncertain = (uncertain_note(defn.uncertain)
                            .replace('位置是猜的', '位置是按名字猜的'))
     return place
@@ -548,67 +681,141 @@ def _fmt(value) -> str:
 def _from_def(defn: TransformDef, args_env: dict, index, screen,
               depth: int) -> Optional[Placement]:
     """
-    一个定义 + 实参 → `Placement`。
+    一个定义 + 实参 → `Placement`（**按 ATL 源码顺序**求最终态）。
 
-    两种形态：
-      · **调用链**（body 只有一行 `focus(320)`）→ 把实参绑到被调用者的形参上，
-        递归进去（实参本身可能又是外层参数，先替换再求值）；
-      · **属性赋值**（`xcenter x xoffset 400 …`）→ 把形参的实参/默认值代回，
-        再逐行收集属性；**定位/缩放类后面的覆盖前面的**（= 最终静止态）。
+    B2（2026-10-20）：从前只收 `body` + `on show`，`parallel:` 整块丢掉、
+    关键帧被标成"猜的"。现在按 `TransformDef.sequence` 顺序走：
+
+      · `linear/easein … xpos 1`：插值的**终点**就是停下来时的值；
+      · `parallel:`：每条分支都作用在同一个基态上，末态是并集；
+      · `block:` / `animation:`：顺序执行，最后一帧赢；
+      · `on show:`：显示完之后的静止态（`on hide` 不可见，跳过）；
+      · `repeat:` / `function` / `choice`：确实没有唯一末态，**明说**。
+
+    调用链（`transform f21: focus(320)`）也在这里统一处理，不再要求
+    "body 只有一行"。
     """
-    body = list(defn.body or [])
-    on_show = list((defn.on_blocks or {}).get('show') or ())
-    if not body and not on_show:
-        return None
-
-    if len(body) == 1:
-        m = _CALL_RE.match(body[0])
-        callee = (index or {}).get(m.group('name')) if m else None
-        if callee is not None and depth < 6:
-            args, kwargs = _split_args(m.group('args'))
-            bound = {}
-            for key, expr in callee.bind(args, kwargs).items():
-                text = str(expr)
-                for outer, outer_val in (args_env or {}).items():
-                    if outer_val is None:
-                        continue
-                    text = re.sub(r'\b%s\b' % re.escape(outer), str(outer_val),
-                                  text)
-                number = eval_number(text, {})
-                if number is not None:
-                    bound[key] = number
-            got = _from_def(callee, bound, index, screen, depth + 1)
-            if got is not None:
-                got.uncertain = got.uncertain or uncertain_note(
-                    getattr(callee, 'uncertain', ''))
-                return got
-
-    subs = dict(defn.defaults or {})
-    subs.update({k: v for k, v in (args_env or {}).items() if v is not None})
-
-    def collect(lines: list, into: dict) -> None:
-        for line in lines:
-            text = str(line)
-            for name, expr in subs.items():
-                text = re.sub(r'\b%s\b' % re.escape(name), _fmt(expr), text)
-            for prop, value in _props_of(text):
-                if prop in _POSITIONAL_PROPS:
-                    into[prop] = value       # 后面的覆盖前面的（最终静止态）
-                else:
-                    into.setdefault(prop, value)
-
-    # `on show:` 的**最后一帧**是玩家看到的静止态（2026-10-18，审计 P1-4：
-    # 从前整块忽略 → 位置退回首字母猜）。它设过的属性**赢**；
-    # 顶层 body 只补它没设的（`xalign 0.5` + on show 只动 xoffset 时两都要）。
-    props: dict = {}
-    collect(on_show, props)
-    rest: dict = {}
-    collect(body, rest)
-    for key, value in rest.items():
-        props.setdefault(key, value)
+    props, source, flags = _eval_def(defn, args_env, index, screen, depth)
     if not props:
         return None
-    return _from_props(props, {}, screen, f'atl:{defn.name}')
+    got = _from_props_ordered(props, {}, screen, source or f'atl:{defn.name}')
+    if got is None:
+        return None
+    reason = '/'.join(dict.fromkeys(
+        [*flags, *([defn.uncertain] if defn.uncertain else [])]))
+    if reason:
+        got.uncertain = uncertain_note(reason)
+    return got
+
+
+def _substitute(line: str, subs: dict) -> str:
+    """把形参名换成实参（按词边界；`_fmt` 保证整数仍是整数写法）。"""
+    text = str(line)
+    for name, expr in (subs or {}).items():
+        if expr is None:
+            continue
+        text = re.sub(r'\b%s\b' % re.escape(name), _fmt(expr), text)
+    return text
+
+
+def _bind_call(callee: TransformDef, args: list, kwargs: dict,
+               outer_env: dict) -> dict:
+    """调用实参 → `{形参: 数值}`；外层形参先代回，再求值。"""
+    bound = {}
+    for key, expr in callee.bind(args, kwargs).items():
+        text = _substitute(str(expr), outer_env or {})
+        number = eval_number(text, {})
+        if number is not None:
+            bound[key] = number
+    return bound
+
+
+def _eval_def(defn: TransformDef, args_env: dict, index, screen, depth: int):
+    """
+    定义 → `(有序属性表, 来源名, 不确定原因列表)`。
+
+    属性表是 `[(属性, 值表达式), …]`：**顺序有意义**，`_from_props_ordered`
+    按它逐条叠（后写的覆盖先写的，`xalign` 会同时改 pos 与 anchor）。
+    """
+    subs = dict(defn.defaults or {})
+    subs.update({k: v for k, v in (args_env or {}).items() if v is not None})
+    props: list = []
+    flags: list = []
+    source = f'atl:{defn.name}'
+
+    def eval_lines(lines, base=None):
+        """把若干行求成属性表；`base` 是 parallel 分支的起始状态。"""
+        out = list(base or [])
+        src = ''
+        for line in lines:
+            text = _substitute(line, subs)
+            m = _CALL_RE.match(text.strip())
+            callee = (index or {}).get(m.group('name')) if m else None
+            if callee is not None and depth < 6:
+                call_args, call_kwargs = _split_args(m.group('args'))
+                bound = _bind_call(callee, call_args, call_kwargs, subs)
+                sub_props, sub_source, sub_flags = _eval_def(
+                    callee, bound, index, screen, depth + 1)
+                out.extend(sub_props)
+                flags.extend(sub_flags)
+                src = sub_source or src
+                continue
+            for prop, value in _props_of(text):
+                out.append((prop, value))
+        return out, src
+
+    def walk(sequence):
+        nonlocal props, source
+        for item in sequence or ():
+            kind = item[0]
+            rest = list(item[1] or [])
+            if kind == 'stmt':
+                props, src = eval_lines(rest, props)
+                source = src or source
+            elif kind == 'on':
+                event = str(rest[0]).strip() if rest else ''
+                # `on hide` 是隐藏时的动画，玩家看不到静止态；
+                # `on show` / `on replace` 才是可见的末态。
+                if event in ('show', 'replace', 'replaced'):
+                    props, src = eval_lines(rest[1:], props)
+                    source = src or source
+                for line in rest[1:]:
+                    if _first_token(line) in ('repeat', 'event', 'function'):
+                        flags.append(_first_token(line))
+            elif kind == 'parallel':
+                # 每条子语句是**一条并行分支**：都以当前基态为起点，
+                # 末态是各分支属性的并集（同属性后写的覆盖）。
+                merged = list(props)
+                for line in rest:
+                    branch, _src = eval_lines([line], list(props))
+                    merged.extend(branch[len(props):])
+                props = merged
+            elif kind in ('block', 'animation'):
+                props, src = eval_lines(rest, props)
+                source = src or source
+            elif kind == 'repeat':
+                props, src = eval_lines(rest, props)
+                source = src or source
+                flags.append('repeat')
+            elif kind == 'choice':
+                # 分支不同则末态不唯一：取第一条能算的，并明说。
+                props, src = eval_lines(rest, props)
+                source = src or source
+                flags.append('choice')
+            elif kind == 'function':
+                flags.append('function')
+            elif kind == 'contains':
+                # `contains` 只增加子 displayable，不改父级位置。
+                continue
+
+    sequence = list(getattr(defn, 'sequence', None) or ())
+    if not sequence:
+        # 老对象（测试/外部构造）只有 body/on_blocks：按老结构走一遍。
+        sequence = [('stmt', [line]) for line in (defn.body or ())]
+        for event, lines in (defn.on_blocks or {}).items():
+            sequence.append(('on', [event, *lines]))
+    walk(sequence)
+    return props, source, flags
 
 
 def _split_args(text: str) -> tuple:
@@ -626,90 +833,130 @@ def _split_args(text: str) -> tuple:
     return args, kwargs
 
 
-def _from_props(props: dict, env: dict, screen, source: str) -> Optional[Placement]:
-    """
-    属性表 → `Placement`。
+def _frac(raw) -> bool:
+    """Ren'Py 的"小数 = 比例"：看**写法**，不看大小。"""
+    text = str(raw or '').strip()
+    return '.' in text or 'e' in text.lower()
 
-    ⚠ Ren'Py 的位置属性是**按写法分辨**的（不是按大小）：
-    **整数 = 像素，小数 = 屏幕比例** —— `ypos 1.03` 是"屏幕高的 103%"
-    （真实项目的 `focus` 就用了它），而 `ypos 1200` 才是 1200 像素。
-    不按这个规则解，位置会整片跑偏。
+
+def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Placement]:
     """
-    width, height = screen
+    有序属性表 → `Placement`（逐条叠，后写的覆盖先写的）。
+
+    这是真实定位的核心：`xalign` 同时改 pos/anchor，`xcenter` 改 pos 并把
+    anchor 设成 0.5，`xpos` 只改 pos；`xoffset` 最后加。用 dict 会丢顺序，
+    所以接口收 list。
+    """
+    width, height = (tuple(screen) + (1920, 1080))[:2]
+    width, height = max(1.0, float(width)), max(1.0, float(height))
+    st = {
+        'xpos': None, 'xfrac': True, 'xanchor': None, 'xanchor_frac': True,
+        'xoffset': 0.0, 'xkind': 'left',
+        'ypos': None, 'yfrac': True, 'yanchor': None, 'yanchor_frac': True,
+        'yoffset': 0.0, 'ykind': 'top',
+        'xz': 1.0, 'yz': 1.0, 'alpha': 1.0, 'rotate': 0.0,
+    }
+    touched = False
+    for prop, raw in (props or ()):
+        number = eval_number(raw, env or {})
+        if number is None:
+            continue
+        prop = str(prop)
+        if prop == 'xalign':
+            st.update(xpos=number, xfrac=True, xanchor=number,
+                      xanchor_frac=True, xkind='align')
+            touched = True
+        elif prop == 'xpos':
+            st.update(xpos=number, xfrac=_frac(raw),
+                      xkind='align' if _frac(raw) else 'left')
+            touched = True
+        elif prop == 'xcenter':
+            st.update(xpos=number, xfrac=_frac(raw), xanchor=0.5,
+                      xanchor_frac=True,
+                      xkind='align' if _frac(raw) else 'center')
+            touched = True
+        elif prop == 'xanchor':
+            st.update(xanchor=number, xanchor_frac=_frac(raw))
+        elif prop == 'xoffset':
+            st['xoffset'] = number
+            touched = True
+        elif prop == 'yalign':
+            st.update(ypos=number, yfrac=True, yanchor=number,
+                      yanchor_frac=True, ykind='align')
+            touched = True
+        elif prop == 'ypos':
+            st.update(ypos=number, yfrac=_frac(raw),
+                      ykind='align' if _frac(raw) else 'bottom')
+            touched = True
+        elif prop == 'ycenter':
+            st.update(ypos=number, yfrac=_frac(raw), yanchor=0.5,
+                      yanchor_frac=True, ykind='center')
+            touched = True
+        elif prop == 'yanchor':
+            st.update(yanchor=number, yanchor_frac=_frac(raw))
+        elif prop == 'yoffset':
+            st['yoffset'] = number
+            touched = True
+        elif prop == 'zoom':
+            if number > 0:
+                st['xz'] = st['yz'] = number
+                touched = True
+        elif prop == 'xzoom':
+            if number > 0:
+                st['xz'] = number
+                touched = True
+        elif prop == 'yzoom':
+            if number > 0:
+                st['yz'] = number
+                touched = True
+        elif prop == 'alpha':
+            st['alpha'] = max(0.0, min(1.0, number))
+            touched = True
+        elif prop == 'rotate':
+            st['rotate'] = number
+            touched = True
+    if not touched:
+        return None
+
     got = Placement(source=source)
-    used_px = False
-
-    def frac(raw) -> bool:
-        return '.' in str(raw or '')
-
-    def value(raw):
-        return eval_number(raw, env)
-
-    xalign = value(props.get('xalign'))
-    xcenter_raw, xpos_raw = props.get('xcenter'), props.get('xpos')
-    xcenter, xpos = value(xcenter_raw), value(xpos_raw)
-    xoffset = value(props.get('xoffset')) or 0.0
-    xanchor = value(props.get('xanchor'))
-
-    if xalign is not None:
-        got.x_kind, got.x_px = 'align', xalign
-        got.xanchor = xanchor if xanchor is not None else xalign
-        got.x = max(0.0, min(1.0, xalign))
-        used_px = True
-    elif xcenter is not None:
-        got.xanchor = xanchor if xanchor is not None else 0.5
-        if frac(xcenter_raw):                 # 小数 = 屏幕比例（锚点 0.5）
-            got.x_kind, got.x_px = 'align', xcenter
-            base = xcenter * width + xoffset
-        else:                                 # 整数 = 像素
-            got.x_kind, got.x_px = 'center', xcenter
-            base = xcenter + xoffset
-        got.x = max(0.0, min(1.0, base / width))
-        used_px = True
-    elif xpos is not None:
-        if frac(xpos_raw):
-            got.x_kind, got.x_px = 'align', xpos
-            got.xanchor = xanchor if xanchor is not None else 0.0
-            got.x = max(0.0, min(1.0, xpos))
-        else:
-            got.x_kind, got.x_px = 'left', xpos
-            got.xanchor = xanchor if xanchor is not None else 0.0
-            got.x = max(0.0, min(1.0, (xpos + xoffset) / width))
-        used_px = True
-    got.xoffset = xoffset
-
-    yalign = value(props.get('yalign'))
-    ypos_raw, ycenter_raw = props.get('ypos'), props.get('ycenter')
-    ypos, ycenter = value(ypos_raw), value(ycenter_raw)
-    yoffset = value(props.get('yoffset')) or 0.0
-    yanchor = value(props.get('yanchor'))
-
-    if yalign is not None:
-        got.y_kind, got.y_px = 'align', yalign
-        got.yanchor = yanchor if yanchor is not None else yalign
-        used_px = True
-    elif ypos is not None:
-        got.y_kind = 'align' if frac(ypos_raw) else 'bottom'
-        got.y_px = ypos
-        # 没写 yanchor 时按 Ren'Py 的默认（0 = 图片顶端落在 ypos 上）。
-        # ⚠ 不能沿用"贴底"那个默认：那会把 `ypos 0.5` 画到屏幕外。
-        got.yanchor = yanchor if yanchor is not None else 0.0
-        used_px = True
-    elif ycenter is not None:
-        got.y_kind = 'align' if frac(ycenter_raw) else 'bottom'
-        got.y_px = ycenter * height if frac(ycenter_raw) else ycenter
-        got.yanchor = yanchor if yanchor is not None else 0.5
-        used_px = True
-    got.yoffset = yoffset
-
-    zoom = value(props.get('zoom'))
-    if zoom is None:
-        zx, zy = value(props.get('xzoom')), value(props.get('yzoom'))
-        zoom = zx if zx is not None else zy
-    got.zoom = float(zoom) if zoom and zoom > 0 else 1.0
-    if not used_px and got.zoom == 1.0:
-        return None                          # 什么定位信息都没有 → 交回启发式
+    got.x_px = 0.0 if st['xpos'] is None else float(st['xpos'])
+    got.xpos_frac = False if st['xpos'] is None else bool(st['xfrac'])
+    got.xanchor = 0.0 if st['xanchor'] is None else float(st['xanchor'])
+    got.xanchor_frac = bool(st['xanchor_frac'])
+    got.xoffset = float(st['xoffset'] or 0.0)
+    got.x_kind = str(st['xkind'])
+    got.y_px = 0.0 if st['ypos'] is None else float(st['ypos'])
+    got.ypos_frac = False if st['ypos'] is None else bool(st['yfrac'])
+    got.yanchor = 0.0 if st['yanchor'] is None else float(st['yanchor'])
+    got.yanchor_frac = bool(st['yanchor_frac'])
+    got.yoffset = float(st['yoffset'] or 0.0)
+    got.y_kind = str(st['ykind'])
+    got.xzoom = float(st['xz'] or 1.0)
+    got.yzoom = float(st['yz'] or 1.0)
+    got.zoom = got.xzoom
+    got.alpha = float(st['alpha'])
+    got.rotate = float(st['rotate'] or 0.0)
+    # 老字段：归一化位置（给"没有真实几何"的示意图用）。
+    if st['xpos'] is None:
+        got.x = 0.0
+    elif st['xfrac']:
+        got.x = max(0.0, min(1.0, float(st['xpos'])))
+    else:
+        got.x = max(0.0, min(1.0,
+                               (float(st['xpos']) + got.xoffset) / width))
+    if st['ypos'] is None:
+        got.y = 0.0
+    elif st['yfrac']:
+        got.y = max(0.0, min(1.0, float(st['ypos'])))
+    else:
+        got.y = max(0.0, min(1.0,
+                               (float(st['ypos']) + got.yoffset) / height))
     return got
+
+
+def _from_props(props: dict, env: dict, screen, source: str) -> Optional[Placement]:
+    """兼容旧接口：dict 会丢顺序，只用于资源表里的单行 ATL 字面量。"""
+    return _from_props_ordered(list((props or {}).items()), env, screen, source)
 
 
 __all__ = ['DEFAULT_SCREEN', 'Placement', 'TransformDef', 'eval_number',

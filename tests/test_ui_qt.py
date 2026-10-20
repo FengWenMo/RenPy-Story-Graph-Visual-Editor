@@ -1158,6 +1158,10 @@ class TestStagePreview:
         from storygraph.app.stage import StageFrame, SpriteLayout
 
         w = self._window(app, project)
+        # 这一条测的是**旧路径**的逐张解码（引擎排版模式下整帧一次画完，
+        # 没有"某张立绘还在解"这个中间态 —— 见下面的
+        # `test_engine_render_is_pending_until_the_frame_is_ready`）。
+        w._canvas.engine_render = False
         first = next((i for i, f in enumerate(w.frames) if f.sprites), None)
         assert first is not None, '测试工程里居然没有带立绘的拍'
         w.show_frame(first)
@@ -1181,6 +1185,7 @@ class TestStagePreview:
         from PySide6.QtCore import QEventLoop, QTimer
 
         w = self._window(app, project)
+        w._canvas.engine_render = False          # 旧路径：逐张解码
         first = next((i for i, f in enumerate(w.frames) if f.sprites), None)
         assert first is not None
         w.show_frame(first)
@@ -1205,10 +1210,26 @@ class TestStagePreview:
                        sprites=[SpriteLayout(image='nope missing', tag='nope',
                                              at='', x=0.5)])
         w.frames = [f]
-        w.show_frame(0)
+        w.idx = 0
+        # 引擎排版是**后台**合成的；这里同步渲染一帧，才好在同一个调用栈里
+        # 断言"缺图名单"。合成完成后 `rendered` 信号会把横条刷新一遍。
+        w._canvas.render_now(f, 0)
         got = w._canvas.missing_assets()
         assert 'bg 根本没有这张' in got and 'nope missing' in got, got
         assert '⚠ 缺图' in w._summary.text(), w._summary.text()
+        w.close()
+
+    def test_engine_render_is_pending_until_the_frame_is_ready(self, app,
+                                                               project):
+        """
+        引擎排版模式下没有"逐张立绘解码"这个中间态：整帧要么在合成、
+        要么已经好了。合成期间**不许贴上一帧**（那会让人以为这拍就是这样）。
+        """
+        w = self._window(app, project)
+        assert w._canvas.engine_render
+        w.show_frame(0)
+        assert w._canvas._render_pending, '没有进入"整帧合成中"状态'
+        assert w._canvas._rendered_pix is None, '还没合成完就贴了画面'
         w.close()
 
     def test_audio_notes_are_shown_on_the_status_line(self, app, project):

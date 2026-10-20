@@ -2918,3 +2918,142 @@ menu_statement(l, loc):
 - **不是播放器**：条件求值、菜单 UI、立绘合成、资源地址映射仍归 Unity 工程。
 - 判据：`tests/test_unity_timeline.py`（5 条）、
   `tools/hell_multi_engine.py`（五引擎/多文件/真实项目 0 处）。
+
+
+# §17 舞台预览：按项目 gui / 字体 / ATL 真实排版（2026-10-20，B2）
+
+用户 2026-10-20：
+
+> 舞台的预览效果必须更真实！最好跟真正编译的一模一样……目前先做 Renpy 的吧！
+
+这一节记的是"预览凭什么说跟编译出来的一样"，以及**实测数字**。
+结论先写：`the_question` 的两个场景（原样 gui / 改过 gui）里，
+立绘位置 Δ0px、台词起点 Δ0px、名字起点 Δ0~1px；只有字宽差 1~3%
+（引擎在 2x 下排版再缩回，字形舍入不同，不是排版错）。
+
+## 17.1 结构：Qt 只负责贴图
+
+- `storygraph/story/renpy_gui.py`：读项目 `gui.rpy` / `screens.rpy` /
+  角色定义 → `GuiProfile`（分辨率、文本框高度、名条/台词坐标与宽度、
+  字号、颜色、描边、字体、文本框底图、角色名/前后缀）。
+- `storygraph/app/stage_render.py`：**纯 Pillow 离屏合成整帧** ——
+  背景 → 立绘（`story.atl.Placement.box` 的真实几何）→ 图层 →
+  文本框底图 → 名条底图 + 角色名 → 台词（换行/颜色/描边/`{tag}`）。
+  不 import Qt，可无头测试。
+- `ui_qt/stage_preview.py`：`StageCanvas` 在后台线程调 `render_frame`，
+  拿到一整张 RGBA 图后等比贴到控件上（letterbox，与全屏播放一致）。
+  没渲染完**不贴上一帧**；缺图/缺字体/位置是猜的，全部进横条提示。
+
+## 17.2 真机对照工具（不是 pytest）
+
+`tools/renpy_stage_compare.py`：
+
+1. 临时复制 SDK 自带的 `the_question`，写一段固定脚本；
+2. 用 Ren'Py 自带的 testcase 跑真引擎、`screenshot`；
+3. 用 `stage_render` 画同一帧；
+4. **逐项量**：立绘顶边/左边缘、名字文字框、台词文字框（x/y/w/h）；
+5. 任一项超容差 → 退出码 3。产物 `report.txt` + `compare-<场景>.png`。
+
+两个场景，第二个专治"写死"：
+
+| 场景 | gui | transform | 台词 |
+|---|---|---|---|
+| `default` | 原样（文本框 185 / 名条 240 / 台词 268,50,744 / 22,30 号） | 项目里的 `sg_center` | 单行 |
+| `custom` | 文本框 260 / 名条 600 / 台词 620,60,560 / 28,34 号 + 粗体 | 内置 `left` | 长句换行 |
+
+实测（`report.txt`）：
+
+```
+default  立绘 (24, 509) 引擎=编辑器        台词起点 (270, 589) Δ0
+         名字 (247, 545)    Δ0/1px          台词换行：1 行
+custom   立绘 (24, 36)    Δ0               台词起点 (621/622, 525) Δ1
+         名字 (608, 471)   Δ0/1px          台词 4 行，断行位置一致，高 126 = 126
+```
+
+容差规则：**位置 2px 严格**；**字宽/字高 4%** —— 引擎截图是 2x 再缩回，
+同一句 236 vs 243px 属于字形舍入，不是排版错。判断"写死"看的是位置，
+判断"字号读错"看的是字高（4 行 = 126px，字号错一档就破）。
+
+跑法（Windows，每次约 8 秒 ×2，CI 不跑）：
+
+```bat
+python tools/renpy_stage_compare.py --sdk D:\...\storygraph_fork_sdk
+```
+
+## 17.3 内置 transform 按 SDK 源码抄（三个错）
+
+`_BUILTIN_PROPS` 直接照 `renpy/common/00definitions.rpy`：
+
+```renpy
+transform left:          xpos 0.0 xanchor 0.0 ypos 1.0 yanchor 1.0
+transform right:         xpos 1.0 xanchor 1.0 ypos 1.0 yanchor 1.0
+transform center:        xpos 0.5 xanchor 0.5 ypos 1.0 yanchor 1.0
+transform truecenter:    xpos 0.5 xanchor 0.5 ypos 0.5 yanchor 0.5
+transform offscreenleft: xpos 0.0 xanchor 1.0 ypos 1.0 yanchor 1.0
+transform default:       … xpos 0.5 xanchor 0.5 ypos 1.0 yanchor 1.0
+```
+
+旧实现错在三处，都是"看起来差不多、真比就差一截"：
+
+1. `left/right/center` 只抄了 x，没抄 `ypos 1.0 yanchor 1.0` ——
+   立绘是**贴底站**的。700 高的图只差 20px，400 高的图差 320px；
+2. `offscreenleft/right` 用了 `xalign -0.5/1.5`（半张图还在屏内），
+   正确是 `xpos 0 xanchor 1` / `xpos 1 xanchor 0`（整张在图外）；
+3. `show x`（没有 `at`）是 `config.default_transform`，即**居中贴底**，
+   旧实现按左上角画。
+
+真机探针（同一张 334×700 立绘，720 高的窗口）：
+
+| 写法 | 引擎实测顶边 | 说明 |
+|---|---|---|
+| `show sylvie`（无 at） | 20px | default transform：贴底 |
+| `at top` | 0px | |
+| `at left` | 20px，左边 0 | left 也贴底 |
+| `at sg_x`（项目里只写 `xalign 0.5`） | 0px | **自带 transform 不继承 default** |
+
+最后一行是关键：`at_list` 里的 transform 继承的是**子节点**的位置，
+不是 `default_transform`。所以 `_from_props_ordered` 的兜底仍是 0/0，
+只有"没有 at"才用 default —— 这两条现在都有测试钉着。
+
+## 17.4 字体：按引擎的搜索顺序
+
+旧实现最后才找 SDK，先扫 `C:\Windows\Fonts`，于是 `DejaVuSans.ttf`
+落到了微软雅黑上：字号一样、**字不是那个字**（"Sylvie" 82px vs 引擎 88px）。
+
+新顺序：项目内相对路径 → 项目里同名文件 → **SDK 的
+`renpy/common` / `gui` / `sdk-fonts`** → Windows 系统字体。
+SDK 用"项目所在 SDK"优先（`<sdk>/the_question` 的祖父目录），
+再退回 `engine_collect.find_sdk()`。
+
+替换要**说清楚**：
+
+- 同名（项目没带、SDK 有 `DejaVuSans.ttf`）→ 不算替换，不报警；
+- 真的换了字（想要 `fonts/x.ttf`，用了 `msyh.ttc`）→ `warnings` +
+  `GuiProfile.fonts_substituted = ["x.ttf → msyh.ttc"]`，预览横条显示。
+
+修完之后同一个 "Sylvie"：引擎 87px / 编辑器 86px（Δ1）。
+
+## 17.5 回归线（不依赖 SDK）
+
+- `tests/test_stage_render.py`（19 条）：文本框/台词/名条的几何来自
+  `gui.*`；名字用角色色；没台词不画窗；长台词换行不出框；未知 tag 不漏源码；
+  立绘框 = `Placement.box`；zoom 改尺寸；缺图/缺背景进 warnings。
+- `tests/test_stage_fidelity_golden.py`（8 条）：把 17.2 量到的**引擎数字**
+  写成断言（文本框 (0,535,1280,185)、立绘 (473,20,334,700)、
+  名字起点 (247,545)、台词起点 (270,589)），换一套 gui 后全部跟着走。
+- `tests/test_stage_geometry_exact.py`：内置 transform 逐条对 SDK 源码
+  （贴底、`top`、`offscreen*`、无 at、自带 transform 不继承 default）。
+- `tests/test_renpy_gui_profile.py`：字体搜索顺序三条（SDK 同名优先、
+  同名不算替换、项目自带字体最优先）。
+
+## 17.6 还没做的（边界写在前面）
+
+- **快捷菜单**（Back/History/Skip/…）引擎每帧都画，预览没有；
+  它是另一个 screen + hbox 样式，下一步按 `screens.rpy` 解析；
+- **HiDPI**：引擎按物理倍率排版（本次截图是 2x 缩回），预览按 1x 排版，
+  字宽因此有 0~3% 的舍入差；
+- **ATL 动画**只取最终态（`linear`/关键帧/`parallel`），
+  预览横条已标"位置是猜的"（B1），不假装知道中间帧；
+- **转场中间帧**不做：`with dissolve` 只影响预览的交叉淡入；
+- **自定义 say screen**（bubble / nvl / 完全重写布局）不在第一版范围，
+  `GuiProfile.screen_say_custom` 会记下"这项目改过 say"，但只按标准模板画。

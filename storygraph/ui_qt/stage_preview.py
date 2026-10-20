@@ -24,8 +24,9 @@ from __future__ import annotations
 import time
 
 from storygraph.core.safeguard import swallow
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import (QObject, QRunnable, QThreadPool, Qt, QTimer,
+                            QUrl, Signal)
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
@@ -34,6 +35,7 @@ from storygraph.app.stage import (BLOCK_H, BLOCK_W, SPRITE_H_RATIO, SPRITE_MAX,
                                   image_index, resolve_frame_assets,
                                   resolve_solid_color, sprite_box,
                                   stage_audio_cues)
+from storygraph.app import stage_render as R
 from storygraph.app.thumbs import natural_size
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
@@ -215,6 +217,49 @@ def layer_model_for(project_root):
         return None
 
 
+class _RenderSignals(QObject):
+    """工作线程 → GUI 线程的唯一通道（Qt 信号跨线程自动排队）。"""
+
+    done = Signal(int, object)
+
+
+class _RenderJob(QRunnable):
+    """
+    在**后台线程**里合成一帧（首次要解码 4320×7680 的立绘，约 2 秒）。
+
+    为什么必须后台：这是用户打开预览的第一秒，主线程卡 2 秒 = 窗口白屏、
+    点不动。渲染失败也只回一个 `None`，由 GUI 退回旧画布，绝不崩。
+    """
+
+    def __init__(self, token: int, signals, frame, project_root, registry,
+                 profile, transform_index, screen):
+        super().__init__()
+        self.token = token
+        self.signals = signals
+        self.frame = frame
+        self.project_root = project_root
+        self.registry = registry
+        self.profile = profile
+        self.transform_index = transform_index
+        self.screen = screen
+
+    def run(self):
+        try:
+            got = R.render_frame(
+                self.frame, project_root=self.project_root,
+                registry=self.registry, profile=self.profile,
+                screen=self.screen, transform_index=self.transform_index)
+        except Exception as e:                    # noqa: BLE001 - 后台绝不炸
+            swallow('stage_preview.render_job', e)
+            got = None
+        try:
+            self.signals.done.emit(self.token, got)
+        except RuntimeError as e:
+            # 窗口已经关了：信号对象随控件销毁，emit 会 RuntimeError。
+            # 这是"正常收尾"，不该炸后台线程；但也要留痕（swallow 计数）。
+            swallow('stage_preview.render_job.emit', e)
+
+
 class StageCanvas(QWidget):
     """
     舞台画布：一帧的画面。
@@ -224,16 +269,38 @@ class StageCanvas(QWidget):
     立绘的位置/大小：**有项目 transform 就按真实几何画**（原图尺寸 × zoom +
     xcenter/xoffset/yanchor/ypos — 见 `app.stage.sprite_box`）；没算出来才退回
     "按屏幕百分比"的示意图（老行为，保持兼容）。
+
+    `engine_render=True` 时，整帧由 `app.stage_render` 在后台线程按项目
+    `gui.*` 合成（背景/立绘/文本框/名条/台词都在一张 1920×1080 画布里），
+    本控件只负责缩放显示 —— 这样才可能"跟真正编译的一样"。
     """
 
+    #: 后台渲染完成：`True` = 有真实画面；`False` = 退回示意图。
+    rendered = Signal(bool)
+
     def __init__(self, parent=None, project_root=None, real_images=True,
-                 screen=None):
+                 screen=None, engine_render=None):
         super().__init__(parent)
         self.setMinimumSize(STAGE_W // 2, STAGE_H // 2)
         self.setAutoFillBackground(False)
         self.project_root = project_root
         self.real_images = real_images
         self.screen = tuple(screen) if screen else (1920, 1080)
+        #: 走不离屏的"引擎排版"渲染（Pillow）还是旧示意图。
+        #: 环境没 Pillow 时自动退回示意（不能因为可选依赖没装就白屏）。
+        self.engine_render = bool(R.available()
+                                   if engine_render is None else engine_render)
+        self._registry = None
+        self._profile = None
+        self._transform_index = None
+        self._pool = QThreadPool.globalInstance()
+        self._render_signals = _RenderSignals(self)
+        self._render_signals.done.connect(self._on_render_done)
+        self._render_token = 0
+        self._rendered_pix = None
+        self._render_result = None
+        self._render_warnings: list = []
+        self._render_pending = False
         self._images: dict = {}
         self._loader = ThumbLoader(self, max_size=SPRITE_MAX,
                                    project_root=project_root)
@@ -289,7 +356,19 @@ class StageCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def set_registry(self, registry):
+        self._registry = registry
         self._images = getattr(registry, 'images', {}) or {}
+
+    def set_engine_context(self, profile=None, transform_index=None):
+        """预读好的 gui 排版 / transform 表（避免每个后台任务都去扫盘）。"""
+        if profile is not None:
+            self._profile = profile
+        if transform_index is not None:
+            self._transform_index = transform_index
+
+    def render_warnings(self) -> list:
+        """这一帧离屏渲染时**必须让用户看见**的话（缺图/缺字体…）。"""
+        return list(self._render_warnings)
 
     def shutdown(self):
         try:
@@ -310,7 +389,14 @@ class StageCanvas(QWidget):
         self._loading = set()
         self._missing = []
         self.update()
-        if frame is None or not self.real_images:
+        if frame is None:
+            return
+        # 引擎排版：整帧由 `app.stage_render` 合成，**必须**用真图
+        # （"真实贴图"关掉时也不该白屏 —— 那个开关只对旧示意图有意义）。
+        if self.engine_render:
+            self._request_engine_render(frame, idx)
+            return                           # 引擎排版：不再逐张取图
+        if not self.real_images:
             return
         # 上一帧的贴图不再需要：把"还排在队里、没开始解"的那些丢掉
         # （正在解的会跑完并进缓存，切回去就是命中）。不丢的话，一路播下去
@@ -348,6 +434,81 @@ class StageCanvas(QWidget):
                           (STAGE_W, STAGE_H))
 
     # ------------------------------------------------------------------
+
+    def _request_engine_render(self, frame, idx: int):
+        """后台合成这一帧；旧结果立即作废（防止"上一帧的图贴到这一帧"）。"""
+        self._render_token += 1
+        token = self._render_token
+        self._render_pending = True
+        self._rendered_pix = None
+        self._render_result = None
+        self._render_warnings = []
+        self._missing = []
+        self.update()
+        if self._profile is None:
+            try:
+                from storygraph.story.renpy_gui import load_gui_profile
+                self._profile = load_gui_profile(self.project_root,
+                                                 registry=self._registry)
+            except Exception as e:            # noqa: BLE001
+                swallow('stage_preview.load_gui_profile', e)
+                self._profile = None
+        if self._transform_index is None:
+            try:
+                from storygraph.story.atl import scan_transforms
+                self._transform_index = scan_transforms(self.project_root)
+            except Exception as e:            # noqa: BLE001
+                swallow('stage_preview.scan_transforms', e)
+                self._transform_index = {}
+        job = _RenderJob(token, self._render_signals, frame,
+                         self.project_root, self._registry, self._profile,
+                         self._transform_index, self.screen)
+        self._pool.start(job)
+
+    def _on_render_done(self, token: int, result):
+        if token != self._render_token:
+            return                            # 已经翻到别的帧了，丢弃
+        self._render_pending = False
+        self._render_result = result
+        self._render_warnings = list(getattr(result, 'warnings', []) or [])
+        self._missing = list(getattr(result, 'missing', []) or [])
+        self._rendered_pix = self._to_pixmap(result)
+        self.update()
+        try:
+            self.rendered.emit(self._rendered_pix is not None)
+        except RuntimeError as e:
+            swallow('stage_preview.render_done.emit', e)
+
+    @staticmethod
+    def _to_pixmap(result):
+        if result is None or getattr(result, 'image', None) is None:
+            return None
+        try:
+            img = result.image.convert('RGBA')
+            data = img.tobytes('raw', 'RGBA')
+            qimg = QImage(data, img.width, img.height, 4 * img.width,
+                          QImage.Format.Format_RGBA8888).copy()
+            return QPixmap.fromImage(qimg)
+        except Exception as e:                # noqa: BLE001
+            swallow('stage_preview.to_pixmap', e)
+            return None
+
+    def render_now(self, frame, idx: int):
+        """同步渲染一帧（测试/无头用；正式播放走后台线程）。"""
+        self._render_token += 1
+        token = self._render_token
+        self._rendered_pix = None
+        self._render_pending = True
+        try:
+            got = R.render_frame(
+                frame, project_root=self.project_root,
+                registry=self._registry, profile=self._profile,
+                screen=self.screen, transform_index=self._transform_index)
+        except Exception as e:                # noqa: BLE001
+            swallow('stage_preview.render_now', e)
+            got = None
+        self._on_render_done(token, got)
+        return got
 
     def missing_assets(self) -> list:
         """这一帧**脚本里写了、磁盘上找不到**的素材名（横条上要显眼地写出来）。"""
@@ -431,6 +592,9 @@ class StageCanvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            if self.engine_render:
+                self._paint_engine(p)
+                return
             # 转场淡入：整帧按 `_fade_alpha` 铺（硬切时恒为 1.0）
             p.setOpacity(max(0.0, min(1.0, float(self._fade_alpha))))
             w, h = self.width(), self.height()
@@ -510,6 +674,28 @@ class StageCanvas(QWidget):
         finally:
             p.end()
 
+    def _paint_engine(self, p):
+        """
+        画离屏合成的一帧：等比缩放、留黑边（与全屏播放的 letterbox 一致）。
+
+        还没渲染完时**不画上一帧**（旧画面会让人以为这拍就是这样）；
+        画一块深色 + 一行说明，首次 2 秒也知道在等什么。
+        """
+        p.setOpacity(max(0.0, min(1.0, float(self._fade_alpha))))
+        w, h = self.width(), self.height()
+        pix = self._rendered_pix
+        if pix is None or pix.isNull():
+            p.fillRect(0, 0, w, h, QColor(T.t('stage.letterbox')))
+            p.setPen(QPen(QColor(T.t('stage.textDim'))))
+            p.setFont(QFont(theme.font_family(), theme.font_pt('body')))
+            msg = '正在按引擎排版渲染…' if self._render_pending else \
+                '这一帧渲染不出来（横条上写了原因）'
+            p.drawText(0, 0, w, h, Qt.AlignCenter, msg)
+            return
+        scale = min(w / max(1, pix.width()), h / max(1, pix.height()))
+        dw, dh = int(pix.width() * scale), int(pix.height() * scale)
+        p.drawPixmap((w - dw) // 2, (h - dh) // 2, dw, dh, pix)
+
     def _draw_block(self, p, s, rect, loading: bool = False):
         """
         占位块：真图不可用时也要让"台上有人"看得出来（`rect` = 框）。
@@ -569,6 +755,10 @@ class StagePreviewWindow(QDialog):
         self._project_root = project_root
         self._real = bool(real_images)
         self._only_changed = False
+        #: 是否走"引擎排版"（Pillow 离屏合成）。没装 Pillow 时自动关闭。
+        self._engine = bool(R.available())
+        self._profile = None
+        self._transform_index = None
         #: 真实舞台几何（游戏分辨率）：transform 的像素值按它归一化
         from storygraph.story.atl import DEFAULT_SCREEN, project_screen
         self._screen = tuple(screen) if screen else (
@@ -591,9 +781,11 @@ class StagePreviewWindow(QDialog):
         root.setSpacing(T.SPACE['xs'])
 
         self._canvas = StageCanvas(self, project_root=self._project_root,
-                                   screen=self._screen)
-        self._canvas._images = self._images
+                                   screen=self._screen,
+                                   engine_render=self._engine)
+        self._canvas.set_registry(self._registry)
         self._canvas.real_images = self._real
+        self._canvas.rendered.connect(self._on_rendered)
         self._canvas.setFixedSize(STAGE_W, STAGE_H)
         root.addWidget(self._canvas, 0, Qt.AlignCenter)
 
@@ -669,6 +861,20 @@ class StagePreviewWindow(QDialog):
         self._real_cb.setChecked(True)
         self._real_cb.toggled.connect(self._on_real)
         bar.addWidget(self._real_cb)
+        self._engine_cb = QCheckBox('引擎排版')
+        self._engine_cb.setChecked(self._engine)
+        self._engine_cb.setToolTip(
+            '按这个项目的 gui.rpy / 字体 / 分辨率，把背景、立绘、文本框、'
+            '名条和台词合成一张和游戏一样的画面。\n'
+            '关掉则退回旧的示意图（立绘 + 画布外的文字标签）。')
+        self._engine_cb.toggled.connect(self._on_engine)
+        if not R.available():
+            self._engine_cb.setEnabled(False)
+            self._engine_cb.setToolTip('没装 Pillow，只能用示意图。')
+        # 引擎排版必须用真图（它要把立绘/背景真的解码进那一帧），
+        # 所以"真实贴图"开关在引擎模式下没有意义 —— 置灰而不是让它白屏。
+        self._real_cb.setEnabled(not self._engine)
+        bar.addWidget(self._engine_cb)
         # 声音：默认开（用户 2026-10-05："bgm 未被实际播放"）——
         # 但给一个开关，免得预览一开就出声吓人。
         self._sound_cb = QCheckBox('🔊 声音')
@@ -721,8 +927,13 @@ class StagePreviewWindow(QDialog):
         except Exception as e:                     # noqa: BLE001 - 放不出声不影响画面
             swallow('ui_qt.stage_preview.show_frame', e)
             cues = {}
-        self._who.setText(f.speaker or '　')
+        self._who.setText(f.speaker_name or f.display_speaker or '　')
         self._dlg.setText(_dialogue_html(f))
+        if self._engine:
+            # 真实渲染里名条/台词已经画进画布；成功回调前先收起外部标签，
+            # 避免"画里一份、画外又一份"。
+            self._who.setVisible(False)
+            self._dlg.setVisible(False)
         self._summary.setText(self._summary_text(f, cues))
         self._pos.setText(f'{idx + 1} / {len(self.frames)}')
         # **按拍定速**（2026-10-18，审计 P1-8"固定 900ms"）：
@@ -797,6 +1008,12 @@ class StagePreviewWindow(QDialog):
             miss = []
         if miss:
             extra.append('⚠ 缺图：' + '、'.join(miss))
+        try:
+            for w in self._canvas.render_warnings():
+                if w not in extra:
+                    extra.append('⚠ ' + str(w))
+        except Exception as e:                    # noqa: BLE001
+            swallow('stage_preview._summary_text.render_warnings', e)
         note = self._audio.note() if self._sound_cb.isChecked() else ''
         if note:
             extra.append(f'（声音：{note}）')
@@ -875,6 +1092,40 @@ class StagePreviewWindow(QDialog):
     def _on_real(self, checked: bool):
         self._canvas.real_images = bool(checked)
         self.show_frame(self.idx)
+
+    def _on_engine(self, checked: bool):
+        """
+        切换"引擎排版 / 示意图"。
+
+        切过去时**重新读一次 gui**（作者可能刚改完字号）：排版参数不是
+        一次会话只读一次盘。切回来时旧画布重新按示意图取图。
+        """
+        self._engine = bool(checked)
+        self._canvas.engine_render = self._engine
+        self._real_cb.setEnabled(not self._engine)
+        if self._engine:
+            try:
+                from storygraph.story.renpy_gui import load_gui_profile
+                self._profile = load_gui_profile(self._project_root,
+                                                 registry=self._registry,
+                                                 force=True)
+                self._canvas.set_engine_context(profile=self._profile)
+            except Exception as e:            # noqa: BLE001
+                swallow('stage_preview._on_engine', e)
+        self._who.setVisible(not self._engine)
+        self._dlg.setVisible(not self._engine)
+        self.show_frame(self.idx)
+
+    def _on_rendered(self, ok: bool):
+        """后台合成完成：成功就把画布外的名条/台词收起来（已经在画里了）。"""
+        if not self._engine:
+            return
+        self._who.setVisible(not ok)
+        self._dlg.setVisible(not ok)
+        if self.frames:
+            self._summary.setText(
+                self._summary_text(self.frames[self.idx], self._cues_for(
+                    self.frames[self.idx])))
 
     def _on_sound(self, checked: bool):
         """

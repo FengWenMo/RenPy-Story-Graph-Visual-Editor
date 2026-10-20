@@ -116,6 +116,9 @@ class SpriteLayout:
     #: 项目 transform 算出来的**真实舞台几何**（见 `story.atl`）。
     #: `None` = 没算出来（那时只按 `x` + 满高画示意图，与老版本一致）。
     place: object = None
+    #: 在 `snapshot_rows` 里的**原始显示顺序**（先 show 的在下面）。
+    #: 预览按它叠，不能按"谁在说话"重排 —— 那会改变遮挡关系。
+    order_index: int = 0
 
     @property
     def zoom(self) -> float:
@@ -150,6 +153,13 @@ class StageFrame:
     speaker: str
     text: str
     scene: str
+    #: 显示名（注册表 `Name`；空 = 旁白，不画名条）。`speaker` 是角色变量。
+    speaker_name: str = ''
+    #: 角色名颜色（`who_color`）与台词颜色（`what_color`，空 = 用 gui 默认）。
+    speaker_color: str = ''
+    what_color: str = ''
+    #: 背景自己的变换（`scene bg room at bgfit` 的 `bgfit`）。
+    scene_at: str = ''
     sprites: list = field(default_factory=list)
     layers: str = ''            # CG/UI 等非角色图层
     music: str = ''
@@ -193,11 +203,21 @@ class StageFrame:
     @property
     def dialogue(self) -> str:
         """这一帧对话框里显示什么。"""
-        who = self.speaker or ''
+        who = self.display_speaker
         body = self.text or ''
         if who and body:
             return f'{who}：「{body}」'
         return body or '（没有台词）'
+
+    @property
+    def display_speaker(self) -> str:
+        """名条上写的字（注册表显示名优先；没有就退回变量名）。"""
+        return str(self.speaker_name or self.speaker or '')
+
+    @property
+    def shows_window(self) -> bool:
+        """这一拍要不要画 say 窗口（Ren'Py：有 say 语句就有对话框）。"""
+        return bool(str(self.text or '').strip())
 
 
 def build_frames(beats: list, registry=None, transform_index=None,
@@ -222,28 +242,32 @@ def build_frames(beats: list, registry=None, transform_index=None,
     frames = []
     for i, (beat, row) in enumerate(zip(beats, rows)):
         speaker = (getattr(beat, 'speaker', '') or '').strip()
+        ch = {}
+        if speaker:
+            try:
+                ch = (getattr(registry, 'characters', {}) or {}).get(speaker) or {}
+            except Exception as e:                # noqa: BLE001
+                swallow('app.stage.build_frames.character', e)
+                ch = {}
         sprites = []
-        for img, at in (row.get('state', {}).get('actors') or []):
+        for order, (img, at) in enumerate(
+                (row.get('state', {}).get('actors') or [])):
             tag = (img or '').split()[0] if img else ''
             place = placement_of(at, transform_index, registry, size)
             sprites.append(SpriteLayout(
                 image=img or '', tag=tag, at=at or '',
-                x=place.x, speaking=False, place=place))
+                x=place.x, speaking=False, place=place,
+                order_index=order))
         # 谁在说话：优先角色变量的 ImageTag，其次说话人本身就是 tag。
         # **不猜**（匹配不上就都不高亮）——高亮打错人比不高亮更糟。
         if speaker:
-            spk_tag = ''
-            try:
-                ch = (getattr(registry, 'characters', {}) or {}).get(speaker) or {}
-                spk_tag = str(ch.get('ImageTag') or '').strip()
-            except Exception as e:
-                swallow('app.stage.build_frames', e)
-                spk_tag = ''
+            spk_tag = str(ch.get('ImageTag') or '').strip()
             hit = spk_tag or speaker
             for s in sprites:
                 if s.tag and s.tag == hit:
                     s.speaking = True
-        # 正在说话的排前面（与卡片一致）
+        # 正在说话的排前面（与卡片一致）。`order_index` 保留了原始叠放顺序，
+        # 真实渲染按它画（说话人高亮不能改变遮挡关系）。
         sprites.sort(key=lambda s: (not s.speaking, s.x))
 
         frames.append(StageFrame(
@@ -251,8 +275,12 @@ def build_frames(beats: list, registry=None, transform_index=None,
             line_id=row.get('line_id', '') or f'{getattr(beat, "label", "")}.{i + 1:04d}',
             label=row.get('label', '') or '',
             speaker=speaker,
+            speaker_name=str(ch.get('Name') or ''),
+            speaker_color=str(ch.get('Color') or ''),
+            what_color=str(ch.get('WhatColor') or ''),
             text=row.get('text', '') or '',
             scene=row.get('scene', '') or '',
+            scene_at=str(getattr(beat, 'scene_at', '') or ''),
             sprites=sprites,
             layers=row.get('layers', '') or '',
             music=row.get('music', '') or '',
@@ -795,52 +823,26 @@ def sprite_box(layout, natural, screen=None):
     `natural` 是图片的原始像素尺寸 `(w, h)`，`layout.place` 是
     `story.atl` 从项目 transform 解析出来的几何。Ren'Py 的规则照抄：
 
-      · 大小 = 原图尺寸 × `zoom`；
-      · `xcenter` / `xpos` / `xalign` + `xanchor` / `xoffset` 定横向；
-      · `ypos`（>1 当像素）/ `yalign` / `yanchor` / `yoffset` 定纵向。
+      · 大小 = 原图尺寸 × `xzoom/yzoom`；
+      · `pos` 是锚点落在哪，`anchor` 是图像自己的哪个点；
+      · 小数 = 屏幕/图像比例，整数 = 像素（`Placement.box` 里实现）。
 
     为什么必须带上原图尺寸：真实项目立绘是 4320×7680，`zoom 0.30` 之后仍有
     1296×2304（1920×1080 屏幕的两倍高）—— 只按"屏幕百分比"画必然错位。
-    `layout` 没有真实几何（`from_atl` 为假）或 `natural` 缺失时返回 None，
+    `layout` 没有真实几何（没有 pos）或 `natural` 缺失时返回 None，
     调用方按老办法画示意图。
     """
     place = getattr(layout, 'place', None)
-    if place is None or not getattr(place, 'from_atl', False):
+    if place is None:
         return None
-    if not natural or len(natural) < 2:
+    if (getattr(place, 'x_px', None) is None
+            and getattr(place, 'y_px', None) is None):
+        return None                      # 只有名字启发 → 交给示意图
+    try:
+        return place.box(natural, screen or (1920, 1080))
+    except Exception as e:                    # noqa: BLE001 - 坏几何不该炸预览
+        swallow('app.stage.sprite_box', e)
         return None
-    nw, nh = float(natural[0] or 0), float(natural[1] or 0)
-    if nw <= 0 or nh <= 0:
-        return None
-    sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen else (1920, 1080)
-    sw, sh = max(1.0, float(sw)), max(1.0, float(sh))
-    zoom = float(getattr(place, 'zoom', 1.0) or 1.0)
-    w, h = nw * zoom, nh * zoom
-    xoffset = float(getattr(place, 'xoffset', 0.0) or 0.0)
-    xanchor = float(getattr(place, 'xanchor', 0.5) or 0.0)
-    x_px = getattr(place, 'x_px', None)
-    kind = getattr(place, 'x_kind', 'center')
-    if x_px is None:
-        left = float(getattr(layout, 'x', 0.5) or 0.5) * sw - w / 2.0
-    elif kind == 'align':
-        left = float(x_px) * sw + xoffset - xanchor * w
-    elif kind == 'left':
-        left = float(x_px) + xoffset - xanchor * w
-    else:                                     # center
-        left = float(x_px) + xoffset - w / 2.0
-    yoffset = float(getattr(place, 'yoffset', 0.0) or 0.0)
-    yanchor = float(getattr(place, 'yanchor', 1.0) or 0.0)
-    y_px = getattr(place, 'y_px', None)
-    ykind = getattr(place, 'y_kind', 'bottom')
-    if y_px is None:
-        bottom = sh                              # 默认贴屏幕底
-    elif ykind == 'align':
-        bottom = float(y_px) * sh + yoffset + (1.0 - yanchor) * h
-    elif ykind == 'top':
-        bottom = float(y_px) + yoffset + h
-    else:                                        # bottom
-        bottom = float(y_px) + yoffset
-    return left, bottom - h, w, h
 
 
 # ===================== 声音：素材名 → 真实音频文件 =====================
