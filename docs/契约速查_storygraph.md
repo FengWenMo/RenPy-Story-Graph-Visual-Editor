@@ -3202,3 +3202,109 @@ JsonUtility 不支持 `Dictionary`，但支持结构体数组，所以形状应�
 - UI 目前只显示"多少组是猜的"；立绘卡按置信度分色是下一步；
 - Unity 侧要拿到这些元数据，得按 §18.2 的下一步做 `AttributePair[]`
   （JsonUtility 不支持 Dictionary，但支持结构体数组）。
+
+
+# §20 中立 IR 自检：导出的这一份自己对不对（2026-10-20）
+
+用户本轮目标里"校验"两个字，§18 只兑现了一半：损失报告说的是
+**"目标引擎少拿了什么"**，不是**"交出去的这一份本身有没有坏"**。
+一份 `story_ir.json` 有三十来个行级字段，下游（Unity 导入器、翻译公司、
+埋点脚本、存档迁移）只认 `line_id` 和 `stats` 这类"看起来像真值"的东西。
+它们一旦自相矛盾，**没有任何一处会报错**：
+
+| 坏数据 | 真实后果 |
+|---|---|
+| `line_id` 重复 | 存档/埋点按 id 存，两个不同的拍被当成同一句 |
+| `stats.lines` 与 `lines` 长度不符 | 产品按统计做进度条，差一截 |
+| `stage[]` 指向不存在的 `line_id` | 导入器要么跳过要么崩，都不说 |
+| `timeline[].order` 不是 0..n-1 | 适配器按 order 排序，演出顺序全乱 |
+| `structure.known=false` 却带 `path` | 两处互相打脸，重建菜单树时信谁？ |
+| `actors` 里挤着 `a; b` | 一张立绘一个字符串才对，挤在一起两边都画错 |
+
+这些**不是目标引擎的损失**（§18 的字段对账看不见它们），而是"这份 IR
+生成完就坏了"。所以放在导出之前跑，产出 `IR_CHECK.md`，并把错误/警告数
+写进导出回执与状态栏。
+
+## 20.1 检查清单
+
+`storygraph/pipeline/ir_validate.py`，`check_ir(ir)` 返回聚合后的
+`Issue(level, code, message, scope, count, examples)`。模块共 **41 个代码**
+（含"不是数组/不是对象"这类形状检查），下表列主要的：
+
+| 代码 | 级别 | 查什么 |
+|---|---|---|
+| `E-IR-SCHEMA` | 错 | 没有 `renpy-story-ir/<版本>` |
+| `W-IR-SCHEMA-VERSION` | 警 | 版本比本工具认识的新 |
+| `E-IR-EMPTY` | 错 | `lines` 为空（导的是空章节） |
+| `E-IR-ID-EMPTY` / `E-IR-ID-DUP` | 错 | 主键为空 / 重复（重复按"几行共用"计数） |
+| `E-IR-LINE-KEYS` / `E-IR-LINE-SHAPE` | 错 | 缺下游要用的键 / 不是对象 |
+| `E-IR-STATS` | 错 | `lines/labels/characters/spoken_lines/chars` 与实际不符 |
+| `E-IR-STAGE-ORPHAN` / `E-IR-STAGE-DUP` | 错 | 快照指向不存在的行 / 同一拍两份快照 |
+| `W-IR-STAGE-MISSING` | 警 | 有拍没有快照（跨章合并时正常） |
+| `E-IR-TIMELINE-ORDER` | 错 | `order` 不是 0..n-1 |
+| `E-IR-TIMELINE-VALUE` | 错 | 事件里出现非标量（适配器只认标量） |
+| `E-IR-STRUCTURE` | 错 | `known=false` 却带 `path` |
+| `W-IR-STRUCTURE-UNKNOWN` | 警 | 这些拍不知道嵌套位置，目标引擎只能当顶层 |
+| `E-IR-ACTOR-JOINED` | 错 | `actors` 里有多张图挤在一个字符串 |
+| `W-IR-ACTOR-UNKNOWN` | 警 | 立绘 tag 在资源清单里找不到 |
+| `W-IR-SPEAKER-UNKNOWN` | 警 | 角色变量不在 `characters` 里（跨章正常，但要说） |
+| `W-IR-MARKUP` | 警 | 台词里还有 `{color=…}` / `[name]`（IR 只保留原文） |
+| `E-IR-ASSET-DUP` / `E-IR-ASSET-ID` | 错 | 资源 id 重复 / 为空 |
+| `W-IR-DIM-NO-META` | 警 | 有维度结构却没有来源/置信度 |
+| `W-IR-DIM-GUESSED` | 警 | 维度是猜的（`unknown` 或置信度 < 0.7，§19） |
+| `E-AD-UNITY-NESTED` | 错 | Unity 产物里出现嵌套字典（JsonUtility 反序列化不了） |
+| `E-AD-UNITY-KEYS` | 错 | Unity line 缺 `lineId` / `speakerId` / `text` |
+
+计数规则：同代码聚合成一行，`count` 是**受影响的条目数**（重复主键按
+"几行共用这个 id"算），例子最多留 8 个 —— 报告是给人扫的，不是日志。
+
+## 20.2 落在导出的哪个位置
+
+- `export_ir()` 在写完适配产物**之后**写 `IR_CHECK.md`（每个引擎都写：
+  中立 IR 是每次导出都有的产物；放最后才能连适配器约束一起查）；
+- `expected_files()` 同步声明这个文件名 —— 五个引擎的"产物集合"测试
+  逐条对账，多一个少一个都会红；
+- `Session.export_ir()` 回执多一段
+  `check={error_count, warning_count, by_code, issues}`；
+- 「更多 → 导出到其他引擎」：有错误时状态栏是 **⚠**（不是 ✔），控制台
+  逐条列 `代码×数量：说明`，并指向 `IR_CHECK.md`；只有警告时 ✔ 后加
+  `· 自检 N 个警告`；
+- 导出目录里同时有两份报告，分工写清楚在各自的抬头：
+  `IR_CHECK.md` = 数据自己对不对；`IR_LOSS-<engine>.md` = 目标引擎少拿了什么。
+
+## 20.3 Unity 的硬约束单独查
+
+`to_unity()` 的产物要能被 `JsonUtility.FromJson<T>` 直接吃，而它
+**不支持 Dictionary**：`{"stage": {"background": "..."}}` 会让整份数据
+解析失败。所以 `structure` 被摊成三个标量、`timeline` 用扁平对象数组
+（§16.5）。`check_adapter('unity', payload)` 递归找 `{键: {…}}` 形态
+（数组里的结构体是允许的），命中就报 `E-AD-UNITY-NESTED` 并给出路径
+（`line[0].stage`）—— 以后谁再往里塞嵌套字典，导出当场就有结论，
+而不是等 Unity 那边报"JSON 解析失败"。
+
+只有 Unity 有这条规则；Godot 的 `JSON.parse` 吃嵌套，`check_adapter`
+对它返回空列表（不为对称而编规则）。
+
+## 20.4 判据（`tests/test_ir_validate.py`，36 条）
+
+- 干净 IR **零错误零警告**（含"什么字段都有"的那份）—— 否则检查在制造噪音；
+- 上面每一行坏数据都有对应代码，且 `count` / `examples` 对得上；
+- `W-IR-SPEAKER-UNKNOWN` 只在**有角色表**时出现（空角色表不该刷屏）；
+- 报告抬头有行数/资源数/错误警告数，正文有代码与"自查了什么"；
+- 坏数据（`lines` / `assets` 不是数组）下报告也能生成，不在报告里再崩；
+- 五个引擎都写 `IR_CHECK.md`，且产物集合与 `expected_files()` 一致；
+- 真 `build_neutral_ir()` 出来的 IR **零错误**；
+- Unity 产物嵌套字典/缺键被抓到，真 `to_unity()` 产物通过；
+- **漂移守卫**：`KNOWN_SCHEMA_VERSIONS` 必须含 `engine_exporters.SCHEMA_VERSION`
+  —— 加了 IR 版本却忘了自检，测试红。
+
+## 20.5 边界
+
+- **非阻塞**：错误只报告、不拦导出 —— 用户可能就是要拿这份数据去排查；
+  但回执写"自检 N 个错误"，不会让它悄悄出去；
+- 只查**结构自洽**，不查剧情语义：label 是否存在、`jump` 目标是否可达、
+  条件表达式是否合法，仍是 `pipeline/validate.py` 的活（三级校验）；
+- 不做 JSON Schema 式的强类型校验（字段类型宽松是中立 IR 的刻意选择：
+  Unity 的 `JsonUtility` 要求标量，Godot 允许嵌套，两边的约束不同）；
+- `W-IR-MARKUP` 是**提醒**不是错：IR 保留台词原文，目标引擎自己决定
+  怎么处理 Ren'Py 标记。

@@ -33,6 +33,8 @@ from pathlib import Path
 
 from storygraph.core.safeguard import swallow
 from storygraph.pipeline.ir_loss import LOSS_REPORT_NAME, report_markdown
+from storygraph.pipeline.ir_validate import (CHECK_REPORT_NAME,
+                                             report_markdown as check_report)
 from storygraph.story.beat_model import split_hide_items, split_show_items
 from storygraph.story.stage_snapshot import stage_snapshots
 
@@ -576,14 +578,14 @@ def expected_files(engine: str) -> list:
     """
     engine = (engine or 'json').lower()
     if engine == 'csv':
-        return [CSV_NAME, NEUTRAL_IR_NAME]
+        return [CSV_NAME, NEUTRAL_IR_NAME, CHECK_REPORT_NAME]
     if engine == 'unity':
         return [NEUTRAL_IR_NAME, UNITY_DATA_NAME, UNITY_NOTES_NAME,
-                LOSS_REPORT_NAME.format(engine='unity')]
+                LOSS_REPORT_NAME.format(engine='unity'), CHECK_REPORT_NAME]
     if engine == 'godot':
         return [NEUTRAL_IR_NAME, GODOT_DATA_NAME, GODOT_LOADER_NAME,
-                LOSS_REPORT_NAME.format(engine='godot')]
-    return [NEUTRAL_IR_NAME]
+                LOSS_REPORT_NAME.format(engine='godot'), CHECK_REPORT_NAME]
+    return [NEUTRAL_IR_NAME, CHECK_REPORT_NAME]
 
 
 def _merge_by_key(old_items, new_items, key) -> list:
@@ -691,6 +693,12 @@ def export_ir(engine: str, beats, out_dir, registry=None,
         written.append(_write_text(
             report_markdown(ir, 'godot'),
             out_dir / LOSS_REPORT_NAME.format(engine='godot')))
+    # **自检报告**（§20）：这份 IR 自己有没有矛盾（重复主键 / 统计不符 /
+    # 快照指向不存在的行 / Unity 产物里的嵌套字典）。放在最后写：
+    # Unity 的适配产物已经生成，检查能连"适配器是否违反 JsonUtility 约束"
+    # 一起覆盖。每个引擎都写 —— 中立 IR 是每次导出都有的产物。
+    written.append(_write_text(check_report(ir, engine),
+                               out_dir / CHECK_REPORT_NAME))
     return written
 
 

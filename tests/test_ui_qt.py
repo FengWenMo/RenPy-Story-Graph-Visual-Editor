@@ -1182,6 +1182,15 @@ class TestStagePreview:
         w.close()
 
     def test_loading_clears_once_the_image_arrives(self, app, project):
+        """
+        解码完就要撤掉"加载中"。
+
+        **不许用固定的 400ms 等**（2026-10-20 全量跑里真假红过一次）：
+        慢机器/杀毒扫描下逐张解码会超过 400ms，断言就变成在测机器速度。
+        这里等**条件本身**，上限 5 秒 —— 真不撤仍然会红。
+        """
+        import time
+
         from PySide6.QtCore import QEventLoop, QTimer
 
         w = self._window(app, project)
@@ -1190,9 +1199,11 @@ class TestStagePreview:
         assert first is not None
         w.show_frame(first)
         assert w._canvas._loading
-        loop = QEventLoop()
-        QTimer.singleShot(400, loop.quit)
-        loop.exec()
+        deadline = time.monotonic() + 5.0
+        while w._canvas._loading and time.monotonic() < deadline:
+            loop = QEventLoop()
+            QTimer.singleShot(50, loop.quit)
+            loop.exec()
         assert not w._canvas._loading, '图解好了还挂着"加载中"'
         w.close()
 

@@ -1169,6 +1169,28 @@ class GraphOpsMixin:
                                   f'（{scope}）')
             self._log('[导出] 损失报告：' + '、'.join(fields[:12])
                       + f'；详见 IR_LOSS-{engine}.md')
+        # **自检**（§20）：IR 自己有没有矛盾（重复主键 / 统计不符 / 快照
+        # 指向不存在的行 / Unity 产物里的嵌套字典）。有错误就不许只报"✔"。
+        check = res.get('check') or {}
+        errs = int(check.get('error_count') or 0)
+        warns = int(check.get('warning_count') or 0)
+        if errs or warns:
+            level = '错误' if errs else '警告'
+            self._log(f'[导出] IR 自检：{errs} 个错误 / {warns} 个警告'
+                      f'（详见 IR_CHECK.md）')
+            for issue in (check.get('issues') or []):
+                if issue.get('level') != 'error':
+                    continue
+                self._log(f'  · {issue.get("code")}×{issue.get("count")}：'
+                          f'{issue.get("message")}')
+            if errs:
+                self._status(f'⚠ 已导出 {engine} 格式（{len(res["files"])} '
+                             f'个文件）· 自检 {errs} 个{level}')
+            else:
+                self._status(f'✔ 已导出 {engine} 格式（{len(res["files"])} '
+                             f'个文件）· 自检 {warns} 个{level}' + (
+                                 f' · 损失 {count} 类字段' if count else ''))
+        elif count:
             self._status(f'✔ 已导出 {engine} 格式（{len(res["files"])} 个文件）'
                          f' · 损失 {count} 类字段')
         else:

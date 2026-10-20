@@ -1,0 +1,348 @@
+"""
+tests/test_ir_validate.py
+=========================
+**中立 IR 自检**（2026-10-20，§20）。
+
+§18 的损失报告回答"目标引擎少拿了什么"；这个文件守的是另一半：
+**交出去的这一份本身有没有自相矛盾** —— 重复 `line_id`、`stats` 与内容
+不符、`stage[]` 指向不存在的行、`timeline[].order` 错位、
+`structure.known` 与 `path` 互相打脸、Unity 产物里混进嵌套字典。
+
+两条不变量：
+
+  ① 干净 IR 必须**零错误零警告**（否则检查在制造噪音，没人会看）；
+  ② 每一条坏数据都有对应 `E-IR-*` / `E-AD-*`，且报告里写得出来。
+
+另外守一条漂移：`KNOWN_SCHEMA_VERSIONS` 必须包含
+`engine_exporters.SCHEMA_VERSION` —— 加了 IR 版本却忘了自检会红。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from storygraph.pipeline.engine_exporters import (            # noqa: E402
+    SCHEMA_VERSION, build_neutral_ir, expected_files, export_ir,
+    to_unity)
+from storygraph.pipeline.ir_validate import (                 # noqa: E402
+    CHECK_REPORT_NAME, KNOWN_SCHEMA_VERSIONS, LOW_CONFIDENCE,
+    check_adapter, check_ir, report_markdown, summarize, write_report)
+from storygraph.story.beat_model import Beat, assign_identity  # noqa: E402
+
+
+def _line(**kw):
+    base = {
+        'line_id': 'a.0001', 'label': 'a', 'seq': 1, 'kind': 'say',
+        'speaker': '', 'speaker_name': '', 'text': 'hello',
+        'condition': '', 'scene': '', 'actors': [],
+        'music': '', 'music_action': '', 'sound': '', 'sound_action': '',
+        'voice': '', 'with': '', 'nest': '', 'line_hash': '',
+        'structure': {'path': '', 'kind': '', 'known': True},
+        'timeline': [], 'targets': [],
+    }
+    base.update(kw)
+    return base
+
+
+def _stats(lines, characters):
+    return {
+        'lines': len(lines),
+        'labels': len({l.get('label') for l in lines if l.get('label')}),
+        'characters': len(characters),
+        'spoken_lines': sum(1 for l in lines if l.get('text')),
+        'chars': sum(len(l.get('text') or '') for l in lines),
+    }
+
+
+def _ir(lines=None, characters=None, assets=None, stage=None, stats=None,
+        schema=f'renpy-story-ir/{SCHEMA_VERSION}'):
+    lines = [_line()] if lines is None else lines
+    characters = [] if characters is None else characters
+    assets = {} if assets is None else assets
+    if stage is None:
+        stage = [{'line_id': l.get('line_id'), 'scene': '', 'actors': [],
+                  'music': ''} for l in lines if isinstance(l, dict)]
+    return {
+        'schema': schema,
+        'project': 'demo', 'title': 'demo',
+        'characters': characters,
+        'lines': lines,
+        'assets': assets,
+        'stage': stage,
+        'stats': _stats(lines, characters) if stats is None else stats,
+    }
+
+
+def _codes(issues):
+    return {i.code for i in issues}
+
+
+def _by_code(issues, code):
+    rows = [i for i in issues if i.code == code]
+    return rows[0] if rows else None
+
+
+class TestCleanIr:
+    def test_clean_ir_has_no_issues(self):
+        assert check_ir(_ir()) == []
+
+    def test_clean_ir_with_everything_still_clean(self):
+        ir = _ir(
+            lines=[_line(label='a', speaker='e',
+                         text='你好',
+                         actors=['eileen happy'],
+                         structure={'path': 'menu:1>B', 'kind': 'menu',
+                                    'known': True},
+                         timeline=[{'op': 'show', 'target': 'eileen',
+                                    'order': 0}])],
+            characters=[{'id': 'e', 'name': 'Eileen'}],
+            assets={'images': [{'id': 'i1', 'tag': 'eileen',
+                                'attributes': {'outfit': 'school'},
+                                'attribute_meta': [
+                                    {'group': 'outfit', 'value': 'school',
+                                     'source': 'explicit',
+                                     'confidence': 1.0}]}]})
+        assert check_ir(ir) == []
+
+
+class TestSchema:
+    def test_missing_schema_is_an_error(self):
+        issues = check_ir(_ir(schema=''))
+        assert 'E-IR-SCHEMA' in _codes(issues)
+
+    def test_unknown_schema_version_is_a_warning(self):
+        issues = check_ir(_ir(schema='renpy-story-ir/9.9'))
+        assert issues and all(i.level == 'warning' for i in issues)
+        assert 'W-IR-SCHEMA-VERSION' in _codes(issues)
+
+    def test_schema_version_table_stays_in_sync(self):
+        assert SCHEMA_VERSION in KNOWN_SCHEMA_VERSIONS, (
+            'IR 版本改了却没加进 KNOWN_SCHEMA_VERSIONS —— 自检会把新数据'
+            '当成旧格式')
+
+
+class TestLines:
+    def test_empty_lines_is_an_error(self):
+        issues = check_ir(_ir(lines=[], stage=[]))
+        assert 'E-IR-EMPTY' in _codes(issues)
+
+    def test_duplicate_line_id_is_an_error(self):
+        ir = _ir(lines=[_line(), _line(text='again')])
+        issues = check_ir(ir)
+        row = _by_code(issues, 'E-IR-ID-DUP')
+        assert row is not None and row.count == 2
+        assert row.as_dict()['examples'] == ['a.0001']
+
+    def test_blank_line_id_is_an_error(self):
+        ir = _ir(lines=[_line(line_id='')], stage=[])
+        assert 'E-IR-ID-EMPTY' in _codes(check_ir(ir))
+
+    def test_missing_required_keys_is_an_error(self):
+        broken = _line()
+        del broken['timeline']
+        issues = check_ir(_ir(lines=[broken]))
+        row = _by_code(issues, 'E-IR-LINE-KEYS')
+        assert row is not None and 'timeline' in row.examples
+
+    def test_non_integer_seq_is_a_warning(self):
+        ir = _ir(lines=[_line(seq='1')])
+        assert 'W-IR-SEQ' in _codes(check_ir(ir))
+
+
+class TestStats:
+    def test_stats_mismatch_names_the_field(self):
+        bad = _stats([_line()], [])
+        bad['lines'] = 99
+        issues = check_ir(_ir(stats=bad))
+        row = _by_code(issues, 'E-IR-STATS')
+        assert row is not None
+        assert any('lines' in e and '99' in e for e in row.examples)
+
+    def test_missing_stats_is_an_error(self):
+        ir = _ir()
+        del ir['stats']
+        assert 'E-IR-STATS' in _codes(check_ir(ir))
+
+
+class TestStage:
+    def test_stage_pointing_at_a_missing_line_is_an_error(self):
+        ir = _ir(stage=[{'line_id': 'a.9999', 'scene': '', 'actors': [],
+                         'music': ''}])
+        assert 'E-IR-STAGE-ORPHAN' in _codes(check_ir(ir))
+
+    def test_duplicate_stage_snapshot_is_an_error(self):
+        row = {'line_id': 'a.0001', 'scene': '', 'actors': [], 'music': ''}
+        ir = _ir(stage=[dict(row), dict(row)])
+        assert 'E-IR-STAGE-DUP' in _codes(check_ir(ir))
+
+    def test_missing_snapshot_is_only_a_warning(self):
+        ir = _ir(stage=[])
+        issues = check_ir(ir)
+        assert not [i for i in issues if i.level == 'error']
+        assert 'W-IR-STAGE-MISSING' in _codes(issues)
+
+
+class TestStructureAndTimeline:
+    def test_known_false_with_path_is_an_error(self):
+        ir = _ir(lines=[_line(structure={'path': 'menu:1>B',
+                                        'kind': 'menu',
+                                        'known': False})])
+        assert 'E-IR-STRUCTURE' in _codes(check_ir(ir))
+
+    def test_known_false_without_path_is_a_warning(self):
+        ir = _ir(lines=[_line(structure={'path': '', 'kind': '',
+                                        'known': False})])
+        issues = check_ir(ir)
+        assert not [i for i in issues if i.level == 'error']
+        assert 'W-IR-STRUCTURE-UNKNOWN' in _codes(issues)
+
+    def test_timeline_order_must_be_zero_based(self):
+        ir = _ir(lines=[_line(timeline=[{'op': 'show', 'order': 1}])])
+        assert 'E-IR-TIMELINE-ORDER' in _codes(check_ir(ir))
+
+    def test_timeline_event_must_be_scalar(self):
+        ir = _ir(lines=[_line(timeline=[{'op': 'show', 'order': 0,
+                                        'target': {'tag': 'e'}}])])
+        assert check_ir(ir), '嵌套值应该被自检抓到'
+        assert 'E-IR-TIMELINE-VALUE' in _codes(check_ir(ir))
+
+
+class TestActorsAndSpeaker:
+    def test_joined_actors_is_an_error(self):
+        ir = _ir(lines=[_line(actors=['eileen happy; bg room'])])
+        assert 'E-IR-ACTOR-JOINED' in _codes(check_ir(ir))
+
+    def test_actor_not_in_assets_is_a_warning(self):
+        ir = _ir(lines=[_line(actors=['eileen happy'])],
+                 assets={'images': [{'id': 'bg1', 'tag': 'bg'}]})
+        issues = check_ir(ir)
+        assert not [i for i in issues if i.level == 'error']
+        assert 'W-IR-ACTOR-UNKNOWN' in _codes(issues)
+
+    def test_unknown_speaker_warns_only_when_characters_are_known(self):
+        ir = _ir(lines=[_line(speaker='ghost')])
+        assert 'W-IR-SPEAKER-UNKNOWN' not in _codes(check_ir(ir))
+        ir = _ir(lines=[_line(speaker='ghost')],
+                 characters=[{'id': 'e', 'name': 'Eileen'}])
+        assert 'W-IR-SPEAKER-UNKNOWN' in _codes(check_ir(ir))
+
+    def test_renpy_markup_is_a_warning_not_an_error(self):
+        ir = _ir(lines=[_line(text='hi {w} [name]')])
+        issues = check_ir(ir)
+        assert not [i for i in issues if i.level == 'error']
+        assert 'W-IR-MARKUP' in _codes(issues)
+
+
+class TestAssets:
+    def test_duplicate_asset_id_is_an_error(self):
+        ir = _ir(assets={'images': [{'id': 'x'}, {'id': 'x'}]})
+        assert 'E-IR-ASSET-DUP' in _codes(check_ir(ir))
+
+    def test_attributes_without_meta_is_a_warning(self):
+        ir = _ir(assets={'images': [{'id': 'i1',
+                                     'attributes': {'outfit': 'school'}}]})
+        issues = check_ir(ir)
+        assert not [i for i in issues if i.level == 'error']
+        assert 'W-IR-DIM-NO-META' in _codes(issues)
+
+    def test_guessed_dimensions_are_called_out(self):
+        ir = _ir(assets={'images': [{
+            'id': 'i1',
+            'attributes': {'outfit': 'school'},
+            'attribute_meta': [{'group': 'outfit', 'value': 'school',
+                                'source': 'unknown',
+                                'confidence': LOW_CONFIDENCE - 0.5}]}]})
+        assert 'W-IR-DIM-GUESSED' in _codes(check_ir(ir))
+
+
+class TestAdapterConstraints:
+    def test_unity_nested_dictionary_is_caught(self):
+        payload = {'lines': [{'lineId': 'a.0001', 'speakerId': '',
+                              'text': '',
+                              'stage': {'background': 'bg'}}]}
+        issues = check_adapter('unity', payload)
+        row = _by_code(issues, 'E-AD-UNITY-NESTED')
+        assert row is not None
+        assert row.examples == ['line[0].stage']
+
+    def test_unity_missing_keys_is_caught(self):
+        issues = check_adapter('unity', {'lines': [{'text': 'x'}]})
+        assert 'E-AD-UNITY-KEYS' in _codes(issues)
+
+    def test_real_unity_payload_is_flat(self):
+        beats = [_beat()]
+        assign_identity(beats)
+        ir = build_neutral_ir(beats, project='demo')
+        assert check_adapter('unity', to_unity(ir)) == [], (
+            'to_unity() 写出了 JsonUtility 吃不下（或缺键）的数据')
+
+    def test_other_engines_have_no_adapter_rules(self):
+        assert check_adapter('godot', {'anything': {'nested': 1}}) == []
+
+
+class TestReportAndExport:
+    def test_report_markdown_lists_counts_and_codes(self):
+        ir = _ir(lines=[_line(), _line(text='again')])
+        text = report_markdown(ir, 'unity')
+        assert text.startswith('# 中立 IR 自检 · unity')
+        assert '- 行：2，资源：0' in text
+        assert 'E-IR-ID-DUP' in text
+        assert '## 错误' in text and '## 自查了什么' in text
+
+    def test_report_survives_malformed_ir(self):
+        text = report_markdown({'lines': 'nope', 'assets': ['x']}, 'json')
+        assert '行：0，资源：0' in text
+        assert 'E-IR-LINES-SHAPE' in text
+
+    def test_write_report_creates_the_file(self, tmp_path):
+        path = write_report(_ir(), tmp_path, 'json')
+        assert Path(path).name == CHECK_REPORT_NAME
+        assert 'IR 自检' in checkbox_text(Path(path))
+
+    def test_summarize_counts_and_groups_by_code(self):
+        ir = _ir(lines=[_line(), _line(text='again')])
+        summary = summarize(ir, 'unity')
+        assert summary['error_count'] >= 2
+        assert summary['by_code']['E-IR-ID-DUP'] == 2
+        assert summary['issues'][0]['level'] == 'error'
+
+    def test_export_writes_the_check_report_for_every_engine(self, tmp_path):
+        beats = [_beat()]
+        assign_identity(beats)
+        for engine in ('renpy', 'unity', 'godot', 'json', 'csv'):
+            out = tmp_path / f'chk_{engine}'
+            files = export_ir(engine, beats, out, project='demo')
+            names = {Path(f).name for f in files}
+            assert names == set(expected_files(engine)), names
+            assert CHECK_REPORT_NAME in names
+            assert (out / CHECK_REPORT_NAME).is_file()
+
+    def test_exported_real_ir_has_no_self_check_errors(self, tmp_path):
+        beats = [_beat(), _beat(seq=2, text='第二句')]
+        assign_identity(beats)
+        ir = build_neutral_ir(beats, project='demo')
+        issues = check_ir(ir)
+        errors = [i for i in issues if i.level == 'error']
+        assert errors == [], [i.as_dict() for i in errors]
+        summary = summarize(ir)
+        assert summary['error_count'] == 0
+
+
+def checkbox_text(path: Path) -> str:
+    """报告文件里一定有的那行字（读文件时别把整篇贴进断言）。"""
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if '自检' in line:
+            return line.strip()
+    return ''
+
+
+def _beat(**kw):
+    base = dict(seq=1, label='a', kind='say', speaker='e', text='hi',
+                scene='bg room', show='eileen happy@left',
+                with_='dissolve', music='bgm_night',
+                music_action='play')
+    base.update(kw)
+    return Beat(**base)

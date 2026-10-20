@@ -1753,10 +1753,30 @@
    "export_ir(json)",
    "ok",
    {
+    "check": {
+     "by_code": {
+      "W-IR-STRUCTURE-UNKNOWN": 1
+     },
+     "error_count": 0,
+     "issues": [
+      {
+       "code": "W-IR-STRUCTURE-UNKNOWN",
+       "count": 1,
+       "examples": [
+        "ch01_end.0014"
+       ],
+       "level": "warning",
+       "message": "这些拍不知道嵌套位置，目标引擎只能当顶层",
+       "scope": "line"
+      }
+     ],
+     "warning_count": 1
+    },
     "engine": "json",
     "error": "",
     "files": [
-     "<PROJ>\\snap_out\\story_ir.json"
+     "<PROJ>\\snap_out\\story_ir.json",
+     "<PROJ>\\snap_out\\IR_CHECK.md"
     ],
     "loss": {
      "by_scope": {},

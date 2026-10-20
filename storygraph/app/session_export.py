@@ -33,6 +33,7 @@ storygraph.app.session_export
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -119,27 +120,44 @@ class ExportMixin:
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'engine': engine, 'out_dir': str(out_dir),
                     'files': [], 'error': str(e)}
-        # **损失报告**（§18）：适配层没搬过去的字段，回执里也要说一句。
-        # IR 是纯内存构造（不碰磁盘），重算一遍比把 IR 从文件读回来更稳。
-        loss = {}
-        if engine in ('unity', 'godot'):
-            try:
-                from storygraph.pipeline.engine_exporters import (
-                    build_neutral_ir)
-                from storygraph.pipeline.ir_loss import summarize
-                loss = summarize(build_neutral_ir(
+        # **损失报告 / 自检**（§18 / §20）：适配层没搬过去的字段，回执里也要
+        # 说一句；中立 IR 自己有没有矛盾（重复主键 / 统计不符 / 快照指向不
+        # 存在的行），同样要说。**用落盘后的那份 IR 算**：多章导同一目录时
+        # `export_ir()` 会把它并进旧文件，重算当前这一章会与 `IR_CHECK.md`
+        # 的数字对不上（回执必须说真话）。
+        loss, check = {}, {}
+        try:
+            from storygraph.pipeline.engine_exporters import (
+                NEUTRAL_IR_NAME, build_neutral_ir)
+            from storygraph.pipeline.ir_validate import (
+                summarize as summarize_check)
+            neutral = next((Path(f) for f in (files or [])
+                            if Path(f).name == NEUTRAL_IR_NAME), None)
+            if neutral is not None and neutral.is_file():
+                ir = json.loads(neutral.read_text(encoding='utf-8'))
+            else:
+                ir = build_neutral_ir(
                     self.beats, registry=self.registry(),
                     project=str(self.project_root or ''),
                     title=Path(self.script_path).stem
-                    if self.script_path else ''), engine)
-            except Exception as e:            # noqa: BLE001 - 报告失败不影响导出
-                swallow('session_export.export_ir.loss', e)
-                loss = {}
+                    if self.script_path else '')
+            check = summarize_check(ir, engine)
+            if engine in ('unity', 'godot'):
+                from storygraph.pipeline.ir_loss import summarize
+                loss = summarize(ir, engine)
+        except Exception as e:            # noqa: BLE001 - 报告失败不影响导出
+            swallow('session_export.export_ir.report', e)
+            loss, check = {}, {}
         return {'ok': True, 'engine': engine, 'out_dir': str(out_dir),
                 'files': [str(f) for f in (files or [])],
                 'loss': {'count': len(loss.get('losses') or []),
                          'by_scope': loss.get('by_scope') or {},
                          'notes': loss.get('notes') or []},
+                'check': {'error_count': int(check.get('error_count') or 0),
+                          'warning_count': int(
+                              check.get('warning_count') or 0),
+                          'by_code': check.get('by_code') or {},
+                          'issues': (check.get('issues') or [])[:12]},
                 'error': ''}
     def frames(self) -> list:
         """
