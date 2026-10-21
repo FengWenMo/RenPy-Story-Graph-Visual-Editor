@@ -59,18 +59,22 @@ class RemoveNodeCommand(Command):
         self.graph_view.on_graph_structure_changed()
 
 class AddEdgeCommand(Command):
-    def __init__(self, graph_view, from_id, to_id, etype, condition, option_text):
+    def __init__(self, graph_view, from_id, to_id, etype, condition,
+                 option_text, from_clause=''):
         self.graph_view = graph_view
         self.from_id = from_id
         self.to_id = to_id
         self.etype = etype
         self.condition = condition
         self.option_text = option_text
+        #: `call X from Y` 的存档点标识（控制流卡同步用）。
+        self.from_clause = from_clause
         self.edge_id = None
 
     def execute(self):
         self.edge_id = self.graph_view.graph.add_edge(
-            self.from_id, self.to_id, self.etype, self.condition, self.option_text
+            self.from_id, self.to_id, self.etype, self.condition,
+            self.option_text, self.from_clause
         )
         self.graph_view.on_graph_structure_changed()
 
@@ -78,6 +82,38 @@ class AddEdgeCommand(Command):
         if self.edge_id is not None:
             self.graph_view.graph.remove_edge(self.edge_id)
             self.graph_view.on_graph_structure_changed()
+
+
+class RetargetEdgeCommand(Command):
+    """
+    改一条已有边的目标 / 类型 / from 子句（控制流卡保存后同步图）。
+
+    2026-10-22（P0-4 第一阶段）：卡片上把 `call side` 改成 `call other`
+    时，图上的边不能还指着 side —— 否则用户看到的是"改了、图上没变"。
+    只改边，不删边再加边：这样边的 id、布局与其它属性都保住。
+    """
+
+    def __init__(self, graph_view, edge_id, to_id=None, etype=None,
+                 from_clause=None):
+        self.graph_view = graph_view
+        self.edge_id = edge_id
+        edge = graph_view.graph.edges[edge_id]
+        self.old = copy.deepcopy(edge)
+        self.to_id = edge.to_id if to_id is None else to_id
+        self.etype = edge.type if etype is None else etype
+        self.from_clause = (getattr(edge, 'from_clause', '')
+                            if from_clause is None else from_clause)
+
+    def execute(self):
+        edge = self.graph_view.graph.edges[self.edge_id]
+        edge.to_id = self.to_id
+        edge.type = self.etype
+        edge.from_clause = self.from_clause
+        self.graph_view.on_graph_structure_changed()
+
+    def undo(self):
+        self.graph_view.graph.edges[self.edge_id] = self.old
+        self.graph_view.on_graph_structure_changed()
 
 class RemoveEdgeCommand(Command):
     def __init__(self, graph_view, edge_id):

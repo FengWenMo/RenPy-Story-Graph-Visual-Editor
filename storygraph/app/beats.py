@@ -361,6 +361,15 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     那条已知规则的一般化。
     """
     b = base or Beat()
+    # **控制流卡**（2026-10-22，P0-4 第一阶段）：`FlowType` / `FlowTarget`
+    # 不是 Excel 列，只是卡片上的两个控件；它们改的是 `Beat.raw` 那一行。
+    # 与 `EditorSession.apply` 同源，两处都调 `story.flow` 的同一份实现。
+    if 'FlowType' in fields or 'FlowTarget' in fields:
+        from storygraph.story.flow import update_beat_flow
+        update_beat_flow(
+            b,
+            fields.get('FlowType') if 'FlowType' in fields else None,
+            fields.get('FlowTarget') if 'FlowTarget' in fields else None)
     if 'Label' in fields:
         b.label = (fields.get('Label') or '').strip()
     elif base is None:

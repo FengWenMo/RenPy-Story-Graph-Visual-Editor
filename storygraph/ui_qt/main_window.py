@@ -190,6 +190,9 @@ class BeatCardEditor(QWidget):
         #: 「语句参数」那一组的控件：`{动态列名: 控件}`（跟着这一拍的语句走，
         #: 没有参数就整组隐藏）。见 `set_spec_args`。
         self._spec_widgets: dict = {}
+        #: 当前这一拍的控制流信息（`call` / `jump`）；None = 不是控制流拍。
+        #: 见 `set_flow`（2026-10-22，P0-4 第一阶段）。
+        self._flow: dict | None = None
         self._build(loader)
         self._connect_dirty_tracking()
 
@@ -200,11 +203,72 @@ class BeatCardEditor(QWidget):
         lab.setProperty('role', 'section')
         return lab
 
+    def _build_flow_bar(self, root):
+        """
+        控制流卡（`call` / `jump`）：这一拍**是什么**、目标能不能改、返回哪。
+
+        为什么单独一条（2026-10-22，P0-4）：`call side` 以前是一张"没有台词
+        的空旁白卡"，只有一行"这一拍还会原样执行：call side"，目标只能去
+        高级区手打。这里把"调用 / 跳转"变成卡片上的一等公民，且类型切换
+        会明确说"跳转不返回"。
+        """
+        self._flow_bar = QFrame()
+        self._flow_bar.setObjectName('flowBar')
+        self._flow_bar.setProperty('role', 'card')
+        lay = QVBoxLayout(self._flow_bar)
+        lay.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
+                               T.SPACE['sm'], T.SPACE['sm'])
+        lay.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setSpacing(T.SPACE['xs'])
+        self._flow_title = QLabel('')
+        self._flow_title.setProperty('role', 'section')
+        self._flow_title.setWordWrap(True)
+        head.addWidget(self._flow_title, 1)
+        self._flow_type = QComboBox()
+        self._flow_type.addItem('↳ 调用（会返回）', 'call')
+        self._flow_type.addItem('→ 跳转（不返回）', 'jump')
+        self._flow_type.setToolTip(
+            '调用：执行目标 label，遇到 return 回到这里继续\n'
+            '跳转：这一章在这里结束，不返回')
+        head.addWidget(self._flow_type, 0)
+        lay.addLayout(head)
+
+        self._flow_detail = QLabel('')
+        self._flow_detail.setProperty('role', 'caption')
+        self._flow_detail.setWordWrap(True)
+        lay.addWidget(self._flow_detail)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(T.SPACE['xs'])
+        cap = QLabel('目标')
+        cap.setProperty('role', 'caption')
+        target_row.addWidget(cap, 0)
+        self._flow_target = QComboBox()
+        self._flow_target.setEditable(True)
+        self._flow_target.setInsertPolicy(QComboBox.NoInsert)
+        self._flow_target.setMinimumWidth(220)
+        self._flow_target.setToolTip(
+            '从本文件已有的 label 里选，或直接写目标 label 名（支持 main.route）')
+        target_row.addWidget(self._flow_target, 1)
+        target_row.addWidget(QLabel('可手写点号 label'), 0)
+        lay.addLayout(target_row)
+        self._flow_type.currentIndexChanged.connect(self._on_flow_edited)
+        self._flow_target.currentIndexChanged.connect(self._on_flow_edited)
+        self._flow_target.editTextChanged.connect(self._on_flow_edited)
+
+        self._flow_bar.setVisible(False)
+        root.addWidget(self._flow_bar)
+
     def _build(self, loader):
         root = QVBoxLayout(self)
         root.setContentsMargins(T.SPACE['md'], T.SPACE['md'],
                                 T.SPACE['md'], T.SPACE['md'])
         root.setSpacing(T.SPACE['sm'])
+
+        # —— 控制流卡（call / jump）——
+        self._build_flow_bar(root)
 
         # —— 语句条：**这一拍是什么**（2026-10-18）——
         #
@@ -618,6 +682,127 @@ class BeatCardEditor(QWidget):
         self._text.setPlaceholderText('这一拍还可以说一句台词（可选）…')
         self._stmt_bar.setVisible(True)
 
+    # ---------- 控制流卡（call / jump）----------
+
+    def set_flow(self, info, targets=()):
+        """
+        显示 / 收起控制流条。
+
+        `info` 来自 `story.flow.flow_info()`（目标、类型、返回哪一拍）；
+        `targets` 是本文件已有的 label（可编辑下拉的候选，手写照样能过）。
+        """
+        info = dict(info) if info else None
+        self._flow = info
+        if not info:
+            self._flow_bar.setVisible(False)
+            if self._loaded_fields:
+                self._loaded_fields.pop('FlowType', None)
+                self._loaded_fields.pop('FlowTarget', None)
+            return
+        self._loading = True
+        try:
+            idx = self._flow_type.findData(str(info.get('type') or 'call'))
+            self._flow_type.setCurrentIndex(idx if idx >= 0 else 0)
+            self._flow_target.blockSignals(True)
+            try:
+                self._flow_target.clear()
+                for name in (targets or ()):
+                    name = str(name or '').strip()
+                    if name and self._flow_target.findText(name) < 0:
+                        self._flow_target.addItem(name)
+                self._flow_target.setCurrentText(str(info.get('target') or ''))
+            finally:
+                self._flow_target.blockSignals(False)
+        finally:
+            self._loading = False
+        self._flow_bar.setVisible(True)
+        self._refresh_flow_text()
+        # 载入时的控制流值也进基线，否则一打开就显示"有未保存的改动"。
+        if self._loaded_fields:
+            self._loaded_fields.update(self.flow_fields())
+        self.refresh_dirty()
+
+    def flow_fields(self) -> dict:
+        """控制流条当前值（不是控制流拍 → 空 dict）。"""
+        if not self._flow:
+            return {}
+        flow_type = str(self._flow_type.currentData()
+                        or self._flow_type.currentText() or 'call')
+        return {'FlowType': flow_type,
+                'FlowTarget': self._flow_target.currentText().strip()}
+
+    def flow_change(self) -> dict | None:
+        """控制流目标 / 类型改了吗？返回 `{old,new,target,type,...}` 或 None。"""
+        if not self._flow:
+            return None
+        new = self.flow_fields()
+        old = {'FlowType': str(self._flow.get('type') or ''),
+               'FlowTarget': str(self._flow.get('target') or '')}
+        if new == old:
+            return None
+        return {
+            'old': dict(self._flow),
+            'new': new,
+            'target': new['FlowTarget'],
+            'type': new['FlowType'],
+            'type_changed': new['FlowType'] != old['FlowType'],
+            'call_to_jump': (old['FlowType'] == 'call'
+                             and new['FlowType'] == 'jump'),
+        }
+
+    def _flow_code_synced(self, fields: dict) -> dict:
+        """
+        高级区「代码」格还停在原来那行 `call …` 时，跟着目标一起改。
+
+        不这么做的话：保存时 `CodeBlock` 仍是旧行 `call side`，而 raw 已经
+        变成 `call other` → 会话会判"代码格被手改了"，把 raw 降级成 code。
+        **只在代码格确实等于原控制流行时同步**；用户手写过别的代码就不碰。
+        """
+        if not self._flow or 'CodeBlock' not in fields:
+            return fields
+        if str(fields.get('CodeBlock') or '').strip() != self._flow.get('line'):
+            return fields
+        from storygraph.story.flow import is_valid_label, render_flow_line
+        vals = self.flow_fields()
+        if not is_valid_label(vals.get('FlowTarget')):
+            # 非法目标先别动代码格：让保存路径的校验去拒绝它，
+            # 不要因为"翻页顺带提交"把 raw 降级成 code。
+            return fields
+        fields['CodeBlock'] = render_flow_line(
+            vals['FlowType'], vals['FlowTarget'],
+            self._flow.get('args') or '', self._flow.get('from_clause') or '')
+        return fields
+
+    def _refresh_flow_text(self):
+        if not self._flow:
+            return
+        flow_type = str(self._flow_type.currentData()
+                        or self._flow_type.currentText() or 'call')
+        target = self._flow_target.currentText().strip()
+        verb = '调用' if flow_type == 'call' else '跳转'
+        arrow = '↳' if flow_type == 'call' else '→'
+        self._flow_title.setText(
+            f'{arrow} {verb} {target or "（还没填目标 label）"}')
+        if flow_type == 'call':
+            detail = str(self._flow.get('call_return_note') or '')
+            if self._flow.get('type') != 'call':
+                detail += '（原来写的是 jump，改成 call 后会返回这里）'
+        else:
+            detail = str(self._flow.get('jump_return_note') or '')
+            if self._flow.get('type') == 'call':
+                detail += '（原来写的是 call，改成 jump 后不会再回到这里）'
+        names = {self._flow_target.itemText(i)
+                 for i in range(self._flow_target.count())}
+        if target and target not in names:
+            detail += '\n目标不在本文件的 label 里；仍可手写（可能来自其他文件）'
+        self._flow_detail.setText(detail)
+
+    def _on_flow_edited(self, *_):
+        if self._loading or not self._flow:
+            return
+        self._refresh_flow_text()
+        self.refresh_dirty()
+
     #: 颜色值（`#rrggbb` / `#rgb` / `rgb()`）—— 那一格旁边给个色块，
     #: 否则 `#ff0000` 对编剧只是一串乱码（用户 2026-10-18 说的"有色字体"）。
     _COLOR_RE = re.compile(r'^(?:#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$')
@@ -967,6 +1152,10 @@ class BeatCardEditor(QWidget):
         """
         self._loading = True
         try:
+            # 控制流条由 `_sync_spec_args` 在 load_fields 之后按这一拍重建；
+            # 先收起来，避免上一拍的 `call side` 闪一下。
+            self._flow = None
+            self._flow_bar.setVisible(False)
             for name in self._all_names():
                 self._set_value(name, fields.get(name, ''))
             self._grid.load(sprite_items)
@@ -1004,6 +1193,9 @@ class BeatCardEditor(QWidget):
         # **语句参数**同理：它一直可见（有参数才出现），所以始终写回。
         # 键与 Excel 的动态列**同名**，折叠走同一条路（见 `EditorSession.apply`）。
         out.update(self._spec_values())
+        # 控制流条也一直可见（只在控制流拍出现），所以始终写回。
+        out.update(self.flow_fields())
+        self._flow_code_synced(out)
         return out
 
     # ---------- 保存 / 撤销 相关的状态 ----------
@@ -1027,6 +1219,8 @@ class BeatCardEditor(QWidget):
         """主区 + 高级区 + 额外控件**全部**字段的当前值（不看折叠状态）。"""
         out = {n: self._get_value(n) for n in self._all_names()}
         out.update(self._spec_values())
+        out.update(self.flow_fields())
+        self._flow_code_synced(out)
         return out
 
     def set_kind(self, kind: str) -> None:
@@ -1796,6 +1990,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._insert_before_btn.setToolTip('在当前这一拍**前面**插入一张空卡片')
         self._insert_before_btn.clicked.connect(lambda: self.insert_card(after=False))
         bh.addWidget(self._insert_before_btn)
+        self._flow_btn = QPushButton('↳ 插入控制流卡')
+        self._flow_btn.setToolTip(
+            '在当前这一拍后面插入一张 call / jump 卡：选目标 label，'
+            '调用完会回到这里继续')
+        self._flow_btn.clicked.connect(lambda: self.insert_flow_card(after=True))
+        bh.addWidget(self._flow_btn)
         self._restore_btn = QPushButton('↩ 撤销结构操作')
         self._restore_btn.setToolTip(
             '撤销最近一次增删卡片（可连按多级）：删掉的放回原位、插进去的撤掉')

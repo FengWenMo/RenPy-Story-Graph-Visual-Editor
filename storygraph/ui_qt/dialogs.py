@@ -490,6 +490,65 @@ class AddNodeDialog(_BaseDialog):
 
 
 # ======================================================================
+#  插入控制流卡（call / jump）
+# ======================================================================
+
+class FlowCardDialog(_BaseDialog):
+    """
+    在大 label 的某一拍后面插入一张 `call` / `jump` 卡。
+
+    用户 2026-10-22 的核心诉求："在一个大 label 里面 call 或 jump 其他小
+    label，然后再回到这个大 label。" 第一阶段先让已有 call 可见可改；
+    这个对话框补上**插入**入口，否则用户还是得回源文件手写。
+    """
+
+    def __init__(self, parent=None, labels=(), default_type='call'):
+        super().__init__(parent, '插入控制流卡')
+        self.flow_type = 'call'
+        self.target = ''
+
+        form = QFormLayout()
+        form.setSpacing(T.SPACE['sm'])
+        self._type = QComboBox()
+        self._type.addItem('↳ 调用（执行完会返回）', 'call')
+        self._type.addItem('→ 跳转（不返回）', 'jump')
+        idx = self._type.findData(str(default_type or 'call'))
+        self._type.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow('类型', self._type)
+
+        self._target = QComboBox()
+        self._target.setEditable(True)
+        self._target.setInsertPolicy(QComboBox.NoInsert)
+        self._target.addItems([str(x) for x in (labels or ()) if str(x)])
+        self._target.setPlaceholderText('目标 label 名（支持 main.route）')
+        self._target.setToolTip(
+            '从本文件已有的 label 里选，或直接写目标 label 名；\n'
+            '跨文件调用也可以直接手写。')
+        form.addRow('目标 label', self._target)
+        self._root.addLayout(form)
+
+        hint = QLabel(
+            '插入的位置在当前这一拍后面。\n'
+            'call：目标 label 执行到 return 后回到这里继续；\n'
+            'jump：不会返回，这一章在跳转处结束。')
+        hint.setProperty('role', 'caption')
+        hint.setWordWrap(True)
+        self._root.addWidget(hint)
+        self._add_buttons('插入')
+        self._target.setFocus()
+
+    def _on_accept(self):
+        target = self._target.currentText().strip()
+        if not valid_label(target):
+            self._fail('目标 label 不合法：只能字母/数字/下划线，可用点号分段，'
+                       '且不能以数字开头。')
+            return
+        self.flow_type = str(self._type.currentData() or 'call')
+        self.target = target
+        self.accept()
+
+
+# ======================================================================
 #  编辑变量操作
 # ======================================================================
 

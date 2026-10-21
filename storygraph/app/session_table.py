@@ -290,6 +290,44 @@ class TableSessionMixin:
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
                 'label': beat.label, 'count': len(self.beats)}
+
+    def insert_flow_beat(self, idx=None, after=True, flow_type='call',
+                         target='', args='', from_clause='') -> dict:
+        """
+        在当前拍后（或前）插入一张 `call` / `jump` 控制流卡。
+
+        与 `insert_beat` 的区别只有一处：新拍的 `raw` 是结构化渲染出来的
+        `call X` / `jump X`，不是空台词。这样它立刻能被卡片上的控制流条
+        认出来，导出也走同一行。
+        """
+        if not self.beats:
+            return {'ok': False, 'error': '还没有载入章节', 'index': -1}
+        from storygraph.story.flow import (is_valid_label, render_flow_line)
+        flow_type = str(flow_type or 'call').strip()
+        target = str(target or '').strip()
+        if flow_type not in ('call', 'jump'):
+            return {'ok': False, 'error': '控制流类型只能是 call / jump',
+                    'index': -1}
+        if not is_valid_label(target):
+            return {'ok': False, 'error': '目标 label 不合法', 'index': -1}
+        pos = len(self.beats) if idx is None else int(idx)
+        pos = max(0, min(pos, len(self.beats) - 1))
+        at = pos + 1 if after else pos
+        from storygraph.story.beat_model import Beat
+        template = self.beats[pos]
+        beat = Beat(seq=0, label=str(getattr(template, 'label', '') or ''),
+                    kind='narration',
+                    raw=render_flow_line(flow_type, target, args, from_clause))
+        doc = self._chapter_doc()
+        at = doc.insert_beat(beat, at)
+        self.beats = doc.beats
+        self._sync_chapter()
+        self._push_struct_undo(('insert', at))
+        self._renumber()
+        self.forget_undo()
+        return {'ok': True, 'error': '', 'index': at,
+                'label': beat.label, 'count': len(self.beats)}
+
     def delete_preview(self, idx: int, cascade: bool = False) -> dict:
         """
         删这一拍会让**产物**少什么（几行、前几行是什么）—— **不改任何状态**。
@@ -618,6 +656,14 @@ class TableSessionMixin:
         （不是台词拍就是空），老调用方一个都不用改。
         """
         b = self.beats[idx]
+        # 控制流拍（`call` / `jump`）：列表里不能显示成「（无台词）」——
+        # 那会让所有跳转卡长得一模一样（2026-10-22，P0-4 第一阶段）。
+        # **只在真是控制流拍时加键**：普通拍的摘要 dict 形状不变，老快照/
+        # 老调用方不受影响。
+        from storygraph.story.flow import parse_flow
+        flow = parse_flow(b)
+        flow_fields = ({'flow_type': flow['type'],
+                        'flow_target': flow['target']} if flow else {})
         prefix = {'narration': '☁', 'menu': '⚑', 'menu_option': '➜'}.get(
             getattr(b, 'kind', ''), '')
         statement = str(getattr(b, 'spec_name', '') or '').strip()
@@ -637,6 +683,7 @@ class TableSessionMixin:
             'statement': statement,
             'statement_head': head,
             'statement_label': self._statement_label(statement),
+            **flow_fields,
         }
 
     def _statement_label(self, name: str) -> str:
@@ -714,6 +761,20 @@ class TableSessionMixin:
             return None
         b = self.beats[idx]
         fields = dict(fields or {})
+
+        # **控制流卡的目标 / 类型**（2026-10-22，P0-4 第一阶段）。
+        #
+        # 它改的是 `Beat.raw` 里那一行（`call side`），不是任何一个 Excel
+        # 列。所以必须在下面的 `CodeBlock` 处理**之前**做：先让 raw 变成
+        # 新目标，后面的 `CodeBlock != compose_code(b)` 才会是 False（前端
+        # 同时提交了同步后的代码格），不会把 raw 误降级成 code。
+        flow_keys = 'FlowType' in fields or 'FlowTarget' in fields
+        if flow_keys:
+            from storygraph.story.flow import update_beat_flow
+            update_beat_flow(
+                b,
+                fields.get('FlowType') if 'FlowType' in fields else None,
+                fields.get('FlowTarget') if 'FlowTarget' in fields else None)
 
         # **键不存在 = 不动这一格**（2026-10-05 修，与 `fields_to_beat` 同源）。
         #
