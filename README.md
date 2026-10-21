@@ -16,7 +16,7 @@
 
 ```bash
 pip install -r requirements.txt     # 运行时依赖 openpyxl；界面用 PySide6
-python -m pytest                    # 4336 个用例；全量约 12 分钟（4 条真机金标占大头）
+python -m pytest                    # 5501 个用例；全量约 21 分钟（4 条真机金标占大头）
 
 python demo/make_demo.py            # 一键重建示例工程（含产物与协作库）
 python main.py                      # 启动图形界面（PySide6）
@@ -129,7 +129,7 @@ storygraph/
 └── main.py     桌面入口（PySide6；没装就明确报错并给出安装命令）
 legacy/         归档的单文件老版本（**不参与构建**，见其 README）
 demo/           示例 Ren'Py 工程 + 一键重建脚本
-tests/          4336 个用例（176 个测试文件）
+tests/          5501 个用例（253 个测试文件）
 ```
 
 **依赖方向单向**：`core` ← 其它所有；`app` 依赖后端但**禁止**依赖任何

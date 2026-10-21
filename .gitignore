@@ -38,6 +38,12 @@ build/*.toc
 build/*.pkg
 build/*.pyz
 dist/
+# 交付用的另一份打包目录（`--distpath dist_release`）与给它打的 zip
+# （2026-10-21：152 MB 的 exe + 68 MB 的 zip，都可由 packaging 重建）
+dist_release/
+/StoryGraph-*.zip
+# PyInstaller 的中间目录（`--workpath build/release`）
+build/release/
 *.spec.bak
 
 # ==================================================================
