@@ -36,6 +36,8 @@ from storygraph.pipeline.ir_loss import LOSS_REPORT_NAME, report_markdown
 from storygraph.pipeline.ir_validate import (CHECK_REPORT_NAME,
                                              crash_report as check_crashed,
                                              report_markdown as check_report)
+from storygraph.pipeline.unity_package import (UNITY_PACKAGE_NAME,
+                                               package_files, write_package)
 from storygraph.story.beat_model import split_hide_items, split_show_items
 from storygraph.story.stage_snapshot import stage_snapshots
 
@@ -629,8 +631,11 @@ def expected_files(engine: str) -> list:
     if engine == 'csv':
         return [CSV_NAME, NEUTRAL_IR_NAME, CHECK_REPORT_NAME]
     if engine == 'unity':
+        # 顺序 = `export_ir` 的写出顺序：数据/说明之后是**可直接导入的
+        # Unity 资产包**（`unity_package.py`），最后才是损失报告与自检。
         return [NEUTRAL_IR_NAME, UNITY_DATA_NAME, UNITY_NOTES_NAME,
-                LOSS_REPORT_NAME.format(engine='unity'), CHECK_REPORT_NAME]
+                UNITY_PACKAGE_NAME, LOSS_REPORT_NAME.format(engine='unity'),
+                CHECK_REPORT_NAME]
     if engine == 'godot':
         return [NEUTRAL_IR_NAME, GODOT_DATA_NAME, GODOT_LOADER_NAME,
                 LOSS_REPORT_NAME.format(engine='godot'), CHECK_REPORT_NAME]
@@ -790,10 +795,20 @@ def export_ir(engine: str, beats, out_dir, registry=None,
     if engine == 'csv':
         written.append(_write_csv(ir, out_dir / CSV_NAME))
     elif engine == 'unity':
-        written.append(_write_json(to_unity(ir),
-                                   out_dir / UNITY_DATA_NAME))
-        written.append(_write_text(
-            _unity_notes(ir), out_dir / UNITY_NOTES_NAME))
+        # 适配数据只生成**一次**，JSON 与资产包用同一份对象/同一套序列化
+        # 规则 —— 包里的 `Resources/UnityDialogueData.json` 必须与目录里
+        # 的 `UnityDialogueData.json` 逐字节相同（测试守着），不能靠"两个
+        # 地方各 dump 一遍、碰巧一样"。
+        unity_data = to_unity(ir)
+        written.append(_write_json(unity_data, out_dir / UNITY_DATA_NAME))
+        notes_text = _unity_notes(ir)
+        written.append(_write_text(notes_text, out_dir / UNITY_NOTES_NAME))
+        # **可直接导入的 Unity 资产包**（2026-10-21，多引擎第三片）：
+        # C#（数据类 / 索引 / 最小播放器）+ 数据 + README 都装进
+        # `StoryGraph.unitypackage`，Unity 里 Custom Package 一步导入。
+        written.append(write_package(
+            out_dir / UNITY_PACKAGE_NAME,
+            package_files(ir, unity_data, notes_text)))
         # **损失报告**：这一份 IR 里哪些字段 Unity 侧没有（§18）。
         written.append(_write_text(
             report_markdown(ir, 'unity'),
@@ -893,6 +908,10 @@ def _unity_notes(ir: dict) -> str:
     return f"""# Unity 接入说明
 
 产物：
+- `StoryGraph.unitypackage` —— **可直接导入的 Unity 资产包**。本目录的
+  `StoryGraph.unitypackage` 可直接 `Assets → Import Package → Custom Package…`
+  导入；里面已经带好 C# 与数据（`DialogueData` / `DialogueDatabase` /
+  `DialoguePlayer` + `Resources/UnityDialogueData.json`），不用再手写加载器。
 - `UnityDialogueData.json` —— 用 `JsonUtility.FromJson<DialogueData>(text)` 直接读。
   字段是标量、`string[]` 或 `TimelineEvent[]`；**没有嵌套字典**
   （JsonUtility 不支持 Dictionary）。
