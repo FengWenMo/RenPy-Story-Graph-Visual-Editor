@@ -292,3 +292,45 @@ def ui_window(qapp, ui_project):
     win = MainWindowQt(_Engine(ui_project), script)
     yield win
     win.close()
+
+
+# ======================================================================
+#  没有 PySide6 时的收集豁免（2026-10-21，CI 三个版本全红）
+# ======================================================================
+
+#: 会拉起 Qt 的 import 行（只看行首，不看注释/字符串里提到）。
+_QT_IMPORT_RE = __import__('re').compile(
+    r'^\s*(?:from\s+PySide6\b|import\s+PySide6\b'
+    r'|from\s+storygraph\.ui_qt\b|import\s+storygraph\.ui_qt\b)',
+    __import__('re').M)
+
+
+def pytest_ignore_collect(collection_path, config):
+    """
+    没装 PySide6 时，**整份跳过**"import 了 Qt"的测试文件。
+
+    为什么需要（2026-10-21，GitHub Actions 三个 Python 版本全红）：
+    CI 只装 `openpyxl` + `Pillow`（不装 PySide6 —— Linux 上还要补
+    libegl / libxkbcommon 等系统库，多一个失败点）。可二十多个测试文件
+    在 **模块顶层**就 `from storygraph.ui_qt… import …`，于是**收集阶段**
+    直接 ModuleNotFoundError：一条测试都跑不了。
+
+    各文件里写的 `pytest.importorskip('PySide6')` 救不了这种情况 ——
+    它在模块体里，收集还没走到那一步。这条 hook 在**收集之前**按文件内容
+    判一次，谁忘写 importorskip 都不影响。
+
+    本机（装了 PySide6）走第一个分支直接返回 None，行为完全不变。
+    """
+    try:
+        import PySide6  # noqa: F401
+        return None
+    except ImportError:
+        pass
+    p = Path(str(collection_path))
+    if p.suffix != '.py' or not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+    return True if _QT_IMPORT_RE.search(text) else None
