@@ -83,8 +83,8 @@ def _write_new_chapter(view, path, label: str) -> str:
         if _has_label(text, label):
             try:
                 view._status(f'{p.name} 里已经有 label {label} 了 —— 换个章节名。')
-            except Exception:                 # noqa: BLE001
-                pass
+            except Exception as e:            # noqa: BLE001 - 状态栏坏了不影响判断
+                swallow('ui_qt.window_nodes.dup_label_status', e)
             return ''
         body = text.rstrip('\n') + f"\n\nlabel {label}:\n    return\n"
         write_text_atomic(p, _detect(p).apply(body))
@@ -92,8 +92,8 @@ def _write_new_chapter(view, path, label: str) -> str:
     except OSError as e:                      # 权限 / 磁盘：说出来，不静默
         try:
             view._status(f'章节建好了，但文件没写出来：{e}')
-        except Exception:                     # noqa: BLE001
-            pass
+        except Exception as e2:               # noqa: BLE001 - 状态栏坏了也得往下走
+            swallow('ui_qt.window_nodes.write_status', e2)
         return ''
 
 
