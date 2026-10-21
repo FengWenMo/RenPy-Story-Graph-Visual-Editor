@@ -119,6 +119,11 @@ def _norm(obj, base: Path):
     if isinstance(obj, str):
         for v in variants:
             obj = obj.replace(v, '<BASE>')
+        # **分隔符统一成 `/`**（2026-10-22，CI 的 Linux 上抓到）：
+        # `<BASE>` 后面一个是 `/game/…`、一个是 `\game\…` —— 同一个行为，
+        # 指纹不可能跨平台一致，而这条金标的意义正是"同输入 → 同输出"。
+        # 先把双写反斜杠折回单个（set repr 里是双写的），再统一成 `/`。
+        obj = obj.replace('\\\\', '\\').replace('\\', '/')
         # ⚠ **set 的 repr 顺序是随机的**（`table_resolved` 里就是 set 的
         # repr 字符串）→ 不排序的话指纹每跑一次都不一样（实测踩到）。
         s = obj.strip()

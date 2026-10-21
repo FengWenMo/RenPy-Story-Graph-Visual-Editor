@@ -145,8 +145,17 @@ def test_classify_head_without_registry_is_empty():
 
 
 def test_root_of_finds_project_root():
-    assert Path(root_of(r'D:\p\game\chapter\a.rpy')) == Path(r'D:\p')
-    assert Path(root_of(str(Path('/p/game/a.rpy')))) == Path('/p')
+    # **比较归一化后的字符串**（2026-10-22，CI 的 Linux 上抓到）：
+    # `root_of` 现在先做**字符串层面**的 `/game/` 判定 —— POSIX 上
+    # `Path(r'D:\p\game\a.rpy')` 是单段路径（反斜杠不是分隔符），用 Path
+    # 推不出来；字符串判定返回原样分隔符的 `D:/p`。
+    # 而 `Path(r'D:\p')` 在 Linux 上是**一个字面反斜杠的目录名** ——
+    # 拿 Path 比必然不等，这跟 `root_of` 判得对不对无关。
+    def _slash(x):
+        return str(x).replace('\\', '/').rstrip('/')
+
+    assert _slash(root_of(r'D:\p\game\chapter\a.rpy')) == 'D:/p'
+    assert _slash(root_of(str(Path('/p/game/a.rpy')))) == '/p'
 
 
 def test_root_of_refuses_non_project_dir(tmp_path):
