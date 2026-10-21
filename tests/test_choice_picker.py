@@ -27,6 +27,12 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest  # noqa: E402
 
+# **先确认有 PySide6 再 import 任何 ui_qt 模块**（2026-10-21，修 CI 全红）：
+# 这个文件直接 `from storygraph.ui_qt.…` / `from PySide6…`，没有 PySide6
+# 的环境（CI）会在**收集阶段**整批 ERROR —— 收集阶段没有 skip 的机会，
+# 一条测试都不会跑。`importorskip` 必须站在第一次 import 它们之前。
+pytest.importorskip('PySide6')
+
 from storygraph.ui_qt.choice_picker import filter_choices  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

@@ -34,7 +34,28 @@ REAL_CHAPTER = REAL_PROJECT / 'game' / 'chapter' / 'chapter1_3.rpy'
 
 
 def module_source(dotted: str) -> Path:
-    """模块的点路径 → 它的真实源码文件（搬移/改名都不会失效）。"""
+    """
+    模块的点路径 → 它的真实源码文件（搬移/改名都不会失效）。
+
+    **不 import 模块，只问 import 系统"源文件在哪"**（2026-10-21，修 CI 全红）。
+
+    从前是 `importlib.import_module(dotted)` 再 `inspect.getfile(...)` ——
+    那会**执行模块的顶层代码**。要扫源码的测试（`test_entry_points` 等十几条）
+    只是想读文件，却因此把 `storygraph.ui_qt.main_window` 的
+    `from PySide6.QtWidgets import …` 跑了一遍：没有 PySide6 的环境（CI）
+    整批在**收集阶段**就 ERROR，`pytest.importorskip` 也来不及救
+    （它在测试文件里，收集还没到那一步）。
+
+    `find_spec` 只解析路径、不执行模块体 —— 拿到的还是同一个文件。
+    """
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec(dotted)
+        if spec is not None and spec.origin:
+            return Path(spec.origin)
+    except (ImportError, AttributeError, ValueError):
+        pass
+    # 兜底：真拿不到 spec（命名空间包之类）才退回 import —— 至少不会静默返回空。
     return Path(inspect.getfile(importlib.import_module(dotted)))
 
 

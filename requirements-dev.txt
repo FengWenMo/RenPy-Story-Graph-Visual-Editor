@@ -17,3 +17,15 @@
 #   python -m pytest -q
 #
 pytest>=8
+
+# ⚠ **依赖必须在这里也列一遍**（2026-10-21，CI 全红的原因）：
+# GitHub Actions 只跑 `pip install -r requirements-dev.txt`，而这里从前只有
+# pytest —— 于是 `import openpyxl` 在收集阶段就炸，三个 Python 版本全挂在
+# 「跑全量测试」的第 10 秒（本地能过，因为开发机装了 requirements.txt）。
+#
+# 为什么**不写** `-r requirements.txt`：那会把 PySide6 一起拖进 CI（Linux 上
+# 还要补 libegl / libxkbcommon 等系统库，多一个失败点）。UI 测试都有
+# `pytest.importorskip('PySide6')`，没装就整批跳过 —— CI 跑"无界面那 5000 条"
+# 足够挡住回归，界面相关的仍在本机全量跑。
+openpyxl>=3.1
+Pillow>=10
