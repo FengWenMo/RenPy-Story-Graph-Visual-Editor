@@ -886,7 +886,13 @@ def _write_csv(ir: dict, path) -> str:
             'text', 'condition', 'scene', 'actors', 'music', 'sound',
             'voice', 'line_hash']
     buf = io.StringIO()
-    w = csv.writer(buf)
+    # **必须给 `escapechar`**（2026-10-22，CI 的 Linux 上抓到）：
+    # 台词里带 `\r` 时 `csv.writer` 会抛
+    # `need to escape, but no escapechar set` —— 整个交付自检因此报
+    # "csv 导出失败"。Windows 上那条路径没触发（换行在更早的地方被规范掉了），
+    # 但这份 CSV 是给**翻译公司**的，他们什么字符都会粘进来，
+    # 靠"碰巧不出现"不是判据。
+    w = csv.writer(buf, escapechar='\\', quoting=csv.QUOTE_MINIMAL)
     w.writerow(cols)
     # `_rows`：坏 IR 里 `lines` 是字符串 / 有条目不是对象时别崩在这里 ——
     # 这份 CSV 是给翻译公司和表格工具的，能出一行是一行。

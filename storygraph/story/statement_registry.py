@@ -300,6 +300,16 @@ def root_of(script_path) -> str:
         p = Path(script_path)
     except TypeError:
         return ''
+    # **字符串层面先判一次 `/game/`**（2026-10-22，CI 的 Linux 上抓到）：
+    # POSIX 上 `Path(r'D://p//game//a.rpy')` 是**单段路径**（反斜杠不是分隔符），
+    # `p.parents` 是空的 —— 于是 Windows 路径一条也推不出来。
+    # 而路径可能从 `--sdk`、日志、剪贴板粘过来，分隔符不一定和本机一致。
+    # 这里只看"路径里有没有 `/game/` 这一段"，纯字符串、与平台无关。
+    raw = str(script_path).replace('\\', '/')
+    if '/game/' in raw:
+        head = raw.split('/game/', 1)[0]
+        if head:
+            return head
     chain = [p.parent, *p.parents]
     for parent in chain:
         if parent.name == 'game':

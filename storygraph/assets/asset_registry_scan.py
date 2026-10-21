@@ -546,7 +546,13 @@ def _scan_file_items(scan_root, walk) -> list:
             items.append((p.relative_to(scan_root).as_posix().lower(), p))
         except ValueError:
             continue
-    return items
+    # **两条路都要排序**（2026-10-22，CI 抓到）：
+    # `rglob` 的顺序取决于目录栈，Windows 与 Linux 不一样 ——
+    # 同一棵树扫出来的图片清单顺序不同，`test_scan_assets_accepts_a_walk_and
+    # _finds_the_same_files` 直接断言了顺序，于是只有 Linux 红。
+    # 顺序还影响 `_make_unique_id` 的后缀编号（同名文件谁先拿到 `_2`），
+    # 所以这不只是测试的事：**产物必须跨平台可复现**。
+    return sorted(items, key=lambda kv: kv[0])
 
 def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 voice_dirs=None, walk=None, facts=None,

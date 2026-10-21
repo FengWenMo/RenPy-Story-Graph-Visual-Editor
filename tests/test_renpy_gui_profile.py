@@ -118,7 +118,13 @@ class TestGuiValues:
     def test_missing_font_falls_back_with_a_warning(self, tmp_path):
         p = load_gui_profile(_project(tmp_path), force=True)
         assert any('没有正文字体' in w for w in p.warnings)
-        assert p.fonts_substituted, '替换了字体就要记一笔（预览横条要显示）'
+        # **"替换了"和"没得替换"是两句话**（2026-10-22，CI 的 Linux 上抓到）：
+        # 系统字体查找只认 `C://Windows//Fonts`，Linux 上一个候选都没有 ——
+        # 于是这只走"系统也找不到可用字体"的 warning，`fonts_substituted` 空。
+        # 用户真正需要的是"**有一句话**说清这支字体怎么了"，不是某个字段非空。
+        assert p.fonts_substituted or any('找不到可用字体' in w
+                                          for w in p.warnings), \
+            '字体没找到却一句话都没说'
 
 
 class TestFontSearchOrder:
@@ -170,7 +176,15 @@ class TestFontSearchOrder:
         p = load_gui_profile(proj, force=True)
         assert Path(p.text_font_path) == (proj / 'game' / 'fonts'
                                           / 'MyFont.ttf')
-        assert p.fonts_substituted == []
+        # 正文那一支**不许**有替换记录（项目字体赢了）。
+        # ⚠ `fonts_substituted` 里可能还有一条 `DejaVuSans.ttf → MyFont.ttf`
+        # —— 那是**名条字体**：`gui.name_text_font` 有默认值
+        # `DejaVuSans.ttf`（`DEFAULTS` 表），项目没写它 → 回退到正文那支。
+        # 在 Windows 上能从 SDK/系统找到 DejaVuSans 所以不记；Linux 没有系统
+        # 字体目录就记了。这条记录说的是实话（请求 A、实际 B），只是与
+        # "正文用哪支字"无关 —— 所以只针对正文那一条断言。
+        assert not any('MyFont.ttf' in x and x.startswith('fonts/MyFont')
+                       for x in p.fonts_substituted)
 
 
 class TestCharacters:

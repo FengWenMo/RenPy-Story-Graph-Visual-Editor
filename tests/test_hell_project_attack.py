@@ -104,7 +104,14 @@ class TestHellProjectAttack:
         地狱项目里必然有 parse error（那正是"地狱"的意思）——
         采集**必须**如实说"不可用"，并且**指出是哪个文件**，绝不许假绿。
         """
-        from storygraph.pipeline.engine_collect import collect
+        from storygraph.pipeline.engine_collect import collect, find_sdk
+        # 没装 SDK 时 `collect` 会如实报"找不到 SDK"—— 那是**环境**结论，
+        # 不是这个用例要验的"地狱项目结论"。没有 SDK 就跳过
+        # （`find_sdk` 找不到是**抛**，不是返回 None）。
+        try:
+            find_sdk()
+        except FileNotFoundError:
+            pytest.skip('没有 Ren\'Py SDK —— 这条判据验的是"引擎怎么说"，跑不了')
         res = collect(self._project(tmp_path), timeout=600, mode='copy')
         assert res['ok'] is False, '有 parse error 却说可用 = 假绿'
         reason = str(res.get('reason') or '')

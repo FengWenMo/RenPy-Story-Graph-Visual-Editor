@@ -294,7 +294,12 @@ class TestBuildReportLintRan:
         `ran=false` —— 闸门开着，报告却在说假话。
         """
         from storygraph.pipeline.engine_collect import find_sdk
-        if not find_sdk():
+        # ⚠ `find_sdk()` **找不到就抛**（它的 docstring 写的就是"不猜"），
+        # 所以不能写成 `if not find_sdk()` —— 那行永远不会执行到，
+        # 在没装 SDK 的机器（CI）上是 FileNotFoundError 直接失败。
+        try:
+            find_sdk()
+        except FileNotFoundError:
             pytest.skip('没有 Ren\'Py SDK，跑不了引擎 lint')
 
         root = tmp_path / 'proj'

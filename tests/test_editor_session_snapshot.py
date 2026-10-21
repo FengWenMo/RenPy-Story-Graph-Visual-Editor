@@ -55,7 +55,14 @@ MIN_CAPTURED = 40
 #  确定性规整
 # ---------------------------------------------------------------------------
 
+#: 绝对路径。⚠ `(?<!>)` 是给 `<PROJ>/game/…` 这种"占位符后面跟路径"的写法
+#: 留的口子：不挡的话 Linux 上 `_norm_path` 会把 `<PROJ>/game/...` 里
+#: `/game/...` 再打码成 `<ABS>`，于是 golden（Windows 生成的
+#: `<PROJ>\game\...`）永远对不上 —— 2026-10-22 CI 就是这么红的。
 _ABS_PATH = re.compile(r'(?:[A-Za-z]:[\\/]|/)[^\s"\'<>|]*')
+
+#: `<PROJ>` / `<TMP>` 后面紧跟的那段相对路径（要保护起来，别再打码）。
+_AFTER_TAG = re.compile(r'(<(?:PROJ|TMP)>)(/[^\s"\'<>|]*)')
 
 
 def _normalize(value, root: Path):
@@ -90,12 +97,27 @@ def _normalize(value, root: Path):
 
 
 def _norm_path(text: str, root: Path) -> str:
-    """把 root 下的绝对路径换成一个稳定占位符。"""
-    s = str(text)
+    """
+    把 root 下的绝对路径换成一个稳定占位符。
+
+    **分隔符统一成 `/`**（2026-10-22）：golden 是 Windows 上生成的
+    （`<PROJ>\\game\\script\\ch01.rpy`），Linux 跑出来是
+    `<PROJ>/game/script/ch01.rpy` —— 同一个行为、两种写法，golden 必然对不上。
+    把两边都归一成 `/`，这份 golden 才真的"跨机器稳定"（它本来就是这个目的）。
+    """
+    s = str(text).replace('\\', '/')
     for prefix, tag in ((str(root), '<PROJ>'),
                         (str(Path(root).parent), '<TMP>')):
-        s = s.replace(prefix.replace('\\', '\\\\'), tag)
+        prefix = prefix.replace('\\', '/')
         s = s.replace(prefix, tag)
+    # **先把"占位符后面的相对路径"护住**：Linux 上 `<PROJ>/game/...` 里那段
+    # `/game/...` 是以 `/` 开头的，会被 `_ABS_PATH` 当成又一个绝对路径再打码，
+    # 变成 `<PROJ><ABS>` —— 2026-10-22 CI 红的就是这个（Windows 上是
+    # `\game\...`，不以 `/` 开头，所以从来没见过）。
+    # 把 `<PROJ>/game/...` 里的 `/` 换成 `\` —— golden 本来就是 Windows 风格
+    # （`<PROJ>\\game\\...`），换成 `\` 之后两边一模一样，而且 `_ABS_PATH`
+    # 只认 `[A-Za-z]:\\` 或 `/` 开头，不会再打一次码。
+    s = _AFTER_TAG.sub(lambda m: m.group(1) + m.group(2).replace('/', '\\'), s)
     # 剩下的绝对路径（例如系统字体、site-packages）统一打码
     s = _ABS_PATH.sub('<ABS>', s)
     return s
