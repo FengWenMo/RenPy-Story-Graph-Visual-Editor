@@ -436,9 +436,14 @@ class WindowExportMixin:
         self.apply_current_beat()
         try:
             from storygraph.ui_qt.stage_preview import open_preview
+            # **从当前那一拍开始**（用户 2026-10-22 连说两次：
+            # "我在修改 200 拍的时候，按演出预览，出来的是第一拍，
+            #   需要手动跳到第 200 拍"）。`frames` 与 `beats` 一一对应
+            # （`build_frames` 就是 `zip(beats, rows)`），拍索引直接可用。
             open_preview(self, self._session.frames(),
                          registry=self._registry_provider(),
-                         project_root=self._project_root)
+                         project_root=self._project_root,
+                         start_index=getattr(self, '_loaded_idx', 0))
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '无法打开预览', str(e))
     def show_help(self):

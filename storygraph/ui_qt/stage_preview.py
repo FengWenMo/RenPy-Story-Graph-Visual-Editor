@@ -1036,13 +1036,22 @@ class StagePreviewWindow(QDialog):
 
     def __init__(self, parent=None, frames=None, title: str = '舞台演出预览',
                  registry=None, project_root=None, real_images: bool = True,
-                 screen=None, sound: bool = True, player_factory=None):
+                 screen=None, sound: bool = True, player_factory=None,
+                 start_index: int = 0):
         super().__init__(parent)
         self.setWindowTitle(title)
         theme.apply_to(self)
         self.frames = list(frames or [])
         self._all = list(frames or [])
-        self.idx = 0
+        # **从当前那一拍开始**，不要总是第一拍（2026-10-22 用户实测报的：
+        # "我在修改 200 拍的时候，按演出预览，然后出来的是第一拍，
+        #   需要手动跳到第 200 拍！！！应当从当前拍开始预览"）。
+        # 越界一律夹回合法范围 —— 调用方传进来的索引可能比 frames 新。
+        try:
+            start = int(start_index or 0)
+        except (TypeError, ValueError):
+            start = 0
+        self.idx = max(0, min(start, len(self.frames) - 1)) if self.frames else 0
         self._playing = False
         self._images = getattr(registry, 'images', {}) or {}
         self._registry = registry
@@ -1085,7 +1094,7 @@ class StagePreviewWindow(QDialog):
             self._canvas.repaint()
         except Exception as e:                    # noqa: BLE001
             swallow('stage_preview.show_initial_frame', e)
-        self.show_frame(0)
+        self.show_frame(self.idx)
 
     # ------------------------------------------------------------------
 
@@ -1599,11 +1608,15 @@ def _dialogue_html(frame) -> str:
 
 def open_preview(parent, frames, registry=None, project_root=None,
                  real_images: bool = True, title: str = '舞台演出预览',
-                 sound: bool = True):
-    """打开预览窗口（非模态，开着也能回去改卡片）。"""
+                 sound: bool = True, start_index: int = 0):
+    """打开预览窗口（非模态，开着也能回去改卡片）。
+
+    `start_index`：从第几拍开始（**当前那一拍**）。不给就从第一拍开始。
+    """
     win = StagePreviewWindow(parent, frames, title=title, registry=registry,
                              project_root=project_root,
-                             real_images=real_images, sound=sound)
+                             real_images=real_images, sound=sound,
+                             start_index=start_index)
     win.show()
     return win
 

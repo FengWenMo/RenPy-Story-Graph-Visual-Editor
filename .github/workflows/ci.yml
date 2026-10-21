@@ -45,14 +45,19 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             echo "----- 尾部 -----"
             tail -30 /tmp/pytest.log
-            echo "----- 失败清单（${{ matrix.python-version }}）-----"
-            grep -E '^(FAILED|ERROR)' /tmp/pytest.log | head -20 | \
-              while IFS= read -r line; do echo "::error title=pytest::$line"; done
-            # 连"一条 FAILED 都没有"的情况也要看得见（收集阶段就崩时就是这种）：
-            # 把尾部原样变成 annotation，手机上也能读。
-            tail -25 /tmp/pytest.log | while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error title=pytest-tail::$line"
-            done
+            # **写进 Job Summary**（2026-10-22）：
+            # `::error::` 那套在 PR 页面上没渲染出来（试了两轮，annotation 里
+            # 只有 "Process completed with exit code 1"）。而 Job Summary
+            # 是 job 页面顶部的一整块 markdown，日志折叠也挡不住它 ——
+            # 排查 CI 时至少能看见"哪几条失败"。
+            {
+              echo "## pytest 失败（Python ${{ matrix.python-version }}）"
+              echo ''
+              echo '```'
+              grep -E '^(FAILED|ERROR)' /tmp/pytest.log | head -30 \
+                || tail -30 /tmp/pytest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$rc"
 
