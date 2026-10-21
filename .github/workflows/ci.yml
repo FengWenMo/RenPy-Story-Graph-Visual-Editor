@@ -41,6 +41,11 @@ jobs:
             echo "----- 失败清单（${{ matrix.python-version }}）-----"
             grep -E '^(FAILED|ERROR)' /tmp/pytest.log | head -20 | \
               while IFS= read -r line; do echo "::error title=pytest::$line"; done
+            # 连"一条 FAILED 都没有"的情况也要看得见（收集阶段就崩时就是这种）：
+            # 把尾部原样变成 annotation，手机上也能读。
+            tail -25 /tmp/pytest.log | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=pytest-tail::$line"
+            done
           fi
           exit "$rc"
 
