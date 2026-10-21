@@ -148,7 +148,13 @@ def three_way(base, left, right) -> Delta:
 def format_report(d: Delta) -> str:
     """人话（结论在第一条）：**冲突必须首先被看见**。"""
     c = d.counts()
-    head = (f'拍级对账：{"没有冲突" if d.clean else f"⚠ {c["conflicts"]} 处冲突"}'
+    # ⚠ **f-string 里嵌同种引号是 3.12 才允许的**（PEP 701）。
+    # 这一段原来是 `f'… else f"⚠ {c["conflicts"]} 处冲突"'` —— 内层 f-string 用
+    # 双引号包双引号，Python 3.10 / 3.11 直接 SyntaxError，
+    # 整个 CI 的 3.10 job 在**收集阶段**就挂（2026-10-22 实测）。
+    # 内层一律改成单引号：外层 `'`、内层 `"`，3.10 一路通。
+    verdict = '没有冲突' if d.clean else f'⚠ {c["conflicts"]} 处冲突'
+    head = (f'拍级对账：{verdict}'
             f'（表改 {c["left_changed"]} · 源码改 {c["right_changed"]}'
             f' · 两边都改且一致 {c["both_same"]}'
             f' · 新增 {c["added_right"]} · 消失 {c["removed_right"]}）')

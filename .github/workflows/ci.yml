@@ -33,7 +33,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest -q --tb=line --maxfail=20 2>&1 | tee /tmp/pytest.log
+          # `-o addopts=''` + `/tmp` 的 basetemp（2026-10-22，CI 第二个坑）：
+          # `pytest.ini` 里写的是 `--basetemp=.pip-tmp/pytest`，而
+          # `.pip-tmp/` 在 .gitignore 里 —— 干净 checkout 上它不存在，
+          # Linux 上跑到第 90 个用例开始 `tmp_path` 全报
+          # `FileNotFoundError: .../.pip-tmp/pytest`（20 个 ERROR，退出 1）。
+          # 把 basetemp 挪到 /tmp 就与仓库目录彻底无关了。
+          python -m pytest -q -o addopts='' --basetemp=/tmp/sg-pt \
+            --tb=line --maxfail=20 2>&1 | tee /tmp/pytest.log
           rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "----- 尾部 -----"
