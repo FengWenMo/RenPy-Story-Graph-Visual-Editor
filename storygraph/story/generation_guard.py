@@ -1201,8 +1201,48 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     out_path = Path(out_path)
     root = project_root or _guess_project_root(out_path)
     merged_onto_target = merging_onto(out_path, merged_from_source)
-    if not force and not merged_onto_target and not _copy_of_source(
-            out_path, source_text) and _looks_handwritten(out_path):
+    # —— **原地覆盖 + 全量 = 拒绝**（2026-10-21，修 P0）——
+    #
+    # 症状（可复现）：策划导过一次表，程序员在同一个 .rpy 里加了三行
+    # （`pause` / 一句台词 / `$ flag = True`），策划在表里改一句后**导出回原文件**
+    # → 退出码 0，回执只有"增量未采用（…）→ 已按全量生成"，
+    # 源文件里程序员那三行**全部消失**。
+    #
+    # 为什么会漏，两层：
+    #   ① 增量对位失败 → 按设计退回全量，而全量只认得表里的拍；
+    #   ② 本该由"手写护栏"拦下，但下面那条 `_copy_of_source` 豁免是
+    #      **套套逻辑**：目标 == 源时，读它必然等于 `source_text` → 恒放行。
+    #      它本来是给"零改动复制到**另一条路径**"（P1-1）开口的。
+    #
+    # 判据取"目标就是底稿，但这份文本**不是**增量合并出来的" —— 也就是
+    # docstring 里那句"全量重生成 → 危险，必须拦"的原意。判据是路径相等，
+    # 不是"调用方说它走了增量"（同 `merging_onto` 的教训）。
+    if (not force and source_text is not None
+            and merging_onto(out_path, source_path)
+            and not merged_onto_target):
+        reason = ('这一章和表**对不上**（增量合并没成功），而目标就是源文件本身：'
+                  '全量重生成只认得表里的拍，源里不在表内的语句（程序员新加的 '
+                  '`pause` / 台词 / `$` 代码 / 注释）会一并消失。拒绝覆盖。'
+                  '先把这一章重新载入（让表和源码对上）再导出；'
+                  '确认产物完整、就是要全量覆盖时用 `--force`。')
+        blocking = [_make_blocking_issue(out_path, reason)]
+        review = None
+        if review_on_block:
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                review = out_path.with_suffix('.blocked.rpy')
+                write_text_atomic(review, text)
+            except OSError:
+                review = None
+        _publish_blocked(out_path, blocking, review)
+        return GeneratedArtifact(out_path, review, False, blocking)
+
+    # 「目标是源文的复制品」这条豁免**只管另一条路径**（见上，2026-10-21）：
+    # 原地覆盖时它恒真，当成"可以覆盖"就等于把护栏整个关掉。
+    copy_of_source = (not merging_onto(out_path, source_path)
+                      and _copy_of_source(out_path, source_text))
+    if not force and not merged_onto_target and not copy_of_source \
+            and _looks_handwritten(out_path):
         reason = ('目标已存在且不是工具生成的（没有生成标记），'
                   '拒绝覆盖手写 .rpy')
         blocking = [_make_blocking_issue(out_path, reason)]

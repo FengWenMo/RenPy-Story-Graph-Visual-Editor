@@ -179,7 +179,10 @@ class WindowExportMixin:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle('覆盖手写文件？')
-        box.setText(f'{name} 看起来是**手写**的 .rpy（没有生成标记）。')
+        # ⚠ `QMessageBox` 只认纯文本 / HTML，**不渲染 Markdown** —— 写成
+        # `**手写**` 用户看到的就是四个星号（同一类坑上一轮在删除确认框里
+        # 踩过）。强调改用中文引号。
+        box.setText(f'{name} 看起来是「手写」的 .rpy（没有生成标记）。')
         if used_patch:
             box.setInformativeText(
                 '但**这一次是增量**：产物是在原文上合并出来的，只替换你改过的'

@@ -237,7 +237,18 @@ def _report_guard(result, out, stream=None, source=None) -> bool:
         # 这一条**有**逃生舱，而且和上面那条"坏脚本"的性质不同：
         # 不是产物有问题，是"目标是人手写的"。所以提示要分开给，
         # 否则用户会以为自己的产物坏了。
-        if result.used_patch:
+        if source and not result.used_patch and result.patch_attempted:
+            # **给了 --source 却没配上**（2026-10-21，P0）：`--source` 指的
+            # 就是目标本身，而这一刀是全量。此前这里走 `else`，说的是
+            # "目标是你手写的 .rpy" —— 用户明明给了底稿，却被告知"再给一次
+            # 底稿"，方向被彻底带偏。真话是：表和源码对不上。
+            print('  这次**没能**增量合并（表与源码对不上，原因见上），'
+                  '而 `--source` 指的正是目标文件本身 —— 全量产物会丢掉源里'
+                  '不在表内的语句（程序员新加的 `pause` / 台词 / `$` 代码）。',
+                  file=stream)
+            print('  先把这一章重新载入（让表和源码对上）再导出；'
+                  '确认产物完整、就是要全量覆盖时加 `--force`。', file=stream)
+        elif result.used_patch:
             # ⚠ 补丁成功时**必须说真话**（2026-10-05）：这一次是在原文上
             # **合并**出来的，`default` / `init python` / `transform` 逐字保留，
             # 一刀下去什么都不会丢。笼统地说"会丢掉这些"是假话，而它恰好
@@ -289,6 +300,15 @@ def _report_incremental(result, stream=None) -> None:
     elif result.patch_attempted and result.patch_note:
         print(f'增量未采用（{result.patch_note}）→ 已按全量生成',
               file=stream)
+        # **全量只认得表里的拍**（2026-10-21，P0 的另一半）：目标不是源文件
+        # 本身时（`--out 新路径`），门禁那条"原地覆盖要拦"的闸不适用，
+        # 产物照写 —— 于是用户拿到一份少了行数、退出码却是 0 的产物。
+        # 这里必须把"少了什么"说出来，否则"退回全量"三个字看着像正常降级。
+        if result.written:
+            print('  ⚠ 这份产物里**没有**源文件中不在表内的语句'
+                  '（导表之后程序员新加的 `pause` / 台词 / `$` 代码等）。'
+                  '要保住它们：先让表和源码对上（重新导入这一章）再导出。',
+                  file=stream)
 
 
 def _cmd_table(args) -> int:

@@ -2570,6 +2570,49 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 细节见 `_insert_ids_of` / `_recover_ranges` 的 docstring。
     insert_ids, dropped, dropped_src, fresh = _recover_ranges(beats,
                                                              source_path)
+
+    # —— **表过期守卫**（2026-10-21，P0）——
+    #
+    # `SequenceMatcher` 只按"身份键"对齐（正文刻意不进键 —— 正文正是要改的东西），
+    # 于是**表过期**时（导表之后程序员又在源里加了一句台词），源比表多一拍：
+    # 对齐会把"表里改过的那一拍"配到**程序员新加的那一行**上，再把
+    # "本来属于它的那一拍"判成"用户删掉的拍"。
+    #
+    # 实测（`label ch1:` + 4 句 → 表里 3 拍，源里多 `pause` / 新台词 / `$`）：
+    # `recover` 给第 3 拍行号 [4..5]（`pause` + 新台词），源第 4 拍（"第三句。"）
+    # 进 dropped；补丁报 `ok=True`、`changed_lines=3`，而产物里
+    # **两句源台词只剩一句** —— 没有任何一处报错。
+    #
+    # 判据：源里有**台词**被判"用户删掉了"，**同时**表里有拍的正文在源里
+    # 根本不存在。两件事凑在一起时"改了那句"和"漏了一拍"无法区分 ——
+    # 按契约（L2 不猜名字 / M4 认不出就报）**不猜**，整份退回全量，
+    # 由调用方与门禁去处理（原地覆盖会被"增量没成功"那道闸拦下）。
+    # 判据只认**台词拍**（`kind in (say, narration)`）：菜单拍的 `Beat.text`
+    # 是占位符 `\x00menu`（`MENU_NO_CAPTION`），原文里写的是 `menu:` ——
+    # 拿它去原文里找必然找不到，会把"删掉一个菜单选项体"这种正常操作
+    # 误判成表过期（`test_a_menu_option_body_becomes_pass` 抓到的正是这个）。
+    def _is_say_beat(b) -> bool:
+        return (str(getattr(b, 'kind', '') or '') in ('say', 'narration')
+                and str(getattr(b, 'text', '') or '').strip() != '')
+
+    _dropped_say = [b for b in (dropped_src or []) if _is_say_beat(b)]
+    # 比对走 `_unescaped`（语义形式）而不是逐字节：真机 `chapter1_2.rpy` 第 132 行
+    # 是旁白 `'file "c:\\admin_script.py", …'`，解析出来的 `text` 是单个反斜杠 ——
+    # 拿它去原文里找永远找不到，于是"删掉一句别的台词"会被误判成表过期
+    # （实测：删一拍从"增量删 8 行"退回"全量 25 段"，L2b 从 19/20 掉到 17/20）。
+    _src_blob = _unescaped(original)
+    _unmatched = [b for b in beats if _is_say_beat(b)
+                  and _unescaped(str(getattr(b, 'text'))) not in _src_blob]
+    if _dropped_say and _unmatched:
+        _d = str(getattr(_dropped_say[0], 'text', ''))[:20]
+        _u = str(getattr(_unmatched[0], 'text', ''))[:20]
+        return PatchResult(
+            generated_text, None, 0, len(beats), 0,
+            reasons=[f'表与源码不同步：源里有 {len(_dropped_say)} 拍台词不在表里'
+                     f'（例如「{_d}」），表里有 {len(_unmatched)} 句在源里找不到'
+                     f'（例如「{_u}」）—— "改了那句"还是"漏了一拍"分不出来，'
+                     f'拒绝猜（先重新载入这一章再导出）'])
+
     # **现算出来的行号 = 新鲜**：它们来自刚解析的这份文件，绕过了"行号会不会
     # 过期"这个问题（见 `_recover_ranges` 的 `fresh` 说明）。表格那条路因此
     # 也能享受"同一拍改了说话人和正文"这类改动的增量 —— 从前它被对位守卫
