@@ -297,6 +297,18 @@ def _report_incremental(result, stream=None) -> None:
             print(f'增量补丁：改动 {result.changed_lines} 行，'
                   f'原文其余部分（含 default / init python / transform）逐字节保留',
                   file=stream)
+            # **"改动"里混着两种动作**（2026-10-21）：换掉一句台词，和
+            # **删掉源文件里的某一行**（用户清空某一拍的舞台列 → 源里那行
+            # `show` 跟着走）。只报一个总数，用户就会问"我只改了一句，
+            # 怎么少了一行 show" —— 把删掉的行直接点名。
+            removed = tuple(getattr(result, 'removed_preview', ()) or ())
+            if removed:
+                print('  其中**删掉了源文件里的这几行**'
+                      '（表里已经没有对应内容）：', file=stream)
+                for ln in removed[:3]:
+                    print(f'    - {ln}', file=stream)
+                if len(removed) > 3:
+                    print(f'    …（还有 {len(removed) - 3} 行）', file=stream)
     elif result.patch_attempted and result.patch_note:
         print(f'增量未采用（{result.patch_note}）→ 已按全量生成',
               file=stream)

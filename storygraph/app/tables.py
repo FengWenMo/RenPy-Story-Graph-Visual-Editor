@@ -184,6 +184,8 @@ def export_table(table_path, registry=None, project_root=None,
     #: "手写护栏让不让路" —— 少了它，增量产物写回**手写**文件时会被自己的
     #: 护栏拦下，而报出来的错还是"检查文件是否被占用"（驴唇不对马嘴）。
     merged_from = None
+    #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 确认框 / 日志要能点名。
+    removed_preview: tuple = ()
     try:
         src = src_for_patch
         # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
@@ -198,6 +200,11 @@ def export_table(table_path, registry=None, project_root=None,
             if getattr(res, 'unlanded_lines', 0):
                 note += (f'（{res.unlanded_lines} 行注释/代码未参与替换，'
                          f'保持原文）')
+            removed_preview = tuple(
+                getattr(res, 'removed_preview', ()) or ())
+            if removed_preview:
+                note += (f'；其中删掉了源文件里 {len(removed_preview)} 行'
+                         f'（{removed_preview[0][:40]}）')
         else:
             why = '；'.join(res.reasons) if res.reasons else \
                 f'与源文件对位率不足（{res.coverage:.0%}）'
@@ -250,6 +257,10 @@ def export_table(table_path, registry=None, project_root=None,
             'note': note,
             'used_patch': bool(merged_from),
             'merged_from': merged_from,
+            # 落盘那一步要它：门禁的「原地覆盖 + 非增量」与 `OPAQUE_LOST`
+            # 都靠 `source_text` / `source_path` 才判得出来（2026-10-21，P1）。
+            'source_path': (str(src_for_patch) if src_for_patch else None),
+            'removed_preview': removed_preview,
             'blocking': [i.format() for i in blocking[:12]],
             'blocking_total': len(blocking),
             'warnings': [i.format() for i in warnings[:6]],
@@ -267,6 +278,8 @@ def export_table(table_path, registry=None, project_root=None,
         'note': note,
         'used_patch': bool(merged_from),
         'merged_from': merged_from,
+        'source_path': (str(src_for_patch) if src_for_patch else None),
+        'removed_preview': removed_preview,
         'blocking': [],
         'blocking_total': 0,
         'warnings': [i.format() for i in warnings[:6]],
@@ -292,9 +305,30 @@ def apply_export(result: dict, project_root=None) -> dict:
     排查方向被彻底带偏。
     """
     target = Path(result['out_path'])
+    # **`source_text` / `source_path` 也必须往下传**（2026-10-21，P1）：
+    # 只传 `merged_from` 时，门禁那条"原地覆盖 + 这一刀不是增量 → 拒写"的
+    # 判据**根本进不去**（它要先有 `source_text`）。实测后果与 P0 一模一样：
+    #
+    #   1) 上一轮导出过这一章（首行有生成标记）；
+    #   2) 程序员在文件里加了 `pause` / 一句台词 / `$ flag`；
+    #   3) 策划在表里改一句 → 「从剧本表导出」。
+    #
+    #   `apply_export` 报 `ok=True / written=True`，程序员那三行**全没了** ——
+    #   而 CLI 那条路（`compile.write_compiled`）早就把这两个参数传全了，
+    #   所以这个洞只在界面这条路上存在（手工护栏按"有没有生成标记"判，
+    #   带标记的文件它一律放行）。
+    src = result.get('source_path')
+    source_text = None
+    if src:
+        try:
+            from storygraph.story.source_style import read_text
+            source_text = read_text(src)[0]
+        except (OSError, UnicodeDecodeError):
+            source_text = None
     art = write_generation(result.get('text') or '', target,
                            review_on_block=True, project_root=project_root,
                            merged_from_source=result.get('merged_from'),
+                           source_text=source_text, source_path=src,
                            unmanaged_blocks=result.get('unmanaged_blocks'))
     out = dict(result)
     out['ok'] = bool(art.written)

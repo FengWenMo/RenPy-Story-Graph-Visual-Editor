@@ -97,6 +97,14 @@ class PatchResult:
     #: （每条语句之间插空行、行尾空格被删、CRLF 变 LF）—— 真机
     #: `definitions.rpy` 1120 行变 1288 行，而用户**一处都没改**。
     passthrough: bool = False
+    #: **被删掉的那几行原文**（最多 5 条，去掉缩进）—— 给回执点名用。
+    #:
+    #: 为什么要单独存（2026-10-21）：补丁从前只报"改动 N 行"。而"改动"里
+    #: 混着三种完全不同的动作：换掉一句台词、插一行、**删掉源文件里的某行**
+    #: （用户把表里某一拍的舞台列清空 → 源里那行 `show` 跟着走）。
+    #: 第三种最容易被吓到："我只改了一句台词，怎么少了一行 show？"——
+    #: 回执不说，用户只能自己 diff 文件。这里把删掉的行原样记下来。
+    removed_preview: tuple = ()
 
     @property
     def coverage(self) -> float:
@@ -1173,6 +1181,19 @@ def _is_new_content_row(body: str, old_heads, old_squash, file_squash,
     return True
 
 
+def _note_removed(removed_out: list, line) -> None:
+    """
+    把"这一行被删掉了"记进回执预览（去缩进，最多 5 条）。
+
+    `removed_out is None` 是合法调用（老调用点不关心这件事）—— 不记就是了。
+    """
+    if removed_out is None:
+        return
+    body = _norm(line)
+    if body and len(removed_out) < 5:
+        removed_out.append(body[:100])
+
+
 def _may_drop_line(line, gen_heads, gen_squash, gen_bodies):
     """这一行能不能因为"生成器不再产出它"而删掉？（两条准入都过才删）"""
     if not _droppable_line(line):
@@ -1193,7 +1214,8 @@ def _may_drop_line(line, gen_heads, gen_squash, gen_bodies):
 
 def _replace_matched(old_lines: list, gen_bodies: list,
                      allow_edit: bool = True, file_squash=None,
-                     relax_speaker: bool = False) -> tuple:
+                     relax_speaker: bool = False,
+                     removed_out: list = None) -> tuple:
     """
     原文区间 → 新区间。
 
@@ -1343,6 +1365,7 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             # 游标到 j 之间：原文有、生成器没有的行 → 能删就删，否则原样保留
             for t in range(cursor, j):
                 if _may_drop_line(old_lines[t], gen_heads, gen_squash, gen_bodies):
+                    _note_removed(removed_out, old_lines[t])
                     shrunk += 1
                     changed += 1
                 else:
@@ -1355,6 +1378,7 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             cursor = j + 1
         for t in range(cursor, len(old_lines)):
             if _may_drop_line(old_lines[t], gen_heads, gen_squash, gen_bodies):
+                _note_removed(removed_out, old_lines[t])
                 shrunk += 1
                 changed += 1
             else:
@@ -2164,10 +2188,14 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
 
 
 def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
-                          indent: str, subs=(), rewrites=()) -> tuple:
+                          indent: str, subs=(), rewrites=(),
+                          removed_out: list = None) -> tuple:
     """
     插入 + 删除 + 整段替换**一起按位置从后往前**做（先动后面的行，前面的
-    行号才不受影响）。返回 `(inserted_lines, removed_lines)`。
+    行号才不受影响）。返回 `(inserted_lines, removed_lines, replaced_lines)`。
+
+    `removed_out`（2026-10-21）：把**被删掉的行原文**收集进去（去缩进，
+    最多 5 条）—— 回执要能点名"删了哪几行"，不能只说"改动 N 行"。
 
     `subs` / `rewrites` 是 2026-10-21 为"删一条分支"加的：
       · `subs`：`(first, last, [整行…])` —— 菜单选项体换成 `pass`；
@@ -2203,6 +2231,8 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
     for _pos, kind, a, b, rows in sorted(ops, reverse=True,
                                         key=lambda t: (t[0], t[1])):
         if kind == 0:
+            for gone in out_lines[a - 1:b]:
+                _note_removed(removed_out, gone)
             del out_lines[a - 1:b]
             removed_lines += b - a + 1
         elif kind == 2:
@@ -2387,7 +2417,8 @@ class _PatchWalkState:
     （原文行、blocks、可信标志…）。打包成一个对象，循环里不会漏传一个。
     """
 
-    __slots__ = ('blocks', 'changed', 'grown_total', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'seen_ranges', 'shrunk_total', 'stale', 'strict_of', 'trust_ranges', 'unlanded_total', 'usable')
+    __slots__ = ('blocks', 'changed', 'grown_total', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'removed_preview', 'seen_ranges', 'shrunk_total', 'stale',
+                  'strict_of', 'trust_ranges', 'unlanded_total', 'usable')
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -2493,7 +2524,7 @@ def _patch_walk_blocks(st) -> None:
         # 行号已证明新鲜时，句位配对（`relax_speaker`）才对。
         new_seg, n_changed, unlanded, grown, shrunk = _replace_matched(
             old, gen, allow_edit=strict, file_squash=st.orig_squash,
-            relax_speaker=st.trust_ranges)
+            relax_speaker=st.trust_ranges, removed_out=st.removed_preview)
         st.unlanded_total += len(unlanded)
         st.grown_total += grown
         st.shrunk_total += shrunk
@@ -2706,6 +2737,9 @@ def patch_export(beats: list, source_path, generated_text: str,
         strict_of[_bi] = _range_looks_like(_old_seg, _bb, _bg,
                                            exact_lines=_old_seg)
     seen_ranges: list = []
+    #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 回执要能点名（2026-10-21）。
+    #: 逐拍的"拍内删行"（清空某一列的立绘/音乐）与"整拍删除"都往这里写。
+    removed_preview: list = []
     st = _PatchWalkState(
         blocks=blocks,
         changed=changed,
@@ -2718,6 +2752,7 @@ def patch_export(beats: list, source_path, generated_text: str,
         orig_set=orig_set,
         orig_squash=orig_squash,
         out_lines=out_lines,
+        removed_preview=removed_preview,
         seen_ranges=seen_ranges,
         shrunk_total=shrunk_total,
         stale=stale,
@@ -2741,7 +2776,8 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 插入 + 删除一起按位置**从后往前**做（先动后面的行，前面行号才不漂）
     inserted_lines, removed_lines, replaced_lines = _apply_sequence_edits(
         st.out_lines, delete_ranges, anchors, indent,
-        subs=delete_subs, rewrites=delete_rewrites)
+        subs=delete_subs, rewrites=delete_rewrites,
+        removed_out=removed_preview)
     st.changed += (inserted_lines + removed_lines + replaced_lines
                    + st.grown_total + st.shrunk_total)
 
@@ -2796,6 +2832,7 @@ def patch_export(beats: list, source_path, generated_text: str,
                        inserted_lines=inserted_lines,
                        inserted_beats=len(st.insert_ids),
                        removed_lines=removed_lines,
+                       removed_preview=tuple(removed_preview),
                        grown_lines=st.grown_total,
                        shrunk_lines=st.shrunk_total,
                        reasons=reasons)

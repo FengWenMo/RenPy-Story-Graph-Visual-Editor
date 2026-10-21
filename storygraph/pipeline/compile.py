@@ -81,6 +81,12 @@ class CompileResult:
     untouched: bool = False
     #: 读表时 `类型` 列填了工具不认的值（行号 + 原值）—— 见 `invalid_kinds`。
     invalid_kinds: list = field(default_factory=list)
+    #: 增量这一刀**删掉了源文件里哪几行**（最多 5 条原文）。
+    #:
+    #: 为什么必须带出来（2026-10-21）：回执只说"改动 N 行"，而"改动"里混着
+    #: 换一句台词和**删掉一行 `show`**。用户清空某一拍的舞台列时，源里那行
+    #: 会跟着走 —— 不说，就成了"我只改了一句，怎么少了一行"。
+    removed_preview: tuple = ()
 
     @property
     def todo_count(self) -> int:
@@ -151,6 +157,8 @@ class IncrementalOutcome:
     #: **原样透传**：这一章没有可编辑的拍（纯定义 / 屏幕 / init 文件）。
     #: `text` 就是源文全文，写盘那一层应当"不写"或"原样复制"。
     passthrough: bool = False
+    #: 这一次**从源文件里删掉的行**（原文，最多 5 条）—— 回执点名用。
+    removed_preview: tuple = ()
 
 
 def merge_incrementally(beats: list, generated_text: str, source_path=None,
@@ -197,7 +205,9 @@ def merge_incrementally(beats: list, generated_text: str, source_path=None,
         return IncrementalOutcome(res.text, True, '',
                                   changed_lines=res.changed_lines,
                                   coverage=res.coverage,
-                                  passthrough=bool(res.passthrough))
+                                  passthrough=bool(res.passthrough),
+                                  removed_preview=tuple(
+                                      getattr(res, 'removed_preview', ()) or ()))
     reason = '；'.join(res.reasons) or f'对位率不足（{res.coverage:.0%}）'
     return IncrementalOutcome(generated_text, False, reason,
                               coverage=res.coverage)
@@ -231,6 +241,7 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     result.patch_note = inc.reason
     result.patch_attempted = bool(source_path)
     result.changed_lines = inc.changed_lines
+    result.removed_preview = tuple(inc.removed_preview or ())
 
     from storygraph.story.generation_guard import (
         ensure_generator_marker,
