@@ -1402,8 +1402,12 @@ class StagePreviewWindow(QDialog):
         """
         try:
             from storygraph.story.layered_model import frame_pose_warnings
+            # ⚠ 属性是 `_project_root`（`__init__` 里就这么存的）。
+            # 2026-10-21 用户截图里的 `[静默失败] ui_qt.stage_preview.warnings`
+            # 就是这里：写成了 `self.project_root` → AttributeError 被 swallow 吞掉
+            # → "姿势改回普通但没 hide"的提示一条都出不来。
             return frame_pose_warnings(
-                self.frames, layer_model_for(self.project_root))
+                self.frames, layer_model_for(self._project_root))
         except Exception as e:                    # noqa: BLE001
             swallow('ui_qt.stage_preview.pose_warnings', e)
             return []

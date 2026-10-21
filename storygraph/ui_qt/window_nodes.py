@@ -51,6 +51,59 @@ from storygraph.ui_qt.thumb_loader import ThumbLoader
 __all__ = ['NodeEditMixin']
 
 
+def _write_new_chapter(view, path, label: str) -> str:
+    """
+    给"新建章节"落一个最小骨架（`label 名:` + `return`），返回路径（失败返回空串）。
+
+    三种情形（2026-10-21，用户实测报的"无源文件"和"一个文件里写第二个 label"）：
+
+      · **文件不存在** → 新建它；
+      · **文件已存在、里面没有同名 label** → **追加**一段
+        `\n\nlabel 名:\n    return\n`（用户原话："我想在一个 rpy 文件里写出
+        第二个 label 该怎么操作？" —— 一个文件放多章在 Ren'Py 里完全合法，
+        工具以前只会建新文件，把这条路堵死了）；
+      · **里面有同名 label** → 一个字都不写（重名 label 会让游戏起不来）。
+
+    追加时按文件自己的**载体风格**（BOM / CRLF）铺回去，不改已有任何一个字节。
+    """
+    if not path or not str(label or '').strip():
+        return ''
+    p = Path(path)
+    try:
+        from storygraph.story.paths import write_text_atomic
+        from storygraph.story.source_style import detect as _detect
+        from storygraph.story.source_style import read_text as _read
+
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(p, f"label {label}:\n    return\n")
+            return str(p)
+
+        text, style = _read(p)
+        if _has_label(text, label):
+            try:
+                view._status(f'{p.name} 里已经有 label {label} 了 —— 换个章节名。')
+            except Exception:                 # noqa: BLE001
+                pass
+            return ''
+        body = text.rstrip('\n') + f"\n\nlabel {label}:\n    return\n"
+        write_text_atomic(p, _detect(p).apply(body))
+        return str(p)
+    except OSError as e:                      # 权限 / 磁盘：说出来，不静默
+        try:
+            view._status(f'章节建好了，但文件没写出来：{e}')
+        except Exception:                     # noqa: BLE001
+            pass
+        return ''
+
+
+def _has_label(text: str, label: str) -> bool:
+    """这段源码里有没有 `label <名字>:`（含带参数 / 带 `(` 的写法）。"""
+    import re as _re
+    return bool(_re.search(
+        rf'^label\s+{_re.escape(label)}\s*(?:\(|:)', text or '', _re.M))
+
+
 class NodeEditMixin:
     """
     模块 ↔ 卡片、画布上的增删连边与右键菜单。
@@ -61,7 +114,7 @@ class NodeEditMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_chapter_label', '_log', '_run_command', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph')
+    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph')
 
     def _selected_node(self):
         nid = self._canvas.selected_node_id()
@@ -189,9 +242,22 @@ class NodeEditMixin:
         existing = [getattr(n, 'label_name', '')
                     for n in ((self.graph.nodes or {}).values()
                               if self.graph else [])]
-        dlg = AddNodeDialog(self, existing=existing)
+        # **默认写到 <项目根>/game/**（Ren'Py 只扫这一个目录）。
+        # 没有项目根（没点「打开项目」）时填空 → 对话框里那一格留空，
+        # 行为与从前一致（只在图里画结构）。
+        default_dir = (str(Path(self._project_root) / 'game')
+                       if getattr(self, '_project_root', None) else '')
+        dlg = AddNodeDialog(self, existing=existing, default_dir=default_dir)
         if dlg.exec() != QDialog.Accepted:
             return
+        # **把"无源文件"变成"有源文件"**（2026-10-21 用户实测报的那条：
+        # 新建章节之后双击进去"打开章节剧本不能用"）。
+        # 先把最小骨架写出来（`label 名:` + `return`），节点就带上 file_path，
+        # 双击直接进编辑器。对话框里那一格留空 → 不建文件（旧行为）。
+        # `getattr`：测试里喂的是**假对话框**（只实现 name/operations），
+        # 真对话框才有这一格。
+        _want_file = getattr(dlg, 'file_path', '') or ''
+        wrote = _write_new_chapter(self, _want_file, dlg.name)
         if self.graph is None:
             from storygraph.graph.models import Graph
             self._set_graph(Graph())
@@ -203,15 +269,20 @@ class NodeEditMixin:
         from storygraph.graph.commands import AddNodeCommand
         cmd = AddNodeCommand(self, dlg.name, float(at[0]), float(at[1]),
                              operations=([dlg.operations]
-                                         if dlg.operations else None))
+                                         if dlg.operations else None),
+                             file_path=(str(_want_file) if wrote else None))
         self._run_command(cmd)
         # 命令 execute 之后才知道新块的 id（它自己 add_node 拿的）
         nid = getattr(cmd, 'node_id', None)
         if nid is not None:
             self._canvas.highlight_node(nid)
             self._canvas.select_node(nid, center=False)
-        self._status(f'已新建章节「{dlg.name}」（在内存里；'
-                     f'点「⤓ 导出」才会进脚本）。Ctrl+Z 可撤销。')
+        if wrote:
+            self._status(f'已新建章节「{dlg.name}」并写出 {Path(wrote).name}'
+                         f'—— 现在双击它就能编辑剧本。Ctrl+Z 可撤销。')
+        else:
+            self._status(f'已新建章节「{dlg.name}」（只在图里，还没有源文件；'
+                         f'双击后可用「导出」给它建立 .rpy）。Ctrl+Z 可撤销。')
     def add_edge(self, from_id=None, to_id=None):
         """
         加一条连线。

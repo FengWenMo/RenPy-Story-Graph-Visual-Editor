@@ -313,18 +313,30 @@ class AddNodeDialog(_BaseDialog):
     `name`：label 名。`operations`：可选的多行初始化代码（`$ x = 1`）。
     """
 
-    def __init__(self, parent=None, existing=()):
+    def __init__(self, parent=None, existing=(), default_dir=None):
         super().__init__(parent, '添加新章节')
         self._existing = set(existing or ())
         self.name = ''
         self.operations = ''
+        #: 要写出的 `.rpy`（空串 = 只在图里画结构，不建文件）。
+        self.file_path = ''
+        #: 用户手动改过"写入文件"那一格之后，不再跟着章节名自动变。
+        self._file_edited = False
 
         form = QFormLayout()
         form.setSpacing(T.SPACE['sm'])
         self._name = QLineEdit()
         self._name.setPlaceholderText('英文 label 名，例如 chapter_02')
+        self._name.textChanged.connect(lambda *_: self._sync_default_file())
         self._name.textChanged.connect(lambda *_: self._ok())
         form.addRow('章节名（label）', self._name)
+
+        self._file = QLineEdit()
+        self._file.setPlaceholderText(
+            '留空 = 只在图里画结构（不建文件，双击后没有剧本可编辑）')
+        self._file.textChanged.connect(self._on_file_edited)
+        form.addRow('写入文件', self._file)
+
         self._ops = QPlainTextEdit()
         self._ops.setPlaceholderText('可选：初始化代码，一行一条，例如\n'
                                      'score = 0\n'
@@ -333,13 +345,45 @@ class AddNodeDialog(_BaseDialog):
         form.addRow('变量操作', self._ops)
         self._root.addLayout(form)
 
-        hint = QLabel("章节名会成为 Ren'Py 的 label —— "
-                      "只能用字母/数字/下划线，且不能以数字开头。")
+        # 章节名 与 默认文件路径 的联动：`chapter_02` → `<default_dir>/chapter_02.rpy`
+        self._default_dir = str(default_dir or '').rstrip('/\\')
+
+        hint = QLabel(
+            "章节名会成为 Ren'Py 的 label —— "
+            "只能用字母/数字/下划线，且不能以数字开头。\n"
+            "「写入文件」非空时**先把它写进脚本**（`label 名:` + `return`），"
+            "双击就能编辑；填一个**已有的 .rpy** 就往那个文件末尾追加"
+            "第二个 label（一个文件放多章是合法的）；留空则只是图上的一个方块，"
+            "之后用「⤓ 导出」或「➕ 导入章节」再给它配文件。")
         hint.setProperty('role', 'caption')
         hint.setWordWrap(True)
         self._root.addWidget(hint)
         self._add_buttons('创建')
         self._name.setFocus()
+
+    # ------------------------------------------------------------------
+
+    def _sync_default_file(self):
+        """章节名变了 → 默认文件跟着变（除非用户手动改过那一格）。"""
+        if self._file_edited:
+            return
+        name = self._name.text().strip()
+        if not name or not self._default_dir:
+            self._file.blockSignals(True)
+            self._file.setText('')
+            self._file.blockSignals(False)
+            return
+        # 用 `Path` 拼，别手写 `/` —— Windows 上会写出 `game/xxx.rpy` 这种
+        # 混着分隔符的路径（能用，但用户复制出去很别扭）。
+        from pathlib import Path as _P
+        self._file.blockSignals(True)
+        self._file.setText(str(_P(self._default_dir) / f'{name}.rpy'))
+        self._file.blockSignals(False)
+
+    def _on_file_edited(self, *_):
+        # 只有**用户**改这一格才锁住联动；`_sync_default_file` 用 blockSignals
+        # 写入的不会走到这里。
+        self._file_edited = True
 
     def _on_accept(self):
         name = self._name.text().strip()
@@ -350,8 +394,33 @@ class AddNodeDialog(_BaseDialog):
         if name in self._existing:
             self._fail(f'已经有一个叫「{name}」的章节了。')
             return
+        path = self._file.text().strip()
+        if path and not path.lower().endswith('.rpy'):
+            self._fail('「写入文件」必须以 .rpy 结尾（Ren\'Py 只读这种脚本）。')
+            return
+        if path:
+            from pathlib import Path as _P
+            _p = _P(path)
+            if _p.exists():
+                # **允许往已有文件里追加第二个 label**（2026-10-21 用户问的
+                # "我想在一个 rpy 文件里写出第二个 label 该怎么操作？"）——
+                # 一个文件放多章在 Ren'Py 里完全合法。只拦**同名 label**：
+                # 重名会让 Ren'Py 直接起不来。
+                try:
+                    import re as _re
+                    from storygraph.story.source_style import read_text as _read
+                    text = _read(_p)[0]
+                except (OSError, UnicodeDecodeError) as e:
+                    self._fail(f'读不了 {_p.name}（{e}），不敢往里追加。')
+                    return
+                if _re.search(rf'^label\s+{_re.escape(name)}\s*(?:\(|:)',
+                              text, _re.M):
+                    self._fail(f'{_p.name} 里已经有 label {name} 了 —— '
+                               f'换个章节名，或把「写入文件」指向别的文件。')
+                    return
         self.name = name
         self.operations = self._ops.toPlainText().strip()
+        self.file_path = path
         self.accept()
 
 
