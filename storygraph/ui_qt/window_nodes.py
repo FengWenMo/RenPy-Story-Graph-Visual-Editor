@@ -470,7 +470,9 @@ class NodeEditMixin:
                        if getattr(self, '_project_root', None) else '')
         known = []
         try:
-            known = self._session.graph_files(self.graph) if self.graph else []
+            known = [f for f in (self._session.graph_files(self.graph)
+                                 if self.graph else [])
+                     if Path(f).exists()]
         except Exception as e:                  # noqa: BLE001 - 下拉没有也不影响手填
             swallow('ui_qt.window_nodes.known_files', e)
         dlg = AddNodeDialog(self, existing=existing, default_dir=default_dir,
