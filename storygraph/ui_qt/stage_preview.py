@@ -41,6 +41,7 @@ Qt 版**舞台演出预览**：把这一章按卡片效果"播"出来。
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from collections import OrderedDict
 
 from storygraph.core.safeguard import swallow
@@ -1340,9 +1341,45 @@ class StagePreviewWindow(QDialog):
         note = self._audio.note() if self._sound_cb.isChecked() else ''
         if note:
             extra.append(f'（声音：{note}）')
+        # 字体那一行只在**真的面板**上问（`_summary_text` 也会被测试用
+        # 一个只有几个属性的替身调用；替身上没有这个方法就不该炸）。
+        font_fn = getattr(self, '_font_note', None)
+        font_note = font_fn(f) if font_fn else ''
+        if font_note:
+            extra.append(font_note)
         if not extra:
             return base
         return (base + '\n' if base else '') + '\n'.join(extra)
+
+    def _font_note(self, f) -> str:
+        """
+        这一句用的是**哪支字、从哪儿来的**（只在"引擎排版"下有话说）。
+
+        为什么值得占一行（2026-10-21）：预览画得像"引擎"，可字体是全局
+        `gui.text_font` 一把抓时，项目一旦用 `gui.dialogue_text_font` 或
+        `Character(what_font=…)` 换过字，预览画的就不是那一支 —— 看起来像，
+        其实不是。这里把"实际用的路径 + 来源"摊开，替换过的也一并说。
+        """
+        if not getattr(self, '_engine', False):
+            return ''
+        profile = getattr(self, '_profile', None)
+        if profile is None:
+            return ''
+        try:
+            speaker = str(getattr(f, 'speaker', '') or '')
+            display = str(getattr(f, 'display_speaker', '') or '')
+            path, src = profile.font_for(speaker, display, 'what')
+        except Exception as e:                    # noqa: BLE001 - 标注不该拦住预览
+            swallow('stage_preview._font_note', e)
+            return ''
+        if not path:
+            return '字体：找不到可用字体（与引擎不会一致）'
+        name = Path(str(path)).name
+        text = f'字体：{name}（{src}）'
+        subs = list(getattr(profile, 'fonts_substituted', []) or [])
+        if subs:
+            text += '；替代：' + '、'.join(subs[:2])
+        return text
 
     # ------------------------------------------------------------------
 

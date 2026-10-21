@@ -696,7 +696,10 @@ def _draw_say(canvas, frame, ctx, result):
     if who:
         who = (style.who_prefix or '') + who + (style.who_suffix or '')
         name_color = _color(style.who_color or profile.name_text_color)
-        font_path = profile.name_font_path or profile.text_font_path
+        # 名条字体：角色自己的 `who_font` 优先（与 Ren'Py 一致），否则全局。
+        font_path, _src = profile.font_for(
+            getattr(frame, 'speaker', ''),
+            str(getattr(frame, 'display_speaker', '') or ''), 'who')
         font = _load_font(font_path or '', int(profile.name_text_size))
         tmp = Image.new('RGBA', (10, 10))
         td = ImageDraw.Draw(tmp)
@@ -749,8 +752,14 @@ def _draw_say(canvas, frame, ctx, result):
     if style.what_suffix and not text.endswith(style.what_suffix):
         text = text + style.what_suffix
     base_color = _color(style.what_color or profile.text_color)
-    runs = text_runs(text, profile.text_size, base_color)
-    font_path = profile.text_font_path or ''
+    # 台词字体：角色自己的 `what_font` 优先，其次 `gui.dialogue_text_font`
+    # （`gui.text_properties("dialogue")` 的解析顺序），最后才是 `gui.text_font`。
+    dlg_size = profile.dialogue_text_size
+    runs = text_runs(text, dlg_size, base_color)
+    font_path, _src = profile.font_for(
+        getattr(frame, 'speaker', ''),
+        str(getattr(frame, 'display_speaker', '') or ''), 'what')
+    font_path = font_path or ''
     font_cache = {}
 
     def fonts(style_):
@@ -769,8 +778,8 @@ def _draw_say(canvas, frame, ctx, result):
     y = top + float(profile.values.get('dialogue_ypos') or 0)
     align = float(profile.values.get('dialogue_text_xalign') or 0)
     _draw_lines(canvas, lines, x, y, width, align,
-                profile.line_spacing, profile.text_outlines, result,
-                profile.text_size)
+                profile.line_spacing, profile.dialogue_text_outlines, result,
+                dlg_size)
 
 
 # ----------------------------------------------------------------------

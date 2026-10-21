@@ -113,6 +113,11 @@ class CharacterStyle:
     image_tag: str = ''
     name_var: str = ''
     kind: str = ''
+    #: `Character(..., what_font="…")` / `who_font="…"`：这一句台词 / 这个名条
+    #: 单独用的字体（相对路径，未解析）。2026-10-21：预览从前只按 gui 全局
+    #: 字体画，角色单独换字体时看着"像"，其实不是那一支。
+    what_font: str = ''
+    who_font: str = ''
 
 
 @dataclass
@@ -126,6 +131,16 @@ class GuiProfile:
     namebox_image: Optional[str] = None
     text_font_path: Optional[str] = None
     name_font_path: Optional[str] = None
+    #: **台词正文**实际会用的字体（`gui.dialogue_text_font` 优先于
+    #: `gui.text_font` —— Ren'Py 的 `gui.text_properties("dialogue")` 就是这么
+    #: 解析的）。`*_source` 记它是从哪个 key 来的，预览面板要把它说出来。
+    dialogue_font_path: Optional[str] = None
+    dialogue_font_source: str = ''
+    text_font_source: str = ''
+    name_font_source: str = ''
+    #: 角色单独指定的字体：`{角色 id: {'what': 路径, 'who': 路径}}`
+    #: （键缺省 = 那个角色用全局字体）。
+    char_font_paths: dict = field(default_factory=dict)
     characters: dict = field(default_factory=dict)   # id -> CharacterStyle
     names: dict = field(default_factory=dict)        # 显示名 -> CharacterStyle
     warnings: list = field(default_factory=list)
@@ -154,6 +169,17 @@ class GuiProfile:
         return float(self.values.get('text_size', 33.0))
 
     @property
+    def dialogue_text_size(self) -> float:
+        """台词正文的字号：`gui.dialogue_text_size` 优先，否则 `gui.text_size`。"""
+        raw = self.values.get('dialogue_text_size')
+        if raw in (None, ''):
+            return self.text_size
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return self.text_size
+
+    @property
     def name_text_size(self) -> float:
         return float(self.values.get('name_text_size', 45.0))
 
@@ -168,6 +194,14 @@ class GuiProfile:
     @property
     def text_outlines(self) -> list:
         return list(self.values.get('text_outlines') or [])
+
+    @property
+    def dialogue_text_outlines(self) -> list:
+        """台词的描边：`gui.dialogue_text_outlines` 优先，否则 `text_outlines`。"""
+        raw = self.values.get('dialogue_text_outlines')
+        if raw:
+            return list(raw)
+        return self.text_outlines
 
     @property
     def name_text_outlines(self) -> list:
@@ -192,6 +226,27 @@ class GuiProfile:
         if style is not None:
             return style
         return self.names.get(str(display or '')) or CharacterStyle(id=speaker)
+
+    # ---- 字体：谁在画哪一句（2026-10-21）----
+    def font_for(self, speaker: str, display: str = '', kind: str = 'what'):
+        """
+        这一句台词 / 这个名条**实际**用哪支字体 → `(路径, 来源说明)`。
+
+        优先级与 Ren'Py 一致：角色自己的 `what_font` / `who_font` 覆盖全局，
+        全局里 `dialogue_text_font` 覆盖 `text_font`（名条用 `name_text_font`）。
+        """
+        style = self.character_for(speaker, display)
+        over = (self.char_font_paths.get(style.id) or {}) if style.id else {}
+        key = 'who' if kind == 'who' else 'what'
+        if over.get(key):
+            return over[key], f'角色 {style.id} 的 {key}_font'
+        if key == 'who':
+            return (self.name_font_path or self.text_font_path or '',
+                    self.name_font_source or self.text_font_source
+                    or 'gui.name_text_font')
+        return (self.dialogue_font_path or self.text_font_path or '',
+                self.dialogue_font_source or self.text_font_source
+                or 'gui.text_font')
 
 
 # ----------------------------------------------------------------------
@@ -378,6 +433,20 @@ def _sdk_roots(project_root: Path) -> list:
     return out
 
 
+def _first_font_in_group(raw: str) -> str:
+    """
+    `FontGroup().add("fonts/a.ttf", "0x20-0x7f")…` → 第一支字体路径。
+
+    预览只有一支字体可用（PIL 不做按字符区间混排），所以取第一支并**说出来**
+    （见 `load_gui_profile` 的 FontGroup 分支）。
+    """
+    text = str(raw or '')
+    m = re.search(r'\.add\(\s*["\']([^"\']+\.(?:ttf|otf|ttc))["\']', text, re.I)
+    if not m:
+        m = re.search(r'["\']([^"\']+\.(?:ttf|otf|ttc))["\']', text, re.I)
+    return m.group(1) if m else ''
+
+
 def _font_probe_paths(project_root: Path, rel: str) -> list:
     """
     字体在**项目内**会被查的路径（含不存在的那几个）。
@@ -545,12 +614,55 @@ def _parse_characters(texts: dict, registry_names: dict | None = None):
                 image_tag=str(kw.get('image') or ''),
                 name_var=name_var,
                 kind=str(kw.get('kind') or ''),
+                what_font=str(kw.get('what_font') or ''),
+                who_font=str(kw.get('who_font') or ''),
             )
             by_id[m.group('id')] = style
             if style.name:
                 by_name.setdefault(style.name, style)
             i = j
     return by_id, by_name, warnings
+
+
+def _resolve_char_fonts(profile: 'GuiProfile', root: Path) -> None:
+    """
+    角色级的 `what_font` / `who_font` → 绝对路径（就地写进 `char_font_paths`）。
+
+    为什么放在角色解析之后（2026-10-21）：`load_gui_profile` 先读 gui 再读
+    `Character(...)`，字体那一段跑的时候 `profile.characters` 还是空的 ——
+    在这之前算就是永远算不到（实测：`char_font_paths` 恒为 `{}`）。
+
+    找不到字体时**明说**并按全局字体画：预览宁可"字不一样但知道"，也不要
+    "看着像、其实不是"。
+    """
+    for cid, style in (profile.characters or {}).items():
+        got = {}
+        for key, rel in (('what', style.what_font), ('who', style.who_font)):
+            if not rel:
+                continue
+            path = (_find_file(root, rel)
+                    or next((str(p) for p in _font_candidates(root, rel)
+                             if p.is_file()), None))
+            # 只认**同名**的那支：`_font_candidates` 最后会退到系统字体
+            # （msyh 之类），拿它顶角色字体等于"静默换字"—— 宁可回全局字体
+            # 并把话说出来（与全局字体那条"同名才算同一个"一致）。
+            if path and Path(path).name.lower() == Path(rel).name.lower():
+                got[key] = path
+            elif path:
+                profile.warnings.append(
+                    f'角色 {cid} 的 {key}_font {rel} 找不到，'
+                    f'按全局字体画（找到的是 {Path(path).name}）')
+                profile.fonts_substituted.append(f'{rel} → 全局字体')
+            else:
+                profile.warnings.append(
+                    f'角色 {cid} 的 {key}_font 找不到（{rel}），按全局字体画')
+                profile.fonts_substituted.append(f'{rel} → 全局字体')
+            # 字体文件出现/消失也要让缓存失效（见 `font_probe`）
+            extra = tuple((str(p), p.is_file())
+                          for p in _font_probe_paths(root, rel))
+            profile.font_probe = tuple(profile.font_probe) + extra
+        if got:
+            profile.char_font_paths[cid] = got
 
 
 def _parse_say_screen(texts: dict) -> tuple:
@@ -671,6 +783,16 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     # 字体
     font_rel = str(values.get('text_font') or 'DejaVuSans.ttf')
     name_rel = str(values.get('name_text_font') or font_rel)
+    # **FontGroup**（`FontGroup().add("a.ttf", "0x20-0x7f")…`）预览模拟不了：
+    # 它是"按字符区间混排多支字体"，PIL 只能画一支。这里取**第一支**并明说，
+    # 绝不让用户以为预览的字形就是引擎的（2026-10-21）。
+    if 'FontGroup' in str(raw.get('text_font') or ''):
+        first = _first_font_in_group(str(raw.get('text_font') or ''))
+        profile.warnings.append(
+            'gui.text_font 是 FontGroup（混排字体），预览不模拟 —— '
+            f'这里用其中第一支 {Path(first).name if first else "（找不到）"}，'
+            '字形可能与引擎不同')
+        font_rel = first or font_rel
     requested_font = _find_file(root, font_rel)
     candidates = _font_candidates(root, font_rel)
     profile.text_font_path = (requested_font
@@ -697,9 +819,35 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
         used = Path(profile.name_font_path).name
         profile.fonts_substituted.append(f'{name_rel} → {used}')
 
+    # 来源标签：预览面板要能回答"这一句用的是哪支字、从哪儿来的"
+    profile.text_font_source = 'gui.text_font'
+    profile.name_font_source = ('gui.name_text_font'
+                                if values.get('name_text_font')
+                                else 'gui.text_font')
+    # **台词正文**：`gui.text_properties("dialogue")` 会优先用
+    # `gui.dialogue_text_font` —— 只读 `text_font` 时，项目一覆盖字体/字号，
+    # 预览画的就是另一支字（2026-10-21 补）。
+    dlg_rel = str(values.get('dialogue_text_font') or '')
+    if dlg_rel:
+        dlg_path = (_find_file(root, dlg_rel)
+                    or next((str(p) for p in _font_candidates(root, dlg_rel)
+                             if p.is_file()), None))
+        profile.dialogue_font_path = dlg_path or profile.text_font_path
+        profile.dialogue_font_source = 'gui.dialogue_text_font'
+        if dlg_path and Path(dlg_path).name.lower() != \
+                Path(dlg_rel).name.lower():
+            profile.fonts_substituted.append(f'{dlg_rel} → {Path(dlg_path).name}')
+    else:
+        profile.dialogue_font_path = profile.text_font_path
+        profile.dialogue_font_source = 'gui.text_font'
+
+    # 角色单独指定的字体要等角色解析完才能做（见函数末尾 `_resolve_char_fonts`）。
     # 记下"字体查过哪些路径、当时在不在"：缓存命中时复核（见 font_probe）。
     probe = []
-    for rel in (font_rel, name_rel):
+    probe_rels = [font_rel, name_rel]
+    if values.get('dialogue_text_font'):
+        probe_rels.append(str(values.get('dialogue_text_font')))
+    for rel in probe_rels:
         for p in _font_probe_paths(root, rel):
             item = (str(p), p.is_file())
             if item not in probe:
@@ -731,6 +879,7 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     profile.characters = by_id
     profile.names = by_name
     profile.warnings.extend(warnings)
+    _resolve_char_fonts(profile, root)
 
     _CACHE[key] = profile
     # 只留最近几份，避免长期运行时缓存无限长
