@@ -30,12 +30,18 @@ GENERATED_SUFFIX = '.generated.rpy'
 #: `label 名字:`（行首、允许缩进）。只用来回答"这个 label 在哪个文件里"，
 #: 不替代解析器 —— 跑一次正则比解析 40 个文件快得多，而且这个问题
 #: （"还缺哪个文件"）只在用户导入时问一次。
-_LABEL_RE = re.compile(r'^[ \t]*label[ \t]+([A-Za-z_]\w*)[ \t]*(?:\([^)]*\))?[ \t]*:',
-                       re.MULTILINE)
+#:
+#: 名字允许点号分段（`main.route`）：解析器本来就是 `[\w.]+`，发现层
+#: 从前只认 `\w+`，于是这类 label 导入后永远补全不到（2026-10-22 实测）。
+_LABEL_RE = re.compile(
+    r'^[ \t]*label[ \t]+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
+    r'[ \t]*(?:\([^)]*\))?[ \t]*:', re.MULTILINE)
 
 #: `jump 名字` / `call 名字`（含 `call X from Y` 那种）。同样只用于
 #: "谁引用了这一章"这种导航性问题，不做语法判断。
-_REF_RE = re.compile(r'^[ \t]*(?:jump|call)[ \t]+([A-Za-z_]\w*)', re.MULTILINE)
+_REF_RE = re.compile(
+    r'^[ \t]*(?:jump|call)[ \t]+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)',
+    re.MULTILINE)
 
 
 def discover_scripts(project_root, extra_dirs=None) -> list:

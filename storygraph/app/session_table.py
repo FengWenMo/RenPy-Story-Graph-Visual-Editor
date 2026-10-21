@@ -161,11 +161,15 @@ class TableSessionMixin:
         """当前章节的顶层保真块（文档级真源，与第一拍在不在无关）。"""
         return self._chapter_doc().file_blocks
 
-    def load(self, path) -> int:
+    def load(self, path, label=None) -> int:
         """
         载入一个 .rpy，解析成 Beat 列表。返回拍数。
 
         与旧路径**同一条语义**：ParseResult → beats → 补 Stage → hydrate DSL。
+
+        `label` 只决定界面**先落到哪一拍**（同一个 .rpy 里可以有多个 label）。
+        它不改变"载入整个文件"这件事 —— 导出、保存、变量分析仍然面对整个文件。
+        找不到时由前端明确提示，并退回第 1 拍（`index_of_label()` 返回 -1）。
         """
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,
                                                      RenPyParser)
@@ -174,6 +178,9 @@ class TableSessionMixin:
         raw = beats_from_parse_result(pr)
         symbols = self.refresh_symbols()
         self.beats = list(raw)
+        #: 界面当前聚焦的 label（同一个文件里点第二个节点时用它定位）。
+        #: 空串 = 没指定，按老行为从第一拍开始。
+        self.focus_label = str(label or '').strip()
         for b in self.beats:
             b.stage = compose_stage_extra(b, symbols)
         hydrate_from_dsl(self.beats, symbols)
@@ -194,6 +201,31 @@ class TableSessionMixin:
         self.forget_undo()
         self._struct_undo = []          # 结构撤销栈同理：索引全变了
         return len(self.beats)
+
+    def label_names(self) -> list:
+        """这个文件里按出现顺序有哪些 label（去重；空 label 不列）。"""
+        out: list = []
+        for b in self.beats:
+            name = str(getattr(b, 'label', '') or '').strip()
+            if name and name not in out:
+                out.append(name)
+        return out
+
+    def index_of_label(self, label) -> int:
+        """
+        `label` 的第一拍在 `beats` 里的下标；找不到返回 -1。
+
+        为什么前端需要它：同一个 `.rpy` 可以有多个 label，而卡片页从前
+        只会 `_show_index(0)` —— 点第二个节点，打开的永远是文件第一拍。
+        数据层本来就知道每拍的 `label`，缺的只是这个查询。
+        """
+        wanted = str(label or '').strip()
+        if not wanted:
+            return 0
+        for i, b in enumerate(self.beats):
+            if str(getattr(b, 'label', '') or '').strip() == wanted:
+                return i
+        return -1
 
     @staticmethod
     def _fingerprint_of(path):

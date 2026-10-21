@@ -114,7 +114,7 @@ class CardPageMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_session', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
+    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_session', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
 
     def _on_load(self):
         start = str(Path(self._project_root or '.') / 'game')
@@ -123,32 +123,47 @@ class CardPageMixin:
             "Ren'Py 脚本 (*.rpy)")
         if path:
             self.load_script(path)
-    def load_script(self, path=None, goto_card: bool = True):
+    def load_script(self, path=None, goto_card: bool = True, label=None):
         """
         载入一章（**语义全在 EditorSession.load**）。
 
         `goto_card`：载入是"要在卡片界面里改这一章"，所以默认**跳进卡片页**；
         构造窗口时的自动载入传 False —— 第一屏必须是剧情结构（用户明确要求）。
+
+        `label`：同一个 `.rpy` 里有多个 label 时，落在**这个 label 的第一拍**，
+        而不是文件第 1 拍。点图上的第二个 label 节点走的就是这条路。
         """
         target = path or self._session.script_path
         if not target:
             return
         mark = self._swallow_mark()
         try:
-            n = self._session.load(target)
+            # 只有真要定位 label 时才传第二个参数：老调用方 / 测试里的
+            # `load(path)` 替身仍然能接住（少一个位置参数不破坏兼容）。
+            n = (self._session.load(target, label=label) if label
+                 else self._session.load(target))
             self._panel.set_symbols(self._session.symbols)
             self._sync_choice_groups()
             self._refresh_asset_choices()
             self._reload_list()
-            self._show_index(0)
+            idx = self._session.index_of_label(label) if label else 0
+            if label and idx < 0:
+                self._log(f'[载入] ⚠ {Path(target).name} 里没有 label '
+                          f'「{label}」—— 已退到第 1 拍')
+                self._status(f'{Path(target).name} 里找不到 label「{label}」，'
+                             f'已从第 1 拍打开。')
+                idx = 0
+            self._show_index(idx)
+            self._sync_label_combo()
             self._sync_graph_highlight()
             if goto_card:
                 self._set_page(self.PAGE_CARD)
             else:
                 self._update_crumb()
-            self._log(f'[载入] {Path(target).name}：{n} 拍'
+            where = f' · {label}' if label else ''
+            self._log(f'[载入] {Path(target).name}{where}：{n} 拍'
                       f'（{"进入卡片编辑器" if goto_card else "留在剧情结构页"}）')
-            self._status(f'已载入 {Path(target).name}：{n} 拍')
+            self._status(f'已载入 {Path(target).name}{where}：{n} 拍')
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '载入失败', str(e))
         finally:
@@ -231,13 +246,59 @@ class CardPageMixin:
         if self.graph is None or not self._session.script_path:
             return
         target = Path(self._session.script_path).resolve()
+        focus = str(getattr(self._session, 'focus_label', '') or '')
+        candidates = []
         for node in (self.graph.nodes or {}).values():
             fp = getattr(node, 'file_path', None)
             if fp and Path(str(fp)).resolve() == target:
-                self._canvas.highlight_node(node.id)
-                self._canvas.select_node(node.id)
-                self._on_canvas_select(node.id)
-                return
+                candidates.append(node)
+        if not candidates:
+            return
+        # 同一个文件里多个 label：**优先高亮当前 label**，不再永远命中第一个。
+        node = next((n for n in candidates
+                     if str(getattr(n, 'label_name', '') or '') == focus),
+                    candidates[0])
+        self._canvas.highlight_node(node.id)
+        self._canvas.select_node(node.id)
+        self._on_canvas_select(node.id)
+    def _sync_label_combo(self):
+        """
+        把"这个文件里有哪些 label"填进左栏下拉，并选中当前 label。
+
+        `blockSignals` 很重要：载入时 `addItems` 会发 `currentIndexChanged`，
+        不挡住就会在 `_show_index` 之前又跳一次。
+        """
+        combo = getattr(self, '_label_combo', None)
+        if combo is None:
+            return
+        labels = self._session.label_names()
+        current = str(getattr(self._session, 'focus_label', '') or '')
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for name in labels:
+                combo.addItem(name)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.setEnabled(len(labels) > 1)
+            combo.setToolTip(
+                f'这个 .rpy 里有 {len(labels)} 个 label；选一个就跳到它的第一拍'
+                if len(labels) > 1 else '这个 .rpy 里只有一个 label')
+        finally:
+            combo.blockSignals(False)
+    def _on_label_changed(self, index: int):
+        """左栏 label 下拉：切到那个 label 的第一拍（先提交当前卡片的改动）。"""
+        combo = getattr(self, '_label_combo', None)
+        if combo is None or index < 0:
+            return
+        label = combo.itemText(index)
+        target = self._session.index_of_label(label)
+        if target < 0 or target == self._loaded_idx:
+            return
+        self.apply_current_beat()
+        self._show_index(target)
+        self._sync_graph_highlight()
+        self._status(f'已切到 label「{label}」的第一拍（第 {target + 1} 拍）。')
     def _reload_list(self):
         self._list.blockSignals(True)
         self._list.clear()
@@ -520,6 +581,10 @@ class CardPageMixin:
         self._idx = idx
         # 告诉会话"前端现在显示这一拍"（`undo()` 不带参数时的默认目标）
         self._session.mark_loaded(idx)
+        # 当前 label 跟着**实际显示的那一拍**走：翻到别的 label 时，
+        # 面包屑 / 下拉 / 图上的高亮都应当一起变。
+        self._session.focus_label = str(
+            getattr(self._session.beats[idx], 'label', '') or '')
         self._panel.load_fields(self._session.fields(idx),
                                 self._session.cards(idx))
         self._sync_spec_args(idx)
@@ -529,6 +594,7 @@ class CardPageMixin:
         self._list.blockSignals(True)
         self._list.setCurrentRow(idx)
         self._list.blockSignals(False)
+        self._sync_label_combo()
         self._status_bar.set_dirty(False, self._file_path)
         self._update_nav()
         self._sync_undo_button()

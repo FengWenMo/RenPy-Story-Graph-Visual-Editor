@@ -1521,6 +1521,9 @@ class TestGraphDialogs:
         from storygraph.ui_qt.dialogs import valid_label
         assert valid_label('chapter_02')
         assert valid_label('_x1')
+        assert valid_label('main.route'), '点号 label 解析器认，创建也要认'
+        assert not valid_label('main..route'), '连续点号不是合法分段'
+        assert not valid_label('main.'), '结尾不能悬着一个点'
         assert not valid_label('第二章'), '中文 label 会生成跑不起来的脚本'
         assert not valid_label('2start'), '不能以数字开头'
         assert not valid_label('a b'), '不能有空格'

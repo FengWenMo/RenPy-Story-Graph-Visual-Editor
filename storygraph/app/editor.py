@@ -149,6 +149,8 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
                              if project_root is not None else None)
         self.script_path: Optional[Path] = None
         self.beats: List[Beat] = []
+        #: 界面当前聚焦的 label（同一文件多 label 时用来定位第一拍）。
+        self.focus_label = ''
         #: **章节级真源**（顶层 `init python` / `default` / `define` …）。
         #: 拍上的 `file_blocks` 只是给渲染/Excel 的传输副本 —— 见
         #: `story.chapter.ChapterDocument`（P0-2：删第一拍不许丢顶层块）。

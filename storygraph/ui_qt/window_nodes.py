@@ -34,10 +34,10 @@ from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QTextCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
-                               QSplitter, QStackedWidget, QToolBar,
+                               QFrame, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QScrollArea, QSplitter, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget)
 
 from storygraph.ui_qt import tokens as T
@@ -114,46 +114,258 @@ class NodeEditMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph')
+    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_session', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapter_files', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph')
 
     def _selected_node(self):
         nid = self._canvas.selected_node_id()
         return (self.graph.nodes or {}).get(nid) if (self.graph and nid) else None
+    def _source_info(self, node) -> dict:
+        """
+        这个节点**现在**属于哪种来源状态（2026-10-22 用户反馈）。
+
+        从前只用一个 `file_path` 布尔值，把三种完全不同的情况混成
+        「（无源文件）」：
+
+          · `bound`   有路径且文件在 → 能打开卡片；
+          · `found`   没有路径，但项目里能找到声明它的 `.rpy`
+                      （别的章节 jump/call 过来的占位块）→ 可一键导入绑定；
+          · `manual`  没有路径，项目里也找不到 → 手工节点，要新建/绑定；
+          · `missing` 有路径，但磁盘上文件没了 → 要重新定位或新建。
+
+        状态不同，右栏主按钮就该不同 —— 不能再出现"可点但必然报错"。
+        """
+        label = str(getattr(node, 'label_name', '') or '')
+        fp = getattr(node, 'file_path', None)
+        if fp and Path(str(fp)).exists():
+            return {'kind': 'bound', 'label': label, 'file': str(fp)}
+        if fp:
+            return {'kind': 'missing', 'label': label, 'file': str(fp)}
+        root = getattr(self, '_project_root', None)
+        if root and label:
+            try:
+                from storygraph.parsing.discover import find_label_files
+                found = find_label_files(root, [label])
+            except Exception as e:                # noqa: BLE001 - 扫描失败按手工处理
+                swallow('ui_qt.window_nodes.source_info', e)
+                found = {}
+            path = found.get(label)
+            if path:
+                return {'kind': 'found', 'label': label, 'file': str(path)}
+        return {'kind': 'manual', 'label': label, 'file': ''}
+
     def _on_canvas_select(self, nid):
-        """左键选中模块 → 右栏"当前模块"跟着变（旧版 `_update_chapter_label`）。"""
+        """左键选中模块 → 右栏"当前模块"和**主按钮**跟着状态变。"""
         # 命令对象要读 `selected_node`（旧版视图接口），这里跟着同步
         self.selected_node = nid
         self.selected_edge = None
         node = (self.graph.nodes or {}).get(nid) if (self.graph and nid) else None
+        info = self._source_info(node) if node is not None else {}
+        self._selected_source_info = info
         name = getattr(node, 'label_name', '') if node else ''
-        fp = getattr(node, 'file_path', None) if node else None
         if node is None:
             self._chapter_label.setText('（在图上点一个模块）')
-        elif fp:
-            self._chapter_label.setText(f'{name}　·　{Path(str(fp)).name}')
-        else:
+        elif info.get('kind') == 'bound':
             self._chapter_label.setText(
-                f'{name}　·　（这一章的文件还没导入：别的章节跳到了它）')
-        for btn in (getattr(self, '_open_script_btn', None),
-                    getattr(self, '_edit_vars_btn', None)):
-            if btn is not None:
-                btn.setEnabled(node is not None)
+                f'{name}　·　{Path(str(info["file"])).name}')
+        elif info.get('kind') == 'found':
+            self._chapter_label.setText(
+                f'{name}　·　未绑定（在 {Path(str(info["file"])).name} 里找到）')
+        elif info.get('kind') == 'missing':
+            self._chapter_label.setText(
+                f'{name}　·　源文件丢失：{Path(str(info["file"])).name}')
+        else:
+            self._chapter_label.setText(f'{name}　·　手工节点，还没有源文件')
+
+        btn = getattr(self, '_open_script_btn', None)
+        if btn is not None:
+            kind = info.get('kind')
+            if kind == 'bound':
+                btn.setText('✎ 打开本章剧本（改台词）')
+                btn.setToolTip('进入卡片编辑器改这一章的台词（也可右键模块 → 改本章台词）')
+                btn.setEnabled(True)
+            elif kind == 'found':
+                btn.setText('🔗 导入并绑定源文件')
+                btn.setToolTip(
+                    f'项目里的 {Path(str(info["file"])).name} 声明了「{name}」；'
+                    f'点一下导入该文件并把节点绑上去')
+                btn.setEnabled(True)
+            elif kind in ('manual', 'missing'):
+                btn.setText('🩹 给这个节点建/绑源文件')
+                btn.setToolTip('还没有可编辑的 .rpy：可以新建一个，或绑定已有文件')
+                btn.setEnabled(True)
+            else:
+                btn.setText('✎ 打开本章剧本（改台词）')
+                btn.setEnabled(False)
+
+        edit_btn = getattr(self, '_edit_vars_btn', None)
+        if edit_btn is not None:
+            edit_btn.setEnabled(node is not None)
+
     def _on_connect_requested(self, from_id, to_id):
         """Shift + 左键从一个块拖到另一个块 → 弹旧版那张"选择跳转类型"对话框。"""
         self.add_edge(from_id=from_id, to_id=to_id)
+
     def _on_node_open(self, nid):
-        """进卡片编辑器打开这一章（右栏「✎ 打开本章剧本」/ 右键菜单）。"""
+        """进卡片编辑器打开这一章（右栏主按钮 / 右键菜单）。"""
         node = (self.graph.nodes or {}).get(nid) if self.graph else None
         if node is None:
             return
-        fp = getattr(node, 'file_path', None)
-        if not fp or not Path(str(fp)).exists():
-            self._status(f'「{node.label_name}」没有关联到源文件'
-                         f'（这个块是手工新建的，或者在图上但磁盘上已删）——'
-                         f'用「➕ 导入章节 .rpy」重新导入那个文件即可。')
+        info = self._source_info(node)
+        if info.get('kind') != 'bound':
+            # 没有源文件时**不要**先报一句错再让用户自己找入口：
+            # 主按钮就是修复入口（2026-10-22 用户："怎么把无源搞成有源？"）。
+            self._repair_node_source(nid, info)
             return
-        self.load_script(fp, goto_card=True)
+        self.load_script(info['file'], goto_card=True, label=node.label_name)
         self._canvas.highlight_node(nid)
+
+    def _repair_node_source(self, nid, info=None):
+        """
+        无源节点的修复入口（可重复调用）：
+
+          · 占位块（项目里找得到声明）→ 导入那个文件并绑定；
+          · 手工节点 → 新建 `.rpy` / 绑定已有文件；
+          · 源文件丢失 → 在原路径新建 / 重新定位。
+        """
+        node = (self.graph.nodes or {}).get(nid) if self.graph else None
+        if node is None:
+            return
+        info = info or self._source_info(node)
+        kind = info.get('kind')
+        label = str(getattr(node, 'label_name', '') or '')
+
+        if kind == 'found':
+            path = info.get('file') or ''
+            ans = QMessageBox.question(
+                self, '导入并绑定源文件',
+                f'「{label}」在项目里的这个文件里：\n{path}\n\n'
+                f'现在导入它，并把这个节点绑上去？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans == QMessageBox.Yes:
+                self._import_and_open(path, label)
+            return
+
+        if kind == 'missing':
+            path = info.get('file') or ''
+            choice = self._repair_choice(
+                '源文件丢失',
+                f'「{label}」记着这个文件，但磁盘上已经不在了：\n{path}\n\n'
+                f'要在原路径重新建一个最小骨架，还是重新定位到别的文件？',
+                [('new', '在原路径新建'), ('locate', '重新定位…'),
+                 ('cancel', '取消')])
+            if choice == 'new':
+                wrote = _write_new_chapter(self, path, label)
+                if wrote:
+                    self._import_and_open(wrote, label)
+            elif choice == 'locate':
+                self._locate_and_bind(label, start=Path(path).parent)
+            return
+
+        # 手工节点：先看项目里有没有同名 label —— 有就直接给"导入并绑定"，
+        # 没有才让用户新建/绑定。
+        root = getattr(self, '_project_root', None)
+        candidates = []
+        if root:
+            try:
+                from storygraph.parsing.discover import find_label_files
+                found = find_label_files(root, [label])
+                if found.get(label):
+                    candidates = [str(found[label])]
+            except Exception as e:                # noqa: BLE001
+                swallow('ui_qt.window_nodes.repair_find', e)
+        if candidates:
+            ans = QMessageBox.question(
+                self, '导入并绑定源文件',
+                f'项目里已经有「{label}」：\n{candidates[0]}\n\n'
+                f'导入它并绑定到这个节点？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans == QMessageBox.Yes:
+                self._import_and_open(candidates[0], label)
+            return
+
+        choice = self._repair_choice(
+            '给节点配源文件',
+            f'「{label}」现在只是图上的一个块，还没有 `.rpy`。\n\n'
+            f'新建一个源文件，或者绑定项目里已有的文件？',
+            [('new', '新建 .rpy…'), ('locate', '绑定已有文件…'),
+             ('cancel', '取消')])
+        if choice == 'new':
+            self._create_source_for_node(label, nid)
+        elif choice == 'locate':
+            self._locate_and_bind(label, start=None)
+
+    def _repair_choice(self, title: str, text: str, buttons) -> str:
+        """带自定义按钮文字的询问框 → 返回按钮 key（没有则 'cancel'）。"""
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setIcon(QMessageBox.Question)
+        made = {}
+        for key, label in buttons:
+            role = (QMessageBox.Cancel if key == 'cancel'
+                    else QMessageBox.AcceptRole)
+            made[key] = box.addButton(label, role)
+        box.exec()
+        for key, button in made.items():
+            if box.clickedButton() is button:
+                return key
+        return 'cancel'
+
+    def _create_source_for_node(self, label: str, nid=None):
+        """给手工节点新建一个最小 `.rpy`，导入并打开。"""
+        root = getattr(self, '_project_root', None)
+        default = (str(Path(root) / 'game' / f'{label}.rpy')
+                   if root else f'{label}.rpy')
+        path, _ = QFileDialog.getSaveFileName(
+            self, '给节点新建源文件', default, "Ren'Py 脚本 (*.rpy)")
+        if not path:
+            return
+        if not path.lower().endswith('.rpy'):
+            self._status('源文件必须以 .rpy 结尾。')
+            return
+        wrote = _write_new_chapter(self, path, label)
+        if wrote:
+            self._import_and_open(wrote, label)
+
+    def _locate_and_bind(self, label: str, start=None):
+        """选一个已有的 `.rpy`，确认里面真有这个 label，再导入绑定。"""
+        start_dir = str(start or (Path(self._project_root or '.') / 'game'))
+        path, _ = QFileDialog.getOpenFileName(
+            self, f'找到声明「{label}」的 .rpy', start_dir,
+            "Ren'Py 脚本 (*.rpy)")
+        if not path:
+            return
+        try:
+            from storygraph.story.source_style import read_text
+            text = read_text(Path(path))[0]
+        except OSError as e:
+            self._status(f'读不了这个文件：{e}')
+            return
+        if not _has_label(text, label):
+            self._status(f'{Path(path).name} 里没有 label「{label}」——'
+                         f'没有绑定（避免把节点指到错的文件）。')
+            return
+        self._import_and_open(path, label)
+
+    def _import_and_open(self, path: str, label: str):
+        """导入一个文件（会更新同名节点的 `file_path`），再打开那个 label。"""
+        res = self.import_chapter_files([path]) or {}
+        if not res.get('ok', True):
+            self._status(f'导入 {Path(path).name} 失败：'
+                         f'{res.get("error") or "未知原因"}')
+            return
+        node = next((n for n in ((self.graph.nodes or {}).values()
+                                 if self.graph else [])
+                     if str(getattr(n, 'label_name', '') or '') == label),
+                    None)
+        if node is None:
+            self._status(f'{Path(path).name} 导入完了，但图里没找到「{label}」——'
+                         f'检查文件里 label 的写法。')
+            return
+        self.load_script(path, goto_card=True, label=label)
+        self._canvas.highlight_node(node.id)
+        self._status(f'✔ 已把「{label}」绑定到 {Path(path).name}，'
+                     f'并打开它的第一拍。')
     def open_node_in_editor(self, nid):
         """旧版右键菜单里的「在编辑器中打开」：用系统默认程序打开那个 .rpy。"""
         from storygraph.graph.editor_utils import open_with_system_default
@@ -193,11 +405,21 @@ class NodeEditMixin:
                                if has_src else None),
             ]
             if not has_src:
+                # 没有源文件的块：**先给修复入口**，再把三条"打开"置灰。
+                # 从前只有置灰，用户完全不知道该点哪里（2026-10-22 实测）。
+                info = self._source_info(node)
+                label = ('导入并绑定源文件…' if info.get('kind') == 'found'
+                         else '新建 / 绑定源文件…')
+                menu.addAction(label, lambda: self._repair_node_source(nid))
                 # 没有源文件的块点了也没用 —— 置灰比"点完再弹一句"友好
                 for a in targets:
                     a.setEnabled(False)
                     a.setToolTip('该块未关联源文件'
                                  '（手工新建的块，或先「➕ 导入章节」）')
+            else:
+                # 同一个 .rpy 里加第二个 label：不用离开工具、不用手打路径。
+                menu.addAction('在本文件新建 label…',
+                               lambda: self.add_label_to_file(nid))
             menu.addSeparator()
             menu.addAction('设为当前章节',
                            lambda: self._canvas.highlight_node(nid))
@@ -247,7 +469,13 @@ class NodeEditMixin:
         # 行为与从前一致（只在图里画结构）。
         default_dir = (str(Path(self._project_root) / 'game')
                        if getattr(self, '_project_root', None) else '')
-        dlg = AddNodeDialog(self, existing=existing, default_dir=default_dir)
+        known = []
+        try:
+            known = self._session.graph_files(self.graph) if self.graph else []
+        except Exception as e:                  # noqa: BLE001 - 下拉没有也不影响手填
+            swallow('ui_qt.window_nodes.known_files', e)
+        dlg = AddNodeDialog(self, existing=existing, default_dir=default_dir,
+                            known_files=known)
         if dlg.exec() != QDialog.Accepted:
             return
         # **把"无源文件"变成"有源文件"**（2026-10-21 用户实测报的那条：
@@ -282,7 +510,68 @@ class NodeEditMixin:
                          f'—— 现在双击它就能编辑剧本。Ctrl+Z 可撤销。')
         else:
             self._status(f'已新建章节「{dlg.name}」（只在图里，还没有源文件；'
-                         f'双击后可用「导出」给它建立 .rpy）。Ctrl+Z 可撤销。')
+                         f'右键它 →「新建 / 绑定源文件…」，'
+                         f'或点右栏主按钮就能配源文件）。Ctrl+Z 可撤销。')
+
+    def add_label_to_file(self, nid=None):
+        """
+        在**这个节点所属的同一个 `.rpy`** 里追加一个新 label，并打开它。
+
+        用户 2026-10-22：
+        > 我想在一个 rpy 文件里写出第二个 label 该怎么操作？
+        > 我就不打开编辑器！我就要在这个工具内改！
+
+        与「新建章节 → 写入文件填已有路径」是同一个落盘动作，但这里
+        文件已经确定，只问 label 名 —— 不需要用户手打完整路径。
+        """
+        node = ((self.graph.nodes or {}).get(nid) if (self.graph and nid)
+                else self._selected_node())
+        if node is None:
+            self._status('先在图上点一个模块，再在它的文件里新建 label。')
+            return
+        fp = getattr(node, 'file_path', None)
+        if not fp or not Path(str(fp)).exists():
+            self._status('这个块还没有源文件 —— 先用「新建 / 绑定源文件…」。')
+            self._repair_node_source(node.id)
+            return
+        from storygraph.ui_qt.dialogs import valid_label
+        name, ok = QInputDialog.getText(
+            self, '在本文件新建 label',
+            f'文件：{Path(str(fp)).name}\n新 label 名（可以用点号，如 main.route）：')
+        name = str(name or '').strip()
+        if not ok or not name:
+            return
+        if not valid_label(name):
+            self._status('label 名不合法：只能字母/数字/下划线，'
+                         '可用点号分段，且不能以数字开头。')
+            return
+        if any(str(getattr(n, 'label_name', '') or '') == name
+               for n in (self.graph.nodes or {}).values()):
+            self._status(f'图上已经有「{name}」了 —— 换个名字。')
+            return
+        try:
+            from storygraph.story.source_style import read_text
+            text = read_text(Path(fp))[0]
+        except OSError as e:
+            self._status(f'读不了 {Path(fp).name}：{e}')
+            return
+        if _has_label(text, name):
+            self._status(f'{Path(fp).name} 里已经有 label「{name}」了。')
+            return
+        wrote = _write_new_chapter(self, str(fp), name)
+        if not wrote:
+            return
+        from storygraph.graph.commands import AddNodeCommand
+        cmd = AddNodeCommand(self, name, float(node.x) + 60.0,
+                             float(node.y) + 160.0, file_path=str(fp))
+        self._run_command(cmd)
+        if getattr(cmd, 'node_id', None) is not None:
+            self._canvas.highlight_node(cmd.node_id)
+            self._canvas.select_node(cmd.node_id, center=False)
+        self.load_script(str(fp), goto_card=True, label=name)
+        self._status(f'✔ 已在 {Path(fp).name} 里追加 label「{name}」，'
+                     f'并打开它的第一拍。Ctrl+Z 只撤图上的块，文件改动需手动撤。')
+
     def add_edge(self, from_id=None, to_id=None):
         """
         加一条连线。

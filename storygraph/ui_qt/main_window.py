@@ -1811,12 +1811,24 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 
         split = QSplitter(Qt.Horizontal)
 
-        # —— 左：章节（拍）/ 参与角色 ——
+        # —— 左：章节（label）/ 拍 / 参与角色 ——
         left = QWidget()
         lay = QVBoxLayout(left)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(T.SPACE['xs'])
-        cap1 = QLabel('章节（拍）')
+        # 同一个 `.rpy` 可以有很多 label。没有这一行时，用户点第二个 label
+        # 的节点只能看到文件第一拍（2026-10-22 实测报的）。
+        label_row = QHBoxLayout()
+        label_row.setSpacing(T.SPACE['xs'])
+        label_cap = QLabel('章节（label）')
+        label_cap.setProperty('role', 'section')
+        label_row.addWidget(label_cap, 0)
+        self._label_combo = QComboBox()
+        self._label_combo.setToolTip('同一个 .rpy 里的 label；选一个跳到它的第一拍')
+        self._label_combo.currentIndexChanged.connect(self._on_label_changed)
+        label_row.addWidget(self._label_combo, 1)
+        lay.addLayout(label_row)
+        cap1 = QLabel('拍（当前 label 的卡片）')
         cap1.setProperty('role', 'section')
         lay.addWidget(cap1)
         self._list = QListWidget()
@@ -2091,10 +2103,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._update_nav()
 
     def _update_crumb(self):
-        """面包屑：`剧情结构 › 文件名 › 第 i / n 拍`。"""
+        """面包屑：`剧情结构 › 文件名 › label › 第 i / n 拍`。"""
         if not hasattr(self, '_crumb'):
             return
         name = Path(self._file_path).name if self._file_path else ''
+        label = str(getattr(self._session, 'focus_label', '') or '')
         n = len(self._session)
         i = self._loaded_idx
         if self._page == self.PAGE_GRAPH:
@@ -2102,7 +2115,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._crumb_hint.setText(
                 f'当前模块：{name}' if name else '（双击一个模块进卡片编辑器）')
         else:
-            self._crumb.setText(f'剧情结构 › {name or "（未载入）"}')
+            where = f'{name or "（未载入）"}'
+            if label:
+                where += f' › {label}'
+            self._crumb.setText(f'剧情结构 › {where}')
             self._crumb_hint.setText(
                 f'第 {i + 1 if i >= 0 else 0} / {n} 拍'
                 f'{self._beat_lines_hint(i)}'
@@ -2145,13 +2161,18 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         """工具栏「✎ 编辑这一章的卡片」：优先画布选中的模块。"""
         nid = self._canvas.selected_node_id()
         if nid is None and self._file_path and self.graph is not None:
-            # 没选块：把当前会话那一章对应的模块找出来
+            # 没选块：把当前会话那一章对应的模块找出来（同一文件多 label 时
+            # 优先当前 label，别又回第一个）
             target = Path(self._file_path).resolve()
-            for node in (self.graph.nodes or {}).values():
-                fp = getattr(node, 'file_path', None)
-                if fp and Path(str(fp)).resolve() == target:
-                    nid = node.id
-                    break
+            focus = str(getattr(self._session, 'focus_label', '') or '')
+            matches = [n for n in (self.graph.nodes or {}).values()
+                       if getattr(n, 'file_path', None)
+                       and Path(str(n.file_path)).resolve() == target]
+            hit = next((n for n in matches
+                        if str(getattr(n, 'label_name', '') or '') == focus),
+                       matches[0] if matches else None)
+            if hit is not None:
+                nid = hit.id
         if nid is None:
             self._status('先在图上点一个模块（或双击它），再进卡片编辑器。')
             return

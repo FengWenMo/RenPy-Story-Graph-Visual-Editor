@@ -24,16 +24,19 @@ from pathlib import Path
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPlainTextEdit, QPushButton,
-                               QVBoxLayout)
+                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QPlainTextEdit,
+                               QPushButton, QVBoxLayout, QWidget)
 
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 
-#: Ren'Py label 名：字母/数字/下划线，不以数字开头。
+#: Ren'Py label 名：字母/数字/下划线，不以数字开头；允许点号分段
+#: （`main.route` / `side.choice` —— 真实项目里用点号做层级很常见，
+#: 解析器 `[\w.]+` 本来就认，创建这边不该比解析器更窄）。
 #: （中文、空格、短横线都会生成**跑不起来**的脚本，必须在这里挡住。）
-_LABEL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_LABEL_RE = re.compile(
+    r'^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$')
 
 
 def valid_label(name: str) -> bool:
@@ -313,7 +316,8 @@ class AddNodeDialog(_BaseDialog):
     `name`：label 名。`operations`：可选的多行初始化代码（`$ x = 1`）。
     """
 
-    def __init__(self, parent=None, existing=(), default_dir=None):
+    def __init__(self, parent=None, existing=(), default_dir=None,
+                 known_files=()):
         super().__init__(parent, '添加新章节')
         self._existing = set(existing or ())
         self.name = ''
@@ -326,16 +330,42 @@ class AddNodeDialog(_BaseDialog):
         form = QFormLayout()
         form.setSpacing(T.SPACE['sm'])
         self._name = QLineEdit()
-        self._name.setPlaceholderText('英文 label 名，例如 chapter_02')
+        self._name.setPlaceholderText('英文 label 名，例如 chapter_02 或 main.route')
         self._name.textChanged.connect(lambda *_: self._sync_default_file())
         self._name.textChanged.connect(lambda *_: self._ok())
         form.addRow('章节名（label）', self._name)
 
+        # "写入文件"：**浏览按钮 + 已导入文件下拉**，不再要求用户手打
+        # 完整路径（2026-10-22 用户："我就不打开编辑器！我就要在工具内改！"）。
         self._file = QLineEdit()
         self._file.setPlaceholderText(
             '留空 = 只在图里画结构（不建文件，双击后没有剧本可编辑）')
         self._file.textChanged.connect(self._on_file_edited)
-        form.addRow('写入文件', self._file)
+        file_row = QWidget()
+        file_lay = QHBoxLayout(file_row)
+        file_lay.setContentsMargins(0, 0, 0, 0)
+        file_lay.setSpacing(T.SPACE['xs'])
+        file_lay.addWidget(self._file, 1)
+        self._browse_btn = QPushButton('选已有…')
+        self._browse_btn.setToolTip('选一个已有 .rpy（会往它末尾追加这个 label）')
+        self._browse_btn.clicked.connect(self._pick_existing_file)
+        file_lay.addWidget(self._browse_btn, 0)
+        self._new_btn = QPushButton('新建…')
+        self._new_btn.setToolTip('选一个新的 .rpy 位置（不存在才新建）')
+        self._new_btn.clicked.connect(self._pick_new_file)
+        file_lay.addWidget(self._new_btn, 0)
+        form.addRow('写入文件', file_row)
+
+        self._known = QComboBox()
+        self._known.setToolTip(
+            '从剧情图里已经导入的 .rpy 里选一个；选了就往它末尾追加 label')
+        self._known.addItem('（新建文件 / 手动填写）', '')
+        for path in (known_files or ()):
+            p = str(path or '')
+            if p:
+                self._known.addItem(Path(p).name, p)
+        self._known.currentIndexChanged.connect(self._on_known_changed)
+        form.addRow('已导入文件', self._known)
 
         self._ops = QPlainTextEdit()
         self._ops.setPlaceholderText('可选：初始化代码，一行一条，例如\n'
@@ -350,8 +380,9 @@ class AddNodeDialog(_BaseDialog):
 
         hint = QLabel(
             "章节名会成为 Ren'Py 的 label —— "
-            "只能用字母/数字/下划线，且不能以数字开头。\n"
-            "「写入文件」非空时**先把它写进脚本**（`label 名:` + `return`），"
+            "只能字母/数字/下划线（可用点号分段，如 main.route），"
+            "且不能以数字开头。\n"
+            "「写入文件」非空时会先把它写进脚本（`label 名:` + `return`），"
             "双击就能编辑；填一个**已有的 .rpy** 就往那个文件末尾追加"
             "第二个 label（一个文件放多章是合法的）；留空则只是图上的一个方块，"
             "之后用「⤓ 导出」或「➕ 导入章节」再给它配文件。")
@@ -362,6 +393,37 @@ class AddNodeDialog(_BaseDialog):
         self._name.setFocus()
 
     # ------------------------------------------------------------------
+
+    def _pick_existing_file(self):
+        """选一个已有 `.rpy`，填进「写入文件」（会追加 label，不覆盖）。"""
+        current = self._file.text().strip()
+        start = current or (str(Path(self._default_dir) / 'chapter.rpy')
+                            if self._default_dir else '')
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选一个已有 .rpy（会往末尾追加 label）', start,
+            "Ren'Py 脚本 (*.rpy)")
+        if path:
+            self._file.setText(path)
+            self._file_edited = True
+
+    def _pick_new_file(self):
+        """选一个新的 `.rpy` 位置，填进「写入文件」。"""
+        current = self._file.text().strip()
+        start = current or (str(Path(self._default_dir) / 'chapter.rpy')
+                            if self._default_dir else '')
+        path, _ = QFileDialog.getSaveFileName(
+            self, '新建一个 .rpy', start, "Ren'Py 脚本 (*.rpy)")
+        if path:
+            self._file.setText(path)
+            self._file_edited = True
+
+    def _on_known_changed(self, index: int):
+        """从"已导入文件"下拉选一个 → 写进路径格，并锁住自动跟随。"""
+        path = str(self._known.itemData(index) or '') if index >= 0 else ''
+        if not path:
+            return
+        self._file.setText(path)
+        self._file_edited = True
 
     def _sync_default_file(self):
         """章节名变了 → 默认文件跟着变（除非用户手动改过那一格）。"""
@@ -379,6 +441,9 @@ class AddNodeDialog(_BaseDialog):
         self._file.blockSignals(True)
         self._file.setText(str(_P(self._default_dir) / f'{name}.rpy'))
         self._file.blockSignals(False)
+        self._known.blockSignals(True)
+        self._known.setCurrentIndex(0)
+        self._known.blockSignals(False)
 
     def _on_file_edited(self, *_):
         # 只有**用户**改这一格才锁住联动；`_sync_default_file` 用 blockSignals
