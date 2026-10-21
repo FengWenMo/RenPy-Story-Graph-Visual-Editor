@@ -281,6 +281,12 @@ def _align_key(beat) -> tuple:
             _stage_tokens(beat))
 
 
+def _has_insert_and_delete(opcodes) -> bool:
+    """对齐里**同时**出现"多一拍"和"少一拍"吗？（= 某一拍的对齐身份变了）"""
+    tags = {op[0] for op in opcodes}
+    return 'insert' in tags and 'delete' in tags
+
+
 def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inserts, inserted_out, dropped_out, dropped, positions=None):
     """按 label 分组做内容对齐（SequenceMatcher）→ 给每拍行号 / 标记插入点 / 记被删的拍。返回配上的拍数（M4 搬出）。
 
@@ -297,7 +303,23 @@ def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inser
         sm = difflib.SequenceMatcher(
             None, [_align_key(b) for b in pool],
             [_align_key(b) for b in group], autojunk=False)
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        opcodes = sm.get_opcodes()
+        # 拍数没变、却又"多一拍 + 少一拍" —— 那不是增删，是**某一拍换了个身份**
+        # （说话人改了 → `_align_key` 变了；2026-10-21 实测 `pomodorro.rpy`）。
+        #
+        # `SequenceMatcher` 这时会拿后面同键的拍去配前面，于是整体错位一位：
+        # 新句只拿到"插入点"、旧句被当成"用户删掉的拍"，补丁随后把新句插进去、
+        # 旧句因为"台词不许删"留着 —— 同一句话两遍。
+        #
+        # 拍数相等就按**顺序**对位：位置 i 就是源文件里的第 i 拍。真错位
+        # （例如把一拍搬了家）仍由 `_range_looks_like` 的内容守卫与整体校验挡住。
+        if len(pool) == len(group) and _has_insert_and_delete(opcodes):
+            for k in range(len(group)):
+                if apply_ranges:
+                    _apply_range(group[k], pool[k])
+            matched += len(group)
+            continue
+        for tag, i1, i2, j1, j2 in opcodes:
             if tag == 'equal':
                 for k in range(i2 - i1):
                     if apply_ranges:
@@ -1239,6 +1261,37 @@ def _replace_matched(old_lines: list, gen_bodies: list,
                     del free_gen[pos]
                     break
 
+    # —— ③ 同一拍里**只剩一行台词** → 槽位配对（2026-10-21 修 P0 重复行）——
+    #
+    # 真机（`pomodorro.rpy` 第 28 行，表格路径）：把说话人 `jc` 和正文同时改掉，
+    # 导出回执「改动 2 行」、退出码 0，文件里却是：
+    #
+    #     yhj "【同改】…"          ← 新行被"插入"
+    #     jc "好了，我休息好了…"     ← 旧行被"台词不许删"留着
+    #
+    # 同一句话出现两遍。根因是前两轮配对都靠**内容**（说话人 / 正文）：
+    # 两者同时变，就与原文哪一行都配不上 → 走"新增内容"通道；而旧台词
+    # 又不许删（`_may_drop_line`）—— 恰好是"插进去 + 留下"。
+    #
+    # 但一拍**最多渲染一行台词**（选项行 / `extend` / `voice` 都被
+    # `_say_parts` 排除），所以"旧区间剩一行、生成块也剩一行"时，配对是
+    # **确定性的**，不需要任何语义猜测：那一行就是这一拍自己的台词。
+    # 只在这两个"都恰好一行"时生效 —— 多行一律不做猜测。
+    #
+    # `slot_pairs` 里的配对按"槽位替换"处理（允许说话人与正文同时变），
+    # 仍由 `_verify_patch`（重新解析 + 内容全在）兜底。
+    slot_pairs: set = set()
+    old_slots = [j for j in range(len(old_lines))
+                 if j not in pick_of_old and _say_parts(_norm(old_lines[j]))]
+    gen_slots = [i for i in range(len(gen_bodies))
+                 if i not in used and _say_parts(_norm(gen_bodies[i]))]
+    if len(old_slots) == 1 and len(gen_slots) == 1:
+        _j, _idx = old_slots[0], gen_slots[0]
+        used.add(_idx)
+        pair_of_gen[_idx] = _j
+        pick_of_old[_j] = _idx
+        slot_pairs.add(_idx)
+
     out: list = []
     changed = 0
     grown = 0
@@ -1294,7 +1347,8 @@ def _replace_matched(old_lines: list, gen_bodies: list,
                     changed += 1
                 else:
                     out.append(old_lines[t])
-            new_line, did = _rewrite_line(old_lines[j], g, relax_speaker)
+            new_line, did = _rewrite_line(old_lines[j], g,
+                                          relax_speaker or idx in slot_pairs)
             out.append(new_line)
             landed_idx.add(idx)
             changed += 1 if did else 0
@@ -1312,7 +1366,8 @@ def _replace_matched(old_lines: list, gen_bodies: list,
                 out.append(ln)                # 生成器里没有对应的行 → 一个字不动
                 continue
             landed_idx.add(idx)
-            new_line, did = _rewrite_line(ln, gen_bodies[idx], relax_speaker)
+            new_line, did = _rewrite_line(ln, gen_bodies[idx],
+                                          relax_speaker or idx in slot_pairs)
             out.append(new_line)
             changed += 1 if did else 0
 
@@ -1878,6 +1933,168 @@ def _deletion_empties_block(orig_lines: list, first: int, last: int) -> bool:
     return True
 
 
+def _branch_head_for(orig_lines: list, first: int) -> tuple:
+    """
+    `first` 这一行的**上一级块头**在哪？（0-based 下标 + 类型）
+
+    类型：`'if'` / `'elif'` / `'else'`（条件分支），`'option'`（菜单选项
+    `"文案":`），`'other'`（别的东西，比如 `python:`）。
+
+    判据与 `_deletion_empties_block` 同源：往上跳过空行/注释，第一个
+    **缩进比块体浅、且以冒号结尾**的行就是块头。
+    """
+    idx = first - 2
+    while idx >= 0:
+        body = _norm(orig_lines[idx]).strip()
+        if body and not body.startswith('#'):
+            break
+        idx -= 1
+    if idx < 0:
+        return None, ''
+    head = orig_lines[idx]
+    body = _content_of(_norm(head)).strip()
+    if not body.endswith(':'):
+        return None, ''
+    if len(_indent_of(head)) >= len(_indent_of(orig_lines[first - 1])):
+        return None, ''
+    m = re.match(r'^(if|elif|else)\b', body)
+    if m:
+        return idx, m.group(1)
+    if _OPTION_ROW_RE.match(_norm(head)):
+        return idx, 'option'
+    return idx, 'other'
+
+
+def _next_sibling(orig_lines: list, head_no: int, last: int):
+    """
+    块头 `head_no` 这一段的**下一个兄弟行**（1-based 行号），没有就 `None`。
+
+    "兄弟" = 缩进与块头相同的第一行；缩进更浅 = 块结束。空行与注释跳过
+    （它们不属于任何一层）。
+    """
+    head_ind = len(_indent_of(orig_lines[head_no - 1]))
+    for n in range(last + 1, len(orig_lines) + 1):
+        line = orig_lines[n - 1]
+        body = _norm(line).strip()
+        if not body or body.startswith('#'):
+            continue
+        ind = len(_indent_of(line))
+        if ind == head_ind:
+            return n
+        if ind < head_ind:
+            return None
+    return None
+
+
+def _gen_for_src(blocks, src_line: int):
+    """`src_line` 这一行是哪一拍的起始行 → 它的渲染结果（没有就 `None`）。"""
+    for _i, first, _last, gen, _b in (blocks or ()):
+        if first == src_line:
+            return gen
+    return None
+
+
+def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
+                         last: int):
+    """
+    被删分支**之后**的每一条 `elif` / `else` 头 → 换成渲染器给那一拍写的条件行。
+
+    为什么必须换（2026-10-21 实测，`pomodorro.rpy` 的 `breakline` 链）：拍上的
+    条件是**展平后的累积形式**（分支 3 是
+    `(breakline == 3) and not ((breakline == 1) or (breakline == 2))`）。
+    删掉分支 1 之后，如果只把下一条 `elif` 换个词，解析器从头累加出来的条件
+    与拍上存的对不上 → `_verify_patch` 判"条件改动走全量" → 又退回全量。
+
+    改写后的条件里可能还留着"已经被删掉的分支"的否定（`not (breakline == 2)`）
+    —— 那是恒真的冗余项，语义不变；下一次全量导出会把条件重新算干净。
+    """
+    head_ind = len(_indent_of(orig_lines[head_no - 1]))
+    out = []
+    n = last + 1
+    while n <= len(orig_lines):
+        line = orig_lines[n - 1]
+        body = _norm(line).strip()
+        if not body or body.startswith('#'):
+            n += 1
+            continue
+        ind = len(_indent_of(line))
+        if ind < head_ind:
+            break
+        if ind == head_ind:
+            tag = body.split(None, 1)[0].rstrip(':')
+            if tag not in ('elif', 'else'):
+                break
+            first_body = n + 1
+            while first_body <= len(orig_lines):
+                b2 = _norm(orig_lines[first_body - 1]).strip()
+                if b2 and not b2.startswith('#'):
+                    break
+                first_body += 1
+            gen = _gen_for_src(blocks, first_body)
+            cond_line = next((g for g in (gen or ())
+                              if re.match(r'^if\b', _norm(g))), '')
+            if not cond_line:
+                return None               # 找不到那一拍 → 不猜
+            out.append((n, _indent_of(line) + cond_line))
+            n = first_body
+            continue
+        n += 1
+    return out
+
+
+def _plan_branch_deletion(orig_lines: list, first: int, last: int,
+                          taken, blocks=()) -> dict | None:
+    """
+    这一拍是**分支唯一的语句** → 连它所在的分支一起删/换。
+
+    为什么（2026-10-21 真机扫了 `pomodorro.rpy` 45 拍）：删一拍时 33 拍
+    走增量，12 拍退回全量 —— 12 拍**全是同一种形状**：
+
+        if breakline == 1:          ← 不是拍，是结构
+            "我需要休息一下."          ← 表里删掉的这一拍
+        elif breakline == 2:        ← 删了上面两行后，这一行成了孤儿
+
+    `_deletion_empties_block` 判"会留空块"是对的（空块语法错），但它的结论
+    是"整章退回全量"—— 代价太大。这里按**分支**处理，只动必须动的几行：
+
+      · `elif` / `else` 分支 → 删 `[分支头 .. 拍末行]`，链自然合法；
+      · `if` 分支 + 后面紧跟 `elif` → 同样删，并把那条 `elif` 改写成 `if`
+        （只换一个词）；后面是 `else:`（要把整块降一级缩进）→ **不猜**；
+      · 菜单选项体（选项头自己是**一拍**，不能删）→ 把体换成 `pass`，
+        与全量重生成的产物一致（实测 `pomodorro.rpy` 就是这么写的）。
+
+    返回 `{'delete': (a, b)}` 或 `{'sub': (a, b, [行…])}` 或 `None`（不敢）。
+    """
+    head_idx, kind = _branch_head_for(orig_lines, first)
+    if head_idx is None:
+        return None
+    head_no = head_idx + 1
+    claimed = any(f and f <= head_no <= l for f, l in taken)
+    if kind == 'option':
+        if not claimed:
+            return None                   # 选项头不是这一拍的：形状不认识
+        # 选项头留着（它是一拍），体换成 `pass`（缩进借原体第一行）
+        pad = _indent_of(orig_lines[first - 1])
+        return {'sub': (first, last, [pad + 'pass'])}
+    if claimed:
+        return None                       # 块头属于别的拍 → 不动它
+    if kind in ('if', 'elif'):
+        rew = _chain_head_rewrites(blocks, orig_lines, head_no, last)
+        if rew is None:
+            return None                   # 链尾接不上 → 不猜
+        if kind == 'if':
+            nxt = _next_sibling(orig_lines, head_no, last)
+            if nxt is not None:
+                tag = _norm(orig_lines[nxt - 1]).strip().split(None, 1)[0]
+                if tag.rstrip(':') not in ('elif', 'else'):
+                    return None           # `menu:` 之类 —— 不猜
+        return {'delete': (head_no, last), 'rewrite': rew}
+    if kind == 'else':
+        # `else:` 一定是链尾，后面没有兄弟分支
+        return {'delete': (head_no, last)}
+    return None
+
+
 def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
     """
     被删掉的源拍 → 可以安全删除的区间列表。
@@ -1894,12 +2111,20 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
         语法直接坏掉）；
       · 区间与**仍在的拍**交叠（那几行不只属于被删的拍）。
 
-    返回 `(delete_ranges, delete_failed)`。
+    **"这一拍是分支唯一语句"**（删完上一级块会空）交给
+    `_plan_branch_deletion`：它把"整条分支"一起删/换（见那里的 docstring）。
+    那也处理不了时才算失败。
+
+    返回 `(delete_ranges, subs, rewrites, delete_failed)`；`subs` 是
+    `(first, last, [整行…])`（菜单选项体 → `pass`），`rewrites` 是
+    `(行号, 新整行)`（`elif` → `if`）。
     """
     delete_ranges: list = []
+    subs: list = []
+    rewrites: list = []
     delete_failed = 0
     if not dropped_src:
-        return delete_ranges, delete_failed
+        return delete_ranges, subs, rewrites, delete_failed
     taken = [(first, last) for (_i, first, last, _g, _b) in blocks if first]
     for b in dropped_src:
         first = int(getattr(b, 'src_first', 0) or 0)
@@ -1913,23 +2138,41 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
             continue
         if _deletion_empties_block(orig_lines, first, last):
             # 删完上一级块会空（`if x:` 下面一行都没有）→ 引擎读不了。
-            # 宁可整章退回全量，也不写出 `expected statement`（P1-3）。
-            delete_failed += 1
-            continue
+            # 整条分支一起删/换（见 `_plan_branch_deletion`）。
+            plan = _plan_branch_deletion(orig_lines, first, last, taken,
+                                         blocks)
+            if plan is None:
+                delete_failed += 1
+                continue
+            if 'sub' in plan:
+                a, z, rows = plan['sub']
+                if any(a <= tf <= z or a <= tl <= z
+                       for tf, tl in taken if tf):
+                    delete_failed += 1        # 与仍在的拍交叠 → 不敢换
+                    continue
+                subs.append((a, z, rows))
+                continue
+            a, z = plan['delete']
+            rewrites.extend(plan.get('rewrite') or [])
+            first, last = a, z
         if any(first <= t_last and last >= t_first
                for t_first, t_last in taken if t_first and t_last >= t_first):
             delete_failed += 1                # 与仍在的拍交叠 → 不敢删
             continue
         delete_ranges.append((first, last))
-    return delete_ranges, delete_failed
+    return delete_ranges, subs, rewrites, delete_failed
 
 
 def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
-                          indent: str) -> tuple:
+                          indent: str, subs=(), rewrites=()) -> tuple:
     """
-    插入 + 删除**一起按位置从后往前**做（先动后面的行，前面的行号才不受影响）。
+    插入 + 删除 + 整段替换**一起按位置从后往前**做（先动后面的行，前面的
+    行号才不受影响）。返回 `(inserted_lines, removed_lines)`。
 
-    返回 `(inserted_lines, removed_lines)`。
+    `subs` / `rewrites` 是 2026-10-21 为"删一条分支"加的：
+      · `subs`：`(first, last, [整行…])` —— 菜单选项体换成 `pass`；
+      · `rewrites`：`(行号, 新整行)` —— `elif` 提升成 `if`。
+    两者与删除同一批处理：**按原行号、从后往前**，前面的行号不会漂。
 
     两处容易写错、都留着注释：
       · **锚点是块头**（`menu:` / `"选项":` / `if …:`）时不能紧贴着插，
@@ -1941,18 +2184,40 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
     """
     inserted_lines = 0
     removed_lines = 0
+    replaced_lines = 0
+    # 改写只换一行的内容（不动行数）→ 先做，后面按原行号删/换都还对得上。
+    for no, text in (rewrites or ()):
+        if 1 <= no <= len(out_lines) and out_lines[no - 1] != text:
+            out_lines[no - 1] = text
+            replaced_lines += 1
+    #: `(位置, 类型, 起, 止, 整行)` —— 0=删、1=插、2=整段换
     ops: list = []
     for first, last in delete_ranges:
-        ops.append((last, 0, first, last))    # (位置, 类型 0=删, 起, 止)
+        ops.append((last, 0, first, last, None))
+    for first, last, rows in (subs or ()):
+        ops.append((last, 2, first, last, rows))
     for point, rows in anchors.items():
         # 同一锚点上的多张新卡片保持拍序（`rows` 是"每张卡片的行"的列表）
         flat = [ln for group in rows for ln in group]
-        ops.append((point, 1, point, flat))   # (位置, 类型 1=插, 点, 行)
-    for _pos, kind, a, b in sorted(ops, reverse=True,
-                                   key=lambda t: (t[0], t[1])):
+        ops.append((point, 1, point, point, flat))
+    for _pos, kind, a, b, rows in sorted(ops, reverse=True,
+                                        key=lambda t: (t[0], t[1])):
         if kind == 0:
             del out_lines[a - 1:b]
             removed_lines += b - a + 1
+        elif kind == 2:
+            # 整段换成给定的整行（缩进已经带在行里）——
+            # 菜单选项体 → `pass`（见 `_plan_branch_deletion`）。
+            n_old = b - a + 1
+            old_rows = list(out_lines[a - 1:b])
+            out_lines[a - 1:b] = list(rows)
+            if len(rows) >= n_old:
+                inserted_lines += len(rows) - n_old
+            else:
+                removed_lines += n_old - len(rows)
+            # 行数没变的那部分（1 行→1 行）也要记进"改动行数"，
+            # 否则回执会说"改动 0 行"，而文件里明明换了内容。
+            replaced_lines += sum(1 for x, y in zip(old_rows, rows) if x != y)
         else:
             at = max(0, min(a, len(out_lines)))
             # **锚点是块头**时不能紧贴着插（见 `_insert_anchor` 的 docstring）
@@ -1966,9 +2231,9 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
                 # 否则顶格写出来的台词会把文件结构读坏。
                 nxt_line = out_lines[at] if 0 <= at < len(out_lines) else ''
                 pad = _indent_of(nxt_line) or indent
-            out_lines[at:at] = [pad + ln for ln in b]
-            inserted_lines += len(b)
-    return inserted_lines, removed_lines
+            out_lines[at:at] = [pad + ln for ln in rows]
+            inserted_lines += len(rows)
+    return inserted_lines, removed_lines, replaced_lines
 
 
 def _insert_ids_of(beats: list) -> set:
@@ -2002,7 +2267,13 @@ def _recover_ranges(beats: list, source_path):
         导出后仍是 214 拍、差异 0 行）。这里只**数**被删的拍 + 给新拍
         补插入点，不改已有行号。
 
-    返回 `(insert_ids, dropped, dropped_src)`。
+    返回 `(insert_ids, dropped, dropped_src, fresh)`。
+
+    `fresh=True` 表示**行号是这一刀刚解析出来的**（不是拍上带来的旧值）：
+    那时"这一段像不像这一拍"的守卫是多余的 —— 行号本来就来自当前磁盘上的
+    这一份文件，不存在"过期"。2026-10-21 实测（`pomodorro.rpy`，表格路径）：
+    说话人与正文同改的拍，守卫一条内容证据都对不上 → 判 stale →
+    新台词落不了地 → 整章退回全量。而它恰恰是最该增量的一刀。
     """
     dropped_src: list = []
     if not any(getattr(b, 'src_first', 0) for b in beats):
@@ -2010,7 +2281,7 @@ def _recover_ranges(beats: list, source_path):
         _m, _t, dropped = recover_source_ranges(beats, source_path,
                                                 dropped_out=dropped_src,
                                                 inserted_out=aligned_inserts)
-        return set(aligned_inserts), dropped, dropped_src
+        return set(aligned_inserts), dropped, dropped_src, True
     try:
         # `apply_inserts=False`：插入点**不用对位算** —— 对位可能把新拍
         # 放到"源拍序列的开头"（它没有对应行），锚点会落到 `label` 之前。
@@ -2022,7 +2293,7 @@ def _recover_ranges(beats: list, source_path):
     except Exception as e:                    # noqa: BLE001 - 查不了就当没有
         swallow('story.patcher.patch_export', e)
         dropped = 0
-    return set(_insert_ids_of(beats)), dropped, dropped_src
+    return set(_insert_ids_of(beats)), dropped, dropped_src, False
 
 
 def _compute_insert_anchors(beats: list, insert_ids, dropped,
@@ -2261,8 +2532,10 @@ def patch_export(beats: list, source_path, generated_text: str,
     旧判据只能判"错位" → 整份拒绝。
 
     ⚠ 默认 `False`：**只有"能保证行号新鲜"的调用方才许传 True**。
-    表格那条路（`src_first` 是 `recover_source_ranges` 现算的）绝不许传 ——
-    那里的行号是猜出来的，守卫是它唯一的网。这也正是当年那次事故
+    表格那条路拍上没有行号，由 `recover_source_ranges` **当场**从这份源文件
+    算出来 —— 那种行号同样新鲜，函数内部会把 `trust_ranges` 提为真
+    （`_recover_ranges` 返回的 `fresh`）。而"拍上带着旧行号"的调用方
+    （编辑器载入后文件被外部改过）仍然必须靠守卫：那正是当年那次事故
     （整体下移 1 行、259 行被改写）的入口。
     """
     source_path = Path(source_path) if source_path else None
@@ -2295,7 +2568,13 @@ def patch_export(beats: list, source_path, generated_text: str,
 
     # 行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来。
     # 细节见 `_insert_ids_of` / `_recover_ranges` 的 docstring。
-    insert_ids, dropped, dropped_src = _recover_ranges(beats, source_path)
+    insert_ids, dropped, dropped_src, fresh = _recover_ranges(beats,
+                                                             source_path)
+    # **现算出来的行号 = 新鲜**：它们来自刚解析的这份文件，绕过了"行号会不会
+    # 过期"这个问题（见 `_recover_ranges` 的 `fresh` 说明）。表格那条路因此
+    # 也能享受"同一拍改了说话人和正文"这类改动的增量 —— 从前它被对位守卫
+    # 判 stale，整章退回全量（2026-10-21 实测）。
+    trust_ranges = bool(trust_ranges or fresh)
     dropped, dropped_src = _compute_insert_anchors(
         beats, insert_ids, dropped, dropped_src)
 
@@ -2412,14 +2691,16 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 与"插入"同一套纪律：只动该动的那几行，凡是拿不准的一律放弃
     # （退回全量），并由下面末尾的全局校验兜底。
     # 具体"哪些情形不敢删"见 `_plan_deletions` 的 docstring。
-    delete_ranges, delete_failed = _plan_deletions(
-        dropped_src, st.blocks, st.orig_lines)
+    delete_ranges, delete_subs, delete_rewrites, delete_failed = \
+        _plan_deletions(dropped_src, st.blocks, st.orig_lines)
     # 新增的拍 → 插入点（锚点见 `_insert_points_for` 的 docstring）
     anchors, insert_failed = _insert_points_for(beats, st.insert_ids, raw_gen)
     # 插入 + 删除一起按位置**从后往前**做（先动后面的行，前面行号才不漂）
-    inserted_lines, removed_lines = _apply_sequence_edits(
-        st.out_lines, delete_ranges, anchors, indent)
-    st.changed += inserted_lines + removed_lines + st.grown_total + st.shrunk_total
+    inserted_lines, removed_lines, replaced_lines = _apply_sequence_edits(
+        st.out_lines, delete_ranges, anchors, indent,
+        subs=delete_subs, rewrites=delete_rewrites)
+    st.changed += (inserted_lines + removed_lines + replaced_lines
+                   + st.grown_total + st.shrunk_total)
 
     text = '\n'.join(st.out_lines)
     if original.endswith('\n'):
