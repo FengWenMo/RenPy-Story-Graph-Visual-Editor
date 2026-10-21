@@ -27,8 +27,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # 失败时把**每条** FAILED/ERROR 变成 GitHub annotation ——
+      # 否则日志藏在折叠面板里，手机上根本看不到（2026-10-21 排查 CI 时踩的）。
       - name: 跑全量测试
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --tb=line --maxfail=20 2>&1 | tee /tmp/pytest.log
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "----- 尾部 -----"
+            tail -30 /tmp/pytest.log
+            echo "----- 失败清单（${{ matrix.python-version }}）-----"
+            grep -E '^(FAILED|ERROR)' /tmp/pytest.log | head -20 | \
+              while IFS= read -r line; do echo "::error title=pytest::$line"; done
+          fi
+          exit "$rc"
 
       # 备份一道"端到端"检查：退出码就是结论（0 通过 / 1 有错误 / 2 用法问题）。
       # 用仓库自带的 demo 工程，不需要外部项目。
