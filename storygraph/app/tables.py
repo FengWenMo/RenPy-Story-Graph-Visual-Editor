@@ -242,6 +242,11 @@ def export_table(table_path, registry=None, project_root=None,
                                               if src_for_patch else None))
     blocking = [i for i in issues if i.is_blocking]
     warnings = [i for i in issues if not i.is_blocking]
+    # **图像引用没在资源表里**：体检（`cli validate`）会报 W110 / W111，但
+    # "改完直接导出"的人看不到它。2026-10-21 用户问的正是这件事：
+    # `show lan base_swimsuit happy` 这种没登记的属性组合，导出时**会不会**
+    # 被发现？—— 体检会，导出从前不会。这里把同类发现搬进导出回执。
+    warnings = _with_image_ref_warnings(warnings, beats, registry)
     # 工具不认识的块语句（M1）：**结论必须随结果走到落盘那一步** ——
     # `apply_export` 只拿得到这份 dict，拿不到 beat 对象，而门禁那条
     # 判据（`UNMANAGED_BLOCK`）必须"说出口"，不许在这一跳上丢掉。
@@ -350,6 +355,74 @@ def apply_export(result: dict, project_root=None) -> dict:
         out['error'] = (f'写不出去：{art.out_path}（{why}）' if why else
                         f'写不出去：{art.out_path}（检查文件是否被占用）')
     return out
+
+
+def _with_image_ref_warnings(warnings, beats, registry) -> list:
+    """
+    把"这一章用到的立绘组合没在资源表里"补进导出回执（2026-10-21）。
+
+    用户的原话："`show lan base_swimsuit happy` 是自定义写法……没有
+    rules.json 时，它能不能识别出这是未定义的？"
+
+    体检（`cli validate`）会报这件事（`W110` / `W111`），但**改完直接导出**
+    的人看不到 —— 回执里只有门禁那几条。这里补上。
+
+    为什么不复用 `validate_level1`：那条判据要看 `Beat` 上的
+    `raw` / `stage` / 角色定义上下文，而"从 Excel 读出来的拍"这些字段是空的
+    —— 同一份剧本，体检说 `W111`（tag 认识到）、导出的拍却说 `E103`
+    （tag 都没认到）。在导出这条路上重算一遍只会得到不一致的第二套结论。
+
+    所以这里只做一件**窄而确定**的事：拿资源表里实际有的 `Tag` 与
+    `Attributes` 两张清单，对本章每一处 `show` 逐条比对：
+
+      · tag 不在表里          → "这个 tag 资源表里没有"；
+      · tag 在、组合不在      → "属性组合没声明（合成立绘按 tag+属性合成）"；
+      · 都命中                → 一声不响。
+
+    资源表里**一个 Tag 都没填**（老表）时直接跳过 —— 没有可比信息时报出来
+    全是噪音。
+    """
+    if registry is None or not beats:
+        return warnings
+    try:
+        declared: dict = {}                       # tag -> {'', 'happy', 'happy sad'}
+        for row in (registry.images or {}).values():
+            tag = str(row.get('Tag') or '').strip()
+            if not tag:
+                continue
+            declared.setdefault(tag, set()).add(
+                str(row.get('Attributes') or '').strip())
+        if not declared:
+            return warnings
+
+        seen, extra = set(), []
+        for b in beats or ():
+            raw = str(getattr(b, 'show', '') or '').strip()
+            if not raw:
+                continue
+            raw = raw.split('@', 1)[0].strip()    # 表里可能带 `@left`
+            parts = raw.split()
+            if not parts:
+                continue
+            tag, combo = parts[0], ' '.join(parts[1:])
+            where = f"{getattr(b, 'label', '')}.{getattr(b, 'seq', 0):04d}"
+            if tag not in declared:
+                note = (f'图片 {raw!r} 的 tag 不在资源表里（{where}）'
+                        ' —— 在 images.xlsx 登记，或核对是不是拼错了')
+            elif combo and combo not in declared[tag]:
+                note = (f'图片 {raw!r} 的属性组合未在资源表声明（tag 已存在，{where}）'
+                        ' —— 合成立绘按 tag+属性合成；要精确管理就在 images.xlsx '
+                        '登记这个组合')
+            else:
+                continue
+            if note in seen:
+                continue
+            seen.add(note)
+            extra.append(note)
+        return list(warnings) + extra[:3]
+    except Exception as e:                    # noqa: BLE001 - 提示是增强，不拖垮导出
+        swallow('app.tables.image_ref_warnings', e)
+        return warnings
 
 
 def _issue_text(issue) -> str:
