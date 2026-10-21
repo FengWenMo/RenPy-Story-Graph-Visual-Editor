@@ -160,7 +160,6 @@ class NodeEditMixin:
         self.selected_edge = None
         node = (self.graph.nodes or {}).get(nid) if (self.graph and nid) else None
         info = self._source_info(node) if node is not None else {}
-        self._selected_source_info = info
         name = getattr(node, 'label_name', '') if node else ''
         if node is None:
             self._chapter_label.setText('（在图上点一个模块）')
@@ -290,7 +289,7 @@ class NodeEditMixin:
             [('new', '新建 .rpy…'), ('locate', '绑定已有文件…'),
              ('cancel', '取消')])
         if choice == 'new':
-            self._create_source_for_node(label, nid)
+            self._create_source_for_node(label)
         elif choice == 'locate':
             self._locate_and_bind(label, start=None)
 
@@ -311,7 +310,7 @@ class NodeEditMixin:
                 return key
         return 'cancel'
 
-    def _create_source_for_node(self, label: str, nid=None):
+    def _create_source_for_node(self, label: str):
         """给手工节点新建一个最小 `.rpy`，导入并打开。"""
         root = getattr(self, '_project_root', None)
         default = (str(Path(root) / 'game' / f'{label}.rpy')
