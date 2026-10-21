@@ -186,6 +186,8 @@ def export_table(table_path, registry=None, project_root=None,
     merged_from = None
     #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 确认框 / 日志要能点名。
     removed_preview: tuple = ()
+    #: 真正删掉的行数（预览会截断，别拿长度算）。
+    removed_count: int = 0
     try:
         src = src_for_patch
         # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
@@ -202,8 +204,12 @@ def export_table(table_path, registry=None, project_root=None,
                          f'保持原文）')
             removed_preview = tuple(
                 getattr(res, 'removed_preview', ()) or ())
+            # **数量用 `removed_count`**，不是预览的长度（预览截断在 5 条）。
+            # 2026-10-21 实测：批量删 30 拍时回执照着预览长度说"删掉了 5 行"。
+            removed_count = int(getattr(res, 'removed_count', 0) or 0) or \
+                len(removed_preview)
             if removed_preview:
-                note += (f'；其中删掉了源文件里 {len(removed_preview)} 行'
+                note += (f'；其中删掉了源文件里 {removed_count} 行'
                          f'（{removed_preview[0][:40]}）')
         else:
             why = '；'.join(res.reasons) if res.reasons else \
@@ -261,6 +267,8 @@ def export_table(table_path, registry=None, project_root=None,
             # 都靠 `source_text` / `source_path` 才判得出来（2026-10-21，P1）。
             'source_path': (str(src_for_patch) if src_for_patch else None),
             'removed_preview': removed_preview,
+        'removed_count': removed_count,
+            'removed_count': removed_count,
             'blocking': [i.format() for i in blocking[:12]],
             'blocking_total': len(blocking),
             'warnings': [i.format() for i in warnings[:6]],
@@ -280,6 +288,7 @@ def export_table(table_path, registry=None, project_root=None,
         'merged_from': merged_from,
         'source_path': (str(src_for_patch) if src_for_patch else None),
         'removed_preview': removed_preview,
+        'removed_count': removed_count,
         'blocking': [],
         'blocking_total': 0,
         'warnings': [i.format() for i in warnings[:6]],

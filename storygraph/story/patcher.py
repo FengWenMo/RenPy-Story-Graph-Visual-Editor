@@ -104,6 +104,11 @@ class PatchResult:
     #: （用户把表里某一拍的舞台列清空 → 源里那行 `show` 跟着走）。
     #: 第三种最容易被吓到："我只改了一句台词，怎么少了一行 show？"——
     #: 回执不说，用户只能自己 diff 文件。这里把删掉的行原样记下来。
+    #: 真正被删掉的行数（`removed_preview` 只存前 5 条，**别拿它算数量**）。
+    #:
+    #: 2026-10-21 实测：批量删 30 拍时回执写"删掉了 5 行"—— 因为拿预览的
+    #: 长度当总数。这是**假话**，比不报更糟。
+    removed_count: int = 0
     removed_preview: tuple = ()
 
     @property
@@ -349,6 +354,25 @@ def _recover_ranges_for_groups(new_groups, src_groups, apply_ranges, apply_inser
                                           inserted_out=inserted_out,
                                           index=positions.get(id(group[k]),
                                                               j1 + k))
+                # —— **`replace` 里"源多出来的拍"必须进 dropped** ——
+                # （2026-10-21，P0）
+                #
+                # 这一支从前只处理"表比源多"（新插入的拍 → 插入点），
+                # 源比表多的那一半**没人管**：那些拍既没拿到行号、也没进
+                # `dropped_out`，于是 `_plan_deletions` 根本不知道要删它们。
+                #
+                # 实测（`ling` 四句，表里删掉第二句、同时把第一句的说话人改成 `e`）：
+                # 对齐键从 [ling,ling,ling,ling] 变成 [e,ling,ling] →
+                # `SequenceMatcher` 给 `replace(源0:2, 表0:1)` + `equal(源2:4, 表1:3)`，
+                # 源第 2 拍（"第二句台词"）落在 replace 的尾巴上被静默跳过 →
+                # 补丁报 `ok=True / changed=2`、`dropped=0`，
+                # **产物里那句台词还在**，而表里已经删掉了。
+                #
+                # 语义与 `delete` 分支完全一致：源里有、表里没有 = 用户删了这一拍。
+                for k in range(i1 + pair, i2):
+                    dropped.append(name)
+                    if dropped_out is not None:
+                        dropped_out.append(pool[k])
             elif tag == 'insert':
                 prev = pool[i1 - 1] if i1 > 0 else None
                 nxt = pool[i1] if i1 < len(pool) else None
@@ -2641,8 +2665,11 @@ def patch_export(beats: list, source_path, generated_text: str,
             generated_text, None, 0, len(beats), 0,
             reasons=[f'表与源码不同步：源里有 {len(_dropped_say)} 拍台词不在表里'
                      f'（例如「{_d}」），表里有 {len(_unmatched)} 句在源里找不到'
-                     f'（例如「{_u}」）—— "改了那句"还是"漏了一拍"分不出来，'
-                     f'拒绝猜（先重新载入这一章再导出）'])
+                     f'（例如「{_u}」）—— 这有两种可能：'
+                     f'① 导表之后源文件被改过（程序员加了内容）；'
+                     f'② 你在表里删了一拍、同时又改了另一拍的说话人/舞台。'
+                     f'两种目前分不开，按"不猜"拒绝增量'
+                     f'（先重新载入这一章；确认无误再加 --force 全量）'])
 
     # **现算出来的行号 = 新鲜**：它们来自刚解析的这份文件，绕过了"行号会不会
     # 过期"这个问题（见 `_recover_ranges` 的 `fresh` 说明）。表格那条路因此
@@ -2832,6 +2859,7 @@ def patch_export(beats: list, source_path, generated_text: str,
                        inserted_lines=inserted_lines,
                        inserted_beats=len(st.insert_ids),
                        removed_lines=removed_lines,
+                       removed_count=(removed_lines + shrunk_total),
                        removed_preview=tuple(removed_preview),
                        grown_lines=st.grown_total,
                        shrunk_lines=st.shrunk_total,

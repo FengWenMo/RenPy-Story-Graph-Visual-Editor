@@ -82,11 +82,14 @@ class CompileResult:
     #: 读表时 `类型` 列填了工具不认的值（行号 + 原值）—— 见 `invalid_kinds`。
     invalid_kinds: list = field(default_factory=list)
     #: 增量这一刀**删掉了源文件里哪几行**（最多 5 条原文）。
+    #: ⚠ 数量看 `removed_count`。
     #:
     #: 为什么必须带出来（2026-10-21）：回执只说"改动 N 行"，而"改动"里混着
     #: 换一句台词和**删掉一行 `show`**。用户清空某一拍的舞台列时，源里那行
     #: 会跟着走 —— 不说，就成了"我只改了一句，怎么少了一行"。
     removed_preview: tuple = ()
+    #: 真正删掉的行数（预览只留 5 条，**别拿预览的长度算数量**）。
+    removed_count: int = 0
 
     @property
     def todo_count(self) -> int:
@@ -158,7 +161,10 @@ class IncrementalOutcome:
     #: `text` 就是源文全文，写盘那一层应当"不写"或"原样复制"。
     passthrough: bool = False
     #: 这一次**从源文件里删掉的行**（原文，最多 5 条）—— 回执点名用。
+    #: ⚠ 数量看 `removed_count`，**别拿这个元组的长度算**（截断了）。
     removed_preview: tuple = ()
+    #: 真正删掉的行数（`removed_preview` 只留 5 条做预览）。
+    removed_count: int = 0
 
 
 def merge_incrementally(beats: list, generated_text: str, source_path=None,
@@ -207,7 +213,9 @@ def merge_incrementally(beats: list, generated_text: str, source_path=None,
                                   coverage=res.coverage,
                                   passthrough=bool(res.passthrough),
                                   removed_preview=tuple(
-                                      getattr(res, 'removed_preview', ()) or ()))
+                                      getattr(res, 'removed_preview', ()) or ()),
+                                  removed_count=int(
+                                      getattr(res, 'removed_count', 0) or 0))
     reason = '；'.join(res.reasons) or f'对位率不足（{res.coverage:.0%}）'
     return IncrementalOutcome(generated_text, False, reason,
                               coverage=res.coverage)
@@ -242,6 +250,7 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     result.patch_attempted = bool(source_path)
     result.changed_lines = inc.changed_lines
     result.removed_preview = tuple(inc.removed_preview or ())
+    result.removed_count = int(inc.removed_count or 0)
 
     from storygraph.story.generation_guard import (
         ensure_generator_marker,

@@ -188,6 +188,8 @@ class TestRemovedLinesAreNamed:
         assert any('show ling happy' in ln for ln in res['removed_preview'])
         # 回执的人话里也要有
         assert '删掉' in res['note'], res['note']
+        # **数量不是预览的长度**（预览截断在 5 条）
+        assert res.get('removed_count') == 1, res.get('removed_count')
 
     def test_cli_report_points_at_the_deleted_lines(self):
         """`cli. _report_incremental` 的输出里得看得见那几行。"""

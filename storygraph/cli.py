@@ -303,12 +303,16 @@ def _report_incremental(result, stream=None) -> None:
             # 怎么少了一行 show" —— 把删掉的行直接点名。
             removed = tuple(getattr(result, 'removed_preview', ()) or ())
             if removed:
-                print('  其中**删掉了源文件里的这几行**'
+                # 数量看 `removed_count`：预览只留 5 条，拿长度当总数会说少
+                # （2026-10-21 实测：批量删 30 拍，回执写"删掉了 5 行"）。
+                total = int(getattr(result, 'removed_count', 0)
+                            or 0) or len(removed)
+                print(f'  其中**删掉了源文件里 {total} 行**'
                       '（表里已经没有对应内容）：', file=stream)
                 for ln in removed[:3]:
                     print(f'    - {ln}', file=stream)
-                if len(removed) > 3:
-                    print(f'    …（还有 {len(removed) - 3} 行）', file=stream)
+                if total > 3:
+                    print(f'    …（共 {total} 行，这里只列 3 条）', file=stream)
     elif result.patch_attempted and result.patch_note:
         print(f'增量未采用（{result.patch_note}）→ 已按全量生成',
               file=stream)

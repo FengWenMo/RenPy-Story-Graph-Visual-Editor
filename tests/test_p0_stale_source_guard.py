@@ -173,3 +173,116 @@ class TestSafePathsStillWork:
                              source_path=fp, engine_lint=False)
         assert out.written is True, f'复制品的二次导出被拦了：{out.guard_issues}'
         assert '改过的一句。' in copy.read_text(encoding='utf-8')
+
+
+class TestDeletePlusSpeakerChange:
+    """
+    **删一拍 + 同时改另一拍的说话人** —— 删掉的那一拍必须真的走。
+
+    2026-10-21（fuzz 第 4 轮抓到的 P0）：四句台词，表里删掉第二句、
+    把第一句的说话人从 `ling` 改成 `e`、再把第四句改个词。导出回执：
+
+        增量补丁：对位 3/3 拍，实际改动 2 行     退出码 0
+
+    而产物里 **"第二句台词"还在** —— 表里已经删掉了。
+
+    根因：`_recover_ranges_for_groups` 的 `replace` 分支只处理"表比源多"
+    （新插入的拍 → 插入点），**源比表多的那一半没人管**：
+    说话人一改，对齐键从 `[ling×4]` 变成 `[e, ling, ling]`，
+    `SequenceMatcher` 给出 `replace(源0:2, 表0:1)` + `equal(源2:4, 表1:3)`，
+    源第 2 拍落在 replace 的尾巴上被静默跳过 —— 既没拿到行号、
+    也没进 `dropped_out`，`_plan_deletions` 根本不知道要删它。
+
+    改法：`replace` 里"源多出来的拍"与 `delete` 分支同样处理（进 dropped）。
+
+    判据只要**不许静默**：写成功了，被删的那句就必须不在产物里；
+    写不成功，源文件必须逐字节不变。中间状态（写成功 + 那句还在）不接受。
+    """
+
+    BODY = '''\
+label ch01:
+    scene bg room
+    show ling happy at left
+    $ gold = 10
+    ling "第一句台词"
+    ling "第二句台词"
+    $ gold += 1
+    ling "第三句台词"
+    hide ling
+    ling "第四句台词"
+    return
+'''
+
+    def _setup(self, tmp_path):
+        from storygraph.app import tables
+        import openpyxl
+        root = tmp_path / 'proj'
+        (root / 'game').mkdir(parents=True)
+        src = root / 'game' / 'ch.rpy'
+        src.write_text(self.BODY, encoding='utf-8')
+        table = tables.generate_table(src, project_root=root)['table_path']
+
+        wb = openpyxl.load_workbook(str(table))
+        ws = wb['Beats']
+        heads = {str(c.value).strip(): i + 1 for i, c in enumerate(ws[1])
+                 if c.value}
+        # 1) 删掉「第二句台词」那一行
+        for r in range(2, ws.max_row + 1):
+            if str(ws.cell(r, heads['台词']).value or '').strip() == '第二句台词':
+                ws.delete_rows(r)
+                break
+        # 2) 第一句的说话人 ling → e
+        rows = []
+        for r in range(2, ws.max_row + 1):
+            kind = str(ws.cell(r, heads['类型']).value or '').strip()
+            text = str(ws.cell(r, heads['台词']).value or '').strip()
+            if kind or text:
+                rows.append((r, kind, text))
+        for r, kind, text in rows:
+            if kind == 'say' and text:
+                ws.cell(r, heads['说话人']).value = 'e'
+                break
+        # 3) 第四句改个词
+        for r, kind, text in rows:
+            if text == '第四句台词':
+                ws.cell(r, heads['台词']).value = '第四句台词（改）'
+                break
+        wb.save(str(table))
+        return tables, root, src, table
+
+    def test_deleted_line_never_silently_survives(self, tmp_path):
+        tables, root, src, table = self._setup(tmp_path)
+        before = src.read_bytes()
+        res = tables.export_table(table, project_root=root, source_rpy=src)
+        done = tables.apply_export(res, project_root=root)
+        now = src.read_text(encoding='utf-8')
+
+        if done.get('written'):
+            assert '第二句台词' not in now, (
+                '报了写入成功，但表里已经删掉的「第二句台词」还在产物里'
+                f'\n产物：\n{now}')
+        else:
+            assert src.read_bytes() == before, '拒写却改了源文件'
+
+    def test_first_and_last_edits_land_or_refuse(self, tmp_path):
+        """另外两处改动要么都落地，要么整份不动 —— 不许只落一半。"""
+        tables, root, src, table = self._setup(tmp_path)
+        before = src.read_bytes()
+        res = tables.export_table(table, project_root=root, source_rpy=src)
+        done = tables.apply_export(res, project_root=root)
+        now = src.read_text(encoding='utf-8')
+        if done.get('written'):
+            assert 'e "第一句台词"' in now
+            assert '第四句台词（改）' in now
+        else:
+            assert src.read_bytes() == before
+
+    def test_refusal_says_both_possibilities(self, tmp_path):
+        """拒写时理由要把两种可能都说出来（不然用户以为是工具坏了）。"""
+        tables, root, src, table = self._setup(tmp_path)
+        res = tables.export_table(table, project_root=root, source_rpy=src)
+        done = tables.apply_export(res, project_root=root)
+        if done.get('written'):
+            pytest.skip('这一刀被安全地增量完成了，拒写文案不适用')
+        why = str(res.get('note') or '') + str(done.get('error') or '')
+        assert '删了一拍' in why or '删了' in why, why
