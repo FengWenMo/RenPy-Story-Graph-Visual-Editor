@@ -936,8 +936,15 @@ class TestLayoutJsonAndControlFlowExport:
         # 旧版的五个键一个不少（老文件照样能读）；唯一新增的是 rom_clause
         # —— call X from Y 的存档点标识，不存它存布局→读布局就会丢。
         assert {'condition', 'from', 'option_text', 'to', 'type'} <= set(e0)
+        # 旧版的五个键一个不少；**新增过两个**，都有必须存下来的理由：
+        #   · `from_clause` —— `call X from Y` 的存档点标识（2026-10-05）；
+        #   · `origin`      —— 这条边来自源文件（source）还是用户画的草图
+        #                      （manual）（2026-10-22 第二阶段）。
+        # 后者不存会怎样：一存一读，手工边全变成 `source`，下一次
+        # "按 flow 拍重建 source 边"就把用户画的线删了 —— 那是工具吃掉了
+        # 用户的动作，比双真源更糟。
         assert set(e0) - {'condition', 'from', 'option_text', 'to', 'type'} \
-            == {'from_clause'}
+            == {'from_clause', 'origin'}
         assert data['next_ids'] == {'node': g.next_node_id,
                                     'edge': g.next_edge_id}
 
