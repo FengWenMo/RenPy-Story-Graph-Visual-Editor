@@ -31,7 +31,7 @@ from storygraph.core.safeguard import swallow
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QTextCursor
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -49,6 +49,11 @@ from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 
 __all__ = ['CardPageMixin']
+
+#: 列表行的 `Qt.UserRole` 存**拍号**（`-1` = 这一行是 label 分组标题，不是拍）。
+#: 从前"行号 == 拍号"是硬约定；有了分组标题行之后，映射必须走 data ——
+#: 否则点分组标题就会 `_show_index(-1)`，把"当前拍"弄丢。
+_GROUP_LABEL_ROLE = Qt.UserRole + 1
 
 
 def _statement_of(beat, statements) -> dict:
@@ -121,6 +126,13 @@ class CardPageMixin:
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
     REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
+
+    #: 被用户折起来的 label 名（跨 `_reload_list` 保留：翻页/插卡不该弹开）。
+    _collapsed_labels: frozenset = frozenset()
+    #: 拍号 → 列表行号；`_reload_list` 里新建（这两个只是"还没载入"时的空值）。
+    _beat_rows: tuple = ()
+    _group_items: dict = {}
+    _group_counts: dict = {}
 
     def _on_load(self):
         start = str(Path(self._project_root or '.') / 'game')
@@ -329,15 +341,160 @@ class CardPageMixin:
         self._sync_graph_highlight()
         self._status(f'已切到 label「{label}」的第一拍（第 {target + 1} 拍）。')
     def _reload_list(self):
+        """
+        重建左栏：同一个 `.rpy` 有多个 label 时，**按 label 分组**（可折叠）。
+
+        用户在这一轮之前只看到一串连续拍号，边界靠行尾 `〔label〕` 认；
+        分组标题行说清"从哪到哪"，点标题还能折起来（大章节翻别的 label 时
+        不用一路滚）。单 label 的常见情况**不加标题行** —— 没有歧义时
+        多一行只是噪音，也保住了"行号 == 拍号"的老判据。
+
+        行与拍的映射：每行 `Qt.UserRole` 存拍号（标题行是 -1），
+        `_beat_rows[拍号] = 行号`。**不能再用行号当拍号**（标题行会插进来）。
+        """
+        labels = self._session.label_names()
+        beats = list(getattr(self._session, 'beats', ()) or ())
+        counts: dict = {}
+        for b in beats:
+            name = str(getattr(b, 'label', '') or '')
+            counts[name] = counts.get(name, 0) + 1
+
+        grouped = len(labels) > 1
+        self._group_items = {}
+        self._group_counts = counts
+        self._beat_rows = []
+
         self._list.blockSignals(True)
-        self._list.clear()
-        for i in range(len(self._session)):
-            self._list.addItem(self._make_item(i))
-        self._list.blockSignals(False)
+        try:
+            self._list.clear()
+            last = None
+            for i in range(len(self._session)):
+                label = str(getattr(beats[i], 'label', '') or '')
+                if grouped and label and label != last:
+                    self._list.addItem(self._make_group_item(label, counts))
+                    self._group_items[label] = self._list.item(
+                        self._list.count() - 1)
+                    last = label
+                self._list.addItem(self._make_item(i))
+                self._beat_rows.append(self._list.count() - 1)
+        finally:
+            self._list.blockSignals(False)
+        self._apply_group_folding()
 
         self._who.clear()
         for cid in self._session.participants():
             self._who.addItem(QListWidgetItem(cid))
+
+    @staticmethod
+    def _group_text(label: str, count: int, folded: bool = False) -> str:
+        """分组标题那一行：`▾ chapter1_1　（4 拍）`。"""
+        arrow = '▸' if folded else '▾'
+        return f'{arrow} {label}　（{count} 拍）'
+
+    def _make_group_item(self, label: str, counts: dict) -> QListWidgetItem:
+        """
+        建一行"label 分组标题"。
+
+        **不可选中**（`ItemIsEnabled` 但不带 `ItemIsSelectable`）：
+        标题不是一拍，被选中就会让"当前拍"指向一个不存在的位置；
+        点它是折叠/展开（`_on_list_item_clicked`）。
+        """
+        item = QListWidgetItem(self._group_text(label, counts.get(label, 0)))
+        item.setData(Qt.UserRole, -1)
+        item.setData(_GROUP_LABEL_ROLE, label)
+        item.setFlags(Qt.ItemIsEnabled)
+        font = QFont(item.font())
+        font.setBold(True)
+        item.setFont(font)
+        try:
+            item.setForeground(QBrush(QColor(theme.t('text.secondary'))))
+        except Exception as e:                  # noqa: BLE001 - 取色失败不影响分组
+            swallow('ui_qt.window_card.group_color', e)
+        item.setToolTip(f'label「{label}」：点这一行折叠 / 展开它的拍')
+        return item
+
+    def _row_of_beat(self, idx: int):
+        """拍号 → 列表行号（没有分组标题行时就是它自己）。"""
+        rows = getattr(self, '_beat_rows', None) or []
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(rows):
+            return int(rows[idx])
+        return None
+
+    def _apply_group_folding(self):
+        """按 `_collapsed_labels` 把分组子行藏起来 / 放出来（不重建列表）。"""
+        groups = getattr(self, '_group_items', None) or {}
+        if not groups:
+            return
+        collapsed = set(getattr(self, '_collapsed_labels', None) or ())
+        beats = list(getattr(self._session, 'beats', ()) or ())
+        rows = list(getattr(self, '_beat_rows', ()) or ())
+        self._list.blockSignals(True)
+        try:
+            for label, head in groups.items():
+                folded = label in collapsed
+                head.setText(self._group_text(
+                    label, (getattr(self, '_group_counts', None) or {})
+                    .get(label, 0), folded))
+            for i, row in enumerate(rows):
+                item = self._list.item(row)
+                if item is None or i >= len(beats):
+                    continue
+                label = str(getattr(beats[i], 'label', '') or '')
+                item.setHidden(label in collapsed)
+            # 当前拍被折进去时，把"当前"挪到分组标题上：否则列表里没有任何
+            # 高亮，看起来像"选中丢了"（`_loaded_idx` 不动，卡片还显示那一拍）。
+            cur = self._loaded_idx
+            if 0 <= cur < len(rows) and rows[cur] < self._list.count():
+                item = self._list.item(rows[cur])
+                label = str(getattr(beats[cur], 'label', '') or '')
+                if item is not None and item.isHidden() and label in groups:
+                    self._list.setCurrentItem(groups[label])
+        finally:
+            self._list.blockSignals(False)
+
+    def _expand_label(self, label: str):
+        """展开某个 label 的分组（导航到它时不让人对着折叠行猜）。"""
+        label = str(label or '')
+        if not label:
+            return False
+        collapsed = set(getattr(self, '_collapsed_labels', None) or ())
+        if label not in collapsed:
+            return False
+        collapsed.discard(label)
+        self._collapsed_labels = frozenset(collapsed)
+        self._apply_group_folding()
+        return True
+
+    def _toggle_label_group(self, label: str):
+        label = str(label or '')
+        if not label or label not in (getattr(self, '_group_items', None) or {}):
+            return
+        collapsed = set(getattr(self, '_collapsed_labels', None) or ())
+        if label in collapsed:
+            collapsed.discard(label)
+        else:
+            collapsed.add(label)
+        self._collapsed_labels = frozenset(collapsed)
+        self._apply_group_folding()
+        self._status(f'{"已折叠" if label in collapsed else "已展开"}'
+                     f' label「{label}」的分组（再点标题行切换）。')
+
+    def _on_list_item_clicked(self, item):
+        """点列表：分组标题 → 折叠/展开；拍 → 交给 `currentRowChanged`。"""
+        if item is None:
+            return
+        data = item.data(Qt.UserRole)
+        try:
+            is_group = data is not None and int(data) < 0
+        except (TypeError, ValueError):
+            is_group = False
+        if is_group:
+            self._toggle_label_group(str(item.data(_GROUP_LABEL_ROLE) or ''))
+
     def _make_item(self, i) -> QListWidgetItem:
         item = QListWidgetItem(self._item_text(i))
         item.setData(Qt.UserRole, i)
@@ -347,23 +504,13 @@ class CardPageMixin:
 
     def _item_text(self, i) -> str:
         """
-        列表一行：**每个 label 的第一拍**带上边界标记（P1-1 的可见部分）。
+        列表一行 = 这一拍的正文（拍号 / 台词 / 语句名）。
 
-        同一个 `.rpy` 里多个 label 时，左栏从前是一串没有分界的拍号 ——
-        用户看不出第 4 张已经属于另一个 label。这里在边界行尾部标
-        `〔label 名〕` 并加粗；不插入额外的行，避免拍号与列表下标错位
-        （那会变成"存错拍"级别的隐患）。
+        label 边界从**行尾标记**升级成了**分组标题行**（`_reload_list`）：
+        同一文件里多个 label 时，标题行写清 `▾ label（N 拍）`，还能折叠。
+        多 label 时行内不再重复 `〔label〕` —— 同一件事说两遍，只是噪音。
         """
-        text = self._row_text(self._session.list_entry(i))
-        labels = self._session.label_names()
-        label = str(getattr(self._session.beats[i], 'label', '') or '')
-        if not label or len(labels) < 2:
-            return text
-        prev = (str(getattr(self._session.beats[i - 1], 'label', '') or '')
-                if i > 0 else '')
-        if prev == label:
-            return text
-        return f'{text}   〔{label}〕'
+        return self._row_text(self._session.list_entry(i))
 
     @staticmethod
     def _row_text(e: dict) -> str:
@@ -405,7 +552,8 @@ class CardPageMixin:
         """
         if not self._session.has(i):
             return
-        item = self._list.item(i)
+        row = self._row_of_beat(i)
+        item = self._list.item(row) if row is not None else None
         if item is None:
             return
         self._list.blockSignals(True)
@@ -612,7 +760,7 @@ class CardPageMixin:
         在列表里的选择状态，而"改一句台词再导出"是最常见的操作。
         """
         count = int(res.get('count') or 0) or len(self._session)
-        if count == self._list.count():
+        if count == len(getattr(self, '_beat_rows', ()) or ()):
             return
         self._reload_list()
         self._show_index(max(0, min(int(self._loaded_idx), count - 1)))
@@ -638,10 +786,11 @@ class CardPageMixin:
         「下一句台词 ▶」—— 用户 2026-09-28 要的**只改台词**快捷路径（本轮补做）。
 
         用户要的是"快速过一遍台词"：一句一句跳，不必每次都在列表里找。
-        ⚠ **不做列表过滤**（把没有台词的拍藏起来）：卡片下标要映射到
-        `session.beats[idx]`，一旦过滤，下标与实际拍就对不上 ——
-        那是"存错拍"级别的隐患，比"找不到"严重得多。
-        所以这里只**移动选中**，列表一个都不藏。
+        ⚠ **不做按内容的过滤**（把没有台词的拍藏起来）：`_show_index` 靠的是
+        "这一拍在会话里的下标"，按内容藏行会让"翻到下一句"跳过别的拍时
+        对不上账。label 分组折叠是**用户自己按的**（`_on_list_item_clicked`），
+        而且任何导航都会先展开那一组（`_show_index` → `_expand_label`），
+        所以不会出现"跳进折叠区、列表没高亮"。
         """
         beats = getattr(self._session, 'beats', None) or []
         if not beats:
@@ -702,8 +851,12 @@ class CardPageMixin:
         self._panel.set_speakers(self._session.characters(),
                                  self._session.beats[idx].speaker or '')
         self.refresh_derived_panels(idx)
+        # 导航到哪一拍，那一组就自动展开（折叠状态不该挡住"跳过去"）
+        self._expand_label(str(getattr(self._session.beats[idx], 'label', '') or ''))
+        row = self._row_of_beat(idx)
         self._list.blockSignals(True)
-        self._list.setCurrentRow(idx)
+        if row is not None:
+            self._list.setCurrentRow(row)
         self._list.blockSignals(False)
         self._sync_label_combo()
         self._status_bar.set_dirty(False, self._file_path)
@@ -1072,9 +1225,25 @@ class CardPageMixin:
         if hasattr(self, '_prev_action'):
             self._update_nav()
     def _on_select(self, row: int):
-        if row >= 0 and row != self._loaded_idx:
+        """
+        列表选中变了：按**行里记的拍号**切拍（不是行号）。
+
+        行号只在"没有分组标题"时才等于拍号；多 label 的列表里标题行
+        会插进来，用行号当拍号会切错拍（甚至切到 -1）。
+        """
+        item = self._list.item(row) if row is not None and row >= 0 else None
+        if item is None:
+            return
+        data = item.data(Qt.UserRole)
+        try:
+            idx = int(data)
+        except (TypeError, ValueError):
+            return
+        if idx < 0:
+            return                      # 分组标题：点击由 `_on_list_item_clicked` 处理
+        if idx != self._loaded_idx:
             self.apply_current_beat()
-            self._show_index(row)
+            self._show_index(idx)
     def next_beat(self):
         """
         前进一拍（先提交当前拍，再翻页）。

@@ -84,15 +84,17 @@ class TestLoadedIndexIsSourceOfTruth:
         win._show_index(3)
         assert win._loaded_idx == 3
         assert win._panel.text() == menu_caption_text(win.beats[3].text)
-        assert win._list.currentRow() == 3, '列表高亮没跟着走'
+        # 多 label 的列表里插了分组标题行 → 行号 ≠ 拍号，映射走 `_row_of_beat`
+        assert win._list.currentRow() == win._row_of_beat(3), '列表高亮没跟着走'
+        assert win._list.currentItem().data(0x0100) == 3, '高亮那一行不是第 3 拍'
 
     def test_out_of_range_is_ignored(self, win):
         win._show_index(99)
         assert win._loaded_idx == -1, '越界不该改状态'
 
     def test_on_select_follows_user_click(self, win):
-        """用户点列表 → 载入那一拍。"""
-        win._list.setCurrentRow(2)          # 触发 currentRowChanged → _on_select
+        """用户点列表 → 载入那一拍（点的是行，落到的是行里记的拍）。"""
+        win._list.setCurrentRow(win._row_of_beat(2))   # → currentRowChanged
         assert win._loaded_idx == 2
 
     def test_loading_a_beat_fills_the_form_from_that_beat(self, win):
@@ -119,7 +121,7 @@ class TestWriteBackUsesLoadedIndexNotListHighlight:
         win._panel.set_text('改过的')
         # 让列表高亮跑到第 5 行（模拟错开）—— 回写**不许**听它的
         win._list.blockSignals(True)
-        win._list.setCurrentRow(4)
+        win._list.setCurrentRow(win._row_of_beat(4))
         win._list.blockSignals(False)
 
         win.apply_current_beat()
@@ -185,11 +187,12 @@ class TestListRowRefreshesAfterEdit:
         win._show_index(2)
         win._panel.set_text('改过的')
         win.save_current_beat()
-        assert '改过的' in win._list.item(2).text()
+        assert '改过的' in win._list.item(win._row_of_beat(2)).text()
 
     def test_other_rows_untouched(self, win):
         win._show_index(2)
-        before = [win._list.item(i).text() for i in (0, 4)]
+        rows = (win._row_of_beat(0), win._row_of_beat(4))
+        before = [win._list.item(i).text() for i in rows]
         win._panel.set_text('改过的')
         win.save_current_beat()
-        assert [win._list.item(i).text() for i in (0, 4)] == before
+        assert [win._list.item(i).text() for i in rows] == before

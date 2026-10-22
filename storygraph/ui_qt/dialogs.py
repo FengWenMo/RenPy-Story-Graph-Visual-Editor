@@ -754,11 +754,19 @@ class VariableWorkbenchDialog(_BaseDialog):
         self.jump_index = None
         #: 新增操作要放在哪一拍后面（用户选中哪条就跟着哪条；None = 本章末尾）
         self.insert_beat = None
+        #: `{新操作下标: 拍下标}` —— 交回会话，按条决定插进哪个块
+        #: （`-1` = 用户明确选了"本章末尾"）。只传一个 `insert_beat` 时，
+        #: 往两个块里各插一条会全落到同一拍，块内插入就名存实亡了。
+        self.anchors: dict = {}
+        self._anchors: dict = {}
+        self._blocks: dict = {}
         self._on_check = on_check
         self._beat_by_index = {}
         for row in (data.get('variables') or ()):
             for op in (row.get('operations') or ()):
-                self._beat_by_index[int(op.get('index', -1))] = op.get('beat_index')
+                i = int(op.get('index', -1))
+                self._beat_by_index[i] = op.get('beat_index')
+                self._blocks[i] = str(op.get('block') or '')
 
         head = QLabel(f'章节：{self.label_name}'
                       + (f'　·　{Path(data.get("file")).name}'
@@ -809,6 +817,22 @@ class VariableWorkbenchDialog(_BaseDialog):
         self._editor.setPlaceholderText('选中上面一条操作，或直接在这里写一条新的')
         self._root.addWidget(self._editor)
 
+        place_row = QHBoxLayout()
+        place_row.addWidget(QLabel('新增放在'))
+        self._place = QComboBox()
+        self._place.addItem('选中这条之后（同一块内）', 'anchor')
+        self._place.addItem('本章末尾（顶层）', 'end')
+        self._place.setToolTip(
+            '默认跟着选中的那条走：它在 if / for 里，新增就落在同一个块内；'
+            '选「本章末尾」则放到 label 结束前（顶层）。')
+        self._place.currentIndexChanged.connect(self._update_target_hint)
+        place_row.addWidget(self._place, 1)
+        self._target_hint = QLabel('')
+        self._target_hint.setProperty('role', 'caption')
+        self._target_hint.setWordWrap(True)
+        place_row.addWidget(self._target_hint, 2)
+        self._root.addLayout(place_row)
+
         row = QHBoxLayout()
         for text, slot, tip in (
                 ('保存这条修改', self._save_op, '只改这一条，不碰其它赋值'),
@@ -833,16 +857,25 @@ class VariableWorkbenchDialog(_BaseDialog):
 
         self._table.itemSelectionChanged.connect(self._filter_ops)
         self._ops.currentRowChanged.connect(self._load_op)
+        self._ops.currentRowChanged.connect(self._update_target_hint)
         self._add_buttons('保存变量')
         self._rebuild_ops()
+        self._update_target_hint()
 
     # ------------------------------------------------------------------
 
     def _item_for(self, i: int) -> QListWidgetItem:
         beat = self._beat_by_index.get(i)
-        prefix = f'第 {beat + 1} 拍 · ' if beat is not None else '（未对位）· '
-        item = QListWidgetItem(prefix + str(self.variables[i]))
+        if beat is not None:
+            where = f'第 {beat + 1} 拍'
+        else:
+            where = '本章末尾' if i in self._anchors else '（未对位）'
+        block = str(self._blocks.get(i) or '')
+        if block:
+            where += f' · 在 {block}'
+        item = QListWidgetItem(f'{where} · {self.variables[i]}')
         item.setData(Qt.UserRole, i)
+        item.setToolTip(block or '顶层（label 里直接执行）')
         return item
 
     def _rebuild_ops(self):
@@ -899,8 +932,43 @@ class VariableWorkbenchDialog(_BaseDialog):
         self._beat_by_index = {
             (k - 1 if k > i else k): v
             for k, v in self._beat_by_index.items() if k != i}
+        self._anchors = {(k - 1 if k > i else k): v
+                         for k, v in self._anchors.items() if k != i}
+        self._blocks = {(k - 1 if k > i else k): v
+                        for k, v in self._blocks.items() if k != i}
         self._rebuild_ops()
         self._hint.setText('已删掉这一条（点「保存变量」生效）。')
+
+    def _new_op_block(self, beat, src_index) -> str:
+        """新增那条会落在哪个块里（用来在界面上说清楚，不影响写回）。"""
+        if beat is None or int(beat) < 0:
+            return ''
+        if 0 <= int(src_index) < len(self.variables):
+            text = str(self._blocks.get(int(src_index)) or '')
+            if text:
+                return text
+        for i, b in self._beat_by_index.items():
+            if b is not None and int(b) == int(beat):
+                return str(self._blocks.get(i) or '')
+        return ''
+
+    def _update_target_hint(self, *_args):
+        """「新增会放到哪」：跟随选中的那条与「新增放在」下拉。"""
+        label = getattr(self, '_target_hint', None)
+        if label is None:
+            return
+        i = self._selected_index()
+        if (getattr(self, '_place', None) is not None
+                and self._place.currentData() == 'end'):
+            label.setText('会放到本章末尾（顶层）')
+            return
+        beat = self._beat_by_index.get(i) if i >= 0 else self.insert_beat
+        if beat is None:
+            label.setText('会放到本章末尾（顶层）')
+            return
+        block = self._new_op_block(beat, i)
+        label.setText(f'会放到第 {int(beat) + 1} 拍'
+                      + (f'的「{block}」块内' if block else '（顶层）'))
 
     def _target_beat(self):
         """新增操作放在哪一拍后面：选中操作的拍 → 选中变量的最后一条 → None。"""
@@ -919,10 +987,17 @@ class VariableWorkbenchDialog(_BaseDialog):
             self._hint.setText('变量名不合法：只能字母/数字/下划线，且不能以数字开头。')
             return
         beat = self._target_beat()
-        self.insert_beat = beat
+        if self._place.currentData() == 'end':
+            beat = -1
+        src = self._selected_index()
+        i = len(self.variables)
+        self.insert_beat = None if beat in (None, -1) else beat
         self.variables.append(f'{name} = 0')
-        self._beat_by_index[len(self.variables) - 1] = beat
+        self._beat_by_index[i] = None if beat in (None, -1) else beat
+        self._anchors[i] = beat if beat is not None else -1
+        self._blocks[i] = self._new_op_block(beat, src)
         self._rebuild_ops()
+        self._update_target_hint()
         self._hint.setText(f'✔ 已追加 {name} = 0（点「保存变量」生效）。')
 
     def _add_op(self):
@@ -932,12 +1007,27 @@ class VariableWorkbenchDialog(_BaseDialog):
         if not ok or not text:
             return
         beat = self._target_beat()
-        self.insert_beat = beat
+        if self._place.currentData() == 'end':
+            beat = -1
+        src = self._selected_index()
+        i = len(self.variables)
+        self.insert_beat = None if beat in (None, -1) else beat
         self.variables.append(text)
-        self._beat_by_index[len(self.variables) - 1] = beat
+        self._beat_by_index[i] = None if beat in (None, -1) else beat
+        self._anchors[i] = beat if beat is not None else -1
+        self._blocks[i] = self._new_op_block(beat, src)
         self._rebuild_ops()
         self._ops.setCurrentRow(self._ops.count() - 1)
-        self._hint.setText('✔ 已追加（点「保存变量」生效）。')
+        self._update_target_hint()
+        block = self._blocks.get(i) or ''
+        placed = self._beat_by_index.get(i)
+        if block:
+            where = f'会插进「{block}」块内'
+        elif placed is not None:
+            where = f'会放到第 {int(placed) + 1} 拍（顶层）'
+        else:
+            where = '会放到本章末尾（顶层）'
+        self._hint.setText(f'✔ 已追加：{where}（点「保存变量」生效）。')
 
     def _locate(self):
         i = self._selected_index()
@@ -969,7 +1059,13 @@ class VariableWorkbenchDialog(_BaseDialog):
             if errors:
                 self._fail('有语法错误，先修再保存：' + '；'.join(errors[:3]))
                 return
-        self.variables = [str(v) for v in self.variables if str(v).strip()]
+        # 空行会被滤掉 → 下标全变；anchor 必须跟着重排，否则会插错拍。
+        kept = [(i, str(v)) for i, v in enumerate(self.variables)
+                if str(v).strip()]
+        self.variables = [text for _i, text in kept]
+        self.anchors = {new_i: self._anchors[old_i]
+                        for new_i, (old_i, _text) in enumerate(kept)
+                        if old_i in self._anchors}
         self.accept()
 
 

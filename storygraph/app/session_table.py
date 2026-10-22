@@ -205,7 +205,7 @@ class TableSessionMixin:
         return len(self.beats)
 
     def apply_node_variable_edits(self, graph, nid, variables,
-                                  insert_beat=None) -> dict:
+                                  insert_beat=None, anchors=None) -> dict:
         """
         把"变量工作台 / 旧变量对话框"的改动**落进当前章节的拍**。
 
@@ -215,8 +215,16 @@ class TableSessionMixin:
         拍上，图上的节点只是索引/分析用的投影。
 
         做法：按每条语句的 `source` 行号找到那一拍，替换/删除 `Beat.code`
-        里的同一行；新增的操作追加到最后一拍（被调 label 的入口处）。
-        找不到拍（手工节点 / 没有行号）时**不猜**，在返回值里报 `unplaced`。
+        里的同一行；新增的操作追加到"用户选中那条所在的拍"，找不到就放到
+        最后一拍（被调 label 的入口处）。找不到拍（手工节点 / 没有行号）时
+        **不猜**，在返回值里报 `unplaced`。
+
+        `anchors`（2026-10-22，块内插入）：`{新操作下标: 拍下标}`。工作台可能
+        一次往**不同的块**里各插一条（`if` 里一条、`for` 里一条），只传一个
+        `insert_beat` 时后者会被前者覆盖 —— 全落到同一拍里。没有 anchor 的
+        新操作退回 `insert_beat`，两者都没有就走"本章最后一拍"。
+        `Beat.code` 存的是**块体本身**（缩进由块头在渲染时补），所以把新行
+        追加到那条赋值所在的拍，就自动落在同一个 `if` / `for` 里面。
         """
         node = (getattr(graph, 'nodes', {}) or {}).get(nid)
         if node is None:
@@ -274,7 +282,42 @@ class TableSessionMixin:
                         return True
             return False
 
+        def anchor_beat(op_index):
+            """
+            这一条新操作该落在哪一拍：`anchors` → `insert_beat` → None。
+
+            指到"循环头"那一拍（`for …:` 自己占一拍、块体在下一拍）时
+            往后挪一拍 —— 头拍的 `code` 是空的，写进去会落在循环**外面**。
+            """
+            want = None
+            if isinstance(anchors, dict):
+                want = anchors.get(op_index)
+            elif anchors:
+                try:
+                    want = anchors[op_index]
+                except (IndexError, TypeError):
+                    want = None
+            if want is None:
+                want = insert_beat
+            try:
+                want = int(want)
+            except (TypeError, ValueError):
+                return None
+            if not 0 <= want < len(self.beats):
+                return None
+            cand = self.beats[want]
+            if str(getattr(cand, 'label', '') or '') != label:
+                return None
+            if (not str(getattr(cand, 'code', '') or '').strip()
+                    and str(getattr(cand, 'loop_header', '') or '').strip()
+                    and want + 1 < len(self.beats)):
+                nxt = self.beats[want + 1]
+                if str(getattr(nxt, 'label', '') or '') == label:
+                    cand = nxt
+            return cand
+
         applied = unplaced = removed = 0
+        inserted: list = []
         for i, new in enumerate(new_ops):
             if i < len(old_ops):
                 old = old_ops[i]
@@ -291,16 +334,16 @@ class TableSessionMixin:
                 else:
                     unplaced += 1
             else:
-                # 新增：优先放在用户选中的那一拍后面（工作台会把索引传进来），
-                # 没选就放到本章最后一拍 —— 下一拍才会执行到它。
-                beat = None
-                if insert_beat is not None and 0 <= int(insert_beat) < len(self.beats):
-                    cand = self.beats[int(insert_beat)]
-                    if str(getattr(cand, 'label', '') or '') == label:
-                        beat = cand
-                beat = beat or beats[-1]
+                # 新增：优先放进用户选中那条所在的拍（同一个块体 → 同一个
+                # `if` / `for` 里面）；没选/对不上就放到本章最后一拍。
+                beat = anchor_beat(i) or beats[-1]
                 beat.code = ((str(beat.code or '') + '\n')
                              if str(beat.code or '').strip() else '') + new
+                try:
+                    inserted.append(next(
+                        n for n, b in enumerate(self.beats) if b is beat))
+                except StopIteration:
+                    inserted.append(-1)
                 applied += 1
         # 被删掉的多余旧操作（从后往前删，避免同一拍多行时下标跑掉）
         for i in range(len(new_ops), len(old_ops)):
@@ -315,6 +358,7 @@ class TableSessionMixin:
         merged = self.set_node_variables(graph, nid, new_ops)
         return {'ok': True, 'error': '', 'applied': applied,
                 'unplaced': unplaced, 'removed': removed,
+                'inserted': inserted,
                 'variables': merged.get('variables'),
                 'kept_tech': merged.get('kept_tech')}
 

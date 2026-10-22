@@ -206,7 +206,10 @@ class GraphOpsMixin:
             if path and Path(path).exists():
                 res = self._session.apply_node_variable_edits(
                     self.graph, nid, dlg.variables,
-                    insert_beat=dlg.insert_beat)
+                    insert_beat=dlg.insert_beat,
+                    # 新增的每条各自带拍号：一次往 if / for 两个块里插入时，
+                    # 只传一个 insert_beat 会让它们全挤到同一拍。
+                    anchors=getattr(dlg, 'anchors', None))
             else:
                 res = self._session.set_node_variables(
                     self.graph, nid, dlg.variables)
@@ -228,6 +231,7 @@ class GraphOpsMixin:
                 self.adopt_loaded_session(info['label'])
             self._log(f'[变量工作台] {info["label"]}：剧情变量 '
                       f'{res["variables"]} 条（技术代码 {res["kept_tech"]} 条原位保留）'
+                      + self._inserted_note(res)
                       + (f'；{res["unplaced"]} 条没对上拍，导出不会写'
                          if res.get('unplaced') else ''))
             self._status(f'已保存「{info["label"]}」的 {res["variables"]} 条剧情变量；'
@@ -245,6 +249,22 @@ class GraphOpsMixin:
                                           goto_card=True)
             self._show_index(int(dlg.jump_index))
             self._status(f'已跳到第 {int(dlg.jump_index) + 1} 拍。')
+
+    @staticmethod
+    def _inserted_note(res: dict) -> str:
+        """新增的变量操作落在第几拍（工作台保存后写日志用）。"""
+        rows = []
+        for value in (res.get('inserted') or ()):
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                continue
+            if n >= 0:
+                rows.append(n + 1)
+        if not rows:
+            return ''
+        return ('；新增 ' + '、'.join(f'第 {n} 拍' for n in rows[:4])
+                + ('…' if len(rows) > 4 else ''))
 
     def _write_analysis(self, text: str):
         """分析结论写进控制台（旧版也是"先清空再写"）。"""
@@ -1525,13 +1545,28 @@ class GraphOpsMixin:
         except Exception as e:                  # noqa: BLE001
             swallow('ui_qt.window_graph_ops.mark_graph_saved', e)
 
+    def _layout_save_target(self):
+        """关窗保存布局的默认位置：项目根目录下的 `storygraph_layout.json`。"""
+        root = getattr(self, '_project_root', None)
+        if not root:
+            return None
+        return Path(str(root)) / 'storygraph_layout.json'
+
+    def _save_layout_to(self, target) -> dict:
+        """把当前图写到 `target`；成功才把状态栏切回"已保存"。"""
+        res = self._session.save_layout(self.graph, Path(target))
+        if res.get('ok'):
+            self._mark_graph_saved(str(res['path']))
+        else:
+            self._log(f'[布局] ⚠ 保存失败：{res.get("error")}')
+        return res
+
     def _auto_save_layout_on_close(self) -> bool:
         """
-        关窗前把剧情图自动存到项目里（`storygraph_layout.json`）。
+        关窗前把剧情图自动存到项目里（**没有用户可问**的那条路）。
 
-        为什么不留弹窗：`closeEvent` 里弹三个按钮，用户点错一次就是"关不掉"
-        或"丢图"；而布局只是版式，存一份在项目根目录的成本极低。加载回入口
-        仍是「📂 加载布局」，文件也在用户能看见的地方。
+        只在 `_confirm_close_graph` 判定"没有可见窗口"时走：测试 / 嵌入 /
+        启动失败清理，构造完就 close，弹模态框会把进程挂住。
         """
         if not self._graph_dirty:
             return True
@@ -1539,14 +1574,76 @@ class GraphOpsMixin:
         nodes = len(getattr(self.graph, 'nodes', None) or {})
         if not root or not nodes:
             return True
-        target = Path(root) / 'storygraph_layout.json'
-        res = self._session.save_layout(self.graph, target)
-        if res.get('ok'):
-            self._mark_graph_saved(str(res['path']))
-            return True
-        # 自动保存失败不拦关闭，但要在控制台留一条（不能静默丢图）。
-        self._log(f'[布局] ⚠ 关窗自动保存失败：{res.get("error")}')
+        self._save_layout_to(Path(root) / 'storygraph_layout.json')
         return True
+
+    def _ask_close_graph_action(self) -> str:
+        """
+        关窗三选一：`save` / `discard` / `cancel`。
+
+        为什么不是"自动保存就完了"：布局只是版式，但用户可能**故意**想丢掉
+        这次拖乱的结构；而"取消"必须真的能取消 —— 否则误点一次就是白改。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle('剧情图还没保存')
+        box.setIcon(QMessageBox.Question)
+        box.setText('剧情图有改动，关掉软件就没了。')
+        target = self._layout_save_target()
+        box.setInformativeText(
+            f'保存到：{target}' if target
+            else '还没打开项目目录，保存时会让你选位置。')
+        save = box.addButton('保存剧情图并退出', QMessageBox.AcceptRole)
+        box.addButton('不保存，直接退出', QMessageBox.DestructiveRole)
+        cancel = box.addButton('取消', QMessageBox.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save:
+            return 'save'
+        if clicked is None or clicked is cancel:
+            return 'cancel'
+        return 'discard'
+
+    def _save_layout_for_close(self) -> bool:
+        """用户选了"保存"：成功才允许关窗（失败就别关，图还在内存里）。"""
+        target = self._layout_save_target()
+        if target is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, '保存剧情图布局',
+                str(Path.home() / 'storygraph_layout.json'),
+                '剧情图布局 (*.json)')
+            if not path:
+                return False
+            target = Path(path)
+        res = self._save_layout_to(target)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '剧情图保存失败',
+                                f'{res.get("error")}\n\n先不关窗，图还在。')
+            return False
+        return True
+
+    def _confirm_close_graph(self) -> bool:
+        """
+        关窗前的图处理：返回 `False` = **不要关**（用户点了取消）。
+
+        只有**窗口真的显示着**才弹三选一：构造完就 close 的那条路
+        （测试 / 嵌入 / 启动失败清理）没有用户在看着，弹框会把进程挂住 ——
+        那种情况沿用"自动存一份、失败也不拦"。
+        """
+        if not self._graph_dirty:
+            return True
+        if not self.isVisible():
+            self._auto_save_layout_on_close()
+            return True
+        action = self._ask_close_graph_action()
+        if action == 'cancel':
+            self._status('已取消关闭 —— 剧情图还在。')
+            return False
+        if action == 'discard':
+            self._log('[布局] 按你的选择：这次改动没有保存。')
+            return True
+        return self._save_layout_for_close()
 
     # ------------------------------------------------------------------
     #  诊断详情（P1-5）

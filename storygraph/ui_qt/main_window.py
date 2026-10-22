@@ -2137,6 +2137,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         lay.addWidget(cap1)
         self._list = QListWidget()
         self._list.currentRowChanged.connect(self._on_select)
+        # 多个 label 时列表里有"分组标题行"（不是拍）：点它折叠 / 展开，
+        # 不改变当前拍。选中还是走 `currentRowChanged`。
+        self._list.itemClicked.connect(self._on_list_item_clicked)
         lay.addWidget(self._list, 1)
         cap2 = QLabel('参与角色（双击填进这一拍）')
         cap2.setProperty('role', 'caption')
@@ -2789,13 +2792,17 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             swallow('main_window._status')
 
     def closeEvent(self, event):
-        # **先落图再拆自己**（2026-10-22）：剧情图只存在内存里，关掉就没了
-        # —— 有项目目录时自动存一份 `storygraph_layout.json`；
-        # 失败只记台账，绝不拦关闭（用户要关窗口时，卡住比丢图更糟）。
+        # **先处理图再拆自己**（2026-10-22）：剧情图只存在内存里。
+        # 关窗前问一句"保存 / 不保存 / 取消"——取消就真的不关（`event.ignore`），
+        # 图一个字节都不动。没有可见窗口时（测试 / 嵌入）不弹框，沿用自动保存。
         try:
-            self._auto_save_layout_on_close()
+            keep_open = not self._confirm_close_graph()
         except Exception as e:                      # noqa: BLE001
-            swallow('main_window.closeEvent.autosave_layout', e)
+            swallow('main_window.closeEvent.confirm_graph', e)
+            keep_open = False
+        if keep_open:
+            event.ignore()
+            return
         # ⚠ **先把记忆落下来再拆自己**（2026-10-13）：`save_session_state()`
         #   要读分栏尺寸、页号、当前章节 —— 那些都还活着的时候才读得到。
         #   放到下面那组"摘掉自己"之后就晚了（窗口在关，控件可能已经不可用）。

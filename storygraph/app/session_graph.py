@@ -361,6 +361,42 @@ def _variable_declarations(path) -> list:
     return out
 
 
+def _source_block_of(lines, line_no) -> tuple:
+    """
+    这一行最内层的块头原文（`if love > 3:` / `for i in range(2):`）+ 它自己的缩进。
+
+    判据只有"缩进"一条：往上找最近的、缩进更小、以 `:` 结尾、且首词是
+    `if/elif/else/for/while` 的行。**不看 AST** —— 变量工作台只想告诉用户
+    "这条赋值在哪一层"，块头原文比 AST 节点好读，也不会把 `elif` 说成
+    `else: if:`。找不到（顶层 / `label` 那一层）返回 `('', 缩进)`。
+    """
+    heads = {'if', 'elif', 'else', 'for', 'while'}
+    try:
+        n = int(line_no)
+    except (TypeError, ValueError):
+        return '', 0
+    if not lines or n < 1 or n > len(lines):
+        return '', 0
+    raw = str(lines[n - 1])
+    indent = len(raw) - len(raw.lstrip())
+    for up in range(n - 2, -1, -1):
+        prev = str(lines[up])
+        if not prev.strip():
+            continue
+        prev_indent = len(prev) - len(prev.lstrip())
+        if prev_indent >= indent:
+            continue
+        head = prev.strip()
+        # 行尾注释不算块头的一部分（`if x:  # 高于 3` 也是块）
+        import re as _re
+        bare = _re.sub(r'\s+#.*$', '', head).rstrip()
+        word = bare.split(None, 1)[0].rstrip(':') if bare else ''
+        if bare.endswith(':') and word in heads:
+            return bare, indent
+        return '', indent               # 最近的外层不是控制流块 → 顶层
+    return '', indent
+
+
 def layout_dict(graph) -> dict:
     """
     剧情图 → 布局 JSON 的 dict（`save_layout` 与"未保存"判据**共用一份**）。
@@ -674,6 +710,8 @@ class GraphSessionMixin:
         返回 `{ok, label, file, variables:[…], operations:[…],
         declarations:[…], warning}`。`operations` 是**原顺序**的文本列表，
         对话框保存时整份交回 `set_node_variables`，不会打乱技术代码的位置。
+        每条 operation 还带 `block` / `indent`：它在哪个 `if` / `for` 块里
+        （顶层是 `''`），工作台靠这两项说清"新增会插进哪一层"。
         """
         from storygraph.core.statement import operation_source
         from storygraph.core.utils import extract_variables
@@ -693,6 +731,7 @@ class GraphSessionMixin:
 
         # 行号 → 拍号（只在同一 label 内对位；跨 label 的行号没有意义）
         line_to_beat = {}
+        source_lines: list = []
         warning = ''
         if path and Path(path).exists():
             try:
@@ -709,6 +748,9 @@ class GraphSessionMixin:
                     if first and last:
                         for line in range(first, last + 1):
                             line_to_beat.setdefault(line, i)
+                # 块头（if / for）只从源码原文读：缩进就是唯一的层级真源
+                from storygraph.story.source_style import read_text
+                source_lines = read_text(Path(path))[0].splitlines()
             except Exception as e:              # noqa: BLE001 - 预览失败不拦工作台
                 warning = f'拍号对位失败：{e}'
 
@@ -729,6 +771,7 @@ class GraphSessionMixin:
                 m = _re.match(r'\s*([A-Za-z_]\w*)', text)
                 names = [m.group(1)] if m else []
             beat_idx = line_to_beat.get(line)
+            block, indent = _source_block_of(source_lines, line)
             for name in names:
                 if name not in rows:
                     order.append(name)
@@ -744,6 +787,9 @@ class GraphSessionMixin:
                     'index': idx, 'text': text, 'line': line,
                     'beat_index': beat_idx,
                     'beat_no': (beat_idx + 1) if beat_idx is not None else 0,
+                    # `if` / `for` 块里的赋值要能看出来：工作台靠它告诉用户
+                    # "新增会插进哪一层"，写回时也按这一拍的同一个块追加。
+                    'block': block, 'indent': indent,
                 })
         # 只声明、没在本章赋值过的变量也列出来（`default love = 0` 要看得见）
         for d in declarations:
