@@ -200,6 +200,7 @@
      "added_edges",
      "added_nodes",
      "control_flow",
+     "edge_rebuild",
      "edges",
      "error",
      "errors",

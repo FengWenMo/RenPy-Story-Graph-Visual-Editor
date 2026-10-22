@@ -939,12 +939,14 @@ class TestLayoutJsonAndControlFlowExport:
         # 旧版的五个键一个不少；**新增过两个**，都有必须存下来的理由：
         #   · `from_clause` —— `call X from Y` 的存档点标识（2026-10-05）；
         #   · `origin`      —— 这条边来自源文件（source）还是用户画的草图
-        #                      （manual）（2026-10-22 第二阶段）。
-        # 后者不存会怎样：一存一读，手工边全变成 `source`，下一次
-        # "按 flow 拍重建 source 边"就把用户画的线删了 —— 那是工具吃掉了
-        # 用户的动作，比双真源更糟。
+        #                      （manual）（2026-10-22 第二阶段）；
+        #   · `line_id`     —— 这条边对应哪一拍（同 label 里多次 call 同一目标
+        #                      靠它对位，同上）。
+        # 后两者不存会怎样：一存一读，手工边全变成 `source`、`line_id` 全空，
+        # 下一次"按 flow 拍重建 source 边"就会把用户画的线删掉、把重复的
+        # call 合成一条 —— 工具吃掉用户的动作，比双真源更糟。
         assert set(e0) - {'condition', 'from', 'option_text', 'to', 'type'} \
-            == {'from_clause', 'origin'}
+            == {'from_clause', 'origin', 'line_id'}
         assert data['next_ids'] == {'node': g.next_node_id,
                                     'edge': g.next_edge_id}
 

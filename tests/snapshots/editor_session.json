@@ -834,6 +834,12 @@
     "added_edges": 4,
     "added_nodes": 4,
     "control_flow": false,
+    "edge_rebuild": {
+     "added": 0,
+     "identified": 4,
+     "retargeted": 0,
+     "skipped": []
+    },
     "edges": 4,
     "error": "",
     "errors": [],

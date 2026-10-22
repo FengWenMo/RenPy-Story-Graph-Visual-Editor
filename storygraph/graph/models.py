@@ -94,7 +94,8 @@ class Node:
 
 class Edge:
     def __init__(self, edge_id, from_id, to_id, etype="jump", condition="",
-                 option_text="", from_clause="", origin="source"):
+                 option_text="", from_clause="", origin="source",
+                 line_id=""):
         self.id = edge_id
         #: 这条边**从哪来**（2026-10-22 第二阶段）：
         #:
@@ -105,6 +106,13 @@ class Edge:
         #: 不分来源的话，重建 `source` 边时会把用户画的草图一起删掉 ——
         #: 那是"工具吃掉用户的动作"，比双真源更糟。
         self.origin = str(origin or 'source')
+        #: 这条边对应**哪一拍**（`Beat.line_id`，如 `ch01.0007`）。
+        #:
+        #: 为什么需要（2026-10-22 第二阶段）：同一个 label 里 `call side` 写两次时，
+        #: 图边按 `from + type + to` 只能找到"第一条"—— 改第二个目标的边会改错。
+        #: 有了 line_id，"哪一拍"就是身份，和拍一一对应。
+        #: 空串 = 老数据 / 手工边（它们没有对应的拍）。
+        self.line_id = str(line_id or '')
         self.from_id = from_id
         self.to_id = to_id
         self.type = etype
@@ -131,6 +139,7 @@ class Edge:
         result.option_text = self.option_text
         result.from_clause = getattr(self, 'from_clause', '')
         result.origin = getattr(self, 'origin', 'source')
+        result.line_id = getattr(self, 'line_id', '')
         return result
 
 class Graph:
@@ -176,11 +185,12 @@ class Graph:
         return nid
 
     def add_edge(self, from_id, to_id, etype="jump", condition="",
-                 option_text="", from_clause="", origin="source"):
+                 option_text="", from_clause="", origin="source",
+                 line_id=""):
         eid = self.next_edge_id
         self.next_edge_id += 1
         edge = Edge(eid, from_id, to_id, etype, condition, option_text,
-                    from_clause, origin=origin)
+                    from_clause, origin=origin, line_id=line_id)
         self.edges[eid] = edge
         return eid
 

@@ -85,6 +85,102 @@ def files_look_like_control_flow(paths) -> bool:
         if _BODY_LINE_RE.search(text):
             return False
     return seen
+def rebuild_source_edges(graph, beats) -> dict:
+    """
+    按这批拍里的控制流拍，重建它们涉及的那几个 label 的 **`source` 边**
+    （2026-10-22 第二阶段）。
+
+    这是"图边与脚本同源"的那一步：`flow_edges(beats)` 是唯一真源，
+    图上的 `source` 边应当恒等于它。
+
+    ## 只做什么
+
+      · **补**：源里有 `call` / `jump`，图上没有对应边 → 建一条（带 `line_id`）；
+      · **改**：同一个 `line_id` 的边，目标 / 类型 / `from` 变了 → 就地改；
+      · **补身份**：老边没有 `line_id`，但结构对得上 → **只补 line_id，不重建**
+        （这样"升级到第二阶段"不会把已有的边全删了重来）。
+
+    ## 刻意不做什么
+
+      · **不删**：源里删掉一个 `call`，这条边**这次不会被移除**。
+        删除要同时满足"知道上次有哪些 line_id"，那是下一步（和 P2-1
+        "重载删幽灵"一起做）。第一版先只增/改，风险最小。
+      · **不动 `manual`**：用户画的草图一条都不碰。
+      · **不硬造节点**：目标不在图上 → 跳过，记进 `skipped`。
+
+    ⚠ **菜单选项里的 `jump` / `call` 也在这里面**（2026-10-22 实测）：
+    `menu:` 的每个选项块里那句 `jump ch01_roof` 同样是控制流拍，
+    `flow_edges` 会把它列出来；而图上的对应边是解析器的**菜单逻辑**建的
+    （带 `option_text`）。
+
+    第一版曾把"`option_text` 非空"的边从 `have` 里排除，结果这两条菜单边
+    匹配不上 → **又新建了一条一模一样的**，demo 的边从 4 条变 6 条
+    （`test_editor_session_snapshot` 的 golden 立刻抓到）。
+    所以这里按 `line_id` / `(from,to,type)` 配，**不看 `option_text`**；
+    匹配上之后只改目标 / 类型 / `from` 子句并补 `line_id`，
+    `option_text` 一个字都不动（那是菜单的显示文案）。
+
+    返回 `{'added', 'retargeted', 'identified', 'skipped'}`：
+      · `identified` = 老边补上了 line_id 的条数（升级兼容用）。
+    """
+    from storygraph.story.flow import flow_edges
+
+    labels = {str(getattr(b, 'label', '') or '') for b in (beats or ())}
+    labels.discard('')
+    by_label = {}
+    for nid, node in (getattr(graph, 'nodes', {}) or {}).items():
+        name = str(getattr(node, 'label_name', '') or '')
+        if name and name not in by_label:
+            by_label[name] = nid
+    src_ids = {by_label[name] for name in labels if name in by_label}
+
+    want = []
+    skipped = []
+    for spec in flow_edges(beats):
+        src = by_label.get(spec['from'])
+        dst = by_label.get(spec['to'])
+        if src is None or dst is None:
+            skipped.append(spec)
+            continue
+        want.append((src, dst, spec))
+
+    edges = list((getattr(graph, 'edges', {}) or {}).values())
+    have = [e for e in edges
+            if getattr(e, 'origin', 'source') == 'source'
+            and e.from_id in src_ids]
+    by_line = {getattr(e, 'line_id', ''): e for e in have
+               if getattr(e, 'line_id', '')}
+    taken = set()
+
+    added = retargeted = identified = 0
+    for src, dst, spec in want:
+        line = spec['line_id']
+        old = by_line.get(line) if line else None
+        if old is None:
+            # **结构配**：老边（无 line_id）按 (from, to, type) 找一条
+            old = next((e for e in have
+                        if id(e) not in taken
+                        and e.from_id == src and e.to_id == dst
+                        and e.type == spec['type']), None)
+        if old is None:
+            graph.add_edge(src, dst, spec['type'], spec['condition'], '',
+                           spec['from_clause'], origin='source',
+                           line_id=line)
+            added += 1
+            continue
+        taken.add(id(old))
+        if old.to_id != dst:
+            old.to_id = dst
+            retargeted += 1
+        old.type = spec['type']
+        old.from_clause = str(spec['from_clause'] or '')
+        if line and not getattr(old, 'line_id', ''):
+            old.line_id = line
+            identified += 1
+    return {'added': added, 'retargeted': retargeted,
+            'identified': identified, 'skipped': skipped}
+
+
 def graph_from_layout_dict(data) -> 'object':
     """
     布局 JSON（dict）→ 新的 `Graph`。**只做数据转换，不碰文件**。
@@ -133,7 +229,9 @@ def graph_from_layout_dict(data) -> 'object':
             str(ed.get('option_text') or ''),
             str(ed.get('from_clause') or ''),
             # 老布局没有这一位 → 默认 `source`（那时候图里的边全部来自解析）
-            str(ed.get('origin') or 'source'))
+            str(ed.get('origin') or 'source'),
+            # 老布局没有 line_id（那一版还没有"按拍对位"）
+            str(ed.get('line_id') or ''))
     nx = (data or {}).get('next_ids') or {}
     graph.next_node_id = int(nx.get('node')
                              or (max(graph.nodes) + 1 if graph.nodes else 1))
@@ -209,6 +307,8 @@ class GraphSessionMixin:
                 # 来源（source / manual）同样要存：否则一存一读，用户画的手工边
                 # 全变成 `source`，下次"从拍派生"就把它们删了。
                 'origin': getattr(e, 'origin', 'source'),
+                # 对应哪一拍（同一 label 里多次 call 同一目标时靠它对位）
+                'line_id': getattr(e, 'line_id', ''),
             } for eid, e in (getattr(graph, 'edges', {}) or {}).items()},
             'next_ids': {
                 'node': int(getattr(graph, 'next_node_id', 1)),
@@ -721,9 +821,24 @@ class GraphSessionMixin:
                 swallow('editor.import_chapters')
         self.refresh_symbols()
 
+        # **图边与脚本同源**（2026-10-22 第二阶段）：图上的 `source` 边
+        # 由这批文件的**控制流拍**派生 —— 补 `line_id`、改目标、补漏。
+        #
+        # 失败不拦导入（图的其余部分已经建好了），但结果要带回去给界面：
+        # `skipped` 里是"目标还不在图上"的那几条，用户需要知道边没画全。
+        rebuild: dict = {}
+        try:
+            from storygraph.story.beat_build import beats_from_parse_result
+            rebuild = rebuild_source_edges(
+                graph, beats_from_parse_result(parse_result))
+        except Exception as e:                    # noqa: BLE001
+            swallow('editor.rebuild_source_edges', e)
+        self._last_edge_rebuild = rebuild
+
         return {
             'ok': True, 'error': '',
             'graph': graph,
+            'edge_rebuild': rebuild,
             'control_flow': bool(getattr(graph, 'control_flow', False)),
             'files': [str(p) for p in paths],
             'added_nodes': max(0, len(graph.nodes or {}) - before_nodes),
