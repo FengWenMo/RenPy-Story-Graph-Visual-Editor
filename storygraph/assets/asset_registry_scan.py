@@ -535,9 +535,20 @@ def _scan_file_items(scan_root, walk) -> list:
     `ling_angry` 这种 ID 去跟真正的"tag_attribute"抢解析，实测直接导致
     "立绘不显示 + 表情调不了"。
     """
+    # 排序键（两条分支共用）：**先比深度、再比路径**。
+    #
+    # 为什么不是纯路径序（2026-10-22，真机金标抓到）：同一个文件名出现在
+    # 两层时（`game/images/bg_1.jpg` 与 `game/images/bg/bg_1.jpg`），
+    # 纯字典序里 `bg/` 的 `/`(0x2f) 排在 `_`(0x5f) 前面 → **深层那个先拿到
+    # 干净的 ID `bg_1`**，浅层的被改成 `bg_bg_1`。而资源表里登记的 `bg_1`
+    # 本来指的是浅层那张 —— 重扫一次就**静默换了图**。
+    # 浅的先扫（= 更"顶层"的那个保住 ID）符合直觉，也和排序之前的实测一致。
+    def _order(rel_path):
+        return (rel_path.count('/'), rel_path)
+
     if walk is not None:
         return sorted(((rel, p) for rel, p in walk.files().items()
-                       if not walk.is_nested(rel)), key=lambda kv: kv[0])
+                       if not walk.is_nested(rel)), key=lambda kv: _order(kv[0]))
     items = []
     for p in scan_root.rglob('*'):
         if not p.is_file():
@@ -552,7 +563,7 @@ def _scan_file_items(scan_root, walk) -> list:
     # _finds_the_same_files` 直接断言了顺序，于是只有 Linux 红。
     # 顺序还影响 `_make_unique_id` 的后缀编号（同名文件谁先拿到 `_2`），
     # 所以这不只是测试的事：**产物必须跨平台可复现**。
-    return sorted(items, key=lambda kv: kv[0])
+    return sorted(items, key=lambda kv: _order(kv[0]))
 
 def scan_assets(scan_root, include_ui=True, audio_dirs=None,
                 voice_dirs=None, walk=None, facts=None,
