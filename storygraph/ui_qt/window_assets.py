@@ -60,8 +60,9 @@ class WindowAssetsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', '_ensure_registry', '_panel',
-                '_project_root', '_registry_provider', '_session')
+    REQUIRES = ('ASSET_FIELD_KINDS', '_ensure_registry', '_file_path', '_log',
+                '_panel', '_project_root', '_registry_provider', '_session',
+                'load_script')
 
     def set_assets_ready(self, ready: bool):
         """
@@ -105,8 +106,38 @@ class WindowAssetsMixin:
             return
         from storygraph.ui_qt.dialog_asset_rename import AssetRenameDialog
         dlg = AssetRenameDialog(self, session=self._session,
-                                registry=self._registry_provider())
+                                registry=self._registry_provider(),
+                                on_applied=self._after_asset_rename)
         dlg.exec()
+
+    def _after_asset_rename(self, res: dict):
+        """
+        改名**写进磁盘之后**：这一章被改过，就必须从磁盘重读。
+
+        为什么非做不可（2026-10-23）：改名把 `ling_happy` 换成 `ling_smile`
+        改的是**文件**，而卡片页还捧着改名前的拍。用户接着按「⤓ 导出 .rpy」，
+        会话会把自己那份（还带着旧名字）写回去 —— **改名被自己的编辑器撤销了**，
+        而且导出还会报"成功"。
+
+        只在"这一章确实被改过"时重读（别的章节被改名与手上这一章无关，
+        重读会白丢用户没导出的改动 —— `AssetRenameDialog.apply` 已经先拦住
+        了"这一章有未导出改动"那种情况）。
+        """
+        modified = [str(p) for p in ((res or {}).get('modified') or ())]
+        current = str(getattr(self, '_file_path', '') or '')
+        if not modified or not current:
+            return
+        try:
+            hit = any(Path(p).resolve() == Path(current).resolve()
+                      for p in modified)
+        except OSError as e:                    # noqa: BLE001 - 路径解析不了就不重读
+            swallow('ui_qt.window_assets.after_rename.path', e)
+            hit = False
+        if not hit:
+            return
+        self._log('[资源改名] 这一章被改过 → 从磁盘重读'
+                  '（不重读的话，下次导出会把旧名字写回去）')
+        self.load_script(current, goto_card=False)
 
     def _pick_image(self, current: str) -> str:
         """挑一张立绘图（走 Qt 版资产选择器）。取消或没有资源表返回 ''。"""

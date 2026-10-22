@@ -90,7 +90,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'clear_console', 'engine', 'graph', 'load_script', 'resync_after_export', 'set_assets_ready')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'resync_after_export', 'set_assets_ready', 'show_recovery')
 
     def _show_analysis_text(self, text: str):
         """
@@ -1445,8 +1445,15 @@ class GraphOpsMixin:
             n += combo.count() if isinstance(combo, QComboBox) else 0
         self._log(f'[资源] 已从资源表重读下拉候选（背景/音乐/语音共 {n} 条）')
         self._status(f'🔄 下拉候选已刷新（共 {n} 条）')
-    def _show_more_tools(self):
-        """把次要入口收进一个菜单（按钮本身不动图，只是入口）。"""
+    def _more_tools_menu(self) -> 'QMenu':
+        """
+        建「更多工具」菜单（**只建不弹**）。
+
+        分成两步是为了能被检查：弹菜单会**阻塞在事件循环里**（`menu.exec`
+        等用户点），测试与"入口盘查"都碰不了它。现在菜单本身是一个纯函数式
+        的构造，`tests/test_entry_points.py` 与协作锁那组用例能直接看里面
+        挂了哪些动作 —— "实现了但没入口"这类问题才抓得到。
+        """
         menu = QMenu(self)
         menu.addAction('⤓ 导出到其他引擎（Unity / Godot / JSON / CSV）…',
                        self.export_other_engine)
@@ -1459,7 +1466,14 @@ class GraphOpsMixin:
         menu.addAction('⤓ 导出控制流 .rpy（按控制流图原样导出）…',
                        lambda: self.export_control_flow(wrapper=False))
         menu.addSeparator()
+        menu.addAction('🕘 上次没导出的改动…', self.show_recovery)
+        menu.addAction('🔒 协作锁（谁在改哪几句）…', self.show_collab_locks)
         menu.addAction('👥 协作库（SQLite ↔ Excel）…', self.show_collab)
+        return menu
+
+    def _show_more_tools(self):
+        """把次要入口收进一个菜单（按钮本身不动图，只是入口）。"""
+        menu = self._more_tools_menu()
         btn = getattr(self, '_more_btn', None)
         pos = (btn.mapToGlobal(btn.rect().bottomLeft()) if btn is not None
                else self.mapToGlobal(self.rect().center()))
@@ -1670,6 +1684,39 @@ class GraphOpsMixin:
                            log=self._log, status=self._status)
         dlg.exec()
         return dlg
+    def show_collab_locks(self):
+        """
+        「协作锁」：谁在改哪几句 + 我这一句先占住（2026-10-23 接线）。
+
+        为什么挂在窗口上而不是放进 `CollabDialog`：它要**当前这一拍**
+        （`_loaded_idx` 那一拍的 line_id）与当前 label —— 那是窗口的状态，
+        协作库对话框不知道"我现在改的是哪一句"。
+
+        传进去的 `line_id` 就是**会话里那一拍**的身份编号：锁认的是它，
+        所以这里必须用会话的拍（不是文件里现算的）—— 否则锁错行。
+        """
+        from storygraph.ui_qt.dialog_locks import CollabLockDialog
+        session = self._session
+        line_id, label = '', ''
+        # ⚠ 不能写 `int(getattr(...) or -1)`：**第 0 拍是 0**，`0 or -1` 会
+        #    把它当成"没载入" —— 于是锁的永远是"没有这一拍"，界面上只回一句
+        #    "先选中一句再回来"（而且看起来一切正常）。
+        idx = getattr(self, '_loaded_idx', -1)
+        idx = -1 if idx is None else int(idx)
+        beats = list(getattr(session, 'beats', None) or ())
+        if 0 <= idx < len(beats):
+            beat = beats[idx]
+            line_id = str(getattr(beat, 'line_id', '') or '')
+            label = str(getattr(beat, 'label', '') or '')
+        if not label:
+            label = str(getattr(session, 'focus_label', '') or '')
+        if not label and beats:
+            label = str(getattr(beats[0], 'label', '') or '')
+        dlg = CollabLockDialog(self, session=session,
+                               project_root=self._project_root,
+                               label=label, line_id=line_id, log=self._log)
+        dlg.exec()
+        return dlg
     def _on_node_moved(self, nid, ox, oy, nx, ny):
         """
         拖完一个块 → 记进撤销栈（用户 2026-10-05："将撤销做好"）。
@@ -1817,6 +1864,9 @@ class GraphOpsMixin:
         """
         state = self._close_dirty_state()
         if not (state['graph'] or state['beats'] or state['form']):
+            # 什么都没改 → 上一次会话留下的快照（如果有）已经没有意义了：
+            # 内存与磁盘一致，再问"要恢复吗"只会让人以为工具坏了。
+            self.autosave_clear()
             return True
         if not self.isVisible():
             # 图沿用"自动存一份、失败也不拦"；拍的改动没有安全落点
@@ -1829,6 +1879,9 @@ class GraphOpsMixin:
             return False
         if action == 'discard':
             self._log('[关闭] 按你的选择：这次没导出的改动没有保存。')
+            # **快照也要清掉**：她刚刚明确说"不要了"，留着它下次打开又弹一次，
+            # 那不是保险，是骚扰。清的是这一章那份，别的章节不动。
+            self.autosave_clear()
             return True
         return self._save_for_close(state)
 
@@ -1969,6 +2022,8 @@ class GraphOpsMixin:
         self._session.take_edits_baseline()
         self._status_bar.set_dirty(False, str(res.get('path') or target))
         self.resync_after_export(res)
+        # 写进文件了 → 自动保存那份快照没有可恢复的东西了（2026-10-23）
+        self.autosave_clear()
         self._log(f'[导出] 关窗前已写回 {Path(target).name}'
                   f'（{res.get("note", "")}）')
         return True

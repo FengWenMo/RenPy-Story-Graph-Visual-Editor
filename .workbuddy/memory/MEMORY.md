@@ -104,3 +104,18 @@
   条件求值/菜单 UI/资源地址仍归 Unity。判据 `tests/test_unity_timeline.py`。
 - **并行纪律**：文档只追加（`docs/契约速查_storygraph.md` §16），
   提交按文件分组，避免卷进另一会话的未完成改动。
+
+## 七、2026-10-23 自动保存与锁（三条会反复踩的）
+
+- **`if self._session:` 在 `EditorSession` 上是错的**：它有 `__len__`（= 拍数），
+  没载入章节时**falsy** → "条件转发"静默走 else，界面显示空表（看起来像"没人锁"）。
+  判空一律 `is not None`。
+- **`int(getattr(self, '_loaded_idx', -1) or -1)` 会把第 0 拍当成"没载入"**（`0 or -1`）。
+  默认值兜底不要用 `or`，用 `if x is None`。
+- **两个 pytest 不能同时跑**：`pytest.ini` 的 `--basetemp=.pip-tmp/pytest` 是按
+  **测试名**建目录，两个进程会用同名目录并互删 → `PermissionError: 另一个程序正在
+  使用此文件` / 大片 ERROR。边跑全量边跑单文件时实测踩过。
+- **模态打桩要打全**：只打 `QMessageBox.question` 不够，`warning` / `information`
+  同样是模态，漏一个测试就挂住（`test_asset_rename_ui` 踩过）。
+- **`QMenu.exec` 打桩不可靠**（PySide6 重载解析）→ 把菜单建成纯函数
+  （`_more_tools_menu()`），测"挂了哪些动作"而不是"弹出来"。

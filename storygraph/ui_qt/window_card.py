@@ -135,7 +135,7 @@ class CardPageMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
+    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph', 'maybe_offer_recovery')
 
     #: 被用户折起来的 label 名（跨 `_reload_list` 保留：翻页/插卡不该弹开）。
     _collapsed_labels: frozenset = frozenset()
@@ -195,6 +195,11 @@ class CardPageMixin:
             self._log(f'[载入] {Path(target).name}{where}：{n} 拍'
                       f'（{"进入卡片编辑器" if goto_card else "留在剧情结构页"}）')
             self._status(f'已载入 {Path(target).name}{where}：{n} 拍')
+            # **自动保存的恢复问句挂在这里**（2026-10-23）：必须等"按磁盘
+            # 载入过这一章"之后才问 —— 恢复是"在磁盘那一版之上换掉拍列表"，
+            # 没有这一版就没有基线（见 `app/session_recover` 的说明）。
+            # 放在 `finally` 之外：恢复失败的异常不该被载入失败的提示盖住。
+            self.maybe_offer_recovery()
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '载入失败', str(e))
         finally:

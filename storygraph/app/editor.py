@@ -70,6 +70,8 @@ from storygraph.app.session_assets import AssetRegistryMixin
 from storygraph.app.session_export import ExportMixin
 # 「协作」那一半（SQLite ↔ Excel 的四条命令）—— 纯转发，风险最低。
 from storygraph.app.session_collab import CollabMixin
+# 「崩溃恢复」那一半（自动保存快照 / 摊回会话）—— 2026-10-23，体验报告 P0-2。
+from storygraph.app.session_recover import RecoverMixin
 from storygraph.story.beat_model import Beat
 from storygraph.story.beat_render import make_symbols
 
@@ -110,7 +112,8 @@ ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage', 'SayTail',
 
 
 class EditorSession(TableSessionMixin, GraphSessionMixin,
-                    AssetRegistryMixin, ExportMixin, CollabMixin):
+                    AssetRegistryMixin, ExportMixin, CollabMixin,
+                    RecoverMixin):
     """
     一章的编辑会话。**前端只碰这个类**（不碰 Beat 内部字段名）。
 
@@ -128,7 +131,9 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         资源表读取 / 候选 / 概览 / 缩略图路径；
       · `ExportMixin`（`session_export.py`，10 方法）——
         落盘与门禁 / 增量补丁 / 多引擎导出 / 预览帧 / 体检；
-      · `CollabMixin`（`session_collab.py`，4 方法）—— SQLite ↔ Excel。
+      · `CollabMixin`（`session_collab.py`，4 方法）—— SQLite ↔ Excel；
+      · `RecoverMixin`（`session_recover.py`，7 方法）——
+        自动保存快照 / 崩溃后摊回会话（2026-10-23，体验报告 P0-2）。
 
     **只剩下"表格/拍编辑"那一块没拆**（`load` / `fields` / `cards` /
     `apply` / `insert` / `delete` / 撤销 …，约 25 个方法）—— 那是核心、

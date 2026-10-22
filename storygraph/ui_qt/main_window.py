@@ -149,6 +149,7 @@ from storygraph.ui_qt.window_export import (WindowExportMixin,
 from storygraph.ui_qt.window_graph_ops import GraphOpsMixin
 from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
 from storygraph.ui_qt.window_state import WindowStateMixin
+from storygraph.ui_qt.window_recover import RecoverMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
 
 
@@ -1419,7 +1420,8 @@ class BeatCardEditor(QWidget):
 
 class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                    WindowExportMixin, WindowAssetsMixin,
-                   WindowKeyboardMixin, WindowStateMixin, QMainWindow):
+                   WindowKeyboardMixin, WindowStateMixin, RecoverMixin,
+                   QMainWindow):
     """
     Qt 版主窗口 —— **两页**：剧情结构图（第一屏）→ 卡片编辑器（点进模块才进）。
 
@@ -1440,7 +1442,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
       · `WindowAssetsMixin`（`window_assets.py`，3）—— 图片与下拉候选；
       · `WindowKeyboardMixin`（`window_keyboard.py`，5）—— 键盘与快捷键；
       · `WindowStateMixin`（`window_state.py`，8）—— **会话记忆**
-        （下次打开回到上次那个项目 + 摆回布局，2026-10-13 用户要求）。
+        （下次打开回到上次那个项目 + 摆回布局，2026-10-13 用户要求）；
+      · `RecoverMixin`（`window_recover.py`，9）—— **崩溃恢复**
+        （编辑时定时抄一份、下次打开问一句；2026-10-23，体验报告 P0-2）。
 
     **本类自己留 36 个成员**，全是"界面骨架 + 页切换 + 谁都要用的工具"：
     三个页构建器（`_build*`）、`_set_page` / `_update_crumb` /
@@ -1747,6 +1751,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 键盘：**必须最后装**（_panel / _list 都建好了，
         # 事件里要判断焦点在哪）
         self._install_shortcuts()
+        # 自动保存：**建好就开始走**（干净时每个 tick 什么都不做）。
+        # 为什么不等到载入章节再建：`load_script` 有多条路进（导入 / 记忆恢复 /
+        # 双击模块），漏一条就是"这一段时间里崩了没处捡"。
+        self.autosave_timer()
 
     # ---------------- 第 0 页：剧情结构 ----------------
 

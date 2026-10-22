@@ -50,7 +50,8 @@ from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
 from storygraph.story.spec_args import is_dynamic_column
 
 
-__all__ = ['TableSessionMixin', 'BeatSnapshot', 'uniform_position_of']
+__all__ = ['TableSessionMixin', 'BeatSnapshot', 'uniform_position_of',
+           'beat_edits_print']
 
 
 #: 撤销快照要装的字段。
@@ -109,6 +110,33 @@ def uniform_position_of(cards: list) -> str:
     rows = [{'at': (str(c.get('position') or '').strip()
                     or str(c.get('at') or '').strip())} for c in (cards or [])]
     return B.uniform_sprite_position(rows)
+
+
+def beat_edits_print(beat, fallback=None) -> str:
+    """
+    一拍"**会不会改变产物**"的指纹（`_beat_edits_print` 与崩溃恢复共用）。
+
+    比的是**渲染出来的行**（与导出同一条路），再补 `label` / `notes`
+    两个不进单拍渲染、但确实要保存的字段。`line_id` / `seq` 刻意不比
+    （见 `TableSessionMixin._beat_edits_print` 的说明）。
+
+    `fallback`：渲染抛异常时的退路（会话那边传 `rendered_lines_of`，
+    崩溃恢复那边可以不传 —— 恢复出来的拍还没进会话，没有退路可用）。
+    """
+    import hashlib
+    try:
+        from storygraph.story.beat_render import render_beat_to_rpy
+        # **不 deepcopy**：`rendered_lines_of` 里那份拷贝是给"预览会删几行"
+        # 用的（它怕 hydrate 改到用户手里那一拍）；这里只读不改，实测
+        # 渲染一整个 1793 拍的章节，直接渲染 68ms / 拷贝再渲染 183ms。
+        lines = list(render_beat_to_rpy(beat))
+    except Exception as e:                      # noqa: BLE001 - 渲染不了就退回退路
+        swallow('app.session_table.beat_edits_print', e)
+        lines = list(fallback(beat) or ()) if callable(fallback) else []
+    tail = [str(getattr(beat, 'label', '') or ''),
+            str(getattr(beat, 'notes', '') or '')]
+    blob = '\x1f'.join([*lines, '', *tail])
+    return hashlib.md5(blob.encode('utf-8', 'replace')).hexdigest()[:12]
 
 
 class TableSessionMixin:
@@ -203,7 +231,7 @@ class TableSessionMixin:
 
     def _beat_edits_print(self, idx: int) -> str:
         """
-        一拍"**会不会改变产物**"的指纹。
+        一拍"**会不会改变产物**"的指纹（实现见模块级 `beat_edits_print`）。
 
         为什么不用字段快照：`apply()`（翻页时的"顺带提交"）会把 `At` 这类
         **投影列**规范化 —— 内存里 `Beat.at` 从空变成 `i11`，而产物一个字都
@@ -215,22 +243,14 @@ class TableSessionMixin:
 
         `line_id` / `seq` 是身份编号，**刻意不比**：插一张卡会让后面每一拍
         整体后移，比它们就会把"插了 1 拍"说成"改了 200 拍"。
+
+        2026-10-23：指纹算法搬成模块级函数（`beat_edits_print`）——
+        **崩溃恢复要拿它比"快照里的拍"与"磁盘上的拍"**，而那份拍还没进
+        会话（不属于任何 idx）。搬出去而不是在界面里抄一遍：
+        "两处各写一份指纹"正是这条判据最怕的事（抄漏一个字段就永远
+        判成"没变"，恢复出来的东西被当成已保存）。
         """
-        import hashlib
-        beat = self.beats[idx]
-        try:
-            from storygraph.story.beat_render import render_beat_to_rpy
-            # **不 deepcopy**：`rendered_lines_of` 里那份拷贝是给"预览会删几行"
-            # 用的（它怕 hydrate 改到用户手里那一拍）；这里只读不改，实测
-            # 渲染一整个 1793 拍的章节，直接渲染 68ms / 拷贝再渲染 183ms。
-            lines = list(render_beat_to_rpy(beat))
-        except Exception as e:                  # noqa: BLE001 - 渲染不了就退回拷贝路
-            swallow('app.session_table._beat_edits_print', e)
-            lines = list(self.rendered_lines_of(beat) or ())
-        tail = [str(getattr(beat, 'label', '') or ''),
-                str(getattr(beat, 'notes', '') or '')]
-        blob = '\x1f'.join([*lines, '', *tail])
-        return hashlib.md5(blob.encode('utf-8', 'replace')).hexdigest()[:12]
+        return beat_edits_print(self.beats[idx], self.rendered_lines_of)
 
     def unsaved_edits(self) -> dict:
         """
@@ -703,8 +723,6 @@ class TableSessionMixin:
         `Beat.code` 本身**一个字符都不改**：行数没变，`ordered` / `op_order` /
         `src_first..src_last` 也就都不用动（这是这条路的立足点）。
         """
-        from storygraph.core.statement import operation_source, strip_marker
-
         node = (getattr(graph, 'nodes', {}) or {}).get(nid)
         if node is None:
             return {'ok': False, 'error': '这个模块不在了', 'lifted': 0}
@@ -721,20 +739,9 @@ class TableSessionMixin:
             except Exception as e:              # noqa: BLE001
                 return {'ok': False, 'error': f'载入失败：{e}', 'lifted': 0}
 
-        wanted: dict = {}
-        for pick in (picks or ()):
-            try:
-                bi = int(pick.get('beat'))
-                start = int(pick.get('start'))
-                end = int(pick.get('end'))
-            except (TypeError, ValueError):
-                continue
-            rows = {int(x) for x in (pick.get('lift') or ())
-                    if str(x).strip() != ''}
-            if rows:
-                wanted.setdefault((bi, start, end), set()).update(rows)
-        if not wanted:
-            return {'ok': False, 'error': '没有选中要搬的行', 'lifted': 0}
+        wanted, error = self._lift_targets(picks)
+        if error:
+            return {'ok': False, 'error': error, 'lifted': 0}
 
         stmts = list(getattr(node, 'statements', None) or [])
         replace: dict = {}           # 语句下标 → 新语句序列
@@ -742,85 +749,15 @@ class TableSessionMixin:
         plan_beats: dict = {}        # 拍下标 → [(start, end, keep_ranges)]
         lifted = 0
         for (bi, start, end), offsets in sorted(wanted.items()):
-            if not 0 <= bi < len(self.beats):
-                return {'ok': False, 'error': f'第 {bi + 1} 拍不在了'
-                                              f'（文件改过了？）', 'lifted': 0}
-            beat = self.beats[bi]
-            if str(getattr(beat, 'label', '') or '') != label:
-                return {'ok': False,
-                        'error': f'第 {bi + 1} 拍不属于 {label}（文件改过了？）',
+            plan = self._plan_lift_block(bi, start, end, offsets, label,
+                                         stmts, used_idx, path)
+            if not plan.get('ok'):
+                return {'ok': False, 'error': plan.get('error') or '不能搬',
                         'lifted': 0}
-            lines = str(getattr(beat, 'code', '') or '').split('\n')
-            if not (1 <= start <= end <= len(lines)):
-                return {'ok': False, 'error': '块的行区间越界（文件改过了？）',
-                        'lifted': 0}
-            lift_rows = {start + o for o in offsets if 0 <= o <= (end - start)}
-            if not lift_rows:
-                continue
-            # 权威校验：只接受"计划里说可搬"的那些行。界面本来只让勾这些，
-            # 但接口也可能被脚本 / 别的入口调用 —— 搬一条嵌套语句出来，
-            # 它上面的 `if` 就成了没有块体的 `if`（语法错）。
-            from storygraph.story.python_lift import analyze_block
-            allowed = set(analyze_block(lines[start - 1:end]).get('lift') or ())
-            bad = sorted(set(offsets) - allowed)
-            if bad:
-                return {'ok': False,
-                        'error': f'第 {start}-{end} 行这个块里，'
-                                 f'第 {bad[0] + 1} 行不能搬'
-                                 f'（嵌套 / 注释 / 多行 / 不是单行赋值）',
-                        'lifted': 0}
-            if (start, end) not in [(int(a), int(b)) for a, b in
-                                    (getattr(beat, 'code_blocks', None) or [])]:
-                return {'ok': False, 'error': '这个块已经被改过了（先刷新一下）',
-                        'lifted': 0}
-            block_rows = list(range(start, end + 1))
-            remain = [r for r in block_rows if r not in lift_rows]
-            runs: list = []
-            for r in remain:
-                if runs and r == runs[-1][-1] + 1:
-                    runs[-1].append(r)
-                else:
-                    runs.append([r])
-            keep: list = []
-            for run in runs:
-                has_stmt = any(self._row_is_code(lines[r - 1]) for r in run)
-                if not has_stmt:
-                    if any(str(lines[r - 1] or '').lstrip().startswith('#')
-                           for r in run):
-                        return {'ok': False,
-                                'error': '有一行注释会只剩它自己待在块外 —— '
-                                         '把同一块里靠近它的那条一起留下',
-                                'lifted': 0}
-                    continue          # 只有空行：块外渲染成空行，合法
-                keep.append((run[0], run[-1]))
-            text = '\n'.join(lines[start - 1:end])
-            si = self._match_block_statement(
-                stmts, used_idx, text, operation_source, strip_marker)
-            if si < 0:
-                return {'ok': False,
-                        'error': '块的文本对不上图节点（先点「🔁 刷新已导入'
-                                 '章节」再试）', 'lifted': 0}
-            used_idx.add(si)
-            cond = str(getattr(stmts[si], 'condition', '') or '')
-            head = self._statement_line(stmts, si)
-            new_stmts: list = []
-            cur: list = []
-            for r in block_rows:
-                if r in lift_rows:
-                    if cur:
-                        new_stmts.append(self._lift_statement(
-                            lines, cur[0], cur, cond, path, head, start))
-                        cur = []
-                    new_stmts.append(self._lift_statement(
-                        lines, r, [r], cond, path, head, start))
-                else:
-                    cur.append(r)
-            if cur:
-                new_stmts.append(self._lift_statement(
-                    lines, cur[0], cur, cond, path, head, start))
-            replace[si] = new_stmts
-            plan_beats.setdefault(bi, []).append((start, end, keep))
-            lifted += len(lift_rows)
+            used_idx.add(plan['si'])
+            replace[plan['si']] = plan['new_stmts']
+            plan_beats.setdefault(bi, []).append((start, end, plan['keep']))
+            lifted += len(plan['lift_rows'])
 
         if not replace:
             return {'ok': False, 'error': '没有可落地的行', 'lifted': 0}
@@ -856,6 +793,136 @@ class TableSessionMixin:
                 'blocks': len(replace), 'beats': sorted(before_snaps),
                 'beat_snapshots': before_snaps,
                 'old_statements': stmts, 'new_statements': merged}
+
+    @staticmethod
+    def _lift_targets(picks):
+        """
+        `picks` → `({(拍, 块首行, 块尾行): {块内行偏移, …}}, 错误)`。
+
+        同一个块被选了两次（界面按理不会，但接口可能）→ **合并**而不是各算一遍：
+        各算一遍会让第二条覆盖第一条，最后只搬了一半。
+        """
+        wanted: dict = {}
+        for pick in (picks or ()):
+            try:
+                bi = int(pick.get('beat'))
+                start = int(pick.get('start'))
+                end = int(pick.get('end'))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            rows = {int(x) for x in (pick.get('lift') or ())
+                    if str(x).strip() != ''}
+            if rows:
+                wanted.setdefault((bi, start, end), set()).update(rows)
+        if not wanted:
+            return {}, '没有选中要搬的行'
+        return wanted, ''
+
+    def _plan_lift_block(self, bi, start, end, offsets, label, stmts,
+                         used_idx, path) -> dict:
+        """
+        **一个块**的搬迁计划（校验 + 留下的连续段 + 语句拆分）。
+
+        返回 `{ok, error, si, keep, lift_rows, new_stmts}`；`ok=False` 时
+        `error` 说的是"为什么这一块不能搬"（人话，会直接显示在对话框里）。
+        """
+        from storygraph.story.python_lift import analyze_block
+
+        if not 0 <= bi < len(self.beats):
+            return {'ok': False,
+                    'error': f'第 {bi + 1} 拍不在了（文件改过了？）'}
+        beat = self.beats[bi]
+        if str(getattr(beat, 'label', '') or '') != label:
+            return {'ok': False,
+                    'error': f'第 {bi + 1} 拍不属于 {label}（文件改过了？）'}
+        lines = str(getattr(beat, 'code', '') or '').split('\n')
+        if not (1 <= start <= end <= len(lines)):
+            return {'ok': False, 'error': '块的行区间越界（文件改过了？）'}
+        lift_rows = {start + o for o in offsets if 0 <= o <= (end - start)}
+        if not lift_rows:
+            return {'ok': False, 'error': '这个块没有可搬的行'}
+        # 权威校验：只接受"计划里说可搬"的那些行。界面本来只让勾这些，
+        # 但接口也可能被脚本 / 别的入口调用 —— 搬一条嵌套语句出来，
+        # 它上面的 `if` 就成了没有块体的 `if`（语法错）。
+        allowed = set(analyze_block(lines[start - 1:end]).get('lift') or ())
+        bad = sorted(set(offsets) - allowed)
+        if bad:
+            return {'ok': False,
+                    'error': f'第 {start}-{end} 行这个块里，第 {bad[0] + 1} 行'
+                             f'不能搬（嵌套 / 注释 / 多行 / 不是单行赋值）'}
+        if (start, end) not in [(int(a), int(b)) for a, b in
+                                (getattr(beat, 'code_blocks', None) or [])]:
+            return {'ok': False, 'error': '这个块已经被改过了（先刷新一下）'}
+        keep, error = self._keep_ranges(lines, start, end, lift_rows)
+        if error:
+            return {'ok': False, 'error': error}
+        from storygraph.core.statement import operation_source, strip_marker
+        text = '\n'.join(lines[start - 1:end])
+        si = self._match_block_statement(stmts, used_idx, text,
+                                         operation_source, strip_marker)
+        if si < 0:
+            return {'ok': False,
+                    'error': '块的文本对不上图节点（先点「🔁 刷新已导入'
+                             '章节」再试）'}
+        cond = str(getattr(stmts[si], 'condition', '') or '')
+        head = self._statement_line(stmts, si)
+        return {'ok': True, 'error': '', 'si': si, 'keep': keep,
+                'lift_rows': lift_rows,
+                'new_stmts': self._split_block_statements(
+                    lines, start, end, lift_rows, cond, path, head)}
+
+    @staticmethod
+    def _keep_ranges(lines, start, end, lift_rows):
+        """
+        "块里还留下哪些连续段"（`[(首行, 尾行), …]`）；出错返回 `(keep, 原因)`。
+
+        为什么"只剩注释的段"要报错而不是丢掉：`python:` 里只有注释是**语法错**，
+        这种行必须退回去陪注释（见 `story/python_lift` 的同名规则）。
+        只有空行的段可以丢（块外渲染成空行，合法）。
+        """
+        runs: list = []
+        for r in (r for r in range(start, end + 1) if r not in lift_rows):
+            if runs and r == runs[-1][-1] + 1:
+                runs[-1].append(r)
+            else:
+                runs.append([r])
+        keep: list = []
+        for run in runs:
+            has_stmt = any(TableSessionMixin._row_is_code(lines[r - 1])
+                           for r in run)
+            if not has_stmt:
+                if any(str(lines[r - 1] or '').lstrip().startswith('#')
+                       for r in run):
+                    return [], ('有一行注释会只剩它自己待在块外 —— '
+                                '把同一块里靠近它的那条一起留下')
+                continue          # 只有空行：块外渲染成空行，合法
+            keep.append((run[0], run[-1]))
+        return keep, ''
+
+    def _split_block_statements(self, lines, block_start, block_end,
+                                lift_rows, cond, path, head) -> list:
+        """
+        块体内的行 → 语句序列（搬出去的行各自成一条，留下的是连续段）。
+
+        顺序**原样保留**（块体前半 → `$` 行 → 块体后半），所以不需要依赖分析
+        —— 见 `story/python_lift` 与契约 §26。
+        """
+        new_stmts: list = []
+        cur: list = []
+        for r in range(block_start, block_end + 1):
+            if r in lift_rows:
+                if cur:
+                    new_stmts.append(self._lift_statement(
+                        lines, cur[0], cur, cond, path, head, block_start))
+                    cur = []
+                new_stmts.append(self._lift_statement(
+                    lines, r, [r], cond, path, head, block_start))
+            else:
+                cur.append(r)
+        if cur:
+            new_stmts.append(self._lift_statement(
+                lines, cur[0], cur, cond, path, head, block_start))
+        return new_stmts
 
     @staticmethod
     def _lift_statement(lines, row, rows, cond, path, head, block_start):

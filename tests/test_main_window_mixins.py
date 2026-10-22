@@ -54,6 +54,7 @@ BLOCKS = {
     'window_assets': 'WindowAssetsMixin',
     'window_keyboard': 'WindowKeyboardMixin',
     'window_state': 'WindowStateMixin',
+    'window_recover': 'RecoverMixin',
 }
 
 #: 主类**刻意留下**的成员（键是名字，值是"为什么留"）。

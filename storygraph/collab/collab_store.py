@@ -1942,6 +1942,41 @@ def locks(db_path) -> list:
     return rows
 
 
+def lock_summaries(db_path, limit: int = 80) -> list:
+    """
+    `locks()` + 每一行**台词摘要**（界面要回答"锁的是哪一句"）。
+
+    为什么另起一个函数而不是给 `locks()` 加一列：`locks()` 是**数据层**的
+    形状（谁 / 到期），CLI 与导出也在用；"人话摘要"是界面需要，
+    混进去等于让数据层替界面决定截断长度。
+
+    `limit`：摘要最多几个字（锁列表是"扫一眼认出来"的用途，不是读稿）。
+    """
+    rows = locks(db_path)
+    if not rows:
+        return rows
+    texts = {}
+    try:
+        with connect(db_path) as conn:
+            for r in conn.execute(
+                    'SELECT line_id, payload FROM beats WHERE locked_by IS NOT NULL '
+                    'AND deleted=0'):
+                try:
+                    payload = json.loads(r['payload'] or '{}')
+                except Exception as e:           # noqa: BLE001 - 一行坏不该清空列表
+                    swallow('collab_store.lock_summaries.payload', e)
+                    continue
+                texts[r['line_id']] = str((payload or {}).get('Text') or '')
+    except Exception as e:                       # noqa: BLE001 - 摘要读不出来就不显示
+        swallow('collab_store.lock_summaries', e)
+    for r in rows:
+        text = ' '.join(texts.get(r.get('line_id'), '').split())
+        if len(text) > limit:
+            text = text[:limit].rstrip() + '…'
+        r['text'] = text
+    return rows
+
+
 # ==================================================================
 #  状态机 / 查询
 # ==================================================================

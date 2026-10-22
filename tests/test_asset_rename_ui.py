@@ -132,10 +132,15 @@ class TestApplyAndRollback:
 class _StubSession:
     """假会话：记录三步各自被调了几次。"""
 
-    def __init__(self, plan):
+    def __init__(self, plan, script_path='', dirty=False):
         self.plan = plan
         self.calls = []
         self.applied = None
+        self.script_path = script_path
+        self.dirty = dirty
+
+    def has_unsaved_edits(self):
+        return bool(self.dirty)
 
     def asset_rename_plan(self, old, new):
         self.calls.append(('plan', old, new))
@@ -177,6 +182,53 @@ def dlg(qapp, monkeypatch, proj):
     d.close()
 
 
+@pytest.fixture
+def rename_dialog_factory(qapp, monkeypatch, proj):
+    """
+    按需造对话框（`dlg` 那个夹具把 session 固定成"干净、没 script_path"了）。
+
+    这一组测的是**顺序**（先导出再改名）与**写盘之后的重读**：
+    两者都要能改 session 的状态，所以这里给一个能配的工厂。
+    """
+    from storygraph.assets.asset_registry import AssetRegistry
+    from storygraph.ui_qt import dialog_asset_rename as D
+
+    monkeypatch.setattr(D.QMessageBox, 'question',
+                        lambda *a, **k: D.QMessageBox.Yes)
+    # ⚠ **warning 也要打桩**：`apply()` 里"这一章有未导出改动"那条是
+    # `QMessageBox.warning(...)`（模态）—— 不打桩就挂在这里等用户点确定。
+    warnings = []
+    monkeypatch.setattr(D.QMessageBox, 'warning',
+                        lambda *a, **k: warnings.append(a[2] if len(a) > 2 else ''))
+    made = []
+
+    def _make(script_path='', dirty=False, modified=None, on_applied=None):
+        """造一个对话框；`_make.warnings` 里是这一路弹过的 warning 正文。"""
+        reg = AssetRegistry()
+        reg.images = {'ling_happy': {'ID': 'ling_happy'}}
+        plan = {'ok': True, 'old_id': 'ling_happy', 'new_id': 'ling_smile',
+                'total_lines': 1,
+                'files': [{'path': str(proj / 'game' / 'script.rpy'),
+                           'changed': [(2, '    show ling_happy at left',
+                                        '    show ling_smile at left')]}],
+                'matched_files': [str(proj / 'game' / 'script.rpy')]}
+        session = _StubSession(plan, script_path=script_path, dirty=dirty)
+        if modified is not None:
+            session.applied = {'ok': True, 'modified': modified,
+                               'backup_files': []}
+            session.asset_rename_apply = lambda p: session.applied
+        d = D.AssetRenameDialog(None, session=session, registry=reg,
+                                on_applied=on_applied)
+        d._stub_session = session
+        made.append(d)
+        return d
+
+    _make.warnings = warnings
+    yield _make
+    for d in made:
+        d.close()
+
+
 class TestTheDialog:
     def test_it_lists_the_ids_of_the_current_kind(self, dlg):
         texts = [dlg._old.itemText(i) for i in range(dlg._old.count())]
@@ -212,3 +264,79 @@ class TestTheDialog:
         dlg._new.setText('')
         dlg.preview()
         assert not dlg._apply_btn.isEnabled()
+
+
+class TestOrderingWithUnsavedEdits:
+    """
+    「先导出再改名」这条顺序（2026-10-23）。
+
+    改的是**文件**，会话内存里那份还是旧的 —— 反过来做，下次导出就把
+    旧名字写回去了，而导出还会报"成功"。所以这一组钉的是：
+    **这一章有没导出的改动时，改名必须被拦住**。
+    """
+
+    def _preview(self, d):
+        d._old.setCurrentText('ling_happy')
+        d._new.setText('ling_smile')
+        d.preview()
+
+    def test_apply_is_blocked_when_this_chapter_is_dirty(
+            self, rename_dialog_factory, proj):
+        d = rename_dialog_factory(script_path=str(proj / 'game' / 'script.rpy'),
+                                  dirty=True)
+        self._preview(d)
+        d.apply()
+        assert ('apply',) not in d._stub_session.calls, '有未导出改动时改名写盘了'
+        # 光"没写盘"不够：必须**说清为什么**（不然就是点了没反应）
+        said = ' '.join(rename_dialog_factory.warnings)
+        assert '导出 .rpy' in said, said
+
+    def test_apply_goes_through_when_clean(self, rename_dialog_factory, proj):
+        d = rename_dialog_factory(script_path=str(proj / 'game' / 'script.rpy'),
+                                  dirty=False)
+        self._preview(d)
+        d.apply()
+        assert ('apply',) in d._stub_session.calls
+
+    def test_dirty_but_other_chapter_is_not_blocked(self, rename_dialog_factory,
+                                                    proj, tmp_path):
+        """手上这一章**不在**这次改名范围里 → 不该拦（否则改名被无关的改动卡住）。"""
+        other = tmp_path / 'other.rpy'
+        other.write_text('label x:\n    return\n', encoding='utf-8')
+        d = rename_dialog_factory(script_path=str(other), dirty=True)
+        self._preview(d)
+        d.apply()
+        assert ('apply',) in d._stub_session.calls
+
+    def test_on_applied_receives_the_result(self, rename_dialog_factory, proj):
+        seen = []
+        target = str(proj / 'game' / 'script.rpy')
+        d = rename_dialog_factory(script_path=target, dirty=False,
+                                  modified=[target],
+                                  on_applied=lambda res: seen.append(res))
+        self._preview(d)
+        d.apply()
+        assert seen and seen[0].get('modified') == [target]
+
+
+class TestWindowReloadsAfterRename:
+    """窗口那一侧：改名写盘之后，把**手上这一章**从磁盘重读（否则导出写回旧名）。"""
+
+    def test_reloads_when_the_current_chapter_changed(self, ui_window, monkeypatch):
+        window = ui_window
+        chapter = str(window._file_path)
+        calls = []
+        monkeypatch.setattr(window, 'load_script',
+                            lambda *a, **k: calls.append((a, k)))
+        window._after_asset_rename({'modified': [chapter]})
+        assert calls, '这一章被改名改到了，却没重读 —— 下次导出会把旧名字写回去'
+        assert calls[0][0][0] == chapter
+        assert calls[0][1].get('goto_card') is False
+
+    def test_does_not_reload_for_other_files(self, ui_window, monkeypatch):
+        window = ui_window
+        calls = []
+        monkeypatch.setattr(window, 'load_script',
+                            lambda *a, **k: calls.append((a, k)))
+        window._after_asset_rename({'modified': ['D:/elsewhere/x.rpy']})
+        assert calls == []

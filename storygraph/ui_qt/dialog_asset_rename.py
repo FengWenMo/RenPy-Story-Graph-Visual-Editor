@@ -20,12 +20,15 @@ storygraph.ui_qt.dialog_asset_rename
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QPushButton,
                                QVBoxLayout)
 
+from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import tokens as T
 
 __all__ = ['AssetRenameDialog']
@@ -39,10 +42,15 @@ _KINDS = (('image', 'images', '图片'), ('music', 'music', '音乐'),
 class AssetRenameDialog(QDialog):
     """预览 → 应用 → 回滚（三步都看得见）。"""
 
-    def __init__(self, parent=None, session=None, registry=None):
+    def __init__(self, parent=None, session=None, registry=None,
+                 on_applied=None):
         super().__init__(parent)
         self._session = session
         self._registry = registry
+        #: 写盘**成功之后**的回调（窗口用它把这一章从磁盘重读，见
+        #: `window_assets._after_asset_rename` —— 不重读，下一次导出会把
+        #: 旧名字又写回去，改名等于没做）。
+        self._on_applied = on_applied
         self._plan = None
         self._applied = None
         self.setWindowTitle('资源改名（传播到脚本）')
@@ -148,8 +156,52 @@ class AssetRenameDialog(QDialog):
             self._say('（脚本里没有引用这个旧名字 —— 不需要改任何 .rpy）')
         self._apply_btn.setEnabled(bool(files))
 
+    def _touches_current_chapter(self) -> bool:
+        """这次改名会改到**手上正开着的这一章**吗？"""
+        if self._session is None:
+            return False
+        path = str(getattr(self._session, 'script_path', '') or '')
+        if not path:
+            return False
+        want = Path(path)
+        try:
+            return any(Path(str(f.get('path') or '')).resolve()
+                       == want.resolve()
+                       for f in (self._plan or {}).get('files') or ())
+        except OSError as e:                    # noqa: BLE001 - 解析不了就保守当"会"
+            swallow('ui_qt.dialog_asset_rename.touches', e)
+            return True
+
+    def _block_if_unsaved(self) -> bool:
+        """
+        「这一章还有没导出的改动」→ **先别改名**（返回 True = 拦住）。
+
+        顺序真的重要：改名写的是文件，而会话内存里那份还是旧的。
+        先改名后导出 = 把旧名字写回去（改名白做）；先导出后改名才是对的。
+        所以这里不弹"要不要继续"，而是直接说清顺序 —— 让用户先导一次，
+        只多按一下，但没有"悄悄把刚改好的名字写回去"的可能。
+        """
+        if not self._touches_current_chapter():
+            return False
+        try:
+            dirty = bool(self._session.has_unsaved_edits())
+        except Exception as e:                  # noqa: BLE001 - 判不出来就不拦
+            swallow('ui_qt.dialog_asset_rename.unsaved', e)
+            return False
+        if not dirty:
+            return False
+        QMessageBox.warning(
+            self, '先导出这一章，再改名',
+            '这一章还有没导出的改动。\n\n'
+            '改名的顺序不能反：先改名、再导出 = 会话把**旧名字**写回文件，'
+            '刚才那次改名等于白做。\n\n'
+            '请先回到卡片页点「⤓ 导出 .rpy」，然后再来改名。')
+        return True
+
     def apply(self):
         if not self._plan:
+            return
+        if self._block_if_unsaved():
             return
         n = self._plan.get('total_lines', 0)
         if QMessageBox.question(
@@ -166,6 +218,13 @@ class AssetRenameDialog(QDialog):
                   f'（备份 {len(res.get("backup_files") or ())} 个 .bak）')
         self._undo_btn.setEnabled(bool(res.get('backup_files')))
         self._apply_btn.setEnabled(False)
+        # 窗口要拿这个回调把"手上这一章"从磁盘重读（见 `_on_applied` 的说明）。
+        if callable(self._on_applied):
+            try:
+                self._on_applied(res)
+            except Exception as e:              # noqa: BLE001 - 重读失败不该吞掉结果
+                swallow('ui_qt.dialog_asset_rename.on_applied', e)
+                self._say(f'⚠ 这一章没能自动重读：{e}（请手动重开这一章）')
 
     def rollback(self):
         if not self._applied:

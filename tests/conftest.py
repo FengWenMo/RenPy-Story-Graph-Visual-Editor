@@ -67,6 +67,78 @@ def _no_real_session_memory():
 
 
 # ------------------------------------------------------------------
+#  自动保存的隔离（**autouse**，2026-10-23）
+# ------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_real_autosave():
+    """
+    跑测试时**不许**往真实的 `%LOCALAPPDATA%/StoryGraph/autosave/` 写快照。
+
+    与上面那条同一个理由，而且这条更急：窗口每 30 秒就会抄一份，
+    几百条用例造几百个临时项目 → 真实目录里攒下一堆 `tmp_path` 的快照，
+    下次你开工具，它会问"要不要恢复这 3 拍" —— 而那 3 拍来自某条用例。
+
+    `STORYGRAPH_AUTOSAVE_DIR` 也一起指到 `tmp`：**双保险**，万一某条用例
+    显式 `set_enabled(True)` 忘了关（测恢复的那几条会这么做），
+    它也只写到一个会被 pytest 清掉的目录里。
+    """
+    import os
+    import tempfile
+
+    from storygraph.core import autosave as AS
+
+    before = AS.enabled()
+    before_dir = os.environ.get('STORYGRAPH_AUTOSAVE_DIR')
+    tmp = tempfile.mkdtemp(prefix='sg-autosave-')
+    AS.set_enabled(False)
+    os.environ['STORYGRAPH_AUTOSAVE_DIR'] = tmp
+    try:
+        yield Path(tmp)
+    finally:
+        AS.set_enabled(before)
+        if before_dir is None:
+            os.environ.pop('STORYGRAPH_AUTOSAVE_DIR', None)
+        else:
+            os.environ['STORYGRAPH_AUTOSAVE_DIR'] = before_dir
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ------------------------------------------------------------------
+#  Qt 偏好的隔离（**autouse**，2026-10-23）
+# ------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolated_qt_prefs(tmp_path):
+    """
+    `ui_qt.prefs` 指向一份**临时 ini**，不写你真实的注册表。
+
+    为什么必须 autouse：偏好读的是 `HKCU\\Software\\storygraph\\editor`，
+    而**窗口本身就会写**（卡片折叠、资源底色、协作锁那页记住的"当前用户"）。
+    没有这道闸，跑一次全量测试就会把"当前用户 = bob"这种测试痕迹留在你的
+    注册表里，下次开工具时协作锁那页顶着别人的名字。
+
+    没装 PySide6 就原样跳过（CI 上不装 Qt，不能因此把所有用例 skip 掉）。
+    """
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:
+        yield None
+        return
+    from storygraph.ui_qt import prefs
+
+    ini = tmp_path / 'prefs.ini'
+    before = prefs.settings_factory
+    prefs.settings_factory = staticmethod(
+        lambda: QSettings(str(ini), QSettings.IniFormat))
+    try:
+        yield ini
+    finally:
+        prefs.settings_factory = before
+
+
+# ------------------------------------------------------------------
 #  夹具
 # ------------------------------------------------------------------
 

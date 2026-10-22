@@ -66,6 +66,13 @@ WRITERS = {
         '这是本模块**唯一**主动写进项目目录的地方，理由写在模块 docstring：'
         '读-改-写（`layout` 段一字不动）+ 原子替换；读不懂那份就**拒写**'
         '（那是人也会手改的文件，覆盖等于删别人的内容），失败退回用户偏好',
+    'core/autosave.py::write':
+        '写**自动保存快照**（崩溃恢复，P0-2）：整章拍 + 顶层块 + 源文件指纹，'
+        '位置在**用户级目录**（`%LOCALAPPDATA%/StoryGraph/autosave/<项目键>/`，'
+        '`STORYGRAPH_AUTOSAVE_DIR` 可覆盖）。'
+        '⚠ **不是产物、绝不写进项目仓库**（那份要进 git、要评审）——'
+        '它只是"崩了能拿回来"的保险，真正落盘仍要过 `generation_guard`（用户点导出）。'
+        '原子替换（`.tmp` + `os.replace`）；写失败只记台账、绝不拦编辑',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
     'story/statement_registry.py::declare_attr_groups':

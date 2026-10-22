@@ -98,12 +98,43 @@ class AppStatusBar(QStatusBar):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        #: 自动保存的钟点（**只在真的存过 / 失败时才出现**）。
+        #:
+        #: 为什么成功也要显示一个钟点：用户得能一眼确认"这东西真的在存"——
+        #: 一个看不见的自动保存，体验上等于没有这个功能（体验报告 P0-2）。
+        self._autosave = QLabel('')
+        self._autosave.setProperty('role', 'caption')
+        self.addPermanentWidget(self._autosave)
         self._layout = QLabel('')
         self._layout.setProperty('role', 'caption')
         self.addPermanentWidget(self._layout)
         self._dirty = QLabel('')
         self._dirty.setProperty('role', 'caption')
         self.addPermanentWidget(self._dirty)
+
+    def set_autosave(self, when: str, path: str = '', error: str = ''):
+        """
+        右下角"自动保存"那一格（`ui_qt/window_recover.py` 调）。
+
+        `error` 非空 = **存失败了**：必须说出来。自动保存悄悄失败，
+        比没有自动保存更坏 —— 人会以为有保险，其实没有。
+        """
+        if error:
+            self._autosave.setText('⚠ 自动保存失败')
+            self._autosave.setStyleSheet(f"color: {T.t('state.warning')};")
+            self._autosave.setToolTip(
+                f'自动保存没写进去：{error}\n'
+                f'改动还在内存里 —— 点「⤓ 导出 .rpy」照常能落盘。')
+        elif when:
+            self._autosave.setText(f'⏱ 自动保存 {when}')
+            self._autosave.setStyleSheet(f"color: {T.t('text.secondary')};")
+            self._autosave.setToolTip(
+                '编辑器里没导出的改动会定时抄一份到用户目录'
+                '（不写你的项目文件）。\n崩溃 / 断电后重开这一章，会问你要不要恢复。'
+                + (f'\n{path}' if path else ''))
+        else:
+            self._autosave.setText('')
+            self._autosave.setToolTip('')
 
     def set_layout_dirty(self, dirty: bool, path: str = ''):
         """

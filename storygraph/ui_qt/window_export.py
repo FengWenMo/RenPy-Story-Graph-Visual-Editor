@@ -94,7 +94,8 @@ class WindowExportMixin:
     REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider',
                 '_reload_list', '_report_swallowed', '_session', '_status',
                 '_status_bar', '_swallow_mark', '_table_mtimes',
-                'apply_current_beat', 'graph', 'resync_after_export')
+                'apply_current_beat', 'autosave_clear', 'graph',
+                'resync_after_export')
 
     def export_script(self):
         """导出这一章（编译 + 增量补丁 + 安全门禁，全在会话里）。"""
@@ -159,6 +160,8 @@ class WindowExportMixin:
         # （只有注释/代码的卡会并进后面那张）→ 卡片列表要跟着刷新，
         # 否则界面还显示旧的拍、点哪张都对不上。
         self.resync_after_export(res)
+        # 写进文件了 → 自动保存那份快照已经没有可恢复的东西（2026-10-23）。
+        self.autosave_clear()
         todos = res.get('todos') or 0
         warn = f'，缺资源 {todos} 处（见 TODO）' if todos else ''
         self._log(f'[导出] 已写入 {Path(path).name}'

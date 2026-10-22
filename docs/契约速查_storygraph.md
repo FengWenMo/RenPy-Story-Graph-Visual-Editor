@@ -3730,5 +3730,68 @@ label 结尾没有 `jump` / `return` 时 Ren'Py 会接着执行文件里的下�
   要按顺序配对"两条被真实数据教育出来的用例）。
 
 
+## 27. 自动保存 / 崩溃恢复（2026-10-23，体验报告 P0-2）
+
+用户："拍的改动没有自动保存 —— 关窗会问，崩了就三拍没了。50 人 × 每天几小时，
+这件事一定会发生。"
+
+- **存哪儿**：`%LOCALAPPDATA%/StoryGraph/autosave/<项目键>/<章节键>.json`
+  （`core/autosave.py`；`STORYGRAPH_AUTOSAVE_DIR` 换目录、`STORYGRAPH_NO_AUTOSAVE`
+  一键关）。与 `session_store` / `ai_settings` / `crashlog` 同一处约定：
+  **绝不写进项目仓库**（那份要进 git、要评审）。
+- **存什么**：**整章**所有拍（`dataclasses.asdict`，含 `line_id` / `src_first`）
+  + 章节顶层块（`file_blocks`，走 `write(extra=…)` 一条原子写）+ 源文件指纹
+  （sha1）。284 拍 ≈ 270 KB / 3 ms（`tools/_probe_autosave.py`）。
+  **不做差量**：差量要靠 `seq`/`line_id` 定位，而插删卡最先变的就是它们。
+- **三条硬规矩**：写不进去只记台账（不拦编辑）；`*.tmp` + `os.replace` 原子替换；
+  读不懂（版本更新 / 半截 JSON）→ `ok=False` 且**不删文件**。
+- **恢复不是"已保存"**：`autosave_restore` **不** `take_edits_baseline()` ——
+  恢复完 `has_unsaved_edits()` 仍为真、状态栏仍是「● 未导出」，
+  必须点「⤓ 导出 .rpy」才落盘（`tests/test_autosave.py` 钉着）。
+- **源文件变过 → 行号清零**：`stale_reason()` 比对快照里的 `source.hash` 与
+  现在的文件；不一样就把 `src_first/src_last` 归零，交给 `patcher._fill_missing_src`
+  按内容重新对位。拿旧行号硬写 = 把改动写到别人的行上（且会报"成功"）。
+- **叫得准**：恢复后停在**第一处改动**那一拍（`_first_change_index`，
+  difflib 对齐 `beat_edits_print` 序列）。
+- **两次防假警报**：① 快照与磁盘逐拍相同（`_recovery_is_noop`：崩溃发生在导出
+  成功之后 / 改完又撤销再崩）→ 不问，直接清；② 定时点发现"已经干净了"
+  （撤销回原样 / 刚导出）→ 收掉快照。
+- **谁写**：`window_recover.RecoverMixin` 30 秒一跳，**只在可见窗口 + 脏**时写；
+  成功在状态栏显示钟点（`AppStatusBar.set_autosave`），**失败必须显示原因**
+  （悄悄失败的自动保存比没有更坏）。
+
+## 28. 协作锁接线（2026-10-23，体验报告 P0-3）
+
+用户："locks 实测在'只有测试在用'清单里 → 能力悬空。"
+
+- **规则一个字没改**：租约 / 过期可接手 / 只读成员不能锁 / 强制解锁只有所有者
+  能做，全在 `collab.collab_store`（`lock` / `renew_lock` / `unlock` /
+  `lock_range` / `locks`）。这一轮只是把入口接上。
+- **四层**：`session_collab.collab_lock/_unlock/_lock_range/_locks`（薄壳）
+  → `ui_qt/dialog_locks.py`（列表 + 锁当前那一拍 + 锁整章 + 续租 + 解锁 +
+  强制解锁）→ `_more_tools_menu()` 的「🔒 协作锁」+ `show_collab_locks()`。
+- `collab_lock_summaries`（`collab_store.lock_summaries`）给列表带**台词摘要**：
+  只显示 `ch01.0007` 人认不出来；`locks()` 的形状不动（CLI / 导出还在用）。
+- ⚠ **读锁列表不许建库**：`collab_store.connect()` 会建目录 + 建库 + 跑 DDL，
+  所以 `session.collab_locks` 先判 `is_file()` —— 否则手填错一个路径，工具就
+  在那儿悄悄造一个空协作库，界面显示"没人锁"。
+- ⚠ 两个实现陷阱（都有用例）：`if self._session:` 遇到 `EditorSession.__len__`
+  （没载入章节 = 空 = falsy）；`int(getattr(self, '_loaded_idx', -1) or -1)`
+  把**第 0 拍**当成"没载入"。
+
+## 29. 资源改名的两个补丁（2026-10-23）
+
+D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog_asset_rename.py`
++ `window_assets.open_asset_rename_dialog`，2026-10-19 的 `53ecc24`）。这一轮补两个洞：
+
+- **顺序闸**：这一章还有未导出的改动时**拒绝改名**（`_block_if_unsaved`）。
+  反过来的后果是"先改名、再导出 → 会话把旧名字写回文件"，且导出报"成功"。
+  只在"这次改名确实会改到手上这一章"时拦（`_touches_current_chapter`）。
+- **写盘后重读**：`on_applied` → `window_assets._after_asset_rename` →
+  若当前章在 `modified` 里就 `load_script(…, goto_card=False)`。
+  不重读的话，卡片页捧着改名前的拍，下次导出同样把旧名字写回去。
+
+
+
 
 
