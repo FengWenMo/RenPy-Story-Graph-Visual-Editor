@@ -183,7 +183,7 @@ class RecoverMixin:
         if not entries:
             return
         entry = entries[0]
-        self._recovery_seen = frozenset(set(self._recovery_seen or ()) | {chapter})
+        self._mark_recovery_seen(chapter)
         try:
             if self._recovery_is_noop(entry):
                 # 崩溃前那次改动已经被撤销 / 已经导出过 → 快照与磁盘一样。
@@ -195,6 +195,21 @@ class RecoverMixin:
         except Exception as e:                  # noqa: BLE001 - 判不出来就照常问
             swallow('ui_qt.window_recover.offer.noop', e)
         self._ask_recovery(entry)
+
+    def _mark_recovery_seen(self, chapter: str):
+        """
+        「这一章这次运行里问过了」（同一章不反复弹）。
+
+        为什么单独一个方法：**菜单恢复**也要先标 —— `_open_recovery_entry` 会调
+        `load_script()` 把这一章按磁盘读一遍，而 `load_script` 末尾就会问
+        "要恢复吗"。不先标上，用户从菜单点"恢复最新那份"会先被他自己的
+        那个问句拦一次（同一个快照问两遍）。
+        """
+        try:
+            self._recovery_seen = frozenset(
+                set(self._recovery_seen or ()) | {str(chapter or '')})
+        except Exception as e:                  # noqa: BLE001 - 标不上最多多问一次
+            swallow('ui_qt.window_recover.mark_seen', e)
 
     def _recovery_is_noop(self, entry) -> bool:
         """
@@ -408,6 +423,9 @@ class RecoverMixin:
                 QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
             if ans != QMessageBox.Yes:
                 return
+        # 紧接着要 `load_script` —— 它末尾会走 `maybe_offer_recovery`。
+        # 不先标上，同一个快照会被问两遍（菜单里一次、载入末尾一次）。
+        self._mark_recovery_seen(chapter)
         self.load_script(chapter, goto_card=False, label=None)
         if stale:
             self._log(f'[自动保存] ⚠ {stale} —— 恢复时行号会重新对位。')

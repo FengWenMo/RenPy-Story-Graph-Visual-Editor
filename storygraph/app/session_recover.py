@@ -120,7 +120,8 @@ def beats_from_snapshot(rows, *, drop_src: bool = False) -> list:
             kwargs['src_first'] = 0
             kwargs['src_last'] = 0
             # 这两列只服务增量对位；留着旧行号 = 让补丁写到别人的行上。
-            kwargs.pop('beat_fingerprint', None)
+            # `beat_fingerprint`（ContentHash）**不动**：它是"这条内容长什么样"的
+            # 哈希，与行号无关；快照里那份算的就是快照的内容，仍然正确。
         try:
             out.append(Beat(**kwargs))
         except Exception as e:                  # noqa: BLE001 - 一拍坏了不该整章丢

@@ -468,3 +468,26 @@ class TestWindowAutosave:
         finally:
             assert window._session.autosave_entries(chapter) == []
             window.hide()
+
+    def test_menu_restore_does_not_ask_twice(self, window, chapter,
+                                             monkeypatch):
+        """
+        从菜单「🕘 上次没导出的改动」恢复时，**不许再被载入末尾那个问句拦一次**。
+
+        真实的坑：`_open_recovery_entry` 会先 `load_script()`（按磁盘读一遍），
+        而 `load_script` 末尾就会问"要恢复吗" → 用户点了"恢复最新那份"，
+        紧接着又被同一个快照问一遍（看起来像点了没用）。
+        """
+        window._session.apply(0, {'Speaker': 'e', 'Text': '改成快照里的版本'})
+        assert window.autosave_now()['ok']
+        entry = window._session.autosave_entries(chapter)[0]
+        window._session.load(chapter)            # 回到磁盘那一版（模拟重开）
+        asked = []
+        monkeypatch.setattr(window, '_ask_recovery',
+                            lambda e: asked.append(e) or False)
+        monkeypatch.setattr(window, 'load_script',
+                            lambda *a, **k: window._session.load(chapter))
+        window._open_recovery_entry(entry)
+        assert asked == [], '从菜单恢复时又被问了一遍（同一个快照）'
+        # 真的恢复了（而不是只在标记里跳过）
+        assert any('改成快照里的版本' in (b.text or '') for b in window._session.beats)
