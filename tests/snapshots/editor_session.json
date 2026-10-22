@@ -837,8 +837,11 @@
     "edge_rebuild": {
      "added": 0,
      "identified": 4,
+     "kept_legacy": 0,
+     "removed": 0,
      "retargeted": 0,
-     "skipped": []
+     "skipped": [],
+     "unmatched": 0
     },
     "edges": 4,
     "error": "",
@@ -849,6 +852,7 @@
     "graph": "<Graph>",
     "nodes": 4,
     "ok": true,
+    "removed_nodes": [],
     "warnings": []
    }
   ],

@@ -208,6 +208,7 @@
      "graph",
      "nodes",
      "ok",
+     "removed_nodes",
      "warnings"
     ],
     "ok": true

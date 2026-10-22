@@ -2233,7 +2233,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '选 .txt（作者写的纯文字）→ 自动转成 .rpy 落进 game/ 并导入；'
             '有认不出的角色写法会先问你一句（确认后写进 characters.xlsx）')
         act('🔁 重载已导入章节', self.reload_imported_chapters,
-            '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（范围不变）')
+            '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（范围不变；'
+            '源里删掉的 label / 连线会一起移除）')
         act('🔗 补全相关章节', self.complete_related_chapters,
             '把图上"被跳到、但文件还没导入"的章节一起导进来 → 连线才画得出')
         act('🗑 清空剧情图', self.clear_graph,

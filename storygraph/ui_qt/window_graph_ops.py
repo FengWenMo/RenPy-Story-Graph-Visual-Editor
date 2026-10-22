@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
 
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
+from storygraph.ui_qt.flow_notes import skipped_targets
 from storygraph.ui_qt.graph_canvas import GraphCanvas
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.status import Notifier, Toast
@@ -639,12 +640,40 @@ class GraphOpsMixin:
         for e in (res.get('errors') or [])[:5]:
             self._log(f'[导入] ✕ {e}')
 
+        # —— 重载对账：源里删掉的 label / call 要**看得见地**消失（P2-1）——
+        edge_rebuild = res.get('edge_rebuild') or {}
+        removed_labels = list(res.get('removed_nodes') or [])
+        if removed_labels:
+            shown = '、'.join(removed_labels[:6])
+            more = f' 等 {len(removed_labels)} 个' if len(removed_labels) > 6 else ''
+            self._log(f'[重载] 源文件里已不存在的模块从图上移除：{shown}{more}'
+                      f'（这次导入可以 Ctrl+Z 整体撤回）')
+        removed_edges = int(edge_rebuild.get('removed') or 0)
+        if removed_edges:
+            self._log(f'[连线] 清理了 {removed_edges} 条源里已不存在的连线')
+        skipped = list(edge_rebuild.get('skipped') or ())
+        if skipped:
+            targets = skipped_targets(edge_rebuild)
+            shown = '、'.join(f'「{n}」' for n in targets[:4])
+            more = f' 等 {len(targets)} 个' if len(targets) > 4 else ''
+            self._log(f'[连线] ⚠ 有 {len(skipped)} 条控制流边没画全：'
+                      f'目标 {shown}{more} 还不在图上。'
+                      f'先导入它所在的章节（或点工具栏「🔗 补全相关章节」）。')
+
         names = '、'.join(Path(p).name for p in res['files'][:3])
         more = f' 等 {len(res["files"])} 个文件' if len(res['files']) > 3 else ''
+        extra = []
+        if removed_labels:
+            extra.append(f'移除 {len(removed_labels)} 个源里已不存在的模块')
+        if removed_edges:
+            extra.append(f'清理 {removed_edges} 条失效连线')
+        if skipped:
+            extra.append(f'⚠ {len(skipped)} 条边没画全（目标未导入）')
         self._status(
             f'✔ 已导入 {len(res["files"])} 章（{names}{more}）：'
             f'新增模块 {res["added_nodes"]} 个 / 连线 {res["added_edges"]} 条，'
-            f'图上共 {res["nodes"]} 个模块 · {res["edges"]} 条连线')
+            f'图上共 {res["nodes"]} 个模块 · {res["edges"]} 条连线'
+            + (f'；{"；".join(extra)}' if extra else ''))
         # **"我连线呢？"**（用户 2026-10-03）：导入的章节之间没有跳转时，
         # 图里确实一条线都没有 —— 因为串起它们的是**另一个文件**。
         # 这里必须把"还缺哪个文件"说出来，并给出一键补全的入口。

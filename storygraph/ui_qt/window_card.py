@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
 
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
+from storygraph.ui_qt.flow_notes import edge_rebuild_note
 from storygraph.ui_qt.graph_canvas import GraphCanvas
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.status import Notifier, Toast
@@ -119,7 +120,7 @@ class CardPageMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
+    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph')
 
     def _on_load(self):
         start = str(Path(self._project_root or '.') / 'game')
@@ -380,6 +381,9 @@ class CardPageMixin:
         if not res.get('ok'):
             self._status(res.get('error') or '插入失败')
             return
+        # 插卡会让后面的拍全部换 line_id：图边跟着重认身份，否则下次
+        # 改目标会按过期 ID 找不到那条边、又画一条新的。
+        self._refresh_flow_edges()
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
@@ -415,10 +419,7 @@ class CardPageMixin:
         if not res.get('ok'):
             self._status(res.get('error') or '插入控制流卡失败')
             return
-        beat = self._session.beats[res['index']]
-        from storygraph.story.flow import flow_info
-        info = flow_info(beat, res['index'], self._session.beats)
-        edge_note = self._sync_flow_edge(beat, None, info)
+        edge_note = self._flow_edge_note(self._refresh_flow_edges())
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
@@ -477,6 +478,9 @@ class CardPageMixin:
         if not res.get('ok'):
             self._status(res.get('error') or '删除失败')
             return
+        # 删掉的如果是一张 call / jump，图上的边也要消失；同时后面的拍
+        # 换了 line_id，派生会一起重认。
+        edge_note = self._flow_edge_note(self._refresh_flow_edges())
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
@@ -484,8 +488,10 @@ class CardPageMixin:
         tail = f'，产物里少了 {lines} 行（{self._lines_brief(preview)}）' \
             if lines > 1 else ''
         self._log(f'[卡片] 已删除第 {idx + 1} 拍（{who}：{text}）{tail} ——'
-                  f'还剩 {res["count"]} 拍；点「↩ 撤销结构操作」可以放回来')
-        self._status(f'🗑 已删除第 {idx + 1} 拍{tail}（还剩 {res["count"]} 拍）。')
+                  f'还剩 {res["count"]} 拍；点「↩ 撤销结构操作」可以放回来'
+                  + (f'；{edge_note}' if edge_note else ''))
+        self._status(f'🗑 已删除第 {idx + 1} 拍{tail}（还剩 {res["count"]} 拍）。'
+                     + (f'{edge_note}。' if edge_note else ''))
 
     # ---------------- 删除前"要丢几行" ----------------
 
@@ -540,11 +546,14 @@ class CardPageMixin:
         if not res.get('ok'):
             self._status(res.get('error') or '没有可恢复的卡片。')
             return
+        edge_note = self._flow_edge_note(self._refresh_flow_edges())
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
-        self._log(f'[卡片] 已把删掉的卡片放回第 {res["index"] + 1} 拍')
-        self._status(f'↩ 已恢复那一张卡片（第 {res["index"] + 1} 拍）。')
+        self._log(f'[卡片] 已把删掉的卡片放回第 {res["index"] + 1} 拍'
+                  + (f'；{edge_note}' if edge_note else ''))
+        self._status(f'↩ 已恢复那一张卡片（第 {res["index"] + 1} 拍）。'
+                     + (f'{edge_note}。' if edge_note else ''))
     def resync_after_export(self, res: dict) -> None:
         """
         导出成功之后刷新卡片列表（2026-10-05）。
@@ -699,80 +708,50 @@ class CardPageMixin:
             swallow('ui_qt.window_card._sync_spec_args', e)
         self._sync_flow_card(beat, idx)
 
-    def _sync_flow_edge(self, beat, old, new) -> str:
+    def _refresh_flow_edges(self) -> dict:
         """
-        控制流目标 / 类型改了之后，把剧情图上对应的边一起改掉。
+        用**当前这一章的拍**重新派生剧情图上的 `source` 边。
 
-        第一阶段只同步**两端节点都已在图上**的情况（最常见的"同一文件里
-        大 label call 小 label"）。目标还没导入时不硬造节点，返回一句提示；
-        第二阶段图边从 flow 拍派生时，这一段会被替换掉。
+        这是 `_sync_flow_edge` 的替代品（2026-10-22 第三阶段）：从前保存时
+        手动改一条边、导入时又派生一遍，是两份真源。现在只有
+        `flow_edges(beats)` 一份 —— 保存 / 插卡 / 删卡 / 导航顺带提交之后
+        都走这里，图边由拍算出来。
+
+        ## 为什么不会拖慢编辑
+
+        `rebuild_source_edges` 只扫这一章的拍 + 图上这些 label 的边，
+        复杂度是 `O(本章拍数 + 相关边数)`，不扫整个项目；真没变化时
+        连画布都不重建（返回的计数全 0）。实测见
+        `docs/控制流卡_第三阶段_2026-10-22.md`。
+
+        返回 `rebuild_source_edges()` 的结果；失败时返回 `{'error': ...}`
+        让调用方把"图上的边没同步"说出来，**不拦保存**。
         """
-        if self.graph is None or not new:
-            return ''
-        old = dict(old or {})
-        new_type = str(new.get('type') or new.get('FlowType') or '')
-        new_target = str(new.get('target') or new.get('FlowTarget') or '')
-        old_type = str(old.get('type') or old.get('FlowType') or '')
-        old_target_name = str(old.get('target') or old.get('FlowTarget') or '')
-        if old_type == new_type and old_target_name == new_target:
-            return ''
-        nodes = list((self.graph.nodes or {}).values())
-        script = str(getattr(self._session, 'script_path', '') or '')
-
-        def _same_file(value) -> bool:
-            try:
-                return Path(str(value)).resolve() == Path(script).resolve()
-            except (OSError, ValueError):
-                return str(value) == script
-
-        src = next((n for n in nodes
-                    if str(getattr(n, 'label_name', '') or '')
-                    == str(getattr(beat, 'label', '') or '')
-                    and _same_file(getattr(n, 'file_path', ''))),
-                   None)
-        if src is None:
-            return ''
-        target = next((n for n in nodes
-                       if str(getattr(n, 'label_name', '') or '')
-                       == new_target), None)
-        if target is None:
-            return (f'目标「{new_target}」还不在剧情图上 —— '
-                    f'边没有同步；先导入它所在的章节。')
-        old_target = next((n for n in nodes
-                           if str(getattr(n, 'label_name', '') or '')
-                           == old_target_name), None)
-        edge = None
-        if old_target is not None:
-            edge = next((e for e in (self.graph.edges or {}).values()
-                         if e.from_id == src.id and e.to_id == old_target.id
-                         and e.type == old_type), None)
-        from_clause = (str(old.get('from_clause') or '')
-                       if new_type == 'call' else '')
+        if self.graph is None:
+            return {}
+        beats = list(getattr(self._session, 'beats', None) or ())
+        if not beats:
+            return {}
+        labels = {str(getattr(b, 'label', '') or '') for b in beats}
+        labels.discard('')
+        if not any(str(getattr(n, 'label_name', '') or '') in labels
+                   for n in (self.graph.nodes or {}).values()):
+            return {}
         try:
-            if edge is not None:
-                from storygraph.graph.commands import RetargetEdgeCommand
-                ok = self._run_command(RetargetEdgeCommand(
-                    self, edge.id, to_id=target.id, etype=new_type,
-                    from_clause=from_clause))
-            else:
-                # 图上已经有同一条边（同一个 label 里多次 call 同一目标）：
-                # 不重复画一条 —— 第一阶段先保证不出现"两条一模一样的线"。
-                same = any(e.from_id == src.id and e.to_id == target.id
-                           and e.type == new_type
-                           for e in (self.graph.edges or {}).values())
-                if same:
-                    return ''
-                from storygraph.graph.commands import AddEdgeCommand
-                ok = self._run_command(AddEdgeCommand(
-                    self, src.id, target.id, new_type,
-                    str(getattr(beat, 'condition', '') or ''), '',
-                    from_clause=from_clause,
-                    # 这条边代表源文件里的 call/jump，不是用户画的草图
-                    origin='source'))
+            from storygraph.app.session_graph import rebuild_source_edges
+            res = rebuild_source_edges(self.graph, beats)
         except Exception as e:                    # noqa: BLE001 - 同步失败不该拦保存
-            swallow('ui_qt.window_card._sync_flow_edge', e)
-            return f'图上的边没有同步（{e}）'
-        return '' if ok else '图上的边没有同步（命令没有记进图历史）'
+            swallow('ui_qt.window_card._refresh_flow_edges', e)
+            return {'error': str(e)}
+        # 只改 line_id（identified）在画面上看不出来，不必重建画布；
+        # 端点 / 条数 / 类型变了才需要重画。
+        if (res.get('added') or res.get('retargeted') or res.get('removed')):
+            self._set_graph(self.graph)
+        return res
+
+    def _flow_edge_note(self, res: dict) -> str:
+        """把派生结果念成人话（统一文案在 `ui_qt.flow_notes`）。"""
+        return edge_rebuild_note(res)
 
     def _sync_flow_card(self, beat, idx: int):
         """
@@ -874,13 +853,17 @@ class CardPageMixin:
             # 载入时那一格的原文：会话靠它判断"用户手改了 Stage 没有"
             stage_loaded=self._panel.stage_loaded())
         self._sync_kind_field(beat)
-        # 翻页 / 预览 / 导出前的"顺带提交"也把控制流边同步掉：
+        # 翻页 / 预览 / 导出前的"顺带提交"也重新派生一次图边：
         # 否则卡片上改了目标、一翻页，图还指着旧目标。
+        # 只有类型 / 目标 / from 真的变了才跑（参数改动不影响边）。
         if old_flow:
             from storygraph.story.flow import flow_info
             new_flow = flow_info(beat, self._loaded_idx, self._session.beats)
-            if new_flow:
-                note = self._sync_flow_edge(beat, old_flow, new_flow)
+            changed = (not new_flow or any(
+                str(old_flow.get(k) or '') != str((new_flow or {}).get(k) or '')
+                for k in ('type', 'target', 'from_clause')))
+            if changed:
+                note = self._flow_edge_note(self._refresh_flow_edges())
                 if note:
                     self._log(f'[控制流] {note}')
         return beat
@@ -968,8 +951,8 @@ class CardPageMixin:
         # 保存成功 = 表单内容成为新基线；列表那一行也要跟着变，
         # 否则左边还挂着旧台词，看起来像"没保存上"。
         self._sync_kind_field(res['beat'])
-        edge_note = (self._sync_flow_edge(res['beat'], flow_change['old'],
-                                          flow_change['new'])
+        # 控制流改了 → 用这一章的拍重新派生图边（不再手动改单条边）。
+        edge_note = (self._flow_edge_note(self._refresh_flow_edges())
                      if flow_change else '')
         self._sync_flow_card(res['beat'], idx)
         self._panel.reset_baseline()
@@ -982,14 +965,14 @@ class CardPageMixin:
 
         if res['changed']:
             self._status(f'✔ 已保存到这一拍（{res["line_id"]}）。'
-                         + (f'{edge_note} ' if edge_note else '')
+                         + (f'{edge_note}；' if edge_note else '')
                          + f'改动在内存里，点「⤓ 导出 .rpy」时才落盘。')
             if flow_change:
                 self._log(
                     f'[控制流] {flow_change["old"]["type"]} '
                     f'{flow_change["old"]["target"]} → '
                     f'{flow_change["type"]} {flow_change["target"]}'
-                    + (f'；{edge_note}' if edge_note else '；图上边已同步'))
+                    + (f'；{edge_note}' if edge_note else '；图边无需改动'))
         else:
             self._status(f'这一拍没有改动，不需要保存（{res["line_id"]}）。')
         return res['beat']
@@ -1014,6 +997,9 @@ class CardPageMixin:
         self._session.undo(idx)
         # 数据变了 → 必须重新载入表单与立绘卡（含 chip 与缩略图）
         self._show_index(idx)
+        # 撤销可能把 `call A` 改回 `call B`：图边也必须跟着派生回去，
+        # 否则卡片显示 B、图上还连着 A。
+        self._refresh_flow_edges()
         self.refresh_list_row(idx)
         self._sync_undo_button()
         self._status_bar.set_dirty(True, self._file_path)

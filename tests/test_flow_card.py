@@ -337,6 +337,68 @@ class TestFlowCard:
         assert ('main', 'ending') in call_edges
         assert ('main', 'side') not in call_edges
 
+    def test_saving_to_unimported_target_says_edges_are_missing(self, window,
+                                                                project):
+        """目标不在图上：边删掉，但状态栏必须说"1 条边没画全"。"""
+        script = project / 'game' / 'script' / 'flow.rpy'
+        window.import_chapter_files([script])
+        idx = self._call_index(window)
+        window._show_index(idx)
+        window._panel._flow_target.setCurrentText('nowhere')
+
+        window.save_current_beat()
+
+        msg = window.statusBar().currentMessage()
+        assert '1 条边没画全' in msg, msg
+        assert 'nowhere' in msg, msg
+        names = {n.id: n.label_name for n in window.graph.nodes.values()}
+        assert not any(
+            names.get(e.from_id) == 'main' and names.get(e.to_id) == 'side'
+            for e in window.graph.edges.values()), \
+            '目标改成未导入的 nowhere 后，旧的 main→side 边还留着'
+
+    def test_reloading_a_deleted_label_drops_the_ghost_node(self, window,
+                                                             project):
+        """P2-1：源文件删掉 label → 重载后图里也不该还挂着它。"""
+        script = project / 'game' / 'script' / 'flow.rpy'
+        window.import_chapter_files([script])
+        assert 'side' in {n.label_name for n in window.graph.nodes.values()}
+
+        script.write_text(
+            'label main:\n    e "开始"\n    jump ending\n\n'
+            'label ending:\n    return\n', encoding='utf-8')
+        res = window.import_chapter_files([script])
+
+        names = {n.label_name for n in window.graph.nodes.values()}
+        assert 'side' not in names, '源里已经删掉的 label 还留在图上'
+        assert res.get('removed_nodes') == ['side'], res
+        msg = window.statusBar().currentMessage()
+        assert '移除 1 个' in msg, msg
+        assert '重载' in window._console.toPlainText(), \
+            window._console.toPlainText()
+
+    def test_undoing_a_flow_change_restores_the_graph_edge(self, window,
+                                                            project):
+        """卡片撤销把 `call ending` 改回 `call side`，图边也要跟着回去。"""
+        script = project / 'game' / 'script' / 'flow.rpy'
+        window.import_chapter_files([script])
+        idx = self._call_index(window)
+        window._show_index(idx)
+        window._panel._flow_target.setCurrentText('ending')
+        window.save_current_beat()
+        names = {n.id: n.label_name for n in window.graph.nodes.values()}
+        assert any(names.get(e.from_id) == 'main'
+                   and names.get(e.to_id) == 'ending'
+                   for e in window.graph.edges.values())
+
+        window.undo_current_beat()
+
+        names = {n.id: n.label_name for n in window.graph.nodes.values()}
+        rows = [(names.get(e.from_id), names.get(e.to_id))
+                for e in window.graph.edges.values() if e.type == 'call']
+        assert ('main', 'side') in rows, rows
+        assert ('main', 'ending') not in rows, rows
+
     def test_compiled_export_contains_the_new_target(self, window):
         idx = self._call_index(window)
         window._show_index(idx)

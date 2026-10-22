@@ -58,7 +58,7 @@ _BODY_LINE_RE = re.compile(
 
 
 __all__ = ['GraphSessionMixin', 'files_look_like_control_flow',
-           'graph_from_layout_dict']
+           'graph_from_layout_dict', 'rebuild_source_edges']
 
 
 def files_look_like_control_flow(paths) -> bool:
@@ -85,26 +85,68 @@ def files_look_like_control_flow(paths) -> bool:
         if _BODY_LINE_RE.search(text):
             return False
     return seen
-def rebuild_source_edges(graph, beats) -> dict:
+def _path_key(value) -> str:
+    """路径比较用的规范化键（大小写 / 相对路径 / 盘符差异都不参与语义）。"""
+    try:
+        return str(Path(str(value)).resolve())
+    except (OSError, ValueError):
+        return str(value)
+
+
+def _prune_missing_source_nodes(graph, parsed_labels, files) -> list:
+    """
+    把**这次重载的文件里已经不存在**的 label 节点从图上拿掉（P2-1）。
+
+    只碰同时满足三条的节点：
+
+      · `file_path` 属于这次重载的文件；
+      · 名字不在 `parsed_labels` 里（源里真的没有了）；
+      · `file_path` 非空（用户手建的块、缺章占位块都不碰）。
+
+    返回被移除的 label 名（按发现顺序），给日志与状态栏用。
+    调用方必须在**解析没有错误**时调用；源文件没读全时删节点比留幽灵危险得多。
+    """
+    parsed = {str(x) for x in (parsed_labels or ()) if str(x)}
+    wanted = {_path_key(p) for p in (files or ())}
+    removed = []
+    for nid, node in list((getattr(graph, 'nodes', {}) or {}).items()):
+        name = str(getattr(node, 'label_name', '') or '')
+        fp = getattr(node, 'file_path', None)
+        if not name or not fp or _path_key(fp) not in wanted:
+            continue
+        if name in parsed:
+            continue
+        removed.append(name)
+        # `remove_node` 连同它的入边 / 出边一起删；留下的悬空边比少一条线更难查。
+        graph.remove_node(nid)
+    return removed
+
+
+def rebuild_source_edges(graph, beats, allow_remove: bool = True) -> dict:
     """
     按这批拍里的控制流拍，重建它们涉及的那几个 label 的 **`source` 边**
-    （2026-10-22 第二阶段）。
+    （2026-10-22 第二阶段 / 第三阶段）。
 
     这是"图边与脚本同源"的那一步：`flow_edges(beats)` 是唯一真源，
     图上的 `source` 边应当恒等于它。
 
-    ## 只做什么
+    ## 做什么
 
       · **补**：源里有 `call` / `jump`，图上没有对应边 → 建一条（带 `line_id`）；
       · **改**：同一个 `line_id` 的边，目标 / 类型 / `from` 变了 → 就地改；
       · **补身份**：老边没有 `line_id`，但结构对得上 → **只补 line_id，不重建**
-        （这样"升级到第二阶段"不会把已有的边全删了重来）。
+        （这样"升级到第二阶段"不会把已有的边全删了重来）；
+      · **重认身份**：插卡 / 删卡后 `line_id` 整体重排，旧边的 line_id 已经
+        不是任何一拍的 ID —— 按 `(from,to,type)` 顺序配回一条，并改成新 ID，
+        不重复画；
+      · **删**：同一批 label 下，源里已经没有对应拍的 `source` 边 → 移除。
+        只删**带 `line_id` 的派生边**：那说明它确实由某次 `flow_edges`
+        派生过、现在那一拍没了。老版解析器留下、还没被认领过的边
+        （没有 `line_id`）保留，避免升级后第一次重载误删；
+        `allow_remove=False` 时全部保留（解析出错时调用方必须传它）。
 
     ## 刻意不做什么
 
-      · **不删**：源里删掉一个 `call`，这条边**这次不会被移除**。
-        删除要同时满足"知道上次有哪些 line_id"，那是下一步（和 P2-1
-        "重载删幽灵"一起做）。第一版先只增/改，风险最小。
       · **不动 `manual`**：用户画的草图一条都不碰。
       · **不硬造节点**：目标不在图上 → 跳过，记进 `skipped`。
 
@@ -120,8 +162,11 @@ def rebuild_source_edges(graph, beats) -> dict:
     匹配上之后只改目标 / 类型 / `from` 子句并补 `line_id`，
     `option_text` 一个字都不动（那是菜单的显示文案）。
 
-    返回 `{'added', 'retargeted', 'identified', 'skipped'}`：
-      · `identified` = 老边补上了 line_id 的条数（升级兼容用）。
+    返回 `{'added', 'retargeted', 'identified', 'removed', 'skipped',
+    'unmatched'}`：
+      · `identified` = 老边补上 / 换上新 line_id 的条数（升级 / 重排兼容用）；
+      · `removed` = 删掉的失效 source 边条数；
+      · `unmatched` = `allow_remove=False` 时**本应删但保留**的条数。
     """
     from storygraph.story.flow import flow_edges
 
@@ -148,20 +193,42 @@ def rebuild_source_edges(graph, beats) -> dict:
     have = [e for e in edges
             if getattr(e, 'origin', 'source') == 'source'
             and e.from_id in src_ids]
-    by_line = {getattr(e, 'line_id', ''): e for e in have
-               if getattr(e, 'line_id', '')}
-    taken = set()
+    want_lines = {spec['line_id'] for _src, _dst, spec in want
+                  if spec.get('line_id')}
+    by_line = {}
+    for edge in have:
+        line = str(getattr(edge, 'line_id', '') or '')
+        if line:
+            by_line.setdefault(line, edge)
 
-    added = retargeted = identified = 0
-    for src, dst, spec in want:
-        line = spec['line_id']
-        old = by_line.get(line) if line else None
+    # 第一轮：line_id 完全对得上（改目标 / 改类型都走这里，身份不变）。
+    taken = set()
+    exact = {}
+    for i, (src, _dst, spec) in enumerate(want):
+        line = spec.get('line_id') or ''
+        edge = by_line.get(line) if line else None
+        if (edge is not None and id(edge) not in taken
+                and edge.from_id == src):
+            exact[i] = edge
+            taken.add(id(edge))
+
+    added = retargeted = identified = removed = 0
+    for i, (src, dst, spec) in enumerate(want):
+        line = spec.get('line_id') or ''
+        old = exact.get(i)
         if old is None:
-            # **结构配**：老边（无 line_id）按 (from, to, type) 找一条
-            old = next((e for e in have
-                        if id(e) not in taken
-                        and e.from_id == src and e.to_id == dst
-                        and e.type == spec['type']), None)
+            # **结构配**：老边（没 line_id，或插删卡后 line_id 已过期）按
+            # (from, to, type) 顺序找一条。已经属于别的 want 的 line_id 不抢
+            # —— 那是上一轮精确匹配的身份，抢了会把两条边互换。
+            candidates = [
+                e for e in have
+                if id(e) not in taken
+                and e.from_id == src and e.to_id == dst
+                and e.type == spec['type']
+                and (not getattr(e, 'line_id', '')
+                     or getattr(e, 'line_id', '') not in want_lines)
+            ]
+            old = candidates[0] if candidates else None
         if old is None:
             graph.add_edge(src, dst, spec['type'], spec['condition'], '',
                            spec['from_clause'], origin='source',
@@ -174,11 +241,27 @@ def rebuild_source_edges(graph, beats) -> dict:
             retargeted += 1
         old.type = spec['type']
         old.from_clause = str(spec['from_clause'] or '')
-        if line and not getattr(old, 'line_id', ''):
+        if line and str(getattr(old, 'line_id', '') or '') != line:
             old.line_id = line
             identified += 1
+
+    # 只删"认领过"的边：有 line_id 说明上一轮确实由某一拍派生出来，
+    # 现在那一拍不在了。没有 line_id 的是老版本 / 手工来源 —— 留着，
+    # 让下一次导入有机会认领它，而不是升级后第一次重载就吃掉。
+    stale = [e for e in have
+             if id(e) not in taken and str(getattr(e, 'line_id', '') or '')]
+    kept_legacy = [e for e in have
+                   if id(e) not in taken
+                   and not str(getattr(e, 'line_id', '') or '')]
+    if allow_remove:
+        for edge in stale:
+            graph.remove_edge(edge.id)
+            removed += 1
     return {'added': added, 'retargeted': retargeted,
-            'identified': identified, 'skipped': skipped}
+            'identified': identified, 'removed': removed,
+            'skipped': skipped,
+            'unmatched': 0 if allow_remove else len(stale),
+            'kept_legacy': len(kept_legacy)}
 
 
 def graph_from_layout_dict(data) -> 'object':
@@ -760,10 +843,11 @@ class GraphSessionMixin:
         所以：
           · 图里**只**出现用户导入过的文件里的 label（以及它们之间的
             jump / call / 菜单选项与条件）；
-          · 再导入一批**累加**，不覆盖上一批（`clear_graph=False`，
-            后端 `GraphBuilder._prepare` 只在 clear 时才删节点）；
+          · 再导入一批**累加**，不覆盖上一批（`clear_graph=False`）；
           · 同一个文件重复导入不会长重复节点（边按
-            `(from,to,type,condition,option_text)` 去重）。
+            `(from,to,type,condition,option_text)` 去重）；
+          · **重载同一个文件时**，源里已经删掉的 label 节点与失效的
+            `source` 边会一起移除（P2-1）；解析有错时只增 / 改，不删。
 
         顺带把脚本里的 `define e = Character(...)` 合并进资源表 —— 说话人
         候选就是这么来的（这一步原来在"重新扫描项目"里，而那个动作现在
@@ -821,16 +905,26 @@ class GraphSessionMixin:
                 swallow('editor.import_chapters')
         self.refresh_symbols()
 
-        # **图边与脚本同源**（2026-10-22 第二阶段）：图上的 `source` 边
-        # 由这批文件的**控制流拍**派生 —— 补 `line_id`、改目标、补漏。
+        # **图边与脚本同源**（2026-10-22 第二阶段 / 第三阶段）：
+        # 图上的 `source` 边由这批文件的**控制流拍**派生 —— 补 `line_id`、
+        # 改目标、补漏、删掉源里已经不存在的边。
         #
         # 失败不拦导入（图的其余部分已经建好了），但结果要带回去给界面：
         # `skipped` 里是"目标还不在图上"的那几条，用户需要知道边没画全。
+        #
+        # ⚠ **解析有错时绝不删任何旧节点 / 旧边**：源没读全时"没看到"不等于
+        # "被删了"，按半份 AST 清理会把整章连线吃掉。增 / 改仍然做。
+        parse_errors = [str(e) for e in (parse_result.errors or [])]
+        removed_nodes: list = []
         rebuild: dict = {}
         try:
             from storygraph.story.beat_build import beats_from_parse_result
+            beats = beats_from_parse_result(parse_result)
+            if not parse_errors:
+                removed_nodes = _prune_missing_source_nodes(
+                    graph, parse_result.labels, paths)
             rebuild = rebuild_source_edges(
-                graph, beats_from_parse_result(parse_result))
+                graph, beats, allow_remove=not parse_errors)
         except Exception as e:                    # noqa: BLE001
             swallow('editor.rebuild_source_edges', e)
         self._last_edge_rebuild = rebuild
@@ -839,6 +933,7 @@ class GraphSessionMixin:
             'ok': True, 'error': '',
             'graph': graph,
             'edge_rebuild': rebuild,
+            'removed_nodes': removed_nodes,
             'control_flow': bool(getattr(graph, 'control_flow', False)),
             'files': [str(p) for p in paths],
             'added_nodes': max(0, len(graph.nodes or {}) - before_nodes),
@@ -846,7 +941,7 @@ class GraphSessionMixin:
             'nodes': len(graph.nodes or {}),
             'edges': len(graph.edges or {}),
             'warnings': [str(w) for w in (parse_result.warnings or [])],
-            'errors': [str(e) for e in (parse_result.errors or [])],
+            'errors': parse_errors,
         }
     def graph_files(self, graph) -> list:
         """图上已经导入了哪些文件（去重、排序）。"""
