@@ -72,6 +72,25 @@ def discover_scripts(project_root, extra_dirs=None) -> list:
     return found
 
 
+def labels_in_file(path) -> list:
+    """
+    这个 `.rpy` 里声明了哪些 label（按出现顺序，去重）。
+
+    与 `find_label_files` 用**同一条正则**：补全/刷新前的预览要告诉用户
+    "这个文件会带进来哪几个 label"，不能预览一套、导入又是另一套。
+    """
+    try:
+        text = Path(path).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return []
+    out: list = []
+    for m in _LABEL_RE.finditer(text):
+        name = m.group(1)
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def find_label_files(project_root, labels) -> dict:
     """
     `{label 名: 声明它的 .rpy}` —— 只回答"这个 label 在哪个文件里"。
@@ -138,5 +157,5 @@ def find_files_referencing_labels(project_root, labels) -> dict:
 
 
 __all__ = ['discover_scripts', 'find_label_files',
-           'find_files_referencing_labels',
+           'find_files_referencing_labels', 'labels_in_file',
            'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']

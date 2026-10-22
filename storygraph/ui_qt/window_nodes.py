@@ -51,7 +51,66 @@ from storygraph.ui_qt.thumb_loader import ThumbLoader
 __all__ = ['NodeEditMixin']
 
 
-def _write_new_chapter(view, path, label: str) -> str:
+def _skeleton_block(label: str, operations: str = '') -> str:
+    """
+    新 label 的最小骨架（`label 名:` + 可选变量操作 + `return`）。
+
+    `operations` 是对话框里那一格（一行一条，`$` 可写可不写）。它从前只进
+    内存节点、不进骨架文件 —— 用户填了变量，打开剧本却看不到（P2-2）。
+    现在**同一份文本**既进节点也进文件，两边不会再对不上。
+    """
+    lines = [f'label {label}:']
+    for raw in str(operations or '').splitlines():
+        text = str(raw or '').strip()
+        if not text:
+            continue
+        if text.startswith('$'):
+            text = text[1:].strip()
+        if not text:
+            continue
+        # `#` 注释照原样缩进；其余按剧情变量写成 `$ ...`。
+        lines.append(f'    {text}' if text.startswith('#') else f'    $ {text}')
+    lines.append('    return')
+    return '\n'.join(lines) + '\n'
+
+
+def _default_chapter_dir(project_root, known_files=()) -> str:
+    """
+    新章节默认写到哪：**跟随项目里已有章节所在的目录**（P2-3）。
+
+    从前固定 `<项目>/game/<名字>.rpy`，而用户的实际章节都在
+    `game/script/` 下 —— 新文件散落在 `game/` 根目录，Ren'Py 虽然也会读，
+    但作者按目录找章节时就会"少一章"。取已知章节里**最常见**的那个目录；
+    一个文件都没有时才退回 `game/`。
+    """
+    root = Path(project_root) if project_root else None
+    dirs = []
+    for fp in (known_files or ()):
+        try:
+            p = Path(str(fp))
+            if p.exists():
+                dirs.append(p.parent)
+        except (OSError, ValueError):
+            continue
+    if not dirs and root is not None:
+        try:
+            from storygraph.parsing.discover import discover_scripts
+            dirs = [p.parent for p in discover_scripts(root)]
+        except Exception as e:                    # noqa: BLE001 - 只是默认值
+            swallow('ui_qt.window_nodes.default_dir', e)
+    if dirs:
+        from collections import Counter
+        # `most_common` 在并列时按首次出现；再按路径长度取深的那个，
+        # `game/script` 比 `game` 更像"章节目录"。
+        counts = Counter(str(d) for d in dirs)
+        best = max(counts, key=lambda d: (counts[d], len(Path(d).parts)))
+        return best
+    if root is None:
+        return ''
+    return str(root / 'game')
+
+
+def _write_new_chapter(view, path, label: str, operations: str = '') -> str:
     """
     给"新建章节"落一个最小骨架（`label 名:` + `return`），返回路径（失败返回空串）。
 
@@ -76,7 +135,7 @@ def _write_new_chapter(view, path, label: str) -> str:
 
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(p, f"label {label}:\n    return\n")
+            write_text_atomic(p, _skeleton_block(label, operations))
             return str(p)
 
         text, style = _read(p)
@@ -86,7 +145,8 @@ def _write_new_chapter(view, path, label: str) -> str:
             except Exception as e:            # noqa: BLE001 - 状态栏坏了不影响判断
                 swallow('ui_qt.window_nodes.dup_label_status', e)
             return ''
-        body = text.rstrip('\n') + f"\n\nlabel {label}:\n    return\n"
+        body = (text.rstrip('\n') + f"\n\n"
+                + _skeleton_block(label, operations))
         write_text_atomic(p, _detect(p).apply(body))
         return str(p)
     except OSError as e:                      # 权限 / 磁盘：说出来，不静默
@@ -114,7 +174,7 @@ class NodeEditMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_session', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapter_files', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph')
+    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_session', '_set_graph', '_status', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapter_files', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph', 'show_variable_workbench')
 
     def _selected_node(self):
         nid = self._canvas.selected_node_id()
@@ -199,6 +259,9 @@ class NodeEditMixin:
         edit_btn = getattr(self, '_edit_vars_btn', None)
         if edit_btn is not None:
             edit_btn.setEnabled(node is not None)
+        workbench = getattr(self, '_vars_workbench_btn', None)
+        if workbench is not None:
+            workbench.setEnabled(node is not None)
 
     def _on_connect_requested(self, from_id, to_id):
         """Shift + 左键从一个块拖到另一个块 → 弹旧版那张"选择跳转类型"对话框。"""
@@ -313,8 +376,15 @@ class NodeEditMixin:
     def _create_source_for_node(self, label: str):
         """给手工节点新建一个最小 `.rpy`，导入并打开。"""
         root = getattr(self, '_project_root', None)
-        default = (str(Path(root) / 'game' / f'{label}.rpy')
-                   if root else f'{label}.rpy')
+        known = []
+        try:
+            known = [f for f in (self._session.graph_files(self.graph)
+                                 if self.graph else []) if Path(f).exists()]
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.window_nodes.create_source.known', e)
+        folder = _default_chapter_dir(root, known)
+        default = (str(Path(folder) / f'{label}.rpy') if folder
+                   else f'{label}.rpy')
         path, _ = QFileDialog.getSaveFileName(
             self, '给节点新建源文件', default, "Ren'Py 脚本 (*.rpy)")
         if not path:
@@ -423,6 +493,8 @@ class NodeEditMixin:
             menu.addAction('设为当前章节',
                            lambda: self._canvas.highlight_node(nid))
             menu.addAction('编辑剧情变量…', lambda: self.edit_node_ops(nid))
+            menu.addAction('变量工作台…',
+                           lambda: self.show_variable_workbench(nid))
             menu.addAction('从这里连一条到…', lambda: self.add_edge(from_id=nid))
             menu.addSeparator()
             # 「移除这一章」按**文件**整章移除（用户心智里一章 = 一个 .rpy）；
@@ -443,8 +515,8 @@ class NodeEditMixin:
             # **不放**资源表的动作（那是另一条路，混在一起用户会以为
             # "重扫项目"会把整部戏画出来 —— 正是上一版最大的误解）。
             menu.addAction('导入章节 .rpy…', self.import_chapters)
-            menu.addAction('补全相关章节', self.complete_related_chapters)
-            menu.addAction('重载已导入章节', self.reload_imported_chapters)
+            menu.addAction('补全缺失章节…', self.complete_related_chapters)
+            menu.addAction('刷新已导入章节…', self.reload_imported_chapters)
             menu.addAction('清空剧情图', self.clear_graph)
         return menu
     def _on_node_menu(self, nid, global_pos):
@@ -463,11 +535,10 @@ class NodeEditMixin:
         existing = [getattr(n, 'label_name', '')
                     for n in ((self.graph.nodes or {}).values()
                               if self.graph else [])]
-        # **默认写到 <项目根>/game/**（Ren'Py 只扫这一个目录）。
+        # **默认写到项目里已有章节的目录**（Ren'Py 只扫 game/，但作者常分
+        # `game/script` 这类子目录 —— 固定写 `game/` 会让新章散落在外面）。
         # 没有项目根（没点「打开项目」）时填空 → 对话框里那一格留空，
         # 行为与从前一致（只在图里画结构）。
-        default_dir = (str(Path(self._project_root) / 'game')
-                       if getattr(self, '_project_root', None) else '')
         known = []
         try:
             known = [f for f in (self._session.graph_files(self.graph)
@@ -475,6 +546,8 @@ class NodeEditMixin:
                      if Path(f).exists()]
         except Exception as e:                  # noqa: BLE001 - 下拉没有也不影响手填
             swallow('ui_qt.window_nodes.known_files', e)
+        default_dir = _default_chapter_dir(
+            getattr(self, '_project_root', None), known)
         dlg = AddNodeDialog(self, existing=existing, default_dir=default_dir,
                             known_files=known)
         if dlg.exec() != QDialog.Accepted:
@@ -486,7 +559,8 @@ class NodeEditMixin:
         # `getattr`：测试里喂的是**假对话框**（只实现 name/operations），
         # 真对话框才有这一格。
         _want_file = getattr(dlg, 'file_path', '') or ''
-        wrote = _write_new_chapter(self, _want_file, dlg.name)
+        _ops = getattr(dlg, 'operations', '') or ''
+        wrote = _write_new_chapter(self, _want_file, dlg.name, _ops)
         if self.graph is None:
             from storygraph.graph.models import Graph
             self._set_graph(Graph())
@@ -603,8 +677,10 @@ class NodeEditMixin:
         self._log(f'[连线] {names.get(dlg.from_id, dlg.from_id)} → '
                   f'{names.get(dlg.to_id, dlg.to_id)}（{dlg.etype}'
                   f'{("，" + dlg.condition) if dlg.condition else ""}'
-                  f'{("「" + dlg.option_text + "」") if dlg.option_text else ""}）')
-        self._status(f'已连线 {dlg.from_id} → {dlg.to_id}（{dlg.etype}）。')
+                  f'{("「" + dlg.option_text + "」") if dlg.option_text else ""}）'
+                  f' —— 草图，只改图，不写 .rpy')
+        self._status(f'已画草图连线 {dlg.from_id} → {dlg.to_id}（{dlg.etype}）；'
+                     f'不写脚本。要写进 .rpy，请打开卡片用「↳ 插入控制流卡」。')
     def delete_edge(self, eid):
         if self.graph is None or eid not in (self.graph.edges or {}):
             return

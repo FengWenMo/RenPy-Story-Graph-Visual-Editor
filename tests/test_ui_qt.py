@@ -2880,7 +2880,7 @@ class TestNodeMenu:
     def test_blank_area_menu_offers_graph_scoped_actions(self, window):
         labels = ' | '.join(self._labels(window.build_node_menu(None)))
         for must in ('添加新章节', '添加连线', '自动布局', '适应窗口',
-                     '导入章节', '重载已导入章节', '清空剧情图'):
+                     '导入章节', '补全缺失章节', '刷新已导入章节', '清空剧情图'):
             assert must in labels, f'空白处菜单缺「{must}」：{labels}'
 
 

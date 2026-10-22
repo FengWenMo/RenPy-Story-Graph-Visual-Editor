@@ -1538,6 +1538,15 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                                    project_root=self._project_root)
         self._notifier = None
         self.graph = graph
+        #: 剧情图"有没有未保存的改动"（= 现在这张图 ≠ 上次落盘/加载的那张）。
+        #:
+        #: 判据用布局 JSON 的指纹（`session_graph.layout_signature`），不是
+        #: 手工在每个命令里置位 —— 置位总有漏掉的路径（拖块 / 撤销 / 派生边），
+        #: 而指纹在 `_set_graph` 这个唯一同步点自动成立。
+        self._graph_saved_sig = ''
+        self._graph_dirty = False
+        self._last_layout_path = ''
+        self._base_title = '剧情编辑器 · 剧情结构图 + 卡片界面'
         # —— 图级撤销栈（旧版 `graph.commands.HistoryManager`）——
         #
         # 命令对象要一个"视图接口"：`graph` / `selected_node` / `selected_edge`
@@ -1559,7 +1568,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   "命令行是不是已经明确指定了项目/章节"—— 那个判断就靠这两个属性。
         #   放到 `_build()` 之后设，就是"恢复跑完了才知道命令行给了什么"。
         self._pending_script = Path(script_path) if script_path else None
-        self.setWindowTitle('剧情编辑器 · 剧情结构图 + 卡片界面')
+        self.setWindowTitle(self._base_title)
         self.resize(1600, 950)
         self._build()
         #: 构造后**立刻**载入这一章（同步）。
@@ -1698,6 +1707,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._canvas.set_empty_hint('' if has_nodes else self.EMPTY_HINT)
         self._on_canvas_select(self._canvas.selected_node_id())
         self._update_crumb()
+        self._sync_graph_dirty()
 
     # ------------------------------------------------------------------
     #  界面
@@ -1811,8 +1821,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         zrow.addWidget(self._fit_btn)
         zrow.addStretch(1)
         self._graph_hint = QLabel(
-            'Shift + 左键拖动 = 连线 · 左键选中/拖动模块 · 双击模块 = 编辑剧情变量'
-            ' · 滚轮缩放 · 空格 + 左键拖动 = 平移')
+            '实线 = 脚本里的控制流 · 点划线 = 手工草图（不写脚本）'
+            ' · Shift + 左键拖动 = 连线 · 左键选中/拖动模块'
+            ' · 双击模块 = 编辑剧情变量 · 滚轮缩放'
+            ' · 空格 + 左键拖动 = 平移')
         self._graph_hint.setProperty('role', 'caption')
         zrow.addWidget(self._graph_hint)
         mv.addLayout(zrow)
@@ -1834,6 +1846,32 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._console_clear_btn.clicked.connect(self.clear_console)
         crow.addWidget(self._console_clear_btn, 0)
         rv.addLayout(crow)
+
+        # —— 诊断摘要（2026-10-22，P1-5）——
+        # 212 条同格式的 `[静默失败]` 不是"日志详细"，是把诊断成本丢给用户。
+        # 这里只留一行：代码问题优先，资源/环境收进详情。
+        self._diag_bar = QFrame()
+        self._diag_bar.setProperty('role', 'card')
+        self._diag_bar.setVisible(False)
+        drow = QHBoxLayout(self._diag_bar)
+        drow.setContentsMargins(T.SPACE['xs'], 2, T.SPACE['xs'], 2)
+        drow.setSpacing(T.SPACE['xs'])
+        self._diag_icon = QLabel('⚠')
+        drow.addWidget(self._diag_icon, 0)
+        self._diag_text = QLabel('')
+        self._diag_text.setWordWrap(True)
+        drow.addWidget(self._diag_text, 1)
+        self._diag_detail_btn = QPushButton('详情')
+        self._diag_detail_btn.setToolTip('按"代码 / 环境 / 资源"分组查看')
+        self._diag_detail_btn.clicked.connect(self.show_diagnostics)
+        drow.addWidget(self._diag_detail_btn, 0)
+        self._diag_copy_btn = QPushButton('复制诊断')
+        self._diag_copy_btn.setToolTip('把摘要与明细复制给开发者')
+        self._diag_copy_btn.clicked.connect(self.copy_diagnostics)
+        drow.addWidget(self._diag_copy_btn, 0)
+        rv.addWidget(self._diag_bar)
+        #: 最近一次操作新增的诊断 `[(context, count, last), …]`
+        self._diag_items: list = []
 
         self._console = QPlainTextEdit()
         self._console.setReadOnly(True)
@@ -1864,6 +1902,13 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '给策划 / 编剧编排剧情分支用的地方（双击模块同样打开）')
         self._edit_vars_btn.clicked.connect(self._edit_selected_vars)
         rv.addWidget(self._edit_vars_btn)
+
+        self._vars_workbench_btn = QPushButton('📋 变量工作台…')
+        self._vars_workbench_btn.setToolTip(
+            '按变量列出初值、每条赋值和它所在的拍；可以只改一条、跳到那一拍')
+        self._vars_workbench_btn.clicked.connect(
+            lambda: self.show_variable_workbench())
+        rv.addWidget(self._vars_workbench_btn)
 
         brow = QHBoxLayout()
         brow.setSpacing(T.SPACE['xs'])
@@ -2232,11 +2277,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('📝 导入纯文字章节', self.import_plain_text,
             '选 .txt（作者写的纯文字）→ 自动转成 .rpy 落进 game/ 并导入；'
             '有认不出的角色写法会先问你一句（确认后写进 characters.xlsx）')
-        act('🔁 重载已导入章节', self.reload_imported_chapters,
-            '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（范围不变；'
-            '源里删掉的 label / 连线会一起移除）')
-        act('🔗 补全相关章节', self.complete_related_chapters,
-            '把图上"被跳到、但文件还没导入"的章节一起导进来 → 连线才画得出')
+        act('🔁 刷新已导入章节…', self.reload_imported_chapters,
+            '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（先给预览：'
+            '新增 / 移除哪些 label；源里删掉的会一起移除）')
+        act('🔗 补全缺失章节…', self.complete_related_chapters,
+            '把图上"被跳到、但文件还没导入"的章节一起导进来（先给预览）'
+            ' → 连线才画得出')
         act('🗑 清空剧情图', self.clear_graph,
             '只清图（资源表 / 项目设置都不动）')
         tb_graph.addSeparator()
@@ -2249,6 +2295,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         tb_graph.addSeparator()
         act('🔎 检查逻辑问题', self.check_logic, '可达性 / 死分支；结论写在右侧并在图上标红')
         act('📊 变量分析', self.show_analysis, '逐节点的变量区间与操作明细（只读）')
+        act('📊 变量分析（可过滤）…', self.show_analysis_dialog,
+            '同样的分析结果，给一个能按变量名过滤的窗口（找"love 出现在哪"）')
         act('📦 资源体检', self.check_asset_health,
             '检查资源表与项目资源是否一一对应，并出示报告（只读）')
         act('🩺 项目体检', self.show_health, '三级校验，只读检查，不写盘')
@@ -2587,27 +2635,66 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
     #  "静默失败"要看得见（见 `core.safeguard` 与不变量 58）
     # ------------------------------------------------------------------
 
-    def _swallow_mark(self) -> int:
-        """记一个"现在有多少条静默失败"，用来只看**本次操作**新增的那些。"""
-        from storygraph.core import safeguard
-        return safeguard.total()
-
-    def _report_swallowed(self, mark: int = 0) -> int:
+    def _swallow_mark(self):
         """
-        把本次操作**新产生**的静默失败写进控制台（没有就什么都不做）。
+        记一个"操作前"的基线，用来只看**本次操作**新增的静默失败。
 
-        为什么要在界面上露出来：审计那条结论（99 处 `except: pass`）的真正
-        代价不是"代码难看"，而是**功能没反应时没有任何痕迹**。
-        现在每一次载入 / 导出结束都会把它们列出来，条数与位置一目了然。
+        返回 `{context: count}`（不是总数）：同一批 173 张缩略图在后续操作里
+        不会重复刷屏 —— 这是 212 条红字的一大半来源。
         """
         from storygraph.core import safeguard
-        if safeguard.total() <= mark:
+        return safeguard.snapshot()
+
+    def _report_swallowed(self, mark=0) -> int:
+        """
+        把本次操作**新产生**的静默失败收成一条摘要（没有就什么都不做）。
+
+        控制台只写一行摘要，明细进诊断面板（分组、聚合、可复制）。
+        用户 2026-10-22：
+        > 一大片红字，我不知道该处理哪条。
+
+        兼容老调用方：`mark` 是 int（总数）时按总数差判断"有没有新增"。
+        """
+        from storygraph.core import safeguard
+        from storygraph.ui_qt.diagnostics import (category_of, summary_line)
+        before = mark if isinstance(mark, dict) else None
+        baseline = int(sum((before or {}).values())) if before is not None \
+            else int(mark or 0)
+        if safeguard.total() <= baseline:
             return 0
-        text = safeguard.report()
-        for line in text.splitlines():
-            self._log(f'[静默失败] {line}')
-        n = safeguard.total() - mark
-        self._status(f'⚠ 本次有 {n} 处错误被跳过（明细见控制台「静默失败」）')
+        if before is not None:
+            now = safeguard.snapshot()
+            lasts = {ctx: last for ctx, _n, last in safeguard.recent(1000)}
+            items = [(ctx, now[ctx] - int(before.get(ctx, 0)),
+                      lasts.get(ctx, ''))
+                     for ctx in now if now[ctx] > int(before.get(ctx, 0))]
+        else:
+            items = safeguard.recent(1000)
+        n = sum(int(count or 0) for _c, count, _l in items)
+        if n <= 0:
+            return 0
+        self._diag_items = list(items)
+        # 控制台只留摘要；具体 context 在详情里，避免同类刷屏。
+        try:
+            self._diag_text.setText('本次操作：' + summary_line(items))
+            self._diag_bar.setVisible(True)
+            code = sum(int(c or 0) for ctx, c, _l in items
+                       if category_of(ctx) == 'code')
+            self._diag_icon.setStyleSheet(
+                f"color: {T.t('state.error' if code else 'state.warning')};"
+                f" font-weight: bold;")
+        except Exception as e:                  # noqa: BLE001
+            swallow('main_window._report_swallowed.panel', e)
+        head = '、'.join(
+            f'{ctx} ×{count}' + (f'（{last}）' if last else '')
+            for ctx, count, last in items[:3])
+        if len(items) > 3:
+            head += f' 等 {len(items)} 处'
+        # 前缀保留 `[静默失败]`：老用户认得这个词，只是不再一条一行。
+        self._log(f'[静默失败] 本次 {n} 次（{len(items)} 处）：{head}'
+                  f' —— 点控制台上方「详情」按代码 / 环境 / 资源分类查看')
+        self._status(f'⚠ 本次有 {n} 次失败被跳过 —— '
+                     f'{summary_line(items)}（控制台上方「详情」）')
         return n
 
 
@@ -2702,6 +2789,13 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             swallow('main_window._status')
 
     def closeEvent(self, event):
+        # **先落图再拆自己**（2026-10-22）：剧情图只存在内存里，关掉就没了
+        # —— 有项目目录时自动存一份 `storygraph_layout.json`；
+        # 失败只记台账，绝不拦关闭（用户要关窗口时，卡住比丢图更糟）。
+        try:
+            self._auto_save_layout_on_close()
+        except Exception as e:                      # noqa: BLE001
+            swallow('main_window.closeEvent.autosave_layout', e)
         # ⚠ **先把记忆落下来再拆自己**（2026-10-13）：`save_session_state()`
         #   要读分栏尺寸、页号、当前章节 —— 那些都还活着的时候才读得到。
         #   放到下面那组"摘掉自己"之后就晚了（窗口在关，控件可能已经不可用）。

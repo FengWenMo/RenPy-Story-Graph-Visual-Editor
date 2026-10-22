@@ -323,6 +323,103 @@ def graph_from_layout_dict(data) -> 'object':
     return graph
 
 
+def _variable_declarations(path) -> list:
+    """
+    文件级 `default` / `define` 的变量初值：`[{name, value, kind, line}]`。
+
+    `node_variables()` 只看 label 里的 `$` 操作，所以 `default love = 0`
+    在变量编辑器里**根本不存在**（用户 2026-10-22："看不到 love 的初值"）。
+    这里用一条保守的正则把初值补上：只认行首 `default` / `define`，
+    `define` 后面是角色 / 图像定义时也照实列出（名字是变量名就行）。
+    """
+    if not path:
+        return []
+    try:
+        from storygraph.story.source_style import read_text
+        text = read_text(Path(path))[0]
+    except (OSError, UnicodeDecodeError):
+        return []
+    import re as _re
+    out = []
+    seen = set()
+    pat = _re.compile(
+        r'^[ \t]*(default|define)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(.*?)[ \t]*$',
+        _re.M)
+    for m in pat.finditer(text):
+        name = m.group(2)
+        if name in seen:
+            continue
+        kind, value = m.group(1), m.group(3).strip()
+        # `define e = Character(...)` / `define bg = Image(...)` 是**资源定义**，
+        # 不是剧情变量；列进变量表只会把 `love` / `flag` 挤下去。
+        if kind == 'define' and value.startswith(
+                ('Character(', 'DynamicCharacter(', 'Image(')):
+            continue
+        seen.add(name)
+        out.append({'name': name, 'kind': kind, 'value': value,
+                    'line': text.count('\n', 0, m.start()) + 1})
+    return out
+
+
+def layout_dict(graph) -> dict:
+    """
+    剧情图 → 布局 JSON 的 dict（`save_layout` 与"未保存"判据**共用一份**）。
+
+    为什么单独抽出来：保存和"图有没有变"必须是同一份投影。两边各拼一次的话，
+    保存时会写进去的字段（`origin` / `line_id` / `statements`）只要漏一边，
+    就会出现"刚保存完仍显示未保存"或者反过来"改了却说已保存"。
+    """
+    data = {
+        'nodes': {str(nid): {
+            'label': n.label_name,
+            'x': n.x, 'y': n.y,
+            'is_current': bool(getattr(n, 'is_current', False)),
+            'operations': list(getattr(n, 'operations', []) or []),
+            # 结构化真源（老读者会忽略这一项）
+            'statements': [s.to_dict()
+                           for s in (getattr(n, 'statements', []) or [])],
+            'file_path': getattr(n, 'file_path', None),
+            'line_number': getattr(n, 'line_number', None),
+        } for nid, n in (getattr(graph, 'nodes', {}) or {}).items()},
+        'edges': {str(eid): {
+            'from': e.from_id, 'to': e.to_id, 'type': e.type,
+            'condition': e.condition, 'option_text': e.option_text,
+            # `from` 子句也要存：不存的话"存布局 → 读布局"就把它丢了
+            'from_clause': getattr(e, 'from_clause', ''),
+            # 来源（source / manual）同样要存：否则一存一读，用户画的手工边
+            # 全变成 `source`，下次"从拍派生"就把它们删了。
+            'origin': getattr(e, 'origin', 'source'),
+            # 对应哪一拍（同一 label 里多次 call 同一目标时靠它对位）
+            'line_id': getattr(e, 'line_id', ''),
+        } for eid, e in (getattr(graph, 'edges', {}) or {}).items()},
+        'next_ids': {
+            'node': int(getattr(graph, 'next_node_id', 1)),
+            'edge': int(getattr(graph, 'next_edge_id', 1)),
+        },
+    }
+    return data
+
+
+def layout_signature(graph) -> str:
+    """
+    图的内容指纹（布局 JSON 的 sha1）。**空图**也有稳定值。
+
+    `is_current` 不算：它只是"当前高亮哪个块"，选中/打开章节都会改它 ——
+    算进去的话，用户什么都没动，状态栏也会跳「未保存」。
+    """
+    import hashlib
+    import json
+    try:
+        data = layout_dict(graph)
+        for nd in (data.get('nodes') or {}).values():
+            nd['is_current'] = False
+        raw = json.dumps(data, ensure_ascii=False,
+                         sort_keys=True, separators=(',', ':'))
+    except (TypeError, ValueError):
+        return ''
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
 class GraphSessionMixin:
     """
     剧情图那一半（见模块 docstring 的职责边界）。
@@ -370,34 +467,7 @@ class GraphSessionMixin:
         信息，老版本读 `operations` 也不受影响（只多一个它不认识的键）。
         """
         import json
-        data = {
-            'nodes': {str(nid): {
-                'label': n.label_name,
-                'x': n.x, 'y': n.y,
-                'is_current': bool(getattr(n, 'is_current', False)),
-                'operations': list(getattr(n, 'operations', []) or []),
-                # 结构化真源（老读者会忽略这一项）
-                'statements': [s.to_dict()
-                               for s in (getattr(n, 'statements', []) or [])],
-                'file_path': getattr(n, 'file_path', None),
-                'line_number': getattr(n, 'line_number', None),
-            } for nid, n in (getattr(graph, 'nodes', {}) or {}).items()},
-            'edges': {str(eid): {
-                'from': e.from_id, 'to': e.to_id, 'type': e.type,
-                'condition': e.condition, 'option_text': e.option_text,
-                # `from` 子句也要存：不存的话"存布局 → 读布局"就把它丢了
-                'from_clause': getattr(e, 'from_clause', ''),
-                # 来源（source / manual）同样要存：否则一存一读，用户画的手工边
-                # 全变成 `source`，下次"从拍派生"就把它们删了。
-                'origin': getattr(e, 'origin', 'source'),
-                # 对应哪一拍（同一 label 里多次 call 同一目标时靠它对位）
-                'line_id': getattr(e, 'line_id', ''),
-            } for eid, e in (getattr(graph, 'edges', {}) or {}).items()},
-            'next_ids': {
-                'node': int(getattr(graph, 'next_node_id', 1)),
-                'edge': int(getattr(graph, 'next_edge_id', 1)),
-            },
-        }
+        data = layout_dict(graph)
         try:
             Path(target).write_text(
                 json.dumps(data, indent=2, ensure_ascii=False),
@@ -585,6 +655,110 @@ class GraphSessionMixin:
             'file': str(getattr(node, 'file_path', '') or ''),
             'line': getattr(node, 'line_number', None),
         }
+    def variable_workbench(self, graph, nid) -> dict:
+        """
+        一个 label 的**变量工作台**数据（P1-2，2026-10-22）。
+
+        与 `node_variables()` 的区别：它给的是"整章一大段文本"，这里给
+        **结构化清单** —— 每个变量一行（初值 / 本拍操作 / 出现位置），
+        每条操作带 `(文件, 行号)` 与它落在第几拍。前端因此能"点一条赋值
+        跳到那一拍"，而不是让用户在一整段 Python 里找。
+
+        数据来源都是现成的，不新写解析：
+
+          · 变量操作：`story_ops.narrative_statements(node)`（结构化语句，
+            带 `source` 行号；技术代码一条都不返回）；
+          · 初值：文件里的 `default` / `define`（正则只认这两种声明）；
+          · 落点：把文件解析成拍，按 `src_first..src_last` 与行号对位。
+
+        返回 `{ok, label, file, variables:[…], operations:[…],
+        declarations:[…], warning}`。`operations` 是**原顺序**的文本列表，
+        对话框保存时整份交回 `set_node_variables`，不会打乱技术代码的位置。
+        """
+        from storygraph.core.statement import operation_source
+        from storygraph.core.utils import extract_variables
+        from storygraph.story import story_ops
+
+        node = (getattr(graph, 'nodes', {}) or {}).get(nid)
+        if node is None:
+            return {'ok': False, 'error': '这个模块不在了', 'label': '',
+                    'file': '', 'variables': [], 'operations': [],
+                    'declarations': [], 'warning': ''}
+        label = str(getattr(node, 'label_name', '') or '')
+        path = str(getattr(node, 'file_path', '') or '')
+        stmts = story_ops.narrative_statements(node)
+        operations = [operation_source(s) for s in stmts]
+        declarations = _variable_declarations(path)
+        decl_by_name = {d['name']: d for d in declarations}
+
+        # 行号 → 拍号（只在同一 label 内对位；跨 label 的行号没有意义）
+        line_to_beat = {}
+        warning = ''
+        if path and Path(path).exists():
+            try:
+                from storygraph.parsing.renpy_parser import (ParseResultBuilder,
+                                                             RenPyParser)
+                from storygraph.story.beat_build import beats_from_parse_result
+                pr = ParseResultBuilder().build(RenPyParser().parse(path))
+                beats = beats_from_parse_result(pr)
+                for i, b in enumerate(beats):
+                    if str(getattr(b, 'label', '') or '') != label:
+                        continue
+                    first = int(getattr(b, 'src_first', 0) or 0)
+                    last = int(getattr(b, 'src_last', 0) or 0)
+                    if first and last:
+                        for line in range(first, last + 1):
+                            line_to_beat.setdefault(line, i)
+            except Exception as e:              # noqa: BLE001 - 预览失败不拦工作台
+                warning = f'拍号对位失败：{e}'
+
+        rows: dict = {}
+        order: list = []
+        for idx, (stmt, text) in enumerate(zip(stmts, operations)):
+            line = 0
+            try:
+                src = getattr(stmt, 'source', None) or ('', 0)
+                line = int(src[1] or 0)
+            except (TypeError, ValueError, IndexError):
+                line = 0
+            names = extract_variables(text) or []
+            # 没有赋值的自增/自减等：extract_variables 也能收到名字；
+            # 收不到时退回第一段标识符（宁可显示，也不要静默漏掉一行）。
+            if not names:
+                import re as _re
+                m = _re.match(r'\s*([A-Za-z_]\w*)', text)
+                names = [m.group(1)] if m else []
+            beat_idx = line_to_beat.get(line)
+            for name in names:
+                if name not in rows:
+                    order.append(name)
+                    d = decl_by_name.get(name) or {}
+                    rows[name] = {
+                        'name': name,
+                        'initial': d.get('value', ''),
+                        'declared_by': d.get('kind', ''),
+                        'decl_line': d.get('line', 0),
+                        'operations': [],
+                    }
+                rows[name]['operations'].append({
+                    'index': idx, 'text': text, 'line': line,
+                    'beat_index': beat_idx,
+                    'beat_no': (beat_idx + 1) if beat_idx is not None else 0,
+                })
+        # 只声明、没在本章赋值过的变量也列出来（`default love = 0` 要看得见）
+        for d in declarations:
+            name = d['name']
+            if name in rows:
+                continue
+            order.append(name)
+            rows[name] = {'name': name, 'initial': d.get('value', ''),
+                          'declared_by': d.get('kind', ''),
+                          'decl_line': d.get('line', 0), 'operations': []}
+        return {'ok': True, 'error': '', 'label': label, 'file': path,
+                'variables': [rows[n] for n in order],
+                'operations': operations, 'declarations': declarations,
+                'warning': warning}
+
     def set_node_variables(self, graph, nid, variables) -> dict:
         """
         写回**只改剧情变量**；技术代码**原位保留**。

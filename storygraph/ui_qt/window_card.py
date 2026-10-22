@@ -174,6 +174,29 @@ class CardPageMixin:
             QMessageBox.critical(self, '载入失败', str(e))
         finally:
             self._report_swallowed(mark)
+    def adopt_loaded_session(self, label=None, index=None,
+                             goto_card: bool = False):
+        """
+        会话里的拍**已经被别处改过**（变量工作台 / 变量对话框）→ 刷新卡片页。
+
+        为什么不直接 `load_script()`：那会从磁盘重读，把刚写进拍的变量改动
+        又盖回旧值。这里只重建列表 / 下拉 / 当前拍，数据仍然用会话里那份。
+        """
+        self._reload_list()
+        self._sync_choice_groups()
+        self._refresh_asset_choices()
+        self._sync_label_combo()
+        if index is None:
+            index = self._session.index_of_label(label) if label else 0
+        if index is None or index < 0:
+            index = 0
+        self._show_index(int(index))
+        self._sync_graph_highlight()
+        if goto_card:
+            self._set_page(self.PAGE_CARD)
+        else:
+            self._update_crumb()
+
     def _sync_choice_groups(self):
         """
         把项目声明的**候选分栏**接成立绘网格的分组候选（分栏显示"服装 / 表情"）。
@@ -316,9 +339,31 @@ class CardPageMixin:
         for cid in self._session.participants():
             self._who.addItem(QListWidgetItem(cid))
     def _make_item(self, i) -> QListWidgetItem:
-        item = QListWidgetItem(self._row_text(self._session.list_entry(i)))
+        item = QListWidgetItem(self._item_text(i))
         item.setData(Qt.UserRole, i)
+        label = str(getattr(self._session.beats[i], 'label', '') or '')
+        item.setToolTip(f'label：{label}' if label else '')
         return item
+
+    def _item_text(self, i) -> str:
+        """
+        列表一行：**每个 label 的第一拍**带上边界标记（P1-1 的可见部分）。
+
+        同一个 `.rpy` 里多个 label 时，左栏从前是一串没有分界的拍号 ——
+        用户看不出第 4 张已经属于另一个 label。这里在边界行尾部标
+        `〔label 名〕` 并加粗；不插入额外的行，避免拍号与列表下标错位
+        （那会变成"存错拍"级别的隐患）。
+        """
+        text = self._row_text(self._session.list_entry(i))
+        labels = self._session.label_names()
+        label = str(getattr(self._session.beats[i], 'label', '') or '')
+        if not label or len(labels) < 2:
+            return text
+        prev = (str(getattr(self._session.beats[i - 1], 'label', '') or '')
+                if i > 0 else '')
+        if prev == label:
+            return text
+        return f'{text}   〔{label}〕'
 
     @staticmethod
     def _row_text(e: dict) -> str:
@@ -363,10 +408,9 @@ class CardPageMixin:
         item = self._list.item(i)
         if item is None:
             return
-        e = self._session.list_entry(i)
         self._list.blockSignals(True)
         try:
-            item.setText(self._row_text(e))
+            item.setText(self._item_text(i))
             item.setData(Qt.UserRole, i)
         finally:
             self._list.blockSignals(False)

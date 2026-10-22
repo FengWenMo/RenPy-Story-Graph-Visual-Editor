@@ -98,9 +98,31 @@ class AppStatusBar(QStatusBar):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._layout = QLabel('')
+        self._layout.setProperty('role', 'caption')
+        self.addPermanentWidget(self._layout)
         self._dirty = QLabel('')
         self._dirty.setProperty('role', 'caption')
         self.addPermanentWidget(self._dirty)
+
+    def set_layout_dirty(self, dirty: bool, path: str = ''):
+        """
+        右下角的**剧情图布局**状态（与"这一拍导出"分两个标签）。
+
+        用户 2026-10-22 的反馈里，图"关掉就没了"没有被说出来过：
+        导入完、排好版，关程序再打开就只剩一张空图。这里把"图还没落盘"
+        常驻在状态栏；有项目目录时关窗会自动存一份（见 `closeEvent`）。
+        """
+        if dirty:
+            self._layout.setText('● 剧情图未保存')
+            self._layout.setStyleSheet(f"color: {T.t('state.warning')};")
+            self._layout.setToolTip(
+                '图的模块位置 / 连线只在内存里。\n'
+                '点「💾 保存布局(JSON)」落盘；有项目目录时关窗会自动保存。')
+        else:
+            self._layout.setText('✔ 剧情图已保存' if path else '')
+            self._layout.setStyleSheet(f"color: {T.t('state.success')};")
+            self._layout.setToolTip(path or '')
 
     def set_dirty(self, dirty: bool, path: str = ''):
         """

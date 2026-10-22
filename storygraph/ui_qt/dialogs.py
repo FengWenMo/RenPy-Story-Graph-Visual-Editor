@@ -22,11 +22,14 @@ from storygraph.core.safeguard import swallow
 import re
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QMessageBox, QPlainTextEdit,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QFileDialog, QFormLayout, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QPlainTextEdit,
+                               QPushButton, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
@@ -128,6 +131,44 @@ class TextViewDialog(_BaseDialog):
             self._error.setVisible(True)
         except Exception:                     # noqa: BLE001
             swallow('dialogs._copy')
+
+
+class SyncPreviewDialog(_BaseDialog):
+    """
+    「补全缺失章节 / 刷新已导入章节」执行**之前**给人看的那一屏。
+
+    用户 2026-10-22：
+    > 补全相关章节和重载已导入章节到底谁让无源变有源？我没搞明白。
+
+    两个动作以前都是"点完才知道发生了什么"。这里把"将导入哪些文件、
+    哪些 label 会新增 / 消失"先摆出来；名字也改成用户能预测的说法：
+
+      · 补全缺失章节… —— 从项目里把缺的文件找回来；
+      · 刷新已导入章节… —— 重读已有文件，源里删掉的 label 会从图上移除。
+    """
+
+    def __init__(self, parent=None, title: str = '同步剧情图',
+                 intro: str = '', detail: str = '',
+                 ok_text: str = '继续', warn: str = ''):
+        super().__init__(parent, title)
+        self.resize(720, 520)
+        head = QLabel(intro)
+        head.setWordWrap(True)
+        head.setProperty('role', 'section')
+        self._root.addWidget(head)
+
+        self._text = QPlainTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setPlainText(str(detail or ''))
+        self._text.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._root.addWidget(self._text, 1)
+
+        if warn:
+            warning = QLabel(warn)
+            warning.setWordWrap(True)
+            warning.setProperty('role', 'warn')
+            self._root.addWidget(warning)
+        self._add_buttons(ok_text)
 
 
 # ======================================================================
@@ -382,13 +423,20 @@ class AddNodeDialog(_BaseDialog):
             "章节名会成为 Ren'Py 的 label —— "
             "只能字母/数字/下划线（可用点号分段，如 main.route），"
             "且不能以数字开头。\n"
-            "「写入文件」非空时会先把它写进脚本（`label 名:` + `return`），"
-            "双击就能编辑；填一个**已有的 .rpy** 就往那个文件末尾追加"
-            "第二个 label（一个文件放多章是合法的）；留空则只是图上的一个方块，"
-            "之后用「⤓ 导出」或「➕ 导入章节」再给它配文件。")
+            "「写入文件」非空时会先把它写进脚本（`label 名:` + 变量操作 + "
+            "`return`），双击就能编辑；填一个**已有的 .rpy** 就往那个文件末尾"
+            "追加第二个 label（一个文件放多章是合法的）；留空则只是图上的一个"
+            "方块，之后用「新建 / 绑定源文件」再给它配文件。\n"
+            "「变量操作」会跟着写进脚本，不只是记在图上。")
         hint.setProperty('role', 'caption')
         hint.setWordWrap(True)
         self._root.addWidget(hint)
+        if self._default_dir:
+            where = QLabel(f'默认目录：{self._default_dir}'
+                           f'（跟随项目里已有章节的位置）')
+            where.setProperty('role', 'caption')
+            where.setWordWrap(True)
+            self._root.addWidget(where)
         self._add_buttons('创建')
         self._name.setFocus()
 
@@ -485,8 +533,32 @@ class AddNodeDialog(_BaseDialog):
                     return
         self.name = name
         self.operations = self._ops.toPlainText().strip()
+        # 变量操作现在会**写进 .rpy**，所以先在对话框里挡掉语法错误 ——
+        # 不能等写到文件里才由 Ren'Py 报（那时用户已经离开这个界面了）。
+        bad = self._operations_error(self.operations)
+        if bad:
+            self._fail(bad)
+            return
         self.file_path = path
         self.accept()
+
+    @staticmethod
+    def _operations_error(text: str) -> str:
+        """一行一条变量操作；返回第一条语法错误的说明（空串 = 都能解析）。"""
+        import ast
+        for i, raw in enumerate(str(text or '').splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('$'):
+                line = line[1:].strip()
+            try:
+                ast.parse(line, mode='exec')
+            except SyntaxError as e:
+                return (f'「变量操作」第 {i} 行不是合法的 Python：{raw.strip()}\n'
+                        f'{e.msg}（这里一行只能写一条简单操作，'
+                        f'例如 love += 1）')
+        return ''
 
 
 # ======================================================================
@@ -653,6 +725,254 @@ class NodeOpsDialog(_BaseDialog):
         self.accept()
 
 
+class VariableWorkbenchDialog(_BaseDialog):
+    """
+    变量工作台（P1-2）：**变量清单 + 初值 + 每条操作落在第几拍**。
+
+    用户 2026-10-22：
+
+    > 检测和修改变量似乎是不行……我没学会用。
+
+    症结不是"不会用"，是界面只有一整段 Python 文本框：看不到变量名清单、
+    看不到 `default` / `define` 的初值、也看不到某条赋值发生在第几拍。
+    这个对话框把同一份数据拆成两层：
+
+      · 上面 = 变量表（初值 / 操作条数 / 出现位置）；
+      · 下面 = 按源顺序排列的操作，选中一条能改、能删、能**跳到那一拍**。
+
+    保存仍然只交接**剧情变量列表**（技术代码由 `set_node_variables` 原位
+    保留）；`jump_index` 非空表示用户点了"定位到这一拍"。
+    """
+
+    def __init__(self, parent=None, label_name: str = '', data=None,
+                 on_check=None):
+        super().__init__(parent, f'变量工作台 · {label_name}')
+        self.resize(860, 620)
+        data = dict(data or {})
+        self.label_name = str(label_name or data.get('label') or '')
+        self.variables = list(data.get('operations') or [])
+        self.jump_index = None
+        #: 新增操作要放在哪一拍后面（用户选中哪条就跟着哪条；None = 本章末尾）
+        self.insert_beat = None
+        self._on_check = on_check
+        self._beat_by_index = {}
+        for row in (data.get('variables') or ()):
+            for op in (row.get('operations') or ()):
+                self._beat_by_index[int(op.get('index', -1))] = op.get('beat_index')
+
+        head = QLabel(f'章节：{self.label_name}'
+                      + (f'　·　{Path(data.get("file")).name}'
+                         if data.get('file') else ''))
+        head.setProperty('role', 'section')
+        self._root.addWidget(head)
+
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(
+            ['变量', '初值', '本拍操作', '出现位置'])
+        self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 150)
+        self._table.setColumnWidth(1, 150)
+        self._table.setColumnWidth(2, 360)
+        for row in (data.get('variables') or ()):
+            ops = list(row.get('operations') or ())
+            texts = '；'.join(str(op.get('text') or '') for op in ops[:3])
+            if len(ops) > 3:
+                texts += f' 等 {len(ops)} 条'
+            places = sorted({int(op.get('beat_no') or 0) for op in ops
+                             if op.get('beat_no')})
+            where = ('第 ' + ' / '.join(str(n) for n in places) + ' 拍'
+                     if places else ('—' if not ops else '未对位'))
+            i = self._table.rowCount()
+            self._table.insertRow(i)
+            name_item = QTableWidgetItem(str(row.get('name') or ''))
+            name_item.setData(Qt.UserRole, str(row.get('name') or ''))
+            self._table.setItem(i, 0, name_item)
+            init_item = QTableWidgetItem(str(row.get('initial') or '') or '—')
+            if row.get('declared_by'):
+                init_item.setToolTip(
+                    f"{row.get('declared_by')} · 第 {row.get('decl_line')} 行")
+            self._table.setItem(i, 1, init_item)
+            self._table.setItem(i, 2, QTableWidgetItem(texts or '—'))
+            self._table.setItem(i, 3, QTableWidgetItem(where))
+        self._root.addWidget(self._table, 2)
+
+        cap = QLabel('这一章的变量操作（按源顺序；选中一条可以改 / 删 / 定位）')
+        cap.setProperty('role', 'caption')
+        self._root.addWidget(cap)
+        self._ops = QListWidget()
+        self._root.addWidget(self._ops, 3)
+
+        self._editor = QLineEdit()
+        self._editor.setPlaceholderText('选中上面一条操作，或直接在这里写一条新的')
+        self._root.addWidget(self._editor)
+
+        row = QHBoxLayout()
+        for text, slot, tip in (
+                ('保存这条修改', self._save_op, '只改这一条，不碰其它赋值'),
+                ('删除这条', self._delete_op, '从本章变量操作里移除这一条'),
+                ('＋ 新增变量…', self._add_var, '追加一条 name = 0'),
+                ('＋ 新增操作…', self._add_op, '追加一条自由写法，例如 love += 2'),
+                ('定位到这一拍', self._locate, '关掉本窗口并跳到那条赋值所在的拍'),
+                ('语法检查', self._check, '逐条检查是否能被 Python 解析')):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch(1)
+        self._root.addLayout(row)
+
+        self._hint = QLabel('')
+        self._hint.setProperty('role', 'caption')
+        self._hint.setWordWrap(True)
+        self._root.addWidget(self._hint)
+        if data.get('warning'):
+            self._hint.setText(f'⚠ {data["warning"]}')
+
+        self._table.itemSelectionChanged.connect(self._filter_ops)
+        self._ops.currentRowChanged.connect(self._load_op)
+        self._add_buttons('保存变量')
+        self._rebuild_ops()
+
+    # ------------------------------------------------------------------
+
+    def _item_for(self, i: int) -> QListWidgetItem:
+        beat = self._beat_by_index.get(i)
+        prefix = f'第 {beat + 1} 拍 · ' if beat is not None else '（未对位）· '
+        item = QListWidgetItem(prefix + str(self.variables[i]))
+        item.setData(Qt.UserRole, i)
+        return item
+
+    def _rebuild_ops(self):
+        current = self._ops.currentRow()
+        self._ops.blockSignals(True)
+        self._ops.clear()
+        for i in range(len(self.variables)):
+            self._ops.addItem(self._item_for(i))
+        self._ops.blockSignals(False)
+        if 0 <= current < self._ops.count():
+            self._ops.setCurrentRow(current)
+
+    def _selected_index(self):
+        item = self._ops.currentItem()
+        return int(item.data(Qt.UserRole)) if item is not None else -1
+
+    def _load_op(self, _row: int):
+        i = self._selected_index()
+        if 0 <= i < len(self.variables):
+            self._editor.setText(str(self.variables[i]))
+
+    def _filter_ops(self):
+        """选中变量行 → 只留下涉及它的操作（不选 = 全部）。"""
+        name = ''
+        items = self._table.selectedItems()
+        if items:
+            name = str(items[0].data(Qt.UserRole) or '')
+        self._ops.blockSignals(True)
+        self._ops.clear()
+        from storygraph.core.utils import extract_variables
+        for i, text in enumerate(self.variables):
+            if name and name not in (extract_variables(text) or []):
+                continue
+            self._ops.addItem(self._item_for(i))
+        self._ops.blockSignals(False)
+
+    def _save_op(self):
+        i = self._selected_index()
+        text = self._editor.text().strip()
+        if i < 0 or not text:
+            self._hint.setText('先在下面选中一条操作，再写内容。')
+            return
+        self.variables[i] = text
+        self._rebuild_ops()
+        self._ops.setCurrentRow(i)
+        self._hint.setText(f'✔ 已改第 {i + 1} 条（还没写盘，点「保存变量」生效）。')
+
+    def _delete_op(self):
+        i = self._selected_index()
+        if i < 0:
+            self._hint.setText('先选中一条操作。')
+            return
+        del self.variables[i]
+        self._beat_by_index = {
+            (k - 1 if k > i else k): v
+            for k, v in self._beat_by_index.items() if k != i}
+        self._rebuild_ops()
+        self._hint.setText('已删掉这一条（点「保存变量」生效）。')
+
+    def _target_beat(self):
+        """新增操作放在哪一拍后面：选中操作的拍 → 选中变量的最后一条 → None。"""
+        i = self._selected_index()
+        if i >= 0 and self._beat_by_index.get(i) is not None:
+            return self._beat_by_index.get(i)
+        return self.insert_beat
+
+    def _add_var(self):
+        name, ok = QInputDialog.getText(
+            self, '新增变量', '变量名（会追加一条 `名字 = 0`）：')
+        name = str(name or '').strip()
+        if not ok or not name:
+            return
+        if not re.match(r'^[A-Za-z_]\w*$', name):
+            self._hint.setText('变量名不合法：只能字母/数字/下划线，且不能以数字开头。')
+            return
+        beat = self._target_beat()
+        self.insert_beat = beat
+        self.variables.append(f'{name} = 0')
+        self._beat_by_index[len(self.variables) - 1] = beat
+        self._rebuild_ops()
+        self._hint.setText(f'✔ 已追加 {name} = 0（点「保存变量」生效）。')
+
+    def _add_op(self):
+        text, ok = QInputDialog.getText(
+            self, '新增变量操作', '例如 love += 1 或 flag = True：')
+        text = str(text or '').strip()
+        if not ok or not text:
+            return
+        beat = self._target_beat()
+        self.insert_beat = beat
+        self.variables.append(text)
+        self._beat_by_index[len(self.variables) - 1] = beat
+        self._rebuild_ops()
+        self._ops.setCurrentRow(self._ops.count() - 1)
+        self._hint.setText('✔ 已追加（点「保存变量」生效）。')
+
+    def _locate(self):
+        i = self._selected_index()
+        beat = self._beat_by_index.get(i)
+        if i < 0 or beat is None:
+            self._hint.setText('这条操作没有对上哪一拍（可能是图上手工加的）。')
+            return
+        self.jump_index = int(beat)
+        self.accept()
+
+    def _check(self):
+        errors = []
+        if self._on_check is not None:
+            try:
+                errors = list(self._on_check(self.variables) or [])
+            except Exception as e:                # noqa: BLE001
+                errors = [f'检查失败：{e}']
+        if errors:
+            self._hint.setText('⚠ ' + '；'.join(errors))
+        else:
+            self._hint.setText(f'✔ {len(self.variables)} 条都能解析。')
+
+    def _on_accept(self):
+        if self._on_check is not None:
+            try:
+                errors = list(self._on_check(self.variables) or [])
+            except Exception as e:                # noqa: BLE001
+                errors = [f'检查失败：{e}']
+            if errors:
+                self._fail('有语法错误，先修再保存：' + '；'.join(errors[:3]))
+                return
+        self.variables = [str(v) for v in self.variables if str(v).strip()]
+        self.accept()
+
+
 # ======================================================================
 #  加连线
 # ======================================================================
@@ -708,12 +1028,17 @@ class AddEdgeDialog(_BaseDialog):
         form.addRow('菜单项', self._opt)
         self._root.addLayout(form)
 
-        hint = QLabel('填了「菜单项」= 这一拍是个分支（menu）；'
-                      '只填「条件」= 条件跳转；都不填 = 直接 ' + 'jump/call' + '。')
+        hint = QLabel(
+            '⚠ 图上的连线是草图：它只改剧情图，不会写进任何 .rpy，'
+            '也不会生成新 label。\n'
+            '要让脚本真的 call / jump，请打开卡片，用「↳ 插入控制流卡」；'
+            '那条控制流会同时在图上出现实线。\n'
+            '填了「菜单项」= 这一拍是个分支（menu）；'
+            '只填「条件」= 条件跳转；都不填 = 直接 ' + 'jump/call' + '。')
         hint.setProperty('role', 'caption')
         hint.setWordWrap(True)
         self._root.addWidget(hint)
-        self._add_buttons('创建')
+        self._add_buttons('创建草图连线')
 
     def _on_accept(self):
         self.from_id = self._src.currentData()
@@ -825,5 +1150,6 @@ class AnalysisDialog(QDialog):
             cb.setText(self._text.toPlainText())
 
 
-__all__ = ['valid_label', 'AddNodeDialog', 'NodeOpsDialog', 'AddEdgeDialog',
-           'AnalysisDialog', 'confirm', 'EDGE_TYPES']
+__all__ = ['valid_label', 'AddNodeDialog', 'NodeOpsDialog',
+           'VariableWorkbenchDialog', 'AddEdgeDialog', 'AnalysisDialog',
+           'SyncPreviewDialog', 'confirm', 'EDGE_TYPES']

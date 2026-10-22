@@ -121,6 +121,50 @@ def contexts() -> list:
     return list(_records.keys())
 
 
+def snapshot() -> dict:
+    """
+    当前每种 context 的次数（`{context: count}`）。
+
+    `_swallow_mark()` 用它取"操作前"的基线：只报**这一次操作新增加**的
+    那些。从前标记只有一个总数，同一批 173 张缩略图会在每次操作后
+    重复打印一遍（用户看到 212 条红字的一大半就是这么来的）。
+    """
+    return {k: int(v.get('count') or 0) for k, v in _records.items()}
+
+
+def records() -> list:
+    """全部 context 的明细：`[{'context','count','last','samples'}, …]`。"""
+    return [{'context': k, 'count': int(v.get('count') or 0),
+             'last': str(v.get('last') or ''),
+             'samples': list(v.get('samples') or ())}
+            for k, v in _records.items()]
+
+
+def report_since(before=None, limit: int = 8) -> str:
+    """
+    只报"相对 `before` 新增/增加"的静默失败（诊断面板与状态栏用）。
+
+    `before` 是 `snapshot()` 的结果；给 `None` 时退回全量 `report()`。
+    返回空串 = 这次操作没有新的失败。
+    """
+    if before is None:
+        return report(limit)
+    now = snapshot()
+    delta = [(ctx, now[ctx] - int(before.get(ctx, 0)))
+             for ctx in now if now[ctx] > int(before.get(ctx, 0))]
+    if not delta:
+        return ''
+    total = sum(n for _ctx, n in delta)
+    lines = [f'静默失败 {total} 次（{len(delta)} 处）：']
+    for ctx, count in delta:
+        last = str((_records.get(ctx) or {}).get('last') or '')
+        tail = f' —— {last}' if last else ''
+        lines.append(f'  · {ctx} ×{count}{tail}')
+    if len(delta) > limit:
+        lines.append(f'  …还有 {len(delta) - limit} 处')
+    return '\n'.join(lines)
+
+
 def clear() -> None:
     """清空记录（测试用；也留给"我看过了"这种交互）。"""
     global _total
@@ -128,5 +172,5 @@ def clear() -> None:
     _total = 0
 
 
-__all__ = ['MAX_CONTEXTS', 'clear', 'contexts', 'recent', 'report',
-           'set_debug', 'swallow', 'total']
+__all__ = ['MAX_CONTEXTS', 'clear', 'contexts', 'records', 'recent', 'report',
+           'report_since', 'set_debug', 'snapshot', 'swallow', 'total']

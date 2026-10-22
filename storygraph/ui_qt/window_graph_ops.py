@@ -90,7 +90,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_canvas', '_console', '_ensure_registry', '_file_path', '_history', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_status', 'clear_console', 'engine', 'graph', 'set_assets_ready')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'clear_console', 'engine', 'graph', 'load_script', 'set_assets_ready')
 
     def _show_analysis_text(self, text: str):
         """
@@ -138,7 +138,14 @@ class GraphOpsMixin:
         if dlg.exec() != QDialog.Accepted:
             return
         before = list(getattr(self.graph.nodes.get(nid), 'operations', []) or [])
-        res = self._session.set_node_variables(self.graph, nid, dlg.variables)
+        # **必须同时改到拍上**：只改图节点的话，导出读的是 `session.beats`，
+        # 用户在变量框里改的值一个字节都进不了 .rpy（P1-2 的真正缺口）。
+        if info.get('file') and Path(str(info['file'])).exists():
+            res = self._session.apply_node_variable_edits(
+                self.graph, nid, dlg.variables)
+        else:
+            res = self._session.set_node_variables(
+                self.graph, nid, dlg.variables)
         if not res.get('ok'):
             self._status(f'保存失败：{res.get("error")}')
             return
@@ -154,10 +161,91 @@ class GraphOpsMixin:
         except Exception:                     # noqa: BLE001
             swallow('main_window.edit_node_ops')
         self._set_graph(self.graph)          # 摘要 / 连线可能变了
+        if info.get('file') and self._session.script_path:
+            # 变量已经写进拍 → 卡片页列表/面板跟上（见 `adopt_loaded_session`）
+            try:
+                self.adopt_loaded_session(info['label'])
+            except Exception as e:            # noqa: BLE001 - 刷新失败不拦保存
+                swallow('main_window.edit_node_ops.adopt', e)
         self._log(f'[变量] {info["label"]}：剧情变量 {res["variables"]} 条'
-                  f'（另有 {res["kept_tech"]} 条实现细节原样保留）')
+                  f'（另有 {res["kept_tech"]} 条实现细节原样保留）'
+                  + (f'；{res["unplaced"]} 条没对上拍，导出不会写'
+                     if res.get('unplaced') else ''))
         self._status(f'已保存「{info["label"]}」的剧情变量'
-                     f'（{res["variables"]} 条）。')
+                     f'（{res["variables"]} 条，已写进这一章；'
+                     f'点「⤓ 导出 .rpy」落盘）。')
+    def show_variable_workbench(self, nid=None):
+        """
+        「📋 变量工作台…」：变量清单 + 初值 + 每条赋值落在第几拍。
+
+        与 `edit_node_ops` 的分工：老对话框是"整章一段 Python"，
+        工作台是**按变量/按条**编辑，并且能定位到拍（P1-2）。
+        两者都只改图上的节点；写盘仍走「⤓ 导出 .rpy」。
+        """
+        from storygraph.ui_qt.dialogs import VariableWorkbenchDialog
+
+        if nid is None:
+            nid = self._canvas.selected_node_id()
+        if nid is None:
+            self._status('先在图上点一个模块，再打开变量工作台。')
+            return
+        info = self._session.variable_workbench(self.graph, nid)
+        if not info.get('ok'):
+            self._status(info.get('error') or '这个模块不在了。')
+            return
+        dlg = VariableWorkbenchDialog(
+            self, label_name=info['label'], data=info,
+            on_check=self._session.check_variable_syntax)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        changed = list(dlg.variables) != list(info.get('operations') or ())
+        if changed:
+            before = list(getattr(self.graph.nodes.get(nid), 'operations', [])
+                          or [])
+            path = str(info.get('file') or '')
+            if path and Path(path).exists():
+                res = self._session.apply_node_variable_edits(
+                    self.graph, nid, dlg.variables,
+                    insert_beat=dlg.insert_beat)
+            else:
+                res = self._session.set_node_variables(
+                    self.graph, nid, dlg.variables)
+            if not res.get('ok'):
+                self._status(f'保存失败：{res.get("error")}')
+                return
+            try:
+                from storygraph.graph.commands import UpdateNodeOperationsCommand
+                cmd = UpdateNodeOperationsCommand(
+                    self, nid, list(self.graph.nodes[nid].operations),
+                    old_ops=before)
+                self._record_applied(cmd)
+            except Exception:                 # noqa: BLE001
+                swallow('main_window.show_variable_workbench.history')
+            self._set_graph(self.graph)
+            # 会话里的拍已经被改过 → 卡片页列表/面板要跟上（不从磁盘重读，
+            # 否则刚写进拍的变量会被旧文件盖回去）。
+            if path and self._session.script_path == Path(path):
+                self.adopt_loaded_session(info['label'])
+            self._log(f'[变量工作台] {info["label"]}：剧情变量 '
+                      f'{res["variables"]} 条（技术代码 {res["kept_tech"]} 条原位保留）'
+                      + (f'；{res["unplaced"]} 条没对上拍，导出不会写'
+                         if res.get('unplaced') else ''))
+            self._status(f'已保存「{info["label"]}」的 {res["variables"]} 条剧情变量；'
+                         f'已写进这一章的拍，点「⤓ 导出 .rpy」落盘。')
+        if dlg.jump_index is not None:
+            path = str(info.get('file') or '')
+            if not path or not Path(path).exists():
+                self._status('这个模块没有可打开的源文件。')
+                return
+            if not changed:
+                self.load_script(path, goto_card=True, label=info['label'])
+            else:
+                self.adopt_loaded_session(info['label'],
+                                          index=int(dlg.jump_index),
+                                          goto_card=True)
+            self._show_index(int(dlg.jump_index))
+            self._status(f'已跳到第 {int(dlg.jump_index) + 1} 拍。')
+
     def _write_analysis(self, text: str):
         """分析结论写进控制台（旧版也是"先清空再写"）。"""
         self._show_analysis_text(text)
@@ -216,6 +304,25 @@ class GraphOpsMixin:
                                   problem_ids=res.get('problem_ids') or [],
                                   independent_ids=res.get('independent_ids') or [])
         self._write_analysis(res.get('text', ''))
+        self._status('✔ 分析完成（只读，没有改动任何东西）')
+
+    def show_analysis_dialog(self):
+        """
+        「📊 变量分析（可过滤）…」：同样的结果，但给一个能按键字过滤的窗口。
+
+        用户 2026-10-22："`变量分析` 输出的是原始文本，不是可操作的变量表。"
+        控制台适合看流水，找"某个变量出现在哪"需要的是过滤框。
+        """
+        res = self._run_analysis()
+        if not res:
+            return
+        self._canvas.set_analysis(entry_id=res.get('entry_id'),
+                                  problem_ids=res.get('problem_ids') or [],
+                                  independent_ids=res.get('independent_ids') or [])
+        from storygraph.ui_qt.dialogs import AnalysisDialog
+        dlg = AnalysisDialog(self, title='变量分析（可按变量过滤）',
+                             text=res.get('text') or '')
+        dlg.exec()
         self._status('✔ 分析完成（只读，没有改动任何东西）')
     def clear_analysis(self):
         """清掉图上的分析标记与控制台里的结论（回到"未分析"的样子）。"""
@@ -658,7 +765,7 @@ class GraphOpsMixin:
             more = f' 等 {len(targets)} 个' if len(targets) > 4 else ''
             self._log(f'[连线] ⚠ 有 {len(skipped)} 条控制流边没画全：'
                       f'目标 {shown}{more} 还不在图上。'
-                      f'先导入它所在的章节（或点工具栏「🔗 补全相关章节」）。')
+                      f'先导入它所在的章节（或点工具栏「🔗 补全缺失章节…」）。')
 
         names = '、'.join(Path(p).name for p in res['files'][:3])
         more = f' 等 {len(res["files"])} 个文件' if len(res['files']) > 3 else ''
@@ -1026,6 +1133,7 @@ class GraphOpsMixin:
             self._status(f'保存布局失败：{res.get("error")}')
             return ''
         name = Path(res['path']).name
+        self._mark_graph_saved(str(res['path']))
         self._log(f'[布局] 已保存 {res["nodes"]} 个模块 / {res["edges"]} 条连线'
                   f' → {res["path"]}')
         self._status(f'💾 布局已保存：{name}（{res["nodes"]} 块 / '
@@ -1072,6 +1180,7 @@ class GraphOpsMixin:
         except Exception:                       # noqa: BLE001
             swallow('main_window.load_layout')
         name = Path(res['path']).name
+        self._mark_graph_saved(str(res['path']))
         self._log(f'[布局] 已加载 {name}：{res["nodes"]} 个模块 / '
                   f'{res["edges"]} 条连线')
         self._status(f'📂 已加载布局 {name}（{res["nodes"]} 块 / '
@@ -1378,6 +1487,91 @@ class GraphOpsMixin:
             self._canvas.note_content_changed()
         except Exception:                     # noqa: BLE001
             swallow('main_window._on_node_moved')
+        # 拖块也是"图的改动"：布局指纹变了，状态栏要能说"还没保存"。
+        self._sync_graph_dirty()
+    # ------------------------------------------------------------------
+    #  剧情图持久化（未保存提示 / 关窗自动保存）
+    # ------------------------------------------------------------------
+
+    def _sync_graph_dirty(self):
+        """按布局指纹刷新"剧情图未保存"标记（状态栏 + 标题栏）。"""
+        try:
+            from storygraph.app.session_graph import layout_signature
+            sig = layout_signature(self.graph)
+            has_content = bool(getattr(self.graph, 'nodes', None))
+            dirty = bool(has_content and sig
+                         and sig != (self._graph_saved_sig or ''))
+            if dirty == self._graph_dirty:
+                return
+            self._graph_dirty = dirty
+            self.setWindowTitle(('● ' if dirty else '') + self._base_title)
+            try:
+                self._status_bar.set_layout_dirty(
+                    dirty, str(self._last_layout_path or ''))
+            except Exception as e:              # noqa: BLE001
+                swallow('ui_qt.window_graph_ops.sync_graph_dirty.status', e)
+        except Exception as e:                  # noqa: BLE001 - 只是提示
+            swallow('ui_qt.window_graph_ops.sync_graph_dirty', e)
+
+    def _mark_graph_saved(self, path: str = ''):
+        """刚落盘 / 刚加载：把当前图记为基线，状态栏回到"已保存"。"""
+        try:
+            from storygraph.app.session_graph import layout_signature
+            self._graph_saved_sig = layout_signature(self.graph)
+            self._last_layout_path = str(path or '')
+            self._graph_dirty = False
+            self.setWindowTitle(self._base_title)
+            self._status_bar.set_layout_dirty(False, str(path or ''))
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_graph_ops.mark_graph_saved', e)
+
+    def _auto_save_layout_on_close(self) -> bool:
+        """
+        关窗前把剧情图自动存到项目里（`storygraph_layout.json`）。
+
+        为什么不留弹窗：`closeEvent` 里弹三个按钮，用户点错一次就是"关不掉"
+        或"丢图"；而布局只是版式，存一份在项目根目录的成本极低。加载回入口
+        仍是「📂 加载布局」，文件也在用户能看见的地方。
+        """
+        if not self._graph_dirty:
+            return True
+        root = self._project_root
+        nodes = len(getattr(self.graph, 'nodes', None) or {})
+        if not root or not nodes:
+            return True
+        target = Path(root) / 'storygraph_layout.json'
+        res = self._session.save_layout(self.graph, target)
+        if res.get('ok'):
+            self._mark_graph_saved(str(res['path']))
+            return True
+        # 自动保存失败不拦关闭，但要在控制台留一条（不能静默丢图）。
+        self._log(f'[布局] ⚠ 关窗自动保存失败：{res.get("error")}')
+        return True
+
+    # ------------------------------------------------------------------
+    #  诊断详情（P1-5）
+    # ------------------------------------------------------------------
+
+    def show_diagnostics(self):
+        """打开诊断详情（分组 + 聚合 + 复制）。"""
+        from storygraph.core import safeguard
+        from storygraph.ui_qt.diagnostics import DiagnosticsDialog
+        items = self._diag_items or safeguard.recent(1000)
+        dlg = DiagnosticsDialog(self, items=items, total=safeguard.total())
+        dlg.exec()
+
+    def copy_diagnostics(self):
+        """把最近一次诊断摘要复制到剪贴板。"""
+        from storygraph.core import safeguard
+        from storygraph.ui_qt.diagnostics import format_report
+        try:
+            text = format_report(self._diag_items or safeguard.recent(1000),
+                                 safeguard.total())
+            QApplication.clipboard().setText(text)
+            self._status('已复制诊断摘要到剪贴板。')
+        except Exception as e:                  # noqa: BLE001
+            swallow('ui_qt.window_graph_ops.copy_diagnostics', e)
+
     def on_graph_structure_changed(self):
         """命令改完图结构后的回调（命令对象约定的视图接口之一）。"""
         self._set_graph(self.graph)
@@ -1443,8 +1637,8 @@ class GraphOpsMixin:
             more = f' 等 {len(files)} 个' if len(files) > 4 else ''
             self._log(f'[提示] 图里还有 {len(files)} 个章节文件没导入，'
                       f"它们和现在这些章节之间有跳转：{names}{more}"
-                      f'　→　点工具栏「🔗 补全相关章节」一起导入，'
-                      f'连线才会画出来（或右键空白 → 补全相关章节）')
+                      f'　→　点工具栏「🔗 补全缺失章节…」一起导入，'
+                      f'连线才会画出来（或右键空白 → 补全缺失章节…）')
         if unknown:
             names = '、'.join(unknown[:6])
             more = f' 等 {len(unknown)} 个' if len(unknown) > 6 else ''
@@ -1453,10 +1647,13 @@ class GraphOpsMixin:
                       f'{names}{more}')
     def complete_related_chapters(self):
         """
-        「🔗 补全相关章节」：把"图上被跳到、但还没导入"的文件一起导进来。
+        「🔗 补全缺失章节…」：把"图上被跳到、但还没导入"的文件一起导进来。
 
-        这样"导入 → 看到线"就闭环了：用户导入 `chapter1_1/1_2/1_3` 后，
-        一点就把 `chapter_controller.rpy` 补进来，9 条连线立刻出现。
+        先给**预览**（会导入哪些文件、每个文件带哪些 label），确认后再导入。
+        用户 2026-10-22 分不清它和"重载"：
+        > 补全相关章节是根据 call/jump 抓其他剧情图？重载是让无源变有源？
+
+        答案写进预览标题里：补全 = 找缺失文件；刷新 = 重读已有文件。
         """
         try:
             info = self._session.missing_chapter_files(self.graph)
@@ -1464,19 +1661,98 @@ class GraphOpsMixin:
             self._status(f'查找相关章节失败：{e}')
             return
         files = list(info.get('files') or [])
+        unknown = list(info.get('unknown') or [])
         if not files:
             self._status('没有需要补全的章节 —— 图上被跳到的 label 都有来源了'
                          '（或者项目里根本找不到它们）。')
+            self._log('[补全] 没有找到缺失文件'
+                      + (f'；这些 label 项目里也没有：{"、".join(unknown[:6])}'
+                         if unknown else ''))
+            return
+        from storygraph.parsing.discover import labels_in_file
+        from storygraph.ui_qt.dialogs import SyncPreviewDialog
+        rows = []
+        for p in files:
+            labels = labels_in_file(p)
+            rows.append(f'{Path(str(p)).name}  →  '
+                        + ('、'.join(labels) if labels else '（读不出 label）')
+                        + f'\n    {p}')
+        detail = '\n'.join(rows)
+        if unknown:
+            detail += ('\n\n这些跳转目标在项目里找不到对应文件'
+                       '（脚本可能写错了，或用了动态跳转）：\n  '
+                       + '、'.join(unknown))
+        dlg = SyncPreviewDialog(
+            self, '补全缺失章节',
+            f'将从项目里导入 {len(files)} 个还没进图的文件。\n'
+            f'它们声明了图上被 jump / call 的 label —— 导入后连线才画得出来。',
+            detail, ok_text='导入这些文件',
+            warn='只补齐缺失文件；已经在图上的章节不会重新读取。'
+                 '要跟上磁盘上的改动，用「刷新已导入章节…」。')
+        if dlg.exec() != QDialog.Accepted:
+            self._status('已取消补全（图没有改动）。')
             return
         self._log(f'[补全] 导入相关章节 {len(files)} 个…')
         self.import_chapter_files(files)
     def reload_imported_chapters(self):
-        """重新解析**已导入的那些**文件（范围不变，用于跟上磁盘上的改动）。"""
+        """
+        「🔁 刷新已导入章节…」：重读**已导入的那些**文件（范围不变）。
+
+        与"补全"的区别先给预览：会新增哪些 label、源里删掉的哪些 label
+        会从图上移除。不是"再合并一次"。
+        """
         files = self._session.graph_files(self.graph)
         if not files:
             self._status('剧情图还是空的 —— 先用「➕ 导入章节 .rpy」加几章。')
             return
-        self._log(f'[重载] 重新解析已导入的 {len(files)} 个章节…')
+        from storygraph.parsing.discover import labels_in_file
+        from storygraph.ui_qt.dialogs import SyncPreviewDialog
+        have: dict = {}
+        for node in (getattr(self.graph, 'nodes', {}) or {}).values():
+            fp = str(getattr(node, 'file_path', '') or '')
+            if fp:
+                have.setdefault(str(Path(fp)), set()).add(
+                    str(getattr(node, 'label_name', '') or ''))
+        rows = []
+        added_total = removed_total = 0
+        for p in files:
+            key = str(Path(str(p)))
+            old = set(have.get(key) or ())
+            new = set(labels_in_file(p))
+            if not new:
+                # 读不出 label 时**不预告删除**：导入那条路在解析有错时也
+                # 不删节点（宁可留幽灵，也不按半份 AST 清图）。
+                rows.append(f'{Path(str(p)).name}  →  ⚠ 读不出 label，'
+                            f'这次不会删任何已有模块')
+                continue
+            added = sorted(new - old)
+            removed = sorted(old - new)
+            added_total += len(added)
+            removed_total += len(removed)
+            if not added and not removed:
+                rows.append(f'{Path(str(p)).name}  →  没有变化')
+                continue
+            pieces = []
+            if added:
+                pieces.append('新增 ' + '、'.join(added[:8])
+                              + (f' 等 {len(added)} 个' if len(added) > 8 else ''))
+            if removed:
+                pieces.append('源里已删除 ' + '、'.join(removed[:8])
+                              + (f' 等 {len(removed)} 个' if len(removed) > 8 else ''))
+            rows.append(f'{Path(str(p)).name}  →  ' + '；'.join(pieces))
+        dlg = SyncPreviewDialog(
+            self, '刷新已导入章节',
+            f'将重新读取图上已经导入的 {len(files)} 个文件。\n'
+            f'预计新增 {added_total} 个 label / 移除 {removed_total} 个'
+            f'（源文件里已经不存在的）。',
+            '\n'.join(rows) or '（没有可预览的变化）',
+            ok_text='重新读取',
+            warn='只重读图上已有的文件；不会把无源节点变成有源。'
+                 '要补缺失文件，用「补全缺失章节…」。')
+        if dlg.exec() != QDialog.Accepted:
+            self._status('已取消刷新（图没有改动）。')
+            return
+        self._log(f'[刷新] 重新解析已导入的 {len(files)} 个章节…')
         self.import_chapter_files(files)
     def clear_graph(self):
         """清空剧情图（**只清图**：资源表、项目根、会话都不动；可撤销）。"""

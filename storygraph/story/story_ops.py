@@ -226,7 +226,13 @@ def merge_narrative_statements(original, edited) -> list:
                         and is_narrative_code(code))
         if is_narrative:
             if used < len(edited):
-                out.append(python_operation(edited[used]))
+                new_stmt = python_operation(edited[used])
+                # **保留出处与条件**（2026-10-22）：变量工作台靠 `source`
+                # 行号把"哪条赋值在第几拍"对上；保存一次就丢掉行号的话，
+                # 第二次打开就只能显示"未对位"。改的是值，不是它所在的位置。
+                new_stmt.source = getattr(stmt, 'source', ('', 0))
+                new_stmt.condition = getattr(stmt, 'condition', '')
+                out.append(new_stmt)
                 used += 1
         else:
             out.append(stmt)

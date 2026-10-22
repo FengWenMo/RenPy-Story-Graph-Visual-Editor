@@ -369,7 +369,12 @@ class EdgeItem(QGraphicsPathItem):
             color = _col(EDGE_COLOR.get(etype, EDGE_DEFAULT))
         width = 2 if (opt or cond) else 1.5
         pen = QPen(color, width)
-        if etype == 'call':
+        # `call` 本来就用虚线；手工草图再用**点划线**区分开 ——
+        # 用户 2026-10-22："连线是什么效果？是生成新 rpy 还是新 label？"
+        # 图上必须一眼看出"这条线还没写进脚本"。
+        if getattr(self.edge, 'origin', 'source') == 'manual':
+            pen.setStyle(Qt.DashDotLine)
+        elif etype == 'call':
             pen.setStyle(Qt.DashLine)
         if self.mark == 'stranded':
             pen = QPen(_col('state.error'), width)
@@ -432,6 +437,12 @@ class EdgeItem(QGraphicsPathItem):
             self._p1, self._p2, self._mid = p1, p2, mid
             # **箭头画在中点**（用户明确要求）——方向沿连线，一眼看出指向谁
             self._arrow = self._make_arrow(mid, ang)
+            # 悬停时说清这条线是哪一种（实线脚本 / 点划线草图）
+            self.setToolTip(
+                '手工草图：只画在图上，不写进 .rpy\n'
+                '要写进脚本，请在卡片里插入控制流卡（call / jump）'
+                if getattr(self.edge, 'origin', 'source') == 'manual'
+                else '源文件里的控制流')
             # 标签放在中点上方（压在线上的话会把线挡断）
             text = self._label_text()
             self._label.setText(_elide(text, self._label.font(), 200))

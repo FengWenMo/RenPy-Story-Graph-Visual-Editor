@@ -124,7 +124,8 @@ class TableSessionMixin:
     #: 本 mixin 要求宿主（或其它 mixin）提供的成员。
     REQUIRES = ('beats', 'symbols', 'script_path', 'registry',
                 'refresh_symbols', 'has', '_renumber', 'forget_undo',
-                '_last_saved', '_last_idx', '_last_removed', 'chapter')
+                '_last_saved', '_last_idx', '_last_removed', 'chapter',
+                'set_node_variables')
 
     # ------------------------------------------------------------------
     #  章节级真源：顶层保真块（P0-2）
@@ -202,6 +203,120 @@ class TableSessionMixin:
         self.forget_undo()
         self._struct_undo = []          # 结构撤销栈同理：索引全变了
         return len(self.beats)
+
+    def apply_node_variable_edits(self, graph, nid, variables,
+                                  insert_beat=None) -> dict:
+        """
+        把"变量工作台 / 旧变量对话框"的改动**落进当前章节的拍**。
+
+        为什么需要这一步（2026-10-22，P1-2 的真正缺口）：
+        `set_node_variables()` 只改**图上节点**，而导出读的是 `self.beats` ——
+        于是用户改了变量、导出后 `.rpy` 一个字都没变。变量的真源必须回到
+        拍上，图上的节点只是索引/分析用的投影。
+
+        做法：按每条语句的 `source` 行号找到那一拍，替换/删除 `Beat.code`
+        里的同一行；新增的操作追加到最后一拍（被调 label 的入口处）。
+        找不到拍（手工节点 / 没有行号）时**不猜**，在返回值里报 `unplaced`。
+        """
+        node = (getattr(graph, 'nodes', {}) or {}).get(nid)
+        if node is None:
+            return {'ok': False, 'error': '这个模块不在了', 'applied': 0,
+                    'unplaced': 0, 'removed': 0}
+        path = str(getattr(node, 'file_path', '') or '')
+        label = str(getattr(node, 'label_name', '') or '')
+        if not path or not Path(path).exists():
+            return {'ok': False, 'error': '这个模块没有可写的源文件',
+                    'applied': 0, 'unplaced': 0, 'removed': 0}
+        # 只写"当前载入的这一章"的拍；别的章节先载入（不会切界面页）。
+        same = (self.script_path is not None
+                and Path(str(self.script_path)).resolve() == Path(path).resolve())
+        if not same:
+            self.load(path, label=label)
+        from storygraph.core.statement import operation_source
+        from storygraph.story import story_ops
+        old_stmts = story_ops.narrative_statements(node)
+        old_ops = [operation_source(s) for s in old_stmts]
+        new_ops = [str(v) for v in (variables or ()) if str(v).strip()]
+        beats = [b for b in (self.beats or ())
+                 if str(getattr(b, 'label', '') or '') == label]
+        if not beats:
+            return {'ok': False, 'error': f'文件里找不到 label {label} 的拍',
+                    'applied': 0, 'unplaced': 0, 'removed': 0}
+
+        def beat_for_line(line):
+            for b in beats:
+                first = int(getattr(b, 'src_first', 0) or 0)
+                last = int(getattr(b, 'src_last', 0) or 0)
+                if first and last and first <= line <= last:
+                    return b
+            return None
+
+        def line_of(stmt):
+            try:
+                return int((getattr(stmt, 'source', None) or ('', 0))[1] or 0)
+            except (TypeError, ValueError, IndexError):
+                return 0
+
+        def edit_line(beat, old, new):
+            """在 `beat.code` / `beat.raw` 里替换（或删掉）一行。"""
+            for attr in ('code', 'raw'):
+                text = str(getattr(beat, attr, '') or '')
+                if not text:
+                    continue
+                lines = text.split('\n')
+                for i, line in enumerate(lines):
+                    if line.strip() == old.strip():
+                        if new:
+                            lines[i] = new
+                        else:
+                            del lines[i]
+                        setattr(beat, attr, '\n'.join(lines))
+                        return True
+            return False
+
+        applied = unplaced = removed = 0
+        for i, new in enumerate(new_ops):
+            if i < len(old_ops):
+                old = old_ops[i]
+                line = line_of(old_stmts[i])
+                beat = beat_for_line(line) if line else None
+                if beat is None:
+                    unplaced += 1
+                    continue
+                if new == old:
+                    applied += 1
+                    continue
+                if edit_line(beat, old, new):
+                    applied += 1
+                else:
+                    unplaced += 1
+            else:
+                # 新增：优先放在用户选中的那一拍后面（工作台会把索引传进来），
+                # 没选就放到本章最后一拍 —— 下一拍才会执行到它。
+                beat = None
+                if insert_beat is not None and 0 <= int(insert_beat) < len(self.beats):
+                    cand = self.beats[int(insert_beat)]
+                    if str(getattr(cand, 'label', '') or '') == label:
+                        beat = cand
+                beat = beat or beats[-1]
+                beat.code = ((str(beat.code or '') + '\n')
+                             if str(beat.code or '').strip() else '') + new
+                applied += 1
+        # 被删掉的多余旧操作（从后往前删，避免同一拍多行时下标跑掉）
+        for i in range(len(new_ops), len(old_ops)):
+            line = line_of(old_stmts[i])
+            beat = beat_for_line(line) if line else None
+            if beat is not None and edit_line(beat, old_ops[i], ''):
+                removed += 1
+                applied += 1
+            else:
+                unplaced += 1
+        # 图上的节点也跟着更新（两处保持一致）
+        merged = self.set_node_variables(graph, nid, new_ops)
+        return {'ok': True, 'error': '', 'applied': applied,
+                'unplaced': unplaced, 'removed': removed,
+                'variables': merged.get('variables'),
+                'kept_tech': merged.get('kept_tech')}
 
     def label_names(self) -> list:
         """这个文件里按出现顺序有哪些 label（去重；空 label 不列）。"""
