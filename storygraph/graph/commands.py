@@ -6,6 +6,57 @@ from storygraph.core.safeguard import swallow
 from storygraph.core.statement import python_operation
 from storygraph.parsing.renpy_parser import parse_renpy_file
 
+
+def restore_beat_states(beat_states, which: str):
+    """
+    把拍退到 `before` / 进到 `after`（没有快照就什么都不做）。
+
+    还原**前先对一下现在的样子**是否就是另一头（撤销前应当等于 `after`、
+    重做前应当等于 `before`）：原地导出会重新解析文件，拍数 / 粒度可能变
+    （只有注释的卡会并进后面那张），此时按拍号硬还原会把快照摊到
+    **别人的拍**上。对不上就跳过那一拍，并在诊断台账里留一行 ——
+    宁可少退一拍，也不能改错拍。
+
+    `beat_states` 的形状（两处命令共用，见 `UpdateNodeOperationsCommand`
+    与 `LiftPythonStatementsCommand`）：
+
+        {'session': 会话, 'before': {拍号: 快照}, 'after': {…},
+         'refresh': 可选回调（让卡片页列表跟上）}
+    """
+    st = beat_states or {}
+    session = st.get('session')
+    snaps = st.get(which) or {}
+    if session is None or not snaps:
+        return
+    other = (st.get('after' if which == 'before' else 'before') or {})
+    for idx, snap in sorted(snaps.items()):
+        expect = other.get(idx)
+        if expect is not None:
+            try:
+                now = session.snapshot(int(idx))
+            except Exception as e:              # noqa: BLE001
+                swallow('graph.commands.restore_beats.peek', e)
+                now = None
+            if now is None or now.fingerprint() != expect.fingerprint():
+                swallow('graph.commands.restore_beats.stale',
+                        RuntimeError(f'第 {int(idx) + 1} 拍已经变了，'
+                                     f'跳过还原（导出重载 / 别的改动）'))
+                continue
+        try:
+            session.restore(snap)
+        except Exception as e:                  # noqa: BLE001 - 单拍还原失败不拦撤销
+            swallow('graph.commands.restore_beats', e)
+    try:
+        session.refresh_edits_flag()            # 退回到"与磁盘一致"时别喊未导出
+    except Exception as e:                      # noqa: BLE001
+        swallow('graph.commands.restore_beats.dirty', e)
+    cb = st.get('refresh')
+    if callable(cb):
+        try:
+            cb()
+        except Exception as e:                  # noqa: BLE001 - 刷新界面失败不拦撤销
+            swallow('graph.commands.restore_beats.refresh', e)
+
 class Command:
     def execute(self):
         raise NotImplementedError
@@ -171,48 +222,8 @@ class UpdateNodeOperationsCommand(Command):
         self.beat_states = dict(beat_states or {})
 
     def _restore_beats(self, which: str):
-        """
-        把拍退到 `before` / 进到 `after`（没有快照就什么都不做）。
-
-        还原**前先对一下现在的样子**是否就是另一头（撤销前应当等于 `after`、
-        重做前应当等于 `before`）：原地导出会重新解析文件，拍数 / 粒度可能变
-        （只有注释的卡会并进后面那张），此时按拍号硬还原会把快照摊到
-        **别人的拍**上。对不上就跳过那一拍，并在诊断台账里留一行 ——
-        宁可少退一拍，也不能改错拍。
-        """
-        st = self.beat_states or {}
-        session = st.get('session')
-        snaps = st.get(which) or {}
-        if session is None or not snaps:
-            return
-        other = (st.get('after' if which == 'before' else 'before') or {})
-        for idx, snap in sorted(snaps.items()):
-            expect = other.get(idx)
-            if expect is not None:
-                try:
-                    now = session.snapshot(int(idx))
-                except Exception as e:              # noqa: BLE001
-                    swallow('graph.commands.restore_beats.peek', e)
-                    now = None
-                if now is None or now.fingerprint() != expect.fingerprint():
-                    swallow('graph.commands.restore_beats.stale',
-                            RuntimeError(f'第 {int(idx) + 1} 拍已经变了，'
-                                         f'跳过还原（导出重载 / 别的改动）'))
-                    continue
-            try:
-                session.restore(snap)
-            except Exception as e:              # noqa: BLE001 - 单拍还原失败不拦撤销
-                swallow('graph.commands.restore_beats', e)
-        try:
-            session.refresh_edits_flag()        # 退回到"与磁盘一致"时别喊未导出
-        except Exception as e:                  # noqa: BLE001
-            swallow('graph.commands.restore_beats.dirty', e)
-        cb = st.get('refresh')
-        if callable(cb):
-            try:
-                cb()
-            except Exception as e:              # noqa: BLE001 - 刷新界面失败不拦撤销
-                swallow('graph.commands.restore_beats.refresh', e)
+        """把拍退到 `before` / 进到 `after`（语义见模块级 `restore_beat_states`）"""
+        restore_beat_states(self.beat_states, which)
 
     def execute(self):
         node = self.graph_view.graph.nodes[self.node_id]
@@ -227,6 +238,40 @@ class UpdateNodeOperationsCommand(Command):
         if self.old_statements is not None:
             node.statements = copy.deepcopy(self.old_statements)
         self._restore_beats('before')           # 撤销：拍也跟着退回"改之前"
+        self.graph_view.on_graph_content_changed(self.node_id)
+
+class LiftPythonStatementsCommand(Command):
+    """
+    把 `python:` 块里的赋值搬到脚本层（2026-10-22，`session.apply_python_lift`）。
+
+    与 `UpdateNodeOperationsCommand` 的区别：那条按**代码字符串**重建语句
+    （`python_operation(text)`，`source` / `condition` 会丢），而搬块这件事
+    **必须保住**每条语句的来源行与条件 —— 否则搬完之后变量工作台"定位到这一拍"
+    全指错地方，再改一次就写到别的拍上。所以这里存的是**整份语句表**
+    （old / new），撤销 / 重做整份还原。
+
+    拍那边只改了 `code_blocks`（行文本一个字节没动），恢复走 `beat_states`
+    的逐拍快照 —— 与变量工作台共用同一套（含"旧快照守卫"）。
+    """
+
+    def __init__(self, graph_view, node_id, old_statements, new_statements,
+                 beat_states=None):
+        self.graph_view = graph_view
+        self.node_id = node_id
+        self.old_statements = copy.deepcopy(list(old_statements or ()))
+        self.new_statements = copy.deepcopy(list(new_statements or ()))
+        self.beat_states = dict(beat_states or {})
+
+    def execute(self):
+        node = self.graph_view.graph.nodes[self.node_id]
+        node.statements = copy.deepcopy(self.new_statements)
+        restore_beat_states(self.beat_states, 'after')
+        self.graph_view.on_graph_content_changed(self.node_id)
+
+    def undo(self):
+        node = self.graph_view.graph.nodes[self.node_id]
+        node.statements = copy.deepcopy(self.old_statements)
+        restore_beat_states(self.beat_states, 'before')
         self.graph_view.on_graph_content_changed(self.node_id)
 
 class UpdateEdgeCommand(Command):

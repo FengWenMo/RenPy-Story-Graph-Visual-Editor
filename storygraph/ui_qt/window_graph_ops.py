@@ -296,6 +296,99 @@ class GraphOpsMixin:
         return ('；新增 ' + '、'.join(f'第 {n} 拍' for n in rows[:4])
                 + ('…' if len(rows) > 4 else ''))
 
+    def lift_python_assignments(self, nid=None):
+        """
+        「⤴ 搬出 python 块…」：把块里的单行赋值变成 `$` 行（2026-10-22）。
+
+        用户 2026-10-22：
+
+        > 真机那 26 条里 21 条是脚本层 `$` 就写得出来的赋值。它们待在 python
+        > 块里不只是"工具管不着"，而是有害的 —— 存档粒度是整块。
+        > ……正确的方向不是"工具去适应 python 块"，是"工具帮用户把语句从
+        > python 块里搬出来"。
+
+        为什么值得做（也是这个入口的理由）：搬出来之后
+
+          · 变量工作台按条列出、能改、能"定位到这一拍"（不再是一大段黑盒）；
+          · 导出 / IR 里它是一个标量事件，而不是一整个 `python:` 块；
+          · 存档 / 回滚的粒度跟着变细（这是用户原话里"有害"的那一条）。
+
+        判定在 `story.python_lift`，落地在 `session.apply_python_lift`；
+        这里只做三件事：开对话框、记一条可撤销的历史（节点 + 拍一起退）、
+        把结果念出来。
+        """
+        from storygraph.ui_qt.dialogs import PythonLiftDialog
+
+        if nid is None:
+            nid = self._canvas.selected_node_id()
+        if nid is None:
+            self._status('先在图上点一个模块，再点「⤴ 搬出 python 块」。')
+            return
+        info = self._session.python_lift_report(self.graph, nid)
+        if not info.get('ok'):
+            self._status(info.get('error') or '这个模块不在了。')
+            return
+        blocks = list(info.get('blocks') or ())
+        if not blocks:
+            self._status(f'「{info.get("label")}」里没有 python 块 —— '
+                         f'没有可搬的东西。')
+            self._log(f'[搬出] {info.get("label")}：这一章的拍里没有 '
+                      f'`python:` 块（`$` 行本来就在脚本层）')
+            return
+        stats = dict(info.get('stats') or {})
+        dlg = PythonLiftDialog(self, label_name=info['label'], data=info)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        picks = list(dlg.picks or ())
+        if not picks:
+            return
+        res = self._session.apply_python_lift(self.graph, nid, picks)
+        if not res.get('ok'):
+            self._status(f'搬不出来：{res.get("error")}')
+            self._log(f'[搬出] ✕ {res.get("error")}')
+            return
+        # 历史：**节点（整份语句表）+ 拍（code_blocks）一起退**。
+        # 只记节点的话，Ctrl+Z 之后工作台里退回去了、导出还是 `$`（假撤销）。
+        try:
+            from storygraph.graph.commands import LiftPythonStatementsCommand
+            after = {}
+            for idx in (res.get('beats') or ()):
+                snap = self._session.snapshot(int(idx))
+                if snap is not None:
+                    after[int(idx)] = snap
+
+            def refresh(_label=info['label']):
+                try:
+                    self.adopt_loaded_session(_label)
+                except Exception as e:          # noqa: BLE001 - 刷新失败不拦撤销
+                    swallow('main_window.lift_python_assignments.refresh', e)
+
+            self._record_applied(LiftPythonStatementsCommand(
+                self, nid, res.get('old_statements'),
+                res.get('new_statements'),
+                {'session': self._session,
+                 'before': res.get('beat_snapshots') or {},
+                 'after': after, 'refresh': refresh}))
+        except Exception as e:                  # noqa: BLE001 - 记不上历史不拦改动
+            swallow('main_window.lift_python_assignments.history', e)
+        self._set_graph(self.graph)
+        try:
+            self.adopt_loaded_session(info['label'])
+        except Exception as e:                  # noqa: BLE001
+            swallow('main_window.lift_python_assignments.adopt', e)
+        for block in blocks:
+            plan = dict(block.get('plan') or {})
+            if not plan.get('ok'):
+                self._log(f'[搬出] 第 {int(block.get("beat_no") or 0)} 拍 · '
+                          f'块（{block.get("start")}-{block.get("end")} 行）'
+                          f'不搬：{plan.get("why")}')
+        self._log(f'[搬出] {info["label"]}：把 {res["lifted"]} 条赋值从 '
+                  f'{res["blocks"]} 个 python 块搬到脚本层（`$` 行）——'
+                  f'它们现在在变量工作台里能逐条改，导出也能进 IR；'
+                  f'块里剩下的调用 / 控制流原位没动')
+        self._status(f'⤴ 已搬出 {res["lifted"]} 条赋值（{res["blocks"]} 个块）；'
+                     f'点「⤓ 导出 .rpy」落盘，Ctrl+Z 可以连块一起退回来。')
+
     def _write_analysis(self, text: str):
         """分析结论写进控制台（旧版也是"先清空再写"）。"""
         self._show_analysis_text(text)

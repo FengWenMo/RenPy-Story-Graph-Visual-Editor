@@ -174,7 +174,7 @@ class NodeEditMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_session', '_set_graph', '_status', 'arrange_by_file', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapter_files', 'import_chapters', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph', 'show_variable_workbench')
+    REQUIRES = ('_canvas', '_chapter_label', '_log', '_project_root', '_run_command', '_session', '_set_graph', '_status', 'arrange_by_file', 'check_logic', 'clear_graph', 'complete_related_chapters', 'edit_node_ops', 'graph', 'import_chapter_files', 'import_chapters', 'lift_python_assignments', 'load_script', 'open_node_in_excel', 'reload_imported_chapters', 'remove_chapter_from_graph', 'show_variable_workbench')
 
     def _selected_node(self):
         nid = self._canvas.selected_node_id()
@@ -495,6 +495,11 @@ class NodeEditMixin:
             menu.addAction('编辑剧情变量…', lambda: self.edit_node_ops(nid))
             menu.addAction('变量工作台…',
                            lambda: self.show_variable_workbench(nid))
+            # 2026-10-22：「工具去适应 python 块」是错的方向；正确的一刀是把
+            # 块里那些 `$` 就写得出来的赋值**搬回脚本层**（用户原话）。这一项
+            # 只搬简单赋值，块里的调用 / 控制流原位不动。
+            menu.addAction('⤴ 搬出 python 块里的赋值…',
+                           lambda: self.lift_python_assignments(nid))
             menu.addAction('从这里连一条到…', lambda: self.add_edge(from_id=nid))
             menu.addSeparator()
             # 「移除这一章」按**文件**整章移除（用户心智里一章 = 一个 .rpy）；

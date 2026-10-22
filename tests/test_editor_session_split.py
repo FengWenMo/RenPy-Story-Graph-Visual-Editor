@@ -59,6 +59,8 @@ BLOCKS = {
             'can_undo', 'undo', 'has_undo', 'mark_loaded', 'loaded_index',
             'insert_beat', 'delete_beat', 'restore_last_removed',
             'has_removed',
+            # 2026-10-22：`python:` 块 → `$` 行（搬出来，不是读懂它）
+            'python_lift_report', 'apply_python_lift',
         ),
     ),
     'session_graph': (

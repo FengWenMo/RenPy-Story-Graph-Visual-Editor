@@ -559,6 +559,327 @@ class TableSessionMixin:
             beat.code_blocks = [(int(a) + len(rows), int(b) + len(rows))
                                 for a, b in blocks]
 
+    # ==================================================================
+    #  `python:` 块 → `$` 行（2026-10-22：搬出来，而不是适应它）
+    # ==================================================================
+
+    def python_lift_report(self, graph, nid) -> dict:
+        """
+        一个 label 的 `python:` 块清单：每块能搬哪些行、哪些不能、为什么。
+
+        用户 2026-10-22：
+
+        > 真机那 26 条里 21 条是脚本层 `$` 就写得出来的赋值。它们待在 python
+        > 块里不只是"工具管不着"，而是有害的 —— 存档粒度是整块。
+        > ……正确的方向不是"工具去适应 python 块"，是"工具帮用户把语句从
+        > python 块里搬出来"。
+
+        判定全在 `story.python_lift.analyze_block()`（纯函数），这里只负责
+        把"拍 / 块 / 图节点语句"三者对上号：
+
+            {'ok', 'error', 'label', 'file',
+             'blocks': [{id, beat, beat_no, start, end, stmt_index,
+                         header_line, text, plan}],
+             'stats': {'blocks', 'liftable', 'safe_lines', 'unsafe_lines'},
+             'warning'}
+
+        **只读**：报告不碰会话状态（可能是在看一个还没载入的章节）。
+        """
+        from storygraph.core.statement import operation_source, strip_marker
+        from storygraph.story.python_lift import analyze_block
+
+        node = (getattr(graph, 'nodes', {}) or {}).get(nid)
+        blank = {'ok': False, 'error': '这个模块不在了', 'label': '',
+                 'file': '', 'blocks': [],
+                 'stats': {'blocks': 0, 'liftable': 0, 'safe_lines': 0,
+                           'unsafe_lines': 0}, 'warning': ''}
+        if node is None:
+            return blank
+        label = str(getattr(node, 'label_name', '') or '')
+        path = str(getattr(node, 'file_path', '') or '')
+        if not path or not Path(path).exists():
+            return dict(blank, error='这个模块没有可读的源文件',
+                        label=label, file=path)
+        beats, warning = self._python_lift_beats(path)
+        if not beats:
+            return dict(blank, error=f'解析不出 {Path(path).name} 的拍',
+                        label=label, file=path, warning=warning)
+        stmts = list(getattr(node, 'statements', None) or [])
+        used: set = set()
+        blocks: list = []
+        for bi, beat in enumerate(beats):
+            if str(getattr(beat, 'label', '') or '') != label:
+                continue
+            lines = str(getattr(beat, 'code', '') or '').split('\n')
+            for start, end in (getattr(beat, 'code_blocks', None) or []):
+                try:
+                    start, end = int(start), int(end)
+                except (TypeError, ValueError):
+                    continue
+                if start < 1 or end < start or end > len(lines):
+                    continue
+                text = '\n'.join(lines[start - 1:end])
+                stmt_index = self._match_block_statement(
+                    stmts, used, text, operation_source, strip_marker)
+                blocks.append({
+                    'id': f'{bi}:{start}-{end}',
+                    'beat': bi, 'beat_no': bi + 1,
+                    'start': start, 'end': end,
+                    'stmt_index': stmt_index,
+                    'header_line': self._statement_line(stmts, stmt_index),
+                    'text': text,
+                    'plan': analyze_block(lines[start - 1:end]),
+                })
+        liftable = sum(1 for b in blocks if b['plan'].get('ok'))
+        safe = sum(len(b['plan'].get('lift') or ()) for b in blocks)
+        unsafe = sum(len(b['plan'].get('skipped') or ()) for b in blocks)
+        return {'ok': True, 'error': '', 'label': label, 'file': path,
+                'blocks': blocks,
+                'stats': {'blocks': len(blocks), 'liftable': liftable,
+                          'safe_lines': safe, 'unsafe_lines': unsafe},
+                'warning': warning}
+
+    def _python_lift_beats(self, path):
+        """
+        把一份 `.rpy` 解析成拍（**不改会话状态** —— 报告必须是只读的）。
+
+        为什么不直接用 `self.beats`：报告可能针对"还没载入的章节"（用户在图上
+        点了另一个模块）；为了看一眼清单就把当前编辑的拍换掉，正在填的表单
+        会被覆盖。与 `variable_workbench` 走同一条局部解析路。
+        """
+        try:
+            from storygraph.parsing.renpy_parser import (ParseResultBuilder,
+                                                         RenPyParser)
+            from storygraph.story.beat_build import beats_from_parse_result
+            pr = ParseResultBuilder().build(RenPyParser().parse(str(path)))
+            return beats_from_parse_result(pr), ''
+        except Exception as e:                  # noqa: BLE001 - 报告失败不拦人
+            swallow('app.session_table.python_lift.parse', e)
+            return [], f'解析失败：{e}'
+
+    @staticmethod
+    def _match_block_statement(stmts, used, text, operation_source,
+                               strip_marker):
+        """块的文本 → 它在 `node.statements` 里的下标（对不上返回 -1）。"""
+        want = str(text or '').strip('\n')
+        for i, st in enumerate(stmts):
+            if i in used:
+                continue
+            got = strip_marker(operation_source(st)).strip('\n')
+            if got == want:
+                used.add(i)
+                return i
+        return -1
+
+    @staticmethod
+    def _statement_line(stmts, index) -> int:
+        """块语句的 `source` 行号（`python:` 那一行）；取不到就是 0。"""
+        try:
+            st = stmts[int(index)]
+            return int((getattr(st, 'source', None) or ('', 0))[1] or 0)
+        except (TypeError, ValueError, IndexError, KeyError):
+            # 只可能"下标对不上 / source 不是 (文件, 行号)"这两种形状问题；
+            # 行号只用于显示，取不到就写 0，不吞别的异常。
+            return 0
+
+    def apply_python_lift(self, graph, nid, picks) -> dict:
+        """
+        把选中的行搬出 `python:` 块（**原地**：行文本不动，只改块标记与语句）。
+
+        `picks`：`[{'beat': 拍下标, 'start': 块首行, 'end': 块尾行,
+                    'lift': [块内行下标, …]}]`（0-based，相对块体）。
+
+        返回 `{ok, error, lifted, blocks, beats, beat_snapshots,
+        old_statements, new_statements}`；`beat_snapshots` 是**动手之前**的
+        逐拍快照（图级撤销要连拍一起退）。
+
+        ⚠ 三处必须一起改，少一处就是"界面说搬了、导出里还在"：
+
+          1. `Beat.code_blocks`（导出真相 —— 渲染层按标记出 `python:` / `$`）；
+          2. `Node.statements`（工作台 / 分析 / 摘要的真相：一条多行语句
+             拆成"每条 `$` 一句"）；
+          3. 撤销历史（`LiftPythonStatementsCommand` 用整份语句表 + 拍快照）。
+
+        `Beat.code` 本身**一个字符都不改**：行数没变，`ordered` / `op_order` /
+        `src_first..src_last` 也就都不用动（这是这条路的立足点）。
+        """
+        from storygraph.core.statement import operation_source, strip_marker
+
+        node = (getattr(graph, 'nodes', {}) or {}).get(nid)
+        if node is None:
+            return {'ok': False, 'error': '这个模块不在了', 'lifted': 0}
+        label = str(getattr(node, 'label_name', '') or '')
+        path = str(getattr(node, 'file_path', '') or '')
+        if not path or not Path(path).exists():
+            return {'ok': False, 'error': '这个模块没有可写的源文件',
+                    'lifted': 0}
+        same = (self.script_path is not None
+                and Path(str(self.script_path)).resolve() == Path(path).resolve())
+        if not same:
+            try:
+                self.load(path, label=label)
+            except Exception as e:              # noqa: BLE001
+                return {'ok': False, 'error': f'载入失败：{e}', 'lifted': 0}
+
+        wanted: dict = {}
+        for pick in (picks or ()):
+            try:
+                bi = int(pick.get('beat'))
+                start = int(pick.get('start'))
+                end = int(pick.get('end'))
+            except (TypeError, ValueError):
+                continue
+            rows = {int(x) for x in (pick.get('lift') or ())
+                    if str(x).strip() != ''}
+            if rows:
+                wanted.setdefault((bi, start, end), set()).update(rows)
+        if not wanted:
+            return {'ok': False, 'error': '没有选中要搬的行', 'lifted': 0}
+
+        stmts = list(getattr(node, 'statements', None) or [])
+        replace: dict = {}           # 语句下标 → 新语句序列
+        used_idx: set = set()        # 已经配过块的语句（两个块文本相同时别抢同一条）
+        plan_beats: dict = {}        # 拍下标 → [(start, end, keep_ranges)]
+        lifted = 0
+        for (bi, start, end), offsets in sorted(wanted.items()):
+            if not 0 <= bi < len(self.beats):
+                return {'ok': False, 'error': f'第 {bi + 1} 拍不在了'
+                                              f'（文件改过了？）', 'lifted': 0}
+            beat = self.beats[bi]
+            if str(getattr(beat, 'label', '') or '') != label:
+                return {'ok': False,
+                        'error': f'第 {bi + 1} 拍不属于 {label}（文件改过了？）',
+                        'lifted': 0}
+            lines = str(getattr(beat, 'code', '') or '').split('\n')
+            if not (1 <= start <= end <= len(lines)):
+                return {'ok': False, 'error': '块的行区间越界（文件改过了？）',
+                        'lifted': 0}
+            lift_rows = {start + o for o in offsets if 0 <= o <= (end - start)}
+            if not lift_rows:
+                continue
+            # 权威校验：只接受"计划里说可搬"的那些行。界面本来只让勾这些，
+            # 但接口也可能被脚本 / 别的入口调用 —— 搬一条嵌套语句出来，
+            # 它上面的 `if` 就成了没有块体的 `if`（语法错）。
+            from storygraph.story.python_lift import analyze_block
+            allowed = set(analyze_block(lines[start - 1:end]).get('lift') or ())
+            bad = sorted(set(offsets) - allowed)
+            if bad:
+                return {'ok': False,
+                        'error': f'第 {start}-{end} 行这个块里，'
+                                 f'第 {bad[0] + 1} 行不能搬'
+                                 f'（嵌套 / 注释 / 多行 / 不是单行赋值）',
+                        'lifted': 0}
+            if (start, end) not in [(int(a), int(b)) for a, b in
+                                    (getattr(beat, 'code_blocks', None) or [])]:
+                return {'ok': False, 'error': '这个块已经被改过了（先刷新一下）',
+                        'lifted': 0}
+            block_rows = list(range(start, end + 1))
+            remain = [r for r in block_rows if r not in lift_rows]
+            runs: list = []
+            for r in remain:
+                if runs and r == runs[-1][-1] + 1:
+                    runs[-1].append(r)
+                else:
+                    runs.append([r])
+            keep: list = []
+            for run in runs:
+                has_stmt = any(self._row_is_code(lines[r - 1]) for r in run)
+                if not has_stmt:
+                    if any(str(lines[r - 1] or '').lstrip().startswith('#')
+                           for r in run):
+                        return {'ok': False,
+                                'error': '有一行注释会只剩它自己待在块外 —— '
+                                         '把同一块里靠近它的那条一起留下',
+                                'lifted': 0}
+                    continue          # 只有空行：块外渲染成空行，合法
+                keep.append((run[0], run[-1]))
+            text = '\n'.join(lines[start - 1:end])
+            si = self._match_block_statement(
+                stmts, used_idx, text, operation_source, strip_marker)
+            if si < 0:
+                return {'ok': False,
+                        'error': '块的文本对不上图节点（先点「🔁 刷新已导入'
+                                 '章节」再试）', 'lifted': 0}
+            used_idx.add(si)
+            cond = str(getattr(stmts[si], 'condition', '') or '')
+            head = self._statement_line(stmts, si)
+            new_stmts: list = []
+            cur: list = []
+            for r in block_rows:
+                if r in lift_rows:
+                    if cur:
+                        new_stmts.append(self._lift_statement(
+                            lines, cur[0], cur, cond, path, head, start))
+                        cur = []
+                    new_stmts.append(self._lift_statement(
+                        lines, r, [r], cond, path, head, start))
+                else:
+                    cur.append(r)
+            if cur:
+                new_stmts.append(self._lift_statement(
+                    lines, cur[0], cur, cond, path, head, start))
+            replace[si] = new_stmts
+            plan_beats.setdefault(bi, []).append((start, end, keep))
+            lifted += len(lift_rows)
+
+        if not replace:
+            return {'ok': False, 'error': '没有可落地的行', 'lifted': 0}
+
+        before_snaps: dict = {}
+        for bi in sorted(plan_beats):
+            try:
+                snap = self.snapshot(bi)
+            except Exception as e:              # noqa: BLE001 - 记不上快照不拦保存
+                swallow('app.session_table.python_lift.snapshot', e)
+                snap = None
+            if snap is not None:
+                before_snaps[bi] = snap
+        for bi, items in plan_beats.items():
+            beat = self.beats[bi]
+            blocks = [(int(a), int(b))
+                      for a, b in (getattr(beat, 'code_blocks', None) or [])]
+            for start, end, keep in items:
+                blocks = [(a, b) for a, b in blocks if (a, b) != (start, end)]
+                blocks.extend(keep)
+            beat.code_blocks = sorted(blocks)
+
+        merged: list = []
+        for i, st in enumerate(stmts):
+            if i in replace:
+                merged.extend(replace[i])
+            else:
+                merged.append(st)
+        node.statements = merged
+        if lifted:
+            self.mark_edits_dirty()
+        return {'ok': True, 'error': '', 'lifted': lifted,
+                'blocks': len(replace), 'beats': sorted(before_snaps),
+                'beat_snapshots': before_snaps,
+                'old_statements': stmts, 'new_statements': merged}
+
+    @staticmethod
+    def _lift_statement(lines, row, rows, cond, path, head, block_start):
+        """
+        块里的若干行 → 一条 `Statement`（搬出去的那条就是一行）。
+
+        `source` 按"`python:` 头 + 块内偏移"推算（只用于落到第几拍的对位）。
+        """
+        from storygraph.core.statement import Statement
+
+        body = '\n'.join(str(lines[r - 1]) for r in rows)
+        return Statement.make_python(
+            body.strip() if len(rows) == 1 else body,
+            condition=cond,
+            source=(path, (head + (int(row) - int(block_start)) + 1)
+                    if head else 0),
+            dollar_space=True)
+
+    @staticmethod
+    def _row_is_code(text: str) -> bool:
+        """这一行是"语句"吗（不是空行 / 注释）？决定它能不能撑起一个块。"""
+        s = str(text or '').strip()
+        return bool(s) and not s.startswith('#')
+
     def label_names(self) -> list:
         """这个文件里按出现顺序有哪些 label（去重；空 label 不列）。"""
         out: list = []

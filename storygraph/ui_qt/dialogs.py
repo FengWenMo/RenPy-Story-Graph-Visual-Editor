@@ -817,6 +817,19 @@ class VariableWorkbenchDialog(_BaseDialog):
         self._root.addWidget(cap)
         self._ops = QListWidget()
         self._root.addWidget(self._ops, 3)
+        # 2026-10-22：这一段 `python:` 块在这里只能当"一条操作"看 —— 想按条
+        # 改里面的赋值，得先把它们搬到脚本层（右栏「⤴ 搬出 python 块…」）。
+        # 不说这一句，用户会以为"工作台里改不了块里的赋值"是工具坏了。
+        n_block_ops = sum(1 for op in self.variables if '\n' in str(op))
+        if n_block_ops:
+            hint = QLabel(
+                f'⚠ 有 {n_block_ops} 条操作是**一整段 python 块**'
+                f'（块里的行这里只能当一段看，改一条得整段重写）。'
+                f'关掉本窗口后点右栏「⤴ 搬出 python 块…」，'
+                f'可以把块里的单行赋值搬成 `$` 行，再回来就能逐条改。')
+            hint.setProperty('role', 'caption')
+            hint.setWordWrap(True)
+            self._root.addWidget(hint)
 
         self._editor = QLineEdit()
         self._editor.setPlaceholderText('选中上面一条操作，或直接在这里写一条新的')
@@ -1211,6 +1224,208 @@ class VariableWorkbenchDialog(_BaseDialog):
         self.anchors = {new_i: self._anchors[old_i]
                         for new_i, (old_i, _text) in enumerate(kept)
                         if old_i in self._anchors}
+        self.accept()
+
+
+# ======================================================================
+#  把 python 块里的赋值搬回脚本层
+# ======================================================================
+
+class PythonLiftDialog(_BaseDialog):
+    """
+    「搬出 python 块」：把块里的单行赋值变成 `$` 行（2026-10-22）。
+
+    用户 2026-10-22：
+
+    > 真机那 26 条里 21 条是脚本层 `$` 就写得出来的赋值。它们待在 python 块里
+    > 不只是"工具管不着"，而是有害的 —— 存档粒度是整块。
+    > ……正确的方向不是"工具去适应 python 块"，是"工具帮用户把语句从 python
+    > 块里搬出来"。
+
+    这里只做**选择与预览**：判定（哪些行能搬、为什么不能）全在
+    `story.python_lift.analyze_block`，落地在
+    `session.apply_python_lift`。对话框里每一行都写清依据 ——
+    "这条为什么不能搬"比"能搬的都勾上"更重要：用户得知道边界在哪儿。
+
+    一个块一行标题（第几拍 / 第几行 / 能否搬），下面它的语句逐行列出：
+    可搬的给勾选框，不可搬的置灰并写原因（含注释 / 嵌套 / 调用 / 多行）。
+    """
+
+    def __init__(self, parent=None, label_name: str = '', data=None):
+        super().__init__(parent, f'搬出 python 块 · {label_name}')
+        self.resize(960, 640)
+        self.picks: list = []
+        data = dict(data or {})
+        self.label_name = str(label_name or data.get('label') or '')
+        self._data = data
+        #: `(QTableWidgetItem, block, candidate)`：勾选状态 → picks 的来源。
+        self._rows: list = []
+
+        stats = dict(data.get('stats') or {})
+        head = QLabel(
+            f'章节：{self.label_name}'
+            + (f'　·　{Path(data.get("file")).name}' if data.get('file') else '')
+            + f'　·　python 块 {int(stats.get("blocks") or 0)} 个，'
+              f'其中 {int(stats.get("safe_lines") or 0)} 条赋值可以搬到脚本层')
+        head.setProperty('role', 'section')
+        head.setWordWrap(True)
+        self._root.addWidget(head)
+
+        why = QLabel(
+            '搬到脚本层（`$` 行）之后，这些赋值会变成**表格里能看见、能改**的'
+            '一条操作，导出到 IR / Unity 时也是一个标量事件。'
+            '块里那些调用 / 控制流 / 嵌套语句原位保留 —— 工具不进去改它们。')
+        why.setProperty('role', 'caption')
+        why.setWordWrap(True)
+        self._root.addWidget(why)
+
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(['搬', '拍', '块', '语句 / 为什么不能搬'])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 42)
+        self._table.setColumnWidth(1, 56)
+        self._table.setColumnWidth(2, 150)
+        for block in (data.get('blocks') or ()):
+            self._add_block(block)
+        self._table.itemChanged.connect(self._refresh_preview)
+        self._root.addWidget(self._table, 3)
+
+        self._preview = QPlainTextEdit()
+        self._preview.setReadOnly(True)
+        self._preview.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._preview.setMaximumHeight(150)
+        self._preview.setPlaceholderText('勾选上面的条目，这里会写出搬完之后的样子')
+        self._root.addWidget(self._preview, 1)
+
+        row = QHBoxLayout()
+        all_btn = QPushButton('全选可搬')
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        row.addWidget(all_btn)
+        none_btn = QPushButton('全不选')
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        row.addWidget(none_btn)
+        row.addStretch(1)
+        self._hint = QLabel('')
+        self._hint.setProperty('role', 'caption')
+        row.addWidget(self._hint)
+        self._root.addLayout(row)
+
+        self._add_buttons('搬出去')
+        self._set_all(True)
+
+    # ---------------- 建表 ----------------
+
+    def _add_block(self, block: dict):
+        """一个块：标题行（第几拍 / 行区间 / 结论）+ 语句行。"""
+        plan = dict(block.get('plan') or {})
+        beat_no = int(block.get('beat_no') or 0)
+        start, end = int(block.get('start') or 0), int(block.get('end') or 0)
+        stmt_ok = int(block.get('stmt_index', -1)) >= 0
+        n_safe = len(plan.get('lift') or ())
+        if not stmt_ok:
+            verdict = '⚠ 对不上图节点 —— 先点「🔁 刷新已导入章节」再试'
+        elif plan.get('ok'):
+            verdict = f'✔ 可搬 {n_safe} 条'
+        else:
+            verdict = f'✕ 不搬：{plan.get("why") or "没有可搬的语句"}'
+        i = self._table.rowCount()
+        self._table.insertRow(i)
+        title = QTableWidgetItem(
+            f'第 {beat_no} 拍 · python 块（第 {start}-{end} 行）· {verdict}')
+        title.setFlags(Qt.ItemIsEnabled)          # 不可选 / 不可勾
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        self._table.setItem(i, 0, title)
+        self._table.setSpan(i, 0, 1, 4)
+
+        # 语句：可搬的（带勾选）在前、不搬的在后 —— 与块里的行序无关，
+        # 因为"能搬哪几条"才是这个对话框要回答的事。
+        lift = list(plan.get('lift') or ())
+        cands = {int(c['line']): c for c in (plan.get('candidates') or ())}
+        for line in lift:
+            cand = dict(cands.get(int(line)) or {})
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            box = QTableWidgetItem('')
+            box.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            box.setCheckState(Qt.Checked if stmt_ok else Qt.Unchecked)
+            self._table.setItem(row, 0, box)
+            self._table.setItem(row, 1, QTableWidgetItem(str(beat_no)))
+            kind = '自增 / 自减' if cand.get('kind') == 'augassign' else '赋值'
+            self._table.setItem(row, 2, QTableWidgetItem(kind))
+            text = str(cand.get('text') or '').strip()
+            item = QTableWidgetItem(f'$ {text}')
+            item.setData(Qt.UserRole, int(line))
+            self._table.setItem(row, 3, item)
+            if stmt_ok:
+                self._rows.append((box, block, line))
+            else:
+                box.setFlags(Qt.ItemIsEnabled)
+        for row_info in (plan.get('skipped') or ()):
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem('—'))
+            self._table.setItem(row, 1, QTableWidgetItem(str(beat_no)))
+            text = str(row_info.get('text') or '').strip()
+            item = QTableWidgetItem(f'{text}　·　{row_info.get("why") or ""}')
+            item.setFlags(Qt.ItemIsEnabled)
+            item.setToolTip('这一行留在 python 块里 —— 搬出去会改语义')
+            self._table.setItem(row, 3, item)
+
+    # ---------------- 勾选 / 预览 ----------------
+
+    def _set_all(self, on: bool):
+        self._table.blockSignals(True)
+        try:
+            for box, _block, _line in self._rows:
+                box.setCheckState(Qt.Checked if on else Qt.Unchecked)
+        finally:
+            self._table.blockSignals(False)
+        self._refresh_preview()
+
+    def _checked(self) -> list:
+        return [(b, l) for box, b, l in self._rows
+                if box.checkState() == Qt.Checked]
+
+    def _refresh_preview(self, *_args):
+        chosen = self._checked()
+        per_block: dict = {}
+        for block, line in chosen:
+            per_block.setdefault(block.get('id'), []).append(int(line))
+        lines = []
+        for block in (self._data.get('blocks') or ()):
+            picked = per_block.get(block.get('id'))
+            if not picked:
+                continue
+            plan = dict(block.get('plan') or {})
+            cands = {int(c['line']): c for c in (plan.get('candidates') or ())}
+            lines.append(f'# 第 {int(block.get("beat_no") or 0)} 拍'
+                         f' · python 块（第 {block.get("start")}-{block.get("end")} 行）')
+            keep = list(plan.get('keep_ranges') or ())
+            if keep:
+                lines.append(f'python:   # 块里还剩 {sum(b - a + 1 for a, b in keep)} 行')
+            for line in sorted(picked):
+                text = str((cands.get(line) or {}).get('text') or '').strip()
+                lines.append(f'$ {text}')
+        self._preview.setPlainText('\n'.join(lines))
+        self._hint.setText(f'已勾 {len(chosen)} 条' if chosen
+                           else '一条都没勾 —— 那就什么都不会改')
+
+    def _on_accept(self):
+        chosen = self._checked()
+        if not chosen:
+            self._fail('一条都没勾。要搬哪几条就勾哪几条；不想改就点「取消」。')
+            return
+        per_block: dict = {}
+        for block, line in chosen:
+            key = (int(block['beat']), int(block['start']), int(block['end']))
+            per_block.setdefault(key, []).append(int(line))
+        self.picks = [{'beat': bi, 'start': start, 'end': end, 'lift': rows}
+                      for (bi, start, end), rows in per_block.items()]
         self.accept()
 
 

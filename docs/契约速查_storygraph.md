@@ -3706,5 +3706,29 @@ label 结尾没有 `jump` / `return` 时 Ren'Py 会接着执行文件里的下�
 判据：`tests/test_feedback_p5_fold_project.py`（14 条）+
 `tests/test_feedback_p5_file_layout.py`（12 条）。
 
+## 26. `python:` 块 → `$` 行（2026-10-22，方向性的一刀）
+
+用户："正确的方向不是'工具去适应 python 块'，是'工具帮用户把语句从 python
+块里搬出来'"。
+
+- **边界不变**：工具对块本身仍然"读进来、原样保留、逐字节写回"（K1/K6）；
+  不解析、不改写、不拆调用/嵌套。这一条只是给用户一条**出口**。
+- **只搬"`$` 就写得出来"的行**（`story/python_lift.analyze_block`，纯函数）：
+  块体顶层 / 单行 / `name = …` 或 `name op= …` / 目标是一个普通变量名 /
+  不以 `_` 开头；并且搬完不能把块拆出"只有注释的块"（`python:` 里只有注释
+  是语法错 → 那种行会退回去陪注释）。
+- **顺序不变**是全部理由：搬出来的行留在原来的行位置（块体前半 → `$` →
+  块体后半），所以不做依赖分析；中间那条也能搬（拆成两个块，都有语句即可）。
+- **落地三处一起改**：`Beat.code_blocks`（导出真相；`Beat.code` 一个字符
+  不改）、`Node.statements`（拆成逐条、`source` 按块头 + 偏移推）、
+  撤销历史（`LiftPythonStatementsCommand`：整份语句表 + 逐拍快照）。
+  ⚠ 不能复用 `UpdateNodeOperationsCommand`：它按字符串重建语句，
+  `source` / `condition` 会丢。
+- **不自动搬**：不扫描全项目、不在导入/导出时顺手改 —— 每一行是"演出变量"
+  还是"引擎状态"只有作者知道。
+- 判据：`tests/test_python_lift.py`（23 条，含"同一拍两个块"与"两块文本相同
+  要按顺序配对"两条被真实数据教育出来的用例）。
+
+
 
 

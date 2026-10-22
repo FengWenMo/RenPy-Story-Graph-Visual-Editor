@@ -1910,6 +1910,15 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             lambda: self.show_variable_workbench())
         rv.addWidget(self._vars_workbench_btn)
 
+        # 2026-10-22：方向是"把赋值从 python 块里搬出来"，不是"让工具读懂块"。
+        self._lift_btn = QPushButton('⤴ 搬出 python 块…')
+        self._lift_btn.setToolTip(
+            '把 `python:` 块里那些 `$` 就写得出来的单行赋值搬回脚本层：\n'
+            '搬完它们会变成变量工作台里能逐条改的操作，导出也能进 IR；\n'
+            '块里的调用 / 控制流原位保留，不动。')
+        self._lift_btn.clicked.connect(lambda: self.lift_python_assignments())
+        rv.addWidget(self._lift_btn)
+
         brow = QHBoxLayout()
         brow.setSpacing(T.SPACE['xs'])
         self._check_btn = QPushButton('🔎 检查逻辑问题')
