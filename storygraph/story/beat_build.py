@@ -21,6 +21,7 @@ from storygraph.core.statement import Statement, StatementKind
 from storygraph.story.beat_model import (
     Beat,
     KIND_EXTEND,
+    KIND_FLOW,
     KIND_MENU,
     KIND_MENU_OPTION,
     KIND_NARRATION,
@@ -1149,7 +1150,10 @@ class _BeatBuilder:
         self.beats.append(self.mark_struct(self.with_src(Beat(
             seq=self.seq, label=self.current_label,
             condition=stmt.condition or '',
-            kind=KIND_NARRATION,
+            # **`kind='flow'`**（2026-10-22 第二阶段）：`call` / `jump` 不再是
+            # "一张没台词的旁白拍"。老表里 `kind=narration` + `raw='call side'`
+            # 的拍仍然认（`flow.parse_flow` 两种 kind 都收）。
+            kind=KIND_FLOW,
             raw=f"{stmt.kind} {target}"
                 f"{_call_args_middle(stmt.kind, payload)}"
                 f"{_call_from_suffix(stmt.kind, payload)}",

@@ -766,7 +766,9 @@ class CardPageMixin:
                 ok = self._run_command(AddEdgeCommand(
                     self, src.id, target.id, new_type,
                     str(getattr(beat, 'condition', '') or ''), '',
-                    from_clause=from_clause))
+                    from_clause=from_clause,
+                    # 这条边代表源文件里的 call/jump，不是用户画的草图
+                    origin='source'))
         except Exception as e:                    # noqa: BLE001 - 同步失败不该拦保存
             swallow('ui_qt.window_card._sync_flow_edge', e)
             return f'图上的边没有同步（{e}）'

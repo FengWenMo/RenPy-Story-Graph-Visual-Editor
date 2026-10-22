@@ -29,6 +29,7 @@ from typing import Optional
 
 from storygraph.assets.asset_completion import AssetCompletion
 from storygraph.assets.asset_registry import describe_asset
+from storygraph.story.flow import FLOW_FIELD_KEYS
 from storygraph.story.beat_model import (
     Beat,
     KIND_MENU,
@@ -364,12 +365,16 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
     # **控制流卡**（2026-10-22，P0-4 第一阶段）：`FlowType` / `FlowTarget`
     # 不是 Excel 列，只是卡片上的两个控件；它们改的是 `Beat.raw` 那一行。
     # 与 `EditorSession.apply` 同源，两处都调 `story.flow` 的同一份实现。
-    if 'FlowType' in fields or 'FlowTarget' in fields:
+    if any(k in fields for k in FLOW_FIELD_KEYS):
         from storygraph.story.flow import update_beat_flow
         update_beat_flow(
             b,
             fields.get('FlowType') if 'FlowType' in fields else None,
-            fields.get('FlowTarget') if 'FlowTarget' in fields else None)
+            fields.get('FlowTarget') if 'FlowTarget' in fields else None,
+            # 第二阶段：参数 `(…)` 与 `from …` 也可视编辑了。
+            # 传 None = 保持原值；所以只改目标时这里自然是 None。
+            fields.get('FlowArgs') if 'FlowArgs' in fields else None,
+            fields.get('FlowFrom') if 'FlowFrom' in fields else None)
     if 'Label' in fields:
         b.label = (fields.get('Label') or '').strip()
     elif base is None:

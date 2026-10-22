@@ -254,9 +254,44 @@ class BeatCardEditor(QWidget):
         target_row.addWidget(self._flow_target, 1)
         target_row.addWidget(QLabel('可手写点号 label'), 0)
         lay.addLayout(target_row)
+
+        # **参数 `(…)` 与 `from …`**（2026-10-22 第二阶段）：
+        # 从前这两段只能在「高级区 · 代码」里手写，卡片上根本看不见 ——
+        # 用户改得了目标、改不了传参，还得回源码找。现在它们和目标是同一条。
+        # `jump` 不接受这两样（Ren'Py 语法），所以切到 jump 时直接禁用。
+        self._flow_args = QLineEdit()
+        self._flow_args.setPlaceholderText('参数（可空），例如 (1, flag)')
+        self._flow_args.setToolTip(
+            '`call side(1, 2)` 里括号那一段。留空 = 不传参。\n'
+            '括号必须配平 —— 不配平的写法会让整份脚本解析不了。')
+        args_row = QHBoxLayout()
+        args_row.setSpacing(T.SPACE['xs'])
+        cap_args = QLabel('参数')
+        cap_args.setProperty('role', 'caption')
+        args_row.addWidget(cap_args, 0)
+        args_row.addWidget(self._flow_args, 1)
+        lay.addLayout(args_row)
+
+        self._flow_from = QLineEdit()
+        self._flow_from.setPlaceholderText(
+            'from 标识（可空），例如 _call_side_1')
+        self._flow_from.setToolTip(
+            '`call side from _call_side_1` 里 from 后面那个标识。\n'
+            '它是**存档点**：同一个 label 被多处 call 时靠它区分，\n'
+            '一改老存档就找不到返回点 —— 不确定就别动。')
+        from_row = QHBoxLayout()
+        from_row.setSpacing(T.SPACE['xs'])
+        cap_from = QLabel('from')
+        cap_from.setProperty('role', 'caption')
+        from_row.addWidget(cap_from, 0)
+        from_row.addWidget(self._flow_from, 1)
+        lay.addLayout(from_row)
+
         self._flow_type.currentIndexChanged.connect(self._on_flow_edited)
         self._flow_target.currentIndexChanged.connect(self._on_flow_edited)
         self._flow_target.editTextChanged.connect(self._on_flow_edited)
+        self._flow_args.textChanged.connect(self._on_flow_edited)
+        self._flow_from.textChanged.connect(self._on_flow_edited)
 
         self._flow_bar.setVisible(False)
         root.addWidget(self._flow_bar)
@@ -713,6 +748,14 @@ class BeatCardEditor(QWidget):
                 self._flow_target.setCurrentText(str(info.get('target') or ''))
             finally:
                 self._flow_target.blockSignals(False)
+            self._flow_args.blockSignals(True)
+            self._flow_from.blockSignals(True)
+            try:
+                self._flow_args.setText(str(info.get('args') or ''))
+                self._flow_from.setText(str(info.get('from_clause') or ''))
+            finally:
+                self._flow_args.blockSignals(False)
+                self._flow_from.blockSignals(False)
         finally:
             self._loading = False
         self._flow_bar.setVisible(True)
@@ -729,7 +772,9 @@ class BeatCardEditor(QWidget):
         flow_type = str(self._flow_type.currentData()
                         or self._flow_type.currentText() or 'call')
         return {'FlowType': flow_type,
-                'FlowTarget': self._flow_target.currentText().strip()}
+                'FlowTarget': self._flow_target.currentText().strip(),
+                'FlowArgs': self._flow_args.text().strip(),
+                'FlowFrom': self._flow_from.text().strip()}
 
     def flow_change(self) -> dict | None:
         """控制流目标 / 类型改了吗？返回 `{old,new,target,type,...}` 或 None。"""
@@ -737,7 +782,9 @@ class BeatCardEditor(QWidget):
             return None
         new = self.flow_fields()
         old = {'FlowType': str(self._flow.get('type') or ''),
-               'FlowTarget': str(self._flow.get('target') or '')}
+               'FlowTarget': str(self._flow.get('target') or ''),
+               'FlowArgs': str(self._flow.get('args') or ''),
+               'FlowFrom': str(self._flow.get('from_clause') or '')}
         if new == old:
             return None
         return {
@@ -770,7 +817,7 @@ class BeatCardEditor(QWidget):
             return fields
         fields['CodeBlock'] = render_flow_line(
             vals['FlowType'], vals['FlowTarget'],
-            self._flow.get('args') or '', self._flow.get('from_clause') or '')
+            vals.get('FlowArgs') or '', vals.get('FlowFrom') or '')
         return fields
 
     def _refresh_flow_text(self):
@@ -795,6 +842,18 @@ class BeatCardEditor(QWidget):
                  for i in range(self._flow_target.count())}
         if target and target not in names:
             detail += '\n目标不在本文件的 label 里；仍可手写（可能来自其他文件）'
+        # `jump` 不接受参数 / from（Ren'Py 语法）—— 灰掉比"填了也不生效"诚实。
+        is_call = flow_type == 'call'
+        self._flow_args.setEnabled(is_call)
+        self._flow_from.setEnabled(is_call)
+        if not is_call:
+            self._flow_args.setPlaceholderText('jump 不接受参数')
+            self._flow_from.setPlaceholderText('jump 不接受 from')
+        else:
+            self._flow_args.setPlaceholderText(
+                '参数（可空），例如 (1, flag)')
+            self._flow_from.setPlaceholderText(
+                'from 标识（可空），例如 _call_side_1')
         self._flow_detail.setText(detail)
 
     def _on_flow_edited(self, *_):

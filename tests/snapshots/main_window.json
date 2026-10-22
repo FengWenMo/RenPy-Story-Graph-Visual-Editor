@@ -71,7 +71,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_roof",
      "scene": "",
@@ -93,7 +93,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_class",
      "scene": "",
@@ -115,7 +115,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -137,7 +137,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -467,7 +467,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_roof",
      "scene": "",
@@ -489,7 +489,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_class",
      "scene": "",
@@ -511,7 +511,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -533,7 +533,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -633,7 +633,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_roof",
      "scene": "",
@@ -655,7 +655,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_class",
      "scene": "",
@@ -677,7 +677,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -699,7 +699,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -955,7 +955,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_roof",
      "scene": "",
@@ -977,7 +977,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_class",
      "scene": "",
@@ -999,7 +999,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",
@@ -1021,7 +1021,7 @@
     {
      "condition": "",
      "hide": "",
-     "kind": "narration",
+     "kind": "flow",
      "music": "",
      "raw": "jump ch01_end",
      "scene": "",

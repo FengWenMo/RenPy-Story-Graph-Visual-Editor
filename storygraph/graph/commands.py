@@ -60,7 +60,7 @@ class RemoveNodeCommand(Command):
 
 class AddEdgeCommand(Command):
     def __init__(self, graph_view, from_id, to_id, etype, condition,
-                 option_text, from_clause=''):
+                 option_text, from_clause='', origin='manual'):
         self.graph_view = graph_view
         self.from_id = from_id
         self.to_id = to_id
@@ -69,12 +69,16 @@ class AddEdgeCommand(Command):
         self.option_text = option_text
         #: `call X from Y` 的存档点标识（控制流卡同步用）。
         self.from_clause = from_clause
+        #: 默认 **manual**：这个命令的常规用法是"用户在图上画一条线"。
+        #: 控制流卡同步出来的边要显式传 `origin='source'`（它代表源文件里的
+        #: `call` / `jump`，第二阶段的"从拍派生"会按这个来源区分重建范围）。
+        self.origin = str(origin or 'manual')
         self.edge_id = None
 
     def execute(self):
         self.edge_id = self.graph_view.graph.add_edge(
             self.from_id, self.to_id, self.etype, self.condition,
-            self.option_text, self.from_clause
+            self.option_text, self.from_clause, origin=self.origin
         )
         self.graph_view.on_graph_structure_changed()
 

@@ -261,8 +261,13 @@ class TestFlowCard:
         assert beat.raw == 'call ending'
         assert beat.code == ''
         assert window._session.rendered_lines_of(beat) == ['call ending']
-        assert window._panel.flow_fields() == {
-            'FlowType': 'call', 'FlowTarget': 'ending'}
+        fields = window._panel.flow_fields()
+        # 第二阶段多了参数 / from 两格；只钉"这几项的值"，不钉键的总数
+        # （否则以后再加一格就红，而那条红不说明任何行为退化）。
+        assert fields['FlowType'] == 'call'
+        assert fields['FlowTarget'] == 'ending'
+        assert fields['FlowArgs'] == ''
+        assert fields['FlowFrom'] == ''
         # 保存之后不应再提示"有未保存改动"
         assert not window._panel.is_modified()
 

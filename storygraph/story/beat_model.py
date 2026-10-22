@@ -583,6 +583,18 @@ def unknown_kinds(beats) -> list:
 KIND_SAY = 'say'
 
 KIND_NARRATION = 'narration'
+#: **控制流拍**（`call` / `jump`）—— 2026-10-22 第二阶段。
+#:
+#: 从前它们被塞进 `kind=narration` + `raw`，卡片上只能显示成
+#: "这一拍还会原样执行：call side"。升成独立 kind 之后：
+#:   · 语义清楚（旁白 ≠ 控制流）；
+#:   · 空台词检查（`validate` 的 `empty_say`）不会把 `call side` 当成
+#:     "有拍没台词"报出来；
+#:   · 图边可以从这类拍**派生**（第二阶段的目标），不再靠保存时同步。
+#:
+#: ⚠ 老数据（`kind=narration` + `raw='call side'`）**继续认** —— 见
+#: `storygraph.story.flow.parse_flow`，读表 / 读旧 JSON 时不会丢。
+KIND_FLOW = 'flow'
 
 KIND_MENU = 'menu'
 
@@ -1304,7 +1316,11 @@ class Beat:
 
         kind = g('Kind') or KIND_SAY
         kind_raw = g('Kind')
-        if kind not in (KIND_SAY, KIND_NARRATION, KIND_MENU,
+        # `KIND_FLOW` **必须在这个白名单里**（2026-10-22 第二阶段）：
+        # 漏了它，表里写 `flow` 的行读回来会被降级成 `say` —— 拍还在、
+        # `raw` 还在，但 `parse_flow` 不认 `say`，**卡片上的控制流卡整个消失**。
+        # 这是"导出能写、读回来认不出"的静默退化，只有实测才看得见。
+        if kind not in (KIND_SAY, KIND_NARRATION, KIND_FLOW, KIND_MENU,
                         KIND_MENU_OPTION, KIND_EXTEND):
             kind = KIND_SAY
 

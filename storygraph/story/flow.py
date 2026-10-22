@@ -34,6 +34,14 @@ FLOW_TYPES = ('call', 'jump')
 #: 卡片 / 列表用的中文动词。
 FLOW_VERBS = {'call': '调用', 'jump': '跳转'}
 
+#: 卡片上属于「控制流卡」的表单键（不是 Excel 列，只走卡片 → `Beat.raw`）。
+#:
+#: 为什么要有这个元组：`fields_to_beat` / `EditorSession.apply` 两处都要判断
+#: "这次提交里有没有控制流字段"，从前各写一遍 `'FlowType' in fields or ...`。
+#: 第二阶段把参数与 `from` 也做成可编辑之后，两处都改不对就会**漏掉新字段**
+#: （表现：改了参数，保存后原样没变）。放这里一处定义、两处引用。
+FLOW_FIELD_KEYS = ('FlowType', 'FlowTarget', 'FlowArgs', 'FlowFrom')
+
 
 def is_valid_label(name) -> bool:
     """`main.route` / `side.choice` 合法；空串、点号首尾、连续点号不合法。"""
@@ -115,7 +123,10 @@ def parse_flow(beat) -> dict | None:
     """
     if beat is None:
         return None
-    if str(getattr(beat, 'kind', '') or '') != 'narration':
+    # **两种 kind 都收**（2026-10-22 第二阶段）：
+    #   · `flow`      —— 新产物（`beat_build._emit_jump_call` 写入）；
+    #   · `narration` —— 老表 / 旧内存对象里的 call 拍，不能因为升级就读不出来。
+    if str(getattr(beat, 'kind', '') or '') not in ('narration', 'flow'):
         return None
     raw = str(getattr(beat, 'raw', '') or '').strip()
     if not raw:
@@ -144,15 +155,39 @@ def render_flow_line(flow_type: str, target: str, args: str = '',
     return line
 
 
-def update_beat_flow(beat, flow_type=None, target=None) -> dict:
+def _normalize_args(args) -> str:
+    """
+    `call side(a, b)` 的参数段：空串，或**配平的一对括号**。
+
+    为什么必须校验：这段会被原样拼进产物。`call side(a` 这种没配平的写法
+    会让整份脚本解析不了，而工具这边看不出任何异常 —— 那种"导出成功、
+    游戏起不来"的错最难查。
+    """
+    text = str(args or '').strip()
+    if not text:
+        return ''
+    if not text.startswith('('):
+        raise ValueError('参数要以 ( 开头')
+    close = _scan_balanced(text, 0)
+    if close < 0 or close != len(text) - 1:
+        raise ValueError('参数括号不配平')
+    return text
+
+
+def update_beat_flow(beat, flow_type=None, target=None, args=None,
+                     from_clause=None) -> dict:
     """
     就地改一张控制流拍的 raw（**只改这一行，不动其它字段**）。
 
     返回 `{ok, changed, error, info}`：
-      · 目标非法 / 这一拍不是控制流拍 → `ok=False`，Beat 一个字节都不动；
+      · 目标非法 / 参数括号不配平 / `from` 不合法 / 这一拍不是控制流拍
+        → `ok=False`，Beat 一个字节都不动；
       · 类型从 call 改成 jump → 参数与 `from` 子句**明确丢掉**（Ren'Py 的
         `jump` 不接受它们，留着会生成跑不起来的脚本）；
       · 没变化 → `changed=False`（不制造"未保存"）。
+
+    `args` / `from_clause` 传 `None` = **保持原值**（第二阶段新加）；
+    传空串 = 清空。所以调用方「只想改目标」时不用知道原来有没有参数。
     """
     old = parse_flow(beat)
     if old is None:
@@ -167,9 +202,22 @@ def update_beat_flow(beat, flow_type=None, target=None) -> dict:
         return {'ok': False, 'changed': False,
                 'error': f'目标 label 不合法：{wanted or "（空）"}',
                 'info': None}
-    args = old['args'] if kind == 'call' else ''
-    from_clause = old['from_clause'] if kind == 'call' else ''
-    line = render_flow_line(kind, wanted, args, from_clause)
+    if kind != 'call':
+        # jump 不接受参数 / from（Ren'Py 语法），明确清掉而不是留着
+        args_text = from_text = ''
+    else:
+        try:
+            args_text = _normalize_args(
+                old['args'] if args is None else args)
+        except ValueError as e:
+            return {'ok': False, 'changed': False,
+                    'error': f'参数不合法：{e}', 'info': None}
+        from_text = str(old['from_clause'] if from_clause is None
+                        else from_clause).strip()
+        if from_text and not is_valid_label(from_text):
+            return {'ok': False, 'changed': False,
+                    'error': f'from 标识不合法：{from_text}', 'info': None}
+    line = render_flow_line(kind, wanted, args_text, from_text)
     changed = line != str(getattr(beat, 'raw', '') or '').strip()
     if changed:
         beat.raw = line
@@ -208,6 +256,37 @@ def flow_info(beat, index: int = 0, beats=None) -> dict | None:
     return out
 
 
+def flow_edges(beats) -> list:
+    """
+    这批拍里的控制流拍 → **图边的唯一真源**（2026-10-22 第二阶段）。
+
+    每条 `{from, to, type, condition, from_clause, line_id}`：
+
+      · `from`  —— 这一拍所在的 label；
+      · `to`    —— `call` / `jump` 的目标；
+      · `line_id` —— 稳定身份（`ch01.0007` 那种），用来**区分同一 label 里
+        多次 call 同一个目标** —— 图边按 `from+type+to` 找第一条的老做法
+        在那种场景下会指错（第二阶段要收的第四件事）。
+
+    `origin='source'` 的边应当**恒等于**这个清单；手工画的边
+    （`origin='manual'`）不在里面，也不该被它覆盖。
+    """
+    out = []
+    for beat in beats or ():
+        info = parse_flow(beat)
+        if not info:
+            continue
+        out.append({
+            'from': str(getattr(beat, 'label', '') or ''),
+            'to': info['target'],
+            'type': info['type'],
+            'condition': str(getattr(beat, 'condition', '') or ''),
+            'from_clause': info['from_clause'],
+            'line_id': str(getattr(beat, 'line_id', '') or ''),
+        })
+    return out
+
+
 def flow_card_text(info: dict | None) -> str:
     """列表 / 删除确认里的一行短文案（没有控制流返回空串）。"""
     if not info:
@@ -215,6 +294,7 @@ def flow_card_text(info: dict | None) -> str:
     return f"{info['type']} {info['target']}"
 
 
-__all__ = ['FLOW_TYPES', 'FLOW_VERBS', 'flow_card_text', 'flow_info',
+__all__ = ['FLOW_FIELD_KEYS', 'FLOW_TYPES', 'FLOW_VERBS',
+           'flow_card_text', 'flow_edges', 'flow_info',
            'is_valid_label', 'parse_flow', 'parse_flow_line',
            'render_flow_line', 'update_beat_flow']

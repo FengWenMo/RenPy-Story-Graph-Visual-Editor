@@ -38,6 +38,7 @@ from typing import List, Optional
 from storygraph.core.safeguard import swallow
 
 from storygraph.app import beats as B
+from storygraph.story.flow import FLOW_FIELD_KEYS
 from storygraph.story.beat_build import (beats_from_parse_result,
                                          hydrate_from_dsl, stage_only_ops)
 from storygraph.story.beat_render import make_symbols
@@ -768,13 +769,15 @@ class TableSessionMixin:
         # 列。所以必须在下面的 `CodeBlock` 处理**之前**做：先让 raw 变成
         # 新目标，后面的 `CodeBlock != compose_code(b)` 才会是 False（前端
         # 同时提交了同步后的代码格），不会把 raw 误降级成 code。
-        flow_keys = 'FlowType' in fields or 'FlowTarget' in fields
+        flow_keys = any(k in fields for k in FLOW_FIELD_KEYS)
         if flow_keys:
             from storygraph.story.flow import update_beat_flow
             update_beat_flow(
                 b,
                 fields.get('FlowType') if 'FlowType' in fields else None,
-                fields.get('FlowTarget') if 'FlowTarget' in fields else None)
+                fields.get('FlowTarget') if 'FlowTarget' in fields else None,
+                fields.get('FlowArgs') if 'FlowArgs' in fields else None,
+                fields.get('FlowFrom') if 'FlowFrom' in fields else None)
 
         # **键不存在 = 不动这一格**（2026-10-05 修，与 `fields_to_beat` 同源）。
         #

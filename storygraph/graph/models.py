@@ -94,8 +94,17 @@ class Node:
 
 class Edge:
     def __init__(self, edge_id, from_id, to_id, etype="jump", condition="",
-                 option_text="", from_clause=""):
+                 option_text="", from_clause="", origin="source"):
         self.id = edge_id
+        #: 这条边**从哪来**（2026-10-22 第二阶段）：
+        #:
+        #:   · `source` —— 源文件里的 `jump` / `call`（解析出来的）；
+        #:   · `manual` —— 用户在图上画的草图。
+        #:
+        #: 为什么要分：第二阶段要让"图边从 flow 拍派生"（删双真源）。
+        #: 不分来源的话，重建 `source` 边时会把用户画的草图一起删掉 ——
+        #: 那是"工具吃掉用户的动作"，比双真源更糟。
+        self.origin = str(origin or 'source')
         self.from_id = from_id
         self.to_id = to_id
         self.type = etype
@@ -121,6 +130,7 @@ class Edge:
         result.condition = self.condition
         result.option_text = self.option_text
         result.from_clause = getattr(self, 'from_clause', '')
+        result.origin = getattr(self, 'origin', 'source')
         return result
 
 class Graph:
@@ -166,11 +176,11 @@ class Graph:
         return nid
 
     def add_edge(self, from_id, to_id, etype="jump", condition="",
-                 option_text="", from_clause=""):
+                 option_text="", from_clause="", origin="source"):
         eid = self.next_edge_id
         self.next_edge_id += 1
         edge = Edge(eid, from_id, to_id, etype, condition, option_text,
-                    from_clause)
+                    from_clause, origin=origin)
         self.edges[eid] = edge
         return eid
 

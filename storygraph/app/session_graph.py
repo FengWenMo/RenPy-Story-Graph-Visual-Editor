@@ -131,7 +131,9 @@ def graph_from_layout_dict(data) -> 'object':
             str(ed.get('type') or 'jump'),
             str(ed.get('condition') or ''),
             str(ed.get('option_text') or ''),
-            str(ed.get('from_clause') or ''))
+            str(ed.get('from_clause') or ''),
+            # 老布局没有这一位 → 默认 `source`（那时候图里的边全部来自解析）
+            str(ed.get('origin') or 'source'))
     nx = (data or {}).get('next_ids') or {}
     graph.next_node_id = int(nx.get('node')
                              or (max(graph.nodes) + 1 if graph.nodes else 1))
@@ -204,6 +206,9 @@ class GraphSessionMixin:
                 'condition': e.condition, 'option_text': e.option_text,
                 # `from` 子句也要存：不存的话"存布局 → 读布局"就把它丢了
                 'from_clause': getattr(e, 'from_clause', ''),
+                # 来源（source / manual）同样要存：否则一存一读，用户画的手工边
+                # 全变成 `source`，下次"从拍派生"就把它们删了。
+                'origin': getattr(e, 'origin', 'source'),
             } for eid, e in (getattr(graph, 'edges', {}) or {}).items()},
             'next_ids': {
                 'node': int(getattr(graph, 'next_node_id', 1)),
