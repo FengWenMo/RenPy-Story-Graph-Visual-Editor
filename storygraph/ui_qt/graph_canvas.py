@@ -515,6 +515,9 @@ class GraphCanvas(QGraphicsView):
         #: 空格按住 = 平移（旧版自己跟踪按键状态；Qt 没有"空格修饰键"）
         self._space_down = False
         self._did_auto_layout = False
+        #: 上一次排版走的是哪条路：'logic'（按跳转分层）/ 'file'（按文件顺序）/
+        #: ''（这次没有重排）。调用方（导入）用它决定要不要在控制台说一句。
+        self.last_arrange = ''
         self._problems: dict = {}
         self._empty_hint = ''
         self._panning = False
@@ -556,9 +559,15 @@ class GraphCanvas(QGraphicsView):
 
         取的是**变换矩阵 + 视口中心对应的场景点**，还原时逐字塞回去，
         不重算 fitInView（那会带上"这次内容多大"的差异）。
+
+        **排版用哪一种**（2026-10-22）：这一批新块如果**全来自同一个
+        `.rpy`**，按**文件顺序**排（一个文件一列、从上到下就是文件里的先后）——
+        一个 `.rpy` 里写了多个 label 时，这才是用户心里的"这一章的样子"；
+        跨文件（或没有来源）才走按跳转分层的 `auto_layout`。
         """
         state = self._view_state()
         self.graph = graph
+        self.last_arrange = ''
         self.scene().clear()
         self._items = {}
         self._edges = []
@@ -591,7 +600,10 @@ class GraphCanvas(QGraphicsView):
         # 有没有"还没摆过"的块？有就重排，没有就保留（含用户手工拖过的位置）。
         if self._unplaced_ids():
             self._did_auto_layout = True
-            self.auto_layout()
+            if self._sole_source_file():
+                self.arrange_by_file()
+            else:
+                self.auto_layout()
             return
         self._did_auto_layout = False
         keep = (state is not None) if keep_view is None else bool(keep_view)
@@ -828,11 +840,43 @@ class GraphCanvas(QGraphicsView):
         except Exception:                    # noqa: BLE001
             swallow('graph_canvas.cancel_interaction')
 
+    def _sole_source_file(self) -> str:
+        """
+        图上的块**全来自同一个文件**时返回那个文件的路径，否则返回空串。
+
+        用它决定"新块怎么排"（见 `set_graph`）：一个 `.rpy` 里写了多个 label
+        时，按文件顺序排才像"这一章的样子"；跨文件时那个顺序没有意义
+        （章与章之间靠 jump / call 相接），得按跳转分层。
+        手画的占位块（没有 `file_path`）会让它返回空串 —— 那种图不该猜。
+        """
+        files = set()
+        nodes = getattr(getattr(self, 'graph', None), 'nodes', None) or {}
+        for node in nodes.values():
+            fp = str(getattr(node, 'file_path', '') or '').strip()
+            if not fp:
+                return ''
+            files.add(fp)
+        return next(iter(files)) if len(files) == 1 else ''
+
+    def _apply_node_positions(self):
+        """把**模型里的坐标**搬到画面上（布局函数只改模型，不碰 QGraphics）。"""
+        for nid, node in self.graph.nodes.items():
+            item = self._items.get(nid)
+            if item is not None:
+                item.setPos(node.x, node.y)
+        for ei in self._edges:
+            ei.refresh()
+        self._reset_view()
+
     def auto_layout(self):
         """
         自动布局：复用 `storygraph/graph/layout.py`，**间距按节点尺寸传进去**。
 
         历史事故：节点放大到 208×104 而间距还是旧值 → 同层块垂直重叠。
+
+        这是**按跳转/调用分层**的排法（回答"谁跳到谁"）。一个 `.rpy` 里
+        写了多个 label、想把图排成文件里的先后，用 `arrange_by_file()`
+        （工具栏「▤ 按文件顺序排列」）。
         """
         if self.graph is None or not self.graph.nodes:
             return
@@ -845,13 +889,35 @@ class GraphCanvas(QGraphicsView):
             for i, node in enumerate(self.graph.nodes.values()):
                 node.x = 40 + (i % 4) * layer_gap
                 node.y = 40 + (i // 4) * node_gap
-        for nid, node in self.graph.nodes.items():
-            item = self._items.get(nid)
-            if item is not None:
-                item.setPos(node.x, node.y)
-        for ei in self._edges:
-            ei.refresh()
-        self._reset_view()
+        self.last_arrange = 'logic'
+        self._apply_node_positions()
+
+    def arrange_by_file(self) -> dict:
+        """
+        按**文件顺序**排列：一个 `.rpy` 一列，同一文件里从上到下就是文件里的先后。
+
+        用户 2026-10-22：
+
+        > 在一个 rpy 文件内定义多个 label……让它识别到并自动排好块逻辑
+        > （现在这个流程图是按 label 之间的逻辑来排的，不是按 rpy 文件的逻辑）
+
+        与 `auto_layout` 的关系是**互补**而不是替代：那条路看得见跨章节的
+        跳转，这条路看得见"这一章在文件里是怎么写的"。返回 `layout_by_file`
+        的摘要（谁在第几列、哪些块没有源文件），调用方拿去写控制台。
+        """
+        if self.graph is None or not self.graph.nodes:
+            return {}
+        layer_gap, node_gap = _layout_gaps()
+        try:
+            from storygraph.graph.layout import layout_by_file
+            info = layout_by_file(self.graph, col_gap=layer_gap,
+                                  row_gap=node_gap)
+        except Exception as e:           # noqa: BLE001 - 排不出来就保持原样
+            swallow('ui_qt.graph_canvas.arrange_by_file', e)
+            return {}
+        self.last_arrange = 'file'
+        self._apply_node_positions()
+        return info
 
     # ------------------------------------------------------------------
     #  缩放

@@ -26,8 +26,35 @@ $XDG_STATE_HOME/storygraph/session.json       （其它平台）
 ## "项目内部有保存布局"怎么满足
 
 如果项目根**自己**有一份 `storygraph.session.json`，本模块会读它并合到
-用户级之上（项目级的字段优先）—— 于是"项目里存了布局"也生效，
-而工具**从不主动往项目里写**这一份。想固定一份团队布局，就手工放进项目根。
+用户级之上（项目级的字段优先）—— 于是"项目里存了布局"也生效。
+想固定一份团队布局，就手工放进项目根。
+
+## 唯一的例外：卡片折叠状态**跟项目走**（2026-10-22）
+
+```json
+{ "cards": { "folded": { "game/script/ch01.rpy": ["ch01_roof"] } } }
+```
+
+用户 2026-10-22：
+
+> 继续完成折叠状态跟项目走
+
+折叠状态以前是**偏好**（按绝对路径存在注册表里），于是"项目搬到别的目录 /
+换台机器"就全展开。现在：**文件在项目根里面 → 写项目里这份 `cards` 段**；
+文件不在项目里（直接打开项目外的 `.rpy`）→ 仍写用户偏好。
+
+为什么这条例外可以破 —— 三条一起看：
+
+1. 值用**项目内相对路径**（`game/script/ch01.rpy`）当键，整目录搬走仍然对得上；
+2. 写的是**同一份** `storygraph.session.json` 里的**另一段**：写之前把整份
+   读出来、只改 `cards.folded` 里那一个键再盖回去，`layout` 段一字不动；
+3. 读不回来 / 写不进去**都不拦人**（只记台账），界面继续按当前状态走；
+   但**读不懂的那份绝不盖回去** —— 这份文件人也会手改（团队往里放 `layout`），
+   "解析失败就写回一个只有 `cards` 的新文件"等于把别人写的内容删掉，
+   所以那种情况直接失败、让调用方退回偏好。
+
+`remember_project()` / `save()` 仍然**只写用户级**：这份项目文件的其它字段
+（`layout`）依旧"只读"，唯一的写入点是 `remember_cards()`。
 
 ## 存什么
 
@@ -76,8 +103,10 @@ from storygraph.core.safeguard import swallow
 _ENV = 'STORYGRAPH_SESSION_CONFIG'
 #: 一键关掉自动打开（任何非空值都算关）—— 打包自检 / 自动化用
 _ENV_OFF = 'STORYGRAPH_NO_SESSION'
-#: 项目根里**可选**的那份（工具只读不写）
+#: 项目根里**可选**的那份（`layout` 只读；只有 `cards` 段归工具写）
 PROJECT_FILE = 'storygraph.session.json'
+#: 项目文件里"卡片视图"那一段（见模块 docstring 的例外说明）
+CARDS_SECTION = 'cards'
 #: 最多记几个最近项目
 MAX_RECENT = 8
 #: 当前结构版本（以后加字段靠它迁移；读到更大的版本就当读不懂）
@@ -214,11 +243,61 @@ def project_layout(root, path=None) -> dict:
                 layout = proj.get('layout') if isinstance(proj.get('layout'), dict) \
                     else proj
                 for k, v in layout.items():
-                    if k != 'projects':
+                    # `cards` 是**卡片视图**（折叠状态），不是布局字段：
+                    # 混进来会被下游当成一个不认识的版式键带回去。
+                    if k not in ('projects', CARDS_SECTION):
                         merged[k] = v
     except Exception as e:                       # noqa: BLE001 - 项目里那份坏了也别拦
         swallow('core.session_store.project_layout.project', e)
     return merged
+
+
+def project_file(root) -> Path:
+    """项目根里那份可选文件的路径（**不保证存在**）。"""
+    return Path(str(root)) / PROJECT_FILE
+
+
+def read_project_file(root) -> dict:
+    """
+    读项目根那份文件（**读不出来就是 `{}`**，绝不抛）。
+
+    为什么不复用 `load()`：那份是**用户级**会话表（有版本号、`projects` 分节），
+    形状完全不同 —— 混着读会把"项目里的 `cards`"当成"用户级的字段"。
+    """
+    fp = project_file(root)
+    try:
+        if not fp.is_file():
+            return {}
+        # `utf-8-sig`：用户可能拿编辑器改过这份文件，Windows 上很容易带上 BOM。
+        # 不带 BOM 时它和 `utf-8` 完全一样（多一个字符都不吃）。
+        data = json.loads(fp.read_text(encoding='utf-8-sig'))
+    except Exception as e:                       # noqa: BLE001 - 手写 / 半截文件容错
+        swallow('core.session_store.read_project_file', e)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def project_cards(root) -> dict:
+    """
+    项目里记的折叠状态：`{项目内相对路径: [折起的 label, ...]}`。
+
+    键**缺了**与**值是空表**是两件事：
+      · 缺键 = "这个文件从来没折过"（调用方可以去旧偏好里找一次）；
+      · `[]` = "折过、后来又都展开了"（明确的"没有"，不该再翻旧偏好）。
+    所以 `remember_cards(..., [])` 会**留下**这个键，而不会把它删掉。
+    """
+    cards = read_project_file(root).get(CARDS_SECTION)
+    folded = cards.get('folded') if isinstance(cards, dict) else None
+    if not isinstance(folded, dict):
+        return {}
+    out: dict = {}
+    for rel, names in folded.items():
+        rel = str(rel or '')
+        if not rel:
+            continue
+        if isinstance(names, (list, tuple)):
+            out[rel] = [str(n) for n in names if str(n or '').strip()]
+    return out
 
 
 def last_project(path=None) -> str:
@@ -326,6 +405,78 @@ def set_auto_open(on: bool, path=None) -> dict:
     data = load(path)
     data['auto_open'] = bool(on)
     return save(data, path)
+
+
+def remember_cards(root, rel, folded) -> dict:
+    """
+    把**一个文件**的折叠状态写进项目根那份 `storygraph.session.json`。
+
+    参数
+    ----
+    `rel`    ：项目内相对路径（正斜杠），例如 `game/script/ch01.rpy`；
+    `folded` ：折起来的 label 名（**空表也要写** —— 它表示"折过、又都展开了"，
+               删掉这个键会让下次打开误以为"从没折过"而去翻旧偏好）。
+
+    形状（只动 `cards.folded` 这一小块）：
+
+    ```json
+    { "cards": { "folded": { "game/script/ch01.rpy": ["ch01_roof"] } } }
+    ```
+
+    ⚠ 三条硬规矩：
+      1. **读-改-写**：整份读出来，只替换那一个键，其余字段（尤其 `layout`）
+         原样写回；键没变化就**不写盘**（翻页 / 展开不该反复改项目文件）；
+      2. **原子替换**（`*.tmp` + `os.replace`）：写一半断电不会留下半截 JSON；
+      3. **失败不拦人**：返回 `ok=False` + 原因，调用方退回用户偏好。
+
+    返回 `{'ok','path','reason','changed'}`。
+    """
+    rel = str(rel or '').replace('\\', '/').strip()
+    root = str(root or '')
+    fp = project_file(root) if root else None
+    if not root or not rel:
+        return {'ok': False, 'path': str(fp or ''),
+                'reason': '没给项目根或文件相对路径', 'changed': False}
+    names = [str(n) for n in (folded or ()) if str(n or '').strip()]
+    data = {}
+    if fp.is_file():
+        # ⚠ **读不懂就不写**：这份文件是人也会手改的（团队会往里放 layout）。
+        # 解析失败时"盖回去"等于把用户手写的内容删掉 —— 宁可这次记进偏好，
+        # 也不能悄悄毁掉项目里那份。
+        try:
+            raw = fp.read_text(encoding='utf-8-sig')
+            data = json.loads(raw) if raw.strip() else {}
+            if not isinstance(data, dict):
+                raise ValueError('顶层不是一个对象')
+        except Exception as e:                   # noqa: BLE001
+            swallow('core.session_store.remember_cards.read', e)
+            return {'ok': False, 'path': str(fp),
+                    'reason': '项目里这份 storygraph.session.json 读不懂'
+                              '（可能手写坏了），这次不覆盖它',
+                    'changed': False}
+    cards = data.get(CARDS_SECTION)
+    if not isinstance(cards, dict):
+        cards = {}
+    folded_map = cards.get('folded')
+    if not isinstance(folded_map, dict):
+        folded_map = {}
+    before = folded_map.get(rel)
+    if isinstance(before, (list, tuple)) and list(before) == names:
+        return {'ok': True, 'path': str(fp), 'reason': '', 'changed': False}
+    folded_map[rel] = names
+    cards['folded'] = folded_map
+    data[CARDS_SECTION] = cards
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = fp.with_suffix(fp.suffix + '.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                       encoding='utf-8')
+        os.replace(tmp, fp)                      # 原子替换：半截文件不会留在原地
+    except Exception as e:                       # noqa: BLE001 - 记不住不影响干活
+        swallow('core.session_store.remember_cards', e)
+        return {'ok': False, 'path': str(fp),
+                'reason': f'{type(e).__name__}: {e}', 'changed': False}
+    return {'ok': True, 'path': str(fp), 'reason': '', 'changed': True}
 
 
 def forget(root=None, path=None) -> dict:

@@ -552,3 +552,93 @@ def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
         graph.nodes[nid].y = y
 
     _ = (undirected_neighbors, self_loops, virtual_info)
+
+
+# ===========================================================================
+#  「按文件顺序」—— 与上面那套分层布局**互补**的另一种排法
+# ===========================================================================
+
+def _file_key(node) -> str:
+    """块属于哪个文件（空串 = 没有源文件）。只用来分组，不解析、不碰盘。"""
+    return str(getattr(node, 'file_path', '') or '').strip()
+
+
+def _line_key(node):
+    """块在文件里的行号（拿不到行号 → 排在**该文件末尾**，不是开头）。"""
+    try:
+        ln = int(getattr(node, 'line_number', 0) or 0)
+    except (TypeError, ValueError):
+        return float('inf')
+    return ln if ln > 0 else float('inf')
+
+
+def file_order_groups(graph) -> list:
+    """
+    块按「文件 → 行号」分成**有序**的组：`[(文件, [(nid, node), …]), …]`。
+
+    用户 2026-10-22：
+
+    > 一个 rpy 文件内定义多个 label……让它识别到并自动排好块逻辑……
+    > 因为现在这个流程图就是按照 label 之间的逻辑来排的，
+    > 不是按照 rpy 文件的逻辑来排的
+
+    所以这里**不读边**：只看 `file_path` / `line_number` 这两个导入时就
+    写好的来源字段，回答"这个文件里谁在谁前面"。
+
+    排序规则（**确定性**，不看 dict 插入顺序）：
+
+      · 文件按路径不分大小写排（`ch01.rpy` 在 `ch02.rpy` 前）；
+      · 没有源文件的块（手画的占位块）放最后一列；
+      · 同一个文件里按行号；没行号的排在该文件最后，同行号按 label 名。
+    """
+    grouped: dict = {}
+    for nid, node in (getattr(graph, 'nodes', None) or {}).items():
+        grouped.setdefault(_file_key(node), []).append((nid, node))
+    files = sorted((fp for fp in grouped if fp), key=lambda s: s.casefold())
+    files += [fp for fp in grouped if not fp]        # 无源文件的排最后
+    out = []
+    for fp in files:
+        items = sorted(grouped[fp],
+                       key=lambda it: (_line_key(it[1]),
+                                       str(getattr(it[1], 'label_name', '')
+                                           or '').casefold()))
+        out.append((fp, items))
+    return out
+
+
+def layout_by_file(graph, col_gap=282, row_gap=134) -> dict:
+    """
+    按「文件 → 行号」排：**一个文件一列**，同一文件里从上到下 = 文件里的先后。
+
+    与 `layout_graph`（按 jump / call 分层、减交叉）是**两条互补的路**：
+
+      · `layout_graph` 回答"谁跳到谁" —— 跨章节看控制流时用；
+      · `layout_by_file` 回答"这一章在文件里是怎么排的" —— 一个 `.rpy` 里
+        写了多个 label 时，从上往下读就是文件顺序（与源文件对照、找"这段
+        该放哪"时用它）。
+
+    为什么按**行号**而不是按导入顺序：导入顺序只反映"解析器先看到谁"，
+    而行号就是文件里的物理位置；也只有行号能扛住"重载一次文件"。
+
+    `col_gap` / `row_gap` 由调用方按块尺寸传进来（改尺寸必须走
+    `graph_canvas._layout_gaps`，否则同列块会叠在一起）。
+
+    返回一份**给人看**的摘要（调用方拿去写控制台 / 状态栏）：
+    `{'columns': N, 'nodes': M, 'files': [{'path','labels'}], 'loose': K}`。
+    """
+    groups = file_order_groups(graph)
+    for ci, (_fp, items) in enumerate(groups):
+        x = ci * col_gap
+        top = -(len(items) - 1) * row_gap / 2.0      # 每列各自垂直居中
+        for ri, (nid, node) in enumerate(items):
+            node.x = x
+            node.y = top + ri * row_gap
+    return {
+        'columns': len(groups),
+        'nodes': sum(len(items) for _fp, items in groups),
+        'files': [{'path': fp,
+                   'labels': [str(getattr(n, 'label_name', '') or '')
+                              for _nid, n in items]}
+                  for fp, items in groups if fp],
+        'loose': sum(len(items) for fp, items in groups if not fp),
+    }

@@ -25,6 +25,7 @@ storygraph.ui_qt.window_card.py
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -56,8 +57,10 @@ __all__ = ['CardPageMixin']
 #: 否则点分组标题就会 `_show_index(-1)`，把"当前拍"弄丢。
 _GROUP_LABEL_ROLE = Qt.UserRole + 1
 
-#: 左栏折叠状态存在**偏好**里（`prefs`），**不进**布局 JSON：
-#: 折叠是"我这会儿不想看这几个 label"的临时视图，不是文档的版式。
+#: 左栏折叠状态**不进**布局 JSON（那是"这张图长什么样"），但它 2026-10-22 起
+#: **跟项目走**：写项目根的 `storygraph.session.json`（`cards.folded`，键是
+#: 项目内相对路径）。这一条偏好键只是**兜底**：没打开项目 / 文件在项目外 /
+#: 项目文件写不进去时用它（键是绝对路径，见 `_fold_store_key`）。
 _FOLD_PREF_KEY = 'cards/folded_labels'
 #: 偏好里最多记住多少个文件（偏好不是日志：每换一个项目就多一条会永不清理）。
 _FOLD_PREF_LIMIT = 24
@@ -434,13 +437,41 @@ class CardPageMixin:
             return int(rows[idx])
         return None
 
+    def _fold_project_key(self) -> str:
+        """
+        项目文件里"这一个文件"的键：**相对项目根**（正斜杠）。
+
+        为什么不是绝对路径（折叠状态要**跟项目走**，2026-10-22 用户要求）：
+        项目整个目录搬到别处、或者换台机器打开，绝对路径全变了 —— 状态就
+        "没了"。相对路径只要项目内部结构不变就一直对得上。
+
+        文件不在项目根里面（直接打开项目外的 `.rpy`）→ 返回空串：
+        它不属于这个项目，写进项目的视图文件只会让下一个人困惑。
+        """
+        root = str(getattr(self, '_project_root', '') or '')
+        path = str(getattr(self, '_file_path', '') or '')
+        if not root or not path:
+            return ''
+        try:
+            rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+        except (OSError, ValueError) as e:      # noqa: BLE001 - 算不出就退回偏好
+            swallow('ui_qt.window_card._fold_project_key', e)
+            return ''
+        if os.path.isabs(rel) or rel == os.pardir \
+                or rel.startswith(os.pardir + os.sep):
+            return ''
+        return rel.replace(os.sep, '/')
+
     def _fold_store_key(self) -> str:
         """
-        偏好里"这一个文件"的键：**绝对路径**。
+        偏好里"这一个文件"的键：**绝对路径**（**没打开项目**时才用它）。
 
         为什么不用 `script_path` 原样：同一份文件可以从项目根、从 `game/`、
         从命令行相对路径打开，三个字符串指同一份文件 —— 用相对路径当键，
         换个入口就"折叠状态没了"。
+
+        有项目的时候走 `_fold_project_key`（项目内相对路径），这条只是兜底：
+        单文件模式 / 文件在项目外 / 项目文件写不进去。
         """
         path = str(getattr(self, '_file_path', '') or '')
         if not path:
@@ -451,28 +482,104 @@ class CardPageMixin:
             swallow('ui_qt.window_card._fold_store_key', e)
             return path
 
-    def _load_collapsed_pref(self):
-        """
-        读回"这个文件上次折了哪些 label"（**新载入一章时**调一次）。
+    def _pref_names(self) -> list:
+        """旧偏好里"这个文件"折了哪些 label（形状 `{绝对路径: [label, …]}`）。"""
+        key = self._fold_store_key()
+        if not key:
+            return []
+        store = prefs.load_json(_FOLD_PREF_KEY, {})
+        if not isinstance(store, dict):
+            return []
+        names = store.get(key) or ()
+        return [str(n) for n in names if str(n or '').strip()]
 
-        为什么不在 `__init__`：构造时还不知道会载入哪一章。为什么不用
-        `_reload_list` 挡：它会跟着插卡 / 删卡 / 变量改动反复重建，从偏好
-        重读会把**这次会话里刚折好的**状态冲掉（偏好是上一次的）。
-        """
-        self._collapsed_labels = frozenset()
+    def _pref_drop(self):
+        """把"这个文件"从偏好里删掉（已经迁进项目了，别留两份各自老化）。"""
         key = self._fold_store_key()
         if not key:
             return
         store = prefs.load_json(_FOLD_PREF_KEY, {})
-        if not isinstance(store, dict):
+        if not isinstance(store, dict) or key not in store:
             return
-        names = store.get(key) or ()
-        self._collapsed_labels = frozenset(
-            str(n) for n in names if str(n or '').strip())
+        store.pop(key, None)
+        prefs.save_json(_FOLD_PREF_KEY, store)
+
+    def _save_pref(self, folded) -> bool:
+        """折叠状态写进用户偏好（**没有项目时**的存储，也是写项目失败时的退路）。"""
+        key = self._fold_store_key()
+        if not key:
+            return False
+        store = prefs.load_json(_FOLD_PREF_KEY, {})
+        if not isinstance(store, dict):
+            store = {}
+        # 先删再插：dict 保持插入顺序，最后那个才是"最近用过的文件"。
+        store.pop(key, None)
+        if folded:
+            store[key] = list(folded)
+        if len(store) > _FOLD_PREF_LIMIT:
+            store = dict(list(store.items())[-_FOLD_PREF_LIMIT:])
+        return prefs.save_json(_FOLD_PREF_KEY, store)
+
+    def _save_project_fold(self, rel: str, folded) -> bool:
+        """折叠状态写进项目根的 `storygraph.session.json`（失败返回 False）。"""
+        try:
+            from storygraph.core import session_store as SS
+            res = SS.remember_cards(self._project_root, rel, list(folded or ()))
+        except Exception as e:                  # noqa: BLE001 - 写不进去也不能拦人
+            swallow('ui_qt.window_card._save_project_fold', e)
+            res = {'ok': False, 'reason': f'{type(e).__name__}: {e}'}
+        if res.get('ok'):
+            return True
+        # 项目目录只读 / 文件被编辑器锁着 / 盘满 —— 说一句，然后退回偏好。
+        self._log(f'[折叠] ⚠ 写不进项目里的 storygraph.session.json'
+                  f'（{res.get("reason") or "未知原因"}）—— 这次记在用户偏好里，'
+                  f'换机器不会跟着走')
+        return False
+
+    def _load_collapsed_pref(self):
+        """
+        读回"这个文件上次折了哪些 label"（**新载入一章时**调一次）。
+
+        读的顺序（2026-10-22 起）：
+
+          1. **项目里**那份（`storygraph.session.json` 的 `cards.folded`，
+             键是项目内相对路径）—— 有它就以它为准，**看都不看**旧偏好：
+             否则"我明明展开了，下次又折回去"会来回跳；
+          2. 项目里没有这个文件的记录 → 读**旧偏好**（换版本之前的记忆）：
+             有就**迁进项目**（迁移只发生一次），并把偏好那条删掉；
+          3. 没有项目（单文件 / 文件在项目外）→ 仍然只读偏好。
+
+        为什么不在 `__init__`：构造时还不知道会载入哪一章。为什么不用
+        `_reload_list` 挡：它会跟着插卡 / 删卡 / 变量改动反复重建，从存储
+        重读会把**这次会话里刚折好的**状态冲掉（存的是上一次的）。
+        """
+        self._collapsed_labels = frozenset()
+        rel = self._fold_project_key()
+        if not rel:
+            self._collapsed_labels = frozenset(self._pref_names())
+            return
+        try:
+            from storygraph.core import session_store as SS
+            store = SS.project_cards(self._project_root)
+        except Exception as e:                  # noqa: BLE001 - 读不出来就用偏好
+            swallow('ui_qt.window_card._load_project_fold', e)
+            store = {}
+        if rel in store:
+            self._collapsed_labels = frozenset(store[rel])
+            return
+        names = self._pref_names()
+        self._collapsed_labels = frozenset(names)
+        if not names:
+            return
+        if self._save_project_fold(rel, names):
+            self._pref_drop()
+            self._log(f'[折叠] 这个文件的折叠状态已改记到项目里'
+                      f'（{SS.PROJECT_FILE} 的 cards 段）—— 换台机器 / '
+                      f'把项目挪个目录都还认得')
 
     def _save_collapsed_pref(self):
         """
-        把当前折叠状态写进偏好。
+        把当前折叠状态写进存储：**有项目就写项目**，没有（或写不进去）写偏好。
 
         两个调用点，语义都是"**用户最后看到的样子**"：
 
@@ -482,20 +589,11 @@ class CardPageMixin:
         第二个也要记：只记"点过的那一次"的话，用户折起 A、跳进 A 看一眼、
         关掉，下次打开 A 又是折的 —— 与关窗那一刻看到的画面相反。
         """
-        key = self._fold_store_key()
-        if not key:
-            return
-        store = prefs.load_json(_FOLD_PREF_KEY, {})
-        if not isinstance(store, dict):
-            store = {}
         folded = sorted(str(n) for n in (self._collapsed_labels or ()))
-        # 先删再插：dict 保持插入顺序，最后那个才是"最近用过的文件"。
-        store.pop(key, None)
-        if folded:
-            store[key] = folded
-        if len(store) > _FOLD_PREF_LIMIT:
-            store = dict(list(store.items())[-_FOLD_PREF_LIMIT:])
-        prefs.save_json(_FOLD_PREF_KEY, store)
+        rel = self._fold_project_key()
+        if rel and self._save_project_fold(rel, folded):
+            return
+        self._save_pref(folded)
 
     def _apply_group_folding(self):
         """按 `_collapsed_labels` 把分组子行藏起来 / 放出来（不重建列表）。"""

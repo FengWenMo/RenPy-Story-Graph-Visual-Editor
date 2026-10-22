@@ -60,6 +60,12 @@ WRITERS = {
                                    '⚠ **绝不写进项目仓库**（那会进 git diff、多人协作互相打架）。'
                                    '原子替换（先写 `.tmp` 再 `os.replace`），'
                                    '写失败只记台账、绝不拦退出',
+    'core/session_store.py::remember_cards':
+        '写**项目根**的 `storygraph.session.json` 的 `cards` 段（卡片左栏折叠状态，'
+        '2026-10-22 "折叠状态跟项目走"）。**不是脚本**，不过 generation_guard。'
+        '这是本模块**唯一**主动写进项目目录的地方，理由写在模块 docstring：'
+        '读-改-写（`layout` 段一字不动）+ 原子替换；读不懂那份就**拒写**'
+        '（那是人也会手改的文件，覆盖等于删别人的内容），失败退回用户偏好',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
     'story/statement_registry.py::declare_attr_groups':

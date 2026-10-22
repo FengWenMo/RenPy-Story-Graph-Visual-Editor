@@ -776,6 +776,14 @@ class GraphOpsMixin:
             swallow('main_window.import_chapter_files')
 
         # —— 逐个文件报告（导入了什么，一眼看得见）——
+        # 排版先说：这一批只有一个文件时，`set_graph` 走的是**文件顺序**
+        # （一列 = 这个文件，从上到下 = 文件里的先后）。不说的话，用户会以为
+        # 图上又是"按跳转排的"，然后奇怪为什么这一章的样子不对。
+        if getattr(self._canvas, 'last_arrange', '') == 'file':
+            self._log('[排版] 这一批只有同一个 .rpy：按**文件顺序**排好了 —— '
+                      '一列就是这个文件，从上到下就是文件里的先后'
+                      '（要看跳转关系：工具栏「⤢ 自动布局」；'
+                      '要再按文件排回来：「▤ 按文件顺序排列」）')
         by_file: dict = {}
         for node in (res['graph'].nodes or {}).values():
             fp = getattr(node, 'file_path', None)
@@ -1236,6 +1244,54 @@ class GraphOpsMixin:
         self._status(f'📂 已加载布局 {name}（{res["nodes"]} 块 / '
                      f'{res["edges"]} 线）')
         return res['path']
+    def arrange_by_file(self):
+        """
+        「▤ 按文件顺序排列」：**一个 `.rpy` 一列**，同一文件里从上到下就是
+        文件里的先后（按 `line_number`，不是按导入顺序）。
+
+        用户 2026-10-22：
+
+        > 在一个 rpy 文件内定义多个 label……让它识别到并自动排好块逻辑
+        > （现在这个流程图就是按照 label 之间的逻辑来排的，
+        > 不是按照 rpy 文件的逻辑来排的）
+
+        语义全在 `graph.layout.layout_by_file`（纯数据、可单测），这里只做
+        三件事：把结果念出来、标脏（坐标变了，状态栏的"未保存"要说真话）、
+        失败时保持原样。
+
+        与「⤢ 自动布局」**不冲突、也不互相覆盖**：那条按 jump / call 分层
+        （看跨章节的控制流），这条按文件与行号（看这一章在源文件里的样子）。
+        """
+        if self.graph is None or not getattr(self.graph, 'nodes', None):
+            self._status('剧情图是空的，没有可排列的块。')
+            return {}
+        info = self._canvas.arrange_by_file() or {}
+        if not info:
+            self._status('排列失败（布局算不出来）—— 图上的位置没动。')
+            return {}
+        files = list(info.get('files') or [])
+        loose = int(info.get('loose') or 0)
+        # 坐标进了布局指纹：排完要立刻标脏，否则关窗时不会提示保存，
+        # 下次打开又是旧位置（"我明明排好了"）。
+        self._sync_graph_dirty()
+        for col, item in enumerate(files[:6], start=1):
+            labels = list(item.get('labels') or [])
+            shown = '、'.join(labels[:6])
+            more = f' 等 {len(labels)} 个' if len(labels) > 6 else ''
+            self._log(f'[排版] 第 {col} 列 '
+                      f'{Path(str(item.get("path") or "")).name}：{shown}{more}')
+        if loose:
+            self._log(f'[排版] 另外 {loose} 个块没有源文件（手画的占位块），'
+                      f'排在最右一列')
+        names = [Path(str(f.get('path') or '')).name for f in files]
+        shown = '、'.join(names[:3]) + (f' 等 {len(names)} 个文件'
+                                       if len(names) > 3 else '')
+        self._status(
+            f'▤ 已按文件顺序排好：{len(files)} 个文件 · '
+            f'{int(info.get("nodes") or 0)} 个块（{shown}）—— '
+            f'一列就是一个 .rpy，同一列从上到下就是文件里的先后；'
+            f'要看跳转关系用「⤢ 自动布局」')
+        return info
     def export_control_flow(self, target=None, *, wrapper=None):
         """
         导出 Ren'Py 控制流脚本（每个模块一个 `<label>_control`）。

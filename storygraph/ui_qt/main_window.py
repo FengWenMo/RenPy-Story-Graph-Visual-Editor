@@ -2292,6 +2292,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('➕ 新章节', self.add_node, '新建一个章节模块（label 名校验过）')
         act('🔗 连线', self.add_edge, '在两个模块之间连 jump / call / 菜单')
         act('⤢ 自动布局', self._canvas.auto_layout, '把模块重新排好（分层 + 减交叉）')
+        act('▤ 按文件顺序排列', self.arrange_by_file,
+            '一个 .rpy 一列，同一列从上到下就是文件里的先后（按行号）——\n'
+            '一个 .rpy 里写了多个 label 时用它对照源文件；\n'
+            '要看跳转关系用「⤢ 自动布局」')
         act('🔍 适应窗口', self._canvas.fit_to_content, '整张图缩放到看得全')
         self._open_action = act('✎ 编辑这一章的卡片', self._open_selected_in_card,
                                 '进卡片编辑器改选中模块那一章（也可双击模块）')
