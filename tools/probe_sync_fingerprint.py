@@ -87,6 +87,18 @@ def build_project(base: Path) -> Path:
 
 
 def table_fingerprint(table_dir: Path, base: Path | None = None) -> str:
+    """
+    资源表**内容**的指纹（逐格，但**与行顺序无关**）。
+
+    ⚠ 为什么不能把行号打进指纹（2026-10-22，CI 抓到）：
+    `sync_asset_tables` 写表时的行顺序来自"扫描顺序"（哪个文件先扫到谁先占行）。
+    同一份输入，Windows 与 Linux 的文件系统返回顺序不同 → 行顺序不同 →
+    同一个行为算出两个指纹（本地 `f57f70…`、CI `a86b52…`），金标永远红。
+    行顺序本身由 `test_asset_tables_autocreate` 那边单独守，这条金标只验
+    "**内容集合**有没有变"。
+
+    做法：先按行取值（含列号 c，表头列顺序仍算内容），**整行排序**后再喂哈希。
+    """
     h = hashlib.sha256()
     for name in sorted(_STANDARD_TABLES.values()):
         p = table_dir / name
@@ -94,12 +106,17 @@ def table_fingerprint(table_dir: Path, base: Path | None = None) -> str:
             h.update(f'{name}:MISSING\n'.encode())
             continue
         ws = openpyxl.load_workbook(p).active
-        for r, row in enumerate(ws.iter_rows(values_only=True), 1):
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            cells = []
             for c, v in enumerate(row, 1):
                 # ⚠ 单元格里也会有**绝对路径**（扫出来的行 Path 是绝对路径）
                 # → 不归一化的话每次跑都不一致（实测踩到）。
                 v = _norm(v, base) if isinstance(v, str) else v
-                h.update(f'{name}|{r}|{c}|{type(v).__name__}|{v}\n'.encode())
+                cells.append(f'{c}|{type(v).__name__}|{v}')
+            rows.append((name, '\x1f'.join(cells)))
+        for item in sorted(rows):
+            h.update(f'{item[0]}\x1e{item[1]}\n'.encode())
     return h.hexdigest()
 
 
@@ -136,7 +153,16 @@ def _norm(obj, base: Path):
     if isinstance(obj, dict):
         return {k: _norm(v, base) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_norm(v, base) for v in obj]
+        items = [_norm(v, base) for v in obj]
+        # **list 也排序**（2026-10-22）：`unregistered` / `missing` 这些清单
+        # 是"扫到了哪些文件"，元素顺序完全取决于文件系统返回顺序 ——
+        # 不排序的话同一行为在 Windows / Linux 上算出的指纹不同。
+        # 用 json 字符串当排序键（元素可能是 dict，直接比会 TypeError）。
+        try:
+            return sorted(items, key=lambda x: json.dumps(
+                x, ensure_ascii=False, sort_keys=True, default=str))
+        except TypeError:
+            return items
     return obj
 
 
