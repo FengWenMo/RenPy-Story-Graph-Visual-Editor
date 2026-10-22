@@ -58,6 +58,14 @@ jobs:
                 || tail -30 /tmp/pytest.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 再兜一次：**不带 title** 的 `::error::`（带 title 的那版在 run 页面上
+            # 从来没渲染出来过）。`%` `\r` `\n` 按 GitHub 的转义规则处理。
+            # 这样即使 Job Summary 那块看不到，annotation 里也有具体是哪条。
+            grep -E '^(FAILED|ERROR)' /tmp/pytest.log | head -15 | \
+              while IFS= read -r line; do
+                safe=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
+                printf '::error::%s\n' "$safe"
+              done
           fi
           exit "$rc"
 
