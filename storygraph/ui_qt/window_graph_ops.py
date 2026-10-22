@@ -90,7 +90,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'clear_console', 'engine', 'graph', 'load_script', 'set_assets_ready')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'clear_console', 'engine', 'graph', 'load_script', 'resync_after_export', 'set_assets_ready')
 
     def _show_analysis_text(self, text: str):
         """
@@ -1565,7 +1565,7 @@ class GraphOpsMixin:
         """
         关窗前把剧情图自动存到项目里（**没有用户可问**的那条路）。
 
-        只在 `_confirm_close_graph` 判定"没有可见窗口"时走：测试 / 嵌入 /
+        只在 `_confirm_close` 判定"没有可见窗口"时走：测试 / 嵌入 /
         启动失败清理，构造完就 close，弹模态框会把进程挂住。
         """
         if not self._graph_dirty:
@@ -1623,27 +1623,176 @@ class GraphOpsMixin:
             return False
         return True
 
-    def _confirm_close_graph(self) -> bool:
+    def _confirm_close(self) -> bool:
         """
-        关窗前的图处理：返回 `False` = **不要关**（用户点了取消）。
+        关窗前"还有什么没保存"：**图 / 这一章 / 当前表单**三处一起问。
+        返回 `False` = **不要关**（用户点了取消）。
 
-        只有**窗口真的显示着**才弹三选一：构造完就 close 的那条路
-        （测试 / 嵌入 / 启动失败清理）没有用户在看着，弹框会把进程挂住 ——
-        那种情况沿用"自动存一份、失败也不拦"。
+        为什么三处要一起问（2026-10-22 上一轮只问了图）：卡片页的改动先落在
+        内存里、点「⤓ 导出 .rpy」才写文件 —— 用户改了三拍、关窗、重开，
+        那三拍**一个字都没了**，而关窗时程序一句都没说。这比"图的位置没了"
+        严重得多（那是版式，这是剧本）。
+
+        只有**窗口真的显示着**才弹框：构造完就 close 的那条路（测试 / 嵌入 /
+        启动失败清理）没有用户在看着，弹框会把进程挂住。
         """
-        if not self._graph_dirty:
+        state = self._close_dirty_state()
+        if not (state['graph'] or state['beats'] or state['form']):
             return True
         if not self.isVisible():
+            # 图沿用"自动存一份、失败也不拦"；拍的改动没有安全落点
+            # （导出要过门禁，不能替用户决定覆盖），只能放弃。
             self._auto_save_layout_on_close()
             return True
-        action = self._ask_close_graph_action()
+        action = self._ask_close_action(state)
         if action == 'cancel':
-            self._status('已取消关闭 —— 剧情图还在。')
+            self._status('已取消关闭 —— 改动都还在。')
             return False
         if action == 'discard':
-            self._log('[布局] 按你的选择：这次改动没有保存。')
+            self._log('[关闭] 按你的选择：这次没导出的改动没有保存。')
             return True
-        return self._save_layout_for_close()
+        return self._save_for_close(state)
+
+    def _confirm_close_graph(self) -> bool:
+        """兼容旧名：关窗询问现在同时管"这一章"（见 `_confirm_close`）。"""
+        return self._confirm_close()
+
+    def _close_dirty_state(self) -> dict:
+        """
+        关窗前"还有什么没保存"：三种来源分别算。
+
+          · `graph`：剧情图的位置 / 连线（`_graph_dirty`，既有判据）；
+          · `beats`：这一章的拍与磁盘不一致（会话的 `unsaved_edits`）；
+          · `form`：当前这一拍的表单改了、还没按「💾 保存这一拍」。
+
+        三者**分开问**，因为"保存"对它们的意思不同：图存成 JSON，
+        拍写回 .rpy，表单先要落到拍上。
+        """
+        state = {'graph': bool(getattr(self, '_graph_dirty', False)),
+                 'beats': False, 'changed': 0, 'added': 0, 'removed': 0,
+                 'form': False,
+                 'file': str(getattr(self._session, 'script_path', '') or '')}
+        try:
+            if len(self._session):
+                info = self._session.unsaved_edits()
+                state['beats'] = bool(info.get('dirty'))
+                state['changed'] = int(info.get('changed') or 0)
+                state['added'] = int(info.get('added') or 0)
+                state['removed'] = int(info.get('removed') or 0)
+        except Exception as e:                  # noqa: BLE001 - 判不出来就别拦关闭
+            swallow('ui_qt.window_graph_ops._close_dirty_state', e)
+        try:
+            if len(self._session):
+                state['form'] = bool(self._panel.is_modified())
+        except Exception as e:                  # noqa: BLE001 - 表单判不了同理
+            swallow('ui_qt.window_graph_ops._close_dirty_state.form', e)
+        return state
+
+    def _beats_state_text(self, state) -> str:
+        """「这一章改了几拍」那一行（数字对不上就**不报数**，不猜）。"""
+        name = Path(state['file']).name if state.get('file') else '这一章'
+        parts = []
+        if state.get('changed'):
+            parts.append(f'{state["changed"]} 拍内容改了')
+        if state.get('added'):
+            parts.append(f'{state["added"]} 拍是新加的')
+        if state.get('removed'):
+            parts.append(f'{state["removed"]} 拍删掉了')
+        what = '、'.join(parts) or '有改动'
+        return f'{name}：{what}，还没导出（点「⤓ 导出 .rpy」才落盘）。'
+
+    def _ask_close_action(self, state) -> str:
+        """
+        关窗询问：返回 `save` / `discard` / `cancel`。
+
+        只有图脏（老情况）时走原来那个三选一，措辞与按钮都不变 —— 那是
+        用户已经熟悉的一步，不要因为多了"这一章"就把它换掉。
+        """
+        if state['graph'] and not (state['beats'] or state['form']):
+            return self._ask_close_graph_action()
+        box = QMessageBox(self)
+        box.setWindowTitle('还有没保存的改动')
+        box.setIcon(QMessageBox.Question)
+        lines = []
+        if state['beats']:
+            lines.append(self._beats_state_text(state))
+        if state['form']:
+            lines.append('当前这一拍的表单改了，还没按「💾 保存这一拍」。')
+        if state['graph']:
+            lines.append('剧情图：模块位置 / 连线只在内存里。')
+        box.setText('\n'.join(lines))
+        box.setInformativeText('「保存并退出」会先把这一章写回原文件，再存剧情图。')
+        save = box.addButton('保存并退出', QMessageBox.AcceptRole)
+        box.addButton('不保存，直接退出', QMessageBox.DestructiveRole)
+        cancel = box.addButton('取消', QMessageBox.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save:
+            return 'save'
+        if clicked is None or clicked is cancel:
+            return 'cancel'
+        return 'discard'
+
+    def _save_for_close(self, state) -> bool:
+        """
+        用户选了"保存"：**先写这一章、再存图**；任一步失败就**不关窗**。
+
+        顺序不能反：图的布局里带着"当前章节 / 节点"，而章节的拍才是剧本
+        的真源 —— 先把剧本写稳，再记版式。
+        """
+        if state['form'] or state['beats']:
+            try:
+                self.apply_current_beat()
+            except Exception as e:              # noqa: BLE001
+                QMessageBox.warning(
+                    self, '保存失败',
+                    f'当前这一拍的表单没能写进去：{e}\n\n先不关窗，改动还在。')
+                return False
+            try:
+                still = self._session.unsaved_edits()
+            except Exception as e:              # noqa: BLE001 - 判不了就按"要写"处理
+                swallow('ui_qt.window_graph_ops._save_for_close.check', e)
+                still = {'dirty': True}
+            if still.get('dirty') and not self._save_chapter_for_close():
+                return False
+        if state['graph']:
+            return self._save_layout_for_close()
+        return True
+
+    def _save_chapter_for_close(self) -> bool:
+        """
+        关窗时把这一章**写回它原来的文件**（不再弹"导出到哪"）。
+
+        为什么不在关窗路上再弹一次文件对话框：用户刚才已经在"保存并退出"
+        上表过态，再叠一个对话框只会让人以为程序卡住。目标就是
+        `default_output_path()`（有源文件 → 原文件；没有源 → `build/renpy/`）。
+
+        失败（门禁拦下 / 语法错）**不关窗**：改动还在内存里，
+        关掉才是真的丢。
+        """
+        target = self._session.default_output_path()
+        try:
+            res = self._session.export(target)
+        except Exception as e:                  # noqa: BLE001
+            QMessageBox.warning(self, '导出失败',
+                                f'{e}\n\n先不关窗，改动还在。')
+            return False
+        if not res.get('ok'):
+            blocking = res.get('blocking') or ['（未知原因）']
+            QMessageBox.warning(
+                self, '这一章没能写出去',
+                '\n'.join(str(b) for b in blocking[:4])
+                + '\n\n先不关窗 —— 改动还在内存里。')
+            return False
+        # 写出去了 → 内存这一刻与磁盘一致（关窗 / 状态栏的"未导出"靠这条基线）
+        self._session.take_edits_baseline()
+        self._status_bar.set_dirty(False, str(res.get('path') or target))
+        self.resync_after_export(res)
+        self._log(f'[导出] 关窗前已写回 {Path(target).name}'
+                  f'（{res.get("note", "")}）')
+        return True
 
     # ------------------------------------------------------------------
     #  诊断详情（P1-5）

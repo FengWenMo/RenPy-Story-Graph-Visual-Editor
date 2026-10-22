@@ -163,6 +163,113 @@ class TableSessionMixin:
         """当前章节的顶层保真块（文档级真源，与第一拍在不在无关）。"""
         return self._chapter_doc().file_blocks
 
+    # ------------------------------------------------------------------
+    #  "还没导出的改动"（2026-10-22：关窗询问 / 状态栏共用一份判据）
+    # ------------------------------------------------------------------
+
+    def take_edits_baseline(self) -> None:
+        """
+        「内存里的拍 == 刚读进来 / 刚写出去的那一份」—— 记下这条基线。
+
+        在 **载入之后**（`load`）与 **导出成功之后**（前端）调用。之后任何改动
+        只是把 `_edits_dirty` 立起来；"到底改了几拍"到关窗时才现算
+        （见 `unsaved_edits`），免得每次翻页都全章比一遍。
+        """
+        self._saved_prints = [self._beat_edits_print(i)
+                              for i in range(len(self.beats))]
+        self._edits_dirty = False
+
+    def mark_edits_dirty(self) -> None:
+        """标记"拍被改过、还没导出"（所有会改拍的路径都要调它）。"""
+        self._edits_dirty = True
+
+    def refresh_edits_flag(self) -> bool:
+        """
+        按基线**重算**"脏不脏"，返回结果。
+
+        撤销那条路专用：用户把改动撤回去之后，内存里可能已经与磁盘一致了
+        （例如刚插了一张卡又撤销插卡）—— 那时状态栏不该再喊「● 未导出」。
+        会全章算一遍指纹，所以只在"撤销 / 恢复"这种点击频率上调用。
+        """
+        try:
+            self._edits_dirty = bool(self.unsaved_edits().get('dirty'))
+        except Exception as e:                  # noqa: BLE001 - 算不出来就保持原样
+            swallow('app.session_table.refresh_edits_flag', e)
+        return bool(getattr(self, '_edits_dirty', False))
+
+    def has_unsaved_edits(self) -> bool:
+        """内存里有没有还没导出的改动（**便宜**：一个布尔，翻页也能问）。"""
+        return bool(getattr(self, '_edits_dirty', False))
+
+    def _beat_edits_print(self, idx: int) -> str:
+        """
+        一拍"**会不会改变产物**"的指纹。
+
+        为什么不用字段快照：`apply()`（翻页时的"顺带提交"）会把 `At` 这类
+        **投影列**规范化 —— 内存里 `Beat.at` 从空变成 `i11`，而产物一个字都
+        不变。拿字段快照比，用户只是翻了几页，关窗时就会凭空问"你改了 3 拍"。
+        该问的是"导出去会不一样吗"，所以这里比**渲染出来的行**
+        （与导出同一条路，见 `rendered_lines_of`），再补两个不进单拍渲染、
+        但确实要保存的字段：`label`（换了 label = 这一拍要挪到别的章节）与
+        `notes`（只在表里，渲染不出**来**，丢了也是丢用户写的东西）。
+
+        `line_id` / `seq` 是身份编号，**刻意不比**：插一张卡会让后面每一拍
+        整体后移，比它们就会把"插了 1 拍"说成"改了 200 拍"。
+        """
+        import hashlib
+        beat = self.beats[idx]
+        try:
+            from storygraph.story.beat_render import render_beat_to_rpy
+            # **不 deepcopy**：`rendered_lines_of` 里那份拷贝是给"预览会删几行"
+            # 用的（它怕 hydrate 改到用户手里那一拍）；这里只读不改，实测
+            # 渲染一整个 1793 拍的章节，直接渲染 68ms / 拷贝再渲染 183ms。
+            lines = list(render_beat_to_rpy(beat))
+        except Exception as e:                  # noqa: BLE001 - 渲染不了就退回拷贝路
+            swallow('app.session_table._beat_edits_print', e)
+            lines = list(self.rendered_lines_of(beat) or ())
+        tail = [str(getattr(beat, 'label', '') or ''),
+                str(getattr(beat, 'notes', '') or '')]
+        blob = '\x1f'.join([*lines, '', *tail])
+        return hashlib.md5(blob.encode('utf-8', 'replace')).hexdigest()[:12]
+
+    def unsaved_edits(self) -> dict:
+        """
+        「改了哪几拍、还没导出」：`{dirty, changed, added, removed, total}`。
+
+        `changed` 是**内容真的变了**的拍数：用 `difflib` 对齐两份指纹序列，
+        所以"中间插了一张卡"只算 1 拍新增，不会把后面每一拍都报成改过。
+
+        ⚠ **这个调用会把全章算一遍指纹**（1800 拍约 80ms）—— 只在关窗 /
+        弹"要不要保存"时用。滚动、翻页、状态栏那些地方用
+        `has_unsaved_edits()`。
+        """
+        cur = [self._beat_edits_print(i) for i in range(len(self.beats))]
+        base = getattr(self, '_saved_prints', None)
+        total = len(cur)
+        if base is None:
+            # 没有基线（测试直接塞 `beats`、会话没走 `load`）：只能信那个布尔。
+            return {'dirty': self.has_unsaved_edits(), 'changed': 0,
+                    'added': 0, 'removed': 0, 'total': total}
+        if list(base) == cur:
+            return {'dirty': False, 'changed': 0, 'added': 0, 'removed': 0,
+                    'total': total}
+        import difflib
+        changed = added = removed = 0
+        matcher = difflib.SequenceMatcher(None, list(base), cur, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                continue
+            if tag == 'replace':
+                changed += min(i2 - i1, j2 - j1)
+                added += max(0, (j2 - j1) - (i2 - i1))
+                removed += max(0, (i2 - i1) - (j2 - j1))
+            elif tag == 'insert':
+                added += j2 - j1
+            elif tag == 'delete':
+                removed += i2 - i1
+        return {'dirty': (changed + added + removed) > 0, 'changed': changed,
+                'added': added, 'removed': removed, 'total': total}
+
     def load(self, path, label=None) -> int:
         """
         载入一个 .rpy，解析成 Beat 列表。返回拍数。
@@ -202,6 +309,8 @@ class TableSessionMixin:
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。
         self.forget_undo()
         self._struct_undo = []          # 结构撤销栈同理：索引全变了
+        # 刚读进来的这一份 = 干净状态（关窗 / 状态栏靠这条基线判"改过没有"）
+        self.take_edits_baseline()
         return len(self.beats)
 
     def apply_node_variable_edits(self, graph, nid, variables,
@@ -282,14 +391,19 @@ class TableSessionMixin:
                         return True
             return False
 
-        def anchor_beat(op_index):
+        def anchor_of(op_index):
             """
-            这一条新操作该落在哪一拍：`anchors` → `insert_beat` → None。
+            这一条新操作该落在**哪一拍、块体的哪一头**。
+
+            返回 `(beat, where)`：`where` 是 `'end'`（块体末尾，默认）或
+            `'head'`（块体最前面 = "块首插入"，2026-10-22）。两种落点共用
+            下面那段"循环头往后挪一拍"的判据 —— 块首就是循环体的第一行。
 
             指到"循环头"那一拍（`for …:` 自己占一拍、块体在下一拍）时
             往后挪一拍 —— 头拍的 `code` 是空的，写进去会落在循环**外面**。
             """
             want = None
+            where = 'end'
             if isinstance(anchors, dict):
                 want = anchors.get(op_index)
             elif anchors:
@@ -299,25 +413,34 @@ class TableSessionMixin:
                     want = None
             if want is None:
                 want = insert_beat
+            if isinstance(want, (tuple, list)) and want:
+                # `(拍号, 'head')`：工作台选了"块首"时就这么递过来。
+                # 只给一个整数的是老契约（= 块体末尾），必须继续认。
+                where = str(want[1] if len(want) > 1 else 'end') or 'end'
+                want = want[0]
             try:
                 want = int(want)
             except (TypeError, ValueError):
-                return None
+                return None, 'end'
             if not 0 <= want < len(self.beats):
-                return None
+                return None, 'end'
             cand = self.beats[want]
             if str(getattr(cand, 'label', '') or '') != label:
-                return None
+                return None, 'end'
             if (not str(getattr(cand, 'code', '') or '').strip()
                     and str(getattr(cand, 'loop_header', '') or '').strip()
                     and want + 1 < len(self.beats)):
                 nxt = self.beats[want + 1]
                 if str(getattr(nxt, 'label', '') or '') == label:
                     cand = nxt
-            return cand
+            return cand, ('head' if where == 'head' else 'end')
 
         applied = unplaced = removed = 0
         inserted: list = []
+        #: `id(beat) -> (beat, [新行…])`：块首那几条**收齐了再插**
+        #: （边收边插会让后加的跑到前面：工作台里"先加 A 再加 B"，
+        #: 产物里变成 B 在 A 上面）。
+        heads: dict = {}
         for i, new in enumerate(new_ops):
             if i < len(old_ops):
                 old = old_ops[i]
@@ -336,15 +459,26 @@ class TableSessionMixin:
             else:
                 # 新增：优先放进用户选中那条所在的拍（同一个块体 → 同一个
                 # `if` / `for` 里面）；没选/对不上就放到本章最后一拍。
-                beat = anchor_beat(i) or beats[-1]
-                beat.code = ((str(beat.code or '') + '\n')
-                             if str(beat.code or '').strip() else '') + new
+                beat, where = anchor_of(i)
+                if beat is None:
+                    beat, where = beats[-1], 'end'
+                if where == 'head':
+                    entry = heads.get(id(beat))
+                    if entry is None:
+                        heads[id(beat)] = (beat, [new])
+                    else:
+                        entry[1].append(new)
+                else:
+                    beat.code = ((str(beat.code or '') + '\n')
+                                 if str(beat.code or '').strip() else '') + new
                 try:
                     inserted.append(next(
                         n for n, b in enumerate(self.beats) if b is beat))
                 except StopIteration:
                     inserted.append(-1)
                 applied += 1
+        for beat, rows in heads.values():
+            self._prepend_beat_code(beat, rows)
         # 被删掉的多余旧操作（从后往前删，避免同一拍多行时下标跑掉）
         for i in range(len(new_ops), len(old_ops)):
             line = line_of(old_stmts[i])
@@ -356,11 +490,45 @@ class TableSessionMixin:
                 unplaced += 1
         # 图上的节点也跟着更新（两处保持一致）
         merged = self.set_node_variables(graph, nid, new_ops)
+        if applied or removed:
+            # 拍的 `code` / `raw` 被改过 → 内存与磁盘不再一致（关窗要问）。
+            self.mark_edits_dirty()
         return {'ok': True, 'error': '', 'applied': applied,
                 'unplaced': unplaced, 'removed': removed,
                 'inserted': inserted,
                 'variables': merged.get('variables'),
                 'kept_tech': merged.get('kept_tech')}
+
+    def _prepend_beat_code(self, beat, lines) -> None:
+        """
+        把几行代码插到**这一拍拍内容的最前面**（变量工作台的"块首插入"）。
+
+        为什么不是一句 `beat.code = 新行 + beat.code`：
+
+          · `ordered` 是 raw / code 在源码里的**交错顺序**。不把新行记进去，
+            `_ordered_code_lines` 会判"code 池里多出来一行"→ 整份退回老顺序
+            （raw 全部在前、code 全部在后），同一拍里原有的 `$` 语句会被挪到
+            `show screen` **之后** —— 只是插一条赋值，演出顺序却变了；
+          · `code_blocks` 是 `python:` 块的行区间（1-based，按"raw 行在前、
+            code 行在后"编号）。前面插了 n 行，所有区间整体后移 n ——
+            不挪的话块标记会落在别的行上（产物语法错）。
+
+        `Beat.code` 存的是**块体本身**，缩进由块头在渲染时补 —— 所以"插到
+        `code` 最前面"就等于"块体的第一行"，不需要自己算空格。
+        """
+        rows = [str(ln) for ln in (lines or ()) if str(ln or '').strip()]
+        if not rows:
+            return
+        old = str(getattr(beat, 'code', '') or '')
+        beat.code = '\n'.join(rows) + (('\n' + old) if old.strip() else '')
+        ordered = getattr(beat, 'ordered', None)
+        if ordered:
+            for row in reversed(rows):
+                ordered.insert(0, ('code', row))
+        blocks = getattr(beat, 'code_blocks', None)
+        if blocks:
+            beat.code_blocks = [(int(a) + len(rows), int(b) + len(rows))
+                                for a, b in blocks]
 
     def label_names(self) -> list:
         """这个文件里按出现顺序有哪些 label（去重；空 label 不列）。"""
@@ -657,6 +825,8 @@ class TableSessionMixin:
         self._push_struct_undo(('insert', at))
         self._renumber()
         self.forget_undo()
+        # 撤销结构 = 可能已经回到磁盘那份（插卡又撤掉）→ 重算脏标记
+        self.refresh_edits_flag()
         return {'ok': True, 'error': '', 'index': at, 'count': len(self.beats)}
 
     #: 结构撤销栈最多留多少步（交互退路，不是版本控制）
@@ -735,6 +905,7 @@ class TableSessionMixin:
         self._sync_chapter()                # 结构撤销同样不许把顶层块弄丢
         self._renumber()
         self.forget_undo()
+        self.refresh_edits_flag()           # 撤到与磁盘一致时，别再喊"未导出"
         return {'ok': True, 'error': '', 'index': index, 'note': note,
                 'count': len(self.beats), 'depth': len(stack)}
 
@@ -919,6 +1090,10 @@ class TableSessionMixin:
         """
         if not self.has(idx):
             return None
+        # **改没改？**（2026-10-22）：`apply` 会被"翻页顺带提交"反复调用，
+        # 不能一调就把"未导出"立起来（否则状态栏永远在喊）。
+        # 只比这一拍的前后指纹（~0.1ms），廉价到可以每次都做。
+        _before_print = self._beat_edits_print(idx)
         b = self.beats[idx]
         fields = dict(fields or {})
 
@@ -1073,6 +1248,9 @@ class TableSessionMixin:
         # 更权威，所以放在最后折。（放在这里也顺带让 `sanitized_cells` 的留痕
         # 与"最终内容"一致。）
         self._fold_dynamic_columns(b, fields)
+        # 真的变了才把"未导出"立起来（翻页 / 空提交不算改动）。
+        if self._beat_edits_print(idx) != _before_print:
+            self.mark_edits_dirty()
         return b
 
     @staticmethod
@@ -1141,6 +1319,7 @@ class TableSessionMixin:
         if not self.has(idx):
             return False
         self.beats[idx].speaker = str(cid or '')
+        self.mark_edits_dirty()          # 绕过 `apply()` 直接改拍，标记要补
         return True
 
     def remove_sprite(self, idx: int, image_spec: str) -> Optional[Beat]:
@@ -1154,6 +1333,7 @@ class TableSessionMixin:
         b.show = new_show
         b.at = B.uniform_sprite_position(rows)
         b.stage = compose_stage_extra(b, self.symbols)
+        self.mark_edits_dirty()
         return b
 
     def snapshot(self, idx: int) -> Optional[BeatSnapshot]:
@@ -1267,7 +1447,11 @@ class TableSessionMixin:
         snap = self._last_saved.pop(idx, None) if idx is not None else None
         if snap is None:
             return None
-        return self.restore(snap)
+        beat = self.restore(snap)
+        # 撤销把内容改回去了 —— 但"现在内存里这份"仍可能与磁盘不同
+        # （例如撤到"改之前"，而改之前本身也没导出过）。所以重算，不猜。
+        self.refresh_edits_flag()
+        return beat
 
     def has_undo(self, idx: int) -> bool:
         """第 idx 拍有没有可撤销的修改（撤销按钮的 enabled 就用它）。"""

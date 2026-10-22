@@ -181,6 +181,16 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         #: 之前发生过什么"的状态，正是拆分时最容易漏的东西 ——
         #: `test_editor_session_split` 的 `REQUIRES` 守卫就要求它一开始就在。
         self._transforms_decision = None
+        #: 内存里的拍**有没有还没导出的改动**（2026-10-22）。
+        #:
+        #: 为什么需要它：卡片页从前只在"保存这一拍"时把状态栏切成「● 未导出」，
+        #: 而插卡 / 删卡 / 变量工作台改块体都不会切；`_show_index` 又会在**每次
+        #: 翻页**时切回「✔ 已同步」—— 于是"改了没导出"这件事被界面自己抹掉了。
+        #: 现在由会话回答（`has_unsaved_edits` / `unsaved_edits`），界面只显示。
+        self._edits_dirty = False
+        #: 载入 / 导出时的**拍内容基线**（用来在关窗时算出"改了几拍"）。
+        #: `None` = 还没载入过任何一章。
+        self._saved_prints = None
 
     #  资产
     # ------------------------------------------------------------------
@@ -244,6 +254,10 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
             if not str(getattr(b, 'label', '') or '').strip():
                 b.label = label
             b.line_id = f'{b.label}.{i:04d}'
+        # **结构变了 = 内存与磁盘不再一致**（2026-10-22）：插卡 / 删卡 / 撤销结构
+        # 都走这里，所以"未导出"的标记放在这一处就够 —— 逐条调用点去加，
+        # 早晚漏一条（而漏的那条就是关窗时悄悄丢改动的那条）。
+        self.mark_edits_dirty()
 
     def __len__(self) -> int:
         return len(self.beats)

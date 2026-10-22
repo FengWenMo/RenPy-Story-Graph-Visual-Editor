@@ -146,6 +146,13 @@ class WindowExportMixin:
             QMessageBox.warning(self, '生成被门禁拦截', '\n'.join(blocking))
             self._report_swallowed(mark)
             return
+        # 写出去了 → 内存这一刻与磁盘一致（关窗 / 状态栏的"未导出"靠这条基线）。
+        # 原地导出会在 `export()` 里重载内存（那时基线已随 `load` 更新过），
+        # 导出到别的路径则不重载 —— 两种都在这里对齐一次。
+        try:
+            self._session.take_edits_baseline()
+        except Exception as e:                  # noqa: BLE001 - 记不上基线不影响导出
+            swallow('main_window.export_script.baseline', e)
         self._status_bar.set_dirty(False, str(res.get('path') or path))
         # **原地导出之后内存会重新对齐到磁盘**（见
         # `session_export._reload_after_inplace_write`）：拍的粒度可能变

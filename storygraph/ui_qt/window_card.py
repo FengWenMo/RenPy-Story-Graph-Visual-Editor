@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
                                QSplitter, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget)
 
+from storygraph.ui_qt import prefs
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.flow_notes import edge_rebuild_note
@@ -54,6 +55,12 @@ __all__ = ['CardPageMixin']
 #: 从前"行号 == 拍号"是硬约定；有了分组标题行之后，映射必须走 data ——
 #: 否则点分组标题就会 `_show_index(-1)`，把"当前拍"弄丢。
 _GROUP_LABEL_ROLE = Qt.UserRole + 1
+
+#: 左栏折叠状态存在**偏好**里（`prefs`），**不进**布局 JSON：
+#: 折叠是"我这会儿不想看这几个 label"的临时视图，不是文档的版式。
+_FOLD_PREF_KEY = 'cards/folded_labels'
+#: 偏好里最多记住多少个文件（偏好不是日志：每换一个项目就多一条会永不清理）。
+_FOLD_PREF_LIMIT = 24
 
 
 def _statement_of(beat, statements) -> dict:
@@ -163,6 +170,9 @@ class CardPageMixin:
             self._panel.set_symbols(self._session.symbols)
             self._sync_choice_groups()
             self._refresh_asset_choices()
+            # **先读偏好、再建列表**：`_reload_list` 建完就按 `_collapsed_labels`
+            # 藏行了，反了的话第一次打开会全展开、然后才被"恢复"成折叠。
+            self._load_collapsed_pref()
             self._reload_list()
             idx = self._session.index_of_label(label) if label else 0
             if label and idx < 0:
@@ -424,6 +434,69 @@ class CardPageMixin:
             return int(rows[idx])
         return None
 
+    def _fold_store_key(self) -> str:
+        """
+        偏好里"这一个文件"的键：**绝对路径**。
+
+        为什么不用 `script_path` 原样：同一份文件可以从项目根、从 `game/`、
+        从命令行相对路径打开，三个字符串指同一份文件 —— 用相对路径当键，
+        换个入口就"折叠状态没了"。
+        """
+        path = str(getattr(self, '_file_path', '') or '')
+        if not path:
+            return ''
+        try:
+            return str(Path(path).resolve())
+        except OSError as e:                    # noqa: BLE001 - 解析不了就退回原字符串
+            swallow('ui_qt.window_card._fold_store_key', e)
+            return path
+
+    def _load_collapsed_pref(self):
+        """
+        读回"这个文件上次折了哪些 label"（**新载入一章时**调一次）。
+
+        为什么不在 `__init__`：构造时还不知道会载入哪一章。为什么不用
+        `_reload_list` 挡：它会跟着插卡 / 删卡 / 变量改动反复重建，从偏好
+        重读会把**这次会话里刚折好的**状态冲掉（偏好是上一次的）。
+        """
+        self._collapsed_labels = frozenset()
+        key = self._fold_store_key()
+        if not key:
+            return
+        store = prefs.load_json(_FOLD_PREF_KEY, {})
+        if not isinstance(store, dict):
+            return
+        names = store.get(key) or ()
+        self._collapsed_labels = frozenset(
+            str(n) for n in names if str(n or '').strip())
+
+    def _save_collapsed_pref(self):
+        """
+        把当前折叠状态写进偏好。
+
+        两个调用点，语义都是"**用户最后看到的样子**"：
+
+          · `_toggle_label_group` —— 点了标题行（明确的折 / 展）；
+          · `_expand_label` —— 导航进了一个折着的组，它被自动展开了。
+
+        第二个也要记：只记"点过的那一次"的话，用户折起 A、跳进 A 看一眼、
+        关掉，下次打开 A 又是折的 —— 与关窗那一刻看到的画面相反。
+        """
+        key = self._fold_store_key()
+        if not key:
+            return
+        store = prefs.load_json(_FOLD_PREF_KEY, {})
+        if not isinstance(store, dict):
+            store = {}
+        folded = sorted(str(n) for n in (self._collapsed_labels or ()))
+        # 先删再插：dict 保持插入顺序，最后那个才是"最近用过的文件"。
+        store.pop(key, None)
+        if folded:
+            store[key] = folded
+        if len(store) > _FOLD_PREF_LIMIT:
+            store = dict(list(store.items())[-_FOLD_PREF_LIMIT:])
+        prefs.save_json(_FOLD_PREF_KEY, store)
+
     def _apply_group_folding(self):
         """按 `_collapsed_labels` 把分组子行藏起来 / 放出来（不重建列表）。"""
         groups = getattr(self, '_group_items', None) or {}
@@ -467,6 +540,9 @@ class CardPageMixin:
         collapsed.discard(label)
         self._collapsed_labels = frozenset(collapsed)
         self._apply_group_folding()
+        # 展开放进记忆（"最后看到的样子"就是这个）：只在这个组**真的**从折着
+        # 变成开着时才写，翻页本身不产生写盘。
+        self._save_collapsed_pref()
         return True
 
     def _toggle_label_group(self, label: str):
@@ -480,8 +556,10 @@ class CardPageMixin:
             collapsed.add(label)
         self._collapsed_labels = frozenset(collapsed)
         self._apply_group_folding()
+        self._save_collapsed_pref()
         self._status(f'{"已折叠" if label in collapsed else "已展开"}'
-                     f' label「{label}」的分组（再点标题行切换）。')
+                     f' label「{label}」的分组（再点标题行切换；'
+                     f'下次打开这个文件还是这样）。')
 
     def _on_list_item_clicked(self, item):
         """点列表：分组标题 → 折叠/展开；拍 → 交给 `currentRowChanged`。"""
@@ -831,6 +909,23 @@ class CardPageMixin:
                 widget.setFocus()
                 return
 
+    def _sync_export_dirty(self):
+        """
+        状态栏右下角的「● 未导出 / ✔ 已同步」**跟着会话走**，不跟着翻页走。
+
+        2026-10-22 修：从前 `_show_index` 每翻一页就把标签切成「✔ 已同步」，
+        于是"改了三拍还没导出"这件事被界面自己抹掉了（而关窗时也不问，
+        改动就这么没了）。现在唯一的判据是 `session.has_unsaved_edits()`：
+        载入 / 导出后是 False，任何改拍的路径（保存这一拍 / 撤销 / 插卡 /
+        删卡 / 变量工作台）之后是 True。
+        """
+        try:
+            dirty = bool(self._session.has_unsaved_edits())
+            path = str(getattr(self._session, 'script_path', '') or '')
+            self._status_bar.set_dirty(dirty, path)
+        except Exception as e:                  # noqa: BLE001 - 只影响一个提示
+            swallow('ui_qt.window_card._sync_export_dirty', e)
+
     def _show_index(self, idx: int):
         if not self._session.has(idx):
             self._idx = -1
@@ -859,7 +954,9 @@ class CardPageMixin:
             self._list.setCurrentRow(row)
         self._list.blockSignals(False)
         self._sync_label_combo()
-        self._status_bar.set_dirty(False, self._file_path)
+        # 翻页**不改**"导出过没有"：这里从前写死 `set_dirty(False)`，
+        # 于是改了没导出、翻一页就显示"已同步"（2026-10-22 修）。
+        self._sync_export_dirty()
         self._update_nav()
         self._sync_undo_button()
         self._sync_structural_buttons()
@@ -1158,7 +1255,8 @@ class CardPageMixin:
         # 用户 2026-10-05："我已经保存该卡片了，可是当前舞台变化没有生效"。
         self.refresh_derived_panels(idx)
         self._sync_undo_button()
-        self._status_bar.set_dirty(True, self._file_path)
+        # 保存成功 = 内存比磁盘新（写入走「⤓ 导出 .rpy」）
+        self._sync_export_dirty()
 
         if res['changed']:
             self._status(f'✔ 已保存到这一拍（{res["line_id"]}）。'
@@ -1199,7 +1297,7 @@ class CardPageMixin:
         self._refresh_flow_edges()
         self.refresh_list_row(idx)
         self._sync_undo_button()
-        self._status_bar.set_dirty(True, self._file_path)
+        self._sync_export_dirty()
         self._status('↩ 已撤销这一拍的修改，恢复成上一次保存时的样子。')
     def _sync_undo_button(self):
         """撤销按钮的可用性跟着会话的撤销栈走。"""
@@ -1275,5 +1373,7 @@ class CardPageMixin:
             return
         self._session.set_speaker(self._loaded_idx, cid)
         self._panel.set_speaker(cid)
-        self._status_bar.set_dirty(True, self._file_path)
+        # `set_speaker` 是**绕过 `apply()`** 直接改拍的（左栏双击填角色），
+        # 会话那边已经补了脏标记，这里只要把状态栏叫醒。
+        self._sync_export_dirty()
         self._status(f'已把「{cid}」填进这一拍的说话人。')

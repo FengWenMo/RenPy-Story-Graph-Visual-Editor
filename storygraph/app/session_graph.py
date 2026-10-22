@@ -732,6 +732,7 @@ class GraphSessionMixin:
         # 行号 → 拍号（只在同一 label 内对位；跨 label 的行号没有意义）
         line_to_beat = {}
         source_lines: list = []
+        beats: list = []
         warning = ''
         if path and Path(path).exists():
             try:
@@ -800,9 +801,15 @@ class GraphSessionMixin:
             rows[name] = {'name': name, 'initial': d.get('value', ''),
                           'declared_by': d.get('kind', ''),
                           'decl_line': d.get('line', 0), 'operations': []}
+        # 本章第一拍（工作台"块首插入"用它把顶层的新操作放到 label 开头）。
+        # 从拍里取而不是假设 0：同一文件有多个 label 时，第 0 拍属于第一个 label。
+        first_beat = next((i for i, b in enumerate(beats)
+                           if str(getattr(b, 'label', '') or '') == label),
+                          None)
         return {'ok': True, 'error': '', 'label': label, 'file': path,
                 'variables': [rows[n] for n in order],
                 'operations': operations, 'declarations': declarations,
+                'first_beat': first_beat,
                 'warning': warning}
 
     def set_node_variables(self, graph, nid, variables) -> dict:

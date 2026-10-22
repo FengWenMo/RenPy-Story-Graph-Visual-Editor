@@ -2792,13 +2792,14 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             swallow('main_window._status')
 
     def closeEvent(self, event):
-        # **先处理图再拆自己**（2026-10-22）：剧情图只存在内存里。
-        # 关窗前问一句"保存 / 不保存 / 取消"——取消就真的不关（`event.ignore`），
-        # 图一个字节都不动。没有可见窗口时（测试 / 嵌入）不弹框，沿用自动保存。
+        # **先处理"没保存的东西"再拆自己**（2026-10-22）：剧情图与这一章的拍
+        # 都只存在内存里。关窗前问一句"保存 / 不保存 / 取消"——取消就真的不关
+        # （`event.ignore`），一个字节都不动。没有可见窗口时（测试 / 嵌入）不弹框，
+        # 图沿用自动保存、拍的改动没有安全落点只能放弃。
         try:
-            keep_open = not self._confirm_close_graph()
+            keep_open = not self._confirm_close()
         except Exception as e:                      # noqa: BLE001
-            swallow('main_window.closeEvent.confirm_graph', e)
+            swallow('main_window.closeEvent.confirm_close', e)
             keep_open = False
         if keep_open:
             event.ignore()
