@@ -828,10 +828,33 @@ class VariableWorkbenchDialog(_BaseDialog):
         self._place.addItem('选中这条之后（同一块内）', 'anchor')
         self._place.addItem('块首（选中这条的块最前面）', 'head')
         self._place.addItem('本章末尾（顶层）', 'end')
+        # 这一章**有哪些块**（2026-10-22）：从前"块首"只能跟着选中那条走，
+        # 想往另一个 `if` 的块首插，得先在那堆操作里找到块里的某条赋值。
+        # 把块本身列出来 → 不用先选中，也不会选错块。
+        self._blocks_list = [dict(b) for b in (data.get('blocks') or ())
+                             if isinstance(b, dict) and b.get('text')]
+        if self._blocks_list:
+            self._place.insertSeparator(self._place.count())
+            for blk in self._blocks_list:
+                text = str(blk.get('text') or '').strip()
+                anchor = blk.get('anchor')
+                # 显示**落点拍**（循环体的第一拍），与右侧那句"会插进第 N 拍"
+                # 同一口径 —— 两处说两个拍号只会让人以为插错了地方。
+                ref = anchor if anchor is not None else blk.get('beat')
+                try:
+                    beat_no = int(ref) + 1
+                except (TypeError, ValueError):
+                    beat_no = 0
+                where = f'（第 {beat_no} 拍）' if beat_no else ''
+                self._place.addItem(f'块首：{text}{where}',
+                                    ('block', 'head', anchor, text))
+                self._place.addItem(f'块尾：{text}{where}',
+                                    ('block', 'end', anchor, text))
         self._place.setToolTip(
-            '默认跟着选中的那条走：它在 if / for 里，新增就落在同一个块内；'
+            '默认跟着选中的那条走：它在 if / while 里，新增就落在同一个块内；'
             '选「块首」则插到那个块的第一行；'
-            '选「本章末尾」则放到 label 结束前（顶层）。')
+            '选「本章末尾」则放到 label 结束前（顶层）。'
+            '下面列的是**这一章的所有块** —— 选一个就能直接插进去，不用先选中。')
         self._place.currentIndexChanged.connect(self._update_target_hint)
         place_row.addWidget(self._place, 1)
         self._target_hint = QLabel('')
@@ -993,6 +1016,27 @@ class VariableWorkbenchDialog(_BaseDialog):
         except (TypeError, ValueError):
             return None
 
+    def _place_mode(self):
+        """「新增放在」当前选的是什么：`'anchor'` / `'head'` / `'end'` / 块元组。"""
+        widget = getattr(self, '_place', None)
+        if widget is None:
+            return 'anchor'
+        data = widget.currentData()
+        return 'anchor' if data is None else data
+
+    def _chosen_block(self):
+        """用户**指定**了哪个块（没指定返回 None）→ `(锚点拍号, 'head'|'end', 块头)`。"""
+        mode = self._place_mode()
+        if not (isinstance(mode, (tuple, list)) and len(mode) >= 3
+                and str(mode[0]) == 'block'):
+            return None
+        try:
+            beat = int(mode[2])
+        except (TypeError, ValueError):
+            return None
+        text = str(mode[3]) if len(mode) > 3 else ''
+        return beat, ('head' if str(mode[1]) == 'head' else 'end'), text
+
     def _anchor_for_new(self):
         """
         新增的那一条要落成什么锚点（见 `self.anchors` 的三种形态）。
@@ -1001,8 +1045,11 @@ class VariableWorkbenchDialog(_BaseDialog):
         `None` = 用户选了「块首」但**对不上哪一拍**：不许悄悄退到"本章末尾"
         （那是另一个位置），调用方会拒绝这次新增并说明原因。
         """
-        mode = ('anchor' if getattr(self, '_place', None) is None
-                else str(self._place.currentData() or 'anchor'))
+        chosen = self._chosen_block()
+        if chosen is not None:
+            beat, where, _text = chosen
+            return (beat, 'head') if where == 'head' else beat
+        mode = self._place_mode()
         if mode == 'end':
             return -1
         if mode == 'head':
@@ -1016,9 +1063,14 @@ class VariableWorkbenchDialog(_BaseDialog):
         label = getattr(self, '_target_hint', None)
         if label is None:
             return
+        chosen = self._chosen_block()
+        if chosen is not None:
+            beat, where, text = chosen
+            side = '最前面' if where == 'head' else '最后面'
+            label.setText(f'会插进第 {beat + 1} 拍的「{text}」块{side}')
+            return
         i = self._selected_index()
-        mode = ('anchor' if getattr(self, '_place', None) is None
-                else str(self._place.currentData() or 'anchor'))
+        mode = self._place_mode()
         if mode == 'end':
             label.setText('会放到本章末尾（顶层）')
             return
@@ -1073,7 +1125,9 @@ class VariableWorkbenchDialog(_BaseDialog):
         self.variables.append(f'{name} = 0')
         self._beat_by_index[i] = self.insert_beat
         self._anchors[i] = anchor
-        self._blocks[i] = self._new_op_block(self.insert_beat, src)
+        chosen = self._chosen_block()
+        self._blocks[i] = (chosen[2] if chosen
+                           else self._new_op_block(self.insert_beat, src))
         self._rebuild_ops()
         self._update_target_hint()
         self._hint.setText(f'✔ 已追加 {name} = 0（点「保存变量」生效）。')
@@ -1097,7 +1151,9 @@ class VariableWorkbenchDialog(_BaseDialog):
         self.variables.append(text)
         self._beat_by_index[i] = self.insert_beat
         self._anchors[i] = anchor
-        self._blocks[i] = self._new_op_block(self.insert_beat, src)
+        chosen = self._chosen_block()
+        self._blocks[i] = (chosen[2] if chosen
+                           else self._new_op_block(self.insert_beat, src))
         self._rebuild_ops()
         self._ops.setCurrentRow(self._ops.count() - 1)
         self._update_target_hint()

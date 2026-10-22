@@ -397,6 +397,51 @@ def _source_block_of(lines, line_no) -> tuple:
     return '', indent
 
 
+def _chapter_blocks(beats, source_lines, label) -> list:
+    """
+    这一章里的控制流块（`if/elif/else` / `while`）清单 —— 工作台"插到指定的块"用。
+
+    每一项：`{text: 块头原文, beat: 头所在的拍号, anchor: 新行该落进哪一拍,
+             indent: 块头缩进, kind: 'if' / 'loop'}`。
+
+    为什么 `anchor` 不一定等于 `beat`：**循环头自己占一拍、块体在下一拍**
+    （`while x:` 那拍的 `code` 是空的，行写进去会落在循环外面）——
+    与 `apply_node_variable_edits.anchor_of` 的"循环头往后挪一拍"同一条判据。
+
+    只从**拍**里取块头，不重新扫源码：`Beat.condition` / `Beat.loop_header`
+    已经是解析器给出的结论；`source_lines` 只用来填缩进（显示层级用）。
+    拍号是**文件内**的绝对下标，与 `variable_workbench` 其余字段同一口径。
+    """
+    out: list = []
+    beats = list(beats or ())
+    for i, b in enumerate(beats):
+        if str(getattr(b, 'label', '') or '') != label:
+            continue
+        cond = str(getattr(b, 'condition', '') or '').strip()
+        loop = str(getattr(b, 'loop_header', '') or '').strip()
+        if cond:
+            text, kind, anchor = f'if {cond}:', 'if', i
+        elif loop:
+            text, kind = loop, 'loop'
+            nxt = beats[i + 1] if i + 1 < len(beats) else None
+            anchor = (i + 1 if nxt is not None
+                      and str(getattr(nxt, 'label', '') or '') == label
+                      else i)
+        else:
+            continue
+        indent = 0
+        try:
+            first = int(getattr(b, 'src_first', 0) or 0)
+            if first and source_lines and 0 < first <= len(source_lines):
+                raw = str(source_lines[first - 1])
+                indent = len(raw) - len(raw.lstrip())
+        except (TypeError, ValueError):
+            indent = 0
+        out.append({'text': text, 'beat': i, 'anchor': anchor,
+                    'indent': indent, 'kind': kind})
+    return out
+
+
 def layout_dict(graph) -> dict:
     """
     剧情图 → 布局 JSON 的 dict（`save_layout` 与"未保存"判据**共用一份**）。
@@ -810,6 +855,11 @@ class GraphSessionMixin:
                 'variables': [rows[n] for n in order],
                 'operations': operations, 'declarations': declarations,
                 'first_beat': first_beat,
+                # 这一章里**有哪些块**（2026-10-22，工作台"插到指定的块"）：
+                # 从前"块首"只能跟着选中那条走 —— 想往另一个 if 的块首插，
+                # 得先在列表里找到那个块里的某条赋值。把块本身列出来，
+                # 就不用先选中了。空列表 = 这一章没有 if / while（或没解析出拍）。
+                'blocks': _chapter_blocks(beats, source_lines, label),
                 'warning': warning}
 
     def set_node_variables(self, graph, nid, variables) -> dict:

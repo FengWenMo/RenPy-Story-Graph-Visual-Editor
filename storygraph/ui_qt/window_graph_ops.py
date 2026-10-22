@@ -152,11 +152,9 @@ class GraphOpsMixin:
         # 变量改动也进历史（Ctrl+Z 能撤回来）。这里操作**已经生效**，
         # 所以只记历史、不重复 execute；改动前的文本用 `old_ops` 显式给，
         # 否则命令会把"撤销"恢复成新值。
+        # **拍也要跟着退**：见 `_variable_ops_command`（2026-10-22 实测修）。
         try:
-            from storygraph.graph.commands import UpdateNodeOperationsCommand
-            cmd = UpdateNodeOperationsCommand(
-                self, nid, list(self.graph.nodes[nid].operations),
-                old_ops=before)
+            cmd = self._variable_ops_command(nid, before, res, info['label'])
             self._record_applied(cmd)
         except Exception:                     # noqa: BLE001
             swallow('main_window.edit_node_ops')
@@ -174,6 +172,40 @@ class GraphOpsMixin:
         self._status(f'已保存「{info["label"]}」的剧情变量'
                      f'（{res["variables"]} 条，已写进这一章；'
                      f'点「⤓ 导出 .rpy」落盘）。')
+    def _variable_ops_command(self, nid, before_ops, res, label=None):
+        """
+        变量改动进图历史的命令：**节点 + 拍一起撤销/重做**（2026-10-22 修）。
+
+        为什么不能只用原来的 `UpdateNodeOperationsCommand`：它只还原
+        `node.statements`，而变量工作台/变量框把同一份改动**也写进了
+        `session.beats`**。于是 Ctrl+Z 之后工作台说"这条没了"、
+        `compile()` 里却还在 —— 撤销是假的，导出照样把那条写出去（实测）。
+
+        `res['beat_snapshots']` 是会话在动手**之前**留给我们的逐拍快照；
+        `after` 在这里现拍（改动已生效）。撤销退 `before`、重做进 `after`，
+        两边都走 `session.restore()`，拍对象身份不变（卡片页 / 章节树还指得对）。
+        """
+        from storygraph.graph.commands import UpdateNodeOperationsCommand
+
+        before = dict(res.get('beat_snapshots') or {})
+        after = {}
+        for idx in before:
+            snap = self._session.snapshot(int(idx))
+            if snap is not None:
+                after[int(idx)] = snap
+        refresh = None
+        if label:
+            def refresh():                      # noqa: F811 - 有意覆盖成回调
+                try:
+                    self.adopt_loaded_session(label)
+                except Exception as e:          # noqa: BLE001 - 刷新失败不拦撤销
+                    swallow('main_window._variable_ops_command.refresh', e)
+        return UpdateNodeOperationsCommand(
+            self, nid, list(self.graph.nodes[nid].operations),
+            old_ops=before_ops,
+            beat_states={'session': self._session, 'before': before,
+                         'after': after, 'refresh': refresh})
+
     def show_variable_workbench(self, nid=None):
         """
         「📋 变量工作台…」：变量清单 + 初值 + 每条赋值落在第几拍。
@@ -217,10 +249,8 @@ class GraphOpsMixin:
                 self._status(f'保存失败：{res.get("error")}')
                 return
             try:
-                from storygraph.graph.commands import UpdateNodeOperationsCommand
-                cmd = UpdateNodeOperationsCommand(
-                    self, nid, list(self.graph.nodes[nid].operations),
-                    old_ops=before)
+                cmd = self._variable_ops_command(nid, before, res,
+                                                 info['label'])
                 self._record_applied(cmd)
             except Exception:                 # noqa: BLE001
                 swallow('main_window.show_variable_workbench.history')

@@ -374,6 +374,26 @@ class TableSessionMixin:
             except (TypeError, ValueError, IndexError):
                 return 0
 
+        #: `拍号 -> 改动前快照`：工作台的改动**同时**落在图节点与拍上，
+        #: 而图级撤销（Ctrl+Z）只认得节点。没有这份快照，撤销之后
+        #: "工作台说这条没了、导出里却还在"（2026-10-22 实测）。
+        before_snaps: dict = {}
+
+        def remember(beat):
+            """动这一拍之前先把它的原样记下来（同一拍只记一次 = 最早那份）。"""
+            # 按**身份**找下标：`Beat` 是 dataclass（`__eq__` 比字段），
+            # `list.index()` 会把内容相同的两拍认成同一拍，快照就记错了对象。
+            idx = next((i for i, b in enumerate(self.beats) if b is beat), None)
+            if idx is None or idx in before_snaps:
+                return
+            try:
+                snap = self.snapshot(idx)
+            except Exception as e:              # noqa: BLE001 - 记不上快照不拦保存
+                swallow('app.session_table.apply_node_variable_edits.snap', e)
+                return
+            if snap is not None:
+                before_snaps[idx] = snap
+
         def edit_line(beat, old, new):
             """在 `beat.code` / `beat.raw` 里替换（或删掉）一行。"""
             for attr in ('code', 'raw'):
@@ -452,6 +472,7 @@ class TableSessionMixin:
                 if new == old:
                     applied += 1
                     continue
+                remember(beat)
                 if edit_line(beat, old, new):
                     applied += 1
                 else:
@@ -469,6 +490,7 @@ class TableSessionMixin:
                     else:
                         entry[1].append(new)
                 else:
+                    remember(beat)
                     beat.code = ((str(beat.code or '') + '\n')
                                  if str(beat.code or '').strip() else '') + new
                 try:
@@ -478,11 +500,14 @@ class TableSessionMixin:
                     inserted.append(-1)
                 applied += 1
         for beat, rows in heads.values():
+            remember(beat)
             self._prepend_beat_code(beat, rows)
         # 被删掉的多余旧操作（从后往前删，避免同一拍多行时下标跑掉）
         for i in range(len(new_ops), len(old_ops)):
             line = line_of(old_stmts[i])
             beat = beat_for_line(line) if line else None
+            if beat is not None:
+                remember(beat)
             if beat is not None and edit_line(beat, old_ops[i], ''):
                 removed += 1
                 applied += 1
@@ -496,6 +521,10 @@ class TableSessionMixin:
         return {'ok': True, 'error': '', 'applied': applied,
                 'unplaced': unplaced, 'removed': removed,
                 'inserted': inserted,
+                # 改动落在哪几拍、以及**改之前**的原样：图级撤销（Ctrl+Z）
+                # 要连拍一起退回去，见 `graph.commands.UpdateNodeOperationsCommand`。
+                'beats': sorted(before_snaps),
+                'beat_snapshots': before_snaps,
                 'variables': merged.get('variables'),
                 'kept_tech': merged.get('kept_tech')}
 
