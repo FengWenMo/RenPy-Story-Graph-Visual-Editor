@@ -3928,6 +3928,21 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
   不许另写一套）。
 - 判据：`tests/test_ui_fit_and_flow.py`（21 条）。
 
+## 36. 行身份（LineId）—— 规则在单独一份（2026-10-23）
+
+规则表、不变量 I1–I5、反例与边界全在 [`契约_行身份.md`](契约_行身份.md)；
+这里只留**改代码时必须记住**的四条：
+
+- 发号**唯一实现** `storygraph.story.line_identity.allocate`（max+1、跳过已用）。
+  **不许**再写 `f'{label}.{seq:04d}'` —— 会话层按位置重算就是 2026-10-23 之前的状态
+  （插一张卡，后面每一行都换身份）。
+- `EditorSession._renumber` 只重排 `seq`，**只给没有身份的行发号**；
+  不许重写别人的 ID（R5/R6/R7 用例钉着）。
+- `beat_fingerprint` 才是**内容哈希**；`line_id` 与内容无关
+  （改台词 / 改条件 / 改舞台都不换 —— 这是与 Ren'Py 官方 translation 的根本区别）。
+- 重新摊表覆盖已有表时走 `script_table._reuse_existing_ids`（两轮匹配、不猜）；
+  判据 `tests/test_line_identity_contract.py`（用例名就是规则）。
+
 
 
 
