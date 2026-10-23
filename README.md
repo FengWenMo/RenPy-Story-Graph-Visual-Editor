@@ -169,6 +169,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 长期目标 / 里程碑进度 | [docs/路线图_长期目标_2026-10-08.md](docs/路线图_长期目标_2026-10-08.md) |
 | 这工具到底要做成什么（产品定位） | [docs/定位重审.md](docs/定位重审.md) |
 | 怎么用（AI 助手 / 自定义动作 / 纯文字导入） | [docs/使用_AI助手与自定义模块_2026-10-11.md](docs/使用_AI助手与自定义模块_2026-10-11.md) |
+| **"逐字节零丢失"到底证明了什么、边界在哪** | [docs/审计_保真证据链_2026-10-23.md](docs/审计_保真证据链_2026-10-23.md)（判据口径见《契约速查》§33） |
 | 每天做了什么 | [docs/开发日志.md](docs/开发日志.md) |
 | 历史设计稿 / 旧问题清单 | [docs/archive/](docs/archive/) |
 
@@ -198,6 +199,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 让人话多认一个词 | `story/dsl.py` 的 `DEFAULT_POSITIONS` / `DEFAULT_EXPRESSIONS` / `VERB_ALIAS` |
 | 加一条校验规则 | `pipeline/validate.py`（选好 L1/L2/L3 与 severity） |
 | 加一个导出目标 | `pipeline/engine_exporters.py`（先扩中立 IR，再写适配器） |
+| **加一条保真样本 / 改"逐字节相同"的判据** | 样本 `tests/fixtures/fidelity/`（头两行写"它测什么"+来源）+ 用例 `tests/test_fidelity_structure.py`（**必须同时加自检正则**）+ 判据 `tools/fidelity_report.py::classify`（见《契约速查》§33） |
 | 改**编辑语义**（卡片怎么读写 Beat） | `app/beats.py`（唯一真源）—— `cards_to_show` 必须带回 `extra_rows` 的**逐条位置**（见不变量 56） |
 | 改**插入 / 删除 / 增量补丁怎么落行** | `story/patcher.py`（`_insert_anchor` 定位 + `patch_export` 的插入/删除通道，见不变量 57） |
 | 改**舞台推导 / 预览语义** | `app/stage.py` |
