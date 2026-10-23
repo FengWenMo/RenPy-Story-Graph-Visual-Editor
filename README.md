@@ -171,6 +171,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 怎么用（AI 助手 / 自定义动作 / 纯文字导入） | [docs/使用_AI助手与自定义模块_2026-10-11.md](docs/使用_AI助手与自定义模块_2026-10-11.md) |
 | **"逐字节零丢失"到底证明了什么、边界在哪** | [docs/审计_保真证据链_2026-10-23.md](docs/审计_保真证据链_2026-10-23.md)（判据口径见《契约速查》§33） |
 | **行身份（LineId）规则：翻译/语音/协作共用的那个 ID** | [docs/契约_行身份.md](docs/契约_行身份.md)（判据 `tests/test_line_identity_contract.py`） |
+| **拿到发布包先看哪** | [docs/快速上手_3分钟.md](docs/快速上手_3分钟.md)（解压 → 打开 demo → 导出） |
 | 每天做了什么 | [docs/开发日志.md](docs/开发日志.md) |
 | 历史设计稿 / 旧问题清单 | [docs/archive/](docs/archive/) |
 
@@ -223,3 +224,20 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | 改 **Qt 界面（页结构 / 工具栏 / 剧情树 / 分析面板）** | `ui_qt/main_window.py`（`legacy/` 那份**不要**动） |
 | 改**配色 / 字号 / 间距** | `ui_qt/tokens.py`（唯一真源）→ `ui_qt/theme.py` 出 QSS |
 | 加共享词表 | `core/vocabulary.py`（别就地再写一份） |
+
+## License
+
+**MIT** —— 见 [LICENSE](LICENSE)。可以自由使用、修改、再分发（包括商用），
+保留版权声明即可；改动请自己承担风险（MIT 不提供担保）。
+
+第三方组件（动态链接、可自行替换，本项目不修改它们）：
+
+| 组件 | 用途 | 许可证 |
+|---|---|---|
+| PySide6 / Qt for Python | 图形界面（可选依赖 `gui`） | LGPLv3 |
+| openpyxl | Excel 读写（必需） | MIT |
+| Pillow | 缩略图（可选依赖 `thumbnails`） | HPND |
+
+发布包里的 `StoryGraph.exe` 随包附带 Qt 动态库，**允许替换**（LGPLv3 的要求），
+因此与上面的 MIT 并存。
+
