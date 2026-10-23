@@ -3400,11 +3400,20 @@ def assign_identity(beats: list):
     LineId 已有则不覆盖（保留 Excel/DB 传来的身份）；
     ContentHash **一律按当前内容重算**——它的语义是"这条现在长什么样"，
     用表里带过来的旧值会导致"改了内容却判成没变"，push 静默丢改动。
+
+    ⚠ 2026-10-23：发号规则统一到 `story.line_identity`（max+1、跳过已用），
+    并且**同一批里的重复 ID 会被重新发号** —— 从前的写法按 `label.seq`
+    生成，新插入的行可能与既存行撞号（Excel 侧没有 `_unique_line_id`）。
     """
+    from storygraph.story.line_identity import allocate, unique_ids
+
+    unique_ids(beats)
+    used = {str(b.line_id) for b in beats if b.line_id}
     for b in beats:
         if not b.line_id:
             label = b.label or 'start'
-            b.line_id = f"{label}.{b.seq:04d}"
+            b.line_id = allocate(used, label)
+            used.add(b.line_id)
         b.beat_fingerprint = _beat_content_hash(b)
 
 

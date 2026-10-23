@@ -356,11 +356,67 @@ def open_rpy_as_table(script_file, output_path=None, registry=None,
         b.stage = compose_stage_extra(b, symbols) or b.stage
         b.bgm = b.bgm or compose_audio_text(b, 'music')
         b.sfx = b.sfx or compose_audio_text(b, 'sound')
+    # 目标是**已存在的表**（"从 .rpy 重新摊表覆盖"）：先把存量身份接回来，
+    # 否则每一行的 LineId 都会按位置重算（契约 I4，2026-10-23）。
+    _reuse_existing_ids(beats, output_path)
     export_beats_to_excel(beats, output_path, registry=registry,
                           include_thumbnails=with_thumbnails, facts=facts,
                           # 表里记下来源：导回时自动走增量（审计 P1-1）
                           source_file=str(script_file))
     return output_path
+
+
+def _reuse_existing_ids(beats, table_path) -> int:
+    """
+    "重新摊表覆盖已有表"时，把**能对上的行**的 LineId 接回来。返回接回几条。
+
+    为什么要它（契约 I4）：`open_rpy_as_table` 覆盖写同一个 `.xlsx` 时，
+    新拍的 `line_id` 是按解析位置新发的 —— 用户"表旧了，从 .rpy 重摊一次"
+    之后，TTS 语音 / 翻译 / 协作评论指向的那批 ID 全部换人。
+
+    匹配是**两轮**（刻意保守，宁可发新号也不乱配）：
+      ① 内容完全相同（label / kind / speaker / 文本 / 条件 / 舞台 / 原文）
+         → 复用它的 ID；同键多条时按出现顺序一条一条配（多重集）；
+      ② 剩下的行**数量相等**、且旧表也只剩同样多 → 按相对顺序配。
+         这档覆盖"只改了文案、结构没动"的重摊；数量不等就整批发新号
+         （插删过的表不猜，猜错比不发号更糟）。
+    """
+    from pathlib import Path
+
+    path = Path(table_path)
+    if not path.is_file() or not beats:
+        return 0
+    try:
+        old = [b for b in import_beats_from_excel(path) if str(b.line_id or '')]
+    except Exception:                        # noqa: BLE001 - 旧表坏了就发新号
+        return 0
+    if not old:
+        return 0
+
+    def key(b):
+        return (str(getattr(b, 'label', '') or ''), str(getattr(b, 'kind', '') or ''),
+                str(getattr(b, 'speaker', '') or ''), str(getattr(b, 'text', '') or ''),
+                str(getattr(b, 'condition', '') or ''), str(getattr(b, 'stage', '') or ''),
+                str(getattr(b, 'raw', '') or ''))
+
+    pool: dict = {}
+    for row in old:
+        pool.setdefault(key(row), []).append(str(row.line_id))
+    reused = 0
+    leftovers = []
+    for b in beats:
+        bucket = pool.get(key(b))
+        if bucket:
+            b.line_id = bucket.pop(0)
+            reused += 1
+        else:
+            leftovers.append(b)
+    rest = [lid for bucket in pool.values() for lid in bucket]
+    if leftovers and len(leftovers) == len(rest):
+        for b, lid in zip(leftovers, rest):
+            b.line_id = lid
+            reused += 1
+    return reused
 
 
 

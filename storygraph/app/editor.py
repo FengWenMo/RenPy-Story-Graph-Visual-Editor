@@ -248,17 +248,34 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
     # ------------------------------------------------------------------
 
     def _renumber(self):
-        """重排 `seq` 与 `line_id`（拍号变了以后必须一致，否则协作/定位错位）。"""
+        """
+        重排 `seq`（拍号）；**line_id 只发给还没有身份的行**。
+
+        2026-10-23 修（契约 I2/I3）：从前这里按位置把所有 `line_id`
+        重写一遍 —— 插一张卡，后面每一行的身份都变。协作库的锁/评论、
+        将来的 XLIFF `trans-unit/@id`、TTS 语音 key 全部跟着错位，
+        而且**静默**。身份与位置无关，改位置不该换身份。
+
+        发号规则只有一份：`story.line_identity.allocate`（max+1、跳过已用）。
+        """
+        from storygraph.story.line_identity import allocate, unique_ids
+
         label = ''
         for b in self.beats:
             if str(getattr(b, 'label', '') or '').strip():
                 label = str(b.label)
                 break
+        unique_ids(self.beats)                    # 重复的先收拾掉
+        used = {str(getattr(b, 'line_id', '') or '')
+                for b in self.beats if str(getattr(b, 'line_id', '') or '')}
         for i, b in enumerate(self.beats, 1):
             b.seq = i
             if not str(getattr(b, 'label', '') or '').strip():
                 b.label = label
-            b.line_id = f'{b.label}.{i:04d}'
+            if not str(getattr(b, 'line_id', '') or '').strip():
+                lid = allocate(used, b.label)
+                b.line_id = lid
+                used.add(lid)
         # **结构变了 = 内存与磁盘不再一致**（2026-10-22）：插卡 / 删卡 / 撤销结构
         # 都走这里，所以"未导出"的标记放在这一处就够 —— 逐条调用点去加，
         # 早晚漏一条（而漏的那条就是关窗时悄悄丢改动的那条）。
