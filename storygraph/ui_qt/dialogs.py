@@ -572,15 +572,33 @@ class FlowCardDialog(_BaseDialog):
     用户 2026-10-22 的核心诉求："在一个大 label 里面 call 或 jump 其他小
     label，然后再回到这个大 label。" 第一阶段先让已有 call 可见可改；
     这个对话框补上**插入**入口，否则用户还是得回源文件手写。
+
+    2026-10-23 三处修正（用户截图原话："这个控制流卡的 UI 不对，下拉……
+    缺失"）：
+      · **目标清单以前只有当前这个文件**（实测真机 `chapter0_0.rpy` 里
+        下拉只有 `chapter0_0` 一项）—— 想 call 的小 label 一个都不在。
+        现在由调用方从项目目录给全（`window_card._flow_target_labels`），
+        这里只负责显示与校验；
+      · **目标默认空着**：从前默认选中第一项，手快一点就插了一张
+        `call <这一章自己>`（等于在章头递归调自己）；
+      · 补上「参数」「from」两格 —— `insert_flow_beat` 与卡片上的控制流条
+        本来就支持，只有这个插入入口缺，用户得"插完再回去改一遍"。
     """
 
     def __init__(self, parent=None, labels=(), default_type='call'):
         super().__init__(parent, '插入控制流卡')
         self.flow_type = 'call'
         self.target = ''
+        self.args = ''
+        self.from_clause = ''
+        # 252×179 是实测出来的默认尺寸：三行表单挤成一条，提示语被折成两行。
+        self.resize(520, 260)
+        self.setMinimumWidth(460)
 
         form = QFormLayout()
         form.setSpacing(T.SPACE['sm'])
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         self._type = QComboBox()
         self._type.addItem('↳ 调用（执行完会返回）', 'call')
         self._type.addItem('→ 跳转（不返回）', 'jump')
@@ -588,26 +606,69 @@ class FlowCardDialog(_BaseDialog):
         self._type.setCurrentIndex(idx if idx >= 0 else 0)
         form.addRow('类型', self._type)
 
+        names = [str(x) for x in (labels or ()) if str(x).strip()]
         self._target = QComboBox()
         self._target.setEditable(True)
         self._target.setInsertPolicy(QComboBox.NoInsert)
-        self._target.addItems([str(x) for x in (labels or ()) if str(x)])
+        self._target.addItems(names)
+        # **不预选第一项**：空着 + placeholder，逼用户明确选一次。
+        self._target.setCurrentIndex(-1)
         self._target.setPlaceholderText('目标 label 名（支持 main.route）')
+        self._target.setMinimumWidth(320)
+        # 下拉列表本身也别比输入框窄：长 label 名在弹层里被截掉等于没有。
+        self._target.view().setMinimumWidth(320)
         self._target.setToolTip(
-            '从本文件已有的 label 里选，或直接写目标 label 名；\n'
-            '跨文件调用也可以直接手写。')
+            '从项目里的 label 里选，或直接写目标 label 名；\n'
+            '跨文件调用、点号分段（main.route）都可以手写。')
         form.addRow('目标 label', self._target)
+
+        self._args = QLineEdit()
+        self._args.setPlaceholderText('（可空）例如 (1, flag)')
+        self._args.setToolTip(
+            '`call side(1, 2)` 里括号那一段。留空 = 不传参。\n'
+            '括号必须配平 —— 不配平的写法会让整份脚本解析不了。')
+        form.addRow('参数', self._args)
+
+        self._from = QLineEdit()
+        self._from.setPlaceholderText('（可空）例如 _call_side_1')
+        self._from.setToolTip(
+            '`call side from _call_side_1` 里 from 后面那个标识。\n'
+            '它是存档点：同一个 label 被多处 call 时靠它区分。\n'
+            '不确定就留空 —— Ren\'Py 会自己生成。')
+        form.addRow('from', self._from)
         self._root.addLayout(form)
 
-        hint = QLabel(
-            '插入的位置在当前这一拍后面。\n'
-            'call：目标 label 执行到 return 后回到这里继续；\n'
-            'jump：不会返回，这一章在跳转处结束。')
-        hint.setProperty('role', 'caption')
-        hint.setWordWrap(True)
-        self._root.addWidget(hint)
+        count = len(names)
+        self._count = QLabel(
+            f'项目里共 {count} 个 label 可选' if count
+            else '项目里没找到别的 label —— 直接手写目标名也可以')
+        self._count.setProperty('role', 'caption')
+        self._count.setWordWrap(True)
+        self._root.addWidget(self._count)
+
+        self._hint = QLabel('')
+        self._hint.setProperty('role', 'caption')
+        self._hint.setWordWrap(True)
+        self._root.addWidget(self._hint)
+        self._on_type_changed()
+
+        self._type.currentIndexChanged.connect(self._on_type_changed)
         self._add_buttons('插入')
         self._target.setFocus()
+
+    def _on_type_changed(self):
+        """`jump` 不接受参数与 from（Ren'Py 语法）→ 直接禁用，别让人白填。"""
+        is_call = str(self._type.currentData() or 'call') == 'call'
+        for field in (self._args, self._from):
+            field.setEnabled(is_call)
+        if not is_call:
+            self._args.clear()
+            self._from.clear()
+        self._hint.setText(
+            '插入的位置在当前这一拍后面。\n'
+            + ('call：目标 label 执行到 return 后回到这里继续。'
+               if is_call else
+               'jump：不会返回 —— 这一章在跳转处结束（参数与 from 不适用）。'))
 
     def _on_accept(self):
         target = self._target.currentText().strip()
@@ -615,8 +676,21 @@ class FlowCardDialog(_BaseDialog):
             self._fail('目标 label 不合法：只能字母/数字/下划线，可用点号分段，'
                        '且不能以数字开头。')
             return
-        self.flow_type = str(self._type.currentData() or 'call')
+        kind = str(self._type.currentData() or 'call')
+        args = self._args.text().strip() if kind == 'call' else ''
+        from_clause = self._from.text().strip() if kind == 'call' else ''
+        # **渲染 → 再解析**一次当校验：括号不配平、from 不合法这些
+        # 在这里就挡住，而不是等导出时才崩（`render_flow_line` 只拼字符串）。
+        from storygraph.story.flow import parse_flow_line, render_flow_line
+        if parse_flow_line(render_flow_line(kind, target, args,
+                                            from_clause)) is None:
+            self._fail('参数要写成配平的一对括号（例如 (1, flag)）；'
+                       'from 只能是标识符（例如 _call_side_1）。')
+            return
+        self.flow_type = kind
         self.target = target
+        self.args = args
+        self.from_clause = from_clause
         self.accept()
 
 

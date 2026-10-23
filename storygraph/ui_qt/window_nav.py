@@ -32,10 +32,11 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QDockWidget, QLabel, QSizePolicy, QTabBar,
-                               QToolBar, QWidget)
+from PySide6.QtWidgets import (QDockWidget, QHBoxLayout, QLabel, QSizePolicy,
+                               QTabBar, QToolBar, QWidget)
 
 from storygraph.core.safeguard import swallow
+from storygraph.ui_qt.elide import ElidedLabel
 from storygraph.ui_qt.navigator import ChapterNavigator
 
 #: 拍的 `kind` → 属性表里那一行"类型"的字。
@@ -101,10 +102,21 @@ class WindowNavMixin:
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
-        info = QLabel('')
-        info.setProperty('role', 'caption')
+        # 右边那句「文件 · label · 第 i 拍」：**必须能被压窄**。
+        # 普通 QLabel 的最小宽度 = 整句宽度，1400px 窗口上它会把模式条
+        # 顶到窗口外面（2026-10-23 用户截图：右边那句被裁在屏幕边缘）。
+        # 这里包一个 Expanding 的壳给它"剩下的宽度"，文字超了画 `…`，
+        # 全文在 tooltip（`_sync_nav_current` 会把它换成完整路径）。
+        holder = QWidget()
+        holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        h = QHBoxLayout(holder)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        info = ElidedLabel('', mode=Qt.ElideRight, role='caption')
+        info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        h.addWidget(info, 1)
+        tb.addWidget(holder)
         self._mode_info = info
-        tb.addWidget(info)
 
         # 「章节导航」开关：关掉之后还得能叫回来（否则只能重启工具）
         act = QAction('▥ 章节导航', self)

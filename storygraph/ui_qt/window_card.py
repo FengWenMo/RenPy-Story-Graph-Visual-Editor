@@ -779,6 +779,35 @@ class CardPageMixin:
         self._status(f"✔ 已插入一张空卡片（第 {res['index'] + 1} 拍）——"
                      f"填完按「💾 保存这一拍」，导出时才落盘。")
 
+    def _flow_target_labels(self) -> list:
+        """
+        插入控制流卡时「目标 label」的**全部**候选。
+
+        ⚠ 2026-10-23 修（用户截图："下拉……缺失"）：第一版只给
+        `session.label_names()` —— 那是**当前这个文件**的 label。真机
+        `chapter0_0.rpy` 里只有一个 label，于是下拉里只有 `chapter0_0`：
+        用户想 call 的小 label 一个都不在，下拉等于没有。
+        现在补上**项目级目录**（与左侧导航同一个 `chapter_index`，40 个文件
+        约 10ms），并且当前这一章排在最前面。
+        """
+        labels = [str(x) for x in self._session.label_names() if str(x).strip()]
+        graph = getattr(self, 'graph', None)
+        for node in ((graph.nodes or {}).values() if graph is not None else ()):
+            name = str(getattr(node, 'label_name', '') or '').strip()
+            if name and name not in labels:
+                labels.append(name)
+        try:
+            from storygraph.app.chapter_index import build_index
+            index = build_index(getattr(self, '_project_root', None))
+            for entry in index.files:
+                for item in entry.labels:
+                    name = str(getattr(item, 'name', '') or '')
+                    if name and name not in labels:
+                        labels.append(name)
+        except Exception as e:                    # noqa: BLE001 - 扫盘失败不该挡住插卡
+            swallow('ui_qt.insert_flow_card.project_labels', e)
+        return labels
+
     def insert_flow_card(self, after: bool = True):
         """
         在当前拍后插入一张 `call` / `jump` 控制流卡（2026-10-22，P0-4a）。
@@ -791,18 +820,14 @@ class CardPageMixin:
             self._status('还没有载入章节，没法插入控制流卡。')
             return
         self.apply_current_beat()
-        labels = list(self._session.label_names())
-        for node in ((self.graph.nodes or {}).values()
-                     if self.graph is not None else ()):
-            name = str(getattr(node, 'label_name', '') or '').strip()
-            if name and name not in labels:
-                labels.append(name)
+        labels = self._flow_target_labels()
         from storygraph.ui_qt.dialogs import FlowCardDialog
         dlg = FlowCardDialog(self, labels=labels)
         if dlg.exec() != QDialog.Accepted:
             return
         res = self._session.insert_flow_beat(
-            idx, after=after, flow_type=dlg.flow_type, target=dlg.target)
+            idx, after=after, flow_type=dlg.flow_type, target=dlg.target,
+            args=getattr(dlg, 'args', ''), from_clause=getattr(dlg, 'from_clause', ''))
         if not res.get('ok'):
             self._status(res.get('error') or '插入控制流卡失败')
             return
@@ -810,10 +835,14 @@ class CardPageMixin:
         self._reload_list()
         self._show_index(res['index'])
         self._sync_structural_buttons()
-        self._log(f'[控制流] 插入 {dlg.flow_type} {dlg.target}'
+        extra = ''.join(x for x in (getattr(dlg, 'args', ''),
+                                    (f' from {dlg.from_clause}'
+                                     if getattr(dlg, 'from_clause', '') else ''))
+                        if x)
+        self._log(f'[控制流] 插入 {dlg.flow_type} {dlg.target}{extra}'
                   f'（第 {res["index"] + 1} 拍）'
                   + (f'；{edge_note}' if edge_note else ''))
-        self._status(f'✔ 已插入 {dlg.flow_type} {dlg.target}'
+        self._status(f'✔ 已插入 {dlg.flow_type} {dlg.target}{extra}'
                      f'（第 {res["index"] + 1} 拍）'
                      + (f'。{edge_note}' if edge_note else ''))
 
@@ -1174,18 +1203,13 @@ class CardPageMixin:
         """
         把这一拍是不是 `call` / `jump`、目标与返回拍推给控制流条。
 
-        候选 label 先放**本文件**里的（最常用），再补图上的其它节点
-        （跨文件 call 也常见）；控件可编辑，手写照样能过。
+        候选 label 用 `_flow_target_labels()`：本文件 + 图上的节点 +
+        **项目目录**（2026-10-23 修：从前只有本文件，真机下拉里只有一项）。
         """
         try:
             from storygraph.story.flow import flow_info
             info = flow_info(beat, idx, self._session.beats)
-            names = list(self._session.label_names())
-            for node in ((self.graph.nodes or {}).values()
-                         if self.graph is not None else ()):
-                name = str(getattr(node, 'label_name', '') or '').strip()
-                if name and name not in names:
-                    names.append(name)
+            names = self._flow_target_labels()
             self._panel.set_flow(info, names)
         except Exception as e:                  # noqa: BLE001 - 控制流条失败不拦卡片
             swallow('ui_qt.window_card._sync_flow_card', e)

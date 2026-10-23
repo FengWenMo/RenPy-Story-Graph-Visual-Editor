@@ -1047,7 +1047,8 @@ class TableSessionMixin:
         """
         if not self.beats:
             return {'ok': False, 'error': '还没有载入章节', 'index': -1}
-        from storygraph.story.flow import (is_valid_label, render_flow_line)
+        from storygraph.story.flow import (is_valid_label, parse_flow_line,
+                                           render_flow_line)
         flow_type = str(flow_type or 'call').strip()
         target = str(target or '').strip()
         if flow_type not in ('call', 'jump'):
@@ -1055,6 +1056,14 @@ class TableSessionMixin:
                     'index': -1}
         if not is_valid_label(target):
             return {'ok': False, 'error': '目标 label 不合法', 'index': -1}
+        line = render_flow_line(flow_type, target, args, from_clause)
+        # **渲染 → 再解析**当校验：`render_flow_line` 只拼字符串，
+        # `call side(a` 这种没配平的写法会让整份脚本解析不了，而工具这边
+        # 看不出异常 —— 那种"导出成功、游戏起不来"的错最难查（2026-10-23）。
+        if parse_flow_line(line) is None:
+            return {'ok': False, 'index': -1,
+                    'error': '参数或 from 的写法不合法（括号要配平、'
+                             'from 只能是标识符）'}
         pos = len(self.beats) if idx is None else int(idx)
         pos = max(0, min(pos, len(self.beats) - 1))
         at = pos + 1 if after else pos
@@ -1062,7 +1071,7 @@ class TableSessionMixin:
         template = self.beats[pos]
         beat = Beat(seq=0, label=str(getattr(template, 'label', '') or ''),
                     kind='narration',
-                    raw=render_flow_line(flow_type, target, args, from_clause))
+                    raw=line)
         doc = self._chapter_doc()
         at = doc.insert_beat(beat, at)
         self.beats = doc.beats

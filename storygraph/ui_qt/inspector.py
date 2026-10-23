@@ -24,48 +24,26 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget
 
 from storygraph.ui_qt import tokens as T
+from storygraph.ui_qt.elide import ElidedLabel
 
 #: 属性表一行的高度（比 QLabel 的 14px 松一点；7 行也不至于占掉半个右栏）。
 ROW_HEIGHT = 20
 
 
-class _ValueLabel(QLabel):
-    """单行、超宽省略（中略）、可选中、tooltip 是全文。"""
+class _ValueLabel(ElidedLabel):
+    """单行、超宽省略（中略）、可选中、tooltip 是全文。
+
+    省略的实现搬去了 `ui_qt.elide`（面包屑 / 模式条也要同一套口径，
+    三份各写一遍迟早漏掉"宽度还没算完时先显示全文"那句）。
+    这里只定"中略 + 可选中 + 备注色"这三件本表特有的事。
+    """
 
     def __init__(self, text: str = '', parent=None):
-        super().__init__('', parent)
-        self.setProperty('role', 'note')
-        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.setMinimumWidth(0)
-        self._full = ''
-        self.setText(str(text))
-
-    # -- Qt 接口 --
-    def setText(self, text: str):             # noqa: N802 - Qt 命名
-        self._full = str(text)
-        self.setToolTip(self._full)
-        self._elide()
-
-    def resizeEvent(self, event):             # noqa: N802 - Qt 命名
-        super().resizeEvent(event)
-        self._elide()
-
-    # -- 自己用 --
-    def full_text(self) -> str:
-        return self._full
-
-    def _elide(self):
-        metrics = QFontMetrics(self.font())
-        width = max(0, self.width() - 2)
-        # 宽度还没定下来（刚建、还没布局）时不要先塞一个 `…` —— 让上级
-        # 先看到全文，等第一次 resize 再省略（否则测试里读到的全是"…"）。
-        if width <= 8:
-            return
-        super().setText(metrics.elidedText(self._full, Qt.ElideMiddle, width))
+        super().__init__(text, parent, mode=Qt.ElideMiddle,
+                         role='note', selectable=True)
 
 
 class PropertyStrip(QWidget):

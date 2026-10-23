@@ -270,12 +270,18 @@ class TestCardLayout:
     """
 
     def test_parameters_sit_above_the_dialogue_box(self, window):
-        """语句拍的参数组要排在台词框**前面**（它才是正文）。"""
+        """语句拍的参数组要排在台词框**前面**（它才是正文）。
+
+        2026-10-23：台词那几块（说话人 / 台词 / 字数 / 富文本预览 / 后缀）包进了
+        `_dialogue_box`（控制流卡要整块收起），所以这里比的是**容器**的位置。
+        """
         _show(window, _idx_of(window, 'play_music'))
         panel = _panel(window)
         layout = panel.layout()
-        assert layout.indexOf(panel._spec_host) < layout.indexOf(panel._text), \
+        assert layout.indexOf(panel._spec_host) < layout.indexOf(panel._dialogue_box), \
             '参数组还在台词框下面 —— 语句拍要滚一整屏才看得到自己能改什么'
+        # 台词框仍然在那个容器里（别为了过用例把台词挪丢）
+        assert panel._dialogue_box.isAncestorOf(panel._text)
 
     def test_a_beat_without_stage_content_collapses_the_stage_block(self, window):
         """一条 `styled …`（纯文字）没有什么舞台内容 → 立绘那块要收起来。"""

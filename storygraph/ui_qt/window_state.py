@@ -35,6 +35,38 @@ from storygraph.core import session_store as SS
 from storygraph.core.safeguard import swallow
 
 
+def fit_to_available(width, height, available=None, margin: int = 48) -> tuple:
+    """
+    把想要的窗口尺寸**压进屏幕可用区**（四周留 `margin`）。返回 `(宽, 高)`。
+
+    为什么必须有它（2026-10-23，用户："整个界面太宽了……全屏都没看全"）：
+    `QMainWindow.sizeHint()` 会把工具栏的完整宽度算进去 —— 这一版实测
+    **2720 × 705**（剧情结构页 25 个动作）。窗口按 sizeHint 打开就是
+    2720 宽，在 1600~1900 的屏幕上右侧直接跑到屏幕外，用户看到的是
+    "按钮被裁掉一半"，而不是"窗口比屏幕大"。
+
+    记下来的布局同理：`_restore_to_screen` 以前只判"矩形与屏幕**相交**"，
+    2720×1500 的旧尺寸当然相交 —— 于是每次启动都还原成一个放不下的窗口。
+    """
+    try:
+        w, h = int(width), int(height)
+    except (TypeError, ValueError):
+        return 1200, 800
+    if available is None:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            screen = QGuiApplication.primaryScreen()
+            available = screen.availableGeometry() if screen else None
+        except Exception as e:                       # noqa: BLE001 - 没屏幕就按原样
+            swallow('ui_qt.window_state.available_geometry', e)
+            available = None
+    if available is None:
+        return w, h
+    max_w = max(640, int(available.width()) - int(margin))
+    max_h = max(480, int(available.height()) - int(margin))
+    return min(w, max_w), min(h, max_h)
+
+
 class WindowStateMixin:
     """窗口记忆（见模块 docstring）。"""
 
@@ -125,7 +157,14 @@ class WindowStateMixin:
     # ------------------------------------------------------------------
 
     def _restore_to_screen(self, geometry):
-        """把记下的窗口大小摆回去（**摆不下就不摆**，绝不把窗口放到屏幕外）。"""
+        """
+        把记下的窗口大小摆回去（**摆不下就不摆**，绝不把窗口放到屏幕外）。
+
+        2026-10-23 补两条（用户："全屏都没看全整个界面"）：
+          · 尺寸要**压进**那块屏幕（`fit_to_available`）—— 旧记录里
+            2720×1500 这种"大于屏幕"的尺寸，光判 `intersects` 是拦不住的；
+          · 位置也要**夹回**屏幕内 —— 否则标题栏可能落在屏幕上方。
+        """
         if not geometry:
             return False
         try:
@@ -138,19 +177,28 @@ class WindowStateMixin:
             y = geometry[3] if len(geometry) > 3 else None
             screens = list(QGuiApplication.screens() or [])
             chosen = None
+            screen = None
             if x is not None and y is not None:
                 rect = QRect(int(x), int(y), w, h)
                 for scr in screens:
                     if scr.availableGeometry().intersects(rect):
+                        screen = scr
                         chosen = rect
                         break
             if chosen is None:
                 # 位置没记 / 记的位置已经不在任何屏幕上（换显示器、拔了外接屏）
-                # → **只把大小摆回去**，位置交给窗口管理器。
+                # → **只把大小摆回去**（并压进主屏），位置交给窗口管理器。
+                avail = (screen or (screens[0] if screens else None))
+                w, h = fit_to_available(
+                    w, h, avail.availableGeometry() if avail else None)
                 self.resize(w, h)
                 return True
+            avail = screen.availableGeometry()
+            w, h = fit_to_available(w, h, avail)
+            nx = max(avail.left(), min(int(x), avail.right() - w + 1))
+            ny = max(avail.top(), min(int(y), avail.bottom() - h + 1))
             top = self.window()
-            (top or self).setGeometry(chosen)
+            (top or self).setGeometry(QRect(nx, ny, w, h))
             return True
         except Exception as e:                      # noqa: BLE001 - 摆不回去就用默认
             swallow('ui_qt.window_state.restore_to_screen', e)

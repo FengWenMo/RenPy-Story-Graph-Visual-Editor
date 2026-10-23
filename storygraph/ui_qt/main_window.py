@@ -133,6 +133,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDockWidget,
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS, EditorSession
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
+from storygraph.ui_qt.elide import ElidedLabel
 from storygraph.ui_qt.graph_canvas import GraphCanvas
 from storygraph.ui_qt.inspector import PropertyStrip
 from storygraph.ui_qt.navigator import ChapterNavigator
@@ -153,7 +154,7 @@ from storygraph.ui_qt.window_export import (WindowExportMixin,
 from storygraph.ui_qt.window_graph_ops import GraphOpsMixin
 from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
 from storygraph.ui_qt.window_nav import WindowNavMixin
-from storygraph.ui_qt.window_state import WindowStateMixin
+from storygraph.ui_qt.window_state import WindowStateMixin, fit_to_available
 from storygraph.ui_qt.window_recover import RecoverMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
 
@@ -256,9 +257,9 @@ class BeatCardEditor(QWidget):
         self._flow_target.setInsertPolicy(QComboBox.NoInsert)
         self._flow_target.setMinimumWidth(220)
         self._flow_target.setToolTip(
-            '从本文件已有的 label 里选，或直接写目标 label 名（支持 main.route）')
+            '从本文件 / 项目里已有的 label 里选，或直接写目标 label 名；\n'
+            '点号分段的写法（main.route）也可以手写。')
         target_row.addWidget(self._flow_target, 1)
-        target_row.addWidget(QLabel('可手写点号 label'), 0)
         lay.addLayout(target_row)
 
         # **参数 `(…)` 与 `from …`**（2026-10-22 第二阶段）：
@@ -376,6 +377,18 @@ class BeatCardEditor(QWidget):
         self._spec_swatches: dict = {}
         root.addWidget(self._spec_host)
 
+        # —— 台词区（说话人 / 台词 / 字数 / 富文本预览 / 后缀）——
+        #
+        # 整块套一个容器，为的是**控制流卡能把它收起来**（2026-10-23）：
+        # 一张 `call side` 没有台词、没有立绘、没有舞台，但卡片把这三块
+        # 原样铺开 —— 用户看到一屏空框，以为自己"还没填"。
+        # 收起来之后，控制流卡上只剩：调用条 + 备注 + 条件 + 高级区。
+        self._dialogue_box = QWidget()
+        dlg_lay = QVBoxLayout(self._dialogue_box)
+        dlg_lay.setContentsMargins(0, 0, 0, 0)
+        dlg_lay.setSpacing(T.SPACE['xs'])
+        root.addWidget(self._dialogue_box)
+
         # —— 说话人 ——（一行，右边留白，视觉上"标签 + 值"）
         row1 = QHBoxLayout()
         row1.setSpacing(T.SPACE['sm'])
@@ -387,14 +400,14 @@ class BeatCardEditor(QWidget):
         self._widgets['Speaker'] = self._speaker
         row1.addWidget(self._speaker, 0)
         row1.addStretch(1)
-        root.addLayout(row1)
+        dlg_lay.addLayout(row1)
 
         # —— 台词（这张卡的主角，给足高度）——
         self._text = QPlainTextEdit()
         self._text.setPlaceholderText('这一拍要说的台词…')
         self._text.setFixedHeight(3 * 24 + 16)
         self._widgets['Text'] = self._text
-        root.addWidget(self._text)
+        dlg_lay.addWidget(self._text)
 
         # —— 字数：超长台词在游戏里会溢出对话框 ——
         # tkinter 版有这一项，搬 Qt 时漏了。它属于"作者看不见的坑"：
@@ -402,7 +415,7 @@ class BeatCardEditor(QWidget):
         self._char_label = QLabel('')
         self._char_label.setProperty('role', 'caption')
         self._char_label.setAlignment(Qt.AlignRight)
-        root.addWidget(self._char_label)
+        dlg_lay.addWidget(self._char_label)
 
         # —— 内联标签**预览**（2026-10-18）——
         #
@@ -417,7 +430,7 @@ class BeatCardEditor(QWidget):
         self._rich_preview.setWordWrap(True)
         self._rich_preview.setProperty('role', 'caption')
         self._rich_preview.setVisible(False)
-        root.addWidget(self._rich_preview)
+        dlg_lay.addWidget(self._rich_preview)
         # 输入时实时更新预览（只在这句话真有标签时才显示）
         self._text.textChanged.connect(self._refresh_rich_preview)
 
@@ -431,7 +444,7 @@ class BeatCardEditor(QWidget):
         self._say_tail_label.setProperty('role', 'caption')
         self._say_tail_label.setWordWrap(True)
         self._say_tail_label.setVisible(False)
-        root.addWidget(self._say_tail_label)
+        dlg_lay.addWidget(self._say_tail_label)
 
         # —— 舞台（**没有改动时只占一行**）——
         #
@@ -736,9 +749,15 @@ class BeatCardEditor(QWidget):
         self._flow = info
         if not info:
             self._flow_bar.setVisible(False)
+            # 回到普通卡片：台词区与舞台块按这一拍自己的内容重新出现
+            # （舞台的显隐规则归 `_apply_stage_visibility`，别在这里另写一套）。
+            self._dialogue_box.setVisible(True)
+            self._apply_stage_visibility()
             if self._loaded_fields:
                 self._loaded_fields.pop('FlowType', None)
                 self._loaded_fields.pop('FlowTarget', None)
+                self._loaded_fields.pop('FlowArgs', None)
+                self._loaded_fields.pop('FlowFrom', None)
             return
         self._loading = True
         try:
@@ -765,6 +784,14 @@ class BeatCardEditor(QWidget):
         finally:
             self._loading = False
         self._flow_bar.setVisible(True)
+        # **控制流卡没有台词与演出**（2026-10-23，用户："这个控制流卡的 UI 不对"）：
+        # 一张 `call side` 却铺开"说话人 + 台词 + 立绘 + 舞台"四个空块，
+        # 看着像"还有一屏没填"。把它们收起来，卡片上只剩调用条 + 备注 +
+        # 条件 + 高级区 —— 这正好是 call/jump 能拥有的全部内容。
+        self._dialogue_box.setVisible(False)
+        self._stage_toggle.setVisible(False)
+        self._stage_empty.setVisible(False)
+        self._stage_box.setVisible(False)
         self._refresh_flow_text()
         # 载入时的控制流值也进基线，否则一打开就显示"有未保存的改动"。
         if self._loaded_fields:
@@ -848,6 +875,8 @@ class BeatCardEditor(QWidget):
                  for i in range(self._flow_target.count())}
         if target and target not in names:
             detail += '\n目标不在本文件的 label 里；仍可手写（可能来自其他文件）'
+        detail += ('\n这张卡没有台词与演出 —— 台词 / 立绘 / 舞台那几块已收起；'
+                   '要加一句台词请另插一张普通卡片。')
         # `jump` 不接受参数 / from（Ren'Py 语法）—— 灰掉比"填了也不生效"诚实。
         is_call = flow_type == 'call'
         self._flow_args.setEnabled(is_call)
@@ -1578,7 +1607,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   放到 `_build()` 之后设，就是"恢复跑完了才知道命令行给了什么"。
         self._pending_script = Path(script_path) if script_path else None
         self.setWindowTitle(self._base_title)
-        self.resize(1600, 950)
+        # ⚠ **按屏幕压一遍**（2026-10-23）：`sizeHint()` 会把工具栏的完整宽度
+        #   算进来（实测 2720×705），照它开窗在 1080p/2K 上都跑到屏幕外。
+        self.resize(*fit_to_available(1600, 950))
         self._build()
         #: 构造后**立刻**载入这一章（同步）。
         #: 不推迟到 QTimer 里 —— 调用方（测试、脚本、`open_editor`）
@@ -2104,8 +2135,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._crumb = QLabel('剧情结构')
         self._crumb.setProperty('role', 'section')
         bh.addWidget(self._crumb)
-        self._crumb_hint = QLabel('')
-        self._crumb_hint.setProperty('role', 'caption')
+        # 面包屑右边那句提示：**可以被压窄**。
+        # 2026-10-23 用户截图：这一行在 1680px 上把「↩ 撤销结构操作」「🗑 删除
+        # 这张卡片」挤到窗口外 —— 实测行最小 1279px、可用 1106px。
+        # 元凶是普通 QLabel 的最小宽度 = 整句宽度（468px）；换成省略标签后
+        # 最小 0，窗口再窄也只会把提示画成 `…`，按钮始终在。
+        self._crumb_hint = ElidedLabel('', mode=Qt.ElideRight, role='caption')
         bh.addWidget(self._crumb_hint, 1)
         # —— 增 / 删卡片（结构编辑）——
         # 用户 2026-10-03："只能够修改，不能增删，还是没用！"
@@ -2191,6 +2226,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._list.setItemDelegate(self._shot_delegate)
         self._list.setUniformItemSizes(False)
         self._list.setSpacing(0)
+        # 横向滚动条**永久关掉**（2026-10-23）：行文字由 delegate 自己按
+        # 视口宽度省略，横向滚动条只会多一条"看起来还有内容在右边"的假线索
+        # —— 而且它一旦出现就会吃掉行高，列表底部那条细线就是它。
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list.setTextElideMode(Qt.ElideRight)
         self._list.setMouseTracking(True)      # 悬停高亮要它
         # `MouseTracking` 只管"鼠标移动事件"；`State_MouseOver` 还要 viewport
         # 带 `WA_Hover`（Qt 的 viewOptions 就是按这个属性判的）。
@@ -2235,10 +2275,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         split.addWidget(right)
 
         # 中间那一栏要能读剧本（行号 + 类型牌 + 说话人），比原来 260 宽不少；
-        # 右边表单仍是主角，但不再吃掉全部剩余宽度。
-        split.setSizes([430, 900])
+        # 右栏是"属性 + 表单"，不该吃掉 2/3 的宽度 —— 2026-10-23 用户截图：
+        # 正文 500px、右栏 900px，读台词反而最挤。改成 3:2：正文能多放两行，
+        # 表单仍然够放（它本来就能滚）。
+        split.setSizes([560, 500])
         split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 5)
+        split.setStretchFactor(1, 2)
         self._split_card = split          # 同上：会话记忆要摆回它
         outer.addWidget(split, 1)
         return page
@@ -2497,7 +2539,15 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._update_nav()
 
     def _update_crumb(self):
-        """面包屑：`剧情结构 › 文件名 › label › 第 i / n 拍`。"""
+        """
+        面包屑：`剧情结构 › 文件名 › label › 第 i / n 拍`。
+
+        ⚠ 右边那句**只放"第几拍 + 这一拍在产物里几行"**（2026-10-23）：
+        从前它后面还挂着一整句"改完按「💾 保存这一拍」，「← 返回剧情结构」
+        回第一屏" —— 那句话把这一行的最小宽度顶到 1279px，1400px 窗口上
+        最后一个按钮直接被裁掉。常驻的提示不该按"每次都要完整读一遍"排版：
+        操作提示进 tooltip，位置信息留在行上。
+        """
         if not hasattr(self, '_crumb'):
             return
         name = Path(self._file_path).name if self._file_path else ''
@@ -2508,16 +2558,17 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._crumb.setText('剧情结构')
             self._crumb_hint.setText(
                 f'当前模块：{name}' if name else '（双击一个模块进卡片编辑器）')
+            self._crumb_hint.setToolTip(self._crumb_hint.full_text())
         else:
             where = f'{name or "（未载入）"}'
             if label:
                 where += f' › {label}'
             self._crumb.setText(f'剧情结构 › {where}')
-            self._crumb_hint.setText(
-                f'第 {i + 1 if i >= 0 else 0} / {n} 拍'
-                f'{self._beat_lines_hint(i)}'
-                f'　·　改完按「💾 保存这一拍」，'
-                f'「← 返回剧情结构」回第一屏')
+            pos = f'第 {i + 1 if i >= 0 else 0} / {n} 拍{self._beat_lines_hint(i)}'
+            self._crumb_hint.setText(pos)
+            self._crumb_hint.setToolTip(
+                f'{pos}\n改完按「💾 保存这一拍」；「← 返回剧情结构」回第一屏。'
+                '\n快捷键：← / → 翻拍，Ctrl+S 保存这一拍。')
 
     def _beat_lines_hint(self, idx: int) -> str:
         """
