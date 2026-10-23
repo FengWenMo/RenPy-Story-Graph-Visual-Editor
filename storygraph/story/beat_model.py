@@ -3412,7 +3412,18 @@ def assign_identity(beats: list):
     for b in beats:
         if not b.line_id:
             label = b.label or 'start'
-            b.line_id = allocate(used, label)
+            # **优先用这一拍自己的序号**（`ch01.0007`）：老表、刚解析出来的文件
+            # 都靠这条保持"编号与从前一致"（validate 金标、用户的旧表都按它）。
+            # 只有撞号（同一批里重复 / 有人手写占了）才退到 max+1。
+            try:
+                seq = int(b.seq or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            preferred = f'{label}.{seq:04d}' if seq > 0 else ''
+            if preferred and preferred not in used:
+                b.line_id = preferred
+            else:
+                b.line_id = allocate(used, label)
             used.add(b.line_id)
         b.beat_fingerprint = _beat_content_hash(b)
 

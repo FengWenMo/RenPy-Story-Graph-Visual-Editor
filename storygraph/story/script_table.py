@@ -388,7 +388,9 @@ def _reuse_existing_ids(beats, table_path) -> int:
         return 0
     try:
         old = [b for b in import_beats_from_excel(path) if str(b.line_id or '')]
-    except Exception:                        # noqa: BLE001 - 旧表坏了就发新号
+    except Exception as e:                   # noqa: BLE001 - 旧表坏了就发新号
+        from storygraph.core.safeguard import swallow
+        swallow('story.script_table.reuse_existing_ids', e)
         return 0
     if not old:
         return 0

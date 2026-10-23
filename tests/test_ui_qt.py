@@ -1752,21 +1752,25 @@ class TestInsertDeleteCard:
         assert window.beats[2].text == text, '恢复的位置不对'
         assert not window._restore_btn.isEnabled(), '恢复过就不该再亮着'
 
-    def test_renumbering_keeps_line_ids_consistent(self, window):
+    def test_renumbering_keeps_line_ids_stable(self, window):
         """
-        插入之后 `seq` / `line_id` 都要重排（否则协作与定位会错位）。
+        插入之后 `seq` 重排，但**别人的 line_id 一个都不许变**（契约 R5/R7）。
 
-        注意 `line_id` 的前缀是**各个 label 名**（一章里可能有好几个 label），
-        所以不能把整串排序比 —— 要单独看**序号后缀**连续且唯一。
+        2026-10-23 之前这里是"按位置重写全部 ID"（`ch01.0001..0009` 整串重排）——
+        插一张卡，后面每一行的身份都换，协作锁/翻译/语音全错位，而且静默。
+        现在只给"没有身份的行"发号：旧行原样，新行一条全新。
         """
         window._set_page(window.PAGE_CARD)
         window._show_index(0)
+        before = [b.line_id for b in window.beats]
         window.insert_card()
-        ids = [b.line_id for b in window.beats]
-        assert len(set(ids)) == len(ids), 'line_id 撞了'
-        assert [b.seq for b in window.beats] == list(range(1, len(ids) + 1))
-        nums = [int(x.rsplit('.', 1)[1]) for x in ids]
-        assert nums == list(range(1, len(ids) + 1)), f'序号没按新顺序排：{ids}'
+        after = [b.line_id for b in window.beats]
+        assert len(set(after)) == len(after), 'line_id 撞了'
+        assert [b.seq for b in window.beats] == list(range(1, len(after) + 1))
+        new = [i for i in after if i not in before]
+        assert len(new) == 1, f'新卡该拿一条全新 ID：{after}'
+        assert [i for i in after if i != new[0]] == before, (
+            f'插入改了别人的身份：\n前 {before}\n后 {after}')
 
     def test_cannot_delete_the_last_remaining_card(self, window, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
