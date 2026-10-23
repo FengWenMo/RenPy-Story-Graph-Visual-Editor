@@ -94,6 +94,7 @@ class WindowStateMixin:
             geometry=geometry,
             split_graph=self._splitter_sizes('_split_graph'),
             split_card=self._splitter_sizes('_split_card'),
+            dock_state=self._dock_state_blob(),
             root=getattr(self, '_project_root', None))
 
     def save_session_state(self) -> dict:
@@ -169,6 +170,54 @@ class WindowStateMixin:
             except Exception as e:                  # noqa: BLE001
                 swallow('ui_qt.window_state.restore_splitters', e)
 
+    # ------------------------------------------------------------------
+    #  停靠面板（左侧「章节导航」）
+    # ------------------------------------------------------------------
+
+    def _dock_state_blob(self) -> str:
+        """
+        `QMainWindow.saveState()` → base64 文本（存不进 JSON 的是 QByteArray）。
+
+        记的是**所有** dock 的位置 / 宽度 / 是否浮出 / 是否关掉。分成
+        "某个 dock 宽度"单独记字段的话，关掉再打开、拖到右边、浮出这几件事
+        都得各写一份，而 Qt 已经把它们编码好了 —— 抄一份现成的。
+        """
+        try:
+            raw = self.saveState()
+            if not raw:
+                return ''
+            return bytes(raw.toBase64()).decode('ascii')
+        except Exception as e:                      # noqa: BLE001 - 记不下就不记
+            swallow('ui_qt.window_state.dock_state_blob', e)
+            return ''
+
+    def _restore_docks(self, layout: dict):
+        """把 dock 的状态摆回去（旧记忆里没有这一项就保持默认，不猜）。"""
+        blob = str((layout or {}).get('dock_state') or '')
+        if not blob:
+            return False
+        try:
+            from PySide6.QtCore import QByteArray
+            data = QByteArray.fromBase64(blob.encode('ascii'))
+            ok = bool(self.restoreState(data))
+        except Exception as e:                      # noqa: BLE001 - 摆不回去就用默认
+            swallow('ui_qt.window_state.restore_docks', e)
+            return False
+        # 工具栏上那个勾选框要跟真实可见性对齐 —— 不同步的话会出现
+        # "勾着但面板已经关了"，再点一次反而把它打开（看起来像失灵）。
+        try:
+            dock = getattr(self, '_nav_dock', None)
+            act = getattr(self, '_nav_action', None)
+            if dock is not None and act is not None:
+                # 同 `window_nav._on_nav_dock_visible`：用 `isHidden()` ——
+                # 恢复布局时窗口通常还没 show，`isVisible()` 一律是 False。
+                act.blockSignals(True)
+                act.setChecked(not dock.isHidden())
+                act.blockSignals(False)
+        except Exception as e:                      # noqa: BLE001
+            swallow('ui_qt.window_state.sync_nav_action', e)
+        return ok
+
     def reopen_project(self, root, remember: bool = True) -> dict:
         """
         打开一个项目 **并把它上次的布局一起摆回去**。
@@ -189,6 +238,7 @@ class WindowStateMixin:
             return {'ok': False, 'reason': str(e)}
         try:
             self._restore_splitters(layout)
+            self._restore_docks(layout)
             self._restore_to_screen(layout.get('geometry'))
             chapter = SS.resolve_chapter(layout, root)
             if chapter:

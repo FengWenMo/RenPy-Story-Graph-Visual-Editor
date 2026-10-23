@@ -1,5 +1,5 @@
 """
-「协作锁」—— 谁在改哪几句，以及**我这一句先占住**。
+「协作」—— 谁在改哪几句（锁），以及**这一章到哪一步了**（状态）。
 ==========================================================================
 
 用户 2026-10-22（体验报告 P0-3，原话）：
@@ -9,12 +9,13 @@
 > locks（collab_store）实测在**"只有测试在用"**清单里 → 能力悬空。
 
 所以这一层**不写任何新规则**：锁的语义（租约 / 过期可接手 / 只读成员不能上锁
-/ 强制解锁只有所有者能做）全在 `collab.collab_store`，界面只做三件事：
+/ 强制解锁只有所有者能做）全在 `collab.collab_store`，界面只做四件事：
 
 ```
-看：列表（哪一句 · 谁 · 还有多久到期 · 是不是我的）
+看：锁列表（哪一句 · 谁 · 还有多久到期 · 是不是我的）
 占：锁住当前这一拍 / 锁住整章
 收：续租我的 / 解锁（选中的） / 强制解锁（所有者）
+推：把一整章标成 草稿 / 待审 / 定稿（2026-10-23 补，P1-5）
 ```
 
 ## 为什么"锁"值得接到界面上（而不是留着当摆设）
@@ -25,6 +26,12 @@
 
 锁的价值不在"挡住别人"，在于**先手**：我改这一句的这 15 分钟里，
 你提交它会被拒，而不是我的改动被静默覆盖。
+
+## 为什么"状态"比"锁"更常被问
+
+锁解决"**同时改**"，状态解决"**到哪一步了**"。策划每天被问的是后者
+（"这章审完了吗"），而逐句标状态没人会做 —— 所以这里只做**按章**，
+权限与 `set_status` 同一条（`collab_store.set_status_range` 里没另写判据）。
 
 ## 三条界面口径
 
@@ -48,6 +55,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout)
 
+from storygraph.core.collab_status import (STATUS_APPROVED, STATUS_DRAFT,
+                                           STATUS_LABELS, STATUS_REVIEW)
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import prefs
 from storygraph.ui_qt import tokens as T
@@ -86,13 +95,14 @@ class CollabLockDialog(QDialog):
                  db_path: str = '', actor: str = '', label: str = '',
                  line_id: str = '', log=None):
         super().__init__(parent)
-        self.setWindowTitle('协作锁（谁在改哪几句）')
-        self.resize(760, 560)
+        self.setWindowTitle('协作（谁在改哪几句 · 这一章到哪一步）')
+        self.resize(800, 720)
         self._session = session
         self._log_fn = log
         self._label = str(label or '')
         self._line_id = str(line_id or '')
         self._rows = []
+        self._status_rows = []
         self._build(Path(project_root) if project_root else Path.cwd(),
                     db_path, actor)
 
@@ -163,6 +173,46 @@ class CollabLockDialog(QDialog):
         acts.addStretch(1)
         root_lay.addLayout(acts)
 
+        # —— 状态（草稿 / 待审 / 定稿）——
+        # 按**章**给开关，不按句：逐句标状态没人会做（见模块 docstring）。
+        cap_status = QLabel('状态（到哪一步了）')
+        cap_status.setProperty('role', 'section')
+        root_lay.addWidget(cap_status)
+        self.status_summary = QLabel('—')
+        self.status_summary.setProperty('role', 'caption')
+        root_lay.addWidget(self.status_summary)
+
+        self.status_table = QTableWidget(0, 6)
+        self.status_table.setHorizontalHeaderLabels(
+            ['章（label）', '行数', '草稿', '待审', '定稿', '锁着'])
+        self.status_table.verticalHeader().setVisible(False)
+        self.status_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.status_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.status_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        shead = self.status_table.horizontalHeader()
+        shead.setMinimumSectionSize(46)     # 否则"行数/草稿/待审"挤成一坨
+        shead.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            shead.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.status_table.setMaximumHeight(150)
+        root_lay.addWidget(self.status_table, 0)
+
+        sacts = QHBoxLayout()
+        sacts.setSpacing(T.SPACE['xs'])
+        for text, status, tip in (
+                ('✎ 标为草稿', STATUS_DRAFT,
+                 '把选中的那一章（没选就当前这一章）标回草稿'),
+                ('👀 送审（待审）', STATUS_REVIEW,
+                 '这一章写完了，请人看一遍'),
+                ('✅ 定稿', STATUS_APPROVED,
+                 '这一章审过了 —— 只有编辑 / 所有者能标（只读成员会被拒）')):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _c=False, s=status: self._set_status(s))
+            sacts.addWidget(btn)
+        sacts.addStretch(1)
+        root_lay.addLayout(sacts)
+
         self.out = QPlainTextEdit()
         self.out.setReadOnly(True)
         self.out.setFixedHeight(96)
@@ -228,6 +278,7 @@ class CollabLockDialog(QDialog):
         self.table.setRowCount(0)
         self._rows = []
         if not self._db() or not Path(self._db()).is_file():
+            self.refresh_status()       # 没库时状态那半也要**说一句**，不是留空白
             return
         res = (self._session.collab_locks(self._db())
                if self._session is not None else {})
@@ -251,6 +302,83 @@ class CollabLockDialog(QDialog):
                     # 我的锁**看得见**（不然列表里全是别人的，人以为没锁上）
                     item.setForeground(Qt.GlobalColor.darkGreen)
                 self.table.setItem(i, col, item)
+        self.refresh_status()
+
+    # ---- 状态 ----
+
+    def refresh_status(self):
+        """重读各章进度（库不在/读不出来就说一句，不留一张空表）。"""
+        self.status_table.setRowCount(0)
+        self._status_rows = []
+        if not self._db() or not Path(self._db()).is_file():
+            self.status_summary.setText('还没有协作库 —— 先在「👥 协作库」里建库')
+            return
+        res = (self._session.collab_status_overview(self._db())
+               if self._session is not None else {})
+        if not res.get('ok'):
+            self.status_summary.setText(f'读不到状态：{res.get("error") or "（没接上会话）"}')
+            return
+        summary = res.get('summary') or {}
+        counts = summary.get('by_status') or {}
+        total = int(summary.get('lines') or 0)
+        self.status_summary.setText(
+            f'共 {total} 行 · '
+            + ' · '.join(f'{STATUS_LABELS.get(k, k)} {int(counts.get(k) or 0)}'
+                         for k in (STATUS_DRAFT, STATUS_REVIEW, STATUS_APPROVED))
+            + (f' · 锁着 {int(summary.get("locked_total") or 0)}'
+               if summary.get('locked_total') else ''))
+        rows = list(summary.get('labels') or ())
+        self._status_rows = rows
+        self.status_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            total_i = int(row.get('total') or 0)
+            approved = int(row.get('approved') or 0)
+            review = int(row.get('in_review') or 0)
+            draft = max(0, total_i - approved - review)
+            label = str(row.get('label') or '（无 label）')
+            cells = [label, str(total_i), str(draft), str(review), str(approved),
+                     str(int(row.get('locked') or 0))]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if col == 0:
+                    item.setToolTip(label)
+                self.status_table.setItem(i, col, item)
+        # 当前这一章默认选中（"我就在改它，给它的状态按钮才是我要按的"）
+        for i, row in enumerate(rows):
+            if self._label and str(row.get('label') or '') == self._label:
+                self.status_table.setCurrentCell(i, 0)
+                break
+
+    def _target_label(self) -> str:
+        """状态按钮作用在哪一章：选中的那一行 → 当前这一章 → 空。"""
+        row = self.status_table.currentRow()
+        rows = getattr(self, '_status_rows', None) or []
+        if 0 <= row < len(rows):
+            return str(rows[row].get('label') or '')
+        return str(self._label or '')
+
+    def _set_status(self, status: str):
+        """把选中的那一章标成某状态（权限、审计、行数全由会话/存储层回答）。"""
+        if not self._require():
+            return
+        label = self._target_label()
+        if not label:
+            self._say('先选一章（或者先在卡片页打开一章）。')
+            return
+        res = self._session.collab_set_status_range(
+            self._db(), label, status, self._me())
+        if not res.get('ok'):
+            self._say(f'没改成：{res.get("error") or "（未知原因）"}')
+            return
+        info = res.get('result') or {}
+        changed = int(info.get('changed') or 0)
+        total = int(info.get('total') or 0)
+        word = STATUS_LABELS.get(status, status)
+        if not changed:
+            self._say(f'「{label}」本来就已经是{word}（{total} 行，没有要改的）。')
+        else:
+            self._say(f'「{label}」→ {word}：改了 {changed} 行 / 共 {total} 行。')
+        self.refresh_status()
 
     # ---- 写 ----
 

@@ -53,6 +53,7 @@ BLOCKS = {
     'window_export': 'WindowExportMixin',
     'window_assets': 'WindowAssetsMixin',
     'window_keyboard': 'WindowKeyboardMixin',
+    'window_nav': 'WindowNavMixin',
     'window_state': 'WindowStateMixin',
     'window_recover': 'RecoverMixin',
 }
@@ -120,7 +121,10 @@ QT_MEMBERS = {
     # 窗口 / 控件
     'statusBar', 'setWindowTitle', 'windowTitle', 'resize', 'close',
     'setCentralWidget', 'centralWidget', 'addToolBar', 'addDockWidget',
+    'addToolBarBreak',
     'menuBar', 'setStatusBar', 'setWindowIcon', 'setMinimumSize',
+    # dock 布局的保存/恢复（`QMainWindow` 自己的，不是我们的实现）
+    'saveState', 'restoreState',
     'setAcceptDrops', 'setMouseTracking', 'rect', 'size', 'width', 'height',
     'parent', 'parentWidget', 'window', 'geometry', 'pos',
     'mapToGlobal', 'mapFromGlobal', 'mapTo', 'mapFrom',

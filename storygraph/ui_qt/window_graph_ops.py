@@ -90,7 +90,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'resync_after_export', 'set_assets_ready', 'show_recovery')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_recovery')
 
     def _show_analysis_text(self, text: str):
         """
@@ -496,6 +496,14 @@ class GraphOpsMixin:
         self._project_root = Path(root)
         self._session.project_root = self._project_root
         self._loader.project_root = self._project_root
+        # 左侧「章节导航」跟着换项目（**先扫一遍再读资源表**：扫盘 ~10ms，
+        # 而读表要 1.8 秒 —— 那几个文件先列出来，等待期间界面就不是空的）。
+        try:
+            if getattr(self, '_nav', None) is not None:
+                self._nav.set_project_root(self._project_root)
+                self.refresh_chapter_nav()
+        except Exception as e:                  # noqa: BLE001 - 导航扫不出来不该挡打开项目
+            swallow('ui_qt.open_project.nav', e)
         # 引擎壳（`_EngineShim`）也有 `project_root`；顺手同步一下，
         # 免得它按老路径懒加载时拿不到项目（那是"添加立绘没反应"的另一半）。
         if getattr(self.engine, 'project_root', None) is None:
@@ -1467,7 +1475,8 @@ class GraphOpsMixin:
                        lambda: self.export_control_flow(wrapper=False))
         menu.addSeparator()
         menu.addAction('🕘 上次没导出的改动…', self.show_recovery)
-        menu.addAction('🔒 协作锁（谁在改哪几句）…', self.show_collab_locks)
+        menu.addAction('🔒 协作锁 / 状态（谁在改 · 到哪一步）…',
+                       self.show_collab_locks)
         menu.addAction('👥 协作库（SQLite ↔ Excel）…', self.show_collab)
         return menu
 
@@ -1686,11 +1695,12 @@ class GraphOpsMixin:
         return dlg
     def show_collab_locks(self):
         """
-        「协作锁」：谁在改哪几句 + 我这一句先占住（2026-10-23 接线）。
+        「协作锁 / 状态」：谁在改哪几句 + 我这一句先占住 + 这一章到哪一步
+        （2026-10-23 接线；状态那半是 P1-5）。
 
         为什么挂在窗口上而不是放进 `CollabDialog`：它要**当前这一拍**
         （`_loaded_idx` 那一拍的 line_id）与当前 label —— 那是窗口的状态，
-        协作库对话框不知道"我现在改的是哪一句"。
+        协作库对话框不知道"我现在改的是哪一句"、"我这一章叫什么"。
 
         传进去的 `line_id` 就是**会话里那一拍**的身份编号：锁认的是它，
         所以这里必须用会话的拍（不是文件里现算的）—— 否则锁错行。

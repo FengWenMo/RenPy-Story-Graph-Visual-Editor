@@ -3791,6 +3791,68 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
   若当前章在 `modified` 里就 `load_script(…, goto_card=False)`。
   不重读的话，卡片页捧着改名前的拍，下次导出同样把旧名字写回去。
 
+## 30. 三栏骨架：章节导航 / 剧本行 / 属性表（2026-10-23，照参考界面）
+
+用户给了一张参考截图："我看类似于这样的 UI 布局就非常不错！参考学习调整 UI 方面的内容！"
+那一版骨架是"顶部模式标签 / 左侧章节树+搜索 / 中间带行号的正文 / 右栏检查器"。
+我们照**骨架**改，编辑语义一行没动。
+
+- **顶部模式条**（`window_nav._build_mode_bar`）：`QTabBar`（🗺 剧情结构 / ✎ 卡片编辑）
+  放进一条单独的工具栏。与 `_set_page` **双向**同步（`blockSignals` 防环；
+  `_set_page` 是唯一改页号的地方）。为什么不给每页再挂快捷键：`QAction` 的快捷键
+  不受"当前在哪页"约束（见 `_build_toolbars.act` 的注释）。
+- **左侧章节导航**（`ui_qt/navigator.py`，`QDockWidget`，`objectName=chapterNavDock`）：
+  数据来自 `app/chapter_index.build_index()`（项目 → 文件 → `label` + 行号）。
+  **不属于任何一页** —— 切页不丢，这正是它最大的用处（在卡片页也想跳去别的章）。
+  - 双击 / 回车才打开（单击只选中）：它紧贴拍列表，手一滑就换章 = 重读磁盘；
+  - `●` = 这个 label 已在剧情图里（`_sync_nav_marks` 由 `_set_graph` 唯一同步点驱动）；
+  - 搜索按"文件路径 / 文件名 / label"过滤，大小写不敏感；搜文件命中时带**全部** label；
+  - 折叠过的文件刷新后保持折着（`_collapsed`），搜索时一律展开。
+- **剧本行**（`ui_qt/shot_list.py`，`QStyledItemDelegate`）：**只换画法不换控件** ——
+  模型、`Qt.UserRole` 里的拍号、`item.text()`、`setCurrentRow` 全原样
+  （几十条既有用例按这些判过）。行号 `003` + 类型牌（对白/旁白/分支/选项/语句/调用/跳转）
+  + 加粗的说话人。类型判据与 `window_card._row_text` 同源。
+- **右栏属性表**（`ui_qt/inspector.py`，`PropertyStrip`）：文件 / label / 第几拍 /
+  类型 / 源位置（`.rpy 第 217–219 行`）/ 说话人。数据由 `window_nav._sync_inspector`
+  从会话取，`_show_index` 里刷新。空值那一行不显示；长值中略 + tooltip 全文 + 可选中复制。
+- ⚠ **同一文件里换 label = 跳拍，不重读**（`open_chapter_at` 先 `_same_file`）。
+  重读会把没导出的改动冲掉。
+- ⚠ **换章前先抄快照**（`autosave_now()`）：不弹窗问"要不要保存"（每次翻章都问，
+  三天就会被闭眼点"否"），但丢掉的那一份必须能捡回来 —— 快照按章存，
+  「🧰 更多工具 → 🕘 上次没导出的改动…」里还在。
+- **布局记忆多了 `dock_state`**（`QMainWindow.saveState()` 的 base64）：
+  存 dock 的位置 / 宽度 / 浮出 / 关掉，只当字符串存、不解释格式
+  （认不出时 `restoreState` 返回 False，就当没记）。`saveState` 要求工具栏有
+  `objectName`（`pageBarGraph` / `pageBarCard` / `modeBar`），否则 Qt 直接不存。
+- ⚠ 判 dock 开没开用 `isHidden()`，**不是** `isVisible()`：恢复布局时窗口通常还没
+  `show()`，`isVisible()` 一律 False → 工具条上那个勾会被莫名去掉。
+
+## 31. 拍列表的"行号 == 拍号"还成立吗（2026-10-23）
+
+成立，但**只在列表里**：`_beat_rows[拍号] = 行号` 仍由 `_reload_list` 维护，
+分组标题行（`Qt.UserRole == -1`）不占拍号。delegate 画的 `003` 是 `拍号 + 1`，
+不是行号 —— 两者在"有 label 分组标题"时会差几行，别混着用。
+
+## 32. 状态流（2026-10-23，体验报告 P1-5）
+
+`collab_store.set_status` 早就有（draft / in_review / approved，含权限与审计），
+界面一直没有入口。这一轮接上，**形状是按章**：
+
+- `collab_store.set_status_range(db, label, status, actor)`：
+  只动这一章、只动 `deleted=0`；已经是该状态的行**不算 changed**；
+  **不碰锁**（锁管内容，状态是审阅元数据）；权限与 `set_status` **同一条**
+  （`_can(role, 'approve')`，别另写）；一条 `status_range` 审计（章 / 状态 /
+  改了几行 / 共几行）；`STATUS_LABELS` 是唯一的中文名来源。
+- `session_collab.collab_status_overview(db)`：`status_summary` 的薄壳。
+  ⚠ **库不存在就直接说，不去碰盘** —— `connect()` 会建库 + 跑 DDL
+  （与 `collab_locks` 同一条）。
+- 界面不新开窗：放进已有的「🔒 协作锁 / 状态」对话框（同一协作库、同一用户名）。
+  上半锁表，下半**状态表**（章 / 行数 / 草稿 / 待审 / 定稿 / 锁着）+
+  三个按钮；没选章时作用于**当前这一章**（打开时把当前 label 传进去并自动选中）。
+- 判定：`tests/test_collab_status_ui.py`（20 条）。
+
+
+
 
 
 

@@ -38,6 +38,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.collab_status import (  # noqa: F401  (本模块 re-export)
+    STATUS_APPROVED, STATUS_DRAFT, STATUS_LABELS, STATUS_REVIEW, STATUSES)
 from storygraph.story.beat_fields import BEAT_FIELDS
 from storygraph.story.beat_model import Beat, assign_identity
 from storygraph.core.cell_limits import CELL_TEXT_LIMIT
@@ -99,10 +101,10 @@ _ROLE_ACTIONS = {
     ROLE_VIEWER: frozenset({'read'}),
 }
 
-STATUS_DRAFT = 'draft'
-STATUS_REVIEW = 'in_review'
-STATUS_APPROVED = 'approved'
-STATUSES = (STATUS_DRAFT, STATUS_REVIEW, STATUS_APPROVED)
+# 状态的值与中文名**不在这里定义** —— 见 `core/collab_status.py` 顶部说明：
+# 界面（主链）也要用它们，而"主链不该依赖旁支 collab"，所以下沉到 core。
+# 这里只是**转出**（`from ... import` 在文件顶部），老调用方
+# `collab_store.STATUS_DRAFT` 这些名字一个字都不用改。
 
 # push/pull 时携带协作状态的工作表名（不污染 Beats 表的列）
 COLLAB_SHEET = '协作信息'
@@ -1997,6 +1999,56 @@ def set_status(db_path, line_id: str, status: str, actor: str) -> dict:
             return {'ok': False, 'reason': f'没有这一行：{line_id}'}
         _audit(conn, actor, 'status', line_id, {'status': status})
     return {'ok': True, 'line_id': line_id, 'status': status}
+
+
+def set_status_range(db_path, label: str, status: str, actor: str = '') -> dict:
+    """
+    把**一整章**的行置为某个状态（"这一章送审 / 定稿"）。
+
+    为什么需要它（2026-10-23，P1-5）：`set_status` 是逐行的，而团队的
+    真实动作是**按章**的 —— 策划不会为 284 句一句句点"定稿"。没有这一步，
+    "状态"就只是一个更麻烦的逐行开关，界面接上了也没人用。
+
+    三条口径：
+      · **只动这一章、只动未删的行**（`deleted=0`）；
+      · 已经就是这个状态的行**不算 changed**（回执里的数字必须能对账）；
+      · **不碰锁**：锁管的是"内容谁在改"，状态是审阅元数据；
+        认可别人锁着的那句"文案没问题"不需要抢她的锁。
+      · 权限与 `set_status` **同一条**（`_can(role, 'approve')`）——
+        别在这里另写一套判据，两处漂移会让"只读能定稿"这种洞藏进去。
+
+    回执：`{ok, label, status, changed, total}`；审计一条 `status_range`。
+    """
+    if status not in STATUSES:
+        return {'ok': False, 'reason': f'状态只能是 {"/".join(STATUSES)}'}
+    text = str(label or '').strip()
+    if not text:
+        return {'ok': False, 'reason': '没给章名（label）'}
+    with connect(db_path, write=True) as conn:
+        role = _actor_role(conn, actor)
+        action = 'approve' if status == STATUS_APPROVED else 'status'
+        if not _can(role, action):
+            return {'ok': False,
+                    'reason': f'只读成员不能改状态（你是 {role}）'}
+        rows = conn.execute(
+            'SELECT line_id, status FROM beats WHERE label=? AND deleted=0',
+            (text,)).fetchall()
+        if not rows:
+            return {'ok': False, 'reason': f'没有这一章的行：{text}'}
+        changed = 0
+        for r in rows:
+            if str(r['status'] or '') == status:
+                continue
+            cur = conn.execute(
+                'UPDATE beats SET status=?, updated_by=?, updated_at=?, '
+                'revision=revision+1 WHERE line_id=?',
+                (status, actor, _now(), r['line_id']))
+            changed += int(cur.rowcount or 0)
+        if changed:
+            _audit(conn, actor, 'status_range', text,
+                   {'status': status, 'changed': changed, 'total': len(rows)})
+    return {'ok': True, 'label': text, 'status': status,
+            'changed': changed, 'total': len(rows)}
 
 
 def upsert_assets(db_path, registry, actor: str = '') -> int:

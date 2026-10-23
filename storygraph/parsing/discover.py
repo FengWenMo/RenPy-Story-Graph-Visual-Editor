@@ -91,6 +91,33 @@ def labels_in_file(path) -> list:
     return out
 
 
+def label_lines_in_file(path) -> list:
+    """
+    这个 `.rpy` 里的 `(label, 行号)`，按出现顺序；**重名只留第一处**。
+
+    行号是 1-based（与编辑器、报错、`src_first` 同一套）。
+
+    为什么和 `labels_in_file` 分两个函数：后者在导入/补全的热路径上，
+    只回名字就够（40 个文件一次扫完）；而左侧「章节导航」要显示
+    「从第几行开始」，多一个行号只是 `text.count('\\n', 0, m.start())`。
+    两处仍用**同一条正则** —— 否则导航里列得出的 label，导入时可能
+    认不出（或反过来），那是"看得见却打不开"这种最难查的错。
+    """
+    try:
+        text = Path(path).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return []
+    out: list = []
+    seen: set = set()
+    for m in _LABEL_RE.finditer(text):
+        name = m.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append((name, text.count('\n', 0, m.start()) + 1))
+    return out
+
+
 def find_label_files(project_root, labels) -> dict:
     """
     `{label 名: 声明它的 .rpy}` —— 只回答"这个 label 在哪个文件里"。
@@ -158,4 +185,4 @@ def find_files_referencing_labels(project_root, labels) -> dict:
 
 __all__ = ['discover_scripts', 'find_label_files',
            'find_files_referencing_labels', 'labels_in_file',
-           'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']
+           'label_lines_in_file', 'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']

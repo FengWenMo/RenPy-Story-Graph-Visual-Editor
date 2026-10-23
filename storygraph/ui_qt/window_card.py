@@ -135,7 +135,7 @@ class CardPageMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_update_crumb', '_who', 'graph', 'maybe_offer_recovery')
+    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_sync_inspector', '_sync_nav_current', '_update_crumb', '_who', 'graph', 'maybe_offer_recovery')
 
     #: 被用户折起来的 label 名（跨 `_reload_list` 保留：翻页/插卡不该弹开）。
     _collapsed_labels: frozenset = frozenset()
@@ -683,6 +683,20 @@ class CardPageMixin:
         item.setToolTip(f'label：{label}' if label else '')
         return item
 
+    def _entry_of_beat(self, idx: int) -> dict:
+        """
+        拍号 → 这一行的摘要（给 `ShotDelegate` 排版用）。
+
+        与 `_item_text` 同一个数据源（`EditorSession.list_entry`）：列表的
+        文字内容与画出来的内容**不许各取一套** —— 那会出现"看起来是 A、
+        复制出来是 B"。
+        """
+        try:
+            return self._session.list_entry(int(idx))
+        except Exception as e:                  # noqa: BLE001 - 画不出来也要画这行
+            swallow('ui_qt.window_card.entry_of_beat', e)
+            return {}
+
     def _item_text(self, i) -> str:
         """
         列表一行 = 这一拍的正文（拍号 / 台词 / 语句名）。
@@ -1035,6 +1049,8 @@ class CardPageMixin:
             self._session.mark_loaded(-1)
             self._update_nav()
             self._sync_undo_button()
+            self._sync_inspector(-1)
+            self._sync_nav_current()
             return
         self._idx = idx
         # 告诉会话"前端现在显示这一拍"（`undo()` 不带参数时的默认目标）
@@ -1063,6 +1079,10 @@ class CardPageMixin:
         self._update_nav()
         self._sync_undo_button()
         self._sync_structural_buttons()
+        # 右栏属性表（文件 / label / 第几拍 / 源行）+ 左侧导航的"当前这一章"
+        # —— 都只读会话，改一个字也不写回去。
+        self._sync_inspector(idx)
+        self._sync_nav_current()
         # 相邻几拍的立绘先解进缓存（翻卡片不空等；见 `_prefetch_neighbours`）
         self._prefetch_neighbours(idx)
 

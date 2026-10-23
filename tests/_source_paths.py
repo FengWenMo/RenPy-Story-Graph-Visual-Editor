@@ -87,6 +87,8 @@ WINDOW_MIXIN_MODULES = (
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_assets',
     'storygraph.ui_qt.window_keyboard',
+    'storygraph.ui_qt.window_nav',
+    'storygraph.ui_qt.window_state',
     'storygraph.ui_qt.window_recover',
 )
 

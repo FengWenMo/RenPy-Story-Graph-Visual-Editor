@@ -171,3 +171,36 @@ class CollabMixin:
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'locks': []}
         return {'ok': True, 'error': '', 'locks': rows}
+
+    # ------------------------------------------------------------------
+    #  状态（草稿 / 待审 / 定稿）—— 2026-10-23，体验报告 P1-5
+    #  `collab_store.set_status` 早就实现了权限与审计，界面上一直没有入口。
+    #  团队流程里"到哪一步了"比"谁在改"更常被问，所以按**章**给一个开关。
+    # ------------------------------------------------------------------
+    def collab_status_overview(self, db_path) -> dict:
+        """
+        协作总览（各状态多少行 / 每章进度 / 成员与最近审计）。
+
+        ⚠ 与 `collab_locks` 同一条：**库不存在就直接说，不去碰盘** ——
+        `connect()` 会建库 + 跑 DDL，看一眼总览不该悄悄造出一个空库。
+        """
+        from storygraph.collab.collab_store import status_summary
+        path = Path(db_path)
+        if not path.is_file():
+            return {'ok': False, 'error': f'还没有协作库：{path}', 'summary': {}}
+        try:
+            data = status_summary(path)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'summary': {}}
+        return {'ok': True, 'error': '', 'summary': data}
+
+    def collab_set_status_range(self, db_path, label: str, status: str,
+                                actor: str = '') -> dict:
+        """把一整章标成草稿 / 待审 / 定稿（规则与权限在 `collab_store`）。"""
+        from storygraph.collab.collab_store import set_status_range
+        try:
+            res = set_status_range(Path(db_path), label, status, actor=actor)
+        except Exception as e:                # noqa: BLE001
+            return {'ok': False, 'error': str(e), 'result': {}}
+        return {'ok': bool(res.get('ok')), 'error': res.get('reason', ''),
+                'result': res}

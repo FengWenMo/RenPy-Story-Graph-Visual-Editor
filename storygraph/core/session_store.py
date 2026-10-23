@@ -539,12 +539,17 @@ def normalize_sizes(values) -> list:
 
 
 def layout_from(*, page=None, card_index=None, chapter=None, geometry=None,
-                split_graph=None, split_card=None, root=None) -> dict:
+                split_graph=None, split_card=None, root=None,
+                dock_state=None) -> dict:
     """
     界面状态 → **可存的布局**（只放"真的取到了"的字段）。
 
     `chapter` 同时记**绝对**与**相对项目根**两份：项目整个搬走之后，
     相对那份还能把章节找回来（绝对那份就失效了）。
+
+    `dock_state` 是 `QMainWindow.saveState()` 的 base64（dock 的位置 / 宽度 /
+    浮出 / 关掉）。**这里只当字符串存**，不解释它 —— Qt 的格式不归我们解析，
+    读的时候 `restoreState` 认不认由它说了算（认不出就当没记）。
     """
     out: dict = {}
     if page is not None:
@@ -578,6 +583,8 @@ def layout_from(*, page=None, card_index=None, chapter=None, geometry=None,
     sc = normalize_sizes(split_card)
     if sc:
         out['split_card'] = sc
+    if dock_state:
+        out['dock_state'] = str(dock_state)
     return out
 
 

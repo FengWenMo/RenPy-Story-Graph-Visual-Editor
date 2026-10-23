@@ -122,17 +122,21 @@ def renpy_text_to_html(text: str) -> tuple:
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QTextCursor
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMainWindow,
-                               QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSplitter, QStackedWidget,
-                               QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDockWidget,
+                               QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSplitter,
+                               QStackedWidget, QTabBar, QToolBar, QVBoxLayout,
+                               QWidget)
 
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS, EditorSession
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.graph_canvas import GraphCanvas
+from storygraph.ui_qt.inspector import PropertyStrip
+from storygraph.ui_qt.navigator import ChapterNavigator
+from storygraph.ui_qt.shot_list import ShotDelegate
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.status import AppStatusBar, Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
@@ -148,6 +152,7 @@ from storygraph.ui_qt.window_export import (WindowExportMixin,
                                              overwritable as _overwritable)
 from storygraph.ui_qt.window_graph_ops import GraphOpsMixin
 from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
+from storygraph.ui_qt.window_nav import WindowNavMixin
 from storygraph.ui_qt.window_state import WindowStateMixin
 from storygraph.ui_qt.window_recover import RecoverMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
@@ -1420,8 +1425,8 @@ class BeatCardEditor(QWidget):
 
 class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                    WindowExportMixin, WindowAssetsMixin,
-                   WindowKeyboardMixin, WindowStateMixin, RecoverMixin,
-                   QMainWindow):
+                   WindowKeyboardMixin, WindowNavMixin, WindowStateMixin,
+                   RecoverMixin, QMainWindow):
     """
     Qt 版主窗口 —— **两页**：剧情结构图（第一屏）→ 卡片编辑器（点进模块才进）。
 
@@ -1521,7 +1526,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
     #: 「我没有叫你所有的文件全部导进剧情图内！……我要看瞎了」——
     #: 引导文案必须把"导入哪些才在图里"讲明白，否则又会有人以为该灌整个项目。
     EMPTY_HINT = (
-        '剧情图是空的 —— 它只放**你自己导入的章节**，不会自动装进整个项目。\n\n'
+        '剧情图是空的 —— 它只放「你自己导入的章节」，不会自动装进整个项目。\n\n'
         '① 点「➕ 导入章节 .rpy」选要看的章节（可多选，累加）\n'
         '② 双击模块 → 进入卡片编辑器改这一章的台词\n'
         '③ 想看整部戏的分支/条件，就把相关章节都导入进来\n\n'
@@ -1712,6 +1717,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._on_canvas_select(self._canvas.selected_node_id())
         self._update_crumb()
         self._sync_graph_dirty()
+        # 图上多了/少了哪些 label → 左侧导航的 `●` 跟着变（`_set_graph` 是
+        # 图变更的唯一同步点，放这里就不会有"图变了导航没变"的路径）。
+        try:
+            self._sync_nav_marks()
+        except Exception as e:               # noqa: BLE001 - 标记失败不影响图
+            swallow('main_window._set_graph.nav_marks', e)
 
     # ------------------------------------------------------------------
     #  界面
@@ -1732,6 +1743,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #: 切到卡片页就再也看不到后端通知了）。
         self._toast = Toast(self._stack)
         self._notifier = Notifier(self._status_bar, self._toast).subscribe()
+
+        # —— 左侧「章节导航」+ 顶部模式条（2026-10-23，照参考界面）——
+        # 导航是 QDockWidget：它不属于任何一页，切页不丢；关掉还能从
+        # 「视图」菜单叫回来（状态跟着布局一起记，见 `window_state`）。
+        self._build_nav_dock()
+        self._build_mode_bar()
 
         self._build_toolbars()
 
@@ -2130,9 +2147,17 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         bh.addWidget(self._delete_btn)
         outer.addWidget(bar)
 
+        # ⚠ 三栏的顺序照参考界面（2026-10-23）：
+        #    左 = 章节导航（窗口级 dock，不在这里）
+        #    中 = **剧本**（拍列表：行号 + 类型牌 + 说话人）
+        #    右 = 检查器（这一拍的属性 + 卡片表单）
+        # 原来拍列表挤在最左边 260px、卡片占掉其余全部宽度 —— 那是"表单
+        # 为主"的排法；改成"正文居中、属性在右"之后，读剧本时视线不用横穿
+        # 整块表单。`_split_card` 的名字与下标（0 = 列表）保持不变：
+        # `window_state` 按它恢复宽度，改下标等于把用户存的宽度对错栏。
         split = QSplitter(Qt.Horizontal)
 
-        # —— 左：章节（label）/ 拍 / 参与角色 ——
+        # —— 中：章节（label）/ 拍 / 参与角色 ——
         left = QWidget()
         lay = QVBoxLayout(left)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -2149,7 +2174,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._label_combo.currentIndexChanged.connect(self._on_label_changed)
         label_row.addWidget(self._label_combo, 1)
         lay.addLayout(label_row)
-        cap1 = QLabel('拍（当前 label 的卡片）')
+        cap1 = QLabel('剧本（行号 = 拍号 · 回车翻拍）')
         cap1.setProperty('role', 'section')
         lay.addWidget(cap1)
         self._list = QListWidget()
@@ -2157,6 +2182,19 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 多个 label 时列表里有"分组标题行"（不是拍）：点它折叠 / 展开，
         # 不改变当前拍。选中还是走 `currentRowChanged`。
         self._list.itemClicked.connect(self._on_list_item_clicked)
+        # —— 剧本版画法（2026-10-23）——
+        # **只换 delegate，不换控件**：模型、`Qt.UserRole` 里的拍号、选中态
+        # 全是原样（几十条用例按 `item.text()` / `setCurrentRow` 判过）。
+        # `entry_of` 把拍号递回给会话，排版逻辑不在这里重写。
+        self._shot_delegate = ShotDelegate(
+            self._list, entry_of=self._entry_of_beat)
+        self._list.setItemDelegate(self._shot_delegate)
+        self._list.setUniformItemSizes(False)
+        self._list.setSpacing(0)
+        self._list.setMouseTracking(True)      # 悬停高亮要它
+        # `MouseTracking` 只管"鼠标移动事件"；`State_MouseOver` 还要 viewport
+        # 带 `WA_Hover`（Qt 的 viewOptions 就是按这个属性判的）。
+        self._list.viewport().setAttribute(Qt.WA_Hover, True)
         lay.addWidget(self._list, 1)
         cap2 = QLabel('参与角色（双击填进这一拍）')
         cap2.setProperty('role', 'caption')
@@ -2167,11 +2205,18 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         lay.addWidget(self._who, 0)
         split.addWidget(left)
 
-        # —— 右：卡片（这一拍）——
+        # —— 右：检查器（属性 + 卡片）——
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(T.SPACE['xs'])
+        # 参考界面的右栏是"属性表在上、正文/预览在下"：先说清"这是哪一拍、
+        # 源在第几行"，再给表单。`PropertyStrip` 自己不取数（`_sync_inspector`）。
+        cap_prop = QLabel('定位（这一拍在文件里的位置）')
+        cap_prop.setProperty('role', 'section')
+        rv.addWidget(cap_prop, 0)
+        self._inspector = PropertyStrip()
+        rv.addWidget(self._inspector, 0)
         cap3 = QLabel('卡片界面（这一拍）')
         cap3.setProperty('role', 'section')
         rv.addWidget(cap3)
@@ -2189,7 +2234,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         rv.addWidget(scroll, 1)
         split.addWidget(right)
 
-        split.setSizes([260, 900])
+        # 中间那一栏要能读剧本（行号 + 类型牌 + 说话人），比原来 260 宽不少；
+        # 右边表单仍是主角，但不再吃掉全部剩余宽度。
+        split.setSizes([430, 900])
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 5)
         self._split_card = split          # 同上：会话记忆要摆回它
         outer.addWidget(split, 1)
         return page
@@ -2198,10 +2247,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 
     def _build_toolbars(self):
         tb_graph = QToolBar('剧情结构')
+        tb_graph.setObjectName('pageBarGraph')     # saveState 要它（否则 dock 状态存不下）
         tb_graph.setMovable(False)
         tb_graph.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(tb_graph)
         tb_card = QToolBar('卡片编辑')
+        tb_card.setObjectName('pageBarCard')
         tb_card.setMovable(False)
         tb_card.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(tb_card)
@@ -2335,8 +2386,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 
         # —— 第二屏：卡片编辑 ——
         self._act_tb = tb_card
-        self._back_action = act('← 返回剧情结构', self._back_to_graph,
-                                '回到第一屏（Esc）')
+        # 「← 返回剧情结构」**不在这里**：卡片页顶部那条面包屑左边已经有
+        # 一个同样的按钮（`_back_btn`），两个并排等于让人猜"有什么区别"。
+        # 保留下面那个（它挨着面包屑，位置更贴近"我要回去哪"）。
         self._save_action = act('💾 保存这一拍', self.save_current_beat,
                                 '把卡片改动提交到当前拍（Ctrl+S）', primary=True)
         # ⭐ 同一条理由（用户 2026-10-21）：导出太常用，紧跟「保存」，
@@ -2380,6 +2432,16 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._stack.setCurrentIndex(index)
         except Exception:                    # noqa: BLE001
             swallow('main_window._set_page')
+        # 顶部模式条跟着切（`blockSignals` 防"我改它 → 它回调我"的环）
+        tabs = getattr(self, '_mode_tabs', None)
+        if tabs is not None:
+            try:
+                if tabs.currentIndex() != index:
+                    tabs.blockSignals(True)
+                    tabs.setCurrentIndex(index)
+                    tabs.blockSignals(False)
+            except Exception:                # noqa: BLE001
+                swallow('main_window._set_page.mode_tabs')
         for tb, want in ((getattr(self, '_tb_graph', None), index == self.PAGE_GRAPH),
                          (getattr(self, '_tb_card', None), index == self.PAGE_CARD)):
             if tb is not None:
