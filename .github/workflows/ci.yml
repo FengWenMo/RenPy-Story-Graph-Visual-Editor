@@ -76,3 +76,44 @@ jobs:
 
       - name: 编译示例工程（缺资源写 TODO，不中断）
         run: python cli.py compile demo/剧本表_ch01.xlsx --out /tmp/ch01.rpy
+
+  # 保真样本：**不依赖真机项目**，也不装界面库。
+  #
+  # 为什么单开一个 job（2026-10-23）：本仓库最硬的一句承诺是"没改的行一个字节
+  # 都不变"，但在此之前，能跑这句承诺的测试**全部** `skipif(not REAL)` ——
+  # 换一台机器（或 fork 的人），它就一点证据都没有。这个 job 的输入是
+  # `tests/fixtures/fidelity/` 里 4 份真实结构样本（python 块 + 行尾注释 /
+  # 嵌套 menu / ATL transform / 条件菜单选项），判据只有一条：逐字节相同。
+  #
+  # 它挡的是什么：有人改了 `patcher.py` / `beat_render.py` / `excel_*` 之后
+  # "看起来还能用" —— 金标在 Linux 上是 skip，全量测试是绿的，只有这里会红。
+  fidelity:
+    name: 保真样本（不依赖真机项目）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 逐字节保真（样本）
+        run: python -m pytest -q -o addopts='' --basetemp=/tmp/sg-fid tests/test_fidelity_structure.py
+
+      # 报告是给人看的：贴进 Job Summary，否则失败时只有一行 exit 1。
+      # `--allow-layout` 不是放水：条件菜单选项退回全量是**已知缺口**
+      # （有一条用例如实钉着它），这里只让报告不把 job 判红。
+      - name: 保真报告
+        if: always()
+        shell: bash
+        run: |
+          python tools/fidelity_report.py --project tests/fixtures/fidelity \
+            --allow-layout --md /tmp/fidelity.md || true
+          if [ -f /tmp/fidelity.md ]; then
+            { echo '## 逐字节保真报告'; echo ''; cat /tmp/fidelity.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,7 @@
+# 保真样本的**字节**就是判据：`tests/test_fidelity_structure.py` 比的是
+# "剥掉生成标记后字节完全相同"。
+#
+# 不锁换行符的话：Linux CI 检出 LF、Windows（core.autocrlf=true）检出 CRLF，
+# 同一份样本变成两份字节 —— 两边都能过，但测的已经不是同一件事了。
+# BOM / CRLF 本身有专门的用例（自己造字节），不依赖这条规则。
+tests/fixtures/fidelity/*.rpy text eol=lf

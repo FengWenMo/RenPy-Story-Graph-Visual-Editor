@@ -40,11 +40,18 @@ def main(argv) -> int:
 
     files = sorted((project / 'game').rglob('*.rpy'))
     files = [f for f in files if not f.name.endswith('.generated.rpy')]
+    from storygraph.story.source_style import read_text as read_source
+
     bad, total_chunks, lost_total = [], 0, 0
     with tempfile.TemporaryDirectory(prefix='opaque_') as td:
         tmp = Path(td)
         for i, f in enumerate(files):
-            text = f.read_text(encoding='utf-8', errors='replace')
+            # ⚠ 必须走 `source_style`（剥 BOM、换行归一）：
+            # 直接 `read_text('utf-8')` 会留下 `\ufeff`，于是第一条顶层语句
+            # 永远"在产物里找不到" → 5 个 BOM 文件全被误报成"丢 1 处"。
+            # 生产那条路（`compile.write_compiled`）本来就这么读，探针也要同口径，
+            # 否则**审计工具自己的假阳性**会把真 bug 淹掉（2026-10-23 实测）。
+            text = read_source(f)[0]
             a = IncrementalRenPyAnalyzer()
             pr, _ = a.analyze(files=[f], graph=None)
             beats = beats_from_parse_result(pr)
