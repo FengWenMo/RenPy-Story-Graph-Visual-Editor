@@ -287,6 +287,47 @@ def flow_edges(beats) -> list:
     return out
 
 
+def label_brief(beats, label) -> dict:
+    """
+    同一批拍里某个 label 的规模：`{'count': 几拍, 'line': 首个源行}`（没有 → `{}`）。
+
+    只回答"这一章有多大、从第几行开始"，不认识内容 —— 调用条上那一行
+    "side：6 拍 · 第 173 行"就是它（2026-10-23，用户："人不能什么都去翻卡片"）。
+    """
+    name = str(label or '').strip()
+    if not name:
+        return {}
+    hits = [b for b in (beats or ())
+            if str(getattr(b, 'label', '') or '') == name]
+    if not hits:
+        return {}
+    try:
+        first = min((int(getattr(b, 'src_first', 0) or 0)
+                     for b in hits if int(getattr(b, 'src_first', 0) or 0)),
+                    default=0)
+    except (TypeError, ValueError):
+        first = 0
+    return {'count': len(hits), 'line': first}
+
+
+def callers_of(beats, target) -> list:
+    """
+    这一批拍里，`call` / `jump` 到 `target` 的**拍序号**（0-based，按出现顺序）。
+
+    只扫当前这一章的拍：跨文件的调用要读别的文件才算得全，那属于
+    `chapter_index` 的活（调用条上写的是"本章 N 处调用"，不冒充全局）。
+    """
+    want = str(target or '').strip()
+    if not want:
+        return []
+    out = []
+    for i, beat in enumerate(beats or ()):
+        info = parse_flow(beat)
+        if info and str(info.get('target') or '') == want:
+            out.append(i)
+    return out
+
+
 def flow_card_text(info: dict | None) -> str:
     """列表 / 删除确认里的一行短文案（没有控制流返回空串）。"""
     if not info:
@@ -295,6 +336,6 @@ def flow_card_text(info: dict | None) -> str:
 
 
 __all__ = ['FLOW_FIELD_KEYS', 'FLOW_TYPES', 'FLOW_VERBS',
-           'flow_card_text', 'flow_edges', 'flow_info',
-           'is_valid_label', 'parse_flow', 'parse_flow_line',
+           'callers_of', 'flow_card_text', 'flow_edges', 'flow_info',
+           'is_valid_label', 'label_brief', 'parse_flow', 'parse_flow_line',
            'render_flow_line', 'update_beat_flow']

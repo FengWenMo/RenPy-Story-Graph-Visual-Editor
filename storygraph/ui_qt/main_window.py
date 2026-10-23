@@ -738,15 +738,19 @@ class BeatCardEditor(QWidget):
 
     # ---------- 控制流卡（call / jump）----------
 
-    def set_flow(self, info, targets=()):
+    def set_flow(self, info, targets=(), brief=None):
         """
         显示 / 收起控制流条。
 
         `info` 来自 `story.flow.flow_info()`（目标、类型、返回哪一拍）；
-        `targets` 是本文件已有的 label（可编辑下拉的候选，手写照样能过）。
+        `targets` 是本文件已有的 label（可编辑下拉的候选，手写照样能过）；
+        `brief` 是目标那一章的摘要（`{count, line, file, same_file, callers}`，
+        见 `window_card._flow_target_brief`）—— 只用来在条上写
+        "side · 6 拍 · 第 173 行 · 本章 2 处调用"，不参与任何写回。
         """
         info = dict(info) if info else None
         self._flow = info
+        self._flow_brief = dict(brief or {}) if info else {}
         if not info:
             self._flow_bar.setVisible(False)
             # 回到普通卡片：台词区与舞台块按这一拍自己的内容重新出现
@@ -875,6 +879,24 @@ class BeatCardEditor(QWidget):
                  for i in range(self._flow_target.count())}
         if target and target not in names:
             detail += '\n目标不在本文件的 label 里；仍可手写（可能来自其他文件）'
+        # **目标那一章长什么样**（2026-10-23，用户："人不能什么都去翻卡片"）：
+        # 在调用条上直接写"几拍 / 哪一行 / 本章几处在调它" —— 不点进去也能判断
+        # "这个 call 是不是我要的"。数据由 `_sync_flow_card` 算好递进来。
+        brief = self._flow_brief or {}
+        if target and brief:
+            bits = []
+            if brief.get('count'):
+                bits.append(f"{brief['count']} 拍")
+            if brief.get('line'):
+                bits.append(f"第 {brief['line']} 行")
+            if brief.get('file') and not brief.get('same_file'):
+                bits.append(str(brief['file']))
+            if bits:
+                detail += f'\n目标 {target}：' + ' · '.join(bits)
+            if brief.get('callers'):
+                detail += f"（本章 {brief['callers']} 处调用）"
+            elif brief.get('same_file'):
+                detail += '（本章还没人调它）'
         detail += ('\n这张卡没有台词与演出 —— 台词 / 立绘 / 舞台那几块已收起；'
                    '要加一句台词请另插一张普通卡片。')
         # `jump` 不接受参数 / from（Ren'Py 语法）—— 灰掉比"填了也不生效"诚实。

@@ -1199,6 +1199,41 @@ class CardPageMixin:
         """把派生结果念成人话（统一文案在 `ui_qt.flow_notes`）。"""
         return edge_rebuild_note(res)
 
+    def _flow_target_brief(self, target) -> dict:
+        """
+        目标那一章的摘要（给控制流条写"几拍 / 第几行 / 本章几处在调它"）。
+
+        只读、不写盘：
+          · 同一个文件（当前会话里）→ 用现有拍算：几拍 + 首个源行 + 本章调用数；
+          · 别的文件 → 用左侧导航那份**已在内存里**的项目目录（`_nav.index()`）
+            拿文件名与行号，**不解析别的文件**（为了显示一行字去扫盘不值得）。
+        数据缺一格就不显示那一格（宁可不写，也不编）。
+        """
+        from storygraph.story.flow import callers_of, label_brief
+
+        name = str(target or '').strip()
+        if not name:
+            return {}
+        beats = list(getattr(self._session, 'beats', None) or ())
+        brief = label_brief(beats, name)
+        if brief:
+            brief['same_file'] = True
+            brief['file'] = Path(self._file_path).name if self._file_path else ''
+            brief['callers'] = len(callers_of(beats, name))
+            return brief
+        nav = getattr(self, '_nav', None)
+        try:
+            index = nav.index() if nav is not None else None
+        except Exception as e:                    # noqa: BLE001 - 摘要失败不该拦卡片
+            swallow('ui_qt.flow_target_brief.index', e)
+            index = None
+        for entry in getattr(index, 'files', ()) or ():
+            for item in getattr(entry, 'labels', ()) or ():
+                if str(getattr(item, 'name', '') or '') == name:
+                    return {'file': entry.name, 'line': int(item.line or 0),
+                            'same_file': False}
+        return {}
+
     def _sync_flow_card(self, beat, idx: int):
         """
         把这一拍是不是 `call` / `jump`、目标与返回拍推给控制流条。
@@ -1210,7 +1245,8 @@ class CardPageMixin:
             from storygraph.story.flow import flow_info
             info = flow_info(beat, idx, self._session.beats)
             names = self._flow_target_labels()
-            self._panel.set_flow(info, names)
+            brief = self._flow_target_brief((info or {}).get('target'))
+            self._panel.set_flow(info, names, brief=brief)
         except Exception as e:                  # noqa: BLE001 - 控制流条失败不拦卡片
             swallow('ui_qt.window_card._sync_flow_card', e)
 
