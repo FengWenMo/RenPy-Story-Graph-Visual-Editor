@@ -3943,6 +3943,21 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
 - 重新摊表覆盖已有表时走 `script_table._reuse_existing_ids`（两轮匹配、不猜）；
   判据 `tests/test_line_identity_contract.py`（用例名就是规则）。
 
+## 37. 图的编辑边界（2026-10-23，用户纠正后写）
+
+- 图**是** label 级结构编辑器：增删节点、加/删/改连线（jump / call / menu，
+  带条件与菜单项文字）、移动、自动布局、撤销/重做
+  （`window_nodes.add_node/add_edge` + `graph/commands.py`）。
+  **它不是"只读诊断视图"** —— 上一轮这样描述是错的
+  （见 [`调查_图编辑器的定位与回写_2026-10-23.md`](调查_图编辑器的定位与回写_2026-10-23.md)）。
+- 两种边必须分清：`origin='source'` 是**从拍派生**的（`story.flow.flow_edges`
+  是唯一真源）；`origin='manual'` 是**草图**，只改图、**不写 `.rpy`**。
+  加边时的日志与弹窗都要把这句话说出来（今天已经是这样，别删）。
+- 写回 `.rpy` 的唯一通道仍然是 **`Beat.raw` → 受控补丁**。将来图上的边要写回，
+  也必须走这一条（`source` 边按 `line_id` 找到那一拍；`manual` 边先让用户选锚点，
+  再插一张 flow 拍）—— 图**不许直接改文件**。
+- 图不编辑 `menu` / `if` 的**块体**（台词与演出归卡片），也不做"一个块 = 一拍"的画布。
+
 
 
 
