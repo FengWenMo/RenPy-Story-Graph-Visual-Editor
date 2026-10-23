@@ -5,6 +5,8 @@
 # Prereq:  pip install -r requirements.txt pyinstaller
 # Output:  dist\StoryGraph\StoryGraph.exe      (GUI, double-click to run)
 #          dist\StoryGraph\StoryGraph-CLI.exe  (console, for CI / batch)
+#          dist\release\                       (exe + template + demo + quickstart + LICENSE)
+#          dist\StoryGraph-1.0.0-win64.zip     (ship this one)
 #
 # ---------------------------------------------------------------------------
 # NOTE: this file is deliberately **pure ASCII** (no Chinese characters).
@@ -50,14 +52,26 @@ if ($LASTEXITCODE -ne 0) {
     throw "Packaged self-check failed (exit $LASTEXITCODE). Do not ship this build."
 }
 
-Write-Host '=== [4/4] Size ===' -ForegroundColor Cyan
+Write-Host '=== [4/5] Size ===' -ForegroundColor Cyan
 $sum = (Get-ChildItem (Join-Path $root 'dist') -Recurse -File |
     Measure-Object Length -Sum).Sum
 $size = [math]::Round($sum / 1MB, 1)
 Write-Host "dist\StoryGraph\ = $size MB"
 
+Write-Host '=== [5/5] Release folder + zip ===' -ForegroundColor Cyan
+# Adds the things a first-time user needs and a bare exe folder does not have:
+#   剧本空表格.xlsx (empty table template), demo\ (open-me project),
+#   快速上手.md (3-minute guide), LICENSE (MIT).
+# It FAILS if any of them is missing -- the 2026-10-21 zip shipped with
+# zero xlsx / zero md / zero demo, and nobody noticed for two days.
+python packaging/make_release.py
+if ($LASTEXITCODE -ne 0) {
+    throw "Release assembly failed (exit $LASTEXITCODE). Do not ship this."
+}
+
 Write-Host ''
 Write-Host 'Build finished.' -ForegroundColor Green
 Write-Host "  GUI      : $gui"
 Write-Host "  Console  : $cli"
-Write-Host 'Ship the WHOLE dist\StoryGraph\ folder (the exes need _internal\).'
+Write-Host "  Ship this: $(Join-Path $root 'dist\StoryGraph-1.0.0-win64.zip')"
+Write-Host '  (the zip already contains the whole StoryGraph folder + extras)'

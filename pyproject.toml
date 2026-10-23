@@ -8,7 +8,10 @@ version = "1.0.0"
 description = "Ren'Py 剧情树可视化编辑器：Excel ↔ .rpy 双向联通的句子级演出编排工具"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary" }
+# MIT（见 LICENSE）。用 table 形式是因为本机 setuptools 70 还不认 PEP 639 的
+# SPDX 字符串（`license = "MIT"` 要 setuptools>=77）；两种写法的产物元数据
+# 都写着 MIT，等打包环境升级再换。
+license = { text = "MIT" }
 dependencies = [
     "openpyxl>=3.1",
 ]
@@ -29,3 +32,7 @@ storygraph = "storygraph.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["storygraph*"]
+
+[tool.setuptools]
+# 让 wheel/sdist 里**带上授权条款本身**（否则 MIT 只是 pyproject 里的一句话）
+license-files = ["LICENSE"]
