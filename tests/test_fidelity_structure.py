@@ -61,6 +61,11 @@ CASES = {
         r'(?m)^\s{4}repeat \w',           # ATL 的 repeat
         r'(?m)^\s{4}with \w',             # with 语句
     ],
+    '04_conditional_option.rpy': [
+        r'(?m)^\s{8}"[^"]+"\s+if\s+\S+:',  # 带 if 条件的菜单选项
+        r'(?m)^\s{4}menu\s*:',             # 菜单
+        r'(?m)^\s+jump \w',                # 选项体里的跳转
+    ],
 }
 
 
@@ -165,14 +170,29 @@ class TestRefusalBranch:
     """
     "**要么全对、要么完全不动**"里"完全不动"那半 ——
     路线图说这条分支"现在没有任何测试"，这个类就是补它。
+
+    怎么稳定地造出"补丁配不上"：拿样本 04 的表，去对**另一个内容完全不同的
+    手写文件**（对位率 0%）。这比"等某个结构自己失败"可靠 ——
+    2026-10-23 条件菜单选项修好之后，原来那个造法就失效了。
     """
 
-    def test_handwritten_target_is_not_overwritten_when_patch_fails(self, tmp_path):
+    @staticmethod
+    def _mismatched_pair(tmp_path):
+        """表来自样本 04，目标/底稿是一个对不上的手写文件。"""
         src = tmp_path / 'handwritten.rpy'
-        src.write_bytes((FIXTURES / '04_conditional_option.rpy').read_bytes())
-        before = src.read_bytes()
+        src.write_text('label other:\n    e "完全不同的内容。"\n    return\n',
+                       encoding='utf-8')
+        xlsx = tmp_path / 't.xlsx'
+        open_rpy_as_table(str(FIXTURES / '04_conditional_option.rpy'), str(xlsx))
+        out = tmp_path / 'unused.rpy'
+        _p, _s, res = compile_table(
+            str(xlsx), rpy_path=src, write_sheet=False, force=False,
+            source_path=str(src), skip_empty=True, engine_lint=False)
+        return src, res, out
 
-        res = _roundtrip(src, src, force=False)     # 目标就是用户手写文件
+    def test_handwritten_target_is_not_overwritten_when_patch_fails(self, tmp_path):
+        src, res, _out = self._mismatched_pair(tmp_path)
+        before = src.read_bytes()
 
         assert res.written is False, '补丁配不上却写了用户的手写文件'
         assert src.read_bytes() == before, '拒绝了覆盖，字节却变了'
@@ -187,46 +207,9 @@ class TestRefusalBranch:
 
     def test_the_preview_is_still_produced(self, tmp_path):
         """拒绝写，但要把"本来会写成什么样"留一份给人看 —— 否则用户无从判断。"""
-        src = tmp_path / 'handwritten.rpy'
-        src.write_bytes((FIXTURES / '04_conditional_option.rpy').read_bytes())
-        res = _roundtrip(src, src, force=False)
+        _src, res, _out = self._mismatched_pair(tmp_path)
         assert res.review_path and Path(res.review_path).exists(), (
             '拒绝了覆盖，却没有留下 blocked 预览')
-
-
-class TestKnownGapConditionalOption:
-    """
-    **如实钉住的已知缺口**：菜单选项带 `if` 条件。
-
-    Ren'Py 官方文档的标准写法，真人最常写的一种；但补丁会报
-    "1 处新增内容没能落进产物" → 退回全量重生成 → 原文的空白被重排。
-    真机 55 个文件里恰好一条条件选项都没有 —— 所以 55/55 全绿也盖不住这个洞。
-
-    ⚠ **修好之后这两条会红**：那时把它们改成"逐字节相同 + used_patch 为真"，
-      并删掉 `docs/审计_保真证据链_2026-10-23.md` 里的缺口条目。
-    """
-
-    def test_it_falls_back_to_full_rebuild(self, tmp_path):
-        src = FIXTURES / '04_conditional_option.rpy'
-        out = tmp_path / 'out.rpy'
-        res = _roundtrip(src, out)
-        assert res.used_patch is False
-        assert '没能落进产物' in res.patch_note
-
-    def test_the_fallback_only_reflows_whitespace(self, tmp_path):
-        """
-        缺口是**排版**级的，不是内容级：一行都没丢。
-        把这条也钉住，是为了让"缺口有多大"可判定 —— 不是"反正坏了"。
-        """
-        src = FIXTURES / '04_conditional_option.rpy'
-        out = tmp_path / 'out.rpy'
-        _roundtrip(src, out)
-        src_body, _ = strip_banner(src.read_bytes())
-        out_body, _ = strip_banner(out.read_bytes())
-        status, missing, extra, _changed, _unified = classify(
-            src_body.decode('utf-8'), out_body.decode('utf-8'))
-        assert status == LAYOUT, f'退化的程度变了：{status}（丢 {missing} 多 {extra}）'
-        assert out_body != src_body, '既然返回「排版差异」，字节就不该相同'
 
 
 class TestClassifier:
@@ -277,8 +260,8 @@ class TestClassifier:
         assert not missing and not changed
         assert extra == [(5, '    e "二"')]
 
-    def test_report_tool_classifies_the_known_gap_the_same_way(self, tmp_path):
-        """工具与用例共用同一把尺：样本 04 在报告里必须是 layout。"""
+    def test_report_tool_sees_the_conditional_option_as_identical(self, tmp_path):
+        """工具与用例共用同一把尺：样本 04 在报告里必须是 identical（且真走了补丁）。"""
         rep = roundtrip(FIXTURES / '04_conditional_option.rpy', tmp_path, 1)
-        assert rep.status == LAYOUT
-        assert rep.used_patch is False
+        assert rep.status == IDENTICAL, rep.unified
+        assert rep.used_patch is True

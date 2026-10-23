@@ -2402,6 +2402,95 @@ def _compute_insert_anchors(beats: list, insert_ids, dropped,
     return dropped, dropped_src
 
 
+def _menu_condition_view(beats: list) -> dict:
+    """
+    拍序号 → 这条拍在**菜单结构**里的条件"应该长什么样"。
+
+    为什么需要它（2026-10-23，条件菜单选项实测）：补丁是**逐行配对**的，
+    而单拍渲染（`render_beat_to_rpy`）不知道菜单结构，于是同一件事长成两种形状：
+
+        # 整份渲染（`_render_menu_segments`，即用户文件里的样子）
+            "台词D" if persistent.flag:
+                e "台词E。"
+
+        # 单拍渲染（补丁用来配对的行）
+            if persistent.flag:
+                "台词D":
+                if persistent.flag:       ← 选项体的拍又被包了一层
+                    e "台词E。"
+
+    这两种形状永远配不上 → 那几行被判成"新增内容没能落进产物" →
+    **整章退回全量重生成**（真机 55 个文件里恰好没有条件选项，所以全绿也盖不住）。
+
+    这里的口径**逐条镜像** `_render_menu_segments`：
+      · 选项行内联的只是"选项自身"的条件（与菜单头重复的不写）；
+      · 选项体拍带的条件是**累积**的（选项 + 菜单头）：正好等于期望值 → 剥掉不包；
+        多出来的是真的嵌了一层 `if` → 减掉结构上那部分再包。
+    """
+    from storygraph.core.nest_path import option_index
+    from storygraph.story.beat_render import (
+        _expected_body_condition, _with_condition, strip_condition_context,
+    )
+
+    menus: dict = {}
+    options: dict = {}
+    for b in beats:
+        path = str(getattr(b, 'nest_path', '') or '')
+        kind = str(getattr(b, 'kind', '') or '')
+        if kind == 'menu':
+            menus[path] = str(getattr(b, 'condition', '') or '').strip()
+        elif kind == 'menu_option':
+            parent = path.rsplit('>', 1)[0] if '>' in path else path
+            options.setdefault(parent, []).append(b)
+
+    view: dict = {}
+    for i, b in enumerate(beats):
+        path = str(getattr(b, 'nest_path', '') or '')
+        kind = str(getattr(b, 'kind', '') or '')
+        cond = str(getattr(b, 'condition', '') or '').strip()
+        if kind == 'menu_option':
+            parent = path.rsplit('>', 1)[0] if '>' in path else path
+            menu_cond = menus.get(parent, '')
+            own = (strip_condition_context(cond, menu_cond)
+                   if (cond and menu_cond) else cond)
+            if own == menu_cond:
+                own = ''
+            view[i] = {'beat': b, 'inline': own, 'drop_wrap': True}
+            continue
+        if '>' not in path:
+            continue                       # 不在菜单里 → 单拍渲染就是对的
+        parent = max((p for p in options if path.startswith(p + '>')),
+                     key=len, default='')
+        if not parent:
+            continue
+        key = path[len(parent) + 1:].split('>')[0]
+        idx = option_index(key)
+        row = options[parent]
+        opt_cond = (str(getattr(row[idx - 1], 'condition', '') or '').strip()
+                    if 0 < idx <= len(row) else '')
+        expected = _expected_body_condition(opt_cond, menus.get(parent, ''))
+        if cond == expected:
+            view[i] = {'beat': b, 'drop_wrap': True}
+        elif cond:
+            lean = strip_condition_context(cond, expected)
+            if lean != cond:
+                view[i] = {'beat': _with_condition(b, lean), 'drop_wrap': False}
+    return view
+
+
+def _menu_shaped_lines(lines: list, info: dict) -> list:
+    """把单拍渲染的行调整成**源文件里的形状**（见 `_menu_condition_view`）。"""
+    inline = str(info.get('inline') or '')
+    if inline and len(lines) >= 2 and str(lines[0]).startswith('if '):
+        head = str(lines[1]).strip()
+        if head.endswith(':'):
+            # `if C:` + `    "文本":` → `"文本" if C:`
+            return [head[:-1] + f' if {inline}:'] + list(lines[2:])
+    if info.get('drop_wrap') and lines and str(lines[0]).strip().startswith('if '):
+        return list(lines[1:])             # 条件已经写在选项行上，不再包一层
+    return lines
+
+
 def _render_blocks(beats: list, indent: str, audit):
     """
     每一拍 → `(序号, 起始行, 结束行, 归一化后的生成行, Beat)`。
@@ -2415,15 +2504,19 @@ def _render_blocks(beats: list, indent: str, audit):
     """
     from storygraph.story.beat_render import render_beat_to_rpy
 
+    view = _menu_condition_view(beats)
     blocks = []
     raw_gen: dict = {}
     for i, b in enumerate(beats):
         first = int(getattr(b, 'src_first', 0) or 0)
         last = int(getattr(b, 'src_last', 0) or 0)
+        info = view.get(i, {})
+        target = info.get('beat', b)
         try:
-            lines = [ln for ln in render_beat_to_rpy(b, indent=indent,
+            lines = [ln for ln in render_beat_to_rpy(target, indent=indent,
                                                      audit=audit)
                      if str(ln).strip()]
+            lines = _menu_shaped_lines(lines, info)
         except Exception as e:                    # noqa: BLE001
             swallow('story.patcher.patch_export', e)
             lines = []
