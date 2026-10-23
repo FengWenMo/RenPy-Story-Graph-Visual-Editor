@@ -3892,6 +3892,38 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
 （剥 BOM + 换行归一），否则带 BOM 的文件第一行永远"对不上" ——
 `probe_opaque_fidelity` 就吃过这个假阳性（5 个文件各误报丢 1 处，2026-10-23 修）。
 
+## 34. 窗口宽度与"放不下"（2026-10-23）
+
+用户报"界面太宽、全屏都看不全、文字跑到界面外"之后定的三条口径：
+
+- **窗口尺寸**：任何时候都不得大于屏幕可用区 —— `window_state.fit_to_available`
+  （四周留 48px），`__init__` 与**记忆恢复**两处都要过它；恢复位置还要夹回屏内。
+  `QMainWindow.sizeHint()` 会把工具栏整宽算进去（实测 2720），**不能**拿它当开窗尺寸。
+- **单行文字**：可能变长的标签一律用 `ui_qt.elide.ElidedLabel`（右略/中略），
+  它把 `minimumSizeHint()` 压到 24px。**不许用普通 `QLabel` 装长句** ——
+  它的最小宽 = 整句宽（实测 468px），会把同一行的按钮挤出窗口。
+- **工具栏（已知限制，2026-10-23）**：动作放不下时 Qt 收进 `qt_toolbar_ext_button`，
+  它在本项目 QSS 下是**看不见的 12px 空白**。**不要试图改它** —— 实测三条路都不通：
+  加宽 → 它伸出工具栏（Qt 钉住 x，不随宽度移动）；手工 `setGeometry()` 摆回 →
+  与布局互相触发 **resize ↔ 摆放无限循环**（3 秒事件循环烧 4.4 秒 CPU）；
+  写文字 / 塞图标 → 都不画。**正确做法（下一轮）**：把低频动作移进显式的
+  「🛠 更多」菜单按钮，不依赖扩展按钮；那要同步改 `test_custom_statement_entry` /
+  `test_qt_signal_wiring` / `test_toolbar_export_entry` 三处"工具栏动作清单"判据。
+
+## 35. 控制流卡（2026-10-23 修正）
+
+- **目标候选**必须来自 `_flow_target_labels()`：本文件 → 图上节点 → **项目目录**
+  （`app.chapter_index`）。不许只取 `session.label_names()` —— 那只有**当前文件**，
+  真机 `chapter0_0.rpy` 里只有 1 项，下拉等于没有。
+- **插入对话框**：目标默认空（不预选，否则容易插一张 `call <这一章自己>`）；
+  `jump` 禁用参数与 `from`；参数/`from` 用**渲染 → 再解析**校验
+  （`render_flow_line` 只拼字符串，`call side(a` 它照拼）。
+  `session.insert_flow_beat` 有同一道闸门 —— 别的调用方绕不过去。
+- **控制流卡没有台词与演出**：`set_flow(info)` 收起 `_dialogue_box` 与舞台三件套；
+  回到普通卡时按这一拍自己的内容恢复（舞台显隐仍只归 `_apply_stage_visibility`，
+  不许另写一套）。
+- 判据：`tests/test_ui_fit_and_flow.py`（21 条）。
+
 
 
 
