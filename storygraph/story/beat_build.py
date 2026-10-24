@@ -650,6 +650,22 @@ class _BeatBuilder:
             menu_name=str(payload.get('name') or ''),
             menu_args=str(payload.get('args') or ''),
         ), _ln)
+        # **标题行属于这一拍的行区间**（2026-10-24，审计第三轮 P0-9）。
+        #
+        # `menu:` 的标题写在块里的下一行，而 `with_src` 给的是块头那一行：
+        #
+        #     menu:                     ← 区间只有这一行
+        #         "是时候和青一起学习了."   ← 标题正文在这里（不在任何拍里）
+        #
+        # 渲染这一拍写的是两行（块头 + 标题），于是改标题时生成的那一行
+        # **不属任何拍的区间**，补丁贴不回去 → "1 处新增内容没能落进产物"
+        # → 整份拒绝（真机 `script_pomo.rpy` 第 157/158 行稳定复现）。
+        # 标题行的行号由解析器随语句带下来（`MenuNode.caption_lines` →
+        # `Statement.caption_lines`，运行期动态属性）。
+        _cap_lines = [int(x) for x in (getattr(stmt, 'caption_lines', None) or ())
+                      if int(x) > 0]
+        if _cap_lines and (menu_beat.src_first or 0) > 0:
+            menu_beat.src_last = max([menu_beat.src_last or 0] + _cap_lines)
         # 菜单拍**不算**选项体（`_menu_member=False`）：它是组头。
         # 结构位必须在这里显式写死，不能让循环末尾那趟"按当前语句"的
         # 转发覆盖 —— 当前语句恰好是"上一条选项体里的语句"时，

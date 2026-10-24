@@ -361,19 +361,9 @@ class ChapterTree:
             return 0
 
         if before:
-            if at >= len(items):
-                ref_node = self._index[id(items[-1])]
-                parent, pos, body_path = self._slot_for(ref_node, True)
-            else:
-                ref_node = self._index[id(items[at])]
-                parent, pos, body_path = self._slot_before(ref_node)
+            parent, pos, body_path = self._slot_at(items, at, before=True)
         else:
-            if at > 0:
-                ref, after = items[at - 1], True
-            else:
-                ref, after = items[0], False
-            ref_node = self._index[id(ref)]
-            parent, pos, body_path = self._slot_for(ref_node, after)
+            parent, pos, body_path = self._slot_at(items, at)
         if body_path is None:
             raise ChapterTreeError('bad_slot', '找不到插入落点')
 
@@ -533,6 +523,69 @@ class ChapterTree:
             node.parent = None
             node = parent
 
+    def _slot_at(self, items: list, at: int, before: bool = False):
+        """
+        扁平位置 `at` → `(父节点, 插入位置, 新拍的结构位)`。
+
+        从 `insert_beat` 里**原样搬出**（2026-10-24，审计第三轮 P0-11）：移动
+        也要先问"落点在哪"，才能在没有真正插进去之前判断"会不会落到 return
+        后面"。两处必须同一套判据，所以只留这一份实现。
+        """
+        at = max(0, min(int(at), len(items)))
+        if before:
+            if at >= len(items):
+                return self._slot_for(self._index[id(items[-1])], True)
+            return self._slot_before(self._index[id(items[at])])
+        if at > 0:
+            ref, after = items[at - 1], True
+        else:
+            ref, after = items[0], False
+        return self._slot_for(self._index[id(ref)], after)
+
+    def _guard_return(self, beat, parent: ChapterNode, pos: int) -> None:
+        """
+        "把一拍移到 `return` 后面 / 把 `return` 挪到中间"→ 拒绝（P0-11）。
+
+        为什么必须拒绝（2026-10-24，审计第三轮）：`return` 是**一拍的邻居**，
+        不是一条看不见的边界。审计实测 `move(0, 3)`：
+
+            e "二"
+            e "三"
+            return
+            e "一"        ← 永远不会执行（静默变死代码）
+
+        `move(2, 0)` 反一反：整章在第一行就结束，后面两句话直接没了。两次都
+        `ok=True`、无警告 —— "成功了但剧情断了"，是这一层最不该发生的事。
+
+        判据（只看**新的兄弟位置**，不跨块猜）：
+
+          · 挪动的是 `return` 一拍 → 它必须是这一段的**最后**一条；
+          · 挪动的是别的拍 → 它不能落在某个 `return` 之后。
+
+        合法的形态照旧放行：`return` 在某条分支体里（`if c: … return`）是那一段
+        的最后一条；把拍移到**另一个**块里不受影响（兄弟列表是新的那一段）。
+        """
+        # 判据与渲染层**同一份实现**（`raw` / `opaque` 里的 `return`）——
+        # 各写一份正是"两处对不上"的来源；而且 `beat_render` 很重，
+        # 这里按需导入（`chapter_tree` 是纯结构层，不该把它拖进来）。
+        from storygraph.story.beat_render import _is_return_beat
+
+        siblings = list(parent.children)
+        pos = max(0, min(int(pos), len(siblings)))
+        if _is_return_beat(beat):
+            if pos < len(siblings):
+                raise ChapterTreeError(
+                    'after_return',
+                    '`return` 是一章的出口，不能挪到它后面还有内容的位置 —— '
+                    '那样后面的内容永远不会执行。请把它留在这一段最后。')
+            return
+        for node in siblings[:pos]:
+            if node.beat is not None and _is_return_beat(node.beat):
+                raise ChapterTreeError(
+                    'after_return',
+                    '不能把一拍移到 `return` 之后：那里的内容永远不会执行'
+                    '（整章已经结束）。要加内容请放在 `return` 前面。')
+
     def move_beat(self, src: int, dst: int) -> int:
         """
         把第 `src` 拍移到扁平位置 `dst`（移动后的下标），返回新下标。
@@ -540,6 +593,10 @@ class ChapterTree:
         只允许移动**叶子拍**（块头带着块体，搬走就等于拆块）；落点跨块时
         会按落点所在容器**重写结构位**（`nest_path`），不会留下"路径还对
         应旧块"的拍。
+
+        **不许越过 `return`**（2026-10-24，审计第三轮 P0-11）：落点在某条
+        `return` 之后 → `ChapterTreeError('after_return')`；`return` 自己
+        被挪到中间同样拒绝。见 `_guard_return`。
         """
         items = self.flatten()
         src = int(src)
@@ -552,9 +609,20 @@ class ChapterTree:
         if node.kind != 'beat':
             raise ChapterTreeError(
                 'header', f'「{node.describe()}」的块头不能单独移动（会拆块）')
+        snap = (getattr(beat, 'nest_path', None),
+                getattr(beat, 'condition', ''),
+                getattr(beat, 'label', ''))
         self.remove_beat(beat)
         remaining = self.flatten()
         dst = max(0, min(int(dst), len(remaining)))
+        try:
+            parent, pos, _body = self._slot_at(remaining, dst)
+            self._guard_return(beat, parent, pos)
+        except ChapterTreeError:
+            # 守卫拒绝 → 把树恢复原状（"不猜"不能留下半截结构）。
+            self.insert_beat(beat, src, inherit=True, retarget=True)
+            (beat.nest_path, beat.condition, beat.label) = snap
+            raise
         return self.insert_beat(beat, dst, inherit=True, retarget=True)
 
     # ------------------------------------------------------------------

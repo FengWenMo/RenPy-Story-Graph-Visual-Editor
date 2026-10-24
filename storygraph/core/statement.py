@@ -530,6 +530,11 @@ class Statement:
         它们改的是产物、必须进拍指纹（`BEAT_FIELD_SPECS` 里的
         `MenuName`/`MenuArgs` 都 `fingerprint=True`），那才是"改了要重写
         文件"的判据。
+
+        ⚠ 标题**行长在哪里**（`MenuNode.caption_lines` → `stmt.caption_lines`）
+        刻意**不进 payload**：行号是运行期元数据，与 `nest_path` /
+        `_menu_member` 同属"`.rpy` 侧的信息"（不入表、不进内容指纹、
+        不参与相等）。理由见 `_walk.add_stmt` 的 docstring。
         """
         payload = {'caption': caption}
         # 菜单块里除选项以外的合法语句（`set seen` …）：逐字保留、原样回写。

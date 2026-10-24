@@ -13,8 +13,11 @@ patcher 从前判"删完上一级块会空"就放弃（空块语法错，判得�
 重生成、手写 `default` / `transform` 全靠门禁拦着。现在的判据是"按分支处理"：
 
   · `elif` / `else` 分支 → 删分支头 + 体；
-  · `if` 分支 → 同样删，并把**后面每一条** `elif` / `else` 换成渲染器给
-    那一拍写的条件行（拍上的条件是展平后的累积形式）；
+  · `if` 分支 → 同样删，并把**紧跟的那条** `elif` 换成 `if`（只换一个词；
+    链必须以 `if` 开头）。后面的兄弟分支**一个字不动** —— 拍上的条件是
+    展平后的累积形式，删掉一支之后它会被解析器重算，这一笔放在**模型侧
+    对账**（`_chain_renumber` → `_verify_patch(renumber=…)`），不写进文件
+    （2026-10-24，审计第三轮 P0-10：结构行逐字节不动）；
   · 菜单选项体（选项头自己是一拍）→ 体换成 `pass`（与全量重生成一致）。
 
 每一条都断言**产物能重新解析**：删错一个词，`elif` 就成了孤儿。
@@ -70,12 +73,23 @@ def _reparse(text, tmp_path):
 
 class TestBranchDelete:
     def test_first_branch_of_a_chain_goes_away_with_its_head(self, write_rpy):
-        """删掉 `if` 分支的唯一语句 → 分支头一起删，链不塌。"""
+        """
+        删掉 `if` 分支的唯一语句 → 分支头一起删，链不塌。
+
+        判据（2026-10-24，审计第三轮 P0-10 改判）：紧跟的那条 `elif` 提升成
+        `if`（**只换一个词**），其余的 `elif` / `else` **一个字不动**。
+        从前这里要求"产物里不许再有 `elif`"—— 那是靠把每条 `elif` 改写成
+        展平的 `if (…) and not (…)` 实现的，改的是用户没碰过的结构行。
+        """
         res, _fp = _drop_and_patch(write_rpy, CHAIN, '第一支')
         assert res.ok, res.reasons
         assert '第一支' not in res.text
         assert 'if t == 1:' not in res.text
-        assert 'elif' not in res.text, '还剩孤儿 elif'
+        assert 'if t == 2:' in res.text, '紧跟的那条 elif 必须提升成 if'
+        assert 'elif t == 3:' in res.text, '后面的兄弟分支一个字都不许动'
+        # 按**整行**判（`elif t == 3:` 里也含 "if t == 3:" 这几个字）
+        assert not [ln for ln in res.text.splitlines()
+                    if ln.strip() == 'if t == 3:'], '不许把 elif 展平成 if'
         assert '第二支' in res.text and '第三支' in res.text
 
     def test_the_chain_still_parses_to_one_fewer_beat(self, write_rpy,

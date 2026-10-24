@@ -2012,6 +2012,8 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         options = []
         #: 块里认不出的行（`set seen` / `$ x = 1` …）——**绝不丢**。
         extras = []
+        #: 标题行的行号（见 `MenuNode.caption_lines`：拍的行区间要覆盖它们）。
+        caption_lines: list = []
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -2055,6 +2057,9 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                     else:
                         cap = _pick_str(m, 2, 3)
                         caption = (caption + '\n' + cap) if caption else cap
+                        ln_no = getattr(line, 'line_number', 0) or 0
+                        if ln_no:
+                            caption_lines.append(ln_no)
                 i += 1
                 continue
 
@@ -2069,7 +2074,7 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                 extras.append(text)
             i += 1
 
-        return caption, options, extras
+        return caption, options, extras, caption_lines
 
     def _parse_menu_option(self, line: LogicalLine,
                            text: str) -> Optional[MenuOptionNode]:
@@ -2880,7 +2885,7 @@ class ParseResultBuilder:
                 not (getattr(o, 'condition', '') or '').strip()
                 for o in node.options):
             menu_own_cond = box.accum_cond
-        box.add_stmt(Statement.make_menu(
+        _menu_stmt = Statement.make_menu(
             node.caption or '', menu_own_cond,
             extras=list(getattr(node, 'extras', None) or ()),
             # 菜单名 / 参数表（2026-10-19，审计 P1-3 收尾）：从前这两样
@@ -2888,7 +2893,15 @@ class ParseResultBuilder:
             # 彻底看不见。现在它们各占一格，选项重新成为可编辑的拍。
             name=getattr(node, 'name', '') or '',
             args=getattr(node, 'args', '') or '',
-            source=(node.filename, node.line_number)))
+            source=(node.filename, node.line_number))
+        # **标题正文长在哪几行**（2026-10-24，审计第三轮 P0-9）：拍的行区间
+        # 必须盖住它们，否则改标题时生成的那一行落不进任何拍的区间。
+        # 与 `nest_path` / `_menu_member` 一样是**运行期动态属性**：
+        # 行号不入表、不进内容指纹（导一次 Excel 就过期了，真源是文件本身）。
+        _menu_stmt.caption_lines = [int(x) for x in
+                                    (getattr(node, 'caption_lines', None) or ())
+                                    if int(x) > 0]
+        box.add_stmt(_menu_stmt)
         box.counters['menu'] = box.counters.get('menu', 0) + 1
         menu_path = join_nest(box.nest_path, f"menu:{box.counters['menu']}")
         for _oi, opt in enumerate(node.options, start=1):

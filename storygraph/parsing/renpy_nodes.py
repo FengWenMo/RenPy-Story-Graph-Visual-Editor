@@ -226,6 +226,19 @@ class MenuNode(ASTNode):
     #: 变成传给菜单 screen 的参数，丢掉就是"菜单样式静默变了"。
     args: str = ''
     options: list = field(default_factory=list)
+    #: **标题行**在源文件里的行号（块内那些裸字符串行）。
+    #:
+    #: 为什么需要（2026-10-24，审计第三轮 P0-9）：`menu:` 的标题**不是 `menu:`
+    #: 那一行**，而是块里的下一行：
+    #:
+    #:     menu:                     ← 拍的行区间指着这一行
+    #:         "是时候和青一起学习了."   ← 标题正文在这里
+    #:
+    #: 从前模型只记 caption 文本、不记它长在哪一行，于是这一拍的行区间只有
+    #: `menu:` 一行 —— 渲染却写出两行。改标题时生成的那一行**不属任何拍的
+    #: 区间**，补丁贴不回去："1 处新增内容没能落进产物" → 整份拒绝
+    #: （真机 `script_pomo.rpy` 第 157/158 行稳定复现）。
+    caption_lines: list = field(default_factory=list)
     #: 菜单块里那些**不是选项、也不是标题**的行，逐字保留
     #: （`set seen` / `$ flags.x = 1` …）。Ren'Py 允许它们在 `menu:` 块里，
     #: 从前 `_parse_menu` 遇到就 `i += 1` —— 静默丢弃（`set seen` 丢了，

@@ -678,6 +678,19 @@ def _is_comment_line(line: str) -> bool:
     return bool(s.startswith('#')) and not _content_of(s).strip()
 
 
+def _is_caption_line(line: str) -> bool:
+    """
+    这一行是**菜单块里的标题行**吗？（裸字符串：没有说话人、不以冒号结尾）
+
+        "是时候和青一起学习了."        ← 是（`menu:` 的标题）
+        "开始":                       ← 不是（选项行，带冒号）
+        e "台词"                      ← 不是（有说话人）
+    """
+    body = _content_of(_norm(line))
+    m = _SAY_RE.match(body)
+    return m is not None and not (m.group('who') or '').strip()
+
+
 def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
     """
     配对用的身份键（见 `_replace_matched` 的说明）。
@@ -1428,6 +1441,30 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     # 证明新鲜（`relax_speaker`）。此时"这段注释"就是用户刚写的那几行 ——
     # 没有别的语义可猜，原样换掉、不参与后面的配对。
     pre_changed = 0
+    # **菜单标题块按"用户写的那几行"整段换掉**（2026-10-24，审计第三轮 P0-9）。
+    #
+    # 菜单标题是 `menu:` 块里的**裸字符串行**，Ren'Py 允许写成一行，也允许
+    # 写成多行（每一行都是标题的一部分）。拍的区间是 [`menu:`, 标题行…]，
+    # 渲染结果也是 [`menu:`, 标题行…] —— 可普通的配对通道只做 1:1 对位：
+    # 两行标题改成一行时，多出来的那行旧标题**没有对手**，于是留在原地
+    # （产物里成了两行标题：一行新的、一行旧的）→ 校验说"台词找不到"→ 拒绝。
+    #
+    # 判据（只认这一种形状，别的一律走老路）：
+    #   · 两边的第一行是**同一个不带标题的菜单头**（`menu:` / `menu 名:`）；
+    #   · 其余每一行都是**裸字符串**（没有说话人的台词形状）；
+    #   · 两边的**行数不同**（行数相同时普通配对已经能逐行换正文）。
+    if allow_edit and len(old_lines) >= 2 and len(gen_bodies) >= 2:
+        _mh = _norm(old_lines[0])
+        if (_MENU_HEAD_RE.match(_mh) and _mh.endswith(':')
+                and _norm(gen_bodies[0]) == _mh
+                and all(_is_caption_line(x) for x in old_lines[1:])
+                and all(_is_caption_line(x) for x in gen_bodies[1:])
+                and len(old_lines) != len(gen_bodies)):
+            _pad = indent_prefix(old_lines[1])
+            _new_caps = [_pad + x for x in gen_bodies[1:]]
+            pre_changed = max(len(old_lines) - 1, len(_new_caps))
+            old_lines = [old_lines[0]] + _new_caps
+            gen_bodies = [gen_bodies[0]]
     if relax_speaker:
         _o_run = _comment_run(old_lines)
         _g_run = _comment_run(gen_bodies)
@@ -1868,14 +1905,26 @@ def _unescaped(line: str) -> str:
     return re.sub(r'[ \t]+', ' ', s).strip()
 
 
-def _condition_reasons(new_beats: list, beats: list) -> list:
+def _condition_reasons(new_beats: list, beats: list,
+                       renumber=()) -> list:
     """
     同一句台词的条件变了没有？返回原因列表（空 = 都对得上）。
 
     判据按**内容身份**配对（label + 说话人 + 台词），不是全局多重集 ——
     后者会被"源里还留着的其它拍"误伤（实测两条既有用例：控制流文件里
     未参与编辑的 `jump` 拍、以及同文案出现在两个分支里）。
+
+    `renumber`（2026-10-24，审计第三轮 P0-10）：`(label, 旧条件, 新条件)`。
+    删掉一条分支之后，**后面那几条分支的条件会被解析器重新累加**（否定项里
+    少了被删的那一支），而文件里作者写的 `elif` 一个字都没动 —— 这不是
+    "条件被改了"，是"这一支没了"。这里按解析器口径把新条件算好交进来
+    （见 `_chain_renumber`），只容忍**恰好这一对、且要求完全相等**。
     """
+    allowed: dict = {}
+    for label, old, new in (renumber or ()):
+        allowed[(str(label or ''), str(old or '').strip())] = \
+            str(new or '').strip()
+
     def _key(b):
         return (b.label or '', (b.speaker or '').strip(),
                 (b.text or '').strip())
@@ -1893,12 +1942,16 @@ def _condition_reasons(new_beats: list, beats: list) -> list:
         if want in pool:
             pool.remove(want)                 # 一次匹配抵一次
             continue
+        exp = allowed.get(((b.label or ''), want))
+        if exp and exp in pool:
+            pool.remove(exp)                  # 删掉一支 → 解析器的重编号
+            continue
         if pool:                              # 台词在、条件变了
             bad.append((_key(b)[2][:16], want, pool[0]))
     return bad
 
 
-def _verify_conditions(text: str, beats: list) -> list:
+def _verify_conditions(text: str, beats: list, renumber=()) -> list:
     """补丁结果重新解析 → 条件对不对得上（`_condition_reasons` 的入口）。"""
     try:
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,
@@ -1979,7 +2032,7 @@ def _written_speaker(beat, symbols) -> str:
 
 
 def _verify_patch(text: str, original: str, beats: list, blocks: list,
-                  symbols=None) -> list:
+                  symbols=None, renumber=()) -> list:
     """
     补丁后的文本能解析、且**该有的东西一样不少**吗？返回不通过的原因列表。
 
@@ -1993,6 +2046,9 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
       ③ **生成器要的每一条内容行都在产物里** —— 真实数据实测 416/416 条
          都满足，所以这条不会误伤；而"区间错位改错了行"会被它挡住
       ④ `label` / `return` 数量不许比原文少（结构不许被啃掉）
+
+    `renumber`：删掉一条分支之后，后面几支条件的**可接受重编号**
+    （见 `_chain_renumber` / `_condition_reasons`）。
     """
     reasons = []
     try:
@@ -2044,7 +2100,7 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
     # 而块头不属于拍的行区间（见 `_body_lines`），所以"生成内容都在产物里"
     # 那条判据看不见它。用户改了「条件」列而增量补丁照写时，就会**报成功、
     # 条件没改**（静默 no-op）。
-    cond_bad = _condition_reasons(new_beats, beats)
+    cond_bad = _condition_reasons(new_beats, beats, renumber=renumber)
     if cond_bad:
         reasons.append(f'{len(cond_bad)} 处条件与要写的拍对不上'
                        f'（例：{cond_bad[0]}）—— 条件改动走全量')
@@ -2293,30 +2349,170 @@ def _next_sibling(orig_lines: list, head_no: int, last: int):
     return None
 
 
-def _gen_for_src(blocks, src_line: int):
-    """`src_line` 这一行是哪一拍的起始行 → 它的渲染结果（没有就 `None`）。"""
-    for _i, first, _last, gen, _b in (blocks or ()):
-        if first == src_line:
-            return gen
-    return None
+#: `menu "标题":` —— 标题**写在头行上**的那种写法（引擎其实不收，但解析器认）。
+#:
+#: 解析器支持它（`_scan_menu_header` 的第一支），所以编排层**必须能原样还原**：
+#: 零改动往返一个字节都不许动，改标题也只许动这一行。
+_MENU_HEAD_CAPTION_RE = re.compile(
+    r'^(?P<pre>\s*menu\s+)(?P<q>"|\')(?P<cap>(?:\\.|[^"\\])*)(?P=q)'
+    r'(?P<post>\s*(?:\(.*\))?\s*:.*)$')
 
 
-def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
-                         last: int):
+def _menu_head_caption_merge(lines: list, beat, first: int, last: int,
+                             orig_lines: list) -> list:
     """
-    被删分支**之后**的每一条 `elif` / `else` 头 → 换成渲染器给那一拍写的条件行。
+    `menu "标题":` 这种**标题在头行**的写法 → 把渲染出来的两行合并回头行。
 
-    为什么必须换（2026-10-21 实测，`pomodorro.rpy` 的 `breakline` 链）：拍上的
-    条件是**展平后的累积形式**（分支 3 是
-    `(breakline == 3) and not ((breakline == 1) or (breakline == 2))`）。
-    删掉分支 1 之后，如果只把下一条 `elif` 换个词，解析器从头累加出来的条件
-    与拍上存的对不上 → `_verify_patch` 判"条件改动走全量" → 又退回全量。
+    渲染器**故意**把标题写进块里（`menu:` + `    "标题"`）：Ren'Py 的 `menu`
+    头只接受 `menu [名] [(参数)]:`，**不接受字符串**（写成头行形式引擎直接
+    `expected ':' not found`，见 `beat_render` 那段注释）。所以整份渲染必须
+    用块内形式 —— 这也正是解析器要把块内标题合并进头部的反面。
 
-    改写后的条件里可能还留着"已经被删掉的分支"的否定（`not (breakline == 2)`）
-    —— 那是恒真的冗余项，语义不变；下一次全量导出会把条件重新算干净。
+    可**源文件里就是这么写的**（别的工具/别的引擎导出来的，或者作者手写坏
+    的）时，增量补丁必须把这一行**照原样还回去**：
+
+      · 零改动往返：产物必须逐字节等于原文（否则"我什么都没改，它却报
+        `1 处新增内容没能落进产物`" —— 审计第三轮 P0-9 的合成样本）；
+      · 改标题：只许动这一行，选项与选项体一个字节不动。
+
+    只认"恰好一行、恰好一个标题行"的情形；多行标题 / 头行还带菜单名或参数
+    的一律不合并（渲染形状与源形状对不上时不猜，交给调用方拒绝）。
     """
+    from storygraph.story.beat_model import KIND_MENU
+
+    if not orig_lines or first != last or first < 1 or first > len(orig_lines):
+        return lines
+    if str(getattr(beat, 'kind', '') or '') != KIND_MENU:
+        return lines
+    src = orig_lines[first - 1]
+    m = _MENU_HEAD_CAPTION_RE.match(src)
+    if m is None:
+        return lines                  # 源文件不是"标题在头行"的写法
+    if len(lines) != 2:
+        return lines                  # 多行标题：头行放不下换行，不猜
+    head = _norm(lines[0])
+    # 行尾注释不参与合并：渲染器会把这一拍的行尾注释贴到标题那一行上，
+    # 而原文的注释本来就在头行末尾（`post` 里），照抄会写出两份
+    # （实测：`menu "标题":  # 备注` → `menu "标题"  # 备注:  # 备注`）。
+    cap = _content_of(_norm(lines[1]))
+    if head != 'menu:' or not re.match(r'^(?:"|\')', cap):
+        return lines                  # 头行还带名字/参数 → 形状对不上，不猜
+    return [m.group('pre') + cap + m.group('post')]
+
+
+def _split_negation(cond: str) -> tuple:
+    """
+    展开成条件的一条分支 → `(前半, [否定项…])`（"`P and not ((a) or (b))`"）。
+
+    只认解析器写出来的那两种形状（`_w_if` 的口径，别的形态一律原样返回
+    `(整条, [])`，调用方据此放弃）：
+
+        (b) and not ((a))                 → ('(b)', ['(a)'])
+        not ((a) or (b))                  → ('',    ['(a)', '(b)'])
+
+    `or` 只在**顶层**切：否定项本身可能带括号里的 `or`（`not ((a or b) or (c))`）。
+    """
+    body = (cond or '').strip()
+    idx = body.rfind(' and not (')
+    if idx >= 0 and body.endswith(')'):
+        head = body[:idx].strip()
+        neg = body[idx + len(' and not ('):-1]
+    elif body.startswith('not (') and body.endswith(')'):
+        head = ''
+        neg = body[len('not ('):-1]
+    else:
+        return body, []
+    terms: list = []
+    i, n = 0, len(neg)
+    while i < n:
+        if neg[i] in ' \t':
+            i += 1
+            continue
+        if neg[i] != '(':
+            return body, []                # 认不出的写法 → 不猜
+        depth, j = 0, i
+        while j < n:
+            if neg[j] == '(':
+                depth += 1
+            elif neg[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            return body, []
+        terms.append(neg[i:j + 1])
+        i = j + 1
+        if neg[i:i + 4] == ' or ':
+            i += 4
+        elif i < n and neg[i:].strip():
+            return body, []
+    return head, terms
+
+
+def _bare_cond(term: str) -> str:
+    """`(a)` → `a`；本身没有外层括号就原样返回。"""
+    s = (term or '').strip()
+    if len(s) >= 2 and s[0] == '(' and s[-1] == ')':
+        depth = 0
+        for k, ch in enumerate(s):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return s[1:-1].strip() if k == len(s) - 1 else s
+    return s
+
+
+def _own_condition(head_line: str) -> str:
+    """`elif a == 1:` / `if a == 1:` → `a == 1`（`else:` → 空）。"""
+    body = _norm(head_line).strip()
+    m = re.match(r'^(?:if|elif)\s+(.*):$', body)
+    return m.group(1).strip() if m else ''
+
+
+def _chain_renumber(blocks, orig_lines: list, head_no: int, last: int):
+    """
+    删掉分支 `[head_no .. last]` 之后，**后面那些分支的条件**要跟着重算。
+
+    为什么需要（2026-10-24，审计第三轮 P0-10）：拍上存的条件是**展平后的
+    累积形式**（第 3 支是 `(b3) and not ((b1) or (b2))`）。删掉第 2 支的头行
+    之后，解析器从头累加出来的条件里就**没有 `(b2)` 了** —— 与拍上存的对不上
+    → `_verify_conditions` 判"条件改动走全量"。
+
+    上一版的做法是**把后面的 `elif` 改写成展平的 `if`**（`if (b3) and not
+    ((b1) or (b2)):`），语义等价、校验也过 —— 但那是**用户没碰过的结构行**，
+    diff 一大片，评审时看不出是工具干的。审计的判据只有一条：
+    **`elif` / `else` / `if` 行逐字节不动**。
+
+    现在改成：文件里作者的结构行一个字节不动，**条件在模型侧对账** ——
+    这里算出"删掉这一支之后，后面每支的条件该长什么样"，交给
+    `_verify_patch` 当作**可接受的重编号**（只容忍这一处，且要求完全相等）。
+    唯一还得动结构行的是"被删的正好是链头 `if`"：紧跟的 `elif` 必须提升成
+    `if`（Ren'Py 的链必须以 `if` 开头），那也只是**换一个词**，条件正文不动。
+
+    返回 `(rewrites, renumber)`：
+
+      · `rewrites`：`[(行号, 新整行)]` —— 只有"链头提升"这一种；
+      · `renumber`：`[(label, 旧条件, 新条件)]` —— 容忍对调的条件。
+
+    认不出来（条件形状不是解析器写的那两种、或对不上拍的区间）→ `None`
+    （调用方按"删这一拍不安全"处理，绝不猜）。
+    """
+    if head_no < 1 or head_no > len(orig_lines):
+        return None
+    own_deleted = _own_condition(orig_lines[head_no - 1])
+    kind_deleted = _norm(orig_lines[head_no - 1]).strip().split(None, 1)[0]
+    kind_deleted = kind_deleted.rstrip(':')
+    if kind_deleted == 'else':
+        return [], []                      # `else` 永远是链尾，后面没有分支
+    if not own_deleted:
+        return None
     head_ind = indent_width(orig_lines[head_no - 1])
-    out = []
+    rewrites: list = []
+    renumber: list = []
+    first_later = True
     n = last + 1
     while n <= len(orig_lines):
         line = orig_lines[n - 1]
@@ -2326,27 +2522,52 @@ def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
             continue
         ind = indent_width(line)
         if ind < head_ind:
+            break                          # 链结束了
+        if ind != head_ind:
+            n += 1
+            continue
+        tag = body.split(None, 1)[0].rstrip(':')
+        if tag not in ('elif', 'else'):
             break
-        if ind == head_ind:
-            tag = body.split(None, 1)[0].rstrip(':')
-            if tag not in ('elif', 'else'):
+        first_body = n + 1
+        while first_body <= len(orig_lines):
+            b2 = _norm(orig_lines[first_body - 1]).strip()
+            if b2 and not b2.startswith('#'):
                 break
-            first_body = n + 1
-            while first_body <= len(orig_lines):
-                b2 = _norm(orig_lines[first_body - 1]).strip()
-                if b2 and not b2.startswith('#'):
-                    break
-                first_body += 1
-            gen = _gen_for_src(blocks, first_body)
-            cond_line = next((g for g in (gen or ())
-                              if re.match(r'^if\b', _norm(g))), '')
-            if not cond_line:
-                return None               # 找不到那一拍 → 不猜
-            out.append((n, indent_prefix(line) + cond_line))
+            first_body += 1
+        beat = next((blk[4] for blk in (blocks or ())
+                     if blk[1] == first_body), None)
+        if beat is None:
+            return None                    # 找不到那一拍 → 不猜
+        label = str(getattr(beat, 'label', '') or '')
+        old_cond = str(getattr(beat, 'condition', '') or '').strip()
+        if not old_cond:
+            return None
+        prefix, terms = _split_negation(old_cond)
+        if not terms:
+            return None                    # 形状认不出（不是解析器写的那一个）
+        if first_later and kind_deleted == 'if':
+            # 被删的是链头 → 这一支变成 `if`，条件就是它自己的原文。
+            own = _own_condition(line)
+            if not own:
+                return None
+            rewrites.append((n, indent_prefix(line) + f'if {own}:'))
+            renumber.append((label, old_cond, own))
+            first_later = False
             n = first_body
             continue
-        n += 1
-    return out
+        kept = [t for t in terms if _bare_cond(t) != own_deleted]
+        if len(kept) == len(terms):
+            return None                    # 否定项里找不到被删的条件 → 不猜
+        neg = ' or '.join(kept)
+        new_cond = (f'{prefix} and not ({neg})' if prefix
+                    else f'not ({neg})')
+        renumber.append((label, old_cond, new_cond))
+        first_later = False
+        n = first_body
+    if first_later:
+        return [], []                      # 后面没有兄弟分支了
+    return rewrites, renumber
 
 
 def _plan_branch_deletion(orig_lines: list, first: int, last: int,
@@ -2386,19 +2607,21 @@ def _plan_branch_deletion(orig_lines: list, first: int, last: int,
     if claimed:
         return None                       # 块头属于别的拍 → 不动它
     if kind in ('if', 'elif'):
-        rew = _chain_head_rewrites(blocks, orig_lines, head_no, last)
-        if rew is None:
-            return None                   # 链尾接不上 → 不猜
+        plan = _chain_renumber(blocks, orig_lines, head_no, last)
+        if plan is None:
+            return None                   # 链算不出来 → 不猜
+        rewrites, renumber = plan
         if kind == 'if':
             nxt = _next_sibling(orig_lines, head_no, last)
             if nxt is not None:
                 tag = _norm(orig_lines[nxt - 1]).strip().split(None, 1)[0]
-                if tag.rstrip(':') not in ('elif', 'else'):
-                    return None           # `menu:` 之类 —— 不猜
-        return {'delete': (head_no, last), 'rewrite': rew}
+                if tag.rstrip(':') == 'else':
+                    return None           # 只剩 `else`：要整块降级缩进，不猜
+        return {'delete': (head_no, last), 'rewrite': rewrites,
+                'renumber': renumber}
     if kind == 'else':
         # `else:` 一定是链尾，后面没有兄弟分支
-        return {'delete': (head_no, last)}
+        return {'delete': (head_no, last), 'renumber': []}
     return None
 
 
@@ -2564,18 +2787,23 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
     `_plan_branch_deletion`：它把"整条分支"一起删/换（见那里的 docstring）。
     那也处理不了时才算失败。
 
-    返回 `(delete_ranges, subs, rewrites, delete_failed, delete_empty)`；
+    返回 `(delete_ranges, subs, rewrites, renumber, delete_failed,
+    delete_empty)`；
     `subs` 是 `(first, last, [整行…])`（菜单选项体 → `pass`），`rewrites` 是
-    `(行号, 新整行)`（`elif` → `if`）；`delete_empty` 是 `delete_failed` 里
+    `(行号, 新整行)`（`elif` → `if`，只在"删掉链头"时用），
+    `renumber` 是 `(label, 旧条件, 新条件)`（删掉一支之后，后面几支条件
+    要重算 —— 见 `_chain_renumber`）；`delete_empty` 是 `delete_failed` 里
     "删完上一层块会一行不剩"的那几条（回执要能说清是哪一种）。
     """
     delete_ranges: list = []
     subs: list = []
     rewrites: list = []
+    renumber: list = []
     delete_failed = 0
     delete_empty = 0                          # 其中"删完上一层块会空"的条数
     if not dropped_src:
-        return delete_ranges, subs, rewrites, delete_failed, delete_empty
+        return (delete_ranges, subs, rewrites, renumber, delete_failed,
+                delete_empty)
     taken = [(first, last) for (_i, first, last, _g, _b) in blocks if first]
     for b in dropped_src:
         first = int(getattr(b, 'src_first', 0) or 0)
@@ -2606,13 +2834,15 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
                 continue
             a, z = plan['delete']
             rewrites.extend(plan.get('rewrite') or [])
+            renumber.extend(plan.get('renumber') or [])
             first, last = a, z
         if any(first <= t_last and last >= t_first
                for t_first, t_last in taken if t_first and t_last >= t_first):
             delete_failed += 1                # 与仍在的拍交叠 → 不敢删
             continue
         delete_ranges.append((first, last))
-    return delete_ranges, subs, rewrites, delete_failed, delete_empty
+    return (delete_ranges, subs, rewrites, renumber, delete_failed,
+            delete_empty)
 
 
 def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
@@ -2906,12 +3136,15 @@ def _menu_shaped_lines(lines: list, info: dict) -> list:
     return lines
 
 
-def _render_blocks(beats: list, audit):
+def _render_blocks(beats: list, audit, orig_lines: list = None):
     """
     每一拍 → `(序号, 起始行, 结束行, 归一化后的生成行, Beat)`。
 
     另外返回 `{序号: 带缩进的生成行}`（`raw_gen`）—— 插入新拍时要用它，
     因为插入没有"原文行"可依，只能整段写进去。
+
+    `orig_lines`：源文件的行（用来把"标题写在头行"的菜单还原回头行形式，
+    见 `_menu_head_caption_merge`）。不给就是纯渲染（老调用方的行为）。
 
     渲染失败（拍本身有问题）就记一笔 `swallow` 并当作"这一拍没有生成行" ——
     不抛出去，因为增量补丁失败时调用方会退回全量重生成，
@@ -2931,6 +3164,7 @@ def _render_blocks(beats: list, audit):
             lines = [ln for ln in render_beat_to_rpy(target, audit=audit)
                      if str(ln).strip()]
             lines = _menu_shaped_lines(lines, info)
+            lines = _menu_head_caption_merge(lines, b, first, last, orig_lines)
         except Exception as e:                    # noqa: BLE001
             swallow('story.patcher.patch_export', e)
             lines = []
@@ -3193,7 +3427,7 @@ def patch_export(beats: list, source_path, generated_text: str,
 
     orig_lines = original.splitlines()
     out_lines = list(orig_lines)
-    blocks, raw_gen = _render_blocks(beats, audit)
+    blocks, raw_gen = _render_blocks(beats, audit, orig_lines)
 
     # 一个"渲染得出内容"的拍都没有 —— 与上面 `not beats` 是同一件事。
     #
@@ -3332,7 +3566,8 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 与"插入"同一套纪律：只动该动的那几行，凡是拿不准的一律放弃
     # （退回全量），并由下面末尾的全局校验兜底。
     # 具体"哪些情形不敢删"见 `_plan_deletions` 的 docstring。
-    delete_ranges, delete_subs, delete_rewrites, delete_failed, delete_empty = \
+    delete_ranges, delete_subs, delete_rewrites, delete_renumber, \
+        delete_failed, delete_empty = \
         _plan_deletions(dropped_src, st.blocks, st.orig_lines)
     # 新增的拍 → 插入点（锚点见 `_insert_points_for` 的 docstring）
     anchors, insert_failed, insert_into_body = _insert_points_for(
@@ -3394,14 +3629,16 @@ def patch_export(beats: list, source_path, generated_text: str,
         reasons.append(_msg)
     if text != original:
         reasons.extend(_verify_patch(text, original, beats, st.blocks,
-                                    symbols=symbols))
+                                    symbols=symbols,
+                                    renumber=delete_renumber))
     else:
         # **一个字都没改，也要查条件**（2026-10-05，O1 实测）。
         #
         # "改了条件、产物一个字节没动"恰好落在两条缝里：`changed_lines=0`
         # → 走不进整体校验；而条件又不是"生成的一行" → 第三条判据也看不见它。
         # 结果就是 `ok=True`、条件没改（静默 no-op）。
-        reasons.extend(_verify_conditions(text, beats))
+        reasons.extend(_verify_conditions(text, beats,
+                                         renumber=delete_renumber))
 
     # **覆盖率不足也必须说话**（2026-10-23）：从前 `ok` 会因为 coverage < 0.9
     # 变成 False，而 `reasons` 仍是空列表 —— 调用方只拿到"失败，没原因"。

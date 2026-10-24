@@ -837,15 +837,18 @@ class TestFailSafe:
         assert voice_lines[0].strip() == 'voice v_ling_01', (
             f'作者那行被改写成了 {voice_lines[0]!r}')
 
-    def test_a_trusted_range_that_cannot_pair_is_refused(self, write_rpy):
+    def test_a_menu_caption_on_its_own_line_is_editable(self, write_rpy):
         """
-        `trust_ranges=True`（行号已证明新鲜）**也**不许"报成功、内容没写"。
+        菜单标题写在 `menu:` 的**下一行**（Ren'Py 的合法写法）→ 改标题必须落地。
 
-        实测（`script_pomo.rpy`，真实项目）：菜单标题写在 `menu:` 的**下一行**
-        （Ren'Py 的合法写法），而拍的行号指向 `menu:` 那一行 —— 把标题改掉
-        是"换行"而不是"换词"，配对键不同 → `_replace_matched` 什么都不做。
-        不报出来就是静默 no-op：`hell_edit_rounds` 的真实项目轴当场抓到
-        "改的那句话没进产物"。
+        2026-10-24（审计第三轮 P0-9）：这条用例从前是**反向**的 —— 它守的是
+        "配不上就别报成功"（宁可拒绝，也不静默 no-op）。根因是菜单拍的行号
+        只到 `menu:` 那一行，标题正文**不属任何拍**，于是生成的那一行贴不
+        回去。现在拍的行区间覆盖标题行（`MenuNode.caption_lines`），配对成立，
+        判据也随之改成"**只动这一行**"：拒绝不再是正确答案，写对才是。
+
+        实测（`script_pomo.rpy`，真实项目）：同一章 55 拍，改前拒绝、改后
+        1 行 diff，`menu:` 与两条选项一个字节不动。
         """
         src = ('label a:\n'
                '    menu:\n'
@@ -857,8 +860,12 @@ class TestFailSafe:
         menu.text = 'X改过的一句话X'
         res = patch_export(beats, fp, render_beats_to_rpy(beats),
                            trust_ranges=True)
-        assert not res.ok, f'配不上却报成功（静默 no-op）：{res}'
-        assert res.reasons, res
+        assert res.ok, res.reasons
+        assert '        "X改过的一句话X"\n' in res.text, res.text
+        assert res.changed_lines == 1, (
+            f'改标题动了 {res.changed_lines} 行（只该动那一行）：\n{res.text}')
+        assert '    menu:\n' in res.text and '        "开始":\n' in res.text, \
+            f'结构行被动了：\n{res.text}'
 
     def test_stale_ranges_never_change_the_file(self, write_rpy):
         """

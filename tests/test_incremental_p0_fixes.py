@@ -84,19 +84,31 @@ IF_BODY = '''label ch01:
 '''
 
 
-class TestBranchDeleteIsRefused:
-    """P1-3：删掉块体唯一那一行 → 增量不许动，退全量（并说明原因）。"""
+class TestBranchDeleteTakesTheHeadWithIt:
+    """
+    P1-3 的**改判**（2026-10-24，审计第三轮 P0-10）：删掉块体唯一那一行 →
+    连分支头一起删，**增量照做**，不退全量。
 
-    def test_deleting_the_only_body_line_is_refused(self, write_rpy):
+    从前这里是"拒绝"（`removed_lines == 0` + `ok=False`）。拒绝的代价是整章
+    退回全量重生成，而全量只认得"拍"——`default` / `init python` / `transform`
+    一行都留不下，原地覆盖还得靠门禁拦。分支头本来就必须跟着走（空块是语法
+    错），删掉这两行**就是最小改动**：`if` 之后只剩 `return`，语义不变。
+
+    仍然拒绝的两种形态在 `tests/test_p0_round3.py::TestDeleteBranchKeepsStructure`
+    里（删完只剩 `else:` / 后面那支第一条不是拍）。
+    """
+
+    def test_deleting_the_only_body_line_removes_the_branch(self, write_rpy):
         fp, beats = _beats(write_rpy, IF_BODY)
         beats = [b for b in beats if b.text != '只有这一句']
         _as_from_table(beats)
         res = patch_export(beats, fp, render_beats_to_rpy(beats))
         assert res.dropped_beats >= 1, '删掉的拍没被检测出来'
-        assert res.removed_lines == 0, '不许真的删（if 体会空）'
-        assert not res.ok, '拒绝时必须 ok=False，让调用方退回全量'
-        assert any('删除不安全' in r for r in res.reasons), res.reasons
-        assert res.text == fp.read_text(encoding='utf-8'), '拒绝时一个字都不许动'
+        assert res.ok, res.reasons
+        assert res.removed_lines == 2, res.removed_lines   # 分支头 + 体
+        assert res.text == ('label ch01:\n    $ love = 0\n    return\n'), \
+            repr(res.text)
+        assert 'if love >= 5:' not in res.text, '空分支的头必须一起删'
 
 
 TWO_LABELS = '''label alpha:

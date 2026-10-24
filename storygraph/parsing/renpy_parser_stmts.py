@@ -191,7 +191,8 @@ class StatementScreens:
             name=header_name,
             args=header_args,
         )
-        sub_caption, node.options, node.extras = self._parse_menu(line.subblock)
+        sub_caption, node.options, node.extras, node.caption_lines = \
+            self._parse_menu(line.subblock)
         if header_caption and sub_caption:
             node.caption = header_caption + '\n' + sub_caption
         else:
