@@ -619,6 +619,40 @@ def _parse_stage_body(body: str) -> tuple:
 _OPTION_ROW_RE = re.compile(
     r'^(?P<lit>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')\s*:\s*(?:#.*)?$')
 
+#: 台词**带尾巴**（`e "台词" (id="l1")` / `… with vpunch` / `… # 备注`）。
+#:
+#: 为什么单开一条（2026-10-24，修审计 P0-8「SayTail 改了不落盘」）：
+#: `_SAY_RE` 要求整行以引号**结尾**，而高级区「台词后缀」一填，生成行就成了
+#: `e "台词" (id="l1")` —— 两条身份键一个 `('say', 'e')`、一个
+#: `('other', 原文)`，配不上对，于是补丁"成功"、文件一个字节没动。
+#:
+#: ⚠ 正文用"不含未转义引号"的字符类（`(?:\\.|[^"\\])*`），不是 `.*`：
+#: 贪婪的 `.*` 会一路吃到**尾巴里最后一个引号**，`e "台词" (id="l1")` 的
+#: 正文会算成 `台词" (id=`，反而更糟。
+_SAY_TAIL_RE = re.compile(
+    r'^(?P<who>[^\W\d]\w*(?:\.[^\W\d]\w*)*)?\s*'
+    r'(?P<q>"|\')(?P<body>(?:\\.|[^"\\])*)(?P=q)'
+    r'\s*(?P<tail>\(.*\)|with\s+[^#]+?|#.*)$')
+
+#: 菜单头（`menu:` / `menu 名:` / `menu 名(args):` / `menu "标题":`）。
+#:
+#: 身份只到"这是一个菜单头"这一层：菜单名/参数/标题都正是用户会改的那几位
+#: （2026-10-24，修审计 P0-8「MenuName 改了不落盘」）。从前它的键是
+#: `('other', 原文)`，`menu:` → `menu my_menu:` 配不上对 → 零 diff。
+_MENU_HEAD_RE = re.compile(r'^menu\b')
+
+#: 控制流行（`call X [args] [from Y]` / `jump X`）。
+#:
+#: 身份 = **动词**（`('flow', 'call')`）：目标/参数/`from` 正是用户在控制流卡上
+#: 改的那几位（2026-10-24，修审计 P0-5「改目标 → 多一条 call」）。从前键是
+#: `('other', 原文)`，换了目标就配不上对 → 新行被插进去、旧行又受
+#: `_PROTECTED_RE` 保护不许删 → **剧情跑两遍**。
+_FLOW_START_RE = re.compile(r'^(?:call|jump)\b')
+
+#: `label 名(参数)…:` 这一行（`label_header` 的参数表要一起保住）。
+_LABEL_LINE_RE = re.compile(r'^(\s*)label\s+([A-Za-z_]\w*)(.*)$')
+
+
 
 def _content_of(line: str) -> str:
     """
@@ -697,6 +731,19 @@ def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
         # 生成器那行会被当"新内容"插进去 → 文件里多一条 `voice`。
         return (verb, rest.strip().strip('"\'').split()[0]
                 if rest.strip().strip('"\'').split() else '')
+    # **控制流行**（2026-10-24，修审计 P0-5）：身份 = 动词。
+    #
+    # 只认 `parse_flow_line` 认得的那几种（`call X` / `jump X` / `call X(a)` /
+    # `call X from Y`）：`jump expression …` / `call screen …` 继续走
+    # `('other', 原文)`，它们的目标不是 label，改了不该被"同类型"放行。
+    if _FLOW_START_RE.match(bare):
+        from storygraph.story.flow import parse_flow_line
+        if parse_flow_line(bare) is not None:
+            return ('flow', bare.split()[0])
+    # **菜单头**（2026-10-24，修审计 P0-8）：身份 = "这是一个菜单头"。
+    # 名字 / 参数 / 标题都正是用户会改的那几位，进身份就配不上对了。
+    if _MENU_HEAD_RE.match(bare):
+        return ('menu', '')
     m = _SAY_RE.match(bare)
     if not m:
         # **菜单选项行**（`"选项":`，可带行尾注释）—— 见 `_OPTION_ROW_RE`：
@@ -708,6 +755,13 @@ def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
             m = _SAY_RE.match(mo.group('lit'))
             if m is not None and (m.group('who') or '').strip():
                 m = None
+    if not m:
+        # **带尾巴的台词**（2026-10-24，修审计 P0-8「SayTail」）：
+        # `e "台词" (id="l1")` / `… with vpunch` / `… # 备注` 与 `e "台词"`
+        # 是同一句话，只是多了后缀 —— 键要一样，否则配不上对、零 diff。
+        mt = _SAY_TAIL_RE.match(bare)
+        if mt is not None:
+            m = mt
     if m:
         who = (m.group('who') or '').strip()
         # ⚠ **关键字不许被"句位配对"吞掉**（2026-10-05 修 p0）：
@@ -831,6 +885,23 @@ def _same_thing_unless_rewritten(old_body: str, new_body: str,
         # 同一通道的两条 `play music` 可能分属相邻两拍，按通道配对会改错行。
         # 编辑器/表格两条正常路径都会带 `trust_ranges`。
         return relax_speaker and _line_key(old_body) == _line_key(new_body)
+    # **控制流**（2026-10-24，修审计 P0-5）：同类型换目标 / 参数 / from。
+    #
+    #   · `call side from _call_side` → `call other_side from _call_side`
+    #     —— 这就是用户在控制流卡上改目标，必须换掉那一行；
+    #   · `call → jump` 连类型一起变，参数与 `from` 按 Ren'Py 语义作废，
+    #     只在"行号已证明新鲜 / 1:1 槽位配对"时放行（`relax_speaker`）。
+    if kind == 'flow':
+        from storygraph.story.flow import parse_flow_line
+        fo, fn = parse_flow_line(old_body), parse_flow_line(new_body)
+        if fo is None or fn is None:
+            return False
+        if fo['type'] == fn['type']:
+            return True
+        return bool(relax_speaker)
+    # **菜单头**（2026-10-24，修审计 P0-8）：名字 / 参数 / 标题都是用户改的那几位。
+    if kind == 'menu':
+        return True
     return False
 
 
@@ -1294,6 +1365,27 @@ def _may_drop_line(line, gen_heads, gen_squash, gen_bodies):
     return True
 
 
+def _comment_run(lines: list):
+    """
+    这一段里**恰好一处**连续的注释块 → `(起, 止)`（含）；否则 `None`。
+
+    为什么只认"恰好一处"：注释块在区间里是"贴在下面那条语句上"的，一拍的
+    区间里通常只有一处；出现两处说明这段的结构比我们认得的多，**不猜**。
+    """
+    runs = []
+    start = None
+    for i, ln in enumerate(lines):
+        is_c = bool(_norm(ln)) and _is_comment_line(ln)
+        if is_c and start is None:
+            start = i
+        elif not is_c and start is not None:
+            runs.append((start, i - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(lines) - 1))
+    return runs[0] if len(runs) == 1 else None
+
+
 def _replace_matched(old_lines: list, gen_bodies: list,
                      allow_edit: bool = True, file_squash=None,
                      relax_speaker: bool = False,
@@ -1325,6 +1417,53 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     所以这一版的增删**只在平整区间**发生，插入的缩进**借原文区间**，
     并且事后仍有"重新解析 + 内容全在"的整体校验兜底（不过就退回全量）。
     """
+    # **注释块按"用户写的那几行"整段换掉**（2026-10-24，审计 P1）。
+    #
+    # 现场：一拍的行区间是 [`# 旧注释`, `e "台词"`]（注释贴在下面那条语句上），
+    # 用户在「注释」格里写成两行 → 旧实现只能做 1:1 配对，多出来的行被当
+    # "新增内容"插进去，而旧的注释行受"注释绝不许删"保护留着 →
+    # 文件里变成 `# 第一行` `# 第二行` `# 旧注释`，**越改越多**。
+    #
+    # 判据很窄：这一段里**恰好有一处连续的注释块**（两边都是），且行号已
+    # 证明新鲜（`relax_speaker`）。此时"这段注释"就是用户刚写的那几行 ——
+    # 没有别的语义可猜，原样换掉、不参与后面的配对。
+    pre_changed = 0
+    if relax_speaker:
+        _o_run = _comment_run(old_lines)
+        _g_run = _comment_run(gen_bodies)
+        if _o_run and _g_run:
+            _oa, _oz = _o_run
+            _ga, _gz = _g_run
+            _old_c = [_norm(x) for x in old_lines[_oa:_oz + 1]]
+            _gen_c = [_norm(x) for x in gen_bodies[_ga:_gz + 1]]
+            # **行尾注释被渲染器搬到拍首**的那一类不算新内容（2026-10-24）。
+            #
+            # 渲染器会把 `show ling close_happy  # 27无图片…` 的行尾注释
+            # 提到块首，于是生成结果里出现**两条**注释：一条是「注释」列，
+            # 一条是刚搬上来的行尾注释 —— 而原文里那行行尾注释**还在**
+            # （舞台行不会被改写）。整段照抄就会写出两条重复注释
+            # （真机 `chapter1_4.rpy` / `screens.rpy` 各一处，金标当场红）。
+            # 所以：生成注释的正文如果已经是这一段里某行的行尾注释，丢掉它。
+            _inline = set()
+            for _ln in old_lines:
+                _bare = _content_of(_norm(_ln))
+                _full = _norm(_ln)
+                # ⚠ `_bare` 必须非空：纯注释行的"内容"就是空串，
+                # 否则它自己会被当成"某行的行尾注释"→ 把自己的注释滤掉
+                # （第一版就这么把整段注释删没了，金标抓到的）。
+                if _bare and _bare != _full \
+                        and _full[len(_bare):].lstrip().startswith('#'):
+                    _inline.add(_full[len(_bare):].lstrip()[1:].strip())
+            _gen_c = [c for c in _gen_c
+                      if c.lstrip('#').strip() not in _inline]
+            if _old_c != _gen_c:
+                _pad = indent_prefix(old_lines[_oa])
+                old_lines = (list(old_lines[:_oa])
+                             + [_pad + x for x in _gen_c]
+                             + list(old_lines[_oz + 1:]))
+                gen_bodies = (list(gen_bodies[:_ga])
+                              + list(gen_bodies[_gz + 1:]))
+                pre_changed = max(len(_old_c), len(_gen_c))
     pool: dict = {}
     for idx, g in enumerate(gen_bodies):
         pool.setdefault(_line_key(g, relax_speaker), []).append(idx)
@@ -1418,8 +1557,30 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             pick_of_old[_j] = _idx
             slot_pairs.add(_idx)          # 允许 `_rewrite_line` 换内容
 
+    # —— ②'' 控制流：`call` → `jump` 这类**连类型都变了**的 1:1 配对 ——
+    #
+    # 第一轮的身份是 `('flow', 动词)`，所以"改目标"能配上对（P0-5 的主刀），
+    # 但 `call side` → `jump other` 配不上：新行被当"新增内容"**插进去**、
+    # 旧行受 `_PROTECTED_RE` 保护不许删 → 两条控制流，剧情跑两遍。
+    #
+    # 只在**两边数量相等**时按顺序 1:1 配（同一段区间里的控制流本来就有序）：
+    # 数量不等时无从判断哪条替哪条，宁可让它进 `unlanded`（→ ok=False 说清楚）。
+    # 计数相等但 >1 时**要求行号已证明新鲜**（`relax_speaker`）——
+    # 那种"同一个区间里两条 call 各改各的"在过期行号上猜不得。
+    old_fl = [j for j in range(len(old_lines))
+              if j not in pick_of_old and _line_key(_norm(old_lines[j]))[0] == 'flow']
+    gen_fl = [i for i in range(len(gen_bodies))
+              if i not in used and _line_key(gen_bodies[i])[0] == 'flow']
+    if old_fl and len(old_fl) == len(gen_fl) \
+            and (relax_speaker or len(old_fl) == 1):
+        for _j, _idx in zip(old_fl, gen_fl):
+            used.add(_idx)
+            pair_of_gen[_idx] = _j
+            pick_of_old[_j] = _idx
+            slot_pairs.add(_idx)
+
     out: list = []
-    changed = 0
+    changed = pre_changed
     grown = 0
     shrunk = 0
     landed_idx = set()
@@ -2241,6 +2402,148 @@ def _plan_branch_deletion(orig_lines: list, first: int, last: int,
     return None
 
 
+def _plan_label_renames(beats, orig_lines) -> list:
+    """
+    表里改了「Label」→ 源文件里那个 `label 名:` 头也要改（2026-10-24，P0-8）。
+
+    为什么必须单开一条：label 头**不属于任何一拍的行区间**（拍的行从
+    `label` 下面第一条语句开始），于是补丁的对位循环根本看不见它 ——
+    改了 `Label` 之后报告"改动 0 行"、文件里还是旧名（审计 P0-8 实测）。
+
+    做法：对每个"新名字"分组，取这一组里 `src_first` 最小的一拍，往上找
+    最近的一行 `label 旧名…:` —— 那就是它所属的块头。名字没变 → 不动。
+
+    **只在能确定"这一拍确实属于这个块头"时才改**：往上第一个 `label` 行就是
+    包住它的那个块头（块是嵌套的，Ren'Py 里 label 不嵌套，所以不会有歧义）。
+    同一个块头被改成两个不同名字（用户把两拍的 Label 改得不一致）→ 不猜，
+    整组跳过（`_verify_patch` 随后会报"台词在补丁结果里找不到"）。
+
+    返回 `[(0 基行下标, 旧名, 新名)]`，每个块头最多一条。
+    """
+    groups: dict = {}
+    for b in beats:
+        name = str(getattr(b, 'label', '') or '').strip()
+        first = int(getattr(b, 'src_first', 0) or 0)
+        if not name or first < 1 or first > len(orig_lines):
+            continue
+        groups.setdefault(name, []).append(first)
+    wanted: dict = {}                      # 行下标 → {旧名, 新名…}
+    for name, firsts in groups.items():
+        first = min(firsts)
+        for k in range(first - 1, -1, -1):
+            m = _LABEL_LINE_RE.match(orig_lines[k])
+            if not m:
+                continue
+            old = m.group(2)
+            if old != name:
+                wanted.setdefault(k, (old, set()))[1].add(name)
+            break
+    plans = []
+    for k, (old, names) in sorted(wanted.items()):
+        if len(names) != 1:
+            continue                       # 一个块头对两个新名字 → 不猜
+        plans.append((k, old, next(iter(names))))
+    return plans
+
+
+def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
+    """
+    内存里的**顺序变了**（把一拍挪了位置）→ 整段按新顺序重写（P0-7）。
+
+    为什么需要单开一条：补丁是**逐拍就地对位**的 —— 每一拍按自己的行号找到
+    原文那几行，内容一样就"改动 0 行"。把一拍从上挪到下时，每一拍的**内容**
+    都还在原处，于是逐拍看全都"没变"，产物顺序当然也不变（审计 P0-7 实测：
+    内存 二/三/一、渲染也是 二/三/一，文件里还是 一/二/三）。
+
+    判据（一条都不满足就不猜，交给调用方退回全量）：
+
+      · 同一个 `label` 里，拍的行号序列**不是单调递增**（有逆序对）；
+      · 逆序对涉及的拍的区间合起来是一段**连续区间**（中间只允许空行/注释）；
+      · 每一拍的区间都**精确认得出自己**（`strict_of`，防"源文件被手改过"
+        时按错位的行号重排）；
+      · 这段区间**没有和别的拍交叠**。
+
+    做法：把这段区间当成一排**槽位**（按源码顺序），槽位 k 里填"内存顺序
+    第 k 拍"的渲染结果，缩进借该槽位原来第一行。空隙行（空行/注释）
+    原地不动 —— 顺序变了，作者的分隔空行不该跟着跑。
+
+    返回 `(plans, reasons)`；`plans` 是 `[(起, 止, 新行, {拍序号})]`。
+    """
+    by_label: dict = {}
+    for blk in blocks:
+        _i, first, last, _gen, beat = blk
+        if first < 1 or last < first or last > len(orig_lines):
+            continue
+        by_label.setdefault(str(getattr(beat, 'label', '') or ''), []).append(blk)
+    plans: list = []
+    reasons: list = []
+    for _name, seq in by_label.items():
+        firsts = [blk[1] for blk in seq]
+        involved = set()
+        for j in range(len(firsts)):
+            for k in range(j):
+                if firsts[k] > firsts[j]:
+                    involved.add(j)
+                    involved.add(k)
+        if not involved:
+            continue
+        span_first = min(firsts[j] for j in involved)
+        span_last = max(seq[j][2] for j in involved)
+        members = [blk for blk in seq
+                   if span_first <= blk[1] and blk[2] <= span_last]
+        member_ids = {blk[0] for blk in members}
+        if not {seq[j][0] for j in involved} <= member_ids:
+            reasons.append('有拍的区间跨出了重排段，无法安全地换顺序')
+            continue
+        if any(blk[1] <= span_last and blk[2] >= span_first
+               for blk in seq if blk[0] not in member_ids):
+            reasons.append('重排段与别的拍交叠，无法安全地换顺序')
+            continue
+        if any(not strict_of.get(blk[0]) for blk in members):
+            reasons.append('重排段里有拍的原文对不上（源文件可能被手改过），'
+                           '不敢按行号换顺序')
+            continue
+        slots = sorted(members, key=lambda t: t[1])
+        ok = True
+        crossed = False
+        for a, b in zip(slots, slots[1:]):
+            if b[1] <= a[2]:
+                ok = False                 # 区间交叠 → 不猜
+                break
+            for n in range(a[2] + 1, b[1]):    # 中间的空隙只许是空行/注释
+                body = _norm(orig_lines[n - 1]).strip()
+                if _LABEL_LINE_RE.match(orig_lines[n - 1]):
+                    crossed = True             # 跨过了 `label` 头
+                if body and not body.startswith('#'):
+                    ok = False
+                    break
+        if crossed:
+            reasons.append('把一拍移到了另一个 label 里（跨 label 的重排）——'
+                           '增量补丁不猜这种结构改动，请用全量重写这一章')
+            continue
+        if not ok:
+            reasons.append('重排段里有认不出的行（不是空行/注释），'
+                           '不敢整段重写')
+            continue
+        new_lines: list = []
+        pos = span_first
+        for slot, blk in zip(slots, members):
+            for n in range(pos, slot[1]):          # 槽位前的空隙：原地不动
+                new_lines.append(orig_lines[n - 1])
+            pad = indent_prefix(orig_lines[slot[1] - 1])
+            rows = raw_gen.get(blk[0]) or []
+            for ln in rows:
+                new_lines.append(pad + ln if str(ln).strip() else ln)
+            pos = slot[2] + 1
+        for n in range(pos, span_last + 1):
+            new_lines.append(orig_lines[n - 1])
+        if [ln.strip() for ln in new_lines] == \
+                [ln.strip() for ln in orig_lines[span_first - 1:span_last]]:
+            continue                       # 渲染结果与原文同序 → 不需要动
+        plans.append((span_first, span_last, new_lines, member_ids))
+    return plans, reasons
+
+
 def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
     """
     被删掉的源拍 → 可以安全删除的区间列表。
@@ -2261,16 +2564,18 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
     `_plan_branch_deletion`：它把"整条分支"一起删/换（见那里的 docstring）。
     那也处理不了时才算失败。
 
-    返回 `(delete_ranges, subs, rewrites, delete_failed)`；`subs` 是
-    `(first, last, [整行…])`（菜单选项体 → `pass`），`rewrites` 是
-    `(行号, 新整行)`（`elif` → `if`）。
+    返回 `(delete_ranges, subs, rewrites, delete_failed, delete_empty)`；
+    `subs` 是 `(first, last, [整行…])`（菜单选项体 → `pass`），`rewrites` 是
+    `(行号, 新整行)`（`elif` → `if`）；`delete_empty` 是 `delete_failed` 里
+    "删完上一层块会一行不剩"的那几条（回执要能说清是哪一种）。
     """
     delete_ranges: list = []
     subs: list = []
     rewrites: list = []
     delete_failed = 0
+    delete_empty = 0                          # 其中"删完上一层块会空"的条数
     if not dropped_src:
-        return delete_ranges, subs, rewrites, delete_failed
+        return delete_ranges, subs, rewrites, delete_failed, delete_empty
     taken = [(first, last) for (_i, first, last, _g, _b) in blocks if first]
     for b in dropped_src:
         first = int(getattr(b, 'src_first', 0) or 0)
@@ -2289,6 +2594,7 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
                                          blocks)
             if plan is None:
                 delete_failed += 1
+                delete_empty += 1
                 continue
             if 'sub' in plan:
                 a, z, rows = plan['sub']
@@ -2306,7 +2612,7 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
             delete_failed += 1                # 与仍在的拍交叠 → 不敢删
             continue
         delete_ranges.append((first, last))
-    return delete_ranges, subs, rewrites, delete_failed
+    return delete_ranges, subs, rewrites, delete_failed, delete_empty
 
 
 def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
@@ -2642,7 +2948,7 @@ class _PatchWalkState:
     （原文行、blocks、可信标志…）。打包成一个对象，循环里不会漏传一个。
     """
 
-    __slots__ = ('blocks', 'changed', 'grown_total', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'removed_preview', 'seen_ranges', 'shrunk_total', 'stale',
+    __slots__ = ('blocks', 'changed', 'grown_total', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'removed_preview', 'reorder_ids', 'seen_ranges', 'shrunk_total', 'stale',
                   'strict_of', 'trust_ranges', 'unlanded_total', 'usable')
 
     def __init__(self, **kw):
@@ -2661,6 +2967,8 @@ def _patch_walk_blocks(st) -> None:
     for _i, first, last, gen, beat in st.usable:
         if _i in st.insert_ids:
             continue                          # 新增的拍 → 走下面的插入通道
+        if _i in st.reorder_ids:
+            continue                          # 顺序变了的拍 → 整段重写（见下）
         if first < 1 or last > len(st.orig_lines):
             continue
         if any(first <= r_last and last >= r_first
@@ -2968,6 +3276,22 @@ def patch_export(beats: list, source_path, generated_text: str,
     #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 回执要能点名（2026-10-21）。
     #: 逐拍的"拍内删行"（清空某一列的立绘/音乐）与"整拍删除"都往这里写。
     removed_preview: list = []
+    # —— **顺序变了**（P0-7）：整段按新顺序重写 ——
+    # 放在逐拍对位之前算：这样那几拍不再走"就地对位"（它们的内容本来都还在
+    # 原处，逐拍看全都"没变"——那正是顺序落不了盘的原因）。
+    reorder_plans, reorder_reasons = _plan_reorders(
+        blocks, orig_lines, raw_gen, strict_of)
+    reorder_ids: set = set()
+    for _pf, _pl, _pn, _pids in reorder_plans:
+        reorder_ids |= _pids
+    # —— **label 改名**（P0-8）：块头那一行不属任何一拍，得单独改 ——
+    label_renames = _plan_label_renames(beats, orig_lines)
+    for _k, _old_name, _new_name in label_renames:
+        _m = _LABEL_LINE_RE.match(out_lines[_k])
+        if _m is None:
+            continue
+        out_lines[_k] = f'{_m.group(1)}label {_new_name}{_m.group(3)}'
+        changed += 1
     st = _PatchWalkState(
         blocks=blocks,
         changed=changed,
@@ -2981,6 +3305,7 @@ def patch_export(beats: list, source_path, generated_text: str,
         orig_squash=orig_squash,
         out_lines=out_lines,
         removed_preview=removed_preview,
+        reorder_ids=reorder_ids,
         seen_ranges=seen_ranges,
         shrunk_total=shrunk_total,
         stale=stale,
@@ -2990,6 +3315,16 @@ def patch_export(beats: list, source_path, generated_text: str,
         usable=usable,
     )
     _patch_walk_blocks(st)
+    # 重排段从后往前换（先动后面，前面的行号才不漂）
+    reorder_changed = 0
+    for _pf, _pl, _pn, _pids in sorted(reorder_plans, key=lambda p: p[0],
+                                       reverse=True):
+        _old_seg = st.out_lines[_pf - 1:_pl]
+        reorder_changed += sum(1 for a, b in zip(_old_seg, _pn) if a != b)
+        reorder_changed += abs(len(_old_seg) - len(_pn))
+        st.out_lines[_pf - 1:_pl] = _pn
+        st.matched += len(_pids)
+    st.changed += reorder_changed
 
     # —— 被删除的拍：**精确删掉它们的那几行** ——
     #
@@ -2997,7 +3332,7 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 与"插入"同一套纪律：只动该动的那几行，凡是拿不准的一律放弃
     # （退回全量），并由下面末尾的全局校验兜底。
     # 具体"哪些情形不敢删"见 `_plan_deletions` 的 docstring。
-    delete_ranges, delete_subs, delete_rewrites, delete_failed = \
+    delete_ranges, delete_subs, delete_rewrites, delete_failed, delete_empty = \
         _plan_deletions(dropped_src, st.blocks, st.orig_lines)
     # 新增的拍 → 插入点（锚点见 `_insert_points_for` 的 docstring）
     anchors, insert_failed, insert_into_body = _insert_points_for(
@@ -3021,7 +3356,12 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 真正把关的是下面两条：系统性错位会把覆盖率打到 0.9 以下，
     # 而**内容校验**会直接指出"生成器要的那一行不见了"，
     # 两者任一触发 → ok=False → 调用方退回全量。**绝不写半对的产物。**
-    reasons = []
+    reasons = list(reorder_reasons)
+    if reorder_plans and (st.insert_ids or dropped_src):
+        # 重排段会改变那几行的**行数**，后面的删除 / 插入锚点全部要跟着漂。
+        # 两者同时发生时不做编排（不猜），让调用方退回全量并说清楚。
+        reasons.append('这一章里既移动了拍、又增删了拍 —— 增量补丁不猜这种组合，'
+                       '请重新载入后再导出（或直接全量重写这一章）')
     if insert_failed:
         # 有新增的拍但**找不到锚点**（例如它是文件里的第一拍，
         # 前面没有任何源拍可依附）→ 不猜，退回全量。
@@ -3042,7 +3382,16 @@ def patch_export(beats: list, source_path, generated_text: str,
     if delete_failed:
         # 被删的拍里，有几拍**不敢删**（区间含块头 / 与别的拍交叠 / 越界）。
         # 少删一拍就会留下"表里没有、文件里还有"的幽灵台词。
-        reasons.append(f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）')
+        _msg = f'{delete_failed} 处删除不安全（含结构行或与其它拍交叠）'
+        if delete_empty:
+            # 审计 P1：删 `label` 下唯一那一拍（常见是一条 `jump`）时，
+            # 上一层块会变成空的 —— 用户看着内存里删掉了，文件却不动，
+            # 而旧提示只会说"不安全"，看不出是这一类。这里点名。
+            _msg += (f'；其中 {delete_empty} 处是"删完上一层块会一行不剩"'
+                     f'（例如 label 下唯一那一拍是 jump）——'
+                     f'内存里已经删了，文件没动；请手动删那一行，'
+                     f'或者用全量重写这一章')
+        reasons.append(_msg)
     if text != original:
         reasons.extend(_verify_patch(text, original, beats, st.blocks,
                                     symbols=symbols))

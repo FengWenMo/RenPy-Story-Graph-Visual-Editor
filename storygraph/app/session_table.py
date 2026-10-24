@@ -1557,13 +1557,34 @@ class TableSessionMixin:
         # 同时提交了同步后的代码格），不会把 raw 误降级成 code。
         flow_keys = any(k in fields for k in FLOW_FIELD_KEYS)
         if flow_keys:
-            from storygraph.story.flow import update_beat_flow
+            from storygraph.story.flow import (parse_flow, render_flow_line,
+                                               update_beat_flow)
+            _old_flow = parse_flow(b)
             update_beat_flow(
                 b,
                 fields.get('FlowType') if 'FlowType' in fields else None,
                 fields.get('FlowTarget') if 'FlowTarget' in fields else None,
                 fields.get('FlowArgs') if 'FlowArgs' in fields else None,
                 fields.get('FlowFrom') if 'FlowFrom' in fields else None)
+            # **代码格跟着控制流卡一起改**（2026-10-24，修审计 P0-6）。
+            #
+            # 从前这件事只在前端做（`main_window._flow_code_synced`）：UI 保存时
+            # 会先把「代码」格改成新那行，于是 `compose_code(b)` 与它相等，
+            # 下面那支不会把 raw 降级。可**任何别的调用方**（脚本 / 表格导入 /
+            # AI agent / 测试）都只交回 `fields()`，那里面 `CodeBlock` 恒等于
+            # **旧**行 —— 于是：raw 改成新目标 → `CodeBlock != compose_code(b)`
+            # → raw 被清空、旧行写回 code → **改了等于没改，还 ok=True**。
+            #
+            # 下沉到这里的判据与前端那条一样窄：只有「代码格确实还是原来那行
+            # 控制流」才同步；用户手写过别的代码，就交给下面那支去降级。
+            if 'CodeBlock' in fields and _old_flow:
+                if str(fields.get('CodeBlock') or '').strip() == _old_flow['line']:
+                    _new_flow = parse_flow(b)
+                    if _new_flow:
+                        fields['CodeBlock'] = render_flow_line(
+                            _new_flow['type'], _new_flow['target'],
+                            _new_flow.get('args') or '',
+                            _new_flow.get('from_clause') or '')
 
         # **键不存在 = 不动这一格**（2026-10-05 修，与 `fields_to_beat` 同源）。
         #
@@ -1634,7 +1655,7 @@ class TableSessionMixin:
                     b.code = new_code
                     b.raw = ''
             if 'Label' in fields:
-                b.label = str(fields.get('Label') or '').strip() or b.label
+                self._apply_label(b, str(fields.get('Label') or '').strip())
             if 'Kind' in fields:
                 b.kind = str(fields.get('Kind') or '').strip() or b.kind
             if 'Notes' in fields:
@@ -1721,6 +1742,30 @@ class TableSessionMixin:
         if self._beat_edits_print(idx) != _before_print:
             self.mark_edits_dirty()
         return b
+
+    def _apply_label(self, b: Beat, new_label: str) -> None:
+        """
+        `Label` 那一格：**改一格 = 给整章那个 label 改名**（2026-10-24，P0-8）。
+
+        为什么不能只改这一拍：`label 名:` 是**块头**，它下面所有拍共用同一个
+        名字。只把一拍的名字改掉，内存里就出现"同一个块里两拍说自己属于两个
+        不同 label"的状态 —— 导出时块头只能写一个名字，另一半的拍在产物里
+        找不到自己的 label，整体校验判"台词找不到"，**整章导出直接失败**。
+
+        所以这里按"改名"处理：凡是旧名字的拍都跟着改。**新名字已经被别的
+        label 占了**时不改（那更像是"把这一拍挪到另一个 label"，属于结构改动，
+        交给导出的校验去拒绝，绝不悄悄合并两个 label）。
+        """
+        if not new_label or new_label == b.label:
+            return
+        old_label = b.label
+        taken = any(o is not b and str(getattr(o, 'label', '') or '') == new_label
+                    for o in self.beats)
+        if taken:
+            return
+        for o in self.beats:
+            if str(getattr(o, 'label', '') or '') == old_label:
+                o.label = new_label
 
     @staticmethod
     def _fold_dynamic_columns(b: Beat, fields: dict):

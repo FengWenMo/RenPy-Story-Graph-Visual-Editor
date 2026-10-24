@@ -14,6 +14,14 @@
 
 ⚠ 真机项目不在时 skip；`tools/hell_edit_rounds.py` 是同一件事的另一个入口
 （它跑"安全拒绝/退回全量"那一类终态），本金标管的是**逐条产物**。
+
+**重录记录**
+
+- 2026-10-24（第二轮 P0）：唯一变化 `script_pomo.rpy [edited]`。
+  旧产物里 `jc "…X" (no_skip=True)` 与 `jc "…" (no_skip=True)` **两行都在**
+  （带台词后缀的行在补丁里认不出自己是台词 → 新行被插、旧行留下）；
+  新产物只剩改过的那一行。这是修 P0-8「SayTail 配不上对」的**正向**变化，
+  不是回归 —— 金标按新产物重录。
 """
 
 from __future__ import annotations
