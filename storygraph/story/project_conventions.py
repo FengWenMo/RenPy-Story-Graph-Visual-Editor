@@ -72,6 +72,14 @@ class Conventions:
     notes: str = ''
     source: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
+    #: 项目形状（G0，2026-10-23）：声明放哪 / 控制流放哪 / 哪些是内容文件。
+    #:
+    #: 为什么它在这里而不是 `placement.py` 自己记：这份约定要被**记住**。
+    #: 探测是"我看到的"，清单是"你确认的" —— 两者分开记（`placement_source`），
+    #: 报告里才能说清"这是你说的还是我猜的"。
+    placement: dict = field(default_factory=dict)
+    #: `declared` = 清单里写的（人确认过）；`detected` = 这次扫出来的。
+    placement_source: str = ''
 
     def pose_options(self, tag: str) -> list:
         return list(self.poses.get(str(tag or '')) or [])
@@ -85,7 +93,9 @@ class Conventions:
                 'path_bases': self.path_bases,
                 'auto_fixes': sorted(self.auto_fixes),
                 'manifest': self.manifest_path, 'source': self.source,
-                'warnings': self.warnings}
+                'warnings': self.warnings,
+                'placement': dict(self.placement),
+                'placement_source': self.placement_source}
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +365,64 @@ def _statement_head(text: str) -> str:
 #  第一层 + 组装
 # ---------------------------------------------------------------------------
 
+def write_placement(project_root, placement=None) -> dict:
+    """
+    把**探测到的**项目形状写进清单（`storygraph.rules.json` 的 `placement` 段）。
+
+    ## 为什么要人来触发
+
+    探测是"我看到的"，写进清单就变成"这个项目就是这样"。这一步一旦自动化，
+    等于把猜测洗成事实 —— 所以只提供**显式入口**
+    （`python cli.py shape <项目> --write`），不自动写。
+
+    ## 行为（都写进判据）
+
+      · **读-改-写**：清单里别的段（`statements` / `poses` / …）原样保留；
+      · 文件不存在 → 新建；
+      · 文件存在但 JSON 坏了 → **拒绝写**（绝不拿我们这份覆盖用户手写的清单）；
+      · `placement` 只写四个键（`declarations` / `control_flow` /
+        `content_globs` / `declaration_style`），探测到的额外细节不落盘
+        （它们是"这次扫描的观察"，不是约定）。
+
+    返回 `{'ok', 'path', 'reason', 'values'}`。
+    """
+    root = Path(project_root)
+    path = find_manifest(root) or (root / MANIFEST_NAMES[0])
+
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('顶层必须是对象')
+        except Exception as e:                    # noqa: BLE001
+            return {'ok': False, 'path': str(path), 'values': {},
+                    'reason': f'清单读不出来（{e}）—— 拒绝覆盖（那是人也会手改的文件）'}
+
+    if placement is None:
+        from storygraph.story.placement import detect_placement
+        placement = detect_placement(root).to_dict()
+    if not isinstance(placement, dict):
+        return {'ok': False, 'path': str(path), 'values': {},
+                'reason': '没给形状'}
+
+    values = {
+        'declarations': placement.get('declarations', ''),
+        'control_flow': placement.get('control_flow', ''),
+        'content_globs': list(placement.get('content_globs') or []),
+        'declaration_style': placement.get('declaration_style', ''),
+    }
+    data['placement'] = values
+
+    from storygraph.story.paths import write_text_atomic
+    try:
+        write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+    except OSError as e:
+        return {'ok': False, 'path': str(path), 'values': values,
+                'reason': f'写不进去：{e}'}
+    return {'ok': True, 'path': str(path), 'reason': '', 'values': values}
+
+
 def detect_conventions(project_root, layer_model=None) -> Conventions:
     """
     自动识别 + 清单声明 → `Conventions`（**声明覆盖识别**）。
@@ -407,6 +475,23 @@ def detect_conventions(project_root, layer_model=None) -> Conventions:
             conv.auto_fixes.add(key)
     if isinstance(data.get('notes'), str):
         conv.notes = data['notes']
+
+    # —— 项目形状（G0）：先探测，再让清单覆盖 ——
+    # 探测是"我看到的"，清单是"人确认过的"。两者都记下来，别混成一个值。
+    try:
+        if Path(project_root).is_dir():
+            from storygraph.story.placement import detect_placement
+            conv.placement = detect_placement(project_root).to_dict()
+            conv.placement_source = 'detected'
+    except Exception as e:                      # noqa: BLE001 - 探测失败不影响其余约定
+        swallow('story.project_conventions.detect_conventions.placement', e)
+    if isinstance(data.get('placement'), dict):
+        for key in ('declarations', 'control_flow', 'content_globs',
+                    'declaration_style'):
+            if key in data['placement']:
+                conv.placement[key] = data['placement'][key]
+        conv.placement_source = 'declared'
+
     # 清单里可以显式关掉自动识别（"别猜我的姿势表"）
     if data.get('detect_poses') is False:
         conv.poses = {k: v for k, v in conv.poses.items()
@@ -437,4 +522,5 @@ def clear_cache():
 
 __all__ = ['Conventions', 'MANIFEST_NAMES', 'KNOWN_STATEMENT_HEADS',
            'find_manifest', 'load_manifest', 'unknown_statements',
-           'detect_conventions', 'conventions_for', 'clear_cache']
+           'detect_conventions', 'conventions_for', 'clear_cache',
+           'write_placement']

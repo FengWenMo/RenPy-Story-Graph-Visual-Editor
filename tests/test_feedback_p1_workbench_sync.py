@@ -12,6 +12,9 @@ tests/test_feedback_p1_workbench_sync.py
   · P2-4 剧情图有未保存标记，关窗自动存一份布局。
 """
 
+# W1a（2026-10-23）：版式从项目根搬进 `.storygraph/`，断言跟着走。
+LAYOUT_REL = '.storygraph/layout.json'
+
 import os
 import sys
 from pathlib import Path
@@ -318,7 +321,7 @@ class TestGraphPersistence:
             e = g.add_edge(a, b, 'jump', origin='manual')
             win._set_graph(g)
             assert g.edges[e].origin == 'manual'
-            assert '点划线' in win._graph_hint.text()
+            assert '草图' in win._graph_hint.text()
         finally:
             win.close()
 
@@ -332,7 +335,7 @@ class TestGraphPersistence:
             g.add_node('a', 0, 0)
             win._set_graph(g)
             assert win._graph_dirty is True
-            win._mark_graph_saved(str(project / 'storygraph_layout.json'))
+            win._mark_graph_saved(str(project / LAYOUT_REL))
             assert win._graph_dirty is False
 
             # 只是"高亮当前块"不算改动（is_current 不进指纹）
@@ -347,5 +350,5 @@ class TestGraphPersistence:
         finally:
             if not win.isHidden():
                 win.close()
-        assert (project / 'storygraph_layout.json').exists(), \
+        assert (project / LAYOUT_REL).exists(), \
             '关窗时应该自动存一份布局，图不该关掉就没'

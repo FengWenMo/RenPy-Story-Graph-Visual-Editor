@@ -28,7 +28,11 @@ _LABEL_RE = re.compile(rf'^{_LABEL}$')
 _FLOW_RE = re.compile(rf'^(call|jump)\s+({_LABEL})(?=\s|\(|$)(.*)$')
 _FROM_RE = re.compile(rf'^from\s+({_LABEL})$')
 
-#: 控制流拍允许出现的类型（目前只有这两个；`return` 不落卡，见 beat_build）。
+#: 卡片上**可编辑目标**的控制流类型（call / jump）。
+#:
+#: `return` 自 2026-10-23 起也是一张 `kind='flow'` 拍（逐字保真的出口），
+#: 但它没有"目标"，所以**不进 `FLOW_TYPES`** —— 这里只回答"能不能用控制流
+#: 表单改它"，不是"哪些拍是 flow"。
 FLOW_TYPES = ('call', 'jump')
 
 #: 卡片 / 列表用的中文动词。
@@ -46,6 +50,63 @@ FLOW_FIELD_KEYS = ('FlowType', 'FlowTarget', 'FlowArgs', 'FlowFrom')
 def is_valid_label(name) -> bool:
     """`main.route` / `side.choice` 合法；空串、点号首尾、连续点号不合法。"""
     return bool(_LABEL_RE.match(str(name or '').strip()))
+
+
+#: 扫源码里的 `call X from Y`（找已占用的存档点名字）。
+#:
+#: 故意**不要求**整行都是 call —— 这里只回答"这个名字用过没有"，
+#: 多算一个（比如台词里恰好有 `from xxx`）只会让自动命名跳过它，
+#: 不会生成重名；少算才会生成一个 Ren'Py 起不来的脚本。
+_FROM_USE_RE = re.compile(rf'\bfrom\s+({_LABEL})\b')
+
+#: 扫 `call X`（不论有没有 `from`）：Ren'Py 会给**没写 from** 的调用
+#: 自动生成 `_call_<X>_<n>`，所以只查显式 from 不够，还要给这些隐式名字留位。
+_CALL_TO_RE = re.compile(rf'\bcall\s+({_LABEL})\b')
+
+
+def collect_from_clauses(texts) -> set:
+    """一批源码文本里所有 `from` 子句（去重；空文本忽略）。"""
+    out = set()
+    for text in (texts or ()):
+        try:
+            out.update(_FROM_USE_RE.findall(str(text or '')))
+        except TypeError:
+            continue
+    return out
+
+
+def call_counts(texts) -> dict:
+    """一批源码文本里每个 label 被 `call` 了几次（用于避开隐式 from 名字）。"""
+    out = {}
+    for text in (texts or ()):
+        try:
+            for target in _CALL_TO_RE.findall(str(text or '')):
+                out[target] = out.get(target, 0) + 1
+        except TypeError:
+            continue
+    return out
+
+
+def from_stem(target) -> str:
+    """`ch02` → `_call_ch02`；`main.route` → `_call_main_route`。"""
+    stem = re.sub(r'[^A-Za-z0-9_]+', '_', str(target or '')).strip('_')
+    return f'_call_{stem}' if stem else '_call_target'
+
+
+def next_from_clause(target, used=()) -> str:
+    """
+    给一个新调用生成存档返回点：`_call_<目标>_<n>`。
+
+    为什么不用随机后缀（P1，2026-10-24）：`from` 是**给人看的存档点身份**，
+    真出问题时作者要在存档/日志里找它。用 Ren'Py 自己的 `_call_…_n`
+    习惯，人和工具都认。
+    """
+    stem = from_stem(target)
+    taken = {str(x) for x in (used or ())}
+    n = 1
+    while f'{stem}_{n}' in taken:
+        n += 1
+    return f'{stem}_{n}'
 
 
 def _scan_balanced(text: str, start: int) -> int:
@@ -335,7 +396,68 @@ def flow_card_text(info: dict | None) -> str:
     return f"{info['type']} {info['target']}"
 
 
+# ---------------------------------------------------------------------------
+#  位置上下文（S0，2026-10-23）
+# ---------------------------------------------------------------------------
+
+def beat_brief(beat, limit: int = 32) -> str:
+    """
+    一张拍的**一句话摘要**，给人看的（图上悬停 / 边详情用）。
+
+    优先 `raw`：控制流拍的 `raw` 就是 `call side` / `jump B`，比"旁白"准确得多。
+    台词拼成 `说话人「内容」`；都没有就说"空拍"——**不猜**。
+    """
+    raw = str(getattr(beat, 'raw', '') or '').strip()
+    if raw:
+        text = raw
+    else:
+        content = str(getattr(beat, 'text', '') or '').strip()
+        who = str(getattr(beat, 'speaker', '') or '').strip()
+        text = f'{who}「{content}」' if (who and content) else content
+    if not text:
+        return '（空拍）'
+    text = text.replace('\n', ' ')
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
+def beat_context(beats) -> dict:
+    """
+    `line_id` → `{index, total, label, prev, text, next}`。
+
+    ## 为什么要它（S0）
+
+    图是空间的（谁连谁），调用是时序的（**在第几步发生**）。用户原话：
+
+    > "我只知道有一个 call，我并不知道 call 在哪个位置"
+
+    数据其实一直都在：`Edge.line_id` 就是那一拍的稳定身份，`Beat` 上也有
+    前后文。缺的只是"把它们摆到界面上"。这个函数就是那一步的纯函数版本：
+    **只读拍的列表，不碰图、不碰文件**，所以能被单测钉住。
+
+    `index` 从 1 开始（人说的话，"第 3 拍"），和卡片列表的显示一致。
+    空 `line_id` 的拍跳过 —— 没有身份就没法被边引用，硬编号反而会串。
+    """
+    items = list(beats or ())
+    total = len(items)
+    out = {}
+    for i, beat in enumerate(items):
+        lid = str(getattr(beat, 'line_id', '') or '')
+        if not lid:
+            continue
+        out[lid] = {
+            'index': i + 1,
+            'total': total,
+            'label': str(getattr(beat, 'label', '') or ''),
+            'prev': beat_brief(items[i - 1]) if i > 0 else '',
+            'text': beat_brief(beat),
+            'next': beat_brief(items[i + 1]) if i + 1 < total else '',
+        }
+    return out
+
+
 __all__ = ['FLOW_FIELD_KEYS', 'FLOW_TYPES', 'FLOW_VERBS',
-           'callers_of', 'flow_card_text', 'flow_edges', 'flow_info',
-           'is_valid_label', 'label_brief', 'parse_flow', 'parse_flow_line',
+           'beat_brief', 'beat_context', 'call_counts',
+           'callers_of', 'collect_from_clauses', 'flow_card_text', 'flow_edges',
+           'flow_info', 'from_stem', 'is_valid_label', 'label_brief',
+           'next_from_clause', 'parse_flow', 'parse_flow_line',
            'render_flow_line', 'update_beat_flow']

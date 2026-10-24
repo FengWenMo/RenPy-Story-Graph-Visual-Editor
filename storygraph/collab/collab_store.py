@@ -34,7 +34,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -178,7 +178,31 @@ CREATE TABLE IF NOT EXISTS audit (
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec='seconds')
+    """
+    当前时间 → **UTC + 明确时区后缀**的 ISO 串（`2026-10-23T12:34:09+00:00`）。
+
+    ⚠ 2026-10-23（清单 §十九）：从前这里写的是**无时区的本地时间**，租约
+    又由另一台机器用它的本地时间比较 —— 北京加锁、东京读，差值直接变成
+    "提前 1 小时过期"；换成带时区的老记录还会 `TypeError`。现在写库统一
+    UTC，比较也统一在 aware 域（见 `lock_state`）。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _local_tz():
+    """本机当前时区（用于把**老库的无时区时间**解释成本地时间）。"""
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _as_aware(dt):
+    """naive → 当作本地时间补上 tz；aware → 统一转 UTC。认不出返回 None。"""
+    if dt is None:
+        return None
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_local_tz())
+    return dt.astimezone(timezone.utc)
 
 
 # ==================================================================
@@ -220,6 +244,52 @@ def _table_columns(conn, table: str) -> set:
         return set()
 
 
+def _migrate_line_ids(conn) -> None:
+    """
+    把历史库里**不在 LineId 语法内**的 ID（`ch01.0002~2` …）重新发号。
+
+    为什么必须迁（2026-10-23，清单 §三）：`~N` 是旧版「两句都留」发明的主键
+    后缀，`line_identity.parse()` 认不出 → 所有按 ID 前缀取章节的下游都
+    退化成 `start`，翻译 / 语音 key 也会带着这个非法字符一直走下去。
+    迁移只动 `beats.line_id` 与 payload 里那份 `LineId`；`audit` 是历史记录，
+    不改写（它记的是"当时那一行的 ID"，改了就篡改审计）。
+
+    幂等：只处理 `parse()` 失败的行；合法 ID 一个都不动。顺序按
+    `label, seq, line_id`，保证迁移后同一章里的相对顺序不变。
+    """
+    from storygraph.story.line_identity import allocate, parse
+
+    rows = conn.execute(
+        'SELECT line_id, label, seq, payload FROM beats '
+        'ORDER BY label, seq, line_id').fetchall()
+    if not rows:
+        return
+    bad = [r for r in rows if parse(r['line_id']) is None]
+    if not bad:
+        return
+    used = {str(r['line_id']) for r in rows
+            if parse(r['line_id']) is not None}
+    for row in bad:
+        old = str(row['line_id'] or '')
+        got = parse(old)
+        label = str(row['label'] or '') or (got[0] if got else '')
+        new = allocate(used, label)
+        while new in used:
+            used.add(new)
+            new = allocate(used, label)
+        used.add(new)
+        try:
+            payload = json.loads(row['payload'] or '{}')
+        except (TypeError, ValueError) as e:        # noqa: BLE001 - 坏 payload 不拖垮迁移
+            swallow('collab_store.migrate_line_ids.payload', e)
+            payload = {}
+        if isinstance(payload, dict):
+            payload['LineId'] = new
+        conn.execute(
+            'UPDATE beats SET line_id=?, payload=? WHERE line_id=?',
+            (new, json.dumps(payload, ensure_ascii=False), old))
+
+
 def _migrate_schema(conn) -> None:
     """
     schema 2 → 3 的**增量迁移**（幂等）。
@@ -257,6 +327,8 @@ def connect(db_path, write: bool = False):
             # 先把写锁拿到手：DDL 之后、任何"读-改-写"之前。
             conn.execute('BEGIN IMMEDIATE')
         _migrate_schema(conn)
+        # 数据值迁移（不新增列，所以不占 schema 版本号）：历史 `~N` ID → 合法 ID。
+        _migrate_line_ids(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),))
@@ -459,12 +531,19 @@ def _can(role: str, action: str) -> bool:
 # ==================================================================
 
 def _parse_ts(value):
-    """ISO 时间串 → datetime（认不出返回 None；只用于租约判断）。"""
+    """
+    ISO 时间串 → **aware UTC datetime**（认不出返回 None）。
+
+    老库里的时间戳没有时区后缀（旧版 `_now()` 写的是本地时间）—— 这里
+    显式当**本地时间**解释，再转 UTC。这样：
+      · 老库升级后不会因为 naive vs aware 相减直接抛 `TypeError`；
+      · 同一台机器上的旧租约按原来的时钟解释，不会凭空多/少几个小时。
+    """
     text = str(value or '').strip()
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text)
+        return _as_aware(datetime.fromisoformat(text))
     except (TypeError, ValueError):
         return None
 
@@ -496,7 +575,7 @@ def lock_state(row, now=None) -> dict:
 
     `expires_in` 为负 = 已过期；None = 不知道（没有时间戳）。
     """
-    now = now or datetime.now()
+    now = _as_aware(now) if now is not None else datetime.now(timezone.utc)
     owner = str((row or {})['locked_by'] or '') if row else ''
     if not owner:
         return {'locked': False, 'owner': '', 'until': '',
@@ -1603,13 +1682,30 @@ def _keep_both(conn, lid, row, mine, theirs, order, actor):
 
 
 def _unique_line_id(conn, lid: str) -> str:
-    """给"两句都留"的新行找个没人用的 LineId（`ch01.0002~2`、`~3`…）。"""
-    for i in range(2, 100):
-        cand = f'{lid}~{i}'
-        got = conn.execute('SELECT 1 FROM beats WHERE line_id=?', (cand,)).fetchone()
-        if got is None:
-            return cand
-    return f'{lid}~{_now().replace(":", "")}'
+    """
+    给"两句都留"的新行找一个没人用的 LineId。
+
+    ⚠ 2026-10-23（清单 §三）：这里从前返回 `ch01.0002~2` / `~3` ——
+    那不在 `line_identity.LINE_ID_RE` 的语法里，全项目解析器都不认；
+    两条 `~2` 撞车后 `unique_ids` 会把章名退化成 `start`。
+    现在只走**唯一发号实现** `line_identity.allocate`：
+    新号 = 该 label 现有最大值 + 1，不撞车、不需要后缀携带"从哪分出来"的信息。
+    （"从哪一行分出来"属于载荷，不属于主键。）
+    """
+    from storygraph.story.line_identity import allocate, parse
+
+    got = parse(lid)
+    label = got[0] if got else ''
+    if not label:
+        row = conn.execute('SELECT label FROM beats WHERE line_id=?',
+                           (lid,)).fetchone()
+        label = str(row['label'] or '') if row is not None else ''
+    used = {str(r[0]) for r in conn.execute('SELECT line_id FROM beats')}
+    new = allocate(used, label)
+    while new in used:                       # `allocate` 已跳过，这里是双保险
+        used.add(new)
+        new = allocate(used, label)
+    return new
 
 
 def _resolve_insert(conn, res, local, actor) -> dict:
@@ -1811,7 +1907,7 @@ def _lease_until(ttl=None) -> tuple:
     """`(现在, 到期时间 ISO)` —— 租约时长的**唯一算法**。"""
     seconds = int(ttl or LOCK_LEASE_SECONDS)
     seconds = max(60, seconds)                 # 低于 1 分钟的租约没有意义
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     return now, (now + timedelta(seconds=seconds)).isoformat(timespec='seconds')
 
 

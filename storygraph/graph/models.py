@@ -5,6 +5,20 @@ from storygraph.core.statement import (is_code_statement, operation_source,
                                        python_operation)
 
 
+#: 一条边的**落点**（2026-10-24，P0）。
+#:
+#: 从前边只有"从谁到谁"，没有"写进剧本的哪一拍"。用户要在图上接线时，
+#: 唯一能选的就是章末；这个字段先把位置变成**边自己的属性**，P1 再接
+#: "第 N 拍"选择器。对**源边**（`origin='source'`）它由 `line_id` 派生，
+#: 不另存一份真源；对**草图**它记录"打算写在哪"，默认章末。
+POSITION_CHAPTER_END = 'chapter_end'
+POSITION_BEAT = 'beat'
+#: 章末接在**编排层**（`X_control`）里，章节源文件一个字不动（P2）。
+POSITION_CONTROL_END = 'control_end'
+#: 这条边是**编排层路由**（不是章节源文件里的那一行）。
+ORIGIN_CONTROL = 'control'
+
+
 class Node:
     """
     剧情图上的一个模块（= 一个 label）。
@@ -95,15 +109,17 @@ class Node:
 class Edge:
     def __init__(self, edge_id, from_id, to_id, etype="jump", condition="",
                  option_text="", from_clause="", origin="source",
-                 line_id=""):
+                 line_id="", position="", position_line_id=""):
         self.id = edge_id
         #: 这条边**从哪来**（2026-10-22 第二阶段）：
         #:
         #:   · `source` —— 源文件里的 `jump` / `call`（解析出来的）；
-        #:   · `manual` —— 用户在图上画的草图。
+        #:   · `manual` —— 用户在图上画的草图；
+        #:   · `control` —— P2 写进编排层（`X_control`）的路由，章节源文件
+        #:     里没有这一行，但导出控制流时会按它生成。
         #:
         #: 为什么要分：第二阶段要让"图边从 flow 拍派生"（删双真源）。
-        #: 不分来源的话，重建 `source` 边时会把用户画的草图一起删掉 ——
+        #: 不分来源的话，重建 `source` 边时会把用户画的草图和编排线一起删掉 ——
         #: 那是"工具吃掉用户的动作"，比双真源更糟。
         self.origin = str(origin or 'source')
         #: 这条边对应**哪一拍**（`Beat.line_id`，如 `ch01.0007`）。
@@ -126,6 +142,27 @@ class Edge:
         #: 靠它区分存档属于哪一处调用。丢了它，导出的脚本语义等价但**存档
         #: 兼容性变了**（老存档会因为找不到 `_call_xxx` 而回滚到上一个 label）。
         self.from_clause = from_clause
+        #: 这条线**打算写在哪**（P0，2026-10-24）：
+        #:
+        #:   · `chapter_end`（默认）—— 章末：`return` 之前 / 最后一句之后；
+        #:   · `beat` —— 指定某一拍（P1 的选择器接进来；现在只有源边会用它）。
+        #:
+        #: 源边的真位置仍然由 `line_id` 决定，这里只是**声明的落点**；
+        #: 草图的落点没有对应的拍，必须靠这个字段记住，转正时才知道往哪写。
+        raw_position = str(position or '').strip()
+        if raw_position:
+            self.position = raw_position
+        elif self.origin == 'source' and self.line_id:
+            # 解析器 / 派生器建的源边：它本来就在某一拍上，别再谎称章末。
+            self.position = POSITION_BEAT
+        elif self.origin == ORIGIN_CONTROL:
+            self.position = POSITION_CONTROL_END
+        else:
+            self.position = POSITION_CHAPTER_END
+        #: `position='beat'` 时具体是哪一拍（`Beat.line_id`）；空 = 还没定。
+        self.position_line_id = str(
+            position_line_id
+            or (self.line_id if self.position == POSITION_BEAT else ''))
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -140,6 +177,8 @@ class Edge:
         result.from_clause = getattr(self, 'from_clause', '')
         result.origin = getattr(self, 'origin', 'source')
         result.line_id = getattr(self, 'line_id', '')
+        result.position = getattr(self, 'position', POSITION_CHAPTER_END)
+        result.position_line_id = getattr(self, 'position_line_id', '')
         return result
 
 class Graph:
@@ -186,11 +225,12 @@ class Graph:
 
     def add_edge(self, from_id, to_id, etype="jump", condition="",
                  option_text="", from_clause="", origin="source",
-                 line_id=""):
+                 line_id="", position="", position_line_id=""):
         eid = self.next_edge_id
         self.next_edge_id += 1
         edge = Edge(eid, from_id, to_id, etype, condition, option_text,
-                    from_clause, origin=origin, line_id=line_id)
+                    from_clause, origin=origin, line_id=line_id,
+                    position=position, position_line_id=position_line_id)
         self.edges[eid] = edge
         return eid
 

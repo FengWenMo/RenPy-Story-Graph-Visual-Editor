@@ -27,6 +27,12 @@ PySide6 没装怎么办
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+# 同 `main_qt`：允许 `python storygraph/main.py` 直接跑。根目录 `main.py`
+# 已经垫过路径；这里兜的是"从包里那个文件启动"的用法。
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from storygraph.core.safeguard import swallow
 

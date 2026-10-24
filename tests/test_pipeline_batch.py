@@ -838,7 +838,8 @@ class TestBuildCommand:
         assert r.ok
         assert any(a.endswith('.rpy') for a in r.artifacts)
         assert (project / 'out' / 'build_report.json').exists()
-        assert r.report['build']['stats']['lines'] == 1
+        # 一句台词 + 一条 return（2026-10-23 起 return 是模型内的控制流语句）
+        assert r.report['build']['stats']['lines'] == 2
 
     def test_build_unity_writes_contract(self, project):
         from storygraph.pipeline.build import build_project
@@ -980,7 +981,8 @@ class TestHealthEntry:
             'label start:\n    e "hi"\n    return\n', encoding='utf-8')
         collected = collect_report(proj)
         assert collected['report'].ok
-        assert len(collected['beats']) == 1
+        # 一句台词 + 一条 return 拍（return 不再被静默丢掉）
+        assert len(collected['beats']) == 2
         # 没写任何产物
         assert not (proj / 'build_out').exists()
 

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
 from storygraph.core.vocabulary import RESERVED_STATEMENT_KEYWORDS
+from storygraph.core.indent import indent_prefix, indent_width
 import difflib
 import re
 from collections import Counter
@@ -156,11 +157,6 @@ def _body(line: str) -> str:
     return (line or '').lstrip(' \t')
 
 
-def _indent_of(line: str) -> str:
-    line = line or ''
-    return line[:len(line) - len(line.lstrip(' \t'))]
-
-
 def _insert_anchor(lines: list, at: int) -> tuple:
     """
     把"插到第 `at` 行之后"修正成**结构安全**的落点：`(at, pad_hint|None)`。
@@ -190,13 +186,13 @@ def _insert_anchor(lines: list, at: int) -> tuple:
         # 缩进交给调用方的老规矩（借下一行）。
         return at, None
     outer = at - 1
-    cur = len(_indent_of(lines[outer]))
+    cur = indent_width(lines[outer])
     j = at - 2
     while j >= 0:
         ln = str(lines[j])
         if not ln.strip():
             break
-        ind = len(_indent_of(ln))
+        ind = indent_width(ln)
         if ind >= cur:
             # 同级（另一个选项）或更深（上一个选项的块体）：都还在同一个
             # 包围块里 → 继续往上找
@@ -208,17 +204,37 @@ def _insert_anchor(lines: list, at: int) -> tuple:
         outer = j
         cur = ind
         j -= 1
-    base = len(_indent_of(lines[outer]))
+    base = indent_width(lines[outer])
     i = outer + 1
     while i < len(lines):
         ln = str(lines[i])
         if not ln.strip():
             break                        # 空行 = 块结束（不吞掉分隔空行）
-        if len(_indent_of(ln)) > base:
+        if indent_width(ln) > base:
             i += 1
             continue
         break
-    return i, _indent_of(lines[outer])
+    return i, indent_prefix(lines[outer])
+
+
+def _ends_with_colon(line: str) -> bool:
+    """这一行是块头吗（`menu:` / `"选项":` / `if …:`）？注释不算。"""
+    body = str(line or '').strip()
+    return bool(body) and body.endswith(':') and not body.startswith('#')
+
+
+def _body_pad(lines: list, at: int, indent: str) -> str:
+    """
+    "插进块体"时新行该用哪一级缩进：`at` 是块头行的**下一个**下标。
+
+    体里已经有语句 → 借它的缩进（它才是这个项目真用的缩进风格）；
+    体是空的（下一个选项已经在同级）→ 块头缩进 + 一级。
+    """
+    head = lines[at - 1] if at >= 1 else ''
+    nxt = lines[at] if 0 <= at < len(lines) else ''
+    if str(nxt).strip() and indent_width(nxt) > indent_width(head):
+        return indent_prefix(nxt)
+    return indent_prefix(head) + indent
 
 
 def _norm(line: str) -> str:
@@ -533,8 +549,20 @@ def _set_insert_point(beat, prev_src, nxt_src=None, inserted_out: list = None,
 #: `'file "c:\\a.py", line 24'`（单引号包、内部双引号不转义），
 #: 生成器写成 `"file \"c:\\\\a.py\", line 24"` —— 只认双引号时这两行
 #: 「身份」不同 → 配不上对 → 生成的那行被当成**新内容插进去**，文件里就多一句。
+#:
+#: ⚠⚠ **说话人不许只认 ASCII**（2026-10-24 修 P0-3）。从前是
+#: `[A-Za-z_][\w.]*`，于是 `凌跃捷 "台词"` / `リン "台詞"` 匹配不上 →
+#: `_line_key` 落到 `('other', 原文)` → **改了正文键就变了** → 补丁认为
+#: "这是新内容"，插入新行；旧行的键也不匹配了，被当未知块留下 →
+#: **改一句台词多一行**，而且每导出一次再长一行（实测 3→4→5）。
+#: 解析器一直认中文说话人（Ren'Py 基于 Python 3，标识符可以是 Unicode），
+#: 只有补丁这一侧不认 —— 典型的两套口径。
+#:
+#: `[^\W\d]` = 字母或下划线（`\w` 在 Python 3 默认 Unicode）；点号分段保留
+#: （`ch.林`）。与 `beat_model._RE_SAY_WHO` **必须同源**，改一处就要改两处。
 _SAY_RE = re.compile(
-    r'^(?P<who>[A-Za-z_][\w.]*)?\s*(?P<q>"|\')(?P<body>.*)(?P=q)$')
+    r'^(?P<who>[^\W\d]\w*(?:\.[^\W\d]\w*)*)?\s*'
+    r'(?P<q>"|\')(?P<body>.*)(?P=q)$')
 #: 舞台/音频行：动词 + 目标
 #:
 #: ⚠ `voice` 必须在这里（2026-10-05 修 p0）：它**不在**列表里时
@@ -610,6 +638,12 @@ def _content_of(line: str) -> str:
     return _strip_comment(line or '')
 
 
+def _is_comment_line(line: str) -> bool:
+    """整行只是一条注释？（行尾注释属于它前面那条语句，不算）"""
+    s = (line or '').strip()
+    return bool(s.startswith('#')) and not _content_of(s).strip()
+
+
 def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
     """
     配对用的身份键（见 `_replace_matched` 的说明）。
@@ -651,6 +685,13 @@ def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
         chan = _CHAN_RE.match(rest.strip())
         if chan:
             return (verb, chan.group('chan'))
+        if verb == 'voice':
+            # `voice` 的"目标"是资产路径，正是用户会改的那一位（和 BGM 一样）。
+            # 旧键把路径算进身份：`voice "a.ogg"` 改 `b.ogg` 后配不上对，
+            # 生成行被当"新内容"**插进去**、旧行还留着 —— 同一拍两条 `voice`
+            # （`test_writeback_fidelity` 的 Voice 用例复现；当时只断言"新值在"
+            # 所以没红）。一圈只有一条 `voice`，身份 = 关键字本身。
+            return (verb, '')
         # 目标**去掉引号**再当身份：`voice v_ling_01` 与 `voice "v_ling_01"`
         # 是同一件事（生成器会补引号）—— 不归一的话它们配不上对，
         # 生成器那行会被当"新内容"插进去 → 文件里多一条 `voice`。
@@ -780,6 +821,16 @@ def _same_thing_unless_rewritten(old_body: str, new_body: str,
             return True                      # 图像名没变，只是属性/位置变了
         # 词数差 1 且逐词下划线压缩 → 是生成器的"规范化"，不是作者的改动
         return len(tok_old) == len(tok_new)
+    # **音频行**（2026-10-24 修）：`play music "a"` → `"b"` / `voice a` → `b`
+    # 就是"在卡片上换一首 BGM"最普通的一刀。身份键已经只含通道（`('play',
+    # 'music')`），配上了对就该允许换目标 —— 从前这里对音频一律 return False，
+    # 于是补丁报告"成功"、文件里还是旧音乐（`test_writeback_fidelity` 的
+    # BGM/SFX 两条当场红）。`voice` 同理（键 = 关键字）。
+    if kind in ('play', 'queue', 'stop', 'voice'):
+        # 只在行号已证明新鲜时换目标：源文件被外部改过（整体错位）时，
+        # 同一通道的两条 `play music` 可能分属相邻两拍，按通道配对会改错行。
+        # 编辑器/表格两条正常路径都会带 `trust_ranges`。
+        return relax_speaker and _line_key(old_body) == _line_key(new_body)
     return False
 
 
@@ -985,6 +1036,9 @@ def _head_of(body: str) -> tuple:
     m = _VERB_RE.match(bare)
     if m:
         rest = m.group('rest').split()
+        if m.group('verb') == 'voice':
+            # 与 `_line_key` 同口径：`voice` 的身份是关键字，不是那串路径。
+            return (m.group('verb'), '')
         return (m.group('verb'),
                 rest[0].strip('"\'') if rest else '')
     m = _SAY_RE.match(bare)
@@ -1102,7 +1156,7 @@ def _flat_editable_range(old_lines: list) -> bool:
             continue
         if _BLOCK_HEAD_RE.match(_norm(ln)) or body.endswith(':'):
             return False
-        indents.add(_indent_of(ln))
+        indents.add(indent_prefix(ln))
     return len(indents) <= 1
 
 
@@ -1163,10 +1217,14 @@ def _rewrite_line(old_line, pick, relax_speaker):
     # 以前代码行只和逐字相同的行配对，改一个数字就配不上 →
     # 新内容既不落地也不报错（`$` 不属于内容行）→ **静默保持旧代码**。
     if body.startswith('$') and _norm(pick).startswith('$'):
-        return _indent_of(old_line) + _norm(pick), True
+        return indent_prefix(old_line) + _norm(pick), True
+    # 纯注释行：内容就是注释文字（`_line_key` 对注释是逐字比，所以只有
+    # 上面那条"行号已证明新鲜 + 两边各一条"的槽位配对才会走到这里）。
+    if _is_comment_line(body) and _is_comment_line(pick_body):
+        return indent_prefix(old_line) + _norm(pick), True
     if not _same_thing_unless_rewritten(body, pick, relax_speaker):
         return old_line, False            # 不是"同一件事" → 不许换
-    return _indent_of(old_line) + _norm(pick), True   # 缩进只来自原文
+    return indent_prefix(old_line) + _norm(pick), True   # 缩进只来自原文
 
 
 def _is_new_content_row(body: str, old_heads, old_squash, file_squash,
@@ -1338,6 +1396,28 @@ def _replace_matched(old_lines: list, gen_bodies: list,
         pick_of_old[_j] = _idx
         slot_pairs.add(_idx)
 
+    # —— ②' 注释行：**只在行号已证明新鲜时**做 1:1 槽位配对 ——
+    #
+    # 注释的身份就是它的文字（`('other', 原文)`），所以"改一句注释"配不上对
+    # → 生成行被当新内容**插进去**、旧行又不许删 → 文件里多一条旧注释
+    # （`test_writeback_fidelity` 的 Comment 用例：行数 +1）。
+    # 但注释不能像台词那样无条件放宽：源文件整体错位一行时，`# 开场注释`
+    # 会正好落到下一条注释 `# 该谁说话了` 的区间里 —— 按"同槽位"改写就是
+    # 把别人的注释冲掉（`test_stale_ranges_never_change_the_file` 抓到的正是
+    # 这个）。所以只认 `relax_speaker`（= 会话核对过"磁盘上那份 == 载入时
+    # 那份"）这一条路，并且**两边都恰好一条注释**才敢配。
+    if relax_speaker:
+        old_c = [j for j, ln in enumerate(old_lines)
+                 if j not in pick_of_old and _is_comment_line(ln)]
+        gen_c = [i for i in range(len(gen_bodies))
+                 if i not in used and _is_comment_line(gen_bodies[i])]
+        if len(old_c) == 1 and len(gen_c) == 1:
+            _j, _idx = old_c[0], gen_c[0]
+            used.add(_idx)
+            pair_of_gen[_idx] = _j
+            pick_of_old[_j] = _idx
+            slot_pairs.add(_idx)          # 允许 `_rewrite_line` 换内容
+
     out: list = []
     changed = 0
     grown = 0
@@ -1380,7 +1460,7 @@ def _replace_matched(old_lines: list, gen_bodies: list,
                 if not _is_new_content_row(body, old_heads, old_squash,
                                            file_squash, old_lines):
                     continue
-                pad = _indent_of(old_lines[0]) if old_lines else ''
+                pad = indent_prefix(old_lines[0]) if old_lines else ''
                 out.append(pad + body)
                 landed_idx.add(idx)
                 grown += 1
@@ -1914,9 +1994,20 @@ def _insert_points_for(beats, insert_ids, raw_gen: dict) -> tuple:
     `raw_gen` 是 `{拍序号: 已渲染的行}`（`patch_export` 算好的），
     返回的字典里同一锚点上有多张卡片时按拍序排好。
 
-    返回 `(anchors, failed)`。
+    **`into_body`（2026-10-23）**：锚点是**块头**、而这一拍在模型里
+    **就在某个选项体里**（`nest_path` 含 `>`，如 `menu:1>A`）时，插到这个
+    选项的体里，不要退到块外。
+    实测：选项头 `"去屋顶":` 后面插一张 `call roof`，模型放进选项体
+    （`nest_path='menu:1>A'`）、全量渲染也在体里，补丁却把它退到 `menu:`
+    之后、和选项同级 —— 语法合法、语义已经改了，还报 `ok=True`。
+    `_insert_anchor` 那条"退到最外层包围块"的规矩是给**选项体的兄弟卡**
+    用的（`tests/test_incremental_export.py::TestInsertIntoBlockStaysStructurallyValid`），
+    两类不能共用一条。
+
+    返回 `(anchors, failed, into_body)`。
     """
     anchors: dict = {}
+    into_body: set = set()
     failed = 0
     for i in sorted(insert_ids):
         point = int(getattr(beats[i], 'insert_anchor', 0) or 0) or \
@@ -1931,7 +2022,14 @@ def _insert_points_for(beats, insert_ids, raw_gen: dict) -> tuple:
             failed += 1                       # 有内容却没有锚点（文件头？）→ 不能安全插
             continue
         anchors.setdefault(point, []).append(rows)
-    return anchors, failed
+        nest = str(getattr(beats[i], 'nest_path', '') or '').strip()
+        # **只认"选项体里"这一种**（`menu:1>A`）：模型把这一拍放进了某个选项的
+        # 体里。`menu:1`（菜单层、还不属于任何选项）不在此列 —— 那种状态的
+        # 整份渲染本身就会写出 `# TODO` + 非法行（见 `beat_render`），补丁这边
+        # 保持老规矩"退到块外"，至少产物是能读的。
+        if '>' in nest:
+            into_body.add(point)
+    return anchors, failed, into_body
 
 
 def _deletion_empties_block(orig_lines: list, first: int, last: int) -> bool:
@@ -1967,14 +2065,14 @@ def _deletion_empties_block(orig_lines: list, first: int, last: int) -> bool:
     head = orig_lines[idx]
     if not _content_of(_norm(head)).rstrip().endswith(':'):
         return False
-    head_ind = len(_indent_of(head))
-    if head_ind >= len(_indent_of(orig_lines[first - 1])):
+    head_ind = indent_width(head)
+    if head_ind >= indent_width(orig_lines[first - 1]):
         return False                       # 上一行不是这一段的"父块头"
     for j in range(first - 1, len(orig_lines)):
         ln = orig_lines[j]
         if _transparent(ln):
             continue                       # 空行 / 注释救不了空块
-        if len(_indent_of(ln)) <= head_ind:
+        if indent_width(ln) <= head_ind:
             return True                    # 块已经结束，里面一行都不剩
         if not (first - 1 <= j <= last - 1):
             return False                   # 还有别的块体行活着
@@ -2003,7 +2101,7 @@ def _branch_head_for(orig_lines: list, first: int) -> tuple:
     body = _content_of(_norm(head)).strip()
     if not body.endswith(':'):
         return None, ''
-    if len(_indent_of(head)) >= len(_indent_of(orig_lines[first - 1])):
+    if indent_width(head) >= indent_width(orig_lines[first - 1]):
         return None, ''
     m = re.match(r'^(if|elif|else)\b', body)
     if m:
@@ -2020,13 +2118,13 @@ def _next_sibling(orig_lines: list, head_no: int, last: int):
     "兄弟" = 缩进与块头相同的第一行；缩进更浅 = 块结束。空行与注释跳过
     （它们不属于任何一层）。
     """
-    head_ind = len(_indent_of(orig_lines[head_no - 1]))
+    head_ind = indent_width(orig_lines[head_no - 1])
     for n in range(last + 1, len(orig_lines) + 1):
         line = orig_lines[n - 1]
         body = _norm(line).strip()
         if not body or body.startswith('#'):
             continue
-        ind = len(_indent_of(line))
+        ind = indent_width(line)
         if ind == head_ind:
             return n
         if ind < head_ind:
@@ -2056,7 +2154,7 @@ def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
     改写后的条件里可能还留着"已经被删掉的分支"的否定（`not (breakline == 2)`）
     —— 那是恒真的冗余项，语义不变；下一次全量导出会把条件重新算干净。
     """
-    head_ind = len(_indent_of(orig_lines[head_no - 1]))
+    head_ind = indent_width(orig_lines[head_no - 1])
     out = []
     n = last + 1
     while n <= len(orig_lines):
@@ -2065,7 +2163,7 @@ def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
         if not body or body.startswith('#'):
             n += 1
             continue
-        ind = len(_indent_of(line))
+        ind = indent_width(line)
         if ind < head_ind:
             break
         if ind == head_ind:
@@ -2083,7 +2181,7 @@ def _chain_head_rewrites(blocks, orig_lines: list, head_no: int,
                               if re.match(r'^if\b', _norm(g))), '')
             if not cond_line:
                 return None               # 找不到那一拍 → 不猜
-            out.append((n, _indent_of(line) + cond_line))
+            out.append((n, indent_prefix(line) + cond_line))
             n = first_body
             continue
         n += 1
@@ -2122,7 +2220,7 @@ def _plan_branch_deletion(orig_lines: list, first: int, last: int,
         if not claimed:
             return None                   # 选项头不是这一拍的：形状不认识
         # 选项头留着（它是一拍），体换成 `pass`（缩进借原体第一行）
-        pad = _indent_of(orig_lines[first - 1])
+        pad = indent_prefix(orig_lines[first - 1])
         return {'sub': (first, last, [pad + 'pass'])}
     if claimed:
         return None                       # 块头属于别的拍 → 不动它
@@ -2213,7 +2311,8 @@ def _plan_deletions(dropped_src, blocks, orig_lines) -> tuple:
 
 def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
                           indent: str, subs=(), rewrites=(),
-                          removed_out: list = None) -> tuple:
+                          removed_out: list = None,
+                          into_body=()) -> tuple:
     """
     插入 + 删除 + 整段替换**一起按位置从后往前**做（先动后面的行，前面的
     行号才不受影响）。返回 `(inserted_lines, removed_lines, replaced_lines)`。
@@ -2233,6 +2332,10 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
         （不带基础缩进）。替换路径之所以看着没问题，是因为
         `_replace_matched` 保留原文那一行的缩进；插入没有"原文行"可依，
         只能借**锚点行**的缩进（新卡片在结构上就是锚点的兄弟节点）。
+
+    `into_body`（2026-10-23）：这些锚点上的新拍**本来就该在块体里**
+    （见 `_insert_points_for`）—— 紧贴块头插、缩进比块头深一级。
+    这与上一条"退到块外"是两种拍，不能共用一条规矩。
     """
     inserted_lines = 0
     removed_lines = 0
@@ -2252,6 +2355,7 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
         # 同一锚点上的多张新卡片保持拍序（`rows` 是"每张卡片的行"的列表）
         flat = [ln for group in rows for ln in group]
         ops.append((point, 1, point, point, flat))
+    into_body = {int(x) for x in (into_body or ()) if x}
     for _pos, kind, a, b, rows in sorted(ops, reverse=True,
                                         key=lambda t: (t[0], t[1])):
         if kind == 0:
@@ -2274,17 +2378,22 @@ def _apply_sequence_edits(out_lines: list, delete_ranges, anchors,
             replaced_lines += sum(1 for x, y in zip(old_rows, rows) if x != y)
         else:
             at = max(0, min(a, len(out_lines)))
-            # **锚点是块头**时不能紧贴着插（见 `_insert_anchor` 的 docstring）
-            at, pad_hint = _insert_anchor(out_lines, at)
-            if pad_hint is not None:
-                pad = pad_hint
+            if a in into_body and at >= 1 and _ends_with_colon(out_lines[at - 1]):
+                # 这一拍在模型里**就在块体里**（`nest_path` 非空）→ 紧贴着
+                # 块头插、缩进比块头深一级；不许退到块外（见 `_insert_points_for`）。
+                pad = _body_pad(out_lines, at, indent)
             else:
-                pad = _indent_of(out_lines[at - 1]) if at >= 1 else ''
-            if not pad:
-                # 锚点是 `label` / 注释这类顶层行 → 用**下一行**的缩进，
-                # 否则顶格写出来的台词会把文件结构读坏。
-                nxt_line = out_lines[at] if 0 <= at < len(out_lines) else ''
-                pad = _indent_of(nxt_line) or indent
+                # **锚点是块头**时不能紧贴着插（见 `_insert_anchor` 的 docstring）
+                at, pad_hint = _insert_anchor(out_lines, at)
+                if pad_hint is not None:
+                    pad = pad_hint
+                else:
+                    pad = indent_prefix(out_lines[at - 1]) if at >= 1 else ''
+                    if not pad:
+                        # 锚点是 `label` / 注释这类顶层行 → 用**下一行**的缩进，
+                        # 否则顶格写出来的台词会把文件结构读坏。
+                        nxt_line = out_lines[at] if 0 <= at < len(out_lines) else ''
+                        pad = indent_prefix(nxt_line) or indent
             out_lines[at:at] = [pad + ln for ln in rows]
             inserted_lines += len(rows)
     return inserted_lines, removed_lines, replaced_lines
@@ -2491,7 +2600,7 @@ def _menu_shaped_lines(lines: list, info: dict) -> list:
     return lines
 
 
-def _render_blocks(beats: list, indent: str, audit):
+def _render_blocks(beats: list, audit):
     """
     每一拍 → `(序号, 起始行, 结束行, 归一化后的生成行, Beat)`。
 
@@ -2513,8 +2622,7 @@ def _render_blocks(beats: list, indent: str, audit):
         info = view.get(i, {})
         target = info.get('beat', b)
         try:
-            lines = [ln for ln in render_beat_to_rpy(target, indent=indent,
-                                                     audit=audit)
+            lines = [ln for ln in render_beat_to_rpy(target, audit=audit)
                      if str(ln).strip()]
             lines = _menu_shaped_lines(lines, info)
         except Exception as e:                    # noqa: BLE001
@@ -2777,7 +2885,7 @@ def patch_export(beats: list, source_path, generated_text: str,
 
     orig_lines = original.splitlines()
     out_lines = list(orig_lines)
-    blocks, raw_gen = _render_blocks(beats, indent, audit)
+    blocks, raw_gen = _render_blocks(beats, audit)
 
     # 一个"渲染得出内容"的拍都没有 —— 与上面 `not beats` 是同一件事。
     #
@@ -2892,12 +3000,13 @@ def patch_export(beats: list, source_path, generated_text: str,
     delete_ranges, delete_subs, delete_rewrites, delete_failed = \
         _plan_deletions(dropped_src, st.blocks, st.orig_lines)
     # 新增的拍 → 插入点（锚点见 `_insert_points_for` 的 docstring）
-    anchors, insert_failed = _insert_points_for(beats, st.insert_ids, raw_gen)
+    anchors, insert_failed, insert_into_body = _insert_points_for(
+        beats, st.insert_ids, raw_gen)
     # 插入 + 删除一起按位置**从后往前**做（先动后面的行，前面行号才不漂）
     inserted_lines, removed_lines, replaced_lines = _apply_sequence_edits(
         st.out_lines, delete_ranges, anchors, indent,
         subs=delete_subs, rewrites=delete_rewrites,
-        removed_out=removed_preview)
+        removed_out=removed_preview, into_body=insert_into_body)
     st.changed += (inserted_lines + removed_lines + replaced_lines
                    + st.grown_total + st.shrunk_total)
 
@@ -2944,6 +3053,17 @@ def patch_export(beats: list, source_path, generated_text: str,
         # → 走不进整体校验；而条件又不是"生成的一行" → 第三条判据也看不见它。
         # 结果就是 `ok=True`、条件没改（静默 no-op）。
         reasons.extend(_verify_conditions(text, beats))
+
+    # **覆盖率不足也必须说话**（2026-10-23）：从前 `ok` 会因为 coverage < 0.9
+    # 变成 False，而 `reasons` 仍是空列表 —— 调用方只拿到"失败，没原因"。
+    # 这里补一条人能看懂的理由；`PatchResult.ok` 仍然按同一条门槛判。
+    base = max(0, pending - len(st.insert_ids))
+    if base > 0:
+        covered = st.matched / base
+        if covered < 0.9 and not any('对位率' in r for r in reasons):
+            reasons.append(
+                f'对位率不足（{st.matched}/{base} = {covered:.0%}，'
+                f'低于 90%）—— 源文件与表对不上，不能安全地增量写入')
 
     return PatchResult(text, source_path, st.matched, pending, st.changed,
                        stale_beats=st.stale,

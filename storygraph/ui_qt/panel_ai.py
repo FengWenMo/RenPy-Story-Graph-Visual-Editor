@@ -161,11 +161,13 @@ class AiPanel(QWidget):
         self.refresh()
 
     # ---------------- 闸门桥（子线程 ↔ 主线程）----------------
-    def _approve_bridge(self, tool, args, preview):
+    def _approve_bridge(self, tool, _args, preview):
         """
         子线程里被 agent 调用：把问题丢给主线程弹窗，然后**等**答案。
 
         ⚠ 必须等（不能默认放行）—— 默认放行就等于"AI 自己决定写盘"。
+        `_args` 是 agent 审批接口的一部分（它传参数给钩子），这里不读：
+        给用户看的是 preview，不是原始参数（清单 §十五）。
         """
         self._gate_wait.clear()
         self._gate_answer['value'] = False

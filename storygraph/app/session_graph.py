@@ -241,8 +241,16 @@ def rebuild_source_edges(graph, beats, allow_remove: bool = True) -> dict:
             retargeted += 1
         old.type = spec['type']
         old.from_clause = str(spec['from_clause'] or '')
+        if line and str(getattr(old, 'position', '') or '') != 'beat':
+            # 源边认领到拍之后，落点就是这一拍；老布局默认的 chapter_end
+            # 若不升级，P1 的边详情会把"第 N 拍"显示成"章末"。
+            old.position = 'beat'
+            old.position_line_id = line
         if line and str(getattr(old, 'line_id', '') or '') != line:
             old.line_id = line
+            # 源边换身份时落点也要跟着换 —— 否则 `position='beat'` 还指着
+            # 插卡前的旧 line_id，P1 的"边详情"会显示不存在的那一拍。
+            old.position_line_id = line
             identified += 1
 
     # 只删"认领过"的边：有 line_id 说明上一轮确实由某一拍派生出来，
@@ -314,7 +322,11 @@ def graph_from_layout_dict(data) -> 'object':
             # 老布局没有这一位 → 默认 `source`（那时候图里的边全部来自解析）
             str(ed.get('origin') or 'source'),
             # 老布局没有 line_id（那一版还没有"按拍对位"）
-            str(ed.get('line_id') or ''))
+            str(ed.get('line_id') or ''),
+            # 落点（P0，2026-10-24）：老文件没有 → 默认章末；源边会在
+            # Edge.__init__ 里按 line_id 自动认成 beat。
+            str(ed.get('position') or ''),
+            str(ed.get('position_line_id') or ''))
     nx = (data or {}).get('next_ids') or {}
     graph.next_node_id = int(nx.get('node')
                              or (max(graph.nodes) + 1 if graph.nodes else 1))
@@ -472,6 +484,10 @@ def layout_dict(graph) -> dict:
             'origin': getattr(e, 'origin', 'source'),
             # 对应哪一拍（同一 label 里多次 call 同一目标时靠它对位）
             'line_id': getattr(e, 'line_id', ''),
+            # 落点（P0，2026-10-24）：章末 / 指定拍。源边的真位置仍由
+            # line_id 决定，这里存的是"这条线声明的落点"，草图转正要用。
+            'position': getattr(e, 'position', 'chapter_end'),
+            'position_line_id': getattr(e, 'position_line_id', ''),
         } for eid, e in (getattr(graph, 'edges', {}) or {}).items()},
         'next_ids': {
             'node': int(getattr(graph, 'next_node_id', 1)),
@@ -583,7 +599,8 @@ class GraphSessionMixin:
         return {'ok': True, 'error': '', 'graph': graph,
                 'nodes': len(graph.nodes), 'edges': len(graph.edges),
                 'path': str(source)}
-    def export_control_flow(self, graph, target, wrapper=None) -> dict:
+    def export_control_flow(self, graph, target, wrapper=None,
+                            allow_overwrite: bool = False) -> dict:
         """
         把剧情图导出成 Ren'Py **控制流脚本**（`<label>_control` 那些 label）。
 
@@ -595,6 +612,10 @@ class GraphSessionMixin:
         `pipeline.renpy_exporter.export_to_renpy` **一直在**（旧版右栏
         「导出为Ren'Py（控制流图）」调的就是它），Qt 版从没接上而已。
         这里只做"调用 + 把结果变成结构化返回值"，不改它的生成规则。
+
+        `allow_overwrite=True`：用户已经在界面上**看过**那些"不像工具生成"
+        的行、并确认可以覆盖（P1-1）。它只越过"手写内容"这一条拦截，
+        缺章 / 外来 label 那两条永远不越过。
         """
         from storygraph.pipeline.renpy_exporter import export_to_renpy
         n_nodes = len(getattr(graph, 'nodes', {}) or {})
@@ -608,6 +629,25 @@ class GraphSessionMixin:
             return {'ok': False,
                     'error': f'导出路径不是路径：{target!r}（要给 .rpy 路径）',
                     'path': '', 'labels': [], 'count': 0}
+
+        # —— 导出前的守门（S3，2026-10-24）——
+        #
+        # `export_to_renpy` 是**按图整份重生成**、覆盖目标文件。而图里可能
+        # 只加载了项目的一部分章节 —— 那样写下去会把**别的章**在这个文件里的
+        # `_control` 整块抹掉，而且一句话都不说（实测：三章导出后再导两章，
+        # 第三章消失）。所以先算一次"会丢什么"，丢东西就**拒写**。
+        from storygraph.story.control_write import plan_control_write
+        plan = plan_control_write(self.project_root, graph, target,
+                                  wrapper=wrapper)
+        if not plan.ok:
+            if not (allow_overwrite and plan.forceable):
+                return {'ok': False,
+                        'error': '；'.join(plan.blocking),
+                        'path': str(target), 'labels': [], 'count': 0,
+                        'plan': plan.to_dict()}
+            # 用户确认过"这些手写行可以丢" —— 只越过这一条，别的拦截已由
+            # `forceable` 排除（缺章 / 外来 label 时它是 False）。
+
         try:
             artifact = export_to_renpy(graph, str(target), wrapper=wrapper,
                                        project_root=self.project_root)

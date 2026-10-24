@@ -91,11 +91,11 @@ class WindowExportMixin:
     #:
     #: `_reload_list`（2026-10-19，审计 P1-7 收尾）：从剧本表写回**本章**之后
     #: 要把左边卡片列表重建 —— 内存已经从磁盘重载，列表还挂着旧的行。
-    REQUIRES = ('_canvas', '_log', '_project_root', '_registry_provider',
-                '_reload_list', '_report_swallowed', '_session', '_status',
-                '_status_bar', '_swallow_mark', '_table_mtimes',
-                'apply_current_beat', 'autosave_clear', 'graph',
-                'resync_after_export')
+    REQUIRES = ('PAGE_CARD', '_canvas', '_log', '_project_root',
+                '_registry_provider', '_reload_list', '_report_swallowed',
+                '_session', '_status', '_status_bar', '_swallow_mark',
+                '_table_mtimes', 'apply_current_beat', 'autosave_clear',
+                'current_page', 'graph', 'resync_after_export')
 
     def export_script(self):
         """导出这一章（编译 + 增量补丁 + 安全门禁，全在会话里）。"""
@@ -106,7 +106,12 @@ class WindowExportMixin:
                          '（或点「✎ 直接编辑单章」）载入一章，再导出。')
             return
         mark = self._swallow_mark()
-        self.apply_current_beat()
+        # **只在卡片页提交表单**（2026-10-23）：结构页按 Ctrl+S 也会走到这里，
+        # 而卡片页隐藏时的"当前表单"可能是上一张卡的旧内容 —— 那会变成
+        # 一次用户看不见的写入（正是 `test_card_actions_are_disabled_...`
+        # 要防的那类事故）。
+        if self.current_page() == self.PAGE_CARD:
+            self.apply_current_beat()
         try:
             self._session.compile()
         except Exception as e:                  # noqa: BLE001
@@ -356,16 +361,21 @@ class WindowExportMixin:
             swallow('ui_qt.window_export.reload_after_write', e)
     def _source_rpy_for_table(self, table_path):
         """
-        增量补丁的底稿 .rpy。
+        增量补丁的底稿 .rpy —— **只看这张表自己**，不看画布选中态。
 
-        优先用**画布上当前章节**的源文件（最准：表可能被另存到别处）；
-        其次让 `app.tables` 退回"表旁边同名 .rpy"。
+        ⚠ 2026-10-23（清单 §十二）：从前这里优先用"画布上当前章节"的
+        `file_path`，而 `table_path` 参数一次都没读。于是用户选了 ch01.xlsx、
+        画布上恰好选中 ch02 的节点，写回目标就成了 `ch02.rpy`；报错还说的是
+        ch01 的 label —— 两个 UI 状态之间没有任何一致性检查，用户只能猜。
+
+        现在落点规则只有一条：**表旁边同名 `.rpy`**（`ch01.xlsx` →
+        `ch01.rpy`）。没有就返回 None（`app.tables` 会退回 `build/renpy/`，
+        不会往 game/ 里凭空多写一份）。用户想写别处，自己指定 `out_path`。
         """
-        nid = self._canvas.selected_node_id()
-        node = (self.graph.nodes or {}).get(nid) if self.graph else None
-        fp = getattr(node, 'file_path', None) if node else None
-        if fp and Path(fp).exists():
-            return Path(fp)
+        table_path = Path(table_path)
+        cand = table_path.with_suffix('.rpy')
+        if cand.exists() and not cand.name.endswith('.generated.rpy'):
+            return cand
         return None
     def _refresh_table_candidates(self, table_path):
         """

@@ -43,7 +43,10 @@ class TestKindIsFlow:
         beats = beats_from_parse_result(
             ParseResultBuilder().build(RenPyParser().parse(str(src))))
         kinds = [b.kind for b in beats if b.raw]
-        assert kinds == ['flow', 'flow'], kinds
+        # 2026-10-23：`return` 也是 flow 拍（清单 §九）—— 三张：
+        # call / jump / return。
+        assert kinds == ['flow', 'flow', 'flow'], kinds
+        assert [b.raw for b in beats if b.raw][-1] == 'return'
 
     def test_flow_still_renders_verbatim(self, tmp_path):
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,

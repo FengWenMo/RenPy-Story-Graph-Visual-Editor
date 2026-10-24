@@ -39,8 +39,26 @@ MAX_STEPS = 8
 #: 工具回执喂回模型前的**截断长度**（超了就截，并明说截了）
 RESULT_LIMIT = 6000
 
-#: **写盘类**工具（必须过闸门）
+#: **写盘类**工具（必须过闸门）。
+#:
+#: ⚠ 2026-10-23（清单 §十八）：判据不能再是 `if short == 'declare'` 这种
+#: **按名字硬编码**。工具会不会写盘，由它的**能力声明**回答：
+#: `mcp_surface.capabilities()` 里 `kind == 'write'`。这样加第二个写盘工具
+#: （比如 `table_export` 真做出来的那天）时，不用记得回来改这里。
 WRITE_TOOLS = frozenset({'declare', 'table_export'})
+
+
+def write_tool_names() -> frozenset:
+    """当前**声明为写盘**的工具名（来源：`capabilities()` 的 `kind='write'`）。"""
+    try:
+        from storygraph import mcp_surface as M
+        names = {str(t.get('name') or '').replace('storygraph_', '')
+                 for t in M.capabilities().get('tools', ())
+                 if str(t.get('kind') or '') == 'write'}
+        return frozenset(n for n in names if n)
+    except Exception as e:                  # noqa: BLE001 - 能力清单坏了也不能放行
+        swallow('ai.agent.write_tool_names', e)
+        return WRITE_TOOLS
 
 #: 一句话系统提示：**只说事实与边界**，不试图用提示词当护栏
 SYSTEM_PROMPT = (
@@ -105,7 +123,7 @@ def execute(name: str, args: dict, *, project_root, approve=None,
                 'reason': f'没有这个工具：{name}'}
     args = dict(args or {})
     args.setdefault('project_root', str(project_root or ''))
-    if short == 'declare':
+    if short in write_tool_names():
         approved = False
         args['dry_run'] = True                     # ← 先强制试算
         preview = fn(**args)
@@ -195,5 +213,6 @@ def run_agent(project_root, messages: list, cfg=None, *, transport=None,
             'reason': f'超过 {max_steps} 步上限'}
 
 
-__all__ = ['MAX_STEPS', 'RESULT_LIMIT', 'SYSTEM_PROMPT', 'WRITE_TOOLS', 'execute',
+__all__ = ['MAX_STEPS', 'RESULT_LIMIT', 'SYSTEM_PROMPT', 'WRITE_TOOLS',
+           'write_tool_names', 'execute',
            'run_agent', 'tool_specs']

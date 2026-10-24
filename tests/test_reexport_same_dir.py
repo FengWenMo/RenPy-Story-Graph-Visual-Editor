@@ -175,9 +175,14 @@ class TestEditThenExportAgain:
         rows = _read(out / NEUTRAL_IR_NAME)['lines']
         by_label = {}
         for row in rows:
-            by_label.setdefault(row['label'], []).append(row['text'])
-        assert by_label['ch01'][0] == '【第一章改过】'
-        assert by_label['ch02'] == ['第二章台词'], '重导第一章把第二章动了'
+            by_label.setdefault(row['label'], []).append(row)
+        assert by_label['ch01'][0]['text'] == '【第一章改过】'
+        # 2026-10-23：`return` 也是 IR 里的一行（kind=flow, raw=return），
+        # 它没有台词 —— 比对"第二章没被动过"时要把 flow 行排除。
+        ch02_spoken = [r['text'] for r in by_label['ch02']
+                       if r.get('kind') != 'flow']
+        assert ch02_spoken == ['第二章台词'], '重导第一章把第二章动了'
+        assert any(r.get('raw') == 'return' for r in by_label['ch02'])
 
     def test_duplicate_id_inside_one_export_keeps_the_last(self, tmp_path):
         """同一份导出里 id 撞了 → 以最后一条为准（与"最后一次导出为准"同向）。"""

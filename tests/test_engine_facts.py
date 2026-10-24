@@ -139,6 +139,43 @@ class TestBuildFacts:
         assert 'nope' not in facts['facts']
         assert EF.validate_facts(facts) == []
 
+    def test_none_is_a_gap_but_empty_is_a_real_empty_value(self):
+        """
+        清单 §六：`('probe', None)`（没取到）与 `('probe', {})`（真的是空）
+        必须在事实文件里长得**不一样**。
+
+        从前 `merge_fact` 把两者一起丢掉，于是"图片清单没取到"被下游一句
+        `or {}` 读成"这个项目没有图片"。
+        """
+        facts = EF.build_facts({
+            'images': [(EF.SRC_PROBE, None)],
+            'tags': [(EF.SRC_PROBE, {})],
+            'transforms': [(EF.SRC_JSON_DUMP, ['left'])],
+        }, collection={'parse_clean': True, 'probe_complete': True})
+
+        assert EF.value_of(facts, 'tags') == {}, '空值也是"采到了"'
+        assert EF.source_of(facts, 'tags') == EF.SRC_PROBE
+        assert 'images' not in facts['facts'], '没取到就不该有值'
+        assert [g['key'] for g in EF.gaps_of(facts)] == ['images']
+        assert facts['gaps'][0]['reason']
+        assert EF.validate_facts(facts) == []
+
+    def test_gap_makes_facts_partial_but_still_usable(self):
+        facts = EF.build_facts(
+            {'images': [(EF.SRC_PROBE, None)],
+             'attributes': [(EF.SRC_PROBE, {'lan': []})]},
+            collection={'parse_clean': True, 'probe_complete': True})
+        ok, why = EF.is_collectable(facts)
+        assert ok is True, '缺一类资源不该把整份事实判成不可用'
+        assert '部分可用' in why and 'images' in why
+
+    def test_gap_without_reason_is_invalid(self):
+        facts = EF.build_facts({}, collection={'parse_clean': True,
+                                               'probe_complete': True})
+        facts['gaps'] = [{'key': 'images'}]
+        assert any('reason' in p for p in EF.validate_facts(facts))
+
+
 
 # ---------------------------------------------------------------------------
 #  纯层：查询

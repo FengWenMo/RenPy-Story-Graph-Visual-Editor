@@ -135,7 +135,7 @@ class CardPageMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_canvas', '_file_path', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_sync_inspector', '_sync_nav_current', '_update_crumb', '_who', 'graph', 'maybe_offer_recovery')
+    REQUIRES = ('PAGE_CARD', 'PREFETCH_AHEAD', 'PREFETCH_BEHIND', '_base_title', '_canvas', '_file_path', '_graph_dirty', '_label_combo', '_list', '_loaded_idx', '_log', '_next_action', '_on_canvas_select', '_page', '_panel', '_pos', '_prev_action', '_project_root', '_refresh_asset_choices', '_report_swallowed', '_run_command', '_session', '_set_graph', '_set_page', '_status', '_status_bar', '_swallow_mark', '_sync_inspector', '_sync_nav_current', '_update_crumb', '_who', 'graph', 'maybe_offer_recovery')
 
     #: 被用户折起来的 label 名（跨 `_reload_list` 保留：翻页/插卡不该弹开）。
     _collapsed_labels: frozenset = frozenset()
@@ -846,6 +846,69 @@ class CardPageMixin:
                      f'（第 {res["index"] + 1} 拍）'
                      + (f'。{edge_note}' if edge_note else ''))
 
+    def insert_choice_point(self):
+        """
+        在当前这一拍后面放一个**选择点**（S2，2026-10-24）。
+
+        落点（两件事，两个文件）：
+          · `menu` 写进 `<章节>_choices.rpy` —— 工具独占，导出控制流和
+            导出剧本都**不碰**它（控制流产物是整份重生成的，塞进去会被冲掉）；
+          · 剧本里**只多一行** `call <label> from _call_<label>`，
+            而且只进**内存**，导出才落盘（与 S1 同一条规矩）。
+
+        为什么不是"先把 menu 插进剧本"：那样一次就 +5 行起，正文当场被搞乱，
+        而且缩进归属一错就是"语法合法、语义错了"。
+        """
+        idx = self._loaded_idx
+        if not self._session.has(idx):
+            self._status('先选一张卡，再插入选择点。')
+            return
+        chapter = Path(str(getattr(self._session, 'script_path', '') or ''))
+        label = str(getattr(self._session.beats[idx], 'label', '') or '')
+        root = getattr(self, '_project_root', None) or chapter.parent
+
+        from storygraph.story.choice_point import (
+            apply_choice_point, plan_choice_point,
+        )
+        plan = plan_choice_point(root, chapter, label)
+        if not plan.ok:
+            self._status('插入选择点被拦住了：' + '；'.join(plan.blocking))
+            return
+
+        what = '新建' if plan.creates_file else '追加到'
+        if QMessageBox.question(
+                self, '插入选择点',
+                f'会在这一拍后面插入一行：\n\n    {plan.call_line}\n\n'
+                f'menu 会{what}：{plan.path}\n\n'
+                f'剧本正文只多这一行（导出才落盘）；'
+                f'选项文字稍后在那个文件里改。继续？'
+        ) != QMessageBox.Yes:
+            return
+
+        res = apply_choice_point(plan, root)
+        if not res.get('ok'):
+            self._status(f'选择点文件写不进去：{res.get("error")}')
+            return
+
+        beat_res = self._session.insert_flow_beat(
+            idx, after=True, flow_type='call', target=plan.label,
+            from_clause=plan.from_clause)
+        if not beat_res.get('ok'):
+            self._status('选择点文件写好了，但插那一行失败：'
+                         f'{beat_res.get("error")}')
+            return
+
+        try:
+            self._refresh_flow_edges()
+            self._reload_list()
+            self._show_index(int(beat_res.get('index', idx)))
+        except Exception as e:               # noqa: BLE001 - 界面没刷新不该回滚文件
+            swallow('ui_qt.window_card.insert_choice_point.refresh', e)
+
+        self._log(f'[选择点] {plan.label} → {plan.path}；'
+                  f'剧本里插了 {plan.call_line}')
+        self._status(f'已插入选择点 {plan.label}（剧本只多一行，导出才落盘）')
+
     def delete_card(self):
         """删掉当前这一拍（**先问一声**：它没有多级撤销，只有单级恢复）。"""
         idx = self._loaded_idx
@@ -1069,6 +1132,14 @@ class CardPageMixin:
             dirty = bool(self._session.has_unsaved_edits())
             path = str(getattr(self._session, 'script_path', '') or '')
             self._status_bar.set_dirty(dirty, path)
+            # **标题栏也要刺眼**（2026-10-23，清单 §八）：一行状态栏小字
+            # 救不了"我按了 Ctrl+S 以为存了"。`*` = 这一章有未导出的改动，
+            # `●` = 剧情图布局有未保存改动；两个可以同时出现。
+            self._script_dirty = dirty
+            prefix = ('* ' if dirty else '')
+            prefix += ('● ' if bool(getattr(self, '_graph_dirty', False))
+                       else '')
+            self.setWindowTitle(prefix + self._base_title)
         except Exception as e:                  # noqa: BLE001 - 只影响一个提示
             swallow('ui_qt.window_card._sync_export_dirty', e)
 
@@ -1442,7 +1513,7 @@ class CardPageMixin:
         self._sync_export_dirty()
 
         if res['changed']:
-            self._status(f'✔ 已保存到这一拍（{res["line_id"]}）。'
+            self._status(f'✔ 已保存到这一拍（{res["display_name"]}）。'
                          + (f'{edge_note}；' if edge_note else '')
                          + f'改动在内存里，点「⤓ 导出 .rpy」时才落盘。')
             if flow_change:
@@ -1452,7 +1523,7 @@ class CardPageMixin:
                     f'{flow_change["type"]} {flow_change["target"]}'
                     + (f'；{edge_note}' if edge_note else '；图边无需改动'))
         else:
-            self._status(f'这一拍没有改动，不需要保存（{res["line_id"]}）。')
+            self._status(f'这一拍没有改动，不需要保存（{res["display_name"]}）。')
         return res['beat']
     def undo_current_beat(self):
         """

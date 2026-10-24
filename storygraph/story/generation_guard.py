@@ -489,7 +489,8 @@ def occupied_labels(project_root=None, exclude=()) -> set:
 
     Ren'Py 会把 game/ 下所有 .rpy 当成"一个大脚本"（官方 Quickstart 原话），
     所以不同文件里重名 label 是硬错误。`parsing.discover.discover_scripts`
-    已经排除了 `tl/` 与 `*.generated.rpy`，正好复用它的口径。
+    已经排除了 `tl/` 与工具留下的派生文件（`*.generated.rpy` /
+    `*.blocked.rpy` / `*.bak.rpy`），正好复用它的口径。
 
     （2026-09-28：这里原先 import 的是 `pipeline.build.discover_scripts`，
     让 story 层反向依赖 pipeline 层、只能靠延迟 import 压着；该函数已下移到
@@ -1104,6 +1105,40 @@ def labels_in_danger(out_path, project_root=None, exclude=()) -> set:
     return occupied_labels(project_root=project_root, exclude=exclude)
 
 
+def review_path_for(out_path, project_root=None) -> Path:
+    """
+    门禁拦下时那份"供人对照"的副本**该落在哪**。
+
+    为什么不能是 `out_path.with_suffix('.blocked.rpy')`（P0，2026-10-23）：
+    Ren'Py 把 `game/` 下**所有** `.rpy` 当成同一个脚本（官方 Quickstart 原话）。
+    `.blocked.rpy` 后缀仍然是 `.rpy`，所以"不写目标、改写副本"在引擎眼里
+    等于**照样写进了游戏**：坏产物仍然会被加载，游戏仍然起不来；而且
+    `occupied_labels()` 会扫到副本里的 `label ch01:`，于是下一次导出被判
+    `LABEL_COLLISION` —— 门禁把自己焊死了，用户只能手动删一个从没见过的文件。
+
+    落点规则：
+      · 认得出项目根 → `<项目根>/build/review/<名字>.blocked.rpy`
+        （`build/` 不在 Ren'Py 的扫描范围内，且和别的构建产物住在一起）；
+      · 认不出项目根（临时目录 / 单测）→ 同目录旧行为。此时 `inside_game_dir`
+        判定为假（没有 `game/`），所以同目录不会污染游戏；
+      · 无论如何都**再断言一次** `inside_game_dir(review) == False`。
+    """
+    out_path = Path(out_path)
+    root = project_root or _guess_project_root(out_path)
+    if root:
+        review = (Path(root) / 'build' / 'review'
+                  / out_path.with_suffix('.blocked.rpy').name)
+    else:
+        review = out_path.with_suffix('.blocked.rpy')
+    if inside_game_dir(review, root):
+        # 兜底：项目布局怪到 `build/` 也在 game/ 里时，宁可放到系统临时目录，
+        # 也绝不把坏脚本交给 Ren'Py 扫描。
+        import tempfile
+        review = (Path(tempfile.gettempdir()) / 'storygraph-review'
+                  / out_path.with_suffix('.blocked.rpy').name)
+    return review
+
+
 def _copy_of_source(out_path, source_text) -> bool:
     """
     目标里那一份，是不是**这一章源文的逐字节复制品**？
@@ -1140,8 +1175,10 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     落盘，并保证"绝不把会让游戏跑不起来的脚本写进目标路径"。
 
       · 无 block 级问题 → 写 `out_path`，`written=True`；
-      · 有 block 级问题 → **不写目标文件**，改写 `<stem>.blocked.rpy`
-        供人对比，`written=False`、`review_path` 指向副本。
+      · 有 block 级问题 → **不写目标文件**，把副本写到
+        `<项目根>/build/review/<stem>.blocked.rpy` 供人对比
+        （**绝不落进 `game/`**，见 `review_path_for`），
+        `written=False`、`review_path` 指向副本。
       · **目标已存在且不是工具生成的** → 同样不写（见下，P0）。
 
     为什么拦下也要留副本：只报错不给人看产物，等于让人猜哪里错了；
@@ -1229,8 +1266,7 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         review = None
         if review_on_block:
             try:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                review = out_path.with_suffix('.blocked.rpy')
+                review = review_path_for(out_path, root)
                 write_text_atomic(review, text)
             except OSError:
                 review = None
@@ -1248,9 +1284,8 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         blocking = [_make_blocking_issue(out_path, reason)]
         review = None
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
             if review_on_block:
-                review = out_path.with_suffix('.blocked.rpy')
+                review = review_path_for(out_path, root)
                 write_text_atomic(review, text)
         except OSError:
             review = None
@@ -1331,7 +1366,7 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if blocking and review_on_block:
-            review = out_path.with_suffix('.blocked.rpy')
+            review = review_path_for(out_path, root)
             write_text_atomic(review, write_text_value)
             _publish_blocked(out_path, blocking, review)
             return GeneratedArtifact(out_path, review, False, issues, _lint)
@@ -1365,7 +1400,7 @@ def _publish_blocked(out_path, blocking, review) -> None:
     try:
         first = blocking[0].format() if blocking else ''
         extra = f'（另有 {len(blocking) - 1} 条）' if len(blocking) > 1 else ''
-        tail = f'已写出待对照的副本：{review.name}' if review else '产物未写出。'
+        tail = f'已写出待对照的副本：{review}' if review else '产物未写出。'
         _notify.error(
             f'生成被拦下，没有写入 {Path(out_path).name}：{first}{extra}。{tail}',
             title='生成被拦下')

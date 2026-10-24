@@ -76,6 +76,21 @@ def _from_suffix(edge) -> str:
     return f' from {clause}'
 
 
+def _edge_target(edge, target_node, control_name) -> str:
+    """
+    这条边该写哪个 label。
+
+    `origin='control'` 的 **call** 是 P2 的"章末 call 子过程"：它要调
+    **章节本身**（`call B`），不是调 `B_control` —— 后者自己会跳走，
+    不会回到调用点。jump 仍然去 `B_control`（章级编排）。
+    """
+    name = str(getattr(target_node, 'label_name', '') or '')
+    if (str(getattr(edge, 'origin', '')) == 'control'
+            and str(getattr(edge, 'type', '')) == 'call'):
+        return name
+    return control_name(name)
+
+
 def _option_line(opt, condition: str, indent: str) -> str:
     """
     菜单选项那一行 —— **字符串转义走章节导出那一份规则**
@@ -93,6 +108,18 @@ def _option_line(opt, condition: str, indent: str) -> str:
     from storygraph.story.beat_render import quote_string
     cond_str = f" if {condition}" if condition else ""
     return f'{indent}{quote_string(opt)}{cond_str}:'
+
+
+def _all_menu_options_conditional(menu_edges) -> bool:
+    """
+    这个 `menu:` 会不会**一个选项都不出现**？
+
+    判据只有一条：每条选项边都带 `condition`。Ren'Py 会把不成立的选项
+    直接藏起来；全藏光时整个 `menu:` 被跳过、执行落到下一行 —— 所以这种
+    菜单后面必须自己补 `return`（否则掉进下一个 label，静默多跑一章）。
+    """
+    return bool(menu_edges) and all(
+        str(getattr(e, 'condition', '') or '').strip() for e in menu_edges)
 
 def _export_control_node(nid, node, lines, graph, controller_style,
                         control_name):
@@ -133,10 +160,15 @@ def _export_control_node(nid, node, lines, graph, controller_style,
             target_node = graph.nodes.get(edge.to_id)
             if not target_node:
                 continue
-            next_label = control_name(target_node.label_name)
+            next_label = _edge_target(edge, target_node, control_name)
             lines.append(_option_line(edge.option_text, edge.condition,
                                       ' ' * 8))
             lines.append(f"            {edge.type} {next_label}")
+        if _all_menu_options_conditional(menu_edges):
+            # Ren'Py：**所有**选项条件都不成立时，整个 `menu:` 块会被跳过，
+            # 执行落到 `menu:` 的下一行 —— 也就是**下一个 label**，把别的章
+            # 顺带跑一遍。只要还有一个无条件选项，玩家总能选中，落不到外面。
+            lines.append("    return")
 
     elif menu_edges:
         if not cond_edges:
@@ -145,16 +177,30 @@ def _export_control_node(nid, node, lines, graph, controller_style,
                 target_node = graph.nodes.get(edge.to_id)
                 if not target_node:
                     continue
-                next_label = control_name(target_node.label_name)
+                next_label = _edge_target(edge, target_node, control_name)
                 lines.append(_option_line(edge.option_text, edge.condition,
                                           ' ' * 8))
                 lines.append(f"            {edge.type} {next_label}")
+            if uncond_edges:
+                # 既有菜单、又有一条无条件出口：菜单选项全不成立时走这条。
+                # 从前这里**静默丢掉** uncond 边（产物直接掉进下一个 label），
+                # 与 `else` 分支只写 cond 的那条路同源。
+                for edge in uncond_edges:
+                    target_node = graph.nodes.get(edge.to_id)
+                    if not target_node:
+                        continue
+                    lines.append(
+                        f"    {edge.type} "
+                        f"{_edge_target(edge, target_node, control_name)}"
+                        + _from_suffix(edge))
+            elif _all_menu_options_conditional(menu_edges):
+                lines.append("    return")
         else:
             for idx, edge in enumerate(cond_edges):
                 target_node = graph.nodes.get(edge.to_id)
                 if not target_node:
                     continue
-                next_label = control_name(target_node.label_name)
+                next_label = _edge_target(edge, target_node, control_name)
                 prefix = "if" if idx == 0 else "elif"
                 lines.append(f"    {prefix} {edge.condition}:")
                 lines.append(f"        {edge.type} {next_label}")
@@ -168,10 +214,13 @@ def _export_control_node(nid, node, lines, graph, controller_style,
                 target_node = graph.nodes.get(edge.to_id)
                 if not target_node:
                     continue
-                next_label = control_name(target_node.label_name)
+                next_label = _edge_target(edge, target_node, control_name)
                 lines.append(_option_line(edge.option_text, edge.condition,
                                           ' ' * 12))
                 lines.append(f"                {edge.type} {next_label}")
+            if _all_menu_options_conditional(menu_edges):
+                # 同上：全条件选项的菜单可能一个都不出现 → 必须自己兜底。
+                lines.append("        return")
 
     else:
         if cond_edges:
@@ -179,11 +228,15 @@ def _export_control_node(nid, node, lines, graph, controller_style,
                 target_node = graph.nodes.get(edge.to_id)
                 if not target_node:
                     continue
-                next_label = control_name(target_node.label_name)
+                next_label = _edge_target(edge, target_node, control_name)
                 prefix = "if" if idx == 0 else "elif"
                 lines.append(f"    {prefix} {edge.condition}:")
                 lines.append(f"        {edge.type} {next_label}")
-            if uncond_edges:
+            if not uncond_edges:
+                # 条件全不成立时这一章/这一段就结束了；没有这句，执行会
+                # 直接落进**下一个 `label`** —— 那是一条静默的错路线。
+                lines.append("    return")
+            else:
                 lines.append("    else:")
                 for edge in uncond_edges:
                     target_node = graph.nodes.get(edge.to_id)
@@ -191,7 +244,7 @@ def _export_control_node(nid, node, lines, graph, controller_style,
                         continue
                     lines.append(
                         f"        {edge.type} "
-                        f"{control_name(target_node.label_name)}"
+                        f"{_edge_target(edge, target_node, control_name)}"
                         + _from_suffix(edge))
         else:
             if uncond_edges:
@@ -205,20 +258,27 @@ def _export_control_node(nid, node, lines, graph, controller_style,
                         continue
                     lines.append(
                         f"    {edge.type} "
-                        f"{control_name(target_node.label_name)}"
+                        f"{_edge_target(edge, target_node, control_name)}"
                         + _from_suffix(edge))
+                last = uncond_edges[-1]
+                if (str(getattr(last, 'origin', '')) == 'control'
+                        and str(getattr(last, 'type', '')) == 'call'):
+                    # call 会回来；后面没有别的路由时必须自己收尾，
+                    # 否则会掉进下一个 label（P2，2026-10-24）。
+                    lines.append("    return")
             else:
                 lines.append("    return")
     lines.append("")
 
-def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
+def render_control_text(graph, wrapper=None) -> str:
     """
-    把剧情图写成 Ren'Py 控制流脚本。
+    按图生成控制流脚本文本（**纯计算，不落盘、不弹通知**）。
 
-    `wrapper=None`（默认）：按 `graph.control_flow` 决定 ——
-      控制流图（导入的就只有 call/jump/menu）→ **原样重建**（不再补 `_control`）；
-      章节图 → 每个节点生成 `<label>_control:` 包装（`call 原label` + 按边写跳转）。
-    `wrapper=True/False`：显式覆盖（界面上"按章节图导出"入口用它）。
+    与 `export_to_renpy` 的文本部分**同一份实现**：导出、diff 预览、"改一条
+    分支后重生成"都必须看到同一段产物，否则预览里说会写什么、实际写下去
+    又是另一份（那种漂移最难查）。
+
+    `wrapper` 语义与 `export_to_renpy` 完全一致。
     """
     all_vars = _declared_variables(graph)
     # 这张图是"章节图"还是"控制流图"？
@@ -252,7 +312,19 @@ def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
         _export_control_node(nid, node, lines, graph,
                              controller_style, control_name)
 
-    text = '\n'.join(lines)
+    return '\n'.join(lines)
+
+
+def export_to_renpy(graph, filepath, wrapper=None, *, project_root=None):
+    """
+    把剧情图写成 Ren'Py 控制流脚本。
+
+    `wrapper=None`（默认）：按 `graph.control_flow` 决定 ——
+      控制流图（导入的就只有 call/jump/menu）→ **原样重建**（不再补 `_control`）；
+      章节图 → 每个节点生成 `<label>_control:` 包装（`call 原label` + 按边写跳转）。
+    `wrapper=True/False`：显式覆盖（界面上"按章节图导出"入口用它）。
+    """
+    text = render_control_text(graph, wrapper=wrapper)
     # ⚠ 落盘一律过**生成门禁**（契约 B1，2026-10-08 修）。
     #
     # 这里以前是裸 `open(filepath, 'w')` —— 等于把门禁漏在门外：控制流脚本

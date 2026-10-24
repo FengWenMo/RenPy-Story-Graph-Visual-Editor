@@ -1605,6 +1605,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #: 而指纹在 `_set_graph` 这个唯一同步点自动成立。
         self._graph_saved_sig = ''
         self._graph_dirty = False
+        #: 这一章有没有**还没导出到 .rpy** 的改动（标题栏 `*` 标记）。
+        self._script_dirty = False
         self._last_layout_path = ''
         self._base_title = '剧情编辑器 · 剧情结构图 + 卡片界面'
         # —— 图级撤销栈（旧版 `graph.commands.HistoryManager`）——
@@ -1748,6 +1750,75 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             return
         self.restore_session()
 
+    def _beat_context(self) -> dict:
+        """
+        `line_id` → "第几拍 / 共几拍 / 前后各一句"（S0，只读）。
+
+        ⚠ 判空用 `is not None`：`EditorSession` 有 `__len__`（= 拍数），
+        没载入章节时是 **falsy** —— 写成 `if self._session:` 会静默走 else，
+        图上看起来"这条边没有位置"，其实就是被判空了（2026-10-23 踩过）。
+        """
+        from storygraph.story.flow import beat_context
+
+        session = getattr(self, '_session', None)
+        if session is None:
+            return {}
+        try:
+            return beat_context(list(getattr(session, 'beats', None) or ()))
+        except Exception as e:               # noqa: BLE001 - 位置画不出来不该拖垮图
+            swallow('main_window._beat_context', e)
+            return {}
+
+    def _open_edge_in_card(self, edge):
+        """
+        右键一条线 →「定位到这一拍」：进卡片页，落在**它对应的那一拍**
+        （2026-10-24 起双击线改为「编辑连线」，不再抢这个动作）。
+
+        ## 顺序是有讲究的
+
+        先 `_on_node_open`（**同步**载入 from 所在那一章），**然后**才取拍上下文。
+        反过来的话，跨章边会用"上一章"的拍号去定位 —— 图上同时有好几章时必现
+        （用户看到的是"点一条线，跳到了完全无关的位置"）。
+
+        ## 三种"点不动"都要说话
+
+        草图没有 `line_id`、拍已经不存在、节点不在图上 —— 一律给一句状态栏提示。
+        没有反馈最容易被当成卡死（这条是项目里反复踩过的）。
+        """
+        line_id = str(getattr(edge, 'line_id', '') or '')
+        if not line_id:
+            self._status('这条线是草图（未写入），剧本里还没有对应的那一行 —— '
+                         '右键这条线 →「写入剧本…」，或删除它。')
+            return
+
+        nid = getattr(edge, 'from_id', None)
+        if self.graph is None or nid not in (self.graph.nodes or {}):
+            self._status('这条线的起点不在当前图上。')
+            return
+
+        try:
+            self._on_node_open(nid)
+        except Exception as e:               # noqa: BLE001 - 打不开只提示，不崩
+            swallow('main_window._open_edge_in_card.open', e)
+            self._status(f'打开这一章失败：{e}')
+            return
+
+        info = self._beat_context().get(line_id)
+        if not info:
+            self._status('这条线对应的那一拍不在这章里了（可能刚改过）—— '
+                         '已停在章节开头。')
+            return
+
+        idx = int(info.get('index') or 0) - 1
+        try:
+            if self._session is not None and self._session.has(idx):
+                self._show_index(idx)
+                where = f'（{info["label"]}）' if info.get('label') else ''
+                self._status(f'已定位到第 {info["index"]} 拍 / '
+                             f'共 {info["total"]} 拍{where}')
+        except Exception as e:               # noqa: BLE001
+            swallow('main_window._open_edge_in_card.show', e)
+
     def _set_graph(self, graph, keep_view=None):
         """
         换一张图：画布 + 空状态提示 + 右栏"当前模块"**一起**更新。
@@ -1765,6 +1836,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._canvas.set_graph(graph, keep_view=keep_view)
         except Exception as e:               # noqa: BLE001
             self._status(f'画布更新失败：{e}')
+        # 位置徽标（S0）：**必须在 set_graph 之后** —— set_graph 会重建全部
+        # EdgeItem，先灌上下文的话，那些新建的线拿到的还是空的。
+        try:
+            self._canvas.set_beat_context(self._beat_context())
+        except Exception as e:               # noqa: BLE001 - 位置是增强，不该挡住图
+            swallow('main_window._set_graph.beat_context', e)
         has_nodes = bool(getattr(graph, 'nodes', None))
         self._canvas.set_empty_hint('' if has_nodes else self.EMPTY_HINT)
         self._on_canvas_select(self._canvas.selected_node_id())
@@ -1870,6 +1947,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._canvas.node_ops_requested.connect(self.edit_node_ops)
         self._canvas.node_add_requested.connect(self.add_node_at)
         self._canvas.node_menu_requested.connect(self._on_node_menu)
+        # 双击一条边 → 打开这条线自己的属性（旧版「编辑连线」，2026-10-24）。
+        # 「定位到这一拍」保留在右键菜单里。
+        self._canvas.edge_edit_requested.connect(self.edit_edge)
+        self._canvas.edge_open_requested.connect(self._open_edge_in_card)
+        # 右键一条边 → 编辑 / 写入剧本 / 删除（P0，2026-10-24）
+        self._canvas.edge_menu_requested.connect(self._on_edge_menu)
         self._canvas.selection_changed.connect(self._on_canvas_select)
         self._canvas.node_moved.connect(self._on_node_moved)
         self._canvas.zoom_changed.connect(self._on_zoom_changed)
@@ -1899,10 +1982,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         zrow.addWidget(self._fit_btn)
         zrow.addStretch(1)
         self._graph_hint = QLabel(
-            '实线 = 脚本里的控制流 · 点划线 = 手工草图（不写脚本）'
-            ' · Shift + 左键拖动 = 连线 · 左键选中/拖动模块'
-            ' · 双击模块 = 编辑剧情变量 · 滚轮缩放'
-            ' · 空格 + 左键拖动 = 平移')
+            '实线 = jump · 虚线 = call'
+            ' · 虚线 +「草图」= 草图'
+            ' · Shift + 左键拖动 = 接线 · 双击连线 = 编辑'
+            ' · 右键连线 = 编辑/写入/改落点/删除'
+            ' · 左键选中/拖动模块 · 双击模块 = 编辑剧情变量'
+            ' · 滚轮缩放 · 空格 + 左键拖动 = 平移')
         self._graph_hint.setProperty('role', 'caption')
         zrow.addWidget(self._graph_hint)
         mv.addLayout(zrow)
@@ -2035,7 +2120,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         c1.setSpacing(T.SPACE['xs'])
         self._save_layout_btn = QPushButton('💾 保存布局(JSON)')
         self._save_layout_btn.setToolTip(
-            '把手排好的块位置存成 .json（Ctrl+S）；格式与旧版一致')
+            '把手排好的块位置存成 .json（Ctrl+Shift+L）；格式与旧版一致')
         # ⚠ 包 lambda：`clicked` 会发一个 `bool`，直接 connect 会让它变成
         # `save_layout(target=False)` —— "没给路径就弹另存为"那条分支走不到，
         # 接着拿 `False` 当路径写文件（TypeError）。三处同理（见下面的
@@ -2191,6 +2276,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '调用完会回到这里继续')
         self._flow_btn.clicked.connect(lambda: self.insert_flow_card(after=True))
         bh.addWidget(self._flow_btn)
+        self._choice_btn = QPushButton('◇ 插入选择点')
+        self._choice_btn.setToolTip(
+            '在当前这一拍后面放一个分支：剧本里**只多一行** call，'
+            'menu 写在同目录的 <章节>_choices.rpy 里（不动剧本正文）')
+        self._choice_btn.clicked.connect(self.insert_choice_point)
+        bh.addWidget(self._choice_btn)
         self._restore_btn = QPushButton('↩ 撤销结构操作')
         self._restore_btn.setToolTip(
             '撤销最近一次增删卡片（可连按多级）：删掉的放回原位、插进去的撤掉')
@@ -2454,7 +2545,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 一个同样的按钮（`_back_btn`），两个并排等于让人猜"有什么区别"。
         # 保留下面那个（它挨着面包屑，位置更贴近"我要回去哪"）。
         self._save_action = act('💾 保存这一拍', self.save_current_beat,
-                                '把卡片改动提交到当前拍（Ctrl+S）', primary=True)
+                                '把卡片改动提交到当前拍（Ctrl+S；'
+                                'Ctrl+Shift+S = 直接导出 .rpy）', primary=True)
         # ⭐ 同一条理由（用户 2026-10-21）：导出太常用，紧跟「保存」，
         #   不排在「下一句台词」后面 —— 那条位置在窄窗口里会溢进「»」。
         act('⤓ 导出 .rpy', self.export_script,
@@ -2590,7 +2682,8 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             self._crumb_hint.setText(pos)
             self._crumb_hint.setToolTip(
                 f'{pos}\n改完按「💾 保存这一拍」；「← 返回剧情结构」回第一屏。'
-                '\n快捷键：← / → 翻拍，Ctrl+S 保存这一拍。')
+                '\n快捷键：← / → 翻拍，Ctrl+S 保存这一拍，'
+                'Ctrl+Shift+S 直接导出 .rpy。')
 
     def _beat_lines_hint(self, idx: int) -> str:
         """

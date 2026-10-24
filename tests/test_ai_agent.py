@@ -196,6 +196,50 @@ def test_unknown_tool_is_an_honest_result_not_a_crash():
     assert got['ok'] is False and '没有这个工具' in got['reason']
 
 
+def test_write_tools_come_from_the_capability_declaration():
+    """
+    清单 §十八：判"要不要审批"看的是**工具声明会不会写盘**，
+    不是 `short == 'declare'` 这种字符串比较。
+    """
+    from storygraph import mcp_surface as M
+    declared = {t['name'].replace('storygraph_', '')
+                for t in M.capabilities()['tools']
+                if t.get('kind') == 'write'}
+    assert A.write_tool_names() == declared
+    assert declared <= A.WRITE_TOOLS
+
+
+def test_a_second_write_tool_is_gated_without_editing_agent(tmp_path,
+                                                            monkeypatch):
+    """
+    `table_export` 也是声明为写盘的工具 → 它必须走同一条审批闸门。
+
+    这条用例的价值不在 `table_export` 本身（它还是诚实桩），而在
+    "将来真做出写盘的 table_export 时，审批**自动**覆盖它"。
+    """
+    from storygraph import mcp_surface as M
+
+    seen = {}
+
+    def fake_table_export(project_root, *, dry_run=False):
+        seen['dry_run'] = dry_run
+        return {'ok': True, 'written': [], 'dry_run': dry_run,
+                'source': 'test', 'reason': ''}
+
+    monkeypatch.setattr(M, 'table_export', fake_table_export)
+
+    def approve(tool, args, preview):
+        seen['tool'] = tool
+        seen['preview_dry'] = preview.get('dry_run')
+        return False
+
+    got = A.execute('storygraph_table_export', {},
+                    project_root=tmp_path, approve=approve)
+    assert seen.get('tool') == 'table_export', '写盘工具绕过了审批'
+    assert seen.get('dry_run') is True, '审批前没有强制 dry_run'
+    assert got['written'] == []
+
+
 def test_gate_event_is_emitted_so_the_panel_can_ask(tmp_path):
     """闸门要发事件 —— 面板靠它弹"要不要真写"。"""
     root = tmp_path / 'proj'

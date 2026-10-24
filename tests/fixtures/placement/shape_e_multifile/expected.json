@@ -1,0 +1,16 @@
+{
+  "sample": "shape_e_multifile",
+  "placement": {
+    "declarations": [
+      "game/data/names.rpy",
+      "game/data/chars.rpy",
+      "game/data/flags.rpy"
+    ],
+    "control_flow": "game/story/flow.rpy",
+    "content_globs": [
+      "game/story/act*.rpy"
+    ],
+    "declaration_style": "dedicated"
+  },
+  "notes": "声明多文件分拆 + 独立 flow.rpy（不叫 _control）+ 双层目录 + 无生成物"
+}

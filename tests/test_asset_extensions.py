@@ -312,6 +312,27 @@ class TestCompletion:
 # ------------------------------------------------------------------
 
 class TestPanelModel:
+    def test_tree_matches_the_app_panel_for_every_grouping(self, registry):
+        """清单 §十七：两个面板数据源必须给出**完全相等**的树。"""
+        from storygraph.app.asset_panel import AssetPanelData
+
+        class _Engine:
+            def get_registry(self):
+                return registry
+
+        ext = AssetPanelModel(registry)
+        app = AssetPanelData(_Engine())
+        for group_by in ('category', 'tag', 'folder', 'type'):
+            assert ext.get_tree(group_by) == app.get_tree(group_by), group_by
+
+    def test_type_grouping_includes_images_transforms_characters(self, registry):
+        ext = AssetPanelModel(registry)
+        tree = ext.get_tree(group_by='type')
+        assert tree['image']['background'] == ['bg_room']
+        assert tree['image']['character'] == ['eileen']
+        assert tree['transform']['transform'] == ['leftish']
+        assert tree['character']['character'] == ['e']
+
     def test_tree_grouped_by_category(self, registry):
         pm = AssetPanelModel(registry)
         tree = pm.get_tree(group_by='category')

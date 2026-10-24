@@ -903,13 +903,15 @@ class Audit:
 # 编译：中间表示 -> Ren'Py 代码
 # ---------------------------------------------------------------------------
 
-def compile_stage(text: str, symbols: Symbols, audit: Audit = None,
-                  native_ok: bool = True) -> list:
+def compile_stage(text: str, symbols: Symbols, audit: Audit = None) -> list:
     """
     Stage 单元格 → [(原始意图, 代码行, 状态)]。
 
     方括号形式严格翻译；原生形式直通。找不到资源写 TODO 注释，
     **不生成**那条非法语句（生成了只会让游戏在运行时报错）。
+
+    ⚠ 2026-10-23（清单 §十五）：从前签名尾部有个 `native_ok=True`，
+    函数体一次都没读、全仓也没有调用方传它 —— 纯装饰开关，已删除。
     """
     audit = audit or Audit(symbols)
     rows = []

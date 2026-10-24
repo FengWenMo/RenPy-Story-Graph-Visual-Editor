@@ -1332,7 +1332,11 @@ class TestEmptySayIsNotAStatement:
                   '    return\n')
         original, produced, props = roundtrip(script, tmp_path, 'realsay')
         assert_same_multiset(original, produced, props)
-        assert len(props['beats']) == 2
+        # 2026-10-23（清单 §九）：`return` 现在是一张控制流拍（不再丢掉、
+        # 也不再靠渲染层无条件补）。两句台词 + 一条 return = 3 拍。
+        assert len(props['beats']) == 3
+        assert [b.kind for b in props['beats']] == ['narration', 'say', 'flow']
+        assert props['beats'][-1].raw == 'return'
 
 
 @pytest.mark.parametrize('kind', ['raw', 'comment', 'python'])

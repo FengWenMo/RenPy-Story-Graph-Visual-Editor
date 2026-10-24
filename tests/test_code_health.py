@@ -209,6 +209,42 @@ class TestSafeguardHelper:
         # 留下的是**最近**的
         assert safeguard.contexts()[-1] == 'demo.19'
 
+    def test_overflow_is_summarised_not_dropped(self, monkeypatch):
+        """
+        清单 §二十：被挤出缓冲的失败次数不能直接丢 —— 否则同一 context
+        重新出现时 count 从 1 开始，`report_since()` 会把新增失败算成没失败。
+        """
+        from storygraph.core import safeguard
+        monkeypatch.setattr(safeguard, 'MAX_CONTEXTS', 2)
+        for _ in range(3):
+            safeguard.swallow('demo.old')
+        safeguard.swallow('demo.a')
+        safeguard.swallow('demo.b')
+        snap = safeguard.snapshot()
+        assert snap.get('__overflow__', 0) >= 3, snap
+
+    def test_report_since_counts_overflow_as_new_failures(self, monkeypatch):
+        from storygraph.core import safeguard
+        monkeypatch.setattr(safeguard, 'MAX_CONTEXTS', 2)
+        safeguard.swallow('demo.a')
+        before = safeguard.snapshot()
+        for _ in range(3):
+            safeguard.swallow('demo.old')
+        safeguard.swallow('demo.b')
+        text = safeguard.report_since(before)
+        assert text, '溢出导致的失败没有被报出来'
+
+    def test_debug_env_is_read_on_every_call(self, monkeypatch, capsys):
+        """清单 §二十：`_debug` 不许缓存第一次读到的环境变量。"""
+        from storygraph.core import safeguard
+        safeguard.set_debug(None)
+        monkeypatch.setenv('STORYGRAPH_DEBUG', '1')
+        safeguard.swallow('demo.on', ValueError('x'))
+        assert 'demo.on' in capsys.readouterr().err
+        monkeypatch.setenv('STORYGRAPH_DEBUG', '0')
+        safeguard.swallow('demo.off', ValueError('y'))
+        assert 'demo.off' not in capsys.readouterr().err
+
     def test_debug_prints_to_stderr(self, capsys):
         from storygraph.core import safeguard
         safeguard.set_debug(True)

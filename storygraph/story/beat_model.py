@@ -583,7 +583,8 @@ def unknown_kinds(beats) -> list:
 KIND_SAY = 'say'
 
 KIND_NARRATION = 'narration'
-#: **控制流拍**（`call` / `jump`）—— 2026-10-22 第二阶段。
+#: **控制流拍**（`call` / `jump` / `return`）—— 2026-10-22 第二阶段；
+#: `return` 2026-10-23 加入（清单 §九：逐字保真，不再靠渲染层补）。
 #:
 #: 从前它们被塞进 `kind=narration` + `raw`，卡片上只能显示成
 #: "这一拍还会原样执行：call side"。升成独立 kind 之后：
@@ -591,6 +592,8 @@ KIND_NARRATION = 'narration'
 #:   · 空台词检查（`validate` 的 `empty_say`）不会把 `call side` 当成
 #:     "有拍没台词"报出来；
 #:   · 图边可以从这类拍**派生**（第二阶段的目标），不再靠保存时同步。
+#:   · `return` 也因此在卡片上看得见、在增量补丁里能被匹配 —— 从前它被
+#:     丢掉、靠章尾无条件补一行"看起来保真"。
 #:
 #: ⚠ 老数据（`kind=narration` + `raw='call side'`）**继续认** —— 见
 #: `storygraph.story.flow.parse_flow`，读表 / 读旧 JSON 时不会丢。
@@ -1889,6 +1892,9 @@ def compose_stage(beat: 'Beat', symbols=None) -> str:
     symbols = symbols if isinstance(symbols, Symbols) else None
 
     ops = []
+    #: 这一项自己的文本里已经带了 `with`（clause / expression 子句）——
+    #: 整拍那条 `beat.with_` 不能再贴上去，否则一次转场会出现两遍。
+    with_inline: set = set()
     if beat.scene:
         line = f"scene {beat.scene}"
         # 背景自己的变换是 `scene_at`（`scene bg bg9_5 at bgfit`）。
@@ -1903,7 +1909,22 @@ def compose_stage(beat: 'Beat', symbols=None) -> str:
         ops.append(('scene', line))
     for item in _split_show_items(beat.show):
         if item.get('clause'):
-            ops.append(('show', f"show {item['clause']}"))
+            line = f"show {item['clause']}"
+            ops.append(('show', line))
+            if ' with ' in f' {line} ':
+                with_inline.add(len(ops) - 1)
+            continue
+        if item.get('is_expression'):
+            # `show expression` 的 `expression` 关键字也是内容的一部分
+            # （少了它引擎会把 `holo("x"` 当图像名）。`_expression_clause`
+            # 与「立绘」列共用同一份编码，别在这里另拼一套。
+            it = dict(item)
+            if not str(it.get('at') or '').strip() and beat.at:
+                it['at'] = beat.at
+            line = f"show {_expression_clause(it)}"
+            ops.append(('show', line))
+            if ' with ' in f' {line} ':
+                with_inline.add(len(ops) - 1)
             continue
         line = f"show {item['image']}"
         # 立绘的位置：自带 `@` 优先，其次才是整拍的「位置」列——
@@ -1925,7 +1946,8 @@ def compose_stage(beat: 'Beat', symbols=None) -> str:
         hide_at = [i for i, (v, _l) in enumerate(ops) if v == 'hide']
         if show_at:
             i = show_at[-1]
-            ops[i] = ('show', ops[i][1] + f" with {beat.with_}")
+            if i not in with_inline:
+                ops[i] = ('show', ops[i][1] + f" with {beat.with_}")
         elif not hide_at:
             ops.append(('show', f"with {beat.with_}"))
     if beat.transform and not beat.at:
@@ -3071,8 +3093,14 @@ def _is_bare_renpy_verb(line: str) -> bool:
     return head.rstrip(':') in _RENPY_STATEMENT_HEADS
 
 
-#: say 语句的**说话人前缀**：`e ` / `m.lin ` / 空（旁白）。
-_RE_SAY_WHO = re.compile(r'^(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s+)?')
+#: say 语句的**说话人前缀**：`e ` / `m.lin ` / `凌跃捷 ` / 空（旁白）。
+#:
+#: ⚠ 2026-10-24：从前只认 `[A-Za-z_]\w*`，于是**中文/日文角色名**写的台词行
+#: 在「代码」格里读回来时被判成 python（`_looks_like_say_line` → False），
+#: 那一行要么进不了 `raw` 要么分类错 —— 与 `patcher._SAY_RE` 是同一次修复
+#: （那边不认 → 改一句多一行；这边不认 → 代码格把它当代码）。
+#: **两处必须同源**：`[^\W\d]`（字母/下划线，Unicode）+ 点号分段。
+_RE_SAY_WHO = re.compile(r'^(?:[^\W\d]\w*(?:\.[^\W\d]\w*)*\s+)?')
 
 
 def _looks_like_say_line(text: str) -> bool:
@@ -3386,6 +3414,50 @@ join_hide_items = _join_hide_items
 
 
 
+def ensure_ids(beats: list) -> int:
+    """
+    **只补空身份**：给还没有 `line_id` 的拍发号，已有身份一个都不动。
+
+    为什么和 `assign_identity` 分开（2026-10-23，清单 §七）：那个名字承诺
+    "分配身份"，实际还会（①）重号时改掉已有身份、（②）无条件重算全部
+    内容指纹。只读场景（编译报表 / 导出）为了拿到号被迫调用一个会改数据的
+    函数，读到一半数据就变了。这个函数把"补号"这一件事单独拿出来。
+
+    ⚠ 不处理重复 ID —— 那是 `line_identity.unique_ids` 的职责。需要两者
+    都做时用 `assign_identity`（保持既有行为）。
+    """
+    from storygraph.story.line_identity import allocate
+
+    used = {str(getattr(b, 'line_id', '') or '') for b in beats or ()
+            if str(getattr(b, 'line_id', '') or '')}
+    filled = 0
+    for b in beats or ():
+        if str(getattr(b, 'line_id', '') or '').strip():
+            continue
+        label = str(getattr(b, 'label', '') or '') or 'start'
+        # **优先用这一拍自己的序号**（`ch01.0007`）：老表、刚解析出来的文件
+        # 都靠这条保持"编号与从前一致"（validate 金标、用户的旧表都按它）。
+        # 只有撞号（同一批里重复 / 有人手写占了）才退到 max+1。
+        try:
+            seq = int(getattr(b, 'seq', 0) or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        preferred = f'{label}.{seq:04d}' if seq > 0 else ''
+        if preferred and preferred not in used:
+            b.line_id = preferred
+        else:
+            b.line_id = allocate(used, label)
+        used.add(b.line_id)
+        filled += 1
+    return filled
+
+
+def refresh_fingerprints(beats: list) -> None:
+    """按**当前内容**重算每一拍的内容指纹（只改 `beat_fingerprint`）。"""
+    for b in beats or ():
+        b.beat_fingerprint = _beat_content_hash(b)
+
+
 def assign_identity(beats: list):
     """
     给每条 Beat 补上稳定身份：LineId + ContentHash。
@@ -3404,28 +3476,16 @@ def assign_identity(beats: list):
     ⚠ 2026-10-23：发号规则统一到 `story.line_identity`（max+1、跳过已用），
     并且**同一批里的重复 ID 会被重新发号** —— 从前的写法按 `label.seq`
     生成，新插入的行可能与既存行撞号（Excel 侧没有 `_unique_line_id`）。
+
+    ⚠ 这个名字**仍然做两件事**（重号改判 + 重算指纹）。只想补号请用
+    `ensure_ids`，只想刷指纹请用 `refresh_fingerprints`；这个函数保留
+    只为了让既有调用点的"补号并刷指纹"语义不变。
     """
-    from storygraph.story.line_identity import allocate, unique_ids
+    from storygraph.story.line_identity import unique_ids
 
     unique_ids(beats)
-    used = {str(b.line_id) for b in beats if b.line_id}
-    for b in beats:
-        if not b.line_id:
-            label = b.label or 'start'
-            # **优先用这一拍自己的序号**（`ch01.0007`）：老表、刚解析出来的文件
-            # 都靠这条保持"编号与从前一致"（validate 金标、用户的旧表都按它）。
-            # 只有撞号（同一批里重复 / 有人手写占了）才退到 max+1。
-            try:
-                seq = int(b.seq or 0)
-            except (TypeError, ValueError):
-                seq = 0
-            preferred = f'{label}.{seq:04d}' if seq > 0 else ''
-            if preferred and preferred not in used:
-                b.line_id = preferred
-            else:
-                b.line_id = allocate(used, label)
-            used.add(b.line_id)
-        b.beat_fingerprint = _beat_content_hash(b)
+    ensure_ids(beats)
+    refresh_fingerprints(beats)
 
 
 

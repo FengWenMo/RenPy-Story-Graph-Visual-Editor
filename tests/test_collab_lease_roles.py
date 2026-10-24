@@ -28,6 +28,7 @@ import pytest
 
 from storygraph.collab import collab_store as cs
 from storygraph.story.beat_model import Beat, assign_identity
+from storygraph.story.line_identity import parse as cs_parse
 
 
 def _beats(n=2):
@@ -74,6 +75,51 @@ class TestConnectionLayer:
 
 
 class TestMigration:
+    def test_illegal_fork_ids_are_migrated_to_parseable_ids(self, tmp_path):
+        """
+        清单 §三：历史库里的 `ch01.0002~2` 全项目解析器都不认。
+
+        打开库时把它重新发号（`parse()` 必须认得），payload 里的 `LineId`
+        也要同步；`label` 字段保持原样。
+        """
+        import json
+
+        db, _seed_sheet = _seed(tmp_path)
+        with cs.connect(db, write=True) as conn:
+            payload = conn.execute(
+                "SELECT payload FROM beats WHERE line_id='ch01.0002'").fetchone()
+            data = json.loads(payload['payload'])
+            data['LineId'] = 'ch01.0002~2'
+            conn.execute(
+                "UPDATE beats SET line_id='ch01.0002~2', payload=? "
+                "WHERE line_id='ch01.0002'",
+                (json.dumps(data, ensure_ascii=False),))
+
+        # 下一次 connect 触发值迁移
+        with cs.connect(db) as conn:
+            rows = conn.execute(
+                'SELECT line_id, label, payload FROM beats ORDER BY seq').fetchall()
+        ids = [r['line_id'] for r in rows]
+        assert all(cs_parse(lid) is not None for lid in ids), ids
+        assert len(set(ids)) == len(ids)
+        assert not any('~' in lid for lid in ids), ids
+        migrated = [r for r in rows if r['label'] == 'ch01' and
+                    json.loads(r['payload']).get('LineId') == r['line_id']]
+        assert len(migrated) == 2, rows
+        assert all(cs_parse(r['line_id']) is not None for r in migrated)
+
+    def test_keep_both_new_id_uses_the_allocator_not_a_tilde_suffix(self,
+                                                                    tmp_path):
+        """「两句都留」的新行 ID 必须是 `label.NNNN`，不是 `~2`。"""
+        db, _seed_sheet = _seed(tmp_path)
+        with cs.connect(db, write=True) as conn:
+            new = cs._unique_line_id(conn, 'ch01.0001')
+            ids = {r['line_id'] for r in
+                   conn.execute('SELECT line_id FROM beats')}
+        assert new not in ids
+        assert cs_parse(new) == ('ch01', 3), new
+
+
     def _old_db(self, tmp_path):
         """手搓一个 schema 2 老库（没有 locked_until / role）。"""
         db = tmp_path / 'old.db'
@@ -149,6 +195,50 @@ class TestLockLease:
         rows = cs.locks(db)
         assert rows[0]['expires_in'] > 0
         assert not rows[0]['expired']
+
+    def test_timestamps_are_timezone_aware(self, tmp_path):
+        """
+        清单 §十九：写库一律 UTC + 时区后缀（不再写"无时区本地时间"）。
+        """
+        db, _ = _seed(tmp_path)
+        res = cs.lock(db, 'ch01.0001', 'alice', ttl=120)
+        assert res['expires_at'].endswith('+00:00'), res['expires_at']
+        parsed = cs._parse_ts(cs._now())
+        assert parsed is not None and parsed.tzinfo is not None
+
+    def test_cross_timezone_lease_does_not_expire_early(self):
+        """
+        北京（UTC+8）写、东京（UTC+9）读：差值不能再被当成本地时间差。
+
+        修复前：`locked_until` 是 naive 的 +08 本地时间，东京用 +09 本地时间
+        比较 → 凭空早 1 小时判过期。修复后统一在 aware UTC 域比较。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        bj = timezone(timedelta(hours=8))
+        tokyo = timezone(timedelta(hours=9))
+        now_utc = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+        until_bj = (now_utc + timedelta(minutes=15)).astimezone(bj).isoformat()
+        row = {'locked_by': 'alice',
+               'locked_at': now_utc.astimezone(bj).isoformat(),
+               'locked_until': until_bj}
+
+        state = cs.lock_state(row, now=now_utc.astimezone(tokyo))
+        assert state['locked'] is True
+        assert state['expired'] is False
+        assert 890 <= state['expires_in'] <= 910, state
+
+    def test_naive_and_aware_records_do_not_raise(self, tmp_path):
+        """混进一条带时区的记录（或一条老的无时区记录）不许直接抛异常。"""
+        from datetime import datetime, timedelta, timezone
+
+        future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        past_local = (datetime.now() - timedelta(minutes=10)).isoformat()
+        for until in (future, past_local):
+            state = cs.lock_state({'locked_by': 'alice',
+                                   'locked_at': until,
+                                   'locked_until': until})
+            assert isinstance(state['expired'], bool), state
 
     def test_expired_lock_can_be_taken_over_with_audit(self, tmp_path):
         db, _ = _seed(tmp_path)

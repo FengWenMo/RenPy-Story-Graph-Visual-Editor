@@ -30,10 +30,15 @@ class TestTransformX:
         assert transform_x('center') == CENTER_X
 
     def test_project_transform_atl_wins(self):
-        """资源表里 transform 的 ATL 有 xpos —— 这是最准的来源。"""
+        """资源表里 transform 的 ATL 有 xpos —— 这是最准的来源。
+
+        ATL 是时间线，`placement_of` 取**最后一个**位置（最终静止态）：
+        `xpos 0.33` 之后又 `linear 0.2 xpos 0.9`，停在 0.9。
+        旧实现取第一处 0.33，与预览真正用的算法不一致（清单 §五）。
+        """
         class R:
             transforms = {'mine': {'ID': 'mine', 'ATL': 'xpos 0.33\nlinear 0.2 xpos 0.9'}}
-        assert transform_x('mine', R()) == pytest.approx(0.33)
+        assert transform_x('mine', R()) == pytest.approx(0.9)
 
     def test_letter_heuristic_for_project_conventions(self):
         """`i11` / `f11` / `l21` / `r22` 这类项目惯例命名给个合理默认位。"""
@@ -51,6 +56,26 @@ class TestTransformX:
         class R:
             transforms = {'wild': {'ID': 'wild', 'ATL': 'xpos 5.0'}}
         assert 0.0 <= transform_x('wild', R()) <= 1.0
+
+    def test_transform_x_is_a_pure_delegate_to_placement_of(self):
+        """
+        清单 §五：位置只有`placement_of`一份实现。
+
+        `transform_x` 从前是第二份表（left=0.2 / right=0.8），而预览真正用的
+        是 `placement_of`（left=0.0 / right=1.0）—— 两条路值不同，测试却只
+        测着旧的死代码。这条等式以后谁改都会被拦。
+        """
+        from storygraph.story.atl import placement_of
+
+        for name in ('left', 'right', 'center', 'truecenter', 'l21', 'f11',
+                     'i11', 'zzz_whatever', ''):
+            assert transform_x(name) == pytest.approx(
+                placement_of(name).x), name
+
+    def test_far_and_f11_now_mean_the_same_direction(self):
+        """`at far` 与 `at f11` 不能再一个居中、一个偏外（清单 §二十）。"""
+        assert transform_x('far') > CENTER_X
+        assert transform_x('far') == pytest.approx(transform_x('f11'))
 
 
 class TestBuildFrames:
@@ -174,18 +199,23 @@ class TestRealChapterPreview:
 
     REAL = r'D:\千连万理\RenPyTest\sr_general\game\chapter\chapter1_3.rpy'
 
-    def _frames(self):
+    def _beats(self):
         from pathlib import Path
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,
                                                      RenPyParser)
         from storygraph.story.beat_build import beats_from_parse_result
-        beats = beats_from_parse_result(
+        return beats_from_parse_result(
             ParseResultBuilder().build(RenPyParser().parse(Path(self.REAL))))
-        return build_frames(beats)
+
+    def _frames(self):
+        return build_frames(self._beats())
 
     def test_builds_all_frames(self):
-        frames = self._frames()
-        assert len(frames) == 305
+        # 帧数 = 拍数，不写死 305：2026-10-23 起 `return` 也是一张控制流拍
+        # （清单 §九），真实章节的每一句 return 都会多一帧"章尾"。
+        beats = self._beats()
+        frames = build_frames(beats)
+        assert len(frames) == len(beats)
 
     def test_positions_are_varied(self):
         """位置散布要合理：全居中说明 transform 推导没起作用。"""

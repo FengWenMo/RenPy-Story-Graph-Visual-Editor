@@ -400,6 +400,16 @@ def compile_beats(beats: list, registry=None, symbols=None,
     # 先把 DSL 文本解释成结构化字段（舞台快照/导出器要用的形态）
     hydrate_from_dsl(beats, symbols)
 
+    # **先补号、再算报表**（2026-10-23，清单 §四）：从前这里用
+    # `line_id or f"{label}.{seq:04d}"` 临时捏一个号 —— 而 `seq` 是**全文**
+    # 连续序号、`line_id` 的号是**label 内**连续序号，多 label 文件里两者
+    # 必然不同。于是同一拍在编译结果表里是 `ch02.0003`、导出 Excel 后变成
+    # `ch02.0001`：同一条台词两个 key，翻译/语音跟着分叉。
+    # 现在补号走唯一实现 `ensure_ids`（不重号、不改已有身份），报表直接用
+    # `beat.line_id`，与 Excel / 协作库看到的是同一个身份。
+    from storygraph.story.beat_model import ensure_ids
+    ensure_ids(beats)
+
     rows = []
     # 菜单按**块**走同一条渲染路径（与 `render_beats_to_rpy` 同一套分组）：
     # 少了这一步，"编译结果表"会把菜单显示成一行行裸语句，而 .rpy 里是
@@ -408,7 +418,7 @@ def compile_beats(beats: list, registry=None, symbols=None,
         if kind == 'menu':
             trace: list = []
             render_menu_block(unit, audit=audit, trace=trace)
-            line_id = unit[0].line_id or f"{unit[0].label}.{unit[0].seq:04d}"
+            line_id = unit[0].line_id or ''
             for item in trace:
                 rows.append({
                     'line_id': line_id,
@@ -423,7 +433,7 @@ def compile_beats(beats: list, registry=None, symbols=None,
         render_beat_to_rpy(beat, audit=audit, trace=trace)
         for item in trace:
             rows.append({
-                'line_id': beat.line_id or f"{beat.label}.{beat.seq:04d}",
+                'line_id': beat.line_id or '',
                 'source': item.get('source', ''),
                 'intent': item.get('intent', ''),
                 'code': item.get('code', ''),

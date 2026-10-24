@@ -46,6 +46,8 @@ from __future__ import annotations
 import ast
 import textwrap
 
+from storygraph.core.indent import indent_width
+
 __all__ = ['analyze_block', 'lift_summary']
 
 #: 这一行为什么不能搬（给界面 / 日志用的人话）
@@ -57,10 +59,6 @@ WHY_COMMENT = '注释留在块里（块里只剩注释就是语法错）'
 WHY_BLANK = '空行'
 WHY_NEAR_COMMENT = '块里这条注释需要留一条语句陪着，所以这一条留在块里'
 WHY_PARSE = '块体不是合法 Python（有语法错 / 非 Python 内容）'
-
-
-def _indent_of(text: str) -> int:
-    return len(text) - len(text.lstrip(' \t'))
 
 
 def _is_blank(text: str) -> bool:
@@ -154,9 +152,9 @@ def analyze_block(lines) -> dict:
     if n == 0 or all(_is_blank(ln) for ln in lines):
         return blank
 
-    anchor = next(_indent_of(ln) for ln in lines if not _is_blank(ln))
+    anchor = next(indent_width(ln) for ln in lines if not _is_blank(ln))
     # 比基准还浅的行：块体本身就不整齐（手工改过），不猜。
-    if any(not _is_blank(ln) and _indent_of(ln) < anchor for ln in lines):
+    if any(not _is_blank(ln) and indent_width(ln) < anchor for ln in lines):
         return dict(blank, why='块体缩进不整齐（有比第一行还浅的行）')
 
     body = textwrap.dedent('\n'.join(lines))

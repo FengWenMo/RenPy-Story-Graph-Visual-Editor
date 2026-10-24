@@ -750,7 +750,10 @@ class FieldCard(QFrame):
             self._values._edit.setFocus()
         self._changed()
 
-    def _on_optional_toggled(self, on: bool):
+    def _on_optional_toggled(self, _on: bool):
+        # `_on` 是 Qt 信号必须接住的参数；**值从控件读**（`data()` 里读
+        # `self._optional.isChecked()`），所以这里不读它。下划线前缀明确
+        # "这是接口参数，不是开关"（清单 §十五）。
         #: 人动过 = 这是**明确的**意思，`data()` 从此把它写出去；
         #: 没动过 = "没说"，由语句头决定默认（show/scene/hide 的属性格可空）。
         self._req_touched = True

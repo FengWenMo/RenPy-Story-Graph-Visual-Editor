@@ -82,6 +82,14 @@ def empty_facts() -> dict:
         },
         'lint': {'parse_errors': [], 'semantic_errors': [], 'program_errors': []},
         'facts': {},
+        #: **缺口记录**（2026-10-23，清单 §六）：某个"声明要采"的 key
+        #: **没取到值**（探针返回 None / 来源根本没给）时，这里写一条
+        #: `{'key': 'images', 'reason': '…'}`。
+        #:
+        #: 为什么不能只是"facts 里没有这个键"：那和"项目真的没有图片"在
+        #: 文件里长得一模一样，下游一句 `value_of(...) or {}` 就变成"没有"。
+        #: 键可以没有值，但"为什么没有"必须在文件里。
+        'gaps': [],
         'derived': {},
         'conflicts': [],
     }
@@ -113,6 +121,19 @@ def source_of(facts: dict, key: str) -> str:
     if isinstance(entry, dict):
         return str(entry.get('source') or '')
     return ''
+
+
+def gaps_of(facts: dict) -> list:
+    """
+    这次采集**没取到**的键（`[{'key','reason'}, …]`；没有 → 空列表）。
+
+    与 `value_of(facts, key, default)` 返回默认值**语义不同**：
+      · `value_of` 返回 `{}` 可能是"项目真的没有"，也可能是"没采到"；
+      · `gaps_of` 非空 = 明确知道"这一项没取到"。
+    调用方要把两者一起用，不能只看值。
+    """
+    return [dict(g) for g in ((facts or {}).get('gaps') or ())
+            if isinstance(g, dict)]
 
 
 def validate_facts(facts) -> list:
@@ -160,6 +181,21 @@ def validate_facts(facts) -> list:
             if k not in coll:
                 problems.append(f'collection 缺 {k}')
 
+    gaps = facts.get('gaps')
+    if gaps is not None:
+        if not isinstance(gaps, list):
+            problems.append('gaps 不是列表')
+        else:
+            for i, gap in enumerate(gaps):
+                if not isinstance(gap, dict):
+                    problems.append(f'gaps[{i}] 不是 {{key, reason}} 结构')
+                    continue
+                if not str(gap.get('key') or ''):
+                    problems.append(f'gaps[{i}] 缺 key')
+                elif gap.get('key') not in FACT_KEYS:
+                    problems.append(f'gaps[{i}] 的 key 不认识：{gap.get("key")!r}')
+                if not str(gap.get('reason') or ''):
+                    problems.append(f'gaps[{i}] 缺 reason —— 没取到也要说清为什么')
     return problems
 
 
@@ -188,6 +224,14 @@ def is_collectable(facts) -> tuple:
     problems = validate_facts(facts)
     if problems:
         return False, '事实结构不合格：' + '；'.join(problems[:3])
+    gaps = facts.get('gaps') or []
+    if gaps:
+        # **部分可用**（2026-10-23，清单 §六）：整份事实仍然是这次采集的
+        # 产物，但有一类资源没取到 —— 不能因为"图片清单缺失"就把属性/候选
+        # 也一并判成不可用，但也绝不能说"全部正常"。
+        names = '、'.join(str(g.get('key') or '') for g in gaps[:4])
+        more = f' 等 {len(gaps)} 项' if len(gaps) > 4 else ''
+        return True, f'部分可用：{names}{more}没取到（详见 gaps）'
     return True, ''
 
 
@@ -854,14 +898,38 @@ def build_facts(payloads: dict, *, engine=None, fingerprint=None,
     out['derived'] = dict(derived or {})
 
     conflicts = []
+    gaps = []
+    payloads = payloads or {}
     for key in FACT_KEYS:
-        entry, found = merge_fact((payloads or {}).get(key))
+        contributions = payloads.get(key)
+        entry, found = merge_fact(contributions)
         if entry is not None:
             out['facts'][key] = entry
             for c in found:
                 c['field'] = key
                 conflicts.append(c)
+            continue
+        if key not in payloads:
+            # 这一轮根本没打算采它（例如 `builtins` 是可选层）——不算缺口。
+            continue
+        # `merge_fact` 把空列表/空字典也当"没有贡献"丢掉了（它对"来源没给"
+        # 和"来源给了空"不敏感）。但事实层必须分得清：
+        #   · `('probe', {})` = **采到了，真的是空** → 写一条空值事实；
+        #   · `('probe', None)` = **没取到** → 写一条缺口记录。
+        kept = [(str(src), val) for src, val in (contributions or ())
+                if val is not None]
+        if kept:
+            out['facts'][key] = {'value': kept[0][1],
+                                 'source': kept[0][0],
+                                 'empty': True}
+        else:
+            gaps.append({
+                'key': key,
+                'reason': ('采集动作没有给出值（探针/引擎 dump 这一项返回 '
+                           'None 或未产出）—— 不能当成"项目里没有"'),
+            })
     out['conflicts'] = conflicts
+    out['gaps'] = gaps
     return out
 
 
@@ -883,7 +951,7 @@ __all__ = [
     'SRC_PROBE', 'SRC_JSON_DUMP', 'SRC_SCANNER', 'SRC_CONFLICT',
     'FACT_KEYS', 'DERIVED_KEYS',
     'empty_facts', 'facts_path', 'validate_facts', 'is_collectable',
-    'value_of', 'source_of', 'attributes_of', 'groups_of', 'candidates_of',
+    'value_of', 'source_of', 'gaps_of', 'attributes_of', 'groups_of', 'candidates_of',
     'grouped_choices', 'group_conflicts', 'rename_overlay', 'unrecognized_attrs',
     'unrecognized_by_tag',
     'table_vs_engine', 'diff_facts',

@@ -18,12 +18,19 @@ Qt（PySide6）版桌面应用入口 —— **剧情结构图 + 卡片界面**�
 
 它**不再是"另一个入口"**：`python main.py` 走的就是这里（tkinter 版
 已于 2026-10-01 彻底移除）。保留本模块只为兼容
-`python -m storygraph.main_qt` 这种老用法。
+`python -m storygraph.main_qt` 和 `python storygraph/main_qt.py`
+这种从包内启动的用法。
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+# 允许 `python storygraph/main_qt.py` 直接跑：脚本方式下 `sys.path[0]`
+# 是 `storygraph/` 而不是仓库根，`import storygraph...` 会直接
+# ModuleNotFoundError。包方式（`python -m storygraph.main_qt`）不走这里。
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from storygraph.core.safeguard import swallow
 
@@ -111,6 +118,19 @@ def main(argv=None) -> int:
     root, script, source = _guess_project_root(argv)
     app = QApplication(sys.argv[:1])
     app.setApplicationName('剧情编辑器（Qt 版）')
+
+    # ⚠ **退出前等后台线程收尾**（2026-10-24，实测到的 access violation）：
+    #   `thumb_loader._schedule_cache_prune` 把缩略图缓存清理丢进
+    #   `QThreadPool.globalInstance()`。窗口关掉之后那个线程可能还在跑，
+    #   进程退出时 GC 撞上它就是 `access violation`（6 个窗口的测试组合
+    #   稳定复现）。这里给最多 2 秒，超时也照常退出 —— 清理只是磁盘卫生。
+    try:
+        from PySide6.QtCore import QThreadPool
+        app.aboutToQuit.connect(
+            lambda: QThreadPool.globalInstance().waitForDone(2000))
+    except Exception as e:                    # noqa: BLE001 - 清理失败不该拦启动
+        from storygraph.core.safeguard import swallow
+        swallow('main_qt.wait_threads_at_exit', e)
 
     from storygraph.core import session_store as SS
     from storygraph.ui_qt.main_window import open_editor

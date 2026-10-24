@@ -39,6 +39,10 @@ WRITERS = {
         '改名补丁（`asset_extensions.apply_rename_patch`）落盘时调的那一处'
         '（P1-2：从前 `write_text` 会改 CRLF、且非原子）。',
     'app/session_graph.py::save_layout': '写布局 JSON（不是脚本）',
+    'app/layout_store.py::save_placement':
+        '写**版式**（`.storygraph/layout.json`：只有坐标 + 手工草图边，'
+        '2026-10-23 W1a 从"整图快照"拆出来）。**不是脚本**、不过 generation_guard；'
+        '原子替换；不写进 `game/`',
     'assets/asset_extensions.py::save': '写扩展配置 JSON',
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
     'pipeline/build.py::build_project': '写构建报告 JSON',

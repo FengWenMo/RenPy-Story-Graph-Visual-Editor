@@ -85,8 +85,13 @@ def fingerprint(root: Path = REAL):
             rec['via_excel'] = _rec(merge_incrementally(back, gen2,
                                                         source_path=src))
             # ③ edited（每 7 条改一次文案 —— 确定性）
+            #
+            # 只改**台词/旁白**：`return` 现在也是一张 flow 拍（清单 §九），
+            # 把它的下标算进 `j % 7` 会让"改哪几条"随 return 数量漂移；
+            # 菜单标题/选项也不是这个探针要压的配对逻辑。
             for j, b in enumerate(back):
-                if j % 7 == 3 and getattr(b, 'text', ''):
+                if (j % 7 == 3 and getattr(b, 'kind', '') in ('say', 'narration')
+                        and getattr(b, 'text', '')):
                     b.text = b.text + 'X'
             gen3 = compile_beats(back).rpy_text
             rec['edited'] = _rec(merge_incrementally(back, gen3,

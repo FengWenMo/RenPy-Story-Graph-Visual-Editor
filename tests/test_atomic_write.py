@@ -85,6 +85,36 @@ class TestWriteTextAtomic:
         assert target.read_bytes() == old, '失败时把目标写坏了'
         assert [p.name for p in tmp_path.iterdir() if '.tmp-' in p.name] == []
 
+    def test_unicode_encode_error_also_cleans_up(self, tmp_path):
+        """
+        `UnicodeEncodeError` 是 `ValueError` 子类，不会被 `except OSError`
+        接住 —— 从前会留下 `.xxx.tmp-<pid>`（写进 game/ 就是垃圾文件）。
+        """
+        target = tmp_path / 'a.rpy'
+        with pytest.raises(UnicodeEncodeError):
+            write_text_atomic(target, 'label a:\n    e "\ud800"\n')
+        assert not target.exists()
+        assert [p.name for p in tmp_path.iterdir() if '.tmp-' in p.name] == []
+
+    def test_temp_name_is_unique_within_one_process(self, tmp_path,
+                                                     monkeypatch):
+        """tmp 名只带 pid 时，同进程两个线程写同一目标会撞同一个 tmp 名。"""
+        import builtins
+
+        seen = []
+        real_open = builtins.open
+
+        def fake_open(name, *a, **kw):
+            seen.append(str(name))
+            return real_open(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, 'open', fake_open)
+        target = tmp_path / 'a.rpy'
+        write_text_atomic(target, 'x')
+        write_text_atomic(target, 'y')
+        tmps = [name for name in seen if '.tmp-' in name]
+        assert len(tmps) == 2 and len(set(tmps)) == 2, tmps
+
 
 class TestGenerationGuardUsesIt:
 

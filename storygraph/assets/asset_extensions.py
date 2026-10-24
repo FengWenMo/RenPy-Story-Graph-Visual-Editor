@@ -21,7 +21,7 @@ from storygraph.core.safeguard import swallow
 import json
 import re
 import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, Optional
@@ -570,37 +570,15 @@ class AssetPanelModel:
           'category' 按 Category -> Tag 分组
           'tag'      按 Tag -> Category 分组
           'folder'   按文件夹路径分组
-        返回：{ group: { subgroup: [asset_id, ...] } }
+          'type'     按资产类型分组
+
+        2026-10-23（清单 §十七）：与 `app.asset_panel` 共用
+        `assets.asset_tree.group_assets` 这一份实现。从前两份复制，
+        这里少了 `type` 分支 —— 同一个参数静默给出两棵不同的树。
         """
-        tree = defaultdict(lambda: defaultdict(list))
+        from storygraph.assets.asset_tree import group_assets
 
-        for aid, row in self.registry.images.items():
-            if group_by == 'category':
-                g = row.get('Category', 'other') or 'other'
-                sg = row.get('Tag', '') or '_'
-            elif group_by == 'tag':
-                g = row.get('Tag', '') or '_'
-                sg = row.get('Category', 'other') or 'other'
-            elif group_by == 'folder':
-                path = row.get('Path', '')
-                # 用 posix 分隔符：Windows 上 str(Path(...)) 会给出反斜杠，
-                # 同一张表在不同平台会长出不同的分组 key。
-                g = str(PurePosixPath(path).parent) if path else '_'
-                sg = row.get('Category', 'other') or 'other'
-            else:
-                g, sg = 'other', '_'
-            tree[g][sg].append(aid)
-
-        # 音频按类别聚合
-        for name, label in [('music', 'music'), ('sounds', 'sound')]:
-            data = getattr(self.registry, name, {})
-            for aid in data:
-                tree[label]['_'].append(aid)
-
-        return {
-            g: {sg: sorted(ids) for sg, ids in subgroups.items()}
-            for g, subgroups in tree.items()
-        }
+        return group_assets(self.registry, group_by)
 
     # ---------- 详情 ----------
     def get_detail(self, asset_id: str) -> Optional[dict]:

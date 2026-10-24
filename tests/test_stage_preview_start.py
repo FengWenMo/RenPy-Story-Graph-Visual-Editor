@@ -49,16 +49,12 @@ def _frames(n=6):
     return build_frames(beats)
 
 
-@pytest.mark.parametrize('start,expected', [
-    (0, 0),
-    (3, 3),
-    (5, 5),      # 最后一拍
-    (99, 5),     # 越界 → 夹到最后一拍
-    (-4, 0),     # 负数 → 0
-])
-def test_window_starts_at_the_given_frame(qapp, start, expected):
+@pytest.mark.parametrize('start', [0, 3, 5, 99, -4])
+def test_window_starts_at_the_given_frame(qapp, start):
     from storygraph.ui_qt.stage_preview import StagePreviewWindow
     frames = _frames(6)
+    # `_frames(6)` 现在是 7 帧（6 句台词 + 一条 return 拍）；最后一拍不是写死的 5。
+    expected = min(max(int(start), 0), len(frames) - 1)
     win = StagePreviewWindow(None, frames, sound=False, start_index=start,
                              real_images=False)
     try:

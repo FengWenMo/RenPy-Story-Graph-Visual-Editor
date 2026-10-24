@@ -1,0 +1,12 @@
+{
+  "sample": "shape_a_triple",
+  "placement": {
+    "declarations": "game/definitions.rpy",
+    "control_flow": "game/chapter/chapter_controller.rpy",
+    "content_globs": [
+      "game/chapter/chapter*.rpy"
+    ],
+    "declaration_style": "dedicated"
+  },
+  "notes": "声明专用文件 + 独立 controller + 嵌套目录 + snake_case + _control 生成物"
+}

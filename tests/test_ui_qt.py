@@ -414,6 +414,17 @@ class TestKeyboardActuallyWorks:
                     widget=window._panel._text)
         assert window.beats[0].text == '键盘保存', 'Ctrl+S 没保存'
 
+    def test_ctrl_shift_s_on_card_page_exports_the_script(self, app, window,
+                                                          monkeypatch):
+        """清单 §八：至少给一个"真的会落盘"的快捷键（Ctrl+Shift+S）。"""
+        window._show_index(0)
+        called = []
+        monkeypatch.setattr(window, 'export_script',
+                            lambda *a, **k: called.append('export'))
+        self._press(app, window, Qt.Key_S,
+                    Qt.ControlModifier | Qt.ShiftModifier)
+        assert called == ['export'], 'Ctrl+Shift+S 没有触发导出'
+
     def test_enter_pages_to_next_beat(self, app, window):
         window._show_index(0)
         self._press(app, window, Qt.Key_Return)
@@ -498,12 +509,25 @@ class TestKeyboardIsPageScoped:
         assert window._stack.currentWidget() is not \
             window._stack.widget(window.PAGE_CARD)
 
-    def test_ctrl_s_does_nothing_on_structure_page(self, app, window):
+    def test_ctrl_s_does_nothing_to_the_hidden_card_on_structure_page(self,
+                                                                      app,
+                                                                      window,
+                                                                      monkeypatch):
+        """
+        结构页 Ctrl+S = **导出 .rpy**，不是把隐藏卡片页的表单写进内存。
+
+        `export_script` 只在卡片页 `apply_current_beat()`；这里把导出动作
+        本身替换掉（避免弹文件对话框），只钉"表单没被写"。
+        """
         window._show_index(0)
         window._panel.set_text('结构页改的')
+        called = []
+        monkeypatch.setattr(window, 'export_script',
+                            lambda *a, **k: called.append('export'))
         self._press(app, window, Qt.Key_S, Qt.ControlModifier)
+        assert called == ['export'], '结构页 Ctrl+S 没走导出'
         assert window.beats[0].text != '结构页改的', \
-            '结构页上 Ctrl+S 把卡片内容写进去了'
+            '结构页上 Ctrl+S 把隐藏卡片的表单写进去了'
 
     def test_card_actions_are_disabled_on_the_structure_page(self, window):
         """
@@ -1937,14 +1961,17 @@ class TestCanvasGroupAndPickerGrid:
         assert 'label ch_a_control:' in text and 'call ch_a' in text
         assert '[控制流]' in window._console.toPlainText()
 
-    def test_ctrl_s_on_the_structure_page_saves_the_layout(self, window,
-                                                          monkeypatch):
-        """旧版 Ctrl+S = 保存布局；结构页要接上（卡片页的 Ctrl+S 是保存这一拍）。"""
+    def test_ctrl_shift_l_on_the_structure_page_saves_the_layout(self, window,
+                                                                  monkeypatch):
+        """
+        Ctrl+Shift+L = 保存布局（2026-10-23 起；Ctrl+S 不再占用"保存"）。
+        """
         called = []
         monkeypatch.setattr(window, 'save_layout',
                             lambda *a, **k: called.append('save'))
         window._set_page(window.PAGE_GRAPH)
-        QTest.keyClick(window, Qt.Key_S, Qt.ControlModifier)
+        QTest.keyClick(window, Qt.Key_L,
+                       Qt.ControlModifier | Qt.ShiftModifier)
         assert called == ['save']
 
     def test_refresh_choices_button_logs(self, window, project):
@@ -3169,6 +3196,9 @@ class TestAddingASpriteReachesTheFile:
     def test_the_sprite_lands_in_the_original_file(self, window, project,
                                                    monkeypatch):
         window.open_project_path(project)
+        # 2026-10-23：`export_script` 只在**卡片页**才提交隐藏表单
+        # （结构页的 Ctrl+S 现在也会走到导出，不许写用户看不见的卡片）。
+        window._set_page(window.PAGE_CARD)
         # `ch01_class` 那一拍：只有一句台词，没有任何立绘（mary 从没登场过）
         idx = next(i for i, b in enumerate(window._session.beats)
                    if b.label == 'ch01_class' and b.kind == 'say')
@@ -3185,7 +3215,8 @@ class TestAddingASpriteReachesTheFile:
         window.export_script()                    # ← 从前这里 NameError
 
         text = target.read_text(encoding='utf-8')
-        assert any(ln.strip() == 'show mary smile'
+        # 允许带 `at right`（卡片的默认站位是表格契约的一部分，不是本用例要管的事）
+        assert any(ln.strip().startswith('show mary smile')
                    for ln in text.splitlines()), (
             '加了立绘，导出后文件里却没有这条 show：\n'
             + '\n'.join(ln for ln in text.splitlines()

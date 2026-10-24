@@ -90,7 +90,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_recovery')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_script_dirty', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_recovery')
 
     def _show_analysis_text(self, text: str):
         """
@@ -642,7 +642,52 @@ class GraphOpsMixin:
                f'音效 {c["sounds"]} · 语音 {c["voices"]} · '
                f'角色 {c["characters"]}；'
                f'剧情图**不受影响**，要加章节请用「➕ 导入章节 .rpy」'))
+        # 打开项目之后：把上次的剧情图重建出来（L7 完整版，2026-10-24）。
+        # 放在最后：资源表读完了、状态栏也写了，这一步只加图。
+        try:
+            self._restore_graph_files()
+        except Exception as e:               # noqa: BLE001 - 恢复失败不该挡打开项目
+            swallow('ui_qt.open_project_path.restore_graph', e)
         return res
+
+    def _restore_graph_files(self) -> int:
+        """
+        把**上次导入剧情图的那批文件**重新导进来（L7 完整版的落点）。
+
+        ## 为什么非有这一步
+
+        W1b 只在"导入章节之后"贴版式。可**重开软件时图是空的** ——
+        没有节点可贴，版式照样用不上，用户看到的还是"上次摆好的又没了"。
+        有了这一步：打开项目 → 自动重建同一张图 → 贴版式 → 真的回来了。
+
+        三条前提，缺一不做：
+          · 图必须是**空的**（用户手上已有工作时不许自动重置）；
+          · `auto_open` 开着（关掉记忆的人就是不想要这个）；
+          · 记录里的文件**现在还在**（删了/改名的跳过，不硬塞空节点）。
+        """
+        if self.graph is not None and getattr(self.graph, 'nodes', None):
+            return 0                     # 已经有图 → 不动
+        root = getattr(self, '_project_root', None)
+        if not root:
+            return 0
+        try:
+            from storygraph.core import session_store as SS
+            if not bool(SS.load().get('auto_open', True)):
+                return 0
+            files = SS.graph_files(root)
+        except Exception as e:               # noqa: BLE001 - 记不住就当没记过
+            swallow('ui_qt.window_graph_ops._restore_graph_files.read', e)
+            return 0
+        if not files:
+            return 0
+        self._log(f'[剧情图] 正在恢复上次的 {len(files)} 个章节文件…')
+        try:
+            self.import_chapter_files(files)
+        except Exception as e:               # noqa: BLE001
+            swallow('ui_qt.window_graph_ops._restore_graph_files.import', e)
+            self._log(f'[剧情图] ⚠ 恢复失败：{e}')
+            return 0
+        return len(files)
 
     def check_asset_health(self):
         """
@@ -870,6 +915,15 @@ class GraphOpsMixin:
                                                       old_graph))
         except Exception:                       # noqa: BLE001
             self._set_graph(res['graph'])
+        # —— 贴上次的版式（W1b）：扫描结果为准，只把坐标贴上去 ——
+        # 放在 `set_graph` / 撤销命令**之后**：先让图按自动排版成形，再覆盖坐标。
+        placed = self._apply_saved_placement()
+        if placed.get('matched'):
+            extra = (f'；{len(placed["missing"])} 个版式条目找不到对应章节（按自动排版）'
+                     if placed.get('missing') else '')
+            self._log(f'[版式] 用上次的位置摆了 {placed["matched"]} 个模块{extra}')
+        elif placed.get('reason') and placed.get('reason') != '这个项目还没有版式文件':
+            self._log(f'[版式] 没有套用上次的位置：{placed["reason"]}')
         try:
             self._panel.set_symbols(self._session.symbols)
             self._refresh_asset_choices()
@@ -945,6 +999,14 @@ class GraphOpsMixin:
         # 这里必须把"还缺哪个文件"说出来，并给出一键补全的入口。
         self._report_missing_chapters(res['graph'])
         self._set_page(self.PAGE_GRAPH)
+        # 记住"这个项目的图由哪些文件组成"（L7）：下次打开项目靠它重建图，
+        # 再贴版式 —— 否则重开软件后图是空的，版式无从可贴。
+        try:
+            from storygraph.core import session_store as SS
+            SS.remember_graph_files(
+                self._project_root, self._session.graph_files(self.graph))
+        except Exception as e:               # noqa: BLE001 - 记不住不影响本次导入
+            swallow('ui_qt.import_chapter_files.remember', e)
         return res
     def import_plain_text(self):
         """
@@ -1271,7 +1333,7 @@ class GraphOpsMixin:
                     swallow('main_window._after_learn_refresh.groups')
     def save_layout(self, target=None):
         """
-        保存布局 JSON（Ctrl+S）。没给路径就弹「另存为」。
+        保存布局 JSON（Ctrl+Shift+L）。没给路径就弹「另存为」。
 
         语义在 `EditorSession.save_layout`（格式与旧版逐字段一致）。
         """
@@ -1430,9 +1492,31 @@ class GraphOpsMixin:
         res = self._session.export_control_flow(self.graph, target,
                                                 wrapper=wrapper)
         if not res.get('ok'):
-            self._log(f'[控制流] 导出失败：{res.get("error")}')
-            self._status(f'导出控制流失败：{res.get("error")}')
-            return ''
+            # **手写内容确认**（P1-1）：缺章 / 外来 label 那两条不给覆盖，
+            # 只有"`_control` 块里有不像工具生成的行"才允许用户看过再覆盖。
+            plan = res.get('plan') or {}
+            manual = list(plan.get('manual_lines') or [])
+            if plan.get('forceable') and manual:
+                shown = '\n'.join(
+                    f"  {m.get('label', '')} 第 {m.get('line', '?')} 行："
+                    f"{m.get('text', '')}" for m in manual[:12])
+                more = (f'\n  …… 还有 {len(manual) - 12} 行'
+                        if len(manual) > 12 else '')
+                ans = QMessageBox.question(
+                    self, '覆盖手写内容？',
+                    '这个控制流文件里有一些**不像工具生成**的行：\n\n'
+                    f'{shown}{more}\n\n'
+                    '导出会整份重新生成，上面这些行会**永久消失**。\n'
+                    '确定要覆盖吗？（建议先把它们挪到别的文件）',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if ans == QMessageBox.Yes:
+                    res = self._session.export_control_flow(
+                        self.graph, target, wrapper=wrapper,
+                        allow_overwrite=True)
+            if not res.get('ok'):
+                self._log(f'[控制流] 导出失败：{res.get("error")}')
+                self._status(f'导出控制流失败：{res.get("error")}')
+                return ''
         name = Path(res['path']).name
         self._log(f'[控制流] 已生成 {res["count"]} 个标签'
                   f'（{res.get("mode", "")}）→ '
@@ -1453,6 +1537,27 @@ class GraphOpsMixin:
             n += combo.count() if isinstance(combo, QComboBox) else 0
         self._log(f'[资源] 已从资源表重读下拉候选（背景/音乐/语音共 {n} 条）')
         self._status(f'🔄 下拉候选已刷新（共 {n} 条）')
+    def focus_edges_on_selected(self):
+        """
+        "只看选中模块的连线"（D3，2026-10-24）。**纯视图**。
+
+        用户想"把图清干净"时，第一反应是删线 —— 可删线在 S1 之后会删剧本那一行。
+        所以这里只改可见性：一个字节不动，再点一次就恢复。
+        """
+        nid = self._canvas.selected_node_id()
+        if nid is None:
+            self._status('先在图上点一个模块，再开「只看它的连线」。')
+            return
+        res = self._canvas.set_edge_focus(nid)
+        if res.get('focus') is None:
+            self._status(f'已恢复全部连线（{res.get("total", 0)} 条）。')
+            return
+        node = (self.graph.nodes or {}).get(nid) if self.graph else None
+        name = str(getattr(node, 'label_name', '') or nid)
+        self._status(f'只看「{name}」的连线：'
+                     f'{res.get("shown", 0)} / {res.get("total", 0)} 条'
+                     f'（再点一次这个菜单恢复，图上什么都没删）')
+
     def _more_tools_menu(self) -> 'QMenu':
         """
         建「更多工具」菜单（**只建不弹**）。
@@ -1466,6 +1571,7 @@ class GraphOpsMixin:
         menu.addAction('⤓ 导出到其他引擎（Unity / Godot / JSON / CSV）…',
                        self.export_other_engine)
         menu.addAction('📈 资产 / 角色统计…', self.show_asset_overview)
+        menu.addAction('🔍 只看选中模块的连线 / 恢复', self.focus_edges_on_selected)
         menu.addAction('✅ 校验当前章节（三级校验）', self.validate_current_script)
         menu.addAction('➕ 补登缺失资源（扫描磁盘 → 写进资产表）…',
                        self.register_missing_assets)
@@ -1760,7 +1866,10 @@ class GraphOpsMixin:
             if dirty == self._graph_dirty:
                 return
             self._graph_dirty = dirty
-            self.setWindowTitle(('● ' if dirty else '') + self._base_title)
+            prefix = ('* ' if bool(getattr(self, '_script_dirty', False))
+                      else '')
+            prefix += ('● ' if dirty else '')
+            self.setWindowTitle(prefix + self._base_title)
             try:
                 self._status_bar.set_layout_dirty(
                     dirty, str(self._last_layout_path or ''))
@@ -1776,21 +1885,82 @@ class GraphOpsMixin:
             self._graph_saved_sig = layout_signature(self.graph)
             self._last_layout_path = str(path or '')
             self._graph_dirty = False
-            self.setWindowTitle(self._base_title)
+            prefix = ('* ' if bool(getattr(self, '_script_dirty', False))
+                      else '')
+            self.setWindowTitle(prefix + self._base_title)
             self._status_bar.set_layout_dirty(False, str(path or ''))
         except Exception as e:                  # noqa: BLE001
             swallow('ui_qt.window_graph_ops.mark_graph_saved', e)
 
-    def _layout_save_target(self):
-        """关窗保存布局的默认位置：项目根目录下的 `storygraph_layout.json`。"""
+    def _apply_saved_placement(self) -> dict:
+        """
+        把上次的版式**贴**到当前图上（W1b，2026-10-23）。
+
+        ## 为什么不复用 `load_layout`
+
+        `load_layout` 是"整图替换"：拿一份旧快照盖掉当前图，新增的章会消失
+        （实测）。这里做的是**另一件事**：扫描出来的图是权威，版式只提供
+        `file::label → (x, y)`，贴完还缺的节点留在自动排版给的位置。
+
+        ## 什么时候调
+
+        导入章节之后（`import_chapter_files`）。打开项目本身不生成图，
+        所以那里没有可贴的对象 —— 这不是偷懒，是"打开项目只读资源表"的既有约定。
+
+        失败一律静默：版式是增强，读不出来不该拦住导入。
+        """
+        from storygraph.app.layout_store import (
+            apply_placement, find_existing, read_placement,
+        )
+        empty = {'ok': False, 'matched': 0, 'missing': [], 'reason': ''}
         root = getattr(self, '_project_root', None)
-        if not root:
-            return None
-        return Path(str(root)) / 'storygraph_layout.json'
+        if not root or self.graph is None or not getattr(self.graph, 'nodes', None):
+            return empty
+
+        try:
+            path = find_existing(root)
+            if path is None:
+                return {**empty, 'reason': '这个项目还没有版式文件'}
+            data = read_placement(path, root)
+            if not data.get('ok'):
+                return {**empty, 'reason': str(data.get('error') or '')}
+            res = apply_placement(self.graph, data, root)
+            if res.get('matched'):
+                self._set_graph(self.graph, keep_view=False)
+                # 贴完就是"和磁盘一致"：不能因为恢复版式就把图标成未保存。
+                self._mark_graph_saved(str(path))
+            res['path'] = str(path)
+            res['migrated'] = bool(data.get('migrated'))
+            return res
+        except Exception as e:                   # noqa: BLE001 - 版式坏了不该挡导入
+            swallow('ui_qt.window_graph_ops._apply_saved_placement', e)
+            return {**empty, 'reason': str(e)}
+
+    def _layout_save_target(self):
+        """
+        自动保存版式的位置：`<项目>/.storygraph/layout.json`（W1a，2026-10-23）。
+
+        为什么换了位置：旧的 `storygraph_layout.json` 躺在项目根，和
+        `storygraph.rules.json` / `storygraph.engine_facts.json` 挤在一起，
+        而那几份是"项目配置"，这一份只是"我摆的样子"——**审美不该占项目的根**。
+        读取时仍然兼容旧位置（见 `layout_store.find_existing`）。
+        """
+        from storygraph.app.layout_store import default_paths
+        new, _legacy = default_paths(getattr(self, '_project_root', None))
+        return new
 
     def _save_layout_to(self, target) -> dict:
-        """把当前图写到 `target`；成功才把状态栏切回"已保存"。"""
-        res = self._session.save_layout(self.graph, Path(target))
+        """
+        把版式写到 `target`；成功才把状态栏切回"已保存"。
+
+        W1a 起写的是**瘦格式**（只有坐标 + 手工草图边），不再把
+        `operations` / `statements` 塞进版式文件 —— 那是内容，会过期，
+        而且实测会让文件大几十倍。撤销仍然用完整的内存快照（`layout_dict`），
+        两者刻意分开。
+        """
+        from storygraph.app.layout_store import save_placement
+        res = save_placement(self.graph, Path(target),
+                             getattr(self, '_project_root', None))
         if res.get('ok'):
             self._mark_graph_saved(str(res['path']))
         else:
@@ -1810,7 +1980,11 @@ class GraphOpsMixin:
         nodes = len(getattr(self.graph, 'nodes', None) or {})
         if not root or not nodes:
             return True
-        self._save_layout_to(Path(root) / 'storygraph_layout.json')
+        # 落点与手动保存**同一处判定**（`_layout_save_target`）：两处各写一个
+        # 路径，迟早出现"自动保存在这、手动保存在那"的双份版式。
+        target = self._layout_save_target()
+        if target is not None:
+            self._save_layout_to(target)
         return True
 
     def _ask_close_graph_action(self) -> str:
@@ -2092,7 +2266,12 @@ class GraphOpsMixin:
         if not self._history.undo_stack:
             self._status('没有可撤销的图操作。')
             return
-        self._history.undo()
+        try:
+            self._history.undo()
+        except Exception as e:                # noqa: BLE001 - 文件被别人改过时不许崩
+            self._log(f'[撤销] 失败：{e}')
+            self._status(f'撤销没做完：{e}')
+            return
         self._set_graph(self.graph)
         self._sync_history_buttons()
         self._log('[撤销] 已撤销上一步图操作')
@@ -2102,7 +2281,12 @@ class GraphOpsMixin:
         if not self._history.redo_stack:
             self._status('没有可重做的图操作。')
             return
-        self._history.redo()
+        try:
+            self._history.redo()
+        except Exception as e:                # noqa: BLE001
+            self._log(f'[重做] 失败：{e}')
+            self._status(f'重做没做完：{e}')
+            return
         self._set_graph(self.graph)
         self._sync_history_buttons()
         self._log('[重做] 已重做上一步图操作')

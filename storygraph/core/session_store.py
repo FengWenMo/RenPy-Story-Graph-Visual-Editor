@@ -407,6 +407,73 @@ def set_auto_open(on: bool, path=None) -> dict:
     return save(data, path)
 
 
+def remember_graph_files(root, files, path=None) -> dict:
+    """
+    记住"这个项目的剧情图上导入了哪些文件"（L7 完整版，2026-10-24）。
+
+    ## 为什么需要
+
+    W1b 只在"导入章节之后"贴版式 —— 可是**重开软件时图是空的**，
+    没有节点可贴，版式照样用不上。用户看到的就是"上次摆好的又没了"。
+
+    记住这批文件之后，下次打开项目可以**自动重建同一张图**，
+    再贴版式，于是"摆好的版式"真的回来了。
+
+    ## 形状
+
+    存项目内**相对路径**（换机器、换盘符都还在），落在用户级会话表的
+    `projects[键].graph_files`；也可以被项目根的 `storygraph.session.json`
+    覆盖（团队共用一份时）。
+
+    空表也要写：它表示"这个项目确实没有图"，和"从没记过"不是一回事。
+    """
+    root_s = str(root or '')
+    if not root_s:
+        return {'ok': False, 'reason': '没给项目根', 'count': 0}
+    rels = []
+    for fp in (files or ()):
+        text = str(fp or '').strip()
+        if not text:
+            continue
+        try:
+            rel = Path(text).resolve().relative_to(Path(root_s).resolve())
+            rels.append(rel.as_posix())
+        except (ValueError, OSError):
+            rels.append(Path(text).as_posix())     # 项目外的文件：原样记
+    seen, ordered = set(), []
+    for rel in rels:
+        if rel not in seen:
+            seen.add(rel)
+            ordered.append(rel)
+    res = remember_project(root_s, layout={'graph_files': ordered}, path=path)
+    res['count'] = len(ordered)
+    return res
+
+
+def graph_files(root, path=None) -> list:
+    """
+    读回"上次导入剧情图的文件"，**绝对路径、按记录顺序**。
+
+    文件已经不存在的**不返回**（那是被删/改名了，硬塞回去只会多出空节点）；
+    调用方拿到的就是"现在还能用的那批"。
+    """
+    root_s = str(root or '')
+    if not root_s:
+        return []
+    rels = project_layout(root_s, path).get('graph_files') or []
+    out = []
+    base = Path(root_s)
+    for rel in rels:
+        p = Path(str(rel))
+        full = p if p.is_absolute() else (base / p)
+        try:
+            if full.is_file():
+                out.append(str(full))
+        except OSError:
+            continue
+    return out
+
+
 def remember_cards(root, rel, folded) -> dict:
     """
     把**一个文件**的折叠状态写进项目根那份 `storygraph.session.json`。
@@ -618,5 +685,6 @@ __all__ = ['PROJECT_FILE', 'MAX_RECENT', 'VERSION', 'config_path', 'disabled',
            'set_enabled', 'enabled',
            'load', 'save', 'project_layout', 'last_project', 'recent_projects',
            'remember_project', 'set_auto_open', 'forget',
+           'remember_graph_files', 'graph_files',
            'normalize_geometry', 'normalize_sizes', 'layout_from',
            'resolve_chapter']

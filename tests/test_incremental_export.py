@@ -720,13 +720,14 @@ class TestStructureFillerBeats:
     13 拍、尾部 `label ch01_end: return` → 实测中招。）
     """
 
-    #: 一张有内容的拍 + 一个空 label（补空拍）+ 终点 label
+    #: 一张有内容的拍 + 一个空 label（补空拍）
+    #: ⚠ 2026-10-23：`return` 现在是一张控制流拍，不再触发"补空拍"；
+    #: 这条用例改用**真的空 label**（只有 `label ch01_end:`）来保留覆盖。
     FILLER = ('label ch01:\n'
               '    e "开场"  # 备注：开场\n'
               '    return\n'
               '\n'
-              'label ch01_end:\n'
-              '    return\n')
+              'label ch01_end:\n')
 
     def test_a_filler_label_does_not_refuse_the_patch(self, write_rpy):
         fp, beats = _beats_of(write_rpy, self.FILLER)

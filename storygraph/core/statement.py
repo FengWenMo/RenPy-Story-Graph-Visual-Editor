@@ -589,10 +589,13 @@ class Statement:
         )
 
     @classmethod
-    def make_return(cls, condition='', source=('', 0)):
+    def make_return(cls, condition='', source=('', 0), value=''):
+        payload = {}
+        if str(value or '').strip():
+            payload['value'] = str(value).strip()
         return cls(
             kind=StatementKind.RETURN,
-            payload={},
+            payload=payload,
             condition=condition,
             source=source,
             content_hash='',

@@ -120,10 +120,12 @@ class ChapterDocument:
         self.sync()
         return self
 
-    def insert_beat(self, beat, at: int, inherit: bool = True) -> int:
+    def insert_beat(self, beat, at: int, inherit: bool = True,
+                    before: bool = False) -> int:
         """在扁平位置 `at` 插一拍（落点/结构位由树决定），返回新下标。"""
         self._ensure_tree()
-        index = self.tree.insert_beat(beat, at, inherit=inherit)
+        index = self.tree.insert_beat(beat, at, inherit=inherit,
+                                      before=before)
         self.beats = self.tree.flatten()
         return index
 

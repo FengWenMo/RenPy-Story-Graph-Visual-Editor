@@ -1,0 +1,16 @@
+{
+  "sample": "shape_c_scattered",
+  "placement": {
+    "declarations": [
+      "game/chapter1.rpy",
+      "game/chapter2.rpy",
+      "game/chapter3.rpy"
+    ],
+    "control_flow": "",
+    "content_globs": [
+      "game/chapter*.rpy"
+    ],
+    "declaration_style": "mixed_with_content"
+  },
+  "notes": "声明散落各文件（与内容同文件）+ 内联 jump + 扁平 + snake + 无生成物"
+}

@@ -73,6 +73,12 @@ def unique_ids(beats) -> bool:
 
     返回"有没有改过"。空 ID **不在这里补** —— 补号需要知道 `label`，
     属于调用方的事（`beat_model.assign_identity` / `editor._renumber`）。
+
+    ⚠ 重发号用**这一拍自己的 `label`**，不拿 ID 前缀反推章名
+    （2026-10-23，清单 §十六）。契约 R7 说"跨 label 搬不改 ID"，所以
+    `ch01.0003` 出现在 `ch02` 名下是合法的；ID 前缀只是**历史来源**，
+    不是当前归属。从前这里写 `parse(lid)[0]`，于是搬过去的行重号后
+    又挂回 `ch01` —— 与 `editor._renumber` 是同一个病的第二个入口。
     """
     seen = set()
     changed = False
@@ -81,7 +87,12 @@ def unique_ids(beats) -> bool:
         if not lid:
             continue
         if lid in seen:
-            new = allocate(seen, parse(lid)[0] if parse(lid) else 'start')
+            # 优先用拍自己的 label；老对象没有 label 属性时才退回 ID 前缀。
+            label = str(getattr(beat, 'label', '') or '').strip()
+            if not label:
+                got = parse(lid)
+                label = got[0] if got else 'start'
+            new = allocate(seen, label)
             beat.line_id = new
             seen.add(new)
             changed = True

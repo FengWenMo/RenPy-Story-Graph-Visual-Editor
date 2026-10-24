@@ -491,11 +491,18 @@ def _emit_text_line(beat, speaker, emit) -> None:
             emit(f"{_quote(beat.text)}{suffix}", '台词', beat.text)
 
 
-def render_beat_to_rpy(beat: Beat, indent: str = '    ',
+def render_beat_to_rpy(beat: Beat,
                        name_resolver=None, audit=None,
                        trace: list = None) -> list:
     """
-    一个 Beat 渲染成 Ren'Py 语句。返回不带换行符的字符串列表。
+    一个 Beat 渲染成 Ren'Py 语句。返回**不带外层缩进**的字符串列表
+    （每行内部的相对缩进保留；外层层级由调用方加，见 `_indent_beat_lines`）。
+
+    ⚠ 2026-10-23（清单 §十）：这里从前有一个 `indent='    '` 参数，
+    签名/文档上像是"控制缩进"，但函数体**一次都没读过它** —— 而
+    `_indent_beat_lines` 真的在传 `indent=''` 想拿无缩进原文，拿到的是
+    "内部函数各自决定"的缩进，再量一次 base 平移。假旋钮被删掉了：
+    "缩进"在这条链上只有一个负责人 —— 调用方（`indent + ln`）。
 
     两条输入形态、两条通道：
 
@@ -1887,7 +1894,7 @@ def _indent_beat_lines(beat, indent: str, audit, trace: list) -> list:
     全项目丢失数变多或让解析异常从 0 涨到 5**，所以保持现状。
     这是**纯排版**：括号内换行的缩进在 Python 里自由，语义完全等价。
     """
-    raw = render_beat_to_rpy(beat, indent='', audit=audit, trace=trace)
+    raw = render_beat_to_rpy(beat, audit=audit, trace=trace)
     base = None
     for ln in raw:
         if ln.strip():
@@ -2740,6 +2747,17 @@ def _label_params(group, name: str = '') -> str:
     return ''
 
 
+def _is_return_beat(beat) -> bool:
+    """这一拍渲染出来是不是一条 `return`（裸 / 带值都算）？"""
+    raw = str(getattr(beat, 'raw', '') or '').strip()
+    if re.match(r'^return(?:\s|$)', raw):
+        return True
+    # 老表把 `return 42` 放在「原样块」里；渲染层会逐字吐出它，同样算"已有
+    # return"，不能再补一行。
+    opaque = str(getattr(beat, 'opaque', '') or '').strip()
+    return bool(re.match(r'^return(?:\s|$)', opaque))
+
+
 def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
                         idx_of) -> int:
     """
@@ -2773,7 +2791,34 @@ def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
         body = []
         # 菜单要按**块**渲染（`split_beat_units` 见模块里"菜单块"那一节）：
         # 逐拍渲染会把 `menu:` 整块压成顺序语句，分支结构静默损坏。
-        for kind, unit in split_beat_units(group):
+        units = list(split_beat_units(group))
+        #: 这个 label 里**已经有一条顶层 return 拍**吗？
+        #:
+        #: 有就不补章尾 return（2026-10-23，清单 §九）：从前无条件补，
+        #: 于是 `return 42` 变两行、`return` 后面的台词被"救活"。
+        #: 只数**顶层** return —— 菜单选项体 / 循环体里的 return 不是这一章
+        #: 的出口，章尾仍需要兜底。
+        has_return = any(
+            kind == 'beat' and _is_return_beat(unit[0])
+            for kind, unit in units if unit)
+        #: 这一章最后一条**顶层**语句是无条件 `jump` 吗？
+        #:
+        #: `jump` 永不返回 → 在它后面补 `return` 是**死代码**，而且会凭空多一行
+        #: （清单 §九的"没有 return 的 label"那一档在 `jump` 结尾时也是同一个病）。
+        #: 真机 `credits_screen.rpy` 的 `label test_image_credits` 就以
+        #: `jump test_image_credits` 结尾 —— 补一行会让增量补丁对不上源文件。
+        terminal_jump = False
+        for kind, unit in reversed(units):
+            if not unit:
+                continue
+            if kind != 'beat':
+                break                    # 菜单/循环结尾：结构里可能还有出口，不猜
+            last = unit[0]
+            raw = str(getattr(last, 'raw', '') or '').strip()
+            terminal_jump = (not str(getattr(last, 'condition', '') or '').strip()
+                             and bool(re.match(r'^jump\s', raw)))
+            break
+        for kind, unit in units:
             # P4：这一拍缺的 `hide`（改回空姿势要先隐藏）——
             # 放在**这一拍自己的内容之前**，所以它是"生成内容"，
             # 增量补丁照旧会校验它、备份它。
@@ -2792,8 +2837,8 @@ def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
                 body.extend(render_loop_block(unit, indent=indent,
                                               audit=audit, trace=trace))
             else:
-                body.extend(render_beat_to_rpy(unit[0], indent=indent,
-                                               audit=audit, trace=trace))
+                body.extend(render_beat_to_rpy(unit[0], audit=audit,
+                                               trace=trace))
         # **只去掉首尾的空行，中间的空行留着**（2026-10-05 修）。
         #
         # 旧写法是 `body = [ln for ln in body if ln.strip() != '']` ——
@@ -2814,7 +2859,8 @@ def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
             out.extend(indent + ln if ln.strip() else '' for ln in body)
         else:
             out.append(indent + 'pass')
-        out.append(indent + 'return')
+        if not has_return and not terminal_jump:
+            out.append(indent + 'return')
         out.append('')
     return emitted_labels
 

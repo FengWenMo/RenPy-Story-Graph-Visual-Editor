@@ -151,7 +151,8 @@ class TestFlowCardSummary:
         panel = _show_call(window)
         text = panel._flow_detail.text()
         assert '目标 side' in text, text
-        assert '2 拍' in text, text
+        # side 本身 2 句台词 + 一条 return 拍（2026-10-23 起 return 也落卡）
+        assert '3 拍' in text, text
         # `src_first` 是**台词那一行**（不是 label 那一行）：文件里 label 在 8、首句在 9
         assert '第 9 行' in text, text
         assert '本章 2 处调用' in text, text

@@ -321,6 +321,115 @@ class NodeItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
+def _edge_is_manual(edge) -> bool:
+    return str(getattr(edge, 'origin', 'source') or 'source') == 'manual'
+
+
+def _edge_is_control(edge) -> bool:
+    """编排层路由（P2）：写在 `X_control` 里，不在章节源文件。"""
+    return str(getattr(edge, 'origin', 'source') or 'source') == 'control'
+
+
+def _edge_where_text(edge, info: dict | None = None) -> str:
+    """
+    这条线**在哪一拍**（短标签用）。
+
+    草图没有真的拍：它记的是"打算写在哪"（P1 之后可以是第 N 拍，
+    仍然只是**打算**，不是已写入）。源边有拍上下文时给"第 N 拍"，
+    最后一拍额外标「章末」；上下文没载入时如实说「位置未载入」，
+    别留空（留空会被读成"没有位置这回事"）。
+    """
+    if _edge_is_control(edge):
+        return '章末（编排层）'
+    if _edge_is_manual(edge):
+        if str(getattr(edge, 'position', 'chapter_end')) == 'beat':
+            if info:
+                try:
+                    return f'第 {int(info.get("index"))} 拍'
+                except (TypeError, ValueError) as e:
+                    swallow('ui_qt.graph_canvas.edge_where', e)
+            return '指定拍（未载入或已删除）'
+        return '章末'
+    if info:
+        try:
+            idx = int(info.get('index'))
+        except (TypeError, ValueError):
+            return '位置未载入'
+        text = f'第 {idx} 拍'
+        total = info.get('total')
+        if (isinstance(total, int)
+                or (isinstance(total, str) and total.isdigit())):
+            if int(total) == idx:
+                text += '（章末）'
+        return text
+    return '位置未载入'
+
+
+def edge_label_text(edge, info: dict | None = None) -> str:
+    """
+    连线上的那行字：**只放条件 / 菜单项**；位置归窗口（2026-10-24）。
+
+    用户明确要求：线上不要把"第几拍"挂在外面，线型负责说 jump/call，
+    条件/菜单项负责说分支；只有草图必须把「草图」写在脸上。
+
+    ```
+    「去屋顶」
+    if trust > 2
+    草图 ·「去屋顶」   ← 手工草图（位置在窗口/提示里）
+    ```
+    """
+    opt = str(getattr(edge, 'option_text', '') or '').strip()
+    cond = str(getattr(edge, 'condition', '') or '').strip()
+    body = f'「{opt}」' if opt else (f'if {cond}' if cond else '')
+    if _edge_is_manual(edge):
+        return ' · '.join(x for x in ('草图', body) if x)
+    return body
+
+
+def edge_tooltip(edge, info: dict | None = None) -> str:
+    """
+    悬停时这条边的"肚子"：它在第几步、前后各是什么。
+
+    先给位置，再给"这条线是什么"。草图那句警告保留在最前 ——
+    它是"这条线还没写进脚本"的唯一提醒，不能因为加了位置就丢掉。
+    """
+    manual = _edge_is_manual(edge)
+    control = _edge_is_control(edge)
+    where = _edge_where_text(edge, info)
+    if manual:
+        tail = ('草图（未写入）：只画在图上，不写进 .rpy\n'
+                '右键这条线 →「写入剧本…」/「删除这条草图」'
+                '（条件/菜单项分支请用卡片）')
+    elif control:
+        tail = ('编排层（`X_control`）里的控制流：写在控制流文件里，'
+                '章节源文件一个字没改')
+    else:
+        tail = '源文件里的控制流'
+
+    if not info:
+        return (f'拍位置：{where}\n\n{tail}' if manual
+                else f'{tail}\n拍位置：{where}')
+
+    kind = str(getattr(edge, 'type', 'jump') or 'jump')
+    semantic = '调用（走完会回来）' if kind == 'call' else '跳转（去了不回）'
+    label = str(info.get('label') or '')
+    lines = [
+        f'{label + " · " if label else ""}第 {info.get("index")} 拍 / '
+        f'共 {info.get("total")} 拍',
+        f'拍位置：{where}',
+        f'{semantic}：{info.get("text") or "（空拍）"}',
+        f'上一拍：{info.get("prev") or "（章首）"}',
+        f'下一拍：{info.get("next") or "（章末）"}',
+        '',
+        tail,
+    ]
+    frm = str(getattr(edge, 'from_clause', '') or '')
+    if frm:
+        # `from` 是存档返回点，比"上一拍/下一拍"更影响老存档，放在语义后面。
+        lines.insert(3, f'存档点：from {frm}')
+    return '\n'.join(lines)
+
+
 class EdgeItem(QGraphicsPathItem):
     """
     一条连线：贝塞尔曲线 + **真的箭头** + 条件/选项标签。
@@ -342,19 +451,37 @@ class EdgeItem(QGraphicsPathItem):
         self._label.setZValue(2)
         self.setZValue(0)
         self.setAcceptHoverEvents(True)
+        # 边可选中：右键菜单 / 后续 Delete 键都靠它（P0）
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        # 手型光标 = "这条线可以点"（双击打开「编辑连线」，见 2026-10-24）
+        self.setCursor(Qt.PointingHandCursor)
         self._apply_pen()
         self.refresh()
 
     # ---------------- 语义 ----------------
 
+    def _beat_info(self) -> dict | None:
+        """
+        这条边对应哪一拍（画布持有的"拍上下文"里查）。
+
+        源边查 `line_id`；草图没有已写入的拍，但 P1 记了**打算写到哪一拍**
+        （`position_line_id`），同样能在上下文里翻译成"第 N 拍"。
+        """
+        canvas = self.canvas
+        ctx = getattr(canvas, '_beat_ctx', None) if canvas is not None else None
+        lid = str(getattr(self.edge, 'line_id', '') or '')
+        if not lid and str(getattr(self.edge, 'origin', 'source')) == 'manual':
+            lid = str(getattr(self.edge, 'position_line_id', '') or '')
+        if not lid or not ctx:
+            return None
+        try:
+            return ctx.get(lid)
+        except Exception as e:                    # noqa: BLE001 - 上下文脏了不该画不出线
+            swallow('ui_qt.graph_canvas.edge.beat_info', e)
+            return None
+
     def _label_text(self) -> str:
-        opt = str(getattr(self.edge, 'option_text', '') or '').strip()
-        cond = str(getattr(self.edge, 'condition', '') or '').strip()
-        if opt:
-            return f'「{opt}」'
-        if cond:
-            return f'if {cond}'
-        return ''
+        return edge_label_text(self.edge, self._beat_info())
 
     def _apply_pen(self):
         """颜色按语义分：选项 > 条件 > 连线类型（旧版就是这个规则）。"""
@@ -369,20 +496,27 @@ class EdgeItem(QGraphicsPathItem):
             color = _col(EDGE_COLOR.get(etype, EDGE_DEFAULT))
         width = 2 if (opt or cond) else 1.5
         pen = QPen(color, width)
-        # `call` 本来就用虚线；手工草图再用**点划线**区分开 ——
-        # 用户 2026-10-22："连线是什么效果？是生成新 rpy 还是新 label？"
-        # 图上必须一眼看出"这条线还没写进脚本"。
-        if getattr(self.edge, 'origin', 'source') == 'manual':
-            pen.setStyle(Qt.DashDotLine)
-        elif etype == 'call':
+        # 虚线 = 不立刻"走死"的/未落盘的：call 和草图都用虚线；
+        # 草图额外靠脸上那句「草图」区分（用户不看图例，只看线）。
+        if (getattr(self.edge, 'origin', 'source') == 'manual'
+                or etype == 'call'):
             pen.setStyle(Qt.DashLine)
         if self.mark == 'stranded':
             pen = QPen(_col('state.error'), width)
+        if self.isSelected():
+            pen.setWidthF(max(pen.widthF(), 3.0))
+            pen.setColor(_col('state.info'))
         self.setPen(pen)
 
     def set_mark(self, mark):
         self.mark = mark
         self._apply_pen()
+
+    def itemChange(self, change, value):
+        # 选中/取消选中时笔宽和颜色要跟着变（Qt 不会替我们重画笔）
+        if change == QGraphicsItem.ItemSelectedHasChanged:
+            self._apply_pen()
+        return super().itemChange(change, value)
 
     # ---------------- 几何 ----------------
 
@@ -437,15 +571,11 @@ class EdgeItem(QGraphicsPathItem):
             self._p1, self._p2, self._mid = p1, p2, mid
             # **箭头画在中点**（用户明确要求）——方向沿连线，一眼看出指向谁
             self._arrow = self._make_arrow(mid, ang)
-            # 悬停时说清这条线是哪一种（实线脚本 / 点划线草图）
-            self.setToolTip(
-                '手工草图：只画在图上，不写进 .rpy\n'
-                '要写进脚本，请在卡片里插入控制流卡（call / jump）'
-                if getattr(self.edge, 'origin', 'source') == 'manual'
-                else '源文件里的控制流')
+            # 悬停时说清"这条线在第几步、前后是什么、是哪一种"
+            self.setToolTip(edge_tooltip(self.edge, self._beat_info()))
             # 标签放在中点上方（压在线上的话会把线挡断）
             text = self._label_text()
-            self._label.setText(_elide(text, self._label.font(), 200))
+            self._label.setText(_elide(text, self._label.font(), 320))
             self._label.setToolTip(text)
             self._label.setVisible(bool(text))
             if text:
@@ -462,6 +592,25 @@ class EdgeItem(QGraphicsPathItem):
             poly.append(QPointF(tip.x() + size * math.cos(ang + delta),
                                 tip.y() + size * math.sin(ang + delta)))
         return poly
+
+    def mouseDoubleClickEvent(self, event):
+        """
+        双击一条边 = **打开这条线的属性**（旧版「编辑连线」，2026-10-24 找回）。
+
+        以前这里发的是 `edge_open_requested`（跳进对应那一拍）—— 用户反馈
+        "点一条线，弹的是章节/新建章节，线自己的信息一个没有"。定位那一拍
+        改走右键菜单「定位到这一拍」，双击只回答"这条线是什么"。
+
+        草图也发信号：窗口层会打开同一个窗口（只读落点 + 可改条件/菜单），
+        比"双击没反应"好。
+        """
+        try:
+            canvas = self.canvas
+            if canvas is not None:
+                canvas.edge_edit_requested.emit(self.edge)
+        except Exception:                    # noqa: BLE001 - 点一下不该崩
+            swallow('graph_canvas.edge.double_click')
+        event.accept()
 
     def paint(self, painter, option, widget=None):
         try:
@@ -485,6 +634,7 @@ class GraphCanvas(QGraphicsView):
       · `connect_requested(from, to)` —— **Shift + 左键拖动**连线，松手时发出；
       · `node_ops_requested(nid)`     —— **双击块** = 编辑变量操作；
       · `node_add_requested(x, y)`    —— 双击空白 = 在那个位置新建章节；
+      · `edge_edit_requested(edge)`   —— **双击线** = 打开「编辑连线」；
       · `node_menu_requested(nid, 屏幕坐标)` —— 右键菜单；
       · `selection_changed(nid)`      —— 左键选中（右侧"当前模块"跟着变）。
 
@@ -501,6 +651,12 @@ class GraphCanvas(QGraphicsView):
     #: 拖完一个块：`nid, 原 x, 原 y, 新 x, 新 y` —— 图级撤销要用它
     #: （用户 2026-10-05："将撤销做好"：拖歪了也要能 Ctrl+Z 回去）。
     node_moved = Signal(object, float, float, float, float)
+    #: 旧的双击边信号：保留给右键「定位到这一拍」那条路（画布不直接发）。
+    edge_open_requested = Signal(object)
+    #: 双击一条边（2026-10-24）：打开**这条线自己的属性**（旧版「编辑连线」）。
+    edge_edit_requested = Signal(object)
+    #: 右键一条边（P0，2026-10-24）：窗口层弹「写入剧本 / 删除」。
+    edge_menu_requested = Signal(object, object)     # edge, 屏幕坐标
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -519,6 +675,15 @@ class GraphCanvas(QGraphicsView):
         #: ''（这次没有重排）。调用方（导入）用它决定要不要在控制台说一句。
         self.last_arrange = ''
         self._problems: dict = {}
+        #: `line_id` → `{index,total,label,prev,text,next}`（S0，2026-10-23）。
+        #:
+        #: 画布**不持有 session**：它只认这份"拍上下文"。由窗口层在
+        #: `_set_graph` 时灌进来（见 `set_beat_context`）——这样画布能单测，
+        #: 也不用为了画一行字去翻整个会话。
+        self._beat_ctx: dict = {}
+        #: 只看某条线（D3）：`None` = 全显示；否则只显示与这个节点相连的边。
+        #: **纯视图**，不删任何数据（删线会动剧本，那是另一件事）。
+        self._edge_focus = None
         self._empty_hint = ''
         self._panning = False
         self._pan_start = None
@@ -537,6 +702,54 @@ class GraphCanvas(QGraphicsView):
     # ------------------------------------------------------------------
     #  建图
     # ------------------------------------------------------------------
+
+    def set_beat_context(self, mapping):
+        """
+        灌"这条边在第几拍"的上下文（`line_id → {...}`，见
+        `story.flow.beat_context`），并让已有的线重画标签。
+
+        只影响**显示**：不改图、不写盘。换章 / 编辑拍之后由窗口层再灌一次 ——
+        所以"第 N 拍"永远跟着当前这批拍走，不会停在上一次的旧值。
+        """
+        self._beat_ctx = dict(mapping or {})
+        for ei in list(getattr(self, '_edges', None) or ()):
+            try:
+                ei.refresh()
+            except Exception:                # noqa: BLE001 - 一条线画坏了不该拖垮整张图
+                swallow('graph_canvas.set_beat_context')
+
+    def _apply_edge_focus(self):
+        """按 `_edge_focus` 设置每条边的可见性（重建图之后也要调一次）。"""
+        target = getattr(self, '_edge_focus', None)
+        for ei in list(getattr(self, '_edges', None) or ()):
+            if target is None:
+                ei.setVisible(True)
+                continue
+            ei.setVisible(target in (getattr(ei.edge, 'from_id', None),
+                                     getattr(ei.edge, 'to_id', None)))
+
+    def set_edge_focus(self, nid):
+        """
+        只看**跟某个模块相连**的连线（D3，2026-10-24）。`nid=None` 或再点一次 = 恢复。
+
+        ## 为什么是"视图"不是"删除"
+
+        用户说"图太乱想清一清"，第一反应是删线 —— 但删线在 S1 之后**会删剧本那一行**。
+        所以"看起来干净"和"删掉数据"必须是两件事：这里只改 `visible`，
+        一个字节都不动，随时恢复。
+
+        返回 `{'focus': nid, 'shown': n, 'total': m}`（好让状态栏说清楚）。
+        """
+        # 再点同一个 = 取消（开关语义，不然用户找不到"怎么恢复"）
+        target = None if nid == getattr(self, '_edge_focus', None) else nid
+        self._edge_focus = target
+        self._apply_edge_focus()
+
+        total = len(getattr(self, '_edges', None) or ())
+        shown = 0 if target is None else sum(
+            1 for ei in (self._edges or ()) if ei.isVisible())
+        return {'focus': target, 'shown': shown if target else total,
+                'total': total}
 
     def set_graph(self, graph, keep_view=None):
         """
@@ -593,6 +806,11 @@ class GraphCanvas(QGraphicsView):
                 src.edges.append(ei)
             dst.edges.append(ei)
         self._apply_marks()
+        # 重建之后要重新应用"只看选中"（否则一连线，刚才的过滤就失效了）
+        try:
+            self._apply_edge_focus()
+        except Exception:                    # noqa: BLE001
+            swallow('graph_canvas.set_graph.edge_focus')
 
         # 场景矩形要留余量（否则小图铺满视口 → "拖画布没反应"）
         self._update_scene_rect()
@@ -1061,6 +1279,13 @@ class GraphCanvas(QGraphicsView):
                 return item.node.id
         return None
 
+    def selected_edge_obj(self):
+        """当前选中的边（没有就 None）—— Delete 键 / 右栏详情用。"""
+        for item in self.scene().selectedItems():
+            if isinstance(item, EdgeItem):
+                return item.edge
+        return None
+
     def highlight_node(self, nid):
         """把某个块标成"当前"（= 卡片编辑器正开着的那一章）。"""
         for item in self._items.values():
@@ -1271,6 +1496,13 @@ class GraphCanvas(QGraphicsView):
             self.node_ops_requested.emit(node)
             event.accept()
             return
+        edge = self._edge_at(pos)
+        if edge is not None:
+            # 线的标签是 EdgeItem 的子项：双击标签时事件冒到 view，
+            # 以前会落进"双击空白 = 新建章节"（用户实测弹了「添加新章节」）。
+            self.edge_edit_requested.emit(edge.edge)
+            event.accept()
+            return
         wx = self.mapToScene(pos)
         self.node_add_requested.emit(wx.x(), wx.y())
         event.accept()
@@ -1282,7 +1514,23 @@ class GraphCanvas(QGraphicsView):
             item = item.parentItem()
         return item.node.id if isinstance(item, NodeItem) else None
 
+    def _edge_at(self, view_pos):
+        """视口坐标 → 命中的边（穿透到边上的标签子项）。"""
+        item = self.itemAt(view_pos)
+        while item is not None and not isinstance(item, EdgeItem):
+            item = item.parentItem()
+        return item if isinstance(item, EdgeItem) else None
+
     def contextMenuEvent(self, event):
+        edge = self._edge_at(event.pos())
+        if edge is not None:
+            # 先把这条线选中（视觉上告诉用户"菜单开的是这一条"）
+            self.scene().clearSelection()
+            edge.setSelected(True)
+            self.edge_menu_requested.emit(edge.edge,
+                                          self.mapToGlobal(event.pos()))
+            event.accept()
+            return
         nid = self._node_at(event.pos())
         if nid is not None:
             self.select_node(nid, center=False)

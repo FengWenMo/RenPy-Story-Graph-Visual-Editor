@@ -1,0 +1,12 @@
+{
+  "sample": "shape_b_template",
+  "placement": {
+    "declarations": "game/script.rpy",
+    "control_flow": "",
+    "content_globs": [
+      "game/script.rpy"
+    ],
+    "declaration_style": "dedicated"
+  },
+  "notes": "声明混在 script.rpy + 内联 jump + 扁平目录 + 官方模板名 + 无生成物"
+}

@@ -37,7 +37,7 @@ def main() -> int:
         print(f'    plan={b.unified_plan()!r}')
     print('单拍渲染：')
     from storygraph.story.beat_render import render_beat_to_rpy
-    print(render_beat_to_rpy(beats[1], indent='    '))
+    print(render_beat_to_rpy(beats[1]))
     print('整份渲染：')
     print(render_beats_to_rpy(beats))
     return 0

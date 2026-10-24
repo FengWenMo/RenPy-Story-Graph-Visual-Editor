@@ -191,6 +191,32 @@ class TableSessionMixin:
         """当前章节的顶层保真块（文档级真源，与第一拍在不在无关）。"""
         return self._chapter_doc().file_blocks
 
+    def block_head_line_ids(self) -> set:
+        """
+        哪些拍是**块头**（`menu` / `loop` / `camera` / 选项头）。
+
+        接线选「第 N 拍」时要靠它挡住"插在这一拍后面" —— 块头的 `after`
+        会掉进块体（`ChapterTree._slot_for` 的既定语义），线看起来接上了，
+        实际只在那个分支/循环里执行。
+
+        只返回**有真身拍**的块头：`if` 在树里没有独立拍（条件挂在第一张
+        块体拍上），所以"if 前面那拍"仍然可以正常接 —— 那是顶层。
+        """
+        try:
+            tree = self._chapter_doc().tree
+        except Exception as e:                    # noqa: BLE001 - 查询失败按"没有块头"
+            swallow('app.session_table.block_head_line_ids', e)
+            return set()
+        out = set()
+        for node in tree.root.walk():
+            header = getattr(node, 'header', None)
+            if header is None or not getattr(node, 'children', None):
+                continue
+            line_id = str(getattr(header, 'line_id', '') or '')
+            if line_id:
+                out.add(line_id)
+        return out
+
     # ------------------------------------------------------------------
     #  "还没导出的改动"（2026-10-22：关窗询问 / 状态栏共用一份判据）
     # ------------------------------------------------------------------
@@ -1073,7 +1099,7 @@ class TableSessionMixin:
                     kind='narration',
                     raw=line)
         doc = self._chapter_doc()
-        at = doc.insert_beat(beat, at)
+        at = doc.insert_beat(beat, at, before=not after)
         self.beats = doc.beats
         self._sync_chapter()
         self._push_struct_undo(('insert', at))
@@ -1630,10 +1656,27 @@ class TableSessionMixin:
         b.kind = B.kind_from_speaker(b.kind, b.speaker)
 
         if cards is not None:
-            show = B.cards_to_show(cards, self.symbols)
-            if show:
-                b.show = show
-            b.at = uniform_position_of(cards)
+            # **立绘写回的唯一出口**（2026-10-24 修 P0，见 `write_back_show`）。
+            #
+            # 从前这里直接 `b.show = cards_to_show(cards)` —— **整体替换**。
+            # 而卡片数组来自 `beat_sprite_rows`，它跳过"结构化列表达不了"的
+            # 项（`behind` / `as` / `with` / `onlayer` / `screen` /
+            # `show expression`）。两件事一夹：那些指令**整条消失**，
+            # 而它们的 `with` 还会被拍级兜底套给别的立绘（真机 8 组中招）。
+            #
+            # `write_back_show` 把表达不了的项按原锚点插回去；没有这类项时
+            # 它的输出与 `cards_to_show` **逐字节相同**（老语义不变）。
+            old_show = str(getattr(b, 'show', '') or '').strip()
+            new_show = B.write_back_show(old_show, cards, self.symbols)
+            # 卡片空 → 保留原值（"空网格不清空立绘"）。这一条是防误删，
+            # 不是保真：用户真要清空立绘，得用卡片上的删除按钮（会走
+            # `remove_sprite`，那条路是逐条精确匹配的）。
+            if new_show or not old_show:
+                b.show = new_show
+            # 整拍位置只在真有立绘卡时才重算：空网格连位置也不许动
+            # （同一条规矩；以前这里无条件清空 `b.at`）。
+            if cards:
+                b.at = uniform_position_of(cards)
 
         # 条件显示（卡片上的「＋ 条件」）。**只在调用方真的给了这个键时才写**：
         # 用 `fields.get(..., b.condition)` 会让"没给"和"给了空串"分不开，
@@ -1727,6 +1770,26 @@ class TableSessionMixin:
             for attr in ('scene', 'scene_at', 'show', 'hide', 'at',
                          'with_', 'transform', 'stage_order'):
                 setattr(b, attr, '')
+            # **立即可重建**（2026-10-24 审计 P1-2）：这一格现在是**完整**
+            # 舞台投影（见 `app.beats.stage_cell`），能认出来的场景/立绘/
+            # 退场/转场全部重建；认不出的（`[停顿]` / 原生语句）由
+            # `stage_only_ops` 原样留在 `b.stage` 里带走。
+            #
+            # 从前这里只清空、等 `apply` 末尾那次 hydrate —— 那条路本身没坏，
+            # 坏的是格子当时只显示"结构化列表达不了的那一条"，于是"清空 +
+            # 从一条重建"必然把其余舞台指令丢掉。现在先重建再把 stage
+            # 归一成"表达不了的部分"，与没手改那条分支同一个出口。
+            try:
+                hydrate_from_dsl([b], self.symbols)
+            except Exception as e:          # noqa: BLE001 - 解析失败也别拦住保存
+                swallow('editor._apply_stage.rehydrate', e)
+            parts = [t for t in (compose_stage_extra(b, self.symbols),
+                                 stage_only_ops(typed, self.symbols)) if t]
+            b.stage = '; '.join(parts)
+            try:
+                b._hydrated_stage = b.stage
+            except Exception:               # noqa: BLE001 - Beat 不该是槽位
+                swallow('editor._apply_stage')
             return
 
         # 没手改：结构化列是唯一真源 → 重新投影；
@@ -1844,11 +1907,16 @@ class TableSessionMixin:
         changed = (self.snapshot(idx).fingerprint() != before.fingerprint())
         if changed:
             self._last_saved[idx] = before
+        line_id = str(getattr(beat, 'line_id', '') or '').strip()
         return {
             'ok': True,
             'beat': beat,
             'changed': changed,
-            'line_id': getattr(beat, 'line_id', '') or f'第 {idx + 1} 拍',
+            # `line_id` 的字段名只有一个含义：**合法 LineId**。没有就返回 None，
+            # 不许再塞一个 `'第 3 拍'` 进这个字段（清单 §二十）。
+            # 给人看的文字放 `display_name`（前端显示用）。
+            'line_id': line_id or None,
+            'display_name': line_id or f'第 {idx + 1} 拍',
             'index': idx,
         }
     def can_undo(self, idx: int = None) -> bool:

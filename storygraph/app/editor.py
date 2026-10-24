@@ -257,21 +257,27 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         而且**静默**。身份与位置无关，改位置不该换身份。
 
         发号规则只有一份：`story.line_identity.allocate`（max+1、跳过已用）。
+
+        **空 label 继承"它前面最近的非空 label"**（2026-10-23，清单 §二）：
+        从前是在循环外取"文件里第一个非空 label"再回填给所有空 label ——
+        一个 `.rpy` 支持多段 label，于是第二章里新插的一拍会被登记成第一章，
+        它的 line_id 也跟着跨章。位置信息不能当成章节信息用。
         """
         from storygraph.story.line_identity import allocate, unique_ids
 
-        label = ''
-        for b in self.beats:
-            if str(getattr(b, 'label', '') or '').strip():
-                label = str(b.label)
-                break
+        current_label = ''
         unique_ids(self.beats)                    # 重复的先收拾掉
         used = {str(getattr(b, 'line_id', '') or '')
                 for b in self.beats if str(getattr(b, 'line_id', '') or '')}
         for i, b in enumerate(self.beats, 1):
             b.seq = i
-            if not str(getattr(b, 'label', '') or '').strip():
-                b.label = label
+            own = str(getattr(b, 'label', '') or '').strip()
+            if own:
+                current_label = str(b.label)
+            elif current_label:
+                b.label = current_label
+            # 文件开头还没有任何 label 时**不猜**：保持空，发号兜底是 'start'，
+            # 但归属仍然空着 —— 让人看得见，而不是替它挂到别的章上。
             if not str(getattr(b, 'line_id', '') or '').strip():
                 lid = allocate(used, b.label)
                 b.line_id = lid

@@ -25,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from storygraph.core.indent import indent_width
+
 __all__ = ['AtlBlock', 'block_of_row', 'is_atl_row', 'locate_block',
            'source_of_row', 'MAX_BODY_LINES']
 
@@ -33,19 +35,6 @@ MAX_BODY_LINES = 40
 
 #: Notes 里那句标记（`beat_build` 写进去的）：有它 = 这一条是 ATL 块形式
 ATL_NOTE_MARK = 'ATL 定义'
-
-
-def _indent_of(line: str) -> int:
-    """缩进宽度（tab 按 4 算 —— 与 Ren'Py 默认的 tab 口径一致）。"""
-    n = 0
-    for ch in line:
-        if ch == ' ':
-            n += 1
-        elif ch == '\t':
-            n += 4
-        else:
-            break
-    return n
 
 
 def _read_text(path: Path) -> str:
@@ -171,14 +160,14 @@ def locate_block(file, line: int, *, max_lines: int = MAX_BODY_LINES) -> tuple:
     if line < 1 or line > len(lines):
         return (), f'行号对不上（{p.name} 只有 {len(lines)} 行，表里记的是第 {line} 行）'
     head = lines[line - 1]
-    base = _indent_of(head)
+    base = indent_width(head)
     out = []
     for raw in lines[line:]:
         stripped = raw.strip()
         if not stripped:
             out.append('')
             continue
-        if _indent_of(raw) <= base:
+        if indent_width(raw) <= base:
             break
         out.append(raw)
     # 尾部空行不算块体
@@ -187,7 +176,7 @@ def locate_block(file, line: int, *, max_lines: int = MAX_BODY_LINES) -> tuple:
     if not out:
         return (), f'{p.name}:{line} 那一行后面没有缩进块（不是块形式？）'
     # 去基准缩进（块里常见的"每行都多缩一层"）
-    indents = [_indent_of(x) for x in out if x.strip()]
+    indents = [indent_width(x) for x in out if x.strip()]
     cut = min(indents) if indents else 0
     body = []
     for raw in out:

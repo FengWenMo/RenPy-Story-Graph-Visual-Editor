@@ -286,6 +286,33 @@ def lookup_image_id(images: dict, tag: str, rest: list) -> str:
             return cand
     return ''
 
+def stage_cell(beat: Beat, symbols=None) -> str:
+    """
+    「舞台（高级）」那一格给**人**看得懂、也改得动的一份文本。
+
+    ⚠ 2026-10-24 修（审计 P1-2）：从前是 `beat.stage or compose_stage(...)`，
+    而 `beat.stage` 按设计只装"结构化列表达不了的那几条"（复杂 show 子句）。
+    于是打开一张带 `show bg library with dissolve` 的卡片时，格子里**只有**
+    这一条 —— 用户改它一格（比如加个 `[停顿]`），`_apply_stage` 会清空全部
+    结构化字段再从这格重编 → `show e happy` / `hide cg` 全部消失。
+
+    现在格子里是**完整投影**（`compose_stage`）+ 表达不了的那些原文
+    （`stage_only_ops`，`[停顿]` 之类）。写回时整格都能被重新解析，
+    "能重建的重建、认不出的原样带走"，不再靠"格子里恰好写了什么"。
+
+    不直接 `beat.stage + compose_stage`：`beat.stage` 里的子句项会被
+    `compose_stage` 再写一遍（双写 → 导出重复行）。
+    """
+    from storygraph.story.beat_build import stage_only_ops
+    full = compose_stage(beat, symbols)
+    try:
+        extra = stage_only_ops(getattr(beat, 'stage', '') or '', symbols)
+    except Exception as e:                  # noqa: BLE001 - 格子不该因解析失败而空
+        swallow('app.beats.stage_cell', e)
+        extra = ''
+    return '; '.join(part for part in (full, extra) if part)
+
+
 def beat_to_fields(beat: Beat, symbols=None) -> dict:
     """
     Beat → 面板字段字典（界面与数据之间的中性中间层）。
@@ -318,7 +345,7 @@ def beat_to_fields(beat: Beat, symbols=None) -> dict:
         'Expression': beat_expression_word(beat, symbols),
         'Position': beat_position_word(beat, symbols),
         'Scene': beat.scene,
-        'Stage': beat.stage or compose_stage(beat, symbols),
+        'Stage': stage_cell(beat, symbols),
         'BGM': beat.bgm or compose_audio_text(beat, 'music'),
         'SFX': beat.sfx or compose_audio_text(beat, 'sound'),
         'Voice': beat.voice,
@@ -455,9 +482,9 @@ def fields_to_beat(fields: dict, base: Optional[Beat] = None) -> Beat:
 
 
 def _first_show_item(beat: Beat) -> dict:
-    """取第一个「一般立绘」项（跳过 clause 形态）。没有就返回空 dict。"""
+    """取第一个「一般立绘」项（跳过 clause / expression 形态）。没有就返回空 dict。"""
     for item in split_show_items(getattr(beat, 'show', '') or ''):
-        if item.get('clause') or not (item.get('image') or '').strip():
+        if _is_opaque_show_item(item) or not (item.get('image') or '').strip():
             continue
         return item
     return {}
@@ -465,7 +492,7 @@ def _first_show_item(beat: Beat) -> dict:
 
 def _show_items(beat: Beat) -> list:
     return [i for i in split_show_items(getattr(beat, 'show', '') or '')
-            if not i.get('clause') and (i.get('image') or '').strip()]
+            if not _is_opaque_show_item(i) and (i.get('image') or '').strip()]
 
 
 def beat_sprite_rows(beat: Beat, symbols=None) -> list:
@@ -483,8 +510,13 @@ def beat_sprite_rows(beat: Beat, symbols=None) -> list:
     """
     rows = []
     for item in split_show_items(getattr(beat, 'show', '') or ''):
-        if item.get('clause') or not (item.get('image') or '').strip():
-            # 复杂子句（behind/as/onlayer）不在这套结构里表达，跳过
+        if _is_opaque_show_item(item) or not (item.get('image') or '').strip():
+            # 复杂子句（behind/as/onlayer）**和表达式**（`show expression X`）
+            # 都不在这套结构里表达，跳过 —— 它们由 `write_back_show` 原样带回。
+            #
+            # ⚠ 2026-10-24 之前只跳过 `clause`，于是 `show expression holo("x")`
+            # 被当普通立绘：`image.split()[0]` 切出 `holo("x` 当 tag，
+            # 写回成 `show holo("x")` —— 关键字没了，整句语法坏掉（P0-2）。
             continue
         parts = (item.get('image') or '').split()
         tag = parts[0] if parts else ''
@@ -532,6 +564,16 @@ def cards_to_show(cards: list, symbols=None) -> str:
 
     整拍位置另有讲究，见 `uniform_sprite_position`。
     """
+    return '; '.join(_card_parts(cards, symbols))
+
+
+def _card_parts(cards: list, symbols=None) -> list:
+    """卡片数组 → show 片段列表（`cards_to_show` / `write_back_show` 共用）。
+
+    ⚠ **只有这一份实现**：卡片怎么拼 `图@位置`、表情怎么逐词归一、extras 怎么
+    按原顺序带回 —— 全在这里。`write_back_show` 只负责"把表达不了的项插回去"，
+    绝不再抄一遍这段（抄一份就又是一次"两套口径"，2026-10-24 的 P0 就是这么来的）。
+    """
     ordered = sorted(cards or [], key=lambda it: it.get('order_index', 0))
     parts = []
     for it in ordered:
@@ -575,7 +617,97 @@ def cards_to_show(cards: list, symbols=None) -> str:
         if at:
             spec += f'@{at}'
         parts.append(spec)
-    return '; '.join(p for p in parts if p)
+    return [p for p in parts if p]
+
+
+def _is_opaque_show_item(item: dict) -> bool:
+    """
+    这一条 show 项**结构化列表达不了**吗（卡片上编辑不到它）？
+
+    两类：
+
+      · `clause`：`behind` / `as` / `with` / `onlayer` / `zorder` / `screen`
+        —— `_split_show_items` 把整段塞进 `clause` 字段，卡片看不见；
+      · `is_expression`：`show expression <Python 表达式>` —— 图像名本身是
+        代码（可能带空格、括号、引号），`图像@位置` 那种紧凑编码分不出边界。
+
+    ⚠ 这两类**必须一起判**。2026-10-24 之前只认 `clause`，于是
+    `show expression holo("x") at i11` 被当普通立绘写回成
+    `show holo("x") at i11` —— 关键字没了，引擎把 `holo("x"` 当图像名，
+    **整句语法坏掉**（P0-2）。
+    """
+    return bool(str(item.get('clause') or '').strip()) or \
+        bool(item.get('is_expression'))
+
+
+def _opaque_part(item: dict) -> str:
+    """表达不了的项 → 写回去的那一小段（**尽量用原文**）。"""
+    clause = str(item.get('clause') or '').strip()
+    if clause:
+        return clause                     # 原样，连多空格都不改
+    # `expression`：只能走规范编码（`expression X as q at i with d`）。
+    # 表达式本体在解析时已经按引号切过，直接用 `image` 拼不会切坏。
+    from storygraph.story.beat_model import show_item_part
+    return show_item_part(item)
+
+
+def write_back_show(old_show: str, cards: list, symbols=None) -> str:
+    """
+    **卡片数组 → 新 `beat.show`**（写回的唯一出口，2026-10-24）。
+
+    与 `cards_to_show` 的唯一差别：**结构化表达不了的项原样带回**，
+    并且插回**原来那个位置**（不能都堆到末尾 —— 那等于改了演出顺序）。
+
+        old = 'e happy; bg library with dissolve'
+        cards = [只有 e happy]
+        → 'e happy; bg library with dissolve'     ← with 那条还在原位
+
+    为什么必须有这一层（P0，2026-10-24 实测）：
+
+      · 卡片的数组是 `beat_sprite_rows` 摊出来的，它**跳过** `clause` 项；
+      · `cards_to_show` 只会拼卡片里的东西；
+      · `session_table.apply` 又是"整体替换"（`b.show = cards_to_show(...)`）。
+        三件事凑在一起 → **`show bg … with dissolve` 整条消失**，而它的
+        `with` 还会被拍级 `Beat.with_` 套给别的立绘（真机 8 组中招）。
+
+    规则（三条，都可解释）：
+
+      1. 没有表达不了的项 → 结果与 `cards_to_show` **逐字节相同**
+         （老语义一个字不改）；
+      2. 有的话 → 按"它前面原来有几个可编辑立绘"当锚点插回去；
+         卡片增删导致数量变化时，锚点**只前移不后移**（顺序单调，不乱跳）；
+      3. 卡片为空（用户删光）→ 只留表达不了的项；**返回空串**则调用方
+         保留原值（"空网格不清空立绘"的既有契约，见 `session_table.apply`）。
+    """
+    items = split_show_items(old_show or '')
+    new_parts = _card_parts(cards, symbols)
+    if not items:
+        return '; '.join(new_parts)
+    # 锚点：每条"表达不了"的项**前面**有几个可编辑项
+    anchors, seen = [], 0
+    for it in items:
+        if _is_opaque_show_item(it):
+            anchors.append(seen)
+        else:
+            seen += 1
+    if not anchors:
+        return '; '.join(new_parts)           # 全是结构化项 → 老路径
+    out, used = [], 0
+    k_i = 0
+    for it in items:
+        if _is_opaque_show_item(it):
+            take = min(anchors[k_i], len(new_parts))
+            k_i += 1
+            while used < take:
+                out.append(new_parts[used])
+                used += 1
+            part = _opaque_part(it)
+            if part:
+                out.append(part)
+    while used < len(new_parts):
+        out.append(new_parts[used])
+        used += 1
+    return '; '.join(out)
 
 
 def uniform_sprite_position(rows: list) -> str:

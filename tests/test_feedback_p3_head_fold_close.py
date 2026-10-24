@@ -12,6 +12,9 @@ tests/test_feedback_p3_head_fold_close.py
 `unsaved_edits()` 的计数与磁盘上那份文件的内容。
 """
 
+# W1a（2026-10-23）：版式从项目根搬进 `.storygraph/`，断言跟着走。
+LAYOUT_REL = '.storygraph/layout.json'
+
 import os
 import sys
 from pathlib import Path
@@ -578,7 +581,7 @@ class TestCloseAsksAboutUnsavedBeats:
 
         assert not win.isVisible()
         assert '改过的台词' in script.read_text(encoding='utf-8'), '章节没写'
-        assert (root / 'storygraph_layout.json').exists(), '图没写'
+        assert (root / LAYOUT_REL).exists(), '图没写'
 
     def test_hidden_window_with_unsaved_beats_does_not_prompt(self, app,
                                                               chapter):

@@ -331,17 +331,23 @@ class ChapterTree:
     #  结构编辑
     # ------------------------------------------------------------------
     def insert_beat(self, beat, at: int, inherit: bool = True,
-                    retarget: bool = False) -> int:
+                    retarget: bool = False, before: bool = False) -> int:
         """
         在扁平位置 `at` 插入一拍，返回实际位置。
 
         落点规则（**看邻拍，不看全局**）：
 
-          · `at > 0` → 参考**前一张**拍（插在它后面）；
-          · `at == 0` → 参考第一张拍（插在它前面）。
+          · `after`（默认）—— `at > 0` 参考**前一张**拍（插在它后面）；
+            `at == 0` 参考第一张拍（插在它前面）；
+          · `before=True` —— 参考**第 `at` 张**拍，插在它前面（同容器）。
 
-        参考拍是块头时：插在它后面 = 进它的块体（菜单/循环/选项体）；
-        插在它前面 = 与块头平级。参考拍是叶子时，新拍进同一个容器。
+        `before` 是 2026-10-24 补的：原来只有"前一张 + after"一种落点，
+        于是"插在章末 `return` 之前"会退化成"插进 `return` 前面的 `if`
+        块体里"（`at-1` 是块体最后一拍）—— 线看起来接上了，实际只在
+        条件成立时执行。章末接线必须能说"插在 return **前面**"。
+
+        参考拍是块头时：`after` = 进它的块体（菜单/循环/选项体）；
+        `before` = 与块头平级。参考拍是叶子时，新拍进同一个容器。
         """
         items = self.flatten()
         at = max(0, min(int(at), len(items)))
@@ -354,12 +360,20 @@ class ChapterTree:
             self._index[id(beat)] = node
             return 0
 
-        if at > 0:
-            ref, after = items[at - 1], True
+        if before:
+            if at >= len(items):
+                ref_node = self._index[id(items[-1])]
+                parent, pos, body_path = self._slot_for(ref_node, True)
+            else:
+                ref_node = self._index[id(items[at])]
+                parent, pos, body_path = self._slot_before(ref_node)
         else:
-            ref, after = items[0], False
-        ref_node = self._index[id(ref)]
-        parent, pos, body_path = self._slot_for(ref_node, after)
+            if at > 0:
+                ref, after = items[at - 1], True
+            else:
+                ref, after = items[0], False
+            ref_node = self._index[id(ref)]
+            parent, pos, body_path = self._slot_for(ref_node, after)
         if body_path is None:
             raise ChapterTreeError('bad_slot', '找不到插入落点')
 
@@ -383,6 +397,13 @@ class ChapterTree:
         node.parent = parent
         self._index[id(beat)] = node
         return self._flat_index(beat)
+
+    def _slot_before(self, ref_node: ChapterNode):
+        """参考节点 → `(父节点, 插入位置, 新拍的结构位)`：插在它**前面**。"""
+        parent = ref_node.parent
+        if parent is None:
+            return ref_node, 0, self._body_path(ref_node)
+        return parent, parent.children.index(ref_node), self._body_path(parent)
 
     def _flat_index(self, beat) -> int:
         """按**对象身份**找扁平下标（`Beat` 的 `==` 比字段，不能用 list.index）。"""

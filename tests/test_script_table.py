@@ -237,7 +237,9 @@ class TestRender:
 
     def test_condition_wraps_in_if(self):
         beat = Beat(speaker='e', text='hi', condition='love > 5')
-        lines = render_beat_to_rpy(beat, indent='    ')
+        # 2026-10-23：`render_beat_to_rpy` 不再有 `indent=` 参数（它从来没被
+        # 读过；外层缩进由调用方负责）。这里钉住"条件体比 if 深一层"。
+        lines = render_beat_to_rpy(beat)
         assert lines[0] == 'if love > 5:'
         assert lines[1] == '    e "hi"'
 

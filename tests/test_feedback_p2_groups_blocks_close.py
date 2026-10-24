@@ -10,6 +10,9 @@ tests/test_feedback_p2_groups_blocks_close.py
 都**不靠截图**：断言列表项的数据、`Beat.code`、编译出来的 `.rpy` 文本。
 """
 
+# W1a（2026-10-23）：版式从项目根搬进 `.storygraph/`，断言跟着走。
+LAYOUT_REL = '.storygraph/layout.json'
+
 import os
 import sys
 from pathlib import Path
@@ -361,7 +364,7 @@ class TestCloseConfirm:
 
         assert win.isVisible(), '点了取消，窗口不该关'
         assert win._graph_dirty  is True
-        assert not (root / 'storygraph_layout.json').exists(), \
+        assert not (root / LAYOUT_REL).exists(), \
             '取消不该偷偷写文件'
         win._ask_close_graph_action = lambda: 'discard'
         win.close()
@@ -374,7 +377,7 @@ class TestCloseConfirm:
         app.processEvents()
 
         assert not win.isVisible()
-        assert not (root / 'storygraph_layout.json').exists(), \
+        assert not (root / LAYOUT_REL).exists(), \
             '选了不保存还写盘，等于骗人'
 
     def test_save_writes_the_layout(self, app, tmp_path):
@@ -385,7 +388,7 @@ class TestCloseConfirm:
         win.close()
         app.processEvents()
 
-        target = root / 'storygraph_layout.json'
+        target = root / LAYOUT_REL
         assert not win.isVisible()
         assert target.exists(), '选了保存却没写文件'
         data = json.loads(target.read_text(encoding='utf-8'))
@@ -421,7 +424,7 @@ class TestCloseConfirm:
         win._ask_close_graph_action = _boom
         win.close()
         app.processEvents()
-        assert (root / 'storygraph_layout.json').exists()
+        assert (root / LAYOUT_REL).exists()
 
     def test_clean_graph_closes_without_prompt(self, app, tmp_path):
         root = build_project(tmp_path / 'proj')

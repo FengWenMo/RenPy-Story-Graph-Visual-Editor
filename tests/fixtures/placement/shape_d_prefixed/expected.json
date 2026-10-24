@@ -1,0 +1,12 @@
+{
+  "sample": "shape_d_prefixed",
+  "placement": {
+    "declarations": "game/00_variables.rpy",
+    "control_flow": "",
+    "content_globs": [
+      "game/01_story.rpy"
+    ],
+    "declaration_style": "dedicated"
+  },
+  "notes": "00 前缀集中声明 + call 子过程 + 扁平 + 数字前缀 + 无生成物"
+}

@@ -209,6 +209,46 @@ class TestEdges:
         assert r.width() <= abs(ei._p2.x() - ei._p1.x()) + 2
         assert r.height() <= abs(ei._p2.y() - ei._p1.y()) + 2
 
+    def test_manual_edge_label_says_it_is_not_written(self, canvas):
+        """草图必须一眼看出"未写入"；落点不挂在线外。"""
+        g = Graph()
+        a = g.add_node('a', 0, 0)
+        b = g.add_node('b', 300, 0)
+        g.add_edge(a, b, origin='manual', option_text='去屋顶')
+        canvas.set_graph(g)
+        text = canvas._edges[0]._label.text()
+        assert '草图' in text, text
+        assert '章末' not in text, text
+
+    def test_right_click_on_an_edge_emits_the_edge_menu(self, canvas, qapp):
+        """P0：右键线不能再落到"空白处菜单"（那就没有删除/转正入口）。"""
+        g = Graph()
+        a = g.add_node('a', 0, 0)
+        b = g.add_node('b', 300, 0)
+        eid = g.add_edge(a, b, origin='manual')
+        canvas.set_graph(g)
+        canvas.show()
+        qapp.processEvents()
+
+        ei = canvas._edges[0]
+        pos = canvas.mapFromScene(ei._mid)
+        assert canvas._edge_at(pos) is ei, '点在线上却命不中'
+
+        seen = []
+        canvas.edge_menu_requested.connect(lambda edge, _p: seen.append(edge))
+
+        class _Event:
+            def pos(self):
+                return pos
+
+            def accept(self):
+                pass
+
+        canvas.contextMenuEvent(_Event())
+        assert len(seen) == 1 and seen[0].id == eid, seen
+        assert ei.isSelected(), '右键的线要显示为选中'
+        canvas.hide()
+
 
 # ==================================================================
 #  三、块上的内容：给人看的摘要，不是技术代码

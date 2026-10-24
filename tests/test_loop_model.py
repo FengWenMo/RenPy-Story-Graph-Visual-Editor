@@ -255,4 +255,6 @@ def test_real_project_reaches_full_coverage():
     assert cov.ratio >= 0.98, cov.to_dict()
     assert cov.count_of(cap.T0B) == 0, cov.counts
     text = cap.format_capability_report(cov)
-    assert text.splitlines()[0].startswith('工具可编辑覆盖率 98.0%'), text
+    # 2026-10-23：`return` 也进了模型（清单 §九），T0 总数从 1817 → 1818，
+    # 覆盖率显示 98.1%。分子 T2=35 与上一条判据仍然钉住"没有新增只读项"。
+    assert text.splitlines()[0].startswith('工具可编辑覆盖率 98.1%'), text

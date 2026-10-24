@@ -1163,11 +1163,29 @@ class _BeatBuilder:
         return False, True
 
     def _emit_return(self, stmt, payload, _ln):
+        """
+        `return` / `return <值>` → **落成一张控制流拍**（逐字保留原文）。
+
+        为什么不能再"什么都不产出"（2026-10-23，清单 §九）：从前这里丢掉
+        return，靠 `beat_render` 在每个 label 结尾**无条件补一行裸 return**
+        互相抵消 —— 只有"章尾一个裸 return"这一种写法看起来对。`return 42`
+        会多一行、`return` 后面还有台词时控制流被改（死代码被救活）、
+        `call ch02` 的返回值被章尾补的裸 return 盖掉。现在 return 是**模型内
+        语句**：它自己落拍、自己渲染，章尾只在"确实一个 return 都没有"时才补。
+        """
         self.flush_stage_only()
-        # `return` 不落成卡（只是章尾）；一章结束，`extend` 不可能跨 label
-        # 续写，归属清零
+        value = str((payload or {}).get('value') or '').strip()
+        line = f'return {value}' if value else 'return'
+        self.seq += 1
+        self.beats.append(self.mark_struct(self.with_src(Beat(
+            seq=self.seq, label=self.current_label,
+            condition=stmt.condition or '',
+            kind=KIND_FLOW,
+            raw=line,
+        ), _ln), stmt))
+        # `return` 是一章的出口；后面的 `extend` 不可能跨它续写，归属清零。
         self.last_speaker = ''
-        return False, False
+        return False, True
 
     # ------------------------------------------------------------------
     #  收尾
@@ -1183,9 +1201,9 @@ class _BeatBuilder:
 
         什么时候会一张拍都没有：
 
-          · `label X:` 后面全是"不落拍"的语句（`return` 就是）；
-          · `label X:` 是空 label（真实项目 51 个 label 里 0 例，但
-            `tools/hell_test.py` 的 `struct_empty_label` 就是照着它造的）。
+          · `label X:` 是**空 label**（没有任何可落拍的语句；2026-10-23 起
+            `return` 自己就是一张 flow 拍，不再需要靠空拍保住 label 名）；
+          · `label X:` 后面只有文件级块（`init python:` 之类，挂在别的拍上）。
 
         插在哪：这个 label **后面那个 label 的第一张拍之前**（保住原文的
         label 顺序）；后面没有了就放末尾。空拍没有内容，渲染出来只是一条

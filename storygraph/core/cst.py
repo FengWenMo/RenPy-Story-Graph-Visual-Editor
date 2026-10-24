@@ -57,6 +57,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.indent import indent_width
 
 #: 动态属性名（统一出口，别在别处手写字符串）
 ATTR_SPAN = 'cst_span'
@@ -229,7 +230,7 @@ def attach_spans(statements, file_texts) -> int:
             limit = max(ln, nxt - 1)
             while k < len(lines) and k < limit:
                 cur = lines[k]
-                if cur.strip() and _indent_width(cur) == 0:
+                if cur.strip() and indent_width(cur) == 0:
                     break              # 顶格行：不归我
                 end = k + 1
                 k += 1
@@ -246,10 +247,6 @@ def attach_spans(statements, file_texts) -> int:
                                      - len(head.lstrip(' \t'))]))
             n += 1
     return n
-
-
-def _indent_width(line: str) -> int:
-    return len(line) - len(line.lstrip(' \t'))
 
 
 def overlaps(statements) -> list:

@@ -176,8 +176,9 @@ class TestScriptTableAtScale:
         table = open_rpy_as_table(big_project['script'],
                                   tmp_path / 'ch01.xlsx')
         beats = import_beats_from_excel(table)
-        # 50 句台词 + 末尾那拍"只有音乐、没有台词"的指令（不能丢）
-        assert len(beats) == USED_COUNT + 1
+        # 50 句台词 + 末尾"只有音乐、没有台词"的指令 + 一条 return 拍
+        # （2026-10-23 起 return 也落卡，不再被静默丢掉）
+        assert len(beats) == USED_COUNT + 2
 
         text = render_beats_to_rpy(beats)
         for i in range(USED_COUNT):

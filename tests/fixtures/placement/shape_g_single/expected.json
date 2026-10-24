@@ -1,0 +1,12 @@
+{
+  "sample": "shape_g_single",
+  "placement": {
+    "declarations": "game/all_in_one.rpy",
+    "control_flow": "game/all_in_one.rpy",
+    "content_globs": [
+      "game/all_in_one.rpy"
+    ],
+    "declaration_style": "single_file"
+  },
+  "notes": "单文件原型：声明/控制流/内容同文件（落点重合的极端情况）"
+}

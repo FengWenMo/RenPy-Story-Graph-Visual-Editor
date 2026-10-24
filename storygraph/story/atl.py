@@ -54,7 +54,7 @@ from storygraph.core.safeguard import swallow
 #: 默认游戏分辨率（读不到 `gui.init(...)` 时用）
 DEFAULT_SCREEN = (1920, 1080)
 
-#: 位置词 → 归一化 x（与 `app.stage._POSITION_X` 同源；这里只做兜底）
+#: 位置词 → 归一化 x（**唯一一份**；`app.stage.transform_x` 已改为委托这里）。
 _WORD_X = {
     'left': 0.0, 'center': 0.5, 'centre': 0.5, 'right': 1.0,
     'truecenter': 0.5, 'leftish': 0.2, 'close': 0.5, 'closeup': 0.5,

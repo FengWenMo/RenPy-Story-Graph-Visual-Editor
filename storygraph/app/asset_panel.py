@@ -32,7 +32,6 @@ from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
 from collections import defaultdict
-from pathlib import PurePosixPath
 from typing import Optional
 
 
@@ -55,64 +54,15 @@ class AssetPanelData:
           'tag'       → Tag -> Category
           'folder'    → 文件夹路径 -> Category
           'type'      → 资产类型 -> 子分组
+
+        2026-10-23（清单 §十七）：实现已收口到
+        `assets.asset_tree.group_assets`（与 `asset_extensions` 共用一份）。
+        从前这里与扩展那一份各写一遍，`type` 只在一边有 —— 同一个参数
+        两棵不同的树。
         """
-        registry = self.engine.get_registry()
-        if registry is None:
-            return {}
+        from storygraph.assets.asset_tree import group_assets
 
-        tree = defaultdict(lambda: defaultdict(list))
-
-        # ---------- 图片 ----------
-        for aid, row in registry.images.items():
-            if group_by == 'category':
-                g = row.get('Category', 'other') or 'other'
-                sg = row.get('Tag', '') or '_'
-            elif group_by == 'tag':
-                g = row.get('Tag', '') or '_'
-                sg = row.get('Category', 'other') or 'other'
-            elif group_by == 'folder':
-                p = row.get('Path', '')
-                # 用 posix 分隔符：否则 Windows 上会生成反斜杠分组 key
-                g = str(PurePosixPath(p).parent) if p else '_'
-                sg = row.get('Category', 'other') or 'other'
-            elif group_by == 'type':
-                g = 'image'
-                sg = row.get('Category', 'other') or 'other'
-            else:
-                g, sg = 'other', '_'
-            tree[g][sg].append(aid)
-
-        # ---------- 音频 ----------
-        for name, label in [('music', 'music'), ('sounds', 'sound')]:
-            for aid in getattr(registry, name, {}):
-                if group_by == 'type':
-                    tree[label][label].append(aid)
-                else:
-                    tree[label]['_'].append(aid)
-
-        # ---------- 变换 ----------
-        for aid in registry.transforms:
-            if group_by == 'type':
-                tree['transform']['transform'].append(aid)
-            else:
-                tree['transform']['_'].append(aid)
-
-        # ---------- 角色 ----------
-        for aid, row in registry.characters.items():
-            if group_by == 'type':
-                tree['character']['character'].append(aid)
-            elif group_by == 'category':
-                # 角色按活跃度分组：有对话 / 无对话
-                count = row.get('_dialogue_count', 0)
-                sg = 'active' if count > 0 else 'defined_only'
-                tree['character'][sg].append(aid)
-            else:
-                tree['character']['_'].append(aid)
-
-        return {
-            g: {sg: sorted(ids) for sg, ids in subs.items()}
-            for g, subs in tree.items()
-        }
+        return group_assets(self.engine.get_registry(), group_by)
 
     # ===================== 详情 =====================
 

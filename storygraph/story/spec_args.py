@@ -872,11 +872,15 @@ def dynamic_headers(rows) -> list:
     return out
 
 
-def fold_dynamic_cells(row, values) -> dict:
+def fold_dynamic_cells(values) -> dict:
     """
     `{参数名: 值}` ← 那些动态列（`values` 是 `{列名: 值}`）。
 
     认不出的列名直接忽略（见 `parse_dynamic_column`）。
+
+    ⚠ 2026-10-23（清单 §十五）：从前签名是 `(row, values)`，但函数体
+    一次都没看过 `row` —— 一个"折叠进某一行"的假旋钮。这里删掉它：
+    折叠只需要动态列本身。
     """
     out: dict = {}
     for header, value in (values or {}).items():

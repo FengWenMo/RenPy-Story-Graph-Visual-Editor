@@ -504,6 +504,23 @@ class TestSaveAndUndo:
         assert res['changed'] is True
         assert session.has_undo(0) is True
 
+    def test_save_returns_a_real_line_id_and_a_separate_display_name(self,
+                                                                    session):
+        """
+        清单 §二十：`line_id` 字段不许再返回 `'第 3 拍'` 这种中文串。
+        给人看的文字放 `display_name`。
+        """
+        res = session.save(0, {'Speaker': 'e', 'Text': '改了'},
+                           cards=session.cards(0), advanced_open=False)
+        assert res['line_id'] is None, '没有身份时返回 None，不是中文占位'
+        assert res['display_name'] == '第 1 拍'
+
+        session.beats[0].line_id = 'c1.0042'
+        res = session.save(0, {'Speaker': 'e', 'Text': '又改了'},
+                           cards=session.cards(0), advanced_open=False)
+        assert res['line_id'] == 'c1.0042'
+        assert res['display_name'] == 'c1.0042'
+
     def test_undo_restores_previous_content(self, session):
         session.mark_loaded(0)
         session.save(0, {'Speaker': 'e', 'Text': '第一次'}, cards=None,
@@ -936,17 +953,20 @@ class TestLayoutJsonAndControlFlowExport:
         # 旧版的五个键一个不少（老文件照样能读）；唯一新增的是 rom_clause
         # —— call X from Y 的存档点标识，不存它存布局→读布局就会丢。
         assert {'condition', 'from', 'option_text', 'to', 'type'} <= set(e0)
-        # 旧版的五个键一个不少；**新增过两个**，都有必须存下来的理由：
+        # 旧版的五个键一个不少；**新增过五个**，都有必须存下来的理由：
         #   · `from_clause` —— `call X from Y` 的存档点标识（2026-10-05）；
         #   · `origin`      —— 这条边来自源文件（source）还是用户画的草图
         #                      （manual）（2026-10-22 第二阶段）；
         #   · `line_id`     —— 这条边对应哪一拍（同 label 里多次 call 同一目标
-        #                      靠它对位，同上）。
+        #                      靠它对位，同上）；
+        #   · `position` / `position_line_id` —— 落点（章末 / 指定拍，
+        #                      2026-10-24 P0；P1 的"第 N 拍"选择器要用）。
         # 后两者不存会怎样：一存一读，手工边全变成 `source`、`line_id` 全空，
         # 下一次"按 flow 拍重建 source 边"就会把用户画的线删掉、把重复的
         # call 合成一条 —— 工具吃掉用户的动作，比双真源更糟。
         assert set(e0) - {'condition', 'from', 'option_text', 'to', 'type'} \
-            == {'from_clause', 'origin', 'line_id'}
+            == {'from_clause', 'origin', 'line_id',
+                'position', 'position_line_id'}
         assert data['next_ids'] == {'node': g.next_node_id,
                                     'edge': g.next_edge_id}
 

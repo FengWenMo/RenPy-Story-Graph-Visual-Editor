@@ -129,6 +129,7 @@ except ImportError:
 
 from storygraph.core.uid import make_translation_uid
 from storygraph.core.nest_path import join_nest, option_key
+from storygraph.core.indent import indent_width
 from storygraph.core.statement import (CONTENT_HASH_HEX, Statement,
                                        StatementKind)
 from storygraph.parsing.renpy_parser_stmts import StatementScreens
@@ -802,11 +803,6 @@ class RenPyLexer:
         return root.subblock
 
 
-def _indent_of(text: str) -> int:
-    """这一行的缩进（字符数）。空行算 0。"""
-    return len(text) - len(text.lstrip(' \t'))
-
-
 def _shift_continuations(text: str, base: int) -> str:
     """
     多行文本 → **首行去缩进、续行相对 `base` 左移**（空行留空）。
@@ -843,7 +839,7 @@ def _dedent_block(lines: list) -> list:
     与 `_top_level_region` 同一套口径 —— 两处都这么做，
     才不会有哪一类块在往返里越缩越深。
     """
-    indents = [_indent_of(s) for s in lines if s.strip()]
+    indents = [indent_width(s) for s in lines if s.strip()]
     base = min(indents) if indents else 0
     return [s[base:] if s.strip() else '' for s in lines]
 
@@ -1103,7 +1099,10 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_CALL = re.compile(r'^call\s+([\w.]+)')
     #: `call X from Y` 里的 Y（存档点标识）
     _RE_CALL_FROM = re.compile(r'\bfrom\s+([A-Za-z_]\w*)')
-    _RE_RETURN = re.compile(r'^return\s*$')
+    #: `return` / `return 42` / `return persistent.x` —— 全部是**模型内**语句。
+    #: 从前这里只认裸 `return`，带值的写法掉进"未建模"通道，渲染时被补一行
+    #: 裸 `return`（清单 §九：章尾多一行 / 返回值被盖掉）。
+    _RE_RETURN = re.compile(r'^return(?:\s+(.+?))?\s*$')
     _RE_DOLLAR = re.compile(r'^\$\s*(.+)')
     #: `python:` 块的**全部**块头形态：
     #:   · label 内：`python:` / `python in store:`
@@ -1490,12 +1489,12 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
                 j = i
                 while j < len(lines) and not lines[j].strip():
                     j += 1
-                if j < len(lines) and _indent_of(lines[j]) > base:
+                if j < len(lines) and indent_width(lines[j]) > base:
                     out.extend(lines[i:j])
                     i = j
                     continue
                 break
-            if _indent_of(cur) <= base:
+            if indent_width(cur) <= base:
                 break
             out.append(cur)
             i += 1
@@ -2780,7 +2779,8 @@ class ParseResultBuilder:
         elif isinstance(node, ReturnNode):
             box.add_stmt(Statement.make_return(
                 box.accum_cond,
-                source=(node.filename, node.line_number)))
+                source=(node.filename, node.line_number),
+                value=getattr(node, 'value', '')))
 
         elif isinstance(node, IfNode):
             # else 分支要写成 `not (前面的条件)`：以前直接给空条件，

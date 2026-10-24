@@ -377,3 +377,47 @@ class TestExportPlan:
         with pytest.raises(GenerationBlocked):
             write_beats_to_rpy([beat], inside, project_root=project)
         assert not inside.exists(), '真写进 game/ 时必须拦下且不留文件'
+
+
+class TestBlockedReviewCopyStaysOutOfGame:
+    """
+    P0（2026-10-23，清单 §一）：被拦下的产物**绝不许**以 `.blocked.rpy`
+    落进 `game/` —— 那个后缀仍然会被 Ren'Py 扫描；而且副本里的 label 会让
+    `occupied_labels()` 把门禁自己焊死。
+    """
+
+    def test_review_copy_is_not_written_inside_game(self, tmp_path):
+        from storygraph.story.paths import inside_game_dir
+
+        project = tmp_path / 'proj'
+        game = project / 'game'
+        game.mkdir(parents=True)
+        (game / 'script.rpy').write_text('label start:\n    return\n',
+                                         encoding='utf-8')
+        target = game / 'ch01.rpy'
+        before = sorted(p.name for p in game.glob('*.rpy'))
+
+        art = write_generation('label ch01:\n    show 叶怀瑾\n', target,
+                               project_root=project)
+
+        assert art.blocked and not art.written
+        assert not target.exists(), '坏产物仍然写进了目标路径'
+        assert art.review_path is not None and art.review_path.exists()
+        assert not inside_game_dir(art.review_path, project), (
+            f'对照副本落进了 Ren\'Py 的扫描范围：{art.review_path}')
+        assert sorted(p.name for p in game.glob('*.rpy')) == before, (
+            '门禁拦下时竟然改了 game/ 里的 .rpy 清单')
+
+    def test_existing_blocked_copy_does_not_occupy_labels(self, tmp_path):
+        """历史项目里已经躺着的 `.blocked.rpy` 必须免疫（否则永远导不出来）。"""
+        from storygraph.parsing.discover import discover_scripts
+
+        project = tmp_path / 'proj'
+        game = project / 'game'
+        game.mkdir(parents=True)
+        (game / 'ch01.blocked.rpy').write_text(
+            "label ch01:\n    '坏产物'\n", encoding='utf-8')
+
+        assert discover_scripts(project) == []
+        assert occupied_labels(project) == set(), (
+            'occupied_labels 把工具自己的对照副本算成了用户占用的 label')

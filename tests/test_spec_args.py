@@ -130,9 +130,9 @@ def test_non_dynamic_headers_are_not_mistaken():
 
 
 def test_fold_dynamic_cells_ignores_unknown_columns():
-    got = sa.fold_dynamic_cells(None, {'mycue·target': 'lan',
-                                       '含义·': 'x',
-                                       'Speaker': 'ling'})
+    got = sa.fold_dynamic_cells({'mycue·target': 'lan',
+                                 '含义·': 'x',
+                                 'Speaker': 'ling'})
     assert got == {'target': 'lan'}, got
 
 

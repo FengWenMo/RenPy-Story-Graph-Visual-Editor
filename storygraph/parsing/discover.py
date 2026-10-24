@@ -27,6 +27,16 @@ SKIP_DIR_PARTS = frozenset({
 #: 本工具自己生成的产物后缀：不能被当成"项目原文"扫进来（否则自我循环）。
 GENERATED_SUFFIX = '.generated.rpy'
 
+#: **派生文件**（工具留下的副本/备份）——它们**不是作者写的脚本**，任何
+#: "项目里有哪些 label"的判定都不该把它们算进去。
+#:
+#: `.blocked.rpy` 是生成门禁拦下时留下的对照副本。它以前落在 `game/` 里，
+#: 于是 `occupied_labels()` 会把它带着的 `label ch01:` 算成"用户已占用"，
+#: 下一次导出被自己的副本判成 `LABEL_COLLISION` —— 门禁把自己焊死
+#: （2026-10-23，§一）。就算副本现在改落 `build/review/`，历史项目里已经
+#: 躺着的副本也必须免疫，所以这份名单**独立于落点修复**存在。
+DERIVED_SUFFIXES = ('.blocked.rpy', '.bak.rpy', GENERATED_SUFFIX)
+
 #: `label 名字:`（行首、允许缩进）。只用来回答"这个 label 在哪个文件里"，
 #: 不替代解析器 —— 跑一次正则比解析 40 个文件快得多，而且这个问题
 #: （"还缺哪个文件"）只在用户导入时问一次。
@@ -50,7 +60,8 @@ def discover_scripts(project_root, extra_dirs=None) -> list:
 
     扫描范围：有 `game/` 就只扫它，否则扫项目根；extra_dirs 追加。
     排除：`tl/`（翻译）、`common/` `renpy/` `cache/` `saves/` `__pycache__/`
-    （引擎自带或缓存）、以及 `*.generated.rpy`（本工具的产物）。
+    （引擎自带或缓存）、以及工具留下的派生文件（`*.generated.rpy` /
+    `*.blocked.rpy` / `*.bak.rpy`，见 `DERIVED_SUFFIXES`）。
     """
     project_root = Path(project_root)
     game = project_root / 'game'
@@ -66,7 +77,7 @@ def discover_scripts(project_root, extra_dirs=None) -> list:
             rel_parts = set(fp.relative_to(root).parts)
             if rel_parts & SKIP_DIR_PARTS:
                 continue
-            if fp.name.endswith(GENERATED_SUFFIX):
+            if fp.name.endswith(DERIVED_SUFFIXES):
                 continue
             found.append(fp)
     return found
@@ -185,4 +196,5 @@ def find_files_referencing_labels(project_root, labels) -> dict:
 
 __all__ = ['discover_scripts', 'find_label_files',
            'find_files_referencing_labels', 'labels_in_file',
-           'label_lines_in_file', 'SKIP_DIR_PARTS', 'GENERATED_SUFFIX']
+           'label_lines_in_file', 'SKIP_DIR_PARTS', 'GENERATED_SUFFIX',
+           'DERIVED_SUFFIXES']

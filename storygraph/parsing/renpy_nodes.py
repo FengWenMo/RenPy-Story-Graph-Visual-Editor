@@ -261,7 +261,12 @@ class CallNode(ASTNode):
 
 @dataclass
 class ReturnNode(ASTNode):
-    pass
+    #: `return` 后面那段表达式原文（`return 42` → `'42'`；裸 `return` → `''`）。
+    #:
+    #: 2026-10-23（清单 §九）：从前这里只有 `pass`，解析器只认**裸 return**，
+    #: `return 42` 掉进"未建模语句"通道 —— 渲染时又无条件补一行裸 `return`，
+    #: 于是章尾多一行。现在值原文跟着节点走，渲染时逐字还原。
+    value: str = ''
 
 @dataclass
 class PythonNode(ASTNode):

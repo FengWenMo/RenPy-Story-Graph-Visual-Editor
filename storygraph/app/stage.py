@@ -45,65 +45,22 @@ from storygraph.story.stage_snapshot import snapshot_rows
 #: 归一化坐标：0.0 = 屏幕最左，1.0 = 最右（与 Ren'Py 的 xalign 同向）
 CENTER_X = 0.5
 
-#: 内置/常见位置词 → xalign。**只收有把握的**，其余走 `_x_from_letters` 或居中。
-_POSITION_X = {
-    'left': 0.2, 'center': CENTER_X, 'centre': CENTER_X,
-    'right': 0.8, 'truecenter': CENTER_X,
-    'close': 0.5, 'closeup': 0.5, 'far': 0.5,
-    'leftish': 0.2,
-}
-
-#: 自定义 transform 常见命名：`i11` / `f11` / `l21` / `r22` / `c11`
-#: 首字母表示横向分区（i = inner 偏内、f = far 偏外、l/r/c = 左/右/中），
-#: 数字表示深度/档位。这是**启发式**，所以只用来给一个合理默认位。
-_LETTER_X = {
-    'l': 0.25, 'r': 0.75, 'c': CENTER_X,
-    'i': 0.35, 'f': 0.65,
-}
-
 
 def transform_x(name: str, registry=None) -> float:
     """
     transform 名 / 位置词 → 归一化 x（0..1）。
 
-    优先级（从可靠到启发）：
-      1. 资源表 transforms 里的 ATL 含 `xpos <数字>` → 直接用它；
-      2. 已知位置词（`left` / `右` / `closeup`…）；
-      3. 名字首字母启发（`i11` → 偏内、`f11` → 偏外、`l/r/c`）；
-      4. 兜底居中 —— **不猜**。
-
-    为什么允许"启发"：预览要让人看出"谁在左谁在右"，全居中就没用了。
-    但启发值只影响**画面示意**，不影响生成的代码（那是编译器的活）。
+    ⚠ 2026-10-23（清单 §五）：这里从前有**第二份**位置表 `_POSITION_X`
+    （left=0.2 / right=0.8），而真正跑在预览里的是 `story.atl.placement_of`
+    （left=0.0 / right=1.0，且能跟项目 transform 的调用链）。两份值不一样，
+    而用户能看见的那一套（`build_frames`）走的是 `placement_of` —— 这个函数
+    只有测试在调，测试因此给了"位置算法有覆盖"的假安全感。
+    现在它是**纯委托**：一个概念只有一处实现，两边谁改都不会漂移。
     """
-    name = (name or '').strip()
-    if not name:
-        return CENTER_X
-    low = name.lower()
+    from storygraph.story.atl import placement_of
 
-    # 1) 项目 transform 的 ATL 里有 xpos —— 这是最准的
-    if registry is not None:
-        row = (getattr(registry, 'transforms', {}) or {}).get(name) or {}
-        atl = str(row.get('ATL') or '')
-        for token in ('xpos', 'xalign'):
-            idx = atl.find(token)
-            if idx >= 0:
-                tail = atl[idx + len(token):].strip().split()
-                if tail:
-                    try:
-                        return max(0.0, min(1.0, float(tail[0])))
-                    except ValueError as e:
-                        swallow('stage.transform_x', e)
-
-    # 2) 已知位置词
-    if low in _POSITION_X:
-        return _POSITION_X[low]
-
-    # 3) 首字母启发（只在"字母 + 数字"这种项目惯例命名上做）
-    if low and low[0] in _LETTER_X:
-        return _LETTER_X[low[0]]
-
-    # 4) 兜底居中
-    return CENTER_X
+    place = placement_of(str(name or '').strip(), registry=registry)
+    return max(0.0, min(1.0, float(place.x)))
 
 
 @dataclass
@@ -116,7 +73,8 @@ class SpriteLayout:
     x: float            # 0..1（归一化中心；没有真实几何时用它）
     speaking: bool = False
     #: 项目 transform 算出来的**真实舞台几何**（见 `story.atl`）。
-    #: `None` = 没算出来（那时只按 `x` + 满高画示意图，与老版本一致）。
+    #: `placement_of` **永远返回一个 Placement**（最差是"按名字猜的居中"），
+    #: 所以这里不会是 `None`；判"是不是真算出来的"看 `from_atl`。
     place: object = None
     #: 在 `snapshot_rows` 里的**原始显示顺序**（先 show 的在下面）。
     #: 预览按它叠，不能按"谁在说话"重排 —— 那会改变遮挡关系。
@@ -233,7 +191,8 @@ def build_frames(beats: list, registry=None, transform_index=None,
     `transform_index` / `screen`（用户 2026-10-05："transform 未对应到舞台真实
     位置"）：项目 `transform.rpy` 里解析出来的定义表 + 游戏分辨率，交给
     `story.atl.placement_of` 算出**真实像素位置与缩放**（`SpriteLayout.place`）。
-    不传就退回老的启发式（按名字首字母猜个 x），行为与以前完全一致。
+    不传时 `placement_of` 仍会按内置 transform / 位置词 / 名字首字母给一个
+    合理值（**永远不返回 None**），行为与以前完全一致。
     """
     if not beats:
         return []

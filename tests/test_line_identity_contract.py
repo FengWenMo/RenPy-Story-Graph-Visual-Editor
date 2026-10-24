@@ -70,6 +70,46 @@ class TestContentEditsKeepIdentity:
 #  R5–R7：结构变了，身份只跟着"那一行"
 # ==================================================================
 
+class TestEmptyLabelInheritance:
+    """
+    清单 §二（P0）：空 label 必须继承**前文最近**的 label，而不是文件头。
+
+    从前的 `_renumber` 取"文件里第一个非空 label"回填给所有空 label，
+    于是第二章里插一拍，它的 label / LineId 前缀都跨回第一章。
+    """
+
+    def test_empty_label_inherits_the_nearest_preceding_label(self):
+        from storygraph.app.editor import EditorSession
+        from storygraph.story.beat_model import Beat
+
+        session = EditorSession()
+        session.beats = [
+            Beat(label='ch01', text='第一章第一句'),
+            Beat(label='', text='（ch01 里新插的一拍）'),
+            Beat(label='ch02', text='第二章开场'),
+            Beat(label='', text='（ch02 里新插的一拍）'),
+        ]
+        session._renumber()
+
+        assert [b.label for b in session.beats] == \
+            ['ch01', 'ch01', 'ch02', 'ch02']
+        assert [b.line_id for b in session.beats] == \
+            ['ch01.0001', 'ch01.0002', 'ch02.0001', 'ch02.0002']
+
+    def test_leading_empty_label_is_not_guessed(self):
+        """文件开头还没有 label 时保持空 —— 不替它挂到别的章上。"""
+        from storygraph.app.editor import EditorSession
+        from storygraph.story.beat_model import Beat
+
+        session = EditorSession()
+        session.beats = [Beat(label='', text='开场白'),
+                         Beat(label='ch01', text='第一章')]
+        session._renumber()
+
+        assert session.beats[0].label == ''
+        assert session.beats[1].label == 'ch01'
+
+
 class TestStructuralEditsKeepOtherIdentities:
     def test_inserting_a_line_keeps_every_other_id(self, session):
         before = ids(session)
@@ -212,6 +252,44 @@ class TestAllocator:
         assert parse('main.route.0012') == ('main.route', 12)
         assert parse('') is None
         assert parse('ch01') is None
+
+    def test_ensure_ids_only_fills_empty_ones(self):
+        """
+        清单 §七：`assign_identity` 那个名字塞了两件事。只想补号时用
+        `ensure_ids` —— 已有身份一个都不许动。
+        """
+        from storygraph.story.beat_model import Beat, ensure_ids
+
+        beats = [Beat(label='ch01', seq=1, text='a'),
+                 Beat(label='ch01', seq=9, text='b', line_id='ch01.0042')]
+        assert ensure_ids(beats) == 1
+        assert beats[0].line_id == 'ch01.0001'
+        assert beats[1].line_id == 'ch01.0042', '已有身份被改掉了'
+
+    def test_refresh_fingerprints_only_touches_the_hash(self):
+        from storygraph.story.beat_model import Beat, refresh_fingerprints
+
+        beat = Beat(label='ch01', seq=1, text='a', line_id='ch01.0001')
+        before = beat.line_id
+        refresh_fingerprints([beat])
+        assert beat.line_id == before
+        assert beat.beat_fingerprint, '指纹没有被重算'
+
+    def test_duplicate_ids_are_reissued_using_the_beat_label(self):
+        """
+        清单 §十六：跨 label 搬之后 ID 前缀是历史来源，不是当前归属。
+        重号时新 ID 必须挂在**这一拍自己的 label** 下。
+        """
+        class B:
+            def __init__(self):
+                self.label = 'ch02'
+                self.line_id = 'ch01.0003'
+
+        beats = [B(), B()]
+        assert unique_ids(beats) is True
+        assert beats[0].line_id == 'ch01.0003'      # 第一次出现的保留
+        assert beats[1].line_id.startswith('ch02.'), beats[1].line_id
+
 
     def test_allocate_takes_max_plus_one(self):
         used = {'ch01.0001', 'ch01.0003'}

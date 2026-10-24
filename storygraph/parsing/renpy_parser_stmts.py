@@ -300,12 +300,14 @@ class StatementScreens:
         )
 
     def _stmt_return(self, line, text):
-        """return。"""
-        if self._RE_RETURN.match(text):
+        """`return` 或 `return <表达式>`（表达式原文由 `ReturnNode.value` 带走）。"""
+        m = self._RE_RETURN.match(text)
+        if m:
             return ReturnNode(
                 line_number=line.line_number,
                 indent=line.indent,
                 filename=line.filename,
+                value=(m.group(1) or '').strip(),
             )
         return self._NO_MATCH
 

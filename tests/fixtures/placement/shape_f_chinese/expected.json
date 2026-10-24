@@ -1,0 +1,12 @@
+{
+  "sample": "shape_f_chinese",
+  "placement": {
+    "declarations": "game/变量定义.rpy",
+    "control_flow": "game/章节/剧情控制.rpy",
+    "content_globs": [
+      "game/章节/第*.rpy"
+    ],
+    "declaration_style": "dedicated"
+  },
+  "notes": "中文文件名 + 中文目录 + 中文 label + 中文控制流"
+}

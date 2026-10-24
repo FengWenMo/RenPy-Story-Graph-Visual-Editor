@@ -60,23 +60,34 @@ class WindowKeyboardMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('PAGE_CARD', '_back_to_graph', '_canvas', '_delete_node', '_list', '_open_selected_in_card', '_page', '_text_input_has_focus', '_who', 'check_logic', 'delete_card', 'insert_card', 'load_layout', 'next_beat', 'prev_beat', 'redo_graph', 'save_current_beat', 'save_layout', 'undo_current_beat', 'undo_graph')
+    REQUIRES = ('PAGE_CARD', '_back_to_graph', '_canvas', '_delete_node', '_list', '_open_selected_in_card', '_page', '_text_input_has_focus', '_who', 'check_logic', 'delete_card', 'delete_edge', 'export_script', 'insert_card', 'load_layout', 'next_beat', 'prev_beat', 'redo_graph', 'save_current_beat', 'save_layout', 'undo_current_beat', 'undo_graph')
 
     def _filter_structural_keys(self, event, key, mods, obj, on_card):
-        """结构页那批按键（回车/Delete/Ctrl+S…）—— eventFilter 里“不在卡片页”那一支（M4 搬出，行为一字不改）。块内**每条路径都 return**，所以外面直接 return 等价。"""
+        """结构页那批按键（回车/Delete/Ctrl+…）—— eventFilter 里“不在卡片页”那一支（M4 搬出，行为一字不改）。块内**每条路径都 return**，所以外面直接 return 等价。"""
         if not on_card:
             # 结构页：回车 = 进选中模块的卡片；Delete = 删块
             if key in (Qt.Key_Return, Qt.Key_Enter):
                 self._open_selected_in_card()
                 return True
             if key == Qt.Key_Delete:
+                # 选中一条线时，Delete 删的是线（草图只删图；源边删那一拍）。
+                # 没有选线才回到旧行为：删选中的块。
+                edge = self._canvas.selected_edge_obj()
+                if edge is not None:
+                    self.delete_edge(edge.id)
+                    return True
                 nid = self._canvas.selected_node_id()
                 if nid is not None:
                     self._delete_node(nid)
                     return True
-            # 旧版结构页的 Ctrl+S / Ctrl+O（保存 / 加载布局）与 Ctrl+A（分析）——
-            # 「功能缺失那么多」里有它们，这里按页补回（卡片页的 Ctrl+S/Z 另算）。
+            # **Ctrl+S = 保存"这一章"的心思是共通的**：结构页也必须真的写
+            # `.rpy`（2026-10-23，清单 §八）。布局改到 Ctrl+Shift+L，
+            # 不再占用"保存"这个最硬的肌肉记忆。
             if key == Qt.Key_S and mods & Qt.ControlModifier:
+                self.export_script()
+                return True
+            if key == Qt.Key_L and mods & Qt.ControlModifier \
+                    and mods & Qt.ShiftModifier:
                 self.save_layout()
                 return True
             if key == Qt.Key_O and mods & Qt.ControlModifier:
@@ -160,6 +171,13 @@ class WindowKeyboardMixin:
         if not on_card:
             return self._filter_structural_keys(event, key, mods, obj, on_card)
 
+        # Ctrl+Shift+S = **真的写 .rpy**（2026-10-23，清单 §八）。
+        # Ctrl+S 的语义仍是"提交这张卡片到内存"——但至少有一个"保存 = 落盘"
+        # 的快捷键，而不是让用户按完 Ctrl+S 以为文件已经更新。
+        if key == Qt.Key_S and mods & Qt.ControlModifier \
+                and mods & Qt.ShiftModifier:
+            self.export_script()
+            return True
         # Ctrl+S：与工具栏 action 的快捷键同一个落点（两处都能按，语义只有一份）
         if key == Qt.Key_S and mods & Qt.ControlModifier:
             self.save_current_beat()

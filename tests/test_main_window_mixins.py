@@ -85,6 +85,8 @@ KEEP = {
     '_back_to_graph': '回结构页',
     '_open_selected_in_card': '页切换 + 载入',
     '_on_zoom_changed': '画布缩放 → 状态栏',
+    '_beat_context': '拍上下文：边上的第 N 拍由它投影（P0 边位置也读它）',
+    '_open_edge_in_card': '双击边 → 定位那一拍；跨章必须先载入再取拍号',
     '_log': '控制台',
     'clear_console': '控制台',
     '_swallow_mark': '静默失败标记',

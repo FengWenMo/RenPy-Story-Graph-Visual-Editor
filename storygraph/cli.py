@@ -16,6 +16,7 @@ cli.py
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -973,7 +974,126 @@ def build_parser() -> argparse.ArgumentParser:
                     help='语义/资源类问题（`is not an image` 等）也算失败（退 1）')
     sp.set_defaults(func=_cmd_engine_facts)
 
+    sp = sub.add_parser(
+        'exits',
+        help='每章出口体检（只读）：会不会落空、能不能包控制流层')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--file', action='append', default=[],
+                    help='只扫这几个 .rpy（可重复；默认扫项目全部）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.set_defaults(func=_cmd_exits)
+
+    sp = sub.add_parser(
+        'shape',
+        help='项目形状体检（只读）：声明/控制流/内容文件各在哪')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.add_argument('--write', action='store_true',
+                    help='把探测到的形状写进 storygraph.rules.json'
+                         '（**读-改-写**，其它段原样保留；坏了就拒写）')
+    sp.set_defaults(func=_cmd_shape)
+
     return p
+
+
+def _cmd_exits(args) -> int:
+    """
+    每章出口体检（只读）。
+
+    为什么要一条独立命令（2026-10-23，G0）：引擎 lint 对"章末没写 return"
+    是**完全沉默**的，而那种章会让玩家顺路撞进下一个 label。这条命令把
+    "我看出来的风险"和"因此工具能用到多深"一次说清楚。
+
+    退出码：有 `blocked` 级问题 → 1（CI 能抓）；否则 0。
+    """
+    from storygraph.story.exits import EXIT_ZH, project_exits
+
+    files = list(getattr(args, 'file', None) or [])
+    rep = project_exits(args.project, files=files or None)
+
+    if getattr(args, 'json', False):
+        print(json.dumps(rep.to_dict(), ensure_ascii=False, indent=1))
+    else:
+        counts = rep.counts()
+        print(f'扫了 {len(rep.files)} 个文件、{len(rep.labels)} 个 label')
+        if rep.errors:
+            print(f'⚠ {len(rep.errors)} 个文件没读出来（不影响其余结论）')
+        print('\n出口分布：')
+        for key, val in sorted(counts.items(), key=lambda t: -t[1]):
+            if val:
+                print(f'  {EXIT_ZH.get(key, key):28s} {val:4d}')
+
+        risky = rep.risky()
+        print(f'\n有风险的章：{len(risky)}')
+        for item in risky:
+            where = f'{item.file}:{item.line}' if item.file else item.label
+            print(f'  · {item.label}（{where}）')
+            print(f'      {item.reason}')
+
+        degs = rep.degradations()
+        if degs:
+            print('\n工具能力降级（这些地方图只能看，不能改）：')
+            for d in degs:
+                print(f'  ▸ [{d["level"]}] {d["title"]}')
+                print(f'      {d["message"]}')
+                print(f'      怎么办：{d["hint"]}')
+        else:
+            print('\n没有降级：所有内容章都能正常接线。')
+
+    blocked = [d for d in rep.degradations() if d.get('level') == 'blocked']
+    return 1 if blocked else 0
+
+
+def _cmd_shape(args) -> int:
+    """
+    项目形状体检（只读）：声明在哪、控制流在哪、哪些文件是内容。
+
+    这是 G0 的后半。它回答的是"你的项目长什么样"，也就是
+    "工具在你这儿能用到多深"的前置条件 —— 不是风格评分。
+    """
+    from storygraph.story.placement import detect_placement
+
+    p = detect_placement(args.project)
+    if getattr(args, 'write', False):
+        from storygraph.story.project_conventions import write_placement
+        res = write_placement(args.project, p.to_dict())
+        if not res.get('ok'):
+            print(f'\n没写：{res.get("reason")}', file=sys.stderr)
+            return 1
+        print(f'\n已把形状写进清单：{res["path"]}')
+        return 0
+    if getattr(args, 'json', False):
+        print(json.dumps(p.to_dict(), ensure_ascii=False, indent=1))
+        return 0
+
+    print(p.summary())
+    print('\n声明：')
+    decl = p.declarations
+    if isinstance(decl, list):
+        for item in decl:
+            print(f'  · {item}')
+    elif decl:
+        print(f'  · {decl}')
+    else:
+        print('  （没找到 default / define）')
+
+    print(f'\n控制流：{p.control_flow or "（没有独立控制流文件 —— 跳转写在内容里）"}')
+    print(f'内容文件（{len(p.content_files)}）：')
+    for item in p.content_files:
+        print(f'  · {item}')
+    if p.inline_flow_files:
+        print(f'\n控制流混在内容里的文件（图只能读，改动归卡片）：')
+        for item in p.inline_flow_files:
+            print(f'  · {item}')
+
+    if p.warnings:
+        print('\n警告：')
+        for w in p.warnings:
+            print(f'  ⚠ {w}')
+    print(f'\n判据：{p.evidence.get("note", "")}')
+    return 0
 
 
 def main(argv=None) -> int:

@@ -42,6 +42,9 @@ dist/
 # （2026-10-21：152 MB 的 exe + 68 MB 的 zip，都可由 packaging 重建）
 dist_release*/
 /StoryGraph-*.zip
+# 带日期的交付目录（`--distpath StoryGraph-1.0.0-win64-2026-10-21`，151 MB 的
+# exe 与 _internal/，同样可由 packaging 重建）
+/StoryGraph-*-win64*/
 # PyInstaller 的中间目录（`--workpath build/release`）
 build/release*/
 *.spec.bak

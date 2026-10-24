@@ -256,9 +256,15 @@ class TestApplyProjectionSafety:
                               'Stage': 'hide cg03'},
                           cards=[], advanced_open=True,
                           stage_loaded='show ling oh; hide cg03')
-        assert b.stage == 'hide cg03'
         assert b.hide == 'cg03', '按人写的文本重新解析应得到同一条退场'
         assert b.show == '', '结构化立绘要让位给手写的高级舞台'
+        # **2026-10-24 起**：Stage 格是完整投影，写回时"能重建的重建"——
+        # 认得出来的 `hide cg03` 落进结构化列，`b.stage` 只留表达不了的部分
+        # （这里是空）。断言"有效舞台"而不是内部字符串：既保证人写的内容
+        # 一条不少，也保证不会被结构化列再输出一遍。
+        from storygraph.story.beat_model import compose_stage
+        assert compose_stage(b) == 'hide cg03'
+        assert 'hide cg03' not in (b.stage or ''), '同一句退场存了两份'
 
     def test_empty_stage_never_wipes_structured_columns(self, session):
         """

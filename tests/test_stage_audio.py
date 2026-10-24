@@ -256,6 +256,32 @@ def preview_audio(audio_project):
 
 
 class TestStageAudioPlayback:
+    def test_bgm_is_played_with_infinite_loop(self, preview_audio):
+        """
+        清单 §十一：`_play(..., loop=True)` 必须真的被读 —— 预览里的 BGM
+        要与 Ren'Py 一样循环，而不是播一遍就没声。
+        """
+        preview_audio.set_frame(_Frame(music='t', line_id='a'), key=('a', 0))
+        loops = [c for c in preview_audio.log if c[0] == 'loops']
+        assert loops and loops[-1][1] == -1, loops
+
+    def test_one_shot_sound_is_explicitly_not_looped(self, audio_project):
+        """音效/语音一次性播放：loop=False 要显式设成 Once（不然会继承循环设置）。"""
+        pytest.importorskip('PySide6')
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        from storygraph.ui_qt.stage_preview import StageAudio
+
+        log = []
+        reg = _Reg(sounds={'click': {'Path': 'game/audio/click.ogg'}})
+        audio = StageAudio(
+            audio_project, registry=reg, enabled=True,
+            player_factory=lambda: (_FakePlayer(log), _FakeOut(),
+                                    _FakePlayer(log), _FakeOut()))
+        audio.set_frame(_Frame(sound='click', line_id='x'), key=('x', 0))
+        loops = [c for c in log if c[0] == 'loops']
+        assert (1 in [v for _k, v in loops]), loops
+
     def test_bgm_starts_and_is_not_restarted_on_the_next_beat(self,
                                                               preview_audio):
         preview_audio.set_frame(_Frame(music='t', line_id='a'), key=('a', 0))

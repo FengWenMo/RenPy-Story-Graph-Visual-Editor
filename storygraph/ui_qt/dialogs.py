@@ -24,11 +24,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QFormLayout, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPlainTextEdit,
-                               QPushButton, QTableWidget, QTableWidgetItem,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QFileDialog, QFormLayout,
+                               QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from storygraph.ui_qt import tokens as T
@@ -1512,16 +1513,45 @@ EDGE_TYPES = [('jump', 'jump（跳过去，不回来）'),
 
 
 class AddEdgeDialog(_BaseDialog):
-    """在两个章节之间加一条连线（`jump` / `call` + 可选条件 / 菜单项文字）。"""
+    """
+    在两个章节之间加一条连线（`jump` / `call` + 条件 / 菜单项 + 插入位置）。
 
-    def __init__(self, parent=None, nodes=None, from_id=None, to_id=None):
+    版面就是旧版「添加连线」：从 / 到 / 类型 / 插入位置 / 条件 / 菜单项；
+    左下角多一个**默认不勾的「草稿」勾选**。没有第二张表单、没有"落点说明"段。
+
+    插入位置决定这条线写到剧本的哪一拍（默认章末，列表精确到第 N 拍）：
+    窗口层用 `plan_fn` 算落点，能写就写进 `.rpy`（有编排层时写 `X_control`），
+    写不进才画成草图（图上标「草图」）。勾了「草稿」则**只画线、不写剧本**，
+    位置仍记下来，以后可以右键「写入剧本…」转正。条件 / 菜单项是分支，
+    **写在编排层**（`X_control` 的 `call X` 之后），章节剧本不动。
+    """
+
+    def __init__(self, parent=None, nodes=None, from_id=None, to_id=None,
+                 plan_fn=None, open_fn=None, positions_fn=None,
+                 suggest_from_fn=None):
         super().__init__(parent, '添加连线')
         nodes = dict(nodes or {})
+        self._nodes = nodes
         self.from_id = from_id
         self.to_id = to_id
         self.etype = 'jump'
         self.condition = ''
         self.option_text = ''
+        self.from_clause = ''
+        self.plan = {}
+        self.position = 'chapter_end'
+        self.position_line_id = ''
+        self.write = False
+        self.draft = False
+        self.branch = False
+        self.reason = ''
+        self._plan_fn = plan_fn
+        self._positions_fn = positions_fn
+        #: `open_fn` / `suggest_from_fn` 是旧调用方还在传的参数；新窗口不用，
+        #: 但保留签名，别让调用方为一个已经不显示的控件改代码。
+        self._open_fn = open_fn
+        self._suggest_from_fn = suggest_from_fn
+        self._plan_takes_etype = self._accepts_etype(plan_fn)
 
         form = QFormLayout()
         form.setSpacing(T.SPACE['sm'])
@@ -1548,6 +1578,11 @@ class AddEdgeDialog(_BaseDialog):
             self._type.addItem(label, value)
         form.addRow('类型', self._type)
 
+        #: 插入位置：章末 / 第 N 拍。选项由窗口层现算；算不出时只剩章末。
+        self._pos = QComboBox()
+        self._pos.addItem('章末（章节文件）', ('chapter_end', ''))
+        form.addRow('插入位置', self._pos)
+
         self._cond = QLineEdit()
         self._cond.setPlaceholderText('可选，例如 score > 3（留空 = 无条件）')
         form.addRow('条件', self._cond)
@@ -1558,17 +1593,137 @@ class AddEdgeDialog(_BaseDialog):
         form.addRow('菜单项', self._opt)
         self._root.addLayout(form)
 
-        hint = QLabel(
-            '⚠ 图上的连线是草图：它只改剧情图，不会写进任何 .rpy，'
-            '也不会生成新 label。\n'
-            '要让脚本真的 call / jump，请打开卡片，用「↳ 插入控制流卡」；'
-            '那条控制流会同时在图上出现实线。\n'
-            '填了「菜单项」= 这一拍是个分支（menu）；'
-            '只填「条件」= 条件跳转；都不填 = 直接 ' + 'jump/call' + '。')
+        hint = QLabel('填了「条件」/「菜单项」= 分支，写在编排层 `X_control` 里'
+                      '（章节剧本一个字不动）；项目还没有编排层时会先带你'
+                      '接管进入点。\n'
+                      '勾「草稿」= 只画线、不写剧本。')
         hint.setProperty('role', 'caption')
         hint.setWordWrap(True)
         self._root.addWidget(hint)
-        self._add_buttons('创建草图连线')
+
+        # 左下角的「草稿」：默认不勾。勾上就不写剧本，只画一条虚线草图
+        # （位置仍记在 `position/position_line_id`，以后可以「写入剧本…」转正）。
+        draft_row = QHBoxLayout()
+        draft_row.setContentsMargins(0, 0, 0, 0)
+        self._draft = QCheckBox('草稿（只画线，不写剧本）')
+        self._draft.setToolTip(
+            '勾上就先画成虚线草稿（图上标「草图」），剧本一个字不改；'
+            '以后右键这条线「写入剧本…」可以转正。'
+            '不勾 = 按插入位置直接写进剧本。')
+        self._draft.setChecked(False)
+        draft_row.addWidget(self._draft)
+        draft_row.addStretch(1)
+        self._root.addLayout(draft_row)
+
+        self._add_buttons('创建')
+        self.setMinimumWidth(520)
+
+        self._src.currentIndexChanged.connect(self._sync_positions)
+        self._dst.currentIndexChanged.connect(self._sync_position)
+        self._type.currentIndexChanged.connect(self._sync_position)
+        self._pos.currentIndexChanged.connect(self._sync_position)
+        self._sync_positions()
+
+    # ---------------- 落点 ----------------
+
+    @staticmethod
+    def _accepts_etype(fn) -> bool:
+        """`plan_fn` 收不收 `etype`（可选第 5 个参数）。"""
+        if not callable(fn):
+            return False
+        try:
+            import inspect
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return False
+        if 'etype' in params:
+            return True
+        return any(p.kind == inspect.Parameter.VAR_POSITIONAL
+                   for p in params.values())
+
+    def _call_plan(self, from_id, to_id):
+        if not callable(self._plan_fn):
+            return {}
+        args = [from_id, to_id, self.position, self.position_line_id]
+        if self._plan_takes_etype:
+            args.append(str(self._type.currentData() or 'jump'))
+        return self._plan_fn(*args) or {}
+
+    def _sync_positions(self, *_args):
+        """
+        起点章变了 → 重建「插入位置」下拉框。
+
+        只列窗口层说能接的位置；算不出（章没打开 / 没有顶层拍）就只剩
+        「章末」，并置灰，不凭章名或拍数去猜一个。
+        """
+        from_id = self._src.currentData()
+        data = {}
+        if callable(self._positions_fn) and from_id is not None:
+            try:
+                data = self._positions_fn(from_id) or {}
+            except Exception as e:            # noqa: BLE001 - 下拉框坏不该拦住接线
+                swallow('ui_qt.dialogs.AddEdgeDialog.positions', e)
+                data = {}
+        items = (list(data.get('items') or ())
+                 if isinstance(data, dict) else [])
+        control = bool(data.get('control')) if isinstance(data, dict) else False
+
+        self._pos.blockSignals(True)
+        self._pos.clear()
+        self._pos.addItem('章末（编排层）' if control else '章末（章节文件）',
+                          ('chapter_end', ''))
+        for it in items:
+            if not isinstance(it, dict) or not it.get('line_id'):
+                continue
+            number = it.get('number')
+            if not isinstance(number, int):
+                try:
+                    number = int(it.get('index') or 0) + 1
+                except (TypeError, ValueError):
+                    number = 0
+            text = str(it.get('text') or '')
+            label = f'第 {number} 拍 · {text}' if text else f'第 {number} 拍'
+            note = str(it.get('note') or '')
+            if not it.get('selectable'):
+                label += f'（{note or "不能接在这里"}）'
+            self._pos.addItem(label, ('beat', str(it['line_id'])))
+            if not it.get('selectable'):
+                row = self._pos.count() - 1
+                try:
+                    item = self._pos.model().item(row)
+                    if item is not None:
+                        item.setEnabled(False)
+                except Exception as e:        # noqa: BLE001 - 置灰失败仍可显示
+                    swallow('ui_qt.dialogs.AddEdgeDialog.gray_position', e)
+        self._pos.setCurrentIndex(0)
+        self._pos.blockSignals(False)
+        self._pos.setEnabled(True)
+        self._pos.setToolTip(str(data.get('reason') or '')
+                             if isinstance(data, dict) else '')
+        self.position, self.position_line_id = 'chapter_end', ''
+        self._sync_position()
+
+    def _sync_position(self, *_args):
+        """下拉框一改，位置和计划立刻跟着变（不必等按「创建」）。"""
+        self.position, self.position_line_id = self._current_position()
+        from_id, to_id = self._src.currentData(), self._dst.currentData()
+        if from_id is None or to_id is None:
+            self.plan = {}
+            return
+        try:
+            self.plan = self._call_plan(from_id, to_id)
+        except Exception as e:                # noqa: BLE001 - 算不出也要能画草图
+            swallow('ui_qt.dialogs.AddEdgeDialog.sync_position', e)
+            self.plan = {}
+
+    def _current_position(self):
+        data = self._pos.currentData()
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            if str(data[0]) == 'beat' and data[1]:
+                return 'beat', str(data[1])
+        return 'chapter_end', ''
+
+    # ---------------- 确定 ----------------
 
     def _on_accept(self):
         self.from_id = self._src.currentData()
@@ -1587,6 +1742,46 @@ class AddEdgeDialog(_BaseDialog):
             return
         self.condition = cond
         self.option_text = self._opt.text().strip()
+        self.draft = bool(self._draft.isChecked())
+        self.position, self.position_line_id = self._current_position()
+        self.from_clause = ''
+
+        try:
+            self.plan = self._call_plan(self.from_id, self.to_id)
+        except Exception as e:                # noqa: BLE001 - 算不出也要能画草图
+            swallow('ui_qt.dialogs.AddEdgeDialog.plan', e)
+            self.plan = {}
+        kind = str(self.plan.get('kind') or '')
+        writable = bool(self.plan.get('ok')) or kind == 'control_init'
+        branch = bool(self.condition or self.option_text)
+        self.branch = branch
+        self.write = bool(writable)
+        self.reason = str(self.plan.get('reason') or '')
+
+        # 条件 / 菜单项是**章末**分支：写在 `X_control` 的 `call X` 之后。
+        # 指定"第 N 拍"时没有编排层落点（往块体里插会破坏缩进与语义），
+        # 当场让人改回章末，不静默改成别的意思。
+        if branch and self.position == 'beat':
+            self.write = False
+            self._fail('条件 / 菜单项是章末分支，只能写在编排层；'
+                       '把「插入位置」改回「章末」，或清空条件 / 菜单项。')
+            return
+
+        # 勾了「草稿」：这一条只画线，**不写剧本**；位置照样记下来，
+        # 以后可以右键「写入剧本…」转正。因此这里不检查"这一拍写不写得进"。
+        if self.draft:
+            self.write = False
+            self.reason = '勾了「草稿」：只画线，不写剧本'
+            self.accept()
+            return
+
+        # 明确选了"某一拍"却写不进去：不许悄悄退化成草图 —— 草图的落点
+        # 就是那一拍，那一拍写不进，草图也就永远转不了正。当场让人换位置。
+        if self.position == 'beat' and not writable and not branch:
+            self._fail('这个拍位置现在写不进：'
+                       + (self.reason or '找不到可插的落点')
+                       + '。换一个位置，或把「插入位置」改回章末。')
+            return
         self.accept()
 
     @staticmethod
@@ -1603,9 +1798,423 @@ class AddEdgeDialog(_BaseDialog):
             from storygraph.graph.analysis import (VariableState,
                                                    condition_possible)
             return condition_possible(VariableState(), cond) is not False
-        except Exception as e:                    # noqa: BLE001
+        except Exception as e:                # noqa: BLE001
             swallow('ui_qt.dialogs._condition_ok', e)
             return True
+
+
+class EditEdgeDialog(_BaseDialog):
+    """
+    一条**已有连线**的属性（旧版「编辑连线」的 Qt 版）。
+
+    版面与「添加连线」同一张表单：从 / 到 / 类型 / 插入位置 / 条件 / 菜单项。
+
+    保存**不是"只改图"**（用户 2026-10-24 抓到的第二个问题）：
+      · 源边 → 改类型 / 到，直接改写剧本里的那一行（`jump B` ↔ `call B`）；
+        改「插入位置」= 把那一行挪到本章另一拍之后（导出才落盘）；
+      · 编排线 → 改类型 / 到 / **条件 / 菜单项**，直接改写 `X_control` 里
+        对应的标记段（普通路由会被换成条件分支）；
+      · 草图 → 只改图上的"打算"（它本来就不在剧本里）。
+
+    源边的条件 / 菜单项仍然只读：那两样挂在它所在的 `if` / `menu` 上，
+    不是这一行自己能改的字段（窗口里写明原因，不给假输入框）。
+    """
+
+    def __init__(self, parent=None, edge=None, from_label='', to_label='',
+                 position_text='', positions=None, open_fn=None,
+                 targets=None, target_id=None):
+        super().__init__(parent, '编辑连线')
+        self.edge = edge
+        self.origin = str(getattr(edge, 'origin', 'source') or 'source')
+        self.etype = str(getattr(edge, 'type', 'jump') or 'jump')
+        self.condition = str(getattr(edge, 'condition', '') or '')
+        self.option_text = str(getattr(edge, 'option_text', '') or '')
+        self.from_clause = str(getattr(edge, 'from_clause', '') or '')
+        self.changed = False
+        self._control = self.origin == 'control'
+        self._manual = self.origin == 'manual'
+        self._source = not self._control and not self._manual
+        self.position = str(getattr(edge, 'position', 'chapter_end')
+                            or 'chapter_end')
+        self.position_line_id = (str(getattr(edge, 'position_line_id', '') or '')
+                                 if self.position == 'beat' else '')
+        if self._source:
+            # 源边的"位置"就是它那一拍的行身份；窗口里可以把它挪到
+            # 本章另一个顶层拍之后（移动会改写剧本，和卡片编辑一样导出落盘）。
+            lid = str(getattr(edge, 'line_id', '') or '')
+            self.position = 'beat' if lid else 'chapter_end'
+            self.position_line_id = lid
+        self._pos_editable = False
+        self.to_id = (target_id if target_id is not None
+                      else getattr(edge, 'to_id', None))
+
+        form = QFormLayout()
+        form.setSpacing(T.SPACE['sm'])
+
+        self._src = QComboBox()
+        self._src.addItem(str(from_label or '?'), 'from')
+        self._src.setEnabled(False)
+        form.addRow('从', self._src)
+
+        #: 到：源边 / 编排线可以改（会改写文件里那一行）；草图两端只读。
+        self._dst = QComboBox()
+        pairs = []
+        for item in (targets or ()):
+            try:
+                nid, name = item
+            except (TypeError, ValueError):
+                continue
+            pairs.append((nid, str(name or '')))
+        if self._control or self._source:
+            rows = list(pairs)
+            if self.to_id is not None \
+                    and self.to_id not in [nid for nid, _n in rows]:
+                rows.insert(0, (self.to_id, str(to_label or '?')))
+            if not rows:
+                rows = [(self.to_id, str(to_label or '?'))]
+            for nid, name in rows:
+                self._dst.addItem(f'{nid}: {name}', nid)
+            i = self._dst.findData(self.to_id)
+            if i >= 0:
+                self._dst.setCurrentIndex(i)
+            self._dst.setEnabled(len(rows) > 1)
+        else:
+            self._dst.addItem(str(to_label or '?'), 'to')
+            self._dst.setEnabled(False)
+        form.addRow('到', self._dst)
+
+        self._type = QComboBox()
+        for value, label in EDGE_TYPES:
+            self._type.addItem(label, value)
+        i = self._type.findData(self.etype)
+        if i >= 0:
+            self._type.setCurrentIndex(i)
+        form.addRow('类型', self._type)
+
+        self._pos = QComboBox()
+        self._fill_positions(positions, position_text)
+        self._pos.setEnabled(self._manual or self._pos_editable)
+        form.addRow('插入位置', self._pos)
+
+        self._cond = QLineEdit(self.condition)
+        self._cond.setPlaceholderText('可选，例如 score > 3（留空 = 无条件）')
+        self._opt = QLineEdit(self.option_text)
+        self._opt.setPlaceholderText('可选：填了就当成菜单选项文字，'
+                                     '例如「去屋顶看看」')
+        # 条件 / 菜单项：编排线可以真的改写（按标记段换 / 换掉原来那一行
+        # 普通路由）；草图只改图上的"打算"；源边的那两样挂在 if / menu 上，
+        # 不是这一行能改的，明确写原因。
+        editable_branch = self._manual or self._control
+        self._cond.setEnabled(editable_branch)
+        self._opt.setEnabled(editable_branch)
+        form.addRow('条件', self._cond)
+        form.addRow('菜单项', self._opt)
+        self._root.addLayout(form)
+
+        if self._manual:
+            hint = QLabel('填了「菜单项」= 这一拍是个分支（menu）；'
+                          '只填「条件」= 条件跳转；都不填 = 直接 jump/call。')
+        elif self._control:
+            hint = QLabel(
+                '这条线是编排层里的一段：改「类型 / 到 / 条件 / 菜单项」会'
+                '直接改写 `X_control` 里的对应段（jump 去 B_control，'
+                'call 去 B）；章节剧本一个字不动。\n'
+                '清空条件 / 菜单项请删掉这条线再用普通接线重连。')
+        else:
+            hint = QLabel(
+                '这条线是剧本里的一行：改「类型 / 到」会直接改写那一行；'
+                '「插入位置」可以把它挪到本章另一个顶层拍之后（导出才落盘）。\n'
+                '条件 / 菜单项挂在它所在的 if / menu 上，不是这一行能改的 —— '
+                '要改请双击那一拍进卡片。')
+        hint.setProperty('role', 'caption')
+        hint.setWordWrap(True)
+        self._root.addWidget(hint)
+
+        self._open_btn = QPushButton('打开编排层文件')
+        self._open_fn = open_fn
+        self._open_btn.setVisible(bool(open_fn) and self._control)
+        self._open_btn.clicked.connect(self._open_control)
+        self._root.addWidget(self._open_btn)
+
+        self._add_buttons('保存')
+        self.setMinimumWidth(520)
+
+    # ---------------- 插入位置 ----------------
+
+    def _fill_positions(self, positions, position_text):
+        if self._control:
+            self._pos.addItem('章末（编排层）', ('chapter_end', ''))
+            return
+        if self._source:
+            # 源边：列出本章顶层拍，选中当前那一拍；能改成"接到另一拍之后"。
+            items = (positions.get('items') or ()
+                     if isinstance(positions, dict) else ())
+            if not items:
+                text = str(position_text or '').strip() or '位置未载入'
+                self._pos.addItem(text, ('current', ''))
+                return
+            for it in items:
+                if not isinstance(it, dict) or not it.get('line_id'):
+                    continue
+                number = it.get('number')
+                if not isinstance(number, int):
+                    try:
+                        number = int(it.get('index') or 0) + 1
+                    except (TypeError, ValueError):
+                        number = 0
+                text = str(it.get('text') or '')
+                label = f'第 {number} 拍 · {text}' if text else f'第 {number} 拍'
+                self._pos.addItem(label, ('beat', str(it['line_id'])))
+                if not it.get('selectable'):
+                    row = self._pos.count() - 1
+                    try:
+                        item = self._pos.model().item(row)
+                        if item is not None:
+                            item.setEnabled(False)
+                    except Exception as e:    # noqa: BLE001 - 置灰失败仍可显示
+                        swallow('ui_qt.dialogs.EditEdgeDialog.gray_source',
+                                e)
+            self._pos_editable = True
+            self._select_position()
+            return
+        self._pos.addItem('章末（章节文件）', ('chapter_end', ''))
+        items = (positions.get('items') or ()
+                 if isinstance(positions, dict) else ())
+        for it in items:
+            if not isinstance(it, dict) or not it.get('line_id'):
+                continue
+            number = it.get('number')
+            if not isinstance(number, int):
+                try:
+                    number = int(it.get('index') or 0) + 1
+                except (TypeError, ValueError):
+                    number = 0
+            text = str(it.get('text') or '')
+            label = f'第 {number} 拍 · {text}' if text else f'第 {number} 拍'
+            if not it.get('selectable'):
+                label += f'（{it.get("note") or "不能接在这里"}）'
+            self._pos.addItem(label, ('beat', str(it['line_id'])))
+            if not it.get('selectable'):
+                row = self._pos.count() - 1
+                try:
+                    item = self._pos.model().item(row)
+                    if item is not None:
+                        item.setEnabled(False)
+                except Exception as e:        # noqa: BLE001 - 置灰失败仍可显示
+                    swallow('ui_qt.dialogs.EditEdgeDialog.gray_position', e)
+        self._select_position()
+
+    def _select_position(self):
+        """选中当前落点；当前拍不在列表里就补一条只读项，不改章末。"""
+        want = ('beat', self.position_line_id) \
+            if self.position == 'beat' else ('chapter_end', '')
+        for row in range(self._pos.count()):
+            data = self._pos.itemData(row)
+            if isinstance(data, (tuple, list)) and tuple(data) == want:
+                self._pos.setCurrentIndex(row)
+                return
+        if self.position == 'beat' and self.position_line_id:
+            self._pos.addItem('指定拍（未载入，保留原值）', want)
+            self._pos.setCurrentIndex(self._pos.count() - 1)
+
+    def _current_position(self):
+        if not (self._manual or (self._source and self._pos_editable)):
+            return self.position, self.position_line_id
+        data = self._pos.currentData()
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            if str(data[0]) == 'beat' and data[1]:
+                return 'beat', str(data[1])
+        return 'chapter_end', ''
+
+    # ---------------- 保存 ----------------
+
+    def _open_control(self):
+        if callable(self._open_fn):
+            try:
+                self._open_fn()
+            except Exception as e:            # noqa: BLE001 - 打不开不该崩
+                swallow('ui_qt.dialogs.EditEdgeDialog.open_control', e)
+        self.accept()
+
+    def _on_accept(self):
+        etype = str(self._type.currentData() or 'jump')
+        editable_branch = self._manual or self._control
+        cond = (self._cond.text().strip() if editable_branch
+                else self.condition)
+        if editable_branch and cond and not AddEdgeDialog._condition_ok(cond):
+            self._fail(f'条件「{cond}」看起来永远不成立，'
+                       f'检查一下变量名和比较符。')
+            return
+        new_opt = (self._opt.text().strip() if editable_branch
+                   else self.option_text)
+        new_from = self.from_clause if etype == 'call' else ''
+        new_pos, new_lid = self._current_position()
+        new_to = (self._dst.currentData()
+                  if (self._control or self._source) else self.to_id)
+        old_type = str(getattr(self.edge, 'type', 'jump') or 'jump')
+        old_to = getattr(self.edge, 'to_id', None)
+        self.changed = (etype != old_type
+                        or str(new_to) != str(old_to)
+                        or cond != self.condition
+                        or new_opt != self.option_text
+                        or new_from != self.from_clause
+                        or new_pos != self.position
+                        or new_lid != self.position_line_id)
+        self.etype = etype
+        self.condition = cond
+        self.option_text = new_opt
+        self.from_clause = new_from
+        self.position = new_pos
+        self.position_line_id = new_lid
+        self.to_id = new_to
+        self.accept()
+
+    @staticmethod
+    def _condition_ok(cond: str) -> bool:
+        return AddEdgeDialog._condition_ok(cond)
+
+
+class TakeoverDialog(_BaseDialog):
+    """
+    「接管进入点」的**多文件 diff 预览**（接管前必须看见会改什么）。
+
+    只读文本，不在这里改路径 / 内容：要改就去改源文件，再来一次。
+    确定 = 执行接管（命令层负责原子写 + 撤销）。
+    """
+
+    def __init__(self, parent=None, plan=None):
+        super().__init__(parent, '接管进入点 · 编排层')
+        self.plan = plan
+        reason = str(getattr(plan, 'reason', '') or '')
+        summary = QLabel(reason or '没有可接管的内容。')
+        summary.setWordWrap(True)
+        self._root.addWidget(summary)
+
+        path = str(getattr(plan, 'control_path', '') or '')
+        where = QLabel(f'编排层：{path}' if path else '还没有编排层文件')
+        where.setProperty('role', 'caption')
+        where.setWordWrap(True)
+        self._root.addWidget(where)
+
+        notes = list(getattr(plan, 'notes', None) or ())
+        if notes:
+            note_label = QLabel('· ' + '\n· '.join(str(x) for x in notes))
+            note_label.setProperty('role', 'caption')
+            note_label.setWordWrap(True)
+            self._root.addWidget(note_label)
+
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(str(getattr(plan, 'diff', '') or
+                             '（这个计划没有文件改动）'))
+        box.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._root.addWidget(box, 1)
+        self._add_buttons('接管')
+        self.resize(880, 560)
+
+
+class EdgePositionDialog(_BaseDialog):
+    """
+    改一条**草图**的落点（P2）：章末 / 第 N 拍。
+
+    只改图上的"打算写在哪"，不碰剧本 —— 要真写进去仍走「写入剧本…」。
+    位置列表由窗口层现算（`edge_position_choices`），不能接的拍照样列出来
+    但置灰；这一份判据与接线窗口、写回共用。
+    """
+
+    def __init__(self, parent=None, positions=None, current_position='chapter_end',
+                 current_line_id=''):
+        super().__init__(parent, '改草图落点')
+        data = positions if isinstance(positions, dict) else {}
+        self.position = str(current_position or 'chapter_end')
+        self.position_line_id = str(current_line_id or '') \
+            if self.position == 'beat' else ''
+
+        form = QFormLayout()
+        form.setSpacing(T.SPACE['sm'])
+        self._pos = QComboBox()
+        self._pos.addItem('章末', ('chapter_end', ''))
+        items = list(data.get('items') or ())
+        for it in items:
+            if not isinstance(it, dict) or not it.get('line_id'):
+                continue
+            number = it.get('number')
+            if not isinstance(number, int):
+                try:
+                    number = int(it.get('index') or 0) + 1
+                except (TypeError, ValueError):
+                    number = 0
+            text = str(it.get('text') or '')
+            label = f'第 {number} 拍 · {text}' if text else f'第 {number} 拍'
+            note = str(it.get('note') or '')
+            if not it.get('selectable'):
+                label += f'（{note or "不能接在这里"}）'
+            elif '之前' in note:
+                label += '（插在它前面）'
+            self._pos.addItem(label, ('beat', str(it['line_id'])))
+            if not it.get('selectable'):
+                try:
+                    item = self._pos.model().item(self._pos.count() - 1)
+                    if item is not None:
+                        item.setEnabled(False)
+                except Exception as e:            # noqa: BLE001 - 置灰失败仍可显示
+                    swallow('ui_qt.dialogs.EdgePositionDialog.gray', e)
+        # 选中当前落点；当前那一拍不在列表里（未载入 / 已删）时保留章末，
+        # 并在下面说明，不偷偷改成一个别的拍。
+        want = ('beat', self.position_line_id) \
+            if self.position == 'beat' and self.position_line_id else \
+            ('chapter_end', '')
+        idx = -1
+        for i in range(self._pos.count()):
+            data = self._pos.itemData(i)
+            if not (isinstance(data, (tuple, list)) and len(data) == 2
+                    and (str(data[0]), str(data[1])) == want):
+                continue
+            item = self._pos.model().item(i)
+            if item is not None and not item.isEnabled():
+                continue        # 当前那一拍现在已经不能接了 → 按"丢了"处理
+            idx = i
+            break
+        if idx >= 0:
+            self._pos.setCurrentIndex(idx)
+        self._lost_current = (self.position == 'beat' and idx < 0)
+
+        form.addRow('落点', self._pos)
+        self._root.addLayout(form)
+
+        self._note = QLabel('')
+        self._note.setWordWrap(True)
+        self._note.setProperty('role', 'caption')
+        if self._lost_current:
+            self._note.setText(
+                '这条线原来记的那一拍现在不在本章（没载入或已删除）；'
+                '下拉框里只剩能选的位置。')
+        elif not items and str(data.get('reason') or ''):
+            self._note.setText(str(data.get('reason')))
+        self._root.addWidget(self._note)
+        hint = QLabel('只改这条草图"打算写在哪"；剧本一个字节都不动。'
+                      '要写进去，右键这条线 →「写入剧本…」。')
+        hint.setWordWrap(True)
+        hint.setProperty('role', 'caption')
+        self._root.addWidget(hint)
+        self._add_buttons('改落点')
+        self._pos.currentIndexChanged.connect(self._sync)
+
+    def _sync(self, *_args):
+        data = self._pos.currentData()
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            self.position, self.position_line_id = str(data[0]), str(data[1])
+        else:
+            self.position, self.position_line_id = 'chapter_end', ''
+        if self.position != 'beat':
+            self.position_line_id = ''
+
+    def _on_accept(self):
+        self._sync()
+        if self.position == 'beat' and not self.position_line_id:
+            self._fail('选了「某一拍」，但没说是哪一拍。')
+            return
+        self.accept()
 
 
 # ======================================================================
@@ -1681,5 +2290,6 @@ class AnalysisDialog(QDialog):
 
 
 __all__ = ['valid_label', 'AddNodeDialog', 'NodeOpsDialog',
-           'VariableWorkbenchDialog', 'AddEdgeDialog', 'AnalysisDialog',
+           'VariableWorkbenchDialog', 'AddEdgeDialog', 'EditEdgeDialog',
+           'EdgePositionDialog', 'AnalysisDialog',
            'SyncPreviewDialog', 'confirm', 'EDGE_TYPES']

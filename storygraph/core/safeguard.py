@@ -39,21 +39,32 @@ SAMPLES_PER_CONTEXT = 3
 #: `{context: {'count': n, 'last': str, 'samples': [str, …]}}`（插入顺序 = 首次出现）
 _records: "OrderedDict[str, dict]" = OrderedDict()
 _total = 0
-_debug = None                     # None = 看环境变量
+_debug = None                     # None = 每次读环境变量（不缓存）
+#: 被挤出的 context 的失败次数**汇总**在这里：不能直接丢，否则同一 context
+#: 重新出现时 `count` 从 1 开始，`report_since()` 的差值会算成"这轮没失败"
+#: —— 诊断功能正好在最需要它的时候失灵（清单 §二十）。
+_overflow = 0
+_OVERFLOW_CONTEXT = '__overflow__'
 
 
 def _debug_on() -> bool:
-    global _debug
-    if _debug is None:
-        _debug = str(os.environ.get('STORYGRAPH_DEBUG', '')).strip() not in \
-            ('', '0', 'false', 'False')
-    return bool(_debug)
+    """
+    是否同时打到 stderr。
+
+    `_debug is None` 时**每次读环境变量**（从前第一次调用后就把值缓存了，
+    测试里改 `STORYGRAPH_DEBUG` 不生效，而且会被之前的状态污染）。
+    `set_debug()` 仍然可以强制覆盖。
+    """
+    if _debug is not None:
+        return bool(_debug)
+    return str(os.environ.get('STORYGRAPH_DEBUG', '')).strip() not in \
+        ('', '0', 'false', 'False')
 
 
 def set_debug(on) -> None:
-    """强制打开/关闭 stderr 输出（测试用）。"""
+    """强制打开/关闭 stderr 输出；`None` = 恢复"每次读环境变量"。"""
     global _debug
-    _debug = bool(on)
+    _debug = None if on is None else bool(on)
 
 
 def swallow(context: str, exc: BaseException = None) -> None:
@@ -64,7 +75,7 @@ def swallow(context: str, exc: BaseException = None) -> None:
     `exc` 给异常对象（拿不到就不给）。**永远不抛异常** ——
     它自己就是错误处理路径上的东西。
     """
-    global _total
+    global _total, _overflow
     try:
         key = str(context or '?')
         detail = ''
@@ -76,7 +87,11 @@ def swallow(context: str, exc: BaseException = None) -> None:
             rec = {'count': 0, 'last': '', 'samples': []}
             _records[key] = rec
             while len(_records) > MAX_CONTEXTS:
-                _records.popitem(last=False)
+                _old_key, old = _records.popitem(last=False)
+                # 不能直接丢：把失败次数汇总进 `__overflow__`。
+                # 否则同一 context 之后重新出现时 count 从 1 开始，
+                # `report_since()` 的差值会把它算成"没失败"。
+                _overflow += int(old.get('count') or 0)
         rec['count'] += 1
         rec['last'] = detail
         if detail and detail not in rec['samples']:
@@ -128,8 +143,15 @@ def snapshot() -> dict:
     `_swallow_mark()` 用它取"操作前"的基线：只报**这一次操作新增加**的
     那些。从前标记只有一个总数，同一批 173 张缩略图会在每次操作后
     重复打印一遍（用户看到 212 条红字的一大半就是这么来的）。
+
+    `__overflow__` 是被环形缓冲挤掉的 context 的**合计次数**。把它放进
+    快照，`report_since()` 才能看见"这轮新增的失败里有 N 次属于已被挤出
+    明细的 context"，而不是当成没发生。
     """
-    return {k: int(v.get('count') or 0) for k, v in _records.items()}
+    out = {k: int(v.get('count') or 0) for k, v in _records.items()}
+    if _overflow:
+        out[_OVERFLOW_CONTEXT] = int(_overflow)
+    return out
 
 
 def records() -> list:
@@ -167,9 +189,10 @@ def report_since(before=None, limit: int = 8) -> str:
 
 def clear() -> None:
     """清空记录（测试用；也留给"我看过了"这种交互）。"""
-    global _total
+    global _total, _overflow
     _records.clear()
     _total = 0
+    _overflow = 0
 
 
 __all__ = ['MAX_CONTEXTS', 'clear', 'contexts', 'records', 'recent', 'report',

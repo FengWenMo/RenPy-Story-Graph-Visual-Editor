@@ -10,6 +10,7 @@ storygraph.story.paths
 
 from __future__ import annotations
 import os
+import uuid
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -30,17 +31,23 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
         （杀毒/同步盘占着）都会留下**半截文件**，而目标路径就是游戏脚本。
 
     做法：
-      1. 同目录临时文件（`.<名字>.tmp-<pid>`，保证 `os.replace` 是同一个卷）；
+      1. 同目录临时文件（`.<名字>.tmp-<pid>-<uuid8>`，保证 `os.replace`
+         是同一个卷；`uuid` 让**同一进程的两个线程**写同一个目标时不会
+         撞同一个临时名）；
       2. `open(..., newline='')` 写，**不做任何换行翻译**；
       3. `flush` + `os.fsync`，确保内容真的落盘；
       4. 目标已存在且 `backup=True` → 先写一份 `<名字>.bak`；
       5. `os.replace` 原子替换（Windows/POSIX 都保证"要么旧、要么新"）。
 
-    失败时删掉临时文件再把异常抛回去；绝不留下半截目标。
+    失败时删掉临时文件再把异常抛回去；**清理范围是 `BaseException`** ——
+    `UnicodeEncodeError`（`ValueError` 子类）和 `KeyboardInterrupt` 都不会
+    被 `except OSError` 接住，从前会留下 `.xxx.tmp-<pid>`（写进 `game/`
+    就是一个 Ren'Py 不认的垃圾文件）。
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f'.{target.name}.tmp-{os.getpid()}')
+    suffix = f'.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}'
+    tmp = target.with_name(f'.{target.name}{suffix}')
     try:
         with open(tmp, 'w', encoding=encoding, newline='') as fh:
             fh.write(text)
@@ -49,7 +56,7 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
         if backup and target.exists():
             bak = target.with_name(target.name + '.bak')
             # 备份用二进制复制：**逐字节**保留原文（换行、BOM、编码都不动）
-            btmp = bak.with_name(f'.{bak.name}.tmp-{os.getpid()}')
+            btmp = bak.with_name(f'.{bak.name}{suffix}')
             try:
                 with open(target, 'rb') as src, open(btmp, 'wb') as dst:
                     while True:
@@ -66,7 +73,7 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
                 except OSError as e:               # noqa: BLE001 - 清理临时文件
                     swallow('story.paths.write_text_atomic.cleanup_bak', e)
         os.replace(tmp, target)
-    except OSError as e:                            # noqa: BLE001 - 清理后原样抛出
+    except BaseException:                           # noqa: BLE001 - 清理后原样抛出
         try:
             tmp.unlink()
         except OSError as e2:                       # noqa: BLE001 - 清理临时文件

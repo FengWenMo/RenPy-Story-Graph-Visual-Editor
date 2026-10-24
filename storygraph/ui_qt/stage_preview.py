@@ -208,14 +208,38 @@ class StageAudio:
         return list(self._notes)
 
     def _play(self, player, path, loop: bool = False):
+        """
+        播放一个文件；`loop` 决定播完是否重头再来。
+
+        ⚠ 2026-10-23（清单 §十一）：从前 `loop` 参数一次都没被读 —— BGM 靠
+        `_make_players` 里预设的 `setLoops(Infinite)` 碰巧能循环，但注入的
+        播放器（测试/无音频后端）不会，而且音效也从未显式设成 Once。
+        现在在**播放这一层**按参数设置循环，两个播放器走同一条规则。
+        """
         if player is None or not path:
             return
         try:
+            self._set_loops(player, loop)
             player.stop()
             player.setSource(QUrl.fromLocalFile(str(path)))
             player.play()
         except Exception as e:                    # noqa: BLE001
             self._error = f'播放失败：{e.__class__.__name__}'
+
+    @staticmethod
+    def _set_loops(player, loop: bool) -> None:
+        setter = getattr(player, 'setLoops', None)
+        if not callable(setter):
+            return
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+            setter(QMediaPlayer.Loops.Infinite if loop
+                   else QMediaPlayer.Loops.Once)
+        except Exception:                         # noqa: BLE001 - 注入的假播放器
+            try:
+                setter(-1 if loop else 1)         # Qt 的枚举值：Infinite=-1
+            except Exception as e2:               # noqa: BLE001
+                swallow('stage_preview._set_loops', e2)
 
     @staticmethod
     def _stop(player):
