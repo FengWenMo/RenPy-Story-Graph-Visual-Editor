@@ -3951,11 +3951,14 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
   **它不是"只读诊断视图"** —— 上一轮这样描述是错的
   （见 [`调查_图编辑器的定位与回写_2026-10-23.md`](调查_图编辑器的定位与回写_2026-10-23.md)）。
 - 两种边必须分清：`origin='source'` 是**从拍派生**的（`story.flow.flow_edges`
-  是唯一真源）；`origin='manual'` 是**草图**，只改图、**不写 `.rpy`**。
-  加边时的日志与弹窗都要把这句话说出来（今天已经是这样，别删）。
-- 写回 `.rpy` 的唯一通道仍然是 **`Beat.raw` → 受控补丁**。将来图上的边要写回，
-  也必须走这一条（`source` 边按 `line_id` 找到那一拍；`manual` 边先让用户选锚点，
-  再插一张 flow 拍）—— 图**不许直接改文件**。
+  是唯一真源）；`origin='manual'` 是**草图**。
+  ⚠ **2026-10-24（P0）之后，"新建接线 = 只画草图"已作废**：接线默认写进剧本
+  （章末或选中的第 N 拍），只有写不进 / 条件分支时才存草图；
+  草图必须标「草图」，右键可「写入剧本…」转正（按它记下的位置写）。
+  日志与状态栏要说出这一次到底是"写"还是"草图"（别删这句话）。
+- 写回 `.rpy` 的唯一通道仍然是 **`Beat.raw` → 受控补丁**：接线走
+  `session.insert_flow_beat` 插一张 flow 拍（`source` 边按 `line_id` 找到那一拍；
+  `manual` 边转正时按 `Edge.position_line_id` 找锚点）—— 图**不许直接改文件**。
 - 图不编辑 `menu` / `if` 的**块体**（台词与演出归卡片），也不做"一个块 = 一拍"的画布。
 
 
@@ -3965,3 +3968,389 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
 
 
 
+
+---
+
+## §38 新增一拍的落点：`nest_path` 说了算（2026-10-23）
+
+- **判据**：新拍在模型里的落点是 `nest_path`（`menu:1>A` = 第一个菜单的第一个选项体）。
+  **写回必须与它一致** —— 不一致的产物可以语法合法、语义已经改了（`call` 从分支里
+  跑到 menu 之外，`patch_export` 还报 `ok=True`）。
+- **两种"块头锚点"要分开**（2026-10-23 实测，真机形状的 `menu`）：
+  - **选项体的兄弟卡**（`nest_path` 为空）→ 退到**最外层包围块之后**、与块头同级
+    （`_insert_anchor`，2026-10-05 为解决"选项下面紧跟一句台词 → 语法坏"而设）；
+  - **放进选项体的卡**（`nest_path` 含 `>`）→ **紧贴块头插、缩进深一级**
+    （`_insert_points_for` 标出这些锚点 → `_apply_sequence_edits(..., into_body=…)`）。
+- `menu:1`（菜单层、还不属于任何选项）**不在此列**：这种状态下整份渲染自己就会写出
+  `# TODO` + 非法行，补丁保持"退到块外"，至少产物能读。
+- 守卫：`tests/test_patch_option_body_insert.py`（先红：`call roof` 跑到下一个选项之后）；
+  老用例 `TestInsertIntoBlockStaysStructurallyValid`（退到块外）必须同时绿 —— 两类不能混。
+
+## §39 拍位置与 `call from`：可选，但只能选真的能写的位置（2026-10-24，P1）
+
+- `Edge.position` 有三个值：`chapter_end`（默认）/ `beat` / `control_end`；
+  `beat` 必须同时有 `position_line_id`（`Beat.line_id`）。源边的真实位置仍由
+  `line_id` 派生，`position` 是"打算写在哪"的声明（草图转正靠它）。
+  `control_end` 只跟 `origin='control'` 一起出现（见 §40）。
+- **唯一判据**是 `window_nodes._beat_position_plan`：
+  - `return` → 插在它**前面**（`after=False`）；
+  - 块体里的拍（`nest_path` 非空）→ 拒绝；
+  - **有真身拍的块头**（`menu`/`loop`/`camera`/选项头，`session.block_head_line_ids()`）
+    → 拒绝（`after` 会掉进块体）；
+  - 已有 `jump`/`call` 的拍 → 拒绝（后面接不上）；
+  - 其余顶层拍 → 接在它后面。
+  下拉框与 `plan_wire_landing(position='beat', …)` 共用这一份，**不许**出现
+  "下拉框能选、点了写不进"。
+- 章末已有 `jump`/`menu` 时，**选一个前面的拍**仍然能写 —— 这是 P1 的意义：
+  歧义只堵"章末"这一个落点，不堵整条线。
+- `call X from Y` 的 `from`：可选，只对 `call` 有效（`jump` 没有）。自动命名
+  `_call_<目标>_<n>` 会扫全项目的显式 `from` **以及每个目标被 call 了几次**
+  （Ren'Py 会给裸 call 自动生成同形名字），避开两类占用。**2026-10-24 晚起，
+  接线/编辑窗口不再放这一格**（用户要求恢复旧版面）；已有源边的 `from` 仍会
+  被读取/保留，底层自动命名也还在。
+- `AddEdgeCommand` / 描边 / 版式都要带 `position`、`position_line_id`、`from_clause`；
+  线外标签只放条件/菜单项（§42），草图只多一句「草图」，位置在
+  tooltip 和「编辑连线」窗口里。
+- 守卫：`tests/test_edge_position_p1.py`（27 条：计划、下拉框、对话框、草图转正、
+  from 命名/校验、图上文字）；P0 的 `test_edge_position_p0.py` 必须同时绿。
+
+## §40 章末写编排层、草图改落点、跨章删源边（2026-10-24，P2）
+
+### 40.1 有独立控制流文件时，章末**不许**写章节剧本
+
+判据不是"更优雅"，是**不写会跑两遍**：
+
+```
+X_control: call X → X 里 jump Y → Y return → 回到 X_control
+           → X_control 又 jump Y_control → Y 跑第二遍
+```
+
+- `plan_wire_landing(position='chapter_end')` 先算 `story.control_route`；
+  有 `X_control` / `Y_control` 就返回 `kind='control'`，落点
+  `position='control_end'`，**章节源文件一个字节不改**。
+- 找不到源/目标 `_control`、或最后一条是 `menu`/`if`/动态跳转 → 返回
+  `control_blocked`，**不退回源文件**（那正是会跑两遍的写法）。
+- `jump`：目标 `Y_control`；最后是 `return` → 替换成 `jump`（不留死代码）；
+  最后是另一条 `jump` → **改接**，但这是语义变化，不能替人拍板；
+  必须进接线窗口让人看见"原来去 C，现在改成去 B"。
+- `call`：目标 `Y`（章节本身），插在最后一条路由**之前**；子过程返回后继续原路。
+  导出器对 `origin='control'` 的 call 写 `call Y`，并在没有后续路由时补 `return`
+  （否则会掉进下一个 label）。
+- 只打一个补丁：`story.control_route` 只替换/插入**一行**，保留 BOM/CRLF/别的
+  label；写盘前核对锚点行，文件被改过就拒绝（`Ctrl+Z` 也不覆盖新改动）。
+- 图上的边：`origin='control'`、`position='control_end'`。它不是草图（不写
+  "草图"，见 §42）；删它只删 `X_control` 那一行，必要时补 `return`，
+  同样可撤销。
+
+### 40.2 草图改落点
+
+- 右键草图 →「改落点…」：章末 / 第 N 拍；不能接的拍置灰，当前拍不在了要明说。
+- 只改 `Edge.position/position_line_id`，**不碰剧本**；进图级撤销栈
+  （`SetEdgePositionCommand`）。要写成剧本仍走「写入剧本…」。
+
+### 40.3 删跨章源边
+
+- 当前编辑器开着 A、图的源边来自 B 时，不再要求先切到 B：
+  `app.source_line_delete` 用临时会话读 B，按 `line_id` 找到拍，用
+  `src_first/src_last` 只删物理行；不导出、不重生成、不加生成标记。
+- 找不到行身份（B 在导入后改过）→ 拒绝，**不按目标名猜一行**；写盘前再核对
+  全文，变了就拒写。撤销把旧全文逐字节写回并把图边放回。
+- 同一文件里找不到行身份仍然拒绝（那不是"另一章"，是身份过期）。
+
+### 40.4 守卫
+
+`tests/test_control_route.py`（33 条：计划/落盘/BOM+CRLF/撤销/删除/图边/版式往返/
+导出重建 call）、`tests/test_edge_position_p2.py`（11 条：对话框/命令/不改剧本）、
+`tests/test_cross_chapter_edge_delete.py`（7 条：计划/删除/取消/过期/逐字节撤销）。
+P0/P1 的 `test_edge_position_p0.py`、`test_edge_position_p1.py`、
+`test_wire_landing.py` 必须同时绿。
+
+## §41 补目标章的 `_control` 包装（2026-10-24，P2.5）
+
+### 41.1 只有"有人进来"的包装才可以补
+
+- **目标章**缺 `B_control`：正在写的 `jump B_control` 就是第一个入口 →
+  可以补；接线窗口显式显示「补包装并接线」，不是静默可写。
+- **源章**缺 `X_control`：它现在被 `jump X` / `call X` 直接进入，补出来
+  没人跳进来，出口是死代码 → `ok=False`，并列出要先接管的入口。
+- **项目里一个 `*_control` 都没有**：不新建控制流文件（没有挂载点，
+  同上）；返回"先导出一次控制流 / 手写一个入口"。
+
+### 41.2 补的形状（必须是这个）
+
+```renpy
+label B_control:
+    call B
+    return
+```
+
+`jump B_control` → `call B`（B 的 `return` 回到这里）→ `return`，与原来
+`jump B` 落到同一个调用帧。**不许**写成 `label B_control: jump B`：下一步
+`plan_control_route` 会把最后一条 `jump` 当"已有出口"改接掉，B 就不再执行。
+
+- 追加前核对全文（不是锚点行）；BOM / CRLF 走 `source_style` 还原。
+- 目标章 label 带参数、找不到声明、label 名不是 `_control` 源 → 拒绝，不猜。
+
+### 41.3 撤销与失败
+
+- `ControlRouteCommand(init_plan=…)`：先补包装 → **重算**路由（行号按新文件）
+  → 写路由；`old_text` 存**补之前**的全文，一次 Ctrl+Z 全部回滚。
+- 补完包装但路由算不出来 / 写失败 → 回滚包装（只回滚自己刚写的那一份，
+  文件被别人改过就不覆盖），不留半个改动。
+- 对话框：`control_init` 的确定键是「补包装并接线」；填了条件/菜单项仍只能
+  草图；落点栏要显示补在哪个文件、哪两行、以及"另有 N 处直接 jump 不经过
+  这个包装"。
+
+### 41.4 守卫
+
+`tests/test_control_init.py`（17 条：目标/已有/无层/缺章/带参数/源章直入/
+断掉的 `jump X_control`/直接入口提醒、BOM+CRLF、全文过期、一键补+一次撤销、
+重做、对话框文案、无 init 回归）。`test_control_route.py`、`test_edge_position_p0/p1.py`、
+`test_wire_landing.py` 必须同时绿。
+
+## §42 「编辑连线」窗口与线外信息（2026-10-24 晚）
+
+### 42.1 双击一条线 = 编辑这条线；新接线一律先弹窗
+
+- 新接线（Shift + 拖 / 右键「添加连线」）**每次都弹**「添加连线」：
+  从 / 到 / 类型 / 插入位置 / 条件 / 菜单项，左下角「草稿」勾选。
+  **不许**为了少一次弹窗省掉它——弹窗不必多，但接线这一步是必要的
+  （用户 2026-10-24 晚明确纠正：线画上了，人却不知道它插在哪）。
+- `GraphCanvas.edge_edit_requested` → `NodeEditMixin.edit_edge` →
+  `dialogs.EditEdgeDialog`。保存分三种（§42.2）：草图走
+  `UpdateEdgeCommand`（只改图），源边改写剧本那一行，编排线改写
+  `X_control` 那一行。`from` 这一格已从窗口移除（§39），已有源边的值仍保留。
+- **不是**"跳到那一拍"：那仍是右键菜单「定位到这一拍」（`_open_edge_in_card`）。
+- 线/线的标签双击都必须命中这条：`EdgeItem.mouseDoubleClickEvent` 发
+  `edge_edit_requested`；`GraphCanvas.mouseDoubleClickEvent` 在块与空白之间
+  再查一次 `_edge_at(pos)`，否则双击标签会落进「添加新章节」。
+- 编排线（`origin='control'`）可以在窗口里直接改**类型 / 到**：保存改写
+  `X_control` 那一行（立刻落盘、一次 Ctrl+Z 逐字节写回）；「打开编排层文件」
+  仍在，留给要改条件 / 分支的人。
+
+### 42.2 窗口里必须有的字段
+
+从 / 到、类型（jump/call）、**插入位置**（章末 / 第 N 拍）、条件、
+菜单项。版面就是旧版「添加连线」那三样（类型、菜单文本、条件）+ 插入位置，
+左下角加一个默认不勾的「草稿」；不是另起一张表单。
+
+- 从（起点章）只读：改起点等于删一条再加一条。
+- 到：草图只读；源边 / 编排线可以改（保存会改写那一行）。
+
+- 插入位置默认「章末」；下拉框精确到第 N 拍（`edge_position_choices`），
+  不能接的拍置灰。
+- 勾「草稿」：只画线（虚线 + 「草图」），**不写 `.rpy`**；位置仍记在
+  `position/position_line_id`，以后右键「写入剧本…」可以转正。默认不勾，
+  不勾就按插入位置直接写。
+- 草图的位置在窗口里的下拉框直接改（复用 `edge_position_choices` 的判据，
+  不能接的置灰；当前拍不在列表里补一条只读项，不许静默改成章末）；
+  源边的落点由 `line_id` 决定，只显示、不可改（改它是删行/插行）。
+- **源边 / 编排线：类型和「到」可以直接改，保存真的改那一行**（2026-10-24
+  用户追问"我希望我能够就这样直接编辑它"）：
+
+  | 来源 | 改类型 / 到 | 写到哪里 | 什么时候落盘 |
+  |---|---|---|---|
+  | 源边 `origin='source'` | 改写剧本里那一行（`jump B` ↔ `call B`） | 本章的拍（内存） | 导出 `.rpy` 时 |
+  | 编排线 `origin='control'` | 改写 `X_control` 那一行 | 控制流文件 | 立刻 |
+
+  `jump → call` 且它原来是这一段最后一条时，自动补一行 `return`（call 会
+  回来，没有下一句会掉进下一个 label）；`call → jump` 后面还有路由时**拒绝**
+  （后面的路由会变成永远不执行的死代码）。新目标缺 `_control` 包装时先补
+  包装、再改这一行，一次撤销全回去。
+- **源边的「插入位置」也能改**（2026-10-24 夜）：下拉框列本章顶层拍，选中
+  另一拍 = 把那一行挪过去（`session.move_beat`，块结构由树维护，撤销走结构
+  撤回栈）。跨 label / 跨章不在这里做 —— 那会改 `from`，是另一条边。
+- 条件 / 菜单项：**编排线可编辑**（§43：按 `# storygraph-edge:<id>` 标记段
+  换，或把普通路由换成条件分支）；源边那两样挂在它所在的 `if` / `menu` 上，
+  不是这一行能改的 —— 窗口里必须写清原因，不许给一个"填了也改不到剧本"的
+  格子。
+- 起草图 / 源边 / 编排线都要能把**起点章**载进来：改源边时按需载入（换章
+  前先抄未导出快照），不要求用户先手动打开那一章。
+
+### 42.3 线外只留条件 / 菜单项
+
+`edge_label_text`：
+
+```
+「菜单项」 / if 条件 / 草图 ·「菜单项」
+```
+
+位置不挂在线外，只在 tooltip 与编辑窗口里；**单击边只选中，不弹窗**，
+右键菜单也不把"第几拍"顶在开头。线型：实线 `jump`、虚线 `call`、
+**虚线 + 「草图」** = 草图（不再用点划线）。
+
+### 42.4 「插入位置」属于**起点章**，不属于"现在打开的那一章"
+
+用户 2026-10-24 抓到的 bug：开着 `chapter0_0` 时，从 `chapter0_0` 拖线能选
+第 N 拍；从 `chapter1_2` 拖线只剩「章末」。同一张窗口两种表现，不是功能。
+
+- `edge_position_choices` / `plan_wire_landing` 取拍的顺序：**会话里就是这
+  一章** → 用会话的拍（尊重没导出的改动）；否则**只读解析**起点章的 `.rpy`
+  （`_source_beats`，按 mtime/size 缓存，不切章、不弹恢复问句）。
+- 解析出来的计划带 `needs_load=<源文件>`；真正写回时 `_apply_wire` 先
+  `_ensure_chapter_loaded`（换章前 `autosave_now` 抄一份未导出快照，
+  `goto_card=False` 不跳页），再按同一个 `line_id` 重算一次落点。
+- 不许再出现"因为当前打开的是别的章，所以这个下拉框只剩章末"。
+
+### 42.5 守卫
+
+`tests/test_edge_edit_dialog.py`（字段回显 / 源边只改自己那一行 / 编排线改
+类型和目标 / 草图位置下拉 / 标签双击不落新建 / 单击只选中 / 右键菜单不带
+位置 / 窗口层命令）；
+`tests/test_edge_edit_writeback.py`（编排线改那一行 + 撤销 / jump→call 补
+return / call→jump 拒绝死代码 / 源边按需载入并改写 / 起点章没打开也能列拍
+并写进去）；
+`test_wire_landing.py`（草稿勾选默认关闭、勾了不写、位置仍记到拍、只导入
+也能列出第 1 拍）；`test_script_entry.py`（三个入口直接当脚本跑）；
+`test_edge_beat_badge.py`、`test_edge_position_p0/p1/p2.py`、
+`test_control_init.py`、`test_graph_canvas.py`、`test_ui_qt.py`、
+`test_main_window_mixins.py` 必须同时绿。
+
+
+
+## §43 条件 / 菜单分支写编排层 + 接管进入点（2026-10-24 夜）
+
+### 43.1 分支不进章节源文件
+
+条件 / 菜单项回答的是"这一章**跑完之后**去哪"，可源文件里"跑完之后"不一定
+有可插入的位置：章末是 `menu:` / `if:` 时，往块体里插一行会破坏缩进与分支
+语义；`return` 之后插又永远不执行。所以分支段只写编排层：
+
+    label X_control:
+        call X
+        # storygraph-edge:12
+        if score > 3:
+            jump Y_control
+        return
+
+`call X` 在 X 的 `return` 之后回到这里，因此 X 以 `menu` / `if` / `return`
+收尾都不影响路由。**源剧本一个字都不加**（用户 2026-10-24："对源剧本 rpy
+文件本身要做到最小的插入原则……尽量放控制流那里"）。
+
+### 43.2 标记段：改 / 删不认行号
+
+每段第一行是 `# storygraph-edge:<edge.id>`。改 / 删按它找（`find_branch_range`），
+**不按行号** —— 行号会漂，标记不会。编辑时保留原缩进，段外字节原样不动；
+`apply_control_branch` 写前核对"文件仍是计划时那一份"，被别处改过就拒绝写。
+
+菜单项不能各写一个 `menu:`（第一个选项无条件先执行，第二个菜单永远轮不到）。
+同一章源的所有菜单项住在**一个**组里：
+
+    # storygraph-menu:ch01
+    menu:
+        # storygraph-edge:12
+        "去屋顶":
+            jump Y_control
+        # storygraph-edge:13
+        "留在教室" if has_key:
+            jump Z_control
+
+组标记定位 menu，`# storygraph-edge:<id>` 定位选项；增 / 改 / 删都只动那一个
+选项，最后一个选项删掉时整个 menu 组一起走。`if` 分支不能静默改成菜单
+（那会多一次玩家选择）—— 拒绝，让人删了重接。
+
+### 43.3 接管进入点（ControlTakeover）
+
+`X_control` 要有入口才执行。项目原来写 `jump X` 时，补一个没人进来的
+`X_control` 只是死代码。接管一次做两件事：
+
+  1. 补 `label X_control: call X; return`（没有才补）；
+  2. 全项目 `jump X` → `jump X_control`。
+
+`call X` **不改**：包装可能 `jump` 走，调用点永远回不来。`apply_takeover`
+先核对所有文件，再逐个写；中途失败按 `old_text` 回滚；`TakeoverCommand`
+撤销时逐字节写回。UI 先弹 `TakeoverDialog` 显示多文件 unified diff。
+
+### 43.4 章末是 `jump` 时拒写分支
+
+`call X` 永远不返回，写进 `X_control` 的分支一次都不会执行。`plan_control_branch`
+扫源章最后一条顶层语句，是 `jump`（且不是 `jump X_control`）就**拒绝**并
+说清，先让人改收尾。
+
+### 43.5 跨章删源边：块体只剩它时删整块
+
+一条 `jump` 是某个选项体 / `if` 体的唯一内容时，只删这一行会留下空块体
+（Ren'Py 解析不了）。`plan_source_line_delete` 现在按缩进找块：
+
+  · 块里只有它 → 连整块删（`menu:` 只剩一个选项时连 menu 一起）；
+  · 块里还有别的语句 → 只删这一行；
+  · `if` 后面紧跟 `elif` / `else` → 不删整块（`elif` 不能没有 `if`），补 `pass`；
+  · 整块删完这一章一拍不剩 → 不删整块，补 `pass` 保住 label。
+
+### 43.6 守卫
+
+`tests/test_control_branch.py`（插入 / 编辑 / 删除 / 段外不动 / 写前核对 /
+章末 jump 拒绝）；`tests/test_control_branch_export.py`（全条件分支与全条件
+菜单后必须 `return`，否则掉进下一个 label）；`tests/test_control_takeover.py`
+（多文件 / `call` 不改 / 写前核对 / 撤销逐字节 / CRLF+BOM / 中文 label）；
+`tests/test_control_branch_ui.py`（窗口字段 / 拍位置拒绝 / 真窗口写分支 /
+真窗口接管预览+撤销）；`tests/test_source_block_delete.py`（选项 / menu / if
+整块删除与 pass 兜底）；`tests/test_edge_edit_dialog.py`（源边挪位置）；
+`tests/test_edge_edit_writeback.py`（源边 move 命令 + 撤销）。
+
+## §44 卡片写回的四条硬判据 + 控制流手写内容守门（2026-10-24 深夜）
+
+### 44.1 每一格写回：**行数不许变**
+
+卡片上每一格改一次，产物只许"换掉那一行"——不光要比"新值在不在"，
+还要比**行数**。`Voice` 曾经插一条新的、旧的不删（同拍两条 `voice`），
+只断言"新值在"是抓不到的。判据在
+`test_writeback_fidelity.py::TestEveryEditableFieldTouchesOnlyItsLine`。
+
+实现侧的三条身份键（`story/patcher.py`）：
+
+- 音频行（`play` / `queue` / `stop`）：身份 = **动词 + 通道**，同一通道
+  允许换目标（换 BGM / 音效就是这一列的功能）；
+- `voice`：身份 = **关键字本身**（一圈只有一条），资产路径是内容；
+- 注释：身份仍是**逐字**（`('other', 原文)`）。只改一个字的注释走
+  **槽位配对**，且只在 `trust_ranges`（磁盘那份 == 载入时那份）并且
+  两边各恰好一条注释时生效。无条件按"注释槽位"配会把整体错位一行的
+  源文件改错行（`test_stale_ranges_never_change_the_file` 守着）。
+
+### 44.2 Stage 格：完整投影 + 表达不了的原文
+
+`app.beats.stage_cell` 的返回值必须让用户看到**全部**舞台指令：
+
+    Stage 格 = compose_stage(beat) + stage_only_ops(beat.stage)
+
+`beat.stage` 按设计只装"结构化列表达不了"的复杂子句；格子里若只有它，
+用户改一格就会丢掉同拍的普通 show / hide（审计 P1-2）。
+
+`compose_stage` 自己也要无损：`show expression …` 必须带 `expression`
+关键字（与「立绘」列共用 `_expression_clause`）；复杂子句项不许再被
+整拍 `with` 贴第二遍。
+
+手改 Stage 的写回必须"清空 → 立即 hydrate → 归一"三步：
+hydrate 把整格能认出的场景/立绘/退场/转场全部重建，归一后的
+`beat.stage` 只剩 `[停顿]` / 原生语句这类表达不了的部分。不归一会在
+渲染时和结构化字段双写。
+
+### 44.3 控制流第四道守门：`_control` 块里的手写行
+
+`plan_control_write` 除了"缺章 / 外来 label"，还要扫同名 `*_control` 块：
+
+- 行形状不像跳转/菜单/条件/注释；
+- 且这次要生成的同名块里**没有这一行**（逐字）→ 判为手写内容。
+
+命中即 `ok=False`，`plan.manual_lines` 带 `label / 行号 / 原文`。
+`forceable` 只在"唯一拦截就是它"时为真；`export_control_flow(allow_overwrite=True)`
+只越过这一条，缺章 / 外来 label 永远不越过。界面必须先把行列给用户看，
+默认按钮是「否」。
+
+控制流图模式下 `$` / `show` 是图里节点的操作、会出现在生成文本里，
+不算手写内容。
+
+### 44.4 明确不做的两条（审计 P1-3 / P1-4）
+
+- 首次导出不插生成标记：标记是 `write_generation` 认自家产物的唯一凭据，
+  去掉会让"第二次导出"把自家文件判成手写文件。**保留。**
+- 翻页即提交：G1/G2 修好后不再破坏内容，`test_clean_sample_roundtrip`
+  的 12 个样本逐字节相同。**保留。**
+
+### 44.5 守卫
+
+`tests/test_writeback_fidelity.py` **54** 条（每格一行 / 行数不变 /
+Stage 手改不丢同拍内容 / expression 关键字）；`tests/test_control_write.py`
+**13** 条（手写内容识别 / 生成操作不误报 / 缺章不可 force / 确认后覆盖）；
+控制流面 103、舞台面 195、UI 面 246 全绿。全量 **6494 passed / 1 failed**
+（唯一红是真机素材新增的 `test_scan_golden`，代码未动）。
