@@ -1699,6 +1699,42 @@ class TableSessionMixin:
             if cards:
                 b.at = uniform_position_of(cards)
 
+        # **「表情 / 位置」两格**（2026-10-24，第三轮扫描 `p0_scan_struct.py`
+        # 的"改 show 的位置"用例暴露）：`fields()` 会算这两格
+        # （`beat_to_fields` 的投影），而 **`apply` 从前根本不读它们** ——
+        # 它们只活在旧的 `fields_to_beat`（tkinter 那条路）里。
+        # 于是任何"拿到 fields()、改 Position/Expression、再 apply"的调用方
+        # （脚本 / 表格导入 / AI agent）都会得到 **改了等于没改、还 ok=True**。
+        #
+        # 三条限制（一条都不放宽）：
+        #   · **只在新值与当前投影不同、且非空时写** —— 空串在这里的意思是
+        #     "多张立绘位置不一致、这一格没有统一值"（`beat_position_word` 的
+        #     约定），拿它去写会把所有位置抹掉；
+        #   · **只在没有立绘卡时**（`cards is None`）：卡片是真源，两处同时
+        #     写会互相覆盖；
+        #   · 只改 `show` 里的那一项，别的属性/参数不动（`apply_*` 本身是
+        #     纯函数）。
+        if cards is None:
+            if 'Expression' in fields:
+                _want = (fields.get('Expression') or '').strip()
+                _cur = B.beat_expression_word(b, self.symbols)
+                if _want and _want != _cur:
+                    b.show = B.apply_expression(b.show, _want)
+            if 'Position' in fields:
+                _want = (fields.get('Position') or '').strip()
+                _cur = B.beat_position_word(b, self.symbols)
+                if _want and _want != _cur:
+                    # 位置有两种存法，**这一拍用的是哪种就改哪种**：
+                    #   · 拍级 `b.at`（渲染成 `show … at X`，作者最常见的写法）
+                    #     —— `beat_position_word` 正是在 `item.at` 为空时退回它；
+                    #   · 立绘项里的 `@X`（`e happy@left`）—— 由 `apply_position` 改。
+                    # 只改已经在用的那一个，避免两种写法叠出来
+                    # `e happy@right at right`。
+                    if str(getattr(b, 'at', '') or '').strip():
+                        b.at = _want
+                    else:
+                        b.show = B.apply_position(b.show, _want)
+
         # 条件显示（卡片上的「＋ 条件」）。**只在调用方真的给了这个键时才写**：
         # 用 `fields.get(..., b.condition)` 会让"没给"和"给了空串"分不开，
         # 而这两件事的语义完全相反（不改 vs 清空条件）。

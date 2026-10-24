@@ -362,6 +362,59 @@ class TestDeleteBranchKeepsStructure:
 
 
 # ----------------------------------------------------------------------
+# 顺带修掉的一处静默 no-op（审计自带的 `tools/p0_scan_struct.py` 里
+# "改 show 的位置"那条用例暴露的；那条用例本身打偏了 —— 它改的是
+# return 那拍 —— 但顺着查下去发现真问题）：
+#
+# `fields()` 会算 `Position` / `Expression` 两格，而 `session.apply` 从前
+# **根本不读它们**（只活在旧的 `fields_to_beat` 里）→ 任何"拿 fields()、
+# 改这两格、再 apply"的调用方都是**改了等于没改、还 ok=True**。
+# 修法：`cards is None` 时按字段写回（有立绘卡时卡片才是真源）。
+# ----------------------------------------------------------------------
+class TestDerivedFieldsWriteBack:
+    SRC = ('label start:\n'
+           '    scene bg room\n'
+           '    show e happy at left\n'
+           '    e "一"\n'
+           '    return\n')
+
+    def test_position_is_written_back(self, tmp_path):
+        session, path = _project(tmp_path, self.SRC)
+        fields = session.fields(0)
+        assert fields.get('Position') == 'left', fields.get('Position')
+        fields['Position'] = 'right'
+        session.apply(0, fields, cards=None, advanced_open=True,
+                      stage_loaded=fields.get('Stage'))
+        after = _exported(session, path, self.SRC)
+        want = ['label start:', '    scene bg room',
+                '    show e happy at right', '    e "一"', '    return']
+        assert after == want, _diff(want, after)
+
+    def test_expression_is_written_back(self, tmp_path):
+        session, path = _project(tmp_path, self.SRC)
+        fields = session.fields(0)
+        fields['Expression'] = 'sad'
+        session.apply(0, fields, cards=None, advanced_open=True,
+                      stage_loaded=fields.get('Stage'))
+        after = _exported(session, path, self.SRC)
+        want = ['label start:', '    scene bg room',
+                '    show e sad at left', '    e "一"', '    return']
+        assert after == want, _diff(want, after)
+
+    def test_empty_or_unchanged_values_do_not_clear_anything(self, tmp_path):
+        """空串 = "没有统一值"（多张立绘位置不一致），不许拿它去抹位置。"""
+        session, path = _project(tmp_path, self.SRC)
+        fields = session.fields(0)
+        fields['Position'] = ''
+        fields['Expression'] = ''
+        session.apply(0, fields, cards=None, advanced_open=True,
+                      stage_loaded=fields.get('Stage'))
+        out = session.export(path)
+        assert out.get('ok'), out
+        assert _read(path) == self.SRC, '空值把位置/表情抹掉了'
+
+
+# ----------------------------------------------------------------------
 # P0-11 · 移动拍不许越过 `return`
 # ----------------------------------------------------------------------
 SRC_RETURN = ('label start:\n'
