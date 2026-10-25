@@ -111,6 +111,12 @@ class PatchResult:
     #: 长度当总数。这是**假话**，比不报更糟。
     removed_count: int = 0
     removed_preview: tuple = ()
+    #: **新插入、但一个字都没有**的拍数（2026-10-25，审计第四轮 P2）。
+    #:
+    #: 空卡片渲染不出任何行 —— 插进去之后"导出成功、文件没变"是**正常**的，
+    #: 但回执只说"这一份与源文件逐字节相同"，用户会以为插卡失败了。
+    #: 有了这个数，`session_export` 就能在回执里补一句"N 张空卡不产生行"。
+    empty_beats: int = 0
 
     @property
     def coverage(self) -> float:
@@ -235,6 +241,19 @@ def _body_pad(lines: list, at: int, indent: str) -> str:
     if str(nxt).strip() and indent_width(nxt) > indent_width(head):
         return indent_prefix(nxt)
     return indent_prefix(head) + indent
+
+
+def _child_pad_at(lines: list, last: int, unit: str) -> str:
+    """
+    第 `last` 行是块头时，它的**块体**用哪一级缩进（不是块头就返回 `''`）。
+
+    只给"菜单标题从无到有"那一支用（见 `_replace_matched` 的 `child_pad`）。
+    """
+    if not last or last < 1 or last > len(lines):
+        return ''
+    if not _ends_with_colon(lines[last - 1]):
+        return ''
+    return _body_pad(lines, last, unit)
 
 
 def _norm(line: str) -> str:
@@ -689,6 +708,22 @@ def _is_caption_line(line: str) -> bool:
     body = _content_of(_norm(line))
     m = _SAY_RE.match(body)
     return m is not None and not (m.group('who') or '').strip()
+
+
+def _caption_is_substantive(line: str) -> bool:
+    """
+    这一行标题**有实质内容**吗（不是 `" "` 这种全是空白的）？
+
+    为什么单独问（2026-10-25）：渲染器把标题写成 `_quote(menu_caption_text(...))`，
+    而 `menu_caption_text` 会 **strip** —— 所以作者写的 `" "`（一个空格）
+    渲染出来是"没有标题"，两边行数天然差一。把它当"用户删掉了标题"
+    就会静默删掉作者那一行（真机 `script_pomo.rpy` 第 205 行）。
+    """
+    body = _content_of(_norm(line))
+    m = _SAY_RE.match(body)
+    if m is None:
+        return False
+    return bool((m.group('body') or '').strip())
 
 
 def _line_key(body: str, ignore_speaker: bool = False) -> tuple:
@@ -1244,6 +1279,36 @@ def _flat_editable_range(old_lines: list) -> bool:
     return len(indents) <= 1
 
 
+def _statement_verb(line) -> str:
+    """
+    这一行是**一条普通原生语句**时返回它的首词，否则 `''`。
+
+    普通原生语句 = 工具没建模、也没有专门通道的那种：
+    `pause 0.1` / `window hide` / `mycue intensity=3` / `with dissolve`。
+    **不包含**：台词、菜单头、选项行、`$` 代码、注释、块头（以冒号结尾）、
+    结构关键字（`if` / `return` / `label` / `jump` …）、舞台与音频（它们
+    各有各的身份键）。
+
+    用途见 `_replace_matched` 的 ⑤：首词相同的两条普通语句就是"同一条语句
+    改了正文"，配成一对 —— 否则改一个数字就会**插一条新的、旧的还留着**。
+    """
+    body = _norm(line)
+    if not body or _is_comment_line(body):
+        return ''
+    if _ends_with_colon(body) or _is_protected(body):
+        return ''
+    if body.startswith('$'):
+        return ''
+    if _VERB_RE.match(body) or _FLOW_START_RE.match(body):
+        return ''
+    if _MENU_HEAD_RE.match(body) or _OPTION_ROW_RE.match(body):
+        return ''
+    if _SAY_RE.match(body) or _SAY_TAIL_RE.match(body):
+        return ''
+    parts = body.split()
+    return parts[0] if parts else ''
+
+
 def _rewrite_line(old_line, pick, relax_speaker):
     """原文那一行 → 生成器那一行（或保留原文）。返回 (行, 是否改了)。"""
     body = _norm(old_line)
@@ -1305,6 +1370,13 @@ def _rewrite_line(old_line, pick, relax_speaker):
     # 纯注释行：内容就是注释文字（`_line_key` 对注释是逐字比，所以只有
     # 上面那条"行号已证明新鲜 + 两边各一条"的槽位配对才会走到这里）。
     if _is_comment_line(body) and _is_comment_line(pick_body):
+        return indent_prefix(old_line) + _norm(pick), True
+    # **同一条原生语句换正文**（2026-10-25）：`pause 0.1` → `pause 0.2`、
+    # `window hide` → `window show`、`mycue a=1` → `mycue a=2` —— 首词相同
+    # 就是"这条语句改了参数"，不是"另起一条新语句"。
+    # （配对在 `_replace_matched` 的 ⑤ 里完成，两者的判据同一个函数。）
+    if _statement_verb(old_line) and \
+            _statement_verb(old_line) == _statement_verb(pick):
         return indent_prefix(old_line) + _norm(pick), True
     if not _same_thing_unless_rewritten(body, pick, relax_speaker):
         return old_line, False            # 不是"同一件事" → 不许换
@@ -1402,7 +1474,8 @@ def _comment_run(lines: list):
 def _replace_matched(old_lines: list, gen_bodies: list,
                      allow_edit: bool = True, file_squash=None,
                      relax_speaker: bool = False,
-                     removed_out: list = None) -> tuple:
+                     removed_out: list = None,
+                     child_pad: str = '') -> tuple:
     """
     原文区间 → 新区间。
 
@@ -1429,6 +1502,10 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     （**语法直接坏掉**），还因为"生成器把注释提到拍首"多插了 24 行。
     所以这一版的增删**只在平整区间**发生，插入的缩进**借原文区间**，
     并且事后仍有"重新解析 + 内容全在"的整体校验兜底（不过就退回全量）。
+
+    `child_pad`：这一拍的**块体缩进**（调用方按原文算，见 `_body_pad`）。
+    只在"菜单标题从无到有"那一支用得上 —— 那时源里没有标题行可借，
+    新行得和块体第一行对齐。
     """
     # **注释块按"用户写的那几行"整段换掉**（2026-10-24，审计 P1）。
     #
@@ -1453,14 +1530,38 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     #   · 两边的第一行是**同一个不带标题的菜单头**（`menu:` / `menu 名:`）；
     #   · 其余每一行都是**裸字符串**（没有说话人的台词形状）；
     #   · 两边的**行数不同**（行数相同时普通配对已经能逐行换正文）。
-    if allow_edit and len(old_lines) >= 2 and len(gen_bodies) >= 2:
+    #
+    # **标题"从无到有 / 从有到无"也走这条**（2026-10-25，审计第四轮 P1）：
+    # 无标题的菜单在卡片上填一句标题，从前配不上对（旧区间只有 `menu:` 一行，
+    # 生成结果是两行）→ 多出来的那行标题落不了地 → 整份拒绝
+    # （`1 处新增内容没能落进产物`），而"加个标题"是再普通不过的一刀。
+    # 反过来把标题清空时，旧标题行没人删 → 产物里标题还在（报成功、没改）。
+    # 这两种都在这条通道里：`old_lines[1:]` / `gen_bodies[1:]` 允许为空。
+    if allow_edit and old_lines and gen_bodies:
         _mh = _norm(old_lines[0])
         if (_MENU_HEAD_RE.match(_mh) and _mh.endswith(':')
                 and _norm(gen_bodies[0]) == _mh
                 and all(_is_caption_line(x) for x in old_lines[1:])
                 and all(_is_caption_line(x) for x in gen_bodies[1:])
-                and len(old_lines) != len(gen_bodies)):
-            _pad = indent_prefix(old_lines[1])
+                and len(old_lines) != len(gen_bodies)
+                # **只在"行数不同"确实来自标题本身时**才动手：
+                # 全是空白的标题（`" "`）渲染出来是**没有标题**
+                # （`menu_caption_text` 会 strip），于是一张标题为 `" "`
+                # 的菜单两边行数天然差一 —— 那不是"用户删了标题"，
+                # 照删就是**静默删掉作者写的一行**（真机 `script_pomo.rpy`
+                # 第 205 行当场被抓到：删相邻的 elif 分支，连带少了一行 `" "`）。
+                and (len(gen_bodies) > len(old_lines)
+                     or all(_caption_is_substantive(x)
+                            for x in old_lines[1:]))):
+            # 缩进：源里有标题行就借它（作者写的那一级）；从无到有时借
+            # **块体第一行的缩进**（`child_pad`，由调用方按原文算），
+            # 拿不到就按渲染结果那一行的相对缩进垫一级。
+            if len(old_lines) >= 2:
+                _pad = indent_prefix(old_lines[1])
+            else:
+                _pad = (child_pad or (indent_prefix(old_lines[0])
+                                      + (indent_prefix(gen_bodies[1])
+                                         if len(gen_bodies) >= 2 else '    ')))
             _new_caps = [_pad + x for x in gen_bodies[1:]]
             pre_changed = max(len(old_lines) - 1, len(_new_caps))
             old_lines = [old_lines[0]] + _new_caps
@@ -1615,6 +1716,38 @@ def _replace_matched(old_lines: list, gen_bodies: list,
             pair_of_gen[_idx] = _j
             pick_of_old[_j] = _idx
             slot_pairs.add(_idx)
+
+    # —— ⑤ **同一条原生语句换正文**（2026-10-25，审计第四轮 P2 连带）——
+    #
+    # 现场（把自定义语句的参数写进「代码」格之后暴露的）：一拍里既有
+    # `mycue intensity=3` 又有台词时，把它改成 `mycue intensity=5`：
+    # 身份键是 `('other', 整行原文)` —— 改一个数字就配不上对 → 新行走
+    # "新增内容"通道**插进去**、旧行又没人删 → 产物里两条语句并存
+    # （剧情跑两遍：`pause 0.1` → `pause 0.2` 会停顿两次）。
+    #
+    # 判据（窄到只有这一种）：两边都是 `('other', …)`、**首词相同**、
+    # 首词不是结构关键字（`if` / `return` / `label` …）、都不是注释、
+    # 都不以冒号结尾（那是块头，改它就是改结构）。同一段区间里按顺序 1:1 配。
+    _free_old = [j for j in range(len(old_lines))
+                 if j not in pick_of_old
+                 and _statement_verb(old_lines[j])]
+    _free_new = [i for i in range(len(gen_bodies))
+                 if i not in used
+                 and _statement_verb(gen_bodies[i])]
+    if _free_old and _free_new:
+        _by_verb: dict = {}
+        for _idx in _free_new:
+            _by_verb.setdefault(_statement_verb(gen_bodies[_idx]),
+                                []).append(_idx)
+        for _j in _free_old:
+            _cand = _by_verb.get(_statement_verb(old_lines[_j])) or []
+            if not _cand:
+                continue
+            _idx = _cand.pop(0)
+            used.add(_idx)
+            pair_of_gen[_idx] = _j
+            pick_of_old[_j] = _idx
+            slot_pairs.add(_idx)          # 允许 `_rewrite_line` 换正文
 
     out: list = []
     changed = pre_changed
@@ -1947,8 +2080,44 @@ def _condition_reasons(new_beats: list, beats: list,
             pool.remove(exp)                  # 删掉一支 → 解析器的重编号
             continue
         if pool:                              # 台词在、条件变了
-            bad.append((_key(b)[2][:16], want, pool[0]))
+            bad.append((b, want, pool[0]))
     return bad
+
+
+def _condition_hint(bad: list, original: str) -> str:
+    """
+    "条件对不上"这条拒因的**具体**说法（2026-10-25，审计第四轮 P1）。
+
+    从前一律说"条件改动走全量" —— 可条件改动里有一类**是能做增量的**
+    （链头 / 独立 `if`，见 `_plan_condition_rewrites`）。剩下这几类做不了，
+    原因各不相同，笼统的一句话让人不知道下一步该做什么：
+
+      · `elif` / `else`：表里存的是**展平后的累积条件**（`(b) and not (a)`），
+        改它没法用一行 `elif` 表达 —— 要改这一支得连链头一起重写；
+      · 嵌在别的块里（`if` 套 `if`）：改的只是内层那一行，累积条件里还有外层，
+        光改一行写不出用户填进去的那句话；
+      · 清空条件 = 拆掉这一层 `if`（结构改动）。
+
+    另外把 `_plan_condition_rewrites` 说出来的**拒绝理由**（"清空条件"那种）
+    一并带上 —— 它比这里更早、更清楚。
+    """
+    b, want, got = bad[0]
+    first = int(getattr(b, 'src_first', 0) or 0)
+    lines = (original or '').splitlines()
+    head_no, kind = (None, '')
+    if first >= 2 and first <= len(lines):
+        head_no, kind = _branch_head_for(lines, first)
+    if kind in ('elif', 'else'):
+        why = ('—— 这一支是 `elif` / `else`：表里存的是展平后的累积条件'
+               '（`(b) and not (a)`），改它没法用一行表达。'
+               '改**链头**那一支的条件可以增量；要改这一支请全量重写这一章')
+    elif str(getattr(b, 'nest_path', '') or '').count('>') > 0:
+        why = ('—— 这一拍嵌在别的块里（`if` 里还有 `if`）：累积条件里含着外层条件，'
+               '光改这一行写不出你填的那句话，请全量重写这一章')
+    else:
+        why = '—— 条件改动走全量'
+    return (f'{len(bad)} 处条件与要写的拍对不上'
+            f'（例：{((want or "")[:40], (got or "")[:40])}）{why}')
 
 
 def _verify_conditions(text: str, beats: list, renumber=()) -> list:
@@ -1974,8 +2143,7 @@ def _verify_conditions(text: str, beats: list, renumber=()) -> list:
         return [f'条件校验：补丁结果解析失败：{exc}']
     bad = _condition_reasons(new_beats, beats)
     if bad:
-        return [f'{len(bad)} 处条件与要写的拍对不上'
-                f'（例：{bad[0]}）—— 条件改动走全量']
+        return [_condition_hint(bad, text)]
     return []
 
 
@@ -2102,8 +2270,7 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
     # 条件没改**（静默 no-op）。
     cond_bad = _condition_reasons(new_beats, beats, renumber=renumber)
     if cond_bad:
-        reasons.append(f'{len(cond_bad)} 处条件与要写的拍对不上'
-                       f'（例：{cond_bad[0]}）—— 条件改动走全量')
+        reasons.append(_condition_hint(cond_bad, text))
 
     # ③ 生成器要的内容行不许丢（错位改错行会在这里现形）
     #
@@ -2570,6 +2737,158 @@ def _chain_renumber(blocks, orig_lines: list, head_no: int, last: int):
     return rewrites, renumber
 
 
+def is_flattened_condition(cond: str) -> bool:
+    """
+    这条条件是解析器**展平后的累积形式**吗（`(b) and not ((a))`）？
+
+    只有 `elif` / `else` 那几支是这样；`if` / 独立条件存的就是它自己。
+    `app.session_table` 靠它判断"改的是不是链头"（跨包只许用公开名字，
+    见 `tests/test_package_layering.py`）。
+    """
+    return bool(_split_negation(str(cond or ''))[1])
+
+
+def rechain_condition(cond: str, old_own: str, new_own: str):
+    """
+    把一条**展平后的累积条件**里"某一支自己的条件"换掉（P1，2026-10-25）。
+
+    为什么要换：`elif` / `else` 的守卫在表里是**累积形式**
+    （第 3 支 = `(b3) and not ((b1) or (b2))`）。用户把链头那一支从
+    `a == 1` 改成 `a == 9` 之后，后面每一支的否定项里都还是 `(a == 1)` ——
+    文件（`elif a == 2:`）重新解析出来的必然是 `not (a == 9) and (a == 2)`，
+    与表里的对不上；而**整份重写**又按表里的旧条件写，两边的语义就分家了。
+
+    所以链头一改，后面那几支的条件**跟着重算**（与文件里的 `elif` 语义一致）。
+
+    返回新条件；形状认不出 / 否定项里找不到 `old_own` → `None`（调用方不猜）。
+    """
+    prefix, terms = _split_negation(cond)
+    if not terms:
+        return None
+    want = str(old_own or '').strip()
+    repl = str(new_own or '').strip()
+    if not want or not repl:
+        return None
+    out: list = []
+    hit = False
+    for term in terms:
+        if not hit and _bare_cond(term) == want:
+            out.append(f'({repl})')
+            hit = True
+        else:
+            out.append(term)
+    if not hit:
+        return None
+    neg = ' or '.join(out)
+    return f'{prefix} and not ({neg})' if prefix else f'not ({neg})'
+
+
+def _has_outer_head(orig_lines: list, head_idx: int) -> bool:
+    """
+    第 `head_idx` 行（0-based）那一层**外面还有没有块**？
+
+    有就不再改那一行：表里存的是累积条件，而外层 `if` 里的内层 `if` 只写得下
+    内层那半句 —— 把累积条件写进去，语义就重了（`if a:` 里套
+    `if a and b:`）。`label` 不算外层（它是章边界，不是块）。
+    """
+    if head_idx is None or head_idx < 0 or head_idx >= len(orig_lines):
+        return True
+    ind = indent_width(orig_lines[head_idx])
+    for k in range(head_idx - 1, -1, -1):
+        ln = orig_lines[k]
+        body = _norm(ln).strip()
+        if not body or body.startswith('#'):
+            continue
+        if indent_width(ln) < ind:
+            if _LABEL_LINE_RE.match(ln):
+                return False
+            return _ends_with_colon(ln)
+    return False
+
+
+def _beat_owns_head(orig_lines: list, head_idx: int, first: int) -> bool:
+    """块头 `head_idx` 与拍的首行 `first` 之间只有空行/注释吗？"""
+    if head_idx is None or head_idx < 0 or first < 1:
+        return False
+    if head_idx + 2 > first:               # 头必须在拍首的上面（至少差一行）
+        return False
+    for n in range(head_idx + 2, first):
+        body = _norm(orig_lines[n - 1]).strip()
+        if body and not body.startswith('#'):
+            return False
+    return True
+
+
+def _plan_condition_rewrites(beats, orig_lines: list, skip_ids=()) -> tuple:
+    """
+    改「条件」那一格 → **把它写回那一行 `if …:`**（P1，2026-10-25）。
+
+    从前条件永远是"改动走全量"：条件不在拍的行区间里（块头不属于任何一拍，
+    见 `_body_lines`），逐拍对位看不见它 → 产物里条件一行没动 → 校验判
+    "1 处条件与要写的拍对不上" → 整份拒绝。用户看着卡片上改好的条件，
+    文件里却还是旧的，只能换条路（导出到 build/ 再手工搬回去）。
+
+    现在：只认**最深不超过一层**的那一支（判据见 `_has_outer_head`），
+    而且这一行必须就是**这一拍自己的块头**（`_beat_owns_head`）。
+    满足就换那一行的条件正文，**别的字节一个不动**：
+
+        if flag:            →   if not flag:
+            e "在里面"              e "在里面"
+
+    返回 `(rewrites, rejects)`：
+
+      · `rewrites`：`[(行号, 新整行)]`；
+      · `rejects`：`[原因]` —— 只在"确实改了、但改不了"时说话
+        （清空条件 = 拆掉这一层 `if`）。
+
+    `elif` / `else` 与嵌套的 `if` 一律不碰：它们"改了没有"判不出来
+    （表里存的是累积条件，本来就和文件那一行不同），交给
+    `_verify_conditions` 去拒绝并说清楚（见 `_condition_hint`）。
+    """
+    rewrites: list = []
+    rejects: list = []
+    for i, b in enumerate(beats):
+        if i in skip_ids:
+            continue
+        # **只认"条件就是这一拍自己的守卫"的那几种拍**（台词 / 旁白）。
+        #
+        # 菜单与菜单选项的条件不走 `Beat.condition`（它们在
+        # `Beat.menu_conditions` 里，渲染与校验另有通道），把它们的空条件
+        # 当成"用户清空了条件"会误判 —— 实测 `test_patch_menu_condition`
+        # 的 `if …: menu:` 当场被判"清空条件"而整份拒绝。
+        if str(getattr(b, 'kind', '') or '') not in ('say', 'narration'):
+            continue
+        first = int(getattr(b, 'src_first', 0) or 0)
+        if first < 2 or first > len(orig_lines):
+            continue
+        head_idx, kind = _branch_head_for(orig_lines, first)
+        if head_idx is None or kind != 'if':
+            continue
+        if not _beat_owns_head(orig_lines, head_idx, first):
+            continue
+        if _has_outer_head(orig_lines, head_idx):
+            continue
+        own = _own_condition(orig_lines[head_idx])
+        if not own:
+            continue
+        want = str(getattr(b, 'condition', '') or '').strip()
+        if want == own or _squash(want) == _squash(own):
+            continue                       # 没改（或只差空白）→ 一个字节不动
+        if not want:
+            rejects.append(
+                f'第 {i + 1} 拍清空了条件 —— 那是拆掉这一层 `if`（结构改动），'
+                f'增量补丁不做，请用全量重写这一章')
+            continue
+        if '\n' in want or '\r' in want:
+            rejects.append(f'第 {i + 1} 拍的条件里有换行 —— 增量补丁不猜，'
+                           f'请用全量重写这一章')
+            continue
+        rewrites.append((head_idx + 1,
+                         indent_prefix(orig_lines[head_idx])
+                         + f'if {want}:'))
+    return rewrites, rejects
+
+
 def _plan_branch_deletion(orig_lines: list, first: int, last: int,
                           taken, blocks=()) -> dict | None:
     """
@@ -2729,6 +3048,7 @@ def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
         slots = sorted(members, key=lambda t: t[1])
         ok = True
         crossed = False
+        blocked: list = []                     # 空隙里那些"认不出"的行
         for a, b in zip(slots, slots[1:]):
             if b[1] <= a[2]:
                 ok = False                 # 区间交叠 → 不猜
@@ -2739,14 +3059,33 @@ def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
                     crossed = True             # 跨过了 `label` 头
                 if body and not body.startswith('#'):
                     ok = False
+                    blocked.append(orig_lines[n - 1])
                     break
         if crossed:
             reasons.append('把一拍移到了另一个 label 里（跨 label 的重排）——'
                            '增量补丁不猜这种结构改动，请用全量重写这一章')
             continue
         if not ok:
-            reasons.append('重排段里有认不出的行（不是空行/注释），'
-                           '不敢整段重写')
+            # **说清楚卡在哪一行、为什么**（2026-10-25，审计第四轮 P1）。
+            #
+            # 现场（真机 `script_pomo.rpy`）：把 `elif breakline == 2:` 那一支的
+            # 台词挪到 `elif` 链外面 —— 空隙里那一行是**块头**
+            # （`if breakline == 1:` / `elif …:`），它不属于任何一拍。
+            # 旧提示只说"有认不出的行"，用户看不出这是"挪出分支 = 改剧情"：
+            # 台词一旦离开 `elif`，条件就不再生效（或者换了判定顺序）。
+            heads = [ln for ln in blocked if _ends_with_colon(ln)]
+            if heads:
+                reasons.append(
+                    f'这一拍要挪过结构块头（`{_norm(heads[0]).strip()}`）：'
+                    f'挪出 `if` / `elif` 分支之后，这一拍的条件就不再生效'
+                    f'（或者换了生效顺序）—— 那是改剧情，不是排版。'
+                    f'增量补丁不猜；要挪请先在卡片上清掉这一拍的条件，'
+                    f'或者用全量重写这一章')
+            else:
+                shown = (_norm(blocked[0]).strip() if blocked else '')
+                reasons.append(f'重排段里有认不出的行（例：`{shown[:40]}`）——'
+                               f'它不属于任何一拍，挪动会把它留在原地或带走，'
+                               f'增量补丁不猜；请用全量重写这一章')
             continue
         new_lines: list = []
         pos = span_first
@@ -3182,7 +3521,7 @@ class _PatchWalkState:
     （原文行、blocks、可信标志…）。打包成一个对象，循环里不会漏传一个。
     """
 
-    __slots__ = ('blocks', 'changed', 'grown_total', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'removed_preview', 'reorder_ids', 'seen_ranges', 'shrunk_total', 'stale',
+    __slots__ = ('blocks', 'changed', 'grown_total', 'indent', 'insert_ids', 'lost_new', 'matched', 'orig_lines', 'orig_loose', 'orig_set', 'orig_squash', 'out_lines', 'removed_preview', 'reorder_ids', 'seen_ranges', 'shrunk_total', 'stale',
                   'strict_of', 'trust_ranges', 'unlanded_total', 'usable')
 
     def __init__(self, **kw):
@@ -3241,7 +3580,8 @@ def _patch_walk_blocks(st) -> None:
                 st.matched += 1
                 new_seg, n_changed, unlanded, _gd, _sk = _replace_matched(
                     old, gen, allow_edit=True, file_squash=st.orig_squash,
-                    relax_speaker=True)
+                    relax_speaker=True,
+                    child_pad=_child_pad_at(st.orig_lines, last, st.indent))
                 st.unlanded_total += len(unlanded)
                 if new_seg != old:
                     st.changed += n_changed
@@ -3291,7 +3631,8 @@ def _patch_walk_blocks(st) -> None:
         # 行号已证明新鲜时，句位配对（`relax_speaker`）才对。
         new_seg, n_changed, unlanded, grown, shrunk = _replace_matched(
             old, gen, allow_edit=strict, file_squash=st.orig_squash,
-            relax_speaker=st.trust_ranges, removed_out=st.removed_preview)
+            relax_speaker=st.trust_ranges, removed_out=st.removed_preview,
+            child_pad=_child_pad_at(st.orig_lines, last, st.indent))
         st.unlanded_total += len(unlanded)
         st.grown_total += grown
         st.shrunk_total += shrunk
@@ -3463,6 +3804,8 @@ def patch_export(beats: list, source_path, generated_text: str,
     # 尾部 `label ch01_end: return` 一张空拍）→ 加一条 show 就导不出去。
     #
     # 判据：**渲染不出任何行**的新拍既没有内容可插、也不该拦住别人。
+    # 它们同时是回执里那句"N 张空卡不产生行"的来源（审计第四轮 P2）。
+    _empty_inserts = {i for i in insert_ids if not raw_gen.get(i)}
     insert_ids = {i for i in insert_ids if raw_gen.get(i)}
 
     matched = 0
@@ -3526,10 +3869,22 @@ def patch_export(beats: list, source_path, generated_text: str,
             continue
         out_lines[_k] = f'{_m.group(1)}label {_new_name}{_m.group(3)}'
         changed += 1
+    # —— **改条件**（P1，2026-10-25）：`if …:` 那一行也不属任何一拍 ——
+    #
+    # 与上面 label 改名同一类：块头单独改。`elif` / `else` / 嵌套的 `if`
+    # 不碰（判据见 `_plan_condition_rewrites`），那几种由 `_verify_conditions`
+    # 拒绝并给出具体理由。
+    cond_rewrites, cond_rejects = _plan_condition_rewrites(
+        beats, orig_lines, skip_ids=set(insert_ids) | set(reorder_ids))
+    for _k, _line in cond_rewrites:
+        if 1 <= _k <= len(out_lines) and out_lines[_k - 1] != _line:
+            out_lines[_k - 1] = _line
+            changed += 1
     st = _PatchWalkState(
         blocks=blocks,
         changed=changed,
         grown_total=grown_total,
+        indent=indent,
         insert_ids=insert_ids,
         lost_new=lost_new,
         matched=matched,
@@ -3639,6 +3994,19 @@ def patch_export(beats: list, source_path, generated_text: str,
         # 结果就是 `ok=True`、条件没改（静默 no-op）。
         reasons.extend(_verify_conditions(text, beats,
                                          renumber=delete_renumber))
+    if cond_rejects:
+        # 条件那一格改了、但这一支改不了（清空条件 / 换行）—— 这条理由比
+        # "N 处条件对不上"具体得多，别让两条同时出现把人绕晕。
+        reasons = [r for r in reasons if '处条件与要写的拍对不上' not in r]
+        reasons.extend(cond_rejects)
+    if reorder_plans and any('处条件与要写的拍对不上' in r for r in reasons):
+        # **移动带条件的拍**：条件在文件里是"位置决定"的（`if` / `elif` 的
+        # 先后就是语义），换了位置就换了哪一条先判 —— 剧情真的会变。
+        # 这条理由点出来，别让人以为是补丁坏了（审计第四轮 P1）。
+        reasons.append('这一章里移动了拍，而其中几拍带条件（`if` / `elif` 分支）：'
+                       '条件在文件里由**位置**决定，换位置就等于换了判定顺序 —— '
+                       '那是改剧情。请先在卡片上清掉这几拍的条件再移动，'
+                       '或用全量重写这一章')
 
     # **覆盖率不足也必须说话**（2026-10-23）：从前 `ok` 会因为 coverage < 0.9
     # 变成 False，而 `reasons` 仍是空列表 —— 调用方只拿到"失败，没原因"。
@@ -3662,6 +4030,7 @@ def patch_export(beats: list, source_path, generated_text: str,
                        removed_preview=tuple(removed_preview),
                        grown_lines=st.grown_total,
                        shrunk_lines=st.shrunk_total,
+                       empty_beats=len(_empty_inserts),
                        reasons=reasons)
 
 

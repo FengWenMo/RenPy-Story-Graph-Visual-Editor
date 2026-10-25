@@ -1652,8 +1652,16 @@ class TableSessionMixin:
                 # 判据：只有这一格**真的和显示值不同**时才写回。
                 new_code = str(fields.get('CodeBlock') or '').strip()
                 if new_code != str(B.compose_code(b) or '').strip():
-                    b.code = new_code
-                    b.raw = ''
+                    # **写的是这一拍自己那条自定义语句 → 逐字写回头行**（P2）。
+                    #
+                    # 现场（审计第四轮 P2）：声明过 `mycue` 的拍，「代码」格里
+                    # 写 `mycue intensity=5` → 走下面那条 python 通道 →
+                    # 渲染成 `$ mycue intensity=5`（`render_code_block` 会给
+                    # 认不出的行补 `$`）→ 产物连 lint 都过不了，而拒因只说
+                    # "`$` 语句里的 Python 语法错误"，人猜不到"该填参数格"。
+                    if not self._write_statement_head(b, new_code):
+                        b.code = new_code
+                        b.raw = ''
             if 'Label' in fields:
                 self._apply_label(b, str(fields.get('Label') or '').strip())
             if 'Kind' in fields:
@@ -1739,7 +1747,21 @@ class TableSessionMixin:
         # 用 `fields.get(..., b.condition)` 会让"没给"和"给了空串"分不开，
         # 而这两件事的语义完全相反（不改 vs 清空条件）。
         if 'condition' in fields:
-            b.condition = str(fields.get('condition') or '').strip()
+            _old_cond = str(getattr(b, 'condition', '') or '').strip()
+            _new_cond = str(fields.get('condition') or '').strip()
+            b.condition = _new_cond
+            # **链头一改，后面那几支的守卫要跟着重算**（P1，2026-10-25）。
+            #
+            # `elif` / `else` 在表里存的是**累积形式**（`(b) and not (a)`）。
+            # 只改链头那一行（`if a == 1:` → `if a == 9:`）之后，文件里
+            # 后面那几支的 `elif` 一个字节没动 —— 解析出来的否定项就变成了
+            # `not (a == 9)`，与表里存的 `not (a == 1)` 对不上：
+            #   · 增量补丁判"条件与要写的拍对不上"→ 整份拒绝；
+            #   · 就算放过去，**全量重写**又按表里的旧条件写 —— 两条路的
+            #     语义分家（同一章导两次得到两种剧情）。
+            # 所以在模型侧就把它们改对：否定项里出现"旧的那支条件"就换成新的
+            # （`rechain_condition`，与补丁同一个判据）。
+            self._rechain_siblings(b, _old_cond, _new_cond)
 
         self._apply_stage(b, fields, stage_loaded)
 
@@ -1778,6 +1800,119 @@ class TableSessionMixin:
         if self._beat_edits_print(idx) != _before_print:
             self.mark_edits_dirty()
         return b
+
+    @staticmethod
+    def _write_statement_head(b: Beat, text: str) -> bool:
+        """
+        「代码」格里写的是**这一拍自己那条自定义语句** → 写回头行（P2，2026-10-25）。
+
+        `mycue intensity=5` 是 Ren'Py 语句，不是 Python。走代码通道会被
+        `render_code_block` 补上 `$`（`$ mycue intensity=5`）—— 产物连加载
+        都过不了，而拒因只会说"Python 语法错误"，看不出"参数该填参数格"。
+
+        判据只有一条：**首词就是这一拍自己那条语句的名字**。那就不可能是
+        "改成一段 python 代码"，只能是"改这条语句本身"：
+
+          · 项目声明过的语句（`spec_name`）→ 写 `spec_head`（渲染时替换头行，
+            见 `beat_render._emit_opaque`）；
+          · 工具不认识的块（`opaque`）→ 换掉它的首行；
+          · 普通原生行（`raw`）→ 换掉 `raw`。
+
+        三条都不匹配（首词不是自己那条语句 / 多行）→ 返回 False，
+        调用方照旧走 python 通道（那才是"我就要写代码"）。
+        """
+        line = (text or '').strip()
+        if not line or '\n' in line:
+            return False
+        verb = line.split()[0]
+        name = str(getattr(b, 'spec_name', '') or '').strip()
+        if name and verb == name:
+            b.spec_head = line
+            opaque = str(getattr(b, 'opaque', '') or '')
+            if opaque.strip():
+                rows = opaque.replace('\r\n', '\n').split('\n')
+                b.opaque = '\n'.join([line] + rows[1:])
+            return True
+        opaque = str(getattr(b, 'opaque', '') or '')
+        if opaque.strip():
+            rows = opaque.replace('\r\n', '\n').split('\n')
+            head = rows[0].strip()
+            if head.split() and head.split()[0] == verb:
+                b.opaque = '\n'.join([line] + rows[1:])
+                if name:
+                    b.spec_head = line
+                return True
+        raw = str(getattr(b, 'raw', '') or '')
+        if raw.strip() and '\n' not in raw and raw.split()[0] == verb:
+            b.raw = line
+            return True
+        return False
+
+    def _rechain_siblings(self, b: Beat, old_cond: str, new_cond: str) -> None:
+        """
+        改了**链头**那一支的条件之后，把同一链里后面几支的守卫跟着重算。
+
+        判据（一条不满足就什么都不做 —— 让补丁那边去拒绝并说清楚）：
+
+          · 这一拍是链头：`nest_path` 的最内层是 `if:1`（第 1 支就是 `if`）；
+          · 它原来那条条件**就是自己那一支的**（没有 `and not (…)` 前缀）——
+            只有链头是这样（`elif` 存的都是累积形式）；
+          · 新条件非空（清空 = 拆掉这一层 `if`，那是结构改动，不在这里做）。
+
+        后面每一支的否定项里找到"旧的那支条件"就换成新的（`rechain_condition`）。
+        换不动（形状认不出）就整体放弃 —— 宁可让补丁拒绝，也不写一半。
+        """
+        if not old_cond or not new_cond or old_cond == new_cond:
+            return
+        path = str(getattr(b, 'nest_path', '') or '')
+        if not path:
+            return
+        head, _, last = path.rpartition('>') if '>' in path else ('', '', path)
+        if not last.startswith('if:') or last != 'if:1':
+            return                             # 不是链头
+        prefix_path = (head + '>') if head else ''
+        try:
+            from storygraph.story.patcher import (is_flattened_condition,
+                                                  rechain_condition)
+        except Exception as e:                 # noqa: BLE001
+            swallow('app.session_table._rechain_siblings', e)
+            return
+        if is_flattened_condition(old_cond):
+            return                             # 自己那条也是累积形式 → 不是链头
+        # 找出同一链、排在它后面的兄弟分支
+        later = []
+        started = False
+        for o in self.beats:
+            if o is b:
+                started = True
+                continue
+            if not started:
+                continue
+            opath = str(getattr(o, 'nest_path', '') or '')
+            if prefix_path:
+                if not opath.startswith(prefix_path):
+                    break
+                tail = opath[len(prefix_path):]
+            else:
+                tail = opath
+            if '>' in tail:
+                continue                       # 更深一层，不是兄弟
+            if not tail.startswith('if:'):
+                break                          # 链结束了
+            later.append((o, tail))
+        if not later:
+            return
+        plans = []
+        for o, tail in later:
+            cur = str(getattr(o, 'condition', '') or '').strip()
+            if not cur:
+                continue
+            nxt = rechain_condition(cur, old_cond, new_cond)
+            if nxt is None:
+                return                         # 认不出 → 整体放弃（不写一半）
+            plans.append((o, nxt))
+        for o, nxt in plans:
+            o.condition = nxt
 
     def _apply_label(self, b: Beat, new_label: str) -> None:
         """

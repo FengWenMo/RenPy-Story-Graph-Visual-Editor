@@ -149,7 +149,16 @@ class WindowExportMixin:
                 path, used_patch=bool(res.get('used_patch'))) or res
         if not res.get('ok'):
             blocking = res.get('blocking') or ['（未知原因）']
-            QMessageBox.warning(self, '生成被门禁拦截', '\n'.join(blocking))
+            # 告警（产物写在 game/ 里之类）**不是**这次拒写的原因 ——
+            # 单列一段，别让人以为"挪个位置就好了"（审计第四轮 P2）。
+            warns = res.get('warnings') or []
+            msg = '\n'.join(blocking)
+            if warns:
+                # ⚠ `QMessageBox` 不渲染 Markdown —— 别在这里写 `**粗体**`
+                # （同一类坑见 `_confirm_force_overwrite` 的注释）。
+                msg += ('\n\n以下是提示，不是这次被拦的原因：\n'
+                        + '\n'.join('· ' + w for w in warns))
+            QMessageBox.warning(self, '生成被门禁拦截', msg)
             self._report_swallowed(mark)
             return
         # 写出去了 → 内存这一刻与磁盘一致（关窗 / 状态栏的"未导出"靠这条基线）。
@@ -172,6 +181,13 @@ class WindowExportMixin:
         self._log(f'[导出] 已写入 {Path(path).name}'
                   f'（{res.get("note", "")}{warn}）')
         self._status(f'✔ 已导出 {Path(path).name}（{res.get("note", "")}{warn}）')
+        # **写成功了也把提示说出来**（审计第四轮 P2）：`OUTSIDE_BUILD_DIR`
+        # 这类 warn 从前只在"拒写"时混进 blocking 列表出现 —— 写成功时
+        # 它干脆消失了，而"产物放在 game/ 里会和原文抢 label"恰恰是
+        # 用户**下次**才会踩到的事。这里至少让它留在日志里。
+        _warns = res.get('warnings') or []
+        if _warns:
+            self._log('[导出] 提示：' + '；'.join(str(w) for w in _warns[:4]))
         self._report_swallowed(mark)
     def _confirm_force_overwrite(self, path, used_patch=False):
         """

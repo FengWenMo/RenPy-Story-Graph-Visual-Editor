@@ -431,6 +431,12 @@ class ExportMixin:
             # `force` 的语义只有一条 —— "我确认要覆盖手写文件"。
             return {'ok': False, 'path': target,
                     'blocking': [self._issue_message(i) for i in blocking],
+                    # **告警单独一格**（2026-10-25，审计第四轮 P2）：
+                    # 从前 warn 级也塞进 `blocking`，拒因列表里第一条是
+                    # "产物写在 game/ 目录里"（那需要**挪位置**，不是这次
+                    # 拒写的原因），真正的原因反而被挤到后面看不见。
+                    'warnings': [self._issue_message(i)
+                                 for i in issues if not i.is_blocking],
                     'codes': [str(getattr(i, 'code', '')) for i in blocking],
                     'note': note['text_note'], 'todos': 0}
 
@@ -477,10 +483,13 @@ class ExportMixin:
                                engine_lint=True,
                                lint_ignore_heads=self._declared_stmt_heads())
         if not art.written:
+            _blk = [i for i in art.issues if i.is_blocking]
+            _warn = [i for i in art.issues if not i.is_blocking]
             return {'ok': False, 'path': target,
-                    'blocking': [self._issue_message(i) for i in art.issues]
+                    'blocking': [self._issue_message(i) for i in _blk]
                                 or ['生成门禁拒绝写入'],
-                    'codes': [str(getattr(i, 'code', '')) for i in art.issues],
+                    'warnings': [self._issue_message(i) for i in _warn],
+                    'codes': [str(getattr(i, 'code', '')) for i in _blk],
                     'review_path': art.review_path,
                     'note': note['text_note'], 'todos': 0,
                     # 这一刀到底是不是"无损的增量"（前端据此说**真话**，见
@@ -521,6 +530,9 @@ class ExportMixin:
                 and Path(target) == Path(self.script_path):
             self._reload_after_inplace_write()
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
+                # 成功了也可能有告警（产物写在 game/ 里、有自定义块没被建模…）
+                'warnings': [self._issue_message(i) for i in art.issues
+                             if not i.is_blocking],
                 'note': note['text_note'],
                 'used_patch': bool(note.get('used_patch')),
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
@@ -656,11 +668,17 @@ class ExportMixin:
             res = patch_export(self.beats, src, text, registry=self.registry(),
                                trust_ranges=trust)
             if res.ok:
+                _note = (f'增量补丁：对位 {res.matched_beats}/'
+                         f'{res.total_beats} 拍，'
+                         f'改动 {res.changed_lines} 行')
+                # **空卡片要说一句**（2026-10-25，审计第四轮 P2）：
+                # 插一张空卡、导出，文件一个字节不变 —— 那是**对的**（空卡
+                # 不产生行），但回执只说"逐字节相同"，用户以为插卡没生效。
+                if getattr(res, 'empty_beats', 0):
+                    _note += (f'；另有 {res.empty_beats} 张空卡片还没有任何内容'
+                              f'（不会产生行 —— 填上台词/舞台再导出）')
                 return {'used_patch': True, 'text': res.text, 'blocking': [],
-                        'had_source': had_source,
-                        'text_note': f'增量补丁：对位 {res.matched_beats}/'
-                                     f'{res.total_beats} 拍，'
-                                     f'改动 {res.changed_lines} 行'}
+                        'had_source': had_source, 'text_note': _note}
             reason = ('；'.join(res.reasons)
                       or f'对位率不足（{res.coverage:.0%}）')
             return {'used_patch': False, 'text': '', 'blocking': [reason],

@@ -624,7 +624,7 @@ def _iter_python_blocks(lines: list):
         i = max(j, i + 1)
 
 
-def _python_syntax_issues(text: str) -> list:
+def _python_syntax_issues(text: str, declared=()) -> list:
     """
     产物里的 `$ …` 语句与 `python:` 块体，各过一次 Python 编译器。
 
@@ -696,12 +696,31 @@ def _python_syntax_issues(text: str) -> list:
         try:
             compile(code, '<generated>', 'exec')
         except SyntaxError as exc:
+            head = code.splitlines()[0].strip() if code.splitlines() else ''
+            # **"这是自定义语句，不是 Python"要说出口**（2026-10-25，审计第四轮 P2）。
+            #
+            # 现场：项目里声明过 `mycue`，用户在「代码」格里写
+            # `mycue intensity=5` → 走代码通道被补成 `$ mycue intensity=5`
+            # → 拒因只说"`$` 语句里的 Python 语法错误"，人只会去改那行
+            # python，永远想不到"参数该填参数格"。首词是**这一章某拍的
+            # 语句名**时就把话说全（`declared` 由调用方从 beats 收上来）。
+            _verb = head.split()[0] if head.split() else ''
+            _hint = ''
+            if _verb and _verb in set(declared or ()):
+                # 不加 `**强调**`：这条会被 UI 的 `QMessageBox` 直接显示，
+                # 它不渲染 Markdown（星号会原样露出来）。
+                _hint = (f'其实 `{_verb}` 是这一章里用到的「自定义语句」，'
+                         f'不是 Python：它的参数请填卡片上那条语句的参数格'
+                         f'（Excel 里是 `{_verb}·参数名` 列），'
+                         f'「代码」格只接受 Python。')
             out.append(GuardIssue(
                 'PYTHON_SYNTAX_ERROR', 'block',
                 f'`$` 语句里的 Python 语法错误：{exc.msg}'
-                f'（`{code.splitlines()[0].strip()}`）。这一行会让 Ren\'Py '
-                f'加载脚本时直接报错，游戏起不来。常见原因：作者手写了一句 '
-                f'Ren\'Py 语句（比如台词 `l oh "3"`）被当成了代码。',
+                f'（`{head}`）。这一行会让 Ren\'Py '
+                f'加载脚本时直接报错，游戏起不来。'
+                + _hint
+                + ('' if _hint else '常见原因：作者手写了一句 '
+                   'Ren\'Py 语句（比如台词 `l oh "3"`）被当成了代码。'),
                 line_no))
     return out
 
@@ -824,7 +843,10 @@ def generation_guard(text: str, out_path, *,
     # —— 0. 产物里的 Python 语法（P0，2026-10-05）——
     # 放在最前面：这是**唯一**一类"Ren'Py 连加载都加载不了"的错误，
     # 比图像名/标签重名更致命（那两类至少能进到解析阶段）。
-    issues.extend(_python_syntax_issues(text))
+    issues.extend(_python_syntax_issues(
+        text, declared={str(getattr(b, 'spec_name', '') or '').strip()
+                        for b in (beats or ())
+                        if str(getattr(b, 'spec_name', '') or '').strip()}))
 
     # —— 1. 图像名 / transform 名的合法性 ——
     for ref in _image_refs(text):
