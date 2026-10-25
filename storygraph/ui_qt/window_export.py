@@ -283,6 +283,26 @@ class WindowExportMixin:
         table_path = res['table_path']
         tables.remember_table_mtime(self._table_mtimes, table_path)
 
+        # **重建覆盖了旧表 → 把人手写的东西保住了多少说出来**（P0-E）。
+        # 这张表就是策划的工作台，一句"我都留着"比任何文档都能让人安心往里写。
+        if res.get('overwrote'):
+            kept = res.get('preserved') or {}
+            bits = []
+            if kept.get('sheets'):
+                bits.append(f'{kept["sheets"]} 张你自己加的页')
+            if kept.get('columns'):
+                bits.append(f'{kept["columns"]} 列你自己加的列')
+            if kept.get('formats'):
+                bits.append(f'{kept["formats"]} 处底色/批注')
+            if bits:
+                self._log('[剧本表] 已保住你在表里手写的内容：'
+                          + '、'.join(bits)
+                          + (f'；旧表备份在 {Path(kept["backup"]).name}'
+                             if kept.get('backup') else ''))
+            if kept.get('unmatched'):
+                self._log(f'[剧本表] 有 {kept["unmatched"]} 行在你自加的列里'
+                          f'找不到对应拍了（那几拍已不在表里），值留空')
+
         if not open_with_system_default(table_path):
             QMessageBox.information(
                 self, '已生成剧本表',

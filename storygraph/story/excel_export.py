@@ -352,6 +352,17 @@ def _write_spec_arg_columns(ws, beats, statements, row_count: int,
     return cols
 
 
+#: 最近一次"保住用户手写内容"的计数（给回执用）。
+#: 为什么不改返回值：`export_beats_to_excel` 的返回值被一堆调用点当路径用，
+#: 改签名会连带改一片；而这件事只需要"最近一次"的结论。
+_LAST_PRESERVE: dict = {}
+
+
+def last_preserve_stats() -> dict:
+    """最近一次 `export_beats_to_excel` 保住了多少用户手写内容（空 dict = 没有）。"""
+    return dict(_LAST_PRESERVE)
+
+
 def export_beats_to_excel(beats: list, output_path,
                           registry=None, include_dropdowns: bool = True,
                           include_thumbnails: bool = False,
@@ -401,6 +412,21 @@ def export_beats_to_excel(beats: list, output_path,
 
     headers = ([BEAT_HEADERS.get(f, f) for f in BEAT_FIELDS]
                + spec_headers + extra_headers)
+
+    # —— **先把用户在这张表里手写的东西拿走**（P0-E，2026-10-25 第六轮）——
+    #
+    # 这个函数是"整份新建 + 覆盖原路径"：用户自加的页（角色设定 / 大纲 /
+    # 排期）、Beats 里自加的列（配音状态 / 审核）、批注、底色、冻结窗格，
+    # 从前会**全没**，而且没有备份。审计探针实测 6 条判据 0/6。
+    #
+    # 快照必须在覆盖之前、在新工作簿填完之后还原（见函数末尾）。
+    _user_snap = None
+    try:
+        from storygraph.story.xlsx_preserve import snapshot_user_content
+        _user_snap = snapshot_user_content(output_path, tool_headers=headers)
+    except Exception as e:                     # noqa: BLE001 - 快照失败不该拦住出表
+        from storygraph.core.safeguard import swallow as _swallow
+        _swallow('excel_export.snapshot_user_content', e)
     ws.append(headers)
     for cell in ws[1]:
         cell.fill = _HEADER_FILL
@@ -507,10 +533,26 @@ def export_beats_to_excel(beats: list, output_path,
     # 导回时靠它自动走增量（见 `table_meta` 的 docstring）——
     # 全量重生成会重排整份文件，而这件事完全可以不发生。
     try:
-        from storygraph.story.table_meta import write_meta
-        write_meta(wb, source_file=source_file)
+        from storygraph.story.table_meta import fingerprint_of, write_meta
+        write_meta(wb, source_file=source_file,
+                   # 摊表这一刻源文件的指纹 → 导回时能**直接**判"表比源码旧"
+                   source_sha1=fingerprint_of(source_file) if source_file else '')
     except Exception as e:                     # noqa: BLE001 - 元信息不该拦住出表
         swallow('excel_export.export_beats_to_excel.meta', e)
+
+    # —— **把人的东西还回去**（P0-E）：用户自加的页整张搬运，Beats 里自加的
+    #    列按 `LineId` 回填（行增删也能对上，身份不是行号）。——
+    try:
+        from storygraph.story.xlsx_preserve import (backup_table,
+                                                    restore_user_content)
+        _stats = restore_user_content(wb, _user_snap, beats=beats)
+        # 覆盖前留一份 —— 兜住"快照没覆盖到的格式"（图表 / 透视表这类
+        # openpyxl 搬不动的东西），也兜住工具自己未来可能踩的坑。
+        _bak = backup_table(output_path)
+        global _LAST_PRESERVE
+        _LAST_PRESERVE = dict(_stats, backup=str(_bak or ''))
+    except Exception as e:                     # noqa: BLE001 - 见上面注释
+        swallow('excel_export.restore_user_content', e)
 
     wb.save(output_path)
     return output_path

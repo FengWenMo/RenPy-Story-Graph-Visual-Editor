@@ -107,12 +107,24 @@ def generate_table(script_path, output_path=None, registry=None,
         return {'ok': False, 'table_path': None,
                 'error': f'找不到脚本：{script_path}'}
     table_path = Path(output_path) if output_path else script_path.with_suffix('.xlsx')
+    existed = table_path.is_file()
     try:
         open_rpy_as_table(script_path, table_path, registry=registry,
                           with_thumbnails=with_thumbnails, facts=facts)
     except Exception as e:                    # noqa: BLE001 - 报给前端
         return {'ok': False, 'table_path': table_path, 'error': str(e)}
-    return {'ok': True, 'table_path': table_path, 'error': ''}
+    # **"你手写的东西我保住了"要说出来**（P0-E，2026-10-25 第六轮）：
+    # 这张表是策划的主界面，重建时保住了什么、备份在哪，得让人看得见 ——
+    # 否则下次他不敢往里写东西，产品的定位（"对着表格编排演出"）就废了。
+    preserved = {}
+    try:
+        from storygraph.story.excel_export import last_preserve_stats
+        preserved = last_preserve_stats() if existed else {}
+    except Exception as e:                    # noqa: BLE001 - 回执拿不到不影响出表
+        from storygraph.core.safeguard import swallow
+        swallow('tables.generate_table.preserve_stats', e)
+    return {'ok': True, 'table_path': table_path, 'error': '',
+            'overwrote': bool(existed), 'preserved': preserved}
 
 
 # ----------------------------------------------------------------------
@@ -211,6 +223,15 @@ def export_table(table_path, registry=None, project_root=None,
             if removed_preview:
                 note += (f'；其中删掉了源文件里 {removed_count} 行'
                          f'（{removed_preview[0][:40]}）')
+            # **表比源码旧？**（2026-10-25 第六轮）：删行时才值得说。
+            # 判据直接来自隐藏表的"来源指纹"，不是间接猜测。
+            try:
+                from storygraph.story.table_meta import staleness_note
+                note += staleness_note(table_path, src_for_patch,
+                                       removed_count)
+            except Exception as e:            # noqa: BLE001
+                from storygraph.core.safeguard import swallow
+                swallow('tables.export_table.staleness_note', e)
         else:
             why = '；'.join(res.reasons) if res.reasons else \
                 f'与源文件对位率不足（{res.coverage:.0%}）'

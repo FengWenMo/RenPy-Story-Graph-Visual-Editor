@@ -334,8 +334,30 @@ def _cmd_table(args) -> int:
     registry = _load_registry(args)
 
     if args.action == 'rpy2xlsx':
+        from pathlib import Path as _P
+        _target = _P(args.out) if args.out else _P(args.path).with_suffix('.xlsx')
+        _existed = _target.is_file()
         out = open_rpy_as_table(args.path, args.out, registry=registry)
         print(f'已生成剧本表：{out}')
+        # 覆盖了旧表 → 说清"你手写的东西"怎么样了（P0-E，第六轮）
+        if _existed:
+            try:
+                from storygraph.story.excel_export import last_preserve_stats
+                kept = last_preserve_stats()
+            except Exception:                 # noqa: BLE001 - 回执拿不到不影响出表
+                kept = {}
+            if kept:
+                bits = []
+                if kept.get('sheets'):
+                    bits.append(f'{kept["sheets"]} 张自加页')
+                if kept.get('columns'):
+                    bits.append(f'{kept["columns"]} 列自加列')
+                if kept.get('formats'):
+                    bits.append(f'{kept["formats"]} 处底色/批注')
+                if bits:
+                    print('  已保住你在表里手写的内容：' + '、'.join(bits))
+                if kept.get('backup'):
+                    print(f'  旧表备份：{kept["backup"]}')
         return 0
     if args.action == 'xlsx2rpy':
         # 落盘逻辑全在 `pipeline.compile.compile_table`（2026-10-05 收口）。
