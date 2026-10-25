@@ -60,7 +60,40 @@
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。
 
+**2026-10-25 不安全审计（三轮闭环，详见 `docs/P0审计_不安全因素_2026-10-25.md` + `_第二轮_` + `_第三轮_2026-10-25.md` + 当日日志）**：
+第一轮五条 + P0-3/P1-4/P1-5/P1-6/P1-A/P1-C/P1-5b **全部已修且探针复测通过**（P0-3 写前复读拒写；P1-4 rename_scope 只改引用位；P1-5 `apply(text, source=)` difflib 逐行还原；P1-6 `_walk_covers`/`_unjudged_paths`；P1-A 严格解码拒写带坐标；P1-C 引号说话人警告网；P1-5b 补传 source=）。
+⚠ 审计期并行提交：`8ef4e1a`→`90ba338`→`d4a60d0`（含把我的探针提交进 git + 重录 sync/main_window golden）。
+⚠ **scan golden 仍红 = 真机内容漂移非回归**（lint_proj 10-22 21:58 才建，golden 录于当天 09:36）→ 待用户/并行工作者重录，别擅改。
+⚠ 探针期望值也会错（本轮三次：+2 标记位移/引号/BOM）——判据要「构造期望全文」别用同索引 diff；探针拷真项目必须 rmtree 收摊（disk_hygiene 守卫）。
+⚠ 两个 pytest 并发跑会互清 `.pip-tmp/pytest` → 大规模 ERROR 是干扰非回归（踩过两次）。
+
 **待用户决定**：D1 树/表归属｜D2 两套生成器收敛｜D3 rename patch 接 Qt｜D4 Stage 格级下拉｜D5 坏味道课题｜D6 pytest.ini basetemp｜D7 多引擎加深｜D8 提交策略。
+
+**2026-10-25 第五轮（载体三轴，见 `docs/P0审计_不安全因素_第五轮_2026-10-25.md`）**：
+四条 P0 已修 + 判据 `tests/test_p0_round5_carrier.py`（32 条）+ 探针 `tools/_p0_audit_round5_{primitive,paths,stale}.py`。
+① **P0-A 行边界**：`str.splitlines()` 认 `U+2028/U+2029/NEL/VT/FF/\x1c-\x1e` 为换行（Ren'Py 只认 `\n`）→
+真 `\n` 被顶掉或软回车变真换行。新增 `core/textlines.py`（`split_lines/split_eols/join_lines`），
+**改写/切行一律用它**；`renpy_parser` 也换了（否则行号与改写点差开 → 删错行）。
+② **P0-B 编码**：非 UTF-8 文件「读回来再写回去」把坏字节换成 `EF BF BD`。修法**不是**在每个调用点预检
+（第三轮那样修必漏），而是 `SourceStyle.apply(source=)` 严格解码抛 `SourceNotUtf8` —— 它是所有落盘点的唯一末班车。
+③ **P0-C**：`commands.py` 9 处 `apply` 补 `source=`（混合换行撤销不再整份归一化）。
+④ **P0-D**：`patcher.removal_note()` 唯一实现（表过期删行三个出口同一句话），此前编辑器 `_patch_note` 一字不提。
+⚠ 真机 312 个 `.rpy` 三轴全 0 —— 这四条是**地雷不是事故**，触发源是作者粘台词 / 拷来的 ANSI 文件。
+⚠ 教训：**"同一件事不同出口两种待遇"是最有效的找 P0 的探针**（本轮两条由此挖出）；探针判据要写"目标行为"，
+不是"腐蚀存在"。
+
+**2026-10-25 第六轮（Excel 是第二份源码，见 `docs/P0审计_第六轮_Excel与难缠工程_2026-10-25.md`）**：
+· **P0-E**：`export_beats_to_excel` 用 `Workbook()` 整份重建 → 用户自加的页/列/批注/底色/冻结窗格全没、零备份。
+  新 `story/xlsx_preserve.py`（备份留 3 代 + 用户整页带走 + Beats 自加列按 **LineId** 回填 + 人标格子按 **LineId+表头**）。
+  **凡是"整份新建再 save 覆盖"的写入点都要按这条审** —— xlsx 也是用户资产。
+· **P1-H 最值钱**：`removed_count` 恒少算"拍内删行"（取的是从不累加的局部变量）→ 回执靠预览兜底才说对，
+  而任何只看 count 的判据（`staleness_note`）**静默失效**。教训：**回执里的每个数必须真算**。
+· 点号 label（`main.route`）导出 100% 失败（`patcher._LABEL_LINE_RE` 的 `\w` 不含点）→ 已修；
+  同一正则另有三处：`statement_probe` 早就对，`choice_point` 前缀校验（已统一），`flow._LABEL_RE`（已支持）。
+· 隐藏表新增「来源指纹」（sha1 前 16 位）：只用来**解释**"表比源码旧"，**不 block**（工具自己写回后指纹立刻变旧，
+  真拦会逼用户闭眼点"仍要覆盖"，更危险）。
+· 难缠工程矩阵 `tools/_p0_audit_round6_stress.py` **16/16**（menu 条件项 / if-elif / call screen / 重复台词 / 点号 label / 撤销逐字节还原）。
+  真机 `sr_general` 太干净，**以后新功能先跑这个矩阵**。
 
 ## 五、协作与定位
 
