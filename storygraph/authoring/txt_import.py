@@ -37,6 +37,20 @@
 第 3 条是关键：宁可把一句带引号的旁白当旁白，也不要把旁白当角色 —— 后者是
 **静默改剧情**（说话人错了，游戏里显示的名字就错了）。
 
+## "判成旁白" ≠ "什么都不说"（两张网：2026-10-11 / 2026-10-25）
+
+第 3 条**仍然是判据**（判读绝不因为"看着像"而改：`他说"你好"` 就是旁白）。
+但"短名字 + 台词标记"却认不出名字的行会进 `suspect_speakers`，并汇总成一条
+人话警告：
+
+  · **冒号形状**（`小明：谁啊？`）—— 2026-10-11 补的；
+  · **引号形状**（`小雨"你回来了。"`）—— 2026-10-25 补的（审计 P1-C：
+    视觉小说圈 `Name"line"` 是通行格式，原来这种行被**静默**判成旁白，
+    台词失去说话人且零提示）。
+
+只报不猜：回执里写的是一句**问句**（要不要把它当角色），既不自动改判、
+也不自动建角色 —— 判读与产物都不动。
+
 ## ⚠ 三个"看起来像角色"的陷阱（2026-10-10 对抗性探针实测，已修）
 
 **① 大小写只能算"同一个人的另一种写法"，前提是两者都指向同一个人。**
@@ -647,7 +661,10 @@ class ConversionResult:
     ambiguous: dict = field(default_factory=dict)
     #: 这份输入看起来像**已经写好的 .rpy**（不是纯文字）—— 强提示
     looks_like_script: list = field(default_factory=list)
-    #: ⚠ "看着像谁在说话，但我不认识这个名字"：`[{no, token, raw}]`。
+    #: ⚠ "看着像谁在说话，但我不认识这个名字"：`[{no, token, shape, raw}]`。
+    #:
+    #: `shape` ∈ `'colon'`（`小明：谁啊？`，2026-10-11）/
+    #: `'quote'`（`小雨"你回来了。"`，2026-10-25 审计 P1-C 补的网）。
     #:
     #: 2026-10-11 抓到的**静默缺陷**：`小明：谁啊？` 原来被安静地当成旁白，
     #: `unmapped/warnings/dropped/ambiguous` **全空** —— 而编剧写的是"小明说"。
@@ -773,20 +790,32 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
     body = '\n'.join(out)
     head = f'label {label}:\n' if label else ''
     text_out = f'{head}{body}\n'
-    # ⚠ **只增不改**的后扫描（2026-10-11 修静默缺陷）：
-    #   `小明：谁啊？` 这种"短名字 + 冒号 + 内容"的行，如果名字既不在 id、
-    #   也不在显示名/别名里，原来会被**安静地**当成旁白（用户看不到任何提示）。
-    #   这里只把它**报出来**（不改判读 —— 它真的可能只是旁白里带冒号）。
-    #   门槛故意保守：名字 ≤12 字、冒号后非空、且不是已知的旁白标记。
+    # ⚠ **只增不改**的后扫描（2026-10-11 修冒号形状的静默缺陷；2026-10-25 扩到
+    #   引号形状 —— 审计 P1-C）：`小明：谁啊？` / `小雨"你回来了。"` 这种
+    #   "短名字 + 台词标记 + 内容"的行，如果名字既不在 id、也不在显示名/别名里，
+    #   原来会被**安静地**当成旁白（用户看不到任何提示）。
+    #   这里只把它**报出来**（不改判读 —— 它真的可能只是旁白里带引号）。
+    #   门槛故意保守：名字 ≤6 字、内容非空、且不像旁白里的话。
     suspect = _suspect_speakers(parsed, chars)
     if suspect:
-        warnings.append(
-            '⚠ 有 {n} 行**看着像谁在说话**，但这个名字不在角色表里（'
-            '它们被当成了旁白）：{sample} —— 要认它，去角色表里加别名；'
-            '不认就确认它是旁白'.format(
-                n=len(suspect),
-                sample='；'.join(f'第 {s["no"]} 行「{s["token"]}」'
-                                 for s in suspect[:5])))
+        sample = '；'.join(
+            '第 {no} 行「{token}」{tag}'.format(
+                no=s['no'], token=s['token'],
+                tag='（名字"台词"）' if s.get('shape') == 'quote' else '')
+            for s in suspect[:5])
+        msg = ('⚠ 有 {n} 行**看着像谁在说话**，但这个名字不在角色表里（'
+               '它们被当成了旁白）：{sample} —— 要认它，去角色表里加别名；'
+               '不认就确认它是旁白')
+        # ⚠ 上面这段措辞（含 `sample` 的冒号形状）**一个字都不要改**：
+        # `tests/golden_txt_import_fingerprint.txt` 把真机 5 章的 `warnings`
+        # 也钉住了 —— 改措辞会让金标假红。引号形状是新补的网（P1-C），
+        # 只加一句"要不要把它当成角色"，且只在**确实有**引号形状时才加。
+        if any(s.get('shape') == 'quote' for s in suspect):
+            msg += ('。⚠ 标了「名字"台词"」的是**引号形式**（视觉小说圈通行写法）：'
+                    '要不要把它当成角色？要认：去角色表里给它补个别名'
+                    '（重导一次就会认）；不认：确认它是旁白即可'
+                    '（**判读没被改动**，产物里仍是旁白）')
+        warnings.append(msg.format(n=len(suspect), sample=sample))
     if mark_generated:
         # ⚠ 形状必须与 `render_beats_to_rpy` **逐字节一致**（实测对齐一次就够了）：
         #
@@ -813,6 +842,37 @@ def convert_text(text: str, *, label: str = '', filename: str = '',
 _SUSPECT_SPEAKER_RE = re.compile(
     r'^\s*([^\s：:，。！？、,\.!?]{1,12})\s*[：:]\s*(\S.*)$')
 
+#: "短名字 + 引号 + 台词" —— 引号**必须成对，且闭引号之后只剩空白**。
+#:
+#: ⚠ 为什么不认"没闭合的引号"（`名字"台词` 一路写到行尾）：真机 5 章 1372 行里
+#: 这条形状**唯一**的命中是作者贴进正文的报错栈
+#: `File "C:\admin_script.py", line 24, in <module>` —— 那是句子里的引号，
+#: 不是台词。闭引号后面还有正文的（`突然"砰"的一声`）同理不算：真台词的
+#: 闭引号就是这一行的结尾（括号注释先剥掉，见 `_match_suspect_speaker`）。
+_QUOTED_SUSPECT_RE = re.compile(
+    r'^\s*([^\s“”":：]{1,16})\s*[“"](.*?)[”"]\s*$')
+
+
+def _match_suspect_speaker(raw: str):
+    """
+    一行旁白 → `(token, shape)`（`shape` ∈ `'colon'` / `'quote'`）；不像就 `None`。
+
+    两种形状**共用**同一道名字闸门 `_looks_like_a_speaker_name`，差别只在
+    "台词标记"本身：冒号是强标记；引号不是（中文旁白里到处是引号），所以引号
+    形状额外要求"闭引号就是行尾"，并先剥掉括号注释 —— `小明"好"（笑）` 里
+    说话人仍然是 `小明`。
+    """
+    m = _SUSPECT_SPEAKER_RE.match(raw)
+    if m:
+        return m.group(1).strip(), 'colon'
+    body, _comments = extract_brackets(raw)
+    m = _QUOTED_SUSPECT_RE.match(body.strip())
+    if m:
+        token, text = m.group(1).strip(), m.group(2).strip()
+        if token and text:
+            return token, 'quote'
+    return None
+
 
 def _suspect_speakers(parsed, chars) -> list:
     """
@@ -820,12 +880,19 @@ def _suspect_speakers(parsed, chars) -> list:
 
     判据保守（宁可少报，不可乱报）：
       · 该行被判成了 `narration`（已识别出来的说话人不用管）；
-      · 形如 `名字：内容` / `名字: 内容`；
-      · 名字 ≤ 12 个字符、不含空格与标点；
+      · 形如 `名字：内容` / `名字: 内容`，或 `名字"内容"`（引号成对且就是行尾）；
+      · 名字通过 `_looks_like_a_speaker_name`（≤6 字符、2–4 汉字或像变量名、
+        不含标点/数字开头、不含"说/曰/道…"这些**旁白味儿**的字）；
       · 名字**不在** id / 显示名 / 别名里。
 
-    ⚠ 返回值只用于**提示** —— 绝不因此改变这一行的判读
-    （`「旁白」：天亮了` 这类真的可能是旁白）。
+    ⚠ 引号形状是 2026-10-25 补的（审计 P1-C）：`小雨"你回来了。"` 原来会被
+    **静默**判成旁白 —— 台词失去说话人、`warnings`/`unmapped` 全空，用户回游戏
+    才发现全员旁白。补网之后它**照旧是旁白**（判读不改），但会进这里并被汇总成
+    一条人话警告（与冒号形状同口径 —— 提案写在回执里让人确认）。
+
+    ⚠ 返回值只用于**提示**，绝不改变判读
+    （`「旁白」：天亮了` 这类真的可能是旁白；`他说"你好"` 由"说"字闸门挡掉，
+    `我"…"` 由"2–4 个汉字"闸门挡掉）。
     """
     known = set()
     for attr in ('ids', 'names', 'aliases'):
@@ -845,14 +912,14 @@ def _suspect_speakers(parsed, chars) -> list:
         if getattr(line, 'kind', '') != 'narration':
             continue
         raw = str(getattr(line, 'raw', '') or '')
-        m = _SUSPECT_SPEAKER_RE.match(raw)
-        if not m:
+        hit = _match_suspect_speaker(raw)
+        if hit is None:
             continue
-        token = m.group(1).strip()
+        token, shape = hit
         if not _looks_like_a_speaker_name(token, known):
             continue
         out.append({'no': int(getattr(line, 'no', 0) or 0), 'token': token,
-                    'raw': raw[:80]})
+                    'shape': shape, 'raw': raw[:80]})
     return out
 
 
