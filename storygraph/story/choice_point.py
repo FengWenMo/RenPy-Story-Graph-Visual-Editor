@@ -211,8 +211,14 @@ def apply_choice_point(plan: ChoicePointPlan, project_root=None) -> dict:
 
     target = Path(plan.path)
     if plan.creates_file or not target.exists():
-        from storygraph.story.generation_guard import write_generation
-        text = f'{FILE_BANNER}\n\n{plan.block}'
+        from storygraph.story.generation_guard import (ensure_generator_marker,
+                                                       write_generation)
+        # **新文件必须带生成标记**（2026-10-25，审计 P1-3）：
+        # `FILE_BANNER` 只是一句人话，不含 `GENERATOR_MARKER` ——
+        # 于是这个文件在护栏眼里是"手写的"。今天没有流程会重写它，
+        # 但将来任何"重算选择点"走 `write_generation`，第一件事就是被
+        # `HANDWRITTEN_TARGET` 拒写（与 `control_takeover` 同一套做法）。
+        text = ensure_generator_marker(f'{FILE_BANNER}\n\n{plan.block}')
         try:
             art = write_generation(text, target, project_root=project_root)
         except Exception as exc:                     # noqa: BLE001
@@ -226,16 +232,40 @@ def apply_choice_point(plan: ChoicePointPlan, project_root=None) -> dict:
                     'error': f'门禁拦下了这份选择点文件（{why or "见产物"}）'}
         return {'ok': True, 'path': str(target), 'created': True, 'error': ''}
 
-    # —— 追加：保留原文件每一个字节，只在末尾接一段 ——
+    # —— 追加：按**原文件的载体风格**接一段（2026-10-25，审计 P0-1）——
+    #
+    # 从前是 `target.read_text(encoding='utf-8')` + `write_text_atomic(...)`：
+    # 裸读会把 CRLF 折成 LF、裸写就是 LF —— **整份文件的换行被静默改写**，
+    # 而用户只加了一个选择点。Windows 中文项目里 CRLF 是常态，
+    # `source_style` 的模块 docstring 记着同一类事故（tutorial 23/23 带 CRLF，
+    # 工具写出来是 LF，逐字节相同率 0/23）；BOM 同理会被丢掉。
+    # 追加路径是那一轮**漏网的一处**，现在与 `control_route` / `patcher`
+    # 走同一套：读时记住风格、写前 `style.apply` 还原。
+    #
+    # ⚠ 这里**不用** `source_style.read_text`（它 `errors='replace'`）：
+    # 追加是"读回来再写回去"，坏字节被替换成 `\ufffd` 就是**改坏用户文件**。
+    # 所以严格 UTF-8 解码，解不开就报错（见审计 P1-2 的第二条路）。
     from storygraph.story.paths import write_text_atomic
+    from storygraph.story.source_style import detect as _detect_style
     try:
-        old = target.read_text(encoding='utf-8')
+        raw_bytes = target.read_bytes()
+        old = raw_bytes.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        return {'ok': False, 'path': str(target), 'created': False,
+                'error': f'这个选择点文件不是 UTF-8（Ren\'Py 只认 UTF-8）：'
+                         f'{target}（第 {exc.start} 字节）。'
+                         f'先另存为 UTF-8 再插入。'}
     except OSError as exc:
         return {'ok': False, 'path': str(target), 'created': False,
                 'error': f'读不了已有的选择点文件：{exc}'}
+    style = _detect_style(target)
+    if old.startswith('\ufeff'):
+        old = old[1:]
+    old = old.replace('\r\n', '\n').replace('\r', '\n')
     sep = '' if old.endswith('\n\n') else ('\n' if old.endswith('\n') else '\n\n')
+    merged = old + sep + plan.block.replace('\r\n', '\n')
     try:
-        write_text_atomic(target, old + sep + plan.block)
+        write_text_atomic(target, style.apply(merged))
     except OSError as exc:
         return {'ok': False, 'path': str(target), 'created': False,
                 'error': f'写不进去：{exc}'}

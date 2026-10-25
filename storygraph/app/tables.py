@@ -343,6 +343,14 @@ def apply_export(result: dict, project_root=None) -> dict:
                            review_on_block=True, project_root=project_root,
                            merged_from_source=result.get('merged_from'),
                            source_text=source_text, source_path=src,
+                           # **引擎闸门**（2026-10-25，审计 P1-1）：
+                           # 同一个"表 → .rpy"的操作，CLI `table xlsx2rpy`、
+                           # `build`、卡片页导出全都过这道闸，只有界面这条路
+                           # 没传 —— 产物引擎读不了也照样写进 game/。
+                           # 这里与 `cli.py` / `session_export` 收口；
+                           # 项目声明过的自定义语句同样豁免（否则假阳性）。
+                           engine_lint=True,
+                           lint_ignore_heads=_declared_heads_near(src),
                            unmanaged_blocks=result.get('unmanaged_blocks'))
     out = dict(result)
     out['ok'] = bool(art.written)
@@ -355,6 +363,22 @@ def apply_export(result: dict, project_root=None) -> dict:
         out['error'] = (f'写不出去：{art.out_path}（{why}）' if why else
                         f'写不出去：{art.out_path}（检查文件是否被占用）')
     return out
+
+
+def _declared_heads_near(source_path) -> set:
+    """
+    这个项目声明过的自定义语句名（引擎闸门的**豁免清单**）。
+
+    与 `session_export._declared_stmt_heads` / `cli` 同一套判据：闸门在一个
+    最小工程里跑 lint，那里没有 `renpy.register_statement`，项目自己的
+    `mycue …` 会被报成语法错 —— 假阳性。拿不到清单就返回空集
+    （宁可严一点，不放过真错）。
+    """
+    try:
+        from storygraph.pipeline.engine_lint import declared_heads_near
+        return declared_heads_near(source_path)
+    except Exception:                              # noqa: BLE001
+        return set()
 
 
 def _with_image_ref_warnings(warnings, beats, registry) -> list:

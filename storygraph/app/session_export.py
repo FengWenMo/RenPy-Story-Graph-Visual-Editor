@@ -550,7 +550,17 @@ class ExportMixin:
         if not p:
             return None
         try:
-            return Path(p).read_text(encoding='utf-8')
+            # ⚠ **必须剥 BOM**（2026-10-25，审计 P0-2）：
+            # `Path.read_text` 会把开头的 `\ufeff` 留成正文第一个字符，
+            # 于是源文第一行是 `'\ufeff# 注释'`，而产物里 BOM 早已被
+            # `source_style.read_text` 剥掉 → `opaque_loss` 判"第 1 行顶层
+            # 语句没出现在产物里" → `OPAQUE_LOST`（block）→ **凡是带 BOM 的
+            # 章节，卡片页原地导出必然被拒**（Windows 中文项目极常见；
+            # 官方 tutorial 23/23 全带 BOM）。`pipeline/compile.py` 与
+            # `app/tables.py` 早就用 `source_style.read_text` 并留着注释，
+            # 这条同样的修法当初漏了这一处。
+            from storygraph.story.source_style import read_text as _read_src
+            return _read_src(p)[0]
         except (OSError, UnicodeDecodeError) as e:
             swallow('session_export._source_text_for_guard', e)
             return None

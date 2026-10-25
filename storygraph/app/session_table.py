@@ -325,10 +325,28 @@ class TableSessionMixin:
         `label` 只决定界面**先落到哪一拍**（同一个 .rpy 里可以有多个 label）。
         它不改变"载入整个文件"这件事 —— 导出、保存、变量分析仍然面对整个文件。
         找不到时由前端明确提示，并退回第 1 拍（`index_of_label()` 返回 -1）。
+
+        **不是 UTF-8 的文件直接报错**（2026-10-25，审计 P1-2）：从前解析器
+        解码失败 `return []` → 载入"成功"、拍数 0 → 界面一张空列表，
+        用户以为这一章是空的（探针实测：GBK 文件 0 拍、无任何提示）。
+        Ren'Py 只认 UTF-8，这件事必须说出口 —— 抛出去的异常前端会弹
+        「载入失败」并显示这句话（`window_card.load_script`）。
         """
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,
                                                      RenPyParser)
         path = Path(path)
+        try:
+            path.read_bytes().decode('utf-8-sig')
+        except UnicodeDecodeError as exc:
+            self.beats = []
+            self.script_path = path
+            raise ValueError(
+                f'这个文件不是 UTF-8（Ren\'Py 只认 UTF-8）：{path.name}'
+                f'（第 {exc.start} 字节起）。'
+                f'请用编辑器另存为「UTF-8」（不要 ANSI / GBK）再载入。'
+            ) from exc
+        except OSError:
+            pass                    # 读不了（权限 / 刚被删）→ 交给下面按老路报
         pr = ParseResultBuilder().build(RenPyParser().parse(str(path)))
         raw = beats_from_parse_result(pr)
         symbols = self.refresh_symbols()
