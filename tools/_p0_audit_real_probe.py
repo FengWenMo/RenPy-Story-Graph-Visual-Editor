@@ -153,21 +153,57 @@ def main():
         after = fp.read_bytes()
         bl = before.splitlines()
         al = after.splitlines()
-        changed = [i for i, (x, y) in enumerate(zip(bl, al)) if x != y]
-        # 改动必须且只能落在：生成标记（前 2 行）+ 改写的那一行
-        allowed = {0, 1}
-        ok = True
+        # —— 判据（2026-10-25 重写）——
+        # 老判据用"同索引比对 bl[i] vs al[i]"，可导出会往头部插 2 行生成标记
+        # （GENERATOR_MARKER + 空行），插入后**每一行索引都错位**，未碰的行
+        # 全被判成"意外改动"（8/12 假阳性）。改为**构造期望全文**：
+        #   期望 = [标记, 空行]（首行没有标记时才插）+ bl 里那一句台词被替换
+        # 一句话说清：只许插标记、只许改那一句，别的行一个字不动。
+        from storygraph.core.vocabulary import GENERATOR_MARKER
+        bl_edit = []
+        replaced = 0
+        for line in bl:
+            try:
+                text = line.decode('utf-8')
+            except UnicodeDecodeError:
+                bl_edit.append(line)
+                continue
+            if old_text and old_text in text:
+                # 行内局部替换：保留行的引号 / 说话人等其余字符
+                bl_edit.append(line.replace(
+                    old_text.encode('utf-8'), EDIT_TEXT.encode('utf-8')))
+                replaced += 1
+            else:
+                bl_edit.append(line)
+        had_marker = bool(bl) and bl[0].decode('utf-8', 'replace').strip() \
+            == GENERATOR_MARKER
+        # BOM 文件：read_text 剥 BOM、apply 把 BOM 加回**全文最前** ——
+        # 于是插标记后 BOM 落在标记行前，原文第一行的 BOM 消失
+        # （盘上仍只有一个 BOM，位置正确；期望要照这个构造）。
+        bom = b''
+        if before.startswith(b'\xef\xbb\xbf'):
+            bom = b'\xef\xbb\xbf'
+            if bl_edit:
+                bl_edit[0] = bl_edit[0][len(bom):]
+        if res.get('untouched'):
+            expected = list(bl)
+        elif had_marker:
+            expected = bl_edit
+        else:
+            expected = ([bom + GENERATOR_MARKER.encode('utf-8'), b'']
+                        + bl_edit)
+        ok = (al == expected)
         detail = ''
-        if len(al) != len(bl) + (0 if res.get('untouched') else 2):
-            # 行数变化只能是 +2（标记+空行）或 0
-            if not (len(al) == len(bl) + 2 or len(al) == len(bl)):
-                ok = False
-                detail = f'行数 {len(bl)}→{len(al)}'
-        stray = [i for i in changed if i not in allowed
-                 and EDIT_TEXT.encode('utf-8') not in al[i]]
-        if stray:
-            ok = False
-            detail += f' 意外改动行 {stray[:5]}'
+        if not ok:
+            if len(al) != len(expected):
+                detail = f'行数 {len(bl)}→{len(al)}（期望 {len(expected)}）'
+            for i in range(min(len(al), len(expected))):
+                if al[i] != expected[i]:
+                    detail += (f' 首个差异 L{i + 1}:'
+                               f' {al[i][:40]!r} != {expected[i][:40]!r}')
+                    break
+            if replaced != 1:
+                detail += f' 台词行命中 {replaced} 处（期望 1）'
         # 判据 D：重新解析，改动落进去了吗
         s2 = EditorSession(project_root=tmp)
         s2.load(fp)
@@ -177,11 +213,16 @@ def main():
             ok = False
             detail += ' 改动没落进重新解析的结果'
         print(f'  {"✓" if ok else "✗"} {fp.name}（{carrier(before)}，'
-              f'{loaded[fp]} 拍）改动行={changed} {detail}')
+              f'{loaded[fp]} 拍，标记={"有" if had_marker else "无"}）{detail}')
         if not ok:
             bad += 1
-            for i in changed[:6]:
-                print(f'      L{i + 1}: {bl[i][:70]!r} -> {al[i][:70]!r}')
+            for i in range(min(8, max(len(bl), len(al)))):
+                b = bl[i] if i < len(bl) else b'<none>'
+                a = al[i] if i < len(al) else b'<none>'
+                mark = '  ' if b == a else '→ '
+                print(f'      {mark}L{i + 1}: {b[:60]!r}')
+                if b != a:
+                    print(f'          {a[:60]!r}')
     print(f'\n阶段二异常：{bad}/{len(sample)}')
     # 收摊（默认删；要复查现场就 SG_KEEP=1 再跑）—— 不收摊会让
     # `test_disk_hygiene` 挂，也会在 TEMP 里堆出几个 GB
