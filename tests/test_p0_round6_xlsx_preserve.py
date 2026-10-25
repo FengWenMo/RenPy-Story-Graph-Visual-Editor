@@ -219,3 +219,32 @@ class TestRemovedCountIsHonest:
         assert len(res.removed_preview) == 2
         # 同一趟里"表比源码旧"也必须被说出来（指纹是直接证据）
         assert '比源码旧' in res.stale_note, res.stale_note
+
+
+class TestLegacyEnglishHeaders:
+    """
+    2026-10-07 之前生成的表，Beats 表头是**英文键**。
+
+    重建时只拿中文标签去比，那些列会被当成"用户自加的列" ——
+    同一个字段变成两列（中文 + 英文），`import_beats_from_excel`
+    取到的是空的那一列：**整章内容读回来是空的**。
+    """
+
+    def test_rebuild_does_not_duplicate_legacy_english_columns(self, tmp_path):
+        from storygraph.story.beat_fields import BEAT_HEADERS
+
+        ch, xlsx = _fixture(tmp_path)
+        wb = openpyxl.load_workbook(xlsx)
+        ws = wb['Beats']
+        invert = {v: k for k, v in BEAT_HEADERS.items()}
+        for cell in ws[1]:
+            if cell.value in invert:
+                cell.value = invert[cell.value]
+        before = len(list(ws[1]))
+        wb.save(xlsx)
+
+        open_rpy_as_table(ch, xlsx)
+        ws2 = openpyxl.load_workbook(xlsx)['Beats']
+        after = [str(c.value or '') for c in ws2[1]]
+        assert len(after) == before, f'列数变了：{before} → {len(after)}'
+        assert after.count('台词') == 1 and 'Text' not in after, after
