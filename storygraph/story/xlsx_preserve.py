@@ -703,3 +703,40 @@ def restore_extra_sheets(wb, snap: 'AssetSnapshot | None') -> int:
 def stash_asset_stats(**stats) -> None:
     global _LAST_ASSET_STATS
     _LAST_ASSET_STATS = dict(stats)
+
+
+# ----------------------------------------------------------------------
+#  5. 写盘失败要说人话（Excel 开着是最常见原因）
+# ----------------------------------------------------------------------
+
+def save_workbook(wb, path) -> None:
+    """
+    `wb.save(path)`，失败时把"Excel 把这个文件锁着"翻成人话。
+
+    为什么（2026-10-25）：资源表/剧本表都是**用户在 Excel 里开着**的文件。
+    `wb.save()` 在那种情况下抛 `PermissionError: [Errno 13] Permission denied:
+    '...xlsx'` —— 这句话对编剧没有任何信息量：他不知道是"文件被占用"、
+    "没权限"、还是"工具坏了"。而且这条路走的是"扫描资源 / 生成演出表"，
+    用户一天点十几次。
+
+    只包装消息，**异常类型不变**（`PermissionError` 仍是 `PermissionError`），
+    调用方既有的 `except OSError` 全部照旧有效。
+    """
+    try:
+        wb.save(path)
+    except OSError as exc:
+        raise type(exc)(_save_hint(exc, path)) from exc
+
+
+def _save_hint(exc, path) -> str:
+    p = Path(path)
+    base = f'写不进 {p.name}：'
+    if isinstance(exc, PermissionError):
+        return (base + '这个文件可能正被 Excel / WPS 打开着（也可能是只读或被别的'
+                       '程序占用）。关掉那个窗口再试一次 —— 表还在，一个字没动。')
+    text = str(exc)
+    if 'No space' in text or 'space' in text.lower():
+        return base + '磁盘满了。表还在，一个字没动。'
+    if 'Read-only' in text or 'readonly' in text.lower():
+        return base + '文件或目录是只读的。改成可写（或换一个位置）再试。'
+    return f'{base}{text}（表还在，一个字没动）'

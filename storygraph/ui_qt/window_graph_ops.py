@@ -564,6 +564,27 @@ class GraphOpsMixin:
                 f'\n        （没删！想救回去就把它改名回 `images.xlsx`；'
                 f'也可以从 `*.bak.xlsx` 恢复）'
                 f'；并按项目内容重建了一张表。')
+        # **重建覆盖了旧表 → 你手写的东西保住了多少要说出来**（P0-F）。
+        # 这条和剧本表那条（`window_export.generate_table`）同一个理由：
+        # 不说，用户下次就不敢往表里加自己的列和页了。
+        _kept = res.get('preserved') or {}
+        if _kept:
+            _bits = []
+            if _kept.get('columns'):
+                _bits.append(f'{_kept["columns"]} 列你自加的列')
+            if _kept.get('kept'):
+                _bits.append(f'{_kept["kept"]} 行你手写的行')
+            if _kept.get('sheets'):
+                _bits.append(f'{_kept["sheets"]} 张你自加的页')
+            if _kept.get('marks'):
+                _bits.append(f'{_kept["marks"]} 处底色/批注')
+            if _bits:
+                self._log('[资源] 重建资源表时保住了：' + '、'.join(_bits)
+                          + (f'（{_kept.get("table", "")}）'
+                             if _kept.get('table') else ''))
+            if _kept.get('dropped'):
+                self._log(f'[资源] 另有 {_kept["dropped"]} 行被删掉'
+                          f'（那些行记的文件确实不在磁盘上了）')
         if res.get('created'):
             cc = res.get('created_counts') or {}
             self._log(

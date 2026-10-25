@@ -10,6 +10,7 @@ storygraph.story.paths
 
 from __future__ import annotations
 import os
+from datetime import datetime
 import uuid
 from pathlib import Path
 
@@ -55,6 +56,21 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
             os.fsync(fh.fileno())
         if backup and target.exists():
             bak = target.with_name(target.name + '.bak')
+            # ⚠ **不覆盖已有 `.bak`**（2026-10-25，P1）：第一份备份通常是
+            # **用户手写的原始文件**，最值钱；而从前的写法是每次都重写同一个
+            # `名字.bak` —— 第二次覆盖写入之后，那个 `.bak` 变成"工具上一次的
+            # 产物"，原件就永久没了。`force` 覆盖手写文件时它是**唯一的安全网**，
+            # 不该被下一次导出悄悄换掉。
+            # 已有 `.bak` → 新备份带时间戳；只保留最近 5 份（含第一份）。
+            if bak.exists():
+                stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+                bak = target.with_name(f'{target.name}.bak-{stamp}')
+                try:
+                    olds = sorted(target.parent.glob(f'{target.name}.bak-*'))
+                    for extra in olds[:-4]:
+                        extra.unlink(missing_ok=True)
+                except OSError as e:               # noqa: BLE001 - 清理旧备份失败不影响写入
+                    swallow('story.paths.write_text_atomic.prune_bak', e)
             # 备份用二进制复制：**逐字节**保留原文（换行、BOM、编码都不动）
             btmp = bak.with_name(f'.{bak.name}{suffix}')
             try:

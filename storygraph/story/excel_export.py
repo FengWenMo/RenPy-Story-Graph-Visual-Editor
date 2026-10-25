@@ -423,7 +423,13 @@ def export_beats_to_excel(beats: list, output_path,
     _user_snap = None
     try:
         from storygraph.story.xlsx_preserve import snapshot_user_content
-        _user_snap = snapshot_user_content(output_path, tool_headers=headers)
+        # ⚠ **工具列要连英文名一起报上**（2026-10-25 第六轮）：
+        # 2026-10-07 之前生成的表，Beats 表头是英文键（`Text` / `Speaker`…）。
+        # 只拿中文标签去比，那些列会被当成"用户自加的列"，重建后**同一字段
+        # 出现两列**（中文 + 英文），读回来取到空的那一列 —— 行内容全丢。
+        _tool_names = list(headers) + [str(f) for f in BEAT_FIELDS]
+        _user_snap = snapshot_user_content(output_path,
+                                           tool_headers=_tool_names)
     except Exception as e:                     # noqa: BLE001 - 快照失败不该拦住出表
         from storygraph.core.safeguard import swallow as _swallow
         _swallow('excel_export.snapshot_user_content', e)
@@ -554,7 +560,8 @@ def export_beats_to_excel(beats: list, output_path,
     except Exception as e:                     # noqa: BLE001 - 见上面注释
         swallow('excel_export.restore_user_content', e)
 
-    wb.save(output_path)
+    from storygraph.story.xlsx_preserve import save_workbook
+    save_workbook(wb, output_path)     # 失败时说人话（Excel 开着是最常见原因）
     return output_path
 
 

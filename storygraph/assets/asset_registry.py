@@ -372,7 +372,7 @@ def write_dict_to_excel(file_path, data_dict: dict, field_order: list,
             ws.column_dimensions[col].hidden = True
     except Exception as e:                      # noqa: BLE001 - 隐藏失败不影响数据
         swallow('assets.asset_registry.write_dict_to_excel.hide_id', e)
-    wb.save(file_path)
+    _xp.save_workbook(wb, file_path)   # 失败时说人话（Excel 开着是最常见原因）
 
 
 def _last_asset_preserved() -> dict:
@@ -1946,7 +1946,12 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
             ws = wb.active
             headers = [k for k in rows[0].keys()
                        if k and not str(k).startswith('_')]
-            ws.append(headers)
+            # **新建表也写中文表头**（2026-10-25，P1：与 `write_dict_to_excel`
+            # 统一）。从前这里写英文键，于是"哪条路径建的表"决定了表头是中是英 ——
+            # 同一批表里两种表头，用户看着像坏了；更糟的是**判定口径**也得
+            # 两套（中文标签比 vs 英文键比），这正是本轮三个坑的共同根因。
+            # 值仍按**规范键**取（`headers` 是英文键，`row.get(h)` 不变）。
+            ws.append([ASSET_FIELD_LABELS.get(h, h) for h in headers])
             seen = set(skip_paths or ())
             for row in rows:
                 rp = norm_asset_path(row.get('Path'))

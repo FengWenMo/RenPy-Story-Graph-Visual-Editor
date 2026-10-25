@@ -202,3 +202,52 @@ class TestRenamedIdColumnStillKeepsValues:
         header = [str(c.value or '') for c in ws2[1]]
         assert '配音演员' in header
         assert ws2.cell(row=2, column=header.index('配音演员') + 1).value == '小林'
+
+
+class TestSaveErrorIsHumanReadable:
+    """写不进去时要说人话（Excel 开着是最常见原因），且**异常类型不变**。"""
+
+    def test_permission_error_mentions_excel_and_keeps_type(self, tmp_path):
+        from storygraph.story.xlsx_preserve import save_workbook
+
+        class Boom:
+            def save(self, path):
+                raise PermissionError(13, 'Permission denied', str(path))
+
+        with pytest.raises(PermissionError) as ei:
+            save_workbook(Boom(), tmp_path / 'images.xlsx')
+        msg = str(ei.value)
+        assert 'Excel' in msg and '一个字没动' in msg
+
+    def test_disk_full_and_readonly_also_get_a_hint(self, tmp_path):
+        from storygraph.story.xlsx_preserve import _save_hint
+        assert '磁盘满' in _save_hint(OSError('No space left on device'),
+                                     tmp_path / 'a.xlsx')
+        assert '只读' in _save_hint(OSError('Read-only file system'),
+                                    tmp_path / 'a.xlsx')
+
+
+class TestBackupNeverEatsTheOriginal:
+    """
+    `write_text_atomic(backup=True)` 从前每次都重写同一个 `名字.bak`。
+
+    后果：`force` 覆盖手写文件 → `.bak` = 原件；**下一次**覆盖写入 →
+    `.bak` 被换成"工具上一次的产物"，**原件永久没了**。
+    而 force 覆盖时它是唯一的安全网。
+    """
+
+    def test_second_write_does_not_clobber_the_first_backup(self, tmp_path):
+        from storygraph.story.paths import write_text_atomic
+        target = tmp_path / 'ch1.rpy'
+        target.write_text('原始（人写的）\n', encoding='utf-8')
+
+        write_text_atomic(target, '第一次生成\n', backup=True)
+        first_bak = tmp_path / 'ch1.rpy.bak'
+        assert first_bak.read_text(encoding='utf-8') == '原始（人写的）\n'
+
+        write_text_atomic(target, '第二次生成\n', backup=True)
+        # 第一份备份**一个字都不许变**
+        assert first_bak.read_text(encoding='utf-8') == '原始（人写的）\n', \
+            '第一份备份（原件）被覆盖了'
+        # 第二次的备份另有文件
+        assert list(tmp_path.glob('ch1.rpy.bak-*')), '第二次没有留下备份'
