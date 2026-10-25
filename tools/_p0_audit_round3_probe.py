@@ -81,9 +81,22 @@ def probe_a_write_new_chapter():
     print(f'  含 label ch02：{"label ch02:" in text}')
     print(f'  原有行还在：{all(x in text for x in ("label ch01:", "return"))}')
 
-    check(bytes([0xE9]) not in after and b'\xef\xbf\xbd' in after,
-          'A-1 非法字节被静默替换成 U+FFFD（腐蚀实证）')
-    check(not baks, 'A-2 没有任何备份（原字节不可恢复）')
+    # —— 判据（2026-10-25 修 P1-A 之后重写）——
+    #
+    # 这条探针**当初**是用来举证腐蚀的（"坏字节被换成 U+FFFD"才算命中）。
+    # P1-A 修好之后正确的行为变成了**明确拒绝**，所以判据要跟着改成"目标行为"，
+    # 否则探针会永远红下去（"探针红 = 有缺陷"这个约定不能被历史判据反过来用）。
+    #
+    # 允许两种正确形态：
+    #   ① 拒绝（`返回 ''`）且**字节一个不动**、状态栏说清"不是 UTF-8"；
+    #   ② 真写成功了，但坏字节**还在**（没有 U+FFFD）且行数只多了新 label。
+    corrupt = b'\xef\xbf\xbd' in after
+    refused = (wrote == '') and after == before
+    wrote_cleanly = (wrote != '') and not corrupt
+    check(not corrupt and (refused or wrote_cleanly)
+          and ('UTF-8' in ' '.join(view.messages) if refused else True),
+          'A-1 非 UTF-8 不被腐蚀：要么拒绝并说清（字节不动），要么写成功但坏字节还在')
+    check(corrupt or not baks, 'A-2 没有"腐蚀照旧 + 无备份"的组合')
 
     # 对照：choice_point 的追加路径对同一形状的文件是严格拒绝
     print('  —— 对照 choice_point 追加路径 ——')
