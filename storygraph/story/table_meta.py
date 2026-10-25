@@ -50,11 +50,38 @@ META_HEADER = ('项', '值')
 KEY_SOURCE = '来源文件'
 KEY_CREATED = '生成于'
 KEY_TOOL = '工具'
+#: 摊表那一刻源 `.rpy` 的**内容指纹**（sha1，见 `fingerprint_of`）。
+#:
+#: 为什么必须记（2026-10-25 第六轮，P1「表过期只丢非台词行」）：
+#:   "表比源码旧"从前只能靠**间接证据**猜 —— 补丁发现"源里有台词被删"才
+#:   怀疑过期（2026-10-21 那条守卫）。而"只丢了 `$ flag = True` 这种行"
+#:   时没有台词被删，守卫不响，于是无从判断"是表旧了"还是"用户清空了那格"。
+#:   记下指纹之后，这件事有了**直接证据**：指纹对不上 = 源码在这张表之后
+#:   被改过 → 那次删除很可能是丢别人的行，而不是用户有意清空。
+KEY_SHA1 = '来源指纹'
 
 TOOL_NAME = "Renpy_Story_Graph_Editor"
 
 
-def write_meta(wb, *, source_file='', created: str = '') -> None:
+def fingerprint_of(path) -> str:
+    """
+    源文件的**内容指纹**：`sha1(原始字节)` 的前 16 位十六进制。
+
+    为什么是字节而不是"规范化后的文本"：这张表将来可能被搬到别的机器、
+    被 git 换行归一（`core.autocrlf`），而"源文件到底变没变"问的是
+    盘上那份字节。指纹只用来判"变没变"，不参与任何还原 —— 所以
+    CRLF/LF 差异导致的"变了"是**保守方向**（宁可多报一次"表旧了"）。
+    """
+    try:
+        import hashlib
+        data = Path(path).read_bytes()
+    except OSError:
+        return ''
+    return hashlib.sha1(data).hexdigest()[:16]
+
+
+def write_meta(wb, *, source_file='', created: str = '',
+               source_sha1: str = '') -> None:
     """
     往工作簿里写一张隐藏的「表信息」。
 
@@ -78,6 +105,8 @@ def write_meta(wb, *, source_file='', created: str = '') -> None:
     ws.append([KEY_CREATED, created or datetime.now().isoformat(
         timespec='seconds')])
     ws.append([KEY_TOOL, TOOL_NAME])
+    if source_sha1:
+        ws.append([KEY_SHA1, str(source_sha1)])
     ws.column_dimensions['A'].width = 12
     ws.column_dimensions['B'].width = 90
     # 整张隐藏：它是工具维护的搬运工，不是给人编辑的界面。
@@ -160,4 +189,33 @@ def source_of(table_path) -> 'Path | None':
 
 
 __all__ = ['META_SHEET', 'META_HEADER', 'KEY_SOURCE', 'KEY_CREATED',
-           'KEY_TOOL', 'read_meta', 'source_of', 'write_meta']
+           'KEY_SHA1', 'KEY_TOOL', 'fingerprint_of', 'read_meta', 'source_of',
+           'staleness_note', 'write_meta']
+
+
+def staleness_note(table_path, source_path, removed_count: int = 0) -> str:
+    """
+    这张表**比源码旧**吗？旧就返回一句人话（否则空串）。
+
+    只在"这次导出要删掉源里的行"时才说话（`removed_count > 0`）：
+    没有删除就无所谓新旧 —— 说了也只是噪音。
+
+    判据是**直接证据**（摊表时记下的内容指纹 vs 现在的字节），
+    不是"补丁发现台词对不上"那种间接推理：
+    所以它能把"表旧了、丢掉的是别人刚写的行"与"用户自己清空了这一格"
+    分开说 —— 前者该重新载入，后者本来就是他的意思。
+    """
+    if int(removed_count or 0) <= 0:
+        return ''
+    if not source_path:
+        return ''
+    meta = read_meta(table_path)
+    stamp = meta.get(KEY_SHA1, '')
+    if not stamp:
+        return ''                    # 老表（没有指纹）：不猜，交给回执的删行清单
+    now = fingerprint_of(source_path)
+    if not now or now == stamp:
+        return ''
+    return ('；**这张表比源码旧**（源码在摊表之后又被改过）：这次删掉的那几行'
+            '很可能是别人刚写的，不是你清空的。先把这一章重新载入'
+            '（表会拿到新行）再导出。')

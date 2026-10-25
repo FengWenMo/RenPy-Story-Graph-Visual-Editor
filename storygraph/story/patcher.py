@@ -698,7 +698,15 @@ _MENU_HEAD_RE = re.compile(r'^menu\b')
 _FLOW_START_RE = re.compile(r'^(?:call|jump)\b')
 
 #: `label 名(参数)…:` 这一行（`label_header` 的参数表要一起保住）。
-_LABEL_LINE_RE = re.compile(r'^(\s*)label\s+([A-Za-z_]\w*)(.*)$')
+#:
+#: ⚠ 名字里**允许点号**（2026-10-25 第六轮）：Ren'Py 的 `label main.route:`
+#: 完全合法，而且**本工具自己**在"新建 label"的对话框里就示范了这种写法
+#: （`ui_qt/window_nodes.py`：'新 label 名（可以用点号，如 main.route）'）。
+#: 从前这里是 `[A-Za-z_]\w*` —— `\w` 不含点，于是 `label main.route:` 不被
+#: 认成 label 行，补丁按"正文"去对位，整章一句都对不上 → 导出被拒
+#: （探针 `tools/_p0_audit_round6_bisect.py`：点号 label 100% 失败）。
+#: `pipeline/statement_probe.py` 早就是 `[A-Za-z_][\w.]*` 的正确写法。
+_LABEL_LINE_RE = re.compile(r'^(\s*)label\s+([A-Za-z_][\w.]*)(.*)$')
 
 
 
@@ -4055,7 +4063,17 @@ def patch_export(beats: list, source_path, generated_text: str,
                        inserted_lines=inserted_lines,
                        inserted_beats=len(st.insert_ids),
                        removed_lines=removed_lines,
-                       removed_count=(removed_lines + shrunk_total),
+                       # ⚠ **两个来源都要算**（2026-10-25 第六轮）：
+                       # `removed_lines` = 整拍/整段被删的行（`_apply_sequence_edits`）；
+                       # `st.shrunk_total` = **拍内跟着删掉**的行（清掉一格的
+                       # show / 表里没有的 `$ x = 1`）。
+                       # 从前这里写的是模块级的 `shrunk_total` —— 那个变量在
+                       # `patch_export` 里只初始化、从不累加（真正的累加在
+                       # `st.shrunk_total`），于是第二类永远算 0：
+                       # 预览里明明有 2 行、`removed_count` 却是 0
+                       # （回执靠 `removal_note` 的"预览兜底"才凑巧说对，
+                       # 而任何只看 count 的判据——比如"表比源码旧"—都静默失效）。
+                       removed_count=(removed_lines + st.shrunk_total),
                        removed_preview=tuple(removed_preview),
                        grown_lines=st.grown_total,
                        shrunk_lines=st.shrunk_total,

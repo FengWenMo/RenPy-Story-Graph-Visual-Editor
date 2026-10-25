@@ -136,6 +136,9 @@ class ChoicePointPlan:
     from_clause: str = ''
     #: 这个文件是新建还是追加
     creates_file: bool = True
+    #: 这一章自己的 `.rpy`（新建选择点文件时**跟随它的载体风格**：
+    #: 全 CRLF 的项目里多一个 LF 文件，git diff / 编辑器都会看着别扭）。
+    chapter_path: str = ''
     #: 不能做的原因（空 = 能做）
     blocking: list = field(default_factory=list)
     notes: list = field(default_factory=list)
@@ -146,6 +149,7 @@ class ChoicePointPlan:
             'block': self.block, 'call_line': self.call_line,
             'from_clause': self.from_clause,
             'creates_file': self.creates_file,
+            'chapter_path': self.chapter_path,
             'blocking': list(self.blocking), 'notes': list(self.notes),
         }
 
@@ -167,6 +171,7 @@ def plan_choice_point(project_root, chapter_path, chapter_label,
     plan = ChoicePointPlan()
     root = Path(str(project_root or '.'))
     ch = Path(str(chapter_path or ''))
+    plan.chapter_path = str(ch)
     label_root = str(chapter_label or '').strip()
 
     if not ch.is_file():
@@ -175,9 +180,13 @@ def plan_choice_point(project_root, chapter_path, chapter_label,
     if not label_root:
         plan.blocking.append('这一章还没有 label 名，没法生成选择点')
         return plan
-    if not re.fullmatch(r'[A-Za-z_][\w]*', label_root):
+    if not re.fullmatch(r'[A-Za-z_][\w]*(?:\.[\w]+)*', label_root):
         # 中文 label 在 Ren'Py 里其实合法，但拼 `_choice_N` 之后要能过 lint；
         # 保守起见只允许 ASCII 起始 —— 不行就让用户先改 label 名。
+        # ⚠ **点号要放过**（2026-10-25 第六轮）：`label main.route:` 合法，
+        # 拼出来 `main.route_choice_1` 也合法；从前这里 `[A-Za-z_][\w]*`
+        # 把点号挡掉了，于是"点了选择点、什么都没发生"（工具自己还示范点号
+        # 写法，见 `ui_qt/window_nodes.py` 的新建 label 对话框）。
         plan.blocking.append(
             f'章节 label「{label_root}」不适合当选择点前缀（要字母或下划线开头）')
         return plan
@@ -222,7 +231,10 @@ def apply_choice_point(plan: ChoicePointPlan, project_root=None) -> dict:
         # `HANDWRITTEN_TARGET` 拒写（与 `control_takeover` 同一套做法）。
         text = ensure_generator_marker(f'{FILE_BANNER}\n\n{plan.block}')
         try:
-            art = write_generation(text, target, project_root=project_root)
+            # `source_path=这一章` → 新建文件**跟随章节的载体风格**（BOM/CRLF）。
+            # 不传就是 LF：一个全 CRLF 的项目里平白多出一个 LF 文件。
+            art = write_generation(text, target, project_root=project_root,
+                                   source_path=(plan.chapter_path or None))
         except Exception as exc:                     # noqa: BLE001
             return {'ok': False, 'path': str(target), 'created': False,
                     'error': str(exc)}

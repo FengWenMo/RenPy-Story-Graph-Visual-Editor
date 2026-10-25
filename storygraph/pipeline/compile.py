@@ -67,6 +67,12 @@ class CompileResult:
     patch_attempted: bool = False
     #: 增量真正改动的行数（全量时恒 0）
     changed_lines: int = 0
+    #: **这张表比源码旧**时的一句话（2026-10-25 第六轮）。
+    #:
+    #: 判据是摊表时记进隐藏表的"来源指纹"（`table_meta.staleness_note`）：
+    #: 指纹对不上 = 源码在那之后被改过 → 这次删掉的行走很可能是别人的。
+    #: 只在"确实要删行"时才有内容（没删就无所谓新旧）。
+    stale_note: str = ''
     #: 输入表里一行都没有（`skip_empty=True` 时由调用方据此给退出码）
     empty: bool = False
     #: **读表时被清洗过的单元格数**（值里的换行/制表符被压成空格）。
@@ -130,6 +136,8 @@ class CompileResult:
             text += (f"\n增量补丁：只改了 {self.changed_lines} 行，"
                      f"原文其余部分（含 default / init python / transform）"
                      f"逐字节保留" + _removal_note(self))
+            if self.stale_note:
+                text += self.stale_note
         elif self.patch_attempted and not self.used_patch:
             text += f"\n增量未采用（{self.patch_note}）"
         if self.guard_issues:
@@ -615,6 +623,14 @@ def compile_table(table_path, rpy_path=None, registry=None,
     result = compile_beats(beats, registry=registry, label_name=label_name)
     write_compiled(result, rpy_path, beats=beats, source_path=source_path,
                    registry=registry, force=force, engine_lint=engine_lint)
+    # **表比源码旧？**（2026-10-25 第六轮）—— 只在这次真要删行时才值得说
+    try:
+        from storygraph.story.table_meta import staleness_note as _stale
+        result.stale_note = _stale(table_path, source_path,
+                                   getattr(result, 'removed_count', 0))
+    except Exception as e:                     # noqa: BLE001 - 元信息不该拦住导出
+        from storygraph.core.safeguard import swallow as _swallow
+        _swallow('pipeline.compile.staleness_note', e)
 
     sheet = None
     if write_sheet:
