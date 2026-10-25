@@ -344,7 +344,9 @@ def _cmd_table(args) -> int:
             try:
                 from storygraph.story.excel_export import last_preserve_stats
                 kept = last_preserve_stats()
-            except Exception:                 # noqa: BLE001 - 回执拿不到不影响出表
+            except Exception as e:            # noqa: BLE001 - 回执拿不到不影响出表
+                from storygraph.core.safeguard import swallow as _sw
+                _sw('cli.table.rpy2xlsx.preserve_stats', e)
                 kept = {}
             if kept:
                 bits = []

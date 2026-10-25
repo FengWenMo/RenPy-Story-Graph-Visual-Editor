@@ -55,6 +55,9 @@ TOOL_SHEETS = frozenset({
     '词表',
     '使用说明',
     '表信息',
+    # 协作层（`collab pull` 自己会重写它）：不当"用户的页"搬运，
+    # 否则每次 pull 都要把这张表整份复制一遍再删掉。
+    '协作信息',
 })
 
 #: 候选表前缀（`Candidates_角色` / `Candidates_图片` …）—— 同样由工具重建。
@@ -62,6 +65,11 @@ CANDIDATE_PREFIX = 'Candidates_'
 
 #: Beats 页里"行身份"那一列的表头（`beat_fields` 里 `LineId` 的 header）。
 LINE_ID_HEADER = '行号'
+
+
+def _norm_path(value) -> str:
+    text = str(value or '').strip().replace('\\', '/')
+    return text.lstrip('./').lower()
 
 
 def is_tool_sheet(name) -> bool:
@@ -373,7 +381,8 @@ def _cell_mark(cell):
         return {'fill': rgb if has_fill else '',
                 'font': copy(font) if has_font else None,
                 'comment': copy(cell.comment) if cell.comment else None}
-    except Exception:                           # noqa: BLE001 - 判不了就当没痕迹
+    except Exception as e:                      # noqa: BLE001 - 判不了就当没痕迹
+        swallow('story.xlsx_preserve.asset.cell_mark', e)
         return None
 
 
@@ -444,3 +453,245 @@ def _restore_row_formats(ws, row_formats) -> int:
             except Exception as e:             # noqa: BLE001 - 一格挂不上不影响别的
                 swallow('story.xlsx_preserve.restore.row_format', e)
     return applied
+
+
+# ----------------------------------------------------------------------
+#  4. 平铺表（资源表 / 角色表 / 变换表）：按 ID 保住人的东西
+# ----------------------------------------------------------------------
+#
+#  为什么单独一套（P0-F，2026-10-25 第六轮下半）：
+#  `write_asset_excel()` 用 `write_dict_to_excel` **整份重建**四张资源表
+#  （images / music / sounds / voices）。代码自己的 docstring 就记着代价：
+#  "2828 行会掉到 349 行"。而这些表是策划维护的主数据 ——
+#  自加的列（`配音演员` / `审核`）、自加的页、格子上的颜色批注、
+#  手写的行（还没有素材的立绘、临时占位），一次「扫描资源」全没。
+#
+#  与剧本表（Beats）的差别：这里的行身份是 **`编号`(ID)**，不是 `LineId`；
+#  而且"行该不该留"多一条判据：**记了真实文件、文件又真的不在了** → 删
+#  （那是表在跟随磁盘）；**没记文件**（人写的占位）→ 留。
+
+@dataclass
+class AssetSnapshot:
+    """一张平铺资源表的"人的东西"。"""
+
+    #: 旧表表头（含人的列），按原顺序
+    headers: list = field(default_factory=list)
+    #: 旧表的行：`[{表头: 值}]`，按行序（含没有 ID 的行）
+    rows: list = field(default_factory=list)
+    #: 不在工具列里的表头（人自加的列）
+    user_headers: list = field(default_factory=list)
+    #: 人标过的格子：`{ID: {表头: {'fill'/'font'/'comment'}}}`
+    marks: dict = field(default_factory=dict)
+    #: 额外的工作表（工具只写第一张，其余都是人的）
+    sheets: list = field(default_factory=list)
+    #: 这次扫描没有产出、但按判据该留下的行 / 该删掉的行数
+    kept_rows: list = field(default_factory=list)
+    dropped_rows: int = 0
+    #: 认不出身份列（`编号`）—— 行只能按 `真实文件` 对，不能按 ID 对
+    id_missing: bool = False
+
+    def user_values(self, asset_id, path=None) -> dict:
+        """
+        这一行的人在自加列里填的值：**先按 ID，再按 `真实文件`**。
+
+        为什么要有路径这一档：用户把「编号」列改名之后，ID 对不上，
+        但"这个文件的配音演员是谁"仍然跟着**文件**走 —— 只要路径还在，
+        人的数据就不该丢。
+        """
+        key = str(asset_id or '')
+        if key and not self.id_missing:
+            for row in self.rows:
+                if str(row.get(self.id_header, '') or '') == key:
+                    return {h: row.get(h, '') for h in self.user_headers}
+        want = _norm_path(path)
+        if want:
+            for row in self.rows:
+                if _norm_path(row.get(self.path_header, '')) == want:
+                    return {h: row.get(h, '') for h in self.user_headers}
+        return {}
+
+    #: 由 `snapshot_asset_table` 填（`编号` / `编号` 的英文键）
+    id_header: str = '编号'
+    path_header: str = '真实文件'
+
+
+#: 最近一次资源表写入"保住了什么"（给回执用，与 `last_preserve_stats` 同型）
+_LAST_ASSET_STATS: dict = {}
+
+
+def last_asset_stats() -> dict:
+    return dict(_LAST_ASSET_STATS)
+
+
+def snapshot_asset_table(table_path, tool_headers,
+                         id_header: str = '编号',
+                         path_header: str = '真实文件') -> 'AssetSnapshot | None':
+    """
+    读一张平铺资源表 → `AssetSnapshot`。读不出来返回 None（调用方退回老行为）。
+    """
+    p = Path(table_path)
+    if not p.is_file():
+        return None
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(p, data_only=False)
+    except Exception as e:                     # noqa: BLE001
+        swallow('story.xlsx_preserve.asset.open', e)
+        return None
+
+    snap = AssetSnapshot(id_header=id_header, path_header=path_header)
+    try:
+        ws = wb.worksheets[0] if wb.worksheets else None
+        if ws is None:
+            return snap
+        header_row = next(ws.iter_rows(min_row=1, max_row=1), ())
+        snap.headers = [str(c.value or '').strip() for c in header_row]
+        known = {str(h or '') for h in (tool_headers or ())}
+        snap.user_headers = [h for h in snap.headers if h and h not in known]
+        # 认不出身份列（用户把「编号」改名/删了）**不等于整张表没人的东西**：
+        # 自加的页、自加的列、列里的值都还在（后者按 `真实文件` 对行）。
+        snap.id_missing = id_header not in snap.headers
+
+        blanks = 0
+        for r in range(2, min(int(ws.max_row or 0), 2 + 200000) + 1):
+            values = {}
+            any_value = False
+            for c, header in enumerate(snap.headers, start=1):
+                if not header:
+                    continue
+                cell = ws.cell(row=r, column=c)
+                values[header] = cell.value
+                if cell.value not in (None, ''):
+                    any_value = True
+                    mark = _cell_mark(cell)
+                    if mark:
+                        aid = str(values.get(id_header) or '').strip()
+                        if aid:
+                            snap.marks.setdefault(aid, {})[header] = mark
+            if not any_value:
+                blanks += 1
+                if blanks >= 200:
+                    break
+                continue
+            blanks = 0
+            snap.rows.append(values)
+
+        # 额外的工作表（工具只写第一张）
+        for name in wb.sheetnames[1:]:
+            snap.sheets.append(_snapshot_sheet(wb[name], name))
+    finally:
+        try:
+            wb.close()
+        except Exception as e:                 # noqa: BLE001
+            swallow('story.xlsx_preserve.asset.close', e)
+    return snap
+
+
+def plan_kept_rows(snap: 'AssetSnapshot | None', known_ids,
+                   base_dir=None) -> tuple:
+    """
+    旧表里**这次扫描没产出**的行，按三条判据分拣 → `(要留下的, 要删掉的行数)`。
+
+      · 没 ID、但有别的字 → 留（那是人写的一行备注 / 草稿）；
+      · 有 ID、没记真实文件 → 留（人写的占位："这个立绘还没画"）；
+      · 有 ID、记了文件、**文件还在** → 留（扫描没扫到它，不代表它不存在）；
+      · 有 ID、记了文件、**文件真的不在了** → 删（表在跟随磁盘，这是它的职责）。
+
+    第 4 条是唯一会删的分支，而且只删"证据确凿"的：路径解析得到、`is_file()`
+    为假。`Path.exists()` 抛异常（权限 / 路径过长）一律当"还在"，宁可留一行
+    也不删错。
+    """
+    if snap is None:
+        return [], 0
+    known = {str(x or '').strip() for x in (known_ids or ())}
+    keep, dropped = [], 0
+    base = Path(base_dir) if base_dir else None
+    for row in snap.rows:
+        aid = str(row.get(snap.id_header, '') or '').strip()
+        if aid and aid in known:
+            continue                            # 这次写过了
+        path_text = str(row.get(snap.path_header, '') or '').strip()
+        if not path_text:
+            keep.append(row)                    # 没记文件：人写的，留着
+            continue
+        p = Path(path_text)
+        if not p.is_absolute() and base is not None:
+            p = base / p
+        try:
+            alive = p.is_file()
+        except OSError:                         # 判不了就当还在（宁可多留）
+            alive = True
+        if alive:
+            keep.append(row)
+        else:
+            dropped += 1
+    return keep, dropped
+
+
+def restore_asset_marks(ws, snap: 'AssetSnapshot | None', row_of: dict,
+                        id_header: str = '编号') -> int:
+    """按 ID 把底色 / 字色 / 批注铺回新表，返回铺了几格。"""
+    if snap is None or not snap.marks or not row_of:
+        return 0
+    from openpyxl.styles import PatternFill
+    header = [str(c.value or '').strip() for c in ws[1]]
+    col_of = {name: i + 1 for i, name in enumerate(header) if name}
+    applied = 0
+    for aid, marks in snap.marks.items():
+        row = row_of.get(str(aid))
+        if not row:
+            continue
+        for name, mark in marks.items():
+            col = col_of.get(name)
+            if not col:
+                continue
+            cell = ws.cell(row=row, column=col)
+            try:
+                if mark.get('fill'):
+                    cell.fill = PatternFill('solid', fgColor=mark['fill'])
+                if mark.get('font') is not None:
+                    cell.font = copy(mark['font'])
+                if mark.get('comment') is not None:
+                    cell.comment = copy(mark['comment'])
+                applied += 1
+            except Exception as e:             # noqa: BLE001
+                swallow('story.xlsx_preserve.asset.mark', e)
+    return applied
+
+
+def restore_extra_sheets(wb, snap: 'AssetSnapshot | None') -> int:
+    """把人的额外工作表带进新工作簿，返回带了几张。"""
+    if snap is None or not snap.sheets:
+        return 0
+    n = 0
+    for sheet in snap.sheets:
+        try:
+            ws = wb.create_sheet(sheet.name)
+        except Exception as e:                 # noqa: BLE001
+            swallow('story.xlsx_preserve.asset.sheet', e)
+            continue
+        for row, col, value, style, comment in sheet.cells:
+            cell = ws.cell(row=row, column=col, value=value)
+            if style is not None:
+                cell._style = copy(style)
+            if comment is not None:
+                cell.comment = copy(comment)
+        for letter, width in sheet.widths.items():
+            try:
+                ws.column_dimensions[letter].width = width
+            except Exception as e:             # noqa: BLE001
+                swallow('story.xlsx_preserve.asset.sheet_width', e)
+        for rng in sheet.merged:
+            try:
+                ws.merge_cells(rng)
+            except Exception as e:             # noqa: BLE001
+                swallow('story.xlsx_preserve.asset.sheet_merge', e)
+        if sheet.freeze:
+            ws.freeze_panes = sheet.freeze
+        n += 1
+    return n
+
+
+def stash_asset_stats(**stats) -> None:
+    global _LAST_ASSET_STATS
+    _LAST_ASSET_STATS = dict(stats)

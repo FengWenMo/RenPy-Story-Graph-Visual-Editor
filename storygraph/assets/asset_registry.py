@@ -246,7 +246,8 @@ def read_excel_rows(file_path) -> list:
 
 
 
-def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
+def write_dict_to_excel(file_path, data_dict: dict, field_order: list,
+                        *, preserve: bool = True):
     """
     将 {id: row_dict} 写入 Excel。
 
@@ -258,15 +259,108 @@ def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
     那个工具内部用的东西，已经藏起来就不需要换位"）→ 这里改为**把 `ID` 列隐藏**：
     策划看到的第一列就是 `真实文件`，效果与"换位"一样，但**零风险**
     （隐藏列 openpyxl 照旧读得到，改名/删行/搜索都不受影响）。
+
+    ⚠ **覆盖已有表时，人的东西必须带走**（P0-F，2026-10-25 第六轮下半）：
+
+      这个函数是**整份新建再 save**，而它是资源表的唯一写入口
+      （「扫描资源」→ `write_asset_excel` → 这里）。代码自己的 docstring 早就
+      记着代价："2828 行会掉到 349 行"。一次扫描就把策划维护的东西全抹掉：
+
+        · 自加的**列**（`配音演员` / `审核` / `翻译状态`）；
+        · 自加的**页**（`分类说明` / `排期`）；
+        · 格子上的**底色 / 批注**（"这张要重画"）；
+        · **手写的行**（还没画出来的立绘、临时占位）。
+
+      现在的判据（`story.xlsx_preserve.plan_kept_rows`）：
+        没 ID 的备注行 → 留；有 ID 没记文件 → 留（人写的占位）；
+        记了文件且文件还在 → 留；**记了文件但文件真的不在了 → 删**（表跟随磁盘）。
+
+      `preserve=False` 只给"确定要一张干净表"的调用方（目前没有）。
     """
     file_path = Path(file_path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
+    from storygraph.story import xlsx_preserve as _xp
+    snap = None
+    if preserve and file_path.is_file():
+        # `tool_headers=[]`：先**把旧表所有表头原样拿回来**，再由下面按
+        # "规范键"决定哪些是工具列、哪些是人的列。
+        #
+        # ⚠ 为什么不能直接拿中文标签去比（2026-10-25 实测踩到）：
+        # 老表（`_persist_definitions` 造的）表头是**英文键**
+        # （`ID` / `Name` / `Color`…）。用中文标签 `编号`/`显示名` 去比，
+        # 那 6 个英文列全被判成"人的列"，于是新表变成
+        # `编号, 显示名, ID, Name, Color, …` —— **同一个字段两列**，
+        # 读回来时 `ID` 取到的是空的那一列，行身份全丢
+        # （`test_end_to_end_rename_reaches_script`：改名推断直接失效）。
+        snap = _xp.snapshot_asset_table(file_path, [],
+                                        id_header=ASSET_FIELD_LABELS.get('ID', 'ID'),
+                                        path_header=ASSET_FIELD_LABELS.get('Path', 'Path'))
+
+    # —— 每一列用哪个表头文本 ——
+    # 旧表里已经有这个字段（按规范键比）→ **沿用旧表头原文**（不制造表头漂移）；
+    # 没有 → 用中文标签。
+    old_headers = list(snap.headers) if snap else []
+    tool_keys = [str(f) for f in field_order]
+    header_for, used = {}, set()
+    for field in field_order:
+        match = next((h for h in old_headers
+                      if h and h not in used and _canon_field(h) == field), None)
+        if match:
+            header_for[field] = match
+            used.add(match)
+        else:
+            header_for[field] = ASSET_FIELD_LABELS.get(field, field)
+    tool_headers = [header_for[f] for f in field_order]
+    user_headers = [h for h in old_headers
+                    if h and h not in used and _canon_field(h) not in set(tool_keys)]
+    if snap is not None:
+        # 行身份 / 路径列要用**旧表里的那个表头原文**（可能是英文 `ID`）
+        snap.id_header = header_for.get('ID', snap.id_header)
+        snap.path_header = header_for.get('Path', snap.path_header)
+        snap.id_missing = snap.id_header not in old_headers
+
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append([ASSET_FIELD_LABELS.get(f, f) for f in field_order])
+    ws.append(tool_headers + user_headers)
+    row_of = {}
     for _asset_id, row_data in data_dict.items():
         excel_row = [row_data.get(field, '') for field in field_order]
-        _asset_append_row(ws, excel_row)
+        if snap is not None:
+            extra = snap.user_values(_asset_id, path=row_data.get('Path'))
+            excel_row += [extra.get(h, '') for h in user_headers]
+        row_no = _asset_append_row(ws, excel_row)
+        row_of[str(_asset_id or '')] = row_no
+
+    # —— 旧表里"这次扫描没产出"的行 ——
+    #
+    # ⚠ **只对"有真实文件列"的表做这件事**（images / music / sounds / voices）：
+    # 那些表的行身份由磁盘上的文件决定，"文件还在但没扫到"值得留一手。
+    # 而 characters / transforms 是**脚本定义的投影**：一行消失通常意味着
+    # 用户改名了（`e` → `eileen`），把旧行留着就等于"改名没发生"
+    # （`test_rename_in_excel_patches_script` 就是这么红的）。
+    # 这两张表的行该由脚本说了算 —— 只保住人的**列 / 页 / 批注**。
+    if 'Path' in tool_keys and not (snap is not None and snap.id_missing):
+        kept, dropped = _xp.plan_kept_rows(
+            snap, list(data_dict.keys()), base_dir=file_path.parent)
+    else:
+        kept, dropped = [], 0
+    for old_row in kept:
+        excel_row = [old_row.get(h, '') for h in tool_headers]
+        excel_row += [old_row.get(h, '') for h in user_headers]
+        row_no = _asset_append_row(ws, excel_row)
+        aid = str(old_row.get(snap.id_header if snap else '编号', '')
+                  or '').strip()
+        if aid:
+            row_of[aid] = row_no
+
+    marks = _xp.restore_asset_marks(
+        ws, snap, row_of,
+        id_header=(snap.id_header if snap else ASSET_FIELD_LABELS.get('ID', 'ID')))
+    sheets = _xp.restore_extra_sheets(wb, snap)
+    if snap is not None:
+        _xp.stash_asset_stats(table=str(file_path), columns=len(user_headers),
+                              kept=len(kept), dropped=dropped, marks=marks,
+                              sheets=sheets)
     # **`ID`（编号）整列隐藏**（用户 2026-10-07："它就是那个本该藏起来、
     # 没什么用的内部编号，已经藏起来就不需要换位了"）。
     # 隐藏只是观感：openpyxl 读得到、`rename`/`delete`/搜索全不受影响。
@@ -279,6 +373,16 @@ def write_dict_to_excel(file_path, data_dict: dict, field_order: list):
     except Exception as e:                      # noqa: BLE001 - 隐藏失败不影响数据
         swallow('assets.asset_registry.write_dict_to_excel.hide_id', e)
     wb.save(file_path)
+
+
+def _last_asset_preserved() -> dict:
+    """上一次资源表写入保住了什么（人的列 / 行 / 批注 / 页）。读不到给空 dict。"""
+    try:
+        from storygraph.story.xlsx_preserve import last_asset_stats
+        return last_asset_stats()
+    except Exception as e:                      # noqa: BLE001 - 回执不该拦住写表
+        swallow('assets.asset_registry.preserved_stats', e)
+        return {}
 
 
 # ===================== 智能扫描 =====================
@@ -1420,7 +1524,8 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
                     reg = registry_hint
                 return {'ok': True, 'created': '', 'path': str(found),
                         'counts': {}, 'error': '', 'registry': reg,
-                        'repaired': [], 'repair_error': ''}
+                        'repaired': [], 'repair_error': '',
+                        'preserved': {}}
             except Exception as e:              # noqa: BLE001 - 读不动 → 重建
                 parse_error = f'{type(e).__name__}: {e}'
                 swallow('assets.asset_registry.ensure_asset_tables.parse', e)
@@ -1447,7 +1552,8 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
             }
             return {'ok': True, 'created': str(target), 'path': str(target),
                     'counts': counts, 'error': '', 'registry': None,
-                    'repaired': repaired, 'repair_error': parse_error}
+                    'repaired': repaired, 'repair_error': parse_error,
+                    'preserved': _last_asset_preserved()}
         if asset_dir:
             target = Path(asset_dir)
         elif (root / 'game').is_dir():
@@ -1476,7 +1582,8 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
         }
         return {'ok': True, 'created': str(target), 'path': str(target),
                 'counts': counts, 'error': '', 'registry': None,
-                'repaired': [], 'repair_error': ''}
+                'repaired': [], 'repair_error': '',
+                'preserved': _last_asset_preserved()}
     except Exception as e:                      # noqa: BLE001 - 建表失败不该让界面崩
         swallow('assets.asset_registry.ensure_asset_tables', e)
         return {'ok': False, 'created': '', 'path': '', 'counts': {},
@@ -1766,9 +1873,23 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
                     continue
                 if key not in headers:
                     headers.append(key)
+                    # ⚠ 这里写的是**英文键**（`Aliases`），与 `write_dict_to_excel`
+                    # 的中文表头不一致 —— 但 `test_char_decisions` 已经把
+                    # "补列写英文"钉成契约（那次修的是"补列要生效"，不是措辞）。
+                    # 改措辞是另一件事（会同时牵动老表的读回），留作 P2。
                     ws.cell(row=1, column=len(headers), value=key)
             row_of = {}
-            id_col = headers.index('ID') + 1 if 'ID' in headers else 1
+            # ⚠ **认不出身份列就先补一列**（2026-10-25 第六轮）：
+            # 用户把「编号」列改名/删掉之后，`headers` 里没有 `ID`，而下面
+            # 写行是 `[row.get(h) for h in headers]` —— 于是**每一行都没有
+            # ID**：判重全失效、每次扫描都把这批行再追加一遍（表越扫越长）。
+            # 补一列比"拒绝写入"更安全（用户只是改了个表头，不该把同步卡死），
+            # 而且补完之后 `_canon_field('编号')` 就能重新认出身份列。
+            if 'ID' not in headers:
+                headers.append('ID')
+                ws.cell(row=1, column=len(headers),
+                        value=ASSET_FIELD_LABELS.get('ID', 'ID'))
+            id_col = headers.index('ID') + 1
             for r in range(2, ws.max_row + 1):
                 v = ws.cell(row=r, column=id_col).value
                 if v:
