@@ -243,6 +243,34 @@ def main():
                       txt.count(b'\n') == txt.count(b'\r\n'),
                       f"LF={txt.count(b'\n')} CRLF={txt.count(b'\r\n')}")
 
+        # ---------- ⑦ 连续两次原地导出：改 A → 导出 → 改 B → 导出 ----------
+        # 这是**真实工作流**（改一句、看效果、再改一句），而且历史上断过
+        # （第一次导出后内存里的行号过期 → 第二次对位率掉到 0）。
+        # 判据：两次改动都在，且除这两行外其余逐字节不变（含 CRLF / 菜单 / if 链）。
+        s7 = EditorSession(project_root=tmp)
+        s7.load(ch1)
+        before7 = ch1.read_bytes()
+        i7 = next(i for i, b in enumerate(s7.beats) if '第一句' in b.text)
+        s7.apply(i7, {'Text': '第一句（第一次改）'})
+        r1 = s7.export(ch1)
+        s7b = EditorSession(project_root=tmp)
+        s7b.load(ch1)
+        i7b = next(i for i, b in enumerate(s7b.beats) if '河边的风' in b.text)
+        s7b.apply(i7b, {'Text': '河边的风（第二次改）'})
+        r2 = s7b.export(ch1)
+        after7 = ch1.read_bytes()
+        a_rows, b_rows = lines(_strip_marker(before7)), lines(_strip_marker(after7))
+        diff = [i for i in range(min(len(a_rows), len(b_rows)))
+                if a_rows[i] != b_rows[i]]
+        check('⑦ 连续两次原地导出：两次改动都还在', r1.get('ok') and r2.get('ok'),
+              f'r1={r1.get("blocking") or r1.get("note")}；'
+              f'r2={r2.get("blocking") or r2.get("note")}')
+        check('⑦ 第二次导出只多动那一行（其余逐字节不变）',
+              len(a_rows) == len(b_rows) and len(diff) == 2,
+              f'行数 {len(a_rows)}→{len(b_rows)}；变了 {len(diff)} 行：{diff}')
+        check('⑦ CRLF 仍是 CRLF',
+              after7.count(b'\n') == after7.count(b'\r\n'))
+
         ok_n = sum(1 for ok, _ in results if ok)
         print(f'\n汇总：{ok_n}/{len(results)} 通过')
         return 0 if ok_n == len(results) else 1

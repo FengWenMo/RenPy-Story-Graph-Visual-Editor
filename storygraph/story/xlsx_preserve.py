@@ -200,13 +200,21 @@ def snapshot_user_content(table_path, *, tool_headers=()) -> 'Snapshot | None':
 
 def _snapshot_sheet(ws, name) -> UserSheet:
     sheet = UserSheet(name=name, freeze=str(ws.freeze_panes or ''))
+    # Excel 的残留格式能把 `max_row` 撑到几十万行（一个远处的底色就够）——
+    # 连续 200 行全空就收手，别为幽灵行白扫几秒（也会把内存撑起来）。
+    blanks = 0
     for row in ws.iter_rows():
+        touched = False
         for cell in row:
             if cell.value is None and not cell.has_style and not cell.comment:
                 continue
+            touched = True
             sheet.cells.append((cell.row, cell.column, cell.value,
                                 copy(cell._style) if cell.has_style else None,
                                 copy(cell.comment) if cell.comment else None))
+        blanks = 0 if touched else blanks + 1
+        if blanks >= 200 and sheet.cells:
+            break
     for letter, dim in (ws.column_dimensions or {}).items():
         if getattr(dim, 'width', None):
             sheet.widths[str(letter)] = dim.width
