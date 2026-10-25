@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.story.source_style import SourceNotUtf8
 from storygraph.ui_qt.qt_args import drop_qt_bool
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
@@ -191,6 +192,12 @@ def _write_new_chapter(view, path, label: str, operations: str = '') -> str:
             return ''
         write_text_atomic(p, _detect(p).apply(body, source=p))
         return str(p)
+    except SourceNotUtf8 as e:                # 严格解码没过：字节一个不动
+        try:
+            view._status(str(e))
+        except Exception as e2:               # noqa: BLE001
+            swallow('ui_qt.window_nodes.notutf8_status', e2)
+        return ''
     except OSError as e:                      # 权限 / 磁盘：说出来，不静默
         try:
             view._status(f'章节建好了，但文件没写出来：{e}')

@@ -52,7 +52,11 @@ from storygraph.story.generation_guard import (ensure_generator_marker,
                                                write_generation)
 
 
-__all__ = ['ExportMixin']
+__all__ = ['ExportMixin', 'removal_note']
+
+# 实现收在 `story/patcher.py`（补丁结果的持有者）：CLI / 表格 / 编辑器
+# 三个出口都用同一句话，措辞不许各写一份（P0-D）。
+from storygraph.story.patcher import removal_note  # noqa: E402
 
 
 class ExportMixin:
@@ -530,10 +534,20 @@ class ExportMixin:
         if art.written and self.script_path \
                 and Path(target) == Path(self.script_path):
             self._reload_after_inplace_write()
+        # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
+        #
+        # `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而删掉程序员的
+        # `$ x = 1` / `play music …` 是**写进去了、事后才发现**的那类事。
+        # 塞进 `warnings` 之后：编辑器这条路会进日志的"提示"段，剧本表那条路
+        # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
+        _warns = [self._issue_message(i) for i in art.issues
+                  if not i.is_blocking]
+        _removal = removal_note(note).lstrip('；')
+        if _removal:
+            _warns.insert(0, _removal.replace('**', ''))
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
                 # 成功了也可能有告警（产物写在 game/ 里、有自定义块没被建模…）
-                'warnings': [self._issue_message(i) for i in art.issues
-                             if not i.is_blocking],
+                'warnings': _warns,
                 'note': note['text_note'],
                 'used_patch': bool(note.get('used_patch')),
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
@@ -682,6 +696,7 @@ class ExportMixin:
                 _note = (f'增量补丁：对位 {res.matched_beats}/'
                          f'{res.total_beats} 拍，'
                          f'改动 {res.changed_lines} 行')
+                _note += removal_note(res)
                 # **空卡片要说一句**（2026-10-25，审计第四轮 P2）：
                 # 插一张空卡、导出，文件一个字节不变 —— 那是**对的**（空卡
                 # 不产生行），但回执只说"逐字节相同"，用户以为插卡没生效。

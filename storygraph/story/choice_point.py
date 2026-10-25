@@ -47,6 +47,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.story.source_style import SourceNotUtf8
+
 #: 选择点文件的命名后缀（同目录、和章节区分开）。
 CHOICES_SUFFIX = '_choices'
 
@@ -266,6 +268,10 @@ def apply_choice_point(plan: ChoicePointPlan, project_root=None) -> dict:
     merged = old + sep + plan.block.replace('\r\n', '\n')
     try:
         write_text_atomic(target, style.apply(merged, source=target))
+    except SourceNotUtf8 as exc:
+        # 极小窗口：上面已严格解过一次，这里再解一次兜住"刚被人改成非 UTF-8"
+        return {'ok': False, 'path': str(target), 'created': False,
+                'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'path': str(target), 'created': False,
                 'error': f'写不进去：{exc}'}

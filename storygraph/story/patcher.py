@@ -63,6 +63,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def removal_note(res, limit: int = 5) -> str:
+    """
+    增量补丁"删掉了哪些行"→ 一句给用户看的话（没有删除返回空串）。
+
+    为什么要有这么小一个函数（P0-D，2026-10-25《不安全因素》第五轮）：
+
+      表过期时（策划先导出过表、程序员又在同一个 `.rpy` 里加了
+      `$ flag = True` / `play music …`），增量补丁会把那些行当
+      "表里已经没有对应内容"删掉。这是**设计内**的行为（与"舞台列清空 →
+      那行该删"是同一个判据，分不开），但**一定要说**。
+
+      而现实是三个出口三种待遇：CLI 的 `_report_incremental` 点名了，
+      `format_compile_result` 紧跟其后又打印一句"只改了 N 行，原文其余部分
+      逐字节保留"（**看起来像没删**），编辑器那条路（`session_export`）
+      一个字都不提。用户读到的是最后那句。
+
+      所以把"怎么说"收成一处：谁要报增量补丁，就拼这一句。
+    """
+    preview = tuple(getattr(res, 'removed_preview', ()) or ())
+    count = int(getattr(res, 'removed_count', 0) or 0) or len(preview)
+    if not count:
+        return ''
+    text = (f'；**删掉了源文件里 {count} 行**'
+            f'（表里已经没有对应内容 —— 表是不是在源码改动之前生成的？）')
+    if preview:
+        text += '：' + ' / '.join(str(x)[:40] for x in preview[:limit])
+    return text
+
+
 @dataclass
 class PatchResult:
     """一次增量导出的结果。"""

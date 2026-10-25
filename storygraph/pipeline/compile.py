@@ -123,9 +123,13 @@ class CompileResult:
         if self.untouched:
             text += '\n这一份与源文件逐字节相同：**文件没有被改动**（0 行改动）'
         if self.used_patch and not self.untouched:
+            # **删掉的行必须点名**（P0-D，2026-10-25 第五轮）：这句话跟在
+            # `_report_incremental` 后面打印，从前只有"其余部分逐字节保留"，
+            # 读起来像"一行都没少"——而表过期时补丁会删掉程序员新写的行。
+            from storygraph.story.patcher import removal_note as _removal_note
             text += (f"\n增量补丁：只改了 {self.changed_lines} 行，"
                      f"原文其余部分（含 default / init python / transform）"
-                     f"逐字节保留")
+                     f"逐字节保留" + _removal_note(self))
         elif self.patch_attempted and not self.used_patch:
             text += f"\n增量未采用（{self.patch_note}）"
         if self.guard_issues:
@@ -271,9 +275,15 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
         src = Path(source_path)
         if target.resolve() != src.resolve():
             # 目标是另一条路径：原样复制（含 BOM / 换行），不经过任何渲染。
+            from storygraph.story.source_style import SourceNotUtf8 as _NotUtf8
             try:
                 write_text_atomic(target, _detect_style(src).apply(
                     inc.text, source=src))
+            except _NotUtf8 as exc:
+                # 底稿不是 UTF-8：复制品会带着 U+FFFD 落地 —— 拒写并说清（P0-B）
+                result.written = False
+                result.patch_note = str(exc)
+                return result
             except OSError:
                 result.written = False
                 return result
@@ -324,10 +334,16 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
         if overwritable:
             if (target.resolve() != Path(source_path).resolve()
                     and not target.exists()):
+                from storygraph.story.source_style import (
+                    SourceNotUtf8 as _NotUtf8)
                 try:
                     write_text_atomic(
                         target, _detect_style(source_path).apply(
                             inc.text, source=source_path))
+                except _NotUtf8 as exc:
+                    result.written = False
+                    result.patch_note = str(exc)
+                    return result
                 except OSError:
                     result.written = False
                     return result

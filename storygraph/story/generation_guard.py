@@ -1383,12 +1383,20 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     write_text_value = text
     _style_source = source_path or merged_from_source
     if _style_source:
+        from storygraph.story.source_style import SourceNotUtf8
         from storygraph.story.source_style import detect as _detect_style
         # `source=` → **逐行**还原换行符（P1-5）：混合换行文件里没碰过的行
         # 一个字节都不动（从前 `apply(text)` 只认"主导风格"，50/50 的文件
         # 会把 CRLF 那几行静默翻成 LF）。
-        write_text_value = _detect_style(_style_source).apply(
-            text, source=_style_source)
+        try:
+            write_text_value = _detect_style(_style_source).apply(
+                text, source=_style_source)
+        except SourceNotUtf8 as exc:
+            # **底稿不是 UTF-8**（P0-B）：产物是拿"读坏了的原文"算出来的，
+            # 写回去就是把用户的坏字节换成 U+FFFD。拒写，且当成 block 级
+            # 问题报出去（不是悄悄返回 written=False）。
+            issues.append(GuardIssue('SOURCE_NOT_UTF8', 'block', str(exc)))
+            blocking = [i for i in issues if i.is_blocking]
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if blocking and review_on_block:
