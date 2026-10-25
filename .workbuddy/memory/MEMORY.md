@@ -30,8 +30,8 @@
 - **两个 registry 不是一回事**：`session.registry()`=资产表；语句表是 `StatementRegistry.for_project(root)`。混用 → Qt 槽吞异常 → "点了毫无反应"。
 - **`EditorSession` 有 `__len__`** → 没载入章节时 falsy。判空用 `is not None`，**绝不用 `if self._session:`**。
 - **默认值兜底不要用 `or`**：`int(x or -1)` 把第 0 拍当"没载入"。
-- **pytest 必须带全新 `--basetemp`**（裸 `pytest` 必炸 ~1589 ERROR，D6 未决）；**两个 pytest 不能同时跑**（同名目录互删）。`.pip-tmp/` 会累积到 GB 级、别用 `du/find` 扫。
-- **全量耗时由 4 条真机金标主导（~730s）**，连跑方差 ±40% —— 别当回归，先看 `--durations`。
+- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 每轮独立 basetemp + 运行锁；详见 `tools/fasttest/README.md`）。裸 `pytest` 串行 ~20 分钟，且两个并发会互删 `.pip-tmp/pytest`（D6）；fasttest 自带锁，但**裸 pytest 不受锁保护**。`.pip-tmp/` 会累积到 GB 级、别用 `du/find` 扫；fasttest 会自动清 >7 天旧目录（`--clean-temp` 清 >24h）。
+- **全量耗时由少数真机金标主导（scan/validate/patch/describe ~730s）**，连跑方差 ±40% —— 别当回归，先看 `--durations`。fasttest 会把重文件排到队首，且 `test_disk_hygiene` 固定第一个跑（它递归扫 `.pip-tmp`，晚跑会从秒级变几分钟）。
 - **无 `QApplication` 就建 Qt 控件 = 进程 abort**（无 traceback）。Qt 测试类要 `qapp` autouse。
 - **面板少一个转发方法** = `AttributeError` → 模态框 → 测试挂死。守卫 `test_every_panel_method_the_window_calls_really_exists`。
 - **构造期 `_refresh_preview` 早于控件创建** → `getattr` 守卫 + 建好后重刷。
@@ -92,8 +92,17 @@
   同一正则另有三处：`statement_probe` 早就对，`choice_point` 前缀校验（已统一），`flow._LABEL_RE`（已支持）。
 · 隐藏表新增「来源指纹」（sha1 前 16 位）：只用来**解释**"表比源码旧"，**不 block**（工具自己写回后指纹立刻变旧，
   真拦会逼用户闭眼点"仍要覆盖"，更危险）。
-· 难缠工程矩阵 `tools/_p0_audit_round6_stress.py` **16/16**（menu 条件项 / if-elif / call screen / 重复台词 / 点号 label / 撤销逐字节还原）。
+· 难缠工程矩阵 `tools/_p0_audit_round6_stress.py` **19/19**（menu 条件项 / if-elif / call screen / 重复台词 / 点号 label /
+  撤销逐字节还原 / **连续两次原地导出**）。
   真机 `sr_general` 太干净，**以后新功能先跑这个矩阵**。
+· **P0-F 资源表同一刀**：`write_dict_to_excel` 也是"整份新建再 save"（docstring 自己写着"2828 行会掉到 349 行"）。
+  改为**直接保住**（用户否掉了隔离备份："隔离解决不了根本问题"）：行按 `编号`，认不出就按 `真实文件`；
+  孤儿行只在"记了文件且文件真不在"时删；人的列/页/批注带走 + 回执。判据 `test_p0_round6_asset_preserve.py`（9 条）。
+· **最容易复发的坑 = 两边口径不一致**（本轮三次全中）：老表表头是**英文键**（`ID/Name/Color`），
+  拿中文标签比 → 同一字段两列 → 读回取空列。**凡是"按表头名比对/映射"的地方都要先规范键**
+  （`_canon_field` / `BEAT_HEADERS` 两个方向都要报）。
+· `test_scan_golden` 已按用户确认重录（`模拟操作/lint_proj` 是刻意保留的真机残留）。
+  **红了先看"少了[]"**：只有新增 = 真机加东西；有删 = 可能真回归。
 
 ## 五、协作与定位
 
