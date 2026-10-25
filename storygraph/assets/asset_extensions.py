@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
 import json
-import re
 import shutil
 from pathlib import Path
 from collections import defaultdict
@@ -27,6 +26,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from storygraph.assets.asset_completion import score_candidates
+from storygraph.assets.rename_scope import rename_in_text, word_pattern
 from storygraph.assets.asset_registry import (
     AssetRegistry,
     parse_asset_tables,
@@ -355,22 +355,36 @@ class DependencyAnalyzer:
 # 转发到这儿（此前两处各写了一遍）。
 
 def _rename_pattern(old_id: str):
-    """词边界匹配：`hero` 不匹配 `hero_happy`（避免部分匹配改坏别人的资源名）。"""
-    return re.compile(r'(?<![\w])' + re.escape(str(old_id)) + r'(?![\w])')
+    """
+    词边界匹配：`hero` 不匹配 `hero_happy`（避免部分匹配改坏别人的资源名）。
+
+    ⚠ **只是词边界还不够**（P1-4，2026-10-25）：它还要求"这一处是资产引用位"，
+    判据在 `assets.rename_scope`（`$ bg = 1` / `# bg 注释` / 字符串里的名字
+    都**不**改）。这个函数保留是因为外部有人按老名字找它；真正的改写走
+    `rename_in_text`。
+    """
+    return word_pattern(old_id)
 
 
 def plan_rename_patch(old_id: str, new_id: str, script_files) -> dict:
     """
     算改名补丁的**预览**（纯函数，绝不写盘）。
 
-    返回 `{'ok','old_id','new_id','files','matched_files','total_lines'}`；
+    返回 `{'ok','old_id','new_id','files','matched_files','total_lines',
+    'rejected','rejected_total','skipped_files'}`；
     `files[i]['changed']` 是 `[(行号, 旧行, 新行), …]`（行号 1 起，方便人对着看）。
+
+    ⚠ **只改"资产引用位"**（判据见 `assets.rename_scope`，P1-4）：像
+    `$ bg = 1` / `# bg 注释` / `"bg 音乐.mp3"` 这种"命中了旧名、但那是代码 /
+    注释 / 字符串"的地方**不改**，而是列进 `rejected`（预览照实给人看）。
+    `skipped_files` 是读都读不了的文件 —— 从前静默跳过，改名会**不完整**
+    而没人知道（P2-2）。
     """
-    pattern = _rename_pattern(old_id)
-    files = []
+    files, rejected, skipped_files = [], [], []
     for fp in script_files:
         fp = Path(fp)
         if not fp.exists():
+            skipped_files.append({'path': str(fp), 'reason': '文件不在了'})
             continue
         try:
             # **保留换行读**（`newline=''`）：Windows 上 `read_text` 会把 CRLF
@@ -380,14 +394,14 @@ def plan_rename_patch(old_id: str, new_id: str, script_files) -> dict:
                 text = fh.read()
         except Exception as e:                      # noqa: BLE001
             swallow('assets.asset_extensions.plan_rename_patch', e)
+            skipped_files.append({'path': str(fp),
+                                  'reason': f'读不了（{type(e).__name__}：{e}）'})
             continue
-        if not pattern.search(text):
+        new_text, changed, misses = rename_in_text(text, old_id, new_id)
+        if misses:
+            rejected.append({'path': str(fp), 'hits': misses})
+        if not changed:
             continue
-        new_text = pattern.sub(str(new_id), text)
-        changed = [(i, a, b)
-                   for i, (a, b) in enumerate(
-                       zip(text.splitlines(), new_text.splitlines()), 1)
-                   if a != b]
         files.append({'path': str(fp), 'changed': changed,
                       'old_text': text, 'new_text': new_text})
     return {
@@ -396,6 +410,9 @@ def plan_rename_patch(old_id: str, new_id: str, script_files) -> dict:
         'files': files,
         'matched_files': [f['path'] for f in files],
         'total_lines': sum(len(f['changed']) for f in files),
+        'rejected': rejected,
+        'rejected_total': sum(len(r['hits']) for r in rejected),
+        'skipped_files': skipped_files,
     }
 
 
@@ -406,19 +423,46 @@ def apply_rename_patch(plan, *, confirm: bool = False,
 
     `backup=True`（默认）先把每个文件复制成 `<名>.bak`，供
     `rollback_rename_patch` 逐位还原。
+
+    ⚠ **写前必须复读**（P0-3，2026-10-25《不安全因素》第二轮）：计划是给人
+    看几分钟的，那期间程序员自己的 IDE / 另一个工具实例 / git 都可能改过
+    同一个 `.rpy`。拿计划里的 `new_text`（基于**过期**的旧全文算出来的）
+    直接覆盖，就把并发写进去的内容**静默吞掉**了 ——
+    `control_route` / `source_line_delete` / undo/redo 都有这道守卫，
+    全仓只有这里没有。现在：当前内容 ≠ 计划里的 `old_text` → **该文件拒写**
+    （其余文件照常写），并列进 `changed_since_plan`，让界面说清是哪个文件。
+
+    备份做不成也**不写**：`.bak` 是"可回滚"的另一半契约，write 成功而备份
+    失败 = 用户再也拿不回原名（从前会照写）。
     """
     if not isinstance(plan, dict) or not plan.get('files'):
         return {'ok': True, 'reason': 'nothing_to_do', 'modified': [],
                 'matched_files': list((plan or {}).get('matched_files') or []),
-                'backup_files': [], 'dry_run': not confirm}
+                'backup_files': [], 'dry_run': not confirm,
+                'changed_since_plan': [], 'failed': [],
+                'skipped_files': list((plan or {}).get('skipped_files') or [])}
     if not confirm:
         return {'ok': False, 'reason': 'needs_confirmation', 'modified': [],
                 'matched_files': list(plan.get('matched_files') or []),
-                'backup_files': [], 'dry_run': True, 'plan': plan}
+                'backup_files': [], 'dry_run': True, 'plan': plan,
+                'changed_since_plan': [], 'failed': [],
+                'skipped_files': list(plan.get('skipped_files') or [])}
 
-    modified, backups = [], []
+    modified, backups, failed, stale = [], [], [], []
     for f in plan['files']:
         fp = Path(f['path'])
+        # ① 写前复读全文（P0-3）：对不上就拒写 —— 绝不拿旧全文盖回去。
+        try:
+            with open(fp, 'r', encoding='utf-8', newline='') as fh:
+                current = fh.read()
+        except Exception as e:                      # noqa: BLE001
+            swallow('assets.asset_extensions.apply_rename_patch.reread', e)
+            failed.append({'path': str(fp), 'reason': f'写前复读失败：{e}'})
+            continue
+        if current != f.get('old_text'):
+            stale.append(str(fp))
+            continue
+        # ② 备份（逐字节复制，供回滚）
         if backup:
             bak = fp.with_suffix(fp.suffix + '.bak')
             try:
@@ -426,6 +470,9 @@ def apply_rename_patch(plan, *, confirm: bool = False,
                 backups.append(str(bak))
             except Exception as e:                  # noqa: BLE001
                 swallow('assets.asset_extensions.apply_rename_patch.backup', e)
+                failed.append({'path': str(fp),
+                               'reason': f'写前备份失败（未写，宁可没改）：{e}'})
+                continue
         try:
             # **原子写 + 保留换行**（P1-2）：这里也是 `.rpy` 落盘点。
             # `Path.write_text` 在 Windows 上会把整个文件翻成 CRLF，而且
@@ -436,9 +483,20 @@ def apply_rename_patch(plan, *, confirm: bool = False,
             modified.append(str(fp))
         except Exception as e:                      # noqa: BLE001
             swallow('assets.asset_extensions.apply_rename_patch', e)
-    return {'ok': True, 'reason': '', 'modified': modified,
+            failed.append({'path': str(fp), 'reason': f'写入失败：{e}'})
+
+    ok = not failed and not stale
+    reason = ''
+    if stale:
+        reason = (f'{len(stale)} 个文件在预览之后被改过，已拒写'
+                  f'（原样未动，请重新预览）')
+    elif failed:
+        reason = f'{len(failed)} 个文件没能写入'
+    return {'ok': ok, 'reason': reason, 'modified': modified,
             'matched_files': list(plan.get('matched_files') or []),
-            'backup_files': backups, 'dry_run': False}
+            'backup_files': backups, 'dry_run': False,
+            'changed_since_plan': stale, 'failed': failed,
+            'skipped_files': list(plan.get('skipped_files') or [])}
 
 
 def rollback_rename_patch(apply_result) -> dict:
@@ -479,10 +537,17 @@ def generate_rename_patch(
     plan = plan_rename_patch(old_id, new_id, script_files)
     if dry_run:
         return {'modified': [], 'matched_files': plan['matched_files'],
-                'dry_run': True, 'ok': True, 'reason': 'dry_run', 'plan': plan}
+                'dry_run': True, 'ok': True, 'reason': 'dry_run', 'plan': plan,
+                'changed_since_plan': [], 'failed': [],
+                'rejected_total': plan.get('rejected_total', 0),
+                'skipped_files': plan.get('skipped_files') or []}
     res = apply_rename_patch(plan, confirm=confirm, backup=backup)
     return {'modified': res['modified'], 'matched_files': res['matched_files'],
             'dry_run': False, 'ok': res['ok'], 'reason': res['reason'],
+            'changed_since_plan': res.get('changed_since_plan') or [],
+            'failed': res.get('failed') or [],
+            'rejected_total': plan.get('rejected_total', 0),
+            'skipped_files': res.get('skipped_files') or [],
             'plan': plan}
 
 

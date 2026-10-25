@@ -124,8 +124,27 @@ def _write_new_chapter(view, path, label: str, operations: str = '') -> str:
       · **里面有同名 label** → 一个字都不写（重名 label 会让游戏起不来）。
 
     追加时按文件自己的**载体风格**（BOM / CRLF）铺回去，不改已有任何一个字节。
+
+    ⚠ 两道**纵深防御**（P2-3，2026-10-25《不安全因素》第二轮）：
+      · label 名先过 `story.flow.is_valid_label`：对话框那一层虽然有正则，
+        但节点数据也能走到这里（`label` 是从外面喂进来的，不该只靠上游校验）；
+      · 读了之后、写之前**再复读一次**比对：中间被别的程序改过就拒写
+        （宁可让用户重来，也不拿旧全文盖掉别人的新内容）。
     """
     if not path or not str(label or '').strip():
+        return ''
+    label = str(label).strip()
+    try:
+        from storygraph.story.flow import is_valid_label
+    except Exception as e:                    # noqa: BLE001 - 校验器都进不来就不拦
+        swallow('ui_qt.window_nodes.label_validate_import', e)
+        is_valid_label = None
+    if callable(is_valid_label) and not is_valid_label(label):
+        try:
+            view._status(f'章节名不能用：{label!r} —— label 只能由字母、数字、'
+                         f'下划线组成，且不能以数字开头。')
+        except Exception as e:                # noqa: BLE001 - 状态栏坏了不影响判断
+            swallow('ui_qt.window_nodes.bad_label_status', e)
         return ''
     p = Path(path)
     try:
@@ -138,6 +157,22 @@ def _write_new_chapter(view, path, label: str, operations: str = '') -> str:
             write_text_atomic(p, _skeleton_block(label, operations))
             return str(p)
 
+        # ⚠ **非 UTF-8 一律拒写**（P1-A，2026-10-25 第三轮审计）：下面 `_read`
+        # 走的是 `source_style.read_text`，它 `errors='replace'` —— 给解析器看
+        # 没问题，但这是"读回来再写回去"：坏字节会被换成 U+FFFD（一个字节变成
+        # 三个），`git diff` 显示这行被改过而用户从没碰过它，而且没有备份。
+        # 与 `choice_point` 同一口径：严格解一遍，解不开就明说、字节一个不动。
+        try:
+            p.read_bytes().decode('utf-8')
+        except UnicodeDecodeError as exc:
+            try:
+                view._status(
+                    f'{p.name} 不是 UTF-8（Ren\'Py 只认 UTF-8）：第 {exc.start} '
+                    f'字节起。先另存为 UTF-8，再往这个文件里加章节。')
+            except Exception as e:            # noqa: BLE001 - 状态栏坏了不影响判断
+                swallow('ui_qt.window_nodes.bad_encoding_status', e)
+            return ''
+
         text, style = _read(p)
         if _has_label(text, label):
             try:
@@ -147,7 +182,14 @@ def _write_new_chapter(view, path, label: str, operations: str = '') -> str:
             return ''
         body = (text.rstrip('\n') + f"\n\n"
                 + _skeleton_block(label, operations))
-        write_text_atomic(p, _detect(p).apply(body))
+        # 写前复读：中间被改过就不写（窗口极小，但覆盖别人的新内容是静默的）
+        if _read(p)[0] != text:
+            try:
+                view._status(f'{p.name} 刚被别的程序改过 —— 这次没写，请重试。')
+            except Exception as e:            # noqa: BLE001
+                swallow('ui_qt.window_nodes.stale_status', e)
+            return ''
+        write_text_atomic(p, _detect(p).apply(body, source=p))
         return str(p)
     except OSError as e:                      # 权限 / 磁盘：说出来，不静默
         try:

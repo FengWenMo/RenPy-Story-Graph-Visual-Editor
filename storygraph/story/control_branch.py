@@ -778,7 +778,7 @@ def apply_control_branch(plan) -> dict:
                          '这次没有写'}
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(plan.new_text))
+        write_text_atomic(path, style.apply(plan.new_text, source=path))
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
                 'path': str(path), 'error': f'写不进编排层：{exc}'}

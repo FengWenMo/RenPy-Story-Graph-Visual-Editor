@@ -1384,7 +1384,11 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
     _style_source = source_path or merged_from_source
     if _style_source:
         from storygraph.story.source_style import detect as _detect_style
-        write_text_value = _detect_style(_style_source).apply(text)
+        # `source=` → **逐行**还原换行符（P1-5）：混合换行文件里没碰过的行
+        # 一个字节都不动（从前 `apply(text)` 只认"主导风格"，50/50 的文件
+        # 会把 CRLF 那几行静默翻成 LF）。
+        write_text_value = _detect_style(_style_source).apply(
+            text, source=_style_source)
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if blocking and review_on_block:

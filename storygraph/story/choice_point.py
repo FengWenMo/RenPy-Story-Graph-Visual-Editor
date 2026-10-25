@@ -265,7 +265,7 @@ def apply_choice_point(plan: ChoicePointPlan, project_root=None) -> dict:
     sep = '' if old.endswith('\n\n') else ('\n' if old.endswith('\n') else '\n\n')
     merged = old + sep + plan.block.replace('\r\n', '\n')
     try:
-        write_text_atomic(target, style.apply(merged))
+        write_text_atomic(target, style.apply(merged, source=target))
     except OSError as exc:
         return {'ok': False, 'path': str(target), 'created': False,
                 'error': f'写不进去：{exc}'}

@@ -4626,3 +4626,86 @@ Ren'Py 只认 UTF-8，所以"这一章是空的"那种界面状态是**假话**�
 `*_choices.rpy` 这类"工具独占、别人不碰"的文件，创建时就要
 `ensure_generator_marker`（与 `control_takeover` 一致）——否则将来任何
 "重算"流程走 `write_generation`，第一步就被 `HANDWRITTEN_TARGET` 拒写。
+
+## §49 改名补丁 / 换行 / 资产表的四条硬判据（2026-10-25 下午）
+
+### 49.1 计划 → 应用之间，文件可能被改过：必须复读比对
+
+凡是"算出 `new_text` 再落盘"的两段式操作（改名补丁是唯一一处），
+`apply` 必须**写前复读全文**并与计划里的 `old_text` 比对；对不上就**拒写该
+文件**（其余照写），把文件列进 `changed_since_plan`，`ok=False`。
+理由：计划里那份全文是**快照**，中间任何一方（IDE / 另一个实例 / git /
+用户自己）改了文件，拿快照覆盖就是**静默吞掉别人的改动**。
+
+配套两条：`ok = not failed and not changed_since_plan`（P2-1：从前
+`swallow` 之后仍报 `ok=True`）；**备份失败也不写**（`.bak` 是"可回滚"的
+另一半契约，写成功而备份失败 = 用户再也拿不回原名）。
+
+### 49.2 改名只改"资产引用位"，判据在 `assets/rename_scope.py`
+
+整份词边界 `sub` 会改到代码 / 注释 / 字符串。逐行判据（`analyse_line`）：
+
+- 注释行、`$`、`python`/`init python` 块体、`label`/`jump`/`call` 行 → **整行不改**；
+- 已知语句首词（`show` `scene` `define` `image` `with` …）→ 参数位从首词**之后**开始
+  （资产 id 叫 `show` 时不改关键字）；未知首词（自定义语句、`meiko "hello"`）→
+  第一个词就是参数位，**可改**（角色改名靠这条）；
+- 引号里：只有音频/语音语句**且**是一整段路径（`"bgm_main.ogg"`）才改；
+  `"bg 音乐.mp3"` 里那个 `bg` 不改；
+- 行尾注释（引号外的 `#` 之后）不改。
+
+被拒的命中**必须报出来**（`plan['rejected']`：行号 / 那一行 / 原因），
+读不了的文件进 `skipped_files` —— 改名"少改一处"在游戏里就是"找不到图"。
+
+### 49.3 换行：能逐行还原就逐行还原，`apply(text, source=路径)`
+
+`detect()` 只给出**主导**风格，混合换行文件里 50/50 时不存在主导 → 整份归一
+会静默改掉没碰过的行。凡是写回**已存在的文件**，都要传 `source=`：
+逐行对齐原文、原样那一行用它自己的 EOL、插入行借前一行。单一风格的文件走
+老路径（逐字节等价），所以这条对老文件是**零风险**的。
+
+### 49.4 资产表的"文件在不在"只有一个答案
+
+- `FileWalkIndex.match()` 对绝对路径与 `_SKIP_SCAN_DIRS`（`tmp/` `cache/`
+  `build/` …）**必然**返回 None —— 那是"索引不覆盖"，**不是**"文件不存在"；
+- 所以 `_missing_paths` 只对**索引管得着**的路径判缺失（`_walk_covers`），
+  管不着的走 `_probe_row_file` 磁盘探测；探不到也**不删**，进
+  `_unjudged_paths`（只报不删，`unjudged_by_kind` 进回执）；
+- `_row_file_exists` 与 `_missing_paths` 必须同一套判据（从前两套 → 同一行
+  被判"缺失删掉"又在别处算"存在"）；
+- 表备份固定名 `*.bak.xlsx`，**上一代**归档成 `*.bak-<时间戳>.xlsx`。
+
+## §50 第三轮：编码腐蚀 / 逐行还原的调用点 / 金标怎么改（2026-10-25 下午）
+
+### 50.1 "读回来再写回去"必须**严格解码**，一个例外都没有
+
+`source_style.read_text` 用 `errors='replace'`（给解析器看的口径）。凡是
+"读已有文件 → 改 → 写回同一路径"的地方，都要先 `read_bytes().decode('utf-8')`
+探一次，解不开就**拒写并说清第几字节**，字节一个不动：
+
+- `choice_point` 的追加路径（§二十五 §3）；
+- `_write_new_chapter` 往已有 `.rpy` 追加 label（第三轮 P1-A —— 从前坏字节
+  被换成 U+FFFD 写回，无备份、无声）。
+
+BOM 不受影响：严格 UTF-8 把 BOM 当合法字符，`detect()` 照旧记着它。
+
+### 50.2 `apply(text, source=…)` 的调用点：凡是"原地改已有文件"就要传
+
+已传：`write_generation` / `compile`(×2) / `choice_point` / `control_route`(×4) /
+`control_branch` / `control_takeover`(×2) / `source_line_delete` / `window_nodes` /
+`session_export`。
+
+**有意不传**：`graph/commands` 的 undo/redo。理由：那条路的 `old_text` 在读取时
+已被 `read_text` 统一成 LF，每行 EOL 在内存里本来就不存在。要逐字节还原 undo，
+得在计划链里保存原始 EOL —— 那是设计题（新存储），不是"补一个参数"。
+新加原地写盘点时照这条清单自检：不传就得能说出"我为什么没有 EOL 信息"。
+
+### 50.3 金标（golden）变了怎么办
+
+先证明"变的是哪一部分"，再改金标：
+
+1. 找出差异的来源（例：新加了 `unjudged*` 两个键）；
+2. **把它摘掉重算**，如果指纹回到旧值，说明行为只多了这部分（`sync` 金标就
+   是这么核的：`94579ad7…`）；
+3. 更新金标 + 在测试 docstring 里写清"为什么变"，提交信息同写。
+
+反过来：如果摘掉新东西也算不出旧值 → 那是**行为回归**，不许改金标。

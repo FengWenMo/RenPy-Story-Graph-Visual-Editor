@@ -600,6 +600,14 @@ class GraphOpsMixin:
                                    for k, v in (res.get('deduped_by_kind')
                                                 or {}).items() if v)
                 bits.append(f'合并重复行 {res["deduped"]} 条（{kinds}）')
+            if res.get('unjudged'):
+                # 绝对路径 / `tmp/` 这类跳过目录：索引根本不走那几段，
+                # 判不了"在不在"就**不删**（P1-6：从前这里会误删文件还在的行）。
+                kinds = ' · '.join(f'{k} {v}'
+                                   for k, v in (res.get('unjudged_by_kind')
+                                                or {}).items() if v)
+                bits.append(f'{res["unjudged"]} 条路径工具扫不到、**没有删**'
+                            f'（绝对路径或 tmp/cache 这类跳过目录：{kinds}）')
             self._log(
                 f'[资源] 已按项目实际情况更新资源表：' + '；'.join(bits)
                 + (f'；写前备份 {res["sync_backup"]}'

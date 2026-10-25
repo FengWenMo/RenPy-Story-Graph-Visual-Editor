@@ -298,7 +298,10 @@ def apply_source_line_delete(plan: SourceLinePlan) -> dict:
                 'error': '源文件在计划之后又被改过；为了不误删，这次没有写'}
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(plan.new_text))
+        # `source=path` → **逐行**还原换行符（P1-5b）：混合换行文件里没碰过的
+        # 行一个字节都不动。这里与 `control_route` 同级（原地改写），
+        # 而且 `plan.new_text` 就是从盘上这一份算出来的 —— 没有理由不传。
+        write_text_atomic(path, style.apply(plan.new_text, source=path))
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
                 'error': f'写不进源文件：{exc}'}

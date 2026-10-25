@@ -272,7 +272,8 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
         if target.resolve() != src.resolve():
             # 目标是另一条路径：原样复制（含 BOM / 换行），不经过任何渲染。
             try:
-                write_text_atomic(target, _detect_style(src).apply(inc.text))
+                write_text_atomic(target, _detect_style(src).apply(
+                    inc.text, source=src))
             except OSError:
                 result.written = False
                 return result
@@ -325,7 +326,8 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
                     and not target.exists()):
                 try:
                     write_text_atomic(
-                        target, _detect_style(source_path).apply(inc.text))
+                        target, _detect_style(source_path).apply(
+                            inc.text, source=source_path))
                 except OSError:
                     result.written = False
                     return result

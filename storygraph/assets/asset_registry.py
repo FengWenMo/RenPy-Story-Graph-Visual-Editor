@@ -502,14 +502,67 @@ def _junk_nested_paths(rows, mine_paths, nested_pref) -> list:
     return out
 
 
+def _walk_covers(rel, walk) -> bool:
+    """
+    `walk` 这张索引**管得着**这条路径吗？
+
+    管不着 = 绝对路径（`D:/x/y.png`）或路径里有 `_SKIP_SCAN_DIRS` 的那几段
+    （`tmp/` / `cache/` / `build/` / `.git/` …）—— `FileWalkIndex._walk`
+    故意不收录它们。这种行上 `walk.match() is None` **不能**当作"文件不存在"
+    （P1-6，2026-10-25《不安全因素》第二轮：同一条路径被两套判据判出两个
+    相反答案，结果是"文件明明在、行被删了"）。
+    """
+    text = str(rel or '').strip().replace('\\', '/')
+    if not text or walk is None:
+        return False
+    if text.startswith('/') or (len(text) > 1 and text[1] == ':'):
+        return False
+    for seg in text.split('/'):
+        if seg.lower() in _SKIP_SCAN_DIRS:
+            return False
+    return True
+
+
+def _probe_row_file(kind_key, rel, root):
+    """
+    拿**磁盘**判一次这一行有没有文件（`walk` 覆盖不到时的兜底，P1-6）。
+
+    先按"相对 `root` 的直接路径"摸一次（绝对路径从这里就命中 —— 用户手写的
+    `D:/…/图.png` 是合法的），再退回两个正式解析器
+    （`resolve_thumb_source` / `_resolve_audio_source`）。
+    """
+    text = str(rel or '').strip()
+    if not text:
+        return None
+    try:
+        p = Path(text.replace('\\', '/'))
+        if not p.is_absolute() and root is not None:
+            p = Path(root) / p
+        if p.is_file():
+            return p
+    except (OSError, ValueError) as e:          # noqa: BLE001 - 探测失败就当探不到
+        swallow('assets.asset_registry._probe_row_file', e)
+    try:
+        if str(kind_key or '').startswith('image'):
+            from storygraph.story.excel_export import resolve_thumb_source
+            return resolve_thumb_source(text, root)
+        return _resolve_audio_source(text, root)
+    except Exception as e:                      # noqa: BLE001
+        swallow('assets.asset_registry._probe_row_file.resolve', e)
+        return None
+
+
 def _missing_paths(rows, skip, kind_key, walk, root) -> list:
     """
     `Path` 解析不到真实文件的行（纯查询；人工占位行豁免）。
 
     `skip` 是"上面已经删过的"（不重复报）。
-    """
-    from storygraph.story.excel_export import resolve_thumb_source
 
+    ⚠ **`walk` 管不着的路径不在这里判"缺失"**（P1-6）：绝对路径、跳过目录
+    （`tmp/` / `cache/`）下的行索引根本不收录，`walk.match()` 必然返回 None ——
+    那种行归 `_unjudged_paths`（探不到也只报不删）。没有索引（`walk is None`）
+    时仍然走磁盘探测，与从前一致。
+    """
     out = []
     for _aid, row in (rows or {}).items():
         rel = str((row or {}).get('Path') or '').strip()
@@ -517,13 +570,33 @@ def _missing_paths(rows, skip, kind_key, walk, root) -> list:
             continue                            # 占位 / 模板：允许没有文件
         if rel in skip:
             continue                            # 上面已经删了
-        if walk is not None:
+        if walk is None:
+            real = _probe_row_file(kind_key, rel, root)
+        elif _walk_covers(rel, walk):
             real = walk.match(rel)
-        elif kind_key == 'images':
-            real = resolve_thumb_source(rel, root)
         else:
-            real = _resolve_audio_source(rel, root)
+            continue                            # 判不了的交给 `_unjudged_paths`
         if real is None:
+            out.append(rel)
+    return out
+
+
+def _unjudged_paths(rows, skip, kind_key, walk, root) -> list:
+    """
+    **工具判不了**的行：`walk` 覆盖不到（绝对路径 / 跳过目录），磁盘上又探不到。
+
+    这些行**不删**（P1-6）：共享盘临时掉线、别的机器上的绝对路径、
+    用户自己的临时目录都长这样 —— 拿"我扫不到"去删用户手写的元数据
+    （Notes / Category / Tag）是错的。交给调用方报给用户，由人决定。
+    """
+    out = []
+    for _aid, row in (rows or {}).items():
+        rel = str((row or {}).get('Path') or '').strip()
+        if not rel or is_missing_allowed(row) or rel in skip:
+            continue
+        if _walk_covers(rel, walk):
+            continue                            # 索引管得着 → 结论已经够了
+        if _probe_row_file(kind_key, rel, root) is None:
             out.append(rel)
     return out
 
@@ -536,11 +609,16 @@ def _sync_prune_stage(root, table_dir, registry, walk):
       · **人工占位**（`Notes`/`Doc` 写了占位…）留着；
       · **工具自己加过、却指向"嵌套副本"** 的行一并删（只有侧车记着我加过的才删）。
 
-    返回 `(removed_by_kind, index, added_paths)`；顺手把删掉的从侧车摘掉。
+    另外：`walk` 覆盖不到的路径（绝对路径 / `tmp/` 这类跳过目录）**只报不删**
+    （见 `_unjudged_paths`）。
+
+    返回 `(removed_by_kind, index, added_paths, unjudged_by_kind)`；顺便把删掉的
+    从侧车摘掉。
     """
     index = _read_autoscan_index(table_dir)
     added = index.get('added') or {}
     removed_by_kind = {}
+    unjudged_by_kind = {}
     nested_pref = walk.nested_prefixes() if walk is not None else set()
     for kind_key in _ASSET_KINDS:
         rows = ((getattr(registry, kind_key, {}) or {})
@@ -559,16 +637,19 @@ def _sync_prune_stage(root, table_dir, registry, walk):
                 added[kind_key] = [p for p in (added.get(kind_key) or [])
                                    if p not in dead]
         gone = _missing_paths(rows, set(junk_nested), kind_key, walk, root)
-        if not gone:
-            continue
-        n = delete_rows_from_table(table_dir, kind_key, gone, backup=True)
-        if n:
-            removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
-        if added.get(kind_key):
-            dead = set(gone)
-            added[kind_key] = [p for p in added[kind_key] if p not in dead]
+        if gone:
+            n = delete_rows_from_table(table_dir, kind_key, gone, backup=True)
+            if n:
+                removed_by_kind[kind_key] = removed_by_kind.get(kind_key, 0) + n
+            if added.get(kind_key):
+                dead = set(gone)
+                added[kind_key] = [p for p in added[kind_key] if p not in dead]
+        unjudged = _unjudged_paths(rows, set(junk_nested) | set(gone),
+                                   kind_key, walk, root)
+        if unjudged:
+            unjudged_by_kind[kind_key] = len(unjudged)
     index['added'] = added
-    return removed_by_kind, index, added
+    return removed_by_kind, index, added, unjudged_by_kind
 
 
 def _sync_relink_stage(root, table_dir, registry, walk):
@@ -712,17 +793,22 @@ def _sync_append_stage(root, table_dir, assets, unreg, diff, walk, added):
 def _sync_report(*, table_dir, registry, diff, repaired, repair_error,
                  removed_by_kind=None, relinked_by_kind=None,
                  deduped_by_kind=None, added_by_kind=None, backup: str = '',
-                 dimensions=None):
+                 dimensions=None, unjudged_by_kind=None):
     """带"删/改指/合并/补登"四项统计的返回体（原先两处各写一遍）。"""
     removed_by_kind = removed_by_kind or {}
     relinked_by_kind = relinked_by_kind or {}
     deduped_by_kind = deduped_by_kind or {}
     added_by_kind = added_by_kind or {}
     dimensions = dimensions or {}
+    unjudged_by_kind = unjudged_by_kind or {}
     return {'ok': True, 'created': '', 'table_dir': str(table_dir),
             'added': sum(added_by_kind.values()), 'by_kind': added_by_kind,
             'removed': sum(removed_by_kind.values()),
             'removed_by_kind': removed_by_kind,
+            # `walk` 覆盖不到、磁盘上又探不到的行 —— **没删**（P1-6）。
+            # 界面上要说一句"这些路径工具扫不到"，不然用户以为表里没有它。
+            'unjudged': sum(unjudged_by_kind.values()),
+            'unjudged_by_kind': unjudged_by_kind,
             'relinked': sum(relinked_by_kind.values()),
             'relinked_by_kind': relinked_by_kind,
             'deduped': sum(deduped_by_kind.values()),
@@ -758,9 +844,16 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
         {'ok', 'created', 'table_dir', 'added', 'by_kind', 'backup',
          'scanned', 'reconcile'}
 
-    ⚠ **不做的事**（都要用户明确动作）：删行（表里有、磁盘上没了）、
-    改已有行的字段、把指向别的目录（另一份副本）的行搬过来 ——
-    那些会动到用户整理过的数据。
+    ⚠ **它会删行**（2026-10-05 用户明确要求："表应当实时反应实际资源的情况，
+    自动更新和增删"）：`Path` 解析不到真实文件的行会**自动删掉**（写前
+    `*.bak.xlsx`），只有人工占位（`Notes` 写「占位」）与模板路径留着。
+    判据、例外与"删之前先备份"都在 `_sync_prune_stage` 里。
+
+    ⚠ **不做的三件事**（会动到用户整理过的数据，必须由人明确动作）：
+    改已有行的字段（`Category` / `Notes` / `Tag` 一个都不动）、把指向别的
+    目录（另一份副本）的行搬过来（`_sync_relink_stage` 只改指到本项目里
+    同名的那一份）、以及删掉"工具扫不到"的行 —— 后者只报不删
+    （`_unjudged_paths`：绝对路径 / `tmp/` 这类跳过目录下的行）。
     """
     root = Path(project_root)
     # ⚠ 本地 import 必须放在**函数最前面**：后面几处（删行判存、判重）
@@ -839,7 +932,7 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     #
     # 两个例外（人工占位留着；工具加过又指向嵌套副本的删掉）与备份规矩
     # 都在 `_sync_prune_stage` 里 —— 这里只负责编排（M4 重构）。
-    removed_by_kind, index, added_paths = _sync_prune_stage(
+    removed_by_kind, index, added_paths, unjudged_by_kind = _sync_prune_stage(
         root, table_dir, registry, walk)
     if removed_by_kind:
         _write_autoscan_index(table_dir, index)
@@ -892,6 +985,7 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                             relinked_by_kind=relinked_by_kind,
                             deduped_by_kind=deduped_by_kind,
                             dimensions=dimensions,
+                            unjudged_by_kind=unjudged_by_kind,
                             backup='、'.join(baks))
 
     # （`assets` 已经在上面扫过一次了，这里直接用 —— 别再扫第二遍。）
@@ -909,6 +1003,7 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                         deduped_by_kind=deduped_by_kind,
                         added_by_kind=added_by_kind,
                         dimensions=dimensions,
+                        unjudged_by_kind=unjudged_by_kind,
                         backup='、'.join(sorted(set(backups))))
 
 
@@ -1082,10 +1177,14 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
     """
     从资源表里**删掉 Path 命中的行**，返回删掉的行数（写前默认备份）。
 
-    只给"自动跟随现实"用：工具自己加进去的行，文件被删掉之后就跟着走
+    只给"自动跟随现实"用：文件被删掉之后，行跟着走
     （用户 2026-10-05："我认为表应当实时反应实际资源的情况，自动更新和增删"）。
-    **人工录入的行绝不走这条**（由侧车 `_autoscan.json` 判归属，见
-    `sync_asset_tables`）—— 占位行更是要留着。
+
+    ⚠ **不区分"谁加的行"**（同上 2026-10-05 的定案）：只要 `Path` 判不到
+    真实文件就删，人工录入的行也一样；占位行由调用方先豁免
+    （`is_missing_allowed`，见 `_missing_paths`）。旧 docstring 说过
+    "人工录入的行绝不走这条（由侧车判归属）"—— 那句早已过期，现在只有
+    "工具扫不到"的行不删（`_unjudged_paths`），不是"人写的行不删"。
     """
     keys = {norm_asset_path(p) for p in (paths or ()) if p}
     if not keys:
@@ -1812,27 +1911,49 @@ def is_missing_allowed(row) -> bool:
 
 
 def _row_file_exists(kind: str, row, project_root=None, walk=None) -> bool:
-    """这一行的 `Path` 在磁盘上真的存在吗（`kind` 是 `image` / `music` …）？"""
+    """
+    这一行的 `Path` 在磁盘上真的存在吗（`kind` 是 `image` / `music` …）？
+
+    ⚠ `walk` **管不着的路径**（绝对路径 / 跳过目录）退回磁盘探测（P1-6）——
+    从前这里和 `_missing_paths` 各判一次，同一条路径能得出两个相反答案：
+    `_missing_paths` 判"缺失"把行删掉，而别处又把它算成"存在"。
+    """
     rel = str((row or {}).get('Path') or '').strip()
     if not rel:
         return False
     try:
-        if walk is not None:
+        if _walk_covers(rel, walk):
             return walk.match(rel) is not None
-        if kind == 'image':
-            from storygraph.story.excel_export import resolve_thumb_source
-            return resolve_thumb_source(rel, project_root) is not None
-        return _resolve_audio_source(rel, project_root) is not None
+        return _probe_row_file(kind, rel, project_root) is not None
     except Exception as e:                      # noqa: BLE001 - 判不了就当存在
         swallow('assets.asset_registry._row_file_exists', e)
         return True
 
 
 def _backup_table(path: Path) -> str:
-    """把资源表备份成 `*.bak.xlsx`（返回备份路径；失败返回 ''）。"""
+    """
+    把资源表备份成 `*.bak.xlsx`（返回备份路径；失败返回 ''）。
+
+    **上一代不覆盖**（P2-4，2026-10-25）：连续两次同步删掉不同行时，
+    固定名 `*.bak.xlsx` 每次都盖掉上一代 —— 第二代的备份一命名，第一代
+    就没了。所以写之前先把旧的那份归档成 `<名>.bak-<时间戳>.xlsx`
+    （不匹配 `*.bak.xlsx` 这个固定名，不会影响"按固定名找备份"的老读者）。
+    """
     try:
         import shutil
+        from datetime import datetime
         bak = Path(path).with_suffix('.bak.xlsx')
+        if bak.is_file():
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            old = Path(path).with_suffix(f'.bak-{stamp}.xlsx')
+            n = 1
+            while old.exists():
+                old = Path(path).with_suffix(f'.bak-{stamp}-{n}.xlsx')
+                n += 1
+            try:
+                shutil.copyfile(bak, old)
+            except OSError as e:                # noqa: BLE001 - 归档失败不该拦住备份
+                swallow('assets.asset_registry._backup_table.archive', e)
         shutil.copyfile(path, bak)
         return str(bak)
     except Exception as e:                      # noqa: BLE001

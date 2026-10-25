@@ -217,6 +217,10 @@ class AssetRegistryMixin:
                 'relinked_by_kind': sync_info.get('relinked_by_kind') or {},
                 'deduped': int(sync_info.get('deduped') or 0),
                 'deduped_by_kind': sync_info.get('deduped_by_kind') or {},
+                # `walk` 覆盖不到（绝对路径 / 跳过目录）、磁盘上又探不到的行：
+                # **没删**，只是报出来让人决定（P1-6）。
+                'unjudged': int(sync_info.get('unjudged') or 0),
+                'unjudged_by_kind': sync_info.get('unjudged_by_kind') or {},
                 'unusable': sync_info.get('unusable') or {},
                 'repaired': sync_info.get('repaired') or [],
                 'repair_error': sync_info.get('repair_error') or '',

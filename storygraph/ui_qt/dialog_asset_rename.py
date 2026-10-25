@@ -154,7 +154,44 @@ class AssetRenameDialog(QDialog):
                 self._say(f'  …（还有 {len(f["changed"]) - 40} 行）')
         if not files:
             self._say('（脚本里没有引用这个旧名字 —— 不需要改任何 .rpy）')
+        self._say_side_effects(res)
         self._apply_btn.setEnabled(bool(files))
+
+    def _say_side_effects(self, res: dict):
+        """
+        把"**没改**的那些命中"和"**读不了**的文件"说清楚（P1-4 / P2-2）。
+
+        为什么必须说：改名是往用户的 `.rpy` 里写东西。两件事都会让"改名
+        等于没做完"，而它们的正确做法完全相反 —— 前者要人自己看一眼
+        （那是代码/注释/字符串，不是资产引用），后者要人修好文件再来一次
+        （编码不对 / 权限 / 文件不在了）。
+        """
+        rejected = res.get('rejected') or []
+        total = int(res.get('rejected_total') or
+                    sum(len(r.get('hits') or ()) for r in rejected))
+        if total:
+            self._say(f'\n⚠ 另有 {total} 处命中了旧名、但看着**不是资产引用位**'
+                      f'（代码 / 注释 / 字符串），没有改：')
+            shown = 0
+            for r in rejected:
+                for line_no, raw, why in (r.get('hits') or ()):
+                    if shown >= 8:
+                        break
+                    self._say(f'  {Path(str(r.get("path") or "")).name}:{line_no} '
+                              f'{raw.strip()[:60]}')
+                    self._say(f'       ↳ 没改：{why}')
+                    shown += 1
+                if shown >= 8:
+                    break
+            if total > shown:
+                self._say(f'  …（还有 {total - shown} 处）')
+            self._say('  真要改它们，请自己确认后手动改（改名只碰资产引用位）。')
+        skipped = res.get('skipped_files') or []
+        if skipped:
+            self._say(f'\n⚠ 有 {len(skipped)} 个文件**读不了**，改名会不完整'
+                      f'（游戏里可能"找不到图"）：')
+            for item in skipped[:8]:
+                self._say(f'  {item.get("path")}：{item.get("reason")}')
 
     def _touches_current_chapter(self) -> bool:
         """这次改名会改到**手上正开着的这一章**吗？"""
@@ -210,14 +247,33 @@ class AssetRenameDialog(QDialog):
                 f'并把原文件备份成 .bak。\n\n继续？') != QMessageBox.Yes:
             return
         res = self._session.asset_rename_apply(self._plan) if self._session else {}
-        if not res.get('ok'):
-            self._say(f'✗ 写入失败：{res.get("error")}')
+        modified = list(res.get('modified') or ())
+        if modified:
+            self._applied = res
+            self._say(f'\n✔ 已改 {len(modified)} 个文件'
+                      f'（备份 {len(res.get("backup_files") or ())} 个 .bak）')
+            self._undo_btn.setEnabled(bool(res.get('backup_files')))
+            self._apply_btn.setEnabled(False)
+        # —— 下面三种"没全成"都要说清（P0-3 / P2-1）——
+        # 从前 `apply` 无脑报 ok，写失败的文件也显示"改名成功"。
+        stale = res.get('changed_since_plan') or []
+        if stale:
+            self._say(f'\n⚠ 这 {len(stale)} 个文件在你**预览之后被改过**，'
+                      f'已拒写（原样未动 —— 重新点一次「预览」再应用）：')
+            for p in stale[:8]:
+                self._say(f'  {p}')
+        failed = res.get('failed') or []
+        if failed:
+            self._say(f'\n⚠ 这 {len(failed)} 个文件没能写入：')
+            for item in failed[:8]:
+                self._say(f'  {item.get("path")}：{item.get("reason")}')
+        if not res.get('ok') and not modified:
+            self._say(f'✗ 写入失败：{res.get("error") or res.get("reason")}')
             return
-        self._applied = res
-        self._say(f'\n✔ 已改 {len(res.get("modified") or ())} 个文件'
-                  f'（备份 {len(res.get("backup_files") or ())} 个 .bak）')
-        self._undo_btn.setEnabled(bool(res.get('backup_files')))
-        self._apply_btn.setEnabled(False)
+        if not res.get('ok'):
+            # 部分成功：回执要如实（别让用户以为全都改好了）
+            self._say('以上是**部分成功**：已写的可以回滚，被拒写的请按提示重试。')
+            return
         # 窗口要拿这个回调把"手上这一章"从磁盘重读（见 `_on_applied` 的说明）。
         if callable(self._on_applied):
             try:

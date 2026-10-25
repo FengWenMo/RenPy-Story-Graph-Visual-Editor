@@ -338,7 +338,8 @@ class ExportMixin:
                         pass                # 原地往返：连写都不写（mtime 不动）
                     elif not tgt.exists():
                         # 新路径：原样复制（新文件是"新建"的正当用途）
-                        _write(tgt, _style_of(self.script_path).apply(text))
+                        _write(tgt, _style_of(self.script_path).apply(
+                            text, source=self.script_path))
                     elif _read_src(tgt)[0] != text:
                         # ⚠ **目标里是另一份东西**（别人的手写文件、别的章节）
                         # —— 零改动也不是"可以不问就覆盖"的理由。

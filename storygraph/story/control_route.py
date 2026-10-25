@@ -538,7 +538,7 @@ def apply_control_init(plan: ControlInitPlan) -> dict:
                 'error': '编排层刚被改过（全文对不上）；重新算一次'}
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(plan.new_text))
+        write_text_atomic(path, style.apply(plan.new_text, source=path))
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': 0,
@@ -779,7 +779,7 @@ def apply_control_route(plan: ControlRoutePlan) -> dict:
         body += '\n'
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(body))
+        write_text_atomic(path, style.apply(body, source=path))
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,
@@ -865,7 +865,7 @@ def apply_control_unroute(plan: ControlRoutePlan) -> dict:
         body += '\n'
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(body))
+        write_text_atomic(path, style.apply(body, source=path))
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,
@@ -1106,7 +1106,7 @@ def apply_control_edit(plan: ControlEditPlan) -> dict:
         body += '\n'
     try:
         from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(body))
+        write_text_atomic(path, style.apply(body, source=path))
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,

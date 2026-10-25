@@ -184,6 +184,8 @@
      "sync_reconcile",
      "synced",
      "synced_by_kind",
+     "unjudged",
+     "unjudged_by_kind",
      "unusable"
     ],
     "ok": true

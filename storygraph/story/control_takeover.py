@@ -335,7 +335,8 @@ def apply_takeover(plan) -> dict:
             p.parent.mkdir(parents=True, exist_ok=True)
             style = (read_text(p)[1] if p.exists() else None)
             from storygraph.story.source_style import PLAIN
-            write_text_atomic(p, (style or PLAIN).apply(edit.new_text))
+            write_text_atomic(p, (style or PLAIN).apply(edit.new_text,
+                                                        source=p))
             written.append(str(p))
         except OSError as exc:
             # 回滚已经写过的（尽力而为）
@@ -351,7 +352,8 @@ def apply_takeover(plan) -> dict:
                         rolled.append(done)
                         continue
                     style = read_text(d)[1]
-                    write_text_atomic(d, style.apply(edit.old_text))
+                    write_text_atomic(d, style.apply(edit.old_text,
+                                                     source=d))
                     rolled.append(done)
                 except OSError as rollback_exc:
                     # 回滚失败只能记账：调用方仍会如实说"已回滚 N 个"，
