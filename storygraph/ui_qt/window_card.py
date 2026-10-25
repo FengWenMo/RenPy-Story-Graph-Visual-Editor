@@ -1159,8 +1159,13 @@ class CardPageMixin:
         # 面包屑 / 下拉 / 图上的高亮都应当一起变。
         self._session.focus_label = str(
             getattr(self._session.beats[idx], 'label', '') or '')
-        self._panel.load_fields(self._session.fields(idx),
-                                self._session.cards(idx))
+        # `source_lines` = 这一拍在源 .rpy 里的行号范围 → 喂给 CodeBlock 的
+        # 行号栏（用户 2026-10-25："精确到行……不然我都不知道它到底在哪儿"）。
+        _beat = self._session.beats[idx]
+        self._panel.load_fields(
+            self._session.fields(idx), self._session.cards(idx),
+            source_lines=(getattr(_beat, 'src_first', None),
+                          getattr(_beat, 'src_last', None)))
         self._sync_spec_args(idx)
         self._panel.set_speakers(self._session.characters(),
                                  self._session.beats[idx].speaker or '')

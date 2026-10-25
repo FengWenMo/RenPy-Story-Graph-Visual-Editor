@@ -131,6 +131,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDockWidget,
                                QWidget)
 
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS, EditorSession
+from storygraph.ui_qt.code_edit import CodeEditor
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.elide import ElidedLabel
@@ -596,10 +597,18 @@ class BeatCardEditor(QWidget):
             lab.setProperty('role', 'caption')
             lab.setMinimumWidth(72)
             box.addWidget(lab, 0)
-            w = (QPlainTextEdit() if name in ('CodeBlock', 'Stage', 'Notes')
-                 else QLineEdit())
+            # **CodeBlock 用带行号栏的编辑器**（用户 2026-10-25："跟 IDE 那种
+            # 一样，左边写个数字……不然我都不知道它到底在哪儿"）。
+            # 行号是**源文件里的真实行号**（`load_fields` 把这一拍的
+            # `src_first/src_last` 传下去）；新建的卡片没有源行 → 退回 1/2/3…
+            if name == 'CodeBlock':
+                w = CodeEditor()
+            elif name in ('Stage', 'Notes'):
+                w = QPlainTextEdit()
+            else:
+                w = QLineEdit()
             if isinstance(w, QPlainTextEdit):
-                w.setFixedHeight(2 * 20 + 12)
+                w.setFixedHeight(3 * 20 + 12)
             self._widgets[name] = w
             box.addWidget(w, 1)
             adv.addLayout(box)
@@ -1259,12 +1268,17 @@ class BeatCardEditor(QWidget):
     #: `condition` 是小写（它是 `Beat.condition`，不是 Excel 列名）。
     EXTRA_WIDGETS = ('condition',)
 
-    def load_fields(self, fields: dict, sprite_items: list):
+    def load_fields(self, fields: dict, sprite_items: list,
+                    source_lines=None):
         """
         把一拍的内容填进卡片。
 
         `_loading` 期间屏蔽脏标记计算：填控件本身会触发一串
         `textChanged`，不加这道闸，"刚载入"会被判成"已修改"。
+
+        `source_lines=(first, last)`：这一拍在源 `.rpy` 里的行号范围 ——
+        给 CodeBlock 的**行号栏**用（用户要"精确到行"，好回编辑器里定位）。
+        不给（新建卡片 / 单测）→ 行号退回 1/2/3…
         """
         self._loading = True
         try:
@@ -1275,6 +1289,10 @@ class BeatCardEditor(QWidget):
             for name in self._all_names():
                 self._set_value(name, fields.get(name, ''))
             self._grid.load(sprite_items)
+            _code = self._widgets.get('CodeBlock')
+            if isinstance(_code, CodeEditor):
+                first, last = (source_lines or (None, None))
+                _code.set_source_lines(first, last)
             self._loaded_fields = {n: str(fields.get(n, '') or '')
                                    for n in self._all_names()}
             # Stage 那一格的原文单独记一份（判"手改过没有"要用它）
