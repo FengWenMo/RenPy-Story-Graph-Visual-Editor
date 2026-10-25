@@ -679,8 +679,23 @@ class CardPageMixin:
     def _make_item(self, i) -> QListWidgetItem:
         item = QListWidgetItem(self._item_text(i))
         item.setData(Qt.UserRole, i)
-        label = str(getattr(self._session.beats[i], 'label', '') or '')
-        item.setToolTip(f'label：{label}' if label else '')
+        beat = self._session.beats[i]
+        label = str(getattr(beat, 'label', '') or '')
+        try:
+            from storygraph.app.beat_clear import empty_note
+            note = empty_note(beat)
+        except Exception as e:                  # noqa: BLE001 - 只是标记
+            swallow('ui_qt.window_card.make_item.empty_note', e)
+            note = ''
+        tips = []
+        if label:
+            tips.append(f'label：{label}')
+        if note:
+            tips.append(f'{note}（你清空了这一拍的文字；'
+                        f'导出后它会只剩这些行）')
+            # 灰掉：一眼扫出来哪些是"清空过"的壳子
+            item.setForeground(QColor(T.t('text.tertiary')))
+        item.setToolTip('\n'.join(tips))
         return item
 
     def _entry_of_beat(self, idx: int) -> dict:
@@ -735,6 +750,11 @@ class CardPageMixin:
             label = str(e.get('statement_label') or '')
             tail = f' · {label}' if label else ''
             return f"{int(e.get('index', 0)) + 1:>3} ◆ {name}{tail}  {rest}"
+        note = str(e.get('empty_note') or '')
+        if note:
+            # **分级删除留下的空拍**：说清"我还剩下什么"，
+            # 而不是混进「（无台词）」里（用户 2026-10-25）
+            return (f"{int(e.get('index', 0)) + 1:>3} ○ {note}")
         return (f"{int(e.get('index', 0)) + 1:>3} "
                 f"{e['prefix']}{e['who']}：{e['text'][:24]}")
     def refresh_list_row(self, i: int):
@@ -909,13 +929,10 @@ class CardPageMixin:
                   f'剧本里插了 {plan.call_line}')
         self._status(f'已插入选择点 {plan.label}（剧本只多一行，导出才落盘）')
 
-    def delete_card(self):
-        """删掉当前这一拍（**先问一声**：它没有多级撤销，只有单级恢复）。"""
-        idx = self._loaded_idx
-        if not self._session.has(idx):
-            self._status('还没有载入章节，没有可删的卡片。')
-            return
-        beat = self._session.beats[idx]
+    # ---------- 分级删除（用户 2026-10-25）----------
+
+    def _beat_brief(self, beat) -> tuple:
+        """`(谁, 台词/流程摘要)` —— 确认框里那一行。"""
         from storygraph.story.flow import flow_card_text, parse_flow
         flow = parse_flow(beat)
         who = '控制流' if flow else (
@@ -923,26 +940,159 @@ class CardPageMixin:
         text = (flow_card_text(flow) if flow
                 else (str(getattr(beat, 'text', '') or '')[:60]
                       or '（没有台词）'))
-        # **删掉的是几行？**（用户 2026-10-21：源码塞在「代码」那一格里，
-        # Excel 只有一行高，人看不见自己删了 7 行代码 + 1 句台词）
+        return who, text
+
+    def delete_options(self, idx: int) -> list:
+        """
+        三档删除各自的"将去掉几行 / 会留下几行 / 能不能做"（**纯计算**）。
+
+        抽成独立方法是为了可测：界面只负责把这些话摆出来，
+        判据直接查这个列表，不用去点按钮。
+        """
+        from storygraph.app.beat_clear import (MODES, MODE_WHOLE,
+                                               normalize_mode)
+        out = []
+        for mode, label, desc in MODES:
+            mode = normalize_mode(mode)
+            if mode == MODE_WHOLE:
+                prev = self._delete_preview(idx)
+                out.append({'mode': mode, 'label': label, 'desc': desc,
+                            'enabled': bool(prev.get('ok', True)),
+                            'lines': int(prev.get('lines') or 0),
+                            'keep': 0,
+                            'head': [str(x) for x in (prev.get('head') or ())],
+                            'why': str(prev.get('error') or '')})
+                continue
+            plan = self._session.clear_preview(idx, mode) or {}
+            ok = bool(plan.get('ok'))
+            drops = [str(x) for x in (plan.get('drop_lines') or [])]
+            out.append({'mode': mode, 'label': label, 'desc': desc,
+                        'enabled': ok,
+                        'lines': len(drops),
+                        'keep': len(plan.get('keep_lines') or []),
+                        'head': drops[:3],
+                        'why': str(plan.get('blocking') or '')})
+        return out
+
+    def _delete_choice_text(self, idx: int, who: str, text: str,
+                            options: list) -> str:
+        """
+        三选一弹框里那段正文（**纯计算**，判据直接查它，不用点按钮）。
+
+        每一档都要说清"去掉几行、**去掉的是哪几行**、留几行" ——
+        `8 行` 是数字，`$ renpy.block_rollback()` 才是人能认出来的东西
+        （2026-10-21 那条教训，在分级删除里同样成立）。
+        """
+        rows = []
+        for opt in options:
+            if not opt['enabled']:
+                rows.append(f"· {opt['label']}：这一档用不了 —— {opt['why']}")
+                continue
+            head = [str(x) for x in (opt.get('head') or ())]
+            brief = ''
+            if head:
+                more = opt['lines'] - len(head)
+                brief = '（' + ' ／ '.join(h.strip() for h in head)
+                brief += ' …' if more > 0 else ''
+                brief += '）'
+            rows.append(f"· {opt['label']}：去掉 {opt['lines']} 行{brief}、"
+                        f"留 {opt['keep']} 行 —— {opt['desc']}")
+        return '\n'.join(rows)
+
+    def _ask_delete_mode(self, idx: int, who: str, text: str,
+                         options: list) -> str:
+        """
+        弹出三选一，返回 `'text'` / `'text_stage'` / `'whole'`；取消返回 `''`。
+
+        用 `QMessageBox` 的自定义按钮（不是 `question()`：那只有是/否，
+        而这里要人**挑一档**）。默认高亮第二档 —— 按用户描述的事故，
+        "文字和舞台清掉、代码留下"才是他真正想要的结果。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle('删这张卡，删到什么程度？')
+        box.setText(f'第 {idx + 1} 拍　{who}：{text}')
+        box.setInformativeText(
+            self._delete_choice_text(idx, who, text, options))
+        buttons = {}
+        for opt in options:
+            role = (QMessageBox.DestructiveRole if opt['mode'] == 'whole'
+                    else QMessageBox.ActionRole)
+            btn = box.addButton(opt['label'], role)
+            btn.setEnabled(bool(opt['enabled']))
+            if not opt['enabled']:
+                btn.setToolTip(opt.get('why') or '')
+            buttons[btn] = opt['mode']
+        cancel = box.addButton('取消', QMessageBox.RejectRole)
+        buttons[cancel] = ''
+        stage_btn = next((b for b, m in buttons.items()
+                          if m == 'text_stage' and b.isEnabled()), None)
+        if stage_btn is not None:
+            box.setDefaultButton(stage_btn)
+        box.exec()
+        return buttons.get(box.clickedButton(), '')
+
+    def _do_clear(self, idx: int, mode: str, who: str, text: str) -> dict:
+        """执行"清空"这一档（内存 + 结构撤销栈），并把结果说出来。"""
+        res = self._session.clear_beat(idx, mode)
+        if not res.get('ok'):
+            self._status(res.get('error') or '清空失败')
+            return res
+        drop = int(len(res.get('drop_lines') or []))
+        keep = int(len(res.get('kept_lines') or []))
+        remains = str(res.get('remains') or '')
+        name = '只清空文字' if mode == 'text' else '清空文字和舞台'
+        self._reload_list()
+        self._show_index(res['index'])
+        self._sync_structural_buttons()
+        self._log(f'[卡片] 第 {idx + 1} 拍已「{name}」（{who}：{text}）：'
+                  f'产物里少了 {drop} 行、留下 {keep} 行'
+                  + (f'（{remains}）' if remains else '')
+                  + '，**代码块一个字没动**；'
+                    '点「↩ 撤销结构操作」可以放回来')
+        self._status(f'✂ 已{name}：少 {drop} 行、留 {keep} 行'
+                     + (f'（{remains}）' if remains else ''))
+        return res
+
+    def delete_card(self):
+        """
+        删掉当前这一拍 —— **先问删到什么程度**。
+
+        三档（`app/beat_clear.MODES`）：
+          ① 只清空文字（代码块、舞台都留）
+          ② 清空文字和舞台（**代码块留**）   ← 默认
+          ③ 整个删掉（连代码块一起）        ← 从前唯一的选择
+
+        为什么要有①②（用户 2026-10-25）：
+
+          > 当我删掉卡片的时候……我会顺带把一些代码块什么的也删掉……
+          > 能不能说：只删掉句子等……而不删掉代码块呢……？
+
+        一张卡 = 一句话 + 它附带的代码行，整拍删等于把 CodeBlock 里那几行
+        手写代码一起带走 —— 于是"删除需要慎用"。分级之后，默认那一档
+        只掉一句台词的量，掉代码要人自己再点一次。
+        """
+        idx = self._loaded_idx
+        if not self._session.has(idx):
+            self._status('还没有载入章节，没有可删的卡片。')
+            return
+        beat = self._session.beats[idx]
+        who, text = self._beat_brief(beat)
+        options = self.delete_options(idx)
+        mode = self._ask_delete_mode(idx, who, text, options)
+        if not mode:
+            return
+        if mode != 'whole':
+            self._do_clear(idx, mode, who, text)
+            return
+
+        # —— 第三档：整拍删除（与从前一致）——
         preview = self._delete_preview(idx)
         if preview and preview.get('ok') is False \
                 and not preview.get('can_cascade'):
-            # 删不了（只剩一拍 / 这一拍不存在）：**别弹那个"要删几行"的框**，
-            # 否则用户确认完才被告知删不了。
             self._status(preview.get('error') or '这一拍删不了。')
-            return
-        if QMessageBox.question(
-                self, '删除这张卡片',
-                f'删掉第 {idx + 1} 拍？\n\n{who}：{text}'
-                + self._delete_line_note(preview) +
-                f'\n\n（只改内存里的章节；删完可以点「↩ 撤销结构操作」放回来，'
-                f'导出前不落盘）'
-        ) != QMessageBox.Yes:
             return
         res = self._session.delete_beat(idx)
         if not res.get('ok') and res.get('can_cascade'):
-            # 块头（菜单/循环/选项体）带着块体：先问"要不要连块体一起删"。
             n = int(res.get('blocked_count') or 0)
             wide = self._delete_preview(idx, cascade=True)
             if QMessageBox.question(
@@ -957,8 +1107,6 @@ class CardPageMixin:
         if not res.get('ok'):
             self._status(res.get('error') or '删除失败')
             return
-        # 删掉的如果是一张 call / jump，图上的边也要消失；同时后面的拍
-        # 换了 line_id，派生会一起重认。
         edge_note = self._flow_edge_note(self._refresh_flow_edges())
         self._reload_list()
         self._show_index(res['index'])

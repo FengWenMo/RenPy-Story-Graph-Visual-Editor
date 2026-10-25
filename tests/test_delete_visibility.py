@@ -88,30 +88,36 @@ class TestDeletePreview:
 # ==================================================================
 
 class TestDeleteDialogSaysIt:
-    def test_the_confirm_text_names_the_lines(self, ui_window, monkeypatch):
+    def test_the_choice_text_names_the_lines(self, ui_window):
         """
-        确认框里必须写"这一拍在产物里是 N 行" + 前几行原文。
+        三选一的框里必须写"去掉几行、**哪几行**、留几行"。
 
-        这里让用户点「No」：**只验话说没说**，不动数据。
+        2026-10-25 改成三档之后，这句话从"一个确认框"搬到了
+        "三选一的正文"里 —— 判据不变：**话必须说，且要给出原文**。
         """
-        from storygraph.ui_qt import window_card as WC
-
-        seen = []
-
-        def _no(parent, title, text, *a, **k):
-            seen.append(str(text))
-            return QMessageBox.No
-
-        monkeypatch.setattr(WC.QMessageBox, 'question', staticmethod(_no))
         w = _window(ui_window)
         w._set_page(w.PAGE_CARD)
         w._show_index(1)
+        who, text = w._beat_brief(w._session.beats[1])
+        opts = w.delete_options(1)
+        assert [o['mode'] for o in opts] == ['text', 'text_stage', 'whole']
+        body = w._delete_choice_text(1, who, text, opts)
+        whole = next(o for o in opts if o['mode'] == 'whole')
+        assert f"去掉 {whole['lines']} 行" in body, body
+        assert 'voice' in body or 'show' in body, f'没给出前几行原文：{body}'
+        # 前两档必须说"留几行"（= 代码块还活着）
+        first = next(o for o in opts if o['mode'] == 'text')
+        assert first['keep'] >= 1, f'第一档连一行都不留，那它就该被禁用：{first}'
+
+    def test_cancel_does_not_touch_the_chapter(self, ui_window, monkeypatch):
+        """弹框里点「取消」→ 一拍都不许少。"""
+        w = _window(ui_window)
+        w._set_page(w.PAGE_CARD)
+        w._show_index(1)
+        before = len(w._session)
+        monkeypatch.setattr(w, '_ask_delete_mode', lambda *a, **k: '')
         w.delete_card()
-        assert seen, '连确认框都没弹'
-        text = seen[0]
-        assert '在产物里是' in text and '行' in text, text
-        assert 'voice' in text or 'show' in text, f'没给出前几行原文：{text}'
-        assert len(w._session) == 13, '点了「No」却删了一拍'
+        assert len(w._session) == before, '点了取消却动了数据'
 
     def test_a_single_line_beat_does_not_get_noise(self, ui_window, monkeypatch):
         """只有一行的拍**不弹**那段警告（多数拍是这样，别制造噪音）。"""
@@ -138,10 +144,9 @@ class TestAfterDeleting:
 
         为什么不是只在确认框里说：人常常点完就忘，事后回看控制台要能对账。
         """
-        from storygraph.ui_qt import window_card as WC
-
-        monkeypatch.setattr(WC.QMessageBox, 'question',
-                            staticmethod(lambda *a, **k: QMessageBox.Yes))
+        w0 = _window(ui_window)
+        # 选「整个删掉」那一档（`whole`）；清空那两档另有判据（test_clear_beat）
+        monkeypatch.setattr(w0, '_ask_delete_mode', lambda *a, **k: 'whole')
         w = _window(ui_window)
         w._set_page(w.PAGE_CARD)
         w._show_index(1)

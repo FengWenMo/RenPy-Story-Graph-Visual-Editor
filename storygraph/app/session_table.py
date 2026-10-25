@@ -1250,6 +1250,52 @@ class TableSessionMixin:
                 'removed': removed[0] if removed else None,
                 'count': len(self.beats)}
 
+    def clear_preview(self, idx: int, mode: str = 'text') -> dict:
+        """
+        清空这张卡**会让产物少哪几行、留哪几行** —— 不改任何状态。
+
+        与"删整拍"的预览（`delete_preview`）是同一个思路：**先把话说清楚**。
+        差别只在作用域 —— 这里清的是通道（文字 / 舞台），代码块留下。
+        """
+        from storygraph.app.beat_clear import plan_clear
+
+        if not self.has(idx):
+            return {'ok': False, 'blocking': '这一拍不存在',
+                    'drop_lines': [], 'keep_lines': []}
+        return plan_clear(self.beats[idx], mode).to_dict()
+
+    def clear_beat(self, idx: int, mode: str = 'text') -> dict:
+        """
+        把第 idx 张卡片**清空成"只剩某些通道"**（用户 2026-10-25 的分级删除）。
+
+        两档（见 `app.beat_clear`）：
+          · `text`       —— 只清文字，**代码块与舞台都留**；
+          · `text_stage` —— 连舞台/音频一起去掉，**代码块留**。
+
+        整拍删除仍然走 `delete_beat`（那是第三档，也是现在的行为）。
+        **只改内存**：落盘仍要「⤓ 导出」，撤销走结构撤销栈（`undo_structural`）。
+        """
+        from storygraph.app.beat_clear import (apply_clear, plan_clear,
+                                               snapshot_fields)
+
+        if not self.has(idx):
+            return {'ok': False, 'error': '这一拍不存在', 'index': -1}
+        beat = self.beats[idx]
+        plan = plan_clear(beat, mode)
+        if not plan.ok:
+            return {'ok': False, 'error': plan.blocking or '这一拍清不了',
+                    'index': idx, 'mode': plan.mode, 'blocked': 'clear',
+                    'kept_lines': [], 'drop_lines': []}
+        saved = snapshot_fields(beat, plan.fields)
+        res = apply_clear(beat, mode)
+        self._push_struct_undo(('clear', idx, saved, mode))
+        # 内容变了 → 内容撤销栈（按拍号记的那些）对不上，清掉（与删/插同一规矩）
+        self.forget_undo()
+        return {'ok': True, 'error': '', 'index': idx, 'mode': res['mode'],
+                'fields': res['fields'], 'drop_lines': res['drop_lines'],
+                'kept_lines': res['keep_lines'], 'remains': res['remains'],
+                'count': len(self.beats)}
+
     def move_beat(self, src: int, dst: int) -> dict:
         """
         把第 `src` 拍移到扁平位置 `dst`（移动后的下标）。
@@ -1355,6 +1401,17 @@ class TableSessionMixin:
             index = at
             if self._last_removed is not None and self._last_removed[0] == at:
                 self._last_removed = None
+        elif kind == 'clear':
+            # 分级删除的"清空"：把清掉的字段原样放回去
+            at = int(op[1])
+            if not 0 <= at < len(self.beats):
+                return {'ok': False,
+                        'error': '那一拍已经不在了（可能被别的操作改过）',
+                        'index': -1}
+            from storygraph.app.beat_clear import restore_fields
+            restore_fields(self.beats[at], op[2] or {})
+            note = '撤销清空'
+            index = at
         elif kind == 'move':
             src, new_index = int(op[1]), int(op[2])
             beat, old_path, old_cond = op[3], op[4], op[5]
@@ -1476,10 +1533,20 @@ class TableSessionMixin:
         if not statement:
             head = str(getattr(b, 'loop_header', '') or '').strip()
             statement = head.split()[0] if head.split() else ''
+        # **分级删除留下的"空拍"**（用户 2026-10-25）：
+        # 文字清了、代码/舞台还在 —— 列表里要一眼看得出来，
+        # 否则那一行会显示成「（无台词）」，跟"本来就是旁白"混在一起。
+        try:
+            from storygraph.app.beat_clear import empty_note
+            empty = empty_note(b)
+        except Exception as e:                     # noqa: BLE001 - 标记只是提示
+            swallow('app.session_table.list_entry.empty_note', e)
+            empty = ''
         return {
             'index': idx,
             'who': (getattr(b, 'speaker', '') or '').strip(),
             'prefix': prefix,
+            'empty_note': empty,
             'text': (getattr(b, 'text', '') or '').strip() or '（无台词）',
             'line_id': getattr(b, 'line_id', '') or '',
             'statement': statement,
