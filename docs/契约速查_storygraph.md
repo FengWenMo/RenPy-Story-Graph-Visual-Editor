@@ -4591,3 +4591,38 @@ jump 改目标 / 改参数 / 只翻页不动）。
   回执说"另有 N 张空卡片还没有任何内容（不会产生行）"。
 - `$` 语句编译不过、而首词是这一章某拍的**语句名**时，拒因补一句
   "这是自定义语句不是 Python，参数请填参数格（Excel 里是 `名·参数` 列）"。
+
+## §48 落盘安全：载体风格 / 非 UTF-8 / 引擎闸门（2026-10-25 中午）
+
+### 48.1 「原地改写」一律走出入对称：读时记风格、写前还原
+
+凡是"读回来 → 改 → 写回去"的落盘点，都必须用
+`source_style.detect()` / `style.apply()`（BOM + 换行），并且**读的时候
+就决定用哪种解码**：
+
+- 要"逐字节保留"的（选择点追加、控制流、ladder）：**严格 UTF-8 解码**
+  （`read_bytes().decode('utf-8')`）。`source_style.read_text` 用的是
+  `errors='replace'`，适合给解析器看，**不适合**读回来再写回去 ——
+  坏字节会被换成 `\ufffd`，那就是改坏用户文件；
+- 只给校验当参照的（`_source_text_for_guard`）：用
+  `source_style.read_text`（剥 BOM、统一 LF）——**不许**用
+  `Path.read_text`（BOM 留在第 1 行，`OPAQUE_LOST` 会把每份 BOM 章节误拒）。
+
+### 48.2 非 UTF-8 文件：载入就报错，不许静默 0 拍
+
+`EditorSession.load` 先按 `utf-8-sig` 严格解一遍；失败抛
+`ValueError`（"这个文件不是 UTF-8（Ren'Py 只认 UTF-8）：… 请另存为 UTF-8"）。
+Ren'Py 只认 UTF-8，所以"这一章是空的"那种界面状态是**假话**。
+
+### 48.3 「表 → .rpy」的三条出口必须同一套闸门
+
+`cli table xlsx2rpy` / `build` / 卡片页导出 / **UI 表格导出**
+（`app/tables.apply_export`）都要 `engine_lint=True` +
+`lint_ignore_heads=declared_heads_near(src)`。少传一处，就等于"界面这条
+路写出去的产物引擎读不了也没人管"。
+
+### 48.4 工具独占文件要带生成标记
+
+`*_choices.rpy` 这类"工具独占、别人不碰"的文件，创建时就要
+`ensure_generator_marker`（与 `control_takeover` 一致）——否则将来任何
+"重算"流程走 `write_generation`，第一步就被 `HANDWRITTEN_TARGET` 拒写。

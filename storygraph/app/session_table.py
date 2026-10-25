@@ -345,8 +345,9 @@ class TableSessionMixin:
                 f'（第 {exc.start} 字节起）。'
                 f'请用编辑器另存为「UTF-8」（不要 ANSI / GBK）再载入。'
             ) from exc
-        except OSError:
-            pass                    # 读不了（权限 / 刚被删）→ 交给下面按老路报
+        except OSError as e:
+            # 读不了（权限 / 刚被删）→ 记一笔，交给下面按老路报
+            swallow('app.session_table.load.decode_check', e)
         pr = ParseResultBuilder().build(RenPyParser().parse(str(path)))
         raw = beats_from_parse_result(pr)
         symbols = self.refresh_symbols()
