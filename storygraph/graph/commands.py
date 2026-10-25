@@ -362,7 +362,7 @@ class ControlRouteCommand(Command):
                 swallow('graph.commands.ControlRouteCommand.rollback_init',
                         RuntimeError('编排层在补包装之后又被改过；不回滚'))
                 return
-            write_text_atomic(self.path, style.apply(old_text))
+            write_text_atomic(self.path, style.apply(old_text, source=self.path))
         except OSError as exc:                    # noqa: BLE001 - 回滚失败只能记账
             swallow('graph.commands.ControlRouteCommand.rollback_init', exc)
 
@@ -378,7 +378,8 @@ class ControlRouteCommand(Command):
                 raise RuntimeError(
                     '编排层在接线之后又被改过；为了不覆盖新改动，'
                     '这次 Ctrl+Z 没有回滚那个文件')
-            write_text_atomic(self.path, style.apply(self.old_text))
+            write_text_atomic(self.path, style.apply(self.old_text,
+                                                     source=self.path))
         graph = self.graph_view.graph
         if self.mode == 'remove':
             if self.removed_edge is not None:
@@ -474,7 +475,7 @@ class EditControlRouteCommand(Command):
                 swallow('graph.commands.EditControlRouteCommand.rollback',
                         RuntimeError('编排层在补包装之后又被改过；不回滚'))
                 return
-            write_text_atomic(self.path, style.apply(old_text))
+            write_text_atomic(self.path, style.apply(old_text, source=self.path))
         except OSError as exc:                    # noqa: BLE001 - 回滚失败只能记账
             swallow('graph.commands.EditControlRouteCommand.rollback', exc)
 
@@ -490,7 +491,8 @@ class EditControlRouteCommand(Command):
                 raise RuntimeError(
                     '编排层在这次修改之后又被改过；为了不覆盖新改动，'
                     '这次 Ctrl+Z 没有回滚那个文件')
-            write_text_atomic(self.path, style.apply(self.old_text))
+            write_text_atomic(self.path, style.apply(self.old_text,
+                                                     source=self.path))
         edge = self.graph_view.graph.edges.get(self.edge_id)
         if edge is not None and self.old_to_id is not None:
             edge.to_id = self.old_to_id
@@ -587,7 +589,7 @@ class DeleteSourceLineCommand(Command):
                 raise RuntimeError(
                     '源文件在删除之后又被改过；为了不覆盖新改动，'
                     '这次 Ctrl+Z 没有回滚那个文件')
-            write_text_atomic(path, style.apply(self.plan.old_text))
+            write_text_atomic(path, style.apply(self.plan.old_text, source=path))
         if self.removed_edge is not None:
             self.graph_view.graph.edges[self.removed_edge.id] = self.removed_edge
         self.graph_view.on_graph_structure_changed()
@@ -878,7 +880,7 @@ class TakeoverCommand(Command):
                 # 这个文件是接管新建的：撤销 = 删掉，而不是留一个空 .rpy
                 path.unlink()
                 continue
-            write_text_atomic(path, style.apply(edit.old_text))
+            write_text_atomic(path, style.apply(edit.old_text, source=path))
         self.graph_view.on_graph_structure_changed()
 
 
@@ -937,7 +939,8 @@ class _ControlBranchBase:
             now, style = read_text(self.path)
             if self.init_new_text and now != self.init_new_text:
                 return
-            write_text_atomic(self.path, style.apply(self.init_old_text))
+            write_text_atomic(self.path, style.apply(self.init_old_text,
+                                                     source=self.path))
         except OSError as exc:                     # noqa: BLE001 - 回滚失败只能记账
             swallow('graph.commands.ControlBranch.rollback_init', exc)
 
@@ -951,7 +954,8 @@ class _ControlBranchBase:
             raise RuntimeError(
                 '编排层在这次修改之后又被改过；为了不覆盖新改动，'
                 '这次 Ctrl+Z 没有回滚那个文件')
-        write_text_atomic(self.path, style.apply(self.old_text))
+        write_text_atomic(self.path, style.apply(self.old_text,
+                                                 source=self.path))
 
 
 class AddControlBranchCommand(_ControlBranchBase, Command):
@@ -1181,7 +1185,8 @@ class RemoveControlBranchCommand(Command):
                 raise RuntimeError(
                     '编排层在删除之后又被改过；为了不覆盖新改动，'
                     '这次 Ctrl+Z 没有回滚那个文件')
-            write_text_atomic(self.path, style.apply(self.plan.old_text))
+            write_text_atomic(self.path, style.apply(self.plan.old_text,
+                                                     source=self.path))
         if self.removed_edge is not None:
             self.graph_view.graph.edges[self.edge_id] = self.removed_edge
         self.graph_view.on_graph_structure_changed()

@@ -61,6 +61,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.textlines import split_lines
+from storygraph.story.source_style import SourceNotUtf8
+
 CONTROL_SUFFIX = '_control'
 
 
@@ -80,7 +83,7 @@ def _blocks(text: str) -> list:
     块体是 `[start+1, end)`）。只认行首无缩进的 `label`，块在下一个行首
     label 或文件尾结束。
     """
-    lines = str(text or '').splitlines()
+    lines = split_lines(text)
     starts = []
     for i, line in enumerate(lines):
         m = re.match(r'^label\s+([^\s:(#]+)\s*(?:\(|:)', line)
@@ -294,7 +297,7 @@ def _label_decl(project_root, name: str):
             text, _style = _read(path)
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines()):
+        for i, line in enumerate(split_lines(text)):
             m = _RE_LABEL_LINE.match(line)
             if m and m.group(1) == want:
                 return {'path': str(path), 'line_no': i + 1,
@@ -330,7 +333,7 @@ def _incoming_refs(project_root, name: str) -> list:
             text, _style = _read(path)
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines()):
+        for i, line in enumerate(split_lines(text)):
             raw = line.strip()
             if not raw or raw.startswith('#'):
                 continue
@@ -539,6 +542,9 @@ def apply_control_init(plan: ControlInitPlan) -> dict:
     try:
         from storygraph.story.paths import write_text_atomic
         write_text_atomic(path, style.apply(plan.new_text, source=path))
+    except SourceNotUtf8 as exc:
+        return {'ok': False, 'path': str(path), 'old_text': text,
+                'new_text': text, 'line_no': 0, 'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': 0,
@@ -623,7 +629,7 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
         plan.blocking.append(plan.reason)
         return plan
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     tops = _top_lines(lines, block)
     if not tops:
         # 空 label 块：直接把路由写进去（`jump` 不需要 return；call 也不返回）。
@@ -742,7 +748,7 @@ def apply_control_route(plan: ControlRoutePlan) -> dict:
                 'new_text': text, 'line_no': 0,
                 'error': '编排层文件是空的'}
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     idx = int(plan.line_no) - 1
     if not (0 <= idx <= len(lines)):
         return {'ok': False, 'path': str(path), 'old_text': text,
@@ -780,6 +786,11 @@ def apply_control_route(plan: ControlRoutePlan) -> dict:
     try:
         from storygraph.story.paths import write_text_atomic
         write_text_atomic(path, style.apply(body, source=path))
+    except SourceNotUtf8 as exc:
+        # 非 UTF-8：读的时候坏字节已变成 U+FFFD，写回去就是改坏它（P0-B）
+        return {'ok': False, 'path': str(path), 'old_text': text,
+                'new_text': text, 'line_no': plan.line_no,
+                'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,
@@ -815,7 +826,7 @@ def plan_control_unroute(project_root, src_label, dst_label,
         plan.blocking.append(plan.reason)
         return plan
     plan.target_label = (control_label(dst) if etype == 'jump' else dst)
-    lines = text.splitlines()
+    lines = split_lines(text)
     tops = _top_lines(lines, block)
     matches = [(i, ln) for i, ln in tops
                if _route_of(ln.strip()) == (etype, plan.target_label)]
@@ -853,7 +864,7 @@ def apply_control_unroute(plan: ControlRoutePlan) -> dict:
     path = Path(plan.path)
     from storygraph.story.source_style import read_text
     text, style = read_text(path)
-    lines = text.splitlines()
+    lines = split_lines(text)
     idx = int(plan.line_no) - 1
     if not (0 <= idx < len(lines)) or lines[idx] != plan.old_line:
         return {'ok': False, 'path': str(path), 'old_text': text,
@@ -866,6 +877,11 @@ def apply_control_unroute(plan: ControlRoutePlan) -> dict:
     try:
         from storygraph.story.paths import write_text_atomic
         write_text_atomic(path, style.apply(body, source=path))
+    except SourceNotUtf8 as exc:
+        # 非 UTF-8：读的时候坏字节已变成 U+FFFD，写回去就是改坏它（P0-B）
+        return {'ok': False, 'path': str(path), 'old_text': text,
+                'new_text': text, 'line_no': plan.line_no,
+                'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,
@@ -973,7 +989,7 @@ def plan_control_edit(project_root, src_label, old_dst_label,
         return plan
 
     old_target = control_label(old_dst) if old_etype == 'jump' else old_dst
-    lines = text.splitlines()
+    lines = split_lines(text)
     tops = _top_lines(lines, block)
     matches = [(i, ln) for i, ln in tops
                if _route_of(ln.strip()) == (old_etype, old_target)]
@@ -1094,7 +1110,7 @@ def apply_control_edit(plan: ControlEditPlan) -> dict:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,
                 'error': '新目标还缺 `_control` 包装：先补包装，再改这一行'}
-    lines = text.splitlines()
+    lines = split_lines(text)
     idx = int(plan.line_no) - 1
     if not (0 <= idx < len(lines)) or lines[idx] != plan.old_line:
         return {'ok': False, 'path': str(path), 'old_text': text,
@@ -1107,6 +1123,11 @@ def apply_control_edit(plan: ControlEditPlan) -> dict:
     try:
         from storygraph.story.paths import write_text_atomic
         write_text_atomic(path, style.apply(body, source=path))
+    except SourceNotUtf8 as exc:
+        # 非 UTF-8：读的时候坏字节已变成 U+FFFD，写回去就是改坏它（P0-B）
+        return {'ok': False, 'path': str(path), 'old_text': text,
+                'new_text': text, 'line_no': plan.line_no,
+                'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no,

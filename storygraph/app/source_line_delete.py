@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.textlines import split_lines
+
 
 @dataclass
 class SourceLinePlan:
@@ -196,7 +198,7 @@ def plan_source_line_delete(project_root, file_path, line_id,
 
     from storygraph.story.source_style import read_text
     text, _style = read_text(path)
-    lines = text.splitlines()
+    lines = split_lines(text)
     if end > len(lines):
         plan.reason = '拍上的行号已经超出文件范围；先重新加载这一章'
         plan.blocking.append(plan.reason)
@@ -291,6 +293,7 @@ def apply_source_line_delete(plan: SourceLinePlan) -> dict:
         return {'ok': False, 'old_text': '', 'new_text': '',
                 'error': '计划无效'}
     path = Path(plan.path)
+    from storygraph.story.source_style import SourceNotUtf8
     from storygraph.story.source_style import read_text
     text, style = read_text(path)
     if text != plan.old_text:
@@ -302,6 +305,10 @@ def apply_source_line_delete(plan: SourceLinePlan) -> dict:
         # 行一个字节都不动。这里与 `control_route` 同级（原地改写），
         # 而且 `plan.new_text` 就是从盘上这一份算出来的 —— 没有理由不传。
         write_text_atomic(path, style.apply(plan.new_text, source=path))
+    except SourceNotUtf8 as exc:
+        # 非 UTF-8：读的时候坏字节已经变成 U+FFFD，写回去就是改坏它（P0-B）
+        return {'ok': False, 'old_text': text, 'new_text': text,
+                'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
                 'error': f'写不进源文件：{exc}'}

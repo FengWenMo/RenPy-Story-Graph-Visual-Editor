@@ -57,6 +57,8 @@ from storygraph.story.control_route import (CONTROL_SUFFIX, _block_for,
                                             _blocks, _indent, _route_of,
                                             _top_lines, control_label,
                                             find_control_file, plan_control_init)
+from storygraph.core.textlines import split_lines
+from storygraph.story.source_style import SourceNotUtf8
 
 #: 分支段的稳定标记（行内注释）。改 / 删只认它，不认行号。
 MARKER_PREFIX = '# storygraph-edge:'
@@ -93,7 +95,7 @@ def find_branch_range(text: str, edge_id, indent: str = None):
     段 = 标记行 + 紧随其后的**一个块**（`if …:` / `menu:`）；块体按缩进
     判定到 dedent 或文件尾为止。找不到返回 `None`。
     """
-    lines = str(text or '').splitlines()
+    lines = split_lines(text)
     want = int(edge_id)
     for i, line in enumerate(lines):
         if _marker_of(line) != want:
@@ -203,7 +205,7 @@ _RE_OPTION = re.compile(r'^(\s*)"((?:\\.|[^"\\])*)"(?:\s+if\s+(.+?))?:\s*$')
 
 def find_menu_group(text: str, src_label: str):
     """找到 `# storygraph-menu:<src>` 这个组的范围：`(start, end, indent)`。"""
-    lines = str(text or '').splitlines()
+    lines = split_lines(text)
     want = menu_group_marker(src_label)
     for i, line in enumerate(lines):
         if str(line).strip() != want:
@@ -247,7 +249,7 @@ def parse_menu_group(text: str, src_label: str) -> list:
     if found is None:
         return []
     start, end, _indent_text = found
-    lines = str(text or '').splitlines()
+    lines = split_lines(text)
     out = []
     edge_id = None
     i = start + 1
@@ -329,7 +331,7 @@ def _source_tail_jump(project_root, label: str):
                 continue
             if _block_for(text, want) is None:
                 continue
-            lines = text.splitlines()
+            lines = split_lines(text)
             block = _block_for(text, want)
             tops = _top_lines(lines, block)
             if not tops:
@@ -423,7 +425,7 @@ def _plan_menu_branch(plan: ControlBranchPlan, text: str, block) -> ControlBranc
     组标记 `# storygraph-menu:<src>`，每个选项仍有自己的
     `# storygraph-edge:<id>`，增 / 改 / 删都只动那一个选项。
     """
-    lines = text.splitlines()
+    lines = split_lines(text)
     src = plan.src_label
     target = plan.target_label
     replace_dst = str(getattr(plan, 'replace_dst_label', '') or '')
@@ -617,7 +619,7 @@ def plan_control_branch(project_root, src_label, dst_label, etype='jump',
         plan.blocking.append(plan.reason)
         return plan
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     found = find_branch_range(text, plan.edge_id)
     if found is not None:
         start, end, indent = found
@@ -714,7 +716,7 @@ def plan_control_branch_remove(project_root, src_label, edge_id,
         kept = [o for o in opts if o.edge_id != plan.edge_id]
         if len(kept) != len(opts):
             start, end, indent = group
-            lines = text.splitlines()
+            lines = split_lines(text)
             plan.old_lines = lines[start:end]
             if kept:
                 plan.new_lines = render_menu_group(
@@ -740,7 +742,7 @@ def plan_control_branch_remove(project_root, src_label, edge_id,
         plan.blocking.append(plan.reason)
         return plan
     start, end, _indent_text = found
-    lines = text.splitlines()
+    lines = split_lines(text)
     plan.old_lines = lines[start:end]
     plan.new_lines = []
     plan.line_no = start + 1
@@ -779,6 +781,10 @@ def apply_control_branch(plan) -> dict:
     try:
         from storygraph.story.paths import write_text_atomic
         write_text_atomic(path, style.apply(plan.new_text, source=path))
+    except SourceNotUtf8 as exc:
+        # 非 UTF-8：读的时候坏字节已变成 U+FFFD，写回去就是改坏它（P0-B）
+        return {'ok': False, 'old_text': text, 'new_text': text,
+                'path': str(path), 'error': str(exc)}
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
                 'path': str(path), 'error': f'写不进编排层：{exc}'}

@@ -37,6 +37,36 @@ from pathlib import Path
 BOM = '\ufeff'
 
 
+class SourceNotUtf8(ValueError):
+    """
+    要写回去的那份源文件**不是合法 UTF-8** —— 拒绝写。
+
+    为什么必须在这一层拦（2026-10-25《不安全因素》第五轮，P0-B）：
+
+      读源文件的唯一入口 `read_text()` 是 `errors='replace'` 的（解析器要能
+      读完整份文件，一个坏字节不该让整章打不开）。可一旦**读回来再写回去**，
+      那个 U+FFFD 就会以三个字节的身份留在盘上：用户的 0xE9 变成 `EF BF BD`，
+      `git diff` 说这行改过，而人从没碰过它 —— 而且 `write_text_atomic` 默认
+      不备份，原字节**不可恢复**。
+
+      第三轮审计只给"新建章节"和"选择点"两条路各加了一次严格解码预检，
+      于是同一个仓库里"追加"拒写、"接线 / 删拍 / 撤销"照旧腐蚀 —— 这说明
+      修在调用点上必然漏。`apply(..., source=路径)` 是**所有落盘点唯一的
+      共同末班车**（它本来就要读一遍源字节来判断每行的换行符），
+      把严格解码放在这里，才没有下一处漏网。
+
+    `offset` 是第一个坏字节的下标（报错里要给出坐标，人才知道去哪儿修）。
+    """
+
+    def __init__(self, path, offset: int = 0, reason: str = ''):
+        self.path = str(path)
+        self.offset = int(offset or 0)
+        super().__init__(
+            f'{self.path} 不是 UTF-8（Ren\'Py 只认 UTF-8）：'
+            f'第 {self.offset} 字节起{("，" + reason) if reason else ""}。'
+            f'为了不改坏原字节，这次没有写。')
+
+
 @dataclass(frozen=True)
 class SourceStyle:
     """一份源文件的载体风格。"""
@@ -59,6 +89,14 @@ class SourceStyle:
         （P1-5，2026-10-25《不安全因素》第二轮）：原文那一行是 CRLF 就还
         CRLF、是 LF 就还 LF，**没碰过的行一个字节都不动**；不给就退回
         "整份翻成一种风格"的老行为（新建文件 / 不知道源时用这条）。
+
+        ⚠ **给了 `source` 就会严格解码那份文件**：解不开抛
+        `SourceNotUtf8`（P0-B，2026-10-25 第五轮）。为什么不是在各个调用点
+        自己预检：这里是"读源字节"和"要写盘"唯一同时在场的地方，
+        修在调用点上必然漏（第三轮就是这么漏掉了接线 / 删行 / undo 的）。
+
+        所以：**凡是"读回来再写回去"的路径，一律传 `source=`** —— 那一传，
+        既拿到了逐行换行符，也拿到了"字节能不能碰"的判据。
         """
         body = str(text or '')
         # 先统一成 LF，再按目标换行符展开 —— 不然会写出 `\r\r\n`。
@@ -73,14 +111,30 @@ class SourceStyle:
 
 
 def _split_eols(raw: str) -> tuple:
-    """`(每行内容, 每行自己的换行符)` —— 与 `str.splitlines()` 同一口径。"""
-    keep = raw.splitlines(keepends=True)
-    plain = raw.splitlines()
-    if len(keep) != len(plain):
-        return plain, ['' for _ in plain]
-    eols = [(chunk[len(line):] if chunk.startswith(line) else '')
-            for chunk, line in zip(keep, plain)]
-    return plain, eols
+    """
+    `(每行内容, 每行自己的换行符)` —— **只按 `\\n` 切**。
+
+    ⚠ 为什么不能用 `str.splitlines()`（2026-10-25《不安全因素》第五轮，P0-A）：
+
+      `splitlines()` 认的"行边界"远不止 `\\n` —— 它把 `U+2028`(LINE
+      SEPARATOR)、`U+2029`、`U+0085`(NEL)、`\\x0b`、`\\x0c`、`\\x1c`~`\\x1e`
+      都当换行。Ren'Py 的 lexer **只认 `\\n`**。于是这些字符一旦出现在**一行
+      中间**（从网页 / Word 粘台词最容易带进来 U+2028），两条"行"的账就对不上：
+
+        原文 `    "hi<U+2028>there"\\n    "b"\\n`（2 行）
+        splitlines 数出 3 行，第 2 行的"换行符"被记成 `U+2028`；
+        逐行还原时 `apply` 把真正的 `\\n` 换成了 `U+2028` ——
+
+      结果：**用户没碰过的那一行，行尾换行符被换成了一个 Ren'Py 不认的字符**，
+      两条语句并成一条（脚本直接语法错），而 `git diff` 只显示"这行变了"。
+      审计探针实测：4 种字符 × 中段插入 = 4/4 全部被改写。
+
+      原文没有 `\\n` 时最后一行没有换行符（`''`），下面靠它判"末尾要不要补"。
+    """
+    if not raw:
+        return [], []
+    from storygraph.core.textlines import split_eols
+    return split_eols(raw)
 
 
 def _dominant_eol(eols, fallback: str) -> str:
@@ -133,9 +187,17 @@ def _restore_line_endings(body: str, source, fallback: str) -> str:
     单一风格（绝大多数文件）走老路径 —— 与从前逐字节等价，且不用对齐。
     """
     try:
-        raw = Path(source).read_bytes().decode('utf-8', 'replace')
+        raw_bytes = Path(source).read_bytes()
     except OSError:
         return body                    # 读不到就照老路：不知道的不动
+    # ⚠ **严格解码**（P0-B）：这段字节马上就要被"读回来再写回去"。
+    # `errors='replace'` 会把坏字节换成 U+FFFD，然后再以三个字节的身份写回盘上
+    # —— 用户的 0xE9 变成 `EF BF BD`，无提示、无备份、不可恢复。
+    # 解不开就抛 `SourceNotUtf8`，让**落盘点**拒绝写（一处拦，处处拦）。
+    try:
+        raw = raw_bytes.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise SourceNotUtf8(source, exc.start) from exc
     if raw.startswith(BOM):
         raw = raw[1:]
     old_lines, old_eols = _split_eols(raw)
@@ -186,9 +248,17 @@ def read_text(path) -> tuple:
     """
     读源文件 → `(文本, 风格)`。
 
+    ⚠ **有损**（`errors='replace'`）：坏字节变成 U+FFFD，原文找不回来了。
+    所以它只适合"看" —— 解析、比较、显示。**任何要把文本写回去的地方**，
+    必须走 `apply(..., source=路径)`（那里会严格解码，坏字节直接拒写）。
+
     文本**已剥掉开头 BOM、换行已统一成 LF**（解析器要的就是这个形态），
     风格留给写盘时 `apply()` 还原。正文中间出现的 `\\ufeff` 是作者内容，
     一个字不动（只在最开头剥一个）。
+
+    只把 `\\r\\n` 折成 `\\n`；**孤立的 `\\r` 也折**（历史行为，保持不动）——
+    见 `apply()` 的 `_restore_line_endings` 说明：那种文件 Ren'Py 自己也
+    读不成行，属已知边界。
     """
     style = detect(path)
     try:
@@ -200,4 +270,4 @@ def read_text(path) -> tuple:
     return text.replace('\r\n', '\n').replace('\r', '\n'), style
 
 
-__all__ = ['BOM', 'PLAIN', 'SourceStyle', 'detect', 'read_text']
+__all__ = ['BOM', 'PLAIN', 'SourceNotUtf8', 'SourceStyle', 'detect', 'read_text']

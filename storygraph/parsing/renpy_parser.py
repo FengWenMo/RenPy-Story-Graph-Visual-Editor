@@ -106,6 +106,7 @@ Ren'Py 脚本解析器（三层架构 + 双输出 + 增量解析）
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.textlines import split_lines
 from storygraph.core.vocabulary import (SHOW_INTRO_KEYWORDS,
                                         classify_show_words,
                                         tokenize_show_words)
@@ -230,7 +231,7 @@ def _top_level_region(filepath, lines=None) -> list:
     """
     if lines is None:
         try:
-            lines = read_source_text(filepath).splitlines()
+            lines = split_lines(read_source_text(filepath))
         except (OSError, UnicodeDecodeError):
             return []
     raw = list(lines)
@@ -505,7 +506,7 @@ class RenPyLexer:
                 self.errors.append(f"读取失败 {filepath}: {e}")
                 return []
 
-        raw_lines = text.splitlines()
+        raw_lines = split_lines(text)
         flat = self._flatten(raw_lines)
         return self._build_tree(flat, str(filepath))
 
@@ -517,7 +518,7 @@ class RenPyLexer:
         源 .rpy vs 产物，见不变量 74）——那种地方不该为了解析去写临时文件。
         """
         self._current_file = str(filename)
-        flat = self._flatten(str(text or '').splitlines())
+        flat = self._flatten(split_lines(text))
         return self._build_tree(flat, str(filename))
 
     # ---------- 扁平化 ----------
@@ -1204,7 +1205,7 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         # 这些虽然进了 AST，却只留下结构化字段、原文已经不在了 ——
         # 只有按**原文**取那一段，才能保证"全量重生成"不丢东西。
         region = _top_level_region(
-            filepath, lines=text.splitlines() if text is not None else None)
+            filepath, lines=split_lines(text) if text is not None else None)
         if region:
             nodes = list(nodes) + [TopLevelRegionNode(
                 filename=str(filepath), blocks=region)]
@@ -2438,7 +2439,7 @@ class ParseResultBuilder:
             if start <= 0:
                 continue
             spans.setdefault(str(getattr(fb, 'source_file', '') or ''),
-                             []).append((start, start + len(code.splitlines())))
+                             []).append((start, start + len(split_lines(code))))
         if not spans:
             return
 
@@ -3584,7 +3585,7 @@ def parse_translation_files(tl_dir) -> dict:
         language = lang_dir.name
         for fp in lang_dir.glob('*.rpy'):
             try:
-                lines = fp.read_text(encoding='utf-8').splitlines()
+                lines = split_lines(fp.read_text(encoding='utf-8'))
             except Exception as e:        # noqa: BLE001
                 # 读不了这一个文件（编码坏 / 权限 / 中途删了）就跳过它 ——
                 # 但**记一笔**：整份翻译文件静默消失，比报错更难查。
