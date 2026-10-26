@@ -3,12 +3,21 @@
 ## 运行
 
 ```bash
-# 依赖：pytest + openpyxl
-pip install pytest openpyxl
-# 项目根目录执行
-python -m pytest            # 全部用例（1732 条，约 53 秒）
+# 依赖：pytest + pytest-xdist + openpyxl（pip install -r requirements-dev.txt）
+# 全量（推荐；AI / CI / 人手都用这个）—— 并行 + 独立 basetemp + 汇总
+python tools/fasttest/run.py
+
+# 单个文件调试（串行）
 python -m pytest tests/test_renpy_parser.py -v
 ```
+
+> **全量不要裸跑 `python -m pytest`**：串行约 20 分钟；`pytest.ini` 把
+> basetemp 固定在 `.pip-tmp/pytest`，两个 pytest 同时跑会互删目录，炸出
+> 成百上千个假 ERROR。`tools/fasttest/run.py` 每次用独立的
+> `.pip-tmp/fasttest/runs/<时间戳>-<pid>/tmp`，并带运行锁。
+> 原理、选项、排障见 `tools/fasttest/README.md`；给 agent 的入口约定见
+> 仓库根目录 `AGENTS.md`。
+
 `pytest.ini` 已把 `SyntaxWarning` 提升为失败——源码里若再写出非法转义会直接红灯。`tests/conftest.py`
 负责：
 1. 把项目根目录与 `tests/` 加入 `sys.path`

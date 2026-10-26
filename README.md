@@ -16,11 +16,17 @@
 
 ```bash
 pip install -r requirements.txt     # 运行时依赖 openpyxl；界面用 PySide6
-python -m pytest                    # 5501 个用例；全量约 21 分钟（4 条真机金标占大头）
+pip install -r requirements-dev.txt # 跑测试：pytest + pytest-xdist + openpyxl
+python tools/fasttest/run.py        # 全量测试（并行；约 2~4 分钟，视机器负载）
+python -m pytest tests/test_xxx.py  # 单个文件调试（串行）
 
 python demo/make_demo.py            # 一键重建示例工程（含产物与协作库）
 python main.py                      # 启动图形界面（PySide6）
 ```
+
+> 全量**不要**直接 `python -m pytest`：串行约 20 分钟，而且 `pytest.ini` 的
+> 固定 basetemp 会让两个并发 pytest 互删目录。`tools/fasttest/` 是专门入口，
+> 详见 `tools/fasttest/README.md` 与 `AGENTS.md`。
 
 > 界面**只有 PySide6 一套**（tkinter 版已于 2026-10-01 彻底移除）。
 > 没装 PySide6 时 `main.py` 会**明确报错并给出 `pip install PySide6`**
@@ -129,7 +135,8 @@ storygraph/
 └── main.py     桌面入口（PySide6；没装就明确报错并给出安装命令）
 legacy/         归档的单文件老版本（**不参与构建**，见其 README）
 demo/           示例 Ren'Py 工程 + 一键重建脚本
-tests/          5501 个用例（253 个测试文件）
+tests/          6000+ 条用例（316 个测试文件；全量入口 tools/fasttest/run.py）
+tools/fasttest/ 全量测试加速器（并行调度 + 独立 basetemp + 运行锁；见其 README）
 ```
 
 **依赖方向单向**：`core` ← 其它所有；`app` 依赖后端但**禁止**依赖任何
