@@ -4773,3 +4773,89 @@ BOM 不受影响：严格 UTF-8 把 BOM 当合法字符，`detect()` 照旧记�
 `tl/` 与 `*.generated.rpy` / `*.blocked.rpy` / `*.bak.rpy`）。
 
 找不到（没 project_root / 临时目录）就**不加这句**，不编路径。
+
+---
+
+## §53 导入冲突预检（"先问后写"）：三种结局 / 零写取消 / 清理残留（2026-10-26 晚）
+
+用户原话："当检测到有 label 重复的时候，能不能不要擅自不落盘，或者擅自全量
+替换呀……能不能给出一个 UI 提醒，让我能够对着 txt 换 label？如果撞 label，
+显示新内容与旧内容对比，再决定是否强制更换（可以全部强制更换，也可以一个个
+文件分……）"
+
+实现分层（改之前先看这张表，别在弹窗里重算判据）：
+
+| 层 | 位置 | 管什么 |
+|---|---|---|
+| 预检/决策 | `authoring/import_review.py`（纯，只读） | `preflight(plan, root) -> Review`；`apply_decisions(plan, review, decisions, rows)` |
+| 流水线 | `authoring/txt_pipeline.run(..., resolve=)` | 写前问；取消零写；不给 `resolve` 时老行为不变 |
+| 会话 | `app/session_graph.import_plain_text(..., resolve=)` | 透传 + 返回 `review` / `needs_review` |
+| 界面 | `ui_qt/dialog_import_review.py` | 左表三选一 + 右栏新旧对比；只产出 `choices()`，**不碰盘** |
+| 清理 | `authoring/import_cleanup.py` + `ui_qt/dialog_cleanup.py` | 扫/删 `.rpy.bak`、`.rpy.bak-<时间戳>`、`.blocked.rpy`、`.bak.rpy` |
+
+### 53.1 预检只判两件"当场能确定"的事（与门禁分工）
+
+1. 计划里的 `label` 是否被**别的** .rpy 定义（`generation_guard.label_owners()`，
+   **同一份**扫描口径给 `occupied_labels` / `label_defined_in` 用；"被 ≥2 个文件
+   定义"= 项目本来就重名，覆盖救不了）；
+2. 计划落点是否**手写**（`generation_guard.is_handwritten_script()` —— 与
+   `write_generation` 的 `HANDWRITTEN_TARGET` 同一份判据，不许各写一套）。
+
+真正的落盘判据仍是 `write_generation`（语法 / 引擎 lint / 编码载体 / 顶层块
+丢失……）。**预检不替门禁放行**：人的决定若仍不合法，门禁照旧拦。
+
+### 53.2 三种结局的落点语义（判据钉在 `tests/test_import_review.py`）
+
+| 动作 | 常量 | 落点 | 备份 |
+|---|---|---|---|
+| 覆盖旧文件 | `ACT_REPLACE` | **写进那个占位的 .rpy**（不是计划落点，不另造撞名产物） | `write_generation(force=True)` + `.bak`；旧文件全文作 `source_text` 喂门禁算"丢哪些顶层块" |
+| 改个名字写入 | `ACT_RENAME` | 写到**旧章节旁边的目录**（`item.writable_dir` = 占位文件父目录），label 重跑 `convert_text` | 不动旧文件 |
+| 这次跳过 | `ACT_SKIP` | 不写，**不产生** `.blocked.rpy` | — |
+
+**没有"覆盖"选项的情形**：项目本来就重名（≥2 个 owner）、或既有 label 冲突
+目标又是手写文件（两边都占着，说不清该覆盖谁）→ 只给改名/跳过（宁可少一个
+选项，不猜）。默认值恒为"不改变现状"：占位的是工具生成 → 预选 replace；
+手写 / 重名 → 预选 skip。
+
+### 53.3 `resolve` 契约（`session.import_plain_text` 与 `TP.run` 同形）
+
+```
+resolve: callable(review) -> [{'source': str, 'action': 'replace'|'rename'|'skip',
+                               'label': str(仅 rename)}] | None
+```
+
+- 返回 `None`（界面点"取消"）→ `needs_review=True`，**零写盘、零副本**；
+- 返回列表 → 逐份应用；**没给结论的文件按 skip 处理**（默认不能是"覆盖"）；
+- **不传 `resolve`**（CLI / 单测）→ 行为与 2026-10-26 之前**完全一致**：
+  照旧写、照旧被门禁拦、照旧留 `build/review/*.blocked.rpy`。老调用方的判据
+  钉着这条（`test_without_resolve_the_old_behaviour_is_kept`）。
+
+改名合法性只有一套理由：`why_rename_failed()`（落盘层）与
+`Review.rename_problem()`（弹窗即时校验）都基于 `valid_label` + 当前占用集合；
+两处各写一套早晚会漂成"弹窗说行、落地说不行"。
+
+### 53.4 幂等：内容一致**不重写**（也就不会多 `.bak`）
+
+`txt_pipeline._identical_to_disk()`：目标已存在且读出的文本 == 产物文本 →
+`written=True, unchanged=True`，**不碰文件**（不备份、不刷 mtime）。
+这一条专治"反复重导同一批 txt 把 `.bak` 越攒越多"（用户实机抱怨的一半）。
+它是"读来比较"，不是"读来写回"——后者必须走 `source_style` 的严格解码（P0-B）。
+
+### 53.5 对比数据（`compare_texts`）：CRLF 要在展示层去掉 `\r`
+
+`split_lines()` 只按 `\n` 切（P0-A：Ren'Py 只认 `\n`），所以 CRLF 旧文件切出来
+每行带尾 `\r` → 对比会把**每一行**标成"改"。展示层 `rstrip('\r')` 只影响
+对比，**不影响落盘口径**（换行由 `source_style.apply(source=)` 逐行还原）。
+
+### 53.6 清理残留的安全红线（`import_cleanup`）
+
+- 只认四类**完整后缀**：`.rpy.bak` / `.rpy.bak-<数字>` / `.blocked.rpy` /
+  `.bak.rpy`；**绝不宽匹配 `*.bak`** —— `*.bak.xlsx`（资源表备份，用户唯一的
+  表备份）既不许列、也不许删；
+- 只在 `<根>/game/`（递归）与 `<根>/build/review/` 工作；项目不存在 / 没有
+  `game/` → `[]`，不抛异常；
+- `delete` **不信任调用方**：每条再验命名 / 所在目录 / 不是链接 / 是普通文件，
+  不匹配进 `failed` 带中文原因；单条失败不影响其它；`unlink(missing_ok=False)`
+  （扫描后消失要报出来，不许假装删成功）；
+- 界面默认勾选：时间戳备份 / 对照副本 / 历史 `.bak.rpy`；**`.rpy.bak` 默认不勾**
+  （可能是覆盖手写文件前的唯一旧版本），弹窗里写明理由。

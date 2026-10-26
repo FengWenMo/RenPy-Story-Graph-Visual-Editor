@@ -58,6 +58,7 @@
 | S2 选择点 | menu 住工具独占的 `<章>_choices.rpy`；剧本只多一行 `call` | `test_choice_point.py` |
 | S3 控制流守门 | `plan_control_write` 拦"只导 2 章 → 抹掉第 3 章 `_control`" | `test_control_write.py` |
 | L7 版式恢复 | 记住图由哪些文件组成 → 图空才重建 → 贴版式 | `test_graph_restore.py` |
+| 导入冲突预检 | 撞 label / 盖手写先在弹窗里"覆盖/改名/跳过"（取消=零写），另有残留清理入口 | `test_import_review.py` / `test_dialog_import_review.py` / `test_import_cleanup.py` / `test_dialog_cleanup.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。
@@ -121,6 +122,25 @@
   独立于 menu_brief、未动。二者都待排期。
 · ⚠ `test_ui_qt` 本轮机器被并行 agent 占满（121/195 后停住、裸 pytest 又撞 D6 `.pip-tmp` 批量删守卫）→ 未跑完；
   定向跑 `test_menu_brief`16 / `test_flow_target_brief`10 / `test_flow_card`40 / `test_package_layering`5 全绿。
+
+**2026-10-26 晚 导入冲突预检（"先问后写"）**（用户："我一个个删 .bak 和 blocked
+老狼狈了……不要擅自不落盘/擅自全量替换……让我能对着 txt 换 label"）：
+· 新 `authoring/import_review.py`（纯读预检 + 决策落地）、`authoring/import_cleanup.py`
+  （残留扫描/删除）、`ui_qt/dialog_import_review.py`（左表三选一 + 右栏新旧对比）、
+  `ui_qt/dialog_cleanup.py`；接线在 `txt_pipeline.run(resolve=)` /
+  `session.import_plain_text(resolve=)` / `window_graph_ops`。
+· **不给 `resolve` 时行为与从前一字不改**（CLI / 单测 / 老判据靠这条）；取消 =
+  **零写盘零副本**（`needs_review=True`）。
+· 三种结局的落点：**覆盖 = 写进占位的那份 .rpy**（不是另造撞名产物）；**改名 =
+  写到旧章节旁边**（`game/chapter/` 跟着走）；跳过 = 什么都不产。
+· **预检与门禁故意不共用结论**：预检只判"谁占着 label / 目标是否手写"，真正
+  拦不拦还是 `write_generation`（人选的覆盖若仍不合法，门禁照旧拦）。
+· 幂等：产物与磁盘逐字节一致 → **不重写**（不产 `.bak`、不刷 mtime）。
+· 清理红线：只认 `.rpy.bak` / `.rpy.bak-<数字>` / `.blocked.rpy` / `.bak.rpy`；
+  **`.bak.xlsx` 不列不删**；`.rpy.bak` 默认**不勾**（可能是手写原件唯一旧版本）。
+· 对比展示：CRLF 旧文件要在**展示层** `rstrip('\r')`，否则每行都标"改了"。
+· 真机探针（副本上）：43 份 txt 对 `sr_general` → ch1（手写）默认跳过、ch2~ch4
+  默认覆盖；40 份"全部覆盖"→ 0 blocked、0 新增 `game/` 根产物、40 份 `.bak`。
 
 ## 五、协作与定位
 
