@@ -4980,3 +4980,52 @@ AI 助手；先导入、后导出、最后刷新和清理"。
 `ui_qt/panel_ai.AiPanel.key_btn`（点它开 `dialog_ai.AiKeyDialog`）。
 判据：`tests/test_ai_key_dialog.py::test_the_entry_lives_inside_the_ai_panel`
 （工具栏里出现独立 key 按钮会红）。
+
+## §56 接线/探测的**读盘成本**：项目级扫描走 `story.scan_cache`（2026-10-27 凌晨）
+
+用户原话："目前每一次连线都很卡……我希望优化一下算法，让它减少等待时间"。
+根因不是画线，是**同一个项目在一次操作里被整份解析了 6~8 遍**（真机
+`sr_general` 91 文件 / 1.2 MB：`detect_placement` 1435 ms、
+`find_control_file` 1498 ms、无包装章的 `plan_control_route` 3389 ms）。
+
+### 56.1 谁能缓存、谁不许
+
+| 函数 | 契约 |
+|---|---|
+| `story.scan_cache.read_text(path)` | 同 `source_style.read_text`；**只读**，按 `(mtime_ns, size)` 失效。写盘路径仍必须走 `SourceStyle.apply(..., source=路径)`（严格解码 + 核对原文），**不许**把缓存里的 text 直接回写 |
+| `scan_cache.labels_of(path)` | `label 名字:` 列表（与 `control_route` 同一条正则） |
+| `scan_cache.file_facts(path, root)` | `placement.scan_file` 的缓存版（整份解析的结果），返回**拷贝** |
+| `scan_cache.discover(root)` | `discover_scripts` 的缓存版；失效看**目录 mtime**（新建/删除/改名）+ 缓存里的文件是否还在 |
+| `scan_cache.fingerprint(root)` | 项目指纹 `((路径, mtime_ns, size), ...)`，所有"项目级结论"的失效判据（91 个文件 ≈ 2 ms） |
+| `scan_cache.memo(name, root, extra, fp, compute)` | 项目级结论缓存；指纹不同才重算。放进去的 `compute` 必须**纯读** |
+
+- **不做 TTL**：TTL 会让"刚改完源文件就接线"读到旧结论，并让"写完文件立刻
+  断言"的用例变成随机失败。内容变了 `mtime_ns` 就变，本工具自己的
+  `write_text_atomic` 也会让指纹失效。
+- 缓存**有上限**（`MAX_ENTRIES = 512`，LRU 挤压）；开一百个项目也不会撑爆。
+- 判据：`tests/test_scan_cache.py`（单候选不排序 / 多候选排序不变 /
+  加删 label 立刻生效 / 第二次零读盘零解析 / 改过的文件必须重新解析 / 有上限）。
+
+### 56.2 `find_control_file` 的**单候选短路**（结论不变）
+
+候选 = "文件里有 `*_control` label"。排序的三个判据（精确 `{src}_control` /
+`detect_placement` 认的纯控制流文件 / 文件名带 control）**都只在多候选时
+才有意义**。所以：
+
+```python
+if len(with_control) == 1:
+    return with_control[0][0]      # 排序只有一个元素时结论相同
+```
+
+这一条是"算法"层面的改动（不是缓存），把真机上 1498 ms 直接变成 ~2 ms；
+判据要求：把 `placement.detect_placement` 换成一个**会抛异常**的函数，
+`find_control_file` 仍要给出正确答案（见 `test_scan_cache.py`）。
+
+### 56.3 画布重建：每个块只排一次文字
+
+`GraphCanvas.set_graph` 是重建的唯一入口；`NodeItem` 的 `mark`（分析结论）
+必须在**构造时**传入，`_apply_marks` 只在 `mark` 真的变了时 `refresh()`。
+理由：`NodeItem.__init__` 已经 refresh 过，再刷一遍只是把同一段文字排版两次
+（120 块白花 15 ms，视觉零变化）。
+判据：`tests/test_graph_canvas.py::TestRebuildIsNotWasteful`。
+
