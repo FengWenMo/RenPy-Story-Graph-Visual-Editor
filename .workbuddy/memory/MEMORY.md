@@ -30,8 +30,9 @@
 - **两个 registry 不是一回事**：`session.registry()`=资产表；语句表是 `StatementRegistry.for_project(root)`。混用 → Qt 槽吞异常 → "点了毫无反应"。
 - **`EditorSession` 有 `__len__`** → 没载入章节时 falsy。判空用 `is not None`，**绝不用 `if self._session:`**。
 - **默认值兜底不要用 `or`**：`int(x or -1)` 把第 0 拍当"没载入"。
-- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 每轮独立 basetemp + 运行锁；详见 `tools/fasttest/README.md`）。裸 `pytest` 串行 ~20 分钟，且两个并发会互删 `.pip-tmp/pytest`（D6）；fasttest 自带锁，但**裸 pytest 不受锁保护**。`.pip-tmp/` 会累积到 GB 级、别用 `du/find` 扫；fasttest 会自动清 >7 天旧目录（`--clean-temp` 清 >24h）。
+- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 每轮独立 basetemp + 运行锁；详见 `tools/fasttest/README.md`）。裸 `pytest` 串行 ~20 分钟，且两个并发会互删 `.pip-tmp/pytest`（D6）；fasttest 自带锁，但**裸 pytest 不受锁保护**。`.pip-tmp/` 会累积到 GB 级、别用 `du/find` 扫；fasttest 会自动清 >7 天旧目录（`--clean-temp` 清 >24h）。现在每 15s 心跳，连续 300s 无输出会退出 **124** 并打印正在跑的 nodeid；旧 tmp 先 rename 到 `.fasttest-trash/` 后台删，启动不再被几分钟的删除卡住；`--retry-failed` 只复跑上一轮纯全量失败（无失败直接退出，不会偷偷跑全量）。
 - **全量耗时由少数真机金标主导（scan/validate/patch/describe ~730s）**，连跑方差 ±40% —— 别当回归，先看 `--durations`。fasttest 会把重文件排到队首，且 `test_disk_hygiene` 固定第一个跑（它递归扫 `.pip-tmp`，晚跑会从秒级变几分钟）。
+- **pytest-xdist 默认 `--loadscope-reorder`**：按"文件里有多少条用例"重排 work unit，会**覆盖**上面的重文件优先，把只有 2 条的 scan/hydrate/patch 金标踢到 99%。fasttest 已显式传 `--no-loadscope-reorder`；手写 `pytest -n` 时别漏（2026-10-26 实测 7m14s → 4m36s）。
 - **无 `QApplication` 就建 Qt 控件 = 进程 abort**（无 traceback）。Qt 测试类要 `qapp` autouse。
 - **面板少一个转发方法** = `AttributeError` → 模态框 → 测试挂死。守卫 `test_every_panel_method_the_window_calls_really_exists`。
 - **构造期 `_refresh_preview` 早于控件创建** → `getattr` 守卫 + 建好后重刷。
@@ -39,6 +40,7 @@
 - **判 dock 开没开用 `isHidden()`**；`saveState()` 要求工具栏有 `objectName`。
 - **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 会乱码），只用 edit/write。
 - **模态打桩要打全**（question/warning/information 都是）；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测"挂了哪些动作"。
+- **删卡三选一 / 块头级联确认是真 `QMessageBox.exec()`**（2026-10-26）：只 patch `QMessageBox.question` 不够，`delete_card()` 会卡在 `_ask_delete_mode` 的 `box.exec()`，xdist 其余 worker 全空闲、整体 0 CPU，看起来像"卡死 20 分钟"。测 `delete_card` 必须同时 patch `_ask_delete_mode`（返回 `'whole'` / `''`）和 `QMessageBox.question`；fasttest 的 124 看门狗会点名 nodeid。
 - `QLabel`/`QCheckBox` 不渲染 Markdown；`Statement.source` 是 `(路径, 行号)` 元组。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完**回读校验**。
