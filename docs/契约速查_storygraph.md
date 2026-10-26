@@ -4928,3 +4928,55 @@ resolve: callable(review) -> [{'source': str, 'action': 'replace'|'rename'|'skip
   `tmp_path` 里造项目（否则全部用例都会挂）。
 - 跑 UI 探针 / 截图脚本时同理：设 `STORYGRAPH_NO_SESSION=1`（或
   `SS.set_enabled(False)`），否则脚本会把自己造的临时项目记进**真**记忆表。
+
+---
+
+## §55 纯文字导入的**导出文件夹** / 顶部工具栏顺序（2026-10-26 深夜，真机）
+
+用户原话："不要写入 chapter 文件夹！因为很多项目根本没有这个文件夹！我们必须
+保证通用性和泛用性！！！你可以给一个 rpy 的导出路径，问一问导出到哪个文件夹
+就行！" + "上头的 UI 应当整理：章节导航最左、然后是打开项目、自定义模块、
+AI 助手；先导入、后导出、最后刷新和清理"。
+
+### 55.1 `out_dir`：**导出文件夹由人指定，工具不猜子目录**
+
+| 环节 | 契约 |
+|---|---|
+| 界面 | `window_graph_ops._ask_plain_text_export_dir()`：`QFileDialog` 目录模式，默认 `<根>/game/`（存在的话）；**取消 = 本次导入零写盘**，状态栏说清 |
+| 会话 | `EditorSession.import_plain_text(..., out_dir=Path)` → `txt_pipeline.run(out_dir=)` |
+| 规划 | `build_plan(root, files, rows, out_dir=)` → `plan_target(..., base_dir=)` |
+| 预检 | `import_review.preflight(plan, root, out_dir=)` → `ReviewItem.writable_dir`（弹窗显示与实际落点**必须同源**） |
+| 落盘 | "改个名字写入" / 新文件 → `out_dir`；"覆盖旧文件" → 那份已占位的 `.rpy`（覆盖不能换地方） |
+| 越界 | `out_dir` 不在 `<根>/game/` 里 → 控制台警告"Ren'Py 不会加载这些章节"（允许导，不让人白导） |
+
+- **禁止**再写"跟着旧章节所在目录走"（`owner.parent`）—— 那是把某个项目的
+  `game/chapter/` 当通用规则；用户 2026-10-26 明确否掉。
+- 不传 `out_dir`（CLI / 旧测试）行为不变：`<根>/game/`（没有 `game/` 就项目根）。
+- 判据：`tests/test_import_review.py::test_the_export_dir_is_where_new_files_go`、
+  `tests/test_txt_pipeline.py::test_the_export_folder_is_chosen_by_the_user_not_guessed`、
+  `tests/test_txt_import_session.py` 的"选 chapter/ 就写 chapter/"与"取消=零写"。
+
+### 55.2 顶部工具栏顺序（用户 2026-10-26 点名）
+
+```
+▥ 章节导航 → 📁 打开项目 → 🧩 自定义语句 → 🤖 AI 助手 →
+➕ 导入章节 .rpy → 📝 导入纯文字章节 → ⤓ 导出 .rpy →
+🔁 刷新已导入章节 → 🧹 清理导入残留 → （补全缺失 / 清空剧情图 / 其它）
+```
+
+- **章节导航**是两页工具栏的第一个动作（同一个 checkable `QAction` 挂两个
+  toolbar，勾选状态 Qt 自动同步；`window_state._restore_docks` 仍按
+  `self._nav_action` 摆回）。模式条只剩"两页标签 + 位置信息"。
+- 这条顺序**取代**两条旧契约：2026-10-10「自定义语句排第一」与
+  2026-10-21「导出排最前」。判据改为
+  `tests/test_custom_statement_entry.py::test_the_toolbar_order_matches_the_user_spec`
+  与 `tests/test_toolbar_export_entry.py::test_export_sits_between_imports_and_refresh`。
+- 窄窗口里靠后的动作会进「»」是**预期**（用户把导入排在导出前面之后，不可能
+  全塞进 1280px）；宽窗口（≥2400px）必须全部可见。
+
+### 55.3 「填 API key」归入 AI 助手面板
+
+工具栏**不再有**独立的「AI 助手 · 填 API key」按钮；入口在
+`ui_qt/panel_ai.AiPanel.key_btn`（点它开 `dialog_ai.AiKeyDialog`）。
+判据：`tests/test_ai_key_dialog.py::test_the_entry_lives_inside_the_ai_panel`
+（工具栏里出现独立 key 按钮会红）。
