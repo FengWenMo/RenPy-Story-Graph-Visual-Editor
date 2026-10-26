@@ -2483,6 +2483,22 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._tb_graph = tb_graph
         self._tb_card = tb_card
 
+        # —— 「▥ 章节导航」开关：**摆最左边**（2026-10-26 用户："章节导航应摆到
+        #   最左边，然后是打开项目，打开项目后是自定义模块，再之后 ai 助手……
+        #   然后先是导入，后是导出，最后才是刷新和清理"）——
+        # 它是窗口级的 dock 开关，不是某一页的功能，所以**两页工具栏都有**，
+        # 而且都排第一个。同一个 QAction 挂两个工具栏，勾选状态由 Qt 同步。
+        nav = QAction('▥ 章节导航', self)
+        nav.setObjectName('navAction')
+        nav.setCheckable(True)
+        nav.setChecked(True)
+        nav.setToolTip('左侧项目目录：文件 → label，双击打开这一章')
+        nav.toggled.connect(self._toggle_nav_dock)
+        self._nav_action = nav
+        for bar in (tb_graph, tb_card):
+            bar.addAction(nav)
+            bar.addSeparator()
+
         # —— 第一屏：剧情结构 ——
         #
         # ⚠ 两条路**必须分开**（用户 2026-10-03 纠正）：
@@ -2491,6 +2507,14 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         #   · 「导入章节」= 剧情图那条路：图里只有用户自己导入的章节。
         # 以前把两者写成一句话（"打开项目 → 建出结构图"），40 个脚本一次性
         # 灌进图里变成 51 个块 —— 用户："这还选个毛线啊！看都要看瞎了！"
+        #
+        # ⭐ 顺序是用户 2026-10-26 点名的（**从左到右**）：
+        #     章节导航 → 打开项目 → 自定义模块 → AI 助手 →
+        #     导入（章节 / 纯文字）→ 导出 → 刷新 → 清理
+        #   判据 `tests/test_custom_statement_entry.py::test_the_toolbar_order_matches_the_user_spec`。
+        act('📁 打开项目', self.open_project,
+            '只加载资源表（xlsx：立绘 / 音乐 / 语音 / 变换 / 角色）'
+            '与缩略图 —— **不往剧情图里放任何东西**')
         act('🧩 自定义语句', self.learn_custom_statement,
             '教工具认识项目自己的写法（swim_suit / mycue 这类）：'
             '先扫出"工具还不认识的写法"，挑一个、说清它后面跟什么，'
@@ -2498,40 +2522,30 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '之后这些格就是表格列、候选值就是下拉。'
             '候选分栏与项目清单（删除 / 重置）在同一个弹窗里。',
             primary=True)
-        # ⭐ 「导出」在最上面那一栏（用户 2026-10-21：
-        #    "导出应当放在最上面那一栏……因为太常用了"）。
-        #
-        #   它跟"现在在哪一页"**无关** —— 导的是**已载入的那一章**，所以两页
-        #   顶部都有它。位置也有讲究：这条工具栏在窄窗口里会溢出进「»」菜单
-        #   （实测 1500px 宽时装不下，需要 2349px），排在后面的按钮等于不存在；
-        #   所以它排在第一个（「🧩 自定义语句」之后，用户 2026-10-10 要求那个
-        #   入口在最上方，判据 `test_the_toolbar_entry_is_the_first_action`）。
+        # 「填 API key」**不再单独占一个按钮**（用户 2026-10-26：
+        #   "ai 助手那里填入 api 的那个功能完全归入 ai 助手之中"）——
+        #   它已经是 AI 助手面板里的「🔑 填 API key」按钮（`panel_ai.AiPanel`）。
+        act('🤖 AI 助手', self.open_ai_panel,
+            '跟它说要干什么（例：看看项目里有哪些我不认识的写法）。'
+            '它会自己读项目、提议怎么改；**要写盘时会先弹窗给你看 diff**，'
+            '你点头它才写。没配好 key 时面板里就有「🔑 填 API key」按钮',
+            primary=True)
+        act('➕ 导入章节 .rpy', self.import_chapters,
+            '可多选；图里只出现你导入过的章节（累加，不覆盖已导入的）',
+            primary=True)
+        act('📝 导入纯文字章节', self.import_plain_text,
+            '选 .txt（作者写的纯文字）→ 先问你「导出到哪个文件夹」→ 转成 .rpy '
+            '落盘并导入；有认不出的角色写法会先问你一句'
+            '（确认后写进 characters.xlsx）')
+        # ⭐ 「导出」紧跟导入（用户 2026-10-26："先是导入，后是导出，最后才是
+        #   刷新和清理"）。它跟"现在在哪一页"无关 —— 导的是**已载入的那一章**，
+        #   所以两页顶部都有它。
         self._export_action = act('⤓ 导出 .rpy', self.export_script,
                                   '把这一章写回磁盘（编译 + 增量补丁 + 安全门禁）。\n'
                                   '最常用的落盘动作：**两页顶部都有它**，'
                                   '不用先回卡片页。\n'
                                   '路径默认是这张表该去的地方，可以改到 build/ 下先看一眼。',
                                   primary=True)
-        # ⚠ 放在「自定义动作」**后面**：用户早先明确要求这个入口在**最上方**
-        #   （2026-10-10："至少我想要个能够自定义的模块入口放在最上方"），
-        #   判据 `test_the_toolbar_entry_is_the_first_action` 钉着这一条。
-        act('🔑 AI 助手 · 填 API key', self.open_ai_key_dialog,
-            'key 只存在你这台机器上（不写进项目、不上传）。填一次就能让 AI 干活；'
-            '随时可以回来改或清掉。另：本工具也能作为 MCP server 被别的 AI 客户端连上'
-            '（那时 key 是那个客户端的）')
-        act('🤖 AI 助手', self.open_ai_panel,
-            '跟它说要干什么（例：看看项目里有哪些我不认识的写法）。'
-            '它会自己读项目、提议怎么改；**要写盘时会先弹窗给你看 diff**，'
-            '你点头它才写', primary=True)
-        act('📁 打开项目', self.open_project,
-            '只加载资源表（xlsx：立绘 / 音乐 / 语音 / 变换 / 角色）'
-            '与缩略图 —— **不往剧情图里放任何东西**')
-        act('➕ 导入章节 .rpy', self.import_chapters,
-            '可多选；图里只出现你导入过的章节（累加，不覆盖已导入的）',
-            primary=True)
-        act('📝 导入纯文字章节', self.import_plain_text,
-            '选 .txt（作者写的纯文字）→ 自动转成 .rpy 落进 game/ 并导入；'
-            '有认不出的角色写法会先问你一句（确认后写进 characters.xlsx）')
         act('🔁 刷新已导入章节…', self.reload_imported_chapters,
             '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（先给预览：'
             '新增 / 移除哪些 label；源里删掉的会一起移除）')

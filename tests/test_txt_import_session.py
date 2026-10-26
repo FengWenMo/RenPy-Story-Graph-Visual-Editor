@@ -159,10 +159,26 @@ def test_the_toolbar_has_the_entry(ui_window):
     assert any('导入纯文字章节' in t for t in texts), texts
 
 
+def _patch_export_dir(ui_window, monkeypatch, proj: Path,
+                      rel: str = 'game') -> Path:
+    """
+    导出文件夹选择器 → 桩（真选择器是 `QFileDialog` 目录模式，offscreen 下会卡住）。
+
+    2026-10-26 起导入前会先问"`.rpy` 导出到哪个文件夹"——不猜子目录
+    （用户："不要写入 chapter 文件夹！很多项目根本没有这个文件夹"）。
+    """
+    target = proj / rel
+    target.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ui_window, '_ask_plain_text_export_dir',
+                        lambda: target)
+    return target
+
+
 def test_the_ui_handler_runs_end_to_end(ui_window, monkeypatch):
     """
-    走 UI 的那个方法（而不是直接调 session）：选文件 → 落盘 → 进图。
-    `CharDecisionDialog` 用桩（真弹窗在 `test_dialog_chars.py` 里单独测）。
+    走 UI 的那个方法（而不是直接调 session）：选文件 → 选导出文件夹 →
+    落盘 → 进图。`CharDecisionDialog` 用桩（真弹窗在 `test_dialog_chars.py`
+    里单独测），目录选择器用桩（见 `_patch_export_dir`）。
     """
     from PySide6.QtWidgets import QFileDialog
     proj = Path(ui_window._project_root)
@@ -171,6 +187,7 @@ def test_the_ui_handler_runs_end_to_end(ui_window, monkeypatch):
     txt.write_text('1.0 chapter9-9 纯文字试写\n这一句是旁白\n', encoding='utf-8')
     monkeypatch.setattr(QFileDialog, 'getOpenFileNames',
                         staticmethod(lambda *a, **k: ([str(txt)], '')))
+    _patch_export_dir(ui_window, monkeypatch, proj)
 
     ui_window.import_plain_text()
     out = proj / 'game' / 'chapter9_9.rpy'
@@ -180,6 +197,46 @@ def test_the_ui_handler_runs_end_to_end(ui_window, monkeypatch):
     # 窗口当前那一份，而不是别的引用
     labels = {n.label_name for n in (ui_window.graph.nodes or {}).values()}
     assert 'chapter9_9' in labels, labels
+
+
+def test_the_import_writes_into_the_chosen_export_folder(ui_window, monkeypatch):
+    """
+    ⭐ 用户 2026-10-26："不要写入 chapter 文件夹！……你可以给一个 rpy 的
+    导出路径，问一问导出到哪个文件夹就行！"
+
+    选了 `game/chapter/` 就落 `game/chapter/`；项目里**没有**这层目录时
+    也照样能选别处 —— 工具不猜，用户说了算。
+    """
+    proj = Path(ui_window._project_root)
+    txt = proj / 'game' / '9-9纯文字试写.txt'
+    txt.write_text('1.0 chapter9-9 纯文字试写\n这一句是旁白\n', encoding='utf-8')
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, 'getOpenFileNames',
+                        staticmethod(lambda *a, **k: ([str(txt)], '')))
+    out_dir = _patch_export_dir(ui_window, monkeypatch, proj,
+                                rel='game/chapter')
+
+    ui_window.import_plain_text()
+
+    assert (out_dir / 'chapter9_9.rpy').is_file(), '没写进人选的那个文件夹'
+    assert not (proj / 'game' / 'chapter9_9.rpy').exists(), \
+        '默认目录里又多了一份（应该只按人选的目录写）'
+
+
+def test_cancelling_the_export_folder_writes_nothing(ui_window, monkeypatch):
+    """目录选择器点「取消」→ 这次不导入、零写盘。"""
+    proj = Path(ui_window._project_root)
+    txt = proj / 'game' / '9-9纯文字试写.txt'
+    txt.write_text('1.0 chapter9-9 纯文字试写\n这一句是旁白\n', encoding='utf-8')
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, 'getOpenFileNames',
+                        staticmethod(lambda *a, **k: ([str(txt)], '')))
+    monkeypatch.setattr(ui_window, '_ask_plain_text_export_dir', lambda: None)
+
+    ui_window.import_plain_text()
+
+    assert not list((proj / 'game').glob('chapter9_9.rpy'))
+    assert '没有选择导出文件夹' in ui_window._status_bar.currentMessage()
 
 
 # ==================== 冲突预检 / 清理残留的 UI 接线 ====================
@@ -234,6 +291,7 @@ def test_the_collision_dialog_is_asked_before_any_write(ui_window, monkeypatch):
     hand = _write_handwritten_chapter9(proj)
     before = hand.read_text(encoding='utf-8')
     _pick_txt(monkeypatch, proj)
+    _patch_export_dir(ui_window, monkeypatch, proj)
     seen = {}
     _patch_dialog(monkeypatch, accepted=True, seen=seen)
 
@@ -255,6 +313,7 @@ def test_cancelling_the_collision_dialog_writes_nothing(ui_window, monkeypatch):
     hand = _write_handwritten_chapter9(proj)
     before = hand.read_text(encoding='utf-8')
     _pick_txt(monkeypatch, proj)
+    _patch_export_dir(ui_window, monkeypatch, proj)
     _patch_dialog(monkeypatch, accepted=False)
 
     ui_window.import_plain_text()
@@ -271,6 +330,7 @@ def test_the_collision_dialog_can_replace_after_the_user_says_so(ui_window,
     hand = _write_handwritten_chapter9(proj)
     before = hand.read_text(encoding='utf-8')
     _pick_txt(monkeypatch, proj)
+    _patch_export_dir(ui_window, monkeypatch, proj)
     _patch_dialog(monkeypatch, accepted=True,
                   choose=lambda rv: [{'source': str(rv.items[0].source),
                                       'action': 'replace'}])

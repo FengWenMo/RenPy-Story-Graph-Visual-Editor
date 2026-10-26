@@ -890,9 +890,14 @@ class GraphOpsMixin:
                           f'（认不出就先去 characters.xlsx 加别名）')
             return None
 
+        # ⚠ 同样先问导出文件夹（这条路是「➕ 导入章节 .rpy」里混选了 .txt 时进来的）。
+        out_dir = self._ask_plain_text_export_dir()
+        if out_dir is None:
+            self._log('[导入] 没有选择导出文件夹 —— 纯文字那部分没有导入')
+            return {'ok': False, 'reason': '没有选择导出文件夹', 'written': []}
         res = self._session.import_plain_text(
             files, self.graph, ask=ask,
-            resolve=self._resolve_import_conflicts)
+            resolve=self._resolve_import_conflicts, out_dir=out_dir)
         for msg in (res.get('messages') or [])[:8]:
             self._log(f'[导入] {msg}')
         if res.get('needs_decision'):
@@ -1056,7 +1061,7 @@ class GraphOpsMixin:
         """
         if not self._project_root:
             QMessageBox.information(self, '提示',
-                                    '先「📁 打开项目」（章节要落进 game/ 里）。')
+                                    '先「📁 打开项目」（章节 .rpy 要落进项目里）。')
             return
         start = str(Path(self._project_root) / 'game')
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1064,8 +1069,15 @@ class GraphOpsMixin:
             '纯文字 (*.txt);;Word 文档 (*.docx);;所有文件 (*)')
         if not paths:
             return
+        # ⚠ **先问导出到哪个文件夹**（2026-10-26 用户："不要写入 chapter 文件夹！
+        #   很多项目根本没有这个文件夹！"）—— 不猜子目录，人说了算。
+        out_dir = self._ask_plain_text_export_dir()
+        if out_dir is None:
+            self._status('没有选择导出文件夹 —— 这次没有导入（一个字节都没写）')
+            return
         # —— 第一遍：规划 + 问角色（不写盘）——
-        first = self._session.import_plain_text(paths, self.graph, dry_run=True)
+        first = self._session.import_plain_text(
+            paths, self.graph, dry_run=True, out_dir=out_dir)
         # ⚠ dry_run 的 `ok` 恒为 False（它按定义什么都没写）—— 判据必须是
         # "**有没有规划出文件**"，不能看 `ok`，否则这条链一次都不会往下走。
         planned = getattr(first.get('plan'), 'files', None) or []
@@ -1093,8 +1105,45 @@ class GraphOpsMixin:
         res = self._session.import_plain_text(
             paths, self.graph, ask=_ask,
             import_chapters=self.import_chapter_files,
-            resolve=self._resolve_import_conflicts)
+            resolve=self._resolve_import_conflicts,
+            out_dir=out_dir)
         self._report_plain_text(res)
+
+    def _ask_plain_text_export_dir(self):
+        """
+        「这些章节的 `.rpy` 导出到哪个文件夹？」（2026-10-26 用户要求）
+
+        用户原话："不要写入 chapter 文件夹！因为很多项目根本没有这个文件夹！
+        我们必须保证通用性和泛用性！！！你可以给一个 rpy 的导出路径，问一问
+        导出到哪个文件夹就行！"
+
+        所以：**不猜任何子目录**。默认 `<项目根>/game/`（Ren'Py 一定会扫描的
+        那层，几乎所有项目都有）；人可以在目录选择器里改成 `game/chapter/` 或
+        任何别处。返回 `None` = 人取消 → 这次**不导入、零写盘**。
+        """
+        root = Path(self._project_root)
+        default = root / 'game' if (root / 'game').is_dir() else root
+        dlg = QFileDialog(self, '这些章节的 .rpy 导出到哪个文件夹？', str(default))
+        dlg.setFileMode(QFileDialog.Directory)
+        dlg.setOption(QFileDialog.ShowDirsOnly, True)
+        dlg.setLabelText(QFileDialog.Accept, '导出到这个文件夹')
+        dlg.setLabelText(QFileDialog.Reject, '取消（这次不导入）')
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        chosen = dlg.selectedFiles()
+        if not chosen:
+            return None
+        picked = Path(chosen[0])
+        self._log(f'[纯文字] 导出到：{picked}')
+        # 不在 Ren'Py 扫描范围 → **说清楚**（写进去也不会被加载，别让人白导）
+        try:
+            from storygraph.story.paths import inside_game_dir
+            if not inside_game_dir(picked / 'x.rpy', root):
+                self._log("[纯文字] ⚠ 这个文件夹不在 game/ 里：Ren'Py 不会加载"
+                          "导出的章节（想让它生效，请选 game/ 下面的目录）。")
+        except Exception as e:                  # noqa: BLE001 - 提示是增强
+            swallow('ui_qt._ask_plain_text_export_dir.scope', e)
+        return picked
 
     def _resolve_import_conflicts(self, review):
         """
@@ -1134,6 +1183,11 @@ class GraphOpsMixin:
             for item in (review.items or ()):
                 conflicts[str(item.source)] = item
         targets = []
+        if plan is not None and plan.files:
+            # 导出到哪个文件夹：**这条必须写在最前面**（用户 2026-10-26 要求
+            # 不猜子目录，那"到底会落到哪"就得一眼看得见）。
+            base = Path(plan.files[0].target).parent
+            self._log(f'[纯文字] 导出到：{base}')
         if plan is not None:
             for f in plan.files:
                 targets.append(f.target)

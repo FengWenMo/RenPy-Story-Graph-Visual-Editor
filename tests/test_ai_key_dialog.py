@@ -120,15 +120,31 @@ def test_the_dialog_text_has_no_markdown_markers(qapp, tmp_path):
                                  f'{node.value[:60]}')
 
 
-def test_the_window_exposes_the_entry(qapp):
+def test_the_entry_lives_inside_the_ai_panel(ui_window, monkeypatch):
     """
-    ⭐ 入口要在（用户："最好打开之后能有一个地方点开"）——
-    工具栏里能找到一个「填 API key」的动作，而且它连着真方法。
+    ⭐ 「填 API key」归入 AI 助手（用户 2026-10-26："ai 助手那里填入 api 的
+    那个功能完全归入 ai 助手之中"）—— 工具栏里**不再**单独占一个按钮，
+    入口在 AI 助手面板里（`panel_ai.AiPanel.key_btn`）。
+
+    用户最初的要求还挂着："最好打开之后能有一个地方点开" —— 面板里那个
+    按钮就是它，点了必须真的打开 key 对话框。
     """
     from storygraph.ui_qt.main_window import MainWindowQt
     assert callable(getattr(MainWindowQt, 'open_ai_key_dialog', None)), \
         '窗口上没有 open_ai_key_dialog —— 入口没接上'
-    src = (ROOT / 'storygraph' / 'ui_qt' / 'main_window.py').read_text(
-        encoding='utf-8')
-    assert 'AI 助手 · 填 API key' in src, '工具栏里没有那个按钮'
-    assert 'self.open_ai_key_dialog' in src, '按钮没连到方法'
+
+    # ① 工具栏里不许再有单独的 key 按钮
+    texts = [a.text() for a in ui_window._tb_graph.actions()]
+    texts += [a.text() for a in ui_window._tb_card.actions()]
+    assert not any('填 API key' in t for t in texts), \
+        f'工具栏里还留着单独的 key 按钮：{texts}'
+
+    # ② 面板里有那个按钮，而且点下去真的开 key 对话框
+    from storygraph.ui_qt import panel_ai as PA
+    panel = PA.AiPanel(None, project_root=None)
+    assert 'API key' in panel.key_btn.text(), panel.key_btn.text()
+    opened = []
+    monkeypatch.setattr(PA.AiPanel, 'open_key_dialog',
+                        lambda self: opened.append(True))
+    panel.key_btn.click()
+    assert opened, 'AI 助手面板里的「填 API key」按钮点了没反应'

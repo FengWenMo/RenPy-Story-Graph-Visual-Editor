@@ -31,7 +31,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QDockWidget, QHBoxLayout, QLabel, QSizePolicy,
                                QTabBar, QToolBar, QWidget)
 
@@ -118,14 +117,11 @@ class WindowNavMixin:
         tb.addWidget(holder)
         self._mode_info = info
 
-        # 「章节导航」开关：关掉之后还得能叫回来（否则只能重启工具）
-        act = QAction('▥ 章节导航', self)
-        act.setCheckable(True)
-        act.setChecked(True)
-        act.setToolTip('左侧项目目录：文件 → label，双击打开这一章')
-        act.toggled.connect(self._toggle_nav_dock)
-        tb.addAction(act)
-        self._nav_action = act
+        # 「▥ 章节导航」开关**不在这里**（2026-10-26 用户："章节导航应摆到
+        # 最左边"）：它改到两页工具栏的**第一个**动作（见
+        # `main_window._build_toolbars`），这样从左到右就是
+        # 章节导航 → 打开项目 → 自定义语句 → AI 助手 → 导入 → 导出 → 刷新 → 清理。
+        # 这个类只保留「模式条」本身（两页标签 + 右边那句位置信息）。
 
     def _on_mode_tab(self, index: int):
         """点模式标签 → 切页（`_set_page` 会再同步回来，用 blockSignals 防环）。"""

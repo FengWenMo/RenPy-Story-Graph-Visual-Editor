@@ -180,18 +180,31 @@ def test_the_preview_says_what_will_be_written():
 
 # ==================== ③ 弹窗与入口（offscreen 真 Qt） ====================
 
-def test_the_toolbar_entry_is_the_first_action(ui_window):
+def test_the_toolbar_order_matches_the_user_spec(ui_window):
     """
-    用户要的是"入口放在**最上方**" —— 所以判据是**工具栏里的第一个动作**
-    （不是"全窗口第一个 QAction"：菜单/快捷键那些更早建出来）。
+    工具栏顺序是用户 2026-10-26 点名的（**从左到右**）：
+
+        章节导航 → 打开项目 → 自定义模块 → AI 助手 →
+        导入（章节 / 纯文字）→ 导出 → 刷新 → 清理
+
+    ⚠ 这条取代了旧的"自定义语句排第一"（2026-10-10）：用户这次明确
+    "章节导航应摆到最左边，然后是打开项目，打开项目后是自定义模块"，
+    所以「自定义语句」退到第三位。判据按**相对顺序**钉，不钉绝对下标
+    （以后在中间插条目不误伤）。
     """
-    tb = ui_window._tb_graph
-    texts = [a.text() for a in tb.actions() if a.text().strip()]
+    texts = [a.text() for a in ui_window._tb_graph.actions() if a.text().strip()]
     assert texts, texts
-    assert '自定义语句' in texts[0], texts[:3]
-    # 而且它排在「导入章节」**前面**（这是"最上方"的实际含义）
-    assert texts.index([t for t in texts if '自定义语句' in t][0]) \
-        < texts.index([t for t in texts if '导入章节' in t][0])
+    assert '章节导航' in texts[0], texts[:4]
+    order = ['打开项目', '自定义语句', 'AI 助手', '导入章节', '导入纯文字',
+             '导出 .rpy', '刷新已导入章节', '清理导入残留']
+    positions = []
+    for key in order:
+        hit = [i for i, text in enumerate(texts) if key in text]
+        assert hit, f'工具栏里找不到「{key}」：{texts[:12]}'
+        positions.append(hit[0])
+    assert positions == sorted(positions), (order, texts[:12])
+    # 「填 API key」不再单独占按钮（用户：完全归入 AI 助手）
+    assert not any('填 API key' in text for text in texts), texts[:12]
 
 
 def test_the_dialog_prefills_from_a_discovered_head(qapp, project):
@@ -396,17 +409,23 @@ def test_候选分栏是列表页上的一等入口_不是折叠块(qapp, tmp_pa
     assert dlg.built_groups()[-1]['split'] is True, dlg.built_groups()[-1]
 
 
-def test_plain_text_import_goes_through_the_session_entry(ui_window):
+def test_plain_text_import_goes_through_the_session_entry(ui_window, monkeypatch,
+                                                          tmp_path):
     """
     ⭐⭐ **S3/S4 缺的那一环**（2026-10-11 发现）：`EditorSession.import_plain_text`
     早就实现了（含 `.docx`、含"未确认角色就一个字都不写"、决定写回 characters.xlsx），
     **只是界面从没调它** —— 我第一版还在界面里自己写了一份转换器，那是**重复实现**。
 
     这条钉住：`.txt/.docx` 一律走**会话那条正式链路**，界面不自己造一套。
+
+    ⚠ 2026-10-26 起导入前会先问"导出到哪个文件夹"（目录选择器）—— 这里换成桩，
+    否则 offscreen 下模态目录框会一直等（测试挂死）。
     """
     win = ui_window
     called = {}
     sess = win._session
+    monkeypatch.setattr(win, '_ask_plain_text_export_dir',
+                        lambda: tmp_path)
 
     class _Stop(Exception):
         """哨兵：记完调用就中止 —— 免得去满足导入后处理的一堆字段契约。"""
