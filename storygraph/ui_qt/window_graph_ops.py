@@ -77,6 +77,12 @@ def format_character_ranking(rows) -> list:
     return out
 
 
+def _clip(text, limit: int = 78) -> str:
+    """控制台一行说清一件事：太长就截断（全文在冲突预检弹窗里看）。"""
+    text = str(text or '')
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
 __all__ = ['GraphOpsMixin']
 
 
@@ -884,7 +890,9 @@ class GraphOpsMixin:
                           f'（认不出就先去 characters.xlsx 加别名）')
             return None
 
-        res = self._session.import_plain_text(files, self.graph, ask=ask)
+        res = self._session.import_plain_text(
+            files, self.graph, ask=ask,
+            resolve=self._resolve_import_conflicts)
         for msg in (res.get('messages') or [])[:8]:
             self._log(f'[导入] {msg}')
         if res.get('needs_decision'):
@@ -1079,26 +1087,63 @@ class GraphOpsMixin:
         # ⚠ 第二遍的导入走**本窗口的** `import_chapter_files`（它负责把图装进
         # 窗口、进历史、写控制台）—— 直接调 session 只会拿到一个返回值，
         # 图不会出现在界面上（实测踩到）。
+        # `resolve=` 是**冲突预检**（2026-10-26 用户："当检测到有 label 重复的
+        # 时候……能不能给出一个 UI 提醒，让我能够对着 txt 换 label"）：
+        # 撞 label / 会覆盖手写文件时，先把新旧内容摆出来让人逐份拍板。
         res = self._session.import_plain_text(
             paths, self.graph, ask=_ask,
-            import_chapters=self.import_chapter_files)
+            import_chapters=self.import_chapter_files,
+            resolve=self._resolve_import_conflicts)
         self._report_plain_text(res)
+
+    def _resolve_import_conflicts(self, review):
+        """
+        冲突预检的弹窗（**先问后写**的唯一 UI 出口）。
+
+        返回 `None` = 用户取消 → 会话层保证**一个字节都不写**，连
+        `build/review/*.blocked.rpy` 都不会产生（那正是用户要删的东西）。
+        """
+        try:
+            from storygraph.ui_qt.dialog_import_review import (
+                CollisionReviewDialog)
+            dlg = CollisionReviewDialog(self, review)
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            return dlg.choices()
+        except Exception as e:                  # noqa: BLE001
+            # Qt 槽里吞异常的症状是"点了毫无反应"，所以这里既记台账也写控制台，
+            # 并按"这次不写"处理（宁可少写，不可替人赌）。
+            swallow('ui_qt._resolve_import_conflicts', e)
+            self._log('[纯文字] ⚠ 冲突预检弹窗打不开：'
+                      f'{type(e).__name__}: {e} —— 这次先不写（一个字节都没动）')
+            return None
 
     def _show_plain_text_preview(self, res):
         """
-        先让人看见"要落哪几个文件、哪些写法要定、**哪些会被拦**"。
+        先让人看见"要落哪几个文件、哪些写法要定、**哪些撞名要你拍板**"。
 
-        ⚠ 目标已存在的问题必须在**问之前**说清（实机实测）：真机项目里
-        `chapter0_0.rpy` 这些**已经存在**（作者手写的），全量生成会被
-        `LABEL_COLLISION` 拦下 —— 只在点完之后报"被拦了"，用户会以为工具坏了。
+        ⚠ 目标已存在 / 撞 label 的问题必须在**问之前**说清（实机实测）：真机
+        项目里 `game/chapter/chapter0_0.rpy` 已经定义着 `chapter0_0`，而计划
+        落点是 `game/chapter0_0.rpy` —— 只在点完之后报"被拦了"，用户会以为
+        工具坏了。现在提前逐条摆出来，落盘前还会弹窗让他一份一份决定。
         """
         plan = res.get('plan')
+        review = res.get('review')
+        conflicts = {}
+        if review is not None:
+            for item in (review.items or ()):
+                conflicts[str(item.source)] = item
         targets = []
         if plan is not None:
             for f in plan.files:
                 targets.append(f.target)
-                state = '已存在（会被门禁拦下，见下）' if f.target.exists() \
-                    else '新建'
+                item = conflicts.get(str(f.source))
+                if item is not None:
+                    state = '⚠ 要你先拍板：' + _clip(item.conflict_text())
+                elif f.target.exists():
+                    state = '已存在（工具以前生成的，重导会覆盖；旧的留 .bak）'
+                else:
+                    state = '新建'
                 self._log(f'[纯文字] {f.source.name} → {f.target.name}'
                           f'（label {f.label}；{state}）')
         for _p, why in (res.get('skipped') or []):
@@ -1107,11 +1152,14 @@ class GraphOpsMixin:
         if props:
             self._log(f'[纯文字] 有 {len(props)} 种写法不在角色表里：'
                       + '、'.join(p.token for p in props))
-        if targets and any(t.exists() for t in targets):
-            self._log('[纯文字] 目标已存在的文件：全量重生成**不会覆盖非工具生成的'
-                      '脚本**（B2/P0：它不认得 define/init python，覆盖会静默'
-                      '毁定义）。想改已有章节请用「导入章节 .rpy」+卡片编辑器；'
-                      '只想看产物可以先导出到别处。')
+        if review is not None and review.items:
+            self._log(f'[纯文字] ⚠ {review.summary()} —— 落盘前会弹窗，'
+                      f'一份一份选「覆盖旧文件 / 改个名字写入 / 这次跳过」；'
+                      f'点取消则**一个字节都不写**（也不留对照副本）')
+        elif targets and any(t.exists() for t in targets):
+            self._log('[纯文字] 目标已存在的文件：都是工具以前生成的 → 直接重导'
+                      '覆盖（旧内容备份成 .bak）。想改**手写**章节请用'
+                      '「导入章节 .rpy」+卡片编辑器。')
 
     def _report_plain_text(self, res):
         for msg in (res.get('messages') or []):
@@ -1119,6 +1167,13 @@ class GraphOpsMixin:
         for path, why in (res.get('blocked') or []):
             self._log(f'[纯文字] 🚫 {Path(path).name} 被门禁拦下：{why}')
         written = res.get('written') or []
+        if res.get('needs_review'):
+            # 冲突预检里点了"取消"：会话层保证零写盘、零残留。
+            self._status('[纯文字] 冲突预检：这次先不写 —— 一个字节都没动，'
+                         '也没有留下任何对照副本')
+            self._log('[纯文字] 想继续就直接再导入一次；'
+                      '要保留旧的就在弹窗里选「跳过」/「改个名字写入」。')
+            return
         if not written:
             why = ''
             if res.get('blocked'):
@@ -1139,6 +1194,41 @@ class GraphOpsMixin:
         # 没有 `graph` 键，别去取它（取到 None 会让下一个用图的人直接炸）。
         if self.graph is not None:
             self._report_missing_chapters(self.graph)
+    def cleanup_import_junk(self):
+        """
+        「🧹 清理导入残留」：把 `.rpy.bak` / `.blocked.rpy` 一次扫出来再删。
+
+        用户 2026-10-26："我一个个删 vscode 里面的 .bak 和 blocked 里面的
+        文件老狼狈了……" —— 这条路只做"摆清单 + 让人勾 + 删 + 记账"，判据全在
+        `authoring.import_cleanup`（哪些算残留、哪些绝不能碰）。
+        """
+        if not self._project_root:
+            QMessageBox.information(self, '提示',
+                                    '先「📁 打开项目」（清理只扫这个项目的 game/）。')
+            return
+        from storygraph.authoring import import_cleanup as IC
+        files = IC.scan_import_junk(self._project_root)
+        if not files:
+            QMessageBox.information(
+                self, '清理导入残留',
+                '没找到导入残留（.rpy.bak / .blocked.rpy）。\n'
+                '这些文件只在"覆盖已有章节"或"生成门禁拦下"时才会产生。')
+            return
+        from storygraph.ui_qt.dialog_cleanup import ImportJunkDialog
+        dlg = ImportJunkDialog(self, self._project_root, files=files)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._log(f'[清理] 删掉 {len(dlg.deleted)} 个导入残留')
+        for path in dlg.deleted[:20]:
+            self._log(f'[清理] ✕ {path}')
+        if len(dlg.deleted) > 20:
+            self._log(f'[清理] ……还有 {len(dlg.deleted) - 20} 个（见上面清单）')
+        for path, why in dlg.failed[:8]:
+            self._log(f'[清理] ⚠ 没删 {Path(path).name}：{why}')
+        self._status(f'🧹 清理完成：删掉 {len(dlg.deleted)} 个导入残留'
+                     + (f'，{len(dlg.failed)} 个没删掉（见控制台）'
+                        if dlg.failed else ''))
+
     def open_ai_panel(self):
         """
         「🤖 AI 助手」：跟模型说话，它自己调工具干活（用户 2026-10-11 的要求）。

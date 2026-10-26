@@ -180,3 +180,149 @@ def test_the_ui_handler_runs_end_to_end(ui_window, monkeypatch):
     # 窗口当前那一份，而不是别的引用
     labels = {n.label_name for n in (ui_window.graph.nodes or {}).values()}
     assert 'chapter9_9' in labels, labels
+
+
+# ==================== 冲突预检 / 清理残留的 UI 接线 ====================
+
+def _write_handwritten_chapter9(proj: Path) -> Path:
+    """手写的 `game/chapter9_9.rpy`（导入 9-9 的 txt 会撞上它）。"""
+    hand = proj / 'game' / 'chapter9_9.rpy'
+    hand.write_text('define hand = Character("手写")\n'
+                    'label chapter9_9:\n    "原文"\n', encoding='utf-8')
+    return hand
+
+
+def _pick_txt(monkeypatch, proj: Path) -> Path:
+    from PySide6.QtWidgets import QFileDialog
+    txt = proj / 'game' / '9-9纯文字试写.txt'
+    txt.write_text('1.0 chapter9-9 纯文字试写\n这一句是旁白\n', encoding='utf-8')
+    monkeypatch.setattr(QFileDialog, 'getOpenFileNames',
+                        staticmethod(lambda *a, **k: ([str(txt)], '')))
+    return txt
+
+
+def _patch_dialog(monkeypatch, *, accepted: bool, choose=None, seen=None):
+    """把冲突预检弹窗换成桩（真弹窗在 `test_dialog_import_review.py` 里测）。"""
+    from PySide6.QtWidgets import QDialog
+
+    class _Stub:
+        def __init__(self, parent, review):
+            self.review = review
+            if seen is not None:
+                seen['review'] = review
+
+        def exec(self):
+            return QDialog.Accepted if accepted else QDialog.Rejected
+
+        def choices(self):
+            if choose is not None:
+                return choose(self.review)
+            return [{'source': str(i.source), 'action': 'skip'}
+                    for i in self.review.items]
+
+    monkeypatch.setattr(
+        'storygraph.ui_qt.dialog_import_review.CollisionReviewDialog', _Stub)
+
+
+def test_the_collision_dialog_is_asked_before_any_write(ui_window, monkeypatch):
+    """
+    撞上**手写**章节时先弹冲突预检：选"跳过" → 手写文件一个字不动，
+    也不产生 `.blocked.rpy`（这正是用户要删的那堆东西）。
+    """
+    from storygraph.authoring import import_review as IR
+    proj = Path(ui_window._project_root)
+    hand = _write_handwritten_chapter9(proj)
+    before = hand.read_text(encoding='utf-8')
+    _pick_txt(monkeypatch, proj)
+    seen = {}
+    _patch_dialog(monkeypatch, accepted=True, seen=seen)
+
+    ui_window.import_plain_text()
+
+    review = seen.get('review')
+    assert review is not None, '没有走冲突预检'
+    assert len(review.items) == 1, review.items
+    assert review.items[0].code in (IR.CODE_HANDWRITTEN, IR.CODE_LABEL_COLLISION)
+    assert hand.read_text(encoding='utf-8') == before, '手写文件被动了！'
+    assert not list((proj / 'build' / 'review').glob('*.blocked.rpy'))
+    log = ui_window._console.toPlainText()
+    assert '跳过' in log or '先不写' in log, log[-2000:]
+
+
+def test_cancelling_the_collision_dialog_writes_nothing(ui_window, monkeypatch):
+    """点「取消（什么都不写）」→ 一个字节都不写（会话层保证）。"""
+    proj = Path(ui_window._project_root)
+    hand = _write_handwritten_chapter9(proj)
+    before = hand.read_text(encoding='utf-8')
+    _pick_txt(monkeypatch, proj)
+    _patch_dialog(monkeypatch, accepted=False)
+
+    ui_window.import_plain_text()
+
+    assert hand.read_text(encoding='utf-8') == before
+    assert not list((proj / 'build' / 'review').glob('*.blocked.rpy'))
+    assert '先不写' in ui_window._console.toPlainText()
+
+
+def test_the_collision_dialog_can_replace_after_the_user_says_so(ui_window,
+                                                                monkeypatch):
+    """人明确选「覆盖旧文件」→ 手写的旧文件被覆盖，且**先备份 .bak**。"""
+    proj = Path(ui_window._project_root)
+    hand = _write_handwritten_chapter9(proj)
+    before = hand.read_text(encoding='utf-8')
+    _pick_txt(monkeypatch, proj)
+    _patch_dialog(monkeypatch, accepted=True,
+                  choose=lambda rv: [{'source': str(rv.items[0].source),
+                                      'action': 'replace'}])
+
+    ui_window.import_plain_text()
+
+    assert before in Path(str(hand) + '.bak').read_text(encoding='utf-8'), \
+        '覆盖手写文件前必须备份 .bak'
+    assert '"这一句是旁白"' in hand.read_text(encoding='utf-8')
+    assert '覆盖' in ui_window._console.toPlainText()
+
+
+def test_the_toolbar_has_the_cleanup_entry(ui_window):
+    """工具栏要有「清理导入残留」—— 用户要的就是"别再一个个删"。"""
+    from PySide6.QtGui import QAction
+    texts = [a.text() for a in ui_window.findChildren(QAction)]
+    assert any('清理导入残留' in t for t in texts), texts
+
+
+def test_cleanup_says_so_when_there_is_nothing_to_clean(ui_window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    seen = []
+    monkeypatch.setattr(QMessageBox, 'information',
+                        staticmethod(lambda *a, **k: seen.append(a[2])))
+    ui_window.cleanup_import_junk()
+    assert seen and '没找到' in seen[0], seen
+
+
+def test_cleanup_deletes_only_after_the_dialog_says_yes(ui_window, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from storygraph.authoring import import_cleanup as IC
+    proj = Path(ui_window._project_root)
+    junk = proj / 'game' / 'chapter1_1.rpy.bak'
+    junk.write_text('旧的一版\n', encoding='utf-8')
+    keep = proj / 'game' / 'asset_tables'
+    keep.mkdir(parents=True, exist_ok=True)
+    precious = keep / 'characters.xlsx.bak'
+    precious.write_bytes(b'\x00xlsx')
+
+    class _Stub:
+        def __init__(self, parent, project_root, files=None):
+            self.deleted = []
+            self.failed = []
+            self.files = list(files or [])
+
+        def exec(self):
+            self.deleted, self.failed = IC.delete_import_junk(self.files)
+            return QDialog.Accepted
+
+    monkeypatch.setattr('storygraph.ui_qt.dialog_cleanup.ImportJunkDialog',
+                        _Stub)
+    ui_window.cleanup_import_junk()
+    assert not junk.exists(), '选了确认却没删'
+    assert precious.is_file(), '资源表备份被误删了！'
+    assert '清理' in ui_window._console.toPlainText()

@@ -2528,6 +2528,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('🔁 刷新已导入章节…', self.reload_imported_chapters,
             '磁盘上的 .rpy 改过之后，重新解析**已导入的那些**（先给预览：'
             '新增 / 移除哪些 label；源里删掉的会一起移除）')
+        act('🧹 清理导入残留…', self.cleanup_import_junk,
+            '把导入/导出留下的 `.rpy.bak` / `build/review/*.blocked.rpy` 一次扫出来，'
+            '按类勾选后一起删（都不参与游戏运行、删除不可恢复；'
+            '`.rpy.bak` 默认不勾 —— 它可能是手写文件唯一的旧版本）')
         act('🔗 补全缺失章节…', self.complete_related_chapters,
             '把图上"被跳到、但文件还没导入"的章节一起导进来（先给预览）'
             ' → 连线才画得出')
