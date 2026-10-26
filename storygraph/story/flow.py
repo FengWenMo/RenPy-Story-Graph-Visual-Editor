@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 
+from storygraph.core.nest_path import join_nest, option_key
+
 #: 与解析器同一套 label 名写法（点号分段是真实项目常见写法）。
 _LABEL = r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*'
 _LABEL_RE = re.compile(rf'^{_LABEL}$')
@@ -371,6 +373,128 @@ def label_brief(beats, label) -> dict:
     return {'count': len(hits), 'line': first}
 
 
+def menu_brief(beats, name) -> dict:
+    """
+    `name` 是这一章里某个**有名 menu**（`menu choice_a:` 的 `choice_a`）时，
+    返回它的选项与各自去向；不是 menu / 找不到 → `{}`。
+
+    为什么需要（用户 2026-10-25）：
+
+        > 它哪里写的是：menu……可是它没有显示 menu 的内容是什么……
+        > 又跳去哪儿……（不然要我点进去才知道）
+
+    `menu` 名在 Ren'Py 里是个**真 label**（`menu_statement` 会为它产出一条
+    `ast.Label`），所以 `jump choice_a` 完全合法 —— 但控制流条上那时只写得出
+    "跳转 choice_a"，人还是不知道这个分支有几条、各自去哪。
+
+    这里按**拍的结构位**（`nest_path`）读，不猜文本：
+
+        menu 头   nest=''
+        选项      nest='menu:1'        （`kind == 'menu_option'`）
+        选项体    nest='menu:1>A'      （后缀字母标出属于第几个选项）
+
+    返回：
+
+        {'name': 'choice_a', 'count': 3,
+         'options': [{'text': '去河边', 'type': 'jump', 'target': 'ch02'},
+                     {'text': '回家', 'type': '', 'target': ''}, …]}
+
+    只认**直接写在该选项体里**的 `jump` / `call`（`call screen` 不算 ——
+    那是界面调用，不改变流程）。深一层（if 里面再跳）不追：追了就得猜
+    "哪个分支才会跳"，那是静态分析的活，不该混进一行提示。
+    """
+    want = str(name or '').strip()
+    if not want:
+        return {}
+    rows = list(beats or ())
+    head = None
+    for i, b in enumerate(rows):
+        if (str(getattr(b, 'kind', '') or '') == 'menu'
+                and str(getattr(b, 'menu_name', '') or '') == want):
+            head = i
+            break
+    if head is None:
+        return {}
+
+    # 块号 = 本 menu 的选项那一层的结构位：`join_nest(父路径, 'menu:N')`。
+    # `N` = 本 menu 在**本 label 里是第几个 menu**（1 起）—— 与解析器写
+    # 结构位时同一套计数（`renpy_parser._w_menu` 的 `counters['menu']`，
+    # 整个 label 共用、嵌套 menu 也续号）。用 **N 反查块号**，而不是"扫到
+    # 第一个选项就当块号"：后者会把**孤儿选项**（S1 删拍 / 表编辑后残留、
+    # 块号属于别的 menu）认领过来（2026-10-26 审计 §2.3）。
+    # ⚠ 也别 `split('>', 1)[0]` 取第一段 —— 那会把内层 menu（`menu:1>A>menu:2`）
+    # 认成外层的 `menu:1`，两个菜单的选项就串台了。
+    parent = str(getattr(rows[head], 'nest_path', '') or '')
+    my_label = str(getattr(rows[head], 'label', '') or '')
+    n = 1
+    for j in range(head):
+        if (str(getattr(rows[j], 'kind', '') or '') == 'menu'
+                and str(getattr(rows[j], 'label', '') or '') == my_label):
+            n += 1
+    block = join_nest(parent, f'menu:{n}')
+
+    def _in_block(nest: str) -> bool:
+        # 这个 menu 块内部（选项行 == 块号；选项体 / 嵌套在块号+`>` 之后）。
+        # 用 `块号 + '>'` 做边界，`menu:1` 才不会把 `menu:12` / 别家的
+        # `menu:2` 圈进来。
+        return nest == block or nest.startswith(block + '>')
+
+    options: list = []
+    for b in rows[head + 1:]:
+        nest = str(getattr(b, 'nest_path', '') or '')
+        if not _in_block(nest):
+            break
+        if nest != block:
+            continue                    # 选项体里的拍，另在下面按字母收
+        if str(getattr(b, 'kind', '') or '') != 'menu_option':
+            continue
+        text = str(getattr(b, 'text', '') or '')
+        # 该选项体的后缀键：第 1 个是 A、第 2 个 B……（`nest_path.option_key`，
+        # 与解析器写结构位时同一个函数 —— 空选项体也不会错位、>26 个也不撞键）。
+        letter = option_key(len(options) + 1)
+        prefix = f'{block}>{letter}'
+        jump_type = jump_target = ''
+        for inner in rows[head + 1:]:
+            inner_nest = str(getattr(inner, 'nest_path', '') or '')
+            if not _in_block(inner_nest):
+                break                       # 出了这个 menu 块，后面不必再看
+            if inner_nest != prefix:
+                continue                    # 选项行 / 别的选项体 / 深层（if、
+                                            # 嵌套 menu）都不追 —— 只认**直接**
+                                            # 写在该选项体里的 jump / call
+            # 复用**同一套** `parse_flow_line`（与卡片 / 列表 / 图边同口径）：
+            # 它把 target/args/from 分家（`call ch02(x) from _f` → target 只有
+            # `ch02`），且只认纯 `call|jump`（`call screen …` / `jump expression …`
+            # 一律 None）。别在这儿另写一套 `raw.split()` 去猜 —— 两边口径
+            # 不一致是本仓库最高频的 P0（"两套出口两种待遇"）。
+            info = parse_flow_line(str(getattr(inner, 'raw', '') or ''))
+            if info and str(info.get('type') or '') in ('jump', 'call'):
+                jump_type = str(info['type'])
+                jump_target = str(info.get('target') or '')
+                break
+        options.append({'text': text, 'type': jump_type,
+                        'target': jump_target})
+    return {'name': want, 'count': len(options), 'options': options}
+
+
+def menu_brief_text(brief) -> str:
+    """`menu_brief` 的结果 → 控制流条上那几行（空 brief → 空串）。"""
+    if not brief or not brief.get('count'):
+        return ''
+    lines = [f'⚑ 这是分支（menu {brief.get("name") or ""}），'
+             f'{brief["count"]} 个选项：']
+    for i, opt in enumerate(brief.get('options') or ()):
+        text = str(opt.get('text') or '（选项）')
+        target = str(opt.get('target') or '').strip()
+        if target:
+            verb = '调用' if str(opt.get('type') or '') == 'call' else '跳转'
+            where = f'{verb} {target}'
+        else:
+            where = '就地继续（不跳）'
+        lines.append(f'   {chr(ord("A") + i)} 「{text}」→ {where}')
+    return '\n'.join(lines)
+
+
 def callers_of(beats, target) -> list:
     """
     这一批拍里，`call` / `jump` 到 `target` 的**拍序号**（0-based，按出现顺序）。
@@ -459,5 +583,6 @@ __all__ = ['FLOW_FIELD_KEYS', 'FLOW_TYPES', 'FLOW_VERBS',
            'beat_brief', 'beat_context', 'call_counts',
            'callers_of', 'collect_from_clauses', 'flow_card_text', 'flow_edges',
            'flow_info', 'from_stem', 'is_valid_label', 'label_brief',
+           'menu_brief', 'menu_brief_text',
            'next_from_clause', 'parse_flow', 'parse_flow_line',
            'render_flow_line', 'update_beat_flow']

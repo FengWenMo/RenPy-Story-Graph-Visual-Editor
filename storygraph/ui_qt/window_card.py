@@ -1432,19 +1432,44 @@ class CardPageMixin:
           · 别的文件 → 用左侧导航那份**已在内存里**的项目目录（`_nav.index()`）
             拿文件名与行号，**不解析别的文件**（为了显示一行字去扫盘不值得）。
         数据缺一格就不显示那一格（宁可不写，也不编）。
+
+        目标是个**有名 menu**（`menu choice_a:`）时，另带上 `menu_brief_text`
+        那几行（选项各自去哪）—— 用户 2026-10-25：
+
+            > 它哪里写的是：menu……可是它没有显示 menu 的内容是什么……
+            > 又跳去哪儿……（不然要我点进去才知道）
+
+        menu 名在 Ren'Py 里是真 label（`jump choice_a` 合法），但拍的
+        `label` 是**外层 label**，所以 `label_brief` 认不到它 —— 这时走
+        `menu_brief` 那条。若目标既像 label 又像 menu，**两件都是事实**，
+        就都摆出来（不猜语义、不挑一个、不编造）。
         """
-        from storygraph.story.flow import callers_of, label_brief
+        from storygraph.story.flow import (
+            callers_of, label_brief, menu_brief, menu_brief_text)
 
         name = str(target or '').strip()
         if not name:
             return {}
         beats = list(getattr(self._session, 'beats', None) or ())
         brief = label_brief(beats, name)
+        # 名字是个有名 menu 时的选项清单（不是 menu / 找不到 → `{}`）。
+        menu = menu_brief(beats, name)
+        menu_text = menu_brief_text(menu) if menu else ''
         if brief:
             brief['same_file'] = True
             brief['file'] = Path(self._file_path).name if self._file_path else ''
             brief['callers'] = len(callers_of(beats, name))
+            if menu_text:
+                brief['menu_text'] = menu_text
             return brief
+        if menu_text:
+            # 只是个有名 menu（不是普通 label）：控制流条上写清它有几条、
+            # 各自去哪，就不用点进去看了。count 不塞进 brief —— 那是**选项数**，
+            # 会被渲染成"N 拍"，驴唇不对马嘴。
+            return {'same_file': True,
+                    'file': Path(self._file_path).name if self._file_path else '',
+                    'callers': len(callers_of(beats, name)),
+                    'menu_text': menu_text}
         nav = getattr(self, '_nav', None)
         try:
             index = nav.index() if nav is not None else None

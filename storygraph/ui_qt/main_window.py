@@ -906,6 +906,10 @@ class BeatCardEditor(QWidget):
                 detail += f"（本章 {brief['callers']} 处调用）"
             elif brief.get('same_file'):
                 detail += '（本章还没人调它）'
+        # 目标是个**有名 menu** 时，把选项清单（各自去哪）整段摆出来 ——
+        # 用户 2026-10-25："它没有显示 menu 的内容是什么……又跳去哪儿……"。
+        if target and (brief.get('menu_text')):
+            detail += '\n' + str(brief['menu_text'])
         detail += ('\n这张卡没有台词与演出 —— 台词 / 立绘 / 舞台那几块已收起；'
                    '要加一句台词请另插一张普通卡片。')
         # `jump` 不接受参数 / from（Ren'Py 语法）—— 灰掉比"填了也不生效"诚实。
