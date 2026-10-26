@@ -2079,20 +2079,25 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._open_script_btn.setToolTip(
             '进入卡片编辑器改这一章的台词（也可右键模块 → 改本章台词）')
         self._open_script_btn.setProperty('variant', 'primary')
-        self._open_script_btn.clicked.connect(self._open_selected_in_card)
+        # ⚠ 过 `_menu_action` 安全壳（2026-10-26）：槽里异常只打 stderr →
+        #   用户看到的是"点了没反应"。无源节点修复入口就在这个按钮上。
+        self._open_script_btn.clicked.connect(
+            self._menu_action('打开本章剧本', self._open_selected_in_card))
         rv.addWidget(self._open_script_btn)
 
         self._edit_vars_btn = QPushButton('🧩 编辑剧情变量…')
         self._edit_vars_btn.setToolTip(
             '给策划 / 编剧编排剧情分支用的地方（双击模块同样打开）')
-        self._edit_vars_btn.clicked.connect(self._edit_selected_vars)
+        self._edit_vars_btn.clicked.connect(
+            self._menu_action('编辑剧情变量', self._edit_selected_vars))
         rv.addWidget(self._edit_vars_btn)
 
         self._vars_workbench_btn = QPushButton('📋 变量工作台…')
         self._vars_workbench_btn.setToolTip(
             '按变量列出初值、每条赋值和它所在的拍；可以只改一条、跳到那一拍')
         self._vars_workbench_btn.clicked.connect(
-            lambda: self.show_variable_workbench())
+            self._menu_action('变量工作台',
+                              lambda: self.show_variable_workbench()))
         rv.addWidget(self._vars_workbench_btn)
 
         # 2026-10-22：方向是"把赋值从 python 块里搬出来"，不是"让工具读懂块"。
@@ -2101,7 +2106,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '把 `python:` 块里那些 `$` 就写得出来的单行赋值搬回脚本层：\n'
             '搬完它们会变成变量工作台里能逐条改的操作，导出也能进 IR；\n'
             '块里的调用 / 控制流原位保留，不动。')
-        self._lift_btn.clicked.connect(lambda: self.lift_python_assignments())
+        self._lift_btn.clicked.connect(
+            self._menu_action('搬出 python 块里的赋值',
+                              lambda: self.lift_python_assignments()))
         rv.addWidget(self._lift_btn)
 
         brow = QHBoxLayout()

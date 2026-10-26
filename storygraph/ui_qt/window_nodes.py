@@ -1047,14 +1047,33 @@ class NodeEditMixin:
             self._locate_and_bind(label, start=None)
 
     def _repair_choice(self, title: str, text: str, buttons) -> str:
-        """带自定义按钮文字的询问框 → 返回按钮 key（没有则 'cancel'）。"""
+        """
+        带自定义按钮文字的询问框 → 返回按钮 key（没有则 'cancel'）。
+
+        ⚠⚠ **`addButton` 的第二个参数是 `ButtonRole`，不是标准按钮**（2026-10-26
+        修 P0）。从前写的是
+
+            role = QMessageBox.Cancel if key == 'cancel' else QMessageBox.AcceptRole
+
+        —— `QMessageBox.Cancel` 是 `StandardButton`（值 4194304），不是角色；
+        PySide6 当场抛
+
+            TypeError: addButton(str, StandardButton) ... Supported signatures:
+                addButton(text: str, role: QMessageBox.ButtonRole)
+
+        而**异常抛在 Qt 槽里只会打到 stderr**：界面上就是"点了完全没反应"。
+        用户 2026-10-26 实测报的正是这条 —— 无源节点的「新建 / 绑定源文件…」
+        （以及右栏主按钮「🩹 给这个节点建/绑源文件」）四个入口全部静默失效，
+        因为**手工节点**和**源文件丢失**这两档都走这个函数。
+        判据：`tests/test_ui_reaction_contract.py`（静态 AST + 真建框）。
+        """
         box = QMessageBox(self)
         box.setWindowTitle(title)
         box.setText(text)
         box.setIcon(QMessageBox.Question)
         made = {}
         for key, label in buttons:
-            role = (QMessageBox.Cancel if key == 'cancel'
+            role = (QMessageBox.RejectRole if key == 'cancel'
                     else QMessageBox.AcceptRole)
             made[key] = box.addButton(label, role)
         box.exec()
@@ -1137,6 +1156,33 @@ class NodeEditMixin:
             self._log(f'[打开] 已用系统默认程序打开 {Path(str(fp)).name}')
         else:
             self._status(f'没能调用系统默认程序，请手动打开：{fp}')
+    def _menu_action(self, name: str, fn):
+        """
+        右键菜单动作的**安全壳**：槽里抛异常绝不许变成"点了没反应"。
+
+        为什么必须有（2026-10-26 用户实报"右键的所有栏都没反应"）：Qt 槽里的
+        异常只会打到 stderr，界面上什么都没有 —— 而那一轮的真正原因
+        （`_repair_choice` 把 `QMessageBox.Cancel` 当 ButtonRole 传）就是被
+        **静默吞掉**的，四个修复入口一起失效，用户只能看到"点了没用"。
+        现在任何异常都会：① 进 `swallow` 台账；② 写状态栏；③ 写控制台。
+
+        也顺手吃掉 `QAction.triggered(bool)` 那个 bool —— 菜单项直接接
+        `self.some_method(arg=None)` 时，那个 `False` 会被当成第一个位置参数
+        （`QPushButton.clicked` 的同类坑，见 `main_window` 里「插入卡片」那段）。
+        """
+        def _run(*_args, **_kwargs):
+            try:
+                return fn()
+            except Exception as e:              # noqa: BLE001 - 槽里不许往外抛
+                swallow(f'ui_qt.window_nodes.menu.{name}', e)
+                message = f'「{name}」出错了：{type(e).__name__}: {e}'
+                try:
+                    self._status(message)
+                    self._log(f'[错误] 右键菜单{message}（已记进诊断）')
+                except Exception as e2:          # noqa: BLE001 - 报错通道坏了也要吞
+                    swallow('ui_qt.window_nodes.menu.report', e2)
+        return _run
+
     def build_node_menu(self, nid=None) -> QMenu:
         """
         拼出右键菜单（**不 exec**，所以能测"哪些项被置灰了"）。
@@ -1144,6 +1190,8 @@ class NodeEditMixin:
         条目与旧版 `GraphView.menu` 对齐。旧版有而上一版被我漏掉的：
         「在编辑器中打开」。旧版叫「改本章台词（卡片）」的那条保持原名
         （用户认得这个名字）。
+
+        ⚠ 每个动作都过 `_menu_action`（异常要说话，不许"点了没反应"）。
         """
         menu = QMenu(self)
         node = (self.graph.nodes or {}).get(nid) if (self.graph and nid) else None
@@ -1153,15 +1201,21 @@ class NodeEditMixin:
             has_src = bool(fp and Path(str(fp)).exists())
 
             targets = [
-                menu.addAction(f'改本章台词（卡片）「{name}」',
-                               (lambda: self._on_node_open(nid)) if has_src
-                               else None),
-                menu.addAction('在编辑器中打开',
-                               (lambda: self.open_node_in_editor(nid))
-                               if has_src else None),
-                menu.addAction('用 Excel 打开此章节',
-                               (lambda: self.open_node_in_excel(nid))
-                               if has_src else None),
+                menu.addAction(
+                    f'改本章台词（卡片）「{name}」',
+                    self._menu_action('改本章台词（卡片）',
+                                      lambda: self._on_node_open(nid))
+                    if has_src else None),
+                menu.addAction(
+                    '在编辑器中打开',
+                    self._menu_action('在编辑器中打开',
+                                      lambda: self.open_node_in_editor(nid))
+                    if has_src else None),
+                menu.addAction(
+                    '用 Excel 打开此章节',
+                    self._menu_action('用 Excel 打开此章节',
+                                      lambda: self.open_node_in_excel(nid))
+                    if has_src else None),
             ]
             if not has_src:
                 # 没有源文件的块：**先给修复入口**，再把三条"打开"置灰。
@@ -1169,7 +1223,8 @@ class NodeEditMixin:
                 info = self._source_info(node)
                 label = ('导入并绑定源文件…' if info.get('kind') == 'found'
                          else '新建 / 绑定源文件…')
-                menu.addAction(label, lambda: self._repair_node_source(nid))
+                menu.addAction(label, self._menu_action(
+                    label.rstrip('…'), lambda: self._repair_node_source(nid)))
                 # 没有源文件的块点了也没用 —— 置灰比"点完再弹一句"友好
                 for a in targets:
                     a.setEnabled(False)
@@ -1177,45 +1232,62 @@ class NodeEditMixin:
                                  '（手工新建的块，或先「➕ 导入章节」）')
             else:
                 # 同一个 .rpy 里加第二个 label：不用离开工具、不用手打路径。
-                menu.addAction('在本文件新建 label…',
-                               lambda: self.add_label_to_file(nid))
+                menu.addAction('在本文件新建 label…', self._menu_action(
+                    '在本文件新建 label', lambda: self.add_label_to_file(nid)))
             menu.addSeparator()
-            menu.addAction('设为当前章节',
-                           lambda: self._canvas.highlight_node(nid))
-            menu.addAction('编辑剧情变量…', lambda: self.edit_node_ops(nid))
-            menu.addAction('变量工作台…',
-                           lambda: self.show_variable_workbench(nid))
+            menu.addAction('设为当前章节', self._menu_action(
+                '设为当前章节', lambda: self._canvas.highlight_node(nid)))
+            menu.addAction('编辑剧情变量…', self._menu_action(
+                '编辑剧情变量', lambda: self.edit_node_ops(nid)))
+            menu.addAction('变量工作台…', self._menu_action(
+                '变量工作台', lambda: self.show_variable_workbench(nid)))
             # 2026-10-22：「工具去适应 python 块」是错的方向；正确的一刀是把
             # 块里那些 `$` 就写得出来的赋值**搬回脚本层**（用户原话）。这一项
             # 只搬简单赋值，块里的调用 / 控制流原位不动。
-            menu.addAction('⤴ 搬出 python 块里的赋值…',
-                           lambda: self.lift_python_assignments(nid))
-            menu.addAction('从这里连一条到…', lambda: self.add_edge(from_id=nid))
-            menu.addAction('接管进入点（jump → _control）…',
-                           lambda: self.takeover_node(nid))
+            menu.addAction('⤴ 搬出 python 块里的赋值…', self._menu_action(
+                '搬出 python 块里的赋值',
+                lambda: self.lift_python_assignments(nid)))
+            menu.addAction('从这里连一条到…', self._menu_action(
+                '从这里连一条到', lambda: self.add_edge(from_id=nid)))
+            menu.addAction('接管进入点（jump → _control）…', self._menu_action(
+                '接管进入点', lambda: self.takeover_node(nid)))
             menu.addSeparator()
             # 「移除这一章」按**文件**整章移除（用户心智里一章 = 一个 .rpy）；
             # 「删除这个块」只删这一个 label。两者都在，别混为一谈。
             if fp:
-                menu.addAction(f'从剧情图移除「{Path(str(fp)).name}」整章',
-                               lambda: self.remove_chapter_from_graph(nid))
-            menu.addAction('删除这个块…', lambda: self._delete_node(nid))
+                menu.addAction(
+                    f'从剧情图移除「{Path(str(fp)).name}」整章',
+                    self._menu_action('从剧情图移除整章',
+                                      lambda: self.remove_chapter_from_graph(nid)))
+            menu.addAction('删除这个块…', self._menu_action(
+                '删除这个块', lambda: self._delete_node(nid)))
         else:
-            menu.addAction('添加新章节…', self.add_node)
-            menu.addAction('添加连线…', self.add_edge)
+            # 空白处右键：动作同样过安全壳（异常要说出口）。
+            menu.addAction('添加新章节…', self._menu_action(
+                '添加新章节', lambda: self.add_node()))
+            menu.addAction('添加连线…', self._menu_action(
+                '添加连线', lambda: self.add_edge()))
             menu.addSeparator()
-            menu.addAction('自动布局', self._canvas.auto_layout)
-            menu.addAction('按文件顺序排列', self.arrange_by_file)
-            menu.addAction('适应窗口', self._canvas.fit_to_content)
-            menu.addAction('检查逻辑问题', self.check_logic)
+            menu.addAction('自动布局', self._menu_action(
+                '自动布局', self._canvas.auto_layout))
+            menu.addAction('按文件顺序排列', self._menu_action(
+                '按文件顺序排列', self.arrange_by_file))
+            menu.addAction('适应窗口', self._menu_action(
+                '适应窗口', self._canvas.fit_to_content))
+            menu.addAction('检查逻辑问题', self._menu_action(
+                '检查逻辑问题', self.check_logic))
             menu.addSeparator()
             # 画布右键 = 剧情图的家务事，所以放"导入章节 / 清空图"，
             # **不放**资源表的动作（那是另一条路，混在一起用户会以为
             # "重扫项目"会把整部戏画出来 —— 正是上一版最大的误解）。
-            menu.addAction('导入章节 .rpy…', self.import_chapters)
-            menu.addAction('补全缺失章节…', self.complete_related_chapters)
-            menu.addAction('刷新已导入章节…', self.reload_imported_chapters)
-            menu.addAction('清空剧情图', self.clear_graph)
+            menu.addAction('导入章节 .rpy…', self._menu_action(
+                '导入章节', self.import_chapters))
+            menu.addAction('补全缺失章节…', self._menu_action(
+                '补全缺失章节', self.complete_related_chapters))
+            menu.addAction('刷新已导入章节…', self._menu_action(
+                '刷新已导入章节', self.reload_imported_chapters))
+            menu.addAction('清空剧情图', self._menu_action(
+                '清空剧情图', self.clear_graph))
         return menu
     def _on_node_menu(self, nid, global_pos):
         self.build_node_menu(nid).exec(global_pos)
