@@ -470,7 +470,7 @@ def _review_one(planned, owners: dict, root) -> Optional[ReviewItem]:
             more = f' 等 {len(involved)} 个文件' if len(involved) > 3 else ''
             conflicts.append(Conflict(
                 code=CODE_ALREADY_DUPLICATED,
-                message=(f'项目里**本来就有**多个文件定义 `label {planned.label}`'
+                message=(f'项目里本来就有多个文件定义 `label {planned.label}`'
                          f'（{shown}{more}）—— 不是这次导入造成的，'
                          f'覆盖也修不好；先手工删掉/改名其中一个'),
                 other_path=owner, other_text=_read_text(owner),

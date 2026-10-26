@@ -77,10 +77,10 @@ class ImportJunkDialog(QDialog):
 
         head = QLabel(
             f'找到 {self.summary["total"]} 个导入残留'
-            f'（共 {self.summary["human_bytes"]}）—— 它们都**不参与游戏运行**'
+            f'（共 {self.summary["human_bytes"]}）—— 它们都不参与游戏运行'
             f'（`.blocked.rpy` 在 `build/review/` 里，Ren\'Py 不扫描；'
             f'`.rpy.bak` 也不是 `.rpy` 脚本），删掉不影响工程。\n'
-            f'每类单独勾选；删除**不可恢复**，先看清楚再点。')
+            f'每类单独勾选；删除不可恢复，先看清楚再点。')
         head.setObjectName('junkHead')
         head.setWordWrap(True)
         root.addWidget(head)
@@ -97,7 +97,7 @@ class ImportJunkDialog(QDialog):
 
         if self.summary['counts'].get(IC.KIND_BAK):
             warn = QLabel('⚠ 「自动备份（.rpy.bak）」可能是覆盖手写文件前留下的'
-                          '**唯一**旧版本 —— 确认不再需要回滚再勾它。')
+                          '唯一旧版本 —— 确认不再需要回滚再勾它。')
             warn.setObjectName('junkBakWarning')
             warn.setWordWrap(True)
             warn.setStyleSheet(f"color: {T.t('state.warning')};")
