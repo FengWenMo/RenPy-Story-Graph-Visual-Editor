@@ -281,6 +281,12 @@ class TestSyncPreview:
         win = MainWindowQt(_Engine(project), script)
         try:
             win.import_chapter_files([script])
+            # ⚠ 刷新**只重读改过的文件**（2026-10-27）：文件一个字节没动时
+            # 它连预览框都不弹（那是"没有改动，不用刷新"）。所以这条用例
+            # 必须先把源文件改一下，才轮得到"预览 → 重读"这条路。
+            script.write_text(script.read_text(encoding='utf-8')
+                              + '\nlabel added_later:\n    return\n',
+                              encoding='utf-8')
             seen = {}
 
             class _FakeDialog:
@@ -299,6 +305,7 @@ class TestSyncPreview:
             win.reload_imported_chapters()
 
             assert seen['title'] == '刷新已导入章节'
+            assert 'added_later' in seen['detail']
             assert called and called[0] == [str(script)]
         finally:
             win.close()
