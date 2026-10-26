@@ -789,3 +789,41 @@ class TestInfiniteStage:
             f'撑舞台把视口顶跑了：{before} → {after}'
         canvas.set_graph(_graph(2)[0])
         assert canvas._items
+
+
+# ==================================================================
+#  九、重建画布的成本（用户 2026-10-26："每一次连线都很卡"）
+# ==================================================================
+
+class TestRebuildIsNotWasteful:
+    """
+    连线之后画布会整张重建（`_set_graph` 是唯一入口）。重建本身是 O(块数)，
+    但**每个块只该排一次文字**：`NodeItem.__init__` 已经 refresh 过，
+    `_apply_marks` 再把每个块 refresh 一遍的话，98 个块多花 15 ms（真机实测），
+    而屏幕上一个像素都不会变。
+    """
+
+    def test_each_node_is_refreshed_once_per_rebuild(self, canvas, monkeypatch):
+        from storygraph.ui_qt import graph_canvas as gc
+
+        calls = []
+        real = gc.NodeItem.refresh
+
+        def _count(self):
+            calls.append(self.node.label_name)
+            return real(self)
+
+        monkeypatch.setattr(gc.NodeItem, 'refresh', _count)
+        canvas.set_graph(_graph(12)[0])
+        dup = sorted({n for n in calls if calls.count(n) > 1})
+        assert dup == [], f'这些块在一次重建里被 refresh 了不止一次：{dup}'
+        assert len(calls) == 12
+
+    def test_marks_are_applied_at_construction(self, canvas):
+        """分析结论要在建块时就贴上去（否则块上会短暂显示"没有结论"）。"""
+        g, ids = _graph(4)
+        canvas.set_analysis(entry_id=ids[0], problem_ids=[ids[1]])
+        canvas.set_graph(g)
+        assert canvas._items[ids[1]].mark == 'stranded'
+        assert '走不到' in canvas._items[ids[1]]._note.text()
+
