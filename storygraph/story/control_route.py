@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from storygraph.core.textlines import split_lines
+from storygraph.story import scan_cache
 from storygraph.story.source_style import SourceNotUtf8
 
 CONTROL_SUFFIX = '_control'
@@ -184,20 +185,20 @@ class ControlRoutePlan:
         }
 
 
-_RE_LABEL = re.compile(r'^\s*label\s+([^\s:(#]+)', re.MULTILINE)
+#: `label 名字:` 的正则**不再在这里**：唯一的定义在 `story.scan_cache.LABEL_RE`
+#: （`_labels_of` 直接读缓存）。这里保留注释只是给搜代码的人一个指针 ——
+#: 历史上有三份副本（本文件 / `control_takeover` / `control_write`），
+#: 新代码请用 `scan_cache.labels_of`，别再抄第四份。
 
 
 def _labels_of(path) -> list:
-    try:
-        text, _style = _read(path)
-    except OSError:
-        return []
-    out = []
-    for m in _RE_LABEL.finditer(text):
-        name = m.group(1).strip()
-        if name and name not in out:
-            out.append(name)
-    return out
+    """
+    这个 `.rpy` 里有哪些 label —— 走 `scan_cache`（同一份文件只读一次）。
+
+    为什么不再自己读：`find_control_file` 每问一次就要扫全部脚本，而一次
+    接线里它被问好几遍（真机 91 个文件、每遍 50 ms 的读盘+正则）。
+    """
+    return list(scan_cache.labels_of(path))
 
 
 def find_control_file(project_root, src_label: str = ''):
@@ -211,6 +212,14 @@ def find_control_file(project_root, src_label: str = ''):
 
     排序：有 `src_label_control` 的优先；其次 `detect_placement` 认出的那个；
     再其次文件名带 `control` / `controller` 的；最后按路径排序（不猜内容）。
+
+    ## 两个让它变快的判据（2026-10-26，都是**结论不变**的短路）
+
+    1. **只有一个候选** → 直接给它。排序的输入只有一个元素时，排不排一样；
+       而"排"要跑 `detect_placement`（整份解析全部脚本，真机 1.4 秒）。
+       绝大多数项目只有一个编排层文件，这一条把 1.5 s 变成 ~40 ms。
+    2. 整个结论按**项目指纹**缓存（`scan_cache.memo`）：文件没变就直接给
+       上一次的答案，不管调用方连着问几遍。
     """
     if not str(project_root or '').strip():
         # ⚠ `Path('')` 是当前目录：空项目根会被当成"整个仓库"，rglob 扫到
@@ -220,10 +229,15 @@ def find_control_file(project_root, src_label: str = ''):
     if not root.is_dir():
         return None
     src = str(src_label or '').strip()
-    paths = []
+    fp = scan_cache.fingerprint(root)
+    return scan_cache.memo('find_control_file', root, src, fp,
+                           lambda: _find_control_file_uncached(root, src))
+
+
+def _find_control_file_uncached(root: Path, src: str):
+    """`find_control_file` 的纯计算部分（结果按指纹缓存）。"""
     try:
-        from storygraph.parsing.discover import discover_scripts
-        paths = [Path(p) for p in discover_scripts(root)]
+        paths = scan_cache.discover(root)
     except Exception as exc:                  # noqa: BLE001 - 扫不出来就只试清单
         from storygraph.core.safeguard import swallow
         swallow('story.control_route.find_control_file.scan', exc)
@@ -236,6 +250,10 @@ def find_control_file(project_root, src_label: str = ''):
             with_control.append((path, labels))
     if not with_control:
         return None
+    if len(with_control) == 1:
+        # 只有一个候选：下面三步（精确包装 / placement / 文件名）都是在
+        # **几个候选里挑一个**，一个候选谈不上挑 —— 结论必然相同。
+        return with_control[0][0]
 
     if src:
         exact = [p for p, labels in with_control
@@ -279,15 +297,26 @@ def _label_decl(project_root, name: str):
     项目里 `label 名字` 的声明（第一处）：`{path, line_no, params, text}`。
 
     只认行首无缩进的 `label`：缩进的同名行不是顶层 label。
+
+    结论按**项目指纹**缓存（`scan_cache.memo`）：`plan_control_init` 一次要问
+    两个名字，而每问一个都要读一遍全部脚本 —— 真机上那是 1.2 MB × 2。
     """
     if not str(project_root or '').strip():
         return None
     want = str(name or '').strip()
     if not want:
         return None
+    root = Path(str(project_root))
+    fp = scan_cache.fingerprint(root)
+    found = scan_cache.memo('label_decl', root, want, fp,
+                            lambda: _label_decl_uncached(root, want))
+    return dict(found) if found else None
+
+
+def _label_decl_uncached(root: Path, want: str):
+    """`_label_decl` 的纯计算部分（结果按指纹缓存）。"""
     try:
-        from storygraph.parsing.discover import discover_scripts
-        paths = discover_scripts(Path(str(project_root)))
+        paths = scan_cache.discover(root)
     except Exception as exc:                  # noqa: BLE001 - 扫不出来就当没有
         from storygraph.core.safeguard import swallow
         swallow('story.control_route._label_decl.scan', exc)
@@ -307,8 +336,8 @@ def _label_decl(project_root, name: str):
 
 
 def _read(path):
-    from storygraph.story.source_style import read_text
-    return read_text(path)
+    """读源文件 → `(text, style)`；走 `scan_cache`（同一次接线里会读很多遍）。"""
+    return scan_cache.read_text(path)
 
 
 def _incoming_refs(project_root, name: str) -> list:
@@ -316,18 +345,32 @@ def _incoming_refs(project_root, name: str) -> list:
     谁 `jump` / `call` 了这个 label（含 `jump X_control`）。
 
     `call X from Y` 的目标仍是 X —— 用 `_route_of` 判，不另写一套正则。
+
+    同样按项目指纹缓存：`plan_control_init` 一次要问"直接进入的"和
+    "走 `_control` 进入的"两个名字，问法一样，答案只跟文件内容有关。
     """
     refs = []
     if not str(project_root or '').strip():
         return refs
+    want = str(name or '').strip()
+    if not want:
+        return refs
+    root = Path(str(project_root))
+    fp = scan_cache.fingerprint(root)
+    found = scan_cache.memo('incoming_refs', root, want, fp,
+                            lambda: _incoming_refs_uncached(root, want))
+    return [dict(r) for r in (found or ())]
+
+
+def _incoming_refs_uncached(root: Path, want: str) -> list:
+    """`_incoming_refs` 的纯计算部分（结果按指纹缓存）。"""
+    refs = []
     try:
-        from storygraph.parsing.discover import discover_scripts
-        paths = discover_scripts(Path(str(project_root)))
+        paths = scan_cache.discover(root)
     except Exception as exc:                  # noqa: BLE001
         from storygraph.core.safeguard import swallow
         swallow('story.control_route._incoming_refs.scan', exc)
         return refs
-    want = str(name or '').strip()
     for path in paths:
         try:
             text, _style = _read(path)
@@ -587,8 +630,9 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
         return plan
     plan.path = str(path)
 
-    from storygraph.story.source_style import read_text
-    text, _style = read_text(path)
+    # 走 `_read`（= `scan_cache`）：一次接线里这份编排层会被算好几遍，
+    # 文件没变就不该重新读盘（真机 1.2 MB 的项目里这一步是纯浪费）。
+    text, _style = _read(path)
     if not text.strip():
         plan.reason = f'编排层文件是空的：{path.name}'
         plan.blocking.append(plan.reason)

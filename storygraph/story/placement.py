@@ -45,11 +45,12 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
 from storygraph.core.statement import StatementKind
+from storygraph.story import scan_cache
 
 # ---------------------------------------------------------------------------
 #  常量
@@ -287,17 +288,54 @@ def detect_placement(project_root, files=None) -> Placement:
     探测项目形状。**只读，不写盘，不建文件。**
 
     `files` 传了就用它（测试/局部），否则用 `discover_scripts` 发现的全部脚本。
+
+    ## 为什么套了两层缓存（2026-10-26）
+
+    真机上这一步要**整份解析每个 `.rpy`**（`sr_general` 91 个文件 1.4 秒），
+    而接线窗口一次操作会问它两遍以上（`find_control_file` 里还要再问）。
+    结论只由"文件内容"决定，所以：
+
+      · `scan_cache.file_facts` 按 `(mtime_ns, size)` 缓存单个文件的解析结果 ——
+        改过的文件才重新解析；
+      · 整个 `Placement` 按项目指纹缓存 —— 文件一个没变就直接给上一次的结论。
+
+    返回的是拷贝：调用方改自己的 `.warnings` / 列表不影响缓存。
     """
-    from storygraph.parsing.discover import discover_scripts
-
     root = Path(project_root)
-    paths = [Path(p) for p in files] if files else \
-        [Path(p) for p in discover_scripts(root)]
+    if files is None:
+        paths = [Path(p) for p in scan_cache.discover(root)]
+    else:
+        paths = [Path(p) for p in files]
+    fp = scan_cache.fingerprint(root, paths)
+    placement = scan_cache.memo(
+        'detect_placement', root, len(paths), fp,
+        lambda: _build_placement(root, paths))
+    return _copy_placement(placement)
 
+
+def _copy_placement(placement: Placement) -> Placement:
+    """`Placement` 里几个 list/dict —— 交出去之前拷一份，别让调用方改到缓存。"""
+    try:
+        decl = placement.declarations
+        return replace(placement,
+                       declarations=(list(decl) if isinstance(decl, list)
+                                     else decl),
+                       content_globs=list(placement.content_globs or ()),
+                       content_files=list(placement.content_files or ()),
+                       inline_flow_files=list(placement.inline_flow_files or ()),
+                       evidence=dict(placement.evidence or {}),
+                       warnings=list(placement.warnings or ()))
+    except Exception as exc:                     # noqa: BLE001 - 拷不动就原样给
+        swallow('story.placement._copy_placement', exc)
+        return placement
+
+
+def _build_placement(root: Path, paths) -> Placement:
+    """真正的探测（`detect_placement` 的纯计算部分，结果会被缓存）。"""
     facts = []
     for path in paths:
         try:
-            facts.append(scan_file(path, root))
+            facts.append(scan_cache.file_facts(path, root))
         except Exception as exc:                      # noqa: BLE001
             facts.append(FileFacts(rel=str(path), abs_path=str(path)))
             _ = exc
