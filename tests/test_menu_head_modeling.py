@@ -67,6 +67,13 @@ def _src(head: str) -> str:
     ('menu (nvl=True):', '', '(nvl=True)'),
     ('menu choice_menu:', 'choice_menu', ''),
     ('menu named_menu (screen="choice"):', 'named_menu', '(screen="choice")'),
+    # —— 点号菜单名（2026-10-26，多智能体审计 M1）——
+    # `menu 名` 的「名」是 `l.label_name()`，而 label 名**可以带点**
+    # （`main.route`）。旧 `_RE_MENU_NAME` 只吃一段标识符，`main` 匹配到
+    # 点上就断 → 头不成立 → 整块掉「原样块」，还折进下一句台词那张拍。
+    ('menu main.route:', 'main.route', ''),
+    ('menu .local:', '.local', ''),
+    ('menu main.route (nvl=True):', 'main.route', '(nvl=True)'),
 ])
 def test_menu_head_is_modeled_not_opaque(tmp_path, head, name, args):
     beats = _beats(tmp_path, _src(head))
@@ -96,6 +103,39 @@ def test_menu_name_is_a_real_label_target(tmp_path):
     assert 'jump choice_menu' in out
 
 
+def test_dotted_menu_does_not_fold_into_the_next_say(tmp_path):
+    """M1 的**数据丢失后果链**（2026-10-26）：点号菜单名从前不被认作 menu 头，
+    整块（头+选项+jump）落进**下一句台词那张拍**的 `opaque` ——
+
+      1. 菜单在卡片 / 树 / brief 里全部隐形；
+      2. 删那张台词拍（S1 删拍 / 整拍删）会把绑在上面的整块菜单**一起带走**。
+
+    判据钉住的是**后果**（台词拍不许驮着菜单），不只是"名字认出来了"——
+    名字认出来但还折在 opaque 里，删台词拍照样毁菜单。
+    """
+    src = (
+        'label start:\n'
+        '    menu main.route:\n'
+        '        "选项 A":\n'
+        '            jump done\n'
+        '    "菜单之后"\n'
+        '    return\n'
+        '\n'
+        'label done:\n'
+        '    return\n'
+    )
+    beats = _beats(tmp_path, src)
+    heads = [b for b in beats if b.kind == KIND_MENU]
+    opts = [b for b in beats if b.kind == KIND_MENU_OPTION]
+    assert len(heads) == 1, f'点号菜单名必须落成菜单拍，实得 {len(heads)} 张'
+    assert heads[0].menu_name == 'main.route', heads[0].menu_name
+    assert len(opts) == 1, f'选项必须是真拍，实得 {len(opts)} 张'
+    says = [b for b in beats if '菜单之后' in str(getattr(b, 'text', '') or '')]
+    assert len(says) == 1, f'应当只有一张台词拍，实得 {len(says)} 张'
+    assert not str(getattr(says[0], 'opaque', '') or '').strip(), (
+        '菜单不许折进后面台词拍的原样块 —— 删那张台词拍会把整块菜单带走')
+
+
 # ---------------------------------------------------------------------------
 #  2. 保真：头行逐字节
 # ---------------------------------------------------------------------------
@@ -105,6 +145,9 @@ def test_menu_name_is_a_real_label_target(tmp_path):
     'menu (nvl=True):',
     'menu choice_menu:',
     'menu named_menu (screen="choice"):',
+    'menu main.route:',
+    'menu .local:',
+    'menu main.route (nvl=True):',
 ])
 def test_menu_head_is_rendered_byte_exactly(tmp_path, head):
     out = _render(tmp_path, _src(head))

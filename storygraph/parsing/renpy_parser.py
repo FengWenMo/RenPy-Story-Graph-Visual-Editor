@@ -1072,13 +1072,23 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
     _RE_ELIF_HEAD = re.compile(r'^elif\s+')
     _RE_ELSE_HEAD = re.compile(r'^else\s*:')
     _RE_MENU_HEAD = re.compile(r'^menu\b')
-    #: `menu` 头上的**菜单名**（`menu choice_menu:` / `menu .local:`）。
+    #: `menu` 头上的**菜单名**（`menu choice_menu:` / `menu .local:` /
+    #: `menu main.route:`）。
     #:
     #: 形状对齐 Ren'Py 的 `Lexer.label_name()`：一个标识符（可带 `.` 前缀
-    #: 表示"本 label 内的局部菜单"）。**不认关键字**（`menu hide:` 不是
-    #: 合法写法）—— 但这里刻意不查关键字表：真出现那种行，把它当名字
-    #: 原样写回，与源文件逐字节相同，错的是源文件、不是我们。
-    _RE_MENU_NAME = re.compile(r'\.?[^\W\d]\w*')
+    #: 表示"本 label 内的局部菜单"），**段与段之间还可以有点**
+    #: （label 名本身允许点，`label main.route:` 合法）。
+    #: **不认关键字**（`menu hide:` 不是合法写法）—— 但这里刻意不查关键字
+    #: 表：真出现那种行，把它当名字原样写回，与源文件逐字节相同，错的是
+    #: 源文件、不是我们。
+    #:
+    #: ⚠ 2026-10-26 修（多智能体审计 M1）：从前是 `\.?[^\W\d]\w*` —— 只吃
+    #: **一段**标识符，`menu main.route:` 在 `main` 后的点上断掉 → 头不成立
+    #: → 整块掉「原样块」，还**折进下一句台词那张拍**的 `opaque`：菜单在
+    #: 卡片/树/brief 里全部隐形，删那张台词拍会把整块菜单一起带走。
+    #: 形状与同文件 `_RE_SAY` 的说话人名同形（点号标识符 + 允许 Unicode），
+    #: 也与 `story/flow._LABEL` 的 label 形状同族 —— 同一件事只写一份口径。
+    _RE_MENU_NAME = re.compile(r'\.?[^\W\d]\w*(?:\.[^\W\d]\w*)*')
     # 角色定义两种写法都收：define 是常量，default 是可存档变量
     _RE_DEFINE = re.compile(
         r'^(?:define|default)\s+([\w.]+)\s*=\s*(.+)$', re.DOTALL)
