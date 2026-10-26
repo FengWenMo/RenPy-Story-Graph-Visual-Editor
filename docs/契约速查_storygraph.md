@@ -4741,3 +4741,35 @@ BOM 不受影响：严格 UTF-8 把 BOM 当合法字符，`detect()` 照旧记�
 `tests/golden_txt_import_fingerprint.txt` 钉住了**真机 5 章的 `warnings` 全文**。
 动警告措辞前先想清楚：要么保持原有句子逐字节不变、只**追加**新句子（P1-C 就是
 这么做的：只在确实有引号形状命中时追加），要么同时更新金标并说明理由。
+
+## §52 章节名（label）的唯一来源与"撞名"口径（2026-10-26 晚，真机）
+
+### 52.1 数字链**段数不截断**
+
+`txt_import.chapter_id_from_filename(filename)` 是**唯一实现**（`^(\d+(?:[\-_]\d+)*)`），
+`label_from` 的回退 2 与 `txt_pipeline.target_stem` 都调它，**不许再抄一份正则**。
+作者的命名是"章-节-段"：`2-1-2凌跃捷线-定稿.txt` → `chapter2_1_2`
+（从前只取两段 → `chapter2_1`，同一节四个片段抢一个 label）。
+
+`_CHAPTER_ID_RE`（正文里的 `chapter2-1-2`）与 `_HEADER_RE` 的编号前缀
+（`2.1.2 chapter2-1-2 标题`）同样放开段数；三段章节头从前认不出来，
+会掉进正文变成一句旁白。
+
+### 52.2 撞名：文件名与产物里的 label **必须一起改**
+
+`build_plan` 同批撞名 → 目标加 `_2` 之后，`label` 要重新取 `target.stem`
+（label 与文件名同源），并记进 `PlannedFile.renamed_from`、在 `run().messages`
+里**说出口**。
+
+只改文件名会造出两份声明同一 label 的产物：第一份落进 `game/` 后，第二份必被
+`LABEL_COLLISION` 拦下，而作者看到的是"我的 `chapter2_1_2` 被拦了"。
+改名可以，静默改名不行。
+
+### 52.3 `LABEL_COLLISION` 必须点名**哪个文件**占着 label
+
+`generation_guard.label_defined_in(name, project_root, exclude)` +
+`_relative_hint()`：消息尾巴带"（就定义在 `game\chapter\chapter3_1.rpy`）"。
+扫描口径与 `occupied_labels` 同一份（`discover_scripts`，排除
+`tl/` 与 `*.generated.rpy` / `*.blocked.rpy` / `*.bak.rpy`）。
+
+找不到（没 project_root / 临时目录）就**不加这句**，不编路径。
