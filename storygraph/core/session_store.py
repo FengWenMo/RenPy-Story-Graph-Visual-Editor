@@ -144,11 +144,15 @@ def disabled() -> bool:
 #: 而测试会造几百个临时项目当窗口 —— 那会把你**真实的**最近项目表
 #: 灌满 `tmp_path`，还会把你自己的项目挤出列表。所以测试里直接
 #: `SS.set_enabled(False)`（见 `tests/conftest.py` 的 autouse 夹具）。
+#:
+#: ⚠ 门禁必须放在**唯一写入口 `save()`** 里（2026-10-26 修）：
+#: 从前只有部分调用方自己查 `enabled()`，而 `remember_graph_files()`
+#: 绕过它直连写盘 —— 跑一轮 UI 测试就污染了用户真实的 `session.json`。
 _ENABLED = True
 
 
 def set_enabled(on: bool):
-    """全局开 / 关记忆（`closeEvent` 那一侧看这个）。"""
+    """全局开 / 关记忆（`save()` 里判；调用方不必各自再查一遍）。"""
     global _ENABLED
     _ENABLED = bool(on)
 
@@ -156,6 +160,21 @@ def set_enabled(on: bool):
 def enabled() -> bool:
     """现在允许读写记忆吗？"""
     return bool(_ENABLED) and not disabled()
+
+
+def _is_real_table(path) -> bool:
+    """
+    这次读写的是**用户真实**的会话表吗？
+
+    "不是真实表" = 调用方显式给了 `path=`（测试自己的记忆文件），
+    或者 `STORYGRAPH_SESSION_CONFIG` 把位置指到了别处（打包 / 自动化）。
+    只有真实表才做下面两件事 —— 否则测记忆的用例（它们本来就在 `tmp_path`
+    里造项目、并且显式传 `path=`）会全挂：
+
+      · 写的时候**剪掉**测试 / 探针项目（`prune_temporary`）；
+      · 读的时候**不返回**临时路径（`last_project` / `recent_projects`）。
+    """
+    return path is None and not (os.environ.get(_ENV) or '').strip()
 
 
 def _key(root) -> str:
@@ -301,7 +320,13 @@ def project_cards(root) -> dict:
 
 
 def last_project(path=None) -> str:
-    """上次打开的项目根（**目录不存在就返回空** —— 不自动打开不存在的东西）。"""
+    """
+    上次打开的项目根（**目录不存在 / 看着像测试目录 → 返回空**）。
+
+    后一条是 2026-10-26 加的：记忆表可能被旧版本（或跑过的 UI 测试）灌进
+    `.pip-tmp/…` 这种**还存在**的临时项目 —— 不拦的话，用户下次启动会
+    自动打开一个早该被清掉的测试目录，看到一张莫名其妙的图。
+    """
     try:
         data = load(path)
     except Exception as e:                       # noqa: BLE001
@@ -309,6 +334,8 @@ def last_project(path=None) -> str:
         return ''
     root = str(data.get('last_project') or '')
     if not root:
+        return ''
+    if _is_real_table(path) and _looks_temporary(root):
         return ''
     try:
         if not Path(root).is_dir():
@@ -320,15 +347,18 @@ def last_project(path=None) -> str:
 
 
 def recent_projects(path=None) -> list:
-    """最近项目列表（**已过滤掉不存在的**，最近的在最前）。"""
+    """最近项目列表（**已过滤掉不存在的 / 测试临时目录**，最近的在最前）。"""
     try:
         data = load(path)
     except Exception as e:                       # noqa: BLE001
         swallow('core.session_store.recent_projects', e)
         return []
     out = []
+    real = _is_real_table(path)
     for root in data.get('recent') or []:
         try:
+            if real and _looks_temporary(root):
+                continue
             if Path(root).is_dir() and root not in out:
                 out.append(root)
         except Exception as e:                   # noqa: BLE001
@@ -340,14 +370,76 @@ def recent_projects(path=None) -> list:
 #  写
 # ===========================================================================
 
+#: 测试 / 探针留下的项目路径特征 —— **绝不进用户记忆**（2026-10-26 修 P0）。
+#:
+#: 真事故：`remember_graph_files()` 从前绕过记忆开关（开关只在窗口那一侧查），
+#: 跑一轮 UI 测试就往用户真实 `session.json` 里灌了 **849 个** `tmp_path`
+#: 项目（`.pip-tmp/fasttest/runs/…/tmp/popen-gw11/…`）。这些路径对人毫无
+#: 意义，却会把用户自己的项目挤出"最近打开"、让"自动打开上次的项目"
+#: 指到一个早被删掉的临时目录。
+_TEMP_PATH_MARKERS = ('.pip-tmp/', '/pytest-', '/popen-gw', '/fasttest/runs/')
+
+
+def _looks_temporary(root) -> bool:
+    """这个项目根看着像测试/探针的临时目录吗？（只认工具自己的那几个特征）"""
+    text = str(root or '').replace('\\', '/').lower()
+    if not text:
+        return False
+    if not text.endswith('/'):
+        text += '/'
+    return any(marker in text for marker in _TEMP_PATH_MARKERS)
+
+
+def prune_temporary(data: dict) -> dict:
+    """
+    从会话表里剔掉"测试 / 探针项目"（返回**新的** dict，不改入参）。
+
+    为什么需要（不是洁癖）：被 849 条 `tmp_path` 灌满的记忆表，用户看到的
+    "最近打开"里一大半是打不开的目录，而他自己的项目被挤到列表外。
+    只剔**特征明确**的路径（工具自己的 `.pip-tmp/`、pytest 的 `pytest-*`
+    与 `popen-gw*` 工作目录）；用户自己放在 `D:\\tmp\\` 里的项目不会被误伤。
+
+    只在写**真实**会话表时生效（`save()` 里 `_is_real_table(path)` 为真）——
+    测试里显式传给临时文件（或 `STORYGRAPH_SESSION_CONFIG` 指走）的那种
+    "记忆表"原样保留，否则测记忆的用例全都存不进 `tmp_path` 项目。
+    """
+    if not isinstance(data, dict):
+        return {}
+    out = dict(data)
+    last = str(out.get('last_project') or '')
+    out['last_project'] = '' if _looks_temporary(last) else last
+    out['recent'] = [str(r) for r in (out.get('recent') or [])
+                     if str(r or '').strip() and not _looks_temporary(r)]
+    out['projects'] = {
+        str(key): value
+        for key, value in (out.get('projects') or {}).items()
+        if isinstance(value, dict) and not _looks_temporary(key)}
+    return out
+
+
 def save(data: dict, path=None) -> dict:
     """
     写会话表。返回 `{'ok', 'path', 'reason'}`（**不抛**）。
 
     ⚠ 写的是**用户级**文件；失败只是"这次没记住"，绝不拦用户干活
     （目录建不出来、盘只读、被别人锁着 —— 都只记台账）。
+
+    ⚠⚠ **门禁在这里，不在调用方**（2026-10-26 修 P0）：`set_enabled(False)`
+    / `STORYGRAPH_NO_SESSION` 关掉记忆时，这里直接不写。从前只有
+    `closeEvent` 那一侧检查开关，而 `remember_graph_files()`
+    （UI 导入章节时调）**绕过它直连 `remember_project`** —— 于是跑一轮
+    UI 测试就把用户真实的 `session.json` 灌进 **849 个** `tmp_path` 项目，
+    "下次自动打开上次的项目"会开到一个早被删掉的临时目录。
+    写入口只留这一个，门禁就必须放在这里（调用方漏一个 = 静默污染用户记忆）。
     """
     fp = Path(path) if path else config_path()
+    if not enabled():
+        return {'ok': False, 'path': str(fp),
+                'reason': '记忆已关（set_enabled(False) / STORYGRAPH_NO_SESSION）'}
+    if _is_real_table(path):
+        # 只在写**真实**用户表时剪：显式 `path=` 或 `STORYGRAPH_SESSION_CONFIG`
+        # 指向别处，都是"这条记忆表属于测试/自动化"，里面的 tmp_path 项目合法。
+        data = prune_temporary(data or {})
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -504,6 +596,12 @@ def remember_cards(root, rel, folded) -> dict:
     if not root or not rel:
         return {'ok': False, 'path': str(fp or ''),
                 'reason': '没给项目根或文件相对路径', 'changed': False}
+    # ⚠ 这里**故意不看** `enabled()`：它写的是**项目里**那份
+    # `storygraph.session.json`（折叠状态跟着项目走，换台机器也读得到），
+    # 不是用户级记忆表。`set_enabled(False)` 的语义是"别记这台机器的用户级
+    # 记忆"，而项目内这份是项目数据（多人协作时也该进仓库）。
+    # 判据：`tests/test_feedback_p5_fold_project.py`（8 条，全在 autouse
+    # 关掉记忆的环境里跑，正好钉住"关记忆不影响项目内折叠状态"）。
     names = [str(n) for n in (folded or ()) if str(n or '').strip()]
     data = {}
     if fp.is_file():
@@ -682,7 +780,7 @@ def resolve_chapter(layout: dict, root=None) -> str:
 
 
 __all__ = ['PROJECT_FILE', 'MAX_RECENT', 'VERSION', 'config_path', 'disabled',
-           'set_enabled', 'enabled',
+           'set_enabled', 'enabled', 'prune_temporary',
            'load', 'save', 'project_layout', 'last_project', 'recent_projects',
            'remember_project', 'set_auto_open', 'forget',
            'remember_graph_files', 'graph_files',

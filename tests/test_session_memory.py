@@ -98,6 +98,99 @@ def test_the_env_switch_turns_everything_off(monkeypatch, tmp_path):
         SS.set_enabled(False)
 
 
+def test_temporary_test_projects_never_reach_the_real_table(monkeypatch,
+                                                            tmp_path):
+    """
+    ⭐⭐ 真实记忆表里不许留测试 / 探针项目（2026-10-26：849 条的现场）。
+
+    写真实表（没给 `path=`）时顺手剪掉 `.pip-tmp/` / `pytest-*` /
+    `popen-gw*` 这些路径；用户自己的项目一个都不动。
+    """
+    real = tmp_path / 'real-session.json'
+    # ⚠ 不能用 `STORYGRAPH_SESSION_CONFIG` 来指路：那个 env 的含义是"这张表
+    # 不是用户的真实表"（测试/自动化），按设计就**不剪**。这里要测的是
+    # "写用户真实表时剪不剪"，所以直接替换 `config_path`。
+    monkeypatch.delenv('STORYGRAPH_SESSION_CONFIG', raising=False)
+    monkeypatch.setattr(SS, 'config_path', lambda: real)
+    SS.set_enabled(True)
+    try:
+        SS.save({
+            'last_project': 'D:/repo/.pip-tmp/pytest-a/proj',
+            'recent': ['D:/repo/.pip-tmp/pytest-a/proj',
+                       'D:/repo/.pip-tmp/fasttest/runs/x/tmp/popen-gw1/p/proj',
+                       'D:/game/sr_general'],
+            'projects': {
+                'D:/repo/.pip-tmp/pytest-a/proj': {'project_name': 'proj'},
+                'D:/game/sr_general': {'project_name': 'sr_general'},
+            },
+        })
+    finally:
+        SS.set_enabled(False)
+    data = SS.load(real)
+    assert data['last_project'] == ''
+    assert data['recent'] == ['D:/game/sr_general'], data['recent']
+    assert list(data['projects']) == ['D:/game/sr_general'], data['projects']
+
+
+def test_an_explicit_test_table_keeps_its_tmp_projects(store, tmp_path):
+    """显式 `path=` 的记忆表**不剪**（测记忆的用例本来就要存 tmp_path 项目）。"""
+    root = _proj(tmp_path)
+    SS.remember_project(root, {'page': 1}, path=store)
+    assert SS.load(store)['last_project'] == str(root)
+
+
+def test_legacy_polluted_entries_are_never_auto_opened(monkeypatch, tmp_path):
+    """
+    记忆表里残留的测试项目（**目录还在**）也不许自动打开 / 进最近列表。
+
+    旧版本写坏的表现在还有 849 条（`.pip-tmp/fasttest/runs/…`）——那些目录
+    7 天内确实还在，`is_dir()` 拦不住。所以读这一侧也认"临时路径特征"。
+    """
+    real = tmp_path / 'session.json'
+    monkeypatch.delenv('STORYGRAPH_SESSION_CONFIG', raising=False)
+    monkeypatch.setattr(SS, 'config_path', lambda: real)
+    polluted = tmp_path / 'repo' / '.pip-tmp' / 'pytest-x' / 'proj'
+    polluted.mkdir(parents=True)
+    real.write_text(json.dumps({
+        'version': SS.VERSION,
+        'last_project': str(polluted),
+        'auto_open': True,
+        'recent': [str(polluted)],
+        'projects': {},
+    }, ensure_ascii=False), encoding='utf-8')
+
+    assert SS.last_project() == ''
+    assert SS.recent_projects() == []
+
+
+def test_the_switch_gates_every_write_entry_not_just_the_window(store, tmp_path):
+    """
+    ⭐⭐ 关掉记忆时**任何**写入口都不许写盘（2026-10-26 修 P0）。
+
+    真事故：`remember_graph_files()`（UI 导入章节时调）从前**绕过开关**
+    直连 `remember_project`，于是跑一轮 UI 测试就把用户真实的
+    `session.json` 灌进 **849 个** `tmp_path` 项目 —— "下次自动打开上次的
+    项目"会开到一个早被删掉的临时目录，而测试全程绿灯。
+    所以门禁必须放在唯一写入口里，不能指望每个调用方都记得查。
+
+    ⚠ `remember_cards` **不在**这条判据里：它写的是**项目里**那份
+    `storygraph.session.json`（折叠状态跟着项目走），不是用户级记忆表；
+    "关掉记忆"不该把项目内的折叠状态也一起关掉
+    （`test_feedback_p5_fold_project.py` 8 条钉着这个语义）。
+    """
+    project = _proj(tmp_path)
+    SS.set_enabled(False)
+    try:
+        assert not SS.enabled()
+        SS.remember_project(project, {'page': 1}, path=store)
+        SS.remember_graph_files(project, ['game/a.rpy'], path=store)
+        SS.set_auto_open(False, path=store)
+        SS.forget(path=store)
+    finally:
+        SS.set_enabled(True)
+    assert not store.exists(), '关掉记忆后仍然写了用户级会话表'
+
+
 # ===========================================================================
 #  ① 纯数据：读 / 写 / 忘
 # ===========================================================================
