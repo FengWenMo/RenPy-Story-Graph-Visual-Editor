@@ -1032,7 +1032,8 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
     blob = '\n'.join(old_lines or [])
     if not blob.strip():
         return True                          # 空区间 = 新增拍的插入点
-    from storygraph.story.beat_model import MENU_NO_CAPTION, KIND_MENU_OPTION
+    from storygraph.story.beat_model import (MENU_NO_CAPTION, KIND_MENU,
+                                             KIND_MENU_OPTION)
     text = (getattr(beat, 'text', '') or '').strip()
     if getattr(beat, 'kind', '') == KIND_MENU_OPTION:
         # **选项行的身份是"它是一条选项行"**（2026-10-05 实测修，与下面
@@ -1050,22 +1051,17 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
         # 而错位到`menu:` / 台词 / 空行上的区间照样拦得住。
         return any(_OPTION_ROW_RE.match(str(ln).strip())
                    for ln in (old_lines or []))
-    if text == MENU_NO_CAPTION:
-        # **无标题菜单的身份是那一行 `menu:`，不是占位符**（2026-10-05 实测修）。
+    if text == MENU_NO_CAPTION or getattr(beat, 'kind', '') == KIND_MENU:
+        # **菜单拍的身份是那一行 `menu:`，不是标题正文**（2026-10-26 扩口，
+        # P1 讨论①）。从前这里只认 `text == MENU_NO_CAPTION`（无标题形态）——
+        # 用户加了标题 / 改了标题之后，`text` 是**新**标题、原文里根本没有，
+        # 每一条身份判据都失效 → 判"错位" → `strict=False` → 标题通道被
+        # `allow_edit=False` 关在门外 → "1 处新增内容没能落进产物"。
+        # 标题正文正是用户改的那一位，拿它当身份等于永远认不出改过标题的拍。
         #
-        # `Beat.text` 在"菜单没有标题"时是占位符 `\x00menu`（见
-        # `MENU_NO_CAPTION`），而源文件里写的是 `menu:` —— 拿占位符去原文里
-        # 找永远找不到，于是**每一拍都少认一个**：带着裸 `menu:` 的章节里，
-        # 这一拍恒定判"错位"，对位率被它拖到 (n-1)/n。章节小的时候就掉到
-        # 90% 门槛之下 → `patch_export` 整份作废 → 原地导出被拒
-        # （用户看到的还是"只能全量导出"那种失败）。
-        #
-        # 实测形状（`tools/hell_edit_rounds.py` 轴 B 第 1 轮，7 拍 → 86%）：
-        # 只改一张卡的立绘，导不进去；把 force 去掉让它浮出来才看见。
-        #
-        # 为什么不是"占位符当没有内容、直接放行"：那会把这一拍的区间校验
-        # 整个关掉。渲染这一拍写出来的就是 `menu:` 那一行，所以要求原文段里
-        # 真有 `menu` 才是对的（错位的区间照样拦得住）。
+        # 为什么不是"直接放行"：要求原文段里真有 `menu` 才算（错位到别人
+        # 台词上的区间照样拦得住）。带 extras（`set seen`）的菜单同理 ——
+        # 身份是 `menu:` 头，extras 的行在区间之外，不参与身份。
         return bool(re.search(r'(?m)^[ \t]*menu\b', blob))
     if text and text in blob:
         return True
@@ -1575,34 +1571,50 @@ def _replace_matched(old_lines: list, gen_bodies: list,
     # 反过来把标题清空时，旧标题行没人删 → 产物里标题还在（报成功、没改）。
     # 这两种都在这条通道里：`old_lines[1:]` / `gen_bodies[1:]` 允许为空。
     if allow_edit and old_lines and gen_bodies:
-        _mh = _norm(old_lines[0])
-        if (_MENU_HEAD_RE.match(_mh) and _mh.endswith(':')
-                and _norm(gen_bodies[0]) == _mh
-                and all(_is_caption_line(x) for x in old_lines[1:])
-                and all(_is_caption_line(x) for x in gen_bodies[1:])
-                and len(old_lines) != len(gen_bodies)
-                # **只在"行数不同"确实来自标题本身时**才动手：
-                # 全是空白的标题（`" "`）渲染出来是**没有标题**
-                # （`menu_caption_text` 会 strip），于是一张标题为 `" "`
-                # 的菜单两边行数天然差一 —— 那不是"用户删了标题"，
-                # 照删就是**静默删掉作者写的一行**（真机 `script_pomo.rpy`
-                # 第 205 行当场被抓到：删相邻的 elif 分支，连带少了一行 `" "`）。
-                and (len(gen_bodies) > len(old_lines)
-                     or all(_caption_is_substantive(x)
-                            for x in old_lines[1:]))):
-            # 缩进：源里有标题行就借它（作者写的那一级）；从无到有时借
-            # **块体第一行的缩进**（`child_pad`，由调用方按原文算），
-            # 拿不到就按渲染结果那一行的相对缩进垫一级。
-            if len(old_lines) >= 2:
-                _pad = indent_prefix(old_lines[1])
-            else:
-                _pad = (child_pad or (indent_prefix(old_lines[0])
-                                      + (indent_prefix(gen_bodies[1])
-                                         if len(gen_bodies) >= 2 else '    ')))
-            _new_caps = [_pad + x for x in gen_bodies[1:]]
-            pre_changed = max(len(old_lines) - 1, len(_new_caps))
-            old_lines = [old_lines[0]] + _new_caps
-            gen_bodies = [gen_bodies[0]]
+        # 条件拍的生成结果带 `if 条件:` 头，而**块头不是拍**（它的行不在
+        # 区间里，见 `_body_lines` 的说明）—— 先剥掉再判。从前拿整串比，
+        # 嵌在 `if` 里的菜单加标题永远配不上（2026-10-26，P1 讨论①）。
+        _gb = _body_lines(gen_bodies)
+        if _gb:
+            _mh = _norm(old_lines[0])
+            # gen[1:] 里的**非标题行**是菜单 extras（`set seen` / `$ x = 1` …，
+            # 整份渲染 `render_menu_segments` 把它们原样吐在标题之后）：
+            # 它们**逐字写在源里**（通常在本区间之外），不是标题块的内容、
+            # 不许写进区间（写了就重复一行）。逐字已在源里的 → 跳过；
+            # 源里没有的 → 不归这条通道管，退回通用配对（宁可拒，不猜它该插哪）。
+            _caps = [x for x in _gb[1:] if _is_caption_line(x)]
+            _extra = [x for x in _gb[1:] if not _is_caption_line(x)]
+            _src = {_squash(y) for y in old_lines}
+            if file_squash:
+                _src = _src | set(file_squash)
+            _extras_known = all(_squash(x) in _src for x in _extra)
+            if (_MENU_HEAD_RE.match(_mh) and _mh.endswith(':')
+                    and _norm(_gb[0]) == _mh
+                    and all(_is_caption_line(x) for x in old_lines[1:])
+                    and _extras_known
+                    and len(old_lines) != len(_caps) + 1
+                    # **只在"行数不同"确实来自标题本身时**才动手：
+                    # 全是空白的标题（`" "`）渲染出来是**没有标题**
+                    # （`menu_caption_text` 会 strip），于是一张标题为 `" "`
+                    # 的菜单两边行数天然差一 —— 那不是"用户删了标题"，
+                    # 照删就是**静默删掉作者写的一行**（真机 `script_pomo.rpy`
+                    # 第 205 行当场被抓到：删相邻的 elif 分支，连带少了一行 `" "`）。
+                    and (len(_caps) + 1 > len(old_lines)
+                         or all(_caption_is_substantive(x)
+                                for x in old_lines[1:]))):
+                # 缩进：源里有标题行就借它（作者写的那一级）；从无到有时借
+                # **块体第一行的缩进**（`child_pad`，由调用方按原文算），
+                # 拿不到就按渲染结果那一行的相对缩进垫一级。
+                if len(old_lines) >= 2:
+                    _pad = indent_prefix(old_lines[1])
+                else:
+                    _pad = (child_pad or (indent_prefix(old_lines[0])
+                                          + (indent_prefix(_caps[0])
+                                             if _caps else '    ')))
+                _new_caps = [_pad + x for x in _caps]
+                pre_changed = max(len(old_lines) - 1, len(_new_caps))
+                old_lines = [old_lines[0]] + _new_caps
+                gen_bodies = [_gb[0]]
     if relax_speaker:
         _o_run = _comment_run(old_lines)
         _g_run = _comment_run(gen_bodies)
@@ -2152,7 +2164,10 @@ def _condition_hint(bad: list, original: str) -> str:
         why = ('—— 这一拍嵌在别的块里（`if` 里还有 `if`）：累积条件里含着外层条件，'
                '光改这一行写不出你填的那句话，请全量重写这一章')
     else:
-        why = '—— 条件改动走全量'
+        why = ('—— 条件改动走全量：请导出到 `build/renpy/` 下的新路径'
+               '（新建不受限制），比对之后再把改好的那一章放回去'
+               '（2026-10-26，P1 讨论③：40 人的团队里大多数不写代码，'
+               '这一步必须写清"去哪里导"，不能只说"走全量"）')
     return (f'{len(bad)} 处条件与要写的拍对不上'
             f'（例：{((want or "")[:40], (got or "")[:40])}）{why}')
 
@@ -3120,9 +3135,18 @@ def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
                     f'或者用全量重写这一章')
             else:
                 shown = (_norm(blocked[0]).strip() if blocked else '')
+                # **为什么危险要说具体**（2026-10-26，P1 讨论②）：
+                # 空隙里这行可能是 `$ renpy.pause(hard=True)`（暂停点）、
+                # `jump`（去向）、`define`（初始化）—— 挪拍换位等于改
+                # **它们与台词的相对顺序**，剧情跟着变，而 diff 里一个字节
+                # 都看不出来（这正是"安全的拒绝"比"能挪"更值钱的原因）。
                 reasons.append(f'重排段里有认不出的行（例：`{shown[:40]}`）——'
-                               f'它不属于任何一拍，挪动会把它留在原地或带走，'
-                               f'增量补丁不猜；请用全量重写这一章')
+                               f'它不属于任何一拍（可能是暂停点 / 跳转 / 初始化），'
+                               f'挪拍换位会改它与台词的**相对顺序**，剧情跟着变、'
+                               f'diff 里却看不出来。增量补丁不猜。'
+                               f'绕路两条：① 先在卡片上清掉这一拍的条件再挪；'
+                               f'② 在目标位置**新插一张卡**写同样内容、'
+                               f'再删掉原来那张（两刀各自都能落盘）')
             continue
         new_lines: list = []
         pos = span_first

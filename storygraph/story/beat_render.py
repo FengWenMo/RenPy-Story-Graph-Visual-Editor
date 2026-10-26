@@ -479,6 +479,14 @@ def _emit_text_line(beat, speaker, emit) -> None:
                 emit('    ' + _quote(cap_line), '菜单', cap_line)
         elif beat.text:
             emit(_head, '菜单', '')
+        # **菜单 extras 原样吐在头/标题之后**（与 `render_menu_segments`
+        # 同一口径，2026-10-26 P1①）：`set seen` / `$ x = 1` … 是 `menu:`
+        # 块里的合法语句，逐字照出、不补 `$`、不重排。从前它走代码通道：
+        # 被补成 `$ set seen` 还排到 `menu:` 前面 —— 两条渲染路对不上，
+        # 增量补丁永远配不上（"新增内容没能落进产物"）。
+        for _ex in str(getattr(beat, 'raw', '') or '').split('\n'):
+            if _ex.strip():
+                emit('    ' + _ex.strip(), '菜单', _ex.strip())
     elif beat.text:
         # 台词后缀（2026-10-18）：`(what_color="#f00")` / `with` / `id` /
         # `nointeract` —— 原样拼在引号后面，与解析时逐字对称。
@@ -588,6 +596,15 @@ def render_beat_to_rpy(beat: Beat,
 
     # ---------------- 代码块（保真后门） ----------------
     def emit_code():
+        if beat.kind == KIND_MENU:
+            # **菜单 extras 不是 Python**（2026-10-26，P1 讨论①）：
+            # `beat.raw` 在菜单拍上是 `menu:` 块里的原样语句（`set seen` /
+            # `$ x = 1` …），由 `_emit_text_line` 的菜单头分支在**头行与
+            # 标题之后**逐字吐回（与整份渲染 `render_menu_segments` 同一口径）。
+            # 走这里会被 `_render_code_block` 补一个 `$`（`set seen` →
+            # `$ set seen`，改坏脚本），而且排到 `menu:` **前面** ——
+            # "两套出口两种待遇"的展示层版本。
+            return
         for c in _render_code_block(compose_code(beat)):
             emit(c, '代码块', c)
 
@@ -695,6 +712,12 @@ def render_beat_to_rpy(beat: Beat,
     # show 没了，**收尾画面与作者要的相反**。
     tokens = beat.op_tokens_full()
     plan = beat.unified_plan() if tokens else None
+    if beat.kind == KIND_MENU:
+        # 菜单拍的 `raw` 是 extras、不是序列里的原生行 —— 序列/令牌通道会
+        # 把它排到头行前面（`set seen` 跑到 `menu:` 上面）。菜单拍没有舞台/
+        # 音频令牌，整张拍的出序由 `_emit_text_line` 一处负责。
+        plan = None
+        tokens = ()
     #: 已经出过的音频通道（补齐用：`music` / `sound`）
     _audio_done: set = set()
     #: 舞台行只算一次（`_stage_lines` 里有一堆字符串处理，别每个 token 重算）

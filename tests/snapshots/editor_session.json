@@ -798,6 +798,7 @@
    "list_entry(0)",
    "ok",
    {
+    "empty_note": "",
     "index": 0,
     "line_id": "ch01.0001",
     "prefix": "",
@@ -812,6 +813,7 @@
    "list_entry(1)",
    "ok",
    {
+    "empty_note": "",
     "index": 1,
     "line_id": "ch01.0002",
     "prefix": "",
