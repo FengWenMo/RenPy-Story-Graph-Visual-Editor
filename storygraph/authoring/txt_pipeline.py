@@ -13,7 +13,11 @@ Ren'Py 到那一句直接 `NameError` 崩掉（真机 5 章 1373 行里有 23 �
 
     ① **规划**（纯，不写盘）：把每个文件转成 `.rpy` 文本，收集未映射写法
        → 让用户做决定（弹窗）
-    ② **落地**：决定写回 `characters.xlsx` → **重跑转换**（这时写法都认得了）
+    ② **冲突预检**（纯读，2026-10-26 用户要求"先问后写"）：撞 label /
+       会覆盖手写文件时，把**新旧内容对比**摆到弹窗里，一份一份决定
+       「覆盖旧文件 / 改个名字写入 / 这次跳过」；点取消 = 一个字节都不写
+       （见 `authoring.import_review`）
+    ③ **落地**：决定写回 `characters.xlsx` → **重跑转换**（这时写法都认得了）
        → 过 `write_generation` 落盘 → 导入剧情图
 
 于是只有两种结局：**产物是干净的**，或者**什么都没写**。没有"写了一半"。
@@ -46,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from storygraph.authoring import char_decisions as CD
+from storygraph.authoring.import_review import apply_decisions, preflight
 from storygraph.authoring.txt_import import (CharacterMap, ConversionResult,
                                             chapter_id_from_filename,
                                             convert_text, label_from,
@@ -67,9 +72,21 @@ class PlannedFile:
     written: bool = False
     blocked: list = field(default_factory=list)     # 门禁 block 级问题
     error: str = ''
+    #: 源文本（改名要**重跑转换**，见 `import_review.apply_decisions`）。
+    source_text: str = ''
     #: 同批撞名后**改名前**的 label（空 = 没改名）。产物里的 label 已同步成
     #: `label`，这里只用来"说出口"（见 `run` 的 messages）。
     renamed_from: str = ''
+    #: 冲突预检里人选了"覆盖旧文件" → 强制写（旧文件先备份 `.bak`）。
+    force: bool = False
+    #: 覆盖旧文件时，旧文件的全文/路径（喂给门禁算"哪些顶层块会丢"+ 沿用
+    #: 它那副换行/BOM 载体风格）。普通写入留空。
+    replace_source_text: str = ''
+    replace_source_path: Path = None
+    #: 门禁拦下时那份对照副本（`build/review/*.blocked.rpy`），好让用户找得到。
+    review_path: Path = None
+    #: 磁盘上已经是这份内容 → **没重写**（于是也没多一份 `.bak`）。
+    unchanged: bool = False
 
     @property
     def rpy_text(self) -> str:
@@ -199,7 +216,7 @@ def build_plan(project_root, files, rows=None) -> Plan:
         result = convert_text(text, characters=chars, filename=path.name,
                               label=label)
         plan.files.append(PlannedFile(source=path, target=target, label=label,
-                                      result=result,
+                                      result=result, source_text=text,
                                       renamed_from=renamed_from))
     if not plan.files and plan.skipped:
         plan.note = '没有任何文件可导入（看 skipped）'
@@ -245,11 +262,18 @@ class ImportResult:
     plan: Plan = None
     import_result: dict = None                        # EditorSession 那边的返回
     decisions: dict = field(default_factory=dict)     # 应用决定的统计
+    #: 冲突预检结果（`import_review.Review`）。`items` 非空 = 有文件撞名 /
+    #: 会覆盖手写文件。`needs_review=True` = 问了但人选择"先不写"。
+    review: object = None
+    needs_review: bool = False
 
     @property
     def summary(self) -> str:
         if self.needs_decision:
             return f'有 {len(self.proposals)} 种写法需要你确认角色'
+        if self.needs_review:
+            n = len(self.review.items) if self.review is not None else 0
+            return f'{n} 个文件撞名/会覆盖手写文件 —— 你选择先不写'
         if self.blocked:
             return f'{len(self.written)} 个已导入，{len(self.blocked)} 个被门禁拦下'
         if self.skipped and not self.written:
@@ -257,12 +281,50 @@ class ImportResult:
         return f'导入 {len(self.written)} 个章节'
 
 
+def _identical_to_disk(planned) -> bool:
+    """
+    磁盘上那一份是不是**已经就是**这份产物？
+
+    为什么需要（2026-10-26，用户"我一个个删 .bak 老狼狈了"的账）：反复导入
+    同一批 txt 时，产物逐字节没变，但每一次都会走一遍"备份 + 原子写"——
+    于是 `*.rpy.bak` / `*.rpy.bak-<时间戳>` 越攒越多（每份最多留 5 代），
+    mtime 也一直在跳。内容一样就**不碰文件**，那一份 `.bak` 自然也不产生。
+
+    ⚠ 这是"读来比较"，不是"读来写回"（后者必须走 `source_style` 的严格解码，
+    见 P0-B）。读不出来就当作"不一样"，照常走门禁。
+    """
+    try:
+        return Path(planned.target).read_text(encoding='utf-8') \
+            == planned.rpy_text
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _write_all(plan: Plan, project_root, force: bool = False) -> None:
-    """把规划里的每个文件过门禁落盘（**唯一 .rpy 落盘入口**）。"""
+    """
+    把规划里的每个文件过门禁落盘（**唯一 .rpy 落盘入口**）。
+
+    `force` 是整批的逃生舱；单份的"强制更换"来自冲突预检里人选了
+    「覆盖旧文件」（`PlannedFile.force`）—— 那条还额外把旧文件全文/路径
+    喂给门禁，让它**算得出**"旧文件里哪些顶层块会丢"并记进回执。
+
+    内容与磁盘**逐字节一致** → 不重写（也就不产生 `.bak`，见
+    `_identical_to_disk`）。此时标 `written=True`：那一份产物确实已经在
+    目标位置上了，界面上报"已导入"是诚实的；另标 `unchanged=True`
+    让回执说清"没重写"。
+    """
     for f in plan.files:
-        art = write_generation(f.rpy_text, f.target, project_root=project_root,
-                               force=force)
+        if _identical_to_disk(f):
+            f.written = True
+            f.unchanged = True
+            continue
+        art = write_generation(
+            f.rpy_text, f.target, project_root=project_root,
+            force=bool(force or f.force),
+            source_text=(f.replace_source_text or None),
+            source_path=(f.replace_source_path or None))
         f.written = bool(art.written)
+        f.review_path = getattr(art, 'review_path', None)
         f.blocked = [f'{i.code}: {i.message}' for i in art.blocking]
         if not art.written:
             f.error = '；'.join(f.blocked) or '门禁拦下（没有写盘）'
@@ -270,14 +332,14 @@ def _write_all(plan: Plan, project_root, force: bool = False) -> None:
 
 def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
         import_chapters=None, ask=None, apply=None, dry_run=False,
-        force=False) -> ImportResult:
+        force=False, resolve=None) -> ImportResult:
     """
-    一条龙：纯文字 →（问）→ 落盘 → 导入剧情图。
+    一条龙：纯文字 →（问角色）→（**问冲突**）→ 落盘 → 导入剧情图。
 
     参数：
       · `game_dir`：**章节 .rpy 落到哪**（UI 传 `self._project_root`，
         函数内部会优先用 `<root>/game/`）；
-      · `files`：输入文件（`.txt`；`.docx` 待 S4）；
+      · `files`：输入文件（`.txt`；`.docx` 走同一条链）；
       · `rows`：角色表 `{变量: 行}`；
       · `decisions`：`[CD.Proposal]`（弹窗里人点过的；**给空就直接用系统建议**）；
       · `import_chapters`：拿到写好的路径后调它（典型是
@@ -287,13 +349,23 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
       · `apply`：`callable(decisions) -> dict`，**谁来把决定写进角色表**。
         默认 `CD.apply_decisions`（纯逻辑）。⚠ 会话层要传自己的实现：它写完之后
         还必须**重读角色表**，否则同一个写法下一次导入会**再问一遍**（实测踩到）。
-      · `dry_run=True`：只规划，绝不写盘。
+      · `resolve`：`callable(review) -> [决定] | None`，**冲突预检**（2026-10-26
+        用户要求"先问后写"）。`review` 是 `import_review.Review`；每份要人拿主意
+        的文件给一条 `{'source': 源路径, 'action': 'replace'|'rename'|'skip',
+        'label': 新名字(仅 rename)}`。返回 `None` = "这次先不写" → 返回
+        `needs_review=True` 且**一个字节都不写**（也不产生 `.blocked.rpy`）。
+        ⚠ 不给 `resolve`（CLI / 单测）时行为与从前**完全一致**：照旧写、
+        照旧被门禁拦下、照旧留对照副本。
+      · `dry_run=True`：只规划（**仍会算冲突预检**，好让界面提前说清），绝不写盘。
 
-    返回 `ImportResult`（含 `plan` / 门禁结论 / 导入结果）。
+    返回 `ImportResult`（含 `plan` / `review` / 门禁结论 / 导入结果）。
     """
     root = Path(project_root) if project_root else Path(game_dir or '.')
     plan = build_plan(root, files, rows)
     out = ImportResult(plan=plan, skipped=list(plan.skipped))
+    # 冲突预检在**任何写入之前**跑（纯读）。dry_run 也跑：界面第一遍就能说
+    # "有 3 个文件撞名"，而不是等点完角色弹窗再吓人一跳。
+    out.review = preflight(plan, root)
     if dry_run or not plan.files:
         out.messages.append(plan.note or '没有可导入的文件')
         return out
@@ -331,11 +403,37 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
             out.messages.append(
                 f'还有 {len(out.proposals)} 种写法没有对应角色，未落盘')
             return out
+        # 角色决定会重跑转换 → 预检要按**新的**产物重算（label 不变，
+        # 但正文变了；对比栏里必须是最终产物，不能是上一轮的）。
+        out.review = preflight(plan, root)
+
+    review = out.review
+    if review is not None and review.items:
+        if resolve is None:
+            # 无人可问（CLI / 单测）→ 保持老行为：照旧写完由门禁逐份裁决。
+            out.messages.append(
+                f'{review.summary()}（没有可问的人 → 照旧逐份落盘，'
+                f'由生成门禁裁决；被拦下的会留对照副本）')
+        else:
+            picks = resolve(review)
+            if picks is None:
+                # "先不写" = **什么都不做**：不落盘、不留 .blocked.rpy。
+                out.needs_review = True
+                out.messages.append(
+                    f'冲突预检：{review.summary()} —— 你选择先不写，'
+                    f'这次一个字节都没动（也没有留下任何对照副本）')
+                return out
+            out.messages.extend(apply_decisions(plan, review, picks, rows))
 
     _write_all(plan, root, force=force)
     out.written = [f.target for f in plan.files if f.written]
     out.blocked = [(str(f.target), f.error) for f in plan.files
                    if not f.written and f.error]
+    # ⚠ `skipped` 在函数开头是**拷贝**；冲突预检（`apply_decisions`）之后还会
+    # 往 `plan.skipped` 里加"你选择跳过 / 名字不合法"这些条目 → 必须回填，
+    # 否则界面拿到的 `skipped` 是旧的（实测：UI 只说"一个文件都没写"，
+    # 却不说是**为什么**没写）。
+    out.skipped = list(plan.skipped)
     for path, why in plan.skipped:
         out.messages.append(f'跳过 {Path(path).name}：{why}')
     for f in plan.files:
@@ -347,6 +445,16 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
                 f'{f.renamed_from}（两份源文推成同一个 label）：已改名为 '
                 f'{f.label}，文件名和产物里的 `label {f.label}:` 一起改了。'
                 f'如果它们本来就是同一章，请只留一份再导入。')
+        # 被门禁拦下时那份对照副本在哪 —— 用户找得到才删得掉（不然只能
+        # 在 vscode 里一个个翻，2026-10-26 用户原话"老狼狈了"）。
+        if not f.written and f.review_path:
+            out.messages.append(
+                f'[{f.source.name}] 对照副本：{f.review_path}'
+                f'（它在 build/review/ 里，不在 Ren\'Py 扫描范围，确认后可删）')
+        if f.unchanged:
+            out.messages.append(
+                f'[{f.source.name}] 和磁盘上的那份**一模一样**，没重写'
+                f'（也就没多一份 .bak）')
         for w in (f.result.warnings or []):
             out.messages.append(f'[{f.source.name}] {w}')
 

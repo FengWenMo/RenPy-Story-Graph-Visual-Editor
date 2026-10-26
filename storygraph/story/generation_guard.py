@@ -483,43 +483,61 @@ class GenerationBlocked(Exception):
 
 
 
-def occupied_labels(project_root=None, exclude=()) -> set:
+def label_owners(project_root=None, exclude=()) -> dict:
     """
-    扫项目里**其他** .rpy 已经定义的 label 名（生成前用来判重名）。
+    `label 名 → [定义它的 .rpy …]`（**一次扫描**；冲突预检要的就是这张反查表）。
+
+    为什么要这一条（2026-10-26）：从前 `occupied_labels()`（只要名字集合）
+    和 `label_defined_in()`（只要第一个文件）各自扫一遍项目、各读一遍文件 ——
+    而"谁占着这个名字"本来就是同一件事。冲突预检（`authoring.import_review`）
+    还需要"这个 label 被**几个**文件定义"（≥2 = 项目本来就重名，覆盖救不了），
+    集合做不到。所以把扫描收成一处，另外两个函数都从它派生。
 
     Ren'Py 会把 game/ 下所有 .rpy 当成"一个大脚本"（官方 Quickstart 原话），
     所以不同文件里重名 label 是硬错误。`parsing.discover.discover_scripts`
     已经排除了 `tl/` 与工具留下的派生文件（`*.generated.rpy` /
     `*.blocked.rpy` / `*.bak.rpy`），正好复用它的口径。
 
-    （2026-09-28：这里原先 import 的是 `pipeline.build.discover_scripts`，
-    让 story 层反向依赖 pipeline 层、只能靠延迟 import 压着；该函数已下移到
-    `parsing.discover`，依赖方向恢复单向。）
-
-    project_root 为空、或项目里没有 game/ 时返回空集合——**宁可少报**，
+    project_root 为空、或项目里没有 game/ 时返回 `{}`——**宁可少报**，
     不要让没有项目的单测/CLI 场景被误拦。
     """
     if not project_root:
-        return set()
+        return {}
     try:
         from storygraph.parsing.discover import discover_scripts
-    except Exception:
-        return set()
+    except Exception as e:                  # noqa: BLE001 - 少报总比崩强，但要留痕
+        swallow('generation_guard.label_owners', e)
+        return {}
 
     exclude = {Path(p).resolve() for p in (exclude or ()) if p}
-    found = set()
+    found: dict = {}
     try:
         scripts = discover_scripts(project_root)
-    except Exception:
-        return set()
+    except Exception as e:                  # noqa: BLE001 - 同上：留痕后少报
+        swallow('generation_guard.label_owners', e)
+        return {}
     for fp in scripts:
         try:
             if Path(fp).resolve() in exclude:
                 continue
-            found.update(_declared_labels(fp))
+            names = _declared_labels(fp)
         except OSError:
             continue
+        for name in names:
+            found.setdefault(name, []).append(Path(fp))
     return found
+
+
+
+def occupied_labels(project_root=None, exclude=()) -> set:
+    """
+    项目里**其他** .rpy 已经定义的 label 名（生成前用来判重名）。
+
+    （2026-09-28：这里原先 import 的是 `pipeline.build.discover_scripts`，
+    让 story 层反向依赖 pipeline 层、只能靠延迟 import 压着；该函数已下移到
+    `parsing.discover`，依赖方向恢复单向。）
+    """
+    return set(label_owners(project_root, exclude))
 
 
 
@@ -530,6 +548,37 @@ def _declared_labels(path) -> set:
     except (OSError, UnicodeDecodeError):
         return set()
     return set(re.findall(r'^label\s+([^\s:#]+)', text, re.M))
+
+
+
+def declared_labels(path) -> set:
+    """
+    `path` 里声明的 label 名（`_declared_labels` 的**公开口径**）。
+
+    冲突预检要回答"这份旧文件里除了撞上的那个 label，还住着谁"（覆盖它会
+    一起消失），所以需要它 —— 不要在 `authoring` 里另抄一份正则。
+    """
+    return _declared_labels(path)
+
+
+
+def is_handwritten_script(path) -> bool:
+    """
+    `path` 是不是**手写 .rpy**（已存在、且首行没有生成标记）？
+
+    `_looks_handwritten` 的公开口径：冲突预检要提前把"这份文件是你手写的、
+    覆盖会毁掉 define/init python"摆到弹窗里；而 `write_generation` 里那条
+    `HANDWRITTEN_TARGET` 护栏用的是同一份判据 —— 两边口径漂移的话，就会出现
+    "弹窗说没事、点下去被拦"（或者更糟：弹窗说会拦、门禁放行）。
+    """
+    return _looks_handwritten(Path(path))
+
+
+
+def relative_hint(path, project_root) -> str:
+    """给用户看的路径：能相对项目根就相对（`game\\chapter\\x.rpy`），否则全路径。"""
+    return _relative_hint(path, project_root)
+
 
 
 def label_defined_in(name, project_root=None, exclude=()) -> Optional[Path]:
@@ -550,26 +599,8 @@ def label_defined_in(name, project_root=None, exclude=()) -> Optional[Path]:
     """
     if not project_root or not name:
         return None
-    try:
-        from storygraph.parsing.discover import discover_scripts
-    except Exception as e:                  # noqa: BLE001 - 少一句提示，不拖垮导出
-        swallow('generation_guard.label_defined_in', e)
-        return None
-    exclude = {Path(p).resolve() for p in (exclude or ()) if p}
-    try:
-        scripts = discover_scripts(project_root)
-    except Exception as e:                  # noqa: BLE001 - 同上：提示是增强
-        swallow('generation_guard.label_defined_in', e)
-        return None
-    for fp in scripts:
-        try:
-            if Path(fp).resolve() in exclude:
-                continue
-        except OSError:
-            continue
-        if name in _declared_labels(fp):
-            return Path(fp)
-    return None
+    found = label_owners(project_root, exclude).get(name) or []
+    return found[0] if found else None
 
 
 def _relative_hint(path, project_root) -> str:

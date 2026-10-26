@@ -970,7 +970,7 @@ class GraphSessionMixin:
         return errors
     def import_plain_text(self, files, graph=None, *, ask=None,
                           decisions=None, dry_run=False,
-                          import_chapters=None) -> dict:
+                          import_chapters=None, resolve=None) -> dict:
         """
         把**纯文字**（`.txt`，`.docx` 待 S4）转成章节导进来（S3）。
 
@@ -993,6 +993,12 @@ class GraphSessionMixin:
         UI 传弹窗，CLI/测试传自己的实现；返回 `None` 表示"这次不决定" →
         返回 `needs_decision=True` 且**不落盘**。
 
+        `resolve` 是**冲突预检**的回调（`callable(review) -> [决定] | None`，
+        2026-10-26 用户要求"先问后写"）：落盘前把"哪些文件撞 label / 会覆盖
+        手写文件"连同新旧内容对比一起交给界面，人决定"覆盖 / 改名 / 跳过"。
+        返回 `None` = 这次先不写 → `needs_review=True`，**不产生任何 .blocked
+        副本**（这正是用户"一个个删残留老狼狈"的那笔账）。不传就保持老行为。
+
         返回 dict（给 UI 看的一层壳，字段与 `ImportResult` 对齐）。
         """
         from storygraph.authoring import txt_pipeline as TP
@@ -1012,7 +1018,7 @@ class GraphSessionMixin:
                      project_root=root, decisions=decisions, ask=ask,
                      apply=(None if dry_run else self.apply_character_decisions),
                      import_chapters=(None if dry_run else import_chapters),
-                     dry_run=dry_run)
+                     dry_run=dry_run, resolve=resolve)
         # 落盘/导入之后，符号表与资源表都要跟着更新（说话人候选来自这里）
         if res.written:
             try:
@@ -1027,6 +1033,9 @@ class GraphSessionMixin:
             'messages': list(res.messages), 'plan': res.plan,
             'import_result': res.import_result, 'decisions': res.decisions,
             'summary': res.summary,
+            # 冲突预检（2026-10-26）：给界面"先问后写"用；`needs_review=True`
+            # = 问了但人选择"这次先不写"（**一个字节都没动**）。
+            'review': res.review, 'needs_review': res.needs_review,
         }
     def apply_character_decisions(self, proposals) -> dict:
         """
