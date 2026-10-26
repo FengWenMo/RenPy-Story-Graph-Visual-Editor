@@ -42,6 +42,15 @@
 - **模态打桩要打全**（question/warning/information 都是）；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测"挂了哪些动作"。
 - **删卡三选一 / 块头级联确认是真 `QMessageBox.exec()`**（2026-10-26）：只 patch `QMessageBox.question` 不够，`delete_card()` 会卡在 `_ask_delete_mode` 的 `box.exec()`，xdist 其余 worker 全空闲、整体 0 CPU，看起来像"卡死 20 分钟"。测 `delete_card` 必须同时 patch `_ask_delete_mode`（返回 `'whole'` / `''`）和 `QMessageBox.question`；fasttest 的 124 看门狗会点名 nodeid。
 - `QLabel`/`QCheckBox` 不渲染 Markdown；`Statement.source` 是 `(路径, 行号)` 元组。
+- **Qt 槽里异常只打 stderr = 界面上"点了没反应"**（2026-10-26）：`QMessageBox.addButton(文本, 角色)`
+  的第二参数是 **ButtonRole**；传 `QMessageBox.Cancel/Ok/Yes`（StandardButton）当场 TypeError。
+  真机事故：无源节点的四个修复入口一起静默失效。菜单/右栏按钮动作一律过
+  `window_nodes._menu_action` 安全壳；**有模态框的动作必须有"真建框"判据**
+  （只打桩函数会漏掉"框根本建不出来"这一类）。静态守卫 `test_ui_reaction_contract.py`。
+- **全局开关（记忆/自动保存）的判据要判在唯一写入口**，别放调用方（2026-10-26）：
+  `remember_graph_files` 漏查 → 跑一轮 UI 测试往用户真实 `session.json` 写了 **849 个**
+  tmp 项目。跑 UI 探针 / 截图脚本先 `STORYGRAPH_NO_SESSION=1`；`session_store.save()`
+  现在自己判 `enabled()`，写真实表时会自动剪 `.pip-tmp/` 等临时项目。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完**回读校验**。
 
@@ -59,6 +68,7 @@
 | S3 控制流守门 | `plan_control_write` 拦"只导 2 章 → 抹掉第 3 章 `_control`" | `test_control_write.py` |
 | L7 版式恢复 | 记住图由哪些文件组成 → 图空才重建 → 贴版式 | `test_graph_restore.py` |
 | 导入冲突预检 | 撞 label / 盖手写先在弹窗里"覆盖/改名/跳过"（取消=零写），另有残留清理入口 | `test_import_review.py` / `test_dialog_import_review.py` / `test_import_cleanup.py` / `test_dialog_cleanup.py` |
+| 点不动修复 + 记忆门禁 | 无源节点修复入口（QMessageBox 角色装错）静默失效；记忆写入口收门禁 + 剪测试污染 | `test_ui_reaction_contract.py` / `test_session_memory.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。

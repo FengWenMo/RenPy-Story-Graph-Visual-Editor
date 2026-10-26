@@ -4859,3 +4859,72 @@ resolve: callable(review) -> [{'source': str, 'action': 'replace'|'rename'|'skip
   （扫描后消失要报出来，不许假装删成功）；
 - 界面默认勾选：时间戳备份 / 对照副本 / 历史 `.bak.rpy`；**`.rpy.bak` 默认不勾**
   （可能是覆盖手写文件前的唯一旧版本），弹窗里写明理由。
+
+---
+
+## §54 Qt 槽异常不许静默 / 记忆门禁必须在唯一写入口（2026-10-26 深夜）
+
+用户原话："当块状编辑器没有源文件的时候……我点击这个块，右键的所有栏都没反应
+……点击导入源文件也没有反应……"
+
+### 54.1 `QMessageBox.addButton(text, role)` 的第二个参数是 **ButtonRole**
+
+- ✅ `QMessageBox.AcceptRole` / `RejectRole` / `DestructiveRole` / `ActionRole`
+- ❌ `QMessageBox.Ok` / `Cancel` / `Yes` / `No` …… —— 这些是 **StandardButton**
+  （`Cancel` 的值是 4194304）。传进去 PySide6 直接
+
+  ```
+  TypeError: addButton(str, StandardButton)
+  ```
+
+  而异常在 Qt 槽里**只打到 stderr**，界面表现就是"点了没反应"。
+  真事故：`window_nodes._repair_choice` 把 `QMessageBox.Cancel` 当角色传，
+  无源节点的四个修复入口（右栏主按钮 / 右键「新建 / 绑定源文件…」/
+  「导入并绑定源文件…」/ 源文件丢失的询问框）**全部静默失效**。
+- 守卫：`tests/test_ui_reaction_contract.py::test_no_standard_button_is_passed_as_a_button_role`
+  （AST 扫 `storygraph/ui_qt/**/*.py`，`addButton(文本, X.<标准按钮>)` 一律红）。
+- 要标准按钮请用 `setStandardButtons(...)`；要自定义文字请用角色。
+
+### 54.2 菜单项 / 右栏按钮的动作必须过安全壳 `_menu_action`
+
+`NodeEditMixin._menu_action(name, fn)`：异常时 ① `swallow` 台账 ② 状态栏
+③ 控制台（还顺手吃掉 `QAction.triggered(bool)` 的 bool）。
+`build_node_menu()` 里每个动作、右栏 `_open_script_btn` 等都必须用它。
+判据：给 `_on_node_open` 塞必抛桩 → 状态栏必须出现"出错：RuntimeError"。
+
+**任何"有模态框的动作"都要有一条真建框的判据**（把 `QMessageBox.exec`
+换成"记录按钮后立刻返回"）。只打桩 `_repair_choice` 会漏掉"框根本建不出来"
+这一类 —— 本次事故就是这么躲过全部测试的。
+
+### 54.3 全局开关（记忆/自动保存）必须判在**唯一写入口**里
+
+反例（2026-10-26 P0）：记忆开关 `enabled()` 只被 `closeEvent` 那一侧检查，
+而 `remember_graph_files()`（UI 导入章节时调）直连
+`remember_project → save`、**一路没人查** —— 跑一轮 UI 测试就往用户真实的
+`%LOCALAPPDATA%/StoryGraph/session.json` 里写 **849 个** `tmp_path` 项目。
+测试全绿、用户下次启动可能自动打开一个早被删掉的临时项目。
+
+现在：
+
+- `session_store.save()` 里判 `enabled()`（❌ 不给 `path=`、❌ 环境开关关掉时直接不写）；
+- `remember_cards()` **刻意不判**：它写的是**项目里**那份
+  `storygraph.session.json`（折叠状态跟着项目走），不是用户级记忆表 ——
+  "关掉这台机器的记忆"不该把项目内数据也关掉
+  （`test_feedback_p5_fold_project.py` 8 条钉着这个语义）；
+- 判据 `tests/test_session_memory.py::test_the_switch_gates_every_write_entry_not_just_the_window`
+  钉住用户级写入口（`remember_project` / `remember_graph_files` /
+  `set_auto_open` / `forget`）。
+- **教训**：开关放在"调用方"就等于没放 —— 漏一个调用点就是静默污染，
+  而且症状只在用户下次开工具时才出现。
+
+### 54.4 "真实记忆表"vs"测试记忆表"：临时项目只许剪真实表
+
+- `_is_real_table(path)`：`path is None` **且** `STORYGRAPH_SESSION_CONFIG`
+  没把位置指走 → 才算用户真实表；
+- 真实表：写时 `prune_temporary()` 剪掉含 `.pip-tmp/`、`/pytest-`、
+  `/popen-gw`、`/fasttest/runs/` 的路径；读时 `last_project()` /
+  `recent_projects()` 也忽略它们（旧版本写坏的表现在还在硬盘上）；
+- 显式 `path=` / 环境变量指走的表：**不剪不滤** —— 测记忆的用例本来就在
+  `tmp_path` 里造项目（否则全部用例都会挂）。
+- 跑 UI 探针 / 截图脚本时同理：设 `STORYGRAPH_NO_SESSION=1`（或
+  `SS.set_enabled(False)`），否则脚本会把自己造的临时项目记进**真**记忆表。
