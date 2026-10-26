@@ -104,6 +104,22 @@
 · `test_scan_golden` 已按用户确认重录（`模拟操作/lint_proj` 是刻意保留的真机残留）。
   **红了先看"少了[]"**：只有新增 = 真机加东西；有删 = 可能真回归。
 
+**2026-10-26 menu_brief 接到控制流条**（用户："menu……没显示内容是什么、又跳去哪儿"）：
+· `story/flow.menu_brief`/`menu_brief_text` 接到 `window_card._flow_target_brief` → `main_window._refresh_flow_text`；
+  跳转/调用目标是**有名 menu** 时，条上整段摆出选项各自去哪（`_flow_detail`）。判据 `tests/test_menu_brief.py`（16 条）。
+· **menu_brief 本身修了 4 个真 bug**（tester 探针 `tools/_multiagent_probe_menu_brief.py` 抓的）：
+  ① 嵌套 menu 串台（外层选项吞内层 jump、查内层报外层选项）→ 块号用 **N 反查**（本 label 第几个 menu），
+     不再"扫到第一个选项就当块号 / split('>') 取首段"；② `startswith('screen')` 误杀 `jump screen_map`/`call screenplay`
+     → 复用 `parse_flow_line`（只认紧跟关键字 `call screen`）；③ `call ch02(x,y) from _f` 把 args/from 拼进 target
+     → 同走 `parse_flow_line`（target/args/from 分家）；④ 孤儿选项（删拍残留、别家块号）被吞 → 同 ①。
+  **教训**：跳转口径**必须复用 `parse_flow_line`**，别另写 `raw.split()` 猜 —— 两边口径不一致是本仓库最高频 P0。
+· **越界未修（非 menu_brief，如实记）**：§1.12 `menu main.route:` 解析器 `_RE_MENU_NAME` 只吃 `identifier/.identifier`，
+  点号 menu 名整块掉 opaque → `menu_brief` 按"认不出就少显示"返 `{}`（要改解析器 + Ren'Py 语义判断，不猜）；
+  §2.8 `parse_flow` 用 `str.splitlines()` 数行 → U+2028 软回车被当换行（P0-A：Ren'Py 只认 `\n`），
+  独立于 menu_brief、未动。二者都待排期。
+· ⚠ `test_ui_qt` 本轮机器被并行 agent 占满（121/195 后停住、裸 pytest 又撞 D6 `.pip-tmp` 批量删守卫）→ 未跑完；
+  定向跑 `test_menu_brief`16 / `test_flow_target_brief`10 / `test_flow_card`40 / `test_package_layering`5 全绿。
+
 ## 五、协作与定位
 
 - 单人开发：AI 写代码，用户设计/测试/验收。多讲"为什么这么设计、否决了哪个备选"；用户写代码时别抢答。**接受判据校准**。
