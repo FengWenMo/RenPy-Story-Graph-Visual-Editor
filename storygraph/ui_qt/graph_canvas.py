@@ -95,13 +95,13 @@ class NodeItem(QGraphicsRectItem):
     （过滤规则在 `storygraph.story.story_ops`，两边共用一份）。
     """
 
-    def __init__(self, node, canvas=None):
+    def __init__(self, node, canvas=None, mark=None):
         super().__init__(0, 0, NODE_W, NODE_H)
         self.node = node
         self.canvas = canvas
         self.edges: list = []
         #: 静态分析结论：'stranded' / 'independent' / None（由画布设置）
-        self.mark = None
+        self.mark = mark
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
@@ -791,7 +791,7 @@ class GraphCanvas(QGraphicsView):
             self.viewport().update()
             return
         for nid, node in (graph.nodes or {}).items():
-            item = NodeItem(node, canvas=self)
+            item = NodeItem(node, canvas=self, mark=self._problems.get(nid))
             self.scene().addItem(item)
             self._items[nid] = item
         for eid, edge in (graph.edges or {}).items():
@@ -1230,8 +1230,19 @@ class GraphCanvas(QGraphicsView):
         self._apply_marks()
 
     def _apply_marks(self):
+        """
+        把静态分析结论贴到块 / 线上。
+
+        块只在 `mark` **真的变了**时重绘：`set_graph` 建块时已经把当时的
+        `mark` 传进去了（`NodeItem(node, canvas, mark=…)`），这里再刷新一遍
+        等于把每个块的文字重新排两遍 —— 120 个块多花 13 ms（2026-10-26 实测），
+        而它换来的字一个像素都没变。
+        """
         for nid, item in self._items.items():
-            item.mark = self._problems.get(nid)
+            mark = self._problems.get(nid)
+            if mark == item.mark:
+                continue
+            item.mark = mark
             item.refresh()
         for ei in self._edges:
             bad = (self._problems.get(ei.edge.from_id) == 'stranded'
