@@ -531,6 +531,57 @@ def _declared_labels(path) -> set:
         return set()
     return set(re.findall(r'^label\s+([^\s:#]+)', text, re.M))
 
+
+def label_defined_in(name, project_root=None, exclude=()) -> Optional[Path]:
+    """
+    哪个 `.rpy` 定义了这个 label（只说**第一个** —— 够用户找到地方改了）。
+
+    为什么要这条（2026-10-26，真机）：`LABEL_COLLISION` 从前只说
+    "在项目其他 .rpy 里已经定义过"，**不说在哪个文件**。用户贴回来的原话是
+
+        chapter2_1_2.rpy 被门禁拦下：`label chapter2_1` 在项目其他 .rpy 里已经定义过
+
+    —— 名字明明叫 `2_1_2`，消息里又没有一处指向那个"其他 .rpy"，
+    于是第一反应只能是"门禁坏了吧"。真实情况是 `game/chapter/chapter3_1.rpy`
+    这种**子目录里的手写章节**占着 label（`discover_scripts` 会扫到它）。
+
+    扫不到（没 project_root / 临时目录 / 编码坏）就返回 None —— 少一句提示
+    也比报错强。
+    """
+    if not project_root or not name:
+        return None
+    try:
+        from storygraph.parsing.discover import discover_scripts
+    except Exception as e:                  # noqa: BLE001 - 少一句提示，不拖垮导出
+        swallow('generation_guard.label_defined_in', e)
+        return None
+    exclude = {Path(p).resolve() for p in (exclude or ()) if p}
+    try:
+        scripts = discover_scripts(project_root)
+    except Exception as e:                  # noqa: BLE001 - 同上：提示是增强
+        swallow('generation_guard.label_defined_in', e)
+        return None
+    for fp in scripts:
+        try:
+            if Path(fp).resolve() in exclude:
+                continue
+        except OSError:
+            continue
+        if name in _declared_labels(fp):
+            return Path(fp)
+    return None
+
+
+def _relative_hint(path, project_root) -> str:
+    """给用户看的路径：能相对项目根就相对（`game\\chapter\\x.rpy`），否则全路径。"""
+    p = Path(path)
+    if project_root:
+        try:
+            return str(p.relative_to(Path(project_root)))
+        except ValueError:
+            return str(p)               # 不在项目根下面 → 用全路径
+    return str(p)
+
 @dataclass(frozen=True)
 class _ImageRef:
     """生成文本里的一条舞台指令：动词 + 图像名 + 行号。"""
@@ -889,9 +940,16 @@ def generation_guard(text: str, out_path, *,
     if occupied_labels:
         for name in re.findall(r'^label\s+([^\s:#]+)', text, re.M):
             if name in occupied_labels:
+                # 说清**在哪个文件**（2026-10-26）：不带这句时，用户看到
+                # "`chapter2_1_2.rpy` 被拦下：`label chapter2_1` 已定义过"
+                # 的第一反应是"它明明叫 2_1_2" —— 消息里没有任何线索。
+                where = label_defined_in(name, project_root,
+                                         exclude={out_path} if out_path else ())
+                hint = (f'（就定义在 {_relative_hint(where, project_root)}）'
+                        if where else '')
                 issues.append(GuardIssue(
                     'LABEL_COLLISION', 'block',
-                    f'`label {name}` 在项目其他 .rpy 里已经定义过。'
+                    f'`label {name}` 在项目其他 .rpy 里已经定义过{hint}。'
                     f'Ren\'Py 把 game/ 下所有 .rpy 当同一个脚本，'
                     f'重名 label 会让游戏直接起不来。'
                     f'请把产物写到 build/ 目录，或改 label 名。'))

@@ -96,10 +96,17 @@ _UPPER_TOKEN_RE = re.compile(r'^[A-Z][A-Z0-9_]{0,11}$')
 #: ⚠ 为什么排除下划线：下划线是"变量名"的形状，而归一会把下划线**丢掉** ——
 #: 于是 `L_J_K` 会命中 `ljk`（作者根本没写过这个角色）→ 探针实测的静默改剧情。
 _ABBREV_TOKEN_RE = re.compile(r'^[A-Z][A-Z0-9]{0,7}$')
-#: 章节头（`1.0 chapter0-0 初入大学` / `chapter0_0 …`）
-_HEADER_RE = re.compile(r'^\s*\d+(?:\.\d+)?\s*([A-Za-z][\w\-]*\d[\w\-]*)\b')
-#: 章节头里那个"章节号"（`chapter0-0`）
-_CHAPTER_ID_RE = re.compile(r'(chapter[\-_]?\d+[\-_]\d+)', re.I)
+#: 章节头（`1.0 chapter0-0 初入大学` / `1.0.2 chapter2-1-2 …` / `chapter0_0 …`）。
+#: ⚠ 编号的**段数不设上限**（2026-10-26）：作者的真实目录是"章-节-段"三段
+#: （`2.1.2 chapter2-1-2 凛冽揍`），从前这里写死 `\d+(?:\.\d+)?` 只认两段，
+#: 三段头会**掉进正文变成一句旁白**。
+_HEADER_RE = re.compile(r'^\s*\d+(?:\.\d+)*\s*([A-Za-z][\w\-]*\d[\w\-]*)\b')
+#: 章节头里那个"章节号"（`chapter0-0` / `chapter2-1-2`）。
+#: ⚠ 同样**不许截断**：`chapter2-1-2` 从前只取到 `chapter2_1`（2026-10-26 真机）。
+_CHAPTER_ID_RE = re.compile(r'(chapter[\-_]?\d+(?:[\-_]\d+)*)', re.I)
+#: 文件名开头的**数字链**（`2-1-2凌跃捷线-定稿` → `2-1-2`）。
+#: ⚠ 段数不设上限：截断就是"四个不同片段抢一个 label"（见 `chapter_id_from_filename`）。
+_NUM_CHAIN_RE = re.compile(r'^(\d+(?:[\-_]\d+)*)')
 #: "这段输入像是已经写好的 Ren'Py 脚本"的形状（只在多行命中时才提示）
 _CODE_LIKE_RES = (
     (re.compile(r'^label\s+[\w.]+\s*:'), 'label'),
@@ -621,24 +628,48 @@ def classify_line(line: str, no: int, chars: CharacterMap,
 
 # ===================== 转换 =====================
 
+def chapter_id_from_filename(filename: str) -> str:
+    """
+    文件名开头的**数字链** → `chapter…`（`2-1-2凌跃捷线-定稿.txt` → `chapter2_1_2`）。
+
+    ⚠ **段数一个都不许截断**（P0，2026-10-26 真机）：从前这条正则写死
+    `^(\\d+)[\\-_](\\d+)`，只取前两段，于是作者真实目录里同一节的四个
+    **不同**片段
+
+        2-1重复实验-定稿.txt / 2-1-1叶怀瑾线 / 2-1-2凌跃捷线 / 2-1-3蓝线 / 2-1-4星桥理子线
+
+    全推成 `chapter2_1` —— 五份产物抢一个 label，落盘时后四份被判
+    `LABEL_COLLISION` 拒写，而用户看到的只是"我的 `2_1_2` 为什么被拦"。
+    作者的命名本身就是"章-节-段"，三段就是三段。
+
+    返回 `''` 表示文件名没有数字前缀（交给调用方走"规范化文件名"那条回退）。
+    """
+    stem = Path(filename).stem if filename else ''
+    m = _NUM_CHAIN_RE.match(stem or '')
+    if not m:
+        return ''
+    return 'chapter' + m.group(1).replace('-', '_')
+
+
 def label_from(text: str, filename: str = '') -> str:
     """
     推 label 名（三级回退，全部**确定性**）：
 
       1. **章节头里的 `chapter0-0`**（真实剧本第一行就是 `1.0 chapter0-0 初入大学`）
-         → `chapter0_0`；
+         → `chapter0_0`；三段（`1.0.2 chapter2-1-2 …`）→ `chapter2_1_2`；
       2. **文件名的 `1-2` 前缀**（`1-2蓝之初见-定稿.txt`）→ `chapter1_2`
          —— 与真机项目里 `chapter1_1` / `chapter1_2` 的命名习惯一致；
+         三段（`2-1-2凌跃捷线`）→ `chapter2_1_2`（见 `chapter_id_from_filename`）；
       3. 兜底：文件名规范化（非字母数字 → `_`，数字开头补 `ch_`）。
     """
     m = _CHAPTER_ID_RE.search(text or '')
     if m:
         return re.sub(r'[^A-Za-z0-9_]', '_', m.group(1)).lower()
-    stem = Path(filename).stem if filename else ''
-    m2 = re.match(r'^(\d+)[\-_](\d+)', stem or '')
-    if m2:
-        return f'chapter{m2.group(1)}_{m2.group(2)}'
-    name = re.sub(r'[^A-Za-z0-9_\u4e00-\u9fff]', '_', stem or '').strip('_')
+    bid = chapter_id_from_filename(filename)
+    if bid:
+        return bid
+    name = re.sub(r'[^A-Za-z0-9_\u4e00-\u9fff]', '_',
+                  Path(filename).stem if filename else '').strip('_')
     name = name or 'chapter'
     if re.match(r'^\d', name):
         name = 'ch_' + name

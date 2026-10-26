@@ -95,6 +95,94 @@ def test_two_files_never_share_one_target(tmp_path):
     targets = [f.target.name for f in plan.files]
     assert len(set(targets)) == 2, targets
     assert 'chapter1_2.rpy' in targets and 'chapter1_2_2.rpy' in targets
+    # 文件名错开还不够：产物里的 label 也必须跟着错开（否则落盘必被门禁拦）
+    labels = [f.label for f in plan.files]
+    assert len(set(labels)) == 2, labels
+    assert labels == ['chapter1_2', 'chapter1_2_2'], labels
+
+
+# ==================== ①b 命名：数字链的段数一个都不许截断 ====================
+#
+# 2026-10-26 真机（`D:\千连万理\演出剧本\`）：作者按"章-节-段"命名，
+# `2-1-1` / `2-1-2` / `2-1-3` / `2-1-4` 是**同一节里四个不同的片段**。
+# 从前的正则只取前两段，四份产物全推成 `chapter2_1`：第一份落进 `game/`
+# 之后，后三份一律被判 `LABEL_COLLISION` 拒写 —— 用户看到的却是
+# "`chapter2_1_2.rpy` 被拦下：`label chapter2_1` 已经定义过"，
+# 而它自己的名字明明就是 2_1_2。
+
+def test_three_segment_file_numbers_keep_every_segment(tmp_path):
+    """`2-1-2凌跃捷线-定稿.txt` → `chapter2_1_2`（不是 `chapter2_1`）。"""
+    root = _project(tmp_path)
+    for name, want in (
+            ('2-1重复实验-定稿.txt', 'chapter2_1'),
+            ('2-1-1叶怀瑾线-定稿.txt', 'chapter2_1_1'),
+            ('2-1-2凌跃捷线-定稿.txt', 'chapter2_1_2'),
+            ('2-5续-定稿.txt', 'chapter2_5'),
+            ('1-2蓝之初见-定稿.txt', 'chapter1_2')):
+        fp = _txt(tmp_path, name, '旁白一句\n')
+        plan = TP.build_plan(root, [fp], ROWS)
+        f = plan.files[0]
+        assert f.label == want, (name, f.label)
+        assert f.target == root / 'game' / f'{want}.rpy', (name, f.target)
+
+
+def test_a_three_segment_chapter_header_is_kept_whole(tmp_path):
+    """
+    章节头三段（`2.1.2 chapter2-1-2 凛冽揍`）也**不许截断成 chapter2_1**，
+    而且它要被认成"章节头"（不进产物），不能掉进正文变成一句旁白。
+    """
+    root = _project(tmp_path)
+    fp = _txt(tmp_path, '2-1-2凌跃捷线-定稿.txt',
+              '2.1.2 chapter2-1-2 凛冽揍\n旁白一句\n')
+    plan = TP.build_plan(root, [fp], ROWS)
+    f = plan.files[0]
+    assert f.label == 'chapter2_1_2'
+    assert 'chapter2-1-2' not in f.rpy_text, '章节头掉进正文了'
+
+
+def test_a_batch_of_scene_files_no_longer_collides(tmp_path):
+    """
+    真机那一批（`2-1重复实验` + `2-1-1..2-1-4`）现在**五个都写得出去**，
+    而且每个产物里的 label 与自己的文件名同源。
+    """
+    root = _project(tmp_path)
+    files = [_txt(tmp_path, n, f'{n} 的旁白\n') for n in (
+        '2-1重复实验-定稿.txt',
+        '2-1-1叶怀瑾线-定稿.txt',
+        '2-1-2凌跃捷线-定稿.txt',
+        '2-1-3蓝线-定稿.txt',
+        '2-1-4星桥理子线-定稿.txt')]
+    res = TP.run(root, files, rows=ROWS, project_root=root)
+    assert res.ok, res.messages
+    assert res.blocked == [], res.blocked
+    got = sorted(p.name for p in res.written)
+    assert got == ['chapter2_1.rpy', 'chapter2_1_1.rpy', 'chapter2_1_2.rpy',
+                   'chapter2_1_3.rpy', 'chapter2_1_4.rpy'], got
+    for p in res.written:
+        assert f'label {p.stem}:' in p.read_text(encoding='utf-8'), p.name
+
+
+def test_a_renamed_target_renames_the_label_too(tmp_path):
+    """
+    两份源文推成同一个 label 时，**文件名和产物里的 label 必须一起改**。
+
+    只改文件名会得到"两份产物声明同一个 label"：第一份落进 `game/` 之后，
+    第二份必然被判 `LABEL_COLLISION` 拒写（2026-10-26 真机就是这么炸的）。
+    改名也必须**说出口**（messages），不能静默把作者的章节名改掉。
+    """
+    root = _project(tmp_path)
+    a = _txt(tmp_path, '1-2甲.txt', '第一段旁白\n')
+    b = tmp_path / 'other' / '1-2乙.txt'
+    b.parent.mkdir()
+    b.write_text('第二段旁白\n', encoding='utf-8')
+    res = TP.run(root, [a, b], rows=ROWS, project_root=root)
+    assert res.ok, res.messages
+    assert res.blocked == [], res.blocked
+    names = sorted(p.name for p in res.written)
+    assert names == ['chapter1_2.rpy', 'chapter1_2_2.rpy'], names
+    assert 'label chapter1_2_2:' in \
+        (root / 'game' / 'chapter1_2_2.rpy').read_text(encoding='utf-8')
+    assert any('chapter1_2_2' in m for m in res.messages), res.messages
 
 
 def test_docx_now_goes_through_the_same_chain(tmp_path):

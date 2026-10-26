@@ -175,6 +175,7 @@ from storygraph.story.generation_guard import (  # noqa: F401
     _is_valid_ident,
     evaluate_generation,
     generation_guard,
+    labels_in_danger,
     occupied_labels,
     planned_output_path,
     write_beats_to_rpy,
@@ -273,6 +274,7 @@ __all__ = [
     'planned_output_path',
     'inside_game_dir',
     'occupied_labels',
+    'labels_in_danger',
     'thumb_cache_dir',
     'make_symbols',
 ]

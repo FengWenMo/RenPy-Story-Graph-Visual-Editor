@@ -22,8 +22,12 @@ Ren'Py 到那一句直接 `NameError` 崩掉（真机 5 章 1373 行里有 23 �
 
 - **落点 = `<项目根>/game/<标签>.rpy`**（没有 game/ 就直接放项目根）——
   作者看得见自己导入了什么；`build/renpy/` 是表格导出的地盘，两个不要混。
-- **标签（文件名）**：优先取文件名里的 `1-2` 前缀 → `chapter1_2`，否则用
+- **标签（文件名）**：优先取文件名里的数字链前缀 → `chapter1_2`
+  （`2-1-2凌跃捷线-定稿.txt` → `chapter2_1_2`，**段数不截断**），否则用
   文件名规范化（**确定性**，不掺时间戳）。与真机 `chapter1_2.rpy` 的习惯一致。
+- 同批两个文件推成同一个 label → 文件名**和产物里的 label 一起**加 `_2`
+  后缀，并在 messages 里说明（只改文件名会造出两份撞名产物，落盘必被
+  `LABEL_COLLISION` 拦下 —— 2026-10-26 真机）。
 - 目标**已存在且不是工具生成的** → `write_generation` 会拒写（手写护栏），
   这里原样报出来；目标存在且**带生成标记** → 允许重导（幂等）。
 
@@ -43,6 +47,7 @@ from pathlib import Path
 
 from storygraph.authoring import char_decisions as CD
 from storygraph.authoring.txt_import import (CharacterMap, ConversionResult,
+                                            chapter_id_from_filename,
                                             convert_text, label_from,
                                             read_text_file)
 from storygraph.story.generation_guard import write_generation
@@ -62,6 +67,9 @@ class PlannedFile:
     written: bool = False
     blocked: list = field(default_factory=list)     # 门禁 block 级问题
     error: str = ''
+    #: 同批撞名后**改名前**的 label（空 = 没改名）。产物里的 label 已同步成
+    #: `label`，这里只用来"说出口"（见 `run` 的 messages）。
+    renamed_from: str = ''
 
     @property
     def rpy_text(self) -> str:
@@ -90,8 +98,6 @@ class Plan:
 
 # ===================== 命名 =====================
 
-_NUM_PREFIX_RE = re.compile(r'^(\d+)[\-_](\d+)')
-
 
 def target_stem(source, label: str = '') -> str:
     """
@@ -101,20 +107,25 @@ def target_stem(source, label: str = '') -> str:
 
       1. **章节头推出来的 label**（`1.0 chapter0-0 初入大学` → `chapter0_0`）——
          章节头是作者写的编号，最权威；
-      2. 文件名的 `1-2` 前缀（`1-2蓝之初见-定稿.txt` → `chapter1_2`）；
+      2. 文件名的数字链前缀（`1-2蓝之初见-定稿.txt` → `chapter1_2`；
+         `2-1-2凌跃捷线-定稿.txt` → `chapter2_1_2`，**段数不截断**）；
       3. 文件名规范化。
 
     ⚠ 为什么章节头优先：真机 5 章的**文件名编号与章节头差一位**
     （`1-0初入大学-定稿.txt` 的头是 `chapter0-0`）—— 拿文件名去命名就会得到
     `chapter1_0.rpy`，与作者心里的那一章对不上，还会和 `chapter0_0` 抢 label。
+
+    ⚠ 数字链解析**只有一处实现**（`txt_import.chapter_id_from_filename`）：
+    这里从前自己抄了一份只取两段的正则，正是"`2-1-2` 被判成 `chapter2_1`"
+    那半个 bug 的来源（2026-10-26 真机）。
     """
     if label:
         return re.sub(r'[^A-Za-z0-9_\u4e00-\u9fff]', '_', label).strip('_') \
             or 'chapter'
+    bid = chapter_id_from_filename(Path(source).name)
+    if bid:
+        return bid
     stem = Path(source).stem
-    m = _NUM_PREFIX_RE.match(stem or '')
-    if m:
-        return f'chapter{m.group(1)}_{m.group(2)}'
     return re.sub(r'[^A-Za-z0-9_\u4e00-\u9fff]', '_', stem).strip('_') or 'chapter'
 
 
@@ -170,17 +181,26 @@ def build_plan(project_root, files, rows=None) -> Plan:
         # "文件名用 A、产物里写着 B"）。
         label = label_from(text, path.name)
         target = plan_target(root, path, label)
+        renamed_from = ''
         # 同批里两个文件算出同一个目标名 → 必须错开，否则后一个会覆盖前一个
         if target in seen_stems:
             n = 2
             while target.with_name(f'{target.stem}_{n}.rpy') in seen_stems:
                 n += 1
+            renamed_from = label
             target = target.with_name(f'{target.stem}_{n}.rpy')
+            # ⚠ **文件名改了，产物里的 label 必须跟着改**（P0，2026-10-26 真机）。
+            # 只改文件名 = 两份产物声明同一个 label：第一份落进 `game/` 之后，
+            # 第二份的 `LABEL_COLLISION` 必然命中，于是"作者看着文件叫
+            # `chapter2_1_2`，门禁却说 `label chapter2_1` 重名"。
+            # 门禁是对的（两个文件真会撞），错的是我们造了一对撞名的产物。
+            label = target.stem
         seen_stems[target] = str(path)
         result = convert_text(text, characters=chars, filename=path.name,
                               label=label)
         plan.files.append(PlannedFile(source=path, target=target, label=label,
-                                      result=result))
+                                      result=result,
+                                      renamed_from=renamed_from))
     if not plan.files and plan.skipped:
         plan.note = '没有任何文件可导入（看 skipped）'
     return plan
@@ -319,6 +339,14 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
     for path, why in plan.skipped:
         out.messages.append(f'跳过 {Path(path).name}：{why}')
     for f in plan.files:
+        # 同批撞名后改了 label 的，**必须说出口**：产物里的 label 与作者预期的
+        # 那个名字不一样了，这属于"静默改名"—— 不报就是第二个 bug。
+        if f.renamed_from:
+            out.messages.append(
+                f'[{f.source.name}] 和本批前面的文件撞了同一个章节名 '
+                f'{f.renamed_from}（两份源文推成同一个 label）：已改名为 '
+                f'{f.label}，文件名和产物里的 `label {f.label}:` 一起改了。'
+                f'如果它们本来就是同一章，请只留一份再导入。')
         for w in (f.result.warnings or []):
             out.messages.append(f'[{f.source.name}] {w}')
 

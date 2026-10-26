@@ -28,7 +28,7 @@ import pytest
 
 from storygraph.story.script_table import (
     Beat, GenerationBlocked, GuardIssue, evaluate_generation,
-    generation_guard, occupied_labels, planned_output_path,
+    generation_guard, labels_in_danger, occupied_labels, planned_output_path,
     render_beats_to_rpy, write_beats_to_rpy, write_generation,
 )
 
@@ -128,6 +128,26 @@ def test_label_collision_is_blocking():
                               occupied_labels={'chapter1_4', 'start'})
     assert codes(issues) == ['LABEL_COLLISION']
     assert issues[0].is_blocking
+
+
+def test_label_collision_says_which_file_owns_the_label(tmp_path):
+    """
+    拦下时必须说清**在哪个文件里**（2026-10-26 真机）。
+
+    用户原话：`chapter2_1_2.rpy 被门禁拦下：label chapter2_1 在项目其他 .rpy
+    里已经定义过` —— "名字明明叫 2_1_2"，而消息里没有一处指向那个"其他 .rpy"。
+    真实情况常是**子目录里的手写章节**（`game/chapter/…`）占着 label。
+    """
+    root = tmp_path / 'proj'
+    (root / 'game' / 'chapter').mkdir(parents=True)
+    (root / 'game' / 'chapter' / 'chapter3_1.rpy').write_text(
+        'label chapter3_1:\n    pass\n', encoding='utf-8')
+    out = root / 'game' / 'chapter3_1.rpy'
+    occupied = labels_in_danger(out, root, exclude={out})
+    issues = generation_guard('label chapter3_1:\n    pass\n', out,
+                              project_root=root, occupied_labels=occupied)
+    msg = [i.message for i in issues if i.code == 'LABEL_COLLISION'][0]
+    assert 'game' in msg and 'chapter3_1.rpy' in msg, msg
 
 
 def test_todo_is_warning_not_block():
