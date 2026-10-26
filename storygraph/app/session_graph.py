@@ -970,7 +970,8 @@ class GraphSessionMixin:
         return errors
     def import_plain_text(self, files, graph=None, *, ask=None,
                           decisions=None, dry_run=False,
-                          import_chapters=None, resolve=None) -> dict:
+                          import_chapters=None, resolve=None,
+                          out_dir=None) -> dict:
         """
         把**纯文字**（`.txt`，`.docx` 待 S4）转成章节导进来（S3）。
 
@@ -999,6 +1000,10 @@ class GraphSessionMixin:
         返回 `None` = 这次先不写 → `needs_review=True`，**不产生任何 .blocked
         副本**（这正是用户"一个个删残留老狼狈"的那笔账）。不传就保持老行为。
 
+        `out_dir` 是**导出文件夹**（界面先问"导出到哪个文件夹"，2026-10-26
+        用户要求）：`.rpy` 落到这里；不传 = 旧行为 `<根>/game/`。
+        ⚠ 不写死 `game/chapter/` —— 很多项目根本没有这个目录，工具不猜。
+
         返回 dict（给 UI 看的一层壳，字段与 `ImportResult` 对齐）。
         """
         from storygraph.authoring import txt_pipeline as TP
@@ -1018,7 +1023,7 @@ class GraphSessionMixin:
                      project_root=root, decisions=decisions, ask=ask,
                      apply=(None if dry_run else self.apply_character_decisions),
                      import_chapters=(None if dry_run else import_chapters),
-                     dry_run=dry_run, resolve=resolve)
+                     dry_run=dry_run, resolve=resolve, out_dir=out_dir)
         # 落盘/导入之后，符号表与资源表都要跟着更新（说话人候选来自这里）
         if res.written:
             try:

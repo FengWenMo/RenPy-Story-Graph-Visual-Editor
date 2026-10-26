@@ -106,7 +106,9 @@ def test_a_label_owned_by_another_file_is_found_before_any_write(tmp_path):
         item.conflict_text()
     # 覆盖旧文件 = 写进**那个已经占位的文件**，而不是另造一份撞名产物
     assert item.replace_path == owner
-    assert item.writable_dir == owner.parent
+    # 改名 / 新写落到**计划的落点目录**（界面会先问导出文件夹；不传时 = game/）。
+    # ⚠ 2026-10-26 起**不再**跟着旧章节目录走（很多项目没有 game/chapter/）。
+    assert item.writable_dir == root / 'game', item.writable_dir
     # 旧的是工具以前生成的 → 默认建议"覆盖"（可安全重导）
     assert item.default_action == IR.ACT_REPLACE
     assert not list((root / 'game').glob('*.rpy')), '预检居然写了文件'
@@ -242,10 +244,14 @@ def test_replace_a_handwritten_file_is_explicit_and_backed_up(tmp_path):
     assert 'define hand' not in hand.read_text(encoding='utf-8')
 
 
-def test_rename_writes_a_new_file_next_to_the_old_one_and_leaves_it(tmp_path):
+def test_rename_writes_into_the_export_dir_and_leaves_the_old_file(tmp_path):
     """
-    「改个名字」：新 label 写进产物第一行，**写到旧章节旁边的目录**
-    （真机章节住在 `game/chapter/`，别另开一窝），旧文件一字不动。
+    「改个名字」：新 label 写进产物第一行，**写到导出文件夹**、旧文件一字不动。
+
+    ⚠ 2026-10-26 用户改口径："不要写入 chapter 文件夹！很多项目根本没有这个
+    文件夹！你可以给一个 rpy 的导出路径，问一问导出到哪个文件夹就行！"
+    —— 所以不再跟着旧章节所在目录走；不传 `out_dir` 时退回计划落点的父目录
+    （默认 `game/`）。
     """
     root = _project(tmp_path)
     owner = _generated(root / 'game' / 'chapter' / 'chapter2_1.rpy', 'chapter2_1')
@@ -257,11 +263,41 @@ def test_rename_writes_a_new_file_next_to_the_old_one_and_leaves_it(tmp_path):
                                       'label': 'chapter2_1_new'}])
     assert res.ok, res.messages
     out = res.written[0]
-    assert out.parent == owner.parent, out
+    assert out.parent == root / 'game', out       # 不再写进 game/chapter/
     assert out.name == 'chapter2_1_new.rpy', out.name
     assert 'label chapter2_1_new:' in out.read_text(encoding='utf-8')
     assert owner.read_text(encoding='utf-8') == before, '旧文件被动了！'
     assert any('改名' in m or '改名为' in m for m in res.messages), res.messages
+
+
+def test_the_export_dir_is_where_new_files_go(tmp_path):
+    """
+    导出文件夹由人指定：`out_dir=` 之后，改名产物的落点就是它
+    （`game/chapter/`、`build/`、甚至项目外，都是人说了算）。
+
+    同时钉住冲突预检里给弹窗看的落点（`item.writable_dir`）也用这个目录 ——
+    否则弹窗写"将写到 A"、实际写到 B。
+    """
+    root = _project(tmp_path)
+    owner = _generated(root / 'game' / 'chapter' / 'chapter2_1.rpy', 'chapter2_1')
+    before = owner.read_text(encoding='utf-8')
+    out_dir = root / 'game' / '章节目录'
+    out_dir.mkdir(parents=True)
+    fp = _txt(tmp_path, '2-1重复实验-定稿.txt')
+    plan = TP.build_plan(root, [fp], ROWS, out_dir=out_dir)
+    assert plan.files[0].target == out_dir / 'chapter2_1.rpy'
+    review = IR.preflight(plan, root, out_dir=out_dir)
+    item = review.items[0]
+    assert item.writable_dir == out_dir, item.writable_dir
+    assert item.rename_target('chapter2_1_x') == out_dir / 'chapter2_1_x.rpy'
+
+    res = TP.run(root, [fp], rows=ROWS, project_root=root, out_dir=out_dir,
+                 resolve=lambda rv: [{'source': str(rv.items[0].source),
+                                      'action': IR.ACT_RENAME,
+                                      'label': 'chapter2_1_x'}])
+    assert res.ok, res.messages
+    assert res.written == [out_dir / 'chapter2_1_x.rpy'], res.written
+    assert owner.read_text(encoding='utf-8') == before, '旧文件被动了！'
 
 
 def test_rename_with_a_bad_name_is_refused_with_a_reason(tmp_path):

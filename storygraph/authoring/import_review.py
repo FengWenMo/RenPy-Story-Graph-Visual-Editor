@@ -37,7 +37,8 @@
     `write_generation(force=True)` —— 这是"强制更换"唯一的实现方式，
     也**只**跳过"手写护栏"那条（语法/引擎/编码等门禁一条都不越）；
   · **改个名字写入** = 只用新的 label，旧文件一个字不动；新文件写到
-    **旧文件旁边**（真机章节住在 `game/chapter/`，跟着它走，不要另开一窝）；
+    **人选的导出文件夹**（界面会先问"导出到哪个文件夹"；⚠ 不写死
+    `game/chapter/` —— 很多项目根本没有它，工具不猜子目录）；
   · **这次跳过** = 保留旧文件，这一份不写，也不产生 `.blocked.rpy`。
 
 ## 这是"提前告知"，不是"另一套判据"
@@ -294,7 +295,7 @@ class ReviewItem:
         return '；'.join(c.message for c in self.conflicts) or '没有冲突'
 
     def rename_target(self, label: str = '') -> Path:
-        """改个名字之后写到哪（默认落在**旧章节所在的目录**）。"""
+        """改个名字之后写到哪（默认落在**人选的导出文件夹**）。"""
         base = Path(self.writable_dir or self.target.parent)
         return base / f'{label or self.new_label or self.label}.rpy'
 
@@ -407,7 +408,7 @@ def _owner_flavour(path: Path) -> str:
     return '手写的' if is_handwritten_script(path) else '工具以前生成的'
 
 
-def preflight(plan, project_root) -> Review:
+def preflight(plan, project_root, out_dir=None) -> Review:
     """
     对一份 `txt_pipeline.Plan` 做冲突预检（**纯读，不写任何文件**）。
 
@@ -418,13 +419,18 @@ def preflight(plan, project_root) -> Review:
       ② 它的落点文件是不是**手写**的（覆盖会毁掉 define / init python）。
 
     两者都没有 → 这个文件不进 `items`（照旧直接写）。
+
+    `out_dir`：**人选的导出文件夹**（界面先问"导出到哪个文件夹"）。
+    "改个名字写入"的新文件就落在这里 —— ⚠ **不再跟着旧章节的目录走**
+    （2026-10-26 用户：很多项目根本没有 `game/chapter/`，工具不猜子目录）。
+    不传时退回计划落点的父目录（= 旧行为 `game/`）。
     """
     root = Path(project_root) if project_root else None
     owners = label_owners(root) if root else {}
     review = Review(root=root, taken_labels=set(owners)
                     | {f.label for f in (getattr(plan, 'files', None) or ())})
     for planned in (getattr(plan, 'files', None) or ()):
-        item = _review_one(planned, owners, root)
+        item = _review_one(planned, owners, root, out_dir)
         if item is not None:
             review.items.append(item)
     if review.items:
@@ -433,7 +439,7 @@ def preflight(plan, project_root) -> Review:
     return review
 
 
-def _review_one(planned, owners: dict, root) -> Optional[ReviewItem]:
+def _review_one(planned, owners: dict, root, out_dir=None) -> Optional[ReviewItem]:
     target = Path(planned.target)
     target_exists = target.is_file()
     target_text = _read_text(target) if target_exists else ''
@@ -512,7 +518,12 @@ def _review_one(planned, owners: dict, root) -> Optional[ReviewItem]:
     if replace_path is not None:
         lost_chunks = tuple(opaque_loss(old_text, planned.rpy_text))
         lost_labels = tuple(sorted(declared_labels(replace_path) - {planned.label}))
-    writable_dir = (Path(others[0]).parent if others else target.parent)
+    # 改名 / 新写去的目录：**人选的导出文件夹**（不传 = 计划落点父目录）。
+    # ⚠ 刻意**不**用"旧章节所在目录"—— 真机有的项目章节全在 `game/chapter/`，
+    # 但很多项目根本没有这个目录；跟着旧章节走等于把某个项目的习惯当成通用规则
+    # （2026-10-26 用户原话："不要写入 chapter 文件夹！很多项目根本没有这个文件夹"）。
+    writable_dir = (Path(out_dir) if out_dir is not None
+                    else Path(target).parent)
     return ReviewItem(
         source=Path(planned.source), target=target, label=planned.label,
         new_text=planned.rpy_text, conflicts=conflicts,

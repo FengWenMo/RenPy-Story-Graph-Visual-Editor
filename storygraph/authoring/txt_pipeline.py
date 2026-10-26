@@ -146,16 +146,23 @@ def target_stem(source, label: str = '') -> str:
     return re.sub(r'[^A-Za-z0-9_\u4e00-\u9fff]', '_', stem).strip('_') or 'chapter'
 
 
-def plan_target(project_root, source, label: str = '') -> Path:
+def plan_target(project_root, source, label: str = '', base_dir=None) -> Path:
     """
-    决定写到哪：`<项目根>/game/<stem>.rpy`（没有 game/ 就写项目根）。
+    决定写到哪：**默认 `<项目根>/game/<stem>.rpy`**，可显式指定导出文件夹。
 
     ⚠ 与 `generation_guard.planned_output_path`（表格导出走 `build/renpy/`）
     **刻意不同**：那条路是"表格 → 脚本"的产物目录；这条路是作者要把章节
     **加进项目**，必须落在 Ren'Py 真正会扫描的 `game/` 里。
+
+    `base_dir`（2026-10-26 用户要求）：**不写死任何子目录**。
+    有的项目章节全在 `game/chapter/`，有的根本没有这个目录 ——
+    工具不再猜，界面会先问一句"导出到哪个文件夹"，把人选的目录传进来。
+    不传时保持旧行为（`<根>/game/`，没有 game/ 就项目根）。
     """
     root = Path(project_root)
     stem = target_stem(source, label)
+    if base_dir is not None:
+        return Path(base_dir) / f'{stem}.rpy'
     base = root / 'game' if (root / 'game').is_dir() else root
     return base / f'{stem}.rpy'
 
@@ -173,11 +180,14 @@ def _read_source(path: Path) -> str:
     raise ValueError(f'不支持的输入类型 {suffix or "(没有后缀)"}：{path.name}')
 
 
-def build_plan(project_root, files, rows=None) -> Plan:
+def build_plan(project_root, files, rows=None, out_dir=None) -> Plan:
     """
     把一批纯文字文件转成 `.rpy` 文本并推 label（**纯函数：不写盘、不读配置**）。
 
     `rows` 是角色表（`{变量: 行}`）；不给他就只用"表命中/缩写形状"那两条判据。
+    `out_dir` 是**导出文件夹**（界面先问人；不传 = 旧行为 `<根>/game/`）——
+    见 `plan_target`。真机上"章节住在 `game/chapter/` 还是 `game/`"没有统一
+    答案，所以工具不猜。
     """
     root = Path(project_root) if project_root else None
     chars = CharacterMap(rows)
@@ -197,7 +207,7 @@ def build_plan(project_root, files, rows=None) -> Plan:
         # `convert_text`（它自己也会推一次；不显式传就可能出现
         # "文件名用 A、产物里写着 B"）。
         label = label_from(text, path.name)
-        target = plan_target(root, path, label)
+        target = plan_target(root, path, label, base_dir=out_dir)
         renamed_from = ''
         # 同批里两个文件算出同一个目标名 → 必须错开，否则后一个会覆盖前一个
         if target in seen_stems:
@@ -332,7 +342,7 @@ def _write_all(plan: Plan, project_root, force: bool = False) -> None:
 
 def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
         import_chapters=None, ask=None, apply=None, dry_run=False,
-        force=False, resolve=None) -> ImportResult:
+        force=False, resolve=None, out_dir=None) -> ImportResult:
     """
     一条龙：纯文字 →（问角色）→（**问冲突**）→ 落盘 → 导入剧情图。
 
@@ -357,15 +367,18 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
         ⚠ 不给 `resolve`（CLI / 单测）时行为与从前**完全一致**：照旧写、
         照旧被门禁拦下、照旧留对照副本。
       · `dry_run=True`：只规划（**仍会算冲突预检**，好让界面提前说清），绝不写盘。
+      · `out_dir`：**导出文件夹**（界面先问一句"导出到哪个文件夹"）。
+        不传 = 旧行为 `<根>/game/`。⚠ 不写死 `game/chapter/` 这类子目录 ——
+        很多项目根本没有它，工具不猜（2026-10-26 用户要求）。
 
     返回 `ImportResult`（含 `plan` / `review` / 门禁结论 / 导入结果）。
     """
     root = Path(project_root) if project_root else Path(game_dir or '.')
-    plan = build_plan(root, files, rows)
+    plan = build_plan(root, files, rows, out_dir=out_dir)
     out = ImportResult(plan=plan, skipped=list(plan.skipped))
     # 冲突预检在**任何写入之前**跑（纯读）。dry_run 也跑：界面第一遍就能说
     # "有 3 个文件撞名"，而不是等点完角色弹窗再吓人一跳。
-    out.review = preflight(plan, root)
+    out.review = preflight(plan, root, out_dir=out_dir)
     if dry_run or not plan.files:
         out.messages.append(plan.note or '没有可导入的文件')
         return out
@@ -394,7 +407,7 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
         out.messages.extend(stats.get('messages') or [])
         # 决定写回了角色表 → **重新加载**（不能用旧的内存副本）
         rows = _reload_rows(root, rows)
-        plan = build_plan(root, files, rows)
+        plan = build_plan(root, files, rows, out_dir=out_dir)
         out.plan = plan
         out.proposals = proposals_for(plan, rows)
         if out.proposals:
@@ -405,7 +418,7 @@ def run(game_dir, files, *, rows=None, project_root=None, decisions=None,
             return out
         # 角色决定会重跑转换 → 预检要按**新的**产物重算（label 不变，
         # 但正文变了；对比栏里必须是最终产物，不能是上一轮的）。
-        out.review = preflight(plan, root)
+        out.review = preflight(plan, root, out_dir=out_dir)
 
     review = out.review
     if review is not None and review.items:

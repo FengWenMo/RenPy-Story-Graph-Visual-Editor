@@ -64,6 +64,31 @@ def test_target_goes_into_the_projects_game_dir(tmp_path):
     assert f.label == 'chapter1_2'
 
 
+def test_the_export_folder_is_chosen_by_the_user_not_guessed(tmp_path):
+    """
+    ⭐ 用户 2026-10-26："不要写入 chapter 文件夹！因为很多项目根本没有这个
+    文件夹！……你可以给一个 rpy 的导出路径，问一问导出到哪个文件夹就行！"
+
+    所以：**工具不猜子目录**。不传 = `<根>/game/`；传了 = 落到人选的目录
+    （`game/chapter/`、`game/script/`、甚至别处都行）。
+    """
+    root = _project(tmp_path)
+    wanted = root / 'game' / '脚本'          # 真机有的项目就叫这个
+    wanted.mkdir()
+    fp = _txt(tmp_path, '1-2蓝之初见-定稿.txt',
+              '1.0 chapter1-2 蓝之初见\nJC"你好"\n')
+
+    plan = TP.build_plan(root, [fp], ROWS, out_dir=wanted)
+    assert plan.files[0].target == wanted / 'chapter1_2.rpy'
+
+    res = TP.run(root, [fp], rows=ROWS, project_root=root, out_dir=wanted)
+    assert res.ok, res.messages
+    assert res.written == [wanted / 'chapter1_2.rpy'], res.written
+    assert (wanted / 'chapter1_2.rpy').is_file()
+    assert not (root / 'game' / 'chapter1_2.rpy').exists(), \
+        '没传出去的默认目录里不该多一份'
+
+
 def test_the_chapter_header_wins_over_the_filename_number(tmp_path):
     """
     ⚠ 真机实测：文件名编号与章节头**差一位**（`1-0初入大学-定稿.txt` 的头是
