@@ -2547,10 +2547,32 @@ class GraphOpsMixin:
 
         与"补全"的区别先给预览：会新增哪些 label、源里删掉的哪些 label
         会从图上移除。不是"再合并一次"。
+
+        ## 只重读**真的改过**的文件（2026-10-27）
+
+        以前这里无条件把图上所有文件重解一遍 —— 91 章的项目按一下刷新就是
+        **3.0 秒**，哪怕一个字节都没动（用户 2026-10-27："剩下的一些流程
+        也需要优化"）。现在先按 `(mtime_ns, size)` 比一遍
+        （`session.stale_import_files`）：
+
+          · **一个都没变** → 不弹窗、不重解，状态栏直接说"都没有改动"；
+          · **变了 N 个** → 只解析这 N 个（预览里也只列它们，其余报一句跳过）。
+
+        「刷新」的语义一点没变：磁盘上改了的，一个都不会漏（判据与
+        `scan_cache` / 分析器缓存同一套：mtime + size）。只是不再为没动的
+        文件付钱 —— 那 N 个文件里，没动的章节本来就该和图上的现状一致。
         """
         files = self._session.graph_files(self.graph)
         if not files:
             self._status('剧情图还是空的 —— 先用「➕ 导入章节 .rpy」加几章。')
+            return
+        changed = self._session.stale_import_files(files)
+        if not changed:
+            self._log(f'[刷新] {len(files)} 个章节在磁盘上都没有改动 —— '
+                      f'没有重读（图保持现状）。')
+            self._status(f'✔ 这 {len(files)} 章的磁盘文件都没有改动'
+                         f'（mtime + 大小都没变），不用刷新；'
+                         f'确实要强制重读就用「➕ 导入章节 .rpy」重选一次。')
             return
         from storygraph.parsing.discover import labels_in_file
         from storygraph.ui_qt.dialogs import SyncPreviewDialog
@@ -2562,7 +2584,7 @@ class GraphOpsMixin:
                     str(getattr(node, 'label_name', '') or ''))
         rows = []
         added_total = removed_total = 0
-        for p in files:
+        for p in changed:
             key = str(Path(str(p)))
             old = set(have.get(key) or ())
             new = set(labels_in_file(p))
@@ -2577,7 +2599,8 @@ class GraphOpsMixin:
             added_total += len(added)
             removed_total += len(removed)
             if not added and not removed:
-                rows.append(f'{Path(str(p)).name}  →  没有变化')
+                rows.append(f'{Path(str(p)).name}  →  没有变化'
+                            f'（只改了正文/条件之类，图上节点不变）')
                 continue
             pieces = []
             if added:
@@ -2587,20 +2610,24 @@ class GraphOpsMixin:
                 pieces.append('源里已删除 ' + '、'.join(removed[:8])
                               + (f' 等 {len(removed)} 个' if len(removed) > 8 else ''))
             rows.append(f'{Path(str(p)).name}  →  ' + '；'.join(pieces))
+        skipped = len(files) - len(changed)
         dlg = SyncPreviewDialog(
             self, '刷新已导入章节',
-            f'将重新读取图上已经导入的 {len(files)} 个文件。\n'
+            f'图上有 {len(files)} 个文件，其中 {len(changed)} 个**改过**'
+            f'（按修改时间 + 大小判断），只重读这 {len(changed)} 个；'
+            f'其余 {skipped} 个原样不动。\n'
             f'预计新增 {added_total} 个 label / 移除 {removed_total} 个'
             f'（源文件里已经不存在的）。',
-            '\n'.join(rows) or '（没有可预览的变化）',
-            ok_text='重新读取',
+            '\n'.join(rows) or '（改过的文件里没有可预览的 label 变化）',
+            ok_text=f'重新读取 {len(changed)} 个',
             warn='只重读图上已有的文件；不会把无源节点变成有源。'
                  '要补缺失文件，用「补全缺失章节…」。')
         if dlg.exec() != QDialog.Accepted:
             self._status('已取消刷新（图没有改动）。')
             return
-        self._log(f'[刷新] 重新解析已导入的 {len(files)} 个章节…')
-        self.import_chapter_files(files)
+        self._log(f'[刷新] 重新解析 {len(changed)} 个改过的章节'
+                  f'（另有 {skipped} 个没改，跳过）…')
+        self.import_chapter_files(changed)
     def clear_graph(self):
         """清空剧情图（**只清图**：资源表、项目根、会话都不动；可撤销）。"""
         n = len(getattr(self.graph, 'nodes', {}) or {})

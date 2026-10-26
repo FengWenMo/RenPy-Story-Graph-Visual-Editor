@@ -1206,7 +1206,18 @@ class GraphSessionMixin:
         before_nodes = len(graph.nodes or {})
         before_edges = len(graph.edges or {})
 
-        analyzer = IncrementalRenPyAnalyzer()
+        #: ⚠ **跨调用复用同一个分析器**（2026-10-27）。
+        #:
+        #: `IncrementalRenPyAnalyzer` 自带"按 (mtime, size) 复用 AST"的文件级
+        #: 缓存，但每次 `import_chapters` 都 new 一个的话，那个缓存只活一次
+        #: 调用 —— 于是「🔁 刷新已导入章节」把 91 个文件**一字未改**地重解一遍
+        #: （真机 3.0 秒，连刷两次都是 3.0 秒）。
+        #: 现在会话持有它：同一份文件第二次进来只重组图，不再重解析
+        #: （真机 3.0 秒 → 1.8 秒；缓存上限与逐出规则见分析器类注释）。
+        analyzer = getattr(self, '_analyzer', None)
+        if analyzer is None:
+            analyzer = IncrementalRenPyAnalyzer()
+            self._analyzer = analyzer
         try:
             parse_result, graph = analyzer.analyze(
                 files=paths, graph=graph, clear_graph=False)
@@ -1259,6 +1270,10 @@ class GraphSessionMixin:
         except Exception as e:                    # noqa: BLE001
             swallow('editor.rebuild_source_edges', e)
         self._last_edge_rebuild = rebuild
+        # 记下这一批"导入时"的 (mtime, size)：`stale_import_files` 靠它把
+        # 「刷新」限定在**真的改过**的文件上（91 个文件里改一个，就不该把
+        # 另外 90 个也重解一遍）。
+        self.remember_import_stamps(paths)
 
         return {
             'ok': True, 'error': '',
@@ -1282,6 +1297,53 @@ class GraphSessionMixin:
             if fp:
                 seen.add(str(Path(str(fp))))
         return sorted(seen)
+
+    # ------------------------------------------------------------------
+    #  "哪些文件真的改过" —— 刷新只重读这些（2026-10-27）
+    # ------------------------------------------------------------------
+
+    def _import_stamps(self) -> dict:
+        """`{文件: (mtime_ns, size)}` —— 上次导入这一批时磁盘上的样子。"""
+        stamps = getattr(self, '_import_stamps_map', None)
+        if not isinstance(stamps, dict):
+            stamps = {}
+            self._import_stamps_map = stamps
+        return stamps
+
+    def remember_import_stamps(self, paths) -> None:
+        """记下这批文件**导入时**的 `(mtime_ns, size)`（供 `stale_import_files` 比）。"""
+        stamps = self._import_stamps()
+        for p in (paths or ()):
+            key = str(Path(str(p)))
+            try:
+                st = Path(key).stat()
+            except OSError as e:                  # noqa: BLE001 - 文件没了：不留记录
+                swallow('app.session_graph.remember_import_stamps', e)
+                stamps.pop(key, None)
+                continue
+            stamps[key] = (int(st.st_mtime_ns), int(st.st_size))
+
+    def stale_import_files(self, files) -> list:
+        """
+        这一批里**磁盘上真的变了**的文件（其余没动）。
+
+        判据只有 `(mtime_ns, size)` 两个数：内容改了 mtime 一定变，长度变了
+        size 变 —— 与 `scan_cache` / 分析器缓存**同一套判据**，三处不会互相打脸。
+        没有导入记录的（比如图是从别处塞进来的）一律算"变了"，宁可多读一遍，
+        也不许拿旧图糊弄。
+        """
+        stamps = self._import_stamps()
+        out = []
+        for p in (files or ()):
+            try:
+                key = str(Path(str(p)))
+                st = Path(key).stat()
+            except OSError:                       # 读不到：交给导入那条路去报
+                out.append(p)
+                continue
+            if stamps.get(key) != (int(st.st_mtime_ns), int(st.st_size)):
+                out.append(p)
+        return out
     def drop_chapters(self, graph, files) -> dict:
         """
         把某些章节**从剧情图上移除**（只改内存里的图，不动磁盘上的 .rpy）。

@@ -3364,10 +3364,70 @@ class IncrementalRenPyAnalyzer:
 
     Graph 清理范围：新 AST 中不存在的 label 节点会被移除；
     同一 (from, to, type, condition, option_text) 的边只加一次。
+
+    ## 缓存的三条规矩（2026-10-27，改的是"能不能跨批次复用"）
+
+    1. **活着的文件不逐出**。以前每次 `analyze()` 都把"这一批之外"的缓存
+       全删掉 —— 那是把"没参与这一批"当成了"被删了"。于是会话里连续两次
+       导入（先导入 3 章、再补 2 章）会把前 3 章的解析结果扔掉，下一次
+       `🔁 刷新已导入章节` 又得把 91 个文件重解一遍（真机 3.0 秒）。
+       现在只逐出**磁盘上已经不在了**的文件。
+    2. **有上限**（`max_source_bytes`，按源文件字节算）。AST 占内存大约是
+       源码的十几倍：91 个文件 / 1.2 MB ≈ 40 MB。所以缓存按插入顺序淘汰，
+       但**绝不淘汰本批正在用的文件**。
+    3. **同一份 AST 重建产物是确定的**。真机验证过：同一批 AST 连续
+       `ParseResultBuilder().build()` 两次，statements / beats / nodes /
+       edges 逐项相同，AST 节点自身不会被打上属性（见
+       `tests/test_analyzer_cache.py::test_rebuilding_from_the_cache_is_identical`）。
+       这是"跨批次复用 AST"能成立的前提。
     """
 
-    def __init__(self):
+    #: 缓存里最多留多少**源码字节**（不是 AST 字节）。1.2 MB 的项目
+    #: 完全装得下；300 个文件的大项目只留最近的几批，宁可重解也不吃满内存。
+    DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024
+
+    def __init__(self, max_source_bytes: int = DEFAULT_MAX_SOURCE_BYTES):
         self._file_cache: dict = {}
+        #: 插入顺序（`dict` 已经是保序的，这里只记"按什么次序淘汰"）
+        self._order: list = []
+        self._bytes = 0
+        self.max_source_bytes = max(0, int(max_source_bytes or 0))
+
+    # ---------------- 缓存记账 ----------------
+
+    def _remember(self, key, entry):
+        """存一条；按**源码字节**记账，超上限时淘汰最旧的（不动本批）。"""
+        old = self._file_cache.get(key)
+        if old is not None:
+            self._bytes -= int(old[1] or 0)
+            if key in self._order:
+                self._order.remove(key)
+        self._file_cache[key] = entry
+        self._order.append(key)
+        self._bytes += int(entry[1] or 0)
+
+    def _forget(self, key):
+        old = self._file_cache.pop(key, None)
+        if old is not None:
+            self._bytes -= int(old[1] or 0)
+        if key in self._order:
+            self._order.remove(key)
+
+    def _trim(self, keep=()):
+        """超上限就按插入顺序淘汰；`keep` 里的（本批）一个都不动。"""
+        protected = set(keep)
+        if self.max_source_bytes <= 0:
+            # 0 = 关掉缓存（测试/极端项目用）
+            for key in list(self._file_cache):
+                if key not in protected:
+                    self._forget(key)
+            return
+        for key in list(self._order):
+            if self._bytes <= self.max_source_bytes:
+                break
+            if key in protected:
+                continue
+            self._forget(key)
 
     def analyze(self, files, graph=None, clear_graph: bool = True) -> tuple:
         seen_keys = set()
@@ -3421,15 +3481,23 @@ class IncrementalRenPyAnalyzer:
                 texts[str(fp_path)] = text
             all_errors.extend(file_errors)
             all_warnings.extend(file_warnings)
-            self._file_cache[fp_key] = (
+            self._remember(fp_key, (
                 st.st_mtime, st.st_size, nodes, file_errors, file_warnings,
                 text
-            )
+            ))
             all_ast.extend(nodes)
 
+        # **只逐出磁盘上已经不在了的**（见类注释第 1 条）：把"这一批没用到"
+        # 当成"被删了"会让下一次导入 / 刷新整批重解。
         for k in list(self._file_cache.keys()):
-            if k not in current_files:
-                del self._file_cache[k]
+            try:
+                still_there = Path(k).exists()
+            except OSError:                       # pragma: no cover - 极端路径
+                still_there = True
+            if not still_there:
+                self._forget(k)
+        # 有上限：按插入顺序淘汰旧批次，**本批正在用的一个都不动**
+        self._trim(keep=current_files)
 
         parse_result = ParseResultBuilder().build(all_ast)
         # **CST（D3，2026-10-07）**：给每条语句挂上"它在原文里的行区间 +
@@ -3480,14 +3548,18 @@ class IncrementalRenPyAnalyzer:
 
     def invalidate(self, filepath):
         key = str(Path(filepath).resolve())
-        self._file_cache.pop(key, None)
+        self._forget(key)
 
     def clear(self):
         self._file_cache.clear()
+        self._order.clear()
+        self._bytes = 0
 
     def stats(self) -> dict:
         return {
             'cached_files': len(self._file_cache),
+            'cached_source_bytes': self._bytes,
+            'max_source_bytes': self.max_source_bytes,
             'files': sorted(self._file_cache.keys()),
         }
 
