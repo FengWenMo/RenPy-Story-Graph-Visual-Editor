@@ -229,6 +229,9 @@ def _capture(win, project):
     #    所以先插一张让它有东西可删；顺序反了会删掉真实内容）
     rec('insert_card', _public(win, 'insert_card', True))
     rec('beats-after-insert', _beats_view(win))
+    # 删卡现在是三选一：明确选「整个删掉」，才和 golden 的
+    # beats-after-delete（少一拍）一致；`QMessageBox.exec -> 0` 会被当成取消。
+    win._ask_delete_mode = lambda *a, **k: 'whole'
     rec('delete_card', _public(win, 'delete_card'))
     rec('beats-after-delete', _beats_view(win))
 

@@ -1740,8 +1740,12 @@ class TestInsertDeleteCard:
         assert window._loaded_idx == 2
 
     def test_delete_removes_the_current_card(self, window, monkeypatch):
+        # 删卡现在先弹三选一；这里直接选「整个删掉」，不让模态框真开。
         from PySide6.QtWidgets import QMessageBox
 
+        monkeypatch.setattr(window, '_ask_delete_mode',
+                            lambda *a, **k: 'whole')
+        # 删到块头时还有一道"连块体一起删？"的确认，同样不能真弹。
         monkeypatch.setattr(QMessageBox, 'question',
                             staticmethod(lambda *a, **k: QMessageBox.Yes))
         window._set_page(window.PAGE_CARD)
@@ -1754,10 +1758,8 @@ class TestInsertDeleteCard:
         assert window._restore_btn.isEnabled(), '删完应该能撤销'
 
     def test_delete_asks_first(self, window, monkeypatch):
-        from PySide6.QtWidgets import QMessageBox
-
-        monkeypatch.setattr(QMessageBox, 'question',
-                            staticmethod(lambda *a, **k: QMessageBox.No))
+        # 「取消」分支：三选一返回空串，一拍都不许少。
+        monkeypatch.setattr(window, '_ask_delete_mode', lambda *a, **k: '')
         window._set_page(window.PAGE_CARD)
         before = len(window.beats)
         window.delete_card()
@@ -1766,6 +1768,8 @@ class TestInsertDeleteCard:
     def test_restore_puts_it_back_at_the_same_index(self, window, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
+        monkeypatch.setattr(window, '_ask_delete_mode',
+                            lambda *a, **k: 'whole')
         monkeypatch.setattr(QMessageBox, 'question',
                             staticmethod(lambda *a, **k: QMessageBox.Yes))
         window._set_page(window.PAGE_CARD)
@@ -1799,6 +1803,8 @@ class TestInsertDeleteCard:
     def test_cannot_delete_the_last_remaining_card(self, window, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
+        monkeypatch.setattr(window, '_ask_delete_mode',
+                            lambda *a, **k: 'whole')
         monkeypatch.setattr(QMessageBox, 'question',
                             staticmethod(lambda *a, **k: QMessageBox.Yes))
         window._set_page(window.PAGE_CARD)

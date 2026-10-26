@@ -44,6 +44,8 @@ from __future__ import annotations
 from copy import copy
 from dataclasses import dataclass, field
 
+from storygraph.core.safeguard import swallow
+
 #: 档位（`whole` 只用于界面排序与说明，本模块不执行）
 MODE_TEXT = 'text'
 MODE_TEXT_STAGE = 'text_stage'
@@ -138,8 +140,8 @@ def why_not(beat) -> str:
         if parse_flow(beat) is not None:
             return ('这是控制流拍（call / jump）—— 它是图上的边，'
                     '只能整个删掉（或者在图上去掉这条线）')
-    except Exception:                      # noqa: BLE001 - 认不出就按普通拍走
-        pass
+    except Exception as e:                 # noqa: BLE001 - 认不出就按普通拍走
+        swallow('app.beat_clear.why_not.parse_flow', e)
     # `parse_flow` 只认 `kind in ('narration','flow')`；手工造的 `kind='say'`
     # 控制流卡它认不出 —— 但那种卡同样不能"只清空"（清完什么也不剩）。
     # 所以这里再看一眼**单行的 raw**：
@@ -170,8 +172,8 @@ def why_not(beat) -> str:
         if str(getattr(beat, 'kind', '') or '') == KIND_MENU:
             return ('这是菜单头 —— 清掉它，下面的选项就变成块外的普通台词，'
                     '只能整个删掉（或连块体一起删）')
-    except Exception:                      # noqa: BLE001
-        pass
+    except Exception as e:                 # noqa: BLE001
+        swallow('app.beat_clear.why_not.kind_menu', e)
     return ''
 
 

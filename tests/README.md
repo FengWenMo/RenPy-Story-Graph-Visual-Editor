@@ -18,6 +18,12 @@ python -m pytest tests/test_renpy_parser.py -v
 > 原理、选项、排障见 `tools/fasttest/README.md`；给 agent 的入口约定见
 > 仓库根目录 `AGENTS.md`。
 
+> **写 UI 测试时不要真开模态框**：headless 下 `QMessageBox.exec()` /
+> `QDialog.exec()` 会永久等用户点击，xdist 的其余 worker 早跑完、整个进程
+> 0 CPU，看起来就像"卡死"。删卡三选一请 patch `_ask_delete_mode`，块头级联
+> 确认还要 patch `QMessageBox.question`；其它对话框同理。fasttest 有 300s
+> 看门狗会以 124 结束并点名 nodeid，但最好在测试里就不要制造这种等待。
+
 `pytest.ini` 已把 `SyntaxWarning` 提升为失败——源码里若再写出非法转义会直接红灯。`tests/conftest.py`
 负责：
 1. 把项目根目录与 `tests/` 加入 `sys.path`
