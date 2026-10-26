@@ -45,6 +45,7 @@
 - **全局开关（记忆/自动保存）的判据要判在唯一写入口**，别放调用方（2026-10-26）：`remember_graph_files` 漏查 → 跑一轮 UI 测试往用户真实 `session.json` 写了 **849 个** tmp 项目。跑 UI 探针/截图先 `STORYGRAPH_NO_SESSION=1`；`session_store.save()` 自己判 `enabled()`，写真实表时自动剪 `.pip-tmp/` 等临时项目。
 - **纯文字导入前会弹"导出到哪个文件夹"**（2026-10-26，用户："不要写入 chapter 文件夹！"）：落点由人指定（`out_dir`），**不猜**子目录；覆盖旧文件仍写那份占位 .rpy。⚠ 任何程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 下模态目录框会**挂死测试**。
 - **"连线很卡"是同一个项目被整份解析 6~8 遍**（2026-10-27）：接线窗口问"编排层是哪个 / `_control` 在不在 / 谁 jump 了这章"，每个问题都读一遍全部 `.rpy`，`detect_placement` 还是整份 AST（真机 1.2 MB → 1435 ms/次）。现在**项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，无 TTL），并且 `find_control_file` 在**只有一个候选**时直接返回（排序只有一个元素时结论相同）。改这块别绕过缓存，也别给它加 TTL —— 判据 `test_scan_cache.py`（含"第二次零读盘""改文件必须重新解析"）。
+- **"刷新已导入章节"以前每次都全量重解**（2026-10-27）：91 章的项目按一下 3.0 秒（0 改动也一样）。现在 ①会话持有一个 `IncrementalRenPyAnalyzer`（缓存跨调用复用；**只逐出磁盘上不存在的文件**、有 8 MB 上限、**本批不淘汰**）；②`import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定刷新重读哪几个，**0 改动连预览框都不弹**（判据 `test_import_stamps.py`；旧用例"导入完立刻刷新也弹框"已校准为"先改文件再刷新"）。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完**回读校验**。
 
@@ -65,6 +66,7 @@
 | 点不动修复 + 记忆门禁 | QMessageBox 角色装错静默失效；记忆写入口收门禁 + 剪测试污染 | `test_ui_reaction_contract.py` / `test_session_memory.py` |
 | 导出落点 + 顶部顺序 | `.rpy` 导出文件夹**由人指定**；工具栏顺序：导航→打开项目→自定义→AI→导入→导出→刷新→清理 | `test_toolbar_export_entry.py` / `test_txt_pipeline.py` |
 | 接线不卡 | 项目级扫描进 `scan_cache`（内容驱动失效）+ 单候选不排序 + 画布每块只 refresh 一次 | `test_scan_cache.py` / `test_graph_canvas.py::TestRebuildIsNotWasteful` |
+| 刷新不白付钱 | 分析器缓存跨调用复用 + 刷新只重读 `(mtime,size)` 变过的文件（0 改动 = 4 ms） | `test_import_stamps.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。
