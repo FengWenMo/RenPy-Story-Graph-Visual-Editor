@@ -358,9 +358,13 @@ def write_dict_to_excel(file_path, data_dict: dict, field_order: list,
         id_header=(snap.id_header if snap else ASSET_FIELD_LABELS.get('ID', 'ID')))
     sheets = _xp.restore_extra_sheets(wb, snap)
     if snap is not None:
-        _xp.stash_asset_stats(table=str(file_path), columns=len(user_headers),
-                              kept=len(kept), dropped=dropped, marks=marks,
-                              sheets=sheets)
+        _xp.stash_asset_stats(
+            table=str(file_path), columns=len(user_headers),
+            kept=len(kept), dropped=dropped, marks=marks, sheets=sheets,
+            # 抢救场景回执要点名"什么没救回来"（P1④：不许装作保住了）
+            rescued=bool(getattr(snap, 'rescued', False)),
+            rescued_lost=('批注/底色/额外页' if getattr(snap, 'rescued', False)
+                          else ''))
     # **`ID`（编号）整列隐藏**（用户 2026-10-07："它就是那个本该藏起来、
     # 没什么用的内部编号，已经藏起来就不需要换位了"）。
     # 隐藏只是观感：openpyxl 读得到、`rename`/`delete`/搜索全不受影响。
@@ -525,12 +529,17 @@ def find_asset_tables(project_root, asset_dir=None):
 
 def _quarantine_broken_tables(table_dir, reason: str = '') -> list:
     """
-    把**读不出来**的表文件挪到一边（改名成 `*.broken-<时间戳>.xlsx`），返回清单。
+    把**读不出来**的表文件复制一份到 `*.broken-<时间戳>.xlsx`，返回清单。
 
-    为什么不删：那是用户的数据 —— 也许是 Excel 正开着（锁住）、也许写坏了，
-    但**都要留着**让人自己去救（或者从我们的 `.bak.xlsx` 恢复）。
-    能读的文件一个都不动（例如只有 `images.xlsx` 坏了，`characters.xlsx`
-    照旧保留，重建时不会被覆盖）。
+    2026-10-26（P1 讨论④）两处改向：
+
+    1. **挪走 → 复制留底**。从前是 move —— 原文件被挪走后，
+       `write_dict_to_excel` 的"保住人的东西"快照**没得读**，重建必然推平
+       策划的列/行/页/批注。现在原地留着，重建链路会走 `salvage_rows`
+       zip 级抢救（sheet XML 常常完好）；`.broken-` 这份只是**兜底**，
+       不是方案（用户对 P0-F 表过态："隔离解决不了根本问题"）。
+    2. **被占用 ≠ 坏表**。`PermissionError`（Excel 开着锁住）一个字节不动、
+       一个副本不做 —— 表根本没坏，谁也不许碰它。
     """
     moved = []
     import time
@@ -542,25 +551,21 @@ def _quarantine_broken_tables(table_dir, reason: str = '') -> list:
             try:
                 read_excel_rows(p)               # 读得动就留着
                 continue
-            except Exception as e:               # noqa: BLE001 - 读不动 → 挪走
+            except PermissionError:
+                # 锁着 ≠ 坏了：不复制、不挪、不重建（调用方报"被占用"）
+                continue
+            except Exception as e:               # noqa: BLE001 - 读不动 → 留底
                 swallow('assets.asset_registry._quarantine_broken_tables', e)
             target = p.with_name(f'{p.stem}.broken-{stamp}.xlsx')
             try:
-                p.rename(target)
-                moved.append(target.name)
-            except OSError as e:                 # noqa: BLE001 - 挪不动就算了
+                import shutil
+                shutil.copy2(p, target)          # **复制**，原件留着给抢救
+                moved.append(str(target))
+            except Exception as e:               # noqa: BLE001
                 swallow('assets.asset_registry._quarantine_broken_tables.move', e)
     except Exception as e:                       # noqa: BLE001
         swallow('assets.asset_registry._quarantine_broken_tables.scan', e)
-    if moved and reason:
-        pass                                     # 原因由调用方写进日志
     return moved
-
-
-
-
-
-
 
 
 def _reload_tables_and_diff(table_dir, root, walk, assets, tag: str):
@@ -1526,6 +1531,19 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
                         'counts': {}, 'error': '', 'registry': reg,
                         'repaired': [], 'repair_error': '',
                         'preserved': {}}
+            except PermissionError as e:
+                # **被占用 ≠ 坏表**（P1④ 第一层）：Excel 开着锁住时一个字节
+                # 都不动、更不重建 —— 从前这里落进下面的"读不动 → 重建"，
+                # 用户回来发现自己的表被推平了。直接说人话 + 零写。
+                swallow('assets.asset_registry.ensure_asset_tables.locked', e)
+                return {
+                    'ok': False, 'created': '', 'path': str(found),
+                    'counts': {}, 'registry': None, 'repaired': [],
+                    'repair_error': '',
+                    'error': ('资源表被占用（可能 Excel 正开着）—— '
+                              '请先关闭 Excel 再扫描。文件一个字节都没动。'),
+                    'preserved': {}, 'locked': True,
+                }
             except Exception as e:              # noqa: BLE001 - 读不动 → 重建
                 parse_error = f'{type(e).__name__}: {e}'
                 swallow('assets.asset_registry.ensure_asset_tables.parse', e)
@@ -1591,6 +1609,31 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
                 'repaired': [], 'repair_error': ''}
 
 
+def _read_existing_rows(file_path) -> list:
+    """读旧表行（`read_excel_rows` 的**容错版**）—— 坏表走 zip 级抢救。
+
+    `read_excel_rows` 是严格的（读不动就抛）：它还是
+    `_quarantine_broken_tables` 的"能不能读"判据，不能软。
+    写盘这一侧要的是"尽量拿到旧行"（P1 讨论④ 第二层）：
+
+      · 锁着（`PermissionError`）→ 照抛 —— 被占用 ≠ 坏表，谁也不许碰；
+      · 坏了 → `xlsx_preserve.salvage_rows`（sheet XML 常常完好）；
+      · zip 都烂了 → 空表（调用方退到重建，`.broken-` 留底由隔离层负责）。
+    """
+    try:
+        return read_excel_rows(file_path)
+    except PermissionError:
+        raise
+    except Exception as e:                      # noqa: BLE001
+        swallow('assets.asset_registry._read_existing_rows', e)
+        from storygraph.story.xlsx_preserve import salvage_rows
+        _h, rows = salvage_rows(file_path)
+        out = []
+        for row in rows:
+            out.append({_canon_field(h): v for h, v in row.items() if h})
+        return out
+
+
 def _merge_existing(existing: dict, asset: dict, auto_fields: list) -> dict:
     """若资产已在 Excel 中存在，保留用户编辑字段，仅覆盖自动字段。"""
     aid = asset['ID']
@@ -1615,7 +1658,7 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
             groups[a['Category']].append(a)
         for cat, assets in groups.items():
             file_path = output_dir / f'images_{cat}.xlsx'
-            existing = {r['ID']: r for r in read_excel_rows(file_path) if r.get('ID')}
+            existing = {r['ID']: r for r in _read_existing_rows(file_path) if r.get('ID')}
             new_data = {}
             for a in assets:
                 new_data[a['ID']] = _merge_existing(
@@ -1626,7 +1669,7 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
                  'Group', 'Value'])
     else:
         file_path = output_dir / 'images.xlsx'
-        existing = {r['ID']: r for r in read_excel_rows(file_path) if r.get('ID')}
+        existing = {r['ID']: r for r in _read_existing_rows(file_path) if r.get('ID')}
         new_data = {}
         for a in image_assets:
             new_data[a['ID']] = _merge_existing(
@@ -1638,7 +1681,7 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
 
     # ---------- 音乐 ----------
     music_file = output_dir / 'music.xlsx'
-    existing = {r['ID']: r for r in read_excel_rows(music_file) if r.get('ID')}
+    existing = {r['ID']: r for r in _read_existing_rows(music_file) if r.get('ID')}
     new_data = {}
     for a in assets_dict['audio']['music']:
         new_data[a['ID']] = _merge_existing(existing, a, ['Path', 'Loop', 'Volume'])
@@ -1648,7 +1691,7 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
 
     # ---------- 音效 ----------
     sound_file = output_dir / 'sounds.xlsx'
-    existing = {r['ID']: r for r in read_excel_rows(sound_file) if r.get('ID')}
+    existing = {r['ID']: r for r in _read_existing_rows(sound_file) if r.get('ID')}
     new_data = {}
     for a in assets_dict['audio']['sound']:
         new_data[a['ID']] = _merge_existing(existing, a, ['Path'])
@@ -1658,7 +1701,7 @@ def write_asset_excel(assets_dict: dict, output_dir, split_by_category=False):
 
     # ---------- 语音 ----------
     voice_file = output_dir / 'voices.xlsx'
-    existing = {r['ID']: r for r in read_excel_rows(voice_file) if r.get('ID')}
+    existing = {r['ID']: r for r in _read_existing_rows(voice_file) if r.get('ID')}
     new_data = {}
     for a in assets_dict.get('voices', []):
         new_data[a['ID']] = _merge_existing(existing, a, ['Path'])

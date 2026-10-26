@@ -497,6 +497,12 @@ class AssetSnapshot:
     dropped_rows: int = 0
     #: 认不出身份列（`编号`）—— 行只能按 `真实文件` 对，不能按 ID 对
     id_missing: bool = False
+    #: 这份快照是 **zip 级抢救**回来的（openpyxl 打不开、sheet XML 还在）。
+    #: 抢救行只许进 keep 通道（人的行），**永远不许覆盖扫描行** ——
+    #: 抢救值的类型可能与 openpyxl 读出的不一致（数字变串）。
+    #: 批注 / 底色 / 额外页**救不到**（要 styles/workbook 元数据），
+    #: 回执里必须点名"这三样未能抢救"，不许装作保住了。
+    rescued: bool = False
 
     def user_values(self, asset_id, path=None) -> dict:
         """
@@ -543,9 +549,30 @@ def snapshot_asset_table(table_path, tool_headers,
     try:
         import openpyxl
         wb = openpyxl.load_workbook(p, data_only=False)
+    except PermissionError:
+        # **被占用 ≠ 坏表**（2026-10-26，P1 讨论④ 第一层）：Excel 开着时
+        # Windows 抛 PermissionError。此时表没坏 —— 一个字节都不该动，
+        # 更不该"隔离 + 重建"（现状就把锁着的表推平了，用户回来发现
+        # 自己的表没了）。原样抛给调用方：写盘侧 `save_workbook` 的
+        # `_save_hint` 会说人话（"Excel 开着"）。
+        raise
     except Exception as e:                     # noqa: BLE001
         swallow('story.xlsx_preserve.asset.open', e)
-        return None
+        # **坏表先抢救，再谈重建**（第二层）：openpyxl 拒载 ≠ 行没了。
+        # workbook.xml 损坏 / 缺 styles 时 sheet XML 常常完好。
+        headers, rows = salvage_rows(p)
+        if not headers:
+            return None                        # zip 都烂了 → 调用方隔离重建
+        snap = AssetSnapshot(id_header=id_header, path_header=path_header,
+                             rescued=True)
+        snap.headers = headers
+        snap.id_missing = id_header not in snap.headers
+        # 用户列全算（工具列名单由调用方传；抢救场景下我们分不清
+        # 哪列是工具的 —— `write_dict_to_excel` 再按规范键裁一次）
+        snap.user_headers = [h for h in headers if h]
+        for row in rows:
+            snap.rows.append(dict(row))
+        return snap
 
     snap = AssetSnapshot(id_header=id_header, path_header=path_header)
     try:
@@ -593,6 +620,146 @@ def snapshot_asset_table(table_path, tool_headers,
         except Exception as e:                 # noqa: BLE001
             swallow('story.xlsx_preserve.asset.close', e)
     return snap
+
+
+#: 抢救时认的表格 XML 命名空间（SpreadsheetML）
+_NS_SHEET = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+#: Excel 单列上限（XFD = 16384）—— 列字母解析越界就停
+_MAX_COL = 16384
+
+
+def _col_letters_to_index(ref: str) -> int:
+    """`B`→2 / `AA`→27（1 基）；认不出返回 0。"""
+    n = 0
+    for ch in ref:
+        if 'A' <= ch <= 'Z':
+            n = n * 26 + (ord(ch) - 64)
+        elif 'a' <= ch <= 'z':
+            n = n * 26 + (ord(ch) - 96)
+        else:
+            break
+    return n if 1 <= n <= _MAX_COL else 0
+
+
+def salvage_rows(table_path) -> tuple:
+    """
+    **zip 级抢救**一张 openpyxl 打不开的 xlsx → `(headers, rows)`；
+    救不了返回 `([], [])`（调用方才退到"隔离 + 重建"）。
+
+    为什么需要（2026-10-26，P1 讨论④）：表坏了（workbook.xml 损坏 / 缺
+    styles.xml / Excel 把文件写残）时，`snapshot_asset_table` 直接返回
+    None → 重建时**人的列 / 行 / 页 / 批注全没**，只剩一个 `.broken-` 隔离
+    副本。用户对同类问题（P0-F）明确表态过"不要做隔离备份，这解决不了
+    根本问题" —— 表读不出 ≠ 行救不回：xlsx 就是个 zip，**sheet XML 常常
+    还完好**。
+
+    读法（只认字面量，不猜语义）：
+      · `xl/sharedStrings.xml` → 共享字符串表（`t="s"` 的索引源）；
+      · `xl/worksheets/sheet1.xml` → 逐行逐格；值分支四种：
+        `t="s"`（共享表下标）/ `t="inlineStr"`（内联串，openpyxl 默认写法，
+        **漏了它就读出一片空**——探针实测过）/ `t="str"` / 无 t（数字）。
+      · 只要 **第一张表**（工具只写第一张；后面的页是人的，本函数救不到、
+        由调用方在回执里点名"未能抢救"）。
+
+    ⚠ 抢救行只许进 **keep 通道**（人的行），**永远不许覆盖扫描行** ——
+    抢救值的类型可能与 openpyxl 读出的不一致（数字变串），拿它去覆盖
+    `scan_assets` 的自动字段就是把干净数据改脏。
+    """
+    p = Path(table_path)
+    if not p.is_file():
+        return [], []
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        with zipfile.ZipFile(p) as z:
+            names = set(z.namelist())
+            shared: list = []
+            if 'xl/sharedStrings.xml' in names:
+                try:
+                    root = ET.fromstring(z.read('xl/sharedStrings.xml'))
+                    for si in root.findall(f'{_NS_SHEET}si'):
+                        # 一个 `si` 里可能有多个 `r`（富文本）→ 拼起来
+                        parts = [t.text or ''
+                                 for t in si.iter(f'{_NS_SHEET}t')]
+                        shared.append(''.join(parts))
+                except Exception as e:              # noqa: BLE001
+                    swallow('story.xlsx_preserve.salvage.shared', e)
+            sheet_name = next(
+                (n for n in ('xl/worksheets/sheet1.xml',)
+                 if n in names), None)
+            if sheet_name is None:
+                # 退一步：任意 sheet*.xml 里取第一个（工作簿元数据坏了时
+                # 文件名未必叫 sheet1）
+                sheet_name = next(
+                    (n for n in sorted(names)
+                     if n.startswith('xl/worksheets/sheet')
+                     and n.endswith('.xml')), None)
+            if sheet_name is None:
+                return [], []
+            try:
+                root = ET.fromstring(z.read(sheet_name))
+            except Exception as e:                  # noqa: BLE001
+                swallow('story.xlsx_preserve.salvage.sheet', e)
+                return [], []
+    except Exception as e:                          # noqa: BLE001 - zip 都打不开
+        swallow('story.xlsx_preserve.salvage.open', e)
+        return [], []
+
+    def _cell_text(c) -> str:
+        t = c.get('t') or ''
+        if t == 's':
+            v = c.find(f'{_NS_SHEET}v')
+            try:
+                return shared[int(v.text)] if v is not None and v.text else ''
+            except (ValueError, IndexError):
+                return ''
+        if t == 'inlineStr':
+            is_el = c.find(f'{_NS_SHEET}is')
+            if is_el is None:
+                return ''
+            return ''.join(x.text or ''
+                           for x in is_el.iter(f'{_NS_SHEET}t'))
+        v = c.find(f'{_NS_SHEET}v')
+        return '' if v is None or v.text is None else v.text
+
+    raw_rows: list = []
+    for row in root.iter(f'{_NS_SHEET}row'):
+        cells: dict = {}
+        for c in row.findall(f'{_NS_SHEET}c'):
+            ref = c.get('r') or ''
+            # 列号优先取 `r="B3"` 里的字母；没有就按出现序（少见到但认字面）
+            idx = _col_letters_to_index(''.join(
+                ch for ch in ref if ch.isalpha()))
+            if not idx:
+                idx = len(cells) + 1
+            cells[idx] = _cell_text(c)
+        raw_rows.append(cells)
+
+    if not raw_rows:
+        return [], []
+    # 表头 = 第一行；行集 = 其后非全空行（与 `snapshot_asset_table` 同口径：
+    # 连续 200 空行截断，这里救不到"空行"概念，就只去尾部全空行）
+    header_cells = raw_rows[0]
+    width = max(header_cells) if header_cells else 0
+    headers = [str(header_cells.get(i, '') or '').strip()
+               for i in range(1, width + 1)]
+    if not any(headers):
+        return [], []
+    rows: list = []
+    for cells in raw_rows[1:]:
+        values = {}
+        any_value = False
+        for i, h in enumerate(headers, start=1):
+            if not h:
+                continue
+            v = cells.get(i, '')
+            values[h] = v
+            if v not in ('', None):
+                any_value = True
+        if any_value:
+            rows.append(values)
+    return headers, rows
 
 
 def plan_kept_rows(snap: 'AssetSnapshot | None', known_ids,
