@@ -5,20 +5,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 40
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from make_art import write_all as write_demo_art          # noqa: E402
+
 OGG = b'OggS' + b'\x00' * 40
 
 DEMO = ROOT / 'demo'
 game = DEMO / 'game'
 
 # --- 素材 ---
+#
+# ⚠ 图片**必须**是真 PNG（`demo/make_art.py` 画的占位图）。
+#   2026-10-27 实测：这里以前写的是 48 字节假 PNG（文件头 + 0），资源表按
+#   "文件在不在"认得它，但舞台图 / 立绘卡 / 演出预览都读不出像素 ——
+#   第一次打开 demo 的人看到的是黑屏 +「⚠ 缺 1 个素材」+「读不出」。
+#   音频仍是占位字节：工具只查存在性、不播；真 ogg 要编码器，不在本脚本范围内。
 assets = {
-    'images/bg/bg_classroom.png': PNG,
-    'images/bg/bg_rooftop.png': PNG,
-    'images/eileen/happy.png': PNG,
-    'images/eileen/sad.png': PNG,
-    'images/eileen/happy_blush.png': PNG,
-    'images/mary/smile.png': PNG,
     'music/night.ogg': OGG,          # 无 bgm_ 前缀，旧实现会错判成音效
     'music/rain.ogg': OGG,
     'sounds/click.ogg': OGG,
@@ -30,6 +32,7 @@ for rel, data in assets.items():
     p = game / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(data)
+write_demo_art(game)
 
 # --- 章节脚本（含自定义 transform + 注释说明 + 多角色 + 音频/语音）---
 SCRIPT = '''define e = Character("爱莲", color="#c8ffc8", image="eileen",
