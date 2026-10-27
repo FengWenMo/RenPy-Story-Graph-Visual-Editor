@@ -48,6 +48,10 @@
 - **"刷新已导入章节"以前每次都全量重解**（2026-10-27）：91 章的项目按一下 3.0 秒（0 改动也一样）。现在 ①会话持有一个 `IncrementalRenPyAnalyzer`（缓存跨调用复用；**只逐出磁盘上不存在的文件**、有 8 MB 上限、**本批不淘汰**）；②`import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定刷新重读哪几个，**0 改动连预览框都不弹**（判据 `test_import_stamps.py`；旧用例"导入完立刻刷新也弹框"已校准为"先改文件再刷新"）。
 - **卡片上的"这一拍的舞台图"**（2026-10-27）：渲染必须走 `stage_render.render_frame`（与「演出预览」**同一个函数**，别另写近似画法）；**一律后台线程**（首次碰上大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；"要不要重画"看 `frame_signature`（内容指纹）——**不许**用 `id(frame)`（每刷一次都是新对象），也不许在换拍时"拿上一张顶着"（卡片是单拍快照，那等于说错话）。图在**舞台块外面**：真机一章 285 拍里 210 拍舞台块是收起的，收起时放弃这张图 = 最该看的时候没有（判据 `test_stage_thumb.py` 22 条）。
 - **界面上"可删的独立件"**（2026-10-27，⭐ GitHub star 徽标）：一个文件 + 一处挂载。控件/网络/离线降级全在 `ui_qt/github_star.py`，**不许** import 窗口/会话代码；主窗口只有 `_build_card_page` 里那三行 try（删掉 + 删文件 = 界面复原）。点击必须立刻返回（网络在后台，`click()` 实测 21 ms）；**启动时不联网**；没 token 不开死页面、连不上只说一句"连不上 GitHub"。判据 `test_github_star.py`（19 条，含"整个 UI 包只有一处 import 它"）。
+- **许可证是 GPLv3**（仓库根 `LICENSE` = GPLv3 全文，2026-10-27 从 GitHub 那条线的 `1f7153b` 恢复）：
+  `README.md` / `pyproject.toml` / `packaging/make_release.py` / `packaging/交付说明.md` / `tests/test_release_manifest.py`
+  必须同源（判据 `test_license_is_gpl_everywhere_it_matters`）。⚠ 10-23 那份提交（`0d32628`）
+  曾把 LICENSE 写成 **MIT**（与线上 GPL 冲突），已改回 —— **别再改回去**。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完**回读校验**。
 
@@ -73,7 +77,7 @@
 | GitHub star 徽标 | 独立件 `ui_qt/github_star.py`（一处挂载、后台点击、离线只说一句） | `test_github_star.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
-**真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。
+**真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）。
 
 **待用户决定**：D1 树/表归属｜D2 两套生成器收敛｜D3 rename patch 接 Qt｜D4 Stage 格级下拉｜D5 坏味道课题｜D6 pytest.ini basetemp｜D7 多引擎加深｜D8 提交策略。
 

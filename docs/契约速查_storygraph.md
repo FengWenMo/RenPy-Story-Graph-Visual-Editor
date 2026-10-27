@@ -5170,6 +5170,20 @@ if len(with_control) == 1:
 `*.github.io` 全指到了 `127.0.0.1`（868 条 `#S302` 屏蔽项），直连真实 IP 也超时。
 应急件：`.pip-tmp/StoryGraph-main-2026-10-27.bundle`（`git bundle`，自带全部历史）。
 
-⚠ 开源前还缺 `LICENSE`（`pyproject.toml` 里写的是 MIT，仓库根没有文件）。
+### 59.5 许可证：**GPLv3**（三处必须同源）
+
+仓库根 `LICENSE` 是 **GPLv3 全文**（与 GitHub 上 2026-05 那条线的初始提交
+`1f7153b` 同一份 blob：35149 字节）。⚠ 2026-10-23 的 `0d32628` 曾把它写成
+MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"），已改回。
+
+| 位置 | 必须写 |
+|---|---|
+| `LICENSE` | GPLv3 全文（`GNU GENERAL PUBLIC LICENSE` + `Version 3`） |
+| `pyproject.toml` | `license = { text = "GPL-3.0-only" }` + `license-files = ["LICENSE"]` |
+| `README.md` | `## License` 段写 GPLv3，并说明 Qt 是 LGPLv3（**与 GPLv3 兼容**） |
+| `packaging/交付说明.md` / `packaging/make_release.py` | 清单表里写 GPLv3（给人看的） |
+| `tests/test_release_manifest.py` | `test_license_is_gpl_everywhere_it_matters` 守"三件一致" |
+
+要换成 "或更高版本" 就统一写 `GPL-3.0-or-later`（README 那句也一起改）。
 
 
