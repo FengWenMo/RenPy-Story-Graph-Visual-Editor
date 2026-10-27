@@ -942,10 +942,11 @@ class GraphCanvas(QGraphicsView):
         字全成蚂蚁 —— 用户看到的"一堵小方块墙"就是这么来的。
 
         为什么"从左上角开始"而不是"停在入口块正中"（2026-10-27 改）：布局
-        现在把块**折进舞台一页一页排**（见 `layout._flow_into_pages`），
-        入口块就在左上角；把它摆在屏幕正中等于**上面空掉半屏**
-        （真实项目 990×847 的舞台里空了 340 px，一屏只能看到 4 排块）。
-        对齐左上角，一屏能看到的块最多 —— 这正是折行的目的。
+        现在会把块**折进舞台**（自动布局排到右边就拐到下一排，文件顺序排满
+        一列换右边、排满一页换下面一页 —— 见 `layout._flow_layers_into_bands`
+        与 `_flow_into_pages`），入口块就在左上角；把它摆在屏幕正中等于
+        **上面空掉半屏**（真实项目 990×847 的舞台里空了 340 px，一屏只能
+        看到 4 排块）。对齐左上角，一屏能看到的块最多。
 
         算过入口（`set_analysis` 给过 `_entry_id`）时仍然停在入口块上：
         那时"从哪开始"比"看最多"更重要，入口不一定在左上角。
@@ -1159,9 +1160,14 @@ class GraphCanvas(QGraphicsView):
         写了多个 label、想把图排成文件里的先后，用 `arrange_by_file()`
         （工具栏「▤ 按文件顺序排列」）。
 
-        **折进舞台**（用户 2026-10-27："尽可能多的标签整齐排列在舞台内部，
-        而不是一路长排下去"）：一列排满接着往右、一页排满往下，舞台多大
-        由 `_stage_box()` 量（见 `layout._flow_into_pages`）。
+        **折进舞台**（用户 2026-10-27 两轮话）：
+
+        > 尽可能多的标签整齐排列在舞台内部，而不是一路长排下去……
+        > 保持尽量横向的流程，自动实现感知到头就拐弯（分叉一类的还是并排放）
+
+        所以这里是"**层还是左右排开**，排到舞台右边就拐到下面一排、下一排
+        反着走"（见 `layout._flow_layers_into_bands`）—— 不是按格子平铺：
+        平铺会把"谁跟谁是同一层"摊平，结构图就看不出结构了。
         """
         if self.graph is None or not self.graph.nodes:
             return
@@ -1182,11 +1188,11 @@ class GraphCanvas(QGraphicsView):
         self._announce_arrange(info)
 
     def _announce_arrange(self, info):
-        """说一句"折成了几列几页"（没人连这个信号就算了，不能因此炸掉）。"""
+        """说一句"15 层排成了几排"（没人连这个信号就算了，不能因此炸掉）。"""
         try:
-            from storygraph.graph.layout import describe_wrap
+            from storygraph.graph.layout import describe_bands
             self.layout_arranged.emit(
-                '⤢ 已按跳转重排：' + (describe_wrap(info) or '按跳转分层'))
+                '⤢ 已按跳转重排：' + (describe_bands(info) or '按跳转分层'))
         except Exception as e:           # noqa: BLE001 - 只是提示
             swallow('ui_qt.graph_canvas._announce_arrange', e)
 

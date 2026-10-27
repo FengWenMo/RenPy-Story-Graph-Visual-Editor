@@ -483,17 +483,47 @@ def _reduce_crossings(order_ext, edge_segments, max_layer):
 #     ⤢ 自动布局      4156 × 2918   15 层并排 —— 一屏看得到 6 个
 #
 # 两个数是同一件事：布局器**只朝一个方向长**，而舞台是有边的。
-# 一个文件一列、一层一列本身没错，错在"列"没有尽头。
 #
-# 所以这里补一步**折行**，规则和排字一样：
+# 但"折进舞台"有两件事，做法**不一样**（用户当天第二轮就点出来了）：
 #
-#   · 一列最多 `rows` 行（舞台竖着放得下几行），一列排满就接着排右边；
-#   · 右边排满 `cols` 列（舞台横着放得下几列）就换到**下面一页**；
-#   · 每页接在上一页下面 —— 往下滚就是下一页（`rows * row_gap` 就是页高）。
+#   · **文件顺序**（`_flow_into_pages`）：一列 = 一个文件里的一段，列与列
+#     之间没有别的含义 —— 所以可以像排字一样"排满一列换右边、排满一页
+#     换下面"，块与块之间只有先后关系。
+#   · **自动布局**（`_flow_layers_into_bands`）：一列 = **一层**，
+#     "左边的事先发生、右边的同时发生"就是这个视图的全部意思。
+#     按格子平铺会把层打散（真实项目里 15 层被摊成 6 行 × 3 列，
+#     谁跟谁是同一层看不出来了）—— 用户：
 #
-# **蛇形**（奇数列自下而上）不是装饰：折行会把"本该挨着"的两列拉到很远，
-# 蛇形让上一列的结尾正好落在下一列的结尾旁边 —— 长链和章节顺序不会
-# 被折线从中间劈开（横向绕回来那一步会变成几十个块宽的一条斜线）。
+#     > 这个自动布局不好！！！因为无法体现结构……我的意思其实是：能不能在
+#     > 保持尽量横向编辑的流程的同时，自动实现感知到头就拐弯呢……？
+#     > （分叉一类的还是并排放）
+#
+#     所以这条路保留**层与层左右排开**，只在**碰到舞台右边**时才拐弯：
+#     层 0,1,2 从左往右，排到右边就拐到下面一排，接着 **从右往左** 排
+#     层 3,4,5（蛇形），再下一排又从左往右 —— 上一排的最后一层和这一排的
+#     第一层落在**同一列**里，拐弯那一步就是一小段竖线，而不是横跨整屏
+#     再折回来的一条斜线。同一层的分叉仍然竖着挨在一起（"并排放"）。
+
+#: 两排之间留多少空（`node_gap` 的倍数）：1.5 倍 ≈ 块高的 1.4 倍。
+#:
+#: 同一个层里相邻两块的空隙只有 `node_gap - 块高` = 30px；
+#: 排与排之间要一眼能分开，所以给到 ~97px，又不至于把图拉得太高。
+BAND_GAP_RATIO = 1.5
+
+
+def _stage_size(stage):
+    """
+    舞台尺寸（拿不到 / 被压扁 / 传了非数 → 退回 `DEFAULT_STAGE`）。
+
+    `stage=None` **不走这里** —— 那是"明确不要折行"，由调用方先判断。
+    """
+    try:
+        w, h = float(stage[0]), float(stage[1])
+    except (TypeError, ValueError, IndexError):
+        w, h = DEFAULT_STAGE
+    if not (w > 0 and h > 0):
+        w, h = DEFAULT_STAGE
+    return w, h
 
 
 def _stage_grid(stage, col_gap, row_gap):
@@ -502,14 +532,8 @@ def _stage_grid(stage, col_gap, row_gap):
 
     用 `//` 而不是算边界：块宽 + 间距就是这个 pitch，所以
     `int(w // col_gap)` 正好是"有几列能整整齐齐放进去"。
-    拿到的盒子不合法（没显示 / 被压扁 / 传了非数）时退回 `DEFAULT_STAGE`。
     """
-    try:
-        w, h = float(stage[0]), float(stage[1])
-    except (TypeError, ValueError, IndexError):
-        w, h = DEFAULT_STAGE
-    if not (w > 0 and h > 0):
-        w, h = DEFAULT_STAGE
+    w, h = _stage_size(stage)
     cols = max(1, int(w // col_gap)) if col_gap > 0 else 1
     rows = max(1, int(h // row_gap)) if row_gap > 0 else 1
     return cols, rows
@@ -599,17 +623,94 @@ def describe_wrap(info) -> str:
             f'（排满往右、再满了往下）')
 
 
+def _flow_layers_into_bands(order_ext, max_layer, *, layer_gap, node_gap,
+                            stage, band_gap=None):
+    """
+    把**一层一列**的排法折进舞台：排到右边就拐到下面一排（蛇形），
+    返回 `(coords, info)`。
+
+    规则（见本节开头）：
+
+      · 一排最多 `cols = 舞台宽 // 层距` 层；
+      · 排满就换到下面一排，**方向反过来**（第 2 排里的层 3、4、5 从右往左）；
+      · 每排自己竖直居中（和老排法一样：同一层共用一条竖线）；
+      · 排高 = 这一排里最高那一层（层高 = `(块数-1) * 行距`），
+        排与排之间留 `BAND_GAP_RATIO * 行距`。
+
+    为什么"每排竖直居中"而不是顶对齐：老排法里一个 22 块的层和一个 1 块的
+    层是同一个中心点（分叉汇合看着对称）；顶对齐会把 1 块那一层甩到排顶，
+    跟它左边那一大列完全脱节。
+
+    `coords` 里包含虚拟节点（调用方自己滤掉）—— 它们要占位置，
+    否则跨层的长边会挤到别的块上。
+    """
+    w, _h = _stage_size(stage)
+    cols = max(1, int(w // layer_gap)) if layer_gap > 0 else 1
+    gap = (float(node_gap) * BAND_GAP_RATIO if band_gap is None
+           else float(band_gap))
+    layers = list(range(int(max_layer) + 1))
+    coords = {}
+    y_top = 0.0
+    bands = 0
+    for start in range(0, len(layers), cols):
+        band = layers[start:start + cols]
+        extent = {lv: max(0, len(order_ext.get(lv) or ()) - 1) * node_gap
+                  for lv in band}
+        band_extent = max(extent.values()) if extent else 0.0
+        center = y_top + band_extent / 2.0
+        flipped = bands % 2 == 1                 # 蛇形：奇数排从右往左
+        for j, lv in enumerate(band):
+            # ⚠ 用**排宽 `cols`** 定位，不是 `len(band)`：最后一排常常不满，
+            # 用 `len(band)` 的话它会被摆到最左边，而上一排的结尾在最右边 ——
+            # 拐弯那一步就横跨整排（实测 layer 14 → 15 从 x=564 甩回 x=0）。
+            col = (cols - 1 - j) if flipped else j
+            x = col * layer_gap
+            y0 = center - extent[lv] / 2.0
+            for i, nid in enumerate(order_ext.get(lv) or ()):
+                coords[nid] = (float(x), float(y0 + i * node_gap))
+        y_top += band_extent + gap
+        bands += 1
+    return coords, {'bands': bands, 'cols': cols, 'layers': len(layers),
+                    'tail': (0.0, float(y_top))}
+
+
+def describe_bands(info) -> str:
+    """
+    把 `_flow_layers_into_bands` 的摘要念成一句人话：
+
+        '15 层排成 5 排（每排 3 层，排到右边就拐下来，下一排从右往左）'
+
+    没分排（不是分层布局 / 一排就排得下）时返回**空串**，
+    那时说什么由调用方决定。
+    """
+    if not isinstance(info, dict):
+        return ''
+    bands = info.get('bands')
+    if not bands:
+        return ''
+    try:
+        bands = int(bands)
+        cols = int(info.get('cols') or 1)
+        layers = int(info.get('layers') or 0)
+    except (TypeError, ValueError):
+        return ''
+    if bands <= 1:
+        return f'{layers} 层一排就排得下（没有拐弯）'
+    return (f'{layers} 层排成 {bands} 排（每排 {cols} 层，排到右边就拐下来，'
+            f'下一排从右往左）')
+
+
 def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10,
                  stage=None):
     """
     按 jump / call 分层，把坐标写回 `graph`。
 
-    `stage=(宽, 高)` 时把排好的**层折进舞台**（一页 = 舞台那么大，蛇形换列，
-    见 `_flow_into_pages`）；`stage=None` 保持老行为（一层一列、一路排出去），
-    纯数据调用与老测试走这条。
+    `stage=(宽, 高)` 时把排好的**层折进舞台**（层还是左右排开，排到舞台
+    右边就拐到下面一排、下一排反着走 —— 见 `_flow_layers_into_bands`）；
+    `stage=None` 保持老行为（一层一列、一路排出去），纯数据调用与老测试走这条。
 
-    返回 `_flow_into_pages` 的摘要（`{'grid','pages','strips','tail'}`，
-    没折行时是空 dict）—— 界面拿它说"折成了几列几页"。
+    返回分排摘要（`{'bands','cols','layers','tail'}`，没折行时是空 dict）
+    —— 界面拿它说"15 层排成了几排"（`describe_bands`）。
     """
     if not graph.nodes:
         return {}
@@ -674,12 +775,12 @@ def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10,
 
     info = {}
     if stage is not None:
-        # 折进舞台：层还是层（顺序、减交叉都没动），只是排到一页放不下时
-        # 接着往右、再往下 —— 而不是把 15 层并成一堵 4156 宽的墙。
-        columns = [(lv, order_ext.get(lv) or ())
-                   for lv in range(max_layer + 1)]
-        packed, info = _flow_into_pages(columns, col_gap=layer_gap,
-                                        row_gap=node_gap, stage=stage)
+        # 折进舞台：层还是层（顺序、减交叉都没动），只是排到舞台右边时
+        # 拐到下面一排接着排（蛇形）—— 而不是把 15 层并成一堵 4156 宽的墙，
+        # 也不是按格子平铺（那样"谁跟谁是同一层"就看不出来了）。
+        packed, info = _flow_layers_into_bands(
+            order_ext, max_layer, layer_gap=layer_gap, node_gap=node_gap,
+            stage=stage)
         coords = {nid: xy for nid, xy in packed.items() if nid in graph.nodes}
         tail = info['tail']
     else:

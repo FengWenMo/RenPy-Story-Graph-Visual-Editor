@@ -1,27 +1,40 @@
 """
 tests/test_layout_stage_wrap.py
 ===============================
-自动布局"**折进舞台**"（2026-10-27）。
+「折进舞台」的两种折法（2026-10-27，两轮）。
 
-用户原话：
+第一轮用户说：
 
 > 自动布局的逻辑不太行……仍然需要修改（因为现在有些太长了，你应该使得
 > 尽可能多的标签整齐排列在舞台内部），而不是一路长排下去……
 
-真实项目（`sr_general`，45 个 `.rpy` / 65 个块，舞台 990×847）量出来的
-"老样子" —— 两个数说的是同一件事：布局只朝**一个方向**长，而舞台有边：
+量出来的"老样子"——两个数说的是同一件事：布局只朝**一个方向**长，而舞台有边：
 
     ▤ 按文件顺序排列   12334 × 2650   44 列并排，一屏只看得到 4 个块
     ⤢ 自动布局          4156 × 2918   15 层并排，一屏看得到 6 个
 
-判据：
+第一轮把两条路都折成了"格子"（`_flow_into_pages`）。第二轮用户否掉了
+**自动布局**那半边：
 
-  ① **一个方向不许无限长**：整图宽 ≤ 舞台宽，每页高 ≤ 舞台高；
-  ② **舞台里装最多的块**：一页排满（块数 == 列 × 行）才换下一页；
-  ③ **列内顺序不变**：同一个文件的 label 从上到下就是文件里的先后
-     （`2026-10-22` 那条老承诺，折行不许把它弄丢）；
-  ④ **不传 `stage` 时逐字节保持老布局**（纯数据调用 / 老用例走这条）；
-  ⑤ 画布真的把**可视区**传下去了，且装不下时从左上角开始看。
+> 这个自动布局不好！！！因为无法体现结构……你还是改回去吧（原来那个比现在
+> 要好得多，因为展现了结构流程图）我的意思其实是：能不能在保持尽量横向编辑
+> 的流程的同时，自动实现感知到头就拐弯呢……？（分叉一类的还是并排放）
+
+于是两条路**分开**：
+
+  · `layout_by_file` —— 像排字一样折（一列 6 块、一页 3 列），块与块之间只
+    有先后关系，按格子平铺不丢信息；
+  · `layout_graph` —— **层还是左右排开**，只在碰到舞台右边时拐到下面一排，
+    下一排反着走（蛇形）。同一层的分叉仍然竖着挨在一起。
+
+本文件的判据：
+
+  ① 文件顺序：一列排满换右边、一页排满换下面；同文件同列、从上到下正序；
+  ② 自动布局：层与层左右排开、到右边才拐弯、拐弯后同一列接得上、
+     分叉不被打散、块不重叠、整图不超舞台宽；
+  ③ 不传 `stage` 时**逐字节保持老布局**（纯数据调用 / 老用例走这条）；
+  ④ 画布真的把**可视区**传下去了，且装不下时从左上角开始看；
+  ⑤ 两套摘要文案说的是同一件事（状态栏 / 控制台共用）。
 """
 
 from __future__ import annotations
@@ -29,11 +42,13 @@ from __future__ import annotations
 import pytest
 
 from storygraph.graph.models import Graph
-from storygraph.graph.layout import (DEFAULT_STAGE, describe_wrap,
-                                     layout_by_file, layout_graph)
+from storygraph.graph.layout import (DEFAULT_STAGE, describe_bands,
+                                     describe_wrap, layout_by_file,
+                                     layout_graph)
 
 #: 与 `ui_qt.graph_canvas._layout_gaps()` 一致（块 208×104 + 间距 74/30）
 COLW, ROWH = 282, 134
+NODE_W, NODE_H = 208, 104
 
 
 # ----------------------------------------------------------------------
@@ -49,6 +64,15 @@ def _chain(n: int, prefix: str = 'n') -> Graph:
     return g
 
 
+def _fan(n: int) -> Graph:
+    """一个入口分出 n 个分支（同一层 n 个块）。"""
+    g = Graph()
+    root = g.add_node('root', 0, 0)
+    for i in range(n):
+        g.add_edge(root, g.add_node(f'b{i}', 0, 0))
+    return g
+
+
 def _one_file(n: int, name: str = 'big.rpy') -> Graph:
     """一个 `.rpy` 里 n 个 label（行号 1, 11, 21 …）。"""
     g = Graph()
@@ -59,8 +83,23 @@ def _one_file(n: int, name: str = 'big.rpy') -> Graph:
     return g
 
 
+def _pos(graph) -> dict:
+    """`{label: (x, y)}` —— 顺手钉住"块不许重叠"。"""
+    out = {}
+    nodes = list(graph.nodes.values())
+    for i, a in enumerate(nodes):
+        for b in nodes[i + 1:]:
+            assert not (abs(a.x - b.x) < NODE_W - 0.5
+                        and abs(a.y - b.y) < NODE_H - 0.5), (
+                f'{a.label_name} 和 {b.label_name} 压在一起了：'
+                f'({a.x}, {a.y}) / ({b.x}, {b.y})')
+    for node in nodes:
+        out[node.label_name] = (node.x, node.y)
+    return out
+
+
 def _grid(graph) -> dict:
-    """`{(列, 行): label}` —— 按坐标反推格子；**顺便钉住"不许重叠"**。"""
+    """`{(列, 行): label}` —— 按坐标反推格子（只给"按文件顺序"那条路用）。"""
     out = {}
     for node in graph.nodes.values():
         col = round(node.x / COLW)
@@ -85,69 +124,14 @@ def _columns(grid: dict) -> dict:
 
 
 # ----------------------------------------------------------------------
-#  ① 一个方向不许无限长
+#  ① 按文件顺序：排满一列换右边、排满一页换下面
 # ----------------------------------------------------------------------
 
-class TestNeverGrowsInOneDirection:
-    def test_wide_enough_stage_is_never_exceeded(self):
-        """30 个块一条链：老布局是 30 列并排（8460 宽），现在必须收进舞台。"""
-        g = _chain(30)
-        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH,
-                            stage=(990, 847))
-        grid = _grid(g)
-        cols = max(c for c, _r in grid) + 1
-        assert cols <= 990 // COLW == 3, f'排了 {cols} 列，舞台只放得下 3 列'
-        assert info['grid'] == (3, 6), info
-
-    def test_every_page_fits_the_stage_height(self):
-        g = _chain(65)
-        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH,
-                            stage=(990, 847))
-        _cols, rows = info['grid']
-        grid = _grid(g)
-        assert max(r for _c, r in grid) < rows * info['pages']
-        # 每一页里块都落在 0..rows-1 行内（页高 = rows 行）
-        for page in range(info['pages']):
-            band = [r for _c, r in grid
-                    if page * rows <= r < (page + 1) * rows]
-            assert band and max(band) - page * rows < rows
-
-    def test_taller_blocks_fit_fewer_rows(self):
-        """舞台高多少行、宽多少列，是**算出来的**，不是写死的。"""
-        g = _chain(20)
-        small = layout_graph(_chain(20), layer_gap=COLW, node_gap=ROWH,
-                             stage=(640, 400))
-        assert small['grid'] == (640 // COLW, 400 // ROWH)
-        g2 = _chain(20)
-        big = layout_graph(g2, layer_gap=COLW, node_gap=ROWH,
-                           stage=(1600, 1000))
-        assert big['grid'] == (1600 // COLW, 1000 // ROWH)
-        assert big['grid'][0] > small['grid'][0]
-
-    def test_bad_stage_falls_back_to_the_default(self):
-        """舞台盒子不合法（0 / 负数 / 不是数）→ 退回 16:9 默认值，不许炸。"""
-        want = (int(DEFAULT_STAGE[0] // COLW), int(DEFAULT_STAGE[1] // ROWH))
-        for bad in ((0, 0), (-5, 10), ('x', 'y')):
-            info = layout_graph(_chain(20), layer_gap=COLW, node_gap=ROWH,
-                                stage=bad)
-            assert info['grid'] == want, bad
-
-    def test_stage_none_means_do_not_wrap_at_all(self):
-        """`stage=None` 是**另一件事**：明确"不要折行"（老布局），不是坏盒子。"""
-        assert layout_graph(_chain(20), layer_gap=COLW, node_gap=ROWH,
-                            stage=None) == {}
-
-
-# ----------------------------------------------------------------------
-#  ② 舞台里装最多的块（一页排满才换页）
-# ----------------------------------------------------------------------
-
-class TestPagesAreFullBeforeTheNextOne:
+class TestFileLayoutPacks:
     def test_first_page_is_full(self):
         """65 个块、一页 3×6 —— 第一页必须**装满 18 个**（不是空着几格）。"""
         g = _chain(65)
-        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH,
-                            stage=(990, 847))
+        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH, stage=(990, 847))
         cols, rows = info['grid']
         grid = _grid(g)
         first = [name for (c, r), name in grid.items() if r < rows]
@@ -155,36 +139,27 @@ class TestPagesAreFullBeforeTheNextOne:
             f'第一页只摆了 {len(first)} 个块（{cols}×{rows} 的格子）')
 
     def test_pages_go_down_not_right(self):
-        """排满一页换到**下面**一页（往下滚），不是接着往右排。"""
         g = _chain(65)
-        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH,
-                            stage=(990, 847))
-        cols, rows = info['grid']
+        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH, stage=(990, 847))
+        _cols, rows = info['grid']
         grid = _grid(g)
         assert info['pages'] > 1
-        # 第 2 页的第 0 列 == 第 1 页的第 0 列（x 一样），只是往下 rows 行
         page2 = [r for (c, r) in grid if c == 0 and r >= rows]
         assert page2, '第 2 页没有落在 x=0 这一列上 —— 页是往右排的'
         assert min(page2) == rows
 
-    def test_few_blocks_stay_in_one_page(self):
-        g = _chain(4)
-        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH,
-                            stage=(990, 847))
-        assert info['pages'] == 1
-        assert len({c for c, _r in _grid(g)}) == 1, '4 个块被折成了两列'
+    def test_grid_is_computed_not_hardcoded(self):
+        small = layout_by_file(_chain(20), col_gap=COLW, row_gap=ROWH,
+                               stage=(640, 400))
+        assert small['grid'] == (640 // COLW, 400 // ROWH)
+        big = layout_by_file(_chain(20), col_gap=COLW, row_gap=ROWH,
+                             stage=(1600, 1000))
+        assert big['grid'] == (1600 // COLW, 1000 // ROWH)
+        assert big['grid'][0] > small['grid'][0]
 
-
-# ----------------------------------------------------------------------
-#  ③ 列内顺序：折行不许打乱"从上到下 = 文件里的先后"
-# ----------------------------------------------------------------------
-
-class TestOrderIsKept:
     def test_a_files_labels_are_top_down_in_one_column(self):
-        """一个文件 4 个 label：同一列、从上到下 = 行号顺序。"""
         g = _one_file(4)
-        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH,
-                              stage=(990, 847))
+        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH, stage=(990, 847))
         assert info['pages'] == 1
         cols = _columns(_grid(g))
         assert len(cols) == 1, '一个文件的 4 个 label 被拆到了几列'
@@ -193,8 +168,6 @@ class TestOrderIsKept:
     def test_long_file_continues_in_the_next_column(self):
         """22 个 label / 一列只放得下 6 个 → 每 6 个占一列，列**内**仍然正序。"""
         g = _one_file(22)
-        # 舞台给到能放下 **4 列**：这样四段都在第一页，按列读出来就是文件顺序
-        # （跨页时下一页从"上一列结尾那一侧"接着排，那是 `test_pages_*` 的事）。
         info = layout_by_file(g, col_gap=COLW, row_gap=ROWH,
                               stage=(4 * COLW, 6 * ROWH))
         assert info['grid'] == (4, 6), info
@@ -203,19 +176,15 @@ class TestOrderIsKept:
         flat = [name for col in sorted(cols) for name in cols[col]]
         assert flat == [f'L{i:02d}' for i in range(22)], (
             f'折行把文件顺序弄乱了：{flat}')
-        for col, names in cols.items():
-            assert names == sorted(names), f'第 {col} 列里是倒序：{names}'
 
-    def test_files_keep_their_own_column_and_stay_readable(self):
-        """多个文件、每个 2 个 label：同一个文件的两个块必须**竖着挨着**。"""
+    def test_files_keep_their_own_column(self):
         g = Graph()
         for fi in range(12):
             for li in range(2):
                 nid = g.add_node(f'F{fi:02d}_{li}', 0, 0)
                 g.nodes[nid].file_path = f'ch{fi:02d}.rpy'
                 g.nodes[nid].line_number = li * 10 + 1
-        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH,
-                              stage=(990, 847))
+        info = layout_by_file(g, col_gap=COLW, row_gap=ROWH, stage=(990, 847))
         assert info['columns'] == 12 and info['pages'] >= 2
         grid = _grid(g)
         pos = {name: (c, r) for (c, r), name in grid.items()}
@@ -224,17 +193,100 @@ class TestOrderIsKept:
             assert c0 == c1, f'ch{fi:02d}.rpy 的两个块被拆到了两列'
             assert r1 > r0, f'ch{fi:02d}.rpy 的两个块上下颠倒了'
 
-    def test_wrap_does_not_change_which_nodes_are_on_the_graph(self):
-        g = _one_file(22)
-        before = set(g.nodes)
-        layout_by_file(g, col_gap=COLW, row_gap=ROWH, stage=(990, 847))
-        assert set(g.nodes) == before
-        assert all(isinstance(n.x, float) and isinstance(n.y, float)
-                   for n in g.nodes.values())
+
+# ----------------------------------------------------------------------
+#  ② 自动布局：层左右排开，到舞台右边才拐弯（蛇形）
+# ----------------------------------------------------------------------
+
+class TestLayeredLayoutTurnsAtTheEdge:
+    def test_never_wider_than_the_stage(self):
+        """8 个块的链：老布局是 8 列并排（2256 宽），现在不许超过舞台。"""
+        g = _chain(8)
+        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        pos = _pos(g)
+        assert max(x for x, _y in pos.values()) + NODE_W <= 990
+        assert info['cols'] == 990 // COLW == 3, info
+        assert info['bands'] == 3, info
+
+    def test_layers_are_still_columns(self):
+        """一层仍然是一列、同一层竖着挨着 —— 不是摊成"每格一个块"。"""
+        g = _chain(6)
+        layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        pos = _pos(g)
+        xs = [pos[f'n{i}'][0] for i in range(6)]
+        assert xs[:3] == [0, COLW, 2 * COLW], xs      # 第 1 排从左往右
+        assert xs[3:] == [2 * COLW, COLW, 0], xs      # 第 2 排从右往左
+
+    def test_branches_stay_in_one_column_and_adjacent(self):
+        """分叉 5 个：必须同一条竖线、上下紧挨着（老承诺，折行不许弄丢）。"""
+        g = _fan(5)
+        layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        pos = _pos(g)
+        xs = {pos[f'b{i}'][0] for i in range(5)}
+        assert len(xs) == 1, f'5 个分支被拆到了几列：{pos}'
+        ys = sorted(pos[f'b{i}'][1] for i in range(5))
+        assert [b - a for a, b in zip(ys, ys[1:])] == [ROWH] * 4, ys
+
+    def test_turning_point_lands_in_the_same_column(self):
+        """
+        拐弯那一步必须**在同一列**里接上（上一排最后一层 ↔ 这一排第一层）。
+
+        这是蛇形的全部意义：层 2 在第 1 排最右，层 3 就必须在第 2 排最右，
+        否则 2→3 那条边要横跨整排再折回来。
+        """
+        g = _chain(7)
+        layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        pos = _pos(g)
+        assert pos['n2'][0] == pos['n3'][0] == 2 * COLW
+        assert pos['n5'][0] == pos['n6'][0] == 0
+
+    def test_short_last_row_still_lines_up(self):
+        """
+        最后一排不满时也要对齐（层 4 是单数排的第一个，必须落在最右边）。
+
+        老实现用 `len(band)` 定位 → 单层那一排被摆到最左边，
+        层 3→4 的边实测从 x=564 甩回 x=0（2026-10-27 修）。
+        """
+        g = _chain(4)
+        info = layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        assert info['bands'] == 2
+        pos = _pos(g)
+        assert pos['n3'][0] == pos['n2'][0] == 2 * COLW, pos
+
+    def test_rows_are_separated_by_a_visible_gap(self):
+        """两排之间要留出比"同列两块"更大的空，不然看不出这是另一排。"""
+        g = _chain(6)
+        layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=(990, 847))
+        pos = _pos(g)
+        first_row_bottom = max(pos[f'n{i}'][1] for i in range(3))
+        second_row_top = min(pos[f'n{i}'][1] for i in range(3, 6))
+        assert second_row_top - first_row_bottom >= ROWH, pos
+
+    def test_wide_stage_makes_fewer_rows(self):
+        narrow = layout_graph(_chain(12), layer_gap=COLW, node_gap=ROWH,
+                              stage=(990, 847))
+        wide = layout_graph(_chain(12), layer_gap=COLW, node_gap=ROWH,
+                            stage=(1600, 847))
+        assert wide['cols'] > narrow['cols']
+        assert wide['bands'] < narrow['bands']
+
+    def test_bad_stage_falls_back_to_the_default(self):
+        want = int(DEFAULT_STAGE[0] // COLW)
+        for bad in ((0, 0), (-5, 10), ('x', 'y')):
+            g = _chain(20)
+            info = layout_graph(g, layer_gap=COLW, node_gap=ROWH, stage=bad)
+            assert info['cols'] == want, bad
+            _pos(g)
+
+    def test_one_row_is_reported_as_such(self):
+        info = layout_graph(_chain(2), layer_gap=COLW, node_gap=ROWH,
+                            stage=(990, 847))
+        assert info['bands'] == 1
+        assert '没有拐弯' in describe_bands(info)
 
 
 # ----------------------------------------------------------------------
-#  ④ 不传 stage = 老布局（纯数据调用与老用例走的这条）
+#  ③ 不传 stage = 老布局（纯数据调用与老用例走的这条）
 # ----------------------------------------------------------------------
 
 class TestStageNoneKeepsTheOldLayout:
@@ -242,9 +294,14 @@ class TestStageNoneKeepsTheOldLayout:
         g = _chain(6)
         info = layout_graph(g, layer_gap=COLW, node_gap=ROWH)
         assert info == {}, '没折行就该返回空摘要'
-        assert len({n.x for n in g.nodes.values()}) == 6, '一层一列的老排法变了'
         assert {n.x for n in g.nodes.values()} == \
             {i * COLW for i in range(6)}
+
+    def test_layered_layout_still_centers_each_column(self):
+        """不带 stage 时竖直居中这条老规矩一个字都不许变。"""
+        g = _chain(3)
+        layout_graph(g, layer_gap=COLW, node_gap=ROWH)
+        assert {n.y for n in g.nodes.values()} == {0.0}
 
     def test_file_layout_still_puts_every_file_in_its_own_column(self):
         g = Graph()
@@ -258,7 +315,7 @@ class TestStageNoneKeepsTheOldLayout:
 
 
 # ----------------------------------------------------------------------
-#  ⑤ 界面：画布把**可视区**当舞台，装不下时从左上角开始看
+#  ④ 界面：画布把**可视区**当舞台，装不下时从左上角开始看
 # ----------------------------------------------------------------------
 
 pytest.importorskip('PySide6')
@@ -276,8 +333,6 @@ def canvas(qapp):
 
 class TestCanvasUsesTheViewport:
     def test_stage_box_is_the_viewport(self, canvas):
-        from storygraph.ui_qt.graph_canvas import GraphCanvas
-        _ = GraphCanvas
         box = canvas._stage_box()
         vp = canvas.viewport().rect()
         assert box == (float(vp.width()), float(vp.height())), box
@@ -293,9 +348,10 @@ class TestCanvasUsesTheViewport:
         g = _chain(40)
         canvas.set_graph(g)
         vp = canvas.viewport().rect()
-        cols = len({round(n.x, 3) for n in g.nodes.values()})
-        assert cols <= max(1, vp.width() // COLW), (
-            f'排了 {cols} 列，可视区 {vp.width()} 只放得下 {vp.width() // COLW} 列')
+        _pos(g)
+        assert max(n.x for n in g.nodes.values()) + NODE_W <= vp.width(), (
+            f'排到了 {max(n.x for n in g.nodes.values()) + NODE_W:.0f} 宽，'
+            f'可视区只有 {vp.width()}')
 
     def test_arrange_by_file_wraps_too(self, canvas):
         g = _one_file(40)
@@ -308,12 +364,9 @@ class TestCanvasUsesTheViewport:
         """
         装不下时把**内容左上角**对齐到视口左上角（2026-10-27 改）。
 
-        以前是"100% 停在入口块**正中**"：折行之后入口块本来就在左上角，
-        把它摆正中等于上面空掉半屏（真实项目 990×847 里空掉 340px）。
-
         ⚠ 只验"往哪儿对"（`centerOn` 拿到哪个点），不验滚动条最后停在哪：
-        没显示出来的 `QGraphicsView` 滚动范围是**懒算**的，值会被夹住
-        （实测 offscreen 下 hscroll.max 是负数）；真机截图另有人眼验收。
+        没显示出来的 `QGraphicsView` 滚动范围是**懒算**的，值会被夹住；
+        真机截图另有人眼验收。
         """
         g = _chain(60)
         asked = []
@@ -326,20 +379,20 @@ class TestCanvasUsesTheViewport:
         want = QPointF(left - canvas.FLUSH_MARGIN, top - canvas.FLUSH_MARGIN)
         got = QPointF(asked[-1].x() - vp.width() / 2.0,
                       asked[-1].y() - vp.height() / 2.0)
-        # 容差 41：`_reset_view` 给内容留了 40px 呼吸位（内容左上角再左/上 40）
         assert abs(got.x() - want.x()) <= 41, (got, want)
         assert abs(got.y() - want.y()) <= 41, (got, want)
 
-    def test_announces_how_many_pages(self, canvas):
+    def test_announces_how_many_rows(self, canvas):
         seen = []
         canvas.layout_arranged.connect(seen.append)
         canvas.set_graph(_chain(40))
         canvas.auto_layout()
-        assert seen and '页' in seen[-1], seen
+        assert seen and '排' in seen[-1], seen
+        assert '拐' in seen[-1], seen
 
 
 # ----------------------------------------------------------------------
-#  摘要文案（两个界面说同一句话）
+#  ⑤ 摘要文案（两个界面说同一句话）
 # ----------------------------------------------------------------------
 
 class TestDescribeWrap:
@@ -356,3 +409,19 @@ class TestDescribeWrap:
         assert describe_wrap({}) == ''
         assert describe_wrap(None) == ''
         assert describe_wrap({'grid': None, 'pages': 1}) == ''
+
+
+class TestDescribeBands:
+    def test_says_layers_rows_and_direction(self):
+        text = describe_bands({'bands': 5, 'cols': 3, 'layers': 15})
+        assert '15 层' in text and '5 排' in text and '每排 3 层' in text
+        assert '拐' in text and '从右往左' in text
+
+    def test_one_row_says_no_turn(self):
+        text = describe_bands({'bands': 1, 'cols': 3, 'layers': 3})
+        assert '没有拐弯' in text
+
+    def test_nothing_to_say(self):
+        assert describe_bands({}) == ''
+        assert describe_bands(None) == ''
+        assert describe_bands({'bands': 0}) == ''
