@@ -19,7 +19,8 @@
   · `StoryGraph.exe` / `StoryGraph-CLI.exe`（PyInstaller 产物，**必须**在 dist 里）
   · `剧本空表格.xlsx` —— 空 Beats 表 + 「列说明」页
   · `demo\\` —— 能双击打开的示例工程（**不带** collab.db / _import_tmp / build/）
-  · `快速上手.md` —— 3 分钟上手（docs/快速上手_3分钟.md 的发布版）
+  · `快速上手.md` —— 1 页速查（docs/快速上手_3分钟.md 的发布版）
+  · `新手快速操作手册.md` + `manual_img\\` —— 完整新手手册与它的两张截图
   · `LICENSE` —— GPLv3（第三方组件说明在文末）
 """
 from __future__ import annotations
@@ -32,6 +33,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+#: 随包发的**文档**：(仓库里的源文件, 包内名字)。缺任何一份都失败 ——
+#: 2026-10-27 之前包里只有一张 1 页的速查，用户问得最多的是"按钮在哪、
+#: 为什么导出被拦"，那一页答不了。
+MANUALS = (
+    ('docs/快速上手_3分钟.md', '快速上手.md'),
+    ('docs/新手快速操作手册.md', '新手快速操作手册.md'),
+)
+#: 手册里的截图目录（md 用相对路径 `manual_img/xx.png` 引用，包内同布局）
+MANUAL_IMG_DIR = 'docs/manual_img'
+MANUAL_IMG_DEST = 'manual_img'
+
 #: demo 里**不发**的目录（产物/缓存/协作库：要么能重建，要么是用户本机状态）
 DEMO_SKIP_DIRS = {'build', '__pycache__', '.pytest_cache', 'saves', 'cache',
                   '.git'}
@@ -40,8 +52,11 @@ DEMO_SKIP_FILES = {'collab.db', '_import_tmp.xlsx', '.DS_Store', 'Thumbs.db'}
 
 #: 发布包必须有的东西（用于收尾自检）
 REQUIRED = ('StoryGraph.exe', 'StoryGraph-CLI.exe',
-            '剧本空表格.xlsx', '快速上手.md', 'LICENSE',
-            'demo/剧本表_ch01.xlsx', 'demo/game/script/ch01.rpy')
+            '剧本空表格.xlsx', '快速上手.md', '新手快速操作手册.md',
+            'manual_img/01_structure.png', 'manual_img/02_card.png',
+            'LICENSE',
+            'demo/剧本表_ch01.xlsx', 'demo/game/script/ch01.rpy',
+            'demo/game/images/bg/bg_classroom.png')
 
 
 def write_template(path, *, registry=None) -> Path:
@@ -90,10 +105,18 @@ def collect_extras(project_root=ROOT, workdir=None) -> list:
 
     extras.append((write_template(work / '剧本空表格.xlsx'), '剧本空表格.xlsx'))
 
-    quick = root / 'docs' / '快速上手_3分钟.md'
-    if not quick.is_file():
-        raise FileNotFoundError(f'缺少上手说明：{quick}')
-    extras.append((quick, '快速上手.md'))
+    for src_rel, dest in MANUALS:
+        path = root / src_rel
+        if not path.is_file():
+            raise FileNotFoundError(f'缺少说明文档：{path}')
+        extras.append((path, dest))
+
+    img_dir = root / MANUAL_IMG_DIR
+    shots = sorted(img_dir.glob('*.png')) if img_dir.is_dir() else []
+    if not shots:
+        raise FileNotFoundError(
+            f'缺少手册截图：{img_dir}（跑 python tools/_shot_manual.py 生成）')
+    extras.extend((p, f'{MANUAL_IMG_DEST}/{p.name}') for p in shots)
 
     license_file = root / 'LICENSE'
     if not license_file.is_file():

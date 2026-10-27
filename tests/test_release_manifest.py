@@ -28,16 +28,23 @@ import make_release as MR                                   # noqa: E402
 
 
 def _fake_project(root: Path) -> Path:
-    """一个最小的"仓库形状"：LICENSE + 上手说明 + demo（带垃圾文件）。"""
+    """一个最小的"仓库形状"：LICENSE + 说明文档 + 手册截图 + demo（带垃圾文件）。"""
     root.mkdir(parents=True, exist_ok=True)
     (root / 'LICENSE').write_text('MIT License\n', encoding='utf-8')
     docs = root / 'docs'
     docs.mkdir()
     (docs / '快速上手_3分钟.md').write_text('# 上手\n', encoding='utf-8')
+    (docs / '新手快速操作手册.md').write_text('# 手册\n', encoding='utf-8')
+    (docs / 'manual_img').mkdir()
+    for name in ('01_structure.png', '02_card.png'):
+        (docs / 'manual_img' / name).write_bytes(b'\x89PNG\r\n\x1a\n')
     demo = root / 'demo'
     (demo / 'game' / 'script').mkdir(parents=True)
     (demo / 'game' / 'script' / 'ch01.rpy').write_text(
         'label ch01:\n    return\n', encoding='utf-8')
+    (demo / 'game' / 'images' / 'bg').mkdir(parents=True)
+    (demo / 'game' / 'images' / 'bg' / 'bg_classroom.png').write_bytes(
+        b'\x89PNG\r\n\x1a\n')
     (demo / '剧本表_ch01.xlsx').write_bytes(b'fake-xlsx')
     (demo / 'collab.db').write_bytes(b'user db')            # 本机数据，不发
     (demo / '_import_tmp.xlsx').write_bytes(b'tmp')         # 中间产物，不发
@@ -84,8 +91,19 @@ def test_extras_have_all_four_groups(tmp_path):
     dests = [rel for _src, rel in extras]
     assert '剧本空表格.xlsx' in dests
     assert '快速上手.md' in dests
+    assert '新手快速操作手册.md' in dests, '完整手册没进包 —— 用户遇到问题没有可查的一页'
+    assert 'manual_img/02_card.png' in dests, '手册引用的截图没进包（md 里会是空图）'
     assert 'LICENSE' in dests
     assert 'demo/game/script/ch01.rpy' in dests
+
+
+def test_missing_manual_shots_fail_loudly(tmp_path):
+    """手册截图缺了就别发：md 里那两行会变成破图，比没有手册更糟。"""
+    root = _fake_project(tmp_path / 'proj')
+    for p in (root / 'docs' / 'manual_img').glob('*.png'):
+        p.unlink()
+    with pytest.raises(FileNotFoundError):
+        MR.collect_extras(root, workdir=tmp_path / 'work')
 
 
 def test_missing_license_fails_loudly(tmp_path):
@@ -101,8 +119,9 @@ def test_stage_copies_the_exe_folder_and_extras(tmp_path):
     extras = MR.collect_extras(root, workdir=tmp_path / 'work')
     out = MR.stage(dist, tmp_path / 'release', extras)
     for rel in ('StoryGraph.exe', 'StoryGraph-CLI.exe',
-                '剧本空表格.xlsx', '快速上手.md', 'LICENSE',
-                'demo/剧本表_ch01.xlsx'):
+                '剧本空表格.xlsx', '快速上手.md', '新手快速操作手册.md',
+                'manual_img/01_structure.png', 'manual_img/02_card.png',
+                'LICENSE', 'demo/剧本表_ch01.xlsx'):
         assert (out / rel).is_file(), f'发布目录少了 {rel}'
     assert not (out / 'demo' / 'collab.db').exists()
     assert MR.check_manifest(out) == []
@@ -146,4 +165,6 @@ def test_zip_has_a_top_level_folder(tmp_path):
     assert all(n.startswith('StoryGraph/') for n in names), (
         '解压会撒一地 / 顶层目录名不对：条目必须以包名目录开头')
     assert 'StoryGraph/快速上手.md' in names
+    assert 'StoryGraph/新手快速操作手册.md' in names
+    assert 'StoryGraph/manual_img/02_card.png' in names
     assert 'StoryGraph/demo/game/script/ch01.rpy' in names
