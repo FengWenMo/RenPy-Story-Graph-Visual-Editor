@@ -61,7 +61,7 @@ Write-Host "dist\StoryGraph\ = $size MB"
 Write-Host '=== [5/5] Release folder + zip ===' -ForegroundColor Cyan
 # Adds the things a first-time user needs and a bare exe folder does not have:
 #   剧本空表格.xlsx (empty table template), demo\ (open-me project),
-#   快速上手.md (3-minute guide), LICENSE (MIT).
+#   快速上手.md (3-minute guide), LICENSE (GPLv3).
 # It FAILS if any of them is missing -- the 2026-10-21 zip shipped with
 # zero xlsx / zero md / zero demo, and nobody noticed for two days.
 python packaging/make_release.py

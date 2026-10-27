@@ -234,8 +234,9 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 
 ## License
 
-**MIT** —— 见 [LICENSE](LICENSE)。可以自由使用、修改、再分发（包括商用），
-保留版权声明即可；改动请自己承担风险（MIT 不提供担保）。
+**GPLv3（GNU General Public License v3.0）** —— 见 [LICENSE](LICENSE)。
+可以自由使用、修改、再分发（包括商用），但**衍生作品也必须以 GPLv3 发布并
+附带源码**；本程序不提供担保。
 
 第三方组件（动态链接、可自行替换，本项目不修改它们）：
 
@@ -245,6 +246,6 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | openpyxl | Excel 读写（必需） | MIT |
 | Pillow | 缩略图（可选依赖 `thumbnails`） | HPND |
 
-发布包里的 `StoryGraph.exe` 随包附带 Qt 动态库，**允许替换**（LGPLv3 的要求），
-因此与上面的 MIT 并存。
+发布包里的 `StoryGraph.exe` 随包附带 Qt 动态库，**允许替换**（LGPLv3 的要求）；
+LGPLv3 与 GPLv3 兼容，两者并存。
 

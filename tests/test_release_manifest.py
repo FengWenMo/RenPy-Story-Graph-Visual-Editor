@@ -117,18 +117,21 @@ def test_manifest_reports_what_is_missing(tmp_path):
     assert '快速上手.md' in missing
 
 
-def test_license_is_mit_everywhere_it_matters():
-    """LICENSE 文件、pyproject 字段、README 段 —— 三件必须一致（MIT）。"""
+def test_license_is_gpl_everywhere_it_matters():
+    """LICENSE 文件、pyproject 字段、README 段 —— 三件必须一致（GPLv3）。"""
     import tomllib
 
     license_text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
-    assert 'MIT License' in license_text
+    assert 'GNU GENERAL PUBLIC LICENSE' in license_text
+    assert 'Version 3' in license_text
     data = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
     declared = data['project']['license']
-    assert 'MIT' in (declared.get('text') if isinstance(declared, dict) else declared)
+    declared_text = (declared.get('text')
+                     if isinstance(declared, dict) else declared)
+    assert 'GPL' in declared_text
     assert 'license-files' in data.get('tool', {}).get('setuptools', {})
     readme = (ROOT / 'README.md').read_text(encoding='utf-8')
-    assert '## License' in readme and 'MIT' in readme
+    assert '## License' in readme and 'GPLv3' in readme
 
 
 def test_zip_has_a_top_level_folder(tmp_path):

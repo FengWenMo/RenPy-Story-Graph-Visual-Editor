@@ -20,7 +20,7 @@
   · `剧本空表格.xlsx` —— 空 Beats 表 + 「列说明」页
   · `demo\\` —— 能双击打开的示例工程（**不带** collab.db / _import_tmp / build/）
   · `快速上手.md` —— 3 分钟上手（docs/快速上手_3分钟.md 的发布版）
-  · `LICENSE` —— MIT（第三方组件说明在文末）
+  · `LICENSE` —— GPLv3（第三方组件说明在文末）
 """
 from __future__ import annotations
 
