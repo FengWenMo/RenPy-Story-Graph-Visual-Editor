@@ -600,7 +600,8 @@ class GraphSessionMixin:
                 'nodes': len(graph.nodes), 'edges': len(graph.edges),
                 'path': str(source)}
     def export_control_flow(self, graph, target, wrapper=None,
-                            allow_overwrite: bool = False) -> dict:
+                            allow_overwrite: bool = False,
+                            force_overwrite: bool = False) -> dict:
         """
         把剧情图导出成 Ren'Py **控制流脚本**（`<label>_control` 那些 label）。
 
@@ -616,6 +617,17 @@ class GraphSessionMixin:
         `allow_overwrite=True`：用户已经在界面上**看过**那些"不像工具生成"
         的行、并确认可以覆盖（P1-1）。它只越过"手写内容"这一条拦截，
         缺章 / 外来 label 那两条永远不越过。
+
+        `force_overwrite=True`（2026-10-28）：目标已存在**且没有生成标记**
+        （比如旧版手写的 `chapter_controller.rpy`）。护栏按"手写文件"拒写，
+        用户只剩"先删掉再导"一条路 —— 他的原话：
+
+        > 我导出控制流时只能把原来的删掉再导……连替换都被拦下了……
+
+        所以给一条**带备份**的正路：调用前把旧文件复制成 `<名>.bak`，
+        再把 `force=True` 交给 `write_generation`（它只越过
+        `HANDWRITTEN_TARGET` / `OPAQUE_LOST` 这两条"目标配不上产物"的拦截，
+        label 重名 / 语法错那些**一条都不越**）。
         """
         from storygraph.pipeline.renpy_exporter import export_to_renpy
         n_nodes = len(getattr(graph, 'nodes', {}) or {})
@@ -640,7 +652,7 @@ class GraphSessionMixin:
         plan = plan_control_write(self.project_root, graph, target,
                                   wrapper=wrapper)
         if not plan.ok:
-            if not (allow_overwrite and plan.forceable):
+            if not ((allow_overwrite or force_overwrite) and plan.forceable):
                 return {'ok': False,
                         'error': '；'.join(plan.blocking),
                         'path': str(target), 'labels': [], 'count': 0,
@@ -648,9 +660,11 @@ class GraphSessionMixin:
             # 用户确认过"这些手写行可以丢" —— 只越过这一条，别的拦截已由
             # `forceable` 排除（缺章 / 外来 label 时它是 False）。
 
+        backup = self._backup_target(target) if force_overwrite else ''
         try:
             artifact = export_to_renpy(graph, str(target), wrapper=wrapper,
-                                       project_root=self.project_root)
+                                       project_root=self.project_root,
+                                       force=force_overwrite)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': str(e), 'path': str(target),
                     'labels': [], 'count': 0}
@@ -663,7 +677,11 @@ class GraphSessionMixin:
                     'error': ('生成的脚本会让游戏跑不起来，已拒写目标路径'
                               + (f'（{why}）' if why else '')),
                     'path': str(getattr(artifact, 'review_path', None) or target),
-                    'labels': [], 'count': 0}
+                    'labels': [], 'count': 0,
+                    # 给界面判"能不能用带备份的覆盖重试"（HANDWRITTEN_TARGET）
+                    'codes': [str(getattr(i, 'code', ''))
+                              for i in (artifact.blocking or [])],
+                    'backup': backup}
         if not Path(target).is_file():
             return {'ok': False, 'error': '文件没有生成（写盘失败？）',
                     'path': str(target), 'labels': [], 'count': 0}
@@ -688,6 +706,13 @@ class GraphSessionMixin:
                     f'这张图同时含章节与已有控制流标签（如 {mixed[0]}）：'
                     f'章节图模式会给它们再包一层。建议分开导出，'
                     f'或用「按控制流图原样导出」。')
+        # 条件读的变量有没有人写（2026-10-28 P0：差一个字符 = 整条线永远
+        # 进不去，而且 lint / 语法检查 / 运行期都不会报）。只在导出时提醒一次。
+        try:
+            from storygraph.story.variable_refs import describe_unassigned
+            warnings.extend(describe_unassigned(graph))
+        except Exception as e:                # noqa: BLE001 - 提醒不该拦导出
+            swallow('session_graph.export_control_flow.vars', e)
         labels = []
         for n in (getattr(graph, 'nodes', {}) or {}).values():
             name = str(n.label_name or '')
@@ -698,7 +723,29 @@ class GraphSessionMixin:
                 labels.append(f'{name}_control')
         return {'ok': True, 'error': '', 'path': str(target),
                 'labels': labels, 'count': len(labels), 'mode': mode,
-                'warnings': warnings}
+                'warnings': warnings, 'backup': backup}
+    def _backup_target(self, target) -> str:
+        """
+        覆盖手写文件之前先留一份 `.bak`（做不成也照写，别因为备份挡住正事）。
+
+        命名：`x.rpy` → `x.rpy.bak`；已经存在就 `x.rpy.1.bak`、`.2.bak`…
+        （不覆盖上一份备份 —— "第二次覆盖"正好是最需要第一份的时候）。
+        """
+        import shutil
+        p = Path(str(target or ''))
+        try:
+            if not p.is_file():
+                return ''
+            backup = p.with_name(p.name + '.bak')
+            n = 1
+            while backup.exists():
+                backup = p.with_name(f'{p.name}.{n}.bak')
+                n += 1
+            shutil.copy2(p, backup)
+            return str(backup)
+        except OSError as e:                  # noqa: BLE001
+            swallow('session_graph._backup_target', e)
+            return ''
     def missing_chapter_files(self, graph, project_root=None) -> dict:
         """
         图上"被别的章节跳到、但那个文件还没导入"的 label 分别在哪个文件里。
@@ -968,6 +1015,28 @@ class GraphSessionMixin:
             except SyntaxError as e:
                 errors.append(f'第{i}行错误: {text} - {e.msg}')
         return errors
+    def check_variable_references(self, graph, lines) -> list:
+        """
+        「语法检查」的第二半：**这些变量和分支条件对得上吗**。
+
+        用户 2026-10-28（真实项目 P0）：
+
+        > 我明明在节点把它设置为了 1，每一个都设置了……它们怎么可能从未被
+        > 赋值呢……？这是 P0 吧……？？？
+
+        对 —— 但问题不在"写没写"，在**写的名字和条件读的名字差一个字符**：
+        节点里 `Plotnode214=1`，条件里 `Plotnodes214 + … == 3`。`ast` 两个
+        都过，Ren'Py lint 也不报（`plottree.rpy` 里有 `default`），于是四条
+        路线永远不成立、一句错都不出。
+
+        这里只报**能证明的**那一种：你正敲的名字，和某个"条件读、但全图没人
+        写"的名字只差一个字符。普通变量不指手画脚（见 `describe_near_miss`）。
+        """
+        if graph is None:
+            return []
+        from storygraph.story.variable_refs import describe_near_miss
+        normalize = self.check_variable_syntax(lines)   # 先过语法，再说语义
+        return normalize + describe_near_miss(graph, lines)
     def import_plain_text(self, files, graph=None, *, ask=None,
                           decisions=None, dry_run=False,
                           import_chapters=None, resolve=None,

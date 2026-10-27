@@ -159,7 +159,12 @@ class GraphOpsMixin:
         dlg = NodeOpsDialog(self, label_name=info['label'],
                             variables=info['variables'],
                             tech_count=info['tech_count'],
-                            on_check=self._session.check_variable_syntax)
+                            # 「语法检查」= 语法 + **和分支条件对得上吗**
+                            # （2026-10-28：`Plotnode214=1` vs 条件里
+                            # `Plotnodes214`，差一个字符，四条路线永远不成立）
+                            on_check=lambda lines: (
+                                self._session.check_variable_references(
+                                    self.graph, lines)))
         if dlg.exec() != QDialog.Accepted:
             return
         before = list(getattr(self.graph.nodes.get(nid), 'operations', []) or [])
@@ -1717,6 +1722,25 @@ class GraphOpsMixin:
                     res = self._session.export_control_flow(
                         self.graph, target, wrapper=wrapper,
                         allow_overwrite=True)
+            # **手写文件确认**（2026-10-28）：目标已存在且没有生成标记 →
+            # 门禁按"手写文件"拒写。从前这里只剩"先删掉再导"一条路，用户
+            # 原话："我导出控制流时只能把原来的删掉再导……连替换都被拦下了"。
+            # 现在明确问一句，确认后**先备份再写**（force_overwrite）。
+            if (not res.get('ok')
+                    and 'HANDWRITTEN_TARGET' in (res.get('codes') or [])):
+                ans = QMessageBox.question(
+                    self, '覆盖已有的手写 .rpy？',
+                    f'目标文件已经存在，而且不是本工具生成的：\n{target}\n\n'
+                    '控制流导出是整份重新生成，文件里的 default / define / '
+                    '手写 label 都会被删掉。\n\n'
+                    '要覆盖吗？（旧文件会先备份成「文件名.bak」）',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if ans == QMessageBox.Yes:
+                    res = self._session.export_control_flow(
+                        self.graph, target, wrapper=wrapper,
+                        force_overwrite=True)
+                    if res.get('ok') and res.get('backup'):
+                        self._log(f'[控制流] 旧文件已备份：{res["backup"]}')
             if not res.get('ok'):
                 self._log(f'[控制流] 导出失败：{res.get("error")}')
                 self._status(f'导出控制流失败：{res.get("error")}')

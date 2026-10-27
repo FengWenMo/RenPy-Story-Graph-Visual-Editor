@@ -103,7 +103,7 @@ def _is_structural(line: str) -> bool:
     return False
 
 
-def find_manual_lines(text: str, generated_text: str) -> list:
+def find_manual_lines(text: str, generated_text: str, also_allowed=()) -> list:
     """
     目标文件里**不像工具生成**的行（`_control` 块内）。
 
@@ -113,10 +113,16 @@ def find_manual_lines(text: str, generated_text: str) -> list:
         这条把"图里本来就有的操作行"排除掉（控制流图模式下 `show` /
         `play` / `$` 也是生成的），留下的就是人手加进去的。
 
+    `also_allowed`：另外**确定是上一版工具搬过来的**行（见
+    `renpy_exporter.imported_operation_lines`）。2026-10-28 起控制流不再把
+    章节文件里的 `$` 搬进来，于是老产物里那几百行会在重导出时消失 ——
+    那是工具自己的旧行为，不该算"人手写的"，否则第一次重导出必然被拦。
+
     返回 `[{'label', 'line', 'text'}, …]`（行号是 1-based，给人看）。
     """
     old_blocks = _label_blocks(text)
     new_blocks = _label_blocks(generated_text)
+    extra = {str(x).strip() for x in (also_allowed or ()) if str(x).strip()}
     found = []
     for name, rows in old_blocks.items():
         if not name.endswith(CONTROL_SUFFIX):
@@ -126,6 +132,7 @@ def find_manual_lines(text: str, generated_text: str) -> list:
             # 那条判据说话，别在这里重复报一遍。
             continue
         allowed = {ln.strip() for _n, ln in new_blocks[name] if ln.strip()}
+        allowed |= extra
         for lineno, raw in rows:
             s = raw.strip()
             if not s or _is_structural(s) or s in allowed:
@@ -250,10 +257,12 @@ def plan_control_write(project_root, graph, target, wrapper=None) -> ControlWrit
     try:
         if not str(target or '').strip():
             raise ValueError('没有目标路径')
-        from storygraph.pipeline.renpy_exporter import render_control_text
-        generated = render_control_text(graph, wrapper=wrapper)
+        from storygraph.pipeline.renpy_exporter import (
+            imported_operation_lines, render_control_text)
+        generated = render_control_text(graph, wrapper=wrapper, out_path=path)
         plan.manual_lines = find_manual_lines(
-            path.read_text(encoding='utf-8', errors='replace'), generated)
+            path.read_text(encoding='utf-8', errors='replace'), generated,
+            also_allowed=imported_operation_lines(graph, path))
     except Exception as exc:                        # noqa: BLE001 - 算不出就别误拦
         plan.notes.append(f'手写内容检查跳过：{exc}')
 
