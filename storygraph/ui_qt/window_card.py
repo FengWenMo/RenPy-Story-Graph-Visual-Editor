@@ -1295,6 +1295,9 @@ class CardPageMixin:
         if not self._session.has(idx):
             self._idx = -1
             self._session.mark_loaded(-1)
+            # 空会话 / 拍号越界：**图也要清掉**（否则卡片上顶着上一章的舞台图，
+            # 而左边一行字都没有 —— 那是纯粹的误导）。
+            self._panel.clear_stage_frame()
             self._update_nav()
             self._sync_undo_button()
             self._sync_inspector(-1)
@@ -1538,6 +1541,11 @@ class CardPageMixin:
             # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
             self._panel.set_stage_digest(self._session.stage_digest_text(idx),
                                          self._session.inherited_hint(idx))
+            # 这一拍的**舞台图**（2026-10-27，用户："每一拍的舞台信息那里……
+            # 给一张这一拍的图片"）。与上面那行文字同时刷新 —— 它渲染的是
+            # 同一个 `StageFrame`（`app.stage_render`，与预览窗口同源），
+            # 所以"字说台上没人、图上却站着人"这种分叉不会发生。
+            self._panel.show_stage_frame(idx, self._session)
         except Exception as e:                # noqa: BLE001 - 派生面板刷不动不该拦住保存
             swallow('ui_qt.window_card.refresh_derived_panels', e)
     def _prefetch_neighbours(self, idx: int):

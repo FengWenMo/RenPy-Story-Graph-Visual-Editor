@@ -316,13 +316,16 @@ def _frame_key(frame) -> int:
     return id(frame)
 
 
-def _result_to_qimage(result, target=None):
+def result_to_qimage(result, target=None):
     """
     `RenderResult`（PIL）→ `QImage`（**可以在工作线程里做**）。
 
     `QImage` 是少数允许在 GUI 线程外构造/缩放的 Qt 类型（`QPixmap` 不行，
     所以那个转换留在 GUI 线程）。顺手缩到控件尺寸：一是省掉每帧 8MB 的
     跨线程拷贝，二是每帧 paint 不用再做一次平滑缩放（转场时 60fps 重绘）。
+
+    卡片上那张「这一拍的舞台图」（`ui_qt.stage_thumb`）**共用这一份**：
+    两处各写一遍缩放，迟早一个平滑一个不平滑。
     """
     img = getattr(result, 'image', None)
     if img is None:
@@ -384,7 +387,7 @@ class _RenderJob(QRunnable):
             got = None
         # 转换/缩放**也在工作线程里做**：1920×1080 RGBA 的跨线程搬运
         # 是每帧十几毫秒的主线程开销，正好卡在"换拍"那一瞬间。
-        qimg = _result_to_qimage(got, self.target)
+        qimg = result_to_qimage(got, self.target)
         warnings = list(getattr(got, 'warnings', []) or [])
         missing = list(getattr(got, 'missing', []) or [])
         try:
@@ -772,7 +775,7 @@ class StageCanvas(QWidget):
         if got is not None:
             self._render_result = got
         self._on_render_done(
-            _frame_key(frame), gen, _result_to_qimage(got, self._pix_target()),
+            _frame_key(frame), gen, result_to_qimage(got, self._pix_target()),
             list(getattr(got, 'warnings', []) or []),
             list(getattr(got, 'missing', []) or []))
         return got

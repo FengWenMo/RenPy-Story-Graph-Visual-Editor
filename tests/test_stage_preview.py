@@ -575,3 +575,65 @@ transform f21:
         assert not s.from_atl
         assert 0.0 <= s.x <= 1.0
         assert s.zoom == 1.0
+
+
+class TestBuildFrameAt:
+    """
+    **只算一拍**（2026-10-27，卡片上的「这一拍的舞台图」用它）。
+
+    卡片每翻一拍、每存一次就要一张图，所以有了这个 O(index) 的入口。
+    这里锁死"它和 `build_frames(beats)[index]` 是同一帧"——否则卡片上的图
+    会跟预览窗口 / 「舞台快照」表说的不是一回事（那比没有图更糟）。
+    """
+
+    @staticmethod
+    def _beats():
+        beats = [
+            Beat(seq=1, label='t', speaker='e', text='一', scene='bg room',
+                 show='ye happy@f21'),
+            Beat(seq=2, label='t', speaker='', text='二'),
+            Beat(seq=3, label='t', speaker='m', text='三', scene='bg roof',
+                 hide='ye'),
+        ]
+        assign_identity(beats)
+        return beats
+
+    def test_matches_the_full_list_field_by_field(self):
+        from storygraph.app.stage import build_frame_at
+
+        beats = self._beats()
+        full = build_frames(beats)
+        for i in range(len(beats)):
+            one = build_frame_at(beats, i)
+            assert one is not None
+            for name in ('index', 'line_id', 'label', 'speaker', 'text',
+                         'scene', 'layers', 'music', 'sound', 'voice',
+                         'changes', 'with_', 'pause', 'speaker_name',
+                         'speaker_color', 'what_color', 'scene_at'):
+                assert getattr(one, name) == getattr(full[i], name), (i, name)
+            assert [(s.image, s.at, s.x, s.speaking, s.order_index)
+                    for s in one.sprites] == \
+                   [(s.image, s.at, s.x, s.speaking, s.order_index)
+                    for s in full[i].sprites], i
+
+    def test_index_out_of_range_is_none(self):
+        """越界 / 空章 → None。**不编一帧假的**（调用方据此显示"没有画面"）。"""
+        from storygraph.app.stage import build_frame_at
+
+        beats = self._beats()
+        assert build_frame_at(beats, -1) is None
+        assert build_frame_at(beats, len(beats)) is None
+        assert build_frame_at(beats, 999) is None
+        assert build_frame_at([], 0) is None
+
+    def test_accumulated_state_comes_from_the_prefix(self):
+        """
+        第 2 拍没有写 scene，但它**继承**了第 1 拍的背景（前缀递推）。
+
+        这正是卡片上这张图的价值：光看这一拍的三列（空）看不出舞台上是什么。
+        """
+        from storygraph.app.stage import build_frame_at
+
+        two = build_frame_at(self._beats(), 1)
+        assert two.scene == 'bg room'
+        assert [s.image for s in two.sprites] == ['ye happy']

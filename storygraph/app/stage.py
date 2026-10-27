@@ -196,61 +196,99 @@ def build_frames(beats: list, registry=None, transform_index=None,
     """
     if not beats:
         return []
-    from storygraph.story.atl import DEFAULT_SCREEN, placement_of
+    from storygraph.story.atl import DEFAULT_SCREEN
 
     size = tuple(screen) if screen else DEFAULT_SCREEN
     rows = snapshot_rows(beats)
-    frames = []
-    for i, (beat, row) in enumerate(zip(beats, rows)):
-        speaker = (getattr(beat, 'speaker', '') or '').strip()
-        ch = {}
-        if speaker:
-            try:
-                ch = (getattr(registry, 'characters', {}) or {}).get(speaker) or {}
-            except Exception as e:                # noqa: BLE001
-                swallow('app.stage.build_frames.character', e)
-                ch = {}
-        sprites = []
-        for order, (img, at) in enumerate(
-                (row.get('state', {}).get('actors') or [])):
-            tag = (img or '').split()[0] if img else ''
-            place = placement_of(at, transform_index, registry, size)
-            sprites.append(SpriteLayout(
-                image=img or '', tag=tag, at=at or '',
-                x=place.x, speaking=False, place=place,
-                order_index=order))
-        # 谁在说话：优先角色变量的 ImageTag，其次说话人本身就是 tag。
-        # **不猜**（匹配不上就都不高亮）——高亮打错人比不高亮更糟。
-        if speaker:
-            spk_tag = str(ch.get('ImageTag') or '').strip()
-            hit = spk_tag or speaker
-            for s in sprites:
-                if s.tag and s.tag == hit:
-                    s.speaking = True
-        # 正在说话的排前面（与卡片一致）。`order_index` 保留了原始叠放顺序，
-        # 真实渲染按它画（说话人高亮不能改变遮挡关系）。
-        sprites.sort(key=lambda s: (not s.speaking, s.x))
+    return [_frame_of(beat, row, i, registry, transform_index, size)
+            for i, (beat, row) in enumerate(zip(beats, rows))]
 
-        frames.append(StageFrame(
-            index=i,
-            line_id=row.get('line_id', '') or f'{getattr(beat, "label", "")}.{i + 1:04d}',
-            label=row.get('label', '') or '',
-            speaker=speaker,
-            speaker_name=str(ch.get('Name') or ''),
-            speaker_color=str(ch.get('Color') or ''),
-            what_color=str(ch.get('WhatColor') or ''),
-            text=row.get('text', '') or '',
-            scene=row.get('scene', '') or '',
-            scene_at=str(getattr(beat, 'scene_at', '') or ''),
-            sprites=sprites,
-            layers=row.get('layers', '') or '',
-            music=row.get('music', '') or '',
-            sound=row.get('sound', '') or '',
-            voice=row.get('voice', '') or '',
-            changes=row.get('display_changes', '') or '',
-            with_=str(getattr(beat, 'with_', '') or ''),
-            pause=_pause_seconds_of(beat)))
-    return frames
+
+def build_frame_at(beats: list, index: int, registry=None,
+                   transform_index=None, screen=None):
+    """
+    **只算第 `index` 拍那一帧**（卡片上的「这一拍的舞台图」用）。
+
+    与 `build_frames(beats)[index]` 逐字段相同，只是不必把整章算完：
+    快照是**前缀递推**（第 i 拍的状态 = 前 i-1 拍累加 + 这一拍的变化，见
+    `stage_snapshots`），所以只喂 `beats[:index + 1]` 的最后一行就够了。
+
+    为什么值得单独开一个入口（而不是让卡片调 `build_frames` 再取一格）：
+    卡片每翻一拍 / 每存一次就要这张图，而 `build_frames` 会把**整章**的
+    transform 位置都算一遍（真机 300 拍 ≈ 40ms）。O(index) 已经够快，
+    再省掉后面几百拍的位置计算。
+
+    参数非法（越界 / 空章）返回 `None` —— 调用方据此显示"没有画面"，
+    **不编一帧假的**。
+    """
+    if not beats:
+        return None
+    from storygraph.story.atl import DEFAULT_SCREEN
+
+    i = int(index)
+    if i < 0 or i >= len(beats):
+        return None
+    size = tuple(screen) if screen else DEFAULT_SCREEN
+    rows = snapshot_rows(beats[:i + 1])
+    if not rows:
+        return None
+    return _frame_of(beats[i], rows[-1], i, registry, transform_index, size)
+
+
+def _frame_of(beat, row, index: int, registry, transform_index,
+              size) -> 'StageFrame':
+    """一行快照 + 一拍 → 一帧（`build_frames` / `build_frame_at` 共用）。"""
+    from storygraph.story.atl import placement_of
+
+    speaker = (getattr(beat, 'speaker', '') or '').strip()
+    ch = {}
+    if speaker:
+        try:
+            ch = (getattr(registry, 'characters', {}) or {}).get(speaker) or {}
+        except Exception as e:                # noqa: BLE001
+            swallow('app.stage.build_frames.character', e)
+            ch = {}
+    sprites = []
+    for order, (img, at) in enumerate(
+            (row.get('state', {}).get('actors') or [])):
+        tag = (img or '').split()[0] if img else ''
+        place = placement_of(at, transform_index, registry, size)
+        sprites.append(SpriteLayout(
+            image=img or '', tag=tag, at=at or '',
+            x=place.x, speaking=False, place=place,
+            order_index=order))
+    # 谁在说话：优先角色变量的 ImageTag，其次说话人本身就是 tag。
+    # **不猜**（匹配不上就都不高亮）——高亮打错人比不高亮更糟。
+    if speaker:
+        spk_tag = str(ch.get('ImageTag') or '').strip()
+        hit = spk_tag or speaker
+        for s in sprites:
+            if s.tag and s.tag == hit:
+                s.speaking = True
+    # 正在说话的排前面（与卡片一致）。`order_index` 保留了原始叠放顺序，
+    # 真实渲染按它画（说话人高亮不能改变遮挡关系）。
+    sprites.sort(key=lambda s: (not s.speaking, s.x))
+
+    return StageFrame(
+        index=index,
+        line_id=(row.get('line_id', '')
+                 or f'{getattr(beat, "label", "")}.{index + 1:04d}'),
+        label=row.get('label', '') or '',
+        speaker=speaker,
+        speaker_name=str(ch.get('Name') or ''),
+        speaker_color=str(ch.get('Color') or ''),
+        what_color=str(ch.get('WhatColor') or ''),
+        text=row.get('text', '') or '',
+        scene=row.get('scene', '') or '',
+        scene_at=str(getattr(beat, 'scene_at', '') or ''),
+        sprites=sprites,
+        layers=row.get('layers', '') or '',
+        music=row.get('music', '') or '',
+        sound=row.get('sound', '') or '',
+        voice=row.get('voice', '') or '',
+        changes=row.get('display_changes', '') or '',
+        with_=str(getattr(beat, 'with_', '') or ''),
+        pause=_pause_seconds_of(beat))
 
 
 def _pause_seconds_of(beat) -> float:

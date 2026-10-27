@@ -140,6 +140,7 @@ from storygraph.ui_qt.inspector import PropertyStrip
 from storygraph.ui_qt.navigator import ChapterNavigator
 from storygraph.ui_qt.shot_list import ShotDelegate
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
+from storygraph.ui_qt.stage_thumb import BeatStageThumb
 from storygraph.ui_qt.status import AppStatusBar, Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 # `MainWindowQt` 的五块职责各住一个文件（P3-14，2026-10-05）。
@@ -171,7 +172,9 @@ class BeatCardEditor(QWidget):
     公共接口（窗口只用这些，不碰 `_` 开头的成员）：
         load_fields / collect_fields / sprite_cards / set_symbols
         set_speaker / speaker / set_text / text
-        set_stage_loaded / is_modified / set_undo_enabled
+        set_stage_loaded / set_stage_digest / show_stage_frame
+        clear_stage_frame / stage_thumb / shutdown_stage_thumb
+        is_modified / set_undo_enabled
     """
 
     #: 「保存这张卡片」/「撤销修改」两个按钮被按下时发出
@@ -454,6 +457,21 @@ class BeatCardEditor(QWidget):
         # 背景·音乐·语音）**一个字都没有**，却占了整整一屏 —— 真正能改的
         # 参数反而要滚过去找。所以：没有舞台内容 → 收成一行说明 + 一个
         # 「改舞台」按钮；有内容 → 与从前一模一样。
+        #
+        # —— 但**这一拍的舞台图**不在可收起的那一块里**（2026-10-27）——
+        #
+        # 用户："每一拍的舞台信息那里……可以除文字描述之外，给一张这一拍的
+        # 图片吗？就放在文字描述之前的上面（与舞台预览一致的图片，但只有一拍，
+        # 每当这一排有修改时，重新刷新这一拍的图）"
+        #
+        # 放在 `_stage_box` **外面**是刻意的：真机一章 285 拍里 210 拍没有
+        # 舞台改动（`_has_stage_content` 为假 → 上面那几块全收起）。而"这一拍
+        # 舞台长什么样"对**那些**拍最有价值 —— 背景和立绘全是继承来的，
+        # 光看「舞台：这一拍没有改动」根本不知道画面里是谁、在哪。
+        # 图跟着舞台块一起收起，就等于"最该看图的时候没有图"。
+        self._stage_thumb = BeatStageThumb(parent=self)
+        root.addWidget(self._stage_thumb)
+
         self._stage_has = True          # 载入前不收起（构造期间没有"这一拍"）
         self._stage_open = False
         self._stage_toggle = QPushButton('＋ 改舞台（背景 / 立绘 / 音乐）')
@@ -1435,6 +1453,39 @@ class BeatCardEditor(QWidget):
             self._stage_label.setText('\n'.join(parts))
         except Exception:                    # noqa: BLE001
             swallow('main_window.set_stage_digest')
+
+    def show_stage_frame(self, idx: int, session):
+        """
+        卡片上那张**这一拍的舞台图**刷成第 `idx` 拍（2026-10-27）。
+
+        与「当前舞台」文字**同一时刻**刷新：两处都是"这一拍生效的舞台"，
+        分开刷就会出现"图是新的、字是旧的"（或者反过来）。
+        渲染在后台线程做（`ui_qt.stage_thumb`），这里只递会话，不阻塞卡片。
+
+        `idx < 0`（没有载入任何一章）→ 清空并写清原因，不画一张空图。
+        """
+        try:
+            self._stage_thumb.show_beat(idx, session)
+        except Exception as e:                    # noqa: BLE001 - 图刷不出来不该拦卡片
+            swallow('main_window.show_stage_frame', e)
+
+    def clear_stage_frame(self, note: str = ''):
+        """没有"当前这一拍"了（空会话 / 关章节）：把图连同说明一起清掉。"""
+        try:
+            self._stage_thumb.clear(note)
+        except Exception as e:                    # noqa: BLE001
+            swallow('main_window.clear_stage_frame', e)
+
+    def stage_thumb(self):
+        """这张卡片上"这一拍的舞台图"控件（测试与诊断用）。"""
+        return self._stage_thumb
+
+    def shutdown_stage_thumb(self):
+        """窗口关闭：停掉舞台图的后台渲染（正在跑的会跑完并把结果丢掉）。"""
+        try:
+            self._stage_thumb.shutdown()
+        except Exception as e:                    # noqa: BLE001
+            swallow('main_window.shutdown_stage_thumb', e)
 
     def update_char_count(self):
         """
@@ -3112,6 +3163,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 之后（同一进程里的下一个窗口 / 测试用例）按键会被死人接走。
         for fn in (lambda: self._remove_shortcuts(),
                    lambda: self._loader.shutdown(),
+                   lambda: self._panel.shutdown_stage_thumb(),
                    lambda: self._notifier and self._notifier.close()):
             try:
                 fn()
