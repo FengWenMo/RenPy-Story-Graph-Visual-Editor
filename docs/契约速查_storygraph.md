@@ -5453,3 +5453,55 @@ wire_plan_writable(plan)  ⇔  plan['ok'] or plan['kind'] == 'control_init'
 换图（`set_graph`）、窗口失活（`cancel_interaction`）、滚到边界（`moved == 0`）。
 
 判据：`TestDragNearTheEdgeAutoScrolls`（7 条，含放大 200% 与"没得滚时不许动"）。
+
+## §65 编排层以「终局语句」收尾 ⇒ **改接**，不是画草图（2026-10-27 真机）
+
+真机原话："不对！为什么只能生成草图……？我明明没有用草稿"。
+起因是 `chapter_controller.rpy` 里最后一章的包装（旧版编辑器写的兜底）：
+
+```
+label chapter1_4_control:
+    call chapter1_4 from _call_chapter1_4
+    $ renpy.full_restart()
+```
+
+### 65.1 判据表（`story.control_route.plan_control_route`，`jump` 边）
+
+| 编排层块内最后一条 | 计划 | 说明 |
+|---|---|---|
+| `return` | `replace` | 换成 `jump B_control`（一直如此） |
+| `jump X` | `replace` | 改接（一直如此） |
+| `call X` | 插入在它之后 / 前面按 etype | 一直如此 |
+| `menu:` / `if …` / `else:` | **blocked** | 分支归卡片，不往块体里插 |
+| `jump expression …` / `$ renpy.jump(x)` | **blocked** | 动态跳转，判不出目标 |
+| **`$ renpy.full_restart()` / `$ renpy.quit()` / `$ renpy.jump_out_of_context(…)`** | **`replace`** | **终局语句**：它自己就是"到此结束"，插什么都执行不到 → 只能替掉 |
+| 别的 `$ …`（如 `$ persistent.seen = True`） | **blocked** | 替掉它 = 删掉作者写的一行；仍"判不出安全的插入点" |
+
+`call` 边不替换：插在终局语句**之前**（call 完回来，再结束，语义不变）。
+
+### 65.2 "终局语句"只有一个定义
+
+`story.exits.terminating_call(code)`（= `_terminate_code` 的公开别名，认
+`renpy.full_restart(` / `renpy.quit(` / `renpy.jump_out_of_context(`）。
+`control_route._terminating_of(line)` 只负责把行首 `$` 剥掉再问它。
+
+**不许**在接线这边另抄一份前缀表：`exits.py` 已经把这些归成 `EXIT_TERMINATE`
+（"没有下一步"），两处不一致就会出现"出口分析说是终点、接线说是判不出"这种自相矛盾
+—— 那正是这次 bug 的成因。
+
+### 65.3 对话框：按钮文字 = 按下去会发生什么
+
+`AddEdgeDialog._sync_ok_button()`，每次落点变化（含勾/取消「草稿」）都重算：
+
+| 情况 | 按钮 | 悬停提示 |
+|---|---|---|
+| `wire_plan_writable(plan)` 为真 | 「创建」 | 按「插入位置」真的写进剧本 |
+| 为假 | 「只画草图」 | `写不进剧本：<plan.reason>` |
+| 勾了「草稿」 | 「画草稿」 | 只画线、不写剧本，以后可转正 |
+
+另外：`plan` 为空（`plan_fn` 抛异常 / 没给）时 `plan_hint_text()` **不再返回空串**，
+而是明说"算不出这一条会落在哪里 —— 按「创建」只会画一条草图"；改接 `jump X` /
+终局语句时提示里点名"原来那一条「…」会被换掉（Ctrl+Z 可放回）"（`return` 不提示，
+那是常规操作）。
+
+判据：`tests/test_control_route_terminal.py`（12 条）。
