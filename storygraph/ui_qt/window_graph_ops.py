@@ -50,6 +50,25 @@ from storygraph.ui_qt.status import Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 
+def _wrap_hint(info: dict, layout_rule: str) -> str:
+    """
+    `layout_rule` + 一句"折成了几列几页"（说法来自 `layout.describe_wrap`）。
+
+    为什么要念（用户 2026-10-27："有些太长了……应该尽可能多的标签整齐排列
+    在舞台内部"）：排完图之后"哪个块在哪一列"是**按当时舞台大小**算的，
+    不说清楚，用户会以为"我上次排好的列怎么变了"。
+
+    没折行（一页就排得下 / `info` 里没有 `grid`）时只报老规矩。
+    """
+    try:
+        from storygraph.graph.layout import describe_wrap
+        body = describe_wrap(info)
+    except Exception as e:                  # noqa: BLE001 - 只是措辞
+        swallow('ui_qt.window_graph_ops.wrap_hint', e)
+        body = ''
+    return f'{layout_rule}；{body}' if body else layout_rule
+
+
 def format_character_ranking(rows) -> list:
     """
     【角色台词量】的行 → 人话。
@@ -978,7 +997,8 @@ class GraphOpsMixin:
         # 图上又是"按跳转排的"，然后奇怪为什么这一章的样子不对。
         if getattr(self._canvas, 'last_arrange', '') == 'file':
             self._log('[排版] 这一批只有同一个 .rpy：按**文件顺序**排好了 —— '
-                      '一列就是这个文件，从上到下就是文件里的先后'
+                      '从上到下就是这个文件里的先后（块太多时接着排到'
+                      '下一列 / 下一页，见状态栏）'
                       '（要看跳转关系：工具栏「⤢ 自动布局」；'
                       '要再按文件排回来：「▤ 按文件顺序排列」）')
         by_file: dict = {}
@@ -1623,19 +1643,21 @@ class GraphOpsMixin:
             labels = list(item.get('labels') or [])
             shown = '、'.join(labels[:6])
             more = f' 等 {len(labels)} 个' if len(labels) > 6 else ''
-            self._log(f'[排版] 第 {col} 列 '
+            # 不再说"第 N 列"：折行之后一个文件**不一定**还占一整列
+            # （`chapter_controller.rpy` 有 22 个 label，它自己就要占好几段）。
+            self._log(f'[排版] {col}. '
                       f'{Path(str(item.get("path") or "")).name}：{shown}{more}')
         if loose:
             self._log(f'[排版] 另外 {loose} 个块没有源文件（手画的占位块），'
-                      f'排在最右一列')
+                      f'排在各文件之后')
         names = [Path(str(f.get('path') or '')).name for f in files]
         shown = '、'.join(names[:3]) + (f' 等 {len(names)} 个文件'
                                        if len(names) > 3 else '')
         self._status(
             f'▤ 已按文件顺序排好：{len(files)} 个文件 · '
             f'{int(info.get("nodes") or 0)} 个块（{shown}）—— '
-            f'一列就是一个 .rpy，同一列从上到下就是文件里的先后；'
-            f'要看跳转关系用「⤢ 自动布局」')
+            + _wrap_hint(info, '列内从上到下就是这个文件里的先后')
+            + '；要看跳转关系用「⤢ 自动布局」')
         return info
     def export_control_flow(self, target=None, *, wrapper=None):
         """

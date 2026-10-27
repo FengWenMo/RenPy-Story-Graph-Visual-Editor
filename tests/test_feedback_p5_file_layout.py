@@ -227,8 +227,12 @@ class TestArrangeByFileAction:
         try:
             win.import_chapter_files([script])
             # 先手工摆乱（模拟用户拖过），再按文件顺序排回来。
-            for node in win.graph.nodes.values():
-                node.x, node.y = 500.0, 700.0
+            # ⚠ 坐标必须**互不相同**：全摆到同一点会被 `_unplaced_ids` 判成
+            # "这个块还没摆过"，`_set_graph` 就会自己重排一次 —— 下面那次
+            # arrange 于是成了空操作，"标脏"也就无从谈起（这条用例以前
+            # 是靠着 0 / 0.0 的 int-float 噪音才通过的，见 2026-10-27）。
+            for i, node in enumerate(win.graph.nodes.values()):
+                node.x, node.y = 500.0 + i * 40, 700.0
             win._set_graph(win.graph)
             win._mark_graph_saved()
             assert win._graph_dirty is False

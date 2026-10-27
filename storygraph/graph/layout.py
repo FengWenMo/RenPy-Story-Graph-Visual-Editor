@@ -25,6 +25,13 @@ import bisect
 #: 虚拟节点的前缀（跨层边会被拆成一串虚拟节点）。
 VIRTUAL_PREFIX = '__virt_'
 
+#: 拿不到真实视口时用的**舞台**尺寸（16:9）。见 `_stage_grid`。
+#:
+#: 布局要"折进舞台"，就得知道舞台多大；这个值只在两种情况下用：
+#: 画布还没显示出来（`viewport()` 还是默认的 100×30），或者调用方
+#: 明确不需要折行（`stage=None`，纯数据单测走这条）。
+DEFAULT_STAGE = (1280.0, 720.0)
+
 
 def _is_virtual(node_id) -> bool:
     return isinstance(node_id, str) and node_id.startswith(VIRTUAL_PREFIX)
@@ -461,9 +468,151 @@ def _reduce_crossings(order_ext, edge_segments, max_layer):
     return order_ext
 
 
-def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
+# ===========================================================================
+#  「折进舞台」—— 不让图一路长排下去
+# ===========================================================================
+#
+# 用户 2026-10-27：
+#
+# > 自动布局的逻辑不太行……仍然需要修改（因为现在有些太长了，你应该使得
+# > 尽可能多的标签整齐排列在舞台内部），而不是一路长排下去……
+#
+# 真实项目（45 个 `.rpy` / 65 个块）量出来的"老样子"：
+#
+#     ▤ 按文件顺序   12334 × 2650   44 列并排 —— 一屏只看得到 4 个块
+#     ⤢ 自动布局      4156 × 2918   15 层并排 —— 一屏看得到 6 个
+#
+# 两个数是同一件事：布局器**只朝一个方向长**，而舞台是有边的。
+# 一个文件一列、一层一列本身没错，错在"列"没有尽头。
+#
+# 所以这里补一步**折行**，规则和排字一样：
+#
+#   · 一列最多 `rows` 行（舞台竖着放得下几行），一列排满就接着排右边；
+#   · 右边排满 `cols` 列（舞台横着放得下几列）就换到**下面一页**；
+#   · 每页接在上一页下面 —— 往下滚就是下一页（`rows * row_gap` 就是页高）。
+#
+# **蛇形**（奇数列自下而上）不是装饰：折行会把"本该挨着"的两列拉到很远，
+# 蛇形让上一列的结尾正好落在下一列的结尾旁边 —— 长链和章节顺序不会
+# 被折线从中间劈开（横向绕回来那一步会变成几十个块宽的一条斜线）。
+
+
+def _stage_grid(stage, col_gap, row_gap):
+    """
+    舞台横着放得下几列、竖着放得下几行（**至少 1×1**）。
+
+    用 `//` 而不是算边界：块宽 + 间距就是这个 pitch，所以
+    `int(w // col_gap)` 正好是"有几列能整整齐齐放进去"。
+    拿到的盒子不合法（没显示 / 被压扁 / 传了非数）时退回 `DEFAULT_STAGE`。
+    """
+    try:
+        w, h = float(stage[0]), float(stage[1])
+    except (TypeError, ValueError, IndexError):
+        w, h = DEFAULT_STAGE
+    if not (w > 0 and h > 0):
+        w, h = DEFAULT_STAGE
+    cols = max(1, int(w // col_gap)) if col_gap > 0 else 1
+    rows = max(1, int(h // row_gap)) if row_gap > 0 else 1
+    return cols, rows
+
+
+def _split_strips(columns, rows):
+    """
+    把每一列切成不超过 `rows` 行的**段**（一个太长的文件/层接着排到下一列）。
+
+    切成"段"而不是"整列搬走"，是因为真实项目里 `chapter_controller.rpy`
+    一个文件就有 22 个 label —— 不切的话它单独就比一页还高，折行等于没折。
+    """
+    strips = []
+    for key, ids in columns:
+        ids = list(ids or ())
+        for i in range(0, len(ids), rows):
+            strips.append((key, ids[i:i + rows]))
+    return strips
+
+
+def _flow_into_pages(columns, *, col_gap, row_gap, stage):
+    """
+    把**有序的列**折进舞台（见本节开头的规则），返回 `(coords, info)`。
+
+    `coords` 里可能含虚拟节点（分层布局那条会带），调用方自己滤掉。
+    `info` 给调用方念给人听：`grid`（几列几行）、`pages`（几页）、
+    `strips`（切成了几段）、`tail`（万一有块没被摆到，放在这儿）。
+
+    ⚠ **段内顺序一律从上往下**（2026-10-27 的第二版）：蛇形只让"段"这种
+    整块从下往上堆，段**里**的块仍然按原顺序从上往下。第一版把整列连内容
+    一起翻过来，一个 3 个 label 的文件在奇数列里就读成了倒序 —— 而
+    "同一列从上到下就是文件里的先后"是这条路唯一的承诺。
+    """
+    cols, rows = _stage_grid(stage, col_gap, row_gap)
+    strips = _split_strips(columns, rows)
+    coords = {}
+    page = col = used = 0
+    for _key, ids in strips:
+        if used and used + len(ids) > rows:
+            col += 1
+            used = 0
+            if col >= cols:                     # 这一页排满了 → 下一页
+                col = 0
+                page += 1
+        # 蛇形：奇数列的**段**自下而上堆（上一列的结尾因此就在这一列的
+        # 结尾旁边，横向绕回来那一步不会变成一条几十个块宽的斜线）
+        upside = (page * cols + col) % 2 == 1
+        top = (rows - used - len(ids)) if upside else used
+        x = col * col_gap
+        base = page * rows * row_gap
+        for j, nid in enumerate(ids):
+            coords[nid] = (float(x), float(base + (top + j) * row_gap))
+        used += len(ids)
+    return coords, {
+        'grid': (cols, rows),
+        'pages': page + 1,
+        'strips': len(strips),
+        'tail': (0.0, float((page + 1) * rows * row_gap)),
+    }
+
+
+def describe_wrap(info) -> str:
+    """
+    把 `_flow_into_pages` 的摘要念成一句人话（状态栏 / 控制台共用）：
+
+        '每列最多 6 块、一页 3 列，共 4 页（排满往右、再满了往下）'
+
+    没有折行（`info` 空 / 没有 `grid`）时返回**空串** —— 那时说什么由
+    调用方决定，别在这儿替它编一句。
+
+    为什么放在这个模块：**"几列几页"是布局算出来的事实**，不是界面文案；
+    两个界面（画布状态栏、控制台）要说同一句话，就不能各写一份。
+    """
+    if not isinstance(info, dict):
+        return ''
+    grid = info.get('grid')
+    if not grid:
+        return ''
+    try:
+        cols, rows = int(grid[0]), int(grid[1])
+        pages = int(info.get('pages') or 1)
+    except (TypeError, ValueError, IndexError):
+        return ''
+    if pages <= 1:
+        return f'每列最多 {rows} 块，一页就排完了'
+    return (f'每列最多 {rows} 块、一页 {cols} 列，共 {pages} 页'
+            f'（排满往右、再满了往下）')
+
+
+def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10,
+                 stage=None):
+    """
+    按 jump / call 分层，把坐标写回 `graph`。
+
+    `stage=(宽, 高)` 时把排好的**层折进舞台**（一页 = 舞台那么大，蛇形换列，
+    见 `_flow_into_pages`）；`stage=None` 保持老行为（一层一列、一路排出去），
+    纯数据调用与老测试走这条。
+
+    返回 `_flow_into_pages` 的摘要（`{'grid','pages','strips','tail'}`，
+    没折行时是空 dict）—— 界面拿它说"折成了几列几页"。
+    """
     if not graph.nodes:
-        return
+        return {}
 
     adj = {nid: [] for nid in graph.nodes}
     undirected_neighbors = {nid: set() for nid in graph.nodes}
@@ -523,19 +672,31 @@ def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
 
     order_ext = _reduce_crossings(order_ext, edge_segments, max_layer)
 
-    coords = {}
-    for lv, layer in order_ext.items():
-        total_height = (len(layer) - 1) * node_gap
-        start_y = -total_height / 2
-        x = lv * layer_gap
-        for i, nid in enumerate(layer):
-            y = start_y + i * node_gap
-            if nid in graph.nodes:
-                coords[nid] = (x, y)
+    info = {}
+    if stage is not None:
+        # 折进舞台：层还是层（顺序、减交叉都没动），只是排到一页放不下时
+        # 接着往右、再往下 —— 而不是把 15 层并成一堵 4156 宽的墙。
+        columns = [(lv, order_ext.get(lv) or ())
+                   for lv in range(max_layer + 1)]
+        packed, info = _flow_into_pages(columns, col_gap=layer_gap,
+                                        row_gap=node_gap, stage=stage)
+        coords = {nid: xy for nid, xy in packed.items() if nid in graph.nodes}
+        tail = info['tail']
+    else:
+        coords = {}
+        for lv, layer in order_ext.items():
+            total_height = (len(layer) - 1) * node_gap
+            start_y = -total_height / 2
+            x = lv * layer_gap
+            for i, nid in enumerate(layer):
+                y = start_y + i * node_gap
+                if nid in graph.nodes:
+                    coords[nid] = (x, y)
+        tail = (max_layer + 1, 0)
 
     for nid in graph.nodes:
         if nid not in coords:
-            coords[nid] = (max_layer + 1, 0)
+            coords[nid] = tail
 
     # 自环**不再**给节点加偏移。
     #
@@ -552,6 +713,7 @@ def layout_graph(graph, start_id=None, layer_gap=180, node_gap=60, max_iter=10):
         graph.nodes[nid].y = y
 
     _ = (undirected_neighbors, self_loops, virtual_info)
+    return info
 
 
 # ===========================================================================
@@ -606,14 +768,14 @@ def file_order_groups(graph) -> list:
     return out
 
 
-def layout_by_file(graph, col_gap=282, row_gap=134) -> dict:
+def layout_by_file(graph, col_gap=282, row_gap=134, stage=None) -> dict:
     """
     按「文件 → 行号」排：**一个文件一列**，同一文件里从上到下 = 文件里的先后。
 
     与 `layout_graph`（按 jump / call 分层、减交叉）是**两条互补的路**：
 
       · `layout_graph` 回答"谁跳到谁" —— 跨章节看控制流时用；
-      · `layout_by_file` 回答"这一章在文件里是怎么排的" —— 一个 `.rpy` 里
+      · `layout_by_file` 回答"这一章在文件里是怎么写的" —— 一个 `.rpy` 里
         写了多个 label 时，从上往下读就是文件顺序（与源文件对照、找"这段
         该放哪"时用它）。
 
@@ -623,17 +785,37 @@ def layout_by_file(graph, col_gap=282, row_gap=134) -> dict:
     `col_gap` / `row_gap` 由调用方按块尺寸传进来（改尺寸必须走
     `graph_canvas._layout_gaps`，否则同列块会叠在一起）。
 
+    `stage=(宽, 高)` 时**一页排不下就折行**（见 `_flow_into_pages`）：
+    真实项目 45 个文件并成一排是 12334 宽、一屏只看得到 4 个块；
+    `stage=None` 保持老行为（一路排出去，纯数据调用与老测试走这条）。
+
     返回一份**给人看**的摘要（调用方拿去写控制台 / 状态栏）：
-    `{'columns': N, 'nodes': M, 'files': [{'path','labels'}], 'loose': K}`。
+    `{'columns': 文件数, 'nodes': M, 'files': [...], 'loose': K,
+      'grid': (列, 行) 或 None, 'pages': 页数, 'strips': 段数}`。
     """
     groups = file_order_groups(graph)
-    for ci, (_fp, items) in enumerate(groups):
-        x = ci * col_gap
-        top = -(len(items) - 1) * row_gap / 2.0      # 每列各自垂直居中
-        for ri, (nid, node) in enumerate(items):
-            node.x = x
-            node.y = top + ri * row_gap
-    return {
+    coords = None
+    info = {}
+    if stage is not None:
+        columns = [(fp, [nid for nid, _node in items])
+                   for fp, items in groups]
+        coords, packed = _flow_into_pages(columns, col_gap=col_gap,
+                                          row_gap=row_gap, stage=stage)
+        info = {'grid': packed['grid'], 'pages': packed['pages'],
+                'strips': packed['strips']}
+    if coords is None:
+        for ci, (_fp, items) in enumerate(groups):
+            x = ci * col_gap
+            top = -(len(items) - 1) * row_gap / 2.0      # 每列各自垂直居中
+            for ri, (nid, node) in enumerate(items):
+                node.x = x
+                node.y = top + ri * row_gap
+    else:
+        for nid, (x, y) in coords.items():
+            node = graph.nodes.get(nid)
+            if node is not None:
+                node.x, node.y = x, y
+    summary = {
         'columns': len(groups),
         'nodes': sum(len(items) for _fp, items in groups),
         'files': [{'path': fp,
@@ -642,3 +824,5 @@ def layout_by_file(graph, col_gap=282, row_gap=134) -> dict:
                   for fp, items in groups if fp],
         'loose': sum(len(items) for fp, items in groups if not fp),
     }
+    summary.update(info)
+    return summary

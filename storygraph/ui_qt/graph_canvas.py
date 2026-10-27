@@ -685,6 +685,10 @@ class GraphCanvas(QGraphicsView):
     edge_edit_requested = Signal(object)
     #: 右键一条边（P0，2026-10-24）：窗口层弹「写入剧本 / 删除」。
     edge_menu_requested = Signal(object, object)     # edge, 屏幕坐标
+    #: 自动布局排完了（2026-10-27）：一句人话，说"折成了几列几页"。
+    #: 为什么不直接在这边弹：画布没有状态栏，窗口把它接到 `_status` 就行
+    #: （工具栏 / 右键菜单两条入口因此都能报，不用各写一遍）。
+    layout_arranged = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -927,12 +931,24 @@ class GraphCanvas(QGraphicsView):
                     unplaced.add(nid)
         return unplaced
 
+    #: 装不下时，把内容左上角留在离视口边缘这么远的地方（像素）
+    FLUSH_MARGIN = 32.0
+
     def _reset_view(self):
         """
-        视口复位：**装得下才适应窗口，装不下就 100% 停在入口块**。
+        视口复位：**装得下才适应窗口，装不下就 100% 从左上角开始看**。
 
         为什么不是无脑 `fitInView`：50 多个块 fit 进一屏要缩到 0.4 以下，
         字全成蚂蚁 —— 用户看到的"一堵小方块墙"就是这么来的。
+
+        为什么"从左上角开始"而不是"停在入口块正中"（2026-10-27 改）：布局
+        现在把块**折进舞台一页一页排**（见 `layout._flow_into_pages`），
+        入口块就在左上角；把它摆在屏幕正中等于**上面空掉半屏**
+        （真实项目 990×847 的舞台里空了 340 px，一屏只能看到 4 排块）。
+        对齐左上角，一屏能看到的块最多 —— 这正是折行的目的。
+
+        算过入口（`set_analysis` 给过 `_entry_id`）时仍然停在入口块上：
+        那时"从哪开始"比"看最多"更重要，入口不一定在左上角。
         """
         if not self._items:
             return
@@ -945,10 +961,23 @@ class GraphCanvas(QGraphicsView):
         if scale >= FIT_MIN_SCALE:
             self.fitInView(rect, Qt.KeepAspectRatio)
         else:
-            self.resetTransform()
-            target = self._entry_id or self._top_left_id()
-            self.center_on_node(target)
+            self.resetTransform()           # 100%
+            entry = self._entry_id if self._entry_id in self._items else None
+            if entry is not None:
+                self.center_on_node(entry)
+            else:
+                self._align_top_left(rect)
         self._emit_zoom()
+
+    def _align_top_left(self, content_rect):
+        """把内容的左上角摆到视口左上角（留 `FLUSH_MARGIN`）。100% 缩放时用。"""
+        try:
+            vp = self.viewport().rect()
+            self.centerOn(content_rect.topLeft() + QPointF(
+                vp.width() / 2.0 - self.FLUSH_MARGIN,
+                vp.height() / 2.0 - self.FLUSH_MARGIN))
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.graph_canvas._align_top_left', e)
 
     def _top_left_id(self):
         if not self._items:
@@ -1129,13 +1158,20 @@ class GraphCanvas(QGraphicsView):
         这是**按跳转/调用分层**的排法（回答"谁跳到谁"）。一个 `.rpy` 里
         写了多个 label、想把图排成文件里的先后，用 `arrange_by_file()`
         （工具栏「▤ 按文件顺序排列」）。
+
+        **折进舞台**（用户 2026-10-27："尽可能多的标签整齐排列在舞台内部，
+        而不是一路长排下去"）：一列排满接着往右、一页排满往下，舞台多大
+        由 `_stage_box()` 量（见 `layout._flow_into_pages`）。
         """
         if self.graph is None or not self.graph.nodes:
             return
         layer_gap, node_gap = _layout_gaps()
+        info = {}
         try:
             from storygraph.graph.layout import layout_graph
-            layout_graph(self.graph, layer_gap=layer_gap, node_gap=node_gap)
+            info = layout_graph(self.graph, layer_gap=layer_gap,
+                                node_gap=node_gap,
+                                stage=self._stage_box()) or {}
         except Exception:                # noqa: BLE001
             # 退而求其次：网格排开，至少不叠在一起
             for i, node in enumerate(self.graph.nodes.values()):
@@ -1143,6 +1179,45 @@ class GraphCanvas(QGraphicsView):
                 node.y = 40 + (i // 4) * node_gap
         self.last_arrange = 'logic'
         self._apply_node_positions()
+        self._announce_arrange(info)
+
+    def _announce_arrange(self, info):
+        """说一句"折成了几列几页"（没人连这个信号就算了，不能因此炸掉）。"""
+        try:
+            from storygraph.graph.layout import describe_wrap
+            self.layout_arranged.emit(
+                '⤢ 已按跳转重排：' + (describe_wrap(info) or '按跳转分层'))
+        except Exception as e:           # noqa: BLE001 - 只是提示
+            swallow('ui_qt.graph_canvas._announce_arrange', e)
+
+    #: 可视区比这还小 = 画布还没显示出来（或被压扁）→ 用布局器的默认舞台。
+    STAGE_MIN_W, STAGE_MIN_H = 320.0, 240.0
+
+    def _stage_box(self):
+        """
+        舞台多大 = **画布可视区**多大（场景像素；100% 缩放下 1:1）。
+
+        为什么是可视区而不是整个场景：布局要回答的是"一屏能摆下多少块"，
+        场景是无边界的（见 `_extend_scene_rect`），拿它当舞台等于没边。
+
+        画布还没 `show()` 过时 `viewport()` 是默认的 100×30，那时折出来的
+        页小得荒唐（一页 0 列），所以低于 `STAGE_MIN_*` 就退回
+        `layout.DEFAULT_STAGE`（16:9）—— 这也让无界面测试有确定的舞台。
+        """
+        try:
+            from storygraph.graph.layout import DEFAULT_STAGE
+        except Exception as e:           # noqa: BLE001 - 布局模块导不进来也不许崩
+            swallow('ui_qt.graph_canvas._stage_box.import', e)
+            DEFAULT_STAGE = (1280.0, 720.0)
+        try:
+            rect = self.viewport().rect()
+            w, h = float(rect.width()), float(rect.height())
+        except Exception as e:           # noqa: BLE001
+            swallow('ui_qt.graph_canvas._stage_box', e)
+            return DEFAULT_STAGE
+        if w < self.STAGE_MIN_W or h < self.STAGE_MIN_H:
+            return DEFAULT_STAGE
+        return (w, h)
 
     def arrange_by_file(self) -> dict:
         """
@@ -1156,6 +1231,9 @@ class GraphCanvas(QGraphicsView):
         与 `auto_layout` 的关系是**互补**而不是替代：那条路看得见跨章节的
         跳转，这条路看得见"这一章在文件里是怎么写的"。返回 `layout_by_file`
         的摘要（谁在第几列、哪些块没有源文件），调用方拿去写控制台。
+
+        同样**折进舞台**：真实项目 45 个文件并成一排是 12334 宽、
+        一屏只看得到 4 个块（用户 2026-10-27："一路长排下去"）。
         """
         if self.graph is None or not self.graph.nodes:
             return {}
@@ -1163,7 +1241,7 @@ class GraphCanvas(QGraphicsView):
         try:
             from storygraph.graph.layout import layout_by_file
             info = layout_by_file(self.graph, col_gap=layer_gap,
-                                  row_gap=node_gap)
+                                  row_gap=node_gap, stage=self._stage_box())
         except Exception as e:           # noqa: BLE001 - 排不出来就保持原样
             swallow('ui_qt.graph_canvas.arrange_by_file', e)
             return {}
