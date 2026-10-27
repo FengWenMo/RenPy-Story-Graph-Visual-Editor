@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from storygraph.graph.commands import ControlRouteCommand  # noqa: E402
 from storygraph.graph.models import Graph  # noqa: E402
 from storygraph.story.control_route import (  # noqa: E402
-    apply_control_init, plan_control_init, plan_control_route)
+    apply_control_init, plan_control_init, plan_control_route,
+    wire_plan_writable)
 from storygraph.ui_qt.dialogs import AddEdgeDialog  # noqa: E402
 from storygraph.ui_qt.window_nodes import NodeEditMixin  # noqa: E402
 
@@ -213,6 +214,7 @@ _Host._control_route_plan = NodeEditMixin._control_route_plan
 _Host.plan_wire_landing = NodeEditMixin.plan_wire_landing
 _Host._apply_wire = NodeEditMixin._apply_wire
 _Host._apply_control_route = NodeEditMixin._apply_control_route
+_Host._write_dialog_edge = NodeEditMixin._write_dialog_edge
 
 
 def _graph_with_two():
@@ -311,3 +313,122 @@ def test_control_route_command_without_init_still_works(tmp_path):
     cmd = ControlRouteCommand(host, plan, from_id=a, to_id=b, etype='jump')
     cmd.execute()
     assert 'jump ch02_control' in _controller(root).read_text(encoding='utf-8')
+
+
+# ===========================================================================
+#  四、"对话框说能写、窗口却什么都不做"（2026-10-27 真机 P0）
+#
+#  用户原话："我连线了好多次……没有显示"。链路上只差一处：对话框认
+#  `control_init`（`创建` 按得下去），窗口 `_write_dialog_edge` 只看
+#  `plan['ok']` —— 而 `control_init` 的 ok 恰好是 False。于是窗口正常关闭、
+#  图上一条线都没有。真机 7 个新章里 42 对连线有 12 对落在这条死路上。
+# ===========================================================================
+
+def test_wire_plan_writable_treats_control_init_as_writable():
+    """
+    判据真值表：**只有这一份**，对话框 / 窗口 / 草图转正都引用它。
+    """
+    assert wire_plan_writable({'ok': True, 'kind': 'control'}) is True
+    assert wire_plan_writable({'ok': True, 'kind': 'chapter_end'}) is True
+    # 还缺目标章包装：没写，但**能写**（`_apply_control_route` 接得住）
+    assert wire_plan_writable({'ok': False, 'kind': 'control_init'}) is True
+    for kind in ('control_blocked', 'not_loaded', 'bad_position',
+                 'stale_position', 'ambiguous', 'cannot'):
+        assert wire_plan_writable({'ok': False, 'kind': kind}) is False, kind
+    assert wire_plan_writable({}) is False
+    assert wire_plan_writable(None) is False
+
+
+def test_creating_a_line_to_a_wrapperless_chapter_really_writes(tmp_path, qapp):
+    """
+    **端到端**：目标章还没有 `_control` 包装时，「创建」之后必须真有这条线。
+
+    这条用例就是 2026-10-27 真机 bug 的判据 —— 修之前 `dlg.write is True`
+    成立、`_write_dialog_edge` 却返回 False 且图上一根线都不多。
+    """
+    root = _project(tmp_path)
+    g, a, b = _graph_with_two()
+    host = _Host(root, g)
+    plan = host.plan_wire_landing(a, b)
+    dlg = AddEdgeDialog(None, nodes=g.nodes, from_id=a, to_id=b,
+                        plan_fn=lambda *_args: plan)
+    dlg._on_accept()
+    assert dlg.write is True                  # 对话框允许「创建」
+    assert dlg.plan['kind'] == 'control_init'
+
+    assert host._write_dialog_edge(dlg) is True
+    text = _controller(root).read_text(encoding='utf-8')
+    assert 'label ch02_control:' in text      # 包装补上了
+    assert '    jump ch02_control' in text    # 路由写上了
+    edges = list((g.edges or {}).values())
+    assert len(edges) == 1, edges
+    assert edges[0].origin == 'control'       # 图上真的有这条线
+    assert not any('没写进去' in s for s in host.status), host.status
+
+
+def test_write_dialog_edge_still_refuses_a_blocked_plan(tmp_path, qapp,
+                                                        monkeypatch):
+    """
+    反过来也要守：**写不进**的落点不许假装成功（否则就是"静默假完成"）。
+
+    这里用 `control_blocked`（源章的 `_control` 结尾判不出安全插入点）。
+    """
+    root = _project(tmp_path, controller=(
+        'label ch01_control:\n    call ch01\n    $ renpy.full_restart()\n\n'
+        'label ch02_control:\n    call ch02\n    return\n'))
+    g, a, b = _graph_with_two()
+    host = _Host(root, g)
+    plan = host.plan_wire_landing(a, b)
+    assert plan['kind'] == 'control_blocked' and plan['ok'] is False
+    dlg = AddEdgeDialog(None, nodes=g.nodes, from_id=a, to_id=b,
+                        plan_fn=lambda *_args: plan)
+    dlg._on_accept()
+    assert dlg.write is False                 # 对话框就该走"草图"那条路
+
+    import storygraph.ui_qt.window_nodes as WN
+    shown = []
+
+    class _FakeBox:                            # 不弹真框
+        @staticmethod
+        def warning(*args, **kwargs):
+            shown.append(str(args[2]) if len(args) > 2 else '')
+
+    monkeypatch.setattr(WN, 'QMessageBox', _FakeBox)
+    assert host._write_dialog_edge(dlg) is False
+    assert shown and '没有这条线' in shown[0]   # 必须**弹出来**说清
+    assert not g.edges
+
+
+def test_dialog_says_it_will_add_the_missing_wrapper(tmp_path, qapp):
+    """
+    「创建」之前就要说清会发生什么 —— 尤其是**会顺手补一个包装**这件事。
+
+    2026-10-27 真机：对话框里对"写进编排层 / 补包装 / 只画草图"三种结果
+    一个字都不显示，人按完按钮只能看状态栏。
+    """
+    root = _project(tmp_path)
+    g, a, b = _graph_with_two()
+    host = _Host(root, g)
+    plan = host.plan_wire_landing(a, b)
+    dlg = AddEdgeDialog(None, nodes=g.nodes, from_id=a, to_id=b,
+                        plan_fn=lambda *_args: plan)
+    text = dlg.plan_hint_text()
+    assert '会写进编排层' in text
+    assert 'ch02_control' in text          # 点名会被补上的包装
+    # 对话框没 show 过，`isVisible()` 恒为 False —— 看"有没有被显式藏起来"
+    assert not dlg._plan_hint.isHidden()
+
+
+def test_dialog_says_a_blocked_wire_only_draws_a_sketch(tmp_path, qapp):
+    root = _project(tmp_path, controller=(
+        'label ch01_control:\n    call ch01\n    $ renpy.full_restart()\n\n'
+        'label ch02_control:\n    call ch02\n    return\n'))
+    g, a, b = _graph_with_two()
+    host = _Host(root, g)
+    plan = host.plan_wire_landing(a, b)
+    assert plan['kind'] == 'control_blocked'
+    dlg = AddEdgeDialog(None, nodes=g.nodes, from_id=a, to_id=b,
+                        plan_fn=lambda *_args: plan)
+    text = dlg.plan_hint_text()
+    assert '只会画一条' in text and '草图' in text
+    assert '写不进剧本' in text

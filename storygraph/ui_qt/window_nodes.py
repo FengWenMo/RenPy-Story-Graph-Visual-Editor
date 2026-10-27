@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.story.control_route import wire_plan_writable
 from storygraph.story.source_style import SourceNotUtf8
 from storygraph.ui_qt.qt_args import drop_qt_bool
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
@@ -857,12 +858,20 @@ class NodeEditMixin:
             self._status(f'编排层没写成：{msg}')
             return {'ok': False, 'error': msg}
         path = getattr(cmd, 'path', '') or str(getattr(cplan, 'path', ''))
+        # 这一条是不是**顺手补了目标章的包装**（`control_init`）？补了就要说 ——
+        # 否则用户下次打开编排层会看见一个自己没写过的 label。
+        added = ''
+        init = getattr(cplan, 'init', None)
+        if init is not None and getattr(init, 'ok', False):
+            name = str(getattr(init, 'chapter_label', '') or '')
+            if name:
+                added = f'；顺手补了 `{name}_control` 包装'
         self._log(f'[接线] 编排层：{getattr(cplan, "control_label", "")} '
                   f'→ {getattr(cplan, "new_lines", []) or [getattr(cplan, "target_label", "")]}'
-                  f'（{path}；章节源文件未改）')
+                  f'（{path}；章节源文件未改{added}）')
         self._status(
             f'✔ 已接到编排层（{Path(path).name if path else "控制流文件"}，'
-            f'章节剧本一个字未改）；Ctrl+Z 可撤回')
+            f'章节剧本一个字未改{added}）；Ctrl+Z 可撤回')
         return {'ok': True, 'path': path, 'kind': 'control',
                 'edge_id': getattr(cmd, 'edge_id', None),
                 'control_plan': cplan}
@@ -1528,8 +1537,19 @@ class NodeEditMixin:
                          or 'chapter_end'),
             position_line_id=str(getattr(dlg, 'position_line_id', '') or ''),
             etype=str(getattr(dlg, 'etype', 'jump') or 'jump'))
-        if not plan.get('ok'):
-            self._status(f'没写进去：{plan.get("reason") or "找不到落点"}')
+        if not wire_plan_writable(plan):
+            msg = str(plan.get('reason') or '找不到落点')
+            # ⚠ 这里以前只看 `plan['ok']`，而 `control_init`（目标章缺
+            # `_control` 包装）的 `ok` 是 False —— 对话框按下了「创建」、
+            # 窗口正常关闭、图上却一条线都不出现，只有状态栏一行字
+            # 转瞬即逝（2026-10-27 真机："我连线了好多次……没有显示"）。
+            # 判据现在与对话框同一份；真走到这里说明"对话框之后状态变了"，
+            # 必须弹出来，不能再只写状态栏。
+            self._status(f'没写进去：{msg}')
+            QMessageBox.warning(
+                self, '连线没写进去',
+                f'{msg}\n\n剧本一个字节都没改，图上也没有这条线。'
+                f'换一个「插入位置」再试。')
             return False
         plan = {**plan, 'etype': str(dlg.etype or 'jump'),
                 'from_clause': str(getattr(dlg, 'from_clause', '') or '')}
@@ -2154,7 +2174,7 @@ class NodeEditMixin:
                              or 'chapter_end'),
                 position_line_id=str(getattr(edge, 'position_line_id', '')
                                      or ''))
-            can_write = (bool(plan.get('ok'))
+            can_write = (wire_plan_writable(plan)
                          and not str(getattr(edge, 'condition', '') or '')
                          and not str(getattr(edge, 'option_text', '') or ''))
             act = menu.addAction('写入剧本…',
@@ -2225,7 +2245,7 @@ class NodeEditMixin:
             position=str(getattr(edge, 'position', 'chapter_end')
                          or 'chapter_end'),
             position_line_id=str(getattr(edge, 'position_line_id', '') or ''))
-        if not plan.get('ok'):
+        if not wire_plan_writable(plan):
             QMessageBox.information(
                 self, '这条草图写不进剧本',
                 str(plan.get('reason') or '当前章节没有可插的落点。'))

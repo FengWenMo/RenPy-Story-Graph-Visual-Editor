@@ -1180,10 +1180,42 @@ def apply_control_edit(plan: ControlEditPlan) -> dict:
             'new_text': body, 'line_no': plan.line_no, 'error': ''}
 
 
+def wire_plan_writable(plan) -> bool:
+    """
+    「接线落点计划」**能不能真的写进去** —— 这条判据只有这一份。
+
+    输入是 `window_nodes.plan_wire_landing(...)` 的返回值（`kind` 见那里的
+    表）。`ok=True` 的一律能写；`kind='control_init'` **虽然 `ok=False`**
+    也能写 —— 它的含义是"还没写，因为目标章缺 `_control` 包装；先补包装
+    再写路由"，而 `_apply_control_route` 本来就接得住这条计划。
+
+    ## 为什么必须只有一份（2026-10-27 真机）
+
+    对话框 `AddEdgeDialog._on_accept` 早就认 `control_init`（所以「创建」
+    键按得下去、窗口正常关闭），窗口层 `_write_dialog_edge` 却只看
+    `plan['ok']` —— 于是"目标章还没有 `_control` 包装"的那些线：
+
+        Shift+左键拖出来 → 弹窗 → 点「创建」→ 窗口关闭
+        → **图上一条线都没有**，只有状态栏一行转瞬即逝的字
+
+    用户原话："我连线了好多次……没有显示"。真机项目（`sr_general`）
+    7 个新章节里 42 对连线有 **12 对**落在这条死路上 —— 恰好都是
+    "接到刚写、还没进编排层的新章"这种最常见的接线。
+
+    判据写在这里、调用方（对话框 / 窗口层 / 草图转正）都引用它，
+    就是为了不再出现"对话框说能写、窗口说写不了"。
+    """
+    if not isinstance(plan, dict):
+        return False
+    if plan.get('ok'):
+        return True
+    return str(plan.get('kind') or '') == 'control_init'
+
+
 __all__ = [
     'CONTROL_SUFFIX', 'ControlEditPlan', 'ControlInitPlan',
     'ControlRoutePlan', 'apply_control_edit', 'apply_control_init',
     'apply_control_route', 'apply_control_unroute', 'control_label',
     'find_control_file', 'plan_control_edit', 'plan_control_init',
-    'plan_control_route', 'plan_control_unroute',
+    'plan_control_route', 'plan_control_unroute', 'wire_plan_writable',
 ]

@@ -1601,6 +1601,17 @@ class AddEdgeDialog(_BaseDialog):
         hint.setWordWrap(True)
         self._root.addWidget(hint)
 
+        #: 这一行是**按当前落点实时算出来的**"按「创建」会发生什么"。
+        #: 为什么要有（2026-10-27 真机）：`plan_wire_landing` 的
+        #: `reason` 以前只进状态栏 / 调用方，对话框里一个字都不显示 ——
+        #: 于是"写不进剧本、只会画草图"和"会顺手补一个包装"这两种很不一样
+        #: 的结果，在按按钮之前长得一模一样。
+        self._plan_hint = QLabel('')
+        self._plan_hint.setProperty('role', 'caption')
+        self._plan_hint.setWordWrap(True)
+        self._plan_hint.setVisible(False)
+        self._root.addWidget(self._plan_hint)
+
         # 左下角的「草稿」：默认不勾。勾上就不写剧本，只画一条虚线草图
         # （位置仍记在 `position/position_line_id`，以后可以「写入剧本…」转正）。
         draft_row = QHBoxLayout()
@@ -1709,12 +1720,64 @@ class AddEdgeDialog(_BaseDialog):
         from_id, to_id = self._src.currentData(), self._dst.currentData()
         if from_id is None or to_id is None:
             self.plan = {}
+            self._show_plan_hint()
             return
         try:
             self.plan = self._call_plan(from_id, to_id)
         except Exception as e:                # noqa: BLE001 - 算不出也要能画草图
             swallow('ui_qt.dialogs.AddEdgeDialog.sync_position', e)
             self.plan = {}
+        self._show_plan_hint()
+
+    def _label_of(self, combo) -> str:
+        """下拉框里那一项对应的 label 名（读不到就退回列表文字）。"""
+        node = self._nodes.get(combo.currentData())
+        name = str(getattr(node, 'label_name', '') or '')
+        if name:
+            return name
+        text = str(combo.currentText() or '')
+        return text.split(':', 1)[-1].strip() if ':' in text else text
+
+    def plan_hint_text(self) -> str:
+        """
+        对话框里那句**"按「创建」会发生什么"**（空 = 说不清就不说）。
+
+        判据与窗口层同源：能不能写看 `wire_plan_writable`，写到哪儿看 kind。
+        """
+        from storygraph.story.control_route import wire_plan_writable
+        plan = self.plan if isinstance(self.plan, dict) else {}
+        if not plan:
+            return ''
+        kind = str(plan.get('kind') or '')
+        why = str(plan.get('reason') or '').strip()
+        src, dst = self._label_of(self._src), self._label_of(self._dst)
+        if kind == 'control':
+            return (f'✔ 会写进编排层：把「{src}」的出口接到「{dst}」'
+                    f'（章节剧本一个字不动）。')
+        if kind == 'control_init':
+            return (f'✔ 会写进编排层：先补「{dst}_control」包装，'
+                    f'再把「{src}」接过去（章节剧本一个字不动）。')
+        if kind in ('chapter_end', 'beat'):
+            where = '章末' if kind == 'chapter_end' else '选好的那一拍'
+            return (f'✔ 会写进章节文件「{src}」的{where}'
+                    f'（内存改动，「⤓ 导出」才落盘）。')
+        if not wire_plan_writable(plan):
+            tail = f'：{why}' if why else '。'
+            return (f'✎ 现在写不进剧本 —— 按「创建」只会画一条**草图**'
+                    f'（虚线，图上标「草图」）{tail}')
+        return ''
+
+    def _show_plan_hint(self):
+        text = ''
+        try:
+            text = self.plan_hint_text()
+        except Exception as e:                # noqa: BLE001 - 提示算不出不该拦住接线
+            swallow('ui_qt.dialogs.AddEdgeDialog.plan_hint', e)
+            text = ''
+        if not hasattr(self, '_plan_hint'):
+            return
+        self._plan_hint.setText(text)
+        self._plan_hint.setVisible(bool(text))
 
     def _current_position(self):
         data = self._pos.currentData()
@@ -1751,8 +1814,12 @@ class AddEdgeDialog(_BaseDialog):
         except Exception as e:                # noqa: BLE001 - 算不出也要能画草图
             swallow('ui_qt.dialogs.AddEdgeDialog.plan', e)
             self.plan = {}
-        kind = str(self.plan.get('kind') or '')
-        writable = bool(self.plan.get('ok')) or kind == 'control_init'
+        # 判据与窗口层**同一份**（`wire_plan_writable`）：`control_init`
+        # （目标章缺 `_control` 包装）的 `ok` 是 False，但它是能写的 ——
+        # 这里只写 `ok` 的话「创建」会按不下去；反过来窗口只看 `ok` 的话，
+        # 按下去以后什么都不发生（2026-10-27 真机"连线不显示"）。
+        from storygraph.story.control_route import wire_plan_writable
+        writable = wire_plan_writable(self.plan)
         branch = bool(self.condition or self.option_text)
         self.branch = branch
         self.write = bool(writable)
