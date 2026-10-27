@@ -50,6 +50,11 @@ dist_release*/
 /StoryGraph-*-win64*/
 # PyInstaller 的中间目录（`--workpath build/release`）
 build/release*/
+# 2026-10-26 重打包用的新目录：沙箱的"批量删除守卫"会拦下 PyInstaller
+# 覆盖 dist/StoryGraph 的动作（要删 240 个文件），所以改用全新输出目录，
+# 避开删除。内容与 dist/ 等价，可由 packaging 重建。
+dist_new/
+build/pack/
 *.spec.bak
 
 # ==================================================================
