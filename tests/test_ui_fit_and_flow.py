@@ -255,6 +255,8 @@ class TestFlowCardHidesDialogue:
         assert panel._stage_box.isHidden()
         assert panel._stage_empty.isHidden()
         assert panel._stage_toggle.isHidden()
+        # 「当前舞台」那一行（图 + 摘要）也是演出，一样收起（2026-10-27）
+        assert panel._stage_now.isHidden(), '控制流卡还挂着这一拍的舞台图'
 
     def test_they_come_back_on_the_next_normal_beat(self, window, app):
         window._set_page(window.PAGE_CARD)
@@ -265,6 +267,7 @@ class TestFlowCardHidesDialogue:
         panel = window._panel
         assert panel._flow_bar.isHidden()
         assert not panel._dialogue_box.isHidden(), '回到普通卡后台词区没回来'
+        assert not panel._stage_now.isHidden(), '回到普通卡后「当前舞台」没回来'
 
     def test_the_flow_strip_explains_where_the_fields_went(self, window, app):
         window._set_page(window.PAGE_CARD)

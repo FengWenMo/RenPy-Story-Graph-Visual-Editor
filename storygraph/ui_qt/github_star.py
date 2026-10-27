@@ -1,7 +1,7 @@
 """
 storygraph.ui_qt.github_star
 ============================
-卡片编辑页右上角的**一个 GitHub Star 小徽标**（2026-10-27）。
+**顶部模式条上的一个 GitHub Star 小徽标**（2026-10-27）。
 
 用户原话：
 
@@ -10,11 +10,15 @@ storygraph.ui_qt.github_star
 > 注意：我希望它是一个独立于整体界面的代码块，到时候方便取下来，
 > 不要耽误别人到时候对这个界面的改造
 
+（同一天又说清了位置：「你应当放第四张图这里，卡片编辑右边！」—— 于是它
+挂在 `🗺 剧情结构 / ✎ 卡片编辑` 那一行的**卡片编辑标签右边**，两页都在。）
+
 所以这个文件是**一个可整块删掉的独立件**：
 
   · 只依赖 Qt + 标准库（外加一个颜色常量模块 `tokens`，纯数据）；
   · **不 import** 任何窗口 / 会话 / 卡片 / 主界面代码（也没人反向依赖它）；
-  · 主窗口那边只有 `attach_star_badge(self, rv)` **一行**调用（带 try/except）；
+  · 主窗口那边只有 `attach_star_badge(self, tb)` **一行**调用（带 try/except，
+    在 `ui_qt/window_nav.py` 的 `_build_mode_bar`）；
     删掉那一行 + 删掉本文件 = 界面完全恢复原样。
 
 ## 点一下会发生什么
@@ -47,7 +51,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QPushButton, QToolBar
 
 from storygraph.core.safeguard import swallow
 
@@ -364,18 +368,23 @@ class GitHubStarBadge(QPushButton):
             swallow('github_star.shutdown', e)
 
 
-def attach_star_badge(window, layout, repo: str = DEFAULT_REPO):
+def attach_star_badge(window, host, repo: str = DEFAULT_REPO):
     """
     把徽标挂上去（**主窗口唯一需要调用的一行**）。
 
     `window`：主窗口（挂在它身上，窗口关闭时能统一收掉）；
-    `layout`：塞进哪个布局（卡片编辑页右栏的最上面，右对齐）。
+    `host`：挂到哪儿 —— 现在用的是**顶部模式条**（`QToolBar`，紧跟
+    「✎ 卡片编辑」标签右边）。也接受普通的 `QBoxLayout`（第一版挂在卡片页
+    右栏时用的那种，留着给别的容器复用）。
     返回徽标本身（测试用）。
 
-    这个函数只做三件事：建控件、加进布局、记在窗口上 —— 不碰任何别的东西。
+    这个函数只做三件事：建控件、挂上去、记在窗口上 —— 不碰任何别的东西。
     """
     badge = GitHubStarBadge(parent=window, repo=repo)
-    layout.insertWidget(0, badge, 0, Qt.AlignmentFlag.AlignRight)
+    if isinstance(host, QToolBar):              # 顶部模式条：当一个小控件加进去
+        host.addWidget(badge)
+    else:                                       # QBoxLayout：第 0 行、右对齐
+        host.insertWidget(0, badge, 0, Qt.AlignmentFlag.AlignRight)
     if window is not None:
         try:
             window._github_star = badge

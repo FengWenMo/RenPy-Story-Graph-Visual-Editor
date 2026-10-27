@@ -512,6 +512,30 @@ class TestWindowWiring:
         ui_window._show_index(0)
         assert ui_window._inspector.texts()['这一拍'].startswith('1 / ')
 
+    def test_location_block_starts_collapsed(self, ui_window):
+        """
+        用户 2026-10-27："定位默认折叠起来，卡片界面必须留几乎右边全屏"。
+
+        判据看 `isHidden()` 而不是 `isVisible()`：这张窗在夹具里没 show，
+        `isVisible()` 恒为假 —— 那样"折叠/展开"根本区分不开。
+        """
+        assert ui_window._loc_open is False
+        assert ui_window._inspector.isHidden(), '定位默认是展开的'
+        assert ui_window._loc_btn.text().startswith('▸')
+        assert '定位' in ui_window._loc_btn.text()
+
+    def test_toggling_it_shows_the_real_rows(self, ui_window):
+        """折叠只是"藏起来"：展开就是这一拍的真话，不是一张空表。"""
+        ui_window._show_index(1)
+        ui_window._loc_btn.click()
+        assert ui_window._loc_open is True
+        assert not ui_window._inspector.isHidden()
+        assert ui_window._loc_btn.text().startswith('▾')
+        assert ui_window._inspector.texts()['这一拍'].startswith('2 / ')
+        ui_window._loc_btn.click()
+        assert ui_window._loc_open is False
+        assert ui_window._inspector.isHidden()
+
     def test_first_shot_is_not_treated_as_no_chapter(self, ui_window):
         """**第 0 拍是 0** —— `0 or -1` 会把它当成"没载入"（第十阶段踩过）。"""
         ui_window._show_index(0)

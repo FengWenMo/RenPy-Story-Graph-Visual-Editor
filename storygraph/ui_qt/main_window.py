@@ -450,28 +450,52 @@ class BeatCardEditor(QWidget):
         self._say_tail_label.setVisible(False)
         dlg_lay.addWidget(self._say_tail_label)
 
-        # —— 舞台（**没有改动时只占一行**）——
+        # —— 「当前舞台」+ 这一拍的图（**永远可见**，2026-10-27）——
+        #
+        # 位置与大小是用户当面指正的（第一版放错了两处）：
+        #
+        #   > 不对！！！你这个不能放卡片界面啊！！！应该缩小放舞台界面！
+        #   > 当前舞台下面那一栏……缩小！再缩小，直到能看到全貌！不然你现在
+        #   > 显示都显示不全何来调整啊？？？
+        #
+        # 所以：`_stage_now` = 「当前舞台（这一拍生效）」标题 + **一行**
+        # （左：288×162 的整帧小图；右：这一拍舞台的文字摘要）。
+        # 图与摘要**并排**而不是上下叠：摘要本来就要占那几行，图因此几乎
+        # 不吃额外高度 —— 卡片留给"能改的东西"的地方才够。
+        #
+        # 为什么这一块**不在 `_stage_box` 里面**（那一块才是可收起的）：
+        # 真机一章 285 拍里 210 拍没有舞台改动（`_has_stage_content` 为假 →
+        # 立绘 / 背景 / 音乐全收起）。而"这一拍台上是谁、在哪、什么曲子"
+        # 对**那些**拍最有价值 —— 图与摘要跟着一起收起，就等于最该看的时候
+        # 什么都没有（用户 2026-10-27 第一次要这张图的理由就是这个）。
+        self._stage_now = QWidget()
+        now_lay = QVBoxLayout(self._stage_now)
+        now_lay.setContentsMargins(0, 0, 0, 0)
+        now_lay.setSpacing(T.SPACE['xs'])
+        # 用户 2026-10-03："为何不写明现在的舞台情况是什么样的，旧版明明都有"
+        # 旧版预览面板用的是 `stage_snapshot.stage_digest`，卡片搬 Qt 时没接上。
+        now_lay.addWidget(self._section('当前舞台（这一拍生效）'))
+        now_row = QHBoxLayout()
+        now_row.setSpacing(T.SPACE['sm'])
+        self._stage_thumb = BeatStageThumb(parent=self, compact=True)
+        now_row.addWidget(self._stage_thumb, 0, Qt.AlignTop)
+        self._stage_label = QLabel('')
+        self._stage_label.setProperty('role', 'note')
+        self._stage_label.setWordWrap(True)
+        self._stage_label.setFont(QFont(T.FONTS['mono'][0],
+                                        T.FONTS['mono'][1]))
+        self._stage_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._stage_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        now_row.addWidget(self._stage_label, 1)
+        now_lay.addLayout(now_row)
+        root.addWidget(self._stage_now)
+
+        # —— 立绘 / 背景 / 音乐（**没有舞台改动时收成一行**）——
         #
         # 用户 2026-10-18：不是每个写法都跟图片相关。一条 `play_music` 或
-        # `styled "红色" "#f00"` 的拍，舞台那三块（立绘网格 / 当前舞台 /
-        # 背景·音乐·语音）**一个字都没有**，却占了整整一屏 —— 真正能改的
-        # 参数反而要滚过去找。所以：没有舞台内容 → 收成一行说明 + 一个
-        # 「改舞台」按钮；有内容 → 与从前一模一样。
-        #
-        # —— 但**这一拍的舞台图**不在可收起的那一块里**（2026-10-27）——
-        #
-        # 用户："每一拍的舞台信息那里……可以除文字描述之外，给一张这一拍的
-        # 图片吗？就放在文字描述之前的上面（与舞台预览一致的图片，但只有一拍，
-        # 每当这一排有修改时，重新刷新这一拍的图）"
-        #
-        # 放在 `_stage_box` **外面**是刻意的：真机一章 285 拍里 210 拍没有
-        # 舞台改动（`_has_stage_content` 为假 → 上面那几块全收起）。而"这一拍
-        # 舞台长什么样"对**那些**拍最有价值 —— 背景和立绘全是继承来的，
-        # 光看「舞台：这一拍没有改动」根本不知道画面里是谁、在哪。
-        # 图跟着舞台块一起收起，就等于"最该看图的时候没有图"。
-        self._stage_thumb = BeatStageThumb(parent=self)
-        root.addWidget(self._stage_thumb)
-
+        # `styled "红色" "#f00"` 的拍，这几块**一个字都没有**，却占了整整一屏
+        # —— 真正能改的参数反而要滚过去找。所以：没有舞台内容 → 收成一行
+        # 说明 + 一个「改舞台」按钮；有内容 → 与从前一模一样。
         self._stage_has = True          # 载入前不收起（构造期间没有"这一拍"）
         self._stage_open = False
         self._stage_toggle = QPushButton('＋ 改舞台（背景 / 立绘 / 音乐）')
@@ -507,18 +531,6 @@ class BeatCardEditor(QWidget):
         self._grid = SpriteGridWidget(symbols=self._symbols, loader=loader,
                                       on_pick_image=self._on_pick_image)
         stage_lay.addWidget(self._grid)
-
-        # —— 当前舞台（这一拍生效的状态）——
-        # 用户 2026-10-03："为何不写明现在的舞台情况是什么样的，旧版明明都有"
-        # 旧版预览面板用的是 `stage_snapshot.stage_digest`，卡片搬 Qt 时没接上。
-        stage_lay.addWidget(self._section('当前舞台（这一拍生效）'))
-        self._stage_label = QLabel('')
-        self._stage_label.setProperty('role', 'note')
-        self._stage_label.setWordWrap(True)
-        self._stage_label.setFont(QFont(T.FONTS['mono'][0],
-                                        T.FONTS['mono'][1]))
-        self._stage_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        stage_lay.addWidget(self._stage_label)
 
         # —— 背景 / 音乐 / 语音（**两行**：背景一行，音乐 + 语音一行）——
         # 每格 = 下拉候选（从**资源表**来）+ 「选择…」按钮（打开资产选择器）。
@@ -783,6 +795,7 @@ class BeatCardEditor(QWidget):
             # 回到普通卡片：台词区与舞台块按这一拍自己的内容重新出现
             # （舞台的显隐规则归 `_apply_stage_visibility`，别在这里另写一套）。
             self._dialogue_box.setVisible(True)
+            self._stage_now.setVisible(True)
             self._apply_stage_visibility()
             if self._loaded_fields:
                 self._loaded_fields.pop('FlowType', None)
@@ -823,6 +836,11 @@ class BeatCardEditor(QWidget):
         self._stage_toggle.setVisible(False)
         self._stage_empty.setVisible(False)
         self._stage_box.setVisible(False)
+        # 「当前舞台」那一行（图 + 摘要）也跟着收起：控制流卡**没有演出**，
+        # 一张 `call` 卡上留着一幅"跳转时台上什么样"的图，纯属占掉半屏
+        # （用户 2026-10-27 反复强调右栏的空间要留给能改的东西）。
+        # 回到普通卡时上面那个分支会把它放出来。
+        self._stage_now.setVisible(False)
         self._refresh_flow_text()
         # 载入时的控制流值也进基线，否则一打开就显示"有未保存的改动"。
         if self._loaded_fields:
@@ -2444,28 +2462,28 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(T.SPACE['xs'])
 
-        # —— ⭐ GitHub 快速 star（**独立件：这三行可以整段删掉**）——
+        # —— 定位（**默认收起**，2026-10-27 用户点名）——
         #
-        # 用户 2026-10-27："再在（卡片编辑器）的稍稍右上方空白处去做一个 github
-        # 的快速 star……我希望它是一个独立于整体界面的代码块，到时候方便取下来，
-        # 不要耽误别人到时候对这个界面的改造。"
+        #   > 还有就是这个定位能不能折叠一下（卡片界面才是最主要的！！！定位
+        #   > 默认折叠起来，卡片界面必须留几乎右边全屏）……留给我的可编辑
+        #   > 窗口太小了！我看不过来！
         #
-        # 约定：控件 / 网络 / 离线降级全在 `ui_qt/github_star.py` 里，这里只有
-        # **一次**挂载调用（它自己插到布局第 0 行、右对齐）。删掉下面这个 try 块
-        # + 那个文件 = 界面完全恢复原样，别处一行都不用动。
-        # 挂不上（老 Qt / 颜色表缺）也只是少一个徽标，绝不拦界面。
-        try:
-            from storygraph.ui_qt.github_star import attach_star_badge
-            attach_star_badge(self, rv)
-        except Exception as e:                 # noqa: BLE001
-            swallow('ui_qt.main_window.star_badge', e)
-
-        # 参考界面的右栏是"属性表在上、正文/预览在下"：先说清"这是哪一拍、
-        # 源在第几行"，再给表单。`PropertyStrip` 自己不取数（`_sync_inspector`）。
-        cap_prop = QLabel('定位（这一拍在文件里的位置）')
-        cap_prop.setProperty('role', 'section')
-        rv.addWidget(cap_prop, 0)
+        # 那 6~7 行（文件 / label / 第几拍 / 类型 / 源位置 / 说话人 / 这一章）
+        # 是"我在哪儿"用的，改台词时不需要一直盯着；收起之后整块高度都还给
+        # 卡片。它**不是消失了**：点一下标题就展开，内容一直是同步的
+        # （`_sync_inspector` 照旧在翻拍时填）。顶部模式条右边也已经有
+        # 「ch01.rpy · ch01 · 第 1 拍」那一句，收起来不会"不知道自己在哪"。
+        self._loc_open = False
+        self._loc_btn = QPushButton('▸ 定位（这一拍在文件里的位置）')
+        self._loc_btn.setProperty('variant', 'chip')
+        self._loc_btn.setFlat(True)
+        self._loc_btn.setToolTip(
+            '文件 / label / 第几拍 / 类型 / 源在文件里的行 —— 点一下展开。'
+            '\n默认收起：把右边这一整栏留给卡片。')
+        self._loc_btn.clicked.connect(self._toggle_location)
+        rv.addWidget(self._loc_btn, 0, Qt.AlignLeft)
         self._inspector = PropertyStrip()
+        self._inspector.setVisible(False)
         rv.addWidget(self._inspector, 0)
         cap3 = QLabel('卡片界面（这一拍）')
         cap3.setProperty('role', 'section')

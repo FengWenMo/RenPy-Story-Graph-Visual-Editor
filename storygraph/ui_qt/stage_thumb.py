@@ -1,9 +1,26 @@
 """
 storygraph.ui_qt.stage_thumb
 ============================
-卡片上的**这一拍的舞台图**（2026-10-27；用户："每一拍的舞台信息那里……
-可以除文字描述之外，给一张这一拍的图片吗？就放在文字描述之前的上面
-（与舞台预览一致的图片，但只有一拍，每当这一排有修改时，重新刷新这一拍的图）"）。
+**这一拍的舞台图**（2026-10-27；用户："每一拍的舞台信息那里……可以除文字
+描述之外，给一张这一拍的图片吗？就放在文字描述之前的上面（与舞台预览一致
+的图片，但只有一拍，每当这一排有修改时，重新刷新这一拍的图）"）。
+
+## 它在卡片上的位置（同一天第二版，改过一次）
+
+第一版把它做成"按卡片宽度的整宽图"（480~1280px 宽、高 270~420），挂在
+台词框下面 —— 用户看到的第一反应是：
+
+> 不对！！！你这个不能放卡片界面啊！！！应该缩小放舞台界面！当前舞台下面
+> 那一栏……缩小！再缩小，直到能看到全貌！不然你现在显示都显示不全何来
+> 调整啊？？？
+
+所以现在是 **`compact=True` 的固定小图（288×162，就是 16:9）**，塞在
+卡片「当前舞台（这一拍生效）」标题下面，**与右边的文字摘要并排**：摘要本来
+就要占那几行字，图因此几乎不额外吃高度，而整帧画面一眼看得全（不再需要
+上下滚半个屏幕才拼得出一张图）。
+
+`compact=False` 的整宽模式**保留**（`sizeHint` 480×270、高度跟宽度走），
+别处要用"一张大图"时仍可拿它；两种模式共用同一条渲染链与缓存。
 
 **像素与舞台预览完全一致**，因为它走的是同一条渲染链：
 
@@ -73,6 +90,14 @@ MAX_TARGET_W = 1280
 #: 控件高度的上下限（16:9 由宽度算；太矮/太高都不好看）。
 MIN_H = 132
 MAX_H = 420
+
+#: 「当前舞台」那一栏里那张图的**固定尺寸**（16:9，2026-10-27 第二版）。
+#:
+#: 288×162 是"整帧都看得见、又不至于把卡片顶下去"的折中：它跟右边的文字
+#: 摘要**并排**，而摘要本来就要占那几行，所以图几乎没有额外的高度成本。
+#: 为什么不更大：用户要的是"能看到全貌、好判断该调什么"，不是"当壁纸看"。
+COMPACT_W = 288
+COMPACT_H = 162
 
 
 # ----------------------------------------------------------------------
@@ -215,7 +240,12 @@ class _Job(QRunnable):
 
 class BeatStageThumb(QWidget):
     """
-    卡片上的"这一拍的舞台图"（16:9，按卡片宽度自适应）。
+    卡片上的"这一拍的舞台图"。
+
+    两种尺寸模式（同一条渲染链、同一个缓存）：
+
+      · `compact=True`（卡片「当前舞台」那一栏，默认）：固定 288×162；
+      · `compact=False`：16:9、按控件宽度自适应（整宽图）。
 
     公共接口（窗口只用这些）：
         set_session / show_beat / clear / note / pixmap / is_pending
@@ -225,13 +255,22 @@ class BeatStageThumb(QWidget):
     #: 画面有效（True）或没有画面（False）。卡片/测试可听。
     rendered = Signal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, compact: bool = False):
         super().__init__(parent)
+        #: 小图（固定尺寸）还是整宽图 —— 决定下面几处尺寸策略。
+        self._compact = bool(compact)
         self.setObjectName('stageThumb')
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(MIN_H)
-        self.setMaximumHeight(MAX_H)
+        if self._compact:
+            # 固定尺寸：塞在标题下面、与摘要并排，**不**跟着列宽长胖。
+            self.setSizePolicy(QSizePolicy.Policy.Fixed,
+                               QSizePolicy.Policy.Fixed)
+            self.setFixedSize(COMPACT_W, COMPACT_H)
+        else:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                               QSizePolicy.Policy.Fixed)
+            self.setMinimumHeight(MIN_H)
+            self.setMaximumHeight(MAX_H)
         self._session = None
         self._project_root = ''
         self._profile = None
@@ -549,16 +588,22 @@ class BeatStageThumb(QWidget):
     # ---------------- 画 ----------------
 
     def hasHeightForWidth(self) -> bool:          # noqa: N802 - Qt 命名
-        return True
+        return not self._compact
 
     def heightForWidth(self, w: int) -> int:      # noqa: N802 - Qt 命名
+        if self._compact:
+            return COMPACT_H
         return max(MIN_H, min(MAX_H, int(round(int(w) * 9.0 / 16.0))))
 
     def sizeHint(self) -> QSize:                  # noqa: N802 - Qt 命名
+        if self._compact:
+            return QSize(COMPACT_W, COMPACT_H)
         return QSize(480, 270)
 
     def _apply_aspect(self):
         """高度跟着宽度走（16:9）—— 卡片列宽变了，图不许变形也不许留大黑边。"""
+        if self._compact:
+            return                                # 小图是固定尺寸（COMPACT_W/H）
         try:
             w = int(self.width() or 0)
             if w <= 0:

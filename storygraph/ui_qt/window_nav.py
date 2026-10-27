@@ -18,8 +18,10 @@
 三个入口的分工
 --------------
 · `_build_mode_bar()`  顶部两格「剧情结构 / 卡片编辑」—— 与 `_set_page` 双向同步；
+  同一条模式条上还挂着那个可整块删掉的 ⭐ 徽标（`ui_qt/github_star.py`）；
 · `_build_nav_dock()`  左侧 `ChapterNavigator`（QDockWidget，不属于任何一页）；
-· `_sync_inspector()`  右栏 `PropertyStrip`：文件 / label / 第几拍 / 类型 / 源行。
+· `_sync_inspector()`  右栏 `PropertyStrip`：文件 / label / 第几拍 / 类型 / 源行；
+· `_toggle_location()` 右栏「定位」的折叠（**默认收起**，把高度留给卡片）。
 
 **点一下就换章是错的**：这一栏紧贴拍列表，手一滑就会重读磁盘。所以导航里
 打开只走双击 / 回车；而换章之前会**先把当前表单落进内存、脏就立刻抄一份
@@ -63,6 +65,8 @@ class WindowNavMixin:
         '_session', '_set_page', '_status', 'apply_current_beat',
         'autosave_now', 'graph', 'import_chapter_files', 'load_script',
         '_show_index', '_swallow_mark', '_report_swallowed',
+        # 右栏「定位」的折叠（2026-10-27）：三件都造在 `_build_card_page` 里
+        '_inspector', '_loc_btn', '_loc_open',
     )
 
     # ------------------------------------------------------------------
@@ -97,6 +101,24 @@ class WindowNavMixin:
         tabs.currentChanged.connect(self._on_mode_tab)
         self._mode_tabs = tabs
         tb.addWidget(tabs)
+
+        # —— ⭐ GitHub 快速 star（**独立件：这一块可以整段删掉**）——
+        #
+        # 用户 2026-10-27 第一次要的是"顺着 GitHub 一键标星"，而且明说要一个
+        # **能整块取下来**的独立件；同一天又纠正了位置：
+        #
+        #   > 还有，github的star我不是叫你放卡片编辑的旁边吗？你应当放第四张图
+        #   > 这里，卡片编辑右边！放错位置啦！！！
+        #
+        # 所以它挂在**模式条**上、紧挨「✎ 卡片编辑」标签右边。为什么不放在
+        # 卡片页右栏（第一版的位置）：那是编辑区，用户要求"右边这一栏几乎
+        # 全留给卡片"；而这个徽标属于"这个工具本身"，挂在两页都在的那一行
+        # 才合理。删掉下面这个 try 块 + `ui_qt/github_star.py` = 界面完全复原。
+        try:
+            from storygraph.ui_qt.github_star import attach_star_badge
+            attach_star_badge(self, tb)
+        except Exception as e:                 # noqa: BLE001 - 挂不上也只是少个徽标
+            swallow('ui_qt.window_nav.star_badge', e)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -347,6 +369,24 @@ class WindowNavMixin:
     # ------------------------------------------------------------------
     #  右栏：属性表
     # ------------------------------------------------------------------
+
+    def _toggle_location(self):
+        """
+        展开 / 收起右栏那块「定位」（默认收起 —— 2026-10-27 用户点名）。
+
+        > 还有就是这个定位能不能折叠一下（卡片界面才是最主要的！！！定位默认
+        > 折叠起来，卡片界面必须留几乎右边全屏）……留给我的可编辑窗口太小了！
+
+        收起时**不删内容**：`PropertyStrip` 一直在，`_sync_inspector` 照旧在
+        翻拍 / 换章时往里填，展开就是对的 —— 这样"折叠"不会变成"看不到真话"。
+        """
+        try:
+            self._loc_open = not bool(getattr(self, '_loc_open', False))
+            self._inspector.setVisible(self._loc_open)
+            self._loc_btn.setText(('▾' if self._loc_open else '▸')
+                                  + ' 定位（这一拍在文件里的位置）')
+        except Exception as e:                    # noqa: BLE001 - 折叠失败不该拦界面
+            swallow('ui_qt.window_nav.toggle_location', e)
 
     def _sync_inspector(self, idx=None):
         """

@@ -15,8 +15,10 @@ tests/test_stage_thumb.py
   · 换拍时**立刻清掉上一张**：卡片写着第 N 拍却画着第 N-1 拍，比空着更糟；
   · 渲染**不占 GUI 线程**：`show_beat` 立刻返回，图在后台出来；
   · 没有画面时**说清原因**（空会话 / 一拍都没有 / 没装 Pillow）；
-  · 卡片接线：图在「当前舞台」文字**上面**，且舞台块收起时它**还在**
-    （真机一章 285 拍里 210 拍没有舞台改动，收起时正好是最需要看图的时候）。
+  · 卡片接线：图在「当前舞台」标题**下面**、摘要**左边**（288×162 的小图，
+    用户 2026-10-27 两次点名："缩小！再缩小，直到能看到全貌"），
+    且舞台块收起时它**还在**（真机一章 285 拍里 210 拍没有舞台改动，
+    收起时正好是最需要看图的时候）。
 """
 
 from __future__ import annotations
@@ -398,18 +400,46 @@ class TestCardWiring:
         assert thumb.objectName() == 'stageThumb'
         assert thumb.beat_index() == card_window._loaded_idx
 
-    def test_it_sits_above_the_stage_text(self, card_window):
+    def test_it_sits_under_the_current_stage_heading(self, card_window):
         """
-        "就放在文字描述之前的上面"：图在「当前舞台」那一块**上面**。
+        "当前舞台下面那一栏"：图在「当前舞台（这一拍生效）」标题**下面**，
+        与文字摘要**并排**（图在左，摘要占右边剩下的宽度）。
 
-        判据用**布局顺序**（根布局里图的序号 < 舞台块的序号），不靠像素 ——
-        无头窗口里控件的几何尺寸不可靠，而"谁在谁上面"就是布局顺序。
+        判据用**布局顺序**（标题 → 那一行 → [图, 摘要]），不靠像素 ——
+        无头窗口里控件的几何尺寸不可靠，而"谁在谁旁边"就是布局顺序。
         """
+        from PySide6.QtWidgets import QLabel
+
         panel = card_window._panel
-        root = panel.layout()
         thumb = panel.stage_thumb()
-        assert root.indexOf(thumb) >= 0, '图不在卡片的布局里'
-        assert root.indexOf(thumb) < root.indexOf(panel._stage_box)
+        # ① 不再挂在卡片顶部（第一版的位置，用户否掉了）
+        assert panel.layout().indexOf(thumb) == -1, \
+            '图又回到卡片顶部了（应在「当前舞台」那一块里面）'
+        assert thumb.parent() is panel._stage_now, '图不在「当前舞台」那一块里'
+        # ② 那一块的第一行是标题，第二行才是 图 + 摘要
+        lay = panel._stage_now.layout()
+        head = lay.itemAt(0).widget()
+        assert isinstance(head, QLabel) and '当前舞台' in head.text(), head
+        row = lay.itemAt(1).layout()
+        assert row is not None, '图与摘要不是并排的一行'
+        assert row.itemAt(0).widget() is thumb, '图不在这一行的最左边'
+        assert row.itemAt(1).widget() is panel._stage_label, \
+            '摘要不在图的右边'
+
+    def test_the_picture_is_a_small_whole_frame(self, card_window):
+        """
+        "缩小！再缩小，直到能看到全貌"：固定 16:9 的小图（288×162），
+        **不是**按列宽撑满的大图（那样一屏看不全，也就没法照着调）。
+        """
+        from PySide6.QtCore import QSize
+
+        from storygraph.ui_qt.stage_thumb import COMPACT_H, COMPACT_W
+
+        thumb = card_window._panel.stage_thumb()
+        assert (COMPACT_W, COMPACT_H) == (288, 162)
+        assert thumb.sizeHint() == QSize(COMPACT_W, COMPACT_H), thumb.sizeHint()
+        assert thumb.maximumWidth() <= 320, '小图不该跟着列宽长胖'
+        assert thumb.maximumHeight() <= 180, '小图不该比一行摘要高太多'
 
     def test_it_stays_when_the_stage_block_is_collapsed(self, card_window):
         """

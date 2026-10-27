@@ -76,9 +76,9 @@ class TestItStaysDetachable:
                if f'import {name}' in text or f'from {name}' in text]
         assert bad == [], f'这个独立件开始依赖界面/业务代码了：{bad}'
 
-    def test_only_the_main_window_mounts_it(self):
+    def test_only_the_mode_bar_mounts_it(self):
         """
-        整个界面里**只有一处**挂载（`main_window` 的那三行 try 块）。
+        整个界面里**只有一处**挂载（`window_nav._build_mode_bar` 的三行 try 块）。
 
         这条判据的意义：以后谁重构界面，删掉那一处 + 那个文件就干净了；
         一旦有人在别的窗口里也 import 它，这条会红。
@@ -90,7 +90,7 @@ class TestItStaysDetachable:
             text = path.read_text(encoding='utf-8')
             if 'github_star' in text:
                 hits.append(path.name)
-        assert hits == ['main_window.py'], f'挂载点不止一处：{hits}'
+        assert hits == ['window_nav.py'], f'挂载点不止一处：{hits}'
 
 
 # ==================================================================
@@ -311,31 +311,56 @@ class TestTokenAndHttp:
 
 
 # ==================================================================
-#  四、卡片页接线
+#  四、顶部模式条接线
 # ==================================================================
 
-class TestCardPageWiring:
-    def test_the_badge_is_on_the_card_page_top_right(self, ui_window):
+class TestModeBarWiring:
+    def test_the_badge_sits_right_of_the_card_tab(self, ui_window):
+        """
+        "你应当放第四张图这里，卡片编辑右边"：
+        徽标在**顶部模式条**上，紧挨「✎ 卡片编辑」标签右边 —— 不是卡片页右栏。
+        """
         badge = getattr(ui_window, '_github_star', None)
-        assert badge is not None, '卡片页上没有 star 徽标'
+        assert badge is not None, '模式条上没有 star 徽标'
         assert badge.objectName() == 'githubStar'
-        layout = badge.parentWidget().layout()
-        assert layout is not None and layout.indexOf(badge) == 0, \
-            '徽标不在右栏的第一行（"稍右上方"）'
         assert badge.text().startswith('★')
+
+        bar = ui_window._tb_modes
+        assert badge.parentWidget() is bar, '徽标不在顶部模式条上'
+        acts = bar.actions()
+
+        def _at(widget):
+            for i, a in enumerate(acts):
+                if a.defaultWidget() is widget:
+                    return i
+            return -1
+
+        tabs_at = _at(ui_window._mode_tabs)
+        badge_at = _at(badge)
+        assert tabs_at >= 0 and badge_at >= 0, '徽标或模式标签不在模式条上'
+        assert badge_at == tabs_at + 1, '徽标不在「卡片编辑」标签右边'
+
+    def test_it_is_not_in_the_card_column(self, ui_window):
+        """
+        卡片页右栏"几乎全留给卡片"（用户 2026-10-27）—— 徽标不许再挤在那里。
+        """
+        badge = ui_window._github_star
+        page = ui_window._stack.widget(ui_window.PAGE_CARD)
+        assert not page.isAncestorOf(badge), '徽标又跑回卡片页里了'
 
     def test_removing_it_leaves_nothing_behind(self, ui_window):
         """
-        删掉徽标之后，卡片页照常工作（= 它没有别的地方依赖）。
+        删掉徽标之后，界面照常工作（= 它没有别的地方依赖）。
 
         判据不是"删除代码"，而是"删掉这个控件之后不残留任何东西"：
-        布局里少一个、窗口上那个引用是它本身（删代码时一起删）。
+        模式条上少一个动作、窗口上那个引用是它本身（删代码时一起删）。
         """
         badge = ui_window._github_star
-        layout = badge.parentWidget().layout()
-        layout.removeWidget(badge)
+        bar = ui_window._tb_modes
+        act = next(a for a in bar.actions() if a.defaultWidget() is badge)
+        bar.removeAction(act)
         badge.deleteLater()
-        assert layout.indexOf(badge) == -1
+        assert not any(a.defaultWidget() is badge for a in bar.actions())
         # 卡片页其余部分不受影响
         assert ui_window._panel is not None
         ui_window._show_index(0)
