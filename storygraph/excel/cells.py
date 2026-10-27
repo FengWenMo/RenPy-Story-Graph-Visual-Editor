@@ -22,11 +22,43 @@ openpyxl 会给以 ``=`` 开头的字符串自动打上 ``data_type='f'``（公�
 """
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from storygraph.core.safeguard import swallow
 from storygraph.core.cell_limits import (CELL_TEXT_LIMIT, CellTextTooLong,
                                           over_limit)
+
+#: xlsx（XML 1.0）**根本装不下**的控制字符：`U+0000~U+0008` / `U+000B` /
+#: `U+000C` / `U+000E~U+001F`（`\t` `\n` `\r` 是合法的，不在此列）。
+#:
+#: 2026-10-28 真机（用户项目 `chapter3_3_3.rpy` 第 79 行）撞上：一句台词里
+#: 混进两个 `U+0005`，`openpyxl` 直接抛 `IllegalCharacterError` ——
+#: **整份剧本表一行都导不出来**，而错因是五万行里的一格。它是不可见字符，
+#: Excel 里没有任何表示法；这里**剥掉**（而不是让整张表失败），但每剥一次
+#: 都进 `safeguard`：崩溃日志的「静默失败清单」会点名到具体单元格，
+#: "悄悄改内容"仍然是不允许的。
+_ILLEGAL_XML_CHARS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
+def xml_safe(value, where: str = ''):
+    """
+    剥掉 Excel 装不下的控制字符（非字符串原样返回）。
+
+    返回**新值**，不改入参。`where` 只用于留痕（`'Beats!R61C7'` 这种），
+    让 `safeguard.report()` 能指到"哪张表哪一格"。
+    """
+    if not isinstance(value, str):
+        return value
+    clean = _ILLEGAL_XML_CHARS.sub('', value)
+    if clean == value:
+        return value
+    codes = sorted({f'U+{ord(ch):04X}' for ch in value
+                    if _ILLEGAL_XML_CHARS.match(ch)})
+    swallow('excel.cells.xml_safe：剥掉 Excel 装不下的控制字符'
+            + (f'（{where}）' if where else ''),
+            ValueError(f'{len(value) - len(clean)} 个：{"、".join(codes)}'))
+    return clean
 
 
 def set_text(ws, row, col, value):
@@ -38,9 +70,17 @@ def set_text(ws, row, col, value):
     写下去会被 openpyxl 静默截断，而"少了几千字还零警告"是本项目最不能
     接受的一类缺陷。调用方（`excel_export`）会先按行 / 字段做一次带
     行号的检查，这里只兜底 —— 任何一条漏网的写路径都不会把内容写残。
+
+    ⚠ 还有一道：xlsx **装不下**的控制字符（`U+0000~08` / `0B` / `0C` /
+    `0E~1F`）在这里先剥掉并留痕 —— 见 `xml_safe`。不剥的话，
+    一格脏会让**整份工作簿**都写不出来（2026-10-28 真机就是这么撞上的）。
     """
+    where = f'{ws.title}!R{row}C{col}'
+    # 先剥控制字符再判长度：剥完可能变短，但**不能**因为一格里有 `\x05`
+    # 就让整张表导不出来（见 `xml_safe` 的说明）。
+    value = xml_safe(value, where=where)
     if over_limit(value):
-        raise CellTextTooLong([{'where': f'{ws.title}!R{row}C{col}',
+        raise CellTextTooLong([{'where': where,
                                 'field': '', 'length': len(str(value))}],
                               where=f'写 {ws.title} 的第 {row} 行第 {col} 列')
     cell = ws.cell(row=row, column=col)
@@ -118,4 +158,4 @@ def set_row(ws, row: int, values: Iterable):
     return cells
 
 
-__all__ = ['set_text', 'append_text_row', 'set_row']
+__all__ = ['set_text', 'append_text_row', 'set_row', 'xml_safe']
