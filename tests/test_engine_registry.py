@@ -22,12 +22,17 @@ sys.path.insert(0, str(ROOT))
 
 from storygraph.core import engine_facts as EF                        # noqa: E402
 
+#: "采全了"的派生段（2026-10-27 审计：说采到了，`derived` 就不能空着）。
+_DERIVED = {'overridden_builtins': [], 'undeclared_heads': [],
+            'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'}
+
 
 def _facts_with_registry(statements, *, clean=True):
     return EF.build_facts(
         {'statements': [(EF.SRC_PROBE, statements)]},
         collection={'parse_clean': clean, 'probe_complete': clean,
-                    'lint_exit': 0})
+                    'lint_exit': 0},
+        derived=_DERIVED)
 
 
 #: 真机（最小工程，注册了 weather）实测的形状

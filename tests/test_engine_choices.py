@@ -30,6 +30,11 @@ from storygraph.app import beats                                      # noqa: E4
 from storygraph.app.session_graph import GraphSessionMixin            # noqa: E402
 from storygraph.core import engine_facts as EF                        # noqa: E402
 
+#: "采全了"的派生段（2026-10-27 审计：`collection` 说采到了，`derived` 就不能空着；
+#: 采集器每次都会写这三个键，测试里造"可用事实"也要带上）。
+_DERIVED = {'overridden_builtins': [], 'undeclared_heads': [],
+            'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'}
+
 
 def _facts(attrs, candidates):
     """
@@ -42,7 +47,8 @@ def _facts(attrs, candidates):
     return EF.build_facts({
         'attributes': [(EF.SRC_PROBE, attrs)],
         'candidates': [(EF.SRC_PROBE, candidates)],
-    }, collection={'parse_clean': True, 'probe_complete': True})
+    }, collection={'parse_clean': True, 'probe_complete': True},
+        derived=_DERIVED)
 
 
 LAN_ATTRS = {
@@ -227,7 +233,8 @@ def _write_facts(root, **collection):
     facts = EF.build_facts({'images': [(EF.SRC_PROBE, ['lan'])]},
                            collection={'parse_clean': True,
                                        'probe_complete': True,
-                                       **collection})
+                                       **collection},
+                           derived=_DERIVED)
     EF.facts_path(root).write_text(EF.dumps(facts), encoding='utf-8')
     return facts
 
@@ -476,7 +483,8 @@ class TestDiffFacts:
     def _f(self, **kw):
         payload = {k: [(EF.SRC_PROBE, v)] for k, v in kw.items()}
         return EF.build_facts(payload, collection={'parse_clean': True,
-                                                   'probe_complete': True})
+                                                   'probe_complete': True},
+                              derived=_DERIVED)
 
     def test_identical_is_same(self):
         a = self._f(labels=['start', 'end'])
@@ -504,10 +512,12 @@ class TestDiffFacts:
     def test_engine_version_change_counts_as_drift(self):
         a = EF.build_facts({}, engine={'version': '8.4.1'},
                            collection={'parse_clean': True,
-                                       'probe_complete': True})
+                                       'probe_complete': True},
+                           derived=_DERIVED)
         b = EF.build_facts({}, engine={'version': '8.5.3'},
                            collection={'parse_clean': True,
-                                       'probe_complete': True})
+                                       'probe_complete': True},
+                           derived=_DERIVED)
         d = EF.diff_facts(a, b)
         assert d['same'] is False
         assert d['engine']['version'] == ('8.4.1', '8.5.3')
@@ -559,7 +569,8 @@ class TestCliDriftGate:
         payload = {k: [(EF.SRC_PROBE, v)] for k, v in kw.items()}
         facts = EF.build_facts(payload, engine={'version': '8.5.3'},
                                collection={'parse_clean': True,
-                                           'probe_complete': True})
+                                           'probe_complete': True},
+                               derived=_DERIVED)
         path.write_text(EF.dumps(facts), encoding='utf-8')
         return facts
 
@@ -636,7 +647,8 @@ class TestSessionEngineFacts:
         facts = EF.build_facts({'images': [(EF.SRC_PROBE, ['lan', 'ye'])],
                                 'labels': [(EF.SRC_PROBE, ['start'])]},
                                collection={'parse_clean': True,
-                                           'probe_complete': True})
+                                           'probe_complete': True},
+                               derived=_DERIVED)
         # 确保 mtime 变化（同一纳秒内写入会命中旧缓存）
         path.write_text(EF.dumps(facts), encoding='utf-8')
         stat = path.stat()
@@ -654,9 +666,11 @@ class TestSessionWarnings:
     def test_overridden_builtin_is_reported(self, tmp_path):
         facts = EF.build_facts({}, collection={'parse_clean': True,
                                               'probe_complete': True},
-                               derived={'overridden_builtins': [
-                                   {'name': 'pause', 'file': 'aa.rpy',
-                                    'line': 3, 'reason': '内置'}]})
+                               derived=dict(
+                                   _DERIVED,
+                                   overridden_builtins=[
+                                       {'name': 'pause', 'file': 'aa.rpy',
+                                        'line': 3, 'reason': '内置'}]))
         EF.facts_path(tmp_path).write_text(EF.dumps(facts), encoding='utf-8')
         warnings = GraphSessionMixin.engine_facts_warnings(_Stub(tmp_path))
         assert warnings and 'pause' in warnings[0]

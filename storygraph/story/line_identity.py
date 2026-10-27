@@ -53,6 +53,10 @@ def allocate(used, label: str) -> str:
       · 不回收：删掉的号不会因为"空出来了"被再发一次（只要 `used` 里还留着它，
         或者它是当前最大值被删——这一档见契约 §3 的 I3 局限）；
       · 不撞车：就算 `used` 里已经有人手写过 `ch01.0007`，也会跳过。
+
+    ⚠ **`used` 要给全**（2026-10-27）：重号发号时传"整批已有的号"，
+    不是"已经处理过的那几条" —— 否则新号可能落到后面某一拍头上，
+    把没重号的行也挤得换身份（见 `unique_ids` 的说明）。
     """
     label = str(label or '').strip() or 'start'
     top = 0
@@ -79,10 +83,25 @@ def unique_ids(beats) -> bool:
     `ch01.0003` 出现在 `ch02` 名下是合法的；ID 前缀只是**历史来源**，
     不是当前归属。从前这里写 `parse(lid)[0]`，于是搬过去的行重号后
     又挂回 `ch01` —— 与 `editor._renumber` 是同一个病的第二个入口。
+
+    ⚠ **只许改重复的那几条**（2026-10-27 审计，P0）：从前的写法只用"已经
+    扫过的 `seen`"算 `max + 1`，于是给重号行发出的新号可能恰好是**后面某一
+    拍正在用的号** —— 那一拍随后也被当成"重号"再改一次，于是一路级联：
+
+        [ch01.0001, ch01.0001, ch01.0002]
+        → [ch01.0001, ch01.0002, ch01.0003]   ← 第三拍从未重号，身份被改
+
+    而"其余行不变"正是契约 R5/R6/R7 那三条的全部意义（身份一旦漂移，
+    TTS 语音缓存 / XLIFF 的 `trans-unit/@id` / 协作库主键全部错位，且**静默**）。
+    所以发号底座是"**整批已用 + 本次已发出的**"，级联在结构上就不可能发生。
     """
+    beats = list(beats or ())
+    #: 整批**已有的**号（含还没轮到的那些拍）—— 发新号时一个都不许撞上。
+    reserved = {str(getattr(b, 'line_id', '') or '').strip() for b in beats}
+    reserved.discard('')
     seen = set()
     changed = False
-    for beat in beats or ():
+    for beat in beats:
         lid = str(getattr(beat, 'line_id', '') or '').strip()
         if not lid:
             continue
@@ -92,9 +111,10 @@ def unique_ids(beats) -> bool:
             if not label:
                 got = parse(lid)
                 label = got[0] if got else 'start'
-            new = allocate(seen, label)
+            new = allocate(reserved, label)
             beat.line_id = new
             seen.add(new)
+            reserved.add(new)
             changed = True
         else:
             seen.add(lid)

@@ -312,3 +312,73 @@ class TestAllocator:
         assert unique_ids(beats) is True
         assert beats[0].line_id == 'a.0001'      # 第一次出现的保留
         assert len({b.line_id for b in beats}) == 3
+
+    # ------------------------------------------------------------------
+    #  重号只许动重复的那一条（2026-10-27 审计 P0）
+    # ------------------------------------------------------------------
+
+    def test_the_duplicate_does_not_steal_a_later_rows_number(self):
+        """
+        审计实测的最小复现：`[0001, 0001, 0002]` 从前会变成
+        `[0001, 0002, 0003]` —— **第三拍从未重号**，身份却被改掉了。
+
+        正确的结局只有一种：重复的那条拿一个"整批都没用过"的号（0003），
+        第三拍守着自己的 0002。
+        """
+        class B:
+            def __init__(self, lid):
+                self.line_id = lid
+                self.label = 'ch01'
+
+        beats = [B('ch01.0001'), B('ch01.0001'), B('ch01.0002')]
+        assert unique_ids(beats) is True
+        assert [b.line_id for b in beats] == \
+            ['ch01.0001', 'ch01.0003', 'ch01.0002']
+
+    def test_renumbering_never_cascades_to_innocent_rows(self):
+        """
+        "其余行不变"（R5/R6/R7）：**在输入里本来就唯一**的 ID 一个都不许换。
+
+        三种顺序都试（重复在首 / 在尾 / 在中间，以及重复之后还有长尾）——
+        老实现只在"重复恰好在最后"时才对（原用例正是那一种，所以它一直是绿的）。
+        """
+        class B:
+            def __init__(self, lid):
+                self.line_id = lid
+                self.label = 'ch01'
+
+        cases = (
+            ['ch01.0001', 'ch01.0001', 'ch01.0002'],
+            ['ch01.0002', 'ch01.0001', 'ch01.0002'],
+            ['ch01.0001', 'ch01.0002', 'ch01.0001'],
+            ['ch01.0001', 'ch01.0001', 'ch01.0002', 'ch01.0003'],
+            ['ch01.0003', 'ch01.0004', 'ch01.0003', 'ch01.0005'],
+        )
+        for given in cases:
+            beats = [B(i) for i in given]
+            unique_ids(beats)
+            got = [b.line_id for b in beats]
+            assert len(set(got)) == len(got), (given, got)
+            innocent = {i for i in given if given.count(i) == 1}
+            assert innocent <= set(got), (
+                f'这些本来唯一的行被改了身份：{sorted(innocent - set(got))}'
+                f'\n输入 {given} → 输出 {got}')
+            # 第一次出现的那条也不许动（保留"先到先得"）
+            assert got[given.index(given[0])] == given[0], (given, got)
+
+    def test_a_duplicate_still_gets_a_number_nobody_uses(self):
+        """
+        修法的另一半：新号仍要"不撞车、不回收" —— 不许为了不级联就退回
+        `[0001, 0001, 0001]` 这种更坏的结果。
+        """
+        class B:
+            def __init__(self, lid):
+                self.line_id = lid
+                self.label = 'ch01'
+
+        beats = [B('ch01.0001'), B('ch01.0001'), B('ch01.0001')]
+        assert unique_ids(beats) is True
+        got = [b.line_id for b in beats]
+        assert got[0] == 'ch01.0001'
+        assert len(set(got)) == 3, got
+        assert all(i.startswith('ch01.') for i in got), got

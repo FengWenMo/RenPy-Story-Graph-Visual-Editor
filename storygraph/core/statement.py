@@ -225,12 +225,19 @@ _HASH_FIELDS = {
 # ID，真实项目 7 条），声明里却只写了 `target`；`SHOW` 漏了
 # `at` / `as_` / `with_` / `zorder` / `onlayer` / `behind` / `is_expression`。
 #
+# ⚠ **"只在真有时才进 payload"的可选字段也要列进来**（2026-10-27 审计）：
+# `tail`（`{color=…}` 这类台词后缀）/ `extras`（menu 里的 `set seen` 等）/
+# `name` / `args`（menu 名与参数、call 的参数）/ `value`（`return 1`）都是
+# "有才写"的键。老版本没列它们，而判据是拿**默认参数**造样例的 ——
+# 于是"新增一个可选字段漏声明"永远抓不到（注释里那句"漏改会当场变红"
+# 对可选字段根本不成立）。现在样例把可选参数都传上，判据才真的覆盖。
+#
 # 这份清单的正确性由 `tests/test_kind_declaration_sync.py` 守着：
-# 它拿真的工厂产出与这里逐一对照，**新增字段漏改会当场变红**。
+# 它拿真的工厂产出与这里逐一对照。
 _FACTORY_FIELDS = {
-    StatementKind.SAY:         ('speaker', 'text'),
+    StatementKind.SAY:         ('speaker', 'text', 'tail'),
     StatementKind.EXTEND:      ('text',),
-    StatementKind.MENU:        ('caption',),
+    StatementKind.MENU:        ('caption', 'extras', 'name', 'args'),
     StatementKind.MENU_OPTION: ('text',),
     StatementKind.SHOW:        ('image', 'at', 'as_', 'with_', 'zorder',
                                 'onlayer', 'behind', 'is_expression'),
@@ -241,8 +248,8 @@ _FACTORY_FIELDS = {
                                 'fadein', 'fadeout'),
     StatementKind.VOICE:       ('name',),
     StatementKind.JUMP:        ('target',),
-    StatementKind.CALL:        ('target', 'from_clause'),
-    StatementKind.RETURN:      (),
+    StatementKind.CALL:        ('target', 'from_clause', 'args'),
+    StatementKind.RETURN:      ('value',),
     StatementKind.PYTHON:      ('code',),
     StatementKind.COMMENT:     ('text',),
     StatementKind.RAW:         ('text', 'raw_kind'),

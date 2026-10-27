@@ -32,10 +32,16 @@ def _samples() -> dict:
 
     `condition` / `source` 不是 payload 字段（它们是 `Statement` 自己的
     属性），所以不在这里。
+
+    ⚠ **可选字段也要传**（2026-10-27 审计）：`make_say(tail=…)` /
+    `make_menu(extras=…, name=…, args=…)` / `make_call(args=…)` /
+    `make_return(value=…)` 都只在"真有"时才往 payload 里写键。老版本这里
+    全用默认参数调用，于是**永远看不到**这些键 —— 判据对"可选字段"形同虚设
+    （`_FACTORY_FIELDS` 里漏了 `tail`/`extras`/`name`/`args`/`value` 也没人发现）。
     """
     S = Statement
     return {
-        StatementKind.SAY: S.make_say('e', '一句'),
+        StatementKind.SAY: S.make_say('e', '一句', tail=' (what_color="#f00")'),
         StatementKind.EXTEND: S.make_extend('一句'),
         StatementKind.SHOW: S.make_show(
             'ling happy', at=['left'], as_='q', with_='dissolve',
@@ -43,11 +49,13 @@ def _samples() -> dict:
         StatementKind.SCENE: S.make_scene('bg room', at=['bgfit'],
                                           with_='fade', onlayer='master'),
         StatementKind.HIDE: S.make_hide('ling', with_='dissolve'),
-        StatementKind.MENU: S.make_menu('选哪个'),
+        StatementKind.MENU: S.make_menu('选哪个', extras=['set seen'],
+                                        name='m1', args='(x)'),
         StatementKind.MENU_OPTION: S.make_menu_option('左边'),
         StatementKind.JUMP: S.make_jump('target_label'),
-        StatementKind.CALL: S.make_call('target_label', from_clause='_c_1'),
-        StatementKind.RETURN: S.make_return(),
+        StatementKind.CALL: S.make_call('target_label', from_clause='_c_1',
+                                        args='(1)'),
+        StatementKind.RETURN: S.make_return(value='1'),
         StatementKind.PYTHON: S.make_python('x = 1'),
         StatementKind.COMMENT: S.make_comment('# 给美术的标注'),
         StatementKind.RAW: S.make_raw('pause 1.0', raw_kind='unmodeled'),
@@ -103,6 +111,24 @@ def test_call_declares_from_clause():
     """
     assert 'from_clause' in _FACTORY_FIELDS[StatementKind.CALL], \
         '_FACTORY_FIELDS[CALL] 必须声明 from_clause'
+
+
+def test_optional_payload_fields_are_declared_too():
+    """
+    **只在"真有"时才进 payload 的字段也要声明**（2026-10-27 审计）。
+
+    这些键默认调用时根本不出现，所以"漏声明"不会让任何判据变红 ——
+    除非样例把可选参数都传上（见 `_samples()` 的说明）。
+    """
+    expected = {
+        StatementKind.SAY: {'tail'},
+        StatementKind.MENU: {'extras', 'name', 'args'},
+        StatementKind.CALL: {'args'},
+        StatementKind.RETURN: {'value'},
+    }
+    for kind, keys in expected.items():
+        declared = set(_FACTORY_FIELDS.get(kind, ()))
+        assert keys <= declared, f'{kind} 少了可选字段的声明：{sorted(keys - declared)}'
 
 
 def test_hash_contract_still_passes():

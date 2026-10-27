@@ -33,7 +33,8 @@ def _facts(undeclared, *, statements=None, parse_clean=True, probe=True):
          'images': [(EF.SRC_PROBE, [])]},
         collection={'parse_clean': parse_clean, 'probe_complete': probe,
                     'lint_exit': 0},
-        derived={'undeclared_heads': undeclared,
+        derived={'overridden_builtins': [],
+                 'undeclared_heads': undeclared,
                  'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'},
     )
 

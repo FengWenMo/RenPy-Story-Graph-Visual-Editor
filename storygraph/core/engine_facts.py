@@ -60,9 +60,23 @@ FACT_KEYS = (
 )
 
 #: `derived` 段（**工具自己算的**，与"引擎给的"分开，避免混为一谈）。
+#:
+#: ⚠ 2026-10-27 审计：`group_conflicts` 曾列在这里，但**从来没有任何代码写它**
+#: —— 它其实是查询（`group_conflicts(facts, tag, attrs)` 每次按 `attributes`
+#: 现算）。声明里挂一个永远不写的键，等于教下一个人去找一个不存在的东西，
+#: 所以删掉；要冲突结论请直接调那个查询。
 DERIVED_KEYS = (
-    'overridden_builtins', 'group_conflicts', 'undeclared_heads', 'scan_disclaimer',
+    'overridden_builtins', 'undeclared_heads', 'scan_disclaimer',
 )
+
+#: `gaps` 里 `derived` 缺口的键前缀：`derived.overridden_builtins` 这种写法
+#: 与 facts 的缺口（`images`）共用一张表，**"没算出来"只有一种表示**。
+DERIVED_GAP_PREFIX = 'derived.'
+
+
+def derived_gap_key(name: str) -> str:
+    """`'overridden_builtins'` → `'derived.overridden_builtins'`（写 gaps 用）。"""
+    return DERIVED_GAP_PREFIX + str(name or '')
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +150,16 @@ def gaps_of(facts: dict) -> list:
             if isinstance(g, dict)]
 
 
+def _gap_key_known(key) -> bool:
+    """`gaps` 里允许的键：facts 的键，或 `derived.<已登记的派生键>`。"""
+    text = str(key or '')
+    if text in FACT_KEYS:
+        return True
+    if text.startswith(DERIVED_GAP_PREFIX):
+        return text[len(DERIVED_GAP_PREFIX):] in DERIVED_KEYS
+    return False
+
+
 def validate_facts(facts) -> list:
     """
     校验一份事实 → **问题清单**（空列表 = 通过）。纯函数。
@@ -144,6 +168,9 @@ def validate_facts(facts) -> list:
       · 不是 dict / 缺 schema / schema 版本不认识；
       · `facts` 段里出现**未知键**（多出来的东西要报，不能悄悄留着）；
       · **任何一条事实没有 `source`** —— 这条最重要：没有来源就无法判断"引擎变了没有"；
+      · `derived` 段（**工具自己算的**）也要有交代（2026-10-27 审计）：
+        不是 dict / 出现未知键 → 报；**声明"采到了"却缺派生键** → 报
+        （除非 `gaps` 里有一条 `derived.<键>` 说明为什么没算出来）；
       · `collection` 段缺 `parse_clean` / `probe_complete`（采不到就没法用它判定）。
     """
     problems = []
@@ -182,6 +209,7 @@ def validate_facts(facts) -> list:
                 problems.append(f'collection 缺 {k}')
 
     gaps = facts.get('gaps')
+    gap_rows = gaps if isinstance(gaps, list) else []
     if gaps is not None:
         if not isinstance(gaps, list):
             problems.append('gaps 不是列表')
@@ -192,10 +220,40 @@ def validate_facts(facts) -> list:
                     continue
                 if not str(gap.get('key') or ''):
                     problems.append(f'gaps[{i}] 缺 key')
-                elif gap.get('key') not in FACT_KEYS:
-                    problems.append(f'gaps[{i}] 的 key 不认识：{gap.get("key")!r}')
+                elif not _gap_key_known(gap.get('key')):
+                    problems.append(f'gaps[{i}] 的 key 不认识：{gap.get("key")!r}'
+                                    '（facts 的键，或 derived.<派生键>）')
                 if not str(gap.get('reason') or ''):
                     problems.append(f'gaps[{i}] 缺 reason —— 没取到也要说清为什么')
+
+    # —— derived 段（工具自己算的）也必须有交代（2026-10-27 审计）——
+    #
+    # 从前这里**一个字都不查**：于是 `derived` 少一个键、或扫描器抛异常被
+    # swallow 成 `[]`，与"项目确实没有覆盖内置语句"在文件里长得一模一样。
+    # 那正是 `gaps` 机制在 `facts` 段落防住的事，`derived` 段原样重演。
+    derived_sec = facts.get('derived')
+    if derived_sec is None:
+        derived_sec = {}
+    if not isinstance(derived_sec, dict):
+        problems.append('derived 不是 dict')
+        derived_sec = {}
+    else:
+        for key in derived_sec:
+            if key not in DERIVED_KEYS:
+                problems.append(
+                    f'derived 里有未知键：{key!r}（不静默忽略，请登记）')
+    collected = (isinstance(coll, dict)
+                 and bool(coll.get('parse_clean'))
+                 and bool(coll.get('probe_complete')))
+    if collected:
+        explained = {str(g.get('key') or '') for g in gap_rows
+                     if isinstance(g, dict)}
+        for key in DERIVED_KEYS:
+            if key in derived_sec or derived_gap_key(key) in explained:
+                continue
+            problems.append(
+                f'derived 缺 {key} —— 采到了就要算它；没算出来请写一条 '
+                f'gaps: {{"key": "{derived_gap_key(key)}", "reason": …}}')
     return problems
 
 
@@ -881,12 +939,17 @@ def merge_fact(contributions) -> tuple:
 
 
 def build_facts(payloads: dict, *, engine=None, fingerprint=None,
-                collection=None, lint=None, derived=None) -> dict:
+                collection=None, lint=None, derived=None,
+                extra_gaps=None) -> dict:
     """
     把 `{键: [(来源, 值), …]}` 装配成一份完整事实（含冲突记录）。纯函数。
 
     这是采集器的**最后一公里**（采集器只管跑引擎、收原始数据）。
     放进纯层是为了让"来源/冲突"这套规矩能被单测覆盖，不必真跑引擎。
+
+    `extra_gaps`：**调用方已知的缺口**（`[{'key','reason'}, …]`）—— 主要是
+    `derived.*` 那几条（扫描器抛异常时"没算出来"要留痕，2026-10-27 审计）。
+    与 payload 里"来源返回 None"产生的缺口合并到一起。
     """
     out = empty_facts()
     out['engine'] = dict(engine or {})
@@ -929,7 +992,9 @@ def build_facts(payloads: dict, *, engine=None, fingerprint=None,
                            'None 或未产出）—— 不能当成"项目里没有"'),
             })
     out['conflicts'] = conflicts
-    out['gaps'] = gaps
+    # 调用方给的缺口（`derived.*`）跟在 payload 缺口后面：一张表、一种表示。
+    out['gaps'] = gaps + [dict(g) for g in (extra_gaps or ())
+                          if isinstance(g, dict)]
     return out
 
 

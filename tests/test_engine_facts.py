@@ -90,6 +90,7 @@ class TestCollectable:
         f = EF.empty_facts()
         f['collection'].update(parse_clean=True, probe_complete=True)
         f['facts']['images'] = {'value': ['x'], 'source': EF.SRC_PROBE}
+        f['derived'] = dict(DERIVED)
         ok, reason = EF.is_collectable(f)
         assert ok and reason == ''
 
@@ -122,6 +123,12 @@ class TestMerge:
         assert conflicts and conflicts[0]['sources'] == [EF.SRC_PROBE, EF.SRC_JSON_DUMP]
 
 
+#: 一份"采全了"的派生段。2026-10-27 审计之后：`collection` 说"采到了"，
+#: `derived` 就不能是空的 —— 采集器（`engine_collect`）每次都会写这三个键。
+DERIVED = {'overridden_builtins': [], 'undeclared_heads': [],
+           'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'}
+
+
 class TestBuildFacts:
     def test_assembles_and_tags_conflicts_with_field(self):
         facts = EF.build_facts({
@@ -151,7 +158,8 @@ class TestBuildFacts:
             'images': [(EF.SRC_PROBE, None)],
             'tags': [(EF.SRC_PROBE, {})],
             'transforms': [(EF.SRC_JSON_DUMP, ['left'])],
-        }, collection={'parse_clean': True, 'probe_complete': True})
+        }, collection={'parse_clean': True, 'probe_complete': True},
+            derived=DERIVED)
 
         assert EF.value_of(facts, 'tags') == {}, '空值也是"采到了"'
         assert EF.source_of(facts, 'tags') == EF.SRC_PROBE
@@ -164,7 +172,8 @@ class TestBuildFacts:
         facts = EF.build_facts(
             {'images': [(EF.SRC_PROBE, None)],
              'attributes': [(EF.SRC_PROBE, {'lan': []})]},
-            collection={'parse_clean': True, 'probe_complete': True})
+            collection={'parse_clean': True, 'probe_complete': True},
+            derived=DERIVED)
         ok, why = EF.is_collectable(facts)
         assert ok is True, '缺一类资源不该把整份事实判成不可用'
         assert '部分可用' in why and 'images' in why
@@ -174,6 +183,72 @@ class TestBuildFacts:
                                                'probe_complete': True})
         facts['gaps'] = [{'key': 'images'}]
         assert any('reason' in p for p in EF.validate_facts(facts))
+
+
+# ---------------------------------------------------------------------------
+#  derived 段：也要有交代（2026-10-27 审计）
+# ---------------------------------------------------------------------------
+
+class TestDerivedSection:
+    """
+    审计原话："`derived` 段既无校验、也无'我没算出来'的通道"。
+
+    后果与 `facts` 段那个坑一模一样：`derived` 少一个键、或扫描器抛异常被
+    `swallow` 成 `[]`，与"项目确实没有覆盖内置语句"在文件里长得一样。
+    """
+
+    def _ok(self, derived=None, gaps=None):
+        return EF.build_facts(
+            {'attributes': [(EF.SRC_PROBE, {'lan': []})]},
+            collection={'parse_clean': True, 'probe_complete': True},
+            derived=derived if derived is not None else DERIVED,
+            extra_gaps=gaps)
+
+    def test_the_collector_only_declares_keys_it_really_writes(self):
+        """
+        `group_conflicts` 曾经在 `DERIVED_KEYS` 里，但**没有任何代码写它**
+        （它是查询，同名不同层）。声明里挂一个永不写的键 = 教人去找不存在的东西。
+        """
+        assert EF.DERIVED_KEYS == ('overridden_builtins', 'undeclared_heads',
+                                   'scan_disclaimer')
+        assert 'group_conflicts' not in EF.DERIVED_KEYS
+        assert callable(EF.group_conflicts), '查询本身当然还在'
+
+    def test_an_unknown_derived_key_is_reported(self):
+        """多写一个键（比如把查询结果当事实存进去）→ 报，不静默留着。"""
+        facts = self._ok(derived={**DERIVED, 'group_conflicts': []})
+        problems = EF.validate_facts(facts)
+        assert any('group_conflicts' in p and '未知键' in p for p in problems), problems
+
+    def test_missing_derived_keys_are_reported_when_collected(self):
+        """说"采到了"却给一个空 `derived` —— 与空 facts 段同一个病。"""
+        facts = self._ok(derived={})
+        problems = EF.validate_facts(facts)
+        assert any('derived 缺 overridden_builtins' in p for p in problems), problems
+        ok, why = EF.is_collectable(facts)
+        assert not ok and 'derived' in why, why
+
+    def test_a_gap_explains_the_missing_key(self):
+        """
+        "没算出来"有正规出口：`gaps: {key: 'derived.<名字>', reason: …}`。
+
+        这条也是**修法本身**的判据：扫描器抛异常时采集器就写这么一条。
+        """
+        facts = self._ok(derived={'undeclared_heads': [], 'scan_disclaimer': 'x'},
+                         gaps=[{'key': 'derived.overridden_builtins',
+                                'reason': '扫描器抛了（测试）'}])
+        assert EF.validate_facts(facts) == [], EF.validate_facts(facts)
+        assert [g['key'] for g in EF.gaps_of(facts)] == ['derived.overridden_builtins']
+        ok, why = EF.is_collectable(facts)
+        assert ok and '部分可用' in why, why
+
+    def test_a_derived_gap_pointing_at_a_ghost_key_is_reported(self):
+        facts = self._ok(gaps=[{'key': 'derived.nope', 'reason': 'x'}])
+        assert any('不认识' in p for p in EF.validate_facts(facts))
+
+    def test_empty_facts_still_validates(self):
+        """采集失败时写的就是空骨架 —— 它必须仍然"结构合格"（只是不可用）。"""
+        assert EF.validate_facts(EF.empty_facts()) == []
 
 
 

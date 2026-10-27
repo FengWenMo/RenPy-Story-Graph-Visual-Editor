@@ -129,6 +129,14 @@ def _enclosing_func(tree: ast.AST, node: ast.AST):
 
 
 def _is_write_call(node: ast.AST) -> bool:
+    """
+    这是不是一次"要落盘"的调用？
+
+    ⚠ 2026-10-27 审计：从前**只看位置参数**（`node.args[1:]`），于是
+    `open(p, 'w')` 抓得到、`open(p, mode='w')` 抓不到 —— 而后者是最常见的
+    另一种写法。守"唯一写入口"这条底线的探针，漏掉一个常见写法就是一条
+    谁都能绕过去的路（现在包里没这么写，但那是运气，不是约束）。
+    """
     if not isinstance(node, ast.Call):
         return False
     f = node.func
@@ -137,8 +145,17 @@ def _is_write_call(node: ast.AST) -> bool:
     if name in _WRITE_METHODS:
         return True
     if name == 'open':
-        modes = [a for a in node.args[1:] if isinstance(a, ast.Constant)]
-        return any(isinstance(m.value, str)
+        # `fileobj=` / `file=` = 写进**一个流**（BytesIO / 已打开的文件），
+        # 不是"自己开文件落盘"。`pipeline/unity_package.build_package` 就是
+        # `tarfile.open(fileobj=gz, mode='w', …)` —— 它写的是内存缓冲，
+        # 真正落盘在别处（`save_package` 的 `tmp.open('wb')`，已登记）。
+        # 少了这一条，探针会把"打包到内存"当成"绕过门禁写盘"。
+        if any(kw.arg in ('fileobj', 'file') for kw in node.keywords):
+            return False
+        modes = [a for a in node.args[1:]]
+        # `mode=` 关键字（`open(p, mode='w')` / `Path(p).open(mode='a')`）
+        modes += [kw.value for kw in node.keywords if kw.arg == 'mode']
+        return any(isinstance(m, ast.Constant) and isinstance(m.value, str)
                    and any(c in m.value for c in 'wax') for m in modes)
     return False
 
@@ -177,6 +194,25 @@ def test_writers_table_has_no_stale_entries():
     """反向：登记表里过期（函数已删/改名）的条目也要清掉，否则它会变成噪声。"""
     stale = sorted(set(WRITERS) - _scan())
     assert stale == [], f'登记表里的这些条目已经不存在了：{stale}'
+
+
+def test_the_probe_sees_both_spellings_of_a_write():
+    """
+    **探针自检**（2026-10-27 审计）：只认位置参数的话，`open(p, mode='w')`
+    会从网里漏过去 —— 探针本身要有判据，否则"唯一写入口"只是一句口号。
+
+    四个必抓、两个必须**不**抓（别把读盘当写盘，那会让登记表天天变红）。
+    """
+    def call(src):
+        return ast.parse(src).body[0].value
+
+    for src in ("open(p, 'w')", "open(p, mode='w')",
+                "Path(p).open(mode='a')", "Path(p).write_text('x')"):
+        assert _is_write_call(call(src)), f'漏抓：{src}'
+    for src in ("open(p)", "open(p, mode='r')", "Path(p).read_text()",
+                # 写进流 ≠ 自己开文件落盘（`build_package` 就是这种）
+                "tarfile.open(fileobj=buf, mode='w')"):
+        assert not _is_write_call(call(src)), f'误抓：{src}'
 
 
 def test_control_flow_export_goes_through_the_gate():

@@ -373,13 +373,19 @@ def _read_json(path) -> object:
 #  采集主流程
 # ---------------------------------------------------------------------------
 
-def _derived_overridden_builtins(project_root) -> list:
+def _derived_overridden_builtins(project_root) -> tuple:
     """
     **规则 N2**：项目用 `register_statement(<内置名>)` 覆盖了内置语句 → 记下来。
 
     为什么必须做：实测（D1a/D1b/D2）覆盖**真的生效**，而且**完全替换**——
     覆盖之后内置的 parse 就没了。而如果那个覆盖自己不报错，**lint 一声不吭**（C7）。
     这是唯一"引擎接受了、工具却浑然不知"的口子，所以必须**静态扫出来**。
+
+    返回 `(rows, problem)`（2026-10-27 审计）：`problem` 非空 = 这一项**没算
+    出来**（扫描器自己抛了）。从前这里 `except → return []`，与"项目确实没覆盖
+    内置语句"在 `engine_facts.json` 里长得一模一样 —— 那正是 `gaps` 机制在
+    `facts` 段防住的事。现在采集处会把它写成一条
+    `gaps: {'key': 'derived.overridden_builtins', …}`。
     """
     from storygraph.core import vocabulary as V
     from storygraph.story import cds_registry
@@ -390,6 +396,7 @@ def _derived_overridden_builtins(project_root) -> list:
         if value:
             known |= set(str(x) for x in value)
     out = []
+    problem = ''
     try:
         for spec in cds_registry.scan_project_cds(project_root):
             name = str(getattr(spec, 'name', '') or '')
@@ -404,11 +411,14 @@ def _derived_overridden_builtins(project_root) -> list:
                     break
     except Exception as e:                       # noqa: BLE001
         swallow('pipeline.engine_collect.derived', e)
-    return out
+        # ⚠ 不能说"没有覆盖" —— 只能说"没扫出来"。已有的一半结果照样写出去。
+        problem = (f'扫描"覆盖内置语句"时出错，这一项**没算完**'
+                   f'（{e.__class__.__name__}: {e}）')
+    return out, problem
 
 
 def _derived_undeclared_heads(project_root, *, ask: bool = False,
-                              ask_limit: int = 12) -> list:
+                              ask_limit: int = 12) -> tuple:
     """
     **扫描线**：这个项目里有哪些"工具还不认识的写法"。
 
@@ -429,14 +439,18 @@ def _derived_undeclared_heads(project_root, *, ask: bool = False,
          和"台词被误读"的行**不进这份清单**（否则又是"工具在输出错误知识"）；
       ② 扫描器**只说我认出了 N 个**（规则 N1）—— 所以这里照抄
          `scan_disclaimer`，绝不宣称"项目里只有这些"；
-      ③ 扫不出来（解析失败等）→ **空列表**，绝不编。
+      ③ 扫不出来（解析失败等）→ **空列表 + 一句原因**，绝不编
+         （2026-10-27 审计：从前只返回空列表，与"项目真的一个都没有"
+         在文件里长得一样；现在调用方会把原因写进
+         `gaps: {'key': 'derived.undeclared_heads', …}`）。
     """
     try:
         from storygraph.story.statement_registry import discover_undeclared
         found = discover_undeclared(project_root)
     except Exception as e:                       # noqa: BLE001 - 扫不动就不写
         swallow('pipeline.engine_collect.undeclared_heads', e)
-        return []
+        return [], (f'扫描"工具还不认识的写法"时出错，这一项**没算出来**'
+                    f'（{e.__class__.__name__}: {e}）')
     out = []
     for rec in (found or ()):
         head = str(rec.get('head') or '')
@@ -449,7 +463,7 @@ def _derived_undeclared_heads(project_root, *, ask: bool = False,
     out.sort(key=lambda r: (-r['count'], r['head']))
     if ask and out:
         _attach_engine_verdicts(project_root, out, ask_limit)
-    return out
+    return out, ''
 
 
 def _attach_engine_verdicts(project_root, rows: list, limit: int) -> None:
@@ -531,7 +545,8 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
     engine_root = Path(sdk_path)
 
     # ① 扫"覆盖内置"必须在**注入探针之前**（免得扫到我们自己的探针）
-    overridden = _derived_overridden_builtins(work)
+    #    返回 `(rows, problem)`：problem 非空 = 没算出来，下面写进 gaps。
+    overridden, overridden_why = _derived_overridden_builtins(work)
 
     manifest_before = _sha1_manifest(work)
     # 上一轮留下的 errors.txt 会让本轮误判 —— 但**它可能是用户自己的文件**，
@@ -593,7 +608,17 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
     dump_loc = (dump_data or {}).get('location') or {} if isinstance(dump_data, dict) else {}
     # 扫描线：这份清单**随事实一起进版本库**（方案 §四 的 derived.undeclared_heads）；
     # `ask=True` 时再让**引擎自己**回答"认不认这些写法"（能问引擎的就不让人填）
-    undeclared = _derived_undeclared_heads(work, ask=ask, ask_limit=ask_limit)
+    undeclared, undeclared_why = _derived_undeclared_heads(
+        work, ask=ask, ask_limit=ask_limit)
+    # 派生段"没算出来"也要留痕（2026-10-27 审计）：与 facts 的缺口同一张表，
+    # 键写成 `derived.<名字>`，`validate_facts` 认这种写法。
+    derived_gaps = []
+    if overridden_why:
+        derived_gaps.append({'key': EF.derived_gap_key('overridden_builtins'),
+                             'reason': overridden_why})
+    if undeclared_why:
+        derived_gaps.append({'key': EF.derived_gap_key('undeclared_heads'),
+                             'reason': undeclared_why})
     payloads = {
         'images': [(EF.SRC_PROBE, probe_data.get('images'))],
         'tags': [(EF.SRC_PROBE, probe_data.get('tags'))],
@@ -616,6 +641,7 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
         derived={'overridden_builtins': overridden,
                  'undeclared_heads': undeclared,
                  'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'},
+        extra_gaps=derived_gaps,
     )
 
     manifest_after = _sha1_manifest(work)

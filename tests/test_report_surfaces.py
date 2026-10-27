@@ -42,7 +42,16 @@ def _facts(attrs=None, cands=None, *, parse_clean=True, probe=True):
         {'attributes': [(EF.SRC_PROBE, attrs if attrs is not None else LAN_ATTRS)],
          'candidates': [(EF.SRC_PROBE, cands if cands is not None else LAN_CANDS)]},
         collection={'parse_clean': parse_clean, 'probe_complete': probe,
-                    'lint_exit': 0})
+                    'lint_exit': 0},
+        # 采集器每次都会写这三个派生键（2026-10-27 审计：`derived` 也要有交代）
+        derived=_derived())
+
+
+#: 采到之后 `derived` 段长什么样（`engine_collect` 每次都会写全）。
+def _derived(overridden=None, undeclared=None):
+    return {'overridden_builtins': list(overridden or ()),
+            'undeclared_heads': list(undeclared or ()),
+            'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'}
 
 
 def test_the_fixture_really_carries_facts():
@@ -198,18 +207,56 @@ def test_scan_goes_into_engine_facts_with_the_gates(tmp_path):
     (root / 'game').mkdir(parents=True)
     (root / 'game' / 'ch01.rpy').write_text(SRC, encoding='utf-8')
     got = _derived_undeclared_heads(root)
-    heads = [r['head'] for r in got]
+    heads = [r['head'] for r in got[0]]
     assert heads == ['weather'], got
-    assert got[0]['count'] == 2
-    assert got[0]['files'] == ['ch01.rpy'], got[0]
+    assert got[0][0]['count'] == 2
+    assert got[0][0]['files'] == ['ch01.rpy'], got[0][0]
+    assert got[1] == '', f'算出来了却报了问题：{got[1]}'
     for builtin in ('with', 'pause', 'window', 'scene'):
         assert builtin not in heads, f'{builtin} 是内置语句，不该进这份清单'
 
 
 def test_scan_in_facts_fails_soft(tmp_path):
-    """扫不动（不是工程根 / 解析失败）→ 空列表，绝不编。"""
+    """
+    扫不动（不是工程根 / 解析失败）→ 空列表 + **一句原因**，绝不编。
+
+    2026-10-27 审计：从前只返回 `[]`，与"项目里真的一个都没有"长得一样；
+    现在第二个返回值就是写进 `gaps` 的那句话。
+    """
     from storygraph.pipeline.engine_collect import _derived_undeclared_heads
-    assert _derived_undeclared_heads(tmp_path / '不存在') == []
+    rows, why = _derived_undeclared_heads(tmp_path / '不存在')
+    assert rows == []
+    # 目录不存在时扫出来就是"没有东西可扫"，不算"没算出来" —— 不编，也不喊狼来了。
+    assert why == '' or '出错' in why, why
+
+
+def test_scanner_crash_becomes_a_gap_not_an_empty_list(tmp_path, monkeypatch):
+    """
+    2026-10-27 审计：`_derived_overridden_builtins` 从前 `except → return []`，
+    与"项目确实没覆盖内置语句"在 `engine_facts.json` 里长得一模一样。
+
+    现在它必须**说一句话**，而这句话要能落到 `gaps: derived.overridden_builtins`
+    上 —— 否则"没算出来"仍然没人看见。
+    """
+    from storygraph.pipeline import engine_collect as EC
+    from storygraph.story import cds_registry
+
+    def _boom(*_a, **_k):
+        raise RuntimeError('扫描器炸了')
+
+    monkeypatch.setattr(cds_registry, 'scan_project_cds', _boom)
+    rows, why = EC._derived_overridden_builtins(tmp_path)
+    assert rows == []
+    assert '没算完' in why and '扫描器炸了' in why, why
+
+    facts = EF.build_facts(
+        {}, collection={'parse_clean': True, 'probe_complete': True},
+        derived=_derived(overridden=rows),
+        extra_gaps=[{'key': EF.derived_gap_key('overridden_builtins'),
+                     'reason': why}])
+    assert EF.validate_facts(facts) == [], EF.validate_facts(facts)
+    assert [g['key'] for g in EF.gaps_of(facts)] == \
+        ['derived.overridden_builtins'], EF.gaps_of(facts)
 
 
 # ==================== ⑤ 构建报告真的打印出来 ====================
