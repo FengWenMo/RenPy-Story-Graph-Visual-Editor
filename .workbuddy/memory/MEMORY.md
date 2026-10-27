@@ -131,6 +131,17 @@
   `python packaging\make_release.py --zip StoryGraph-1.0.0-win64-<日期>.zip`。
   ⚠ PowerShell 里 `... 2>&1 | Select-Object -Last N` 会把 PyInstaller 的 stderr 变成
   NativeCommandError 提前中止（假 exit 1）—— 用 `*> .pip-tmp\pyi.log` 落盘再看。
-- **数字**（10-27 这次）：全量 **6943 passed / 2 skipped / 1 xfailed**（4m13s, 12 进程）；
-  zip **67.7 MB / 279 条目**，解压 **146.6 MB**；包内 `selfcheck` 四项全过、
+- **数字**（10-28 这次）：全量 **7070 passed / 2 skipped / 1 xfailed**（4m29s, 6 进程；
+  12 进程在内存紧张时会 `code 0x8007000e` 全体起不来 —— 见下）；
+  zip **67.8 MB / 279 条目**，解压 **146.7 MB**；包内 `selfcheck` 四项全过、
   `validate demo` 错误 0 / 警告 4。
+- **14 进程/12 workers 有内存风险**：本机 32 GB、开着 VS Code + 两个 WorkBuddy 时，
+  12 个 xdist worker 在 import PySide6 阶段会 `Windows fatal exception: code 0x8007000e`
+  （E_OUTOFMEMORY），表现是"所有 worker 在 sessionstart 就死"。降 `--workers 6` 即可。
+- **真机工程会自己长大**：`D:\千连万理\RenpyTest\sr_general` 是 gitee 仓库的副本，
+  作者 `git pull` 之后 `.rpy` 会 55 → 96。**金标一红先跑** `tools/golden_baseline.py --check`，
+  确认是"项目变了"再 `--save` + 各 `probe_*_fingerprint.py --save`（10-28 就是这么做的：
+  53 个共同文件中 36 个指纹一字未变，说明工具没漂）。
+- **xlsx 存不下的控制字符**（`U+0000~08/0B/0C/0E~1F`）会让**整份表**导不出来：
+  在 `excel/cells.py::xml_safe` 剥掉并留痕（`\t\n\r` 保留）。真机触发点：
+  `chapter3_3_3.rpy:79` 的两个 `U+0005`。契约 §68。
