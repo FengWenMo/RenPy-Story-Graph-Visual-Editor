@@ -5311,3 +5311,51 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 只在"真有"时才进 payload 的键（`say.tail`、`menu.extras/name/args`、`call.args`、
 `return.value`）也要声明，样例必须**把可选参数传上** —— 否则"漏声明"永远不会变红：
 `test_optional_payload_fields_are_declared_too` + `_samples()` 的注释。
+
+## §62 发布包：**"能打开" ≠ "看得见"**（2026-10-27，第 N 次重打包）
+
+这一节管的是"发给别人的那个 zip 长什么样"。判据都在
+`tests/test_release_manifest.py`（10 条），清单在 `packaging/make_release.py`。
+
+### 62.1 清单：少一样就构建失败（不是警告）
+
+| 必须有 | 为什么 |
+|---|---|
+| `StoryGraph.exe` / `StoryGraph-CLI.exe` + `_internal\` | 双击就能开；CLI 给批量 / CI |
+| `剧本空表格.xlsx` | 空 Beats 表 + 「列说明」页；**必须走真实导出器**生成（自己拼表头 = 填了也导不回去） |
+| `demo\`（**不带** `collab.db` / `_import_tmp` / `build\`） | 第一次打开"有东西可开"；本机数据与产物不进包 |
+| `快速上手.md` | 1 页速查（`docs/快速上手_3分钟.md` 的发布版） |
+| `新手快速操作手册.md` + `manual_img\` | 完整手册 + 它引用的两张截图 |
+| `LICENSE` | GPLv3（见 §59.5） |
+
+⚠ **手册里的截图也得进包**：md 用相对路径 `manual_img/xx.png` 引用，包内目录布局
+与 `docs/` 一致。少了图，用户看到的是两个破图 —— 比没有手册更糟，所以
+`collect_extras` 直接 `FileNotFoundError`（`test_missing_manual_shots_fail_loudly`）。
+
+### 62.2 demo 的图片必须是**真 PNG**（2026-10-27 实测的 P0）
+
+以前 `demo/make_demo.py` 写的是 **48 字节假 PNG**（`\x89PNG` 文件头 + 40 个 0）。
+资源表、体检、导出全绿 —— 因为它们只问"文件在不在"；而**任何读像素的地方**
+都读不出：卡片页舞台图一片黑 +「⚠ 缺 1 个素材」、立绘卡写「读不出」、
+演出预览降级成方块。第一次打开 demo 的人看到的就是这些。
+
+| 规矩 | 判据 |
+|---|---|
+| `game/images/**` 的图必须是能解码的真 PNG | `demo/make_art.py`（Pillow 画占位图：背景 + 立绘，带名字，明确写"不是美术资源"） |
+| 改 `demo/` 的素材生成方式时，**资源表不用重扫**（表里没有尺寸/哈希列），但**包里的图要重新生成** | `make_release` 的 `REQUIRED` 里有 `demo/game/images/bg/bg_classroom.png` |
+| 占位音频仍是假字节（只查存在性、不播） | 真 ogg 要编码器，不在生成脚本的职责里 |
+
+> 教训：判据问的是"存在"，用户看的是"画面"。凡是**给第一次打开的人看的东西**，
+> 判据要问"能不能渲染出来"。
+
+### 62.3 截图脚本的三条硬规矩（`tools/_shot_manual.py`）
+
+| 规矩 | 为什么 |
+|---|---|
+| `QT_QPA_PLATFORM=offscreen` + `STORYGRAPH_NO_SESSION=1` | 无显示器也能跑；**不写**用户的 `session.json` |
+| 把 `demo/` 拷到临时目录再打开 | `📁 打开项目` 会往项目根写 `storygraph.session.json` —— 截图不能有副作用 |
+| **不许 `win.close()`**，结尾 `os._exit(0)` | 导入过章节 = 有"未导出"改动 → 关窗弹「保存 / 不保存 / 取消」**模态框**，无人点击就永远卡住（实测 45 s 超时） |
+
+截图内容：`01_structure.png`（剧情结构页，200% + 居中，别用 `fit_to_content` ——
+只有一个块时会放大到 300%+，一块顶满屏幕看不出这是画布）、
+`02_card.png`（卡片页第一拍，舞台小图要 `_pump` 等后台线程画完）。

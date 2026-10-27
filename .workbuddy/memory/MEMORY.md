@@ -108,3 +108,29 @@
 - 图管"章与章怎么串"，卡片管"这章怎么演"，桥只有一行 `call`。menu 的家 = 编排层文件（`_control` 或工具独占的 `_choices.rpy`），**永不写进剧本文件**。
 - 引擎对坏写法沉默（落空/章末 jump/menu 嵌 if，lint 全过）→ 发现是工具的活（`story/exits.py`）。七档出口，`call` 后无 `return` 一样落空。
 - **"不能写剧本" ≠ "不给你连线"**：算不出来就退回画草图 + 状态栏说清，静默是最坏的反馈（E1 事故）。
+
+## 八、2026-10-27 夜深：发布包与两份手册（口径写在这里）
+
+- **发布包清单**（`packaging/make_release.py` 的 `REQUIRED`，缺一样就 `FileNotFoundError`）：
+  `StoryGraph.exe` / `StoryGraph-CLI.exe` + `_internal\`、`剧本空表格.xlsx`、`demo\`
+  （不带 `collab.db` / `_import_tmp` / `build\`）、`快速上手.md`、`新手快速操作手册.md`、
+  `manual_img\`、`LICENSE`。判据 `tests/test_release_manifest.py`（10 条，含"截图缺了别发"）。
+- **demo 的图必须是真 PNG**：`demo/make_art.py` 用 Pillow 画背景 2 + 立绘 4（约 144 KB）。
+  以前那版是 48 字节假 PNG（`\x89PNG` + 40 个 0）—— 资源表 / 体检 / 导出全绿，
+  但卡片页舞台图一片黑 +「⚠ 缺 1 个素材」、立绘卡「读不出」、演出预览只能降级成方块。
+  **判据问"存在"，用户看"画面"。**
+- **手册截图**：`tools/_shot_manual.py`（`QT_QPA_PLATFORM=offscreen` +
+  `STORYGRAPH_NO_SESSION=1` + demo 拷临时目录）。三条硬规矩：① **不许 `win.close()`**
+  —— 有未导出改动会弹「保存/不保存/取消」模态框，没人点就永远卡住（实测 45 s 超时），
+  结尾 `os._exit(0)`；② 结构页别用 `fit_to_content()`（一个块会放到 300%+），
+  改 `zoom_reset → zoom_by(2.0) → center_on_node`；③ 卡片页要 `_pump` 等舞台图后台线程。
+- **许可证四处同源**：`LICENSE` / `pyproject.toml` / `README.md` / **随包的 `快速上手.md`**。
+  最后一处最容易漏，而它偏偏是用户唯一会读的那处（10-23 写错过 MIT，10-27 只改了前三处）。
+- **打包顺序**：`tools/fasttest/run.py` 全绿 → `python -m PyInstaller packaging/storygraph.spec
+  --noconfirm --log-level WARN` → `dist\StoryGraph\StoryGraph-CLI.exe selfcheck` →
+  `python packaging\make_release.py --zip StoryGraph-1.0.0-win64-<日期>.zip`。
+  ⚠ PowerShell 里 `... 2>&1 | Select-Object -Last N` 会把 PyInstaller 的 stderr 变成
+  NativeCommandError 提前中止（假 exit 1）—— 用 `*> .pip-tmp\pyi.log` 落盘再看。
+- **数字**（10-27 这次）：全量 **6943 passed / 2 skipped / 1 xfailed**（4m13s, 12 进程）；
+  zip **67.7 MB / 279 条目**，解压 **146.6 MB**；包内 `selfcheck` 四项全过、
+  `validate demo` 错误 0 / 警告 4。
