@@ -367,8 +367,27 @@ REAL = Path(r'D:\千连万理\RenpyTest\sr_general')
 
 
 class TestLineConservation:
+    """
+    台词数量守恒：**渲染出去的台词不许比解析出来的少**。
+
+    2026-10-28 换了复核口径 —— 从前"少不少"是数**渲染行的行首形状**
+    （`patcher._line_key`）。那个分类器对"台词正文里带 `\\"` 或 `#`"的行
+    会认错：真机 `chapter3_4_4.rpy` 有两句是
+
+        xqlz "那是上一句的接话！…你不会忘了吧\\" \\t\\t#这里出现名字…"
+
+    正文里有**转义引号**和一个 `#`；`_content_of` 从 `#` 处截断之后这一行
+    没有收尾引号，于是被算成 `('other', 原文)` —— 老判据报"少了两句"，
+    其实是它自己没认出来（把产物重新解析一遍：185 句进去、185 句出来）。
+
+    现在的口径：行首分类**只当便宜的初筛**；它一喊"少了"就用产物回读
+    复核（把渲染结果重新喂给解析器，数 `say` 语句）。真有丢失，回读也会少；
+    没丢，这条不再制造假警报。
+    """
+
     @pytest.mark.skipif(not REAL.is_dir(), reason='真机项目不在本机（换机）')
     def test_no_file_renders_fewer_say_lines_than_it_parsed(self):
+        import tempfile
         from storygraph.parsing.discover import discover_scripts
         from storygraph.parsing.renpy_parser import RenPyParser, \
             ParseResultBuilder
@@ -376,16 +395,28 @@ class TestLineConservation:
         from storygraph.story.beat_render import render_beats_to_rpy
         from storygraph.story.patcher import _line_key, _norm
 
+        def _say_count(pr) -> int:
+            return sum(1 for s in pr.statements
+                       if s.kind == 'say'
+                       and str(s.payload.get('text') or '').strip())
+
         bad = []
-        for f in discover_scripts(REAL):
-            pr = ParseResultBuilder().build(RenPyParser().parse(str(f)))
-            beats = beats_from_parse_result(pr)
-            text = render_beats_to_rpy(beats)
-            src = sum(1 for s in pr.statements
-                      if s.kind == 'say'
-                      and str(s.payload.get('text') or '').strip())
-            out = sum(1 for ln in text.splitlines()
-                      if ln.strip() and _line_key(_norm(ln))[0] == 'say')
-            if out < src:
-                bad.append((f.name, src, out))
+        with tempfile.TemporaryDirectory() as td:
+            back_path = Path(td) / 'rendered.rpy'
+            for f in discover_scripts(REAL):
+                pr = ParseResultBuilder().build(RenPyParser().parse(str(f)))
+                beats = beats_from_parse_result(pr)
+                text = render_beats_to_rpy(beats)
+                src = _say_count(pr)
+                out = sum(1 for ln in text.splitlines()
+                          if ln.strip() and _line_key(_norm(ln))[0] == 'say')
+                if out >= src:
+                    continue
+                # 初筛说少了 → **回读复核**（可能是行首分类没认出来）
+                back_path.write_text(text, encoding='utf-8')
+                back = ParseResultBuilder().build(
+                    RenPyParser().parse(str(back_path)))
+                n_back = _say_count(back)
+                if n_back < src:
+                    bad.append((f.name, src, n_back))
         assert not bad, f'这些文件渲染出去的台词比解析出来的少：{bad[:8]}'

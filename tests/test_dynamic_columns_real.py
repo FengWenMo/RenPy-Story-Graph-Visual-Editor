@@ -55,11 +55,33 @@ def _heads_in(text: str) -> set:
     return {m.group(1) for m in _HEAD_RE.finditer(text)}
 
 
+def _is_chapter(p) -> bool:
+    """
+    这真的是**章节**（解析出来有台词）吗？
+
+    2026-10-28：真机工程刷新之后 `game\\screens.rpy` 里也有 `pause`
+    （界面里的暂停），而它按路径排序在 `game\\chapter\\` 之前 —— 老挑法
+    会把界面文件当章节挑走，于是"叶子 `pause` → 每参数一列"这条判据
+    拿到的 beats 是空的，报的却是"没有 pause 列"。判"是不是剧情"用的是
+    **解析结果**（有 `say`），不是文件名，也不是有没有那个词。
+    """
+    key = str(p)
+    if key not in _CHAPTER_CACHE:
+        pr = IncrementalRenPyAnalyzer().analyze(files=[p], graph=None)[0]
+        _CHAPTER_CACHE[key] = any(s.kind == 'say' for s in pr.statements)
+    return _CHAPTER_CACHE[key]
+
+
+_CHAPTER_CACHE: dict = {}
+
+
 def _pick(*, want=(), avoid=()):
     """挑一个真实章节：含 `want` 里所有头、且不含 `avoid` 里任何头。"""
     for p in _chapters():
         heads = _heads_in(p.read_text(encoding='utf-8', errors='ignore'))
         if all(h in heads for h in want) and not any(h in heads for h in avoid):
+            if want and not _is_chapter(p):
+                continue            # 界面/配置文件里也有这些词，不是章节
             return p
     return None
 

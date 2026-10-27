@@ -257,4 +257,10 @@ def test_real_project_reaches_full_coverage():
     text = cap.format_capability_report(cov)
     # 2026-10-23：`return` 也进了模型（清单 §九），T0 总数从 1817 → 1818，
     # 覆盖率显示 98.1%。分子 T2=35 与上一条判据仍然钉住"没有新增只读项"。
-    assert text.splitlines()[0].startswith('工具可编辑覆盖率 98.1%'), text
+    #
+    # 2026-10-28：真机工程被作者 pull 到最新（55 → 96 个 `.rpy`），这行数字
+    # **跟着项目内容走**（98.1% → 99.6%）。钉死一个历史数字只会制造假红，
+    # 改判"报告里的数字 == 模型算出来的数字"（报告漂了照样红）。
+    head = text.splitlines()[0]
+    assert head.startswith('工具可编辑覆盖率 '), head
+    assert f'（{cov.editable}/{cov.total} 条）' in head, (head, cov.to_dict())
