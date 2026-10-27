@@ -46,8 +46,8 @@
 - **纯文字导入前会弹"导出到哪个文件夹"**（2026-10-26，用户："不要写入 chapter 文件夹！"）：落点由人指定（`out_dir`），**不猜**子目录；覆盖旧文件仍写那份占位 .rpy。⚠ 任何程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 下模态目录框会**挂死测试**。
 - **"连线很卡"是同一个项目被整份解析 6~8 遍**（2026-10-27）：接线窗口问"编排层是哪个 / `_control` 在不在 / 谁 jump 了这章"，每个问题都读一遍全部 `.rpy`，`detect_placement` 还是整份 AST（真机 1.2 MB → 1435 ms/次）。现在**项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，无 TTL），并且 `find_control_file` 在**只有一个候选**时直接返回（排序只有一个元素时结论相同）。改这块别绕过缓存，也别给它加 TTL —— 判据 `test_scan_cache.py`（含"第二次零读盘""改文件必须重新解析"）。
 - **"刷新已导入章节"以前每次都全量重解**（2026-10-27）：91 章的项目按一下 3.0 秒（0 改动也一样）。现在 ①会话持有一个 `IncrementalRenPyAnalyzer`（缓存跨调用复用；**只逐出磁盘上不存在的文件**、有 8 MB 上限、**本批不淘汰**）；②`import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定刷新重读哪几个，**0 改动连预览框都不弹**（判据 `test_import_stamps.py`；旧用例"导入完立刻刷新也弹框"已校准为"先改文件再刷新"）。
-- **卡片上的"这一拍的舞台图"**（2026-10-27）：渲染必须走 `stage_render.render_frame`（与「演出预览」**同一个函数**，别另写近似画法）；**一律后台线程**（首次碰上大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；"要不要重画"看 `frame_signature`（内容指纹）——**不许**用 `id(frame)`（每刷一次都是新对象），也不许在换拍时"拿上一张顶着"（卡片是单拍快照，那等于说错话）。图在**舞台块外面**：真机一章 285 拍里 210 拍舞台块是收起的，收起时放弃这张图 = 最该看的时候没有（判据 `test_stage_thumb.py` 22 条）。
-- **界面上"可删的独立件"**（2026-10-27，⭐ GitHub star 徽标）：一个文件 + 一处挂载。控件/网络/离线降级全在 `ui_qt/github_star.py`，**不许** import 窗口/会话代码；主窗口只有 `_build_card_page` 里那三行 try（删掉 + 删文件 = 界面复原）。点击必须立刻返回（网络在后台，`click()` 实测 21 ms）；**启动时不联网**；没 token 不开死页面、连不上只说一句"连不上 GitHub"。判据 `test_github_star.py`（19 条，含"整个 UI 包只有一处 import 它"）。
+- **卡片上的"这一拍的舞台图"**（2026-10-27）：渲染必须走 `stage_render.render_frame`（与「演出预览」**同一个函数**，别另写近似画法）；**一律后台线程**（首次碰上大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；"要不要重画"看 `frame_signature`（内容指纹）——**不许**用 `id(frame)`（每刷一次都是新对象），也不许在换拍时"拿上一张顶着"（卡片是单拍快照，那等于说错话）。图在**「当前舞台」标题下面、与文字摘要并排、固定 288×162**（`compact=True`；用户 2026-10-27 两次点名"缩小！再缩小，直到能看到全貌"）；它所在的 `_stage_now` **不在可收起的 `_stage_box` 里** —— 285 拍里 210 拍那几块收起时它还在，而控制流卡（`call`/`jump`）连它一起收（判据 `test_stage_thumb.py` 24 条 + `test_ui_fit_and_flow.py`）。
+- **界面上"可删的独立件"**（2026-10-27，⭐ GitHub star 徽标）：一个文件 + 一处挂载。控件/网络/离线降级全在 `ui_qt/github_star.py`，**不许** import 窗口/会话代码；挂载只有 `window_nav._build_mode_bar` 里那三行 try（徽标在**模式条上、「✎ 卡片编辑」右边**，删掉 + 删文件 = 界面复原）。点击必须立刻返回（网络在后台，`click()` 实测 21 ms）；**启动时不联网**；没 token 不开死页面、连不上只说一句"连不上 GitHub"。判据 `test_github_star.py`（19 条，含"整个 UI 包只有一处 import 它"）。
 - **许可证是 GPLv3**（仓库根 `LICENSE` = GPLv3 全文，2026-10-27 从 GitHub 那条线的 `1f7153b` 恢复）：
   `README.md` / `pyproject.toml` / `packaging/make_release.py` / `packaging/交付说明.md` / `tests/test_release_manifest.py`
   必须同源（判据 `test_license_is_gpl_everywhere_it_matters`）。⚠ 10-23 那份提交（`0d32628`）
@@ -75,6 +75,9 @@
 | 刷新不白付钱 | 分析器缓存跨调用复用 + 刷新只重读 `(mtime,size)` 变过的文件（0 改动 = 4 ms） | `test_import_stamps.py` |
 | 卡片单拍舞台图 | `app.stage.build_frame_at` + `ui_qt.stage_thumb`（后台渲染 / 内容指纹 / 防抖 / LRU）；**在「当前舞台」标题下面、与摘要并排、固定 288×162**（`compact=True`）；`_stage_now` 永远可见（舞台块收起时也在） | `test_stage_thumb.py` / `test_stage_preview.py::TestBuildFrameAt` |
 | 右栏竖向配额 | 「定位」默认折叠（chip，点开才展开，`PropertyStrip` 一直同步）；卡片页一屏装得下 | `test_ui_nav_layout.py::TestWindowWiring` |
+| 重号不级联 | `unique_ids` 的发号底座 = **整批已有 ID + 本次已发**，不是"已经扫过的"；输入里唯一的 ID 一个都不许换；`[0001,0001,0002] → [0001,0003,0002]` | `test_line_identity_contract.py` |
+| derived 段要交代 | 说"采到了"就必须有 `derived` 三个键；没算出来写 `gaps: derived.<名字>`；`DERIVED_KEYS` 只列采集器真写的键（`group_conflicts` 是查询，已删） | `test_engine_facts.py::TestDerivedSection` |
+| 写入口探针两种 open | `open(p, mode='w')` 也算落盘；`fileobj=`/`file=`（写流）不算 | `test_single_write_entry.py` |
 | GitHub star 徽标 | 独立件 `ui_qt/github_star.py`（**模式条上、「✎ 卡片编辑」右边**；一处挂载 `window_nav`；后台点击；离线只说一句） | `test_github_star.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 

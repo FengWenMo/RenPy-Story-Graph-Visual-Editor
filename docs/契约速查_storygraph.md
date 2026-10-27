@@ -5262,3 +5262,52 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
   「卡片编辑」标签（动作序列 +1）；不在卡片页里；删掉它之后界面照常；
 - `tests/test_ui_nav_layout.py::TestWindowWiring::test_inspector_shows_where_this_shot_lives`
   （收起与否，`PropertyStrip` 的内容一直是这一拍的）；
+
+## §61 三条"静默失败"的老口子（2026-10-27 深夜，审计复验后修）
+
+三处都是同一类病：**"没做"与"做了、结果是没有"在产物里长得一样**。
+这一节把修法与判据写下来，避免下一个人再按老形状加代码。
+
+### 61.1 重号只许动重复的那一条（`line_identity.unique_ids`）
+
+| 规矩 | 判据 |
+|---|---|
+| 发号底座 = **整批已有的 ID + 本次已发出的**，不是"已经扫过的那几条" | `test_the_duplicate_does_not_steal_a_later_rows_number`：`[0001, 0001, 0002]` 必须得到 `[0001, 0003, 0002]` |
+| **输入里本来就唯一**的 ID，一个都不许换（R5/R6/R7 的"其余行不变"） | `test_renumbering_never_cascades_to_innocent_rows`（5 种顺序） |
+| 别为了"不级联"退化成同号 | `test_a_duplicate_still_gets_a_number_nobody_uses` |
+
+> 为什么以前没抓到：唯一的重号用例把重复放在了**最后一行**（`['a.0001','a.0002','a.0001']`），
+> 级联恰好不发生。**判据的输入顺序也是判据的一部分。**
+
+### 61.2 `derived` 段必须有交代（`core/engine_facts` + `pipeline/engine_collect`）
+
+`facts` 段早就有三态：**有值（带 source）/ 缺口（gaps 带 reason）/ 结构不合格**。
+`derived` 段现在一样：
+
+| 状态 | 文件里长什么样 | 判据 |
+|---|---|---|
+| 算出来了 | `derived: {overridden_builtins: […], undeclared_heads: […], scan_disclaimer: …}` | `TestDerivedSection` |
+| **没算出来** | `gaps: [{'key': 'derived.overridden_builtins', 'reason': '扫描器出错…'}]` | `test_a_gap_explains_the_missing_key` / `test_scanner_crash_becomes_a_gap_not_an_empty_list` |
+| 说采到了却空着 | `collection.parse_clean/probe_complete = True` + `derived: {}` | `test_missing_derived_keys_are_reported_when_collected`（**报**） |
+
+- `DERIVED_KEYS` 只许列**采集器真的会写**的键。`group_conflicts` 曾在这里，但它是
+  查询（`group_conflicts(facts, tag, attrs)` 现算），已删 —— 声明里挂一个永远不写的键，
+  等于教人去找不存在的东西。
+- `derived` 里出现未知键 → **报**（与 `facts` 段同一条规矩）。
+- 派生段的缺口与 facts 的缺口**共用 `gaps` 一张表**，键写成 `derived.<名字>`
+  （`EF.derived_gap_key()`）；`_derived_*` 两个函数返回 `(rows, problem)`，
+  `problem` 非空就写缺口 —— **一半结果照样写出去**，只把"没算完"说出来。
+
+### 61.3 写入口探针：两种 `open` 写法都要看见
+
+| 规矩 | 判据 |
+|---|---|
+| `open(p, 'w')` 与 `open(p, mode='w')` 都算落盘 | `test_the_probe_sees_both_spellings_of_a_write` |
+| **写进流不算落盘**：`fileobj=` / `file=`（如 `tarfile.open(fileobj=gz, mode='w')`，打包进 BytesIO） | 同一条用例的"必须不抓"那一半 |
+| 新增落盘点必须登记 + 写清写的是什么 | `test_every_write_site_is_accounted_for` |
+
+### 61.4 `_FACTORY_FIELDS` 必须含**可选** payload 键
+
+只在"真有"时才进 payload 的键（`say.tail`、`menu.extras/name/args`、`call.args`、
+`return.value`）也要声明，样例必须**把可选参数传上** —— 否则"漏声明"永远不会变红：
+`test_optional_payload_fields_are_declared_too` + `_samples()` 的注释。

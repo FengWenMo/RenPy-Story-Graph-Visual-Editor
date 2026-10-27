@@ -3378,7 +3378,7 @@ class IncrementalRenPyAnalyzer:
     3. **同一份 AST 重建产物是确定的**。真机验证过：同一批 AST 连续
        `ParseResultBuilder().build()` 两次，statements / beats / nodes /
        edges 逐项相同，AST 节点自身不会被打上属性（见
-       `tests/test_analyzer_cache.py::test_rebuilding_from_the_cache_is_identical`）。
+       `tests/test_import_stamps.py::TestAnalyzerCache::test_rebuilding_from_the_cache_is_identical`）。
        这是"跨批次复用 AST"能成立的前提。
     """
 
