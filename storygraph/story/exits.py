@@ -122,6 +122,17 @@ def _terminate_code(code: str) -> str:
     return ''
 
 
+def terminating_call(code: str) -> str:
+    """
+    这段 Python 代码是"游戏到此为止"吗？是就返回那个调用名，否则空串。
+
+    `_terminate_code` 的**唯一对外别名**。接线那边（`control_route`）要判
+    "编排层结尾是不是终局语句"，必须问这里 —— 再抄一份判据的话，
+    两处迟早会不一样（"`renpy.quit()` 是终局"这种判断分散了就没人守得住）。
+    """
+    return _terminate_code(code)
+
+
 #: 这些调用**静态判不出去哪** —— 目标是运行时的变量/表达式。
 #: `renpy.jump_out_of_context(` 不在此列（它已经在 `_TERMINATING_CALLS` 里，是终局）。
 _DYNAMIC_CALLS = ('renpy.jump(', 'renpy.call(', 'renpy.call_in_new_context(')

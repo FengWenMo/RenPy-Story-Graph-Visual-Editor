@@ -371,10 +371,12 @@ def test_write_dialog_edge_still_refuses_a_blocked_plan(tmp_path, qapp,
     """
     反过来也要守：**写不进**的落点不许假装成功（否则就是"静默假完成"）。
 
-    这里用 `control_blocked`（源章的 `_control` 结尾判不出安全插入点）。
+    这里用 `control_blocked`（源章的 `_control` 结尾是一条判不出安全插入点
+    的普通 python 语句）。⚠ 别用 `$ renpy.full_restart()` 当"写不进"的样本
+    —— 那是终局语句，**能改接**（见 `test_control_route_terminal.py`）。
     """
     root = _project(tmp_path, controller=(
-        'label ch01_control:\n    call ch01\n    $ renpy.full_restart()\n\n'
+        'label ch01_control:\n    call ch01\n    $ persistent.seen = True\n\n'
         'label ch02_control:\n    call ch02\n    return\n'))
     g, a, b = _graph_with_two()
     host = _Host(root, g)
@@ -421,7 +423,7 @@ def test_dialog_says_it_will_add_the_missing_wrapper(tmp_path, qapp):
 
 def test_dialog_says_a_blocked_wire_only_draws_a_sketch(tmp_path, qapp):
     root = _project(tmp_path, controller=(
-        'label ch01_control:\n    call ch01\n    $ renpy.full_restart()\n\n'
+        'label ch01_control:\n    call ch01\n    $ persistent.seen = True\n\n'
         'label ch02_control:\n    call ch02\n    return\n'))
     g, a, b = _graph_with_two()
     host = _Host(root, g)

@@ -1633,6 +1633,8 @@ class AddEdgeDialog(_BaseDialog):
         self._dst.currentIndexChanged.connect(self._sync_position)
         self._type.currentIndexChanged.connect(self._sync_position)
         self._pos.currentIndexChanged.connect(self._sync_position)
+        # 勾「草稿」不改落点，但改**按下去会发生什么** → 按钮文字要跟着变
+        self._draft.toggled.connect(self._show_plan_hint)
         self._sync_positions()
 
     # ---------------- 落点 ----------------
@@ -1747,13 +1749,25 @@ class AddEdgeDialog(_BaseDialog):
         from storygraph.story.control_route import wire_plan_writable
         plan = self.plan if isinstance(self.plan, dict) else {}
         if not plan:
-            return ''
+            # 算不出落点 ⇒ 窗口层拿不到 `write=True`，按「创建」只会画草图。
+            # 以前这种情况一个字都不说（`plan_hint_text` 直接返回空串），
+            # 于是"点了创建、图上多条虚线、剧本没变"没有任何解释。
+            return ('✎ 算不出这一条会落在哪里 —— 按「创建」只会画一条**草图**'
+                    '（虚线，图上标「草图」）。')
         kind = str(plan.get('kind') or '')
         why = str(plan.get('reason') or '').strip()
         src, dst = self._label_of(self._src), self._label_of(self._dst)
         if kind == 'control':
-            return (f'✔ 会写进编排层：把「{src}」的出口接到「{dst}」'
+            text = (f'✔ 会写进编排层：把「{src}」的出口接到「{dst}」'
                     f'（章节剧本一个字不动）。')
+            # 改接时说清**原来那一条去哪了**：`return` 是常规操作，
+            # 而 `jump X` / `$ renpy.full_restart()` 是被换掉的原有出口。
+            cplan = plan.get('control_plan')
+            old = str(getattr(cplan, 'old_route', '') or '').strip()
+            if str(getattr(cplan, 'kind', '') or '') == 'replace' \
+                    and old and old != 'return':
+                text += f'原来那一条「{old}」会被换掉（Ctrl+Z 可放回）。'
+            return text
         if kind == 'control_init':
             return (f'✔ 会写进编排层：先补「{dst}_control」包装，'
                     f'再把「{src}」接过去（章节剧本一个字不动）。')
@@ -1778,6 +1792,44 @@ class AddEdgeDialog(_BaseDialog):
             return
         self._plan_hint.setText(text)
         self._plan_hint.setVisible(bool(text))
+        self._sync_ok_button()
+
+    def _sync_ok_button(self):
+        """
+        「创建」键的文字 = **按下去真的会发生什么**。
+
+        真机（2026-10-27，用户原话）："为什么只能生成草图……？我明明没有用
+        草稿"。那时按钮一直写「创建」，而写不进的落点其实只会画一条线 ——
+        区别全都藏在下面一行灰色小字里。现在写不进时按钮自己就叫「只画草图」。
+        """
+        box = getattr(self, '_buttons', None)
+        draft_box = getattr(self, '_draft', None)
+        if box is None or draft_box is None:
+            return
+        btn = box.button(QDialogButtonBox.Ok)
+        if btn is None:
+            return
+        from storygraph.story.control_route import wire_plan_writable
+        plan = self.plan if isinstance(self.plan, dict) else {}
+        try:
+            writable = wire_plan_writable(plan)
+        except Exception as e:                # noqa: BLE001 - 算不出就按"不能写"
+            swallow('ui_qt.dialogs.AddEdgeDialog.ok_button', e)
+            writable = False
+        if bool(draft_box.isChecked()):
+            text = '画草稿'
+            tip = ('只画线、不写剧本（图上标「草稿」）；'
+                   '以后右键这条线「写入剧本…」可以转正')
+        elif not writable:
+            why = str(plan.get('reason') or '').strip() or '算不出这条线落在哪'
+            text = '只画草图'
+            tip = f'写不进剧本：{why}\n剧本一个字节都不会改，只在图上画一条虚线。'
+        else:
+            text = '创建'
+            tip = '按「插入位置」真的写进剧本'
+        if btn.text() != text:
+            btn.setText(text)
+        btn.setToolTip(tip)
 
     def _current_position(self):
         data = self._pos.currentData()

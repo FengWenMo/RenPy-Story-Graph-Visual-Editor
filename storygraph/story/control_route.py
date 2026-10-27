@@ -141,6 +141,24 @@ def _route_of(text: str):
     return None
 
 
+def _terminating_of(text: str) -> str:
+    """
+    这一行是不是"**游戏到此为止**"（`$ renpy.full_restart()` / `$ renpy.quit()`）？
+
+    是就返回那个调用名，否则空串。判据不在这里：问 `story.exits
+    .terminating_call`（"终局语句"只有那一份定义），这里只负责把行首的
+    `$` 剥掉 —— 编排层里它是 `$ renpy.full_restart()`，而出入口分析那边
+    拿到的是代码本身（没有 `$`）。
+    """
+    raw = str(text or '').strip()
+    if raw.startswith('$'):
+        raw = raw[1:].strip()
+    elif raw == 'python' or raw.startswith('python '):
+        return ''            # `python:` 块不是单行，这里不猜
+    from storygraph.story.exits import terminating_call
+    return terminating_call(raw)
+
+
 @dataclass
 class ControlRoutePlan:
     """一次"写到编排层"的**纯计划**（不碰磁盘）。"""
@@ -758,6 +776,26 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
         plan.ok = True
         plan.reason = f'把 `{plan.control_label}` 的 return 接成 ' \
                       f'jump {plan.target_label}'
+        return plan
+
+    # 编排层以**终局语句**收尾（`$ renpy.full_restart()` / `$ renpy.quit()`）：
+    # 它自己就是"到此结束"，后面再插什么都执行不到 —— 新路由只能**替掉它**。
+    # 这也正是把"这一章演完游戏就结束"改成"演完接着去 B"的唯一写法。
+    #
+    # 为什么必须认这一档（2026-10-27 真机）：旧版编辑器生成的编排层，最后一章
+    # 的 `_control` 就是 `call 这一章` + `$ renpy.full_restart()`。于是
+    # 「接上下一章」这个最自然的动作落到这里被判成"判不出安全的插入点"，
+    # 对话框只能画一条草图 —— 用户原话："为什么只能生成草图？我明明没有用草稿"。
+    terminal = _terminating_of(raw)
+    if terminal:
+        plan.kind = 'replace'
+        plan.old_line = lines[last_i]
+        plan.new_lines = ['    ' + _render_route('jump', plan.target_label,
+                                                 from_clause)]
+        plan.ok = True
+        plan.reason = (f'改接：`{plan.control_label}` 原来以「{raw}」收尾'
+                       f'（演完就结束），换成 jump {plan.target_label}')
+        plan.notes.append('原来那条「结束」会被换掉；Ctrl+Z 可以放回')
         return plan
 
     plan.reason = (f'`{plan.control_label}` 的最后一条是「{raw}」—— '
