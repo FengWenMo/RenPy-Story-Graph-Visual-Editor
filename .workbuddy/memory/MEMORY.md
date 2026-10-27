@@ -47,6 +47,7 @@
 - **"连线很卡"是同一个项目被整份解析 6~8 遍**（2026-10-27）：接线窗口问"编排层是哪个 / `_control` 在不在 / 谁 jump 了这章"，每个问题都读一遍全部 `.rpy`，`detect_placement` 还是整份 AST（真机 1.2 MB → 1435 ms/次）。现在**项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，无 TTL），并且 `find_control_file` 在**只有一个候选**时直接返回（排序只有一个元素时结论相同）。改这块别绕过缓存，也别给它加 TTL —— 判据 `test_scan_cache.py`（含"第二次零读盘""改文件必须重新解析"）。
 - **"刷新已导入章节"以前每次都全量重解**（2026-10-27）：91 章的项目按一下 3.0 秒（0 改动也一样）。现在 ①会话持有一个 `IncrementalRenPyAnalyzer`（缓存跨调用复用；**只逐出磁盘上不存在的文件**、有 8 MB 上限、**本批不淘汰**）；②`import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定刷新重读哪几个，**0 改动连预览框都不弹**（判据 `test_import_stamps.py`；旧用例"导入完立刻刷新也弹框"已校准为"先改文件再刷新"）。
 - **卡片上的"这一拍的舞台图"**（2026-10-27）：渲染必须走 `stage_render.render_frame`（与「演出预览」**同一个函数**，别另写近似画法）；**一律后台线程**（首次碰上大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；"要不要重画"看 `frame_signature`（内容指纹）——**不许**用 `id(frame)`（每刷一次都是新对象），也不许在换拍时"拿上一张顶着"（卡片是单拍快照，那等于说错话）。图在**舞台块外面**：真机一章 285 拍里 210 拍舞台块是收起的，收起时放弃这张图 = 最该看的时候没有（判据 `test_stage_thumb.py` 22 条）。
+- **界面上"可删的独立件"**（2026-10-27，⭐ GitHub star 徽标）：一个文件 + 一处挂载。控件/网络/离线降级全在 `ui_qt/github_star.py`，**不许** import 窗口/会话代码；主窗口只有 `_build_card_page` 里那三行 try（删掉 + 删文件 = 界面复原）。点击必须立刻返回（网络在后台，`click()` 实测 21 ms）；**启动时不联网**；没 token 不开死页面、连不上只说一句"连不上 GitHub"。判据 `test_github_star.py`（19 条，含"整个 UI 包只有一处 import 它"）。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完**回读校验**。
 
@@ -69,6 +70,7 @@
 | 接线不卡 | 项目级扫描进 `scan_cache`（内容驱动失效）+ 单候选不排序 + 画布每块只 refresh 一次 | `test_scan_cache.py` / `test_graph_canvas.py::TestRebuildIsNotWasteful` |
 | 刷新不白付钱 | 分析器缓存跨调用复用 + 刷新只重读 `(mtime,size)` 变过的文件（0 改动 = 4 ms） | `test_import_stamps.py` |
 | 卡片单拍舞台图 | `app.stage.build_frame_at` + `ui_qt.stage_thumb`（后台渲染 / 内容指纹 / 防抖 / LRU）；舞台块收起时也在 | `test_stage_thumb.py` / `test_stage_preview.py::TestBuildFrameAt` |
+| GitHub star 徽标 | 独立件 `ui_qt/github_star.py`（一处挂载、后台点击、离线只说一句） | `test_github_star.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）｜许可证 Proprietary 无 LICENSE。

@@ -5121,4 +5121,55 @@ if len(with_control) == 1:
 - 卡片面板的公共接口：`show_stage_frame(idx, session)` / `clear_stage_frame()` /
   `stage_thumb()` / `shutdown_stage_thumb()`（窗口关闭时清线程池）。
 
+## §59 「可整块删掉的独立件」：卡片页的 ⭐ GitHub Star（2026-10-27 晚）
+
+用户原话："再在（卡片编辑器）的稍稍右上方空白处去做一个 github 的快速 star 呢？……
+我希望它是一个独立于整体界面的代码块，到时候方便取下来，不要耽误别人到时候对这个
+界面的改造"。
+
+这一节把"独立件"写成契约 —— 以后任何**加在界面上、但不属于产品主体**的东西
+（star 徽标、赞助入口、公告条…）都按这套来，别人才敢改界面。
+
+### 59.1 三条硬规矩
+
+| 规矩 | 判据 |
+|---|---|
+| **一个文件**：控件 + 网络 + 降级全在 `ui_qt/github_star.py` | 它只许 `import` Qt / 标准库 / `ui_qt.tokens`（纯色表）；**不许** import `main_window` / `window_card` / `app.*` / `story.*` |
+| **一处挂载**：主窗口只有那三行 try 块 | 整个 `storygraph/ui_qt/` 里除它自己，只有 `main_window.py` 出现 `github_star`；删掉那三行 + 那个文件 = 界面完全恢复 |
+| **挂不上也不拦界面** | 挂载处 `try/except` + `swallow`。老 Qt / 颜色表缺 / 线程池起不来，最多少一个徽标 |
+
+判据：`tests/test_github_star.py::TestItStaysDetachable`。
+
+### 59.2 点击语义（三条出口，都是说人话）
+
+| 情况 | 行为 |
+|---|---|
+| 有 token | `PUT https://api.github.com/user/starred/<owner>/<repo>`，`204` = 成功（**已标过也回 204**，幂等，不许当失败） |
+| 没 token | 先 `probe` 一次（2.5 s 超时）再打开仓库页 —— **不许在浏览器里开一个死页面** |
+| 连不上 / 401 / 403 / 404 | 按钮上写一句原因（"连不上 GitHub（不影响使用）" / "token 无效或已过期"…），几秒后自己恢复；`401` 还要**退回开网页** |
+
+- token 来源优先级：`STORYGRAPH_GITHUB_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` →
+  `%LOCALAPPDATA%\StoryGraph\github.json` 的 `{"token": "…"}`（与 AI key 同一约定：
+  不进项目、不进 git）。都没有 → 只开网页，**一次网络都不发**。
+- 网络**一律在后台线程**（`QThreadPool`，3 s 超时）；`click()` 必须立刻返回
+  （实测 21 ms），忙碌期间按钮置灰防连点。
+- **启动时不联网**：不探测、不拉 star 数、不留后台心跳 —— 只有人点才发请求。
+  离线时它就是一块静默的装饰。
+
+### 59.3 位置
+
+卡片页右栏布局的**第 0 行、右对齐**（`layout.insertWidget(0, badge, 0, Qt.AlignRight)`），
+即"稍稍右上方"那块空白；它不挤压任何已有控件的语义，只占一行约 22 px。
+
+### 59.4 顺带记：这一轮**没能**推送 GitHub
+
+远端 `origin` = `FengWenMo/RenPy-Story-Graph-Visual-Editor`，本地领先
+`origin/main`（`45a2c79`）**88 个提交**；仓库本身已清到"可推"（1169 个文件 /
+23.3 MB，最大单文件 1.29 MB，无 exe/zip/pyc）。推不上去的原因是这台机器的
+`hosts` 把 `github.com` / `api.github.com` / `raw.githubusercontent.com` /
+`*.github.io` 全指到了 `127.0.0.1`（868 条 `#S302` 屏蔽项），直连真实 IP 也超时。
+应急件：`.pip-tmp/StoryGraph-main-2026-10-27.bundle`（`git bundle`，自带全部历史）。
+
+⚠ 开源前还缺 `LICENSE`（`pyproject.toml` 里写的是 MIT，仓库根没有文件）。
+
 
