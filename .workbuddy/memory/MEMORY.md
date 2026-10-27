@@ -73,8 +73,9 @@
 | 导出落点 + 顶部顺序 | `.rpy` 导出文件夹**由人指定**；工具栏顺序：导航→打开项目→自定义→AI→导入→导出→刷新→清理 | `test_toolbar_export_entry.py` / `test_txt_pipeline.py` |
 | 接线不卡 | 项目级扫描进 `scan_cache`（内容驱动失效）+ 单候选不排序 + 画布每块只 refresh 一次 | `test_scan_cache.py` / `test_graph_canvas.py::TestRebuildIsNotWasteful` |
 | 刷新不白付钱 | 分析器缓存跨调用复用 + 刷新只重读 `(mtime,size)` 变过的文件（0 改动 = 4 ms） | `test_import_stamps.py` |
-| 卡片单拍舞台图 | `app.stage.build_frame_at` + `ui_qt.stage_thumb`（后台渲染 / 内容指纹 / 防抖 / LRU）；舞台块收起时也在 | `test_stage_thumb.py` / `test_stage_preview.py::TestBuildFrameAt` |
-| GitHub star 徽标 | 独立件 `ui_qt/github_star.py`（一处挂载、后台点击、离线只说一句） | `test_github_star.py` |
+| 卡片单拍舞台图 | `app.stage.build_frame_at` + `ui_qt.stage_thumb`（后台渲染 / 内容指纹 / 防抖 / LRU）；**在「当前舞台」标题下面、与摘要并排、固定 288×162**（`compact=True`）；`_stage_now` 永远可见（舞台块收起时也在） | `test_stage_thumb.py` / `test_stage_preview.py::TestBuildFrameAt` |
+| 右栏竖向配额 | 「定位」默认折叠（chip，点开才展开，`PropertyStrip` 一直同步）；卡片页一屏装得下 | `test_ui_nav_layout.py::TestWindowWiring` |
+| GitHub star 徽标 | 独立件 `ui_qt/github_star.py`（**模式条上、「✎ 卡片编辑」右边**；一处挂载 `window_nav`；后台点击；离线只说一句） | `test_github_star.py` |
 | E1/E3+D3 | 拖线落点由结构决定；过滤只改 visible 不删边 | `test_wire_landing.py` / `test_edge_beat_badge.py` |
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜M5 多引擎深度（运行时组件未做）｜G1 行为级契约进 CI（21 个 `skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层（支持矩阵 + 探针降级闸门）。

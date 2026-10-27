@@ -5107,21 +5107,25 @@ if len(with_control) == 1:
 缓存命中时停掉排队中的防抖任务。真机：后台一拍 78~217 ms（首次大盘立绘
 0.5~1.3 s），`_show_index` 不含等图（143~193 ms，与改动前同档）。
 
-### 58.3 位置与"收起"的取舍
+### 58.3 位置与"收起"的取舍（位置在 §60 改过一次，以 §60 为准）
 
-- 图在**舞台块外面**（`_stage_box` 之前、`＋ 改舞台` 之上），**永远在**。
-  理由：真机一章 285 拍里 210 拍没有舞台内容（那几块收起），而那些拍的
-  背景/立绘全是从上文**继承**来的 —— 收起时放弃这张图等于"最该看的时候没有"。
-  判据 `test_it_stays_when_the_stage_block_is_collapsed`。
-- 「当前舞台」那行**文字**不变（还是 `stage_digest_text`），图在它上面；
+- 图在「当前舞台（这一拍生效）」标题**下面**、与文字摘要**并排**（图在左，
+  固定 288×162）；它所在的 `_stage_now` 区块**永远可见**（`_stage_box` 收起时
+  也在，见 §60.1）。理由：真机一章 285 拍里 210 拍没有舞台内容（那几块收起），
+  而那些拍的背景/立绘全是从上文**继承**来的 —— 收起时放弃这张图等于
+  "最该看的时候没有"。
+  判据 `test_it_stays_when_the_stage_block_is_collapsed` /
+  `test_it_sits_under_the_current_stage_heading`。
+- 「当前舞台」那行**文字**不变（还是 `stage_digest_text`），图在它**左边**；
   两者**同一时刻**刷新（`window_card.refresh_derived_panels` 里一次调两个），
   不许出现"图是新的、字是旧的"。
-- 高度跟着卡片宽走（16:9，`MIN_H 132` / `MAX_H 420`）：宽了上下留黑边，
+- 尺寸：`compact=True` → 固定 288×162（`COMPACT_W/COMPACT_H`）；`compact=False`
+  才是"高度跟着卡片宽走"（16:9，`MIN_H 132` / `MAX_H 420`）。宽了留黑边，
   不许把图拉变形。
 - 卡片面板的公共接口：`show_stage_frame(idx, session)` / `clear_stage_frame()` /
   `stage_thumb()` / `shutdown_stage_thumb()`（窗口关闭时清线程池）。
 
-## §59 「可整块删掉的独立件」：卡片页的 ⭐ GitHub Star（2026-10-27 晚）
+## §59 「可整块删掉的独立件」：顶部模式条的 ⭐ GitHub Star（2026-10-27 晚）
 
 用户原话："再在（卡片编辑器）的稍稍右上方空白处去做一个 github 的快速 star 呢？……
 我希望它是一个独立于整体界面的代码块，到时候方便取下来，不要耽误别人到时候对这个
@@ -5135,7 +5139,7 @@ if len(with_control) == 1:
 | 规矩 | 判据 |
 |---|---|
 | **一个文件**：控件 + 网络 + 降级全在 `ui_qt/github_star.py` | 它只许 `import` Qt / 标准库 / `ui_qt.tokens`（纯色表）；**不许** import `main_window` / `window_card` / `app.*` / `story.*` |
-| **一处挂载**：主窗口只有那三行 try 块 | 整个 `storygraph/ui_qt/` 里除它自己，只有 `main_window.py` 出现 `github_star`；删掉那三行 + 那个文件 = 界面完全恢复 |
+| **一处挂载**：`window_nav._build_mode_bar()` 里那三行 try 块 | 整个 `storygraph/ui_qt/` 里除它自己，只有 `window_nav.py` 出现 `github_star`；删掉那三行 + 那个文件 = 界面完全恢复（`test_only_the_mode_bar_mounts_it`） |
 | **挂不上也不拦界面** | 挂载处 `try/except` + `swallow`。老 Qt / 颜色表缺 / 线程池起不来，最多少一个徽标 |
 
 判据：`tests/test_github_star.py::TestItStaysDetachable`。
@@ -5156,10 +5160,18 @@ if len(with_control) == 1:
 - **启动时不联网**：不探测、不拉 star 数、不留后台心跳 —— 只有人点才发请求。
   离线时它就是一块静默的装饰。
 
-### 59.3 位置
+### 59.3 位置（第二版，用户当场纠正过）
 
-卡片页右栏布局的**第 0 行、右对齐**（`layout.insertWidget(0, badge, 0, Qt.AlignRight)`），
-即"稍稍右上方"那块空白；它不挤压任何已有控件的语义，只占一行约 22 px。
+**顶部模式条**（`QToolBar`，`objectName='modeBar'`）上、紧挨「✎ 卡片编辑」标签
+**右边**（`tb.addWidget(badge)`，见 `window_nav._build_mode_bar`）。两页都看得见
+—— 它属于"这个工具本身"，不属于卡片页的编辑区。
+
+第一版挂在卡片页右栏布局第 0 行，被用户否掉了：
+> 还有，github的star我不是叫你放卡片编辑的旁边吗？你应当放第四张图这里，
+> 卡片编辑右边！放错位置啦！！！
+
+判据：`test_the_badge_sits_right_of_the_card_tab`（模式条动作序列里
+`徽标 = 标签 + 1`）+ `test_it_is_not_in_the_card_column`（`卡片页` 不是它的祖先）。
 
 ### 59.4 顺带记：这一轮**没能**推送 GitHub
 
@@ -5187,3 +5199,66 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 要换成 "或更高版本" 就统一写 `GPL-3.0-or-later`（README 那句也一起改）。
 
 
+
+## §60 卡片右栏的**竖向配额**：定位折叠 / 288×162 的图 / 徽标在模式条（2026-10-27 深夜）
+
+用户看完第一版截图后一次点了三处（原话）：
+
+> 不对！！！你这个不能放卡片界面啊！！！应该缩小放舞台界面！当前舞台下面那一栏……
+> 缩小！再缩小，直到能看到全貌！不然你现在显示都显示不全何来调整啊？？？
+> 还有就是这个定位能不能折叠一下（卡片界面才是最主要的！！！定位默认折叠起来，
+> 卡片界面必须留几乎右边全屏）……留给我的可编辑窗口太小了！我看不过来！
+
+这三句其实是同一条规则的三种说法：**右边这一栏的竖向空间，优先给"能改的东西"**。
+§60 把这条写成可判的配额，以后往右栏加东西先算这笔账。
+
+### 60.1 三条配额
+
+| 谁 | 占多少 | 能不能收 | 判据 |
+|---|---|---|---|
+| 「▸ 定位（这一拍在文件里的位置）」 | 收起时 **1 行**（一个 chip），展开时 6~7 行 | **默认收起**，点一下展开；`PropertyStrip` 一直在、照旧同步 | `test_location_block_starts_collapsed` / `test_toggling_it_shows_the_real_rows` |
+| 「当前舞台」+ 这一拍的图 | 标题 1 行 + **一行**（图 288×162 在左、文字摘要在右） | 普通拍**一直可见**；**控制流卡收起**（`call` / `jump` 没有演出） | `test_it_sits_under_the_current_stage_heading` / `test_the_picture_is_a_small_whole_frame` / `test_ui_fit_and_flow.py::TestFlowCardHidesDialogue` |
+| 立绘网格 / 背景 / 音乐 / 语音（`_stage_box`） | 有舞台内容才有 | 这一拍没有舞台改动 → 整块收起成一行说明 + 「＋ 改舞台」 | `test_it_stays_when_the_stage_block_is_collapsed` |
+
+**为什么"定位"能收、"当前舞台"不能**：定位是"我在文件的哪儿"，回答一次就够
+（模式条右边还一直写着 `ch01.rpy · ch01 · 第 1 拍`）；而"这一拍台上是谁 / 在哪 /
+什么曲子"是**每拍都要重新看**的东西，且 285 拍里 210 拍没有舞台改动 ——
+它一收，那些拍就什么都没有了。唯一的例外是**控制流卡**（`call` / `jump`）：
+那里既没有台词也没有演出，图和摘要一起收起（`set_flow` 里显隐）。
+
+### 60.2 卡片根布局的顺序（改顺序要同时改这三处的判据）
+
+```
+语句条 / 参数
+说话人 · 台词 · 字数 · 富文本预览 · 台词后缀
+当前舞台（这一拍生效）
+├─ 标题
+└─ [ 288×162 的图 | 文字摘要（stage_digest_text） ]     ← `_stage_now`（控制流卡收起）
+舞台：这一拍没有改动 … ／ ＋ 改舞台                       ← 二者互斥
+立绘网格 · 背景 · 音乐 · 语音                            ← `_stage_box`，可收起
+备注 · 条件 · 高级区 · 保存/撤销 · 提示条
+```
+
+- 图在**摘要左边**、同一行：摘要本来就要占那几行，图因此几乎不吃额外高度；
+- 图是 **288×162 固定小图**（`stage_thumb.COMPACT_W/COMPACT_H`），
+  整帧一眼看得完 —— "看得全"比"看得大"重要，因为看它是为了**决定改什么**；
+- 点开「定位」不会把卡片挤走：它插在卡片上方的 `rv` 里，卡片自己在一个
+  `QScrollArea` 里（`stretch=1`），高度不够时滚的是卡片，不是窗口。
+
+### 60.3 实测（1760×1000，真机 `sr_general/chapter1_4.rpy` 285 拍）
+
+- 定位收起：右栏从「▸ 定位」一行直接接「卡片界面（这一拍）」，卡片一屏装下
+  说话人 / 台词 / 当前舞台（图+摘要）/ 立绘 / 背景 / 音乐 / 备注 / 条件 / 高级区 /
+  保存撤销，不必滚；
+- 图 288×162，渲染目标仍是 480×270（`MIN_TARGET_W` 下限），后台 674 ms 首帧；
+- 模式条那一行：`🗺 剧情结构 │ ✎ 卡片编辑 │ ★ Star on GitHub`，右边
+  `chapter1_4.rpy · chapter1_4 · 第 1 拍`。
+
+### 60.4 判据清单
+
+- `tests/test_stage_thumb.py::TestCardWiring`：图在「当前舞台」标题下面、
+  摘要左边；是 288×162 的小图；舞台块收起时它还在；翻拍 / 保存 / 空会话照旧；
+- `tests/test_github_star.py::TestModeBarWiring`：徽标在模式条上、紧跟
+  「卡片编辑」标签（动作序列 +1）；不在卡片页里；删掉它之后界面照常；
+- `tests/test_ui_nav_layout.py::TestWindowWiring::test_inspector_shows_where_this_shot_lives`
+  （收起与否，`PropertyStrip` 的内容一直是这一拍的）；
