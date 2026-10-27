@@ -5074,3 +5074,51 @@ if len(with_control) == 1:
   按用户口径（只做几秒级）不做。
 
 
+## §58 卡片上的「这一拍的舞台图」（2026-10-27 傍晚）
+
+用户原话："每一拍的舞台信息那里……可以除文字描述之外，给一张这一拍的图片吗？
+就放在文字描述之前的上面（与舞台预览一致的图片，但只有一拍，每当这一排有
+修改时，重新刷新这一拍的图）"。
+
+### 58.1 一个入口、一条渲染链
+
+| 规矩 | 判据 / 说明 |
+|---|---|
+| 只算一拍：`app.stage.build_frame_at(beats, i, registry=, transform_index=, screen=)` | 与 `build_frames(beats)[i]` **逐字段相同**（`tests/test_stage_preview.py::TestBuildFrameAt`）。实现上只喂 `beats[:i+1]` —— 快照是前缀递推，截断安全。真机 2.2 ms（整章 `build_frames` 82 ms） |
+| 渲染只有一份：`app.stage_render.render_frame(...)` | 卡片与「🎬 演出预览」调**同一个函数**、同一份 `load_gui_profile` / `transform_index` / `screen`。**不许**在卡片里另写一套"近似画法"（那就是"预览在骗人"） |
+| 越界 / 空章 → `None` | 调用方据此显示"没有画面"并说原因；**不许编一帧假的** |
+| 缩放（PIL，工作线程）到控件尺寸 | 不许把 1920×1080 搬过线程边界再让 Qt 缩（`QImage` 拷贝 17 ms，首调更贵）。目标宽 = 控件宽 × dpr，夹在 [480, 1280] |
+
+### 58.2 `ui_qt.stage_thumb.BeatStageThumb` 的四条不变量
+
+1. **换拍立刻清掉上一张**。不许学预览的"上一张顶着 + 角标"：卡片是"第 N 拍的
+   快照"，画着第 N-1 拍就是错的信息。只有两个状态：这一拍 / 明说"正在渲染"。
+2. **指纹决定重画**（`frame_signature`：index、line_id、label、speaker（含显示名
+   与颜色）、text、scene（含 at）、立绘（图像名 / at / x / 是否在说话 / transform
+   几何）、layers、music、sound、voice、with_、pause）。同一拍同内容**不重渲**；
+   `id(frame)` 不能用（每次都是新对象）。
+3. **迟到的结果只进缓存**（`_Gate` + 缓存键比对）：绝不许把上一拍的图贴到
+   这一拍上；也不许为"已经翻走的那一拍"白算（工作线程开跑前先看门闩）。
+4. **没有画面必须说原因**（`note()` 永远非空）：空会话 / 没选中 / 越界 /
+   没装 Pillow / 渲染失败，各有各的话。缺素材时右下角「⚠ 缺 N 个素材」+
+   tooltip 列名单。
+
+异步/性能约定：**防抖 120 ms**、**两个渲染线程**、**LRU 12 拍**、
+缓存命中时停掉排队中的防抖任务。真机：后台一拍 78~217 ms（首次大盘立绘
+0.5~1.3 s），`_show_index` 不含等图（143~193 ms，与改动前同档）。
+
+### 58.3 位置与"收起"的取舍
+
+- 图在**舞台块外面**（`_stage_box` 之前、`＋ 改舞台` 之上），**永远在**。
+  理由：真机一章 285 拍里 210 拍没有舞台内容（那几块收起），而那些拍的
+  背景/立绘全是从上文**继承**来的 —— 收起时放弃这张图等于"最该看的时候没有"。
+  判据 `test_it_stays_when_the_stage_block_is_collapsed`。
+- 「当前舞台」那行**文字**不变（还是 `stage_digest_text`），图在它上面；
+  两者**同一时刻**刷新（`window_card.refresh_derived_panels` 里一次调两个），
+  不许出现"图是新的、字是旧的"。
+- 高度跟着卡片宽走（16:9，`MIN_H 132` / `MAX_H 420`）：宽了上下留黑边，
+  不许把图拉变形。
+- 卡片面板的公共接口：`show_stage_frame(idx, session)` / `clear_stage_frame()` /
+  `stage_thumb()` / `shutdown_stage_thumb()`（窗口关闭时清线程池）。
+
+
