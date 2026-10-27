@@ -5,12 +5,14 @@ P2.5（2026-10-24）：补**目标章**的 `_control` 包装，然后接线。
 这一层解决的是一句很具体的话：项目已经有编排层，但新导入的目标章还没有
 `B_control`。以前只能"先导出控制流"，否则这条线接不上。
 
-判据只有一条：**补出来的包装得有人进来**。所以：
+判据只有一条：**接线必须真的写进文件**。所以：
 
-  · 目标章缺包装 → 新写的 `jump B_control` 就是第一个入口 → 可以补；
-  · 源章缺包装 → 它现在被 `jump X` 直接进入，补出来是死代码 → 不补，
-    并说清"要补得先接管入口"；
-  · 项目里一个 `_control` 都没有 → 不新建文件（没有入口的文件只会是死代码）。
+  · 目标章缺包装 → 新写的 `jump B_control` 就是第一个入口 → 补；
+  · 源章缺包装 → 也补（2026-10-27 用户口径："就算是断裂的局部也能不画
+    草图直接连"）。补之前是不是已经有人进来、进来的是不是 `jump X`
+    都不拦，只在 `notes` / `reachable` 里说清"这条线什么时候才会执行"；
+  · 项目里一个 `_control` 都没有 → 不新建文件（没有入口的文件只会是死代码，
+    而且那不是"接线"，是"建编排层"——那一步由「接管进入点」负责）。
 """
 from __future__ import annotations
 
@@ -101,15 +103,35 @@ class TestPlanInit:
         assert plan.ok is False
         assert '带参数' in plan.reason
 
-    def test_source_wrapper_is_refused_when_entered_directly(self, tmp_path):
-        """源章缺包装：jump ch01 直接进来，补 ch01_control 是死代码。"""
+    def test_source_wrapper_is_written_even_if_entered_directly(self, tmp_path):
+        """
+        源章缺包装、现在是 `jump ch01` **直接**进入的：照样补。
+
+        以前这里拒写（"补出来是死代码"），结果一个还没接进入口的章节永远
+        接不出线 —— 用户 2026-10-27：「就算是断裂的局部也能不画草图直接连」。
+        写归写，但必须标明它暂时没人走。
+        """
         root = _project(tmp_path, controller='label ch02_control:\n    call ch02\n    return\n')
         (root / 'game' / 'script' / 'main.rpy').write_text(
             'label start:\n    jump ch01\n', encoding='utf-8')
         plan = plan_control_init(root, 'ch01', role='source')
-        assert plan.ok is False
-        assert 'jump ch01' in plan.reason
-        assert '死代码' in plan.reason
+        assert plan.ok is True and plan.kind == 'append', plan.reason
+        assert plan.reachable is False
+        assert any('jump ch01' in n and '直接' in n for n in plan.notes), plan.notes
+        assert 'label ch01_control:' in plan.new_text
+
+    def test_source_wrapper_with_no_entry_at_all_is_written_with_a_note(self, tmp_path):
+        """一个入口都没有的章节：也补（否则图上接不出来），并说清暂时到不了。"""
+        root = _project(tmp_path,
+                        controller='label ch02_control:\n    call ch02\n    return\n')
+        plan = plan_control_init(root, 'ch01', role='source')
+        assert plan.ok is True and plan.kind == 'append', plan.reason
+        assert plan.reachable is False
+        assert any('没有任何地方进入' in n for n in plan.notes), plan.notes
+        # 真的能落盘
+        res = apply_control_init(plan)
+        assert res['ok'] is True, res
+        assert 'label ch01_control:' in _controller(root).read_text(encoding='utf-8')
 
     def test_source_wrapper_fixes_a_broken_jump_to_control(self, tmp_path):
         """已经有人 jump ch01_control，但 label 丢了 → 补它是修 bug。"""

@@ -858,20 +858,30 @@ class NodeEditMixin:
             self._status(f'编排层没写成：{msg}')
             return {'ok': False, 'error': msg}
         path = getattr(cmd, 'path', '') or str(getattr(cplan, 'path', ''))
-        # 这一条是不是**顺手补了目标章的包装**（`control_init`）？补了就要说 ——
-        # 否则用户下次打开编排层会看见一个自己没写过的 label。
+        # 这一条是不是**顺手补了 `_control` 包装**？补了就要说 —— 否则用户
+        # 下次打开编排层会看见一个自己没写过的 label。源章（这一章还没有入口）
+        # 和目标章（新接进来的那一头）都可能补，包装名要分别点出来。
         added = ''
+        caveat = ''
         init = getattr(cplan, 'init', None)
         if init is not None and getattr(init, 'ok', False):
             name = str(getattr(init, 'chapter_label', '') or '')
             if name:
                 added = f'；顺手补了 `{name}_control` 包装'
+            if not getattr(init, 'reachable', True):
+                # 写是写了，但这一章现在没人从编排层进来 —— 必须说出来，
+                # 否则"图上有一条线、游戏里永远走不到"就是另一种骗人。
+                notes = [str(n) for n in (getattr(init, 'notes', ()) or ())
+                         if str(n or '').strip()]
+                caveat = ('\n⚠ ' + notes[0] if notes else
+                          '\n⚠ 这一章现在还没有入口 —— 这条线写进去了，'
+                          '但要等接上进入这一章的线才会真的执行')
         self._log(f'[接线] 编排层：{getattr(cplan, "control_label", "")} '
                   f'→ {getattr(cplan, "new_lines", []) or [getattr(cplan, "target_label", "")]}'
                   f'（{path}；章节源文件未改{added}）')
         self._status(
             f'✔ 已接到编排层（{Path(path).name if path else "控制流文件"}，'
-            f'章节剧本一个字未改{added}）；Ctrl+Z 可撤回')
+            f'章节剧本一个字未改{added}）；Ctrl+Z 可撤回{caveat}')
         return {'ok': True, 'path': path, 'kind': 'control',
                 'edge_id': getattr(cmd, 'edge_id', None),
                 'control_plan': cplan}

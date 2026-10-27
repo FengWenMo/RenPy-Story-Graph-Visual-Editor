@@ -241,8 +241,12 @@ class ControlRouteCommand(Command):
     `mode='add'` 用 `plan_control_route` 的结果；`mode='remove'` 用
     `plan_control_unroute`。文件的旧全文存在命令里，撤销时逐字节写回。
 
-    P2.5：`init_plan` 是"目标章缺 `_control` 包装"的补计划。先补包装、
-    再重算路由、再写路由；撤销把**补之前**的全文写回（一次 Ctrl+Z 全回去）。
+    P2.5：`init_plan` 是"接线前要先补的那个 `_control` 包装"（源章缺、
+    目标章缺都算）。先补、再重算、再写；撤销把**补之前**的全文写回
+    （一次 Ctrl+Z 全回去）。
+
+    2026-10-27 真机（`chapter2_4 → chapter2_4_1`）：两头包装都缺是**最常见**
+    的情形，所以补包装走 `apply_init_chain` —— 一次能把两个都补上。
     """
 
     def __init__(self, graph_view, plan, mode='add', from_id=None, to_id=None,
@@ -263,11 +267,13 @@ class ControlRouteCommand(Command):
         self.path = ''
         self.error = ''
         self._init_written = False
+        #: `apply_init_chain` 的落地记录：`[(path, 补之前, 补之后)]`
+        self.init_snapshots = []
 
     def execute(self):
-        from storygraph.story.control_route import (apply_control_init,
-                                                    apply_control_route,
-                                                    apply_control_unroute)
+        from storygraph.story.control_route import (
+            apply_control_route, apply_control_unroute, apply_init_chain,
+            plan_control_route, rollback_wrapper_writes)
         # 重做时从干净状态开始：上一次 execute 记的 edge_id 已经随 undo 失效。
         self.edge_id = None
         self.removed_edge = None
@@ -276,48 +282,37 @@ class ControlRouteCommand(Command):
         self.new_text = ''
         self.path = ''
         self._init_written = False
-        init_old_text = ''
+        self.init_snapshots = []
         if self.mode == 'remove':
             res = apply_control_unroute(self.plan)
         else:
             res = {'ok': True}
-            if self.init_plan is not None:
-                init_res = apply_control_init(self.init_plan)
-                if not init_res.get('ok'):
-                    self.error = str(init_res.get('error') or '补包装失败')
-                    raise RuntimeError(self.error)
-                self.path = str(init_res.get('path') or '')
-                init_old_text = str(init_res.get('old_text') or '')
-                if str(self.init_plan.kind or '') == 'append':
-                    self._init_written = True
-                # 包装已经进文件了（或本来就在）：路由的行号要按**新文件**重算。
-                if not self.project_root:
-                    self._rollback_init(init_old_text)
-                    self.error = '补了包装，但不知道项目根，无法重算路由'
-                    raise RuntimeError(self.error)
-                from storygraph.story.control_route import plan_control_route
-                self.plan = plan_control_route(
+            # 重做 / 被别的动作改过之后：`self.plan` 可能是上一次「补完包装」的
+            # 结果（`ok=True`、路径齐全），而文件已经被撤销回原样。照着旧计划
+            # 直接写，会写出"跳到一个根本没补出来的 `_control`"（2026-10-27
+            # 真机 redo 用例抓到的）。按同一份输入重算一次，判据只在规划层。
+            if self.project_root:
+                fresh = plan_control_route(
                     self.project_root,
-                    getattr(self.plan, 'src_label', ''),
-                    getattr(self.plan, 'dst_label', ''),
+                    str(getattr(self.plan, 'src_label', '') or ''),
+                    str(getattr(self.plan, 'dst_label', '') or ''),
                     self.etype)
-                if not getattr(self.plan, 'ok', False):
-                    self._rollback_init(init_old_text)
-                    self.error = (getattr(self.plan, 'reason', '')
-                                  or '补完包装后路由仍然算不出来')
-                    raise RuntimeError(self.error)
-                if self.path and self.plan.path \
-                        and Path(self.path) != Path(self.plan.path):
-                    self._rollback_init(init_old_text)
-                    self.error = '补包装与写路由落到了不同文件；已回滚'
-                    raise RuntimeError(self.error)
+                if getattr(fresh, 'path', ''):
+                    self.plan = fresh
+            # 计划里自带"要补的包装"（源章 / 目标章都有可能），也可能由调用方
+            # 显式塞进来 `init_plan`。统一走同一条链：补 → 重算 → 直到能写。
+            chain = self._init_chain(apply_init_chain, plan_control_route,
+                                     rollback_wrapper_writes)
+            if chain is not None:
+                return chain
             res = apply_control_route(self.plan)
         if not res.get('ok'):
-            self._rollback_init(init_old_text)
+            self._rollback_init()
             self.error = str(res.get('error') or '写编排层失败')
             raise RuntimeError(self.error)
         self.path = str(res.get('path') or self.path)
-        self.old_text = init_old_text or str(res.get('old_text') or '')
+        self.old_text = (self._original_text(self.path)
+                         or str(res.get('old_text') or ''))
         self.new_text = str(res.get('new_text') or '')
 
         graph = self.graph_view.graph
@@ -348,23 +343,79 @@ class ControlRouteCommand(Command):
                 self.added_edge = True
         self.graph_view.on_graph_structure_changed()
 
-    def _rollback_init(self, old_text):
-        """补包装成功、但后面的路由失败：把文件退回补之前的样子。"""
-        if not self._init_written or not old_text or not self.path:
+    def _init_chain(self, apply_init_chain, plan_control_route,
+                    rollback_wrapper_writes):
+        """
+        计划里带着"还没补的 `_control` 包装"时：**先补、再重算、再写**。
+
+        返回 `None` = 不用补（调用方直接写路由）；抛 `RuntimeError` = 补不成，
+        文件已经退回补之前的样子。
+
+        这条链一次性处理两头的包装（2026-10-27 真机 `chapter2_4 → 2_4_1`：
+        源章、目标章都没有 `_control`，只补一个永远写不进去）。
+        """
+        seed = self.plan
+        candidates = [getattr(seed, name, None) for name in ('init', 'src_init')]
+        if self.init_plan is not None:
+            candidates.append(self.init_plan)
+        if not any(c is not None and getattr(c, 'ok', False)
+                   for c in candidates):
+            return None
+        if self.init_plan is not None and getattr(seed, 'init', None) is None:
+            try:
+                seed.init = self.init_plan
+            except AttributeError:              # noqa: BLE001 - 只读计划就算了
+                swallow('graph.commands.ControlRouteCommand.seed_init',
+                        AttributeError('计划不可写'))
+        if not self.project_root:
+            self.error = '要先补编排入口，但不知道项目根，无法重算路由'
+            raise RuntimeError(self.error)
+        src_label = str(getattr(seed, 'src_label', '') or '')
+        dst_label = str(getattr(seed, 'dst_label', '') or '')
+        etype = self.etype
+
+        def _replan():
+            return plan_control_route(self.project_root, src_label, dst_label,
+                                      etype)
+
+        out = apply_init_chain(seed, _replan)
+        self.init_snapshots = list(out.get('snapshots') or ())
+        if not out.get('ok'):
+            rollback_wrapper_writes(self.init_snapshots)
+            self.init_snapshots = []
+            self.error = str(out.get('error') or '补完包装后仍然写不了')
+            raise RuntimeError(self.error)
+        self.plan = out.get('plan')
+        self._init_written = bool(self.init_snapshots)
+        if self.init_snapshots:
+            # 包装落在哪个文件，路由就要写进哪个文件（否则一次撤销回不去）。
+            self.path = str(self.init_snapshots[-1][0] or '')
+        if self.path and getattr(self.plan, 'path', '') \
+                and Path(self.path) != Path(self.plan.path):
+            rollback_wrapper_writes(self.init_snapshots)
+            self.init_snapshots = []
+            self.error = '补包装与写路由落到了不同文件；已回滚'
+            raise RuntimeError(self.error)
+        return None
+
+    def _original_text(self, path) -> str:
+        """补包装**之前**那个文件的全文本（撤销要写回它）。"""
+        for item in self.init_snapshots:
+            try:
+                item_path, old_text, _new_text = item
+            except (TypeError, ValueError):
+                continue
+            if path and Path(item_path) == Path(str(path)):
+                return str(old_text or '')
+        return ''
+
+    def _rollback_init(self):
+        """补包装成功、但后面的步骤失败：把补过的文件退回补之前的样子。"""
+        if not self.init_snapshots:
             return
-        try:
-            from storygraph.story.paths import write_text_atomic
-            from storygraph.story.source_style import read_text
-            now, style = read_text(self.path)
-            # 只回滚**自己刚写的那一份**；中间被别人改过就别覆盖。
-            expected = str(getattr(self.init_plan, 'new_text', '') or '')
-            if expected and now != expected:
-                swallow('graph.commands.ControlRouteCommand.rollback_init',
-                        RuntimeError('编排层在补包装之后又被改过；不回滚'))
-                return
-            write_text_atomic(self.path, style.apply(old_text, source=self.path))
-        except OSError as exc:                    # noqa: BLE001 - 回滚失败只能记账
-            swallow('graph.commands.ControlRouteCommand.rollback_init', exc)
+        from storygraph.story.control_route import rollback_wrapper_writes
+        rollback_wrapper_writes(self.init_snapshots)
+        self.init_snapshots = []
 
     def undo(self):
         from storygraph.story.paths import write_text_atomic
@@ -901,24 +952,34 @@ class _ControlBranchBase:
         return self._plan()
 
     def _apply_plan(self, plan):
-        """应用计划；目标章缺包装时先补包装再重算。返回最终计划。"""
+        """应用计划；缺 `_control` 包装时先补包装（源章 / 目标章都可能缺）再重算。"""
         from storygraph.story.control_branch import (apply_control_branch,
                                                      plan_control_branch)
-        from storygraph.story.control_route import apply_control_init
+        from storygraph.story.control_route import (apply_init_chain,
+                                                    rollback_wrapper_writes)
         self.init_old_text = ''
         self.init_new_text = ''
-        init = getattr(plan, 'init', None)
-        if init is not None and getattr(init, 'ok', False):
-            res = apply_control_init(init)
-            if not res.get('ok'):
-                raise RuntimeError(str(res.get('error') or '补目标章包装失败'))
-            self.init_old_text = str(res.get('old_text') or '')
-            self.init_new_text = str(res.get('new_text') or '')
-            self.path = str(res.get('path') or self.path)
-            plan = self._replan()
-            if not plan.ok:
-                self._rollback_init()
-                raise RuntimeError(plan.reason or '补完包装后仍然写不了分支')
+        self.init_snapshots = []
+        if any(getattr(getattr(plan, name, None), 'ok', False)
+               for name in ('init', 'src_init')):
+            out = apply_init_chain(plan, self._replan)
+            self.init_snapshots = list(out.get('snapshots') or ())
+            if not out.get('ok'):
+                rollback_wrapper_writes(self.init_snapshots)
+                self.init_snapshots = []
+                raise RuntimeError(out.get('error') or '补完包装后仍然写不了分支')
+            plan = out.get('plan')
+            if self.init_snapshots:
+                # 撤销要写回**最早**那一版（同一个文件可能被补过两次：
+                # 源章一个、目标章一个），回滚校验用的是**最后**那一版。
+                self.path = str(self.init_snapshots[-1][0] or '')
+                self.init_old_text = str(self.init_snapshots[0][1] or '')
+                self.init_new_text = str(self.init_snapshots[-1][2] or '')
+            if self.path and getattr(plan, 'path', '') \
+                    and Path(self.path) != Path(plan.path):
+                rollback_wrapper_writes(self.init_snapshots)
+                self.init_snapshots = []
+                raise RuntimeError('补包装与写分支落到了不同文件；已回滚')
         if not plan.ok:
             return plan
         res = apply_control_branch(plan)

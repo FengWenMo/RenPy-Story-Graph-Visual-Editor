@@ -415,7 +415,7 @@ class ControlInitPlan:
     path: str = ''
     chapter_label: str = ''
     control_label: str = ''
-    #: `target`（目标章，安全）/ `source`（源章，要接管入口才安全）
+    #: `target`（目标章，补了立刻有人走）/ `source`（源章，暂时可能到不了）
     role: str = 'target'
     old_text: str = ''
     new_text: str = ''
@@ -425,6 +425,8 @@ class ControlInitPlan:
     #: 谁进入这一章（判断"补了会不会是死代码"）
     incoming: list = field(default_factory=list)
     safe: bool = False
+    #: 补出来的包装**现在有没有人走**（源章缺入口时为 False：写了也不执行）
+    reachable: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -433,7 +435,7 @@ class ControlInitPlan:
             'control_label': self.control_label, 'role': self.role,
             'reason': self.reason, 'blocking': list(self.blocking),
             'notes': list(self.notes), 'incoming': list(self.incoming),
-            'safe': self.safe,
+            'safe': self.safe, 'reachable': bool(self.reachable),
         }
 
 
@@ -444,8 +446,10 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
     `role='target'`：正在给**目标章**接一条新入口 —— 补出来的包装会被
     新写的 `jump B_control` 进入，所以安全。
 
-    `role='source'`：源章缺包装 —— 它现在多半是被 `jump X` / `call X`
-    直接进入的，补出来没有入口；返回 `ok=False` 并说清要先接管哪些入口。
+    `role='source'`：源章缺包装。照样补（追加 `call X` / `return`），但
+    `notes` 里会写清这一条现在**有没有人走** —— 没人进入这一章、或者它是被
+    `jump X` 直接进入的，补出来的盒子暂时执行不到。仍然写，是因为人在图上
+    搭故事时是"先接分支、后接入口"，拒绝只会让图上留一堆草图。
     """
     src = str(label or '').strip()
     role = 'source' if str(role or '') == 'source' else 'target'
@@ -523,27 +527,35 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
     direct_calls = [r for r in jump_direct if r['etype'] == 'call']
 
     if role == 'source':
+        # 源章缺包装 ⇒ **照样能补**，只是要记账"这一条线现在有没有人走"。
+        #
+        # 2026-10-27 真机（用户原话）：「2_4 到 2_4_1，我明明没有勾选草图！
+        # 为什么还是只能画草图？？？」「就算是断裂的局部也能不画草图直接连」。
+        # 以前这里一律拒绝（"补出来是死代码"），于是一个还没接进入口的章节
+        # 永远接不出线 —— 而写剧本的顺序根本不是拓扑序：人先把这一段的
+        # 分支搭好，最后才去接入口。拒绝等于让图上留一堆草图。
+        #
+        # 现在改成"写 + 明说"：包装照样追加，`notes` 里讲清它暂时到不了；
+        # 等进入这一章的入口接上（或改接到 `X_control`），它立刻生效。
+        plan.safe = True
+        plan.reachable = bool(jump_ctrl)
         if jump_ctrl and not direct_jumps and not direct_calls:
-            plan.safe = True                  # 有人跳 X_control，但 label 丢了：修好它
+            pass                              # 有人跳 X_control，但 label 丢了：修好它
         elif direct_jumps or direct_calls:
             how = []
             if direct_jumps:
                 how.append(f'{len(direct_jumps)} 处 `jump {src}`')
             if direct_calls:
                 how.append(f'{len(direct_calls)} 处 `call {src}`')
-            plan.reason = (
-                f'`{src}` 现在是被 ' + '、'.join(how) + ' **直接进入**的。'
-                f'补一个没人跳进来的 `{plan.control_label}`，写进去的出口'
-                f'不会执行（死代码）。要补，得先把这些入口改接到 '
-                f'`{plan.control_label}` —— 那是"接管入口"，不是补一行 label')
-            plan.blocking.append(plan.reason)
-            return plan
+            plan.notes.append(
+                f'`{src}` 现在是被 ' + '、'.join(how) + ' **直接**进入的：'
+                f'补出来的 `{plan.control_label}` 暂时没人走 —— 等那些入口'
+                f'改接到 `{plan.control_label}`，这条线才会真的执行')
         else:
-            plan.reason = (f'项目里没有任何地方进入 `{src}` —— 补出来的 '
-                           f'`{plan.control_label}` 永远不会被执行；'
-                           f'先接上进入这一章的线')
-            plan.blocking.append(plan.reason)
-            return plan
+            plan.notes.append(
+                f'项目里现在没有任何地方进入 `{src}`：补出来的 '
+                f'`{plan.control_label}` 暂时到不了 —— 等你在别处接上进入'
+                f'这一章的线，它立刻生效')
     else:
         plan.safe = True
         if direct_jumps or direct_calls:
@@ -557,7 +569,7 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
     block = [
         '',
         f'# 故事图编辑器补的编排入口：等价于直接进入「{src}」',
-        f'# （call 完 return，和原来 jump {src} 落到同一个调用帧）',
+        f'# （call 完接着走这个盒子里的下一句）',
         f'label {plan.control_label}:',
         f'    call {src}',
         '    return',
@@ -614,6 +626,116 @@ def apply_control_init(plan: ControlInitPlan) -> dict:
             'new_text': plan.new_text, 'line_no': 0, 'error': ''}
 
 
+#: 一次接线里最多补几个 `_control` 包装（实际最多两个：源章一个、目标章一个）
+INIT_CHAIN_ROUNDS = 3
+
+
+def apply_init_chain(plan, replan, rounds=INIT_CHAIN_ROUNDS) -> dict:
+    """
+    把计划里带的 `_control` 包装**先补上**，再重算，直到计划自己能写。
+
+    为什么要有"链"（2026-10-27 真机 `chapter2_4 → chapter2_4_1`）：一节
+    新章通常两头的包装都缺 —— 源章没有 `chapter2_4_control`（没人从编排层
+    进过它），目标章也没有 `chapter2_4_1_control`。补完源章那一个，重算出来
+    的计划还需要再补目标章那一个。以前命令层只肯补**一个**，于是这种最常见
+    的接线永远差一步。
+
+    参数
+    ----
+    plan : 任何带 `init` / `src_init` 的计划（路由 / 分支 / 改接都行）
+    replan : `() -> plan`，补完之后按同一份输入重算
+    rounds : 最多补几轮（防病态输入死循环）
+
+    返回 `{ok, plan, error, snapshots}`：`snapshots` 是
+    `[(path, 补之前全文, 补之后全文)]`，交给 `rollback_wrapper_writes`
+    回滚、交给命令的 `old_text` 做撤销。**不碰图，也不弹提示。**
+    """
+    snapshots = []
+    if plan is None:
+        return {'ok': False, 'plan': None, 'error': '计划为空',
+                'snapshots': snapshots}
+    for _round in range(max(1, int(rounds))):
+        if getattr(plan, 'ok', False):
+            break
+        init = _next_init(plan)
+        if init is None:
+            break
+        res = apply_control_init(init)
+        if not res.get('ok'):
+            return {'ok': False, 'plan': plan,
+                    'error': str(res.get('error') or '补包装失败'),
+                    'snapshots': snapshots}
+        path = str(res.get('path') or getattr(init, 'path', '') or '')
+        if path and str(getattr(init, 'kind', '') or '') == 'append':
+            snapshots.append((path, str(res.get('old_text') or ''),
+                              str(res.get('new_text') or '')))
+        try:
+            plan = replan()
+        except Exception as exc:              # noqa: BLE001 - 重算失败要能回滚
+            from storygraph.core.safeguard import swallow
+            swallow('story.control_route.apply_init_chain.replan', exc)
+            return {'ok': False, 'plan': plan,
+                    'error': f'补完包装后重算失败：{exc}',
+                    'snapshots': snapshots}
+        if plan is None:
+            return {'ok': False, 'plan': None,
+                    'error': '补完包装后重算不出计划', 'snapshots': snapshots}
+    if not getattr(plan, 'ok', False):
+        return {'ok': False, 'plan': plan,
+                'error': str(getattr(plan, 'reason', '') or '补完包装后仍然写不了'),
+                'snapshots': snapshots}
+    return {'ok': True, 'plan': plan, 'error': '', 'snapshots': snapshots}
+
+
+def _next_init(plan):
+    """
+    这一轮该补哪个包装：先 `init`（当前这条线要落地的那一步），再 `src_init`。
+
+    `kind='exists'` 的补计划**不算**（包装已经在文件里了，再"补"是空转，
+    空转就会一直重算 —— 那是死循环）。
+    """
+    for name in ('init', 'src_init'):
+        init = getattr(plan, name, None)
+        if init is None or not getattr(init, 'ok', False):
+            continue
+        if str(getattr(init, 'kind', '') or '') == 'exists':
+            continue
+        return init
+    return None
+
+
+def rollback_wrapper_writes(snapshots) -> list:
+    """
+    把 `apply_init_chain` 补过的包装**退回去**（按写入顺序倒着退）。
+
+    只退**没被别人改过**的那些：文件现在的全文必须还是自己刚写的那一版，
+    否则说明中间有别的改动，覆盖它就是删别人的代码 —— 那就别动，记账。
+
+    返回真正退回去的路径列表。
+    """
+    restored = []
+    for item in reversed(list(snapshots or ())):
+        try:
+            path, old_text, new_text = item
+        except (TypeError, ValueError):
+            continue
+        if not path or not old_text:
+            continue
+        target = Path(str(path))
+        try:
+            now, style = _read(target)
+            if new_text and now != new_text:
+                continue
+            from storygraph.story.paths import write_text_atomic
+            write_text_atomic(target,
+                              style.apply(str(old_text), source=target))
+            restored.append(str(target))
+        except OSError as exc:                # noqa: BLE001 - 回滚失败只能记账
+            from storygraph.core.safeguard import swallow
+            swallow('story.control_route.rollback_wrapper_writes', exc)
+    return restored
+
+
 def plan_control_route(project_root, src_label, dst_label, etype='jump',
                        from_clause='') -> ControlRoutePlan:
     """
@@ -659,9 +781,29 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
     plan.control_label = control_label(src)
     block = _block_for(text, plan.control_label)
     if block is None:
+        # 源章还没有 `_control` 包装 —— 先补，再接线（2026-10-27 真机：
+        # 以前这里一律拒写，于是"还没有进入口"的章节永远接不出线）。
         plan.src_init = plan_control_init(project_root, src, role='source')
-        plan.reason = (f'编排层里没有 `{plan.control_label}` —— 这一章现在'
-                       f'不是从编排层进入的。' + plan.src_init.reason)
+        if (plan.src_init.ok and plan.src_init.kind == 'exists'
+                and Path(plan.src_init.path) != Path(path)):
+            # 同一 label 声明在两个编排层文件里：Ren'Py 自己就会报重复。
+            plan.src_init.ok = False
+            plan.src_init.kind = 'blocked'
+            plan.src_init.reason = (
+                f'`{plan.src_init.control_label}` 已经在另一个文件里'
+                f'（{Path(plan.src_init.path).name}），但又不在这个编排层'
+                f'文件里；同一 label 不能两处声明。先合并这两份编排层，再接线')
+            plan.src_init.blocking.append(plan.src_init.reason)
+        if plan.src_init.ok:
+            # `init` 就是"接线前要先落地的那一步"：命令层先补、再重算、再写。
+            plan.init = plan.src_init
+            plan.reason = (f'编排层里还没有 `{plan.control_label}`；'
+                           f'先把「{src}」的编排入口补上'
+                           f'（{plan.src_init.reason}），再接这条线')
+            plan.notes.extend(plan.src_init.notes)
+        else:
+            plan.reason = (f'编排层里没有 `{plan.control_label}`，'
+                           f'而且补不了：{plan.src_init.reason}')
         plan.blocking.append(plan.reason)
         return plan
 
@@ -1252,8 +1394,9 @@ def wire_plan_writable(plan) -> bool:
 
 __all__ = [
     'CONTROL_SUFFIX', 'ControlEditPlan', 'ControlInitPlan',
-    'ControlRoutePlan', 'apply_control_edit', 'apply_control_init',
-    'apply_control_route', 'apply_control_unroute', 'control_label',
-    'find_control_file', 'plan_control_edit', 'plan_control_init',
-    'plan_control_route', 'plan_control_unroute', 'wire_plan_writable',
+    'ControlRoutePlan', 'INIT_CHAIN_ROUNDS', 'apply_control_edit',
+    'apply_control_init', 'apply_control_route', 'apply_control_unroute',
+    'apply_init_chain', 'control_label', 'find_control_file',
+    'plan_control_edit', 'plan_control_init', 'plan_control_route',
+    'plan_control_unroute', 'rollback_wrapper_writes', 'wire_plan_writable',
 ]

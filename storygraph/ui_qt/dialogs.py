@@ -1769,7 +1769,22 @@ class AddEdgeDialog(_BaseDialog):
                 text += f'原来那一条「{old}」会被换掉（Ctrl+Z 可放回）。'
             return text
         if kind == 'control_init':
-            return (f'✔ 会写进编排层：先补「{dst}_control」包装，'
+            # 两个方向都要说清：目标章缺包装（新接进来的那一头）、源章缺包装
+            # （这一章现在还没有入口 —— 2026-10-27 真机最常见的那一种）。
+            cplan = plan.get('control_plan')
+            init = getattr(cplan, 'init', None)
+            name = str(getattr(init, 'control_label', '') or f'{dst}_control')
+            if str(getattr(init, 'role', '') or '') == 'source':
+                text = (f'✔ 会写进编排层：先给「{src}」补编排入口 `{name}`'
+                        f'（`call {src}` / `return`），再把它的出口接到'
+                        f'「{dst}」（章节剧本一个字不动）。')
+                if not getattr(init, 'reachable', True):
+                    text += ('\n⚠ 这一章现在还没有入口：补出来的 `'
+                             + name + '` 暂时到不了，等你在别处接上进入'
+                             + f'「{src}」的线，这条线立刻生效 —— '
+                               '现在写进去，不用先画草图占位。')
+                return text
+            return (f'✔ 会写进编排层：先补「{name}」包装，'
                     f'再把「{src}」接过去（章节剧本一个字不动）。')
         if kind in ('chapter_end', 'beat'):
             where = '章末' if kind == 'chapter_end' else '选好的那一拍'

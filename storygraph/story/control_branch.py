@@ -580,6 +580,8 @@ def plan_control_branch(project_root, src_label, dst_label, etype='jump',
     plan.control_label = control_label(src)
     block = _block_for(text, plan.control_label)
     if block is None:
+        # 源章还没有 `_control`：分支这条路走"接管进入点"（`_ensure_control_entry`：
+        # 补包装 + 把 `jump X` 改接 `jump X_control`），不在这里自作主张补一行。
         plan.src_init = plan_control_init(project_root, src, role='source')
         plan.reason = (f'编排层里没有 `{plan.control_label}` —— 这一章现在'
                        f'不是从编排层进入的。' + plan.src_init.reason)
