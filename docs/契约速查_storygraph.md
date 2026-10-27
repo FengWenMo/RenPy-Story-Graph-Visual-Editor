@@ -5359,3 +5359,57 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 截图内容：`01_structure.png`（剧情结构页，200% + 居中，别用 `fit_to_content` ——
 只有一个块时会放大到 300%+，一块顶满屏幕看不出这是画布）、
 `02_card.png`（卡片页第一拍，舞台小图要 `_pump` 等后台线程画完）。
+
+## §63 「接线」只有一个"能不能写"的判据（2026-10-27 真机）
+
+### 63.1 一条线要过两个判据 —— 它们必须同源
+
+| 位置 | 作用 | 从前 | 现在 |
+|---|---|---|---|
+| `dialogs.AddEdgeDialog._on_accept` | 决定「创建」按下去是"写入"还是"画草图" | `ok or kind == 'control_init'` | `wire_plan_writable(plan)` |
+| `window_nodes._write_dialog_edge` | 真正执行写入 | **只看 `ok`** ← P0 | `wire_plan_writable(plan)` |
+| `window_nodes.write_manual_edge` | 草图右键「写入剧本…」转正 | 只看 `ok` | `wire_plan_writable(plan)` |
+| `window_nodes.build_edge_menu` | 右键「写入剧本…」是否可点 | 只看 `ok` | `wire_plan_writable(plan)` |
+
+`wire_plan_writable()` 在 `storygraph/story/control_route.py`，是**纯函数、无 Qt**：
+
+```python
+wire_plan_writable(plan)  ⇔  plan['ok'] or plan['kind'] == 'control_init'
+```
+
+| kind | `ok` | 能写 | 写到哪 |
+|---|---|---|---|
+| `control` | True | ✔ | 编排层 `X_control`（替换 `return` / `jump`） |
+| `chapter_end` / `beat` | True | ✔ | 章节源文件（内存；导出才落盘） |
+| `control_init` | **False** | ✔ | 先补目标章 `B_control` 包装，再把路由接上去 |
+| `control_blocked` / `not_loaded` / `bad_position` / `stale_position` / `ambiguous` / `cannot` | False | ✘ | 退回草图，或当场说明原因 |
+
+⚠ `control_init` 的 `ok=False` **是有意的**（它还没写），不是"写不进"。
+任何把 `ok` 当"能不能写"的新代码都是同一个 bug 的第 N 次复发。
+
+### 63.2 判据
+
+| 规矩 | 判据 |
+|---|---|
+| `control_init` 算能写（真值表） | `tests/test_control_init.py::test_wire_plan_writable_treats_control_init_as_writable` |
+| 对话框说能写 ⇒ 窗口必须真写出边 + 包装 + 路由 | `test_creating_a_line_to_a_wrapperless_chapter_really_writes` |
+| 真写不进去时：弹框 + 不加边（不许静默假完成） | `test_write_dialog_edge_still_refuses_a_blocked_plan` |
+
+### 63.3 失败的**可见性**：状态栏不够
+
+`_write_dialog_edge` 失败时必须 `QMessageBox.warning`。理由是这次真机现场：
+对话框正常关闭、剧本没改、图上没线，只有状态栏一行字 —— 用户连续失败十几次
+都没意识到"每次都没成功"，反而以为"线画上了但看不见"。
+
+### 63.4 空图必须解释自己（`_report_no_flow`）
+
+| 情况 | 说什么 |
+|---|---|
+| 图上有 ≥2 个块、**0 条线**、项目有编排层且未导入 | 点名那个 `.rpy`，给出「补全缺失章节…」+「Shift+左键自己接」两条路 |
+| 同上，但编排层已导入 | 说"它的 `_control` label 和图上章节对不上"，不重复建议导入 |
+| 项目没有编排层 | 只给"自己接"那条路，**不许**编一个文件名出来 |
+| 图上有线 / 只有 1 个块 | **一句都不说** |
+
+判据：`tests/test_graph_no_flow_hint.py`（5 条）。
+为什么需要它：`_report_missing_chapters` 只找"被 jump 到却没导入"的文件；
+章节之间**根本没有 jump/call** 时它无话可说，用户只能猜（真机 7 章全是 `return`）。
