@@ -1024,7 +1024,11 @@ class GraphOpsMixin:
 
         names = '、'.join(Path(p).name for p in res['files'][:3])
         more = f' 等 {len(res["files"])} 个文件' if len(res['files']) > 3 else ''
+        #: 整张图一根线都没有（不是"这次新增 0 条"，是**真的一条都没有**）。
+        no_flow = not (getattr(res['graph'], 'edges', None) or {})
         extra = []
+        if no_flow:
+            extra.append('⚠ 图上还没有任何连线（原因见控制台）')
         if removed_labels:
             extra.append(f'移除 {len(removed_labels)} 个源里已不存在的模块')
         if removed_edges:
@@ -1040,6 +1044,11 @@ class GraphOpsMixin:
         # 图里确实一条线都没有 —— 因为串起它们的是**另一个文件**。
         # 这里必须把"还缺哪个文件"说出来，并给出一键补全的入口。
         self._report_missing_chapters(res['graph'])
+        if no_flow:
+            # 2026-10-27 真机："导入完一条线都没有"。`_report_missing_chapters`
+            # 只认"被跳到、但没导入"的文件；章节之间**根本没有 jump/call** 时
+            # 它一句话都不会说（真机 7 章全是 `return` 收尾）—— 人只能猜。
+            self._report_no_flow(res['graph'])
         self._set_page(self.PAGE_GRAPH)
         # 记住"这个项目的图由哪些文件组成"（L7）：下次打开项目靠它重建图，
         # 再贴版式 —— 否则重开软件后图是空的，版式无从可贴。
@@ -2470,6 +2479,61 @@ class GraphOpsMixin:
             btn = getattr(self, name, None)
             if btn is not None:
                 btn.setEnabled(bool(stack))
+    def _report_no_flow(self, graph):
+        """
+        整张图**一根线都没有**时，说清"为什么"和"两条路"（只写控制台）。
+
+        用户 2026-10-27 真机：导入了 7 个章节，图上一根线都没有。原因不是
+        bug —— 那 7 个 `.rpy` 里除了一句 `return` 没有任何 `jump` / `call`，
+        串起它们的是编排层（`chapter_controller.rpy`），而它没被导入。
+        但界面上只报了一句"连线 0 条"，人只能猜。
+
+        `_report_missing_chapters` 覆盖不了这一档：它找的是"**被** jump 到、
+        却还没导入"的文件；这里连一个 jump 都没有，它无话可说。
+        """
+        try:
+            if graph is None:
+                return
+            if len(getattr(graph, 'nodes', None) or {}) < 2:
+                return
+            if getattr(graph, 'edges', None):
+                return
+            root = getattr(self, '_project_root', None)
+            control = None
+            if root:
+                try:
+                    from storygraph.story.control_route import find_control_file
+                    control = find_control_file(root)
+                except Exception as e:              # noqa: BLE001 - 只是提示
+                    swallow('ui_qt.report_no_flow.find_control', e)
+                    control = None
+            imported = set()
+            try:
+                imported = {Path(str(p)).resolve()
+                            for p in self._session.graph_files(graph)}
+            except Exception as e:                  # noqa: BLE001
+                swallow('ui_qt.report_no_flow.graph_files', e)
+            already = bool(control) and Path(str(control)).resolve() in imported
+            self._log('[提示] 图上现在**一条连线都没有**：这批章节文件里没有'
+                      '任何 `jump` / `call`，所以导入它们不会长线 —— 串起'
+                      '章节的是别的东西。两条路：')
+            if control and not already:
+                self._log(f'  · 项目里的编排层是 {control}（`X_control` 里'
+                          f'`call X` + `jump Y_control`）—— 把它也导入'
+                          f'（「➕ 导入章节 .rpy」选它；或右键空白 → '
+                          f'补全缺失章节…），call / jump 的线才会画出来；')
+            elif control and already:
+                self._log(f'  · 编排层 {Path(str(control)).name} 已经导进来了，'
+                          f'但它里面的 `_control` label 和图上的章节对不上 ——'
+                          f'先在「卡片」里看看它是不是空章；')
+            self._log('  · 或者自己接线：**Shift + 左键**从一个块拖到另一个块，'
+                      '松手在弹出的窗口里选 jump / call 和插入位置'
+                      '（只画不写：勾「草稿」）。')
+            self._log('  · 只想看"谁跳到谁"：先「🔗 补全缺失章节…」，'
+                      '再「⤢ 自动布局」按跳转关系排版。')
+        except Exception as e:                      # noqa: BLE001 - 提示不该影响导入
+            swallow('ui_qt.report_no_flow', e)
+
     def _report_missing_chapters(self, graph):
         """把"被跳到、但文件还没导入"的章节写进控制台（并提示补全）。"""
         try:
