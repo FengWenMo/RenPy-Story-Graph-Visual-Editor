@@ -5413,3 +5413,43 @@ wire_plan_writable(plan)  ⇔  plan['ok'] or plan['kind'] == 'control_init'
 判据：`tests/test_graph_no_flow_hint.py`（5 条）。
 为什么需要它：`_report_missing_chapters` 只找"被 jump 到却没导入"的文件；
 章节之间**根本没有 jump/call** 时它无话可说，用户只能猜（真机 7 章全是 `return`）。
+
+## §64 画布的"手势状态"：光标、自动滚（2026-10-27）
+
+画布上有三种"正在进行的操作"：**平移**（空格/中键）、**连线**（Shift+拖）、
+**拖块**（左键拖）。它们在拖动中会改光标、会滚视口，所以状态必须"进得去、出得来"。
+
+### 64.1 光标：只有一个写入口，且有自愈
+
+| 规矩 | 为什么 |
+|---|---|
+| 只许 `GraphCanvas._set_cursor(shape)`，它同时写 `viewport()` 与 `self` | `QAbstractScrollArea` 的显示面是 viewport；只写外层在部分平台/版本上只生效一半 |
+| 每个手势出口都调 `_restore_cursor()` | 出口 = `mouseReleaseEvent` / `_finish_connect` / `cancel_interaction` / `keyReleaseEvent` |
+| `_idle_cursor()` = 空格按着 ? 张手 : 箭头 | 空格还按着时恢复成箭头，等于"提示用户空格还按着"这件事没了 |
+| `_heal_cursor()` 只在**无手势**且光标是 `ClosedHand` / `Cross` 时复原 | 用户 2026-10-27："拖动结束后鼠标没有变回来"。释放事件可能根本到不了画布；状态与光标不一致时，鼠标下次经过就修好 |
+| 悬停连线手型（`PointingHand`）**永远不碰** | 那是 `QGraphicsScene` 设的；碰了就等于"线点不动" |
+| `set_space_down` 不做"状态没变就早退" | 它是唯一知道空格按着没有的地方；早退会让状态与光标越差越远 |
+
+判据：`TestCursorNeverSticks`（5 条，含"release 丢了也能自愈"）。
+
+### 64.2 拖块贴边 → 视口自动滚
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `DRAG_SCROLL_MARGIN` | 44 px | 光标进入视口四边这么多就开始滚 |
+| `DRAG_SCROLL_INTERVAL` | 16 ms | ≈60fps |
+| `DRAG_SCROLL_MIN` / `MAX` | 2 / 22 px 每拍 | 速度 = `max(MIN, MAX * (depth/margin)^2)` |
+
+两条硬规矩：
+
+1. **块要跟着视图走**：滚动条走 `N` 像素 = 场景走 `N/scale`，块按同样的场景距离挪。
+   判据不是"滚动条动了没有"，而是**块在屏幕上的位置不变**（<=2 px）——
+   符号写反、或忘记除 scale，滚动条都会动，但块会飞出去。
+2. **滚不动就不滚，不许撑舞台**：`_extend_scene_rect()` 会 `centerOn` 重排视口，
+   缩到 0.43 时实测把画面顶跑 376 px。舞台由拖完之后的
+   `_on_node_moved → note_content_changed()` 按内容撑大。
+
+停表条件：松开（`end_node_drag`）、移出边缘（`note_drag_cursor` 里 delta 归零）、
+换图（`set_graph`）、窗口失活（`cancel_interaction`）、滚到边界（`moved == 0`）。
+
+判据：`TestDragNearTheEdgeAutoScrolls`（7 条，含放大 200% 与"没得滚时不许动"）。
