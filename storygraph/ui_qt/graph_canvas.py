@@ -30,7 +30,7 @@ from __future__ import annotations
 from storygraph.core.safeguard import swallow
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF,
                            QPainter, QPainterPath, QPen, QPolygonF, QTransform)
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem,
@@ -54,6 +54,16 @@ FIT_MIN_SCALE = 0.70
 #: 解析器新建节点时用的默认坐标（`GraphBuilder` 建 label / 占位节点都用它）。
 #: 坐标正好等于它 = "这个块还没被摆过"（见 `GraphCanvas._unplaced_ids`）。
 DEFAULT_POS = (200.0, 200.0)
+
+#: 拖块时**离视口边缘多近开始自动滚**（像素）—— 用户 2026-10-27：
+#: "当鼠标处在拖拽节点状态的时候，碰到画布边界画布舞台自动移动"。
+#: 44 px 大约是一张卡片高度的 40%：注意力落在块上时也能感到"到头了"。
+DRAG_SCROLL_MARGIN = 44.0
+#: 自动滚的最快速度（每 16 ms 的像素数）与最小速度（贴边但也得一格一格走）
+DRAG_SCROLL_MAX = 22.0
+DRAG_SCROLL_MIN = 2.0
+#: 自动滚的节拍（约 60 fps）
+DRAG_SCROLL_INTERVAL = 16
 
 #: 连线颜色按**语义**分（与 tkinter 版一致：选项 / 条件 / 类型）
 EDGE_COLOR = {
@@ -271,10 +281,23 @@ class NodeItem(QGraphicsRectItem):
             if event.button() == Qt.LeftButton and not getattr(
                     self.canvas, '_space_down', False):
                 self._drag_from = (float(self.pos().x()), float(self.pos().y()))
+                # 拖块时贴到视口边缘 → 画布自己滚（用户 2026-10-27 的体验优化）
+                if self.canvas is not None:
+                    self.canvas.begin_node_drag(self)
         except Exception as e:                    # noqa: BLE001
             swallow('ui_qt.graph_canvas.mousePressEvent', e)
             self._drag_from = None
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """拖动过程中把鼠标的**视口坐标**告诉画布（决定要不要自动滚）。"""
+        super().mouseMoveEvent(event)
+        try:
+            if self.canvas is not None and self.canvas._drag_item is self:
+                self.canvas.note_drag_cursor(
+                    self.canvas.mapFromScene(event.scenePos()))
+        except Exception as e:                    # noqa: BLE001 - 滚不动也要能拖
+            swallow('ui_qt.graph_canvas.node_drag_move', e)
 
     def mouseReleaseEvent(self, event):
         """
@@ -285,6 +308,11 @@ class NodeItem(QGraphicsRectItem):
         坐标改回去、重做时再改回来。
         """
         super().mouseReleaseEvent(event)
+        try:
+            if self.canvas is not None:
+                self.canvas.end_node_drag()
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.graph_canvas.node_drag_end', e)
         origin = getattr(self, '_drag_from', None)
         self._drag_from = None
         try:
@@ -688,6 +716,14 @@ class GraphCanvas(QGraphicsView):
         self._panning = False
         self._pan_start = None
         self._did_auto_layout = False
+        #: 正在被拖的块（拖到视口边缘要自动滚，见 `begin_node_drag`）
+        self._drag_item = None
+        #: 拖动中最近一次的**视口坐标**（自动滚按它算方向与速度）
+        self._drag_cursor = None
+        #: 自动滚的节拍器：只在拖动 + 贴边时走
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(DRAG_SCROLL_INTERVAL)
+        self._drag_scroll_timer.timeout.connect(self._drag_scroll_tick)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         # 不用橡皮筋框选：左键在块上是"选中 + 拖动"，在空白是"取消选中"
         # （旧版 `on_left_down` 就是这么分的）。块本身仍然可拖。
@@ -786,6 +822,7 @@ class GraphCanvas(QGraphicsView):
         self._edges = []
         self._connect_from = None
         self._temp_line = None
+        self.end_node_drag()
         if graph is None:
             self.setSceneRect(QRectF(-400, -300, 800, 600))
             self.viewport().update()
@@ -1046,17 +1083,14 @@ class GraphCanvas(QGraphicsView):
         self._panning = False
         self._pan_start = None
         self._connect_from = None
+        self.end_node_drag()
         if self._temp_line is not None:
             try:
                 self.scene().removeItem(self._temp_line)
             except Exception:                # noqa: BLE001
                 swallow('graph_canvas.cancel_interaction')
             self._temp_line = None
-        try:
-            self.setCursor(Qt.OpenHandCursor if self._space_down
-                           else Qt.ArrowCursor)
-        except Exception:                    # noqa: BLE001
-            swallow('graph_canvas.cancel_interaction')
+        self._restore_cursor()
 
     def _sole_source_file(self) -> str:
         """
@@ -1351,6 +1385,164 @@ class GraphCanvas(QGraphicsView):
     def _scene_pos(self, view_pos) -> QPointF:
         return self.mapToScene(view_pos)
 
+    # ------------------------------------------------------------------
+    #  光标：只从这个口子改（会自动复原）
+    # ------------------------------------------------------------------
+
+    #: 手势里会改掉的几种形状。**离开手势就必须复原**，否则会卡住。
+    _GESTURE_CURSORS = (Qt.ClosedHandCursor, Qt.CrossCursor)
+
+    def _idle_cursor(self):
+        """没有手势时该是什么形状：空格按住 = 张开的手（可抓），否则箭头。"""
+        return Qt.OpenHandCursor if self._space_down else Qt.ArrowCursor
+
+    def _set_cursor(self, shape):
+        """
+        改画布光标（**同时改 viewport**）。
+
+        为什么两处都写：`QAbstractScrollArea` 的实际显示面是 `viewport()`，
+        只改外层在部分平台/Qt 版本上不生效（或只生效一半）；反正代价是零。
+        """
+        try:
+            self.viewport().setCursor(shape)
+        except Exception as e:               # noqa: BLE001
+            swallow('ui_qt.graph_canvas.set_cursor.viewport', e)
+        try:
+            self.setCursor(shape)
+        except Exception as e:               # noqa: BLE001
+            swallow('ui_qt.graph_canvas.set_cursor', e)
+
+    def _restore_cursor(self):
+        """手势结束：回到"没有手势时"的形状（空格还按着就是张手）。"""
+        self._set_cursor(self._idle_cursor())
+
+    def _heal_cursor(self):
+        """
+        自愈：没有手势，却还顶着"抓/十字"的光标 → 复原。
+
+        用户 2026-10-27：「拖动画布的时候鼠标变了，拖动结束后并没有变回来」。
+        正常路径（`mouseReleaseEvent`）本来就会复原，但**释放事件可能根本
+        没到画布**（拖到窗口外松手、系统吞掉一次 release、切走再回来……）。
+        与其逐条堵，不如每次鼠标经过画布时看一眼：状态和光标不一致就改回去。
+        只认 `_GESTURE_CURSORS` 这两种 —— 悬停连线时的"手型"是 QGraphicsScene
+        自己设的，不能碰。
+        """
+        try:
+            if self._panning or self._connect_from is not None:
+                return
+            shape = self.cursor().shape()
+            want = self._idle_cursor()
+            if shape in self._GESTURE_CURSORS and shape != want:
+                self._set_cursor(want)
+            elif (shape == Qt.OpenHandCursor and want == Qt.ArrowCursor
+                  and not self._space_down):
+                self._set_cursor(want)
+        except Exception as e:               # noqa: BLE001 - 光标不该影响拖拽
+            swallow('ui_qt.graph_canvas.heal_cursor', e)
+
+    # ------------------------------------------------------------------
+    #  拖块到边界：画布自己走（用户 2026-10-27 的体验优化）
+    # ------------------------------------------------------------------
+
+    def begin_node_drag(self, item):
+        """
+        开始拖一个块（由 `NodeItem.mousePressEvent` 调）。
+
+        记下是哪一个：贴边自动滚的时候，**块要跟着视图一起走**，
+        否则画布滚了、块还停在原地，手一松就"掉"到别处去了。
+        """
+        self._drag_item = item
+        self._drag_cursor = None
+
+    def note_drag_cursor(self, view_pos):
+        """拖动中鼠标到了哪儿（视口坐标）—— 决定要不要自动滚、滚多快。"""
+        if self._drag_item is None:
+            return
+        self._drag_cursor = view_pos
+        dx, dy = self._drag_scroll_delta(view_pos)
+        if dx or dy:
+            if not self._drag_scroll_timer.isActive():
+                self._drag_scroll_timer.start()
+        else:
+            self._drag_scroll_timer.stop()
+
+    def end_node_drag(self):
+        """拖完了：停表、清状态（**不改块的位置**）。"""
+        self._drag_item = None
+        self._drag_cursor = None
+        try:
+            self._drag_scroll_timer.stop()
+        except Exception as e:               # noqa: BLE001
+            swallow('ui_qt.graph_canvas.end_node_drag', e)
+
+    def _drag_scroll_delta(self, view_pos):
+        """
+        光标离四边多近 → 每个节拍滚多少像素（x, y）。
+
+        速度按**压进边缘的深度**平方增长（贴边慢、压到底快），这样既能
+        一格一格微调，也能一口气拖到很远的地方。
+        """
+        if view_pos is None:
+            return 0.0, 0.0
+        vp = self.viewport().rect()
+        margin = DRAG_SCROLL_MARGIN
+
+        def speed(depth):
+            depth = max(0.0, min(float(depth), margin))
+            if depth <= 0.0:
+                return 0.0
+            ratio = depth / margin
+            return max(DRAG_SCROLL_MIN,
+                       DRAG_SCROLL_MAX * ratio * ratio)
+
+        dx = dy = 0.0
+        x, y = view_pos.x(), view_pos.y()
+        if x < vp.left() + margin:
+            dx = -speed(vp.left() + margin - x)
+        elif x > vp.right() - margin:
+            dx = speed(x - (vp.right() - margin))
+        if y < vp.top() + margin:
+            dy = -speed(vp.top() + margin - y)
+        elif y > vp.bottom() - margin:
+            dy = speed(y - (vp.bottom() - margin))
+        return dx, dy
+
+    def _drag_scroll_tick(self):
+        """自动滚一格：滚视图 + 把块按同样的场景距离挪过去（块贴在鼠标下）。"""
+        if self._drag_item is None or self._drag_cursor is None:
+            self._drag_scroll_timer.stop()
+            return
+        dx, dy = self._drag_scroll_delta(self._drag_cursor)
+        if not dx and not dy:
+            self._drag_scroll_timer.stop()
+            return
+        try:
+            hb = self.horizontalScrollBar()
+            vb = self.verticalScrollBar()
+            old_h, old_v = hb.value(), vb.value()
+            hb.setValue(old_h + int(round(dx)))
+            vb.setValue(old_v + int(round(dy)))
+            moved_x = hb.value() - old_h
+            moved_y = vb.value() - old_v
+            if not moved_x and not moved_y:
+                # 已经到头了（场景矩形就这么大）→ 这一轮不滚。
+                # **故意不在这里 `_extend_scene_rect`**：撑舞台会连带
+                # `centerOn` 重排视口，缩得很小时实测能把画面顶跑 376 px
+                # （2026-10-27 自测抓到）。舞台在拖完时由窗口层按内容撑大
+                # （`_on_node_moved` → `note_content_changed`），够用且不跳。
+                self._drag_scroll_timer.stop()
+                return
+            scale = abs(self.transform().m11()) or 1.0
+            item = self._drag_item
+            # 滚动条 +1 = 视口往右走一格 = 同一个屏幕点对应的场景 x 变大 →
+            # 块要往**同一个方向**挪同样的场景距离，才一直贴在鼠标下面。
+            # （第一版把符号写反了：滚一下、块再反向跑一下，屏幕上直接飞走 2 倍。）
+            item.setPos(item.pos() + QPointF(moved_x / scale,
+                                             moved_y / scale))
+        except Exception as e:               # noqa: BLE001 - 滚不动不该打断拖动
+            swallow('ui_qt.graph_canvas.drag_scroll_tick', e)
+            self._drag_scroll_timer.stop()
+
     def _start_connect(self, nid):
         self._connect_from = nid
         if self._temp_line is None:
@@ -1361,7 +1553,7 @@ class GraphCanvas(QGraphicsView):
             self.scene().addItem(self._temp_line)
         self._update_temp_line(self.mapFromGlobal(QCursor.pos()))
         try:
-            self.setCursor(Qt.CrossCursor)
+            self._set_cursor(Qt.CrossCursor)
         except Exception:                # noqa: BLE001
             swallow('graph_canvas._start_connect')
 
@@ -1385,7 +1577,7 @@ class GraphCanvas(QGraphicsView):
             self.scene().removeItem(self._temp_line)
             self._temp_line = None
         try:
-            self.setCursor(Qt.ArrowCursor)
+            self._restore_cursor()
         except Exception:                # noqa: BLE001
             swallow('graph_canvas._finish_connect')
         if src is None:
@@ -1418,7 +1610,7 @@ class GraphCanvas(QGraphicsView):
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Space:
             self._space_down = False
-            self.setCursor(Qt.ArrowCursor)
+            self._restore_cursor()
         super().keyReleaseEvent(event)
 
     def set_space_down(self, down: bool):
@@ -1429,13 +1621,15 @@ class GraphCanvas(QGraphicsView):
         收得到 —— 而用户按空格时焦点通常在工具栏/右栏控件上，于是
         "空格 + 左键拖 = 平移"完全没反应（用户 2026-10-05 实测）。
         旧版 tkinter 就是把空格绑在 `root`（整窗）上的，这里恢复那个语义。
+
+        ⚠ 光标**每次都刷新**，不因为 `down` 没变就早退：状态与光标有可能
+        因为别的原因对不上（用户 2026-10-27：拖完画布光标没变回来），
+        而这里是唯一知道"空格到底按着没有"的地方。
         """
         down = bool(down)
-        if down == getattr(self, '_space_down', False):
-            return
         self._space_down = down
         if not getattr(self, '_panning', False):
-            self.setCursor(Qt.OpenHandCursor if down else Qt.ArrowCursor)
+            self._set_cursor(self._idle_cursor())
 
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
@@ -1444,7 +1638,7 @@ class GraphCanvas(QGraphicsView):
         if panning:
             self._panning = True
             self._pan_start = pos
-            self.setCursor(Qt.ClosedHandCursor)
+            self._set_cursor(Qt.ClosedHandCursor)
             event.accept()
             return
         if event.button() != Qt.LeftButton:
@@ -1482,12 +1676,16 @@ class GraphCanvas(QGraphicsView):
             return
         if self._connect_from is not None:
             self._update_temp_line(pos)
+        self._heal_cursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self._panning:
             self._panning = False
-            self.setCursor(Qt.ArrowCursor)
+            self._pan_start = None
+            # 空格还按着就回到"张手"，不是无脑箭头（2026-10-27 用户反馈的
+            # 那条"拖动结束后鼠标没变回来"，正常路径就在这一行复原）
+            self._restore_cursor()
             event.accept()
             return
         if self._connect_from is not None:
@@ -1495,6 +1693,7 @@ class GraphCanvas(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+        self._heal_cursor()
         self.selection_changed.emit(self.selected_node_id())
 
     def mouseDoubleClickEvent(self, event):

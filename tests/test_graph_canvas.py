@@ -827,3 +827,228 @@ class TestRebuildIsNotWasteful:
         assert canvas._items[ids[1]].mark == 'stranded'
         assert '走不到' in canvas._items[ids[1]]._note.text()
 
+
+
+# ==================================================================
+#  七、光标：手势结束时必须复原（2026-10-27 用户反馈）
+# ==================================================================
+
+class TestCursorNeverSticks:
+    """
+    用户 2026-10-27：
+
+    > 当我拖动画布的时候鼠标变了，可是在拖动结束后鼠标并没有变回来……
+
+    正常路径（`mouseReleaseEvent`）本来就复原；这里钉的是**所有路径**都复原，
+    以及"释放事件根本没到画布"时的自愈（鼠标再经过画布就改回去）。
+    """
+
+    def _shape(self, canvas):
+        from PySide6.QtCore import Qt
+        assert canvas.cursor().shape() == canvas.viewport().cursor().shape(), \
+            '外层和 viewport 的光标不一致（view 的是摆设）'
+        return canvas.cursor().shape()
+
+    def test_middle_drag_restores_the_arrow(self, canvas):
+        from PySide6.QtCore import QEvent, QPoint, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QApplication
+
+        canvas.set_graph(_graph(3)[0])
+        vp = canvas.viewport()
+        pt = QPoint(vp.width() // 2, vp.height() // 2)
+        for kind, btn, buttons, pos in (
+                (QEvent.MouseButtonPress, Qt.MiddleButton, Qt.MiddleButton, pt),
+                (QEvent.MouseButtonRelease, Qt.MiddleButton, Qt.NoButton, pt)):
+            QApplication.sendEvent(
+                vp, QMouseEvent(kind, pos, vp.mapToGlobal(pos), btn, buttons,
+                                Qt.NoModifier))
+        assert self._shape(canvas) == Qt.ArrowCursor, '中键平移之后光标没复原'
+
+    def test_space_drag_leaves_the_open_hand_while_space_is_held(self, canvas):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        canvas.set_graph(_graph(2)[0])
+        vp = canvas.viewport()
+        canvas.set_space_down(True)
+        QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, QPoint(300, 200))
+        assert self._shape(canvas) == Qt.ClosedHandCursor
+        QTest.mouseRelease(vp, Qt.LeftButton, Qt.NoModifier, QPoint(300, 200))
+        assert self._shape(canvas) == Qt.OpenHandCursor, \
+            '空格还按着就该是"张手"，不是箭头'
+        canvas.set_space_down(False)
+        assert self._shape(canvas) == Qt.ArrowCursor
+
+    def test_a_lost_release_is_healed_on_the_next_mouse_move(self, canvas):
+        """释放事件丢了（拖到窗口外松手 / 系统吞掉）→ 鼠标再经过就改回来。"""
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        canvas.set_graph(_graph(2)[0])
+        vp = canvas.viewport()
+        canvas.set_space_down(True)
+        QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, QPoint(300, 200))
+        # 模拟"release / 空格抬起都没到"：**直接改字段**（不走 setter，
+        # 否则 setter 自己就把光标修好了 —— 那就测不到自愈）
+        canvas._panning = False
+        canvas._pan_start = None
+        canvas._space_down = False
+        assert self._shape(canvas) == Qt.ClosedHandCursor   # 卡住的样子
+        QTest.mouseMove(vp, QPoint(320, 220))
+        assert self._shape(canvas) == Qt.ArrowCursor, '鼠标经过时没有自愈'
+
+    def test_healing_never_touches_the_edge_hover_cursor(self, canvas):
+        """悬停连线时的手型是 scene 设的，自愈不许改它。"""
+        from PySide6.QtCore import Qt
+
+        canvas.set_graph(_graph(2)[0])
+        canvas._set_cursor(Qt.PointingHandCursor)
+        canvas._heal_cursor()
+        assert canvas.cursor().shape() == Qt.PointingHandCursor
+
+    def test_cancel_interaction_restores_the_cursor(self, canvas):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        canvas.set_graph(_graph(2)[0])
+        canvas.set_space_down(True)
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, Qt.NoModifier,
+                         QPoint(200, 200))
+        canvas.cancel_interaction()
+        assert canvas.cursor().shape() == Qt.OpenHandCursor
+
+
+# ==================================================================
+#  八、拖块到画布边界 → 画布自己走（用户 2026-10-27 的体验优化）
+# ==================================================================
+
+class TestDragNearTheEdgeAutoScrolls:
+    """
+    用户原话：
+
+    > 当鼠标处在拖拽节点状态的时候，碰到画布边界画布舞台自动移动
+    > （朝着鼠标拖拽的方向移）
+
+    判据有三条：① 贴边才滚；② 越贴边越快；③ **块要跟着走**（不然画布滚了、
+    块留在原地，一松手就"掉"到别处）。
+    """
+
+    def _prepared(self, canvas, n=4):
+        from PySide6.QtCore import QPoint
+        g, ids = _graph(n)
+        canvas.set_graph(g)
+        hs, vs = canvas.horizontalScrollBar(), canvas.verticalScrollBar()
+        for sb in (hs, vs):
+            sb.setValue((sb.minimum() + sb.maximum()) // 2)
+        item = canvas._items[ids[0]]
+        return item, hs, vs, QPoint
+
+    def test_dragging_into_the_right_edge_scrolls(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        h0 = hs.value()
+        canvas.note_drag_cursor(QPoint(vp.width() - 3, vp.height() // 2))
+        assert canvas._drag_scroll_timer.isActive(), '贴到右边缘却没开始滚'
+        screen_before = canvas.mapFromScene(item.sceneBoundingRect().center())
+        canvas._drag_scroll_tick()
+        canvas._drag_scroll_tick()
+        assert hs.value() > h0, '视图没有滚'
+        screen_after = canvas.mapFromScene(item.sceneBoundingRect().center())
+        assert abs(screen_after.x() - screen_before.x()) <= 2, \
+            '画布滚了，块没跟着走（一松手就掉到别处）'
+
+    def test_dragging_into_the_left_edge_scrolls_back(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        h0 = hs.value()
+        canvas.note_drag_cursor(QPoint(3, vp.height() // 2))
+        canvas._drag_scroll_tick()
+        assert hs.value() < h0
+
+    def test_the_middle_of_the_canvas_does_not_scroll(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        canvas.note_drag_cursor(QPoint(vp.width() // 2, vp.height() // 2))
+        assert not canvas._drag_scroll_timer.isActive()
+
+    def test_leaving_the_edge_stops_the_timer(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        canvas.note_drag_cursor(QPoint(vp.width() - 2, vp.height() // 2))
+        assert canvas._drag_scroll_timer.isActive()
+        canvas.note_drag_cursor(QPoint(vp.width() // 2, vp.height() // 2))
+        assert not canvas._drag_scroll_timer.isActive(), '离开边缘还在滚'
+
+    def test_releasing_stops_everything(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        canvas.note_drag_cursor(QPoint(vp.width() - 2, vp.height() // 2))
+        canvas.end_node_drag()
+        assert canvas._drag_item is None
+        assert not canvas._drag_scroll_timer.isActive()
+
+    def test_the_deeper_you_push_the_faster_it_goes(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        edge = vp.width() - 1
+        near = canvas._drag_scroll_delta(QPoint(edge, vp.height() // 2))[0]
+        mid = canvas._drag_scroll_delta(
+            QPoint(vp.width() - 20, vp.height() // 2))[0]
+        assert near > mid > 0, (near, mid)
+
+    def test_it_also_works_vertically_and_diagonally(self, canvas):
+        item, hs, vs, QPoint = self._prepared(canvas)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        dx, dy = canvas._drag_scroll_delta(
+            QPoint(vp.width() - 2, vp.height() - 2))
+        assert dx > 0 and dy > 0, (dx, dy)
+
+    def test_it_also_works_when_zoomed_in(self, canvas):
+        """放大到 200% 时，块每 tick 的场景位移要按 1/scale 缩小（视觉上才跟手）。"""
+        item, hs, vs, QPoint = self._prepared(canvas)
+        canvas.scale(2.0, 2.0)
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        canvas.note_drag_cursor(QPoint(vp.width() - 2, vp.height() // 2))
+        screen_before = canvas.mapFromScene(item.sceneBoundingRect().center())
+        x0 = item.pos().x()
+        for _ in range(3):
+            canvas._drag_scroll_tick()
+        screen_after = canvas.mapFromScene(item.sceneBoundingRect().center())
+        assert item.pos().x() > x0, '放大之后一次都没滚'
+        assert abs(screen_after.x() - screen_before.x()) <= 2, \
+            f'缩放后块没跟住画布：{screen_before.x()} -> {screen_after.x()}'
+
+    def test_it_never_jumps_the_view_when_there_is_nothing_to_scroll(self, canvas):
+        """
+        场景矩形小到没得滚时：**一个像素都不许动**，更不许硬撑舞台。
+
+        第一版在这里 `_extend_scene_rect()` 撑舞台，`centerOn` 会把画面
+        顶跑几百像素（实测 376 px），手感就是"拖到边上，图自己跳一下"。
+        """
+        from PySide6.QtCore import QRectF
+
+        item, hs, vs, QPoint = self._prepared(canvas)
+        # 舞台比视口还小 → 没有可滚的余量（setValue 会被夹住）
+        canvas.setSceneRect(QRectF(-60, -60, 120, 120))
+        vp = canvas.viewport()
+        canvas.begin_node_drag(item)
+        canvas.note_drag_cursor(QPoint(vp.width() - 2, vp.height() // 2))
+        h0 = hs.value()
+        pos0 = (item.pos().x(), item.pos().y())
+        before = canvas.mapToScene(canvas.viewport().rect().center())
+        for _ in range(3):
+            canvas._drag_scroll_tick()
+        after = canvas.mapToScene(canvas.viewport().rect().center())
+        assert hs.value() == h0, '没得滚却把滚动条动了'
+        assert (item.pos().x(), item.pos().y()) == pos0, '块自己跑掉了'
+        assert abs(after.x() - before.x()) < 2 and abs(after.y() - before.y()) < 2, \
+            f'滚不动时把视口顶跑了：{before} → {after}'
