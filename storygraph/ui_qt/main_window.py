@@ -2443,6 +2443,23 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(T.SPACE['xs'])
+
+        # —— ⭐ GitHub 快速 star（**独立件：这三行可以整段删掉**）——
+        #
+        # 用户 2026-10-27："再在（卡片编辑器）的稍稍右上方空白处去做一个 github
+        # 的快速 star……我希望它是一个独立于整体界面的代码块，到时候方便取下来，
+        # 不要耽误别人到时候对这个界面的改造。"
+        #
+        # 约定：控件 / 网络 / 离线降级全在 `ui_qt/github_star.py` 里，这里只有
+        # **一次**挂载调用（它自己插到布局第 0 行、右对齐）。删掉下面这个 try 块
+        # + 那个文件 = 界面完全恢复原样，别处一行都不用动。
+        # 挂不上（老 Qt / 颜色表缺）也只是少一个徽标，绝不拦界面。
+        try:
+            from storygraph.ui_qt.github_star import attach_star_badge
+            attach_star_badge(self, rv)
+        except Exception as e:                 # noqa: BLE001
+            swallow('ui_qt.main_window.star_badge', e)
+
         # 参考界面的右栏是"属性表在上、正文/预览在下"：先说清"这是哪一拍、
         # 源在第几行"，再给表单。`PropertyStrip` 自己不取数（`_sync_inspector`）。
         cap_prop = QLabel('定位（这一拍在文件里的位置）')

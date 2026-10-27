@@ -1,0 +1,342 @@
+"""
+tests/test_github_star.py
+=========================
+卡片编辑页右上角的 **⭐ GitHub 快速 star**（用户 2026-10-27）
+
+> 再在（卡片编辑器）的稍稍右上方空白处去做一个 github 的快速 star 呢？
+> （点击这个如果能连得上网的话最好就能给我个标个星，如果不能联网也没关系）
+> 注意：我希望它是一个独立于整体界面的代码块，到时候方便取下来，
+> 不要耽误别人到时候对这个界面的改造
+
+所以这里钉三件事：
+
+  1. **它真的是独立件**：`ui_qt/github_star.py` 不 import 任何窗口/会话代码，
+     整个 UI 包只有 `main_window.py` 一处挂载；
+  2. **点一下有用**：有 token → 直接 star；没 token → 打开仓库页；
+  3. **离线/失败不许崩、也不许骗人**：连不上就说"连不上"，不开死页面，
+     GUI 线程一秒都不等（网络全在后台线程）。
+"""
+
+from __future__ import annotations
+
+import time
+import urllib.error
+
+import pytest
+
+pytest.importorskip('PySide6')
+
+from PySide6.QtCore import QEventLoop, QTimer               # noqa: E402
+
+PKG = __import__('pathlib').Path(__file__).resolve().parents[1] / 'storygraph'
+
+
+def _spin(ms: int) -> None:
+    loop = QEventLoop()
+    QTimer.singleShot(int(ms), loop.quit)
+    loop.exec()
+
+
+def _wait(cond, timeout: float = 6.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        _spin(20)
+    return bool(cond())
+
+
+@pytest.fixture
+def star(qapp):
+    """一个干净的徽标（不读环境变量里的真 token：显式注入空串）。"""
+    from storygraph.ui_qt.github_star import GitHubStarBadge
+
+    badge = GitHubStarBadge(repo='someone/some-repo', token='')
+    try:
+        yield badge
+    finally:
+        badge.shutdown()
+        badge.close()
+
+
+# ==================================================================
+#  一、独立件（这是用户点名的约束）
+# ==================================================================
+
+class TestItStaysDetachable:
+    def test_the_module_does_not_import_the_ui_tree(self):
+        """
+        它只许依赖 Qt + 标准库 + 一个颜色常量模块 —— **不许** import 任何
+        窗口 / 会话 / 卡片代码，否则"取下来"就会扯到别处。
+        """
+        text = (PKG / 'ui_qt' / 'github_star.py').read_text(encoding='utf-8')
+        bad = [name for name in ('main_window', 'window_card', 'window_nav',
+                                 'storygraph.app', 'storygraph.story',
+                                 'storygraph.pipeline', 'editor')
+               if f'import {name}' in text or f'from {name}' in text]
+        assert bad == [], f'这个独立件开始依赖界面/业务代码了：{bad}'
+
+    def test_only_the_main_window_mounts_it(self):
+        """
+        整个界面里**只有一处**挂载（`main_window` 的那三行 try 块）。
+
+        这条判据的意义：以后谁重构界面，删掉那一处 + 那个文件就干净了；
+        一旦有人在别的窗口里也 import 它，这条会红。
+        """
+        hits = []
+        for path in sorted((PKG / 'ui_qt').glob('*.py')):
+            if path.name == 'github_star.py':
+                continue
+            text = path.read_text(encoding='utf-8')
+            if 'github_star' in text:
+                hits.append(path.name)
+        assert hits == ['main_window.py'], f'挂载点不止一处：{hits}'
+
+
+# ==================================================================
+#  二、点一下：三种结局
+# ==================================================================
+
+class TestOneClick:
+    def test_with_a_token_it_stars_directly(self, star, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        calls = []
+
+        def _star(repo, token, timeout=G.TIMEOUT):
+            calls.append((repo, token))
+            return (True, '已 star（204）')
+
+        opened = []
+        monkeypatch.setattr(G, 'star_repo', _star)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = 'tok123'
+        star.click()
+        assert _wait(lambda: '已 star' in star.text()), star.text()
+        assert calls == [('someone/some-repo', 'tok123')]
+        assert opened == [], '已经 star 成功了不该再开网页'
+
+    def test_without_a_token_it_opens_the_repo_page(self, star, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+        monkeypatch.setattr(G, 'probe_repo', lambda repo, timeout=0: True)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = ''
+        star.click()
+        assert _wait(lambda: opened == ['someone/some-repo']), star.text()
+        assert '仓库页' in star.text(), star.text()
+
+    def test_offline_says_so_and_does_not_open_a_dead_page(self, star,
+                                                          monkeypatch):
+        """
+        连不上时**不许**在浏览器里开一个死页面 —— 那看起来像工具坏了。
+        """
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+        monkeypatch.setattr(G, 'probe_repo', lambda repo, timeout=0: False)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = ''
+        star.click()
+        assert _wait(lambda: '连不上' in star.text()), star.text()
+        assert opened == []
+
+    def test_a_bad_token_falls_back_to_the_page(self, star, monkeypatch):
+        """token 过期 → 自动 star 失败 → 退回开网页，并且**说清为什么**。"""
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+        monkeypatch.setattr(G, 'star_repo',
+                            lambda repo, token, timeout=0: (False, 'token 无效或已过期'))
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = 'expired'
+        star.click()
+        assert _wait(lambda: opened == ['someone/some-repo']), star.text()
+        assert 'token 无效' in star.text(), star.text()
+
+    def test_no_browser_available_still_tells_the_url(self, star, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        monkeypatch.setattr(G, 'probe_repo', lambda repo, timeout=0: True)
+        monkeypatch.setattr(G, 'open_repo_page', lambda repo: False)
+        star._token = ''
+        star.click()
+        assert _wait(lambda: '打不开浏览器' in star.text()), star.text()
+        assert 'github.com/someone/some-repo' in star.text()
+
+    def test_click_returns_immediately(self, star, monkeypatch):
+        """
+        网络在后台：`click()` 必须**立刻**返回（真机上一次网络要 2~3 秒）。
+        """
+        from storygraph.ui_qt import github_star as G
+
+        def _slow(repo, token, timeout=G.TIMEOUT):
+            time.sleep(0.4)
+            return (True, 'ok')
+
+        monkeypatch.setattr(G, 'star_repo', _slow)
+        star._token = 'tok'
+        t0 = time.perf_counter()
+        star.click()
+        dt = (time.perf_counter() - t0) * 1000
+        assert dt < 150, f'点一下就卡了 {dt:.0f} ms'
+        assert star.text() != '★ Star on GitHub'
+        assert star.isEnabled() is False        # 忙碌期间不许连点
+        assert _wait(lambda: star.isEnabled(), timeout=5)
+
+
+# ==================================================================
+#  三、token 从哪来 / HTTP 语义（纯函数，不碰界面）
+# ==================================================================
+
+class TestTokenAndHttp:
+    def test_constructing_never_touches_the_network(self, qapp, monkeypatch):
+        """
+        **启动时不联网**：建控件不许发请求（不探测、不拉 star 数）。
+
+        理由：它是界面上的一块装饰，不许在打开工具时偷偷发网络包，更不许
+        因为没网而让启动变慢或弹错。
+        """
+        from storygraph.ui_qt import github_star as G
+
+        def _boom(*_a, **_k):
+            raise AssertionError('启动时联网了')
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _boom)
+        badge = G.GitHubStarBadge(repo='someone/some-repo', token='')
+        try:
+            assert badge.text().startswith('★')
+        finally:
+            badge.close()
+
+    def test_env_var_wins(self, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        monkeypatch.setenv('STORYGRAPH_GITHUB_TOKEN', 'envtok')
+        monkeypatch.delenv('GITHUB_TOKEN', raising=False)
+        monkeypatch.delenv('GH_TOKEN', raising=False)
+        assert G.read_token() == 'envtok'
+
+    def test_file_fallback(self, tmp_path, monkeypatch):
+        """普通人不会设环境变量：`%LOCALAPPDATA%/StoryGraph/github.json` 也认。"""
+        from storygraph.ui_qt import github_star as G
+
+        for name in ('STORYGRAPH_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / 'StoryGraph').mkdir()
+        (tmp_path / 'StoryGraph' / 'github.json').write_text(
+            '{"token": "filetok"}', encoding='utf-8')
+        monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+        assert G.read_token() == 'filetok'
+
+    def test_no_token_anywhere_is_empty(self, tmp_path, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        for name in ('STORYGRAPH_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+        assert G.read_token() == ''
+
+    def test_star_repo_success_is_idempotent_204(self, monkeypatch):
+        """已经 star 过也是 204 —— 不能被当成失败。"""
+        from storygraph.ui_qt import github_star as G
+
+        class _Resp:
+            status = 204
+
+            def read(self, *_a):
+                return b''
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        seen = {}
+
+        def _urlopen(req, timeout=None):
+            seen['method'] = req.get_method()
+            seen['url'] = req.full_url
+            seen['auth'] = req.get_header('Authorization')
+            return _Resp()
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        ok, msg = G.star_repo('someone/some-repo', 'tok')
+        assert ok and '204' in msg
+        assert seen['method'] == 'PUT'
+        assert seen['url'].endswith('/user/starred/someone/some-repo')
+        assert seen['auth'] == 'Bearer tok'
+
+    @pytest.mark.parametrize('code,expect', [
+        (401, 'token 无效'),
+        (403, '限流'),
+        (404, '仓库名'),
+    ])
+    def test_star_repo_maps_http_errors_to_words(self, monkeypatch, code, expect):
+        from storygraph.ui_qt import github_star as G
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, 'nope', None, None)
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        ok, msg = G.star_repo('someone/some-repo', 'tok')
+        assert ok is False and expect in msg, msg
+
+    def test_star_repo_without_token_never_calls_the_network(self, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        def _boom(*_a, **_k):
+            raise AssertionError('没有 token 还去联网了')
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _boom)
+        ok, msg = G.star_repo('someone/some-repo', '')
+        assert ok is False and 'token' in msg
+
+    def test_probe_and_star_turn_offline_into_words(self, monkeypatch):
+        from storygraph.ui_qt import github_star as G
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.URLError('getaddrinfo failed')
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        assert G.probe_repo('someone/some-repo') is False
+        ok, msg = G.star_repo('someone/some-repo', 'tok')
+        assert ok is False and '连不上' in msg
+
+
+# ==================================================================
+#  四、卡片页接线
+# ==================================================================
+
+class TestCardPageWiring:
+    def test_the_badge_is_on_the_card_page_top_right(self, ui_window):
+        badge = getattr(ui_window, '_github_star', None)
+        assert badge is not None, '卡片页上没有 star 徽标'
+        assert badge.objectName() == 'githubStar'
+        layout = badge.parentWidget().layout()
+        assert layout is not None and layout.indexOf(badge) == 0, \
+            '徽标不在右栏的第一行（"稍右上方"）'
+        assert badge.text().startswith('★')
+
+    def test_removing_it_leaves_nothing_behind(self, ui_window):
+        """
+        删掉徽标之后，卡片页照常工作（= 它没有别的地方依赖）。
+
+        判据不是"删除代码"，而是"删掉这个控件之后不残留任何东西"：
+        布局里少一个、窗口上那个引用是它本身（删代码时一起删）。
+        """
+        badge = ui_window._github_star
+        layout = badge.parentWidget().layout()
+        layout.removeWidget(badge)
+        badge.deleteLater()
+        assert layout.indexOf(badge) == -1
+        # 卡片页其余部分不受影响
+        assert ui_window._panel is not None
+        ui_window._show_index(0)
+        assert ui_window._panel.stage_thumb().beat_index() == 0
