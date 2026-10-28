@@ -61,7 +61,10 @@ REQUIRED_MODULES = (
     'storygraph.pipeline.engine_exporters',
     'storygraph.pipeline.validate',
     'storygraph.assets.asset_registry',
+    'storygraph.app.engine_preview',
+    'storygraph.app.stage_edition',
     'storygraph.ui_qt.main_window',
+    'storygraph.ui_qt.window_engine',
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_graph_ops',
     'openpyxl',
@@ -218,6 +221,51 @@ def _check_build_pipeline() -> str:
     return ''
 
 
+def _check_stage_edition() -> tuple:
+    """
+    **演出专用版**的随包资产：引擎（`renpy_sdk/`）与项目预设。
+
+    返回 `(是否适用, 错误说明, 详情)`：
+
+      · 标准版（没有 `演出专用版.txt`）→ `(False, '', '标准版')`，算通过；
+      · 演出专用版 → 必须找到完整引擎 + 两份可读 JSON，否则失败。
+
+    为什么放在自检里：这一版多出来的两大件（引擎 300MB+ / 真实项目预设）
+    正是**打包最容易漏、运行时最难查**的东西 —— 用户双击后只会看到
+    "引擎试玩点不了"，而真正的原因往往是"解压被杀毒软件吃了一半"。
+    """
+    from storygraph.app import engine_preview as EP
+    from storygraph.app import stage_edition as SE
+
+    if not EP.stage_edition():
+        return False, '', '标准版（不带引擎）'
+    engine = EP.find_engine()
+    if engine is None:
+        return True, ('找不到引擎：包里应该有 renpy_sdk\\renpy.exe'
+                      '（解压不完整？被杀毒软件隔离了？）'), ''
+    for rel in ('renpy', 'lib/py3-windows-x86_64', 'lib/python3.12'):
+        if not (Path(engine.home) / rel).is_dir():
+            return True, f'引擎不完整：缺 {rel}/', ''
+    rules = SE.preset_file(SE.RULES_NAME)
+    layout = SE.preset_file(SE.LAYOUT_NAME)
+    if rules is None or layout is None:
+        return True, '项目预设缺失（需要 项目预设/storygraph.rules.json 与 layout.json）', ''
+    import json
+    try:
+        json.loads(rules.read_text(encoding='utf-8'))
+        json.loads(layout.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
+        return True, f'项目预设读不出来：{e}', ''
+    received = ''
+    try:
+        found = SE.find_received_project()
+        if found is not None:
+            received = f'；随包项目：{Path(found).name}'
+    except Exception as e:                      # noqa: BLE001 - 找项目失败不算包坏
+        received = f'；随包项目探测失败：{e}'
+    return True, '', f'{engine.describe()}；预设可读{received}'
+
+
 def run() -> dict:
     """
     跑完整自检。返回 `{'ok': bool, 'checks': [(名字, 通过?, 详情), …]}`。
@@ -255,6 +303,17 @@ def run() -> dict:
         err = (f'未捕获异常 {type(e).__name__}: {e}\n'
                + traceback.format_exc(limit=3))
     checks.append(('Qt 界面可构建', not err, err))
+
+    try:
+        applicable, err, detail = _check_stage_edition()
+    except Exception as e:                      # noqa: BLE001
+        applicable, err, detail = True, (
+            f'未捕获异常 {type(e).__name__}: {e}\n'
+            + traceback.format_exc(limit=3)), ''
+    if not applicable:
+        checks.append(('演出专用版（引擎 + 预设）', True, '标准版：不适用'))
+    else:
+        checks.append(('演出专用版（引擎 + 预设）', not err, err or detail))
 
     return {'ok': all(ok for _n, ok, _d in checks), 'checks': checks}
 

@@ -56,6 +56,7 @@ BLOCKS = {
     'window_nav': 'WindowNavMixin',
     'window_state': 'WindowStateMixin',
     'window_recover': 'RecoverMixin',
+    'window_engine': 'WindowEngineMixin',
 }
 
 #: 主类**刻意留下**的成员（键是名字，值是"为什么留"）。

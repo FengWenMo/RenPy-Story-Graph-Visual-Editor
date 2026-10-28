@@ -47,11 +47,13 @@ storygraph.app —— **应用服务层**（框架无关）。
 其余：`chapter_index`（项目里有哪些章可打开 = 左侧导航的数据源）/
 `layout_store`（版式的存取：只记"谁摆在哪"）/ `prewarm`（缩略图预热）/
 `layer_compose`（把分离的立绘层合成一张图）/ `beat_clear`（清空一张卡片）/
-`source_line_delete`（删一条没打开的源边：只动源文件那一行）
+`source_line_delete`（删一条没打开的源边：只动源文件那一行）/
+`engine_preview`（**真引擎试玩**：镜像工程 → 起随包 Ren'Py → 跳章 / warp）/
+`stage_edition`（**演出专用版**：随包预设补缺、收到项目自动打开）
 
 > ⚠ 这份清单靠人维护，历史上漂过（2026-10-27 审计：这里写着 8 个、包里有 22 个）。
 > 加新模块时顺手加一行；实在懒得写描述，也把名字补上 —— 名单不全比没有更误导。
 """
 
 __all__ = ['beats', 'stage', 'notify', 'editor', 'picker', 'thumbs',
-           'asset_panel', 'tables']
+           'asset_panel', 'tables', 'engine_preview', 'stage_edition']

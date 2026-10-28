@@ -110,6 +110,24 @@ WRITERS = {
     'schema.py::main': '生成 docs/schema.json（CLI 入口）',
     'selfcheck.py::_check_build_pipeline': '自检夹具（写临时目录里的样例）',
     'selfcheck.py::_check_export': '自检夹具（写临时目录里的样例）',
+    # ── 引擎预览（2026-10-29）：只写**镜像缓存目录**，绝不碰用户项目 ──
+    'app/engine_preview.py::_save_manifest':
+        '写引擎预览镜像的同步清单 `%LOCALAPPDATA%\\StoryGraph\\engine_preview\\*'
+        '\\mirror.json`（记哪些文件已复制、哪些目录是 junction）；不写用户项目',
+    'app/engine_preview.py::_write_entry':
+        '往**镜像**的 `game/` 里写注入入口 `zzz_storygraph_engine_preview.rpy`'
+        '（config.label_overrides 把 start 指过去）。⚠ 只写镜像：源项目的 .rpy'
+        '由 `mirror_project` 逐字节复制，这里写的是副本',
+    'app/engine_preview.py::_write_capture':
+        '往**镜像**的 `game/` 里写验收用自动截图钩子（只在测试/验收时注入，'
+        '正常预览不写）；同样是副本，不碰用户项目',
+    'app/engine_preview.py::launch':
+        '写引擎子进程的 stdout 日志 `engine_stdout.log`（在镜像缓存目录里），'
+        '并把镜像里的 `log.txt/errors.txt/traceback.txt` 先清掉（只清副本）',
+    'app/stage_edition.py::_write_bytes_atomic':
+        '演出专用版把**随包预设**补进用户项目：缺 `storygraph.rules.json` / '
+        '`.storygraph/layout.json` 时写一份（已有就一个字节不动；临时文件 + '
+        'os.replace，不会留半份 JSON）',
 }
 
 _WRITE_METHODS = {'write_text', 'write_bytes'}

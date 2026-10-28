@@ -1,0 +1,178 @@
+{
+  "version": 2,
+  "nodes": {
+    "game/chapter/chapter0_0.rpy::chapter0_0": {
+      "x": -257.0,
+      "y": -2803.0
+    },
+    "game/chapter/chapter1_1.rpy::chapter1_1": {
+      "x": 0.0,
+      "y": -1340.0
+    },
+    "game/chapter/chapter1_2.rpy::chapter1_2": {
+      "x": 0.0,
+      "y": 134.0
+    },
+    "game/chapter/chapter1_3.rpy::chapter1_3": {
+      "x": 0.0,
+      "y": 1608.0
+    },
+    "game/chapter/chapter1_4.rpy::chapter1_4": {
+      "x": 1.21,
+      "y": 2278.0
+    },
+    "game/chapter/chapter2_1.rpy::chapter2_1": {
+      "x": 0.0,
+      "y": 2412.0
+    },
+    "game/chapter/chapter2_1_1.rpy::chapter2_1_1": {
+      "x": 0.0,
+      "y": 2546.0
+    },
+    "game/chapter/chapter2_1_2.rpy::chapter2_1_2": {
+      "x": 0.0,
+      "y": 2680.0
+    },
+    "game/chapter/chapter2_1_3.rpy::chapter2_1_3": {
+      "x": 0.0,
+      "y": 2814.0
+    },
+    "game/chapter/chapter2_1_4.rpy::chapter2_1_4": {
+      "x": 117.0,
+      "y": -2870.0
+    },
+    "game/chapter/chapter2_2.rpy::chapter2_2": {
+      "x": 0.0,
+      "y": -2546.0
+    },
+    "game/chapter/chapter2_2_1.rpy::chapter2_2_1": {
+      "x": 0.0,
+      "y": -2412.0
+    },
+    "game/chapter/chapter2_2_2.rpy::chapter2_2_2": {
+      "x": 0.0,
+      "y": -2278.0
+    },
+    "game/chapter/chapter2_2_3.rpy::chapter2_2_3": {
+      "x": 0.0,
+      "y": -2144.0
+    },
+    "game/chapter/chapter2_2_4.rpy::chapter2_2_4": {
+      "x": 0.0,
+      "y": -2010.0
+    },
+    "game/chapter/chapter2_3.rpy::chapter2_3": {
+      "x": 0.0,
+      "y": -1876.0
+    },
+    "game/chapter/chapter2_3_1.rpy::chapter2_3_1": {
+      "x": 0.0,
+      "y": -1742.0
+    },
+    "game/chapter/chapter2_3_2.rpy::chapter2_3_2": {
+      "x": 0.0,
+      "y": -1608.0
+    },
+    "game/chapter/chapter2_4.rpy::chapter2_4": {
+      "x": 0.0,
+      "y": -1474.0
+    },
+    "game/chapter/chapter2_4_1.rpy::chapter2_4_1": {
+      "x": 0.0,
+      "y": -1206.0
+    },
+    "game/chapter/chapter2_4_2.rpy::chapter2_4_2": {
+      "x": 0.0,
+      "y": -1072.0
+    },
+    "game/chapter/chapter2_5.rpy::chapter2_5": {
+      "x": 0.0,
+      "y": -938.0
+    },
+    "game/chapter/chapter3_1_1.rpy::chapter3_1_1": {
+      "x": 0.0,
+      "y": -804.0
+    },
+    "game/chapter/chapter3_1_2.rpy::chapter3_1_2": {
+      "x": 0.0,
+      "y": -670.0
+    },
+    "game/chapter/chapter3_1_3.rpy::chapter3_1_3": {
+      "x": 0.0,
+      "y": -536.0
+    },
+    "game/chapter/chapter3_1_4.rpy::chapter3_1_4": {
+      "x": 0.0,
+      "y": -402.0
+    },
+    "game/chapter/chapter3_1_5.rpy::chapter3_1_5": {
+      "x": 0.0,
+      "y": -268.0
+    },
+    "game/chapter/chapter3_2_1.rpy::chapter3_2_1": {
+      "x": 0.0,
+      "y": -134.0
+    },
+    "game/chapter/chapter3_2_2.rpy::chapter3_2_2": {
+      "x": 0.0,
+      "y": 0.0
+    },
+    "game/chapter/chapter3_2_3.rpy::chapter3_2_3": {
+      "x": 0.0,
+      "y": 268.0
+    },
+    "game/chapter/chapter3_2_4.rpy::chapter3_2_4": {
+      "x": 0.0,
+      "y": 402.0
+    },
+    "game/chapter/chapter3_3_1.rpy::chapter3_3_1": {
+      "x": 0.0,
+      "y": 536.0
+    },
+    "game/chapter/chapter3_3_2.rpy::chapter3_3_2": {
+      "x": 0.0,
+      "y": 670.0
+    },
+    "game/chapter/chapter3_3_3.rpy::chapter3_3_3": {
+      "x": 0.0,
+      "y": 804.0
+    },
+    "game/chapter/chapter3_3_4.rpy::chapter3_3_4": {
+      "x": 0.0,
+      "y": 938.0
+    },
+    "game/chapter/chapter3_4_1.rpy::chapter3_4_1": {
+      "x": 0.0,
+      "y": 1072.0
+    },
+    "game/chapter/chapter3_4_2.rpy::chapter3_4_2": {
+      "x": 0.0,
+      "y": 1206.0
+    },
+    "game/chapter/chapter3_4_3.rpy::chapter3_4_3": {
+      "x": 0.0,
+      "y": 1340.0
+    },
+    "game/chapter/chapter3_4_4.rpy::chapter3_4_4": {
+      "x": 0.0,
+      "y": 1474.0
+    },
+    "game/chapter/chapter4_1_1.rpy::chapter4_1_1": {
+      "x": 0.0,
+      "y": 1742.0
+    },
+    "game/chapter/chapter4_1_2.rpy::chapter4_1_2": {
+      "x": 0.0,
+      "y": 1876.0
+    },
+    "game/chapter/chapter4_1_3.rpy::chapter4_1_3": {
+      "x": 0.0,
+      "y": 2010.0
+    },
+    "game/chapter/chapter4_1_4.rpy::chapter4_1_4": {
+      "x": 0.0,
+      "y": 2144.0
+    }
+  },
+  "edges": []
+}

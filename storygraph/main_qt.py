@@ -150,6 +150,54 @@ def main(argv=None) -> int:
     if explicit is None and root is not None and memory_on:
         root = None                  # 交给记忆去决定开哪个项目
 
+    # ── 演出专用版：随包项目 + 随包预设（2026-10-29）──────────────────
+    #
+    # 交付给文案/策划的包是"工具 + 完整项目文件夹"两份东西。他们没有
+    # VSCode / Ren'Py / Python，也不该先学会"📁 打开项目要点到哪一层"：
+    #   · `项目/` 放在工具旁边（或把项目文件夹拖到 exe 上）→ 自动打开；
+    #   · 项目里缺 `storygraph.rules.json` / 布局 → 从随包预设补（只补缺）。
+    # 标准版（不是演出专用版）这一整块**不执行**，行为与以前完全一样。
+    from storygraph.app import engine_preview as _EP
+    from storygraph.app import stage_edition as _SE
+    stage = False
+    received = None
+    preset_notes: list = []
+    try:
+        stage = _EP.stage_edition()
+    except Exception as e:                       # noqa: BLE001 - 判断不出就当标准版
+        from storygraph.core.safeguard import swallow as _swallow
+        _swallow('main_qt.stage_edition', e)
+    if stage:
+        if explicit is None and not script:
+            try:
+                received = _SE.find_received_project()
+            except Exception as e:               # noqa: BLE001 - 找不到不是错误
+                from storygraph.core.safeguard import swallow as _swallow
+                _swallow('main_qt.received_project', e)
+                received = None
+            # 有"上次那个项目"时**让记忆优先**：它大概率就是这个随包项目，
+            # 恢复会把上次那一章和版式一起摆回来；不是同一个项目时也不该
+            # 被旁边放的文件夹悄悄顶掉。
+            if received is not None and memory_on:
+                try:
+                    remembered = SS.last_project(SS.config_path())
+                except Exception as e:           # noqa: BLE001 - 记忆读不出来就当没有
+                    from storygraph.core.safeguard import swallow as _swallow
+                    _swallow('main_qt.memory_last_project', e)
+                    remembered = ''
+                if remembered:
+                    received = None
+        for _candidate in (explicit, received):
+            if _candidate is None:
+                continue
+            try:
+                _presets = _SE.apply_presets(_candidate)
+                preset_notes.extend(_presets.get('actions') or ())
+                preset_notes.extend(_presets.get('errors') or ())
+            except Exception as e:               # noqa: BLE001 - 补预设失败不拦启动
+                from storygraph.core.safeguard import swallow as _swallow
+                _swallow('main_qt.apply_presets', e)
+
     engine = _EngineShim(root)
     # graph 一律从**空**开始：图里只该出现用户导入过的章节。
     # （以前这里 `analyze(files=discover_scripts(root))` 一次把 40 个脚本
@@ -158,10 +206,27 @@ def main(argv=None) -> int:
     if explicit is not None:
         # 项目根只喂资源表（xlsx）：立绘 / 音乐 / 角色候选、缩略图路径。
         win.open_project_path(explicit)
+    if received is not None:
+        # 随包项目：打开资源侧（规则/候选/导航都会跟着就位）。
+        win.open_project_path(received)
+        try:
+            win._log(f'[演出专用版] 已自动打开随包项目：{received}')
+            win._status('已自动打开随包项目；左侧点一章开始'
+                        '（卡片页工具栏有「🎮 引擎试玩」）')
+        except Exception as e:                   # noqa: BLE001 - 写日志失败不拦
+            from storygraph.core.safeguard import swallow as _swallow
+            _swallow('main_qt.received_status', e)
+    if preset_notes:
+        try:
+            for _note in preset_notes:
+                win._log('[预设] ' + str(_note))
+        except Exception as e:                   # noqa: BLE001 - 写日志失败不拦
+            from storygraph.core.safeguard import swallow as _swallow
+            _swallow('main_qt.preset_notes', e)
     if script:
         # 只把这一个章节放进剧情图（累加，不动别的）。
         win.import_chapter_files([script])
-    if explicit:
+    if explicit or received is not None:
         return app.exec()
     # ⚠ 这里**不再提示"正在恢复"**（2026-10-13 用户要求）：
     #   恢复是**自动且无 UI** 的，控制台由 `window_state` 打一行
