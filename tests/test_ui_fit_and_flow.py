@@ -253,8 +253,6 @@ class TestFlowCardHidesDialogue:
         assert not panel._flow_bar.isHidden()
         assert panel._dialogue_box.isHidden(), '控制流卡还显示着说话人/台词区'
         assert panel._stage_box.isHidden()
-        assert panel._stage_empty.isHidden()
-        assert panel._stage_toggle.isHidden()
         # 「当前舞台」那一行（图 + 摘要）也是演出，一样收起（2026-10-27）
         assert panel._stage_now.isHidden(), '控制流卡还挂着这一拍的舞台图'
 

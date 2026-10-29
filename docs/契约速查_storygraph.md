@@ -5223,7 +5223,7 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 |---|---|---|---|
 | 「▸ 定位（这一拍在文件里的位置）」 | 收起时 **1 行**（一个 chip），展开时 6~7 行 | **默认收起**，点一下展开；`PropertyStrip` 一直在、照旧同步 | `test_location_block_starts_collapsed` / `test_toggling_it_shows_the_real_rows` |
 | 「当前舞台」+ 这一拍的图 | 标题 1 行 + **一行**（图 288×162 在左、文字摘要在右） | 普通拍**一直可见**；**控制流卡收起**（`call` / `jump` 没有演出） | `test_it_sits_under_the_current_stage_heading` / `test_the_picture_is_a_small_whole_frame` / `test_ui_fit_and_flow.py::TestFlowCardHidesDialogue` |
-| 立绘网格 / 背景 / 音乐 / 语音（`_stage_box`） | 有舞台内容才有 | 这一拍没有舞台改动 → 整块收起成一行说明 + 「＋ 改舞台」 | `test_it_stays_when_the_stage_block_is_collapsed` |
+| 立绘网格 / 背景 / 音乐 / 语音（`_stage_box`） | **一直显示**（2026-10-29 起，见 §71.1） | 普通拍**常显**（这一拍没有舞台改动也不收）；**控制流卡收起**（`call`/`jump` 没有演出） | `test_a_beat_without_stage_content_still_shows_the_stage_block` |
 
 **为什么"定位"能收、"当前舞台"不能**：定位是"我在文件的哪儿"，回答一次就够
 （模式条右边还一直写着 `ch01.rpy · ch01 · 第 1 拍`）；而"这一拍台上是谁 / 在哪 /
@@ -5239,8 +5239,7 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 当前舞台（这一拍生效）
 ├─ 标题
 └─ [ 288×162 的图 | 文字摘要（stage_digest_text） ]     ← `_stage_now`（控制流卡收起）
-舞台：这一拍没有改动 … ／ ＋ 改舞台                       ← 二者互斥
-立绘网格 · 背景 · 音乐 · 语音                            ← `_stage_box`，可收起
+立绘网格 · 背景 · 音乐 · 语音                            ← `_stage_box`，普通拍常显（§71.1）
 备注 · 条件 · 高级区 · 保存/撤销 · 提示条
 ```
 
@@ -5833,3 +5832,71 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   必须报 / 登记过的头不报）、`scan` 只读、`move_to_comment` 只挪可疑的、
   弹窗真建框（默认全勾、默认决定是「原样」、取消是 `Rejected`）、
   接线（导出流程里"先问后 compile"、CLI 提示不改表）。
+
+---
+
+## §71 卡片右栏三处（2026-10-29 深夜）：舞台块常显 / 滚轮不换值 / 缩略图文字可读
+
+用户一次报三条（第四条"立绘匹配"见 §71.4，本轮未动）：
+
+> 不要让滚轮上下滑动调整背景，音乐和语音这三个东西……太容易误触了！！！
+> 找不到入口！！！不要这个 + 改舞台/音乐这个了！直接完整显示……因为这是基本
+> 信息！默认不应当收起……
+> 还有用户表示渲染存在问题！修！！！
+
+### 71.1 立绘 / 背景 / 音乐 / 语音（`_stage_box`）**常显**
+
+- **普通卡**：一直完整显示（没有舞台改动也显示），**没有**"收起成一行"这个
+  状态，也没有 `_stage_toggle` / `_stage_empty` 这两个控件（2026-10-29 删）。
+  理由：用户找不到入口；且"这一拍没换景/人/曲"本身是信息（沿用上一拍）。
+- **控制流卡**（`call` / `jump`）：照旧整体收起（`set_flow(info)` 里显隐；
+  它们没有台词与演出）；`set_flow(None)` 回到普通卡时放出来。
+- `load_fields()` 每次载入普通卡都确保 `_stage_box` / `_stage_now` 可见
+  （上一拍可能是控制流卡）。
+- 「当前舞台」那一行（图 + 摘要，`_stage_now`）与 `_stage_box` 仍**分成两块**：
+  一个是"看"（只读、常显），一个是"改"（输入）。
+- 判据：`test_hell_custom_card_layout.py::test_a_beat_without_stage_content_still_shows_the_stage_block`
+  / `…_with_stage_content_…` / `test_ui_fit_and_flow.py::TestFlowCardHidesDialogue`
+  / `test_stage_thumb.py::test_it_stays_when_the_beat_has_no_stage_change`。
+
+### 71.2 背景 / 音乐 / 语音三格：**滚轮不改值**（`WheelSafeComboBox`）
+
+- 规则：**点进去（有焦点）滚轮才换值**；没焦点时**不换值**，并把滚轮事件
+  **显式转交**给父级 `QAbstractScrollArea` 的 viewport（滚页面照常滚）。
+  不赌 `event.ignore()` 的冒泡（冒泡失败 = 鼠标停字段上页面滚不动）。
+- 可编辑组合框的焦点可能落在内部 `QLineEdit`，`_focused()` 两处都看。
+- 实现：`ui_qt/wheel_guard.py::WheelSafeComboBox`；`main_window._asset_row`
+  里三格用它（**不是裸 `QComboBox`** —— 裸 combo 默认会吃滚轮，实测 1→2 档）。
+- 判据：`tests/test_wheel_guard.py`（无焦点不改值 / 滚轮转交滚动区 /
+  有焦点才换值 / 三格真用了这个类）。
+
+### 71.3 compact 缩略图（288×162）：名字/台词按**缩略图字号**重画
+
+- 只对 `BeatStageThumb(compact=True)` 生效：整帧照旧 `render_frame`（1920×1080，
+  真实排版），`scale_result_image` 缩到 target 后，由
+  `stage_render.draw_readable_say(img, result, frame, profile)` 重画名字/台词。
+  舞台预览窗口、卡片整宽图**行为不变**。
+- 字号：`MIN_READABLE_PX`（name 11 / dialogue 9）+ `READABLE_PX_RATIO`
+  （288 宽 → name ≈12 / dialogue ≈10）+ `MAX_READABLE_PX`；按图宽比例算，
+  所以换 target 宽度/设备像素比后"在 288 控件上看到的字号"稳定。
+- 铺底：条带（`textbox_rect`）与名条（`name_tag`）**各自用区域平均色、不透明**
+  铺平，再画字；名字**名条底跟着字长**（`_fit_name_tag`：左/顶对齐引擎
+  `name_rect`，只往右/下长；长到画面边缘才逐级缩到 9px + 「…」）。
+- 字体：`profile.font_for(...)` 取项目字体；项目字体不含汉字时回退
+  `_cjk_font_path()`（雅黑/黑体/宋体/Noto/文泉驿），**不许**用 Pillow 默认字体
+  画中文；`info['font_fallback']` 可见。字号 <16px **不描边**（描边吃笔画）。
+- 重画失败（异常）：`stage_thumb._picture()` `swallow` 并退回纯缩放的整帧图。
+- 返回 `info`（测试用）：`drawn` / `name_px` / `dialogue_px` / `name_lines` /
+  `dialogue_lines` / `ellipsis` / `font_fallback` / `name_box`（引擎原框）/
+  `name_tag`（实际铺底+画字的框）/ `name_text_box` / `strip` / `covered`。
+- 已知取舍：compact 图里项目文本框**装饰**（圆角/爱心/虚线）被铺平盖掉
+  （可读优先；名条位置保留"有颜色的小标签"观感）；名条可能向下贴到框顶。
+- 判据：`tests/test_stage_thumb_readable.py`（30 条）。
+
+### 71.4 未闭环：立绘"只有文件名是角色名的可以匹配"
+
+用户原话："只有文件名是角色名的可以匹配，不能直接放立绘图，直接放角色那个
+头像图才能动。" 2026-10-29 追问三个方向（选择器挑图认不出角色 / 卡片显示成
+头像特写 / 舞台缩略图显示错图），用户答**都不是**、会补截图与步骤。
+**在拿到复现材料前不要动这块**（方向猜错比不改更贵）。
+

@@ -283,30 +283,30 @@ class TestCardLayout:
         # 台词框仍然在那个容器里（别为了过用例把台词挪丢）
         assert panel._dialogue_box.isAncestorOf(panel._text)
 
-    def test_a_beat_without_stage_content_collapses_the_stage_block(self, window):
-        """一条 `styled …`（纯文字）没有什么舞台内容 → 立绘那块要收起来。"""
-        _show(window, _idx_of(window, 'styled'))
-        panel = _panel(window)
-        assert not panel._stage_box.isVisibleTo(panel), \
-            '空立绘网格还占着一整屏'
-        assert panel._stage_empty.isVisibleTo(panel), '收起来了却没说为什么'
-        assert '没有改动' in panel._stage_empty.text(), panel._stage_empty.text()
+    def test_a_beat_without_stage_content_still_shows_the_stage_block(self, window):
+        """
+        没有舞台改动 ≠ 把舞台藏起来（2026-10-29 用户）：
 
-    def test_the_stage_block_can_be_opened_again(self, window):
-        """收起来 ≠ 藏死：想给这一拍加张立绘，得点得开。"""
+        > 用户表示找不到入口！！！不要这个 + 改舞台/音乐这个了！直接完整
+        > 显示……因为这是基本信息！默认不应当收起……
+
+        所以这类拍上「立绘 / 背景 / 音乐 / 语音」要**一直看得见**，并且
+        「＋ 改舞台」按钮和"没有改动"那行说明都不再存在（它们只服务于"收起"）。
+        """
         _show(window, _idx_of(window, 'styled'))
         panel = _panel(window)
-        assert panel._stage_toggle.isVisibleTo(panel), '没有"改舞台"的入口'
-        panel._stage_toggle.click()
-        assert panel._stage_box.isVisibleTo(panel), '点了却打不开'
-        assert panel._grid.isVisibleTo(panel), '立绘网格没跟着出来'
+        assert panel._stage_box.isVisibleTo(panel), \
+            '没有舞台改动的拍把舞台块收起来了 —— 用户就找不到入口'
+        assert panel._grid.isVisibleTo(panel), '立绘网格没显示出来'
+        assert not hasattr(panel, '_stage_toggle'), '「＋ 改舞台」按钮应该已经删掉'
+        assert not hasattr(panel, '_stage_empty'), '"没有改动"那行收起说明应该已经删掉'
 
     def test_a_beat_with_stage_content_still_shows_the_stage_block(self, window):
         """有舞台内容的拍**一个字都不许收**：那是它本来就要编辑的东西。"""
         _show(window, len(window.beats) - 1)      # 收尾那拍：音乐 + 音效 + 台词
         panel = _panel(window)
         assert panel._stage_box.isVisibleTo(panel), '有舞台内容的拍被收起来了'
-        assert not panel._stage_empty.isVisibleTo(panel)
+        assert panel._grid.isVisibleTo(panel)
 
     def test_unmodeled_lines_are_named_on_the_card(self, window):
         """

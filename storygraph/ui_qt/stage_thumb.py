@@ -29,6 +29,12 @@ storygraph.ui_qt.stage_thumb
 与「舞台快照」表、生成器、预览窗口同源（`app.stage` / `app.stage_render`）。
 本文件只做三件事：什么时候渲染、渲染成多大、画在控件上。
 
+**唯一的例外：compact 小图会重画名字/台词**（2026-10-29，用户报「渲染有问题」）。
+整帧 1920×1080 的 26~30px 台词缩到 288 宽只剩 3~4px，糊成方块 —— 所以
+compact 模式先在 PIL 侧缩到 target，再交给 `stage_render.draw_readable_say`
+按缩略图自己的可读字号把名字/台词重画一遍（背景/立绘仍是引擎排版的缩放）。
+整宽模式与舞台预览窗口**不受影响**：那里的字本来就看得清。
+
 ## 为什么不在 GUI 线程算
 
 真机上合成一帧 100ms~1.3s（首次碰到大盘立绘要解码缩图，见
@@ -68,7 +74,7 @@ from storygraph.app.stage import build_frame_at
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import theme
 from storygraph.ui_qt import tokens as T
-from storygraph.ui_qt.stage_preview import result_to_qimage
+from storygraph.ui_qt.stage_preview import image_to_qimage, result_to_qimage
 
 #: 翻拍时的防抖：连按方向键翻过去的那几拍不必每张都渲染一遍
 #: （一张 100ms~1.3s，而人眼在翻页途中根本看不清中间那几张）。
@@ -169,6 +175,30 @@ def _place_key(place):
 #  后台渲染
 # ----------------------------------------------------------------------
 
+def _picture(got, frame, profile, target, compact: bool):
+    """
+    `RenderResult` → `QImage`（工作线程里调，别在 GUI 线程做）。
+
+    **compact 小图**多一步：先缩到 target，再调
+    `stage_render.draw_readable_say` 按缩略图自己的字号把名字/台词重画一遍
+    （2026-10-29 用户报「渲染有问题」：整帧 26~30px 的台词缩到 288 宽只剩
+    3~4px，糊成方块）。整宽图 / 舞台预览窗口不走这一步 —— 那里的字本来
+    就是引擎排版、看得清，行为保持原样。
+    """
+    if not compact:
+        return result_to_qimage(got, target)
+    img = R.scale_result_image(got, target)
+    if img is None:
+        return result_to_qimage(got, target)
+    try:
+        img, _info = R.draw_readable_say(img, got, frame, profile)
+    except Exception as e:                    # noqa: BLE001 - 重画失败别丢图
+        # 可读重画只是"锦上添花"：它挂了也必须退回纯缩放的整帧图，
+        # 否则后台线程直接抛异常 → 卡片永远停在"正在渲染"。
+        swallow('stage_thumb.readable_say', e)
+    return image_to_qimage(img)
+
+
 class _Signals(QObject):
     """工作线程 → GUI 线程的唯一通道。"""
 
@@ -192,10 +222,10 @@ class _Gate:
 
 
 class _Job(QRunnable):
-    """在后台线程里合成一帧（并在那边缩到控件大小）。"""
+    """在后台线程里合成一帧（并在那边缩到控件大小、小图再重画可读文字）。"""
 
     def __init__(self, signals, gate, gen, key, frame, project_root, registry,
-                 profile, transform_index, screen, target):
+                 profile, transform_index, screen, target, compact=False):
         super().__init__()
         self.signals = signals
         self.gate = gate
@@ -208,6 +238,8 @@ class _Job(QRunnable):
         self.transform_index = transform_index
         self.screen = screen
         self.target = target
+        #: 小图（卡片上 288×162 那张）才重画可读文字；整宽图保持引擎排版。
+        self.compact = bool(compact)
         self.setAutoDelete(True)
 
     def run(self):
@@ -222,9 +254,10 @@ class _Job(QRunnable):
         except Exception as e:                # noqa: BLE001 - 后台绝不炸
             swallow('stage_thumb.render_job', e)
             got = None
-        # 缩放**也在工作线程里做**（PIL 缩到目标尺寸 ≈ 20ms，比把 1920×1080
-        # 搬过线程边界再让 Qt 缩便宜得多）。
-        qimg = result_to_qimage(got, self.target)
+        # 缩放 + 小图可读文字**也在工作线程里做**（PIL 缩到目标尺寸 ≈ 20ms，
+        # 比把 1920×1080 搬过线程边界再让 Qt 缩便宜得多）。
+        qimg = _picture(got, self.frame, self.profile, self.target,
+                        self.compact)
         warnings = list(getattr(got, 'warnings', []) or ())
         missing = list(getattr(got, 'missing', []) or ())
         try:
@@ -437,6 +470,9 @@ class BeatStageThumb(QWidget):
         self._gen += 1
         got = None
         try:
+            # 可读重画要用**同一份** gui 排版（颜色/字体/前后缀），
+            # 所以先确保 profile 载入（正式路径在 `_enqueue` 里已经确保过）。
+            self._ensure_profile()
             got = R.render_frame(
                 self._frame, project_root=self._project_root,
                 registry=self._registry(), profile=self._profile,
@@ -447,7 +483,8 @@ class BeatStageThumb(QWidget):
             got = None
         self.render_count += 1
         self._on_done(self._key, self._gen,
-                      result_to_qimage(got, size),
+                      _picture(got, self._frame, self._profile, size,
+                               self._compact),
                       list(getattr(got, 'warnings', []) or ()),
                       list(getattr(got, 'missing', []) or ()))
         return self._pix
@@ -540,7 +577,8 @@ class BeatStageThumb(QWidget):
             self._pool.start(_Job(
                 self._signals, self._gate, self._gen, self._key, self._frame,
                 self._project_root, self._registry(), self._profile,
-                self._transform_index(), self._screen(), size))
+                self._transform_index(), self._screen(), size,
+                self._compact))
         except Exception as e:                    # noqa: BLE001
             swallow('stage_thumb.enqueue', e)
 

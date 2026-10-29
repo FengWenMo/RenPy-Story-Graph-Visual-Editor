@@ -441,19 +441,22 @@ class TestCardWiring:
         assert thumb.maximumWidth() <= 320, '小图不该跟着列宽长胖'
         assert thumb.maximumHeight() <= 180, '小图不该比一行摘要高太多'
 
-    def test_it_stays_when_the_stage_block_is_collapsed(self, card_window):
+    def test_it_stays_when_the_beat_has_no_stage_change(self, card_window):
         """
-        没有舞台改动的那一拍（舞台块收起）**也要有图**。
+        没有舞台改动的那一拍**也要有图**（而且舞台块不再收起）。
 
         真机一章 285 拍里 210 拍是这种情况，而"背景和立绘都是继承来的"
         恰恰是最需要看一眼图的时候。
+
+        2026-10-29 用户又进一步要求舞台块**常显**（"这是基本信息，默认
+        不应当收起"），所以这里同时钉住"图在 + 块也在"。
         """
         win = card_window
         win._show_index(BEAT_INHERIT)
         panel = win._panel
-        assert panel._stage_box.isHidden(), '这一拍应该没有舞台块'
+        assert not panel._stage_box.isHidden(), '舞台块不该再收起来了'
         thumb = panel.stage_thumb()
-        assert not thumb.isHidden(), '舞台块收起时连图一起收掉了'
+        assert not thumb.isHidden(), '这一拍连图都没有'
         assert thumb.beat_index() == BEAT_INHERIT
 
     def test_flipping_the_beat_flips_the_picture(self, card_window):

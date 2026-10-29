@@ -316,18 +316,17 @@ def _frame_key(frame) -> int:
     return id(frame)
 
 
-def result_to_qimage(result, target=None):
+def image_to_qimage(img, target=None):
     """
-    `RenderResult`（PIL）→ `QImage`（**可以在工作线程里做**）。
+    PIL 图 → `QImage`（**可以在工作线程里做**）。
 
-    `QImage` 是少数允许在 GUI 线程外构造/缩放的 Qt 类型（`QPixmap` 不行，
-    所以那个转换留在 GUI 线程）。顺手缩到控件尺寸：一是省掉每帧 8MB 的
-    跨线程拷贝，二是每帧 paint 不用再做一次平滑缩放（转场时 60fps 重绘）。
+    为什么单独公开：卡片上的 compact 缩略图要先缩放、再在 PIL 侧重画
+    可读的名字/台词（`app.stage_render.draw_readable_say`），最后才转 Qt ——
+    转换这一步必须能被 `stage_thumb` 单独调用，不能只经 `RenderResult`。
+    `target` 给了就顺手缩到它（`QImage` 的缩放也允许在 GUI 线程外做）。
 
-    卡片上那张「这一拍的舞台图」（`ui_qt.stage_thumb`）**共用这一份**：
-    两处各写一遍缩放，迟早一个平滑一个不平滑。
+    失败返回 None（转不了就退回示意图，绝不崩预览）。
     """
-    img = getattr(result, 'image', None)
     if img is None:
         return None
     try:
@@ -342,8 +341,22 @@ def result_to_qimage(result, target=None):
                                    Qt.TransformationMode.SmoothTransformation)
         return qimg
     except Exception as e:                    # noqa: BLE001 - 转不了就退回示意图
-        swallow('stage_preview.result_to_qimage', e)
+        swallow('stage_preview.image_to_qimage', e)
         return None
+
+
+def result_to_qimage(result, target=None):
+    """
+    `RenderResult`（PIL）→ `QImage`（**可以在工作线程里做**）。
+
+    `QImage` 是少数允许在 GUI 线程外构造/缩放的 Qt 类型（`QPixmap` 不行，
+    所以那个转换留在 GUI 线程）。顺手缩到控件尺寸：一是省掉每帧 8MB 的
+    跨线程拷贝，二是每帧 paint 不用再做一次平滑缩放（转场时 60fps 重绘）。
+
+    卡片上那张「这一拍的舞台图」（`ui_qt.stage_thumb`）**共用这一份**：
+    两处各写一遍缩放，迟早一个平滑一个不平滑。
+    """
+    return image_to_qimage(getattr(result, 'image', None), target)
 
 
 class _RenderJob(QRunnable):

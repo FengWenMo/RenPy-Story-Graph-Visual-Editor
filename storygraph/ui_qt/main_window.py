@@ -143,6 +143,7 @@ from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.stage_thumb import BeatStageThumb
 from storygraph.ui_qt.status import AppStatusBar, Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
+from storygraph.ui_qt.wheel_guard import WheelSafeComboBox
 # `MainWindowQt` 的五块职责各住一个文件（P3-14，2026-10-05）。
 # **基类顺序**：六个 mixin 必须排在 `QMainWindow` **前面** ——
 # `eventFilter` / `closeEvent` 是 Qt 虚函数（`QObject` 自己就定义了），
@@ -484,11 +485,13 @@ class BeatCardEditor(QWidget):
         # 图与摘要**并排**而不是上下叠：摘要本来就要占那几行，图因此几乎
         # 不吃额外高度 —— 卡片留给"能改的东西"的地方才够。
         #
-        # 为什么这一块**不在 `_stage_box` 里面**（那一块才是可收起的）：
-        # 真机一章 285 拍里 210 拍没有舞台改动（`_has_stage_content` 为假 →
-        # 立绘 / 背景 / 音乐全收起）。而"这一拍台上是谁、在哪、什么曲子"
-        # 对**那些**拍最有价值 —— 图与摘要跟着一起收起，就等于最该看的时候
+        # 为什么这一块**不在 `_stage_box` 里面**（那一块装的是能改的输入）：
+        # 它是**只读的"现在台上什么样"**，和"这一拍要不要改舞台"无关 ——
+        # 真机一章 285 拍里 210 拍没有舞台改动，而"这一拍台上是谁、在哪、
+        # 什么曲子"对**那些**拍最有价值；跟着一起收起，就等于最该看的时候
         # 什么都没有（用户 2026-10-27 第一次要这张图的理由就是这个）。
+        # 2026-10-29 起 `_stage_box` 也常显了（见下面那段），但两者仍然分开：
+        # 一个是"看"，一个是"改"。
         self._stage_now = QWidget()
         now_lay = QVBoxLayout(self._stage_now)
         now_lay.setContentsMargins(0, 0, 0, 0)
@@ -511,29 +514,19 @@ class BeatCardEditor(QWidget):
         now_lay.addLayout(now_row)
         root.addWidget(self._stage_now)
 
-        # —— 立绘 / 背景 / 音乐（**没有舞台改动时收成一行**）——
+        # —— 立绘 / 背景 / 音乐（**永远完整显示**，2026-10-29 用户要求）——
         #
-        # 用户 2026-10-18：不是每个写法都跟图片相关。一条 `play_music` 或
-        # `styled "红色" "#f00"` 的拍，这几块**一个字都没有**，却占了整整一屏
-        # —— 真正能改的参数反而要滚过去找。所以：没有舞台内容 → 收成一行
-        # 说明 + 一个「改舞台」按钮；有内容 → 与从前一模一样。
-        self._stage_has = True          # 载入前不收起（构造期间没有"这一拍"）
-        self._stage_open = False
-        self._stage_toggle = QPushButton('＋ 改舞台（背景 / 立绘 / 音乐）')
-        self._stage_toggle.setProperty('variant', 'chip')
-        self._stage_toggle.setFlat(True)
-        self._stage_toggle.setToolTip('这一拍没有舞台改动。点开可以加立绘、'
-                                      '换背景、放音乐。')
-        self._stage_toggle.clicked.connect(self._toggle_stage)
-        self._stage_toggle.setVisible(False)
-        root.addWidget(self._stage_toggle, 0, Qt.AlignLeft)
-        self._stage_empty = QLabel('舞台：这一拍没有改动（背景 / 立绘 / '
-                                   '音乐都沿用上一拍）')
-        self._stage_empty.setProperty('role', 'caption')
-        self._stage_empty.setWordWrap(True)
-        self._stage_empty.setVisible(False)
-        root.addWidget(self._stage_empty)
-
+        # 这里曾经是"没有舞台内容 → 收成一行说明 + 一个「＋ 改舞台」按钮"
+        # （2026-10-18：不是每一拍都跟图片有关，空的立绘网格会把真正能改的
+        # 参数顶到看不见）。用户 2026-10-29 的反馈是**入口根本找不到**：
+        #
+        #   > 用户表示找不到入口！！！不要这个 + 改舞台/音乐这个了！直接完整
+        #   > 显示……因为这是基本信息！默认不应当收起……
+        #
+        # 这个理由也对得上：背景 / 立绘 / 音乐就是"这一拍的舞台"，**空着本身
+        # 也是信息**（这一拍没换景、没换人、没换曲 ⇒ 沿用上一拍），收起来反而
+        # 要人先猜"里面藏了什么"。所以这一块不再有收起/展开两种状态：普通卡片
+        # 上一直完整铺开，想加什么就直接点（控制流卡整体收起，见 `set_flow`）。
         self._stage_box = QWidget()
         stage_lay = QVBoxLayout(self._stage_box)
         stage_lay.setContentsMargins(0, 0, 0, 0)
@@ -580,7 +573,13 @@ class BeatCardEditor(QWidget):
                 box.addWidget(cap)
                 line = QHBoxLayout()
                 line.setSpacing(T.SPACE['xs'])
-                combo = QComboBox()
+                # ⚠ **滚轮不许改这三格的值**（用户 2026-10-29："不要让滚轮上下
+                # 滑动调整背景，音乐和语音这三个东西……太容易误触了！！！"）。
+                # 卡片在滚动区里，鼠标扫过字段时滚轮就会把值换掉，而且换的是
+                # 自由文本（图名 / bgm id），改错了不一定看得出来。
+                # `WheelSafeComboBox`：只有点进去（有焦点）才响应滚轮，否则把
+                # 滚轮转交给父级滚动区 —— 滚页面照常滚。规则写在那个模块里。
+                combo = WheelSafeComboBox()
                 combo.setEditable(True)
                 self._widgets[name] = combo
                 line.addWidget(combo, 1)
@@ -605,7 +604,7 @@ class BeatCardEditor(QWidget):
         row3.addWidget(cap, 0)
         self._comment = QLineEdit()
         self._comment.setPlaceholderText(
-            '写进脚本的注释（不用自己加 #）：例 bg1.2 bgm13 / 舞台备忘 / '
+            '写进脚本的注释（不用自己加 #）：例 bg1.2 bgm13 / 场景备忘 / '
             '给同事的说明')
         self._widgets['Comment'] = self._comment
         row3.addWidget(self._comment, 1)
@@ -719,36 +718,13 @@ class BeatCardEditor(QWidget):
         return (('▾' if self._adv_open else '▸')
                 + ' 高级区（代码 / Label / 类型 / Notes / Stage / 台词后缀 / 菜单头）')
 
-    # ---------- 语句条 + 舞台收放（2026-10-18）----------
-
-    def _toggle_stage(self):
-        """「改舞台」：把收起来的舞台块展开/再收起。"""
-        self._stage_open = not self._stage_open
-        self._apply_stage_visibility()
-
-    def _apply_stage_visibility(self):
-        """按"这一拍有没有舞台内容 / 用户是不是手动展开了"决定显不显示。"""
-        show = bool(self._stage_has or self._stage_open)
-        self._stage_box.setVisible(show)
-        self._stage_empty.setVisible(not show)
-        self._stage_toggle.setVisible(not show)
-        if not show:
-            self._stage_toggle.setText('＋ 改舞台（背景 / 立绘 / 音乐）')
-
-    @staticmethod
-    def _has_stage_content(fields: dict, cards: list) -> bool:
-        """
-        这一拍**有舞台内容**吗（立绘 / 背景 / 音乐 / 音效 / 语音 / 舞台指令）？
-
-        `Stage` 那一格是结构化列的**投影**（`compose_stage`），所以它非空
-        就等于"这一拍有 scene/show/hide/with"——不必再逐列判。
-        """
-        if cards:
-            return True
-        for key in ('Scene', 'BGM', 'SFX', 'Voice', 'Stage'):
-            if str((fields or {}).get(key, '') or '').strip():
-                return True
-        return False
+    # ---------- 语句条（2026-10-18）----------
+    #
+    # ⚠ 这里原本还有一道"舞台块收放"（`_toggle_stage` / `_apply_stage_visibility`
+    # / `_has_stage_content`，2026-10-18 加、2026-10-29 拆）。拆的理由见
+    # `_build` 里「立绘 / 背景 / 音乐（永远完整显示）」那段：那是基本信息，
+    # 不该藏在「＋ 改舞台」按钮后面。舞台块现在只有"普通卡显示 / 控制流卡收起"
+    # 两种状态，由 `set_flow` 决定（`load_fields` 负责把普通卡放出来）。
 
     def _set_statement(self, statement, loose):
         """填顶部的「语句条」+ 下面那行"原样行"提示（各自独立显隐）。"""
@@ -815,11 +791,12 @@ class BeatCardEditor(QWidget):
         self._flow_brief = dict(brief or {}) if info else {}
         if not info:
             self._flow_bar.setVisible(False)
-            # 回到普通卡片：台词区与舞台块按这一拍自己的内容重新出现
-            # （舞台的显隐规则归 `_apply_stage_visibility`，别在这里另写一套）。
+            # 回到普通卡片：台词区与舞台块都放出来。舞台块**平时常显**
+            # （理由见 `_build` 里「立绘 / 背景 / 音乐（永远完整显示）」），
+            # 这里只要把控制流卡收掉的再放出来就行。
             self._dialogue_box.setVisible(True)
             self._stage_now.setVisible(True)
-            self._apply_stage_visibility()
+            self._stage_box.setVisible(True)
             if self._loaded_fields:
                 self._loaded_fields.pop('FlowType', None)
                 self._loaded_fields.pop('FlowTarget', None)
@@ -856,8 +833,6 @@ class BeatCardEditor(QWidget):
         # 看着像"还有一屏没填"。把它们收起来，卡片上只剩调用条 + 备注 +
         # 条件 + 高级区 —— 这正好是 call/jump 能拥有的全部内容。
         self._dialogue_box.setVisible(False)
-        self._stage_toggle.setVisible(False)
-        self._stage_empty.setVisible(False)
         self._stage_box.setVisible(False)
         # 「当前舞台」那一行（图 + 摘要）也跟着收起：控制流卡**没有演出**，
         # 一张 `call` 卡上留着一幅"跳转时台上什么样"的图，纯属占掉半屏
@@ -1360,11 +1335,12 @@ class BeatCardEditor(QWidget):
                                    for n in self._all_names()}
             # Stage 那一格的原文单独记一份（判"手改过没有"要用它）
             self._stage_loaded = str(fields.get('Stage', '') or '')
-            # 舞台块收不收起来：跟着**这一拍有没有舞台内容**走（每次载入重判，
-            # 手动展开状态也复位 —— 翻到下一拍时不该继承上一拍的展开）。
-            self._stage_has = self._has_stage_content(fields, sprite_items)
-            self._stage_open = False
-            self._apply_stage_visibility()
+            # 舞台块（立绘 / 背景 / 音乐 / 语音）**常显**（2026-10-29）：
+            # 载入一张普通卡片时确保它在上面 —— 上一拍可能是控制流卡
+            # （`set_flow(info)` 会把整块收起来），不能让它一直收着。
+            # 真正的控制流卡由随后的 `set_flow(info)` 再收起，见那里的说明。
+            self._stage_box.setVisible(True)
+            self._stage_now.setVisible(True)
             # 台词后缀：有才提示（它就是"给这句台词上色/加样式"那一类写法）
             tail = str(fields.get('SayTail', '') or '').strip()
             self._say_tail_label.setText(

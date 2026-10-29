@@ -42,7 +42,8 @@
 - **纯文字导入前必问"导出到哪个文件夹"**：落点由人指定（`out_dir`），不猜子目录。任何程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 模态目录框会挂死。
 - **项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，**无 TTL**）；`find_control_file` 单候选直接返回。绕过缓存 → "连线很卡"（同一项目整份解析 6~8 遍，`detect_placement` 1435 ms/次）。别给缓存加 TTL（判据 `test_scan_cache.py`）。
 - **刷新已导入章节**：会话持有 `IncrementalRenPyAnalyzer`（只逐出磁盘上不存在的文件、8 MB 上限、本批不淘汰）+ `import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定重读哪几个；0 改动连预览框都不弹（`test_import_stamps.py`）。
-- **卡片上的单拍舞台图**：渲染必须走 `stage_render.render_frame`（与「演出预览」同一函数）；一律后台线程（首次大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹，**不许** `id(frame)`、不许换拍时拿上一张顶。图在「当前舞台」标题下、与摘要并排、固定 288×162（`compact=True`）；`_stage_now` 不在可收起的 `_stage_box` 里（控制流卡除外）。
+- **卡片上的单拍舞台图**：渲染必须走 `stage_render.render_frame`（与「演出预览」同一函数）；一律后台线程（首次大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹，**不许** `id(frame)`、不许换拍时拿上一张顶。图在「当前舞台」标题下、与摘要并排、固定 288×162（`compact=True`）；`_stage_now`（只看）与 `_stage_box`（能改）是两块，**普通卡都常显**，控制流卡才收起。compact 小图的**名字/台词要按缩略图字号重画**（`stage_render.draw_readable_say`，2026-10-29）：整帧缩小后字只剩 3~4px 是"方块"；铺底要**不透明**且**名条也要铺**（名条可能在文本框上方），名字字号**不许**被引擎名条宽度卡死（名条底跟着字长长）。
+- **卡片「背景 / 音乐 / 语音」三格滚轮不许改值**（2026-10-29）：用 `ui_qt/wheel_guard.py::WheelSafeComboBox`，没焦点时不换值并把滚轮**显式转交**给父级滚动区（别赌冒泡）。裸 `QComboBox` 默认会吃滚轮。
 - **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 乱码），只用 edit/write。
 - **界面上"可删的独立件"** 范式（如 `ui_qt/github_star.py`）：一个文件 + 一处 try 挂载，不 import 窗口/会话代码，点击立刻返回（网络后台），启动不联网。判据 `test_github_star.py`。
 - **许可证 GPLv3 必须四处同源**：`LICENSE` / `pyproject.toml` / `README.md` / 随包 `快速上手.md`（最后一处最容易漏）。10-23 曾误写 MIT，**别改回去**。
@@ -51,7 +52,7 @@
 
 ## 四、当前的片（判据见同名测试）
 
-E1/E2/E3 引擎事实｜纯文字导入 S1~S4（`test_txt_import*` + 金标）｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门（`plan_control_write`）｜L7 版式恢复｜导入冲突预检（覆盖/改名/跳过，取消=零写）｜点不动修复 + 记忆门禁｜导出落点 + 工具栏顺序｜接线不卡｜刷新不白付钱｜卡片单拍舞台图｜右栏竖向配额（「定位」默认折叠）｜重号不级联（发号底座=整批已有+本次已发）｜derived 段要交代｜写入口探针两种 open｜GitHub star 徽标｜E1/E3+D3 拖线落点由结构决定｜**🎮 引擎试玩 + 演出专用版**（`engine_preview` / `stage_edition` / `packaging/make_stage_release.py`）。
+E1/E2/E3 引擎事实｜纯文字导入 S1~S4（`test_txt_import*` + 金标）｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门（`plan_control_write`）｜L7 版式恢复｜导入冲突预检（覆盖/改名/跳过，取消=零写）｜点不动修复 + 记忆门禁｜导出落点 + 工具栏顺序｜接线不卡｜刷新不白付钱｜卡片单拍舞台图｜右栏竖向配额（「定位」默认折叠）｜重号不级联（发号底座=整批已有+本次已发）｜derived 段要交代｜写入口探针两种 open｜GitHub star 徽标｜E1/E3+D3 拖线落点由结构决定｜**🎮 引擎试玩 + 演出专用版**（`engine_preview` / `stage_edition` / `packaging/make_stage_release.py`）｜**舞台（高级）可疑行 → 导出前确认**（`story/stage_suspect.py`，撤回自动补 `#`）｜**卡片三修**（`_stage_box` 常显 / `WheelSafeComboBox` 滚轮防误触 / compact 缩略图文字可按读）。
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层｜**从当前拍 warp 的近似性**（前情 `$` 变量缺，UI 已明说，未做"补前情状态"）｜引擎试玩只支持 Windows 源生 SDK 运行（不做 build 分发）。
 

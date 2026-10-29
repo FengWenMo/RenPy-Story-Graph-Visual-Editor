@@ -23,6 +23,7 @@ Pillow 是可选依赖：没装时 `available()` 为 False，调用方退回旧�
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -783,6 +784,785 @@ def _draw_say(canvas, frame, ctx, result):
 
 
 # ----------------------------------------------------------------------
+#  缩略图上的可读名字 / 台词（2026-10-29）
+# ----------------------------------------------------------------------
+#
+# 用户 2026-10-29：「渲染有问题」—— 卡片「当前舞台」那张 288×162 的小图里，
+# 名字条和台词缩成了方块图案。根因不是画错了，是**尺度**：整帧按项目分辨率
+# （典型 1920×1080）画，26~30px 的台词缩到 480 宽的 target 只剩 6~7px，再画
+# 到 288 的控件上只剩 3~4px —— 字的笔画糊在一起就是一片方块。
+#
+# 所以：整帧照旧渲染（背景/立绘/文本框都是真实排版），**缩到 target 之后**
+# 再把名字/台词按缩略图自己的可读字号重画一遍。只给 compact 小图用；舞台
+# 预览窗口和卡片整宽图仍是"原汁原味"的引擎排版（那里的字本来就看得清）。
+#
+# 第二版（同一天，真机上验出来）：**先不透明铺平条带 + 名条，再画字**。
+# 第一版只铺条带、alpha=245，结果 ① 缩放残留的原文透出"鬼影"；② 名条
+# （`gui.name_ypos = -58` 的项目里它在文本框上方）没盖，原名字还在、重画的
+# 名字又画在它下面 —— 像写了两个名字。现在的做法见 `draw_readable_say`。
+
+#: 缩略图上名字 / 台词的**最小可读字号**（像素）。
+#: 少量字的名称至少 11px、整句台词至少 9px，再小就回到"方块"了。
+MIN_READABLE_PX = {'name': 11, 'dialogue': 9}
+
+#: 字号 / 图宽的比例：288 宽的小图上名字 ≈12px、台词 ≈10px。
+#:
+#: 为什么用比例而不是定值：target 宽度由"控件宽 × 设备像素比"决定（夹在
+#: 480~1280），最后统一画到 288 的控件上。按比例算，480 宽 target 上画的
+#: 20px 字画到 288 上正好还是 12px —— 换机器/换缩放比例，看得清的程度一致。
+READABLE_PX_RATIO = {'name': 0.042, 'dialogue': 0.035}
+
+#: 字号上限：target 特别大或文本框特别矮时，别让字把条带撑爆。
+MAX_READABLE_PX = {'name': 40, 'dialogue': 34}
+
+#: 铺底色叠上去的不透明度 —— **全不透明**（2026-10-29 第二版）。
+#:
+#: 第一版用 245（想留一点文本框纹理），真机上被一眼看出两个毛病：
+#:   ① 缩放后残留的原文会透出来一层"鬼影"，和大字叠成两层；
+#:   ② 名条（`name_rect`）根本没盖 —— `gui.name_ypos = -58` 的项目里名条在
+#:      文本框**上方**，原名字还在、重画的名字又在下面画一个，像写了两个名字。
+#: 所以现在条带与名条**按各自区域的平均色不透明铺平**，原文字一个像素都不透。
+_READABLE_BASE_ALPHA = 255
+
+#: 名条**左右各留多少**内边距（× 名字字号）—— 名条长到包住字时用。
+#:
+#: 第三版（2026-10-29）：名条的底允许长得比引擎的原框更大。第一/二版把名字
+#: 字号夹在名条宽高里，真机上等于没修 —— sr_general 的名条在 1920×1080 下
+#: 257×80，缩到 576 target 只剩 77×24，"「凌跃捷」"5 个字形被压到 14px
+#: （画到 288 控件只剩 7px），汉字还是糊的。可这张小图本来就是**缩略图专用
+#: 重排**：位置/颜色照引擎，名条的底跟着字长（见 `_fit_name_tag`）。
+_NAME_TAG_PAD_X_RATIO = 0.22
+
+#: 名条**上下各留多少**内边距（× 名字字号）。只留一点点：名条常贴在文本框
+#: 上方（`name_ypos = -58`），往下长得太多会压住台词第一行的字头。
+_NAME_TAG_PAD_Y_RATIO = 0.10
+
+#: 名字的最后底线字号：再小就回到"方块"了（与 `MIN_READABLE_PX['name']`
+#: 同一个量级；名条长到画面边缘还放不下时，宁可缩到这里也不能出画面）。
+_NAME_BOX_MIN_PX = 9
+
+#: 小于这个字号就**不描边**。为什么：1px 描边画在 14px 的汉字上等于把笔画
+#: 吃掉一半（实测名字会糊成一块灰），而铺底的平均色已经保证和字色有对比，
+#: 所以小字宁可不要描边。15px 以上描边只是让轮廓更清楚。
+_READABLE_STROKE_MIN_PX = 16
+
+#: 系统里的中文字体候选，**顺序即优先级**。微软雅黑最接近 Windows 上 Ren'Py
+#: 模板的观感，其次黑体/宋体；非 Windows 给几个常见的 Noto / 文泉驿。
+_CJK_FONT_CANDIDATES = (
+    r'C:\Windows\Fonts\msyh.ttc',
+    r'C:\Windows\Fonts\msyhl.ttc',
+    r'C:\Windows\Fonts\simhei.ttf',
+    r'C:\Windows\Fonts\simsun.ttc',
+    '/System/Library/Fonts/PingFang.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+)
+
+
+@lru_cache(maxsize=1)
+def _cjk_font_path() -> str:
+    """
+    系统里能画中文的字体路径（找不到返回空串）。
+
+    为什么需要单独找：Pillow 自带的 `ImageFont.load_default()` **没有汉字**，
+    字号又只有 9~20px，落到它上面中文全变方块 —— 那正是用户报的现象。
+    """
+    for path in _CJK_FONT_CANDIDATES:
+        try:
+            if Path(path).is_file():
+                return str(path)
+        except OSError as e:                  # 权限/坏链接：换下一个候选
+            swallow('stage_render.cjk_font', e)
+    return ''
+
+
+def _truetype(path: str, size: int, bold: bool = False,
+              italic: bool = False):
+    """只尝试**这一支**字体（含同目录的 Bold/Italic 变体），不掺任何回退。"""
+    if not path or not _PIL_OK:
+        return None
+    want = max(1, int(size))
+    chosen = _font_variant(str(path), bold, italic)
+    for cand in (chosen, str(path)):
+        try:
+            return ImageFont.truetype(str(cand), want)
+        except (OSError, ValueError) as e:    # 坏字体/权限：换下一个候选
+            swallow('stage_render.readable_font', e)
+    return None
+
+
+@lru_cache(maxsize=64)
+def _load_readable_font(path: str, size: int, bold: bool = False,
+                        italic: bool = False):
+    """
+    缩略图重画专用字体加载器：**绝不**悄悄落到 Pillow 默认字体。
+
+    与 `_load_font` 的区别：那个给 1920×1080 的整帧用（字号 20~45px，默认
+    字体的缺憾还能看出轮廓）；缩略图只有 9~20px，默认字体连中文都没有，
+    所以这里宁可换成系统的中文字体，也不画方块。
+    """
+    if not _PIL_OK:
+        return None
+    want = max(1, int(size))
+    font = _truetype(path, want, bold, italic)
+    if font is not None:
+        return font
+    cjk = _cjk_font_path()
+    if cjk:
+        font = _truetype(cjk, want, bold, italic)
+        if font is not None:
+            return font
+        if bold and Path(cjk).name.lower() == 'msyh.ttc':
+            # 雅黑有独立的粗体文件；`-Bold` 变体规则找不到它（文件名不同）
+            font = _truetype(str(Path(cjk).with_name('msyhbd.ttc')), want)
+            if font is not None:
+                return font
+    # 连一个中文字体都没有（非 Windows 的 CI）：至少别抛异常。
+    try:
+        return ImageFont.load_default(size=want)
+    except TypeError:                         # Pillow < 9.2 没有 size 参数
+        return ImageFont.load_default()
+
+
+#: 文本里有没有汉字（只关心"要不要挑一支能画中文的字体"）。
+_CJK_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
+
+
+def _text_has_cjk(text) -> bool:
+    """这段文字里有没有汉字（没有就不用操心字体缺中文）。"""
+    return bool(_CJK_RE.search(str(text or '')))
+
+
+@lru_cache(maxsize=16)
+def _font_covers_cjk(path: str) -> bool:
+    """
+    这支字体到底画不画得出汉字。
+
+    为什么需要：项目里写着 `gui.text_font = "DejaVuSans.ttf"`（Ren'Py 模板的
+    默认值，SDK 里能摸到）时，字体**不算缺失**、但根本没有汉字 —— Pillow 会画
+    成一个个 notdef 方块，正是用户说的"方块"。缩略图只有 288 宽，宁可换成
+    系统的雅黑/黑体，也不能把中文画成方块（整帧预览/导出仍用项目字体）。
+    """
+    font = _truetype(path, 18)
+    if font is None:
+        return False
+    try:
+        # 缺字时 Pillow 画 .notdef；拿几乎不可能被任何字体定义的 U+FFFF 当参照。
+        notdef = bytes(font.getmask('\uffff'))
+        for ch in ('中', '一', '说'):
+            if bytes(font.getmask(ch)) != notdef:
+                return True
+        return False
+    except Exception as e:                    # noqa: BLE001 - 查不出来就当能画
+        swallow('stage_render.glyph_probe', e)
+        return True
+
+
+def _pick_readable_font_path(profile, speaker: str, display: str,
+                            kind: str, text: str) -> tuple:
+    """
+    缩略图这次该用哪支字体 → `(路径, 是否换成了系统中文字体)`。
+
+    项目字体能画中文就用它（字形与引擎一致）；能开但画不了中文时，返回空串
+    让 `_load_readable_font` 走系统中文字体 —— 字号已经够小了，再画方块就
+    等于没做这次修复。
+    """
+    path = _font_path_for(profile, speaker, display, kind)
+    if not path or not _text_has_cjk(text):
+        return path, False
+    if _font_covers_cjk(path):
+        return path, False
+    return '', True
+
+
+def _readable_px(kind: str, width: int, strip_h: int) -> int:
+    """缩略图上某种文字的字号（像素）：按比例算，夹在 [最小可读, 最大] 之间。"""
+    low = int(MIN_READABLE_PX[kind])
+    high = int(MAX_READABLE_PX[kind])
+    want = int(round(float(width) * float(READABLE_PX_RATIO[kind])))
+    want = max(low, min(high, want))
+    if strip_h > 0:
+        # 条带本身很矮时（高 DPI 下 target 可能只有几十像素高的对话区），
+        # 字再大只会糊出条带外；按条带高度再封一次顶。
+        want = min(want, max(low, int(round(float(strip_h) * 0.5))))
+    return max(1, want)
+
+
+def _scaled_rect(rect, sx: float, sy: float) -> tuple:
+    """整帧坐标 → 缩略图坐标（`RenderResult` 里的矩形都按原分辨率给）。"""
+    try:
+        x, y, w, h = (float(v) for v in list(rect)[:4])
+    except (TypeError, ValueError):
+        return (0, 0, 0, 0)
+    return (int(round(x * sx)), int(round(y * sy)),
+            int(round(w * sx)), int(round(h * sy)))
+
+
+def _clamp_rect(rect, width: int, height: int) -> tuple:
+    """把矩形夹进图里（换算后可能因为四舍五入比图宽 1px）。"""
+    x, y, w, h = rect
+    x = max(0, min(max(0, int(width) - 1), int(x)))
+    y = max(0, min(max(0, int(height) - 1), int(y)))
+    w = max(0, min(int(w), int(width) - x))
+    h = max(0, min(int(h), int(height) - y))
+    return (x, y, w, h)
+
+
+def _avg_rgb(img, rect) -> tuple:
+    """条带的平均色（缩到 1×1 采样：一行代码，不用引 ImageStat）。"""
+    try:
+        crop = img.crop((rect[0], rect[1], rect[0] + rect[2],
+                         rect[1] + rect[3]))
+        if crop.width <= 0 or crop.height <= 0:
+            return (0, 0, 0)
+        r, g, b = crop.convert('RGB').resize(
+            (1, 1), Image.Resampling.BOX).getpixel((0, 0))
+        return (int(r), int(g), int(b))
+    except Exception as e:                    # noqa: BLE001 - 采样失败别炸预览
+        swallow('stage_render.readable_avg_color', e)
+        return (0, 0, 0)
+
+
+def _luma(rgb) -> float:
+    """亮度（BT.601 权重，够判"深色/浅色"就行）。"""
+    return 0.299 * float(rgb[0]) + 0.587 * float(rgb[1]) + \
+        0.114 * float(rgb[2])
+
+
+def _readable_base_rgb(img, rect, text_rgba) -> tuple:
+    """
+    条带底色 = 缩略图上条带的平均色；和字色对比不够时往黑/白拉开一段。
+
+    为什么不能直接用平均色：文本框可能是浅色主题（白底黑字）。白字铺在
+    白底上等于没画。这里只调**亮度**、不换色相 —— 颜色来自项目自己的
+    文本框，不是编辑器主题。
+    """
+    base = _avg_rgb(img, rect)
+    text_luma = _luma(text_rgba[:3])
+    if abs(_luma(base) - text_luma) >= 96:     # 已经够对比：保留原色
+        return base
+    if text_luma >= 128:                       # 浅色字 → 压暗底
+        return tuple(max(0, int(round(v * 0.22))) for v in base)
+    return tuple(int(round(v + (255 - v) * 0.78)) for v in base)  # 深色字 → 提亮底
+
+
+def _attr(obj, name: str, default=''):
+    """宽厚的属性读取：profile / style 可能是假的（测试桩），别因此炸缩略图。"""
+    try:
+        value = getattr(obj, name, default)
+        return default if value is None else value
+    except Exception as e:                    # noqa: BLE001 - 属性写坏了不该拖垮画面
+        swallow('stage_render.readable_attr', e)
+        return default
+
+
+def _cover_rect(out, rect, rgb) -> None:
+    """
+    把一个矩形铺成**不透明**的平均色（缩略图铺底专用）。
+
+    为什么必须不透明：`img` 是按 LANCZOS 缩下来的整帧，原文本框里的台词会以
+    "淡一层的小字鬼影"残留在这个区域里；只要底不是全不透明，它就会和新画的
+    大字叠在一起（用户看到的是"字有重影"）。铺平之后这个区域只剩新字。
+    """
+    if rect[2] <= 0 or rect[3] <= 0:
+        return
+    patch = Image.new('RGBA', (int(rect[2]), int(rect[3])),
+                      (int(rgb[0]), int(rgb[1]), int(rgb[2]),
+                       _READABLE_BASE_ALPHA))
+    try:
+        out.alpha_composite(patch, (int(rect[0]), int(rect[1])))
+    except Exception as e:                    # noqa: BLE001 - 铺底失败别炸预览
+        swallow('stage_render.readable_base', e)
+
+
+def _ink_box(draw, pos, text: str, font, stroke: int = 1) -> tuple:
+    """
+    这段字实际占的 `(x, y, w, h)`（含描边）—— 给测试断言"没出框"用。
+
+    为什么不用 `draw.textlength`：那个只给宽度，而"名字冒出小标签"是高度问题。
+    `textbbox` 拿的是墨迹边界（含描边）；老 Pillow 没有它就退回按字体度量估。
+    """
+    try:
+        box = draw.textbbox((int(pos[0]), int(pos[1])), text, font=font,
+                            stroke_width=int(stroke), anchor='la')
+        if box and box[2] > box[0] and box[3] > box[1]:
+            return (int(box[0]), int(box[1]),
+                    int(box[2] - box[0]), int(box[3] - box[1]))
+    except Exception as e:                    # noqa: BLE001 - 老 Pillow：按度量估
+        swallow('stage_render.readable_textbbox', e)
+    tw = int(round(_measure(draw, text, font)))
+    ascent, descent = font.getmetrics()
+    return (int(pos[0]), int(pos[1]), max(1, tw),
+            max(1, int(ascent + descent)))
+
+
+def _readable_stroke(px: int) -> int:
+    """这个字号该不该描边（见 `_READABLE_STROKE_MIN_PX` 的说明）。"""
+    return 1 if int(px) >= _READABLE_STROKE_MIN_PX else 0
+
+
+def _draw_name_in_box(draw, box, text: str, font_path: str, px: int,
+                      color, outline) -> tuple:
+    """
+    把名字画在**名条矩形里面** → `(墨迹 box, 实际字号, 是否截断)`。
+
+    三件事一起保证"名字不会写了两遍/冒出标签"：
+      · 调用方先按可读字号把名条**长到包住字**（`_fit_name_tag`），到这里时
+        `box` 已经是"装得下这个名字"的尺寸；
+      · 字还是太宽就**逐级缩字号**（到 9px 为止），不是硬截断 —— 名字少一半
+        比小一号更糟；
+      · 实在放不下（超长名字 / 名条已经顶到画面右边缘）才末尾加「…」，并且
+        最后把落点夹回矩形里。
+    """
+    x, y, w, h = (int(v) for v in box)
+    if w <= 0 or h <= 0:
+        return None, 0, False
+    px = max(1, int(px))
+    avail = max(4, w - 4)
+    font = _load_readable_font(font_path, px)
+    while font is not None and px > _NAME_BOX_MIN_PX and \
+            _measure(draw, text, font) > avail:
+        px -= 1
+        font = _load_readable_font(font_path, px)
+    if font is None:
+        return None, 0, False
+    shown = text
+    clipped = False
+    if _measure(draw, shown, font) > avail:
+        clipped = True
+        while shown and _measure(draw, shown + '…', font) > avail:
+            shown = shown[:-1]
+        shown = (shown.rstrip() + '…') if shown else '…'
+    ascent, descent = font.getmetrics()
+    line_h = max(1, int(ascent + descent))
+    text_w = int(round(_measure(draw, shown, font)))
+    tx = x + max(0, (w - text_w) // 2)
+    ty = y + max(0, (h - line_h) // 2)
+    tx = max(x, min(x + w - text_w, tx))
+    ty = max(y, min(y + h - line_h, ty))
+    stroke = _readable_stroke(px)
+    draw.text((tx, ty), shown, font=font, fill=color, stroke_width=stroke,
+              stroke_fill=outline, anchor='la')
+    return _ink_box(draw, (tx, ty), shown, font, stroke), int(px), clipped
+
+
+def _fit_name_tag(draw, box, text: str, font_path: str, px: int,
+                  size) -> tuple:
+    """
+    名条在缩略图上**长到包住可读字号的名字** → `((x, y, w, h), 字号)`。
+
+    为什么不能直接把名字塞进引擎的名条框：那张框是 1920×1080 上的尺寸，缩到
+    576 的 target 后常常只剩 77×24（真机 sr_general），可读字号 24px 放不进去，
+    名字就只能被压到 14px —— 画到 288 的控件上只有 7px，汉字照样糊成方块。
+    小图是"缩略图专用重排"，所以这里**保留名条的位置/颜色，让底跟着字长**：
+
+      · 从左/顶**向右/下**长到 `字宽 + 左右 padding` / `行高 + 上下 padding`；
+      · 宽高只增不减（返回的矩形**一定**盖住原 `name_box`，铺底才盖得干净）；
+      · 一路长到画面右边缘（或底边）还放不下，才逐级缩字号，下限
+        `_NAME_BOX_MIN_PX` —— 名条和名字都不许出画面。
+
+    到下限仍放不下时返回"顶到画面边缘"的矩形，由 `_draw_name_in_box` 负责
+    加「…」截断（超长名字才可能走到这里）。
+    """
+    x, y, w, h = (int(v) for v in box)
+    avail_w = max(1, int(size[0]) - x)
+    avail_h = max(1, int(size[1]) - y)
+    px = max(_NAME_BOX_MIN_PX, int(px))
+    while True:
+        font = _load_readable_font(font_path, px)
+        if font is None:                       # 字体加载失败：按原框画（会截断）
+            return (x, y, w, h), px
+        text_w = int(math.ceil(_measure(draw, text, font)))
+        ascent, descent = font.getmetrics()
+        line_h = max(1, int(ascent + descent))
+        pad_x = max(2, int(round(float(px) * _NAME_TAG_PAD_X_RATIO)))
+        pad_y = max(1, int(round(float(px) * _NAME_TAG_PAD_Y_RATIO)))
+        want_w = max(w, text_w + 2 * pad_x)
+        want_h = max(h, line_h + 2 * pad_y)
+        tag_w = min(avail_w, want_w)
+        tag_h = min(avail_h, want_h)
+        if tag_w >= want_w and tag_h >= want_h:
+            return (x, y, tag_w, tag_h), px
+        if px <= _NAME_BOX_MIN_PX:             # 到底线了：顶边+截断
+            return (x, y, tag_w, tag_h), px
+        px -= 1
+
+
+def _draw_name_in_strip(draw, strip, pad: int, right: int, bottom: int,
+                        text: str, font_path: str, px: int,
+                        color, outline) -> tuple:
+    """
+    没有可用名条矩形时的退路：名字画在**条带内第一行**（可借满整条宽度）。
+
+    这是第一版的行为，只在"老项目 / 项目没写名条矩形 / 名条矩形退化"时才走；
+    正常有 `name_rect` 的项目一律由 `_fit_name_tag` + `_draw_name_in_box`
+    画进（长到包住字的）小标签里。
+    """
+    font = _load_readable_font(font_path, px)
+    if font is None:
+        return None
+    ascent, descent = font.getmetrics()
+    line_h = max(1, int(ascent + descent))
+    x = strip[0] + pad
+    y = max(strip[1] + pad, min(bottom - line_h, strip[1] + pad))
+    shown = text
+    max_w = max(8, right - x)
+    if _measure(draw, shown, font) > max_w:
+        while shown and _measure(draw, shown + '…', font) > max_w:
+            shown = shown[:-1]
+        shown = (shown.rstrip() + '…') if shown else '…'
+    stroke = _readable_stroke(px)
+    draw.text((x, y), shown, font=font, fill=color, stroke_width=stroke,
+              stroke_fill=outline, anchor='la')
+    return _ink_box(draw, (x, y), shown, font, stroke)
+
+
+def _font_path_for(profile, speaker: str, display: str, kind: str) -> str:
+    """这一句/这个名条实际用哪支字体（与 `_draw_say` 同一个口径）；拿不到就空串。"""
+    try:
+        font_for = getattr(profile, 'font_for', None)
+        if callable(font_for):
+            got = font_for(speaker, display, kind)
+            if isinstance(got, (tuple, list)) and got:
+                return str(got[0] or '')
+            if isinstance(got, str):
+                return got
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.readable_font_for', e)
+    return ''
+
+
+def _readable_payload(frame, profile):
+    """
+    这一拍要重画的 `(名字, 台词, 角色样式)`。
+
+    前后缀 / 谁在说话的口径**照抄 `_draw_say`**：缩略图可以小，但不能
+    "卡片上是这个名字、缩略图上写另一个"。
+    """
+    speaker = str(_attr(frame, 'speaker', '') or '')
+    display = str(_attr(frame, 'display_speaker', '') or '')
+    style = None
+    try:
+        character_for = getattr(profile, 'character_for', None)
+        if callable(character_for):
+            style = character_for(speaker, display)
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.readable_character', e)
+    who = str(_attr(frame, 'display_speaker', '') or '')
+    if who:
+        who = (_attr(style, 'who_prefix', '') or '') + who + \
+            (_attr(style, 'who_suffix', '') or '')
+    text = str(_attr(frame, 'text', '') or '')
+    if style is not None:
+        prefix = str(_attr(style, 'what_prefix', '') or '')
+        suffix = str(_attr(style, 'what_suffix', '') or '')
+        if prefix and not text.startswith(prefix):
+            text = prefix + text
+        if suffix and not text.endswith(suffix):
+            text = text + suffix
+    return who, text, style
+
+
+def _readable_outline(profile, kind: str) -> tuple:
+    """描边颜色：项目自己的 `*_text_outlines` 优先；没有就用黑色（模板默认）。"""
+    try:
+        attr = 'name_text_outlines' if kind == 'name' else \
+            'dialogue_text_outlines'
+        outlines = getattr(profile, attr, None)
+        if outlines:
+            first = outlines[0]
+            value = first[1] if len(first) > 1 else ''
+            if isinstance(value, str):
+                return _color(value)
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.readable_outline', e)
+    return (0, 0, 0, 255)
+
+
+def _hex_color(rgba) -> str:
+    """RGBA → `#rrggbb`（`_draw_lines` 的 outline 只认字符串颜色）。"""
+    return '#%02x%02x%02x' % (int(rgba[0]) & 255, int(rgba[1]) & 255,
+                              int(rgba[2]) & 255)
+
+
+class _RectSink:
+    """
+    接住 `_draw_lines` 会写回的 `text_rect`。
+
+    缩略图重画只是"在缩小后的图上补一层字"，不改变整帧的排版结果
+    （`RenderResult.text_rect` 描述的是 1920×1080 那一版），所以给它一个
+    一次性对象接住，而不是把原结果改脏。
+    """
+
+    __slots__ = ('text_rect',)
+
+    def __init__(self):
+        self.text_rect = (0, 0, 0, 0)
+
+
+def draw_readable_say(img, result, frame, profile=None):
+    """
+    在**已经缩到缩略图尺寸**的舞台图上，按可读字号把名字 / 台词重画一遍。
+
+    参数：
+      · `img`：缩小后的 RGBA 图。**不改它**，返回一张新的（没动手时返回原对象）；
+      · `result`：整帧的 `RenderResult` —— 用 `textbox_rect` / `name_rect` /
+        `text_rect` 按 `img.width / result.width` 换算位置；
+      · `frame`：`StageFrame`（名字、台词、谁在说话）；
+      · `profile`：`GuiProfile`（颜色 / 字体 / 前后缀）。传 None 也能画
+        （默认白字 + 系统中文字体），只是不知道项目自己的排版。
+
+    返回 `(img, info)`。`info` 是这次实际用了多少号字（`name_px` /
+    `dialogue_px`）、几行（`name_lines` / `dialogue_lines`）、有没有截断
+    （`ellipsis`）、有没有因为项目字体画不了汉字而换成系统中文字体
+    （`font_fallback`），测试直接断言它，不必从像素反推。
+
+    2026-10-29 第二版（真机上验出来的两个毛病）：铺底改成**条带 + 名条各自
+    平均色、不透明**盖平 —— 原文字一个像素都不透；名条在文本框上方时台词从
+    条带顶部起、不再被名字往下挤。
+
+    2026-10-29 第三版：**名条的底跟着字长**。第二版把名字塞进引擎名条框
+    （`name_rect` 缩到 576 target 只剩 77×24），"「凌跃捷」"被压到 14px ——
+    真机 sr_general 上等于没修。现在先用 `_readable_px('name', …)` 定字号，
+    再由 `_fit_name_tag` 把名条的底从左/顶向右/下长到包住字；只有长到画面
+    边缘还放不下才逐级缩字号（下限 9px），绝不画出画面。位置/颜色/前后缀
+    仍照引擎，这只是一张"缩略图专用重排"的小图。
+
+    `info` 里供测试/调试用的键：
+
+      · `strip` / `name_box`：本次重画的两个矩形（图坐标；名条无效时为 0；
+        `name_box` 是引擎名条框换算到图上的位置，没长过）；
+      · `name_tag`：**实际铺底并画字**的名条矩形 —— 从 `name_box` 的左/顶
+        向右/下长到包住名字后的尺寸（名条无效时为 0）；
+      · `strip_base` / `name_base`：铺底用的平均色（名条无效时 `name_base`
+        为 None）；
+      · `covered`：**所有**被不透明铺平的矩形（条带在前、名条 `name_tag`
+        在后）；
+      · `name_text_box` / `dialogue_text_box`：新名字 / 新台词的**实际墨迹**
+        范围（含描边，`(x, y, w, h)`）—— 判"字没画到框外 / 没有旧字残留"。
+
+    以下情况**原样返回、逐像素不变**：没有 say 窗口（`shows_window=False`）、
+    文本框矩形无效、没有名字也没有台词。
+    """
+    if img is None or result is None or frame is None or not _PIL_OK:
+        return img, {'drawn': False, 'reason': '没有可画的图 / 帧'}
+    if not getattr(frame, 'shows_window', False):
+        return img, {'drawn': False, 'reason': '这一拍没有 say 窗口'}
+    src_w = int(getattr(result, 'width', 0) or 0)
+    src_h = int(getattr(result, 'height', 0) or 0)
+    if src_w <= 0 or src_h <= 0:
+        return img, {'drawn': False, 'reason': 'RenderResult 没有分辨率'}
+    sx = float(img.width) / float(src_w)
+    sy = float(img.height) / float(src_h)
+    strip = _clamp_rect(
+        _scaled_rect(getattr(result, 'textbox_rect', (0, 0, 0, 0)), sx, sy),
+        img.width, img.height)
+    if strip[2] < 8 or strip[3] < 8:
+        return img, {'drawn': False, 'reason': '没有可用的文本框矩形'}
+
+    who_text, dlg_text, style = _readable_payload(frame, profile)
+    if not who_text and not dlg_text:
+        return img, {'drawn': False, 'reason': '这一拍没有名字 / 台词'}
+
+    speaker = str(_attr(frame, 'speaker', '') or '')
+    display = str(_attr(frame, 'display_speaker', '') or '')
+    dlg_color = _color(_attr(style, 'what_color', '') or
+                       _attr(profile, 'text_color', '') or '#ffffff')
+    name_color = _color(_attr(style, 'who_color', '') or
+                        _attr(profile, 'name_text_color', '') or '#ffffff')
+
+    # 名条矩形：`name_rect` 可能整个贴在本框**上方**（`gui.name_ypos = -58`），
+    # 所以铺底不能只铺条带 —— 不盖名条，原名字会和重画的名字叠成两个。
+    name_raw = _scaled_rect(getattr(result, 'name_rect', (0, 0, 0, 0)), sx, sy)
+    name_box = _clamp_rect(name_raw, img.width, img.height)
+    name_ok = bool(who_text) and name_box[2] >= 8 and name_box[3] >= 8 \
+        and name_raw[0] < img.width and name_raw[1] < img.height
+
+    out = img.convert('RGBA').copy()
+    draw = ImageDraw.Draw(out)
+    # 名字先按**可读字号**算，再让名条的底长到包住它（第三版，见
+    # `_fit_name_tag`）：引擎的名条框只是"位置 / 颜色"的参照，不是字号的笼子
+    # —— 真机上 77px 宽的小标签会把「凌跃捷」压到 14px，画到 288 控件上只剩
+    # 7px，等于没修。
+    name_px = _readable_px('name', out.width, strip[3])
+    name_path, name_fell_back = '', False
+    if who_text:
+        name_path, name_fell_back = _pick_readable_font_path(
+            profile, speaker, display, 'who', who_text)
+    name_tag = (0, 0, 0, 0)
+    if name_ok:
+        name_tag, name_px = _fit_name_tag(
+            draw, name_box, who_text, name_path, name_px, out.size)
+    # ① 铺底：条带 / 名条各自用**自己区域的平均色**、**不透明**盖平。
+    #    平均色必须在画任何东西之前采（要反映项目原本的底色）；名条后盖，
+    #    这样名条与文本框重叠的那条边仍是"有颜色的小标签"，不会被条带吃掉。
+    #    名条的底按**加宽/加高后**的 `name_tag` 铺（它一定盖住原 `name_box`），
+    #    否则长出来的那半截没有底色，字会压在原画面上。
+    strip_base = _readable_base_rgb(out, strip, dlg_color)
+    name_base = _readable_base_rgb(
+        out, name_box, name_color) if name_ok else None
+    _cover_rect(out, strip, strip_base)
+    if name_base is not None:
+        _cover_rect(out, name_tag, name_base)
+    pad = max(2, int(round(float(strip[3]) * 0.05)))
+    right = strip[0] + strip[2] - pad
+    bottom = strip[1] + strip[3] - pad
+    info = {'drawn': True, 'name_px': 0, 'dialogue_px': 0,
+            'name_lines': 0, 'dialogue_lines': 0, 'ellipsis': False,
+            'font_fallback': bool(name_fell_back), 'strip': tuple(strip),
+            'strip_base': tuple(strip_base), 'name_base': name_base,
+            'name_box': tuple(name_box) if name_ok else (0, 0, 0, 0),
+            'name_tag': tuple(name_tag) if name_ok else (0, 0, 0, 0),
+            'name_text_box': (0, 0, 0, 0),
+            'dialogue_text_box': (0, 0, 0, 0),
+            'covered': [tuple(strip)] + ([tuple(name_tag)] if name_ok else [])}
+
+    # ② 名字
+    #    · 有名条矩形：画进**长到包住字**的名条 `name_tag` 里（可读字号）；
+    #      名条在条带里时台词接在加长后的名条底下，名条在条带**上方**时
+    #      不推台词 —— 那样会把整块台词往下挤；
+    #    · 没有名条矩形（老项目 / 没名条图 / 字体加载失败）：退回"条带内
+    #      第一行"的画法。
+    name_bottom = strip[1] + pad
+    if who_text:
+        name_outline = _readable_outline(profile, 'name')
+        ink, used_px, clipped = None, int(name_px), False
+        if name_ok:
+            ink, used_px, clipped = _draw_name_in_box(
+                draw, name_tag, who_text, name_path, name_px, name_color,
+                name_outline)
+            if ink is not None and name_tag[1] >= strip[1]:
+                # 名条落在条带里（模板的写法）：台词接在名条下面。
+                # 名条在条带**上方**时不推台词 —— 那样会把整块台词往下挤。
+                name_bottom = max(name_bottom,
+                                  name_tag[1] + name_tag[3] + max(1, pad // 2))
+        if ink is None:                        # 没有名条矩形 / 字体加载失败
+            used_px = int(name_px)
+            ink = _draw_name_in_strip(
+                draw, strip, pad, right, bottom, who_text, name_path,
+                used_px, name_color, name_outline)
+            if ink is not None:
+                name_bottom = max(name_bottom,
+                                  ink[1] + ink[3] + max(1, pad // 2))
+        if ink is not None:
+            info['name_px'] = int(used_px)
+            info['name_lines'] = 1
+            info['name_text_box'] = tuple(ink)
+            info['ellipsis'] = bool(info['ellipsis'] or clipped)
+
+    # ③ 台词：在条带内按可读字号重排（中文逐字断行），放不下就末尾加 …
+    if dlg_text:
+        dlg_px = _readable_px('dialogue', out.width, strip[3])
+        dlg_rect = _clamp_rect(
+            _scaled_rect(getattr(result, 'text_rect', (0, 0, 0, 0)), sx, sy),
+            out.width, out.height)
+        dlg_x = strip[0] + pad
+        if dlg_rect[2] > 0:
+            # 起点照引擎的 dialogue_xpos（保留它给立绘留的左边距）；
+            # 换行宽度**用满文本框条带**（而不是引擎的 dialogue_width）：
+            # 288 宽的小图上 dialogue_width 往往只剩不到 170px，一行十来个字
+            # 就没了；既然这段文字本来就是"缩略图专用重排"，宽度就按条带给。
+            dlg_x = max(strip[0] + pad, min(right - 16, dlg_rect[0]))
+        dlg_w = max(16, right - dlg_x)
+        dlg_y = max(strip[1] + pad, name_bottom)
+        if dlg_rect[3] > 0 and dlg_rect[1] >= name_bottom - 2:
+            # 引擎排版里台词起点就在名条下面时照它来（保持"名上句下"）
+            dlg_y = max(dlg_y, dlg_rect[1])
+        engine_px = float(_attr(profile, 'dialogue_text_size', 0.0) or 0.0) \
+            or 33.0
+        dlg_align = 0.0
+        try:
+            dlg_align = float(
+                (getattr(profile, 'values', {}) or {}).get(
+                    'dialogue_text_xalign') or 0)
+        except (TypeError, ValueError, AttributeError) as e:
+            swallow('stage_render.readable_align', e)
+        # `{size=…}` 这类标签里的字号是**引擎尺度**的，按 target 的缩放比
+        # 一起缩下来，否则一行里会冒出一个 45px 的巨字把条带撑爆。
+        runs = text_runs(dlg_text, float(dlg_px), dlg_color)
+        ratio = float(dlg_px) / max(1.0, engine_px)
+        for _text, run_style in runs:
+            if abs(float(run_style.size) - float(dlg_px)) > 0.01:
+                run_style.size = max(
+                    6.0, min(float(MAX_READABLE_PX['dialogue']) * 1.5,
+                             float(run_style.size) * ratio))
+        dlg_font_path, dlg_fell_back = _pick_readable_font_path(
+            profile, speaker, display, 'what', dlg_text)
+        info['font_fallback'] = bool(info['font_fallback'] or dlg_fell_back)
+        font_cache = {}
+
+        def _run_font(run_style):
+            key = (int(round(run_style.size)), bool(run_style.bold),
+                   bool(run_style.italic))
+            if key not in font_cache:
+                font_cache[key] = _load_readable_font(
+                    dlg_font_path, key[0], key[1], key[2])
+            return font_cache[key]
+
+        base_font = _load_readable_font(dlg_font_path, int(dlg_px))
+        if runs and base_font is not None:
+            ascent, descent = base_font.getmetrics()
+            line_h = max(1, int(ascent + descent))
+            avail = max(1, bottom - dlg_y)
+            max_lines = max(1, int(avail // line_h))
+            lines = _wrap(_units(runs, _run_font), float(dlg_w), draw)
+            clipped = False
+            if len(lines) > max_lines:
+                clipped = True
+                lines = lines[:max_lines]
+                last = lines[-1]
+                last_font = last[-1][1] if last else base_font
+                last_style = last[-1][2] if last else _TextStyle(
+                    color=dlg_color, size=float(dlg_px))
+                ell = _measure(draw, '…', last_font)
+                while last and sum(_measure(draw, t, f)
+                                   for t, f, _s in last) + ell > dlg_w:
+                    last.pop()
+                if ell <= dlg_w:
+                    last.append(('…', last_font, last_style))
+            if any(line for line in lines):
+                sink = _RectSink()
+                stroke_w = _readable_stroke(dlg_px)
+                outline = ([(stroke_w,
+                             _hex_color(_readable_outline(profile,
+                                                          'dialogue')),
+                             0, 0)] if stroke_w else [])
+                _draw_lines(
+                    out, lines, float(dlg_x), float(dlg_y), float(dlg_w),
+                    dlg_align, 0.0, outline, sink, float(dlg_px))
+                info['dialogue_px'] = int(dlg_px)
+                info['dialogue_lines'] = len(lines)
+                # 别把名字那边的「…」盖掉：名字与台词共用这一个标志位。
+                info['ellipsis'] = bool(info['ellipsis'] or clipped)
+                # 新字实际占的排版框（含行高）—— 测试拿它判"条带里除了新字
+                # 没有别的像素被改动"，也判"原文字已被铺底盖掉"。
+                info['dialogue_text_box'] = tuple(sink.text_rect)
+    return out, info
+
+
+def scale_result_image(result, target):
+    """
+    `RenderResult` → 缩到 `target` 的 RGBA 图（PIL 侧）。
+
+    为什么缩放在这里而不是 Qt 侧：compact 缩略图要**先缩放、再重画** ——
+    可读字号必须按最终尺寸算（见 `draw_readable_say`）。整宽模式仍走
+    `stage_preview.result_to_qimage` 那条老路，行为不变。
+    """
+    img = getattr(result, 'image', None) if result is not None else None
+    if img is None or not _PIL_OK:
+        return None
+    try:
+        img = img.convert('RGBA')
+        tw, th = int(target[0]), int(target[1])
+        if tw > 0 and th > 0 and img.size != (tw, th):
+            img = img.resize((tw, th), Image.Resampling.LANCZOS)
+        return img
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.scale_result_image', e)
+        return None
+
+
+# ----------------------------------------------------------------------
 #  入口
 # ----------------------------------------------------------------------
 
@@ -850,5 +1630,6 @@ def render_frame_to_png(frame, out_path, **kwargs) -> Optional[str]:
         return None
 
 
-__all__ = ['RenderResult', 'available', 'render_frame',
-           'render_frame_to_png', 'text_runs']
+__all__ = ['MAX_READABLE_PX', 'MIN_READABLE_PX', 'READABLE_PX_RATIO',
+           'RenderResult', 'available', 'draw_readable_say', 'render_frame',
+           'render_frame_to_png', 'scale_result_image', 'text_runs']
