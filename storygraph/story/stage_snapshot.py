@@ -174,6 +174,7 @@ def _apply_show_verb(item, beat, actors, state):
         # `show bg rooftop` 就是换背景
         if state['scene'] != image:
             state['scene'] = image
+        state['unknown'].discard('scene')
         return actors, changes
     key = image.split()[0]
     if state['layers'].get(key) != image:
@@ -210,6 +211,40 @@ def _apply_hide_verb(item, actors, state):
     return actors, changes
 
 
+def _initial_state(initial_state: Optional[dict]) -> dict:
+    """
+    快照的起始状态。
+
+    `initial_state=None`（默认）时与历史行为**逐字节一致**：
+    背景空 / 台上没人 / 没有图层 / 没有音乐 / 没有语音。
+
+    传了 `initial_state` 就是"接着上一章演"（跨章连续性用）：
+    值是上一章的出口状态，`unknown` 是里面**还不能确定**的元素集合
+    （例如上游有分支汇聚 —— 不知道玩家走的是哪条线）。
+    """
+    init = dict(initial_state or {})
+    unknown = set(init.get('unknown') or ())
+    actors = []
+    for item in init.get('actors') or ():
+        try:
+            image = str(item[0] or '')
+            at = str(item[1] or '') if len(item) > 1 else ''
+        except (TypeError, IndexError, KeyError):
+            continue
+        if image:
+            actors.append([image, at])
+    return {
+        'scene': str(init.get('scene') or ''),
+        'actors': actors,
+        'layers': {str(k): str(v)
+                   for k, v in (init.get('layers') or {}).items()},
+        'music': str(init.get('music') or ''),
+        'voice': str(init.get('voice') or ''),
+        #: 内部标记：这些元素的值"还不知道"，不是"空"。
+        'unknown': unknown,
+    }
+
+
 def _apply_audio(beat, state):
     """
     音乐 / 音效 / 语音：就地改 `state`，返回 `(changes, notes)`。
@@ -218,6 +253,10 @@ def _apply_audio(beat, state):
     """
     changes = []
     notes = []
+    # 音乐是单值通道：本拍只要**显式**写了 play / stop，它的值就重新已知
+    # （上游分支汇聚导致的"不知道"到这里被一个明确的动作替代了）。
+    if beat.music or (beat.music_action or '') == 'stop':
+        state['unknown'].discard('music')
     if beat.music:
         if (beat.music_action or 'play') == 'stop':
             if state['music']:
@@ -314,9 +353,16 @@ def _note_add_then_clear(changes, state):
                         '（源码顺序如此，快照与生成脚本一致）'})
 
 
-def stage_snapshots(beats: list) -> list:
+def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
     """
     逐 Beat 推导舞台状态 + 本拍变化。
+
+    `initial_state`（可选，跨章连续性用）：从上一章的出口状态接着演。
+    不传时与历史行为**逐字节一致**（全新舞台）。传了以后：
+      · 值照常参与推导；
+      · `state['unknown']` 里的元素是"还不知道"的（上游分支汇聚/循环），
+        本拍只要**显式**写到了它（`scene` / `play|stop music` 等）
+        就重新变回已知；没写到就继续"未知"，**绝不替它猜**。
 
     返回 [{line_id, seq, label, speaker, text, scene, actors, music, sound,
            voice, note, changes, display_changes, changed, state}, ...]
@@ -329,16 +375,7 @@ def stage_snapshots(beats: list) -> list:
                         其余是继承来的（标灰）
       · state           完整状态（供引擎导出复用）
     """
-    state = {
-        'scene': '',
-        'actors': [],        # [[image, at], ...]
-        # 非角色图层（cg / ui / movie…）：{tag: image}。它们不算"立绘"，
-        # 但**也是舞台变化**——只换 CG 的那一拍必须能被看出来，否则
-        # 快照/时间轴会显示"什么都没变"，而脚本明明切了图（假阴性）。
-        'layers': {},
-        'music': '',
-        'voice': '',
-    }
+    state = _initial_state(initial_state)
     out = []
 
     for beat in beats or []:
@@ -395,6 +432,9 @@ def stage_snapshots(beats: list) -> list:
                     actors = []
                     state['actors'] = actors
                     state['scene'] = image
+                    # `scene` 写明了背景，还清空了立绘 → 这两个元素重新已知
+                    state['unknown'].discard('scene')
+                    state['unknown'].discard('actors')
             elif verb == 'show':
                 for item in _pick('show', show_items, idx):
                     actors, _ch = _apply_show_verb(item, beat, actors, state)
@@ -454,9 +494,44 @@ def stage_snapshots(beats: list) -> list:
                 'music': state['music'],
                 'voice': state['voice'],
                 'condition': beat.condition or '',
+                # 只在"确实有不知道的元素"时出现 —— 默认路径（全新舞台）
+                # 的输出与历史**逐字节一致**，不惊动既有 golden。
+                **({'unknown': sorted(state['unknown'])}
+                   if state['unknown'] else {}),
             },
         })
 
+    return out
+
+
+#: 跨章状态要看的那几样（`stage_exit_state` 的输出键）。
+EXIT_STATE_KEYS = ('scene', 'actors', 'layers', 'music', 'voice')
+
+
+def stage_exit_state(beats: list, initial_state: Optional[dict] = None) -> dict:
+    """
+    **跑完这些拍之后**的舞台状态 + 哪些元素仍然未知（跨章连续性用）。
+
+    与 `stage_snapshots` 共用同一套推导（`initial_state` = 上一章的出口），
+    所以"预览/快照说这样"与"跨章判据说这样"不可能各说一套。
+
+    返回 `{scene, actors, layers, music, voice, unknown}`：
+      · `unknown` 是**集合**（不是JSON）：这些元素的值还不知道 ——
+        调用方必须把它们当"不判"，不能当空串；
+      · 没有拍时原样返回入口状态（空列表 → 空转）。
+    """
+    beats = list(beats or ())
+    rows = stage_snapshots(beats, initial_state=initial_state)
+    st = rows[-1]['state'] if rows else _initial_state(initial_state)
+    out = {}
+    for key in EXIT_STATE_KEYS:
+        if key == 'actors':
+            out[key] = [[str(a), str(at)] for a, at in (st.get(key) or ())]
+        elif key == 'layers':
+            out[key] = dict(st.get(key) or {})
+        else:
+            out[key] = str(st.get(key) or '')
+    out['unknown'] = set(st.get('unknown') or ())
     return out
 
 

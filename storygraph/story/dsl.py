@@ -37,8 +37,11 @@ from typing import Optional
 
 from storygraph.core.vocabulary import (
     ASSET_TYPE_ATTR,
+    AUDIO_PSEUDO_ACTION,
     AUDIO_TYPE_ATTR,
     NON_ACTOR_TAGS,
+    RENPY_KNOWN_HEADS,
+    statement_head_token,
 )
 
 from storygraph.core.safeguard import swallow
@@ -99,6 +102,44 @@ _AUDIO_PARAM_RE = re.compile(
     r'\b(loop|fadein|fadeout|fade|volume|channel|if_changed)\b')
 _STOP_WORDS = {'停止', '停', '关掉', 'stop', 'off', '无', '空'}
 
+# `（停止音乐）` / `（排队播放）` 这类**伪值**：动作写在曲名那一格里。
+# 词表本体在 `core.vocabulary`（表格下拉、Excel 候选表、这里必须同一份，
+# 否则“Excel 能选、卡片打出来却导成 play”）。
+_PSEUDO_AUDIO_WORDS = {w.strip('（）()'): v
+                       for w, v in AUDIO_PSEUDO_ACTION.items()}
+_PSEUDO_AUDIO_RE = re.compile(
+    r'^[（(](' + '|'.join(re.escape(w) for w in _PSEUDO_AUDIO_WORDS)
+    + r')[)）]\s*(.*)$')
+
+# 原生 stop 行直接写在音频格里（从 .rpy 复制过来）：
+# 以前它被当成曲名，导出成 `play music "stop music fadeout 1.0"` + TODO。
+_NATIVE_STOP_RE = re.compile(r'^stop\s+(music|sound)\b\s*(.*)$',
+                             re.IGNORECASE)
+
+
+def _params_only(tokens: list) -> str:
+    """
+    只挑参数（`fadeout 1.0` / `loop`），**忽略**其它词。
+
+    停止动作后面只允许参数；非参数词如果被糊成参数，会生成语法错的
+    `stop music bgm03`，比丢掉更糟。
+    """
+    params = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _AUDIO_PARAM_RE.match(tok):
+            params.append(tok)
+            if tok in ('fadein', 'fadeout', 'fade', 'volume', 'channel') \
+                    and i + 1 < len(tokens):
+                params.append(tokens[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        i += 1
+    return ' '.join(params)
+
 # 原生写法的头部关键字（直通后门）
 _NATIVE_HEADS = ('show', 'hide', 'scene', 'with', 'pause', 'window')
 
@@ -147,7 +188,7 @@ def split_ops(text: str) -> list:
 @dataclass
 class StageOp:
     """一条舞台指令。"""
-    verb: str = ''                 # show / hide / scene / with / pause / unknown
+    verb: str = ''                 # show / hide / scene / with / pause / comment / unknown
     native: bool = False           # True = 原生写法，直通不校验
     raw: str = ''                  # 原始文本（native 或 pause 用）
     target: str = ''               # 角色词 / 图像词
@@ -235,7 +276,15 @@ def parse_stage(text: str) -> ParsedStage:
     for chunk in split_ops(text):
         m = re.match(r'^\[([^\]]*)\]\s*(.*)$', chunk)
         if not m:
-            out.ops.append(_native_op(chunk))
+            if _looks_like_stage_note(chunk):
+                # 作者在舞台（高级）里写的备忘（没写 `#`）→ 当注释，补 `#`
+                # （判据极保守，见 `_looks_like_stage_note`；合法原生写法
+                # 与自定义语句一律还是直通代码）。
+                out.ops.append(StageOp(verb='comment', native=True,
+                                       raw='# ' + chunk.strip(),
+                                       source=chunk))
+            else:
+                out.ops.append(_native_op(chunk))
             continue
         word = (m.group(1) or '').strip()
         rest = (m.group(2) or '').strip()
@@ -259,6 +308,58 @@ def _native_op(chunk: str) -> StageOp:
     else:
         verb = 'raw'
     return StageOp(verb=verb, native=True, raw=chunk, source=chunk)
+
+
+#: 「舞台（高级）」里"像注释的裸文本"判据用到的**代码标点**：
+#: 带这些字符的行照旧按原生代码直通（自定义语句、表达式、带引号的台词都可能
+#: 带它们），绝不擅自改写成注释。
+#:
+#: `:` / `;` / `,` **不算代码标点**：舞台备忘里很常见
+#: （`bg1.2: 淡出`、`bg1.2, bgm13`），而"未知语句头 + 冒号/逗号"本来也不是
+#: 合法 Ren'Py 语句。代码里真正的硬信号是引号 / 括号 / 等号 / `$` / `[]`。
+_STAGE_NOTE_CODE_CHARS = frozenset('"\'()[]{}<>=`$@\\')
+
+#: `renpy.` / `config.` 这类命名空间前缀（`RENPY_KNOWN_HEADS` 里存的是带点前缀）
+_STAGE_NOTE_NAMESPACES = ('renpy.', 'config.', 'gui.', 'store.', 'persistent.')
+
+
+def _looks_like_stage_note(text: str) -> bool:
+    """
+    这行**像不像作者手写的舞台注释**（而不是舞台指令）？
+
+    背景（2026-10-28，用户）：舞台（高级）列里作者常常直接写备忘：
+
+        bg1.2 bgm13
+        白色转场
+        （淡出）
+
+    这种行**不是合法 Ren'Py 语句**：照旧直通会生成 `bg1.2 bgm13` 这种
+    坏脚本；补一个 `#` 则既是合法注释、又把作者写的字原样保留下来。
+
+    判据刻意**保守**（宁可继续当代码，也不误伤自定义语句）——四条都满足才算：
+
+      1. 不是以 `[` / `#` / `$` 开头（那是 DSL / 注释 / 顶层代码）；
+      2. 第一个词**不是**已知的 Ren'Py 语句头（`show` / `scene` / `pause` …）；
+      3. 整行**没有任何代码标点**（引号 / 括号 / 等号 / `$` / `[]`…；
+         `:` `;` `,` 不算 —— 舞台备忘里很常见）；
+      4. 不是空的。
+
+    于是 `mycue "x"`（带引号）、`$ x = 1`、`[显示] …`、`show ling happy`
+    都不会被当注释；而 `bg1.2（淡出）` 这种**全角**标点的备忘仍算注释。
+    """
+    chunk = str(text or '').strip()
+    if not chunk or chunk[0] in '[#$':
+        return False
+    head = statement_head_token(chunk)
+    if not head:
+        return False
+    if head in RENPY_KNOWN_HEADS or head.rstrip('.') in RENPY_KNOWN_HEADS:
+        return False
+    if head.startswith(_STAGE_NOTE_NAMESPACES):
+        return False
+    if any(ch in _STAGE_NOTE_CODE_CHARS for ch in chunk):
+        return False
+    return True
 
 
 def _build_stage_op(verb: str, rest: str, chunk: str) -> StageOp:
@@ -297,6 +398,24 @@ def parse_audio(text: str, channel: str) -> list:
     """
     ops = []
     for chunk in split_ops(text):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # 伪值（`（停止音乐）` / `（排队播放）`）：动作不在方括号里，
+        # 是与 Excel 下拉候选表同一套词。后面可以直接跟参数。
+        m_pseudo = _PSEUDO_AUDIO_RE.match(chunk)
+        if m_pseudo:
+            word, rest = m_pseudo.group(1), (m_pseudo.group(2) or '').strip()
+            action, ch = _PSEUDO_AUDIO_WORDS[word]
+            ops.append(_build_audio_op(ch or channel, rest, action, chunk))
+            continue
+        # 原生 stop 行（`stop music fadeout 1.0`）直接写在音频格里
+        m_native = _NATIVE_STOP_RE.match(chunk)
+        if m_native:
+            ops.append(_build_audio_op(m_native.group(1).lower(),
+                                       (m_native.group(2) or '').strip(),
+                                       'stop', chunk))
+            continue
         m = re.match(r'^\[([^\]]*)\]\s*(.*)$', chunk)
         verb = ''
         rest = chunk
@@ -329,10 +448,15 @@ def parse_audio(text: str, channel: str) -> list:
 
 def _build_audio_op(channel: str, rest: str, action: str, chunk: str) -> AudioOp:
     tokens = _tokens(rest)
+    if action == 'stop':
+        # 停止动作后面**只允许参数**（`fadeout 1.0`）。
+        # 从前第一个 token 被当曲名：`[停止音乐] fadeout 1.0` 的 fadeout
+        # 死在 name 里，导出成裸 `stop music`（2026-10-28 实测的数据丢失）。
+        return AudioOp(channel=channel, action='stop', name='',
+                       params=_params_only(tokens), source=chunk)
     if not tokens:
-        # `[停止音乐]` 这种把动作写在动词里的形式
-        if action == 'stop':
-            return AudioOp(channel=channel, action='stop', source=chunk)
+        # `[停止音乐]` 这种把动作写在动词里的形式已在上面处理；
+        # 到这里还没有名字 = 无法识别的指令（`[音乐]` 裸写）。
         return AudioOp(channel=channel, action='unknown', name=chunk,
                        source=chunk)
 

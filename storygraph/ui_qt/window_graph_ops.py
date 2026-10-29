@@ -3,20 +3,8 @@ storygraph.ui_qt.window_graph_ops.py
 ====================================
 `MainWindowQt` 的**剧情图那一半：结构分析 / 章节导入导出 / 布局存取 / 图级撤销。**
 
-为什么拆（P3-14，2026-10-05）
------------------------------
-`MainWindowQt` 原本是 3452 行 / 120 方法的上帝对象 —— `EditorSession`
-（已拆成 5 块）的另一半。它比那边更难拆，因为：
-
-  · 它是 **UI 层**：行为测试薄得多，而且要真起 Qt（`test_ui_qt.py`）；
-  · 方法之间靠 **Qt 信号**耦合，不像会话那样能按"主语是什么"干净切开。
-
-所以顺序是**先补网、再拆**：`tests/test_main_window_snapshot.py`
-（63 步操作序列 golden）先把外部可观察行为钉住，
-拆分期间它必须一直绿。
-
-**做成 mixin 而不是独立对象**：调用方（菜单、工具栏、信号、
-`open_editor`）一行都不用改 —— 这是**搬家**不是改契约。
+**为什么是 mixin、当初怎么拆的**：`docs/代码地图.md` §三·五 讲一次，
+不再在 6 个 `window_*.py` 里各抄一遍（从前这 22 行在 6 个文件里逐字重复）。
 
 与主类的隐式依赖
 ----------------
@@ -523,6 +511,21 @@ class GraphOpsMixin:
         """
         if not root:
             return None
+        # 演出专用版（2026-10-29）：**先补随包预设、再打开项目**。
+        # `storygraph.rules.json` 决定卡片上那几列下拉候选（角色/服装/表情），
+        # 布局决定剧情图摆在哪 —— 两者都是"项目里缺才补，有就一个字节都不动"
+        # （见 `storygraph.app.stage_edition.apply_presets`）。标准版走不到这里。
+        try:
+            from storygraph.app import engine_preview as _EP
+            if _EP.stage_edition():
+                from storygraph.app.stage_edition import apply_presets
+                _presets = apply_presets(root)
+                for _line in _presets.get('actions') or ():
+                    self._log('[预设] ' + _line)
+                for _line in _presets.get('errors') or ():
+                    self._log('[预设] ⚠ ' + _line)
+        except Exception as e:                  # noqa: BLE001 - 补预设失败不该挡打开
+            swallow('ui_qt.open_project.presets', e)
         self._project_root = Path(root)
         self._session.project_root = self._project_root
         self._loader.project_root = self._project_root

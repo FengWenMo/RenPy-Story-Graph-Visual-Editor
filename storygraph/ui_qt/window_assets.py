@@ -3,20 +3,8 @@ storygraph.ui_qt.window_assets.py
 =================================
 `MainWindowQt` 的**资产选择：图片 / 下拉候选（资源表经会话取，不自己读表）。**
 
-为什么拆（P3-14，2026-10-05）
------------------------------
-`MainWindowQt` 原本是 3452 行 / 120 方法的上帝对象 —— `EditorSession`
-（已拆成 5 块）的另一半。它比那边更难拆，因为：
-
-  · 它是 **UI 层**：行为测试薄得多，而且要真起 Qt（`test_ui_qt.py`）；
-  · 方法之间靠 **Qt 信号**耦合，不像会话那样能按"主语是什么"干净切开。
-
-所以顺序是**先补网、再拆**：`tests/test_main_window_snapshot.py`
-（63 步操作序列 golden）先把外部可观察行为钉住，
-拆分期间它必须一直绿。
-
-**做成 mixin 而不是独立对象**：调用方（菜单、工具栏、信号、
-`open_editor`）一行都不用改 —— 这是**搬家**不是改契约。
+**为什么是 mixin、当初怎么拆的**：`docs/代码地图.md` §三·五 讲一次，
+不再在 6 个 `window_*.py` 里各抄一遍（从前这 22 行在 6 个文件里逐字重复）。
 
 与主类的隐式依赖
 ----------------
@@ -151,13 +139,19 @@ class WindowAssetsMixin:
         把资源表里的候选灌进卡片的三格下拉（背景 / 音乐 / 语音）。
 
         没有资源表时清空候选（而不是留一堆过期值）。
+
+        音频两格**额外加动作伪值**（`（停止音乐）` / `（停止音效）`）：
+        与 Excel 候选表同一套词，但**不含「（排队播放）」**（用户拍板
+        2026-10-28：排队必须带曲名，单放伪值会导成 TODO）。
         """
+        from storygraph.app.beats import audio_choice_items
         panel = getattr(self, '_panel', None)
         if panel is None:
             return
         for field, kind in self.ASSET_FIELD_KINDS.items():
             try:
                 choices = self._session.asset_choices(kind)
+                choices = audio_choice_items(kind, choices)
             except Exception as e:                  # noqa: BLE001
                 swallow('ui_qt.window_assets._refresh_asset_choices', e)
                 choices = []

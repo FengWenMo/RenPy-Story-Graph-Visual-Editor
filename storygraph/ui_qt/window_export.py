@@ -3,20 +3,8 @@ storygraph.ui_qt.window_export.py
 =================================
 `MainWindowQt` 的**导出 / 体检 / 舞台预览 / 剧本表 —— 与外部世界打交道的那一批。**
 
-为什么拆（P3-14，2026-10-05）
------------------------------
-`MainWindowQt` 原本是 3452 行 / 120 方法的上帝对象 —— `EditorSession`
-（已拆成 5 块）的另一半。它比那边更难拆，因为：
-
-  · 它是 **UI 层**：行为测试薄得多，而且要真起 Qt（`test_ui_qt.py`）；
-  · 方法之间靠 **Qt 信号**耦合，不像会话那样能按"主语是什么"干净切开。
-
-所以顺序是**先补网、再拆**：`tests/test_main_window_snapshot.py`
-（63 步操作序列 golden）先把外部可观察行为钉住，
-拆分期间它必须一直绿。
-
-**做成 mixin 而不是独立对象**：调用方（菜单、工具栏、信号、
-`open_editor`）一行都不用改 —— 这是**搬家**不是改契约。
+**为什么是 mixin、当初怎么拆的**：`docs/代码地图.md` §三·五 讲一次，
+不再在 6 个 `window_*.py` 里各抄一遍（从前这 22 行在 6 个文件里逐字重复）。
 
 与主类的隐式依赖
 ----------------
@@ -502,6 +490,43 @@ class WindowExportMixin:
                          start_index=getattr(self, '_loaded_idx', 0))
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '无法打开预览', str(e))
+    def show_continuity(self):
+        """
+        「🧵 跨章连续性」：上一章留下的背景 / 立绘 / CG / BGM，下一章
+        第一句台词时还在不在？（只读）
+
+        B 方案（2026-10-28）。判据（用户第二轮澄清的最终口径）：
+
+            **下一章只有一条入边就判继承**（不看前一章有几条出边 ——
+            分支点自己的章末状态是确定的，每个分支章继承同一份状态）；
+            分支汇聚不判（不猜"反正一样"）。
+
+        分析在后台线程跑（真实项目约 2~3 秒），窗口不会冻住；结果按
+        "项目根 + 源文件指纹"缓存，文件没改再点开是瞬时的。
+        """
+        if not self._project_root:
+            self._status('先打开一个项目。')
+            return
+        from storygraph.ui_qt.continuity_dialog import ContinuityDialog
+        dialog = ContinuityDialog(self, self._project_root)
+        dialog.report_ready.connect(self._log_continuity_summary)
+        dialog.exec()
+
+    def _log_continuity_summary(self, report):
+        """把"这次分析看到了什么"写一行到控制台（报告窗口里是全文）。"""
+        try:
+            st = report.stats()
+            self._log(f"[跨章连续性] 章节 {st['chapters']} · 可判接缝 "
+                      f"{st['judged_seams']} · 需要人看 {st['warnings']} · "
+                      f"不判定 {st['undetermined']} · "
+                      f"{report.elapsed:.1f}s（只读）")
+            first = next((f for f in report.findings
+                          if f.level == 'warn'), None)
+            if first is not None:
+                self._log(f'  ⚠ {first.title}')
+        except Exception as e:                      # noqa: BLE001 - 摘要不该拦住报告
+            swallow('ui_qt.window_export.continuity_summary', e)
+
     def show_help(self):
         from storygraph.ui_qt.help_dialog import show_help
         return show_help(self)

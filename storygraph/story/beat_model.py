@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from storygraph.core.statement import MARKER
+#: 音频“伪值”词表（`（停止音乐）` / `（排队播放）`）的**唯一真源**在
+#: `core.vocabulary`：`dsl.parse_audio` 也要认同一份词，两处各写一份就会
+#: “Excel 能选、卡片打出来却导成 play” （2026-10-28 实测的真实 bug）。
+from storygraph.core.vocabulary import AUDIO_PSEUDO
 #: 「每参数一列」的列名判定（`语句名·参数名` / `语句名·参数名@位置号`）。
 #: 唯一真源在 `story/spec_args.py`（零项目内依赖），这里只 import 一个纯函数。
 from storygraph.story.spec_args import is_dynamic_column
@@ -522,11 +526,9 @@ DROPDOWN_COLUMNS = {
 
 
 # 音频列里的"伪值"：动作写在同一个下拉里，策划不用再记一列动作。
-# 用书名号包起来，永远不会和真实资产 ID 撞。
-AUDIO_PSEUDO = {
-    'BGM': {'（停止音乐）': 'stop', '（排队播放）': 'queue'},
-    'SFX': {'（停止音效）': 'stop', '（排队播放）': 'queue'},
-}
+# 用中文括号包起来，永远不会和真实资产 ID 撞。
+# 词表本体已收敛到 `core.vocabulary.AUDIO_PSEUDO`（本行只是模块级别名，
+# 旧 import 路径 `from storygraph.story.beat_model import AUDIO_PSEUDO` 不变）。
 
 _AUDIO_PSEUDO_REVERSE = {k: v for k, v in
                          (('stop', '（停止音乐）'), ('queue', '（排队播放）'))}
@@ -2231,21 +2233,28 @@ def _fill_audio_from_cells(beat, channel: str, value: str, params: str):
     if not raw:
         return
 
-    # 兼容上一版把整句 DSL 写在音频列里的表（`[音乐] spring fadein 1.0`）
-    if raw.startswith('['):
-        from storygraph.story.dsl import parse_audio
-        ops = parse_audio(raw, channel)
-        if ops:
-            name = ops[0].name
-            action = ops[0].action if ops[0].action != 'unknown' else 'play'
-            params = ops[0].params or params
-            if channel == 'music':
-                beat.music, beat.music_params, beat.music_action = \
-                    name, (params or '').strip(), action
-            else:
-                beat.sound, beat.sound_params, beat.sound_action = \
-                    name, (params or '').strip(), action
-            return
+    # 这三种写法都当"整句 DSL / 动作"解析，而不是曲名：
+    #   · `[音乐] spring fadein 1.0`（上一版把整句 DSL 写进音频列的表）；
+    #   · `（停止音乐） fadeout 1.0`（卡片下拉伪值 + 手打的参数）；
+    #   · `stop music fadeout 1.0`（从 .rpy 直接复制到卡片里）。
+    # 2026-10-28：从前只认 `[`，于是 `（停止音乐） fadeout 1.0` 整串被当成
+    # 曲名 → 导出成 `play music "（停止音乐） fadeout 1.0"` + 缺少资源 TODO。
+    from storygraph.story.dsl import parse_audio
+    looks_like_audio_dsl = (
+        raw.startswith('[') or raw.startswith('（')
+        or bool(re.match(r'(?i)^stop\s+(music|sound)\b', raw)))
+    ops = parse_audio(raw, channel) if looks_like_audio_dsl else []
+    if ops:
+        name = ops[0].name
+        action = ops[0].action if ops[0].action != 'unknown' else 'play'
+        params = ops[0].params or params
+        if channel == 'music':
+            beat.music, beat.music_params, beat.music_action = \
+                name, (params or '').strip(), action
+        else:
+            beat.sound, beat.sound_params, beat.sound_action = \
+                name, (params or '').strip(), action
+        return
 
     if raw in pseudo:
         action, name = pseudo[raw], ''

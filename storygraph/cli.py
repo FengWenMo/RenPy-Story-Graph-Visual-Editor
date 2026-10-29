@@ -1009,6 +1009,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_cmd_exits)
 
     sp = sub.add_parser(
+        'continuity',
+        help='跨章连续性体检（只读）：上一章的音乐/背景/立绘，'
+             '下一章第一句台词时还在不在')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--file', action='append', default=[],
+                    help='只扫这几个 .rpy（可重复；默认扫项目全部）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.add_argument('--strict', action='store_true',
+                    help='有"漏章"级问题（或读不出来的文件）就退 1（CI 用）')
+    sp.set_defaults(func=_cmd_continuity)
+
+    sp = sub.add_parser(
         'shape',
         help='项目形状体检（只读）：声明/控制流/内容文件各在哪')
     sp.add_argument('project', nargs='?', default='.',
@@ -1068,6 +1081,40 @@ def _cmd_exits(args) -> int:
 
     blocked = [d for d in rep.degradations() if d.get('level') == 'blocked']
     return 1 if blocked else 0
+
+
+def _cmd_continuity(args) -> int:
+    """
+    跨章连续性体检（只读）。
+
+    为什么要一条独立命令（2026-10-28，B 方案）：章与章之间的"上一章还在播
+    这首曲子 / 这章整章零舞台语句"问题，单章预览与项目体检都看不见。
+    判据是用户拍板的"只看单一入边的接缝，分支/汇聚不猜"。
+
+    退出码：默认 0（报告本来就是给人看的）；`--strict` 时有"漏章"级问题
+    或读不出来的文件 → 1（CI 能抓）。
+    """
+    from storygraph.pipeline.continuity import analyze_project
+
+    files = list(getattr(args, 'file', None) or [])
+    rep = analyze_project(args.project, files=files or None)
+    if getattr(args, 'json', False):
+        print(json.dumps(rep.to_dict(), ensure_ascii=False, indent=1))
+    else:
+        print(rep.render_text())
+
+    warn = [f for f in rep.findings if f.level == 'warn']
+    strict = bool(getattr(args, 'strict', False))
+    if strict:
+        if rep.errors:
+            print(f'\n[strict] {len(rep.errors)} 个文件读不出来 → 退 1',
+                  file=sys.stderr)
+            return 1
+        if warn:
+            print(f'\n[strict] {len(warn)} 条"漏章"级问题 → 退 1',
+                  file=sys.stderr)
+            return 1
+    return 0
 
 
 def _cmd_shape(args) -> int:

@@ -158,6 +158,7 @@ from storygraph.ui_qt.window_keyboard import WindowKeyboardMixin
 from storygraph.ui_qt.window_nav import WindowNavMixin
 from storygraph.ui_qt.window_state import WindowStateMixin, fit_to_available
 from storygraph.ui_qt.window_recover import RecoverMixin
+from storygraph.ui_qt.window_engine import WindowEngineMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
 
 
@@ -308,6 +309,26 @@ class BeatCardEditor(QWidget):
         root.addWidget(self._flow_bar)
 
     def _build(self, loader):
+        """
+        把**一张卡片的全部控件**按"作者填写的心流"从上到下建出来。
+
+        顺序不是随手定的，每挪一次都对应一句用户原话（各节注释里有原话）：
+
+            控制流卡 → 语句条 → 语句参数 → 台词区 → 当前舞台 + 舞台图
+            → 立绘 / 背景 / 音乐 → 备注 → 条件 → 高级区 → 保存/撤销 → 提示条
+
+        两条贯穿全卡的规矩：
+
+          · **跟内容走**：控制流卡（`call` / `jump`）没有台词、没有立绘，
+            那几块要收起来 —— 否则用户看到一屏空框，以为自己"还没填"；
+          · **先给能改的**：语句参数排在台词**上面**，因为语句拍的参数
+            就是它的正文，放在台词下面那版实测要滚一整屏才看得见。
+
+        ⚠ **这里只建控件、不填数据。** 填数据是另一组入口
+        （`set_text` / `set_speaker` / `set_flow` / `set_spec_args` / …）。
+        两者一旦混在一起，构造期就会读到还没建好的控件 ——
+        `_refresh_preview` 早于控件创建那条老坑就是这么来的。
+        """
         root = QVBoxLayout(self)
         root.setContentsMargins(T.SPACE['md'], T.SPACE['md'],
                                 T.SPACE['md'], T.SPACE['md'])
@@ -583,7 +604,9 @@ class BeatCardEditor(QWidget):
         cap.setProperty('role', 'caption')
         row3.addWidget(cap, 0)
         self._comment = QLineEdit()
-        self._comment.setPlaceholderText('给同事/程序看的说明（不进脚本）')
+        self._comment.setPlaceholderText(
+            '写进脚本的注释（不用自己加 #）：例 bg1.2 bgm13 / 舞台备忘 / '
+            '给同事的说明')
         self._widgets['Comment'] = self._comment
         row3.addWidget(self._comment, 1)
         root.addLayout(row3)
@@ -1568,7 +1591,7 @@ class BeatCardEditor(QWidget):
 class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
                    WindowExportMixin, WindowAssetsMixin,
                    WindowKeyboardMixin, WindowNavMixin, WindowStateMixin,
-                   RecoverMixin, QMainWindow):
+                   RecoverMixin, WindowEngineMixin, QMainWindow):
     """
     Qt 版主窗口 —— **两页**：剧情结构图（第一屏）→ 卡片编辑器（点进模块才进）。
 
@@ -2661,6 +2684,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('🔍 适应窗口', self._canvas.fit_to_content, '整张图缩放到看得全')
         self._open_action = act('✎ 编辑这一章的卡片', self._open_selected_in_card,
                                 '进卡片编辑器改选中模块那一章（也可双击模块）')
+        # 「🎮 引擎试玩」放这里：结构图上看完"章和章怎么串"，下一步就是想看
+        # 这一章真跑起来是什么样 —— 不用先进卡片页再点一次（2026-10-29）。
+        self._engine_graph_action = act(
+            '🎮 引擎试玩', self.engine_preview_selected,
+            '用随工具的 Ren\'Py 引擎，从选中模块那一章开头真跑一遍\n'
+            '（转场 / ATL / 自定义 UI / 小游戏都是真的；标准版会提示装演出专用版）')
         tb_graph.addSeparator()
         act('🔎 检查逻辑问题', self.check_logic, '可达性 / 死分支；结论写在右侧并在图上标红')
         act('📊 变量分析', self.show_analysis, '逐节点的变量区间与操作明细（只读）')
@@ -2669,6 +2698,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         act('📦 资源体检', self.check_asset_health,
             '检查资源表与项目资源是否一一对应，并出示报告（只读）')
         act('🩺 项目体检', self.show_health, '三级校验，只读检查，不写盘')
+        act('🧵 跨章连续性', self.show_continuity,
+            '上一章留下的背景 / 立绘 / CG / BGM，下一章第一句台词时还在不在？\n'
+            '只读；下一章只有一条入边就判继承（分支点分出去的各章继承同一份'
+            '章末状态），分支汇聚不猜\n'
+            '（报告里会把"不判定"的章节与各前驱的章末状态如实列出来）。')
         act('✏️ 资源改名', self.open_asset_rename_dialog,
             '资源表改了名字之后，把脚本里的旧名字按词边界换掉。\n'
             '先看预览（哪些文件、哪几行）→ 确认后写盘（自动备份 .bak）→ 可一键回滚。')
@@ -2713,6 +2747,16 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '这两张是递推推导出来的，改了脚本/表格后不会自己变 —— '
             '表头会写着它是哪一刻生成的。')
         act('🎬 演出预览', self.open_stage_preview, '按卡片效果"跑起来"')
+        # 真引擎（2026-10-29）：Pillow 预览负责"改一句看一眼"，它负责
+        # "这一章真跑起来是什么样" —— 转场/ATL/自定义 UI/小游戏只有引擎准。
+        self._engine_action = act(
+            '🎮 引擎试玩', self.engine_preview_chapter,
+            '用随工具的 Ren\'Py 引擎，从**这一章开头**真跑一遍\n'
+            '（第一次要几秒准备镜像；关掉游戏窗口就回到工具）')
+        self._engine_beat_action = act(
+            '🎞 从这一拍试玩', self.engine_preview_from_beat,
+            '用引擎直接落到**当前这一拍**（近似：跳过前情，'
+            '前面几章设的变量没有值；先导出再试）')
         act('❓ 使用说明', self.show_help, '操作说明与快捷键（独立窗口，不占界面）')
 
     # ------------------------------------------------------------------
@@ -3205,6 +3249,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         for fn in (lambda: self._remove_shortcuts(),
                    lambda: self._loader.shutdown(),
                    lambda: self._panel.shutdown_stage_thumb(),
+                   # 关掉游戏窗口只是"这次预览结束"，工具关掉时引擎也必须停 ——
+                   # 否则后台留一个全屏游戏进程，用户只会觉得"电脑变卡了"。
+                   lambda: self.shutdown_engine_preview(),
                    lambda: self._notifier and self._notifier.close()):
             try:
                 fn()

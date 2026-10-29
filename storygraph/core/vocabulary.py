@@ -46,6 +46,33 @@ AUDIO_TYPE_ATTR = {
 
 
 # ==================================================================
+#  音频“伪值”（动作写进曲名那一格）
+# ==================================================================
+#
+# 音频列里的“伪值”：动作写在同一个下拉里，策划不用再记一列动作。
+# 用中文括号包住，永远不会和真实资产 ID 撞。
+#
+# **唯一真源在这里**（2026-10-28 收敛）：从前 `beat_model.AUDIO_PSEUDO`
+# 有一份、`dsl.parse_audio` 不认伪值（只认 `[…]`），于是卡片上打
+# `（停止音乐） fadeout 1.0` 会被当成曲名 → 导出成
+# `play music "（停止音乐）"` + 缺少资源 TODO。两处词表必须同源。
+#
+#: 表格列 → {伪值: 动作}。`BGM` 用 BGM 那组、`SFX` 用 SFX 那组。
+AUDIO_PSEUDO = {
+    'BGM': {'（停止音乐）': 'stop', '（排队播放）': 'queue'},
+    'SFX': {'（停止音效）': 'stop', '（排队播放）': 'queue'},
+}
+
+#: 伪值（不带列上下文）→ (动作, 通道)。通道为空串 = 由所在列决定，
+#: 例如 `（排队播放）` 既能排队音乐也能排队音效。
+AUDIO_PSEUDO_ACTION = {
+    '（停止音乐）': ('stop', 'music'),
+    '（停止音效）': ('stop', 'sound'),
+    '（排队播放）': ('queue', ''),
+}
+
+
+# ==================================================================
 #  舞台词汇
 # ==================================================================
 
@@ -672,6 +699,7 @@ GENERATOR_MARKER = '# 由剧本表自动生成，请勿在此文件手工改动�
 
 __all__ = [
     'ASSET_TYPE_ATTR', 'AUDIO_TYPE_ATTR',
+    'AUDIO_PSEUDO', 'AUDIO_PSEUDO_ACTION',
     'NON_ACTOR_TAGS', 'NON_ACTOR_SHOW_TARGETS', 'LAYER_CN_TAG',
     'RENPY_BUILTIN_TRANSFORMS', 'GENERATOR_MARKER',
     'RENPY_FLOW_BLOCK_HEADS', 'statement_head_token', 'is_known_flow_block',

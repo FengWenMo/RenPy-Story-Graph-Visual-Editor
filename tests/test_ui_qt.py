@@ -1695,6 +1695,25 @@ class TestAssetPickingActuallyWorks:
         window._refresh_asset_choices()
         assert window._panel._get_value('Scene') == 'bg 我自己写的'
 
+    def test_audio_combo_offers_stop_pseudo_but_not_queue(self, window,
+                                                          project):
+        """
+        卡片 BGM 下拉要有「（停止音乐）」——与 Excel 候选表同一套词
+        （2026-10-28：从前只有曲名，停止只能手打，手打还被当曲名）。
+
+        「（排队播放）」**不放**（用户拍板）：排队必须带曲名，单放伪值
+        会导成 `# TODO`。
+        """
+        window.open_project_path(project)
+        window._refresh_asset_choices()
+        combo = window._panel._widgets['BGM']
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        assert '（停止音乐）' in texts, texts
+        assert not any('排队' in t for t in texts), texts
+        # 伪值排最前（容易选到），并带一句说明 tooltip
+        assert texts[0] == '（停止音乐）', texts
+        assert combo.itemData(0, Qt.ToolTipRole) is not None
+
     def test_picking_an_image_without_a_registry_says_why(self, window):
         """没有资源表时要**说清楚**，不是静默什么都不做。"""
         window._console.clear()
