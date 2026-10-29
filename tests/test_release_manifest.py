@@ -50,6 +50,17 @@ def _fake_project(root: Path) -> Path:
     (demo / '_import_tmp.xlsx').write_bytes(b'tmp')         # 中间产物，不发
     (demo / 'build').mkdir()
     (demo / 'build' / 'junk.rpy').write_text('junk', encoding='utf-8')
+    # ⚠ 2026-10-28 的三个真实现场（原来只测了 `build/`，于是它们全漏了）：
+    #    产物目录叫 `build_out` / `build_renpy` / `build_unity`，
+    #    开发者脚本叫 `make_art.py` / `make_demo.py`，演示残留 `协作/`。
+    (demo / 'build_out').mkdir()
+    (demo / 'build_out' / 'story_ir.json').write_text('{}', encoding='utf-8')
+    (demo / 'build_renpy').mkdir()
+    (demo / 'build_renpy' / 'story.generated.rpy').write_text(
+        'label x:\n    return\n', encoding='utf-8')
+    (demo / 'make_demo.py').write_text('print(1)\n', encoding='utf-8')
+    (demo / '协作').mkdir()
+    (demo / '协作' / 'ch01_frontend_alice.xlsx').write_bytes(b'fake-xlsx')
     return root
 
 
@@ -82,7 +93,36 @@ def test_demo_copy_skips_user_state_and_build_output(tmp_path):
     assert '剧本表_ch01.xlsx' in files
     assert 'collab.db' not in files, '把用户的协作库打进发布包了'
     assert '_import_tmp.xlsx' not in files
-    assert not any(f.startswith('build/') for f in files), '把构建产物打进去了'
+    # **前缀**匹配：`build` / `build_out` / `build_renpy` / `build_unity` 全挡
+    assert not any(f.startswith('build') for f in files), (
+        f'把构建产物打进去了：{[f for f in files if f.startswith("build")]}')
+    assert 'make_demo.py' not in files, '把开发者重建 demo 的脚本打进去了'
+    assert not any(f.startswith('协作/') for f in files), (
+        '把协作演示残留打进去了（没有 collab.db，那张表是孤儿）')
+
+
+def test_staging_rejects_anything_that_should_not_ship(tmp_path):
+    """
+    ⭐ 反方向自检：`check_forbidden` 必须挡住"多了"。
+
+    2026-10-28 的真实现场：demo 里混进 8 个构建产物 + 2 个开发者脚本，
+    exe 双击照样能开、selfcheck 照样过 —— 只有点开 zip 看才发现。
+    所以判据不能只有"缺没缺"，必须有"多没多"。
+    """
+    root = _fake_project(tmp_path / 'proj')
+    dist = _fake_dist(root)
+    extras = MR.collect_extras(root, workdir=tmp_path / 'work')
+    out = MR.stage(dist, tmp_path / 'release', extras)
+    assert MR.check_forbidden(out) == [], MR.check_forbidden(out)
+
+    # 手工再往里扔一份"不该发"的东西 —— 自检必须看得见
+    junk = out / 'demo' / 'build_renpy'
+    junk.mkdir(parents=True)
+    (junk / 'story.generated.rpy').write_text('label x:\n', encoding='utf-8')
+    (out / 'demo' / 'make_art.py').write_text('print(1)\n', encoding='utf-8')
+    hits = MR.check_forbidden(out)
+    assert any('build_renpy' in h for h in hits), hits
+    assert any(h.endswith('make_art.py') for h in hits), hits
 
 
 def test_extras_have_all_four_groups(tmp_path):
@@ -95,6 +135,63 @@ def test_extras_have_all_four_groups(tmp_path):
     assert 'manual_img/02_card.png' in dests, '手册引用的截图没进包（md 里会是空图）'
     assert 'LICENSE' in dests
     assert 'demo/game/script/ch01.rpy' in dests
+
+
+def test_program_edition_extras_have_no_demo(tmp_path):
+    """2026-10-29「程序用的干净包」：示例不要了，`demo/` 一个文件都不收。"""
+    root = _fake_project(tmp_path / 'proj')
+    extras = MR.collect_extras(root, workdir=tmp_path / 'work', include_demo=False)
+    dests = [rel for _src, rel in extras]
+    assert dests, '程序版不能只剩下一堆空目录'
+    assert not any(d.startswith('demo/') for d in dests), dests
+    # "完全初始化"要留的东西：空表模板 + 能看懂的两份文档 + LICENSE
+    assert '剧本空表格.xlsx' in dests
+    assert '快速上手.md' in dests
+    assert '新手快速操作手册.md' in dests
+    assert 'manual_img/02_card.png' in dests
+    assert 'LICENSE' in dests
+
+
+def test_program_edition_manifest_does_not_require_demo(tmp_path):
+    """程序版清单只查 `REQUIRED_BASE`；两套判据真的是两套。"""
+    root = _fake_project(tmp_path / 'proj')
+    dist = _fake_dist(root)
+    extras = MR.collect_extras(root, workdir=tmp_path / 'work', include_demo=False)
+    out = MR.stage(dist, tmp_path / 'release', extras)
+    assert not (out / 'demo').exists()
+    assert MR.check_manifest(out, MR.REQUIRED_BASE) == []
+    assert MR.check_forbidden(out, allow_demo=False) == []
+    # 标准版完整清单当然会报"缺 demo" —— 证明不是把 REQUIRED 写松了
+    assert 'demo/game/script/ch01.rpy' in MR.check_manifest(out)
+
+
+def test_program_edition_rejects_a_demo_that_sneaks_back(tmp_path):
+    """`--no-demo` 的包如果混回一棵 demo/，反向自检必须看得见。"""
+    root = _fake_project(tmp_path / 'proj')
+    dist = _fake_dist(root)
+    extras = MR.collect_extras(root, workdir=tmp_path / 'work', include_demo=False)
+    out = MR.stage(dist, tmp_path / 'release', extras)
+    (out / 'demo' / 'game' / 'script').mkdir(parents=True)
+    (out / 'demo' / 'game' / 'script' / 'ch01.rpy').write_text(
+        'label x:\n', encoding='utf-8')
+    hits = MR.check_forbidden(out, allow_demo=False)
+    assert 'demo' in hits, hits
+    # 同一棵 demo 在"标准版"眼里是合法的：判据按包的类型走，不是一刀切
+    assert MR.check_forbidden(out, allow_demo=True) == []
+
+
+def test_program_edition_cli_end_to_end(tmp_path):
+    """`main(--no-demo --stage-only)` 真铺出干净目录（不只测零件）。"""
+    root = _fake_project(tmp_path / 'proj')
+    dist = _fake_dist(root)
+    out = tmp_path / 'release'
+    rc = MR.main(['--project-root', str(root), '--dist', str(dist),
+                  '--out', str(out), '--no-demo', '--stage-only'])
+    assert rc == 0
+    assert not (out / 'demo').exists()
+    assert (out / 'StoryGraph.exe').is_file()
+    assert (out / '剧本空表格.xlsx').is_file()
+    assert MR.check_forbidden(out, allow_demo=False) == []
 
 
 def test_missing_manual_shots_fail_loudly(tmp_path):

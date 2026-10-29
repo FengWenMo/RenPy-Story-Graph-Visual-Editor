@@ -168,6 +168,43 @@ exe_cli = EXE(                              # noqa: F821 - spec 注入
     entitlements_file=None,
 )
 
+# ---- 组装前最后一道：剔掉**构建机混进来**的文件 ----
+#
+# 2026-10-28 实测到的一次真事故：在 Git Bash 里跑 PyInstaller 时，
+# `PortableGit/mingw64/bin` 在 `PATH` 上，PyInstaller 顺着 PATH 找到了
+# Git 自带的 `libcrypto-3-x64.dll` / `libssl-3-x64.dll`，把它们当成
+# `_ssl` 的依赖收进了包。后果有两个，都不是"多几个文件"：
+#
+#   ① 包里有**两套 OpenSSL**（Python 的 `libcrypto-3.dll` 与 Git 的
+#      `-x64` 版），运行时谁先被加载取决于 DLL 搜索顺序 —— 今天是 A，
+#      换台机器可能变成 B，而这种 bug 只会表现为"https 偶尔失败"；
+#   ② 6.8 MB 白肉，而且是**别人机器上的工具链**跟着交付物一起发出去。
+#
+# 判据不写死文件名（否则换个工具链又漏），而是看**来源**：
+# 来自这些"构建机上的第三方工具目录"的一律不要。
+FOREIGN_BINARY_MARKERS = ('portablegit', 'mingw64', 'msys64', '/git/')
+
+
+def drop_foreign_binaries(toc):
+    """把来源带 FOREIGN_BINARY_MARKERS 的 binary 剔掉 → `(新 TOC, 剔掉的名字)`。"""
+    keep, dropped = [], []
+    for entry in toc:
+        source = str(entry[1]).lower().replace('\\', '/')
+        if any(mark in source for mark in FOREIGN_BINARY_MARKERS):
+            dropped.append(entry[0])
+            continue
+        keep.append(entry)
+    return keep, dropped
+
+
+a.binaries, _drop_gui = drop_foreign_binaries(a.binaries)
+a_cli.binaries, _drop_cli = drop_foreign_binaries(a_cli.binaries)
+_dropped = sorted(set(_drop_gui) | set(_drop_cli))
+if _dropped:
+    # 打印而不是静默：剔掉东西必须留痕，否则下次有人问"为什么没这个 dll"
+    # 又会去翻半天。看到这一行就说明**构建环境的 PATH 不干净**。
+    print('[spec] ⚠ 剔掉构建机工具链带来的文件（详见 spec 注释）：', _dropped)
+
 coll = COLLECT(                             # noqa: F821 - spec 注入
     exe_gui,
     exe_cli,

@@ -55,6 +55,11 @@ build/release*/
 # 避开删除。内容与 dist/ 等价，可由 packaging 重建。
 dist_new/
 build/pack/
+# 2026-10-28 重打包前挪走的旧产物（`mv dist dist_old_20261028`）。
+# ⚠ 想原地重建时，**别用 shell 的 `rm -rf dist/StoryGraph`** —— 同样会被
+# 那个守卫拦（一次 227 个文件），然后 PyInstaller 拿到半旧目录。
+# 用 Python 删：`python -c "import shutil;shutil.rmtree('dist/StoryGraph')"`
+dist_old_*/
 *.spec.bak
 
 # ==================================================================
