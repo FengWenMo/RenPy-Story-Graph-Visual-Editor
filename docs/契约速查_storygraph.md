@@ -5699,3 +5699,111 @@ xlsx 是 XML 1.0，有一批字符**根本存不进去**：`U+0000~U+0008`、`U+
 > `tools/golden_baseline.py --check` 分清"项目变了"还是"工具变了"。
 > 项目侧真变了（2026-10-28：`.rpy` 55 → 96）时，**逐条确认**新输出无误后
 > `--save` 重生基线、再用对应的 `tools/probe_*_fingerprint.py --save` 刷新金标。
+
+## §69 跨章连续性：后继单入边就判（2026-10-28，两轮澄清）
+
+**上一章留下的背景 / 立绘 / CG / BGM，下一章第一句台词时还在不在？**
+单章预览与项目体检都看不见这一类问题（各自只看一章/只看语法），所以单起
+一个**只读**分析。最终判据（用户第二轮澄清）：
+
+> 本意就是只要节点"单入边就判、不管前驱出边"。
+
+### 69.1 判据（最大程度判，但不出错）
+
+| 结构 | 判不判 |
+|---|---|
+| 线性章节（单入边） | ✅ 判 |
+| 分支点（多出边） | ✅ 判它**自己的入口**（若单入边）；从它分出去的**每个分支章**（单入边）也判 —— 继承同一份章末状态 |
+| 分支后的第一章 | ✅ 判（理由同上：分支点出口状态是确定的） |
+| 汇聚点（多入边） | ❌ 不判汇进来的接缝；各前驱章末状态**列事实**，不合并/不排序/不猜 |
+| 环 / 动态跳转 / Python 音频 / 未建模声道 / 旁支 / 无台词 | ❌ 不判，进「不判定（不猜）」清单 |
+
+状态推导与预览/快照**同源**：`story.stage_snapshot.stage_exit_state(beats,
+initial_state)`；`initial_state['unknown']` 集合表示"不知道"，与"空串 = 静音 /
+空背景"严格区分。汇聚点**不做 join**（哪怕各前驱恰好一样也按未知）。
+
+文本报告里"同一来源 + 同类问题"的分支子章会压成一行"细节同上"；
+JSON / 可判接缝清单里**逐条都在**（最大程度保留详细信息）。
+
+### 69.2 API（`storygraph.pipeline.continuity`，纯逻辑、不 import Qt/图）
+
+| 符号 | 说明 |
+|---|---|
+| `analyze_project(root, files=None)` | 整项目只读分析 → `ContinuityReport`；坏文件进 `errors` 不中断 |
+| `analyze_parse_result(parse_result, project_root='', files=None)` | 吃已解析 IR（与表/图同一份），测试用 |
+| `analyze_files(paths, project_root='')` | 指定文件分析（CLI `--file` / 测试） |
+| `project_source_signature(root)` / `source_signature(paths)` | 源文件指纹（mtime_ns + size），UI 缓存失效判据 |
+| `ContinuityReport` | `.to_dict()` / `.render_text()` / `.stats()` / `.chapter_map()` / `.judged_seams()` |
+
+`ContinuityReport.chapters`（`Chapter`）：`entry/exit`（状态 + `unknown` 集合）、
+`in_edges/out_edges`、`root/side/cycle/chain_end`、计数（音乐/舞台/台词）、
+`role`（链根/分支/汇聚/链尾/旁支）。
+`Seam`：`judged` + `reason` + `outcomes`（`ok/leak/short/unknown/uncertain/n/a`）。
+`Finding`：`code`（M0/M1/S0/S1/C0/C1/G0/G1/L1/L2）、`level`（warn/info）、
+`chapters`、`suggestion`。
+`Undetermined`：`kind`（branch/merge/cycle/dynamic/python_audio/unmodeled_channel/
+side_branch/entry_unknown/condition/internal_flow/no_dialogue/…）。
+
+### 69.3 结构识别与边界
+
+- **章节**：内容 label（有 `say/extend/show/scene/hide/play/voice`，或带标题的
+  `menu`）被"编排层"（无内容语句的 label）`call`/`jump` 到 → 章节；
+- 没有编排层的项目退回"入口 + 被跳转到的内容"；
+- **入口只用 `start`**（没有才用全部 `ENTRY_LABELS`）。否则同项目里的独立小应用
+  （番茄钟的 `beginstory` 等）会被当成第二条主线 —— 实测会把
+  `pomo_script2 → location` 拉进跨章报告；
+- 编排层 `menu` 每个选项都 `jump/return` → **不算落空**（`_tail_terminates_in_menu`）；
+- 只读：不写 `.rpy/.xlsx/.rpyc`、不自动补 stop；分支汇聚处不猜。
+
+### 69.4 入口
+
+- CLI：`python cli.py continuity <项目根> [--json] [--strict] [--file …]`
+  （`--strict`：有"漏章"级问题或读不出来的文件才退 1）；
+- UI：剧情结构页「🧵 跨章连续性」→ `ui_qt/continuity_dialog.py`
+  （`QThread` 后台分析 + 按源文件指纹缓存 + 重新分析/复制报告）；
+- **不进「🩺 项目体检」**：体检是构建门禁语言，跨章是审稿语言。
+
+### 69.5 判据
+
+`tests/test_continuity.py`（25 条：线性漏章/首拍就换/第二拍才换、分支子章照判
+（单入边）、汇聚不 join、动态跳转、环、旁支、Python 音频、未建模声道、
+JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
+`tests/test_continuity_cli_ui.py`（10 条：CLI/`--strict`/`--file`、报告窗口
+后台线程 + 缓存失效、工具栏入口）。
+
+## §70 注释的 `#` 补全：产物层补，格内文字不动（2026-10-28）
+
+两条通道，两条边界：
+
+  · **产物（`.rpy`）必须合法**：写进脚本的注释行一定以 `#` 开头；
+  · **格内文字必须原样回来**（P0 数据安全）：Excel / 卡片里作者打的字
+    不因为"补 `#`"被偷改。
+
+### 70.1 「注释」列 / 卡片备注
+
+- 渲染层**本来就有**：`render_beat_to_rpy` ① 对 `beat.comment` 逐行补
+  `# `（已有 `#` 的行逐字不动，`#bg1.2` 紧凑写法保留）；
+- 表格 / 卡片里存的是作者的原话，**不在读写边界补 `#`**
+  （`test_hell_carrier_attack` 钉着"格内文字必须原样回来"）。
+
+### 70.2 「舞台（高级）」列
+
+- `dsl._looks_like_stage_note(text)`：**只**把"像注释的裸文本"补成 `# …`。
+  判据（四条都满足）：
+  1. 不以 `[` / `#` / `$` 开头；
+  2. 第一个词不是已知 Ren'Py 语句头（`RENPY_KNOWN_HEADS` /
+     `renpy.` / `config.` / `gui.` / `store.` / `persistent.` 命名空间）；
+  3. 没有代码标点：`" ' ( ) [ ] { } < > = \` $ @ \`；`:` `;` `,` **不算**；
+  4. 非空。
+- `dsl.parse_stage` 命中时产出 `StageOp(verb='comment', native=True,
+  raw='# …')`，`compile_stage` 对 native 直通 → 产物是合法注释；
+- 落点：**只在 `parse_stage`（渲染产物时）**；`Beat.from_row` /
+  `Beat.to_row` / 卡片保存**不重写**舞台格内容（同 70.1 的边界）。
+- **不动**：`[显示] …` DSL、`show/hide/scene/pause/with/play/stop…` 原生写法、
+  自定义语句（带引号/括号/等号等）、已有 `#` 的注释。
+
+### 70.3 判据
+
+`tests/test_comment_hash.py`（19 条：注释列渲染逐行补 / 不双写；
+舞台备注 vs 原生写法 / 自定义语句 / DSL 的分界；格内文字原样回来（含多行）；
+Excel 往返 + `.rpy` 往返产物合法且只有一个 `#`）。

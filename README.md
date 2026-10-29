@@ -12,6 +12,35 @@
 | 主策 / QA | 不知道"这句台词播出来长什么样" | **舞台快照 / 演出时间轴**（派生视图，只读） |
 | 制作人 | 以后要迁 Unity、要做多语言 | **引擎中立 IR** + Unity / Godot / CSV 导出器 |
 
+## 演出专用版（Stage Edition）
+
+普通发布包约 70 MB，**不带引擎**：能编辑、能「🎬 演出预览」（Pillow 按卡片
+重画），但不能真跑演出（转场 / ATL / 特效 / 项目自定义 UI / 小游戏都不真）。
+演出专用版把**完整 Ren'Py SDK**（去 `vscode/` + `tmp/`，约 340 MB）随包发，
+给没有 VSCode / Ren'Py / Python 的文案策划用：
+
+- **🎮 引擎试玩**：真引擎跑这一章（章首；或 `--warp` 从当前这一拍）。
+  引擎在**预览镜像**里跑（脚本复制 + 资源目录 junction + 独立存档 / 缓存），
+  **不写用户项目一个字节**；`RENPY_SKIP_*` 跳过闪屏 / 主菜单，注入
+  `config.label_overrides` 直接进章（不改项目 `screens.rpy`）。
+- **随包真实项目预设**：`storygraph.rules.json`（show 的 角色 / 服装 / 表情
+  三列候选）+ 布局；项目里缺才补，**只补缺不覆盖**。
+- **收到项目就自动打开**：`项目/` 放在 exe 旁边即可（包里已留好位置）。
+- zip 约 230 MB（硬上限 4 GiB；构建脚本自检 13 项必需 + 3 项禁止）。
+
+构建（先铺标准版目录，再套演出专用版包）：
+
+```bash
+python packaging/make_release.py --dist dist/StoryGraph --out dist/release --stage-only
+python packaging/make_stage_release.py --dist dist/release \
+    --sdk D:\software\renpy-8.4.1-sdk --out dist/stage --zip
+```
+
+判据：`tests/test_engine_preview.py`（镜像 / 入口 / 隔离 / 不写项目）、
+`tests/test_stage_edition.py`（真实预设 + 自动打开 + 只补缺）、
+`tests/test_stage_release.py`（打包清单两向自检 + 4 GiB 上限）。
+给策划的随包说明：`docs/演出专用说明.md`（打包时复制进 zip）。
+
 ## 快速开始
 
 ```bash
@@ -245,6 +274,7 @@ UI 框架；`ui_qt` 依赖全部，谁都不依赖它。
 | PySide6 / Qt for Python | 图形界面（可选依赖 `gui`） | LGPLv3 |
 | openpyxl | Excel 读写（必需） | MIT |
 | Pillow | 缩略图（可选依赖 `thumbnails`） | HPND |
+| Ren'Py SDK（**仅演出专用版**随包，`renpy_sdk/`） | 「🎮 引擎试玩」真跑演出 | MIT（见包内 `renpy_sdk/LICENSE.txt`；Ren'Py 自带第三方组件另有声明） |
 
 发布包里的 `StoryGraph.exe` 随包附带 Qt 动态库，**允许替换**（LGPLv3 的要求）；
 LGPLv3 与 GPLv3 兼容，两者并存。
