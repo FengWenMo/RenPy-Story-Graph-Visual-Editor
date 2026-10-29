@@ -31,6 +31,11 @@ def _fake_project(root: Path) -> Path:
     """一个最小的"仓库形状"：LICENSE + 说明文档 + 手册截图 + demo（带垃圾文件）。"""
     root.mkdir(parents=True, exist_ok=True)
     (root / 'LICENSE').write_text('MIT License\n', encoding='utf-8')
+    # 规则清单的来源（`collect_extras` 从 `storygraph/presets/` 取，2026-10-29）
+    presets = root / 'storygraph' / 'presets'
+    presets.mkdir(parents=True)
+    (presets / 'storygraph.rules.json').write_text(
+        '{"statements": []}\n', encoding='utf-8')
     docs = root / 'docs'
     docs.mkdir()
     (docs / '快速上手_3分钟.md').write_text('# 上手\n', encoding='utf-8')
@@ -149,6 +154,8 @@ def test_program_edition_extras_have_no_demo(tmp_path):
     assert '快速上手.md' in dests
     assert '新手快速操作手册.md' in dests
     assert 'manual_img/02_card.png' in dests
+    # 规则清单：没有它，项目自己的语句在界面上就是裸文本（2026-10-29）
+    assert 'storygraph.rules.json' in dests
     assert 'LICENSE' in dests
 
 

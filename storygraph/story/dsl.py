@@ -40,8 +40,6 @@ from storygraph.core.vocabulary import (
     AUDIO_PSEUDO_ACTION,
     AUDIO_TYPE_ATTR,
     NON_ACTOR_TAGS,
-    RENPY_KNOWN_HEADS,
-    statement_head_token,
 )
 
 from storygraph.core.safeguard import swallow
@@ -276,15 +274,16 @@ def parse_stage(text: str) -> ParsedStage:
     for chunk in split_ops(text):
         m = re.match(r'^\[([^\]]*)\]\s*(.*)$', chunk)
         if not m:
-            if _looks_like_stage_note(chunk):
-                # 作者在舞台（高级）里写的备忘（没写 `#`）→ 当注释，补 `#`
-                # （判据极保守，见 `_looks_like_stage_note`；合法原生写法
-                # 与自定义语句一律还是直通代码）。
-                out.ops.append(StageOp(verb='comment', native=True,
-                                       raw='# ' + chunk.strip(),
-                                       source=chunk))
-            else:
-                out.ops.append(_native_op(chunk))
+            # 裸文本一律**原样直通**（`_native_op`）。
+            #
+            # 这格是"逃生通道"：写什么就出什么，工具**不替作者判断**
+            # "这行看起来像不像备忘"。曾经试过自动补 `#`
+            # （`_looks_like_stage_note`，2026-10-28 → 10-29 撤掉）：
+            # 判据只能看字面，而 `bg1.2 bgm13`（备忘）和 `weather6 rain`
+            # （fork 引擎的自定义语句）字面上完全同构 —— 结果是把作者
+            # 真正要执行的语句注释掉了，卡片上看着还是原文，导出后
+            # 行为静默消失。用户 2026-10-29 拍板：**补 `#` 只发生在备注列**。
+            out.ops.append(_native_op(chunk))
             continue
         word = (m.group(1) or '').strip()
         rest = (m.group(2) or '').strip()
@@ -308,58 +307,6 @@ def _native_op(chunk: str) -> StageOp:
     else:
         verb = 'raw'
     return StageOp(verb=verb, native=True, raw=chunk, source=chunk)
-
-
-#: 「舞台（高级）」里"像注释的裸文本"判据用到的**代码标点**：
-#: 带这些字符的行照旧按原生代码直通（自定义语句、表达式、带引号的台词都可能
-#: 带它们），绝不擅自改写成注释。
-#:
-#: `:` / `;` / `,` **不算代码标点**：舞台备忘里很常见
-#: （`bg1.2: 淡出`、`bg1.2, bgm13`），而"未知语句头 + 冒号/逗号"本来也不是
-#: 合法 Ren'Py 语句。代码里真正的硬信号是引号 / 括号 / 等号 / `$` / `[]`。
-_STAGE_NOTE_CODE_CHARS = frozenset('"\'()[]{}<>=`$@\\')
-
-#: `renpy.` / `config.` 这类命名空间前缀（`RENPY_KNOWN_HEADS` 里存的是带点前缀）
-_STAGE_NOTE_NAMESPACES = ('renpy.', 'config.', 'gui.', 'store.', 'persistent.')
-
-
-def _looks_like_stage_note(text: str) -> bool:
-    """
-    这行**像不像作者手写的舞台注释**（而不是舞台指令）？
-
-    背景（2026-10-28，用户）：舞台（高级）列里作者常常直接写备忘：
-
-        bg1.2 bgm13
-        白色转场
-        （淡出）
-
-    这种行**不是合法 Ren'Py 语句**：照旧直通会生成 `bg1.2 bgm13` 这种
-    坏脚本；补一个 `#` 则既是合法注释、又把作者写的字原样保留下来。
-
-    判据刻意**保守**（宁可继续当代码，也不误伤自定义语句）——四条都满足才算：
-
-      1. 不是以 `[` / `#` / `$` 开头（那是 DSL / 注释 / 顶层代码）；
-      2. 第一个词**不是**已知的 Ren'Py 语句头（`show` / `scene` / `pause` …）；
-      3. 整行**没有任何代码标点**（引号 / 括号 / 等号 / `$` / `[]`…；
-         `:` `;` `,` 不算 —— 舞台备忘里很常见）；
-      4. 不是空的。
-
-    于是 `mycue "x"`（带引号）、`$ x = 1`、`[显示] …`、`show ling happy`
-    都不会被当注释；而 `bg1.2（淡出）` 这种**全角**标点的备忘仍算注释。
-    """
-    chunk = str(text or '').strip()
-    if not chunk or chunk[0] in '[#$':
-        return False
-    head = statement_head_token(chunk)
-    if not head:
-        return False
-    if head in RENPY_KNOWN_HEADS or head.rstrip('.') in RENPY_KNOWN_HEADS:
-        return False
-    if head.startswith(_STAGE_NOTE_NAMESPACES):
-        return False
-    if any(ch in _STAGE_NOTE_CODE_CHARS for ch in chunk):
-        return False
-    return True
 
 
 def _build_stage_op(verb: str, rest: str, chunk: str) -> StageOp:

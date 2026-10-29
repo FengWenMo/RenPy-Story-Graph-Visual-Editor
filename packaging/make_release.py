@@ -91,7 +91,7 @@ FORBIDDEN_DEMO_SUFFIXES = {'.py', '.pyc', '.bak', '.db'}   # 脚本 / 备份 / �
 REQUIRED_BASE = ('StoryGraph.exe', 'StoryGraph-CLI.exe',
                  '剧本空表格.xlsx', '快速上手.md', '新手快速操作手册.md',
                  'manual_img/01_structure.png', 'manual_img/02_card.png',
-                 'LICENSE')
+                 'storygraph.rules.json', 'LICENSE')
 #: 示例工程 `demo/` 里必须有的三件锚点（只有**带 demo** 的标准版才要求）：
 #: 一份能打开的表 / 一章能导入的脚本 / 一张能显示的背景。少一件说明
 #: demo 被"清过头"了，发出去等于没 demo。
@@ -173,6 +173,21 @@ def collect_extras(project_root=ROOT, workdir=None, *, include_demo=True) -> lis
     if not license_file.is_file():
         raise FileNotFoundError(f'缺少 LICENSE：{license_file}')
     extras.append((license_file, 'LICENSE'))
+
+    # **规则清单**（2026-10-29 用户："加个 rules.json"）：程序版也要一份。
+    #
+    # 它决定"语句分栏 / 候选值 / 自定义语句头"长什么样 —— 没有它，工具只认
+    # 内置语句，`weather6 rain` 这种项目自己的语句在界面上就是一串裸文本
+    # （导出照旧原样直通，但分栏、候选、校验全都给不出来）。
+    #
+    # 来源是仓库里**真实项目在用的**那份（`storygraph/presets/`，与演出专用版
+    # 「项目预设」同源）：给一份真的，而不是一个空骨架 —— 空文件照着也学不会
+    # 格式。用法写在「快速上手」里：把项目放 exe 旁边启动，工具会把它补到
+    # 项目根（已经有的绝不覆盖）。
+    rules = root / 'storygraph' / 'presets' / 'storygraph.rules.json'
+    if not rules.is_file():
+        raise FileNotFoundError(f'缺少规则清单：{rules}')
+    extras.append((rules, 'storygraph.rules.json'))
 
     if not include_demo:
         return extras

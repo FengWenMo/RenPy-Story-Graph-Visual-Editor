@@ -784,6 +784,36 @@ def _cmd_engine_facts(args) -> int:
     return 0
 
 
+def _warn_stage_suspects(table_path: Path, project=None) -> int:
+    """
+    编译前查一遍「舞台（高级）」列，把"看着不像 Ren'Py 语句"的行打出来。
+
+    **只报告，不阻塞、不改表**：命令行常常挂在 CI / 批处理上，"要不要把
+    这行挪到备注"是人该拿的主意（界面上有弹窗问，见
+    `ui_qt.dialog_stage_suspect`）。这里把话说明白就够 ——
+    退出码与从前一致，导出照常。
+
+    返回报出来的条数（调用方目前不看，留给以后 `--strict-stage`）。
+    """
+    from storygraph.core.safeguard import swallow
+
+    try:
+        from storygraph.story.excel_import import import_beats_from_excel
+        from storygraph.story.stage_suspect import scan
+
+        beats = import_beats_from_excel(table_path)
+        res = scan(beats, project_root=project or '')
+    except Exception as e:                      # noqa: BLE001 - 查不了不影响编译
+        swallow('cli.warn_stage_suspects', e)
+        return 0
+    if not res:
+        return 0
+    print(res.report(), file=sys.stderr)
+    print('（只是提示，导出照常进行。要它们变成注释请挪到「备注」列。）',
+          file=sys.stderr)
+    return len(res)
+
+
 def _cmd_compile(args) -> int:
     """
     演出表 → .rpy（**不做全局校验**）。
@@ -821,6 +851,9 @@ def _cmd_compile(args) -> int:
     # （见 `docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
     # `--source` 是**无损**那条路：给出这一章原来的 .rpy，走增量合并，
     # 只改你改过的行，default / init python / transform 原样保留。
+    # **导出前先看一眼**（2026-10-29）：「舞台（高级）」是代码，写错的备忘
+    # 会原样进脚本、启动时才报语法错。这里只提示，不拦（人要能批处理）。
+    _warn_stage_suspects(table_path, getattr(args, 'project', None))
     _path, sheet, result = compile_table(
         table_path,
         rpy_path=out,

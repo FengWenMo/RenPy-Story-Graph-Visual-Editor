@@ -100,6 +100,10 @@ class WindowExportMixin:
         # 要防的那类事故）。
         if self.current_page() == self.PAGE_CARD:
             self.apply_current_beat()
+        # **导出前问一句**（2026-10-29）：Stage 列里看着不像 Ren'Py 语句的行，
+        # 要不要挪到「备注」列。人点「取消」= 一个字节都不写（返回 False）。
+        if not self._review_stage_suspects():
+            return
         try:
             self._session.compile()
         except Exception as e:                  # noqa: BLE001
@@ -177,6 +181,53 @@ class WindowExportMixin:
         if _warns:
             self._log('[导出] 提示：' + '；'.join(str(w) for w in _warns[:4]))
         self._report_swallowed(mark)
+
+    def _review_stage_suspects(self) -> bool:
+        """
+        导出前查一遍 Stage 列，返回 `False` = 人点了取消（零写）。
+
+        「舞台（高级）」是**代码**：那一格写什么，导出后就是脚本里的一行。
+        判据在 `story.stage_suspect`（宽进：宁可多问一次，不要漏一句），
+        这里只负责"问"和"照着人的决定改内存"。
+
+        为什么**默认原样导出**而不是默认挪走：挪走会改用户填的格子。
+        工具不该把"改用户的表"当默认动作 —— 要改得人自己点。
+        """
+        from storygraph.story import stage_suspect as SS
+
+        beats = getattr(self._session, 'beats', None)
+        if not beats:
+            return True
+        try:
+            res = SS.scan(beats,
+                          project_root=getattr(self, '_project_root', '') or '')
+        except Exception as e:                  # noqa: BLE001 - 检查失败不拦导出
+            swallow('main_window._review_stage_suspects', e)
+            return True
+        if not res:
+            return True
+
+        from PySide6.QtWidgets import QDialog
+        from storygraph.ui_qt import dialog_stage_suspect as D
+
+        dlg = D.StageSuspectDialog(self, res)
+        if dlg.exec() != QDialog.Accepted:
+            self._status('已取消导出 —— 什么都没写')
+            self._log('[导出] 已取消（未写任何文件）')
+            return False
+        if dlg.decision == D.MOVE:
+            picked = dlg.selected()
+            n = SS.move_to_comment(beats, picked)
+            self._log(f'[导出] 把 {n} 行舞台内容移到「备注」列（原格内容不丢）')
+            self._status(f'已把 {n} 行移到备注，接着导出…')
+            try:
+                # 内存改了、磁盘还没写 → 状态栏要显示"未导出"，
+                # 否则人以为已经存过（这一条与导出成功后的 set_dirty(False) 配对）。
+                self._status_bar.set_dirty(True, '')
+            except Exception as e:              # noqa: BLE001
+                swallow('main_window._review_stage_suspects.dirty', e)
+        return True
+
     def _confirm_force_overwrite(self, path, used_patch=False):
         """
         「目标是你手写的文件，真的要覆盖吗？」—— 用户点"覆盖"才返回结果。
@@ -230,6 +281,39 @@ class WindowExportMixin:
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '导出失败', str(e))
             return None
+    def _review_table_stage_suspects(self, table_path) -> bool:
+        """
+        从表导出前的同一道检查，返回 `False` = 人点了取消（零写）。
+
+        与 `_review_stage_suspects` 的唯一差别：**不给"移到备注"这个动作**。
+        这条路的真源是那张 `.xlsx`，工具在导出前顺手改用户的工作簿风险更大
+        （还有别的 sheet、格式、公式）—— 把"哪几拍、原文是什么"说清楚，
+        让人回 Excel 自己挪。
+        """
+        from storygraph.story import stage_suspect as SS
+
+        try:
+            from storygraph.story.excel_import import import_beats_from_excel
+
+            beats = import_beats_from_excel(table_path)
+            res = SS.scan(beats,
+                          project_root=getattr(self, '_project_root', '') or '')
+        except Exception as e:                  # noqa: BLE001 - 检查失败不拦导出
+            swallow('main_window._review_table_stage_suspects', e)
+            return True
+        if not res:
+            return True
+
+        from PySide6.QtWidgets import QDialog
+        from storygraph.ui_qt import dialog_stage_suspect as D
+
+        dlg = D.StageSuspectDialog(self, res, allow_move=False)
+        if dlg.exec() != QDialog.Accepted:
+            self._status('已取消导出 —— 什么都没写')
+            self._log('[导出] 已取消（未写任何文件）')
+            return False
+        return True
+
     def open_node_in_excel(self, nid=None):
         """
         右键章节模块 → 用它对应的 .rpy 生成演出表（同名 .xlsx）并打开。
@@ -319,6 +403,12 @@ class WindowExportMixin:
         if tables.table_changed_since(self._table_mtimes, table_path):
             self._refresh_table_candidates(table_path)
             tables.remember_table_mtime(self._table_mtimes, table_path)
+
+        # **导出前先看一眼**（2026-10-29，同 `export_script`）。
+        # 这条路和卡片页的差别：真源是那张 `.xlsx`，工具不在这里改用户的工作簿
+        # （还有别的 sheet / 格式），只把"第几拍、原文是什么"指出来让人自己挪。
+        if not self._review_table_stage_suspects(table_path):
+            return
 
         try:
             res = tables.export_table(
