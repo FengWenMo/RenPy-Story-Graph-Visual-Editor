@@ -64,11 +64,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.user_path import app_data_dir
 
 __all__ = ['VERSION', 'KEEP', 'root_dir', 'project_dir', 'snapshot_path',
            'enabled', 'set_enabled', 'write', 'read', 'candidates',
@@ -118,20 +118,14 @@ def root_dir() -> Path:
     """
     自动保存的根目录（`STORYGRAPH_AUTOSAVE_DIR` 可覆盖）。
 
-    与 `core/session_store.config_path()` 同一处约定：用户已经知道
-    "这工具的东西存在 `%LOCALAPPDATA%/StoryGraph/`"，再开一个新地方
-    会让人找不到该删什么。
+    位置规则只有一份：`core/user_path.app_data_dir`，与 `session.json`、
+    `ai.json`、`crash.log` 同一处 —— 用户已经知道"这工具的东西存在
+    `%LOCALAPPDATA%/StoryGraph/`"，再开一个新地方会让人找不到该删什么。
     """
     env = os.environ.get(_ENV_DIR, '').strip()
     if env:
         return Path(env)
-    if sys.platform.startswith('win'):
-        base = os.environ.get('LOCALAPPDATA') or ''
-        if base:
-            return Path(base) / 'StoryGraph' / 'autosave'
-    base = os.environ.get('XDG_STATE_HOME') or ''
-    root = Path(base) if base else Path.home() / '.local' / 'state'
-    return root / 'storygraph' / 'autosave'
+    return app_data_dir('autosave')
 
 
 def _norm(path) -> str:

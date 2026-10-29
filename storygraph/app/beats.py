@@ -31,6 +31,7 @@ from storygraph.assets.asset_completion import AssetCompletion
 from storygraph.assets.asset_registry import describe_asset
 from storygraph.story.flow import FLOW_FIELD_KEYS
 from storygraph.story.beat_model import (
+    AUDIO_PSEUDO,
     Beat,
     KIND_MENU,
     KIND_MENU_OPTION,
@@ -46,6 +47,31 @@ from storygraph.story.beat_model import (
 )
 
 # ===================== 纯逻辑（可单测） =====================
+
+def audio_choice_items(asset_type: str, choices) -> list:
+    """
+    卡片「音乐 / 音效」下拉的候选：**动作伪值排最前**，其余照旧。
+
+    为什么要有它（2026-10-28）：Excel 的候选表里一直有「（停止音乐）」，
+    卡片的 BGM 下拉却只有曲名 —— 用户只能手打伪值，而手打
+    `（停止音乐） fadeout 1.0` 会被当成曲名，导出成
+    `play music "（停止音乐） fadeout 1.0"` + 缺少资源 TODO。
+
+    **只放「（停止音乐）/（停止音效）」，不放「（排队播放）」**（用户拍板
+    2026-10-28）：排队必须带曲名，单放一个伪值会导成 `# TODO`，比不给更坑。
+
+    候选形态与 `session.asset_choices` 一致：`[(值, 说明), ...]`；
+    说明挂在候选项 tooltip 上（`BeatCardEditor.set_asset_choices`）。
+    """
+    out = list(choices or ())
+    if asset_type not in ('music', 'sound'):
+        return out
+    pseudo = AUDIO_PSEUDO['BGM' if asset_type == 'music' else 'SFX']
+    label = '音乐' if asset_type == 'music' else '音效'
+    words = [(word, f'动作：停止{label}（不播放具体音频）')
+             for word, action in pseudo.items() if action == 'stop']
+    return words + out
+
 
 def kind_from_speaker(kind: str, speaker: str) -> str:
     """
@@ -1958,6 +1984,33 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
       · `extras`：**不属于任何引擎组的词原样留着**（`base_handdown_mask` /
         `_hd_cut` 这类内部件 —— 实测资源表里真有它们）。我们不认识它们，但
         **别人的东西一个字节都不许丢**。
+
+    本函数的分段（219 行，按这个顺序读就不会晕）
+    --------------------------------------------
+    ① **拆 spec**：`show ye base_handdown gratified` → `tag='ye'`、
+       `attrs=[base_handdown, gratified]`。认不出 tag 就当场返回 `[]`。
+
+    ② **四档降级找"结构"**（组名和每组有哪些词）。顺序固定、先到先得，
+       拿到就不再试下一档 —— 因为越靠前的越权威，混着用会两边打架：
+
+       | 顺序 | 来源 | 什么时候用 |
+       |---|---|---|
+       | 1 | 引擎事实 `engine_facts.grouped_choices` | 采过引擎的项目（最准） |
+       | 2 | 项目里的 `layeredimage` 声明 | 没采过引擎，但写了分层立绘 |
+       | 3 | 资源表的 `Group` / `Value` 列 | 前两者都没有，但表里登记了维度 |
+       | 4 | 项目声明的 `attr_groups` | 前三档都空，靠手写声明兜底 |
+
+       四档全空 → 返回 `[]`，走"单格老路"（老项目一个字节都不变）。
+
+    ③ **显式拆分**：声明里带 `split: true` 的组，把属于它的词从引擎组里
+       **取走**单独成一格（引擎把动作并进 `outfit` 时，策划想分开摆）。
+
+    ④ **造标题 + 分当前值**：每组建一行；当前值里的一个词只归一个组
+       （先命中的组拿走）。没被项目改名的组**不显示引擎内部名**
+       （`outfit` → 「属性 1」），内部名只进 tooltip。
+
+    ⑤ **补三样东西**：`display`（求值后给人看的写法）、`other`（点这一格时
+       其余维度的词，防"点一格吃掉另一格"）、`extras`（不认识的词原样留着）。
     """
     spec = str(image_spec or '').strip()
     toks = [t for t in (_show_item_attr(t) for t in spec.split()) if t]
@@ -2055,8 +2108,11 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
             group_rows = []
     # ⚠ **组数才是判据**（每组一格；≥1 个组就建格）。从前判的是"有值的维度数"，
     #   于是"只写了一个词的拍"一个格都没有、只写 tag 的拍更没有入口。
-    #   三档结构来源：引擎事实 → 项目 `layeredimage` → 项目声明的 `attr_groups`；
-    #   三档都认不出（`group_rows` 为空）才返回 `[]` 走老路。
+    #   结构来源一共**四档**（顺序见 docstring ②；这里写全，别只写三档 ——
+    #   资源表 `Group`/`Value` 那一档是 2026-10-19 插在声明档**之前**的，
+    #   曾经漏写，读代码的人会以为它排在最后）：
+    #     引擎事实 → 项目 `layeredimage` → 资源表维度 → 项目声明的 `attr_groups`
+    #   四档都认不出（`group_rows` 为空）才返回 `[]` 走老路。
     if not group_rows:
         return []
     # —— 显式拆分（2026-10-18）：引擎把动作/姿势并进 `outfit` 时，

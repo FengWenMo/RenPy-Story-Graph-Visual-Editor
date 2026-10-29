@@ -93,11 +93,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.user_path import app_data_dir
 
 #: 用户级会话文件（`STORYGRAPH_SESSION_CONFIG` 可覆盖）
 _ENV = 'STORYGRAPH_SESSION_CONFIG'
@@ -117,20 +117,14 @@ def config_path() -> Path:
     """
     用户级会话文件路径。
 
-    与 `core/ai_settings.config_path()`（`ai.json`）同一处约定 ——
-    用户已经知道"这工具的东西存在 `%LOCALAPPDATA%/StoryGraph/`"，
-    再开一个新地方会让人找不到该删什么。
+    位置规则只有一份：`core/user_path.app_data_dir`，与 `ai.json`、
+    `autosave/`、`crash.log` 同一处 —— 用户已经知道"这工具的东西存在
+    `%LOCALAPPDATA%/StoryGraph/`"，再开一个新地方会让人找不到该删什么。
     """
     env = os.environ.get(_ENV, '').strip()
     if env:
         return Path(env)
-    if sys.platform.startswith('win'):
-        base = os.environ.get('LOCALAPPDATA') or ''
-        if base:
-            return Path(base) / 'StoryGraph' / 'session.json'
-    base = os.environ.get('XDG_STATE_HOME') or ''
-    root = Path(base) if base else Path.home() / '.local' / 'state'
-    return root / 'storygraph' / 'session.json'
+    return app_data_dir('session.json')
 
 
 def disabled() -> bool:

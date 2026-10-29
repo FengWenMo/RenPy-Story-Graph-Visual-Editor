@@ -22,10 +22,10 @@ from __future__ import annotations
 import json
 import os
 import stat
-import sys
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.user_path import app_data_dir
 
 #: 支持的提供方（**只列真的能用的**；`base_url` 可选，兼容自建/代理）
 PROVIDERS = {
@@ -47,19 +47,13 @@ def config_path() -> Path:
     """
     用户级配置文件（`STORYGRAPH_AI_CONFIG` 可覆盖）。**不在项目里**。
 
-    与崩溃日志同一处（`core/crashlog.py` 的约定）：Windows 用 `%LOCALAPPDATA%`，
-    其它平台用 `~/.local/state`；都不行就退回用户主目录。
+    位置规则只有一份：`core/user_path.app_data_dir`。与 `session.json`、
+    `autosave/`、`crash.log` 同一个目录 —— 用户才知道该去哪个目录里删东西。
     """
     env = os.environ.get('STORYGRAPH_AI_CONFIG', '').strip()
     if env:
         return Path(env)
-    if sys.platform.startswith('win'):
-        base = os.environ.get('LOCALAPPDATA') or ''
-        if base:
-            return Path(base) / 'StoryGraph' / 'ai.json'
-    base = os.environ.get('XDG_STATE_HOME') or ''
-    root = Path(base) if base else Path.home() / '.local' / 'state'
-    return root / 'storygraph' / 'ai.json'
+    return app_data_dir('ai.json')
 
 
 def load(path=None) -> dict:
