@@ -1,4 +1,4 @@
-﻿# storygraph 契约速查（不许违反 + 为什么）
+# storygraph 契约速查（不许违反 + 为什么）
 
 > 本文是 `.workbuddy/memory/MEMORY.md` 的**详细契约分册**。
 > MEMORY.md 只留"状态速览 + 最关键铁律 + 指针"，**全部契约在此**。
@@ -5896,12 +5896,12 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 
 ### 71.2 背景 / 音乐 / 语音三格：**滚轮不改值**（`WheelSafeComboBox`）
 
-- 规则：**点进去（有焦点）滚轮才换值**；没焦点时**不换值**，并把滚轮事件
-  **显式转交**给父级 `QAbstractScrollArea` 的 viewport（滚页面照常滚）。
-  不赌 `event.ignore()` 的冒泡（冒泡失败 = 鼠标停字段上页面滚不动）。
-- 可编辑组合框的焦点可能落在内部 `QLineEdit`，`_focused()` 两处都看。
-- 实现：`ui_qt/wheel_guard.py::WheelSafeComboBox`；`main_window._asset_row`
-  里三格用它（**不是裸 `QComboBox`** —— 裸 combo 默认会吃滚轮，实测 1→2 档）。
+- ⚠ **规则已被 2026-10-30 收紧，现行版本见 §74.1**："有焦点就放行"这条口子
+  删了（那正是"滚动会导致选择切换"复发的原因）。这里只留历史记录。
+- 旧规则：点进去（有焦点）滚轮才换值；没焦点不换值，并把滚轮**显式转交**给
+  父级 `QAbstractScrollArea` 的 viewport（滚页面照常滚）。
+- 实现：`ui_qt/wheel_guard.py`；`main_window._asset_row` 里三格用它
+  （**不是裸 `QComboBox`** —— 裸 combo 默认会吃滚轮，实测 1→2 档）。
 - 判据：`tests/test_wheel_guard.py`（无焦点不改值 / 滚轮转交滚动区 /
   有焦点才换值 / 三格真用了这个类）。
 
@@ -6163,3 +6163,64 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 - 自定义调用的**返回值/副作用**工具不知道；`effect`/`seconds_arg` 是项目
   自己声明的"等价预览"，不是对函数体的推断。
 
+
+## §74 第 6 条反馈：滚轮永不改值 / 打开就窄 / 分栏按比例（2026-10-30 夜）
+
+用户原话：
+
+> 现在仍然是滚动会导致选择切换！！！不要这个！另外，现在打开已经打开过的项目还是这么大！
+
+### 74.1 滚轮**永远**不改值（`wheel_guard`，全项目生效）
+
+- **规则只有一条，没有例外**：任何 `QComboBox` / `QAbstractSpinBox` /
+  `QSlider` / `QDial`，滚轮都不许改值；那一格滚轮**显式转交**给外层
+  `QAbstractScrollArea` 的 viewport（页面照常滚）。唯一放行的是
+  **候选列表已经弹开**（`QComboBox.view().isVisible()`）—— 那时滚的是列表本身。
+- 为什么删掉"有焦点就放行"（2026-10-29 的旧规则）：用户刚点过「说话人」，
+  焦点还在它身上，滚页面时鼠标划过它就换了人 —— 这正是"滚动会导致选择切换"。
+- 为什么还要全局兜底：裸 `QComboBox`（**可编辑**时连焦点都不用）就会
+  被滚轮换值，并且**把滚动吃掉**（offscreen 实测：index 1→2、滚动条 0→0）。
+  全项目 60+ 个组合框，靠"记得用子类"必漏。
+- 实现：`ui_qt/wheel_guard.py`
+  · `WheelSafeComboBox`：滚轮永不改值（卡片「说话人 / 背景 / 音乐 / 语音」四格用它）；
+  · `WheelValueGuard` + `ensure_installed()`：挂在 `QApplication` 上的事件过滤器
+    （幂等，靠 `app._storygraph_wheel_guard` 去重），在 `MainWindowQt.__init__`
+    里装一次，**所有窗口**（含对话框）都受保护。
+- 判据：`tests/test_wheel_guard.py`（无焦点不改值 / 滚轮转交滚动区 /
+  **有焦点也不改值** / 四格真用了这个类 / 裸 combo 被全局守卫拦住 /
+  幂等 / 弹开的列表放行）。
+
+### 74.2 窗口大小：**每次恢复都压**到 `DEFAULT_WINDOW_SIZE`（1200×800）
+
+- 现象：真机 `session.json` 里 `geometry=[1392,804]` 且 `layout_version=2` ——
+  上一轮的一次性迁移**跑过了**，但用户随后把窗口拖大/最大化，退出时又把大尺寸
+  存了回去（版本号已经是 2），下一次启动"又这么大"。
+- 规则：`window_state.narrow_layout` 对 **geometry 不再看版本号**，
+  每次恢复都 `min(记忆, DEFAULT_WINDOW_SIZE)`（**只压大的，小的照旧**）。
+  记忆只用来把窗口**记小**，不用来记大。卡片栏迁移（右栏 > 60% → 默认窄）
+  仍然只做一次。
+- `reopen_project` 的顺序固定为：**`_restore_to_screen` → `_restore_docks` →
+  开项目/载章节/切页 → `_restore_splitters`（并 `singleShot(0)` 再补一次）**。
+  在页面还藏着、窗口还没 resize 的时候摆分栏，量到的是"最小宽兜底"。
+- 判据：`tests/test_ui_width.py::TestLegacyLayoutMigration`
+  （老 1440/813 被压；**带 version=2 的 1392 也被压**；更小的窗口不被放大；
+  端到端 `reopen_project` 两条；`big_screen` fixture 把 offscreen 的 800×800
+  换成用户那块 1440×852，否则 1200 会被屏幕压成 752，判据假绿）。
+
+### 74.3 分栏按**比例**摆，不按绝对像素（`WindowStateMixin._scale_sizes`）
+
+- 记忆里的 `split_card=[583,584]` 是"当时那个 1392 窗口"的像素；窗口被压到
+  1200 后分栏只有 ~906 宽，`setSizes([583,584])`（和 1167）会被 Qt **从右边硬砍**：
+  实测 `[545,357]` / `[172,340]`，用户摆的对半完全失真。
+- 现在先按当前分栏宽度等比缩（`_scale_sizes`，四舍五入零头补最后一栏），
+  再 `setSizes` —— 实测 906 宽摆出来 `[451,451]`。
+
+### 74.4 章节**绝对不能跨项目**载入（`session_store.resolve_chapter`）
+
+- 真机两个同名项目（`...\RenPyTest\sr_general` 与 `...\sr_general`）共用一份
+  `last_chapter` 绝对路径 → 打开 A 项目却载入 B 项目的章节，屏幕内容和
+  "打开的项目"对不上，改起来还会写回 B。
+- 规则：绝对路径必须**在项目根里面**（`_inside`，`Path.resolve().relative_to`）
+  才认，否则退回 `last_chapter_rel`（相对项目根那份）；两份都不成立 → `''`
+  （只开项目、不载章节）。
+- 判据：`tests/test_session_memory.py::test_a_chapter_from_another_project_is_never_loaded`。
