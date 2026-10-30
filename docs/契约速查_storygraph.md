@@ -5973,7 +5973,7 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 - **不猜**：unknown 就 `showable=False`，卡片/选择器明说，导出门禁报出来。
 - 判据：`tests/test_asset_identity.py`（59 条）。
 
-### 72.2 项目级映射：`assets/asset_mapping.py` + `ui_qt/mapping_dialog.py`
+### 72.2 项目级映射：`assets/asset_mapping.py` + `assets/mapping_excel.py` + `ui_qt/mapping_dialog.py`
 
 - 文件名与位置：**`storygraph.mapping.json`**（schema `storygraph.mapping/1`），
   项目根或 `game/` 下；跟着项目走、可提交、可 diff（与 `storygraph.rules.json` 同一模式）。
@@ -5984,14 +5984,34 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   （按 mtime 缓存）/ `resolve_with_mapping` / `draft_mapping`（从**实际目录**汇总，
   不写死任何项目路径，导出后能被 `load_mapping` 原样读回）/ `save_mapping`
   （原子写 + 旧文件 `.bak`，已登记 `test_single_write_entry` 的唯一写入口）。
+- **第二条定义途径：Excel**（用户 2026-10-30「映射表除了 json 文件外，添加 excel
+  表格的定义途径」）——`storygraph.mapping.xlsx`，代码在 `assets/mapping_excel.py`：
+  · **一张表 = 一个顶层键**：「映射」/「角色」/「规则」/「图片」/「属性」
+    （表名、列名中英文都认，`人物`/`characters` 都行；表头可不在第 1 行）；
+  · **行序 = 数组顺序**（`rules` 先中先得，Excel 里没有下标列，顺序只能靠行位置）；
+  · **空单元格 = 不写这个键**；`备注/说明/note` 列刻意忽略；`kind` 列有下拉 +
+    冻结首行；`13.2` 这类数字 id 按文本读回；
+  · 结构校验仍走 `validate_mapping(data, where=…)`：同一句话在 JSON 里是
+    `images['x'] kind 不认识`，在 Excel 里是 `「图片」表第 12 行：kind 不认识`；
+  · **xlsx 只读**：工具从不回写人做的表（`load`→`save` 一轮会丢图/图表/条件格式）；
+    `write_workbook` 只用于**新建**（导出初稿 / 空白模板），
+    「保存到项目根」写的是**同目录的 JSON 快照**（`write_target` 把 `.xlsx` → `.json`）。
+- **优先级**：同一目录 `xlsx` **优先于** `json`，目录远近先于格式（项目根的 JSON
+  胜过 `game/` 的 Excel）。`mapping_sources()` 出全部候选，`mapping_cached()` 在
+  两份都在时追加一条"当前以哪份为准、改别的那份不会生效"，`status_text()` 写
+  `（Excel）`——**生效源每处都说得出来**，不许靠猜。
 - 工具**没有映射也能干活**（按目录/文件名推断）；映射只做**覆盖 / 纠正**。
-- UI：菜单栏「**🗂 资源映射**」五个动作 —— `载入映射…` / `重读` / `导出映射初稿…` /
-  `保存到项目根`（**先看 unified diff 再确认写**）/ `资源对照表`（路径/推断/tag/属性/
-  依据/能否 show，可只看未识别）。打开项目自动加载项目根或 `game/` 下的映射。
+- UI：菜单栏「**🗂 资源映射**」五个动作 —— `载入映射…`（JSON / Excel 都吃）/ `重读` /
+  `导出映射初稿…`（存 `.json` 或 `.xlsx`，xlsx 带表头+下拉+说明页）/ `保存到项目根`
+  （**先看 unified diff 再确认写**）/ `资源对照表`（路径/推断/tag/属性/依据/能否 show，
+  可只看未识别）。打开项目自动加载项目根或 `game/` 下的映射。
 - 发人样例：`examples/mapping/sr_general.mapping.json`（45 characters / 61 rules /
-  40 精确覆盖，命中 91.8%，与"无映射推断"不一致 **0**）；
-  给别的项目开发者的格式说明：`docs/资源映射_给项目开发者.md`。
-- 判据：`tests/test_asset_mapping.py`（40 条）、`tests/test_mapping_dialog.py`（29 条）。
+  40 精确覆盖，命中 91.8%，与"无映射推断"不一致 **0**），以及同名的
+  `.xlsx`（同一份内容的 Excel 版；**45/61/40 往返一字不差**，可当填表模板看）；
+  给别的项目开发者的格式说明：`docs/资源映射_给项目开发者.md`（含 Excel 填表规矩）。
+- 判据：`tests/test_asset_mapping.py`（40 条）、`tests/test_mapping_dialog.py`（32 条）、
+  `tests/test_mapping_excel.py`（40 条：往返 / 人写的表 / 定位警告 / `.bak` /
+  被 Excel 占用说人话 / 优先级 / `draft_mapping`→Excel→判定结论不变）。
 
 ### 72.3 选图判定与卡片提示：`app/picker.py::resolve_pick` + `ui_qt/asset_picker.py`
 
