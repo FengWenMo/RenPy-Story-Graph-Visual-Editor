@@ -13,6 +13,18 @@ Qt 版**立绘网格**（真实缩略图 + 卡内 chip 换表情/位置）。
   · `SpriteGridWidget` —— 网格（QGridLayout）+ 末尾「＋ 添加立绘」
   · `cards_to_show(cards, symbols)` —— 卡 → `show` 文本（写回）
 
+**2026-10-30（④⑥ 第二阶段）：加图 / 换图这条路要"看得见判定"**
+------------------------------------------------------------------
+选择器在 `accept()` 时已经能判"这张图能不能进 show"（`app.picker.resolve_pick`，
+S1 的唯一真源）。这里负责**把判定结果摆到卡片上、不许静默写**：
+
+  · 选了预览图 / 头像 → 选择器自动换成真立绘，卡片上出现一条提示条，
+    写明"原资产 → 实际写进卡片的 spec"（`PickResult.replaced_from/to/message`）；
+  · spec 首词**不是已知角色 tag** → 卡片上给**警告**提示条，并给一个
+    「去『资源映射』修」的按钮（真源是 `Symbols.is_actor_tag`）；
+  · 判不了（项目没打开 / 符号表为空）时**不警告** —— 那会是假警报，
+    与缩略图"没有"那条同一个纪律（见 `SpriteCardWidget._load_thumb`）。
+
 **card item 的数据契约**（与 tkinter 版一致）：
   {image: str, expression: str, position: str, at: str, speaking: bool,
    order_index: int, extra_rows: list}
@@ -20,9 +32,9 @@ Qt 版**立绘网格**（真实缩略图 + 卡内 chip 换表情/位置）。
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QLayout, QPushButton, QVBoxLayout, QWidget)
 
 from storygraph.app.beats import (apply_attr_slot, attr_slot_rows,
                                   choices_for_image,
@@ -93,6 +105,57 @@ def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
     return None
 
 
+def pick_spec_and_result(value) -> tuple:
+    """
+    选择器回调的返回值 → `(spec, PickResult | None)`（两种契约都认）。
+
+    历史原因：这条路上存在**两代回调**
+      · 老：`on_pick_image(current) -> str`（`window_assets._pick_image`）；
+      · 新：`on_pick_image_result(current) -> PickResult | str`（本轮接线，
+        多了 `replaced_from/to/message`，卡片提示条要用）。
+    把它们归一在这一个函数里，`_on_add` / `_on_click` 两条路就不用各判一次
+    —— 也避免"老回调还能用、新回调没接上"这种半接线状态。
+    """
+    if value is None:
+        return '', None
+    if isinstance(value, str):
+        return value.strip(), None
+    spec = str(getattr(value, 'spec', '') or '').strip()
+    return spec, value
+
+
+def known_tag_warning(spec, symbols) -> str:
+    """
+    `spec` 的首词**不是已知角色 tag** 时给的一句话（空串 = 没问题 / 判不了）。
+
+    为什么判据是"角色 tag"而不是随便一个 image tag：这一格是**立绘**。
+    选了背景 / CG / 界面图写进 `show` 里，引擎不会报错但演出是错的
+    （用户 2026-10-30："不能直接放立绘图，直接放角色那个头像图就能动"
+    —— 反方向同样成立：立绘格里放背景图是同一个错误）。
+
+    ⚠ **判不了就闭嘴**（与缩略图"没有"同一条纪律）：项目没打开时
+    `symbols` 是 None；项目有图但没有角色表时 `Symbols.is_actor_tag`
+    会按"非背景/CG/UI"粗判 —— 这两种情况都不许报"未知角色"（假警报
+    比不提示更糟，用户会去改本来没问题的东西）。
+    """
+    spec = str(spec or '').strip()
+    if not spec or symbols is None:
+        return ''
+    tag = spec.split()[0]
+    if not tag:
+        return ''
+    try:
+        if not (symbols.has('image') or symbols.has('character')):
+            return ''                              # 无从判定：不猜
+        if symbols.is_actor_tag(tag):
+            return ''
+    except Exception as e:                         # noqa: BLE001 - 符号表怪就当判不了
+        swallow('ui_qt.sprite_grid.known_tag_warning', e)
+        return ''
+    return (f'「{tag}」不是已知的角色立绘标签 —— 这一格要的是立绘；'
+            f'如果它其实属于某个角色，去「资源映射」把它认成角色/立绘。')
+
+
 class SpriteCardWidget(QFrame):
     """一张立绘卡：缩略图 + 名字 + 表情 chip + 位置 chip + ✕。"""
 
@@ -102,13 +165,21 @@ class SpriteCardWidget(QFrame):
     def __init__(self, item: dict, symbols=None, loader=None,
                  parent=None, on_change=None, on_resolve_path=None,
                  choice_groups=None, choice_groups_for=None,
-                 assets_ready: bool = False):
+                 assets_ready: bool = False, on_open_mapping=None):
         super().__init__(parent)
         self.item = dict(item or {})
         self._symbols = symbols
         self._loader = loader
         self._on_change = on_change
         self._on_resolve_path = on_resolve_path
+        #: 「去『资源映射』修」的入口（主窗口注入；None = 不显示那个按钮）
+        self._on_open_mapping = on_open_mapping
+        #: 选择器刚给的三件事（`PickResult.message` / 换图前 / 换图后）。
+        #: 只在"这次选中"之后显示一次；关掉提示条或再换一次图就没了。
+        self._pick_note = ''
+        self._pick_note_tip = ''
+        #: 现在提示条显示的是什么（`_refresh_hint` 维护；判据读它）
+        self._hint_text = ''
         #: **现在有没有"判得了"的底子**（项目打开过 / 资源表读过）。
         #:
         #: 用户 2026-10-13："如果在卡牌编辑器内打开时，若找不到对应的文件，
@@ -150,6 +221,109 @@ class SpriteCardWidget(QFrame):
             self._load_thumb(str(self.item.get('image') or ''))
         except Exception as e:                     # noqa: BLE001 - 重画失败不该炸卡片
             swallow('ui_qt.sprite_grid.set_assets_ready', e)
+
+    def set_symbols(self, symbols):
+        """
+        符号表晚到了（项目打开 / 重读资源表）→ 重判"首词是不是角色 tag"。
+
+        为什么卡片也要收：网格 `set_symbols` 从前只换自己那份，已经画出来的
+        卡片还拿着旧符号表 —— 于是"项目刚打开"之后卡片仍按"判不了"沉默，
+        要翻页重画才出提示（看起来像时有时无的 bug）。
+        """
+        self._symbols = symbols
+        self.refresh()
+
+    # ---------- 判定提示条（④⑥ 第二阶段） ----------
+
+    def show_pick_hint(self, result):
+        """
+        选择器给的结论 → 卡片提示条（`PickResult`；也接受纯 spec 字符串）。
+
+        用户能看懂的只有两件事：**我选的被换成了什么**、**为什么**。
+        所以文案优先用 `PickResult.message`（S1 写好的那句话），
+        换过图时再把 `replaced_from → replaced_to` 放进 tooltip（要查时查得到）。
+        """
+        if result is None or isinstance(result, str):
+            return                                  # 老回调：没有结论可摆
+        msg = str(getattr(result, 'message', '') or '').strip()
+        was = str(getattr(result, 'replaced_from', '') or '').strip()
+        now = str(getattr(result, 'replaced_to', '') or '').strip()
+        if now:
+            note = msg or f'已自动换成真立绘：{now}'
+            tip = (f'原资产：{was or "（未知）"}\n'
+                   f'自动改用：{now}\n'
+                   f'（预览图 / 头像不能直接进 show，写进卡片的是真立绘）')
+        elif msg:
+            note, tip = msg, ''
+        else:
+            self._pick_note = self._pick_note_tip = ''
+            self._refresh_hint()                    # 没有话说 = 收回上一条
+            return
+        self._pick_note, self._pick_note_tip = note, tip
+        self._refresh_hint()
+
+    def dismiss_hint(self):
+        """用户手动收起提示条（不读、不改任何值）。"""
+        self._pick_note = self._pick_note_tip = ''
+        self._hint.setVisible(False)
+        self._hint_text = ''
+
+    def _open_mapping(self):
+        fn = self._on_open_mapping
+        if callable(fn):
+            try:
+                fn()
+            except Exception as e:                 # noqa: BLE001 - 入口坏了不该炸卡片
+                swallow('ui_qt.sprite_grid.open_mapping', e)
+
+    def _refresh_hint(self):
+        """
+        提示条的唯一决定点（`refresh()` 每次都过一遍）：
+
+          1. 首词不是已知角色 tag → **警告** + 「去『资源映射』修」按钮；
+          2. 否则这次选中换过图 → 普通提示 + tooltip 里的"原 → 新"；
+          3. 都没有 → 隐藏。
+
+        ⚠ 顺序不能反：换图提示（"已换成真立绘"）只说明发生过什么，
+        而"首词不是角色 tag"是**还没解决**的事 —— 后者必须压在上面。
+        """
+        spec = str(self.item.get('image') or '').strip()
+        warning = known_tag_warning(spec, self._symbols)
+        if warning:
+            text, warn = warning, True
+            tip = warning
+        elif self._pick_note:
+            text, warn = self._pick_note, False
+            tip = self._pick_note_tip
+        else:
+            self._hint_text = ''
+            self._hint.setVisible(False)
+            return
+        if text == self._hint_text and self._hint.isVisible():
+            return                                  # 同一条，不折腾样式/重排
+        self._hint_text = text
+        self._hint_label.setText(text)
+        self._hint_label.setToolTip(tip or text)
+        self._hint.setToolTip(tip or text)
+        if warn:
+            self._hint.setStyleSheet(
+                f"QFrame#spriteCardHint {{"
+                f" background: {theme.t('state.warningBg')};"
+                f" border: 1px dashed {theme.t('border.dashed')};"
+                f" border-radius: {T.RADIUS['control']}px; }}")
+            self._hint_label.setStyleSheet(
+                f"color: {theme.t('state.warning')}; background: transparent;")
+        else:
+            self._hint.setStyleSheet(
+                f"QFrame#spriteCardHint {{"
+                f" background: {theme.t('bg.skeleton')};"
+                f" border-radius: {T.RADIUS['control']}px; }}")
+            self._hint_label.setStyleSheet(
+                f"color: {theme.t('text.secondary')}; background: transparent;")
+        # 入口按钮：只有"判不了/判错了"这种要人去修的情况才给（换图提示给了反而误导）
+        self._hint_mapping_btn.setVisible(
+            bool(warn) and callable(self._on_open_mapping))
+        self._hint.setVisible(True)
 
     # ------------------------------------------------------------------
 
@@ -208,6 +382,55 @@ class SpriteCardWidget(QFrame):
         chips.addWidget(self._pos_btn)
         chips.addStretch(1)
         lay.addLayout(chips)
+
+        # —— 判定提示条（默认隐藏；选择器给了结论 / 首词不是角色 tag 才出现）——
+        #
+        # 为什么放在卡片里而不是弹窗：用户 2026-10-30 的诉求是"加图这条路要
+        # 说得清"，弹窗会打断连续加图；卡片上一条字 + 一个入口按钮，
+        # 加完立刻看得见、也能当场去修。
+        #
+        # ⚠ 宽度：这一栏**不能**把卡片最小宽顶上去（右栏 340 是硬预算，
+        # 见 `tests/test_ui_width.py`）—— 所以文字必须 `wordWrap`、
+        # 按钮单独一行、提示条本身默认 hidden（隐藏的控件不参与布局最小宽）。
+        self._hint = QFrame()
+        self._hint.setObjectName('spriteCardHint')
+        self._hint.setVisible(False)
+        hint_lay = QVBoxLayout(self._hint)
+        hint_lay.setContentsMargins(4, 2, 4, 2)
+        hint_lay.setSpacing(2)
+        self._hint_label = QLabel('')
+        self._hint_label.setObjectName('spriteCardHintText')
+        self._hint_label.setWordWrap(True)
+        self._hint_label.setProperty('role', 'caption')
+        self._hint_label.setTextFormat(Qt.PlainText)
+        self._hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._hint_label.setMinimumWidth(1)
+        hint_lay.addWidget(self._hint_label)
+        hint_row = QHBoxLayout()
+        hint_row.setContentsMargins(0, 0, 0, 0)
+        hint_row.setSpacing(4)
+        self._hint_mapping_btn = QPushButton('去「资源映射」修')
+        self._hint_mapping_btn.setObjectName('spriteCardMappingBtn')
+        self._hint_mapping_btn.setProperty('variant', 'chip')
+        self._hint_mapping_btn.setStyleSheet(
+            'padding:2px 6px;font-size:8pt;border-radius:8px;')
+        self._hint_mapping_btn.setToolTip(
+            '打开「🗂 资源映射」：把这张图认成某个角色/立绘，或看一眼它是怎么被认出来的')
+        self._hint_mapping_btn.clicked.connect(self._open_mapping)
+        self._hint_mapping_btn.setVisible(False)
+        hint_row.addWidget(self._hint_mapping_btn, 0)
+        hint_row.addStretch(1)
+        self._hint_close_btn = QPushButton('✕')
+        self._hint_close_btn.setObjectName('spriteCardHintClose')
+        self._hint_close_btn.setFixedSize(18, 18)
+        self._hint_close_btn.setStyleSheet(
+            'padding:0;border-radius:9px;font-size:9px;')
+        self._hint_close_btn.setToolTip('收起这条提示（什么都没改）')
+        self._hint_close_btn.clicked.connect(self.dismiss_hint)
+        hint_row.addWidget(self._hint_close_btn, 0)
+        hint_lay.addLayout(hint_row)
+        lay.addWidget(self._hint)
+
         lay.addStretch(1)
         self._rebuild_slot_chips()
 
@@ -430,6 +653,8 @@ class SpriteCardWidget(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self._load_thumb(spec)
+        # 判定提示条跟着这一张图走（换图 / 符号表晚到 / 撤销都要重判）
+        self._refresh_hint()
 
     def _thumb_bg(self) -> str:
         """
@@ -562,6 +787,7 @@ class SpriteCardWidget(QFrame):
             return
         self.item['image'] = ' '.join(parts)
         self.item['expression'] = ' '.join(parts[1:])
+        self._pick_note = self._pick_note_tip = ''   # 换过图了，上一条"换过"的说明作废
         self.refresh()
         if self._on_change is not None:
             self._on_change(self)
@@ -650,6 +876,7 @@ class SpriteCardWidget(QFrame):
                 #   "一维一格"那条路（见 `_cycle` / `_pick_from_list`）。
                 self.item['image'] = ' '.join([tag[0]] + attrs) if attrs \
                     else tag[0]
+        self._pick_note = self._pick_note_tip = ''   # 用户自己改了值：上一条说明作废
         self.refresh()
         if self._on_change is not None:
             self._on_change(self)
@@ -764,24 +991,57 @@ class SpriteCardWidget(QFrame):
 
 
 class SpriteGridWidget(QWidget):
-    """立绘网格 + 末尾「＋ 添加立绘」。"""
+    """立绘网格 + 末尾「＋ 添加立绘」。
+
+    **列数随可用宽度自适应**（2026-10-30，用户反馈第 5 条「UI 宽窄可变」）
+    ------------------------------------------------------------------
+    以前是写死 4 列（`_cols = 4`），后果是一张卡片的最小宽 = 4 列卡片的宽：
+    右栏只有 420px 时，**2 张立绘卡就把卡片最小宽顶到 519px** —— 横向滚动条
+    必然出现，而右端恰恰是「选择…」按钮。用户看到的就是"背景那几格要拖到
+    最右边才看得见"。
+
+    现在：列数 = f(可用宽度)（`_cols_for_width`，1~4 列），窄栏自动变 1 列竖排，
+    宽栏仍然 4 列。同时把布局的"最小宽约束"关掉（`QLayout.SetNoConstraint`）
+    并让 `minimumSizeHint()` 只报**一列卡片**的宽 —— 否则宽栏时（4 列布局）
+    那个最小宽会反过来把右栏顶宽，横向滚动条又回来了。
+    """
 
     add_requested = Signal()
     change = Signal(object)           # 任意一张卡被改过（通知主窗口重投影）
+    #: 选择器**拒绝**了这张图 / 别的"没写成"的事，但卡片里没有地方摆 →
+    #: 抛给主窗口去写控制台 + 状态栏（**不许静默什么都不做**）。
+    notice = Signal(str)
+
+    #: 最多排几列（宽屏上限）。再多就留白，不把卡片拉得稀稀拉拉。
+    MAX_COLS = 4
 
     def __init__(self, symbols=None, loader=None, parent=None,
-                 on_pick_image=None):
+                 on_pick_image=None, on_pick_image_result=None,
+                 on_open_mapping=None):
         super().__init__(parent)
         self._symbols = symbols
         self._loader = loader
+        #: **老回调**：`current -> image spec`（`window_assets._pick_image`）。
         self._on_pick_image = on_pick_image
+        #: **新回调**：`current -> PickResult | str`。多带"预览图被换成了哪张真立绘"
+        #: 这类结论，卡片提示条要用（见 `show_pick_hint`）。两个都给时**优先它**。
+        self._on_pick_image_result = on_pick_image_result
+        #: 「去『资源映射』修」的入口（主窗口注入；None = 不显示那个按钮）
+        self._on_open_mapping = on_open_mapping
         #: `image spec → 真实图片路径` 的解析器（主窗口注入；真源是资源表）
         self._on_resolve_path = None
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(4, 4, 4, 4)
         self._grid.setSpacing(T.SPACE['sm'])
+        # ⚠ 列数自适应 ⇒ **不许**让布局把"当前列数的最小宽"写成控件的最小宽
+        # （默认的 SetDefaultConstraint 会这么做：4 列时 808px，正好把右栏顶宽）。
+        # 最小宽由本类的 `minimumSizeHint()` 显式给"一列卡片"的宽度。
+        self._grid.setSizeConstraint(QLayout.SetNoConstraint)
         self._cards: list = []
-        self._cols = 4
+        #: 当前列数（**由 `_sync_cols()` 按宽度算出来**；测试与探针读它）
+        self._cols = 1
+        #: 重排防重入（`resizeEvent` → `_layout()` → 布局失效 → 又一次 resize）
+        self._relayouting = False
         #: 项目声明的候选分栏（空 = 平铺；见 `set_choice_groups`）
         self._choice_groups: dict = {}
         #: `tag -> 分组候选`（窗口注入；见 `set_choice_groups_provider`）
@@ -824,7 +1084,15 @@ class SpriteGridWidget(QWidget):
             card._choice_groups_for = fn
 
     def set_symbols(self, symbols):
+        """
+        符号表（项目打开 / 重读资源表后到）→ 自己 + **已画出来的每张卡**。
+
+        从前只换自己那份、卡片还捧着旧的：于是"首词是不是角色 tag"必须翻页
+        才重新判一次，看起来像时灵时不灵。
+        """
         self._symbols = symbols
+        for card in self._cards:
+            card.set_symbols(symbols)
 
     def set_path_resolver(self, resolver):
         """
@@ -883,56 +1151,149 @@ class SpriteGridWidget(QWidget):
             c.deleteLater()
         self._cards = []
         for it in items:
-            card = SpriteCardWidget(it, symbols=self._symbols,
-                                    loader=self._loader,
-                                    on_change=self._on_card_change,
-                                    on_resolve_path=self._on_resolve_path,
-                                    choice_groups=self._choice_groups,
-                                    choice_groups_for=self._choice_groups_for,
-                                    assets_ready=self._assets_ready)
-            card.remove_requested.connect(self._on_remove)
-            card.clicked.connect(self._on_click)
-            self._cards.append(card)
+            self._cards.append(self._new_card(it))
+        # 先按**当前宽度**定列数再排（否则窄栏第一帧会按 4 列排一次，
+        # 多一次可见的重排；宽栏同理）。
+        self._sync_cols()
         self._layout()
 
+    def _new_card(self, item: dict):
+        """造一张卡并接好三条回调（**唯一入口**：`load` 与「＋ 添加立绘」共用）。"""
+        card = SpriteCardWidget(
+            item, symbols=self._symbols, loader=self._loader,
+            on_change=self._on_card_change,
+            on_resolve_path=self._on_resolve_path,
+            choice_groups=self._choice_groups,
+            choice_groups_for=self._choice_groups_for,
+            assets_ready=self._assets_ready,
+            on_open_mapping=self._on_open_mapping)
+        card.remove_requested.connect(self._on_remove)
+        card.clicked.connect(self._on_click)
+        return card
+
+    # ---------------- 列数自适应 ----------------
+
+    def _cols_for_width(self, avail: int) -> int:
+        """
+        可用宽度 → 列数（1~`MAX_COLS`）。
+
+        算法：扣掉网格左右边距，每列按 `CARD_W + spacing` 排，能放几列算几列。
+        `avail<=0`（还没布局）时返回 1 —— **宁可先竖排**，也别按 4 列把右栏顶宽。
+        """
+        gap = max(0, int(self._grid.spacing()))
+        margins = self._grid.contentsMargins()
+        inner = int(avail) - margins.left() - margins.right()
+        if inner <= 0:
+            return 1
+        cols = (inner + gap) // max(1, CARD_W + gap)
+        return max(1, min(int(self.MAX_COLS), int(cols)))
+
+    def _sync_cols(self) -> bool:
+        """按当前宽度重算列数；**变了才返回 True**（调用方决定要不要重排）。"""
+        if getattr(self, '_grid', None) is None:   # 构造期（布局还没建）
+            return False
+        width = int(self.width())
+        if width <= 0:
+            return False
+        cols = self._cols_for_width(width)
+        if cols == self._cols:
+            return False
+        self._cols = cols
+        return True
+
+    def minimumSizeHint(self) -> QSize:           # noqa: N802 - Qt 接口
+        """
+        最小宽 = **一列卡片**（+边距）。高度仍交给布局（要能纵向滚）。
+
+        为什么必须覆盖：列数是按宽度算的，布局内部的"当前列数最小宽"是**结果**
+        而不是**约束**。不覆盖的话，宽栏下 4 列布局会把 808px 写成卡片的
+        最小宽 —— 右栏又被迫变宽，横向滚动条在**窗口变宽**时反而出现。
+        """
+        hint = super().minimumSizeHint()
+        grid = getattr(self, '_grid', None)
+        if grid is None:                          # 构造期（还没建布局）
+            return hint
+        margins = grid.contentsMargins()
+        return QSize(CARD_W + margins.left() + margins.right(), hint.height())
+
+    def resizeEvent(self, event):                 # noqa: N802 - Qt 接口
+        super().resizeEvent(event)
+        if getattr(self, '_relayouting', False):
+            return
+        if self._sync_cols():
+            self._layout()
+
     def _layout(self):
-        while self._grid.count():
-            w = self._grid.takeAt(0).widget()
-            if w is not None:
-                w.setParent(None)
-        for i, card in enumerate(self._cards):
-            self._grid.addWidget(card, i // self._cols, i % self._cols)
-        add = QPushButton('＋ 添加立绘')
-        add.setStyleSheet(
-            f"border: 2px dashed {theme.t('border.dashed')};"
-            f"border-radius: {T.RADIUS['card']}px; padding: 30px 8px;"
-            f"color: {theme.t('text.tertiary')};")
-        add.clicked.connect(self._on_add)
-        self._grid.addWidget(add, len(self._cards) // self._cols,
-                             len(self._cards) % self._cols)
+        if getattr(self, '_relayouting', False):
+            return
+        self._relayouting = True
+        try:
+            while self._grid.count():
+                w = self._grid.takeAt(0).widget()
+                if w is not None:
+                    w.setParent(None)
+            cols = max(1, int(self._cols))
+            for i, card in enumerate(self._cards):
+                self._grid.addWidget(card, i // cols, i % cols)
+            add = QPushButton('＋ 添加立绘')
+            add.setStyleSheet(
+                f"border: 2px dashed {theme.t('border.dashed')};"
+                f"border-radius: {T.RADIUS['card']}px; padding: 30px 8px;"
+                f"color: {theme.t('text.tertiary')};")
+            add.clicked.connect(self._on_add)
+            self._grid.addWidget(add, len(self._cards) // cols,
+                                 len(self._cards) % cols)
+        finally:
+            self._relayouting = False
+
+    # ------------------------------------------------------------------
+
+    def _pick(self, current: str = '') -> tuple:
+        """
+        问主窗口要一张立绘 → `(spec, PickResult | None)`（取消 = `('', None)`）。
+
+        **有"带结论"的回调就优先它**：提示条要 `replaced_from/to/message`，
+        老回调只有一个字符串 —— 那只能悄悄写、没法说"你选的被换成了谁"，
+        正是本轮要消灭的形态。
+        """
+        if self._on_pick_image_result is not None:
+            return pick_spec_and_result(self._on_pick_image_result(current))
+        if self._on_pick_image is not None:
+            return pick_spec_and_result(self._on_pick_image(current))
+        return '', None
+
+    def _has_picker(self) -> bool:
+        return (self._on_pick_image_result is not None
+                or self._on_pick_image is not None)
+
+    def _refuse(self, result):
+        """选择器拒绝 / 没给出可写 spec → **说出来**，一格都不写。"""
+        reason = str(getattr(result, 'message', '') or '').strip()
+        if not reason:
+            reason = '这张图不能加进立绘（选择器没给出可写进脚本的图像名）。'
+        self.notice.emit(reason)
 
     # ------------------------------------------------------------------
 
     def _on_add(self):
-        if self._on_pick_image is not None:
-            spec = self._on_pick_image('')
-            if not spec:
-                return
-            self._cards.append(SpriteCardWidget(
-                {'image': spec, 'expression': '', 'position': '', 'at': '',
-                 'speaking': False, 'order_index': len(self._cards),
-                 'extra_rows': []},
-                symbols=self._symbols, loader=self._loader,
-                on_change=self._on_card_change,
-                on_resolve_path=self._on_resolve_path,
-                assets_ready=self._assets_ready,
-                choice_groups=self._choice_groups,
-                choice_groups_for=self._choice_groups_for))
-            self._cards[-1].remove_requested.connect(self._on_remove)
-            self._cards[-1].clicked.connect(self._on_click)
-            self._layout()
-        else:
+        if not self._has_picker():
             self.add_requested.emit()
+            self.change.emit(self)                  # 老行为：没有选择器也通知一声
+            return
+        spec, result = self._pick('')
+        if result is not None and not getattr(result, 'ok', True):
+            self._refuse(result)
+            return
+        if not spec:
+            return                                  # 用户取消：什么都不发生
+        card = self._new_card(
+            {'image': spec, 'expression': '', 'position': '', 'at': '',
+             'speaking': False, 'order_index': len(self._cards),
+             'extra_rows': []})
+        self._cards.append(card)
+        self._layout()
+        if result is not None:
+            card.show_pick_hint(result)             # 换过图 / 有话说 → 摆出来
         self.change.emit(self)
 
     def _on_remove(self, card):
@@ -944,14 +1305,21 @@ class SpriteGridWidget(QWidget):
             self.change.emit(self)
 
     def _on_click(self, card):
-        if self._on_pick_image is not None:
-            spec = self._on_pick_image(card.item.get('image') or '')
-            if spec:
-                # 把新图的属性同步进表情，并**把几条维度重新算一遍**
-                # （`_apply_image_spec` → `refresh` → `_slot_rows`），
-                # 于是换图之后 chip 个数跟着新图的分组走。
-                card._apply_image_spec(spec)
-                self.change.emit(self)
+        if not self._has_picker():
+            return
+        spec, result = self._pick(card.item.get('image') or '')
+        if result is not None and not getattr(result, 'ok', True):
+            self._refuse(result)                    # 拒绝：**保留**这一格原样
+            return
+        if not spec:
+            return
+        # 把新图的属性同步进表情，并**把几条维度重新算一遍**
+        # （`_apply_image_spec` → `refresh` → `_slot_rows`），
+        # 于是换图之后 chip 个数跟着新图的分组走。
+        card._apply_image_spec(spec)
+        if result is not None:
+            card.show_pick_hint(result)             # `_apply_image_spec` 会清旧提示 → 再摆新的
+        self.change.emit(self)
 
     def _on_card_change(self, _card):
         self.change.emit(self)

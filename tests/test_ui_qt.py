@@ -3192,6 +3192,22 @@ class TestNoTkinterInBackend:
 #  十六、加了立绘 → 导出：`show` 必须真的落到文件里（用户 2026-10-05 实测报）
 # ==================================================================
 
+def _stub_pick_image(monkeypatch, grid, spec: str):
+    """
+    「＋ 添加立绘 / 双击换图」的取图回调打桩成直接返回 `spec`。
+
+    ⚠ **两个回调都要打**（2026-10-30）：网格**优先**走 `_on_pick_image_result`
+    （带 `PickResult` 的新回调；生产上接的是 `main_window.pick_sprite_result`
+    —— 会真弹资产选择器）。只打桩老回调 `_on_pick_image` 会被新回调**短路**，
+    offscreen 下真弹出模态框：2026-10-30 全量就是卡在这里
+    （`test_the_sprite_lands_in_the_original_file` 连续 300s 无输出 →
+    fasttest 判 124 卡死）。新回调给同一个 spec 字符串
+    （`pick_spec_and_result` 认字符串 → `(spec, None)`，等价于"没换图、没话要说"）。
+    """
+    monkeypatch.setattr(grid, '_on_pick_image_result', lambda cur='': spec)
+    monkeypatch.setattr(grid, '_on_pick_image', lambda cur='': spec)
+
+
 class TestAddingASpriteReachesTheFile:
     """
     用户报："明明已经添加了立绘，导出后对应的 show 却没有出现"。
@@ -3228,9 +3244,8 @@ class TestAddingASpriteReachesTheFile:
         idx = next(i for i, b in enumerate(window._session.beats)
                    if b.label == 'ch01_class' and b.kind == 'say')
         window._show_index(idx)
-        # 「＋ 添加立绘」的取图回调（真跑会弹模态框，offscreen 下会卡住）
-        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
-                            lambda cur: 'mary smile')
+        # 「＋ 添加立绘」的取图回调打桩（真跑会弹模态框，offscreen 下会卡住）
+        _stub_pick_image(monkeypatch, window._panel._grid, 'mary smile')
         window._panel._grid._on_add()
         assert [c.item.get('image') for c in window._panel._grid._cards] == \
             ['mary smile'], '加了立绘却没进网格'
@@ -3283,8 +3298,7 @@ class TestAddingASpriteReachesTheFile:
         idx = next(i for i, b in enumerate(window._session.beats)
                    if b.kind == 'say' and not (b.show or '').strip())
         window._show_index(idx)
-        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
-                            lambda cur: 'mary smile')
+        _stub_pick_image(monkeypatch, window._panel._grid, 'mary smile')
         window._panel._grid._on_add()
         card = window._panel._grid._cards[-1]
         assert card.item['position'] == '' and card.item['expression'] == ''
@@ -3316,8 +3330,7 @@ class TestAddingASpriteReachesTheFile:
         before = window._panel._stage_label.text()
         assert 'mary smile' not in before
 
-        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
-                            lambda cur: 'mary smile')
+        _stub_pick_image(monkeypatch, window._panel._grid, 'mary smile')
         window._panel._grid._on_add()
         window.save_current_beat()
 
@@ -3343,8 +3356,7 @@ class TestAddingASpriteReachesTheFile:
         idx = next(i for i, b in enumerate(window._session.beats)
                    if b.kind == 'say' and not (b.show or '').strip())
         window._show_index(idx)
-        monkeypatch.setattr(window._panel._grid, '_on_pick_image',
-                            lambda cur: 'ling happy')
+        _stub_pick_image(monkeypatch, window._panel._grid, 'ling happy')
         window._panel._grid._on_add()
         card = window._panel._grid._cards[-1]
         assert card.item['image'] == 'ling happy'

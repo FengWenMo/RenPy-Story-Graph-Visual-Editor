@@ -139,12 +139,20 @@ class TestWindowWidth:
         assert '/' in window._crumb_hint.full_text()
 
     def test_the_card_button_row_fits(self, window, app):
+        """
+        卡片页那条动作条在 **900px 窗口**下不许裁剪（2026-10-30 收紧）。
+
+        从前判的是"1366 下不裁剪"——那是"窗口最窄 1142"时代的判据：
+        5 个结构按钮还排在外面，行最小宽 920。现在它们收进「⋯ 结构」菜单，
+        窗口最小宽 1142 → 738，所以判据跟着收到 900：既要能量到宽度，
+        又要"最小宽 ≤ 可用宽"（有按钮被裁就是这条红）。
+        """
         window._set_page(window.PAGE_CARD)
-        window.resize(1366, 820)
+        window.resize(900, 820)
         window.show()
         app.processEvents()
         row = window._back_btn.parentWidget()
-        assert row.width() >= 1000, f'这一行没拿到宽度（{row.width()}），量不到'
+        assert row.width() >= 600, f'这一行没拿到宽度（{row.width()}），量不到'
         assert row.minimumSizeHint().width() <= row.width(), (
             f'卡片页那条按钮行的最小宽度 {row.minimumSizeHint().width()} '
             f'大于可用 {row.width()} —— 又会有按钮被裁在窗口外')

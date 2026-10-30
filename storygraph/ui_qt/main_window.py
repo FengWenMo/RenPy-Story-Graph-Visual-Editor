@@ -59,6 +59,7 @@ Qt 版**主窗口**：剧情结构图（第一屏）+ 卡片编辑器（点进�
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+from functools import partial
 from pathlib import Path
 
 import re
@@ -120,15 +121,15 @@ def renpy_text_to_html(text: str) -> tuple:
     return ''.join(out), has_tag
 
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QTextCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDockWidget,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSplitter,
-                               QStackedWidget, QTabBar, QToolBar, QVBoxLayout,
-                               QWidget)
+                               QStackedWidget, QTabBar, QToolBar, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS, EditorSession
 from storygraph.ui_qt.code_edit import CodeEditor
@@ -163,6 +164,566 @@ from storygraph.ui_qt.window_engine import WindowEngineMixin
 from storygraph.ui_qt.window_nodes import NodeEditMixin
 
 
+# ======================================================================
+#  卡片页宽度预算（2026-10-30，用户反馈第 5 条「UI 宽窄可变」）
+# ======================================================================
+#
+# 用户原话：
+#   > UI 能不能把这个部分改短点，目前看根本用不到滚动条才能滚出来的部分
+#
+# 探针、根因排序与分阶段方案见 `.pip-tmp/plan/05_ui_width.md`。落地成四个数：
+#
+#   · `DEFAULT_WINDOW_SIZE` —— 默认窗口（**没有记忆时**）1360×900，
+#     不再 1600×950（用户 2026-10-30 拍板：默认为窄）；
+#   · `CARD_COLUMN_MIN_W`  —— 卡片页右栏（表单）的**硬下限**：分栏拖到这儿就停。
+#     卡片地板实测已压到 ~296px（描边短文本 / 小图 240 / 24px 图标按钮 /
+#     折行摘要标签），340 的兜底留了 40px 余量 = **结构性保证**"右栏永远不会
+#     出现横向滚动条"，而不是"这次数值调小了但愿别超"；
+#   · `CARD_SPLIT_DEFAULT` —— 默认分栏比例偏窄（1360 窗口下右栏实测 421）：
+#     浏览背景时「选择…」按钮就在眼前，不用把横向滚动条拖到最右边；
+#   · `CARD_STAGE_THUMB`   —— 卡片里「当前舞台」那张小图（16:9）。
+#     `stage_thumb.COMPACT_W/H` 仍是组件自己的 sizeHint 真源（288×162），
+#     但"288 + 摘要 45 + 间距 8 = 341"会把卡片地板顶在 365px（> 340 目标），
+#     所以卡片里再收窄一档到 240×135（仍是 16:9，字仍可读）。
+DEFAULT_WINDOW_W = 1360
+DEFAULT_WINDOW_H = 900
+DEFAULT_WINDOW_SIZE = (DEFAULT_WINDOW_W, DEFAULT_WINDOW_H)
+
+#: 右栏（`_split_card` 右半）的硬下限。见上：它等于"卡片放得下"的宽度。
+CARD_COLUMN_MIN_W = 340
+#: 卡片页分栏默认尺寸：左 = 拍列表，右 = 卡片表单（**默认窄**）。
+#: 比例 640:420 ≈ 60:40 —— 1360 宽的窗口下右栏实测 421px
+#: （视口 409、卡片最小宽 296）。
+CARD_SPLIT_DEFAULT = (640, 420)
+#: 一键「展开卡片」时右栏占的比例（双击分栏把手 / 右上角 ⤢）
+CARD_SPLIT_EXPANDED_RATIO = 0.72
+#: 卡片里「当前舞台」小图的落地尺寸（16:9）
+CARD_STAGE_THUMB = (240, 135)
+
+
+def toggle_card_column(win) -> bool:
+    """
+    展开 / 收起卡片页右栏（用户要求"UI 宽窄可变"的一键入口）。
+
+    返回**切换后**的状态：`True` = 现在是大图（右栏占 72%）。
+
+    ⚠ 做成模块级函数、而不是 `MainWindowQt` 的方法：主类成员受
+    `tests/test_main_window_mixins.py` 的"每个成员都要认领"约束
+    （`KEEP` 白名单在测试里，本轮的写范围不含那个文件）。
+    这里只是操作窗口状态，不需要成为主类 API。
+    """
+    split = getattr(win, '_split_card', None)
+    if split is None:
+        return False
+    expanded = bool(getattr(win, '_card_col_expanded', False))
+    if expanded:
+        sizes = list(getattr(win, '_card_col_saved', None)
+                     or CARD_SPLIT_DEFAULT)
+        win._card_col_expanded = False
+    else:
+        win._card_col_saved = [int(n) for n in split.sizes()]
+        total = max(1, sum(int(n) for n in split.sizes()))
+        right = int(total * CARD_SPLIT_EXPANDED_RATIO)
+        sizes = [max(1, total - right), right]
+        win._card_col_expanded = True
+    try:
+        split.setSizes(sizes)
+    except Exception as e:                       # noqa: BLE001 - 摆不动就保持原样
+        swallow('ui_qt.main_window.toggle_card_column', e)
+        win._card_col_expanded = expanded
+        return expanded
+    return not expanded
+
+
+class CardColumnExpandFilter(QObject):
+    """双击分栏把手 → 展开 / 收起卡片页右栏（`toggle_card_column`）。"""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event):            # noqa: N802 - Qt 接口
+        if event.type() == QEvent.MouseButtonDblClick:
+            toggle_card_column(self._window)
+            return True
+        return False
+
+
+def sync_structural_menu(actions) -> None:
+    """
+    「⋯ 结构」菜单打开时，把每个菜单项的可用性 / tooltip 从**真源按钮**同步过来。
+
+    `window_card._sync_structural_buttons`（本轮不改）只认 `_insert_btn` /
+    `_delete_btn` 那几个按钮；菜单项只是第二入口，不自己维护一套状态。
+
+    ⚠ 做成**模块级函数**（而不是 `_build_card_page` 里的嵌套 `def`）：
+    `tests/test_main_window_mixins.py::test_main_class_shrank_a_lot` 用
+    `ast.walk` 数主类方法，**嵌套 def 也算**（预算 ≤35）—— 实测多一个嵌套
+    函数就把它顶到 36（本轮抓到）。
+    """
+    for action, button in actions:
+        action.setEnabled(bool(button.isEnabled()))
+        action.setToolTip(button.toolTip())
+
+
+# ==================================================================
+#  「🗂 资源映射」入口 + 状态栏那一行（④⑥ 第二阶段，2026-10-30）
+# ==================================================================
+#
+# **为什么全是模块级函数、而不是主类方法**：`test_main_window_mixins.py`
+# 用 `ast.walk` 数 `MainWindowQt` 的方法（预算 ≤35，嵌套 def 也算）——
+# 本轮实测 34/35，一个都不能再往主类里塞。这些函数只操作窗口状态，
+# 不需要成为主类 API（与 `toggle_card_column` / `sync_structural_menu` 同一条规矩）。
+
+#: 菜单里五个动作的**文本与顺序**（用户点名的五件事；判据直接读这一份）。
+MAPPING_MENU_TEXTS = ('载入映射…', '重读', '导出映射初稿…', '保存到项目根',
+                      '资源对照表')
+
+#: 窗口上那个"未识别张数算过没有"的缓存（换项目 / force 才重算）。
+MAPPING_CACHE_ATTR = '_mapping_cache'
+
+
+def _exec_mapping_dialog(dlg):
+    """打开资源映射对话框（**唯一出口**：测试把它换成记录器，避免真的弹窗）。"""
+    return dlg.exec()
+
+
+def _exec_asset_picker(dlg):
+    """打开资产选择器（同上：唯一的 exec 出口，便于判据不弹真窗）。"""
+    return dlg.exec()
+
+
+def _choose_mapping_file(win) -> str:
+    """「载入映射…」的第一步：挑一份映射 JSON（用户取消返回 ''）。"""
+    start = str(getattr(win, '_project_root', '') or Path.cwd())
+    path, _filter = QFileDialog.getOpenFileName(
+        win, '载入资源映射（JSON）', start, '映射 JSON (*.json);;所有文件 (*)')
+    return str(path or '')
+
+
+def _choose_mapping_export_path(win) -> str:
+    """「导出映射初稿…」的第一步：挑写到哪儿（用户取消返回 ''）。"""
+    root = getattr(win, '_project_root', '') or Path.cwd()
+    try:
+        from storygraph.assets.asset_mapping import MAPPING_FILENAME
+    except Exception as e:                       # noqa: BLE001 - 拿不到就用手写名
+        swallow('ui_qt.main_window.mapping_export_path', e)
+        MAPPING_FILENAME = 'storygraph.mapping.json'
+    path, _filter = QFileDialog.getSaveFileName(
+        win, '导出资源映射初稿', str(Path(str(root)) / MAPPING_FILENAME),
+        '映射 JSON (*.json);;所有文件 (*)')
+    return str(path or '')
+
+
+def _ignore_checked(fn, win, *_args):
+    """
+    菜单/按钮回调垫片：`QAction.triggered(bool)` 会把 `checked` 当**第一个
+    位置参数**喂给槽函数（见 `_build_toolbars.act()` 的说明）。这里吞掉它，
+    否则 `fn(win, False)` 会 TypeError —— 用户看到的是"点了没反应"。
+    """
+    return fn(win)
+
+
+def open_mapping_dialog(win, *, mapping_path: str = '',
+                        force_reload: bool = False, tab: str = '',
+                        export_path: str = '', prepare_save: bool = False):
+    """
+    打开「🗂 资源映射」对话框（五个菜单动作共用这一条路）。
+
+    各动作只是"开在哪个状态"，判定 / 写盘 / diff 全在对话框里（一次只维护一份）：
+
+      · `mapping_path`   —— 指定要读哪份映射（「载入映射…」先问路径）；
+      · `force_reload`   —— 绕过 mtime 缓存重读（「重读」：外部编辑器刚改完）；
+      · `export_path`    —— 先按当前项目生成初稿写到这儿，再开窗显示结果
+                            （写盘是用户刚才在「另存为」里**明确点过**的）；
+      · `prepare_save`   —— 先把"保存到项目根"的 diff 算好摆出来，
+                            用户只需在窗里点「确认写入」（**确认门禁不跳过**）；
+      · `tab`            —— `'table'` 时直接翻到「资源对照表」页。
+
+    没有项目根时**说一句人话**再返回（不静默什么都不做）：映射要写进项目里。
+    """
+    from storygraph.ui_qt.mapping_dialog import MappingDialog
+    root = str(getattr(win, '_project_root', '') or '')
+    if not root and not mapping_path:
+        msg = ('还没有打开项目 —— 先点「📁 打开项目」选项目根，'
+               '资源映射要存在项目里（项目根或 game/ 下）。')
+        try:
+            win._log('[资源映射] ' + msg)
+            win._status(msg)
+        except Exception as e:                    # noqa: BLE001 - 提示失败也返回
+            swallow('ui_qt.main_window.mapping_no_project', e)
+        return None
+    registry = None
+    try:
+        registry = win._registry_provider()
+    except Exception as e:                        # noqa: BLE001 - 没有资源表也能读映射
+        swallow('ui_qt.main_window.mapping_registry', e)
+    dlg = MappingDialog(win, registry=registry, project_root=root,
+                        mapping_path=mapping_path)
+    # 各动作的"预置状态"——失败只记台账，不许拦住开窗（用户还得能看能改）
+    for step, fn in (('reload', lambda: dlg.reload_mapping() if force_reload else None),
+                     ('export', lambda: dlg.export_draft(export_path) if export_path else None),
+                     ('prepare_save', lambda: dlg.prepare_save() if prepare_save else None)):
+        try:
+            fn()
+        except Exception as e:                    # noqa: BLE001
+            swallow(f'ui_qt.main_window.mapping_{step}', e)
+    if tab == 'table':
+        tabs = getattr(dlg, '_tabs', None)        # 稳定内部结构（见 mapping_dialog._build）
+        if tabs is not None:
+            try:
+                for i in range(tabs.count()):
+                    if '对照' in tabs.tabText(i):
+                        tabs.setCurrentIndex(i)
+                        break
+            except Exception as e:                # noqa: BLE001
+                swallow('ui_qt.main_window.mapping_tab', e)
+    try:
+        _exec_mapping_dialog(dlg)
+    finally:
+        # 对话框里可能载入了 / 写了新映射 —— 状态栏那一行与"未识别张数"必须重算
+        refresh_mapping_status(win, force=True)
+    return dlg
+
+
+def mapping_load_file(win):
+    """菜单「载入映射…」：先挑文件，再开在这个映射上。"""
+    path = _choose_mapping_file(win)
+    if not path:
+        return None
+    return open_mapping_dialog(win, mapping_path=path)
+
+
+def mapping_reload(win):
+    """菜单「重读」：绕过缓存重读项目里的映射文件。"""
+    return open_mapping_dialog(win, force_reload=True)
+
+
+def mapping_export_draft(win):
+    """菜单「导出映射初稿…」：先挑保存位置，再开窗看到结果。"""
+    path = _choose_mapping_export_path(win)
+    if not path:
+        return None
+    return open_mapping_dialog(win, export_path=path)
+
+
+def mapping_save_to_project(win):
+    """菜单「保存到项目根」：开窗时 diff 已经算好，用户点「确认写入」才落盘。"""
+    return open_mapping_dialog(win, prepare_save=True)
+
+
+def mapping_show_table(win):
+    """菜单「资源对照表」：开窗并翻到对照表页（1720 行一张图 + 只看未识别）。"""
+    return open_mapping_dialog(win, tab='table')
+
+
+def refresh_mapping_status(win, *, force: bool = False):
+    """
+    （重新）算「映射」那条状态 + 未识别张数，写进状态栏那一格。
+
+    **未识别张数只算一次**（用户点名：别每次刷新都算一遍）：1720 张图算一轮
+    实测 ~0.16s，挂在"每次状态栏刷新"上就是肉眼可见的卡。缓存键是**项目根**：
+    换项目 / `force=True`（对话框关掉、点「重读」）才重算。
+
+    返回 `(MappingState | None, unknown)`；判据（`tests/test_mapping_menu.py`）
+    直接读它，不必去截状态栏文字。
+    """
+    root = str(getattr(win, '_project_root', '') or '')
+    cache = getattr(win, MAPPING_CACHE_ATTR, None)
+    if cache is not None and not force and cache.get('root') == root:
+        state, unknown = cache.get('state'), int(cache.get('unknown') or 0)
+    else:
+        state, unknown = None, 0
+        if root:
+            try:
+                from storygraph.ui_qt.mapping_dialog import (contrast_rows,
+                                                            state_from_project,
+                                                            unknown_count)
+                state = state_from_project(root, force=force)
+                registry = None
+                try:
+                    registry = win._registry_provider()
+                except Exception as e:            # noqa: BLE001 - 没资源表也算
+                    swallow('ui_qt.main_window.mapping_status.registry', e)
+                if registry is not None:
+                    unknown = int(unknown_count(contrast_rows(registry, root)))
+            except Exception as e:                # noqa: BLE001 - 状态算不出不该拦人
+                swallow('ui_qt.main_window.mapping_status', e)
+        setattr(win, MAPPING_CACHE_ATTR,
+                {'root': root, 'state': state, 'unknown': unknown})
+    label = getattr(win, '_mapping_label', None)
+    if label is None:                             # 界面还没搭到这一步
+        return state, unknown
+    try:
+        from storygraph.ui_qt.mapping_dialog import status_text
+        text = status_text(state, unknown)
+        label.setText(text)
+        color = theme.t('text.secondary')
+        if state is not None and getattr(state, 'error', ''):
+            color = theme.t('state.warning')
+        elif state is not None and state.has_data():
+            color = theme.t('state.success')
+        label.setStyleSheet(f'color: {color};')
+        tips = [text]
+        if root:
+            tips.append(f'项目根：{root}')
+        path = str(getattr(state, 'path', '') or '') if state is not None else ''
+        if path:
+            tips.append(f'映射文件：{path}')
+        if state is not None and getattr(state, 'error', ''):
+            tips.append('读不出来：' + str(state.error))
+        if unknown:
+            tips.append(f'{unknown} 张图没认出是什么 —— 点「🗂 资源映射 → 资源对照表」'
+                        f'看明细（未识别的排最上面）。')
+        label.setToolTip('\n'.join(str(t) for t in tips))
+    except Exception as e:                        # noqa: BLE001 - 只影响一个提示
+        swallow('ui_qt.main_window.mapping_status.label', e)
+    return state, unknown
+
+
+def _install_mapping_ui(win):
+    """
+    装「🗂 资源映射」菜单 + 状态栏那一格（在 `_build_toolbars` 里调一次）。
+
+    为什么是**菜单栏**而不是工具栏按钮：工具栏那条在 900px 窗口下已经
+    贴着预算（见 `test_ui_width.py`），再加一个 100px+ 的文字按钮会把它顶破；
+    菜单栏标题本来就窄，而且两页都看得见（映射与"在哪一页"无关）。
+    """
+    try:
+        menu = win.menuBar().addMenu('🗂 资源映射')
+    except Exception as e:                        # noqa: BLE001 - 没有菜单栏也不该拦开窗
+        swallow('ui_qt.main_window.mapping_menu', e)
+        return
+    menu.setObjectName('mappingMenu')
+    menu.setToolTip('旧版资产识别口径：映射文件 / 重读 / 导出初稿 / 保存 / 对照表')
+    actions = []
+    for text, fn in zip(MAPPING_MENU_TEXTS,
+                        (mapping_load_file, mapping_reload,
+                         mapping_export_draft, mapping_save_to_project,
+                         mapping_show_table)):
+        act = menu.addAction(text)
+        act.setObjectName('mappingAction' + str(len(actions)))
+        act.triggered.connect(partial(_ignore_checked, fn, win))
+        actions.append(act)
+    win._mapping_menu = menu
+    win._mapping_actions = actions
+    label = QLabel('')
+    label.setObjectName('mappingStatus')
+    label.setProperty('role', 'caption')
+    win._mapping_label = label
+    try:
+        win._status_bar.addPermanentWidget(label)
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.mapping_status.install', e)
+    refresh_mapping_status(win, force=True)
+
+
+# ==================================================================
+#  立绘网格 ↔ 资产选择器 / 资源映射（④⑥ 第二阶段接线）
+# ==================================================================
+
+def pick_sprite_result(win, current: str = ''):
+    """
+    立绘网格的「＋ 添加立绘 / 双击换图」→ 资产选择器（**用途预选「立绘」**）。
+
+    为什么要专门的入口（而不是复用 `window_assets._pick_image`）：那条路只还
+    一个 spec 字符串，卡片就无从知道"用户选的预览图被换成了哪张真立绘"，
+    提示条也就摆不出来（用户 2026-10-30：要看得见判定）。这里多返回
+    `PickResult`（含 `replaced_from/replaced_to/message`），取消返回 None。
+    """
+    from storygraph.ui_qt.asset_picker import AssetPickerDialog
+    if not win._ensure_registry():
+        return None
+    dlg = AssetPickerDialog(
+        win, registry=win._registry_provider(),
+        project_root=getattr(win, '_project_root', None), current=current,
+        types=['image'], want_image_spec=True,
+        title='选择立绘（预览图 / 头像会自动换成真立绘）',
+        purpose='sprite')
+    try:
+        if _exec_asset_picker(dlg) != QDialog.Accepted:
+            return None
+        res = getattr(dlg, 'pick_result', None)
+    finally:
+        try:
+            dlg.close()
+        except Exception as e:                    # noqa: BLE001 - 关不掉也返回
+            swallow('ui_qt.main_window.pick_sprite.close', e)
+    return res if res is not None else str(dlg.image_spec or '')
+
+
+def open_mapping_from_card(win):
+    """卡片提示条上「去『资源映射』修」→ 打开资源映射对话框。"""
+    return open_mapping_dialog(win)
+
+
+def notify_card_notice(win, message: str):
+    """
+    立绘网格的"没写成"通知（选择器拒绝 / 给不出可写 spec）→ 控制台 + 状态栏。
+
+    网格里没有状态栏可用，但**绝不能**因此把拒绝变成静默：用户会以为加上了。
+    """
+    text = str(message or '').strip()
+    if not text:
+        return
+    try:
+        win._log('[立绘] ' + text)
+        win._status(text)
+    except Exception as e:                        # noqa: BLE001 - 提示失败也不拦
+        swallow('ui_qt.main_window.card_notice', e)
+
+
+# ==================================================================
+#  「🎬 演出预览」的写回 at 接线（P2，2026-10-30）
+# ==================================================================
+#
+# ⚠ 真正的调用点在 `window_export.open_stage_preview`（S1 的文件，本轮不加线）。
+# 所以这里给**工具栏那条**换成带 beats / on_apply_at 的版本；各处测试仍可调
+# `win.open_stage_preview()` 走老路（它们只关心"从当前那一拍开始"）。
+
+def _confirm_at_plan(parent, plan) -> bool:
+    """「写回 at」的确认框（**唯一出口**：判据把它换掉，不弹真窗）。"""
+    return QMessageBox.question(
+        parent, '写回 at？', plan.diff_text(),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+
+def _plan_preview_at(win, req):
+    """演出预览发来的写回请求 → `AtEdit` 计划（只算，不动 Beat）。"""
+    from storygraph.app.stage import plan_at_edit
+    from storygraph.story.atl import DEFAULT_SCREEN, project_screen
+    root = getattr(win, '_project_root', None)
+    try:
+        screen = project_screen(root) if root else DEFAULT_SCREEN
+    except Exception as e:                        # noqa: BLE001 - 读不到就用默认分辨率
+        swallow('ui_qt.main_window.preview_at.screen', e)
+        screen = DEFAULT_SCREEN
+    try:
+        idx = int((req or {}).get('beat_index', -1))
+    except (TypeError, ValueError):
+        idx = -1
+    return plan_at_edit(list(getattr(win._session, 'beats', None) or ()), idx,
+                        target=str((req or {}).get('target') or 'scene'),
+                        tag=str((req or {}).get('tag') or ''),
+                        transform=str((req or {}).get('transform') or ''),
+                        project_root=root, screen=screen)
+
+
+def _after_preview_beat_edit(win, plan) -> None:
+    """
+    写回 at 之后的**既有门禁**：会话脏标记 + 状态栏「● 未导出」+ 一行台账。
+
+    ⚠ 刻意**不重载卡片**：卡片里可能有还没保存的手改，重载会把它们冲掉。
+    `session.apply` 对"用户没手改 Stage"的拍会保留结构化列，所以不重载不会
+    把这次写回弄丢（Stage 被手改过的拍以卡片为准 —— 那是用户自己的选择）。
+    """
+    try:
+        win._session.mark_edits_dirty()
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.preview_at.dirty', e)
+    try:
+        win._sync_export_dirty()
+    except Exception as e:                        # noqa: BLE001 - 状态标签失败不拦写回
+        swallow('ui_qt.main_window.preview_at.dirty_ui', e)
+    try:
+        win._log(f'[演出预览] 已写回 at：第 {int(plan.beat_index) + 1} 拍 · '
+                 f'{plan.target_label} · {plan.transform}'
+                 f'（只改内存里的拍；导出时才写 .rpy，预览窗口里可撤销）')
+        win._status('已写回 at（只改内存里的拍；导出仍走既有 diff 确认门禁）')
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.preview_at.log', e)
+
+
+def apply_at_from_preview(win, req):
+    """
+    预览窗口「写回 at…」的外部钩子（`on_apply_at(request) -> AtEdit | None`）。
+
+    约定（见 `stage_preview._on_apply_at_clicked`）：返回的 `AtEdit` 已经
+    **落进内存 Beat**，窗口负责把它记进自己的撤销栈并重画帧；返回 None =
+    没写（用户取消 / 计划被拒）。
+
+    流程与 S3 窗口内的默认路径一致：算计划 → 给 diff 确认 → 写内存 →
+    会话脏标记（导出时的既有确认门禁因此照常生效）。
+    """
+    plan = _plan_preview_at(win, req)
+    if plan is None or not getattr(plan, 'ok', False):
+        reason = str(getattr(plan, 'reason', '') or '').strip() or '没有可写的改动。'
+        notify_card_notice(win, '写回 at 没做：' + reason)
+        return None
+    if not _confirm_at_plan(win, plan):
+        try:
+            win._status('已取消：没有写回 at。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.preview_at.cancel', e)
+        return None
+    try:
+        if not plan.apply():
+            notify_card_notice(win, '写回 at 失败：计划没落进内存里的拍。')
+            return None
+    except Exception as e:                        # noqa: BLE001 - 写失败要说出来
+        swallow('ui_qt.main_window.preview_at.apply', e)
+        notify_card_notice(win, f'写回 at 失败：{e}')
+        return None
+    _after_preview_beat_edit(win, plan)
+    return plan
+
+
+def open_stage_preview_with_at(win):
+    """
+    工具栏「🎬 演出预览」：打开预览窗口，并把**当前 beats + 写回 at 入口**交给它。
+
+    与 `window_export.open_stage_preview` 的差别只有"多传两个参数"：
+    `beats` 让 S3 的「尺寸变换 → 写回 at」能用（只改内存 Beat），
+    `on_apply_at` 让写回走主窗口的脏标记 / 导出确认门禁（见
+    `apply_at_from_preview`）。
+    """
+    session = getattr(win, '_session', None)
+    if not len(session):
+        try:
+            win._status('先载入一章。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.preview.no_chapter', e)
+        return None
+    try:
+        win.apply_current_beat()                  # 先把卡片上的改动提交（老行为）
+    except Exception as e:                        # noqa: BLE001 - 提交失败也照样能预览
+        swallow('ui_qt.main_window.preview.apply_current', e)
+    try:
+        from storygraph.ui_qt.stage_preview import open_preview
+        beats = list(getattr(session, 'beats', None) or [])
+        return open_preview(win, session.frames(),
+                            registry=win._registry_provider(),
+                            project_root=getattr(win, '_project_root', None),
+                            start_index=getattr(win, '_loaded_idx', 0),
+                            beats=beats or None,
+                            on_apply_at=partial(apply_at_from_preview, win))
+    except Exception as e:                        # noqa: BLE001 - 与老入口同一处理
+        QMessageBox.critical(win, '无法打开预览', str(e))
+        return None
+
+
+class NarrowWrapLabel(QLabel):
+    """
+    换行标签，**最小宽只留 24px**：长单词不许把整张卡片顶宽。
+
+    为什么需要（2026-10-30，用户第 5 条「右栏不许出横向滚动条」）：
+    `QLabel(wordWrap=True)` 的最小宽 = **最长的那个词**。舞台摘要
+    （`_stage_label`）里 `base_arms_akimbo` / 长的 bgm id 这类 token 实测能把
+    「当前舞台」那一行顶到 240+150+8 ≈ 398px，整张卡片地板随之 422px ——
+    右栏 340 放不下，横向滚动条又出现。
+
+    这些文字本来就是"折行显示的多行说明"：压窄 = **行数变多**，一个字都不会
+    少（与"用 AlwaysOff 把滚动条关掉、内容被静默裁掉"是两回事）。
+    """
+
+    NARROW_W = 24
+
+    def minimumSizeHint(self) -> QSize:           # noqa: N802 - Qt 接口
+        base = super().minimumSizeHint()
+        return QSize(min(int(base.width()), self.NARROW_W), base.height())
+
+
 class BeatCardEditor(QWidget):
     """
     一张**拍**的卡片：说话人 / 台词 / 立绘网格 / 背景 / 音乐 / 语音 / 备注
@@ -184,7 +745,9 @@ class BeatCardEditor(QWidget):
     undo_requested = Signal()
 
     def __init__(self, symbols=None, loader=None, parent=None,
-                 on_pick_image=None, on_pick_asset=None):
+                 on_pick_image=None, on_pick_asset=None,
+                 on_pick_image_result=None, on_open_mapping=None,
+                 on_notice=None):
         super().__init__(parent)
         self._symbols = symbols
         self._widgets: dict = {}
@@ -193,6 +756,12 @@ class BeatCardEditor(QWidget):
         #: `(字段名, 当前值) -> 新值`：背景/音乐/语音那三格的「选择…」用它。
         #: 卡片不认识资源表与选择器 —— 那条路由主窗口注入（同一个回调模式）。
         self._on_pick_asset = on_pick_asset
+        #: 立绘网格的"带结论"选择器回调（`PickResult`，提示条要用）。
+        self._on_pick_image_result = on_pick_image_result
+        #: 卡片上的「去『资源映射』修」入口（主窗口注入）。
+        self._on_open_mapping = on_open_mapping
+        #: 网格里"没写成"的事（选择器拒绝…）越级上报给主窗口（控制台 + 状态栏）。
+        self._on_notice = on_notice
         #: 载入时 `Stage` 那一格里的原文。用来判断"用户手改过 Stage 没有" ——
         #: 判据是 `当前值 != 这个值`，不是"格子非空"（`beat_to_fields`
         #: 会把结构化列投影进这一格，所以非空不代表人改过）。
@@ -235,7 +804,7 @@ class BeatCardEditor(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(T.SPACE['xs'])
-        self._flow_title = QLabel('')
+        self._flow_title = NarrowWrapLabel('')
         self._flow_title.setProperty('role', 'section')
         self._flow_title.setWordWrap(True)
         head.addWidget(self._flow_title, 1)
@@ -248,7 +817,7 @@ class BeatCardEditor(QWidget):
         head.addWidget(self._flow_type, 0)
         lay.addLayout(head)
 
-        self._flow_detail = QLabel('')
+        self._flow_detail = NarrowWrapLabel('')
         self._flow_detail.setProperty('role', 'caption')
         self._flow_detail.setWordWrap(True)
         lay.addWidget(self._flow_detail)
@@ -353,11 +922,11 @@ class BeatCardEditor(QWidget):
         bar.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
                                T.SPACE['sm'], T.SPACE['sm'])
         bar.setSpacing(2)
-        self._stmt_title = QLabel('')
+        self._stmt_title = NarrowWrapLabel('')
         self._stmt_title.setProperty('role', 'section')
         self._stmt_title.setWordWrap(True)
         bar.addWidget(self._stmt_title)
-        self._stmt_head = QLabel('')
+        self._stmt_head = NarrowWrapLabel('')
         self._stmt_head.setProperty('role', 'caption')
         self._stmt_head.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
         self._stmt_head.setWordWrap(True)
@@ -373,7 +942,7 @@ class BeatCardEditor(QWidget):
         #: ⚠ **不放进语句条**（2026-10-18）：台词拍也可能有这种行
         #: （`play ambience` 后面紧跟一句台词就是同一拍），而语句条在没有
         #: 语句时是隐藏的 —— 放进去就会跟着一起消失。
-        self._loose_label = QLabel('')
+        self._loose_label = NarrowWrapLabel('')
         self._loose_label.setProperty('role', 'caption')
         self._loose_label.setWordWrap(True)
         self._loose_label.setVisible(False)
@@ -502,8 +1071,12 @@ class BeatCardEditor(QWidget):
         now_row = QHBoxLayout()
         now_row.setSpacing(T.SPACE['sm'])
         self._stage_thumb = BeatStageThumb(parent=self, compact=True)
+        # 卡片里这张小图再收窄一档（240×135，仍是 16:9）：288+45+8 的整行最小宽
+        # 341 会把卡片地板顶在 365px，超过"卡片最小宽 ≤340"的预算。
+        # 见模块顶部 `CARD_STAGE_THUMB` 的说明。
+        self._stage_thumb.setFixedSize(*CARD_STAGE_THUMB)
         now_row.addWidget(self._stage_thumb, 0, Qt.AlignTop)
-        self._stage_label = QLabel('')
+        self._stage_label = NarrowWrapLabel('')
         self._stage_label.setProperty('role', 'note')
         self._stage_label.setWordWrap(True)
         self._stage_label.setFont(QFont(T.FONTS['mono'][0],
@@ -542,8 +1115,13 @@ class BeatCardEditor(QWidget):
         head.addWidget(hint, 0)
         head.addStretch(1)
         stage_lay.addLayout(head)
-        self._grid = SpriteGridWidget(symbols=self._symbols, loader=loader,
-                                      on_pick_image=self._on_pick_image)
+        self._grid = SpriteGridWidget(
+            symbols=self._symbols, loader=loader,
+            on_pick_image=self._on_pick_image,
+            on_pick_image_result=self._on_pick_image_result,
+            on_open_mapping=self._on_open_mapping)
+        # 网格里"没写成"的事（选择器拒绝 / 给不出 spec）一路报给主窗口
+        self._grid.notice.connect(self._on_grid_notice)
         stage_lay.addWidget(self._grid)
 
         # —— 背景 / 音乐 / 语音（**两行**：背景一行，音乐 + 语音一行）——
@@ -583,8 +1161,20 @@ class BeatCardEditor(QWidget):
                 combo.setEditable(True)
                 self._widgets[name] = combo
                 line.addWidget(combo, 1)
-                pick = QPushButton('选择…')
+                # ⚠ 2026-10-30（用户第 5 条反馈）：从「选择…」缩成 24px「⋯」。
+                # 三个「选择…」按钮的结构性成本是 58px/个（含 2 个一行的音乐+语音
+                # 行 = 116px），而卡片地板被它顶在 380px —— 右栏拖窄就出横向滚动条。
+                # 按钮**必须看得出能点**：保留 hover/边框样式 + tooltip 写全
+                # （"从资源表里挑背景（分类 / 搜索 / 预览）"）。
+                pick = QPushButton('⋯')
+                pick.setFixedSize(T.CONTROL['iconW'], T.CONTROL['iconW'])  # 24×24
+                # ⚠ **必须 `padding:0`**：默认 QSS 的内边距有十几 px，24px 宽的
+                # 按钮里那个「⋯」会被裁成**一片空白**（offscreen 截图实测），
+                # 用户看到的是"一个点了没反应的方块" —— 正是本项目最怕的形态。
+                # 判据：`tests/test_ui_width.py::test_the_asset_pickers_are_icon_sized`。
+                pick.setStyleSheet('padding:0;')
                 pick.setToolTip(f'从资源表里挑{label}（分类 / 搜索 / 预览）')
+                pick.setAccessibleName(f'选择{label}')
                 pick.clicked.connect(lambda _=False, f=name: self._choose_asset(f))
                 self._asset_btns[name] = pick
                 line.addWidget(pick, 0)
@@ -632,8 +1222,12 @@ class BeatCardEditor(QWidget):
         self._adv_btn = QPushButton(self._adv_label())
         self._adv_btn.setProperty('variant', 'chip')
         self._adv_btn.setFlat(True)
-        self._adv_btn.setToolTip('代码块 / Label / 类型 / Notes / Stage'
-                                 '（收起时这些字段不会被写回）')
+        # 标签只写"高级区"（2026-10-30：原来那句 51 字的长标签一个控件就把
+        # 卡片最小宽顶到 356px、整卡地板 380px —— 右栏一窄就出横向滚动条）。
+        # "里面有什么"放进 tooltip，信息一点没少。
+        self._adv_btn.setToolTip(
+            '代码 / Label / 类型 / Notes / Stage / 台词后缀 / 菜单头'
+            '\n（收起时这些字段不会被写回）')
         self._adv_btn.clicked.connect(self._toggle_adv)
         root.addWidget(self._adv_btn, 0, Qt.AlignLeft)
 
@@ -712,11 +1306,11 @@ class BeatCardEditor(QWidget):
         root.addWidget(self._note_label)
 
     def _adv_label(self) -> str:
-        # 标签里列的是"这里**能改什么**"。2026-10-19 补上菜单头
-        # （`menu 名(args):` 的名与参数）—— 不写进来，人不会知道菜单拍
-        # 也能改这两样（它们只出现在菜单拍上）。
-        return (('▾' if self._adv_open else '▸')
-                + ' 高级区（代码 / Label / 类型 / Notes / Stage / 台词后缀 / 菜单头）')
+        # 标签只留「高级区」：里面有什么写在 tooltip（`_build` 里），
+        # 因为**最小宽度由文本决定** —— 51 字的长标签会把整张卡片的地板
+        # 顶到 380px（`_adv_btn` 单独 minHint=356），右栏一窄就出横向滚动条。
+        # 判据：`tests/test_ui_width.py::test_card_min_width_budget`。
+        return ('▾' if self._adv_open else '▸') + ' 高级区'
 
     # ---------- 语句条（2026-10-18）----------
     #
@@ -1212,6 +1806,22 @@ class BeatCardEditor(QWidget):
     def set_symbols(self, symbols):
         self._symbols = symbols
         self._grid.set_symbols(symbols)
+        # 项目刚打开 / 资源表刚读完：**顺手把资源映射状态加载进来**（一次，按项目根缓存）。
+        # 为什么不放在 `open_project_path` 里：那是 S1 的 mixin 文件，本轮不动；
+        # 而"符号表到位"这件事正好是"资源表读完了"的那一刻（同一次打开项目里，
+        # `_panel.set_symbols` 紧跟 `session.load_assets()` 之后被调用）。
+        win = self.window()
+        if win is not None:
+            refresh_mapping_status(win)
+
+    def _on_grid_notice(self, message: str):
+        """网格的"没写成"通知 → 主窗口（控制台 + 状态栏）。"""
+        fn = self._on_notice
+        if callable(fn):
+            try:
+                fn(str(message or ''))
+            except Exception as e:                # noqa: BLE001 - 提示失败不拦操作
+                swallow('ui_qt.main_window.grid_notice', e)
 
     def set_asset_choices(self, field: str, choices):
         """
@@ -1723,7 +2333,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self.setWindowTitle(self._base_title)
         # ⚠ **按屏幕压一遍**（2026-10-23）：`sizeHint()` 会把工具栏的完整宽度
         #   算进来（实测 2720×705），照它开窗在 1080p/2K 上都跑到屏幕外。
-        self.resize(*fit_to_available(1600, 950))
+        # 2026-10-30：默认尺寸 1600×950 → **1360×900**（用户第 5 条反馈"默认为窄"；
+        #   数字见模块顶部 `DEFAULT_WINDOW_SIZE`）。有记忆时仍以记忆为准
+        #   （`_restore_to_screen` 会覆盖这里）。
+        self.resize(*fit_to_available(*DEFAULT_WINDOW_SIZE))
         self._build()
         #: 构造后**立刻**载入这一章（同步）。
         #: 不推迟到 QTimer 里 —— 调用方（测试、脚本、`open_editor`）
@@ -2351,8 +2964,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         bh.addWidget(self._crumb_hint, 1)
         # —— 增 / 删卡片（结构编辑）——
         # 用户 2026-10-03："只能够修改，不能增删，还是没用！"
-        self._insert_btn = QPushButton('＋ 插入卡片')
-        self._insert_btn.setToolTip('在当前这一拍后面插入一张空卡片（Ctrl+Insert）')
+        #
         # ⚠ **必须包一层 lambda**（2026-10-05 实测，用户报"两个按钮一模一样"）：
         # `QPushButton.clicked` 的信号签名是 `clicked(bool checked = False)`，
         # PySide 会把这个 bool **当成第一个位置参数**喂给槽函数 ——
@@ -2364,35 +2976,80 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # （`window.insert_card(after=True)`），根本没经过信号 ——
         # 缺陷在接线处，而用例绕开了接线（"测试绿了 ≠ 缺陷被钉住"）。
         # 现在有 `test_every_button_slot_can_accept_the_clicked_bool` 守着这一类。
+        #
+        # 2026-10-30（用户第 5 条「UI 宽窄可变」）：这 5 个按钮合计约 570px，
+        # 是**窗口最小宽 1142px 的主因** —— 探针实测：把它们隐藏掉，窗口最小宽
+        # 1142 → 726（`.pip-tmp/plan/05_ui_width.md` §一）。现在收进「⋯ 结构」
+        # 菜单；「↩ 撤销结构操作」留在外面（它是"刚才那一步怎么撤"的即时反馈，
+        # 不该再点两层）。
+        #
+        # ⚠ 5 个按钮对象**都保留**（只是不进这条按钮行）：它们是接线与可用性的
+        # **唯一真源** —— `window_card._sync_structural_buttons` 只认这几个按钮
+        # （那个文件不在本轮改动范围），`tests/test_qt_signal_wiring.py` 也直接
+        # `.click()` 它们。菜单项是同一批按钮的**第二个入口**：打开菜单时把
+        # 可用性从按钮同步过来（见模块级 `sync_structural_menu`）。
+        self._structural_buttons_host = QWidget(self)
+        self._structural_buttons_host.hide()      # 只当"按钮的爹"，不占版面
+        self._insert_btn = QPushButton('＋ 插入卡片', self._structural_buttons_host)
+        self._insert_btn.setToolTip('在当前这一拍后面插入一张空卡片（Ctrl+Insert）')
         self._insert_btn.clicked.connect(lambda: self.insert_card(after=True))
-        bh.addWidget(self._insert_btn)
-        self._insert_before_btn = QPushButton('＋ 插到前面')
+        self._insert_before_btn = QPushButton('＋ 插到前面',
+                                              self._structural_buttons_host)
         self._insert_before_btn.setToolTip('在当前这一拍**前面**插入一张空卡片')
-        self._insert_before_btn.clicked.connect(lambda: self.insert_card(after=False))
-        bh.addWidget(self._insert_before_btn)
-        self._flow_btn = QPushButton('↳ 插入控制流卡')
+        self._insert_before_btn.clicked.connect(
+            lambda: self.insert_card(after=False))
+        self._flow_btn = QPushButton('↳ 插入控制流卡',
+                                     self._structural_buttons_host)
         self._flow_btn.setToolTip(
             '在当前这一拍后面插入一张 call / jump 卡：选目标 label，'
             '调用完会回到这里继续')
         self._flow_btn.clicked.connect(lambda: self.insert_flow_card(after=True))
-        bh.addWidget(self._flow_btn)
-        self._choice_btn = QPushButton('◇ 插入选择点')
+        self._choice_btn = QPushButton('◇ 插入选择点',
+                                       self._structural_buttons_host)
         self._choice_btn.setToolTip(
             '在当前这一拍后面放一个分支：剧本里**只多一行** call，'
             'menu 写在同目录的 <章节>_choices.rpy 里（不动剧本正文）')
         self._choice_btn.clicked.connect(self.insert_choice_point)
-        bh.addWidget(self._choice_btn)
+        self._delete_btn = QPushButton('🗑 删除这张卡片',
+                                       self._structural_buttons_host)
+        self._delete_btn.setToolTip('删掉当前这一拍（只改内存，导出才落盘）')
+        self._delete_btn.setProperty('variant', 'danger')
+        self._delete_btn.clicked.connect(self.delete_card)
+
+        # —— 「⋯ 结构」菜单：上面那 5 个动作的收纳入口 ——
+        self._structural_menu = QMenu(self)
+        self._structural_menu.setToolTipsVisible(True)
+        self._structural_actions = []            # [(QAction, 真源按钮)]
+        for _text, _btn in (
+                ('＋ 插入卡片', self._insert_btn),
+                ('＋ 插到前面', self._insert_before_btn),
+                ('↳ 插入控制流卡', self._flow_btn),
+                ('◇ 插入选择点', self._choice_btn),
+                ('🗑 删除这张卡片', self._delete_btn)):
+            _act = self._structural_menu.addAction(_text)
+            _act.setToolTip(_btn.toolTip())
+            # 与按钮同一条接线：点菜单项 = 点那个按钮（含它自己的 lambda 包装）
+            _act.triggered.connect(
+                lambda _checked=False, b=_btn: b.click())
+            self._structural_actions.append((_act, _btn))
+
+        self._structural_menu.aboutToShow.connect(
+            lambda: sync_structural_menu(self._structural_actions))
+        self._structural_btn = QToolButton()
+        self._structural_btn.setText('⋯ 结构')
+        self._structural_btn.setToolTip(
+            '增 / 删卡片 · 插入控制流卡 · 插入选择点\n'
+            '（原来那一排按钮收进了这里 —— 2026-10-30：给窗口腾出可缩窄的宽度）')
+        self._structural_btn.setPopupMode(QToolButton.InstantPopup)
+        self._structural_btn.setMenu(self._structural_menu)
+        self._structural_btn.setAutoRaise(False)
+        bh.addWidget(self._structural_btn, 0)
         self._restore_btn = QPushButton('↩ 撤销结构操作')
         self._restore_btn.setToolTip(
             '撤销最近一次增删卡片（可连按多级）：删掉的放回原位、插进去的撤掉')
         self._restore_btn.clicked.connect(self.restore_card)
         self._restore_btn.setEnabled(False)
         bh.addWidget(self._restore_btn)
-        self._delete_btn = QPushButton('🗑 删除这张卡片')
-        self._delete_btn.setToolTip('删掉当前这一拍（只改内存，导出才落盘）')
-        self._delete_btn.setProperty('variant', 'danger')
-        self._delete_btn.clicked.connect(self.delete_card)
-        bh.addWidget(self._delete_btn)
         outer.addWidget(bar)
 
         # ⚠ 三栏的顺序照参考界面（2026-10-23）：
@@ -2403,7 +3060,13 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 为主"的排法；改成"正文居中、属性在右"之后，读剧本时视线不用横穿
         # 整块表单。`_split_card` 的名字与下标（0 = 列表）保持不变：
         # `window_state` 按它恢复宽度，改下标等于把用户存的宽度对错栏。
+        #
+        # 2026-10-30（用户第 5 条）：右栏**默认窄**（`CARD_SPLIT_DEFAULT`），
+        # 并且 `setChildrenCollapsible(False)` —— 不让孩子被拖成 0 宽；
+        # 右栏自身有 `CARD_COLUMN_MIN_W=340` 的硬下限（见下面 `right.setMinimumWidth`），
+        # 所以"分栏拖到最窄"= 卡片刚好放得下 = **横向滚动条不可能出现**。
         split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
 
         # —— 中：章节（label）/ 拍 / 参与角色 ——
         left = QWidget()
@@ -2487,12 +3150,32 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self._inspector = PropertyStrip()
         self._inspector.setVisible(False)
         rv.addWidget(self._inspector, 0)
+        cap3_row = QHBoxLayout()
+        cap3_row.setSpacing(T.SPACE['xs'])
         cap3 = QLabel('卡片界面（这一拍）')
         cap3.setProperty('role', 'section')
-        rv.addWidget(cap3)
-        self._panel = BeatCardEditor(symbols=None, loader=self._loader,
-                                     on_pick_image=self._pick_image,
-                                     on_pick_asset=self._pick_asset_for)
+        cap3_row.addWidget(cap3, 0)
+        cap3_row.addStretch(1)
+        # 「⤢ 展开卡片」：右栏默认窄（420），要改大块内容时一键放大。
+        # 与"双击分栏把手"是同一个动作（`toggle_card_column`）。
+        self._card_expand_btn = QToolButton()
+        self._card_expand_btn.setText('⤢')
+        self._card_expand_btn.setToolTip(
+            '展开 / 收起卡片栏（也可**双击分栏把手**）\n'
+            '展开 = 这一栏占 72%，收起 = 回到默认的窄栏')
+        self._card_expand_btn.clicked.connect(
+            lambda _=False: toggle_card_column(self))
+        cap3_row.addWidget(self._card_expand_btn, 0)
+        rv.addLayout(cap3_row)
+        self._panel = BeatCardEditor(
+            symbols=None, loader=self._loader,
+            on_pick_image=self._pick_image,
+            on_pick_asset=self._pick_asset_for,
+            # 立绘网格这条路要"看得见判定"（④⑥）：多带 PickResult / 资源映射入口 /
+            # 拒绝通知（全是模块级函数的 partial —— 主类方法数预算见 `toggle_card_column`）
+            on_pick_image_result=partial(pick_sprite_result, self),
+            on_open_mapping=partial(open_mapping_from_card, self),
+            on_notice=partial(notify_card_notice, self))
         # 立绘缩略图的路径解析：真源是资源表的 Path 列，只有会话拿得到
         self._panel.set_path_resolver(self._session.path_of_image)
         # 卡片里那两个按钮直接连过来（用户要的"保存 / 撤销这张卡片"）
@@ -2502,15 +3185,31 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._panel)
         rv.addWidget(scroll, 1)
+        # ⚠ **结构性保证**：右栏最小宽 = 340（卡片地板实测 296，留 44px 余量）。
+        # `QScrollArea(widgetResizable=True)` 的规则是"卡片宽 = max(视口宽, 卡片
+        # 最小宽)"，所以只要右栏 ≥ 卡片最小宽，横向滚动条就**不可能**出现；
+        # 分栏拖到最窄会自动停在这里（`setChildrenCollapsible(False)` + 本下限）。
+        # 判据：`tests/test_ui_width.py` 把右栏压到 340 逐拍断言 hbar 不可见。
+        right.setMinimumWidth(CARD_COLUMN_MIN_W)
+        self._right_col = right
         split.addWidget(right)
 
         # 中间那一栏要能读剧本（行号 + 类型牌 + 说话人），比原来 260 宽不少；
         # 右栏是"属性 + 表单"，不该吃掉 2/3 的宽度 —— 2026-10-23 用户截图：
-        # 正文 500px、右栏 900px，读台词反而最挤。改成 3:2：正文能多放两行，
-        # 表单仍然够放（它本来就能滚）。
-        split.setSizes([560, 500])
+        # 正文 500px、右栏 900px，读台词反而最挤。
+        # 2026-10-30：默认再往窄拉一档（用户第 5 条"默认为窄"）：右栏 ≈ 420，
+        # 读剧本的正文栏多留一些。要改大块内容时点「⤢」或双击分栏把手。
+        split.setSizes(list(CARD_SPLIT_DEFAULT))
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
+        # 双击分栏把手 = 展开 / 收起卡片栏（与「⤢」同一个动作）
+        handle = split.handle(1)
+        if handle is not None:
+            handle.setToolTip('拖动 = 调整卡片栏宽度\n双击 = 展开 / 收起卡片栏')
+            self._card_handle_filter = CardColumnExpandFilter(self)
+            handle.installEventFilter(self._card_handle_filter)
+        self._card_col_expanded = False
+        self._card_col_saved = list(CARD_SPLIT_DEFAULT)
         self._split_card = split          # 同上：会话记忆要摆回它
         outer.addWidget(split, 1)
         return page
@@ -2722,7 +3421,12 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '只重算「舞台快照」「演出时间轴」两张只读表（不动 Beats 一格）。\n'
             '这两张是递推推导出来的，改了脚本/表格后不会自己变 —— '
             '表头会写着它是哪一刻生成的。')
-        act('🎬 演出预览', self.open_stage_preview, '按卡片效果"跑起来"')
+        # ⚠ 这里**不走** `self.open_stage_preview`（S1 的 `window_export` 那份只传
+        # frames）：工具栏这条要顺手把当前 beats 与"写回 at"入口交给预览窗口，
+        # 见 `open_stage_preview_with_at`（P2，2026-10-30）。
+        act('🎬 演出预览', partial(open_stage_preview_with_at, self),
+            '按卡片效果"跑起来"\n'
+            '预览窗口里能用「尺寸变换」把 at 写回这一拍（只改内存，导出时才写 .rpy）')
         # 真引擎（2026-10-29）：Pillow 预览负责"改一句看一眼"，它负责
         # "这一章真跑起来是什么样" —— 转场/ATL/自定义 UI/小游戏只有引擎准。
         self._engine_action = act(
@@ -2734,6 +3438,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             '用引擎直接落到**当前这一拍**（近似：跳过前情，'
             '前面几章设的变量没有值；先导出再试）')
         act('❓ 使用说明', self.show_help, '操作说明与快捷键（独立窗口，不占界面）')
+
+        # —— 「🗂 资源映射」菜单 + 状态栏那一格（④⑥ 第二阶段）——
+        # 放在**菜单栏**而不是工具栏：900px 窗口下工具栏已贴着宽度预算
+        # （见 `_install_mapping_ui` 的说明）；而且映射与"在哪一页"无关。
+        _install_mapping_ui(self)
 
     # ------------------------------------------------------------------
     #  页切换
