@@ -41,6 +41,8 @@ from pathlib import Path
 
 from storygraph.app.beats import lookup_image_id
 from storygraph.story.stage_snapshot import snapshot_rows
+from storygraph.story.transition_catalog import effect_of, scan_project_transitions
+from storygraph.story.transition_expr import beat_transitions
 
 #: 归一化坐标：0.0 = 屏幕最左，1.0 = 最右（与 Ren'Py 的 xalign 同向）
 CENTER_X = 0.5
@@ -119,9 +121,14 @@ class StageFrame:
     speaker_color: str = ''
     what_color: str = ''
     #: 背景自己的变换（`scene bg room at bgfit` 的 `bgfit`）。
+    #: **持续状态**：来自快照 state（`scene` 之后每一拍都带着），
+    #: 不是"这一拍写了才有"（2026-10-30，⑦ P0）。
     scene_at: str = ''
     sprites: list = field(default_factory=list)
     layers: str = ''            # CG/UI 等非角色图层
+    #: 图层 tag → 它的 `at`（`show cg cg01 at cg38402160` 的变换）。
+    #: 来自快照 state['layer_at']；缺键默认空 dict，老调用方不受影响。
+    layers_at: dict = field(default_factory=dict)
     music: str = ''
     sound: str = ''
     voice: str = ''
@@ -132,6 +139,17 @@ class StageFrame:
     #: 这一拍的**停顿秒数**（`pause 1.5` / `pause 1.5 hard`；0 = 没写）。
     #: 预览据此决定自动播放停多久 —— 从前固定 900ms，长台词一闪而过。
     pause: float = 0.0
+    #: 这一拍派生出的**过场调用**（`transition_expr.beat_transitions(beat)`）。
+    #: 三路都算：`Beat.with_` 子句 / `Beat.raw` 里独立一行的 `with X` /
+    #: `Beat.code` 里的 `$ renpy.transition(...)`。默认空元组 ——
+    #: 手工构造的老调用方不用改（缺省 = "这一拍没有过场"）。
+    transitions: tuple = ()
+    #: `transitions` 翻成的**效果描述**（`transition_catalog.effect_of`）。
+    #: 只在构造时拿得到 `project_root` 时自定义名字才解析得准（`define 名字 =
+    #: Fade(…)`）；拿不到时裸构造器照常、自定义名是 `unknown`。消费方可以
+    #: 用 `story.transition_catalog.effect_of` + `project_transitions()` 重解析
+    #: （`app.stage_render.transition_notes` 就是这么做的）。
+    effects: tuple = ()
 
     @property
     def duration_ms(self) -> int:
@@ -180,8 +198,98 @@ class StageFrame:
         return bool(str(self.text or '').strip())
 
 
+# ---------------------------------------------------------------------------
+#  项目转场目录（按项目根 + `.rpy` 修改时间缓存）
+# ---------------------------------------------------------------------------
+#
+# 为什么要缓存：`scan_project_transitions` 读一遍项目里的 `.rpy`（真机 96 个
+# 文件约 0.1s）；而卡片每次刷新、预览每翻一拍都要问"这一拍的过场长什么样"。
+# 每拍扫一遍 = 把 0.1s × 1022 拍摊在播放上，不能接受。这里按项目根缓存，
+# 并用"路径 + mtime + 大小"的签名兜底：项目里改了 `.rpy` 就会重扫。
+
+#: `{项目根: (签名, 取签名时刻, {名字: Effect})}`
+_TRANSITION_CACHE: dict = {}
+#: 目录签名的复核间隔（秒）：改完 `.rpy` 最多这么久就会生效。
+_TRANSITION_REFRESH_SECONDS = 2.0
+
+
+def _transition_signature(project_root) -> tuple:
+    """项目 `.rpy` 的"修改指纹"（路径 + mtime + 大小）—— 变了就重扫。"""
+    try:
+        from storygraph.story.cds_registry import find_scripts
+        scripts = list(find_scripts(project_root))
+    except Exception as e:                    # noqa: BLE001 - 目录坏了不该崩
+        swallow('app.stage.transition_scripts', e)
+        return ()
+    out = []
+    for path in scripts:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        out.append((str(path), stat.st_mtime_ns, stat.st_size))
+    out.sort()
+    return tuple(out)
+
+
+def project_transitions(project_root, refresh_seconds: float = None) -> dict:
+    """
+    项目里 `define` 的转场 → `{名字: Effect}`（**按项目根 + mtime 缓存**）。
+
+    扫描口径与 `transition_catalog.scan_project_transitions` 完全一样，只多
+    两层缓存：
+      1. 模块级缓存：0.1s 的扫描只落在"第一次 / 项目真的改了"上；
+      2. 签名复核（路径 + mtime + 大小）最多每 `refresh_seconds` 秒一次，
+         改完 `.rpy` 不会一直拿旧效果演。
+
+    没有 `project_root` → 空表（调用方按"项目里没有 define 过"处理）。
+    """
+    if not project_root:
+        return {}
+    try:
+        root = str(Path(str(project_root)))
+    except (TypeError, ValueError):
+        return {}
+    try:
+        ttl = float(refresh_seconds if refresh_seconds is not None
+                    else _TRANSITION_REFRESH_SECONDS)
+    except (TypeError, ValueError):
+        ttl = _TRANSITION_REFRESH_SECONDS
+    now = time.monotonic()
+    cached = _TRANSITION_CACHE.get(root)
+    # 用 `<` 而不是 `<=`：`refresh_seconds=0` 要**每次都复核签名**（测试/探针），
+    # 而 Windows 的 monotonic 分辨率较粗，背靠背两次调用可能差 0.0。
+    if cached is not None and ttl > 0 and (now - cached[1]) < ttl:
+        return cached[2]
+    signature = _transition_signature(project_root)
+    if cached is not None and cached[0] == signature:
+        _TRANSITION_CACHE[root] = (signature, now, cached[2])
+        return cached[2]
+    try:
+        catalog = scan_project_transitions(project_root)
+    except Exception as e:                    # noqa: BLE001 - 扫不动就当没有
+        swallow('app.stage.project_transitions', e)
+        catalog = {}
+    _TRANSITION_CACHE[root] = (signature, now, catalog)
+    return catalog
+
+
+def clear_transition_cache() -> None:
+    """清空转场目录缓存（测试 / 换项目时用；正常使用不需要调）。"""
+    _TRANSITION_CACHE.clear()
+
+
+def _beat_transitions_of(beat) -> tuple:
+    """一拍 → 过场调用元组（派生失败按"没有过场"处理，不崩舞台）。"""
+    try:
+        return tuple(beat_transitions(beat))
+    except Exception as e:                    # noqa: BLE001 - 派生失败不该拦预览
+        swallow('app.stage.beat_transitions', e)
+        return ()
+
+
 def build_frames(beats: list, registry=None, transform_index=None,
-                 screen=None) -> list:
+                 screen=None, project_root=None) -> list:
     """
     Beat 序列 → `StageFrame` 列表（**纯函数，不碰 tkinter**）。
 
@@ -193,6 +301,11 @@ def build_frames(beats: list, registry=None, transform_index=None,
     `story.atl.placement_of` 算出**真实像素位置与缩放**（`SpriteLayout.place`）。
     不传时 `placement_of` 仍会按内置 transform / 位置词 / 名字首字母给一个
     合理值（**永远不返回 None**），行为与以前完全一致。
+
+    `project_root`（2026-10-30，③ 过场接入）：项目根。传了才查项目
+    `define` 的转场目录（`project_transitions`，带缓存），自定义转场名
+    （`with close_eyes`）才能翻成"怎么演"；不传时裸构造器照常，自定义名是
+    `unknown` —— 与"没载入项目"的语义一致，不猜。
     """
     if not beats:
         return []
@@ -200,12 +313,14 @@ def build_frames(beats: list, registry=None, transform_index=None,
 
     size = tuple(screen) if screen else DEFAULT_SCREEN
     rows = snapshot_rows(beats)
-    return [_frame_of(beat, row, i, registry, transform_index, size)
+    return [_frame_of(beat, row, i, registry, transform_index, size,
+                      project_root=project_root)
             for i, (beat, row) in enumerate(zip(beats, rows))]
 
 
 def build_frame_at(beats: list, index: int, registry=None,
-                   transform_index=None, screen=None):
+                   transform_index=None, screen=None,
+                   project_root=None):
     """
     **只算第 `index` 拍那一帧**（卡片上的「这一拍的舞台图」用）。
 
@@ -220,6 +335,9 @@ def build_frame_at(beats: list, index: int, registry=None,
 
     参数非法（越界 / 空章）返回 `None` —— 调用方据此显示"没有画面"，
     **不编一帧假的**。
+
+    `project_root`：同 `build_frames`（查项目转场目录，自定义转场名才解析得准；
+    卡片那张缩略图不需要过场，不传也不影响画面）。
     """
     if not beats:
         return None
@@ -232,11 +350,12 @@ def build_frame_at(beats: list, index: int, registry=None,
     rows = snapshot_rows(beats[:i + 1])
     if not rows:
         return None
-    return _frame_of(beats[i], rows[-1], i, registry, transform_index, size)
+    return _frame_of(beats[i], rows[-1], i, registry, transform_index, size,
+                     project_root=project_root)
 
 
 def _frame_of(beat, row, index: int, registry, transform_index,
-              size) -> 'StageFrame':
+              size, project_root=None) -> 'StageFrame':
     """一行快照 + 一拍 → 一帧（`build_frames` / `build_frame_at` 共用）。"""
     from storygraph.story.atl import placement_of
 
@@ -269,6 +388,28 @@ def _frame_of(beat, row, index: int, registry, transform_index,
     # 真实渲染按它画（说话人高亮不能改变遮挡关系）。
     sprites.sort(key=lambda s: (not s.speaking, s.x))
 
+    # 舞台状态全部来自快照 state（与产物同源）：
+    #   · `scene_at` 是**持续状态**（`scene bg X at bgfit` 之后一直带着），
+    #     回退到当前拍的 `beat.scene_at` 只为了兼容"单拍手工构造"的老调用方；
+    #   · `layers_at` 是 2026-10-30 ⑦ P0 新增的图层变换表（tag → at）。
+    state = row.get('state') or {}
+    scene_at = str(state.get('scene_at')
+                   or getattr(beat, 'scene_at', '') or '')
+    layers_at = dict(state.get('layer_at') or {})
+
+    # 过场（2026-10-30，③）：三条来路（inline with / 独立 with /
+    # `$ renpy.transition(...)`）都派生，再翻成"怎么演"。
+    # 目录只在有项目根时查；没有项目的空目录也能解析裸构造器（不猜名字）。
+    transitions = _beat_transitions_of(beat)
+    effects = ()
+    if transitions:
+        try:
+            catalog = project_transitions(project_root) if project_root else {}
+            effects = tuple(effect_of(call, catalog) for call in transitions)
+        except Exception as e:                # noqa: BLE001 - 解析失败不等于硬切
+            swallow('app.stage.frame.transition_effects', e)
+            effects = ()
+
     return StageFrame(
         index=index,
         line_id=(row.get('line_id', '')
@@ -280,15 +421,18 @@ def _frame_of(beat, row, index: int, registry, transform_index,
         what_color=str(ch.get('WhatColor') or ''),
         text=row.get('text', '') or '',
         scene=row.get('scene', '') or '',
-        scene_at=str(getattr(beat, 'scene_at', '') or ''),
+        scene_at=scene_at,
         sprites=sprites,
         layers=row.get('layers', '') or '',
+        layers_at=layers_at,
         music=row.get('music', '') or '',
         sound=row.get('sound', '') or '',
         voice=row.get('voice', '') or '',
         changes=row.get('display_changes', '') or '',
         with_=str(getattr(beat, 'with_', '') or ''),
-        pause=_pause_seconds_of(beat))
+        pause=_pause_seconds_of(beat),
+        transitions=transitions,
+        effects=effects)
 
 
 def _pause_seconds_of(beat) -> float:
@@ -342,6 +486,319 @@ def placement_notes(frame: StageFrame) -> list:
         who = str(getattr(s, 'image', '') or getattr(s, 'tag', '') or '').strip()
         out.append(f'{who}：{note}' if who else note)
     return out
+
+
+# ===================== 人工写回 at（P2，2026-10-30） =====================
+#
+# 用户拍板（二轮）：
+#   · **工具不自动写 at**（预览必须真实：没有 at 就按引擎裁切 + 提示）；
+#   · 但**经人手**可以选一个 transform 写回（diff 确认、可撤销）；
+#   · 只允许引用**项目里已有**的 transform（不新增定义、不猜语义）。
+#
+# 这些函数只改**内存里的 `Beat`**：落盘/导出仍走既有 `patch_export` 门禁
+# （diff 确认 + 撤销）。所以它们**绝不直接写 .rpy**，也不碰用户字节。
+
+
+def at_transform_candidates(project_root=None, transform_index=None,
+                            screen=None) -> list:
+    """
+    项目里**已有**、可以挂到背景/图层上的 transform → 给 UI 的候选表。
+
+    返回 `[{'name', 'label', 'fit', 'zoom', 'changes_size'}, …]`：
+      · `changes_size` = 这条 transform 真的会改尺寸（fit/xsize/ysize/zoom）；
+      · 排序：会改尺寸的在前（用户要"调大小"），同组按名字。
+    只读项目源码（`scan_transforms`），不写盘。
+    """
+    from storygraph.story.atl import (DEFAULT_SCREEN, placement_of,
+                                      scan_transforms)
+    index = transform_index if transform_index is not None \
+        else (scan_transforms(project_root) if project_root else {})
+    index = index or {}
+    screen_pair = tuple(screen) if screen else DEFAULT_SCREEN
+    out = []
+    for name in sorted(index):
+        try:
+            place = placement_of(name, index, screen=screen_pair)
+        except Exception as e:                 # noqa: BLE001 - 坏定义跳过
+            swallow('app.stage.at_transform_candidates', e)
+            continue
+        fit = str(getattr(place, 'fit', '') or '')
+        xz = float(getattr(place, 'xzoom', 1.0) or 1.0)
+        yz = float(getattr(place, 'yzoom', 1.0) or 1.0)
+        xs = getattr(place, 'xsize', None)
+        ys = getattr(place, 'ysize', None)
+        changes_size = bool(fit or xs is not None or ys is not None
+                            or abs(xz - 1.0) > 1e-6
+                            or abs(yz - 1.0) > 1e-6)
+        bits = []
+        if fit:
+            bits.append(f'fit "{fit}"')
+        if xs is not None:
+            bits.append(f'xsize {float(xs):g}')
+        if ys is not None:
+            bits.append(f'ysize {float(ys):g}')
+        if abs(xz - yz) < 1e-6:
+            if abs(xz - 1.0) > 1e-6:
+                bits.append(f'zoom {xz:g}')
+        else:
+            bits.append(f'xzoom {xz:g}，yzoom {yz:g}')
+        if not bits and getattr(place, 'x_px', None) is not None:
+            bits.append('位置')
+        out.append({
+            'name': name,
+            'fit': fit,
+            'zoom': xz,
+            'changes_size': changes_size,
+            'label': f'{name}（{"，".join(bits)}）' if bits else name,
+        })
+    out.sort(key=lambda e: (not e['changes_size'], e['name']))
+    return out
+
+
+@dataclass
+class AtEdit:
+    """
+    一次"人工应用 transform"的**计划**（P2）。
+
+    `apply(beat)` / `revert(beat)` 只改内存；写盘仍走既有补丁门禁。
+    字段里的 `rpy_before/rpy_after` 是**生成产物**的逐行 diff（确认对话框用）。
+    """
+
+    target: str = 'scene'          # 'scene'（背景 scene_at）| 'layer'（show at）
+    tag: str = ''                  # target='layer' 时的图层 tag（cg/ui…）
+    transform: str = ''
+    beat_index: int = -1
+    _beat: object = field(default=None, repr=False, compare=False)
+    field: str = 'scene_at'        # 'scene_at' | 'show'
+    before: str = ''
+    after: str = ''
+    rpy_before: str = ''
+    rpy_after: str = ''
+    reason: str = ''               # 非空 = 拒绝（不写）
+
+    @property
+    def ok(self) -> bool:
+        return not self.reason and self.before != self.after
+
+    @property
+    def target_label(self) -> str:
+        if self.target == 'layer':
+            return f'图层 {self.tag}（show at）'
+        return '背景（scene_at）'
+
+    def _get_beat(self, beat=None):
+        return beat if beat is not None else self._beat
+
+    def apply(self, beat=None) -> bool:
+        """写进内存里的 Beat；成功返回 True（不改 .rpy）。"""
+        beat = self._get_beat(beat)
+        if not self.ok or beat is None:
+            return False
+        setattr(beat, self.field, self.after)
+        return True
+
+    def revert(self, beat=None) -> bool:
+        """撤销：把字段还原成计划时的值（可重复调用）。"""
+        beat = self._get_beat(beat)
+        if beat is None:
+            return False
+        setattr(beat, self.field, self.before)
+        return True
+
+    def diff_text(self) -> str:
+        """给人看的 diff（确认对话框正文）。"""
+        lines = [f'第 {self.beat_index + 1} 拍 · {self.target_label} · '
+                 f'transform「{self.transform}」',
+                 f'字段：{self.field}']
+        if self.reason:
+            lines.append(f'不能写：{self.reason}')
+            return '\n'.join(lines)
+        try:
+            import difflib
+            diff = list(difflib.unified_diff(
+                (self.rpy_before or '').splitlines(),
+                (self.rpy_after or '').splitlines(),
+                fromfile='现在', tofile='应用后', lineterm='', n=1))
+        except Exception as e:                 # noqa: BLE001 - diff 失败退字段对比
+            swallow('app.stage.AtEdit.diff_text', e)
+            diff = []
+        if diff:
+            lines.extend(diff)
+        else:
+            lines.extend([f'- {self.before or "（空）"}',
+                          f'+ {self.after or "（空）"}'])
+        lines.append('只改内存里的 Beat；保存/导出仍走既有 diff 确认门禁，'
+                     '可撤销。')
+        return '\n'.join(lines)
+
+
+def _show_part_info(part: str) -> dict:
+    """
+    一条 `show` 子句（`split_stage_items` 的一段）→ 简单判断。
+
+    返回 `{'part','image','at','kind'}`；`kind` 是：
+      · `simple` —— 紧凑 `图@变换` 或纯图名（**能安全改写**）；
+      · `complex` —— 含 `behind/with/as/onlayer/zorder` 等修饰（拒绝改写）；
+      · `expression` —— `show expression …`（图像名是表达式，拒绝改写）。
+
+    ⚠ 刻意**不** import `story.beat_model._split_show_items`（跨包私有名，
+    `test_package_layering` 不允许）：这里只需要"能不能安全改 @at"，用
+    公开词表 `core.vocabulary` 的同一套关键字即可，不复制完整解析。
+    """
+    from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
+                                            SHOW_INTRO_KEYWORDS,
+                                            classify_show_words)
+    part = str(part or '').strip()
+    if not part:
+        return {}
+    if part.startswith('expression') and (
+            len(part) == len('expression')
+            or part[len('expression')].isspace()):
+        return {'part': part, 'image': '', 'at': '', 'kind': 'expression'}
+    words = part.split()
+    if any(w in SHOW_CLAUSE_KEYWORDS or w in SHOW_INTRO_KEYWORDS
+           for w in words):
+        try:
+            target = classify_show_words(part, intros=()).target or ''
+        except Exception as e:                 # noqa: BLE001 - 认不出就按复杂处理
+            swallow('app.stage._show_part_info', e)
+            target = ''
+        return {'part': part, 'image': str(target), 'at': '',
+                'kind': 'complex'}
+    if '@' in part:
+        image, _, at = part.partition('@')
+        return {'part': part, 'image': image.strip(), 'at': at.strip(),
+                'kind': 'simple'}
+    return {'part': part, 'image': part, 'at': '', 'kind': 'simple'}
+
+
+def _layer_show_edit(beat, tag: str, transform: str):
+    """
+    `target='layer'` 的改写：只动**简单** show 条目的 `@at`。
+
+    复杂子句（`behind` / `with` / `expression`）**拒绝**：那是"不猜语义"，
+    让用户去高级区 Stage 手改（与预览其它地方同一条规矩）。
+
+    返回 `(new_show, before_at, reason)`；reason 非空 = 拒绝。
+    """
+    from storygraph.core.vocabulary import NON_ACTOR_TAGS, split_stage_items
+
+    tag = str(tag or '').strip()
+    if not tag:
+        return '', '', '没有指定图层 tag'
+    if tag not in NON_ACTOR_TAGS or tag in ('bg', 'background', 'bg_'):
+        return '', '', f'「{tag}」不是非角色图层（立绘位置请走「位置」入口）'
+    if not str(getattr(beat, 'show', '') or '').strip():
+        return '', '', '这一拍没有 show 图层'
+    parts = split_stage_items(beat.show)
+    infos = [_show_part_info(p) for p in parts]
+    hit = -1
+    for i, info in enumerate(infos):
+        if not info:
+            continue
+        image_parts = str(info.get('image') or '').split()
+        image_tag = image_parts[0] if image_parts else ''
+        if image_tag != tag:
+            continue
+        if info.get('kind') == 'expression':
+            return '', '', 'expression 形态的 show 不能安全改写，请在高级区 Stage 改'
+        if info.get('kind') == 'complex':
+            return '', '', ('这条 show 是复杂子句（含 behind/with 等），'
+                            '请在「高级区 · Stage」里手改；预览不猜')
+        hit = i
+    if hit < 0:
+        return '', '', f'这一拍没有图层「{tag}」的 show'
+    part = parts[hit]
+    if '@' in part:
+        new_part = part.rpartition('@')[0].rstrip() + '@' + transform
+    else:
+        new_part = part.strip() + '@' + transform
+    new_show = '; '.join([*parts[:hit], new_part, *parts[hit + 1:]])
+    before_at = str(infos[hit].get('at') or '')
+    return new_show, before_at, ''
+
+
+def plan_at_edit(beats, index: int, *, target: str = 'scene', tag: str = '',
+                 transform: str, project_root=None, transform_index=None,
+                 screen=None) -> AtEdit:
+    """
+    计划一次"人工写回 at"（**只算，不动 Beat**；确认后调 `AtEdit.apply`）。
+
+    规则（契约 §1.6 P2 / 用户拍板）：
+      · 只引用**项目已有**的 transform（`scan_transforms` 查不到就拒绝）；
+      · `target='scene'` → 写 `beat.scene_at`；`target='layer'` → 改该 show
+        条目的 `@at`（复杂子句 / expression 拒绝）；
+      · 计划里带**生成产物 diff**（`render_beat_to_rpy` 前后），供确认；
+      · 只改内存 Beat —— 落盘走既有 patch/导出门禁，可撤销。
+    """
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return AtEdit(reason='拍索引不合法', beat_index=-1)
+    beats = list(beats or ())
+    if idx < 0 or idx >= len(beats):
+        return AtEdit(reason='没有这一拍（索引越界）', beat_index=idx)
+    beat = beats[idx]
+    transform = str(transform or '').strip()
+    if not transform:
+        return AtEdit(reason='没有选择 transform', beat_index=idx, _beat=beat)
+    from storygraph.story.atl import (DEFAULT_SCREEN, placement_of,
+                                      scan_transforms)
+    if transform_index is None and project_root:
+        transform_index = scan_transforms(project_root)
+    transform_index = transform_index or {}
+    if transform not in transform_index:
+        return AtEdit(
+            reason=f'项目里没有 transform「{transform}」（只允许引用项目已有的）',
+            beat_index=idx, _beat=beat, transform=transform)
+    screen_pair = tuple(screen) if screen else DEFAULT_SCREEN
+    try:
+        place = placement_of(transform, transform_index, screen=screen_pair)
+    except Exception as e:                     # noqa: BLE001 - 坏定义拒绝
+        swallow('app.stage.plan_at_edit', e)
+        place = None
+    if place is None or not str(getattr(place, 'source', '')).startswith(
+            ('atl', 'builtin', 'word', 'letter', 'center')):
+        return AtEdit(reason=f'transform「{transform}」解析不出几何，拒绝写',
+                      beat_index=idx, _beat=beat, transform=transform)
+
+    if target == 'layer':
+        before = str(getattr(beat, 'show', '') or '')
+        new_show, before_at, reason = _layer_show_edit(beat, tag, transform)
+        edit = AtEdit(target='layer', tag=str(tag or '').strip(),
+                      transform=transform, field='show',
+                      before=before, after=new_show or before,
+                      reason=reason, beat_index=idx, _beat=beat)
+        if not reason and edit.before == edit.after:
+            edit.reason = f'这一拍的图层「{tag}」已经是这个变换了'
+        if not edit.reason and before_at == transform:
+            edit.reason = '已经是这个变换了'
+    else:
+        scene = str(getattr(beat, 'scene', '') or '').strip()
+        if not scene:
+            return AtEdit(reason='这一拍没有背景（没有 scene），不能写背景变换',
+                          beat_index=idx, _beat=beat, transform=transform)
+        if '@' in scene:
+            return AtEdit(reason='背景是紧凑写法 `图@变换`，请先在卡片里拆开',
+                          beat_index=idx, _beat=beat, transform=transform)
+        before = str(getattr(beat, 'scene_at', '') or '')
+        edit = AtEdit(target='scene', transform=transform, field='scene_at',
+                      before=before, after=transform, beat_index=idx,
+                      _beat=beat)
+        if before == transform:
+            edit.reason = '已经是这个变换了'
+
+    # 生成产物 diff（确认对话框的真相：不是"字段变了"，是"脚本会变成什么"）
+    try:
+        import copy
+        from storygraph.story.beat_render import render_beat_to_rpy
+        edit.rpy_before = '\n'.join(render_beat_to_rpy(beat) or [])
+        clone = copy.copy(beat)
+        setattr(clone, edit.field, edit.after)
+        edit.rpy_after = '\n'.join(render_beat_to_rpy(clone) or [])
+    except Exception as e:                     # noqa: BLE001 - diff 拿不到不影响计划
+        swallow('app.stage.plan_at_edit.diff', e)
+    return edit
 
 
 def has_stage_change(frame: StageFrame) -> bool:

@@ -171,12 +171,18 @@ def _apply_show_verb(item, beat, actors, state):
     if kind is None:
         return actors, changes                 # 幂等重复，确实没变
     if kind == 'scene':
-        # `show bg rooftop` 就是换背景
+        # `show bg rooftop` 就是换背景；`at`（`show bg X at bgfit`）同样要
+        # 写进**持续状态**（Ren'Py 里变换挂在背景 displayable 上）。
         if state['scene'] != image:
             state['scene'] = image
+        state['scene_at'] = at
         state['unknown'].discard('scene')
         return actors, changes
     key = image.split()[0]
+    # 图层自己的变换：`show cg cg01 at cg38402160` —— show 时记下，
+    # hide 时清掉（下面 `_apply_hide_verb`）。同一图重复 show 时引擎会
+    # 重新套 transform，所以这里**覆盖**而不是"只记第一次"。
+    state['layer_at'][key] = at
     if state['layers'].get(key) != image:
         state['layers'][key] = image
         changes.append({'kind': kind, 'column': 'layer', 'text':
@@ -205,9 +211,11 @@ def _apply_hide_verb(item, actors, state):
     if state['layers'].pop(tag, None) is not None:
         changes.append({'kind': 'layer', 'column': 'layer',
                         'text': f'− 撤下 {image}'})
+    state['layer_at'].pop(tag, None)
     # 退场也把"背景就是这张图"的情况算上
     if state['scene'] and state['scene'].split()[0] == tag:
         state['scene'] = ''
+        state['scene_at'] = ''
     return actors, changes
 
 
@@ -235,9 +243,16 @@ def _initial_state(initial_state: Optional[dict]) -> dict:
             actors.append([image, at])
     return {
         'scene': str(init.get('scene') or ''),
+        #: 背景自己的变换是**持续状态**（`scene bg X at bgfit` 之后，直到
+        #: 下一次 `scene` 之前，背景一直带着这个 transform）—— 2026-10-30
+        #: ⑦ P0 补上；老 `initial_state` 没有这两个键，缺省即"空/空"。
+        'scene_at': str(init.get('scene_at') or ''),
         'actors': actors,
         'layers': {str(k): str(v)
                    for k, v in (init.get('layers') or {}).items()},
+        #: 图层 tag → 它的 `at`（CG/UI 等非角色图层）。同上，缺省空。
+        'layer_at': {str(k): str(v)
+                     for k, v in (init.get('layer_at') or {}).items()},
         'music': str(init.get('music') or ''),
         'voice': str(init.get('voice') or ''),
         #: 内部标记：这些元素的值"还不知道"，不是"空"。
@@ -432,6 +447,10 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
                     actors = []
                     state['actors'] = actors
                     state['scene'] = image
+                    # `scene bg X at bgfit` 的变换是背景 displayable 的一部分，
+                    # 之后所有继承背景的拍都要带着它（引擎语义，见 docstring）。
+                    state['scene_at'] = str(
+                        getattr(beat, 'scene_at', '') or '').strip()
                     # `scene` 写明了背景，还清空了立绘 → 这两个元素重新已知
                     state['unknown'].discard('scene')
                     state['unknown'].discard('actors')
@@ -489,8 +508,15 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
             'layers': _render_layers(state['layers']),
             'state': {
                 'scene': state['scene'],
+                # 背景变换是**持续状态**（2026-10-30，⑦ P0）：
+                # `scene bg X at bgfit` 之后每一拍都带着它，直到下一次 scene。
+                # 只加内部键，**不改任何显示列**；老调用方缺键用默认空串。
+                'scene_at': state['scene_at'],
                 'actors': [[s[0], s[1]] for s in state['actors']],
                 'layers': dict(state['layers']),
+                # 图层 tag → `at`（`show cg cg01 at cg38402160` 的变换）；
+                # show 时记、hide 时清。缺键默认 {}。
+                'layer_at': dict(state['layer_at']),
                 'music': state['music'],
                 'voice': state['voice'],
                 'condition': beat.condition or '',

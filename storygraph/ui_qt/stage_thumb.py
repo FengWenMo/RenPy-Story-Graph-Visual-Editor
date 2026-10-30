@@ -122,6 +122,14 @@ def frame_signature(frame) -> tuple:
     默认 repr），同样不稳定。所以**逐字段列出会影响像素的东西**：
     背景 / 立绘（图像名、位置、谁在说话）/ 图层 / 台词 / 说话人 / 转场。
     音乐与音效不影响画面，但一起放进来也无害（同拍换歌本来就是另一拍）。
+
+    2026-10-30（S3 交接）：`at` 的真实几何落到 `StageFrame.scene_at`、
+    逐层 `layers_at` 和 `Placement` 的新字段（`fit` / 尺寸族 / 采样 / alpha…
+    上）—— 这些**漏一个就等于"改了没反应"**，所以：
+      · 背景 `scene_at` 进签名；
+      · 图层不只取 `layers` 字符串，还逐层带上 `layers_at` 的 at（见
+        `_layers_key`：同一个 CG 换 at 时字符串一个字符都不变）；
+      · 立绘的 `Placement` 走 `_place_key`，把 `fit` 等像素相关的字段全收。
     """
     sprites = tuple(
         (str(getattr(s, 'image', '') or ''), str(getattr(s, 'at', '') or ''),
@@ -140,12 +148,37 @@ def frame_signature(frame) -> tuple:
             str(getattr(frame, 'scene', '') or ''),
             str(getattr(frame, 'scene_at', '') or ''),
             sprites,
-            str(getattr(frame, 'layers', '') or ''),
+            _layers_key(frame),
             str(getattr(frame, 'music', '') or ''),
             str(getattr(frame, 'sound', '') or ''),
             str(getattr(frame, 'voice', '') or ''),
             str(getattr(frame, 'with_', '') or ''),
             round(float(getattr(frame, 'pause', 0.0) or 0.0), 4))
+
+
+def _layers_key(frame) -> tuple:
+    """
+    非角色图层（CG / UI）的 `(spec, at)` 列表 —— **逐层**，保留叠放顺序。
+
+    2026-10-30（⑦ P0，S3 新加的 `StageFrame.layers_at`）：同一张 CG 从
+    `cg01 at cg38402160` 改成 `cg01 at cgfit` 时，`layers` 字符串一个字符
+    不变 —— 签名里只放字符串就会**沿用旧缓存**，卡片上的图永远不重画。
+
+    解析规则与 `stage_render._draw_layers` 一字不差（先按 tag 找、再按整条
+    spec 找），所以"签名认为变了"和"画面真的会变"是同一件事。
+    老帧没有 `layers_at`（或者不是 dict）按空表兜底，不炸。
+    """
+    raw = str(getattr(frame, 'layers', '') or '')
+    if not raw:
+        return ()
+    ats = getattr(frame, 'layers_at', None)
+    if not isinstance(ats, dict):
+        ats = {}
+    out = []
+    for spec in [part.strip() for part in raw.split(';') if part.strip()]:
+        tag = spec.split()[0]
+        out.append((spec, str(ats.get(tag) or ats.get(spec) or '')))
+    return tuple(out)
 
 
 def _place_key(place):
@@ -155,12 +188,23 @@ def _place_key(place):
     为什么要这么全（而不是只取 `x`）：项目里改了 `transform i11:` 之后，
     同一个 `at i11` 的 `x_px` / `zoom` / `anchor` 都会变 —— 只比 `x`
     （归一化兜底值，常常恒等于 0.5）会让卡片上的图**停在旧位置**上。
+
+    2026-10-30（⑦ P0，S3）：`fit` 与尺寸族（`xsize` / `ysize`）、采样
+    （`nearest`）、`alpha` / `rotate` 同样会改像素 —— 少一个就是"用户改了
+    `fit` 但卡片缩略图不重画"。这些字段老版本 `Placement` 没有，
+    `getattr` 兜底成 None，所以老帧不炸。
     """
     if place is None:
         return None
     out = []
     for name in ('x', 'x_px', 'x_kind', 'xanchor', 'xoffset', 'zoom',
-                 'xzoom', 'yzoom', 'y_px', 'y_kind', 'yanchor', 'yoffset'):
+                 'xzoom', 'yzoom', 'y_px', 'y_kind', 'yanchor', 'yoffset',
+                 # —— 2026-10-30（⑦ P0）：尺寸 / 采样 / 透明度也算像素 ——
+                 'fit', 'xsize', 'ysize', 'xsize_frac', 'ysize_frac',
+                 'nearest', 'alpha', 'rotate',
+                 # 'xpos 0.5' 与 'xpos 0.5px' 的 x_px 都在，但**语义**靠这几个
+                 # frac 标记区分；改 transform 时常只翻标记不翻数字。
+                 'xpos_frac', 'ypos_frac', 'xanchor_frac', 'yanchor_frac'):
         value = getattr(place, name, None)
         if isinstance(value, bool) or value is None:
             out.append(value)

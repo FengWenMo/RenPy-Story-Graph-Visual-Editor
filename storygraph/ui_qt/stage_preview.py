@@ -48,12 +48,14 @@ from storygraph.core.safeguard import swallow
 from PySide6.QtCore import (QObject, QRunnable, QThreadPool, Qt, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
-                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
+                               QLabel, QMessageBox, QPushButton, QSpinBox,
+                               QVBoxLayout, QWidget)
 
 from storygraph.app.stage import (BLOCK_H, BLOCK_W, SPRITE_H_RATIO, SPRITE_MAX,
-                                  STAGE_H, STAGE_W, audio_spec_name,
-                                  image_index, resolve_frame_assets,
+                                  STAGE_H, STAGE_W, at_transform_candidates,
+                                  audio_spec_name, build_frames, image_index,
+                                  plan_at_edit, resolve_frame_assets,
                                   resolve_solid_color, sprite_box,
                                   stage_audio_cues)
 from storygraph.app import stage_render as R
@@ -63,6 +65,15 @@ from storygraph.ui_qt import theme
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 PLAY_MS = 900          # 自动播放间隔；节奏仅示意，不代表真实时长
+
+#: 过场动画的帧率：把 `Effect.duration` 换成"画几张中间帧"。20fps 够看清
+#: dissolve / pixellate 的变化，又不会为了 0.1s 的过场去画几十张 1080p。
+FX_FPS = 20
+#: 一次过场最多画几帧（1s 的 dissolve = 20 帧）；封顶防止超长转场吃内存。
+FX_MAX_FRAMES = 40
+#: 时长未知时兜底多少秒 —— 与 `stage_render.FX_FALLBACK_SECONDS` 同一个数
+#: （说明行写"按 0.35s 近似"，这里就真演 0.35s）。
+FX_FALLBACK_SECONDS = R.FX_FALLBACK_SECONDS
 
 #: 预取往后几拍（用户 2026-10-05："每次加载时……总有一个蓝色框当占位符
 #: 一闪而过"）。预告下一两拍的图，翻到它时就是内存命中（0 延迟），
@@ -359,6 +370,155 @@ def result_to_qimage(result, target=None):
     return image_to_qimage(getattr(result, 'image', None), target)
 
 
+def qimage_to_pil_image(qimg):
+    """
+    `QImage` → `PIL.Image`（RGBA）—— `image_to_qimage` 的反向。
+
+    只给**过场动画**用：把"上一拍 / 这一拍"已经渲染好的 `QImage` 交给
+    `app.transition_fx.render_effect` 演中间帧。`QImage` 允许在 GUI 线程外
+    碰（所以转换放在过场工作线程里，不挡播放）；`QPixmap` 不行，调用方
+    必须先在 GUI 线程把它 `toImage()`。
+
+    失败返回 `None`（演不了就硬切，绝不因此崩预览）。
+    """
+    if qimg is None or qimg.isNull():
+        return None
+    try:
+        from PIL import Image
+        img = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+        width, height = int(img.width()), int(img.height())
+        if width <= 0 or height <= 0:
+            return None
+        data = bytes(img.constBits())
+        stride = int(img.bytesPerLine())
+        return Image.frombuffer('RGBA', (width, height), data, 'raw', 'RGBA',
+                                stride, 1).copy()
+    except Exception as e:                        # noqa: BLE001 - 转不了就硬切
+        swallow('stage_preview.qimage_to_pil', e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+#  过场动画（2026-10-30，③ 过场接入）
+# ---------------------------------------------------------------------------
+#
+# 语义：**有 `Effect` 就按效果演，认不出就只显示文字**（绝不假装淡入）。
+# `StageFrame.transitions/effects` 由 `app.stage` 派生；这里只负责三件事：
+#   1. 选这一拍"能演"的第一个效果（`unknown` / 空 kind 不演）；
+#   2. 把"上一拍 → 这一拍"两张图丢给 `app.transition_fx` 在后台演中间帧；
+#   3. 按帧率把中间帧画到画布上（`QPixmap` 只在 GUI 线程构造）。
+
+def _frame_effects(frame, project_root=None) -> tuple:
+    """
+    一帧的过场效果（帧上带着的最好；有项目根就按项目目录重解析一遍）。
+
+    为什么要重解析：卡片/其它调用方可能是在**没有项目根**的时候构造的帧
+    （自定义名当时解析成 `unknown`），而预览知道项目根 —— 不能因为上游
+    少传一个参数就把"闪黑"演成"无法精确预览"。
+    """
+    from storygraph.story.transition_catalog import effect_of
+
+    calls = tuple(getattr(frame, 'transitions', ()) or ())
+    effects = tuple(getattr(frame, 'effects', ()) or ())
+    if not calls:
+        return effects
+    if project_root:
+        try:
+            from storygraph.app.stage import project_transitions
+            catalog = project_transitions(project_root)
+            return tuple(effect_of(call, catalog) for call in calls)
+        except Exception as e:                    # noqa: BLE001 - 退回帧上的
+            swallow('ui_qt.stage_preview.frame_effects', e)
+    if effects:
+        return effects
+    try:
+        return tuple(effect_of(call, {}) for call in calls)
+    except Exception as e:                        # noqa: BLE001 - 演不了就硬切
+        swallow('ui_qt.stage_preview.frame_effects.fallback', e)
+        return ()
+
+
+def first_renderable_effect(frame, project_root=None):
+    """这一拍第一个**能演**的过场效果（`unknown` / 空 → `None`，只显示文字）。"""
+    for effect in _frame_effects(frame, project_root):
+        if str(getattr(effect, 'kind', '') or '') not in ('', 'unknown'):
+            return effect
+    return None
+
+
+def effect_seconds(effect) -> tuple:
+    """`(时长秒, 是否用了兜底)`：时长未知 → `FX_FALLBACK_SECONDS` 兜底。"""
+    try:
+        duration = float(getattr(effect, 'duration', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        return float(FX_FALLBACK_SECONDS), True
+    return duration, False
+
+
+def effect_frame_count(effect, fps: int = FX_FPS) -> int:
+    """`Effect` → 中间帧数（至少 2 帧：过场总要有"起点/终点"可插值）。"""
+    seconds, _fallback = effect_seconds(effect)
+    count = int(round(seconds * max(1, int(fps))))
+    return max(2, min(FX_MAX_FRAMES, count))
+
+
+class _FxSignals(QObject):
+    """过场工作线程 → GUI 线程（Qt 信号跨线程自动排队）。"""
+
+    #: `代号, 帧 id, [(QImage…)], 说明, 是否降级`
+    done = Signal(int, 'qint64', object, str, bool)
+
+
+class _FxJob(QRunnable):
+    """
+    后台把"上一拍 → 这一拍"演成过场中间帧（Pillow 全在 worker 里跑）。
+
+    为什么必须后台：1920×1080 的 8 帧 dissolve ≈ 十几毫秒，但 image dissolve
+    要读遮罩图、multiple 要分段——放在 GUI 线程做就是一次可感的顿挫。
+    失败只回空帧，由画布硬切（**绝不卡住播放**）。
+    """
+
+    def __init__(self, signals, gen, key, before_qimage, after_qimage, effect,
+                 size, count, project_root):
+        super().__init__()
+        self.signals = signals
+        self.gen = int(gen)
+        self.key = int(key)
+        self.before = before_qimage
+        self.after = after_qimage
+        self.effect = effect
+        self.size = size
+        self.count = count
+        self.project_root = project_root
+        self.setAutoDelete(True)
+
+    def run(self):
+        frames: list = []
+        note = ''
+        degraded = False
+        try:
+            from storygraph.app.transition_fx import render_effect
+            before = qimage_to_pil_image(self.before)
+            after = qimage_to_pil_image(self.after)
+            seq = render_effect(before, after, self.effect, size=self.size,
+                                count=self.count,
+                                project_root=self.project_root)
+            frames = [q for q in (image_to_qimage(f) for f in seq.frames)
+                      if q is not None]
+            note = str(getattr(seq, 'note', '') or '')
+            degraded = bool(getattr(seq, 'degraded', False))
+        except Exception as e:                    # noqa: BLE001 - 后台绝不炸
+            swallow('stage_preview.fx_job', e)
+            frames = []
+        try:
+            self.signals.done.emit(self.gen, self.key, frames, note, degraded)
+        except RuntimeError as e:
+            # 窗口已关：信号对象随控件销毁，emit 会 RuntimeError（正常收尾）
+            swallow('stage_preview.fx_job.emit', e)
+
+
 class _RenderJob(QRunnable):
     """
     在**后台线程**里合成一帧（首次要解码 4320×7680 的立绘，约 2 秒）。
@@ -491,17 +651,41 @@ class StageCanvas(QWidget):
         self._fade_timer = QTimer(self)
         self._fade_timer.setInterval(16)
         self._fade_timer.timeout.connect(self._tick_fade)
+        #: **过场动画**（2026-10-30，③ 过场接入）：这一拍有可演的效果时，
+        #: 用 `app.transition_fx` 把"上一拍 → 这一拍"演成中间帧
+        #: （dissolve / fade / pixellate / imagedissolve / multiple 按项目
+        #: `define` 的效果演）；`unknown` / 演不出来 → 不演，只在横条显示文字。
+        self._fx_frames: list = []        # 正在播的中间帧（QPixmap，控件尺寸）
+        self._fx_index = 0
+        self._fx_started = 0.0
+        self._fx_seconds = 0.0
+        self._fx_before = None            # 切过来的那一刻屏幕上的图（before）
+        self._fx_pending = None           # 等 after 渲染好再开演的 Effect
+        self._fx_note = ''                # 过场降级说明（诊断用）
+        self._fx_token = 0
+        self._fx_signals = _FxSignals(self)
+        self._fx_signals.done.connect(self._on_fx_done)
+        #: 过场渲染单独一个小池：不能和帧合成共用（`_queue` 每次清池会把它清掉）
+        self._fx_pool = QThreadPool(self)
+        self._fx_pool.setMaxThreadCount(1)
+        self._fx_timer = QTimer(self)
+        self._fx_timer.setInterval(16)
+        self._fx_timer.timeout.connect(self._tick_fx)
 
     # ------------------------------------------------------------------
 
     def begin_transition(self, fade: bool) -> None:
         """
-        这一拍切过去时要不要淡入（`with dissolve` / `with fade`）。
+        这一拍切过去时要不要**淡入**（老行为：只看 `with dissolve/fade`）。
+
+        ⚠ 2026-10-30（③ 过场接入）：有可演的 `Effect` 时**不走这里** ——
+        画布用 `app.transition_fx` 按项目 define 的效果演（见 `_maybe_start_effect`），
+        播放器会传 `fade=False`。这条淡入只留给"没有派生到效果的旧式
+        `with dissolve`"（保持硬切看起来像硬切）。
 
         为什么不是"真播那个转场"：转场是引擎的渲染语义（ATL + shader），
         在 Qt 里重写一遍必然对不上。预览的目标是"让人看出这里有一次
-        **渐变**换景"，所以只做淡入这一件事，并且**只对渐变类转场**做 ——
-        硬切必须看起来像硬切，否则"我明明写的是硬切"会看不出来。
+        **渐变**换景"，而这条老路只做淡入这一件事。
         """
         if not fade:
             self._fade_alpha = 1.0
@@ -520,6 +704,130 @@ class StageCanvas(QWidget):
             self.update()
         except Exception:                      # noqa: BLE001 - 定时器里不许抛
             self._fade_timer.stop()
+
+    # ---------------- 过场动画 ----------------
+
+    def effect_active(self) -> bool:
+        """画布现在是不是在演过场中间帧（测试/诊断用）。"""
+        return bool(self._fx_frames)
+
+    def _stop_effect(self) -> None:
+        """翻拍 / 关窗：正在演的过场作废（迟到的结果按代号丢弃）。"""
+        self._fx_token += 1                   # 让还在跑的 worker 结果作废
+        self._fx_frames = []
+        self._fx_index = 0
+        self._fx_pending = None
+        self._fx_seconds = 0.0
+        try:
+            self._fx_timer.stop()
+        except Exception as e:                # noqa: BLE001 - 控件可能已销毁
+            swallow('stage_preview.stop_effect.timer', e)
+        try:
+            self._fx_pool.clear()             # 还没开跑的任务别再启动
+        except Exception as e:                # noqa: BLE001
+            swallow('stage_preview.stop_effect.pool', e)
+
+    def _maybe_start_effect(self) -> None:
+        """
+        `after` 图已经就绪 → 把"上一拍 → 这一拍"的过场丢后台演（不阻塞播放）。
+
+        三个条件缺一不可：这一拍要有**能演**的效果、after 图已经渲染好、
+        屏幕上有"before"（第一拍没有上一张，没得演）。任何一条不满足就
+        **硬切** —— 宁可硬切，也不假装淡入。
+        """
+        effect = self._fx_pending
+        after = self._rendered_pix
+        before = self._fx_before
+        if effect is None or after is None or after.isNull() or self._render_failed:
+            return
+        self._fx_pending = None               # 只演一次
+        if before is None or before.isNull() or not R.available():
+            return
+        try:
+            size = (max(1, after.width()), max(1, after.height()))
+            count = effect_frame_count(effect)
+            if count < 2:
+                return
+            seconds, _fallback = effect_seconds(effect)
+            self._fx_token += 1
+            token = self._fx_token
+            self._fx_seconds = max(0.05, seconds)
+            self._fx_frames = []
+            self._fx_index = 0
+            self._fx_pool.clear()             # 上一个还没跑完的过场作废
+            self._fx_pool.start(_FxJob(
+                self._fx_signals, token, _frame_key(self._frame),
+                before.toImage(), after.toImage(), effect, size, count,
+                self.project_root))
+        except Exception as e:                # noqa: BLE001 - 演不了就硬切
+            swallow('stage_preview.start_effect', e)
+
+    def _on_fx_done(self, gen, key, qframes, note, degraded) -> None:
+        """过场中间帧回来了（不是当前这拍 / 过期的大方丢掉）。"""
+        try:
+            if int(gen) != self._fx_token:
+                return
+            if self._frame is None or _frame_key(self._frame) != int(key):
+                return
+            pixmaps = []
+            for qimg in qframes or ():
+                if qimg is None or qimg.isNull():
+                    continue
+                pixmaps.append(QPixmap.fromImage(qimg))   # QPixmap 只在 GUI 线程
+            if not pixmaps:
+                return                        # 演不出来：硬切（不假装淡入）
+            self._fx_note = str(note or '')
+            self._fx_frames = pixmaps
+            self._fx_index = 0
+            self._fx_started = time.monotonic()
+            self._fx_timer.start()
+            self.update()
+        except Exception as e:                # noqa: BLE001 - 过场失败不拦播放
+            swallow('stage_preview.fx_done', e)
+
+    def _tick_fx(self) -> None:
+        """按时间推进中间帧；播完就停表、交回普通帧。"""
+        try:
+            if not self._fx_frames:
+                self._fx_timer.stop()
+                return
+            elapsed = time.monotonic() - self._fx_started
+            span = max(0.05, float(self._fx_seconds))
+            total = len(self._fx_frames)
+            index = int(elapsed / span * total)
+            if index >= total:
+                self._fx_frames = []
+                self._fx_index = 0
+                self._fx_timer.stop()
+                self.update()
+                return
+            if index != self._fx_index:
+                self._fx_index = index
+                self.update()
+        except Exception as e:                # noqa: BLE001 - 定时器里不许抛
+            swallow('stage_preview.tick_fx', e)
+            self._fx_timer.stop()
+
+    def _paint_fx_frame(self, painter, width: int, height: int) -> bool:
+        """正在演过场 → 画那帧中间帧（返回 True 表示这一帧由过场接管）。"""
+        if not self._fx_frames:
+            return False
+        try:
+            index = max(0, min(int(self._fx_index), len(self._fx_frames) - 1))
+            pix = self._fx_frames[index]
+            if pix is None or pix.isNull():
+                return False
+            painter.setOpacity(1.0)
+            scale = min(width / max(1, pix.width()),
+                        height / max(1, pix.height()))
+            draw_w = max(1, int(pix.width() * scale))
+            draw_h = max(1, int(pix.height() * scale))
+            painter.drawPixmap((width - draw_w) // 2, (height - draw_h) // 2,
+                               draw_w, draw_h, pix)
+            return True
+        except Exception as e:                # noqa: BLE001 - 画不了就退回普通帧
+            swallow('stage_preview.paint_fx', e)
+            return False
 
     # ------------------------------------------------------------------
 
@@ -544,6 +852,14 @@ class StageCanvas(QWidget):
         except Exception:                    # noqa: BLE001
             swallow('stage_preview.shutdown')
         try:
+            self._fx_timer.stop()            # 过场动画的定时器随控件一起停
+        except Exception as e:               # noqa: BLE001
+            swallow('stage_preview.shutdown.fx_timer', e)
+        try:
+            self._fx_pool.clear()
+        except Exception as e:               # noqa: BLE001
+            swallow('stage_preview.shutdown.fx_pool', e)
+        try:
             self._loader.shutdown()
         except Exception:                    # noqa: BLE001
             swallow('stage_preview.shutdown')
@@ -566,6 +882,12 @@ class StageCanvas(QWidget):
         self._boxes = {}
         self._loading = set()
         self._missing = []
+        # 过场（2026-10-30，③）：先停掉上一次，再记住"切过来之前屏幕上那张图"
+        # —— 它是过场的 before；等 after 渲染好（`_maybe_start_effect`）才开演。
+        self._stop_effect()
+        self._fx_before = self._last_good_pix if frame is not None else None
+        self._fx_pending = (first_renderable_effect(frame, self.project_root)
+                            if frame is not None else None)
         self.update()
         if frame is None:
             # 空场：连"上一拍"也不该留着（那会是一张跟当前状态无关的图）
@@ -651,6 +973,11 @@ class StageCanvas(QWidget):
                 self.rendered.emit(True)
             except RuntimeError as e:
                 swallow('stage_preview.render_done.emit', e)
+            # 这一拍有可演的过场 → after/before 都齐了，开演（后台，不挡播放）
+            try:
+                self._maybe_start_effect()
+            except Exception as e:            # noqa: BLE001 - 过场失败不拦播放
+                swallow('stage_preview.cache_hit.effect', e)
         else:
             # 还没画好：`_rendered_pix` 只代表"**这一拍**的图"，所以清空；
             # 画面靠 `_last_good_pix`（上一拍）顶着 —— 见 `_paint_engine`。
@@ -766,6 +1093,11 @@ class StageCanvas(QWidget):
             self.rendered.emit(pix is not None)
         except RuntimeError as e:
             swallow('stage_preview.render_done.emit', e)
+        # 过场：after 图刚就绪 —— 有可演的效果就开始演中间帧
+        try:
+            self._maybe_start_effect()
+        except Exception as e:                # noqa: BLE001 - 过场失败不拦播放
+            swallow('stage_preview.render_done.effect', e)
 
     def render_now(self, frame, idx: int):
         """同步渲染一帧（测试/无头用；正式播放走后台队列）。"""
@@ -773,6 +1105,7 @@ class StageCanvas(QWidget):
         self._render_token += 1
         gen = self._render_token
         self._gate.gen = gen
+        self._stop_effect()                   # 同步渲染不做过场动画（无事件循环）
         self._frame = frame
         self._frame_idx = idx
         self._render_failed = False
@@ -974,8 +1307,13 @@ class StageCanvas(QWidget):
         —— 用户 2026-10-21："连续播放时速度不够常常变黑屏"。
         真正渲染失败（`_render_failed`）时才不拿旧图骗人：那种情况画深色 + 说明。
         """
-        p.setOpacity(max(0.0, min(1.0, float(self._fade_alpha))))
+        p.setOpacity(1.0 if self._fx_frames
+                     else max(0.0, min(1.0, float(self._fade_alpha))))
         w, h = self.width(), self.height()
+        # 过场动画：这一帧由 `app.transition_fx` 的中间帧接管（不透明、盖住
+        # 老淡入）；播完 `_fx_frames` 清空，自然落回下面的"这一拍"。
+        if self._paint_fx_frame(p, w, h):
+            return
         pix = self._rendered_pix
         stale = False
         if (pix is None or pix.isNull()) and not self._render_failed:
@@ -1077,12 +1415,21 @@ class StagePreviewWindow(QDialog):
     def __init__(self, parent=None, frames=None, title: str = '舞台演出预览',
                  registry=None, project_root=None, real_images: bool = True,
                  screen=None, sound: bool = True, player_factory=None,
-                 start_index: int = 0):
+                 start_index: int = 0, beats=None, on_apply_at=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         theme.apply_to(self)
         self.frames = list(frames or [])
         self._all = list(frames or [])
+        #: 「写回 at」（P2，2026-10-30）用的 Beat 列表 —— **可选**：
+        #: 主窗口接线前不传，本轮入口置灰并说明原因（不假装能写）。
+        self._beats = list(beats) if beats else None
+        #: 外部写回钩子（可选）：`on_apply_at(request) -> AtEdit | None`。
+        #: 主窗口以后可以自己接管写回/落盘门禁；不传就走本窗口的 Beat 直改。
+        self._on_apply_at = on_apply_at
+        #: 本窗口里已经写回、还没撤销的编辑（撤销 = `AtEdit.revert`）。
+        self._at_undo: list = []
+        self._at_tf_cache = None
         # **从当前那一拍开始**，不要总是第一拍（2026-10-22 用户实测报的：
         # "我在修改 200 拍的时候，按演出预览，然后出来的是第一拍，
         #   需要手动跳到第 200 拍！！！应当从当前拍开始预览"）。
@@ -1183,6 +1530,44 @@ class StagePreviewWindow(QDialog):
         self._summary.setProperty('role', 'caption')
         self._summary.setWordWrap(True)
         root.addWidget(self._summary)
+
+        # —— 尺寸 / 写回 at（P2，2026-10-30）——
+        # 用户拍板：**工具不自动写 at**（预览必须真实：没 at 就按引擎裁切），
+        # 但经人手可以选一个**项目里已有**的 transform 写回（diff 确认、
+        # 可撤销）。所以这里只给入口，不给"自动适配"。
+        self._at_target = QComboBox()
+        self._at_target.setToolTip(
+            '要改哪个对象：背景（scene_at），或这一拍的某个非角色图层'
+            '（CG/UI 的 show at）。')
+        self._at_transform = QComboBox()
+        self._at_transform.setToolTip(
+            '只能选**项目里已有**的 transform（工具不新增定义、不猜语义）。')
+        self._at_apply_btn = QPushButton('写回 at…')
+        self._at_apply_btn.setToolTip(
+            '把选中的 transform 写进这一拍（先看 diff 再确认）。\n'
+            '只改内存里的 Beat；保存/导出仍走既有 diff 门禁，可撤销。')
+        self._at_undo_btn = QPushButton('撤销写回')
+        self._at_undo_btn.setEnabled(False)
+        self._at_undo_btn.setToolTip('把最近一次「写回 at」还原（可连续撤销）。')
+        self._at_status = QLabel('')
+        self._at_status.setProperty('role', 'caption')
+        self._at_apply_btn.clicked.connect(self._on_apply_at_clicked)
+        self._at_undo_btn.clicked.connect(self.undo_last_at_edit)
+        at_bar = QHBoxLayout()
+        at_bar.setSpacing(T.SPACE['xs'])
+        at_bar.addWidget(QLabel('尺寸变换：'))
+        at_bar.addWidget(self._at_target)
+        at_bar.addWidget(self._at_transform)
+        at_bar.addWidget(self._at_apply_btn)
+        at_bar.addWidget(self._at_undo_btn)
+        at_bar.addWidget(self._at_status, 1)
+        root.addLayout(at_bar)
+        if not self._can_write_at():
+            for w in (self._at_target, self._at_transform, self._at_apply_btn):
+                w.setEnabled(False)
+            self._at_status.setText(
+                '这个窗口拿不到 Beat 数据（只预览，不写回）；'
+                '从主窗口打开预览时才可写回。')
 
         # —— 控制条 ——
         bar = QHBoxLayout()
@@ -1316,10 +1701,15 @@ class StagePreviewWindow(QDialog):
             self._timer.setInterval(int(getattr(f, 'duration_ms', PLAY_MS)))
         except Exception:                     # noqa: BLE001 - 老 frame 没这个属性
             self._timer.setInterval(PLAY_MS)
-        # **转场**（P1-8"无转场"）：`with dissolve/fade` 的那一拍淡入，
-        # 硬切的不淡 —— 这样"换景"和"换立绘"在预览里看起来不一样。
+        # **转场**（P1-8"无转场"，2026-10-30 ③ 升级）：
+        #   有可演的 `Effect` → 画布按项目 define 的效果演中间帧
+        #   （`app.transition_fx`；`unknown` 不演）；
+        #   没有派生到效果时才走老行为：`with dissolve/fade` 淡入，硬切不淡。
         try:
-            self._canvas.begin_transition(bool(getattr(f, 'fades', False)))
+            has_effect = first_renderable_effect(
+                f, getattr(self, '_project_root', None)) is not None
+            self._canvas.begin_transition(
+                False if has_effect else bool(getattr(f, 'fades', False)))
         except Exception:                     # noqa: BLE001
             swallow('ui_qt.stage_preview.show_frame.transition')
         # **姿势改回普通但没 hide** → 在状态行上说清楚（用户 2026-10-05 报的
@@ -1331,6 +1721,11 @@ class StagePreviewWindow(QDialog):
                     (self._summary.text() + '　⚠ ' + hint).strip())
         except Exception as e:                     # noqa: BLE001 - 提示失败不影响画面
             swallow('ui_qt.stage_preview.show_frame.pose_hint', e)
+        # 「写回 at」的候选（背景/图层 + 项目 transform）随这一拍更新
+        try:
+            self._update_at_controls(f)
+        except Exception as e:                     # noqa: BLE001 - 入口失败不拦预览
+            swallow('ui_qt.stage_preview.show_frame.at_controls', e)
         self._jump.setValue(idx + 1)
         self._prev.setEnabled(idx > 0)
         self._next.setEnabled(idx < len(self.frames) - 1)
@@ -1367,6 +1762,16 @@ class StagePreviewWindow(QDialog):
             swallow('ui_qt.stage_preview._summary_text', e)
             base = ''
         extra = [str(n) for n in ((cues or {}).get('notes') or ())]
+        # **过场**（2026-10-30，③）：这一拍在游戏里用什么效果 —— 与卡片
+        # 「当前舞台」同一行文字（`stage_render.transition_notes` 一处实现，
+        # 两处不再各写一套）。认不出的效果只写"无法精确预览"，不装淡入。
+        try:
+            for line in R.transition_notes(
+                    f, project_root=getattr(self, '_project_root', None)):
+                if line not in extra:
+                    extra.append(line)
+        except Exception as e:                    # noqa: BLE001 - 提示失败不影响画面
+            swallow('ui_qt.stage_preview._summary_text.transition_notes', e)
         # **位置是猜的**（用户 2026-10-19，B1）：`parallel` / 关键帧里的属性没进
         # 最终态，`x` 是启发式猜的 —— 画得跟真位置一样而不说，比算错更糟。
         try:
@@ -1374,6 +1779,20 @@ class StagePreviewWindow(QDialog):
             extra.extend('⚠ ' + str(n) for n in (placement_notes(f) or ()))
         except Exception as e:                    # noqa: BLE001 - 标注失败不影响画面
             swallow('ui_qt.stage_preview._summary_text.placement_notes', e)
+        # **尺寸人话**（P1，2026-10-30）：`背景 bg7_0 2304×1296 → 屏幕
+        # 1920×1080（无 at：游戏里会被裁切）`。只读、不替它 fit；给用户
+        # 一个"为什么预览里被裁了 / 该选哪个 transform"的抓手。
+        try:
+            for note in R.scale_notes(
+                    f, registry=self._registry,
+                    project_root=self._project_root,
+                    screen=self._screen,
+                    transform_index=getattr(self._canvas,
+                                            '_transform_index', None)):
+                if note not in extra:
+                    extra.append(note)
+        except Exception as e:                    # noqa: BLE001 - 提示失败不影响画面
+            swallow('ui_qt.stage_preview._summary_text.scale_notes', e)
         try:
             miss = self._canvas.missing_assets()
         except Exception as e:                    # noqa: BLE001
@@ -1429,6 +1848,213 @@ class StagePreviewWindow(QDialog):
         if subs:
             text += '；替代：' + '、'.join(subs[:2])
         return text
+
+    # ------------------------------------------------------------------
+    #  「写回 at」（P2，2026-10-30）：人工触发、只引用项目已有 transform、
+    #  diff 确认、可撤销。**工具不自动写**；预览不替它 fit。
+    # ------------------------------------------------------------------
+
+    def _can_write_at(self) -> bool:
+        """这个窗口能不能写回（有 Beat 数据，或调用方提供了外部钩子）。"""
+        return bool(self._beats) or callable(self._on_apply_at)
+
+    def _at_transform_index(self):
+        """项目 transform 表（优先用画布已扫好的那份；否则扫一次并缓存）。"""
+        if self._at_tf_cache:
+            return self._at_tf_cache
+        tf = None
+        canvas = getattr(self, '_canvas', None)
+        if canvas is not None:
+            tf = getattr(canvas, '_transform_index', None)
+        if tf:
+            self._at_tf_cache = tf
+        elif self._project_root:
+            try:
+                from storygraph.story.atl import scan_transforms
+                self._at_tf_cache = scan_transforms(self._project_root) or {}
+            except Exception as e:                    # noqa: BLE001
+                swallow('stage_preview._at_transform_index', e)
+                self._at_tf_cache = {}
+        else:
+            self._at_tf_cache = {}
+        return self._at_tf_cache
+
+    def _at_candidates(self) -> list:
+        """项目里已有的 transform 候选（会改尺寸的排前面）。"""
+        cache = getattr(self, '_at_candidates_cache', None)
+        if cache is not None:
+            return cache
+        try:
+            cache = at_transform_candidates(
+                project_root=self._project_root,
+                transform_index=self._at_transform_index(),
+                screen=self._screen)
+        except Exception as e:                        # noqa: BLE001 - 入口坏不拦预览
+            swallow('stage_preview._at_candidates', e)
+            cache = []
+        self._at_candidates_cache = cache
+        return cache
+
+    @staticmethod
+    def _at_targets_of(frame) -> list:
+        """这一拍可写的对象：背景 scene_at + 各非角色图层的 show at。"""
+        out = []
+        scene = str(getattr(frame, 'scene', '') or '')
+        if scene:
+            out.append(('背景（scene_at）', ('scene', '')))
+        raw = str(getattr(frame, 'layers', '') or '')
+        ats = dict(getattr(frame, 'layers_at', None) or {})
+        for spec in [p.strip() for p in raw.split(';') if p.strip()]:
+            parts = spec.split()
+            tag = parts[0] if parts else spec
+            at = str(ats.get(tag) or ats.get(spec) or '')
+            suffix = f'，at {at}' if at else '，无 at'
+            out.append((f'图层 {spec}{suffix}（at）', ('layer', tag)))
+        return out
+
+    def _update_at_controls(self, frame) -> None:
+        """按这一拍刷新"写回 at"的下拉（背景/图层 + 项目已有 transform）。"""
+        if not self._can_write_at() or frame is None:
+            return
+        prev = self._at_target.currentData()
+        targets = self._at_targets_of(frame)
+        self._at_target.blockSignals(True)
+        self._at_target.clear()
+        for label, data in targets:
+            self._at_target.addItem(label, data)
+        if prev is not None:
+            hit = self._at_target.findData(prev)
+            if hit >= 0:
+                self._at_target.setCurrentIndex(hit)
+        self._at_target.blockSignals(False)
+        self._at_target.setEnabled(bool(targets))
+        if self._at_transform.count() == 0:
+            self._at_transform.blockSignals(True)
+            for entry in self._at_candidates():
+                self._at_transform.addItem(entry['label'], entry['name'])
+            self._at_transform.blockSignals(False)
+        self._at_transform.setEnabled(self._at_transform.count() > 0)
+        self._at_apply_btn.setEnabled(
+            bool(targets) and self._at_transform.count() > 0)
+        self._at_undo_btn.setEnabled(bool(self._at_undo))
+        if not targets:
+            self._at_status.setText('这一拍没有背景 / 图层可写 at。')
+        elif not self._at_candidates():
+            self._at_status.setText('项目里没有解析出 transform（写回需要项目已有的 transform）。')
+
+    def _at_request(self):
+        """当前下拉选择 → 写回请求 dict；没选好返回 None。"""
+        if not self.frames:
+            return None
+        frame = self.frames[self.idx]
+        data = self._at_target.currentData()
+        transform = self._at_transform.currentData()
+        if not data or not transform:
+            return None
+        return {'target': str(data[0]), 'tag': str(data[1] or ''),
+                'transform': str(transform),
+                'beat_index': int(getattr(frame, 'index', self.idx)),
+                'frame': frame}
+
+    def _on_apply_at_clicked(self) -> None:
+        """「写回 at…」按钮：算计划 → 弹 diff 确认 → 写内存 Beat。"""
+        req = self._at_request()
+        if req is None:
+            self._at_status.setText('先选一个对象和 transform。')
+            return
+        if callable(self._on_apply_at):
+            try:
+                edit = self._on_apply_at(req)
+            except Exception as e:                    # noqa: BLE001
+                swallow('stage_preview._on_apply_at_clicked.external', e)
+                QMessageBox.warning(self, '写回 at', f'外部写回失败：{e}')
+                return
+            if edit is None:
+                return
+            self._at_undo.append(edit)
+            self._update_at_undo_btn()
+            self._refresh_frames_after_beat_edit()
+            return
+        plan = plan_at_edit(
+            self._beats, req['beat_index'], target=req['target'],
+            tag=req['tag'], transform=req['transform'],
+            project_root=self._project_root,
+            transform_index=self._at_transform_index(), screen=self._screen)
+        if not plan.ok:
+            self._at_status.setText(plan.reason or '没有可写的改动。')
+            QMessageBox.information(self, '不能写回 at', plan.diff_text())
+            return
+        answer = QMessageBox.question(
+            self, '写回 at？', plan.diff_text(),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if self.apply_at_edit(plan):
+            self._at_status.setText(
+                f'已写回 {plan.transform}（{plan.target_label}）；可撤销。')
+
+    def apply_at_edit(self, plan) -> bool:
+        """把计划写进内存 Beat + 记入撤销栈 + 重画当前帧（**不弹窗**，可测）。"""
+        if plan is None or not getattr(plan, 'ok', False):
+            return False
+        try:
+            if not plan.apply():
+                return False
+        except Exception as e:                        # noqa: BLE001
+            swallow('stage_preview.apply_at_edit', e)
+            return False
+        self._at_undo.append(plan)
+        self._update_at_undo_btn()
+        self._refresh_frames_after_beat_edit()
+        return True
+
+    def undo_last_at_edit(self) -> bool:
+        """撤销最近一次「写回 at」（可连续撤销）。"""
+        if not self._at_undo:
+            return False
+        plan = self._at_undo.pop()
+        try:
+            plan.revert()
+        except Exception as e:                        # noqa: BLE001
+            swallow('stage_preview.undo_last_at_edit', e)
+            return False
+        self._update_at_undo_btn()
+        self._refresh_frames_after_beat_edit()
+        self._at_status.setText(
+            f'已撤销 {plan.transform}（{plan.target_label}）。')
+        return True
+
+    def _update_at_undo_btn(self) -> None:
+        try:
+            self._at_undo_btn.setEnabled(bool(self._at_undo))
+        except Exception:                             # noqa: BLE001
+            swallow('stage_preview._update_at_undo_btn')
+
+    def _refresh_frames_after_beat_edit(self) -> None:
+        """写回/撤销之后按 Beat 重建帧（背景变换是**持续状态**，后面几拍也变）。"""
+        if not self._beats:
+            return
+        idx = int(getattr(self, 'idx', 0))
+        try:
+            rebuilt = build_frames(self._beats, registry=self._registry,
+                                   transform_index=self._at_transform_index(),
+                                   screen=self._screen,
+                                   project_root=self._project_root)
+        except Exception as e:                        # noqa: BLE001
+            swallow('stage_preview._refresh_frames_after_beat_edit', e)
+            return
+        self._all = list(rebuilt)
+        self.frames = list(rebuilt)
+        if self._only_changed:
+            filtered = [f for f in self.frames if self._has_change(f)]
+            self.frames = filtered or list(self._all)
+        try:
+            self._jump.setRange(1, max(1, len(self.frames)))
+        except Exception:                             # noqa: BLE001
+            swallow('stage_preview._refresh_frames_after_beat_edit.jump')
+        self.show_frame(max(0, min(idx, len(self.frames) - 1)))
+
 
     # ------------------------------------------------------------------
 
@@ -1648,17 +2274,25 @@ def _dialogue_html(frame) -> str:
 
 def open_preview(parent, frames, registry=None, project_root=None,
                  real_images: bool = True, title: str = '舞台演出预览',
-                 sound: bool = True, start_index: int = 0):
+                 sound: bool = True, start_index: int = 0,
+                 beats=None, on_apply_at=None):
     """打开预览窗口（非模态，开着也能回去改卡片）。
 
     `start_index`：从第几拍开始（**当前那一拍**）。不给就从第一拍开始。
+
+    `beats` / `on_apply_at`（P2，2026-10-30，**可选**）：传了才启用
+    「写回 at」入口（只改内存 Beat、diff 确认、可撤销）；不传时入口置灰
+    并说明"这个窗口拿不到 Beat 数据"。主窗口接线由 Lead 整合时做。
     """
     win = StagePreviewWindow(parent, frames, title=title, registry=registry,
                              project_root=project_root,
                              real_images=real_images, sound=sound,
-                             start_index=start_index)
+                             start_index=start_index, beats=beats,
+                             on_apply_at=on_apply_at)
     win.show()
     return win
 
 
-__all__ = ['StageAudio', 'StageCanvas', 'StagePreviewWindow', 'open_preview']
+__all__ = ['FX_FALLBACK_SECONDS', 'FX_FPS', 'StageAudio', 'StageCanvas',
+           'StagePreviewWindow', 'effect_frame_count', 'effect_seconds',
+           'first_renderable_effect', 'open_preview', 'qimage_to_pil_image']

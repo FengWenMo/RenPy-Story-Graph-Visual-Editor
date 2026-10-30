@@ -265,6 +265,87 @@ class TestRefresh:
 
 
 # ==================================================================
+#  二·五、内容指纹要看得见 S3 的舞台几何（2026-10-30）
+# ==================================================================
+
+def _sig_frame(**fields):
+    """最小 `StageFrame`：只写签名字段，其余走 dataclass 默认。"""
+    from storygraph.app.stage import StageFrame
+
+    base = dict(index=0, line_id='l0', label='ch', speaker='', text='',
+                scene='bg red')
+    base.update(fields)
+    return StageFrame(**base)
+
+
+def _sig_sprite(place=None, **fields):
+    from storygraph.app.stage import SpriteLayout
+
+    s = SpriteLayout(image='ling happy', tag='ling', at='', x=0.5,
+                     place=place)
+    for key, value in fields.items():
+        setattr(s, key, value)
+    return s
+
+
+class TestFingerprintSeesStageGeometry:
+    """
+    S3 交接时发现的真问题：缓存键是帧的内容指纹，**漏一个几何字段就等于
+    "改了没反应"** —— 用户改了 `at` / `fit`，卡片缩略图却还停在旧画面。
+
+    2026-10-30 S3 给 `StageFrame` 加了 `scene_at` / `layers_at`、给
+    `Placement` 加了 `fit` 与尺寸族；指纹这边必须跟上。
+    """
+
+    def test_only_scene_at_differs(self):
+        """只改背景的 `scene at bgfit` → 指纹必须不同。"""
+        from storygraph.ui_qt.stage_thumb import frame_signature
+
+        assert frame_signature(_sig_frame()) != \
+            frame_signature(_sig_frame(scene_at='bgfit'))
+
+    def test_only_a_layer_at_differs(self):
+        """图层 `at` 是**逐层**的：只改非背景图层的 at 也要算指纹变化。"""
+        from storygraph.ui_qt.stage_thumb import frame_signature
+
+        layers = 'cg cg01; ui hud'
+        with_bg = _sig_frame(layers=layers, layers_at={'cg': 'cg38402160'})
+        assert frame_signature(_sig_frame(layers=layers)) != \
+            frame_signature(with_bg)
+        a = _sig_frame(layers=layers, layers_at={'cg': 'cg38402160',
+                                                 'ui': 'right'})
+        b = _sig_frame(layers=layers, layers_at={'cg': 'cg38402160',
+                                                 'ui': 'left'})
+        assert frame_signature(a) != frame_signature(b), \
+            '只改非背景图层的 at，指纹没变 → 卡片会一直用旧缓存'
+
+    def test_only_fit_differs(self):
+        """只改 `Placement.fit`（cover ↔ contain）→ 指纹必须不同。"""
+        from storygraph.story.atl import Placement
+        from storygraph.ui_qt.stage_thumb import frame_signature
+
+        cover = _sig_frame(sprites=[_sig_sprite(Placement(fit='cover'))])
+        contain = _sig_frame(sprites=[_sig_sprite(Placement(fit='contain'))])
+        assert frame_signature(cover) != frame_signature(contain)
+
+    def test_old_frames_without_the_new_fields_do_not_raise(self):
+        """老 frame（没有 scene_at / layers_at / `Placement.fit`）照常算指纹。"""
+        from types import SimpleNamespace
+
+        from storygraph.ui_qt.stage_thumb import frame_signature
+
+        old = SimpleNamespace(index=0, line_id='l0', label='ch', speaker='',
+                              text='', scene='bg red', layers='cg cg01',
+                              sprites=[SimpleNamespace(
+                                  image='ling happy', at='', x=0.5,
+                                  speaking=False,
+                                  place=SimpleNamespace(x=0.5, zoom=1.0))])
+        sig = frame_signature(old)             # 不抛错
+        assert isinstance(sig, tuple) and sig
+        assert frame_signature(old) == sig, '同一个老 frame 的指纹要稳定'
+
+
+# ==================================================================
 #  三、不卡界面 / 不骗人
 # ==================================================================
 

@@ -24,7 +24,10 @@ Pillow 是可选依赖：没装时 `available()` 为 False，调用方退回旧�
 from __future__ import annotations
 
 import math
+import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -40,7 +43,7 @@ except Exception as e:                  # noqa: BLE001 - 没装就退回旧预�
     Image = ImageColor = ImageDraw = ImageFont = None
     _PIL_OK = False
 
-from storygraph.story.atl import placement_of
+from storygraph.story.atl import placement_box, placement_of
 
 
 def available() -> bool:
@@ -244,21 +247,224 @@ def _load_font(path: str, size: int, bold: bool = False,
 #  图片缓存
 # ----------------------------------------------------------------------
 
-@lru_cache(maxsize=48)
-def _load_scaled(path: str, mtime: int, w: int, h: int):
-    """按目标像素尺寸解码（大立绘 4320×7680 不会整张进内存缓存）。"""
+#: `_load_scaled` 缓存默认预算（2026-10-30，⑦ P0）。
+#:
+#: 旧实现是 `lru_cache(maxsize=48)` —— 按**张数**淘汰。一张 8K 背景
+#: 4320×7680 RGBA = **132.7MB**，48 张理论上 6.4GB；真实项目当前素材
+#: （4K CG 33.2MB / 2K 背景 ~13MB / 立绘缩图 11.9MB）满槽也要 1GB 左右。
+#: "高分辨率图会出问题"的风险点就在这。现在按**字节预算**淘汰：
+#: 默认 256MB，可用环境变量调（`STORYGRAPH_STAGE_CACHE_BYTES` 字节，
+#: 或 `STORYGRAPH_STAGE_CACHE_MB` 兆）。
+DEFAULT_CACHE_BYTES = 256 * 1024 * 1024
+CACHE_BYTES_ENV = 'STORYGRAPH_STAGE_CACHE_BYTES'
+CACHE_MB_ENV = 'STORYGRAPH_STAGE_CACHE_MB'
+
+
+def _int_env(name: str, scale: int = 1):
+    """环境变量 → 非负整数；没设返回 None，坏值**留痕**后也返回 None。"""
+    raw = (os.environ.get(name) or '').strip()
+    if not raw:
+        return None
+    try:
+        return max(0, int(float(raw) * scale))
+    except (TypeError, ValueError) as e:      # 手改环境变量写错不该炸渲染
+        swallow('stage_render.cache_env_budget', e)
+        return None
+
+
+def _env_cache_budget() -> int:
+    """环境变量里的缓存预算（字节）；没设/坏值就用默认 256MB。"""
+    got = _int_env(CACHE_BYTES_ENV)
+    if got is None:
+        got = _int_env(CACHE_MB_ENV, 1024 * 1024)
+    return DEFAULT_CACHE_BYTES if got is None else got
+
+
+class _ImageCache:
+    """
+    按**字节预算**淘汰的 LRU 图片缓存（线程安全）。
+
+    为什么不是 `lru_cache`：它只认"张数"，而一张图多大完全取决于项目素材
+    （8K 立绘 132MB vs 界面小图 0.1MB）—— 张数上限根本约束不住内存。
+    """
+
+    def __init__(self):
+        self._items: OrderedDict = OrderedDict()
+        self._bytes = 0
+        self._explicit = None            # 测试/调用方显式设的预算（None = 环境变量）
+        self._hits = 0
+        self._misses = 0
+        self._lock = threading.RLock()
+
+    def budget(self) -> int:
+        with self._lock:
+            return (self._explicit if self._explicit is not None
+                    else _env_cache_budget())
+
+    def configure(self, max_bytes=None) -> int:
+        """显式设预算（`None` = 回到环境变量/默认值）；返回生效的预算。"""
+        with self._lock:
+            self._explicit = (None if max_bytes is None
+                              else max(0, int(max_bytes)))
+            self._evict()
+            return self.budget()
+
+    def get(self, key):
+        with self._lock:
+            item = self._items.get(key)
+            if item is None:
+                self._misses += 1
+                return None
+            self._items.move_to_end(key)
+            self._hits += 1
+            return item[0]
+
+    def put(self, key, img) -> None:
+        size = int(getattr(img, 'width', 0)) * int(getattr(img, 'height', 0)) * 4
+        with self._lock:
+            old = self._items.pop(key, None)
+            if old is not None:
+                self._bytes -= old[1]
+            budget = self.budget()
+            if size > budget:
+                # 单张就超预算：不缓存（但仍返回给调用方画），否则会立刻被淘汰
+                return
+            self._items[key] = (img, size)
+            self._bytes += size
+            self._evict()
+
+    def _evict(self) -> None:
+        budget = self.budget()
+        while self._bytes > budget and self._items:
+            _key, (_img, size) = self._items.popitem(last=False)
+            self._bytes -= size
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._bytes = 0
+            self._hits = 0
+            self._misses = 0
+
+    def info(self) -> dict:
+        with self._lock:
+            return {'entries': len(self._items), 'bytes': self._bytes,
+                    'budget': self.budget(), 'hits': self._hits,
+                    'misses': self._misses}
+
+
+_SCALED_CACHE = _ImageCache()
+
+
+def cache_info() -> dict:
+    """当前图片缓存的状态（测试/诊断用）：条目数、字节数、预算、命中数。"""
+    return _SCALED_CACHE.info()
+
+
+def cache_clear() -> None:
+    """清空图片缓存（测试/诊断用）。"""
+    _SCALED_CACHE.clear()
+
+
+def configure_cache(max_bytes=None) -> int:
+    """设置图片缓存预算（`None` = 回到环境变量/默认 256MB）；返回生效值。"""
+    return _SCALED_CACHE.configure(max_bytes)
+
+
+def _resample_of(value):
+    """`'nearest'` / 其它 → Pillow 重采样枚举（默认 LANCZOS）。"""
+    if not _PIL_OK:
+        return None
+    text = str(value or '').strip().lower()
+    if text in ('nearest', '1', 'true'):
+        return Image.Resampling.NEAREST
+    return Image.Resampling.LANCZOS
+
+
+def _load_scaled(path: str, mtime: int, w: int, h: int, crop=None,
+                 resample=None, full=None):
+    """
+    按目标像素尺寸解码；`crop` 时只返回目标坐标里的那一块（可见区域）。
+
+    参数含义（2026-10-30，⑦ P0：让"解码目标"和"完整绘制尺寸"分开）：
+
+      · `w` / `h` —— **要返回的像素数**（调用方已按屏幕可见区域封顶）；
+      · `crop` —— 可见块在**完整绘制坐标**里的 `(x0, y0, x1, y1)`；
+      · `full` —— 完整绘制尺寸 `(fw, fh)`（决定 zoom 比例；缺省 = (w, h)）。
+
+    为什么要有 `crop`/`full`：没有 `at` 的大图按引擎语义是 **1:1 贴左上、
+    右/下裁掉**。整图 8K 解出来 132.7MB，而画布上真正看得见的只有
+    1920×1080（8.3MB）—— 先按比例把源图裁成可见那一块再缩，缓存里就只留
+    屏幕大小；配合 `_ImageCache` 的字节预算，内存有上界。
+
+    实现顺序：原图 →（按 full 比例映射到）源区域裁切 → 缩到可见尺寸。
+    没给 `crop` 时等价于"整图缩到 w×h"（老行为）。
+    """
     if not _PIL_OK:
         return None
     try:
+        fw_out = max(1, int(round(float(w))))
+        fh_out = max(1, int(round(float(h))))
+        fw_full, fh_full = ((int(round(float(full[0]))),
+                             int(round(float(full[1]))))
+                            if full else (fw_out, fh_out))
+        fw_full = max(1, fw_full)
+        fh_full = max(1, fh_full)
+    except (TypeError, ValueError):
+        return None
+    box = None
+    if crop:
+        try:
+            x0, y0, x1, y1 = [int(round(float(v))) for v in crop]
+        except (TypeError, ValueError):
+            return None
+        x0 = max(0, min(fw_full, x0))
+        y0 = max(0, min(fh_full, y0))
+        x1 = max(x0, min(fw_full, x1))
+        y1 = max(y0, min(fh_full, y1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        box = (x0, y0, x1, y1)
+    mode = _resample_of(resample)
+    key = (str(path), int(mtime), fw_out, fh_out, fw_full, fh_full, box,
+           int(mode or 0))
+    cached = _SCALED_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
         with Image.open(path) as src:
             img = src.convert('RGBA')
-            if (w, h) != img.size:
-                img = img.resize((max(1, int(w)), max(1, int(h))),
-                                 Image.Resampling.LANCZOS)
-            return img.copy()
+            nw, nh = img.size
+            if box is None:
+                if (fw_out, fh_out) != img.size:
+                    img = img.resize((fw_out, fh_out), mode)
+                return _cache_put(key, img.copy())
+            x0, y0, x1, y1 = box
+            # 完整绘制坐标 → 源坐标：裁切框按"完整绘制尺寸/原图尺寸"的比例
+            # 缩回源图，这样"先缩再裁"与"先裁再缩"几何等价，而内存只用
+            # 可见那么大。
+            sx = float(nw) / float(fw_full)
+            sy = float(nh) / float(fh_full)
+            src_box = (max(0, min(nw, int(round(x0 * sx)))),
+                       max(0, min(nh, int(round(y0 * sy)))),
+                       max(0, min(nw, int(round(x1 * sx)))),
+                       max(0, min(nh, int(round(y1 * sy)))))
+            if src_box[2] <= src_box[0] or src_box[3] <= src_box[1]:
+                return None
+            piece = img.crop(src_box)
+            size = (fw_out, fh_out)
+            if piece.size != size:
+                piece = piece.resize(size, mode)
+            return _cache_put(key, piece)
     except Exception as e:                    # noqa: BLE001 - 坏图不炸预览
         swallow('stage_render.load_scaled', e)
         return None
+
+
+def _cache_put(key, img):
+    """把解码结果放进字节预算缓存并返回它（单张超预算时不缓存）。"""
+    _SCALED_CACHE.put(key, img)
+    return img
 
 
 def _mtime(path) -> int:
@@ -353,6 +559,11 @@ class RenderResult:
     width: int = 0
     height: int = 0
     sprite_boxes: dict = field(default_factory=dict)   # 原 sprites 下标 -> box
+    #: 背景在画布上的框 `(left, top, w, h)`（虚拟像素；2026-10-30 ⑦ P0，
+    #: 给提示行/诊断用：`w > 屏幕宽` 就是"游戏里会裁切"）。
+    background_box: tuple = (0, 0, 0, 0)
+    #: 各非角色图层的框：`{tag: (left, top, w, h)}`。
+    layer_boxes: dict = field(default_factory=dict)
     textbox_rect: tuple = (0, 0, 0, 0)
     name_rect: tuple = (0, 0, 0, 0)
     text_rect: tuple = (0, 0, 0, 0)
@@ -390,11 +601,100 @@ def _solid(spec, ctx):
                                ctx.project_root)
 
 
-def _box_for(spec, at, ctx, natural):
+def _real_geometry(place) -> bool:
+    """这个 `Placement` 是**真算出来**的吗（而不是按名字猜的）？"""
+    return (place is not None
+            and getattr(place, 'x_px', None) is not None
+            and getattr(place, 'y_px', None) is not None)
+
+
+def _at_box(at, ctx, natural, result, what, spec=''):
+    """
+    一张图的 `at` → 画布框 `(left, top, w, h)`（Ren'Py 语义）。
+
+    · 没有 `at` → 原图尺寸 @ (0,0)（引擎就是这样：超出屏幕的右/下被裁）；
+    · `at` 能算（项目 transform / 内置位置 / fit / zoom）→ `placement_box`；
+    · `at` **认不出**（名字猜的）→ 不猜位置：按原图左上画，并明说可能与
+      游戏不一致（"算不出还不说"比算错更糟）。
+    """
     if not at:
         return 0.0, 0.0, float(natural[0]), float(natural[1])
-    place = placement_of(at, ctx.transform_index, ctx.registry, ctx.screen)
-    return place.box(natural, ctx.screen)
+    place = None
+    try:
+        place = placement_of(at, ctx.transform_index, ctx.registry, ctx.screen)
+        box = placement_box(place, natural, ctx.screen)
+    except Exception as e:                    # noqa: BLE001 - 坏几何不该炸预览
+        swallow('stage_render.at_box', e)
+        box = None
+    if box is not None and _real_geometry(place):
+        return box
+    who = f'{what}「{spec}」' if spec else what
+    result.warnings.append(
+        f'{who} 的变换「{at}」认不出，预览按原图左上画（可能与游戏不一致）')
+    return 0.0, 0.0, float(natural[0]), float(natural[1])
+
+
+def _box_for(spec, at, ctx, natural):
+    """背景框（兼容旧接口；`_at_box` 需要 `result` 记警告，这里只算几何）。"""
+    if not at:
+        return 0.0, 0.0, float(natural[0]), float(natural[1])
+    try:
+        place = placement_of(at, ctx.transform_index, ctx.registry, ctx.screen)
+        box = placement_box(place, natural, ctx.screen)
+    except Exception as e:                    # noqa: BLE001
+        swallow('stage_render.background_box', e)
+        box = None
+    if box is not None and _real_geometry(place):
+        return box
+    return 0.0, 0.0, float(natural[0]), float(natural[1])
+
+
+def _clip_to_screen(left, top, w, h, screen):
+    """
+    盒子裁到画布：返回 `(x, y, iw, ih, crop, fw, fh)`；完全不可见返回 None。
+
+    `crop` 是**目标像素坐标**里的可见子矩形（给 `_load_scaled` 只解这一块）；
+    `fw/fh` 是完整的绘制尺寸（它决定 zoom 比例，不能丢）。
+    """
+    try:
+        cw = max(1, int(screen[0]))
+        ch = max(1, int(screen[1]))
+        x = int(round(float(left)))
+        y = int(round(float(top)))
+        fw = max(1, int(round(float(w))))
+        fh = max(1, int(round(float(h))))
+    except (TypeError, ValueError):
+        return None
+    x0 = max(0, -x)
+    y0 = max(0, -y)
+    x1 = min(fw, cw - x)
+    y1 = min(fh, ch - y)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x + x0, y + y0, x1 - x0, y1 - y0, (x0, y0, x1, y1), fw, fh
+
+
+def _draw_picture(canvas, path, box, screen, alpha: float = 1.0,
+                  resample=None) -> bool:
+    """
+    把一张图按 `box` 画到画布上；**只解码画布上真正看得见的那一块**。
+
+    这是背景 / 图层 / 立绘共用的贴图入口（2026-10-30 ⑦ P0）：
+    `_clip_to_screen` 先把框裁到屏幕，`_load_scaled(crop=…)` 就只解/只缓存
+    可见部分（8K 背景贴左上时缓存的是屏幕大小，不是 132MB 整图）。
+    """
+    if not box:
+        return False
+    clipped = _clip_to_screen(box[0], box[1], box[2], box[3], screen)
+    if clipped is None:
+        return False
+    px, py, pw, ph, crop, fw, fh = clipped
+    img = _load_scaled(path, _mtime(path), pw, ph, crop=crop,
+                       resample=resample, full=(fw, fh))
+    if img is None:
+        return False
+    _paste(canvas, img, px, py, alpha)
+    return True
 
 
 def _draw_background(canvas, frame, ctx, result):
@@ -415,14 +715,9 @@ def _draw_background(canvas, frame, ctx, result):
             natural = None
         if natural:
             at = str(getattr(frame, 'scene_at', '') or '')
-            try:
-                left, top, w, h = _box_for(scene, at, ctx, natural)
-            except Exception as e:            # noqa: BLE001
-                swallow('stage_render.background_box', e)
-                left, top, w, h = 0, 0, natural[0], natural[1]
-            img = _load_scaled(path, _mtime(path), int(w), int(h))
-            if img is not None:
-                _paste(canvas, img, left, top)
+            box = _at_box(at, ctx, natural, result, '背景', scene)
+            result.background_box = tuple(float(v) for v in box)
+            if _draw_picture(canvas, path, box, ctx.screen):
                 return
     if color:
         _fill(canvas, color)
@@ -458,27 +753,37 @@ def _draw_sprites(canvas, frame, ctx, result):
             result.warnings.append(f'立绘读不出：{spec}')
             continue
         try:
-            left, top, w, h = place.box(natural, ctx.screen)
+            box = placement_box(place, natural, ctx.screen)
+            if box is None:
+                box = (0.0, 0.0, natural[0], natural[1])
         except Exception as e:                # noqa: BLE001
             swallow('stage_render.sprite_box', e)
-            left, top, w, h = 0, 0, natural[0], natural[1]
+            box = (0.0, 0.0, natural[0], natural[1])
+        left, top, w, h = box
         # 画面外的立绘不 decode：省内存也省时间
         if left >= ctx.screen[0] or top >= ctx.screen[1] or \
                 left + w <= 0 or top + h <= 0:
             result.warnings.append(f'立绘在画面外：{spec}')
             continue
-        img = _load_scaled(path, _mtime(path), int(w), int(h))
-        if img is None:
-            result.warnings.append(f'立绘解码失败：{spec}')
-            continue
         angle = float(getattr(place, 'rotate', 0.0) or 0.0)
+        alpha = float(getattr(place, 'alpha', 1.0) or 1.0)
         if angle:
+            # 旋转必须先拿整图（旋转后包围盒会变），走老路。
+            img = _load_scaled(path, _mtime(path), int(w), int(h))
+            if img is None:
+                result.warnings.append(f'立绘解码失败：{spec}')
+                continue
             img = img.rotate(-angle, expand=True,
                              resample=Image.Resampling.BICUBIC)
             left -= (img.width - w) / 2.0
             top -= (img.height - h) / 2.0
-        _paste(canvas, img, left, top,
-               float(getattr(place, 'alpha', 1.0) or 1.0))
+            _paste(canvas, img, left, top, alpha)
+        else:
+            resample = 'nearest' if getattr(place, 'nearest', False) else None
+            if not _draw_picture(canvas, path, box, ctx.screen,
+                                 alpha=alpha, resample=resample):
+                result.warnings.append(f'立绘解码失败：{spec}')
+                continue
         result.sprite_boxes[i] = (left, top, w, h)
 
 
@@ -486,7 +791,10 @@ def _draw_layers(canvas, frame, ctx, result):
     raw = str(getattr(frame, 'layers', '') or '')
     if not raw:
         return
+    ats = dict(getattr(frame, 'layers_at', None) or {})
     for spec in [p.strip() for p in raw.split(';') if p.strip()]:
+        tag = spec.split()[0] if spec.split() else spec
+        at = str(ats.get(tag) or ats.get(spec) or '')
         path = _resolve_path(spec, ctx)
         color = None
         if path is None:
@@ -499,8 +807,10 @@ def _draw_layers(canvas, frame, ctx, result):
                 swallow('stage_render.layer_size', e)
                 natural = None
             if natural:
-                img = _load_scaled(path, _mtime(path), natural[0], natural[1])
-                _paste(canvas, img, 0, 0)
+                what = 'CG' if tag == 'cg' else f'图层 {tag}'
+                box = _at_box(at, ctx, natural, result, what, spec)
+                result.layer_boxes[tag] = tuple(float(v) for v in box)
+                _draw_picture(canvas, path, box, ctx.screen)
                 continue
         if color:
             canvas.alpha_composite(Image.new('RGBA', canvas.size,
@@ -508,6 +818,322 @@ def _draw_layers(canvas, frame, ctx, result):
             continue
         result.warnings.append(f'图层找不到：{spec}')
         result.missing.append(spec)
+
+
+# ----------------------------------------------------------------------
+#  尺寸提示（人话）—— P1
+# ----------------------------------------------------------------------
+
+#: 图片"原始像素尺寸"缓存（只读文件头，不解码整图）。
+_NATURAL_SIZE_CACHE: dict = {}
+_NATURAL_SIZE_LIMIT = 256
+#: 项目 transform 表缓存（`scan_transforms` 要读几十~几百个 .rpy；提示行每拍
+#: 都要问，不能每拍扫盘）。预览窗口有时会把自己的表传进来，优先用那个。
+_TRANSFORM_INDEX_CACHE: dict = {}
+
+
+def _natural_size(path):
+    """图片原始尺寸 `(w, h)`；读不到返回 None（只读文件头，<1ms）。"""
+    if not _PIL_OK or not path:
+        return None
+    try:
+        st = Path(path).stat()
+        key = (str(path), int(st.st_mtime_ns))
+    except OSError:
+        return None
+    got = _NATURAL_SIZE_CACHE.get(key)
+    if got is not None:
+        return got
+    try:
+        with Image.open(path) as im:
+            got = (int(im.width), int(im.height))
+    except Exception as e:                     # noqa: BLE001 - 坏图不该拦住提示
+        swallow('stage_render.natural_size', e)
+        return None
+    if len(_NATURAL_SIZE_CACHE) >= _NATURAL_SIZE_LIMIT:
+        _NATURAL_SIZE_CACHE.clear()
+    _NATURAL_SIZE_CACHE[key] = got
+    return got
+
+
+def _transform_index_of(project_root, index=None):
+    """项目 transform 表；`index` 显式给了就用它（预览窗口自己扫好的那份）。"""
+    if index is not None:
+        return index
+    if not project_root:
+        return {}
+    key = str(project_root)
+    got = _TRANSFORM_INDEX_CACHE.get(key)
+    if got is not None:
+        return got
+    try:
+        from storygraph.story.atl import scan_transforms
+        got = scan_transforms(project_root) or {}
+    except Exception as e:                     # noqa: BLE001 - 提示失败不影响画面
+        swallow('stage_render.transform_index', e)
+        got = {}
+    if len(_TRANSFORM_INDEX_CACHE) >= 32:
+        _TRANSFORM_INDEX_CACHE.clear()
+    _TRANSFORM_INDEX_CACHE[key] = got
+    return got
+
+
+def _at_phrase(at, place) -> str:
+    """`at` 的人话：`无 at` / `at bgfit（fit "cover"）` / `at x（认不出…）`。"""
+    at = str(at or '').strip()
+    if not at:
+        return '无 at'
+    if not _real_geometry(place):
+        return f'at {at}（认不出，预览按原图左上画，可能与游戏不一致）'
+    bits = []
+    fit = str(getattr(place, 'fit', '') or '')
+    if fit:
+        bits.append(f'fit "{fit}"')
+    xs = getattr(place, 'xsize', None)
+    ys = getattr(place, 'ysize', None)
+    if xs is not None:
+        bits.append(f'xsize {float(xs):g}')
+    if ys is not None:
+        bits.append(f'ysize {float(ys):g}')
+    xz = float(getattr(place, 'xzoom', 1.0) or 1.0)
+    yz = float(getattr(place, 'yzoom', 1.0) or 1.0)
+    if abs(xz - yz) < 1e-6:
+        if abs(xz - 1.0) > 1e-6:
+            bits.append(f'zoom {xz:g}')
+    else:
+        bits.append(f'xzoom {xz:g}，yzoom {yz:g}')
+    if not bits:
+        bits.append('位置')
+    return f'at {at}（{"，".join(bits)}）'
+
+
+def _relation_phrase(box, screen) -> str:
+    """框 vs 屏幕：`正好铺满` / `游戏里会被裁切` / `游戏里会留黑边`。"""
+    if not box:
+        return '尺寸未知'
+    try:
+        sw, sh = float(screen[0]), float(screen[1])
+        left, top, w, h = [float(v) for v in box]
+    except (TypeError, ValueError):
+        return '尺寸未知'
+    over = (left < -0.5 or top < -0.5 or left + w > sw + 0.5
+            or top + h > sh + 0.5)
+    under = (w < sw - 0.5 or h < sh - 0.5 or left > 0.5 or top > 0.5)
+    if over and under:
+        return '游戏里会裁切并留黑边'
+    if over:
+        return '游戏里会被裁切'
+    if under:
+        return '游戏里会留黑边'
+    return '正好铺满'
+
+
+def _size_note(label, spec, natural, at, index, registry,
+               project_root, screen) -> str:
+    """一条人话尺寸提示（提示行/测试共用；纯文本）。"""
+    place = None
+    box = None
+    at = str(at or '').strip()
+    if at:
+        try:
+            place = placement_of(at, index, registry, screen)
+            box = placement_box(place, natural, screen)
+        except Exception as e:                 # noqa: BLE001
+            swallow('stage_render.size_note', e)
+            place, box = None, None
+    if box is None:
+        box = (0.0, 0.0, float(natural[0]), float(natural[1]))
+    sw, sh = int(screen[0]), int(screen[1])
+    return (f'{label} {spec} {natural[0]}×{natural[1]} → 屏幕 {sw}×{sh}'
+            f'（{_at_phrase(at, place)}：{_relation_phrase(box, screen)}）')
+
+
+def scale_notes(frame, registry=None, project_root=None, screen=None,
+                transform_index=None, limit: int = 3) -> list:
+    """
+    这一拍的**尺寸人话**（P1：用户二轮反馈"图调不了大小"）。
+
+    形如：
+
+        背景 bg bg7_0 2304×1296 → 屏幕 1920×1080（无 at：游戏里会被裁切）
+        CG cg cg01 3840×2160 → 屏幕 1920×1080（at cg38402160（zoom 0.5）：正好铺满）
+
+    **只读、不改任何数据**（"预览不骗人"：游戏里会裁就写会裁，不会替它 fit）。
+    没装 Pillow / 图找不到 / 认不出尺寸时返回空表或跳过（缺图有别的提示）。
+    """
+    if frame is None or not _PIL_OK:
+        return []
+    from storygraph.story.atl import project_screen
+
+    try:
+        sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen \
+            else (project_screen(project_root) if project_root
+                  else (1920, 1080))
+        screen_pair = (max(1, int(sw)), max(1, int(sh)))
+    except (TypeError, ValueError):
+        screen_pair = (1920, 1080)
+    images = getattr(registry, 'images', {}) or {}
+    index = _transform_index_of(project_root, transform_index)
+    from storygraph.app.stage import resolve_stage_asset
+
+    def resolve(spec):
+        try:
+            return resolve_stage_asset(spec, images, project_root)
+        except Exception as e:                 # noqa: BLE001 - 解析失败就不提示
+            swallow('stage_render.scale_notes.resolve', e)
+            return None
+
+    notes = []
+    scene = str(getattr(frame, 'scene', '') or '').strip()
+    if scene:
+        natural = _natural_size(resolve(scene))
+        if natural:
+            at = str(getattr(frame, 'scene_at', '') or '')
+            notes.append(_size_note('背景', scene, natural, at, index, registry,
+                                    project_root, screen_pair))
+    raw = str(getattr(frame, 'layers', '') or '')
+    ats = dict(getattr(frame, 'layers_at', None) or {})
+    try:
+        from storygraph.core.vocabulary import LAYER_CN_TAG
+    except Exception as e:                     # noqa: BLE001 - 词表读不到就退 tag
+        swallow('stage_render.scale_notes.layer_cn', e)
+        LAYER_CN_TAG = {}
+    for spec in [p.strip() for p in raw.split(';') if p.strip()][:max(0, limit)]:
+        tag = spec.split()[0] if spec.split() else spec
+        at = str(ats.get(tag) or ats.get(spec) or '')
+        natural = _natural_size(resolve(spec))
+        if not natural:
+            continue
+        label = LAYER_CN_TAG.get(tag, tag)
+        notes.append(_size_note(label, spec, natural, at, index, registry,
+                                project_root, screen_pair))
+    return notes
+
+
+# ---------------------------------------------------------------------------
+#  过场说明（卡片「当前舞台」与演出预览共用）
+# ---------------------------------------------------------------------------
+
+#: 过场时长未知（`Effect.duration == 0`）时，预览按这个秒数近似演；
+#: 说明行里也写这个数（"时长未知，按 0.35s 近似"）—— 一处常量，两处一致。
+FX_FALLBACK_SECONDS = 0.35
+
+
+def _fmt_transition_arg(value) -> str:
+    """过场参数 → 一行里好读的字面量（认不出的参数原样写，不猜值）。"""
+    from storygraph.story.transition_expr import NonLiteral
+
+    if isinstance(value, NonLiteral):
+        return str(value.text or '…')
+    if isinstance(value, str):
+        return f'"{value}"'
+    if isinstance(value, bool):
+        return 'True' if value else 'False'
+    if isinstance(value, (int, float)):
+        return f'{value:g}' if isinstance(value, float) else str(value)
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join(_fmt_transition_arg(v) for v in value) + ']'
+    return str(value)
+
+
+def _transition_call_text(call, effect) -> str:
+    """
+    一次过场调用 → 说明行里的那一项（**只读、不编号**）。
+
+    三种长相（与用户拍板的样例一致）：
+      · 构造器调用 → `Dissolve 0.1（master）`（参数是字面量才写）；
+      · 项目自定义名 → 用效果的人话名，如 `闪黑 1s（0.5 出 + 0 停 + 0.5 入）`；
+      · 认不出 → `名字（无法精确预览）`（**绝不写成"淡入"**）。
+    """
+    name = str(getattr(call, 'name', '') or '').strip()
+    expr = str(getattr(call, 'expr', '') or '').strip()
+    name = name or expr or '过场'
+    kind = str(getattr(effect, 'kind', '') or '') if effect is not None else ''
+    if effect is not None and kind in ('', 'unknown'):
+        return f'{name}（无法精确预览）'
+    args = tuple(getattr(call, 'args', ()) or ())
+    layer = str(getattr(call, 'layer', '') or '').strip()
+    if args:
+        text = name + ' ' + ' '.join(_fmt_transition_arg(a) for a in args)
+        return text + (f'（{layer}）' if layer else '')
+    if effect is not None:
+        label = str(getattr(effect, 'label', '') or '')
+        if label:
+            if float(getattr(effect, 'duration', 0.0) or 0.0) <= 0 \
+                    and kind not in ('pause', 'solid'):
+                label += f'（时长未知，按 {FX_FALLBACK_SECONDS:g}s 近似）'
+            return label
+    return name + (f'（{layer}）' if layer else '')
+
+
+def _frame_transition_effects(frame, project_root=None) -> tuple:
+    """一帧的过场效果（帧上带着的最好；有项目根就按项目目录重解析一遍）。"""
+    calls = tuple(getattr(frame, 'transitions', ()) or ())
+    effects = tuple(getattr(frame, 'effects', ()) or ())
+    if not calls:
+        return effects
+    if project_root:
+        try:
+            from storygraph.app.stage import project_transitions
+            from storygraph.story.transition_catalog import effect_of
+            catalog = project_transitions(project_root)
+            return tuple(effect_of(call, catalog) for call in calls)
+        except Exception as e:                # noqa: BLE001 - 解析失败就退回帧上的
+            swallow('stage_render.transition_effects', e)
+    if effects:
+        return effects
+    try:
+        from storygraph.story.transition_catalog import effect_of
+        return tuple(effect_of(call, {}) for call in calls)
+    except Exception as e:                    # noqa: BLE001 - 提示失败不影响画面
+        swallow('stage_render.transition_effects.fallback', e)
+        return ()
+
+
+def transition_notes(frame, project_root=None, limit: int = 2) -> list:
+    """
+    这一拍的**过场说明行**（卡片「当前舞台」与演出预览共用，只读）。
+
+    形如：
+
+        过场：Dissolve 0.1（master）
+        过场：闪黑 1s（0.5 出 + 0 停 + 0.5 入）
+        过场：WeirdTransition（无法精确预览）
+
+    一拍多条**只读、不编号**：最多列 `limit` 条，后面用「（…共 N 条）」收尾。
+    `unknown` 只写名字 + "无法精确预览" —— 消费方只显示文字，**不套默认淡入**。
+    没有过场返回 `[]`（调用方据此一行都不加，不做"硬切"占位）。
+
+    `project_root` 给了就按项目 `define` 的转场目录重解析（帧可能是在没有
+    项目根的时候构造的，自定义名当时解析不出来）。
+    """
+    if frame is None:
+        return []
+    calls = tuple(getattr(frame, 'transitions', ()) or ())
+    effects = _frame_transition_effects(frame, project_root)
+    items: list = []
+    for index, call in enumerate(calls):
+        effect = effects[index] if index < len(effects) else None
+        text = _transition_call_text(call, effect)
+        if text and text not in items:
+            items.append(text)
+    if not calls:
+        # 老调用方构造的帧只有 `with_`（没有派生过场）：原样写出来，不装效果
+        raw = str(getattr(frame, 'with_', '') or '').strip()
+        if raw:
+            return [f'过场：{raw}']
+        for effect in effects:
+            label = str(getattr(effect, 'label', '') or '').strip()
+            if label and label not in items:
+                items.append(label)
+    if not items:
+        return []
+    total = len(items)
+    shown = items[:max(1, int(limit or 1))]
+    line = '、'.join(shown)
+    if total > len(shown):
+        line += f'（…共 {total} 条）'
+    return [f'过场：{line}']
 
 
 # ----------------------------------------------------------------------
@@ -1630,6 +2256,8 @@ def render_frame_to_png(frame, out_path, **kwargs) -> Optional[str]:
         return None
 
 
-__all__ = ['MAX_READABLE_PX', 'MIN_READABLE_PX', 'READABLE_PX_RATIO',
-           'RenderResult', 'available', 'draw_readable_say', 'render_frame',
-           'render_frame_to_png', 'scale_result_image', 'text_runs']
+__all__ = ['DEFAULT_CACHE_BYTES', 'FX_FALLBACK_SECONDS', 'MAX_READABLE_PX',
+           'MIN_READABLE_PX', 'READABLE_PX_RATIO', 'RenderResult', 'available',
+           'cache_clear', 'cache_info', 'configure_cache', 'draw_readable_say',
+           'render_frame', 'render_frame_to_png', 'scale_notes',
+           'scale_result_image', 'text_runs', 'transition_notes']

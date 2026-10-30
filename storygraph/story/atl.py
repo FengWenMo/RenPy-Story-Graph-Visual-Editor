@@ -102,11 +102,27 @@ _BUILTIN_PROPS = {
 #: 自定义命名的首字母启发（`i11` 偏内 / `f11` 偏外 …）
 _LETTER_X = {'l': 0.25, 'r': 0.75, 'c': 0.5, 'i': 0.35, 'f': 0.65}
 
-#: ATL 里认识的属性（其余忽略：`subpixel` / `fit` / `nearest`…）
+#: ATL 里认识的属性（其余忽略：`subpixel` / `rotate` 之外的显示属性…）
 _X_PROPS = {'xpos', 'xcenter', 'xalign', 'xoffset', 'xanchor'}
 _Y_PROPS = {'ypos', 'ycenter', 'yalign', 'yoffset', 'yanchor'}
 #: 数值型属性（与位置无关，但 `zoom` 要用）
 _NUM_PROPS = {'zoom', 'xzoom', 'yzoom', 'alpha', 'rotate'}
+#: 尺寸 / 适配类属性（2026-10-30，⑦ P0）。
+#:
+#: 从前这里整族被忽略（旧注释原话"其余忽略：`fit` / `nearest`"）：
+#: 项目里的 `transform bgfit: fit "cover"` 落到"按名字猜位置"的兜底，
+#: 于是 1728×972 的背景在预览里被画成**原尺寸居中贴底**，而游戏里是
+#: 铺满 1920×1080 —— 这就是用户看到的"BG 调不了大小"。
+#:
+#: 语义只来自 SDK 文档（`doc/transform_properties.html` 的 fit 表），
+#: 不按名字猜：尺寸来源 = `xsize`+`ysize` → `xsize`/`ysize` 单边 →
+#: （都没有时）`fit` 用 Transform 的包含区域（舞台上就是屏幕）。
+_FIT_PROPS = {'fit', 'nearest', 'xsize', 'ysize', 'xysize'}
+#: Ren'Py 文档里 fit 的五个合法值（`None`/`fill` 等价于"拉伸到尺寸"）。
+_FIT_VALUES = {'contain', 'cover', 'fill', 'scale-down', 'scale-up'}
+#: `xysize (w, h)` 的两个值里有逗号/括号，按空格切 token 会碎 —— 先整段摘出来。
+_XYSIZE_RE = re.compile(
+    r'\bxysize\s*\(\s*([^,()]+?)\s*,\s*([^,()]+?)\s*\)')
 #: 缓动/控制关键字（后面可能跟一个时长表达式）
 _WARPERS = {'linear', 'ease', 'easein', 'easeout', 'pause', 'repeat',
             'block', 'parallel', 'choice', 'animation', 'time', 'event',
@@ -460,9 +476,18 @@ def _props_of(line: str) -> list:
     要能吃掉缓动前缀与"一行多个属性"：
         `easein .25 xcenter x zoom z*1 alpha 1.00`
         → [('xcenter','x'), ('zoom','z*1'), ('alpha','1.00')]
+
+    2026-10-30（⑦ P0）补上尺寸族：`fit "cover"` / `nearest 1` / `xsize 960` /
+    `ysize 540` / `xysize (960, 540)`。`xysize (...)` 里的逗号会把 token
+    切碎，所以先整段摘出来再走 token 解析。
     """
-    tokens = str(line or '').split()
+    text = str(line or '')
     out = []
+    for m in _XYSIZE_RE.finditer(text):
+        out.append(('xysize', f'{m.group(1).strip()},{m.group(2).strip()}'))
+    if out:
+        text = _XYSIZE_RE.sub(' ', text)
+    tokens = text.split()
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -471,6 +496,26 @@ def _props_of(line: str) -> list:
             if i < len(tokens) and eval_number(tokens[i], {}) is not None:
                 i += 1
             if i < len(tokens) and tokens[i] == ':':
+                i += 1
+            continue
+        if token in ('xsize', 'ysize'):
+            value = tokens[i + 1] if i + 1 < len(tokens) else ''
+            out.append((token, value))
+            i += 2
+            continue
+        if token == 'fit':
+            value = tokens[i + 1] if i + 1 < len(tokens) else ''
+            out.append(('fit', value.strip().strip('"\'')))
+            i += 2
+            continue
+        if token == 'nearest':
+            # 布尔属性可以不带值（ATL 写法 `nearest` / `nearest 1`）。
+            if i + 1 < len(tokens) and eval_number(tokens[i + 1], {}) \
+                    is not None:
+                out.append(('nearest', tokens[i + 1]))
+                i += 2
+            else:
+                out.append(('nearest', 'True'))
                 i += 1
             continue
         if token in _X_PROPS or token in _Y_PROPS or token in _NUM_PROPS:
@@ -523,51 +568,157 @@ class Placement:
     yzoom: float = 1.0
     alpha: float = 1.0
     rotate: float = 0.0
+    #: `fit`（2026-10-30，⑦ P0）：Ren'Py 的"按包含区域缩放"。
+    #: None / 'contain' / 'cover' / 'fill' / 'scale-down' / 'scale-up'。
+    #: 几何在 `placement_box` 里算；**`box()` 已经委托过去**，所以两条路一致。
+    fit: Optional[str] = None
+    #: `xsize` / `ysize` / `xysize` 拆出来的显式尺寸（`position` 语义：
+    #: 整数 = 像素、小数 = 屏幕比例）。None = 没写。
+    xsize: Optional[float] = None
+    ysize: Optional[float] = None
+    xsize_frac: bool = False
+    ysize_frac: bool = False
+    #: `nearest`：最近邻缩放。预览只记录（解码时用），不影响 box 几何。
+    nearest: bool = False
 
     def box(self, natural, screen=DEFAULT_SCREEN) -> Optional[tuple]:
         """
         真实图像尺寸 + 本位置 → 屏幕上的 `(left, top, w, h)`（虚拟像素）。
 
-        这是 Ren'Py `Transform` 的定位公式，**只做这一件事**：
-          · 尺寸 = 原图 × zoom；
-          · `pos` 是"锚点要落在哪"，`anchor` 是"图像自己的哪个点"；
-          · 小数 = 屏幕/图像比例，整数 = 像素；
-          · `offset` 最后加。
-
-        返回 `None` = 没有算出来的位置（调用方该退回示意图，而不是画到角上）。
+        ⚠ 2026-10-30：几何**唯一实现**已移到模块函数 `placement_box`
+        （背景 / 立绘 / 图层共用，且要支持 `fit`）。这里保留同名方法是为了
+        既有调用方（`app.stage.sprite_box` / `stage_render`）一行不用改。
         """
-        if not natural or len(natural) < 2:
-            return None
-        try:
-            nw, nh = float(natural[0]), float(natural[1])
-        except (TypeError, ValueError):
-            return None
-        if nw <= 0 or nh <= 0:
-            return None
-        sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen else DEFAULT_SCREEN
-        sw, sh = max(1.0, float(sw)), max(1.0, float(sh))
-        w, h = nw * float(self.xzoom or 1.0), nh * float(self.yzoom or 1.0)
-        if self.x_px is None:
-            # 老字段（按名字猜的归一化中心）兜底：把 x 当中心。
-            left = self.x * sw - float(self.xanchor or 0.5) * w
-        else:
-            pos = float(self.x_px) * sw if self.xpos_frac else float(self.x_px)
-            anchor = (float(self.xanchor) * w if self.xanchor_frac
-                      else float(self.xanchor))
-            left = pos + float(self.xoffset or 0.0) - anchor
-        if self.y_px is None:
-            top = sh - h                    # 老行为：没有纵向信息就贴底
-        else:
-            pos = float(self.y_px) * sh if self.ypos_frac else float(self.y_px)
-            anchor = (float(self.yanchor) * h if self.yanchor_frac
-                      else float(self.yanchor))
-            top = pos + float(self.yoffset or 0.0) - anchor
-        return left, top, w, h
+        return placement_box(self, natural, screen)
 
     @property
     def from_atl(self) -> bool:
         """这个位置是从项目 transform 里**真算出来**的吗？"""
         return str(self.source).startswith('atl')
+
+
+def _screen_pair(screen) -> tuple:
+    """屏幕尺寸兜底：坏值/缺值都回落到 1920×1080 的比例，永远返回两正数。"""
+    try:
+        sw, sh = (tuple(screen) + (1920, 1080))[:2]
+        return max(1.0, float(sw)), max(1.0, float(sh))
+    except (TypeError, ValueError):
+        return float(DEFAULT_SCREEN[0]), float(DEFAULT_SCREEN[1])
+
+
+def _fitted_size(natural, dims, fit) -> tuple:
+    """
+    `fit` / `xsize` / `ysize` → 最终的"原图尺寸"（还没乘 zoom）。
+
+    `dims` 是 `[('x', 像素), ('y', 像素)]` 的子集（只列**写了的**维度）。
+    规则照抄 Ren'Py 文档（见模块里 `_FIT_PROPS` 的注释）：
+
+      · `contain`：在维度内尽量大、保比例（取最小比例）；
+      · `cover`：至少盖住所有维度、保比例（取最大比例）；
+      · `fill` / `None`：各维度拉伸到给定值（没给的维度保持原图）；
+      · `scale-down` / `scale-up`：contain/cover 的结果再夹到"不放大/不缩小"。
+
+    认不出的 fit 字符串**按没有 fit 处理**（不猜语义：宁可按原图，也不假装
+    知道它是什么意思）。
+    """
+    nw, nh = natural
+    fit = str(fit or '').strip().lower()
+    if fit not in _FIT_VALUES:
+        fit = ''
+    if not dims and not fit:
+        return nw, nh
+    xdim = dict(dims).get('x')
+    ydim = dict(dims).get('y')
+    if fit in ('contain', 'cover', 'scale-down', 'scale-up'):
+        ratios = []
+        if xdim is not None and xdim > 0:
+            ratios.append(float(xdim) / nw)
+        if ydim is not None and ydim > 0:
+            ratios.append(float(ydim) / nh)
+        if not ratios:
+            return nw, nh
+        ratio = max(ratios) if fit in ('cover', 'scale-up') else min(ratios)
+        if fit == 'scale-down':
+            ratio = min(ratio, 1.0)          # 不放大原图
+        elif fit == 'scale-up':
+            ratio = max(ratio, 1.0)          # 不缩小原图
+        return nw * ratio, nh * ratio
+    # fill / None：各维度拉伸到给定值；没给的那一维保持原图
+    return (float(xdim) if xdim is not None else nw,
+            float(ydim) if ydim is not None else nh)
+
+
+def placement_box(placement, img_size, screen=DEFAULT_SCREEN) -> Optional[tuple]:
+    """
+    `Placement` + 原图尺寸 + 屏幕 → `(left, top, w, h)`（Ren'Py 语义）。
+
+    这是**背景 / 立绘 / 图层共用**的唯一几何实现（`Placement.box` 是它的
+    同名委托）。与 2026-10-30 之前的差别只有一条：**先把 `fit` / `xsize` /
+    `ysize` 算成尺寸**，再套 `pos/anchor/offset`。没有这几样时结果与旧版
+    **逐位相同**（尺寸 = 原图 × zoom）。
+
+    组合顺序（Ren'Py：fit 决定 displayable 的尺寸，zoom 是之后的作用）：
+    `原图 → fit/尺寸 → × zoom → 定位`。项目里的真实用法（`bgfit` 只有
+    `fit`、`cg38402160` 只有 `zoom`）都落在这条链的单步上，所以没有歧义。
+    """
+    if not img_size or len(img_size) < 2:
+        return None
+    try:
+        nw, nh = float(img_size[0]), float(img_size[1])
+    except (TypeError, ValueError):
+        return None
+    if nw <= 0 or nh <= 0:
+        return None
+    sw, sh = _screen_pair(screen)
+    try:
+        xs = getattr(placement, 'xsize', None)
+        ys = getattr(placement, 'ysize', None)
+        dims = []
+        if xs is not None:
+            xv = float(xs) * sw if getattr(placement, 'xsize_frac', False) \
+                else float(xs)
+            dims.append(('x', xv))
+        if ys is not None:
+            yv = float(ys) * sh if getattr(placement, 'ysize_frac', False) \
+                else float(ys)
+            dims.append(('y', yv))
+        fit = getattr(placement, 'fit', None)
+        if dims:
+            w0, h0 = _fitted_size((nw, nh), dims, fit)
+        elif fit:
+            w0, h0 = _fitted_size((nw, nh), [('x', sw), ('y', sh)], fit)
+        else:
+            w0, h0 = nw, nh
+        w = w0 * float(getattr(placement, 'xzoom', 1.0) or 1.0)
+        h = h0 * float(getattr(placement, 'yzoom', 1.0) or 1.0)
+        x_px = getattr(placement, 'x_px', None)
+        y_px = getattr(placement, 'y_px', None)
+        xanchor = float(getattr(placement, 'xanchor', 0.0) or 0.0)
+        yanchor = float(getattr(placement, 'yanchor', 0.0) or 0.0)
+        xoffset = float(getattr(placement, 'xoffset', 0.0) or 0.0)
+        yoffset = float(getattr(placement, 'yoffset', 0.0) or 0.0)
+        if x_px is None:
+            # 老字段（按名字猜的归一化中心）兜底：把 x 当中心。
+            # `or 0.5` 是旧行为：这条兜底路径上 anchor 没意义，缺省就是居中。
+            left = float(getattr(placement, 'x', 0.5) or 0.0) * sw \
+                - (xanchor or 0.5) * w
+        else:
+            pos = float(x_px) * sw if getattr(placement, 'xpos_frac', True) \
+                else float(x_px)
+            anchor = (xanchor * w if getattr(placement, 'xanchor_frac', True)
+                      else xanchor)
+            left = pos + xoffset - anchor
+        if y_px is None:
+            top = sh - h                    # 老行为：没有纵向信息就贴底
+        else:
+            pos = float(y_px) * sh if getattr(placement, 'ypos_frac', True) \
+                else float(y_px)
+            anchor = (yanchor * h if getattr(placement, 'yanchor_frac', True)
+                      else yanchor)
+            top = pos + yoffset - anchor
+        return left, top, w, h
+    except (TypeError, ValueError):
+        return None
 
 
 def uncertain_note(reason: str) -> str:
@@ -855,13 +1006,48 @@ def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Place
         'ypos': None, 'yfrac': True, 'yanchor': None, 'yanchor_frac': True,
         'yoffset': 0.0, 'ykind': 'top',
         'xz': 1.0, 'yz': 1.0, 'alpha': 1.0, 'rotate': 0.0,
+        # 尺寸/适配族（2026-10-30，⑦ P0）
+        'fit': None, 'xsize': None, 'ysize': None,
+        'xsize_frac': False, 'ysize_frac': False, 'nearest': False,
     }
     touched = False
     for prop, raw in (props or ()):
+        prop = str(prop)
+        if prop in ('fit', 'nearest'):
+            # 字符串/布尔属性：不走 eval_number
+            if prop == 'fit':
+                value = str(raw or '').strip().strip('"\'').lower()
+                st['fit'] = value or None
+            else:
+                text = str(raw or '').strip().lower()
+                st['nearest'] = text not in ('', '0', 'false', 'none')
+            touched = True
+            continue
+        if prop == 'xysize':
+            parts = str(raw or '').split(',', 1)
+            if len(parts) != 2:
+                continue
+            for key, expr in zip(('xsize', 'ysize'), parts):
+                number = eval_number(expr, env or {})
+                if number is None:
+                    continue
+                st[key] = number
+                st[key + '_frac'] = _frac(expr)
+                touched = True
+            continue
         number = eval_number(raw, env or {})
         if number is None:
             continue
-        prop = str(prop)
+        if prop == 'xsize':
+            st['xsize'] = number
+            st['xsize_frac'] = _frac(raw)
+            touched = True
+            continue
+        if prop == 'ysize':
+            st['ysize'] = number
+            st['ysize_frac'] = _frac(raw)
+            touched = True
+            continue
         if prop == 'xalign':
             st.update(xpos=number, xfrac=True, xanchor=number,
                       xanchor_frac=True, xkind='align')
@@ -936,6 +1122,13 @@ def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Place
     got.zoom = got.xzoom
     got.alpha = float(st['alpha'])
     got.rotate = float(st['rotate'] or 0.0)
+    # 尺寸/适配族（2026-10-30，⑦ P0）：几何在 `placement_box` 里用。
+    got.fit = st['fit']
+    got.xsize = st['xsize']
+    got.ysize = st['ysize']
+    got.xsize_frac = bool(st['xsize_frac'])
+    got.ysize_frac = bool(st['ysize_frac'])
+    got.nearest = bool(st['nearest'])
     # 老字段：归一化位置（给"没有真实几何"的示意图用）。
     if st['xpos'] is None:
         got.x = 0.0
@@ -960,5 +1153,5 @@ def _from_props(props: dict, env: dict, screen, source: str) -> Optional[Placeme
 
 
 __all__ = ['DEFAULT_SCREEN', 'Placement', 'TransformDef', 'eval_number',
-           'parse_transforms', 'placement_of', 'project_screen',
-           'scan_transforms']
+           'parse_transforms', 'placement_box', 'placement_of',
+           'project_screen', 'scan_transforms']
