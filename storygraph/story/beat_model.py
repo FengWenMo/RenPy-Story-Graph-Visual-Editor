@@ -174,6 +174,56 @@ def _fold_leaf_arg(beat, head: str, positional, value) -> bool:
     return True
 
 
+def _fold_code_call_arg(beat, head: str, kind: str, arg, value) -> bool:
+    """
+    技术调用参数列 → 折进 `Beat.code` **那一行**（并同步 `ordered`）。
+
+    只认**单行、恰好一次**调用：多行调用 / 同一 head 出现多次 → 不动
+    （挑一条改就是改了另一条指令，见 `story.call_expr` 的纪律）。
+    """
+    from storygraph.story.call_expr import find_calls, set_arg
+    code = str(getattr(beat, 'code', '') or '')
+    if not code.strip():
+        return False
+    hits = find_calls(code, head)
+    if len(hits) != 1:
+        return False
+    hit = hits[0]
+    if '\n' in code[hit.start:hit.end]:
+        return False                         # 多行调用：不猜
+    old_line = code.split('\n')[code.count('\n', 0, hit.start)]
+    new_line = set_arg(old_line, head,
+                       position=(arg if kind == 'pos' else None),
+                       kw=(arg if kind == 'kw' else ''), value=value)
+    if new_line == old_line:
+        return False
+    start = code.rfind('\n', 0, hit.start) + 1
+    end = code.find('\n', hit.end)
+    end = len(code) if end < 0 else end
+    beat.code = code[:start] + new_line + code[end:]
+    beat.ordered = _sync_ordered_code_line(beat, old_line, new_line)
+    return True
+
+
+def _sync_ordered_code_line(beat, old: str, new: str) -> list:
+    """`ordered` 里那条 code 记录的文本跟着改（**只改一条**）。"""
+    fixed = []
+    done = False
+    for item in (getattr(beat, 'ordered', None) or ()):
+        try:
+            kind, line = item[0], item[1]
+        except (TypeError, ValueError, IndexError):
+            fixed.append(item)
+            continue
+        if (not done and kind == 'code'
+                and unmask_code_block_markers(str(line)) == old):
+            fixed.append((kind, new) + tuple(item[2:]))
+            done = True
+            continue
+        fixed.append(item)
+    return fixed
+
+
 def _sync_ordered_raw_line(beat, old: str, new: str) -> list:
     """`ordered` 里那条 raw 记录的文本跟着改（**只改一条**，见 `_fold_leaf_arg`）。"""
     fixed = []
@@ -256,7 +306,9 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
     同时追加到 `sanitized`（W114 留痕的依据）。
     """
     from storygraph.core.vocabulary import statement_head_token
-    from storygraph.story.spec_args import fold_dynamic_columns, parse_dynamic_full
+    from storygraph.story.spec_args import (fold_dynamic_columns,
+                                            parse_call_column,
+                                            parse_dynamic_full)
     cleaned: list = []
     dyn: dict = {}
     for key, val in (values or {}).items():
@@ -274,7 +326,16 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
     head_token = statement_head_token(beat.statement_head())
     leaf: dict = {}
     head_dyn: dict = {}
+    code_calls: dict = {}
     for key, value in dyn.items():
+        # 技术调用（2026-10-30）：列名带 `@N` / `@kw`，而且这一拍的 `code`
+        # 里**真的**有那个 head 的调用 —— 三者同时成立才当调用列。
+        call_head, _cp, call_kind, call_arg = parse_call_column(key)
+        if call_head and call_kind:
+            from storygraph.story.call_expr import has_call
+            if has_call(beat.code, call_head):
+                code_calls[key] = (call_head, call_kind, call_arg, value)
+                continue
         col_head, _param, _pos = parse_dynamic_full(key)
         if col_head and col_head != head_token:
             leaf[key] = value
@@ -285,6 +346,10 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
     for key, value in leaf.items():
         col_head, _param, pos = parse_dynamic_full(key)
         _fold_leaf_arg(beat, col_head, pos, value)
+    # ①b **技术调用**（`$ renpy.transition(...)` / 项目包装函数）：折进
+    #     `Beat.code` 那一行（并同步 `ordered`）—— 同样不碰头行。
+    for _key, (head, kind, arg, value) in code_calls.items():
+        _fold_code_call_arg(beat, head, kind, arg, value)
     # ② **头行语句**（声明的自定义语句 / 循环 / 相机）：折进那个字段。
     if head_dyn:
         target = beat._head_field()
@@ -346,15 +411,32 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
                 split_at = str(base).index(head_word) + len(head_word)
                 head_prefix = str(base)[:split_at]
                 fold_base = str(base)[split_at:].lstrip()
-        folded = fold_dynamic_columns(fold_base, head_dyn)
         # ⚠ **把"格子"一起交给折回那一侧**（2026-10-13 修）：多值格与可选段
         #   按位置号换是错的（只换第一个词 / 根本没有号）—— 有格子才能按
         #   "这一格在行里的字符区间"整段换。见 `spec_args.set_slot_value`。
+        # ⭐ **复杂子句**（2026-10-30）：同理把声明带过去 —— 否则只能认出
+        #   "有这一句、改它的值"，插不进去（不知道声明顺序/类型）。
+        clauses = list(getattr(beat, '_spec_clauses', None) or ())
+        if not clauses:
+            from storygraph.story.spec_args import parse_clause_column
+            from storygraph.story.spec_clauses import normalize_clause
+            for key in head_dyn:
+                _h, c_name, c_kw = parse_clause_column(key)
+                if not c_kw:
+                    continue
+                clause = normalize_clause({
+                    'keyword': c_kw, 'name': c_name,
+                    'kind': ('transition' if c_kw == 'with' else 'word')})
+                if clause:
+                    clauses.append(clause)
+        meta = dict(head_dyn)
         if pattern:
-            folded = fold_dynamic_columns(fold_base, dict(head_dyn,
-                                                          __pattern__=list(pattern)))
-            if head_prefix and folded != fold_base:
-                folded = f'{head_prefix} {folded}'.strip()
+            meta['__pattern__'] = list(pattern)
+        if clauses:
+            meta['__clauses__'] = list(clauses)
+        folded = fold_dynamic_columns(fold_base, meta)
+        if head_prefix and folded != fold_base:
+            folded = f'{head_prefix} {folded}'.strip()
         # ⚠⚠ **`show` 那一支要把动作名摘掉再写回**（2026-10-13 实测修）。
         #
         # `Beat.show` 存的是动作名**后面**那一串（`'lan swim_suit happy'`），
@@ -975,6 +1057,8 @@ class Beat:
         读成"有个名叫 background 的参数"。
         """
         from storygraph.story.spec_args import (parse_dynamic_full,
+                                                parse_call_column,
+                                                parse_clause_column,
                                                 positional_values,
                                                 spec_arg_values,
                                                 head_is_a_pattern_slot,
@@ -1048,6 +1132,12 @@ class Beat:
         #   "格子区间"整段换值。不记的话它只能退回位置号那套 ——
         #   多值格只换掉第一个词、可选段的旧值留在原地（2026-10-14 实测）。
         self._spec_pattern = list(pattern) if pattern else []
+        #: 这一拍**复杂子句**的声明（`clauses`）—— 折回时按它决定"插到哪、
+        #: 是哪种值"。与 `_spec_pattern` 同一个理由：读值侧已经有这份，
+        #: 不必让折回再查一次注册表（`Beat.from_row` 也根本拿不到项目根）。
+        clause_rows = [c.get('clauses') for c in (columns or ())
+                       if isinstance(c, dict) and c.get('clauses')]
+        self._spec_clauses = (list(clause_rows[0]) if clause_rows else [])
         if pattern:
             try:
                 by_slot = slot_value_map(stripped, pattern)
@@ -1058,6 +1148,61 @@ class Beat:
         out = []
         for col in columns or ():
             header = col if isinstance(col, str) else str(col.get('header') or '')
+            # 技术调用（2026-10-30）：值在 `Beat.code` 的那一次调用里。
+            call = col.get('call') if isinstance(col, dict) else None
+            if not call:
+                ch, cp, ckind, carg = parse_call_column(header)
+                if ch and ckind:
+                    call = {'head': ch, 'kind': ckind,
+                            'position': carg if ckind == 'pos' else None,
+                            'kw': carg if ckind == 'kw' else ''}
+            if call:
+                from storygraph.story.call_expr import has_call, read_arg
+                # ⚠ 列名 `camera·layer@0` 也长得像调用列（同样是 `@0`）——
+                #   必须再确认"这一拍的代码里真的有这个 head"。有 `call`
+                #   元数据时它来自调用声明，可以信（列只会为真调用生成）。
+                if not (isinstance(col, dict) and col.get('call')) \
+                        and not has_call(self.code, call.get('head', '')):
+                    call = None
+            if call:
+                col_kind = (str(col.get('kind') or '')
+                            if isinstance(col, dict) else '')
+                out.append(read_arg(
+                    self.code, call.get('head', ''),
+                    position=call.get('position'),
+                    kw=call.get('kw', ''),
+                    unquote=(col_kind != 'transition')))
+                continue
+            _clause_head, clause_param, clause_kw = parse_clause_column(header)
+            if clause_kw:
+                # 复杂子句（2026-10-30）：值在头行里、由关键字引入 ——
+                # 不是位置参数，也不是 `key=value`。
+                from storygraph.story.spec_clauses import clause_values
+                clause = (col.get('clause') if isinstance(col, dict) else {}) or {}
+                if not clause:
+                    clause = {'keyword': clause_kw, 'name': clause_param,
+                              'kind': ('transition' if clause_kw == 'with'
+                                       else 'word')}
+                # ⚠ 必须拿**全部子句**去扫：只给这一句时，`at` 会把后面的
+                #   `with Dissolve(0.3)` 一起吞进来（真机实测就是这么错的）。
+                context = list(getattr(self, '_spec_clauses', None) or ())
+                if not context:
+                    from storygraph.story.spec_clauses import normalize_clause
+                    for other in (columns or ()):
+                        oh = (other if isinstance(other, str)
+                              else str(other.get('header') or ''))
+                        _oh, oname, okw = parse_clause_column(oh)
+                        if not okw:
+                            continue
+                        synth = normalize_clause({
+                            'keyword': okw, 'name': oname,
+                            'kind': ('transition' if okw == 'with'
+                                     else 'word')})
+                        if synth:
+                            context.append(synth)
+                context = context or [clause]
+                out.append(clause_values(base, context).get(clause_param, ''))
+                continue
             head_name, param, positional = parse_dynamic_full(header)
             # ⚠⚠ **这一列可能有好几个名字**（2026-10-14 修）：声明里的
             #   `columns[].name`（`who`）与 `pattern[].column`（`角色`）**常常不同**

@@ -87,16 +87,18 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                               QCompleter, QDialog, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPlainTextEdit,
-                               QPushButton, QScrollArea, QSizePolicy,
-                               QStackedWidget, QTableWidget, QTableWidgetItem,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QComboBox, QCompleter, QDialog, QFrame,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMessageBox,
+                               QPlainTextEdit, QPushButton, QScrollArea,
+                               QSizePolicy, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QToolButton, QVBoxLayout,
+                               QWidget)
 
 from storygraph.authoring.learn_statement import (build_declaration,
                                                   declaration_preview)
 from storygraph.core.safeguard import swallow
+from storygraph.story.spec_clauses import CLAUSE_KIND_LABELS, CLAUSE_KINDS
 from storygraph.ui_qt import theme
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt.column_editor import ColumnList
@@ -206,7 +208,23 @@ class CustomStatementDialog(QDialog):
         help_btn.setToolTip('术语表 + 四步操作 + 它到底会改哪个文件')
         help_btn.clicked.connect(self._show_help)
         lay.addWidget(help_btn)
+        calls_btn = QPushButton('技术调用…')
+        calls_btn.setProperty('role', 'ghost')
+        calls_btn.setToolTip(
+            '给 `$ 项目包装函数(...)` 这类过场声明参数形状（高级；'
+            '不声明也能逐字保留，只是卡片上没有可编辑的格）')
+        calls_btn.clicked.connect(self._open_calls)
+        lay.addWidget(calls_btn)
         return head
+
+    def _open_calls(self):
+        """打开「技术调用」小窗（`$ 函数(...)` 的参数形状）。"""
+        from storygraph.ui_qt.dialog_calls import CallDialog
+        dlg = CallDialog(self, project_root=self._root_path)
+        dlg.exec()
+        if getattr(dlg, 'changed', False):
+            self.changed = True
+            self._set_status('ok', '技术调用已更新 —— 重新打开那几拍就能看到参数格。')
 
     def _build_action_bar(self) -> QWidget:
         """
@@ -504,8 +522,11 @@ class CustomStatementDialog(QDialog):
         lay.addWidget(self.params)
         self.params.add_field()          # 一进来就有一格，省得人想"要先点加号吗"
 
+        # —— 2.5 复杂子句（高级，可选）——
+        self._build_clause_section(lay)
+
         # —— 3. 拿一行剧本试试 ——
-        lay.addWidget(_step(3, '拿一行剧本试试'))
+        lay.addWidget(_step(4, '拿一行剧本试试'))
         lay.addWidget(_hint('从剧本里粘一整行最准（开头那个词不用删，工具认得出）。'))
         cut_row = FlowRow(spacing=T.SPACE['xs'])
         self.sample = QLineEdit()
@@ -556,6 +577,143 @@ class CustomStatementDialog(QDialog):
         # ⚠ 只接"试切"这一个落点：接两次再断开是自找麻烦（顺序错一次就炸）
         self.sample.textChanged.connect(self._refresh_cut)
         return outer
+
+    def _build_clause_section(self, lay: QVBoxLayout):
+        """
+        「复杂子句」那一块（2026-10-30）。
+
+        什么时候需要它：一条语句除了位置参数，还带 `at …` / `with …` /
+        `behind …` 这种**关键字子句**。它们可以不出现、顺序可变，而且
+        `with` 后面可能是一个带空格/括号的表达式（`Dissolve( 0.3 )`）——
+        用"一格一个词"表达不了，所以单独一张小表。
+
+        只写声明，不碰剧本：保存后卡片/Excel 里会多出这些列。
+        """
+        lay.addWidget(_step(3, '复杂子句（可选，高级）'))
+        lay.addWidget(_hint(
+            '一条语句除了位置参数，还带 `at 左, 右` / `with Dissolve(0.3)` '
+            '这种「关键字 + 一段值」时，在这里加一行。不出现也能用 —— '
+            '不填 = 这条语句没有子句。'))
+        lay.addWidget(_hint(
+            '值类型：「一个词」= behind ye；「多个词」= at 左, 右；'
+            '「表达式」= with Dissolve( 0.3 )；「转场」= 同表达式，但演出预览'
+            '会按它演；「数字」= fade 0.5。'))
+
+        self.clause_table = QTableWidget(0, 4)
+        self.clause_table.setHorizontalHeaderLabels(
+            ['关键字（剧本里的词）', '列名（表格里叫什么）', '值类型', '可省略'])
+        hh = self.clause_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.clause_table.verticalHeader().setVisible(False)
+        self.clause_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.clause_table.setMinimumHeight(96)
+        self.clause_table.setMaximumHeight(168)
+        self.clause_table.setToolTip(
+            '例：关键字 `with`、列名「转场」、类型「转场表达式」——'
+            '保存后卡片上就多一格「转场」，改它只动 `with …` 那一段。')
+        self.clause_table.itemChanged.connect(self._on_form_changed)
+        lay.addWidget(self.clause_table)
+
+        row = FlowRow(spacing=T.SPACE['xs'])
+        add = QPushButton('＋ 加一句')
+        add.setToolTip('加一行：关键字（at / with / behind…）+ 列名 + 值类型')
+        add.clicked.connect(lambda: self._add_clause_row())
+        rm = QPushButton('删掉选中那句')
+        rm.clicked.connect(self._remove_clause_row)
+        row.add(add)
+        row.add(rm)
+        lay.addWidget(row)
+
+        # ⚠ 表格里**没有行**时也占着这一块（标题 + 提示），否则人不知道
+        #   有这个能力；但不显示空表格的横线。
+        self.clause_table.setVisible(True)
+
+    def _add_clause_row(self, keyword: str = '', name: str = '',
+                        kind: str = 'word', optional: bool = True):
+        """加一行子句声明（信号先关掉：灌数据不算"人改了"）。"""
+        table = getattr(self, 'clause_table', None)
+        if table is None:
+            return
+        table.blockSignals(True)
+        try:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(str(keyword or '')))
+            table.setItem(row, 1, QTableWidgetItem(str(name or '')))
+            combo = QComboBox()
+            for key in CLAUSE_KINDS:
+                combo.addItem(CLAUSE_KIND_LABELS.get(key, key), key)
+            idx = combo.findData(kind if kind in CLAUSE_KINDS else 'word')
+            combo.setCurrentIndex(max(0, idx))
+            combo.currentIndexChanged.connect(self._on_form_changed)
+            table.setCellWidget(row, 2, combo)
+            item = QTableWidgetItem('')
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled
+                          | Qt.ItemIsSelectable)
+            item.setCheckState(Qt.Checked if optional else Qt.Unchecked)
+            table.setItem(row, 3, item)
+        finally:
+            table.blockSignals(False)
+
+    def _remove_clause_row(self):
+        table = getattr(self, 'clause_table', None)
+        if table is None or table.rowCount() == 0:
+            return
+        row = table.currentRow()
+        if row < 0:
+            row = table.rowCount() - 1
+        table.removeRow(row)
+        self._on_form_changed()
+
+    def _clause_rows(self) -> list:
+        """
+        表格 → 声明里的 `clauses`（空行跳过；坏行交给后端规范化时出声）。
+
+        ⚠ 类型下拉存的是 `itemData`（`word` / `words` / `expr` /
+        `transition` / `number`），显示的是中文 —— 两种不能混。
+        """
+        table = getattr(self, 'clause_table', None)
+        if table is None:
+            return []
+        out = []
+        for row in range(table.rowCount()):
+            kw_item = table.item(row, 0)
+            name_item = table.item(row, 1)
+            keyword = (kw_item.text() if kw_item else '').strip()
+            name = (name_item.text() if name_item else '').strip()
+            if not keyword and not name:
+                continue
+            combo = table.cellWidget(row, 2)
+            kind = (combo.currentData() if isinstance(combo, QComboBox)
+                    else 'word') or 'word'
+            opt_item = table.item(row, 3)
+            optional = (opt_item.checkState() == Qt.Checked
+                        if opt_item is not None else True)
+            out.append({'keyword': keyword, 'name': name, 'kind': kind,
+                        'optional': optional})
+        return out
+
+    def _fill_clauses(self, decl):
+        """声明 → 表格（载入已有语句时用；没有 → 清空）。"""
+        table = getattr(self, 'clause_table', None)
+        if table is None:
+            return
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)
+            for clause in (getattr(decl, 'clauses', None) or ()):
+                if not isinstance(clause, dict):
+                    continue
+                self._add_clause_row(
+                    keyword=clause.get('keyword', ''),
+                    name=clause.get('name', ''),
+                    kind=clause.get('kind', 'word'),
+                    optional=bool(clause.get('optional', True)))
+        finally:
+            table.blockSignals(False)
 
     def _on_preview_toggled(self, on: bool):
         self.preview.setVisible(bool(on))
@@ -1011,6 +1169,7 @@ class CustomStatementDialog(QDialog):
             self.cut_view.clear()
             self._verify_view.setVisible(False)
             self._fill_params(decl)
+            self._fill_clauses(decl)
             self._sync_optional_defaults()
         finally:
             self._loading = False
@@ -1161,7 +1320,7 @@ class CustomStatementDialog(QDialog):
             swallow('ui_qt.dialog_learn.signature', e)
             return ''
         keep = {k: b.get(k) for k in ('name', 'label', 'docs', 'block',
-                                      'columns', 'pattern')}
+                                      'columns', 'pattern', 'clauses')}
         return json.dumps(keep, sort_keys=True, ensure_ascii=False)
 
     def _is_dirty(self) -> bool:
@@ -1239,7 +1398,8 @@ class CustomStatementDialog(QDialog):
         res = SR.declare_statement(
             self._root_path, built['name'], label=built.get('label', ''),
             columns=built.get('columns') or [], block=built.get('block'),
-            docs=built.get('docs', ''), pattern=built.get('pattern') or [])
+            docs=built.get('docs', ''), pattern=built.get('pattern') or [],
+            clauses=built.get('clauses') or [])
         if not res.get('ok'):
             self._set_status('error', '没写进项目清单：' + str(res.get('reason') or '?'))
             return False
@@ -1336,7 +1496,10 @@ class CustomStatementDialog(QDialog):
             #   卡片没被人动过时不会自带 `required`，这里按语句头补默认，
             #   写进声明的 `pattern` 也就是"以后一直是这个意思"。
             pattern=_with_optional_defaults(self.params.slots(),
-                                            self.name.text()))
+                                            self.name.text()),
+            # ⭐ 复杂子句（2026-10-30）：`[]` 也算"这次编辑过"—— 人删光
+            #   子句再保存，清单里就该没有它们（而不是留一堆看不见的旧声明）。
+            clauses=self._clause_rows())
 
     def result_declaration(self) -> dict:
         """按下去之后的最终参数（调用方/判据拿去查声明）。"""

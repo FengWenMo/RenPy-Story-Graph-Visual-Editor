@@ -53,6 +53,10 @@ WRITERS = {
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
     'pipeline/build.py::build_project': '写构建报告 JSON',
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
+    'story/statement_registry.py::declare_calls':
+        '写项目清单的 `calls` 段（技术调用的参数形状；2026-10-30）。'
+        '与 `declare_statement` 同一条纪律：坏 JSON 拒绝覆盖、同名合并、'
+        '只写清单不碰剧本/资源表',
     'mcp_surface.py::declare': 'MCP 的写入口 —— **自己不写盘**，只调上面那个唯一写入口'
                                '（`declare_statement`）；额外做三件事：'
                                '`dry_run` 试算（只给 diff 不落盘）、写前留 `.bak`、'

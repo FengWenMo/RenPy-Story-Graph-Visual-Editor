@@ -279,13 +279,103 @@ def clear_transition_cache() -> None:
     _TRANSITION_CACHE.clear()
 
 
-def _beat_transitions_of(beat) -> tuple:
+def _beat_transitions_of(beat, project_root=None) -> tuple:
     """一拍 → 过场调用元组（派生失败按"没有过场"处理，不崩舞台）。"""
     try:
-        return tuple(beat_transitions(beat))
+        calls = list(beat_transitions(beat))
     except Exception as e:                    # noqa: BLE001 - 派生失败不该拦预览
         swallow('app.stage.beat_transitions', e)
-        return ()
+        calls = []
+    # ⭐ **项目声明过的复杂子句**（2026-10-30）：`mycue … with Dissolve(0.3)`
+    # 里的 `with` 不是 `Beat.with_`（自定义语句的头行在 `spec_head`），
+    # 所以 `beat_transitions` 看不到它。声明里 `kind='transition'` 的子句
+    # 由这里补一路 —— 认不出/没声明就一条都不加（不猜）。
+    if project_root and getattr(beat, 'spec_head', ''):
+        try:
+            calls.extend(_declared_transition_calls(beat, project_root))
+        except Exception as e:                # noqa: BLE001 - 声明坏了不该拦预览
+            swallow('app.stage.declared_transition_clauses', e)
+    if project_root and getattr(beat, 'code', ''):
+        try:
+            calls.extend(_declared_call_transitions(beat, project_root))
+        except Exception as e:                # noqa: BLE001 - 同上
+            swallow('app.stage.declared_call_transitions', e)
+    return tuple(calls)
+
+
+def _declared_transition_calls(beat, project_root) -> list:
+    """`spec_head` + 项目声明 → `[TransitionCall, ...]`（只读、不猜）。"""
+    from dataclasses import replace
+
+    from storygraph.core.vocabulary import statement_head_token
+    from storygraph.story.spec_clauses import (clause_value,
+                                               declared_transition_clauses)
+    from storygraph.story.statement_registry import StatementRegistry
+    from storygraph.story.transition_expr import (SOURCE_CLAUSE,
+                                                  parse_with_clause)
+
+    head = statement_head_token(str(getattr(beat, 'spec_head', '') or ''))
+    if not head:
+        return []
+    spec = StatementRegistry.for_project(project_root).match(head)
+    if spec is None:
+        return []
+    calls = []
+    for clause in declared_transition_clauses(getattr(spec, 'clauses', None)):
+        value = clause_value(str(getattr(beat, 'spec_head', '') or ''), clause)
+        if not value.strip():
+            continue
+        for call in parse_with_clause(value):
+            calls.append(replace(call, source=SOURCE_CLAUSE, line=0))
+    return calls
+
+
+def _declared_call_transitions(beat, project_root) -> list:
+    """
+    项目声明的**技术调用** → `[TransitionCall, ...]`（只读、不猜）。
+
+    包装函数本身不是转场。项目在 `rules.json` 里写：
+
+        {"calls": [{"head": "my_wipe", "effect": "Dissolve",
+                    "seconds_arg": 1, "columns": [...]}]}
+
+    才按 `Dissolve(<第 1 个参数>)` 演；**没写 effect 的**仍然列出来（卡片
+    看得到"这里有一次调用"），但效果由 `effect_of` 如实标"认不出" ——
+    绝不假装淡入。
+    """
+    from storygraph.story.call_expr import find_calls
+    from storygraph.story.statement_registry import StatementRegistry
+    from storygraph.story.transition_expr import (SOURCE_CALL,
+                                                  TransitionCall)
+
+    code = str(getattr(beat, 'code', '') or '')
+    if not code.strip():
+        return []
+    reg = StatementRegistry.for_project(project_root)
+    calls = []
+    for spec in (getattr(reg, 'calls', None) or ()):
+        head = str(spec.get('head') or '')
+        hits = find_calls(code, head)
+        if len(hits) != 1:
+            continue                         # 多条/没有：不猜改哪条
+        hit = hits[0]
+        effect = str(spec.get('effect') or '').strip()
+        expr = hit.expr
+        name = hit.head
+        if effect:
+            name = effect
+            seconds = spec.get('seconds_arg')
+            expr = effect
+            if seconds is not None:
+                arg = hit.arg(position=seconds)
+                if arg is not None and str(arg.value).strip():
+                    value = str(arg.value).strip()
+                    if value[0].isdigit() or value[0] == '.':
+                        expr = f'{effect}({value})'
+        calls.append(TransitionCall(
+            expr=expr, name=name, args=(), kwargs={}, layer='', line=0,
+            source=SOURCE_CALL))
+    return calls
 
 
 def build_frames(beats: list, registry=None, transform_index=None,
@@ -400,7 +490,7 @@ def _frame_of(beat, row, index: int, registry, transform_index,
     # 过场（2026-10-30，③）：三条来路（inline with / 独立 with /
     # `$ renpy.transition(...)`）都派生，再翻成"怎么演"。
     # 目录只在有项目根时查；没有项目的空目录也能解析裸构造器（不猜名字）。
-    transitions = _beat_transitions_of(beat)
+    transitions = _beat_transitions_of(beat, project_root)
     effects = ()
     if transitions:
         try:

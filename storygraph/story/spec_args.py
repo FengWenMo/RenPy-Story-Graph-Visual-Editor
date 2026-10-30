@@ -770,6 +770,30 @@ BUILTIN_ARG_SCHEMAS = {
     ],
 }
 
+#: **技术调用**的参数形状（2026-10-30，用户："自定义模块要支撑复杂的转场调用"）。
+#:
+#: 与 `BUILTIN_ARG_SCHEMAS` 的区别：那些是 Ren'Py **语句**（头行），这些是
+#: `$` **Python 代码**里的函数调用。项目里最典型的复杂过场就写在这里：
+#:
+#:     $ renpy.transition(MultipleTransition([...]), layer="master")
+#:
+#: 字段口径：
+#:   · `position`：第几个位置参数（0-based）；
+#:   · `kw`：关键字参数名（写 `@kw` 进列名，读表时不必查声明）。
+#:
+#: ⚠ 只声明**语法上确定**的两样：第 0 个位置参数是转场表达式、`layer=` 是层。
+#:   不猜"时长"：`Dissolve(d)` 的 `d` 可能是变量，改它等于改语义。
+#: `renpy.transition` 是引擎自带 API，不需要项目声明就能用（B1 的默认形状）；
+#: 项目自己的包装函数用 `rules.json` 的 `calls` 段声明。
+BUILTIN_CALL_SCHEMAS = {
+    'renpy.transition': [
+        {'name': 'transition', 'label': '转场（表达式）',
+         'position': 0, 'kind': 'transition', 'required': False},
+        {'name': 'layer', 'label': '层（空 = 默认）',
+         'kw': 'layer', 'kind': 'word', 'required': False},
+    ],
+}
+
 
 def builtin_columns(head) -> list:
     """这个语句头的**内置**参数形状（没有 → 空列表）。"""
@@ -777,7 +801,8 @@ def builtin_columns(head) -> list:
             BUILTIN_ARG_SCHEMAS.get(str(head or '').strip(), ())]
 
 
-def dynamic_column_name(head, param, positional=None) -> str:
+def dynamic_column_name(head, param, positional=None, clause='',
+                        call_kw='') -> str:
     """
     `('mycue', 'intensity')` → `'mycue·intensity'`（列名/表头）。
 
@@ -788,12 +813,25 @@ def dynamic_column_name(head, param, positional=None) -> str:
         而不是追加一个 `layer=…`（那对 `camera` 是**语法错**）；
       · 只认列名就能判，就不必把 schema 也搬进 `beat_model`（那是个很底层
         的模块，不该认识"项目声明"这套东西）。
+
+    `clause` 非空时写成 `'mycue·位置~at'`（**复杂子句**，2026-10-30）：
+    关键字进列名，读表/折回就不必再查声明；`~` 是保留分隔符（列名里
+    本来就不该出现它）。
+
+    `call_kw` 非空时写成 `'renpy.transition·layer@kw'`（**技术调用的关键字
+    参数**）：`@kw` 与位置号 `@N` 同一套"读表侧判据进列名"的思路。
     """
     h = str(head or '').strip()
     p = str(param or '').strip()
     if not h or not p:
         return ''
     name = f'{h}{SPEC_COLUMN_SEP}{p}'
+    kw = str(call_kw or '').strip()
+    if kw:
+        return f'{name}@kw'
+    kw = str(clause or '').strip()
+    if kw:
+        return f'{name}~{kw}'
     if positional is None or isinstance(positional, bool):
         return name
     try:
@@ -801,6 +839,22 @@ def dynamic_column_name(head, param, positional=None) -> str:
     except (TypeError, ValueError):
         return name
     return f'{name}@{idx}' if idx >= 0 else name
+
+
+def parse_clause_column(header) -> tuple:
+    """
+    列名 → `(语句名, 参数名, 子句关键字)`；不是复杂子句列 → `('', '', '')`。
+
+    `mycue·位置~at` → `('mycue', '位置', 'at')`。`~` 后面的关键字**必须非空、
+    不含空白**；否则当普通动态列（`param` 里保留 `~`，不认它是子句）。
+    """
+    head, param, _pos = parse_dynamic_full(str(header or ''))
+    if not param or '~' not in param:
+        return '', '', ''
+    name, _sep, kw = param.rpartition('~')
+    if not name or not kw or any(ch.isspace() for ch in kw):
+        return '', '', ''
+    return head, name, kw
 
 
 def parse_dynamic_full(header) -> tuple:
@@ -823,9 +877,15 @@ def parse_dynamic_full(header) -> tuple:
     positional = None
     if '@' in text:
         text, _sep, tail = text.rpartition('@')
-        if not tail.isdigit():
+        if tail == 'kw':
+            # 技术调用的**关键字参数**列（`renpy.transition·layer@kw`）：
+            # 位置号仍是 None，参数名在左边；读表时靠 `parse_call_column`
+            # 知道它是 `kw`。
+            positional = None
+        elif not tail.isdigit():
             return '', '', None
-        positional = int(tail)
+        else:
+            positional = int(tail)
     if not text or text.count(SPEC_COLUMN_SEP) != 1:
         return '', '', None
     h, p = (part.strip() for part in text.split(SPEC_COLUMN_SEP))
@@ -840,9 +900,34 @@ def parse_dynamic_full(header) -> tuple:
     #   表格列名**，中文天经地义（`show·人物@0`）。
     #   不加这一条，`SpecHead` 的中文表头「自定义语句·头行（高级）」会被当成
     #   动态列（`·` 正好在中间）—— 实测：它污染了"干净章节一列都不多"那条判据。
-    if not re.fullmatch(r'[A-Za-z_]\w*', h):
+    #
+    # ⚠ 2026-10-30：技术调用的 head 可以带**一个点**（`renpy.transition`）——
+    #   只放行"标识符.标识符"，仍拒绝别的形状（中文表头照旧被挡）。
+    if not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?', h):
         return '', '', None
     return h, p, positional
+
+
+def parse_call_column(header) -> tuple:
+    """
+    技术调用列 → `(语句名, 参数名, 种类, 参数)`；不是 → `('', '', '', None)`。
+
+      · `renpy.transition·transition@0` → `('renpy.transition', 'transition',
+        'pos', 0)`；
+      · `renpy.transition·layer@kw` → `('renpy.transition', 'layer', 'kw',
+        'layer')`。
+
+    `种类` 只用来决定"读/写哪个实参"，不参与语义判断。
+    """
+    raw = str(header or '').strip()
+    head, param, positional = parse_dynamic_full(raw)
+    if not head or not param:
+        return '', '', '', None
+    if raw.endswith('@kw'):
+        return head, param, 'kw', param
+    if positional is not None:
+        return head, param, 'pos', int(positional)
+    return '', '', '', None
 
 
 def parse_dynamic_column(header) -> tuple:
@@ -906,13 +991,33 @@ def fold_dynamic_columns(row, values) -> str:
     text = str(row or '')
     raw_pattern = list(values.get('__pattern__') or ()) if isinstance(values, dict) \
         else []
+    raw_clauses = list(values.get('__clauses__') or ()) if isinstance(values, dict) \
+        else []
     for header, value in (values or {}).items():
-        if header == '__pattern__':
+        if header in ('__pattern__', '__clauses__'):
+            continue
+        clean = '' if value is None else str(value).strip()
+        # ⭐ **复杂子句**（2026-10-30）：列名里带 `~关键字`，只换"关键字…
+        #   值"里值那一段（顺序可任意、可以没有这一句）。
+        _h, clause_param, clause_kw = parse_clause_column(header)
+        if clause_kw:
+            from storygraph.story.spec_clauses import (clause_by_name,
+                                                       set_clause_value)
+            clauses = raw_clauses
+            clause = clause_by_name(clauses, clause_param)
+            if not clause:
+                # 表格里只有列名（没有声明元数据）时的**最小形状**：
+                # 只够"改已有值"，插新子句时按 `word` 放行（不猜语义）。
+                kind = ('transition' if clause_kw in ('with', 'transition')
+                        else ('words' if clause_kw == 'at' else 'word'))
+                clause = {'keyword': clause_kw, 'name': clause_param,
+                          'kind': kind, 'optional': True}
+                clauses = [clause]
+            text = set_clause_value(text, clauses, clause_param, clean)
             continue
         _head, param, positional = parse_dynamic_full(header)
         if not param:
             continue
-        clean = '' if value is None else str(value).strip()
         # ⚠⚠ **有多值 / 可选段时按"格子区间"换**（2026-10-13 修）：
         #   位置号只会换掉第一个词，`mypose happy sad` 改成 smile 会留下
         #   `mypose smile sad`（谁也没想要）；而可选段（`at left`）在位置号
@@ -1035,6 +1140,6 @@ __all__ = [
     'slot_value_map', 'slot_span', 'set_slot_value', 'pattern_slot_values',
     'head_is_a_pattern_slot', 'WALK_KINDS',
     'dynamic_column_name', 'parse_dynamic_column', 'parse_dynamic_full',
-    'is_dynamic_column',
+    'parse_clause_column', 'parse_call_column', 'is_dynamic_column',
     'dynamic_headers', 'fold_dynamic_cells',
 ]

@@ -37,6 +37,8 @@ from storygraph.core.safeguard import swallow
 MANIFEST_KEY = 'statements'
 #: 清单里放**词组声明**的键（"服装 / 表情"这类分栏；见 `authoring.spec_groups`）
 ATTR_GROUPS_KEY = 'attr_groups'
+#: 清单里放**技术调用**声明的键（`$ 项目自己的包装函数(...)`；2026-10-30）
+CALLS_KEY = 'calls'
 
 
 #: 清单文件名。与 `project_conventions.MANIFEST_NAMES` 是同一份约定
@@ -69,6 +71,9 @@ class RegisteredStatement:
     #: `角色`/`服装` 两格是**空的**（只有 `mood=happy` 认得出）。
     #: 现在它跟着声明一起流到 `spec_columns`（`_declared_positionals`）。
     pattern: list = field(default_factory=list)
+    #: **复杂子句**（`clauses`：`at` / `behind` / `with` 这类关键字后面的
+    #: 一段；2026-10-30）。形状见 `story.spec_clauses`。
+    clauses: list = field(default_factory=list)
     render: str = 'verbatim'
 
     @property
@@ -80,13 +85,19 @@ class RegisteredStatement:
         return self.block in ('yes', 'possible', True)
 
     def to_dict(self) -> dict:
-        return {'name': self.name, 'aliases': list(self.aliases),
-                'block': self.block, 'source': self.source,
-                'origin': self.origin, 'docs': self.docs,
-                'label': self.label, 'columns': list(self.columns),
-                'body_allows': list(self.body_allows),
-                'pattern': [dict(s) for s in (self.pattern or ())],
-                'render': self.render}
+        out = {'name': self.name, 'aliases': list(self.aliases),
+               'block': self.block, 'source': self.source,
+               'origin': self.origin, 'docs': self.docs,
+               'label': self.label, 'columns': list(self.columns),
+               'body_allows': list(self.body_allows),
+               'pattern': [dict(s) for s in (self.pattern or ())],
+               'render': self.render}
+        # ⚠ 没有子句时**不写这个键**：`describe` 的 golden 是"纯重构不许变"，
+        #   给每条老声明都加一个空 `clauses` 只会让金标整份重基（噪声）。
+        #   有子句时才出现，且放在最后（老键顺序不动）。
+        if self.clauses:
+            out['clauses'] = [dict(c) for c in self.clauses]
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +155,104 @@ def _from_manifest(data: dict, manifest_path: str) -> list:
             # ⚠ 有序格子必须一起收进来（否则读取侧推不出"第几格 = 第几个位置参数"）
             pattern=[dict(s) for s in (item.get('pattern') or ())
                      if isinstance(s, dict)],
+            # 复杂子句（2026-10-30）：坏条目在这里**跳过**（与 columns 同一条
+            # "坏条目跳过"纪律；界面那一层会出声）。
+            clauses=_clauses_from_manifest(item.get('clauses')),
             render=str(item.get('render') or 'verbatim')))
+    return out
+
+
+def _clauses_from_manifest(raw) -> list:
+    """清单里的 `clauses` → 规范形状（坏条目跳过，不炸整份清单）。"""
+    if not raw:
+        return []
+    try:
+        from storygraph.story.spec_clauses import normalize_clauses
+        return normalize_clauses(raw)
+    except Exception as e:                       # noqa: BLE001 - 坏条目不影响装配
+        swallow('story.statement_registry.clauses', e)
+        return []
+
+
+#: 技术调用的 head：标识符，允许**一个点**（`renpy.transition` / `my_wipe`）。
+_CALL_HEAD_RE = re.compile(r'^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$')
+_IDENT_RE = re.compile(r'^[A-Za-z_]\w*$')
+
+
+def _call_head_ok(head: str) -> bool:
+    return bool(_CALL_HEAD_RE.fullmatch(str(head or '').strip()))
+
+
+def _ident_ok(text: str) -> bool:
+    """是不是一个合法标识符（关键字参数名）。"""
+    return bool(_IDENT_RE.fullmatch(str(text or '')))
+
+
+def _calls_from_manifest(raw) -> list:
+    """
+    清单里的 `calls` → 规范形状（坏条目跳过）。
+
+    形状：
+
+        {"head": "my_wipe", "label": "擦除",
+         "columns": [{"name": "transition", "label": "转场",
+                      "position": 0, "kind": "transition"}],
+         "effect": "Dissolve", "seconds_arg": 1}
+
+    `effect` / `seconds_arg` 只影响**演出预览**：包装函数本身不是转场，
+    但项目可以在声明里说"它等价于哪个效果、时长取第几个参数"。
+    认不出/没写 → 预览如实标"认不出"，不假装淡入。
+    """
+    out = []
+    for item in (raw or ()):
+        if isinstance(item, str):
+            item = {'head': item}
+        if not isinstance(item, dict):
+            continue
+        head = str(item.get('head') or item.get('name') or '').strip()
+        if not _call_head_ok(head):
+            continue
+        columns = []
+        for col in (item.get('columns') or ()):
+            if not isinstance(col, dict):
+                continue
+            name = str(col.get('name') or col.get('label') or '').strip()
+            if not name:
+                continue
+            raw_pos = col.get('position',
+                              col.get('positional'))
+            kw = str(col.get('kw') or '').strip()
+            pos = None
+            if kw:
+                if not _ident_ok(kw):
+                    continue
+            else:
+                try:
+                    pos = int(raw_pos)
+                except (TypeError, ValueError):
+                    continue
+                if pos < 0:
+                    continue
+            columns.append({
+                'name': name,
+                'label': str(col.get('label') or name),
+                'kind': str(col.get('kind') or 'word'),
+                'position': pos,
+                'kw': kw,
+                'choices': [str(c) for c in (col.get('choices') or ())],
+            })
+        if not columns:
+            continue
+        seconds_arg = item.get('seconds_arg')
+        try:
+            seconds_arg = (int(seconds_arg)
+                           if seconds_arg is not None else None)
+        except (TypeError, ValueError):
+            seconds_arg = None
+        out.append({'head': head, 'label': str(item.get('label') or ''),
+                    'columns': columns,
+                    'effect': str(item.get('effect') or ''),
+                    'seconds_arg': seconds_arg})
     return out
 
 
@@ -175,14 +283,19 @@ class StatementRegistry:
         hit = reg.match('mycue')      # → RegisteredStatement | None
     """
 
-    def __init__(self, declared=(), host=(), attr_groups=()):
+    def __init__(self, declared=(), host=(), attr_groups=(), calls=()):
         self.declared = list(declared)
         self.host = list(host)
         #: 项目声明的**词组**（`attr_groups`）—— 用于把候选分栏显示
         #: （"服装 / 表情"这类）。见 `authoring.spec_groups`。
         #: 空 = 项目没声明 → 调用方走原来的平铺候选，行为一字不变。
         self.attr_groups = list(attr_groups)
+        #: 项目声明的**技术调用**（`calls`：`$ 包装函数(...)` 的参数形状）。
+        #: 空 = 只有内置 `renpy.transition` 那一条，行为与从前一致。
+        self.calls = [dict(c) for c in (calls or ())
+                      if isinstance(c, dict) and c.get('head')]
         self._by_name = {}
+        self._calls_by_head = {str(c['head']): c for c in self.calls}
         # **先装 host，再装 declared** —— 后者覆盖前者（优先级就落在这里，
         # 而不是散在调用方的 if 里）。
         for spec in self.host:
@@ -201,6 +314,10 @@ class StatementRegistry:
     def match(self, head: str):
         """语句头（`'mycue'`）→ `RegisteredStatement`；没有就是 None。"""
         return self._by_name.get(str(head or '').strip().rstrip(':'))
+
+    def call_spec(self, head: str):
+        """技术调用 head（`'my_wipe'`）→ 声明 dict；没有就是 None。"""
+        return self._calls_by_head.get(str(head or '').strip())
 
     def names(self) -> list:
         return sorted(self._by_name)
@@ -240,6 +357,7 @@ class StatementRegistry:
             if hit is not None:
                 return hit
         declared, host, groups = [], [], []
+        calls: list = []
         try:
             from storygraph.story.project_conventions import load_manifest
             from storygraph.authoring.spec_groups import parse_attr_groups
@@ -249,10 +367,13 @@ class StatementRegistry:
                 # 词组分栏：项目自己声明"有哪几组词"（`attr_groups`），
                 # 工具不写死"服装/表情"（用户 2026-10-10 的通用性要求）
                 groups = parse_attr_groups(data.get(ATTR_GROUPS_KEY))
+                # 技术调用（2026-10-30）：`$ 包装函数(...)` 的参数形状
+                calls = _calls_from_manifest(data.get(CALLS_KEY))
         except Exception as e:                # noqa: BLE001
             swallow('story.statement_registry.for_project.manifest', e)
         host = _from_cds(project_root)
-        reg = cls(declared=declared, host=host, attr_groups=groups)
+        reg = cls(declared=declared, host=host, attr_groups=groups,
+                  calls=calls)
         if use_cache:
             _CACHE[key] = reg
         return reg
@@ -681,6 +802,27 @@ def spec_columns(registry, head: str) -> list:
                     # "这一格能装好几个词"（多音轨 / 多声部）：卡片据此给提示
                     'multi': bool(col.get('multi')) or name in multi,
                     'choices_from': str(col.get('choices_from') or '')})
+    # ---- 复杂子句（2026-10-30）------------------------------------------
+    # 子句**不是位置参数**：它由关键字引入、可以不出现、顺序也可变。
+    # 所以 `positional=None`，并带上 `clause` 元数据，让读值/折回知道
+    # "这一列要按子句处理，不能写成 `位置=…`"。
+    seen = {str(c.get('name')) for c in out}
+    for clause in (getattr(spec, 'clauses', None) or ()):
+        if not isinstance(clause, dict):
+            continue
+        name = str(clause.get('name') or '').strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({'name': name,
+                    'label': str(clause.get('label') or name),
+                    'choices': [str(c) for c in (clause.get('choices') or ())],
+                    'required': not bool(clause.get('optional', True)),
+                    'positional': None,
+                    # 类型只为提示（`transition` 会让预览消费它）
+                    'multi': str(clause.get('kind') or '') == 'words',
+                    'choices_from': '',
+                    'clause': dict(clause)})
     return out
 
 
@@ -841,6 +983,54 @@ def merge_builtin_columns(builtin, declared) -> list:
     return out
 
 
+def call_columns(registry, head: str) -> list:
+    """
+    技术调用 head 的**参数列**：项目声明优先，其次内置 `renpy.transition`。
+
+    返回形状与 `spec_columns` 同族，多一个 `call` 元数据：
+    `{'name','label','choices','required','positional','multi',
+      'call': {'head','kind':'pos'|'kw','position','kw'}}`。
+    """
+    from storygraph.story.spec_args import BUILTIN_CALL_SCHEMAS
+    name = str(head or '').strip()
+    if not name:
+        return []
+    raw = []
+    spec = registry.call_spec(name) if registry is not None else None
+    if spec:
+        raw = [dict(c) for c in (spec.get('columns') or ())
+               if isinstance(c, dict)]
+    elif name in BUILTIN_CALL_SCHEMAS:
+        raw = [dict(c) for c in BUILTIN_CALL_SCHEMAS[name]]
+    out = []
+    for col in raw:
+        param = str(col.get('name') or '').strip()
+        if not param:
+            continue
+        kw = str(col.get('kw') or '').strip()
+        position = col.get('position', col.get('positional'))
+        if kw:
+            position = None
+        else:
+            try:
+                position = int(position)
+            except (TypeError, ValueError):
+                position = 0
+        out.append({'name': param,
+                    'label': str(col.get('label') or param),
+                    'choices': [str(c) for c in (col.get('choices') or ())],
+                    'required': bool(col.get('required')),
+                    'positional': position,
+                    'multi': False,
+                    'choices_from': '',
+                    'kind': str(col.get('kind') or 'word'),
+                    'call': {'head': name,
+                             'kind': 'kw' if kw else 'pos',
+                             'position': position,
+                             'kw': kw}})
+    return out
+
+
 def arg_columns(registry, head: str) -> list:
     """
     这个语句头的**参数列形状**：项目声明优先，其次内置表，都没有就空。
@@ -855,6 +1045,11 @@ def arg_columns(registry, head: str) -> list:
     """
     declared = spec_columns(registry, head)
     from storygraph.story.spec_args import builtin_columns
+    calls = call_columns(registry, head)
+    if calls:
+        # 技术调用是**代码**，没有"语句参数形状"可言；同名 head 也不该同时
+        # 是语句（`renpy.transition` 不是语句）。所以这里直接返回调用列。
+        return calls
     builtin = builtin_columns(head)
     if not declared:
         return builtin
@@ -885,7 +1080,7 @@ def dynamic_spec_columns(beats, registry) -> list:
 
     heads: list = []
     for b in (beats or ()):
-        for name in _beat_statement_heads(b):
+        for name in _beat_statement_heads(b, registry):
             if name and name not in heads:
                 heads.append(name)
 
@@ -893,8 +1088,12 @@ def dynamic_spec_columns(beats, registry) -> list:
     seen: set = set()
     for name in heads:
         for col in arg_columns(registry, name):
-            header = dynamic_column_name(name, col['name'],
-                                         col.get('positional'))
+            clause = col.get('clause') if isinstance(col, dict) else None
+            call = col.get('call') if isinstance(col, dict) else None
+            header = dynamic_column_name(
+                name, col['name'], col.get('positional'),
+                clause=((clause or {}).get('keyword') or ''),
+                call_kw=((call or {}).get('kw') or ''))
             if not header or header in seen:
                 continue
             seen.add(header)
@@ -910,8 +1109,27 @@ def dynamic_spec_columns(beats, registry) -> list:
                         #   位置号那套数不准 —— `keyword` 格（固定几个字）**不占
                         #   位置号却吃掉一个词**，于是「人物/服装/神态」三格里
                         #   只对一格。每一条列都带同一份（读值只取第一份）。
-                        'pattern': _declared_pattern(registry, name)})
+                        'pattern': _declared_pattern(registry, name),
+                        # 复杂子句：这一列是哪一句（没有 → 空）、这张表里
+                        # 全部子句（插到没有出现过的位置时要用声明顺序）。
+                        'clause': dict(clause) if clause else {},
+                        'clauses': _declared_clauses(registry, name),
+                        # 技术调用（2026-10-30）：这一列读/写哪个实参。
+                        'call': dict(call) if call else {},
+                        # 列的值类型（`transition` = 过场表达式，读值时保留引号）
+                        'kind': str(col.get('kind') or '')})
     return out
+
+
+def _declared_clauses(registry, head: str) -> list:
+    """这条声明里**全部**复杂子句（按声明顺序）；没有 → `[]`。"""
+    try:
+        spec = registry.match(head) if registry is not None else None
+        return [dict(c) for c in (getattr(spec, 'clauses', None) or ())
+                if isinstance(c, dict)]
+    except Exception as e:                      # noqa: BLE001 - 认不出就不带
+        swallow('story.statement_registry.declared_clauses', e)
+        return []
 
 
 def _declared_pattern(registry, head: str) -> list:
@@ -932,7 +1150,19 @@ def _declared_pattern(registry, head: str) -> list:
         return []
 
 
-def _beat_statement_heads(beat) -> list:
+def _registered_call_heads(registry) -> list:
+    """内置 + 项目声明的技术调用 head（保序去重）。"""
+    from storygraph.story.spec_args import BUILTIN_CALL_SCHEMAS
+    out = list(BUILTIN_CALL_SCHEMAS)
+    if registry is not None:
+        for spec in (getattr(registry, 'calls', None) or ()):
+            head = str((spec or {}).get('head') or '').strip()
+            if head and head not in out:
+                out.append(head)
+    return out
+
+
+def _beat_statement_heads(beat, registry=None) -> list:
     """
     这一拍贡献的**语句头**（保序去重）—— 一个拍可能有多个：
 
@@ -955,6 +1185,17 @@ def _beat_statement_heads(beat) -> list:
     for head in _leaf_heads_of(beat):
         if head not in out:
             out.append(head)
+    # 技术调用（2026-10-30）：`$ renpy.transition(...)` / 项目包装函数。
+    # **只在这一拍恰好一次时建列**（同一 head 出现两次 = 一格装不下两条，
+    # 不猜改哪条；见 `call_expr` 的纪律）。
+    code = str(getattr(beat, 'code', '') or '')
+    if code.strip():
+        from storygraph.story.call_expr import find_calls
+        for head in _registered_call_heads(registry):
+            if head in out or head not in code:
+                continue
+            if len(find_calls(code, head)) == 1:
+                out.append(head)
     return out
 
 
@@ -1243,7 +1484,7 @@ def spec_body_allows(registry, head: str) -> list:
 
 def declare_statement(project_root, name: str, label: str = '',
                       columns=None, block=None, docs: str = '',
-                      pattern=None) -> dict:
+                      pattern=None, clauses=None) -> dict:
     """
     **把一条"教给它"的结构落成声明**（设计文档 §5 第 3 步：
     "教一次"入口 —— 人答的当场落成 `rules.json` 的 `statements`）。
@@ -1326,6 +1567,12 @@ def declare_statement(project_root, name: str, label: str = '',
              if isinstance(s, dict) and s.get('kind')]
     if slots:
         entry['pattern'] = slots
+    # ⭐ **复杂子句**（2026-10-30）：`clauses is not None` 才算"这次编辑过
+    #   这一段"—— 于是 UI 能清空它（`[]`），而 CLI/MCP 不传时保留旧值
+    #   （`merged.update(entry)` 不会碰没写的键）。
+    if clauses is not None:
+        from storygraph.story.spec_clauses import normalize_clauses
+        entry['clauses'] = normalize_clauses(clauses)
 
     out = []
     replaced = False
@@ -1354,6 +1601,56 @@ def declare_statement(project_root, name: str, label: str = '',
     clear_cache()                               # 刚改完清单：装配缓存作废
     return {'ok': True, 'path': str(path), 'action': action,
             'reason': '', 'entry': entry}
+
+
+def declare_calls(project_root, calls, *, replace: bool = True) -> dict:
+    """
+    **技术调用**（`$ 项目包装函数(...)`）→ 写进 `storygraph.rules.json` 的
+    `calls` 段（唯一写入口；与 `declare_statement` 同一条纪律）。
+
+    `calls` 的形状见 `_calls_from_manifest`。`replace=True` = 这一份就是全部
+    声明（UI 保存时用）；`False` = 按 head 合并（CLI 逐个装包时用）。
+
+    返回 `{'ok','path','count','reason'}`。坏 JSON / 顶层不是对象 → 拒绝写，
+    绝不覆盖用户手写的清单。
+    """
+    import json
+
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'count': 0,
+                'reason': '没有项目根目录'}
+    path = manifest_path(root)
+    data = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8') or '{}')
+        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
+            return {'ok': False, 'path': str(path), 'count': 0,
+                    'reason': f'storygraph.rules.json 不是合法 JSON，'
+                              f'拒绝覆盖（{e}）'}
+        if not isinstance(data, dict):
+            return {'ok': False, 'path': str(path), 'count': 0,
+                    'reason': '清单顶层不是对象，拒绝覆盖'}
+    clean = _calls_from_manifest(calls)
+    if replace:
+        data[CALLS_KEY] = clean
+    else:
+        old = _calls_from_manifest(data.get(CALLS_KEY))
+        by_head = {str(c['head']): c for c in old}
+        for call in clean:
+            by_head[str(call['head'])] = call
+        data[CALLS_KEY] = list(by_head.values())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                        encoding='utf-8')
+    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
+        return {'ok': False, 'path': str(path), 'count': 0,
+                'reason': f'写不进去：{e}'}
+    clear_cache()
+    return {'ok': True, 'path': str(path),
+            'count': len(data.get(CALLS_KEY) or []), 'reason': ''}
 
 
 def _is_builtin_head(head: str) -> bool:

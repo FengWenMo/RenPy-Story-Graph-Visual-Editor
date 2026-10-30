@@ -79,12 +79,17 @@ def parse_choices(text) -> list:
 
 
 def build_declaration(name: str, label: str = '', docs: str = '',
-                      block=None, params=None, pattern=None) -> dict:
+                      block=None, params=None, pattern=None,
+                      clauses=None) -> dict:
     """
     表单 → `declare_statement` 的参数（**纯函数**）。
 
     `params` 是 `[{'name','label','choices'}]`（UI 表格的行），
     `choices` 可以是字符串（`'1,2,3'`）或列表。
+
+    `clauses`（2026-10-30）是**复杂子句**的行：
+    `[{'keyword','name','label','kind','optional','choices'}]` —— 见
+    `story.spec_clauses`。`kind` 不在白名单里时按 `word` 处理并报出来。
 
     返回 `{'ok', 'name', 'label', 'docs', 'block', 'columns', 'warnings'}`：
 
@@ -214,11 +219,26 @@ def build_declaration(name: str, label: str = '', docs: str = '',
             head = [by_name[n] for n in ordered if n in by_name]
             if head:
                 columns = head + [c for c in columns if c not in head]
+    # ⭐ **复杂子句**（2026-10-30）：`at` / `behind` / `with` 这类关键字后面的
+    #   一段（可能是一串词，也可能是带括号空格的表达式）。它们不是"格子"——
+    #   顺序可以任意、可以不出现，所以单独一段 `clauses` 交给 `spec_clauses`。
+    #
+    #   ⚠ 只增不改：没给 `clauses` 时**连这个键都不写**，旧清单/旧判据逐字节不变。
+    clause_rows: list = []
+    if clauses is not None:
+        from storygraph.story.spec_clauses import normalize_clauses
+        reserved = {str(c.get('name') or '').strip() for c in columns}
+        reserved |= {str(s.get('column') or '').strip() for s in slots}
+        reserved.discard('')
+        clause_rows = normalize_clauses(clauses, reserved_names=reserved,
+                                        warnings=warnings)
     out = {'ok': True, 'name': name, 'label': str(label or '').strip(),
            'docs': str(docs or '').strip(), 'block': block,
            'columns': columns, 'warnings': warnings}
     if slots:
         out['pattern'] = slots
+    if clauses is not None:
+        out['clauses'] = clause_rows
     return out
 
 
@@ -964,6 +984,18 @@ def declaration_preview(built: dict, path: str = '') -> str:
                              ('可选', '固定')) else ''))
     else:
         lines.append('  参数：无（只逐字透传）')
+    cl = built.get('clauses') or []
+    if cl:
+        lines.append(f'  复杂子句 {len(cl)} 个：')
+        for c in cl:
+            kind = str(c.get('kind') or 'word')
+            note = str(c.get('name') or '')
+            if kind != 'word':
+                note += ('，' if note else '') + kind
+            if not c.get('optional', True):
+                note += '，必填'
+            lines.append(f'    · {c.get("keyword")}'
+                         + (f'（{note}）' if note else ''))
     if built.get('warnings'):
         lines.append('⚠ ' + '；'.join(built['warnings']))
     if path:

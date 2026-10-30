@@ -63,6 +63,13 @@ SOURCE_RENPY = 'renpy.transition'
 SOURCE_WITH = 'with'
 #: `show/scene/… with <表达式>` 的子句（`Beat.with_`）
 SOURCE_INLINE_WITH = 'inline-with'
+#: 项目**声明过的复杂子句**（`mycue … with X` 的 `with`，2026-10-30）：
+#: 它不是 `Beat.with_`，由 `app.stage` 按 `rules.json` 的 `clauses` 读出来。
+SOURCE_CLAUSE = 'declared-clause'
+#: 项目**声明过的技术调用**（`$ my_wipe(...)` 的包装函数，2026-10-30）：
+#: 它本身不是 Ren'Py 转场，但项目在 `rules.json` 的 `calls` 里声明了
+#: "等价于哪个效果"；预览按那个效果演。
+SOURCE_CALL = 'declared-call'
 
 #: Python 标识符（含中文等 Unicode 名字 —— 项目完全可以写 `with 场景淡入`）
 _IDENT_RE = re.compile(r'[^\W\d]\w*', re.UNICODE)
@@ -942,7 +949,8 @@ def beat_transitions(beat) -> list:
 
 
 __all__ = [
-    'SOURCE_RENPY', 'SOURCE_WITH', 'SOURCE_INLINE_WITH',
+    'SOURCE_RENPY', 'SOURCE_WITH', 'SOURCE_INLINE_WITH', 'SOURCE_CLAUSE',
+    'SOURCE_CALL',
     'Expr', 'LiteralExpr', 'NameExpr', 'CallExpr', 'ListExpr', 'TupleExpr',
     'NonLiteral', 'TransitionCall',
     'parse_expression', 'normalize_expression',
