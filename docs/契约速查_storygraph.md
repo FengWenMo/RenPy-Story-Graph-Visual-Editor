@@ -3914,6 +3914,13 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
   「🛠 更多」菜单按钮，不依赖扩展按钮；那要同步改 `test_custom_statement_entry` /
   `test_qt_signal_wiring` / `test_toolbar_export_entry` 三处"工具栏动作清单"判据。
 
+- **2026-10-30 ⑤（UI 宽窄可变）**：默认窗口 **1600×950 → 1360×900**；窗口最小宽
+  **1142 → 738**；卡片最小宽 **380 → 296**（右栏硬下限 `CARD_COLUMN_MIN_W=340`
+  ⇒ **右栏不会出现横向滚动条**，逐拍压到 340 断言 hbar 不可见）；立绘网格列数
+  随宽度自适应 **1~4 列**；5 个结构按钮（插入卡片 / 插到前面 / 插入控制流卡 /
+  插入选择点 / 删除这张卡片）收进卡片页顶部动作条的「⋯ 结构」菜单（动作与
+  快捷键不变，「↩ 撤销结构操作」留在外面）；判据 `tests/test_ui_width.py` **22 条**。
+
 ## 35. 控制流卡（2026-10-23 修正）
 
 - **目标候选**必须来自 `_flow_target_labels()`：本文件 → 图上节点 → **项目目录**
@@ -5149,19 +5156,24 @@ if len(with_control) == 1:
 
 判据：`tests/test_github_star.py::TestItStaysDetachable`。
 
-### 59.2 点击语义（三条出口，都是说人话）
+### 59.2 点击语义（每种出口都说人话；2026-10-30 按真机反馈改过）
 
 | 情况 | 行为 |
 |---|---|
 | 有 token | `PUT https://api.github.com/user/starred/<owner>/<repo>`，`204` = 成功（**已标过也回 204**，幂等，不许当失败） |
-| 没 token | 先 `probe` 一次（2.5 s 超时）再打开仓库页 —— **不许在浏览器里开一个死页面** |
-| 连不上 / 401 / 403 / 404 | 按钮上写一句原因（"连不上 GitHub（不影响使用）" / "token 无效或已过期"…），几秒后自己恢复；`401` 还要**退回开网页** |
+| 没 token | **点一下立刻打开仓库页**（本机动作、不联网、不等探测）；后台自检只决定按钮补哪句提示 |
+| 探测没通过 | 页面**照样打开**（浏览器走系统代理/PAC，往往能开），按钮补一句"网络自检没通过，浏览器里若打不开多半是代理/网络"。**探测结果不许挡着开页面** |
+| 自动 star 失败（401/403/404/离线/限流） | 按钮上写一句原因（"token 无效或已过期" / "被 GitHub 限流了" / "仓库名对不上" / "连不上（…）"），并**退回打开仓库页**，几秒后自己恢复 |
 
+- **探测判据**：拿到**任何 HTTP 响应**都算网络通（404/403/429/5xx 也算 —— 那是
+  GitHub 自己回的话，说明 DNS/TCP/TLS/代理都活着）；超时 7 s、失败重试一次
+  （同一条网络实测 5 次里有 1 次 >6 s，v1 的 2.5 s 必然误报）。
 - token 来源优先级：`STORYGRAPH_GITHUB_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` →
   `%LOCALAPPDATA%\StoryGraph\github.json` 的 `{"token": "…"}`（与 AI key 同一约定：
   不进项目、不进 git）。都没有 → 只开网页，**一次网络都不发**。
-- 网络**一律在后台线程**（`QThreadPool`，3 s 超时）；`click()` 必须立刻返回
-  （实测 21 ms），忙碌期间按钮置灰防连点。
+- 网络**一律在后台线程**（`QThreadPool`；API 8 s / 探测 7 s 超时）；`click()` 必须
+  立刻返回（实测 21 ms），忙碌期间按钮置灰防连点；**没 token 时开页面在 `click()`
+  里同步做完**，不等探测。
 - **启动时不联网**：不探测、不拉 star 数、不留后台心跳 —— 只有人点才发请求。
   离线时它就是一块静默的装饰。
 
@@ -5216,6 +5228,11 @@ MIT（写错了，用户 2026-10-27 当场指出："不是 GPL 协议的吗？"�
 
 这三句其实是同一条规则的三种说法：**右边这一栏的竖向空间，优先给"能改的东西"**。
 §60 把这条写成可判的配额，以后往右栏加东西先算这笔账。
+
+> **2026-10-30 ⑤ 追加**：卡片里那张小图收窄到 **240×135**
+> （`main_window.CARD_STAGE_THUMB`，仍是 16:9；`stage_thumb.COMPACT_W/H` 组件
+> 自身仍是 288×162），立绘网格列数改为随宽度自适应 **1~4 列** —— 下面
+> 60.1 / 60.2 / 60.3 里写的 288×162 是当时的形状，数值以这句为准。
 
 ### 60.1 三条配额
 
@@ -5899,4 +5916,133 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 头像图才能动。" 2026-10-29 追问三个方向（选择器挑图认不出角色 / 卡片显示成
 头像特写 / 舞台缩略图显示错图），用户答**都不是**、会补截图与步骤。
 **在拿到复现材料前不要动这块**（方向猜错比不改更贵）。
+
+> **2026-10-30 已闭环**：用户补了材料（"立绘怎么一堆单独的分类，什么 relaxing，
+> resigned" + 选择器实测），根因是**没有"图像 → 角色/属性"的唯一真源**，
+> 不是显示问题。修法与判据见 §72.1 / §72.2 / §72.3。
+
+---
+
+## §72 二轮反馈：给"认得出 / 画得真 / 演得出"各立一个**唯一真源**（2026-10-30）
+
+用户二轮试用的六条反馈 + 两个直接问题。规划与实测数字：
+`docs/规划_二轮反馈修复路径_2026-10-30.md`；逐日叙事：`docs/开发日志.md` §52。
+**这一节只钉接口、判定顺序、边界**——以后改这四块先看这里，别看细报告。
+
+> 共同形状：三件事过去都不缺"判断"，缺的是**一个所有路径都走的真源**。
+> 身份解析（哪张图是谁）、`placement_box`（舞台几何）、`transition_catalog`
+> （过场长什么样）都是这么立起来的；然后卡片 / 预览 / 导出 / Excel 全走它。
+
+### 72.1 资产身份解析：`assets/asset_identity.py`（纯函数，禁止 import UI/Qt）
+
+- **为什么有它**：分类只看资源表「标签」列 + 空 Tag 行拿资产 ID 当 tag
+  ⇒ 真机 **145 个分组里 137 个是「立绘：」、110 个分组只有 1 张图**；
+  `cc_preview/<角色>/<表情>.png` 预览副本和真立绘混在一起。
+- 接口（契约 §1.1）：
+  `Identity(kind, tag, attrs, display, source, showable)`、
+  `normalize_relpath`、`resolve_image(row, *, relpath, known_tags, known_chars, mapping)`、
+  `find_real_sprite`、`spec_for_identity`、`asset_id_of`、`project_context(registry, root)`。
+- **判定顺序（只认字面量，不模糊匹配）**：
+  ⓪ 项目自己声明过的名字（ATL / 脚本 `define … image=` / 语句表）→
+  ① 映射 `images` 精确覆盖 → ② 映射 `rules`（按数组顺序，先中先得）→
+  ③ 资源表「Tag」列（**且 tag 是已知角色 tag 才算 sprite**）→
+  ④ 路径目录段命中已知角色 tag（`.../<tag>/<stem>.png`，stem 作 attrs）→
+  ⑤ 文件 stem 恰等于角色 tag → ⑥ **unknown**。
+- `kind ∈ sprite / preview / avatar / bg / cg / ui / other / unknown`；
+  `showable` 只对"真图层"（sprite/bg/cg/ui）为真 —— 选择器/卡片据此决定能不能写 `show`。
+- **通用"副本检测"**：同 tag + 同 stem **另有一行 Tag 非空** ⇒ 这一行是 `preview`。
+  **不是**认 `cc_preview` 这个目录名（任何项目都能用）。
+- **不猜**：unknown 就 `showable=False`，卡片/选择器明说，导出门禁报出来。
+- 判据：`tests/test_asset_identity.py`（59 条）。
+
+### 72.2 项目级映射：`assets/asset_mapping.py` + `ui_qt/mapping_dialog.py`
+
+- 文件名与位置：**`storygraph.mapping.json`**（schema `storygraph.mapping/1`），
+  项目根或 `game/` 下；跟着项目走、可提交、可 diff（与 `storygraph.rules.json` 同一模式）。
+- 四个键：`characters` / `rules` / `images` / `attributes`。边界：
+  **未知键只警告不失败**；`images` 精确覆盖**优先于** `rules`；`rules` 按数组顺序；
+  glob 占位 `<tag>` / `<stem>`；坏 JSON 抛 `MappingError`（降级成 warnings 一句话）。
+- 接口（契约 §1.2）：`find_mapping_path` / `load_mapping` / `mapping_cached`
+  （按 mtime 缓存）/ `resolve_with_mapping` / `draft_mapping`（从**实际目录**汇总，
+  不写死任何项目路径，导出后能被 `load_mapping` 原样读回）/ `save_mapping`
+  （原子写 + 旧文件 `.bak`，已登记 `test_single_write_entry` 的唯一写入口）。
+- 工具**没有映射也能干活**（按目录/文件名推断）；映射只做**覆盖 / 纠正**。
+- UI：菜单栏「**🗂 资源映射**」五个动作 —— `载入映射…` / `重读` / `导出映射初稿…` /
+  `保存到项目根`（**先看 unified diff 再确认写**）/ `资源对照表`（路径/推断/tag/属性/
+  依据/能否 show，可只看未识别）。打开项目自动加载项目根或 `game/` 下的映射。
+- 发人样例：`examples/mapping/sr_general.mapping.json`（45 characters / 61 rules /
+  40 精确覆盖，命中 91.8%，与"无映射推断"不一致 **0**）；
+  给别的项目开发者的格式说明：`docs/资源映射_给项目开发者.md`。
+- 判据：`tests/test_asset_mapping.py`（40 条）、`tests/test_mapping_dialog.py`（29 条）。
+
+### 72.3 选图判定与卡片提示：`app/picker.py::resolve_pick` + `ui_qt/asset_picker.py`
+
+- `PickResult(spec, identity, ok, replaced_from, replaced_to, message)`；
+  `resolve_pick(asset_id, row, **project_context)` 是**唯一判定**：
+  · 能上舞台 → 直接给 spec；
+  · 预览图 / 头像 → `find_real_sprite` 找到真立绘 ⇒ `ok=True` + `replaced_*` +
+    `message='已用对应的立绘 xxx'`（真机 158 张预览图 **100% 换到**）；
+    换不到 / 认不出 ⇒ `ok=False` + 一句原因，「确定」置灰。
+- `image_spec_of` 原签名/行为**不许变**（既有调用方还在用）。
+- 选择器：左栏**角色优先分组**（`立绘：凌跃捷（ling）` 放该角色全部表情；预览图/头像
+  单独组；背景/CG/界面各自成组）；顶部**用途过滤**（全部/立绘/背景/CG/界面/角色预览图/其他）
+  判据是 `Identity.kind`，**不按分组名/路径猜**；条目人话名 + tooltip 原始 ID/路径。
+- 卡片：`sprite_grid` 的 `show_pick_hint` 提示条（换图 / 警告 / 「去『资源映射』修」）；
+  首选回调 `on_pick_image_result`（带结论），老 `on_pick_image` 只作降级 ——
+  **两个回调的优先级是钉死的**（只打桩老回调会被新回调短路，offscreen 下真弹模态框，
+  2026-10-30 全量就卡在这条上）。
+- 导出前门禁：`app.stage_identity_guard.scan_stage_identity` 逐拍看 `show` 的 spec 首词
+  能不能上舞台，接入 `window_export._review_stage_suspects` 既有的「舞台可疑行」弹窗
+  （**可仍然导出 / 取消 / 去修**，不静默拦不静默放）；拿不到资源表时**不判**（`degraded`）。
+- 判据：`tests/test_picker_and_refresh.py`、`tests/test_asset_picker_resolve.py`（47 条）、
+  `tests/test_stage_identity_guard.py`（43 条）。
+
+### 72.4 舞台几何：`story/atl.py::placement_box`（**唯一几何实现**）
+
+- `Placement` 增 `fit / xsize / ysize / nearest`；`fit` 五种值照 SDK 文档
+  （`contain / cover / fill / scale-down / None`）；**认不出的 fit 值按没有 fit 处理**（不猜）。
+  无 fit 时结果与原实现**逐位相同**（`Placement.box()` 委托 `placement_box`）。
+- `story/stage_snapshot.py`：state 加 `scene_at`（**持续状态**：scene 写入、继承到下次 scene）
+  与 `layer_at`（show 记、hide 清）；**只加 state 内部键**，显示列/变化文字不变，
+  缺键默认空串（老调用方不炸）。
+- `app/stage_render.py`：背景/图层/立绘统一走 `placement_box`；**无 at 的大图按引擎语义
+  1:1 贴左上裁切**，不做"预览自动 fit"（用户拍板"预览必须真实"），旁边写人话提示。
+- 内存：`_load_scaled` 解码按**可见区域**封顶 + 缓存改**字节预算 LRU**
+  （默认 256MB，`STORYGRAPH_STAGE_CACHE_BYTES` / `_MB` 可调），替换 `lru_cache(48 张)`。
+- 人工写 at（用户拍板"不自动写、经人手可以"）：`at_transform_candidates()` /
+  `plan_at_edit()` → `AtEdit`；**只引用项目已有 transform**、只改内存 `Beat`、
+  apply→revert 逐字还原、落盘仍走既有 diff 门禁；`stage_preview` 有「尺寸变换」下拉 + 撤销。
+- 判据：`tests/test_stage_render_scale.py`（31 条，像素采样）、
+  `test_stage_snapshot_scene_at.py`（14 条）、`test_stage_render_memory.py`（11 条）。
+
+### 72.5 自定义过场：`transition_expr` → `transition_catalog` → `transition_fx`
+
+- **为什么有它**：项目里 303 处 `$ renpy.transition(...)` 是 **Python 语句**（`Beat.code`），
+  而工具只有 `Beat.with_` 一条过场通道 ⇒ 卡片看不见、预览硬切、Excel「转场」列空。
+- `story/transition_expr.py`：**安全字面量递归下降解析器**（无 `eval`、无
+  `ast.literal_eval`；禁 f-string/运算/推导式）。认 `$ renpy.transition(EXPR, layer=…)`、
+  独立 `with EXPR`、行内 `with`；多行/注释/字符串里的括号/中文标识符都能处理；
+  **认不出 → 空列表，不猜**。`beat_transitions(beat)` 纯读。
+  已知限制：`hide X with Y` 不派生（上游把 `with` 丢了，如实不猜）。
+- `story/transition_catalog.py`：扫项目 `define NAME = <expr>`（含多行）建目录，
+  递归解析 `Dissolve / Fade / Pixellate / ImageDissolve / MultipleTransition /
+  Pause / Solid`，名字引用带循环保护；`MoveTransition / CropMove / ComposeTransition`
+  **如实 `unknown`**。`Effect(kind, duration, color, ramp, ramplen, segments, label)`；
+  `effect_of(call, catalog)` / `describe_effect(effect)`。
+- `app/transition_fx.py`：Effect → **中间帧**（dissolve 交叉 / fade 按 out·hold·in /
+  pixellate 块化 / imagedissolve 用 ramp 遮罩 / multiple 分段 / pause·solid / unknown 空帧）。
+  **认不出 / 缺遮罩就如实降级 + 标注「无法精确预览」，绝不假装淡入。**
+- 接线：`StageFrame.transitions`（默认空 = 向后兼容）；卡片「当前舞台」与演出预览共用
+  `stage_render.transition_summary_lines()`（`过场：Dissolve 0.1（master）`，
+  一拍多条只读、不编号）；预览按 `Effect` 演中间帧（20fps，帧数封顶）。
+- 判据：`test_transition_expr.py`（29 条）、`test_transition_catalog.py`（21 条）、
+  `test_transition_fx.py`（35 条）、`test_stage_transition_integration.py`（24 条）。
+
+### 72.6 通用性与纪律（这一轮的四条硬规矩）
+
+1. **项目知识只能来自数据**：代码里**不许**出现 `sr_general` / `cc_preview` / `ling`
+   这类项目专有常量作为逻辑分支；唯一载体是资源表 / 目录结构 / 映射文件 / 引擎事实。
+2. **认不出就说认不出**：unknown / degraded / 无法精确预览都有明确出口，**不猜**。
+3. **UI 只编排**：`assets/*`、`story/*` 新模块纯函数无 Qt；判定全在 `app/*`。
+4. **真机 `sr_general` 全程只读**：这一轮没有写用户项目一个字节（探针全部写临时副本）。
 

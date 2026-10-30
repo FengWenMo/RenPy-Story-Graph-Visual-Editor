@@ -102,6 +102,8 @@ storygraph/
 ├── assets/     资产链路
 │   ├── asset_registry.py   扫描 / 资源表读写 / 引用判定唯一真源
 │   ├── asset_registry_*.py 拆出的常量与扫描族
+│   ├── asset_identity.py   图像 → 角色/属性 的**唯一判定**（认不出=unknown，不猜）
+│   ├── asset_mapping.py    项目级 `storygraph.mapping.json`（加载 / 初稿 / 原子写）
 │   ├── asset_events.py     文件监听与事件总线
 │   ├── asset_engine.py     编排层：目录变化 → 重载 → 同步进表格
 │   └── asset_extensions.py / asset_completion.py
@@ -119,7 +121,9 @@ storygraph/
 │   ├── spec_args.py        自定义语句"每参数一列 + 原生下拉"的唯一真源
 │   ├── layered_model.py    合成立绘（layeredimage）模型 + 条件求值
 │   ├── cds_registry.py     CDS（register_statement）扫描
-│   ├── atl.py              项目 transform（ATL）解析 → 舞台真实位置 + 分辨率
+│   ├── atl.py              项目 transform（ATL）解析 → 舞台真实位置 + 分辨率（`placement_box` 唯一几何）
+│   ├── transition_expr.py  过场调用解析（`$ renpy.transition(...)` / `with`，安全字面量，无 eval）
+│   ├── transition_catalog.py 项目 `define` 的转场 → `Effect`（效果描述，认不出如实 unknown）
 │   ├── patcher.py          原地补丁：按行身份配对替换，要么全对要么不动
 │   ├── stage_snapshot.py   舞台快照 / 演出时间轴（派生视图）
 │   └── story_ops.py        剧情变量 vs 引擎代码的区分视图
@@ -133,8 +137,11 @@ storygraph/
 │   ├── engine_exporters.py 中立 IR → Unity / Godot / CSV
 │   └── renpy_exporter.py   图 → .rpy（保真，不过滤）
 ├── app/        **应用服务层（框架无关）← 前端只跟这一层打交道**
-│   ├── beats.py            编辑语义唯一真源（Beat↔字段、立绘行、表情/位置投影）
-│   ├── stage.py            舞台推导（Beat 序列 → 可绘制帧 + 素材解析）
+│   ├── beats.py            编辑语义唯一真源（Beat↔字段、立绘行、表情/位置投影、资产分组）
+│   ├── stage.py            舞台推导（Beat 序列 → 可绘制帧 + 素材解析 + 过场字段）
+│   ├── stage_render.py     舞台合成（卡片小图 / 演出预览共用；含过场说明行）
+│   ├── transition_fx.py    过场效果 → 中间帧（认不出如实降级，不假装淡入）
+│   ├── stage_identity_guard.py 导出前"这条 show 项目里真有吗"门禁
 │   ├── editor.py           `EditorSession`：载入/写回/保存/撤销/导出/体检/分析
 │   ├── tables.py           剧本表（Excel）双向工作流 ← 含产物落点与门禁编排
 │   ├── asset_panel.py / picker.py / thumbs.py  资产面板 / 选择器语义 / 缩略图内核
@@ -146,7 +153,8 @@ storygraph/
 │   ├── param_editor.py / column_editor.py / flow.py  自定义动作弹窗（v4，折行布局）
 │   ├── dialog_learn.py / dialog_chars.py / dialog_ai.py  弹窗（教写法 / 角色 / 对话）
 │   ├── panel_ai.py         AI 助手聊天面板
-│   ├── sprite_grid.py / asset_picker.py / stage_preview.py  立绘网格 / 资产选择 / 演出预览
+│   ├── sprite_grid.py / asset_picker.py / mapping_dialog.py  立绘网格 / 资产选择 / 资源映射
+│   ├── stage_preview.py / stage_thumb.py  演出预览（含过场动画）/ 卡片单拍缩略图
 │   ├── tokens.py / theme.py 设计 token 唯一真源 → QSS
 │   └── thumb_loader.py     QThreadPool 异步缩略图
 ├── authoring/  纯函数写作层（纯文字导入 / 教工具认写法）
@@ -164,7 +172,7 @@ storygraph/
 └── main.py     桌面入口（PySide6；没装就明确报错并给出安装命令）
 legacy/         归档的单文件老版本（**不参与构建**，见其 README）
 demo/           示例 Ren'Py 工程 + 一键重建脚本
-tests/          6700+ 条用例（320+ 个测试文件；全量入口 tools/fasttest/run.py）
+tests/          7700+ 条用例（330+ 个测试文件；全量入口 tools/fasttest/run.py）
 tools/fasttest/ 全量测试加速器（并行调度 + 独立 basetemp + 运行锁；见其 README）
 ```
 

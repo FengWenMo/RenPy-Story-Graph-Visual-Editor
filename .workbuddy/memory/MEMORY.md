@@ -45,6 +45,11 @@
 - **卡片上的单拍舞台图**：渲染必须走 `stage_render.render_frame`（与「演出预览」同一函数）；一律后台线程（首次大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹，**不许** `id(frame)`、不许换拍时拿上一张顶。图在「当前舞台」标题下、与摘要并排、固定 288×162（`compact=True`）；`_stage_now`（只看）与 `_stage_box`（能改）是两块，**普通卡都常显**，控制流卡才收起。compact 小图的**名字/台词要按缩略图字号重画**（`stage_render.draw_readable_say`，2026-10-29）：整帧缩小后字只剩 3~4px 是"方块"；铺底要**不透明**且**名条也要铺**（名条可能在文本框上方），名字字号**不许**被引擎名条宽度卡死（名条底跟着字长长）。
 - **卡片「背景 / 音乐 / 语音」三格滚轮不许改值**（2026-10-29）：用 `ui_qt/wheel_guard.py::WheelSafeComboBox`，没焦点时不换值并把滚轮**显式转交**给父级滚动区（别赌冒泡）。裸 `QComboBox` 默认会吃滚轮。
 - **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 乱码），只用 edit/write。
+- **"这张图是谁"只有唯一真源**（2026-10-30）：`assets/asset_identity.resolve_image`（判定顺序：项目自声明名字 → 映射精确覆盖 → 映射规则 → 资源表 Tag 列（须是已知角色 tag）→ 路径目录段 → 文件 stem → **unknown 不猜**）。`assets/asset_mapping.py` 的 `storygraph.mapping.json` 只做覆盖/纠正，没它也能按目录推断；**不许**在 UI/其他模块按路径或文件名另写一套猜法（`cc_preview` / `sr_general` / `ling` 这类项目专名**不许**进逻辑分支）。
+- **舞台几何只有唯一实现**（2026-10-30）：`story/atl.py::placement_box`（`Placement.fit/xsize/ysize/nearest`）。无 `at`/`fit` 的大图按引擎语义 **1:1 贴左上裁切**，**不**做"预览自动 fit"（用户拍板：预览必须真实）；`stage_snapshot` 的 `scene_at`（持续、继承）/`layer_at`（show 记 hide 清）只进 state 内部键，显示列不变；缓存按**字节预算**（默认 256MB，`STORYGRAPH_STAGE_CACHE_BYTES`），不是张数。
+- **过场是项目自定义的，不是"淡入"**（2026-10-30）：`$ renpy.transition(...)` 是 Python 语句（`Beat.code`），要 `story/transition_expr`（安全字面量解析，无 eval）→ `story/transition_catalog`（扫项目 `define` 出 `Effect`）→ `app/transition_fx`（中间帧）。**认不出/缺遮罩如实降级 + 标「无法精确预览」，绝不假装淡入**。
+- **"两个回调"的件，测试打桩要打全**（2026-10-30，全量卡死级）：`sprite_grid` **优先** `on_pick_image_result`（生产接 `main_window.pick_sprite_result` → 真弹资产选择器），老 `on_pick_image` 只作降级；只打桩老回调会被新回调短路 → offscreen 真弹模态框 → fasttest 连续 300s 无输出判 **124 卡死**（`test_ui_qt` 4 条都踩）。同族：导出的「舞台可疑行 / 非法 show」弹窗在 `_review_stage_suspects` 里 `dlg.exec()`，**没有桩就别走到它**。
+
 - **界面上"可删的独立件"** 范式（如 `ui_qt/github_star.py`）：一个文件 + 一处 try 挂载，不 import 窗口/会话代码，点击立刻返回（网络后台），启动不联网。判据 `test_github_star.py`。
 - **许可证 GPLv3 必须四处同源**：`LICENSE` / `pyproject.toml` / `README.md` / 随包 `快速上手.md`（最后一处最容易漏）。10-23 曾误写 MIT，**别改回去**。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
@@ -52,7 +57,7 @@
 
 ## 四、当前的片（判据见同名测试）
 
-E1/E2/E3 引擎事实｜纯文字导入 S1~S4（`test_txt_import*` + 金标）｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门（`plan_control_write`）｜L7 版式恢复｜导入冲突预检（覆盖/改名/跳过，取消=零写）｜点不动修复 + 记忆门禁｜导出落点 + 工具栏顺序｜接线不卡｜刷新不白付钱｜卡片单拍舞台图｜右栏竖向配额（「定位」默认折叠）｜重号不级联（发号底座=整批已有+本次已发）｜derived 段要交代｜写入口探针两种 open｜GitHub star 徽标｜E1/E3+D3 拖线落点由结构决定｜**🎮 引擎试玩 + 演出专用版**（`engine_preview` / `stage_edition` / `packaging/make_stage_release.py`）｜**舞台（高级）可疑行 → 导出前确认**（`story/stage_suspect.py`，撤回自动补 `#`）｜**卡片三修**（`_stage_box` 常显 / `WheelSafeComboBox` 滚轮防误触 / compact 缩略图文字可按读）。
+E1/E2/E3 引擎事实｜纯文字导入 S1~S4（`test_txt_import*` + 金标）｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门（`plan_control_write`）｜L7 版式恢复｜导入冲突预检（覆盖/改名/跳过，取消=零写）｜点不动修复 + 记忆门禁｜导出落点 + 工具栏顺序｜接线不卡｜刷新不白付钱｜卡片单拍舞台图｜右栏竖向配额（「定位」默认折叠）｜重号不级联（发号底座=整批已有+本次已发）｜derived 段要交代｜写入口探针两种 open｜GitHub star 徽标｜E1/E3+D3 拖线落点由结构决定｜**🎮 引擎试玩 + 演出专用版**（`engine_preview` / `stage_edition` / `packaging/make_stage_release.py`）｜**舞台（高级）可疑行 → 导出前确认**（`story/stage_suspect.py`，撤回自动补 `#`）｜**卡片三修**（`_stage_box` 常显 / `WheelSafeComboBox` 滚轮防误触 / compact 缩略图文字可按读）｜**二轮反馈五件套（2026-10-30）**：②⁴ 资产身份解析 + 角色优先分组 + 项目级映射（`assets/asset_identity` / `asset_mapping` / `ui_qt/mapping_dialog` / `app/picker.resolve_pick`）｜⑦ 真实舞台几何 fit/at/黄切 + 内存封顶（`atl.placement_box` / `stage_snapshot.scene_at` / `stage_render`）｜③ 自定义过场解析 + 预览演效（`story/transition_*` / `app/transition_fx`）｜⑤ UI 宽窄（默认 1360×900、最小 738、右栏 340、网格自适应）｜导出前「非法 show」门禁（`app/stage_identity_guard`）｜GitHub Star 探测误报修复（任何 HTTP 响应算网络通、点一下立刻开页）。
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层｜**从当前拍 warp 的近似性**（前情 `$` 变量缺，UI 已明说，未做"补前情状态"）｜引擎试玩只支持 Windows 源生 SDK 运行（不做 build 分发）。
 
