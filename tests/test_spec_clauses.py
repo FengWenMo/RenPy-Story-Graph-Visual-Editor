@@ -256,6 +256,27 @@ def test_parenthetical_transition_is_not_split_by_the_pattern_columns(tmp_path):
         '(True, ImageDissolve("x.png", 0.4))])')
 
 
+def test_builtin_show_can_declare_extra_clauses(tmp_path):
+    """内置 `show` 也能声明自己的子句（用户点名："连 show 也能长参数格"）。"""
+    root = _write_project(tmp_path / 'proj', statements=[{
+        'name': 'show',
+        'clauses': [
+            {'keyword': 'at', 'name': '位置', 'kind': 'words'},
+            {'keyword': 'behind', 'name': '挡住', 'kind': 'word'},
+        ],
+    }])
+    clear_cache()
+    reg = StatementRegistry.for_project(root)
+    beat = Beat(seq=1, label='start', show='lan happy at left behind ye')
+    cols = dynamic_spec_columns([beat], reg)
+    headers = [c['header'] for c in cols]
+    assert 'show·位置~at' in headers
+    assert 'show·挡住~behind' in headers
+    assert dict(zip(headers, beat.spec_arg_cells(cols)))['show·位置~at'] == 'left'
+    fold_spec_arg_columns(beat, {'show·位置~at': 'right'})
+    assert beat.show == 'lan happy at right behind ye'
+
+
 def test_from_row_folds_clause_columns_without_a_registry():
     """Excel 那条路没有项目根：列名里的 `~关键字` 就够改/删了。"""
     row = {
