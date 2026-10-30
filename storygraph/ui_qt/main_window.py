@@ -2068,7 +2068,15 @@ class BeatCardEditor(QWidget):
     def refresh_dirty(self):
         """刷新那行小字提示（未保存 + 字数）。"""
         modified = self.is_modified()
-        self._dirty_label.setText('● 有未保存的改动' if modified else '')
+        # ⚠ 文案**必须短**（2026-10-30 第 7 条实测）：这句 9 个字（99px）和
+        # 「保存这张卡片」「撤销修改」两个按钮同一行，量下来那一行最小宽
+        # 117+89+99+间距 = 321px，加上卡片留白 24 = **345** —— 右栏下限 340
+        # 放不下，卡片又被顶宽 5px（用户："所有图案不得超出右边框！"）。
+        # 现在这句只写「● 未保存」（~60px），那行 290px；完整说明在 tooltip。
+        self._dirty_label.setText('● 未保存' if modified else '')
+        self._dirty_label.setToolTip(
+            '这张卡片改过了、还没保存。点「💾 保存这张卡片」或 Ctrl+S。'
+            if modified else '')
         self._dirty_label.setProperty('role',
                                       'warn' if modified else 'caption')
         try:
@@ -3184,6 +3192,13 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._panel)
+        # 横向滚动条**永久关掉**（用户 2026-10-30："右窗口不得有横向滚动条！
+        # 所有图案不得超出右边框！"）。理由与左边剧本列表同一条：卡片是"表单"，
+        # 横向滚动条只会多一条"右边还有东西"的假线索，还把内容挤成两屏宽。
+        # ⚠ 关掉它**不是**解决办法 —— 真正的保证是"卡片最小宽 ≤ 右栏"：
+        # 判据 `tests/test_ui_width.py::test_card_min_width_budget` 与
+        # `test_no_widget_sticks_out_of_the_right_edge`（逐拍量右边界）。
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         rv.addWidget(scroll, 1)
         # ⚠ **结构性保证**：右栏最小宽 = 340（卡片地板实测 296，留 44px 余量）。
         # `QScrollArea(widgetResizable=True)` 的规则是"卡片宽 = max(视口宽, 卡片

@@ -44,7 +44,7 @@ pytest.importorskip('PySide6')
 
 from PySide6.QtCore import QPoint, Qt                      # noqa: E402
 from PySide6.QtWidgets import (QApplication, QScrollArea,  # noqa: E402
-                               QToolButton)
+                               QToolButton, QWidget)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -246,6 +246,82 @@ class TestNoHorizontalScrollbar:
             QApplication.processEvents()
         assert grid._cols >= 2, f'宽右栏（{grid.width()}px）还只排 1 列：{grid._cols}'
         grid.load(_cards(0))
+
+
+class TestNothingSticksOut:
+    """
+    用户 2026-10-30 第 7 条（看着截图说的两句原话）：
+
+    > 右窗口不得有横向滚动条！所有图案不得超出右边框！
+
+    上一轮只做到"右栏有最小宽 + 压窗口"，可**卡片自己**仍会长到 1077px：
+    `QComboBox` 的最小宽默认按**最长条目**算，真机背景候选里有 40 多字的长名，
+    三个资产下拉（音乐 + 语音并排）加起来把卡片地板顶到 1077 —— 右栏 357，
+    横向滚动条必然出现，所有控件被摆到 1053px 宽（全越界）。
+    """
+
+    def test_long_asset_names_do_not_widen_the_card(self, ui_window):
+        """40 多字的长图名**不许**把卡片顶宽（这是真机 1077px 的来源）。"""
+        win = _card_page(ui_window, (1200, 800))
+        combo = win._panel._widgets['Scene']
+        long_names = ['bg ' + 'x' * 40 + f'_{i}' for i in range(8)]
+        combo.clear()
+        combo.addItems(long_names)
+        for _ in range(6):
+            QApplication.processEvents()
+        assert combo.minimumSizeHint().width() <= 220, (
+            f'长条目又把组合框最小宽顶到 {combo.minimumSizeHint().width()}px'
+            '（`sizeAdjustPolicy` 被改回去了？）')
+        budget = int(win._panel.minimumSizeHint().width())
+        widest = sorted(((w.minimumSizeHint().width(),
+                          f'{type(w).__name__}#{w.objectName()}'
+                          f'{w.isVisible() and "*" or ""}')
+                         for w in win._panel.findChildren(QWidget)),
+                        reverse=True)[:5]
+        rows = []
+        lay = win._panel.layout()
+        for i in range(lay.count() if lay is not None else 0):
+            item = lay.itemAt(i)
+            w = item.widget() if item is not None else None
+            rows.append((int(item.minimumSize().width()) if item else -1,
+                         f'{type(w).__name__}#{w.objectName() if w else "layout"}'))
+        assert budget <= 340, (
+            f'卡片最小宽 {budget}px（长图名把卡片顶宽了）；最宽的几项：{widest}；'
+            f'顶层同行：{sorted(rows, reverse=True)[:5]}')
+        assert not _card_scroll(win).horizontalScrollBar().isVisible(), (
+            '长图名把卡片顶宽 → 又出横向滚动条了')
+
+    def test_no_widget_is_placed_beyond_the_right_edge(self, ui_window):
+        """**逐拍**量：任何可见控件的右边界都不许越过卡片的右边。"""
+        win = _card_page(ui_window, (1200, 800))
+        panel = win._panel
+        bad = []
+        for i in range(len(win._session.beats)):
+            win._show_index(i)
+            for _ in range(3):
+                QApplication.processEvents()
+            right_of_panel = int(panel.width())
+            for w in panel.findChildren(QWidget):
+                if not w.isVisible():
+                    continue
+                try:
+                    pos = w.mapTo(panel, QPoint(0, 0))
+                except Exception:                    # noqa: BLE001 - 已销毁
+                    continue
+                edge = int(pos.x()) + int(w.width())
+                if edge > right_of_panel + 1:
+                    bad.append((i, type(w).__name__, w.objectName(), edge,
+                                right_of_panel))
+        assert not bad, (
+            '这些控件被摆到了卡片右边界之外（拍号, 类, objectName, 右边界, 卡片宽）：'
+            f'{bad[:8]}')
+
+    def test_the_card_scroll_area_never_shows_a_horizontal_bar(self, ui_window):
+        """结构性兜底：策略是 `AlwaysOff`（将来哪个控件又变宽也不出横条）。"""
+        win = _card_page(ui_window)
+        scroll = _card_scroll(win)
+        assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert not scroll.horizontalScrollBar().isVisible()
 
 
 class TestSpriteGridColumnsAdapt:
@@ -533,21 +609,25 @@ class TestLegacyLayoutMigration:
 
     def test_a_versioned_big_window_is_still_capped(self):
         """
-        打过版本号**也**要压 —— 用户第 6 条反馈的直接判据。
+        打过版本号**也**要压窗口 —— 用户第 6 条反馈的直接判据。
 
         "打开已经打开过的项目还是这么大"：第一次迁移之后用户把窗口拖大/最大化
         过一次，退出时 `1392×804` 就带着 `layout_version=2` 存回去了。窗口大小
         不能再给版本号留口子：记忆只用来把窗口**记小**，不用来记大。
+
+        ⚠ 第 7 条之后（`LAYOUT_VERSION = 3`）：**对半的卡片栏也算旧摆法**。
+        用户记忆里正是 `[583, 584]` = 50%，卡在旧的 60% 门槛下面，上一轮
+        **一次都没迁移过** —— 所以他才说"还是一模一样，都说了要变窄一些"。
         """
         WS = self._ws()
         layout = {'geometry': [1392, 804, 0, 23], 'split_card': [583, 584],
-                  WS.LAYOUT_VERSION_KEY: WS.LAYOUT_VERSION}
+                  WS.LAYOUT_VERSION_KEY: 2}
         got = WS.narrow_layout(layout)
         assert got['geometry'][:2] == list(MW.DEFAULT_WINDOW_SIZE), (
             f'版本号已是 2 的大窗口没被压：{got["geometry"]}')
-        # 位置不动；卡片栏 50:50 不是"卡片铺满"，不许动
         assert got['geometry'][2:] == [0, 23], got['geometry']
-        assert got['split_card'] == [583, 584], got['split_card']
+        assert list(got['split_card']) == list(MW.CARD_SPLIT_DEFAULT), (
+            f'对半（50%）的卡片栏没被压成默认窄：{got["split_card"]}')
         assert layout['geometry'] == [1392, 804, 0, 23]
 
     def test_a_smaller_window_is_not_blown_up(self):
@@ -565,10 +645,11 @@ class TestLegacyLayoutMigration:
         assert got['split_card'] == [700, 900], got['split_card']
 
     def test_a_moderate_saved_split_is_kept(self):
-        """55:45 这种正常拖过的比例不算"旧摆法"，不要乱动。"""
+        """已经拖窄的比例（30%、40%）不算旧摆法，不要乱动。"""
         WS = self._ws()
-        got = WS.narrow_layout({'split_card': [600, 480]})
-        assert got['split_card'] == [600, 480], got['split_card']
+        for narrow in ([700, 300], [600, 400]):
+            got = WS.narrow_layout({'split_card': list(narrow)})
+            assert got['split_card'] == list(narrow), (narrow, got['split_card'])
 
     def test_junk_layout_does_not_explode(self):
         WS = self._ws()
@@ -667,11 +748,14 @@ class TestLegacyLayoutMigration:
     def test_the_remembered_split_is_scaled_not_clamped(
             self, ui_window, tmp_path, big_screen):
         """
-        **端到端**：记忆里 `split_card=[583,584]`（对半），窗口被压到 1200 后
-        分栏只有 ~975 宽，两栏必须**还是对半**。
+        **端到端**：记忆里是个**窄**比例（`[700,400]`，右栏 36%），窗口从 1360
+        被压到 1200 后，两栏必须**还是那个比例**（不能被 Qt 从右边硬砍）。
 
-        老实现直接 `setSizes([583,584])`：和 1167 > 975 时 Qt 从右边硬砍，
-        实测摆成 `[545,357]` —— 用户会看到"我摆的对半，怎么卡片只剩三分之一"。
+        老实现直接 `setSizes([700,400])`：和 1100 > 可用宽时 Qt 从右边砍，
+        实测摆成 `[545,357]` —— 用户看到的是"我摆的 36%，怎么卡片只剩三分之一"。
+
+        ⚠ 用 36% 而不是对半：`LAYOUT_VERSION = 3` 起，**≥45% 的旧摆法会被迁移**
+        成默认窄栏（用户第 7 条），对半不再走"按比例还原"这条路。
         """
         from storygraph.core import session_store as SS
 
@@ -682,10 +766,10 @@ class TestLegacyLayoutMigration:
         store.write_text(json.dumps({
             'version': SS.VERSION, 'last_project': root, 'auto_open': True,
             'recent': [root],
-            'projects': {key: {'project_name': '对半分过的项目',
-                               'geometry': [1392, 804, 0, 23],
-                               'split_card': [583, 584],
-                               'layout_version': 2}},
+            'projects': {key: {'project_name': '拖窄过的项目',
+                               'geometry': [1360, 820, 0, 23],
+                               'split_card': [700, 400],
+                               'layout_version': 3}},
         }, ensure_ascii=False), encoding='utf-8')
         win.session_store_path = lambda: store
         for _ in range(4):
@@ -696,8 +780,9 @@ class TestLegacyLayoutMigration:
             QApplication.processEvents()
 
         left, right = (int(n) for n in win._split_card.sizes())
-        assert abs(left - right) <= 40, (
-            f'记忆里是对半，摆出来却是 {left}:{right}（右侧被硬砍）')
+        share = right / max(1, left + right)
+        assert abs(share - 400 / 1100) <= 0.04, (
+            f'记忆里右栏占 36%，摆出来 {left}:{right}（{share:.0%}）—— 比例没保住')
 
     def test_absolute_pixels_are_scaled_to_the_current_width(self):
         from storygraph.ui_qt.window_state import WindowStateMixin as WSM

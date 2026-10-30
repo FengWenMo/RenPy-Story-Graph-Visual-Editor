@@ -69,19 +69,23 @@ def fit_to_available(width, height, available=None, margin: int = 48) -> tuple:
 
 #: 布局记忆的**格式版本**（不是 `session_store.VERSION`，那个管整份文件的结构）。
 #: 升到 2 = "默认窗口改窄 + 卡片栏默认窄"那一轮（2026-10-30，用户第 5 条）。
-LAYOUT_VERSION = 2
+#: 升到 3 = "对半的卡片栏也算旧摆法"（2026-10-30 第 7 条：用户看着截图说
+#:          "还是一模一样……都说了要变窄一些"——他记忆里是 583:584，50% 正好
+#:          卡在旧的 60% 门槛下面，于是**一次都没被迁移过**）。
+LAYOUT_VERSION = 3
 #: 布局里记版本号的键。
 LAYOUT_VERSION_KEY = 'layout_version'
-#: 迁移时卡片页右栏的**上限占比**：超过就是"卡片铺满整个窗口"的旧摆法。
-#: 真机老记忆是 813/1215 = 67%；正常拖过的 55:45（55.6%）不该被动。
-LEGACY_CARD_SHARE = 0.60
+#: 迁移时卡片页右栏的**上限占比**：超过就是"卡片太宽"的旧摆法。
+#: 真机老记忆 813/1215 = 67%；对半 583/1167 = 50%；默认 420/1060 = 39.6%。
+#: 门槛取 **45%**：对半会被压，用户自己拖到 40% 左右的窄栏不会被乱动。
+LEGACY_CARD_SHARE = 0.45
 
 
 def narrow_layout(layout: dict) -> dict:
     """
-    布局记忆 → 窄默认（**每次恢复都跑**，不是只迁移一次）。
+    布局记忆 → 窄默认（**每次恢复都跑窗口那条，卡片栏那条只迁一次**）。
 
-    两条规则，力度不同：
+    三条规则，力度不同：
 
       · **窗口大小：每次恢复都压**到 `DEFAULT_WINDOW_SIZE`（只压大的，小的照旧）。
         为什么不再看版本号：真机第一次迁移确实变成了 1200×800，但用户随后把
@@ -90,8 +94,12 @@ def narrow_layout(layout: dict) -> dict:
         就是这句话。所以：**记忆只用来把窗口记小，不用来记大**。会话里拖多大、
         要不要最大化都随你，只是下次打开仍回到默认窄窗。
 
-      · **卡片栏：只压一次**（`layout_version < 2` 的旧摆法，右栏 > 60%）。
-        用户自己拖过的比例（比如 55:45）之后一直尊重不动。
+      · **卡片栏：只压一次**（`layout_version < 3` 的旧摆法，右栏 ≥ 45%）。
+        用户自己拖过的**窄**比例（≤45%）之后一直尊重不动。
+
+        为什么门槛从 60% 降到 45%（用户第 7 条）：他记忆里是 `[583, 584]`
+        对半 —— 50% 卡在 60% 门槛下面，上一轮的迁移**一次都没动过它**，
+        所以"打开还是那么宽"。对半就不是"窄栏"，这个判断得改。
 
     位置不在这里动：屏幕夹紧仍由 `_restore_to_screen` 做。
     """
@@ -117,7 +125,7 @@ def narrow_layout(layout: dict) -> dict:
             out['geometry'] = [w, h, g[2], g[3]]
     if version < LAYOUT_VERSION:
         sc = SS.normalize_sizes(out.get('split_card'))
-        if len(sc) == 2 and sum(sc) > 0 and sc[1] > sum(sc) * LEGACY_CARD_SHARE:
+        if len(sc) == 2 and sum(sc) > 0 and sc[1] >= sum(sc) * LEGACY_CARD_SHARE:
             out['split_card'] = list(CARD_SPLIT_DEFAULT)
     return out
 

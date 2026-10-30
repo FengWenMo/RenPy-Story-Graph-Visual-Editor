@@ -107,9 +107,37 @@ class WheelSafeComboBox(QComboBox):
     """
     滚轮不改值的组合框（**没有**"点进去就放行"的例外）。
 
-    用法与 `QComboBox` 完全一样（子类只多一条滚轮规则）；卡片里
-    「说话人 / 背景 / 音乐 / 语音」四格用它，见 `BeatCardEditor`。
+    用法与 `QComboBox` 完全一样（子类只多两条：滚轮规则 + 宽度不跟条目走）；
+    卡片里「说话人 / 背景 / 音乐 / 语音」四格用它，见 `BeatCardEditor`。
+
+    ## 为什么还要管宽度（用户 2026-10-30）
+
+    > 右窗口不得有横向滚动条！所有图案不得超出右边框！
+
+    `QComboBox.minimumSizeHint()` **默认按最长条目算宽**。真机背景候选里有
+    40 多字的长图名，于是量到：
+
+        默认                             minHint= 558   ← 一个下拉就 558
+        AdjustToMinimumContentsLength     minHint= 146   ← 按 N 个字符算
+
+    卡片里三个资产下拉并排（音乐 + 语音）时整张卡片的地板被顶到 **1077px**，
+    右栏只有 357px ⇒ 滚动区出横向滚动条、所有控件被摆到 1053px 宽（全越界）。
+    改成"最小宽按 N 个字符算"，实际可用宽度仍由布局拉伸分配（要长就长）。
     """
+
+    #: 最小宽按几个字符算（**不是**显示宽度的上限：布局给多少就用多少）。
+    #: 取 4：卡片最窄时「音乐 + 语音」两个下拉并排（各自还要带一个 24px 的
+    #: 「⋯」按钮），总共 ~250px —— 右栏下限 340 里放得下，不会反过来顶宽卡片。
+    MIN_CONTENTS = 4
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            self.setSizeAdjustPolicy(
+                QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            self.setMinimumContentsLength(self.MIN_CONTENTS)
+        except Exception as e:                # noqa: BLE001 - 老 Qt 没有这些 API
+            swallow('ui_qt.wheel_guard.combo_size_policy', e)
 
     def wheelEvent(self, event):              # noqa: N802 - Qt 命名
         if _popup_open(self):
