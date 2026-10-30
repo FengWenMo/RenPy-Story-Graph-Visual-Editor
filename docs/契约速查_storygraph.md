@@ -3939,6 +3939,28 @@ D3'（plan → apply(confirm) → rollback）**早已接进 Qt**（`ui_qt/dialog
   不迁移的话"默认改窄"对老用户**完全不可见**（用户原话："并没有做到缩小"）。
   迁移只做一次；之后用户拖多大就记多大。
 
+- **2026-10-30 ⑦（右栏：横条没了 / 不出框 / 卡片栏真的窄了）**：用户第 7 条
+  「右窗口不得有横向滚动条！所有图案不得超出右边框！」+「都说了要变窄一些」。
+  根因**不在**滚动区，在**卡片自己**：`QComboBox.minimumSizeHint()` 默认按
+  **最长条目**算宽（真机背景候选 40 多字 → 单个下拉 **1025px**，三个资产下拉
+  把卡片地板顶到 **1077px**）。四条改动：
+  · `ui_qt/wheel_guard.py::WheelSafeComboBox` 起手就
+    `setSizeAdjustPolicy(AdjustToMinimumContentsLengthWithIcon)` +
+    `setMinimumContentsLength(4)`（**最小宽按 4 个字符算，实际宽度仍由布局拉伸**；
+    2 个字符行「音乐 + 语音」实测 208px）。**不许改回默认策略**。
+  · 卡片滚动区 `setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)`（结构性兜底，
+    与左边剧本列表同一条纪律）；真正的保证是"卡片最小宽 ≤ 右栏"，判据见下。
+  · 未保存提示 9 字 →「● 未保存」：它和两个按钮同一行，实测 117+89+99+间距 = **321**
+    ⇒ 卡片 345（右栏下限 340 放不下）。完整说明进 tooltip。
+  · `window_state.LAYOUT_VERSION` **2 → 3**，`LEGACY_CARD_SHARE` **0.60 → 0.45**：
+    用户记忆里是 `[583,584]`（对半 50%），卡在旧门槛下面 ⇒ 上一轮**一次都没迁移**，
+    所以"还是一模一样"。现在 ≥45% 的旧摆法一律压回 `CARD_SPLIT_DEFAULT`；
+    ≤45% 的窄比例照旧按比例还原（`_scale_sizes` 不砍右栏）。
+  实测（真机 `sr_general`，285 拍）：窗口 1200 → 右栏 **386**（原 500）、
+  卡片 374 = 视口宽、卡片最小宽 **296**、hbar 不可见、越界控件 **0**；
+  1440 → 右栏 481 / 卡片 469，同样不越界。判据 `tests/test_ui_width.py`
+  （30 → **38 条**：长图名不许顶宽 / 逐拍量右边界 / hbar 策略 / 对半记忆要被压）。
+
 ## 35. 控制流卡（2026-10-23 修正）
 
 - **目标候选**必须来自 `_flow_target_labels()`：本文件 → 图上节点 → **项目目录**
@@ -6217,15 +6239,18 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   存了回去（版本号已经是 2），下一次启动"又这么大"。
 - 规则：`window_state.narrow_layout` 对 **geometry 不再看版本号**，
   每次恢复都 `min(记忆, DEFAULT_WINDOW_SIZE)`（**只压大的，小的照旧**）。
-  记忆只用来把窗口**记小**，不用来记大。卡片栏迁移（右栏 > 60% → 默认窄）
-  仍然只做一次。
+  记忆只用来把窗口**记小**，不用来记大。卡片栏迁移（`LAYOUT_VERSION=3`、
+  `LEGACY_CARD_SHARE=0.45`：右栏 ≥45% → 默认窄栏）仍然只做一次。
+  ⚠ 门槛从 0.60 降到 0.45 是因为**对半（50%）的旧摆法卡在旧门槛下面、
+  一次都没迁移过**（用户："还是一模一样……都说了要变窄一些"）。见 §34 的 ⑦ 条。
 - `reopen_project` 的顺序固定为：**`_restore_to_screen` → `_restore_docks` →
   开项目/载章节/切页 → `_restore_splitters`（并 `singleShot(0)` 再补一次）**。
   在页面还藏着、窗口还没 resize 的时候摆分栏，量到的是"最小宽兜底"。
 - 判据：`tests/test_ui_width.py::TestLegacyLayoutMigration`
-  （老 1440/813 被压；**带 version=2 的 1392 也被压**；更小的窗口不被放大；
-  端到端 `reopen_project` 两条；`big_screen` fixture 把 offscreen 的 800×800
-  换成用户那块 1440×852，否则 1200 会被屏幕压成 752，判据假绿）。
+  （老 1440/813 被压；**带 version=2 的对半也被压**；更小的窗口不被放大；
+  窄比例（30%/40%）原样保留；端到端 `reopen_project` 两条；`big_screen` fixture
+  把 offscreen 的 800×800 换成用户那块 1440×852，否则 1200 会被屏幕压成 752，
+  判据假绿）。
 
 ### 74.3 分栏按**比例**摆，不按绝对像素（`WindowStateMixin._scale_sizes`）
 
