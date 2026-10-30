@@ -162,3 +162,66 @@ class TestBackwardCompatibility:
         assert 'layer_at' not in row
         assert row['scene'] == 'bg room'
         assert row['layers'] == ''
+
+
+class TestExitStateCarriesTheNewKeys:
+    """
+    跨章继承（2026-10-30，P1）：`stage_exit_state` 的出口状态必须带
+    `scene_at` / `layer_at`。
+
+    为什么单钉：`_initial_state` 早就支持这两个键，但 `EXIT_STATE_KEYS`
+    里没有它们 → 上一章的 `scene bg room at bgfit` / `show cg cg01 at
+    cg38402160` 到下一章第一拍就丢了（背景变回原尺寸、CG 贴左上）。
+    """
+
+    def test_exit_state_carries_scene_at_and_layer_at(self):
+        beats = [
+            _beat(1, scene='bg room', scene_at='bgfit'),
+            _beat(2, show='cg cg01 at cg38402160'),
+            _beat(3, text='这一章演完'),
+        ]
+        out = stage_exit_state(beats)
+        assert out['scene'] == 'bg room'
+        assert out['scene_at'] == 'bgfit'
+        assert out['layers'] == {'cg': 'cg cg01'}
+        assert out['layer_at'] == {'cg': 'cg38402160'}
+
+    def test_next_chapter_inherits_scene_at_and_layer_at(self):
+        """把出口状态喂给下一章：第一拍仍带这两个值。"""
+        prev = [
+            _beat(1, scene='bg room', scene_at='bgfit'),
+            _beat(2, show='cg cg01 at cg38402160'),
+        ]
+        exit_state = stage_exit_state(prev)
+        nxt = [_beat(1, text='下一章第一句')]
+        rows = stage_snapshots(nxt, initial_state=exit_state)
+        assert rows[0]['state']['scene'] == 'bg room'
+        assert rows[0]['state']['scene_at'] == 'bgfit'
+        assert rows[0]['state']['layer_at'] == {'cg': 'cg38402160'}
+
+    def test_new_keys_are_present_even_when_empty(self):
+        """空也输出：结构稳定（调用方不用先 `.get` 再判键在不在）。"""
+        out = stage_exit_state([])
+        assert out['scene_at'] == ''
+        assert out['layer_at'] == {}
+
+    def test_empty_beats_return_entry_state_verbatim(self):
+        """没有拍时原样返回入口状态（`unknown` 语义不动）。"""
+        init = {'scene': 'bg room', 'scene_at': 'bgfit',
+                'actors': [['ling happy', 'left']],
+                'layers': {'cg': 'cg cg01'},
+                'layer_at': {'cg': 'cg38402160'},
+                'music': 'song1', 'voice': '',
+                'unknown': {'layers'}}
+        out = stage_exit_state([], initial_state=init)
+        assert out['scene'] == 'bg room'
+        assert out['scene_at'] == 'bgfit'
+        assert out['layer_at'] == {'cg': 'cg38402160'}
+        assert out['unknown'] == {'layers'}
+
+    def test_layer_at_is_a_copy(self):
+        """`layer_at` 必须是副本：调用方改出口状态不能回写入口/快照。"""
+        init = {'layer_at': {'cg': 'cg38402160'}}
+        out = stage_exit_state([], initial_state=init)
+        out['layer_at']['ui'] = 'msg'
+        assert init['layer_at'] == {'cg': 'cg38402160'}

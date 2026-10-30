@@ -52,14 +52,58 @@ def _clause_image(clause: str) -> str:
     """
     return classify_show_words(clause, intros=()).target
 
+
+def _clause_value_text(value) -> str:
+    """
+    `classify_show_words` 的一个子句值 → item 里的**字符串**字段。
+
+    ⚠ `at` / `behind` 分类器给的是 **list**（多目标：`at a, b` / `behind x, y`），
+      其余子句（`with` / `as` / `onlayer` / `zorder`）给 str。
+      多目标之间用 `', '` 连接 —— Ren'Py 的 `at` 是**逗号分隔**的变换列表，
+      空格连接会少掉语义（与 `beat_model._join_at_targets` 同一条规矩）。
+      单目标 / 缺省统一返回 `''`，老调用方的 `.strip()` 不会炸。
+    """
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v).strip() for v in value if str(v).strip())
+    return str(value or '').strip()
+
+
+def _clause_values(part: str) -> dict:
+    """
+    复杂子句里**结构化列承载得了**的那几个值（`at` / `with` / `as` / `behind`）。
+
+    为什么要有（2026-10-30，P1）：`stage_snapshot._apply_show_verb` 只认 item
+    的 `at`；从前 clause 分支的 `at` 恒为 `''`，于是
+    `show cg cg02 at cg38402160 behind ye` 这类复杂子句的变换**整条丢失**
+    （真机 `sr_general` 实测 23 帧受影响，立绘/CG 只能按原图贴左上）。
+
+    ⚠ **不另写切分**：切分本体仍是 `core.vocabulary.classify_show_words`
+      （与 `_clause_image` 同一个 `intros=()` 口径，所以 `screen msg` 照旧
+      整段算图像名）。这里只把它的返回形状统一成 item 的字符串字段。
+    """
+    clauses = classify_show_words(part, intros=()).clauses
+    return {
+        'at': _clause_value_text(clauses.get('at')),
+        'with_': _clause_value_text(clauses.get('with')),
+        'as_': _clause_value_text(clauses.get('as')),
+        'behind': _clause_value_text(clauses.get('behind')),
+    }
+
+
 def _split_show_items(text: str) -> list:
     """
     `bg@left; eileen happy; cg cg02 at t behind ye`
       -> [{'clause': '', 'image': 'bg', 'at': 'left'},
           {'clause': '', 'image': 'eileen happy', 'at': ''},
-          {'clause': 'cg cg02 at t behind ye', 'image': 'cg cg02', 'at': ''}]
+          {'clause': 'cg cg02 at t behind ye', 'image': 'cg cg02', 'at': 't',
+           'with_': '', 'as_': '', 'behind': 'ye'}]
 
     只认 `图像@变换`（紧凑式）与"含修饰关键字的完整子句"两种；其余当纯图像名。
+
+    ⚠ 复杂子句的 `clause` **仍然是原文**（渲染/去重的既有契约：整条归
+      「舞台（高级）」列，见 `beat_model.show_item_part` / `show_cell_parts`）；
+      `at` / `with_` / `as_` / `behind` 只是**另外**填给舞台快照看的结构化值
+      （2026-10-30 修：从前 `at` 恒为空，`show … at … behind …` 的变换丢失）。
 
     **`expression` 形态单独走一条路**（2026-10-05 修）：`show expression`
     的图像名本身是个 Python 表达式（`holo("lan base")`），里面可能带空格、
@@ -89,7 +133,7 @@ def _split_show_items(text: str) -> list:
             items.append({'clause': '', 'image': image, 'at': at.strip()})
         elif any(w in _SHOW_CHUNK_WORDS for w in part.split()):
             items.append({'clause': part, 'image': _clause_image(part),
-                          'at': ''})
+                          **_clause_values(part)})
         else:
             items.append({'clause': '', 'image': part, 'at': ''})
     return items

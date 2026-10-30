@@ -531,7 +531,12 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
 
 
 #: 跨章状态要看的那几样（`stage_exit_state` 的输出键）。
-EXIT_STATE_KEYS = ('scene', 'actors', 'layers', 'music', 'voice')
+#:
+#: ⚠ `scene_at` / `layer_at` 必须在这里（2026-10-30，P1）：`_initial_state`
+#:   早就支持这两个键，但出口状态不带它们 → 下一章第一拍就丢背景 fit / CG
+#:   变换（`scene bg room at bgfit` / `show cg cg01 at cg38402160`）。
+EXIT_STATE_KEYS = ('scene', 'scene_at', 'actors', 'layers', 'layer_at',
+                   'music', 'voice')
 
 
 def stage_exit_state(beats: list, initial_state: Optional[dict] = None) -> dict:
@@ -541,9 +546,11 @@ def stage_exit_state(beats: list, initial_state: Optional[dict] = None) -> dict:
     与 `stage_snapshots` 共用同一套推导（`initial_state` = 上一章的出口），
     所以"预览/快照说这样"与"跨章判据说这样"不可能各说一套。
 
-    返回 `{scene, actors, layers, music, voice, unknown}`：
+    返回 `{scene, scene_at, actors, layers, layer_at, music, voice, unknown}`：
       · `unknown` 是**集合**（不是JSON）：这些元素的值还不知道 ——
         调用方必须把它们当"不判"，不能当空串；
+      · `scene_at`（背景变换，str）与 `layer_at`（图层 tag → at 的**字典副本**）
+        是"持续状态"，跨章必须一起继承；空也原样输出（结构稳定）；
       · 没有拍时原样返回入口状态（空列表 → 空转）。
     """
     beats = list(beats or ())
@@ -553,7 +560,9 @@ def stage_exit_state(beats: list, initial_state: Optional[dict] = None) -> dict:
     for key in EXIT_STATE_KEYS:
         if key == 'actors':
             out[key] = [[str(a), str(at)] for a, at in (st.get(key) or ())]
-        elif key == 'layers':
+        elif key in ('layers', 'layer_at'):
+            # 两个 dict 都要**副本**：调用方会改这份状态，不能把快照/入口
+            # 那本字典直接递出去（`layer_at` 空也输出 `{}`）。
             out[key] = dict(st.get(key) or {})
         else:
             out[key] = str(st.get(key) or '')

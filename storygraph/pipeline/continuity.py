@@ -60,6 +60,16 @@ from storygraph.story.beat_model import (
 from storygraph.story.exits import ENTRY_LABELS
 from storygraph.story.stage_snapshot import EXIT_STATE_KEYS, stage_exit_state
 
+#: 跨章**继承**要看的元素里，continuity 会逐项判的（2026-10-30）。
+#:
+#: `EXIT_STATE_KEYS` 现在还带 `scene_at` / `layer_at`（背景/图层的变换是
+#: 持续状态，必须跟着上一章走）—— 但它们是**舞台几何的内部键**，不是
+#: "这一幕该不该换背景/谁在台上"那种叙事结构。continuity 的 outcomes
+#: 契约只判下面的元素；把两个内部键塞进去会让 UI 的"有状态 N 条"多算，
+#: 也会让 JSON 多出没人消费的字段。所以这里显式收窄，**不是**漏判。
+JUDGED_STATE_KEYS = tuple(k for k in EXIT_STATE_KEYS
+                          if k not in ('scene_at', 'layer_at'))
+
 #: 有这些语句的 label 才算"内容章"（演出真的发生在里面）。
 CONTENT_KINDS = frozenset({
     K.SAY, K.EXTEND, K.SHOW, K.SCENE, K.HIDE, K.PLAY, K.VOICE,
@@ -113,7 +123,8 @@ _LEVEL_ORDER = {LEVEL_WARN: 0, LEVEL_INFO: 1}
 def _unknown_state() -> dict:
     """"什么都不知道"的入口状态（给链根 / 循环 / 汇聚用）。"""
     return {
-        'scene': '', 'actors': [], 'layers': {}, 'music': '', 'voice': '',
+        'scene': '', 'scene_at': '', 'actors': [], 'layers': {},
+        'layer_at': {}, 'music': '', 'voice': '',
         'unknown': set(EXIT_STATE_KEYS),
     }
 
@@ -125,7 +136,7 @@ def _state_to_dict(state: dict) -> dict:
         value = state.get(key)
         if key == 'actors':
             out[key] = [[str(a), str(at)] for a, at in (value or ())]
-        elif key == 'layers':
+        elif key in ('layers', 'layer_at'):
             out[key] = {str(k): str(v) for k, v in (value or {}).items()}
         else:
             out[key] = str(value or '')
@@ -1296,12 +1307,12 @@ def _judge_seam(seam: Seam, p: Chapter, n: Chapter,
         seam.judged = False
         seam.reason = (f'{n.label} 有 {n.in_degree} 条入边' if n.in_degree > 1
                        else f'{n.label} 没有入边（链根，入口状态未知）')
-        seam.outcomes = {k: 'unknown' for k in EXIT_STATE_KEYS}
+        seam.outcomes = {k: 'unknown' for k in JUDGED_STATE_KEYS}
         return
     if p.cycle or n.cycle:
         seam.judged = False
         seam.reason = '在环里（转几圈不确定），不判'
-        seam.outcomes = {k: 'unknown' for k in EXIT_STATE_KEYS}
+        seam.outcomes = {k: 'unknown' for k in JUDGED_STATE_KEYS}
         return
     seam.judged = True
     seam.reason = '后继只有一条入边'
@@ -1315,7 +1326,7 @@ def _compare_inheritance(seam: Seam, p: Chapter, n: Chapter,
     pe = p.exit or {}
     unknown = set(pe.get('unknown') or ())
     outcomes = {}
-    for element in EXIT_STATE_KEYS:
+    for element in JUDGED_STATE_KEYS:
         if element == 'voice':
             continue
         if element in unknown:
