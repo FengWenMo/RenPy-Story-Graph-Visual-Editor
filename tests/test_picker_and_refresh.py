@@ -17,6 +17,7 @@ import os
 
 import pytest
 
+from storygraph.app import picker as P
 from storygraph.app.beats import (
     _guess_image_tag, categorize_assets, image_spec_of_row,
     speaking_sprite_index, order_sprite_rows, beat_sprite_rows,
@@ -25,8 +26,9 @@ from storygraph.story.beat_render import make_symbols
 
 
 class _Engine:
-    def __init__(self, reg):
+    def __init__(self, reg, project_root=None):
         self._reg = reg
+        self.project_root = project_root
 
     def get_registry(self):
         return self._reg
@@ -37,23 +39,44 @@ def registry():
     from storygraph.assets.asset_registry import AssetRegistry
     reg = AssetRegistry()
     reg.images = {}
+
+    def img(aid, path, tag='', attrs=''):
+        reg.images[aid] = {'ID': aid, 'Path': path, 'Tag': tag,
+                           'Attributes': attrs}
+
     for a in ('happy', 'sad', 'close_happy'):
-        reg.images[f'ling_{a}'] = {'ID': f'ling_{a}', 'Tag': 'ling',
-                                   'Attributes': a}
-    reg.images['mary_smile'] = {'ID': 'mary_smile', 'Tag': 'mary',
-                                'Attributes': 'smile'}
-    reg.images['bg_classroom'] = {'ID': 'bg_classroom', 'Tag': 'bg',
-                                  'Attributes': 'classroom'}
-    reg.images['bg_roof'] = {'ID': 'bg_roof', 'Tag': 'bg',
-                             'Attributes': 'roof'}
-    reg.images['cg_01'] = {'ID': 'cg_01', 'Tag': 'cg', 'Attributes': '01'}
-    reg.images['ui_btn'] = {'ID': 'ui_btn', 'Tag': 'ui', 'Attributes': 'btn'}
+        img(f'ling_{a}', f'game/images/characters/ling/{a}.png', 'ling', a)
+    img('mary_smile', 'game/images/characters/mary/smile.png', 'mary', 'smile')
+    img('mary_sad', 'game/images/characters/mary/sad.png', 'mary', 'sad')
+    # 预览副本：Tag 空，同 tag+同 stem 另有真立绘行 → 通用副本检测
+    img('lan_happy', 'game/images/characters/lan/happy.png', 'lan', 'happy')
+    img('lan_refusing', 'game/images/characters/lan/refusing.png',
+        'lan', 'refusing')
+    img('refusing', 'game/cc_preview/lan/refusing.png')
+    # 头像：目录段明确写着 avatar
+    img('avatar_ling', 'game/cc_preview/avatar/ling.png')
+    # 认不出的零散图：**不许猜**
+    img('about_smoke', 'about_smoke.png')
+    img('bg_classroom', 'game/images/bg/classroom.png', 'bg', 'classroom')
+    img('bg_roof', 'game/images/bg/roof.png', 'bg', 'roof')
+    img('cg_01', 'game/images/cg/cg01.png', 'cg', '01')
+    img('ui_btn', 'game/images/ui/btn.png', 'ui', 'btn')
+    reg.characters = {
+        'lyj': {'ID': 'lyj', 'Name': '凌', 'ImageTag': 'ling'},
+        'l': {'ID': 'l', 'Name': '蓝', 'ImageTag': 'lan'},
+        'm': {'ID': 'm', 'Name': '', 'ImageTag': 'mary'},
+    }
     reg.music = {'bgm_a': {'ID': 'bgm_a'}}
     reg.sounds = {'sfx_door': {'ID': 'sfx_door'}}
     reg.voices = {}
     reg.transforms = {'i11': {'ID': 'i11'}}
-    reg.characters = {'lyj': {'ID': 'lyj'}}
+    # ATL 声明行（`image logo blink:`，贴图在块里）：项目自己声明过的图像名，
+    # 必须还能从选择器加（不许被"认不出角色 tag"误伤）。
+    reg.images['logo_blink'] = {'ID': 'logo_blink', 'Path': '',
+                                'Tag': 'logo', 'Attributes': 'blink',
+                                '_atl': True}
     return reg
+
 
 
 class TestAssetCategorization:
@@ -64,11 +87,29 @@ class TestAssetCategorization:
     """
 
     def test_sprites_grouped_by_character_tag(self, registry):
+        """一个角色一组（显示名在组名里），组内是**所有表情**（按属性排）。"""
         g = categorize_assets(_Engine(registry))
-        assert '立绘：ling' in g
-        assert '立绘：mary' in g
-        ids = [a for _, a in g['立绘：ling']]
-        assert ids == ['ling_close_happy', 'ling_happy', 'ling_sad'], ids
+        assert '立绘：凌（ling）' in g
+        assert [a for _, a in g['立绘：凌（ling）']] == [
+            'ling_close_happy', 'ling_happy', 'ling_sad']
+
+    def test_sprite_group_falls_back_to_tag_without_display_name(self, registry):
+        g = categorize_assets(_Engine(registry))
+        assert '立绘：mary' in g, '没有显示名时用 tag，不许编一个名字'
+
+    def test_each_character_is_exactly_one_group(self, registry):
+        """110 个"每个表情一个分组"的回归：现在每人只有一组。"""
+        g = categorize_assets(_Engine(registry))
+        sprite_groups = [k for k in g if k.startswith('立绘：')]
+        assert len(sprite_groups) == 3, sprite_groups
+        assert len({k for k in g}) < 20, '分组数不该随表情数增长'
+
+    def test_no_single_image_sprite_group(self, registry):
+        """用户痛点：`立绘：resigned` 这种"一张图一个分类"不许再出现。"""
+        g = categorize_assets(_Engine(registry))
+        singles = [k for k, v in g.items()
+                   if k.startswith('立绘：') and len(v) == 1]
+        assert singles == [], f'又出现单图立绘分类：{singles}'
 
     def test_backgrounds_separated_from_sprites(self, registry):
         g = categorize_assets(_Engine(registry))
@@ -80,6 +121,30 @@ class TestAssetCategorization:
         g = categorize_assets(_Engine(registry))
         assert 'CG' in g
         assert '界面/其他图层' in g
+
+    def test_preview_and_avatar_are_separate_groups(self, registry):
+        """预览图/头像单独成组（不能直接上舞台），不混进立绘。"""
+        g = categorize_assets(_Engine(registry))
+        preview = '角色预览图（不能直接上舞台）'
+        avatar = '角色头像（不能直接上舞台）'
+        assert preview in g and avatar in g
+        assert [a for _, a in g[preview]] == ['refusing']
+        assert [a for _, a in g[avatar]] == ['avatar_ling']
+        assert all(not k.startswith('立绘：refusing') for k in g)
+
+    def test_unknown_is_not_guessed(self, registry):
+        """认不出的图归「未识别（不猜）」，不许按 ID 编一个角色 tag。"""
+        g = categorize_assets(_Engine(registry))
+        assert '未识别（不猜）' in g
+        assert [a for _, a in g['未识别（不猜）']] == ['about_smoke']
+
+    def test_single_image_groups_are_few(self, registry):
+        """整套分组里"单图分类"要少（用户见过 110 个单图分类的列表）。"""
+        g = categorize_assets(_Engine(registry))
+        singles = [k for k, v in g.items() if len(v) == 1]
+        # 小夹具里背景/CG/预览图等本来就各一条；关键约束是**立绘**不许单图成组
+        assert [k for k in singles if k.startswith('立绘：')] == []
+        assert len(g) <= 15, f'分组太多：{list(g)}'
 
     def test_audio_and_transform_separated(self, registry):
         g = categorize_assets(_Engine(registry))
@@ -107,10 +172,160 @@ class TestAssetCategorization:
         assert categorize_assets(None) == {}
 
     def test_guess_tag(self):
+        """旧启发式函数保留（别的调用方还在用），但分组**不再**用它猜。"""
         assert _guess_image_tag('bg_classroom') == 'bg'
         assert _guess_image_tag('ling_happy') == 'ling'
         assert _guess_image_tag('cg_01') == 'cg'
         assert _guess_image_tag('') == ''
+
+
+class TestCategorizeOnForeignLayout:
+    """
+    **通用性**：换一个布局完全不同的项目，分组照样成立。
+
+    这里造 `art/faces/<tag>/<attr>.png` + `art/copies/<tag>/*.png` +
+    `pics/bg/*.png` —— 和真实项目的 `images/characters` / `cc_preview`
+    没有一处相同；分组结果必须一样按角色聚合（证明没写死本项目结构）。
+    """
+
+    def test_foreign_layout(self, tmp_path):
+        from storygraph.assets.asset_registry import AssetRegistry
+        root = tmp_path / 'foreign'
+        for rel in ('art/faces/eileen/happy.png', 'art/faces/eileen/sad.png',
+                    'art/copies/eileen/happy.png', 'pics/bg/room.png'):
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b'x')
+        reg = AssetRegistry()
+        reg.images = {
+            'eileen_happy': {'ID': 'eileen_happy',
+                             'Path': 'art/faces/eileen/happy.png',
+                             'Tag': 'eileen', 'Attributes': 'happy'},
+            'eileen_sad': {'ID': 'eileen_sad',
+                           'Path': 'art/faces/eileen/sad.png',
+                           'Tag': 'eileen', 'Attributes': 'sad'},
+            'happy': {'ID': 'happy', 'Path': 'art/copies/eileen/happy.png',
+                      'Tag': '', 'Attributes': 'happy'},
+            'room': {'ID': 'room', 'Path': 'pics/bg/room.png',
+                     'Tag': 'bg', 'Attributes': 'room'},
+        }
+        reg.characters = {'el': {'ID': 'el', 'Name': 'Eileen',
+                                 'ImageTag': 'eileen'}}
+        g = categorize_assets(_Engine(reg, project_root=str(root)))
+        assert '立绘：Eileen（eileen）' in g
+        assert [a for _, a in g['立绘：Eileen（eileen）']] == [
+            'eileen_happy', 'eileen_sad']
+        assert [a for _, a in g['角色预览图（不能直接上舞台）']] == ['happy']
+        assert [a for _, a in g['背景']] == ['room']
+        assert 'cc_preview' not in ''.join(g), '分组名里不许出现本项目目录名'
+
+
+class TestPickContextAndResolvePick:
+    """
+    `resolve_pick`（契约 §1.1b）：选中一张图 → 能不能加、加什么。
+
+    用户 2026-10-30 最痛的一条：**选中预览图后写出了非法 `show refusing`**。
+    现在预览图/头像会自动换成真立绘，换不到就拒绝并给一句话原因。
+    """
+
+    def _pick(self, registry, aid, tmp_path, **kw):
+        return P.resolve_pick(aid, registry.images.get(aid),
+                              registry=registry,
+                              project_root=str(tmp_path), **kw)
+
+    def test_sprite_gives_spec_directly(self, registry, tmp_path):
+        got = self._pick(registry, 'ling_happy', tmp_path)
+        assert got.ok is True
+        assert got.spec == 'ling happy'
+        assert got.message == ''
+        assert got.identity is not None and got.identity.kind == 'sprite'
+
+    def test_bg_gives_spec(self, registry, tmp_path):
+        got = self._pick(registry, 'bg_classroom', tmp_path)
+        assert got.ok is True and got.spec == 'bg classroom'
+
+    def test_preview_is_replaced_with_real_sprite(self, registry, tmp_path):
+        got = self._pick(registry, 'refusing', tmp_path)
+        assert got.ok is True, got.message
+        assert got.spec == 'lan refusing'
+        assert got.replaced_from == 'refusing'
+        assert got.replaced_to == 'lan_refusing'
+        assert '已用对应的立绘' in got.message
+
+    def test_avatar_is_replaced_with_real_sprite(self, registry, tmp_path):
+        got = self._pick(registry, 'avatar_ling', tmp_path)
+        assert got.ok is True, got.message
+        assert got.replaced_from == 'avatar_ling'
+        assert got.replaced_to.startswith('ling_')
+        assert '已用对应的立绘' in got.message
+
+    def test_atl_declared_image_is_pickable(self, registry, tmp_path):
+        """`image logo blink:`（贴图写在 ATL 块里）→ 能加，spec=`logo blink`。"""
+        got = self._pick(registry, 'logo_blink', tmp_path)
+        assert got.ok is True, got.message
+        assert got.spec == 'logo blink'
+
+    def test_atl_character_image_is_pickable(self, registry, tmp_path):
+        registry.images['ling_secret'] = {
+            'ID': 'ling_secret', 'Path': '', 'Tag': 'ling',
+            'Attributes': 'secret', '_atl': True}
+        got = self._pick(registry, 'ling_secret', tmp_path)
+        assert got.ok is True, got.message
+        assert got.spec == 'ling secret'
+        assert got.identity is not None and got.identity.kind == 'sprite'
+
+    def test_unknown_is_rejected_with_reason(self, registry, tmp_path):
+        got = self._pick(registry, 'about_smoke', tmp_path)
+        assert got.ok is False
+        assert got.spec == ''
+        assert '认不出' in got.message
+
+    def test_preview_without_real_sprite_is_rejected(self, registry, tmp_path):
+        registry.images['lonely'] = {
+            'ID': 'lonely', 'Path': 'game/cc_preview/lan/lonely.png',
+            'Tag': '', 'Attributes': 'lonely'}
+        got = self._pick(registry, 'lonely', tmp_path)
+        assert got.ok is False
+        assert '预览图' in got.message and '没找到' in got.message
+
+    def test_resolve_pick_without_registry_still_works(self, registry, tmp_path):
+        row = registry.images['ling_happy']
+        ctx = P.pick_context(registry, str(tmp_path))
+        got = P.resolve_pick('ling_happy', row, project_root=str(tmp_path),
+                             **ctx)
+        assert got.ok is True and got.spec == 'ling happy'
+
+    def test_pick_context_keys_align_with_resolve_pick(self, registry, tmp_path):
+        import inspect
+        ctx = P.pick_context(registry, str(tmp_path))
+        params = inspect.signature(P.resolve_pick).parameters
+        assert set(ctx) <= set(params), set(ctx) - set(params)
+        row = registry.images['refusing']
+        got = P.resolve_pick('refusing', row, project_root=str(tmp_path),
+                             **ctx)
+        assert got.ok is True and got.replaced_to == 'lan_refusing'
+
+    def test_identities_batch(self, registry, tmp_path):
+        idents = P.identities(registry, str(tmp_path))
+        assert idents['ling_happy'].kind == 'sprite'
+        assert idents['refusing'].kind == 'preview'
+        assert idents['avatar_ling'].kind == 'avatar'
+        assert idents['about_smoke'].kind == 'unknown'
+        assert idents['bg_classroom'].kind == 'bg'
+
+    def test_identity_of_single(self, registry, tmp_path):
+        got = P.identity_of(registry, 'refusing', project_root=str(tmp_path))
+        assert (got.kind, got.tag) == ('preview', 'lan')
+        assert got.display == '蓝'
+
+    def test_image_spec_of_signature_unchanged(self):
+        """契约：`image_spec_of` 原签名/行为不许变（既有调用方还在用）。"""
+        assert P.image_spec_of('ling_happy',
+                               {'Tag': 'ling',
+                                'Attributes': 'happy'}) == 'ling happy'
+        assert P.image_spec_of('refusing', {'Tag': '', 'Attributes': ''}) \
+            == 'refusing'
+
 
 
 class TestImageSpecOfRow:

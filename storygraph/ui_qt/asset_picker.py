@@ -1,25 +1,43 @@
 """
 storygraph.ui_qt.asset_picker
 =============================
-**资产选择器**（PySide6）—— 对齐用户最在意的那一句：
+**资产选择器**（PySide6）—— 对齐用户最在意的那几句：
 
 > 资产列是**下拉框**，不用手打 ID
+> 立绘怎么一堆单独的分类，什么 relaxing，resigned —— 这不都是凌的表情吗
+> 只有文件名是角色名的可以匹配……直接放角色那个头像图就能动
 
-左：类别列表（立绘：<角色> / 背景 / CG / 音乐 / 音效 / 语音 / 变换）
+左：类别列表（**角色优先**）：`立绘：凌跃捷（ling）` / 角色预览图 / 背景 / CG /
+    界面 / 音乐 / 音效 / 语音 / 变换
 中：候选网格（真缩略图，走 QThreadPool 异步解码）
-右：选中项的详情（transform 会显示它的 ATL 与注释）
-上：搜索框（前缀 / 子串 / 模糊，规则来自 `score_candidates` 唯一真源）
+右：选中项的详情（不止原文，还写清"这是什么东西"：kind / tag / 属性 / 依据 /
+    能不能直接写进 `show`）
+上：搜索框 + **用途过滤**（全部 / 立绘 / 背景 / CG / 界面 / 角色预览图 / 其他）
 
-语义全在 `storygraph.app.picker`，这里只画控件、收事件。
+## 这一层只画控件、收事件 —— 判定都在别处
+
+  · 谁和谁一类（分组）                → `app.beats.categorize_assets`（角色优先）
+  · 一条图是什么（kind/tag/属性/依据）→ `assets.asset_identity.resolve_image`
+  · 能不能写进 `show`、预览图换成哪张 → `app.picker.resolve_pick`
+
+**不许**在这里重写第二套判定（按路径猜 tag、认 `cc_preview` 这项目专名、
+把预览图当立绘写回）—— 2026-10-30 用户实测：159 张预览副本混进立绘被拆成 110 个
+单图分类，选中后还真写出 `show refusing`（引擎里没有这张图，游戏运行时"找不到图"）。
+
+用户拍板：**预览图允许选，但必须自动换成对应的真立绘**，底部提示条说明
+"已用对应的立绘 xxx"；换不到 / 认不出 → **禁止「确定」**并给一句原因。
+
+其它细节说明散落在各处，都是踩过的坑（底色 / 预热 / 只加载可见项 / 后台补齐）。
 """
 
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
-from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem as _Item,
-                               QPushButton, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem as _Item, QPushButton, QSplitter,
+                               QVBoxLayout, QWidget)
 
 from storygraph.app import picker as P
 from storygraph.ui_qt import tokens as T
@@ -41,6 +59,271 @@ FILL_CHUNK = 40
 FILL_INTERVAL_MS = 220
 #: 一次打开最多补齐多少条（避免为了"全绿"把 CPU 烧几分钟）。
 FILL_BUDGET = 600
+
+# ==================================================================
+#  用途过滤（用户 2026-10-30：1193 张图全挤在一个列表里，找不到、容易误选）
+# ==================================================================
+
+PURPOSE_ALL = '全部'
+PURPOSE_SPRITE = '立绘'
+PURPOSE_BG = '背景'
+PURPOSE_CG = 'CG'
+PURPOSE_UI = '界面'
+PURPOSE_PREVIEW = '角色预览图'
+PURPOSE_OTHER = '其他'
+
+#: 下拉里能选的档（顺序 = 用户找东西的顺序：立绘最常用）。
+PURPOSES = (PURPOSE_ALL, PURPOSE_SPRITE, PURPOSE_BG, PURPOSE_CG, PURPOSE_UI,
+            PURPOSE_PREVIEW, PURPOSE_OTHER)
+
+#: kind → 用途档。**只按 `Identity.kind` 归**（不按分组名/路径/项目专名猜）。
+PURPOSE_BY_KIND = {
+    'sprite': PURPOSE_SPRITE,
+    'bg': PURPOSE_BG,
+    'cg': PURPOSE_CG,
+    'ui': PURPOSE_UI,
+    'preview': PURPOSE_PREVIEW,
+    'avatar': PURPOSE_PREVIEW,     # 头像和预览图一样：不能直接上舞台
+    'other': PURPOSE_OTHER,
+    'unknown': PURPOSE_OTHER,
+}
+
+#: 调用方可能传 kind / 英文 / 中文 —— 都认，认不出就当「全部」（**不猜**）。
+_PURPOSE_ALIASES = {
+    '': PURPOSE_ALL, 'all': PURPOSE_ALL, '全部': PURPOSE_ALL,
+    'sprite': PURPOSE_SPRITE, '立绘': PURPOSE_SPRITE, 'char': PURPOSE_SPRITE,
+    'bg': PURPOSE_BG, 'background': PURPOSE_BG, '背景': PURPOSE_BG,
+    'cg': PURPOSE_CG, 'CG': PURPOSE_CG,
+    'ui': PURPOSE_UI, 'gui': PURPOSE_UI, '界面': PURPOSE_UI,
+    'preview': PURPOSE_PREVIEW, 'avatar': PURPOSE_PREVIEW,
+    '角色预览图': PURPOSE_PREVIEW, '预览图': PURPOSE_PREVIEW, '头像': PURPOSE_PREVIEW,
+    'other': PURPOSE_OTHER, '其他': PURPOSE_OTHER,
+}
+
+#: `Identity.kind` → 人话（详情/tooltip/对照表共用）。
+KIND_LABELS = {
+    'sprite': '立绘',
+    'preview': '角色预览图（不能直接上舞台）',
+    'avatar': '角色头像（不能直接上舞台）',
+    'bg': '背景',
+    'cg': 'CG',
+    'ui': '界面',
+    'other': '其他图片',
+    'unknown': '未识别',
+}
+
+#: `Identity.source` → 人话（"凭什么这么判"）。对照表与 tooltip 共用。
+SOURCE_LABELS = {
+    'mapping': '映射（精确覆盖）',
+    'mapping-rule': '映射（路径规则）',
+    'tag-column': '资源表「Tag」列',
+    'folder': '文件夹推断',
+    'stem': '文件名推断',
+    'unknown': '没认出来',
+}
+
+#: 重建分类列表时"保留当前选中项"的哨兵（`None` 表示「全部」那一行）。
+_KEEP_CURRENT = object()
+
+
+# ==================================================================
+#  判定/标签 —— 纯函数（判定本身不在这里，见模块 docstring）
+# ==================================================================
+
+def purpose_label(value: str) -> str:
+    """把调用方给的用途参数规范成下拉里的一档（认不出的当「全部」，不猜）。"""
+    raw = str(value or '').strip()
+    key = raw.lower()
+    if key in _PURPOSE_ALIASES:
+        return _PURPOSE_ALIASES[key]
+    if raw in PURPOSES:
+        return raw
+    return PURPOSE_ALL
+
+
+def purpose_of(identity) -> str:
+    """
+    一条图的用途档。
+
+    **只按 `Identity.kind` 归**（用户 2026-10-30："立绘/背景/CG/界面混在一起"）：
+    kind 是判定层唯一真源给的，分组名只是显示文案，不能拿来做机器判断。
+    """
+    kind = str(getattr(identity, 'kind', '') or '')
+    return PURPOSE_BY_KIND.get(kind, PURPOSE_OTHER)
+
+
+def pick_context(registry, project_root, *, mapping=None) -> dict:
+    """
+    装配 `resolve_image` / `resolve_pick` 需要的**项目上下文**。
+
+    唯一实现在 `app.picker.pick_context` —— 界面只拿得到 registry + 项目根，
+    而"哪些 tag 是known 角色、显示名是什么、映射文件在哪"属于语义层。
+    这里不重写第二套（否则两处口径必然漂移）。判定层不可用时返回 `{}`。
+    """
+    try:
+        return P.pick_context(registry, project_root, mapping=mapping) or {}
+    except Exception as e:                    # noqa: BLE001 - 判定层坏了也要能开窗
+        swallow('ui_qt.asset_picker.pick_context', e)
+        return {}
+
+
+def identity_map(registry, project_root, *, mapping=None) -> dict:
+    """
+    **全部**图片行 → `{asset_id: Identity}`（kind / tag / attrs / display /
+    source / showable）。
+
+    判定 100% 在 `assets.asset_identity`（唯一真源）：这里只装配项目上下文
+    （已知角色 tag / 显示名 / 映射 / 副本索引），然后走它的**批量入口** ——
+    `resolve_image` 的 docstring 明说"UI 不要逐条调"（逐条会重建副本索引，
+    1720 行 = O(n²)）。判定层不可用时返回 `{}`，界面按"没认出来"处理。
+    """
+    if registry is None:
+        return {}
+    root = str(project_root or '')
+    images = getattr(registry, 'images', None) or {}
+    try:
+        from storygraph.assets.asset_identity import (project_context,
+                                                      resolve_image)
+        ctx = project_context(registry, root, mapping=mapping)
+        idents = dict(P.identities(registry, root, context=ctx))
+    except Exception as e:                    # noqa: BLE001 - 不让判定炸掉选择器
+        swallow('ui_qt.asset_picker.identity_map', e)
+        return {}
+    # 批量入口以**行里的 ID** 为 key，而资源表字典的 key 偶尔不同（真实项目
+    # 实测有 `'bg_2 '` 带尾空格、行 ID 是 `bg_2` 的行）。这里按表 key 补齐，
+    # 保证"表里每一行都有结论" —— 否则那几行在选择器里会变成"未识别"。
+    for key in images:
+        key_s = str(key)
+        if key_s in idents:
+            continue
+        row = images.get(key) or {}
+        rid = str((row or {}).get('ID') or '').strip()
+        if rid and rid in idents:
+            idents[key_s] = idents[rid]
+            continue
+        try:
+            idents[key_s] = resolve_image(
+                row, relpath=str(row.get('Path') or ''),
+                known_tags=ctx['known_tags'], known_chars=ctx['known_chars'],
+                mapping=ctx['mapping'], rows=images,
+                copy_index=ctx.get('copy_index'))
+        except Exception as e:                # noqa: BLE001 - 单行失败不影响别的
+            swallow('ui_qt.asset_picker.identity_map.row', e)
+    return idents
+
+
+def identity_of(registry, project_root, asset_id, *, row=None):
+    """
+    一条图片行的 `Identity`（单条；批量请用 `identity_map`）。
+
+    返回 `None` = 判定层不可用（没有注册表 / 判定抛错）—— 界面按"没认出来"
+    处理，**不自己猜**。
+    """
+    if registry is None:
+        return None
+    try:
+        return P.identity_of(registry, asset_id, row,
+                             project_root=str(project_root or ''))
+    except Exception as e:                    # noqa: BLE001 - 不让判定炸掉选择器
+        swallow('ui_qt.asset_picker.identity_of', e)
+        return None
+
+
+def _fold_dup_halves(text: str) -> str:
+    """
+    把"前后半段完全相同"的重复折掉一半。
+
+    真实项目里有 `Tag == Attributes`（两栏都填了 `Frame 13`）的行，拼出来是
+    `Frame 13 Frame 13`。只折叠这种**整段重复**，不做通用去重（免得误伤
+    `ling happy happy` 这种真写法）。
+    """
+    words = str(text or '').split()
+    half = len(words) // 2
+    if half and words[:half] == words[half:]:
+        return ' '.join(words[:half])
+    return ' '.join(words)
+
+
+def _short_spec(asset_id: str, row: dict = None) -> str:
+    """资产 ID + 行 → 可写进卡片的 image spec（`ling happy`）；取不到就用 ID。"""
+    try:
+        spec = P.image_spec_of(asset_id, row or {})
+    except Exception as e:                    # noqa: BLE001
+        swallow('ui_qt.asset_picker._short_spec', e)
+        spec = ''
+    return _fold_dup_halves(str(spec or '').strip() or str(asset_id or ''))
+
+
+def human_label(identity, asset_id: str = '', row: dict = None) -> str:
+    """
+    候选格子里显示的**人话名**。
+
+      · 角色相关（立绘 / 预览图 / 头像）：`凌跃捷 refusing`
+        （显示名来自 characters.xlsx；没有显示名就退 tag；预览图/头像带前缀）；
+      · 背景 / CG / 界面：沿用能写进卡片的 image spec（`bg bg9_5`）；
+      · 未识别：明写「未识别」，不装成某个角色。
+
+    原始资产 ID / 相对路径一律放 tooltip —— 格子里只放"人怎么叫它"。
+    """
+    aid = str(asset_id or '').strip()
+    row = row or {}
+    if identity is None:
+        return _short_spec(aid, row) or aid
+
+    kind = str(getattr(identity, 'kind', '') or '')
+    name = (str(getattr(identity, 'display', '') or '').strip()
+            or str(getattr(identity, 'tag', '') or '').strip())
+    attrs = ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ())
+                     if str(a).strip())
+    if kind in ('sprite', 'preview', 'avatar'):
+        head = name or aid
+        if kind == 'preview':
+            head = f'预览图 · {head}'
+        elif kind == 'avatar':
+            head = f'头像 · {head}'
+        return _fold_dup_halves(f'{head} {attrs}'.strip())
+
+    spec = _short_spec(aid, row) or aid
+    if kind == 'unknown':
+        return f'未识别 · {spec}'
+    label = KIND_LABELS.get(kind, '')
+    return f'{label} · {spec}' if label else spec
+
+
+def identity_tooltip(identity, asset_id: str = '', row: dict = None,
+                     detail: str = '') -> str:
+    """
+    格子的 tooltip：**原始 ID / 相对路径 + 凭什么这么判 + 能不能 show**。
+
+    用户 2026-10-30 的原话是"只有文件名是角色名的可以匹配"，根因就是界面
+    从不把"依据"摆出来 —— 人只能对着文件名猜。这里把依据写成一行，另外
+    原始 ID / 路径也留着（要复制、要回资源表查时有用）。
+    """
+    aid = str(asset_id or '').strip()
+    row = row or {}
+    lines = [f'资产 ID：{aid}']
+    rel = str(row.get('Path') or '').strip()
+    lines.append(f'文件：{rel}' if rel else '文件：（资源表里没有登记路径）')
+    if identity is not None:
+        kind = str(getattr(identity, 'kind', '') or '')
+        src = str(getattr(identity, 'source', '') or '')
+        lines.append(f'判定：{KIND_LABELS.get(kind, kind)}'
+                     f'（依据：{SOURCE_LABELS.get(src, src or "—")}）')
+        tag = str(getattr(identity, 'tag', '') or '')
+        attrs = ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ())
+                         if str(a).strip())
+        lines.append(f'角色 tag：{tag or "（没有）"}    属性：{attrs or "（没推断出）"}')
+        showable = bool(getattr(identity, 'showable', False))
+        spec = ' '.join([tag] + (attrs.split() if attrs else [])).strip()
+        if showable:
+            lines.append('能不能直接写进 `show`：能'
+                         + (f'（会写成 `{spec}`）' if spec else ''))
+        else:
+            lines.append('能不能直接写进 `show`：不能'
+                         '（预览图/头像/未识别 —— 选了会被自动换掉或拒绝）')
+    if detail:
+        lines += ['', str(detail)]
+    return '\n'.join(lines)
 
 
 def _settings():
@@ -86,6 +369,13 @@ class AssetPickerDialog(QDialog):
 
     `want_image_spec=True` 时（选立绘/背景图用），确认后 `image_spec`
     给出可写进卡片的 `show` 片段（`ling happy`），否则给资产 ID。
+
+    **选中即校验**（用户拍板 2026-10-30）：图片选中后走
+    `app.picker.resolve_pick` ——
+      · 能 show → 底部提示条写"将写入 xxx"；
+      · 预览图/头像 → 自动换成真立绘，提示条写"已用对应的立绘 xxx"；
+      · 换不到/认不出 → **「确定」置灰**，提示条给一句原因。
+    这样"看起来加上了、保存后写出非法 show"这条老路走不通了。
     """
 
     #: 预热缩略图的进度 / 结果 —— **必须定义在类上**：工作线程 emit，
@@ -95,7 +385,7 @@ class AssetPickerDialog(QDialog):
 
     def __init__(self, parent=None, registry=None, project_root=None,
                  current: str = '', types=None, want_image_spec: bool = False,
-                 title: str = '选择资产'):
+                 title: str = '选择资产', purpose: str = ''):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 620)
@@ -105,14 +395,29 @@ class AssetPickerDialog(QDialog):
         self._project_root = project_root
         self._types = list(types) if types else None
         self._want_spec = bool(want_image_spec)
+        #: 用途过滤只有"选图片"才有意义（选音乐/变换时藏起来，别占地方）。
+        self._show_purpose = (self._want_spec and
+                              (self._types is None or 'image' in self._types))
+        self._purpose = (purpose_label(purpose) if self._show_purpose
+                         else PURPOSE_ALL)
         self.selection = None
         self.image_spec = ''
+        #: 预览图被自动换真立绘时的那句话（第二阶段卡片警告条/状态栏要用）
+        self.replaced_message = ''
+        #: 选中那一刻的判定结果（`app.picker.PickResult`；选音频等为 None）
+        self.pick_result = None
         self._filter = ''
         self._warming = False
         #: `asset_id → AtlBlock | None`（'image 名:' 块形式的只读定位；非 ATL 为 None）
         self._atl_cache: dict = {}
         #: 当前详情对应的源文件位置 `(path, line)`；没有 = 「打开源文件」置灰
         self._detail_loc = None
+        #: `asset_id → Identity`：**一次算全量**（判定层批量入口），第一次用到时才算
+        self._identities = None
+        #: `asset_id → PickResult | None`：选中即校验的结果（切来切去不重复算）
+        self._pick_cache: dict = {}
+        #: `分组名 → 用途档`（只用于"选了用途就藏起不相关的分组"）
+        self._group_purpose_cache: dict = {}
         self.warm_progress.connect(self._on_prewarm_progress)
         self.warm_done.connect(self._on_prewarm_done)
         # 调度模型见 `ui_qt/thumb_loader.py`：**优先级队列**（自限流），
@@ -140,9 +445,33 @@ class AssetPickerDialog(QDialog):
         lab.setProperty('role', 'caption')
         top.addWidget(lab, 0)
         self._search = QLineEdit()
-        self._search.setPlaceholderText('输入 ID 前缀 / 片段（留空显示全部）')
+        # 现在格子显示的是**人话名**（`凌跃捷 refusing`），所以搜索也按
+        # "名字 / ID 片段"来提示；底层 `P.search` 仍按资产 ID 打分。
+        self._search.setPlaceholderText('输入名字 / ID 前缀 / 片段（留空显示全部）')
         self._search.textChanged.connect(self._on_search)
         top.addWidget(self._search, 1)
+        # **用途过滤**（用户 2026-10-30："1193 张图全在一个列表里，找不到"）：
+        # 一个下拉就够，不做复杂交互；档位只由 `Identity.kind` 决定。
+        if self._show_purpose:
+            lab_purpose = QLabel('用途')
+            lab_purpose.setProperty('role', 'caption')
+            top.addWidget(lab_purpose, 0)
+            self._purpose_box = QComboBox()
+            self._purpose_box.setObjectName('purpose')
+            for name in PURPOSES:
+                self._purpose_box.addItem(name)
+            self._purpose_box.setSizeAdjustPolicy(
+                QComboBox.AdjustToContents)          # 别把「角色预览图」截成「角色预览」
+            self._purpose_box.setMinimumWidth(120)
+            self._purpose_box.setCurrentText(self._purpose)
+            self._purpose_box.setToolTip(
+                '只显示某一类图：立绘 / 背景 / CG / 界面 / 角色预览图。\n'
+                '「角色预览图」是**不能直接上舞台**的副本 —— 选了会自动换成'
+                '对应的真立绘，换不到就不让加。')
+            self._purpose_box.currentTextChanged.connect(self._on_purpose)
+            top.addWidget(self._purpose_box, 0)
+        else:
+            self._purpose_box = None
         # **底色切换**（用户 2026-10-05：
         # "先加一个背景切换颜色按钮，把白背景变成暗色背景，防止有的照片被挡住"）
         #
@@ -172,7 +501,7 @@ class AssetPickerDialog(QDialog):
         split = QSplitter(Qt.Horizontal)
         # —— 左：类别 ——
         self._cats = QListWidget()
-        self._cats.setMaximumWidth(220)
+        self._cats.setMaximumWidth(260)
         self._cats.currentItemChanged.connect(lambda *_: self._load_items())
         split.addWidget(self._cats)
         # —— 中：候选（**严格网格**）——
@@ -200,7 +529,7 @@ class AssetPickerDialog(QDialog):
         self._items.setMovement(QListWidget.Static)
         self._items.setSelectionMode(QListWidget.SingleSelection)
         self._items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._items.currentItemChanged.connect(lambda *_: self._show_detail())
+        self._items.currentItemChanged.connect(self._on_current_changed)
         self._items.itemDoubleClicked.connect(lambda *_: self.accept())
         # 滚动 → 补加载可见项的缩略图（只加载看得见的，见 `_load_visible_thumbs`）
         self._items.verticalScrollBar().valueChanged.connect(self._on_scroll)
@@ -245,13 +574,23 @@ class AssetPickerDialog(QDialog):
         split.setSizes([200, 460, 240])
         root.addWidget(split, 1)
 
+        # **选中即校验的提示条**（预览图自动换真立绘 / 换不到为什么不能加）。
+        # 单独一条，不去挤"N 条 · 已加载 M"那条计数（后者一直有用）。
+        self._pick_hint = QLabel('')
+        self._pick_hint.setObjectName('pick_hint')
+        self._pick_hint.setWordWrap(True)
+        self._pick_hint.setProperty('role', 'note')
+        self._pick_hint.setVisible(False)
+        root.addWidget(self._pick_hint)
+
         self._hint = QLabel('')
         self._hint.setProperty('role', 'caption')
         root.addWidget(self._hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText('确定')
-        buttons.button(QDialogButtonBox.Ok).setProperty('variant', 'primary')
+        self._ok = buttons.button(QDialogButtonBox.Ok)
+        self._ok.setText('确定')
+        self._ok.setProperty('variant', 'primary')
         buttons.button(QDialogButtonBox.Cancel).setText('取消')
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -395,18 +734,68 @@ class AssetPickerDialog(QDialog):
     def _load_groups(self):
         # 分类组 + 音频/变换/角色各自的整组（`groups()` 只含图片那套分类，
         # 少了这一层，选音乐时列表里会一条都没有 —— 见 `groups_with_plain`）。
+        #
+        # 分组口径（角色优先 / 预览图单独一组）由 `app.beats.categorize_assets`
+        # 决定，界面只展示它的名字 —— 不在这里做机器判断。
         self._groups = P.groups_with_plain(self._registry, types=self._types,
                                            project_root=self._project_root)
-        self._cats.clear()
-        item_all = _Item('全部')
-        item_all.setData(Qt.UserRole, None)
-        self._cats.addItem(item_all)
-        for name in self._groups:
-            it = _Item(name)
-            it.setData(Qt.UserRole, name)
-            self._cats.addItem(it)
-        if self._cats.count():
-            self._cats.setCurrentRow(0)
+        self._group_purpose_cache.clear()
+        self._refresh_categories(keep=None)
+
+    def _refresh_categories(self, keep=_KEEP_CURRENT):
+        """
+        重建左侧分类列表。
+
+        用途过滤会改变"哪些组还看得见"：选了「只看立绘」再点「背景」只会看到
+        空列表 —— 那不是用户要的。组归哪档由 `_group_purpose()` 按**组内前
+        几条的 `Identity.kind`** 定（不按组名字面量猜）。
+        """
+        if keep is _KEEP_CURRENT:
+            keep = self._current_group()
+        self._cats.blockSignals(True)
+        try:
+            self._cats.clear()
+            item_all = _Item(PURPOSE_ALL)
+            item_all.setData(Qt.UserRole, None)
+            self._cats.addItem(item_all)
+            for name in self._groups:
+                if not self._group_matches_purpose(name):
+                    continue
+                it = _Item(name)
+                it.setData(Qt.UserRole, name)
+                self._cats.addItem(it)
+            row = 0
+            for i in range(self._cats.count()):
+                if self._cats.item(i).data(Qt.UserRole) == keep:
+                    row = i
+                    break
+            self._cats.setCurrentRow(row)
+        finally:
+            self._cats.blockSignals(False)
+        self._load_items()
+
+    def _group_purpose(self, name: str) -> str:
+        """一个分组主要是什么用途（看组内前几条的判定；算一次记住）。"""
+        if name in self._group_purpose_cache:
+            return self._group_purpose_cache[name]
+        counts: dict = {}
+        for atype, aid in (self._groups.get(name) or [])[:8]:
+            if atype != 'image':
+                continue
+            p = purpose_of(self._identity(aid))
+            counts[p] = counts.get(p, 0) + 1
+        best = max(counts, key=lambda k: counts[k]) if counts else ''
+        self._group_purpose_cache[name] = best
+        return best
+
+    def _group_matches_purpose(self, name: str) -> bool:
+        if self._purpose == PURPOSE_ALL:
+            return True
+        return self._group_purpose(name) == self._purpose
+
+    def _on_purpose(self, text):
+        self._purpose = purpose_label(text)
+        self._refresh_categories()
 
     def _current_group(self):
         it = self._cats.currentItem()
@@ -424,6 +813,11 @@ class AssetPickerDialog(QDialog):
             pairs = list(self._groups.get(group) or [])
         if self._types:
             pairs = [(t, a) for (t, a) in pairs if t in self._types]
+        # 用途过滤：只留这一档的图（按 kind 判，**不按分组名/路径**）。
+        # 选"全部"时不过滤 —— 音频/变换等非图片资产也照旧看得见。
+        if self._purpose != PURPOSE_ALL:
+            pairs = [(t, a) for (t, a) in pairs
+                     if t == 'image' and purpose_of(self._identity(a)) == self._purpose]
         # 去重保序：不同分组可能给出同一条（"全部"是各组的并集）
         seen = set()
         uniq = []
@@ -450,10 +844,11 @@ class AssetPickerDialog(QDialog):
         except Exception:                     # noqa: BLE001
             swallow('asset_picker._load_items')
         for atype, aid in pairs:
-            # 显示**短名**：图片显示它对应的 image spec（`bg bg9_5` /
-            # `ling happy`）——那才是写进卡片的值，比内部 ID
-            # （`sr_general_Frame 26`）好认得多；其余类型显示资产 ID。
-            # 完整信息（ID / 路径 / 属性）在 tooltip 里，不挤在格子里。
+            # 显示**人话名**：角色显示「显示名 + 属性」（`凌跃捷 refusing`），
+            # 背景/CG/界面显示可写进卡片的 image spec（`bg bg9_5`）；
+            # 原始资产 ID / 相对路径 / 判定依据全在 tooltip 里，不挤在格子里。
+            row = self._row(aid) if atype == 'image' else None
+            ident = self._identity(aid) if atype == 'image' else None
             label = self._short_label(atype, aid)
             it = _Item(label)
             it.setData(Qt.UserRole, (atype, aid))
@@ -492,14 +887,15 @@ class AssetPickerDialog(QDialog):
             # 行高 = 真实行高。
             it.setSizeHint(CELL)
             it.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            # ATL 行的详情里就是块体原文，别在 400 字处切断（块体常超）
+            cap = 2000 if atl is not None else 400
             if atype == 'image' and not has_file and atl is None:
-                it.setToolTip(
-                    f'{aid}\n资源表里登记了，但按 Path 找不到图片文件。')
+                detail = '资源表里登记了，但按 Path 找不到图片文件。'
             else:
-                # ATL 行的详情里就是块体原文，别在 400 字处切断（块体常超）
-                cap = 2000 if atl is not None else 400
-                it.setToolTip(P.detail(self._registry, atype, aid,
-                                       self._project_root)[:cap])
+                detail = P.detail(self._registry, atype, aid,
+                                  self._project_root)[:cap]
+            # tooltip = 原始 ID / 路径 + 判定依据 + 能不能 show + 旧详情。
+            it.setToolTip(identity_tooltip(ident, aid, row, detail))
             self._items.addItem(it)
             if atype == 'image' and not has_file:
                 if atl is not None:
@@ -516,6 +912,7 @@ class AssetPickerDialog(QDialog):
         # 以前这里对**全部**候选（真实项目 2828 张）一次性 `request()` ——
         # 线程池被灌满、可见的那几个排在几千个后面，于是"半天不出图 + 一堆空格子"。
         self._load_visible_thumbs()
+        self._update_pick_hint()
         self._start_background_fill()
 
     def _update_hint(self, searching: bool = None):
@@ -529,6 +926,8 @@ class AssetPickerDialog(QDialog):
             searching = bool(self._filter)
         n = self._hint_total or self._items.count()
         parts = [f'{n} 条']
+        if self._show_purpose and self._purpose != PURPOSE_ALL:
+            parts.append(f'用途：{self._purpose}')
         if searching:
             parts.append('搜索中')
         if n:
@@ -598,6 +997,7 @@ class AssetPickerDialog(QDialog):
 
         为什么用"滚动位置 ÷ 格子高"算，而不是 `indexAt` 命中测试：早先那个
         网格配置下 `indexAt` 恒返回无效索引（=-1），补加载永远只覆盖第一屏。
+
         现在条目 sizeHint = 格子（见 `_load_items`），行高与格子高一致，
         这个算式就是准的 —— 用它是因为它**不依赖视图已经布局完**
         （首屏 `_load_items` 时还没画过）。
@@ -677,26 +1077,12 @@ class AssetPickerDialog(QDialog):
         """
         候选在格子里的短名（认得出就行；详情看 tooltip 与右侧面板）。
 
-        图片优先显示它对应的 **image spec**（`ling happy`）——那才是写进卡片的
-        值，比内部 ID 好认。但真实项目里有 `Tag == Attributes`（两栏都填了
-        `Frame 13`）的行，拼出来会是 `Frame 13 Frame 13`：这里把**整段重复**
-        折掉一半（只折叠"前后半完全相同"这种，不做通用去重，免得误伤
-        `ling happy happy` 之类真的写法）。
+        实现全在 `human_label`（角色显示名 + 属性 / 背景 CG 的可写 spec）；
+        这里只负责"非图片类型原样显示资产 ID"。
         """
         if atype != 'image':
             return str(aid)
-        try:
-            row = P.row_of(self._registry, atype, aid, self._project_root)
-            spec = P.image_spec_of(aid, row) if row else ''
-        except Exception as e:                     # noqa: BLE001
-            swallow('ui_qt.asset_picker._short_label', e)
-            spec = ''
-        spec = str(spec or '').strip()
-        words = spec.split()
-        half = len(words) // 2
-        if half and words[:half] == words[half:]:
-            spec = ' '.join(words[:half])
-        return spec or str(aid)
+        return human_label(self._identity(aid), aid, self._row(aid))
 
     @staticmethod
     def _slot_of(item, asset_id):
@@ -740,6 +1126,129 @@ class AssetPickerDialog(QDialog):
                              priority=priority)
         return slot
 
+    # ------------------------------------------------------------------
+    #  判定（Identity / PickResult）—— 只装配、不重写规则
+    # ------------------------------------------------------------------
+
+    def _row(self, aid):
+        """资源表里这条图片的原始行（没有返回 None）。"""
+        try:
+            return P.row_of(self._registry, 'image', aid, self._project_root)
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.asset_picker._row', e)
+            return None
+
+    def _identity_map(self) -> dict:
+        """`asset_id → Identity`（判定层批量结果；一次打开只算一次）。"""
+        if self._identities is None:
+            self._identities = identity_map(self._registry, self._project_root)
+        return self._identities
+
+    def _identity(self, aid):
+        """一条图片的判定结论（`Identity`；判定层不可用时为 None）。"""
+        return self._identity_map().get(str(aid or ''))
+
+    def _pick_result(self, aid):
+        """
+        选中一条图时的判定：能 show 吗 / 预览图换成哪张真立绘 / 为什么不能加。
+
+        判定 100% 在 `app.picker.resolve_pick`（唯一真源；传 registry 让它自己
+        装配上下文）。返回 `None` = 判定层不可用（没有注册表）—— 这时保留
+        老行为：直接把 spec 给它（无头测试/极老的项目仍能用）。
+        """
+        aid = str(aid or '')
+        if aid in self._pick_cache:
+            return self._pick_cache[aid]
+        if self._registry is None:
+            return None
+        try:
+            res = P.resolve_pick(aid, self._row(aid) or {},
+                                 project_root=self._project_root,
+                                 registry=self._registry)
+        except Exception as e:                     # noqa: BLE001 - 不让判定炸掉界面
+            swallow('ui_qt.asset_picker._pick_result', e)
+            res = None
+        self._pick_cache[aid] = res
+        return res
+
+    @staticmethod
+    def _repolish(widget):
+        """`role` 属性变了要重新 polish 一次，QSS 才会换色。"""
+        try:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+        except Exception as e:                     # noqa: BLE001
+            swallow('ui_qt.asset_picker._repolish', e)
+
+    def _on_current_changed(self, *_):
+        self._show_detail()
+        self._update_pick_hint()
+
+    def _update_pick_hint(self):
+        """
+        底部提示条 + 「确定」能不能按。
+
+        用户拍板（2026-10-30）：**预览图允许选，但必须自动换成真立绘**；
+        换不到 / 认不出 → 不许加（从前是"看起来加上了"，保存后写出非法的
+        `show refusing`，游戏里运行时找不到图）。
+        """
+        if not self._show_purpose:
+            self._pick_hint.setVisible(False)
+            self._ok.setEnabled(True)
+            return
+        it = self._items.currentItem()
+        if it is None:
+            # 没点任何一条：保留老行为（点「确定」会提示"还没选中"）。
+            self._pick_hint.setVisible(False)
+            self._ok.setEnabled(True)
+            return
+        atype, aid = it.data(Qt.UserRole)
+        if atype != 'image':
+            self._pick_hint.setVisible(False)
+            self._ok.setEnabled(True)
+            return
+        res = self._pick_result(aid)
+        if res is None:
+            # 判定层不可用：不假报错，退回老行为（直接写 spec）。
+            self._pick_hint.setVisible(False)
+            self._ok.setEnabled(True)
+            return
+        self._pick_hint.setVisible(True)
+        if res.ok and res.spec:
+            self._ok.setEnabled(True)
+            if res.replaced_to:
+                msg = res.message or '已换成对应的真立绘'
+                self._pick_hint.setText(f'{msg}；将写入：{res.spec}')
+            else:
+                self._pick_hint.setText(f'将写入：{res.spec}')
+            self._pick_hint.setProperty('role', 'note')
+        elif res.ok:
+            self._ok.setEnabled(False)
+            self._pick_hint.setText(
+                '⚠ 这张图认不出该写成什么名字（可在资源映射里登记）。')
+            self._pick_hint.setProperty('role', 'warn')
+        else:
+            self._ok.setEnabled(False)
+            self._pick_hint.setText(f'⚠ {res.message or "这一张不能加"}')
+            self._pick_hint.setProperty('role', 'warn')
+        self._repolish(self._pick_hint)
+
+    @staticmethod
+    def _identity_block(identity) -> str:
+        """详情面板最上面那几行"这是什么东西"。"""
+        if identity is None:
+            return ''
+        kind = str(getattr(identity, 'kind', '') or '')
+        src = str(getattr(identity, 'source', '') or '')
+        tag = str(getattr(identity, 'tag', '') or '')
+        attrs = ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ())
+                         if str(a).strip())
+        showable = bool(getattr(identity, 'showable', False))
+        return (f'判定：{KIND_LABELS.get(kind, kind)}'
+                f'（依据：{SOURCE_LABELS.get(src, src or "—")}）\n'
+                f'角色 tag：{tag or "（没有）"}    属性：{attrs or "（没推断出）"}\n'
+                f'能不能直接写进 show：{"能" if showable else "不能"}\n\n')
+
     def _atl_block(self, asset_id):
         """
         这一条图片是不是 **ATL 块形式**？是就返回 `AtlBlock`（含块体 + 定位），
@@ -773,11 +1282,13 @@ class AssetPickerDialog(QDialog):
         atype, aid = it.data(Qt.UserRole)
         self._detail_loc = None
         blk = self._atl_block(aid) if atype == 'image' else None
+        ident = self._identity(aid) if atype == 'image' else None
+        head = self._identity_block(ident)
         if blk is not None:
             # ATL 块形式：详情 = 块体原文 + 行号（`app.beats.asset_detail`
             # 已经把"读不到"的原因写成了一句人话）。
             self._detail.setText(
-                f'[image] {aid}\n\n'
+                head + f'[image] {aid}\n\n'
                 + (P.detail(self._registry, atype, aid, self._project_root)
                    or '（无更多信息）'))
             if blk.found and blk.file:
@@ -786,13 +1297,14 @@ class AssetPickerDialog(QDialog):
             return
         if atype == 'image' and not self._image_path(aid):
             self._detail.setText(
-                f'[image] {aid}\n\n'
+                head + f'[image] {aid}\n\n'
                 f'⚠ 资源表里登记了这一条，但按它的 Path 在项目里找不到图片文件。\n'
                 f'（不是"还在加载"—— 这一格永远不会有图。）')
             self._open_btn.setEnabled(False)
             return
         text = P.detail(self._registry, atype, aid, self._project_root)
-        self._detail.setText(f'[{atype}] {aid}\n\n{text or "（无更多信息）"}')
+        self._detail.setText(head + f'[{atype}] {aid}\n\n'
+                             f'{text or "（无更多信息）"}')
         self._open_btn.setEnabled(False)
 
     def _open_source(self):
@@ -833,11 +1345,30 @@ class AssetPickerDialog(QDialog):
                                '再按「确定」。')
             return
         atype, aid = it.data(Qt.UserRole)
-        self.selection = (atype, aid)
         if self._want_spec and atype == 'image':
-            row = P.row_of(self._registry, atype, aid, self._project_root)
-            self.image_spec = P.image_spec_of(aid, row)
+            res = self._pick_result(aid)
+            if res is not None and not res.ok:
+                # 理论上「确定」已经置灰；双保险：真按了也不许关窗、不许写。
+                self._update_pick_hint()
+                self._pick_hint.setVisible(True)
+                self._pick_hint.setText(f'⚠ 不能选这一张：{res.message}')
+                self._pick_hint.setProperty('role', 'warn')
+                self._repolish(self._pick_hint)
+                return
+            self.pick_result = res
+            if res is not None and res.spec:
+                self.image_spec = res.spec
+            else:
+                self.image_spec = P.image_spec_of(aid, self._row(aid) or {})
+            # 选了预览图/头像时：selection 记**真正要用的那一张**（真立绘），
+            # 这样调用方拿到的东西和 image_spec 一致。
+            if res is not None and res.replaced_to:
+                self.selection = (atype, res.replaced_to)
+                self.replaced_message = res.message or '已换成对应的真立绘'
+            else:
+                self.selection = (atype, aid)
         else:
+            self.selection = (atype, aid)
             self.image_spec = aid
         super().accept()
 
@@ -854,18 +1385,21 @@ class AssetPickerDialog(QDialog):
 # ----------------------------------------------------------------------
 
 def pick_image(parent=None, registry=None, current: str = '',
-               project_root=None) -> str:
+               project_root=None, purpose: str = '') -> str:
     """
     选一张**立绘/背景图**，返回可写进卡片的 image spec（取消返回 ''）。
 
     这是主窗口与立绘网格直接调用的入口。
+
+    `purpose` 给初始用途过滤（`'sprite'` / `'立绘'` / `'bg'` / `'preview'`…），
+    例如立绘网格的"加一张立绘"用 `purpose='sprite'`，一打开就只看见立绘。
     """
     if registry is None:
         return ''
     dlg = AssetPickerDialog(parent, registry=registry,
                             project_root=project_root, current=current,
                             types=['image'], want_image_spec=True,
-                            title='选择立绘 / 背景图')
+                            title='选择立绘 / 背景图', purpose=purpose)
     if dlg.exec() == QDialog.Accepted:
         return dlg.image_spec
     return ''
@@ -884,4 +1418,9 @@ def pick_asset(parent=None, registry=None, asset_type: str = '',
     return ''
 
 
-__all__ = ['AssetPickerDialog', 'pick_image', 'pick_asset']
+__all__ = ['AssetPickerDialog', 'pick_image', 'pick_asset',
+           'PURPOSE_ALL', 'PURPOSE_SPRITE', 'PURPOSE_BG', 'PURPOSE_CG',
+           'PURPOSE_UI', 'PURPOSE_PREVIEW', 'PURPOSE_OTHER', 'PURPOSES',
+           'KIND_LABELS', 'SOURCE_LABELS',
+           'purpose_label', 'purpose_of', 'pick_context', 'identity_of',
+           'identity_map', 'human_label', 'identity_tooltip']

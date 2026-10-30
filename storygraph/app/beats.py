@@ -1368,23 +1368,25 @@ def image_spec_of_row(row: dict, fallback: str = '') -> str:
 
 def categorize_assets(engine, asset_types=None, limit: int = 3000) -> dict:
     """
-    把候选资产**按类别分组**（用户 2026-09-28 要求，阶段 3 第 3 项）。
+    把候选资产**按看图的人怎么找**分组（用户 2026-09-28 / 2026-10-30 两次要求）。
 
     > 资源选择器加分类/分组 —— 2904 张图不能靠打字。
+    > 立绘怎么一堆单独的分类，什么 relaxing，resigned —— 这不都是凌的表情吗
 
-    以前的 `AssetPickerDialog` 只有"搜索 + 预览"，没有分类：
-    真实项目有 2904 张图，策划不记得 ID 就只能一个个打字试。
-    这里给出分组结构，UI 用左侧分类列表 + 右侧条目。
+    旧实现按「Tag 列 + 资产 ID 猜 tag」分组：Tag 空的行（预览图 / 头像副本）
+    被 ID 拆成 110 个"每张图一个分组"，同一角色的表情散在几十组里。
+    现在按 **`assets.asset_identity` 的身份**分组（唯一真源）：
 
-    分组规则（**看图的人怎么找**，不是按数据表怎么存）：
+        立绘：<显示名>（<tag>）   —— 一个角色一组，内含该角色**所有表情**
+                                    （按属性排序）；显示名来自 characters 表
+        角色预览图（不能直接上舞台） / 角色头像（不能直接上舞台）
+        背景 / CG / 界面/其他图层 / 其他图片 / 未识别（不猜）
+        音乐 / 音效 / 语音 / 变换 / 角色
 
-        背景 / CG / 界面    —— 非角色图层，按 tag 分
-        立绘：<角色 tag>     —— 角色立绘按 tag 分组（最常用的一组）
-        音乐 / 音效 / 语音   —— 音频按通道分
-        变换                —— transform
+    分组**从项目数据推导**（characters 表 + 资源表 Tag + 路径目录段 + 映射
+    文件），不写死任何项目名/目录名；认不出 = `未识别（不猜）`，不编分组。
 
-    返回 `{类别名: [(asset_type, asset_id), ...]}`，类别内按 ID 排序
-    （稳定顺序，便于习惯位置）。
+    返回 `{类别名: [(asset_type, asset_id), ...]}`（结构不变：界面直接画）。
     """
     from storygraph.assets.asset_completion import AssetCompletion
 
@@ -1411,35 +1413,67 @@ def categorize_assets(engine, asset_types=None, limit: int = 3000) -> dict:
                                              limit=limit):
                 rows.append((atype2, aid, {}))
 
-    groups = {}
-    for atype, aid, row in rows[:limit]:
+    # 身份解析：一次装配上下文 + 一次批量解析（分组口径全在这里）。
+    from storygraph.assets import asset_identity as I
+    project_root = ''
+    try:
+        project_root = str(getattr(engine, 'project_root', None) or '')
+    except Exception as e:                      # noqa: BLE001 - 拿不到就按无映射推断
+        swallow('app.beats.categorize_assets.project_root', e)
+    items = rows[:limit]
+    image_rows = {aid: row for atype, aid, row in items if atype == 'image'}
+    try:
+        ctx = I.project_context(reg, project_root)
+        identities = I.resolve_images(
+            image_rows, known_tags=ctx['known_tags'],
+            known_chars=ctx['known_chars'], mapping=ctx['mapping'],
+            project_root=project_root, copy_index=ctx['copy_index'])
+    except Exception as e:                      # noqa: BLE001 - 分组坏了仍要能选
+        swallow('app.beats.categorize_assets.identity', e)
+        identities = {}
+
+    groups: dict = {}
+    sprite_attrs: dict = {}
+    for atype, aid, row in items:
         if atype == 'image':
-            tag = (row.get('Tag') or '').strip()
-            if not tag:
-                # 从 ID 猜 tag：`bg_classroom` → bg；`ling_happy` → ling
-                tag = _guess_image_tag(aid)
-            low = tag.lower()
-            if low in ('bg', 'background'):
-                cat = '背景'
-            elif low in ('cg',):
-                cat = 'CG'
-            elif low in NON_ACTOR_TAGS_FOR_PICK:
-                cat = '界面/其他图层'
-            else:
-                cat = f'立绘：{tag}' if tag else '未分类图片'
+            ident = identities.get(aid) or I.Identity(kind='unknown',
+                                                     source='unknown')
+            cat = I.group_key_for_identity(ident)
+            if ident.kind == 'sprite':
+                sprite_attrs[aid] = tuple(
+                    str(a).strip().lower() for a in ident.attrs)
         else:
             cat = {'character': '角色', 'transform': '变换',
                    'music': '音乐', 'sound': '音效',
                    'voice': '语音'}.get(atype, atype)
         groups.setdefault(cat, []).append((atype, aid))
 
-    # 类别排序：立绘在前（最常用），背景次之，其余按名字
-    def rank(name):
+    # 组内顺序：立绘按**属性**排（同角色的表情连在一起），其余按 ID。
+    for cat, pairs in groups.items():
+        if cat.startswith('立绘：'):
+            pairs.sort(key=lambda p: (sprite_attrs.get(p[1], ()), str(p[1])))
+        else:
+            pairs.sort(key=lambda p: str(p[1]))
+
+    # 组间顺序：立绘最前（最常用）→ 背景/CG/界面/预览图/… → 其余按名字。
+    def rank(name: str):
         if name.startswith('立绘：'):
-            return (0, name)
-        return (1, name)
+            return (0, _sprite_group_tag(name))
+        try:
+            return (1, f'{I.GROUP_ORDER.index(name):02d}')
+        except ValueError:
+            return (2, name)
 
     return {k: groups[k] for k in sorted(groups, key=rank)}
+
+
+def _sprite_group_tag(name: str) -> str:
+    """`立绘：凌跃捷（ling）` → `ling`（排序用；没有括号就退整段）。"""
+    text = str(name or '')
+    if '（' in text and text.endswith('）'):
+        return text.rsplit('（', 1)[-1][:-1].lower()
+    return text.replace('立绘：', '', 1).lower()
+
 
 
 #: 判"这条图片不是角色立绘"的 tag 集合（与 stage_snapshot 同口径）

@@ -13,6 +13,17 @@ storygraph.app.picker
   · 选中项回填的是**image spec**（`ling happy`），不是资产 ID
     （`ling_happy`）—— 两者差一个字，写错就是"图不存在"。
 
+资产身份（2026-10-30 用户 P0：选预览图写出非法 `show refusing`）
+----------------------------------------------------------------
+"这张图是谁"的唯一真源是 `storygraph.assets.asset_identity`（纯函数）。
+本模块只做**装配与决策**：
+
+  · `pick_context()`：一次装好 `known_tags / known_chars / mapping /
+    all_rows / dimensions`，可直接 `**` 展开给 `resolve_pick`；
+  · `identity_of()` / `identities()`：给 UI 的用途过滤（按 `Identity.kind`）；
+  · `resolve_pick()`：能 show 的直接出 spec；预览图/头像自动换成真立绘
+    （换不到就**拒绝**并给一句话）；认不出**不猜**。
+
 这些都放在这里，Qt 版与 tkinter 版共用同一份；换前端不用改语义。
 
 **禁止**在本模块里 import 任何 UI 框架。
@@ -20,9 +31,21 @@ storygraph.app.picker
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from storygraph.app import beats as B
+from storygraph.assets.asset_identity import (
+    Identity,
+    asset_id_of,
+    build_copy_index,
+    find_real_sprite,
+    normalize_relpath,
+    project_context,
+    resolve_image,
+    resolve_images,
+    spec_for_identity,
+)
 
 
 class RegistrySource:
@@ -52,6 +75,27 @@ class RegistrySource:
     def find_broken_references(self, include_transforms: bool = False) -> list:
         from storygraph.assets.asset_registry import broken_references
         return broken_references(self._registry, include_transforms)
+
+
+@dataclass(frozen=True)
+class PickResult:
+    """
+    "选中一张图"的完整结论（契约 §1.1b）。
+
+    · `spec`：写回卡片的那段 image spec（`ling happy`）；拒绝时为空；
+    · `identity`：最终采用的资产身份（换了真立绘时是**真立绘**的身份）；
+    · `ok=False`：**不能加**，`message` 是给人看的一句话原因；
+    · `replaced_from/to`：选了预览图/头像、被自动换成真立绘时，
+      原资产 ID / 换成的真立绘资产 ID（用于提示条与审计）；
+    · `message`：提示条文案（空串 = 直接可用，无需说明）。
+    """
+
+    spec: str = ''
+    identity: Optional[Identity] = None
+    ok: bool = True
+    replaced_from: str = ''
+    replaced_to: str = ''
+    message: str = ''
 
 
 def groups(registry, limit: int = 3000, project_root=None) -> dict:
@@ -151,6 +195,171 @@ def row_of(registry, asset_type: str, asset_id: str, project_root=None):
                        asset_type, asset_id)
 
 
+# ---------------------------------------------------------------------------
+#  身份解析的"项目上下文"（唯一装配处：UI 不许自己读 characters.xlsx）
+# ---------------------------------------------------------------------------
+
+def pick_context(registry=None, project_root=None, *, mapping=None,
+                 dimensions=None) -> dict:
+    """
+    装配 `resolve_pick` / `resolve_image` 的关键字参数（**可直接 `**` 展开**）：
+
+        {'known_tags': frozenset[str], 'known_chars': dict,
+         'mapping': dict, 'all_rows': dict[str, dict], 'dimensions': dict|None}
+
+    · `known_tags`：characters 表「立绘 tag」+ 映射 `characters` + 引擎事实
+      里带属性的 tag（三路合并，来自项目自己的数据）；
+    · `all_rows`：`registry.images`（`{asset_id: row}`）—— 副本检测要用"另一行"；
+    · `mapping`：项目根 / `game/` 下的 `storygraph.mapping.json`；没有 = `{}`；
+    · `dimensions`：可选 `{asset_id 或相对路径: (w, h)}`，只有"换真立绘时
+      优先像素更大"会用到；不传不影响正确性（只是少一条排序依据）。
+
+    纯读：不写盘、不 import Qt。
+    """
+    ctx = project_context(registry, str(project_root or ''), mapping=mapping)
+    return {
+        'known_tags': ctx['known_tags'],
+        'known_chars': ctx['known_chars'],
+        'mapping': ctx['mapping'],
+        'all_rows': ctx['rows'],
+        'dimensions': dimensions,
+    }
+
+
+def _context_parts(context) -> tuple:
+    """`pick_context(...)` 或 `project_context(...)` 的返回 → 四个常用片段。"""
+    ctx = context or {}
+    rows = ctx.get('rows')
+    if not isinstance(rows, dict):
+        rows = ctx.get('all_rows')
+    return (ctx.get('known_tags') or frozenset(),
+            ctx.get('known_chars') or {},
+            ctx.get('mapping') if isinstance(ctx.get('mapping'), dict) else {},
+            rows if isinstance(rows, dict) else {})
+
+
+def identity_of(registry, asset_id: str, row: Optional[dict] = None, *,
+                project_root=None, context=None) -> Identity:
+    """一条图片资产的身份（UI 的用途过滤 / 人话名都用它）。"""
+    known_tags, known_chars, mapping, rows = _context_parts(context)
+    if context is None:
+        known_tags, known_chars, mapping, rows = _context_parts(
+            project_context(registry, str(project_root or '')))
+    aid = str(asset_id or '').strip()
+    row = row or (rows or {}).get(aid) or {}
+    if not row:
+        return Identity(kind='unknown', source='unknown', showable=False)
+    rel = normalize_relpath(row.get('Path') or '', str(project_root or ''))
+    return resolve_image(row, relpath=rel, known_tags=known_tags,
+                         known_chars=known_chars, mapping=mapping,
+                         rows=rows, copy_index=build_copy_index(rows))
+
+
+def identities(registry, project_root=None, *, context=None) -> dict:
+    """
+    全部图片行 → `{asset_id: Identity}`（**一次算全量**，供分组/用途过滤）。
+
+    UI 不要逐条调 `resolve_image`：那样每条都会重建一次副本索引。
+    """
+    root = str(project_root or '')
+    if context is None:
+        context = project_context(registry, root)
+    known_tags, known_chars, mapping, rows = _context_parts(context)
+    copy_index = context.get('copy_index') if isinstance(context, dict) else None
+    if not isinstance(copy_index, dict):
+        copy_index = build_copy_index(rows)
+    return resolve_images(rows, known_tags=known_tags,
+                          known_chars=known_chars, mapping=mapping,
+                          project_root=root, copy_index=copy_index)
+
+
+def resolve_pick(asset_id: str, row: Optional[dict], *,
+                 project_root: str = '', known_tags=frozenset(),
+                 known_chars: Optional[dict] = None, mapping=None,
+                 all_rows=None, dimensions=None, registry=None,
+                 copy_index=None) -> PickResult:
+    """
+    "选中这张图，到底能不能加、加什么" → `PickResult`（契约 §1.1b）。
+
+    行为（用户 2026-10-30 抱怨的"选预览图写出非法 show"就断在这里）：
+
+      · 能直接 `show` 的图（真立绘 / 背景 / CG / 界面）→ 给规范 spec；
+      · **预览图 / 头像** → 自动找同 tag+属性的真立绘：找到就换成它并
+        在 `message` 里说明"已用对应的立绘 xxx"；找不到 → `ok=False` + 原因；
+      · 认不出的图（`unknown`）→ `ok=False` + 一句话（不写非法 show）；
+      · 非角色图层但说不出名字 → `ok=False` + 一句话。
+
+    `registry` 给了就用 `pick_context` 自动补齐 `known_tags / known_chars /
+    mapping / all_rows`（UI 可以只传 registry + project_root）。
+    """
+    aid = str(asset_id or '').strip()
+    if registry is not None:
+        ctx = pick_context(registry, project_root, mapping=mapping,
+                           dimensions=dimensions)
+        if not known_tags:
+            known_tags = ctx['known_tags']
+        if known_chars is None:
+            known_chars = ctx['known_chars']
+        if mapping is None:
+            mapping = ctx['mapping']
+        if all_rows is None:
+            all_rows = ctx['all_rows']
+        if row is None:
+            row = (all_rows or {}).get(aid)
+    if not row:
+        return PickResult(ok=False, message='找不到这条图片资源（资源表里没有它）')
+    aid = aid or asset_id_of(row)
+    rows = all_rows if all_rows is not None else {aid: row}
+    if copy_index is None:
+        copy_index = build_copy_index(rows)
+    root = str(project_root or '')
+    rel = normalize_relpath(row.get('Path') or '', root)
+    ident = resolve_image(row, relpath=rel, known_tags=known_tags,
+                          known_chars=known_chars, mapping=mapping,
+                          rows=rows, copy_index=copy_index)
+
+    if ident.showable:
+        spec = spec_for_identity(ident, row)
+        if spec:
+            return PickResult(spec=spec, identity=ident, ok=True)
+        return PickResult(identity=ident, ok=False,
+                          message='这张图认不出该写什么名字（可在资源映射里登记）')
+
+    if ident.kind in ('preview', 'avatar'):
+        real = find_real_sprite(ident, rows, dimensions=dimensions)
+        if real is not None:
+            real_id = asset_id_of(real)
+            real_ident = resolve_image(
+                real, relpath=normalize_relpath(real.get('Path') or '', root),
+                known_tags=known_tags, known_chars=known_chars,
+                mapping=mapping, rows=rows, copy_index=copy_index)
+            spec = spec_for_identity(real_ident, real)
+            if not spec:
+                spec = image_spec_of(real_id, real)
+            label = (real_ident.display or real_ident.tag or spec
+                     or real_id)
+            what = '角色预览图' if ident.kind == 'preview' else '角色头像'
+            return PickResult(
+                spec=spec, identity=real_ident, ok=True,
+                replaced_from=aid, replaced_to=real_id,
+                message=f'这是{what}，已用对应的立绘「{label}」'
+                        f'（{spec}）')
+        what = '角色预览图' if ident.kind == 'preview' else '角色头像'
+        return PickResult(
+            identity=ident, ok=False, replaced_from=aid,
+            message=f'这是{what}，不是能直接上舞台的立绘；'
+                    f'没找到对应的真立绘（可在资源映射里登记）')
+
+    if ident.kind == 'unknown':
+        return PickResult(
+            identity=ident, ok=False,
+            message='这张图认不出是哪个角色（可在资源映射里登记）')
+    return PickResult(
+        identity=ident, ok=False,
+        message='这张图说不出该写什么名字（不是能直接上舞台的立绘；'
+                '可在资源映射里登记）')
+
+
 def image_spec_of(asset_id: str, row: Optional[dict] = None, *,
                   expression: str = '', position: str = '') -> str:
     """
@@ -186,5 +395,7 @@ def image_spec_of(asset_id: str, row: Optional[dict] = None, *,
     return spec
 
 
-__all__ = ['RegistrySource', 'groups', 'search', 'detail', 'thumbnail_path',
-           'row_of', 'image_spec_of']
+__all__ = ['RegistrySource', 'groups', 'groups_with_plain', 'search',
+           'detail', 'thumbnail_path', 'row_of', 'image_spec_of',
+           'PickResult', 'pick_context', 'identity_of', 'identities',
+           'resolve_pick']
