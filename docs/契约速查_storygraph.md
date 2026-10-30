@@ -6132,7 +6132,7 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   ⚠ `[]` 也算"这次编辑过"：人删光子句再保存，清单里就该没有它们。
 - 头部「技术调用…」→ `ui_qt/dialog_calls.py`：调用名 / 等价效果 / 时长参数 /
   参数列（`转场@0; 层=layer`）。保存写 `calls` 段。
-- 判据：`tests/test_spec_clauses.py`（37 条：声明/读值/写回/动态列/Excel 无
+- 判据：`tests/test_spec_clauses.py`（38 条：声明/读值/写回/动态列/Excel 无
   注册表/技术调用/预览/两个 UI 小窗）；`tests/test_stage_complex_clause_at.py`
   （7 条）与 `test_stage_snapshot_scene_at.py`（19 条）覆盖 `show … at … behind`
   的 at 不再丢、跨章 `scene_at`/`layer_at` 继承。
