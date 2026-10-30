@@ -12,9 +12,12 @@ tests/test_github_star.py
 
   1. **它真的是独立件**：`ui_qt/github_star.py` 不 import 任何窗口/会话代码，
      整个 UI 包只有 `main_window.py` 一处挂载；
-  2. **点一下有用**：有 token → 直接 star；没 token → 打开仓库页；
-  3. **离线/失败不许崩、也不许骗人**：连不上就说"连不上"，不开死页面，
-     GUI 线程一秒都不等（网络全在后台线程）。
+  2. **点一下有用**：有 token → 直接 star；没 token → **立刻**打开仓库页
+     （开页面是本机动作，不许被网络自检挡着）；
+  3. **探测只做提示、不许挡路**（2026-10-30 真机反馈）：拿不拿得到探测结果，
+     页面都照开；"任何 HTTP 响应（含 404/403/429/5xx）都算网络通"，超时 6~8s
+     且失败重试一次 —— v1 的"探不通就不开死页面"恰恰是"明明能打开却什么都不做"。
+     网络全在后台线程，GUI 线程一秒都不等。
 """
 
 from __future__ import annotations
@@ -126,13 +129,17 @@ class TestOneClick:
                             lambda repo: (opened.append(repo), True)[1])
         star._token = ''
         star.click()
-        assert _wait(lambda: opened == ['someone/some-repo']), star.text()
-        assert '仓库页' in star.text(), star.text()
+        assert opened == ['someone/some-repo'], '点一下就该把页面打开'
+        assert _wait(lambda: '点一下 Star' in star.text()), star.text()
 
-    def test_offline_says_so_and_does_not_open_a_dead_page(self, star,
-                                                          monkeypatch):
+    def test_offline_probe_still_opens_the_page_and_says_so(self, star,
+                                                           monkeypatch):
         """
-        连不上时**不许**在浏览器里开一个死页面 —— 那看起来像工具坏了。
+        **v1 的旧断言已推翻**：探测没通过**照样**开页面。
+
+        浏览器走系统代理/PAC，探测失败（2.5s 超时 / 把 404 当断网）时浏览器
+        往往照样打得开 —— 旧行为"探不通就不开"等于"明明能打开却什么都不做"，
+        正是用户报"连不上，但其实我能打开"的直接原因。现在只补一句提示。
         """
         from storygraph.ui_qt import github_star as G
 
@@ -142,8 +149,121 @@ class TestOneClick:
                             lambda repo: (opened.append(repo), True)[1])
         star._token = ''
         star.click()
-        assert _wait(lambda: '连不上' in star.text()), star.text()
-        assert opened == []
+        assert opened == ['someone/some-repo'], '探测失败也必须把页面打开'
+        assert _wait(lambda: '网络自检没通过' in star.text()), star.text()
+        assert '代理' in star.text() or '网络' in star.text(), star.text()
+
+    # --------------------------------------------------------------
+    #  2026-10-30 真机反馈：探测判据本身也要修
+    # --------------------------------------------------------------
+
+    @pytest.mark.parametrize('code', [404, 403, 429, 500])
+    def test_any_http_response_counts_as_online(self, monkeypatch, code):
+        """
+        **404/403/429/5xx 也算网络通**：那是 GitHub 自己回的话，说明
+        DNS/TCP/TLS/代理全活着（私有仓库、改名后 404、限流 429，浏览器都能开）。
+        v1 把它们全当"连不上"，是误报的另一半原因。
+        """
+        from storygraph.ui_qt import github_star as G
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, 'nope', None, None)
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        assert G.probe_repo('someone/some-repo') is True
+
+    def test_a_404_page_still_counts_as_online(
+            self, star, monkeypatch):
+        """端到端：探测拿到 404 → 页面已开 → 提示"点一下 Star 就行"。"""
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+
+        def _urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404, 'Not Found', None, None)
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = ''
+        star.click()
+        assert opened == ['someone/some-repo']
+        assert _wait(lambda: '点一下 Star' in star.text()), star.text()
+
+    def test_probe_timeout_is_patient_and_retries_once(self, monkeypatch):
+        """超时不再是 v1 的 2.5s（同网络 5 次里 1 次 >6s），且失败重试一次。"""
+        from storygraph.ui_qt import github_star as G
+
+        assert 6.0 <= G.PROBE_TIMEOUT <= 8.0, G.PROBE_TIMEOUT
+        seen = []
+
+        def _urlopen(req, timeout=None):
+            seen.append(timeout)
+            raise urllib.error.URLError('timed out')
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        assert G.probe_repo('someone/some-repo') is False
+        assert len(seen) == 2, f'失败要重试一次，实际试了 {len(seen)} 次'
+        assert seen == [G.PROBE_TIMEOUT, G.PROBE_TIMEOUT]
+
+    def test_an_http_response_is_not_retried(self, monkeypatch):
+        """拿到 HTTP 响应就已经是结论了，不需要再重试（也别多打一次网络）。"""
+        from storygraph.ui_qt import github_star as G
+
+        seen = []
+
+        def _urlopen(req, timeout=None):
+            seen.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 404, 'nope', None, None)
+
+        monkeypatch.setattr(G.urllib.request, 'urlopen', _urlopen)
+        assert G.probe_repo('someone/some-repo') is True
+        assert len(seen) == 1
+
+    def test_probe_timeout_still_opens_the_page(self, star, monkeypatch):
+        """真超时（后台抛出 TimeoutError）也**不耽误**页面已经打开。"""
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+
+        def _timeout(repo, timeout=0, *a, **k):
+            raise TimeoutError('timed out')
+
+        monkeypatch.setattr(G, 'probe_repo', _timeout)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = ''
+        star.click()
+        assert opened == ['someone/some-repo'], '超时也必须先把页面打开'
+        assert _wait(lambda: '网络自检没通过' in star.text()), star.text()
+        assert star.isEnabled()
+
+    def test_click_returns_immediately_without_waiting_for_probe(
+            self, star, monkeypatch):
+        """
+        点一下**不许等探测**：`click()` 立刻返回，且页面在 `click()` 返回时
+        就已经打开了（v1 要等 2.5~3s 探测完才决定开不开）。
+        """
+        from storygraph.ui_qt import github_star as G
+
+        opened = []
+
+        def _slow(repo, timeout=0, *a, **k):
+            time.sleep(0.5)
+            return True
+
+        monkeypatch.setattr(G, 'probe_repo', _slow)
+        monkeypatch.setattr(G, 'open_repo_page',
+                            lambda repo: (opened.append(repo), True)[1])
+        star._token = ''
+        t0 = time.perf_counter()
+        star.click()
+        dt = (time.perf_counter() - t0) * 1000
+        assert opened == ['someone/some-repo'], 'click() 返回时页面就该开了'
+        assert dt < 150, f'点一下就卡了 {dt:.0f} ms（在等探测）'
+        assert star.isEnabled() is False, '自检期间不许连点'
+        assert _wait(lambda: star.isEnabled(), timeout=5)
+        assert '点一下 Star' in star.text(), star.text()
 
     def test_a_bad_token_falls_back_to_the_page(self, star, monkeypatch):
         """token 过期 → 自动 star 失败 → 退回开网页，并且**说清为什么**。"""
@@ -166,7 +286,9 @@ class TestOneClick:
         monkeypatch.setattr(G, 'open_repo_page', lambda repo: False)
         star._token = ''
         star.click()
-        assert _wait(lambda: '打不开浏览器' in star.text()), star.text()
+        # 先把"打不开浏览器"说出来（点一下立刻就有），自检完再补上地址
+        assert '打不开浏览器' in star.text(), star.text()
+        assert _wait(lambda: '地址是' in star.text()), star.text()
         assert 'github.com/someone/some-repo' in star.text()
 
     def test_click_returns_immediately(self, star, monkeypatch):

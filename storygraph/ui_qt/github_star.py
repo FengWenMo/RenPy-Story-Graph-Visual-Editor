@@ -21,24 +21,35 @@ storygraph.ui_qt.github_star
     在 `ui_qt/window_nav.py` 的 `_build_mode_bar`）；
     删掉那一行 + 删掉本文件 = 界面完全恢复原样。
 
-## 点一下会发生什么
+## 点一下会发生什么（2026-10-30 按真机反馈改过一版）
 
 1. **有 token**（环境变量 `STORYGRAPH_GITHUB_TOKEN` / `GITHUB_TOKEN`，或
    `%LOCALAPPDATA%/StoryGraph/github.json` 里的 `{"token": "..."}`）：
-   直接 `PUT https://api.github.com/user/starred/<owner>/<repo>` ——
-   一次点击就把星标上（已经标过也返回 204，幂等，不会重复报错）。
-2. **没有 token**：先探一下 github.com 通不通，通就打开仓库网页
-   （star 按钮就在那儿，人自己点）。
-3. **连不上**（超时 / DNS 被挡 / 代理没开）：不弹框、不崩、不在浏览器里
-   开一个死页面，按钮上写一句"连不上 GitHub（不影响使用）"，几秒后恢复。
+   后台 `PUT https://api.github.com/user/starred/<owner>/<repo>` ——
+   一次点击就把星标上（已经标过也返回 204，幂等，不会重复报错）；
+   失败（token 过期 / 被限流 / 没网）则退回打开仓库页，并说清原因。
+2. **没有 token**：**立刻**在系统浏览器里打开仓库页 —— 这是本机动作，
+   不联网、不等任何探测结果（star 按钮就在那儿，人自己点）；
+   同时后台探一下网络，只用来决定按钮上补哪一句提示。
+3. **探测没通过**（超时 / DNS 被挡 / 代理没开）：页面**照样已经打开**了 ——
+   浏览器走系统代理/PAC，往往能开；按钮上补一句"网络自检没通过，浏览器里
+   若打不开多半是代理/网络"。不弹框、不崩、不挡着浏览器。
 
-网络请求**全部在后台线程**（`QThreadPool`，3 秒超时），GUI 线程不碰 socket；
+网络请求**全部在后台线程**（`QThreadPool`），GUI 线程不碰 socket；
 **启动时不会自动联网**（不探测、不取 star 数）—— 只有人点它才发请求。
 
-## 为什么要先探再开浏览器
+## 为什么现在是"先开页面、再后台自检"（v1 错在哪）
 
-没有 token 时"打开网页"是本机动作，网不通的话用户只会看到浏览器自己的
-错误页，还以为是工具坏了。花 2~3 秒探一次，换来一句诚实的"连不上"。
+v1 是"先探 2.5 秒，探通了才开页面、探不通就不开"。真机上这条判据错得厉害：
+
+  · **2.5s 太短**：同一条网络实测连续 5 次里就有 1 次 >6s —— 偶发误报"连不上"；
+  · **任何 `HTTPError` 都当"连不上"**：404/403/429/500 是 GitHub **自己回的话**，
+    恰恰证明 DNS/TCP/TLS/代理全活着（私有仓库、仓库改名后 404，浏览器照样能开）；
+  · **探不通就不开**：这是最致命的一步 —— 浏览器有自己的代理/PAC，能打开，
+    工具却什么都不做，用户只看到一句"连不上 GitHub"。
+
+所以现在：**开页面 = 本机动作，不受探测结果影响**；探测只负责提示，判据放宽成
+"拿到任何 HTTP 响应（含 4xx/5xx）都算网络通"，超时放到 7s、失败重试一次。
 """
 
 from __future__ import annotations
@@ -64,10 +75,14 @@ except Exception as e:                    # noqa: BLE001 - 拿不到就用内置
 #: 这个项目自己的仓库（改这里就够，别处没有第二份）
 DEFAULT_REPO = 'FengWenMo/RenPy-Story-Graph-Visual-Editor'
 
-#: 网络超时（秒）。点一下最多等这么久，且**在后台线程**里等。
-TIMEOUT = 3.0
-#: 探活可以比 star 短一点（它只是决定"要不要开浏览器"）
-PROBE_TIMEOUT = 2.5
+#: 网络超时（秒）。点一下最多等这么久，且**在后台线程**里等（不卡界面）。
+#: 2026-10-30：原来 3.0 在真机上偶发超时（同网络实测 5 次里 1 次 >6s）。
+TIMEOUT = 8.0
+#: 探活超时（秒）。同一条网络实测 5 次里就有 1 次 >6s —— v1 的 2.5s 必然误报，
+#: 所以放到 7s（后台线程里等，用户感觉不到），失败再重试一次。
+PROBE_TIMEOUT = 7.0
+#: 探活失败再给一次机会（偶发慢包 / 冷 DNS 不值得报"连不上"）
+PROBE_RETRIES = 1
 
 #: 结果那句话显示多久（毫秒）后恢复成常态文案
 FLASH_MS = 6000
@@ -135,17 +150,34 @@ def star_repo(repo: str, token: str, timeout: float = TIMEOUT):
     return (True, f'已 star（{code}）')
 
 
-def probe_repo(repo: str, timeout: float = PROBE_TIMEOUT) -> bool:
-    """github.com 上这个仓库页打得开吗（只决定"要不要开浏览器"）。"""
+def probe_repo(repo: str, timeout: float = PROBE_TIMEOUT,
+               retries: int = PROBE_RETRIES) -> bool:
+    """
+    **网络这一层**通不通（只决定按钮上补哪句提示，不再决定"开不开页面"）。
+
+    v1 的判据是"页面 200 才算通"，错在两处：
+
+      1. **任何 `HTTPError` 都当"连不上"** —— 404/403/429/500 是 GitHub 自己
+         回的话，说明 DNS/TCP/TLS/代理都活着（私有仓库、改名后 404、限流 429，
+         浏览器里照样打得开）。所以：**拿到任何 HTTP 响应就算通**。
+      2. 超时太短（2.5s）—— 同网络实测 5 次里有 1 次 >6s。所以默认 7s，
+         并且**失败再重试一次**（偶发慢包不该报"连不上"）。
+    """
     url = f'https://github.com/{repo}'
-    req = urllib.request.Request(url, method='GET')
-    req.add_header('User-Agent', 'StoryGraph')
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp.read(1)                 # 只读一个字节：够证明连上了
-            return True
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return False
+    attempts = max(1, int(retries) + 1)
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, method='GET')
+        req.add_header('User-Agent', 'StoryGraph')
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp.read(1)             # 只读一个字节：够证明连上了
+                return True
+        except urllib.error.HTTPError:
+            return True                  # 有 HTTP 响应 = 网络通（4xx/5xx 也算）
+        except (urllib.error.URLError, OSError, TimeoutError):
+            if attempt + 1 >= attempts:  # 重试也失败了：这次是真连不上
+                return False
+    return False
 
 
 def open_repo_page(repo: str) -> bool:
@@ -223,7 +255,7 @@ _IDLE_TIP = (
     '给这个项目标个星（Star）\n'
     '· 配了 token：点一下直接 star（环境变量 GITHUB_TOKEN，或\n'
     '  %LOCALAPPDATA%\\StoryGraph\\github.json 里写 {"token": "..."}）\n'
-    '· 没配 token：打开仓库页，点一下 Star 按钮\n'
+    '· 没配 token：立刻打开仓库页（点一下 Star 就行）；后台自检只影响提示\n'
     '· 没网也不影响任何编辑功能')
 
 
@@ -255,8 +287,10 @@ class GitHubStarBadge(QPushButton):
         self.setFlat(True)
         self.apply_style()
         self._busy = False
-        #: 'star' = 有 token，走 API；'page' = 没 token，探活后开网页
+        #: 'star' = 有 token，走 API；'page' = 没 token，页面已开、后台自检
         self._mode = 'page'
+        #: 这次点击有没有真的把浏览器拉起来（没有就提示 URL）
+        self._page_opened = False
         self.repo_url = f'https://github.com/{self.repo}'
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
@@ -299,33 +333,65 @@ class GitHubStarBadge(QPushButton):
 
     def start_star(self):
         """
-        点一下（也供测试直接调用）：**立刻返回**，网络在后台跑。"""
+        点一下（也供测试直接调用）：**立刻返回**，网络在后台跑。
+
+        没 token 时**先把浏览器打开**再探测 —— 开页面是本机动作，不该被网络
+        自检挡着（v1 的 bug：探不通就不开，可浏览器走系统代理/PAC 明明能开）。
+        探测结果只用来补一句提示。
+        """
         if self._busy:
             return
         self._busy = True
         self._reset_timer.stop()
         token = self.token()
-        self.setText('正在连接…' if token else '正在检查网络…')
-        self.setEnabled(False)
         self.repo_url = f'https://github.com/{self.repo}'
         if token:
-            fn = lambda: star_repo(self.repo, token, self._timeout)   # noqa: E731
             self._mode = 'star'
-        else:
-            fn = lambda: (probe_repo(self.repo, min(self._timeout,
-                                                    PROBE_TIMEOUT)), '')
-            self._mode = 'page'
+            self._page_opened = False
+            self.setText('正在连接…')
+            self.setEnabled(False)
+            if not self._start_job(
+                    lambda: star_repo(self.repo, token, self._timeout)):
+                self._open_page('打不开后台线程，已打开仓库页')
+            return
+        self._mode = 'page'
+        # ① 立刻开页面：本机动作、不联网、不等探测结果
+        self._page_opened = open_repo_page(self.repo)
+        self.setText('已打开仓库页…' if self._page_opened else '打不开浏览器…')
+        self.setEnabled(False)           # 自检结束前不许连点
+        # ② 探测挪后台，只决定"补哪一句"
+        timeout = min(self._timeout, PROBE_TIMEOUT)
+        if not self._start_job(lambda: (probe_repo(self.repo, timeout), '')):
+            # 连后台线程都起不来：页面已经开了，就当自检没跑，别吓用户
+            self._say_page_result(True)
+
+    def _start_job(self, fn) -> bool:
+        """把一件网络事丢进后台线程；连线程都给不了就返回 False（绝不炸界面）。"""
         try:
             self._pool.start(_Job(self._signals, fn))
+            return True
         except Exception as e:            # noqa: BLE001 - 线程都给不了也别炸界面
             swallow('github_star.start', e)
             self._busy = False
             self.setEnabled(True)
-            self.setText('★ 打开仓库页')
-            open_repo_page(self.repo)
+            return False
+
+    def _say_page_result(self, ok: bool):
+        """没 token 那条路的收尾：页面开没开 + 自检结果 → 一句话（**不关页面**）。"""
+        if not self._page_opened:
+            self._flash('打不开浏览器 —— 地址是 ' + self.repo_url)
+        elif ok:
+            self._flash('已打开仓库页 —— 点一下 Star 就行')
+        else:
+            self._flash(
+                '已打开仓库页（网络自检没通过，浏览器里若打不开多半是代理/网络）')
 
     def _on_done(self, ok: bool, message: str):
-        """后台回来了：决定"说哪句话 + 要不要开浏览器"。**在 GUI 线程**。"""
+        """后台回来了：决定"说哪句话"。**在 GUI 线程**。
+
+        页面在没 token 时早就打开了 —— 这里**不再拿探测结果去决定开不开**，
+        只决定补哪句提示（v1 的 bug 就出在这个顺序上）。
+        """
         self._busy = False
         self.setEnabled(True)
         try:
@@ -335,11 +401,8 @@ class GitHubStarBadge(QPushButton):
                     return
                 # 自动 star 失败（token 过期 / 被限流 / 没网）→ 退回开网页
                 self._open_page(f'没能自动 star（{message}），已打开仓库页')
-            else:
-                if ok:
-                    self._open_page('已打开仓库页 —— 点一下 Star 就行')
-                else:
-                    self._flash('连不上 GitHub（不影响使用）')
+                return
+            self._say_page_result(ok)
         except Exception as e:            # noqa: BLE001 - 收尾里绝不外抛
             swallow('github_star.done', e)
             self.reset_text()
