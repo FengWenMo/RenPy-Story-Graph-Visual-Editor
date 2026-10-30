@@ -210,7 +210,9 @@ def pick_context(registry=None, project_root=None, *, mapping=None,
     · `known_tags`：characters 表「立绘 tag」+ 映射 `characters` + 引擎事实
       里带属性的 tag（三路合并，来自项目自己的数据）；
     · `all_rows`：`registry.images`（`{asset_id: row}`）—— 副本检测要用"另一行"；
-    · `mapping`：项目根 / `game/` 下的 `storygraph.mapping.json`；没有 = `{}`；
+    · `mapping`：项目根 / `game/` 下的 `storygraph.mapping.json` **或**
+      `storygraph.mapping.xlsx`（同目录 Excel 优先，见 `assets/mapping_excel.py`）；
+      没有 = `{}`；
     · `dimensions`：可选 `{asset_id 或相对路径: (w, h)}`，只有"换真立绘时
       优先像素更大"会用到；不传不影响正确性（只是少一条排序依据）。
 

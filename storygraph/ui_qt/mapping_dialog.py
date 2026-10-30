@@ -39,7 +39,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -59,6 +59,13 @@ from storygraph.ui_qt.asset_picker import (KIND_LABELS, SOURCE_LABELS,
 #: 映射文件的名字（项目根或 `game/` 下；与 `storygraph.rules.json` 同一个模式）。
 #: 定义在 `asset_mapping` 里（读/写/查找共用同一份），这里只是给界面用的别名。
 MAPPING_NAME = AM.MAPPING_FILENAME
+
+#: Excel 那份的名字（同位置**优先于** JSON，规则在 `assets/mapping_excel.py`）。
+MAPPING_XLSX = AM.MAPPING_XLSX_FILENAME
+
+#: 「载入 / 导出」的文件过滤器（JSON 是产出面、Excel 是手工维护面，都给）。
+MAPPING_FILTERS = ('映射文件 (*.json *.xlsx *.xlsm);;JSON (*.json);;'
+                   'Excel (*.xlsx *.xlsm);;所有文件 (*)')
 
 #: 这份映射是哪来的。
 SOURCE_PROJECT = 'project'      # 项目里找到的（自动加载 / 保存后就是它）
@@ -149,9 +156,9 @@ class ContrastRow:
 
 def state_from_file(path, *, kind: str = SOURCE_LOADED) -> MappingState:
     """
-    从一个 JSON 文件读映射。
+    从一个映射文件读（**JSON 或 Excel**，按后缀分派）。
 
-    坏 JSON **不抛**给界面：转成 `MappingState.error` 里的一句人话 ——
+    坏文件 **不抛**给界面：转成 `MappingState.error` 里的一句人话 ——
     用户点的动作里不许出现 traceback（闪退更是最坏反馈）。
     """
     p = str(path or '').strip()
@@ -165,6 +172,27 @@ def state_from_file(path, *, kind: str = SOURCE_LOADED) -> MappingState:
         return MappingState(kind=kind, path=p, error=f'读不到这个文件：{e}')
     return MappingState(kind=kind, path=p, data=dict(data or {}),
                         warnings=tuple(warnings or ()))
+
+
+def _add_shadow(state: MappingState, root: str) -> MappingState:
+    """
+    把"项目里还有另一份映射、当前以哪份为准"补进 warnings。
+
+    为什么不在 `state_from_file` 里做：那句话取决于**项目里还有哪些文件**，
+    而 `state_from_file` 只认一个路径。「重读」走的是"直接按路径重读"
+    （绕过 mtime 缓存），所以要在这里补一次，否则点一下「重读」这句提醒就没了。
+    """
+    active = str(getattr(state, 'path', '') or '')
+    if not active or getattr(state, 'error', ''):
+        return state
+    try:
+        note = AM.shadow_note(root, active)
+    except Exception as e:                        # noqa: BLE001 - 提醒算不出来不算错
+        swallow('ui_qt.mapping_dialog._add_shadow', e)
+        note = ''
+    if not note or note in state.warnings:
+        return state
+    return replace(state, warnings=tuple(state.warnings) + (note,))
 
 
 def state_from_project(project_root, *, force: bool = False) -> MappingState:
@@ -185,7 +213,7 @@ def state_from_project(project_root, *, force: bool = False) -> MappingState:
             path = None
         if not path:
             return MappingState()
-        return state_from_file(path, kind=SOURCE_PROJECT)
+        return _add_shadow(state_from_file(path, kind=SOURCE_PROJECT), root)
     try:
         data, warnings, path = AM.mapping_cached(root)
     except Exception as e:                        # noqa: BLE001 - 坏文件别闪退
@@ -205,7 +233,14 @@ def state_from_project(project_root, *, force: bool = False) -> MappingState:
 
 
 def write_target(project_root) -> str:
-    """「保存到项目根」写哪儿：项目里已有映射就写回原处，否则写项目根。"""
+    """
+    「保存到项目根」写哪儿：项目里已有映射就写回**同目录**，否则写项目根。
+
+    ⚠ 当前生效的是 Excel 时，写的是**同一目录的 JSON**（
+    `storygraph.mapping.xlsx` → `storygraph.mapping.json`）——
+    工具**从不回写人做的 Excel**（理由见 `assets/mapping_excel.py` ③），
+    而放在同目录的 JSON 不会顶掉 Excel 的优先级（同一位置 Excel 优先）。
+    """
     root = str(project_root or '').strip()
     if not root:
         return ''
@@ -215,8 +250,15 @@ def write_target(project_root) -> str:
         swallow('ui_qt.mapping_dialog.write_target', e)
         found = None
     if found:
+        if AM.is_workbook(found):
+            return str(Path(found).with_suffix('.json'))
         return str(found)
     return str(Path(root) / MAPPING_NAME)
+
+
+def format_label(path) -> str:
+    """这份映射是 Excel 还是 JSON（`''` = 不是映射文件）。"""
+    return {'excel': 'Excel', 'json': 'JSON'}.get(AM.file_format(path), '')
 
 
 def json_text(data) -> str:
@@ -274,6 +316,9 @@ def status_text(state, unknown: int = 0) -> str:
 
     用户 2026-10-30 要的形态：`映射：项目文件` / `映射：按文件夹推断` /
     `映射：无（N 张未识别）`。
+
+    来自 Excel 时后面多一句 `（Excel）`：**同一目录 Excel 优先于 JSON**，
+    所以必须让人一眼看出"我改 JSON 没生效"是因为生效的是那份 Excel。
     """
     if state is None:
         base = f'映射：{INFER_TEXT}'
@@ -281,6 +326,8 @@ def status_text(state, unknown: int = 0) -> str:
         base = '映射：读取失败（打开「资源映射」看原因）'
     elif state.has_data():
         base = f'映射：{state.label()}'
+        if format_label(getattr(state, 'path', '')) == 'Excel':
+            base += '（Excel）'
     else:
         base = f'映射：无（{INFER_TEXT}）'
     if unknown:
@@ -479,9 +526,9 @@ class MappingDialog(QDialog):
         lay.setContentsMargins(0, T.SPACE['sm'], 0, 0)
         lay.setSpacing(T.SPACE['xs'])
         desc = QLabel(
-            f'项目根的 {MAPPING_NAME}（game/ 下同名也行）。它是**唯一'
-            f'"项目知识"载体**：贴图在哪、谁是谁、哪张是预览图，都写在这里；'
-            f'工具只按它覆盖/纠正自己的推断。'
+            f'项目根的 {MAPPING_NAME}（Excel 版 {MAPPING_XLSX} 也认；'
+            f'两者都可以放在 game/ 下）。它是**唯一"项目知识"载体**：贴图在哪、'
+            f'谁是谁、哪张是预览图，都写在这里；工具只按它覆盖/纠正自己的推断。'
             f'没写到的图 = 按文件夹/文件名推断（对照表里能看到依据）。')
         desc.setWordWrap(True)
         desc.setProperty('role', 'note')
@@ -582,23 +629,30 @@ class MappingDialog(QDialog):
         self._repolish(self._status)
 
     def _refresh_json(self):
+        fmt = format_label(self._state.path) if self._state.path else ''
         if self._state.error:
             self._json.setPlainText('')
             self._json.setPlaceholderText('（这份映射读不出来，见下面的原因）')
         elif not self._state.data:
             self._json.setPlainText('')
             self._json.setPlaceholderText(
-                '（还没有映射。点「导出映射初稿…」按项目结构生成一份，'
-                '或「载入映射…」读别人发来的。）')
+                '（还没有映射。点「导出映射初稿…」按项目结构生成一份 —— '
+                '存 .json 或 .xlsx 都行；或「载入映射…」读别人发来的。）')
         else:
             self._json.setPlainText(json_text(self._state.data))
         warn = []
+        if fmt == 'Excel':
+            warn.append('ℹ 这份映射来自 Excel：下面是工具读出来的**等价 JSON**。'
+                        '要改请改那份 .xlsx（工具不会回写它），改完点「重读」。')
         if self._state.error:
             warn.append(f'⚠ 读不出来：{self._state.error}')
         if self._state.warnings:
             warn.append('⚠ ' + '；'.join(str(w) for w in self._state.warnings))
         self._warn.setText('\n'.join(warn))
         self._warn.setVisible(bool(warn))
+        self._warn.setProperty(
+            'role', 'warn' if (self._state.error or self._state.warnings) else 'note')
+        self._repolish(self._warn)
 
     def refresh_contrast(self, *, force: bool = False):
         """
@@ -750,6 +804,9 @@ class MappingDialog(QDialog):
         真实项目 1720 行实测 `draft_mapping` 约 **10 秒**（S1 的纯函数，按目录
         汇总规则），所以这里先给一句"正在生成" + 忙碌光标，别让人以为卡死。
 
+        写成 `.xlsx` 时多一句实话：**同一位置 Excel 优先于 JSON**，所以把表
+        导出到项目根就等于把它设成生效源（这件事必须当场说，不能事后猜）。
+
         返回 True = 写出成功。
         """
         from PySide6.QtWidgets import QApplication
@@ -763,7 +820,7 @@ class MappingDialog(QDialog):
                 self.say('⚠ 没有资源表 / 生成失败，导不出初稿。', warn=True)
                 return False
             try:
-                AM.save_mapping(str(path), draft)
+                counts = AM.save_mapping(str(path), draft)
             except AM.MappingError as e:
                 self.say(f'⚠ 写不进这个文件：{e}', warn=True)
                 return False
@@ -772,10 +829,21 @@ class MappingDialog(QDialog):
                 self._set_state(
                     state, f'初稿已写到 {path}，但读回来失败：{state.error}')
                 return True
-            self._set_state(
-                state,
-                f'已导出映射初稿：{path}'
-                f'（按项目目录 + 角色表生成；改完可「保存到项目根」）')
+            detail = ''
+            if isinstance(counts, dict):
+                detail = (f'（角色 {counts.get("characters", 0)} 条 · '
+                          f'规则 {counts.get("rules", 0)} 条 · '
+                          f'图片 {counts.get("images", 0)} 条 · '
+                          f'属性 {counts.get("attributes", 0)} 条）')
+            hint = (f'已导出映射初稿：{path}'
+                    f'（按项目目录 + 角色表生成；改完可「保存到项目根」）')
+            if AM.is_workbook(path):
+                hint = (f'已导出映射初稿：{path}{detail}'
+                        f'　⚠ 同一位置 Excel 优先于 JSON：以后打开这个项目就以这份'
+                        f' Excel 为准了（在 Excel 里改完点「重读」即可）')
+            elif detail:
+                hint = f'已导出映射初稿：{path}{detail}'
+            self._set_state(state, hint)
             self._tabs.setCurrentIndex(0)
             return True
         finally:
@@ -807,7 +875,14 @@ class MappingDialog(QDialog):
             return False
         after = json_text(self._state.data)
         self._pending = (target, self._state.data)
-        self._diff_label.setText(f'将要写入：{target} —— {diff_summary(before, after)}')
+        note = ''
+        active = str(getattr(self._state, 'path', '') or '')
+        if active and AM.is_workbook(active):
+            note = (f'　⚠ 当前生效的是 {Path(active).name}：这里写的是同目录的 '
+                    f'{Path(target).name} 快照，**不会**动那份 Excel，'
+                    f'也不会改变"以 Excel 为准"。')
+        self._diff_label.setText(
+            f'将要写入：{target} —— {diff_summary(before, after)}{note}')
         self._diff.setPlainText('\n'.join(diff_lines(before, after))
                                or '（内容没有变化，写入也不会改变文件）')
         self._diff_label.setVisible(True)
@@ -854,7 +929,7 @@ class MappingDialog(QDialog):
     def _on_load(self):
         start = self._project_root or ''
         path, _ = QFileDialog.getOpenFileName(
-            self, '载入资源映射', start, '映射文件 (*.json);;所有文件 (*)')
+            self, '载入资源映射（JSON / Excel）', start, MAPPING_FILTERS)
         if path:
             self.load_mapping_file(path)
 
@@ -867,7 +942,8 @@ class MappingDialog(QDialog):
             return
         default = str(Path(self._project_root or '.') / MAPPING_NAME)
         path, _ = QFileDialog.getSaveFileName(
-            self, '导出映射初稿', default, '映射文件 (*.json);;所有文件 (*)')
+            self, '导出映射初稿（.json 可提交 / .xlsx 可手工维护）',
+            default, MAPPING_FILTERS)
         if path:
             self.export_draft(path)
 
@@ -894,8 +970,9 @@ class MappingDialog(QDialog):
             swallow('ui_qt.mapping_dialog._repolish', e)
 
 
-__all__ = ['MAPPING_NAME', 'COLUMNS', 'SOURCE_PROJECT', 'SOURCE_LOADED',
+__all__ = ['MAPPING_NAME', 'MAPPING_XLSX', 'MAPPING_FILTERS', 'COLUMNS',
+           'SOURCE_PROJECT', 'SOURCE_LOADED',
            'SOURCE_NONE', 'MappingState', 'ContrastRow',
            'state_from_file', 'state_from_project', 'write_target',
            'json_text', 'diff_lines', 'diff_summary', 'status_text',
-           'contrast_rows', 'unknown_count', 'MappingDialog']
+           'contrast_rows', 'unknown_count', 'format_label', 'MappingDialog']

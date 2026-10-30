@@ -448,3 +448,77 @@ class TestPureHelpers:
         text = json_text({'name': '凌跃捷'})
         assert '凌跃捷' in text, 'JSON 不许把中文转成 \\u 转义'
         assert text.endswith('\n')
+
+
+# ==================================================================
+#  ⑧ Excel 定义途径（用户 2026-10-30）
+# ==================================================================
+
+class TestExcelMapping:
+    """
+    同一份映射的第二种写法：`.xlsx`。界面这里钉三件事 ——
+    **认得出、说得出、不碰人家的表**。
+    """
+
+    def _write_excel(self, project):
+        from storygraph.assets import asset_mapping as AM
+        path = project / AM.MAPPING_XLSX_FILENAME
+        AM.save_mapping(str(path), VALID_MAPPING)
+        return path
+
+    def test_project_excel_is_picked_up_and_says_so(self, project):
+        """打开项目自动认 xlsx；状态行写 `（Excel）`，页签里说明"改请改它"。"""
+        from storygraph.ui_qt.mapping_dialog import MappingDialog
+        self._write_excel(project)
+        d = MappingDialog(None, registry=_registry(), project_root=project)
+        try:
+            assert d.state().path.endswith('.xlsx'), d.state().path
+            assert '（Excel）' in d.status_line(), d.status_line()
+            assert '等价 JSON' in d._warn.text(), d._warn.text()
+            assert '"rules"' in d._json.toPlainText()
+            assert d.state().data.get('rules') == VALID_MAPPING['rules']
+        finally:
+            d.close()
+
+    def test_export_draft_can_write_xlsx(self, project, dlg):
+        """导出初稿存成 .xlsx：写得出来，并且**当场说清它成了生效源**。"""
+        target = project / 'storygraph.mapping.xlsx'
+        assert dlg.export_draft(target) is True
+        assert target.is_file()
+        assert dlg.state().path.endswith('.xlsx'), dlg.state().path
+        hint = dlg._hint.text()
+        assert '以这份' in hint and 'Excel' in hint, hint
+
+    def test_重读之后仍提醒还有另一份(self, project, dlg):
+        """
+        「重读」走的是"绕过缓存、按路径直接读" —— 那句"当前以哪份为准"
+        不能因为换了这条读取路径就消失（否则人刚被提醒过，点一下就忘了）。
+        """
+        self._write_excel(project)
+        _write_mapping(project, {'schema': 'storygraph.mapping/1',
+                                 'name': '另一份（不会生效）'})
+        assert dlg.reload_mapping() is True
+        notes = dlg.state().warnings
+        assert any('为准' in str(w) for w in notes), notes
+
+    def test_save_writes_a_json_snapshot_and_never_touches_the_excel(self,
+                                                                     project):
+        """
+        生效源是 Excel 时，「保存到项目根」写的是**同目录的 JSON 快照**：
+        那份 Excel 一个字节都不许动（工具从不回写人做的表）。
+        """
+        from storygraph.ui_qt.mapping_dialog import MappingDialog
+        xlsx = self._write_excel(project)
+        before = xlsx.read_bytes()
+        d = MappingDialog(None, registry=_registry(), project_root=project)
+        try:
+            assert d.prepare_save() is True
+            target, _data = d._pending
+            assert str(target).endswith('storygraph.mapping.json'), target
+            assert '不会' in d._diff_label.text(), d._diff_label.text()
+            assert d.confirm_save() is True
+            assert xlsx.read_bytes() == before, 'Excel 那份被改了'
+            assert (project / 'storygraph.mapping.json').is_file()
+            assert d.state().path.endswith('.xlsx'), '生效源不该因为写 JSON 而变'
+        finally:
+            d.close()

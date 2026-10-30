@@ -1,7 +1,8 @@
 """
 storygraph.assets.asset_mapping
 ===============================
-**项目级资源映射文件**（`storygraph.mapping.json`，schema `storygraph.mapping/1`）。
+**项目级资源映射文件**（`storygraph.mapping.json` / `.xlsx`，
+schema `storygraph.mapping/1`）。
 
 定位（规划 §2.6）
 -----------------
@@ -9,9 +10,20 @@ storygraph.assets.asset_mapping
 它让项目开发者自己维护"哪张图是哪个角色的哪个表情"；工具在**没有映射**时
 按文件夹推断（`assets.asset_identity`），映射只做**覆盖 / 纠正**。
 
+两条定义途径（用户 2026-10-30）
+------------------------------
+  · **JSON**（`storygraph.mapping.json`）：可 diff、可 review、可单独发人；
+  · **Excel**（`storygraph.mapping.xlsx`）：1720 行的大表，人在 Excel 里维护
+    才是现实的做法 —— 表结构 / 单元格约定 / 为什么"只读不回写"全在
+    `assets/mapping_excel.py` 的模块 docstring 里。
+
+**同一目录里 Excel 优先于 JSON**，并且这份优先级**每处都说得出来**：
+`mapping_sources()` 返回按优先级排好的全部候选，`mapping_cached()` 在两份都在时
+给一条警告，界面状态行显示当前生效的那份路径。
+
 为什么是 JSON 而不是别的（用户 2026-10-30 拍板）
 -----------------------------------------------
-  · 可以单独发给用户 / 发剧本群（"载入映射…"吃任意路径的 JSON）；
+  · 可以单独发给用户 / 发剧本群（"载入映射…"吃任意路径的 JSON / xlsx）；
   · 可以提交进游戏仓库、可以 review diff；
   · 坏文件不会把工具搞崩：`load_mapping` 抛 `MappingError`，
     `mapping_cached` 把它降级成 warnings 里的**一句话**。
@@ -80,8 +92,17 @@ from storygraph.assets.asset_identity import (
 #: 映射文件的结构版本。**改结构就 +1**（读取方据此判断能不能认）。
 MAPPING_SCHEMA = 'storygraph.mapping/1'
 
-#: 文件名（项目根，或 `game/` 下同名 —— 两者都接受）。
+#: JSON 映射的文件名（项目根，或 `game/` 下同名 —— 两者都接受）。
 MAPPING_FILENAME = 'storygraph.mapping.json'
+
+#: Excel 映射的文件名（同位置**优先于** JSON，见模块 docstring）。
+MAPPING_XLSX_FILENAME = 'storygraph.mapping.xlsx'
+
+#: Excel 后缀（`.xlsm` 读法一样；老式 `.xls` 读不了，由 `mapping_excel` 说人话）。
+WORKBOOK_SUFFIXES = ('.xlsx', '.xlsm')
+
+#: 同一个目录里按这个顺序找（Excel 优先）。
+MAPPING_NAMES = (MAPPING_XLSX_FILENAME, MAPPING_FILENAME)
 
 #: 认识的顶层键（多出来的**警告不失败**：别的工具/未来版本加的键不该拦读）。
 KNOWN_TOP_KEYS = ('schema', 'name', 'characters', 'rules', 'images',
@@ -104,30 +125,71 @@ class MappingError(ValueError):
 #  查找 / 读取
 # ---------------------------------------------------------------------------
 
-def find_mapping_path(project_root: str) -> Optional[str]:
-    """
-    项目里的映射文件 → **绝对路径**；没有返回 `None`。
+def is_workbook(path) -> bool:
+    """这个路径是 Excel 映射吗（按后缀；`.xls` 不算 —— 它读不了）。"""
+    return str(path or '').strip().lower().endswith(WORKBOOK_SUFFIXES)
 
-    先找项目根，再找 `game/` 下（两种放法都见得到：有的团队喜欢把配置
-    全塞进 `game/`）。返回绝对路径，方便直接显示/打开。
+
+def file_format(path) -> str:
+    """映射文件的格式：`'excel'` / `'json'` / `''`（认不出）。界面拿它说人话。"""
+    suffix = Path(str(path or '').strip()).suffix.lower()
+    if suffix in WORKBOOK_SUFFIXES:
+        return 'excel'
+    if suffix == '.json':
+        return 'json'
+    return ''
+
+
+def mapping_sources(project_root: str) -> list:
+    """
+    项目里**所有**候选映射文件（绝对路径，按生效优先级排好）。
+
+    顺序是「项目根」整组在前、「`game/`」整组在后，每组里 `xlsx → json`：
+    所以"项目根那份 JSON"胜过"`game/` 里那份 Excel"—— 目录的远近先于格式，
+    这符合人对"项目根是我的主目录"的直觉。
     """
     root = str(project_root or '').strip()
     if not root:
-        return None
+        return []
     base = Path(root)
-    for candidate in (base / MAPPING_FILENAME,
-                      base / 'game' / MAPPING_FILENAME):
-        try:
-            if candidate.is_file():
-                return str(candidate.resolve())
-        except OSError:
-            continue
-    return None
+    found = []
+    for folder in (base, base / 'game'):
+        for name in MAPPING_NAMES:
+            candidate = folder / name
+            try:
+                if candidate.is_file():
+                    found.append(str(candidate.resolve()))
+            except OSError:
+                continue
+    return found
+
+
+def find_mapping_path(project_root: str) -> Optional[str]:
+    """
+    项目里**当前生效**的映射文件 → 绝对路径；没有返回 `None`。
+
+    先找项目根，再找 `game/` 下；同一目录里 `xlsx` 优先于 `json`（见模块
+    docstring）。返回绝对路径，方便直接显示 / 打开。
+    """
+    found = mapping_sources(project_root)
+    return found[0] if found else None
+
+
+def xls_unsupported(path) -> str:
+    """
+    老式 `.xls` 的统一说法（两条读取路径共用同一句，别一处一个写法）。
+
+    `.xls` 是 OLE 复合文档，openpyxl 读不了；而它**恰好**也是"二进制当文本读"
+    会炸的东西 —— 不拦下来的话用户看到的是 `'utf-8' codec can't decode ...`，
+    等于没说。
+    """
+    return (f'{Path(str(path or "")).name} 是老式 .xls 格式，读不了 —— '
+            f'在 Excel / WPS 里「另存为」`.xlsx` 再从「载入映射…」选它。')
 
 
 def load_mapping(path: str) -> tuple:
     """
-    读一份映射 → `(data, warnings)`。
+    读一份映射 → `(data, warnings)`（按后缀分派：JSON / Excel）。
 
     · 文件不存在 / 读不出 / 不是合法 JSON / 顶层不是对象 → 抛 `MappingError`
       （**这是配置错误**，界面要明说，不能当成"没有映射"）；
@@ -139,6 +201,14 @@ def load_mapping(path: str) -> tuple:
     p = Path(text_path)
     if not p.is_file():
         raise MappingError(f'映射文件不存在：{p}')
+    if p.suffix.lower() == '.xls':
+        raise MappingError(xls_unsupported(p))
+    if is_workbook(p):
+        # 惰性 import：只有用 Excel 的项目才需要 openpyxl 的读取路径，
+        # JSON 项目连这个模块都不加载（启动不多花一毫秒）。
+        from storygraph.assets.mapping_excel import read_workbook
+
+        return read_workbook(p)
     try:
         text = p.read_text(encoding='utf-8-sig')
     except OSError as e:
@@ -154,15 +224,34 @@ def load_mapping(path: str) -> tuple:
     return data, validate_mapping(data)
 
 
-def validate_mapping(data) -> list:
+def validate_mapping(data, *, where=None) -> list:
     """
     映射结构检查 → **警告列表**（空 = 没问题）。纯函数、不改数据。
 
     为什么警告不失败：这份文件是**人写的、会随项目长大**；多一个 `notes`
     之类的键就拒绝加载，等于逼人删信息。但也不能静默 —— 认不出的键
     要报出来，否则"我写进去了怎么没生效"永远查不出。
+
+    `where` 是**定位器**（可选）：`where(*path) -> '图片 表第 12 行'`。
+    Excel 来源的映射传它，同一句警告就从 `images['x'] kind 不认识`
+    变成 `图片 表第 12 行：kind 不认识` —— 人要能按这句话直接在表里找到那一行。
     """
     warnings = []
+
+    def at(*path):
+        """一句警告的前缀（`rules[0] ` / `规则 表第 9 行：`）。"""
+        default = path[0] if len(path) == 1 else (
+            f'{path[0]}[{path[1]!r}]' if len(path) > 1 else str(path[0]))
+        if where is not None:
+            try:
+                got = str(where(*path) or '').strip()
+            except Exception as e:            # noqa: BLE001 - 定位器坏了不该拦校验
+                swallow('assets.asset_mapping.validate_mapping.where', e)
+                got = ''
+            if got:
+                return got + '：'
+        return default + ' '
+
     if not isinstance(data, dict):
         return ['映射顶层不是对象']
     for key in data:
@@ -183,28 +272,28 @@ def validate_mapping(data) -> list:
             if not str(tag or '').strip():
                 warnings.append('characters 里有空 tag')
             elif not isinstance(entry, dict):
-                warnings.append(f'characters[{tag!r}] 不是对象')
+                warnings.append(f'{at("characters", tag)}不是对象')
     rules = data.get('rules')
     if rules is not None and not isinstance(rules, list):
         warnings.append('rules 不是数组')
     elif isinstance(rules, list):
         for i, rule in enumerate(rules):
             if not isinstance(rule, dict):
-                warnings.append(f'rules[{i}] 不是对象')
+                warnings.append(f'{at("rules", i)}不是对象')
                 continue
             for key in rule:
                 if key not in KNOWN_ENTRY_KEYS:
-                    warnings.append(f'rules[{i}] 未知键 {key!r}（已忽略）')
+                    warnings.append(f'{at("rules", i)}未知键 {key!r}（已忽略）')
             glob = str(rule.get('glob') or '').strip()
             if not glob:
-                warnings.append(f'rules[{i}] 缺 glob（这条规则用不了）')
+                warnings.append(f'{at("rules", i)}缺 glob（这条规则用不了）')
             elif _looks_outside_project(glob):
                 warnings.append(
-                    f'rules[{i}].glob 像是绝对路径：{glob!r}'
+                    f'{at("rules", i)}glob 像是绝对路径：{glob!r}'
                     '（映射里的路径应写**项目相对**，否则换台机器就失效）')
             kind = str(rule.get('kind') or '').strip()
             if kind and kind not in KINDS:
-                warnings.append(f'rules[{i}] kind 不认识：{kind!r}')
+                warnings.append(f'{at("rules", i)}kind 不认识：{kind!r}')
     images = data.get('images')
     if images is not None and not isinstance(images, dict):
         warnings.append('images 不是对象（应为 {asset_id 或相对路径: {...}}）')
@@ -214,18 +303,27 @@ def validate_mapping(data) -> list:
                 warnings.append('images 里有空 key')
                 continue
             if not isinstance(entry, dict):
-                warnings.append(f'images[{key!r}] 不是对象（简短写法不支持，'
+                warnings.append(f'{at("images", key)}不是对象（简短写法不支持，'
                                 '请写 {"kind": ...}）')
                 continue
             for field in entry:
                 if field not in KNOWN_ENTRY_KEYS:
-                    warnings.append(f'images[{key!r}] 未知键 {field!r}（已忽略）')
+                    warnings.append(f'{at("images", key)}未知键 {field!r}（已忽略）')
             kind = str(entry.get('kind') or '').strip()
             if kind and kind not in KINDS:
-                warnings.append(f'images[{key!r}] kind 不认识：{kind!r}')
+                warnings.append(f'{at("images", key)}kind 不认识：{kind!r}')
     attributes = data.get('attributes')
     if attributes is not None and not isinstance(attributes, dict):
         warnings.append('attributes 不是对象（应为 {维度: {"label": ...}}）')
+    elif isinstance(attributes, dict):
+        for key, entry in attributes.items():
+            if not isinstance(entry, dict):
+                warnings.append(f'{at("attributes", key)}不是对象'
+                                '（应为 {"label": ...}）')
+                continue
+            for field in entry:
+                if field not in ('label', 'values', 'options'):
+                    warnings.append(f'{at("attributes", key)}未知键 {field!r}（已忽略）')
     return warnings
 
 
@@ -258,16 +356,47 @@ def mapping_cached(project_root: str) -> tuple:
     stamp = (int(st.st_mtime_ns), int(st.st_size))
     cached = _CACHE.get(path)
     if cached and cached[0] == stamp:
-        return cached[1], list(cached[2]), path
+        data, warnings = cached[1], list(cached[2])
+    else:
+        try:
+            data, warnings = load_mapping(path)
+        except MappingError as e:
+            data, warnings = {}, [str(e)]
+        _CACHE[path] = (stamp, data, list(warnings))
+        if len(_CACHE) > _CACHE_MAX:
+            for key in list(_CACHE)[:-_CACHE_MAX]:
+                _CACHE.pop(key, None)
+    # "还有另一份"这条**不进缓存**：它取决于别的文件在不在，
+    # 而缓存键只有这一份的 mtime+size（多一份文件不会让缓存失效）。
+    shadow = shadow_note(root, path)
+    if shadow:
+        warnings.append(shadow)
+    return data, warnings, path
+
+
+def shadow_note(project_root: str, active: str) -> str:
+    """
+    项目里还有别的映射文件时，说清"当前用的是哪份、别改错文件"。
+
+    两份都在不是错误（人试一次 Excel、或从别人那儿收了一份 JSON 都会这样），
+    但**必须说出来** —— 否则"我改了 JSON 怎么没生效"要查半天。
+    """
     try:
-        data, warnings = load_mapping(path)
-    except MappingError as e:
-        data, warnings = {}, [str(e)]
-    _CACHE[path] = (stamp, data, list(warnings))
-    if len(_CACHE) > _CACHE_MAX:
-        for key in list(_CACHE)[:-_CACHE_MAX]:
-            _CACHE.pop(key, None)
-    return data, list(warnings), path
+        others = [p for p in mapping_sources(project_root) if p != active]
+    except OSError as e:                      # noqa: BLE001 - 查不到就算了
+        swallow('assets.asset_mapping._shadow_note', e)
+        return ''
+
+    def rel(value):
+        try:
+            return str(Path(value).relative_to(Path(project_root)))
+        except (ValueError, OSError):
+            return str(value)
+
+    if not others:
+        return ''
+    return ('项目里还有 ' + '、'.join(rel(p) for p in others)
+            + f'，但当前以 {rel(active)} 为准 —— 改别的那份不会生效')
 
 
 # ---------------------------------------------------------------------------
@@ -765,21 +894,34 @@ def _draft_avatar_path(resolved, tag: str) -> str:
 #  写回（原子 + 旧文件 .bak）
 # ---------------------------------------------------------------------------
 
-def save_mapping(path: str, data) -> None:
+def save_mapping(path: str, data):
     """
-    把映射写回磁盘：**原子替换 + 旧文件 `.bak`**。
+    把映射写回磁盘（按后缀分派）：**原子替换 + 旧文件 `.bak`**。
 
+    · `.json` → 本函数写（见下面三条纪律），返回 `None`；
+    · `.xlsx` / `.xlsm` → 交给 `assets.mapping_excel.write_workbook` 整份重建，
+      返回"写了多少行"的计数 dict —— 那是"新建一份表"（导出初稿 / 模板），
+      **不是**给人做的表来回覆盖（见 `mapping_excel` 模块 docstring ③）；
+    · 失败抛 `MappingError`，由调用方决定怎么提示。
+
+    JSON 这条路的三条纪律：
     · 旧文件存在就先逐字节备份成 `<文件名>.bak`；备份失败 → **不写**
       （宁可没改，也不让人失去上一版）；
     · 新内容先写临时文件、`os.replace` 一步换上去 —— 中途断电不会留下
       半份 JSON（这份文件会进 git，半份 = 一次坏提交）；
-    · 失败抛 `MappingError`，由调用方决定怎么提示。
     """
     if not isinstance(data, Mapping):
         raise MappingError('映射数据必须是 JSON 对象')
     target = Path(str(path or '').strip())
     if not str(path or '').strip() or not target.name:
         raise MappingError('没有给出映射文件路径')
+    if is_workbook(target):
+        from storygraph.assets.mapping_excel import write_workbook
+
+        return write_workbook(str(target), data)
+    if target.suffix.lower() == '.xls':
+        raise MappingError(
+            f'{target.name} 是老式 .xls 格式，写不了 —— 存成 .xlsx 或 .json。')
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -803,10 +945,13 @@ def save_mapping(path: str, data) -> None:
         except OSError:                         # noqa: BLE001 - 清理失败不掩盖真错误
             swallow('assets.asset_mapping.save_mapping.cleanup', e)
         raise MappingError(f'写映射文件失败：{e}') from e
+    return None
 
 
 __all__ = [
-    'MAPPING_SCHEMA', 'MAPPING_FILENAME', 'KNOWN_TOP_KEYS', 'KNOWN_ENTRY_KEYS',
-    'MappingError', 'find_mapping_path', 'load_mapping', 'validate_mapping',
+    'MAPPING_SCHEMA', 'MAPPING_FILENAME', 'MAPPING_XLSX_FILENAME',
+    'MAPPING_NAMES', 'WORKBOOK_SUFFIXES', 'KNOWN_TOP_KEYS', 'KNOWN_ENTRY_KEYS',
+    'MappingError', 'is_workbook', 'file_format', 'mapping_sources',
+    'shadow_note', 'find_mapping_path', 'load_mapping', 'validate_mapping',
     'mapping_cached', 'resolve_with_mapping', 'draft_mapping', 'save_mapping',
 ]

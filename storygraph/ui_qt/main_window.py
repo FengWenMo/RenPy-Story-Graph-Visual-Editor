@@ -313,15 +313,17 @@ def _exec_asset_picker(dlg):
 
 
 def _choose_mapping_file(win) -> str:
-    """「载入映射…」的第一步：挑一份映射 JSON（用户取消返回 ''）。"""
+    """「载入映射…」的第一步：挑一份映射（JSON 或 Excel，用户取消返回 ''）。"""
     start = str(getattr(win, '_project_root', '') or Path.cwd())
     path, _filter = QFileDialog.getOpenFileName(
-        win, '载入资源映射（JSON）', start, '映射 JSON (*.json);;所有文件 (*)')
+        win, '载入资源映射（JSON / Excel）', start,
+        '映射文件 (*.json *.xlsx *.xlsm);;JSON (*.json);;'
+        'Excel (*.xlsx *.xlsm);;所有文件 (*)')
     return str(path or '')
 
 
 def _choose_mapping_export_path(win) -> str:
-    """「导出映射初稿…」的第一步：挑写到哪儿（用户取消返回 ''）。"""
+    """「导出映射初稿…」的第一步：挑写到哪儿（.json 可提交 / .xlsx 可手改）。"""
     root = getattr(win, '_project_root', '') or Path.cwd()
     try:
         from storygraph.assets.asset_mapping import MAPPING_FILENAME
@@ -329,8 +331,9 @@ def _choose_mapping_export_path(win) -> str:
         swallow('ui_qt.main_window.mapping_export_path', e)
         MAPPING_FILENAME = 'storygraph.mapping.json'
     path, _filter = QFileDialog.getSaveFileName(
-        win, '导出资源映射初稿', str(Path(str(root)) / MAPPING_FILENAME),
-        '映射 JSON (*.json);;所有文件 (*)')
+        win, '导出资源映射初稿（.json 可提交 / .xlsx 可手工维护）',
+        str(Path(str(root)) / MAPPING_FILENAME),
+        '映射 JSON (*.json);;映射 Excel (*.xlsx);;所有文件 (*)')
     return str(path or '')
 
 
