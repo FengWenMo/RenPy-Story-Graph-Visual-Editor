@@ -67,6 +67,64 @@ def fit_to_available(width, height, available=None, margin: int = 48) -> tuple:
     return min(w, max_w), min(h, max_h)
 
 
+#: 布局记忆的**格式版本**（不是 `session_store.VERSION`，那个管整份文件的结构）。
+#: 升到 2 = "默认窗口改窄 + 卡片栏默认窄"那一轮（2026-10-30，用户第 5 条）。
+LAYOUT_VERSION = 2
+#: 布局里记版本号的键。
+LAYOUT_VERSION_KEY = 'layout_version'
+#: 迁移时卡片页右栏的**上限占比**：超过就是"卡片铺满整个窗口"的旧摆法。
+#: 真机老记忆是 813/1215 = 67%；正常拖过的 55:45（55.6%）不该被动。
+LEGACY_CARD_SHARE = 0.60
+
+
+def narrow_layout(layout: dict) -> dict:
+    """
+    老布局记忆 → 新的「窄默认」（**一次性**迁移，写回后不再触发）。
+
+    为什么必须有它（2026-10-30 用户第 6 条："并没有做到缩小！！！还是那么宽
+    看不全！！！"）：真机 `session.json` 里这个项目存的是
+    `geometry = [1440, 830, 0, 23]`、`split_card = [402, 813]` —— 窗口 1440 宽、
+    卡片栏 813（占 67%）。启动时**记忆优先于默认值**，于是"默认窗口改窄"
+    这个改动对老用户**完全不可见**：他还是看到 1440 宽 + 卡片铺满。
+    而他那块屏的可用区实测只有 **1440×852** —— 1440 宽就是"铺满整个屏幕"。
+
+    所以这里在版本号缺失/过低时压一次：
+
+      · 窗口宽 / 高 → 不超过 `DEFAULT_WINDOW_SIZE`（位置不动，屏幕夹紧仍由
+        `_restore_to_screen` 做）；
+      · 卡片页右栏 → 超过 60% 就回到 `CARD_SPLIT_DEFAULT`（"列表窄、卡片铺满"
+        那种旧摆法；正常拖过的比例（比如 55:45）不动）。
+
+    之后用户自己拖多大就是多大 —— `current_layout()` 会写回 `LAYOUT_VERSION`，
+    下一次启动 `version >= LAYOUT_VERSION` 直接原样返回。
+    """
+    if not isinstance(layout, dict):
+        return {}
+    try:
+        version = int(layout.get(LAYOUT_VERSION_KEY) or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= LAYOUT_VERSION:
+        return layout
+    out = dict(layout)
+    out[LAYOUT_VERSION_KEY] = LAYOUT_VERSION
+    try:
+        from storygraph.ui_qt.main_window import (CARD_SPLIT_DEFAULT,
+                                                  DEFAULT_WINDOW_SIZE)
+    except Exception as e:                       # noqa: BLE001 - 拿不到常量就只打版本
+        swallow('ui_qt.window_state.narrow_layout.constants', e)
+        return out
+    g = SS.normalize_geometry(out.get('geometry'))
+    if g and g[0] and g[1]:
+        w = min(int(g[0]), int(DEFAULT_WINDOW_SIZE[0]))
+        h = min(int(g[1]), int(DEFAULT_WINDOW_SIZE[1]))
+        out['geometry'] = [w, h, g[2], g[3]]
+    sc = SS.normalize_sizes(out.get('split_card'))
+    if len(sc) == 2 and sum(sc) > 0 and sc[1] > sum(sc) * LEGACY_CARD_SHARE:
+        out['split_card'] = list(CARD_SPLIT_DEFAULT)
+    return out
+
+
 class WindowStateMixin:
     """窗口记忆（见模块 docstring）。"""
 
@@ -119,7 +177,7 @@ class WindowStateMixin:
                 card_index = None
         except Exception as e:                      # noqa: BLE001
             swallow('ui_qt.window_state.current_layout.index', e)
-        return SS.layout_from(
+        layout = SS.layout_from(
             page=getattr(self, '_page', None),
             card_index=card_index,
             chapter=getattr(self, '_file_path', '') or None,
@@ -128,6 +186,10 @@ class WindowStateMixin:
             split_card=self._splitter_sizes('_split_card'),
             dock_state=self._dock_state_blob(),
             root=getattr(self, '_project_root', None))
+        # 打上格式版本：下次启动 `narrow_layout` 就不再把这份记忆当"老摆法"压一次
+        # （用户自己拖出的宽窗口必须被尊重，只有**升级前**的记忆才迁移）。
+        layout[LAYOUT_VERSION_KEY] = LAYOUT_VERSION
+        return layout
 
     def save_session_state(self) -> dict:
         """
@@ -276,7 +338,8 @@ class WindowStateMixin:
         """
         if not root:
             return {'ok': False, 'reason': '没给项目根'}
-        layout = SS.project_layout(root, path=self.session_store_path())
+        layout = narrow_layout(SS.project_layout(root,
+                                                 path=self.session_store_path()))
         res = {}
         try:
             res = self.open_project_path(root) or {}

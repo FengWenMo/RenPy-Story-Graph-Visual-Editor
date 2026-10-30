@@ -85,6 +85,15 @@ class FlowLayout(QLayout):
         m = self.contentsMargins()
         return size + QSize(m.left() + m.right(), m.top() + m.bottom())
 
+    def gap(self) -> int:
+        """
+        这一行的间距（只读）。
+
+        给 `FlowRow` 的子类算 `sizeHint` 用：`QLayout` 自带的 `spacing()` 是
+        **可写属性**（`setSpacing`），这里只暴露一个不会与它混淆的只读名。
+        """
+        return int(self._spacing)
+
     def clear_widgets(self):
         """清空（`ValueChips` 用）。"""
         while self._items:

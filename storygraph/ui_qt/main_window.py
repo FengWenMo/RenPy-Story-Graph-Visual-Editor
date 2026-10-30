@@ -126,7 +126,7 @@ from PySide6.QtGui import QAction, QFont, QTextCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDockWidget,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSplitter,
                                QStackedWidget, QTabBar, QToolBar, QToolButton,
                                QVBoxLayout, QWidget)
@@ -136,6 +136,7 @@ from storygraph.ui_qt.code_edit import CodeEditor
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.elide import ElidedLabel
+from storygraph.ui_qt.flow import FlowRow
 from storygraph.ui_qt.graph_canvas import GraphCanvas
 from storygraph.ui_qt.inspector import PropertyStrip
 from storygraph.ui_qt.navigator import ChapterNavigator
@@ -173,8 +174,12 @@ from storygraph.ui_qt.window_nodes import NodeEditMixin
 #
 # 探针、根因排序与分阶段方案见 `.pip-tmp/plan/05_ui_width.md`。落地成四个数：
 #
-#   · `DEFAULT_WINDOW_SIZE` —— 默认窗口（**没有记忆时**）1360×900，
-#     不再 1600×950（用户 2026-10-30 拍板：默认为窄）；
+#   · `DEFAULT_WINDOW_SIZE` —— 默认窗口（**没有记忆时**）1200×800，
+#     不再 1600×950（用户 2026-10-30 拍板：默认为窄）。**2026-10-30 晚改成 1200**：
+#     用户那块屏的可用区实测只有 1440×852（`System.Windows.Forms.Screen`），
+#     1360 宽 = 屏宽的 94%，他看到的还是"铺满整个屏幕"（原话："还是那么宽看不全"）。
+#     1200 ≈ 83%，右边留得下明显一截；记过位置的旧窗口由 `window_state.narrow_layout`
+#     一次性压到这个上限（见那里）。
 #   · `CARD_COLUMN_MIN_W`  —— 卡片页右栏（表单）的**硬下限**：分栏拖到这儿就停。
 #     卡片地板实测已压到 ~296px（描边短文本 / 小图 240 / 24px 图标按钮 /
 #     折行摘要标签），340 的兜底留了 40px 余量 = **结构性保证**"右栏永远不会
@@ -185,8 +190,8 @@ from storygraph.ui_qt.window_nodes import NodeEditMixin
 #     `stage_thumb.COMPACT_W/H` 仍是组件自己的 sizeHint 真源（288×162），
 #     但"288 + 摘要 45 + 间距 8 = 341"会把卡片地板顶在 365px（> 340 目标），
 #     所以卡片里再收窄一档到 240×135（仍是 16:9，字仍可读）。
-DEFAULT_WINDOW_W = 1360
-DEFAULT_WINDOW_H = 900
+DEFAULT_WINDOW_W = 1200
+DEFAULT_WINDOW_H = 800
 DEFAULT_WINDOW_SIZE = (DEFAULT_WINDOW_W, DEFAULT_WINDOW_H)
 
 #: 右栏（`_split_card` 右半）的硬下限。见上：它等于"卡片放得下"的宽度。
@@ -249,21 +254,35 @@ class CardColumnExpandFilter(QObject):
         return False
 
 
-def sync_structural_menu(actions) -> None:
+class CardActionRow(FlowRow):
     """
-    「⋯ 结构」菜单打开时，把每个菜单项的可用性 / tooltip 从**真源按钮**同步过来。
+    卡片页右上那一排**增 / 删卡片**动作：宽了一行放下，窄了自动折行。
 
-    `window_card._sync_structural_buttons`（本轮不改）只认 `_insert_btn` /
-    `_delete_btn` 那几个按钮；菜单项只是第二入口，不自己维护一套状态。
+    为什么是"折行"、而不是 2026-10-30 第一版那个「⋯ 结构」下拉菜单：
+    用户看完截图的第 6 条反馈是**"不要那个结构！恢复回原来的 UI"** ——
+    6 颗按钮被藏进两层菜单换来可缩窄的宽度，他不接受。折行两样都留着：
 
-    ⚠ 做成**模块级函数**（而不是 `_build_card_page` 里的嵌套 `def`）：
-    `tests/test_main_window_mixins.py::test_main_class_shrank_a_lot` 用
-    `ast.walk` 数主类方法，**嵌套 def 也算**（预算 ≤35）—— 实测多一个嵌套
-    函数就把它顶到 36（本轮抓到）。
+      · 默认窗口（1200 宽）及以上 → **与从前一模一样**：一行、右对齐、顺序不变
+        （`.pip-tmp/plan/probe_band_rows.py` 实测：1200/1240/1280/1360/1440 都是 1 行）；
+      · 再窄（≈1150 以下）→ 后面的按钮折到第二行，**一颗都不藏、也不裁在窗口外**；
+      · `minimumSizeHint` 仍是 `FlowRow` 的"最宽那一颗"（≈113px），
+        所以"窗口能缩到 700 出头"这个好处**没有丢**。
+
+    `sizeHint` 报"一行全排开"的宽：父布局（`QHBoxLayout`）在宽窗口下就按
+    这个宽把它摆成一行；空间不够时它按自己的最小宽收窄，`FlowLayout` 自己
+    折行。高度靠 `hasHeightForWidth` 一路传上去（`bar` → 页面根布局）。
     """
-    for action, button in actions:
-        action.setEnabled(bool(button.isEnabled()))
-        action.setToolTip(button.toolTip())
+
+    def sizeHint(self) -> QSize:                    # noqa: N802 - Qt 接口
+        w = h = 0
+        n = self.flow.count()
+        for i in range(n):
+            m = self.flow.itemAt(i).sizeHint()
+            w += m.width()
+            h = max(h, m.height())
+        if n > 1:
+            w += self.flow.gap() * (n - 1)
+        return QSize(w, h)
 
 
 # ==================================================================
@@ -273,7 +292,7 @@ def sync_structural_menu(actions) -> None:
 # **为什么全是模块级函数、而不是主类方法**：`test_main_window_mixins.py`
 # 用 `ast.walk` 数 `MainWindowQt` 的方法（预算 ≤35，嵌套 def 也算）——
 # 本轮实测 34/35，一个都不能再往主类里塞。这些函数只操作窗口状态，
-# 不需要成为主类 API（与 `toggle_card_column` / `sync_structural_menu` 同一条规矩）。
+# 不需要成为主类 API（与 `toggle_card_column` / `CardActionRow` 同一条规矩）。
 
 #: 菜单里五个动作的**文本与顺序**（用户点名的五件事；判据直接读这一份）。
 MAPPING_MENU_TEXTS = ('载入映射…', '重读', '导出映射初稿…', '保存到项目根',
@@ -2333,9 +2352,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         self.setWindowTitle(self._base_title)
         # ⚠ **按屏幕压一遍**（2026-10-23）：`sizeHint()` 会把工具栏的完整宽度
         #   算进来（实测 2720×705），照它开窗在 1080p/2K 上都跑到屏幕外。
-        # 2026-10-30：默认尺寸 1600×950 → **1360×900**（用户第 5 条反馈"默认为窄"；
+        # 2026-10-30：默认尺寸 1600×950 → **1200×800**（用户第 5 条反馈"默认为窄"；
         #   数字见模块顶部 `DEFAULT_WINDOW_SIZE`）。有记忆时仍以记忆为准
-        #   （`_restore_to_screen` 会覆盖这里）。
+        #   （`_restore_to_screen` 会覆盖这里；**升级前**的旧记忆由
+        #   `window_state.narrow_layout` 一次性压到这个上限）。
         self.resize(*fit_to_available(*DEFAULT_WINDOW_SIZE))
         self._build()
         #: 构造后**立刻**载入这一章（同步）。
@@ -2978,78 +2998,48 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 现在有 `test_every_button_slot_can_accept_the_clicked_bool` 守着这一类。
         #
         # 2026-10-30（用户第 5 条「UI 宽窄可变」）：这 5 个按钮合计约 570px，
-        # 是**窗口最小宽 1142px 的主因** —— 探针实测：把它们隐藏掉，窗口最小宽
-        # 1142 → 726（`.pip-tmp/plan/05_ui_width.md` §一）。现在收进「⋯ 结构」
-        # 菜单；「↩ 撤销结构操作」留在外面（它是"刚才那一步怎么撤"的即时反馈，
-        # 不该再点两层）。
+        # 是**窗口最小宽 1142px 的主因**（`.pip-tmp/plan/05_ui_width.md` §一）。
+        # 第一版把它们收进「⋯ 结构」下拉菜单换宽度 —— 用户 2026-10-30 第 6 条
+        # 直接否掉：**"不要那个结构！恢复回原来的 UI"**。菜单已整个删掉
+        # （`_structural_btn` / `_structural_menu` / `_structural_actions` /
+        # `sync_structural_menu` 都不再存在）。
         #
-        # ⚠ 5 个按钮对象**都保留**（只是不进这条按钮行）：它们是接线与可用性的
-        # **唯一真源** —— `window_card._sync_structural_buttons` 只认这几个按钮
-        # （那个文件不在本轮改动范围），`tests/test_qt_signal_wiring.py` 也直接
-        # `.click()` 它们。菜单项是同一批按钮的**第二个入口**：打开菜单时把
-        # 可用性从按钮同步过来（见模块级 `sync_structural_menu`）。
-        self._structural_buttons_host = QWidget(self)
-        self._structural_buttons_host.hide()      # 只当"按钮的爹"，不占版面
-        self._insert_btn = QPushButton('＋ 插入卡片', self._structural_buttons_host)
+        # 现在这两个诉求**同时**成立：按钮全在条上、顺序照旧；装进一个会折行的
+        # `CardActionRow` —— 宽窗口下与从前**一模一样**（一行、右对齐），
+        # 窗口窄到放不下时才折到第二行。**一颗都不藏、也不裁在窗口外**，
+        # 而"最小宽 = 最宽那一颗"（≈113px），窗口照样能缩到 700 出头。
+        self._action_row = CardActionRow(self, spacing=T.SPACE['sm'])
+        self._insert_btn = QPushButton('＋ 插入卡片')
         self._insert_btn.setToolTip('在当前这一拍后面插入一张空卡片（Ctrl+Insert）')
         self._insert_btn.clicked.connect(lambda: self.insert_card(after=True))
-        self._insert_before_btn = QPushButton('＋ 插到前面',
-                                              self._structural_buttons_host)
+        self._insert_before_btn = QPushButton('＋ 插到前面')
         self._insert_before_btn.setToolTip('在当前这一拍**前面**插入一张空卡片')
         self._insert_before_btn.clicked.connect(
             lambda: self.insert_card(after=False))
-        self._flow_btn = QPushButton('↳ 插入控制流卡',
-                                     self._structural_buttons_host)
+        self._flow_btn = QPushButton('↳ 插入控制流卡')
         self._flow_btn.setToolTip(
             '在当前这一拍后面插入一张 call / jump 卡：选目标 label，'
             '调用完会回到这里继续')
         self._flow_btn.clicked.connect(lambda: self.insert_flow_card(after=True))
-        self._choice_btn = QPushButton('◇ 插入选择点',
-                                       self._structural_buttons_host)
+        self._choice_btn = QPushButton('◇ 插入选择点')
         self._choice_btn.setToolTip(
             '在当前这一拍后面放一个分支：剧本里**只多一行** call，'
             'menu 写在同目录的 <章节>_choices.rpy 里（不动剧本正文）')
         self._choice_btn.clicked.connect(self.insert_choice_point)
-        self._delete_btn = QPushButton('🗑 删除这张卡片',
-                                       self._structural_buttons_host)
-        self._delete_btn.setToolTip('删掉当前这一拍（只改内存，导出才落盘）')
-        self._delete_btn.setProperty('variant', 'danger')
-        self._delete_btn.clicked.connect(self.delete_card)
-
-        # —— 「⋯ 结构」菜单：上面那 5 个动作的收纳入口 ——
-        self._structural_menu = QMenu(self)
-        self._structural_menu.setToolTipsVisible(True)
-        self._structural_actions = []            # [(QAction, 真源按钮)]
-        for _text, _btn in (
-                ('＋ 插入卡片', self._insert_btn),
-                ('＋ 插到前面', self._insert_before_btn),
-                ('↳ 插入控制流卡', self._flow_btn),
-                ('◇ 插入选择点', self._choice_btn),
-                ('🗑 删除这张卡片', self._delete_btn)):
-            _act = self._structural_menu.addAction(_text)
-            _act.setToolTip(_btn.toolTip())
-            # 与按钮同一条接线：点菜单项 = 点那个按钮（含它自己的 lambda 包装）
-            _act.triggered.connect(
-                lambda _checked=False, b=_btn: b.click())
-            self._structural_actions.append((_act, _btn))
-
-        self._structural_menu.aboutToShow.connect(
-            lambda: sync_structural_menu(self._structural_actions))
-        self._structural_btn = QToolButton()
-        self._structural_btn.setText('⋯ 结构')
-        self._structural_btn.setToolTip(
-            '增 / 删卡片 · 插入控制流卡 · 插入选择点\n'
-            '（原来那一排按钮收进了这里 —— 2026-10-30：给窗口腾出可缩窄的宽度）')
-        self._structural_btn.setPopupMode(QToolButton.InstantPopup)
-        self._structural_btn.setMenu(self._structural_menu)
-        self._structural_btn.setAutoRaise(False)
-        bh.addWidget(self._structural_btn, 0)
         self._restore_btn = QPushButton('↩ 撤销结构操作')
         self._restore_btn.setToolTip(
             '撤销最近一次增删卡片（可连按多级）：删掉的放回原位、插进去的撤掉')
         self._restore_btn.clicked.connect(self.restore_card)
         self._restore_btn.setEnabled(False)
-        bh.addWidget(self._restore_btn)
+        self._delete_btn = QPushButton('🗑 删除这张卡片')
+        self._delete_btn.setToolTip('删掉当前这一拍（只改内存，导出才落盘）')
+        self._delete_btn.setProperty('variant', 'danger')
+        self._delete_btn.clicked.connect(self.delete_card)
+        # 顺序 = 原来的动作条（插入 / 插到前面 / 控制流 / 选择点 / 撤销 / 删除）
+        for _btn in (self._insert_btn, self._insert_before_btn, self._flow_btn,
+                     self._choice_btn, self._restore_btn, self._delete_btn):
+            self._action_row.add(_btn)
+        bh.addWidget(self._action_row, 0)
         outer.addWidget(bar)
 
         # ⚠ 三栏的顺序照参考界面（2026-10-23）：
@@ -3522,13 +3512,19 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 
     def _update_crumb(self):
         """
-        面包屑：`剧情结构 › 文件名 › label › 第 i / n 拍`。
+        面包屑：`文件名 › label`（+ 右边的 `第 i / n 拍`）。
 
         ⚠ 右边那句**只放"第几拍 + 这一拍在产物里几行"**（2026-10-23）：
         从前它后面还挂着一整句"改完按「💾 保存这一拍」，「← 返回剧情结构」
         回第一屏" —— 那句话把这一行的最小宽度顶到 1279px，1400px 窗口上
         最后一个按钮直接被裁掉。常驻的提示不该按"每次都要完整读一遍"排版：
         操作提示进 tooltip，位置信息留在行上。
+
+        ⚠ 2026-10-30 晚：前面那个 `剧情结构 › ` **去掉了**（省 60px）。左边
+        那颗按钮就写着「← 返回剧情结构」，面包屑再重复一遍纯属占宽 —— 而
+        60px 恰好是 1200px 默认窗口下"6 颗结构按钮能不能排成一行"的分水岭
+        （`.pip-tmp/plan/probe_band_rows.py`：1240 一行 / 1200 折行 → 去掉
+        前缀后 1200 也能一行）。
         """
         if not hasattr(self, '_crumb'):
             return
@@ -3545,7 +3541,7 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
             where = f'{name or "（未载入）"}'
             if label:
                 where += f' › {label}'
-            self._crumb.setText(f'剧情结构 › {where}')
+            self._crumb.setText(where)
             pos = f'第 {i + 1 if i >= 0 else 0} / {n} 拍{self._beat_lines_hint(i)}'
             self._crumb_hint.setText(pos)
             self._crumb_hint.setToolTip(

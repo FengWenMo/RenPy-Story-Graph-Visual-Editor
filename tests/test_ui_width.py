@@ -12,7 +12,8 @@ tests/test_ui_width.py
 （修复后数字）。根因有四层，这个文件一层一条判据：
 
   ① 卡片页顶部动作条 5 个结构按钮 ≈570px → 窗口最小宽被顶到 1142px
-     （`test_window_can_be_narrow` / `test_structural_menu_*`）；
+     （`TestWindowCanBeNarrow` / `TestStructuralButtonsRestored`：按钮**不藏菜单**，
+     装进会折行的 `CardActionRow`，一行放不下就折行）；
   ② 「高级区」按钮 51 字长文本 /「选择…」按钮 / 288px 舞台小图 → 卡片地板 380px
      （`test_card_min_width_budget`）；
   ③ 立绘网格写死 4 列 → 2 张立绘卡就把卡片最小宽顶到 519px
@@ -20,11 +21,17 @@ tests/test_ui_width.py
   ④ 分栏能拖到远小于卡片宽度 → 拖窄必出横向滚动条
      （`test_every_beat_has_no_horizontal_scrollbar`：逐拍把右栏压到 340 断言）。
 
+用户 2026-10-30 第 6 条（**"不要那个结构！恢复回原来的 UI"**）之后，① 的
+"收进菜单"写法被整个否掉：按钮回到动作条上、窄了折行（`CardActionRow`）。
+另加一条迁移判据：`TestLegacyLayoutMigration` —— 老记忆（窗口 1440 / 卡片栏
+813）启动时压成窄默认，否则"默认改窄"对老用户完全不可见。
+
 判据都量**可观察几何**（minimumSizeHint / 滚动条可见性 / 分栏尺寸），不测截图。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -35,8 +42,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ.setdefault('QT_QPA_FONTDIR', r'C:\Windows\Fonts')
 pytest.importorskip('PySide6')
 
-from PySide6.QtCore import Qt                              # noqa: E402
-from PySide6.QtWidgets import (QApplication, QMenu, QScrollArea,  # noqa: E402
+from PySide6.QtCore import QPoint, Qt                      # noqa: E402
+from PySide6.QtWidgets import (QApplication, QScrollArea,  # noqa: E402
                                QToolButton)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -291,10 +298,16 @@ class TestSpriteGridColumnsAdapt:
 class TestWindowCanBeNarrow:
 
     def test_the_default_window_size_constant(self):
-        """默认窗口 1360×900（用户 2026-10-30 拍板），且没超过小屏预算。"""
-        assert MW.DEFAULT_WINDOW_SIZE == (1360, 900)
-        assert 1200 <= MW.DEFAULT_WINDOW_W <= 1400, (
+        """默认窗口 1200×800（用户 2026-10-30 晚拍板），且没超过小屏预算。
+
+        为什么从 1360 再降到 1200：用户那块屏可用区实测 **1440×852**，
+        1360 宽 = 屏宽 94% —— 他看到的还是"铺满屏幕"（"还是那么宽看不全"）。
+        """
+        assert MW.DEFAULT_WINDOW_SIZE == (1200, 800)
+        assert 1100 <= MW.DEFAULT_WINDOW_W <= 1400, (
             f'默认窗口宽 {MW.DEFAULT_WINDOW_W} 不在"窄一档"的范围')
+        assert MW.DEFAULT_WINDOW_H <= 860, (
+            f'默认窗口高 {MW.DEFAULT_WINDOW_H} 在 852 的可用高度上放不下')
 
     def test_the_window_minimum_width_is_under_900(self, ui_window):
         win = _card_page(ui_window)
@@ -319,7 +332,7 @@ class TestWindowCanBeNarrow:
             win.hide()
 
     def test_the_card_page_button_row_fits_at_900(self, ui_window):
-        """卡片页那条动作条在 900px 窗口下**不许裁剪**（结构按钮已收进菜单）。"""
+        """卡片页那条动作条在 900px 窗口下**不许裁剪**（按钮折行而不是藏起来）。"""
         win = _card_page(ui_window, (900, 820))
         row = win._back_btn.parentWidget()
         assert row.width() >= 600, f'动作条没拿到宽度（{row.width()}），量不到'
@@ -328,53 +341,91 @@ class TestWindowCanBeNarrow:
             f'—— 又有按钮被裁在窗口外')
 
 
-class TestStructuralMenu:
-    """5 个结构按钮收进「⋯ 结构」菜单（动作 / 快捷键 / 文案不变）。"""
+class TestStructuralButtonsRestored:
+    """
+    5 个结构按钮**回到动作条上**，窄了折行、不藏菜单也不裁出窗口。
 
+    用户 2026-10-30 第 6 条：**"不要那个结构！恢复回原来的 UI 先"** ——
+    第一版把它们收进「⋯ 结构」下拉菜单的写法整个否掉。
+    """
+
+    #: 动作条上的顺序（与恢复前完全一致：插入 / 插到前面 / 控制流 / 选择点 /
+    #: 撤销 / 删除）
     EXPECTED = ('＋ 插入卡片', '＋ 插到前面', '↳ 插入控制流卡',
-                '◇ 插入选择点', '🗑 删除这张卡片')
+                '◇ 插入选择点', '↩ 撤销结构操作', '🗑 删除这张卡片')
 
-    def test_the_five_actions_are_in_a_menu(self, ui_window):
+    def test_the_six_buttons_are_back_on_the_bar(self, ui_window):
         win = _card_page(ui_window)
-        btn: QToolButton = win._structural_btn
-        menu: QMenu = win._structural_menu
-        assert btn.menu() is menu, '「⋯ 结构」没挂菜单'
-        texts = tuple(a.text() for a in menu.actions())
-        assert texts == self.EXPECTED, texts
-        # 按钮本身**不再占**动作条的宽度（它们只是接线与可用性的真源）
+        shown = []
         for name in ('_insert_btn', '_insert_before_btn', '_flow_btn',
-                     '_choice_btn', '_delete_btn'):
-            assert not getattr(win, name).isVisibleTo(win), (
-                f'{name} 还显示在动作条上（窗口又被顶宽了）')
+                     '_choice_btn', '_restore_btn', '_delete_btn'):
+            btn = getattr(win, name)
+            assert btn.isVisibleTo(win), f'{name} 不在动作条上（又被藏起来了）'
+            assert btn.parentWidget() is win._action_row, (
+                f'{name} 的爹不是折行按钮带 —— 它是被塞进菜单了吗')
+            shown.append(btn.text())
+        assert tuple(shown) == self.EXPECTED, shown
 
-    def test_a_menu_action_does_the_same_thing_as_the_button(self, ui_window):
-        """菜单项 = 那个按钮的第二个入口：真的能建框（不是"点了没反应"）。"""
+    def test_there_is_no_structure_menu_any_more(self, ui_window):
+        """「⋯ 结构」这颗按钮和它的菜单**都不许再存在**（用户明确不要）。"""
+        win = _card_page(ui_window)
+        for dead in ('_structural_btn', '_structural_menu', '_structural_actions',
+                     '_structural_buttons_host'):
+            assert not hasattr(win, dead), f'{dead} 还在 —— 菜单没删干净'
+        texts = [w.text() for w in win.findChildren(QToolButton)]
+        assert '⋯ 结构' not in texts, texts
+
+    def test_a_click_still_builds_a_card(self, ui_window):
+        """按钮回到动作条后**仍然真的干活**（不是只画了个样子）。"""
         win = _card_page(ui_window)
         win._show_index(2)
         before = len(win._session.beats)
-        action = win._structural_actions[0][0]      # ＋ 插入卡片
-        action.trigger()
+        win._insert_btn.click()
         for _ in range(3):
             QApplication.processEvents()
-        assert len(win._session.beats) == before + 1, (
-            '菜单里的「＋ 插入卡片」没建出新卡（点了没反应）')
+        assert len(win._session.beats) == before + 1, '「＋ 插入卡片」没建出新卡'
 
-    def test_menu_action_state_follows_the_button(self, ui_window):
-        """可用性从按钮同步（`_sync_structural_buttons` 只认按钮）。"""
-        win = _card_page(ui_window)
-        action, button = next((a, b) for a, b in win._structural_actions
-                              if a.text() == '🗑 删除这张卡片')
-        button.setEnabled(False)
-        win._structural_menu.aboutToShow.emit()     # 用户点开菜单时发生的事
-        assert action.isEnabled() is False, '删卡片按钮置灰了，菜单项还亮着'
-        button.setEnabled(True)
-        win._structural_menu.aboutToShow.emit()
-        assert action.isEnabled() is True
+    def test_the_bands_wraps_instead_of_clipping(self, ui_window):
+        """
+        窗口窄到一行放不下 → **折行**（按钮全在），不是裁在窗口外。
 
-    def test_the_undo_structural_button_stays_visible(self, ui_window):
-        """「↩ 撤销结构操作」留在外面（它是即时反馈，不该多一层菜单）。"""
-        win = _card_page(ui_window)
-        assert win._restore_btn.isVisibleTo(win), '撤销结构操作被收进菜单了'
+        判据只看"每颗按钮的矩形是否都落在动作条里面"，
+        所以字体/间距差异不会让这条变成假失败。
+        """
+        win = _card_page(ui_window, (900, 820))
+        bar = win._back_btn.parentWidget()
+        band = win._action_row
+        assert band.height() >= band.sizeHint().height(), '按钮带高度不够'
+        for name in ('_insert_btn', '_insert_before_btn', '_flow_btn',
+                     '_choice_btn', '_restore_btn', '_delete_btn'):
+            btn = getattr(win, name)
+            top_left = btn.mapTo(bar, QPoint(0, 0))
+            assert top_left.x() >= 0, f'{name} 跑到动作条左边外面了'
+            assert top_left.x() + btn.width() <= bar.width() + 1, (
+                f'{name} 的右边缘 {top_left.x() + btn.width()}px 超出动作条 '
+                f'{bar.width()}px —— 被裁在窗口外')
+            assert top_left.y() + btn.height() <= bar.height() + 1, (
+                f'{name} 的底边超出动作条高度（折行时高度没跟上）')
+
+    def test_the_band_wraps_to_two_lines_when_narrow(self, ui_window):
+        """900px 下确实是**两行以上**（一行放不下 6 颗），且按钮带跟着变高。"""
+        win = _card_page(ui_window, (900, 820))
+        band = win._action_row
+        rows = {getattr(win, name).mapTo(band, QPoint(0, 0)).y()
+                for name in ('_insert_btn', '_insert_before_btn', '_flow_btn',
+                             '_choice_btn', '_restore_btn', '_delete_btn')}
+        assert len(rows) >= 2, f'900px 下 6 颗按钮还挤在一行（y={sorted(rows)}）'
+        assert band.height() > band.sizeHint().height() + 8, (
+            f'折行了但按钮带没变高（高 {band.height()}、单行 {band.sizeHint().height()}）')
+
+    def test_the_band_stays_one_line_when_wide(self, ui_window):
+        """1360px 下**就是原来那一行**（这条守住"恢复回原来的 UI"）。"""
+        win = _card_page(ui_window, (1360, 820))
+        band = win._action_row
+        rows = {getattr(win, name).mapTo(band, QPoint(0, 0)).y()
+                for name in ('_insert_btn', '_insert_before_btn', '_flow_btn',
+                             '_choice_btn', '_restore_btn', '_delete_btn')}
+        assert len(rows) == 1, f'1360px 下按钮折行了（y={sorted(rows)}）'
 
 
 # ==================================================================
@@ -426,3 +477,100 @@ class TestCardColumnSplitter:
         assert btn.isVisibleTo(win), '「⤢」展开按钮不见了'
         assert '双击' in btn.toolTip(), (
             f'按钮 tooltip 没提"双击分栏把手"这条捷径：{btn.toolTip()!r}')
+
+
+# ==================================================================
+#  ⑤ 老记忆迁移：默认改窄必须**真的生效**（用户第 6 条）
+# ==================================================================
+#
+# 真机（`%LOCALAPPDATA%/StoryGraph/session.json`，2026-10-30 19:39）存的是
+#   geometry = [1440, 830, 0, 23]、split_card = [402, 813]
+# —— 窗口 1440 宽、卡片栏 813（67%）。记忆**优先于默认值**，所以"默认 1600 → 1360"
+# 对老用户完全不可见：还是 1440 宽 + 卡片铺满。这组判据钉住一次性迁移。
+
+class TestLegacyLayoutMigration:
+    """老布局记忆 → 窄默认（`window_state.narrow_layout`）。"""
+
+    def _ws(self):
+        from storygraph.ui_qt import window_state as WS
+        return WS
+
+    def test_an_old_wide_layout_is_pressed_into_the_narrow_defaults(self):
+        WS = self._ws()
+        layout = {'geometry': [1440, 830, 0, 23], 'split_card': [402, 813]}
+        got = WS.narrow_layout(layout)
+        assert got['geometry'][:2] == list(MW.DEFAULT_WINDOW_SIZE), (
+            f"老记忆的窗口没被压到默认窄：{got['geometry']}")
+        assert list(got['split_card']) == list(MW.CARD_SPLIT_DEFAULT), (
+            f"卡片栏 813/1215=67% 的旧摆法没被换回默认窄：{got['split_card']}")
+        assert got[WS.LAYOUT_VERSION_KEY] == WS.LAYOUT_VERSION
+        # **不改调用方那份 dict**（只返回新的一份）
+        assert layout['geometry'] == [1440, 830, 0, 23]
+        assert layout['split_card'] == [402, 813]
+
+    def test_a_versioned_layout_is_left_alone(self):
+        """打过版本号的记忆 = 用户自己摆的 → 一个字都不动。"""
+        WS = self._ws()
+        layout = {'geometry': [1800, 1000, 10, 10], 'split_card': [700, 900],
+                  WS.LAYOUT_VERSION_KEY: WS.LAYOUT_VERSION}
+        assert WS.narrow_layout(layout) == layout
+
+    def test_a_moderate_saved_split_is_kept(self):
+        """55:45 这种正常拖过的比例不算"旧摆法"，不要乱动。"""
+        WS = self._ws()
+        got = WS.narrow_layout({'split_card': [600, 480]})
+        assert got['split_card'] == [600, 480], got['split_card']
+
+    def test_junk_layout_does_not_explode(self):
+        WS = self._ws()
+        for junk in (None, {}, '不是字典', {'geometry': ['x', 'y']},
+                     {'split_card': []}):
+            got = WS.narrow_layout(junk)
+            assert isinstance(got, dict)
+
+    def test_the_version_is_written_back_on_save(self, ui_window):
+        """存记忆时打上版本号 —— 否则每次启动都会被压一次（用户拖宽也不记住）。"""
+        WS = self._ws()
+        win = _card_page(ui_window, (1360, 820))
+        layout = win.current_layout()
+        assert layout.get(WS.LAYOUT_VERSION_KEY) == WS.LAYOUT_VERSION, (
+            f'`current_layout()` 没写 layout_version：{sorted(layout)}')
+
+    def test_reopening_an_old_project_really_narrows_the_window(self, ui_window,
+                                                               tmp_path):
+        """
+        **端到端**：写一份"老摆法"的记忆 → `reopen_project()` → 窗口真的变窄。
+
+        这条是用户那句话的直接判据（"并没有做到缩小"）：只测 `narrow_layout`
+        的纯函数不够 —— 它必须真的接在启动恢复的那条路上。
+        """
+        from storygraph.core import session_store as SS
+
+        win = _card_page(ui_window, (1360, 820))
+        store = tmp_path / 'session.json'
+        root = str(win._project_root)
+        # ⚠ 直接写文件（不走 `remember_project`）：测试环境 `STORYGRAPH_NO_SESSION=1`
+        #   时写盘是被关掉的，而这里要的正是"盘上有一份老记忆"。
+        key = __import__('os').path.abspath(root).replace('\\', '/')
+        store.write_text(json.dumps({
+            'version': SS.VERSION, 'last_project': root, 'auto_open': True,
+            'recent': [root],
+            'projects': {key: {'project_name': '老项目',
+                               'geometry': [1440, 830, 0, 23],
+                               'split_card': [402, 813]}},
+        }, ensure_ascii=False), encoding='utf-8')
+        win.session_store_path = lambda: store
+        win.resize(1440, 830)
+        for _ in range(4):
+            QApplication.processEvents()
+
+        win.reopen_project(root)
+        for _ in range(8):
+            QApplication.processEvents()
+
+        assert win.width() <= MW.DEFAULT_WINDOW_W + 40, (
+            f'老记忆 1440 宽 → 恢复后还是 {win.width()}px（用户："没有缩小"）')
+        right = int(win._split_card.sizes()[1])
+        assert right <= 480, (
+            f'老记忆里卡片栏 813px（67%）→ 恢复后 {right}px，还是"卡片铺满"')
+
