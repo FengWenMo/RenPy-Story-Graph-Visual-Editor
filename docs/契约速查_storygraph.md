@@ -6046,3 +6046,102 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 3. **UI 只编排**：`assets/*`、`story/*` 新模块纯函数无 Qt；判定全在 `app/*`。
 4. **真机 `sr_general` 全程只读**：这一轮没有写用户项目一个字节（探针全部写临时副本）。
 
+## §73 自定义模块 v7：**复杂子句**与**技术调用**（2026-10-30）
+
+> 用户："自定义模块一定要支撑起复杂的转场调用一类的。复杂子句平时可以不用，
+> 但也要能依靠自定义模块来定义它！"
+> 结论：语句声明多了 `clauses` 段；清单多了 `calls` 段；两者都遵循同一条
+> "**改值才写、只动那一段、认不出不猜**"。
+
+### 73.1 语句的复杂子句（`rules.json` 的 `statements[].clauses`）
+
+```json
+{"name": "mycue",
+ "pattern": [{"kind": "keyword", "text": "mycue"},
+             {"kind": "variable", "column": "标题"}],
+ "clauses": [
+   {"keyword": "at",    "name": "位置", "kind": "words"},
+   {"keyword": "behind","name": "挡住", "kind": "word"},
+   {"keyword": "with",  "name": "转场", "kind": "transition"},
+   {"keyword": "zorder","name": "叠序", "kind": "number"}]}
+```
+
+- **为什么不能塞进 `pattern`**：子句由关键字引入、**可以不出现、顺序可变**，
+  值还可能是一段带空格/括号/引号的表达式（`Dissolve( 0.3 )`、
+  `MultipleTransition([...])`）。`pattern` 是"第 N 个词"的平铺序列，装不下。
+- `kind` 白名单（`story/spec_clauses.py::CLAUSE_KINDS`）：
+  `word` / `words` / `expr` / `transition` / `number`。
+  `transition` = 同 `expr`，但**演出预览会按它演**；其余只做展示/编辑。
+- **读值** `clause_values(head, clauses)`：只认**顶层、完整词**的关键字
+  （引号/括号/注释里的 `at` 不算）；值从关键字之后到下一个**已声明**关键字
+  （或块冒号/行尾注释）为止。`at`/`behind` 可以是一串（逗号原样保留）。
+- **写回** `set_clause_value(head, clauses, name, value)`：
+  * 值没变 → **原样返回入参字符串**（逐字节相同）；
+  * 有这一句 → 只换"值"那一段，别处的空格/引号/其它子句一个字节不动；
+  * 没有这一句、人填了值 → 按声明顺序插在下一个出现过的子句前面，都没出现
+    就插行尾（块语句插在结尾 `:` 之前）；
+  * 清空 → 删关键字 + 值，只吃一个分隔空格；实际不存在时清空是 no-op；
+  * 声明里没有的名字 → **原样返回**（绝不拼一个项目不认识的参数）。
+- **动态列**：列名是 `head·列名~关键字`（`mycue·位置~at`），`~` 是保留分隔符。
+  `Beat.spec_arg_cells` 用**全部声明子句**做边界（只给一句时 `at` 会把后面的
+  `with …` 吞进值里 —— 已用判据钉住）；`fold_dynamic_columns` 认 `~` 后走
+  `set_clause_value`，不写成 `位置=…`（那对自定义语句是语法错）。
+- **Excel 没有项目根也能改**：列名里的 `~at` 就是最小声明；**插新子句**需要
+  声明顺序，只有一格时按当前这一句处理（能从行里认出的其他关键字仍按边界
+  切开，见 `spec_clauses` 的扫描规则）。
+- **预览**：`app.stage._declared_transition_calls` 读 `spec_head` + 声明，
+  只消费 `kind='transition'` 的子句；`TransitionCall.source='declared-clause'`。
+- **零改动**：`set_clause_value` 的等式守卫在"值相同"时返回原串，所以
+  "教会之前 / 之后"导出逐字节相同（铁律 #6）。
+
+### 73.2 技术调用（`rules.json` 的 `calls`）
+
+```json
+{"calls": [
+  {"head": "my_wipe", "label": "擦除",
+   "columns": [{"name": "transition", "label": "转场",
+                "position": 0, "kind": "transition"},
+               {"name": "layer", "label": "层", "kw": "layer"}],
+   "effect": "Dissolve", "seconds_arg": 1}]}
+```
+
+- 适用对象：`$ my_wipe("left", 0.6)` / `$ renpy.transition(...)` 这类 **Python
+  代码里的一次函数调用**，不是 Ren'Py 语句；它们住在 `Beat.code`。
+- **内置**：`renpy.transition` 不需要声明（`spec_args.BUILTIN_CALL_SCHEMAS`），
+  自带两列：`transition@0`（转场表达式）与 `layer@kw`（关键字 `layer=`）；
+  这是 B1"过场可编辑"的默认形状。
+- `story/call_expr.py`：只按顶层逗号切实参；`read_arg` / `set_arg`；
+  **同一 head 出现两次 / 多行调用 / 括号配不平 → 读空、写原样**，绝不挑一条改；
+  值没变返回原串；清空关键字参数会连 `name=` 与一个逗号一起删。
+- **列名**：位置参数 `head·列名@0`；关键字参数 `head·列名@kw`（`@kw` 是
+  `parse_dynamic_full` 认的保留尾巴）。读表那侧不需要查声明。
+- **折回**：`fold_spec_arg_columns` 只在这一拍**真的**有该 head 的调用时改
+  `Beat.code` 那一行，并同步 `ordered`（与 raw 叶语句同一套"池行 == 记录行"
+  纪律）；`python:` 块/多条同名调用不建可编辑列。
+- **预览**：`calls[].effect`（可空）+ `seconds_arg` 才演；没写 effect 仍会把
+  调用列出来，但 `transition_catalog` 如实标 `unknown`，**不假装淡入**。
+  `TransitionCall.source='declared-call'`。
+- 写入口：`statement_registry.declare_calls(project_root, calls, replace=...)`
+  （坏 JSON 拒绝覆盖；`replace=True` = 整段替换，`False` = 按 head 合并）。
+
+### 73.3 UI
+
+- `ui_qt/dialog_learn.py` 第 3 块「复杂子句（可选，高级）」：表格四列
+  关键字 / 列名 / 值类型 / 可省略；`built()` 的 `clauses` 与 `pattern` 一起
+  过 `build_declaration`，保存调 `declare_statement(..., clauses=…)`。
+  ⚠ `[]` 也算"这次编辑过"：人删光子句再保存，清单里就该没有它们。
+- 头部「技术调用…」→ `ui_qt/dialog_calls.py`：调用名 / 等价效果 / 时长参数 /
+  参数列（`转场@0; 层=layer`）。保存写 `calls` 段。
+- 判据：`tests/test_spec_clauses.py`（37 条：声明/读值/写回/动态列/Excel 无
+  注册表/技术调用/预览/两个 UI 小窗）；`tests/test_stage_complex_clause_at.py`
+  （7 条）与 `test_stage_snapshot_scene_at.py`（19 条）覆盖 `show … at … behind`
+  的 at 不再丢、跨章 `scene_at`/`layer_at` 继承。
+
+### 73.4 已知边界
+
+- 同一子句关键字**出现两次**：读值只取第一条，写回只改第一条（不猜哪条算数）。
+- 只声明了 `at`、而行里还有 `with`：`at` 会读到行尾 —— 这是"只声明了一部分"
+  的必然结果；要么把全部子句声明齐，要么别用列编辑（`.rpy` 原文仍逐字保留）。
+- 自定义调用的**返回值/副作用**工具不知道；`effect`/`seconds_arg` 是项目
+  自己声明的"等价预览"，不是对函数体的推断。
+
