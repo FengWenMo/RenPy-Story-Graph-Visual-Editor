@@ -44,6 +44,12 @@ WRITERS = {
         '2026-10-23 W1a 从"整图快照"拆出来）。**不是脚本**、不过 generation_guard；'
         '原子替换；不写进 `game/`',
     'assets/asset_extensions.py::save': '写扩展配置 JSON',
+    'assets/asset_mapping.py::save_mapping':
+        '写**项目级资源映射** `storygraph.mapping.json`（JSON，不是 .rpy；'
+        '原子写 + 旧文件 `.bak`）。⚠ 刻在自己这里写而不是复用 '
+        '`story.paths.write_text_atomic`：`assets` 层不能反向依赖 `story` 层'
+        '（契约 H1 / `test_package_layering`）。只写映射文件，不碰用户脚本、'
+        '不碰资源表',
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
     'pipeline/build.py::build_project': '写构建报告 JSON',
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',

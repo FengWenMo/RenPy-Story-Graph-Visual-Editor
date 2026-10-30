@@ -66,6 +66,55 @@ def overwritable(res: dict) -> bool:
     return 'HANDWRITTEN_TARGET' in (res.get('codes') or [])
 
 
+def _scan_stage_identity(host, beats):
+    """
+    导出前的**身份门禁**：这几条 `show` 写的名字，项目里真的有吗？
+
+    判据在 `app.stage_identity_guard`（只读、不猜）：
+      · 已知角色 tag（角色表「立绘 tag」/ 映射 `characters` / 引擎事实）；
+      · 项目 `.rpy` 里声明过的图像名（`_from_script` / ATL / layeredimage）；
+      · `bg`/`cg`/`ui` 这类真图层名，以及 `show screen` 这种目标关键字。
+    不是这些 → 报出来让人看（`show refusing` 就是这一类：预览图/文件 stem
+    被当成名字写了进去，游戏里没有这个图像）。
+
+    拿不到资源表 / 角色表时**不判**（返回 `degraded` 空结果）—— 白名单残缺时
+    报出来的大半是假警报，那比不报更坏。任何异常也一律当"这次判不了"：
+    **检查失败不拦导出**（与舞台那条同一个口径），绝不因为一次检查把导出弄挂。
+
+    ⚠ **为什么是模块级函数而不是 mixin 方法**：`tests/test_stage_suspect.py`
+    把 `_review_stage_suspects` 当未绑定函数、拿一个**裸 QWidget** 当 self 调
+    （那个测试只验证"问没问、改没改"）。写成 `self._scan_stage_identity(...)`
+    的话裸 QWidget 上没有这个方法，测试替身当场 AttributeError —— 而那和线上
+    无关。模块级函数让"宿主只提供属性"的老式替身继续能用。
+    """
+    try:
+        from storygraph.assets import asset_identity as AI
+        from storygraph.app import stage_identity_guard as SG
+
+        provider = getattr(host, '_registry_provider', None)
+        registry = provider() if callable(provider) else None
+        root = str(getattr(host, '_project_root', '') or '')
+        ctx = AI.project_context(registry, root)
+        result = SG.scan_stage_identity(
+            beats, project_root=root,
+            known_tags=ctx.get('known_tags') or frozenset(),
+            known_chars=ctx.get('known_chars') or {},
+            mapping=ctx.get('mapping') or {},
+            all_rows=ctx.get('rows') or {})
+        log = getattr(host, '_log', None)
+        if callable(log):
+            if result.degraded:
+                log('[导出] 身份检查跳过：没拿到角色表/资源表，'
+                    '无法判断 show 的名字是否存在')
+            elif result:
+                log(f'[导出] 身份检查：{len(result)} 条 show 的名字'
+                    f'项目里找不到（共看 {result.checked} 条）')
+        return result
+    except Exception as e:                      # noqa: BLE001 - 检查失败不拦导出
+        swallow('main_window._scan_stage_identity', e)
+        return None
+
+
 class WindowExportMixin:
     """
     导出 / 体检 / 舞台预览 / 剧本表 —— 与外部世界打交道的那一批。
@@ -184,13 +233,19 @@ class WindowExportMixin:
 
     def _review_stage_suspects(self) -> bool:
         """
-        导出前查一遍 Stage 列，返回 `False` = 人点了取消（零写）。
+        导出前查一遍「舞台（高级）」和「立绘」列，返回 `False` = 人点了取消（零写）。
 
-        「舞台（高级）」是**代码**：那一格写什么，导出后就是脚本里的一行。
-        判据在 `story.stage_suspect`（宽进：宁可多问一次，不要漏一句），
-        这里只负责"问"和"照着人的决定改内存"。
+        两类问题（判据各自在模块里，一行都不在这里）：
 
-        为什么**默认原样导出**而不是默认挪走：挪走会改用户填的格子。
+          · `story.stage_suspect` —— 舞台列里"看着不像 Ren'Py 语句"的行
+            （宽进：宁可多问一次，不要漏一句），可以挪到「备注」列；
+          · `app.stage_identity_guard` —— `show` 写的名字项目里根本找不到
+            （2026-10-30 用户：**不许静默写出 `show refusing`**），只能改名字。
+
+        两类**并排摆进同一个弹窗**（同一个流程、同一个"原样导出 / 取消"决定），
+        别另造一套框 —— 一次导出最多问一次，问完就写。
+
+        为什么**默认原样导出**而不是默认处理：挪走/改名都会改用户填的格子。
         工具不该把"改用户的表"当默认动作 —— 要改得人自己点。
         """
         from storygraph.story import stage_suspect as SS
@@ -203,14 +258,15 @@ class WindowExportMixin:
                           project_root=getattr(self, '_project_root', '') or '')
         except Exception as e:                  # noqa: BLE001 - 检查失败不拦导出
             swallow('main_window._review_stage_suspects', e)
-            return True
-        if not res:
+            res = SS.ScanResult()
+        ident = _scan_stage_identity(self, beats)
+        if not res and not ident:
             return True
 
         from PySide6.QtWidgets import QDialog
         from storygraph.ui_qt import dialog_stage_suspect as D
 
-        dlg = D.StageSuspectDialog(self, res)
+        dlg = D.StageSuspectDialog(self, res or SS.ScanResult(), identity=ident)
         if dlg.exec() != QDialog.Accepted:
             self._status('已取消导出 —— 什么都没写')
             self._log('[导出] 已取消（未写任何文件）')
@@ -289,6 +345,9 @@ class WindowExportMixin:
         这条路的真源是那张 `.xlsx`，工具在导出前顺手改用户的工作簿风险更大
         （还有别的 sheet、格式、公式）—— 把"哪几拍、原文是什么"说清楚，
         让人回 Excel 自己挪。
+
+        身份门禁（`show` 的名字项目里找不到）也在**同一个**弹窗里查 ——
+        从表导回同样会写出非法 `show`，不能因为换了条路就少一道。
         """
         from storygraph.story import stage_suspect as SS
 
@@ -296,18 +355,24 @@ class WindowExportMixin:
             from storygraph.story.excel_import import import_beats_from_excel
 
             beats = import_beats_from_excel(table_path)
-            res = SS.scan(beats,
-                          project_root=getattr(self, '_project_root', '') or '')
         except Exception as e:                  # noqa: BLE001 - 检查失败不拦导出
             swallow('main_window._review_table_stage_suspects', e)
             return True
-        if not res:
+        try:
+            res = SS.scan(beats,
+                          project_root=getattr(self, '_project_root', '') or '')
+        except Exception as e:                  # noqa: BLE001
+            swallow('main_window._review_table_stage_suspects', e)
+            res = SS.ScanResult()
+        ident = _scan_stage_identity(self, beats)
+        if not res and not ident:
             return True
 
         from PySide6.QtWidgets import QDialog
         from storygraph.ui_qt import dialog_stage_suspect as D
 
-        dlg = D.StageSuspectDialog(self, res, allow_move=False)
+        dlg = D.StageSuspectDialog(self, res or SS.ScanResult(),
+                                   allow_move=False, identity=ident)
         if dlg.exec() != QDialog.Accepted:
             self._status('已取消导出 —— 什么都没写')
             self._log('[导出] 已取消（未写任何文件）')

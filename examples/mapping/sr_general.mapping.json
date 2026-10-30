@@ -1,0 +1,666 @@
+{
+  "schema": "storygraph.mapping/1",
+  "name": "千连万理 · 资源映射",
+  "characters": {
+    "ALL": {
+      "display": "所有人"
+    },
+    "CAT": {
+      "display": "猫"
+    },
+    "DOG": {
+      "display": "狗"
+    },
+    "DS": {
+      "display": "导师"
+    },
+    "DUCK": {
+      "display": "鸭子",
+      "aliases": [
+        "YA"
+      ]
+    },
+    "DY": {
+      "display": "大爷"
+    },
+    "GRANDMA": {
+      "display": "奶奶"
+    },
+    "GRANDPA": {
+      "display": "爷爷"
+    },
+    "HOST": {
+      "display": "主持人"
+    },
+    "LS": {
+      "display": "老师"
+    },
+    "MAN": {
+      "display": "男人"
+    },
+    "PET": {
+      "display": "宠物"
+    },
+    "PLAYER1": {
+      "display": "队友1"
+    },
+    "PLAYER2": {
+      "display": "队友2"
+    },
+    "PLAYER3": {
+      "display": "队友3"
+    },
+    "REPORTER": {
+      "display": "记者"
+    },
+    "SZ": {
+      "display": "校长"
+    },
+    "WOMAN": {
+      "display": "女人"
+    },
+    "aaa": {
+      "display": "舍友A",
+      "aliases": [
+        "A"
+      ]
+    },
+    "aabb": {
+      "display": "A&B"
+    },
+    "ay": {
+      "display": "阿姨"
+    },
+    "ba": {
+      "display": "保安"
+    },
+    "bbb": {
+      "display": "舍友B",
+      "aliases": [
+        "B"
+      ]
+    },
+    "bd": {
+      "display": "班导"
+    },
+    "dhy": {
+      "display": "杜恒远"
+    },
+    "dhyab": {
+      "display": "杜恒远&A&B"
+    },
+    "dororo": {
+      "display": "Roro"
+    },
+    "fw": {
+      "display": "服务员",
+      "aliases": [
+        "FWY"
+      ]
+    },
+    "hidden_name": {
+      "display": "？？？"
+    },
+    "jc": {
+      "display": "蒋忱"
+    },
+    "jcab": {
+      "display": "蒋忱&A&B"
+    },
+    "jg": {
+      "display": "教官"
+    },
+    "lan": {
+      "display": "蓝",
+      "avatar": "game/cc_preview/avatar/lan.png"
+    },
+    "ld": {
+      "display": "校领导"
+    },
+    "ling": {
+      "display": "凌跃捷",
+      "aliases": [
+        "LTJ"
+      ],
+      "avatar": "game/cc_preview/avatar/ling.png"
+    },
+    "ly": {
+      "display": "姥爷"
+    },
+    "mm": {
+      "display": "妈妈",
+      "aliases": [
+        "MOM"
+      ]
+    },
+    "narrator": {
+      "display": "narrator"
+    },
+    "q": {
+      "display": "青"
+    },
+    "toto": {
+      "display": "Toto"
+    },
+    "txf": {
+      "display": "汤X凤"
+    },
+    "u": {
+      "display": "???"
+    },
+    "xing": {
+      "display": "星桥理子",
+      "avatar": "game/cc_preview/avatar/xing.png"
+    },
+    "xy": {
+      "display": "校医"
+    },
+    "ye": {
+      "display": "叶怀瑾",
+      "avatar": "game/cc_preview/avatar/ye.png"
+    }
+  },
+  "rules": [
+    {
+      "glob": "game/cc_preview/avatar/<stem>.png",
+      "kind": "avatar",
+      "char": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/avatar/<stem>.png",
+      "kind": "avatar",
+      "char": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/lan/*.png",
+      "kind": "preview",
+      "char": "lan",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/lan/dynamic_images/*.png",
+      "kind": "preview",
+      "char": "lan",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/ling/*.png",
+      "kind": "preview",
+      "char": "ling",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/ling/dynamic_images/*.png",
+      "kind": "preview",
+      "char": "ling",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/xing/*.png",
+      "kind": "preview",
+      "char": "xing",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/xing/dynamic_images/*.png",
+      "kind": "preview",
+      "char": "xing",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/ye/*.png",
+      "kind": "preview",
+      "char": "ye",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/cc_preview/ye/dynamic_images/*.png",
+      "kind": "preview",
+      "char": "ye",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/lan/*.png",
+      "kind": "sprite",
+      "char": "lan",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/lan/dynamic_images/*.png",
+      "kind": "sprite",
+      "char": "lan",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/ling/*.png",
+      "kind": "sprite",
+      "char": "ling",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/ling/dynamic_images/*.png",
+      "kind": "sprite",
+      "char": "ling",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/xing/*.png",
+      "kind": "sprite",
+      "char": "xing",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/characters/ye/*.png",
+      "kind": "sprite",
+      "char": "ye",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "images/characters/ye/*.png",
+      "kind": "sprite",
+      "char": "ye",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/*.jpg",
+      "kind": "bg",
+      "char": "bg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/bg/*.jpg",
+      "kind": "bg",
+      "char": "bg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/bg/*.png",
+      "kind": "bg",
+      "char": "bg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/minigamepieces/puzzlepieces/*.jpg",
+      "kind": "bg",
+      "char": "bg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/minigamepieces/puzzlepieces/*.png",
+      "kind": "bg",
+      "char": "bg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/images/cg/*.png",
+      "kind": "cg",
+      "char": "cg",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/charactercenter/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/bar/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/button/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 10/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 11/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 12/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 13/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 13/00_00/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 15/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 18/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 19/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 21/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 24/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 26/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 27/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 28/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 29/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 30/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 31/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 31/下一段文本/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 45/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 45/角色/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/frame 9/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/dutui/other/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/overlay/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/bar/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/button/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/overlay/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/scrollbar/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/phone/slider/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/scrollbar/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/gui/slider/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/minigamepieces/logo/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/phone_msg/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    },
+    {
+      "glob": "game/phone_msg/exp/*.png",
+      "kind": "ui",
+      "char": "ui",
+      "attr": "<stem>"
+    }
+  ],
+  "images": {
+    "bg": {
+      "kind": "bg"
+    },
+    "ball_moving_game_bg_1": {
+      "kind": "bg"
+    },
+    "button_1": {
+      "kind": "ui"
+    },
+    "button_2": {
+      "kind": "ui"
+    },
+    "button_3": {
+      "kind": "ui"
+    },
+    "icon_book": {
+      "kind": "ui"
+    },
+    "map_bg": {
+      "kind": "bg"
+    },
+    "start": {
+      "kind": "ui"
+    },
+    "title_bg": {
+      "kind": "bg"
+    },
+    "music_background": {
+      "kind": "bg"
+    },
+    "music_buttonback": {
+      "kind": "ui"
+    },
+    "music_buttonback2": {
+      "kind": "ui"
+    },
+    "bgbed": {
+      "kind": "bg"
+    },
+    "bgcafe": {
+      "kind": "bg"
+    },
+    "bgcafeblur": {
+      "kind": "bg"
+    },
+    "bgforest": {
+      "kind": "bg"
+    },
+    "bglibrary": {
+      "kind": "bg"
+    },
+    "bglibraryblur": {
+      "kind": "bg"
+    },
+    "bgocean": {
+      "kind": "bg"
+    },
+    "bgoceanblur": {
+      "kind": "bg"
+    },
+    "bgroom": {
+      "kind": "bg"
+    },
+    "bgtea": {
+      "kind": "bg"
+    },
+    "bgtest": {
+      "kind": "bg"
+    },
+    "button_beach_hover": {
+      "kind": "ui"
+    },
+    "button_beach_idle": {
+      "kind": "ui"
+    },
+    "button_cafe_hover": {
+      "kind": "ui"
+    },
+    "button_cafe_idle": {
+      "kind": "ui"
+    },
+    "button_library_hover": {
+      "kind": "ui"
+    },
+    "button_library_idle": {
+      "kind": "ui"
+    },
+    "dbackground": {
+      "kind": "bg"
+    },
+    "dbackgroundcrop": {
+      "kind": "bg"
+    },
+    "dororo_displeased": {
+      "kind": "sprite",
+      "char": "dororo",
+      "attr": "dororo_displeased"
+    },
+    "dororo_neutral": {
+      "kind": "sprite",
+      "char": "dororo",
+      "attr": "dororo_neutral"
+    },
+    "dororo_smile": {
+      "kind": "sprite",
+      "char": "dororo",
+      "attr": "dororo_smile"
+    },
+    "start_menu_glamour": {
+      "kind": "ui"
+    },
+    "images_start_menu_glamour": {
+      "kind": "ui"
+    },
+    "toto_dead": {
+      "kind": "sprite",
+      "char": "toto",
+      "attr": "toto_dead"
+    },
+    "toto_happy": {
+      "kind": "sprite",
+      "char": "toto",
+      "attr": "toto_happy"
+    },
+    "toto_neutral": {
+      "kind": "sprite",
+      "char": "toto",
+      "attr": "toto_neutral"
+    },
+    "toto_serious": {
+      "kind": "sprite",
+      "char": "toto",
+      "attr": "toto_serious"
+    }
+  },
+  "attributes": {}
+}
