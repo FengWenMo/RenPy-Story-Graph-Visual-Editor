@@ -747,16 +747,31 @@ def layout_from(*, page=None, card_index=None, chapter=None, geometry=None,
     return out
 
 
+def _inside(path, root) -> bool:
+    """`path` 在 `root` 里面吗（根认不出来就当不在）。"""
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except Exception as e:                       # noqa: BLE001 - 路径怪就当作不在
+        swallow('core.session_store.inside', e)
+        return False
+
+
 def resolve_chapter(layout: dict, root=None) -> str:
     """
     布局里记的章节 → **现在还在的那个路径**（找不到就 `''`）。
 
-    顺序：绝对路径（若还在）→ **相对项目根那份**（项目搬过家也能找回来）。
+    顺序：绝对路径（若还在**且属于这个项目**）→ 相对项目根那份（项目搬过家也能找回来）。
+
+    ⚠ 绝对路径必须校验归属（2026-10-30 真机踩到）：用户有两个同名项目
+    （`D:\\千连万理\\RenPyTest\\sr_general` 和 `D:\\千连万理\\sr_general`），
+    旧记忆里的 `last_chapter` 是**另一个项目**的文件 —— 打开 A 项目却载入 B 项目的
+    章节，于是"打开的项目"和"屏幕上的内容"对不上，还可能在 B 的文件上写回。
     """
     if not isinstance(layout, dict):
         return ''
     abs_ch = str(layout.get('last_chapter') or '')
-    if abs_ch:
+    if abs_ch and (root is None or _inside(abs_ch, root)):
         try:
             if Path(abs_ch).is_file():
                 return abs_ch

@@ -486,10 +486,33 @@ class TestCardColumnSplitter:
 # 真机（`%LOCALAPPDATA%/StoryGraph/session.json`，2026-10-30 19:39）存的是
 #   geometry = [1440, 830, 0, 23]、split_card = [402, 813]
 # —— 窗口 1440 宽、卡片栏 813（67%）。记忆**优先于默认值**，所以"默认 1600 → 1360"
-# 对老用户完全不可见：还是 1440 宽 + 卡片铺满。这组判据钉住一次性迁移。
+# 对老用户完全不可见：还是 1440 宽 + 卡片铺满。
+#
+# 20:28 又变成 `[1392, 804]`（version 已经是 2）：迁移**跑过一次**了，但用户随手
+# 把窗口拖大/最大化，退出时又把大尺寸存了回去 —— 下次启动"还是这么大"。
+# 所以现在的规则是：**窗口大小每次恢复都压**（不看版本号），
+# 卡片栏迁移才是一次性的。
+
+@pytest.fixture
+def big_screen(monkeypatch):
+    """
+    把"屏幕"换成用户那块 **1440×852**（可用区 -48 边距）。
+
+    为什么需要：offscreen 平台的屏幕只有 800×800，`fit_to_available` 会把
+    1200 的窗口压成 752 —— 于是 e2e 判据分不清"上限生效"和"被屏幕压小"，
+    假绿。
+    """
+    from storygraph.ui_qt import window_state as WS
+
+    def fake_fit(w, h, available=None, margin=48):
+        return (min(int(w), 1440 - 48), min(int(h), 852 - 48))
+
+    monkeypatch.setattr(WS, 'fit_to_available', fake_fit)
+    return fake_fit
+
 
 class TestLegacyLayoutMigration:
-    """老布局记忆 → 窄默认（`window_state.narrow_layout`）。"""
+    """布局记忆 → 窄默认（`window_state.narrow_layout`）。"""
 
     def _ws(self):
         from storygraph.ui_qt import window_state as WS
@@ -508,12 +531,38 @@ class TestLegacyLayoutMigration:
         assert layout['geometry'] == [1440, 830, 0, 23]
         assert layout['split_card'] == [402, 813]
 
-    def test_a_versioned_layout_is_left_alone(self):
-        """打过版本号的记忆 = 用户自己摆的 → 一个字都不动。"""
+    def test_a_versioned_big_window_is_still_capped(self):
+        """
+        打过版本号**也**要压 —— 用户第 6 条反馈的直接判据。
+
+        "打开已经打开过的项目还是这么大"：第一次迁移之后用户把窗口拖大/最大化
+        过一次，退出时 `1392×804` 就带着 `layout_version=2` 存回去了。窗口大小
+        不能再给版本号留口子：记忆只用来把窗口**记小**，不用来记大。
+        """
         WS = self._ws()
-        layout = {'geometry': [1800, 1000, 10, 10], 'split_card': [700, 900],
+        layout = {'geometry': [1392, 804, 0, 23], 'split_card': [583, 584],
                   WS.LAYOUT_VERSION_KEY: WS.LAYOUT_VERSION}
-        assert WS.narrow_layout(layout) == layout
+        got = WS.narrow_layout(layout)
+        assert got['geometry'][:2] == list(MW.DEFAULT_WINDOW_SIZE), (
+            f'版本号已是 2 的大窗口没被压：{got["geometry"]}')
+        # 位置不动；卡片栏 50:50 不是"卡片铺满"，不许动
+        assert got['geometry'][2:] == [0, 23], got['geometry']
+        assert got['split_card'] == [583, 584], got['split_card']
+        assert layout['geometry'] == [1392, 804, 0, 23]
+
+    def test_a_smaller_window_is_not_blown_up(self):
+        """记忆比默认更小 → 尊重它（"压上限"不是"每次开都放大"）。"""
+        WS = self._ws()
+        got = WS.narrow_layout({'geometry': [980, 700, 10, 10]})
+        assert got['geometry'] == [980, 700, 10, 10], got['geometry']
+
+    def test_a_versioned_split_is_left_alone(self):
+        """卡片栏的迁移只做一次：用户自己拖的比例之后一直尊重。"""
+        WS = self._ws()
+        layout = {'split_card': [700, 900],
+                  WS.LAYOUT_VERSION_KEY: WS.LAYOUT_VERSION}
+        got = WS.narrow_layout(layout)
+        assert got['split_card'] == [700, 900], got['split_card']
 
     def test_a_moderate_saved_split_is_kept(self):
         """55:45 这种正常拖过的比例不算"旧摆法"，不要乱动。"""
@@ -537,7 +586,8 @@ class TestLegacyLayoutMigration:
             f'`current_layout()` 没写 layout_version：{sorted(layout)}')
 
     def test_reopening_an_old_project_really_narrows_the_window(self, ui_window,
-                                                               tmp_path):
+                                                               tmp_path,
+                                                               big_screen):
         """
         **端到端**：写一份"老摆法"的记忆 → `reopen_project()` → 窗口真的变窄。
 
@@ -573,4 +623,91 @@ class TestLegacyLayoutMigration:
         right = int(win._split_card.sizes()[1])
         assert right <= 480, (
             f'老记忆里卡片栏 813px（67%）→ 恢复后 {right}px，还是"卡片铺满"')
+
+    def test_reopening_with_a_versioned_big_window_still_opens_small(
+            self, ui_window, tmp_path, big_screen):
+        """
+        **端到端（用户真机现状）**：记忆里是 `1392×804` 且 `layout_version=2`
+        —— 也就是"迁移过一次、又被用户拖大存回去"的那种 —— 再打开仍然窄。
+
+        这条钉的是"先把窗口拖大再重启"这个循环：只要还能存回大尺寸，
+        用户就会一直看到"打开还是这么大"。
+        """
+        from storygraph.core import session_store as SS
+
+        win = _card_page(ui_window, (1360, 820))
+        store = tmp_path / 'session.json'
+        root = str(win._project_root)
+        key = __import__('os').path.abspath(root).replace('\\', '/')
+        store.write_text(json.dumps({
+            'version': SS.VERSION, 'last_project': root, 'auto_open': True,
+            'recent': [root],
+            'projects': {key: {'project_name': '拖大过一次的项目',
+                               'geometry': [1392, 804, 0, 23],
+                               'split_card': [583, 584],
+                               'layout_version': 2}},
+        }, ensure_ascii=False), encoding='utf-8')
+        win.session_store_path = lambda: store
+        win.resize(1392, 804)
+        for _ in range(4):
+            QApplication.processEvents()
+
+        win.reopen_project(root)
+        for _ in range(8):
+            QApplication.processEvents()
+
+        assert win.width() <= MW.DEFAULT_WINDOW_W + 40, (
+            f'记忆里 1392×804（version=2）→ 打开还是 {win.width()}px'
+            '（用户："打开已经打开过的项目还是这么大"）')
+        assert win.height() <= MW.DEFAULT_WINDOW_H + 40, win.height()
+        right = int(win._split_card.sizes()[1])
+        assert right <= 640, (
+            f'窗口压窄了但卡片栏还有 {right}px（50:50 在 1200 窗口下约 600）')
+
+    def test_the_remembered_split_is_scaled_not_clamped(
+            self, ui_window, tmp_path, big_screen):
+        """
+        **端到端**：记忆里 `split_card=[583,584]`（对半），窗口被压到 1200 后
+        分栏只有 ~975 宽，两栏必须**还是对半**。
+
+        老实现直接 `setSizes([583,584])`：和 1167 > 975 时 Qt 从右边硬砍，
+        实测摆成 `[545,357]` —— 用户会看到"我摆的对半，怎么卡片只剩三分之一"。
+        """
+        from storygraph.core import session_store as SS
+
+        win = _card_page(ui_window, (1360, 820))
+        store = tmp_path / 'session.json'
+        root = str(win._project_root)
+        key = __import__('os').path.abspath(root).replace('\\', '/')
+        store.write_text(json.dumps({
+            'version': SS.VERSION, 'last_project': root, 'auto_open': True,
+            'recent': [root],
+            'projects': {key: {'project_name': '对半分过的项目',
+                               'geometry': [1392, 804, 0, 23],
+                               'split_card': [583, 584],
+                               'layout_version': 2}},
+        }, ensure_ascii=False), encoding='utf-8')
+        win.session_store_path = lambda: store
+        for _ in range(4):
+            QApplication.processEvents()
+
+        win.reopen_project(root)
+        for _ in range(8):
+            QApplication.processEvents()
+
+        left, right = (int(n) for n in win._split_card.sizes())
+        assert abs(left - right) <= 40, (
+            f'记忆里是对半，摆出来却是 {left}:{right}（右侧被硬砍）')
+
+    def test_absolute_pixels_are_scaled_to_the_current_width(self):
+        from storygraph.ui_qt.window_state import WindowStateMixin as WSM
+        got = WSM._scale_sizes([583, 584], 975)
+        assert got == [487, 488], got
+        assert sum(got) == 975
+        # 已经放得下（和 ≤ 当前宽）也要等比缩，不能原样塞回去
+        assert WSM._scale_sizes([200, 200], 400) == [200, 200]
+        # 垃圾输入不炸
+        for junk, avail in (([], 100), (['x', 1], 100), ([0, 0], 100),
+                            ([1, 1], 0)):
+            WSM._scale_sizes(junk, avail)
 

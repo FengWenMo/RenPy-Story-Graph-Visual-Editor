@@ -348,6 +348,31 @@ def test_chapter_is_remembered_both_absolute_and_relative(store, tmp_path):
     assert SS.resolve_chapter(got, tmp_path / 'nowhere') == ''
 
 
+def test_a_chapter_from_another_project_is_never_loaded(tmp_path):
+    """
+    ⭐ **别的项目的章节不许载入**（2026-10-30 真机踩到）。
+
+    用户有两个同名项目：`...\\RenPyTest\\sr_general` 和 `...\\sr_general`。
+    记忆里的 `last_chapter` 是绝对路径，指向**另一个项目**里的文件 ——
+    打开 A 却载入 B 的章节，屏幕上的内容跟"打开的项目"对不上，
+    改起来还会写回 B。
+    """
+    other = _proj(tmp_path, 'other')
+    ch = other / 'game' / 'chapter' / 'ch01.rpy'
+    assert ch.is_file(), '`_proj` 应该已经建好一章'
+
+    mine = _proj(tmp_path, 'mine')
+    my_ch = mine / 'game' / 'chapter' / 'ch02.rpy'
+
+    layout = {'last_chapter': str(ch),
+              'last_chapter_rel': 'game/chapter/ch02.rpy'}
+    # 绝对那份属于别人 → 走相对那份（就在本项目里，虽然还没建出来）
+    assert SS.resolve_chapter(layout, mine) == ''
+    my_ch.write_text('label ch02:\n    "y"\n', encoding='utf-8')
+    assert SS.resolve_chapter(layout, mine) == str(my_ch), \
+        '别的项目的绝对路径赢了 —— 打开 A 却载入 B 的章节'
+
+
 # ===========================================================================
 #  ① 纯数据：项目里那份（用户说的"项目内部有保存布局"）
 # ===========================================================================

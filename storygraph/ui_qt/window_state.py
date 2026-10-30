@@ -79,24 +79,21 @@ LEGACY_CARD_SHARE = 0.60
 
 def narrow_layout(layout: dict) -> dict:
     """
-    老布局记忆 → 新的「窄默认」（**一次性**迁移，写回后不再触发）。
+    布局记忆 → 窄默认（**每次恢复都跑**，不是只迁移一次）。
 
-    为什么必须有它（2026-10-30 用户第 6 条："并没有做到缩小！！！还是那么宽
-    看不全！！！"）：真机 `session.json` 里这个项目存的是
-    `geometry = [1440, 830, 0, 23]`、`split_card = [402, 813]` —— 窗口 1440 宽、
-    卡片栏 813（占 67%）。启动时**记忆优先于默认值**，于是"默认窗口改窄"
-    这个改动对老用户**完全不可见**：他还是看到 1440 宽 + 卡片铺满。
-    而他那块屏的可用区实测只有 **1440×852** —— 1440 宽就是"铺满整个屏幕"。
+    两条规则，力度不同：
 
-    所以这里在版本号缺失/过低时压一次：
+      · **窗口大小：每次恢复都压**到 `DEFAULT_WINDOW_SIZE`（只压大的，小的照旧）。
+        为什么不再看版本号：真机第一次迁移确实变成了 1200×800，但用户随后把
+        窗口拖大/最大化过一次，退出时就把 `1392×804` 存回去了（这时
+        `layout_version` 已经是 2）—— 下一次启动"又这么大"，用户第 6 条反馈
+        就是这句话。所以：**记忆只用来把窗口记小，不用来记大**。会话里拖多大、
+        要不要最大化都随你，只是下次打开仍回到默认窄窗。
 
-      · 窗口宽 / 高 → 不超过 `DEFAULT_WINDOW_SIZE`（位置不动，屏幕夹紧仍由
-        `_restore_to_screen` 做）；
-      · 卡片页右栏 → 超过 60% 就回到 `CARD_SPLIT_DEFAULT`（"列表窄、卡片铺满"
-        那种旧摆法；正常拖过的比例（比如 55:45）不动）。
+      · **卡片栏：只压一次**（`layout_version < 2` 的旧摆法，右栏 > 60%）。
+        用户自己拖过的比例（比如 55:45）之后一直尊重不动。
 
-    之后用户自己拖多大就是多大 —— `current_layout()` 会写回 `LAYOUT_VERSION`，
-    下一次启动 `version >= LAYOUT_VERSION` 直接原样返回。
+    位置不在这里动：屏幕夹紧仍由 `_restore_to_screen` 做。
     """
     if not isinstance(layout, dict):
         return {}
@@ -104,8 +101,6 @@ def narrow_layout(layout: dict) -> dict:
         version = int(layout.get(LAYOUT_VERSION_KEY) or 1)
     except (TypeError, ValueError):
         version = 1
-    if version >= LAYOUT_VERSION:
-        return layout
     out = dict(layout)
     out[LAYOUT_VERSION_KEY] = LAYOUT_VERSION
     try:
@@ -118,10 +113,12 @@ def narrow_layout(layout: dict) -> dict:
     if g and g[0] and g[1]:
         w = min(int(g[0]), int(DEFAULT_WINDOW_SIZE[0]))
         h = min(int(g[1]), int(DEFAULT_WINDOW_SIZE[1]))
-        out['geometry'] = [w, h, g[2], g[3]]
-    sc = SS.normalize_sizes(out.get('split_card'))
-    if len(sc) == 2 and sum(sc) > 0 and sc[1] > sum(sc) * LEGACY_CARD_SHARE:
-        out['split_card'] = list(CARD_SPLIT_DEFAULT)
+        if (w, h) != (int(g[0]), int(g[1])):
+            out['geometry'] = [w, h, g[2], g[3]]
+    if version < LAYOUT_VERSION:
+        sc = SS.normalize_sizes(out.get('split_card'))
+        if len(sc) == 2 and sum(sc) > 0 and sc[1] > sum(sc) * LEGACY_CARD_SHARE:
+            out['split_card'] = list(CARD_SPLIT_DEFAULT)
     return out
 
 
@@ -186,8 +183,9 @@ class WindowStateMixin:
             split_card=self._splitter_sizes('_split_card'),
             dock_state=self._dock_state_blob(),
             root=getattr(self, '_project_root', None))
-        # 打上格式版本：下次启动 `narrow_layout` 就不再把这份记忆当"老摆法"压一次
-        # （用户自己拖出的宽窗口必须被尊重，只有**升级前**的记忆才迁移）。
+        # 打上格式版本：`narrow_layout` 靠它判断"卡片栏要不要迁回默认窄"
+        # （只迁一次）。⚠ 窗口大小**不看**这个版本号 —— 每次恢复都会压到
+        # `DEFAULT_WINDOW_SIZE` 以内（用户："打开已经打开过的项目还是这么大"）。
         layout[LAYOUT_VERSION_KEY] = LAYOUT_VERSION
         return layout
 
@@ -266,8 +264,30 @@ class WindowStateMixin:
             swallow('ui_qt.window_state.restore_to_screen', e)
             return False
 
+    @staticmethod
+    def _scale_sizes(sizes, available):
+        """
+        记忆里的**绝对像素** → 当前分栏宽度的**等比像素**。
+
+        为什么非换算不可（2026-10-30 实测）：窗口被压到 1200 之后分栏宽 ~975，
+        而记忆里是 `[583, 584]`（和 = 1167 > 975）。`setSizes` 不会等比缩，
+        它从右边硬砍 —— 实测摆出来是 `[545, 357]`，卡片页只剩三分之一。
+        用户看到的会是"我明明摆的是对半，怎么卡片这么窄"。
+        """
+        try:
+            total = sum(int(n) for n in sizes)
+            if total <= 0 or available <= 0:
+                return []
+            avail = int(available)
+            out = [max(1, int(round(int(n) * avail / total))) for n in sizes]
+            # 四舍五入的零头补给最后一栏，保证总和 = available
+            out[-1] += avail - sum(out)
+            return out
+        except (TypeError, ValueError):
+            return []
+
     def _restore_splitters(self, layout: dict):
-        """两处分栏尺寸摆回去（值不合法就保持默认 —— 不猜）。"""
+        """两处分栏比例摆回去（**按比例**，值不合法就保持默认 —— 不猜）。"""
         for name, key in (('_split_graph', 'split_graph'),
                           ('_split_card', 'split_card')):
             sizes = SS.normalize_sizes((layout or {}).get(key))
@@ -275,8 +295,11 @@ class WindowStateMixin:
                 continue
             try:
                 sp = getattr(self, name, None)
-                if sp is not None:
-                    sp.setSizes(sizes)
+                if sp is None:
+                    continue
+                available = sum(int(n) for n in sp.sizes()) or int(sp.width())
+                scaled = self._scale_sizes(sizes, available)
+                sp.setSizes(scaled or sizes)
             except Exception as e:                  # noqa: BLE001
                 swallow('ui_qt.window_state.restore_splitters', e)
 
@@ -348,9 +371,11 @@ class WindowStateMixin:
             self._log(f'[记忆] ⚠ 打不开上次那个项目：{type(e).__name__}: {e}')
             return {'ok': False, 'reason': str(e)}
         try:
-            self._restore_splitters(layout)
-            self._restore_docks(layout)
+            # 顺序有讲究（2026-10-30）：**先定窗口大小，再摆 dock**。
+            # 反过来摆的话，分栏是在"还没 resize 的旧宽度"上摆的，像素尺寸
+            # 会被 Qt 硬砍，比例失真（实测 583:584 摆成 545:357）。
             self._restore_to_screen(layout.get('geometry'))
+            self._restore_docks(layout)
             chapter = SS.resolve_chapter(layout, root)
             if chapter:
                 # ⚠ `goto_card=False` 与构造时的自动载入一致：**第一屏必须是
@@ -366,6 +391,12 @@ class WindowStateMixin:
                     self._show_index(int(idx))
                 except Exception as e:              # noqa: BLE001 - 摆不回就停在第一拍
                     swallow('ui_qt.window_state.reopen_project.index', e)
+            # 分栏**最后摆**，而且下一回合再补一次：分栏宽度要等这一页真的
+            # 显示、布局跑完才准。在页面还藏着的时候 `setSizes`，量到的是
+            # "最小宽兜底"（实测 172:340，用户摆的对半完全失真）。
+            self._restore_splitters(layout)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._restore_splitters(layout))
         except Exception as e:                      # noqa: BLE001 - 摆布局绝不拦启动
             swallow('ui_qt.window_state.reopen_project.layout', e)
         if remember:

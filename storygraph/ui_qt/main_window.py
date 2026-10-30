@@ -145,7 +145,7 @@ from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.stage_thumb import BeatStageThumb
 from storygraph.ui_qt.status import AppStatusBar, Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
-from storygraph.ui_qt.wheel_guard import WheelSafeComboBox
+from storygraph.ui_qt.wheel_guard import WheelSafeComboBox, ensure_installed
 # `MainWindowQt` 的五块职责各住一个文件（P3-14，2026-10-05）。
 # **基类顺序**：六个 mixin 必须排在 `QMainWindow` **前面** ——
 # `eventFilter` / `closeEvent` 是 Qt 虚函数（`QObject` 自己就定义了），
@@ -1007,7 +1007,10 @@ class BeatCardEditor(QWidget):
         row1 = QHBoxLayout()
         row1.setSpacing(T.SPACE['sm'])
         row1.addWidget(self._section('说话人'))
-        self._speaker = QComboBox()
+        # ⚠ 这格必须是 `WheelSafeComboBox`（2026-10-30 用户："滚动会导致选择切换"）。
+        #   它是可编辑组合框 —— 实测这种控件**连焦点都不用**就会被滚轮换值，
+        #   而且把滚动吃掉，于是滚页面时"人换了、页面没动"。
+        self._speaker = WheelSafeComboBox()
         self._speaker.setEditable(True)
         self._speaker.setMinimumWidth(160)
         self._speaker.setMaximumWidth(240)
@@ -2305,6 +2308,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
 
     def __init__(self, engine, script_path=None, project_root=None, graph=None):
         super().__init__()
+        #: **全局滚轮守卫**（2026-10-30）：任何组合框 / 数值框 / 滑块都不许被
+        #: 滚轮改值（用户："滚动会导致选择切换！！！不要这个！"）。装一次就够，
+        #: 幂等；装在这里而不是 `main()`，是为了测试里单独建窗口也受保护。
+        ensure_installed()
         self.engine = engine
         self._project_root = project_root or getattr(engine, 'project_root', None)
         #: 全部编辑语义都在这个会话里（本窗口不自己实现任何一条）
@@ -2353,9 +2360,9 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # ⚠ **按屏幕压一遍**（2026-10-23）：`sizeHint()` 会把工具栏的完整宽度
         #   算进来（实测 2720×705），照它开窗在 1080p/2K 上都跑到屏幕外。
         # 2026-10-30：默认尺寸 1600×950 → **1200×800**（用户第 5 条反馈"默认为窄"；
-        #   数字见模块顶部 `DEFAULT_WINDOW_SIZE`）。有记忆时仍以记忆为准
-        #   （`_restore_to_screen` 会覆盖这里；**升级前**的旧记忆由
-        #   `window_state.narrow_layout` 一次性压到这个上限）。
+        #   数字见模块顶部 `DEFAULT_WINDOW_SIZE`）。有记忆时以记忆为准，但
+        #   `window_state.narrow_layout` 会把它**压在这个上限以内**（每 次 都 压，
+        #   不是只迁一次 —— 用户第 6 条："打开已经打开过的项目还是这么大"）。
         self.resize(*fit_to_available(*DEFAULT_WINDOW_SIZE))
         self._build()
         #: 构造后**立刻**载入这一章（同步）。
