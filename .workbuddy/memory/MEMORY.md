@@ -121,7 +121,7 @@
 
 ## 五、当前的片（判据见同名测试）
 
-E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门｜L7 版式恢复｜导入冲突预检（取消=零写）｜记忆门禁｜导出落点｜卡片单拍舞台图｜右栏竖向配额｜重号不级联｜derived 段要交代｜写入口探针｜GitHub star｜E1/E3+D3 拖线落点由结构决定｜🎮 引擎试玩 + 演出专用版｜舞台可疑行导出前确认｜卡片三修｜二轮反馈五件套（资产身份解析 / 舞台几何 / 自定义过场 / UI 宽窄 / 非法 show 门禁）｜自定义模块 v7（复杂子句 / 技术调用 / 跨章 scene_at）｜UI 第 6 条（删「⋯ 结构」、滚轮永不改值、分栏按比例、`resolve_chapter` 不跨项目）｜资产选择器左右栏两种口径｜词汇表 + `labeled_choices` 四处下拉｜尺寸面板（铺满/适应/50% → 项目已有 transform，匹配不到才生成 `sg_*`）｜生成 `sg_*` 三护栏（sha256 标记 / 写前查重 / 引用存在性）｜**显式「换景」**（`scene` 只在人按下时写，确认框报"会清掉 N 个立绘"；顺带修了"scene 不清 CG 图层"——真机 40/61 个拍预览在骗人）｜**本景单独改写计数**（`override_advice`：只报数、三档提示、算不出来降档，面板/确认框同一份措辞）｜**合并回源**（`at_merge` + 一处一个勾的确认框：改的是 `@at` 不是删行；已一致时按钮不出现；顺手修掉 ATL 冒号被吃掉的老坑）｜**跨章继承闭环**（入口状态 = `continuity.Chapter.entry`，`app/stage_entry.py` 按项目指纹缓存 + `ui_qt/entry_warm.py` 后台算一次；卡片「当前舞台」/「尺寸」/小图/演出预览四条线都接上了 → 「本章第一拍补一条 show」真按得到）｜「自定义倍数」输入框（`parse_zoom` 唯一判据；面板一行 `QLineEdit`；`match_without_natural` 让图找不到也能查重；真机 0.5 复用已有 `zoom 0.5`、0.75 才生成）。
+E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门｜L7 版式恢复｜导入冲突预检（取消=零写）｜记忆门禁｜导出落点｜卡片单拍舞台图｜右栏竖向配额｜重号不级联｜derived 段要交代｜写入口探针｜GitHub star｜E1/E3+D3 拖线落点由结构决定｜🎮 引擎试玩 + 演出专用版｜舞台可疑行导出前确认｜卡片三修｜二轮反馈五件套（资产身份解析 / 舞台几何 / 自定义过场 / UI 宽窄 / 非法 show 门禁）｜自定义模块 v7（复杂子句 / 技术调用 / 跨章 scene_at）｜UI 第 6 条（删「⋯ 结构」、滚轮永不改值、分栏按比例、`resolve_chapter` 不跨项目）｜资产选择器左右栏两种口径｜词汇表 + `labeled_choices` 四处下拉｜尺寸面板（铺满/适应/50% → 项目已有 transform，匹配不到才生成 `sg_*`）｜生成 `sg_*` 三护栏（sha256 标记 / 写前查重 / 引用存在性）｜**显式「换景」**（`scene` 只在人按下时写，确认框报"会清掉 N 个立绘"；顺带修了"scene 不清 CG 图层"——真机 40/61 个拍预览在骗人）｜**本景单独改写计数**（`override_advice`：只报数、三档提示、算不出来降档，面板/确认框同一份措辞）｜**合并回源**（`at_merge` + 一处一个勾的确认框：改的是 `@at` 不是删行；已一致时按钮不出现；顺手修掉 ATL 冒号被吃掉的老坑）｜**跨章继承闭环**（入口状态 = `continuity.Chapter.entry`，`app/stage_entry.py` 按项目指纹缓存 + `ui_qt/entry_warm.py` 后台算一次；卡片「当前舞台」/「尺寸」/小图/演出预览四条线都接上了 → 「本章第一拍补一条 show」真按得到）｜「自定义倍数」输入框（`parse_zoom` 唯一判据；面板一行 `QLineEdit`；`match_without_natural` 让图找不到也能查重；真机 0.5 复用已有 `zoom 0.5`、0.75 才生成）｜**随包两份预设改成真项目扫出来的**（`tools/build_presets_real.py`：92 文件 / 312 条 show / 服装 12 行 / 表情 91 行；A/B 只认注释证据，xing 各 1 处 → 留空；`角色` 候选不封闭；`scan_project` 新增"表和注释只对上 N/M"提示）。
 
 **真缺口**：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜从当前拍 warp 的近似性｜引擎试玩只支持 Windows 源生 SDK。
 **待用户决定**：D1 树/表归属｜D2 两套生成器收敛｜D3 rename patch 接 Qt｜D4 Stage 格级下拉｜D5 坏味道课题｜D6 pytest.ini basetemp｜D7 多引擎加深｜D8 提交策略。
@@ -143,7 +143,8 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
 
 ## 八、发布包
 
-- 清单（`packaging/make_release.py::REQUIRED`）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`LICENSE`。判据 `test_release_manifest.py`。
+- 清单（`packaging/make_release.py::REQUIRED`）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`storygraph.rules.json`、`storygraph.mapping.json`、`LICENSE`。判据 `test_release_manifest.py`。
+- 两份预设（`storygraph/presets/`）**是真项目扫出来的**，重建脚本 `tools/build_presets_real.py`（`--dry-run` 只打印）；映射与 rules 同源同发，但**不自动套进项目**（映射写的是"这个项目的哪张图是谁"），见契约 §82。
 - 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip`。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
 - 手册截图 `tools/_shot_manual.py`：`offscreen` + `STORYGRAPH_NO_SESSION=1`；**不许 `win.close()`**（未导出改动弹模态框永卡），结尾 `os._exit(0)`；结构页用 `zoom_reset→zoom_by(2.0)→center_on_node`。
 - 真机工程会长大（`sr_general` 55→96 章）：金标红先 `tools/golden_baseline.py --check`，确认项目变了再 `--save`。基线**别把工具副产物算成输入**（按 `resolve()` 去重、不收 `~$*` 与 `*.bak*`）。

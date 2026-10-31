@@ -7102,3 +7102,58 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 `ME.SPECS['images'].empty` 从前写的是「工具认成了什么」「补进映射…」，
 人都找不到那个入口。判据
 `test_the_other_sections_explain_why_zero_is_fine`。
+
+## §82 随包的两份预设：真项目扫出来的（2026-11-01）
+
+### 82.1 三件套
+
+`storygraph/presets/` 里的文件既**随包发**（`packaging/make_release.py` 的
+`extras` + `REQUIRED_BASE`；演出专用版走 `make_stage_release.PRESET_FILES`
+→ `项目预设/`），也是 `app/stage_edition.py` **补缺**时的来源。三件：
+
+| 文件 | 内容 | 会自动套进项目吗 |
+|---|---|---|
+| `storygraph.rules.json` | `show` 的 角色/服装/表情 三列候选 | 会（演出专用版，缺才补） |
+| `storygraph.mapping.json` | 立绘代号表：服装字母 + 表情编号 | **不会**（映射写的是"这个项目的哪张图是谁"） |
+| `layout.json` | 剧情图节点坐标 | 会（同上） |
+
+### 82.2 值从哪来：`tools/build_presets_real.py`
+
+一条命令从真项目重建前两份（`--dry-run` 只打印）。四条真源，一条都不猜：
+
+1. 表情编号 ← `game/images/characters/<tag>/对应.txt`（四种写法都认；
+   两份都在时由剧本注释投票挑一份）；
+2. 服装字母 ← 注释 `# 表情B7` 后面那条 `show` 的服装属性（证据 <2 处留空）；
+3. 中文名 ← 项目自己的 `charactercenter.rpy`（`CC_OUTFIT_LABEL` /
+   `CHARACTER_NAMES`）与 `definitions.rpy`（`default x_name` +
+   `define x = DynamicCharacter(..., image='tag')`）；
+4. 角色候选 ← 剧本里真的 `show` 过的**角色 tag**（有
+   `images/characters/<tag>/` 或声明过 layeredimage 的才算；
+   `show bgoceanblur` 那种"一张图一个字"不是角色）。
+
+**服装 A/B 不是按 `CC_OUTFIT_CYCLE` 的顺序排的**：那是界面上的轮换顺序
+（ling 循环是 `aa / 泳装 / 叉腰`，剧本里 `B` 却是叉腰）。唯一的判据是注释。
+
+### 82.3 `角色` 那格不封闭（`limit: false`）
+
+`show` 的第一个词是**图片 tag**：真项目里有 `show bgoceanblur` / `show icon` /
+`show cg cg01`。封闭枚举会把它们判成非法 —— 与 `pattern.py`
+"候选是下拉里的备选，不是必填项"是同一条规矩。`服装` 本来就不封闭，
+`表情` 的 68 个枚举与真项目逐一比对是完整的，维持封闭。
+
+### 82.4 只剩一份编号表也可能错（`scan_project` 的新提示）
+
+以前只在**两份表打架**时说话。真项目只剩一份时它一声不响，而
+`sr_general` 的 lan 正是这种：`对应.txt` 重新编过号，剧本注释还按老编号写
+（26 处证据只对上 5 处）。现在证据 ≥2 且对上不到一半就记一句
+"编号表「X」和剧本注释只对上 N/M"——**一行数据都不改**，只把数字交出去
+（工具不替人裁决；判据 `test_sprite_codes.py` 两条：只剩一份表也要说 /
+对得上就不吵）。
+
+### 82.5 判据
+
+`tests/test_presets_real.py`（14 条）：随包映射能被 `load_mapping` 读进来
+（0 警告）、两段形状、**证据不足的字母必须是空的**（xing / clothes2 /
+泳装 / 汉服）、映射里的每个属性都在 rules 的候选里、角色候选含 5 个真 tag、
+角色格不封闭，最后用两条真题收口：`lan B7 → show lan base_hand_up indifferent`、
+`ye A1 → show ye aa close_happy`。
