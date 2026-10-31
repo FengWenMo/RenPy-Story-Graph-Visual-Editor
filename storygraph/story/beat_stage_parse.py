@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from storygraph.core.vocabulary import (SHOW_CLAUSE_KEYWORDS,
                                         SHOW_INTRO_KEYWORDS,
@@ -175,6 +176,171 @@ def item_at(item, beat=None) -> str:
         return at
     return (str(getattr(beat, 'at', '') or '').strip()
             or str(getattr(beat, 'transform', '') or '').strip())
+
+def show_part_info(part: str) -> dict:
+    """
+    一条 `show` 子句（`split_stage_items` 的一段）→ 简单判断。
+
+    返回 `{'part','image','at','kind'}`；`kind` 是：
+
+      · `simple` —— 紧凑 `图@变换` 或纯图名（**能安全改写**）；
+      · `complex` —— 含 `behind/with/as/at/onlayer/zorder` 等修饰
+        （**拒绝**自动改写：那是"不猜语义"）；
+      · `expression` —— `show expression …`（图像名是表达式，拒绝改写）。
+
+    为什么在 `story` 层（2026-10-31）：原来只有 `app.stage._show_part_info`
+    一份，用来给"尺寸面板改 at"判断"这一条能不能改"。现在 `story.at_merge`
+    （合并回源）要判**同一件事** —— 两份各写一遍的后果不是多几行，而是
+    "面板说能改、合并却改不动"这种两个出口两种待遇。所以规则搬到这里，
+    `app.stage` 那个私有名转调它（保持老调用点不动）。
+
+    `kind='complex'` 时 `image` 是 `classify_show_words` 认出的目标名
+    （认不出就是 `''`）—— 只用来判断"是不是这个对象"，不参与改写。
+    """
+    from storygraph.core.safeguard import swallow
+
+    part = str(part or '').strip()
+    if not part:
+        return {}
+    # 行尾冒号 = 这一条 show 后面跟着 ATL 块（`split_stage_items` 不拆它，
+    # `_split_show_items` 剥下来记在 `block` 上）。这里也剥：留着它的话
+    # `@at` 会解析成 `half:` —— 改写时就会吃掉那个冒号，ATL 块变无主缩进，
+    # 引擎报 `expects a non-empty block`。剥下来的标记放进 `block`，
+    # 改写方（`set_item_at`）负责拼回去。
+    block = part.endswith(':')
+    if block:
+        part = part[:-1].rstrip()
+        if not part:
+            return {}
+    if part.startswith('expression') and (
+            len(part) == len('expression')
+            or part[len('expression')].isspace()):
+        return {'part': part, 'image': '', 'at': '', 'kind': 'expression',
+                'block': block}
+    words = part.split()
+    if any(w in SHOW_CLAUSE_KEYWORDS or w in SHOW_INTRO_KEYWORDS
+           for w in words):
+        try:
+            target = classify_show_words(part, intros=()).target or ''
+        except Exception as e:                 # noqa: BLE001 - 认不出就按复杂处理
+            swallow('story.beat_stage_parse.show_part_info', e)
+            target = ''
+        return {'part': part, 'image': str(target), 'at': '',
+                'kind': 'complex', 'block': block}
+    if '@' in part:
+        image, _, at = part.partition('@')
+        return {'part': part, 'image': image.strip(), 'at': at.strip(),
+                'kind': 'simple', 'block': block}
+    return {'part': part, 'image': part, 'at': '', 'kind': 'simple',
+            'block': block}
+
+
+#: `set_item_at` 的结局（机器读；**措辞由调用方给** —— 尺寸面板与合并桥
+#: 面对的是同一件事，但两处要说的话不一样）。
+AT_OK = 'ok'
+#: 这一处本来就写着这个值（不改，不算失败）
+AT_NOOP = 'noop'
+#: 这一拍没有这个对象（调用方该说"这里没有它"）
+AT_MISSING = 'missing'
+#: 复杂子句（含 `behind/with/as/at`…）：不猜语义
+AT_COMPLEX = 'complex'
+#: `show expression …`：图像名是表达式，分不出边界
+AT_EXPRESSION = 'expression'
+#: 拍级 `at` / `transform` 会盖住这一条 —— 只改这一条改不动它
+AT_BLOCKED = 'blocked'
+
+
+@dataclass(frozen=True)
+class ItemAtRewrite:
+    """`set_item_at` 的结果（`status` 见上面的常量）。"""
+
+    status: str = AT_MISSING
+    #: 改写后的整个 `show` 字段（不是 `AT_OK` 时**原样返回**原文）
+    text: str = ''
+    #: 这一处**原本**生效的 at（`AT_OK` / `AT_NOOP` 时有效）
+    before_at: str = ''
+    #: 命中的是第几条子句（`AT_MISSING` 时 -1）
+    index: int = -1
+
+    @property
+    def ok(self) -> bool:
+        return self.status in (AT_OK, AT_NOOP)
+
+    @property
+    def changed(self) -> bool:
+        return self.status == AT_OK
+
+
+def set_item_at(text: str, tag: str, at: str, beat=None) -> ItemAtRewrite:
+    """
+    把 `show` 字段里**这一条**的 `@at` 改成 `at`（`at=''` = 去掉 at）。
+
+    这是"改一条 show 的变换"的**唯一实现**（2026-10-31）：尺寸面板改源、
+    合并回源改那几处、以后别的入口，走的都是它 —— 因为"哪一条算数"这件事
+    只许有一份答案：
+
+      · 同一个 tag 写了多条时，**最后一条**算数（Ren'Py 侧就是后 show 的赢）；
+      · `kind='complex'` / `expression` 一条都不改（返回对应 `status`）。
+
+    与 `app.stage._bg_show_edit` / `_layer_show_edit` 的关系：那两个还负责
+    "没有这条时**补一条**"（`show bg X` 的「从这一拍起」模式），补条目的
+    逻辑留在这里不做 —— 这个函数**只改已有的，绝不新增/删除子句**
+    （返回 `AT_MISSING` 就是没有）。合并回源要的正是这条保证：它是"把
+    写法对齐"，不是"给用户加语句"。
+
+    ⚠ 拍级 `at` / `transform`（Stage 高级区里那一列）与 item 的 at 是
+    **叠加**关系（`item_at` 的优先级）：item 自己没写 at 时，拍级的值会
+    继续生效 —— 要"去掉 at"时只改 item 是改不动的（返回 `AT_BLOCKED`），
+    决不含糊地报成功。要写入一个值则不受影响（item 的 `@at` 压过拍级）。
+
+    `beat` 是可选的：给了才做上面那条拍级检查（不给就只能判 item 自己
+    那一层 —— 单测与"只看字符串"的调用方不需要 Beat）。
+    """
+    raw = str(text or '')
+    tag = str(tag or '').strip()
+    at = str(at or '').strip()
+    parts = list(split_stage_items(raw))
+    if not tag or not parts:
+        return ItemAtRewrite(status=AT_MISSING, text=raw)
+    hit = -1
+    before_at = ''
+    block = False
+    for i, part in enumerate(parts):
+        info = show_part_info(part)
+        words = str(info.get('image') or '').split()
+        if not words or words[0] != tag:
+            continue
+        if info.get('kind') == 'expression':
+            return ItemAtRewrite(status=AT_EXPRESSION, text=raw)
+        if info.get('kind') == 'complex':
+            return ItemAtRewrite(status=AT_COMPLEX, text=raw)
+        hit = i
+        before_at = str(info.get('at') or '').strip()
+        block = bool(info.get('block'))
+    if hit < 0:
+        return ItemAtRewrite(status=AT_MISSING, text=raw)
+    if beat is not None and not before_at and not at:
+        # 要的是"原样"（去掉 at），可这条 item 本来就没写 at —— 拍级
+        # `at` / `transform` 会顶上（`item_at` 的优先级）。这种情况**只改
+        # item 改不动**，报 `AT_BLOCKED`；拍级有值却报 noop 就是撒谎。
+        #
+        # 反过来（要写入一个值）不受影响：item 自己写了 `@at` 就压过拍级。
+        level = (str(getattr(beat, 'at', '') or '').strip()
+                 or str(getattr(beat, 'transform', '') or '').strip())
+        if level:
+            return ItemAtRewrite(status=AT_BLOCKED, text=raw,
+                                 before_at=level, index=hit)
+    if before_at == at:
+        return ItemAtRewrite(status=AT_NOOP, text=raw, before_at=before_at,
+                             index=hit)
+    part = parts[hit]
+    body = part[:-1].rstrip() if block else part.strip()
+    base = body.rpartition('@')[0].rstrip() if '@' in body else body.strip()
+    new_part = (f'{base}@{at}' if at else base) + (':' if block else '')
+    new_text = '; '.join([*parts[:hit], new_part, *parts[hit + 1:]])
+    return ItemAtRewrite(status=AT_OK, text=new_text, before_at=before_at,
+                         index=hit)
+
 
 def _parse_show_expression(part: str) -> dict:
     """

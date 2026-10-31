@@ -411,8 +411,10 @@ class TestPreviewLabels:
         from storygraph.ui_qt.stage_preview import StagePreviewWindow
         frame = StageFrame(index=0, line_id='t.0001', label='t', speaker='',
                            text='', scene='bg big', scene_src=-1)
-        _label, data = StagePreviewWindow._at_targets_of(frame)[0]
+        label, data = StagePreviewWindow._at_targets_of(frame)[0]
         assert data == ('scene', '', -1)
+        # 2026-10-31：留白会让人以为按下去就改这一行 —— 实际是"本章第一拍补一条"
+        assert '出处不在这章' in label
 
     def test_the_override_entry_is_offered_only_for_inherited_backgrounds(self):
         pytest.importorskip('PySide6')

@@ -157,10 +157,12 @@ class TestRows:
         assert size_rows(None, project_root=project, screen=SCREEN) == []
 
     def test_an_inherited_line_says_so_in_the_tooltip(self, project):
-        """跨章继承（出处 -1）：行照样显示尺寸，但 tooltip 先说清改不了。"""
+        """跨章继承（出处 -1）：行照样显示尺寸，但 tooltip 先说清会发生什么。"""
         rows = _rows(_frame(scene='bg big'), project)      # scene_src 缺省 -1
         assert rows[0]['source'] == -1
-        assert '上一章继承' in rows[0]['why']
+        # 2026-10-31 起不是死路：按「改」= **本章第一拍补一条 show**。
+        assert '上一章' in rows[0]['why']
+        assert '本章第一拍' in rows[0]['why'] and '补一条' in rows[0]['why']
 
 
 # ==================================================================
@@ -353,21 +355,30 @@ class TestPlanSizeEdit:
         assert not edit.ok
         assert 'show bg' in edit.reason and '高级区' in edit.reason
 
-    def test_an_inherited_background_says_it_cannot_be_edited_here(
+    def test_an_inherited_background_is_added_at_the_first_beat(
             self, project):
-        """跨章继承（出处 -1）：不猜一个拍号，明确说"改不了、要用换景"。"""
+        """
+        跨章继承（出处 -1）：不猜一个拍号 —— 在本章**第一拍**补一条 `show`。
+
+        （2026-10-31 之前这里是"拒绝"；现在它是唯一能改的路：出处不在本剧本
+        里，改不了"那一行"，写 `scene` 又会清台。判据仍是**不猜**：落点明写
+        第 1 拍，且只加一条 `show`。）
+        """
         beats = [Beat(seq=1, label='t', text='')]      # 这一章没有任何 scene
         row = _rows(_frame(index=0, scene='bg big'), project)[0]
         edit = plan_size_edit(beats, 0, row, key='cover', at='bgfit',
                               project_root=project, screen=SCREEN)
-        assert not edit.ok
-        assert '上一章继承' in edit.reason and '换景' in edit.reason
+        assert edit.ok, edit.reason
+        assert edit.inserted is True
         assert edit.beat_index == 0
+        assert edit.after == 'bg big@bgfit'          # 不带 at：**不写 scene**
+        assert '补一条' in edit.diff_text()
 
-    def test_an_inherited_layer_says_it_cannot_be_edited_here(self, project):
+    def test_an_inherited_layer_is_added_at_the_first_beat(self, project):
         beats = [Beat(seq=1, label='t', text='')]
         row = _rows(_frame(index=0, layers='cg cg1'), project)[0]
         edit = plan_size_edit(beats, 0, row, key='cover', at='bgfit',
                               project_root=project, screen=SCREEN)
-        assert not edit.ok
-        assert '上一章继承' in edit.reason
+        assert edit.ok, edit.reason
+        assert edit.inserted is True and edit.target == 'layer'
+        assert edit.after == 'cg cg1@bgfit'

@@ -42,6 +42,14 @@ Ren'Py transform 定义文件，而不是让人自己去 `transform.rpy` 里手�
 
 名字被别的内容占了（人自己写过 `transform sg_fit_cover: zoom 3`）时**不改别人
 的定义**，退到 `sg_fit_cover_2`，并在说明里写清为什么改叫这个。
+
+## 「自定义倍数」（2026-10-31）
+
+`custom` 是**同一套护栏下的第五种预设**（`size_presets.GENERATABLE`）：名字和体
+都从人填的那个数来 —— `0.75 → sg_zoom_075 (zoom 0.75)`。区别只有一条：
+数不合法（不是数 / 越出 `ZOOM_MIN..ZOOM_MAX`）就**到此为止**，不夹一个数接着写。
+判断用的是 `size_presets.zoom_error`，面板按下去之前也是它 ——
+"输入框说能填"和"写盘前觉得不能写"绝不能是两套判断。
 """
 
 from __future__ import annotations
@@ -162,6 +170,23 @@ def transform_name(key: str, zoom: float = None) -> str:
         return f'sg_zoom_{int(round(pct)):03d}'
     tail = f'{float(z):g}'.replace('.', 'p')
     return f'sg_zoom_{tail}'
+
+
+def custom_hint(zoom) -> str:
+    """
+    「自定义倍数」那一行下面那句（**唯一措辞**：面板 / 探针共用）。
+
+    只说两件**确定**的事：会写什么体、没有现成的时候叫什么名字。不承诺
+    "项目里一定有/没有" —— 那要读 transform 表，发生在确认那一步（写了什么
+    由 `SgPlan.diff_text` 说）。
+    """
+    z = SP.target_zoom('custom', zoom)
+    if z is None or SP.zoom_error(z):
+        return ''
+    body = SP.atl_body('custom', z)
+    name = transform_name('custom', z)
+    tail = f'；没有现成的就生成 {name}（重名会换名）' if name else ''
+    return f'会写 {body}{tail}'
 
 
 def definition_text(name: str, key: str, zoom: float = None) -> str:
@@ -508,7 +533,16 @@ def plan_define(sg, key: str, zoom: float = None, *, index=None, natural=None,
     if key == 'as_is':
         return SgPlan(action=REFUSE, key=key,
                       reason='「原样」是去掉 at，不生成任何 transform')
-    if key not in SP.PRESET_ORDER:
+    if key == 'custom':
+        # 「自定义倍数」（2026-10-31）：名字和体都从**这一个数**来
+        # （`sg_zoom_075` / `zoom 0.75`），所以数不合法就到此为止 ——
+        # 绝不夹一个数接着写（夹了人以为自己填的是那个值）。
+        err = SP.zoom_error(zoom)
+        if err:
+            return SgPlan(action=REFUSE, key=key, zoom=zoom,
+                          reason=f'自定义倍数没填好：{err}')
+        zoom = round(float(zoom), 3)
+    if key not in SP.GENERATABLE:
         return SgPlan(action=REFUSE, key=key,
                       reason=f'「{key}」不是可生成的尺寸预设')
     stmt = SP.atl_body(key, zoom)
@@ -527,6 +561,22 @@ def plan_define(sg, key: str, zoom: float = None, *, index=None, natural=None,
     if defn is not None and _def_stmt(defn) == stmt:
         return SgPlan(action=REUSE, name=base, key=key, zoom=zoom, rel=rel,
                       reason=f'项目里已经有 {base}（{stmt}），直接用它')
+    # ② 查重之一·补：**同一条 ATL 体**（逐字相同的命令）也叫等价 ——
+    # 它不看名字，也**不需要知道图多大**（倍数是尺度无关的）。
+    #
+    # 为什么必须有这一条：真机 `sr_general` 里 `zoom 0.5` 早就叫
+    # `cg38402160` 了，而"自定义 0.5×"如果拿不到 `natural`（图找不到 /
+    # 纯函数调用）就没法做几何查重 —— 那不写文件、直接用它才是对的，
+    # 不该再生成一条 `sg_zoom_050`。文本相同 ⇒ 效果相同，这条对任何预设都成立
+    # （是**充分不必要**：`xysize (1920,1080)` 与 `fit "cover"` 那种等价
+    # 仍然靠下面的几何查重）。
+    for other in sorted(index):
+        if other == base:
+            continue
+        if _def_stmt(index[other]) == stmt:
+            return SgPlan(action=REUSE, name=other, key=key, zoom=zoom, rel=rel,
+                          reason=(f'项目里已经有等价变换 {other}（{stmt}），'
+                                  '复用不新建'))
     # ② 查重之二：几何上能匹配到别的 transform → 复用
     if natural:
         try:
@@ -539,6 +589,21 @@ def plan_define(sg, key: str, zoom: float = None, *, index=None, natural=None,
                           key=key, zoom=zoom, rel=rel,
                           reason=(f'项目里已有等价变换 {hit.get("name")}'
                                   f'（{hit.get("brief")}），复用不新建'))
+    elif key in ('half', 'custom'):
+        # 拿不到图尺寸（图找不到 / 纯函数调用）：倍数类预设的等价性其实与图
+        # 无关 —— 纯缩放的框是图尺寸的一次函数。这一条让"项目里已有一条
+        # `zoom 0.5`"在图缺失时也不白写一条 `sg_zoom_050`。
+        try:
+            hit = SP.match_without_natural(key, screen, index, zoom=zoom)
+        except Exception as e:                 # noqa: BLE001 - 匹配失败就当没有
+            swallow('story.sg_transforms.plan_define.match_no_natural', e)
+            hit = None
+        if hit is not None:
+            return SgPlan(action=REUSE, name=str(hit.get('name') or ''),
+                          key=key, zoom=zoom, rel=rel,
+                          reason=(f'项目里已有等价变换 {hit.get("name")}'
+                                  f'（{hit.get("brief")}），复用不新建'
+                                  '（不用看图尺寸：纯缩放的框与图无关）'))
     # ③ 护栏：文件本身可不可写
     if not getattr(sg, 'ok', False):
         return SgPlan(action=REFUSE, key=key, zoom=zoom, rel=rel,

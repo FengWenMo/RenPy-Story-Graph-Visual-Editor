@@ -363,6 +363,110 @@ class Undetermined:
         }
 
 
+@dataclass(frozen=True)
+class ChapterEntry:
+    """
+    一章**开演之前**台上是什么（跨章继承，只读）。
+
+    与 `Chapter.entry` 是**同一份**状态（`stage_exit_state` 的产物）—— 这里
+    只是补上界面需要、而 `Chapter` 上不直接可读的两件事：
+
+      · `why`：**为什么**是这个状态（"接上一章 chapter1_4 的收尾" /
+        "本章是链根" / "前面有 2 章汇到这里"）—— 每个界面各写一遍这套判断，
+        迟早出现"卡片说不知道、报告说有"；
+      · `unknown`：哪些通道**还不知道**（`state['unknown']`）。
+
+    ⚠ `unknown` 里的通道 = **还不知道**，不是空。界面必须写"不知道"，
+      不能画成"台上没人 / 没有背景"—— 那正是本项目最贵的那类谎话。
+    """
+
+    label: str = ''
+    file: str = ''
+    state: dict = field(default_factory=dict, repr=False)
+    why: str = ''
+
+    # ---------------- 读 ----------------
+    @property
+    def unknown(self) -> frozenset:
+        return frozenset(str(x) for x in (self.state.get('unknown') or ()))
+
+    def known(self, key: str) -> bool:
+        """这个通道**确定**吗（`False` = 上游有分支/环，不知道）。"""
+        return str(key) not in self.unknown
+
+    @property
+    def scene(self) -> str:
+        return str(self.state.get('scene') or '') if self.known('scene') else ''
+
+    @property
+    def has_any(self) -> bool:
+        """有没有**任何**确定的东西（全不知道时界面不该装作"接上了"）。"""
+        if self.scene or (self.state.get('layers') or {}):
+            return True
+        if self.known('actors') and (self.state.get('actors') or ()):
+            return True
+        return bool(self.known('music') and str(self.state.get('music') or ''))
+
+    def key(self) -> tuple:
+        """等价判据（"入口状态变了没有"用；`unknown` 是集合，不能直接比）。"""
+        return _state_key(self.state)
+
+    # ---------------- 人话 ----------------
+    def note(self) -> str:
+        """台上状态的**一句话**（每一项都说清"确定 / 不知道"）。"""
+        st = self.state
+        parts = []
+        if self.known('scene'):
+            parts.append(f'背景 {_short_image(self.scene)}'
+                         if self.scene else '没有背景')
+        else:
+            parts.append('背景不知道')
+        if self.known('actors'):
+            actors = st.get('actors') or ()
+            parts.append('立绘 ' + '、'.join(str(a[0]) for a in actors)
+                         if actors else '台上没人')
+        else:
+            parts.append('立绘不知道')
+        layers = st.get('layers') or {}
+        if layers:
+            parts.append('CG ' + '、'.join(_short_image(v)
+                                           for v in layers.values()))
+        if not self.known('music'):
+            parts.append('BGM 不知道')
+        elif st.get('music'):
+            parts.append(f"BGM {_short_audio(st['music'])}")
+        return ' · '.join(parts)
+
+    def describe(self) -> str:
+        """`why` + `note` —— 卡片/日志里那一行。"""
+        return f'{self.why}；{self.note()}' if self.why else self.note()
+
+    def to_dict(self) -> dict:
+        return {'label': self.label, 'file': self.file,
+                'why': self.why, 'note': self.note(),
+                'unknown': sorted(self.unknown),
+                'state': _state_to_dict(self.state)}
+
+
+def _state_key(state) -> tuple:
+    """状态 → 可比较的**稳定键**（`unknown` 是 set，`dict` 顺序不定）。"""
+    st = state or {}
+    actors = []
+    for item in st.get('actors') or ():
+        try:
+            actors.append((str(item[0]), str(item[1]) if len(item) > 1 else ''))
+        except (TypeError, IndexError, KeyError):
+            continue
+    return (str(st.get('scene') or ''), str(st.get('scene_at') or ''),
+            tuple(actors),
+            tuple(sorted((str(k), str(v))
+                         for k, v in (st.get('layers') or {}).items())),
+            tuple(sorted((str(k), str(v))
+                         for k, v in (st.get('layer_at') or {}).items())),
+            str(st.get('music') or ''), str(st.get('voice') or ''),
+            tuple(sorted(str(x) for x in (st.get('unknown') or ()))))
+
+
 @dataclass
 class ContinuityReport:
     """一次跨章连续性体检的全部结果（JSON 可序列化 + 人话渲染）。"""
@@ -1833,6 +1937,81 @@ def analyze_project(project_root, *, files=None) -> ContinuityReport:
     return res
 
 
+def _entry_why(ch: Chapter, chapters: dict) -> str:
+    """
+    `Chapter.entry` **为什么**是它（人话）。
+
+    判据与 `analyze_parse_result` 里的 `_entry_of` **同一条**：链根 / 环 /
+    多前驱汇聚 → 不知道；单前驱 → 取它的出口。这里只是把同一件事说成人话
+    （`_entry_of` 只返回状态，说不出"为什么不知道"）。
+    """
+    if getattr(ch, 'root', False):
+        return '本章是链根（前面没有别的章节）'
+    if getattr(ch, 'cycle', False):
+        return '这一章在环里（jump 回了自己），入口状态取决于转了几圈'
+    preds = [s.from_label for s in (ch.in_edges or ())
+             if s.from_label in chapters]
+    if not preds:
+        return '找不到它的上一章（没有可判的接缝）'
+    if len(preds) > 1:
+        return (f'前面有 {len(preds)} 章汇到这里（'
+                + ' / '.join(preds) + '），不知道该走哪条')
+    pred = chapters.get(preds[0])
+    if pred is None or not getattr(pred, 'exit', None):
+        return f'上一章 {preds[0]} 的收尾状态没算出来'
+    return f'接上一章 {preds[0]} 的收尾'
+
+
+def _norm_entry_path(path) -> str:
+    """路径归一（Windows 大小写不敏感 / 反斜杠）—— 只用于匹配，不读盘。"""
+    try:
+        text = str(path or '').strip()
+    except Exception as e:                       # noqa: BLE001 - 坏路径当"没有"
+        swallow('pipeline.continuity.norm_entry_path', e)
+        return ''
+    if not text:
+        return ''
+    return text.replace('\\', '/').rstrip('/').lower()
+
+
+def entry_by_file(report) -> dict:
+    """
+    `{文件（归一后）: ChapterEntry}` —— 每个 `.rpy` **开头那一章**的入口状态。
+
+    一个文件里有多个 label 时取 `order` 最小的那一章（文件是从它开始演的）。
+    没有章节的文件不在表里。结果缓存在报告对象上（一份报告只算一次）。
+    """
+    cached = getattr(report, '_entry_by_file', None)
+    if cached is not None:
+        return cached
+    chapters = {ch.label: ch for ch in (report.chapters or ())}
+    out = {}
+    best = {}
+    for ch in (report.chapters or ()):
+        key = _norm_entry_path(getattr(ch, 'file', ''))
+        if not key:
+            continue
+        order = int(getattr(ch, 'order', 0) or 0)
+        if key in out and order >= best.get(key, 0):
+            continue
+        out[key] = ChapterEntry(label=ch.label, file=str(ch.file or ''),
+                                state=dict(getattr(ch, 'entry', None) or {}),
+                                why=_entry_why(ch, chapters))
+        best[key] = order
+    try:
+        report._entry_by_file = out             # noqa: SLF001 - 只读缓存
+    except Exception as e:                       # noqa: BLE001 - 冻结/代理对象也不拦
+        swallow('pipeline.continuity.entry_by_file_cache', e)
+    return out
+
+
+def entry_for_file(report, path) -> ChapterEntry | None:
+    """这个 `.rpy` 开头的入口状态（没这份报告 / 不是章节文件 → `None`）。"""
+    if report is None:
+        return None
+    return entry_by_file(report).get(_norm_entry_path(path))
+
+
 def source_signature(paths) -> str:
     """
     一组源文件的**内容坐标**（路径 + mtime + size 的指纹）—— 给 UI 缓存用。
@@ -1863,8 +2042,10 @@ def project_source_signature(project_root) -> str:
 
 
 __all__ = [
-    'Chapter', 'ContinuityReport', 'Finding', 'Seam', 'Undetermined',
+    'Chapter', 'ChapterEntry', 'ContinuityReport', 'Finding', 'Seam',
+    'Undetermined',
     'analyze_files', 'analyze_parse_result', 'analyze_project',
+    'entry_by_file', 'entry_for_file',
     'source_signature', 'project_source_signature',
     'CONTENT_KINDS', 'ELEMENT_ZH', 'LEVEL_INFO', 'LEVEL_WARN',
     'PYTHON_AUDIO_RE', 'MODELED_CHANNELS',

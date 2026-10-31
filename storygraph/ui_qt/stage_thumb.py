@@ -395,6 +395,23 @@ class BeatStageThumb(QWidget):
         self._session = session
         self._project_root = root
 
+    @staticmethod
+    def _initial_state_of(session):
+        """
+        本章第一拍之前的舞台状态（跨章继承；拿不到就是 `None`）。
+
+        **拿不到必须是 `None`，不能是空 dict**：空 dict 和"没有入口状态"
+        在 `stage_snapshots` 里语义一样，但写给后来的人看时会误导。
+        """
+        getter = getattr(session, 'stage_initial_state', None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception as e:                    # noqa: BLE001 - 判不出来就当没有
+            swallow('stage_thumb.initial_state', e)
+            return None
+
     def show_beat(self, idx: int, session=None, *, force: bool = False):
         """
         把控件刷成**第 `idx` 拍**的画面（`idx < 0` / 越界 → 显示"没有可画的"）。
@@ -417,7 +434,10 @@ class BeatStageThumb(QWidget):
                 list(getattr(s, 'beats', None) or []), idx,
                 registry=s.registry(),
                 transform_index=self._transform_index(),
-                screen=self._screen())
+                screen=self._screen(),
+                # 跨章继承（2026-10-31）：本章第一拍之前台上是什么。
+                # 没有它就画不出"上一章留下的背景"（第 1 拍会是空的）。
+                initial_state=self._initial_state_of(s))
         except Exception as e:                    # noqa: BLE001 - 画不出也别炸卡片
             swallow('stage_thumb.show_beat.frame', e)
             frame = None

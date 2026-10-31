@@ -2293,7 +2293,13 @@ class TestSilentFailuresAreVisible:
         res = window._session.asset_overview()
         assert res['ok'] is False and '资源表' in res['error']
 
-    def test_validate_current_script_logs(self, window):
+    def test_validate_current_script_logs(self, window, monkeypatch):
+        # ⚠ 2026-10-31：校验结果现在会弹**模态**清单（双击能跳到那一拍）。
+        # offscreen 下没人点"关闭"，`exec()` 会一直等 —— 不打桩这条就挂死
+        # （实测：不桩时全量跑到 30 分钟还没有任何输出）。
+        from storygraph.ui_qt import validation_list as VL
+        monkeypatch.setattr(VL.ValidationListDialog, 'exec',
+                            lambda self, *a, **k: 0)
         window.validate_current_script()
         text = window._console.toPlainText()
         assert '[校验]' in text, text

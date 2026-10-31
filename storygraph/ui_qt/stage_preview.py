@@ -1413,9 +1413,17 @@ def _as_src(value) -> int:
 
 
 def _src_suffix(src: int, frame) -> str:
-    """下拉标签上的出处后缀：`（第 41 拍设的）`；在本拍写的不加。"""
-    if not isinstance(src, int) or src < 0:
+    """
+    下拉标签上的出处后缀：`（第 41 拍设的）`；在本拍写的不加。
+
+    `src < 0`（跨章继承 / 手工帧）从 2026-10-31 起**不再留白**：写
+    `（出处不在这章）` —— 那一行改不了"原处"，只能在本章第一拍补一条
+    （`app.stage.MODE_CHAPTER_FIRST`）。标签上不说，人会以为按下去就是改它。
+    """
+    if not isinstance(src, int):
         return ''
+    if src < 0:
+        return '（出处不在这章）'
     if _as_src(getattr(frame, 'index', -2)) == src:
         return ''
     return f'（第 {src + 1} 拍设的）'
@@ -1449,12 +1457,16 @@ class StagePreviewWindow(QDialog):
     def __init__(self, parent=None, frames=None, title: str = '舞台演出预览',
                  registry=None, project_root=None, real_images: bool = True,
                  screen=None, sound: bool = True, player_factory=None,
-                 start_index: int = 0, beats=None, on_apply_at=None):
+                 start_index: int = 0, beats=None, on_apply_at=None,
+                 initial_state: dict = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         theme.apply_to(self)
         self.frames = list(frames or [])
         self._all = list(frames or [])
+        #: 本章第一拍之前台上是什么（跨章继承，2026-10-31）。写回 at 之后
+        #: 重算帧时必须**再传一次**，否则第 1 拍的背景会凭空消失。
+        self._initial_state = dict(initial_state) if initial_state else None
         #: 「写回 at」（P2，2026-10-30）用的 Beat 列表 —— **可选**：
         #: 主窗口接线前不传，本轮入口置灰并说明原因（不假装能写）。
         self._beats = list(beats) if beats else None
@@ -2101,7 +2113,8 @@ class StagePreviewWindow(QDialog):
             rebuilt = build_frames(self._beats, registry=self._registry,
                                    transform_index=self._at_transform_index(),
                                    screen=self._screen,
-                                   project_root=self._project_root)
+                                   project_root=self._project_root,
+                                   initial_state=self._initial_state)
         except Exception as e:                        # noqa: BLE001
             swallow('stage_preview._refresh_frames_after_beat_edit', e)
             return
@@ -2336,7 +2349,7 @@ def _dialogue_html(frame) -> str:
 def open_preview(parent, frames, registry=None, project_root=None,
                  real_images: bool = True, title: str = '舞台演出预览',
                  sound: bool = True, start_index: int = 0,
-                 beats=None, on_apply_at=None):
+                 beats=None, on_apply_at=None, initial_state: dict = None):
     """打开预览窗口（非模态，开着也能回去改卡片）。
 
     `start_index`：从第几拍开始（**当前那一拍**）。不给就从第一拍开始。
@@ -2344,12 +2357,17 @@ def open_preview(parent, frames, registry=None, project_root=None,
     `beats` / `on_apply_at`（P2，2026-10-30，**可选**）：传了才启用
     「写回 at」入口（只改内存 Beat、diff 确认、可撤销）；不传时入口置灰
     并说明"这个窗口拿不到 Beat 数据"。主窗口接线由 Lead 整合时做。
+
+    `initial_state`（2026-10-31，**可选**）：本章第一拍之前台上是什么
+    （跨章继承）。`frames` 已经带着它算过，但写回 at 之后窗口要按 Beat 重算
+    帧 —— 这里不给，第 1 拍的背景会在第一次写回后消失。
     """
     win = StagePreviewWindow(parent, frames, title=title, registry=registry,
                              project_root=project_root,
                              real_images=real_images, sound=sound,
                              start_index=start_index, beats=beats,
-                             on_apply_at=on_apply_at)
+                             on_apply_at=on_apply_at,
+                             initial_state=initial_state)
     win.show()
     return win
 

@@ -82,6 +82,9 @@ class ExportMixin:
     #: 宿主 `EditorSession.__init__` 初始化。
     #: 守卫：`tests/test_editor_session_mixin_contract.py`。
     REQUIRES = ('registry', 'compile', 'symbols', 'project_root',
+                #: 跨章继承（2026-10-31）：`frames()` 要给 `build_frames` 传
+                #: 本章第一拍之前的舞台状态，否则预览第 1 拍是空台。
+                'stage_initial_state',
                 'script_path', 'beats', '_transforms_decision',
                 # 原地写回之后要把内存重新对齐到磁盘（见
                 # `_reload_after_inplace_write`）—— 那是 `SessionTableMixin.load`。
@@ -181,7 +184,10 @@ class ExportMixin:
         """
         return build_frames(self.beats, self.registry(),
                             transform_index=self.transform_index(),
-                            screen=self.screen_size())
+                            screen=self.screen_size(),
+                            # 跨章继承（2026-10-31）：不给它就演不出"上一章
+                            # 留下的背景"——预览第 1 拍会是空台，与游戏不符。
+                            initial_state=self.stage_initial_state())
     def transform_index(self) -> dict:
         """项目里的 transform 定义（按项目根缓存；换项目自动失效）。"""
         root = str(self.project_root or '')

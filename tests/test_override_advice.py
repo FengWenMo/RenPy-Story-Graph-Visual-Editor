@@ -189,7 +189,12 @@ class TestWordings:
     def test_a_notice_also_says_how_to_do_it_properly(self):
         full = override_advice(SCENE_THREE, 0).text(label='背景')
         assert '合并回源' in full
-        assert '不替你删' in full               # 只报数，不代删（L4 纪律）
+        # 2026-10-31：合并有了入口（「一并改成一样」），但它动的是用户的
+        # `.rpy` 行 —— 所以那句话必须点出**逐处确认 / 可撤销**（L4 纪律），
+        # 而不是"点一下就好了"。
+        assert '一并改成一样' in full
+        assert '逐处确认' in full
+        assert '可撤销' in full
 
     def test_without_new_at_it_does_not_pretend_to_know_who_wins(self):
         full = override_advice(SCENE_THREE, 0).text(label='背景')

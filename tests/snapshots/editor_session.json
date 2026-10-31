@@ -782,7 +782,7 @@
   [
    "stage_digest_text(0)",
    "ok",
-   "第 1 拍 · label ch01\n本拍变化：\n  + ling base_arms_akimbo sigh @ i11（登场）\n  ♪ 音乐 → night fadein 1.0\n  背景 → bg classroom\n背景：bg classroom\n立绘：ling base_arms_akimbo sigh@i11\n音乐：night"
+   "第 1 拍 · label ch01\n本拍变化：\n  + ling base_arms_akimbo sigh @ i11（登场）\n  ♪ 音乐 → night fadein 1.0\n  背景 → bg classroom\n背景：bg classroom\n立绘：ling base_arms_akimbo sigh@i11\n音乐：night\n跨章：上一章留了什么 —— 还不知道（还没分析过整本（后台算一次就绪；只在内存里，不写盘））"
   ],
   [
    "stage_digest_text(1)",

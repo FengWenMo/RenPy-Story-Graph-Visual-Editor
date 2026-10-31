@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from storygraph.core.safeguard import swallow
 from storygraph.core.vocabulary import (
     LAYER_CN_TAG as _LAYER_CN_TAG,
     NON_ACTOR_TAGS as _NON_ACTOR_TAGS,
@@ -671,9 +672,16 @@ def _render_actors(actors) -> str:
     return '; '.join(parts)
 
 
-def snapshot_rows(beats: list) -> list:
-    """给 Excel 工作表用的行（字段名已是中文友好的展示形态）。"""
-    return stage_snapshots(beats)
+def snapshot_rows(beats: list, initial_state: Optional[dict] = None) -> list:
+    """
+    给 Excel 工作表用的行（字段名已是中文友好的展示形态）。
+
+    `initial_state`（2026-10-31）：**接着上一章演**。传了它，第 0 拍之前就
+    已经有背景/立绘/图层 —— 那些行的 `scene_src` / `layer_src` 是 `-1`
+    （出处不在这本剧本里），"改尺寸"因此只能走"本章第一拍补一条"
+    （`app.stage.MODE_CHAPTER_FIRST`）。不传时与历史行为逐字节一致。
+    """
+    return stage_snapshots(beats, initial_state=initial_state)
 
 
 def snapshot_summary(beats: list, limit: int = 200) -> list:
@@ -694,40 +702,100 @@ def snapshot_summary(beats: list, limit: int = 200) -> list:
     return out
 
 
-def stage_digest(beats: list, index: int) -> str:
+#: "这个通道还不知道"的括注。**必须带上"不是没有"**：卡片上这一格最常见的
+#: 误读就是"没写 = 台上没有"，而"不知道"与"确定没有"是两件事。
+#: （为什么不知道：入口状态是 `stage_exit_state` 一路传下来的，链根/分支汇聚/
+#:  环里的章节从一开始就不知道 —— 详见 `pipeline.continuity` 的报告。）
+_UNKNOWN_NOTE = '（不知道：上游没定下来，不是「没有」）'
+
+
+def _inherited_line(state: dict) -> str:
+    """这一拍的状态里**哪些是本文件没写过的**（跨章继承，`*_src < 0`）。"""
+    parts = []
+    try:
+        scene = str(state.get('scene') or '').strip()
+        # **缺键 ≠ 继承**：手工构造的帧（测试 / 探头）不带出处，不能因此
+        # 给每一拍都贴一句"来自上一章"。
+        if scene and 'scene_src' in state and int(state['scene_src']) < 0:
+            parts.append('背景')
+    except (TypeError, ValueError) as e:
+        swallow('story.stage_snapshot.inherited_scene_src', e)
+    for tag, src in (state.get('layer_src') or {}).items():
+        try:
+            if int(src) < 0:
+                parts.append(f'图层 {tag}')
+        except (TypeError, ValueError):
+            continue
+    return '、'.join(parts)
+
+
+def stage_digest(beats: list, index: int,
+                 initial_state: Optional[dict] = None,
+                 entry_note: str = '', entry_why: str = '') -> str:
     """
     单拍的可读摘要（卡片上的「当前舞台」与旧版预览面板共用）。
 
     返回多行文本：变化 / 背景 / 立绘 / CG图层 / 音乐 / 音效 / 语音 / 条件 / 备注。
+
+    `initial_state`（2026-10-31）：**接着上一章演**（同 `stage_snapshots`）。
+    给了它，第 1 拍就可能已经有背景/立绘/CG —— 而它们的出处不在本文件里，
+    所以第一行会写清「跨章继承：…（本章没写过，来自上一章）」，
+    `entry_note` 是那句的来源说明（`ChapterEntry.describe()`）。
+
+    `unknown` 里的通道一律写「不知道」，**绝不**退化成"（未设置）/（台上没人）"
+    —— 那两句话是**确定的事**，混在一起就是骗人。
     """
-    snaps = stage_snapshots(beats)
+    snaps = stage_snapshots(beats, initial_state=initial_state)
     if not snaps:
         return '（没有演出单元）'
     if index < 0 or index >= len(snaps):
         index = max(0, min(index, len(snaps) - 1))
     s = snaps[index]
-    lines = [f"第 {s['seq']} 拍 · label {s['label'] or '(无)'}"]
+    state = s['state']
+    unknown = set(state.get('unknown') or ())
+    lines = []
+    inherited = _inherited_line(state)
+    if inherited:
+        lines.append(f'跨章继承：{inherited}（本章没写过，来自上一章）')
+        if str(entry_note or '').strip():
+            lines.append(f'  {str(entry_note).strip()}')
+    lines.append(f"第 {s['seq']} 拍 · label {s['label'] or '(无)'}")
     if s['display_changes']:
         lines.append('本拍变化：')
         for ln in s['display_changes'].splitlines():
             lines.append(f'  {ln}')
     else:
         lines.append('本拍变化：（舞台无变化）')
-    lines.append(f"背景：{s['scene'] or '（未设置）'}")
-    lines.append(f"立绘：{s['actors'] or '（台上没人）'}")
+    lines.append('背景：' + (_UNKNOWN_NOTE if 'scene' in unknown
+                          else (s['scene'] or '（未设置）')))
+    lines.append('立绘：' + (_UNKNOWN_NOTE if 'actors' in unknown
+                          else (s['actors'] or '（台上没人）')))
     # CG / 图层也要写出来：`cg cg03` 这类整屏图不是"立绘"，
     # 少了这一行就会出现"舞台说明里看不出屏幕上有张 CG"。
-    if s.get('layers'):
+    if 'layers' in unknown:
+        lines.append(f'CG/图层：{_UNKNOWN_NOTE}')
+    elif s.get('layers'):
         lines.append(f"CG/图层：{s['layers']}")
-    lines.append(f"音乐：{s['music'] or '（静音）'}")
+    lines.append('音乐：' + (_UNKNOWN_NOTE if 'music' in unknown
+                          else (s['music'] or '（静音）')))
     if s['sound']:
         lines.append(f"音效：{s['sound']}")
-    if s['voice']:
+    if 'voice' in unknown:
+        lines.append(f'语音：{_UNKNOWN_NOTE}')
+    elif s['voice']:
         lines.append(f"语音：{s['voice']}")
-    if s['state']['condition']:
-        lines.append(f"条件：{s['state']['condition']}")
+    if state.get('condition'):
+        lines.append(f"条件：{state['condition']}")
     if s['note']:
         lines.append(f"备注：{s['note']}")
+    # **没有入口状态**时把"为什么"也说清（还没分析 / 这个文件不是章节…）：
+    # 这一格空着**不等于**"上一章什么都没留" —— 那正是要治的那个病。
+    # 只在**第 1 拍**说（入口状态是章级事实，每拍重复一遍就成噪声；
+    # 其余拍由 `跨章继承` 那一段和"不知道"括注说清）。
+    # （单文件模式由调用方决定不传：跨章本来不存在，说了只是噪声。）
+    why = str(entry_why or '').strip()
+    if why and not inherited and index == 0:
+        lines.append(f'跨章：上一章留了什么 —— 还不知道（{why}）')
     return '\n'.join(lines)
 
 

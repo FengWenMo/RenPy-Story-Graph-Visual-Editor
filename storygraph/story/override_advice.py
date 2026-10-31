@@ -26,11 +26,13 @@ storygraph.story.override_advice
 不由档位决定。这个功能正好落在最低的那一档：
 
     · 它不改任何东西（不写盘、不改 Beat、不删行）；
-    · 它的数字只用来**说**，不用来"顺手帮你合并"。
+    · 它的数字只用来**说**。
 
-合并回源（把 N 处删掉、把值挪到源里）是**另一档**：动的是用户的 `.rpy` 行，
-按 §5.5 的 L4 纪律必须**逐处确认、逐处可撤**。这里刻意不做，连"点一下就
-合并"的按钮都不给 —— 给了就等于把 L4 藏在一次点击后面。
+合并回源（`story.at_merge`）是**另一档**，而且是**另一种做法**：不是"把那
+几处删掉"，而是把那几处的 `@at` 改成和源一样（`show` 会重建 displayable，
+删掉 at 等于回到原样，不是继承）。它动的是用户的 `.rpy` 行，按 §5.5 的 L4
+纪律**逐处确认、逐处可撤**，所以是**人按下按钮**才发生的事 —— 这个模块
+永远只报数，不替任何人做决定。
 
 ## 多级提示（同一份事实，三种强度）
 
@@ -39,6 +41,7 @@ storygraph.story.override_advice
 | 0 处（改源在整个本景有效）   | `none`    | 一个字都不显示           |
 | 1–2 处                     | `hint`    | 行下一句话（不拦）        |
 | ≥3 处（`NOTICE_AT`）        | `notice`  | 一句话 + 影响清单 + 建议  |
+| **那几处和源写着同一个值**   | `hint`    | 去掉 ⚠、说"不会再盖回"（仍报，源下次再改还是会断） |
 | **算不出来**                | `hint`    | 注明"未能统计"，**不许当 0** |
 
 最后一行是文档 §5.5「防误报」表里的那条：引用数算不出来时**降档**并注明，
@@ -163,6 +166,18 @@ class OverrideAdvice:
     unknown: bool = False
     #: `unknown=True` 时说明为什么算不出（人话）
     reason: str = ''
+    #: **源那一行自己写着**的 at（`None` = 不知道，别猜）。有了它才能分辨
+    #: "那几处写的是另一个值（会盖回）"和"那几处本来就写着同一个值（不会
+    #: 盖回，但源再改仍只到那一拍有效）"—— 两种事实，两句话。
+    source_at: object = None
+
+    @property
+    def agreed(self) -> bool:
+        """那几处写的**都是**源那个值（= 合并过 / 本来就是一致的）。"""
+        if self.source_at is None or not self.sites:
+            return False
+        want = str(self.source_at or '')
+        return all(str(s.at or '') == want for s in self.sites)
 
     # ---------- 数字（全部从 sites 推，不另存一份） ----------
 
@@ -207,7 +222,8 @@ class OverrideAdvice:
     def as_dict(self) -> dict:
         return {'level': self.level, 'count': self.count,
                 'beats': list(self.beats), 'unknown': self.unknown,
-                'reason': self.reason,
+                'reason': self.reason, 'agreed': self.agreed,
+                'source_at': self.source_at,
                 'sites': [s.as_dict() for s in self.sites]}
 
     # ---------- 唯一一份措辞 ----------
@@ -236,6 +252,12 @@ class OverrideAdvice:
         if not self.sites:
             return ''
         what = _label_phrase(label)
+        if self.agreed:
+            # 那几处和源写的是同一个值：**不再吓人**，但也不能消失 ——
+            # 源下次再改，仍然只到第一处有效（陷阱还在，只是这次没踩）。
+            return (f'本景还有 {self.count} 处写着同一个 at'
+                    f'（{self._names(self.sites)}）：再改源只到'
+                    f'{self.sites[0].label}有效')
         head = (f'⚠ 本景还有 {self.count} 处单独' + _said('改了', what)
                 + f'（{self._names(self.sites)}）')
         return head + f'：改源只到{self.sites[0].label}有效'
@@ -255,6 +277,13 @@ class OverrideAdvice:
         if not self.sites:
             return ''
         what = _label_phrase(label)
+        if self.agreed:
+            lines = [f'本景后面还有 {self.count} 处写着同一个值'
+                     f'（{self._names(self.sites)}），和源一样 —— '
+                     '它们**不会**盖回这次改动。']
+            lines.append(f'但那 {self.count} 处仍是独立写法：源以后再改，'
+                         f'仍只到{self.sites[0].label}有效。')
+            return '\n'.join(lines)
         head = (f'⚠ 本景后面还有 {self.count} 处单独' + _said('改了', what)
                 + f'（{self._names(self.sites)}）')
         if self.same_at and self.sites[0].at:
@@ -275,9 +304,8 @@ class OverrideAdvice:
                 lines.append(f'那 {self.count} 处写的都是这个值 —— 不会盖回'
                              '这次改动（但仍是同一写法的重复）。')
         if self.level == NOTICE:
-            lines.append(f'要一次改到底，得连那 {self.count} 处一起改'
-                         '（合并回源）；本工具不替你删那几行 —— '
-                         '删代码是另一档，要逐处确认。')
+            lines.append(f'要一次改到底：用「一并改成一样」（合并回源）把那 '
+                         f'{self.count} 处改成同一个值（逐处确认、可撤销）。')
         return '\n'.join(lines)
 
 
@@ -319,7 +347,7 @@ def _at_kinds(sites, limit: int = 3) -> str:
 
 
 def override_advice(beats, source, *, kind: str = 'scene', tag: str = '',
-                    prefetched: dict = None) -> OverrideAdvice:
+                    prefetched: dict = None, source_at=None) -> OverrideAdvice:
     """
     第 `source` 拍写下的那个对象，在本景里**后面还有多少处单独改写**。
 
@@ -328,6 +356,11 @@ def override_advice(beats, source, *, kind: str = 'scene', tag: str = '',
 
     `prefetched` 是 `override_map(beats, 更早的起点)` 的结果（面板一帧多行时
     复用同一次扫描）；不给就现扫。
+
+    `source_at` 是**源那一行自己写着**的 at（`''` = 原样；`None` = 不知道）。
+    给了才能分清"那几处写的是另一个值（会盖回）"与"那几处本来就写着同一个
+    值（不会盖回）"，见 `OverrideAdvice.agreed`。给 `None` 时一律按"可能会
+    盖回"处理 —— 不知道就别往轻里说。
 
     什么时候返回 `unknown=True`：
 
@@ -366,7 +399,12 @@ def override_advice(beats, source, *, kind: str = 'scene', tag: str = '',
         return OverrideAdvice(level=HINT, unknown=True,
                               reason='统计时出错了')
     level = NONE if not sites else (NOTICE if len(sites) >= NOTICE_AT else HINT)
-    return OverrideAdvice(level=level, sites=sites)
+    advice = OverrideAdvice(level=level, sites=sites, source_at=source_at)
+    if advice.agreed and level == NOTICE:
+        # 那几处写的都跟源一样：**仍然要说**（源下次再改还是只到第一处），
+        # 但没到"你要往回收"的程度 —— 降回一句话，不上琥珀色。
+        advice = OverrideAdvice(level=HINT, sites=sites, source_at=source_at)
+    return advice
 
 
 __all__ = ['HINT', 'LEVELS', 'MAX_NAMES', 'NONE', 'NOTICE', 'NOTICE_AT',

@@ -136,7 +136,7 @@ class TestSizePanel:
         assert req == {'row': 0, 'key': 'cover', 'at': 'bgfit',
                        'kind': 'scene', 'tag': '', 'spec': 'bg big',
                        'source': 3, 'generate': False,
-                       'natural': (800, 600),
+                       'natural': (800, 600), 'zoom': None,
                        'text': '铺满（裁掉多余） → bgfit（fit "cover"）'}
 
     def test_a_generating_item_is_flagged_and_carries_the_size(self, qapp):
@@ -433,3 +433,180 @@ class TestApplyFromCard:
             'spec': 'bg classroom', 'source': 0})
         assert plan is None
         assert '改尺寸没做' in win._console.toPlainText()
+
+
+# ==================================================================
+#  ④ 「一并改成一样」—— 合并回源（2026-10-31）
+# ==================================================================
+#
+# 面板上那个按钮只在"本景真有单独改写"时出现；点下去走的是**逐处确认**
+# （`ui_qt.merge_dialog`，一处一个勾）。判据分两段：按钮的显隐与文字（面板
+# 自己）、以及端到端真的只改勾上的那几拍（窗口层）。
+
+class TestMergeButton:
+    def test_without_advice_there_is_no_button(self, qapp):
+        panel = SizePanel()
+        panel.set_rows(_rows())                   # 老数据没有 'advice'
+        assert panel.slots()[0]['merge'].isVisibleTo(panel) is False
+
+    def test_zero_sites_hides_the_button(self, qapp):
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='none', count=0)
+        panel.set_rows(rows)
+        assert panel.slots()[0]['merge'].isVisibleTo(panel) is False
+
+    def test_the_button_names_the_count_and_says_what_it_will_touch(
+            self, qapp):
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='hint', count=2)
+        rows[0]['source_at'] = 'fit'
+        panel.set_rows(rows)
+        btn = panel.slots()[0]['merge']
+        assert btn.isVisibleTo(panel) is True
+        assert '2 处' in btn.text()
+        tip = btn.toolTip()
+        assert '源' in tip and '`fit`' in tip
+        # L4 的边界必须写在按下去之前：不删行、逐处确认
+        assert '不删行' in tip
+        assert '逐处确认' in tip
+
+    def test_unknown_hides_the_button(self, qapp):
+        """连"有几处"都不知道 → 不给一个"要改不知道几行"的按钮。"""
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='hint', count=0, unknown=True,
+                                    reason='统计时出错了')
+        panel.set_rows(rows)
+        assert panel.slots()[0]['merge'].isVisibleTo(panel) is False
+
+    def test_a_cross_chapter_source_hides_the_button(self, qapp):
+        """源不在这一章（`source=-1`）→ 没有"回源"可谈。"""
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='hint', count=2)
+        rows[0]['source'] = -1
+        panel.set_rows(rows)
+        assert panel.slots()[0]['merge'].isVisibleTo(panel) is False
+
+    def test_clicking_it_emits_what_the_window_needs(self, qapp):
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='hint', count=2)
+        panel.set_rows(rows)
+        got = []
+        panel.merge_requested.connect(got.append)
+        panel.slots()[0]['merge'].click()
+        assert len(got) == 1
+        req = got[0]
+        assert req['kind'] == 'scene' and req['tag'] == ''
+        assert req['source'] == 3 and req['count'] == 2
+        assert req['label'] == '背景'
+
+    def test_sites_that_already_agree_hide_the_button(self, qapp):
+        """
+        那几处**已经写着源那个值** → 按钮不出现：点了也是"没有要改的"。
+
+        （这台机器的真机上就是这样：`sr_general` 那 58 处写的都是源同一个
+        `@cg38402160`，合并无事可做。给一个按下去什么都不会发生的按钮，
+        比没有按钮更糟。）
+        """
+        from storygraph.story.override_advice import OverrideAdvice, Site
+
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['source_at'] = 'fit'
+        rows[0]['advice'] = OverrideAdvice(
+            level='hint', source_at='fit',
+            sites=tuple(Site(index=4 + i, at='fit', image='bg big')
+                        for i in range(2)))
+        panel.set_rows(rows)
+        assert panel.slots()[0]['merge'].isVisibleTo(panel) is False
+        # 提示行仍在（源下次再改还是只到那一拍），只是换了口气
+        assert '写着同一个 at' in panel.slots()[0]['advice'].text()
+
+    def test_the_button_clears_when_the_row_changes(self, qapp):
+        panel = SizePanel()
+        rows = _rows()
+        rows[0]['advice'] = _advice(level='hint', count=2)
+        panel.set_rows(rows)
+        btn = panel.slots()[0]['merge']
+        assert btn.isVisibleTo(panel) is True
+        rows[0]['advice'] = _advice(level='none', count=0)
+        panel.set_rows(rows)
+        assert btn.isVisibleTo(panel) is False
+
+
+class TestMergeFromCard:
+    def _setup(self, win):
+        """在第 i 拍背景之后插两条"又 show 了一次"的拍（`@half` = 单元格写法）。"""
+        from storygraph.story.beat_model import Beat
+
+        i = _scene_beat_index(win)
+        win._show_index(i)
+        scene = str(win._session.beats[i].scene or '').strip()
+        assert scene, '这一拍没有背景，换个夹具'
+        for k in (1, 2):
+            win._session.beats.insert(
+                i + k, Beat(seq=0, label='t', text='', show=f'{scene}@half'))
+        win._show_index(i)
+        return i, scene
+
+    def test_merge_rewrites_exactly_the_ticked_sites(self, ui_window,
+                                                     monkeypatch):
+        win = ui_window
+        i, scene = self._setup(win)
+        monkeypatch.setattr(MW, '_confirm_merge_plan',
+                            lambda parent, plan: {i + 1, i + 2})
+        slot = win._panel.size_panel().slots()[0]
+        assert '2 处' in slot['merge'].text(), slot['merge'].text()
+        slot['merge'].click()
+        # 源是"原样"（没有 at）→ 那两处也变成原样
+        assert win._session.beats[i + 1].show == scene
+        assert win._session.beats[i + 2].show == scene
+        assert '合并回源' in win._console.toPlainText()
+
+    def test_a_ticked_subset_leaves_the_others_alone(self, ui_window,
+                                                     monkeypatch):
+        win = ui_window
+        i, scene = self._setup(win)
+        monkeypatch.setattr(MW, '_confirm_merge_plan',
+                            lambda parent, plan: {i + 1})
+        win._panel.size_panel().slots()[0]['merge'].click()
+        assert win._session.beats[i + 1].show == scene
+        assert win._session.beats[i + 2].show == f'{scene}@half'
+
+    def test_cancel_changes_nothing(self, ui_window, monkeypatch):
+        win = ui_window
+        i, scene = self._setup(win)
+        monkeypatch.setattr(MW, '_confirm_merge_plan',
+                            lambda parent, plan: None)
+        win._panel.size_panel().slots()[0]['merge'].click()
+        assert win._session.beats[i + 1].show == f'{scene}@half'
+        assert win._session.beats[i + 2].show == f'{scene}@half'
+
+    def test_ticking_nothing_says_so_instead_of_silence(self, ui_window,
+                                                        monkeypatch):
+        win = ui_window
+        i, scene = self._setup(win)
+        monkeypatch.setattr(MW, '_confirm_merge_plan',
+                            lambda parent, plan: set())
+        win._panel.size_panel().slots()[0]['merge'].click()
+        assert win._session.beats[i + 1].show == f'{scene}@half'
+        assert '一处都没勾' in win._console.toPlainText()
+
+    def test_the_source_at_is_what_gets_written(self, ui_window, monkeypatch):
+        """目标值是**源那一行自己写着的** at，不是"这一拍看到的"。"""
+        win = ui_window
+        i, scene = self._setup(win)
+        win._session.beats[i].scene_at = 'leftish'
+        win._show_index(i)
+        monkeypatch.setattr(MW, '_confirm_merge_plan',
+                            lambda parent, plan: {i + 1, i + 2})
+        win._panel.size_panel().slots()[0]['merge'].click()
+        assert win._session.beats[i + 1].show == f'{scene}@leftish'
+        assert win._session.beats[i + 2].show == f'{scene}@leftish'
+        # 卡片跟着刷了：这一行现在显示的是源那个值
+        rows = win._panel.size_panel().rows()
+        assert rows[0]['source_at'] == 'leftish'

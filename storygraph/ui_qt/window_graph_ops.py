@@ -144,7 +144,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_script_dirty', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_recovery')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_script_dirty', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_beat', 'show_recovery')
 
     def _show_analysis_text(self, text: str):
         """
@@ -2030,11 +2030,16 @@ class GraphOpsMixin:
         self._status(f'✔ 已补登 {res["added"]} 条资源（{kinds}）')
     def validate_current_script(self):
         """
-        三级校验当前章节（`pipeline.validate.validate_all`）→ 控制台。
+        三级校验当前章节（`pipeline.validate.validate_all`）→ **可点清单**。
 
         契约：它收的是 **beats**（不是路径），返回的 `ValidationReport` 有
         `errors` / `warnings` / `summary`；`Issue` 是 dict（level/code/
         severity/message/where/hint），**没有** `is_blocking`。
+
+        2026-10-31（UX 建议 ③）：从前结果只写控制台 —— 用户拿着
+        `chapter3_1.0042` 这串坐标，得自己在 266 张卡片里翻。现在改成
+        清单对话框，**双击任一条就跳到那一拍**（`_locate_issue`）。
+        控制台仍留一行摘要，方便事后翻记录。
         """
         if not self._session.beats:
             self._status('还没有载入章节，没有可校验的内容。')
@@ -2053,17 +2058,49 @@ class GraphOpsMixin:
         warnings = list(getattr(report, 'warnings', []) or [])
         name = Path(self._file_path).name if self._file_path else '（未命名）'
 
-        def _msg(issue):
-            if isinstance(issue, dict):
-                return f"[{issue.get('level', '')}] {issue.get('message', '')}"
-            return f'[{getattr(issue, "level", "")}] ' \
-                   f'{getattr(issue, "message", issue)}'
-
         self._log(f'[校验] {name}：{len(errors)} 个错误 / {len(warnings)} 条提醒')
-        for issue in (errors + warnings)[:20]:
-            self._log(f'    · {_msg(issue)[:160]}')
-        self._status(f'✅ 校验完成：{len(errors)} 个错误 / {len(warnings)} 条提醒'
-                     '（明细见控制台）')
+        self._status(f'校验完成：{len(errors)} 个错误 / {len(warnings)} 条提醒'
+                     '（双击清单里的条目可跳到那一拍）')
+
+        from storygraph.ui_qt.validation_list import ValidationListDialog
+        dlg = ValidationListDialog(self, errors=errors, warnings=warnings,
+                                   title=f'校验 · {name}')
+        dlg.issue_activated.connect(self._locate_issue)
+        dlg.exec()
+
+    def _locate_issue(self, issue):
+        """
+        `Issue.where` → 跳到那一拍。**认不出就什么都不做**（不猜）。
+
+        只认两种形态，与 `pipeline.validate` 写 `where` 的两条路一一对应：
+
+          · `line_id` 精确相等（稳定 ID，改名不失效）；
+          · `label.seq`（`seq` 必须是纯数字）。
+
+        其余一律算"跳不过去"，记一行日志 —— 显示一个点了没反应的按钮，
+        比不显示更糟，所以对话框那边也会先用同一个判据决定给不给入口。
+        """
+        issue = issue or {}
+        where = str((issue.get('where') if isinstance(issue, dict)
+                     else getattr(issue, 'where', '')) or '').strip()
+        if not where:
+            return
+        beats = list(getattr(self._session, 'beats', ()) or ())
+        for i, b in enumerate(beats):
+            if str(getattr(b, 'line_id', '') or '').strip() == where:
+                if self.show_beat(i):
+                    self._status(f'已定位到 {where}')
+                return
+        label, _sep, tail = where.rpartition('.')
+        if label and tail.isdigit():
+            want = int(tail)
+            for i, b in enumerate(beats):
+                if (str(getattr(b, 'label', '') or '') == label
+                        and int(getattr(b, 'seq', 0) or 0) == want):
+                    if self.show_beat(i):
+                        self._status(f'已定位到 {where}')
+                    return
+        self._log(f'[校验] 跳不过去：`{where}` 不在当前载入的章节里')
     def show_collab(self):
         """
         协作库入口（`collab.collab_store`：SQLite ↔ Excel）。

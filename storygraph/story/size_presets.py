@@ -34,9 +34,22 @@ transform 名（`bgfit` / `cg38402160`）。这一层负责把前者翻成后者
 它不是一条 transform，而是**去掉 `at`**（写回时由 `plan_at_edit(mode='clear')`
 处理）。所以 `target_box('as_is')` 给的是"引擎默认摆法"那个框（左上角、原尺寸），
 只用于告诉人"现在会是什么样"，不用于匹配。
+
+## 「自定义倍数」：人填的数也是预设（2026-10-31）
+
+用户原话要的是「自定义 0.75×」——`50%` 只是 `0.5` 的特例，人想填 0.75 / 1.25
+就得能填。这条路和上面几条**同一条判据**：先按几何在项目里找效果一样的
+（`match_preset('custom', …, zoom=)`），找不到才由上层去生成
+`sg_zoom_075`（`story.sg_transforms` 的三条护栏）。
+
+这一层只多两件事：**认写法**（`parse_zoom`）与**说范围**
+（`zoom_error`，0.05–5）—— 两件都是纯函数，面板、计划、确认框共用
+（"输入框说能填" 和 "写盘前觉得不能写" 绝不能是两套判断）。
 """
 
 from __future__ import annotations
+
+import re
 
 from storygraph.core.safeguard import swallow
 from storygraph.story.atl import (DEFAULT_SCREEN, Placement, is_static_transform,
@@ -48,6 +61,25 @@ TOLERANCE = 1.5
 
 #: 预设的固定顺序（UI 与文档都按这个来；改顺序要改判据）。
 PRESET_ORDER = ('as_is', 'cover', 'contain', 'half')
+
+#: 能生成 `sg_*` 的预设。`PRESET_ORDER` 是下拉里**固定那几项**；「自定义倍数」
+#: 不进去（它的值是人填的，列不出有限几项），但"可生成"这件事和它们同级 ——
+#: `story.sg_transforms.plan_define` 只认这个集合。
+GENERATABLE = ('cover', 'contain', 'half', 'custom')
+
+#: 「自定义倍数」允许的范围（2026-10-31）。
+#:
+#: Ren'Py 的 `zoom` 什么数都收：0 等于看不见；100 倍会把一张 4K 背景解成
+#: 30 万像素宽 —— 预览进程直接卡死，而 `.rpy` 里那行"看起来"完全合法。
+#: 所以范围**写在提示里、越界就拒绝**，不悄悄夹一个数（夹了人以为自己填的是
+#: 那个值）。下限 0.05 也是"还看得见"的下限；上限 5 是"再大就没意义"。
+ZOOM_MIN = 0.05
+ZOOM_MAX = 5.0
+
+#: 输入框认的写法：`0.75` / `0.75x` / `0.75×` / `0.75倍` / `75%`。
+#: `75`（不带百分号）**不认** —— 它是 75 倍，但人多半想写 75%，猜错一次就是
+#: 往项目文件里写一条 `zoom 75`。错误句里把两种写法都给他。
+_ZOOM_TEXT = re.compile(r'^(\d+(?:\.\d+)?|\.\d+)([xX×倍%])?$')
 
 
 def preset_label(key: str) -> str:
@@ -68,6 +100,67 @@ def preset_note(key: str) -> str:
         'contain': '按比例缩到能完整看见，不够的地方留黑边。',
         'half': '缩到原图的一半（左上角对齐，与不带 at 的摆法同源）。',
     }.get(str(key or ''), '')
+
+
+def zoom_label(zoom) -> str:
+    """倍数的人话（`0.75×`）；数不出来就写「自定义倍数」，**不编一个数**。"""
+    try:
+        return f'{float(zoom):g}×'
+    except (TypeError, ValueError):
+        return '自定义倍数'
+
+
+def zoom_error(value) -> str:
+    """
+    这个倍数能不能写进 `.rpy`（`''` = 能，否则一句人话原因）。
+
+    只有这一条判据，三处共用：面板（按下去之前）、`plan_define`（写盘之前）、
+    确认框（说明里）。**绝不悄悄夹**：`0.001` 不会变成 `0.01`。
+    """
+    try:
+        z = float(value)
+    except (TypeError, ValueError):
+        return '倍数得是一个数（例如 0.75）'
+    if z != z:                                     # NaN：任何比较都是 False
+        return '倍数得是一个数（例如 0.75）'
+    if z == float('inf') or z == float('-inf'):
+        return f'倍数得是一个有限数（{ZOOM_MIN:g}–{ZOOM_MAX:g}）'
+    if z < ZOOM_MIN - 1e-9:
+        return (f'{z:g} 倍太小了（允许 {ZOOM_MIN:g}–{ZOOM_MAX:g}）：'
+                '再小预览和游戏里都只剩几个像素')
+    if z > ZOOM_MAX + 1e-9:
+        return (f'{z:g} 倍太大了（允许 {ZOOM_MIN:g}–{ZOOM_MAX:g}）：'
+                f'一张 4K 背景会被解成 {int(3840 * z)} 像素宽'
+                '（若你写的是百分比，请写成 75% 或 0.75 这样）')
+    return ''
+
+
+def parse_zoom(text):
+    """
+    输入框里那串字 → `(zoom, 错误句)`；一个成功另一个必为空。
+
+    认这几种写法：`0.75` / `0.75x` / `0.75×` / `0.75倍` / `75%`。
+    `75`（不带百分号）**不认** —— 它是 75 倍，但人多半想写 75%，猜错一次
+    就要往项目文件里写一条 `zoom 75`。所以明说两种写法，不替人换算。
+
+    值统一 `round(…, 3)`：`0.750` 与 `0.75` 必须是同一个数（否则 transform
+    名会分成 `sg_zoom_075` 和 `sg_zoom_0p75` 两条）。
+    """
+    raw = str(text or '').strip().replace(' ', '')
+    if not raw:
+        return None, f'先填一个倍数（{ZOOM_MIN:g}–{ZOOM_MAX:g}），例如 0.75'
+    hit = _ZOOM_TEXT.match(raw)
+    if hit is None:
+        return None, (f'这个写法认不出来：「{raw}」—— 填 0.75（也可以写 '
+                      '0.75× 或 75%）')
+    value = float(hit.group(1))
+    if hit.group(2) == '%':
+        value = value / 100.0
+    value = round(value, 3)
+    err = zoom_error(value)
+    if err:
+        return None, err
+    return value, ''
 
 
 def atl_body(key: str, zoom: float = None) -> str:
@@ -228,6 +321,80 @@ def _screen_of(screen) -> tuple:
         return DEFAULT_SCREEN
 
 
+#: 判"不用图尺寸也能比"时用的两个**参考**图尺寸（都不是真图，互不相同）。
+#: 纯缩放的框是图尺寸的**一次函数**：两个不同的值都比同一框 ⇒ 任何图尺寸都同框。
+#: （`fit` / `xsize` 那些是分段/常数函数，不在这个比较范围内 —— 它们本来
+#: 就有真图可比，不需要这条路。）
+_REF_NATURALS = ((1280, 720), (3200, 1800))
+
+
+def match_without_natural(key: str, screen=DEFAULT_SCREEN, index=None,
+                          zoom: float = None):
+    """
+    **不需要知道图多大**的预设匹配（只对倍数类预设：`half` / `custom`）。
+
+    什么时候需要它：这一行的图找不到（`natural=None`），可"项目里已经有一条
+    `zoom 0.5`"这件事其实和图片大小无关 —— 真机 `sr_general` 里那条就叫
+    `cg38402160`（`zoom 0.5; anchor (0,0)`）。拿不到图就查重不到，白写一条
+    `sg_zoom_050`，正是护栏 ② 要防的重复。
+
+    判据仍然是**效果**：纯缩放（没有 `fit` / `xsize` / `ysize`）的框是图尺寸的
+    一次函数，所以在 `_REF_NATURALS` 两个参考尺寸上框都相同 ⇒ 任何图尺寸都
+    相同。**位置参与比较** —— `zoom 0.6` 但居中放的那条不会冒充"左上角 0.6"。
+
+    多条等价时取名字排序第一个（确定性；候选全是纯缩放，"语义"这一层没有
+    可挑的差别 —— `_preference` 在这里用不上）。
+
+    返回 `{'name', 'brief'}`；没有 → None。
+    """
+    key = str(key or '')
+    z = target_zoom(key, zoom)
+    if z is None or key == 'as_is':
+        return None
+    target = Placement(x_px=0.0, x_kind='left', xanchor=0.0,
+                       y_px=0.0, y_kind='top', yanchor=0.0,
+                       xzoom=z, yzoom=z, fit=None, source='preset')
+    screen_pair = _screen_of(screen)
+    for name in sorted(index or {}):
+        defn = index[name]
+        if not is_static_transform(defn, index):
+            continue
+        try:
+            place = placement_of(name, index, screen=screen_pair)
+        except Exception as e:                 # noqa: BLE001 - 坏定义跳过
+            swallow('story.size_presets.match_without_natural.place', e)
+            continue
+        if place is None or str(getattr(place, 'uncertain', '') or ''):
+            continue
+        if getattr(place, 'fit', None) \
+                or getattr(place, 'xsize', None) is not None \
+                or getattr(place, 'ysize', None) is not None:
+            continue                           # 框不是图尺寸的一次函数
+        try:
+            if abs(float(getattr(place, 'alpha', 1.0)) - 1.0) > 1e-6:
+                continue
+            if abs(float(getattr(place, 'rotate', 0.0))) > 1e-6:
+                continue
+        except (TypeError, ValueError) as e:
+            swallow('story.size_presets.match_without_natural.flags', e)
+            continue
+        same = True
+        for natural in _REF_NATURALS:
+            try:
+                got = placement_box(place, natural, screen_pair)
+                want = placement_box(target, natural, screen_pair)
+            except Exception as e:             # noqa: BLE001 - 算不出就是不等
+                swallow('story.size_presets.match_without_natural.box', e)
+                same = False
+                break
+            if not _same_box(got, want):
+                same = False
+                break
+        if same:
+            return {'name': name, 'brief': _brief(place)}
+    return None
+
+
 def _preference(key: str, opt: dict, zoom: float = None) -> tuple:
     """
     多条几何等价时**先看语义、再看名字**（确定性，不随机）。
@@ -294,6 +461,8 @@ def describe_match(key: str, hit) -> str:
     return text
 
 
-__all__ = ['PRESET_ORDER', 'TOLERANCE', 'atl_body', 'describe_match',
-           'match_preset', 'preset_label', 'preset_note', 'target_box',
-           'target_zoom', 'transform_options']
+__all__ = ['GENERATABLE', 'PRESET_ORDER', 'TOLERANCE', 'ZOOM_MAX', 'ZOOM_MIN',
+           'atl_body', 'describe_match', 'match_preset',
+           'match_without_natural', 'parse_zoom', 'preset_label',
+           'preset_note', 'target_box', 'target_zoom', 'transform_options',
+           'zoom_error', 'zoom_label']

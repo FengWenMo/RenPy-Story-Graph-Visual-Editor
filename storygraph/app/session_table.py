@@ -373,6 +373,8 @@ class TableSessionMixin:
         # 旁白改成台词、同时加了一张立绘时，内容证据本来就全没了）。
         # 文件要是被外部改过，指纹就对不上 → 退回保守的对位守卫（今天的默认）。
         self._source_fingerprint = self._fingerprint_of(path)
+        # 换了文件，上一章那份入口状态就不再属于这次载入（跨章继承按文件算）。
+        self.set_stage_entry(None)
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。
         self.forget_undo()
         self._struct_undo = []          # 结构撤销栈同理：索引全变了
@@ -1602,6 +1604,66 @@ class TableSessionMixin:
             return ''
         return B.inherited_state_hint(self.beats, idx)
 
+    # ---------------- 跨章继承：本章第一拍之前台上是什么（2026-10-31） ----
+    def stage_initial_state(self):
+        """
+        本章第一拍**之前**的舞台状态（`stage_snapshots(initial_state=)` 认的那种）。
+
+        `None` = 没有 / 不知道（单文件模式、还没分析完、这个文件不是章节）。
+        **不知道时也必须传 `None`**：绝不能拿一份"空舞台"顶上去 —— 那会把
+        "上一章可能有背景"说成"这一拍没有背景"，正是要治的那个病。
+        """
+        return getattr(self, '_stage_entry', None)
+
+    def stage_entry(self):
+        """`pipeline.continuity.ChapterEntry`（带 `why` / `note`）或 `None`。"""
+        return getattr(self, '_stage_entry_info', None)
+
+    def stage_entry_note(self) -> str:
+        """入口状态的一句话（"接上一章 chapter1_4 的收尾；背景 bg9_2 …"）。"""
+        info = getattr(self, '_stage_entry_info', None)
+        try:
+            return str(info.describe() or '').strip() if info is not None else ''
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_table.stage_entry_note', e)
+            return ''
+
+    def stage_entry_why_not(self) -> str:
+        """现在为什么没有入口状态（人话；有的话返回空串）。"""
+        if getattr(self, '_stage_entry_info', None) is not None:
+            return ''
+        try:
+            from storygraph.app import stage_entry as SE
+            return SE.why_not(getattr(self, 'project_root', None),
+                              self.script_path)
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.session_table.stage_entry_why_not', e)
+            return ''
+
+    def set_stage_entry(self, entry) -> bool:
+        """
+        界面把后台算好的入口状态塞进来（`ChapterEntry` 或 `None`）。
+
+        返回**变了没有** —— 变了界面才需要重画派生面板（当前舞台 / 尺寸行 /
+        小图）。用 `ChapterEntry.key()` 比：`unknown` 是集合、`dict` 顺序不定，
+        直接比对象会每次都"变了"，然后每翻一拍重画一次。
+        """
+        info = entry
+        state = None
+        key = ()
+        if info is not None:
+            try:
+                state = dict(info.state or {})
+                key = tuple(info.key())
+            except Exception as e:                 # noqa: BLE001 - 坏对象当"没有"
+                swallow('app.session_table.set_stage_entry', e)
+                info, state, key = None, None, ()
+        before = tuple(getattr(self, '_stage_entry_key', ()) or ())
+        self._stage_entry_info = info
+        self._stage_entry = state
+        self._stage_entry_key = key
+        return bool(key != before)
+
     def stage_digest_text(self, idx: int) -> str:
         """
         这一拍**生效的舞台状态**（变化 / 背景 / 立绘 / CG / 音乐 / 音效 /
@@ -1615,12 +1677,22 @@ class TableSessionMixin:
         时**没把它接上**（函数一直在，只是没人调用）。这里复用同一份
         `stage_snapshots` 推导 —— 与预览、与 Excel 的「舞台快照」表同源，
         不另写一套"当前舞台"的算法。
+
+        `initial_state`（2026-10-31）：把**上一章留下的**背景/立绘/CG 也算进来
+        （`stage_initial_state()`）。不传时与历史行为逐字节一致。
         """
         if not self.has(idx):
             return ''
         try:
             from storygraph.story.stage_snapshot import stage_digest
-            return stage_digest(self.beats, idx)
+            # 单文件模式（没有项目根）不传 `entry_why`：跨章本来不存在，
+            # 每一拍都喊一句"判不了上一章"只是噪声（老行为逐字节不变）。
+            why = (self.stage_entry_why_not()
+                   if getattr(self, 'project_root', None) else '')
+            return stage_digest(self.beats, idx,
+                                initial_state=self.stage_initial_state(),
+                                entry_note=self.stage_entry_note(),
+                                entry_why=why)
         except Exception as e:                     # noqa: BLE001
             swallow('app.session_table.stage_digest_text', e)
             return ''
@@ -1644,7 +1716,12 @@ class TableSessionMixin:
             screen = self.screen_size()
             frame = build_frame_at(self.beats, int(idx), registry=registry,
                                    transform_index=transform_index,
-                                   screen=screen)
+                                   screen=screen,
+                                   # 本章第一拍之前台上是什么（跨章继承）：
+                                   # 有了它，第 1 拍才看得见"上一章留下的背景"
+                                   # （`source=-1`），「本章第一拍补一条」那个
+                                   # 入口才有前提可判。
+                                   initial_state=self.stage_initial_state())
             if frame is None:
                 return []
             return size_rows(frame, registry=registry,

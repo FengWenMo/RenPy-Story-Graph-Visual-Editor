@@ -1097,16 +1097,33 @@ def _unknown_source_why(src) -> str:
     「这一行是上一章继承来的」那句提示（出处未知，**没有那一拍可改**）。
 
     跨章继承的背景 / 图层没有"最初写下它的那一拍"（`scene_src = -1`）——
-    尺寸面板改不了它，点「改」会被 `plan_at_edit` 拒绝。这句放在行的 tooltip
-    里，让人点之前就知道；**不猜**一个拍号出来。
+    改不了"那一行"（本工具一次只载入一章，看不到上一章）。但从 2026-10-31
+    起它**不是死路**：按「改」会在**本章第一拍补一条 `show`**，把尺寸定下来
+    （`app.stage.MODE_CHAPTER_FIRST`；只加一行、不清立绘、不碰上一章）。
+    这句放在行的 tooltip 里，让人点之前就知道会发生什么；**不猜**一个拍号出来。
+
+    「原样」是唯一补不了的：上一章留下的 at 是什么，这里看不到。
     """
     try:
         if int(src) >= 0:
             return ''
     except (TypeError, ValueError) as e:
         swallow('stage_render._unknown_source_why', e)
-    return ('这一行找不到最初写它的那一拍（多半是上一章继承来的），'
-            '不能在这里改尺寸')
+    return ('这一行是上一章留下的（出处不在这本剧本里）：按「改」会在**本章'
+            '第一拍**补一条 show 把尺寸定下来（不改上一章、不清立绘）；'
+            '「原样」补不了（上一章的 at 是什么看不到）')
+
+
+def _row_why(image_why: str, src) -> str:
+    """
+    一行的 `why` = **两件事都要说**（图片找不到 / 出处不在这章）。
+
+    从前是 `why or _unknown_source_why(src)` —— 图片解析不出来时，"这一行是
+    上一章留下的"这句就**被吞掉**了，人只会看到"找不到这张图"，按「改」之后
+    才发现落点跑到第 1 拍去了。两条事实互不替代，用 `；` 连起来。
+    """
+    parts = [str(image_why or '').strip(), _unknown_source_why(src)]
+    return '；'.join([p for p in parts if p])
 
 
 def size_rows(frame, registry=None, project_root=None, screen=None,
@@ -1124,6 +1141,7 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
           'spec': 'bg bg7_0',            # 这一行的图名（原样）
           'label': '背景' | 'CG',        # 人话
           'at': '', 'source': -1,        # 当前变换 / 它是第几拍写下的
+          'source_at': '',               # **源那一行自己写着**的 at（None = 不知道）
           'natural': (2304, 1296),       # 引擎显示尺寸（超采样已折过）
           'note': '背景 bg bg7_0 …',     # `_size_note` 那一行（**同一份措辞**）
           'items': [ {...}, … ],         # 预设 + 自定义（见下）
@@ -1137,6 +1155,10 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
         （`generate=True`，`at` 是生成的名字）—— 这里只算不写，人确认之后
         才落盘（`story.sg_transforms` 的三条护栏在那儿）；
       · `key='pick'` → 「自定义」：项目里已有的 transform（`at` 是名字）；
+      · `key='custom'` → 「自定义倍数」（2026-10-31）：**值还没填**，`at=''`、
+        `zoom=None`、`generate=True` —— 面板按输入框里的数换成一份算好的副本
+        再发请求（0.75 → `sg_zoom_075` / `zoom 0.75`）。它也是唯一**不需要知道
+        图片尺寸**的预设（图找不到时照样能填）；
       · `current=True` → 这一行现在就是它（UI 标 ✓、按钮置灰）。
 
     **只读**：不写盘、不改 Beat。`at` 的匹配规则全在
@@ -1170,6 +1192,9 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
     images = getattr(registry, 'images', {}) or {}
     index = _transform_index_of(project_root, transform_index)
     from storygraph.app.stage import image_index, resolve_stage_asset
+    #: 这一帧是不是**接着上一章演**算出来的（`entry_state`）。只有它 + 出处
+    #: 不在这本剧本里，才能说"上一章的 at 看不到"（见 `items_for` 的 `cross`）。
+    from storygraph.app.stage import is_unknown_source
     # 「按文件名回退」那一条（`resolve_stage_asset` 的 ③）要显式给索引才生效。
     # 有些项目**不写 `image` 声明**、只靠 Ren'Py 的自动命名（`images/bg/x.png`
     # → `bg x`）—— 不给索引的话，尺寸面板对这类项目永远是"找不到这张图"
@@ -1199,8 +1224,14 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
     #: 4 行都要问"能不能生成"，不能每问一次读一遍文件）。
     gen_cache: dict = {'file': None}
 
-    def items_for(row_at, natural):
-        """预设 + 自定义 → `items`（未匹配到的预设也列出来，只是 `ok=False`）。"""
+    def items_for(row_at, natural, cross: bool = False):
+        """预设 + 自定义 → `items`（未匹配到的预设也列出来，只是 `ok=False`）。
+
+        `cross=True` = 这一行**从上一章继承来的**（`frame.entry_state` 且出处
+        不在这本剧本里）：这时"现在是哪个变换"根本看不到，「原样」也因此
+        补不了（`plan_size_edit` 会拒绝）—— 措辞要照这个说，不能写成
+        "已经是原样"。
+        """
         out = []
 
         def generate_for(key, natural_size):
@@ -1239,6 +1270,13 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
                 why = '' if ok else '这一行本来就没有 at'
                 text = (SP.preset_label(key) if ok
                         else '原样（已经是原样）')
+                if cross and not ok:
+                    # 上一章写的是什么 at 看不到：说"已经是原样"是**假装知道**
+                    # （真机截图当场露出来过）。`ok` / `current` 不动 ——
+                    # 按钮态与 `plan_size_edit` 的拒绝理由仍走同一个口径。
+                    why = ('上一章的 at 看不到：「原样」补不了，'
+                           '请挑一个变换')
+                    text = '原样（跨章这一行补不了）'
             elif not natural:
                 why = '找不到这张图，算不出尺寸'
                 text = f'{SP.preset_label(key)}（算不出尺寸）'
@@ -1274,6 +1312,25 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
             out.append({'key': key, 'at': at, 'text': text, 'ok': ok,
                         'why': why, 'current': str(row_at) == str(at),
                         'generate': gen, 'note': item_note})
+        # 「自定义倍数」（2026-10-31）：人填一个数（0.75 / 1.25 …）。
+        #
+        # 这一条**现在算不出 `at`**：数还没填。面板拿到它之后，按输入框里的值
+        # 换成一份算好的副本（`text` / `ok` / `zoom`），再发请求；真要把名字定
+        # 下来（复用项目里已有的那条，还是生成 `sg_zoom_075`）发生在窗口层确认
+        # 那一步 —— 只有那里有完整的 transform 表，也才该决定写不写项目文件。
+        #
+        # `generate=True` 是**准确**的：它迟早要走"生成/查重"那条路，只是名字
+        # 得等人把数填了才知道。`ok=False` 保证没填数时按钮是灰的。
+        out.append({
+            'key': 'custom', 'at': '', 'zoom': None,
+            'text': '自定义倍数…（先填一个数）',
+            'ok': False,
+            'why': (f'先在下面填一个倍数（{SP.ZOOM_MIN:g}–{SP.ZOOM_MAX:g}），'
+                    '例如 0.75'),
+            'current': False, 'generate': True,
+            'note': ('填一个倍数（0.05–5）：项目里已经有一样效果的就直接用它；'
+                     '没有才生成一条 sg_zoom_0xx（工具生成、带指纹）。'
+                     '不需要知道这张图多大 —— 倍数本身就是答案。')})
         # 「自定义」= 项目里已有的 transform（带动画的/算不出几何的不列）
         for opt in SP.transform_options(index, natural, screen_pair):
             name = opt['name']
@@ -1319,19 +1376,32 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
 
         给了拍表却统计失败时**不返回 None**：那是"算不出来"，要说出来
         （`OverrideAdvice(unknown=True)`），不能悄悄退化成"没有说话"。
+
+        返回 `(advice, source_at)`：`source_at` 是**源那一行自己写着**的 at
+        （`None` = 不知道）—— 有它才能分清"那几处写的是另一个值"和"本来就
+        写着同一个值"（`story.at_merge` 也用它当合并的目标值，同一个来源）。
         """
         if beats is None:
-            return None
+            return None, None
         try:
             from storygraph.story.override_advice import (OverrideAdvice,
                                                           override_advice)
         except Exception as e:                 # noqa: BLE001 - 模块进不来就不显示
             swallow('stage_render.size_rows.advice_import', e)
-            return None
+            return None, None
         if not advice_ok:
-            return OverrideAdvice(level='hint', unknown=True, reason=advice_why)
+            return OverrideAdvice(level='hint', unknown=True,
+                                  reason=advice_why), None
+        src_at = None
+        try:
+            from storygraph.story.at_merge import source_at_of
+            src_at = source_at_of(beats, src, kind=kind, tag=tag)
+        except Exception as e:                 # noqa: BLE001 - 不知道就别猜
+            swallow('stage_render.size_rows.source_at', e)
+            src_at = None
         return override_advice(beats, src, kind=kind, tag=tag,
-                               prefetched=advice_map)
+                               prefetched=advice_map,
+                               source_at=src_at), src_at
 
     scene = str(getattr(frame, 'scene', '') or '').strip()
     if scene:
@@ -1350,14 +1420,17 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
             why = '找不到这张图（尺寸未知，只能原样或自定义）'
             note = f'背景 {scene}（尺寸未知：找不到图）'
         src_i = src if isinstance(src, int) else -1
+        advice, src_at = advice_for(src_i, 'scene', '')
+        cross = bool(getattr(frame, 'entry_state', False)) \
+            and is_unknown_source(src_i)
         rows.append({'index': len(rows), 'kind': 'scene', 'tag': '',
                      'spec': scene, 'label': '背景', 'at': at,
-                     'source': src_i,
+                     'source': src_i, 'source_at': src_at,
                      'natural': natural,
                      'note': note + _source_suffix(src, frame),
-                     'items': items_for(at, natural),
-                     'advice': advice_for(src_i, 'scene', ''),
-                     'why': why or _unknown_source_why(src)})
+                     'items': items_for(at, natural, cross=cross),
+                     'advice': advice,
+                     'why': _row_why(why, src)})
     raw = str(getattr(frame, 'layers', '') or '')
     ats = dict(getattr(frame, 'layers_at', None) or {})
     srcs = dict(getattr(frame, 'layer_src', None) or {})
@@ -1379,14 +1452,17 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
             why = '找不到这张图（尺寸未知，只能原样或自定义）'
             note = f'{label} {spec}（尺寸未知：找不到图）'
         src_i = src if isinstance(src, int) else -1
+        advice, src_at = advice_for(src_i, 'layer', tag)
+        cross = bool(getattr(frame, 'entry_state', False)) \
+            and is_unknown_source(src_i)
         rows.append({'index': len(rows), 'kind': 'layer', 'tag': tag,
                      'spec': spec, 'label': label, 'at': at,
-                     'source': src_i,
+                     'source': src_i, 'source_at': src_at,
                      'natural': natural,
                      'note': note + _source_suffix(src, frame),
-                     'items': items_for(at, natural),
-                     'advice': advice_for(src_i, 'layer', tag),
-                     'why': why or _unknown_source_why(src)})
+                     'items': items_for(at, natural, cross=cross),
+                     'advice': advice,
+                     'why': _row_why(why, src)})
     return rows
 
 

@@ -642,6 +642,7 @@ def _confirm_at_plan(parent, plan, extra: str = '',
 
 def _plan_preview_at(win, req):
     """演出预览发来的写回请求 → `AtEdit` 计划（只算，不动 Beat）。"""
+    from storygraph.app.stage import MODE_CHAPTER_FIRST, is_unknown_source
     from storygraph.app.stage import plan_at_edit
     from storygraph.story.atl import DEFAULT_SCREEN, project_screen
     root = getattr(win, '_project_root', None)
@@ -654,13 +655,20 @@ def _plan_preview_at(win, req):
         idx = int((req or {}).get('beat_index', -1))
     except (TypeError, ValueError):
         idx = -1
+    mode = str((req or {}).get('mode') or 'source')
+    src = (req or {}).get('source_index')
+    # 跨章继承（出处不在这本剧本里，`source_index < 0`）且这一拍**看得见**背景/
+    # 图层：没有"那一行"可改 → 与尺寸面板同一条路（本章第一拍补一条 show）。
+    # 同一个请求两种出口两种待遇，正是本轮在治的病。
+    if mode == 'source' and is_unknown_source(src) \
+            and str((req or {}).get('scene_image') or '').strip():
+        mode = MODE_CHAPTER_FIRST
     return plan_at_edit(list(getattr(win._session, 'beats', None) or ()), idx,
                         target=str((req or {}).get('target') or 'scene'),
                         tag=str((req or {}).get('tag') or ''),
                         transform=str((req or {}).get('transform') or ''),
                         project_root=root, screen=screen,
-                        source_index=(req or {}).get('source_index'),
-                        mode=str((req or {}).get('mode') or 'source'),
+                        source_index=src, mode=mode,
                         scene_image=str((req or {}).get('scene_image') or ''))
 
 
@@ -824,15 +832,19 @@ def _plan_sg_from_card(win, req, index):
     from storygraph.story import sg_transforms as SG
 
     key = str((req or {}).get('key') or '')
+    # `zoom` 只有「自定义倍数」有（`key='custom'`）：名字与体都从这个数来
+    # （`sg_zoom_075` / `zoom 0.75`），所以一路带着它 —— 只在 `plan_for_project`
+    # 里丢掉的话，写进文件的会是 `zoom 1`（2026-10-31）。
+    zoom = (req or {}).get('zoom')
     root = getattr(win, '_project_root', None)
-    plan = SG.plan_for_project(root, key, index=index,
+    plan = SG.plan_for_project(root, key, zoom, index=index,
                                natural=(req or {}).get('natural'),
                                screen=_screen_pair(win))
     if not plan.ok or not plan.writes:
         return plan, index
-    defn = SG.transform_def(plan.name, key)
+    defn = SG.transform_def(plan.name, key, plan.zoom)
     if defn is None:
-        return SG.SgPlan(action=SG.REFUSE, key=key,
+        return SG.SgPlan(action=SG.REFUSE, key=key, zoom=zoom,
                          reason=f'生成的 {plan.name} 解析不出几何，拒绝写'), index
     merged = dict(index or {})
     merged[plan.name] = defn
@@ -1015,7 +1027,13 @@ def apply_scene_from_card(win, req):
             swallow('ui_qt.main_window.scene.index', e)
             index = {}
         try:
-            sg_plan, index = _plan_sg_from_card(win, req, index)
+            # ⚠ 换景要**换图**：请求里那个 `natural` 是**旧背景**的尺寸（面板是
+            # 按"现在这张图"算的）。拿它去查重会把"只对旧图等价"的 transform
+            # 当成等价（例如 `xysize (1920,1080)` 恰好等于 4K 图的「铺满」），
+            # 可新图还没量过。所以这里**不传尺寸**：只按逐字相同的 ATL 体
+            # （尺度无关）与倍数类预设的"不用看图尺寸"那条查重（2026-10-31）。
+            sg_plan, index = _plan_sg_from_card(
+                win, dict(req, natural=None), index)
         except Exception as e:                    # noqa: BLE001 - 计划失败要说出来
             swallow('ui_qt.main_window.scene.sg_plan', e)
             notify_card_notice(win, f'生成 transform 没做：{e}')
@@ -1086,6 +1104,128 @@ def apply_scene_from_card(win, req):
     return plan
 
 
+# ==================================================================
+#  「一并改成一样」—— 合并回源（2026-10-31）
+# ==================================================================
+#
+# 尺寸面板那句"本景还有 2 处单独改写"后面那个按钮。它动的是**用户的 show
+# 行**（`docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5 的 L4：confirm、永远、
+# 逐处），所以：
+#
+#   ① 计划是 `story.at_merge.plan_at_merge`（只算，不动 Beat）；
+#   ② 确认框**一处一个勾**（`ui_qt.merge_dialog`），勾掉的一个字都不动；
+#   ③ 写进内存的拍，导出时仍有既有 diff 门禁 —— 那一步还能反悔。
+
+def _confirm_merge_plan(parent, plan):
+    """
+    合并回源的确认框（**唯一出口**：判据把它换掉，不弹真窗）。
+
+    返回勾选的拍号集合；**取消**返回 `None`（与"一个都没勾"区分：
+    后者要说"一处都没勾"，前者只写一行"已取消"）。
+    """
+    from storygraph.ui_qt.merge_dialog import ask_merge
+
+    return ask_merge(plan, parent)
+
+
+def apply_merge_from_panel(win, req):
+    """
+    尺寸面板「一并改成一样」：算计划 → **逐处**确认 → 写内存 Beat → 刷卡片。
+
+    为什么是"把源的值套给那几处"而不是"删掉那几行"：Ren'Py 的 `show` 会
+    **重建** displayable（`at` 不继承），所以删掉 `at` 等于回到原样 —— 见
+    `story.at_merge` 的模块注释。这里只负责窗口层：门禁、脏标记、台账、刷新。
+
+    返回落进内存的 `MergePlan`；取消 / 被拒 / 一处都没勾 / 失败返回 None。
+    """
+    if not isinstance(req, dict):
+        return None
+    from storygraph.story.at_merge import plan_at_merge
+
+    # 卡片上还没保存的手改先落进这一拍（与「改」「换景」同一条前提）
+    try:
+        win.apply_current_beat()
+    except Exception as e:                        # noqa: BLE001 - 提交失败也照样能合
+        swallow('ui_qt.main_window.merge.apply_current', e)
+    try:
+        plan = plan_at_merge(
+            list(getattr(win._session, 'beats', None) or ()),
+            int(req.get('source', -1)),
+            kind=str(req.get('kind') or 'scene'),
+            tag=str(req.get('tag') or ''),
+            label=str(req.get('label') or ''))
+    except Exception as e:                        # noqa: BLE001 - 计划失败要说出来
+        swallow('ui_qt.main_window.merge.plan', e)
+        notify_card_notice(win, f'合并回源没做：{e}')
+        return None
+    if plan is None or not getattr(plan, 'ok', False):
+        reason = str(getattr(plan, 'reason', '') or '').strip() \
+            or '没有要合并的。'
+        notify_card_notice(win, '合并回源没做：' + reason)
+        return None
+    chosen = _confirm_merge_plan(win, plan)
+    if chosen is None:
+        try:
+            win._status('已取消：没有合并回源。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.merge.cancel', e)
+        return None
+    if not chosen:
+        notify_card_notice(win, '一处都没勾：没有改任何行。')
+        return None
+    try:
+        if not plan.apply(selected=set(int(i) for i in chosen)):
+            notify_card_notice(win, '合并回源失败：计划没落进内存里的拍。')
+            return None
+    except Exception as e:                        # noqa: BLE001 - 写失败要说出来
+        swallow('ui_qt.main_window.merge.apply', e)
+        notify_card_notice(win, f'合并回源失败：{e}')
+        return None
+    try:
+        win._session.mark_edits_dirty()
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.merge.dirty', e)
+    try:
+        win._sync_export_dirty()
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.merge.dirty_ui', e)
+    _refresh_card_after_merge(win, plan)
+    try:
+        names = '、'.join(str(i + 1) for i in plan.beats[:6])
+        more = (f' 等 {plan.count} 处' if plan.count > 6 else '')
+        skipped = (f'（另有 {plan.skipped_count} 处改不了，见台账）'
+                   if plan.skipped_count else '')
+        win._log(f'[尺寸] 合并回源：第 {names} 拍的{plan.label} at 改成'
+                 f' {plan.value_text}（源第 {plan.source + 1} 拍；'
+                 '只改内存里的拍；不删行、不加行）')
+        win._status(f'已把 {plan.count} 处改成和源一样{more}{skipped}'
+                    '（只改内存里的拍；导出仍走既有 diff 确认门禁）')
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.merge.log', e)
+    return plan
+
+
+def _refresh_card_after_merge(win, plan) -> None:
+    """
+    合并之后刷卡片：**动到的拍里有当前载入的那一拍**才重载表单。
+
+    与 `_refresh_card_after_size` 同一条规矩（重载会冲掉手改，所以只在
+    "反正已经提交过"时重载）：这里事先调过 `apply_current_beat`，而且只有
+    当载入的那一拍**自己被改了**才需要重载（`show` 那一列的文字变了）。
+    """
+    try:
+        loaded = int(getattr(win, '_loaded_idx', -1))
+    except (TypeError, ValueError):
+        loaded = -1
+    try:
+        if loaded >= 0 and loaded in set(int(i) for i in plan.beats):
+            win._show_index(loaded)
+        else:
+            win.refresh_derived_panels(loaded)
+    except Exception as e:                        # noqa: BLE001 - 刷不动不拦写回
+        swallow('ui_qt.main_window.merge.refresh_card', e)
+
+
 def open_stage_preview_with_at(win):
     """
     工具栏「🎬 演出预览」：打开预览窗口，并把**当前 beats + 写回 at 入口**交给它。
@@ -1114,7 +1254,9 @@ def open_stage_preview_with_at(win):
                             project_root=getattr(win, '_project_root', None),
                             start_index=getattr(win, '_loaded_idx', 0),
                             beats=beats or None,
-                            on_apply_at=partial(apply_at_from_preview, win))
+                            on_apply_at=partial(apply_at_from_preview, win),
+                            # 跨章继承（2026-10-31）：第 1 拍的背景可能来自上一章。
+                            initial_state=session.stage_initial_state())
     except Exception as e:                        # noqa: BLE001 - 与老入口同一处理
         QMessageBox.critical(win, '无法打开预览', str(e))
         return None
@@ -3657,6 +3799,10 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 与「改」**分开一条路**：`scene` 的代价不是像素，是台上的人。
         self._panel.size_panel().scene_requested.connect(
             partial(apply_scene_from_card, self))
+        # 「一并改成一样」（合并回源）：动的是用户的 `show` 行（L4），
+        # 逐处确认、只改内存 —— 见 `story.at_merge`。
+        self._panel.size_panel().merge_requested.connect(
+            partial(apply_merge_from_panel, self))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._panel)
@@ -4423,6 +4569,11 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         for fn in (lambda: self._remove_shortcuts(),
                    lambda: self._loader.shutdown(),
                    lambda: self._panel.shutdown_stage_thumb(),
+                   # 跨章继承的后台分析（整本约 2 秒）：关窗时别留一个线程在跑。
+                   # ⚠ 它是**窗口**上的（`CardPageMixin`），不在 `self._panel`
+                   # 那个卡片控件上 —— 写到 `_panel.` 上就是 AttributeError →
+                   # 模态弹窗（`test_every_panel_method_the_window_calls_really_exists`）。
+                   lambda: self.shutdown_stage_entry(),
                    # 关掉游戏窗口只是"这次预览结束"，工具关掉时引擎也必须停 ——
                    # 否则后台留一个全屏游戏进程，用户只会觉得"电脑变卡了"。
                    lambda: self.shutdown_engine_preview(),

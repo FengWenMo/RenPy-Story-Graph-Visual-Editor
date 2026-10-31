@@ -259,6 +259,9 @@ class CardPageMixin:
             self._show_index(idx)
             self._sync_label_combo()
             self._sync_graph_highlight()
+            # 跨章继承（2026-10-31）：本章第一拍之前台上是什么。
+            # 缓存命中就立刻生效；没命中就后台算一次（不阻塞这一章打开）。
+            self.warm_stage_entry()
             if goto_card:
                 self._set_page(self.PAGE_CARD)
             else:
@@ -1401,6 +1404,25 @@ class CardPageMixin:
         except Exception as e:                  # noqa: BLE001 - 只影响一个提示
             swallow('ui_qt.window_card._sync_export_dirty', e)
 
+    def show_beat(self, idx: int) -> bool:
+        """
+        公开的「跳到第 idx 拍」（校验清单 / 诊断条目用）。
+
+        为什么要这层包装：`_show_index` 是同一张窗口里几个 mixin 共用的内部
+        约定，而 `window_graph_ops`（另一个 mixin）要调它。给它一个**公开
+        名字**，比让两个模块互相摸对方的私有方法清楚；越界**返回 False**
+        而不是静默摆到"没有这一拍"的状态 —— 调用方（校验清单）要据此告诉
+        用户"这条跳不过去"，而不是假装跳了。
+        """
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            return False
+        if i < 0 or i >= len(list(getattr(self._session, 'beats', ()) or ())):
+            return False
+        self._show_index(i)
+        return True
+
     def _show_index(self, idx: int):
         if not self._session.has(idx):
             self._idx = -1
@@ -1623,6 +1645,94 @@ class CardPageMixin:
             self._panel.set_flow(info, names, brief=brief)
         except Exception as e:                  # noqa: BLE001 - 控制流条失败不拦卡片
             swallow('ui_qt.window_card._sync_flow_card', e)
+
+    # ---------------- 跨章继承：上一章是谁（2026-10-31） ----------------
+    def stage_entry_warmer(self):
+        """后台"整本分析一次"的调度器（懒建；一个窗口一份）。"""
+        warmer = getattr(self, '_stage_entry_warmer', None)
+        if warmer is None:
+            from storygraph.ui_qt.entry_warm import StageEntryWarmer
+            warmer = StageEntryWarmer(self)
+            warmer.ready.connect(self._on_stage_entry_ready)
+            self._stage_entry_warmer = warmer
+        return warmer
+
+    def warm_stage_entry(self) -> str:
+        """
+        按需在后台算一次"本章第一拍之前台上是什么"（整本连续性分析一次）。
+
+        为什么不在 `_show_index` 里做：翻一拍就分析一次整本 = 卡死。这里是
+        **按项目缓存**的（指纹 = 所有 .rpy 的 mtime+size），只在载入章节时问一次。
+
+        返回 `'cached'` / `'queued'` / `'running'` / `'skipped'`（诊断与测试用）。
+        """
+        session = getattr(self, '_session', None)
+        root = getattr(session, 'project_root', None) if session else None
+        if not root or not getattr(session, 'script_path', None):
+            return 'skipped'
+        try:
+            status = self.stage_entry_warmer().request(root)
+        except Exception as e:                    # noqa: BLE001 - 排不上队不拦载入
+            swallow('ui_qt.window_card.warm_stage_entry', e)
+            return 'skipped'
+        if status == 'cached':
+            # 缓存命中：主线程直接查（O(1)），不排队、不等
+            try:
+                from storygraph.app import stage_entry as SE
+                self._apply_stage_entry(SE.cached_report(root))
+            except Exception as e:                # noqa: BLE001
+                swallow('ui_qt.window_card.warm_stage_entry.cached', e)
+        return status
+
+    def _on_stage_entry_ready(self, report):
+        """后台算完了（主线程）：把入口状态塞进会话，按需重画派生面板。"""
+        try:
+            self._apply_stage_entry(report)
+        except Exception as e:                    # noqa: BLE001 - 失败不拦卡片
+            swallow('ui_qt.window_card._on_stage_entry_ready', e)
+
+    def _apply_stage_entry(self, report) -> bool:
+        """
+        报告 → 会话的入口状态。返回"变了没有"（变了才重画）。
+
+        ⚠ 只重画**派生面板**（当前舞台 / 尺寸格 / 小图），**不重载表单**：
+        后台算两秒的工夫，用户可能已经在打字了。
+        """
+        session = getattr(self, '_session', None)
+        if session is None:
+            return False
+        from storygraph.app import stage_entry as SE
+        root = getattr(session, 'project_root', None)
+        if not SE.matches_project(root, report):
+            return False
+        try:
+            entry = SE.entry_for(root, getattr(session, 'script_path', None))
+        except Exception as e:                    # noqa: BLE001 - 查不到就是没有
+            swallow('ui_qt.window_card._apply_stage_entry.query', e)
+            entry = None
+        changed = session.set_stage_entry(entry)
+        try:
+            if entry is not None:
+                self._log(f'[跨章] 本章第一拍之前：{entry.describe()}')
+            else:
+                self._log('[跨章] 判不出上一章：' + session.stage_entry_why_not())
+        except Exception as e:                    # noqa: BLE001 - 台账失败不拦
+            swallow('ui_qt.window_card._apply_stage_entry.log', e)
+        if changed:
+            try:
+                self.refresh_derived_panels(getattr(self, '_loaded_idx', -1))
+            except Exception as e:                # noqa: BLE001
+                swallow('ui_qt.window_card._apply_stage_entry.refresh', e)
+        return changed
+
+    def shutdown_stage_entry(self):
+        """关窗：停掉后台分析（正在跑的会跑完，结果只进内存缓存）。"""
+        try:
+            warmer = getattr(self, '_stage_entry_warmer', None)
+            if warmer is not None:
+                warmer.shutdown()
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.window_card.shutdown_stage_entry', e)
 
     def refresh_derived_panels(self, idx: int = None):
         """

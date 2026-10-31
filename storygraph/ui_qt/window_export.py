@@ -642,7 +642,9 @@ class WindowExportMixin:
             open_preview(self, self._session.frames(),
                          registry=self._registry_provider(),
                          project_root=self._project_root,
-                         start_index=getattr(self, '_loaded_idx', 0))
+                         start_index=getattr(self, '_loaded_idx', 0),
+                         # 跨章继承（2026-10-31）：第 1 拍的背景可能来自上一章。
+                         initial_state=self._session.stage_initial_state())
         except Exception as e:                  # noqa: BLE001
             QMessageBox.critical(self, '无法打开预览', str(e))
     def show_continuity(self):

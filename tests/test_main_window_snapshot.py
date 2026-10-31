@@ -76,6 +76,10 @@ def worked(tmp_path, app, monkeypatch):
     from PySide6.QtWidgets import QFileDialog, QMessageBox
 
     monkeypatch.setattr(QMessageBox, 'exec', lambda self, *a, **k: 0)
+    # 校验清单（2026-10-31）：它是模态的，offscreen 下没人点"关闭"会一直等。
+    # 桩成"用户点了关闭"（返回 0），流程继续往下走。
+    from storygraph.ui_qt.validation_list import ValidationListDialog
+    monkeypatch.setattr(ValidationListDialog, 'exec', lambda self, *a, **k: 0)
     monkeypatch.setattr(QMessageBox, 'question',
                         staticmethod(lambda *a, **k: QMessageBox.Yes))
     monkeypatch.setattr(QMessageBox, 'warning',

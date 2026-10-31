@@ -196,6 +196,15 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         #: 载入 / 导出时的**拍内容基线**（用来在关窗时算出"改了几拍"）。
         #: `None` = 还没载入过任何一章。
         self._saved_prints = None
+        #: **跨章继承**：本章第一拍之前台上是什么（2026-10-31）。
+        #:
+        #: `_stage_entry` 是 `story.stage_snapshot` 认的初始状态（含 `unknown`
+        #: 集合），`_stage_entry_info` 是 `pipeline.continuity.ChapterEntry`
+        #: （带"为什么是这个状态"的人话）。**会话自己不去算**（整本 2.2 秒）：
+        #: 界面在后台算好后用 `set_stage_entry` 塞进来；`None` = 不知道。
+        self._stage_entry = None
+        self._stage_entry_info = None
+        self._stage_entry_key = ()
 
     #  资产
     # ------------------------------------------------------------------
