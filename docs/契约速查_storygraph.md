@@ -5792,6 +5792,7 @@ JSON / 可判接缝清单里**逐条都在**（最大程度保留详细信息）
 | `analyze_parse_result(parse_result, project_root='', files=None)` | 吃已解析 IR（与表/图同一份），测试用 |
 | `analyze_files(paths, project_root='')` | 指定文件分析（CLI `--file` / 测试） |
 | `project_source_signature(root)` / `source_signature(paths)` | 源文件指纹（mtime_ns + size），UI 缓存失效判据 |
+| `entry_by_file(report)` / `entry_for_file(report, path)` | 每个 `.rpy` **开头那一章**的入口状态（`ChapterEntry`：`state` + `why` + `unknown`）；结果缓存在报告对象上（2026-10-31） |
 | `ContinuityReport` | `.to_dict()` / `.render_text()` / `.stats()` / `.chapter_map()` / `.judged_seams()` |
 
 `ContinuityReport.chapters`（`Chapter`）：`entry/exit`（状态 + `unknown` 集合）、
@@ -6085,7 +6086,8 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 | 操作 | 语句 | 副作用 | 工具里的唯一实现 |
 |---|---|---|---|
 | 换景 | `scene bg x` | **清空该层所有 displayable**（立绘全没） | `app/stage.py::plan_scene_change` + 尺寸面板背景行的「换景」（见 72.4.1d；**只有人按下才写**） |
-| 改这一景的尺寸 | `show bg x at …` | 只替换**同 tag** | `app/stage.py::_bg_show_edit`（函数体里**不出现 `scene`**） |
+| 改这一景的尺寸 | `show bg x at …` | 只替换**同 tag** | `app/stage.py::_bg_show_edit`（函数体里**不出现 `scene`**）→ 改写本体 `beat_stage_parse.set_item_at` |
+| 合并回源 | 改那几处的 `at`（**不增删行**） | 整景统一成源那个值 | `story/at_merge.py::plan_at_merge` + `beat_stage_parse.set_item_at`（见 72.4.1f） |
 | 超清图 | 文件名 `xxx@2.png` | 引擎按 1/N 显示 | `app/stage_render.py::oversample_of / display_size`（**只认文件名，不自动改名**） |
 
 - **`scene` 清的是整个 master 层**（2026-10-31 修）：从前 `stage_snapshots` 只清
@@ -6130,19 +6132,23 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   「原样」没有体 —— 它是**去掉 at**，不是套空 transform。
 - `app/stage_render.size_rows(frame, …, beats=None)`：背景 + 各 CG/UI（≤3）各一行，
   `note` 复用 `_size_note`（与预览提示行同一份措辞）+ 出处 `（第 N 拍设的）`；
-  `items` = 四条预设 + `pick`（项目已有 transform）；不可用项 `ok=False` + `why`；
+  `items` = 四条预设 + 「自定义倍数」（见 72.4.1i）+ `pick`（项目已有 transform）；
+  不可用项 `ok=False` + `why`；
   `advice` = 本景"还有几处单独改写"（见 72.4.1e；不给 `beats` 就是 `None`）。
   缺图/自动命名的项目走 `resolve_stage_asset(..., index=image_index(root))`。
 - `app/stage.plan_size_edit(beats, index, row, key=, at=)`：`as_is` →
   `plan_at_edit(mode='clear')`（`scene_at=''` / 删 `@at`；本来没有 at 就拒绝）；
   其余 → `mode='source'`（改**最初写下这一行的那一拍**）。背景若是 `show bg X`
   换的（没有 `scene_at`）→ 明确说"请在高级区 Stage 改那条 show 的 at"。
+  **`source < 0`（跨章继承）** → 两条口径都换：`mode='chapter_first'`
+  （见 72.4.1g）；「原样」直接拒（上一章的 at 看不到，补裸 show 可能白做）。
 - 卡片：`ui_qt/size_panel.py::SizePanel`（4 槽，`WheelSafeComboBox` +
   `NarrowWrapLabel`）只发 `size_requested`；窗口层 `apply_size_from_card`
   走**与演出预览相同的** `_confirm_at_plan` / `_after_preview_beat_edit`。
   写回前先 `apply_current_beat()`；改的是本拍 → `_show_index` 重载，否则只刷派生面板。
-- 判据：`test_size_presets.py`（27）、`test_stage_size_rows.py`（29）、
-  `test_size_panel.py`（17）、`test_size_generate.py`（5）。
+- 判据：`test_size_presets.py`（27）、`test_stage_size_rows.py`（28）、
+  `test_size_panel.py`（38）、`test_size_generate.py`（8）、
+  `test_size_custom.py`（46，见 72.4.1i）。
 - `NarrowWrapLabel` 已搬到 `ui_qt/wrap_label.py`（`main_window` 仍导出同名）。
 
 #### 72.4.1c 生成 `sg_*`：三条护栏（2026-10-31 夜）
@@ -6156,8 +6162,10 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   hand_edited / bad_version / unreadable`，只有前两种可写。`SgPlan.apply()` 写盘前
   **再看一眼**磁盘（确认框隔着一次人机交互），状态变了或条目对不上 → 抛 `RuntimeError`，
   不覆盖。版本列表 `MARKER_VERSIONS = (1,)`（认旧版本，不认识的版本也不动）。
-- **② 生成前查重**：`plan_define` 依次判 —— 同名同内容 → `reuse`；几何能匹配到项目里
-  已有 transform（`size_presets.match_preset`）→ `reuse`；文件里已经有这一条 → `noop`；
+- **② 生成前查重**：`plan_define` 依次判 —— 同名同内容 → `reuse`；**逐字相同的
+  ATL 体**（换个名字写的一样命令）→ `reuse`；几何能匹配到项目里已有 transform
+  （`size_presets.match_preset`；拿不到图尺寸时倍数类预设走
+  `match_without_natural`，见 72.4.1i）→ `reuse`；文件里已经有这一条 → `noop`；
   名字被别人的内容占了 → 退到 `sg_xxx_2`（**不改别人的定义**，`note` 说清）。
   只有都不过才 `create` / `append`。`size_rows` 里那一层**只算不写**。
 - **命名**：`sg_fit_cover` / `sg_fit_contain` / `sg_zoom_050`（百分比三位补零，
@@ -6246,13 +6254,176 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 - **面板**：`ui_qt/size_panel.py` 每个槽多一个 `advice` 标签 —— 一行短的 + 完整
   句子在 tooltip；`hint` 用 `role="note"`、`notice` 用 `role="warn"`（琥珀），
   `none` / `None` 隐藏。**不拦任何操作**。
-- **边界**：合并回源（删那几处 `show … at …`）**没做** —— 那是改用户 `.rpy`
-  的 L4 删行，按 §5.5 要逐处确认、逐处可撤；本功能只报数，连"点一下合并"
-  的按钮都不给。
+- **边界**：这个模块只报数、不替人做决定。合并有了入口，但是**另一档**（见
+  72.4.1f）：人按按钮 + 逐处勾选，而且做法是**改 `@at`**，不是删行。
 - 判据：`tests/test_override_advice.py`（37 条：扫描边界 / 三种背景写法同桶 /
   图层分桶 / `hide` 口径 / 三档 / 降档 / 措辞数字 == 处数 / `new_at` 只点会盖回的 /
   `short()` 单行 / 面板与确认框接线 / **与舞台快照逐拍一致**）+
   `tests/test_size_panel.py` 里 8 条（显隐 / 颜色 / tooltip / 不顶宽 / 窗口级确认框）。
+
+#### 72.4.1f 合并回源：把那几处改成同一个值（2026-10-31 深夜）
+
+- **一个必须先说清的语义**：合并不是"把那几处 `show … at …` 删掉"。
+  `show` 会**重建** displayable ⇒ 删掉 `at` = 回到**原样**（不是继承源的 `at`）；
+  而且那几条 `show` 往往**同时换了图**。所以合并 = **只改那几条的 `@at`**：
+  行数、图名、`behind/with/as` 一个字都不动。
+- **目标值**：`story/at_merge.py::source_at_of(beats, index, kind=, tag=)` ——
+  **源那一行自己写着的** `at`（该拍有这条 `show` 就用它的 `item_at`，否则
+  `scene_at`）。**不能**拿 `frame.scene_at`：那一拍可能已经在某处改写**之后**，
+  拿它回填会把源一起改掉。
+- **计划**：`plan_at_merge(beats, source, *, kind, tag, label)` → `MergePlan`
+  （`ok` / `count` / `beats` / `steps` / `skipped` / `apply(selected=)` /
+  `revert()` / `diff_text()`，接口与 `AtEdit` 对齐，多拍所以没有 `beat_index`）。
+  - 处数**不自己扫**：直接吃 `override_advice(...).sites` ⇒ 恒有
+    `len(steps) + len(skipped) == advice.count`（面板说 2 处，这里改的就是那 2 拍）；
+  - `site.at == 目标值` 的**不列**（已经一样，不是"改不动"）；
+  - `skipped` 带原因（`complex` 复杂子句 / `expression` / `blocked` 拍级 at 会顶上 /
+    `missing` 找不到那条 `show`）—— **绝不静默跳过**；
+  - 计划拒绝（`reason` 非空）：源越界 / 没有 tag / 源里的 `at` 带 `@` /
+    没有可合并的 / 全改不了 / **统计不出**。
+- **改写本体**：`story/beat_stage_parse.py::set_item_at(text, tag, at, beat=None)`
+  → `ItemAtRewrite(status=ok|noop|missing|complex|expression|blocked)`。
+  **这是"改一条 show 的 `@at`"的唯一实现**：`app.stage._layer_show_edit` /
+  `_bg_show_edit` 都转调它（补条目 / 补 `show#N` 令牌仍是 `_bg_show_edit` 特有）。
+  三条规矩：① 同 tag 多条时改**最后一条**（Ren'Py 侧后 show 的赢）；
+  ② **绝不新增/删除子句**；③ 行尾冒号（ATL 块）剥下来再拼回去 —— 旧实现会
+  吃掉它（`show cg cg1@half:` → `show cg cg1@fit` + 无主缩进，引擎报
+  `expects a non-empty block`，真机 35 处）。`show_part_info` 同时搬到这里，
+  面板与合并因此判同一件事。
+- **L4 门禁**（`docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5：confirm、永远、
+  逐处）：入口 = 尺寸面板每行的「一并改成一样（N 处）」（`merge_requested`）→
+  `ui_qt/merge_dialog.py::MergeDialog` / `ask_merge`：**一处一个勾**（默认全勾，
+  勾掉的一个字不动）、「全不选」≠ 取消（返回 `set()`，调用方说"一处都没勾"）、
+  改不了的单独列出 → `main_window.apply_merge_from_panel` 只改内存里的 Beat。
+  多拍**没有全局撤销栈**（会话是逐拍单级 `undo(idx)`），文案说的是真实的门禁：
+  导出前还有一次逐行 diff。
+- **显隐**：`advice.agreed`（那几处都写着源那个值）→ **按钮不出现**（点了只会
+  "没有要改的"）；`unknown` / `source < 0` / 0 处同样不出现。
+  `override_advice(..., source_at=)` 新增 `agreed`，面板那句在这种状态下**降档
+  换口气**："本景还有 2 处写着同一个 at（第 943、952 拍）：再改源只到第 943 拍
+  有效" —— 陷阱还在（源下次再改仍只到第一处），所以不消失、只不上琥珀色。
+- 真机（只读，`tools/_probe_merge_real.py`）：`sr_general` 8045 拍 / 副本 8343 拍，
+  两边都 **58 行有单独改写，且全部是 `agreed`**（重复写同一个 `@cg38402160`）——
+  计划一致拒绝，两个项目数字一字不差。截图 `tools/_merge_panel.png` /
+  `tools/_merge_dialog.png`（面板最小宽仍 166）。
+- 判据：`tests/test_at_merge.py`（35：改写本体 13 / 目标值 5 / 计划 8 /
+  勾选与撤销 5 / **跨层两拍一致** 2）、`tests/test_merge_dialog.py`（11）、
+  `tests/test_size_panel.py` 里 6 条（显隐 5 + 端到端 5 —— 合计见该文件）。
+
+#### 72.4.1g 跨章继承的一行：本章第一拍补一条 `show`（2026-10-31 深夜）
+
+- **前提（先说没接上的那一半）**：`scene_src` / `layer_src < 0` = 出处**不在
+  这本剧本里**（上一章留下的）。卡片/预览建帧从来没传 `initial_state`，所以
+  真机上这种行在卡片里是 **0 个**（`tools/_probe_entry_real.py`：两个项目都是 0）。
+  `snapshot_rows(beats, initial_state=)` / `build_frames(..., initial_state=)` /
+  `build_frame_at(..., initial_state=)` 这一轮已经收它，**喂什么**还没接
+  （必须走 `pipeline/continuity` 的链条：`chapter2_1.rpy` 整章 130 拍没有
+  scene，"上一个文件的出口"是空的）。
+- **`plan_at_edit(mode='chapter_first', scene_image=图名)`**：出处不在本剧本
+  ⇒ 没有"那一行"可改，写 `scene` 又会清台 ⇒ 只能在**第 0 拍**补一条
+  `show 图@变换`。产物**只多一行**：行数 +1、别的条目与图名逐字不动。
+  `AtEdit.inserted=True`（`diff_text()` 说"补到第 1 拍"、`target_label` 说
+  "本章第一拍补一条 show，不清立绘"）。
+- **落点恒为第 0 拍**（背景/图层从本章第一拍就在台上）。接不住的一律**带
+  原因拒绝**，绝不静默换拍：第一拍带 `condition` / 在 `menu`·循环块
+  （`nest_path`）/ 行尾冒号（ATL 块）/ 同 tag 已 `show` / 图名带 `@` / 图名
+  与 tag 对不上 / 预设是**「原样」**（上一章的 at 看不到，补裸 show 可能白做）。
+- **补条目本体**：`app.stage._append_show_item(beat, image, transform)` ——
+  与「从这一拍起改这一景」（`_bg_show_edit`）**共用**，含 `show#N` 令牌
+  （`_show_token_append`：`op_order` 有逐条令牌时不补 = 快照看不见新条目）。
+- **两条出口一份判断**：`app.stage.is_unknown_source(value)`（公开名；**`0` 是
+  合法出处**）供 `plan_size_edit` 与 `ui_qt.main_window._plan_preview_at` 共用
+  —— 尺寸面板与演出预览都走这一条，不再"面板补一条、预览拒绝"。
+- **行的 `why` 两件事都写**：`stage_render._row_why(image_why, src)`。从前是
+  `why or _unknown_source_why(src)` —— 图片解析不出来时"这一行是上一章留下的"
+  会被**吞掉**，人按了「改」才发现落点跑到第 1 拍。
+- 真机（`tools/_probe_chapter_first_real.py`）：91/92 个章节的第一拍可当落点
+  （1 个因 ATL 块拒绝）；`chapter1_1→chapter1_2` 继承 `bg bg9_2`（无 at）→
+  补 `show bg bg9_2 at bgfit`，影响 1–1 拍（那处接缝本就是 S0）；
+  `chapter1_4→chapter2_1` 继承 `black`（纯色，算不出自然尺寸）→ 只有「自定义」。
+- 判据：`tests/test_chapter_first.py`（40：落点与产物 / 跨层快照 / 六种守卫 /
+  两条出口 / 面板措辞 / 前提）；旧措辞改 3 条（`test_stage_size_rows.py`：
+  "跨章 = 拒绝" → "跨章 = 第 1 拍补一条"）。
+
+#### 72.4.1h 把入口状态喂给卡片：跨章继承闭环（2026-10-31 深夜）
+
+上一节那条"前提"现在接上了 —— 卡片**真的**看得见"上一章留下的背景"。
+
+- **真源只有一份**：入口状态 = `continuity.Chapter.entry`（`stage_exit_state`
+  的产物）。`ChapterEntry`（`label/file/state/why`）只补 `Chapter` 上读不到的
+  两件事：`why`（链根 / 环 / 汇聚 / `接上一章 X 的收尾`）与 `unknown` 集合；
+  `note()` 逐通道说"确定 / 不知道"，`describe()` = `why；note`。
+- **不许按文件名猜**：`chapter2_1.rpy` 整章 130 拍没有一句 scene，
+  "上一个文件的出口"是空的；那 4 处 `2_1 → 2_1_1~4` 只能沿链条
+  （chapter1_4 → chapter2_1 → 2_1_1）推。`entry_by_file(report)` 取**文件开头
+  那一章**（同文件多章取 `order` 最小），一条报告只算一次（挂在报告对象上）。
+- **贵的那一步只在后台**：整本 `analyze_project` 真机 **2.2–2.8 s**（解析 1.6 +
+  分析 0.5），指纹 `project_source_signature` **46 ms**。所以
+  `app/stage_entry.py` 只做"缓存 + 只读查询"（键 = 项目根 + 指纹；
+  `entry_for()` 没命中就 `None` + `why_not()`，**不在查询里跑分析**），
+  分析由 `ui_qt/entry_warm.py::StageEntryWarmer` 丢进 `QThreadPool`
+  （同一项目只跑一份，`request()` → `cached/queued/running/skipped`）。
+- **四条消费线**都从 `session.stage_initial_state()` 取（唯一口子）：
+  `stage_digest_text`（`stage_digest(initial_state=, entry_note=, entry_why=)`）/
+  `stage_size_rows`（`build_frame_at(initial_state=)` → `source == -1` 的行）/
+  卡片小图 `stage_thumb.show_beat` / 演出预览（`session.frames()` +
+  `open_preview(initial_state=)`，**含写回 at 之后重算帧**）。
+  `EditorSession.load()` 清入口状态（换文件 = 换了上一章）。
+- **`unknown` ≠ 空**：卡片写 `（不知道：上游没定下来，不是「没有」）`；
+  没有入口状态时第 1 拍另说 `跨章：上一章留了什么 —— 还不知道（原因）`
+  （只在第 1 拍说；单文件模式不传 —— 跨章本来不存在，老行为逐字节不变）。
+- **`StageFrame.entry_state`**（新字段，默认 False）：这一帧是不是**接着上一章
+  演**算出来的。手工拼的帧 `scene_src=-1` **不是**跨章 —— 跨章那一行的
+  「原样」要写「原样（跨章这一行补不了）」（上一章的 at 看不到），
+  本地行仍写「原样（已经是原样）」。
+- 真机（`tools/_probe_entry_card.py`，offscreen 真窗口只读）：43 章里 **6 章**
+  入口有确定背景（`chapter1_2 ← bg9_2`；`chapter2_1 / 2_1_1~4 ← black`）=
+  跨章体检报的那 6 处接缝。截图 `tools/_entry_card.png`。
+- 判据：`tests/test_stage_entry.py`（37：`ChapterEntry` 措辞 / 文件→入口 /
+  会话四条线 / 缓存失效 / 后台只算一次 / 卡片只重画派生面板 / 预览重算帧）。
+
+#### 72.4.1i 「自定义倍数」：人填的那个数（2026-10-31 深夜）
+
+`50%` 只是 `0.5` 的特例；用户要的是能填 `0.75` / `1.25`。这一条**不新开一条
+机制**：仍然是"先在项目里找效果一样的，找不到才生成"，只是值改由人给。
+
+- **判据只有一份**：`size_presets.parse_zoom(text)` → `(zoom, 错误句)`，
+  `zoom_error(value)` → `''`／原因；范围 `ZOOM_MIN = 0.05` … `ZOOM_MAX = 5`
+  （`0` 看不见；`100` 倍会把 4K 背景解成 30 万像素宽）。**越界就拒绝，绝不夹**
+  —— 夹了人以为自己填的是那个值。认 `0.75` / `0.75x` / `0.75×` / `0.75倍` /
+  `75%`；`75`（不带百分号）**不认**（那是 75 倍，但人多半想写 75%），
+  错误句里两种写法都给。值统一 `round(…, 3)`（`0.750` 与 `0.75` 必须同一个数，
+  否则 transform 名会分成两条）。
+- **可生成的预设集合**：`size_presets.GENERATABLE = cover / contain / half / custom`
+  （`PRESET_ORDER` 仍是下拉里固定那四项 —— `custom` 的值列不完）。
+  `sg_transforms.plan_define(key='custom', zoom=)` 先 `zoom_error`，不过就
+  `refuse`（`自定义倍数没填好：…`），过了才 `sg_zoom_075` / `zoom 0.75`。
+- **行与面板**：`size_rows` 在四条预设后面、`pick` 前面固定插一条
+  `{'key':'custom', 'at':'', 'zoom':None, 'generate':True, 'ok':False}`；
+  面板按输入框里的值换成**算好的副本**（不动 `rows` 里的字典 —— 那是会话缓存），
+  条目文字 `自定义倍数 0.75×（zoom 0.75）`，选中时才露输入框那一行。
+  填错了条目**仍然可选**（不然人看不见自己错在哪），灰的是「改」按钮；
+  填过的字按 `kind+tag` 记着（**原样存**，翻拍回来还是它）。请求多一个
+  `'zoom'`（别的条目是 `None`），`at` 仍是 `''` —— 名字由窗口层定。
+  输入框用 `QLineEdit` 而不是 `QDoubleSpinBox`：数值框吃滚轮（靠全局
+  `wheel_guard` 兜），输入框根本不响应滚轮。
+- **两条新查重**（护栏 ② 的补丁，真机暴露的）：
+  ① **逐字相同的 ATL 体也算等价**（不看名字：真机 `sr_general` 的 `cover`
+   → 已有 `bgfit`）；② **拿不到图尺寸也能查倍数类预设** ——
+  `match_without_natural(key, screen, index, zoom=)`：纯缩放（没有 `fit` /
+  `xsize` / `ysize`）的框是图尺寸的一次函数，在 `_REF_NATURALS`
+  两个参考尺寸上框都相同 ⇒ 任何图尺寸都相同；**位置参与比较**
+  （`zoom 0.6` 但居中放的不冒充左上角）。于是 `zoom 0.5; anchor (0,0)`
+  （真机叫 `cg38402160`）在"图找不到"时也能被判等价。
+- 真机（`tools/_probe_custom_zoom.py`，只读）：92 文件 / **1627** 个尺寸行全都
+  带这一条；`sr_general` 有 **116** 条 zoom 变换（0.2 / 0.3 / 0.36 / 0.4 / 0.5 /
+  0.6 / 1.2 / 1.5 / 2），所以「0.5」会复用 `cg38402160`、「0.75」才会同一条
+  `sg_zoom_075`。铺满/适应/50% 有一条能匹配现成 transform 的行 1536；
+  三条**全都只能生成**的 **91** 行全是 `black`（纯色，没有图 → 算不出尺寸），
+  那种行只有「原样」和「自定义倍数」能落地（倍数不需要知道图多大）。
+  截图 `tools/_custom_panel.png`。
+- 判据：`tests/test_size_custom.py`（46）。生成那半的旧判据仍有效
+  （`test_sg_transforms.py` / `test_size_generate.py` 一条不改）。
 
 ### 72.4.2 优先级三件事：显式层 / 覆盖留痕 / 三态（2026-10-31）
 
