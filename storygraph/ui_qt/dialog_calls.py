@@ -87,7 +87,7 @@ def format_columns_text(columns) -> str:
 
 
 class CallDialog(QDialog):
-    """技术调用的声明表（调用名 / 等价效果 / 时长参数 / 参数列）。"""
+    """技术调用的声明表（调用名 / 中文名 / 等价效果 / 时长参数 / 参数列）。"""
 
     def __init__(self, parent=None, project_root=None):
         super().__init__(parent)
@@ -109,16 +109,22 @@ class CallDialog(QDialog):
         lay.addWidget(_hint(
             '参数列的写法：`转场@0` = 第 0 个位置参数；`层=layer` = 关键字参数；'
             '多个用分号隔开。等价效果可留空（留空 = 预览如实标「认不出」，不假装淡入）。'))
+        lay.addWidget(_hint(
+            '中文名填了之后，`with …`（过场）那一格的下拉里就叫这个名字 —— '
+            '★ 连下拉里找不到的写法也能在「⋯」候选框里搜到。'
+            '（映射表里登记过的同名条目优先，见 `assets/vocabulary.py`）'))
 
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ['调用名（如 my_wipe）', '等价效果（可空，如 Dissolve）',
+            ['调用名（如 my_wipe）', '中文名（可空，如 闪白转场）',
+             '等价效果（可空，如 Dissolve）',
              '时长取第几个参数（可空）', '参数列'])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setMinimumHeight(140)
@@ -176,11 +182,13 @@ class CallDialog(QDialog):
         self.table.setItem(row, 0, QTableWidgetItem(
             str(call.get('head') or '')))
         self.table.setItem(row, 1, QTableWidgetItem(
+            str(call.get('label') or '')))
+        self.table.setItem(row, 2, QTableWidgetItem(
             str(call.get('effect') or '')))
         seconds = call.get('seconds_arg')
-        self.table.setItem(row, 2, QTableWidgetItem(
-            '' if seconds is None else str(seconds)))
         self.table.setItem(row, 3, QTableWidgetItem(
+            '' if seconds is None else str(seconds)))
+        self.table.setItem(row, 4, QTableWidgetItem(
             format_columns_text(call.get('columns') or ())))
 
     def remove_row(self):
@@ -202,18 +210,19 @@ class CallDialog(QDialog):
             if not head:
                 bad.append(f'第 {row + 1} 行没有调用名')
                 continue
-            effect = cell(1)
-            raw_seconds = cell(2)
+            name = cell(1)
+            effect = cell(2)
+            raw_seconds = cell(3)
             seconds_arg = None
             if raw_seconds:
                 if raw_seconds.isdigit():
                     seconds_arg = int(raw_seconds)
                 else:
                     bad.append(f'第 {row + 1} 行的"时长参数"不是数字')
-            columns = parse_columns_text(cell(3))
+            columns = parse_columns_text(cell(4))
             if not columns:
                 bad.append(f'第 {row + 1} 行没有参数列')
-            out.append({'head': head, 'label': '',
+            out.append({'head': head, 'label': name,
                         'columns': columns,
                         'effect': effect,
                         'seconds_arg': seconds_arg})

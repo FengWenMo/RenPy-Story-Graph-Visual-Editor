@@ -1075,6 +1075,43 @@ def _reached_nodes(graph, start_id) -> set:
 #  汇总
 # ==================================================================
 
+def validate_sg_transforms(project_root) -> list:
+    """
+    **尺寸变换的引用存在性**（护栏 ③，2026-10-31 用户拍板的前提）。
+
+    `at sg_fit_cover` 引用了、项目里却没有这个定义 —— 这是 Ren'Py 运行到那一行
+    才会炸的错（`NameError`），而且报错只说名字，不说"哪个文件的哪一行"。
+    工具既然会**生成** `sg_*`，就必须同时负责"引用了但没有"的这件事：
+    打开项目体检时点名，而不是让人对着引擎报错猜。
+
+    只查 `sg_` 命名空间：那是工具自己的地盘（人自己写的 transform 不在
+    这里报 —— 扫不出来定义的原因太多：动态定义、include、别的目录）。
+    `project_root` 没给就跳过（CLI 的某些入口只跑内存里的拍）。
+
+    ⚠ 它**永远是全项目**的（"校验当前章节"时也会报别的章里的问题）：
+    引用和定义分散在不同文件里，只看当前章反而会漏 —— 每条都带 `文件:行号`。
+    """
+    if not project_root:
+        return []
+    try:
+        from storygraph.story.sg_transforms import missing_references
+        missing = missing_references(project_root)
+    except Exception as e:                     # noqa: BLE001 - 扫不动就别拦体检
+        swallow('pipeline.validate.sg_transforms', e)
+        return []
+    out = []
+    for ref in missing:
+        name = str(ref.get('name') or '')
+        out.append(Issue(
+            L3, 'E305', ERROR,
+            f'脚本引用了 at {name}，但项目里没有这个 transform'
+            '（游戏跑到那一行会报 NameError）',
+            where=f'{ref.get("file") or ""}:{int(ref.get("line") or 0) + 1}',
+            hint=('在 game/sg_transforms.rpy 里定义它，或改用卡片「尺寸」一格'
+                  '生成一个（工具会写好自己的定义文件）')))
+    return out
+
+
 def validate_all(beats, registry=None, graph=None, script_warnings=None,
                  project_root=None, menu_labels=None,
                  char_limit: int = DEFAULT_CHAR_LIMIT,
@@ -1097,6 +1134,8 @@ def validate_all(beats, registry=None, graph=None, script_warnings=None,
     report.extend(validate_level3(beats, registry, graph,
                                   script_warnings, project_root,
                                   project_speakers))
+    # 护栏 ③：引用了 `at sg_*` 但项目里没有定义（只查工具自己的命名空间）。
+    report.extend(validate_sg_transforms(project_root))
     if dedupe or cap_per_code:
         report.issues = _dedupe_and_cap(report.issues, cap_per_code)
     return report

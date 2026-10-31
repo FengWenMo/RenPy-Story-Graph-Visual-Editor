@@ -30,12 +30,19 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog,
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.graph_canvas import GraphCanvas
+from storygraph.ui_qt.labeled_choices import (labeled, legacy_pairs, say,
+                                              session_vocabulary)
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.status import Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 
 
 __all__ = ['WindowAssetsMixin']
+
+#: 资产种类 → 词汇表的 `kind`（两者本来同名，**只有背景不一样**：
+#: 资产表里它叫 `image`（与立绘同一张表），而"要起中文名"的那个东西是 **bg**）。
+VOCAB_KIND = {'image': 'bg', 'music': 'music', 'sound': 'sound',
+              'voice': 'voice'}
 
 
 class WindowAssetsMixin:
@@ -143,19 +150,31 @@ class WindowAssetsMixin:
         音频两格**额外加动作伪值**（`（停止音乐）` / `（停止音效）`）：
         与 Excel 候选表同一套词，但**不含「（排队播放）」**（用户拍板
         2026-10-28：排队必须带曲名，单放伪值会导成 TODO）。
+
+        **显示值 ≠ 真值**（用户 2026-10-31 第 2/3 条）：词汇表登记过的不光
+        显示英文，屏幕上是 `18 嗯？` / `bg9.2 储物间`，选出来写进剧本的仍是
+        `bgm/嗯？.mp3` / `bg bg9_5`。没登记的（绝大多数）原样显示 —— 规矩 2。
         """
         from storygraph.app.beats import audio_choice_items
+
         panel = getattr(self, '_panel', None)
         if panel is None:
             return
+        vocab = session_vocabulary(getattr(self, '_session', None))
         for field, kind in self.ASSET_FIELD_KINDS.items():
+            vocab_kind = VOCAB_KIND.get(kind, '')
             try:
                 choices = self._session.asset_choices(kind)
                 choices = audio_choice_items(kind, choices)
+                # 资源表那边是老形状 `(值, 说明)` → 先换成 `Choice`，再补中文名
+                choices = labeled(legacy_pairs(choices), vocab, vocab_kind)
             except Exception as e:                  # noqa: BLE001
                 swallow('ui_qt.window_assets._refresh_asset_choices', e)
                 choices = []
-            panel.set_asset_choices(field, choices)
+            # **当前值不在候选里**时也翻（`[音乐] night fadein 1.0` 这种复合值）
+            panel.set_asset_choices(
+                field, choices,
+                display=lambda value, k=vocab_kind: say(vocab, k, value))
     def _pick_asset_for(self, field: str, current: str) -> str:
         """
         卡片「选择…」的回调：从**已登记的资产**里挑一个填进这一格。

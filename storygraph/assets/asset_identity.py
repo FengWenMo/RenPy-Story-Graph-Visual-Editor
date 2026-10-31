@@ -25,14 +25,21 @@ storygraph.assets.asset_identity
 
 判定顺序（契约 §1.1，只认字面量）
 ----------------------------------
-⓪ **项目自己声明过的图像名**（`image 名:` / ATL 块 / 脚本合并进来的
+顺序的**唯一真源**是 `core.authority.IDENTITY_ORDER`（层号见 `AUTHORITY`）：
+
+① **映射精确覆盖**（asset ID / 项目相对路径）—— 人指着这一张说"它叫这个"，
+   最高级别的人为意图（可以改项目声明，但只对这一张生效，且要留痕）；
+② **项目自己声明过的图像名**（`image 名:` / ATL 块 / 脚本合并进来的
    `_from_script` 行）—— 名字是项目 `.rpy` 里的字面量，直接 `showable=True`；
-① 映射精确覆盖（asset ID / 项目相对路径）
-② 映射 glob 规则（按数组顺序，先中先得）
-③ 资源表「Tag」列（是**已知角色 tag** 才算 sprite；非角色词走 kind 判定）
-④ 路径**目录段**命中已知角色 tag：`.../<tag>/<表情>.png`
-⑤ 文件 stem 恰等于已知角色 tag（`.../ling.png`）
-⑥ `unknown`（不猜，`showable=False`）
+③ 映射 glob 规则（按数组顺序，先中先得）—— **只补空缺**：不许改 ①②
+   （§六 6.2「个体显式 > 批量规则」）；
+④ 资源表「Tag」列（是**已知角色 tag** 才算 sprite；非角色词走 kind 判定）
+⑤ 路径**目录段**命中已知角色 tag：`.../<tag>/<表情>.png`
+⑥ 文件 stem 恰等于已知角色 tag（`.../ling.png`）
+⑦ `unknown`（不猜，`showable=False`）
+
+> 2026-10-31 之前 ①② 是**一个整体**且在声明之前，于是一条 `game/**` 的
+> glob 就能把项目自己声明过的名字改掉；现在拆成两层、声明夹在中间。
 
 kind 判定
 ---------
@@ -68,8 +75,10 @@ KINDS = ('sprite', 'preview', 'avatar', 'bg', 'cg', 'ui', 'other', 'unknown')
 #: 能直接写进 `show <spec>` 的类别（其余一律先换真图或拒绝）。
 SHOWABLE_KINDS = frozenset({'sprite', 'bg', 'cg', 'ui'})
 
-#: 来源标记（对照表要显示"这个结论是谁给的"）。
-SOURCES = ('mapping', 'mapping-rule', 'tag-column', 'folder', 'stem', 'unknown')
+#: 来源标记（对照表要显示"这个结论是谁给的"）。取值与层号的对应见
+#: `core.authority.SOURCE_LAYER` —— 新增一个 source 必须同时登记那一层。
+SOURCES = ('declared', 'mapping', 'mapping-rule', 'tag-column', 'folder',
+           'stem', 'unknown')
 
 #: 副本/缩略图目录的**通用词**（不是项目名！）。
 #: 只用来判 kind=preview；判 tag 仍然只靠目录段命中的已知角色 tag。
@@ -111,6 +120,9 @@ class Identity:
     display: str = ''
     source: str = ''
     showable: bool = False
+    #: 覆盖留痕（append-only；`core.authority.Override`）。P0-3：
+    #: `source` 只回答"赢家是谁"，这里回答"原来是什么、被谁盖的"。
+    overrides: tuple = ()
 
     def __post_init__(self):
         # 属性统一成 tuple[str, ...]（调用方可能传 list；frozen 也允许在这里
@@ -123,6 +135,7 @@ class Identity:
         object.__setattr__(self, 'display', str(self.display or '').strip())
         object.__setattr__(self, 'source', str(self.source or ''))
         object.__setattr__(self, 'showable', bool(self.showable))
+        object.__setattr__(self, 'overrides', tuple(self.overrides or ()))
 
 
 # ---------------------------------------------------------------------------
@@ -537,24 +550,33 @@ def resolve_image(row: dict, *, relpath: str = '', known_tags=None,
     tag_map = _tag_map(known_tags, known_chars)
     attrs = tuple(row_values(row))
 
-    # ① / ② 映射优先（精确覆盖 > 规则；规则内部按数组顺序）
-    if isinstance(mapping, Mapping) and mapping:
-        try:
-            from storygraph.assets.asset_mapping import resolve_with_mapping
-            hit = resolve_with_mapping(mapping, relpath=rel, asset_id=aid)
-        except Exception as e:                  # noqa: BLE001 - 映射坏了退到推断
-            swallow('assets.asset_identity.resolve_image.mapping', e)
-            hit = None
-        if hit is not None:
-            if not hit.display:
-                hit = replace(hit, display=_display_of(known_chars, hit.tag))
-            return hit
+    # 判定顺序 = `core.authority.IDENTITY_ORDER`（**改这里必须同步那张表**）。
+    #
+    # 2026-10-31 改过一次（真源与优先级 §P0-1）：
+    #   · 旧：映射（精确 + 规则）**整体**在最前 → 一条 `game/**` 的 glob
+    #     就能把项目自己声明过的图像名改掉，而注释 ⓪ 明明写着"映射要治理的
+    #     是『猜』，不是『项目自己声明过的』"——注释在第 553 行、映射在第 541 行，
+    #     代码与意图相反；
+    #   · 新：精确覆盖（点名的这一张）→ 项目声明 → glob 规则。
+    #     判据：**规则只补空缺；要改就写精确覆盖**（§六 6.2）。
 
-    # ⓪ 项目自己声明过的图像名（ATL 块 / 脚本合并行）：名字是 `.rpy` 里的
-    # 字面量 —— 不许因为"Tag 不在角色表里"就把一条**原本能用的 show** 封掉
-    # （用户 2026-10-30 的映射表要治理的是"猜"，不是"项目自己声明过的"）。
+    # ① 映射的精确覆盖（`images` 表点名了资产 ID / 相对路径）
+    hit = _mapping_layer(mapping, rel, aid, 'mapping-exact')
+    if hit is not None:
+        return _record_declared_override(_with_display(hit, known_chars),
+                                         row, attrs, tag_map, known_chars,
+                                         aid, rel)
+
+    # ② 项目自己声明过的图像名（ATL 块 / 脚本合并行 / `layeredimage`）：名字
+    # 是 `.rpy` 里的字面量 —— 不许因为"Tag 不在角色表里"就把一条**原本能用
+    # 的 show** 封掉；也不许让 glob 规则把它改掉。
     if _is_declared_image(row):
         return _from_declared(row, attrs, tag_map, known_chars)
+
+    # ③ 映射的 glob 规则（按数组顺序，先中先得）：只补上面两层没说话的行。
+    hit = _mapping_layer(mapping, rel, aid, 'mapping-rule')
+    if hit is not None:
+        return _with_display(hit, known_chars)
 
     idx = copy_index
     if idx is None and rows is not None:
@@ -565,6 +587,76 @@ def resolve_image(row: dict, *, relpath: str = '', known_tags=None,
         return _from_tag_column(row, tag_col, rel, attrs, tag_map,
                                 known_chars, idx, aid)
     return _from_path(row, rel, attrs, tag_map, known_chars, idx, aid)
+
+
+def _mapping_layer(mapping, rel: str, aid: str, layer: str):
+    """
+    只取映射的**一层**（`mapping-exact` 或 `mapping-rule`）；没有就 `None`。
+
+    为什么分两次调（而不是一次拿"最终赢家"）：项目声明那一层必须夹在
+    两者**中间** —— 一次拿结果就没法在中间插队（§P0-1）。
+    """
+    if not isinstance(mapping, Mapping) or not mapping:
+        return None
+    try:
+        from storygraph.assets.asset_mapping import (resolve_exact_image,
+                                                     resolve_rule_image)
+        if layer == 'mapping-exact':
+            return resolve_exact_image(mapping, relpath=rel, asset_id=aid)
+        return resolve_rule_image(mapping, relpath=rel, asset_id=aid)
+    except Exception as e:                      # noqa: BLE001 - 映射坏了退到推断
+        swallow('assets.asset_identity.resolve_image.mapping', e)
+        return None
+
+
+def _with_display(hit, known_chars):
+    """映射没给显示名时，补上角色表的显示名（映射只写它要改的字段）。"""
+    if not hit.display:
+        hit = replace(hit, display=_display_of(known_chars, hit.tag))
+    return hit
+
+
+def _identity_value(identity) -> str:
+    """一条身份的人话值（比较"值变没变"、写覆盖记录都用它）。"""
+    parts = [str(getattr(identity, 'kind', '') or ''),
+             str(getattr(identity, 'tag', '') or ''),
+             ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ()))]
+    return ' '.join(p for p in parts if p).strip() or '（认不出）'
+
+
+def _record_declared_override(result, row, attrs, tag_map, known_chars,
+                              aid: str, rel: str):
+    """
+    精确覆盖赢的时候，如果这一行**项目自己声明过**，就留一条覆盖记录（P0-3）。
+
+    为什么要多算一次：`resolve_image` 在①就返回了，根本不知道②会说什么。
+    而"映射点名改掉了项目声明"正是最需要留痕的那一条（§七.1：覆盖可以改声明，
+    但必须能说出原来是啥）。只多算**一次纯函数**（`_from_declared` 不读盘），
+    且只在"这一行确实声明过"时才走 —— 轮不到的行一分钱不花。
+
+    值一样就不记：那不是覆盖，是两层恰好说同一句话。
+    """
+    if not _is_declared_image(row):
+        return result
+    try:
+        loser = _from_declared(row, attrs, tag_map, known_chars)
+    except Exception as e:                      # noqa: BLE001 - 留痕失败不该拦判定
+        swallow('assets.asset_identity.record_declared_override', e)
+        return result
+    if _identity_value(loser) == _identity_value(result):
+        return result
+    from storygraph.core.authority import Override
+
+    record = Override(
+        domain='identity',
+        key=str(aid or rel or '').strip() or '（这张图）',
+        winner_layer='mapping-exact',
+        loser_layer='declared',
+        winner_value=_identity_value(result),
+        loser_value=_identity_value(loser),
+        origin=str(rel or ''),
+        match=(str(aid or ''),))
+    return replace(result, overrides=tuple(result.overrides) + (record,))
 
 
 def _is_declared_image(row: Mapping) -> bool:
@@ -607,10 +699,10 @@ def _from_declared(row, attrs: tuple, tag_map: dict, known_chars) -> Identity:
         tag = tag_map[low]
         return Identity(kind='sprite', tag=tag, attrs=attrs,
                         display=_display_of(known_chars, tag),
-                        source='tag-column', showable=True)
+                        source='declared', showable=True)
     kind = kind_from_tag_word(low) or 'other'
     return Identity(kind=kind, tag=tag_col, attrs=attrs,
-                    source='tag-column', showable=True)
+                    source='declared', showable=True)
 
 
 def _from_tag_column(row, tag_col: str, rel: str, attrs: tuple,

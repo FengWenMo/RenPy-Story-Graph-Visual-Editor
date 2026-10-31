@@ -107,6 +107,30 @@ NON_ACTOR_SHOW_TARGETS = frozenset({
     'screen', 'layer', 'expression', 'movie', 'text',
 })
 
+#: **背景图层的三种 tag 写法**：`scene bg rooftop` / `show background x` /
+#: `show bg_ x` 在 Ren'Py 里都是同一个背景图层。
+#:
+#: 为什么单独拿出来（2026-10-31）：判"这条 show 是不是在换背景"的口径原先
+#: 有两份 —— `app.stage._same_layer_tag` 与 `story.override_advice`。两份
+#: 迟早漂移，而漂移的后果是"数出来的处数"和"实际会盖回去的处数"不一致
+#: （`docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5 最后一条判据）。
+BACKGROUND_TAGS = frozenset({'bg', 'background', 'bg_'})
+
+
+def same_layer_tag(a: str, b: str) -> bool:
+    """
+    两个 tag 是不是**同一个图层**（背景的三种写法算同一个）。
+
+    只做字符串判定 + 背景别名，**不猜**其它同义写法（`cg` 与 `cg2` 是两个
+    图层；Ren'Py 里 tag 就是字面量）。
+    """
+    a = str(a or '').strip()
+    b = str(b or '').strip()
+    if a == b:
+        return True
+    return a in BACKGROUND_TAGS and b in BACKGROUND_TAGS
+
+
 #: 非角色图层 tag → 给人看的中文名（快照「本拍变化」列里用）。
 #: 缺失的 key 由调用方兜底成"图层"。
 LAYER_CN_TAG = {
@@ -701,6 +725,7 @@ __all__ = [
     'ASSET_TYPE_ATTR', 'AUDIO_TYPE_ATTR',
     'AUDIO_PSEUDO', 'AUDIO_PSEUDO_ACTION',
     'NON_ACTOR_TAGS', 'NON_ACTOR_SHOW_TARGETS', 'LAYER_CN_TAG',
+    'BACKGROUND_TAGS', 'same_layer_tag',
     'RENPY_BUILTIN_TRANSFORMS', 'GENERATOR_MARKER',
     'RENPY_FLOW_BLOCK_HEADS', 'statement_head_token', 'is_known_flow_block',
     'RENPY_STATEMENT_VERBS', 'RENPY_FLOW_HEADS', 'RENPY_DECLARATIVE_HEADS',

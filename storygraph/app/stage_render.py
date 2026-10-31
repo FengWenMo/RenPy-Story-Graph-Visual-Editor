@@ -709,7 +709,7 @@ def _draw_background(canvas, frame, ctx, result):
     if path:
         try:
             with Image.open(path) as src:
-                natural = src.size
+                natural = display_size(path, src.size)
         except Exception as e:                # noqa: BLE001
             swallow('stage_render.background_size', e)
             natural = None
@@ -748,7 +748,7 @@ def _draw_sprites(canvas, frame, ctx, result):
         place = getattr(s, 'place', None)
         try:
             with Image.open(path) as src:
-                natural = src.size
+                natural = display_size(path, src.size)
         except Exception:                     # noqa: BLE001
             result.warnings.append(f'立绘读不出：{spec}')
             continue
@@ -802,7 +802,7 @@ def _draw_layers(canvas, frame, ctx, result):
         if path:
             try:
                 with Image.open(path) as src:
-                    natural = src.size
+                    natural = display_size(path, src.size)
             except Exception as e:            # noqa: BLE001
                 swallow('stage_render.layer_size', e)
                 natural = None
@@ -830,6 +830,46 @@ _NATURAL_SIZE_LIMIT = 256
 #: 项目 transform 表缓存（`scan_transforms` 要读几十~几百个 .rpy；提示行每拍
 #: 都要问，不能每拍扫盘）。预览窗口有时会把自己的表传进来，优先用那个。
 _TRANSFORM_INDEX_CACHE: dict = {}
+
+
+#: Ren'Py 的**超采样**：文件名以 `@N` 结尾（`eileen happy@2.png`）→ 引擎按
+#: **1/N** 的尺寸显示。官方文档原话：
+#:
+#:   "if an image is 3480x2160 and has an oversample of 2, then each axis will
+#:    be halved, and the image would fill the same 1920x1080 window."
+#:
+#: 工具从前不认它 —— 4K 图按 3840×2160 画，**预览比游戏大 N 倍**。这正是
+#: "超清像素导入导致的错位"的另一半（另一半是没写 at）。
+_OVERSAMPLE_RE = re.compile(r'@([1-9][0-9]*)$')
+
+
+def oversample_of(path) -> int:
+    """这张图在引擎里的超采样倍数（没有 / 认不出 = 1）。只看文件名。"""
+    if not path:
+        return 1
+    try:
+        stem = Path(str(path)).stem
+    except (TypeError, ValueError):
+        return 1
+    m = _OVERSAMPLE_RE.search(stem)
+    if not m:
+        return 1
+    try:
+        return max(1, int(m.group(1)))
+    except ValueError:
+        return 1
+
+
+def display_size(path, size) -> tuple:
+    """文件里的像素尺寸 → **引擎实际显示的尺寸**（超采样按 1/N）。"""
+    try:
+        w, h = int(size[0]), int(size[1])
+    except (TypeError, ValueError, IndexError):
+        return size
+    n = oversample_of(path)
+    if n <= 1:
+        return (w, h)
+    return (max(1, round(w / n)), max(1, round(h / n)))
 
 
 def _natural_size(path):
@@ -929,8 +969,14 @@ def _relation_phrase(box, screen) -> str:
 
 
 def _size_note(label, spec, natural, at, index, registry,
-               project_root, screen) -> str:
-    """一条人话尺寸提示（提示行/测试共用；纯文本）。"""
+               project_root, screen, raw=None, oversample: int = 1) -> str:
+    """
+    一条人话尺寸提示（提示行/测试共用；纯文本）。
+
+    `natural` 是**引擎显示尺寸**；`raw` / `oversample` 只在文件是超采样
+    （`xxx@2.png`）时给，用来说明"文件里是 4K、引擎按 1080p 画"——否则
+    用户会照着 3840×2160 去调，越调越错。
+    """
     place = None
     box = None
     at = str(at or '').strip()
@@ -944,7 +990,11 @@ def _size_note(label, spec, natural, at, index, registry,
     if box is None:
         box = (0.0, 0.0, float(natural[0]), float(natural[1]))
     sw, sh = int(screen[0]), int(screen[1])
-    return (f'{label} {spec} {natural[0]}×{natural[1]} → 屏幕 {sw}×{sh}'
+    size_text = f'{natural[0]}×{natural[1]}'
+    if int(oversample or 1) > 1 and raw:
+        size_text = (f'{raw[0]}×{raw[1]}@{int(oversample)}'
+                     f'（引擎按 {natural[0]}×{natural[1]} 画）')
+    return (f'{label} {spec} {size_text} → 屏幕 {sw}×{sh}'
             f'（{_at_phrase(at, place)}：{_relation_phrase(box, screen)}）')
 
 
@@ -986,11 +1036,14 @@ def scale_notes(frame, registry=None, project_root=None, screen=None,
     notes = []
     scene = str(getattr(frame, 'scene', '') or '').strip()
     if scene:
-        natural = _natural_size(resolve(scene))
-        if natural:
+        path = resolve(scene)
+        raw_px = _natural_size(path)
+        if raw_px:
+            natural = display_size(path, raw_px)
             at = str(getattr(frame, 'scene_at', '') or '')
             notes.append(_size_note('背景', scene, natural, at, index, registry,
-                                    project_root, screen_pair))
+                                    project_root, screen_pair,
+                                    raw=raw_px, oversample=oversample_of(path)))
     raw = str(getattr(frame, 'layers', '') or '')
     ats = dict(getattr(frame, 'layers_at', None) or {})
     try:
@@ -1001,13 +1054,340 @@ def scale_notes(frame, registry=None, project_root=None, screen=None,
     for spec in [p.strip() for p in raw.split(';') if p.strip()][:max(0, limit)]:
         tag = spec.split()[0] if spec.split() else spec
         at = str(ats.get(tag) or ats.get(spec) or '')
-        natural = _natural_size(resolve(spec))
-        if not natural:
+        path = resolve(spec)
+        raw_px = _natural_size(path)
+        if not raw_px:
             continue
+        natural = display_size(path, raw_px)
         label = LAYER_CN_TAG.get(tag, tag)
         notes.append(_size_note(label, spec, natural, at, index, registry,
-                                project_root, screen_pair))
+                                project_root, screen_pair,
+                                raw=raw_px, oversample=oversample_of(path)))
     return notes
+
+
+# ---------------------------------------------------------------------------
+#  尺寸面板（P1，2026-10-31）：这一拍可调尺寸的对象 + 预设→项目已有 transform
+# ---------------------------------------------------------------------------
+
+#: 尺寸面板最多列几张图层（1 个背景 + 3 个图层 = UI 的 4 个槽）。
+SIZE_ROW_LAYERS = 3
+
+
+def _source_suffix(src, frame) -> str:
+    """行说明里的出处后缀：`（第 41 拍设的）`；在本拍写下的不加。"""
+    try:
+        src = int(src)
+    except (TypeError, ValueError):
+        return ''
+    if src < 0:
+        return ''
+    try:
+        if int(getattr(frame, 'index', -2)) == src:
+            return ''
+    except (TypeError, ValueError) as e:
+        # 帧上没有合法拍号（手工构造 / 坏值）：当"不是本拍写的"处理即可，
+        # 但**留个痕**（同项目的静默 except 规矩）。
+        swallow('stage_render._source_suffix', e)
+    return f'（第 {src + 1} 拍设的）'
+
+
+def _unknown_source_why(src) -> str:
+    """
+    「这一行是上一章继承来的」那句提示（出处未知，**没有那一拍可改**）。
+
+    跨章继承的背景 / 图层没有"最初写下它的那一拍"（`scene_src = -1`）——
+    尺寸面板改不了它，点「改」会被 `plan_at_edit` 拒绝。这句放在行的 tooltip
+    里，让人点之前就知道；**不猜**一个拍号出来。
+    """
+    try:
+        if int(src) >= 0:
+            return ''
+    except (TypeError, ValueError) as e:
+        swallow('stage_render._unknown_source_why', e)
+    return ('这一行找不到最初写它的那一拍（多半是上一章继承来的），'
+            '不能在这里改尺寸')
+
+
+def size_rows(frame, registry=None, project_root=None, screen=None,
+              transform_index=None, limit: int = SIZE_ROW_LAYERS,
+              beats=None) -> list:
+    """
+    这一拍**可以调尺寸**的对象：背景 + 各 CG/UI 图层（P1，2026-10-31）。
+
+    每行一个 dict：
+
+        {
+          'index': 0,                    # 行号（UI 槽位用）
+          'kind': 'scene' | 'layer',     # 写回时 target
+          'tag': '',                     # 图层 tag（`cg` / `ui`…）
+          'spec': 'bg bg7_0',            # 这一行的图名（原样）
+          'label': '背景' | 'CG',        # 人话
+          'at': '', 'source': -1,        # 当前变换 / 它是第几拍写下的
+          'natural': (2304, 1296),       # 引擎显示尺寸（超采样已折过）
+          'note': '背景 bg bg7_0 …',     # `_size_note` 那一行（**同一份措辞**）
+          'items': [ {...}, … ],         # 预设 + 自定义（见下）
+          'why': '',                     # 非空 = 这一行现在不能改（说明原因）
+        }
+
+    `items` 里每一项：`{'key','at','text','ok','why','current','generate'}`：
+      · `key='as_is'` → 去掉 at；`at=''`；
+      · `key='cover'|'contain'|'half'` → 已按几何匹配到项目里的 transform
+        （`at` 是那条的名字）；匹配不到时**提议生成**一条 `sg_*`
+        （`generate=True`，`at` 是生成的名字）—— 这里只算不写，人确认之后
+        才落盘（`story.sg_transforms` 的三条护栏在那儿）；
+      · `key='pick'` → 「自定义」：项目里已有的 transform（`at` 是名字）；
+      · `current=True` → 这一行现在就是它（UI 标 ✓、按钮置灰）。
+
+    **只读**：不写盘、不改 Beat。`at` 的匹配规则全在
+    `story.size_presets`（按**效果**匹配，不按名字猜）；"能不能生成"全在
+    `story.sg_transforms`（文件被手改过就一律不列，`why` 说清原因）。
+
+    没装 Pillow / 找不到图 / 认不出尺寸时：不猜像素，`natural=None`，
+    只有「原样」和「自定义」可用（它们不需要知道尺寸）。
+
+    ## `beats`：本景还有几处"单独改写"（2026-10-31，只读）
+
+    给了整章的拍表，每行会多一个 `advice`（`story.override_advice.
+    OverrideAdvice`）—— 它回答的是尺寸面板**最容易被骗的那件事**：改源之后，
+    本景后面还有谁又 `show` 了一次同一个对象，把这次改动盖回去。
+
+    不给 `beats` 就是 `advice=None`（**不显示**，绝不冒充"0 处"）：
+    `tests` 与探针只关心"行怎么算出来"，不该被迫造一份拍表。
+    """
+    if frame is None:
+        return []
+    from storygraph.story import size_presets as SP
+    from storygraph.story.atl import project_screen
+
+    try:
+        sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen \
+            else (project_screen(project_root) if project_root
+                  else (1920, 1080))
+        screen_pair = (max(1, int(sw)), max(1, int(sh)))
+    except (TypeError, ValueError):
+        screen_pair = (1920, 1080)
+    images = getattr(registry, 'images', {}) or {}
+    index = _transform_index_of(project_root, transform_index)
+    from storygraph.app.stage import image_index, resolve_stage_asset
+    # 「按文件名回退」那一条（`resolve_stage_asset` 的 ③）要显式给索引才生效。
+    # 有些项目**不写 `image` 声明**、只靠 Ren'Py 的自动命名（`images/bg/x.png`
+    # → `bg x`）—— 不给索引的话，尺寸面板对这类项目永远是"找不到这张图"
+    # （渲染 / 提示行那边同源，但它们的调用方没传索引，这次只给尺寸面板补上）。
+    disk_index = None
+    if project_root:
+        try:
+            disk_index = image_index(project_root)
+        except Exception as e:                 # noqa: BLE001 - 索引建不出就不回退
+            swallow('stage_render.size_rows.disk_index', e)
+            disk_index = None
+    try:
+        from storygraph.core.vocabulary import LAYER_CN_TAG
+    except Exception as e:                     # noqa: BLE001 - 词表读不到就退 tag
+        swallow('stage_render.size_rows.layer_cn', e)
+        LAYER_CN_TAG = {}
+
+    def resolve(spec):
+        try:
+            return resolve_stage_asset(spec, images, project_root,
+                                       index=disk_index)
+        except Exception as e:                 # noqa: BLE001 - 解析失败就不给尺寸
+            swallow('stage_render.size_rows.resolve', e)
+            return None
+
+    #: `game/sg_transforms.rpy` 的体检结果：**每帧只读一次**（4 个预设 × 最多
+    #: 4 行都要问"能不能生成"，不能每问一次读一遍文件）。
+    gen_cache: dict = {'file': None}
+
+    def items_for(row_at, natural):
+        """预设 + 自定义 → `items`（未匹配到的预设也列出来，只是 `ok=False`）。"""
+        out = []
+
+        def generate_for(key, natural_size):
+            """
+            项目里没有几何匹配的 transform 时，**提议生成**一条 `sg_*`
+            （2026-10-31 用户拍板：允许生成，但要三条护栏 —— 见
+            `story.sg_transforms`）。这里**只算不写**：人按下「改」并确认之后，
+            窗口层（`main_window.apply_size_from_card`）才落盘。
+
+            ⚠ 这里**不传 `natural`**：几何匹配刚刚才在 `items_for` 里做过一遍
+            （还是 None），再让 `plan_define` 拿同样的数据算一遍 `transform_options`
+            等于每帧多算三次全表。**生成前的查重照做** —— 在确认那一步
+            （`plan_for_project(..., natural=...)`），那才是写盘前的最后一道。
+            """
+            if not project_root:
+                return None
+            try:
+                from storygraph.story import sg_transforms as SG
+                if gen_cache.get('file') is None:
+                    gen_cache['file'] = SG.inspect(project_root)
+                return SG.plan_define(gen_cache['file'], key, index=index,
+                                      screen=screen_pair)
+            except Exception as e:             # noqa: BLE001 - 计划不出来就当没有
+                swallow('stage_render.size_rows.generate', e)
+                return None
+
+        for key in SP.PRESET_ORDER:
+            at = ''
+            hit = None
+            ok = False
+            why = ''
+            gen = False
+            item_note = SP.preset_note(key)
+            if key == 'as_is':
+                ok = bool(row_at)
+                why = '' if ok else '这一行本来就没有 at'
+                text = (SP.preset_label(key) if ok
+                        else '原样（已经是原样）')
+            elif not natural:
+                why = '找不到这张图，算不出尺寸'
+                text = f'{SP.preset_label(key)}（算不出尺寸）'
+            else:
+                hit = SP.match_preset(key, natural, screen_pair, index)
+                if hit:
+                    at = hit['name']
+                    ok = str(at) != str(row_at)
+                    why = '' if ok else '已经是这个变换了'
+                    text = SP.describe_match(key, hit)
+                else:
+                    plan = generate_for(key, natural)
+                    if plan is not None and plan.writes:
+                        at = plan.name
+                        ok = str(at) != str(row_at)
+                        gen = True
+                        text = f'{SP.preset_label(key)}（生成 {plan.name}）'
+                        item_note = (f'{SP.preset_note(key)}\n'
+                                     f'项目里没有现成的：确认后会在 {plan.rel} 里'
+                                     f'写一条 {plan.name}（工具生成、带指纹；'
+                                     '以后手改过就不覆盖）')
+                        if plan.note:
+                            item_note += f'\n{plan.note}'
+                    elif plan is not None and plan.action == 'reuse':
+                        at = plan.name
+                        ok = str(at) != str(row_at)
+                        why = '' if ok else '已经是这个变换了'
+                        text = f'{SP.preset_label(key)} → {plan.name}'
+                    else:
+                        why = (plan.reason if plan is not None
+                               else '项目里没有几何匹配的 transform')
+                        text = f'{SP.preset_label(key)}（没有几何匹配的 transform）'
+            out.append({'key': key, 'at': at, 'text': text, 'ok': ok,
+                        'why': why, 'current': str(row_at) == str(at),
+                        'generate': gen, 'note': item_note})
+        # 「自定义」= 项目里已有的 transform（带动画的/算不出几何的不列）
+        for opt in SP.transform_options(index, natural, screen_pair):
+            name = opt['name']
+            ok = str(name) != str(row_at)
+            out.append({
+                'key': 'pick', 'at': name,
+                'text': f'自定义：{name}（{opt["brief"]}）',
+                'ok': ok, 'why': '' if ok else '已经是这个变换了',
+                'current': str(name) == str(row_at), 'generate': False,
+                'note': '套用项目里已有的这个 transform（只改 @at，别的不动）。'})
+        return out
+
+    rows = []
+
+    # —— 本景"单独改写"的处数：**一次扫描**、四行共用（2026-10-31）——
+    #
+    # 一帧最多 4 行，每行各扫一遍整景是 4 倍白算；而 `override_map` 的边界
+    # 只取决于"起点之前"（起点取各行 source 里最靠前的那个，逐行再按自己的
+    # source 切片）。`beats=None`（单测/探针）→ 不算，`advice=None`。
+    advice_map = None
+    advice_ok = beats is not None
+    advice_why = '没给整章的拍表' if not advice_ok else ''
+    if advice_ok:
+        try:
+            from storygraph.story.override_advice import override_map
+            starts = []
+            for value in [getattr(frame, 'scene_src', -1)] + \
+                    list((getattr(frame, 'layer_src', None) or {}).values()):
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if value >= 0:
+                    starts.append(value)
+            advice_map = override_map(beats, min(starts)) if starts else {}
+        except Exception as e:                 # noqa: BLE001 - 统计算不出就降档
+            swallow('stage_render.size_rows.advice_map', e)
+            advice_ok = False
+            advice_why = '统计时出错了'
+
+    def advice_for(src, kind, tag):
+        """这一行的"本景还有几处单独改写"；`None` = 调用方没给拍表（不显示）。
+
+        给了拍表却统计失败时**不返回 None**：那是"算不出来"，要说出来
+        （`OverrideAdvice(unknown=True)`），不能悄悄退化成"没有说话"。
+        """
+        if beats is None:
+            return None
+        try:
+            from storygraph.story.override_advice import (OverrideAdvice,
+                                                          override_advice)
+        except Exception as e:                 # noqa: BLE001 - 模块进不来就不显示
+            swallow('stage_render.size_rows.advice_import', e)
+            return None
+        if not advice_ok:
+            return OverrideAdvice(level='hint', unknown=True, reason=advice_why)
+        return override_advice(beats, src, kind=kind, tag=tag,
+                               prefetched=advice_map)
+
+    scene = str(getattr(frame, 'scene', '') or '').strip()
+    if scene:
+        path = resolve(scene)
+        raw_px = _natural_size(path)
+        natural = display_size(path, raw_px) if raw_px else None
+        at = str(getattr(frame, 'scene_at', '') or '')
+        src = getattr(frame, 'scene_src', -1)
+        note = ''
+        why = ''
+        if natural:
+            note = _size_note('背景', scene, natural, at, index, registry,
+                              project_root, screen_pair, raw=raw_px,
+                              oversample=oversample_of(path))
+        else:
+            why = '找不到这张图（尺寸未知，只能原样或自定义）'
+            note = f'背景 {scene}（尺寸未知：找不到图）'
+        src_i = src if isinstance(src, int) else -1
+        rows.append({'index': len(rows), 'kind': 'scene', 'tag': '',
+                     'spec': scene, 'label': '背景', 'at': at,
+                     'source': src_i,
+                     'natural': natural,
+                     'note': note + _source_suffix(src, frame),
+                     'items': items_for(at, natural),
+                     'advice': advice_for(src_i, 'scene', ''),
+                     'why': why or _unknown_source_why(src)})
+    raw = str(getattr(frame, 'layers', '') or '')
+    ats = dict(getattr(frame, 'layers_at', None) or {})
+    srcs = dict(getattr(frame, 'layer_src', None) or {})
+    for spec in [p.strip() for p in raw.split(';') if p.strip()][:max(0, limit)]:
+        tag = spec.split()[0] if spec.split() else spec
+        at = str(ats.get(tag) or ats.get(spec) or '')
+        src = srcs.get(tag)
+        path = resolve(spec)
+        raw_px = _natural_size(path)
+        natural = display_size(path, raw_px) if raw_px else None
+        label = LAYER_CN_TAG.get(tag, tag)
+        note = ''
+        why = ''
+        if natural:
+            note = _size_note(label, spec, natural, at, index, registry,
+                              project_root, screen_pair, raw=raw_px,
+                              oversample=oversample_of(path))
+        else:
+            why = '找不到这张图（尺寸未知，只能原样或自定义）'
+            note = f'{label} {spec}（尺寸未知：找不到图）'
+        src_i = src if isinstance(src, int) else -1
+        rows.append({'index': len(rows), 'kind': 'layer', 'tag': tag,
+                     'spec': spec, 'label': label, 'at': at,
+                     'source': src_i,
+                     'natural': natural,
+                     'note': note + _source_suffix(src, frame),
+                     'items': items_for(at, natural),
+                     'advice': advice_for(src_i, 'layer', tag),
+                     'why': why or _unknown_source_why(src)})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -2257,7 +2637,8 @@ def render_frame_to_png(frame, out_path, **kwargs) -> Optional[str]:
 
 
 __all__ = ['DEFAULT_CACHE_BYTES', 'FX_FALLBACK_SECONDS', 'MAX_READABLE_PX',
-           'MIN_READABLE_PX', 'READABLE_PX_RATIO', 'RenderResult', 'available',
-           'cache_clear', 'cache_info', 'configure_cache', 'draw_readable_say',
-           'render_frame', 'render_frame_to_png', 'scale_notes',
-           'scale_result_image', 'text_runs', 'transition_notes']
+           'MIN_READABLE_PX', 'READABLE_PX_RATIO', 'RenderResult',
+           'SIZE_ROW_LAYERS', 'available', 'cache_clear', 'cache_info',
+           'configure_cache', 'draw_readable_say', 'render_frame',
+           'render_frame_to_png', 'scale_notes', 'scale_result_image',
+           'size_rows', 'text_runs', 'transition_notes']

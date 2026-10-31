@@ -1692,7 +1692,8 @@ def beat_position_word(beat: Beat, symbols=None) -> str:
     return _position_display(at, symbols)
 
 
-def spec_arg_choices_for(beat: Beat, statements, registry=None) -> dict:
+def spec_arg_choices_for(beat: Beat, statements, registry=None,
+                         vocab=None) -> dict:
     """
     这一拍的**语句参数候选**：`{参数名: [候选值]}`（D1 / M4 第二阶段）。
 
@@ -1706,6 +1707,11 @@ def spec_arg_choices_for(beat: Beat, statements, registry=None) -> dict:
       · **标准语句的内置形状**（`camera` 层名 / `with` 转场 / `window` 动作 …）
         —— `with` 的候选来自**资源表里真实存在的变换**（`choices_from`），
         没有资源表就不给候选（宁可没有下拉，也不要编一串项目里没有的名字）。
+
+    `vocab`（词汇表，可选）只多做一件事：**把「过场 / 调用」也放进转场候选**
+    （用户 2026-10-31 第 5 条）—— `with` 那一格是"过场动画"的落点，而项目
+    自定义的过场（`Fade(...)` / `my_wipe`）本来就登记在词汇表里。
+    词汇表没给 → 与从前逐字一致（判据里那些 `==` 断言靠的就是这一点）。
     """
     out: dict = {}
     # ⚠ **不早退**：`statements` 与 `registry` 都为 None 时，内置形状表
@@ -1724,8 +1730,23 @@ def spec_arg_choices_for(beat: Beat, statements, registry=None) -> dict:
         if source == 'transform' and registry is not None:
             rows = getattr(registry, 'transforms', None) or {}
             choices = sorted(str(k) for k in rows) or choices
+        if source == 'transform' and vocab is not None:
+            choices = _plus_cues(choices, vocab)
         if choices:
             out[param] = choices
+    return out
+
+
+def _plus_cues(choices, vocab) -> list:
+    """把词汇表里的 `cue`（过场 / 调用）并进候选：**去重、保序、原样值**。"""
+    from storygraph.assets.vocabulary import KIND_CUE
+
+    out = list(choices or ())
+    seen = set(out)
+    for term in vocab.of_kind(KIND_CUE):
+        if term.id and term.id not in seen:
+            seen.add(term.id)
+            out.append(term.id)
     return out
 
 

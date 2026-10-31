@@ -139,6 +139,8 @@ _ANIM_BLOCKS = {'block', 'animation', 'contains'}
 _TRANSFORM_RE = re.compile(r'^(?P<indent>\s*)transform\s+(?P<name>[A-Za-z_]\w*)'
                            r'\s*(?:\((?P<params>[^)]*)\))?\s*:\s*$')
 _CALL_RE = re.compile(r'^(?P<name>[A-Za-z_]\w*)\s*\((?P<args>.*)\)\s*$')
+#: 一行只有一个标识符（`anim`）—— 也是一次 transform 调用，只是没写括号。
+_BARE_NAME_RE = re.compile(r'^[A-Za-z_]\w*$')
 
 
 # ----------------------------------------------------------------------
@@ -337,6 +339,63 @@ def parse_transforms(text: str) -> dict:
                                  on_blocks=on_blocks, sequence=sequence,
                                  uncertain='/'.join(dict.fromkeys(flags)))
     return out
+
+
+def is_static_transform(defn, index: Optional[dict] = None,
+                        _depth: int = 0) -> bool:
+    """
+    这条 transform 是**静止的**吗（套上去不会放动画 / 不靠事件块）？
+
+    为什么问这个（2026-10-31，尺寸面板）：`at` 这一格能写任何 transform，
+    但"改尺寸"只该改**停下来时的几何**。把 `focus`（`on show:` 里
+    `easein .25 …`）当尺寸变换套在背景上，用户得到的是"每次换景都从
+    小放大一下"——那是另一件事，不该由一个叫「改尺寸」的按钮顺手做掉。
+
+    判据（与 `_from_def` 的"最后一帧赢"同源）：
+      · 有 `on show:` / `on hide:` 等事件块 → 不是静止（里面有动画）；
+      · 有 `block:` / `animation:` / `parallel:` / `choice:` / `repeat` → 否；
+      · 行首是缓动词（`linear` / `easein` / `pause` / `function` …）→ 否；
+      · 调用别的 transform（`f21` → `focus(320)`）→ 跟着看被调的那条
+        （最多 6 层，与 `placement_of` 的深度上限一致；查不到就当静止 ——
+        与"不猜"同向：能算几何就允许引用）。
+
+    只读解析结果，不碰项目文件。
+    """
+    if defn is None:
+        return False
+    if getattr(defn, 'on_blocks', None):
+        return False
+    index = index or {}
+    for item in (getattr(defn, 'sequence', None) or ()):
+        try:
+            kind, payload = item
+        except (TypeError, ValueError):
+            return False
+        if kind != 'stmt':
+            return False                       # block / parallel / on / choice…
+        # ⚠ `sequence` 的第二项是**行列表**（`('stmt', ['zoom 0.5'])`），
+        # 不是字符串 —— 当成 str 会得到 `"['zoom 0.5']"`，行首就成了 `"['zoom"`，
+        # 缓动词与调用链一条都认不出来（2026-10-31 实测）。
+        lines = payload if isinstance(payload, (list, tuple)) else [payload]
+        for line in lines:
+            line = str(line or '').strip()
+            first = line.split()[0] if line.split() else ''
+            if first in _ANIM_WARPERS:
+                return False
+            m = _CALL_RE.match(line)
+            if m and _depth < 6:
+                callee = index.get(m.group('name'))
+                if callee is not None and not is_static_transform(
+                        callee, index, _depth + 1):
+                    return False
+            elif _BARE_NAME_RE.match(line) and _depth < 6:
+                # 裸名字也是一次调用（`transform wrapper: anim`）—— 不许因为
+                # 没写括号就当它是普通属性行
+                callee = index.get(line)
+                if callee is not None and not is_static_transform(
+                        callee, index, _depth + 1):
+                    return False
+    return True
 
 
 def scan_transforms(project_root, limit_files: int = 400) -> dict:

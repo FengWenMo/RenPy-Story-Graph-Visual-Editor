@@ -106,7 +106,13 @@ MAPPING_NAMES = (MAPPING_XLSX_FILENAME, MAPPING_FILENAME)
 
 #: 认识的顶层键（多出来的**警告不失败**：别的工具/未来版本加的键不该拦读）。
 KNOWN_TOP_KEYS = ('schema', 'name', 'characters', 'rules', 'images',
-                  'attributes')
+                  'attributes', 'outfit_codes', 'expression_codes',
+                  'vocabulary')
+
+#: 代号两段（`sprite_codes`）+ 词汇表（`vocabulary`）里一条能有的键。
+CODE_KEYS = {'outfit_codes': ('char', 'code', 'attr', 'label'),
+             'expression_codes': ('char', 'no', 'attr', 'label'),
+             'vocabulary': ('kind', 'id', 'label', 'code', 'char', 'note')}
 
 #: `images` / `rules` 条目里认识的键（多出来同样只警告）。
 KNOWN_ENTRY_KEYS = ('glob', 'kind', 'char', 'tag', 'attr', 'attrs',
@@ -312,6 +318,32 @@ def validate_mapping(data, *, where=None) -> list:
             kind = str(entry.get('kind') or '').strip()
             if kind and kind not in KINDS:
                 warnings.append(f'{at("images", key)}kind 不认识：{kind!r}')
+    for section, keys in CODE_KEYS.items():
+        entries = data.get(section)
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            warnings.append(f'{section} 不是数组（应为 [{{...}}, ...]）')
+            continue
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                warnings.append(f'{at(section, i)}不是对象')
+                continue
+            for field in entry:
+                if field not in keys:
+                    warnings.append(f'{at(section, i)}未知键 {field!r}（已忽略）')
+            if section == 'vocabulary':
+                from storygraph.assets.vocabulary import is_kind, kind_label
+                kind = str(entry.get('kind') or '').strip()
+                if kind and not is_kind(kind):
+                    warnings.append(f'{at(section, i)}种类不认识：{kind!r}'
+                                    f'（认得的：' + '、'.join(
+                                        kind_label(k) for k in
+                                        ('transform', 'music', 'bg',
+                                         'character', 'cue', 'costume'))
+                                    + ' …）')
+                if not str(entry.get('id') or '').strip():
+                    warnings.append(f'{at(section, i)}缺 id（这一条对不上任何东西）')
     attributes = data.get('attributes')
     if attributes is not None and not isinstance(attributes, dict):
         warnings.append('attributes 不是对象（应为 {维度: {"label": ...}}）')
@@ -545,25 +577,40 @@ def _identity_from_entry(entry, *, relpath: str, groups: Mapping,
 
 
 def resolve_with_mapping(mapping, *, relpath: str = '',
-                         asset_id: str = '') -> Optional[Identity]:
+                         asset_id: str = '', exact: bool = True,
+                         rules: bool = True) -> Optional[Identity]:
     """
     映射 → `Identity`（**没有命中**返回 `None`，交给字面量推断）。
 
     顺序（契约 §1.2）：`images` 精确覆盖（asset ID / 相对路径）优先，
     然后 `rules` **按数组顺序**先中先得。
+
+    `exact` / `rules` 是**分层开关**（2026-10-31，真源与优先级 §4.3）：
+    精确覆盖与 glob 规则**不是同一层** —— 前者是人指着某一张图说"它叫
+    这个"，后者是"这一类大概都这样"。`asset_identity.resolve_image` 要在
+    两者**之间**插进"项目自己声明过的名字"，所以必须能单独取一层：
+
+        resolve_with_mapping(..., rules=False)   # 只要 mapping-exact
+        resolve_with_mapping(..., exact=False)   # 只要 mapping-rule
+
+    两个都为 False → 恒 `None`（调用方拿它当"这一层没话可说"）。
     """
     if not isinstance(mapping, Mapping) or not mapping:
         return None
     rel = normalize_relpath(relpath)
     aid = str(asset_id or '').strip()
 
-    hit = _match_exact_image(mapping.get('images'), aid, rel)
-    if hit is not None:
-        return hit
+    if exact:
+        hit = _match_exact_image(mapping.get('images'), aid, rel)
+        if hit is not None:
+            return hit
 
-    rules = mapping.get('rules')
-    if isinstance(rules, list):
-        for rule in rules:
+    if not rules:
+        return None
+
+    rule_list = mapping.get('rules')
+    if isinstance(rule_list, list):
+        for rule in rule_list:
             if not isinstance(rule, Mapping):
                 continue
             glob = str(rule.get('glob') or '').strip()
@@ -575,6 +622,20 @@ def resolve_with_mapping(mapping, *, relpath: str = '',
             return _identity_from_entry(rule, relpath=rel, groups=groups,
                                         source='mapping-rule')
     return None
+
+
+def resolve_exact_image(mapping, *, relpath: str = '',
+                        asset_id: str = '') -> Optional[Identity]:
+    """只要**精确覆盖**那一层（人点名某一张图）。没有就 `None`。"""
+    return resolve_with_mapping(mapping, relpath=relpath, asset_id=asset_id,
+                                rules=False)
+
+
+def resolve_rule_image(mapping, *, relpath: str = '',
+                       asset_id: str = '') -> Optional[Identity]:
+    """只要 **glob 规则**那一层。没有就 `None`。"""
+    return resolve_with_mapping(mapping, relpath=relpath, asset_id=asset_id,
+                                exact=False)
 
 
 def _match_exact_image(images, asset_id: str, rel: str) -> Optional[Identity]:
@@ -848,6 +909,11 @@ def draft_mapping(project_root: str, rows, known_chars, *,
         'characters': characters,
         'rules': rules,
         'images': images,
+        # 代号两段（服装字母 / 表情编号）**不从目录结构推**：初稿里先空着，
+        # 由「逐条编辑」页的「按项目自动填」去数剧本注释（`sprite_codes`）。
+        'outfit_codes': [],
+        'expression_codes': [],
+        'vocabulary': [],
         'attributes': {},
     }
 
@@ -953,5 +1019,6 @@ __all__ = [
     'MAPPING_NAMES', 'WORKBOOK_SUFFIXES', 'KNOWN_TOP_KEYS', 'KNOWN_ENTRY_KEYS',
     'MappingError', 'is_workbook', 'file_format', 'mapping_sources',
     'shadow_note', 'find_mapping_path', 'load_mapping', 'validate_mapping',
-    'mapping_cached', 'resolve_with_mapping', 'draft_mapping', 'save_mapping',
+    'mapping_cached', 'resolve_with_mapping', 'resolve_exact_image',
+    'resolve_rule_image', 'draft_mapping', 'save_mapping',
 ]

@@ -67,16 +67,48 @@ def _git(root: Path, *args) -> str:
         return ''
 
 
+def _real_table(p: Path) -> bool:
+    """
+    这个 xlsx 是**真资源表**，还是工具自己留下的副产物？
+
+    为什么要分（2026-10-30 实测）：`_TABLE_GLOBS` 里的 `game/**/*asset_tables*
+    /**/*.xlsx` 会把 `game/asset_tables/*.xlsx` **再收一遍**（同一份表被数两次），
+    还会顺手收进：
+      · `~$images.xlsx` —— Excel 打开时留下的**锁文件**；
+      · `images.bak.xlsx` / `images.bak-20261030-202707.xlsx` —— 工具每次保存
+        写的 `.bak` 副本（`asset_registry.write_dict_to_excel`）。
+    这几样一进摘要，**每保存一次表基线就红一次**，而红的原因跟"项目内容变了"
+    毫无关系 —— 全是工具自己写的，属于噪声。
+    """
+    name = p.name.lower()
+    if name.startswith('~$'):
+        return False
+    if '.bak' in name:
+        return False
+    return True
+
+
 def snapshot(project: Path) -> dict:
     """项目侧的**内容摘要**（与工具代码无关，只描述"输入长什么样"）。"""
     project = Path(project)
     rpy = []
     asset_paths = []
     tables = []
+    seen_tables = set()
     for pat in _RPY_GLOBS:
         rpy += [p for p in project.glob(pat) if p.is_file()]
     for pat in _TABLE_GLOBS:
-        tables += [p for p in project.glob(pat) if p.is_file()]
+        for p in project.glob(pat):
+            if not p.is_file() or not _real_table(p):
+                continue
+            try:
+                key = p.resolve()
+            except OSError:
+                key = p
+            if key in seen_tables:          # 同一份表被两条 glob 各收了一次
+                continue
+            seen_tables.add(key)
+            tables.append(p)
     for rel in _ASSET_DIRS:
         d = project / rel
         if d.is_dir():

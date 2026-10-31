@@ -150,10 +150,12 @@ class TableSessionMixin:
     """
 
     #: 本 mixin 要求宿主（或其它 mixin）提供的成员。
+    #: `screen_size` / `transform_index`（2026-10-31）：`stage_size_rows` 要算
+    #: 这一拍的尺寸行（项目分辨率 + transform 表），两者都在 `ExportMixin` 里。
     REQUIRES = ('beats', 'symbols', 'script_path', 'registry',
                 'refresh_symbols', 'has', '_renumber', 'forget_undo',
                 '_last_saved', '_last_idx', '_last_removed', 'chapter',
-                'set_node_variables')
+                'set_node_variables', 'screen_size', 'transform_index')
 
     # ------------------------------------------------------------------
     #  章节级真源：顶层保真块（P0-2）
@@ -1034,17 +1036,42 @@ class TableSessionMixin:
         except OSError:
             return None
 
+    def source_state(self, draft_text=None) -> str:
+        """
+        磁盘上这一章相对"载入时那一份"的**三态**（`story/write_gate.py`）。
+
+        · `draft_text` 给了（真要写的那一刻）→ 完整三态：`ADOPT`（盘上已经是
+          这份草稿）/ `REBASE`（内容没变，只是被 touch）/ `CONFLICT`（真分叉）；
+        · 不给 → 只能回答后两态（没有草稿就没有 `ADOPT`）。
+
+        ⚠ 冲突**只在写入那一刻**判定（§6.3b"不打断正在编辑的人"）：
+        这个方法不被轮询，只在导出/落盘前问一次。
+        """
+        from storygraph.story import write_gate as W
+
+        fp = getattr(self, '_source_fingerprint', None)
+        if fp is None or not self.script_path:
+            return W.CONFLICT
+        try:
+            disk = Path(self.script_path).read_bytes()
+        except OSError:
+            return W.CONFLICT
+        if draft_text is None:
+            return W.REBASE if W.sha1_16(disk) == fp[2] else W.CONFLICT
+        return W.classify(disk, fp[2], draft_text).state
+
     def source_unchanged(self) -> bool:
         """
         磁盘上这一章还是"载入时那一份"吗？
 
-        `False` 时（读不出来、或真变了）调用方要退回**保守**的判据 ——
-        行号可能已经过期，只能靠内容对位（见 `patcher._range_looks_like`）。
+        2026-10-31（三态）：判据从 `(大小, mtime, sha1)` 改成**只比内容**。
+        `touch` / `git checkout` / 备份工具重写会改 mtime 而内容一个字没变，
+        从前会因此 `False` → 退回保守的内容对位（平白丢掉可信行号）。
+        内容真变了才是 `CONFLICT`，走保守判据（见 `patcher._range_looks_like`）。
         """
-        fp = getattr(self, '_source_fingerprint', None)
-        if fp is None or not self.script_path:
-            return False
-        return self._fingerprint_of(self.script_path) == fp
+        from storygraph.story import write_gate as W
+
+        return self.source_state() != W.CONFLICT
 
     def insert_beat(self, idx: int = None, after: bool = True) -> dict:
         """
@@ -1597,6 +1624,41 @@ class TableSessionMixin:
         except Exception as e:                     # noqa: BLE001
             swallow('app.session_table.stage_digest_text', e)
             return ''
+    def stage_size_rows(self, idx: int) -> list:
+        """
+        这一拍**可调尺寸**的对象（背景 + 各 CG/UI 图层）与预设匹配结果。
+
+        语义全在 `app.stage_render.size_rows`（按几何匹配项目已有 transform，
+        不按名字猜）；这里只负责凑齐它的输入：这一拍的帧（`build_frame_at`，
+        O(idx)）、资源表、项目 transform 表与分辨率。
+
+        **只读**：不改 Beat、不写盘。卡片每翻一拍调一次，所以不建整章的帧。
+        """
+        if not self.has(idx):
+            return []
+        try:
+            from storygraph.app.stage import build_frame_at
+            from storygraph.app.stage_render import size_rows
+            registry = self.registry()
+            transform_index = self.transform_index()
+            screen = self.screen_size()
+            frame = build_frame_at(self.beats, int(idx), registry=registry,
+                                   transform_index=transform_index,
+                                   screen=screen)
+            if frame is None:
+                return []
+            return size_rows(frame, registry=registry,
+                             project_root=getattr(self, 'project_root', None),
+                             screen=screen,
+                             transform_index=transform_index,
+                             # 本景"还有几处单独改写"（只读、一次扫描四行共用）：
+                             # 不给这份拍表，面板就不知道改源会被谁盖回去 ——
+                             # 而"改完没生效"正是尺寸面板最容易被骗的地方。
+                             beats=self.beats)
+        except Exception as e:                     # noqa: BLE001 - 尺寸格坏不拦卡片
+            swallow('app.session_table.stage_size_rows', e)
+            return []
+
     def speaking_card_index(self, idx: int) -> int:
         """当前说话人对应哪张立绘卡（-1 = 没有）。"""
         if not self.has(idx):

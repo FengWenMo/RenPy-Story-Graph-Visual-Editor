@@ -197,6 +197,16 @@ class ExportMixin:
             index = {}
         self._transform_index_cache = (root, index)
         return index
+    def refresh_transform_index(self) -> dict:
+        """
+        丢掉缓存、**重新扫**项目里的 transform（P1，2026-10-31）。
+
+        为什么需要它：尺寸面板会往 `game/sg_transforms.rpy` 里**写一条新定义**
+        （用户确认之后）。缓存不失效的话，卡片刷新时还是"项目里没有这个
+        transform"，人刚生成的东西自己看不见 —— 最典型的"做了等于没做"。
+        """
+        self._transform_index_cache = None
+        return self.transform_index()
     def screen_size(self) -> tuple:
         """游戏分辨率（`gui.init(w, h)`）；读不到用 1920×1080。"""
         root = str(self.project_root or '')

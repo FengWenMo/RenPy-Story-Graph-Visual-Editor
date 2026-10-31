@@ -48,6 +48,7 @@ from storygraph.app.beats import (apply_attr_slot, attr_slot_rows,
 from storygraph.app.session_table import uniform_position_of  # noqa: F401
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
+from storygraph.ui_qt.labeled_choices import labeled
 
 from storygraph.core.safeguard import swallow
 
@@ -103,6 +104,66 @@ def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
         swallow('ui_qt.sprite_grid.resolve_sprite_thumb_path', e)
         return None
     return None
+
+
+#: chip 上最多显示这么多个字（右栏 340px 是硬预算，长名字会顶宽卡片）。
+CHIP_TEXT_MAX = 10
+
+
+def _short(text, limit: int = CHIP_TEXT_MAX) -> str:
+    """chip 上的短名字：超长截断 + `…`（全文放 tooltip，见 `_raw_tip`）。"""
+    got = str(text if text is not None else '').strip()
+    return got if len(got) <= limit else got[:limit - 1] + '…'
+
+
+def _slot_kind(row) -> str:
+    """引擎分组 → 词汇表的种类（`outfit` → 服装，其余 → 表情）。"""
+    group = str((row or {}).get('group') or '').lower()
+    if group.startswith(('outfit', 'clothes')):
+        return 'costume'
+    return 'expression'
+
+
+def _raw_tip(kind: str, ident, vocabulary=None) -> str:
+    """
+    "词汇表里它叫什么 + 引擎里写的是什么"那两行提示。
+
+    ⚠ chip 上的名字会被截断（右栏 340px），**全文必须留在 tooltip 里** ——
+    否则长名字的人就只能看到「一个特别特别特…」。
+    """
+    vocab = vocabulary
+    if vocab is None:
+        return ''
+    try:
+        shown = vocab.label(kind, ident)
+    except Exception as e:                     # noqa: BLE001 - 提示失败不算错
+        swallow('ui_qt.sprite_grid._raw_tip', e)
+        return ''
+    raw = str(ident if ident is not None else '').strip()
+    if not shown or shown == raw:
+        return ''
+    return f'词汇表里叫：{shown}\n引擎里写的是 `{raw}`\n'
+
+
+def _accepts_one_argument(fn) -> bool:
+    """
+    这个回调**收不收一个参数**（决定「去『资源映射』修」要不要带上 spec）。
+
+    为什么要判而不是直接 `fn(spec)`：这个入口是主窗口注入的，
+    测试里常写成无参 lambda；直接传参会 `TypeError`，而"先试一次再退回去"
+    等于**可能执行两遍**。签名看不懂就当它不收参数（退回老行为，最安全）。
+    """
+    if not callable(fn):
+        return False
+    import inspect
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    kinds = (inspect.Parameter.POSITIONAL_ONLY,
+             inspect.Parameter.POSITIONAL_OR_KEYWORD,
+             inspect.Parameter.VAR_POSITIONAL)
+    return any(p.kind in kinds for p in params)
 
 
 def pick_spec_and_result(value) -> tuple:
@@ -174,6 +235,8 @@ class SpriteCardWidget(QFrame):
         self._on_resolve_path = on_resolve_path
         #: 「去『资源映射』修」的入口（主窗口注入；None = 不显示那个按钮）
         self._on_open_mapping = on_open_mapping
+        #: 这个入口要不要"带上这一条 spec"（见 `_accepts_one_argument`）。
+        self._mapping_wants_spec = _accepts_one_argument(on_open_mapping)
         #: 选择器刚给的三件事（`PickResult.message` / 换图前 / 换图后）。
         #: 只在"这次选中"之后显示一次；关掉提示条或再换一次图就没了。
         self._pick_note = ''
@@ -268,13 +331,42 @@ class SpriteCardWidget(QFrame):
         self._hint.setVisible(False)
         self._hint_text = ''
 
+    def _vocabulary(self):
+        """
+        这张卡片能用的**词汇表**（窗口挂在 `_for_tag` provider 上）。
+
+        为什么不在这里 import 项目映射：卡片是"只认传进来的东西"的一层
+        （`BeatCardEditor` / 网格都不碰项目根）。词汇表跟 `engine_facts` /
+        `layer_model` 一样，由窗口挂上去 —— 少一个注入通道，少一次"忘了转发"。
+        """
+        from storygraph.assets import vocabulary as V
+        return getattr(self._choice_groups_for, 'vocabulary', None) \
+            or V.EMPTY_VOCABULARY
+
+    def _say(self, kind: str, ident, char: str = '') -> str:
+        """
+        引擎写法 → 屏幕上那串字（查不到原样）。
+
+        ⚠ **只截断词汇表起的名字**：原名（`base_handdown` / `i11`）一个字都不许
+        少 —— 那是用户对着剧本核对的锚点，截了就成了另一张图
+        （实测：把 `base_handdown` 截成 `base_hand…` 立刻有三条判据红）。
+        """
+        raw = str(ident if ident is not None else '').strip()
+        text = self._vocabulary().label(kind, ident, char)
+        return _short(text) if text != raw else text
+
     def _open_mapping(self):
         fn = self._on_open_mapping
-        if callable(fn):
-            try:
+        if not callable(fn):
+            return
+        spec = str(self.item.get('image') or '').strip()
+        try:
+            if self._mapping_wants_spec:
+                fn(spec)
+            else:
                 fn()
-            except Exception as e:                 # noqa: BLE001 - 入口坏了不该炸卡片
-                swallow('ui_qt.sprite_grid.open_mapping', e)
+        except Exception as e:                 # noqa: BLE001 - 入口坏了不该炸卡片
+            swallow('ui_qt.sprite_grid.open_mapping', e)
 
     def _refresh_hint(self):
         """
@@ -599,6 +691,7 @@ class SpriteCardWidget(QFrame):
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
         inherited = str(self.item.get('inherited_at') or '').strip()
+        tag = spec.split()[0] if spec else ''
         # 一维一格（引擎分组）；只有一条维度时 `rows` 为空 → 回到单个表情格。
         rows = self._slot_rows()
         signature = [(str(r.get('group') or ''), str(r.get('label') or ''))
@@ -610,7 +703,9 @@ class SpriteCardWidget(QFrame):
             self._rebuild_slot_chips(rows)
         if rows:
             for btn, row in zip(self._slot_btns, rows):
-                shown = str(row.get('display') or row.get('value') or '')
+                raw = str(row.get('value') or '')
+                shown = self._say(_slot_kind(row), raw, tag) if raw else (
+                    str(row.get('display') or ''))
                 btn.setText(
                     f"{row.get('label') or row.get('group') or '属性'}："
                     f"{shown or '—'}")
@@ -618,6 +713,8 @@ class SpriteCardWidget(QFrame):
                        f"（共 {len(row.get('options') or [])} 个候选）。\n"
                        '左键 = 换下一个 · **右键 = 搜索选择**\n'
                        '点它只改这一维，其余维度（服装/表情/…）原样保留。')
+                if raw and shown != raw:
+                    tip = f'引擎里写的是 `{raw}`（屏幕上显示的是词汇表起的名字）。\n' + tip
                 if not shown:
                     # ⚠ 空着的那一格要说清它**不是坏了**：这一拍自己没写这一维，
                     #   画面上按引擎的默认走；点一下才把它固定到这一拍。
@@ -627,7 +724,9 @@ class SpriteCardWidget(QFrame):
         else:
             if getattr(self, '_expr_btn', None) is None or self._slot_btns:
                 self._rebuild_slot_chips([])
-            self._expr_btn.setText(f'{self._fallback_label()}：{expr or "—"}')
+            self._expr_btn.setText(
+                f'{self._fallback_label()}：'
+                f'{self._say("expression", expr, tag) if expr else "—"}')
             self._expr_btn.setToolTip(
                 '左键 = 换下一个候选 · **右键 = 搜索选择**'
                 '（候选就是项目里真实的属性名）')
@@ -636,11 +735,14 @@ class SpriteCardWidget(QFrame):
         # 标一个「继承」是为了不让人以为"这一拍自己写了这个位置"：
         # 保存时**只写这一拍真正有的值**，点一下 chip 才会把它固定下来。
         if pos:
-            self._pos_btn.setText(f'位置：{pos}')
-            self._pos_btn.setToolTip('这一拍自己写了位置。\n'
-                                     '左键 = 换下一个候选 · **右键 = 搜索选择**')
+            self._pos_btn.setText(f'位置：{self._say("transform", pos)}')
+            self._pos_btn.setToolTip(
+                _raw_tip('transform', pos, self._vocabulary())
+                + '这一拍自己写了位置。\n'
+                  '左键 = 换下一个候选 · **右键 = 搜索选择**')
         elif inherited:
-            self._pos_btn.setText(f'位置：{inherited}（继承）')
+            self._pos_btn.setText(
+                f'位置：{self._say("transform", inherited)}（继承）')
             self._pos_btn.setToolTip(
                 f'这一拍没写位置，屏幕上沿用的是更早那一拍的 `at {inherited}`。\n'
                 f'点一下即可把它固定到这一拍。\n'
@@ -911,6 +1013,10 @@ class SpriteCardWidget(QFrame):
         if not choices:
             return
         label = '表情' if field == 'expression' else '位置'
+        # **位置**显示人话（`i11` → 「1人，近处」），选出来仍是 `i11`；
+        # 表情候选是项目自己的词（`project_words`），那边已经是人说得出的话了。
+        if field == 'position':
+            choices = labeled(choices, self._vocabulary(), 'transform')
         groups = list(self._groups_for(field))
         value = choose_from(self,
                             f'选择{label} —— 共 {len(choices)} 个候选'
@@ -1028,6 +1134,8 @@ class SpriteGridWidget(QWidget):
         self._on_pick_image_result = on_pick_image_result
         #: 「去『资源映射』修」的入口（主窗口注入；None = 不显示那个按钮）
         self._on_open_mapping = on_open_mapping
+        #: 这个入口要不要"带上这一条 spec"（见 `_accepts_one_argument`）。
+        self._mapping_wants_spec = _accepts_one_argument(on_open_mapping)
         #: `image spec → 真实图片路径` 的解析器（主窗口注入；真源是资源表）
         self._on_resolve_path = None
         self._grid = QGridLayout(self)

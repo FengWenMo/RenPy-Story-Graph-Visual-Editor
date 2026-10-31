@@ -350,6 +350,15 @@ class ShowNode(ASTNode):
     onlayer: str = ''
     behind: list = field(default_factory=list)
     is_expression: bool = False
+    #: **ATL 块原文**（`show x at y:` 后面缩进的那几行，相对首行的缩进保留）。
+    #:
+    #: 2026-10-31：从前这里什么都没有，带块的 show 整条落 `_stmt_unmodeled`
+    #: → `known_block` → 台上有人工具却看不见（真机 33 处）。
+    #:
+    #: ⚠ 这是**纯文本透传**，不是"建模 ATL"：我们只回答"这段属于这一拍"，
+    #: 不解析 `zoom/yoffset/ease/parallel` 任何一个属性。`Beat.opaque` 原样
+    #: 吐回去，所以作者写什么还是什么（唯一真源永远是 .rpy）。
+    atl: str = ''
 
 @dataclass
 class SceneNode(ASTNode):

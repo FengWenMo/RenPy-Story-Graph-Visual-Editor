@@ -198,9 +198,23 @@ def test_表达式里的逗号一个都不许丢():
     assert roles2.target == 'holo(path, "lan base", (1920, 1080))', roles2
     assert roles2.clause('at') == ['i11'], roles2
 
-    # 端到端：原样进 → 原样出（`renpy_parser` 这一站的 dict）
+    # 端到端：`_parse_show_scene` 会**剥掉行尾冒号**（2026-10-31 契约变更）。
+    #
+    # 为什么变：冒号是"后面跟 ATL 块"的**语法标记**，不是 `as` 的值。
+    # 从前它被并进 `as_`，于是 `as title:` 变成一个名叫 `title:` 的标识符 ——
+    # 下游拿它去查 transform / 生成子句，永远查不到；而 `show lan indifferent:`
+    # 的图像名也会变成 `lan indifferent:`（真机 33 处，见 chapter3_1.rpy）。
+    #
+    # 冒号**没有丢**：它由 `payload['atl']` 是否存在表示，渲染时由
+    # `_emit_show`（拼 `:`）与 `emit_opaque`（兜底补 `:`）还原。
+    # 逐字节往返的判据在 `tests/test_hell_atl_mapping.py`。
     r = RenPyParser._parse_show_scene('show ' + text, False)
-    assert r['image'] == expr and r['is_expression'] and r['as_'] == 'title:', r
+    assert r['image'] == expr and r['is_expression'], r
+    assert r['as_'] == 'title', ('冒号不该留在 `as` 的值里', r['as_'])
+    # 不带冒号的写法结果相同（剥的只是"行尾那一个"）
+    r2 = RenPyParser._parse_show_scene(
+        'show expression ' + expr + ' as title', False)
+    assert r2['as_'] == 'title', r2
 
 
 def test_舞台片段那一站刻意不看引入型():

@@ -9,6 +9,9 @@ storygraph.ui_qt.asset_picker
 
 左：类别列表（**角色优先**）：`立绘：凌跃捷（ling）` / 角色预览图 / 背景 / CG /
     界面 / 音乐 / 音效 / 语音 / 变换
+    左上角一个下拉能在两种口径间**随时切**（用户 2026-10-30）：
+    「按分类」（上面那套用途归类）⇄「按文件夹」（`images/ling` 这种真实目录，
+    见 `app.picker.folder_groups`）。切的时候尽量停在同一批图上（交集最大）。
 中：候选网格（真缩略图，走 QThreadPool 异步解码）
 右：选中项的详情（不止原文，还写清"这是什么东西"：kind / tag / 属性 / 依据 /
     能不能直接写进 `show`）
@@ -114,6 +117,7 @@ KIND_LABELS = {
 
 #: `Identity.source` → 人话（"凭什么这么判"）。对照表与 tooltip 共用。
 SOURCE_LABELS = {
+    'declared': '项目自己的声明（.rpy）',
     'mapping': '映射（精确覆盖）',
     'mapping-rule': '映射（路径规则）',
     'tag-column': '资源表「Tag」列',
@@ -124,6 +128,26 @@ SOURCE_LABELS = {
 
 #: 重建分类列表时"保留当前选中项"的哨兵（`None` 表示「全部」那一行）。
 _KEEP_CURRENT = object()
+
+# ==================================================================
+#  左栏的两种口径（用户 2026-10-30）
+# ==================================================================
+#
+#  > 文件筛选与分类方面……要提供两种分类方式，一种就是按文件夹分类排序，
+#  > 另一种就是原来的按图片 / 背景 / UI 等那种分类排序……这两种方式要能够
+#  > 随时切换
+#
+# 两种都是"怎么找图"，只是口径不同：分类回答"这是什么"，文件夹回答"它在哪"。
+# 谁都不许替用户拍板，所以做成一个**随时能按**的下拉，而不是二选一的偏好。
+
+GROUP_BY_CATEGORY = '按分类'
+GROUP_BY_FOLDER = '按文件夹'
+GROUP_MODES = (GROUP_BY_CATEGORY, GROUP_BY_FOLDER)
+
+#: 文件夹那一档里，每一层缩进多少（`QListWidget` 没有层级，靠空格画树）。
+FOLDER_INDENT = '  '
+#: 最多缩进几层（再深就贴边了，路径全写在 tooltip 里）。
+FOLDER_INDENT_MAX = 6
 
 
 # ==================================================================
@@ -290,6 +314,23 @@ def human_label(identity, asset_id: str = '', row: dict = None) -> str:
     return f'{label} · {spec}' if label else spec
 
 
+def override_lines(identity) -> list:
+    """
+    这一条身份**覆盖了谁**（P0-3）→ 一列人话（可能空）。
+
+    数据来自判定层（`Identity.overrides`，append-only）；这里只做格式化，
+    不重新推一遍"谁赢"（那会变成第二个判据）。
+    """
+    if identity is None:
+        return []
+    try:
+        from storygraph.core.authority import describe
+        return describe(getattr(identity, 'overrides', ()) or ())
+    except Exception as e:                      # noqa: BLE001 - 说明文字不该拦界面
+        swallow('ui_qt.asset_picker.override_lines', e)
+        return []
+
+
 def identity_tooltip(identity, asset_id: str = '', row: dict = None,
                      detail: str = '') -> str:
     """
@@ -309,6 +350,9 @@ def identity_tooltip(identity, asset_id: str = '', row: dict = None,
         src = str(getattr(identity, 'source', '') or '')
         lines.append(f'判定：{KIND_LABELS.get(kind, kind)}'
                      f'（依据：{SOURCE_LABELS.get(src, src or "—")}）')
+        covers = override_lines(identity)
+        if covers:
+            lines.append('覆盖了：' + '；'.join(covers))
         tag = str(getattr(identity, 'tag', '') or '')
         attrs = ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ())
                          if str(a).strip())
@@ -418,6 +462,12 @@ class AssetPickerDialog(QDialog):
         self._pick_cache: dict = {}
         #: `分组名 → 用途档`（只用于"选了用途就藏起不相关的分组"）
         self._group_purpose_cache: dict = {}
+        #: 左栏口径（`GROUP_MODES` 之一）。**不落盘**：这是"这一眼怎么找"，
+        #: 不是长期偏好；真记住它反而会让"上次切过文件夹"变成看不见的状态。
+        self._group_by = GROUP_BY_CATEGORY
+        #: `{文件夹: [(类型, id), …]}` —— 按文件夹那种口径（第一次切过去才算，
+        #: 真实项目 74 个文件夹 / 1977 张图约 20ms，但没切就不该付这个钱）。
+        self._folder_groups = None
         self.warm_progress.connect(self._on_prewarm_progress)
         self.warm_done.connect(self._on_prewarm_done)
         # 调度模型见 `ui_qt/thumb_loader.py`：**优先级队列**（自限流），
@@ -499,11 +549,39 @@ class AssetPickerDialog(QDialog):
         root.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
-        # —— 左：类别 ——
+        # —— 左：分类方式 + 类别 ——
+        #
+        # 分类方式的下拉**贴着左栏**（不塞进顶部搜索那一条）：它改的是"左栏
+        # 按什么排"，放在它影响的东西上面，人才不会以为它是全窗口的筛选器。
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, T.SPACE['sm'], 0)
+        ll.setSpacing(T.SPACE['xs'])
+        head = QHBoxLayout()
+        head.setSpacing(T.SPACE['xs'])
+        cap_cat = QLabel('分类方式')
+        cap_cat.setProperty('role', 'caption')
+        head.addWidget(cap_cat, 0)
+        self._group_by_box = QComboBox()
+        self._group_by_box.setObjectName('group_by')
+        self._group_by_box.addItems(list(GROUP_MODES))
+        self._group_by_box.setCurrentText(self._group_by)
+        self._group_by_box.setMinimumWidth(110)
+        self._group_by_box.setToolTip(
+            '左栏按什么排：\n'
+            '· 按分类 —— 立绘：<角色> / 背景 / CG / 界面 / 音乐 …（这是什么）\n'
+            '· 按文件夹 —— 资源表里 Path 的真实目录（它在哪），\n'
+            '  每一层都含它下面所有子文件夹的图。\n'
+            '两个口径随时切，切的时候尽量停在同一批图上。')
+        self._group_by_box.currentTextChanged.connect(self._on_group_by)
+        head.addWidget(self._group_by_box, 1)
+        ll.addLayout(head)
         self._cats = QListWidget()
-        self._cats.setMaximumWidth(260)
         self._cats.currentItemChanged.connect(lambda *_: self._load_items())
-        split.addWidget(self._cats)
+        ll.addWidget(self._cats, 1)
+        left.setMaximumWidth(260)
+        left.setMinimumWidth(170)
+        split.addWidget(left)
         # —— 中：候选（**严格网格**）——
         #
         # 用户 2026-10-04：
@@ -739,8 +817,115 @@ class AssetPickerDialog(QDialog):
         # 决定，界面只展示它的名字 —— 不在这里做机器判断。
         self._groups = P.groups_with_plain(self._registry, types=self._types,
                                            project_root=self._project_root)
+        # 资源表换了 → 文件夹口径（按 Path 算的）也必须重算。
+        self._folder_groups = None
         self._group_purpose_cache.clear()
         self._refresh_categories(keep=None)
+
+    def _mode_groups(self) -> dict:
+        """
+        当前口径下要展示的组：分类 ⇄ 文件夹（两种都保留，切换只是换这一眼）。
+
+        文件夹口径**现算**（`app.picker.folder_groups`，纯字符串归一、不 stat
+        磁盘）：真实项目 1977 张图 → 74 个文件夹约 20ms，切过去才付这笔钱。
+        """
+        if self._group_by != GROUP_BY_FOLDER:
+            return self._groups
+        if self._folder_groups is None:
+            self._folder_groups = P.folder_groups(
+                self._registry, project_root=self._project_root,
+                types=self._types or ['image'])
+        return self._folder_groups
+
+    def _on_group_by(self, text):
+        """切口径：**别把人甩到「全部」去**（尽量停在同一批图上）。"""
+        mode = str(text or '').strip()
+        if mode not in GROUP_MODES:
+            mode = GROUP_BY_CATEGORY
+        if mode == self._group_by:
+            return
+        old_cur = self._current_group()
+        old_pairs = list(self._mode_groups().get(old_cur) or ()) if old_cur else []
+        self._group_by = mode
+        self._group_purpose_cache.clear()      # 组的用途是按组内前几条算的，换口径要重算
+        self._refresh_categories(keep=self._match_group(old_pairs))
+
+    def _match_group(self, pairs):
+        """
+        老口径里那批图 → 新口径里**交集最大**的那一组（没有就回「全部」）。
+
+        切过去还指着同一批图，人才不会觉得"一切就把我丢了"；找不到对应关系
+        就老实回「全部」，不硬凑一个空组。
+
+        交集一样大时取**更具体**的那个（文件夹口径下"更深"= 少一层囊括）：
+        不然 `pomodorro` 会抢走 `pomodorro/images` 的位置，切过去看到的图比
+        原来那批多一圈。
+        """
+        want = set(pairs or ())
+        if not want:
+            return None
+        best, best_key = None, (0, 0)
+        for name, group in self._mode_groups().items():
+            n = len(want & set(group or ()))
+            if not n:
+                continue
+            key = (n, str(name).count('/'))
+            if key > best_key:
+                best, best_key = name, key
+        return best
+
+    def _folder_labels(self, names=None) -> dict:
+        """
+        `{文件夹: 左栏那一行文字}`（文件夹口径，**一次算全**）。
+
+        `names` 是**左栏真的要显示的那些组**（用途过滤已经过一遍）—— 只按屏幕
+        上真出现的行算重名，否则"被过滤掉的那个同名文件夹"会让这一行白白多一段
+        `← characters` 尾巴（真机上"用途：立绘"时就出现过）。
+
+        缩进画层级、后缀写张数；**叶子名撞车时补一段父目录** —— 真实项目里
+        `gui/dutui/overlay` 与 `gui/phone/overlay` 都叫 `overlay`，只写叶子名
+        就是"两行长得一模一样、点开才知道是哪一个"。补到能区分的最短一段
+        （`← dutui`），不是无脑写全路径。
+
+        分类口径**一个字都不改**（`立绘：凌跃捷（ling）` 就是它本来的样子：
+        那套名字自己带角色名，再挂数字只是噪声）。
+        """
+        groups = self._mode_groups()
+        special = (P.ROOT_GROUP, P.NO_PATH_GROUP)
+        shown = [n for n in (groups if names is None else names)]
+        labels: dict = {}
+        names_plain = [n for n in shown if n not in special]
+        #: 叶子名（小写）→ 叫这个名字的文件夹们
+        same_leaf: dict = {}
+        for n in names_plain:
+            same_leaf.setdefault(str(n).rsplit('/', 1)[-1].lower(),
+                                 []).append(n)
+        for n in names_plain:
+            depth = min(str(n).count('/'), FOLDER_INDENT_MAX)
+            leaf = str(n).rsplit('/', 1)[-1]
+            text = f'{FOLDER_INDENT * depth}{leaf}（{len(groups.get(n) or ())}）'
+            twins = same_leaf.get(leaf.lower()) or []
+            if len(twins) > 1:
+                hint = self._parent_hint(n, twins)
+                if hint:
+                    text += f' ← {hint}'
+            labels[n] = text
+        for n in special:
+            if n in shown:
+                labels[n] = f'{n}（{len(groups.get(n) or ())}）'
+        return labels
+
+    @staticmethod
+    def _parent_hint(name: str, twins) -> str:
+        """叶子重名时，从近到远补父目录，补到**能和同名的其他几个分开**为止。"""
+        parts = str(name).split('/')[:-1]
+        others = [o for o in twins if o != name]
+        for k in range(1, len(parts) + 1):
+            tail = [p.lower() for p in parts[-k:]]
+            if all([p.lower() for p in str(o).split('/')[:-1]][-k:] != tail
+                   for o in others):
+                return '/'.join(parts[-k:])
+        return ''
 
     def _refresh_categories(self, keep=_KEEP_CURRENT):
         """
@@ -758,11 +943,17 @@ class AssetPickerDialog(QDialog):
             item_all = _Item(PURPOSE_ALL)
             item_all.setData(Qt.UserRole, None)
             self._cats.addItem(item_all)
-            for name in self._groups:
-                if not self._group_matches_purpose(name):
-                    continue
-                it = _Item(name)
+            groups = self._mode_groups()
+            shown = [n for n in groups if self._group_matches_purpose(n)]
+            labels = self._folder_labels(shown) \
+                if self._group_by == GROUP_BY_FOLDER else {}
+            for name in shown:
+                it = _Item(labels.get(name) or name)
                 it.setData(Qt.UserRole, name)
+                if name not in (P.ROOT_GROUP, P.NO_PATH_GROUP):
+                    it.setToolTip(f'{name}\n{len(groups.get(name) or ())} 条'
+                                  + ('（含子文件夹）'
+                                     if self._group_by == GROUP_BY_FOLDER else ''))
                 self._cats.addItem(it)
             row = 0
             for i in range(self._cats.count()):
@@ -779,7 +970,7 @@ class AssetPickerDialog(QDialog):
         if name in self._group_purpose_cache:
             return self._group_purpose_cache[name]
         counts: dict = {}
-        for atype, aid in (self._groups.get(name) or [])[:8]:
+        for atype, aid in (self._mode_groups().get(name) or [])[:8]:
             if atype != 'image':
                 continue
             p = purpose_of(self._identity(aid))
@@ -804,13 +995,14 @@ class AssetPickerDialog(QDialog):
     def _pairs(self) -> list:
         """当前该显示的 `(asset_type, asset_id)` 列表。"""
         group = self._current_group()
+        groups = self._mode_groups()
         if self._filter:
             pairs = P.search(self._registry, self._filter, limit=300,
                              project_root=self._project_root)
         elif group is None:
-            pairs = [(t, a) for v in self._groups.values() for (t, a) in v]
+            pairs = [(t, a) for v in groups.values() for (t, a) in v]
         else:
-            pairs = list(self._groups.get(group) or [])
+            pairs = list(groups.get(group) or [])
         if self._types:
             pairs = [(t, a) for (t, a) in pairs if t in self._types]
         # 用途过滤：只留这一档的图（按 kind 判，**不按分组名/路径**）。
@@ -1244,10 +1436,12 @@ class AssetPickerDialog(QDialog):
         attrs = ' '.join(str(a) for a in (getattr(identity, 'attrs', ()) or ())
                          if str(a).strip())
         showable = bool(getattr(identity, 'showable', False))
+        covers = override_lines(identity)
         return (f'判定：{KIND_LABELS.get(kind, kind)}'
                 f'（依据：{SOURCE_LABELS.get(src, src or "—")}）\n'
-                f'角色 tag：{tag or "（没有）"}    属性：{attrs or "（没推断出）"}\n'
-                f'能不能直接写进 show：{"能" if showable else "不能"}\n\n')
+                + (f'覆盖了：{"；".join(covers)}\n' if covers else '')
+                + f'角色 tag：{tag or "（没有）"}    属性：{attrs or "（没推断出）"}\n'
+                + f'能不能直接写进 show：{"能" if showable else "不能"}\n\n')
 
     def _atl_block(self, asset_id):
         """

@@ -128,6 +128,64 @@ class TestLayerAt:
         assert rows[1]['state']['layer_at'] == {'cg': 'cg38402160'}
 
 
+class TestSceneClearsTheWholeMasterLayer:
+    """
+    `scene` 清的是**整个 master 层**，不只是立绘（2026-10-31 修）。
+
+    Ren'Py 官方措辞："The scene statement removes all displayables from the
+    master layer, and then shows an image on that layer." —— 所以
+    `show cg …` 的 CG、`show ui …` 的 HUD 和立绘一样，被 `scene` 清掉。
+
+    从前快照只清 `actors`、`layers` 原样留着 → **产物里已经没了的 CG，
+    预览/卡片还在画**。真机 `sr_general` 61 个 `scene` 拍里 **40 个**是这样。
+    """
+
+    def test_scene_clears_cg_layers_too(self):
+        beats = [
+            _beat(1, scene='bg room', show='cg cg01@cg38402160'),
+            _beat(2, text='CG 还挂着'),
+            _beat(3, scene='bg wide'),            # 换景 → CG 没了
+            _beat(4, text='继承'),
+        ]
+        rows = stage_snapshots(beats)
+        assert [r['layers'] for r in rows] == \
+            ['cg cg01', 'cg cg01', '', '']
+        assert [r['state']['layer_at'] for r in rows] == \
+            [{'cg': 'cg38402160'}, {'cg': 'cg38402160'}, {}, {}]
+        assert 'layer_src' not in rows[2]['state'] or \
+            rows[2]['state']['layer_src'].get('cg') is None
+
+    def test_the_change_line_says_the_layers_went_away(self):
+        beats = [
+            _beat(1, show='cg cg01'),
+            _beat(2, scene='bg room'),
+        ]
+        rows = stage_snapshots(beats)
+        text = rows[1]['display_changes']
+        assert '清空图层（1 个）' in text, text
+        assert '清空立绘' not in text            # 那一拍台上没有立绘
+
+    def test_shows_after_the_scene_in_the_same_beat_survive(self):
+        """同一拍 `scene` 之后又 show 的 CG 当然还在（顺序就是语义）。"""
+        beats = [
+            _beat(1, show='cg old'),
+            _beat(2, scene='bg room', show='cg new'),
+        ]
+        rows = stage_snapshots(beats)
+        assert rows[1]['state']['layers'] == {'cg': 'cg new'}
+        assert rows[1]['layers'] == 'cg new'
+
+    def test_a_show_before_the_scene_in_the_same_beat_is_cleared(self):
+        beats = [
+            _beat(1, scene='bg room'),
+            _beat(2, show='cg cg01', scene='bg wide',
+                  op_order='show#0,scene#0'),
+        ]
+        rows = stage_snapshots(beats)
+        assert rows[0]['state']['layers'] == {}
+        assert rows[1]['state']['layers'] == {}
+
+
 class TestBackwardCompatibility:
     def test_state_keys_exist_even_when_empty(self):
         row = snapshot_rows([_beat(1, text='只有台词')])[0]

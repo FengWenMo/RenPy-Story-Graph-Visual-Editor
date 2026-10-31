@@ -90,7 +90,48 @@ def _clip(text, limit: int = 78) -> str:
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
-__all__ = ['GraphOpsMixin']
+def report_missing_sg_transforms(win) -> list:
+    """
+    **打开项目时点名**"引用了、但项目里没有定义"的 `sg_*`（护栏 ③，2026-10-31）。
+
+    为什么放在打开项目这一下（用户原话："别让用户对着引擎报错猜"）：Ren'Py 只在
+    **跑到那一行**才炸，报的还是 `NameError: name 'sg_fit_cover' is not defined`
+    —— 名字有了、位置和原因都没有。工具既然会生成 `sg_*`，就该在打开时就点出来。
+
+    只在**真有问题**时说一句（干净的项目一个字都不写）。扫一遍 ~0.25s / 200 个
+    `.rpy`，所以调用方用 `QTimer.singleShot(0, …)` 推到窗口画完之后跑。
+
+    返回点到的条目（`[{'name','file','line','text'}, …]`；没有 = `[]`），测试用。
+    """
+    root = getattr(win, '_project_root', None)
+    if not root:
+        return []
+    try:
+        from storygraph.story.sg_transforms import missing_references
+        missing = missing_references(root)
+    except Exception as e:                  # noqa: BLE001 - 点不了名也不该影响打开
+        swallow('ui_qt.open_project.sg_transforms', e)
+        return []
+    if not missing:
+        return []
+    names = sorted({str(m.get('name') or '') for m in missing})
+    spots = '、'.join(f'{m.get("name")}（{m.get("file")}:'
+                      f'{int(m.get("line") or 0) + 1}）'
+                      for m in missing[:4])
+    more = f' …共 {len(missing)} 处' if len(missing) > 4 else ''
+    text = (f'[变换] ⚠ 脚本里引用了 {len(names)} 个 sg_* 变换，但项目里没有定义：'
+            f'{spots}{more}\n'
+            '        游戏跑到那一行会报 NameError。补上定义，或用卡片「尺寸」'
+            '一格重新生成一条（项目体检里也有这条 E305）')
+    try:
+        win._log(text)
+        win._status(f'⚠ {len(names)} 个 sg_* 变换没有定义（见控制台）')
+    except Exception as e:                  # noqa: BLE001 - 窗口没了也别炸
+        swallow('ui_qt.open_project.sg_transforms.report', e)
+    return missing
+
+
+__all__ = ['GraphOpsMixin', 'report_missing_sg_transforms']
 
 
 class GraphOpsMixin:
@@ -576,6 +617,13 @@ class GraphOpsMixin:
             self.set_assets_ready(True)
         except Exception as e:                  # noqa: BLE001 - 说不了也不该拦打开
             swallow('main_window.open_project_path.assets_ready', e)
+        # 护栏 ③（2026-10-31）：脚本里 `at sg_*` 引用了、但项目里没有定义 → **打开
+        # 项目就点名**（Ren'Py 只在跑到那一行才炸，报错只说名字）。
+        # 推到"窗口画完"之后再扫（200 个 `.rpy` 约 0.25s），别让打开项目多等半秒。
+        try:
+            QTimer.singleShot(0, lambda: report_missing_sg_transforms(self))
+        except Exception as e:                  # noqa: BLE001 - 排不上队也不该拦打开
+            swallow('ui_qt.open_project_path.sg_transforms', e)
         if not res.get('ok'):
             msg = (f'[项目] 读不到资源表：{res.get("error") or "未知原因"}'
                    f'（剧情图不受影响；下拉候选会是空的）')

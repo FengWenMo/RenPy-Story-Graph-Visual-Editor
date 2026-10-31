@@ -162,6 +162,25 @@ def test_positional_values_ignore_kv_inside_strings():
     assert sa.positional_values('mycue "a=b" intensity=3') == ['a=b']
 
 
+def test_a_call_expression_is_one_positional_value():
+    """
+    **括号里的逗号 / 空格不算分隔**（2026-10-31 实测报）。
+
+    `with Fade(0.2, 0.0, 0.2)` 从前被切成 `Fade(0.2,` + `0.0,` + `0.2)`，
+    于是卡片「转场」那格只显示 `Fade(0.2,` —— 而真实项目里过场就长这样
+    （用户第 5 条要的"自定义过场动画的调用代码"正是它）。一个调用表达式
+    在 Ren'Py 里**就是一个值**，与引号串同理。
+    """
+    assert sa.positional_values('with Fade(0.2, 0.0, 0.2)') == \
+        ['Fade(0.2, 0.0, 0.2)']
+    assert sa.positional_values('with Dissolve(1.0)') == ['Dissolve(1.0)']
+    assert sa.positional_values('with dissolve') == ['dissolve']
+    # 括号里套字符串、字符串里有括号：都还是一个值
+    assert sa.positional_values('t f("a)b", [1, 2])') == ['f("a)b", [1, 2])']
+    # 括号后面还有参数 → 那是两个
+    assert sa.positional_values('t f(1, 2) x=3 tail') == ['f(1, 2)', 'tail']
+
+
 def test_setting_the_same_positional_value_changes_nothing():
     for head, idx, value in (('camera background:', 0, 'background'),
                              ("camera 'background':", 0, 'background'),

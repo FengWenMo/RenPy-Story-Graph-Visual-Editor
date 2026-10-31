@@ -116,9 +116,22 @@ def _split_show_items(text: str) -> list:
         part = part.strip()
         if not part:
             continue
+        # **行尾冒号 = 这一条 show 后面跟着 ATL 块**（2026-10-31）。
+        #
+        # 冒号不能留在 `at` 值里：`at right:` 会让舞台几何去找一个叫
+        # `right:` 的变换（永远找不到），预览就静默丢掉这个位置。
+        # 但也不能扔：它是"后面有块"的语法标记，扔了导出就少一个冒号，
+        # 块体变成无主缩进，引擎报 `expects a non-empty block`。
+        # 所以**剥下来单独记在 `block` 上**，`show_item_part` 再拼回去 ——
+        # 单元格里那个字符串因此**往返保真**（写出去什么样，读回来什么样）。
+        block = part.endswith(':')
+        if block:
+            part = part[:-1].rstrip()
+            if not part:
+                continue
         if part.startswith('expression') and (
                 part == 'expression' or part[len('expression')].isspace()):
-            items.append(_parse_show_expression(part))
+            item = _parse_show_expression(part)
         elif '@' in part:
             image, _, at = part.partition('@')
             image = image.strip()
@@ -128,15 +141,40 @@ def _split_show_items(text: str) -> list:
                     or image[len('expression')].isspace()):
                 item = _parse_show_expression(image)
                 item['at'] = at.strip()
-                items.append(item)
-                continue
-            items.append({'clause': '', 'image': image, 'at': at.strip()})
+            else:
+                item = {'clause': '', 'image': image, 'at': at.strip()}
         elif any(w in _SHOW_CHUNK_WORDS for w in part.split()):
-            items.append({'clause': part, 'image': _clause_image(part),
-                          **_clause_values(part)})
+            item = {'clause': part, 'image': _clause_image(part),
+                    **_clause_values(part)}
         else:
-            items.append({'clause': '', 'image': part, 'at': ''})
+            item = {'clause': '', 'image': part, 'at': ''}
+        if block:
+            item['block'] = True
+        items.append(item)
     return items
+
+
+def item_at(item, beat=None) -> str:
+    """
+    一条 show item **真正生效**的 `at`（空 = 这一条不带变换）。
+
+    优先级（Ren'Py 侧就是这么叠加的，也是 `stage_snapshot` 一直用的口径）：
+
+        item 自己的 `at`  >  拍级 `at`  >  拍级 `transform`
+
+    为什么单独抽出来（2026-10-31）：`stage_snapshot._apply_show_verb` 内联写过
+    一遍，`story.override_advice` 要数"哪几处单独改了尺寸"又需要同一份答案。
+    两份各算一遍的后果不是"多一行代码"，而是**数出来的处数和实际会盖回去的
+    处数不一致** —— 报告里的数字必须和写入动的是同一批行
+    （`docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5 最后一条判据）。
+
+    `beat=None` 时只认 item 自己那一层（纯解析用）。
+    """
+    at = str((item or {}).get('at') or '').strip()
+    if at or beat is None:
+        return at
+    return (str(getattr(beat, 'at', '') or '').strip()
+            or str(getattr(beat, 'transform', '') or '').strip())
 
 def _parse_show_expression(part: str) -> dict:
     """

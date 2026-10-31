@@ -237,11 +237,19 @@ def test_real_project_reaches_full_coverage():
     """
     真机：**没有一条语句是"工具不认识"的**（T3 = 0），循环块也不再是 T0b。
 
-    ⚠ 2026-10-18 起，可编辑覆盖率**不再是 100%**：`show …:` 的 ATL 块形式
-    （真机 35 处）没有块体载体，整块改走逐字保真（T2）—— 从前它们被算成
-    T0，可渲染时块体是**丢掉**的（产物 `show …:` 空块，Ren'Py 直接报
-    `show statement expects a non-empty block.`）。所以 100% 是假的，
-    98% 才是真的：那 2% 是"看得懂形状、逐字抄对"，不是"接不住"。
+    ⚠ 2026-10-18 的历史（保留，别删）：`show …:` 的 ATL 块形式当时**没有
+    块体载体**，整块只能走逐字保真（T2）—— 那时如果算成 T0，可渲染时块体
+    是**丢掉**的（产物 `show …:` 空块，Ren'Py 报
+    `show statement expects a non-empty block.`），所以 100% 是假的。
+
+    ✅ 2026-10-31：`ShowNode.atl` 接住了块体 —— 头行（谁/什么/在哪）
+    结构化进 `Beat.show`，块体原文逐字进 `Beat.opaque`。于是这 35 处
+    从 T2（看得懂形状、逐字抄）升到 **T0（结构已知）**：卡片/预览/跨章
+    连续性都能看到台上有人，产物仍逐字节不变
+    （`tests/test_hell_atl_mapping.py` 钉往返）。
+
+    所以 T2 从此归零 —— 不是"放宽判据"，是**能力真的升了一级**；
+    块体仍然逐字保真，只是它不再是"这一拍认不出来"的证据。
     """
     from storygraph.parsing.discover import discover_scripts
     from storygraph.story.statement_registry import coverage_of_beats
@@ -250,8 +258,8 @@ def test_real_project_reaches_full_coverage():
     beats = beats_from_parse_result(pr)
     cov = coverage_of_beats(beats)
     assert cov.count_of(cap.T3) == 0, cov.counts
-    #: 仅剩的不可编辑项：`show …:` 的 ATL 块（真机 35 处，逐字保真）
-    assert cov.counts.get(cap.T2, 0) == 35, cov.counts
+    #: ATL 块形式的 show 已经进 beat（结构已知）→ 不再有 T2 只读项
+    assert cov.counts.get(cap.T2, 0) == 0, cov.counts
     assert cov.ratio >= 0.98, cov.to_dict()
     assert cov.count_of(cap.T0B) == 0, cov.counts
     text = cap.format_capability_report(cov)

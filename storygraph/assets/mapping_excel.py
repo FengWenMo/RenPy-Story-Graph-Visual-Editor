@@ -113,6 +113,12 @@ SHEET_SPECS = (
                             'characters', 'character')),
     ('rules', '规则', ('规则', '规则表', '路径规则', 'rules', 'rule')),
     ('images', '图片', ('图片', '图片表', '单图', 'images', 'image')),
+    ('outfit_codes', '服装代号', ('服装代号', '服装', '服装表', '衣服',
+                                  'outfit_codes', 'outfit', 'costumes')),
+    ('expression_codes', '表情编号', ('表情编号', '表情', '表情表',
+                                      'expression_codes', 'expressions')),
+    ('vocabulary', '中文叫法', ('中文叫法', '词汇表', '叫法', '别名',
+                                'vocabulary', 'terms', 'names')),
     ('attributes', '属性', ('属性', '属性表', 'attributes', 'attribute')),
 )
 
@@ -144,6 +150,26 @@ FIELDS = {
         'showable': ('showable', '能否 show', '能 show', '可否 show', 'show'),
         'display': ('display', '显示名', '名字'),
     },
+    'outfit_codes': {
+        'char': ('char', '角色', '角色 tag', 'tag', '谁'),
+        'code': ('code', '代号', '字母', 'letter'),
+        'attr': ('attr', 'attrs', '剧本里怎么写', '属性', '服装', '衣服'),
+        'label': ('label', '说明', '中文', '中文名'),
+    },
+    'expression_codes': {
+        'char': ('char', '角色', '角色 tag', 'tag', '谁'),
+        'no': ('no', 'number', '编号', '号码', '第几号'),
+        'attr': ('attr', 'attrs', '剧本里怎么写', '属性', '表情'),
+        'label': ('label', '说明', '中文', '中文名'),
+    },
+    'vocabulary': {
+        'kind': ('kind', '是什么', '种类', '类别', '类型'),
+        'id': ('id', '原名', '引擎里怎么写', '写法', '标识'),
+        'label': ('label', '叫什么', '中文', '中文名', '说法', '名字'),
+        'code': ('code', '编号', '代号', '号码'),
+        'char': ('char', '角色', '角色 tag', 'tag', '谁'),
+        'note': ('note', '备注', '说明'),
+    },
     'attributes': {
         'key': ('key', '维度', 'dimension', 'name', '名字', '属性'),
         'label': ('label', '标签', '中文', '显示名', '中文名'),
@@ -152,7 +178,24 @@ FIELDS = {
 
 #: 每张表**必须有**的列（没有就跳过这张表并警告）。
 KEY_FIELDS = {'characters': 'tag', 'rules': 'glob', 'images': 'key',
-              'attributes': 'key'}
+              'outfit_codes': 'char', 'expression_codes': 'char',
+              'vocabulary': 'id', 'attributes': 'key'}
+
+#: 写表时**表头写什么**（人话；读的一侧两种写法都认，见 `FIELDS`）。
+#:
+#: 用户 2026-10-31："提供一个模板 xlsx……" —— 模板是给人照着填的，
+#: 表头写 `char / code / attr / label` 等于逼他先学会我们的键名。
+#: 所以写出去的每一列表头都用中文，且都在 `FIELDS` 的别名里（读得回来）。
+HEADERS = {
+    'meta': ('键', '值'),
+    'characters': ('角色', '显示名', '别名', '头像'),
+    'rules': ('路径', '类型', '角色', '属性', '能否 show', '显示名'),
+    'images': ('资产 ID', '类型', '角色', '属性', '能否 show', '显示名'),
+    'outfit_codes': ('角色', '代号', '剧本里怎么写', '说明'),
+    'expression_codes': ('角色', '编号', '剧本里怎么写', '说明'),
+    'vocabulary': ('是什么', '原名', '叫什么', '编号', '角色', '备注'),
+    'attributes': ('维度', '显示名'),
+}
 
 _TRUE = frozenset({'1', 'true', 'yes', 'y', 'on', '是', '能', '可以', '可',
                    '√', '✓', '对'})
@@ -431,6 +474,9 @@ _ENTRY_FIELDS = {
     'characters': ('display', 'aliases', 'avatar'),
     'rules': ('kind', 'char', 'attr', 'showable', 'display'),
     'images': ('kind', 'char', 'attr', 'showable', 'display'),
+    'outfit_codes': ('code', 'attr', 'label'),
+    'expression_codes': ('no', 'attr', 'label'),
+    'vocabulary': ('kind', 'label', 'code', 'char', 'note'),
     'attributes': ('label',),
 }
 
@@ -498,6 +544,75 @@ def _read_images(ws, warnings, located) -> dict:
     return out
 
 
+def _read_codes(ws, key: str, warnings, located) -> list:
+    """
+    「服装代号」/「表情编号」两张表 → 一维数组（**行序 = 表里的行序**）。
+
+    这两张表没有"键"：一条就是 `角色 + 代号 + 剧本里怎么写`，
+    所以整行都是字段（和 `rules` 同一个形状）。
+    """
+    label = SHEET_TITLES[key]
+    rows = _rows(ws, warnings, label)
+    header_at, cols, unknown = _find_header(rows, key)
+    if header_at < 0:
+        _warn_no_header(rows, key, warnings)
+        return []
+    _warn_unknown_cols(unknown, label, header_at + 1, warnings)
+    out = []
+    for line, values in _entries(rows, header_at, cols, key, warnings):
+        entry = _entry_of(values, key, warnings, line, label)
+        entry['char'] = _text(values.get('char'))
+        for field in ('code', 'no'):
+            if field in FIELDS[key]:
+                entry[field] = _text(values.get(field))
+        if not entry.get('code') and not entry.get('no'):
+            warnings.append(f'「{label}」表第 {line} 行：没填'
+                            f'「{"代号" if key == "outfit_codes" else "编号"}」'
+                            f'—— 这一行用不了（已跳过）')
+            if 'code' in entry:
+                entry.pop('code', None)
+            if 'no' in entry:
+                entry.pop('no', None)
+            continue
+        out.append(entry)
+        located[(key, len(out) - 1)] = f'「{label}」表第 {line} 行'
+    return out
+
+
+def _read_vocabulary(ws, warnings, located) -> list:
+    """
+    「中文叫法」表 → 一维数组（**行序 = 表里的行序**）。
+
+    那一列 `是什么` 人一定写成中文（`位置` / `音乐` / `服装`）—— 用
+    `vocabulary.kind_from_text` 认，认不出给警告并**跳过这一行**（不猜）。
+    """
+    from storygraph.assets.vocabulary import is_kind, kind_from_text
+
+    label = SHEET_TITLES['vocabulary']
+    rows = _rows(ws, warnings, label)
+    header_at, cols, unknown = _find_header(rows, 'vocabulary')
+    if header_at < 0:
+        _warn_no_header(rows, 'vocabulary', warnings)
+        return []
+    _warn_unknown_cols(unknown, label, header_at + 1, warnings)
+    out = []
+    for line, values in _entries(rows, header_at, cols, 'vocabulary', warnings):
+        entry = _entry_of(values, 'vocabulary', warnings, line, label)
+        entry['id'] = _text(values.get('id'))
+        raw_kind = _text(values.get('kind'))
+        kind = raw_kind if is_kind(raw_kind) else kind_from_text(raw_kind)
+        if not kind:
+            warnings.append(f'「{label}」表第 {line} 行：不认识「是什么」'
+                            f'那一格（{raw_kind!r}）—— 这一行跳过了'
+                            f'（认得：位置 / 音乐 / 音效 / 语音 / 背景 / '
+                            f'角色 / 过场 / 服装 / 表情）')
+            continue
+        entry['kind'] = kind
+        out.append(entry)
+        located[('vocabulary', len(out) - 1)] = f'「{label}」表第 {line} 行'
+    return out
+
+
 def _read_attributes(ws, warnings, located) -> dict:
     label = SHEET_TITLES['attributes']
     rows = _rows(ws, warnings, label)
@@ -540,7 +655,7 @@ def read_workbook(path) -> tuple:
     """
     读一份 Excel 映射 → `(data, warnings)`（与 `load_mapping` 同口径）。
 
-    · 读不出 / 不是工作簿 / 四张表一张都认不出 → 抛 `MappingError`；
+    · 读不出 / 不是工作簿 / 六张表一张都认不出 → 抛 `MappingError`；
     · 未知列、重复 key、认不出的布尔值 → `warnings`（**带表名 + 行号**）；
     · 其余结构问题由 `asset_mapping.validate_mapping(data, where=…)` 统一判，
       同一句话在 JSON 里是 `images['x'] kind 不认识`，在这里就是
@@ -555,11 +670,12 @@ def read_workbook(path) -> tuple:
     try:
         sheets = _index_sheets(wb)
         if not any(sheets.get(k) for k in
-                   ('characters', 'rules', 'images', 'attributes')):
+                   ('characters', 'rules', 'images', 'attributes',
+                    'outfit_codes', 'expression_codes', 'vocabulary')):
             raise MappingError(
-                f'{p.name} 里没有「角色 / 规则 / 图片 / 属性」任何一张表 —— '
-                f'它看起来不是资源映射（认得的表名见 '
-                f'「资源映射_给项目开发者.md」）。')
+                f'{p.name} 里没有「角色 / 规则 / 图片 / 服装代号 / 表情编号 / '
+                f'中文叫法 / 属性」任何一张表 —— 它看起来不是资源映射'
+                f'（认得的表名见「资源映射_给项目开发者.md」）。')
         meta = _read_meta(sheets['meta'], warnings) if sheets.get('meta') else {}
         data = {'schema': meta.get('schema') or MAPPING_SCHEMA}
         if meta.get('name'):
@@ -567,6 +683,12 @@ def read_workbook(path) -> tuple:
         for key, reader in (('characters', _read_characters),
                             ('rules', _read_rules),
                             ('images', _read_images),
+                            ('outfit_codes',
+                             lambda ws, w, l: _read_codes(ws, 'outfit_codes', w, l)),
+                            ('expression_codes',
+                             lambda ws, w, l: _read_codes(ws, 'expression_codes',
+                                                          w, l)),
+                            ('vocabulary', _read_vocabulary),
                             ('attributes', _read_attributes)):
             sheet = sheets.get(key)
             if sheet is not None:
@@ -684,8 +806,9 @@ def _write_help(wb, counts: dict) -> None:
         ('谁说了算', '同一个目录里 Excel 优先于 storygraph.mapping.json；'
                      '两份都在时工具用 Excel，并在「🗂 资源映射」里给一条提醒。'),
         ('改完怎么生效', '存盘 → 工具里点「🗂 资源映射 → 重读」（不用重启）。'),
-        ('只有这几张表算了', '工具只读「映射」「角色」「规则」「图片」「属性」'
-                            '五张表；别的表（封面 / 草稿 / 你的笔记）随便加，'
+        ('只有这几张表算了', '工具只读「映射」「角色」「规则」「图片」'
+                            '「服装代号」「表情编号」「中文叫法」「属性」八张表；'
+                            '别的表（封面 / 草稿 / 你的笔记）随便加，'
                             '工具不看也不改。'),
         ('规则顺序', '「规则」表从上到下就是匹配顺序（先中先得）；'
                      '想调顺序就整行挪。'),
@@ -695,8 +818,14 @@ def _write_help(wb, counts: dict) -> None:
         ('kind 取值', ' / '.join(KINDS)),
         ('写回', '工具只读这张表，从不改它；要提交 / 发人请用 '
                  '「保存到项目根」写 JSON（可 diff、可 review）。'),
+        ('代号两段', '「服装代号」是"B 是哪身衣服"、「表情编号」是"7 号是哪个'
+                     '表情"；两段合起来就能把美术需求表的 `B7` 和剧本里的 '
+                     '`show 角色 服装 表情` 互相换算。一般不手填：'
+                     '工具里点「按项目自动填」会照剧本注释和 对应.txt 数一遍。'),
         ('本次导出', '角色 {characters} 条 · 规则 {rules} 条 · 图片 {images} 条 · '
-                     '属性 {attributes} 条'.format(**counts)),
+                     '服装代号 {outfit_codes} 条 · 表情编号 {expression_codes} 条 · '
+                     '中文叫法 {vocabulary} 条 · 属性 {attributes} 条'
+                     .format(**counts)),
     ]
     for i, (key, value) in enumerate(lines, start=1):
         cell = _safe_set(ws, i, 1, key)
@@ -776,13 +905,14 @@ def write_workbook(path, data) -> dict:
     payload = dict(data or {})
     counts = {key: len(payload.get(key) or ()) if isinstance(payload.get(key),
                                                             (list, dict)) else 0
-              for key in ('characters', 'rules', 'images', 'attributes')}
+              for key in ('characters', 'rules', 'images', 'outfit_codes',
+                          'expression_codes', 'vocabulary', 'attributes')}
 
     wb = openpyxl.Workbook()
     # ① 「映射」表（schema / name）
     meta_ws = wb.active
     meta_ws.title = SHEET_TITLES['meta']
-    _write_header(meta_ws, ('键', '值'))
+    _write_header(meta_ws, HEADERS['meta'])
     meta_rows = [('schema', payload.get('schema') or MAPPING_SCHEMA),
                  ('name', payload.get('name') or '资源映射')]
     _write_rows(meta_ws, ('键', '值'), meta_rows)
@@ -793,7 +923,7 @@ def write_workbook(path, data) -> dict:
     # ② 角色
     char_fields = ('tag', 'display', 'aliases', 'avatar')
     ws = wb.create_sheet(SHEET_TITLES['characters'])
-    _write_header(ws, char_fields)
+    _write_header(ws, HEADERS['characters'])
     chars = payload.get('characters') if isinstance(payload.get('characters'),
                                                     Mapping) else {}
     rows = []
@@ -807,7 +937,7 @@ def write_workbook(path, data) -> dict:
     # ③ 规则（**行序 = 数组顺序**，不许排序）
     rule_fields = ('glob', 'kind', 'char', 'attr', 'showable', 'display')
     ws = wb.create_sheet(SHEET_TITLES['rules'])
-    _write_header(ws, rule_fields)
+    _write_header(ws, HEADERS['rules'])
     rules = [r for r in (payload.get('rules') or ()) if isinstance(r, Mapping)]
     rows = [[_entry_cell(r, f) for f in rule_fields] for r in rules]
     counts['rules'] = _write_rows(ws, rule_fields, rows)
@@ -822,7 +952,7 @@ def write_workbook(path, data) -> dict:
     # ④ 图片（精确覆盖）
     img_fields = ('key', 'kind', 'char', 'attr', 'showable', 'display')
     ws = wb.create_sheet(SHEET_TITLES['images'])
-    _write_header(ws, img_fields)
+    _write_header(ws, HEADERS['images'])
     images = payload.get('images') if isinstance(payload.get('images'),
                                                  Mapping) else {}
     rows = []
@@ -839,10 +969,31 @@ def write_workbook(path, data) -> dict:
         except Exception as e:                # noqa: BLE001
             swallow('assets.mapping_excel.write_workbook.filter.images', e)
 
-    # ⑤ 属性
+    # ⑥ 服装代号 / 表情编号（美术需求表那套写法：B7 = 服装 B + 第 7 号表情）
+    for key, fields in (('outfit_codes', ('char', 'code', 'attr', 'label')),
+                        ('expression_codes', ('char', 'no', 'attr', 'label'))):
+        ws = wb.create_sheet(SHEET_TITLES[key])
+        _write_header(ws, HEADERS[key])
+        entries = [e for e in (payload.get(key) or ())
+                   if isinstance(e, Mapping)]
+        rows = [[_cell_of(e.get(f)) for f in fields] for e in entries]
+        counts[key] = _write_rows(ws, fields, rows)
+        _set_widths(ws, fields)
+
+    # ⑦ 中文叫法（词汇表：引擎写法 → 人话；位置 / 音乐 / 背景 / 角色 / 过场…）
+    vocab_fields = ('kind', 'id', 'label', 'code', 'char', 'note')
+    ws = wb.create_sheet(SHEET_TITLES['vocabulary'])
+    _write_header(ws, HEADERS['vocabulary'])
+    terms = [e for e in (payload.get('vocabulary') or ())
+             if isinstance(e, Mapping)]
+    rows = [[_cell_of(e.get(f)) for f in vocab_fields] for e in terms]
+    counts['vocabulary'] = _write_rows(ws, vocab_fields, rows)
+    _set_widths(ws, vocab_fields)
+
+    # ⑧ 属性
     attr_fields = ('维度', 'label')
     ws = wb.create_sheet(SHEET_TITLES['attributes'])
-    _write_header(ws, attr_fields)
+    _write_header(ws, HEADERS['attributes'])
     attrs = payload.get('attributes') if isinstance(payload.get('attributes'),
                                                     Mapping) else {}
     rows = []
@@ -889,13 +1040,17 @@ def _cleanup(tmp: Path) -> None:
 
 def blank_template() -> dict:
     """
-    空白模板（只有表头、没有数据行）—— 「导出映射初稿」在没有资源表时也能给。
+    空白模板（只有表头、没有数据行）—— 「导出空模板」给的就是它。
 
-    `characters` / `rules` / `images` / `attributes` 全空，但四张表都在：
-    人打开就能照着列名填。
+    `characters` / `rules` / `images` / `outfit_codes` / `expression_codes` /
+    `attributes` 全空，但**六张表都在**：人打开就能照着列名填。
+    服装代号 / 表情编号两段是"美术需求表"那套写法的落点（`B7` = 服装 B +
+    第 7 号表情），填完就能拿 `lan 泳装 生气` 换算出 `B7`。
     """
     return {'schema': MAPPING_SCHEMA, 'name': '资源映射',
-            'characters': {}, 'rules': [], 'images': {}, 'attributes': {}}
+            'characters': {}, 'rules': [], 'images': {},
+            'outfit_codes': [], 'expression_codes': [], 'vocabulary': [],
+            'attributes': {}}
 
 
 __all__ = ['MAPPING_XLSX_FILENAME', 'WORKBOOK_SUFFIXES', 'SHEET_SPECS',

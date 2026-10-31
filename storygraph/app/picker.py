@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from storygraph.app import beats as B
+from storygraph.core.vocabulary import ASSET_TYPE_ATTR
 from storygraph.assets.asset_identity import (
     Identity,
     asset_id_of,
@@ -157,6 +158,133 @@ def groups_with_plain(registry, types=None, project_root=None,
         out[name] = missing
         seen.update(missing)
     return out
+
+
+# ---------------------------------------------------------------------------
+#  另一种口径：**按文件夹**（用户 2026-10-30）
+# ---------------------------------------------------------------------------
+
+#: 资源表里"文件路径"可能用的列名。`Path` 是资源表自己的列（唯一主用法），
+#: 其余是引擎/映射那边见过的写法 —— 都认，认不出就当"没有路径"（不猜）。
+FOLDER_PATH_KEYS = ('Path', 'path', 'File', 'file', 'Filename', 'filename')
+
+#: 两条兜底分组：文件直接在 `game/` 下 / 这一行根本没说文件在哪。
+ROOT_GROUP = '（根目录）'
+NO_PATH_GROUP = '（没有路径）'
+
+#: Ren'Py 项目目录名。资源表的 `Path` 有两种真实写法（`game/images/x.png`
+#: 与 `images/x.png` —— 后者相对 `game/`，见 `asset_identity.normalize_relpath`
+#: 的 docstring）。按文件夹分组时把这一段去掉，两种写法才落到同一个文件夹。
+GAME_DIR_SEGMENT = 'game'
+
+
+def folder_of_row(row, project_root=None) -> Optional[str]:
+    """
+    一条资产**所在文件夹**（相对 `game/` 的 POSIX 路径）。
+
+    返回值有三种，别混：
+
+      · `'images/ling'` —— 正常文件夹；
+      · `''`            —— 文件**直接躺在 `game/` 下**（没有文件夹）；
+      · `None`          —— 这一行**没写文件路径**（不是错误：角色/变换这类
+        本来就没有文件，资源表里也不是每行都填 `Path`）。
+
+    只做字符串归一（`normalize_relpath` 是纯函数、**不 stat 磁盘**），
+    所以两三千行也不会卡住 UI 线程。
+    """
+    raw = ''
+    for key in FOLDER_PATH_KEYS:
+        val = (row or {}).get(key) if isinstance(row, dict) else None
+        if isinstance(val, str) and val.strip():
+            raw = val.strip()
+            break
+    if not raw:
+        return None
+    rel = normalize_relpath(raw, str(project_root or ''))
+    parts = [p for p in rel.split('/') if p]
+    if not parts:
+        return None
+    if len(parts) > 1 and parts[0].lower() == GAME_DIR_SEGMENT:
+        parts = parts[1:]
+    return '/'.join(parts[:-1])
+
+
+def _folder_prefixes(folder: str) -> list:
+    """`'a/b/c'` → `['a', 'a/b', 'a/b/c']`（含每一层祖先）。"""
+    parts = [p for p in str(folder or '').split('/') if p]
+    return ['/'.join(parts[:i + 1]) for i in range(len(parts))]
+
+
+def _folder_sort_key(name: str):
+    """文件夹排序：根目录最前 → 逐段按名字（父在子前）→ 没有路径的垫底。"""
+    if name == ROOT_GROUP:
+        return (0, ())
+    if name == NO_PATH_GROUP:
+        return (2, ())
+    return (1, tuple(seg.lower() for seg in str(name).split('/')))
+
+
+def folder_groups(registry, project_root=None, *, types=None, limit: int = 3000,
+                  include_subfolders: bool = True) -> dict:
+    """
+    按**文件所在文件夹**分组：`{文件夹: [(asset_type, asset_id), ...]}`。
+
+    用户 2026-10-30（这是"分类"之外的**第二种口径**，两种要能随时切）：
+
+    > 文件筛选与分类方面……要提供两种分类方式，一种就是按文件夹分类排序，
+    > 另一种就是原来的按图片 / 背景 / UI 等那种分类排序……这两种方式要能够
+    > 随时切换
+
+    口径与 `groups()` **并列、不互相覆盖**：`groups()` 回答"这是什么"
+    （立绘/背景/UI…），这里回答"它躺在哪个文件夹"。所以两者都保留，
+    界面给一个开关。
+
+    `include_subfolders=True`（默认）时，**每一层都含它下面所有子文件夹的图**
+    —— 点 `images` 就看到 `images/**` 全部。这样每一层都可点、都不会是
+    空列表（真实项目里 `game/images` 下面常常只有子文件夹、一个文件都没有）。
+    要"只看这一层文件"传 `False`。
+
+    `limit` 是行数上限（和 `groups()` 一样，防极端项目把内存吃满）。
+    """
+    if registry is None:
+        return {}
+    root = str(project_root or '')
+    wanted = list(types) if types else list(ASSET_TYPE_ATTR)
+    out: dict = {}
+    no_path: list = []
+    seen = set()
+    #: `小写路径 → 实际写法`。Windows 上 `GUI/` 与 `gui/` 是**同一个文件夹**
+    #: （真项目里就同时出现过），分组时合成一行，显示先用到的那个写法。
+    canon: dict = {}
+
+    def _add(key: str, pair):
+        real = canon.setdefault(key.lower(), key)
+        out.setdefault(real, []).append(pair)
+
+    for atype in wanted:
+        attr = ASSET_TYPE_ATTR.get(atype)
+        table = getattr(registry, attr, {}) if attr else {}
+        for aid in sorted(table or {}):
+            if len(seen) >= limit:
+                break
+            pair = (atype, aid)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            folder = folder_of_row((table or {}).get(aid) or {}, root)
+            if folder is None:
+                no_path.append(pair)
+                continue
+            keys = _folder_prefixes(folder) if include_subfolders else [folder]
+            if not keys:                       # 直接在 game/ 下
+                keys = [ROOT_GROUP]
+            for key in keys:
+                _add(key, pair)
+    if no_path:
+        # 宁可多一组"没有路径"，也不让这些资产在文件夹口径下**凭空消失**
+        # （角色 / 变换这类本来就没有文件，用户仍要能选到）。
+        out[NO_PATH_GROUP] = no_path
+    return {k: out[k] for k in sorted(out, key=_folder_sort_key)}
 
 
 def search(registry, query: str = '', asset_types=None, limit: int = 50,
@@ -397,7 +525,8 @@ def image_spec_of(asset_id: str, row: Optional[dict] = None, *,
     return spec
 
 
-__all__ = ['RegistrySource', 'groups', 'groups_with_plain', 'search',
+__all__ = ['RegistrySource', 'groups', 'groups_with_plain', 'folder_groups',
+           'folder_of_row', 'NO_PATH_GROUP', 'ROOT_GROUP', 'search',
            'detail', 'thumbnail_path', 'row_of', 'image_spec_of',
            'PickResult', 'pick_context', 'identity_of', 'identities',
            'resolve_pick']

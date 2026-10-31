@@ -1404,6 +1404,40 @@ class StageCanvas(QWidget):
         p.drawText(left, top + bh + 2, max(40, bw), 16, Qt.AlignHCenter, dim)
 
 
+def _as_src(value) -> int:
+    """来源拍号 → 整数；认不出 / 没有 → -1（**0 是合法值**，别用 `or -1`）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _src_suffix(src: int, frame) -> str:
+    """下拉标签上的出处后缀：`（第 41 拍设的）`；在本拍写的不加。"""
+    if not isinstance(src, int) or src < 0:
+        return ''
+    if _as_src(getattr(frame, 'index', -2)) == src:
+        return ''
+    return f'（第 {src + 1} 拍设的）'
+
+
+def _at_done_text(plan) -> str:
+    """写回成功后的状态行：改的是哪一拍、影响多少拍、能撤销。"""
+    bits = [f'已写回 {plan.transform}（{plan.target_label}）']
+    req = _as_src(getattr(plan, 'requested_index', -1))
+    beat_i = _as_src(getattr(plan, 'beat_index', -1))
+    if req >= 0 and req != beat_i:
+        bits.append(f'改的是第 {beat_i + 1} 拍')
+    affects = getattr(plan, 'affects', ()) or ()
+    if len(affects) == 2:
+        first, last = _as_src(affects[0]), _as_src(affects[1])
+        if first >= 0 and last >= first:
+            bits.append(f'影响第 {first + 1}–{last + 1} 拍'
+                        f'（共 {last - first + 1} 拍）')
+    bits.append('可撤销')
+    return '；'.join(bits) + '。'
+
+
 class StagePreviewWindow(QDialog):
     """
     舞台演出预览窗口。
@@ -1897,19 +1931,36 @@ class StagePreviewWindow(QDialog):
 
     @staticmethod
     def _at_targets_of(frame) -> list:
-        """这一拍可写的对象：背景 scene_at + 各非角色图层的 show at。"""
+        """
+        这一拍可写的对象：背景 scene_at + 各非角色图层的 show at。
+
+        每项 `(人话标签, ('scene'|'layer', tag, 来源拍号))`。来源拍号是**最初
+        写下它的那一拍**（`frame.scene_src` / `frame.layer_src`，0 基；
+        -1 = 不知道）—— 背景/图层变换是持续状态，在继承它的拍上写不进去。
+        """
         out = []
         scene = str(getattr(frame, 'scene', '') or '')
         if scene:
-            out.append(('背景（scene_at）', ('scene', '')))
+            src = _as_src(getattr(frame, 'scene_src', -1))
+            out.append((f'背景 {scene}{_src_suffix(src, frame)}',
+                        ('scene', '', src)))
+            # 「从这一拍起」= 只写 `show`（替换同 tag），**不清立绘**。
+            # 本拍自己就写了 scene 时不需要它：那种情况下「改这一景」改的
+            # 就是本拍这一行。
+            if src >= 0 and src != int(getattr(frame, 'index', -1)):
+                out.append((f'背景 {scene}（从这一拍起改写，不清立绘）',
+                            ('scene_override', '', -1)))
         raw = str(getattr(frame, 'layers', '') or '')
         ats = dict(getattr(frame, 'layers_at', None) or {})
+        srcs = dict(getattr(frame, 'layer_src', None) or {})
         for spec in [p.strip() for p in raw.split(';') if p.strip()]:
             parts = spec.split()
             tag = parts[0] if parts else spec
             at = str(ats.get(tag) or ats.get(spec) or '')
             suffix = f'，at {at}' if at else '，无 at'
-            out.append((f'图层 {spec}{suffix}（at）', ('layer', tag)))
+            src = _as_src(srcs.get(tag))
+            out.append((f'图层 {spec}{suffix}{_src_suffix(src, frame)}',
+                        ('layer', tag, src)))
         return out
 
     def _update_at_controls(self, frame) -> None:
@@ -1951,9 +2002,17 @@ class StagePreviewWindow(QDialog):
         transform = self._at_transform.currentData()
         if not data or not transform:
             return None
-        return {'target': str(data[0]), 'tag': str(data[1] or ''),
-                'transform': str(transform),
+        kind = str(data[0])
+        mode = 'source'
+        if kind == 'scene_override':
+            # 这一条**只写 show**：scene 会清台（官方语义），绝不生成它
+            kind, mode = 'scene', 'override'
+        return {'target': kind, 'tag': str(data[1] or ''),
+                'transform': str(transform), 'mode': mode,
+                'scene_image': str(getattr(frame, 'scene', '') or ''),
                 'beat_index': int(getattr(frame, 'index', self.idx)),
+                # 背景 / 图层是持续状态：本拍没写就改"最初写它的那一拍"
+                'source_index': _as_src(data[2] if len(data) > 2 else -1),
                 'frame': frame}
 
     def _on_apply_at_clicked(self) -> None:
@@ -1979,7 +2038,10 @@ class StagePreviewWindow(QDialog):
             self._beats, req['beat_index'], target=req['target'],
             tag=req['tag'], transform=req['transform'],
             project_root=self._project_root,
-            transform_index=self._at_transform_index(), screen=self._screen)
+            transform_index=self._at_transform_index(), screen=self._screen,
+            source_index=req.get('source_index'),
+            mode=req.get('mode', 'source'),
+            scene_image=req.get('scene_image', ''))
         if not plan.ok:
             self._at_status.setText(plan.reason or '没有可写的改动。')
             QMessageBox.information(self, '不能写回 at', plan.diff_text())
@@ -1991,8 +2053,7 @@ class StagePreviewWindow(QDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
         if self.apply_at_edit(plan):
-            self._at_status.setText(
-                f'已写回 {plan.transform}（{plan.target_label}）；可撤销。')
+            self._at_status.setText(_at_done_text(plan))
 
     def apply_at_edit(self, plan) -> bool:
         """把计划写进内存 Beat + 记入撤销栈 + 重画当前帧（**不弹窗**，可测）。"""

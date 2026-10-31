@@ -139,13 +139,18 @@ from storygraph.ui_qt.elide import ElidedLabel
 from storygraph.ui_qt.flow import FlowRow
 from storygraph.ui_qt.graph_canvas import GraphCanvas
 from storygraph.ui_qt.inspector import PropertyStrip
+from storygraph.ui_qt.labeled_choices import (as_choices, combo_value,
+                                              fill_combo, legacy_pairs,
+                                              select_value)
 from storygraph.ui_qt.navigator import ChapterNavigator
 from storygraph.ui_qt.shot_list import ShotDelegate
+from storygraph.ui_qt.size_panel import SizePanel
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.stage_thumb import BeatStageThumb
 from storygraph.ui_qt.status import AppStatusBar, Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
 from storygraph.ui_qt.wheel_guard import WheelSafeComboBox, ensure_installed
+from storygraph.ui_qt.wrap_label import NarrowWrapLabel
 # `MainWindowQt` 的五块职责各住一个文件（P3-14，2026-10-05）。
 # **基类顺序**：六个 mixin 必须排在 `QMainWindow` **前面** ——
 # `eventFilter` / `closeEvent` 是 Qt 虚函数（`QObject` 自己就定义了），
@@ -296,7 +301,7 @@ class CardActionRow(FlowRow):
 
 #: 菜单里五个动作的**文本与顺序**（用户点名的五件事；判据直接读这一份）。
 MAPPING_MENU_TEXTS = ('载入映射…', '重读', '导出映射初稿…', '保存到项目根',
-                      '资源对照表')
+                      '工具怎么认的')
 
 #: 窗口上那个"未识别张数算过没有"的缓存（换项目 / force 才重算）。
 MAPPING_CACHE_ATTR = '_mapping_cache'
@@ -348,7 +353,8 @@ def _ignore_checked(fn, win, *_args):
 
 def open_mapping_dialog(win, *, mapping_path: str = '',
                         force_reload: bool = False, tab: str = '',
-                        export_path: str = '', prepare_save: bool = False):
+                        export_path: str = '', prepare_save: bool = False,
+                        focus_image: str = ''):
     """
     打开「🗂 资源映射」对话框（五个菜单动作共用这一条路）。
 
@@ -360,7 +366,10 @@ def open_mapping_dialog(win, *, mapping_path: str = '',
                             （写盘是用户刚才在「另存为」里**明确点过**的）；
       · `prepare_save`   —— 先把"保存到项目根"的 diff 算好摆出来，
                             用户只需在窗里点「确认写入」（**确认门禁不跳过**）；
-      · `tab`            —— `'table'` 时直接翻到「资源对照表」页。
+      · `tab`            —— `'table'` 时直接翻到「工具怎么认的」页；
+      · `focus_image`    —— 卡片上那条警告带过来的 image spec：开窗就翻到
+                            「逐条编辑 → 单张图片」并选中那一行（没有就按推断
+                            先补一条），人只需补空着的格子。
 
     没有项目根时**说一句人话**再返回（不静默什么都不做）：映射要写进项目里。
     """
@@ -381,7 +390,7 @@ def open_mapping_dialog(win, *, mapping_path: str = '',
     except Exception as e:                        # noqa: BLE001 - 没有资源表也能读映射
         swallow('ui_qt.main_window.mapping_registry', e)
     dlg = MappingDialog(win, registry=registry, project_root=root,
-                        mapping_path=mapping_path)
+                        mapping_path=mapping_path, focus_image=focus_image)
     # 各动作的"预置状态"——失败只记台账，不许拦住开窗（用户还得能看能改）
     for step, fn in (('reload', lambda: dlg.reload_mapping() if force_reload else None),
                      ('export', lambda: dlg.export_draft(export_path) if export_path else None),
@@ -395,7 +404,7 @@ def open_mapping_dialog(win, *, mapping_path: str = '',
         if tabs is not None:
             try:
                 for i in range(tabs.count()):
-                    if '对照' in tabs.tabText(i):
+                    if '认' in tabs.tabText(i):   # 「工具怎么认的」
                         tabs.setCurrentIndex(i)
                         break
             except Exception as e:                # noqa: BLE001
@@ -491,11 +500,11 @@ def refresh_mapping_status(win, *, force: bool = False):
             tips.append(f'项目根：{root}')
         path = str(getattr(state, 'path', '') or '') if state is not None else ''
         if path:
-            tips.append(f'映射文件：{path}')
+            tips.append(f'这次用的是：{path}')
         if state is not None and getattr(state, 'error', ''):
             tips.append('读不出来：' + str(state.error))
         if unknown:
-            tips.append(f'{unknown} 张图没认出是什么 —— 点「🗂 资源映射 → 资源对照表」'
+            tips.append(f'{unknown} 张图没认出是什么 —— 点「🗂 资源映射 → 工具怎么认的」'
                         f'看明细（未识别的排最上面）。')
         label.setToolTip('\n'.join(str(t) for t in tips))
     except Exception as e:                        # noqa: BLE001 - 只影响一个提示
@@ -574,9 +583,15 @@ def pick_sprite_result(win, current: str = ''):
     return res if res is not None else str(dlg.image_spec or '')
 
 
-def open_mapping_from_card(win):
-    """卡片提示条上「去『资源映射』修」→ 打开资源映射对话框。"""
-    return open_mapping_dialog(win)
+def open_mapping_from_card(win, spec=''):
+    """
+    卡片提示条上「去『资源映射』修」→ 打开资源映射，并**落到那张图那一行**。
+
+    `spec` 是那条警告里的 image spec（`ling happy`）：开窗直接翻到
+    「逐条编辑 → 单张图片」并选中它（表里没有就先按推断补一条）。
+    从前这里只 `open_mapping_dialog(win)` —— 人还得自己在 3889 行里找。
+    """
+    return open_mapping_dialog(win, focus_image=str(spec or ''))
 
 
 def notify_card_notice(win, message: str):
@@ -603,10 +618,24 @@ def notify_card_notice(win, message: str):
 # 所以这里给**工具栏那条**换成带 beats / on_apply_at 的版本；各处测试仍可调
 # `win.open_stage_preview()` 走老路（它们只关心"从当前那一拍开始"）。
 
-def _confirm_at_plan(parent, plan) -> bool:
-    """「写回 at」的确认框（**唯一出口**：判据把它换掉，不弹真窗）。"""
+def _confirm_at_plan(parent, plan, extra: str = '',
+                     title: str = '写回 at？') -> bool:
+    """
+    「写回 at」的确认框（**唯一出口**：判据把它换掉，不弹真窗）。
+
+    `extra` 是**同一张框里**的第二件事（2026-10-31 起：生成 `sg_*` 时要顺带
+    新建/追加 `game/sg_transforms.rpy`）。刻意不弹第二个框 —— 一次点击却弹
+    两次确认，人会条件反射点"是"，那等于没有确认。
+
+    `title` 只影响窗口标题：换景走的是同一个出口，但它是"会清台"的那件事，
+    标题得说清（`换景（会清台）？`），不能还写着"写回 at"。
+    """
+    body = plan.diff_text()
+    extra = str(extra or '').strip()
+    if extra:
+        body = f'{body}\n\n—— 另外要动项目文件 ——\n{extra}'
     return QMessageBox.question(
-        parent, '写回 at？', plan.diff_text(),
+        parent, title, body,
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
@@ -629,12 +658,21 @@ def _plan_preview_at(win, req):
                         target=str((req or {}).get('target') or 'scene'),
                         tag=str((req or {}).get('tag') or ''),
                         transform=str((req or {}).get('transform') or ''),
-                        project_root=root, screen=screen)
+                        project_root=root, screen=screen,
+                        source_index=(req or {}).get('source_index'),
+                        mode=str((req or {}).get('mode') or 'source'),
+                        scene_image=str((req or {}).get('scene_image') or ''))
 
 
-def _after_preview_beat_edit(win, plan) -> None:
+def _after_preview_beat_edit(win, plan, *, kind: str = '已写回 at',
+                             tag: str = '演出预览') -> None:
     """
-    写回 at 之后的**既有门禁**：会话脏标记 + 状态栏「● 未导出」+ 一行台账。
+    改完一拍之后的**既有门禁**：会话脏标记 + 状态栏「● 未导出」+ 一行台账。
+
+    `kind` / `tag` 只影响那行台账与状态栏措辞：换景（`scene`）走的不再是
+    "写回 at"，日志里不能还这么写（真实项目第一次跑就露出来了：
+    `[演出预览] 已写回 at：第 134 拍 · 换景（scene，会清台） ·  ·`）——
+    空 transform 还会多出一对孤零零的 `·`。
 
     ⚠ 刻意**不重载卡片**：卡片里可能有还没保存的手改，重载会把它们冲掉。
     `session.apply` 对"用户没手改 Stage"的拍会保留结构化列，所以不重载不会
@@ -649,10 +687,19 @@ def _after_preview_beat_edit(win, plan) -> None:
     except Exception as e:                        # noqa: BLE001 - 状态标签失败不拦写回
         swallow('ui_qt.main_window.preview_at.dirty_ui', e)
     try:
-        win._log(f'[演出预览] 已写回 at：第 {int(plan.beat_index) + 1} 拍 · '
-                 f'{plan.target_label} · {plan.transform}'
-                 f'（只改内存里的拍；导出时才写 .rpy，预览窗口里可撤销）')
-        win._status('已写回 at（只改内存里的拍；导出仍走既有 diff 确认门禁）')
+        span = ''
+        try:
+            if getattr(plan, 'affects', ()):
+                first, last = int(plan.affects[0]), int(plan.affects[1])
+                span = (f' · 影响第 {first + 1}–{last + 1} 拍'
+                        f'（共 {last - first + 1} 拍）')
+        except (TypeError, ValueError):
+            span = ''
+        what = str(getattr(plan, 'transform', '') or '').strip()
+        win._log(f'[{tag}] {kind}：第 {int(plan.beat_index) + 1} 拍 · '
+                 f'{plan.target_label}' + (f' · {what}' if what else '')
+                 + f'{span}（只改内存里的拍；导出时才写 .rpy，可撤销）')
+        win._status(f'{kind}（只改内存里的拍；导出仍走既有 diff 确认门禁）')
     except Exception as e:                        # noqa: BLE001
         swallow('ui_qt.main_window.preview_at.log', e)
 
@@ -691,6 +738,354 @@ def apply_at_from_preview(win, req):
     return plan
 
 
+def _screen_pair(win):
+    """项目的游戏分辨率（`gui.init`）；读不到用 1920×1080。"""
+    from storygraph.story.atl import DEFAULT_SCREEN, project_screen
+
+    root = getattr(win, '_project_root', None)
+    try:
+        return project_screen(root) if root else DEFAULT_SCREEN
+    except Exception as e:                        # noqa: BLE001 - 读不到就用默认分辨率
+        swallow('ui_qt.main_window.size.screen', e)
+        return DEFAULT_SCREEN
+
+
+def _plan_size_from_card(win, req, index=None):
+    """
+    尺寸面板（卡片上的「尺寸」一格）的一次「改」→ `AtEdit` 计划（只算）。
+
+    请求 dict 来自 `ui_qt.size_panel.SizePanel.request`：
+    `{row, key, at, kind, tag, spec, source, generate, natural}` —— 里面的 `at`
+    是 `story.size_presets` **按几何**在项目里匹配到的 transform（或 `''` =
+    原样）。**`generate=True` 时 `at` 是个还不存在的 `sg_*` 名字**：窗口层先把
+    它加进 `index`（`transform_def` 从生成的文本再解析一次），计划就能像
+    "文件已经写好"那样算几何；真写盘在确认之后（见 `apply_size_from_card`）。
+
+    这里只把它翻成"改哪一拍、写哪个字段"，不重新匹配（面板给的就是它看见的）。
+    """
+    from storygraph.app.stage import plan_size_edit
+
+    root = getattr(win, '_project_root', None)
+    screen = _screen_pair(win)
+    try:
+        idx = int(getattr(win, '_loaded_idx', -1))
+    except (TypeError, ValueError):
+        idx = -1
+    req = req or {}
+    row = {'kind': str(req.get('kind') or 'scene'),
+           'tag': str(req.get('tag') or ''),
+           'spec': str(req.get('spec') or ''),
+           'source': req.get('source', -1)}
+    return plan_size_edit(list(getattr(win._session, 'beats', None) or ()),
+                          idx, row, key=str(req.get('key') or ''),
+                          at=str(req.get('at') or ''),
+                          project_root=root, transform_index=index,
+                          screen=screen)
+
+
+def _refresh_card_after_size(win, plan) -> None:
+    """
+    改完尺寸把卡片对齐（**只有这一条路会重载表单**）。
+
+    为什么允许重载（`_after_preview_beat_edit` 刻意不重载）：这次改动是从
+    **卡片自己**发起的，动笔之前已经把表单里的手改提交进这一拍了
+    （`apply_current_beat`）。所以重载丢掉的东西 = 无。
+
+    改的是**别的拍**（背景是第 41 拍写的、你在第 100 拍改）时只刷只读派生面板
+    （当前舞台 / 尺寸行 / 小图），不重载表单 —— 表单本来就不该变。
+    """
+    try:
+        loaded = int(getattr(win, '_loaded_idx', -1))
+    except (TypeError, ValueError):
+        loaded = -1
+    try:
+        if int(getattr(plan, 'beat_index', -2)) == loaded:
+            win._show_index(loaded)
+        else:
+            win.refresh_derived_panels(loaded)
+    except Exception as e:                        # noqa: BLE001 - 刷不动不拦写回
+        swallow('ui_qt.main_window.size.refresh_card', e)
+
+
+def _plan_sg_from_card(win, req, index):
+    """
+    `generate=True` 的那一条 → 写 `game/sg_transforms.rpy` 的计划 + 新 transform 表。
+
+    返回 `(plan, index)`：
+
+      · `plan.writes` → 确认之后要**先写文件**，`index` 里已经带上这条新定义的
+        几何（`AtEdit` 计划因此能算得像"文件已写好"）；
+      · `plan` 是 `reuse` / `noop` → 项目里已经有等价的东西（护栏 ②），
+        **不写文件**，只是把名字换成它；
+      · `plan` 是 `refuse` / `None` → 调用方说清原因、什么都不动。
+
+    三条护栏都在 `story.sg_transforms` 里，这里只负责"读一次表、合一次表"。
+    """
+    from storygraph.story import sg_transforms as SG
+
+    key = str((req or {}).get('key') or '')
+    root = getattr(win, '_project_root', None)
+    plan = SG.plan_for_project(root, key, index=index,
+                               natural=(req or {}).get('natural'),
+                               screen=_screen_pair(win))
+    if not plan.ok or not plan.writes:
+        return plan, index
+    defn = SG.transform_def(plan.name, key)
+    if defn is None:
+        return SG.SgPlan(action=SG.REFUSE, key=key,
+                         reason=f'生成的 {plan.name} 解析不出几何，拒绝写'), index
+    merged = dict(index or {})
+    merged[plan.name] = defn
+    return plan, merged
+
+
+def apply_size_from_card(win, req):
+    """
+    「尺寸」一格的「改」：算计划 → diff 确认 → 写内存 Beat → 刷卡片。
+
+    与 `apply_at_from_preview` **同一条门禁**（同一个 `_confirm_at_plan`、
+    同一个 `_after_preview_beat_edit`）：只改内存里的拍，导出时才落盘；
+    会话脏标记照常点亮，所以既有 diff 确认不会绕过去。
+
+    **唯一的例外**（2026-10-31，用户拍板的前提）：`generate=True` 时要先往
+    `game/sg_transforms.rpy` 里写一条 `sg_*` 定义 —— 那是**项目文件**，不是
+    内存。所以：
+
+      ① 先把两件事一起摊在**同一张**确认框里（脚本 diff + 文件 diff）；
+      ② 确认后**先写文件**（护栏过了才写），再 `.apply()` 内存里的拍；
+      ③ 写完刷 session 的 transform 缓存 —— 否则卡片还显示"项目里没有"。
+
+    返回落进内存的 `AtEdit`；取消 / 被拒 / 失败返回 None。
+    """
+    if not isinstance(req, dict):
+        return None
+    # 先把卡片上还没保存的手改落进这一拍 —— 否则它会在写回后被表单盖掉
+    try:
+        win.apply_current_beat()
+    except Exception as e:                        # noqa: BLE001 - 提交失败也照样能改
+        swallow('ui_qt.main_window.size.apply_current', e)
+    index = None
+    sg_plan = None
+    if req.get('generate'):
+        try:
+            index = dict(win._session.transform_index() or {})
+        except Exception as e:                    # noqa: BLE001 - 取不到表就别生成
+            swallow('ui_qt.main_window.size.index', e)
+            index = {}
+        try:
+            sg_plan, index = _plan_sg_from_card(win, req, index)
+        except Exception as e:                    # noqa: BLE001 - 计划失败要说出来
+            swallow('ui_qt.main_window.size.sg_plan', e)
+            notify_card_notice(win, f'生成 transform 没做：{e}')
+            return None
+        if sg_plan is None or not sg_plan.ok:
+            reason = str(getattr(sg_plan, 'reason', '') or '').strip() \
+                or '生成不了这个 transform。'
+            notify_card_notice(win, '生成 transform 没做：' + reason)
+            return None
+        # 查重命中（项目里已经有等价的东西）时，名字可能不是面板上那个
+        req = dict(req, at=str(sg_plan.name or ''), generate=False)
+    try:
+        plan = _plan_size_from_card(win, req, index=index)
+    except Exception as e:                        # noqa: BLE001 - 计划失败要说出来
+        swallow('ui_qt.main_window.size.plan', e)
+        notify_card_notice(win, f'改尺寸没做：{e}')
+        return None
+    if plan is None or not getattr(plan, 'ok', False):
+        reason = str(getattr(plan, 'reason', '') or '').strip() or '没有可写的改动。'
+        notify_card_notice(win, '改尺寸没做：' + reason)
+        return None
+    extra = sg_plan.diff_text() if (sg_plan is not None
+                                   and getattr(sg_plan, 'writes', False)) else ''
+    if not _confirm_at_plan(win, plan, extra=extra):
+        try:
+            win._status('已取消：没有改尺寸。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.size.cancel', e)
+        return None
+    if sg_plan is not None and getattr(sg_plan, 'writes', False):
+        try:
+            sg_plan.apply()
+        except Exception as e:                    # noqa: BLE001 - 写文件失败要说出来
+            swallow('ui_qt.main_window.size.sg_apply', e)
+            notify_card_notice(win, f'写 {sg_plan.rel} 失败：{e}')
+            return None
+        try:
+            win._session.refresh_transform_index()
+        except Exception as e:                    # noqa: BLE001 - 刷不到只影响显示
+            swallow('ui_qt.main_window.size.sg_refresh', e)
+        notify_card_notice(win, f'已生成 {sg_plan.name} → {sg_plan.rel}'
+                                '（工具生成、带指纹；手改过就不再覆盖）')
+    try:
+        if not plan.apply():
+            notify_card_notice(win, '改尺寸失败：计划没落进内存里的拍。')
+            return None
+    except Exception as e:                        # noqa: BLE001 - 写失败要说出来
+        swallow('ui_qt.main_window.size.apply', e)
+        notify_card_notice(win, f'改尺寸失败：{e}')
+        return None
+    _after_preview_beat_edit(win, plan)
+    _refresh_card_after_size(win, plan)
+    return plan
+
+
+def _ask_scene_image(win, req) -> str:
+    """
+    「换景」的**唯一入口**：让用户挑新背景（判据把它换掉，不开真窗）。
+
+    走的是卡片「背景」那一格**同一个**资产选择器（`_pick_asset_for`）：
+    背景的可选范围必须与那一格完全一致，否则"从这里能选、从那里选不到"
+    就成了两个真相。取消 / 打不开 → 空串（调用方什么都不做）。
+    """
+    current = str((req or {}).get('spec') or '')
+    try:
+        return str(win._pick_asset_for('Scene', current) or '')
+    except Exception as e:                        # noqa: BLE001 - 打不开要说出来
+        swallow('ui_qt.main_window.scene.pick', e)
+        notify_card_notice(win, f'打不开背景选择器：{e}')
+        return ''
+
+
+def _plan_scene_from_card(win, req, index=None):
+    """「换景」请求 → `SceneEdit` 计划（只算，不动 Beat）。"""
+    from storygraph.app.stage import plan_scene_change
+
+    root = getattr(win, '_project_root', None)
+    screen = _screen_pair(win)
+    try:
+        idx = int(getattr(win, '_loaded_idx', -1))
+    except (TypeError, ValueError):
+        idx = -1
+    return plan_scene_change(
+        list(getattr(win._session, 'beats', None) or ()), idx,
+        str((req or {}).get('image') or ''),
+        at=str((req or {}).get('at') or ''),
+        project_root=root, transform_index=index, screen=screen)
+
+
+def apply_scene_from_card(win, req):
+    """
+    背景行的「换景」：挑图 → 计划 → **一张**确认框（写清会清掉几个立绘）
+    → 写内存 Beat → 刷卡片。
+
+    为什么这条路要单独存在（用户 2026-10-31 拍板）：Ren'Py 的 `scene`
+    移除 master 层上**所有** displayable 再显示新背景 —— 立绘会一起没。
+    改背景"大小"用不着它（那写 `show`，见 `apply_size_from_card`）；
+    但"这一拍换成另一张背景"只有它，所以入口必须**显式**，代价必须
+    **写在确认框里**（`SceneEdit.diff_text` 那句"会清掉台上 N 个立绘"）。
+
+    与尺寸那条路共用同一套门禁：只改内存里的拍（导出时才落盘）、同一个
+    脏标记、同一张确认框出口；`generate=True`（新背景要套一个项目里还没有
+    的 `sg_*`）时也先写 `game/sg_transforms.rpy`（三条护栏都在
+    `story.sg_transforms` 里）。
+
+    返回落进内存的 `SceneEdit`；取消 / 被拒 / 失败返回 None。
+    """
+    if not isinstance(req, dict):
+        return None
+    try:
+        loaded = int(getattr(win, '_loaded_idx', -1))
+    except (TypeError, ValueError):
+        loaded = -1
+    if loaded < 0:
+        # 没有"当前拍"就没有换景的落点：别先弹一个背景选择器再告诉人没载入
+        try:
+            win._status('先载入一章，再换景。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.scene.no_chapter', e)
+        return None
+    # 卡片上还没保存的手改先落进这一拍 —— 换景会重建这一拍的脚本
+    try:
+        win.apply_current_beat()
+    except Exception as e:                        # noqa: BLE001 - 提交失败也照样能换
+        swallow('ui_qt.main_window.scene.apply_current', e)
+    image = _ask_scene_image(win, req)
+    if not image:
+        try:
+            win._status('已取消：没有换景。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.scene.cancel', e)
+        return None
+    index = None
+    sg_plan = None
+    if req.get('generate'):
+        try:
+            index = dict(win._session.transform_index() or {})
+        except Exception as e:                    # noqa: BLE001 - 取不到表就别生成
+            swallow('ui_qt.main_window.scene.index', e)
+            index = {}
+        try:
+            sg_plan, index = _plan_sg_from_card(win, req, index)
+        except Exception as e:                    # noqa: BLE001 - 计划失败要说出来
+            swallow('ui_qt.main_window.scene.sg_plan', e)
+            notify_card_notice(win, f'生成 transform 没做：{e}')
+            return None
+        if sg_plan is None or not sg_plan.ok:
+            reason = str(getattr(sg_plan, 'reason', '') or '').strip() \
+                or '生成不了这个 transform。'
+            notify_card_notice(win, '换景没做：' + reason)
+            return None
+        # 查重命中（项目里已有等价的东西）时名字可能不是面板上那个
+        req = dict(req, at=str(sg_plan.name or ''), generate=False)
+    try:
+        plan = _plan_scene_from_card(win, dict(req, image=image), index=index)
+    except Exception as e:                        # noqa: BLE001 - 计划失败要说出来
+        swallow('ui_qt.main_window.scene.plan', e)
+        notify_card_notice(win, f'换景没做：{e}')
+        return None
+    if plan is None or not getattr(plan, 'ok', False):
+        reason = str(getattr(plan, 'reason', '') or '').strip() or '没有可写的改动。'
+        notify_card_notice(win, '换景没做：' + reason)
+        return None
+    extra = sg_plan.diff_text() if (sg_plan is not None
+                                   and getattr(sg_plan, 'writes', False)) else ''
+    if not _confirm_at_plan(win, plan, extra=extra, title='换景（会清台）？'):
+        try:
+            win._status('已取消：没有换景。')
+        except Exception as e:                    # noqa: BLE001
+            swallow('ui_qt.main_window.scene.cancel_confirm', e)
+        return None
+    if sg_plan is not None and getattr(sg_plan, 'writes', False):
+        try:
+            sg_plan.apply()
+        except Exception as e:                    # noqa: BLE001 - 写文件失败要说出来
+            swallow('ui_qt.main_window.scene.sg_apply', e)
+            notify_card_notice(win, f'写 {sg_plan.rel} 失败：{e}')
+            return None
+        try:
+            win._session.refresh_transform_index()
+        except Exception as e:                    # noqa: BLE001 - 刷不到只影响显示
+            swallow('ui_qt.main_window.scene.sg_refresh', e)
+        notify_card_notice(win, f'已生成 {sg_plan.name} → {sg_plan.rel}'
+                                '（工具生成、带指纹；手改过就不再覆盖）')
+    try:
+        if not plan.apply():
+            notify_card_notice(win, '换景失败：计划没落进内存里的拍。')
+            return None
+    except Exception as e:                        # noqa: BLE001 - 写失败要说出来
+        swallow('ui_qt.main_window.scene.apply', e)
+        notify_card_notice(win, f'换景失败：{e}')
+        return None
+    _after_preview_beat_edit(win, plan, kind='已换景', tag='换景')
+    _refresh_card_after_size(win, plan)
+    try:
+        # 台账那行由 `_after_preview_beat_edit` 统一写（措辞已经按"换景"走）；
+        # 这里只补它不知道的那件事：**清掉了谁**（确认框里报过，事后也要能查）。
+        if plan.cleared_sprites or plan.cleared_layers:
+            win._log('换景清掉：'
+                     + (f'立绘 {len(plan.cleared_sprites)} 个'
+                        f'（{"、".join(plan.cleared_sprites[:4])}）'
+                        if plan.cleared_sprites else '')
+                     + ('；' if plan.cleared_sprites and plan.cleared_layers
+                        else '')
+                     + (f'图层 {len(plan.cleared_layers)} 个'
+                        f'（{"、".join(plan.cleared_layers[:3])}）'
+                        if plan.cleared_layers else ''))
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.main_window.scene.log', e)
+    return plan
+
+
 def open_stage_preview_with_at(win):
     """
     工具栏「🎬 演出预览」：打开预览窗口，并把**当前 beats + 写回 at 入口**交给它。
@@ -725,27 +1120,6 @@ def open_stage_preview_with_at(win):
         return None
 
 
-class NarrowWrapLabel(QLabel):
-    """
-    换行标签，**最小宽只留 24px**：长单词不许把整张卡片顶宽。
-
-    为什么需要（2026-10-30，用户第 5 条「右栏不许出横向滚动条」）：
-    `QLabel(wordWrap=True)` 的最小宽 = **最长的那个词**。舞台摘要
-    （`_stage_label`）里 `base_arms_akimbo` / 长的 bgm id 这类 token 实测能把
-    「当前舞台」那一行顶到 240+150+8 ≈ 398px，整张卡片地板随之 422px ——
-    右栏 340 放不下，横向滚动条又出现。
-
-    这些文字本来就是"折行显示的多行说明"：压窄 = **行数变多**，一个字都不会
-    少（与"用 AlwaysOff 把滚动条关掉、内容被静默裁掉"是两回事）。
-    """
-
-    NARROW_W = 24
-
-    def minimumSizeHint(self) -> QSize:           # noqa: N802 - Qt 接口
-        base = super().minimumSizeHint()
-        return QSize(min(int(base.width()), self.NARROW_W), base.height())
-
-
 class BeatCardEditor(QWidget):
     """
     一张**拍**的卡片：说话人 / 台词 / 立绘网格 / 背景 / 音乐 / 语音 / 备注
@@ -758,8 +1132,8 @@ class BeatCardEditor(QWidget):
         load_fields / collect_fields / sprite_cards / set_symbols
         set_speaker / speaker / set_text / text
         set_stage_loaded / set_stage_digest / show_stage_frame
-        clear_stage_frame / stage_thumb / shutdown_stage_thumb
-        is_modified / set_undo_enabled
+        set_stage_size / size_panel / clear_stage_frame
+        stage_thumb / shutdown_stage_thumb / is_modified / set_undo_enabled
     """
 
     #: 「保存这张卡片」/「撤销修改」两个按钮被按下时发出
@@ -1110,6 +1484,27 @@ class BeatCardEditor(QWidget):
         self._stage_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         now_row.addWidget(self._stage_label, 1)
         now_lay.addLayout(now_row)
+        # —— 「尺寸」一格（P1，2026-10-31）——
+        #
+        # 用户二轮反馈："针对 bg 和 cg 不能改像素的问题……那个超清像素导入导致
+        # 的错位"。尺寸是**持续状态**（背景一直是那个 at，直到下一次 scene），
+        # 所以这一格不挂在"这一拍写的 scene/show"上，而是每个**台上能看见的
+        # 对象**一行：背景 + 各 CG/UI 图层，行说明里写清是哪一拍设的。
+        #
+        # 面板只是一张表（`ui_qt/size_panel.py`）：它不认识会话，选好之后发
+        # `size_requested`，计划 / diff 确认 / 写回全在窗口层（`_on_card_size_requested`）。
+        self._size_panel = SizePanel()
+        self._size_box = QWidget()
+        size_lay = QVBoxLayout(self._size_box)
+        size_lay.setContentsMargins(0, 0, 0, 0)
+        size_lay.setSpacing(T.SPACE['xs'])
+        size_lay.addWidget(self._section('尺寸'))
+        size_lay.addWidget(self._size_panel)
+        # 这一拍台上没有背景/图层时**整格收起**（`set_stage_size([])`）：
+        # 空着还要占三行"没有尺寸可调"，在一张控制流卡上就是纯噪音 ——
+        # 「当前舞台」那一块已经写着「背景：（未设置）」了。
+        self._size_box.setVisible(False)
+        now_lay.addWidget(self._size_box)
         root.addWidget(self._stage_now)
 
         # —— 立绘 / 背景 / 音乐（**永远完整显示**，2026-10-29 用户要求）——
@@ -1734,7 +2129,7 @@ class BeatCardEditor(QWidget):
                         lab.setToolTip(
                             f'{header}（位置参数：按顺序写，第 {int(_pos) + 1} 位）')
                     box.addWidget(lab, 0)
-                    opts = [str(o) for o in (choices.get(col.get('param'), ()) or ())]
+                    opts = as_choices(choices.get(col.get('param'), ()) or ())
                     value = str(values.get(header, '') or '')
                     # 颜色值：先给色块，再给输入框（色块跟着输入实时变）
                     sw = self._make_swatch(value)
@@ -1744,9 +2139,10 @@ class BeatCardEditor(QWidget):
                     if opts:
                         w = QComboBox()
                         w.setEditable(True)          # 手打新值照样能过（同 Excel）
-                        w.addItem('')
-                        w.addItems(opts)
-                        w.setToolTip('从下拉里选，或直接写一个项目里在用的值')
+                        # 候选可能是人话（`1人，近处`），**选出来的是真值**
+                        fill_combo(w, opts, '', blank=True)
+                        w.setToolTip('从下拉里选，或直接写一个项目里在用的值'
+                                     '\n（候选里带人话名字时，悬停能看到引擎写法）')
                     else:
                         w = QLineEdit()
                         w.setPlaceholderText('留空 = 不带这个参数')
@@ -1761,6 +2157,18 @@ class BeatCardEditor(QWidget):
                     self._spec_widgets[header] = w
                     self._widgets[header] = w         # `_set_value` / `_get_value` 复用
                     box.addWidget(w, 1)
+                    if opts:
+                        # 「⋯」= **可搜索**的候选列表（151 个变换靠下拉翻不动）。
+                        # 与资产那三格的「⋯」同一个形态、同一个 24px 尺寸。
+                        pick = QPushButton('⋯')
+                        pick.setFixedSize(T.CONTROL['iconW'], T.CONTROL['iconW'])
+                        pick.setStyleSheet('padding:0;')
+                        pick.setToolTip(f'从候选里搜索挑选（共 {len(opts)} 个）')
+                        pick.setAccessibleName(f'挑选{header}')
+                        pick.clicked.connect(
+                            lambda _=False, h=header, box_w=w, items=opts:
+                            self._pick_spec_value(h, box_w, items))
+                        box.addWidget(pick, 0)
                     if col.get('multi'):
                         # "这一格能装好几个词"（多音轨 / 多声部）：**说出来**，
                         # 否则人只会填一个，而另一个在脚本里其实也能写。
@@ -1772,7 +2180,7 @@ class BeatCardEditor(QWidget):
             for header, w in self._spec_widgets.items():
                 value = str(values.get(header, '') or '')
                 if isinstance(w, QComboBox):
-                    w.setCurrentText(value)
+                    select_value(w, value)
                 else:
                     w.setText(value)
             self._spec_host.setVisible(bool(self._spec_widgets))
@@ -1797,6 +2205,27 @@ class BeatCardEditor(QWidget):
         return {h: self._get_value(h)
                 for h in (getattr(self, '_spec_widgets', None) or {})}
 
+    def _pick_spec_value(self, header: str, combo, options):
+        """
+        参数格右边的「⋯」：**可搜索**的候选列表（用户 2026-10-31 第 5 条）。
+
+        为什么要它：`with` 的转场候选在真实项目里有 150+ 个（变换 + 词汇表里
+        登记的过场调用），靠下拉翻页找 `Fade(...)` 是不可能的；`choose_from`
+        早就有"输入即筛"，只是一直只服务立绘 chip。选中后**写回下拉的真值**
+        （屏幕上显示人话），与手点下拉是同一条路。
+        """
+        from storygraph.ui_qt.choice_picker import choose_from
+        items = as_choices(options)
+        if not items:
+            return
+        picked = choose_from(self,
+                             f'选择{header} —— 共 {len(items)} 个候选'
+                             '（输入即筛，可搜中文名或原名）',
+                             items, combo_value(combo))
+        if picked:
+            select_value(combo, picked)
+            self.refresh_dirty()
+
     def _toggle_adv(self):
         self._adv_open = not self._adv_open
         self._adv_host.setVisible(self._adv_open)
@@ -1810,18 +2239,26 @@ class BeatCardEditor(QWidget):
             return
         value = str(value or '')
         if isinstance(w, QComboBox):
-            w.setCurrentText(value)
+            # 显示的可能是人话（`18 嗯？`）、**存的是真值**（`bgm/嗯？.mp3`）
+            select_value(w, value)
         elif isinstance(w, QPlainTextEdit):
             w.setPlainText(value)
         elif isinstance(w, QLineEdit):
             w.setText(value)
 
     def _get_value(self, name) -> str:
+        """
+        这一格**现在代表什么**（写进剧本的那个值，不是屏幕上那句）。
+
+        ⚠ 下拉一定走 `labeled_choices.combo_value`：词汇表让下拉显示
+        `1人，近处`，而写回 beat 的必须还是 `i11`。从前这里读
+        `currentText()` —— 一接上是直接往剧本里写中文。
+        """
         w = self._widgets.get(name)
         if w is None:
             return ''
         if isinstance(w, QComboBox):
-            return (w.currentText() or '').strip()
+            return combo_value(w)
         if isinstance(w, QPlainTextEdit):
             return w.toPlainText().strip()
         if isinstance(w, QLineEdit):
@@ -1848,28 +2285,29 @@ class BeatCardEditor(QWidget):
             except Exception as e:                # noqa: BLE001 - 提示失败不拦操作
                 swallow('ui_qt.main_window.grid_notice', e)
 
-    def set_asset_choices(self, field: str, choices):
+    def set_asset_choices(self, field: str, choices, display=None):
         """
         给某一格装候选（从资源表来）：`[(值, 说明), ...]`。
 
         保留用户当前正在编辑的值（即使它不在候选里 —— 手写的自定义值不许被
         下拉清空）。说明挂成候选项的 tooltip，挑的时候能看清是什么效果。
+
+        **显示值 ≠ 真值**（2026-10-31）：候选也可以是 `Choice(值, 显示)` /
+        `(值, 显示, 提示)` —— 那样下拉里写着 `18 嗯？`，选出来存的仍是
+        `bgm/嗯？.mp3`。
+
+        `display(值)`：**当前值不在候选里**时屏幕上该显示什么（音乐那格的值
+        常常是复合的 `[音乐] night fadein 1.0`，靠它才翻得过去）。
+
+        ⚠ 二元组在这里**仍是 `(值, 说明)`**（老契约，说明 = tooltip），所以
+        先把它换成 `Choice(值, '', 说明)` 再交给 `fill_combo`
+        —— `labeled_choices` 那边二元组是 `(值, 显示)`，两种解释不许混。
         """
         combo = self._widgets.get(field)
         if not isinstance(combo, QComboBox):
             return
-        current = combo.currentText()
-        combo.blockSignals(True)
-        try:
-            combo.clear()
-            for value, desc in (choices or ()):
-                combo.addItem(str(value))
-                if desc:
-                    combo.setItemData(combo.count() - 1, str(desc),
-                                      Qt.ToolTipRole)
-            combo.setCurrentText(current)
-        finally:
-            combo.blockSignals(False)
+        # 老契约的 `(值, 说明)` 在 `legacy_pairs` 里换算（全库唯一一处）
+        fill_combo(combo, legacy_pairs(choices), display=display)
 
     def _choose_asset(self, field):
         """点「选择…」：把资产选择器的结果填进这一格（取消/没资源表则不动）。"""
@@ -1903,20 +2341,20 @@ class BeatCardEditor(QWidget):
     # —— 公共访问器（窗口不再摸私有属性）——
 
     def speaker(self) -> str:
-        return (self._speaker.currentText() or '').strip()
+        """说话人那一格的真值（角色 tag：`DY`，不是屏幕上那句「大爷」）。"""
+        return combo_value(self._speaker)
 
     def set_speaker(self, value):
-        self._speaker.setCurrentText(str(value or ''))
+        select_value(self._speaker, str(value or ''))
 
     def set_speakers(self, values, current=''):
-        """重填说话人下拉（不触发信号，避免把用户正在改的拍写脏）。"""
-        self._speaker.blockSignals(True)
-        self._speaker.clear()
-        self._speaker.addItem('')
-        for v in values or []:
-            self._speaker.addItem(str(v))
-        self._speaker.setCurrentText(str(current or ''))
-        self._speaker.blockSignals(False)
+        """
+        重填说话人下拉（不触发信号，避免把用户正在改的拍写脏）。
+
+        `values` 可以是 `['DY', …]`，也可以是 `[Choice('DY', '大爷'), …]`
+        —— 后者屏幕上写人话、写回剧本的仍是 tag。
+        """
+        fill_combo(self._speaker, values, str(current or ''), blank=True)
 
     def text(self) -> str:
         return self._text.toPlainText().strip()
@@ -2113,6 +2551,26 @@ class BeatCardEditor(QWidget):
             self._stage_label.setText('\n'.join(parts))
         except Exception:                    # noqa: BLE001
             swallow('main_window.set_stage_digest')
+
+    def set_stage_size(self, rows):
+        """
+        卡片上的「尺寸」一格刷成这一拍的**可调对象**（P1，2026-10-31）。
+
+        `rows` 来自 `app.stage_render.size_rows`（背景 + 各 CG/UI 图层，
+        每行带预设的匹配结果）—— 语义不在前端：前端只画表、递选择。
+        `[]` / None = 这一拍台上没有背景和图层：**整格收起**（不留一个
+        "没有尺寸可调"的空框；「当前舞台」已经说清背景/立绘都空着）。
+        """
+        try:
+            rows = list(rows or ())
+            self._size_panel.set_rows(rows)
+            self._size_box.setVisible(bool(rows))
+        except Exception as e:                    # noqa: BLE001 - 尺寸格坏不拦卡片
+            swallow('ui_qt.main_window.set_stage_size', e)
+
+    def size_panel(self):
+        """「尺寸」那一格控件（测试与诊断用）。"""
+        return self._size_panel
 
     def show_stage_frame(self, idx: int, session):
         """
@@ -3189,6 +3647,16 @@ class MainWindowQt(GraphOpsMixin, CardPageMixin, NodeEditMixin,
         # 卡片里那两个按钮直接连过来（用户要的"保存 / 撤销这张卡片"）
         self._panel.save_requested.connect(self.save_current_beat)
         self._panel.undo_requested.connect(self.undo_current_beat)
+        # 「尺寸」一格的「改」：计划 / diff 确认 / 写回。
+        # 走模块级函数（`apply_size_from_card`）而不是主类方法 —— 主类成员受
+        # `tests/test_main_window_mixins.py` 的"每个成员都要认领"约束。
+        # ⚠ 直接连**面板上**那个信号：卡片不转一层（少一个"信号连信号"）。
+        self._panel.size_panel().size_requested.connect(
+            partial(apply_size_from_card, self))
+        # 背景行的「换景」：写 `scene`（会清台），确认框里报会清掉几个立绘。
+        # 与「改」**分开一条路**：`scene` 的代价不是像素，是台上的人。
+        self._panel.size_panel().scene_requested.connect(
+            partial(apply_scene_from_card, self))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._panel)

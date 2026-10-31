@@ -654,7 +654,24 @@ def render_beat_to_rpy(beat: Beat,
             return
         _opaque_done.append(True)
         text = text.replace('\r\n', '\n').replace('\r', '\n')
-        lines = text.split('\n')
+        blk = text.split('\n')
+        # **块体紧跟头行时，头行必须有冒号**（2026-10-31）。
+        #
+        # 判据是**结构**，不是措辞：`opaque` 第一行**有前导空白** = 这段是
+        # "挂在上一行语句上的块体"（块语句自己的头行永远顶格，走的是另一条
+        # 分支）。这时上一行就是它的头行，少了冒号引擎会报
+        # `show statement expects a non-empty block.`
+        #
+        # 只对 `show` / `scene` 动手（其余头行自带冒号，或根本不该有）；
+        # 上一行已经以 `:` 结尾就不重复加。**认不出一律不动** —— 少补一个
+        # 冒号只是语法错（引擎会喊），多补一个可能改到别人的行。
+        if blk and blk[0][:1] in (' ', '\t') and lines:
+            prev = str(lines[-1] or '')
+            prev_stripped = prev.lstrip()
+            if (not prev_stripped.endswith(':')
+                    and (prev_stripped.startswith('show ')
+                         or prev_stripped.startswith('scene '))):
+                lines[-1] = prev.rstrip() + ':'
         # **头行可编辑**（M4，T1a/T1b 的参数编辑面）：
         # `spec_head` 是头行的**原样拷贝**，所以"没改"时它与首行相同 ——
         # 只有**真的不同**才替换。于是
@@ -669,9 +686,9 @@ def render_beat_to_rpy(beat: Beat,
         head = (str(getattr(beat, 'spec_head', '') or '')
                 or str(getattr(beat, 'loop_header', '') or '')
                 or str(getattr(beat, 'camera_header', '') or ''))
-        if head and lines and head.strip() != lines[0].strip():
-            lines = [head] + lines[1:]
-        for ln in lines:
+        if head and blk and head.strip() != blk[0].strip():
+            blk = [head] + blk[1:]
+        for ln in blk:
             emit(ln.rstrip(), '原样块', ln.strip())
 
     # ---------------- 音频 ----------------

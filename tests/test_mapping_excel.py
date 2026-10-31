@@ -71,6 +71,14 @@ GOOD = {
     'images': {'13.2': {'kind': 'cg'},
                'refusing': {'kind': 'preview', 'char': 'ling',
                             'attr': 'refusing', 'showable': False}},
+    # 代号两段（2026-10-31）：写表时两张表**一定**建出来（模板要它有表头），
+    # 所以读回来这两个键也一定在 —— 往返判据要求 `back == GOOD`，这里得写上。
+    'outfit_codes': [{'char': 'ling', 'code': 'B', 'attr': 'base_swimsuit',
+                      'label': '泳装'}],
+    'expression_codes': [{'char': 'ling', 'no': '7', 'attr': 'indifferent',
+                          'label': '不在意'}],
+    # 中文叫法（2026-10-31）：同样是"写表时一定建出来的"，读回来键一定在
+    'vocabulary': [{'kind': 'transform', 'id': 'i11', 'label': '1人，近处'}],
     'attributes': {'expressions': {'label': '表情'}},
 }
 
@@ -97,7 +105,8 @@ class TestRoundTrip:
         p = tmp_path / MAPPING_XLSX_FILENAME
         counts = save_mapping(str(p), GOOD)
         assert counts == {'characters': 1, 'rules': 2, 'images': 2,
-                          'attributes': 1}
+                          'outfit_codes': 1, 'expression_codes': 1,
+                          'vocabulary': 1, 'attributes': 1}
         back, warnings = load_mapping(str(p))
         assert warnings == [], warnings
         assert back == GOOD, json.dumps(back, ensure_ascii=False, indent=1)
@@ -130,17 +139,23 @@ class TestRoundTrip:
         # 判定结论必须和原 JSON 一致（换的是写法，不是语义）
         assert resolve_with_mapping(back, relpath='game/a/ling.png').tag == 'ling'
 
-    def test_空白模板四张表都在(self, tmp_path):
+    def test_空白模板七张表都在(self, tmp_path):
         """没有资源表也能导出模板：表头都在，人打开就照着填。"""
         p = tmp_path / 'template.xlsx'
         counts = write_workbook(str(p), blank_template())
         assert counts == {'characters': 0, 'rules': 0, 'images': 0,
-                          'attributes': 0}
+                          'outfit_codes': 0, 'expression_codes': 0,
+                          'vocabulary': 0, 'attributes': 0}
         wb = openpyxl.load_workbook(str(p), read_only=True)
         try:
             assert SHEET_TITLES['characters'] in wb.sheetnames
             assert SHEET_TITLES['rules'] in wb.sheetnames
             assert SHEET_TITLES['images'] in wb.sheetnames
+            # 代号两段：没有它们，模板就填不出 `B7`（用户 2026-10-31）
+            assert SHEET_TITLES['outfit_codes'] in wb.sheetnames
+            assert SHEET_TITLES['expression_codes'] in wb.sheetnames
+            # 词汇表（2026-10-31）：位置 / 音乐 / 背景 / 角色 / 过场的中文名
+            assert SHEET_TITLES['vocabulary'] in wb.sheetnames
             assert SHEET_TITLES['attributes'] in wb.sheetnames
         finally:
             wb.close()
@@ -341,14 +356,21 @@ class TestBadFiles:
 # ==================================================================
 
 class TestWrite:
-    def test_表头_冻结_下拉(self, tmp_path):
+    def test_表头写人话_冻结_下拉(self, tmp_path):
+        """
+        表头是**给人照着填的**（用户 2026-10-31 要"模板"）：写 `glob/kind/char`
+        等于逼人先学会我们的键名。读的一侧两种写法都认（`test_mapping_excel`
+        里手搓的表用的就是英文表头）。
+        """
+        from storygraph.assets.mapping_excel import HEADERS
         p = tmp_path / MAPPING_XLSX_FILENAME
         save_mapping(str(p), GOOD)
         wb = openpyxl.load_workbook(str(p))
         try:
             ws = wb[SHEET_TITLES['rules']]
             assert [ws.cell(row=1, column=i).value for i in range(1, 7)] == \
-                   ['glob', 'kind', 'char', 'attr', 'showable', 'display']
+                   list(HEADERS['rules'])
+            assert HEADERS['rules'][0] == '路径'      # 人话，不是 `glob`
             assert ws.freeze_panes == 'A2'
             dvs = list(ws.data_validations.dataValidation)
             assert dvs and 'sprite' in str(dvs[0].formula1)

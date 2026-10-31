@@ -1040,6 +1040,16 @@ def _shift_embedded_indent(text: str, delta: int) -> str:
 _BLOCK_CARRYING_NODES = (
     LabelNode, MenuNode, MenuOptionNode, IfNode, PythonNode, TransformNode,
     LayeredImageNode, LoopNode, CameraNode, UnknownBlockNode,
+    #: `show x at y:` + ATL 块（2026-10-31）。
+    #:
+    #: 2026-10-18 那道"看不懂就别拆"的带块守卫把它挡在外面，是因为当时
+    #: `ShowNode` **没有块体载体** —— 拆一半会把块体静默丢掉，引擎会报
+    #: `show statement expects a non-empty block.`（真机 35 处）。
+    #:
+    #: 现在 `ShowNode.atl` 存了块体原文（相对缩进），结构（image/at）与
+    #: 块体（atl）都完整，才允许它进这一支。**判据是"有没有载体"，
+    #: 不是"是不是 show"** —— 以后给 `SceneNode` 加载体就同样加进来。
+    ShowNode,
 )
 
 
@@ -1858,6 +1868,20 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             return None
 
         rest = text[m.end():].strip()
+        # ⚠ **行尾冒号是 ATL 块的开始标记，不是参数的一部分**（2026-10-31）。
+        #
+        # 不剥它的话，`show lan indifferent:` 的 `image` 会变成
+        # `lan indifferent:`、`show lan happy at right:` 的 `at` 值会变成
+        # `right:` —— 实测（真机 chapter3_1.rpy 33 处 ATL 块）：
+        #   `classify_show_words('lan indifferent:')` → target='lan indifferent:'
+        #   `classify_show_words('lan happy at center:')` → at=['center:']
+        # 带着冒号的图像名/变换名，下游一个都查不到（资源表里没有这种键），
+        # 于是整条 show 只能落回逐字保真 —— 台上有人，工具却看不见。
+        #
+        # 只剥**结尾**的一个冒号：`expresson Text("a:b")` 之类的中段冒号不动
+        # （Ren'Py 里行尾冒号就是"后面跟块"的唯一写法）。
+        if rest.endswith(':'):
+            rest = rest[:-1].rstrip()
         result = {
             'image': '',
             'at': [],
@@ -2657,6 +2681,7 @@ class ParseResultBuilder:
                 node.image, at=node.at, as_=node.as_, with_=node.with_,
                 zorder=node.zorder, onlayer=node.onlayer,
                 behind=node.behind, is_expression=node.is_expression,
+                atl=getattr(node, 'atl', ''),
                 condition=box.accum_cond,
                 source=(node.filename, node.line_number)))
 

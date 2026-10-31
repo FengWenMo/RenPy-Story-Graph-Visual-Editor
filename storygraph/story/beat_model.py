@@ -3409,14 +3409,20 @@ def show_item_part(item: dict) -> str:
     所以它编码成自描述的完整子句 `expression X as q at i`。
     """
     if item.get('clause'):
-        return ' '.join(str(item['clause']).split())
-    image = ' '.join(str(item.get('image') or '').split())
-    if not image:
-        return ''
-    if item.get('is_expression'):
-        return _expression_clause(item)
-    at = str(item.get('at') or '').strip()
-    return f'{image}@{at}' if at else image
+        out = ' '.join(str(item['clause']).split())
+    else:
+        image = ' '.join(str(item.get('image') or '').split())
+        if not image:
+            return ''
+        if item.get('is_expression'):
+            out = _expression_clause(item)
+        else:
+            at = str(item.get('at') or '').strip()
+            out = f'{image}@{at}' if at else image
+    # 行尾冒号 = 这一条 show 后面跟着 ATL 块（`block` 由 `_split_show_items`
+    # 剥下来单独记）。**必须拼回去**：少了它，块体就成了无主缩进，引擎报
+    # `show statement expects a non-empty block.`（真机 35 处）。
+    return out + ':' if item.get('block') else out
 
 
 

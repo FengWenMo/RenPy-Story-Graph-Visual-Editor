@@ -462,6 +462,75 @@ class AssetRegistryMixin:
             swallow('app.session_assets.characters', e)
             return []
 
+    def character_labels(self) -> dict:
+        """
+        `{tag: 人话名}` —— 说话人下拉 / 参与角色列表显示用的那套名字。
+
+        三档来源，**前面的盖后面的**（与词汇表同一条规矩）：
+
+          1. 项目映射 `vocabulary` / `characters` 段里给的（第 4 条要的就是它）；
+          2. 资源表里角色那行的 `name`（`describe_asset` 用的也是它）；
+          3. 都没有 → 不出现（调用方原样显示 tag）。
+
+        为什么不用 `Registry` 的 name 直接当唯一真源：它只覆盖"资产表里登记过
+        的角色"，`narrator` / `n` 这种引擎自带的、或者脚本里就地 `define` 的
+        角色根本不在表里；映射里却能随手写。两处都读，才不会有"这个角色
+        怎么没翻译"。
+        """
+        out = {}
+        try:
+            reg = self.registry()
+            for tag, row in (getattr(reg, 'characters', {}) or {}).items():
+                name = str((row or {}).get('name') or '').strip() \
+                    if isinstance(row, dict) else ''
+                if name:
+                    out[str(tag)] = name
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.character_labels', e)
+        vocab = self.vocabulary()
+        for term in vocab.of_kind('character'):
+            shown = term.display()
+            if shown and shown != term.id:
+                out[term.id] = shown
+        return out
+
+    def vocabulary(self):
+        """
+        项目那份映射的**词汇表**（引擎写法 → 人话）。没有映射 → 空表。
+
+        ⚠ 这是界面唯一该拿词汇表的地方：`window_card` / `window_assets` /
+        参数列候选全都走它。从前 `window_card._vocabulary()` 自己读
+        `mapping_cached(...)`，却把返回值当成"对象"用了（它其实是
+        `(data, warnings, path)` 元组）→ 异常被吞掉 → **真机上词汇表永远是空的**，
+        只有单测里注入的那份在生效。一处访问器就不可能有这个错。
+        """
+        from storygraph.assets import asset_mapping as AM
+        from storygraph.assets import vocabulary as V
+
+        root = str(getattr(self, 'project_root', '') or '')
+        if not root:
+            return V.EMPTY_VOCABULARY
+        data = {}
+        try:
+            data, _warnings, _path = AM.mapping_cached(root)
+        except Exception as e:                    # noqa: BLE001 - 映射坏了不该拦界面
+            swallow('app.session_assets.vocabulary.mapping', e)
+        vocab = V.from_mapping(data)
+        calls = []
+        try:
+            from storygraph.story.statement_registry import StatementRegistry
+            calls = list(getattr(StatementRegistry.for_project(root), 'calls',
+                                 None) or ())
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.vocabulary.calls', e)
+        # 层号决定胜负（P0-2）：`mapping` 是命名域的正本，`calls.label` 是
+        # 项目声明 —— 两者谁赢**写在 `core/authority.py`**，不看这里的书写
+        # 顺序（从前 `plus()` 是"后来者优先"，写反了就静默反过来）。
+        return V.Vocabulary.merged([
+            ('calls', V.cue_terms(calls)),
+            ('mapping', vocab.as_terms()),
+        ])
+
     def participants(self, limit: int = 8) -> list:
         """本项目的参与角色（含脚本声明；见 `beats.participants`）。"""
         if self.registry() is None:

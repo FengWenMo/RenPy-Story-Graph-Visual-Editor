@@ -114,6 +114,46 @@ def _dedent_continuations(text: str) -> str:
 
 
 
+#: **语句种类 → 处理方法名**的唯一清单（2026-10-31，P1 从 `add()` 里提出来）。
+#:
+#: 为什么必须提成模块级常量：这张表就是"每种语句去哪"的全部答案。
+#: 从前它是 `add()` 里的一个临时 dict，于是**新增一个 `StatementKind`
+#: 却忘了接处理**这件事没有任何人能发现 —— 语句被静默丢掉，导出少一行，
+#: 而所有测试都是绿的。现在 `tests/test_statement_assignment.py` 会拿
+#: `StatementKind` 的全集跟这张表对差集，缺一个就红。
+#:
+#: ⚠ 值写的是**方法名**而不是绑定方法：`add()` 里 `getattr(self, name)`
+#: 取，这样表本身不持有实例引用，也不会在类定义顺序上打结。
+_HANDLER_OF = {
+    StatementKind.SAY: '_emit_say',
+    StatementKind.EXTEND: '_emit_extend',
+    StatementKind.MENU: '_emit_menu',
+    StatementKind.MENU_OPTION: '_emit_menu_option',
+    StatementKind.SCENE: '_emit_scene',
+    StatementKind.SHOW: '_emit_show',
+    StatementKind.HIDE: '_emit_hide',
+    StatementKind.PLAY: '_emit_play',
+    StatementKind.VOICE: '_emit_voice',
+    StatementKind.PYTHON: '_emit_python',
+    StatementKind.COMMENT: '_emit_comment',
+    StatementKind.RAW: '_emit_raw',
+    StatementKind.LOOP: '_emit_loop',
+    # `camera`（3D 舞台）与循环块**同一档、同一套约定**：头行进
+    # 可编辑列、整块原文进 `opaque`（见 `CameraNode`）。
+    StatementKind.CAMERA: '_emit_camera',
+    StatementKind.JUMP: '_emit_jump_call',
+    StatementKind.CALL: '_emit_jump_call',
+    StatementKind.RETURN: '_emit_return',
+    #: **未知 kind**（`Statement.from_dict` 读到不认识的 kind 时给的兜底）。
+    #:
+    #: 2026-10-31（P1 审计发现的真缺口）：这张表从前没有它 —— 于是
+    #: "用新版工具写的表、拿旧版工具打开"（或有人手改了 JSON 的 kind）
+    #: 时，那条语句**一个字节都不会出现在产物里**，而且不报错。
+    #: 现在走 `_emit_raw` 的整块原文通道：认不出就原样抄，绝不猜。
+    StatementKind.UNKNOWN: '_emit_unknown',
+}
+
+
 class _BeatBuilder:
     """
     把顺序语句流折叠成 Beat 序列的**状态机**（P3-12，2026-10-05）。
@@ -169,6 +209,22 @@ class _BeatBuilder:
         #: **源文件里出现过的 label（按出现顺序）** —— 用来给"一张拍都没
         #: 落到它名下"的 label 补空拍（见 `_fill_empty_labels`）。
         self.label_order: list = []
+        #: **归属审计**（2026-10-31，P1）：哪条语句**既没进 pending、也没建拍**。
+        #:
+        #: 为什么需要它：工具的"不认识"从前只有一条判据 —— 语句头词在不在
+        #: 白名单里。于是"我认不出参数形状"这件事永远不报（真机 127 条未建模
+        #: 语句，界面显示 0）。这条审计换了个问法：
+        #:
+        #:     **这条语句最后去哪了？**
+        #:
+        #: 判据是 `add()` 里那两个事实的组合，不依赖任何语法清单：
+        #:   · `absorbed=False`（handler 说"我没把它并进 pending"）
+        #:   · `len(self.beats)` 没变（也没有因此新建一张拍）
+        #: 两者同时成立 = 这条语句在产物里没有任何落点（注释除外）。
+        #:
+        #: 每项是 `{'line', 'kind', 'text', 'file'}`；空列表 = 全覆盖。
+        #: 它不影响出拍结果（只读记录），可以随 `report` 参数取出来断言。
+        self.unassigned: list = []
 
     # ------------------------------------------------------------------
     #  状态操作（原来是闭包）
@@ -471,31 +527,29 @@ class _BeatBuilder:
         #: （菜单拍 / 选项拍 / 跳转拍是直接构造的）
         struct_done = False
 
-        handler = {
-            StatementKind.SAY: self._emit_say,
-            StatementKind.EXTEND: self._emit_extend,
-            StatementKind.MENU: self._emit_menu,
-            StatementKind.MENU_OPTION: self._emit_menu_option,
-            StatementKind.SCENE: self._emit_scene,
-            StatementKind.SHOW: self._emit_show,
-            StatementKind.HIDE: self._emit_hide,
-            StatementKind.PLAY: self._emit_play,
-            StatementKind.VOICE: self._emit_voice,
-            StatementKind.PYTHON: self._emit_python,
-            StatementKind.COMMENT: self._emit_comment,
-            StatementKind.RAW: self._emit_raw,
-            StatementKind.LOOP: self._emit_loop,
-            # `camera`（3D 舞台）与循环块**同一档、同一套约定**：头行进
-            # 可编辑列、整块原文进 `opaque`（见 `CameraNode`）。
-            StatementKind.CAMERA: self._emit_camera,
-            StatementKind.JUMP: self._emit_jump_call,
-            StatementKind.CALL: self._emit_jump_call,
-            StatementKind.RETURN: self._emit_return,
-        }.get(kind)
+        _name = _HANDLER_OF.get(kind)
+        handler = getattr(self, _name, None) if _name else None
         _n_before = len(self.beats)
         self._inline_taken = False        # 每条语句重置（见 `take_inline_comment`）
-        if handler is not None:
+        if handler is None:
+            # 这个 kind **一个 handler 都没有**（新增了语句种类却忘了接）：
+            # 它不可能落到任何地方，记下来，别装作没发生。
+            self.unassigned.append({
+                'line': _ln, 'kind': str(kind), 'reason': 'no-handler',
+                'text': str(payload.get('text') or '')[:80],
+            })
+        else:
             absorbed, struct_done = handler(stmt, payload, _ln)
+            # **归属审计**（P1）：既没被 pending 吸收、也没有新建任何拍
+            # → 这条语句在产物里没有任何落点。注释除外（它进「注释」列，
+            # 是 `absorbed=False` 的正常形态）。
+            if (not absorbed) and len(self.beats) == _n_before \
+                    and kind != StatementKind.COMMENT:
+                self.unassigned.append({
+                    'line': _ln, 'kind': str(kind), 'reason': 'dropped',
+                    'text': (str(payload.get('text') or '')
+                             or str(payload.get('image') or ''))[:80],
+                })
 
         # **行号归属：只记"真被这一拍吸收"的那条**
         if _ln and absorbed:
@@ -732,8 +786,12 @@ class _BeatBuilder:
     def _emit_show(self, stmt, payload, _ln):
         self.branch_guard(stmt)
         pending = self.pending
+        #: ATL 块原文（`show x at y:` 后面缩进的那几行）。`''` = 没有块。
+        #: 它决定**头行末尾那个冒号**要不要写回去 —— 冒号不是装饰，是
+        #: "后面跟块"的语法标记：少了它，块体就成了无主的缩进，引擎报错。
+        _atl = str(payload.get('atl') or '')
         items = _split_show_items(pending.show)
-        items.append({'clause': _show_item_text(payload),
+        items.append({'clause': _show_item_text(payload) + (':' if _atl else ''),
                       'image': payload.get('image', '') or '',
                       'at': ''})
         # **作者写两遍就得留两遍**（`dedup=False`，2026-10-07 修缺口 4）：
@@ -763,10 +821,34 @@ class _BeatBuilder:
                 items[-1] = {**items[-1],
                              'clause': _show_clause_args({**payload, 'with_': _w})}
                 pending.show = _join_show_items(items, dedup=False)
+        # **ATL 块：结构进 show，块体原文跟这一拍走**（2026-10-31）。
+        #
+        # `show lan happy at right:` + 缩进的 `zoom 0.15 / yoffset 200` 是
+        # Ren'Py 最常见的立绘演出写法（真机 chapter3_1.rpy 33 处）。从前
+        # `ShowNode` 没有块体载体，`_parse_statement` 的带块守卫把整条打回
+        # `unmodeled` —— 卡片上"台上无人"、预览里那几秒是空的、跨章连续性
+        # 也认为没人，但导出的字节一个没错。**这种沉默比报错危险得多。**
+        #
+        # 现在只做两件事，边界非常硬：
+        #   ① 头行照常进 `pending.show`（谁 / 什么 / 在哪）；
+        #   ② 块体原文进 `pending.opaque`，`emit_opaque` 逐字吐回去。
+        # **不解析** zoom / yoffset / ease / parallel —— 它们是作者的排版，
+        # 唯一真源永远是 `.rpy`，工具只回答"这段属于这一拍"。
+        _atl = str(payload.get('atl') or '')
         pending.condition = stmt.condition or pending.condition
         self.pending_has_stage = True
         self.mark_stage('show', len(items) - 1)
         self.mark_op('show', len(items) - 1)
+        # ⚠ **必须排在 `mark_op('show')` 之后**（2026-10-31 实测踩到的）：
+        # `ordered` 是"谁先吐"的唯一依据，先记 opaque 就会把块体吐在
+        # `show … :` **前面** —— 产物变成
+        #     zoom 0.15
+        #     show lan agreeable at right        ← 头行跑到块后面去了
+        # 引擎直接语法错。令牌顺序 = 源码顺序，一条都不能提前。
+        if _atl:
+            pending.opaque = _append_line(pending.opaque, _atl)
+            pending.ordered.append(('opaque', 0))
+            self.mark_op('opaque', 0)
         return True, False
 
     def _emit_hide(self, stmt, payload, _ln):
@@ -1203,6 +1285,38 @@ class _BeatBuilder:
         self.last_speaker = ''
         return False, True
 
+    def _emit_unknown(self, stmt, payload, _ln):
+        """
+        未知 `kind`（`Statement.from_dict` 的兜底）→ **整条原样保真**。
+
+        2026-10-31（P1 审计发现）：`StatementKind.UNKNOWN` 从前**没有处理
+        分支**，于是它会被静默丢掉 —— 一个字节都不进产物，也不报错。
+        触发场景很现实：新版工具写的表拿旧版打开（`kind` 不认识）、
+        有人手改了 JSON、或者插件写了一条自己的 kind。
+
+        做法与 `_emit_raw` 的 `unknown_block` 分支完全一致：认不出就原样抄。
+        **唯一不妥协的地方**是"原文都没有"的情况 —— 那种语句连保真都做不到，
+        绝不能装作它不存在，记进 `unassigned` 让调用方看见。
+        """
+        text = str((payload or {}).get('text')
+                   or (payload or {}).get('code') or '')
+        if not text.strip():
+            self.unassigned.append({
+                'line': _ln, 'kind': str(getattr(stmt, 'kind', '') or ''),
+                'reason': 'unknown-empty', 'text': '',
+            })
+            return False, False
+        # **不复用 `_emit_raw`**：那条路要先判 `raw_kind`（`unmodeled` /
+        # `known_block` / …），而未知 kind 的 payload 里根本没有这个键 ——
+        # 复用它的结果就是"以为保真了，其实 opaque 还是空的"（实测踩到）。
+        # 这里只有一件事：整条原文进 `opaque`，逐字吐回去。
+        self.pending.opaque = _append_line(self.pending.opaque, text)
+        self.pending.ordered.append(('opaque', 0))
+        self.mark_op('opaque', 0)
+        self.pending.condition = stmt.condition or self.pending.condition
+        self.pending_has_stage = True
+        return True, False
+
     # ------------------------------------------------------------------
     #  收尾
     # ------------------------------------------------------------------
@@ -1263,7 +1377,8 @@ class _BeatBuilder:
 
 def beats_from_statements(statements: Iterable[Statement],
                           label: str = '',
-                          labels: Optional[list] = None) -> list:
+                          labels: Optional[list] = None,
+                          report: Optional[list] = None) -> list:
     """
     把顺序语句流折叠成 Beat 序列。
 
@@ -1290,6 +1405,10 @@ def beats_from_statements(statements: Iterable[Statement],
     builder.note_branch_edges(statements)
     for stmt, stmt_label in zip(statements, labels):
         builder.add(stmt, stmt_label)
+    if report is not None:
+        # 归属审计：把这批语句里"哪都没去"的取出来（见 `_BeatBuilder.unassigned`）。
+        # 判据由 `_BeatBuilder.add` 在分派处记录，**不影响出拍结果**。
+        report.extend(builder.unassigned)
     return builder.build()
 
 
@@ -2071,7 +2190,8 @@ def _has_unmodeled(parse_result) -> bool:
 
 
 def beats_from_parse_result(parse_result, label: str = '',
-                            spec_registry=None) -> list:
+                            spec_registry=None,
+                            report: Optional[list] = None) -> list:
     """
     入口：ParseResult → Beat 列表（并带上**文件级保真块**）。
 
@@ -2108,6 +2228,7 @@ def beats_from_parse_result(parse_result, label: str = '',
         parse_result.statements,
         label=label,
         labels=getattr(parse_result, 'statement_labels', None),
+        report=report,
     )
     _fill_labels_without_beats(
         beats, getattr(parse_result, 'labels', None) or {})

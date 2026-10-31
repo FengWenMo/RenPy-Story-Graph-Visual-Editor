@@ -233,6 +233,41 @@ def fold_spec_args(head, args) -> str:
 # 的那些 token"按顺序列出来（含引号串，整串算一个）。**谁对应谁**由调用方
 # 声明的 schema 决定 —— 声明了就编辑，没声明就一个都不碰。
 
+def _balanced_end(text: str, start: int) -> int:
+    """
+    `text[start]` 是 `(` / `[` → 返回**配对括号之后**的位置（配不上就到行尾）。
+
+    引号串里的括号不算（`f("a)b")` 也是一个表达式）。
+    """
+    pairs = {'(': ')', '[': ']'}
+    opener = text[start]
+    closer = pairs[opener]
+    depth = 0
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            while i < n:
+                if text[i] == '\\':
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth <= 0:
+                return i + 1
+        i += 1
+    return n
+
+
 def positional_tokens(head, skip_head: bool = True) -> list:
     """
     语句头之外的**位置参数** token → `[(起, 止, 原文), …]`（`止` 不含）。
@@ -272,7 +307,17 @@ def positional_tokens(head, skip_head: bool = True) -> list:
                     break
                 i += 1
         else:
-            while i < n and not text[i].isspace():
+            # **括号里的逗号 / 空格不算分隔**（2026-10-31 实测报）：
+            # `with Fade(0.2, 0.0, 0.2)` 从前被切成 `Fade(0.2,` + `0.0,` + `0.2)`
+            # —— 于是卡片那格显示 `Fade(0.2,`，而真实项目里 `with Fade(...)`
+            # 就是这个写法（用户第 5 条要的"过场调用代码"正是它）。
+            # 一个调用表达式在 Ren'Py 里**就是一个值**，与引号串同理。
+            while i < n:
+                if text[i] in '([':
+                    i = _balanced_end(text, i)
+                    continue
+                if text[i].isspace():
+                    break
                 i += 1
         token = text[start:i]
         if first:

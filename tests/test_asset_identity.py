@@ -10,8 +10,13 @@ tests/test_asset_identity.py
 
 根因：没有"这张图是谁"的唯一真源。这里钉住**判定顺序**与**不猜**：
 
-  ① 映射精确覆盖 → ② 映射规则 → ③ 资源表 Tag 列（仅已知角色 tag 算立绘）
-  → ④ 路径目录段命中已知角色 tag → ⑤ 文件 stem 恰等于 tag → ⑥ unknown。
+  ① 映射精确覆盖 → ② 项目自己声明过的名字 → ③ 映射规则
+  → ④ 资源表 Tag 列（仅已知角色 tag 算立绘）
+  → ⑤ 路径目录段命中已知角色 tag → ⑥ 文件 stem 恰等于 tag → ⑦ unknown。
+
+（顺序的唯一真源是 `core.authority.IDENTITY_ORDER`；2026-10-31 之前 ①② 是
+一个整体、且排在声明之前，glob 规则因此能改掉项目声明 —— 见
+`TestDeclaredBeatsGlobRules`。）
 
 以及**通用副本检测**（同 tag+同 stem 另有一行 Tag 非空 → 预览图）、
 **avatar 只认目录段**、`find_real_sprite` 预览/头像 → 真立绘。
@@ -377,6 +382,46 @@ class TestMappingPriority:
         got = ident(row('happy', 'game/images/characters/ling/happy.png'),
                     mapping={})
         assert got.kind == 'sprite'
+
+
+class TestDeclaredBeatsGlobRules:
+    """
+    2026-10-31（真源与优先级 §P0-1）：**glob 规则只补空缺，不许改项目声明**。
+
+    旧代码把"精确覆盖 + 规则"当成一个整体排在声明之前，于是：
+
+      · 一条 `game/**` 的 glob（"这一类大概都这样"）就能把项目自己写的
+        `layeredimage` 名字改掉；
+      · 而同一函数的注释还写着"映射要治理的是『猜』，不是『项目自己声明过的』"
+        —— 注释在第 553 行、映射在第 541 行，**代码与意图相反**，两边都不报。
+
+    现在的顺序：精确覆盖（点名的这一张）→ 项目声明 → glob 规则。
+    """
+
+    def _declared(self, **extra):
+        return row('ling_happy', 'game/images/characters/ling/happy.png',
+                   'ling', 'happy', _layered=True, **extra)
+
+    def test_a_glob_rule_cannot_rename_a_declared_image(self):
+        mapping = {'rules': [{'glob': 'game/**', 'kind': 'preview'}]}
+        got = ident(self._declared(), mapping=mapping)
+        assert got.kind == 'sprite', '声明过的图像名被一条 glob 规则改掉了'
+        assert got.source == 'declared'
+        assert got.showable is True
+
+    def test_an_exact_override_still_wins(self):
+        """人**点名**这一张（`images` 表）：可以改，这是最高级别的人为意图。"""
+        mapping = {'images': {'ling_happy': {'kind': 'preview',
+                                             'char': 'ling',
+                                             'attr': 'happy'}}}
+        got = ident(self._declared(), mapping=mapping)
+        assert got.kind == 'preview' and got.source == 'mapping'
+
+    def test_a_rule_still_fills_a_row_nobody_declared(self):
+        """规则不是废物：没人声明过的行，它照旧给结论。"""
+        mapping = {'rules': [{'glob': 'game/**', 'kind': 'bg'}]}
+        got = ident(row('room', 'game/images/bg/room.png'), mapping=mapping)
+        assert got.kind == 'bg' and got.source == 'mapping-rule'
 
 
 # ==================================================================

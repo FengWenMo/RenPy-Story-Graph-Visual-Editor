@@ -240,7 +240,11 @@ _FACTORY_FIELDS = {
     StatementKind.MENU:        ('caption', 'extras', 'name', 'args'),
     StatementKind.MENU_OPTION: ('text',),
     StatementKind.SHOW:        ('image', 'at', 'as_', 'with_', 'zorder',
-                                'onlayer', 'behind', 'is_expression'),
+                                'onlayer', 'behind', 'is_expression',
+                                #: ATL 块原文（2026-10-31）。**必须登记**：
+                                #: 不登记就等于"工厂产出了一个没人认领的字段"，
+                                #: 下游（渲染/快照/对拍）会静默拿不到它。
+                                'atl'),
     StatementKind.SCENE:       ('image', 'at', 'with_', 'onlayer',
                                 'is_expression'),
     StatementKind.HIDE:        ('image', 'with_'),
@@ -435,7 +439,7 @@ class Statement:
     @classmethod
     def make_show(cls, image, at=None, as_='', with_='', zorder=None,
                   onlayer='', behind=None, is_expression=False,
-                  condition='', source=('', 0)):
+                  condition='', source=('', 0), atl=''):
         payload = {
             'image': image,
             'at': list(at) if at else [],
@@ -445,6 +449,9 @@ class Statement:
             'onlayer': onlayer,
             'behind': list(behind) if behind else [],
             'is_expression': bool(is_expression),
+            #: ATL 块原文（相对缩进）。`''` = 这条 show 没有块体。
+            #: 工具**不解析**它，只负责让它跟着这一拍走（唯一真源仍是 .rpy）。
+            'atl': str(atl or ''),
         }
         return cls(
             kind=StatementKind.SHOW,

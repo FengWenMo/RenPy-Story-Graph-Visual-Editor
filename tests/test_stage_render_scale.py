@@ -441,7 +441,11 @@ class TestAtEditPlan:
         beats = self._beats()
         edit = plan_at_edit(beats, 1, target='scene', transform='bgfit',
                             transform_index=transforms)
-        assert not edit.ok and '没有背景' in edit.reason
+        # 文案在 2026-10-31 变具体了（"找不到最初写它的那一拍 + 换景去路"），
+        # 但判据没变：没有出处就**拒绝**，不猜一个拍号。
+        assert not edit.ok
+        assert '找不到最初写它的那一拍' in edit.reason
+        assert '换景' in edit.reason
 
     def test_complex_layer_clause_is_refused(self, transforms):
         """`behind ye` 这类复杂子句不在预览里猜（去高级区 Stage 手改）。"""
@@ -469,7 +473,9 @@ class TestPreviewEntryTargets:
         targets = StagePreviewWindow._at_targets_of(frame)
         labels = [t[0] for t in targets]
         data = [t[1] for t in targets]
-        assert data[0] == ('scene', '')
-        assert ('layer', 'cg') in data
-        assert ('layer', 'ui') in data
+        # 第 3 位是**来源拍号**（2026-10-31）：-1 = 不知道 / 不是本拍写的
+        assert data[0][:2] == ('scene', '')
+        pairs = [d[:2] for d in data]
+        assert ('layer', 'cg') in pairs
+        assert ('layer', 'ui') in pairs
         assert any('CG' not in label and '背景' in label for label in labels)

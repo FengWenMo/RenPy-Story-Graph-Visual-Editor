@@ -15,6 +15,12 @@ storygraph.assets.asset_tree
 这比"不支持"更糟 —— 调用方看不出自己传错了。现在只有这一份；
 两份旧实现都**委托**过来，判据是"同一份 registry、同一个 group_by
 必须给出完全相等的 dict"（`tests/test_asset_extensions.py`）。
+
+`group_by='folder'` 是**面板的两级树**（文件夹 → Category），key 直接取
+`Path` 的目录部分、不做归一。**选择器**要的是另一种口径（归一 `game/`
+前缀、每一层含子目录、按段排序、还带"没有路径"的兜底组）—— 那份在
+`app.picker.folder_groups`，别把两边的口径混着改：面板的树是给"浏览"
+用的，选择器那份是给"找一张图"用的（2026-10-30）。
 """
 
 from __future__ import annotations

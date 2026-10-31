@@ -110,6 +110,63 @@ def _after_second_string(text: str) -> int:
     return end2 if closed2 else len(text)
 
 
+def _strip_leading_width(raw: str, width: int) -> str:
+    """
+    删掉前导空白里**视觉宽度为 `width`** 的那一段，返回剩下的原文。
+
+    为什么按宽度而不是按字符数：`ln.text` 是**带缩进的原文**，而
+    `LogicalLine.indent` 是**视觉宽度**（tab 算 `TAB_WIDTH`）。按字符切
+    在有 tab 的文件里会切歪。这里只数到宽度用完为止，剩下的字符
+    （可能是空格也可能是 tab）**原样返回** —— 不把 tab 换成空格，
+    否则"作者怎么写就怎么存"就又破了一次。
+    """
+    from storygraph.core.indent import TAB_WIDTH
+
+    used = 0
+    i = 0
+    while i < len(raw) and raw[i] in ' \t' and used < width:
+        used += TAB_WIDTH if raw[i] == '\t' else 1
+        i += 1
+    return raw[i:]
+
+
+def _subblock_block(line, source_text: str = '') -> str:
+    """
+    `show/scene` 后面的 ATL 块 → **相对缩进原文**（`''` = 没有块）。
+
+    **优先按源文件的物理行取**（`source_text` 非空时）：`LogicalLine.subblock`
+    里**没有空行** —— 空行不生成节点，于是块体中间的空行会被漏掉。
+    纯靠 subblock 重建的话，`zoom` / 空行 / `yoffset` 会变成
+    `zoom` + `yoffset` 挨在一起（实测：地狱测试当场抓到，那是**改别人的排版**）。
+    按行号区间从源文件切，空行、作者多缩进的格数全都原样。
+
+    缩进基准是**首行的 `indent`**：`    show x:`（4 格）+ 块体 8 格 →
+    存成 4 格相对缩进；渲染时外层再加 beat 自己的缩进。
+
+    没有 `source_text` 时退回 subblock 重建 —— 那种情况会丢空行，但不会错位；
+    正确性优先于"看起来完整"。
+    """
+    block = getattr(line, 'subblock', None) or ()
+    if not block:
+        return ''
+    base = int(getattr(line, 'indent', 0) or 0)
+    first = int(getattr(line, 'line_number', 0) or 0)
+    last = max((int(getattr(ln, 'line_number', 0) or 0) for ln in block),
+               default=0)
+    if source_text and first and last > first:
+        phys = source_text.split('\n')
+        out = []
+        for n in range(first + 1, last + 1):
+            raw = phys[n - 1] if 0 <= n - 1 < len(phys) else ''
+            out.append(_strip_leading_width(raw, base))
+        # 末尾若多了空行（`last` 之后本来就是空行）不算错 —— 区间由行号定死。
+        while out and not out[-1].strip():
+            out.pop()
+        return '\n'.join(out)
+    return '\n'.join(_strip_leading_width(str(getattr(ln, 'text', '') or ''), base)
+                     for ln in block)
+
+
 class StatementScreens:
     """`_stmt_*` 一族（搬自 `RenPyParser`，逐字未改）。"""
 
@@ -420,6 +477,15 @@ class StatementScreens:
                 onlayer=parsed['onlayer'],
                 behind=parsed['behind'],
                 is_expression=parsed['is_expression'],
+                # 2026-10-31：ATL 块**不再整条丢掉**。从前这里没有 atl，
+                # 带块的 show 一律落 `_stmt_unmodeled` → 台上有人工具看不见。
+                # 现在：结构（谁/什么/在哪）照常进 beat，块体原文随行透传。
+                # `_source_text` 只在 `RenPyParser` 上有（本类是 mixin），
+                # 拿不到就退回 subblock 重建（会丢空行，但不错位）。
+                atl=_subblock_block(
+                    line,
+                    (self._source_text(line.filename) or '')
+                    if callable(getattr(self, '_source_text', None)) else ''),
             )
         return self._NO_MATCH
 

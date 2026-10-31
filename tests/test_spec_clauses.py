@@ -506,7 +506,8 @@ def test_call_dialog_loads_and_saves_declarations(tmp_path, qapp):
     dlg = CallDialog(None, project_root=root)
     assert dlg.table.rowCount() == 1
     assert dlg.built_calls()[0]['head'] == 'my_wipe'
-    dlg.table.item(0, 1).setText('Fade')
+    # 第 2 列 = 等价效果（第 1 列是 2026-10-31 加的「中文名」）
+    dlg.table.item(0, 2).setText('Fade')
     dlg._save()
     clear_cache()
     reg = StatementRegistry.for_project(root)

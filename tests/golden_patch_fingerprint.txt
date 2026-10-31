@@ -1,2 +1,3328 @@
-73987ecf662ffff6203743b8a17bfb724dea028a1eeca05d021293fb3b442e02
-{"AAA示例.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "60ecd476021a1887", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "60ecd476021a1887", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "60ecd476021a1887", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "Mergedbg.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "79c6ccd38a65e6ff", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "79c6ccd38a65e6ff", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "79c6ccd38a65e6ff", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "about_collection.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2bc9b4454a267097", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2bc9b4454a267097", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2bc9b4454a267097", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "ball_moving_game.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e5329aaccfb48071", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e5329aaccfb48071", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e5329aaccfb48071", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "cc_preview_images.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ea71567e12f268aa", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ea71567e12f268aa", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ea71567e12f268aa", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "changeover.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d53e1fa37ddd0ce4", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d53e1fa37ddd0ce4", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d53e1fa37ddd0ce4", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter0_0.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a707d4146838ae78", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ebbba26dbcc075b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a707d4146838ae78", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter1_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c25fde03f6ca52f7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0a970e4f941432cd", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c25fde03f6ca52f7", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter1_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "763d465dbcb57520", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "eac2794e50a1a9d7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "763d465dbcb57520", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter1_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "b37adb2440be069d", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e687dc17a3005caf", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "b37adb2440be069d", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter1_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4a0450776f79fd70", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "54b71d6e68c47758", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4a0450776f79fd70", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4c88dcef4b9b9625", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "853dad93e0ef816d", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4c88dcef4b9b9625", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_1_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5a21122e1070b428", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "dc9e2f2d1e89cafd", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5a21122e1070b428", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_1_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "37549af1b53dc3a5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "849a282ce4caaacd", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "37549af1b53dc3a5", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_1_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0648991d2a0e4f09", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "bd0d9d8708fc78d0", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0648991d2a0e4f09", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_1_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "db472167761a29a8", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c66de0d6b437e848", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "db472167761a29a8", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "362affe2531311ad", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ddfe5a971d77b009", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "362affe2531311ad", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_2_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "005399ac29975d9c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "af2045a921e6298b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "005399ac29975d9c", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_2_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "31de47ceebd9a504", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ba1ec09af4f98413", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "31de47ceebd9a504", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_2_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "7f52b6e4972c0d70", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "188d2d4952f1dcce", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "7f52b6e4972c0d70", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_2_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d539f772296b9436", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "dfa30e73c330d9dd", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d539f772296b9436", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5132bc0584b05b82", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5f4b055b244d6a1c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5132bc0584b05b82", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_3_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "09453c71d8a054ee", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "79f2c893428d285e", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "09453c71d8a054ee", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_3_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "30eabebf7961f793", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "838060b9c95d18d7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "30eabebf7961f793", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4a04e5081410191c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "41d18d382b9d16f7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4a04e5081410191c", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_4_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "460f2dda9d17390f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "edb9380655339d87", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "460f2dda9d17390f", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_4_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "235b5d80711e825a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e5d471bef3ce33bf", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "235b5d80711e825a", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter2_5.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a8772312242457b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f76ae91adfd03103", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a8772312242457b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "cc7994c348aca373", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c803569ab51ef13e", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "cc7994c348aca373", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "37e19a3572e95d17", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "575c45dd09287a57", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "37e19a3572e95d17", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1f65c840017b69e6", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4f1870724b7cafbf", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1f65c840017b69e6", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "26170999712281b6", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e055531198235f6f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "26170999712281b6", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a515f686e3218385", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "00aac7688a59d5a4", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a515f686e3218385", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_1_5.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9abb8eb945e245f2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8df0a6e639d272f0", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9abb8eb945e245f2", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_2_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a7b57e15c0365019", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "6d2e4938cedba049", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "a7b57e15c0365019", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_2_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8f14380710959d76", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d7dba2540e069e10", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8f14380710959d76", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_2_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2cc379ca82215d16", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d8645bf932d150d2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2cc379ca82215d16", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_2_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "772f3e9e1e63e31c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "b7532fb705e79cb2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "772f3e9e1e63e31c", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_3_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0e56c373fd0ebfc0", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4f604d70febc5d1b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0e56c373fd0ebfc0", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_3_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5d2c99f57679a56a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ae1fbb64ed43786e", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5d2c99f57679a56a", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_3_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fbac926986fab243", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "74dabd51beaf21e5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fbb545e9df89af70", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_3_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "3813c5d186d40554", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ce2dd68534338276", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "3813c5d186d40554", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_4_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fa14d3012dc5da10", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ec117322687ef079", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fa14d3012dc5da10", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_4_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d37e3040e01f2ba4", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "eae3f2138b38f0b1", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1eb9baec926cac69", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_4_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ed5d32be87dd8924", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "89f13c47e6239106", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c43e7e05a19281fc", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter3_4_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "84c5fa2a0e72b37a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c269815350f28e17", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "84c5fa2a0e72b37a", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter4_1_1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "42cb104f5d8f6704", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ec9233dc66bf95f1", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "42cb104f5d8f6704", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter4_1_2.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1a3ed8eb39730831", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4d9dedcd45664fb3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "cbdd888a49492d03", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter4_1_3.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0b918d5e1a0c09a2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "da17289a917aa13a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "0b918d5e1a0c09a2", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter4_1_4.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ee4c0cd93abe409d", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "205dd452d44ee258", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ee4c0cd93abe409d", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "chapter_titles.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f11dd23efe0401b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f11dd23efe0401b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f11dd23efe0401b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "character_gallery.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e17788f34949818f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e17788f34949818f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e17788f34949818f", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "charactercenter.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "542c42512b1d2985", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "542c42512b1d2985", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "542c42512b1d2985", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "credits_screen.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "6a140f7228ece8f5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "6a140f7228ece8f5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "6a140f7228ece8f5", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "ctrl_fast_skip.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5b833d8b60a36fea", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5b833d8b60a36fea", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5b833d8b60a36fea", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "definitions.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "745aeacb4113df6f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "745aeacb4113df6f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "745aeacb4113df6f", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "effects.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d6505b78225decea", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d6505b78225decea", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "d6505b78225decea", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "eyes_tracker.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "50b4138ef7f4974b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "50b4138ef7f4974b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "50b4138ef7f4974b", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "gallery_lazy.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "889e278faed7176c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "889e278faed7176c", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "889e278faed7176c", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "generated_ui.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "3f4dbed66cb4dd4b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "3f4dbed66cb4dd4b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "3f4dbed66cb4dd4b", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "gui.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5faff71f739ec854", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5faff71f739ec854", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "5faff71f739ec854", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "image_cache.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "55e0aa9443b79108", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "55e0aa9443b79108", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "55e0aa9443b79108", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "menu_hero.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1e1593579feeb094", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1e1593579feeb094", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1e1593579feeb094", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "mini_game1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9d7a47f78cd4e5b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9d7a47f78cd4e5b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9d7a47f78cd4e5b9", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "mini_game_dfinder.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "42403c41b9b19af9", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f189b8dcca6befb8", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "42403c41b9b19af9", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "mini_game_flipcard.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "43213c3ea248c9b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "43213c3ea248c9b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "43213c3ea248c9b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "mini_game_puzzle.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "359d35963db55179", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "359d35963db55179", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "359d35963db55179", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "music.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "acbb44d023f4ccf2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "acbb44d023f4ccf2", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "acbb44d023f4ccf2", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "my_perferences.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8fd6235ecd3d7dc5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8fd6235ecd3d7dc5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8fd6235ecd3d7dc5", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "navigation_addition.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4e5c52b74db69038", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4e5c52b74db69038", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4e5c52b74db69038", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "options.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ccda9d82713d8b24", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ccda9d82713d8b24", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ccda9d82713d8b24", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "parallax.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1ba2f62fa32dc751", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1ba2f62fa32dc751", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1ba2f62fa32dc751", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "phone_msg.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "043e92039e100170", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "043e92039e100170", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "043e92039e100170", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "plottree.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4640b8cb7df56412", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4640b8cb7df56412", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4640b8cb7df56412", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "pomodorro.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "40ba4ceb47c63aff", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "bc87af6d46a3a844", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "40ba4ceb47c63aff", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "popup_msg_override.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c47cbcb950d15292", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c47cbcb950d15292", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c47cbcb950d15292", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "rhythm_game_displayable.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e1a0710653915661", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e1a0710653915661", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "e1a0710653915661", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "rhythm_game_start.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fb49c3b6d7ca1116", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fb49c3b6d7ca1116", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fb49c3b6d7ca1116", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "rhythm_game_style.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "75b0f8a96ff0dc53", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "75b0f8a96ff0dc53", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "75b0f8a96ff0dc53", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "save_page_control.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "251301dd16d44fc7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "251301dd16d44fc7", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "251301dd16d44fc7", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "screens.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2f79c0b04354d7b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2f79c0b04354d7b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "2f79c0b04354d7b3", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "script.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "7400926782cbf763", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "396ecc8fd5aa3385", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "7400926782cbf763", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "script0.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ab7915c5a377358f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ab7915c5a377358f", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ab7915c5a377358f", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "script1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c3c21d29562c1e1e", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c3c21d29562c1e1e", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c3c21d29562c1e1e", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "script_pomo.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1516acb17d8897d3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "9f6e8df53c156e63", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "1516acb17d8897d3", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "settings_config.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8552216f4b113cfa", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8552216f4b113cfa", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "8552216f4b113cfa", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "settings_toggles.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "baedf9bc8ec72277", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "baedf9bc8ec72277", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "baedf9bc8ec72277", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "skip_show_defer.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fa045b77d918844b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fa045b77d918844b", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "fa045b77d918844b", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "story_graph_control.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ed95b99e3d96487a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ed95b99e3d96487a", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "ed95b99e3d96487a", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "test.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "af3c1e83f4ab4707", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "4140e7426872ae3d", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "af3c1e83f4ab4707", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "test1.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "95e5080bb200b6d5", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "366b3d083749ca60", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "95e5080bb200b6d5", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "tmp_shot_probe.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c4d9ded45d6c8f67", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c4d9ded45d6c8f67", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c4d9ded45d6c8f67", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "transform.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c1d3cffcf0763818", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c1d3cffcf0763818", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "c1d3cffcf0763818", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "whackamole.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f3f5efedae9fddb3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f3f5efedae9fddb3", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "f3f5efedae9fddb3", "total_beats": null, "unlanded_lines": null, "used_patch": true}}, "whackamole_images.rpy": {"direct": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "785bf13a59f3f8d8", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "edited": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "785bf13a59f3f8d8", "total_beats": null, "unlanded_lines": null, "used_patch": true}, "via_excel": {"changed_lines": null, "dropped_beats": null, "matched_beats": null, "reasons": [], "stale_beats": null, "text": "785bf13a59f3f8d8", "total_beats": null, "unlanded_lines": null, "used_patch": true}}}
+aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
+{
+ "AAA示例.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "60ecd476021a1887",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "60ecd476021a1887",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "60ecd476021a1887",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "Mergedbg.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "79c6ccd38a65e6ff",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "79c6ccd38a65e6ff",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "79c6ccd38a65e6ff",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "about_collection.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2bc9b4454a267097",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2bc9b4454a267097",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2bc9b4454a267097",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "ball_moving_game.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e5329aaccfb48071",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e5329aaccfb48071",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e5329aaccfb48071",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "cc_preview_images.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ea71567e12f268aa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ea71567e12f268aa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ea71567e12f268aa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "changeover.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d53e1fa37ddd0ce4",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d53e1fa37ddd0ce4",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d53e1fa37ddd0ce4",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter0_0.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a707d4146838ae78",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ebbba26dbcc075b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a707d4146838ae78",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter1_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c25fde03f6ca52f7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0a970e4f941432cd",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c25fde03f6ca52f7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter1_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "763d465dbcb57520",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "eac2794e50a1a9d7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "763d465dbcb57520",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter1_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "b37adb2440be069d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e687dc17a3005caf",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "b37adb2440be069d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter1_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4a0450776f79fd70",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "54b71d6e68c47758",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4a0450776f79fd70",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4c88dcef4b9b9625",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "853dad93e0ef816d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4c88dcef4b9b9625",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_1_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5a21122e1070b428",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "dc9e2f2d1e89cafd",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5a21122e1070b428",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_1_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "37549af1b53dc3a5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "849a282ce4caaacd",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "37549af1b53dc3a5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_1_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0648991d2a0e4f09",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "bd0d9d8708fc78d0",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0648991d2a0e4f09",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_1_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "db472167761a29a8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c66de0d6b437e848",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "db472167761a29a8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "362affe2531311ad",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ddfe5a971d77b009",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "362affe2531311ad",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_2_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "005399ac29975d9c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "af2045a921e6298b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "005399ac29975d9c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_2_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "31de47ceebd9a504",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ba1ec09af4f98413",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "31de47ceebd9a504",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_2_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "7f52b6e4972c0d70",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "188d2d4952f1dcce",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "7f52b6e4972c0d70",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_2_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d539f772296b9436",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "dfa30e73c330d9dd",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d539f772296b9436",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5132bc0584b05b82",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5f4b055b244d6a1c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5132bc0584b05b82",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_3_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "09453c71d8a054ee",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "79f2c893428d285e",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "09453c71d8a054ee",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_3_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "30eabebf7961f793",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "838060b9c95d18d7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "30eabebf7961f793",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4a04e5081410191c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "41d18d382b9d16f7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4a04e5081410191c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_4_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "460f2dda9d17390f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "edb9380655339d87",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "460f2dda9d17390f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_4_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "235b5d80711e825a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e5d471bef3ce33bf",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "235b5d80711e825a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter2_5.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a8772312242457b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f76ae91adfd03103",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a8772312242457b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "cc7994c348aca373",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "6641f8681ea90a99",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "cc7994c348aca373",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "37e19a3572e95d17",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "575c45dd09287a57",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "37e19a3572e95d17",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1f65c840017b69e6",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4f1870724b7cafbf",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1f65c840017b69e6",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "26170999712281b6",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e055531198235f6f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "26170999712281b6",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a515f686e3218385",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "00aac7688a59d5a4",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a515f686e3218385",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_1_5.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9abb8eb945e245f2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8df0a6e639d272f0",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9abb8eb945e245f2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_2_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a7b57e15c0365019",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "6d2e4938cedba049",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "a7b57e15c0365019",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_2_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8f14380710959d76",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d7dba2540e069e10",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8f14380710959d76",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_2_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2cc379ca82215d16",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d8645bf932d150d2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2cc379ca82215d16",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_2_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "772f3e9e1e63e31c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "b7532fb705e79cb2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "772f3e9e1e63e31c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_3_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0e56c373fd0ebfc0",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4f604d70febc5d1b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0e56c373fd0ebfc0",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_3_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5d2c99f57679a56a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ae1fbb64ed43786e",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5d2c99f57679a56a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_3_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fbac926986fab243",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "74dabd51beaf21e5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fbb545e9df89af70",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_3_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "3813c5d186d40554",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ce2dd68534338276",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "3813c5d186d40554",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_4_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fa14d3012dc5da10",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ec117322687ef079",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fa14d3012dc5da10",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_4_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d37e3040e01f2ba4",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "eae3f2138b38f0b1",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1eb9baec926cac69",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_4_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ed5d32be87dd8924",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "89f13c47e6239106",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c43e7e05a19281fc",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter3_4_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "84c5fa2a0e72b37a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c269815350f28e17",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "84c5fa2a0e72b37a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter4_1_1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "42cb104f5d8f6704",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ec9233dc66bf95f1",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "42cb104f5d8f6704",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter4_1_2.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1a3ed8eb39730831",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4d9dedcd45664fb3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "cbdd888a49492d03",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter4_1_3.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0b918d5e1a0c09a2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "da17289a917aa13a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "0b918d5e1a0c09a2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter4_1_4.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ee4c0cd93abe409d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "205dd452d44ee258",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ee4c0cd93abe409d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "chapter_titles.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f11dd23efe0401b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f11dd23efe0401b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f11dd23efe0401b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "character_gallery.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e17788f34949818f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e17788f34949818f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e17788f34949818f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "charactercenter.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "542c42512b1d2985",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "542c42512b1d2985",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "542c42512b1d2985",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "credits_screen.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "6a140f7228ece8f5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "6a140f7228ece8f5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "6a140f7228ece8f5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "ctrl_fast_skip.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5b833d8b60a36fea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5b833d8b60a36fea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5b833d8b60a36fea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "definitions.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "745aeacb4113df6f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "745aeacb4113df6f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "745aeacb4113df6f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "effects.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d6505b78225decea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d6505b78225decea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "d6505b78225decea",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "eyes_tracker.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "50b4138ef7f4974b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "50b4138ef7f4974b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "50b4138ef7f4974b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "gallery_lazy.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "889e278faed7176c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "889e278faed7176c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "889e278faed7176c",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "generated_ui.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "3f4dbed66cb4dd4b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "3f4dbed66cb4dd4b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "3f4dbed66cb4dd4b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "gui.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5faff71f739ec854",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5faff71f739ec854",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "5faff71f739ec854",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "image_cache.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "55e0aa9443b79108",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "55e0aa9443b79108",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "55e0aa9443b79108",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "menu_hero.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1e1593579feeb094",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1e1593579feeb094",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1e1593579feeb094",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "mini_game1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9d7a47f78cd4e5b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9d7a47f78cd4e5b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9d7a47f78cd4e5b9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "mini_game_dfinder.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "42403c41b9b19af9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f189b8dcca6befb8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "42403c41b9b19af9",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "mini_game_flipcard.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "43213c3ea248c9b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "43213c3ea248c9b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "43213c3ea248c9b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "mini_game_puzzle.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "359d35963db55179",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "359d35963db55179",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "359d35963db55179",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "music.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "acbb44d023f4ccf2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "acbb44d023f4ccf2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "acbb44d023f4ccf2",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "my_perferences.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8fd6235ecd3d7dc5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8fd6235ecd3d7dc5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8fd6235ecd3d7dc5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "navigation_addition.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4e5c52b74db69038",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4e5c52b74db69038",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4e5c52b74db69038",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "options.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ccda9d82713d8b24",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ccda9d82713d8b24",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ccda9d82713d8b24",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "parallax.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1ba2f62fa32dc751",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1ba2f62fa32dc751",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1ba2f62fa32dc751",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "phone_msg.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "043e92039e100170",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "043e92039e100170",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "043e92039e100170",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "plottree.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4640b8cb7df56412",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4640b8cb7df56412",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4640b8cb7df56412",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "pomodorro.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "40ba4ceb47c63aff",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "bc87af6d46a3a844",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "40ba4ceb47c63aff",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "popup_msg_override.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c47cbcb950d15292",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c47cbcb950d15292",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c47cbcb950d15292",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "rhythm_game_displayable.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e1a0710653915661",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e1a0710653915661",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "e1a0710653915661",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "rhythm_game_start.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fb49c3b6d7ca1116",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fb49c3b6d7ca1116",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fb49c3b6d7ca1116",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "rhythm_game_style.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "75b0f8a96ff0dc53",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "75b0f8a96ff0dc53",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "75b0f8a96ff0dc53",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "save_page_control.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "251301dd16d44fc7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "251301dd16d44fc7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "251301dd16d44fc7",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "screens.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2f79c0b04354d7b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2f79c0b04354d7b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "2f79c0b04354d7b3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "script.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "7400926782cbf763",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "396ecc8fd5aa3385",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "7400926782cbf763",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "script0.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ab7915c5a377358f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ab7915c5a377358f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ab7915c5a377358f",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "script1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c3c21d29562c1e1e",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c3c21d29562c1e1e",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c3c21d29562c1e1e",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "script_pomo.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1516acb17d8897d3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "9f6e8df53c156e63",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "1516acb17d8897d3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "settings_config.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8552216f4b113cfa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8552216f4b113cfa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "8552216f4b113cfa",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "settings_toggles.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "baedf9bc8ec72277",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "baedf9bc8ec72277",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "baedf9bc8ec72277",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "skip_show_defer.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fa045b77d918844b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fa045b77d918844b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "fa045b77d918844b",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "story_graph_control.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ed95b99e3d96487a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ed95b99e3d96487a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "ed95b99e3d96487a",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "test.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "af3c1e83f4ab4707",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "4140e7426872ae3d",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "af3c1e83f4ab4707",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "test1.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "95e5080bb200b6d5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "366b3d083749ca60",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "95e5080bb200b6d5",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "tmp_shot_probe.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c4d9ded45d6c8f67",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c4d9ded45d6c8f67",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c4d9ded45d6c8f67",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "transform.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c1d3cffcf0763818",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c1d3cffcf0763818",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "c1d3cffcf0763818",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "whackamole.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f3f5efedae9fddb3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f3f5efedae9fddb3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "f3f5efedae9fddb3",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ },
+ "whackamole_images.rpy": {
+  "direct": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "785bf13a59f3f8d8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "edited": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "785bf13a59f3f8d8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  },
+  "via_excel": {
+   "changed_lines": null,
+   "dropped_beats": null,
+   "matched_beats": null,
+   "reasons": [],
+   "stale_beats": null,
+   "text": "785bf13a59f3f8d8",
+   "total_beats": null,
+   "unlanded_lines": null,
+   "used_patch": true
+  }
+ }
+}

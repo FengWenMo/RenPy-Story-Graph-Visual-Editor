@@ -33,6 +33,7 @@ from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.flow_notes import edge_rebuild_note
 from storygraph.ui_qt.graph_canvas import GraphCanvas
+from storygraph.ui_qt.labeled_choices import labeled, pairs, session_vocabulary
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
 from storygraph.ui_qt.status import Notifier, Toast
 from storygraph.ui_qt.thumb_loader import ThumbLoader
@@ -52,6 +53,89 @@ _GROUP_LABEL_ROLE = Qt.UserRole + 1
 _FOLD_PREF_KEY = 'cards/folded_labels'
 #: 偏好里最多记住多少个文件（偏好不是日志：每换一个项目就多一条会永不清理）。
 _FOLD_PREF_LIMIT = 24
+
+
+def _scene_cell_image(cell) -> str:
+    """
+    `Scene` 那一格 → 图像名（`bg big@bgfit` 的**图像部分**是 `bg big`）。
+
+    卡片上「背景」一格存的是紧凑写法 `图@变换`（与 `compose_scene_cell` 同一
+    形状），判"这一格本来是不是空的"必须只看图像那半边 —— 只看整串的话，
+    `@bgfit` 也会被当成"有背景"。
+    """
+    return str(cell or '').split('@')[0].strip()
+
+
+def note_scene_added(card, idx: int, image: str) -> None:
+    """
+    卡片「背景」那一格**新写出一条 `scene`** 之后，把"带走了谁"说出来。
+
+    为什么是"事后点名"而不是弹框（2026-10-31）：
+
+      · 填背景是这个工具**最常做**的编辑之一；每保存一次弹一个确认框，
+        人就会条件反射点"是" —— 那比不弹更糟（本项目已经用这个理由把
+        "一次点击弹两次确认"毙掉过）；
+      · 但**静默**更糟：从"没有背景"变成"有背景"= 一条 `scene`，
+        Ren'Py 会清掉该层**所有** displayable。卡片上看不见那些立绘
+        （它们是上一拍 show 的），用户只会看到"人突然没了"。
+
+    所以：数据照常保存（可撤销），控制台/状态栏**立刻**点名被带走的立绘与
+    图层。要"事前确认"的那条路是尺寸面板背景行的「换景」
+    （`app.stage.SceneEdit` / `main_window.apply_scene_from_card`）——
+    它会在写之前把 N 个立绘写进确认框。
+
+    台上没人 → 一个字都不说（新建一景、空台换景是最常见的情形）。
+
+    返回**一句短警告**（给调用方拼进"已保存"那条状态栏消息）；没话说返回空串。
+    控制台那条详细版由这里自己写 —— 两处说的是同一件事。
+    """
+    try:
+        from storygraph.app.stage import stage_before
+        info = stage_before(list(getattr(card._session, 'beats', None) or ()),
+                            idx)
+    except Exception as e:                        # noqa: BLE001 - 提示失败不拦保存
+        swallow('ui_qt.window_card.note_scene_added', e)
+        return ''
+    if not info:
+        return ''
+    sprites = list(info.get('sprites') or ())
+    layers = list(info.get('layers') or ())
+    if not sprites and not layers:
+        return ''
+    bits = []
+    if sprites:
+        bits.append(f'{len(sprites)} 个立绘（{"、".join(sprites[:4])}'
+                    + ('…' if len(sprites) > 4 else '') + '）')
+    if layers:
+        bits.append(f'{len(layers)} 个图层（{"、".join(layers[:3])}'
+                    + ('…' if len(layers) > 3 else '') + '）')
+    what = '、'.join(bits)
+    try:
+        card._log(f'[换景] 这一拍新写了一条 `scene`（背景：{image}）—— '
+                  f'Ren\'Py 的 scene 会清掉该层所有 displayable：{what}。'
+                  '数据已经改了（可撤销）；要**事前**确认请用「尺寸」里'
+                  '背景行的「换景」。')
+    except Exception as e:                        # noqa: BLE001
+        swallow('ui_qt.window_card.note_scene_added.log', e)
+    return f'⚠ 这一拍新写了一条 scene：{what} 被清掉（可撤销）。'
+
+
+def arg_kind_of(col) -> tuple:
+    """
+    参数列 → 该去词汇表**哪个种类**里找它的候选名（空 = 不翻）。
+
+    约定只有一条：**`choices_from` 就是词汇表的 `kind`**（`transform` / `music`
+    / `bg` / `costume` …）—— 项目给列声明"候选从哪来"，与词汇表"这东西叫什么"
+    是同一个词，不需要第二张对照表。
+
+    唯一的例外是转场那一格：`with` 的候选既可能是资源表里的变换（`dissolve`），
+    也可能是词汇表登记的**过场调用**（`Fade(0.2, 0, 0.2)` / `my_wipe`）——
+    用户第 5 条要的就是后者在卡片上能按中文挑，所以两个种类轮流问。
+    """
+    source = str((col or {}).get('choices_from') or '').strip()
+    if source == 'transform':
+        return ('transform', 'cue')
+    return (source,) if source else ()
 
 
 def _statement_of(beat, statements) -> dict:
@@ -267,10 +351,24 @@ class CardPageMixin:
         #: ⚠ 2026-10-16：把**项目根**也挂上 —— 没有引擎事实时，`attr_slot_rows`
         #:   要退回项目自己的 `layeredimage`（它自己按项目根建/读模型缓存）。
         _for_tag.project_root = getattr(self._session, 'project_root', None)
+        #: 词汇表（2026-10-31）：引擎写法 → 人话。卡片上那些 chip 的显示名
+        #: 全靠它；挂在这里的理由同上（不多开一条注入通道）。
+        _for_tag.vocabulary = self._vocabulary()
 
         # 现取（不缓存）：同一个词在不同角色下的显示名可能不同
         self._panel.set_choice_groups_provider(_for_tag)
         self._warn_engine_facts_once()
+
+    def _vocabulary(self):
+        """
+        项目那份映射里的**词汇表**（引擎写法 → 中文叫法），没有就空表。
+
+        查不到的种类/写法一律原样显示（见 `assets/vocabulary.py` 规矩 2），
+        所以这里返回空表是**安全**的：卡片与从前一模一样。
+
+        真源在会话（`session.vocabulary()`：映射 + `rules.json` 的 calls 中文名）。
+        """
+        return session_vocabulary(self._session)
 
     def _warn_engine_facts_once(self):
         """
@@ -388,8 +486,32 @@ class CardPageMixin:
         self._apply_group_folding()
 
         self._who.clear()
+        labels = self._character_labels()
         for cid in self._session.participants():
-            self._who.addItem(QListWidgetItem(cid))
+            shown = labels.get(cid, '')
+            item = QListWidgetItem(shown or cid)
+            # ⚠ **tag 留在数据里**：双击填进剧本的必须是 `DY`，不是「大爷」
+            item.setData(Qt.UserRole, cid)
+            if shown and shown != cid:
+                item.setToolTip(f'{shown}（剧本里写的是 `{cid}`）')
+            self._who.addItem(item)
+
+    def _character_labels(self) -> dict:
+        """
+        `{tag: 人话名}`（说话人下拉 / 参与角色列表用）。
+
+        真源在会话（映射的 `characters` / `vocabulary` 段 + 资源表的 `name`），
+        这里只兜住"会话是测试里的假对象"那一档 —— 拿不到就空表，
+        界面原样显示 tag（与从前逐字一致）。
+        """
+        getter = getattr(self._session, 'character_labels', None)
+        if not callable(getter):
+            return {}
+        try:
+            return dict(getter() or {})
+        except Exception as e:                  # noqa: BLE001 - 名字取不到不该拦列表
+            swallow('ui_qt.window_card._character_labels', e)
+            return {}
 
     @staticmethod
     def _group_text(label: str, count: int, folded: bool = False) -> str:
@@ -1286,6 +1408,8 @@ class CardPageMixin:
             # 空会话 / 拍号越界：**图也要清掉**（否则卡片上顶着上一章的舞台图，
             # 而左边一行字都没有 —— 那是纯粹的误导）。
             self._panel.clear_stage_frame()
+            # 尺寸行同理：不能显示上一章那一拍的背景/图层尺寸
+            self._panel.set_stage_size([])
             self._update_nav()
             self._sync_undo_button()
             self._sync_inspector(-1)
@@ -1306,8 +1430,10 @@ class CardPageMixin:
             source_lines=(getattr(_beat, 'src_first', None),
                           getattr(_beat, 'src_last', None)))
         self._sync_spec_args(idx)
-        self._panel.set_speakers(self._session.characters(),
-                                 self._session.beats[idx].speaker or '')
+        # 说话人下拉：屏幕上是人话（「大爷」），写回 beat 的仍是 tag（`DY`）
+        self._panel.set_speakers(
+            pairs(self._session.characters(), self._character_labels()),
+            self._session.beats[idx].speaker or '')
         self.refresh_derived_panels(idx)
         # 导航到哪一拍，那一组就自动展开（折叠状态不该挡住"跳过去"）
         self._expand_label(str(getattr(self._session.beats[idx], 'label', '') or ''))
@@ -1359,10 +1485,18 @@ class CardPageMixin:
             cols, values = _beats.spec_arg_fields_for(beat, statements)
             registry = getattr(getattr(self._session, 'symbols', None),
                                'registry', None)
+            vocab = self._vocabulary()
             choices = _beats.spec_arg_choices_for(beat, statements,
-                                                  registry=registry)
+                                                  registry=registry,
+                                                  vocab=vocab)
+            # 候选翻成屏幕上那句（写回去的仍是候选里的原值）：
+            # `with` 那格的 `Fade(0.2,0,0.2)` → 「闪白」，`dissolve` → 原样。
+            kinds = {str(c.get('param') or c.get('name') or ''): arg_kind_of(c)
+                     for c in (cols or ())}
+            shown = {param: labeled(vals, vocab, kinds.get(param, ''))
+                     for param, vals in choices.items()}
             self._panel.set_spec_args(
-                cols, values, choices,
+                cols, values, shown or choices,
                 statement=_statement_of(beat, statements),
                 loose=_loose_lines(beat))
         except Exception as e:                  # noqa: BLE001 - 参数组刷不动不该拦住卡片
@@ -1529,6 +1663,10 @@ class CardPageMixin:
             # 两份文案都来自语义层（stage_snapshot / app.beats），前端不自己拼。
             self._panel.set_stage_digest(self._session.stage_digest_text(idx),
                                          self._session.inherited_hint(idx))
+            # 「尺寸」一格（P1，2026-10-31）：背景 + 各 CG/UI 图层的尺寸与
+            # 预设匹配（"铺满 / 适应 / 50%" → 项目里效果一样的 transform）。
+            # 与上面两处同一时刻刷新 —— 换了 scene/show，尺寸行必须跟着变。
+            self._panel.set_stage_size(self._session.stage_size_rows(idx))
             # 这一拍的**舞台图**（2026-10-27，用户："每一拍的舞台信息那里……
             # 给一张这一拍的图片"）。与上面那行文字同时刷新 —— 它渲染的是
             # 同一个 `StageFrame`（`app.stage_render`，与预览窗口同源），
@@ -1632,6 +1770,12 @@ class CardPageMixin:
         if not self._session.has(idx):
             self._status('还没有载入章节，没什么可保存。')
             return None
+        # 「背景」那一格也能写出一条 `scene`（从"没有背景"变成"有背景"）——
+        # 那是换景，会清台。基线要在 `reset_baseline()` **之前**读
+        # （保存成功后基线会被改成新值，再看就永远是"没变"）。
+        scene_loaded = _scene_cell_image(
+            (getattr(self._panel, '_loaded_fields', None) or {}).get('Scene'))
+        scene_now = _scene_cell_image(self._panel.collect_fields().get('Scene'))
         flow_change = self._panel.flow_change()
         if flow_change:
             from storygraph.story.flow import is_valid_label
@@ -1687,9 +1831,16 @@ class CardPageMixin:
         self._sync_export_dirty()
 
         if res['changed']:
+            # 这一保存**新写了一条 scene**（原来没有背景）→ 把代价点名。
+            # 与"已保存"合成**一条**状态栏消息：两条会互相盖掉，
+            # 而被盖掉的恰好是"人已经没了"那句。
+            warn = ''
+            if scene_now and not scene_loaded:
+                warn = note_scene_added(self, idx, scene_now) or ''
             self._status(f'✔ 已保存到这一拍（{res["display_name"]}）。'
                          + (f'{edge_note}；' if edge_note else '')
-                         + f'改动在内存里，点「⤓ 导出 .rpy」时才落盘。')
+                         + f'改动在内存里，点「⤓ 导出 .rpy」时才落盘。'
+                         + (f' {warn}' if warn else ''))
             if flow_change:
                 self._log(
                     f'[控制流] {flow_change["old"]["type"]} '
@@ -1796,7 +1947,11 @@ class CardPageMixin:
         if i > 0:
             self._show_index(i - 1)
     def _fill_speaker(self, item):
-        cid = item.text() if item else ''
+        # 列表上显示的是人话（「大爷」），`UserRole` 里才是 tag（`DY`）
+        cid = ''
+        if item is not None:
+            data = item.data(Qt.UserRole)
+            cid = str(data) if isinstance(data, str) and data else item.text()
         if not cid or not self._session.has(self._loaded_idx):
             return
         self._session.set_speaker(self._loaded_idx, cid)
@@ -1804,4 +1959,5 @@ class CardPageMixin:
         # `set_speaker` 是**绕过 `apply()`** 直接改拍的（左栏双击填角色），
         # 会话那边已经补了脏标记，这里只要把状态栏叫醒。
         self._sync_export_dirty()
-        self._status(f'已把「{cid}」填进这一拍的说话人。')
+        shown = self._character_labels().get(cid, cid)
+        self._status(f'已把「{shown}」填进这一拍的说话人。')

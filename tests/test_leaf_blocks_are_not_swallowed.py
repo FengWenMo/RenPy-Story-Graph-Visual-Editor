@@ -121,13 +121,36 @@ class TestBlockBodySurvives:
                 f'`show statement expects a non-empty block.`）\n{out}')
 
     def test_statement_goes_to_the_fidelity_channel(self, tmp_path):
-        """整块进 `Beat.opaque`（逐字保真），不是 structured 的 stage。"""
+        """
+        `show …:` + 块体：**结构进 `Beat.show`，块体进 `Beat.opaque`**。
+
+        ⚠ 2026-10-31 判据升级（不是放宽）。旧断言要求"整块（含头行）都在
+        `opaque` 里"，那是 2026-10-18 的临时口径 —— 当时 `ShowNode` 没有
+        块体载体，只能整条退回逐字保真，代价是**工具看不见台上有谁**
+        （真机 33 处：卡片上台上无人、预览空白、跨章连续性认为没人）。
+
+        现在 `ShowNode.atl` 接住了块体，于是这一条拆成两个可验证的事实：
+
+          ① `Beat.show` 里有这个人（结构没丢 —— 卡片/预览/连续性靠它）；
+          ② `Beat.opaque` 里有块体原文（逐字没丢 —— 产物靠它）。
+
+        "块体一个字都没少"由同类的
+        `test_every_body_line_is_in_the_output` 独立保证，
+        "产物没有空块头"由 `test_output_has_no_empty_block_head` 保证 ——
+        所以这里**不必**再要求头行也进 opaque。
+        """
         _pr, beats = _beats(tmp_path, CASES['show_atl'])
-        carrier = [b for b in beats if 'show lan agreeable at right:' in
-                   (b.opaque or '')]
+        # ① 结构：台上真的有人
+        structural = [b for b in beats
+                      if 'lan agreeable' in (getattr(b, 'show', '') or '')]
+        assert structural, [(b.show, b.opaque) for b in beats]
+        # ② 块体：原文在 opaque 里，且**不含头行**（头行归 show）
+        carrier = [b for b in beats if 'zoom 0.15' in (b.opaque or '')]
         assert carrier, [b.opaque for b in beats]
-        assert 'zoom 0.15' in carrier[0].opaque
-        assert 'show lan agreeable at right:' in carrier[0].opaque
+        assert 'yoffset 200' in carrier[0].opaque
+        assert 'show lan agreeable' not in carrier[0].opaque, (
+            '头行不该再进 opaque —— 它已经结构化进 `Beat.show`，'
+            f'两边都存就会在产物里出现两次：{carrier[0].opaque!r}')
 
 
 class TestTheGuardDoesNotOverTrigger:

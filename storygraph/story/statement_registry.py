@@ -651,6 +651,21 @@ def coverage_of_beats(beats, registry=None, samples_limit: int = 24):
     seen = set()
     for b in (beats or ()):
         text = str(getattr(b, 'opaque', '') or '')
+        # **ATL 附件**（2026-10-31）：`show …:` + 缩进块现在拆成两半 ——
+        # 头行（谁/什么/在哪）结构化进 `Beat.show`，块体原文进 `Beat.opaque`。
+        #
+        # 于是这里不能再用"opaque 第一行是什么语句"来判级：块体首行是
+        # `    zoom 0.15`，取出来的 head 是 `zoom` —— 一个不存在的语句头，
+        # 于是 33 处本已接住的立绘被记成 T3「工具完全不知道它是什么」。
+        #
+        # 判据改成**结构**：opaque 首行有缩进（说明它是挂在上一行语句上的
+        # 块体，不是自带头行的整块）+ 这一拍的 `show` 有值（头行真的接住了）
+        # → 结构已知，T0；块体逐字保真，工具**不解释也不需要解释** ATL。
+        _first = next((ln for ln in text.split('\n') if ln.strip()), '')
+        if (_first[:1] in (' ', '\t')
+                and str(getattr(b, 'show', '') or '').strip()):
+            cov.counts[T0] = cov.count_of(T0) + 1
+            continue
         if not text.strip():
             # 没有 `opaque` = 这一拍是**内置建模**的（台词 / 舞台 / 代码…），
             # 或者是**结构化块的头拍**（循环 / 相机：块体各自成拍）。
@@ -1117,7 +1132,13 @@ def dynamic_spec_columns(beats, registry) -> list:
                         # 技术调用（2026-10-30）：这一列读/写哪个实参。
                         'call': dict(call) if call else {},
                         # 列的值类型（`transition` = 过场表达式，读值时保留引号）
-                        'kind': str(col.get('kind') or '')})
+                        'kind': str(col.get('kind') or ''),
+                        # ⚠ **候选来自哪一类资产**（2026-10-31 补）：
+                        #   从前这里把它丢了，于是 `with` 的「转场」那一格
+                        #   **一个候选都没有**（`spec_arg_choices_for` 只能看
+                        #   到 `choices: []`），更别说按词汇表显示中文了。
+                        #   项目声明的列本来就有这个键（`arg_columns` 带出来）。
+                        'choices_from': str(col.get('choices_from') or '')})
     return out
 
 

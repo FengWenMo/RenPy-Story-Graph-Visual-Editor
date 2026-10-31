@@ -36,6 +36,7 @@ from storygraph.core.vocabulary import (
     LAYER_CN_TAG as _LAYER_CN_TAG,
     NON_ACTOR_TAGS as _NON_ACTOR_TAGS,
 )
+from storygraph.story.beat_stage_parse import item_at
 from storygraph.story.beat_model import (
     _split_hide_items,
     _split_show_items,
@@ -136,11 +137,28 @@ def _layer_cn(kind: str) -> str:
 SNAPSHOT_COLUMNS = ('scene', 'actors', 'music', 'sound', 'voice')
 
 
-def _apply_show_verb(item, beat, actors, state):
+def _as_src(value) -> int:
+    """
+    "第几拍写的" → 整数；认不出就 -1（不知道）。
+
+    为什么不用 `int(value or -1)`：`-1` 是合法值（不知道），而 `0` 会被
+    `or` 吞成 `-1` —— 正好把"第 0 拍写的"说成"不知道"。这条坑项目里踩过
+    不止一次（`int(x or -1)` 把第 0 拍当没载入）。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _apply_show_verb(item, beat, actors, state, src_index=-1):
     """
     处理一个 `show` item（角色 / 非角色图层 / 换背景）。
 
     返回**新的 actors 列表**与要追加的 changes。
+
+    `src_index` 是"这条 show 写在第几拍"（0 基）—— 只记进 `scene_src` /
+    `layer_src` 两个**内部键**，给"改尺寸"找得到该改哪一行用（2026-10-31）。
 
     ⚠ `actors` 是**重新绑定**的（`_apply_show` 可能就地改）——
     所以必须把新列表返回给调用方，不能只改 `state['actors']`
@@ -150,9 +168,10 @@ def _apply_show_verb(item, beat, actors, state):
     image = (item.get('image') or '').strip()
     if not image:
         return actors, changes
-    at = ((item.get('at') or '').strip()
-          or (beat.at or '').strip()
-          or (beat.transform or '').strip())
+    # 口径唯一（`beat_stage_parse.item_at`）：item 自己 > 拍级 `at` > `transform`。
+    # 抽出去是因为 `story.override_advice` 要数"哪几处单独改了尺寸" ——
+    # 两份各算一遍，报告里的处数就会和实际会盖回去的处数对不上。
+    at = item_at(item, beat)
     had_actor = [(s[0], s[1]) for s in actors]
     _apply_show(actors, image, at, state['scene'])
     state['actors'] = actors
@@ -176,6 +195,7 @@ def _apply_show_verb(item, beat, actors, state):
         if state['scene'] != image:
             state['scene'] = image
         state['scene_at'] = at
+        state['scene_src'] = _as_src(src_index)
         state['unknown'].discard('scene')
         return actors, changes
     key = image.split()[0]
@@ -183,6 +203,7 @@ def _apply_show_verb(item, beat, actors, state):
     # hide 时清掉（下面 `_apply_hide_verb`）。同一图重复 show 时引擎会
     # 重新套 transform，所以这里**覆盖**而不是"只记第一次"。
     state['layer_at'][key] = at
+    state.setdefault('layer_src', {})[key] = _as_src(src_index)
     if state['layers'].get(key) != image:
         state['layers'][key] = image
         changes.append({'kind': kind, 'column': 'layer', 'text':
@@ -212,10 +233,14 @@ def _apply_hide_verb(item, actors, state):
         changes.append({'kind': 'layer', 'column': 'layer',
                         'text': f'− 撤下 {image}'})
     state['layer_at'].pop(tag, None)
+    srcs = state.get('layer_src')
+    if isinstance(srcs, dict):
+        srcs.pop(tag, None)
     # 退场也把"背景就是这张图"的情况算上
     if state['scene'] and state['scene'].split()[0] == tag:
         state['scene'] = ''
         state['scene_at'] = ''
+        state['scene_src'] = -1
     return actors, changes
 
 
@@ -253,6 +278,16 @@ def _initial_state(initial_state: Optional[dict]) -> dict:
         #: 图层 tag → 它的 `at`（CG/UI 等非角色图层）。同上，缺省空。
         'layer_at': {str(k): str(v)
                      for k, v in (init.get('layer_at') or {}).items()},
+        #: **出处**（2026-10-31）：`scene_src` = 当前背景是第几拍写的（0 基），
+        #: `layer_src` = 每个图层 tag 是第几拍 show 的；-1 = 不知道（例如从
+        #: 上一章继承来的，跨章没有"本文件的拍号"可说）。
+        #:
+        #: 为什么要有：背景变换 / 图层变换是**持续状态**，而"改尺寸"必须改
+        #: **写它的那一行**。只记值不记出处，UI 就只能在"这一拍自己写了
+        #: scene/show"的那 5% 拍上动手（真机实测：1013 个有背景的拍里 972 个
+        #: 是继承来的）。它只进 state，**不进显示列**。
+        'scene_src': -1,
+        'layer_src': {},
         'music': str(init.get('music') or ''),
         'voice': str(init.get('voice') or ''),
         #: 内部标记：这些元素的值"还不知道"，不是"空"。
@@ -393,7 +428,7 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
     state = _initial_state(initial_state)
     out = []
 
-    for beat in beats or []:
+    for bi, beat in enumerate(beats or []):
         notes = []
         changes = []
         # 舞台状态在这一拍**开始前**的快照。所有"变了没有"的判定都拿它对比。
@@ -446,23 +481,61 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
                              f'× 清空立绘（{len(actors)} 个）'})
                     actors = []
                     state['actors'] = actors
+                    # `scene` 清的是**整个 master 层**（Ren'Py 官方措辞：
+                    # "removes all displayables from the master layer"）——
+                    # CG/UI 那些 `show cg …` 的图层和立绘一样会被清掉。
+                    # 2026-10-31 修：从前这里只清 actors，layers 原样留着，
+                    # 于是**产物里已经没了的 CG，预览/卡片还在画**。
+                    # 真机实测（sr_general，61 个 scene 拍）：**40 拍的图层
+                    # 其实被清掉、工具却继续显示** —— 正是本项目最贵的那类
+                    # "看到的 ≠ 生成的"。清了之后"换景会清掉什么"才说得准
+                    # （新「换景」入口的确认框直接读这里）。
+                    if state['layers']:
+                        changes.append(
+                            {'kind': 'clear', 'column': 'layer',
+                             'text':
+                             f'× 清空图层（{len(state["layers"])} 个）'})
+                        state['layers'] = {}
+                        state['layer_at'] = {}
+                        srcs = state.get('layer_src')
+                        if isinstance(srcs, dict):
+                            srcs.clear()
                     state['scene'] = image
                     # `scene bg X at bgfit` 的变换是背景 displayable 的一部分，
                     # 之后所有继承背景的拍都要带着它（引擎语义，见 docstring）。
                     state['scene_at'] = str(
                         getattr(beat, 'scene_at', '') or '').strip()
+                    # 出处：这一拍的 `scene` 就是当前背景的来源（改尺寸时
+                    # 要回到这一行去写 at，不能在继承它的拍上硬塞）。
+                    state['scene_src'] = bi
                     # `scene` 写明了背景，还清空了立绘 → 这两个元素重新已知
                     state['unknown'].discard('scene')
                     state['unknown'].discard('actors')
             elif verb == 'show':
                 for item in _pick('show', show_items, idx):
-                    actors, _ch = _apply_show_verb(item, beat, actors, state)
+                    actors, _ch = _apply_show_verb(item, beat, actors, state,
+                                                   src_index=bi)
                     changes.extend(_ch)
             elif verb == 'hide':
                 for item in _pick('hide', hide_items, idx):
                     actors, _ch = _apply_hide_verb(item, actors, state)
                     changes.extend(_ch)
                 state['actors'] = actors
+
+        # ---- 补齐：令牌没点到的 show/hide 条目 ----
+        # 与渲染器 `beat_render._emit_leftover_stage` **同一条规矩**：
+        # `op_order` 只点到前几条时，渲染器会把剩下的追加在末尾；快照从前
+        # 直接丢掉 → "看到的 ≠ 生成的"（卡片加第二个立绘，预览只显示一个，
+        # 产物却两个）。2026-10-31 实测：真机两个项目 0 条触发，但合成用例
+        # `show='ling a; ye b'` + `op_order='show#0'` 当场复现。
+        for item in show_items[seen['show']:]:
+            actors, _ch = _apply_show_verb(item, beat, actors, state,
+                                           src_index=bi)
+            changes.extend(_ch)
+        for item in hide_items[seen['hide']:]:
+            actors, _ch = _apply_hide_verb(item, actors, state)
+            changes.extend(_ch)
+            state['actors'] = actors
 
         # ---- 音频 ----
         _audio_changes, _audio_notes = _apply_audio(beat, state)
@@ -517,6 +590,10 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
                 # 图层 tag → `at`（`show cg cg01 at cg38402160` 的变换）；
                 # show 时记、hide 时清。缺键默认 {}。
                 'layer_at': dict(state['layer_at']),
+                # 出处（2026-10-31）：背景 / 每个图层是**第几拍**写的。
+                # 只给 UI 与"改尺寸"用，不参与任何显示列；跨章继承时是 -1。
+                'scene_src': state['scene_src'],
+                'layer_src': dict(state['layer_src']),
                 'music': state['music'],
                 'voice': state['voice'],
                 'condition': beat.condition or '',
