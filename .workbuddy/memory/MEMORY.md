@@ -1,7 +1,7 @@
 # 项目记忆：RenPy 剧情编辑器（storygraph）· 索引页
 
 > 只放**最容易踩的坑**与**指针**；易变事实（用例数/行数/性能）读代码或跑测试，别信文档里的 ✅。
-> 详情：契约 `docs/契约速查_storygraph.md`（按需 grep）｜逐日 `docs/开发日志.md` + `.workbuddy/memory/2026-10-*.md`｜路线图 / 竞争格局 / 短板评估 见 `docs/`。
+> 详情：契约 `docs/契约速查_storygraph.md`（按需 grep）｜逐日 `docs/开发日志.md` + `.workbuddy/memory/2026-*.md`｜**真源与优先级（四域 + 层序常量 + 准入四问）**：`docs/真源与优先级_设计决策_2026-10-31.md`｜**超清 CG/BG 零侵入导入（L0–L4 阶梯）**：`docs/超清CG与BG_零侵入导入_2026-10-31.md`。
 
 ## 一、十条铁律（违反任一条都会静默毁掉用户项目）
 
@@ -9,10 +9,10 @@
 2. **要么全对、要么完全不动**。任一行配不上 → 整份放弃 + 报错，不产出"半对"。
 3. **认不出就原样抄**。未知块原样保留，不补 `$`、不包 `python:`、不改缩进。
 4. **猜一个名字比说"不知道"坏得多**。只认字面量，不模糊匹配。
-5. **绝不静默全量覆盖**。落盘过门禁；`HANDWRITTEN_TARGET` 拒写；改用户 `.rpy` 先出 diff，未确认零写。
+5. **绝不静默全量覆盖**。落盘过门禁；`HANDWRITTEN_TARGET` 拒写；改用户 `.rpy` 先出 diff。
 6. **教它升级，不许改字节**。教会自定义语法后首次导出必须与教会前逐字节相同。
-7. **不许静默丢行**（txt 导入/表格/补丁三条路）。判据要"整段相等"。
-8. **一个落盘点一个登记**（`WRITERS`，守卫 `test_single_write_entry.py`）；走 `write_text_atomic`/`write_generation` 的不登记。
+7. **不许静默丢行**（txt 导入/表格/补丁三条路）。判据是"整段相等"。
+8. **一个落盘点一个登记**（`WRITERS`，守卫 `test_single_write_entry.py`）。
 9. **本工具不猜语义**。意思由人标注，工具只发现/展示/检索。
 10. **含中文/转义的复现一律写 `.py`** —— `python -c` 经 Bash 会改坏样本（曾"复现"出不存在的 P0）。
 
@@ -22,74 +22,124 @@
 - 事实文件 `<项目>/storygraph.engine_facts.json`：每条带 `source`；两源不一致记 `conflicts`，不静默挑一个。
 - **覆盖内置语句 = 完全替换**；**fork 引擎新增语句对工具隐形**；`test` headless 不可用。
 - 真机基准（sr_general）：images 317 / tags 235 / transforms 155 / labels 106。
-- 本机 SDK：`D:\software\renpy-8.4.1-sdk` 实际是 **8.5.3.26051504**（看 `renpy/vc_version.py`，别信目录名）；演出专用版随包的就是它（`renpy_sdk/`，去 `vscode/`+`tmp/`）。
-- **引擎试玩**（`app/engine_preview.py`）走"镜像 + 注入 + 隔离"：镜像在 `%LOCALAPPDATA%\StoryGraph\engine_preview\`；`config.label_overrides["start"]` + `RENPY_SKIP_MAIN_MENU/SPLASHSCREEN` 直接进章；`--warp game/x.rpy:行` 进单拍；`--savedir`+`APPDATA/HOME` 重定向 + `RENPY_DISABLE_BACKUPS` 保证不碰项目、不污染用户目录。
-- 验收截图**用引擎自己的 `renpy.screenshot`**（注入 `config.periodic_callbacks`），别用 `PIL.ImageGrab` 截窗口 —— 窗口被挡时截到的是挡在前面的窗口（2026-10-28 误判过"引擎黑屏"）。
+- 本机 SDK：`D:\software\renpy-8.4.1-sdk` 实际是 **8.5.3.26051504**（看 `renpy/vc_version.py`）。
+- **引擎试玩**（`app/engine_preview.py`）= "镜像 + 注入 + 隔离"：镜像在 `%LOCALAPPDATA%\StoryGraph\engine_preview\`；`config.label_overrides["start"]` + `RENPY_SKIP_MAIN_MENU/SPLASHSCREEN` 直接进章；`--warp game/x.rpy:行` 进单拍；`--savedir` + `APPDATA/HOME` 重定向 + `RENPY_DISABLE_BACKUPS` 保证不碰项目/用户目录。
+- 验收截图**用引擎自己的 `renpy.screenshot`**（注入 `config.periodic_callbacks`），别用 `PIL.ImageGrab`（窗口被挡会截到前面的窗口，误判过"引擎黑屏"）。
 
 ## 三、最高频的实操坑
 
+**判空/真值**
+- **有 `__bool__` 的对象别用真值判断**：`EditorSession`（有 `__len__`，没载入章节时 falsy）、`StatementRegistry.__bool__`（只有 `calls` 的项目 falsy，`dialog_calls._load` 曾因此读成空表）。判空一律 `is not None`；默认值兜底别用 `or`（`int(x or -1)` 把第 0 拍当没载入）。`Statement.source` 是 `(路径,行号)` 元组。
 - **两个 registry 不是一回事**：`session.registry()`=资产表；语句表是 `StatementRegistry.for_project(root)`。混用 → Qt 槽吞异常 → "点了没反应"。
-- **`EditorSession` 有 `__len__`** → 没载入章节时 falsy。判空用 `is not None`，绝不用 `if self._session:`；默认值兜底别用 `or`（`int(x or -1)` 把第 0 拍当没载入）。同类：`Statement.source` 是 `(路径,行号)` 元组。
-- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 独立 basetemp + 运行锁）。裸 pytest 串行 ~20 min 且两个并发互删 `.pip-tmp/pytest`；`.pip-tmp/` 会到 GB 级，别用 du/find 扫。15s 心跳、300s 无输出退 **124** 并打印 nodeid；`--retry-failed` 只复跑上轮纯全量失败。
-- **耗时由少数真机金标主导**（scan/validate/patch/describe ~730s），方差 ±40%，别当回归。`test_disk_hygiene` 必须第一个跑。**pytest-xdist 默认 `--loadscope-reorder` 会覆盖重文件优先**（fasttest 已传 `--no-loadscope-reorder`；手写 `-n` 别漏，实测 7m14s→4m36s）。
-- **12 workers 会 `0x8007000e` 全体起不来**（内存不够 import PySide6）→ 降 `--workers 6`。
-- **无 `QApplication` 就建 Qt 控件 = 进程 abort**（无 traceback）。Qt 测试类要 `qapp` autouse。
-- **面板少一个转发方法** = AttributeError → 模态框 → 挂死。守卫 `test_every_panel_method_the_window_calls_really_exists`。构造期 `_refresh_preview` 早于控件创建 → `getattr` 守卫 + 建好后重刷。
-- **QSS 吞 `QTreeView` 展开三角** → 自绘 `▾/▸` + `setRootIsDecorated(False)`；判 dock 开没开用 `isHidden()`；`saveState()` 要求工具栏有 `objectName`。
-- **Qt 槽里异常只打 stderr = "点了没反应"**：`QMessageBox.addButton(文本, 角色)` 第二参数是 **ButtonRole**，传 StandardButton 当场 TypeError（真机事故：无源节点四个修复入口一起失效）。菜单/右栏动作一律过 `window_nodes._menu_action` 安全壳；有模态框的动作必须有"真建框"判据（`test_ui_reaction_contract.py`）。
-- **模态打桩要打全**：`delete_card` 走 `_ask_delete_mode` 的 `box.exec()`，只 patch `QMessageBox.question` 会卡死（xdist 全空闲、整体 0 CPU，看着像卡 20 分钟）。`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测"挂了哪些动作"。
-- **全局开关（记忆/自动保存）的判据要判在唯一写入口**：`remember_graph_files` 漏查曾往用户真实 `session.json` 写入 **849 个** tmp 项目。跑 UI 探针/截图先 `STORYGRAPH_NO_SESSION=1`；`session_store.save()` 自己判 `enabled()` 并剪 `.pip-tmp/`。
-- **纯文字导入前必问"导出到哪个文件夹"**：落点由人指定（`out_dir`），不猜子目录。任何程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 模态目录框会挂死。
-- **项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，**无 TTL**）；`find_control_file` 单候选直接返回。绕过缓存 → "连线很卡"（同一项目整份解析 6~8 遍，`detect_placement` 1435 ms/次）。别给缓存加 TTL（判据 `test_scan_cache.py`）。
-- **刷新已导入章节**：会话持有 `IncrementalRenPyAnalyzer`（只逐出磁盘上不存在的文件、8 MB 上限、本批不淘汰）+ `import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定重读哪几个；0 改动连预览框都不弹（`test_import_stamps.py`）。
-- **卡片上的单拍舞台图**：渲染必须走 `stage_render.render_frame`（与「演出预览」同一函数）；一律后台线程（首次大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹，**不许** `id(frame)`、不许换拍时拿上一张顶。图在「当前舞台」标题下、与摘要并排、固定 288×162（`compact=True`）；`_stage_now`（只看）与 `_stage_box`（能改）是两块，**普通卡都常显**，控制流卡才收起。compact 小图的**名字/台词要按缩略图字号重画**（`stage_render.draw_readable_say`，2026-10-29）：整帧缩小后字只剩 3~4px 是"方块"；铺底要**不透明**且**名条也要铺**（名条可能在文本框上方），名字字号**不许**被引擎名条宽度卡死（名条底跟着字长长）。
-- **滚轮永远不许改值**（2026-10-30 二次收紧，`ui_qt/wheel_guard.py`）：`WheelSafeComboBox`（卡片「说话人/背景/音乐/语音」四格）+ `WheelValueGuard`（挂 `QApplication`，`ensure_installed()` 幂等，兜住所有裸 combo/数值框/滑块）。滚轮一律不改值、**显式转交**外层滚动区；只有**候选列表已弹开**才放行。别再写"有焦点就放行"——那正是"滚动导致选择切换"复发的原因（可编辑裸 combo 连焦点都不用就会换值并吃掉滚动）。
-- **右栏宽度不是"滚动区的事"，是"卡片自己多宽"**（2026-10-30 第 7 条，`QComboBox` 是最常见的地板杀手）：`QComboBox.minimumSizeHint()` 默认按**最长条目**算宽（真机 40 多字图名 → 单个下拉 1025px，卡片地板 1077px，右栏 357 ⇒ 横向滚动条 + 全部控件越界）。`WheelSafeComboBox` 里已钉 `AdjustToMinimumContentsLengthWithIcon` + `MinimumContentsLength=4`，**别改回默认策略**；卡片滚动区 `ScrollBarAlwaysOff` 只是兜底，真正的判据是"卡片最小宽 ≤ 右栏"与"逐拍量右边界"。同族：`_dirty_label` 的 9 字文案（321px 那一行）也顶宽过卡片，只能留「● 未保存」；`window_state.LAYOUT_VERSION=3` + `LEGACY_CARD_SHARE=0.45`（对半的旧记忆等于 `CARD_SPLIT_DEFAULT`）。
-- **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 乱码），只用 edit/write。
-- **"这张图是谁"只有唯一真源**（2026-10-30）：`assets/asset_identity.resolve_image`（判定顺序：项目自声明名字 → 映射精确覆盖 → 映射规则 → 资源表 Tag 列（须是已知角色 tag）→ 路径目录段 → 文件 stem → **unknown 不猜**）。`assets/asset_mapping.py` 的 `storygraph.mapping.json` 只做覆盖/纠正，没它也能按目录推断；**不许**在 UI/其他模块按路径或文件名另写一套猜法（`cc_preview` / `sr_general` / `ling` 这类项目专名**不许**进逻辑分支）。
-- **映射有两种等价写法，同目录 Excel 优先**（2026-10-30）：`storygraph.mapping.json` / `storygraph.mapping.xlsx`（`assets/mapping_excel.py`：一张表=一个顶层键、行序=数组顺序、空格子=不写这个键、`备注` 列刻意忽略、表头可不在第 1 行）。**xlsx 只读，工具绝不回写人做的表**（load→save 会丢图/图表）；「保存到项目根」在生效源是 Excel 时写**同目录 JSON 快照**。生效源必须每处都说出来（`status_text` 的 `（Excel）` + `mapping_cached` 的"还有另一份"警告 + `mapping_sources` 的固定顺序），**不许靠猜**。
-- **舞台几何只有唯一实现**（2026-10-30）：`story/atl.py::placement_box`（`Placement.fit/xsize/ysize/nearest`）。无 `at`/`fit` 的大图按引擎语义 **1:1 贴左上裁切**，**不**做"预览自动 fit"（用户拍板：预览必须真实）；`stage_snapshot` 的 `scene_at`（持续、继承）/`layer_at`（show 记 hide 清）只进 state 内部键，显示列不变；缓存按**字节预算**（默认 256MB，`STORYGRAPH_STAGE_CACHE_BYTES`），不是张数。
-- **过场是项目自定义的，不是"淡入"**（2026-10-30）：`$ renpy.transition(...)` 是 Python 语句（`Beat.code`），要 `story/transition_expr`（安全字面量解析，无 eval）→ `story/transition_catalog`（扫项目 `define` 出 `Effect`）→ `app/transition_fx`（中间帧）。**认不出/缺遮罩如实降级 + 标「无法精确预览」，绝不假装淡入**。
-- **"两个回调"的件，测试打桩要打全**（2026-10-30，全量卡死级）：`sprite_grid` **优先** `on_pick_image_result`（生产接 `main_window.pick_sprite_result` → 真弹资产选择器），老 `on_pick_image` 只作降级；只打桩老回调会被新回调短路 → offscreen 真弹模态框 → fasttest 连续 300s 无输出判 **124 卡死**（`test_ui_qt` 4 条都踩）。同族：导出的「舞台可疑行 / 非法 show」弹窗在 `_review_stage_suspects` 里 `dlg.exec()`，**没有桩就别走到它**。
-- **复杂子句靠"声明"，不靠把 `pattern` 拉长**（2026-10-30）：`rules.json` 的 `statements[].clauses`（`story/spec_clauses`），`kind ∈ word/words/expr/transition/number`；列名 `head·列名~关键字`（`~` 保留）；读值时**必须拿全部声明子句当边界**（只给 `at` 一句会把后面的 `with …` 吞进值里）；写回只换值那一段，值没变逐字节原样。关键字只在**顶层完整词**认（引号/括号/注释里不算）。
-- **`$ 函数(...)` 是技术调用，不是语句**（2026-10-30）：`story/call_expr` 只按顶层逗号切实参、不 eval；内置 `renpy.transition`（`spec_args.BUILTIN_CALL_SCHEMAS`）+ 项目 `rules.json` 的 `calls`；动态列 `head·参数@0` / `head·参数@kw`；同一 head 两次/多行/`python:` 块体内**不建列、不写**；改值只动 `Beat.code` 那一行并同步 `ordered`。预览只按声明里的 `effect`/`seconds_arg` 演，没写就如实 unknown。
-- **有 `__bool__` 的对象别用真值判断**（2026-10-30 又踩一次）：`StatementRegistry.__bool__` 判的是**语句表**，只有 `calls` 的项目是 falsy —— `dialog_calls._load` 因此读成空表。判空一律 `is not None`。
-- **复杂子句 `show … at … behind …` 的 at 在 `classify_show_words` 里是 list**（`at`/`behind` 都是多目标；`with`/`as` 才是 str）：`beat_stage_parse._clause_values` 用 `', '.join` 归一，单目标给 str；`stage_snapshot` 的 `layer_at`/actors 才能拿到变换。
-- **跨章状态现在含 `scene_at`/`layer_at`**（2026-10-30）：`stage_snapshot.EXIT_STATE_KEYS` 加了这两把钥匙，`pipeline/continuity` 用 `JUDGED_STATE_KEYS` 显式只判 scene/actors/layers/music/voice（内部几何键不进 outcomes）；`_state_to_dict` 对 `layer_at` 输出 dict 副本，不能走通用 `str()`。
 
-- **界面上"可删的独立件"** 范式（如 `ui_qt/github_star.py`）：一个文件 + 一处 try 挂载，不 import 窗口/会话代码，点击立刻返回（网络后台），启动不联网。判据 `test_github_star.py`。
-- **许可证 GPLv3 必须四处同源**：`LICENSE` / `pyproject.toml` / `README.md` / 随包 `快速上手.md`（最后一处最容易漏）。10-23 曾误写 MIT，**别改回去**。
+**测试入口**
+- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 独立 basetemp + 运行锁）。裸 pytest 串行 ~20 min，两个并发互删 `.pip-tmp/pytest`；`.pip-tmp/` 会到 GB 级，别用 du/find 扫。15s 心跳、300s 无输出退 **124** 并打印 nodeid；`--retry-failed` 只复跑上轮纯全量失败；`--lf` 无效（每轮新 basetemp）。
+- 耗时由少数真机金标主导（scan/validate/patch/describe ~730s），方差 ±40%，别当回归。`test_disk_hygiene` 必须第一个跑。**pytest-xdist 默认 `--loadscope-reorder` 会覆盖重文件优先**（fasttest 已传 `--no-loadscope-reorder`；手写 `-n` 别漏，7m14s→4m36s）。**12 workers 会 `0x8007000e` 全体起不来** → `--workers 6`。
+
+**Qt**
+- **无 `QApplication` 就建 Qt 控件 = 进程 abort**（无 traceback）。Qt 测试类要 `qapp` autouse。
+- **面板少一个转发方法** = AttributeError → 模态框 → 挂死（守卫 `test_every_panel_method_the_window_calls_really_exists`）；构造期 `_refresh_preview` 早于控件创建 → `getattr` 守卫 + 建好后重刷。
+- **Qt 槽里异常只打 stderr = "点了没反应"**：`QMessageBox.addButton(文本, 角色)` 第二参数是 **ButtonRole**，传 StandardButton 当场 TypeError（真机事故：无源节点四个修复入口一起失效）。菜单/右栏动作一律过 `window_nodes._menu_action` 安全壳；有模态框的动作必须有"真建框"判据（`test_ui_reaction_contract.py`）。
+- **模态打桩要打全**：`delete_card` 走 `_ask_delete_mode` 的 `box.exec()`，只 patch `QMessageBox.question` 会卡死（xdist 全空闲、0 CPU）；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测。**"两个回调"的件**：`sprite_grid` 优先 `on_pick_image_result`（生产接真资产选择器），只打桩老回调会被短路 → 真弹模态 → fasttest 判 124（`test_ui_qt` 4 条都踩）。导出的「舞台可疑行 / 非法 show」弹窗在 `_review_stage_suspects` 里 `dlg.exec()`，没桩别走到它。
+- **QSS 吞 `QTreeView` 展开三角** → 自绘 `▾/▸` + `setRootIsDecorated(False)`；判 dock 开没开用 `isHidden()`；`saveState()` 要求工具栏有 `objectName`。
+- **滚轮永远不许改值**（`ui_qt/wheel_guard.py`）：`WheelSafeComboBox`（说话人/背景/音乐/语音）+ `WheelValueGuard`（挂 `QApplication`，`ensure_installed()` 幂等，兜所有裸 combo/数值框/滑块）。一律不改值、**显式转交**外层滚动；只有候选列表已弹开才放行。别写"有焦点就放行"。
+- **右栏宽度取决于"卡片自己多宽"**（`QComboBox` 是地板杀手）：`minimumSizeHint()` 按最长条目算（40 多字图名 → 下拉 1025px → 卡片 1077px，右栏 357 ⇒ 横向滚动条 + 全部越界）。`WheelSafeComboBox` 已钉 `AdjustToMinimumContentsLengthWithIcon` + `MinimumContentsLength=4`，**别改回默认**。同族：`_dirty_label` 只能留「● 未保存」；`window_state.LAYOUT_VERSION=3` + `LEGACY_CARD_SHARE=0.45`。
+
+**落盘/全局开关**
+- **全局开关的判据要判在唯一写入口**：`remember_graph_files` 漏查曾往用户真实 `session.json` 写入 **849 个** tmp 项目。跑 UI 探针/截图先 `STORYGRAPH_NO_SESSION=1`；`session_store.save()` 自己判 `enabled()` 并剪 `.pip-tmp/`。
+- **纯文字导入前必问"导出到哪个文件夹"**（`out_dir`），不猜子目录。程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 模态目录框挂死。
+- **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 乱码），只用 edit/write。
+
+**扫描/刷新**
+- **项目级扫描一律走 `story/scan_cache.py`**（按 `mtime_ns+size` / 项目指纹失效，**无 TTL**）；`find_control_file` 单候选直接返回。绕过缓存 → "连线很卡"（同一项目整份解析 6~8 遍，`detect_placement` 1435 ms/次）。别给缓存加 TTL（`test_scan_cache.py`）。
+- **刷新已导入章节**：会话持 `IncrementalRenPyAnalyzer`（只逐出磁盘上不存在的文件、8 MB 上限）+ `import_chapters` 记 `(mtime_ns,size)`，`stale_import_files` 决定重读哪几个；0 改动不弹预览框（`test_import_stamps.py`）。
+
+**唯一真源（别另写一套）**
+- **优先级 = 一张常量表**：`core/authority.py`（mapping-exact 1 > declared 2 > mapping-rule 3 > registry 4 > inferred 5；engine 0 是天花板，unknown 6 = "没结论"）。规矩：**规则只补空缺，覆盖必须精确**；**投影不投票**（`*.generated.rpy` 等工具产物不进任何统计）。决策全文 `docs/真源与优先级_设计决策_2026-10-31.md`；守卫 `tests/test_authority_layers.py` **同时比对文档 §4.3**（两源不一致当场红）。
+- **词汇表合并不看顺序**：`Vocabulary.merged([(层名, 词条), …])` 按 `VOCAB_LAYERS` → `AUTHORITY` 的层号合并；`plus()` 是"后来者优先"的老路，**新代码别用**（写反了"映射优先"就静默反过来）。同一层里的段次序由 `_SEGMENT_ORDER` 固定。
+- **覆盖要留痕**：`core.authority.Override`（append-only，`sentence()` 唯一措辞）。命名域在 `Vocabulary.merged()` 里记（值不同才记）+ `explain()` + `labeled()` 填进 tooltip；身份域 `Identity.overrides`（仅"精确覆盖赢 + 声明过"时记）+ 选择器 tooltip「覆盖了：」。**别在 UI 里另写一句措辞**。
+- **冲突三态**：`story/write_gate.classify(disk_bytes, base_sha1, draft_text, base_text=None)` → `ADOPT`（盘上已是草稿）/ `REBASE`（内容==基线，只是被 touch）/ `CONFLICT`。`source_unchanged()` **只比内容**（touch 不算冲突，行号继续可信）。`base_text` 给了才有行级合并候选，**有候选也仍是 CONFLICT**（合不合并由人定）。
+- **"这张图是谁"**：`assets/asset_identity.resolve_image`（映射精确覆盖 → 项目声明 → 映射 glob 规则 → 资源表 Tag 列 → 路径目录段 → 文件 stem → **unknown 不猜**）。`storygraph.mapping.json` 只做覆盖/纠正；**不许**在 UI/其他模块按路径或文件名另写猜法（`cc_preview`/`sr_general`/`ling` 这类专名**不许**进逻辑分支）。声明过的行 `source='declared'`；每个 source 必须在 `authority.SOURCE_LAYER` 登记。
+- **`outfit` 代号/表情编号的证据只数作者写的剧本**：`sprite_codes._script_texts()` 必须走 `parsing.discover.DERIVED_SUFFIXES`/`SKIP_DIR_PARTS`。实测：`chapter1_4.generated.rpy` 让同一句 `show` 数两遍 → `xing` 的 B 从"留空"变「B」→ 两个近乎克隆的项目给出不同代号表。**别用 `game.rglob('*.rpy')` 自己数**。
+- **base 快照：先不做**（用户 2026-10-31 拍板）。表里只存哈希（`table_meta` 的 `来源指纹`）；三态判定（采纳 / rebase / 真分叉）的三处接缝与"什么时候重启"写死在决策文档 §八。**别顺手往 `.rpy` 里写元数据，也别存原文快照**。
+- **舞台几何**：`story/atl.py::placement_box`。无 `at`/`fit` 的大图按引擎语义 **1:1 贴左上裁切**，**不**做"预览自动 fit"；`stage_snapshot` 的 `scene_at`（持续继承）/`layer_at`（show 记 hide 清）只进 state 内部键；缓存按**字节预算**（默认 256MB，`STORYGRAPH_STAGE_CACHE_BYTES`），不是张数。
+- **"改图片大小"是三件事，不是一件**（2026-10-31 用户亲纠）：`scene` = **清台**（该层 displayable 全没），`show` = 只替换同 tag。所以改背景尺寸只能写 `show 图@变换` —— `app/stage.py::_bg_show_edit` 的函数体里**不会出现 `scene`**（判据 `test_stage_at_source.py::TestOverrideWritesShowNeverScene`，含"改完立绘还在"与"写 scene 就清空"的正反对照）。**超清图另有官方解法**：文件名 `xxx@2.png`（oversampling），引擎按 1/N 显示；唯一实现 `stage_render.oversample_of/display_size`，**只认文件名、永不自动改名**（图 ID 来自文件名）。
+- **背景/图层是持续状态，写回要回"写它的那一拍"**：快照 state 有 `scene_src`/`layer_src`（0 基拍号，-1=不知道；**0 是合法值，别用 `int(x or -1)`**），`StageFrame` 带出，`plan_at_edit(source_index=)` 改来源拍；`AtEdit.requested_index`/`affects` 负责"你在第 200 拍点的、影响 41–266 拍"。真机实测：1013 个有背景的拍里 **972 个是继承的**（旧行为 0 可写 → 修后 673 可写）。
+- **令牌没点到的 show/hide 条目，快照必须补**：渲染器 `_emit_leftover_stage` 一直会补，`stage_snapshots` 从前直接丢 → 卡片加第二个立绘 = "产物两句 show、预览一个人"（合成用例 `show='ling a; ye b'` + `op_order='show#0'` 复现；真机两项目 0 触发）。`AtEdit.extra_token/token_field` 是写入口那一侧的自保（插入新 show 补 `show#N`）。
+- **尺寸面板 = 人话 → 项目已有 transform**（2026-10-31）：`story/size_presets.py`（`target_box` 用**同一个** `placement_box`；`match_preset` **只看效果**、容差 1.5px、位置一律左上角；**语义先于名字** —— 4K 放 1080p 时「50%」与「铺满」框相同，别把 `fit "cover"` 当 50%；带动画/改 alpha/旋转的**不算**尺寸变换；匹配不到 → `None`，**绝不编**）。行由 `stage_render.size_rows` 出（`_size_note` 同一份措辞 + 出处 `（第 N 拍设的）`），写回走 `stage.plan_size_edit`（`as_is` = `plan_at_edit(mode='clear')`；其余 `mode='source'` 改出处那一拍）。卡片 `ui_qt/size_panel.py` 只发 `size_requested`，窗口层 `apply_size_from_card` 复用演出预览的确认/脏标记门禁。`NarrowWrapLabel` 已搬到 `ui_qt/wrap_label.py`。
+- **生成 `sg_*` 只有一个入口 + 三道锁**（2026-10-31，用户拍板）：`story/sg_transforms.py` 写 `game/sg_transforms.rpy`。**①指纹**：第 3 行 `# sg-gen v1 sha256 <正文指纹>`（UTF-8、**LF 归一**，CRLF 不算手改）；`SgFile.state` ∈ `missing/ok/foreign/hand_edited/bad_version/unreadable`，**只有前两种可写**；`SgPlan.apply()` 写盘前**再看一眼**磁盘（状态变了/条目对不上 → 抛错不写）。**②查重**（三层，命中任一就不写）：同名同内容 → `reuse`；`match_preset` 几何等价 → 用现成名字；文件里已有 → `noop`；名字被别人占了 → `sg_xxx_2`，**绝不顶掉别人的定义**（Ren'Py 同名后定义者赢）。**③引用存在性**：`missing_references()` 一次扫描（`scan()` 同时收 `at` 引用与定义）→ `pipeline.validate.E305`（L3 error，`文件:行号`，进体检 / CLI）；**只查 `sg_` 命名空间**，台词里的 "meet me at …" 不算。面板那条只是**提议**（`items.generate`），确认后**同一张框**里既有脚本 diff 又有文件 diff，顺序 = 写文件 → `session.refresh_transform_index()` → 改内存拍。名字/体/几何同源：`atl_body` 出体，`transform_def` 把生成的文本**再解析一次**算框。
+- **跨章状态含 `scene_at`/`layer_at`**：`EXIT_STATE_KEYS` 两把钥匙；`pipeline/continuity` 用 `JUDGED_STATE_KEYS` 只判 scene/actors/layers/music/voice；`_state_to_dict` 对 `layer_at` 输出 dict 副本。
+- **"本景还有几处单独改写"只报数，不代你删**（2026-10-31，队列第 4 项）：`story/override_advice.py`（`override_map(beats, start)` → `{桶: (Site…)}`；`override_advice(beats, source, kind=, tag=, prefetched=)` → `OverrideAdvice`）。为什么要有：尺寸面板改的是**源**那一行，而本景后面只要有谁又 `show` 了同一个对象，Ren'Py 就**重建** displayable ⇒ 源里的 `at` 从那一拍起失效；人改完看的是当时那一拍，于是"改好了"和"只改到第 12 拍"长得一模一样。规矩抄 `docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5：**只读**（↔ 文档 §一"能靠读解决的绝不写"）；0 处 `none` / 1–2 处 `hint` / ≥3 处 `notice`；**算不出来降档到 `hint` 并注明，绝不当 0 处**；`source<0`（跨章继承）→ `none` + `reason`（这一行本来就改不了，不冒充 0）。**口径只许一份**：生效 `at` 走 `beat_stage_parse.item_at(item, beat)`（`stage_snapshot._apply_show_verb` 也改调它）、"是不是同一图层"走 `core.vocabulary.same_layer_tag`（`app.stage._same_layer_tag` 转调它）—— 报的处数必须等于实际会盖回去的处数。接线：`size_rows(..., beats=None)` 每行 `advice`（**不给拍表 = `None`，不是"0 处"**）、`AtEdit.advice` → `diff_text()` 在 diff **之前**说这句话、面板一行短的 + 完整句进 tooltip（`hint` 灰 / `notice` 琥珀）。**合并回源（删那几行 `show … at …`）没做** —— 那是 L4 删行，按 §5.5 要逐处确认、逐处可撤。
+- **"引擎写法 ⇄ 人话"只有一层**：`assets/vocabulary.py` 的 `Term(kind,id,label,code,char,note)`；`id` 是写进剧本的真值；查不到**原样显示**（补充不是白名单）；模糊匹配只在唯一命中时认；服装/表情**不搬家**（`outfit_codes` 投影进来）。
+- **"显示值 ≠ 真值"只有一层**：`ui_qt/labeled_choices.py`（原语 `addItem(显示, 真值)`，真值进 `UserRole`，**真值优先**）。坑：① `mapping_cached()` 返回**三元组**，唯一访问器是 `session.vocabulary()`；② 可编辑下拉 `setEditText` 后 `currentIndex` 仍指上一项，`combo_value` 必须同时比文本；③ `dynamic_spec_columns` 曾丢 `choices_from` → `with` 的「转场」一个候选都没有。
+
+**映射（Excel/JSON 双写法）**
+- 同目录 **Excel 优先**：`storygraph.mapping.xlsx`（`assets/mapping_excel.py`；一张表=一个顶层键、行序=数组序、空格子=不写这个键、`备注` 列忽略、表头可不在第 1 行）。**xlsx 只读，绝不回写人做的表**；「保存到项目根」在生效源是 Excel 时写**同目录 JSON 快照**。生效源每处都要说出来。
+- 表格编辑入口：`ui_qt/mapping_editor.py`（表）+ `assets/mapping_edit.py`（`SPECS` 六段），**JSON 仍是唯一产出**。三条规矩：① 深拷贝 + 只改认识的键（`to_data` 对没碰过的条目逐字节等价）；② 空壳行不落盘、删光的段整键去掉、原本空的段保留；③ 表**不许 import `save_mapping`**。坑：`itemChanged` 里**不许重建表**（抢焦点）；列宽**不许伸缩有内容的列**（末列「属性」760px、首列 `#` 380px），用"每列定宽 + 末尾空列吃满"。QLabel 是纯文本，中文文案里 `**`/反引号会原样显示；要 `<b>` 必须显式 `setTextFormat(RichText)`。
+- **`B7` = 服装字母 + 表情编号**：`assets/sprite_codes.py` 是唯一真源（`scan_project` 建表 / `translate` 双向换算）；`outfit_codes`/`expression_codes` 两段、Excel 两张同名表、「按项目自动填」「存空模板」都挂在它上面。铁律：**一组一个属性**（`show ye hi` 不撤销服装）；**注释取最后一个代号**；**跨角色声明过的属性不算服装标记**。数不出来就**留空并点名**，不按顺序硬凑；已有行一条都不改。
+- **「角色 0」= 没有覆盖，不是没读到**（用户 2026-11-01 截图问"为什么角色是0"）：`characters` 段空着时名字照 `characters.xlsx` 来（`asset_identity._display_of`，映射为空给 `display='凌跃捷'`）。所以编辑页空表要**当场说清**"表里有 N 个角色 / 空着就行"，并给「把资源表里的角色写进来」按钮（`mapping_editor.import_characters`，**只加不改**）。**不许开窗自动抄** —— 抄进映射就盖住资源表，改 xlsx 名字不生效。判据 `test_mapping_chars_from_table.py`。
+
+**舞台/卡片/过场**
+- **卡片单拍舞台图**：渲染走 `stage_render.render_frame`（与「演出预览」同一函数）；一律后台线程（首次大盘立绘 1.3 s），防抖 120 ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹（**不许** `id(frame)`、不许换拍拿上一张顶）。固定 288×162（`compact=True`）；`_stage_now`（只看）与 `_stage_box`（能改）是两块，普通卡常显，控制流卡收起。compact 小图的**名字/台词要按缩略图字号重画**（`draw_readable_say`）：铺底要**不透明**且**名条也要铺**，名字字号不许被引擎名条宽度卡死。
+- **过场是项目自定义的**：`$ renpy.transition(...)` 是 Python 语句（`Beat.code`），走 `story/transition_expr`（安全字面量解析，无 eval）→ `transition_catalog`（扫 `define`）→ `app/transition_fx`。**认不出/缺遮罩如实降级 + 标「无法精确预览」，绝不假装淡入**。
+
+- **带 ATL 块的 `show`（2026-10-31 打通，五条坑连着踩）**：`show lan happy at right:` + 缩进块现在是 `kind=show` + `payload['atl']`（块体原文）→ `Beat.opaque` → `emit_opaque` 逐字吐。要改就得同时记住：
+  ① **判据是"节点有没有块体载体"，不是"是不是 show"** —— `_parse_statement` 的带块守卫（`_BLOCK_CARRYING_NODES`）会把没有载体的节点整条打回 `unmodeled`。给 `SceneNode` 加载体才允许它进这张表，别只加个类名。
+  ② **`ln.text` 自带缩进**（实测 `'        zoom 0.15'` 且 `indent=8`）。按 `ln.indent - head.indent` 补空格会变成双份缩进（8+4）；正确做法是 `_strip_leading_width(raw, base)` **只剥掉首行那一段**。
+  ③ **`LogicalLine.subblock` 里没有空行**（空行不生成节点）。纯靠 subblock 重建会吃掉块体中间的空行 → 改别人排版。必须按 `(首行行号+1 .. 末条 subblock 行号)` 从**源文件**取（`self._source_text(path)`）。
+  ④ **opaque 的 `ordered` 令牌必须排在 `mark_op('show')` 之后** —— 先记就吐在 `show …:` **前面**，产物直接语法错。
+  ⑤ **行尾冒号要走"编解码往返"**：`_split_show_items` 把它剥成 `item['block']=True`（否则 `at` 值变成 `right:`，变换查不到），`show_item_part` 再拼回去；`render` 那边的 `emit_opaque` 还有一道兜底（块体首行缩进 → 给上一行 `show/scene` 补 `:`）。
+- **ATL 那一刀还欠 11 条红（2026-10-31 13:42 全量实测）**：`ShowNode.atl` 没进 `_FACTORY_FIELDS`（`test_kind_declaration_sync` / `test_field_reconciliation`）、`show … as title:` 的冒号被误当块首（`test_show_clause_words`）、块体承载标记（`test_leaf_blocks_are_not_swallowed`）、`test_loop_model` T0/T3、以及 6 份金标没刷新（`golden_baseline.json` 停在 10-30 22:59）。**先修代码再刷金标**，别反着来。定位：`python tools/fasttest/run.py --retry-failed`。
+- **归属审计（P1，2026-10-31）**：`_HANDLER_OF`（模块级）是"每种语句去哪"的**唯一清单**；`_BeatBuilder.unassigned` 记"既没进 pending 也没建拍"的语句，`beats_from_parse_result(..., report=[])` 取出来断言。判据是**结构**（不靠语法白名单），新加写法自动落进 attach。它当场抓到 `StatementKind.UNKNOWN` **一个 handler 都没有**（读新版表/手改 JSON 时静默丢语句）——已补 `_emit_unknown`，整条原文进 opaque。
+- **多行源码别走 shell 管道**（2026-10-31 又踩）：`python - <<'PY'` 里塞带 `show ...` 的测试源码，`show` 行会被吞掉，于是"复现"出"show 没了"的假回归。探针要写成 `.py` 文件再跑（铁律 10 的同族）。
+- **本机没装 pytest 且 pip 无网**（`from versions: none`，换镜像也一样）：验证只能跑 `tools/_*.py` 探针；`tests/` 里的用例照写（用户环境有 pytest）。`tests/test_hell_atl_mapping.py` 末尾自带标准库运行器，`python tests/test_hell_atl_mapping.py` 可直接跑。
+
+**自定义语法**
+- **复杂子句靠"声明"**：`rules.json` 的 `statements[].clauses`（`story/spec_clauses`），`kind ∈ word/words/expr/transition/number`；列名 `head·列名~关键字`；读值**必须拿全部声明子句当边界**（只给 `at` 会把后面的 `with …` 吞进值里）；写回只换值那一段。关键字只在**顶层完整词**认。
+- **`$ 函数(...)` 是技术调用，不是语句**：`story/call_expr` 只按顶层逗号切实参、不 eval；内置 `renpy.transition` + 项目 `rules.json` 的 `calls`；动态列 `head·参数@0` / `head·参数@kw`；同一 head 两次/多行/`python:` 块体内**不建列不写**；改值只动 `Beat.code` 并同步 `ordered`。
+- **`show … at … behind …` 的 at 在 `classify_show_words` 里是 list**（`at`/`behind` 多目标；`with`/`as` 才 str）：`beat_stage_parse._clause_values` 用 `', '.join` 归一，单目标给 str，否则 `layer_at`/actors 拿不到变换。
+
+- **界面上"可删的独立件"** 范式（如 `ui_qt/github_star.py`）：一个文件 + 一处 try 挂载，不 import 窗口/会话代码，点击立刻返回，启动不联网。判据 `test_github_star.py`。
+- **许可证 GPLv3 必须四处同源**：`LICENSE` / `pyproject.toml` / `README.md` / 随包 `快速上手.md`。10-23 曾误写 MIT，**别改回去**。
 - `tools/audit_real_project.py` 是坏脚本，别信输出。
 - **并发写入常态**：动手前 `git status` + 时间戳；文档只追加；提交按文件分组；写完回读校验。
 
-## 四、当前的片（判据见同名测试）
+## 四、通用性（2026-10-31 审计，用户质疑"只服务我的项目"）
 
-E1/E2/E3 引擎事实｜纯文字导入 S1~S4（`test_txt_import*` + 金标）｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门（`plan_control_write`）｜L7 版式恢复｜导入冲突预检（覆盖/改名/跳过，取消=零写）｜点不动修复 + 记忆门禁｜导出落点 + 工具栏顺序｜接线不卡｜刷新不白付钱｜卡片单拍舞台图｜右栏竖向配额（「定位」默认折叠）｜重号不级联（发号底座=整批已有+本次已发）｜derived 段要交代｜写入口探针两种 open｜GitHub star 徽标｜E1/E3+D3 拖线落点由结构决定｜**🎮 引擎试玩 + 演出专用版**（`engine_preview` / `stage_edition` / `packaging/make_stage_release.py`）｜**舞台（高级）可疑行 → 导出前确认**（`story/stage_suspect.py`，撤回自动补 `#`）｜**卡片三修**（`_stage_box` 常显 / `WheelSafeComboBox` 滚轮防误触 / compact 缩略图文字可按读）｜**二轮反馈五件套（2026-10-30）**：②⁴ 资产身份解析 + 角色优先分组 + 项目级映射（`assets/asset_identity` / `asset_mapping` / `ui_qt/mapping_dialog` / `app/picker.resolve_pick`）｜⑦ 真实舞台几何 fit/at/黄切 + 内存封顶（`atl.placement_box` / `stage_snapshot.scene_at` / `stage_render`）｜③ 自定义过场解析 + 预览演效（`story/transition_*` / `app/transition_fx`）｜⑤ UI 宽窄（默认 1360×900、最小 738、右栏 340、网格自适应）｜导出前「非法 show」门禁（`app/stage_identity_guard`）｜GitHub Star 探测误报修复（任何 HTTP 响应算网络通、点一下立刻开页）｜**自定义模块 v7（2026-10-30）**：复杂子句 `clauses`（`story/spec_clauses` + 弹窗第 3 块）｜技术调用 `calls`（`story/call_expr` + `ui_qt/dialog_calls` + 内置 `renpy.transition` 可编辑列）｜复杂 `show … at … behind` 的 at 进快照（`beat_stage_parse._clause_values`）｜跨章 `scene_at`/`layer_at` 继承（`EXIT_STATE_KEYS` + continuity `JUDGED_STATE_KEYS`）｜**UI 第 6 条（2026-10-30 晚，"不要那个结构"）**：删掉「⋯ 结构」菜单、6 颗结构按钮回动作条 + `CardActionRow`（`FlowRow`）折行（窗口最小宽仍 738）｜老记忆一次性迁移 `window_state.narrow_layout` + `layout_version`（窗口 1440→1360、卡片栏 813→640:420）｜**UI 第 6 条（2026-10-30 深夜，"滚动会导致选择切换 / 打开还是这么大"）**：滚轮永不改值（全局 `WheelValueGuard`，有焦点也不放行）｜窗口大小**每次**恢复都压到默认 1200×800（`narrow_layout` 对 geometry 不看版本号）｜分栏按**比例**摆（`_scale_sizes`）+ 恢复顺序 resize→dock→切页→分栏→`singleShot(0)` 补摆｜`resolve_chapter` 不再跨项目载入章节（绝对路径必须在项目根内）。
+- **结论：逻辑层没有按项目名分支**（AST 扫过非 docstring 字符串常量，21 处命中全是**给用户看的示例文案**；`pipeline` 里 `cc_preview` 只出现在"不拷这些重目录"的 SKIP 列表，无害）。
+- **但有三处"预设了某类项目形态"**，改的时候按这个清单：
+  1. `assets/sprite_codes.py` 的 `_EXPR_GROUPS` / `_OUTFIT_GROUPS` **是白名单猜测**（`outfit/clothes/body/服装/服`、`expr/face/eme/表情`）。实测：`group dress` / `costume` / `wardrobe` / `armor` 全认不出（留空并点名，不会硬凑，但"按项目自动填"在英文项目上等于失效）。爆炸半径只有 `scan_project` + 「按项目自动填」；**立绘卡分格走 `asset_dimensions`，不写死组名**。要改成"从 `layeredimage` 的 `group` 全量列出，由人勾哪组是服装"。
+  2. `assets/vocabulary.py` 的 kind 同义表（`outfit/costume/clothes → costume`）—— 只归一**人写的** kind，可接受，但同样漏 `dress/wardrobe`。
+  3. `examples/mapping/sr_general.mapping.{json,xlsx}` 是**真实项目导出**（45 角色 / 61 条 `game/cc_preview/...` 规则）。没进发行包（`dist*` 里没有），但在仓库里 = 观感问题 + 隐私问题。应换成 `demo/` 那种自造小项目。
+- **`outfit` 出现在表里的原因**（用户问的那个）：它不是被"注册"的变量。`draft_mapping()` 自动初稿里 `attributes` 恒 `{}`、`outfit_codes` 恒 `[]` —— 不会自己长出 `outfit`。表里出现只有两条路：① 项目自己写了 `group outfit`，「按项目自动填」照实记；② 人在「属性」表填了维度 `outfit → 服装`（改名层，`beats.group_labels` 只当显示名覆盖）。仓库内 10 个 xlsx 实测**没有任何一个含 outfit 字符串**。
+- 中文界面 vs 英文项目：UI 全中文（团队自己用没问题），但表头/别名都配了英文（`FIELDS` 里 `tag/display/glob/kind` 都认），英文项目能落表。
 
-**真缺口**：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip，含全部 8 个 golden）｜G2 引擎版本适配层｜**从当前拍 warp 的近似性**（前情 `$` 变量缺，UI 已明说，未做"补前情状态"）｜引擎试玩只支持 Windows 源生 SDK 运行（不做 build 分发）。
+## 五、当前的片（判据见同名测试）
 
+E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资产维度结构化｜立绘卡"一维一格"｜S1 删边=删拍｜S2 选择点（menu 住 `<章>_choices.rpy`，剧本只多一行 `call`）｜S3 控制流守门｜L7 版式恢复｜导入冲突预检（取消=零写）｜记忆门禁｜导出落点｜卡片单拍舞台图｜右栏竖向配额｜重号不级联｜derived 段要交代｜写入口探针｜GitHub star｜E1/E3+D3 拖线落点由结构决定｜🎮 引擎试玩 + 演出专用版｜舞台可疑行导出前确认｜卡片三修｜二轮反馈五件套（资产身份解析 / 舞台几何 / 自定义过场 / UI 宽窄 / 非法 show 门禁）｜自定义模块 v7（复杂子句 / 技术调用 / 跨章 scene_at）｜UI 第 6 条（删「⋯ 结构」、滚轮永不改值、分栏按比例、`resolve_chapter` 不跨项目）｜资产选择器左右栏两种口径｜词汇表 + `labeled_choices` 四处下拉｜尺寸面板（铺满/适应/50% → 项目已有 transform，匹配不到才生成 `sg_*`）｜生成 `sg_*` 三护栏（sha256 标记 / 写前查重 / 引用存在性）｜**显式「换景」**（`scene` 只在人按下时写，确认框报"会清掉 N 个立绘"；顺带修了"scene 不清 CG 图层"——真机 40/61 个拍预览在骗人）｜**本景单独改写计数**（`override_advice`：只报数、三档提示、算不出来降档，面板/确认框同一份措辞；合并回源还没做）。
+
+**真缺口**：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜从当前拍 warp 的近似性｜引擎试玩只支持 Windows 源生 SDK。
 **待用户决定**：D1 树/表归属｜D2 两套生成器收敛｜D3 rename patch 接 Qt｜D4 Stage 格级下拉｜D5 坏味道课题｜D6 pytest.ini basetemp｜D7 多引擎加深｜D8 提交策略。
 
-## 五、P0 审计（六轮，细节见 `docs/P0审计_*.md`）
+## 六、P0 审计（六轮，细节见 `docs/P0审计_*.md`）
 
 - **最高频 P0 = 两边口径不一致**（老表英文键 vs 中文表头 → `_canon_field`/`BEAT_HEADERS` 两向都要报）；**最有效探针 = "同一件事不同出口两种待遇"**。
 - 载体三轴（真机 312 个 `.rpy` 全 0）：行边界（`core/textlines.py`，Ren'Py 只认 `\n`）｜编码（`SourceStyle.apply(source=)` 严格解码抛 `SourceNotUtf8`，所有落盘点唯一末班车）｜`commands.py` 各处补 `source=`。
-- Excel 是第二份源码：`story/xlsx_preserve.py`（备份 3 代 + 用户整页带走 + 自加列按 **LineId** 回填）；`removed_count` 必须真算。xlsx 存不下控制字符会让**整份表**导不出 → `excel/cells.py::xml_safe` 剥掉留痕。
+- Excel 是第二份源码：`story/xlsx_preserve.py`（备份 3 代 + 用户整页带走 + 自加列按 **LineId** 回填）；`removed_count` 必须真算；`excel/cells.py::xml_safe` 剥控制字符留痕。
 - 新功能先跑 `tools/_p0_audit_round6_stress.py`（19 条难缠工程）；真机 `sr_general` 太干净。`test_scan_golden` 红先看"少了 []"。
 
-## 六、协作与定位
+## 七、协作与定位
 
 - 单人开发：AI 写代码，用户设计/测试/验收。多讲"为什么这么设计、否决了哪个备选"；用户写代码时别抢答；**接受判据校准**。
 - 说人话（编剧也看得懂）、每个观点要"为什么"、给指标/表格/P0-P1 标签。
 - 定位：**已有项目的外科手术刀 + 资产治理层 + 跨引擎逃生舱**；三条护栏 = 不改引擎 / 不改用户字节 / 能带走。
 - 图管"章与章怎么串"，卡片管"这章怎么演"，桥只有一行 `call`。menu 的家 = 编排层文件，**永不写进剧本**。
-- 引擎对坏写法沉默（落空/章末 jump/menu 嵌 if，lint 全过）→ 发现是工具的活（`story/exits.py`，七档出口）。**"不能写剧本" ≠ "不给你连线"**：算不出就画草图 + 状态栏说清，静默是最坏反馈。
+- 引擎对坏写法沉默（落空/章末 jump/menu 嵌 if，lint 全过）→ 发现是工具的活（`story/exits.py`，七档出口）。**"不能写剧本" ≠ "不给你连线"**：算不出就画草图 + 状态栏说清。
 
-## 七、发布包
+## 八、发布包
 
-- 清单（`packaging/make_release.py::REQUIRED`，缺一样报错）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG，`demo/make_art.py`）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`LICENSE`。判据 `test_release_manifest.py`。
-- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip`。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变 NativeCommandError 假 exit 1，用 `*> .pip-tmp/pyi.log`。
-- 手册截图 `tools/_shot_manual.py`：`offscreen` + `STORYGRAPH_NO_SESSION=1`；**不许 `win.close()`**（未导出改动弹模态框永卡住，结尾 `os._exit(0)`）；结构页用 `zoom_reset→zoom_by(2.0)→center_on_node`，别 `fit_to_content()`。
-- 真机工程会自己长大（`sr_general` 55→96 章）：金标红先跑 `tools/golden_baseline.py --check`，确认是项目变了再 `--save`。
-- **演出专用版**（`packaging/make_stage_release.py`，2026-10-29）：`--dist dist/release --sdk D:\software\renpy-8.4.1-sdk --out dist/stage --zip`。包内 = 标准版全部 + `renpy_sdk/`（完整 SDK 去 `vscode/`+`tmp/`，约 330 MB）+ `项目预设/`（真实 rules + 43 章布局）+ `演出专用版.txt` + `演出专用说明.md`；13 项 REQUIRED、3 项 FORBIDDEN、zip ≤ 4 GiB。**先跑 `make_release.py --stage-only` 铺出带 extras 的 `dist/release`，再拿它当 `--dist`**（`dist/StoryGraph` 只有两个 exe）。
-- 验收：`StoryGraph.exe --selfcheck`（演出专用版会多一条"引擎 + 预设"，含随包项目探测）；解压后把 `项目/` 放 exe 旁边再启动，应自动打开项目并补 `storygraph.rules.json` / `.storygraph/layout.json`（判据：这两个文件出现）。
+- 清单（`packaging/make_release.py::REQUIRED`）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`LICENSE`。判据 `test_release_manifest.py`。
+- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip`。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
+- 手册截图 `tools/_shot_manual.py`：`offscreen` + `STORYGRAPH_NO_SESSION=1`；**不许 `win.close()`**（未导出改动弹模态框永卡），结尾 `os._exit(0)`；结构页用 `zoom_reset→zoom_by(2.0)→center_on_node`。
+- 真机工程会长大（`sr_general` 55→96 章）：金标红先 `tools/golden_baseline.py --check`，确认项目变了再 `--save`。基线**别把工具副产物算成输入**（按 `resolve()` 去重、不收 `~$*` 与 `*.bak*`）。
+- **演出专用版**（`packaging/make_stage_release.py`）：`--dist dist/release --sdk <SDK> --out dist/stage --zip`。包内 = 标准版 + `renpy_sdk/`（约 330 MB）+ `项目预设/` + 两个说明；13 项 REQUIRED、3 项 FORBIDDEN、zip ≤ 4 GiB。**先 `make_release.py --stage-only` 铺带 extras 的 `dist/release` 再当 `--dist`**。

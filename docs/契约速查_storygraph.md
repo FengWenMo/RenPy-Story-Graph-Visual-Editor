@@ -13,6 +13,7 @@
 - **A2** `core.statement` 唯一 IR；禁第二套 AST walk。IR 是语句流非树：`elif/else` 展开成 `not(前一条件)`；`menu` 渲染前重新归组复原。
 - **A3** 保真后门两条（scope 不同）：`CodeBlock`（一拍内 `python:`）/`FileBlock`（顶层 `init python:`）。同一语句绝不两条通道各出一次。
 - **A4** 整行注释必须保真：lexer 存**含缩进**原文（存 stripped 会双重去缩进→非法 ATL）。行尾注释**刻意**剥掉。
+- **A5** **真源与优先级的层序**唯一真源=`core/authority.py`（`AUTHORITY` / `IDENTITY_ORDER` / `SOURCE_LAYER` / `DOMAINS`），决策全文 `docs/真源与优先级_设计决策_2026-10-31.md`。三条硬规矩：① 任何"谁覆盖谁"**查表**，不许按调用顺序/目录远近/文件格式临时排；② **规则只补空缺，覆盖必须精确**（`mapping-rule` 不许改 `declared`；要改就写 `mapping-exact`，且只对点名的这一个）；③ **投影不投票**（工具自己的产物 `*.generated.rpy` 等不进任何统计）。层序：engine 0 > mapping-exact 1 > declared 2 > mapping-rule 3 > registry 4 > inferred 5 > unknown 6。守卫 `tests/test_authority_layers.py`（同时比对本文档 §4.3 的层序表）。
 
 ## B. 写入与落盘（最高危）
 - **B1** 落盘一律过 `generation_guard.write_generation`。`LABEL_COLLISION` 只在产物真落进 `<根>/game/` 时判。`HANDWRITTEN_TARGET`=目标存在且首行无生成标记→拒写，`force` 只越这条。让路判据=底稿==目标。三处调用方：`EditorSession.export` / `pipeline.compile.write_compiled` / `app.tables.apply_export`。
@@ -51,6 +52,8 @@
 - **D3** transform 的 `ATL`/`Params`/`Doc` 以脚本为权威（`update_keys=`）；人写 `Category`/`Notes` 不动。
 - **D4** 注册表图片 Path 两套基准：扫描行相对项目根，脚本 `image` 声明行相对 `game/`。
 - **D5/D6/D7** 缺资源→`# TODO` + 建议；校验分级（有表查不到→错误；没建表→警告宁少报）；编译路径不校验。
+- **D8** **"这张图是谁"的判定顺序**=`core.authority.IDENTITY_ORDER`：`mapping-exact`（images 表点名）→ `declared`（`.rpy` 里的字面量）→ `mapping-rule`（glob）→ `registry`（Tag 列）→ `inferred`（路径/stem）→ `unknown`。**glob 规则不许改项目声明**（2026-10-31 实测：一条 `game/**` 能把项目自定义图像名整片改掉）。`Identity.source` 的每个取值必须在 `core.authority.SOURCE_LAYER` 登记（不登记就红）；声明过的行走 `source='declared'`。
+- **D9** **代号/编号的统计只数真源**：`assets/sprite_codes._script_texts()` 复用 `parsing.discover.DERIVED_SUFFIXES`/`SKIP_DIR_PARTS`，`*.generated.rpy` / `*.blocked.rpy` / `*.bak.rpy` / `tl/` 不进证据。实测：副本让同一句 `show` 数两遍，`xing` 的 B 号服装 1 票→2 票，「证据太弱留空」静默变成「B」（两个近乎克隆项目给出不同代号表）。守卫 `test_sprite_codes`。
 
 ## E. 性能 / 缩略图
 - **E1** 图片路径基准唯一真源=`story.excel_export.resolve_thumb_source`。
@@ -6027,13 +6030,15 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   `导出映射初稿…`（存 `.json` 或 `.xlsx`，xlsx 带表头+下拉+说明页）/ `保存到项目根`
   （**先看 unified diff 再确认写**）/ `资源对照表`（路径/推断/tag/属性/依据/能否 show，
   可只看未识别）。打开项目自动加载项目根或 `game/` 下的映射。
+  **第三个入口是表格**：窗口第一个页签「逐条编辑」= 同一份映射的表，见 §75。
 - 发人样例：`examples/mapping/sr_general.mapping.json`（45 characters / 61 rules /
   40 精确覆盖，命中 91.8%，与"无映射推断"不一致 **0**），以及同名的
   `.xlsx`（同一份内容的 Excel 版；**45/61/40 往返一字不差**，可当填表模板看）；
   给别的项目开发者的格式说明：`docs/资源映射_给项目开发者.md`（含 Excel 填表规矩）。
-- 判据：`tests/test_asset_mapping.py`（40 条）、`tests/test_mapping_dialog.py`（32 条）、
+- 判据：`tests/test_asset_mapping.py`（40 条）、`tests/test_mapping_dialog.py`（33 条）、
   `tests/test_mapping_excel.py`（40 条：往返 / 人写的表 / 定位警告 / `.bak` /
-  被 Excel 占用说人话 / 优先级 / `draft_mapping`→Excel→判定结论不变）。
+  被 Excel 占用说人话 / 优先级 / `draft_mapping`→Excel→判定结论不变）、
+  `tests/test_mapping_edit.py` + `tests/test_mapping_editor_ui.py`（表格页，见 §75）。
 
 ### 72.3 选图判定与卡片提示：`app/picker.py::resolve_pick` + `ui_qt/asset_picker.py`
 
@@ -6074,6 +6079,198 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   apply→revert 逐字还原、落盘仍走既有 diff 门禁；`stage_preview` 有「尺寸变换」下拉 + 撤销。
 - 判据：`tests/test_stage_render_scale.py`（31 条，像素采样）、
   `test_stage_snapshot_scene_at.py`（14 条）、`test_stage_render_memory.py`（11 条）。
+
+#### 72.4.1 「改图片大小」是**三件事**（2026-10-31，用户亲纠）
+
+| 操作 | 语句 | 副作用 | 工具里的唯一实现 |
+|---|---|---|---|
+| 换景 | `scene bg x` | **清空该层所有 displayable**（立绘全没） | `app/stage.py::plan_scene_change` + 尺寸面板背景行的「换景」（见 72.4.1d；**只有人按下才写**） |
+| 改这一景的尺寸 | `show bg x at …` | 只替换**同 tag** | `app/stage.py::_bg_show_edit`（函数体里**不出现 `scene`**） |
+| 超清图 | 文件名 `xxx@2.png` | 引擎按 1/N 显示 | `app/stage_render.py::oversample_of / display_size`（**只认文件名，不自动改名**） |
+
+- **`scene` 清的是整个 master 层**（2026-10-31 修）：从前 `stage_snapshots` 只清
+  `actors`、`layers` 原样留着 → **产物里已经没了的 CG，预览/卡片还在画**。真机
+  副本 `sr_general` 61 个 `scene` 拍里 **40 个**是这种"看到的 ≠ 生成的"。现在
+  `state['layers'] / layer_at / layer_src` 一起清，并写一条「× 清空图层（N 个）」。
+  判据 `test_stage_snapshot_scene_at.py::TestSceneClearsTheWholeMasterLayer`（4 条，
+  含"同拍 scene 之后又 show 的还在"这条正面对照）。
+
+- **出处（provenance）**：`stage_snapshot` 的 state 加 `scene_src` / `layer_src`
+  （0 基拍号，-1 = 不知道；**0 合法，别用 `int(x or -1)`**），`StageFrame` 带出；
+  `plan_at_edit(source_index=)` 在本拍没写 `scene`/这条 `show` 时改**来源那一拍**；
+  `AtEdit.requested_index` / `affects` 说明"你在第 N 拍点的、影响第 a–b 拍"；
+  `AtEdit.advice` 说"本景后面还有几处单独改写、改源到第几拍失效"（见 72.4.1e）。
+  真机：1013 个有背景的拍里 972 个是继承的（旧行为 0 可写 → 修后 673 可写）。
+- **`mode='override'`**（"从这一拍起"）：只写 `show`，复杂子句拒绝；本拍自己就是
+  换景拍时改这一行的 `scene_at`（不新增 show）。
+- **超采样**：`@N` 后缀 → 显示尺寸 = 文件尺寸 / N；`@0` / `@x` 不认（不猜）。
+  尺寸提示行写两种形状：`800×600@2（引擎按 400×300 画）` / `800×600`。
+- **令牌没点到的 show/hide 条目**：渲染器 `_emit_leftover_stage` 会补在末尾，
+  `stage_snapshots` 从前直接丢（"产物两句 show、预览一个人"）；现在末尾按同一条
+  规矩补齐。`AtEdit.extra_token/token_field` 是写入口那一侧的自保（插入新 show
+  补 `show#N`，verb 级令牌不补）。
+- 判据：`tests/test_stage_at_source.py`（36 条，含"改完立绘还在"与"写 scene 就清空"
+  的正反对照、"快照显示的人数 == 渲染器吐出的 show 行数"）、
+  `test_stage_render_oversample.py`（8 条）。
+
+#### 72.4.1b 尺寸预设：人话 → 项目已有 transform（2026-10-31 傍晚）
+
+- `story/size_presets.py`：`PRESET_ORDER = as_is / cover / contain / half`。
+  `target_box(key, natural, screen)` 用**同一个** `atl.placement_box` 算目标框，
+  位置一律左上角 `(0,0)`（引擎默认摆法，不替人决定居中；要居中是 `xalign` 的事）。
+- `match_preset(key, natural, screen, index)`：把项目每条 transform 套在这张图 +
+  这个屏幕上算框，与目标框**逐像素**比（容差 1.5px）—— **只看效果，不看名字**。
+  ⚠ 语义先于名字：4K 图放 1080p 屏时「50%」与「铺满」的框完全相同，纯按名字会
+  把 `fit "cover"` 当 50%；`_preference` 先按语义（cover/contain 看 `fit`，
+  half/custom 看 `zoom`）再按名字。
+- **排除**：带动画/事件块的（`atl.is_static_transform`，顺调用链看一层）、
+  改透明度/旋转的、几何算不出的。一条都没有 → `None`，由下一层决定"生成"还是
+  "明说没有"（见 72.4.1c）。
+- `atl_body(key, zoom=)` 是生成 `sg_*` 的**唯一出处**（`fit "cover"` / `zoom 0.5`）；
+  「原样」没有体 —— 它是**去掉 at**，不是套空 transform。
+- `app/stage_render.size_rows(frame, …, beats=None)`：背景 + 各 CG/UI（≤3）各一行，
+  `note` 复用 `_size_note`（与预览提示行同一份措辞）+ 出处 `（第 N 拍设的）`；
+  `items` = 四条预设 + `pick`（项目已有 transform）；不可用项 `ok=False` + `why`；
+  `advice` = 本景"还有几处单独改写"（见 72.4.1e；不给 `beats` 就是 `None`）。
+  缺图/自动命名的项目走 `resolve_stage_asset(..., index=image_index(root))`。
+- `app/stage.plan_size_edit(beats, index, row, key=, at=)`：`as_is` →
+  `plan_at_edit(mode='clear')`（`scene_at=''` / 删 `@at`；本来没有 at 就拒绝）；
+  其余 → `mode='source'`（改**最初写下这一行的那一拍**）。背景若是 `show bg X`
+  换的（没有 `scene_at`）→ 明确说"请在高级区 Stage 改那条 show 的 at"。
+- 卡片：`ui_qt/size_panel.py::SizePanel`（4 槽，`WheelSafeComboBox` +
+  `NarrowWrapLabel`）只发 `size_requested`；窗口层 `apply_size_from_card`
+  走**与演出预览相同的** `_confirm_at_plan` / `_after_preview_beat_edit`。
+  写回前先 `apply_current_beat()`；改的是本拍 → `_show_index` 重载，否则只刷派生面板。
+- 判据：`test_size_presets.py`（27）、`test_stage_size_rows.py`（29）、
+  `test_size_panel.py`（17）、`test_size_generate.py`（5）。
+- `NarrowWrapLabel` 已搬到 `ui_qt/wrap_label.py`（`main_window` 仍导出同名）。
+
+#### 72.4.1c 生成 `sg_*`：三条护栏（2026-10-31 夜）
+
+用户拍板："选 1（允许生成 sg），但要加三个前提条件……一条都别省"。
+
+- **文件**：`game/sg_transforms.rpy`（`story/sg_transforms.py::FILE_NAME`）。头两行是
+  人话叮嘱，第三行是判据：`# sg-gen v<版本> sha256 <64 位十六进制>`（`MARKER_RE`）。
+  **sha256 是标记行之后那段正文的指纹**（UTF-8、LF 归一 —— 线尾改成 CRLF 不算手改）。
+- **① 手改就 abort**：`inspect()` → `SgFile.state` ∈ `missing / ok / foreign /
+  hand_edited / bad_version / unreadable`，只有前两种可写。`SgPlan.apply()` 写盘前
+  **再看一眼**磁盘（确认框隔着一次人机交互），状态变了或条目对不上 → 抛 `RuntimeError`，
+  不覆盖。版本列表 `MARKER_VERSIONS = (1,)`（认旧版本，不认识的版本也不动）。
+- **② 生成前查重**：`plan_define` 依次判 —— 同名同内容 → `reuse`；几何能匹配到项目里
+  已有 transform（`size_presets.match_preset`）→ `reuse`；文件里已经有这一条 → `noop`；
+  名字被别人的内容占了 → 退到 `sg_xxx_2`（**不改别人的定义**，`note` 说清）。
+  只有都不过才 `create` / `append`。`size_rows` 里那一层**只算不写**。
+- **命名**：`sg_fit_cover` / `sg_fit_contain` / `sg_zoom_050`（百分比三位补零，
+  `0.333` → `sg_zoom_0p333`）。名字**不带图名** —— 同一个"铺满"对所有图都成立。
+- **几何自证**：`transform_def(name, key)` 从**生成的文本再解析一次**（`parse_transforms`），
+  计划里算的框因此必然等于文件里写的东西（判据拿 `placement_box` 逐像素比对）。
+- **写回顺序**（`main_window.apply_size_from_card`）：① 两件事摊在**同一张**确认框
+  （脚本 diff + 文件 diff，`_confirm_at_plan(extra=)`）；② 先写文件（护栏过了才写），
+  再 `.apply()` 内存里的拍；③ `session.refresh_transform_index()` 刷缓存，否则卡片
+  还显示"项目里没有"。取消 / 被拒 → 文件和拍**一个字节都不动**。
+- **③ 引用存在性**：`sg_transforms.missing_references(root)`（`scan()` 一次读完全部
+  `.rpy`，同一次扫描里收 transform 定义）→ `pipeline.validate.validate_sg_transforms`
+  出 `E305`（L3 / **error**，`where=文件:行号`），进项目体检 / `cli.py validate`；
+  打开项目时另由 `ui_qt.window_graph_ops.report_missing_sg_transforms`（挂在
+  `QTimer.singleShot(0)` 上）在控制台点名 —— 干净项目一个字都不说。
+  **只查 `sg_` 命名空间**：人自己的 transform 扫不全（动态定义 / include / 别的目录），
+  在那里报就是噪音。台词里 `"meet me at sg_home"` 不算引用（只看 `scene/show/add/
+  camera` 语句的 `at` 子句，`with/behind/onlayer/zorder/as` 之后截断）。
+- 真机：`sr_general` 与 `renpytest/sr_general` 两个项目 **0 引用 / 0 漏报**，
+  单遍扫描 246 / 273 ms（只跑在体检上）。
+
+#### 72.4.1d 显式「换景」：`scene` 只在人按下时写（2026-10-31）
+
+- **入口**：卡片「尺寸」一格**背景行**多一个「换景」（`ui_qt/size_panel.py` →
+  信号 `scene_requested`；主窗口 `main_window.apply_scene_from_card`）。
+  面板只看"当前是哪张图 + 下拉里选中的预设"，**不数人、不弹框**。
+  挑图走卡片「背景」那一格**同一个**资产选择器（`_pick_asset_for('Scene', …)`），
+  保证"从这里能选的、从那里也选得到"。
+- **计划**：`app/stage.py::plan_scene_change(beats, index, image, at=…)` → `SceneEdit`
+  （`AtEdit` 的子类）。写**请求的那一拍**（换景是**事件**，不是持续状态；
+  尺寸才是持续状态，那一条写"最初写下它的那一拍"）。
+- **确认框写清代价**（用户原话）：`SceneEdit.diff_text()` 先写"这一拍本来有没有
+  scene / 换到哪张图 / **会清掉台上 N 个立绘（名字）** / 还会清掉几个 CG·UI 图层"，
+  再写 diff。`cleared_sprites` / `cleared_layers` 来自 `stage_before(beats, index)`
+  —— **这一拍开始前**的舞台状态（与预览同一份推导，不是另数一遍）。
+  算不出来（快照炸了）→ **拒绝**，不当"台上没人"。
+- **顺序令牌**（`_scene_token_insert`）：本来没有 scene 的拍要把 `scene` 令牌
+  插在**第一条舞台指令之前**。不插的话 `op_tokens_full()` 把缺的 verb 补在
+  **末尾** → `show → scene` = 人刚上台又被清掉（与换景意图相反）。
+  没有顺序信息（两张列都空）→ 什么都不补（渲染器本来就按 scene→show→hide 出）。
+- **同一拍的背景 `show`**：简单子句（`bg x` / `bg x@at`）**去掉**（它排在 scene
+  之后会把新背景盖回旧那张）；复杂子句（`behind/with/expression`）→ **拒绝**，
+  让人先去高级区改。别的 tag（cg/ui）不动（它们排在 scene 之后，照常存活）。
+- **拒绝清单**：图名空 / 带 `@` / 项目里找不到这张图（`script_image` +
+  `image_index` 都认不出 → 写进脚本会 NameError）/ transform 项目里没有 /
+  scene 已经是这一景 / 台上没人且背景没变（"什么都不会改"）。
+- **另一条会写 `scene` 的路**：卡片「背景」那一格（从"没有背景"变成"有背景"）。
+  它**不弹框**（填背景是最常做的编辑），但保存成功后由
+  `ui_qt.window_card.note_scene_added` **立刻点名**被带走的立绘/图层
+  （控制台 `[换景]` + 状态栏那句"…被清掉（可撤销）"）；台上没人时一个字不说。
+  要**事前**确认，用上面的「换景」入口。
+- **入口的边界**：尺寸面板在"这一拍看不到背景、也没有 CG/UI 图层"时**整格收起**
+  （`set_stage_size([])`），所以**空台新建一景**没有「换景」按钮 —— 那种情形用
+  卡片「背景」那一格（上面那条事后点名）。「换景」按钮只负责"已经有景，换一张"。
+- 判据：`tests/test_scene_change.py`（39 条：计划 / 清台计数 / 令牌位置 /
+  同拍 show 去除 / 同一张背景只清台 / 确认框正文 / 面板只给背景行 /
+  窗口端到端 / 卡片那一格不静默）。
+
+#### 72.4.1e 本景"还有几处单独改写"（2026-10-31 夜，只读）
+
+- **它回答什么**："改最初那一行（源）之后，本景后面还有谁又 `show` 了一次这个
+  对象、把这次改动盖回去"。尺寸面板改的是**源**那一行，而 `show` 会**重建**
+  displayable ⇒ 源里的 `at` 从那一拍起失效。用户改完看的是当时那一拍，于是
+  "改好了"和"只改到第 12 拍"长得一样。
+- **纯函数**：`story/override_advice.py`
+  - `override_map(beats, start)` → `{key: (Site…)}`：背景进 `'scene'` 桶
+    （三种 tag 同一个桶），CG/UI 按自己的 tag 分桶。边界只有一条：**遇到自己
+    写了 `scene` 的拍就停**。只数 `show`（`hide` 既不变成一处、也不结束扫描）。
+  - `override_advice(beats, source, *, kind, tag, prefetched)` → `OverrideAdvice`
+    （`level` / `sites` / `count` / `beats` / `ends_at` / `same_at` /
+    `conflicts(new_at)` / `agreeing(new_at)` / `text(new_at, label)` / `short(label)`）。
+  - **档位**（`docs/超清CG与BG_零侵入导入_2026-10-31.md` §5.5）：0 处 `none`
+    （不显示）/ 1–2 处 `hint` / ≥3 处（`NOTICE_AT`）`notice`。**算不出来** →
+    `hint` + `unknown=True` + `reason`（降档，但绝不当 0 处）。`source < 0`
+    （跨章继承）→ `none` + `reason`（这一行本来就改不了，不冒充 0 处）。
+  - `prefetched` = 面板一帧 4 行共用的一次扫描（起点取各行 `source` 的最小值，
+    逐行再按自己的 `source` 切片）。
+- **口径只有一份**：生效的 `at` 走 `story/beat_stage_parse.py::item_at(item, beat)`
+  （item 的 `at` > 拍级 `at` > 拍级 `transform`；`stage_snapshot._apply_show_verb`
+  也改调它）；"是不是同一个图层"走 `core/vocabulary.py::same_layer_tag`
+  （`app.stage._same_layer_tag` 转调它）。
+- **接线**：`app/stage_render.size_rows(..., beats=None)` 每行多一个 `advice`
+  （不给 `beats` → `advice=None`，**不显示**，不是"0 处"）；
+  `plan_at_edit` 把同一结论放进 `AtEdit.advice`，`AtEdit.diff_text()` 在 **diff
+  之前**说这句话（坐标写"第 12、19 拍"，不写"若干处"）。
+- **面板**：`ui_qt/size_panel.py` 每个槽多一个 `advice` 标签 —— 一行短的 + 完整
+  句子在 tooltip；`hint` 用 `role="note"`、`notice` 用 `role="warn"`（琥珀），
+  `none` / `None` 隐藏。**不拦任何操作**。
+- **边界**：合并回源（删那几处 `show … at …`）**没做** —— 那是改用户 `.rpy`
+  的 L4 删行，按 §5.5 要逐处确认、逐处可撤；本功能只报数，连"点一下合并"
+  的按钮都不给。
+- 判据：`tests/test_override_advice.py`（37 条：扫描边界 / 三种背景写法同桶 /
+  图层分桶 / `hide` 口径 / 三档 / 降档 / 措辞数字 == 处数 / `new_at` 只点会盖回的 /
+  `short()` 单行 / 面板与确认框接线 / **与舞台快照逐拍一致**）+
+  `tests/test_size_panel.py` 里 8 条（显隐 / 颜色 / tooltip / 不顶宽 / 窗口级确认框）。
+
+### 72.4.2 优先级三件事：显式层 / 覆盖留痕 / 三态（2026-10-31）
+
+- **词汇表显式层（P0-2）**：`assets/vocabulary.py::VOCAB_LAYERS`（层名 → `AUTHORITY`
+  层）+ `Vocabulary.merged([(层名, 词条), …])`：**按层号合并，顺序无关**；
+  `plus()` 只是兼容（后来者优先，新代码别用）。同一层里的段次序由
+  `_SEGMENT_ORDER` 固定（文件内部的事，不是优先级）。判据
+  `tests/test_vocabulary_layers.py`（三层全排列结果相同 / 未知层名 `ValueError`）。
+- **覆盖留痕（P0-3）**：`core/authority.py::Override`（append-only，`sentence()`
+  是唯一措辞）+ `describe()`。命名域在 `Vocabulary.merged()` 里记
+  （**值不同**才记），`Vocabulary.explain()` 说出来，`labeled_choices.labeled()`
+  把它填进下拉 tooltip；身份域在 `Identity.overrides`，`resolve_image` 在
+  "精确覆盖赢 + 这一行声明过"时留痕，选择器 tooltip / 详情面板显示「覆盖了：…」。
+- **三态判定**：`story/write_gate.py::classify(disk_bytes, base_sha1, draft_text,
+  base_text=None)` → `ADOPT` / `REBASE` / `CONFLICT`（`Verdict.ok` = 前两态）。
+  会话侧入口 `EditorSession.source_state()`；`source_unchanged()` **只比内容**
+  （touch 不算冲突）。`base_text` 给了才有行级合并候选（`merge_text`），
+  有候选也仍是 `CONFLICT`。判据 `tests/test_write_gate.py`（17 条）。
 
 ### 72.5 自定义过场：`transition_expr` → `transition_catalog` → `transition_fx`
 
@@ -6269,3 +6466,468 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   才认，否则退回 `last_chapter_rel`（相对项目根那份）；两份都不成立 → `''`
   （只开项目、不载章节）。
 - 判据：`tests/test_session_memory.py::test_a_chapter_from_another_project_is_never_loaded`。
+
+## §75 第 8 条反馈："JSON 能不能显式化" —— 映射的**表格页**（2026-10-30 深夜）
+
+用户原话：
+
+> json的自定义能不能用工具显式化……？本质上它就是键值对嘛！也就是类似于之前
+> 探测未定义角色名称的样子，弄一个显化的UI，然后点击保存的话再存为json……？
+> 因为实际上使用json定义对非程序员门槛有点高。
+
+### 75.1 定位：JSON 是**产出格式**，不是人的输入方式
+
+- 新增 `ui_qt/mapping_editor.py`（表，只摆和收）+ `assets/mapping_edit.py`
+  （纯逻辑：读成行 / 改一格 / 增删移 / 校验 / `to_data`）。判定仍是
+  `assets/asset_identity.resolve_image` 的事，这里不重写第二套。
+- 页签顺序固定：**逐条编辑 / 映射文件 / 资源对照表**，下标用
+  `mapping_dialog.TAB_EDIT / TAB_FILE / TAB_TABLE`（**不许写魔法数字**）。
+- 表**只改内存里的工作副本**；写盘仍然只有「保存到项目根」这一条路
+  （`prepare_save` 出 diff → `confirm_save` 落盘 + `.bak`）。表**不 import**
+  `save_mapping`，它没有写文件的能力。
+
+### 75.2 四段 = 四张表（`mapping_edit.SPECS`）
+
+| 段 | 形状 | 第一列 | 其余列 | 顺序有意义 |
+|---|---|---|---|---|
+| `characters` | `{tag: {...}}` | 角色 tag | 显示名 / 别名（数组）/ 头像 | — |
+| `images` | `{id 或相对路径: {...}}` | 这张图 | 是什么（下拉）/ 角色 / 属性 | — |
+| `rules` | `[{...}]` | 第几条 | 路径通配 / 是什么 / 角色 / 属性 | **是**（先中先得，能上移下移） |
+| `attributes` | `{维度: {label}}` | 维度 | 显示名 | — |
+
+- `tag` 是 `char` 的旧写法、`attrs` 是 `attr` 的旧写法：改这一格**改原来那个键**，
+  不另加一个（否则一条里两个意思，谁赢看读取顺序）。
+- `aliases` 用 `|` / 逗号 / 顿号 / 分号分隔，存回时是**数组**。
+
+### 75.3 三条硬规矩（都为了"别改坏人的文件"）
+
+1. **只动它认识的键**：工作副本是原文件的深拷贝，不认识的顶层键 / 条目字段
+   原样保留；没改过的条目 `to_data()` 逐字节等价 ⇒ diff 里只会有人真改的行。
+2. **空行不落盘**：默认键（`新角色` / `新图片` / `新分组`）+ 一个字段都没有
+   ⇒ 丢掉，`blank_rows()` 报给界面。**人改过键的空行不丢**（那是他的决定）。
+   人把某段条目删光 ⇒ 该段的键整个去掉；**原本就空**的段（`"images": {}`）保留。
+3. **不偷偷补 schema**：`to_data()` 只在"确有内容但没有 schema"时补
+   `storygraph.mapping/1`；空表不补。
+
+### 75.4 改一格**不许重建表**
+
+`itemChanged` 里重建会在人打字打到一半时把焦点抢走。规则：
+**改一格 → 只改模型 + 重算问题条**；只有加 / 删 / 改键 / 上下移才重建。
+判据 `test_typing_does_not_rebuild_the_table`（同一个 `QTableWidgetItem` 还在）。
+
+### 75.5 界面细节（踩过的）
+
+- **列宽定死 + 末尾一条空列吃满剩余宽度**：伸缩有内容的列 = 窗口一宽就有一列
+  被拉成六七百像素的空格子；规则段伸缩第一列更糟（`#` 被拉成 380px）。
+- **中文 UI 文案里不许出现 markdown**：QLabel 是纯文本，`**粗体**` 和 `` `代码` ``
+  会**原样显示**（第一次截图就看见了）。
+- 「是什么」列是下拉，值不在 `KINDS` 里时**原样显示**（人手改的 JSON 不许被
+  悄悄改成第一项）；`角色` 列是可输入 + 有建议（也允许 `<tag>` 占位符）。
+- 「资源对照表」多了 **「补进映射…」**：按选中的行填 `kind` / `char` / `attr`，
+  键 = 资产 ID（**唯一**时）否则相对路径；同一张图点两次是**并进**不是复制。
+- 生效源是 Excel ⇒ 表头一条横幅（"你改的是 JSON，保存只写快照"）；
+  文件读不出来 ⇒ **整页禁用**（表是空的，一存就把文件盖成空白）。
+  两条都由 `_load_editor` 一处决定。
+
+### 75.6 判据
+
+- `tests/test_mapping_edit.py`（43 条）：行/列、改一格、旧写法、重命名、移动、
+  空壳、未知键、schema、问题分级、引用计数、写出去能被 `asset_mapping` 读回。
+- `tests/test_mapping_editor_ui.py`（27 条）：页签顺序、四段切换、打字改数据、
+  不重建表、JSON 预览跟随、保存写的是表、未确认不写、对照表补进来、
+  Excel 横幅、坏文件禁用、重读丢弃改动并说出来、表底那个保存按钮走同一段。
+
+## §76 选择器左栏的第二种口径：**按文件夹**（2026-10-30 深夜）
+
+用户原话：
+
+> 文件筛选与分类方面……要提供两种分类方式，一种就是按文件夹分类排序，
+> 另一种就是原来的按图片，背景，UI 等那种分类排序……这两种方式要能够随时切换
+
+### 76.1 两套口径并列，谁也不是默认偏好
+
+| 口径 | 回答 | 唯一实现 | 界面 |
+|---|---|---|---|
+| 按分类 | "这是什么"（立绘 / 背景 / UI…） | `app.beats.categorize_assets`（身份层） | 左栏组名照旧，**一个字没改** |
+| 按文件夹 | "它在哪个文件夹" | `app.picker.folder_groups` | 左栏缩进树 + 每层张数 |
+
+开关是 `ui_qt.asset_picker.AssetPickerDialog._group_by_box`（`GROUP_MODES =
+('按分类', '按文件夹')`）。**不写进 QSettings**：这一眼怎么找不是长期偏好，
+记住它 = 下次打开莫名其妙是一屏目录。判据
+`test_the_choice_is_not_written_into_the_prefs`。
+
+### 76.2 `folder_of_row(row, project_root)` 的三种返回
+
+| 返回 | 意思 | 落进哪一组 |
+|---|---|---|
+| `'images/ling'` | 正常文件夹（相对 `game/`、posix 分隔符） | 同名组 |
+| `''` | 文件**直接躺在 `game/` 下** | `（根目录）` |
+| `None` | 这一行**没写文件路径**（角色 / 变换 / ATL 块） | `（没有路径）` |
+
+归一规则（**全部字符串操作，不 stat 磁盘**）：
+
+- `game/images/x.png` 与 `images/x.png` → 同一个文件夹（后者按 Ren'Py 约定
+  相对 `game/`，见 `asset_identity.normalize_relpath` 的 docstring）；
+- `sr_general/game/...`（带项目目录名，真项目 74 行）→ 由 `normalize_relpath` 去掉；
+- 反斜杠 / 绝对路径（在项目根下）都认；路径列名认
+  `FOLDER_PATH_KEYS = ('Path', 'path', 'File', 'file', 'Filename', 'filename')`。
+
+### 76.3 `folder_groups(registry, project_root, *, types, limit, include_subfolders)`
+
+- 返回 `{文件夹: [(asset_type, asset_id), …]}`（累加口径：**每一层都含它下面
+  所有子文件夹的图**）。`include_subfolders=False` 才是"只看这一层"。
+- 排序：`（根目录）` 最前 → 逐段小写比名字（父在子前）→ `（没有路径）` 垫底。
+- 大小写不拆行（Windows 上 `GUI/` 与 `gui/` 同一个目录）。
+- `limit` 与 `groups()` 同义（防极端项目）。
+- 面板那套两级树（`assets.asset_tree.group_assets(group_by='folder')`）**不改**：
+  它是"文件夹 → Category"的浏览视图，key 不归一；两边的口径别混着改。
+
+### 76.4 切口径时"别把人甩走"（`_match_group`）
+
+老组那批图 → 新口径里**交集最大**的组；交集一样大取**更具体**的那个
+（`pomodorro/images` 优于 `pomodorro`）。一条都对不上 ⇒ 回「全部」，
+不硬凑空组。
+
+### 76.5 左栏文字（`_folder_labels`）
+
+- 缩进画层级 + `（张数）`；
+- 叶子名撞车时补**能区分的最短一段父目录**：`overlay（3） ← dutui` /
+  `overlay（2） ← phone`（真项目 `gui/dutui/overlay` 与 `gui/phone/overlay` 同名）；
+  不撞名不加尾巴；完整路径在 tooltip。
+- 分类口径不给组名加数字（`立绘：凌跃捷（ling）` 原样，别动既有界面）。
+
+### 76.6 判据
+
+- `tests/test_picker_folders.py`（23 条）：三种返回、四种 Path 写法归一、
+  累加口径 / 只看这一层、排序、大小写、`types` / `limit`、空注册表、不 stat 磁盘、
+  两套口径同时可用。
+- `tests/test_asset_picker_folders_ui.py`（18 条）：默认按分类且组名不变、不写偏好、
+  目录树与张数、父目录看得见子目录、`（没有路径）` 可达、空桶不占行、
+  同名叶子能分清、切过去/切回来停在同一批图、用途过滤在两种口径下都生效、选音乐时也有文件夹（没有「用途」那一档）。
+- 既有选择器测试（`test_asset_picker_resolve.py` / `test_asset_picker_ui.py` /
+  `test_picker_and_refresh.py`）不改一行仍全绿。
+
+## §77 映射表格页的"人话"口径：显示值 / 真值 / 文案唯一真源（2026-10-30 深夜）
+
+用户原话：
+
+> 资源映射这张表格不能够太学术化啊！tag 一类的……谁知道你是怎么叫的呢……？？？
+> 我需要一个编剧跟文案都能看明白的表！而不是什么 tag 什么值一类的……
+
+### 77.1 屏幕上说什么（旧名一律退役）
+
+| 位置 | 屏幕上的字 |
+|---|---|
+| 页签 | `逐条编辑` / `原始文件` / `工具怎么认的`（唯一真源：`mapping_dialog.TAB_TITLES`） |
+| 左栏四段 | `角色` / `单张图片` / `一类图片` / `表情怎么叫` |
+| 第一列 | 角色段 `剧本里的写法`、图片段 `是哪张图`、规则段 `顺序`、属性段 `分组（工具内部）` |
+| 其余列 | `名字` / `别的写法` / `头像图` · `它是哪种图` / `属于谁` / `表情／状态` · `文件在哪儿` · `界面上叫它` |
+| 认图结果页 | `文件` / `工具认为它是` / `角色` / `表情` / `凭什么这么判` / `能直接写进剧本吗` |
+
+**不许再出现在屏幕上**的词（`tests/test_mapping_edit.py::test_no_jargon_on_screen` 钉着）：
+`tag`、`ID`、`glob`、`kind`、`attr`、`schema`、`键`、`值`、`通配`、`维度`、
+`资产`、`精确覆盖`。机器那边叫什么写在 `Field.tech` / `Section.tech`，
+**只进 tooltip 第二行**（`技术写法（给开发者）：…`）。
+`<tag>` / `<stem>` 这类**要照抄的写法**不算行话（扫之前先摘掉）。
+
+### 77.2 一格两个值：显示值 vs 真值
+
+- `QTableWidgetItem.text()` = 人话（`背景`、`立绘`、`角色预览图`）；
+- `Qt.UserRole` = 写回 JSON 的真值（`bg`、`sprite`、`preview`）。
+
+`MappingEditor.cell_text()` 读人话、`cell_value()` 读真值；
+`set_cell()` 传的是**真值**（和文件一个口径），显示由界面翻
+（`KIND_TEXT` / `KIND_BY_TEXT` 由 `KIND_CHOICES` 派生）。
+
+⚠ `item.setData(UserRole, …)` **也会发 `itemChanged`** —— 程序同步格子
+（`set_cell` / `_revert`）必须整段压在 `_filling` 底下，否则 `_on_item_changed`
+会拿旧文字把模型写回去（实测：返回值成功、数据没变）。
+
+### 77.3 文案住在 `assets/mapping_edit.SPECS`
+
+`Section.label / hint / key_label / empty / tech`、
+`Field.label / hint / tech`、`KIND_CHOICES = (短名, 真值, 悬停长解释)`。
+界面代码里**不许**再硬写表头（加一段只改 SPECS + `SECTIONS`）。
+
+- `empty`：这一段 0 条时显示的"怎么开始"，摆在表**上方**（真机项目常常一份
+  映射都没有，空表格什么都不说 = 门槛）；
+- 表头 / 左栏 / 每一格都有悬停：一句人话 + 一行技术写法；
+- 问题条（`MappingEdit.problems()`）也是人话：「没选『它是哪种图』—— 工具会按
+  文件夹和文件名自己猜。」
+
+### 77.4 判据
+
+- `test_no_jargon_on_screen` / `test_every_section_explains_how_to_start_when_empty`
+  （`tests/test_mapping_edit.py`）
+- `test_no_jargon_in_the_tab_names` / `test_the_page_says_what_it_is_for` /
+  `test_the_headers_explain_themselves` / `test_an_empty_section_tells_you_how_to_start`
+  （`tests/test_mapping_editor_ui.py`）
+- `test_switching_sections_changes_the_columns`：同一格 `cell_text == '立绘'` 且
+  `cell_value == 'sprite'` —— 两个都得对，才算既好看又没写错文件。
+
+### 77.5 从卡片警告一步落到那一行（闭环）
+
+- `sprite_grid._open_mapping()` 把 `item['image']`（`ling happy`）交给注入的回调；
+  回调收不收参数由 `_accepts_one_argument(fn)` 按签名判 —— 无参回调照旧可用，
+  **不许用 `try: fn(spec) except TypeError: fn()`**（可能执行两遍）。
+- `main_window.open_mapping_from_card(win, spec='')` → `open_mapping_dialog(...,
+  focus_image=spec)` → `MappingDialog(..., focus_image=...)`。
+- `MappingDialog.focus_image(spec)` 的匹配顺序：**资产 ID → 相对路径 → tag+属性**；
+  表里没有、资源表里有 ⇒ 按 `_mapping_row_for()` 先补一条并选中；
+  两边都没有 ⇒ 落到「单张图片」+ 一句人话（不静默、不瞎猜）。
+- 选中一行 ≠ 当前行：`_rebuild(select=[…])` 里补 `setCurrentCell(last, 1)`，
+  否则 `currentRow()` 是 -1，键盘和焦点都不在那儿。
+- 判据：`TestFocusFromTheCard` / `TestTheCardButtonCarriesTheImage`
+  （`tests/test_mapping_editor_ui.py`）。
+
+## §78 立绘代号：服装字母 + 表情编号（2026-10-31 凌晨）
+
+用户原话：
+
+> 我总觉得他们其实不是这个意思……你看看真实项目之中的注释：#B7 这些注释，
+> B 对应的是服装，而 7 对应的是这个角色的第 7 号表情，那请问我该如何通过你这个
+> 映射表把 lan swim_suit angry 映射为 lan B 7 呢……？不太方便吧？？？
+
+### 78.1 唯一真源
+
+| 问题 | 真源 | 模块 |
+|---|---|---|
+| 第 7 号表情是什么 | 角色文件夹里的 `对应.txt`（有几份读几份） | `sprite_codes.parse_expression_line` |
+| B 是哪身衣服 | 剧本注释 `# 表情B7` + 紧跟的那条 `show` | `sprite_codes.scan_script_text` |
+| 哪些属性是表情 / 服装 | `layeredimage <角色>` 的 `group` 归类 | `sprite_codes.parse_layeredimage` |
+| 两段怎么落盘 | `outfit_codes` / `expression_codes`（顶层数组） | `mapping_edit.SPECS` |
+| 换算 | 查表（表错 → 换算错，不回退猜测） | `sprite_codes.translate` |
+
+### 78.2 剧本注释的读法（三条规矩）
+
+1. **一组一个属性**：`show ye hi` 只替换表情组，服装保持上一条
+   （`# 表情B7` 说的就是"上一身衣服 + `hi`"）；`hide` 才清空。
+2. **注释取最后一个代号**：`# 表情B6换到表情B7` → B7。
+3. **跨角色声明过的属性不算服装标记**：`show ye uh` 里的 `uh` 是 lan 的表情
+   （手误），不是 ye 的服装。只有"谁都没声明过"的（`aa`）才当服装标记。
+
+### 78.3 `对应.txt` 的三种真实写法（都认）
+
+```
+7 不在意-indifferent          # 中文在前（lan / ye）
+2 close_happy-闭眼微笑        # 属性在前（ling）
+表情1-哈哈 — haha             # 带「表情」前缀 + 破折号（xing）
+```
+
+判据：按破折号切开，**纯 ASCII 标识符**那半是属性，另一半是中文名。
+两份表的编号不一致时**不裁决**：用"和剧本注释对得更多"的那份，并说出来。
+
+### 78.4 自动建表的边界（不许做的事）
+
+- 只出现过一次的字母 → **留空**并说"证据太弱"（真实项目有 `show lan p happy`）；
+- 剧本里没出现过的服装 → 出一行**空代号**，说明"照美术需求表补"；
+- 同一个字母指向两个属性 → 按票数留一个，另一个留空并说一句；
+- 编号表里没有、注释里出现 ≥2 次的号 → 补一行并提醒（可能是表漏了）；
+- 已有的行**一条都不改**（自动填只填空表；点按钮也只补缺的）。
+
+### 78.5 Excel / JSON / 界面
+
+- Excel：两张表 `服装代号` / `表情编号`（`SHEET_SPECS` 认中英文别名），
+  空白模板 `blank_template()` 里六个键都在 → 「存一份空模板…」导出的 .xlsx
+  六张表都有表头；
+- 界面：「服装代号 / 表情编号」两段上方有换算框（两种写法都认，缺什么说什么），
+  旁边「按项目自动填」；
+- 打开映射窗时若两段都空，**自动建表**并在提示条报数（真机 0.2 s / 103 行）。
+
+### 78.6 判据
+
+- `tests/test_sprite_codes.py`（41 条）：三种编号写法 / `attribute x default:` /
+  一组一个属性 / 跨角色手误 / 两份表对不上 / 证据弱就留空 / 预览变体不算角色 /
+  两个方向的换算 / 缺角色缺字母缺编号时都要说人话。
+- `tests/test_mapping_editor_ui.py`：`TestCodesPage` / `TestAutoBuildTable` /
+  `TestTemplateExport`（12 条）。
+- `tests/test_mapping_excel.py`：两张新表的往返（`GOOD` 里带上了这两段）。
+
+### 78.7 写出去的表头是中文
+
+`mapping_excel.HEADERS` 是写表表头的唯一真源（`路径 / 类型 / 角色 / 属性 /
+能否 show / 显示名 / 代号 / 编号 / 剧本里怎么写 / 说明`）；读的一侧 `FIELDS`
+的别名两套都认，所以人做的英文表头和工具写的英文/中文表头都能读回来。
+判据：`test_表头写人话_冻结_下拉`（旧的英文表头断言已随之更新）。
+
+> **第四种写法（2026-10-31 补）**：`lan` 的 `中英对应.txt` 每行末尾还带一张图的
+> 路径（`1 闭眼笑-close_happy images\characters\lan\close_happy.png`）。第一版
+> 没认出来 → lan 的两份编号表只剩一份，"两份对不上"这件真事就**看不到了**，
+> 于是 `# 表情A9`（脚本说 `angry`）会被算成 `stare`。现在行尾的图片路径先摘掉，
+> 再判哪半是属性；真机结果：lan 用 `中英对应.txt`（对上 23 处，`对应.txt` 7 处）。
+
+## §79 词汇表：引擎写法 ⇄ 人话（2026-10-31 凌晨）
+
+### 79.1 唯一真源
+
+`storygraph/assets/vocabulary.py`
+
+| 东西 | 在哪 |
+|---|---|
+| 有哪几类 | `KIND_SPECS`（位置 / 音乐 / 音效 / 语音 / 背景 / 角色 / 过场 / 服装 / 表情） |
+| 一条长什么样 | `Term(kind, id, label, code, char, note)`，`id` 是**写进剧本的真值** |
+| 从映射拼表 | `from_mapping(data)`（`vocabulary` 段 + 服装/表情两段投影） |
+| 两个方向 | `label()`（写法→人话）/ `ident()`（人话→写法） |
+| 搜 | `search()`（中文 / 编号 / 原名都命中） |
+| 唯一匹配 | `_unique()`：归一后命中 ≥2 条就**不猜** |
+| 学编号 | `learn()`：`# bgm18` + 下一条 `play music`（背景 / 音效同） |
+
+### 79.2 三条规矩
+
+1. `id` 永远是真值（屏幕上换名字不改剧本）；
+2. 查不到**原样显示**（词汇表是补充，不是白名单）；
+3. 模糊匹配只在**唯一**命中时认。
+
+### 79.3 存储与界面
+
+- JSON：顶层 `vocabulary`（数组）；Excel：`中文叫法` 表（`是什么/原名/叫什么/
+  编号/角色/备注`，`是什么` 写中文也认）；
+- 界面：`mapping_edit.SPECS['vocabulary']`，`是什么` 是**自带选项的下拉**
+  （`Field.choices`，这轮新加的通用能力）；
+- 卡片：`sprite_grid` 用 `provider.vocabulary`（窗口挂在 `_for_tag` 上，
+  与 `engine_facts` / `layer_model` 同一条通道）；位置 chip = `transform`，
+  服装/表情 chip = `costume`/`expression`（按 tag 查，带角色作用域）；
+- chip 文字最多 10 字 + `…`，全文在 tooltip（右栏 340px 硬预算）。
+
+### 79.4 还没接的
+
+（2026-10-31 第二轮已全部接上，见 §80。此条留作历史。）
+
+---
+
+## §80 显示值 ≠ 真值：所有下拉 / 列表的唯一一层（2026-10-31）
+
+### 80.1 一个原语、一条规矩
+
+`storygraph/ui_qt/labeled_choices.py`
+
+    QComboBox.addItem(显示文本, 真值)      # 真值进 UserRole
+
+> **一个下拉/列表的"真值"永远优先取 `UserRole` 里的数据；没有数据才用显示的文本。**
+
+| 函数 | 干什么 |
+|---|---|
+| `Choice(value, display, tip)` | 一个候选（`text` = 显示，`value` = 真值） |
+| `as_choices(items)` | 归一（见 80.2） |
+| `fill_combo(combo, items, current, blank=, display=)` | 重填下拉，保留手写值 |
+| `combo_value(combo)` | 读**真值**（可编辑下拉的关键，见 80.3） |
+| `select_value(combo, value)` | 按真值选中（屏幕显示 display；不在候选里就挂"当前值"那一行） |
+| `set_display(combo, fn)` / `show_current(combo, value)` | 挂在控件上的"这串字该叫什么" + **复合值**那一行 |
+| `say(vocab, kind, ident)` | 查词汇表（`kind` 可传一串，按顺序问） |
+| `labeled(items, vocab, kind)` | 给一批候选补显示名 |
+| `pairs(values, {值: 显示})` | 值序列 + 名字表 → `[Choice]` |
+| `legacy_pairs(items)` | **老形状 `(值, 说明)` → `Choice(值, '', 说明)`**（全库唯一一处） |
+| `session_vocabulary(session)` | 从会话取词汇表（拿不到 → 空表） |
+
+**复合值**（`[音乐] night fadein 1.0`）：`Vocabulary.label_in_text()` 只翻壳里
+那个名字（`[音乐] 18 夜 fadein 1.0`），壳与参数原样；专门用于显示，写回用原串。
+
+### 80.2 形状（**一个形状一种意思**）
+
+    'bgm/a.ogg'                      → 显示 = 真值（老调用方一字不变）
+    ('bgm/a.ogg', '18 嗯？')          → (值, 显示)
+    ('bgm/a.ogg', '18 嗯？', '说明')  → (值, 显示, 提示→tooltip)
+    Choice(值, 显示, 提示)            → 显式
+
+`set_asset_choices(field, choices)` 的老契约 `[(值, 说明)]` **照旧**，
+它在自己那一处调 `legacy_pairs()` 换算 —— 所以 `labeled_choices` 里
+二元组只有"值 + 显示"一种解释。
+
+### 80.3 `combo_value` 的判定顺序（别改）
+
+1. 当前项有 `UserRole` 字符串 **且输入框里还是它那句显示文本** → 就是它；
+2. 输入框里的字恰好等于某一项的显示文本**且唯一** → 认那一项；
+3. 都没有 → 输入框里那串（手写的自由值必须能过）。
+
+⚠ 第 1 步**必须同时比文本**：可编辑下拉在改字之后 `currentIndex` 仍可能
+指着上一项（`setEditText` 实测如此），只看 index 会把用户刚打的
+`bgm/别的.ogg` 读成旧值 —— 屏幕上是他的字，改错的是剧本。
+
+### 80.4 谁在用（四处）
+
+| 面 | 入口 | 词汇表 kind |
+|---|---|---|
+| 背景 / 音乐 / 语音 / 音效那几格 | `window_assets._refresh_asset_choices` → `labeled(legacy_pairs(…))` | `VOCAB_KIND`（**image → bg**，其余同名） |
+| 说话人下拉 + 参与角色列表 | `window_card._show_index` → `pairs(chars, labels)`；`_fill_speaker` 读 `UserRole` | `character` |
+| 参数格（`with` 的「转场」等） | `window_card._sync_spec_args` → `labeled(…, arg_kind_of(col))` | **`choices_from` 就是 kind**；`transform` → `('transform','cue')` |
+| 立绘 chip 的右键候选 / 参数格「⋯」 | `choose_from(..., [Choice])`（筛选中英文两栏都命中） | `transform` / `cue` |
+
+`session.vocabulary()` 是**唯一访问器**：映射 + `rules.json` 的
+`calls[].label`（映射优先）。谁也别再自己 `mapping_cached()` ——
+那个函数返回 `(data, warnings, path)` **元组**，当对象用不会抛，
+只会永远拿到空表（§80.5）。
+
+⚠ 转场那一格的**值是整个调用表达式**：`spec_args.positional_tokens` 括号内
+不切（`with Fade(0.2, 0.0, 0.2)` 是一个位置参数，不是三个）。没有这一条，
+那格读出来是半截 `Fade(0.2,`，认不出、也显示不出中文。
+
+### 80.5 四个坑（判据钉着）
+
+1. `mapping_cached()` 是元组不是对象：把它当 `state.data` 用 →
+   **永远空表且不抛**（真机上"一个中文都没有"）。
+   判据：`test_vocabulary_wiring.py::test_会话读得到项目里的映射`（走真文件）。
+2. 可编辑下拉改字不改 `currentIndex` → 见 80.3。
+3. 2 元组两种含义 → 见 80.2。
+4. 背景的值是**图像 spec**（`bg classroom`）：`Vocabulary.label()` 整串
+   查不到时再试最后一个词；`ident()`（反查）**不许**这么做（会吃掉 `bg`）。
+5. `dynamic_spec_columns` 从前丢了 `choices_from` → `with` 的「转场」一格
+   **没有任何候选**。补回去了，判据
+   `test_转场候选里有过场调用`。
+
+### 80.6 一条边界（刻意的）
+
+**能改的格子翻译，摘录保持原文**：左栏摘要（`DY：台词`）、卡片里
+「当前舞台（这一拍生效）」那几行、代码块 —— 都是**剧本本身的摘录**，
+与 `at i11` 一样原样显示；只有"能选的格子"（下拉 / 候选列表 / chip）
+才翻成中文。两边混着翻的话，人对不上自己写的那行。
+
+### 80.7 判据
+
+`tests/test_vocabulary_wiring.py`（25 条，含复合值与"当前值"那一行）；
+老判据全绿（`test_choice_picker` 的纯函数口径、`test_spec_groups` 的组标题、
+`test_sprite_slots` 的完整路径候选都没动）。
+
+## §81 资源映射的「角色」段：空 = 不覆盖，不是没读到（2026-11-01）
+
+### 81.1 一句话
+
+映射的 `characters` 是**覆盖层**，不是户口本：
+
+    留空  → 名字照资源表 asset_tables/characters.xlsx（ImageTag / Name / Aliases）
+    写了  → 以映射为准（资源表再改，界面不跟）
+
+判据在 `asset_identity._display_of()` / `identity_of()`：`mapping={}` 时
+`ling_happy` 照样给 `display='凌跃捷'`。所以编辑页显示「角色 0」的准确含义是
+**"没有覆盖"**。
+
+### 81.2 为什么代号两段会自己长出来、角色段不会
+
+| 段 | 信息的家 | 开窗自动建表 |
+|---|---|---|
+| 角色 | `characters.xlsx` | ✗ 抄了会盖住表（改表不生效） |
+| 单张图片 / 一类图片 | 路径 + Tag 列推断 | ✗ |
+| 服装代号 / 表情编号 | 只在 `对应.txt` + 剧本注释 `# 表情B7` | ✓ `apply_codes()` |
+| 中文叫法 / 表情怎么叫 | 只在映射 / 有默认名 | ✗ |
+
+**能抄的只有"别处没有"的那两段。**
+
+### 81.3 入口与判据
+
+- 角色段空着时，`mapping_editor._empty_text()` 说清"表里有 N 个角色
+  （举几个名字）+ 空着就行 + 写了以这里为准"；名字按**资源表顺序**取
+  （字母序会把 `ALL / CAT / DOG` 排到句首）。
+- 「把资源表里的角色写进来」按钮（`MappingEditor.import_characters()`）：
+  **只加不改**、名字等于写法的跳过、别名写成数组、顺序照表；底部提示
+  必须说"还没保存 + 抄进来以后这一段优先"。
+- `mapping_dialog._known_char_entries()` = `known_characters(registry)`
+  （缓存）；`_known_chars()` 只返回 `{tag: 显示名}`（**不许再 `str(dict)`**）。
+
+判据 `tests/test_mapping_chars_from_table.py`（12 条），重点两条：
+`test_existing_rows_are_never_overwritten`、`test_copying_says_it_is_not_saved_yet_and_who_wins`。
+
+### 81.4 文案的真名（别再写错）
+
+页签叫「工具怎么认的」，按钮叫「加进表里…」——
+`ME.SPECS['images'].empty` 从前写的是「工具认成了什么」「补进映射…」，
+人都找不到那个入口。判据
+`test_the_other_sections_explain_why_zero_is_fine`。
