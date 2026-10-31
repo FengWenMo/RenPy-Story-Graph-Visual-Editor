@@ -91,7 +91,7 @@ FORBIDDEN_DEMO_SUFFIXES = {'.py', '.pyc', '.bak', '.db'}   # 脚本 / 备份 / �
 REQUIRED_BASE = ('StoryGraph.exe', 'StoryGraph-CLI.exe',
                  '剧本空表格.xlsx', '快速上手.md', '新手快速操作手册.md',
                  'manual_img/01_structure.png', 'manual_img/02_card.png',
-                 'storygraph.rules.json', 'LICENSE')
+                 'storygraph.rules.json', 'storygraph.mapping.json', 'LICENSE')
 #: 示例工程 `demo/` 里必须有的三件锚点（只有**带 demo** 的标准版才要求）：
 #: 一份能打开的表 / 一章能导入的脚本 / 一张能显示的背景。少一件说明
 #: demo 被"清过头"了，发出去等于没 demo。
@@ -188,6 +188,17 @@ def collect_extras(project_root=ROOT, workdir=None, *, include_demo=True) -> lis
     if not rules.is_file():
         raise FileNotFoundError(f'缺少规则清单：{rules}')
     extras.append((rules, 'storygraph.rules.json'))
+
+    # **映射表**（2026-11-01 用户："再做一个映射的json表格 + rules.json"）：
+    # 同样是**真项目扫出来的那份**（`tools/build_presets_real.py` 生成），
+    # 与 rules.json 同源、同一层放。它决定「B7 ⇄ show lan base_hand_up angry」
+    # 这种代号换算认不认得出；没有它，代号只能一个字母一个字母手填。
+    # 用法与 rules 一样：放 exe 旁边，用「载入映射…」挑它（工具**不**自动往
+    # 项目里塞 —— 映射写的是"这个项目的哪张图是谁"，不是全局配置）。
+    mapping = root / 'storygraph' / 'presets' / 'storygraph.mapping.json'
+    if not mapping.is_file():
+        raise FileNotFoundError(f'缺少映射表：{mapping}')
+    extras.append((mapping, 'storygraph.mapping.json'))
 
     if not include_demo:
         return extras

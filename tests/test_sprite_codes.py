@@ -301,6 +301,28 @@ class TestScanProject:
         assert {r['no']: r['attr'] for r in scan.expressions}['7'] == 'care'
         assert any('对不上' in n for n in scan.notes), scan.notes
 
+    def test_只剩一份表但它和注释对不上也要说(self, tmp_path):
+        """
+        真实项目 lan 的正脸：`对应.txt` 重新编过号（`angry2` 从 8 号挪到 19 号），
+        剧本注释还按老编号写 —— 26 处证据里只对上 5 处。
+
+        两份表都在时有"谁赢"，**只剩一份**时以前一声不响：整张表静默地错一半。
+        这里不替人裁决（一行数据都不改），只把数字说出来。
+        """
+        script = '# 表情A7\nshow ye aa care\n# 表情A8\nshow ye aa angry\n'
+        scan = SC.scan_project(_project(
+            tmp_path, lan_table='7 不在意-indifferent\n8 生气-angry\n',
+            scripts={'c.rpy': script}))
+        assert any('只对上 0/2' in n for n in scan.notes), scan.notes
+        # 表本身一个字没改：说的还是表里那两行
+        assert {r['no']: r['attr'] for r in scan.expressions}['7'] == 'indifferent'
+
+    def test_对得上就不吵(self, tmp_path):
+        script = '# 表情A7\nshow ye aa care\n# 表情A7\nshow ye aa care\n'
+        scan = SC.scan_project(_project(
+            tmp_path, lan_table='7 关心-care\n', scripts={'c.rpy': script}))
+        assert not any('只对上' in n for n in scan.notes), scan.notes
+
     def test_工具留下的副本不重复投票(self, tmp_path):
         """
         同一章旁边躺着一个 `.generated.rpy`（工具早先导出的副本）时，证据

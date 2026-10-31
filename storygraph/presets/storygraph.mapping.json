@@ -1,0 +1,647 @@
+{
+  "schema": "storygraph.mapping/1",
+  "name": "sr_general · 立绘代号（服装字母 + 表情编号）",
+  "characters": {
+    "lan": {
+      "display": "蓝",
+      "avatar": "game/images/characters/avatar/lan.png"
+    },
+    "ling": {
+      "display": "凌跃捷",
+      "avatar": "game/images/characters/avatar/ling.png"
+    },
+    "xing": {
+      "display": "星桥理子",
+      "avatar": "game/images/characters/avatar/xing.png"
+    },
+    "ye": {
+      "display": "叶怀瑾",
+      "avatar": "game/images/characters/avatar/ye.png"
+    },
+    "qing": {
+      "avatar": "game/images/characters/avatar/qing.png"
+    }
+  },
+  "outfit_codes": [
+    {
+      "char": "lan",
+      "code": "A",
+      "attr": "aa",
+      "label": "普通（剧本里出现 11 处）"
+    },
+    {
+      "char": "lan",
+      "code": "B",
+      "attr": "base_hand_up",
+      "label": "举手（剧本里出现 13 处）"
+    },
+    {
+      "char": "lan",
+      "code": "",
+      "attr": "clothes2",
+      "label": "衣服2（剧本里没出现过这个服装的代号）"
+    },
+    {
+      "char": "ling",
+      "code": "A",
+      "attr": "aa",
+      "label": "普通（剧本里出现 9 处）"
+    },
+    {
+      "char": "ling",
+      "code": "B",
+      "attr": "base_arms_akimbo",
+      "label": "叉腰（剧本里出现 6 处）"
+    },
+    {
+      "char": "ling",
+      "code": "",
+      "attr": "base_swimsuit",
+      "label": "泳装（剧本里没出现过这个服装的代号）"
+    },
+    {
+      "char": "xing",
+      "code": "",
+      "attr": "aa",
+      "label": "普通（项目里声明了这套，剧本没写过它的代号）"
+    },
+    {
+      "char": "xing",
+      "code": "",
+      "attr": "base_hands_down",
+      "label": "放下手（剧本里没出现过这个服装的代号）"
+    },
+    {
+      "char": "xing",
+      "code": "",
+      "attr": "hanfu_base",
+      "label": "汉服（剧本里没出现过这个服装的代号）"
+    },
+    {
+      "char": "ye",
+      "code": "A",
+      "attr": "aa",
+      "label": "普通（剧本里出现 41 处）"
+    },
+    {
+      "char": "ye",
+      "code": "B",
+      "attr": "base_handdown",
+      "label": "手放下（剧本里出现 39 处）"
+    },
+    {
+      "char": "ye",
+      "code": "",
+      "attr": "base_swimsuit",
+      "label": "泳装（剧本里没出现过这个服装的代号）"
+    }
+  ],
+  "expression_codes": [
+    {
+      "char": "lan",
+      "no": "1",
+      "attr": "close_happy",
+      "label": "闭眼笑"
+    },
+    {
+      "char": "lan",
+      "no": "2",
+      "attr": "oh",
+      "label": "哦"
+    },
+    {
+      "char": "lan",
+      "no": "3",
+      "attr": "agreeable",
+      "label": "噢"
+    },
+    {
+      "char": "lan",
+      "no": "4",
+      "attr": "scared",
+      "label": "惊恐"
+    },
+    {
+      "char": "lan",
+      "no": "5",
+      "attr": "shy",
+      "label": "娇羞"
+    },
+    {
+      "char": "lan",
+      "no": "6",
+      "attr": "arrogant",
+      "label": "傲娇"
+    },
+    {
+      "char": "lan",
+      "no": "7",
+      "attr": "indifferent",
+      "label": "不在意"
+    },
+    {
+      "char": "lan",
+      "no": "8",
+      "attr": "angry",
+      "label": "生气"
+    },
+    {
+      "char": "lan",
+      "no": "9",
+      "attr": "stare",
+      "label": "盯着你"
+    },
+    {
+      "char": "lan",
+      "no": "10",
+      "attr": "lose",
+      "label": "失落"
+    },
+    {
+      "char": "lan",
+      "no": "11",
+      "attr": "mischievous",
+      "label": "嘿嘿"
+    },
+    {
+      "char": "lan",
+      "no": "12",
+      "attr": "chuckle",
+      "label": "姨妈笑"
+    },
+    {
+      "char": "lan",
+      "no": "13",
+      "attr": "happy",
+      "label": "笑"
+    },
+    {
+      "char": "lan",
+      "no": "14",
+      "attr": "uh",
+      "label": "呃"
+    },
+    {
+      "char": "lan",
+      "no": "15",
+      "attr": "sigh",
+      "label": "唉"
+    },
+    {
+      "char": "lan",
+      "no": "16",
+      "attr": "disgusting",
+      "label": "恶心"
+    },
+    {
+      "char": "lan",
+      "no": "17",
+      "attr": "afraid",
+      "label": "害怕"
+    },
+    {
+      "char": "lan",
+      "no": "18",
+      "attr": "speechless",
+      "label": "无语至极"
+    },
+    {
+      "char": "lan",
+      "no": "19",
+      "attr": "angry2",
+      "label": "生气2"
+    },
+    {
+      "char": "ling",
+      "no": "1",
+      "attr": "happy",
+      "label": "微笑"
+    },
+    {
+      "char": "ling",
+      "no": "2",
+      "attr": "close_happy",
+      "label": "闭眼微笑"
+    },
+    {
+      "char": "ling",
+      "no": "3",
+      "attr": "huh",
+      "label": "嗯？"
+    },
+    {
+      "char": "ling",
+      "no": "4",
+      "attr": "scared",
+      "label": "惊恐"
+    },
+    {
+      "char": "ling",
+      "no": "5",
+      "attr": "sideeye",
+      "label": "啊？"
+    },
+    {
+      "char": "ling",
+      "no": "6",
+      "attr": "nervous",
+      "label": "？汗？"
+    },
+    {
+      "char": "ling",
+      "no": "7",
+      "attr": "unhappy",
+      "label": "不开心"
+    },
+    {
+      "char": "ling",
+      "no": "8",
+      "attr": "avoiding",
+      "label": "刻意躲避"
+    },
+    {
+      "char": "ling",
+      "no": "9",
+      "attr": "sigh",
+      "label": "叹气"
+    },
+    {
+      "char": "ling",
+      "no": "10",
+      "attr": "angry",
+      "label": "生气"
+    },
+    {
+      "char": "ling",
+      "no": "11",
+      "attr": "despise",
+      "label": "嫌弃"
+    },
+    {
+      "char": "ling",
+      "no": "12",
+      "attr": "scorn",
+      "label": "鄙视"
+    },
+    {
+      "char": "ling",
+      "no": "13",
+      "attr": "disappointed",
+      "label": "失落"
+    },
+    {
+      "char": "ling",
+      "no": "14",
+      "attr": "resigned",
+      "label": "无奈"
+    },
+    {
+      "char": "ling",
+      "no": "15",
+      "attr": "shy",
+      "label": "娇羞"
+    },
+    {
+      "char": "ling",
+      "no": "16",
+      "attr": "heihei",
+      "label": "嘿嘿"
+    },
+    {
+      "char": "ling",
+      "no": "17",
+      "attr": "hmph",
+      "label": "哼"
+    },
+    {
+      "char": "ling",
+      "no": "18",
+      "attr": "oh",
+      "label": "哦"
+    },
+    {
+      "char": "ling",
+      "no": "19",
+      "attr": "blankface",
+      "label": "冷脸"
+    },
+    {
+      "char": "ling",
+      "no": "20",
+      "attr": "speechless",
+      "label": "愣住"
+    },
+    {
+      "char": "ling",
+      "no": "21",
+      "attr": "sideeye",
+      "label": "撇视"
+    },
+    {
+      "char": "ling",
+      "no": "22",
+      "attr": "furious",
+      "label": "暴怒"
+    },
+    {
+      "char": "ling",
+      "no": "23",
+      "attr": "refusing",
+      "label": "不要"
+    },
+    {
+      "char": "ling",
+      "no": "24",
+      "attr": "scared_2",
+      "label": "可怕"
+    },
+    {
+      "char": "ling",
+      "no": "25",
+      "attr": "serious",
+      "label": "严肃"
+    },
+    {
+      "char": "ling",
+      "no": "26",
+      "attr": "worried",
+      "label": "困惑"
+    },
+    {
+      "char": "ling",
+      "no": "27",
+      "attr": "relax",
+      "label": "放松"
+    },
+    {
+      "char": "ling",
+      "no": "28",
+      "attr": "ah",
+      "label": "啊"
+    },
+    {
+      "char": "xing",
+      "no": "1",
+      "attr": "haha",
+      "label": "哈哈"
+    },
+    {
+      "char": "xing",
+      "no": "2",
+      "attr": "smile",
+      "label": "微笑"
+    },
+    {
+      "char": "xing",
+      "no": "3",
+      "attr": "henhen",
+      "label": "哼哼（微笑）"
+    },
+    {
+      "char": "xing",
+      "no": "4",
+      "attr": "en",
+      "label": "嗯（微笑）"
+    },
+    {
+      "char": "xing",
+      "no": "5",
+      "attr": "yo",
+      "label": "哟"
+    },
+    {
+      "char": "xing",
+      "no": "6",
+      "attr": "shock",
+      "label": "啊？"
+    },
+    {
+      "char": "xing",
+      "no": "7",
+      "attr": "sad",
+      "label": "委屈"
+    },
+    {
+      "char": "xing",
+      "no": "8",
+      "attr": "pitiful",
+      "label": "娇羞小委屈"
+    },
+    {
+      "char": "xing",
+      "no": "9",
+      "attr": "littleshock",
+      "label": "错愕"
+    },
+    {
+      "char": "xing",
+      "no": "10",
+      "attr": "tsudere",
+      "label": "傲娇"
+    },
+    {
+      "char": "xing",
+      "no": "11",
+      "attr": "curious",
+      "label": "好奇"
+    },
+    {
+      "char": "xing",
+      "no": "12",
+      "attr": "explore",
+      "label": "指尖试探"
+    },
+    {
+      "char": "xing",
+      "no": "13",
+      "attr": "frown",
+      "label": "怨念"
+    },
+    {
+      "char": "xing",
+      "no": "14",
+      "attr": "worried",
+      "label": "你自己体会"
+    },
+    {
+      "char": "xing",
+      "no": "15",
+      "attr": "fierce",
+      "label": "就这？拿捏了"
+    },
+    {
+      "char": "xing",
+      "no": "16",
+      "attr": "abuse",
+      "label": "蒋忱，你又在胡说八道什么？"
+    },
+    {
+      "char": "xing",
+      "no": "17",
+      "attr": "veryshock",
+      "label": "这啥玩意儿？"
+    },
+    {
+      "char": "xing",
+      "no": "18",
+      "attr": "sleepy",
+      "label": "懵懵半瞌眼"
+    },
+    {
+      "char": "xing",
+      "no": "19",
+      "attr": "wink",
+      "label": "星桥理子式媚眼"
+    },
+    {
+      "char": "xing",
+      "no": "20",
+      "attr": "sweet",
+      "label": "甜笑（哈哈）"
+    },
+    {
+      "char": "xing",
+      "no": "21",
+      "attr": "gaolen",
+      "label": "哼，不理你"
+    },
+    {
+      "char": "xing",
+      "no": "22",
+      "attr": "hengaolen",
+      "label": "别碰我，我没生气（不理你）"
+    },
+    {
+      "char": "xing",
+      "no": "23",
+      "attr": "angry",
+      "label": "你居然凶我"
+    },
+    {
+      "char": "xing",
+      "no": "24",
+      "attr": "veryangry",
+      "label": "蒋忱，别惹我"
+    },
+    {
+      "char": "xing",
+      "no": "25",
+      "attr": "fear",
+      "label": "瞳孔地震"
+    },
+    {
+      "char": "xing",
+      "no": "26",
+      "attr": "veryfear",
+      "label": "可怕"
+    },
+    {
+      "char": "ye",
+      "no": "1",
+      "attr": "close_happy",
+      "label": "闭眼笑出眼泪"
+    },
+    {
+      "char": "ye",
+      "no": "2",
+      "attr": "lose",
+      "label": "失落"
+    },
+    {
+      "char": "ye",
+      "no": "3",
+      "attr": "hmph",
+      "label": "哼"
+    },
+    {
+      "char": "ye",
+      "no": "4",
+      "attr": "sigh",
+      "label": "唉"
+    },
+    {
+      "char": "ye",
+      "no": "5",
+      "attr": "ahah",
+      "label": "啊啊！"
+    },
+    {
+      "char": "ye",
+      "no": "6",
+      "attr": "happy",
+      "label": "微笑"
+    },
+    {
+      "char": "ye",
+      "no": "7",
+      "attr": "hi",
+      "label": ""
+    },
+    {
+      "char": "ye",
+      "no": "8",
+      "attr": "unhappy",
+      "label": "不高兴"
+    },
+    {
+      "char": "ye",
+      "no": "9",
+      "attr": "disappointed",
+      "label": "黯然神伤"
+    },
+    {
+      "char": "ye",
+      "no": "10",
+      "attr": "care",
+      "label": "担心的看向你"
+    },
+    {
+      "char": "ye",
+      "no": "11",
+      "attr": "gratified",
+      "label": "欣慰"
+    },
+    {
+      "char": "ye",
+      "no": "12",
+      "attr": "moved",
+      "label": "感动"
+    },
+    {
+      "char": "ye",
+      "no": "13",
+      "attr": "sideeye",
+      "label": "撇视"
+    },
+    {
+      "char": "ye",
+      "no": "14",
+      "attr": "scared",
+      "label": "害怕"
+    },
+    {
+      "char": "ye",
+      "no": "15",
+      "attr": "angry",
+      "label": "生气"
+    },
+    {
+      "char": "ye",
+      "no": "16",
+      "attr": "serious",
+      "label": "严肃"
+    },
+    {
+      "char": "ye",
+      "no": "17",
+      "attr": "puzzled",
+      "label": "困惑"
+    },
+    {
+      "char": "ye",
+      "no": "18",
+      "attr": "relax",
+      "label": "放松"
+    }
+  ]
+}

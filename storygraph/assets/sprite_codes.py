@@ -455,6 +455,23 @@ def scan_project(project_root) -> Scan:
                            for n, t in files.items() if n != best_name))
         for conflict in conflicts[:3]:
             scan.notes.append(f'{tag}：{conflict}')
+        # 表选好了还要问一句**它对得上剧本吗**。
+        #
+        # 真实项目（2026-11-01）：`对应.txt` 被重新编号（`angry2` 从 8 号挪到
+        # 19 号），可剧本注释还按老编号写 —— lan 的 26 处证据里这张表只对上
+        # **5** 处，老编号那份（`中英对应.txt`）对上 16 处，而老编号那份只剩在
+        # 另一个镜像项目里。两份表打架的提示只报给"手上有两份"的人；
+        # 只剩一份时它一声不响，整张表就静默地错一半。
+        #
+        # 这里**不替人裁决**（阈值只是"值得说一句"，不改任何一行数据），
+        # 把数字原样交出去：注释按哪套编号写，表就该是哪套。
+        total = sum(votes.values())
+        if total >= 2:
+            got = agreement(table, votes)
+            if got * 2 < total:
+                scan.notes.append(
+                    f'{tag}：编号表「{best_name}」和剧本注释只对上 {got}/{total} '
+                    '—— 脚本里可能混用了两套编号（说话的是注释，不是文件日期）')
         for number in sorted(table, key=_num_key):
             attr, label = table[number]
             scan.expressions.append({'char': tag, 'no': number,

@@ -7,6 +7,12 @@
           "name": "角色",
           "label": "角色",
           "choices": [
+            "cg",
+            "ye",
+            "lan",
+            "ling",
+            "xing",
+            "qing",
             "???",
             "A&B",
             "Roro",
@@ -41,6 +47,7 @@
           "name": "服装",
           "label": "服装",
           "choices": [
+            "aa",
             "clothes2",
             "base_hand_up",
             "base_swimsuit",
@@ -130,6 +137,12 @@
           "kind": "choice",
           "column": "角色",
           "options": [
+            "cg",
+            "ye",
+            "lan",
+            "ling",
+            "xing",
+            "qing",
             "???",
             "A&B",
             "Roro",
@@ -159,13 +172,14 @@
             "青",
             "？？？"
           ],
-          "limit": true,
+          "limit": false,
           "multi": false
         },
         {
           "kind": "choice",
           "column": "服装",
           "options": [
+            "aa",
             "clothes2",
             "base_hand_up",
             "base_swimsuit",

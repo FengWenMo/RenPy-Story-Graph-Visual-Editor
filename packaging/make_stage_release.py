@@ -114,7 +114,7 @@ GUIDE_NAME = '演出专用说明.md'
 GUIDE_SOURCE = f'docs/{GUIDE_NAME}'
 #: 项目预设的仓库来源目录 + 随包文件（真实项目的规则清单和布局）。
 PRESET_SOURCE_DIR = 'storygraph/presets'
-PRESET_FILES = ('storygraph.rules.json', 'layout.json')
+PRESET_FILES = ('storygraph.rules.json', 'storygraph.mapping.json', 'layout.json')
 #: 包内给"收到的项目"留的位置（运行时 `find_received_project` 认的第一个名字）。
 PROJECT_DIRNAME = '项目'
 PROJECT_PLACEHOLDER = '把项目放在这里.txt'
@@ -134,6 +134,7 @@ REQUIRED_STAGE = (
     f'{RUNTIME_DIRNAME}/lib/python3.12/',
     f'{RUNTIME_DIRNAME}/LICENSE.txt',
     f'{PRESET_DIRNAME}/storygraph.rules.json',
+    f'{PRESET_DIRNAME}/storygraph.mapping.json',
     f'{PRESET_DIRNAME}/layout.json',
     f'{PRESET_DIRNAME}/README.md',
     # 空项目位：解压出来就有一个 `项目/` 文件夹，策划把完整项目**拖进去**即可；
@@ -417,12 +418,16 @@ def preset_readme_text(*, version: str, date_str: str) -> str:
     return (
         '# 项目预设（演出专用版）\n'
         '\n'
-        '这两个文件是「演出专用版」随包携带的**默认预设**，来源是 StoryGraph\n'
+        '这三个文件是「演出专用版」随包携带的**默认预设**，来源是 StoryGraph\n'
         f'仓库的 `{PRESET_SOURCE_DIR}/`，由 `packaging/make_stage_release.py`\n'
         '原样复制进包，不是运行时生成的。\n'
         '\n'
         '- `storygraph.rules.json`：真实项目在用的规则清单'
         '（自定义语句的形状 / 表格列 / 分组）\n'
+        '- `storygraph.mapping.json`：真实项目的**立绘代号表**'
+        '（服装字母 A/B/C + 表情编号 `B7`），\n'
+        '  给「映射表」窗口用；**不自动套用**（映射写的是"这个项目的哪张图\n'
+        '  是谁"，套到别的项目上就是错的），要用手动「载入映射…」挑它\n'
         '- `layout.json`：真实项目的节点布局（图上的节点位置）\n'
         '\n'
         '## 什么时候自动套用\n'

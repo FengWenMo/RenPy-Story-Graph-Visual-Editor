@@ -47,7 +47,7 @@ PACKAGE_NAME = f'StoryGraph-Stage-{FAKE_VERSION}-win64-{DATE}'
 # ---------------------------------------------------------------------------
 
 def _fake_project(root: Path) -> Path:
-    """最小仓库形状：storygraph/__init__.py + 真实预设两份 + 演出专用说明。"""
+    """最小仓库形状：storygraph/__init__.py + 真实预设三份 + 演出专用说明。"""
     story = root / 'storygraph'
     story.mkdir(parents=True)
     (story / '__init__.py').write_text(
@@ -58,6 +58,8 @@ def _fake_project(root: Path) -> Path:
     presets.mkdir()
     (presets / 'storygraph.rules.json').write_text(
         '{"statements": []}\n', encoding='utf-8')
+    (presets / 'storygraph.mapping.json').write_text(
+        '{"schema": "storygraph.mapping/1"}\n', encoding='utf-8')
     (presets / 'layout.json').write_text(
         '{"version": 2, "nodes": {}}\n', encoding='utf-8')
 
@@ -178,6 +180,7 @@ def test_contract_names_exposed_for_runtime():
                 'renpy_sdk/lib/python3.12/',
                 'renpy_sdk/LICENSE.txt',
                 '项目预设/storygraph.rules.json',
+                '项目预设/storygraph.mapping.json',
                 '项目预设/layout.json',
                 '项目预设/README.md',
                 '演出专用版.txt', '演出专用说明.md'):
@@ -284,6 +287,8 @@ def test_presets_are_real_and_readme_explains_auto_apply(roots, tmp_path):
     assert '绝不覆盖' in readme, 'README 没写清已有文件不覆盖（会让人以为会被改）'
     # 落点必须和运行时 stage_edition 的真实写入位置一致，否则策划手动放会放错
     assert 'storygraph.rules.json' in readme
+    assert 'storygraph.mapping.json' in readme, (
+        'README 没交代代号表放在哪、以及它**不会**自动套用')
     assert '.storygraph/layout.json' in readme, (
         'README 没写 layout 的真实落点（运行时写 <项目>/.storygraph/layout.json）')
 
