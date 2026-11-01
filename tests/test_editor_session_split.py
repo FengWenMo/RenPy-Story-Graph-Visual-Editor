@@ -61,6 +61,11 @@ BLOCKS = {
             'has_removed',
             # 2026-10-22：`python:` 块 → `$` 行（搬出来，不是读懂它）
             'python_lift_report', 'apply_python_lift',
+            # 2026-11-01：`apply`（282 行 / 71 分支）拆成"一格一函数"，
+            # 六段各自是一个完整的 `if`，见 `docs/开发日志.md` §83。
+            '_apply_flow_fields', '_apply_main_columns',
+            '_apply_advanced_fields', '_apply_sprite_cards',
+            '_apply_word_cells', '_apply_condition',
         ),
     ),
     'session_graph': (

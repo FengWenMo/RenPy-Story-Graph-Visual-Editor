@@ -1774,6 +1774,77 @@ class TableSessionMixin:
         b = self.beats[idx]
         fields = dict(fields or {})
 
+        self._apply_flow_fields(b, fields)
+
+        self._apply_main_columns(b, fields)
+
+        # **「每参数一列」的键**（`mycue·intensity` / `camera·layer@0` /
+        # `pause·seconds@0`）：卡片与 Excel 走**同一条折叠路径**
+        # （`beat_model.fold_spec_arg_columns`）—— 一份实现两处用，
+        # 卡片上改参数与在表里改参数的结果必然一致。
+        #
+        # ⚠⚠ **折的时机被挪到了这个方法的最末尾**（2026-10-13 实测修）：
+        #   放在这里会被后面的 `cards_to_show` / `hydrate_from_dsl` 盖回去
+        #   （实测：`show·人物@0` 改成 `ling`，保存后又变回 `lan`）。
+        #   真正的调用点在 `return b` 之前，见那里的长注释。
+        #
+        # 为什么不受 `advanced_open` 影响：这一组控件是跟着这一拍的语句走的
+        # （有参数才出现），不像高级区那样会被折叠 —— 折叠起来的东西不写回
+        # 是契约（见上面那段），而它一直可见。
+
+        self._apply_advanced_fields(b, fields, advanced_open)
+        # **类型是说话人的投影**（`say` / `narration` 这一对，见
+        # `app.beats.kind_from_speaker`）：用户只填说话人时，高级区那一格
+        # 也必须跟着变成 `say` —— 否则它一直显示 `narration`，用户会以为
+        # "我填的说话人没生效"（2026-10-05 实测报的）。
+        b.kind = B.kind_from_speaker(b.kind, b.speaker)
+
+        self._apply_sprite_cards(b, cards)
+
+        self._apply_word_cells(b, fields, cards)
+
+        self._apply_condition(b, fields)
+
+        self._apply_stage(b, fields, stage_loaded)
+
+        try:
+            hydrate_from_dsl([b], self.symbols)
+        except Exception:                    # noqa: BLE001 - 与旧实现一致的兜底
+            swallow('editor.apply')
+        # **舞台 verb 顺序跟着结构化列走**（2026-10-05 用户实测报："我已经保存
+        # 该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化"）：
+        # 卡片上加一张立绘只写 `beat.show`，而 `stage_order` 还停在 `'scene'`
+        # —— 舞台快照/预览从前只回放列出来的 verb → 看不到这个人（产物其实
+        # 是对的，渲染器会补齐）。读的时候两边现在都补齐（`Beat.stage_verbs`），
+        # 这里再把**随表走的列**写实，免得下一次从表回来的人又看到"这一拍
+        # 没有立绘"。
+        try:
+            b.sync_stage_order()
+        except Exception as e:                # noqa: BLE001 - 顺序列坏了不该拦住保存
+            swallow('editor.apply.sync_stage_order', e)
+        # ⚠⚠ **语句参数必须在这一切之后再折**（2026-10-13 实测修）。
+        #
+        # 现场（用户要求"连 show 这种内置语句也能在卡片上长出参数格"）：
+        # 卡片上把 `show·人物@0` 从 `lan` 改成 `ling`，保存后 `Beat.show` 又变回
+        # `lan swim_suit happy` —— **一个字都没生效**。
+        #
+        # 根因是**顺序**：动态列在上面（第 480 行那一支）就折好了，可紧接着
+        #   · `cards_to_show(cards)` 会用**立绘卡**重建整个 `Beat.show`；
+        #   · `hydrate_from_dsl` 会再从 `show` 反推一遍结构化字段；
+        # 两件事都把刚折进去的参数**盖回原样**。而 `show` 的参数格恰恰就是
+        # `Beat.show` 这一格 —— 于是"卡片上能改、但改了不算"。
+        #
+        # 动态列是**用户刚在这一格上亲手改的字**，它比"从立绘卡/DSL 推出来的"
+        # 更权威，所以放在最后折。（放在这里也顺带让 `sanitized_cells` 的留痕
+        # 与"最终内容"一致。）
+        self._fold_dynamic_columns(b, fields)
+        # 真的变了才把"未导出"立起来（翻页 / 空提交不算改动）。
+        if self._beat_edits_print(idx) != _before_print:
+            self.mark_edits_dirty()
+        return b
+
+    def _apply_flow_fields(self, b, fields) -> None:
+        """控制流卡（call / jump）的目标与类型写回（拆自 `apply`，2026-11-01）。"""
         # **控制流卡的目标 / 类型**（2026-10-22，P0-4 第一阶段）。
         #
         # 它改的是 `Beat.raw` 里那一行（`call side`），不是任何一个 Excel
@@ -1811,6 +1882,8 @@ class TableSessionMixin:
                             _new_flow.get('args') or '',
                             _new_flow.get('from_clause') or '')
 
+    def _apply_main_columns(self, b, fields) -> None:
+        """主区那六列（Speaker / Text / Scene / BGM / Voice / Comment）（拆自 `apply`，2026-11-01）。"""
         # **键不存在 = 不动这一格**（2026-10-05 修，与 `fields_to_beat` 同源）。
         #
         # 以前一律 `b.scene = str(fields.get('Scene') or '').strip()`，于是
@@ -1843,20 +1916,8 @@ class TableSessionMixin:
         if 'Comment' in fields:
             b.comment = str(fields.get('Comment') or '').strip()
 
-        # **「每参数一列」的键**（`mycue·intensity` / `camera·layer@0` /
-        # `pause·seconds@0`）：卡片与 Excel 走**同一条折叠路径**
-        # （`beat_model.fold_spec_arg_columns`）—— 一份实现两处用，
-        # 卡片上改参数与在表里改参数的结果必然一致。
-        #
-        # ⚠⚠ **折的时机被挪到了这个方法的最末尾**（2026-10-13 实测修）：
-        #   放在这里会被后面的 `cards_to_show` / `hydrate_from_dsl` 盖回去
-        #   （实测：`show·人物@0` 改成 `ling`，保存后又变回 `lan`）。
-        #   真正的调用点在 `return b` 之前，见那里的长注释。
-        #
-        # 为什么不受 `advanced_open` 影响：这一组控件是跟着这一拍的语句走的
-        # （有参数才出现），不像高级区那样会被折叠 —— 折叠起来的东西不写回
-        # 是契约（见上面那段），而它一直可见。
-
+    def _apply_advanced_fields(self, b, fields, advanced_open) -> None:
+        """高级区：**收起 ≠ 清空**（拆自 `apply`，2026-11-01）。"""
         if advanced_open:
             if 'SFX' in fields:
                 b.sfx = str(fields.get('SFX') or '').strip()
@@ -1903,12 +1964,9 @@ class TableSessionMixin:
                 b.menu_name = str(fields.get('MenuName') or '').strip()
             if 'MenuArgs' in fields:
                 b.menu_args = str(fields.get('MenuArgs') or '').strip()
-        # **类型是说话人的投影**（`say` / `narration` 这一对，见
-        # `app.beats.kind_from_speaker`）：用户只填说话人时，高级区那一格
-        # 也必须跟着变成 `say` —— 否则它一直显示 `narration`，用户会以为
-        # "我填的说话人没生效"（2026-10-05 实测报的）。
-        b.kind = B.kind_from_speaker(b.kind, b.speaker)
 
+    def _apply_sprite_cards(self, b, cards) -> None:
+        """立绘卡 → `show` / `at`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
         if cards is not None:
             # **立绘写回的唯一出口**（2026-10-24 修 P0，见 `write_back_show`）。
             #
@@ -1932,6 +1990,8 @@ class TableSessionMixin:
             if cards:
                 b.at = uniform_position_of(cards)
 
+    def _apply_word_cells(self, b, fields, cards) -> None:
+        """「表情 / 位置」两格（**只在没有立绘卡时**写）（拆自 `apply`，2026-11-01）。"""
         # **「表情 / 位置」两格**（2026-10-24，第三轮扫描 `p0_scan_struct.py`
         # 的"改 show 的位置"用例暴露）：`fields()` 会算这两格
         # （`beat_to_fields` 的投影），而 **`apply` 从前根本不读它们** ——
@@ -1968,6 +2028,8 @@ class TableSessionMixin:
                     else:
                         b.show = B.apply_position(b.show, _want)
 
+    def _apply_condition(self, b, fields) -> None:
+        """条件写回 + 链头守卫重算（拆自 `apply`，2026-11-01）。"""
         # 条件显示（卡片上的「＋ 条件」）。**只在调用方真的给了这个键时才写**：
         # 用 `fields.get(..., b.condition)` 会让"没给"和"给了空串"分不开，
         # 而这两件事的语义完全相反（不改 vs 清空条件）。
@@ -1988,43 +2050,6 @@ class TableSessionMixin:
             # （`rechain_condition`，与补丁同一个判据）。
             self._rechain_siblings(b, _old_cond, _new_cond)
 
-        self._apply_stage(b, fields, stage_loaded)
-
-        try:
-            hydrate_from_dsl([b], self.symbols)
-        except Exception:                    # noqa: BLE001 - 与旧实现一致的兜底
-            swallow('editor.apply')
-        # **舞台 verb 顺序跟着结构化列走**（2026-10-05 用户实测报："我已经保存
-        # 该卡片了，可是当前舞台变化没有生效，并且舞台演出预览没有变化"）：
-        # 卡片上加一张立绘只写 `beat.show`，而 `stage_order` 还停在 `'scene'`
-        # —— 舞台快照/预览从前只回放列出来的 verb → 看不到这个人（产物其实
-        # 是对的，渲染器会补齐）。读的时候两边现在都补齐（`Beat.stage_verbs`），
-        # 这里再把**随表走的列**写实，免得下一次从表回来的人又看到"这一拍
-        # 没有立绘"。
-        try:
-            b.sync_stage_order()
-        except Exception as e:                # noqa: BLE001 - 顺序列坏了不该拦住保存
-            swallow('editor.apply.sync_stage_order', e)
-        # ⚠⚠ **语句参数必须在这一切之后再折**（2026-10-13 实测修）。
-        #
-        # 现场（用户要求"连 show 这种内置语句也能在卡片上长出参数格"）：
-        # 卡片上把 `show·人物@0` 从 `lan` 改成 `ling`，保存后 `Beat.show` 又变回
-        # `lan swim_suit happy` —— **一个字都没生效**。
-        #
-        # 根因是**顺序**：动态列在上面（第 480 行那一支）就折好了，可紧接着
-        #   · `cards_to_show(cards)` 会用**立绘卡**重建整个 `Beat.show`；
-        #   · `hydrate_from_dsl` 会再从 `show` 反推一遍结构化字段；
-        # 两件事都把刚折进去的参数**盖回原样**。而 `show` 的参数格恰恰就是
-        # `Beat.show` 这一格 —— 于是"卡片上能改、但改了不算"。
-        #
-        # 动态列是**用户刚在这一格上亲手改的字**，它比"从立绘卡/DSL 推出来的"
-        # 更权威，所以放在最后折。（放在这里也顺带让 `sanitized_cells` 的留痕
-        # 与"最终内容"一致。）
-        self._fold_dynamic_columns(b, fields)
-        # 真的变了才把"未导出"立起来（翻页 / 空提交不算改动）。
-        if self._beat_edits_print(idx) != _before_print:
-            self.mark_edits_dirty()
-        return b
 
     @staticmethod
     def _write_statement_head(b: Beat, text: str) -> bool:
