@@ -54,6 +54,7 @@ storygraph.story.patcher
 from __future__ import annotations
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.textlines import split_lines
 from storygraph.core.vocabulary import RESERVED_STATEMENT_KEYWORDS
 from storygraph.core.indent import indent_prefix, indent_width
 import difflib
@@ -190,6 +191,22 @@ class PatchResult:
 def _body(line: str) -> str:
     """去掉缩进。"缩进属于结构，补丁不碰"，所以比对一律在去缩进后做。"""
     return (line or '').lstrip(' \t')
+
+
+def _join_like(original: str, lines: list) -> str:
+    """
+    把行数组拼回全文 —— **与 `patch_export` 末尾同一套规则**（唯一实现）。
+
+    规则只有一条：原文末尾有没有换行，产物就留不留（`'a\\n'` 不能被拼成
+    `'a'`，`'a'` 也不能被补成 `'a\\n'`）。
+
+    有了它，`patch_export` 才能做那个自检："把原文切开再拼回去 == 原文"。
+    见 `patch_export` 里那段注释（U+2028 的事故形态）。
+    """
+    text = '\n'.join(lines)
+    if (original or '').endswith('\n'):
+        text += '\n'
+    return text
 
 
 def _insert_anchor(lines: list, at: int) -> tuple:
@@ -1075,7 +1092,7 @@ def _range_looks_like(old_lines: list, beat, gen_lines: list = None,
     # 这些行本来就字面写在区间里，能对上就是对的区间，很安全。
     for attr in ('raw', 'code'):
         body = (getattr(beat, attr, '') or '').strip()
-        for ln in body.splitlines():
+        for ln in split_lines(body):
             if ln.strip() and ln.strip() in blob:
                 return True
     for token in _stage_tokens(beat):
@@ -2181,7 +2198,7 @@ def _condition_hint(bad: list, original: str) -> str:
     """
     b, want, got = bad[0]
     first = int(getattr(b, 'src_first', 0) or 0)
-    lines = (original or '').splitlines()
+    lines = split_lines(original)
     head_no, kind = (None, '')
     if first >= 2 and first <= len(lines):
         head_no, kind = _branch_head_for(lines, first)
@@ -2383,9 +2400,9 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
         return {k for k in out if k}
 
     text_set = set()
-    for ln in text.splitlines():
+    for ln in split_lines(text):
         text_set |= _keys(ln)
-    out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in text.splitlines()]
+    out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in split_lines(text)]
     out_blobs = [b for b in out_blobs if b]
     # ③b **音频行按"通道计数"容忍**（2026-10-05）。
     #
@@ -2406,7 +2423,7 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
             ident = _audio_ident(line)
             if ident:
                 audio_gen[ident] += 1
-    for line in text.splitlines():
+    for line in split_lines(text):
         ident = _audio_ident(line)
         if ident:
             audio_out[ident] += 1
@@ -3877,7 +3894,31 @@ def patch_export(beats: list, source_path, generated_text: str,
     from storygraph.story.dsl import Audit
     audit = Audit(symbols) if symbols is not None else None
 
-    orig_lines = original.splitlines()
+    orig_lines = split_lines(original)
+
+    # —— **切行必须能原样拼回去**（2026-11-01，外部审查 5.2 / P1-5）——
+    #
+    # 这是"只改你动过的行"这条承诺的**自检**：把原文切成行、再按同一套规则
+    # 拼回去，必须**逐字节等于原文**。从前这里用的是 `str.splitlines()`，
+    # 它把 `U+2028`（软回车）/ `\x0c`（换页）/ `\x85`（NEL）也当成换行 ——
+    # 于是"一个字没改"的文件被切成两行、再拼成一个真换行：
+    #
+    #     原始：# 备注：软回车\u2028在这里         ← 一行
+    #     产物：# 备注：软回车                     ← 两行
+    #           # 在这里
+    #
+    # 实测（tools/_probe_patch_roundtrip.py）：这种文件不仅会被改写，
+    # 连增量都做不成 —— 行号整体错位，校验报"1 句台词在补丁结果里找不到"，
+    # 整章退回全量。台词里混进这类字符时，游戏显示的文字就是被改过的。
+    #
+    # 判据放在这里而不是只在测试里：以后谁再换回会吞掉分隔符的写法，
+    # **当场拒绝增量**，而不是安静地改坏文件。
+    if _join_like(original, orig_lines) != original:
+        return PatchResult(
+            generated_text, None, 0, len(beats), 0,
+            reasons=['这个文件里的行分隔符切不回来（可能含 U+2028 / 换页符 '
+                     '这类不可见字符）：拒绝增量，以免"没改一个字"却改动了文件。'
+                     '换成按 \\n 切行的实现后再导（见 core/textlines.py）'])
     out_lines = list(orig_lines)
     blocks, raw_gen = _render_blocks(beats, audit, orig_lines)
 
@@ -4046,9 +4087,7 @@ def patch_export(beats: list, source_path, generated_text: str,
     st.changed += (inserted_lines + removed_lines + replaced_lines
                    + st.grown_total + st.shrunk_total)
 
-    text = '\n'.join(st.out_lines)
-    if original.endswith('\n'):
-        text += '\n'
+    text = _join_like(original, st.out_lines)
 
     # ② 整体校验：认不出每一句话就作废（调用方退回全量）
     #

@@ -20,6 +20,7 @@ storygraph.story.script_table —— 剧本演出表（**兼容门面**）
 """
 
 from __future__ import annotations
+import re
 from pathlib import Path
 
 from storygraph.story.beat_build import (  # noqa: F401
@@ -326,6 +327,30 @@ def registry_from_parse_result(parse_result, base=None):
 
 # ===================== 一体化入口 =====================
 
+def _require_script_file(script_file) -> Path:
+    """
+    校验"这确实是一份存在的 `.rpy` 文件"，不是就**抛**。
+
+    为什么不返回 `None` / 空表（2026-11-01）：坏输入的三种错法各说各的，
+    但都必须**出声**。从前这里把不存在的路径交给解析器，解析器返回空节点，
+    于是产出一张只有表头的表 —— 调用方看到的是"成功"。审查报告把这一类
+    叫"假绿"，它比报错更坏：人不会再查。
+
+    `OSError` 家族（不存在 / 是目录）与 `ValueError`（后缀不对）分开，
+    是为了让调用方能按"路径错了"和"类型错了"分别给建议。
+    """
+    p = Path(str(script_file))
+    if not p.exists():
+        raise FileNotFoundError(
+            f'找不到剧本文件：{p}（这个路径不存在 —— 检查一下路径或拼写）')
+    if p.is_dir():
+        raise IsADirectoryError(
+            f'{p} 是一个目录，不是剧本文件（要传 .rpy 文件的路径）')
+    if p.suffix.lower() != '.rpy':
+        raise ValueError(f'{p.name} 不是 .rpy 文件（这里只收 .rpy）')
+    return p
+
+
 def open_rpy_as_table(script_file, output_path=None, registry=None,
                       label: str = '', with_thumbnails: bool = False,
                       facts=None):
@@ -338,15 +363,26 @@ def open_rpy_as_table(script_file, output_path=None, registry=None,
     有符号表时会**重合成人话**：`show ling close_happy at left` 变成
     `[显示] 凌跃捷 开心 左`——但只在往返无损时才换（见 dsl 自检），
     猜不准就保留程序写法，绝不猜错一个表情。
+
+    2026-11-01（外部审查 H1）：**解析出的错误不再被丢掉**。从前
+    `open_rpy_as_table` 只返回路径，`ParseResult.errors` 谁也不看 ——
+    于是"引号没闭合""缩进错了"都会安静地生成一张缺内容的表。
+    现在把结果记进 `last_open_stats()`，CLI 据此给非 0 退出码。
+
+    2026-11-01（地狱测试补）：**路径本身不合法时直接抛**，不再"安静地摊一张空表"。
+    从前 `RenPyParser().parse(不存在的路径)` 返回空节点 → 一张只有表头的表 →
+    调用方看到"成功"。CLI 那道闸（`_require_file`）只管 CLI；界面 / MCP /
+    别的程序化调用一样会踩到。判据见 `tests/test_hell_guardrails.py`。
     """
     from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
 
-    script_file = Path(script_file)
+    script_file = _require_script_file(script_file)
     if output_path is None:
         output_path = script_file.with_suffix('.xlsx')
 
     nodes = RenPyParser().parse(script_file)
     result = ParseResultBuilder().build(nodes)
+    _remember_open_stats(script_file, result)
     if registry is None:
         registry = registry_from_parse_result(result)
     symbols = make_symbols(registry)
@@ -366,6 +402,63 @@ def open_rpy_as_table(script_file, output_path=None, registry=None,
                           # 表里记下来源：导回时自动走增量（审计 P1-1）
                           source_file=str(script_file))
     return output_path
+
+
+#: 上一次 `open_rpy_as_table` 的解析统计（CLI / 体检拿它判断"这次真的读到东西了吗"）
+_LAST_OPEN_STATS: dict = {}
+
+
+def _remember_open_stats(script_file, result) -> None:
+    global _LAST_OPEN_STATS
+    _LAST_OPEN_STATS = {
+        'source': str(script_file),
+        'labels': len(getattr(result, 'labels', {}) or ()),
+        'statements': len(getattr(result, 'statements', ()) or ()),
+        'errors': [str(e) for e in (getattr(result, 'errors', ()) or ())],
+        'warnings': [str(w) for w in (getattr(result, 'warnings', ()) or ())],
+        'suspect_say': _suspect_unclosed_say(getattr(result, 'statements', ())),
+    }
+
+
+#: 「看起来是台词、但引号没闭合」的一行：`e "还没写完` / `"旁白没有收尾`
+_UNCLOSED_SAY_RE = re.compile(r'^\s*(?:[A-Za-z_]\w*\s+)?"[^"]*$')
+
+
+def _suspect_unclosed_say(statements) -> list:
+    """
+    找出**引号没闭合**的台词行：`[(行号, 原文), …]`。
+
+    为什么要它（2026-11-01，外部审查 5.4）：这种行在解析器眼里是"工具没建模
+    的写法"（`raw / unmodeled`），于是**安静地**变成一行原样文本 ——
+    表里没有它作为台词的位置，而 CLI 照样报"已生成剧本表"。
+
+    判据刻意窄（只认"还带着开头引号，却没有收尾引号"）：
+    宁可漏报，也不要拿模糊的启发式去诬陷一行合法写法。
+    真正的裁判仍是 Ren'Py 自己的 parser —— 这条只是让用户在
+    **打开表格之前**就知道"这几行有问题"。
+    """
+    out = []
+    for st in statements or ():
+        if str(getattr(st, 'kind', '')) != 'raw':
+            continue
+        payload = getattr(st, 'payload', None) or {}
+        text = str(payload.get('text') or '')
+        if not _UNCLOSED_SAY_RE.match(text):
+            continue
+        src = getattr(st, 'source', ('', 0)) or ('', 0)
+        out.append((int(src[1] or 0), text.strip()))
+    return out
+
+
+def last_open_stats() -> dict:
+    """
+    上一次 `open_rpy_as_table` 读到了什么（`errors` / `statements` / …）。
+
+    为什么要有（2026-11-01，外部审查 H1）：解析器的错误从前**没有任何
+    出口** —— 表照生成、CLI 照报"已生成"。CLI 拿这个字典决定退出码：
+    有 `errors` → 1，一条语句都没读出来 → 1。
+    """
+    return dict(_LAST_OPEN_STATS)
 
 
 def _reuse_existing_ids(beats, table_path) -> int:

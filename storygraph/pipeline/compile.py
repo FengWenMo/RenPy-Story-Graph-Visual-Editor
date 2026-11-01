@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.atomicio import save_workbook_atomic
 from storygraph.excel.cells import set_row
 
 EXPORT_SHEET = 'Export_RenPy'
@@ -87,6 +88,12 @@ class CompileResult:
     untouched: bool = False
     #: 读表时 `类型` 列填了工具不认的值（行号 + 原值）—— 见 `invalid_kinds`。
     invalid_kinds: list = field(default_factory=list)
+    #: **这次刚给文件头加了 2 行生成标记**（首行标记 + 一个空行）。
+    #:
+    #: 为什么要单独记（2026-11-01，外部审查 5.3）：只改一句台词时，
+    #: 磁盘上的差异是"2 行文件头 + 1 行改动"，全文行号下移 2 —— 而回执
+    #: 从前只写"对位 10/10 拍"，那 2 行不翼而飞。第二次导出起就收敛了。
+    marker_added: bool = False
     #: 增量这一刀**删掉了源文件里哪几行**（最多 5 条原文）。
     #: ⚠ 数量看 `removed_count`。
     #:
@@ -136,6 +143,11 @@ class CompileResult:
             text += (f"\n增量补丁：只改了 {self.changed_lines} 行，"
                      f"原文其余部分（含 default / init python / transform）"
                      f"逐字节保留" + _removal_note(self))
+            if self.marker_added:
+                # 审查 5.3：那 2 行必须说出口（否则用户对不上 diff）。
+                text += ('\n（第一次导出这份文件：首行加了 2 行**生成标记**'
+                         '——标记 + 一个空行，工具据此认出自家产物。'
+                         '全文行号因此下移 2；第二次导出起不会再变）')
             if self.stale_note:
                 text += self.stale_note
         elif self.patch_attempted and not self.used_patch:
@@ -325,6 +337,29 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     # 用户会看到的那个事实。目标就是源文件时**连写都不写**（mtime 也不动）；
     # 目标是别的路径时按源文的载体风格原样复制，同样不加标记 ——
     # 复制品还是"作者的那份文件"，不该被认成工具产物。
+
+    # —— **说好 0 行改动，文本却变了 → 拒绝写**（2026-11-01，外部审查 P1-5）——
+    #
+    # 这是"逐字节保留"这条承诺的反向断言：补丁计数说"一行没改"，
+    # 产物却和源文不一样 —— 那就一定有一处**没人承认的改动**。
+    # 从前它会照常落盘（U+2028 / 换页符被 splitlines 换成真换行，
+    # 就是这么溜进来的）。现在当场拒绝，并说清是哪一类。
+    if (inc.used_patch and source_text is not None
+            and int(inc.changed_lines or 0) == 0
+            and inc.text != source_text):
+        from storygraph.story.generation_guard import GuardIssue
+        result.written = False
+        result.patch_note = (
+            '增量补丁报告"0 行改动"，但产物与原文**不一致** —— '
+            '这是"没有任何改动却改了文件"，拒绝写入（原文件没有被改动）。'
+            '请把这份 .rpy 连同 .xlsx 一起发给作者：这说明有一个'
+            '补丁计数没算进去的改动点。')
+        result.guard_issues = [GuardIssue(
+            code='SILENT_REWRITE', level='block',
+            message='增量补丁报告 0 行改动，产物却与源文不同：拒绝写入'
+                    '（多半是文件里含 U+2028 / 换页符这类不可见分隔符）')]
+        return result
+
     if inc.used_patch and source_text is not None and inc.text == source_text:
         from storygraph.story.source_style import detect as _detect_style
         from storygraph.story.source_style import read_text as _read_style
@@ -362,6 +397,13 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
 
     if inc.used_patch:
         text = ensure_generator_marker(inc.text)
+        # **这次是不是刚加上那 2 行生成标记**（2026-11-01，外部审查 5.3）。
+        #
+        # 只改一句台词时，磁盘上的差异其实是"2 行文件头 + 1 行改动"，
+        # 全文行号整体下移 2 —— 而从前的回执只写"增量补丁：对位 10/10 拍"，
+        # 一个字都不提那 2 行。用户拿 diff 一看就懵："我只改了一句，
+        # 怎么多了两行？" 这件事必须说，而且要说是**第一次**才加。
+        result.marker_added = (text != inc.text)
     else:
         text = result.rpy_text
 
@@ -509,7 +551,7 @@ def write_export_sheet(source_table, result: CompileResult,
     ws = wb.active
     ws.title = EXPORT_SHEET
     _fill_export_sheet(ws, result, openpyxl, Font, PatternFill, Alignment)
-    wb.save(output_path)
+    save_workbook_atomic(wb, output_path)
     return output_path
 
 
@@ -528,7 +570,7 @@ def merge_export_sheet(table_path, result: CompileResult) -> Path:
         del wb[EXPORT_SHEET]
     ws = wb.create_sheet(EXPORT_SHEET)
     _fill_export_sheet(ws, result, openpyxl, Font, PatternFill, Alignment)
-    wb.save(table_path)
+    save_workbook_atomic(wb, table_path)
     return table_path
 
 

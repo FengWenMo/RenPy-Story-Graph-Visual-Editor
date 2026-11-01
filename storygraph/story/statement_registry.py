@@ -407,6 +407,14 @@ def manifest_path(project_root) -> Path:
     return root / MANIFEST_NAMES[0]
 
 
+#: 往上找项目根时**永远跳过**的目录名（构建/缓存/版本库/临时目录）。
+_NEVER_A_PROJECT_ROOT = frozenset({
+    '.pip-tmp', '.git', '.hg', '.svn', '__pycache__',
+    'node_modules', '.venv', 'venv', '.tox', '.mypy_cache',
+    '.pytest_cache', 'dist', 'build',
+})
+
+
 def root_of(script_path) -> str:
     """
     从脚本路径反推**项目根**。**推不出来返回 `''`**（不是"退回父目录"）。
@@ -436,6 +444,14 @@ def root_of(script_path) -> str:
         if parent.name == 'game':
             return str(parent.parent)
     for parent in chain:
+        # **这些目录永远不是项目根**（2026-11-01 实测的一次真事故）：
+        # `.pip-tmp/storygraph.rules.json` 是某次测试/探针留下的，而 pytest 的
+        # 临时目录就在 `.pip-tmp/` 下 —— 于是**每一条**从 tmp 路径出发的
+        # root_of() 都反推出 `.pip-tmp`，把那份带 `show` 声明的清单套到
+        # 所有用例的导出上：Beats 多出 3 列、`show` 往返变成 `show show show`，
+        # 30 条用例一起红。根因不是那份文件，是"往上找"没有边界。
+        if parent.name in _NEVER_A_PROJECT_ROOT:
+            continue
         try:
             if (parent / 'game').is_dir():
                 return str(parent)

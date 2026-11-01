@@ -644,6 +644,13 @@ ACTION_HINTS = {
 KNOWN_BEAT_KINDS = frozenset(ACTION_COLUMNS['Kind']) | frozenset({
     'raw', 'code', 'opaque', 'blank', 'python', 'loop', 'notes',
     'scene', 'show', 'hide', 'with', 'audio', 'music', 'sound', 'voice',
+    # ⚠ `flow`（控制流拍：`call` / `jump` / `return`）**必须在**。
+    # 2026-11-01：`open_rpy_as_table` 导出的表里，`return` 那一行的
+    # `类型` 就是 `flow` —— 而这里没有它，于是"从 .rpy 摊出来的表"立刻
+    # 被判"类型列有 1 行填了工具不认的值"。**工具写出去的值，自己读不回来**，
+    # 是最典型的假警报：用户会开始不信这类提示（而那正是 P1-2 那条白名单
+    # 存在的理由 —— 它本来是用来抓"用户手填了中文"的）。
+    'flow',
 })
 
 

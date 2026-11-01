@@ -96,6 +96,18 @@ class ValidationReport:
     def ok(self) -> bool:
         return not self.errors
 
+    @property
+    def clean(self) -> bool:
+        """
+        **一条问题都没有**（错误 0 且警告 0）。
+
+        为什么要与 `ok` 分开（2026-11-01，外部审查 5.9）：JSON 里
+        `"ok": true, "warning_count": 5` 会被读成"体检通过" ——
+        而 `ok` 的口径一直只是"没有 error"。两个字段并排放着，
+        谁也不会再误解成"干净"。
+        """
+        return not self.issues
+
     def by_level(self, level: str) -> list:
         return [i for i in self.issues if i.level == level]
 
@@ -105,6 +117,8 @@ class ValidationReport:
     def to_dict(self) -> dict:
         return {
             'ok': self.ok,
+            'clean': self.clean,
+            'has_warnings': bool(self.warnings),
             'error_count': len(self.errors),
             'warning_count': len(self.warnings),
             'by_level': {lv: len(self.by_level(lv)) for lv in (L1, L2, L3)},
@@ -1075,6 +1089,46 @@ def _reached_nodes(graph, start_id) -> set:
 #  汇总
 # ==================================================================
 
+def validate_label_collisions(project_root) -> list:
+    """
+    **跨文件 label 重名**（2026-11-01，外部审查 5.9 / H7）。
+
+    为什么要这条：生成门禁把"产物里的 label 和项目里别的 .rpy 撞名"判成
+    **block 级**（`LABEL_COLLISION`），而体检**一条都不报** —— 于是"体检通过"
+    是一份虚假信心：同一个项目，跑体检是绿的，一导出就被拦。
+
+    Ren'Py 把 `game/` 下所有 .rpy 当成同一个脚本（官方 Quickstart 原话），
+    所以两个文件各写一个 `label start:` 是**硬错误**，游戏直接起不来。
+
+    判据与门禁**同源**：都用 `generation_guard.label_owners`（一次扫描，
+    且已排除 `tl/` 与工具自己产的 `*.generated.rpy` / `*.blocked.rpy`）。
+    """
+    if not project_root:
+        return []
+    try:
+        from storygraph.story.generation_guard import label_owners
+        owners = label_owners(project_root)
+    except Exception as e:                     # noqa: BLE001 - 扫不动就别拦体检
+        swallow('pipeline.validate.label_collisions', e)
+        return []
+    out = []
+    for name in sorted(owners or ()):
+        files = list(owners.get(name) or ())
+        if len(files) < 2:
+            continue
+        shown = '、'.join(str(Path(f).name) for f in files[:4])
+        more = '…' if len(files) > 4 else ''
+        out.append(Issue(
+            L3, 'E306', ERROR,
+            f'label `{name}` 在 {len(files)} 个文件里都有定义（{shown}{more}）'
+            '—— Ren\'Py 把 game/ 下所有 .rpy 当同一个脚本，重名会让游戏起不来',
+            where=str(files[0]),
+            hint='只留一处定义，其余改名（或者改成 `jump` 指过去）。'
+                 '生成门禁那边是同一条判据（LABEL_COLLISION）——'
+                 '体检与关卡结论必须一致'))
+    return out
+
+
 def validate_sg_transforms(project_root) -> list:
     """
     **尺寸变换的引用存在性**（护栏 ③，2026-10-31 用户拍板的前提）。
@@ -1136,6 +1190,9 @@ def validate_all(beats, registry=None, graph=None, script_warnings=None,
                                   project_speakers))
     # 护栏 ③：引用了 `at sg_*` 但项目里没有定义（只查工具自己的命名空间）。
     report.extend(validate_sg_transforms(project_root))
+    # 护栏 ④：**跨文件 label 重名** —— 与生成门禁的 LABEL_COLLISION 同一条判据
+    # （2026-11-01，外部审查 5.9：从前"体检通过"但一导出就被拦）。
+    report.extend(validate_label_collisions(project_root))
     if dedupe or cap_per_code:
         report.issues = _dedupe_and_cap(report.issues, cap_per_code)
     return report

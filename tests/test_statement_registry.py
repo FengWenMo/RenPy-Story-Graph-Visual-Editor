@@ -180,6 +180,38 @@ def test_root_of_accepts_manifest_without_game_dir(tmp_path):
     assert Path(root_of(f)) == Path(tmp_path)
 
 
+def test_root_of_never_lands_in_a_scratch_or_build_dir(tmp_path):
+    """
+    **向上找根要有边界**（2026-11-01，一次 32 条全红的实测事故）。
+
+    事故形态：`.pip-tmp/storygraph.rules.json` 是某次探针留下的，而 pytest 的
+    临时目录就在 `.pip-tmp/` 下 —— 于是每条从 tmp 路径出发的 `root_of()` 都反
+    推出 `.pip-tmp`，把那份带 `show` 声明的清单套到**所有**用例的导出上
+    （Beats 多出 3 列、`show` 往返成 `show show show`）。根因不是那份文件，
+    是"往上找"没有边界。
+
+    判据：构建/缓存/版本库目录（`build` / `.git` / `__pycache__` / `.pip-tmp` …）
+    **永远不许**被当成项目根；但它们的**子目录**可以是。
+    """
+    from storygraph.story.statement_registry import _NEVER_A_PROJECT_ROOT
+
+    for name in sorted(_NEVER_A_PROJECT_ROOT):
+        scratch = tmp_path / name
+        if scratch.exists():
+            continue
+        scratch.mkdir()
+        # ① 松散脚本：不许把这种目录本身当根
+        loose = scratch / 'loose.rpy'
+        loose.write_text('label a:\n    return\n', encoding='utf-8')
+        assert root_of(loose) == '', f'{name} 被当成了项目根'
+        # ② 但它的**子目录**（真有 game/）仍然是正经项目
+        inner = scratch / 'inner' / 'game'
+        inner.mkdir(parents=True)
+        ch = inner / 'ch.rpy'
+        ch.write_text('label start:\n    return\n', encoding='utf-8')
+        assert Path(root_of(ch)) == scratch / 'inner', f'{name}/inner 没被认出来'
+
+
 def test_annotate_only_touches_unmodeled():
     """内置建模过的语句（say 等）不该被 spec 抢走。"""
     reg = StatementRegistry(declared=[RegisteredStatement(name='mycue')])
