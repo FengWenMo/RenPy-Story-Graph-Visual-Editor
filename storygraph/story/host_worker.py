@@ -5,6 +5,14 @@
 由 `host_hooks.load_host_hooks()` 用 `python -I` 启动，**唯一**会执行项目
 `storygraph.host.py` 的地方。协议极简：stdin / stdout 每行一个 JSON。
 
+> ⚠ 2026-11-01（外部审查 H3）：host_hooks.py 的文档说“本工具唯一会执行项目里代码的地方”，
+> 而**真正的 exec_module 写在这里** —— 两句话指的是同一条链路的两端（该闸在父进程、这次执行在子进程），
+> 字面对不上，分开读的人会以为有第二条路。准确说法是：
+>
+>   · **闸门**（	rust_decision / load_host_hooks）只在 host_hooks.py；
+>   · **执行**只在 host_worker.py，而它**只由那道闸在判定通过后启动**（python -I host_worker.py <hook.py>），
+>     没有别的调用方；它自己的 main() 只认一个显式路径参数，没有任何自动发现并执行的行为。
+
 请求：
 
     {"id": 1, "op": "declarations"}

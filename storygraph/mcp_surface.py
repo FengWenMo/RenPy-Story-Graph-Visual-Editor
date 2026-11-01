@@ -99,14 +99,14 @@ def capabilities() -> dict:
              'summary': '把一条声明写进 storygraph.rules.json（唯一写入口）',
              'source': 'table', 'tri_state': False, 'status': 'done',
              'known_limits': ['只写清单文件；**不许**改资源表（硬红线）',
-                              '`dry_run=True` 只算 diff 不写盘 —— '
-                              '**先试算给人看，再决定真写**',
+                              '`dry_run` **默认 True**（只算 diff、不写盘）；'
+                              '要真写必须显式 `dry_run=False`',
                               '回执必带 `written` / `diff` / `backup`']},
-            {'name': 'storygraph_table_export', 'kind': 'write',
-             'summary': '导出剧本表（**本步故意没做**，见 reason）',
-             'source': 'table+engine', 'tri_state': False, 'status': 'planned',
-             'known_limits': ['⚠ **还没做**：调它一律 `ok=False` + "还没实现"，'
-                              '别把它当成导出成功']},
+            # ⚠ `storygraph_table_export` **不在清单里**（2026-11-01，审查 5.10）：
+            # 它永远返回 `ok=False + 还没实现`，却被列进"工具清单"和"可写工具"
+            # 名单里 —— 给模型广告一个永远失败的工具，比不给更糟：
+            # 它会一直重试。等真做出来了再加回来说明（函数本身留着，
+            # 老调用方不会突然 ImportError）。
         ],
         'hard_limits': [
             '引擎级：`init python` 里注册的写法**赶不上解析期**，'
@@ -413,14 +413,17 @@ def _manifest_path(project_root):
 
 
 def declare(project_root, name, *, label='', docs='', block=None, params=(),
-            dry_run=False) -> dict:
+            dry_run=True) -> dict:
     """
     **把一个写法写进项目清单**（`storygraph.rules.json`，唯一写入口）。
 
     这是 MCP 里**第一个会改盘的**工具，所以护栏最厚：
 
-      · `dry_run=True` → **只算 diff、不写盘**（回执里 `written=[]`）——
-        模型该先试算、给人看，再决定要不要真写；
+      · **`dry_run` 默认 `True`**（2026-11-01，外部审查 H2 / P1-11）：
+        从前默认 `False`，任何 MCP 客户端一调就**直接写**用户的配置文件 ——
+        护栏写在调用方（"要求模型先试算"），接口上却没有任何门槛。
+        现在要真写必须 `dry_run=False`，**显式**说出来；
+      · `dry_run=True` → 只算 diff、不写盘（回执里 `written=[]`）；
       · 真写时**先记 diff 与备份路径**，回执里必须有；
       · 走的是**唯一写入口** `statement_registry.declare_statement`
         （它自己负责"同名=更新""不覆盖手写清单""拒绝空名字"）；

@@ -462,15 +462,39 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on', 'y')
 
 
+def _flag(value) -> bool:
+    """
+    清单里的"信任"标志 → 布尔，**只认真正的真值**。
+
+    为什么不能 `bool(value)`（2026-11-01，外部审查 H4）：
+    `bool("false")` 是 `True` —— 别人发来的工程里写一行
+    `{"host_hooks": {"trust": "false"}}`，在任何人类读者眼里都是
+    "不信任"，而在这里会**打开任意代码执行**。这是全项目唯一会执行
+    项目代码的地方，判据不能有这种歧义。
+
+    认：`True` / `1` / `"true"` / `"yes"` / `"on"`（以及 `False` / `0` /
+    `"false"` / `"no"` / `"off"`）；其余（含 `"maybe"`、`{}`、`"0 "`）
+    一律按**不信任**处理。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return _truthy(value)
+
+
 def trust_decision(project_root, trust=None) -> tuple:
     """
     是否允许执行项目钩子 → `(allowed, 人话理由)`。
 
     优先级：显式参数 > 环境变量 > `storygraph.rules.json` 的
     `host_hooks.trust` > **默认拒绝**。
+
+    2026-11-01（外部审查 H4）：三处 `bool(...)` 全换成 `_flag(...)` ——
+    字符串 `"false"` 从前会被当成"信任"。
     """
     if trust is not None:
-        return bool(trust), '调用方显式指定 trust=' + str(bool(trust))
+        return _flag(trust), '调用方显式指定 trust=' + str(_flag(trust))
     env = os.environ.get(TRUST_ENV)
     if env is not None and str(env).strip() != '':
         return _truthy(env), f'环境变量 {TRUST_ENV}={env}'
@@ -483,10 +507,10 @@ def trust_decision(project_root, trust=None) -> tuple:
     if isinstance(data, dict):
         block = data.get(TRUST_RULES_KEY)
         if isinstance(block, dict) and 'trust' in block:
-            return (bool(block.get('trust')),
+            return (_flag(block.get('trust')),
                     f'{Path(path).name} 的 {TRUST_RULES_KEY}.trust')
         if 'trust_host_hooks' in data:
-            return (bool(data.get('trust_host_hooks')),
+            return (_flag(data.get('trust_host_hooks')),
                     f'{Path(path).name} 的 trust_host_hooks')
     return False, (f'默认不执行项目代码（可执行入口）。要授权：在项目根的 '
                    f'storygraph.rules.json 写 '

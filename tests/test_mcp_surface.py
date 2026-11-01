@@ -274,10 +274,15 @@ def test_declare_dry_run_writes_nothing_but_shows_the_diff(tmp_path):
 
 
 def test_declare_writes_and_hands_back_a_receipt(tmp_path):
-    """真写：回执必须说清**写了哪个文件**、diff 是什么、备份在哪。"""
+    """真写：回执必须说清**写了哪个文件**、diff 是什么、备份在哪。
+
+    ⚠ 2026-11-01 起 `dry_run` **默认 True**（外部审查 H2 / P1-11）：
+    要真写得显式写 `dry_run=False` —— 从前 MCP 客户端一调就直接改用户的
+    配置文件，护栏全写在调用方嘴上。
+    """
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
-    got = M.declare(root, 'weather', label='天气')
+    got = M.declare(root, 'weather', label='天气', dry_run=False)
     assert got['ok'] is True, got
     assert got['written'], '写了盘却没说是哪个文件'
     assert str(root / 'storygraph.rules.json') in got['written']
@@ -287,6 +292,22 @@ def test_declare_writes_and_hands_back_a_receipt(tmp_path):
     import json
     data = json.loads((root / 'storygraph.rules.json').read_text(encoding='utf-8'))
     assert any(s.get('name') == 'weather' for s in data['statements'])
+
+
+def test_declare_defaults_to_dry_run_and_touches_nothing(tmp_path):
+    """
+    默认**不写盘**：只算 diff，`written=[]`，而且文件真的没被创建。
+
+    审查 H2 的原话是"任何 MCP 客户端一调用就直接写用户的配置文件"——
+    判据就是"不传参数时，磁盘上什么都不会变"。
+    """
+    root = tmp_path / 'proj'
+    (root / 'game').mkdir(parents=True)
+    got = M.declare(root, 'weather', label='天气')
+    assert got['dry_run'] is True
+    assert got['written'] == []
+    assert got['diff'], '试算也要给出 diff（否则模型没东西可看）'
+    assert not (root / 'storygraph.rules.json').exists(), '默认居然写了盘'
 
 
 def test_declare_refuses_a_bad_name_and_says_why(tmp_path):
@@ -314,24 +335,27 @@ def test_declare_never_touches_asset_tables(tmp_path):
     wb.save(target)
     before = target.read_bytes()
     for name in ('weather', 'outfit'):
-        M.declare(root, name, label=name)
+        M.declare(root, name, label=name, dry_run=False)   # 真写，才叫"红线"
     after = target.read_bytes()
     assert before == after, '写声明竟然动了资源表'
 
 
-def test_table_export_is_honestly_not_implemented(tmp_path):
+def test_table_export_is_not_advertised_while_it_cannot_work(tmp_path):
     """
     ⚠ 我第一版这里只"读了注册表、比了 mtime"就返回 `ok=True` —— **假绿**。
-    现在一律 `ok=False` + "还没实现"，能力清单里也标 `planned`。
+
+    2026-11-01（外部审查 5.10 / P1-11）：它已经**不在工具清单里**了。
+    给模型广告一个永远失败的工具，比不给更糟 —— 它会一直重试。
+    函数本身留着（老调用方不会 ImportError），但谁调它都得到诚实的失败。
     """
     root = tmp_path / 'proj'
     (root / 'game').mkdir(parents=True)
     got = M.table_export(root)
     assert got['ok'] is False and '还没实现' in got['reason'], got
     assert got['written'] == []
-    planned = {t['name'] for t in M.capabilities()['tools']
-               if t.get('status') == 'planned'}
-    assert 'storygraph_table_export' in planned, planned
+    names = {t['name'] for t in M.capabilities()['tools']}
+    assert 'storygraph_table_export' not in names, \
+        '未实现的能力又回到工具清单里了（模型会一直重试）'
 
 
 def test_both_write_tools_use_the_same_receipt_shape(tmp_path):

@@ -21,6 +21,79 @@ import sys
 from pathlib import Path
 
 
+# ==================================================================
+#  坏输入必须**喊出来**（2026-11-01，外部审查 H1）
+# ==================================================================
+#
+# 审查报告的实机清单（当时**全部退出 0**）：
+#
+#     传一个不存在的 .rpy     → "成功"，给你一张只有表头的空表
+#     传一个不存在的项目目录   → "成功"，章节 0 个，通过"
+#     把目录当 .rpy 传        → "成功"
+#
+# 这在 CI 里是最坏的形态：批处理拿退出码判断成败，而工具对"我什么都没找到"
+# 和"一切正常"给了同一个答案。下面这组函数就是那条判据 —— **找不到就是找不到**，
+# 退出码 2（用法/环境问题），错误信息点名到具体路径。
+
+#: 退出码：0 通过 / 1 有错误或被门禁拦下 / 2 用法或环境问题
+EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
+
+
+def _err(msg: str) -> None:
+    """错误一律走 stderr（CI 只读 stderr 时也能拿到原因）。"""
+    print(msg, file=sys.stderr)
+
+
+def _require_file(path, *, suffix: str = '', what: str = '文件'):
+    """
+    校验"这个路径必须是一份存在的 `suffix` 文件"。返回 `(Path, 退出码)`。
+
+    退出码 `None` = 通过。三种错法各说各的（审查报告把它们归成同一个"成功"）：
+      · 不存在 → 多半是路径/拼写错了，把路径原样回显；
+      · 是目录 → 把目录当文件传，是参数位置的错，不是内容错；
+      · 后缀不对 → 明说只收什么。
+    """
+    p = Path(str(path))
+    if not p.exists():
+        _err(f'找不到{what}：{p}\n'
+             f'  这个路径不存在（检查一下路径或拼写）。')
+        return None, EXIT_USAGE
+    if p.is_dir():
+        _err(f'{p} 是一个目录，不是{what}（传 .rpy 文件的路径）。')
+        return None, EXIT_USAGE
+    if suffix and p.suffix.lower() != suffix.lower():
+        _err(f'{p} 不是 {suffix} 文件（{what}只收 {suffix}）。')
+        return None, EXIT_USAGE
+    return p, None
+
+
+def _check_project(path) -> int:
+    """
+    校验"项目根"：必须是存在的目录，且里面**至少有一个 .rpy**。
+
+    为什么要求后者：`validate <空目录>` 从前输出"章节脚本 0 个 …… 通过"
+    并退出 0。空目录不是"一个干净的项目"，是**指错了地方** ——
+    真项目里没有 .rpy 是不可能的。
+    """
+    root = Path(str(path))
+    if not root.exists():
+        _err(f'找不到项目目录：{root}\n'
+             f'  这个路径不存在（检查一下路径或拼写）。')
+        return EXIT_USAGE
+    if not root.is_dir():
+        _err(f'{root} 不是目录 —— 项目根要传一个目录（里面含 game/）。')
+        return EXIT_USAGE
+    scripts = list(root.rglob('*.rpy'))
+    if not scripts:
+        game = root / 'game'
+        hint = (f'  {root} 下没有任何 .rpy 文件 —— 项目根要选**含 game/ 的'
+                f'那一级**（例如 D:\\mygame，而不是 D:\\mygame\\game）。')
+        if game.is_dir():
+            hint += f'\n  （{game} 存在，那这个目录下面应该有剧本才对）'
+        _err(f'不是 Ren\'Py 项目：{root}\n' + hint)
+        return EXIT_USAGE
+    return None
+
 def _cmd_diff3(args) -> int:
     """
     **表 vs 源码**的拍级对账（只读）：`story/beat_merge.three_way`（设计文档 §5 第 6 步）。
@@ -166,9 +239,16 @@ def _cmd_validate(args) -> int:
     现在走 `collect_report()`：它与编辑器里的「项目体检」面板是同一份逻辑，
     且明确承诺"不产出任何文件"。数字口径由 `collect_stats()` 统一，
     面板看到的与 CI 看到的必然一致。
+
+    2026-11-01（外部审查 H1）：**坏输入不再报"通过"**。以前
+    `validate 不存在的目录` 打印"章节脚本 0 个 …… 通过：错误 0"并退出 0 ——
+    对 CI 来说那是"这个项目没问题"，而事实是**根本没找到项目**。
     """
     from storygraph.pipeline.build import collect_report, collect_stats
 
+    err = _check_project(args.project)
+    if err:
+        return err
     collected = collect_report(
         args.project, asset_dir=args.asset_dir, char_limit=args.char_limit)
     report = collected['report']
@@ -193,6 +273,9 @@ def _cmd_validate(args) -> int:
 def _cmd_build(args) -> int:
     from storygraph.pipeline.build import build_project, format_build_result
 
+    err = _check_project(args.project)
+    if err:
+        return err
     result = build_project(
         args.project, asset_dir=args.asset_dir, out_dir=args.out,
         engine=args.engine, strict=args.strict, char_limit=args.char_limit,
@@ -331,14 +414,49 @@ def _report_incremental(result, stream=None) -> None:
 def _cmd_table(args) -> int:
     from storygraph.story.script_table import open_rpy_as_table
 
-    registry = _load_registry(args)
-
     if args.action == 'rpy2xlsx':
+        # **坏输入必须喊出来**（2026-11-01，外部审查 H1）：从前传一个不存在的
+        # `.rpy`、或者把目录当 `.rpy` 传，都会"成功"生成一张只有表头的空表、
+        # 退出码 0。CI 与批处理拿退出码判成败，那等于对"我什么都没读到"
+        # 和"一切正常"给了同一个答案。
+        src, err = _require_file(args.path, suffix='.rpy', what='剧本文件')
+        if err:
+            return err
+        registry = _load_registry(args)
         from pathlib import Path as _P
-        _target = _P(args.out) if args.out else _P(args.path).with_suffix('.xlsx')
+        _target = _P(args.out) if args.out else src.with_suffix('.xlsx')
         _existed = _target.is_file()
-        out = open_rpy_as_table(args.path, args.out, registry=registry)
+        out = open_rpy_as_table(src, args.out, registry=registry)
+        from storygraph.story.script_table import last_open_stats
+        stats = last_open_stats()
         print(f'已生成剧本表：{out}')
+        if stats.get('errors'):
+            # 解析出的错误**逐条说**：这些句子在表里是缺的，而文件还在。
+            print(f'\n⚠ 这份剧本有 {len(stats["errors"])} 处**解析错误**，'
+                  f'表里对应的内容不完整：', file=sys.stderr)
+            for msg in stats['errors'][:10]:
+                print(f'  · {msg}', file=sys.stderr)
+            if len(stats['errors']) > 10:
+                print(f'  …还有 {len(stats["errors"]) - 10} 条', file=sys.stderr)
+            return 1
+        if not stats.get('statements'):
+            print(f'\n⚠ {src.name} 里**一条语句都没解析出来**'
+                  f'（空文件 / 不是 Ren\'Py 脚本 / 编码不对）。'
+                  f'生成的那张表只有表头。', file=sys.stderr)
+            return 1
+        if stats.get('suspect_say'):
+            # 审查 5.4 的那一条："台词引号没闭合 → 成功"。这种行在解析器眼里
+            # 是"没建模的写法"，会安静地变成原样文本 —— 表里没有它的台词位。
+            bad = stats['suspect_say']
+            print(f'\n⚠ 有 {len(bad)} 行**看起来是台词、但引号没闭合**：',
+                  file=sys.stderr)
+            for line_no, text in bad[:5]:
+                print(f'  · 第 {line_no} 行：{text[:60]}', file=sys.stderr)
+            if len(bad) > 5:
+                print(f'  …还有 {len(bad) - 5} 行', file=sys.stderr)
+            print('  这几行不会被当成台词（表里没有它们的位置）。'
+                  '先补上引号再来导表。', file=sys.stderr)
+            return 1
         # 覆盖了旧表 → 说清"你手写的东西"怎么样了（P0-E，第六轮）
         if _existed:
             try:
@@ -362,6 +480,15 @@ def _cmd_table(args) -> int:
                     print(f'  旧表备份：{kept["backup"]}')
         return 0
     if args.action == 'xlsx2rpy':
+        table, err = _require_file(args.path, suffix='.xlsx', what='剧本表')
+        if err:
+            return err
+        registry = _load_registry(args)
+        if getattr(args, 'source', None):
+            _src, err2 = _require_file(args.source, suffix='.rpy',
+                                       what='底稿 .rpy')
+            if err2:
+                return err2
         # 落盘逻辑全在 `pipeline.compile.compile_table`（2026-10-05 收口）。
         # 这里以前自己又写了一遍 import + compile_beats + write_generation ——
         # 与 `compile_table` 是同一件事的两份实现，于是新增的 `--source`
@@ -427,9 +554,65 @@ def _cmd_collab(args) -> int:
         print('        collab push 把改好的 Excel 写回库。')
         return 0
 
-    if not db.exists():
-        print(f'找不到数据库 {db}，先跑 collab init', file=sys.stderr)
-        return 2
+    if action == 'import-ir':
+        # 从 .rpy 灌进数据库：新项目第一次入库走这个
+        from storygraph.pipeline.build import load_asset_registry
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.story.beat_build import beats_from_parse_result
+        from storygraph.pipeline.build import discover_scripts
+
+        # 2026-11-01（外部审查 C1，P0）：**这里以前会拿参数当输出路径**。
+        # `collab import-ir --sheet D:\mygame\game\ch01.rpy` 会先把这个
+        # 1488 字节的剧本写成 15481 字节的 Excel，再拿它去 push ——
+        # 一次误传 = 一章剧本没了，而且先覆盖后校验，退出码还是 0。
+        #
+        # 现在三条闸：
+        #   ① 输出路径只认 `--out`（`--sheet` 仍认，但会提示改用 `--out`）；
+        #   ② 默认写到**系统临时目录**，不往项目里扔 `_import_tmp.xlsx`；
+        #   ③ 目标已存在 → 必须 `--force`；写之前自动备份。
+        err = _check_project(args.project)
+        if err:
+            return err
+        out = getattr(args, 'out', None) or args.sheet
+        if args.sheet and not getattr(args, 'out', None):
+            _err('提示：import-ir 的 `--sheet` 是**输出**路径，已改名为 `--out`'
+                 '（`--sheet` 仍然认，但建议改过来）。')
+        if out:
+            out_path = Path(out)
+            if out_path.exists() and not args.force:
+                _err(f'拒绝覆盖已有文件：{out_path}\n'
+                     f'  import-ir 会**整份重写**这个路径（它是张临时 Excel，'
+                     f'不是剧本库）。\n'
+                     f'  确认要覆盖就加 --force；想换个位置就用 --out <别的.xlsx>。')
+                return EXIT_USAGE
+        else:
+            import tempfile
+            out_path = Path(tempfile.mkdtemp(prefix='storygraph-import-')) \
+                / 'import_ir.xlsx'
+
+        scripts = discover_scripts(args.project)
+        if not scripts:
+            _err(f'{args.project} 里没有找到任何 .rpy —— 没什么可入库的。')
+            return EXIT_FAIL
+        analyzer = IncrementalRenPyAnalyzer()
+        pr, _ = analyzer.analyze(files=scripts, graph=None)
+        beats = beats_from_parse_result(pr)
+        if not beats:
+            _err(f'这 {len(scripts)} 个脚本里一条演出语句都没解析出来 —— '
+                 f'不入库（从前会安静地建一个空库并报成功）。')
+            return EXIT_FAIL
+        cs.init_db(db, users=[args.user])
+        from storygraph.story.excel_export import export_beats_to_excel
+        from storygraph.core.atomicio import RefusedWrite
+        try:
+            export_beats_to_excel(beats, out_path)
+        except RefusedWrite as e:
+            _err(str(e))
+            return EXIT_USAGE
+        res = cs.push(db, out_path, actor=args.user, force=True)
+        cs.upsert_assets(db, load_asset_registry(args.project), actor=args.user)
+        print(f"入库 {len(res['added'])} 行（来自 {len(scripts)} 个脚本）")
+        return 0
 
     if action == 'pull':
         if not args.sheet:
@@ -572,26 +755,9 @@ def _cmd_collab(args) -> int:
               else f"失败：{res['reason']}")
         return 0 if res['ok'] else 1
 
-    if action == 'import-ir':
-        # 从 .rpy 灌进数据库：新项目第一次入库走这个
-        from storygraph.pipeline.build import load_asset_registry
-        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
-        from storygraph.story.beat_build import beats_from_parse_result
-        from storygraph.pipeline.build import discover_scripts
-
-        scripts = discover_scripts(args.project)
-        analyzer = IncrementalRenPyAnalyzer()
-        pr, _ = analyzer.analyze(files=scripts, graph=None)
-        beats = beats_from_parse_result(pr)
-        cs.init_db(db, users=[args.user])
-        tmp = Path(args.sheet) if args.sheet else Path(args.project) / \
-            '_import_tmp.xlsx'
-        from storygraph.story.excel_export import export_beats_to_excel
-        export_beats_to_excel(beats, tmp)
-        res = cs.push(db, tmp, actor=args.user, force=True)
-        cs.upsert_assets(db, load_asset_registry(args.project), actor=args.user)
-        print(f"入库 {len(res['added'])} 行（来自 {len(scripts)} 个脚本）")
-        return 0
+    if not db.exists():
+        print(f'找不到数据库 {db}，先跑 collab init', file=sys.stderr)
+        return 2
 
     print(f'未知动作：{action}', file=sys.stderr)
     return 2
@@ -881,7 +1047,11 @@ def _cmd_compile(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='cli.py',
-        description='RenPy 剧情编辑器命令行：体检 / 构建 / 表格 / 协作')
+        description='RenPy 剧情编辑器命令行：体检 / 构建 / 表格 / 协作',
+        epilog='退出码：0 通过 / 1 有错误或被门禁拦下 / 2 用法或环境问题。'
+               '加 --debug 看被兜住的错误明细（也可以设 STORYGRAPH_DEBUG=1）。')
+    p.add_argument('--debug', action='store_true',
+                   help='打印被兜住的每一处错误（等价于 STORYGRAPH_DEBUG=1）')
     sub = p.add_subparsers(dest='cmd', required=True)
 
     def add_build_args(sp):
@@ -991,6 +1161,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--project', default='.', help='项目根目录')
     sp.add_argument('--asset-dir', default=None)
     sp.add_argument('--sheet', default=None, help='Excel 路径')
+    sp.add_argument('--out', default=None,
+                    help='import-ir 的**输出**表路径（默认写到系统临时目录；'
+                         '已存在时必须配 --force）')
     sp.add_argument('--user', default='anonymous', help='你的成员 ID')
     sp.add_argument('--users', default='', help='init 时登记的成员，逗号分隔')
     sp.add_argument('--owner', default='',
@@ -1201,18 +1374,45 @@ def _cmd_shape(args) -> int:
 
 
 def main(argv=None) -> int:
+    """
+    命令行入口。
+
+    `--debug`（2026-11-01，外部审查 5.4 / P1-7）：从前 `main()` 里写着
+    `if '--debug' in argv: raise`，而**参数表里根本没有 `--debug`** ——
+    argparse 会先报 "unrecognized arguments" 退 2，那个开关等于不存在。
+    现在它是真的全局开关：打开后
+
+      · 被 `swallow()` 兜住的每一处错误都打到 stderr（`[swallow] …`）；
+      · 异常不再被 `except Exception` 抹平，直接抛出来带 traceback；
+      · 命令**成功**但中途有东西被吞时，最后补一行摘要（见 `summary_line`）。
+    """
+    from storygraph.core import safeguard
+
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    # 在 parse 之前先认 `--debug`：连 argparse 自己报的参数错误也该带上明细。
+    want_debug = '--debug' in list(argv)
+    if want_debug:
+        safeguard.configure(debug=True)
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        code = args.func(args)
     except FileNotFoundError as e:
         print(f'路径不存在：{e}', file=sys.stderr)
-        return 2
+        code = EXIT_USAGE
     except Exception as e:                      # noqa: BLE001
         print(f'执行失败：{e}', file=sys.stderr)
-        if '--debug' in (argv or sys.argv):
+        if want_debug:
             raise
-        return 2
+        code = EXIT_USAGE
+    if not want_debug and getattr(args, 'cmd', '') != 'selfcheck':
+        # 成功也要说：**退出码 0、但中途有东西被吞掉**正是最该被看见的那一格。
+        # `selfcheck` 例外：它自己就逐项列出结论，再叠一行汇总只是噪音。
+        line = safeguard.summary_line()
+        if line:
+            print(line, file=sys.stderr)
+    return code
 
 
 if __name__ == '__main__':

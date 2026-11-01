@@ -80,9 +80,13 @@ _SCHEMAS = {
         'name': {'type': 'string'}, 'label': {'type': 'string'},
         'docs': {'type': 'string'},
         'dry_run': {'type': 'boolean',
-                    'description': 'true = 只试算给 diff、不写盘（建议先这样）'}},
+                    'description': '**默认 true**（只试算给 diff、不写盘）；'
+                                   '要真写必须显式给 dry_run=false'}},
         'required': ['name']},
-    'table_export': {'type': 'object', 'properties': {}, 'required': []},
+    # ⚠ `table_export` **撤下**（2026-11-01，外部审查 5.10 / P1-11）：
+    # 它永远返回 `ok=False + 还没实现`，却一直出现在"工具清单"里 ——
+    # 给模型广告一个永远失败的工具，它会一直重试。`mcp_surface.table_export`
+    # 函数还留着（老脚本 import 不会炸），但 MCP 客户端已经看不到它了。
 }
 
 #: 不需要项目根的工具（其余的一律要）

@@ -212,32 +212,47 @@ def test_write_tools_come_from_the_capability_declaration():
 def test_a_second_write_tool_is_gated_without_editing_agent(tmp_path,
                                                             monkeypatch):
     """
-    `table_export` 也是声明为写盘的工具 → 它必须走同一条审批闸门。
+    **写盘工具自动进闸门** —— 不用改 `execute` 的代码。
 
-    这条用例的价值不在 `table_export` 本身（它还是诚实桩），而在
-    "将来真做出写盘的 table_export 时，审批**自动**覆盖它"。
+    这条用例的价值不在某个具体工具，而在"清单里声明 `kind='write'` 的工具
+    **自动**被审批覆盖"。2026-11-01 起 `table_export` 已从清单撤下
+    （永远失败的工具不该被广告），所以这里换成 `declare` 来验同一条闸门。
     """
     from storygraph import mcp_surface as M
 
     seen = {}
 
-    def fake_table_export(project_root, *, dry_run=False):
-        seen['dry_run'] = dry_run
-        return {'ok': True, 'written': [], 'dry_run': dry_run,
-                'source': 'test', 'reason': ''}
+    def fake_declare(project_root, name, **kw):
+        seen['dry_run'] = kw.get('dry_run')
+        seen['name'] = name
+        return {'ok': True, 'written': [], 'dry_run': kw.get('dry_run'),
+                'source': 'test', 'reason': '', 'diff': '',
+                'action': 'would-write'}
 
-    monkeypatch.setattr(M, 'table_export', fake_table_export)
+    monkeypatch.setattr(M, 'declare', fake_declare)
 
     def approve(tool, args, preview):
         seen['tool'] = tool
         seen['preview_dry'] = preview.get('dry_run')
         return False
 
-    got = A.execute('storygraph_table_export', {},
+    got = A.execute('storygraph_declare', {'name': 'weather'},
                     project_root=tmp_path, approve=approve)
-    assert seen.get('tool') == 'table_export', '写盘工具绕过了审批'
+    assert seen.get('tool') == 'declare', '写盘工具绕过了审批'
     assert seen.get('dry_run') is True, '审批前没有强制 dry_run'
     assert got['written'] == []
+
+
+def test_unadvertised_tool_is_not_whitelisted_as_a_writer():
+    """
+    `table_export` 已撤出清单（审查 5.10）→ 它不再是一个"写盘工具"。
+
+    这条钉住撤下的**方向**：不是把函数删了，而是清单与闸门都说它不存在。
+    """
+    from storygraph.ai import agent as A
+
+    assert 'table_export' not in A.write_tool_names()
+    assert 'declare' in A.write_tool_names()
 
 
 def test_gate_event_is_emitted_so_the_panel_can_ask(tmp_path):

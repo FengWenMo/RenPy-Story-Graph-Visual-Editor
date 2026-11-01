@@ -40,20 +40,22 @@ def test_initialize_handshake():
 def test_tools_list_comes_from_capabilities_not_a_copy():
     """
     ⭐ **防漂移**：清单里每个工具的描述与边界都来自 `mcp_surface.capabilities()`；
-    没实现的（如 table_export）**也列**（客户端要知道它存在但还不能用），
     而**能力清单里没有的**一律不列。
+
+    ⚠ 2026-11-01 改口径（外部审查 5.10 / P1-11）：没实现的工具**不再列**
+    （从前"也列，好让客户端知道它存在"）—— 给模型一个永远失败的工具，
+    它会一直重试，比不告诉它更糟。
     """
     from storygraph import mcp_surface as M
     got = S.handle({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'})
     names = {t['name'] for t in got['result']['tools']}
     assert 'storygraph_project_context' in names
     assert 'storygraph_declare' in names
-    assert 'storygraph_table_export' in names, '未实现的也要让客户端知道'
+    assert 'storygraph_table_export' not in names, '未实现的工具又被广告了'
     # 每个 schema 都要能对上能力清单里的边界文字
     by_name = {t['name']: t for t in got['result']['tools']}
     assert '已知边界' in by_name['storygraph_ask_engine']['description'], \
         by_name['storygraph_ask_engine']['description']
-    assert '还没实现' in by_name['storygraph_table_export']['description']
     # 能力清单里没实现的工具不许出现在 server 清单里
     assert not (names - {f'storygraph_{k}' for k in S._SCHEMAS}), names
 
