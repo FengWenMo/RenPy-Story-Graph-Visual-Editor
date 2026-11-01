@@ -47,6 +47,7 @@ from pathlib import Path
 from storygraph.core.safeguard import swallow
 
 from storygraph.app import beats as B
+from storygraph.app.asset_catalog import ASSET_KINDS, AssetCatalog
 
 
 __all__ = ['AssetRegistryMixin']
@@ -75,10 +76,9 @@ class AssetRegistryMixin:
                 'engine_facts',
                 '_transforms_decision', '_loaded_registry', '_linker')
 
-    #: 资产种类 → 资源表字段名（与 `_write_candidate_sheets` 的映射同源）
-    ASSET_KINDS = {'character': 'characters', 'image': 'images',
-                   'transform': 'transforms', 'music': 'music',
-                   'sound': 'sounds', 'voice': 'voices'}
+    #: 资产种类 → 资源表字段名。**唯一真源在 `app.asset_catalog`**
+    #: （2026-11-01 服务化第一刀：候选的判据搬过去了，常量跟着走）。
+    ASSET_KINDS = ASSET_KINDS
 
     def _ensure_tables_on_open(self, reg, created, created_counts, sync_info, walk, load_asset_registry):
         """打开项目时「没有资源表就当场建一张」那一整段（M4 从 load_assets 搬出，行为一字不改）。返回更新后的 (reg, created, created_counts, sync_info)。"""
@@ -453,14 +453,20 @@ class AssetRegistryMixin:
         """
         return getattr(self, '_last_reconcile', None) or {}
 
+    def catalog(self) -> AssetCatalog:
+        """
+        资源侧的只读查询服务（现建一个很轻：只包一份 registry 引用）。
+
+        2026-11-01 服务化第一刀：`characters` / `character_labels` /
+        `vocabulary` / `asset_choices` 的实现搬去 `app.asset_catalog`，
+        这里只留转发 —— 那些判据于是可以拿一个假 registry 直接单测
+        （`tests/test_asset_catalog.py`），不必造一个会话、不必碰 Qt。
+        """
+        return AssetCatalog(self.registry(), self.project_root)
+
     def characters(self) -> list:
         """可用说话人 ID（排序）。"""
-        reg = self.registry()
-        try:
-            return sorted((getattr(reg, 'characters', {}) or {}).keys())
-        except Exception as e:                    # noqa: BLE001
-            swallow('app.session_assets.characters', e)
-            return []
+        return self.catalog().characters()
 
     def character_labels(self) -> dict:
         """
@@ -472,64 +478,19 @@ class AssetRegistryMixin:
           2. 资源表里角色那行的 `name`（`describe_asset` 用的也是它）；
           3. 都没有 → 不出现（调用方原样显示 tag）。
 
-        为什么不用 `Registry` 的 name 直接当唯一真源：它只覆盖"资产表里登记过
-        的角色"，`narrator` / `n` 这种引擎自带的、或者脚本里就地 `define` 的
-        角色根本不在表里；映射里却能随手写。两处都读，才不会有"这个角色
-        怎么没翻译"。
+        判据见 `app.asset_catalog.AssetCatalog.character_labels`。
         """
-        out = {}
-        try:
-            reg = self.registry()
-            for tag, row in (getattr(reg, 'characters', {}) or {}).items():
-                name = str((row or {}).get('name') or '').strip() \
-                    if isinstance(row, dict) else ''
-                if name:
-                    out[str(tag)] = name
-        except Exception as e:                    # noqa: BLE001
-            swallow('app.session_assets.character_labels', e)
-        vocab = self.vocabulary()
-        for term in vocab.of_kind('character'):
-            shown = term.display()
-            if shown and shown != term.id:
-                out[term.id] = shown
-        return out
+        return self.catalog().character_labels()
 
     def vocabulary(self):
         """
         项目那份映射的**词汇表**（引擎写法 → 人话）。没有映射 → 空表。
 
         ⚠ 这是界面唯一该拿词汇表的地方：`window_card` / `window_assets` /
-        参数列候选全都走它。从前 `window_card._vocabulary()` 自己读
-        `mapping_cached(...)`，却把返回值当成"对象"用了（它其实是
-        `(data, warnings, path)` 元组）→ 异常被吞掉 → **真机上词汇表永远是空的**，
-        只有单测里注入的那份在生效。一处访问器就不可能有这个错。
+        参数列候选全都走它。实现（以及"为什么不能各自去读 `mapping_cached`"）
+        见 `app.asset_catalog.AssetCatalog.vocabulary`。
         """
-        from storygraph.assets import asset_mapping as AM
-        from storygraph.assets import vocabulary as V
-
-        root = str(getattr(self, 'project_root', '') or '')
-        if not root:
-            return V.EMPTY_VOCABULARY
-        data = {}
-        try:
-            data, _warnings, _path = AM.mapping_cached(root)
-        except Exception as e:                    # noqa: BLE001 - 映射坏了不该拦界面
-            swallow('app.session_assets.vocabulary.mapping', e)
-        vocab = V.from_mapping(data)
-        calls = []
-        try:
-            from storygraph.story.statement_registry import StatementRegistry
-            calls = list(getattr(StatementRegistry.for_project(root), 'calls',
-                                 None) or ())
-        except Exception as e:                    # noqa: BLE001
-            swallow('app.session_assets.vocabulary.calls', e)
-        # 层号决定胜负（P0-2）：`mapping` 是命名域的正本，`calls.label` 是
-        # 项目声明 —— 两者谁赢**写在 `core/authority.py`**，不看这里的书写
-        # 顺序（从前 `plus()` 是"后来者优先"，写反了就静默反过来）。
-        return V.Vocabulary.merged([
-            ('calls', V.cue_terms(calls)),
-            ('mapping', vocab.as_terms()),
-        ])
+        return self.catalog().vocabulary()
 
     def participants(self, limit: int = 8) -> list:
         """本项目的参与角色（含脚本声明；见 `beats.participants`）。"""
@@ -560,48 +521,20 @@ class AssetRegistryMixin:
         > 添加立绘，添加语音，添加音乐，全部都没有反应！
         > 我不是已经注册了资产吗？为何不能从中选取并导入呢？？？
 
-        **值是"脚本里该写的那个东西"**：
-          · image      → image spec（`ling happy` / `bg bg9_5`），与选择器一致
-          · music/sound/voice → **资产 ID**（与 Excel 的候选表同源！真实路径
-            由渲染器 `_render_audio_from_fields` 翻出来，查不到就写
-            `# TODO: 缺少资源 …`，所以写 ID 是安全的）
-          · transform/character → ID
-
-        候选来源与 Excel 的下拉**同一份数据**（`registry.<复数>`），
-        说明文字复用 `describe_asset` —— 不另造一套"什么算可选资产"。
+        **值是"脚本里该写的那个东西"**（image → image spec，音频 → 资产 ID），
+        候选来源与说明文字的判据见 `app.asset_catalog.AssetCatalog.asset_choices`。
         """
-        reg = self.registry()
-        field = self.ASSET_KINDS.get(str(asset_type or ''))
-        if reg is None or not field:
-            return []
-        rows = getattr(reg, field, None) or {}
-        out = []
-        for aid in sorted(rows.keys()):
-            row = rows.get(aid) or {}
-            if asset_type == 'image':
-                value = self._image_spec_of(aid, row)
-            else:
-                value = aid
-            out.append((value, self._describe_asset(asset_type, row)))
-        return out
-    @staticmethod
+        return self.catalog().asset_choices(asset_type)
 
+    @staticmethod
     def _image_spec_of(aid, row) -> str:
-        """图片行 → image spec（`tag attr`）。复用 `app.picker`（选择器同源）。"""
-        try:
-            from storygraph.app import picker as P
-            return P.image_spec_of(aid, row)
-        except Exception:                     # noqa: BLE001
-            return str(aid)
-    @staticmethod
+        """图片行 → image spec（`tag attr`）。转发到服务层（选择器同源）。"""
+        return AssetCatalog.image_spec_of(aid, row)
 
+    @staticmethod
     def _describe_asset(asset_type, row) -> str:
-        try:
-            from storygraph.assets.asset_registry import describe_asset
-            return describe_asset(asset_type, row)
-        except Exception as e:                     # noqa: BLE001
-            swallow('app.session_assets._describe_asset', e)
-            return ''
+        """一行 → 人话说明。转发到服务层。"""
+        return AssetCatalog.describe_asset(asset_type, row)
 
     def asset_linker(self):
         """
