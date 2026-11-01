@@ -2573,8 +2573,12 @@ class ParseResultBuilder:
 
     def _dispatch_node(self, node, box):
         """
-        `_walk` 的那条大分发（23 个 `isinstance`）—— **原样搬出来**，
-        只为拆复杂度；判据/注释/顺序一个字都没动。
+        AST 节点分发的**第一段**：声明区 + 台词/菜单。
+
+        2026-11-01（技术债第十轮）：这里从前是 245 行 / 43 分支的一条大
+        `isinstance` 链。现在按**职责**切成四段，每段末尾把"剩下的"交给
+        下一段（`_dispatch_stage` → `_dispatch_fidelity` → `_dispatch_flow`）。
+        判据/注释/顺序一个字都没动：节点类型互不重叠，"先问谁"不影响结果。
 
         上下文（`add_stmt` / 行尾注释 / 条件注释 / 结构位…）全在 `box` 上：
         它们是**逐层递归共享的可变状态**，必须显式传递，不能各留一份。
@@ -2658,7 +2662,12 @@ class ParseResultBuilder:
         elif isinstance(node, MenuNode):
             self._w_menu(node, box)
 
-        elif isinstance(node, ShowNode):
+        else:
+            self._dispatch_stage(node, box)
+
+    def _dispatch_stage(self, node, box):
+        """分发**第二段**：舞台/声音（show / scene / hide / play / voice / camera）。"""
+        if isinstance(node, ShowNode):
             box.add_stmt(Statement.make_show(
                 node.image, at=node.at, as_=node.as_, with_=node.with_,
                 zorder=node.zorder, onlayer=node.onlayer,
@@ -2693,7 +2702,21 @@ class ParseResultBuilder:
                 node.name, box.accum_cond,
                 source=(node.filename, node.line_number)))
 
-        elif isinstance(node, TopLevelRegionNode):
+        elif isinstance(node, CameraNode):
+            # 3D 舞台的 `camera` 块（2026-10-07）：与循环块同一档 ——
+            # 头行（层名）结构化、块体（ATL 属性）逐字。
+            if box.current_label:
+                box.add_stmt(Statement.make_camera(
+                    node.text, header=node.header, layer=node.layer,
+                    body=node.body, condition=box.accum_cond,
+                    source=(node.filename, node.line_number)))
+
+        else:
+            self._dispatch_fidelity(node, box)
+
+    def _dispatch_fidelity(self, node, box):
+        """分发**第三段**：保真通道（顶层区间 / python / 注释 / 未建模块）。"""
+        if isinstance(node, TopLevelRegionNode):
             # **整个顶层区间**（label 之外的一切）→ 文件级保真块，
             # 按原文顺序追加。见 `TopLevelRegionNode` 的 docstring。
             for head, code, line_no in node.blocks or ():
@@ -2732,7 +2755,29 @@ class ParseResultBuilder:
                     node.text, box.accum_cond,
                     source=(node.filename, node.line_number)))
 
-        elif isinstance(node, LoopNode):
+        elif isinstance(node, RawNode):
+            if box.current_label:
+                # **未建模块**先记一笔账（体检报告 / 门禁要用），
+                # 内容照旧走下面同一条保真通道。见
+                # `ParseResult.unknown_blocks` 的说明。
+                if isinstance(node, UnknownBlockNode):
+                    box.result.unknown_blocks.append({
+                        'head': node.head,
+                        'file': node.filename,
+                        'line': node.line_number,
+                        'lines': len(node.block_raw) + 1,
+                    })
+                box.add_stmt(Statement.make_raw(
+                    node.text, raw_kind=node.raw_kind,
+                    condition=box.accum_cond,
+                    source=(node.filename, node.line_number)))
+
+        else:
+            self._dispatch_flow(node, box)
+
+    def _dispatch_flow(self, node, box):
+        """分发**第四段**：流程（loop / jump / call / return / if）。"""
+        if isinstance(node, LoopNode):
             # 循环块（D2/T0）：**头行一条语句 + 块体各一条语句**。
             #
             # 这里是"给拍模型加作用域"的落点：
@@ -2760,32 +2805,6 @@ class ParseResultBuilder:
                     nest_path=join_nest(
                         box.nest_path, f"loop:{box.counters['loop']}"),
                     counters=box.counters)
-
-        elif isinstance(node, CameraNode):
-            # 3D 舞台的 `camera` 块（2026-10-07）：与循环块同一档 ——
-            # 头行（层名）结构化、块体（ATL 属性）逐字。
-            if box.current_label:
-                box.add_stmt(Statement.make_camera(
-                    node.text, header=node.header, layer=node.layer,
-                    body=node.body, condition=box.accum_cond,
-                    source=(node.filename, node.line_number)))
-
-        elif isinstance(node, RawNode):
-            if box.current_label:
-                # **未建模块**先记一笔账（体检报告 / 门禁要用），
-                # 内容照旧走下面同一条保真通道。见
-                # `ParseResult.unknown_blocks` 的说明。
-                if isinstance(node, UnknownBlockNode):
-                    box.result.unknown_blocks.append({
-                        'head': node.head,
-                        'file': node.filename,
-                        'line': node.line_number,
-                        'lines': len(node.block_raw) + 1,
-                    })
-                box.add_stmt(Statement.make_raw(
-                    node.text, raw_kind=node.raw_kind,
-                    condition=box.accum_cond,
-                    source=(node.filename, node.line_number)))
 
         elif isinstance(node, JumpNode):
             box.add_stmt(Statement.make_jump(
