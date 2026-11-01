@@ -1445,70 +1445,7 @@ class BeatCardEditor(QWidget):
         # —— 控制流卡（call / jump）——
         self._build_flow_bar(root)
 
-        # —— 语句条：**这一拍是什么**（2026-10-18）——
-        #
-        # 为什么要有它：卡片从前**假设每一拍都是一句台词**。于是一条
-        # `play_music track=bgm file="bgm/theme.ogg"` 或者 `styled "红色" "#ff0000"`
-        # 在界面上长成"一个空的说话人 + 一个空的台词框 + 一张空立绘网格"，
-        # 而它真正能改的那几格（参数）被埋在卡片最底下 —— 要滚过一整屏
-        # 与它无关的东西才看得到。用户 2026-10-18：**"不是每个写法都跟 show
-        # 一样与图片相关"**（有的可能是声音、是文字），排版得跟着内容走。
-        self._stmt_bar = QFrame()
-        self._stmt_bar.setObjectName('statementBar')
-        self._stmt_bar.setProperty('role', 'card')
-        bar = QVBoxLayout(self._stmt_bar)
-        bar.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
-                               T.SPACE['sm'], T.SPACE['sm'])
-        bar.setSpacing(2)
-        self._stmt_title = NarrowWrapLabel('')
-        self._stmt_title.setProperty('role', 'section')
-        self._stmt_title.setWordWrap(True)
-        bar.addWidget(self._stmt_title)
-        self._stmt_head = NarrowWrapLabel('')
-        self._stmt_head.setProperty('role', 'caption')
-        self._stmt_head.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
-        self._stmt_head.setWordWrap(True)
-        self._stmt_head.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bar.addWidget(self._stmt_head)
-        self._stmt_bar.setVisible(False)
-        root.addWidget(self._stmt_bar)
-
-        #: 这一拍里**工具没建模、但会原样执行**的那些行（`play ambience` /
-        #: `show screen` / 自定义块）—— 它们不属于任何一格，从前只躺在
-        #: 折叠着的高级区里，卡片看起来像"什么都没有"。
-        #:
-        #: ⚠ **不放进语句条**（2026-10-18）：台词拍也可能有这种行
-        #: （`play ambience` 后面紧跟一句台词就是同一拍），而语句条在没有
-        #: 语句时是隐藏的 —— 放进去就会跟着一起消失。
-        self._loose_label = NarrowWrapLabel('')
-        self._loose_label.setProperty('role', 'caption')
-        self._loose_label.setWordWrap(True)
-        self._loose_label.setVisible(False)
-        root.addWidget(self._loose_label)
-
-        # —— 语句参数（**跟着这一拍的语句走**；没有参数就整组隐藏）——
-        #
-        # ⚠ 位置在**台词之前**（2026-10-18 挪上来的）：语句拍的参数就是它的
-        # 正文，而台词是可选的附加物。放在台词下面那版实测要滚一整屏才看得见。
-        #
-        # 为什么要有这一组（用户 2026-10-07 的意见）：动态参数列**只在 Excel**
-        # 里做了，卡片上还是"候选注释"（`app.beats.spec_arg_choices_for`
-        # 一直是"只有测试在用"）。可编剧是**在卡片上写**的 —— 表里有下拉、
-        # 卡片上没有，等于这条能力只对着会开 Excel 的人。
-        #
-        # 这里一格一个参数：有候选就是**可编辑下拉**（手打新值照样能过，
-        # 与 Excel 的 `showErrorMessage=False` 同一条口径），没候选就是普通
-        # 输入框。值写回的路径与 Excel **完全同一条**
-        # （`app.beats.apply_spec_arg_fields` → `beat_model.fold_spec_arg_columns`），
-        # 所以"卡片上改"与"表里改"的结果必然一致。
-        self._spec_host = QWidget()
-        self._spec_form = QVBoxLayout(self._spec_host)
-        self._spec_form.setContentsMargins(0, 0, 0, 0)
-        self._spec_form.setSpacing(T.SPACE['xs'])
-        self._spec_host.setVisible(False)
-        #: `{列名: 颜色小方块}`（值是颜色时才建，见 `set_spec_args`）
-        self._spec_swatches: dict = {}
-        root.addWidget(self._spec_host)
+        self._build_statement_area(root)
 
         # —— 台词区（说话人 / 台词 / 字数 / 富文本预览 / 后缀）——
         #
@@ -1748,6 +1685,79 @@ class BeatCardEditor(QWidget):
         stage_lay.addWidget(_asset_row([('BGM', '音乐'), ('Voice', '语音')],
                                        'assetRowAudio'))
 
+        self._build_meta_area(root)
+
+        self._build_footer(root)
+
+    def _build_statement_area(self, root) -> None:
+        """语句条 / 零散行 / 语句参数宿主（拆自 `_build`，2026-11-01）。"""
+        # —— 语句条：**这一拍是什么**（2026-10-18）——
+        #
+        # 为什么要有它：卡片从前**假设每一拍都是一句台词**。于是一条
+        # `play_music track=bgm file="bgm/theme.ogg"` 或者 `styled "红色" "#ff0000"`
+        # 在界面上长成"一个空的说话人 + 一个空的台词框 + 一张空立绘网格"，
+        # 而它真正能改的那几格（参数）被埋在卡片最底下 —— 要滚过一整屏
+        # 与它无关的东西才看得到。用户 2026-10-18：**"不是每个写法都跟 show
+        # 一样与图片相关"**（有的可能是声音、是文字），排版得跟着内容走。
+        self._stmt_bar = QFrame()
+        self._stmt_bar.setObjectName('statementBar')
+        self._stmt_bar.setProperty('role', 'card')
+        bar = QVBoxLayout(self._stmt_bar)
+        bar.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
+                               T.SPACE['sm'], T.SPACE['sm'])
+        bar.setSpacing(2)
+        self._stmt_title = NarrowWrapLabel('')
+        self._stmt_title.setProperty('role', 'section')
+        self._stmt_title.setWordWrap(True)
+        bar.addWidget(self._stmt_title)
+        self._stmt_head = NarrowWrapLabel('')
+        self._stmt_head.setProperty('role', 'caption')
+        self._stmt_head.setFont(QFont(T.FONTS['mono'][0], T.FONTS['mono'][1]))
+        self._stmt_head.setWordWrap(True)
+        self._stmt_head.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        bar.addWidget(self._stmt_head)
+        self._stmt_bar.setVisible(False)
+        root.addWidget(self._stmt_bar)
+
+        #: 这一拍里**工具没建模、但会原样执行**的那些行（`play ambience` /
+        #: `show screen` / 自定义块）—— 它们不属于任何一格，从前只躺在
+        #: 折叠着的高级区里，卡片看起来像"什么都没有"。
+        #:
+        #: ⚠ **不放进语句条**（2026-10-18）：台词拍也可能有这种行
+        #: （`play ambience` 后面紧跟一句台词就是同一拍），而语句条在没有
+        #: 语句时是隐藏的 —— 放进去就会跟着一起消失。
+        self._loose_label = NarrowWrapLabel('')
+        self._loose_label.setProperty('role', 'caption')
+        self._loose_label.setWordWrap(True)
+        self._loose_label.setVisible(False)
+        root.addWidget(self._loose_label)
+
+        # —— 语句参数（**跟着这一拍的语句走**；没有参数就整组隐藏）——
+        #
+        # ⚠ 位置在**台词之前**（2026-10-18 挪上来的）：语句拍的参数就是它的
+        # 正文，而台词是可选的附加物。放在台词下面那版实测要滚一整屏才看得见。
+        #
+        # 为什么要有这一组（用户 2026-10-07 的意见）：动态参数列**只在 Excel**
+        # 里做了，卡片上还是"候选注释"（`app.beats.spec_arg_choices_for`
+        # 一直是"只有测试在用"）。可编剧是**在卡片上写**的 —— 表里有下拉、
+        # 卡片上没有，等于这条能力只对着会开 Excel 的人。
+        #
+        # 这里一格一个参数：有候选就是**可编辑下拉**（手打新值照样能过，
+        # 与 Excel 的 `showErrorMessage=False` 同一条口径），没候选就是普通
+        # 输入框。值写回的路径与 Excel **完全同一条**
+        # （`app.beats.apply_spec_arg_fields` → `beat_model.fold_spec_arg_columns`），
+        # 所以"卡片上改"与"表里改"的结果必然一致。
+        self._spec_host = QWidget()
+        self._spec_form = QVBoxLayout(self._spec_host)
+        self._spec_form.setContentsMargins(0, 0, 0, 0)
+        self._spec_form.setSpacing(T.SPACE['xs'])
+        self._spec_host.setVisible(False)
+        #: `{列名: 颜色小方块}`（值是颜色时才建，见 `set_spec_args`）
+        self._spec_swatches: dict = {}
+        root.addWidget(self._spec_host)
+
+    def _build_meta_area(self, root) -> None:
+        """备注 / 条件 / 高级区（拆自 `_build`，2026-11-01）。"""
         # —— 备注 ——
         row3 = QHBoxLayout()
         row3.setSpacing(T.SPACE['sm'])
@@ -1822,6 +1832,8 @@ class BeatCardEditor(QWidget):
             adv.addLayout(box)
         root.addWidget(self._adv_host)
 
+    def _build_footer(self, root) -> None:
+        """保存 / 撤销 / 防御性提示（拆自 `_build`，2026-11-01）。"""
         # —— 保存 / 撤销（这张卡片的）——
         # 用户 2026-10-01 明确要这两个按钮，而不是只有 Ctrl+S：
         #   > 我希望卡片端加两个功能：一个是保存该卡片的修改，

@@ -210,8 +210,8 @@
    "branches": 18
   },
   "storygraph/ui_qt/main_window.py::_build": {
-   "lines": 450,
-   "branches": 5
+   "lines": 272,
+   "branches": 1
   },
   "storygraph/ui_qt/main_window.py::_build_card_page": {
    "lines": 268,
