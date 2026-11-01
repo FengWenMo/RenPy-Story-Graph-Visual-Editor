@@ -38,6 +38,10 @@ import re
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+# 导出的**纯判定**（默认路径 / 门禁代码 / 能不能强写）搬去 `export_plan`
+# （2026-11-01，服务化第三刀）：那几个判据只认路径、问题对象、结果字典，
+# 与 Qt 和会话状态都无关，所以能脱开界面单测。
+from storygraph.app import export_plan
 from storygraph.app.stage import build_frames
 # 门禁这一套（`export` / `_patch_note` 全靠它们）：
 #   · `evaluate_generation` + `labels_in_danger` —— 落盘**前**预检；
@@ -278,34 +282,16 @@ class ExportMixin:
             decision = True
         self._transforms_decision = decision
         return decision
-    @staticmethod
-    def _issue_message(issue) -> str:
-        """
-        门禁发现 → 一句给人看的话。
-
-        统一在这里取：`blocking` 要交给 UI 直接显示，
-        而 `GuardIssue` 有 `.message`、别的实现可能只有 `__str__`
-        （单测里塞过裸字符串）。三种形态都兜住，别在调用点各写一遍。
-        """
-        return str(getattr(issue, 'message', None) or issue)
     def default_output_path(self) -> Path:
         """
-        导出对话框的**默认路径**。
+        导出对话框的**默认路径**（判据在 `app.export_plan`，这里只递两个属性）。
 
-        ⚠ 2026-10-18（审计 P1-7"写回不闭环"）：从前**总是** `build/renpy/
-        <stem>.generated.rpy` —— 于是策划改完卡片、导出，原章节文件**一动
-        不动**，还得自己把产物搬回去。审计原话："写回落到 build/renpy/，
-        不重载编辑器、不改原章节"。
-
-        现在：**这一章有源文件就默认原地写回**（增量合并 + 安全门禁：
-        对位成功时逐字节保留、只换改过的行；对不上时门禁会拦，绝不静默
-        覆盖）。没有源文件（新建章节）才落到 `build/renpy/`。
+        保留这个方法而不是让前端直接调那个函数：`script_path` /
+        `project_root` 是**会话状态**，前端不该为了算一个默认路径去摸它们
+        （也摸不到 —— 那是 `_session` 的私有状态）。
         """
-        if self.script_path:
-            return Path(self.script_path)
-        stem = self.script_path.stem if self.script_path else 'out'
-        base = (self.project_root or Path('.')) / 'build' / 'renpy'
-        return base / f'{stem}.generated.rpy'
+        return export_plan.default_output_path(self.script_path,
+                                               self.project_root)
     def export(self, target, force: bool = False) -> dict:
         """
         落盘导出。**所有安全检查都在这里**，前端只管挑路径。
@@ -406,7 +392,7 @@ class ExportMixin:
         # `$ x = 1` / `play music …` 是**写进去了、事后才发现**的那类事。
         # 塞进 `warnings` 之后：编辑器这条路会进日志的"提示"段，剧本表那条路
         # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
-        _warns = [self._issue_message(i) for i in art.issues
+        _warns = [export_plan.issue_message(i) for i in art.issues
                   if not i.is_blocking]
         _removal = removal_note(note).lstrip('；')
         if _removal:
@@ -526,14 +512,14 @@ class ExportMixin:
         # Python 语法错误都是"产物本身坏了"，覆盖只会把坏脚本写进 game/。
         # `force` 的语义只有一条 —— "我确认要覆盖手写文件"。
         return {'ok': False, 'path': target,
-                'blocking': [self._issue_message(i) for i in blocking],
+                'blocking': [export_plan.issue_message(i) for i in blocking],
                 # **告警单独一格**（2026-10-25，审计第四轮 P2）：
                 # 从前 warn 级也塞进 `blocking`，拒因列表里第一条是
                 # "产物写在 game/ 目录里"（那需要**挪位置**，不是这次
                 # 拒写的原因），真正的原因反而被挤到后面看不见。
-                'warnings': [self._issue_message(i)
+                'warnings': [export_plan.issue_message(i)
                              for i in issues if not i.is_blocking],
-                'codes': [str(getattr(i, 'code', '')) for i in blocking],
+                'codes': export_plan.block_codes(blocking),
                 'note': note['text_note'], 'todos': 0}
 
     def _write_export(self, target, text, note, force):
@@ -587,10 +573,10 @@ class ExportMixin:
         _blk = [i for i in art.issues if i.is_blocking]
         _warn = [i for i in art.issues if not i.is_blocking]
         return {'ok': False, 'path': target,
-                'blocking': [self._issue_message(i) for i in _blk]
+                'blocking': [export_plan.issue_message(i) for i in _blk]
                             or ['生成门禁拒绝写入'],
-                'warnings': [self._issue_message(i) for i in _warn],
-                'codes': [str(getattr(i, 'code', '')) for i in _blk],
+                'warnings': [export_plan.issue_message(i) for i in _warn],
+                'codes': export_plan.block_codes(_blk),
                 'review_path': art.review_path,
                 'note': note['text_note'], 'todos': 0,
                 # 这一刀到底是不是"无损的增量"（前端据此说**真话**，见

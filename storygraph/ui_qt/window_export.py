@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.app import export_plan
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
 from PySide6.QtCore import Qt, QTimer
@@ -62,8 +63,12 @@ def overwritable(res: dict) -> bool:
     _overwritable(res)`）—— 而测试只直接调过那个函数，从没走这条分支。
     症状是最糟的那种：**点了导出什么都不发生**（没有对话框、没有文件、
     状态栏也不说话）。
+
+    ⚠ 判据本身搬去 `app.export_plan.overridable`（2026-11-01，服务化第三
+    刀）：`window_graph_ops` 里**又手写过一遍**同一句话，两处漂移就会
+    "同一个被拦下的导出，一个入口给逃生舱、另一个不给"。这里只剩转发。
     """
-    return 'HANDWRITTEN_TARGET' in (res.get('codes') or [])
+    return export_plan.overridable(res)
 
 
 def _scan_stage_identity(host, beats):

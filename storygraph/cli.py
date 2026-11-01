@@ -317,8 +317,12 @@ def _report_guard(result, out, stream=None, source=None) -> bool:
               file=stream)
         print('  修好表里出问题的那几行后重新导出即可；想回到原样，'
               '把这次改动撤销（改回原值）再导一次。', file=stream)
-    codes = {getattr(i, 'code', '') for i in result.guard_issues}
-    if 'HANDWRITTEN_TARGET' in codes:
+    # 判据只有一个出处（`app.export_plan`）：界面上"能不能覆盖"与 CLI 里
+    # "该不该劝他换条路"是**同一条**判据，各写一份必然漂移（2026-11-01）。
+    from storygraph.app import export_plan
+
+    codes = set(export_plan.block_codes(result.guard_issues))
+    if codes & export_plan.OVERRIDABLE_CODES:
         # 这一条**有**逃生舱，而且和上面那条"坏脚本"的性质不同：
         # 不是产物有问题，是"目标是人手写的"。所以提示要分开给，
         # 否则用户会以为自己的产物坏了。

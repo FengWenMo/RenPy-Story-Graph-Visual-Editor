@@ -18,6 +18,7 @@ from pathlib import Path
 
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt.qt_args import drop_qt_bool
+from storygraph.app import export_plan
 from storygraph.app.editor import ADVANCED_FIELDS, PRIMARY_FIELDS
 
 from PySide6.QtCore import Qt, QTimer
@@ -1801,8 +1802,7 @@ class GraphOpsMixin:
             # 门禁按"手写文件"拒写。从前这里只剩"先删掉再导"一条路，用户
             # 原话："我导出控制流时只能把原来的删掉再导……连替换都被拦下了"。
             # 现在明确问一句，确认后**先备份再写**（force_overwrite）。
-            if (not res.get('ok')
-                    and 'HANDWRITTEN_TARGET' in (res.get('codes') or [])):
+            if export_plan.overridable(res):
                 ans = QMessageBox.question(
                     self, '覆盖已有的手写 .rpy？',
                     f'目标文件已经存在，而且不是本工具生成的：\n{target}\n\n'
