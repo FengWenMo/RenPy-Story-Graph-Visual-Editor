@@ -1048,55 +1048,20 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     目录（另一份副本）的行搬过来（`_sync_relink_stage` 只改指到本项目里
     同名的那一份）、以及删掉"工具扫不到"的行 —— 后者只报不删
     （`_unjudged_paths`：绝对路径 / `tmp/` 这类跳过目录下的行）。
+
+    主线只是把六个阶段连起来；每一步的判据都在各自的 `_sync_*_stage` 里。
     """
     root = Path(project_root)
     made = ensure_asset_tables(root, asset_dir, walk=walk,
                                parse_check=registry is None)
+    early = _sync_early_report(made)
+    if early is not None:
+        return early
+    table_dir = Path(made['path'])
     repaired = made.get('repaired') or []
     repair_error = made.get('repair_error') or ''
-    if not made.get('ok'):
-        return {'ok': False, 'created': '', 'table_dir': '', 'added': 0,
-                'by_kind': {}, 'backup': '', 'error': made.get('error'),
-                'repaired': repaired, 'repair_error': repair_error,
-                'scanned': {}, 'reconcile': {}}
-    table_dir = Path(made['path']) if made.get('path') else None
-    if table_dir is None:
-        return {'ok': False, 'created': '', 'table_dir': '', 'added': 0,
-                'by_kind': {}, 'backup': '',
-                'error': '找不到资源表目录', 'repaired': repaired,
-                'repair_error': repair_error, 'scanned': {}, 'reconcile': {}}
-    if made.get('created'):
-        # 刚按项目内容建好（含"坏表挪走之后重建"）→ 表与磁盘本来就一致
-        return {'ok': True, 'created': made['created'],
-                'table_dir': str(table_dir), 'added': 0, 'by_kind': {},
-                'backup': '', 'scanned': made.get('counts') or {},
-                'reconcile': {}, 'repaired': repaired,
-                'repair_error': repair_error,
-                'registry': made.get('registry')}
-
-    # 已经解析过一遍（`ensure_asset_tables` 读得动时会顺手带回来）——
-    # 别再解析一次：真实项目 2890 行，一次解析不便宜。
-    if registry is None and made.get('registry') is not None:
-        registry = made.get('registry')
-
-    if registry is None:
-        try:
-            registry = parse_asset_tables(
-                table_dir, hooks=load_hooks(project_root=root),
-                project_root=root)
-        except Exception as e:                  # noqa: BLE001 - 读不动就当没漂移
-            swallow('assets.asset_registry.sync_asset_tables.parse', e)
-            registry = None
-    # ⚠ **磁盘只扫一次**，对账和补登共用（原先各扫一次：真实项目 2 × 0.2 秒
-    # 是小事，但它们各自还会再走一遍索引里的 5854 个文件）。
-    assets = scan_assets(root, include_ui=True, walk=walk)
-    # 新补登的行也要带维度：否则它们在表里是"Value=整串文件名、Group 空"，
-    # 要等下一次打开才被 `parse_asset_tables` 补上。
-    try:
-        from storygraph.assets.asset_dimensions import enrich_image_rows
-        enrich_image_rows(assets.get('images') or [], project_root=root)
-    except Exception as e:                      # noqa: BLE001
-        swallow('assets.asset_registry.sync.enrich', e)
+    registry = _sync_registry(made, registry, table_dir, root)
+    assets = _sync_scan_assets(root, walk)
     diff = (compare_registry_to_disk(root, registry, walk=walk, assets=assets)
             if registry is not None else {})
     unreg = (diff or {}).get('unregistered') or {}
@@ -1107,67 +1072,30 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     # > 已经不在那这个东西实际上不需要啦！你自己自动删改表即可！
     # > 之前就说表跟资源一一对应！如果不可用直接删了就行！
     #
-    # 所以现在**不再区分"谁加的行"**：只要 `Path` 解析不到真实文件就删。
-    # 两个例外：
-    #   · **人工占位**（`Notes`/`Doc` 写「占位」/placeholder/…）留着 —— 那是
-    #     用户明说"这个还没有出图"，见上一轮那条"这个允许"；
-    #   · 删之前一定备份 `*.bak.xlsx`；删不掉（例如表在 Excel 里锁着）就
-    #     退回"标为不可用"，并在结果里报出来（`unusable`）。
-    # —— ❶ **自动删**：文件没了的行，跟着走 ——
-    #
-    # 用户 2026-10-05（看到"表里有 11 行指向的文件已经不在 → 已标为不可用"之后）：
-    #
-    # > 已经不在那这个东西实际上不需要啦！你自己自动删改表即可！
-    # > 之前就说表跟资源一一对应！如果不可用直接删了就行！
-    #
-    # 两个例外（人工占位留着；工具加过又指向嵌套副本的删掉）与备份规矩
-    # 都在 `_sync_prune_stage` 里 —— 这里只负责编排（M4 重构）。
+    # 所以**不再区分"谁加的行"**：只要 `Path` 解析不到真实文件就删。两个例外
+    # （人工占位留着、工具扫不到的只报不删）、备份规矩与写前改表都在
+    # `_sync_prune_stage` 里 —— 这里只负责编排（M4 重构）。
     removed_by_kind, index, added_paths, unjudged_by_kind = _sync_prune_stage(
         root, table_dir, registry, walk)
     if removed_by_kind:
         _write_autoscan_index(table_dir, index)
         # 删完要重新读表（内存里的注册表也过期了）
-        _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
-                                             'reload')
-        if _r is not None:
-            registry, diff, unreg = _r, _d, _u
-
+        registry, diff, unreg = _sync_reload_tables(
+            table_dir, root, walk, assets, registry, diff, unreg, 'reload')
     # —— ❷ **改指** + ❸ **合并重复** ——
     #
     # （为什么现在才敢自动改指：上一版试过，结果跟"自动补登"**打架** ——
     #  ping-pong：改指之后副本文件变成"未登记"→ 补登又加回来，未登记
     #  239 → 1644。现在 `scan_assets` 已经把嵌套副本**排除在项目资源之外**，
     #  两条规则终于共用同一个"什么算项目资源"的定义。）
-    #
-    # 两步都只在 `walk` 认得嵌套前缀时才做；判据与实现见各自的阶段函数
-    # （M4 重构：只为拆复杂度，行为一字不改）。
-    relinked_by_kind = _sync_relink_stage(root, table_dir, registry, walk)
-    if relinked_by_kind:
-        _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
-                                            'relink')
-        if _r is not None:
-            registry, diff, unreg = _r, _d, _u
-    if walk is not None and walk.nested_prefixes():
-        deduped_by_kind = _sync_dedupe_stage(table_dir, registry)
-        if deduped_by_kind:
-            _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets,
-                                                 'dedupe')
-            if _r is not None:
-                registry, diff, unreg = _r, _d, _u
-    else:
-        deduped_by_kind = {}
-
+    registry, diff, unreg, relinked_by_kind, deduped_by_kind = (
+        _sync_fix_references(root, table_dir, registry, walk, assets, diff,
+                             unreg))
     # —— ❹ 维度结构化回填 ——
     # 只填空白的 `Group` / `Value`（新列追加在末尾），写前备份。
     # 放在删/改指/合并之后：那几步会换掉 registry 的行，回填要用最新的。
-    dimensions = {}
-    if registry is not None:
-        dimensions = backfill_dimension_columns(table_dir, registry.images)
-
+    dimensions = _sync_backfill_dimensions(table_dir, registry)
     if not auto_append or not unreg:
-        baks = sorted({p.name for p in table_dir.glob('*.bak.xlsx')}
-                      & {Path(_STANDARD_TABLES[k]).stem + '.bak.xlsx'
-                         for k in removed_by_kind})
         return _sync_report(table_dir=table_dir, registry=registry,
                             diff=diff, repaired=repaired,
                             repair_error=repair_error,
@@ -1176,8 +1104,8 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                             deduped_by_kind=deduped_by_kind,
                             dimensions=dimensions,
                             unjudged_by_kind=unjudged_by_kind,
-                            backup='、'.join(baks))
-
+                            backup=_sync_removed_backups(
+                                table_dir, removed_by_kind))
     # （`assets` 已经在上面扫过一次了，这里直接用 —— 别再扫第二遍。）
     # ❹ **补登**：磁盘上有、表里没有的 → 追加 + 记侧车。判重按**解析后的
     # 真实文件**（不是按字符串）—— 细节都在 `_sync_append_stage`（M4 重构）。
@@ -1195,6 +1123,129 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                         dimensions=dimensions,
                         unjudged_by_kind=unjudged_by_kind,
                         backup='、'.join(sorted(set(backups))))
+
+
+def _sync_early_report(made) -> dict:
+    """
+    建表阶段就能收工的三种情形：建表失败 / 找不到表目录 / **刚建好**。
+
+    返回最终报告；**返回 `None` 表示表本来就在**，继续往下对账。
+    （刚建好时表与磁盘本来就一致，没有"漂移"可对。）
+    """
+    repaired = made.get('repaired') or []
+    repair_error = made.get('repair_error') or ''
+    if not made.get('ok'):
+        return {'ok': False, 'created': '', 'table_dir': '', 'added': 0,
+                'by_kind': {}, 'backup': '', 'error': made.get('error'),
+                'repaired': repaired, 'repair_error': repair_error,
+                'scanned': {}, 'reconcile': {}}
+    if not made.get('path'):
+        return {'ok': False, 'created': '', 'table_dir': '', 'added': 0,
+                'by_kind': {}, 'backup': '',
+                'error': '找不到资源表目录', 'repaired': repaired,
+                'repair_error': repair_error, 'scanned': {}, 'reconcile': {}}
+    if made.get('created'):
+        # 刚按项目内容建好（含"坏表挪走之后重建"）→ 表与磁盘本来就一致
+        return {'ok': True, 'created': made['created'],
+                'table_dir': str(Path(made['path'])), 'added': 0, 'by_kind': {},
+                'backup': '', 'scanned': made.get('counts') or {},
+                'reconcile': {}, 'repaired': repaired,
+                'repair_error': repair_error,
+                'registry': made.get('registry')}
+    return None
+
+
+def _sync_registry(made, registry, table_dir, root):
+    """
+    拿一份能用的注册表：调用方给的 > 建表时顺手带回来的 > 自己解析一份。
+
+    ⚠ 解析失败只吞掉（`swallow`）当"没有漂移"—— 与从前一致。
+    """
+    # 已经解析过一遍（`ensure_asset_tables` 读得动时会顺手带回来）——
+    # 别再解析一次：真实项目 2890 行，一次解析不便宜。
+    if registry is None and made.get('registry') is not None:
+        registry = made.get('registry')
+    if registry is not None:
+        return registry
+    try:
+        return parse_asset_tables(table_dir, hooks=load_hooks(project_root=root),
+                                  project_root=root)
+    except Exception as e:                  # noqa: BLE001 - 读不动就当没漂移
+        swallow('assets.asset_registry.sync_asset_tables.parse', e)
+        return None
+
+
+def _sync_scan_assets(root, walk):
+    """
+    扫一次磁盘（对账与补登共用），顺手给新行带上维度。
+
+    ⚠ **磁盘只扫一次**：原先对账和补登各扫一次，各走一遍索引里的 5854 个
+    文件。维度补不进只吞掉 —— 一次维度解析失败不该挡住建表。
+    """
+    assets = scan_assets(root, include_ui=True, walk=walk)
+    # 新补登的行也要带维度：否则它们在表里是"Value=整串文件名、Group 空"，
+    # 要等下一次打开才被 `parse_asset_tables` 补上。
+    try:
+        from storygraph.assets.asset_dimensions import enrich_image_rows
+        enrich_image_rows(assets.get('images') or [], project_root=root)
+    except Exception as e:                      # noqa: BLE001
+        swallow('assets.asset_registry.sync.enrich', e)
+    return assets
+
+
+def _sync_reload_tables(table_dir, root, walk, assets, registry, diff, unreg,
+                        why: str = 'reload'):
+    """
+    改过表（删 / 改指 / 合并）之后重读一遍，返回新的 `(registry, diff, unreg)`。
+
+    ⚠ 读不动就**原样返回**（不拿半份注册表去覆盖）—— `_reload_tables_and_diff`
+    用 `None` 表示"没读成"，这里把它翻译成"保持旧值"。
+    """
+    _r, _d, _u = _reload_tables_and_diff(table_dir, root, walk, assets, why)
+    if _r is None:
+        return registry, diff, unreg
+    return _r, _d, _u
+
+
+def _sync_fix_references(root, table_dir, registry, walk, assets, diff, unreg):
+    """
+    ❷ 改指 + ❸ 合并重复：每做一步就重读表，返回
+    `(registry, diff, unreg, 改指数, 合并数)`。
+
+    两步都只在 `walk` 认得嵌套前缀时才做；判据与实现见各自的阶段函数
+    （M4 重构：只为拆复杂度，行为一字不改）。
+    """
+    relinked_by_kind = _sync_relink_stage(root, table_dir, registry, walk)
+    if relinked_by_kind:
+        registry, diff, unreg = _sync_reload_tables(
+            table_dir, root, walk, assets, registry, diff, unreg, 'relink')
+    if walk is not None and walk.nested_prefixes():
+        deduped_by_kind = _sync_dedupe_stage(table_dir, registry)
+        if deduped_by_kind:
+            registry, diff, unreg = _sync_reload_tables(
+                table_dir, root, walk, assets, registry, diff, unreg, 'dedupe')
+    else:
+        deduped_by_kind = {}
+    return registry, diff, unreg, relinked_by_kind, deduped_by_kind
+
+
+def _sync_backfill_dimensions(table_dir, registry) -> dict:
+    """❹ 维度结构化回填：只填空白的 `Group` / `Value`（新列追加在末尾）。"""
+    if registry is None:
+        return {}
+    return backfill_dimension_columns(table_dir, registry.images)
+
+
+def _sync_removed_backups(table_dir, removed_by_kind) -> str:
+    """
+    删行时留下的备份文件名（给界面显示"删之前备份到哪儿了"）。
+
+    只列**这一轮真删过**的表的备份 —— 目录里别的 `*.bak.xlsx` 是历史遗留。
+    """
+    baks = sorted({p.name for p in table_dir.glob('*.bak.xlsx')}
+                  & {Path(_STANDARD_TABLES[k]).stem + '.bak.xlsx'
+                     for k in removed_by_kind})
+    return '、'.join(baks)
 
 
 def _unusable_summary(registry) -> dict:
