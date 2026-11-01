@@ -43,6 +43,12 @@ from storygraph.app import beats as B
 # `sprite_grid.py` 的老导入不必改。
 from storygraph.app.table_edits import (FieldWriter,  # noqa: F401
                                         uniform_position_of)
+# 结构撤销栈与四条逆操作搬去 `table_structure`（2026-11-01，服务化第四刀）。
+# `STRUCT_UNDO_LIMIT` 继续在本模块可读，老用例按会话名读它。
+from storygraph.app import table_structure as TS
+from storygraph.app.table_structure import (STRUCT_UNDO_LIMIT,  # noqa: F401
+                                            ClearOp, DeleteOp, InsertOp,
+                                            MoveOp)
 from storygraph.story.beat_build import (beats_from_parse_result,
                                          hydrate_from_dsl)
 from storygraph.story.beat_render import make_symbols
@@ -182,10 +188,14 @@ class TableSessionMixin:
     #: 本 mixin 要求宿主（或其它 mixin）提供的成员。
     #: `screen_size` / `transform_index`（2026-10-31）：`stage_size_rows` 要算
     #: 这一拍的尺寸行（项目分辨率 + transform 表），两者都在 `ExportMixin` 里。
+    #: `_struct_edits`（2026-11-01，服务化第四刀）：结构撤销栈搬去
+    #: `app.table_structure` 之后，会话只剩一个**持有它的字段** —— 演进
+    #: `_push_struct_undo` 与 `undo_structural` 两处转发。
     REQUIRES = ('beats', 'symbols', 'script_path', 'registry',
                 'refresh_symbols', 'has', '_renumber', 'forget_undo',
                 '_last_saved', '_last_idx', '_last_removed', 'chapter',
-                'set_node_variables', 'screen_size', 'transform_index')
+                'set_node_variables', 'screen_size', 'transform_index',
+                '_struct_edits')
 
     # ------------------------------------------------------------------
     #  章节级真源：顶层保真块（P0-2）
@@ -407,7 +417,7 @@ class TableSessionMixin:
         self.set_stage_entry(None)
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。
         self.forget_undo()
-        self._struct_undo = []          # 结构撤销栈同理：索引全变了
+        self._struct_edits.clear()      # 结构撤销栈同理：索引全变了
         # 刚读进来的这一份 = 干净状态（关窗 / 状态栏靠这条基线判"改过没有"）
         self.take_edits_baseline()
         return len(self.beats)
@@ -1125,7 +1135,7 @@ class TableSessionMixin:
         at = doc.insert_beat(beat, at)
         self.beats = doc.beats
         self._sync_chapter()                  # 插到第一张之前也不许丢顶层块
-        self._push_struct_undo(('insert', at))
+        self._push_struct_undo(InsertOp(at))
         self._renumber()
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
@@ -1171,7 +1181,7 @@ class TableSessionMixin:
         at = doc.insert_beat(beat, at, before=not after)
         self.beats = doc.beats
         self._sync_chapter()
-        self._push_struct_undo(('insert', at))
+        self._push_struct_undo(InsertOp(at))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': at,
@@ -1293,7 +1303,7 @@ class TableSessionMixin:
         # 就等于把 `init python` / `default` 整块丢掉。
         self._sync_chapter()
         self._last_removed = (idx, list(removed))
-        self._push_struct_undo(('delete', idx, list(removed)))
+        self._push_struct_undo(DeleteOp(idx, list(removed)))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': min(idx, len(self.beats) - 1),
@@ -1338,7 +1348,7 @@ class TableSessionMixin:
                     'kept_lines': [], 'drop_lines': []}
         saved = snapshot_fields(beat, plan.fields)
         res = apply_clear(beat, mode)
-        self._push_struct_undo(('clear', idx, saved, mode))
+        self._push_struct_undo(ClearOp(idx, saved, mode))
         # 内容变了 → 内容撤销栈（按拍号记的那些）对不上，清掉（与删/插同一规矩）
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': idx, 'mode': res['mode'],
@@ -1366,8 +1376,8 @@ class TableSessionMixin:
             return {'ok': False, 'error': str(e), 'index': src,
                     'blocked': e.kind}
         self.beats = doc.beats
-        self._push_struct_undo(('move', src, new_index, beat, old_path,
-                                old_cond))
+        self._push_struct_undo(MoveOp(src, new_index, beat, old_path,
+                                      old_cond))
         self._renumber()
         self.forget_undo()
         return {'ok': True, 'error': '', 'index': new_index,
@@ -1389,103 +1399,49 @@ class TableSessionMixin:
         self.beats = doc.beats
         self._sync_chapter()                  # 恢复的拍不许把顶层块带重
         self._last_removed = None
-        self._push_struct_undo(('insert', at))
+        self._push_struct_undo(InsertOp(at))
         self._renumber()
         self.forget_undo()
         # 撤销结构 = 可能已经回到磁盘那份（插卡又撤掉）→ 重算脏标记
         self.refresh_edits_flag()
         return {'ok': True, 'error': '', 'index': at, 'count': len(self.beats)}
 
-    #: 结构撤销栈最多留多少步（交互退路，不是版本控制）
-    STRUCT_UNDO_LIMIT = 50
+    #: 结构撤销栈最多留多少步（真源在 `table_structure.STRUCT_UNDO_LIMIT`，
+    #: 这里保留同名类属性：老调用方 / 用例按会话名读它）
+    STRUCT_UNDO_LIMIT = STRUCT_UNDO_LIMIT
 
     def _push_struct_undo(self, op) -> None:
-        stack = getattr(self, '_struct_undo', None)
-        if stack is None:
-            self._struct_undo = stack = []
-        stack.append(op)
-        del stack[:-self.STRUCT_UNDO_LIMIT]     # 只留最近的
+        """把一次结构动作记进栈（`op` 见 `table_structure` 的四个 `*Op`）。"""
+        self._struct_edits.push(op)
 
     def can_undo_structural(self) -> bool:
-        return bool(getattr(self, '_struct_undo', None))
+        return bool(self._struct_edits)
 
     def struct_undo_depth(self) -> int:
-        return len(getattr(self, '_struct_undo', None) or ())
+        return len(self._struct_edits)
 
     def undo_structural(self) -> dict:
         """
-        撤销**最近一次结构编辑**（插卡或删卡），可连按多级。
+        撤销**最近一次结构编辑**（插/删/清空/移），可连按多级。
 
         与内容撤销（`undo()`）分开：
           · `undo()` 回到"这一拍上一次保存"的内容；
           · `undo_structural()` 退回"上一次增删卡片"这个**结构动作**。
         互不影响：内容编辑不动结构栈；结构编辑清的是**内容**栈
         （拍号变了，内容撤销记录对不上）。
+
+        栈与四条逆操作都在 `app.table_structure`（服务化第四刀）；
+        这里只补会话自己的两件事：拍数与栈深。
         """
-        stack = getattr(self, '_struct_undo', None)
-        if not stack:
+        op = self._struct_edits.pop()
+        if op is None:
             return {'ok': False, 'error': '没有可撤销的结构操作', 'index': -1}
-        op = stack.pop()
-        kind = op[0]
-        doc = self._chapter_doc()
-        if kind == 'insert':
-            at = int(op[1])
-            if not 0 <= at < len(self.beats):
-                return {'ok': False,
-                        'error': '落点已经不在了（可能被别的操作改过）',
-                        'index': -1}
-            try:
-                doc.remove_beat_at(at)
-            except ChapterTreeError as e:
-                return {'ok': False, 'error': str(e), 'index': -1}
-            self.beats = doc.beats
-            note = '撤销插卡'
-            index = min(at, max(0, len(self.beats) - 1))
-        elif kind == 'delete':
-            at = max(0, min(int(op[1]), len(self.beats)))
-            removed = list(op[2]) if isinstance(op[2], (list, tuple)) else [op[2]]
-            self.beats[at:at] = removed
-            doc.adopt(self.beats)
-            self.beats = doc.beats
-            note = '恢复删除'
-            index = at
-            if self._last_removed is not None and self._last_removed[0] == at:
-                self._last_removed = None
-        elif kind == 'clear':
-            # 分级删除的"清空"：把清掉的字段原样放回去
-            at = int(op[1])
-            if not 0 <= at < len(self.beats):
-                return {'ok': False,
-                        'error': '那一拍已经不在了（可能被别的操作改过）',
-                        'index': -1}
-            from storygraph.app.beat_clear import restore_fields
-            restore_fields(self.beats[at], op[2] or {})
-            note = '撤销清空'
-            index = at
-        elif kind == 'move':
-            src, new_index = int(op[1]), int(op[2])
-            beat, old_path, old_cond = op[3], op[4], op[5]
-            try:
-                doc.move_beat(new_index, src)
-            except ChapterTreeError as e:
-                return {'ok': False, 'error': str(e), 'index': -1}
-            # 跨块移动会重写结构位/条件；撤销要连它们一起还原，再按 beat
-            # 上的旧值重建树（节点 path 也跟着回来）。
-            beat.nest_path = old_path
-            beat.condition = old_cond
-            doc._rebuild_tree()
-            self.beats = doc.beats
-            note = '撤销移动'
-            index = src
-        else:
-            return {'ok': False, 'error': f'不认识的结构操作：{kind!r}',
-                    'index': -1}
-        self._sync_chapter()                # 结构撤销同样不许把顶层块弄丢
-        self._renumber()
-        self.forget_undo()
-        self.refresh_edits_flag()           # 撤到与磁盘一致时，别再喊"未导出"
-        return {'ok': True, 'error': '', 'index': index, 'note': note,
-                'count': len(self.beats), 'depth': len(stack)}
+        res = TS.undo(op, self)
+        if not res.get('ok'):
+            return res
+        return {**res, 'count': len(self.beats),
+                'depth': self.struct_undo_depth()}
+
 
     def has_removed(self) -> bool:
         return self._last_removed is not None
