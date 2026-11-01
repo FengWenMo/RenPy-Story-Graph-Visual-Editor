@@ -97,42 +97,12 @@ class BuildResult:
 # 这里继续 re-export，既有调用方（cli / story / 测试）无需改动。
 
 
-def load_asset_registry(project_root, asset_dir=None, walk=None):
-    """读资源表（不存在就返回 None，校验会相应降级为 L1/L2 为主）。"""
-    project_root = Path(project_root)
-    candidates = []
-    if asset_dir:
-        candidates.append(Path(asset_dir))
-    candidates += [project_root / 'asset_tables',
-                    project_root / 'game' / 'asset_tables']
-    # ⚠ 只认**真表**：`*.bak.xlsx`（我们自己的备份）、`~$*.xlsx`（Excel 锁文件）
-    # 和 `*.broken-*.xlsx`（读不出来时挪到一边的坏文件）都不算"有表" ——
-    # 否则一个只放着备份的目录会让这里返回一张**空表**，于是永远不去建表、
-    # 打开项目看到 0 个资源（2026-10-05 实测）。
-    try:
-        from storygraph.assets.asset_registry import is_real_table_file
-    except Exception as e:                      # noqa: BLE001 - 极端情况退回宽判
-        swallow('pipeline.build.load_asset_registry.import', e)
-
-        def is_real_table_file(p):
-            return str(p).lower().endswith('.xlsx')
-    for c in candidates:
-        try:
-            if c.exists() and any(is_real_table_file(p)
-                                  for p in c.glob('*.xlsx')):
-                from storygraph.assets.asset_registry import (load_hooks,
-                                                              parse_asset_tables)
-                try:
-                    return parse_asset_tables(
-                        c, hooks=load_hooks(project_root=project_root),
-                        project_root=project_root, walk=walk)
-                except Exception as e:
-                    swallow('pipeline.build.load_asset_registry', e)
-                    return None
-        except OSError as e:                    # noqa: BLE001
-            swallow('pipeline.build.load_asset_registry', e)
-            continue
-    return None
+# `load_asset_registry` 已搬到 `assets/registry_load.py`（依赖方向修正，
+# 2026-11-01）：这个函数名里就写着 asset，做的事是"找表 + 解析"，留在
+# pipeline 里会让 `story.statement_registry` 往上层 import（一条环比）。
+# 这里继续 re-export，既有调用方（cli / main_qt / authoring / 测试）不改。
+from storygraph.assets.registry_load import (
+    load_asset_registry)
 
 
 def collect_report(project_root, asset_dir=None, char_limit=DEFAULT_CHAR_LIMIT,

@@ -25,7 +25,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storygraph.core import engine_facts as EF                      # noqa: E402
+from storygraph.pipeline import _engine as PE                       # noqa: E402
 from storygraph.pipeline import engine_collect as EC                # noqa: E402
+
+
+def _no_sdk(monkeypatch):
+    """
+    让 `find_sdk()` 必然找不到（用例要的是"抛/报错"，不是真 SDK）。
+
+    ⚠ 两处一起打（同 §86 的教训）：`find_sdk` 已下沉到 `pipeline._engine`，
+    函数体里读的是 `_engine` 的全局；`engine_collect` 上那个同名属性只是
+    **转发来的值** —— 只打 `EC` 是**空话**（函数照样能摸到真 SDK）。
+    """
+    monkeypatch.setattr(PE, 'DEFAULT_SDK_CANDIDATES', ())
+    monkeypatch.setattr(EC, 'DEFAULT_SDK_CANDIDATES', ())
+    monkeypatch.delenv(PE.SDK_ENV, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -376,16 +390,14 @@ class TestClassifyLint:
 
 class TestFindSdk:
     def test_raises_with_actionable_message(self, monkeypatch):
-        monkeypatch.setattr(EC, 'DEFAULT_SDK_CANDIDATES', ())
-        monkeypatch.delenv(EC.SDK_ENV, raising=False)
+        _no_sdk(monkeypatch)
         with pytest.raises(FileNotFoundError) as ei:
-            EC.find_sdk()
+            PE.find_sdk()
         assert 'SDK' in str(ei.value)
 
     def test_collect_reports_missing_sdk_instead_of_raising(self, tmp_path,
                                                             monkeypatch):
-        monkeypatch.setattr(EC, 'DEFAULT_SDK_CANDIDATES', ())
-        monkeypatch.delenv(EC.SDK_ENV, raising=False)
+        _no_sdk(monkeypatch)
         (tmp_path / 'game').mkdir()
         result = EC.collect(tmp_path)
         assert result['ok'] is False and 'SDK' in result['reason']

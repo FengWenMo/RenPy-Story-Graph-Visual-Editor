@@ -49,15 +49,14 @@ PROBE_FILENAME = 'zz_storygraph_probe.rpy'
 PROBE_MARK = '# storygraph 临时探针（工具生成，用完即删；请勿提交）'
 #: 探针把结果写到这里（**项目之外**，由采集器指定）。
 FACTS_ENV = 'STORYGRAPH_ENGINE_FACTS_OUT'
-#: SDK 位置（换机器时指过来）。
-SDK_ENV = 'STORYGRAPH_RENPY_SDK'
-
-DEFAULT_SDK_CANDIDATES = (
-    r'D:/software/renpy-8.4.1-sdk',
-    r'C:/renpy',
-)
-
-DEFAULT_TIMEOUT = 600
+# ⚠ 这三件事（SDK 在哪 / 用哪个 python / 怎么跑）已下沉到 `pipeline/_engine.py`：
+#   `statement_probe` 要用它们，而本模块又要在 `_attach_engine_verdicts` 里
+#   （延迟）import `statement_probe` —— 互相 import 就是环的源头。
+#   这里继续 re-export，既有调用方（cli / story / 测试）无需改动。
+# ⚠ 打桩要打在 `_engine` 上（这些名字在本模块只是转发来的值）。
+from storygraph.pipeline._engine import (  # noqa: F401 - re-export
+    DEFAULT_SDK_CANDIDATES, DEFAULT_TIMEOUT, SDK_ENV, _engine_python, find_sdk,
+    run_engine)
 
 #: 采集时**跳过**的目录（引擎自己的运行产物，不算"工程内容"）。
 _SKIP_DIRS = {'cache', 'saves'}
@@ -179,55 +178,9 @@ init 999 python:
 ''' % {'env': FACTS_ENV, 'mark': PROBE_MARK}
 
 
-# ---------------------------------------------------------------------------
-#  环境与子进程
-# ---------------------------------------------------------------------------
-
-def find_sdk(explicit=None) -> Path:
-    """
-    SDK 位置：显式参数 > 环境变量 > 候选列表。**找不到就抛**（不猜）。
-    """
-    cands = [explicit, os.environ.get(SDK_ENV, ''),
-             *DEFAULT_SDK_CANDIDATES]
-    for c in cands:
-        if not c:
-            continue
-        p = Path(c)
-        if (p / 'renpy.py').is_file():
-            return p
-    raise FileNotFoundError(
-        f'找不到 Ren\'Py SDK（想找 renpy.py）。用 --sdk 或环境变量 {SDK_ENV} 指定')
-
-
-def _engine_python(sdk: Path) -> Path:
-    """SDK 自带的 python（拿不到就退回当前解释器）。"""
-    for rel in ('lib/py3-windows-x86_64/python.exe',
-                'lib/py3-linux-x86_64/python'):
-        p = Path(sdk) / rel
-        if p.is_file():
-            return p
-    return Path(sys.executable)
-
-
-def run_engine(sdk, project_root, args, timeout=DEFAULT_TIMEOUT) -> tuple:
-    """
-    跑一次引擎命令 → `(退出码, 合并输出)`。环境里带上 `SDL_* = dummy`（无头）。
-
-    ⚠ 超时**不抛**：返回 `(-1, 说明)`。采集是"可失败的动作"，不该把调用方炸掉。
-    """
-    cmd = [str(_engine_python(Path(sdk))), str(Path(sdk) / 'renpy.py'),
-           str(project_root)] + [str(a) for a in args]
-    env = dict(os.environ)
-    env['SDL_VIDEODRIVER'] = 'dummy'
-    env['SDL_AUDIODRIVER'] = 'dummy'
-    try:
-        p = subprocess.run(cmd, cwd=str(sdk), env=env, capture_output=True,
-                           text=True, errors='replace', timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return -1, f'引擎命令超时（>{timeout}s）：{" ".join(cmd[3:])}'
-    except OSError as e:
-        return -1, f'引擎命令起不来：{e!r}'
-    return p.returncode, (p.stdout or '') + (p.stderr or '')
+# `find_sdk` / `_engine_python` / `run_engine` 已下沉到 `pipeline/_engine.py`
+# （为了打断 `statement_probe` ↔ 本模块的环，见 `_attach_engine_verdicts`）；
+# 本模块与 `statement_probe` 都从那里取，这里只是 re-export。
 
 
 # ---------------------------------------------------------------------------

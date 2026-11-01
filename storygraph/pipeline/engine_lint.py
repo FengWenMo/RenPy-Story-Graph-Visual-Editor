@@ -108,7 +108,7 @@ class LintReport:
 def _sdk():
     """找到 SDK 就返回 Path，找不到返回 None（**不抛**：lint 是可选闸门）。"""
     try:
-        from storygraph.pipeline.engine_collect import find_sdk
+        from storygraph.pipeline._engine import find_sdk
         return find_sdk()
     except Exception as e:                         # noqa: BLE001 - 没有 SDK 很常见
         from storygraph.core.safeguard import swallow

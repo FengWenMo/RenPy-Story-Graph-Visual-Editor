@@ -426,7 +426,7 @@ def _sdk_roots(project_root: Path) -> list:
     # 的那一份** SDK —— 比全局探测到的 SDK 更可信，排前面。
     out.extend(list(Path(project_root).parents)[:3])
     try:
-        from storygraph.pipeline.engine_collect import find_sdk
+        from storygraph.pipeline._engine import find_sdk
         out.append(Path(find_sdk()))
     except Exception as e:                   # noqa: BLE001 - 没有 SDK 也能用
         swallow('renpy_gui.find_sdk', e)

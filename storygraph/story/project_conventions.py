@@ -34,8 +34,11 @@ from storygraph.core.safeguard import swallow
 from storygraph.core.vocabulary import (RENPY_CONTAINER_HEADS,
                                         RENPY_KNOWN_HEADS)
 
-#: 清单文件名（两处都找：项目根、`game/` 下）
-MANIFEST_NAMES = ('storygraph.rules.json',)
+#: 清单文件名 —— **唯一真源**在 `story.project_manifest`（与读取一起下沉，
+#: 为了打断 `host_hooks ↔ project_conventions` 的互引环）。这里继续
+#: re-export：既有调用方（`mcp_surface` / `dialog_learn` / 测试）不改。
+from storygraph.story.project_manifest import (
+    MANIFEST_NAMES, find_manifest, load_manifest)
 
 #: 工具**认识**的语句头（用来算"覆盖度"）。宁少不宁多：
 #: 少写几个 → 报告里多几条"我不认识"（诚实）；多写 → 假装懂（危险）。
@@ -101,43 +104,6 @@ class Conventions:
 # ---------------------------------------------------------------------------
 #  第二层：清单
 # ---------------------------------------------------------------------------
-
-def find_manifest(project_root) -> object:
-    """项目根 / `game/` 下的 `storygraph.rules.json`（没有返回 None）。"""
-    root = Path(project_root)
-    for base in (root, root / 'game'):
-        for name in MANIFEST_NAMES:
-            cand = base / name
-            try:
-                if cand.is_file():
-                    return cand
-            except OSError as e:                # noqa: BLE001
-                swallow('story.project_conventions.find_manifest', e)
-    return None
-
-
-def load_manifest(project_root) -> tuple:
-    """
-    读清单 → `(data, path, warnings)`。
-
-    坏 JSON **不抛异常**（工具不该因为一个手写错的文件就打不开项目），
-    而是记一条警告并当作"没有清单"。
-    """
-    path = find_manifest(project_root)
-    warnings = []
-    if path is None:
-        return {}, '', warnings
-    try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        if not isinstance(data, dict):
-            raise ValueError('顶层必须是对象')
-        return data, str(path), warnings
-    except Exception as e:                      # noqa: BLE001 - 手写文件容错
-        swallow('story.project_conventions.load_manifest', e)
-        warnings.append(f'{path.name} 读不出来（{e}）—— 已忽略，'
-                        f'按自动识别走')
-        return {}, str(path), warnings
-
 
 # ---------------------------------------------------------------------------
 #  第三层：覆盖度（哪些语句头我不认识）

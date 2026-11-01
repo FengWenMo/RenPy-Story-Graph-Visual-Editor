@@ -378,7 +378,7 @@ def ask_many(project_root, heads, *, sdk=None, timeout=DEFAULT_TIMEOUT,
     if not asked:
         out['reason'] = '没有要问的写法'
         return out
-    from storygraph.pipeline.engine_collect import find_sdk, run_engine
+    from storygraph.pipeline._engine import find_sdk, run_engine
     try:
         sdk_path = find_sdk(sdk)
     except FileNotFoundError as e:
@@ -419,7 +419,7 @@ def ask_many(project_root, heads, *, sdk=None, timeout=DEFAULT_TIMEOUT,
 
 def _lint(work: Path, sdk_path, timeout):
     """在这个副本上跑一次 lint（**errors.txt 先挪开** —— 见 `ask_engine` 的说明）。"""
-    from storygraph.pipeline.engine_collect import run_engine
+    from storygraph.pipeline._engine import run_engine
     errors_txt = work / 'errors.txt'
     parked = None
     if errors_txt.exists():
@@ -689,7 +689,7 @@ def verify_behavior(project_root, label: str, *, evidence: str = '',
         empty['reason'] = f'不是工程根（没有 game/）：{root}'
         empty['summary'] = f'行为级**测不出来**：{empty["reason"]}'
         return empty
-    from storygraph.pipeline.engine_collect import find_sdk
+    from storygraph.pipeline._engine import find_sdk
     try:
         sdk_path = find_sdk(sdk)
     except FileNotFoundError as e:
@@ -735,10 +735,10 @@ def _run_test_capture(work: Path, sdk_path, case: str, timeout: int):
     返回 `(输出全文, 末尾若干行)`。⚠ 超时也必须返回**已经读到的**输出 ——
     那里面往往带着"为什么没跑完"。
     """
-    from storygraph.pipeline.engine_collect import run_engine
+    from storygraph.pipeline._engine import run_engine
     # ⚠ 不能用 `run_engine`（它等进程结束）；`test` 跑完不退，得自己边读边收。
     import subprocess
-    from storygraph.pipeline.engine_collect import _engine_python
+    from storygraph.pipeline._engine import _engine_python
     cmd = [str(_engine_python(Path(sdk_path))),
            str(Path(sdk_path) / 'renpy.py'), str(work), 'test', case]
     env = dict(os.environ)
@@ -974,7 +974,7 @@ def ask_engine(project_root, head: str, *, sdk=None, lines=None,
         empty['reason'] = f'不是工程根（没有 game/）：{root}'
         empty['summary'] = summarize(empty)
         return empty
-    from storygraph.pipeline.engine_collect import find_sdk, run_engine
+    from storygraph.pipeline._engine import find_sdk, run_engine
     try:
         sdk_path = find_sdk(sdk)
     except FileNotFoundError as e:

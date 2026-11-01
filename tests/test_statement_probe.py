@@ -461,7 +461,11 @@ def test_ask_many_says_who_blocked_it(tmp_path, monkeypatch):
     def fake_find_sdk(explicit=None):
         return tmp_path / 'sdk'                # 只要不抛就行（lint 被替换）
 
+    # ⚠ 两处一起打：`ask_many` 现在从 `pipeline._engine` 取 `find_sdk`，
+    #   只打 `engine_collect` 上是**空话**（那里只是转发值，同 §86 教训）。
+    import storygraph.pipeline._engine as PE
     import storygraph.pipeline.engine_collect as EC
+    monkeypatch.setattr(PE, 'find_sdk', fake_find_sdk)
     monkeypatch.setattr(EC, 'find_sdk', fake_find_sdk)
     monkeypatch.setattr(SP, '_lint', fake_lint)
     got = SP.ask_many(root, ['weather'], sdk=tmp_path / 'sdk', timeout=5)

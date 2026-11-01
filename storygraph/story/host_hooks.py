@@ -499,7 +499,10 @@ def trust_decision(project_root, trust=None) -> tuple:
     if env is not None and str(env).strip() != '':
         return _truthy(env), f'环境变量 {TRUST_ENV}={env}'
     try:
-        from storygraph.story.project_conventions import load_manifest
+        # ⚠ 直接取**下沉后的**叶子模块，不经过 `project_conventions`：
+        #   那边还要 `load_host_hooks`，走它就成了 `host_hooks ↔
+        #   project_conventions` 的互引环（2026-11-01 拆环）。
+        from storygraph.story.project_manifest import load_manifest
         data, path, _warnings = load_manifest(project_root)
     except Exception as e:                      # noqa: BLE001 - 读不到就当没授权
         swallow('story.host_hooks.trust_manifest', e)

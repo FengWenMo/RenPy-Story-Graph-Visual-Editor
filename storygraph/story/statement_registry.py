@@ -359,7 +359,9 @@ class StatementRegistry:
         declared, host, groups = [], [], []
         calls: list = []
         try:
-            from storygraph.story.project_conventions import load_manifest
+            # 直接取下沉后的 `project_manifest`：`project_conventions` 会
+            # import 本模块（`_declared_heads`），走它就是一条环比。
+            from storygraph.story.project_manifest import load_manifest
             from storygraph.authoring.spec_groups import parse_attr_groups
             data, path, _warnings = load_manifest(project_root)
             if isinstance(data, dict):
@@ -1720,7 +1722,9 @@ def _character_names(project_root) -> tuple:
     """`(角色 ID 集合, 显示名集合)`（读不出就两个空集）。"""
     ids, names = set(), set()
     try:
-        from storygraph.pipeline.build import load_asset_registry
+        # 从 `assets.registry_load` 直接取（不是 `pipeline.build` 的门面）：
+        # 后者是**上层**，`story` 调它就是反向边、也是大环上的一条环比。
+        from storygraph.assets.registry_load import load_asset_registry
         reg = load_asset_registry(project_root)
         for cid, row in (getattr(reg, 'characters', {}) or {}).items():
             ids.add(str(cid))
