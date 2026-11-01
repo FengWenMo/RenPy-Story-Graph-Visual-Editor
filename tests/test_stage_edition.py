@@ -274,8 +274,14 @@ class TestWiring:
         assert 'stage_edition' in src
 
     def test_main_window_has_engine_actions(self):
-        src = (ROOT / 'storygraph' / 'ui_qt' / 'main_window.py').read_text(
-            encoding='utf-8')
+        # 扫**整个前端**：这几条动作 2026-11-01 搬进了 `window_graph_page` 的
+        # `_toolbar_graph` / `_toolbar_card`（只读入口文件会误报"没接"）。
+        import sys
+
+        sys.path.insert(0, str(ROOT / 'tests'))
+        from _source_paths import main_window_source_text
+
+        src = main_window_source_text()
         assert 'engine_preview_chapter' in src
         assert 'engine_preview_from_beat' in src
         assert 'engine_preview_selected' in src

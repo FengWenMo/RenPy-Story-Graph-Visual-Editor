@@ -359,7 +359,7 @@ class TestApplyFromCard:
     def test_applying_a_custom_transform_writes_the_scene_line(
             self, ui_window, monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         i = _scene_beat_index(win)
         win._show_index(i)
         beat = win._session.beats[i]
@@ -375,7 +375,7 @@ class TestApplyFromCard:
 
     def test_cancel_changes_nothing(self, ui_window, monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_no))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_no))
         i = _scene_beat_index(win)
         win._show_index(i)
         beat = win._session.beats[i]
@@ -408,7 +408,7 @@ class TestApplyFromCard:
             body['text'] = text
             return QMessageBox.StandardButton.No
 
-        monkeypatch.setattr(MW.QMessageBox, 'question',
+        monkeypatch.setattr(CA.QMessageBox, 'question',
                             staticmethod(_capture))
         _select_pick(win, 'leftish')
         text = body.get('text') or ''
@@ -421,7 +421,7 @@ class TestApplyFromCard:
                                                        monkeypatch):
         """「原样」在没有 at 的行上是不可写的：不发请求、状态栏说清。"""
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         i = _scene_beat_index(win)
         win._show_index(i)
         panel = win._panel.size_panel()

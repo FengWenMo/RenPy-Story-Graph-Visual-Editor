@@ -27,6 +27,7 @@ pytest.importorskip('PySide6')
 from PySide6.QtWidgets import QMessageBox                     # noqa: E402
 
 from storygraph.app.stage_render import available              # noqa: E402
+from storygraph.ui_qt import card_actions as CA               # noqa: E402
 from storygraph.ui_qt import main_window as MW                # noqa: E402
 
 pytestmark = pytest.mark.skipif(not available(), reason='没装 Pillow')
@@ -75,7 +76,7 @@ class TestGenerateFromCard:
     def test_confirm_writes_the_file_and_edits_the_beat(self, ui_window,
                                                         monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         i = _scene_beat_index(win)
         win._show_index(i)
         beat = win._session.beats[i]
@@ -100,7 +101,7 @@ class TestGenerateFromCard:
             seen['text'] = text
             return QMessageBox.StandardButton.Yes
 
-        monkeypatch.setattr(MW.QMessageBox, 'question',
+        monkeypatch.setattr(CA.QMessageBox, 'question',
                             staticmethod(_capture))
         win._show_index(_scene_beat_index(win))
         _click(win, 'cover')
@@ -112,7 +113,7 @@ class TestGenerateFromCard:
 
     def test_cancel_touches_nothing(self, ui_window, monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_no))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_no))
         i = _scene_beat_index(win)
         win._show_index(i)
         _click(win, 'cover')
@@ -123,7 +124,7 @@ class TestGenerateFromCard:
                                                     monkeypatch):
         """文件被手改过 → 条目置灰；就算硬发请求也不写、不改、说清原因。"""
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         sg = _sg_file(win)
         sg.write_text('# 我自己写的\ntransform mine:\n    zoom 2\n',
                       encoding='utf-8')
@@ -153,7 +154,7 @@ class TestGenerateFromCard:
         （模拟"面板那一刻还没看到 bgfit"）。写盘前再查一遍重就该选 `bgfit`。
         """
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         (win._project_root / 'game' / 'mine.rpy').write_text(
             'transform bgfit:\n    fit "cover"\n', encoding='utf-8')
         win._session.refresh_transform_index()

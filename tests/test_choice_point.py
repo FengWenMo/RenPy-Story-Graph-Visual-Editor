@@ -230,8 +230,15 @@ def _src(name: str) -> str:
 
 
 def test_the_button_is_wired_to_the_method():
+    """
+    ⚠ 扫**整个前端**（`main_window_source_text()`），不是只读 `main_window.py`：
+    那一排增删按钮 2026-11-01 搬进了 `window_graph_page._card_page_breadcrumb`
+    —— 只读入口文件会得出"这个按钮根本没接线"的错误结论。
+    """
+    from _source_paths import main_window_source_text
+
     assert 'self._choice_btn.clicked.connect(self.insert_choice_point)' in \
-        _src('main_window.py')
+        main_window_source_text()
 
 
 def test_method_exists_and_goes_through_the_plan():

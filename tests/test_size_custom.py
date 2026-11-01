@@ -370,6 +370,7 @@ pytest.importorskip('PySide6')
 
 from PySide6.QtWidgets import QMessageBox                     # noqa: E402
 
+from storygraph.ui_qt import card_actions as CA               # noqa: E402
 from storygraph.ui_qt import main_window as MW                # noqa: E402
 from storygraph.ui_qt.size_panel import SizePanel             # noqa: E402
 
@@ -571,7 +572,7 @@ class TestApplyFromCard:
     def test_filling_075_writes_the_definition_and_the_beat(self, ui_window,
                                                             monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         i = _scene_beat_index(win)
         win._show_index(i)
         assert not str(getattr(win._session.beats[i], 'scene_at', '') or '')
@@ -599,7 +600,7 @@ class TestApplyFromCard:
             seen['text'] = text
             return QMessageBox.StandardButton.Yes
 
-        monkeypatch.setattr(MW.QMessageBox, 'question',
+        monkeypatch.setattr(CA.QMessageBox, 'question',
                             staticmethod(_capture))
         win._show_index(_scene_beat_index(win))
         slot = _custom_slot(win)
@@ -612,7 +613,7 @@ class TestApplyFromCard:
 
     def test_cancel_touches_nothing(self, ui_window, monkeypatch):
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_no))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_no))
         i = _scene_beat_index(win)
         win._show_index(i)
         slot = _custom_slot(win)
@@ -625,7 +626,7 @@ class TestApplyFromCard:
             self, ui_window, monkeypatch):
         """项目里已有 `transform quarter: zoom 0.25` → 用它，不新建文件。"""
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         (win._project_root / 'game' / 'mine.rpy').write_text(
             'transform quarter:\n    zoom 0.25\n', encoding='utf-8')
         win._session.refresh_transform_index()
@@ -641,7 +642,7 @@ class TestApplyFromCard:
                                                      monkeypatch):
         """绕过面板硬发（没有 zoom）→ 不许静默：控制台说清哪一步没填。"""
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         i = _scene_beat_index(win)
         win._show_index(i)
         plan = MW.apply_size_from_card(win, {
@@ -654,7 +655,7 @@ class TestApplyFromCard:
     def test_scene_change_can_carry_a_custom_zoom(self, ui_window, monkeypatch):
         """换景那条路也走同一个 `_plan_sg_from_card`（不是各写一份）。"""
         win = ui_window
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         monkeypatch.setattr(win, '_pick_asset_for',
                             lambda what, current=None: 'bg rooftop')
         i = _scene_beat_index(win)

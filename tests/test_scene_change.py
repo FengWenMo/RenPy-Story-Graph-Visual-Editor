@@ -502,7 +502,7 @@ class TestWindowSceneFlow:
             bodies.append((title, body))
             return QMessageBox.StandardButton.Yes
 
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_confirm))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_confirm))
         panel = win._panel.size_panel()
         assert panel.rows(), '这一拍没有尺寸行'
         spec_before = panel.rows()[0]['spec']
@@ -524,7 +524,7 @@ class TestWindowSceneFlow:
         win._show_index(i)
         monkeypatch.setattr(CA, '_ask_scene_image',
                             lambda _w, _r: 'bg rooftop')
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_no))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_no))
         before = str(getattr(win._session.beats[i], 'scene', '') or '')
         win._panel.size_panel().slots()[0]['swap'].click()
         assert str(win._session.beats[i].scene or '') == before
@@ -548,7 +548,7 @@ class TestWindowSceneFlow:
         win._show_index(i)
         monkeypatch.setattr(CA, '_ask_scene_image',
                             lambda _w, _r: 'bg nosuchimage')
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         win._panel.size_panel().slots()[0]['swap'].click()
         assert '换景没做' in win._console.toPlainText()
         assert '找不到这张图' in win._console.toPlainText()

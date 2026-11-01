@@ -462,6 +462,7 @@ class TestWindowExits:
                                                       monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
+        from storygraph.ui_qt import card_actions as CA
         from storygraph.ui_qt import main_window as MW
 
         bodies = []
@@ -470,7 +471,8 @@ class TestWindowExits:
             bodies.append(text)
             return QMessageBox.StandardButton.Yes
 
-        monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
+        # ⚠ 打桩打在 `card_actions`：确认框是它在弹（2026-11-01 搬出 main_window）
+        monkeypatch.setattr(CA.QMessageBox, 'question', staticmethod(_yes))
         win = ui_window
         idx = 2
         win._show_index(idx)

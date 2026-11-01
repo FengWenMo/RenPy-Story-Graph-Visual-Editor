@@ -85,6 +85,14 @@ REQUIRED_MODULES = (
     # `main_window` 顶层 import，但它**自己**又被 `tests/_source_paths` 与
     # 那套 mixin 守卫当成"前端的一整块" —— 换名字或漏打包都从这里先炸。
     'storygraph.ui_qt.window_graph_page',
+    # 2026-11-01（第十段）：前端拆成四层时新建的三个叶子 ——
+    # `window_graph_page` 顶层 import 它们（`main_window` 再 import 那一块）。
+    # 这批正是"刚拆出来的新文件"，最容易漏在 hiddenimports 外：
+    # 缺了就是**打开窗口就 `ModuleNotFoundError`**（不是某个按钮坏了，
+    # 是连界面都起不来），所以逐个点名。
+    'storygraph.ui_qt.card_editor',
+    'storygraph.ui_qt.card_actions',
+    'storygraph.ui_qt.mapping_status',
     # 2026-11-01（解 `assets` 三模块环）：映射结构契约与身份词汇两个新叶子。
     # `mapping_schema` 里放着 `validate_mapping`，而 `mapping_excel` 现在是
     # **顶层** import 它 —— 打包时这两份文件要是没进 hiddenimports，

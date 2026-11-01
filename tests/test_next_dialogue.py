@@ -125,7 +125,12 @@ def test_no_beats_says_so(tmp_path):
 
 def test_the_toolbar_has_the_entry():
     """入口要在（用户："我找不到入口"是历史教训 —— 之前 4 项功能做完却找不到）。"""
-    src = (ROOT / 'storygraph' / 'ui_qt' / 'main_window.py').read_text(
-        encoding='utf-8')
+    # 扫**整个前端**：工具栏 2026-11-01 搬进了 `window_graph_page._toolbar_card`
+    import sys
+
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from _source_paths import main_window_source_text
+
+    src = main_window_source_text()
     assert '下一句台词' in src, '工具栏里没有这个入口'
     assert 'self.next_dialogue' in src, '按钮没连到方法'
