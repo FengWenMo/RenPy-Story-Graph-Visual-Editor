@@ -1921,33 +1921,7 @@ class TableSessionMixin:
         if advanced_open:
             if 'SFX' in fields:
                 b.sfx = str(fields.get('SFX') or '').strip()
-            if 'CodeBlock' in fields:
-                # ⚠⚠ **没改就别动**（2026-10-18 修）。
-                #
-                # 《代码》那一格是 `raw` + `code` 两份内容**拼出来给人看的**，
-                # 而 `raw` 里那些行还带着"它是不是原生语句"的分类（`ordered`）。
-                # 无条件写回（并把 `raw` 清空）等于**把分类丢掉**：
-                # `code_lines_with_kinds()` 于是对不上 → `unified_plan()` 返回
-                # `None` → 渲染退回"按 verb 分组"那条老路 →
-                #
-                #     play music / play ambience / play sound / stop ambience
-                #     保存一次卡片之后变成
-                #     play music / play sound / play ambience / stop ambience
-                #
-                # **顺序被改**，而用户只是打开了卡片、什么都没改。
-                # 判据：只有这一格**真的和显示值不同**时才写回。
-                new_code = str(fields.get('CodeBlock') or '').strip()
-                if new_code != str(B.compose_code(b) or '').strip():
-                    # **写的是这一拍自己那条自定义语句 → 逐字写回头行**（P2）。
-                    #
-                    # 现场（审计第四轮 P2）：声明过 `mycue` 的拍，「代码」格里
-                    # 写 `mycue intensity=5` → 走下面那条 python 通道 →
-                    # 渲染成 `$ mycue intensity=5`（`render_code_block` 会给
-                    # 认不出的行补 `$`）→ 产物连 lint 都过不了，而拒因只说
-                    # "`$` 语句里的 Python 语法错误"，人猜不到"该填参数格"。
-                    if not self._write_statement_head(b, new_code):
-                        b.code = new_code
-                        b.raw = ''
+            self._apply_code_cell(b, fields)
             if 'Label' in fields:
                 self._apply_label(b, str(fields.get('Label') or '').strip())
             if 'Kind' in fields:
@@ -1964,6 +1938,36 @@ class TableSessionMixin:
                 b.menu_name = str(fields.get('MenuName') or '').strip()
             if 'MenuArgs' in fields:
                 b.menu_args = str(fields.get('MenuArgs') or '').strip()
+
+    def _apply_code_cell(self, b, fields) -> None:
+        """《代码》那一格**没改就别动**（拆自 `_apply_advanced_fields`，2026-11-01）。"""
+        if 'CodeBlock' in fields:
+            # ⚠⚠ **没改就别动**（2026-10-18 修）。
+            #
+            # 《代码》那一格是 `raw` + `code` 两份内容**拼出来给人看的**，
+            # 而 `raw` 里那些行还带着"它是不是原生语句"的分类（`ordered`）。
+            # 无条件写回（并把 `raw` 清空）等于**把分类丢掉**：
+            # `code_lines_with_kinds()` 于是对不上 → `unified_plan()` 返回
+            # `None` → 渲染退回"按 verb 分组"那条老路 →
+            #
+            #     play music / play ambience / play sound / stop ambience
+            #     保存一次卡片之后变成
+            #     play music / play sound / play ambience / stop ambience
+            #
+            # **顺序被改**，而用户只是打开了卡片、什么都没改。
+            # 判据：只有这一格**真的和显示值不同**时才写回。
+            new_code = str(fields.get('CodeBlock') or '').strip()
+            if new_code != str(B.compose_code(b) or '').strip():
+                # **写的是这一拍自己那条自定义语句 → 逐字写回头行**（P2）。
+                #
+                # 现场（审计第四轮 P2）：声明过 `mycue` 的拍，「代码」格里
+                # 写 `mycue intensity=5` → 走下面那条 python 通道 →
+                # 渲染成 `$ mycue intensity=5`（`render_code_block` 会给
+                # 认不出的行补 `$`）→ 产物连 lint 都过不了，而拒因只说
+                # "`$` 语句里的 Python 语法错误"，人猜不到"该填参数格"。
+                if not self._write_statement_head(b, new_code):
+                    b.code = new_code
+                    b.raw = ''
 
     def _apply_sprite_cards(self, b, cards) -> None:
         """立绘卡 → `show` / `at`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
