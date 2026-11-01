@@ -688,6 +688,19 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
      `window_state` / `stage_preview` 各指它们，原来那个五模块环
      （`main_window → stage_thumb → stage_preview → main_window` +
      `main_window ↔ window_state`）就是这么断的。
+   · **`assets` 层两个新叶子**（2026-11-01 第七段）：`assets/identity_core.py`
+     （`KINDS` / `SHOWABLE_KINDS` / `Identity` / `normalize_relpath` /
+     `asset_id_of` / `build_copy_index` + `_iter_rows` / `_row_relpath` /
+     `_stem_of`）与 `assets/mapping_schema.py`（`MAPPING_SCHEMA` /
+     `MappingError` / `xls_unsupported` / `validate_mapping` + 三张认识键表）。
+     `asset_identity` 与 `asset_mapping` 都**再导出**前者的名字（外面一百多处
+     `from ...asset_identity import Identity` 不用改）；`mapping_excel` 只许指
+     这两个叶子，`mapping_schema` / `identity_core` **不许**反过来导入
+     `asset_identity` / `asset_mapping` / `mapping_excel`。
+     环的现状：**`[2] asset_identity ↔ asset_mapping`**（唯一剩下的一条边，
+     两处：`resolve_image` 的映射层、`project_context` 的 `mapping_cached`）；
+     断它的方法见 `docs/开发日志.md` §82 第 3 节（抬一个 `assets/image_resolve.py`
+     到两者之上），**不是**搬常量。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
