@@ -1597,40 +1597,8 @@ def _menu_segments_by_path(run: list):
             keys_in_order.append(key)
     if not option_rows:
         return None                           # 一级选项都没有 → 老路
-    # 键 → 段：**先按键本身**（`B` → 第 2 段，那是"结构位"的本义），
-    # 解不出来才退回"按出现顺序配对"。
-    #
-    # 为什么不能只用顺序配对（2026-10-05 修，空选项体实测）：
-    # **某个选项体是空的**时候键会缺一个 ——
-    #
-    #     menu:
-    #         "空的":            ← A，没有块体
-    #         "有内容":          ← B
-    #             e "x"          ← 路径 `menu:1>B`
-    #
-    # 唯一的键 `B` 会被配给第 1 个选项（`空的`）→ **两个选项体对调**：
-    # 选"空的"播了台词、选"有内容"什么都不做（静默改剧情）。
-    #
-    # 为什么还要保留顺序配对：**表可以被编辑** —— 删掉选项 A 之后，
-    # 存下来的键还是 `B`/`C`（越界了），而它们现在排第 1/2 位。
-    # 判据因此是"**所有**键都能解成互不重复、且落在选项数之内的序号"，
-    # 才敢按键配对；只要有一个解不出/越界/撞车，就整体退回顺序配对
-    # （`test_deleting_an_option_keeps_the_rest` 钉着这一档）。
     segments = [[opt, [], []] for _pos, opt in option_rows]
-    key_of: dict = {}
-    by_key: dict = {}
-    used: set = set()
-    for key in keys_in_order:
-        i = option_index(key)
-        if i and i <= len(segments) and (i - 1) not in used:
-            by_key[key] = i - 1
-            used.add(i - 1)
-    if len(by_key) == len(keys_in_order):
-        key_of = by_key
-    else:
-        for i, key in enumerate(keys_in_order):
-            if i < len(segments):
-                key_of[key] = i
+    key_of = _menu_option_key_slots(keys_in_order, len(segments))
     # 第二趟：块体拍按**它的键**归位；键对不上（编辑过）就按出现顺序找空位
     for pos, b in enumerate(run[1:]):
         path = str(getattr(b, 'nest_path', ''))
@@ -1658,6 +1626,48 @@ def _menu_segments_by_path(run: list):
     for pos, b in malformed:                  # 菜单层上"不是选项行"的拍
         segments[-1][2].append((pos, b, '这一拍在菜单层、却不属于任何选项'))
     return segments
+
+
+def _menu_option_key_slots(keys_in_order: list, option_count: int) -> dict:
+    """
+    选项键 → 段下标（`_menu_segments_by_path` 配对那一趟）。
+
+    `option_count` = 本层选项段的数量（返回的下标必须落在它之内）。
+    """
+    # 键 → 段：**先按键本身**（`B` → 第 2 段，那是"结构位"的本义），
+    # 解不出来才退回"按出现顺序配对"。
+    #
+    # 为什么不能只用顺序配对（2026-10-05 修，空选项体实测）：
+    # **某个选项体是空的**时候键会缺一个 ——
+    #
+    #     menu:
+    #         "空的":            ← A，没有块体
+    #         "有内容":          ← B
+    #             e "x"          ← 路径 `menu:1>B`
+    #
+    # 唯一的键 `B` 会被配给第 1 个选项（`空的`）→ **两个选项体对调**：
+    # 选"空的"播了台词、选"有内容"什么都不做（静默改剧情）。
+    #
+    # 为什么还要保留顺序配对：**表可以被编辑** —— 删掉选项 A 之后，
+    # 存下来的键还是 `B`/`C`（越界了），而它们现在排第 1/2 位。
+    # 判据因此是"**所有**键都能解成互不重复、且落在选项数之内的序号"，
+    # 才敢按键配对；只要有一个解不出/越界/撞车，就整体退回顺序配对
+    # （`test_deleting_an_option_keeps_the_rest` 钉着这一档）。
+    key_of: dict = {}
+    by_key: dict = {}
+    used: set = set()
+    for key in keys_in_order:
+        i = option_index(key)
+        if i and i <= option_count and (i - 1) not in used:
+            by_key[key] = i - 1
+            used.add(i - 1)
+    if len(by_key) == len(keys_in_order):
+        key_of = by_key
+    else:
+        for i, key in enumerate(keys_in_order):
+            if i < option_count:
+                key_of[key] = i
+    return key_of
 
 
 def _menu_segments(run: list, use_paths: bool = True) -> list:
@@ -1829,17 +1839,6 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         label += _inline_note(opt)
         emit(label, '菜单', opt.text or '')
 
-        # 选项体在拍上带的条件是**累积**的（`_combine(外层, 选项条件)`）。
-        # 两种情况必须分开处理：
-        #   · 正好等于"本选项 + 外层菜单"的累积条件 → 那只是解析器的记账，
-        #     块体不该再多一层 `if`，把它**剥掉**再渲染；
-        #   · 不等于（真的嵌了一层 `if`）→ 保留，让渲染器出嵌套 `if`。
-        #
-        # 认不出归属的拍（策划插进菜单组中间的）**按原位置**插回来，
-        # 前面加一句显式警告：Ren'Py 的 `menu:` 里除选项外没有合法位置，
-        # 只能收进某个选项体，静默收进去就成了"只有选中才播"的剧情错误。
-        expected = _expected_body_condition(own_cond, menu_cond)
-        ordered = list(sorted(list(body) + list(foreign)))
         inner = opt_indent + '    '
         # **选项体统一走这条递归路**（2026-10-05 修，`minimal_nested_menu`）。
         #
@@ -1856,66 +1855,16 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         #      `render_menu_block`，嵌套菜单就在那里递归，**要几层有几层**；
         #   3. 认不出归属的拍（`why`）在**原位置**插一句显式 TODO（不许静默收进
         #      选项体：那会变成"只有选中这个选项才播"的剧情错误）。
-        prepared: list = []
-        for _pos, beat, why in ordered:
-            got = (beat.condition or '').strip()
-            if not why and (not got or got == expected):
-                prepared.append((_with_condition(beat, ''), ''))
-                continue
-            # 要保留自己条件的拍：减去**已经写在结构上**的那部分
-            # （选项条件 + 菜单块条件）—— 外层那个 `if:` 已经表达了它。
-            # 不减就会翻倍（见 `strip_condition_context` 的 docstring）。
-            if not why and got:
-                lean = strip_condition_context(got, expected)
-                if lean != got:
-                    prepared.append((_with_condition(beat, lean), why))
-                    continue
-            prepared.append((beat, why))
+        prepared = _prepare_option_body_beats(body, foreign,
+                                              own_cond, menu_cond)
         body_lines = []
-
-        def _render_body(beats_: list) -> list:
-            """
-            一串拍 → 已带**本层前缀**（`inner`）的行。
-
-            为什么不用 `_render_unit_lines`：它的口径是"相对调用方框架、
-            不补前缀"，而这里的调用方（label 循环那边）会补一次 —— 两个框架
-            混用，嵌套菜单的**菜单头**就会少一级（`probe_nested_render.py`
-            的调用轨迹原样抓到）。这里统一自己补：菜单块用 `indent=''`
-            渲染成纯相对形式，再整体加 `inner`：
-
-                菜单头 = inner        选项 = inner+4        选项体 = inner+8
-
-            与 `_indent_beat_lines` 的口径一致，所以**嵌套可以任意深**。
-            """
-            out = []
-            for kind, group in split_beat_units(beats_):
-                if kind == 'menu':
-                    out.extend(
-                        inner + ln if ln.strip() else ''
-                        # 一级相对（`render_menu_block(indent=X)` 把**选项**放在 X
-                        # 那一级、**菜单头**放在 0 那一级，量过见 probe），
-                        # 再整体加 `inner` → 头 inner / 选项 inner+4 / 体 inner+8
-                        for ln in render_menu_block(group, indent='    ',
-                                                    audit=audit, trace=trace))
-                elif kind == 'loop':
-                    # 循环同一个口径（2026-10-07）：头在 0 级、块体在 4 级，
-                    # 再整体加 `inner`。漏了这一支，**选项体里的循环**
-                    # （`test_loop_inside_menu_is_nested`）会整块消失 ——
-                    # 因为循环头拍自己没有 `opaque`，单拍渲染是空的。
-                    out.extend(
-                        inner + ln if ln.strip() else ''
-                        for ln in render_loop_block(group, indent='    ',
-                                                    audit=audit, trace=trace))
-                else:
-                    out.extend(_indent_beat_lines(group[0], inner,
-                                                  audit, trace))
-            return out
 
         body_run: list = []          # ⚠ 别叫 `run`：那是本函数的参数（整个菜单组）
 
         def _flush_body() -> None:
             if body_run:
-                body_lines.extend(_render_body(list(body_run)))
+                body_lines.extend(_render_menu_body_lines(
+                    list(body_run), inner, audit, trace))
                 body_run.clear()
 
         for beat, why in prepared:
@@ -1932,6 +1881,81 @@ def _render_menu_segments(run: list, segments: list, indent: str,
         lines.extend(body_lines)
     return lines
 
+
+def _prepare_option_body_beats(body: list, foreign: list, own_cond: str,
+                               menu_cond: str) -> list:
+    """
+    选项体的拍 → `[(带最终条件的拍, 认不出归属的原因), ...]`（按原位置排好）。
+
+    `body` / `foreign` 是菜单段的后两项：认得出归属的拍、认不出归属
+    （要带警告插回原位置）的拍，元素都是 `(pos, beat, why)`。
+    """
+    # 选项体在拍上带的条件是**累积**的（`_combine(外层, 选项条件)`）。
+    # 两种情况必须分开处理：
+    #   · 正好等于"本选项 + 外层菜单"的累积条件 → 那只是解析器的记账，
+    #     块体不该再多一层 `if`，把它**剥掉**再渲染；
+    #   · 不等于（真的嵌了一层 `if`）→ 保留，让渲染器出嵌套 `if`。
+    #
+    # 认不出归属的拍（策划插进菜单组中间的）**按原位置**插回来，
+    # 前面加一句显式警告：Ren'Py 的 `menu:` 里除选项外没有合法位置，
+    # 只能收进某个选项体，静默收进去就成了"只有选中才播"的剧情错误。
+    expected = _expected_body_condition(own_cond, menu_cond)
+    ordered = list(sorted(list(body) + list(foreign)))
+    prepared: list = []
+    for _pos, beat, why in ordered:
+        got = (beat.condition or '').strip()
+        if not why and (not got or got == expected):
+            prepared.append((_with_condition(beat, ''), ''))
+            continue
+        # 要保留自己条件的拍：减去**已经写在结构上**的那部分
+        # （选项条件 + 菜单块条件）—— 外层那个 `if:` 已经表达了它。
+        # 不减就会翻倍（见 `strip_condition_context` 的 docstring）。
+        if not why and got:
+            lean = strip_condition_context(got, expected)
+            if lean != got:
+                prepared.append((_with_condition(beat, lean), why))
+                continue
+        prepared.append((beat, why))
+    return prepared
+
+
+def _render_menu_body_lines(beats_: list, inner: str, audit, trace: list) -> list:
+    """
+    一串拍 → 已带**本层前缀**（`inner`）的行。
+
+    为什么不用 `_render_unit_lines`：它的口径是"相对调用方框架、
+    不补前缀"，而这里的调用方（label 循环那边）会补一次 —— 两个框架
+    混用，嵌套菜单的**菜单头**就会少一级（`probe_nested_render.py`
+    的调用轨迹原样抓到）。这里统一自己补：菜单块用 `indent=''`
+    渲染成纯相对形式，再整体加 `inner`：
+
+        菜单头 = inner        选项 = inner+4        选项体 = inner+8
+
+    与 `_indent_beat_lines` 的口径一致，所以**嵌套可以任意深**。
+    """
+    out = []
+    for kind, group in split_beat_units(beats_):
+        if kind == 'menu':
+            out.extend(
+                inner + ln if ln.strip() else ''
+                # 一级相对（`render_menu_block(indent=X)` 把**选项**放在 X
+                # 那一级、**菜单头**放在 0 那一级，量过见 probe），
+                # 再整体加 `inner` → 头 inner / 选项 inner+4 / 体 inner+8
+                for ln in render_menu_block(group, indent='    ',
+                                            audit=audit, trace=trace))
+        elif kind == 'loop':
+            # 循环同一个口径（2026-10-07）：头在 0 级、块体在 4 级，
+            # 再整体加 `inner`。漏了这一支，**选项体里的循环**
+            # （`test_loop_inside_menu_is_nested`）会整块消失 ——
+            # 因为循环头拍自己没有 `opaque`，单拍渲染是空的。
+            out.extend(
+                inner + ln if ln.strip() else ''
+                for ln in render_loop_block(group, indent='    ',
+                                            audit=audit, trace=trace))
+        else:
+            out.extend(_indent_beat_lines(group[0], inner,
+                                          audit, trace))
+    return out
 
 
 def _with_condition(beat, condition: str):
@@ -2978,6 +3002,55 @@ def _emit_label_groups(groups, out, indent, audit, trace, pose_hides,
         out.append('')
     return emitted_labels
 
+
+def _group_beats_by_label(beats: list, label_name: Optional[str]) -> list:
+    """
+    整表 → `[(label 名, 该段的拍), ...]`（`render_beats_to_rpy` 的分组那一趟）。
+
+    `label_name` 非空时全部塞进同一个 label（便于替换单个章节）；
+    为空时按 `Beat.label` 分段，空名归 `start`。
+    """
+    groups = []
+    if label_name:
+        groups.append((label_name, list(beats)))
+    else:
+        current = None
+        bucket = []
+        for b in beats:
+            name = b.label or 'start'
+            if current is None:
+                current = name
+            if name != current:
+                groups.append((current, bucket))
+                current, bucket = name, []
+            bucket.append(b)
+        if bucket:
+            groups.append((current, bucket))
+        if not groups and label_name:
+            groups.append((label_name, []))
+        #
+        # **一张拍都没有、也没指定 label 名 → 不产生任何 label**
+        # （2026-10-05 修，`tools/probe_label_fate_xlsx.py` 抓到）。
+        #
+        # 旧写法是 `groups.append(('start', []))` —— 凭空造一个 label。
+        # 真实项目里 6 个**纯定义文件**中招（`transform.rpy` /
+        # `whackamole_images.rpy` / `generated_ui.rpy` / `plottree.rpy` /
+        # `script0.rpy` / `script1.rpy`）：它们只有 `transform` / `image` /
+        # `init python`，**源文件里根本没有 label**，产物里却各多出一个
+        #
+        #     label start:
+        #         pass
+        #         return
+        #
+        # 而 `start` 是 Ren'Py 的游戏入口 —— 这些产物一旦落进 `game/`，
+        # 就是**重复 label，游戏起不来**。
+        # 一个只有定义的文件**没有 label** 才是对的（Ren'Py 允许）。
+        #
+        # 注意这条与上面"空拍保住 label 名"是同一枚硬币的两面：
+        # 源文件里**有**的 label 必须留下来，**没有**的绝不能凭空造。
+    return groups
+
+
 def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
                         indent: str = '    ', registry=None,
                         symbols=None, trace: list = None,
@@ -3043,44 +3116,7 @@ def render_beats_to_rpy(beats: list, label_name: Optional[str] = None,
         out.append(text)
         out.append('')
 
-    groups = []
-    if label_name:
-        groups.append((label_name, list(beats)))
-    else:
-        current = None
-        bucket = []
-        for b in beats:
-            name = b.label or 'start'
-            if current is None:
-                current = name
-            if name != current:
-                groups.append((current, bucket))
-                current, bucket = name, []
-            bucket.append(b)
-        if bucket:
-            groups.append((current, bucket))
-        if not groups and label_name:
-            groups.append((label_name, []))
-        #
-        # **一张拍都没有、也没指定 label 名 → 不产生任何 label**
-        # （2026-10-05 修，`tools/probe_label_fate_xlsx.py` 抓到）。
-        #
-        # 旧写法是 `groups.append(('start', []))` —— 凭空造一个 label。
-        # 真实项目里 6 个**纯定义文件**中招（`transform.rpy` /
-        # `whackamole_images.rpy` / `generated_ui.rpy` / `plottree.rpy` /
-        # `script0.rpy` / `script1.rpy`）：它们只有 `transform` / `image` /
-        # `init python`，**源文件里根本没有 label**，产物里却各多出一个
-        #
-        #     label start:
-        #         pass
-        #         return
-        #
-        # 而 `start` 是 Ren'Py 的游戏入口 —— 这些产物一旦落进 `game/`，
-        # 就是**重复 label，游戏起不来**。
-        # 一个只有定义的文件**没有 label** 才是对的（Ren'Py 允许）。
-        #
-        # 注意这条与上面"空拍保住 label 名"是同一枚硬币的两面：
-        # 源文件里**有**的 label 必须留下来，**没有**的绝不能凭空造。
+    groups = _group_beats_by_label(beats, label_name)
 
     #: 拍对象 → 原始下标（P4 的 `pose_hides` 按**拍序号**给）
     idx_of = {id(b): i for i, b in enumerate(beats or ())}

@@ -2404,6 +2404,91 @@ def _written_speaker(beat, symbols) -> str:
     return speaker
 
 
+def _missing_generated_lines(text: str, blocks: list) -> list:
+    """
+    ③ 生成器要的**内容行**在产物里一条都没少吗？返回产物里找不到的那些行。
+
+    判据要比"逐字节相同"宽：源文件那行可能带选项冒号、带行尾注释，而生成器
+    写的是另一种写法 —— 容忍哪几种形态见下面 `_keys`；音频行另按通道计数
+    容忍（③b）。
+
+    `blocks` 是 `(拍序号, 首行, 末行, 生成的行, 拍)`。
+    """
+    # ③ 生成器要的内容行不许丢（错位改错行会在这里现形）
+    #
+    # 比对要**容忍结尾冒号**：菜单选项在源文件里是 `"A":`，而生成器
+    # 只产 `"A"`（冒号是 `menu:` 结构的语法）。不放这一档就会把
+    # 正常脚本误判成"源码区间对不上"。
+    #
+    # 还要容忍**空白写法差异**（2026-10-05 真实 chapter3_1 实测）：
+    # 原文 `yhj"结。"   ###注意：…`（说话人后没空格 + 行尾还有作者注释）而
+    # 生成器写 `yhj "结。"` —— Ren'Py 读出来是同一句，按逐字节比却判"内容丢了"
+    # → **整章退回全量重生成、手写注释被冲掉**。所以：
+    #   · 键里加上"去掉全部空白"的形式；
+    #   · 再允许"生成的那行是产物某一行（去空白后）的子串"，
+    #     用来吸收"源文件那行后面还跟着注释"这种情况。
+    def _keys(line):
+        out = set()
+        n = _norm(line)
+        # ⚠ **顺序**：先 `rstrip(':')` 再 `_unescaped`（2026-10-05 修 O1）。
+        # 从前是"去冒号"与"去引号"各自独立地加一遍，于是**两个一起出现**
+        # 的形态对不上：原文 `'第一章':`（单引号 + 选项冒号）、生成器
+        # `"第一章"` → 生成侧算得出 `第一章`，原文那侧只有 `'第一章':`
+        # 与 `'第一章':`（去引号失败，因为它以 `:` 结尾）→ 判成"内容丢了"
+        # → `script.rpy` 整章退回全量（7 条菜单选项）。
+        for base in (n, n.rstrip(':')):
+            for k in (base, _unescaped(base)):
+                if k:
+                    out.add(k)
+                    out.add(re.sub(r'\s+', '', k))
+        return {k for k in out if k}
+
+    text_set = set()
+    for ln in split_lines(text):
+        text_set |= _keys(ln)
+    out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in split_lines(text)]
+    out_blobs = [b for b in out_blobs if b]
+    # ③b **音频行按"通道计数"容忍**（2026-10-05）。
+    #
+    # 音频行在配对里**永远不会被改写**（`_rewrite` 只放行 say 与舞台动词），
+    # 所以产物里保留的是**作者的写法**；而生成器会把它翻译成真实路径
+    # （`play music night` → `play music "music/night.ogg"` —— 那个翻译本身
+    # 是对的，Ren'Py 要的就是路径）。于是下面那条"每条生成行都要在产物里"
+    # 必然失败 → **整份补丁作废**：用户侧看到的是"我只改了一张卡，
+    # 却弹「1 条生成内容在补丁结果里找不到」"。
+    #
+    # 容忍判据取**同一个 (动词, 通道) 的条数**：产物里的条数不许比生成器
+    # 想要的少 —— "某条音乐凭空没了"仍然抓得住，"作者写 night、生成器写路径"
+    # 不再误伤。
+    audio_gen: Counter = Counter()
+    audio_out: Counter = Counter()
+    for _i, _f, _l, gen, _b in blocks:
+        for line in _content_lines(gen):
+            ident = _audio_ident(line)
+            if ident:
+                audio_gen[ident] += 1
+    for line in split_lines(text):
+        ident = _audio_ident(line)
+        if ident:
+            audio_out[ident] += 1
+    audio_tolerated = {k for k, n in audio_gen.items()
+                       if audio_out.get(k, 0) >= n}
+    lost = []
+    for _i, _first, _last, gen, _beat in blocks:
+        for line in _content_lines(gen):
+            ident = _audio_ident(line)
+            if ident and ident in audio_tolerated:
+                continue
+            keys = _keys(line)
+            if keys & text_set:
+                continue
+            stripped = re.sub(r'\s+', '', _norm(line))
+            if stripped and any(stripped in blob for blob in out_blobs):
+                continue
+            lost.append(line)
+    return lost
+
+
 def _verify_patch(text: str, original: str, beats: list, blocks: list,
                   symbols=None, renumber=()) -> list:
     """
@@ -2477,78 +2562,7 @@ def _verify_patch(text: str, original: str, beats: list, blocks: list,
     if cond_bad:
         reasons.append(_condition_hint(cond_bad, text))
 
-    # ③ 生成器要的内容行不许丢（错位改错行会在这里现形）
-    #
-    # 比对要**容忍结尾冒号**：菜单选项在源文件里是 `"A":`，而生成器
-    # 只产 `"A"`（冒号是 `menu:` 结构的语法）。不放这一档就会把
-    # 正常脚本误判成"源码区间对不上"。
-    #
-    # 还要容忍**空白写法差异**（2026-10-05 真实 chapter3_1 实测）：
-    # 原文 `yhj"结。"   ###注意：…`（说话人后没空格 + 行尾还有作者注释）而
-    # 生成器写 `yhj "结。"` —— Ren'Py 读出来是同一句，按逐字节比却判"内容丢了"
-    # → **整章退回全量重生成、手写注释被冲掉**。所以：
-    #   · 键里加上"去掉全部空白"的形式；
-    #   · 再允许"生成的那行是产物某一行（去空白后）的子串"，
-    #     用来吸收"源文件那行后面还跟着注释"这种情况。
-    def _keys(line):
-        out = set()
-        n = _norm(line)
-        # ⚠ **顺序**：先 `rstrip(':')` 再 `_unescaped`（2026-10-05 修 O1）。
-        # 从前是"去冒号"与"去引号"各自独立地加一遍，于是**两个一起出现**
-        # 的形态对不上：原文 `'第一章':`（单引号 + 选项冒号）、生成器
-        # `"第一章"` → 生成侧算得出 `第一章`，原文那侧只有 `'第一章':`
-        # 与 `'第一章':`（去引号失败，因为它以 `:` 结尾）→ 判成"内容丢了"
-        # → `script.rpy` 整章退回全量（7 条菜单选项）。
-        for base in (n, n.rstrip(':')):
-            for k in (base, _unescaped(base)):
-                if k:
-                    out.add(k)
-                    out.add(re.sub(r'\s+', '', k))
-        return {k for k in out if k}
-
-    text_set = set()
-    for ln in split_lines(text):
-        text_set |= _keys(ln)
-    out_blobs = [re.sub(r'\s+', '', _norm(ln)) for ln in split_lines(text)]
-    out_blobs = [b for b in out_blobs if b]
-    # ③b **音频行按"通道计数"容忍**（2026-10-05）。
-    #
-    # 音频行在配对里**永远不会被改写**（`_rewrite` 只放行 say 与舞台动词），
-    # 所以产物里保留的是**作者的写法**；而生成器会把它翻译成真实路径
-    # （`play music night` → `play music "music/night.ogg"` —— 那个翻译本身
-    # 是对的，Ren'Py 要的就是路径）。于是下面那条"每条生成行都要在产物里"
-    # 必然失败 → **整份补丁作废**：用户侧看到的是"我只改了一张卡，
-    # 却弹「1 条生成内容在补丁结果里找不到」"。
-    #
-    # 容忍判据取**同一个 (动词, 通道) 的条数**：产物里的条数不许比生成器
-    # 想要的少 —— "某条音乐凭空没了"仍然抓得住，"作者写 night、生成器写路径"
-    # 不再误伤。
-    audio_gen: Counter = Counter()
-    audio_out: Counter = Counter()
-    for _i, _f, _l, gen, _b in blocks:
-        for line in _content_lines(gen):
-            ident = _audio_ident(line)
-            if ident:
-                audio_gen[ident] += 1
-    for line in split_lines(text):
-        ident = _audio_ident(line)
-        if ident:
-            audio_out[ident] += 1
-    audio_tolerated = {k for k, n in audio_gen.items()
-                       if audio_out.get(k, 0) >= n}
-    lost = []
-    for _i, _first, _last, gen, _beat in blocks:
-        for line in _content_lines(gen):
-            ident = _audio_ident(line)
-            if ident and ident in audio_tolerated:
-                continue
-            keys = _keys(line)
-            if keys & text_set:
-                continue
-            stripped = re.sub(r'\s+', '', _norm(line))
-            if stripped and any(stripped in blob for blob in out_blobs):
-                continue
-            lost.append(line)
+    lost = _missing_generated_lines(text, blocks)  # ③ 生成的内容行一条都不许丢
     if lost:
         reasons.append(f'{len(lost)} 条生成内容在补丁结果里找不到（例：'
                        f'{lost[0][:40]!r}）——多半是源码区间对不上原文')
@@ -3193,6 +3207,43 @@ def _plan_label_renames(beats, orig_lines) -> list:
     return plans
 
 
+def _reorder_gap_reason(blocked: list) -> str:
+    """
+    重排段的空隙里有"不属于任何一拍"的行 → 给用户的拒绝理由。
+
+    `blocked` 是那些认不出的原文行。两种说法分开写（挪过结构块头 / 其它
+    认不出的行），因为两种危险不一样，提示要说得具体。
+    """
+    # **说清楚卡在哪一行、为什么**（2026-10-25，审计第四轮 P1）。
+    #
+    # 现场（真机 `script_pomo.rpy`）：把 `elif breakline == 2:` 那一支的
+    # 台词挪到 `elif` 链外面 —— 空隙里那一行是**块头**
+    # （`if breakline == 1:` / `elif …:`），它不属于任何一拍。
+    # 旧提示只说"有认不出的行"，用户看不出这是"挪出分支 = 改剧情"：
+    # 台词一旦离开 `elif`，条件就不再生效（或者换了判定顺序）。
+    heads = [ln for ln in blocked if _ends_with_colon(ln)]
+    if heads:
+        return (
+            f'这一拍要挪过结构块头（`{_norm(heads[0]).strip()}`）：'
+            f'挪出 `if` / `elif` 分支之后，这一拍的条件就不再生效'
+            f'（或者换了生效顺序）—— 那是改剧情，不是排版。'
+            f'增量补丁不猜；要挪请先在卡片上清掉这一拍的条件，'
+            f'或者用全量重写这一章')
+    shown = (_norm(blocked[0]).strip() if blocked else '')
+    # **为什么危险要说具体**（2026-10-26，P1 讨论②）：
+    # 空隙里这行可能是 `$ renpy.pause(hard=True)`（暂停点）、
+    # `jump`（去向）、`define`（初始化）—— 挪拍换位等于改
+    # **它们与台词的相对顺序**，剧情跟着变，而 diff 里一个字节
+    # 都看不出来（这正是"安全的拒绝"比"能挪"更值钱的原因）。
+    return (f'重排段里有认不出的行（例：`{shown[:40]}`）——'
+            f'它不属于任何一拍（可能是暂停点 / 跳转 / 初始化），'
+            f'挪拍换位会改它与台词的**相对顺序**，剧情跟着变、'
+            f'diff 里却看不出来。增量补丁不猜。'
+            f'绕路两条：① 先在卡片上清掉这一拍的条件再挪；'
+            f'② 在目标位置**新插一张卡**写同样内容、'
+            f'再删掉原来那张（两刀各自都能落盘）')
+
+
 def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
     """
     内存里的**顺序变了**（把一拍挪了位置）→ 整段按新顺序重写（P0-7）。
@@ -3271,35 +3322,7 @@ def _plan_reorders(blocks, orig_lines, raw_gen, strict_of) -> tuple:
                            '增量补丁不猜这种结构改动，请用全量重写这一章')
             continue
         if not ok:
-            # **说清楚卡在哪一行、为什么**（2026-10-25，审计第四轮 P1）。
-            #
-            # 现场（真机 `script_pomo.rpy`）：把 `elif breakline == 2:` 那一支的
-            # 台词挪到 `elif` 链外面 —— 空隙里那一行是**块头**
-            # （`if breakline == 1:` / `elif …:`），它不属于任何一拍。
-            # 旧提示只说"有认不出的行"，用户看不出这是"挪出分支 = 改剧情"：
-            # 台词一旦离开 `elif`，条件就不再生效（或者换了判定顺序）。
-            heads = [ln for ln in blocked if _ends_with_colon(ln)]
-            if heads:
-                reasons.append(
-                    f'这一拍要挪过结构块头（`{_norm(heads[0]).strip()}`）：'
-                    f'挪出 `if` / `elif` 分支之后，这一拍的条件就不再生效'
-                    f'（或者换了生效顺序）—— 那是改剧情，不是排版。'
-                    f'增量补丁不猜；要挪请先在卡片上清掉这一拍的条件，'
-                    f'或者用全量重写这一章')
-            else:
-                shown = (_norm(blocked[0]).strip() if blocked else '')
-                # **为什么危险要说具体**（2026-10-26，P1 讨论②）：
-                # 空隙里这行可能是 `$ renpy.pause(hard=True)`（暂停点）、
-                # `jump`（去向）、`define`（初始化）—— 挪拍换位等于改
-                # **它们与台词的相对顺序**，剧情跟着变，而 diff 里一个字节
-                # 都看不出来（这正是"安全的拒绝"比"能挪"更值钱的原因）。
-                reasons.append(f'重排段里有认不出的行（例：`{shown[:40]}`）——'
-                               f'它不属于任何一拍（可能是暂停点 / 跳转 / 初始化），'
-                               f'挪拍换位会改它与台词的**相对顺序**，剧情跟着变、'
-                               f'diff 里却看不出来。增量补丁不猜。'
-                               f'绕路两条：① 先在卡片上清掉这一拍的条件再挪；'
-                               f'② 在目标位置**新插一张卡**写同样内容、'
-                               f'再删掉原来那张（两刀各自都能落盘）')
+            reasons.append(_reorder_gap_reason(blocked))
             continue
         new_lines: list = []
         pos = span_first

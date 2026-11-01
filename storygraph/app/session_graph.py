@@ -122,6 +122,148 @@ def _prune_missing_source_nodes(graph, parsed_labels, files) -> list:
     return removed
 
 
+def _source_scope(graph, beats) -> tuple:
+    """
+    这次重建的**作用域**：`label 名 → 节点 id` 索引 + 这批拍涉及的源节点集合。
+
+    重名 label 取图上先遇到的那个；没在图上出现的 label 不进 `src_ids`
+    —— 它们本来也没有 `source` 边可谈。
+    """
+    labels = {str(getattr(b, 'label', '') or '') for b in (beats or ())}
+    labels.discard('')
+    by_label = {}
+    for nid, node in (getattr(graph, 'nodes', {}) or {}).items():
+        name = str(getattr(node, 'label_name', '') or '')
+        if name and name not in by_label:
+            by_label[name] = nid
+    src_ids = {by_label[name] for name in labels if name in by_label}
+    return by_label, src_ids
+
+
+def _wanted_source_edges(beats, by_label) -> tuple:
+    """
+    这批控制流拍要的边：`(源节点, 目标节点, spec)`，以及配不上的 `skipped`。
+
+    源 / 目标还不在图上的一律进 `skipped` —— **不硬造节点**。
+    """
+    from storygraph.story.flow import flow_edges
+
+    want = []
+    skipped = []
+    for spec in flow_edges(beats):
+        src = by_label.get(spec['from'])
+        dst = by_label.get(spec['to'])
+        if src is None or dst is None:
+            skipped.append(spec)
+            continue
+        want.append((src, dst, spec))
+    return want, skipped
+
+
+def _existing_source_edges(graph, src_ids) -> list:
+    """这些源节点上已有的 `source` 边（`manual` 一条都不碰）。"""
+    edges = list((getattr(graph, 'edges', {}) or {}).values())
+    return [e for e in edges
+            if getattr(e, 'origin', 'source') == 'source'
+            and e.from_id in src_ids]
+
+
+def _line_id_matches(want, have) -> tuple:
+    """
+    按 `line_id` 认领老边，返回 `(taken, exact)`。
+
+    `taken` 是已认领边的 `id()` 集合 —— 下一轮不抢它、最后判"谁没被认领"
+    也靠它；`exact` 是 `want` 下标 → 边。
+    """
+    by_line = {}
+    for edge in have:
+        line = str(getattr(edge, 'line_id', '') or '')
+        if line:
+            by_line.setdefault(line, edge)
+
+    # 第一轮：line_id 完全对得上（改目标 / 改类型都走这里，身份不变）。
+    taken = set()
+    exact = {}
+    for i, (src, _dst, spec) in enumerate(want):
+        line = spec.get('line_id') or ''
+        edge = by_line.get(line) if line else None
+        if (edge is not None and id(edge) not in taken
+                and edge.from_id == src):
+            exact[i] = edge
+            taken.add(id(edge))
+    return taken, exact
+
+
+def _apply_source_edges(graph, want, have, taken, exact) -> tuple:
+    """
+    第二轮：逐条拍把边改到位 —— 认领 / 改目标 / 补 `line_id` / 新建。
+
+    `taken` 会就地补上这一轮认领的边（调用方最后判失效边还要用它）。
+    返回 `(added, retargeted, identified)`，含义见 `rebuild_source_edges`。
+    """
+    want_lines = {spec['line_id'] for _src, _dst, spec in want
+                  if spec.get('line_id')}
+    added = retargeted = identified = 0
+    for i, (src, dst, spec) in enumerate(want):
+        line = spec.get('line_id') or ''
+        old = exact.get(i)
+        if old is None:
+            # **结构配**：老边（没 line_id，或插删卡后 line_id 已过期）按
+            # (from, to, type) 顺序找一条。已经属于别的 want 的 line_id 不抢
+            # —— 那是上一轮精确匹配的身份，抢了会把两条边互换。
+            candidates = [
+                e for e in have
+                if id(e) not in taken
+                and e.from_id == src and e.to_id == dst
+                and e.type == spec['type']
+                and (not getattr(e, 'line_id', '')
+                     or getattr(e, 'line_id', '') not in want_lines)
+            ]
+            old = candidates[0] if candidates else None
+        if old is None:
+            graph.add_edge(src, dst, spec['type'], spec['condition'], '',
+                           spec['from_clause'], origin='source',
+                           line_id=line)
+            added += 1
+            continue
+        taken.add(id(old))
+        if old.to_id != dst:
+            old.to_id = dst
+            retargeted += 1
+        old.type = spec['type']
+        old.from_clause = str(spec['from_clause'] or '')
+        if line and str(getattr(old, 'position', '') or '') != 'beat':
+            # 源边认领到拍之后，落点就是这一拍；老布局默认的 chapter_end
+            # 若不升级，P1 的边详情会把"第 N 拍"显示成"章末"。
+            old.position = 'beat'
+            old.position_line_id = line
+        if line and str(getattr(old, 'line_id', '') or '') != line:
+            old.line_id = line
+            # 源边换身份时落点也要跟着换 —— 否则 `position='beat'` 还指着
+            # 插卡前的旧 line_id，P1 的"边详情"会显示不存在的那一拍。
+            old.position_line_id = line
+            identified += 1
+    return added, retargeted, identified
+
+
+def _unclaimed_source_edges(have, taken) -> tuple:
+    """
+    这一轮没被认领的边，分成 `(stale, kept_legacy)` 两类 —— 只删前一类。
+
+    判据就是"有没有 `line_id`"；来由见下面的注释与
+    `rebuild_source_edges` docstring 的"删"那一节。
+    """
+    # 只删"认领过"的边：有 line_id 说明上一轮确实由某一拍派生出来，
+    # 现在那一拍不在了。没有 line_id 的是老版本 / 手工来源 —— 留着，
+    # 让下一次导入有机会认领它，而不是升级后第一次重载就吃掉。
+    stale = [e for e in have
+             if id(e) not in taken and str(getattr(e, 'line_id', '') or '')]
+    kept_legacy = [e for e in have
+                   if id(e) not in taken
+                   and not str(getattr(e, 'line_id', '') or '')]
+    return stale, kept_legacy
+
+
 def rebuild_source_edges(graph, beats, allow_remove: bool = True) -> dict:
     """
     按这批拍里的控制流拍，重建它们涉及的那几个 label 的 **`source` 边**
@@ -168,99 +310,15 @@ def rebuild_source_edges(graph, beats, allow_remove: bool = True) -> dict:
       · `removed` = 删掉的失效 source 边条数；
       · `unmatched` = `allow_remove=False` 时**本应删但保留**的条数。
     """
-    from storygraph.story.flow import flow_edges
+    by_label, src_ids = _source_scope(graph, beats)
+    want, skipped = _wanted_source_edges(beats, by_label)
+    have = _existing_source_edges(graph, src_ids)
+    taken, exact = _line_id_matches(want, have)
+    added, retargeted, identified = _apply_source_edges(
+        graph, want, have, taken, exact)
 
-    labels = {str(getattr(b, 'label', '') or '') for b in (beats or ())}
-    labels.discard('')
-    by_label = {}
-    for nid, node in (getattr(graph, 'nodes', {}) or {}).items():
-        name = str(getattr(node, 'label_name', '') or '')
-        if name and name not in by_label:
-            by_label[name] = nid
-    src_ids = {by_label[name] for name in labels if name in by_label}
-
-    want = []
-    skipped = []
-    for spec in flow_edges(beats):
-        src = by_label.get(spec['from'])
-        dst = by_label.get(spec['to'])
-        if src is None or dst is None:
-            skipped.append(spec)
-            continue
-        want.append((src, dst, spec))
-
-    edges = list((getattr(graph, 'edges', {}) or {}).values())
-    have = [e for e in edges
-            if getattr(e, 'origin', 'source') == 'source'
-            and e.from_id in src_ids]
-    want_lines = {spec['line_id'] for _src, _dst, spec in want
-                  if spec.get('line_id')}
-    by_line = {}
-    for edge in have:
-        line = str(getattr(edge, 'line_id', '') or '')
-        if line:
-            by_line.setdefault(line, edge)
-
-    # 第一轮：line_id 完全对得上（改目标 / 改类型都走这里，身份不变）。
-    taken = set()
-    exact = {}
-    for i, (src, _dst, spec) in enumerate(want):
-        line = spec.get('line_id') or ''
-        edge = by_line.get(line) if line else None
-        if (edge is not None and id(edge) not in taken
-                and edge.from_id == src):
-            exact[i] = edge
-            taken.add(id(edge))
-
-    added = retargeted = identified = removed = 0
-    for i, (src, dst, spec) in enumerate(want):
-        line = spec.get('line_id') or ''
-        old = exact.get(i)
-        if old is None:
-            # **结构配**：老边（没 line_id，或插删卡后 line_id 已过期）按
-            # (from, to, type) 顺序找一条。已经属于别的 want 的 line_id 不抢
-            # —— 那是上一轮精确匹配的身份，抢了会把两条边互换。
-            candidates = [
-                e for e in have
-                if id(e) not in taken
-                and e.from_id == src and e.to_id == dst
-                and e.type == spec['type']
-                and (not getattr(e, 'line_id', '')
-                     or getattr(e, 'line_id', '') not in want_lines)
-            ]
-            old = candidates[0] if candidates else None
-        if old is None:
-            graph.add_edge(src, dst, spec['type'], spec['condition'], '',
-                           spec['from_clause'], origin='source',
-                           line_id=line)
-            added += 1
-            continue
-        taken.add(id(old))
-        if old.to_id != dst:
-            old.to_id = dst
-            retargeted += 1
-        old.type = spec['type']
-        old.from_clause = str(spec['from_clause'] or '')
-        if line and str(getattr(old, 'position', '') or '') != 'beat':
-            # 源边认领到拍之后，落点就是这一拍；老布局默认的 chapter_end
-            # 若不升级，P1 的边详情会把"第 N 拍"显示成"章末"。
-            old.position = 'beat'
-            old.position_line_id = line
-        if line and str(getattr(old, 'line_id', '') or '') != line:
-            old.line_id = line
-            # 源边换身份时落点也要跟着换 —— 否则 `position='beat'` 还指着
-            # 插卡前的旧 line_id，P1 的"边详情"会显示不存在的那一拍。
-            old.position_line_id = line
-            identified += 1
-
-    # 只删"认领过"的边：有 line_id 说明上一轮确实由某一拍派生出来，
-    # 现在那一拍不在了。没有 line_id 的是老版本 / 手工来源 —— 留着，
-    # 让下一次导入有机会认领它，而不是升级后第一次重载就吃掉。
-    stale = [e for e in have
-             if id(e) not in taken and str(getattr(e, 'line_id', '') or '')]
-    kept_legacy = [e for e in have
-                   if id(e) not in taken
-                   and not str(getattr(e, 'line_id', '') or '')]
+    stale, kept_legacy = _unclaimed_source_edges(have, taken)
+    removed = 0
     if allow_remove:
         for edge in stale:
             graph.remove_edge(edge.id)
@@ -454,6 +512,91 @@ def _chapter_blocks(beats, source_lines, label) -> list:
     return out
 
 
+def _beat_line_index(path, label) -> tuple:
+    """
+    行号 → 拍号的对位表，外加拍列表与源码行。
+
+    返回 `(line_to_beat, source_lines, beats, warning)`：解析失败时
+    `warning` 非空、对位表为空 —— **预览失败不拦工作台**，其余字段照常给。
+    """
+    # 行号 → 拍号（只在同一 label 内对位；跨 label 的行号没有意义）
+    line_to_beat = {}
+    source_lines: list = []
+    beats: list = []
+    warning = ''
+    if path and Path(path).exists():
+        try:
+            from storygraph.parsing.renpy_parser import (ParseResultBuilder,
+                                                         RenPyParser)
+            from storygraph.story.beat_build import beats_from_parse_result
+            pr = ParseResultBuilder().build(RenPyParser().parse(path))
+            beats = beats_from_parse_result(pr)
+            for i, b in enumerate(beats):
+                if str(getattr(b, 'label', '') or '') != label:
+                    continue
+                first = int(getattr(b, 'src_first', 0) or 0)
+                last = int(getattr(b, 'src_last', 0) or 0)
+                if first and last:
+                    for line in range(first, last + 1):
+                        line_to_beat.setdefault(line, i)
+            # 块头（if / for）只从源码原文读：缩进就是唯一的层级真源
+            from storygraph.story.source_style import read_text
+            source_lines = read_text(Path(path))[0].splitlines()
+        except Exception as e:              # noqa: BLE001 - 预览失败不拦工作台
+            warning = f'拍号对位失败：{e}'
+    return line_to_beat, source_lines, beats, warning
+
+
+def _variable_rows(stmts, operations, decl_by_name, line_to_beat,
+                   source_lines) -> tuple:
+    """
+    把每条变量操作变成工作台的一行：`(rows, order)`。
+
+    `rows` 是 `名字 → 行`（初值 / 声明位置 / 本拍操作）；`order` 按脚本里
+    **第一次出现**的顺序排队 —— 工作台按它列，不按字典序。
+    """
+    from storygraph.core.utils import extract_variables
+
+    rows: dict = {}
+    order: list = []
+    for idx, (stmt, text) in enumerate(zip(stmts, operations)):
+        line = 0
+        try:
+            src = getattr(stmt, 'source', None) or ('', 0)
+            line = int(src[1] or 0)
+        except (TypeError, ValueError, IndexError):
+            line = 0
+        names = extract_variables(text) or []
+        # 没有赋值的自增/自减等：extract_variables 也能收到名字；
+        # 收不到时退回第一段标识符（宁可显示，也不要静默漏掉一行）。
+        if not names:
+            import re as _re
+            m = _re.match(r'\s*([A-Za-z_]\w*)', text)
+            names = [m.group(1)] if m else []
+        beat_idx = line_to_beat.get(line)
+        block, indent = _source_block_of(source_lines, line)
+        for name in names:
+            if name not in rows:
+                order.append(name)
+                d = decl_by_name.get(name) or {}
+                rows[name] = {
+                    'name': name,
+                    'initial': d.get('value', ''),
+                    'declared_by': d.get('kind', ''),
+                    'decl_line': d.get('line', 0),
+                    'operations': [],
+                }
+            rows[name]['operations'].append({
+                'index': idx, 'text': text, 'line': line,
+                'beat_index': beat_idx,
+                'beat_no': (beat_idx + 1) if beat_idx is not None else 0,
+                # `if` / `for` 块里的赋值要能看出来：工作台靠它告诉用户
+                # "新增会插进哪一层"，写回时也按这一拍的同一个块追加。
+                'block': block, 'indent': indent,
+            })
+    return rows, order
+
+
 def layout_dict(graph) -> dict:
     """
     剧情图 → 布局 JSON 的 dict（`save_layout` 与"未保存"判据**共用一份**）。
@@ -515,6 +658,146 @@ def layout_signature(graph) -> str:
     except (TypeError, ValueError):
         return ''
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
+def _importable_chapter_paths(files) -> list:
+    """这批文件里真正能导入的：存在、且后缀是 `.rpy`（其余静默忽略）。"""
+    paths = []
+    for fp in (files or ()):
+        p = Path(fp)
+        if p.exists() and p.suffix.lower() == '.rpy':
+            paths.append(p)
+    return paths
+
+
+def _apply_batch_control_flow(graph, batch_control_only: bool,
+                              before_nodes: int) -> None:
+    """按这一批导入的内容更新 `graph.control_flow`（累加式判定）。"""
+    # 这张图的性质（控制流图 / 章节图）：**累加式**判定 ——
+    # 只有"到目前为止导入的每一批都是控制流脚本"才算控制流图。
+    # 于是"先导章节、再补 controller"= 章节图（导出时按章节补 _control）；
+    # "只导 controller"= 控制流图（导出时原样重建）。名字不参与判断。
+    if before_nodes == 0:
+        graph.control_flow = bool(batch_control_only)
+    else:
+        graph.control_flow = (bool(getattr(graph, 'control_flow', False))
+                              and bool(batch_control_only))
+
+
+def _rebuild_after_import(graph, parse_result, parse_errors, paths) -> tuple:
+    """
+    导入之后按控制流拍重建 `source` 边，并清掉源里已经没有的 label 节点。
+
+    返回 `(removed_nodes, rebuild)`；`rebuild` 是 `rebuild_source_edges`
+    的统计（`skipped` 里是"目标还不在图上"的那几条）。
+    """
+    # **图边与脚本同源**（2026-10-22 第二阶段 / 第三阶段）：
+    # 图上的 `source` 边由这批文件的**控制流拍**派生 —— 补 `line_id`、
+    # 改目标、补漏、删掉源里已经不存在的边。
+    #
+    # 失败不拦导入（图的其余部分已经建好了），但结果要带回去给界面：
+    # `skipped` 里是"目标还不在图上"的那几条，用户需要知道边没画全。
+    #
+    # ⚠ **解析有错时绝不删任何旧节点 / 旧边**：源没读全时"没看到"不等于
+    # "被删了"，按半份 AST 清理会把整章连线吃掉。增 / 改仍然做。
+    removed_nodes: list = []
+    rebuild: dict = {}
+    try:
+        from storygraph.story.beat_build import beats_from_parse_result
+        beats = beats_from_parse_result(parse_result)
+        if not parse_errors:
+            removed_nodes = _prune_missing_source_nodes(
+                graph, parse_result.labels, paths)
+        rebuild = rebuild_source_edges(
+            graph, beats, allow_remove=not parse_errors)
+    except Exception as e:                    # noqa: BLE001
+        swallow('editor.rebuild_source_edges', e)
+    return removed_nodes, rebuild
+
+
+def _control_write_gate(project_root, graph, target, wrapper,
+                        allow_overwrite: bool,
+                        force_overwrite: bool) -> dict:
+    """
+    控制流导出前的守门：目标文件里会丢东西就**拒写**。
+
+    放行时返回 `{}`；否则返回直接交给调用方的失败信封（带 `plan`）。
+    """
+    # —— 导出前的守门（S3，2026-10-24）——
+    #
+    # `export_to_renpy` 是**按图整份重生成**、覆盖目标文件。而图里可能
+    # 只加载了项目的一部分章节 —— 那样写下去会把**别的章**在这个文件里的
+    # `_control` 整块抹掉，而且一句话都不说（实测：三章导出后再导两章，
+    # 第三章消失）。所以先算一次"会丢什么"，丢东西就**拒写**。
+    from storygraph.story.control_write import plan_control_write
+    plan = plan_control_write(project_root, graph, target,
+                              wrapper=wrapper)
+    if not plan.ok:
+        if not ((allow_overwrite or force_overwrite) and plan.forceable):
+            return {'ok': False,
+                    'error': '；'.join(plan.blocking),
+                    'path': str(target), 'labels': [], 'count': 0,
+                    'plan': plan.to_dict()}
+        # 用户确认过"这些手写行可以丢" —— 只越过这一条，别的拦截已由
+        # `forceable` 排除（缺章 / 外来 label 时它是 False）。
+    return {}
+
+
+def _control_export_mode(graph, wrapper) -> tuple:
+    """
+    这次按哪种模式导出（控制流图原样重建 / 章节图补 `_control`），以及文案。
+
+    返回 `(controller_style, mode)`。
+    """
+    # 与导出器**同一处判定**（算两遍必然漂移：曾经 wrapper=False 时
+    # 模式文案还写着"补 _control"，而标签其实没有补）
+    controller_style = (bool(getattr(graph, 'control_flow', False))
+                        if wrapper is None else not bool(wrapper))
+    mode = ('原样重建（控制流图）' if controller_style
+            else '补 _control 包装（章节图）')
+    return controller_style, mode
+
+
+def _control_export_warnings(graph, controller_style: bool) -> list:
+    """
+    导出时要提醒、但**不拦导出**的两类事：混合图、读了没人写的变量。
+    """
+    # 混合图（既导了章节、又导了 controller）如实告知一句：
+    # 章节图模式下 controller 的 chapter0_0_control 会被再包一层
+    # （chapter0_0_control_control）—— 产物能跑但冗余、容易看错。
+    # **不在这里猜哪个节点才是控制流标签**（那又要拿名字当保留字用），
+    # 只告知 + 让用户改用另一种导出入口。
+    warnings = []
+    if not controller_style:
+        names = {str(n.label_name or '')
+                 for n in (getattr(graph, 'nodes', {}) or {}).values()}
+        mixed = sorted(n for n in names if f'{n}_control' in names)
+        if mixed:
+            warnings.append(
+                f'这张图同时含章节与已有控制流标签（如 {mixed[0]}）：'
+                f'章节图模式会给它们再包一层。建议分开导出，'
+                f'或用「按控制流图原样导出」。')
+    # 条件读的变量有没有人写（2026-10-28 P0：差一个字符 = 整条线永远
+    # 进不去，而且 lint / 语法检查 / 运行期都不会报）。只在导出时提醒一次。
+    try:
+        from storygraph.story.variable_refs import describe_unassigned
+        warnings.extend(describe_unassigned(graph))
+    except Exception as e:                # noqa: BLE001 - 提醒不该拦导出
+        swallow('session_graph.export_control_flow.vars', e)
+    return warnings
+
+
+def _control_export_labels(graph, controller_style: bool) -> list:
+    """导出产物里会出现的 label 名（章节图模式下每个都补一层 `_control`）。"""
+    labels = []
+    for n in (getattr(graph, 'nodes', {}) or {}).values():
+        name = str(n.label_name or '')
+        if controller_style:
+            labels.append(name)
+        else:
+            # **一律**补一层（哪怕章节就叫 A_control）——不许拿名字当保留字
+            labels.append(f'{name}_control')
+    return labels
 
 
 class GraphSessionMixin:
@@ -642,23 +925,10 @@ class GraphSessionMixin:
                     'error': f'导出路径不是路径：{target!r}（要给 .rpy 路径）',
                     'path': '', 'labels': [], 'count': 0}
 
-        # —— 导出前的守门（S3，2026-10-24）——
-        #
-        # `export_to_renpy` 是**按图整份重生成**、覆盖目标文件。而图里可能
-        # 只加载了项目的一部分章节 —— 那样写下去会把**别的章**在这个文件里的
-        # `_control` 整块抹掉，而且一句话都不说（实测：三章导出后再导两章，
-        # 第三章消失）。所以先算一次"会丢什么"，丢东西就**拒写**。
-        from storygraph.story.control_write import plan_control_write
-        plan = plan_control_write(self.project_root, graph, target,
-                                  wrapper=wrapper)
-        if not plan.ok:
-            if not ((allow_overwrite or force_overwrite) and plan.forceable):
-                return {'ok': False,
-                        'error': '；'.join(plan.blocking),
-                        'path': str(target), 'labels': [], 'count': 0,
-                        'plan': plan.to_dict()}
-            # 用户确认过"这些手写行可以丢" —— 只越过这一条，别的拦截已由
-            # `forceable` 排除（缺章 / 外来 label 时它是 False）。
+        gate = _control_write_gate(self.project_root, graph, target, wrapper,
+                                   allow_overwrite, force_overwrite)
+        if gate:
+            return gate
 
         backup = self._backup_target(target) if force_overwrite else ''
         try:
@@ -685,42 +955,9 @@ class GraphSessionMixin:
         if not Path(target).is_file():
             return {'ok': False, 'error': '文件没有生成（写盘失败？）',
                     'path': str(target), 'labels': [], 'count': 0}
-        # 与导出器**同一处判定**（算两遍必然漂移：曾经 wrapper=False 时
-        # 模式文案还写着"补 _control"，而标签其实没有补）
-        controller_style = (bool(getattr(graph, 'control_flow', False))
-                            if wrapper is None else not bool(wrapper))
-        mode = ('原样重建（控制流图）' if controller_style
-                else '补 _control 包装（章节图）')
-        # 混合图（既导了章节、又导了 controller）如实告知一句：
-        # 章节图模式下 controller 的 chapter0_0_control 会被再包一层
-        # （chapter0_0_control_control）—— 产物能跑但冗余、容易看错。
-        # **不在这里猜哪个节点才是控制流标签**（那又要拿名字当保留字用），
-        # 只告知 + 让用户改用另一种导出入口。
-        warnings = []
-        if not controller_style:
-            names = {str(n.label_name or '')
-                     for n in (getattr(graph, 'nodes', {}) or {}).values()}
-            mixed = sorted(n for n in names if f'{n}_control' in names)
-            if mixed:
-                warnings.append(
-                    f'这张图同时含章节与已有控制流标签（如 {mixed[0]}）：'
-                    f'章节图模式会给它们再包一层。建议分开导出，'
-                    f'或用「按控制流图原样导出」。')
-        # 条件读的变量有没有人写（2026-10-28 P0：差一个字符 = 整条线永远
-        # 进不去，而且 lint / 语法检查 / 运行期都不会报）。只在导出时提醒一次。
-        try:
-            from storygraph.story.variable_refs import describe_unassigned
-            warnings.extend(describe_unassigned(graph))
-        except Exception as e:                # noqa: BLE001 - 提醒不该拦导出
-            swallow('session_graph.export_control_flow.vars', e)
-        labels = []
-        for n in (getattr(graph, 'nodes', {}) or {}).values():
-            name = str(n.label_name or '')
-            if controller_style:
-                labels.append(name)
-            else:
-                # **一律**补一层（哪怕章节就叫 A_control）——不许拿名字当保留字
-                labels.append(f'{name}_control')
+        controller_style, mode = _control_export_mode(graph, wrapper)
+        warnings = _control_export_warnings(graph, controller_style)
+        labels = _control_export_labels(graph, controller_style)
         return {'ok': True, 'error': '', 'path': str(target),
                 'labels': labels, 'count': len(labels), 'mode': mode,
                 'warnings': warnings, 'backup': backup}
@@ -853,7 +1090,6 @@ class GraphSessionMixin:
         （顶层是 `''`），工作台靠这两项说清"新增会插进哪一层"。
         """
         from storygraph.core.statement import operation_source
-        from storygraph.core.utils import extract_variables
         from storygraph.story import story_ops
 
         node = (getattr(graph, 'nodes', {}) or {}).get(nid)
@@ -868,69 +1104,10 @@ class GraphSessionMixin:
         declarations = _variable_declarations(path)
         decl_by_name = {d['name']: d for d in declarations}
 
-        # 行号 → 拍号（只在同一 label 内对位；跨 label 的行号没有意义）
-        line_to_beat = {}
-        source_lines: list = []
-        beats: list = []
-        warning = ''
-        if path and Path(path).exists():
-            try:
-                from storygraph.parsing.renpy_parser import (ParseResultBuilder,
-                                                             RenPyParser)
-                from storygraph.story.beat_build import beats_from_parse_result
-                pr = ParseResultBuilder().build(RenPyParser().parse(path))
-                beats = beats_from_parse_result(pr)
-                for i, b in enumerate(beats):
-                    if str(getattr(b, 'label', '') or '') != label:
-                        continue
-                    first = int(getattr(b, 'src_first', 0) or 0)
-                    last = int(getattr(b, 'src_last', 0) or 0)
-                    if first and last:
-                        for line in range(first, last + 1):
-                            line_to_beat.setdefault(line, i)
-                # 块头（if / for）只从源码原文读：缩进就是唯一的层级真源
-                from storygraph.story.source_style import read_text
-                source_lines = read_text(Path(path))[0].splitlines()
-            except Exception as e:              # noqa: BLE001 - 预览失败不拦工作台
-                warning = f'拍号对位失败：{e}'
-
-        rows: dict = {}
-        order: list = []
-        for idx, (stmt, text) in enumerate(zip(stmts, operations)):
-            line = 0
-            try:
-                src = getattr(stmt, 'source', None) or ('', 0)
-                line = int(src[1] or 0)
-            except (TypeError, ValueError, IndexError):
-                line = 0
-            names = extract_variables(text) or []
-            # 没有赋值的自增/自减等：extract_variables 也能收到名字；
-            # 收不到时退回第一段标识符（宁可显示，也不要静默漏掉一行）。
-            if not names:
-                import re as _re
-                m = _re.match(r'\s*([A-Za-z_]\w*)', text)
-                names = [m.group(1)] if m else []
-            beat_idx = line_to_beat.get(line)
-            block, indent = _source_block_of(source_lines, line)
-            for name in names:
-                if name not in rows:
-                    order.append(name)
-                    d = decl_by_name.get(name) or {}
-                    rows[name] = {
-                        'name': name,
-                        'initial': d.get('value', ''),
-                        'declared_by': d.get('kind', ''),
-                        'decl_line': d.get('line', 0),
-                        'operations': [],
-                    }
-                rows[name]['operations'].append({
-                    'index': idx, 'text': text, 'line': line,
-                    'beat_index': beat_idx,
-                    'beat_no': (beat_idx + 1) if beat_idx is not None else 0,
-                    # `if` / `for` 块里的赋值要能看出来：工作台靠它告诉用户
-                    # "新增会插进哪一层"，写回时也按这一拍的同一个块追加。
-                    'block': block, 'indent': indent,
-                })
+        line_to_beat, source_lines, beats, warning = _beat_line_index(
+            path, label)
+        rows, order = _variable_rows(stmts, operations, decl_by_name,
+                                     line_to_beat, source_lines)
         # 只声明、没在本章赋值过的变量也列出来（`default love = 0` 要看得见）
         for d in declarations:
             name = d['name']
@@ -1236,6 +1413,16 @@ class GraphSessionMixin:
         reg = self.registry()
         rows = getattr(reg, 'characters', None)
         return dict(rows) if rows else {}
+    def _merge_script_definitions(self, parse_result) -> None:
+        """把脚本里的 `define` 并进资源表，再重算一遍符号表。"""
+        reg = self.registry()
+        if reg is not None:
+            try:
+                from storygraph.story.beat_build import apply_script_definitions
+                apply_script_definitions(reg, parse_result)
+            except Exception:                 # noqa: BLE001
+                swallow('editor.import_chapters')
+        self.refresh_symbols()
     def import_chapters(self, files, graph=None) -> dict:
         """
         把用户选中的章节 `.rpy` 解析进剧情图（**累加**，不动没选中的章节）。
@@ -1260,11 +1447,7 @@ class GraphSessionMixin:
         候选就是这么来的（这一步原来在"重新扫描项目"里，而那个动作现在
         只管资源表，不能再顺手碰图）。
         """
-        paths = []
-        for fp in (files or ()):
-            p = Path(fp)
-            if p.exists() and p.suffix.lower() == '.rpy':
-                paths.append(p)
+        paths = _importable_chapter_paths(files)
         if not paths:
             return {'ok': False, 'error': '没有选中任何 .rpy 文件',
                     'graph': graph, 'added_nodes': 0, 'added_edges': 0,
@@ -1304,47 +1487,13 @@ class GraphSessionMixin:
                     'files': [str(p) for p in paths],
                     'warnings': [], 'errors': []}
 
-        # 这张图的性质（控制流图 / 章节图）：**累加式**判定 ——
-        # 只有"到目前为止导入的每一批都是控制流脚本"才算控制流图。
-        # 于是"先导章节、再补 controller"= 章节图（导出时按章节补 _control）；
-        # "只导 controller"= 控制流图（导出时原样重建）。名字不参与判断。
-        if before_nodes == 0:
-            graph.control_flow = bool(batch_control_only)
-        else:
-            graph.control_flow = (bool(getattr(graph, 'control_flow', False))
-                                  and bool(batch_control_only))
+        _apply_batch_control_flow(graph, batch_control_only, before_nodes)
 
-        reg = self.registry()
-        if reg is not None:
-            try:
-                from storygraph.story.beat_build import apply_script_definitions
-                apply_script_definitions(reg, parse_result)
-            except Exception:                 # noqa: BLE001
-                swallow('editor.import_chapters')
-        self.refresh_symbols()
+        self._merge_script_definitions(parse_result)
 
-        # **图边与脚本同源**（2026-10-22 第二阶段 / 第三阶段）：
-        # 图上的 `source` 边由这批文件的**控制流拍**派生 —— 补 `line_id`、
-        # 改目标、补漏、删掉源里已经不存在的边。
-        #
-        # 失败不拦导入（图的其余部分已经建好了），但结果要带回去给界面：
-        # `skipped` 里是"目标还不在图上"的那几条，用户需要知道边没画全。
-        #
-        # ⚠ **解析有错时绝不删任何旧节点 / 旧边**：源没读全时"没看到"不等于
-        # "被删了"，按半份 AST 清理会把整章连线吃掉。增 / 改仍然做。
         parse_errors = [str(e) for e in (parse_result.errors or [])]
-        removed_nodes: list = []
-        rebuild: dict = {}
-        try:
-            from storygraph.story.beat_build import beats_from_parse_result
-            beats = beats_from_parse_result(parse_result)
-            if not parse_errors:
-                removed_nodes = _prune_missing_source_nodes(
-                    graph, parse_result.labels, paths)
-            rebuild = rebuild_source_edges(
-                graph, beats, allow_remove=not parse_errors)
-        except Exception as e:                    # noqa: BLE001
-            swallow('editor.rebuild_source_edges', e)
+        removed_nodes, rebuild = _rebuild_after_import(
+            graph, parse_result, parse_errors, paths)
         self._last_edge_rebuild = rebuild
         # 记下这一批"导入时"的 (mtime, size)：`stale_import_files` 靠它把
         # 「刷新」限定在**真的改过**的文件上（91 个文件里改一个，就不该把

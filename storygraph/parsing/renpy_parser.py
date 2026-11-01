@@ -262,59 +262,10 @@ def _top_level_region(filepath, lines=None) -> list:
         if top and re.match(r'^label\s', stripped):
             flush()                           # label 及其块体由"拍"负责
             cur = []
-            i += 1
-            # ⚠ **顶格注释不结束 label**（2026-10-18，审计 P0-3）。
-            #
-            # 从前这里的判据只有"空行 / 缩进行"—— 于是 label 体中间那条
-            # **顶格注释**（Ren'Py 完全合法、真机 `whackamole.rpy` 就这么写）
-            # 把 label 的"跳过区间"截断了：注释与它后面的缩进代码被当成
-            # 顶层区域收走，渲染时被搬到文件最前面 → 产物里
-            # `Unexpected indentation at start of file`。
-            #
-            # 语义上注释不参与缩进判断：只要**后面还有本块的缩进行**，
-            # 它就仍属于块内（与 `_followed_by_indented` 同一口径）。
-            # 反之（后面是顶格语句 / 到文件末尾）它是"下一段的标题"，
-            # 留给下面那个 comment 分支自己起一段。
-            while i < n:
-                s = raw[i].strip()
-                if not s or raw[i][:1] in (' ', '\t'):
-                    i += 1
-                    continue
-                if s.startswith('#') and _followed_by_indented(raw, i + 1):
-                    i += 1
-                    continue
-                break
+            i = _skip_label_block(raw, i)
             continue
         if top and stripped.startswith('#'):
-            # 顶格**注释**：Ren'Py 里注释不参与缩进判断 —— 它可以出现在一个
-            # 缩进块的中间。真实项目就是这么写的：
-            #
-            #     init python:
-            #     # 类/对象设置          ← 顶格注释，仍在 init python 块里
-            #         class GridCell:
-            #
-            # 所以"块头以 `:` 结尾"的当前段遇到顶格注释要**收进来**；
-            # 否则块体会被劈成两段，渲染时丢掉 `init python:` 这个块头 →
-            # 产物里出现一段悬空的缩进（Ren'Py 直接报缩进错）。
-            #
-            # ⚠ **但"块头以 `:` 收尾"不足以判定"**（2026-10-07 实测，
-            # `tools/audit_idempotence.py` 抓到 5 个真实文件中招）：
-            #
-            #     init python:
-            #         ...
-            #     # 全局人物页面 screen      ← 作者写的是**下一段的标题**
-            #     screen character_gallery_screen():
-            #
-            # 旧判据把它收进 `init python:` 的块体 → `render_file_block` 给
-            # 块体每行加 4 → **每导出一次就多缩进一层**（幂等破掉）。
-            #
-            # 语义上它**两边都合法**（注释不参与缩进判断），所以这不是"猜
-            # 语义"，而是按**排版意图**挑一种，并保证挑法是逐字稳定的。
-            # 判据用**向后看**：块体的定义就是"后面还有属于本块的缩进行"——
-            # 后面第一条**结构性**行（跳过空行与注释）缩进 → 收进块体；
-            # 顶格 / 到底 → 它属于下一段，自己起一段。
-            if (cur and _opens_a_block(cur[0].strip())
-                    and _followed_by_indented(raw, i + 1)):
+            if _toplevel_comment_joins_current(cur, raw, i):
                 cur.append(line)
             else:
                 flush()
@@ -456,6 +407,77 @@ def _region_chunk(body: list, line_no: int) -> tuple:
         else:
             out.append(ln)                    # 顶格注释：原样带着
     return head, '\n'.join(out).rstrip('\n'), line_no
+
+
+def _skip_label_block(raw: list, start: int) -> int:
+    """
+    `raw[start]`（一条**顶格 `label` 行**）起，跳过 label 与它的块体 → 新下标。
+
+    `_top_level_region` 用：label 里面的东西不归"顶层区域"管（由"拍"负责）。
+    返回值可能就是 `len(raw)`（块体一直到文件末尾）。
+
+    "块体到哪结束"与 `_followed_by_indented` 同一口径：空行与整行注释不算
+    结构，不参与缩进判断。
+    """
+    i = start + 1
+    # ⚠ **顶格注释不结束 label**（2026-10-18，审计 P0-3）。
+    #
+    # 从前这里的判据只有"空行 / 缩进行"—— 于是 label 体中间那条
+    # **顶格注释**（Ren'Py 完全合法、真机 `whackamole.rpy` 就这么写）
+    # 把 label 的"跳过区间"截断了：注释与它后面的缩进代码被当成
+    # 顶层区域收走，渲染时被搬到文件最前面 → 产物里
+    # `Unexpected indentation at start of file`。
+    #
+    # 语义上注释不参与缩进判断：只要**后面还有本块的缩进行**，
+    # 它就仍属于块内（与 `_followed_by_indented` 同一口径）。
+    # 反之（后面是顶格语句 / 到文件末尾）它是"下一段的标题"，
+    # 留给下面那个 comment 分支自己起一段。
+    while i < len(raw):
+        s = raw[i].strip()
+        if not s or raw[i][:1] in (' ', '\t'):
+            i += 1
+            continue
+        if s.startswith('#') and _followed_by_indented(raw, i + 1):
+            i += 1
+            continue
+        break
+    return i
+
+
+def _toplevel_comment_joins_current(cur: list, raw: list, i: int) -> bool:
+    """
+    `raw[i]` 这条**顶格注释**收进当前段（`cur`），还是自己起一段？
+
+    `_top_level_region` 用。顶格**注释**：Ren'Py 里注释不参与缩进判断 ——
+    它可以出现在一个缩进块的中间。真实项目就是这么写的：
+
+        init python:
+        # 类/对象设置          ← 顶格注释，仍在 init python 块里
+            class GridCell:
+
+    所以"块头以 `:` 结尾"的当前段遇到顶格注释要**收进来**；
+    否则块体会被劈成两段，渲染时丢掉 `init python:` 这个块头 →
+    产物里出现一段悬空的缩进（Ren'Py 直接报缩进错）。
+
+    ⚠ **但"块头以 `:` 收尾"不足以判定"**（2026-10-07 实测，
+    `tools/audit_idempotence.py` 抓到 5 个真实文件中招）：
+
+        init python:
+            ...
+        # 全局人物页面 screen      ← 作者写的是**下一段的标题**
+        screen character_gallery_screen():
+
+    旧判据把它收进 `init python:` 的块体 → `render_file_block` 给
+    块体每行加 4 → **每导出一次就多缩进一层**（幂等破掉）。
+
+    语义上它**两边都合法**（注释不参与缩进判断），所以这不是"猜
+    语义"，而是按**排版意图**挑一种，并保证挑法是逐字稳定的。
+    判据用**向后看**：块体的定义就是"后面还有属于本块的缩进行"——
+    后面第一条**结构性**行（跳过空行与注释）缩进 → 收进块体；
+    顶格 / 到底 → 它属于下一段，自己起一段。
+    """
+    return bool(cur and _opens_a_block(cur[0].strip())
+                and _followed_by_indented(raw, i + 1))
 
 
 @dataclass
@@ -1542,6 +1564,44 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
             return self._stmt_unmodeled(line, text)
         return node
 
+    def _statement_handler_chain(self) -> tuple:
+        """
+        语句分派链：**元组顺序就是匹配优先级**（见 `_parse_statement_core`）。
+
+        每个 `_stmt_*` 返回 `self._NO_MATCH` 表示"这条语句我认不出，试下一个"；
+        返回别的（含 `None`）表示"有结论了"。新增语句种类时，加一个 `_stmt_*`
+        并**按优先级**插到这个元组里 —— 这里是分派顺序的**唯一**出处。
+        """
+        return (
+            self._stmt_comment,
+            self._stmt_label,
+            self._stmt_define,
+            self._stmt_menu,
+            self._stmt_if,
+            self._stmt_jump_expression,
+            self._stmt_call_expression,
+            self._stmt_call_screen,
+            self._stmt_jump,
+            self._stmt_call,
+            self._stmt_return,
+            self._stmt_dollar,
+            self._stmt_python_block,
+            self._stmt_layeredimage,
+            self._stmt_image_def,
+            self._stmt_screen_op,
+            self._stmt_show,
+            self._stmt_scene,
+            self._stmt_hide,
+            self._stmt_audio,
+            self._stmt_voice,
+            self._stmt_extend,
+            self._stmt_loop,
+            self._stmt_camera,
+            self._stmt_say,
+            self._stmt_transform,
+            self._stmt_unmodeled,
+        )
+
     def _parse_statement_core(self, line: LogicalLine, text: str):
         """一条逻辑行 → AST 节点（按语句种类分派）。
 
@@ -1582,87 +1642,10 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         就此结束" —— 两者**必须分开**，否则一句坏掉的 `if` 会被
         后面的 `_stmt_say` 当作台词吃掉。
         """
-        node = self._stmt_comment(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_label(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_define(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_menu(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_if(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_jump_expression(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_call_expression(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_call_screen(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_jump(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_call(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_return(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_dollar(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_python_block(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_layeredimage(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_image_def(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_screen_op(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_show(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_scene(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_hide(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_audio(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_voice(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_extend(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_loop(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_camera(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_say(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_transform(line, text)
-        if node is not self._NO_MATCH:
-            return node
-        node = self._stmt_unmodeled(line, text)
-        if node is not self._NO_MATCH:
-            return node
+        for handler in self._statement_handler_chain():
+            node = handler(line, text)
+            if node is not self._NO_MATCH:
+                return node
         return None
 
     def _parse_label(self, line: LogicalLine, text: str) -> Optional[LabelNode]:
@@ -3651,6 +3634,27 @@ def parse_translation_files(tl_dir) -> dict:
     if not tl_dir.exists():
         return result
 
+    for lang_dir in tl_dir.iterdir():
+        if not lang_dir.is_dir():
+            continue
+        language = lang_dir.name
+        for fp in lang_dir.glob('*.rpy'):
+            try:
+                lines = split_lines(fp.read_text(encoding='utf-8'))
+            except Exception as e:        # noqa: BLE001
+                # 读不了这一个文件（编码坏 / 权限 / 中途删了）就跳过它 ——
+                # 但**记一笔**：整份翻译文件静默消失，比报错更难查。
+                swallow('parsing.renpy_parser.parse_translation_files', e)
+                continue
+
+            _parse_translation_lines(lines, language, result)
+
+    return result
+
+
+def _translation_line_patterns() -> tuple:
+    """`tl/` 文件的行级正则；返回顺序**固定**，调用方按序解包。"""
+
     re_translate = re.compile(r'^\s*translate\s+([\w-]+)\s+([\w-]+)\s*:')
     re_translate_any = re.compile(r'^\s*translate\b')
     # `# old "…"` = 对话块的"原文"注释（**必须带 `#`**）。
@@ -3670,6 +3674,21 @@ def parse_translation_files(tl_dir) -> dict:
     # 于是新式文件的译文一条都读不到（翻译面板空的，且不报错）。
     re_bare_dialogue = re.compile(
         r'^\s+(?:[A-Za-z_]\w*\s+)?' + _TR_STR + r'\s*$')
+    return (re_translate, re_translate_any, re_old_comment, re_old,
+            re_new, re_new_strings, re_bare_dialogue)
+
+
+def _parse_translation_lines(lines, language: str, result: dict) -> None:
+    """
+    一个 `tl/*.rpy` 的全部行 → 把翻译单元**就地**写进 `result`。
+
+    没有返回值、就地写：一个 unit id 的字段是**分几行**补上去的
+    （`translate` 行先登记 `language`，`# old` 行再补 `original`），
+    所以条目必须一直挂在调用方的 `result` 上就地补 —— 每个文件另建
+    一份再合并，会把先补上去的字段整块盖掉。
+    """
+    (re_translate, re_translate_any, re_old_comment, re_old, re_new,
+     re_new_strings, re_bare_dialogue) = _translation_line_patterns()
 
     def _pick_named(m):
         """
@@ -3687,102 +3706,87 @@ def parse_translation_files(tl_dir) -> dict:
             return ''
         return _unescape_renpy_string(v)
 
-    for lang_dir in tl_dir.iterdir():
-        if not lang_dir.is_dir():
-            continue
-        language = lang_dir.name
-        for fp in lang_dir.glob('*.rpy'):
-            try:
-                lines = split_lines(fp.read_text(encoding='utf-8'))
-            except Exception as e:        # noqa: BLE001
-                # 读不了这一个文件（编码坏 / 权限 / 中途删了）就跳过它 ——
-                # 但**记一笔**：整份翻译文件静默消失，比报错更难查。
-                swallow('parsing.renpy_parser.parse_translation_files', e)
-                continue
+    current_id = None
+    current_lang = None
+    in_strings_block = False
 
+    for line in lines:
+        m = re_translate.match(line)
+        if m:
+            lang, ident = m.group(1), m.group(2)
+            if ident == 'strings':
+                # strings 块：unit id 延迟到 old 行生成
+                current_id = None
+                current_lang = lang
+                in_strings_block = True
+            elif ident == 'python':
+                # [FIX-44] python 翻译块不是对话单元
+                current_id = None
+                current_lang = None
+                in_strings_block = False
+            else:
+                current_id = ident
+                current_lang = None
+                in_strings_block = False
+                # **先登记**：现代 tl 格式里对话 id 下面只有一句译文
+                # （没有 `# old`），译文行才补 `translated`。
+                # 不先登记的话那条线的 `language` 永远缺（实测 KeyError）。
+                result.setdefault(current_id, {'language': language})
+            continue
+
+        if re_translate_any.match(line):
+            # translate python: / translate style foo: 等
             current_id = None
             current_lang = None
             in_strings_block = False
+            continue
 
-            for line in lines:
-                m = re_translate.match(line)
-                if m:
-                    lang, ident = m.group(1), m.group(2)
-                    if ident == 'strings':
-                        # strings 块：unit id 延迟到 old 行生成
-                        current_id = None
-                        current_lang = lang
-                        in_strings_block = True
-                    elif ident == 'python':
-                        # [FIX-44] python 翻译块不是对话单元
-                        current_id = None
-                        current_lang = None
-                        in_strings_block = False
-                    else:
-                        current_id = ident
-                        current_lang = None
-                        in_strings_block = False
-                        # **先登记**：现代 tl 格式里对话 id 下面只有一句译文
-                        # （没有 `# old`），译文行才补 `translated`。
-                        # 不先登记的话那条线的 `language` 永远缺（实测 KeyError）。
-                        result.setdefault(current_id, {'language': language})
-                    continue
+        # 原文：对话块是 `# old "…"`，`strings:` 块是 `old "…"`。
+        m = re_old_comment.match(line) or re_old.match(line)
+        if m:
+            orig = _pick_named(m)
+            if in_strings_block and current_lang:
+                h = hashlib.md5(
+                    orig.encode('utf-8')
+                ).hexdigest()[:8]
+                key = f"{current_lang}.strings_{h}"
+                current_id = key
+                entry = result.setdefault(key, {})
+            elif current_id:
+                entry = result.setdefault(current_id, {})
+            else:
+                entry = None
+            if entry is not None:
+                # **逐字段写**，不用 `setdefault(key, {...})`：
+                # 对话 id 在 `translate` 那一行就登记过了，
+                # `setdefault` 遇到已存在的键会**整块跳过**，
+                # `original` 于是永远补不上（实测 KeyError）。
+                entry['original'] = orig
+                entry.setdefault('language', language)
+            continue
 
-                if re_translate_any.match(line):
-                    # translate python: / translate style foo: 等
-                    current_id = None
-                    current_lang = None
-                    in_strings_block = False
-                    continue
+        if in_strings_block:
+            m = re_new_strings.match(line)
+            if m and current_id:
+                result.setdefault(current_id, {})['translated'] = \
+                    _pick_named(m)
+                continue
 
-                # 原文：对话块是 `# old "…"`，`strings:` 块是 `old "…"`。
-                m = re_old_comment.match(line) or re_old.match(line)
-                if m:
-                    orig = _pick_named(m)
-                    if in_strings_block and current_lang:
-                        h = hashlib.md5(
-                            orig.encode('utf-8')
-                        ).hexdigest()[:8]
-                        key = f"{current_lang}.strings_{h}"
-                        current_id = key
-                        entry = result.setdefault(key, {})
-                    elif current_id:
-                        entry = result.setdefault(current_id, {})
-                    else:
-                        entry = None
-                    if entry is not None:
-                        # **逐字段写**，不用 `setdefault(key, {...})`：
-                        # 对话 id 在 `translate` 那一行就登记过了，
-                        # `setdefault` 遇到已存在的键会**整块跳过**，
-                        # `original` 于是永远补不上（实测 KeyError）。
-                        entry['original'] = orig
-                        entry.setdefault('language', language)
-                    continue
+        m = re_new.match(line)
+        if m and current_id and not in_strings_block:
+            result.setdefault(
+                current_id, {'language': language})['translated'] = \
+                _pick_named(m)
+            continue
 
-                if in_strings_block:
-                    m = re_new_strings.match(line)
-                    if m and current_id:
-                        result.setdefault(current_id, {})['translated'] = \
-                            _pick_named(m)
-                        continue
-
-                m = re_new.match(line)
-                if m and current_id and not in_strings_block:
-                    result.setdefault(
-                        current_id, {'language': language})['translated'] = \
-                        _pick_named(m)
-                    continue
-
-                # **现代 tl 格式**：对话 id 下面直接一句裸字符串
-                # （`"你好啊"` 或 `e "你好啊"`）。
-                if current_id and not in_strings_block:
-                    m = re_bare_dialogue.match(line)
-                    if m:
-                        result.setdefault(current_id, {})['translated'] = \
-                            _pick_named(m)
-                        continue
-
-    return result
+        # **现代 tl 格式**：对话 id 下面直接一句裸字符串
+        # （`"你好啊"` 或 `e "你好啊"`）。
+        if current_id and not in_strings_block:
+            m = re_bare_dialogue.match(line)
+            if m:
+                result.setdefault(current_id, {})['translated'] = \
+                    _pick_named(m)
+                continue
 
 
 # ====================================================================

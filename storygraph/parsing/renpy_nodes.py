@@ -522,7 +522,7 @@ def unescape_renpy_string(text: str) -> str:
     属于内容本身，反转义不该碰它们）。
 
     两个调用方：`_pick_str`（解析侧，`.rpy` → 内容）与
-    `parse_translation_files._pick_named`（`tl/` → 译文）。
+    `renpy_parser._parse_translation_lines` 里的 `_pick_named`（`tl/` → 译文）。
     """
     if '\\' not in text:
         return text

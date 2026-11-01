@@ -456,6 +456,66 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
     plan = ControlInitPlan(chapter_label=src, role=role)
     plan.control_label = control_label(src)
 
+    precheck = _init_precheck(project_root, plan)
+    if precheck is not None:
+        return precheck
+
+    path = find_control_file(project_root, src)
+    if path is None:
+        path = find_control_file(project_root)
+    if path is None:
+        plan.reason = (f'项目里没有任何 `*_control` label —— 现在新建一个 '
+                       f'`{plan.control_label}` 也没有入口会跳进来，只会是死代码。'
+                       f'先导出一次控制流，或手写一个入口，再补包装')
+        plan.blocking.append(plan.reason)
+        return plan
+    plan.path = str(path)
+
+    try:
+        text, _style = _read(path)
+    except OSError as exc:
+        plan.reason = f'读不了编排层：{exc}'
+        plan.blocking.append(plan.reason)
+        return plan
+    if not text.strip():
+        plan.reason = f'编排层文件是空的：{Path(path).name}'
+        plan.blocking.append(plan.reason)
+        return plan
+
+    _init_incoming_notes(project_root, plan, src)
+
+    block = [
+        '',
+        f'# 故事图编辑器补的编排入口：等价于直接进入「{src}」',
+        f'# （call 完接着走这个盒子里的下一句）',
+        f'label {plan.control_label}:',
+        f'    call {src}',
+        '    return',
+        '',
+    ]
+    body = text
+    if body and not body.endswith('\n'):
+        body += '\n'
+    if body and not body.endswith('\n\n'):
+        body += '\n'
+    plan.old_text = text
+    plan.new_text = body + '\n'.join(block[1:]) + '\n'
+    plan.ok = True
+    plan.kind = 'append'
+    plan.reason = (f'在 {Path(path).name} 末尾补 `{plan.control_label}`'
+                   f'（call {src} / return，行为与直接进入 {src} 等价）')
+    return plan
+
+
+def _init_precheck(project_root, plan: ControlInitPlan):
+    """
+    先看这一章**要不要补**包装：名字合法、`label X` 找得到且不带参数；
+    已经有 `X_control` 时直接给 `exists` 计划。
+
+    返回 `None` 表示继续算追加包装；否则返回的就是最终 `plan`。
+    """
+    src = plan.chapter_label
+
     if not src:
         plan.reason = '没有 label 名'
         plan.blocking.append(plan.reason)
@@ -498,28 +558,17 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
                        f'（{Path(existing["path"]).name}:{existing["line_no"]}）')
         return plan
 
-    path = find_control_file(project_root, src)
-    if path is None:
-        path = find_control_file(project_root)
-    if path is None:
-        plan.reason = (f'项目里没有任何 `*_control` label —— 现在新建一个 '
-                       f'`{plan.control_label}` 也没有入口会跳进来，只会是死代码。'
-                       f'先导出一次控制流，或手写一个入口，再补包装')
-        plan.blocking.append(plan.reason)
-        return plan
-    plan.path = str(path)
+    return None
 
-    try:
-        text, _style = _read(path)
-    except OSError as exc:
-        plan.reason = f'读不了编排层：{exc}'
-        plan.blocking.append(plan.reason)
-        return plan
-    if not text.strip():
-        plan.reason = f'编排层文件是空的：{Path(path).name}'
-        plan.blocking.append(plan.reason)
-        return plan
 
+def _init_incoming_notes(project_root, plan: ControlInitPlan, src: str) -> None:
+    """
+    记下谁进入这一章，并写清补出来的包装现在**有没有人走**。
+
+    源章缺包装时照样能补（写 + 明说），这里只填 `incoming` / `notes` /
+    `reachable`，不返回阻塞。
+    """
+    role = plan.role
     jump_direct = _incoming_refs(project_root, src)
     jump_ctrl = _incoming_refs(project_root, plan.control_label)
     plan.incoming = jump_direct + jump_ctrl
@@ -565,28 +614,6 @@ def plan_control_init(project_root, label, role='target') -> ControlInitPlan:
                     + ([f'{len(direct_calls)} 处 `call {src}`'] if direct_calls else [])
                 ) + f' 直接进入 `{src}`，它们不经过这个包装；'
                     f'要让它们也走编排层，得改接那些入口')
-
-    block = [
-        '',
-        f'# 故事图编辑器补的编排入口：等价于直接进入「{src}」',
-        f'# （call 完接着走这个盒子里的下一句）',
-        f'label {plan.control_label}:',
-        f'    call {src}',
-        '    return',
-        '',
-    ]
-    body = text
-    if body and not body.endswith('\n'):
-        body += '\n'
-    if body and not body.endswith('\n\n'):
-        body += '\n'
-    plan.old_text = text
-    plan.new_text = body + '\n'.join(block[1:]) + '\n'
-    plan.ok = True
-    plan.kind = 'append'
-    plan.reason = (f'在 {Path(path).name} 末尾补 `{plan.control_label}`'
-                   f'（call {src} / return，行为与直接进入 {src} 等价）')
-    return plan
 
 
 def apply_control_init(plan: ControlInitPlan) -> dict:
@@ -1222,47 +1249,9 @@ def plan_control_edit(project_root, src_label, old_dst_label,
         plan.blocking.append(plan.reason)
         return plan
 
-    path = find_control_file(project_root, src)
-    if path is None:
-        plan.reason = '项目里没有独立控制流文件（编排层）'
-        plan.blocking.append(plan.reason)
+    anchor = _locate_edit_route(project_root, plan)
+    if anchor is None:
         return plan
-    plan.path = str(path)
-    try:
-        text, _style = _read(path)
-    except OSError as exc:
-        plan.reason = f'读不了编排层：{exc}'
-        plan.blocking.append(plan.reason)
-        return plan
-    plan.control_label = control_label(src)
-    block = _block_for(text, plan.control_label)
-    if block is None:
-        plan.reason = f'编排层里没有 `{plan.control_label}`'
-        plan.blocking.append(plan.reason)
-        return plan
-
-    old_target = control_label(old_dst) if old_etype == 'jump' else old_dst
-    lines = split_lines(text)
-    tops = _top_lines(lines, block)
-    matches = [(i, ln) for i, ln in tops
-               if _route_of(ln.strip()) == (old_etype, old_target)]
-    if not matches:
-        plan.reason = (f'`{plan.control_label}` 里找不到 '
-                       f'{old_etype} {old_target}')
-        plan.blocking.append(plan.reason)
-        return plan
-    if len(matches) > 1:
-        plan.reason = (f'`{plan.control_label}` 里有 {len(matches)} 条 '
-                       f'{old_etype} {old_target}，不知道改哪一条')
-        plan.blocking.append(plan.reason)
-        return plan
-
-    idx, old_line = matches[0]
-    plan.line_no = idx + 1
-    plan.old_line = old_line
-    indent = old_line[:len(old_line) - len(old_line.lstrip())]
-    new_target = control_label(new_dst) if new_etype == 'jump' else new_dst
-    is_last_top = bool(tops) and tops[-1][0] == idx
 
     if new_etype == old_etype and new_dst == old_dst:
         plan.kind = 'noop'
@@ -1277,66 +1266,143 @@ def plan_control_edit(project_root, src_label, old_dst_label,
         return plan
 
     if new_etype == 'jump':
-        if _block_for(text, new_target) is None:
-            plan.init = plan_control_init(project_root, new_dst,
-                                          role='target')
-            if plan.init.kind == 'exists' \
-                    and Path(plan.init.path) != Path(path):
-                plan.reason = (f'`{new_target}` 在另一个文件里'
-                               f'（{Path(plan.init.path).name}），'
-                               f'不在这个编排层里；先合并再改')
-                plan.blocking.append(plan.reason)
-                return plan
-            if not plan.init.ok:
-                plan.reason = (f'编排层里没有 `{new_target}`，而且补不了：'
-                               f'{plan.init.reason}')
-                plan.blocking.append(plan.reason)
-                return plan
-        if old_etype == 'call' and not is_last_top:
-            plan.reason = ('这条 call 后面还有路由；改成 jump 会让它们'
-                           '永远不执行 —— 先把后面那些删掉再来改')
+        return _plan_edit_to_jump(project_root, plan, anchor)
+    # new_etype == 'call'
+    return _plan_edit_to_call(plan, anchor)
+
+
+@dataclass
+class _EditAnchor:
+    """`plan_control_edit` 定位到的"要改的那一行"和它周围需要的东西。"""
+
+    path: Path
+    text: str
+    idx: int
+    old_line: str
+    indent: str
+    new_target: str
+    is_last_top: bool
+
+
+def _locate_edit_route(project_root, plan: ControlEditPlan):
+    """
+    在编排层里找出要改的那一行，算好缩进、新目标、是不是最后一条顶层语句。
+
+    定位不到时把 `plan` 填成阻塞态并返回 `None`（调用方原样返回 `plan`）。
+    """
+    path = find_control_file(project_root, plan.src_label)
+    if path is None:
+        plan.reason = '项目里没有独立控制流文件（编排层）'
+        plan.blocking.append(plan.reason)
+        return None
+    plan.path = str(path)
+    try:
+        text, _style = _read(path)
+    except OSError as exc:
+        plan.reason = f'读不了编排层：{exc}'
+        plan.blocking.append(plan.reason)
+        return None
+    plan.control_label = control_label(plan.src_label)
+    block = _block_for(text, plan.control_label)
+    if block is None:
+        plan.reason = f'编排层里没有 `{plan.control_label}`'
+        plan.blocking.append(plan.reason)
+        return None
+
+    old_target = (control_label(plan.old_dst_label)
+                  if plan.old_etype == 'jump' else plan.old_dst_label)
+    lines = split_lines(text)
+    tops = _top_lines(lines, block)
+    matches = [(i, ln) for i, ln in tops
+               if _route_of(ln.strip()) == (plan.old_etype, old_target)]
+    if not matches:
+        plan.reason = (f'`{plan.control_label}` 里找不到 '
+                       f'{plan.old_etype} {old_target}')
+        plan.blocking.append(plan.reason)
+        return None
+    if len(matches) > 1:
+        plan.reason = (f'`{plan.control_label}` 里有 {len(matches)} 条 '
+                       f'{plan.old_etype} {old_target}，不知道改哪一条')
+        plan.blocking.append(plan.reason)
+        return None
+
+    idx, old_line = matches[0]
+    plan.line_no = idx + 1
+    plan.old_line = old_line
+    indent = old_line[:len(old_line) - len(old_line.lstrip())]
+    new_target = (control_label(plan.new_dst_label)
+                  if plan.new_etype == 'jump' else plan.new_dst_label)
+    is_last_top = bool(tops) and tops[-1][0] == idx
+    return _EditAnchor(path, text, idx, old_line, indent, new_target,
+                       is_last_top)
+
+
+def _plan_edit_to_jump(project_root, plan: ControlEditPlan,
+                       anchor: _EditAnchor) -> ControlEditPlan:
+    """把这条路由改成 `jump`：目标章还没有 `_control` 包装时先补一个计划。"""
+    if _block_for(anchor.text, anchor.new_target) is None:
+        plan.init = plan_control_init(project_root, plan.new_dst_label,
+                                      role='target')
+        if plan.init.kind == 'exists' \
+                and Path(plan.init.path) != Path(anchor.path):
+            plan.reason = (f'`{anchor.new_target}` 在另一个文件里'
+                           f'（{Path(plan.init.path).name}），'
+                           f'不在这个编排层里；先合并再改')
             plan.blocking.append(plan.reason)
             return plan
-        plan.kind = 'replace'
-        plan.ok = True
-        plan.new_lines = [f'{indent}jump {new_target}']
-        if old_etype == 'call' and is_last_top:
-            plan.reason = (f'把 `{plan.control_label}` 的 {old_line.strip()} '
-                           f'改成 jump {new_target}（call 会回来；它原来是'
-                           f'最后一句，所以直接跳到目标章）')
-        else:
-            plan.reason = (f'改接：`{plan.control_label}` 里的 '
-                           f'{old_line.strip()} → jump {new_target}')
+        if not plan.init.ok:
+            plan.reason = (f'编排层里没有 `{anchor.new_target}`，而且补不了：'
+                           f'{plan.init.reason}')
+            plan.blocking.append(plan.reason)
+            return plan
+    if plan.old_etype == 'call' and not anchor.is_last_top:
+        plan.reason = ('这条 call 后面还有路由；改成 jump 会让它们'
+                       '永远不执行 —— 先把后面那些删掉再来改')
+        plan.blocking.append(plan.reason)
         return plan
+    plan.kind = 'replace'
+    plan.ok = True
+    plan.new_lines = [f'{anchor.indent}jump {anchor.new_target}']
+    if plan.old_etype == 'call' and anchor.is_last_top:
+        plan.reason = (f'把 `{plan.control_label}` 的 {anchor.old_line.strip()} '
+                       f'改成 jump {anchor.new_target}（call 会回来；它原来是'
+                       f'最后一句，所以直接跳到目标章）')
+    else:
+        plan.reason = (f'改接：`{plan.control_label}` 里的 '
+                       f'{anchor.old_line.strip()} → jump {anchor.new_target}')
+    return plan
 
-    # new_etype == 'call'
-    if old_etype == 'jump':
-        plan.new_lines = [f'{indent}call {new_target}']
-        if is_last_top:
+
+def _plan_edit_to_call(plan: ControlEditPlan,
+                       anchor: _EditAnchor) -> ControlEditPlan:
+    """把这条路由改成 `call`：原来是 jump 时可能补一个 `return` 收尾。"""
+    if plan.old_etype == 'jump':
+        plan.new_lines = [f'{anchor.indent}call {anchor.new_target}']
+        if anchor.is_last_top:
             # call 会回来；这一段没有下一句 → 补 return 收尾，否则掉进下一个 label
-            plan.new_lines.append(f'{indent}return')
-            plan.reason = (f'把 `{plan.control_label}` 的 {old_line.strip()} '
-                           f'改成 call {new_target} + return'
+            plan.new_lines.append(f'{anchor.indent}return')
+            plan.reason = (f'把 `{plan.control_label}` 的 {anchor.old_line.strip()} '
+                           f'改成 call {anchor.new_target} + return'
                            f'（调过去，回来就结束这一段）')
         else:
-            plan.reason = (f'把 `{plan.control_label}` 的 {old_line.strip()} '
-                           f'改成 call {new_target}（返回后继续后面那几条路由）')
+            plan.reason = (f'把 `{plan.control_label}` 的 {anchor.old_line.strip()} '
+                           f'改成 call {anchor.new_target}（返回后继续后面那几条路由）')
     else:
         old_info = {}
         try:
             from storygraph.story.flow import parse_flow_line
-            old_info = parse_flow_line(old_line.strip()) or {}
+            old_info = parse_flow_line(anchor.old_line.strip()) or {}
         except Exception as exc:              # noqa: BLE001 - 只是保留参数/from
             from storygraph.core.safeguard import swallow
             swallow('story.control_route.plan_control_edit.parse', exc)
             old_info = {}
         args = str(old_info.get('args') or '')
         frm = str(old_info.get('from_clause') or '')
-        line = f'call {new_target}{args}'
+        line = f'call {anchor.new_target}{args}'
         if frm:
             line += f' from {frm}'
-        plan.new_lines = [indent + line]
-        plan.reason = (f'把 `{plan.control_label}` 里的 {old_line.strip()} '
+        plan.new_lines = [anchor.indent + line]
+        plan.reason = (f'把 `{plan.control_label}` 里的 {anchor.old_line.strip()} '
                        f'改成 {line.strip()}（存档返回点保留）')
     plan.kind = 'replace'
     plan.ok = True
