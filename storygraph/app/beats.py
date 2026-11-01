@@ -1994,8 +1994,236 @@ def _symbols_project_root(symbols):
     return getattr(reg, 'project_root', None) if reg is not None else None
 
 
-def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
-                   layer_model=None) -> list:
+def _attr_slot_overlay(groups) -> dict:
+    """项目声明只当**改名层**（`outfit` → 「服装」）：结构仍由引擎给。"""
+    try:
+        from storygraph.core import engine_facts as EF
+        return EF.rename_overlay(groups)
+    except Exception as e:                          # noqa: BLE001 - 坏声明不该炸卡片
+        swallow('app.beats.attr_slot_rows.overlay', e)
+        return {}
+
+
+def _slot_rows_from_facts(tag, facts, overlay) -> list:
+    """②-1 **引擎事实**（`engine_facts.grouped_choices`）：采过引擎的项目用它。"""
+    try:
+        from storygraph.core import engine_facts as EF
+        return list(EF.grouped_choices(facts, tag, overlay) or [])
+    except Exception as e:                        # noqa: BLE001 - 引擎事实坏掉不该炸卡片
+        swallow('app.beats.attr_slot_rows.facts', e)
+        return []
+
+
+def _slot_rows_from_layers(tag, symbols, overlay, layer_model) -> list:
+    """②-2 项目里的 `layeredimage` 声明（同一份结构，只是从 `.rpy` 现读）。"""
+    try:
+        model = layer_model
+        if model is None:
+            from storygraph.story.layered_model import load_layer_model_cached
+            root = _symbols_project_root(symbols)
+            model = load_layer_model_cached(root) if root else None
+        img = (model.images or {}).get(tag) if model is not None else None
+        if img is None:
+            return []
+        buckets: dict = {}
+        for g in img.groups:
+            names = [n for n in g.attrs if n and n not in buckets]
+            buckets.setdefault(g.name or '', [])
+            for n in names:
+                if n not in buckets[g.name or '']:
+                    buckets[g.name or ''].append(n)
+        return [{'group': k, 'label': overlay.get(k) or k, 'values': v}
+                for k, v in buckets.items() if v]
+    except Exception as e:                        # noqa: BLE001
+        swallow('app.beats.attr_slot_rows.layers', e)
+        return []
+
+
+def _slot_rows_from_dims(tag, symbols, overlay) -> list:
+    """②-3 **资源表自带的维度**：`Group` / `Value` 列（≥2 个维度才接管）。
+
+    只在 **≥2 个维度**时接管：一个维度的老项目继续走单格老路，一个字节不变。
+    """
+    try:
+        dims = symbols.dimension_groups_of_tag(tag)
+        if len([g for g in dims if g]) < 2:
+            return []
+        return [{'group': k, 'label': overlay.get(k) or k, 'values': list(v)}
+                for k, v in dims.items() if k and v]
+    except Exception as e:                        # noqa: BLE001
+        swallow('app.beats.attr_slot_rows.dims', e)
+        return []
+
+
+def _declared_rows_flat(declared) -> list:
+    """声明里认不出"哪些词属于哪一栏"时，按声明自己的 `options` 硬分栏。"""
+    rows = []
+    for g in declared:
+        vals = [str(v) for v in (getattr(g, 'options', ()) or ())
+                if str(v).strip()]
+        if vals:
+            rows.append({
+                'group': str(getattr(g, 'name', '') or ''),
+                'label': str(getattr(g, 'title', lambda: '')()
+                             or getattr(g, 'name', '') or ''),
+                'values': vals})
+    return rows
+
+
+def _slot_rows_from_declared(tag, symbols, groups, overlay) -> list:
+    """②-4 项目自己声明的分栏（`rules.json` 的 `attr_groups`）。
+
+    ⚠ 仍然通用：按声明里的 `options` 归组，**不写死任何组名**。
+    """
+    try:
+        from storygraph.authoring.spec_groups import (group_choices,
+                                                      parse_attr_groups)
+        declared = groups
+        if declared and isinstance(declared[0], dict):
+            declared = parse_attr_groups(declared)
+        known_attrs = [str(a or '').strip()
+                       for a in (symbols.attrs_of_tag(tag) or ())
+                       if str(a or '').strip()]
+        if not known_attrs:
+            return _declared_rows_flat(declared)
+        return [{'group': e['group'],
+                 'label': e['label'] or e['group'],
+                 'values': list(e['values'])}
+                for e in group_choices(known_attrs, declared)]
+    except Exception as e:                    # noqa: BLE001 - 坏声明不该炸卡片
+        swallow('app.beats.attr_slot_rows.groups', e)
+        return []
+
+
+def _attr_slot_structure(tag, symbols, groups, facts, layer_model,
+                         overlay) -> list:
+    """② **四档降级找"结构"**（组名 + 每组有哪些词）。
+
+    顺序固定、先到先得，拿到就不再试下一档 —— 因为越靠前的越权威，
+    混着用会两边打架（顺序与 `attr_slot_rows` 的 docstring 表一致）：
+
+      1. 引擎事实 `engine_facts.grouped_choices` —— 采过引擎的项目（最准）；
+      2. 项目里的 `layeredimage` 声明 —— 没采过引擎，但写了分层立绘；
+      3. 资源表的 `Group` / `Value` 列 —— 前两者都没有，但表里登记了维度；
+      4. 项目声明的 `attr_groups` —— 前三档都空，靠手写声明兜底。
+
+    四档全空 → `[]`（调用方据此走"单格老路"，老项目一个字节都不变）。
+    """
+    if facts:
+        rows = _slot_rows_from_facts(tag, facts, overlay)
+        if rows:
+            return rows
+    rows = _slot_rows_from_layers(tag, symbols, overlay, layer_model)
+    if rows:
+        return rows
+    rows = _slot_rows_from_dims(tag, symbols, overlay)
+    if rows:
+        return rows
+    if groups:
+        return _slot_rows_from_declared(tag, symbols, groups, overlay)
+    return []
+
+
+def _attr_slot_apply_split(group_rows: list, groups) -> list:
+    """③ **显式拆分**：声明里带 `split: true` 的组，把属于它的词从引擎组里
+    **取走**单独成一格（引擎把动作并进 `outfit` 时，策划想分开摆）。
+
+    只影响卡片 / 候选，不改引擎语义。
+    """
+    split_groups = _split_declared_groups(groups)
+    if not split_groups:
+        return group_rows
+    return _split_slots(split_groups, group_rows)
+
+
+def _split_declared_groups(groups) -> list:
+    """声明里带 `split: true` 的组（先把 `dict` 形态解析成组对象）。"""
+    declared = groups
+    if declared and isinstance(declared[0], dict):
+        try:
+            from storygraph.authoring.spec_groups import parse_attr_groups
+            declared = parse_attr_groups(declared)
+        except Exception as e:                  # noqa: BLE001
+            swallow('app.beats.attr_slot_rows.split.parse', e)
+            declared = []
+    return [g for g in (declared or ()) if bool(getattr(g, 'split', False))]
+
+
+def _split_slots(split_groups, group_rows: list) -> list:
+    """把属于拆分组的词从引擎组里**取走**、单独成格 → 新的 `group_rows`。"""
+    engine_values = {str(v) for e in group_rows
+                     for v in (e.get('values') or ())}
+    split_slots, taken_words = [], set()
+    for g in split_groups:
+        wanted = [str(v) for v in (getattr(g, 'options', ()) or ())
+                  if str(v).strip()]
+        vals = [v for v in wanted if v in engine_values] or wanted
+        if not vals:
+            continue
+        taken_words.update(vals)
+        split_slots.append({'group': str(getattr(g, 'name', '') or ''),
+                            'label': str(getattr(g, 'title', lambda: '')()
+                                         or getattr(g, 'name', '') or ''),
+                            'values': vals})
+    if not split_slots:
+        return group_rows
+    kept = []
+    for entry in group_rows:
+        rest = [v for v in (entry.get('values') or ())
+                if v not in taken_words]
+        if rest:
+            kept.append({**entry, 'values': rest})
+    return kept + split_slots
+
+
+def _attr_slot_label(group_rows: list, overlay) -> list:
+    """④ **造标题**：没有项目改名时，**不要把引擎内部组名**（`outfit` /
+    `expressions`）当标题 —— 标题用通用的「属性 1 / 属性 2」，内部组名只进
+    tooltip（`sprite_grid` 里）。
+    """
+    labeled = []
+    for i, entry in enumerate(group_rows, 1):
+        group_name = str(entry.get('group') or '')
+        label = (overlay.get(group_name) or str(entry.get('label') or '')).strip()
+        if not label or label == group_name:
+            label = f'属性 {i}'
+        labeled.append({**entry, 'label': label})
+    return labeled
+
+
+def _attr_slot_cells(group_rows: list, attrs, tag, symbols) -> list:
+    """④⑤ 每组一行：**分当前值**（一个词只归一组，先命中的组拿走），再补
+    `display`（求值后给人看的写法）、`other`（点这一格时其余维度的词，防
+    "点一格吃掉另一格"）、`extras`（不认识的词原样留着）。
+    """
+    taken = set()
+    slots = []
+    for entry in group_rows:
+        vals = [str(v) for v in (entry.get('values') or ()) if str(v)]
+        cur = next((a for a in attrs if a in vals and a not in taken), '')
+        if cur:
+            taken.add(cur)
+        slots.append({'group': str(entry.get('group') or ''),
+                      'label': str(entry.get('label') or '')
+                               or str(entry.get('group') or ''),
+                      'value': cur, 'options': vals})
+    # 不属于任何引擎组的词（掩码/切图这类内部件，实测项目里真有）原样留着。
+    known = {v for s in slots for v in s['options']}
+    extras = [a for a in attrs if a and a not in known]
+    for slot in slots:
+        probe = Beat(seq=1, label='', text='',
+                     show=' '.join([tag] + ([slot['value']]
+                                            if slot['value'] else [])))
+        slot['display'] = (_expression_display(slot['value'], tag, probe, symbols)
+                           if slot['value'] else '')
+        # **其它维度的词原样保留**（点一格不许吃掉另一格）——点它时用这一份去合成。
+        slot['other'] = [a for a in attrs if a and a != slot['value']]
+        slot['extras'] = list(extras)
+    return slots
+
+
+def attr_slot_rows(image_spec: str, symbols, groups=None,
+                   facts=None, layer_model=None) -> list:
     """
     一个立绘 spec → **按引擎分组的一维一格**行（`[{'group','label','value',
     'display','options','other'}, …]`）。
@@ -2040,8 +2268,9 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
         `_hd_cut` 这类内部件 —— 实测资源表里真有它们）。我们不认识它们，但
         **别人的东西一个字节都不许丢**。
 
-    本函数的分段（219 行，按这个顺序读就不会晕）
-    --------------------------------------------
+    本函数的分段（每一段都是一个具名函数 —— 这里只留编排，
+    细节在 `_attr_slot_*` 那一组 / 四个 `_slot_rows_*` 里）
+    ----------------------------------------------------------------
     ① **拆 spec**：`show ye base_handdown gratified` → `tag='ye'`、
        `attrs=[base_handdown, gratified]`。认不出 tag 就当场返回 `[]`。
 
@@ -2069,98 +2298,15 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
     """
     spec = str(image_spec or '').strip()
     toks = [t for t in (_show_item_attr(t) for t in spec.split()) if t]
-    # ⚠ 只要**认得出 tag**就往下走：`show lan`（这一拍没写属性）也应该能长出
+    # ⚠ 只要**认得出 tag** 就往下走：`show lan`（这一拍没写属性）也应该能长出
     #   "服装 / 表情"格 —— 否则用户想补一个属性时根本没有入口
     #   （2026-10-18 实测："卡片编辑器内服装不显示"）。
     if not toks or symbols is None:
         return []
     tag, attrs = toks[0], toks[1:]
-    # 项目声明只当**改名层**（`outfit` → 「服装」）：结构仍由引擎给。
-    overlay: dict = {}
-    try:
-        from storygraph.core import engine_facts as EF
-        overlay = EF.rename_overlay(groups)
-    except Exception as e:                          # noqa: BLE001 - 坏声明不该炸卡片
-        swallow('app.beats.attr_slot_rows.overlay', e)
-    group_rows = []
-    try:
-        if facts:
-            from storygraph.core import engine_facts as EF
-            group_rows = list(EF.grouped_choices(facts, tag, overlay) or [])
-    except Exception as e:                        # noqa: BLE001 - 引擎事实坏掉不该炸卡片
-        swallow('app.beats.attr_slot_rows.facts', e)
-        group_rows = []
-    if not group_rows:
-        # 没采过引擎事实 / 引擎没给这个 tag 的分组 → 退回项目里的 `layeredimage`
-        # 声明（同一份结构，只是从 `.rpy` 现读）。
-        try:
-            model = layer_model
-            if model is None:
-                from storygraph.story.layered_model import load_layer_model_cached
-                root = _symbols_project_root(symbols)
-                model = load_layer_model_cached(root) if root else None
-            img = (model.images or {}).get(tag) if model is not None else None
-            if img is not None:
-                buckets: dict = {}
-                for g in img.groups:
-                    names = [n for n in g.attrs if n and n not in buckets]
-                    buckets.setdefault(g.name or '', [])
-                    for n in names:
-                        if n not in buckets[g.name or '']:
-                            buckets[g.name or ''].append(n)
-                group_rows = [{'group': k, 'label': overlay.get(k) or k,
-                               'values': v}
-                              for k, v in buckets.items() if v]
-        except Exception as e:                    # noqa: BLE001
-            swallow('app.beats.attr_slot_rows.layers', e)
-            group_rows = []
-    if not group_rows and symbols is not None:
-        # 第四档（2026-10-19）：**资源表自带的结构化维度**。
-        # 没有引擎事实、也读不到 `layeredimage` 的项目，`Group`/`Value`
-        # 列就是唯一结构来源 —— 一维一格不再依赖"引擎采过没有"。
-        # 只在 **≥2 个维度**时接管：一个维度的老项目继续走单格老路，
-        # 一个字节不变（通用性底线）。
-        try:
-            dims = symbols.dimension_groups_of_tag(tag)
-            if len([g for g in dims if g]) >= 2:
-                group_rows = [{'group': k,
-                               'label': overlay.get(k) or k,
-                               'values': list(v)}
-                              for k, v in dims.items() if k and v]
-        except Exception as e:                    # noqa: BLE001
-            swallow('app.beats.attr_slot_rows.dims', e)
-            group_rows = []
-    if not group_rows and groups:
-        # 第三档：**项目自己声明的分栏**（`rules.json` 的 `attr_groups`）。
-        # 没有引擎事实、也读不到 `layeredimage` 的项目，声明就是唯一结构来源。
-        # ⚠ 仍然通用：按声明里的 `options` 归组，**不写死任何组名**。
-        try:
-            from storygraph.authoring.spec_groups import (group_choices,
-                                                          parse_attr_groups)
-            declared = groups
-            if declared and isinstance(declared[0], dict):
-                declared = parse_attr_groups(declared)
-            known_attrs = [str(a or '').strip()
-                           for a in (symbols.attrs_of_tag(tag) or ())
-                           if str(a or '').strip()]
-            if known_attrs:
-                group_rows = [{'group': e['group'],
-                               'label': e['label'] or e['group'],
-                               'values': list(e['values'])}
-                              for e in group_choices(known_attrs, declared)]
-            else:
-                for g in declared:
-                    vals = [str(v) for v in (getattr(g, 'options', ()) or ())
-                            if str(v).strip()]
-                    if vals:
-                        group_rows.append({
-                            'group': str(getattr(g, 'name', '') or ''),
-                            'label': str(getattr(g, 'title', lambda: '')()
-                                         or getattr(g, 'name', '') or ''),
-                            'values': vals})
-        except Exception as e:                    # noqa: BLE001 - 坏声明不该炸卡片
-            swallow('app.beats.attr_slot_rows.groups', e)
-            group_rows = []
+    overlay = _attr_slot_overlay(groups)
+    group_rows = _attr_slot_structure(tag, symbols, groups, facts,
+                                      layer_model, overlay)
     # ⚠ **组数才是判据**（每组一格；≥1 个组就建格）。从前判的是"有值的维度数"，
     #   于是"只写了一个词的拍"一个格都没有、只写 tag 的拍更没有入口。
     #   结构来源一共**四档**（顺序见 docstring ②；这里写全，别只写三档 ——
@@ -2170,79 +2316,9 @@ def attr_slot_rows(image_spec: str, symbols, groups=None, facts=None,
     #   四档都认不出（`group_rows` 为空）才返回 `[]` 走老路。
     if not group_rows:
         return []
-    # —— 显式拆分（2026-10-18）：引擎把动作/姿势并进 `outfit` 时，
-    #    项目可以声明 `{"name":"pose","label":"动作","options":[...],"split":true}`
-    #    把那些词从引擎组里**取走**，单独成一格。只影响卡片/候选，不改引擎语义。
-    declared_groups = groups
-    if declared_groups and isinstance(declared_groups[0], dict):
-        try:
-            from storygraph.authoring.spec_groups import parse_attr_groups
-            declared_groups = parse_attr_groups(declared_groups)
-        except Exception as e:                  # noqa: BLE001
-            swallow('app.beats.attr_slot_rows.split.parse', e)
-            declared_groups = []
-    split_groups = [g for g in (declared_groups or ())
-                    if bool(getattr(g, 'split', False))]
-    if split_groups:
-        engine_values = {str(v) for e in group_rows
-                         for v in (e.get('values') or ())}
-        split_slots, taken_words = [], set()
-        for g in split_groups:
-            wanted = [str(v) for v in (getattr(g, 'options', ()) or ())
-                      if str(v).strip()]
-            vals = [v for v in wanted if v in engine_values] or wanted
-            if not vals:
-                continue
-            taken_words.update(vals)
-            split_slots.append({'group': str(getattr(g, 'name', '') or ''),
-                                'label': str(getattr(g, 'title', lambda: '')()
-                                             or getattr(g, 'name', '') or ''),
-                                'values': vals})
-        if split_slots:
-            kept = []
-            for entry in group_rows:
-                rest = [v for v in (entry.get('values') or ())
-                        if v not in taken_words]
-                if rest:
-                    kept.append({**entry, 'values': rest})
-            group_rows = kept + split_slots
-    # 没有项目改名时，**不要把引擎内部组名**（`outfit` / `expressions`）当标题 ——
-    # 用户 2026-10-18："我明明定义的编剧名称是服装，卡片上却显示 outfit"。
-    # 标题用通用的「属性 1 / 属性 2」，内部组名只进 tooltip（`sprite_grid` 里）。
-    labeled_rows = []
-    for i, entry in enumerate(group_rows, 1):
-        group_name = str(entry.get('group') or '')
-        label = (overlay.get(group_name) or str(entry.get('label') or '')).strip()
-        if not label or label == group_name:
-            label = f'属性 {i}'
-        labeled_rows.append({**entry, 'label': label})
-    group_rows = labeled_rows
-    # 当前值 → 每一维当前选中的那个词（一个词只归一组，先命中的组拿走 —— 与
-    # `grouped_choices` 的"值 = 该组成员"同口径）。
-    taken = set()
-    slots = []
-    for entry in group_rows:
-        vals = [str(v) for v in (entry.get('values') or ()) if str(v)]
-        cur = next((a for a in attrs if a in vals and a not in taken), '')
-        if cur:
-            taken.add(cur)
-        slots.append({'group': str(entry.get('group') or ''),
-                      'label': str(entry.get('label') or '')
-                               or str(entry.get('group') or ''),
-                      'value': cur, 'options': vals})
-    # 不属于任何引擎组的词（掩码/切图这类内部件，实测项目里真有）原样留着。
-    known = {v for s in slots for v in s['options']}
-    extras = [a for a in attrs if a and a not in known]
-    for slot in slots:
-        probe = Beat(seq=1, label='', text='',
-                     show=' '.join([tag] + ([slot['value']]
-                                            if slot['value'] else [])))
-        slot['display'] = (_expression_display(slot['value'], tag, probe, symbols)
-                           if slot['value'] else '')
-        # **其它维度的词原样保留**（点一格不许吃掉另一格）——点它时用这一份去合成。
-        slot['other'] = [a for a in attrs if a and a != slot['value']]
-        slot['extras'] = list(extras)
-    return slots
+    group_rows = _attr_slot_apply_split(group_rows, groups)
+    group_rows = _attr_slot_label(group_rows, overlay)
+    return _attr_slot_cells(group_rows, attrs, tag, symbols)
 
 
 def _replace_attr_word(attrs, old: str, new: str) -> list:
