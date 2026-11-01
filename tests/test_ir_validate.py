@@ -388,7 +388,8 @@ class TestBadShapesDoNotCrashTheChecker:
             raise RuntimeError('适配器没跑成')
 
         monkeypatch.setattr(EE, 'to_unity', boom)
-        summary = summarize(_ir(), 'unity')
+        # 2026-11-01：适配器由调用方注入（`ir_validate` 不再认识导出层）。
+        summary = summarize(_ir(), 'unity', adapter=EE.to_unity)
         assert 'E-IR-CHECK-CRASH' in summary['by_code'], summary['by_code']
         assert summary['error_count'] >= 1
 

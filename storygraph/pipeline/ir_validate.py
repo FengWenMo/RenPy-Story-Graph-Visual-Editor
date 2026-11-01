@@ -487,11 +487,15 @@ def check_adapter(engine: str, payload) -> list:
 #  汇总与报告
 # ==================================================================
 
-def summarize(ir, engine: str = '') -> dict:
+def summarize(ir, engine: str = '', adapter=None) -> dict:
     """
     自检结果的可回执形态：`{error_count, warning_count, issues, by_code}`。
 
-    `engine` 给了就顺带检查适配产物（Unity 才会真的多出结论）。
+    `engine` + `adapter` 给了就顺带检查**适配产物**：`adapter(ir)` 由调用方
+    传入（导出层传 `to_unity` / `to_godot`）。2026-11-01 起本模块**不再认识
+    具体适配器** —— 从前这里函数体内 import `engine_exporters`，而
+    `engine_exporters` 顶层 import 本模块，构成 2 环。检查哪些引擎是导出层
+    的知识，自检只负责"拿到产物怎么判"（`check_adapter`）。
 
     **适配产物检查自己崩了要算一条错误**（2026-10-20 修，P1）：从前这里
     直接调 `to_unity(ir)`，坏形状的 IR 会抛出去 —— 而 `session_export`
@@ -499,14 +503,9 @@ def summarize(ir, engine: str = '') -> dict:
     "没跑成"和"干净"在回执上长得一样，这是这个仓库最忌讳的一类谎。
     """
     issues = check_ir(ir)
-    if engine:
+    if engine and adapter is not None:
         try:
-            from storygraph.pipeline.engine_exporters import (to_godot,
-                                                              to_unity)
-            if str(engine).lower() == 'unity':
-                issues += check_adapter('unity', to_unity(ir))
-            elif str(engine).lower() == 'godot':
-                issues += check_adapter('godot', to_godot(ir))
+            issues += check_adapter(engine, adapter(ir))
         except Exception as e:                # noqa: BLE001 - 崩了也算一条错误
             swallow('pipeline.ir_validate.summarize.adapter', e)
             issues.append(Issue(
@@ -555,9 +554,9 @@ def crash_report(engine: str, exc: BaseException) -> str:
         '用例在 `tests/test_ir_validate.py`。', ''])
 
 
-def report_markdown(ir, engine: str = '') -> str:
+def report_markdown(ir, engine: str = '', adapter=None) -> str:
     """自检报告（落盘成 `IR_CHECK.md`，给接引擎的人先看这一页）。"""
-    summary = summarize(ir, engine)
+    summary = summarize(ir, engine, adapter=adapter)
     lines = ir.get('lines') if isinstance(ir, dict) else []
     if not isinstance(lines, list):
         lines = []                    # 坏数据也要能出报告（别在报告里再崩）
@@ -599,8 +598,8 @@ def report_markdown(ir, engine: str = '') -> str:
     return '\n'.join(out)
 
 
-def write_report(ir, out_dir, engine: str = '') -> str:
+def write_report(ir, out_dir, engine: str = '', adapter=None) -> str:
     """把自检报告写进导出目录，返回路径。"""
     path = Path(out_dir) / CHECK_REPORT_NAME
-    write_text_atomic(path, report_markdown(ir, engine))
+    write_text_atomic(path, report_markdown(ir, engine, adapter=adapter))
     return str(path)

@@ -32,6 +32,8 @@ from contextlib import suppress
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.pipeline.artifact_names import (NEUTRAL_IR_NAME,
+                                                UNITY_DATA_NAME)
 from storygraph.pipeline.ir_loss import LOSS_REPORT_NAME, report_markdown
 from storygraph.pipeline.ir_validate import (CHECK_REPORT_NAME,
                                              crash_report as check_crashed,
@@ -627,8 +629,9 @@ def to_godot(ir: dict) -> dict:
 #: 守卫：`tests/test_pipeline_batch.py::TestEngineExporters`
 #: （`test_no_two_product_names_collide_on_case_insensitive_fs` /
 #:  `test_godot_data_is_distinct_and_loader_points_at_it`）。
-NEUTRAL_IR_NAME = 'story_ir.json'
-UNITY_DATA_NAME = 'UnityDialogueData.json'
+#: 产出文件名：定义在 `pipeline.artifact_names`（叶子模块，`unity_package`
+#: 也从那里拿 —— 2026-11-01 解环）。此处不再赋值，`NEUTRAL_IR_NAME` /
+#: `UNITY_DATA_NAME` 由顶层 import 提供，本模块对外照样 re-export。
 UNITY_NOTES_NAME = 'UNITY_IMPORT.md'
 GODOT_DATA_NAME = 'GodotDialogueData.json'
 GODOT_LOADER_NAME = 'dialogue_importer.gd'
@@ -677,6 +680,18 @@ func label_lines(label: String) -> Array:
 # ==================================================================
 
 SUPPORTED_ENGINES = ('renpy', 'unity', 'godot', 'json', 'csv')
+
+
+def _adapter_for(engine: str):
+    """
+    引擎名 → 适配函数（`ir` → 适配产物）；自检要用它检查适配产物。
+
+    `ir_validate.summarize()` 2026-11-01 起不再自己 import 适配器（那是
+    `engine_exporters ↔ ir_validate` 的 2 环），由本层注入。函数对象在
+    **调用时**从模块全局取，测试 monkeypatch `EE.to_unity` 照样生效。
+    """
+    return {'unity': to_unity, 'godot': to_godot}.get(
+        str(engine or '').lower())
 
 
 def expected_files(engine: str) -> list:
@@ -892,7 +907,7 @@ def export_ir(engine: str, beats, out_dir, registry=None,
     # 它自己成了崩溃点等于这个功能不存在。现在写一份"自检没跑成"的报告：
     # 错误照样算一条，看得到、查得着。
     try:
-        check_text = check_report(ir, engine)
+        check_text = check_report(ir, engine, adapter=_adapter_for(engine))
     except Exception as e:                    # noqa: BLE001 - 报告不许反噬产物
         swallow('pipeline.engine_exporters.export_ir.check', e)
         check_text = check_crashed(engine, e)

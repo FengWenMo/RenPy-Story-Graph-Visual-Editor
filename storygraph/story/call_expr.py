@@ -34,8 +34,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from storygraph.story.transition_expr import (_KWARG_RE, _match_paren,
-                                              _split_top_level)
+from storygraph.story.beat_text import (CODE_BLOCK_BODY, CODE_BLOCK_OPEN,
+                                        _KWARG_RE, _mask_non_code,
+                                        _match_paren, _split_top_level)
 
 
 @dataclass(frozen=True)
@@ -128,18 +129,11 @@ def _block_masked(text: str) -> str:
     `python:` 块体行 → 空格（长度不变）。
 
     `Beat.code` 里块体每行以 `CODE_BLOCK_OPEN` / `CODE_BLOCK_BODY` 开头
-    （见 `beat_model`）；块里的调用语义是"循环/条件里可能执行"，不是
-    "这一拍固定过场"，不能给它建可编辑列/派生预览。掩码而不是删除，
-    是为了让区间下标仍能切回原文。
+    （哨兵定义在 `story.beat_text`，是文本格式事实）；块里的调用语义是
+    "循环/条件里可能执行"，不是"这一拍固定过场"，不能给它建可编辑列/派生
+    预览。掩码而不是删除，是为了让区间下标仍能切回原文。
     """
     s = str(text or '')
-    try:
-        from storygraph.story.beat_model import (CODE_BLOCK_BODY,
-                                                 CODE_BLOCK_OPEN)
-    except Exception as e:                  # noqa: BLE001 - 读不到就按普通文本
-        from storygraph.core.safeguard import swallow
-        swallow('story.call_expr.block_masked', e)
-        return s
     markers = (CODE_BLOCK_OPEN, CODE_BLOCK_BODY)
     out = []
     for line in s.split('\n'):
@@ -159,7 +153,6 @@ def find_calls(text, head: str) -> list:
     if not pattern or not s:
         return []
     # 注释/字符串/`python:` 块体里的 `head(` 不算。
-    from storygraph.story.transition_expr import _mask_non_code
     masked = _mask_non_code(_block_masked(s))
     out = []
     for m in pattern.finditer(masked):

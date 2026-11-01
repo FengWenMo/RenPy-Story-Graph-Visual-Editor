@@ -31,7 +31,8 @@ from storygraph.story.spec_args import is_dynamic_column
 #: 括号/引号扫描器（纯字符串，零项目内依赖）。**顶层 import** ——
 #: 以前它在函数体里 `from ...beat_render import`，那是"Beat 本体反过来要
 #: 渲染层"的反向边（29 模块环的一条反馈边）。搬到 `beat_text` 后没有环可绕。
-from storygraph.story.beat_text import _bracket_delta, _quote_state
+from storygraph.story.beat_text import (CODE_BLOCK_BODY, CODE_BLOCK_OPEN,
+                                        _bracket_delta, _quote_state)
 from storygraph.story.beat_stage_parse import (  # 2026-10-12 拆分
     _NATIVE_TAIL_RE,
     _clause_image,
@@ -2428,8 +2429,11 @@ def compose_code(beat: 'Beat', skip_seq_with: bool = False) -> str:
 #: `CODE_BLOCK_OPEN` = 块的第一行（渲染时出 `python:` 头），
 #: `CODE_BLOCK_BODY` = 块体的后续行。私用区字符策划打不出来，
 #: 也不是控制字符（`openpyxl` 拒收控制字符，见 `core.statement.MARKER`）。
-CODE_BLOCK_OPEN = '\ue001'
-CODE_BLOCK_BODY = '\ue002'
+#:
+#: 2026-11-01：定义搬到 `story.beat_text`（纯文本格式事实）。`call_expr` /
+#: `transition_expr` 从前为了认这两个哨兵反过来 import 本模块，构成了
+#: `beat_model → call_expr → transition_expr → beat_model` 的环。这里
+#: re-export，从 `beat_model` 拿常量的老路（含测试）照样通。
 
 
 def mark_code_blocks(lines: list, blocks) -> list:

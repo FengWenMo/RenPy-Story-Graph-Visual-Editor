@@ -56,6 +56,9 @@ import re
 from dataclasses import dataclass, field, replace
 
 from storygraph.core.safeguard import swallow
+from storygraph.story.beat_text import (CODE_BLOCK_BODY, CODE_BLOCK_OPEN,
+                                        _KWARG_RE, _mask_non_code,
+                                        _match_paren, _split_top_level)
 
 #: `$ renpy.transition(...)` —— Python 代码里的函数调用
 SOURCE_RENPY = 'renpy.transition'
@@ -78,8 +81,8 @@ _TRANSITION_RE = re.compile(r'(?<![\w.])renpy[ \t]*\.[ \t]*transition'
                             r'[ \t]*\(')
 #: `with` 关键字（前后都不能贴着标识符；排除 `withhold` / `foo.with`）
 _WITH_RE = re.compile(r'(?<![\w.])with(?=[ \t\r\n])')
-#: `key=value` 形状的参数（`==` / `>=` 不算关键字参数）
-_KWARG_RE = re.compile(r'^([^\W\d]\w*)[ \t]*=(?!=)', re.UNICODE)
+#: `key=value` 形状的参数（`==` / `>=` 不算关键字参数）；定义在
+#: `story.beat_text`，这里 re-export（`call_expr` 也从那里拿）。
 #: 数字字面量
 _NUMBER_RE = re.compile(r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?')
 #: 字符串转义里最常见的几个（不认识的转义按"字符本身"处理，不求值）
@@ -410,136 +413,12 @@ def parse_expression(text: str):
 #  文本预处理：掩码、括号配平、顶层切分
 # ---------------------------------------------------------------------------
 
-def _mask_non_code(text: str) -> str:
-    """
-    把**字符串字面量与注释**替换成空格（换行保留），长度与原串一致。
-
-    这样在"掩码"上找 `renpy.transition(` / `with` 只命中真代码；
-    取参数时仍从原串切，字符串里的括号/逗号原样保留。
-    """
-    n = len(text)
-    out = list(text)
-    i = 0
-    quote = ''
-    while i < n:
-        ch = text[i]
-        if quote:
-            out[i] = '\n' if ch == '\n' else ' '
-            if ch == '\\':
-                if i + 1 < n:
-                    out[i + 1] = '\n' if text[i + 1] == '\n' else ' '
-                i += 2
-                continue
-            if ch == quote:
-                quote = ''
-            i += 1
-            continue
-        # 三引号整块遮掉（块里可以有任意括号/关键字）
-        triple = ''
-        if text.startswith('"""', i):
-            triple = '"""'
-        elif text.startswith("'''", i):
-            triple = "'''"
-        if triple:
-            end = text.find(triple, i + 3)
-            stop = n if end < 0 else end + 3
-            for j in range(i, stop):
-                if text[j] != '\n':
-                    out[j] = ' '
-            i = stop
-            continue
-        if ch in '"\'':
-            quote = ch
-            out[i] = ' '
-            i += 1
-            continue
-        if ch == '#':
-            while i < n and text[i] != '\n':
-                out[i] = ' '
-                i += 1
-            continue
-        i += 1
-    return ''.join(out)
-
-
-def _match_paren(text: str, open_idx: int) -> int:
-    """`text[open_idx]` 是 `(` → 配对 `)` 的下标；配不平返回 -1。"""
-    depth = 0
-    i = open_idx
-    n = len(text)
-    quote = ''
-    while i < n:
-        ch = text[i]
-        if quote:
-            if ch == '\\':
-                i += 2
-                continue
-            if ch == quote:
-                quote = ''
-            i += 1
-            continue
-        if ch in '"\'':
-            quote = ch
-            i += 1
-            continue
-        if ch == '#':
-            nl = text.find('\n', i)
-            i = n if nl < 0 else nl + 1
-            continue
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def _split_top_level(body: str) -> list:
-    """调用体按**顶层逗号**切（跳过嵌套括号、字符串、注释）。"""
-    parts = []
-    buf = []
-    depth = 0
-    quote = ''
-    i = 0
-    n = len(body)
-    while i < n:
-        ch = body[i]
-        if quote:
-            buf.append(ch)
-            if ch == '\\' and i + 1 < n:
-                buf.append(body[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = ''
-            i += 1
-            continue
-        if ch in '"\'':
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == '#':
-            nl = body.find('\n', i)
-            if nl < 0:
-                break
-            i = nl + 1
-            continue
-        if ch in '([{':
-            depth += 1
-        elif ch in ')]}':
-            depth -= 1
-        if ch == ',' and depth == 0:
-            parts.append(''.join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    parts.append(''.join(buf))
-    return [p.strip() for p in parts if p.strip()]
+#  `_mask_non_code` / `_match_paren` / `_split_top_level` / `_KWARG_RE` 住在
+#  `story.beat_text`（纯文本扫描：本模块与 `spec_clauses`、`call_expr` 共用。
+#  2026-11-01：前两个函数原先在本模块各有一份逐字副本，`call_expr` 为了拿
+#  括号配对又反着 import 本模块 —— 那就是 `debt_report` 记的
+#  `beat_model → call_expr → transition_expr → beat_model` 环的一半）。
+#  这里只 re-export，从本模块 import 的老路照样通。
 
 
 def _split_kwarg(part: str):
@@ -841,18 +720,13 @@ def parse_with_clause(text: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _block_markers() -> tuple:
-    """`compose_code` 给 `python:` 块行打的标记（见 `beat_model.CODE_BLOCK_*`）。
+    """`python:` 块行的行首哨兵（定义在 `story.beat_text`）。
 
-    这里只**取常量**，不复制它们的字面量：标记属于 `beat_model` 的约定，
-    第二处硬编码就说明约定分叉了（`test_code_health` 也盯着这条）。
+    `compose_code` 打的标记就在这里；从前本函数反着 import `beat_model`
+    才拿得到 —— 那是 `beat_model → call_expr → transition_expr` 环的最后
+    一条边（2026-11-01 搬到叶子模块后这条边消失）。
     """
-    try:
-        from storygraph.story.beat_model import (CODE_BLOCK_BODY,
-                                                 CODE_BLOCK_OPEN)
-        return (CODE_BLOCK_OPEN, CODE_BLOCK_BODY)
-    except Exception as e:                     # noqa: BLE001 - 读不到就退化为"无块"
-        swallow('story.transition_expr.block_markers', e)
-        return ()
+    return (CODE_BLOCK_OPEN, CODE_BLOCK_BODY)
 
 
 def _composed_code_text(beat) -> str:

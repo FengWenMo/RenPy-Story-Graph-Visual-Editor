@@ -47,6 +47,9 @@ import tarfile
 from contextlib import suppress
 from pathlib import Path
 
+from storygraph.pipeline.artifact_names import (NEUTRAL_IR_NAME,
+                                                UNITY_DATA_NAME)
+
 __all__ = [
     'PACKAGE_ROOT', 'UNITY_PACKAGE_NAME', 'build_package', 'guid_for',
     'package_files', 'read_package', 'verify_package', 'write_package',
@@ -931,12 +934,9 @@ def package_files(ir: dict, unity_data: dict, notes_md: str,
     路径都行）。只做**补充**：与自动生成的文件同名时以生成内容为准 ——
     否则调用方可以无意间破坏"包内数据 == 目录数据"这条保证。
     """
-    # 延迟 import：`engine_exporters` 在顶层 import 本模块（导出时调
-    # `package_files`），这里再顶层 import 它会成环。文件名仍只有那一份
-    # 真源，不在两个文件里各抄一遍。
-    from storygraph.pipeline.engine_exporters import (NEUTRAL_IR_NAME,
-                                                      UNITY_DATA_NAME)
-
+    # 文件名来自 `pipeline.artifact_names`（叶子）：从前这里在函数体反着
+    # import `engine_exporters` 才拿得到，而本模块顶层又被它 import ——
+    # `engine_exporters → unity_package → engine_exporters` 的 2 环。
     files = {
         f'{PACKAGE_ROOT}/Runtime/DialogueData.cs':
             _DIALOGUE_DATA_CS.encode('utf-8'),

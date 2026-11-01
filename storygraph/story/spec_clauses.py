@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import re
 
+from storygraph.story.beat_text import _mask_non_code
+
 #: 子句值的类型。决定"读到哪为止"和界面怎么提示。
 #:
 #:   · `word`      ：一个词（`behind ye` / `zorder 5`）；
@@ -174,50 +176,8 @@ def clause_by_name(clauses, name) -> dict:
 #  文本扫描：顶层词、深度、行尾
 # ---------------------------------------------------------------------------
 
-def _mask_non_code(text: str) -> str:
-    """
-    字符串字面量与注释 → 空格（换行保留），长度不变。
-
-    这样找"行尾的 `:` / 注释"只命中真代码，不会被 `mycue "x:"` 骗到。
-    """
-    n = len(text)
-    out = list(text)
-    i = 0
-    quote = ''
-    while i < n:
-        ch = text[i]
-        if quote:
-            out[i] = '\n' if ch == '\n' else ' '
-            if ch == '\\':
-                if i + 1 < n:
-                    out[i + 1] = '\n' if text[i + 1] == '\n' else ' '
-                i += 2
-                continue
-            if ch == quote:
-                quote = ''
-            i += 1
-            continue
-        if text.startswith('"""', i) or text.startswith("'''", i):
-            triple = text[i:i + 3]
-            end = text.find(triple, i + 3)
-            stop = n if end < 0 else end + 3
-            for j in range(i, stop):
-                if text[j] != '\n':
-                    out[j] = ' '
-            i = stop
-            continue
-        if ch in '"\'':
-            quote = ch
-            out[i] = ' '
-            i += 1
-            continue
-        if ch == '#':
-            while i < n and text[i] != '\n':
-                out[i] = ' '
-                i += 1
-            continue
-        i += 1
-    return ''.join(out)
+#  `_mask_non_code` 住在 `story.beat_text`（与 `transition_expr` 共用一份，
+#  2026-11-01 合并了逐字相同的两份副本）。这里 re-export。
 
 
 def _depth_map(text: str) -> list:
