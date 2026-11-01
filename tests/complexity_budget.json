@@ -118,8 +118,8 @@
    "branches": 30
   },
   "storygraph/pipeline/continuity.py::analyze_parse_result": {
-   "lines": 328,
-   "branches": 117
+   "lines": 281,
+   "branches": 90
   },
   "storygraph/pipeline/continuity.py::scan_label": {
    "lines": 123,

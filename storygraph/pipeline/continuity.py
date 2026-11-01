@@ -1063,37 +1063,14 @@ def _chapter_from_beats(label: str, beats: list, meta,
 #  主分析
 # ======================================================================
 
-def analyze_parse_result(parse_result, *, project_root: str = '',
-                         files=None) -> ContinuityReport:
+def _chapter_candidates(lg) -> list:
     """
-    已解析的项目 → 跨章连续性报告（纯分析，不写盘、不 import Qt/图）。
+    章节候选：被"编排层" `call` / `jump` 到的内容 label（按源文件 + 行号排序）。
 
-    参数：
-      · `parse_result`：`ParseResult`（`IncrementalRenPyAnalyzer` 的产物；
-        与剧本表/剧情图**同一份 IR** —— 不另解析一遍项目）；
-      · `files`：参与分析的文件（只用于展示与错误归属）。
+    没有任何编排层时退回"入口 + 被跳转到的内容"（普通线性项目）。
+    拆自 `analyze_parse_result`（2026-11-01，复杂度第一刀的第二处）；
+    纯函数，只读 `_LabelGraph`。
     """
-    t0 = time.time()
-    report = ContinuityReport(
-        root=str(project_root or ''),
-        files=[str(p) for p in (files or ())],
-        labels_total=len(getattr(parse_result, 'labels', None) or {}),
-    )
-    lg = _LabelGraph(parse_result)
-    report.route_labels = len(lg.route_labels)
-
-    # ---- 拍（与剧本表同源）----
-    all_beats = []
-    try:
-        all_beats = beats_from_parse_result(parse_result, spec_registry={})
-    except Exception as e:                       # noqa: BLE001 - 出不了拍也要给出口检查
-        report.errors.append({'file': '(beats)', 'error': str(e)})
-        swallow('pipeline.continuity.beats', e)
-    beats_by_label = defaultdict(list)
-    for beat in all_beats:
-        beats_by_label[str(getattr(beat, 'label', '') or '')].append(beat)
-
-    # ---- 章节候选：被"编排层"call / jump 到的内容 label ----
     chapter_labels = []
     seen = set()
     for label in (lg.route_labels or ()):
@@ -1131,15 +1108,17 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
         except (TypeError, ValueError, IndexError):
             return ('', 0)
     chapter_labels.sort(key=_sort_key)
+    return chapter_labels
 
-    chapters = {}
-    for i, label in enumerate(chapter_labels):
-        ch = _chapter_from_beats(label, beats_by_label.get(label) or [],
-                                 lg.labels.get(label), i)
-        chapters[label] = ch
-    report.chapters = list(chapters.values())
 
-    # ---- 章节图（P 的 call 点之后会到哪一章）----
+def _call_sites_by_chapter(lg, chapters) -> dict:
+    """
+    `章节 → [(调用方 label, 语句下标), …]` —— 谁 `call` 了进来。
+
+    只有"目标确实是章节"的才算（旁支内容不进这张表）。
+    拆自 `analyze_parse_result`（同上）；纯函数。
+    """
+    call_sites = defaultdict(list)
     call_sites = defaultdict(list)      # chapter → [(caller_label, stmt_idx)]
     for label, idxs in lg.by_label.items():
         for gi in idxs:
@@ -1150,6 +1129,49 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
                       or '').strip()
             if tgt in chapters:
                 call_sites[tgt].append((label, gi))
+    return call_sites
+
+
+def analyze_parse_result(parse_result, *, project_root: str = '',
+                         files=None) -> ContinuityReport:
+    """
+    已解析的项目 → 跨章连续性报告（纯分析，不写盘、不 import Qt/图）。
+
+    参数：
+      · `parse_result`：`ParseResult`（`IncrementalRenPyAnalyzer` 的产物；
+        与剧本表/剧情图**同一份 IR** —— 不另解析一遍项目）；
+      · `files`：参与分析的文件（只用于展示与错误归属）。
+    """
+    t0 = time.time()
+    report = ContinuityReport(
+        root=str(project_root or ''),
+        files=[str(p) for p in (files or ())],
+        labels_total=len(getattr(parse_result, 'labels', None) or {}),
+    )
+    lg = _LabelGraph(parse_result)
+    report.route_labels = len(lg.route_labels)
+
+    # ---- 拍（与剧本表同源）----
+    all_beats = []
+    try:
+        all_beats = beats_from_parse_result(parse_result, spec_registry={})
+    except Exception as e:                       # noqa: BLE001 - 出不了拍也要给出口检查
+        report.errors.append({'file': '(beats)', 'error': str(e)})
+        swallow('pipeline.continuity.beats', e)
+    beats_by_label = defaultdict(list)
+    for beat in all_beats:
+        beats_by_label[str(getattr(beat, 'label', '') or '')].append(beat)
+
+    chapter_labels = _chapter_candidates(lg)
+
+    chapters = {}
+    for i, label in enumerate(chapter_labels):
+        ch = _chapter_from_beats(label, beats_by_label.get(label) or [],
+                                 lg.labels.get(label), i)
+        chapters[label] = ch
+    report.chapters = list(chapters.values())
+
+    call_sites = _call_sites_by_chapter(lg, chapters)
 
     seams = []
     edge_seen = set()
