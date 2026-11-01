@@ -523,20 +523,25 @@ class TestTheOpenPathIsFast:
             self, fake_project, monkeypatch):
         """给了索引之后，对账**一次都不该**调 `resolve_thumb_source`。"""
         from storygraph.assets import asset_registry as AR
-        import storygraph.story.excel_export as EE
+        from storygraph.assets import asset_registry_scan as ARS
+        from storygraph.assets import thumb_paths as TP
 
         reg = AR.parse_asset_tables(fake_project / 'game' / 'asset_tables',
                                     hooks=AR.load_hooks(
                                         project_root=fake_project),
                                     project_root=fake_project)
         calls = {'n': 0}
-        real = EE.resolve_thumb_source
+        real = TP.resolve_thumb_source
 
         def spy(rel, root=None):
             calls['n'] += 1
             return real(rel, root)
 
-        monkeypatch.setattr(EE, 'resolve_thumb_source', spy)
+        # 2026-11-01：真源搬进 `assets/thumb_paths.py` 之后，调用点看的是
+        # **自己模块里的那个名字**（`from ... import` 是绑值）。三个可能
+        # 落点都要打桩，否则这条判据会变成"永远 0 次"的空话。
+        for mod in (TP, AR, ARS):
+            monkeypatch.setattr(mod, 'resolve_thumb_source', spy)
         walk = self._walk(fake_project)
         AR.compare_registry_to_disk(fake_project, reg, walk=walk)
         assert calls['n'] == 0, f'给了索引还在逐行摸磁盘：{calls["n"]} 次'

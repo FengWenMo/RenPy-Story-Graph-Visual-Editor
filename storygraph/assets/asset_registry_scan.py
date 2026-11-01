@@ -18,6 +18,9 @@ from pathlib import Path
 from storygraph.assets.asset_registry_constants import SUPPORTED_IMAGE_EXT, SUPPORTED_AUDIO_EXT, CATEGORY_KEYWORDS, ASSET_FIELD_LABELS, _asset_set_text, _asset_append_row, _UI_WORDS, _UI_SUFFIXES, _CHARACTER_CONTAINER_WORDS, _GENERIC_IMAGE_ROOTS, _BG_WORDS, _CG_WORDS, _BG_NAME_RE, _CG_NAME_RE, _UI_NAME_RE, _BG_NAME_HINTS, _CG_NAME_HINTS, _UI_NAME_HINTS, _NON_CHARACTER_FIRST_WORDS, _SKIP_SCAN_DIRS, _GENERIC_IMAGE_DIRS, _MUSIC_DIR_NAMES, _SOUND_DIR_NAMES, _SOUND_NAME_HINTS, _MUSIC_NAME_HINTS, _ASSET_KINDS, _STANDARD_TABLES, _TABLE_FIELDS, _PLACEHOLDER_MARKS, _COLOR_PATTERN, _SHOW_STOP_WORDS, _RE_SHOW_LINE, _RE_AUDIO_LINE, _RE_AT_TRANSFORM, _RE_WITH_TRANSITION, _RE_VOICE_LINE, _AUDIO_ID_PREFIXES
 from storygraph.core.safeguard import swallow
 from storygraph.assets.asset_dimensions import dimensions_of_row
+#: 缩略图路径解析（2026-11-01 从 `story/excel_export.py` 搬进同包 `thumb_paths`）：
+#: 对账要按行判"这行在磁盘上有没有"，原先靠函数体内 import 上层 `story`。
+from storygraph.assets.thumb_paths import resolve_thumb_source
 from storygraph.assets.asset_registry_constants import (
     CATEGORY_KEYWORDS,
     SUPPORTED_AUDIO_EXT,
@@ -746,7 +749,6 @@ def compare_registry_to_disk(project_root, registry, include_ui=True,
     这个函数只回答"差在哪"，补登由 `session.register_missing_assets()`
     （UI 的「补登缺失资源」，写前自动备份）负责。
     """
-    from storygraph.story.excel_export import resolve_thumb_source
     root = Path(project_root)
     game_dir = root / 'game'                    # 只用于"是不是在 game/ 外"的判断
     table_paths = {}

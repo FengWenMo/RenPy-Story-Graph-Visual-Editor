@@ -11,7 +11,8 @@ storygraph.story.beat_model
   · 单元格原语：`compose_*` 把结构化字段写成格内文本，`_split_*` 反向拆开
 
 刻意**不含**渲染与 Excel IO —— 那些在 beat_render / excel_export 里。
-这一层只依赖 core 与 excel.cells，是全 story 层的地基。
+这一层只依赖 core、`spec_args`、`beat_text`（纯文本扫描器）与 excel.cells，
+是全 story 层的地基。
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ from storygraph.core.vocabulary import AUDIO_PSEUDO
 #: 「每参数一列」的列名判定（`语句名·参数名` / `语句名·参数名@位置号`）。
 #: 唯一真源在 `story/spec_args.py`（零项目内依赖），这里只 import 一个纯函数。
 from storygraph.story.spec_args import is_dynamic_column
+#: 括号/引号扫描器（纯字符串，零项目内依赖）。**顶层 import** ——
+#: 以前它在函数体里 `from ...beat_render import`，那是"Beat 本体反过来要
+#: 渲染层"的反向边（29 模块环的一条反馈边）。搬到 `beat_text` 后没有环可绕。
+from storygraph.story.beat_text import _bracket_delta, _quote_state
 from storygraph.story.beat_stage_parse import (  # 2026-10-12 拆分
     _NATIVE_TAIL_RE,
     _clause_image,
@@ -3131,8 +3136,6 @@ def _group_logical_lines(tokens: list) -> list:
 
     输入是 `(文本, 是否带块标记)`；返回 `[(组文本, 是否带标记), ...]`。
     """
-    from storygraph.story.beat_render import _bracket_delta, _quote_state
-
     groups = []
     buf, marked, quote, depth = [], False, '', 0
     for text, flag in tokens:
@@ -3303,8 +3306,6 @@ def _relative_indents(lines: list, in_block=None) -> list:
     （`_render_code_block` 的 `_group_code_statements` 用同一套括号口径
     把续行重新粘成一条语句，两边必须一致。）
     """
-    from storygraph.story.beat_render import _bracket_delta, _quote_state
-
     flags = list(in_block or [])
     rel = []
     stack = [0]

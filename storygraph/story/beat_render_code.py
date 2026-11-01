@@ -18,6 +18,11 @@ from __future__ import annotations
 from storygraph.core.statement import is_tight_dollar, strip_marker
 from storygraph.core.vocabulary import GENERATOR_MARKER, RENPY_BUILTIN_TRANSFORMS, RENPY_STATEMENT_VERBS
 from storygraph.story.beat_model import Beat, CODE_BLOCK_BODY, CODE_BLOCK_OPEN, KIND_EXTEND, KIND_MENU, KIND_MENU_OPTION, _fill_audio_from_cells, _looks_like_renpy_statement, _parse_native_stage_tail, _split_hide_items, _split_lines, _split_show_items, compose_code, hide_item_part, hide_item_parts, is_literal_speaker, show_item_part, show_item_parts, unmask_code_block_markers
+#: 括号/引号扫描器**定义在 `beat_text`**（叶子模块，2026-11-01 搬出）：
+#: 它们是纯字符串处理，不该和 `beat_render_code` 绑在一起 —— 否则 `beat_model`
+#: 为了它俩要反过来 import `beat_render`（29 模块环里的一条反馈边）。
+#: 这里 import 进本模块命名空间，`beat_render` 的 re-export 与调用点都不用改。
+from storygraph.story.beat_text import _bracket_delta, _quote_state
 import ast
 
 def _looks_like_dialogue(line: str) -> bool:
@@ -451,68 +456,3 @@ def _group_code_statements(lines: list) -> list:
         groups.append(('\n'.join(buf), buf[0]))
     return groups
 
-def _bracket_delta(line: str, quote: str) -> int:
-    """这一行让括号深度变化多少（引号内的括号不算；`#` 之后不算）。"""
-    depth = 0
-    i = 0
-    n = len(line)
-    while i < n:
-        ch = line[i]
-        if quote:
-            if ch == '\\':
-                i += 2
-                continue
-            if line.startswith(quote, i):
-                i += len(quote)
-                quote = ''
-                continue
-            i += 1
-            continue
-        if ch == '#':
-            break
-        if ch in '"\'':
-            if line.startswith(ch * 3, i):
-                quote = ch * 3
-                i += 3
-                continue
-            quote = ch
-            i += 1
-            continue
-        if ch in '([{':
-            depth += 1
-        elif ch in ')]}':
-            depth -= 1
-        i += 1
-    return depth
-
-def _quote_state(line: str, quote: str) -> str:
-    """扫完这一行之后，三引号字符串是否还开着（开着的引号标记，否则空串）。"""
-    i = 0
-    n = len(line)
-    while i < n:
-        if quote:
-            if line.startswith(quote, i):
-                quote = ''
-                i += 3
-                continue
-            i += 1
-            continue
-        ch = line[i]
-        if ch == '#':
-            break
-        if ch in '"\'':
-            if line.startswith(ch * 3, i):
-                quote = ch * 3
-                i += 3
-                continue
-            # 单行字符串：跳到它的收尾
-            i += 1
-            while i < n:
-                if line[i] == '\\':
-                    i += 2
-                    continue
-                if line[i] == ch:
-                    break
-                i += 1
-        i += 1
-    return quote

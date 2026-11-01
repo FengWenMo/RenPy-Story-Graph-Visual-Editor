@@ -63,6 +63,10 @@ from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import save_workbook_atomic
 # 2026-11-01：读 Excel 只走这一个入口（zip 炸弹 / 声明维度 / 宏 / 外链 检查）。
 from storygraph.excel import safety as excel_safety
+#: 缩略图路径解析（2026-11-01 从 `story/excel_export.py` 搬进同包 `thumb_paths`）：
+#: 本模块原先在 3 个函数体里 `from storygraph.story.excel_export import ...` ——
+#: `assets` 是底座，反过来 import `story` 就是 29 模块环里那条反馈边的来源。
+from storygraph.assets.thumb_paths import resolve_thumb_source
 from storygraph.assets.asset_registry_constants import (  # 2026-10-11 拆分
     SUPPORTED_IMAGE_EXT,
     SUPPORTED_AUDIO_EXT,
@@ -183,6 +187,56 @@ class AssetRegistry:
             'voice': self.voices,
         }
         return list(mapping.get(asset_type, {}).keys())
+
+
+# ===================== 从脚本解析结果造注册表 =====================
+#
+# 没有资源表时（用户还没「打开项目」），下拉候选里该有脚本已定义的
+# 角色与 transform —— 否则 `At` 列只能手打。
+#
+# 2026-11-01 从 `story/script_table.py` 搬来：它只构造 `AssetRegistry`、
+# 不认识 story 层的任何类型（parse_result 全靠 getattr 鸭子类型）。
+# 留在 story 里时，本模块要在函数体内反过来 `import story.script_table`
+# —— `assets` 是底座，那是 29 模块环里的一条反馈边。
+
+def registry_from_parse_result(parse_result, base=None):
+    """
+    从脚本自身的解析结果造一份最小注册表（角色 + 自定义 transform）。
+
+    用途：用户还没「打开项目」（没有资源表）时，"用 Excel 打开此章节"
+    依然要能把脚本里已定义的 transform / 角色做成下拉候选——否则
+    `At` 列只能手打，正是用户抱怨的"变换选不到"。
+    """
+    reg = base if base is not None else AssetRegistry()
+    for var, ch in (getattr(parse_result, 'characters', {}) or {}).items():
+        if var in reg.characters:
+            continue
+        reg.characters[var] = {
+            'ID': var,
+            'Name': getattr(ch, 'display_name', '') or var,
+            'Color': getattr(ch, 'color', ''),
+            'WhatColor': getattr(ch, 'what_color', ''),
+            'ImageTag': getattr(ch, 'image_tag', ''),
+            'Kind': getattr(ch, 'kind', ''),
+            'VoiceTag': getattr(ch, 'voice_tag', ''),
+            'Notes': f"{getattr(ch, 'source_file', '')}:"
+                     f"{getattr(ch, 'source_line', 0)}",
+            '_dialogue_count': getattr(ch, 'dialogue_count', 0),
+        }
+    for name, tf in (getattr(parse_result, 'transforms', {}) or {}).items():
+        if name in reg.transforms:
+            continue
+        reg.transforms[name] = {
+            'ID': name,
+            'Path': '',
+            'ATL': getattr(tf, 'body', ''),
+            'Params': getattr(tf, 'params', ''),
+            'Doc': getattr(tf, 'doc', ''),
+            'Category': 'custom',
+            'Notes': f"{getattr(tf, 'source_file', '')}:"
+                     f"{getattr(tf, 'source_line', 0)}",
+        }
+    return reg
 
 
 # ===================== Excel 读写 =====================
@@ -687,7 +741,6 @@ def _probe_row_file(kind_key, rel, root):
         swallow('assets.asset_registry._probe_row_file', e)
     try:
         if str(kind_key or '').startswith('image'):
-            from storygraph.story.excel_export import resolve_thumb_source
             return resolve_thumb_source(text, root)
         return _resolve_audio_source(text, root)
     except Exception as e:                      # noqa: BLE001
@@ -886,8 +939,6 @@ def _sync_append_stage(root, table_dir, assets, unreg, diff, walk, added):
     `music/night.ogg`，扫出来是 `game/music/night.ogg` —— 字符串不等但是
     同一个文件；只比字符串会给它写第二行（实测）。
     """
-    from storygraph.story.excel_export import resolve_thumb_source
-
     rows_by_kind = {
         'images': assets.get('images') or [],
         'music': (assets.get('audio') or {}).get('music') or [],
@@ -999,10 +1050,6 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
     （`_unjudged_paths`：绝对路径 / `tmp/` 这类跳过目录下的行）。
     """
     root = Path(project_root)
-    # ⚠ 本地 import 必须放在**函数最前面**：后面几处（删行判存、判重）
-    # 都要用它，而 Python 会把"函数里任何位置 import 的名字"当成本地变量
-    # —— 放在下面就会 `UnboundLocalError`（实测踩到）。
-    from storygraph.story.excel_export import resolve_thumb_source
     made = ensure_asset_tables(root, asset_dir, walk=walk,
                                parse_check=registry is None)
     repaired = made.get('repaired') or []
@@ -1475,7 +1522,6 @@ def _write_script_tables(project_root, target) -> dict:
     try:
         from storygraph.parsing.discover import discover_scripts
         from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
-        from storygraph.story.script_table import registry_from_parse_result
 
         scripts = discover_scripts(project_root)
         if not scripts:

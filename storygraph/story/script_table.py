@@ -23,6 +23,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# 2026-11-01：`registry_from_parse_result` 已搬去 `assets/asset_registry`
+# （它只造 `AssetRegistry`，不碰 story 层；`assets` 反过来 import 本模块
+# 曾是 29 模块环上的一条反馈边）。这里保留旧名转发，调用方不用改。
+from storygraph.assets.asset_registry import (  # noqa: F401
+    registry_from_parse_result,
+)
 from storygraph.story.beat_build import (  # noqa: F401
     _absorb_native,
     _category_from_tag,
@@ -282,46 +288,6 @@ __all__ = [
 
 
 
-def registry_from_parse_result(parse_result, base=None):
-    """
-    从脚本自身的解析结果造一份最小注册表（角色 + 自定义 transform）。
-
-    用途：用户还没「打开项目」（没有资源表）时，"用 Excel 打开此章节"
-    依然要能把脚本里已定义的 transform / 角色做成下拉候选——否则
-    `At` 列只能手打，正是用户抱怨的"变换选不到"。
-    """
-    from storygraph.assets.asset_registry import AssetRegistry
-
-    reg = base if base is not None else AssetRegistry()
-    for var, ch in (getattr(parse_result, 'characters', {}) or {}).items():
-        if var in reg.characters:
-            continue
-        reg.characters[var] = {
-            'ID': var,
-            'Name': getattr(ch, 'display_name', '') or var,
-            'Color': getattr(ch, 'color', ''),
-            'WhatColor': getattr(ch, 'what_color', ''),
-            'ImageTag': getattr(ch, 'image_tag', ''),
-            'Kind': getattr(ch, 'kind', ''),
-            'VoiceTag': getattr(ch, 'voice_tag', ''),
-            'Notes': f"{getattr(ch, 'source_file', '')}:"
-                     f"{getattr(ch, 'source_line', 0)}",
-            '_dialogue_count': getattr(ch, 'dialogue_count', 0),
-        }
-    for name, tf in (getattr(parse_result, 'transforms', {}) or {}).items():
-        if name in reg.transforms:
-            continue
-        reg.transforms[name] = {
-            'ID': name,
-            'Path': '',
-            'ATL': getattr(tf, 'body', ''),
-            'Params': getattr(tf, 'params', ''),
-            'Doc': getattr(tf, 'doc', ''),
-            'Category': 'custom',
-            'Notes': f"{getattr(tf, 'source_file', '')}:"
-                     f"{getattr(tf, 'source_line', 0)}",
-        }
-    return reg
 
 
 

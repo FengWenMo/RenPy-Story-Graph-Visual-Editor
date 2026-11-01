@@ -42,6 +42,15 @@ from storygraph.story.beat_fields import COLUMN_SPECS
 from storygraph.story.beat_render import make_symbols
 from storygraph.core.cell_limits import (ensure_fit, over_limit,
                                           row_offenders)
+#: 缩略图路径解析住在 `assets/`（2026-11-01 搬出）：它回答的是"资源在哪"、
+#: 与导表无关。留在本模块会让 `assets` 反过来 import `story`（环上一条反馈边）。
+#: 这里 re-export —— `app.thumbs` / `ui_qt` / 旧函数体 import 都不用改。
+#: （扩展名元组 `_THUMB_EXTS` **不**跟着导回来：跨包取私有名是违规的，
+#:  它现在只有 `thumb_paths` 自己用。）
+from storygraph.assets.thumb_paths import (  # noqa: F401 - 兼容旧引用点
+    THUMB_EXTS as _THUMB_EXTS,   # 门面 `script_table` 还在转发这个旧名
+    resolve_thumb_source,
+)
 from storygraph.story.paths import _guess_project_root
 from storygraph.excel.cells import set_text as _set_text
 from storygraph.excel.cells import append_text_row as _append_text_row
@@ -1114,8 +1123,6 @@ except Exception as e:                        # noqa: BLE001
     swallow('story.excel_export.<module>', e)
     _PILImage = None
 
-#: 支持的扩展名：webp/动图之类 Pillow 不一定能读，读不了就跳过
-_THUMB_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
 
 
 
@@ -1297,47 +1304,6 @@ def _thumbnail_bytes(path, project_root=None):
 
 
 
-def resolve_thumb_source(path, project_root=None):
-    """
-    资源表里的 Path → 磁盘上真实存在的图。
-
-    路径基准不统一（`sr_general/game/images/x.png` / `game/images/x.png` /
-    `images/x.png`），所以逐个基准试；都找不到就放弃（不猜）。
-    """
-    text = str(path or '').strip().replace('\\', '/')
-    if not text or not text.lower().endswith(_THUMB_EXTS):
-        return None
-    p = Path(text)
-    candidates = []
-    if p.is_absolute():
-        candidates.append(p)
-    else:
-        # 资源表 Path 的基准五花八门：`sr_general/game/images/x.png`、
-        # `game/images/x.png`、`images/x.png`、`x.png` 都出现过。逐个试，
-        # 以**文件真的存在**为准——这是唯一可靠的判据。
-        parts = [q for q in text.split('/') if q not in ('', '.')]
-        bases = [Path.cwd()]
-        if project_root:
-            root = Path(project_root)
-            bases = [root, root.parent, root / 'game'] + bases
-        for base in bases:
-            candidates.append(base / text)
-            if len(parts) > 1:
-                candidates.append(base / '/'.join(parts[1:]))
-                candidates.append(base / 'game' / '/'.join(parts[1:]))
-            candidates.append(base / 'game' / text)
-    seen = set()
-    for c in candidates:
-        key = str(c)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if c.is_file():
-                return c
-        except OSError:
-            continue
-    return None
 
 
 
