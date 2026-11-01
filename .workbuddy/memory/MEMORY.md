@@ -167,8 +167,10 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
 
 - 清单（`packaging/make_release.py::REQUIRED`）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`storygraph.rules.json`、`storygraph.mapping.json`、`LICENSE`。判据 `test_release_manifest.py`。
 - 两份预设（`storygraph/presets/`）**是真项目扫出来的**，重建脚本 `tools/build_presets_real.py`（`--dry-run` 只打印）；映射与 rules 同源同发，但**不自动套进项目**（映射写的是"这个项目的哪张图是谁"），见契约 §82。
-- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip` → **`python tools/_probe_release_zip.py <zip>` 开箱核对**（顶层只有 `StoryGraph/`、清单齐、`demo` 与 `.bak`/`__pycache__` 为 0）。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
-- `selfcheck` 的 `REQUIRED_MODULES`（2026-11-01 第八段起 **35** 个）要跟着新模块涨：`core.atomicio` / `core.preflight` / `excel.safety` 这类"函数体内 import / 启动早期 import"正是打包后最容易静默缺失的；「系统 DLL」项**缺 icuuc.dll 会红**（GUI 起不来就是失败，不许假绿）。
+- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --no-demo --zip …`（**程序版**；默认不带 `--no-demo` 会连 `demo\` 一起发）→ `python tools/_probe_release_zip.py <zip>` 开箱核对（顶层只有 `StoryGraph/`、清单齐、`demo` 与 `.bak`/`__pycache__` 为 0）→ `python tools/_probe_release_smoke.py --exe …` 开箱实测（8 项）。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
+- ⚠ **同一天两种形状的包，名字分不出来**：`-rules` 那串是 `--no-demo`（250 文件），默认 `make_release.py`（含 `build_exe.ps1` 第 5 步）**带 demo**（270 文件）。`dist\` 根目录只留最新一份，旧的进 `dist\archive\`，带 demo 的要改名标出来。
+- `selfcheck` 的 `REQUIRED_MODULES`（2026-11-01 第二十二段起 **39** 个）要跟着新模块涨：`core.atomicio` / `core.preflight` / `excel.safety` 这类"函数体内 import / 启动早期 import"正是打包后最容易静默缺失的；「系统 DLL」项**缺 icuuc.dll 会红**（GUI 起不来就是失败，不许假绿）。
+- 两份预设"在包里"≠"能用"：`mapping` 解析失败只会让下拉候选变空、`rules` 读坏同理，**打包自检发现不了**。判据：包内两份 vs `storygraph/presets/` 的 SHA256 相同 + `load_mapping`/`validate_mapping` 0 警告 + 把包里那份放进空项目让 `StatementRegistry.for_project` 读出 `show` 三列候选。
 - 手册截图 `tools/_shot_manual.py`：`offscreen` + `STORYGRAPH_NO_SESSION=1`；**不许 `win.close()`**（未导出改动弹模态框永卡），结尾 `os._exit(0)`；结构页用 `zoom_reset→zoom_by(2.0)→center_on_node`。
 - 真机工程会长大（`sr_general` 55→96 章）：金标红先 `tools/golden_baseline.py --check`，确认项目变了再 `--save`。基线**别把工具副产物算成输入**（按 `resolve()` 去重、不收 `~$*` 与 `*.bak*`）。
 - **演出专用版**（`packaging/make_stage_release.py`）：`--dist dist/release --sdk <SDK> --out dist/stage --zip`。包内 = 标准版 + `renpy_sdk/`（约 330 MB）+ `项目预设/` + 两个说明；13 项 REQUIRED、3 项 FORBIDDEN、zip ≤ 4 GiB。**先 `make_release.py --stage-only` 铺带 extras 的 `dist/release` 再当 `--dist`**。
