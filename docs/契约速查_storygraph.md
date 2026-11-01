@@ -672,11 +672,22 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
      新方法只吃显式参数（别读上一段的局部变量），每搬一段跑该模块的测试。
    · 清债之后重生成快照：`python tools/complexity_budget.py` /
      `python tools/debt_budget.py`。
+   · **`print` 分两档量**（2026-11-01 第六段）：`print_calls` 是总量
+     （含 `cli.py` 等 6 个呈现层模块与 `if __name__ == '__main__'` 演示 ——
+     那部分**必须留 stdout**，改成日志等于把 CLI 弄瞎）；`print_library`
+     才是真债，现在 = **3**（`preflight` 的 stderr 兜底 ×2 + `safeguard`
+     的 `--debug` 通道 ×1，都是给人看的）。**库里不许新加 `print`** →
+     走 `swallow('模块.函数', e)`。
    · **两个"解环叶子"不许长回来**（2026-11-01）：`parsing/continuation.py`
      （`shift_continuations`，`renpy_parser` / `renpy_parser_stmts` 共用）与
      `story/file_facts.py`（`FileFacts` / `scan_file`，`placement` 与
      `scan_cache` 共用）只许导 `core.*`；**不许**反过来导入上层模块 ——
      一旦导入，环就原样长回来（`debt_report --cycles` 会当场红）。
+     同一批还有 `ui_qt/window_layout.py`（六个窗口/卡片数字）与
+     `ui_qt/text_html.py`（`renpy_text_to_html`）：`main_window` 与
+     `window_state` / `stage_preview` 各指它们，原来那个五模块环
+     （`main_window → stage_thumb → stage_preview → main_window` +
+     `main_window ↔ window_state`）就是这么断的。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
