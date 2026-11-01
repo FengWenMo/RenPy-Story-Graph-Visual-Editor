@@ -29,6 +29,19 @@ P3-13 守卫：**不许有"什么都不说"的 `except Exception`**
 `logging.warning(...)`、`_emit(ENGINE_ERROR, ...)` 都是**说了**
 （用户/开发者看得到、或者进了事件流），不该被判违规。
 只认 `swallow` 会把它们全红掉，那这个守卫就没人愿意留。
+
+**2026-11-01 收紧（第十七轮技术债）**：上面那条"有没有调用"太松 ——
+`set()`、`QColor(fallback)`、`text.setText(body)`、`_ = exc` 都是调用/提到了 `e`，
+但**一个字的信息都没留下**。审计（`docs/宽泛except分类审计_2026-11-01.md`）
+拿这条判据复算，24 处真正"静默咽 bug"里**只有 1 处会被判红**（`safeguard`
+白名单）。所以判据改成：
+
+    **体里必须有一条"记录通道"**（`swallow` / print / logging / 进
+    errors·warnings 列表 / 状态字段 / 事件 emit / 用户可见的错误 /
+    `raise` / 失败信封 / 把 `e` 拼进给人看的句子）→ 否则红。
+
+改完之后：这 24 处已经全被修掉（一处保留白名单），仓库仍然全绿 ——
+也就是说**这条守卫现在锁住了那一轮的成果**，谁再拿 `set()` 糊弄会当场红。
 """
 
 from __future__ import annotations
@@ -54,6 +67,175 @@ ALLOWED: dict = {
 #: 宽捕获的类型（只查这两种；`except ValueError:` 那种窄的不管）
 WIDE = ('Exception', 'BaseException')
 
+# ---------------------------------------------------------------------------
+#  "记录通道"名字表 —— 与 `docs/宽泛except分类审计_2026-11-01.md` §1.3 同源，
+#  改这里就等于改审计口径，两边必须一起动。
+# ---------------------------------------------------------------------------
+#: 日志方法名
+LOG_METHODS = {'debug', 'info', 'warning', 'warn', 'error', 'exception',
+               'critical', 'fatal'}
+#: 进"错误通道"的列表名
+ERROR_LISTS = {'errors', 'errs', 'failures', 'failure', 'failed', 'blocking',
+               'problems', 'bad', 'issues'}
+#: 进"警告/备注通道"的列表名
+WARN_LISTS = {'warnings', 'warns', 'notes', 'note', 'messages', 'message',
+              'diagnostics', 'skipped_files', 'skipped', 'unmatched', 'missing'}
+#: 状态字段名（写进去 = 界面上会变，人看得到）
+STATUS_NAMES = {'status', 'state', 'last_error', 'last_err', 'ok', 'failed',
+                '_status', '_error', 'error_text', '_err', 'error_message',
+                '_errtext', 'set_status', '_set_status', '_log', 'log'}
+#: 事件 / 通知
+EMIT_NAMES = {'_emit', 'emit', '_notify', 'notify_card_notice', 'notify',
+              '_notice', 'say', '_append', '_report_swallowed'}
+#: 直接弹给人看的错误
+USER_ERROR_CALLS = {'QMessageBox.critical', 'QMessageBox.warning',
+                    'QMessageBox.information'}
+
+
+def _call_text(node: ast.Call) -> str:
+    try:
+        return ast.unparse(node.func)
+    except Exception:                     # pragma: no cover - ast 不该在这里炸
+        return '<call>'
+
+
+def _last_seg(text: str) -> str:
+    return text.rsplit('.', 1)[-1]
+
+
+def _mentions_exc_in_message(src: str, exc: str) -> bool:
+    """
+    异常对象**被拼进了一句给人看的话**（不是"出现过"）。
+
+    这一条是 2026-11-01 收紧的重点：旧判据"体里出现 `e`"里，
+    `_ = exc` 这种"让守卫闭嘴"的写法也算 —— 它一个字都没留下。
+    现在只认三种真会出现在输出里的形态：f-string、`str(e)` / `repr(e)`、
+    `'…%s' % e`。
+    """
+    if not exc:
+        return False
+    return (f'{{{exc}}}' in src or f'{{{exc}!' in src or f'{{{exc}.' in src
+            or f'str({exc})' in src or f'repr({exc})' in src
+            or f'% {exc}' in src or f'%({exc}' in src)
+
+
+def _has_failure_envelope(st: ast.stmt) -> bool:
+    """`return {'ok': False, 'error': …}` / `return Foo(error=…)` 这类失败信封。"""
+    if not isinstance(st, ast.Return) or st.value is None:
+        return False
+    return _is_failure_payload(st.value)
+
+
+#: 失败信封里会出现的关键字
+FAIL_KEYS = frozenset({'ok', 'error', 'errors', 'reason', 'failed', 'blocking'})
+
+
+def _is_failure_payload(node) -> bool:
+    """一个表达式是不是"失败信封"的形状（dict 键 / 构造器关键字）。"""
+    if isinstance(node, ast.Dict):
+        return any(isinstance(k, ast.Constant) and isinstance(k.value, str)
+                   and k.value in FAIL_KEYS for k in node.keys)
+    if isinstance(node, ast.Call):
+        return any(k.arg in FAIL_KEYS for k in node.keywords if k.arg)
+    return False
+
+
+def _has_trace(node: ast.ExceptHandler, swallow_names=('swallow',)) -> bool:
+    """
+    这个 handler 体里**有没有一条记录通道**。
+
+    只看 `node.body`（不能 `ast.walk(node)` —— 那会把 `node.type` 里
+    `Exception` 这个名字也算进来）。
+
+    刻意**不**算数的东西（都是实测抓到的"假痕迹"）：
+
+      · `pass` / `continue` / `return None`；
+      · `_ = exc`（把异常对象赋给一个没人用的名字）；
+      · `set()` / `QColor(fallback)` / `text.setText(body)` 这类
+        "有调用、但调用不是记录" 的语句；
+      · `x = None` 这种"什么都没改"的赋值。
+
+    `swallow_names` 是**这个文件里 `swallow` 的本地名**（很多文件写
+    `from …safeguard import swallow as _sw`，只认字面 `swallow` 会漏）。
+    """
+    body = node.body
+    exc = node.name or ''
+    body_src = '\n'.join(ast.unparse(st) for st in body)
+    calls = [n for st in body for n in ast.walk(st)
+             if isinstance(n, ast.Call)]
+    texts = [_call_text(c) for c in calls]
+    names = set(swallow_names) | {'swallow'}
+
+    # ① 上抛（含 `raise ... from e`）—— 已经交给上面的调用方了
+    if any(isinstance(n, ast.Raise) for st in body for n in ast.walk(st)):
+        return True
+
+    # ② swallow（含 `_sw` / `_swallow` 这类别名）
+    if any(_last_seg(t) in names for t in texts):
+        return True
+
+    # ③ print / traceback / stderr
+    if any(t == 'print' or 'print_exc' in t for t in texts):
+        return True
+    if any(t.endswith('.write') and 'stderr' in t for t in texts):
+        return True
+
+    # ④ logging（`logging.warning(...)` / `logger.exception(...)`）
+    if any(_last_seg(t) in LOG_METHODS and '.' in t for t in texts):
+        return True
+
+    # ⑤ 进 errors / warnings 这类列表（`errors.append(...)`）
+    for c in calls:
+        if not isinstance(c.func, ast.Attribute):
+            continue
+        if c.func.attr not in ('append', 'extend', 'add', 'insert', 'update'):
+            continue
+        holder = c.func.value
+        name = (holder.attr if isinstance(holder, ast.Attribute) else
+                holder.id if isinstance(holder, ast.Name) else '')
+        if (name or '').lower() in (ERROR_LISTS | WARN_LISTS):
+            return True
+
+    # ⑥ 状态字段 / `self._status(...)` / `self._log(...)`
+    for st in body:
+        for n in ast.walk(st):
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                tgts = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in tgts:
+                    nm = (t.attr if isinstance(t, ast.Attribute) else
+                          t.id if isinstance(t, ast.Name) else '')
+                    if (nm or '').lower() in STATUS_NAMES:
+                        return True
+    if any(_last_seg(t) in STATUS_NAMES for t in texts):
+        return True
+
+    # ⑦ 事件 / 通知
+    if any(_last_seg(t) in EMIT_NAMES for t in texts):
+        return True
+
+    # ⑧ 直接弹给人看 / 统一失败出口
+    if any(t in USER_ERROR_CALLS or _last_seg(t) == '_fail' for t in texts):
+        return True
+
+    # ⑨ 失败信封（`return {'ok': False…}`，或把失败 dict 交给 `_send(...)`）
+    if any(_has_failure_envelope(st) for st in body):
+        return True
+    if any(isinstance(a, ast.Dict) and _is_failure_payload(a)
+           for st in body for n in ast.walk(st)
+           if isinstance(n, ast.Call) for a in n.args):
+        return True
+
+    # ⑩ 把异常拼进一句给人看的话
+    if _mentions_exc_in_message(body_src, exc):
+        return True
+
+    return False
+
+
+def _is_silent(node: ast.ExceptHandler, swallow_names=('swallow',)) -> bool:
+    """体里没有任何记录通道 → 什么都不说。"""
+    return not _has_trace(node, swallow_names)
+
 
 def _iter_py():
     return sorted(PKG.rglob('*.py'))
@@ -75,27 +257,16 @@ def _enclosing(p: Path, src: str, line_no: int) -> str:
     return best.name if best else '<module>'
 
 
-def _is_silent(node: ast.ExceptHandler) -> bool:
-    """
-    体**既没用异常对象、也没有任何调用** → 什么都不说。
-
-    两处细节都是被实测逼出来的：
-
-      · 只看 `node.body`（**不能** `ast.walk(node)`）——
-        那会把 `node.type`（`Exception` 这个名字）也算进来；
-      · f-string 里的 `{e}` 要能认出来（`_status(f'失败：{e}')` 是说了的），
-        所以按 `'{e}'` / `'e.'` / `' e'` / `'(e'` / `', e'` 找一圈。
-    """
-    body_src = '\n'.join(ast.unparse(st) for st in node.body)
-    if any(isinstance(n, ast.Call) for st in node.body for n in ast.walk(st)):
-        return False
-    if node.name and (f'{{{node.name}}}' in body_src
-                      or f'{node.name}.' in body_src
-                      or f' {node.name}' in body_src
-                      or f'({node.name}' in body_src
-                      or f', {node.name}' in body_src):
-        return False
-    return True
+def _swallow_aliases(tree) -> set:
+    """这个文件里 `swallow` 的**本地名**（`import swallow as _sw` → `_sw`）。"""
+    out = {'swallow'}
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.ImportFrom) and n.module
+                and n.module.endswith('safeguard')):
+            for a in n.names:
+                if a.name == 'swallow':
+                    out.add(a.asname or a.name)
+    return out
 
 
 def _find_silent() -> list:
@@ -107,12 +278,13 @@ def _find_silent() -> list:
         except SyntaxError as e:          # 解析不了本身就是错
             bad.append((p, 0, '<unparsable>', str(e)))
             continue
+        aliases = _swallow_aliases(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler) or node.type is None:
                 continue
             if ast.unparse(node.type) not in WIDE:
                 continue
-            if not _is_silent(node):
+            if not _is_silent(node, aliases):
                 continue
             key = (_module_of(p), _enclosing(p, src, node.lineno))
             if key in ALLOWED:
@@ -126,7 +298,7 @@ class TestNoSilentWideExcept:
 
     def test_no_handler_swallows_without_a_trace(self):
         """
-        宽捕获**必须留下痕迹**：用 `e`，或者至少调一次什么。
+        宽捕获**必须留下一条记录通道**（判据见文件开头与 `_has_trace`）。
 
         这一条是这次改动的**净收益**：改之前 88 处是真的什么都不说
         （`except Exception: return None` / `continue` / `x = None`），
@@ -135,7 +307,7 @@ class TestNoSilentWideExcept:
         """
         bad = _find_silent()
         assert not bad, (
-            '这些 `except Exception` 体里既没用异常对象、也没有任何调用，'
+            '这些 `except Exception` 体里没有任何记录通道，'
             '出事时不会有任何痕迹：\n'
             + '\n'.join(f'  {p.relative_to(PKG)}:{ln}  {fn}()  {body!r}'
                         for p, ln, fn, body in bad[:25])
@@ -218,6 +390,80 @@ class TestNoSilentWideExcept:
         assert not missing, (
             f'这些文件调了 `swallow` 却没有 import 它（跑到那条 except 才 '
             f'NameError）：{missing}')
+
+
+class TestTheGuardBites:
+    """
+    **守卫自己也要被守卫**（2026-11-01 收紧时补的）。
+
+    收紧判据最大的风险不是"误报"，是"改着改着它什么都不抓了"。
+    这里用剥出来的小片段钉住两个方向：
+    假痕迹必须红，真记录必须不红。
+    """
+
+    #: 这些体**一个字的痕迹都没有** → 必须判红
+    SILENT = [
+        # `pass` 与它的几个同义写法
+        'except Exception:\n    pass\n',
+        'except Exception:\n    return None\n',
+        'except Exception:\n    return []\n',
+        'except Exception:\n    continue\n',
+        # ↓ 这四种正是老守卫（"有没有 Call / 有没有 e"）放过去的
+        'except Exception as exc:\n    _ = exc\n',
+        'except Exception:\n    return set()\n',
+        'except Exception:\n    return QColor(fallback)\n',
+        'except Exception as e:\n    text.setText(body)\n',
+        'except Exception as e:\n    x = None\n',
+    ]
+
+    #: 这些体都有记录通道 → 不许判红
+    TRACED = [
+        "except Exception as e:\n    swallow('m.f', e)\n",
+        "except Exception as e:\n    _sw('m.f', e)\n",       # swallow 别名
+        "except Exception as e:\n    print(e)\n",
+        "except Exception as e:\n    logging.warning('读不到', exc_info=e)\n",
+        'except Exception:\n    raise\n',
+        'except Exception as e:\n    raise RuntimeError from e\n',
+        "except Exception as e:\n    errors.append(str(e))\n",
+        "except Exception as e:\n    self._status(f'失败：{e}')\n",
+        "except Exception as e:\n    self._log(str(e))\n",
+        "except Exception as e:\n    return {'ok': False, 'error': str(e)}\n",
+        "except Exception as e:\n    return Foo(error=str(e))\n",
+        "except Exception as e:\n    ok, msg = (False, f'出错了（{e.__class__.__name__}）')\n",
+    ]
+
+    @staticmethod
+    def _handler(src: str) -> ast.ExceptHandler:
+        # `except` 不能单独成句 —— 前面垫一个 `try: pass` 才解析得了
+        tree = ast.parse('try:\n    pass\n' + src)
+        return next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.ExceptHandler))
+
+    @pytest.mark.parametrize('src', SILENT)
+    def test_a_body_without_any_record_is_silent(self, src):
+        assert _is_silent(self._handler(src), {'swallow', '_sw'}), src
+
+    @pytest.mark.parametrize('src', TRACED)
+    def test_a_body_with_a_record_channel_is_not_silent(self, src):
+        assert not _is_silent(self._handler(src), {'swallow', '_sw'}), src
+
+    def test_the_guard_is_not_vacuous(self):
+        """
+        反向保险：如果 `_has_trace` 被改成"永远 True"，上一条不会红 ——
+        所以这里直接断言仓库里**确实有**至少 1000 个能判出痕迹的 handler
+        （2026-11-01 实测：1960 个 handler 里 1232 个是宽捕获）。
+        """
+        traced = 0
+        for p in _iter_py():
+            tree = ast.parse(p.read_text(encoding='utf-8'))
+            aliases = _swallow_aliases(tree)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.ExceptHandler)
+                        and node.type is not None
+                        and ast.unparse(node.type) in WIDE
+                        and not _is_silent(node, aliases)):
+                    traced += 1
+        assert traced > 1000, f'只有 {traced} 个宽捕获被判为"有痕迹"，判据可能坏了'
 
 
 class TestSafeguardIsWired:
