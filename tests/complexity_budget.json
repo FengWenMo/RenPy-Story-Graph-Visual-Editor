@@ -1,0 +1,257 @@
+{
+ "note": "复杂度上限（棘轮）：只许降，不许升。生成脚本 tools/complexity_report.py --budget",
+ "threshold": {
+  "long_lines": 120,
+  "complex_branches": 20
+ },
+ "limit_new": {
+  "lines": 500,
+  "branches": 150
+ },
+ "functions": {
+  "storygraph/app/beats.py::attr_slot_rows": {
+   "lines": 249,
+   "branches": 96
+  },
+  "storygraph/app/beats.py::fields_to_beat": {
+   "lines": 102,
+   "branches": 48
+  },
+  "storygraph/app/session_export.py::export": {
+   "lines": 263,
+   "branches": 27
+  },
+  "storygraph/app/session_graph.py::rebuild_source_edges": {
+   "lines": 148,
+   "branches": 52
+  },
+  "storygraph/app/session_table.py::apply": {
+   "lines": 282,
+   "branches": 71
+  },
+  "storygraph/app/session_table.py::apply_node_variable_edits": {
+   "lines": 214,
+   "branches": 76
+  },
+  "storygraph/app/source_line_delete.py::plan_source_line_delete": {
+   "lines": 145,
+   "branches": 50
+  },
+  "storygraph/app/stage.py::plan_at_edit": {
+   "lines": 253,
+   "branches": 103
+  },
+  "storygraph/app/stage.py::plan_scene_change": {
+   "lines": 166,
+   "branches": 47
+  },
+  "storygraph/app/stage_render.py::draw_readable_say": {
+   "lines": 238,
+   "branches": 62
+  },
+  "storygraph/app/stage_render.py::size_rows": {
+   "lines": 338,
+   "branches": 61
+  },
+  "storygraph/app/tables.py::export_table": {
+   "lines": 192,
+   "branches": 24
+  },
+  "storygraph/assets/asset_mapping.py::validate_mapping": {
+   "lines": 127,
+   "branches": 63
+  },
+  "storygraph/assets/asset_registry.py::describe_asset": {
+   "lines": 87,
+   "branches": 42
+  },
+  "storygraph/assets/asset_registry.py::sync_asset_tables": {
+   "lines": 182,
+   "branches": 28
+  },
+  "storygraph/assets/sprite_codes.py::scan_project": {
+   "lines": 156,
+   "branches": 47
+  },
+  "storygraph/assets/sprite_codes.py::translate": {
+   "lines": 88,
+   "branches": 49
+  },
+  "storygraph/authoring/learn_statement.py::build_declaration": {
+   "lines": 162,
+   "branches": 46
+  },
+  "storygraph/authoring/pattern.py::_spans": {
+   "lines": 245,
+   "branches": 66
+  },
+  "storygraph/authoring/pattern.py::solve": {
+   "lines": 165,
+   "branches": 56
+  },
+  "storygraph/cli.py::_cmd_collab": {
+   "lines": 158,
+   "branches": 62
+  },
+  "storygraph/cli.py::build_parser": {
+   "lines": 203,
+   "branches": 0
+  },
+  "storygraph/collab/collab_store.py::push": {
+   "lines": 314,
+   "branches": 74
+  },
+  "storygraph/graph/analysis.py::analyze_reachability_full": {
+   "lines": 184,
+   "branches": 40
+  },
+  "storygraph/parsing/renpy_parser.py::_dispatch_node": {
+   "lines": 245,
+   "branches": 43
+  },
+  "storygraph/pipeline/build.py::build_project": {
+   "lines": 205,
+   "branches": 23
+  },
+  "storygraph/pipeline/compile.py::write_compiled": {
+   "lines": 194,
+   "branches": 30
+  },
+  "storygraph/pipeline/continuity.py::analyze_parse_result": {
+   "lines": 328,
+   "branches": 117
+  },
+  "storygraph/pipeline/continuity.py::scan_label": {
+   "lines": 123,
+   "branches": 48
+  },
+  "storygraph/pipeline/engine_exporters.py::timeline_of": {
+   "lines": 117,
+   "branches": 69
+  },
+  "storygraph/pipeline/renpy_exporter.py::_export_control_node": {
+   "lines": 150,
+   "branches": 44
+  },
+  "storygraph/pipeline/unity_package.py::verify_package": {
+   "lines": 167,
+   "branches": 44
+  },
+  "storygraph/story/atl.py::_from_props_ordered": {
+   "lines": 155,
+   "branches": 54
+  },
+  "storygraph/story/beat_build.py::apply_script_definitions": {
+   "lines": 170,
+   "branches": 38
+  },
+  "storygraph/story/beat_model.py::fold_spec_arg_columns": {
+   "lines": 172,
+   "branches": 51
+  },
+  "storygraph/story/beat_model.py::from_row": {
+   "lines": 250,
+   "branches": 31
+  },
+  "storygraph/story/beat_model.py::spec_arg_cells": {
+   "lines": 251,
+   "branches": 94
+  },
+  "storygraph/story/beat_render.py::render_beat_to_rpy": {
+   "lines": 356,
+   "branches": 55
+  },
+  "storygraph/story/control_branch.py::plan_control_branch": {
+   "lines": 177,
+   "branches": 45
+  },
+  "storygraph/story/control_route.py::plan_control_route": {
+   "lines": 208,
+   "branches": 38
+  },
+  "storygraph/story/excel_export.py::export_beats_to_excel": {
+   "lines": 218,
+   "branches": 19
+  },
+  "storygraph/story/generation_guard.py::write_generation": {
+   "lines": 241,
+   "branches": 40
+  },
+  "storygraph/story/patcher.py::_replace_matched": {
+   "lines": 407,
+   "branches": 94
+  },
+  "storygraph/story/patcher.py::patch_export": {
+   "lines": 469,
+   "branches": 63
+  },
+  "storygraph/story/renpy_gui.py::load_gui_profile": {
+   "lines": 172,
+   "branches": 64
+  },
+  "storygraph/story/stage_snapshot.py::stage_snapshots": {
+   "lines": 202,
+   "branches": 28
+  },
+  "storygraph/story/statement_registry.py::declare_attr_groups": {
+   "lines": 146,
+   "branches": 43
+  },
+  "storygraph/ui_qt/asset_picker.py::_build": {
+   "lines": 190,
+   "branches": 2
+  },
+  "storygraph/ui_qt/dialog_learn.py::_why_not": {
+   "lines": 137,
+   "branches": 61
+  },
+  "storygraph/ui_qt/dialog_stage_suspect.py::__init__": {
+   "lines": 177,
+   "branches": 18
+  },
+  "storygraph/ui_qt/main_window.py::_build": {
+   "lines": 450,
+   "branches": 5
+  },
+  "storygraph/ui_qt/main_window.py::_build_card_page": {
+   "lines": 268,
+   "branches": 2
+  },
+  "storygraph/ui_qt/main_window.py::_build_graph_page": {
+   "lines": 293,
+   "branches": 1
+  },
+  "storygraph/ui_qt/main_window.py::_build_toolbars": {
+   "lines": 227,
+   "branches": 4
+  },
+  "storygraph/ui_qt/main_window.py::set_spec_args": {
+   "lines": 169,
+   "branches": 48
+  },
+  "storygraph/ui_qt/param_editor.py::__init__": {
+   "lines": 217,
+   "branches": 5
+  },
+  "storygraph/ui_qt/theme.py::qss": {
+   "lines": 242,
+   "branches": 0
+  },
+  "storygraph/ui_qt/window_graph_ops.py::import_chapter_files": {
+   "lines": 142,
+   "branches": 43
+  },
+  "storygraph/ui_qt/window_graph_ops.py::open_project_path": {
+   "lines": 220,
+   "branches": 57
+  },
+  "storygraph/ui_qt/window_nodes.py::edit_edge": {
+   "lines": 101,
+   "branches": 51
+  },
+  "storygraph/ui_qt/window_nodes.py::plan_wire_landing": {
+   "lines": 162,
+   "branches": 53
+  }
+ }
+}
