@@ -291,3 +291,17 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   ⚠ `engine_lint` 里 `swallow` 原来只在两个函数内 import，模块级用到就报
   `test_no_undefined_names` 的 `'swallow'`；补顶层 import。
   全量 8917 例 / 8914 通过 / 0 失败（12 进程 2m22s）。
+- 2026-11-01 第二十段续（§95 §8）：**守卫本身也收紧了**（原本打算"单开一轮"）。
+  `tests/test_no_silent_except.py` 判据从"体内有没有 Call / 有没有出现 e"换成
+  "体内有没有一条**记录通道**"（swallow 含别名 / print / logging / errors·warnings 列表 /
+  状态字段 / emit / QMessageBox / raise / 失败信封 / 把 e 拼进句子），
+  名字表与审计 §1.3 同源。**不收**的四种假痕迹正是骗过旧守卫的：
+  `_ = exc` / `set()` / `QColor(fallback)` / `text.setText(body)`。
+  收紧后直接全绿（那 23 处本轮已修完）→ 守卫从"下个任务"变成"锁住这轮成果"。
+  ⚠ 第一次跑红 14 处，**全是判据自己的漏**：(a) 7 处用
+  `from …safeguard import swallow as _sw` 别名 → 得按文件收集本地别名；
+  (b) `_send(..., {'ok': False, 'error': …})` 失败信封不只在 return，交给函数的 dict 也算；
+  (c) `f'…{e.__class__.__name__}'` 要认 `{e.` 开头。
+  ⚠ 还加了反向保险 `TestTheGuardBites`：9 个假痕迹必须红 + 12 个真记录必须不红 +
+  "仓库里被判有痕迹的宽捕获 > 1000 个"（否则有人把 `_has_trace` 改成 return True，
+  正向用例一条都不会红）。用例 8917→**8939**，全量 0 失败（2m22s）。
