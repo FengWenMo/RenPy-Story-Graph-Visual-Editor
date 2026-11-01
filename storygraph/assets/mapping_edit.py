@@ -53,7 +53,7 @@ storygraph.assets.mapping_edit
 ## 兼容写法
 
 映射条目里 `tag` 是 `char` 的旧写法、`attrs` 是 `attr` 的旧写法
-（`asset_mapping._identity_from_entry` 两者都认）。改这一格时必须改**原来
+（`asset_mapping.identity_from_entry` 两者都认）。改这一格时必须改**原来
 那个键**，不能再加一个 —— 否则一条里同时出现 `char` 和 `tag`，谁赢看
 读取顺序，等于制造歧义。
 """

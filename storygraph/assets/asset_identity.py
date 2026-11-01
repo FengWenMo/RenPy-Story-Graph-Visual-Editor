@@ -84,6 +84,13 @@ from storygraph.assets.identity_core import (
     build_copy_index,
     normalize_relpath,
 )
+#: 映射层（精确覆盖 / glob 规则的**只读取**，不碰读盘与写回）。
+#: 2026-11-01 起可以是顶层 import 了：初稿生成（唯一需要反过来 import 本模块的
+#: 地方）已经抬到 `assets.mapping_draft`，所以 `asset_mapping` 不再指回这里，
+#: 那条边不再是环（见 §83）。原来是两处函数体内 import —— 只是因为环。
+from storygraph.assets.asset_mapping import (mapping_cached,
+                                             resolve_exact_image,
+                                             resolve_rule_image)
 
 
 #: 来源标记（对照表要显示"这个结论是谁给的"）。取值与层号的对应见
@@ -438,8 +445,6 @@ def _mapping_layer(mapping, rel: str, aid: str, layer: str):
     if not isinstance(mapping, Mapping) or not mapping:
         return None
     try:
-        from storygraph.assets.asset_mapping import (resolve_exact_image,
-                                                     resolve_rule_image)
         if layer == 'mapping-exact':
             return resolve_exact_image(mapping, relpath=rel, asset_id=aid)
         return resolve_rule_image(mapping, relpath=rel, asset_id=aid)
@@ -711,7 +716,6 @@ def project_context(registry, project_root: str = '', *, mapping=None) -> dict:
         data = {}
         if root:
             try:
-                from storygraph.assets.asset_mapping import mapping_cached
                 data, warn, mapping_path = mapping_cached(root)
                 warnings = tuple(warn or ())
             except Exception as e:              # noqa: BLE001 - 映射坏了不该打不开

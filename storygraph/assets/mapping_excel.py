@@ -869,7 +869,7 @@ def _entry_cell(entry: Mapping, field: str):
     条目里的一列 → 单元格。
 
     `char` / `tag` 与 `attr` / `attrs` 在判定里**是同一个东西**
-    （`_identity_from_entry` 先看前者、没有再退回后者）。Excel 只有一列，
+    （`identity_from_entry` 先看前者、没有再退回后者）。Excel 只有一列，
     所以这里也认别名 —— 否则一份用 `tag` 写的 JSON 转成 Excel 会**静默丢掉**
     角色（那是"导出成功、结果变错"的典型）。
     """

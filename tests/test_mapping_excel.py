@@ -122,7 +122,7 @@ class TestRoundTrip:
     def test_tag与attrs的别名写法不会丢(self, tmp_path):
         """
         JSON 里 `tag` / `char`、`attrs` / `attr` 是同一个东西
-        （`_identity_from_entry` 先看前者、再退回后者）。Excel 只有一列，
+        （`identity_from_entry` 先看前者、再退回后者）。Excel 只有一列，
         所以转换时必须认别名 —— 否则"导出成功、角色变没了"。
         """
         data = {'schema': MAPPING_SCHEMA,
@@ -487,7 +487,7 @@ class TestIntegratedWithJudge:
 
     def test_初稿写成Excel再读回(self, tmp_path):
         """`draft_mapping` 的产物走 Excel 一圈，结论不许变。"""
-        from storygraph.assets.asset_mapping import draft_mapping
+        from storygraph.assets.mapping_draft import draft_mapping
 
         rows = {
             'a': {'ID': 'a', 'Path': 'game/art/full/ling/happy.png',

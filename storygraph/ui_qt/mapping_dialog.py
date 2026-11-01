@@ -27,7 +27,7 @@ storygraph.ui_qt.mapping_dialog
 
   · 一条图是什么            → `assets.asset_identity.resolve_image`
   · 映射怎么读 / 怎么校验   → `assets.asset_mapping`
-  · 映射初稿怎么生成        → `assets.asset_mapping.draft_mapping`
+  · 映射初稿怎么生成        → `assets.mapping_draft.draft_mapping`
 
 本文件只负责：把结果摆出来、收人的决定、把错误变成**一句人话**（坏 JSON
 不许闪退、不许把 traceback 甩给用户）。映射文件是**唯一"项目知识"载体**，
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog,
                                QWidget)
 
 from storygraph.assets import asset_mapping as AM
+from storygraph.assets import mapping_draft as MD
 from storygraph.assets.asset_identity import known_characters
 from storygraph.core.safeguard import swallow
 from storygraph.ui_qt import theme
@@ -1072,7 +1073,7 @@ class MappingDialog(QDialog):
         images = getattr(self._registry, 'images', None) or {}
         name = Path(self._project_root).name if self._project_root else ''
         try:
-            return AM.draft_mapping(self._project_root, images, known_chars,
+            return MD.draft_mapping(self._project_root, images, known_chars,
                                     project_name=name)
         except Exception as e:                    # noqa: BLE001 - 坏注册表别闪退
             swallow('ui_qt.mapping_dialog.draft_data', e)

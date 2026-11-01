@@ -33,7 +33,6 @@ from storygraph.assets.asset_mapping import (
     MAPPING_FILENAME,
     MAPPING_SCHEMA,
     MappingError,
-    draft_mapping,
     find_mapping_path,
     load_mapping,
     mapping_cached,
@@ -42,6 +41,7 @@ from storygraph.assets.asset_mapping import (
     validate_mapping,
 )
 from storygraph.assets.asset_registry import AssetRegistry
+from storygraph.assets.mapping_draft import draft_mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -87,6 +87,9 @@ REQUIRED_MODULES = (
     # 症状是"打开 Excel 映射就崩"，属于主链路，点名一次。
     'storygraph.assets.mapping_schema',
     'storygraph.assets.identity_core',
+    # 2026-11-01（解 `assets` 两模块环）：映射初稿生成抬成独立模块。`mapping_dialog`
+    # 顶层 import 它，"导出初稿"是主链路按钮 —— 打包漏了就是点一下崩。
+    'storygraph.assets.mapping_draft',
     'openpyxl',
 )
 

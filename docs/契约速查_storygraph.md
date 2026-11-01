@@ -688,19 +688,22 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
      `window_state` / `stage_preview` 各指它们，原来那个五模块环
      （`main_window → stage_thumb → stage_preview → main_window` +
      `main_window ↔ window_state`）就是这么断的。
-   · **`assets` 层两个新叶子**（2026-11-01 第七段）：`assets/identity_core.py`
-     （`KINDS` / `SHOWABLE_KINDS` / `Identity` / `normalize_relpath` /
-     `asset_id_of` / `build_copy_index` + `_iter_rows` / `_row_relpath` /
-     `_stem_of`）与 `assets/mapping_schema.py`（`MAPPING_SCHEMA` /
-     `MappingError` / `xls_unsupported` / `validate_mapping` + 三张认识键表）。
+   · **`assets` 层两个新叶子 + 一个下游**（2026-11-01 第七/八段）：
+     `assets/identity_core.py`（`KINDS` / `SHOWABLE_KINDS` / `Identity` /
+     `normalize_relpath` / `asset_id_of` / `build_copy_index` + `_iter_rows` /
+     `_row_relpath` / `_stem_of`）与 `assets/mapping_schema.py`（`MAPPING_SCHEMA` /
+     `MappingError` / `xls_unsupported` / `validate_mapping` + 三张认识键表）；
      `asset_identity` 与 `asset_mapping` 都**再导出**前者的名字（外面一百多处
      `from ...asset_identity import Identity` 不用改）；`mapping_excel` 只许指
      这两个叶子，`mapping_schema` / `identity_core` **不许**反过来导入
      `asset_identity` / `asset_mapping` / `mapping_excel`。
-     环的现状：**`[2] asset_identity ↔ asset_mapping`**（唯一剩下的一条边，
-     两处：`resolve_image` 的映射层、`project_context` 的 `mapping_cached`）；
-     断它的方法见 `docs/开发日志.md` §82 第 3 节（抬一个 `assets/image_resolve.py`
-     到两者之上），**不是**搬常量。
+     环的现状：**`assets` 里 0 个环**（2026-11-01 第八段）。最后那条
+     `asset_mapping → asset_identity`（初稿逐行算身份）跟着 `draft_mapping`
+     整块搬到了下游 `assets/mapping_draft.py`；`asset_identity` 反而可以把
+     映射层的两处**函数体内 import 提到顶层**（`asset_mapping` 不再指回来）。
+     **依赖方向是单向的**：`mapping_schema` / `identity_core` →
+     `asset_mapping` → `asset_identity` → `mapping_draft`。`mapping_draft`
+     是唯一允许同时 import `asset_mapping` 与 `asset_identity` 的地方。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
@@ -6060,7 +6063,7 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
 - **不猜**：unknown 就 `showable=False`，卡片/选择器明说，导出门禁报出来。
 - 判据：`tests/test_asset_identity.py`（59 条）。
 
-### 72.2 项目级映射：`assets/asset_mapping.py` + `assets/mapping_excel.py` + `ui_qt/mapping_dialog.py`
+### 72.2 项目级映射：`assets/asset_mapping.py` + `assets/mapping_draft.py` + `assets/mapping_excel.py` + `ui_qt/mapping_dialog.py`
 
 - 文件名与位置：**`storygraph.mapping.json`**（schema `storygraph.mapping/1`），
   项目根或 `game/` 下；跟着项目走、可提交、可 diff（与 `storygraph.rules.json` 同一模式）。
@@ -6068,9 +6071,12 @@ JSON、`stage_exit_state` 状态推导、真机只读 mtime 不变）；
   **未知键只警告不失败**；`images` 精确覆盖**优先于** `rules`；`rules` 按数组顺序；
   glob 占位 `<tag>` / `<stem>`；坏 JSON 抛 `MappingError`（降级成 warnings 一句话）。
 - 接口（契约 §1.2）：`find_mapping_path` / `load_mapping` / `mapping_cached`
-  （按 mtime 缓存）/ `resolve_with_mapping` / `draft_mapping`（从**实际目录**汇总，
-  不写死任何项目路径，导出后能被 `load_mapping` 原样读回）/ `save_mapping`
-  （原子写 + 旧文件 `.bak`，已登记 `test_single_write_entry` 的唯一写入口）。
+  （按 mtime 缓存）/ `resolve_with_mapping` / `save_mapping`
+  （原子写 + 旧文件 `.bak`，已登记 `test_single_write_entry` 的唯一写入口）；
+  **初稿**在 `assets/mapping_draft.py::draft_mapping`（从**实际目录**汇总，
+  不写死任何项目路径，导出后能被 `load_mapping` 原样读回）。初稿要用"没有映射"
+  的身份决议，所以它在 `asset_identity` 的**下游**（2026-11-01 第八段从
+  `asset_mapping` 搬出来，正是为了断掉那条反向边）。
 - **第二条定义途径：Excel**（用户 2026-10-30「映射表除了 json 文件外，添加 excel
   表格的定义途径」）——`storygraph.mapping.xlsx`，代码在 `assets/mapping_excel.py`：
   · **一张表 = 一个顶层键**：「映射」/「角色」/「规则」/「图片」/「属性」
