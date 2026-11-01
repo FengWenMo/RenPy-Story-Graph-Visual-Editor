@@ -95,9 +95,20 @@ WINDOW_MIXIN_MODULES = (
 )
 
 
+#: 前端的**非 mixin** 模块（独立 QWidget / 模块级回调垫片）。
+#:
+#: 2026-11-01 起 `BeatCardEditor` 不再住在 `main_window.py`：它是一个独立的
+#: `QWidget`，被搬进了 `ui_qt/card_editor.py`。扫源码的用例（"保存/撤销按钮
+#: 在不在"、"脏标记在不在"）只扫入口 + mixin 就会当场误报三条 —— 所以这份
+#: 清单必须跟着走。**加一块就加一行**。
+WINDOW_SIDE_MODULES = (
+    'storygraph.ui_qt.card_editor',
+)
+
+
 def main_window_sources() -> list:
     """
-    **整个前端**的源码文件（入口 + 全部 mixin）。
+    **整个前端**的源码文件（入口 + 全部 mixin + 非 mixin 的前端模块）。
 
     为什么要有它：拆分之后"某方法在不在"必须看**所有**文件 ——
     `eventFilter` 在 `window_keyboard.py`、`export_script` 在
@@ -105,10 +116,12 @@ def main_window_sources() -> list:
     的错误结论，而那正是拆分当天 7 条用例红掉的原因。
 
     按**实际文件**取（`module_source`），所以以后再拆一块、改个名，
-    这里跟着 `WINDOW_MIXIN_MODULES` 走，不会因为硬编码路径失效。
+    这里跟着 `WINDOW_MIXIN_MODULES` / `WINDOW_SIDE_MODULES` 走，
+    不会因为硬编码路径失效。
     """
-    return [main_window_source()] + [module_source(m)
-                                     for m in WINDOW_MIXIN_MODULES]
+    return ([main_window_source()]
+            + [module_source(m) for m in WINDOW_MIXIN_MODULES]
+            + [module_source(m) for m in WINDOW_SIDE_MODULES])
 
 
 def main_window_source_text() -> str:
@@ -130,4 +143,5 @@ def legacy_editor_source() -> Path:
 
 __all__ = ['PROJECT_ROOT', 'module_source', 'main_window_source',
            'main_window_sources', 'main_window_source_text',
-           'WINDOW_MIXIN_MODULES', 'legacy_editor_source']
+           'WINDOW_MIXIN_MODULES', 'WINDOW_SIDE_MODULES',
+           'legacy_editor_source']
