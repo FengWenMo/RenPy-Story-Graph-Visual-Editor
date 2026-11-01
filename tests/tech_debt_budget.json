@@ -10,8 +10,8 @@
   "complex_functions": 208,
   "print_calls": 240,
   "print_library": 3,
-  "swallow_calls": 1239,
-  "broad_excepts": 1227,
+  "swallow_calls": 1258,
+  "broad_excepts": 1218,
   "todos": 110,
   "long_files": 26,
   "import_cycles_all": 0,
@@ -22,8 +22,8 @@
  "cycle_shapes": [],
  "snapshot": {
   "modules": 256,
-  "total_lines": 163433,
-  "functions": 5649,
-  "file_edges_all": 1267
+  "total_lines": 163550,
+  "functions": 5650,
+  "file_edges_all": 1270
  }
 }
