@@ -1790,8 +1790,8 @@ def load_hooks(config_path=None, project_root=None):
             'pre_process_row': getattr(module, 'pre_process_row', None),
             'post_process_registry': getattr(module, 'post_process_registry', None),
         }
-    except Exception as e:
-        print(f"[asset_registry] 加载钩子失败: {e}")
+    except Exception as e:                      # noqa: BLE001 - 钩子坏了退成"没有钩子"
+        swallow('assets.asset_registry.load_hooks', e)
         return {}
 
 
@@ -1861,8 +1861,8 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
                     ws.append([ASSET_FIELD_LABELS.get(f, f) for f in fields])
                     _asset_append_row(ws, [row.get(h, '') for h in fields])
                 save_workbook_atomic(wb, p)
-            except Exception as e:
-                print(f"[asset_registry] 写入资源表失败: {e}")
+            except Exception as e:              # noqa: BLE001 - 一张表写不进去不该中断整批
+                swallow('assets.asset_registry.add_asset.write_table', e)
     return True
 
 
@@ -2045,8 +2045,8 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
                     seen.add(rp)
                 added += 1
             save_workbook_atomic(wb, path)
-    except Exception as e:                      # noqa: BLE001
-        print(f"[asset_registry] 写入 {fname} 失败: {e}")
+    except Exception as e:                      # noqa: BLE001 - 写不进去就报 0 行
+        swallow('assets.asset_registry.append_rows.write_table', e)
         return 0
     return added + updated
 

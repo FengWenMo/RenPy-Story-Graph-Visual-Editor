@@ -25,6 +25,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from storygraph.core.safeguard import swallow
+
 
 # ===================== 事件类型 =====================
 
@@ -101,8 +103,10 @@ class AssetEventBus:
         for cb in specific + wildcard:
             try:
                 cb(event)
-            except Exception as e:
-                print(f"[AssetEventBus] 订阅者回调异常: {e}")
+            except Exception as e:              # noqa: BLE001 - 一个订阅者炸了不该拖垮别人
+                # 库内**不许 print**（打包成无窗口程序后没有输出通道）：
+                # 走 `swallow` —— 它记一笔、进 logging（DEBUG），`--debug` 时上 stderr。
+                swallow('assets.asset_events.bus.publish', e)
 
 
 # ===================== 原生文件监听器 =====================
@@ -189,8 +193,8 @@ class AssetFileWatcher:
         # 首次扫描：建立基线，不触发事件
         try:
             initial = self._scan_all()
-        except Exception as e:
-            print(f"[AssetFileWatcher] 初始扫描失败: {e}")
+        except Exception as e:                  # noqa: BLE001 - 扫不动就从空基线开始
+            swallow('assets.asset_events.watcher.initial_scan', e)
             initial = {}
         self._snapshot = initial
         self._pending = dict(initial)
@@ -201,8 +205,8 @@ class AssetFileWatcher:
                 break
             try:
                 self._tick()
-            except Exception as e:
-                print(f"[AssetFileWatcher] 扫描异常: {e}")
+            except Exception as e:              # noqa: BLE001 - 后台线程不许死
+                swallow('assets.asset_events.watcher.tick', e)
 
     def _tick(self):
         current = self._scan_all()
@@ -214,8 +218,8 @@ class AssetFileWatcher:
                 if changes:
                     try:
                         self.on_change(changes)
-                    except Exception as e:
-                        print(f"[AssetFileWatcher] on_change 回调异常: {e}")
+                    except Exception as e:      # noqa: BLE001 - 回调炸了不该断监听
+                        swallow('assets.asset_events.watcher.on_change', e)
                 self._snapshot = current
             self._pending_ticks = 0
             self._pending_since = None
@@ -232,8 +236,8 @@ class AssetFileWatcher:
                 if changes:
                     try:
                         self.on_change(changes)
-                    except Exception as e:
-                        print(f"[AssetFileWatcher] on_change 回调异常: {e}")
+                    except Exception as e:      # noqa: BLE001 - 同上（强制稳定那一支）
+                        swallow('assets.asset_events.watcher.on_change', e)
                 self._snapshot = current
                 self._pending_ticks = 0
                 self._pending_since = None
@@ -398,6 +402,6 @@ class ConfirmationGate:
             return True
         try:
             return bool(self.ask_callback(request))
-        except Exception as e:
-            print(f"[ConfirmationGate] ask_callback 异常: {e}")
+        except Exception as e:                  # noqa: BLE001 - 弹窗炸了按"不许"处理
+            swallow('assets.asset_events.gate.ask', e)
             return False
