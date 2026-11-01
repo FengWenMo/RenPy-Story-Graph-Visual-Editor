@@ -695,6 +695,10 @@ class StageCanvas(QWidget):
         self._fade_started = time.monotonic()
         self._fade_timer.start()
 
+    #: `_tick_fade` 的异常只记**第一次**：它是 16ms 的定时器，每帧记一条会在
+    #: 一秒内把诊断面板的 200 条环形缓冲刷满（然后真正有用的记录全被挤掉）。
+    _fade_err_logged = False
+
     def _tick_fade(self) -> None:
         try:
             elapsed = time.monotonic() - self._fade_started
@@ -702,8 +706,13 @@ class StageCanvas(QWidget):
             if self._fade_alpha >= 1.0:
                 self._fade_timer.stop()
             self.update()
-        except Exception:                      # noqa: BLE001 - 定时器里不许抛
+        except Exception as e:                 # noqa: BLE001 - 定时器里不许抛
+            # Qt 定时器回调里抛异常 = 窗口崩（C++ 对象可能已经随窗口销毁）。
+            # 宽是必须的；但一次都不记等于"淡入坏了永远查不到"，所以记第一次。
             self._fade_timer.stop()
+            if not StageCanvas._fade_err_logged:
+                StageCanvas._fade_err_logged = True
+                swallow('ui_qt.stage_preview.tick_fade', e)
 
     # ---------------- 过场动画 ----------------
 
@@ -1768,7 +1777,10 @@ class StagePreviewWindow(QDialog):
         # （`StageFrame.duration_ms`：pause 秒数 → 字数估算 → 600ms）。
         try:
             self._timer.setInterval(int(getattr(f, 'duration_ms', PLAY_MS)))
-        except Exception:                     # noqa: BLE001 - 老 frame 没这个属性
+        except (AttributeError, TypeError, ValueError):
+            # `duration_ms` 不存在 → AttributeError（老 `StageFrame`）；
+            # 值不是数字 → TypeError / `int('')` → ValueError。
+            # 三种都只是"这一拍说不出时长"，退到固定 `PLAY_MS`。
             self._timer.setInterval(PLAY_MS)
         # **转场**（P1-8"无转场"，2026-10-30 ③ 升级）：
         #   有可演的 `Effect` → 画布按项目 define 的效果演中间帧

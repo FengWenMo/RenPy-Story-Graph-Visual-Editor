@@ -237,12 +237,18 @@ def _copy_placement(placement: Placement) -> Placement:
 def _build_placement(root: Path, paths) -> Placement:
     """真正的探测（`detect_placement` 的纯计算部分，结果会被缓存）。"""
     facts = []
+    unprobed: list = []
     for path in paths:
         try:
             facts.append(scan_cache.file_facts(path, root))
-        except Exception as exc:                      # noqa: BLE001
-            facts.append(FileFacts(rel=str(path), abs_path=str(path)))
-            _ = exc
+        except Exception as exc:          # noqa: BLE001 - 单个文件读不出来不能拖垮整份版式
+            # **不**拿路径冒充事实。以前这里塞 `FileFacts(rel=str(path), ...)`：
+            # 一是用绝对路径冒充项目相对路径（后面 `matches_globs` 会拿它去匹配
+            # `content_globs`），二是它在 `evidence['file_count']` 里和"探到了、
+            # 但文件里什么都没有"同形 —— 于是版式判据把一次**探测失败**当成了
+            # 一条**有效事实**。现在只记名字、不参与判定，失败单独进 warnings。
+            swallow('story.placement.file_facts', exc)
+            unprobed.append(str(path))
 
     decl_files = sorted(f.rel for f in facts if f.has_decl)
     content_files = sorted(f.rel for f in facts if f.is_content)
@@ -254,6 +260,12 @@ def _build_placement(root: Path, paths) -> Placement:
         inline_flow_files=inline_flow,
         content_globs=_globs_for(content_files),
     )
+
+    if unprobed:
+        names = '、'.join(Path(p).name for p in unprobed[:3])
+        more = f' 等 {len(unprobed)} 个' if len(unprobed) > 3 else ''
+        placement.warnings.append(
+            f'{len(unprobed)} 个文件读不出来，没参与版式判定：{names}{more}')
 
     # ---- 声明 ----
     if len(decl_files) == 1:
@@ -297,6 +309,7 @@ def _build_placement(root: Path, paths) -> Placement:
         'control_only_files': control_only,
         'inline_flow_files': inline_flow,
         'file_count': len(facts),
+        'unprobed_files': unprobed,
         'note': ('声明判据：顶层 default/define 且名字不带点号（排除 gui./config.）；'
                  '内容判据：label 里有演出语句；'
                  '控制流判据：全部 label 无演出且有 jump/call'),

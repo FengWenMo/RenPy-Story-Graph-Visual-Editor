@@ -132,7 +132,12 @@ class _Job(QRunnable):
         img = QImage()
         try:
             img = _decode(self.path, self.max_size, self.loader.project_root)
-        except Exception:                    # noqa: BLE001 - 缺图就是空 QImage
+        except Exception as e:               # noqa: BLE001 - 缺图就是空 QImage
+            # 这条在 Qt 工作线程里跑，宽是必须的（解码器崩不能带走整个窗口）。
+            # 但"缺图"和"解码器炸了"对用户都是灰格子 —— 留一条痕，
+            # 诊断面板里才分得清是文件没了还是 Pillow/Qt 那边出的问题。
+            from storygraph.core.safeguard import swallow
+            swallow('ui_qt.thumb_loader.decode', e)
             img = QImage()
         # 交还主线程（loader 是 QObject，信号会排队到它所属线程）。
         #

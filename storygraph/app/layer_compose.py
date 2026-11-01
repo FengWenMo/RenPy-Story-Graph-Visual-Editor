@@ -162,7 +162,11 @@ def _default_cache_dir() -> Path:
         from storygraph.app.thumbs import thumb_cache_dir
         base = Path(thumb_cache_dir())
         return base.parent if base.name == 'thumbs' else base
-    except Exception:                       # noqa: BLE001
+    except Exception as e:                  # noqa: BLE001 - 缓存目录退到 temp 是正常兜底
+        # 退到 temp 不算错，但这也意味着缩略图缓存不跟着项目走（换项目会串）。
+        # 留一条痕，免得以后查"为什么缩略图没了"时找不到方向。
+        from storygraph.core.safeguard import swallow
+        swallow('app.layer_compose.default_cache_dir', e)
         import tempfile
         return Path(tempfile.gettempdir()) / 'storygraph_thumbs'
 

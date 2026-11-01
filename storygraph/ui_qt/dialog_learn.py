@@ -1984,7 +1984,7 @@ class CustomStatementDialog(QDialog):
                 try:
                     s = slots[int(i)]
                     names.append(str(s.get('column') or s.get('text') or f'第{i + 1}格'))
-                except Exception:               # noqa: BLE001 - 认不出就说第几格
+                except (TypeError, ValueError, IndexError):
                     names.append(f'第{int(i) + 1}格')
             parts.append('这些格子没吃到东西：' + '、'.join(names[:6]))
         if not parts:

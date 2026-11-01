@@ -1676,7 +1676,11 @@ def _nine_slice(img, w: int, h: int, borders):
 def _measure(draw, text, font):
     try:
         return float(draw.textlength(text, font=font))
-    except Exception:                     # noqa: BLE001 - 老 Pillow
+    except (AttributeError, TypeError) as e:
+        # 老 Pillow 没有 `ImageDraw.textlength`（AttributeError），
+        # 或字体对象不是 Pillow 认识的类型（TypeError）→ 退到 `font.getsize`。
+        from storygraph.core.safeguard import swallow
+        swallow('app.stage_render.measure', e)
         return float(font.getsize(text)[0])
 
 

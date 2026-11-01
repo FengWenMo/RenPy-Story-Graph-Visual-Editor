@@ -182,7 +182,12 @@ class AssetCatalog:
         try:
             from storygraph.app import picker as P
             return P.image_spec_of(aid, row)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                # noqa: BLE001 - 选择器缺失也要导得出去
+            # 退化成裸 id：导出表里这一格会从 `tag attr` 变成 id。
+            # 不收窄类型 —— `P.image_spec_of` 是域函数，它能抛什么静态枚举不出来
+            # （审计 §5.2）。但必须留痕，否则"选择器没装上"和"这行本来就只有 id"
+            # 在导出结果里完全同形。
+            swallow('app.asset_catalog.image_spec_of', e)
             return str(aid)
 
     @staticmethod

@@ -1467,9 +1467,12 @@ def _add_dynamic_names(wb, ranges: dict) -> dict:
             wb.defined_names.add(DefinedName(
                 name, attr_text=_dynamic_range_formula(_sheet_name_of(ref))))
             names[asset_type] = name
-        except Exception:
-            # 个别 Excel 兼容模式写不进去时，退回固定区间下拉，不影响功能
+        except (KeyError, TypeError, ValueError) as e:
+            # 个别 Excel 兼容模式写不进去时，退回固定区间下拉，不影响功能。
+            # 收窄到 openpyxl `defined_names` 在兼容模式下的三种已知抛法
+            # （名字不合法 → ValueError；重复/缺失 → KeyError；类型不对 → TypeError）。
             names.pop(asset_type, None)
+            swallow('story.excel_export._add_dynamic_names', e)
     return names
 
 

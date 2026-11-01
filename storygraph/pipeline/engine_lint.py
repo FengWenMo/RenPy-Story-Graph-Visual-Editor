@@ -37,6 +37,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.safeguard import swallow
+
 #: 引擎**加载 / 编译阶段抛异常**的报错行：
 #:
 #:     File "game/script.rpy", line 13850: '{' was never closed
@@ -501,7 +503,11 @@ def declared_heads_near(path) -> set:
             return set()
         from storygraph.story.statement_registry import StatementRegistry
         return set(StatementRegistry.for_project(root).names())
-    except Exception:                              # noqa: BLE001 - 豁免清单拿不到不影响判据
+    except Exception as e:                         # noqa: BLE001 - 豁免清单拿不到不影响判据
+        # 空集是"宁可严"的既定策略（宁可多豁免不了，也不放过真错），
+        # 但必须留痕：否则"项目没有自定义语句"和"清单读崩了"同形，
+        # 后者会让 `mycue …` 被报成语法错，而且没人查得到为什么。
+        swallow('pipeline.engine_lint.declared_heads_near', e)
         return set()
 
 

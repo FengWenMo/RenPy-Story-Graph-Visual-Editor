@@ -52,7 +52,12 @@ def _root_key(project_root) -> str:
     """项目根的缓存键（Windows 大小写不敏感：同一份项目不能存两份）。"""
     try:
         return os.path.normcase(str(project_root or '')).rstrip('\\/')
-    except Exception:                            # noqa: BLE001
+    except (TypeError, ValueError) as e:
+        # `normcase` 只对"路径协议怪异的类型"抛（`__fspath__` 返回非 str/bytes
+        # → TypeError；内嵌空字节 → ValueError）。退化成原样字符串：
+        # 那会让 Windows 上大小写不同的同一项目算成两个缓存键 —— 只浪费内存，
+        # 不会给出错结果；但要留痕，不然永远查不到为什么缓存没命中。
+        swallow('app.stage_entry.root_key', e)
         return str(project_root or '')
 
 

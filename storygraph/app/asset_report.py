@@ -50,8 +50,13 @@ def _emit_custom_statement_section(stmts, cds, cds_error, out):
                 from storygraph.story.cds_registry import format_cds_report
                 text = format_cds_report(cds or [])
             out.append('    ' + text.replace('\n', '\n    '))
-        except Exception:                       # noqa: BLE001 - 报告不该因此失败
-            out.append(f'    （读到 {len(stmts or cds or [])} 条声明）')
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            # 以前这句是 `（读到 N 条声明）` —— 读者分不清"读到 N 条"到底
+            # 是成功摘要还是失败占位。现在明说是读取失败。
+            from storygraph.core.safeguard import swallow
+            swallow('app.asset_report.custom_statement_section', e)
+            out.append(f'    （读取失败：{len(stmts or cds or [])} 条声明没法排版）'
+                       f'　{e}')
 
 def _emit_engine_align_section(align: dict, out: list) -> None:
     """

@@ -421,9 +421,13 @@ def _declared_heads_near(source_path) -> set:
     """
     try:
         from storygraph.pipeline.engine_lint import declared_heads_near
-        return declared_heads_near(source_path)
-    except Exception:                              # noqa: BLE001
+    except ImportError as e:
+        # 只需要兜 import：`declared_heads_near` 自己内部把异常全接了。
+        # 以前这里是 `except Exception`（宽），但它吐不出任何痕迹 ——
+        # 空集到底是"项目没声明自定义语句"还是"模块没装上"，没人知道。
+        swallow('app.tables.declared_heads_near', e)
         return set()
+    return declared_heads_near(source_path)
 
 
 def _with_image_ref_warnings(warnings, beats, registry) -> list:

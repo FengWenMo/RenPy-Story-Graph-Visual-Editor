@@ -82,7 +82,12 @@ def _layout_gaps():
 def _col(name: str, fallback: str = '#8a8a8a') -> QColor:
     try:
         return QColor(theme.t(name))
-    except Exception:                    # noqa: BLE001
+    except Exception as e:               # noqa: BLE001 - 绘制路径，宽是合理的
+        # 主题表缺键 / 值拼错都退默认色。绘图在 `paint()` 里跑，抛出去就是
+        # 画布整个黑掉，所以保持宽 —— 但选色错误会一直重复出现，
+        # 留一条痕才看得出"某个块颜色不对"是主题表的问题。
+        from storygraph.core.safeguard import swallow
+        swallow('ui_qt.graph_canvas.col', e)
         return QColor(fallback)
 
 
@@ -91,7 +96,9 @@ def _elide(text: str, font: QFont, width: float) -> str:
     try:
         fm = QFontMetricsF(font)
         return fm.elidedText(str(text or ''), Qt.ElideRight, width)
-    except Exception:                    # noqa: BLE001
+    except (AttributeError, TypeError):
+        # `QFontMetricsF(font)` 拿到非字体（TypeError）/ `elidedText` 不支持
+        # 这个重载（AttributeError）→ 不省略，字可能溢出框（视觉退化，不影响功能）。
         return str(text or '')
 
 
@@ -1178,8 +1185,11 @@ class GraphCanvas(QGraphicsView):
             info = layout_graph(self.graph, layer_gap=layer_gap,
                                 node_gap=node_gap,
                                 stage=self._stage_box()) or {}
-        except Exception:                # noqa: BLE001
-            # 退而求其次：网格排开，至少不叠在一起
+        except Exception as e:           # noqa: BLE001 - 布局炸了也必须有排版
+            # 退而求其次：4 列网格排开，至少不叠在一起。布局算法读的是整个图
+            # （几千个块），抛什么静态说不清，这里必须保持宽 —— 但"这一版
+            # 其实是网格、不是按跳转分层"必须留痕，否则用户只会觉得"排得怪"。
+            swallow('ui_qt.graph_canvas.auto_layout', e)
             for i, node in enumerate(self.graph.nodes.values()):
                 node.x = 40 + (i % 4) * layer_gap
                 node.y = 40 + (i // 4) * node_gap

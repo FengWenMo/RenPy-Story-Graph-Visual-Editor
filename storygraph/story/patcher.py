@@ -508,7 +508,13 @@ def recover_source_ranges(beats: list, source_path,
         from storygraph.story.beat_build import beats_from_parse_result
         parsed = ParseResultBuilder().build(RenPyParser().parse(src))
         src_beats = beats_from_parse_result(parsed)
-    except Exception:                        # noqa: BLE001 - 解析失败就不找
+    except Exception as e:                   # noqa: BLE001 - 解析失败就不找
+        # 解析失败 → 一拍都对不上（`(0, N, 0)`），于是整章退回全量重写。
+        # 返回值与"真的一拍都没对上"同形，**调用方分不出来** —— 所以必须留痕：
+        # 诊断面板里能查到这一次是"解析炸了"还是"确实没对上"。
+        # （回执里写一行"行号恢复 0/N"要动 `PatchResult`，见
+        #   docs/宽泛except分类审计_2026-11-01.md §7.1 #1 的待办）
+        swallow('story.patcher.recover_source_ranges', e)
         return 0, len(beats), 0
 
     # 按 label 分组（保持顺序）：跨 label 对齐没有意义，也对不准

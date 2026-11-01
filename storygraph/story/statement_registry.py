@@ -606,8 +606,11 @@ def _known_heads() -> frozenset:
         try:
             from storygraph.core.vocabulary import RENPY_KNOWN_HEADS
             _KNOWN_HEADS = RENPY_KNOWN_HEADS
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                # noqa: BLE001 - 退化成空集，但要说一声
+            # 空集 = 一个宿主 statement 头都不认 → 语句覆盖率 / 校验基线会整体变。
+            # 缓存只在**成功**时写入（空集就是"没加载过"的哨兵，下次还会重试）。
             _KNOWN_HEADS = frozenset()
+            swallow('story.statement_registry.known_heads', e)
     return _KNOWN_HEADS
 
 

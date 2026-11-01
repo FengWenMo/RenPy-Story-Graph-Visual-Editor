@@ -135,6 +135,28 @@ def report_missing_sg_transforms(win) -> list:
 __all__ = ['GraphOpsMixin', 'report_missing_sg_transforms']
 
 
+def _swap_graph(win, graph, old, where: str) -> None:
+    """
+    "把当前图换成 `graph`"，**能进撤销栈就进，进不去也必须显示出来**。
+
+    两处调用（导入章节 `import_chapter_files` / 加载布局 `load_layout`）
+    原来各写一份一模一样的 12 行 try/except；抽出来是因为在
+    `test_no_budgeted_function_grew_longer_or_bushier` 那条棘轮上，
+    "给 except 补一条记录"会让这两个函数超预算 —— 而这条记录不能不加：
+    撤销命令建不起来时图照样显示（产品行为），但用户按 Ctrl+Z 没反应，
+    没痕就永远查不到"这次为什么没进历史"。
+    """
+    try:
+        from storygraph.graph.commands import ReplaceGraphCommand
+        if old is None:
+            win._set_graph(graph)
+        else:
+            win._run_command(ReplaceGraphCommand(win, graph, old))
+    except Exception as e:              # noqa: BLE001 - 命令建不起来也得把图显示出来
+        swallow(f'ui_qt.window_graph_ops.{where}', e)
+        win._set_graph(graph)
+
+
 class GraphOpsMixin:
     """
     剧情图那一半：结构分析 / 章节导入导出 / 布局存取 / 图级撤销。
@@ -1048,15 +1070,7 @@ class GraphOpsMixin:
             return res
         # 导入也进历史：一次导入几十个文件之后发现导错了，Ctrl+Z 就能回到
         # 导入前的图（旧版是 `ImportRenPyCommand`/`ReplaceGraphCommand`）。
-        try:
-            from storygraph.graph.commands import ReplaceGraphCommand
-            if old_graph is None:
-                self._set_graph(res['graph'])
-            else:
-                self._run_command(ReplaceGraphCommand(self, res['graph'],
-                                                      old_graph))
-        except Exception:                       # noqa: BLE001
-            self._set_graph(res['graph'])
+        _swap_graph(self, res['graph'], old_graph, 'import_chapter_files')
         # —— 贴上次的版式（W1b）：扫描结果为准，只把坐标贴上去 ——
         # 放在 `set_graph` / 撤销命令**之后**：先让图按自动排版成形，再覆盖坐标。
         placed = self._apply_saved_placement()
@@ -1668,14 +1682,7 @@ class GraphOpsMixin:
             self._log(f'[布局] 加载失败：{res.get("error")}')
             self._status(f'加载布局失败：{res.get("error")}')
             return ''
-        try:
-            from storygraph.graph.commands import ReplaceGraphCommand
-            if old is None:
-                self._set_graph(res['graph'])
-            else:
-                self._run_command(ReplaceGraphCommand(self, res['graph'], old))
-        except Exception:                       # noqa: BLE001
-            self._set_graph(res['graph'])
+        _swap_graph(self, res['graph'], old, 'load_layout')
         # 加载布局是"我要看这张新图" —— 显式适应窗口。
         # （连线/撤销那种重建默认**保住**缩放，见 `GraphCanvas.set_graph`；
         # 这里是少数几个"换了看什么"的场景，所以主动 fit 一次。）
@@ -2701,6 +2708,12 @@ class GraphOpsMixin:
             return
         files = info.get('files') or []
         unknown = info.get('unknown') or []
+        if info.get('error'):
+            # 查找本身失败 —— 千万不能落到下面的"没有缺失章节"分支上去，
+            # 那等于告诉用户"一切正常"（假阴性，见审计 §7.1 #3）。
+            self._log(f"[提示] 查找缺失章节失败：{info['error']}"
+                      f'　（不代表没有缺失章节）')
+            return
         if files:
             names = '、'.join(Path(p).name for p in files[:4])
             more = f' 等 {len(files)} 个' if len(files) > 4 else ''
@@ -2731,6 +2744,9 @@ class GraphOpsMixin:
             return
         files = list(info.get('files') or [])
         unknown = list(info.get('unknown') or [])
+        if info.get('error'):
+            self._status(f"查找相关章节失败：{info['error']}")
+            return
         if not files:
             self._status('没有需要补全的章节 —— 图上被跳到的 label 都有来源了'
                          '（或者项目里根本找不到它们）。')

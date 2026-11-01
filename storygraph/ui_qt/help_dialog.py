@@ -509,8 +509,13 @@ def _page(title: str, body: str, parent=None) -> QWidget:
     try:
         text.setTextFormat(Qt.TextFormat.RichText)
         text.setText(_emphasize(body))
-    except Exception:                        # noqa: BLE001
-        text.setText(body)
+    except (TypeError, AttributeError) as e:
+        # `_emphasize` 返回的不是 str（TypeError）/ Qt 这边没有对应重载
+        # （AttributeError）→ 退纯文本。帮助窗里宁可少一点粗体，不能整页空白。
+        from storygraph.core.safeguard import swallow
+        swallow('ui_qt.help_dialog.page', e)
+        text.setTextFormat(Qt.TextFormat.PlainText)
+        text.setText(str(body or ''))
     text.setWordWrap(True)
     text.setTextInteractionFlags(Qt.TextSelectableByMouse)
     text.setFont(QFont(theme.font_family(), theme.font_pt('body')))

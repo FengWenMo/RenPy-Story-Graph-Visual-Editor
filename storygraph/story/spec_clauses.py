@@ -263,7 +263,11 @@ def _token_spans(text: str) -> list:
     try:
         from storygraph.authoring.pattern import token_spans
         return [(int(a), int(b)) for a, b in token_spans(text) if b > a]
-    except Exception:                       # noqa: BLE001 - 词法层不可用时退化为空白切
+    except Exception as e:                  # noqa: BLE001 - 词法层不可用时退化为空白切
+        # 退化路径本身是既定的，但它**会改变词区间**（卡片/试切的位置会偏），
+        # 所以不能一声不响地切：诊断面板里要能查到"这一次用了退化路径"。
+        from storygraph.core.safeguard import swallow
+        swallow('story.spec_clauses.token_spans', e)
         spans = []
         for m in re.finditer(r'\S+', text):
             spans.append((m.start(), m.end()))

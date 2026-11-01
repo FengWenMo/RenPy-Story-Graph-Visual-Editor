@@ -759,11 +759,14 @@ class GraphSessionMixin:
         `chapter_controller.rpy`。所以图里确实没有线可画。
 
         工具必须把这句话说出来，而不是让用户对着一张没有线的图猜。
-        返回 `{'files': [...], 'unknown': [...], 'labels': [...]}`：
+        返回 `{'files': [...], 'unknown': [...], 'labels': [...], 'error': ''}`：
 
           · `files`   声明了那些 label 的文件（**建议一起导入** —— 导入后
             连线就出现了）；
-          · `unknown` 任何文件里都找不到的 label（脚本里写错了 / 动态跳转）。
+          · `unknown` 任何文件里都找不到的 label（脚本里写错了 / 动态跳转）；
+          · `error`   查找过程本身炸了（**非空时 `files` 不可信**）。
+            以前这里异常也返回空列表 —— 于是"扫不动"和"没有缺失章节"
+            对界面是同一句话，用户看到的是"一切正常"（假阴性）。
         """
         nodes = getattr(graph, 'nodes', None) or {}
         labels = sorted({str(getattr(n, 'label_name', '') or '')
@@ -771,7 +774,8 @@ class GraphSessionMixin:
                          if not getattr(n, 'file_path', None)} - {''})
         root = project_root or self.project_root
         if not root:
-            return {'files': [], 'unknown': list(labels), 'labels': labels}
+            return {'files': [], 'unknown': list(labels), 'labels': labels,
+                    'error': ''}
         already = {str(Path(f)) for f in self.graph_files(graph)}
         files = set()
         unknown = []
@@ -792,10 +796,13 @@ class GraphSessionMixin:
                 refs = find_files_referencing_labels(root, imported_labels)
                 for paths in refs.values():
                     files |= {str(p) for p in paths}
-        except Exception:                     # noqa: BLE001
-            return {'files': [], 'unknown': list(labels), 'labels': labels}
+        except Exception as e:                # noqa: BLE001 - 查找失败要让界面说出来
+            swallow('app.session_graph.missing_chapter_files', e)
+            return {'files': [], 'unknown': list(labels), 'labels': labels,
+                    'error': str(e) or e.__class__.__name__}
         files = sorted(f for f in files if str(Path(f)) not in already)
-        return {'files': files, 'unknown': unknown, 'labels': labels}
+        return {'files': files, 'unknown': unknown, 'labels': labels,
+                'error': ''}
     def node_variables(self, graph, nid) -> dict:
         """
         一个模块里**给策划看的剧情变量**（技术代码一条都不返回）。
