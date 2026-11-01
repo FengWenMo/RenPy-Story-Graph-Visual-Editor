@@ -6,11 +6,11 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 69,
-  "complex_functions": 220,
+  "long_functions": 62,
+  "complex_functions": 216,
   "print_calls": 240,
   "print_library": 3,
-  "swallow_calls": 1238,
+  "swallow_calls": 1239,
   "broad_excepts": 1227,
   "todos": 110,
   "long_files": 26,
@@ -22,8 +22,8 @@
  "cycle_shapes": [],
  "snapshot": {
   "modules": 253,
-  "total_lines": 162243,
-  "functions": 5511,
+  "total_lines": 162498,
+  "functions": 5545,
   "file_edges_all": 1248
  }
 }
