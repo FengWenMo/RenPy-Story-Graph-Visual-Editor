@@ -400,20 +400,7 @@ def export_beats_to_excel(beats: list, output_path,
     不给（手工新建、协作库导出）→ 不写那张表，行为与从前完全一致。
     """
     output_path = Path(output_path)
-    # **先过后缀白名单，再碰任何东西**（2026-11-01，Excel 安全层补的一刀）：
-    # 从前这条闸只在最后 `save_workbook_atomic` 里。可自打"重建前先读旧表、
-    # 把用户页/列接回来"之后，`.rpy` 这类路径会先在**读**那一步被安全检查拒绝，
-    # 报错就变成"拒绝打开 notes.rpy"（听起来像读坏了），而不是"这不是表格、
-    # 不许覆盖"。同一条判据两处说法不一致，人就分不清该改哪个参数。
-    # 现在提前用同一句人话拒绝，文件一个字节都不碰。
-    from storygraph.core.atomicio import WORKBOOK_SUFFIXES, RefusedWrite
-    _suffix = output_path.suffix.lower()
-    if _suffix not in WORKBOOK_SUFFIXES:
-        raise RefusedWrite(
-            f'拒绝把 Excel 写成 {output_path.name!r}：'
-            f'只允许 {" / ".join(WORKBOOK_SUFFIXES)}。'
-            f'（这里传进来的路径不是表格 —— 覆盖它会把原来的文件毁掉）')
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_workbook_path(output_path)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -444,7 +431,66 @@ def export_beats_to_excel(beats: list, output_path,
     # 从前会**全没**，而且没有备份。审计探针实测 6 条判据 0/6。
     #
     # 快照必须在覆盖之前、在新工作簿填完之后还原（见函数末尾）。
-    _user_snap = None
+    user_snap = _snapshot_user_content(output_path, headers)
+
+    symbols = make_symbols(registry) if registry is not None else None
+    _write_beat_rows(ws, beats, headers, symbols, spec_headers, extra_headers,
+                     statements, facts)
+    _style_beat_columns(ws, beats, spec_cols, spec_headers, extra_headers)
+    _write_candidate_layer(
+        wb, ws, registry, beats, statements, spec_headers, extra_headers,
+        output_path,
+        include_dropdowns=include_dropdowns,
+        include_thumbnails=include_thumbnails)
+
+    # 舞台快照：把"每一拍舞台上是什么样 + 本拍变了什么"算出来另写两张表。
+    # 文案不用再去脑补 scene/show/hide 叠加的结果（二）。
+    _write_stage_snapshot_sheet(wb, beats)
+    # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：**另存一张隐藏表**，
+    # 一行一格。它**不是**为了绕开 32767 —— 一段完整顶层文本装不进一个格子是
+    # 结构问题（"一格一行文本"才是对的形态）；**单行**超过 32767 照样报错。
+    _write_file_blocks_sheet(wb, beats)
+    _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
+    _write_source_meta(wb, source_file)
+
+    # —— **把人的东西还回去**（P0-E）：用户自加的页整张搬运，Beats 里自加的
+    #    列按 `LineId` 回填（行增删也能对上，身份不是行号）。——
+    _restore_user_content(wb, user_snap, beats, output_path)
+
+    from storygraph.story.xlsx_preserve import save_workbook
+    save_workbook(wb, output_path)     # 失败时说人话（Excel 开着是最常见原因）
+    return output_path
+
+
+def _prepare_workbook_path(output_path: Path) -> None:
+    """
+    后缀闸 + 建父目录（**先过白名单，再碰任何东西**）。
+
+    2026-11-01，Excel 安全层补的一刀：从前这条闸只在最后
+    `save_workbook_atomic` 里。可自打"重建前先读旧表、把用户页/列接回来"
+    之后，`.rpy` 这类路径会先在**读**那一步被安全检查拒绝，报错就变成
+    "拒绝打开 notes.rpy"（听起来像读坏了），而不是"这不是表格、不许覆盖"。
+    同一条判据两处说法不一致，人就分不清该改哪个参数。现在提前用同一句
+    人话拒绝，文件一个字节都不碰。
+    """
+    from storygraph.core.atomicio import WORKBOOK_SUFFIXES, RefusedWrite
+    _suffix = output_path.suffix.lower()
+    if _suffix not in WORKBOOK_SUFFIXES:
+        raise RefusedWrite(
+            f'拒绝把 Excel 写成 {output_path.name!r}：'
+            f'只允许 {" / ".join(WORKBOOK_SUFFIXES)}。'
+            f'（这里传进来的路径不是表格 —— 覆盖它会把原来的文件毁掉）')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _snapshot_user_content(output_path, headers):
+    """
+    在覆盖之前把用户手写的东西拿走；没有旧表 / 读不了 → None。
+
+    `safety.UnsafeWorkbook` 与 `PermissionError` **必须往上抛**：表在、但读
+    不了时不能重建 —— 重建会把它整份换成新表，用户自加的页 / 列 / 批注一起
+    没（虽然 atomicio 会留 .bak，但"需要你去翻备份"本身就是失败）。
+    """
     try:
         from storygraph.story.xlsx_preserve import snapshot_user_content
         # ⚠ **工具列要连英文名一起报上**（2026-10-25 第六轮）：
@@ -452,24 +498,23 @@ def export_beats_to_excel(beats: list, output_path,
         # 只拿中文标签去比，那些列会被当成"用户自加的列"，重建后**同一字段
         # 出现两列**（中文 + 英文），读回来取到空的那一列 —— 行内容全丢。
         _tool_names = list(headers) + [str(f) for f in BEAT_FIELDS]
-        _user_snap = snapshot_user_content(output_path,
-                                           tool_headers=_tool_names)
+        return snapshot_user_content(output_path, tool_headers=_tool_names)
     except (safety.UnsafeWorkbook, PermissionError):
-        # **表在、但读不了**：不能重建 —— 重建会把它整份换成新表，
-        # 用户自加的页 / 列 / 批注一起没（虽然 atomicio 会留 .bak，
-        # 但"需要你去翻备份"本身就是失败）。让人先处理那张表。
         raise
     except Exception as e:                     # noqa: BLE001 - 快照失败不该拦住出表
-        from storygraph.core.safeguard import swallow as _swallow
-        _swallow('excel_export.snapshot_user_content', e)
+        swallow('excel_export.snapshot_user_content', e)
+        return None
+
+
+def _write_beat_rows(ws, beats, headers, symbols, spec_headers, extra_headers,
+                     statements, facts) -> None:
+    """表头 + 数据行 + 两处批注（自定义语句头 / 引擎没认的属性）。"""
     ws.append(headers)
     for cell in ws[1]:
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
         cell.alignment = Alignment(vertical='center', wrap_text=True)
     ws.row_dimensions[1].height = 30
-
-    symbols = make_symbols(registry) if registry is not None else None
     # ⚠ **不再给选项体补 `True` 条件**（B 阶段三，2026-10-05）：
     # 从前必须补，是因为表里没有"这拍在菜单块里"这一位，只能拿 Condition
     # 记 1 bit（`True` = 在某个选项体里 / 空 = 块外）。现在隐藏列 `Nest`
@@ -499,6 +544,10 @@ def export_beats_to_excel(beats: list, output_path,
     # 没采过引擎事实时 facts 为空 → 一个批注都不挂（行为与从前一致）。
     _annotate_unknown_attrs(ws, beats, facts)
 
+
+def _style_beat_columns(ws, beats, spec_cols, spec_headers,
+                        extra_headers) -> None:
+    """列宽 / 隐藏内部列 / 冻结窗格 / 行高 / 自动筛选。"""
     # 列宽：台词最宽，技术列压窄。'ContentHash' 是协作指纹，给程序员看的，
     # 压到 12 并放到最后一列，避免它跟内容列抢视觉重心。
     widths = {'LineId': 14, 'Seq': 5, 'Label': 14, 'Kind': 10,
@@ -530,6 +579,11 @@ def export_beats_to_excel(beats: list, output_path,
     _last_col = get_column_letter(len(BEAT_FIELDS) + len(spec_cols))
     ws.auto_filter.ref = f'A1:{_last_col}{max(len(beats) + 1, 2)}'
 
+
+def _write_candidate_layer(wb, ws, registry, beats, statements, spec_headers,
+                           extra_headers, output_path, *, include_dropdowns,
+                           include_thumbnails) -> None:
+    """候选表 / 下拉 / 关键字表 / 活引用 / 资源图库（整块都可缺席）。"""
     if registry is not None and include_dropdowns:
         ranges = _write_candidate_sheets(wb, registry)
         names = _defined_names_for(ranges)
@@ -556,17 +610,14 @@ def export_beats_to_excel(beats: list, output_path,
         # 挂不上就退回注释（`choices_from` 绑不到候选表时，下面会走注释兜底）。
         _write_spec_arg_columns(ws, beats, statements, len(beats))
 
-    # 舞台快照：把"每一拍舞台上是什么样 + 本拍变了什么"算出来另写两张表。
-    # 文案不用再去脑补 scene/show/hide 叠加的结果（二）。
-    _write_stage_snapshot_sheet(wb, beats)
-    # 文件级保真块（顶层 `define`/`screen`/`init python`/…）：**另存一张隐藏表**，
-    # 一行一格。它**不是**为了绕开 32767 —— 一段完整顶层文本装不进一个格子是
-    # 结构问题（"一格一行文本"才是对的形态）；**单行**超过 32767 照样报错。
-    _write_file_blocks_sheet(wb, beats)
-    _write_usage_sheet(wb, registry, beats, bool(include_dropdowns))
-    # **来源信息**（2026-10-19，审计 P1-1）：这张表是从哪一份 .rpy 摊出来的。
-    # 导回时靠它自动走增量（见 `table_meta` 的 docstring）——
-    # 全量重生成会重排整份文件，而这件事完全可以不发生。
+
+def _write_source_meta(wb, source_file) -> None:
+    """
+    **来源信息**（2026-10-19，审计 P1-1）：这张表是从哪一份 .rpy 摊出来的。
+
+    导回时靠它自动走增量（见 `table_meta` 的 docstring）—— 全量重生成会重排
+    整份文件，而这件事完全可以不发生。
+    """
     try:
         from storygraph.story.table_meta import fingerprint_of, write_meta
         write_meta(wb, source_file=source_file,
@@ -575,12 +626,13 @@ def export_beats_to_excel(beats: list, output_path,
     except Exception as e:                     # noqa: BLE001 - 元信息不该拦住出表
         swallow('excel_export.export_beats_to_excel.meta', e)
 
-    # —— **把人的东西还回去**（P0-E）：用户自加的页整张搬运，Beats 里自加的
-    #    列按 `LineId` 回填（行增删也能对上，身份不是行号）。——
+
+def _restore_user_content(wb, user_snap, beats, output_path) -> None:
+    """把人的东西还回去（P0-E）；顺手留一份覆盖前的备份。"""
     try:
         from storygraph.story.xlsx_preserve import (backup_table,
                                                     restore_user_content)
-        _stats = restore_user_content(wb, _user_snap, beats=beats)
+        _stats = restore_user_content(wb, user_snap, beats=beats)
         # 覆盖前留一份 —— 兜住"快照没覆盖到的格式"（图表 / 透视表这类
         # openpyxl 搬不动的东西），也兜住工具自己未来可能踩的坑。
         _bak = backup_table(output_path)
@@ -588,10 +640,6 @@ def export_beats_to_excel(beats: list, output_path,
         _LAST_PRESERVE = dict(_stats, backup=str(_bak or ''))
     except Exception as e:                     # noqa: BLE001 - 见上面注释
         swallow('excel_export.restore_user_content', e)
-
-    from storygraph.story.xlsx_preserve import save_workbook
-    save_workbook(wb, output_path)     # 失败时说人话（Excel 开着是最常见原因）
-    return output_path
 
 
 
