@@ -139,6 +139,45 @@ def beat_edits_print(beat, fallback=None) -> str:
     return hashlib.md5(blob.encode('utf-8', 'replace')).hexdigest()[:12]
 
 
+def statement_line(stmt) -> int:
+    """一条语句 → 源码行号（认不出就 `0`，调用方据此**不猜**）。"""
+    try:
+        return int((getattr(stmt, 'source', None) or ('', 0))[1] or 0)
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+def beat_covering_line(beats, line: int):
+    """`line` 落在哪一拍的行区间（`src_first..src_last`）里 —— 没有就 `None`。"""
+    for b in beats:
+        first = int(getattr(b, 'src_first', 0) or 0)
+        last = int(getattr(b, 'src_last', 0) or 0)
+        if first and last and first <= line <= last:
+            return b
+    return None
+
+
+def replace_beat_line(beat, old: str, new: str) -> bool:
+    """在 `beat.code` / `beat.raw` 里替换（`new` 为空则删掉）一行。
+
+    找不到那一行返回 `False`（调用方据此记 `unplaced`）。
+    """
+    for attr in ('code', 'raw'):
+        text = str(getattr(beat, attr, '') or '')
+        if not text:
+            continue
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if line.strip() == old.strip():
+                if new:
+                    lines[i] = new
+                else:
+                    del lines[i]
+                setattr(beat, attr, '\n'.join(lines))
+                return True
+    return False
+
+
 class TableSessionMixin:
     """
     表格 / 拍编辑那一半（见模块 docstring 的职责边界）。
@@ -405,19 +444,10 @@ class TableSessionMixin:
         追加到那条赋值所在的拍，就自动落在同一个 `if` / `for` 里面。
         """
         node = (getattr(graph, 'nodes', {}) or {}).get(nid)
-        if node is None:
-            return {'ok': False, 'error': '这个模块不在了', 'applied': 0,
-                    'unplaced': 0, 'removed': 0}
-        path = str(getattr(node, 'file_path', '') or '')
-        label = str(getattr(node, 'label_name', '') or '')
-        if not path or not Path(path).exists():
-            return {'ok': False, 'error': '这个模块没有可写的源文件',
-                    'applied': 0, 'unplaced': 0, 'removed': 0}
-        # 只写"当前载入的这一章"的拍；别的章节先载入（不会切界面页）。
-        same = (self.script_path is not None
-                and Path(str(self.script_path)).resolve() == Path(path).resolve())
-        if not same:
-            self.load(path, label=label)
+        label = str(getattr(node, 'label_name', '') or '') if node else ''
+        error = self._load_variable_target(node, label)
+        if error:
+            return error
         from storygraph.core.statement import operation_source
         from storygraph.story import story_ops
         old_stmts = story_ops.narrative_statements(node)
@@ -429,100 +459,10 @@ class TableSessionMixin:
             return {'ok': False, 'error': f'文件里找不到 label {label} 的拍',
                     'applied': 0, 'unplaced': 0, 'removed': 0}
 
-        def beat_for_line(line):
-            for b in beats:
-                first = int(getattr(b, 'src_first', 0) or 0)
-                last = int(getattr(b, 'src_last', 0) or 0)
-                if first and last and first <= line <= last:
-                    return b
-            return None
-
-        def line_of(stmt):
-            try:
-                return int((getattr(stmt, 'source', None) or ('', 0))[1] or 0)
-            except (TypeError, ValueError, IndexError):
-                return 0
-
         #: `拍号 -> 改动前快照`：工作台的改动**同时**落在图节点与拍上，
         #: 而图级撤销（Ctrl+Z）只认得节点。没有这份快照，撤销之后
         #: "工作台说这条没了、导出里却还在"（2026-10-22 实测）。
         before_snaps: dict = {}
-
-        def remember(beat):
-            """动这一拍之前先把它的原样记下来（同一拍只记一次 = 最早那份）。"""
-            # 按**身份**找下标：`Beat` 是 dataclass（`__eq__` 比字段），
-            # `list.index()` 会把内容相同的两拍认成同一拍，快照就记错了对象。
-            idx = next((i for i, b in enumerate(self.beats) if b is beat), None)
-            if idx is None or idx in before_snaps:
-                return
-            try:
-                snap = self.snapshot(idx)
-            except Exception as e:              # noqa: BLE001 - 记不上快照不拦保存
-                swallow('app.session_table.apply_node_variable_edits.snap', e)
-                return
-            if snap is not None:
-                before_snaps[idx] = snap
-
-        def edit_line(beat, old, new):
-            """在 `beat.code` / `beat.raw` 里替换（或删掉）一行。"""
-            for attr in ('code', 'raw'):
-                text = str(getattr(beat, attr, '') or '')
-                if not text:
-                    continue
-                lines = text.split('\n')
-                for i, line in enumerate(lines):
-                    if line.strip() == old.strip():
-                        if new:
-                            lines[i] = new
-                        else:
-                            del lines[i]
-                        setattr(beat, attr, '\n'.join(lines))
-                        return True
-            return False
-
-        def anchor_of(op_index):
-            """
-            这一条新操作该落在**哪一拍、块体的哪一头**。
-
-            返回 `(beat, where)`：`where` 是 `'end'`（块体末尾，默认）或
-            `'head'`（块体最前面 = "块首插入"，2026-10-22）。两种落点共用
-            下面那段"循环头往后挪一拍"的判据 —— 块首就是循环体的第一行。
-
-            指到"循环头"那一拍（`for …:` 自己占一拍、块体在下一拍）时
-            往后挪一拍 —— 头拍的 `code` 是空的，写进去会落在循环**外面**。
-            """
-            want = None
-            where = 'end'
-            if isinstance(anchors, dict):
-                want = anchors.get(op_index)
-            elif anchors:
-                try:
-                    want = anchors[op_index]
-                except (IndexError, TypeError):
-                    want = None
-            if want is None:
-                want = insert_beat
-            if isinstance(want, (tuple, list)) and want:
-                # `(拍号, 'head')`：工作台选了"块首"时就这么递过来。
-                # 只给一个整数的是老契约（= 块体末尾），必须继续认。
-                where = str(want[1] if len(want) > 1 else 'end') or 'end'
-                want = want[0]
-            try:
-                want = int(want)
-            except (TypeError, ValueError):
-                return None, 'end'
-            if not 0 <= want < len(self.beats):
-                return None, 'end'
-            cand = self.beats[want]
-            if str(getattr(cand, 'label', '') or '') != label:
-                return None, 'end'
-            if (not str(getattr(cand, 'code', '') or '').strip()
-                    and str(getattr(cand, 'loop_header', '') or '').strip()
-                    and want + 1 < len(self.beats)):
-                nxt = self.beats[want + 1]
-                if str(getattr(nxt, 'label', '') or '') == label:
-                    cand = nxt
-            return cand, ('head' if where == 'head' else 'end')
 
         applied = unplaced = removed = 0
         inserted: list = []
@@ -533,23 +473,24 @@ class TableSessionMixin:
         for i, new in enumerate(new_ops):
             if i < len(old_ops):
                 old = old_ops[i]
-                line = line_of(old_stmts[i])
-                beat = beat_for_line(line) if line else None
+                line = statement_line(old_stmts[i])
+                beat = beat_covering_line(beats, line) if line else None
                 if beat is None:
                     unplaced += 1
                     continue
                 if new == old:
                     applied += 1
                     continue
-                remember(beat)
-                if edit_line(beat, old, new):
+                self._remember_beat_snapshot(beat, before_snaps)
+                if replace_beat_line(beat, old, new):
                     applied += 1
                 else:
                     unplaced += 1
             else:
                 # 新增：优先放进用户选中那条所在的拍（同一个块体 → 同一个
                 # `if` / `for` 里面）；没选/对不上就放到本章最后一拍。
-                beat, where = anchor_of(i)
+                beat, where = self._variable_anchor_of(
+                    i, label, anchors, insert_beat)
                 if beat is None:
                     beat, where = beats[-1], 'end'
                 if where == 'head':
@@ -559,7 +500,7 @@ class TableSessionMixin:
                     else:
                         entry[1].append(new)
                 else:
-                    remember(beat)
+                    self._remember_beat_snapshot(beat, before_snaps)
                     beat.code = ((str(beat.code or '') + '\n')
                                  if str(beat.code or '').strip() else '') + new
                 try:
@@ -569,15 +510,15 @@ class TableSessionMixin:
                     inserted.append(-1)
                 applied += 1
         for beat, rows in heads.values():
-            remember(beat)
+            self._remember_beat_snapshot(beat, before_snaps)
             self._prepend_beat_code(beat, rows)
         # 被删掉的多余旧操作（从后往前删，避免同一拍多行时下标跑掉）
         for i in range(len(new_ops), len(old_ops)):
-            line = line_of(old_stmts[i])
-            beat = beat_for_line(line) if line else None
+            line = statement_line(old_stmts[i])
+            beat = beat_covering_line(beats, line) if line else None
             if beat is not None:
-                remember(beat)
-            if beat is not None and edit_line(beat, old_ops[i], ''):
+                self._remember_beat_snapshot(beat, before_snaps)
+            if beat is not None and replace_beat_line(beat, old_ops[i], ''):
                 removed += 1
                 applied += 1
             else:
@@ -596,6 +537,95 @@ class TableSessionMixin:
                 'beat_snapshots': before_snaps,
                 'variables': merged.get('variables'),
                 'kept_tech': merged.get('kept_tech')}
+
+    def _load_variable_target(self, node, label: str):
+        """
+        把"要写哪一份文件"落定：节点 → 源文件 → **当前载入的那一章**。
+
+        只写当前载入的这一章的拍；别的章节**先载入**（不会切界面页）——
+        不载入就改，写的是另一章的 `self.beats`，产物会串章。
+
+        返回错误 dict（调用方原样返回给界面）或 `None`（可以往下写）。
+        """
+        if node is None:
+            return {'ok': False, 'error': '这个模块不在了', 'applied': 0,
+                    'unplaced': 0, 'removed': 0}
+        path = str(getattr(node, 'file_path', '') or '')
+        if not path or not Path(path).exists():
+            return {'ok': False, 'error': '这个模块没有可写的源文件',
+                    'applied': 0, 'unplaced': 0, 'removed': 0}
+        same = (self.script_path is not None
+                and Path(str(self.script_path)).resolve()
+                == Path(path).resolve())
+        if not same:
+            self.load(path, label=label)
+        return None
+
+    def _remember_beat_snapshot(self, beat, before_snaps: dict) -> None:
+        """
+        动这一拍之前先把它的原样记下来（同一拍只记一次 = 最早那份）。
+
+        为什么要有这份：工作台的改动**同时**落在图节点与拍上，而图级撤销
+        （Ctrl+Z）只认得节点。没有快照，撤销之后"工作台说这条没了、导出里
+        却还在"（2026-10-22 实测）。
+
+        ⚠ 按**身份**找下标：`Beat` 是 dataclass（`__eq__` 比字段），
+        `list.index()` 会把内容相同的两拍认成同一拍，快照就记错了对象。
+        """
+        idx = next((i for i, b in enumerate(self.beats) if b is beat), None)
+        if idx is None or idx in before_snaps:
+            return
+        try:
+            snap = self.snapshot(idx)
+        except Exception as e:              # noqa: BLE001 - 记不上快照不拦保存
+            swallow('app.session_table.apply_node_variable_edits.snap', e)
+            return
+        if snap is not None:
+            before_snaps[idx] = snap
+
+    def _variable_anchor_of(self, op_index, label: str, anchors, insert_beat):
+        """
+        一条新操作该落在**哪一拍、块体的哪一头**。
+
+        返回 `(beat, where)`：`where` 是 `'end'`（块体末尾，默认）或
+        `'head'`（块体最前面 = "块首插入"，2026-10-22）。两种落点共用
+        下面那段"循环头往后挪一拍"的判据 —— 块首就是循环体的第一行。
+
+        指到"循环头"那一拍（`for …:` 自己占一拍、块体在下一拍）时
+        往后挪一拍 —— 头拍的 `code` 是空的，写进去会落在循环**外面**。
+        """
+        want = None
+        where = 'end'
+        if isinstance(anchors, dict):
+            want = anchors.get(op_index)
+        elif anchors:
+            try:
+                want = anchors[op_index]
+            except (IndexError, TypeError):
+                want = None
+        if want is None:
+            want = insert_beat
+        if isinstance(want, (tuple, list)) and want:
+            # `(拍号, 'head')`：工作台选了"块首"时就这么递过来。
+            # 只给一个整数的是老契约（= 块体末尾），必须继续认。
+            where = str(want[1] if len(want) > 1 else 'end') or 'end'
+            want = want[0]
+        try:
+            want = int(want)
+        except (TypeError, ValueError):
+            return None, 'end'
+        if not 0 <= want < len(self.beats):
+            return None, 'end'
+        cand = self.beats[want]
+        if str(getattr(cand, 'label', '') or '') != label:
+            return None, 'end'
+        if (not str(getattr(cand, 'code', '') or '').strip()
+                and str(getattr(cand, 'loop_header', '') or '').strip()
+                and want + 1 < len(self.beats)):
+            nxt = self.beats[want + 1]
+            if str(getattr(nxt, 'label', '') or '') == label:
+                cand = nxt
+        return cand, ('head' if where == 'head' else 'end')
 
     def _prepend_beat_code(self, beat, lines) -> None:
         """
