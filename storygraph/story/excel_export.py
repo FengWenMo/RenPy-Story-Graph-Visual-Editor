@@ -13,6 +13,7 @@ storygraph.story.excel_export
 
 from __future__ import annotations
 from storygraph.core.safeguard import swallow
+from storygraph.core.atomicio import save_workbook_atomic
 import re
 from io import BytesIO
 from pathlib import Path
@@ -1804,7 +1805,7 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
     except Exception as e:
         swallow('excel_export.refresh_candidate_sheets', e)
 
-    wb.save(table_path)
+    save_workbook_atomic(wb, table_path)
     return table_path
 
 
@@ -1831,7 +1832,7 @@ def refresh_stage_views(table_path, registry=None) -> Path:
         except Exception as e:                    # noqa: BLE001 - 原文也能推导
             swallow('excel_export.refresh_stage_views.hydrate', e)
         _write_stage_snapshot_sheet(wb, beats)
-        wb.save(table_path)
+        save_workbook_atomic(wb, table_path)
     finally:
         wb.close()
     return table_path

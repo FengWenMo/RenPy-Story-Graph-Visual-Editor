@@ -49,6 +49,11 @@ REQUIRED_MODULES = (
     'storygraph.core.consoleio',
     'storygraph.core.crashlog',
     'storygraph.core.safeguard',
+    # 2026-11-01：写盘只有一条路（`core.atomicio`）与启动前的系统 DLL 体检
+    # （`core.preflight`）。两者都在**打包后最容易静默缺失**的位置上
+    # （函数体内 import / 启动早期 import），必须在打包环境里真的 import 一次。
+    'storygraph.core.atomicio',
+    'storygraph.core.preflight',
     'storygraph.parsing.renpy_parser',
     'storygraph.story.beat_build',
     'storygraph.story.beat_render',
@@ -303,6 +308,25 @@ def run() -> dict:
         err = (f'未捕获异常 {type(e).__name__}: {e}\n'
                + traceback.format_exc(limit=3))
     checks.append(('Qt 界面可构建', not err, err))
+
+    # **系统 DLL**（2026-11-01，外部审查 5.12）：`Qt6Core.dll` 依赖
+    # `icuuc.dll`，而那是 Win10 1607+ 的系统组件 —— 打包不会带上它，
+    # 老系统 / Wine 上图形界面会起不来（命令行不受影响）。
+    #
+    # ⚠ 缺了就是**红**，不是"只报告"：这个包的主产品是图形界面，在这台机器上
+    # 它起不来 —— 自检说"全部通过"就是假绿（正是审查报告最反对的那种）。
+    # 详情里同时说清"命令行不受影响"，别让人以为整个工具废了。
+    try:
+        from storygraph.core import preflight
+        deps = preflight.check_gui_system_dlls()
+    except Exception as e:                      # noqa: BLE001
+        deps = {'ok': True, 'missing': [], 'detail': f'检查没做成：{e}'}
+    dll_ok = bool(deps.get('ok'))
+    checks.append(('系统 DLL（图形界面依赖）', dll_ok,
+                   ('可用：' + deps.get('detail', '')) if dll_ok
+                   else ('缺 ' + '、'.join(deps.get('missing') or [])
+                         + ' —— 图形界面在这台机器上起不来（命令行不受影响，'
+                           '体检 / 导表 / 导出都能用）。' + deps.get('detail', ''))))
 
     try:
         applicable, err, detail = _check_stage_edition()

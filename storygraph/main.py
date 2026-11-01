@@ -88,6 +88,20 @@ def main(argv=None) -> int:
             print(f'       崩溃日志：{log}', file=sys.stderr)
         return 1
 
+    # —— **先查系统 DLL，再开窗**（2026-11-01，外部审查 5.12）——
+    #
+    # `Qt6Core.dll` 的导入表里有 `icuuc.dll`（Win10 1607+ 自带的系统组件）。
+    # 老 Windows / 精简镜像 / **Wine** 上没有它，而窗口程序的 stderr 被接到
+    # 空设备 —— 用户看到的就是"双击了一下，什么都没发生"。这里在开窗之前
+    # 先用 ctypes 真的加载一次；缺了就弹一个**不依赖 Qt** 的系统对话框。
+    from storygraph.core import preflight
+    deps = preflight.check_gui_system_dlls()
+    if not deps.get('ok'):
+        preflight.warn_gui_startup_failure(deps)
+        if log:
+            print(f'       崩溃日志：{log}', file=sys.stderr)
+        return 2
+
     # PySide6 在就开 Qt 版；Qt 前端**自身的异常不吞** ——
     # 吞掉会变成"窗口没出来但退出码是 0"，比崩溃更难查。
     from storygraph.main_qt import main as qt_main

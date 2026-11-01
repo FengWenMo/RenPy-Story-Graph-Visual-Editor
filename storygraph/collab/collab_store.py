@@ -38,6 +38,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.atomicio import save_workbook_atomic
 from storygraph.core.collab_status import (  # noqa: F401  (本模块 re-export)
     STATUS_APPROVED, STATUS_DRAFT, STATUS_LABELS, STATUS_REVIEW, STATUSES)
 from storygraph.story.beat_fields import BEAT_FIELDS
@@ -874,7 +875,7 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
     ws.cell(row=ws.max_row, column=2, value=_now())
     for col, w in zip('ABCDEFG', (16, 10, 14, 12, 14, 20, 60)):
         ws.column_dimensions[col].width = w
-    wb.save(out)
+    save_workbook_atomic(wb, out)
 
     with connect(db_path) as conn:
         _audit(conn, actor, 'pull', '', {'sheet': str(out),
@@ -1769,7 +1770,7 @@ def _drop_local_row(sheet_path, lid: str) -> bool:
         for r in range(2, ws.max_row + 1):
             if str(ws.cell(row=r, column=id_col).value or '').strip() == lid:
                 ws.delete_rows(r)
-                wb.save(path)
+                save_workbook_atomic(wb, path)
                 return True
         return False
     finally:
@@ -1829,7 +1830,7 @@ def _write_local_rows(sheet_path, payloads: dict) -> int:
                         value = 0
                 ws.cell(row=r, column=col, value='' if value is None else value)
             n += 1
-        wb.save(sheet_path)
+        save_workbook_atomic(wb, sheet_path)
         return n
     finally:
         wb.close()
@@ -1894,7 +1895,7 @@ def _refresh_collab_rows(db_path, sheet_path, line_ids) -> int:
                 if c:
                     ws.cell(row=r, column=c, value=value)
             n += 1
-        wb.save(sheet_path)
+        save_workbook_atomic(wb, sheet_path)
         return n
     finally:
         wb.close()

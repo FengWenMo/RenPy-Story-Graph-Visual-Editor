@@ -72,16 +72,16 @@ class TestWriteTextAtomic:
         old = b'label a:\n    e "old"\n    return\n'
         target.write_bytes(old)
 
-        import storygraph.story.paths as paths
-        real_replace = paths.os.replace
+        import storygraph.core.atomicio as atomicio
+        real_replace = atomicio.os.replace
 
         def boom(src, dst):
             raise OSError('模拟磁盘满')
 
-        monkeypatch.setattr(paths.os, 'replace', boom)
+        monkeypatch.setattr(atomicio.os, 'replace', boom)
         with pytest.raises(OSError):
             write_text_atomic(target, 'label a:\n    e "new"\n    return\n')
-        monkeypatch.setattr(paths.os, 'replace', real_replace)
+        monkeypatch.setattr(atomicio.os, 'replace', real_replace)
         assert target.read_bytes() == old, '失败时把目标写坏了'
         assert [p.name for p in tmp_path.iterdir() if '.tmp-' in p.name] == []
 

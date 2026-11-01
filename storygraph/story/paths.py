@@ -9,18 +9,19 @@ storygraph.story.paths
 """
 
 from __future__ import annotations
-import os
-from datetime import datetime
-import uuid
 from pathlib import Path
 
-from storygraph.core.safeguard import swallow
+from storygraph.core import atomicio
 
 
 def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
                       backup: bool = False) -> Path:
     """
     把文本**逐字节**写进 `path`：保留换行、原子替换、可选备份。
+
+    ⚠ 2026-11-01：实现已经**搬进 `core/atomicio.py`**（`.rpy` 与 `.xlsx`
+    必须共用同一条写盘路，见那边模块文档）。这里保留原名与签名，
+    是因为调用点与测试都用它 —— 换名只会制造一次无谓的搬家风险。
 
     为什么不能用 `Path.write_text(text, encoding='utf-8')`（P1-2，2026-10-16
     调研实锤）：
@@ -45,58 +46,8 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
     被 `except OSError` 接住，从前会留下 `.xxx.tmp-<pid>`（写进 `game/`
     就是一个 Ren'Py 不认的垃圾文件）。
     """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    suffix = f'.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}'
-    tmp = target.with_name(f'.{target.name}{suffix}')
-    try:
-        with open(tmp, 'w', encoding=encoding, newline='') as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        if backup and target.exists():
-            bak = target.with_name(target.name + '.bak')
-            # ⚠ **不覆盖已有 `.bak`**（2026-10-25，P1）：第一份备份通常是
-            # **用户手写的原始文件**，最值钱；而从前的写法是每次都重写同一个
-            # `名字.bak` —— 第二次覆盖写入之后，那个 `.bak` 变成"工具上一次的
-            # 产物"，原件就永久没了。`force` 覆盖手写文件时它是**唯一的安全网**，
-            # 不该被下一次导出悄悄换掉。
-            # 已有 `.bak` → 新备份带时间戳；只保留最近 5 份（含第一份）。
-            if bak.exists():
-                stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-                bak = target.with_name(f'{target.name}.bak-{stamp}')
-                try:
-                    olds = sorted(target.parent.glob(f'{target.name}.bak-*'))
-                    for extra in olds[:-4]:
-                        extra.unlink(missing_ok=True)
-                except OSError as e:               # noqa: BLE001 - 清理旧备份失败不影响写入
-                    swallow('story.paths.write_text_atomic.prune_bak', e)
-            # 备份用二进制复制：**逐字节**保留原文（换行、BOM、编码都不动）
-            btmp = bak.with_name(f'.{bak.name}{suffix}')
-            try:
-                with open(target, 'rb') as src, open(btmp, 'wb') as dst:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-                    dst.flush()
-                    os.fsync(dst.fileno())
-                os.replace(btmp, bak)
-            finally:
-                try:
-                    btmp.unlink()
-                except OSError as e:               # noqa: BLE001 - 清理临时文件
-                    swallow('story.paths.write_text_atomic.cleanup_bak', e)
-        os.replace(tmp, target)
-    except BaseException:                           # noqa: BLE001 - 清理后原样抛出
-        try:
-            tmp.unlink()
-        except OSError as e2:                       # noqa: BLE001 - 清理临时文件
-            swallow('story.paths.write_text_atomic.cleanup_tmp', e2)
-        raise
-    return target
-
+    return atomicio.write_text_atomic(path, text, encoding=encoding,
+                                      backup=backup)
 
 
 def inside_game_dir(out_path, project_root=None) -> bool:

@@ -29,6 +29,7 @@ from storygraph.core.vocabulary import (
 from storygraph.excel.cells import append_text_row, set_text
 
 from storygraph.core.safeguard import swallow
+from storygraph.core.atomicio import save_workbook_atomic
 from storygraph.assets.asset_registry_constants import (  # 2026-10-11 拆分
     SUPPORTED_IMAGE_EXT,
     SUPPORTED_AUDIO_EXT,
@@ -1189,7 +1190,7 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
         if changed:
             if backup:
                 _backup_table(path)
-            wb.save(path)
+            save_workbook_atomic(wb, path, backup=False)
     except Exception as e:                      # noqa: BLE001 - 改不动就当没改
         swallow('assets.asset_registry.update_table_paths', e)
         return 0
@@ -1270,7 +1271,7 @@ def backfill_dimension_columns(asset_dir, rows, backup: bool = True) -> dict:
             if changed or added:
                 if backup:
                     _backup_table(path)
-                wb.save(path)
+                save_workbook_atomic(wb, path, backup=False)
         finally:
             wb.close()
     except Exception as e:                      # noqa: BLE001 - 写不动就当没写
@@ -1320,7 +1321,7 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
         if removed:
             if backup:
                 _backup_table(path)
-            wb.save(path)
+            save_workbook_atomic(wb, path, backup=False)
     except Exception as e:                      # noqa: BLE001
         swallow('assets.asset_registry.delete_rows_from_table', e)
         return 0
@@ -1361,7 +1362,7 @@ def delete_rows_by_id(asset_dir, table_key: str, ids, backup: bool = True) -> in
         if removed:
             if backup:
                 _backup_table(path)
-            wb.save(path)
+            save_workbook_atomic(wb, path, backup=False)
     except Exception as e:                      # noqa: BLE001
         swallow('assets.asset_registry.delete_rows_by_id', e)
         return 0
@@ -1821,7 +1822,7 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
                     # 是中是英 —— 同一批表里两种表头，用户看着像坏了。
                     ws.append([ASSET_FIELD_LABELS.get(f, f) for f in fields])
                     _asset_append_row(ws, [row.get(h, '') for h in fields])
-                wb.save(p)
+                save_workbook_atomic(wb, p)
             except Exception as e:
                 print(f"[asset_registry] 写入资源表失败: {e}")
     return True
@@ -1983,7 +1984,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
             if added or updated:
                 if backup:
                     _backup_table(path)
-                wb.save(path)
+                save_workbook_atomic(wb, path, backup=False)
         else:
             wb = openpyxl.Workbook()
             ws = wb.active
@@ -2004,7 +2005,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
                 if rp:
                     seen.add(rp)
                 added += 1
-            wb.save(path)
+            save_workbook_atomic(wb, path)
     except Exception as e:                      # noqa: BLE001
         print(f"[asset_registry] 写入 {fname} 失败: {e}")
         return 0
@@ -2101,33 +2102,33 @@ def _row_file_exists(kind: str, row, project_root=None, walk=None) -> bool:
 
 def _backup_table(path: Path) -> str:
     """
-    把资源表备份成 `*.bak.xlsx`（返回备份路径；失败返回 ''）。
+    把资源表备份成 `*.bak.xlsx`（返回备份路径）。
+
+    为什么**失败就抛**（2026-11-01，外部审查 C3）：从前这里
+    `except Exception: swallow(…); return ''`，而调用方紧接着照常
+    `wb.save(path)` —— 磁盘满 / 权限不足 / 杀毒软件占着文件时，
+    用户以为有 `.bak`，其实没有，然后原表被覆盖。**备份失败必须中止整次写入**：
+    抛出去之后调用方的 `except` 会接住，保存那一步根本不会执行。
 
     **上一代不覆盖**（P2-4，2026-10-25）：连续两次同步删掉不同行时，
     固定名 `*.bak.xlsx` 每次都盖掉上一代 —— 第二代的备份一命名，第一代
     就没了。所以写之前先把旧的那份归档成 `<名>.bak-<时间戳>.xlsx`
     （不匹配 `*.bak.xlsx` 这个固定名，不会影响"按固定名找备份"的老读者）。
     """
-    try:
-        import shutil
-        from datetime import datetime
-        bak = Path(path).with_suffix('.bak.xlsx')
-        if bak.is_file():
-            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-            old = Path(path).with_suffix(f'.bak-{stamp}.xlsx')
-            n = 1
-            while old.exists():
-                old = Path(path).with_suffix(f'.bak-{stamp}-{n}.xlsx')
-                n += 1
-            try:
-                shutil.copyfile(bak, old)
-            except OSError as e:                # noqa: BLE001 - 归档失败不该拦住备份
-                swallow('assets.asset_registry._backup_table.archive', e)
-        shutil.copyfile(path, bak)
-        return str(bak)
-    except Exception as e:                      # noqa: BLE001
-        swallow('assets.asset_registry._backup_table', e)
-        return ''
+    import shutil
+    from datetime import datetime
+    bak = Path(path).with_suffix('.bak.xlsx')
+    if bak.is_file():
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        old = Path(path).with_suffix(f'.bak-{stamp}.xlsx')
+        n = 1
+        while old.exists():
+            old = Path(path).with_suffix(f'.bak-{stamp}-{n}.xlsx')
+            n += 1
+        # 归档失败也可以抛：旧备份拿不出来的话，下一步就会把它盖掉。
+        shutil.copyfile(bak, old)
+    shutil.copyfile(path, bak)
+    return str(bak)
 
 
 def parse_asset_tables(asset_dir, hooks=None, project_root=None,
@@ -3132,7 +3133,7 @@ def register_missing_assets(project_root, asset_dir=None,
                 values = [row.get(h, '') for h in headers]
                 append_text_row(ws, values)
                 all_rows.append(row)
-            wb.save(target)
+            save_workbook_atomic(wb, target)
             added_total += len(fresh)
         except Exception as e:                # noqa: BLE001
             return {'ok': False, 'error': f'写 {filename} 失败：{e}',

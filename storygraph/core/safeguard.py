@@ -20,13 +20,20 @@ storygraph.core.safeguard
 
   · 记进一个有界环形缓冲（默认 200 条，按 context 聚合计数）；
   · `report()` / `recent()` 给控制台、测试、体检用；
-  · `STORYGRAPH_DEBUG=1`（或 `set_debug(True)`）时同时打到 stderr。
+  · `STORYGRAPH_DEBUG=1`（或 `set_debug(True)`）时同时打到 stderr；
+  · **同时进标准库 `logging`**（2026-11-01，外部审查 5.4 / P1-7）：
+    从前全项目 0 处 `logging`，只有这个自造的环形缓冲 —— 于是打包后的
+    无窗口版本（没有 stderr）连这一条都看不见。现在 `swallow()` 除了
+    记账，还会往 `logging.getLogger('storygraph')` 记一条 DEBUG。
+    默认不输出（和标准库日志一样）；`configure(debug=True)` 或
+    `STORYGRAPH_DEBUG=1` 时打到 stderr，`configure(log_file=…)` 时落盘。
 
 零依赖：只用标准库（core 层的规矩）。
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections import OrderedDict
@@ -67,6 +74,79 @@ def set_debug(on) -> None:
     _debug = None if on is None else bool(on)
 
 
+#: 标准库日志器：`swallow()` 记 DEBUG，`configure()` 决定它往哪去。
+LOGGER_NAME = 'storygraph'
+logger = logging.getLogger(LOGGER_NAME)
+
+
+def configure(*, debug=None, log_file=None, level=None) -> logging.Logger:
+    """
+    把"被兜住的错误"接进标准库 `logging`。**幂等**（重复调用不会叠 handler）。
+
+    三种去向，可以叠加：
+
+      · `debug=True`（或环境变量 `STORYGRAPH_DEBUG=1`）→ 打到 stderr；
+      · `log_file=<路径>` → 追加写进文件（GUI 崩溃日志、CI 归档都用这条）；
+      · 都不给 → 只进环形缓冲（`report()` 仍能取到），终端不吵。
+
+    为什么要它（2026-11-01，外部审查 5.4）：全项目 0 处 `logging`，而打包后
+    的**无窗口版本根本没有 stderr** —— 193 处 `print` 连同 `swallow` 的
+    调试输出一起消失，"双击没反应"就真的一点痕迹都不剩。
+    """
+    if debug is not None:
+        set_debug(bool(debug))
+    on = _debug_on()
+    logger.setLevel(logging.DEBUG if (on or log_file) else logging.WARNING)
+    # **幂等**：先把上一次挂的、带我们标记的 handler 摘掉，再按需重挂。
+    for h in list(logger.handlers):
+        if getattr(h, '_storygraph', False):
+            logger.removeHandler(h)
+            _close_quietly(h)
+    if on:
+        sh = logging.StreamHandler(stream=sys.stderr)
+        sh.setLevel(logging.DEBUG)
+        sh.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+        sh._storygraph = True
+        logger.addHandler(sh)
+    if log_file:
+        try:
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(
+                '%(asctime)s [%(levelname)s] %(message)s'))
+            fh._storygraph = True
+            logger.addHandler(fh)
+        except OSError as exc:
+            # 写不了日志文件不该拖垮主流程（磁盘满 / 目录只读）。
+            # 但要留痕：这是"你以为了“有日志”，其实没有"的那一格。
+            logger.warning('日志文件写不了（%s）：%s', log_file, exc)
+    logger.propagate = False
+    return logger
+
+
+def _close_quietly(handler) -> None:
+    """关掉一个 handler；关不掉也不算错（最坏是它还挂着，下次配置再摘）。"""
+    try:
+        handler.close()
+    except Exception as exc:                 # noqa: BLE001 - 关 handler 失败无关紧要
+        logger.debug('关闭日志 handler 失败：%s', exc)
+
+
+def summary_line(limit: int = 3) -> str:
+    """
+    一行摘要：「本次有 N 次被兜住的错误（--debug 看明细）」。
+
+    给 CLI 在**命令成功之后**打印 —— "退出码 0、但中途有东西被吞掉"
+    正是最该被看见的那一格（外部审查 5.4 的那张表全是这种形态）。
+    没有记录时返回空串。
+    """
+    if not _records:
+        return ''
+    names = '、'.join(k for k, _n, _l in recent(limit))
+    tail = f'；加 --debug 看明细（首条：{names}）' if names else ''
+    return f'注意：本次运行有 {_total} 次错误被兜住、没有中断{tail}'
+
+
 def swallow(context: str, exc: BaseException = None) -> None:
     """
     记一笔"这里出过错，但按设计继续往下走"。
@@ -98,6 +178,9 @@ def swallow(context: str, exc: BaseException = None) -> None:
             rec['samples'].append(detail)
             del rec['samples'][SAMPLES_PER_CONTEXT:]
         _total += 1
+        # 标准库日志（`configure()` 决定去向；没配过就是"不输出"）。
+        # DEBUG 级：它不是错误，是"被兜住了"，默认不该污染终端。
+        logger.debug('%s: %s', key, detail or '(no message)')
         if _debug_on():
             print(f'[swallow] {key}: {detail}', file=sys.stderr)
     except Exception:                 # noqa: BLE001 - 记录失败也不许影响主流程
@@ -195,5 +278,6 @@ def clear() -> None:
     _overflow = 0
 
 
-__all__ = ['MAX_CONTEXTS', 'clear', 'contexts', 'records', 'recent', 'report',
-           'report_since', 'set_debug', 'snapshot', 'swallow', 'total']
+__all__ = ['LOGGER_NAME', 'MAX_CONTEXTS', 'clear', 'configure', 'contexts',
+           'logger', 'records', 'recent', 'report', 'report_since',
+           'set_debug', 'snapshot', 'summary_line', 'swallow', 'total']

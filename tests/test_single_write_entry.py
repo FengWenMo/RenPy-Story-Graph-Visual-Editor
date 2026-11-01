@@ -32,12 +32,18 @@ PKG = ROOT / 'storygraph'
 
 #: 允许直接落盘的地方 —— 每个都要说明**写的是什么**。
 WRITERS = {
-    'story/paths.py::write_text_atomic':
-        '**原子写原语**（唯一实现）：临时文件 + fsync + os.replace，'
-        '`newline=""` 保留换行。它**不是旁路** —— 就是 '
+    'core/atomicio.py::write_text_atomic':
+        '**原子写原语**（唯一实现，`.rpy` 与 `.xlsx` 共用）：临时文件 + fsync + '
+        'os.replace，`newline=""` 保留换行。它**不是旁路** —— 就是 '
         '`generation_guard.write_generation` / `write_beats_to_rpy` /'
         '改名补丁（`asset_extensions.apply_rename_patch`）落盘时调的那一处'
-        '（P1-2：从前 `write_text` 会改 CRLF、且非原子）。',
+        '（P1-2：从前 `write_text` 会改 CRLF、且非原子）。2026-11-01 从 '
+        '`story/paths.py` 搬到这里，因为 Excel 那条路也要走它',
+    'core/atomicio.py::write_bytes_atomic':
+        '**逐字节**写原语（备份拷贝、二进制复制）—— 不做编码、不碰换行',
+    'core/atomicio.py::backup_file':
+        '写**备份**（`<名>.bak` / `<名>.bak-<时间戳>`），不是目标文件本身；'
+        '失败即抛，调用方据此中止整次写入',
     'app/session_graph.py::save_layout': '写布局 JSON（不是脚本）',
     'app/layout_store.py::save_placement':
         '写**版式**（`.storygraph/layout.json`：只有坐标 + 手工草图边，'

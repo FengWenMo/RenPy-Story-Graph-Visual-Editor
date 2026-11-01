@@ -878,7 +878,7 @@ def stash_asset_stats(**stats) -> None:
 
 def save_workbook(wb, path) -> None:
     """
-    `wb.save(path)`，失败时把"Excel 把这个文件锁着"翻成人话。
+    Excel 保存的唯一入口：**原子替换 + 多代备份 + 后缀白名单**。
 
     为什么（2026-10-25）：资源表/剧本表都是**用户在 Excel 里开着**的文件。
     `wb.save()` 在那种情况下抛 `PermissionError: [Errno 13] Permission denied:
@@ -886,24 +886,25 @@ def save_workbook(wb, path) -> None:
     "没权限"、还是"工具坏了"。而且这条路走的是"扫描资源 / 生成演出表"，
     用户一天点十几次。
 
+    为什么（2026-11-01，外部审查 P0-2）：只把报错翻译成人话**不够** ——
+    `wb.save()` 本身是三无写盘（无原子、无备份、无后缀校验）。实测
+    `collab import-ir --sheet <某个.rpy>` 把 1488 字节的剧本覆盖成 15481
+    字节的 Excel。现在这一层只是"翻译 + 转发"，真正的写盘在
+    `core.atomicio.save_workbook_atomic`（与 `.rpy` 同一条路）。
+
     只包装消息，**异常类型不变**（`PermissionError` 仍是 `PermissionError`），
     调用方既有的 `except OSError` 全部照旧有效。
     """
+    from storygraph.core import atomicio
+
     try:
-        wb.save(path)
+        atomicio.save_workbook_atomic(wb, path)
     except OSError as exc:
-        raise type(exc)(_save_hint(exc, path)) from exc
+        raise type(exc)(atomicio.human_io_error(exc, path)) from exc
 
 
 def _save_hint(exc, path) -> str:
-    p = Path(path)
-    base = f'写不进 {p.name}：'
-    if isinstance(exc, PermissionError):
-        return (base + '这个文件可能正被 Excel / WPS 打开着（也可能是只读或被别的'
-                       '程序占用）。关掉那个窗口再试一次 —— 表还在，一个字没动。')
-    text = str(exc)
-    if 'No space' in text or 'space' in text.lower():
-        return base + '磁盘满了。表还在，一个字没动。'
-    if 'Read-only' in text or 'readonly' in text.lower():
-        return base + '文件或目录是只读的。改成可写（或换一个位置）再试。'
-    return f'{base}{text}（表还在，一个字没动）'
+    """旧名保留：老调用点/测试还在用，口径已统一到 `core.atomicio`。"""
+    from storygraph.core import atomicio
+    return atomicio.human_io_error(exc, path)
+

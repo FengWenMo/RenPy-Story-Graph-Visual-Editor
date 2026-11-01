@@ -85,6 +85,7 @@ from typing import Mapping
 from storygraph.assets.asset_identity import KINDS
 from storygraph.assets.asset_mapping import MAPPING_SCHEMA, MappingError
 from storygraph.core.safeguard import swallow
+from storygraph.core.atomicio import RefusedWrite
 
 #: 项目里这份工作簿的名字（与 `MAPPING_FILENAME` 同一个模式：项目根或 `game/` 下）。
 MAPPING_XLSX_FILENAME = 'storygraph.mapping.xlsx'
@@ -1006,26 +1007,21 @@ def write_workbook(path, data) -> dict:
     # ⑥ 说明（放最后：人打开先看到的是「映射」，但说明一直在）
     _write_help(wb, counts)
 
-    # 写盘：旧文件先备份 → 临时文件 → os.replace（与 save_mapping 同一条纪律）
-    if target.exists():
-        backup = target.with_name(target.name + '.bak')
-        try:
-            shutil.copy2(target, backup)
-        except OSError as e:
-            raise MappingError(f'旧映射备份失败（未写，宁可没改）：{e}') from e
-    tmp = target.with_name(target.name + '.tmp.xlsx')
+    # 写盘：交 `core.atomicio`（与 `.rpy` 同一条路）——
+    # 2026-11-01 起它自己会：校验后缀 → 备份 → 同目录临时文件 → fsync →
+    # os.replace。这里只剩"把 OSError 翻成 MappingError"这一件事。
+    from storygraph.core import atomicio
     try:
-        wb.save(str(tmp))
-        os.replace(tmp, target)
+        atomicio.save_workbook_atomic(wb, target)
+    except RefusedWrite as e:
+        raise MappingError(str(e)) from e
     except OSError as e:
-        _cleanup(tmp)
         if isinstance(e, PermissionError):
             raise MappingError(
                 f'写不进 {target.name}：这个文件可能正被 Excel / WPS 打开着。'
                 f'关掉那个窗口再试。') from e
         raise MappingError(f'写映射文件失败：{e}') from e
     except Exception as e:                    # noqa: BLE001 - openpyxl 自己的怪错
-        _cleanup(tmp)
         raise MappingError(f'写映射文件失败：{e}') from e
     return counts
 
