@@ -325,10 +325,15 @@ class ExportMixin:
         `default` / `init python` / `transform` 一行都留不下
         （`docs/archive/P0_静默全量覆盖_2026-10-03.md`）。
         """
+
+        # 2026-11-01：这个函数原来 263 行（**全项目最长**）。下面前五段各自搬进
+        # 了一个方法 —— 每段都对应**一种拒绝或放行的理由**，编排留在这里，
+        # 于是"导出会依次过哪几道门"一眼能读完。每段的注释都跟着代码走了。
         target = Path(target)
         result = self.compile()
         if getattr(result, 'blocking', None):
-            return {'ok': False, 'path': target, 'blocking': list(result.blocking),
+            return {'ok': False, 'path': target,
+                    'blocking': list(result.blocking),
                     'codes': ['COMPILE'], 'note': '', 'todos': 0}
 
         text = result.rpy_text
@@ -337,94 +342,15 @@ class ExportMixin:
         if note['used_patch']:
             text = note['text']
 
-        # —— **一个字节都没改 → 不写、不加标记**（2026-10-19，修 P1-1）——
-        #
-        # 与 CLI 那条路（`pipeline.compile.write_compiled`）同一条判据：
-        # 零改动往返从前会被 `ensure_generator_marker` 插进 2 行标记，
-        # 于是"表里一个字没改、产物逐字节还原"永远差 2 行。
-        # 目标就是源文件时连写都不写（mtime 也不动）；目标在别处时
-        # 按源文的载体风格原样复制 —— 复制品仍是作者那份文件。
-        if note.get('used_patch') and self.script_path:
-            try:
-                from storygraph.story.source_style import detect as _style_of
-                from storygraph.story.source_style import read_text as _read_src
-                from storygraph.story.paths import write_text_atomic as _write
-                if text == _read_src(self.script_path)[0]:
-                    tgt = Path(target)
-                    same_path = (tgt.resolve()
-                                 == Path(self.script_path).resolve())
-                    may_skip = True
-                    if same_path:
-                        pass                # 原地往返：连写都不写（mtime 不动）
-                    elif not tgt.exists():
-                        # 新路径：原样复制（新文件是"新建"的正当用途）
-                        _write(tgt, _style_of(self.script_path).apply(
-                            text, source=self.script_path))
-                    elif _read_src(tgt)[0] != text:
-                        # ⚠ **目标里是另一份东西**（别人的手写文件、别的章节）
-                        # —— 零改动也不是"可以不问就覆盖"的理由。
-                        # 交给下面的门禁：它会报 HANDWRITTEN_TARGET，
-                        # 由用户决定要不要 force。
-                        may_skip = False
-                    if may_skip:
-                        return {'ok': True, 'path': target, 'blocking': [],
-                                'codes': [],
-                                'note': (note['text_note']
-                                         + '这一份与源文件逐字节相同：'
-                                           '**文件没有被改动**'),
-                                'used_patch': True, 'untouched': True,
-                                'count': len(self.beats),
-                                'todos': getattr(result, 'todo_count', 0)}
-            except (OSError, UnicodeDecodeError) as e:
-                # 读不到源就照老路走（过门禁），别把导出弄挂
-                swallow('session_export.zero_change_check', e)
+        untouched = self._untouched_export(target, text, note, result)
+        if untouched is not None:
+            return untouched
 
         # `used_patch` 与 `blocking` 互斥（补丁成功就不会有 blocking），
         # 所以这里是独立的 `if`，不是上面那个零改动分支的 `elif`。
         if note.get('blocking') and not force and would_destroy_opaque(
                 target, self.script_path):
-            # **补丁失败 + 覆盖它会毁掉不进表的东西 = 拒绝写盘**（P0，2026-10-05）。
-            #
-            # 为什么必须拦：此时唯一的替代是"全量重生成"，而全量只认得"拍"，
-            # `default` / `init python` / `transform` / `screen` 一行都留不下。
-            #
-            # `_would_destroy_opaque` 的判据是"**目标文件里有没有工具不认识的
-            # 内容**"，而不是笼统的"补丁失败了"：
-            #
-            #   · 目标就是源 .rpy（原地导出）→ 那是作者手写的文件，
-            #     里面很可能有 `default` / `init python` → **必须拦**；
-            #   · 目标是一个**新建的**路径（导出到 `build/`、另存一章）→
-            #     覆盖它不会毁掉任何东西，全量正是要做的事 → **放行**；
-            #   · 目标已存在且**没有生成标记** → 别人的手写文件 → **拦**。
-            #
-            # 第一版只看 `had_source`（"有源 .rpy 可增量"），那会把
-            # "编辑 ch01、导出到 out.rpy"这种正常操作也拦掉 ——
-            # 实测 `test_export_reflects_the_edit` 当场红。
-            #
-            # 第二层护栏（`write_generation` 的 `HANDWRITTEN_TARGET`）仍然
-            # 会兜住"凭空新建到别人的手写文件上"那种情况。
-            return {'ok': False, 'path': target,
-                    'blocking': list(note['blocking']) + [
-                        # **给一条能走的路**（2026-10-05，验收时自己撞到的）：
-                        # 以前这里只有一句"对位率不足（N%）"—— 用户看着它
-                        # 不知道下一步做什么，而"重载这一章再导出"通常就能解决
-                        # （行号过期是主因，见 `_resync_source_ranges`）。
-                        #
-                        # ③ 的措辞 2026-10-05 夜改过：它从前说"再明确要求覆盖"，
-                        # 而这一条**根本没有"仍然覆盖"按钮**（`_overwritable`
-                        # 只放 `HANDWRITTEN_TARGET`）—— 用户按着这句话找按钮，
-                        # 找不到，就变成"为何阻止我替换旧文件"。说实话：
-                        # 这条路是**刻意**关掉的（见 `_patch_note` 的 docstring）。
-                        '可以试：① 重新载入这一章再导出（行号过期是最常见的原因）；'
-                        '② 导出到 build/renpy/ 下的新路径（新建不受这条限制），'
-                        '比对之后再把改好的那一章放回去；'
-                        '③ 原地覆盖这条路**是刻意关掉的**：补丁没配上时写出去'
-                        '就是丢内容（`default` / `init python` 会没）。'
-                        '若这一章的结构被手工改过（例如把菜单标题写到了 '
-                        '`menu:` 的下一行），增量补丁做不了这种两行合一行，'
-                        '先改回"一行一个结构"再导。'],
-                    'codes': ['PATCH_FAILED'],
-                    'note': note['text_note'], 'todos': 0}
+            return self._patch_failed_export(target, note)
 
         # **产物必须带生成标记**，补丁那条路也一样（2026-10-05 实测）。
         #
@@ -439,28 +365,179 @@ class ExportMixin:
         # 这正是 `test_allows_overwriting_its_own_output` 想防的那种事故，
         # 只不过它当时只在 `write_generation` 这一层测，没经过 export。
         text = ensure_generator_marker(text)
+        blocked = self._generation_blocked(target, text, note)
+        if blocked is not None:
+            return blocked
 
+        art = self._write_export(target, text, note, force)
+        if not art.written:
+            return self._write_refused(target, note, art)
+
+        # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
+        #
+        # 为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
+        # 写回之后磁盘上那一份已经是新内容（补丁插了行、首行多了生成标记），
+        # 而内存拍的 `src_first/src_last` 还是**改动前**那份文件的 →
+        # 第二次原地导出对位率掉到 0~50% → 补丁失败 → P0 那条"目标就是源文件"
+        # 的护栏拒写。用户看到 `PATCH_FAILED：对位率不足`，而它偏偏落在
+        # **最常用的那条循环**上：
+        #
+        #     改一句 → 导出 → 再改一句 → 再导出   ← 第二次就断
+        #
+        # 为什么是"重新解析"而不是"按内容猜行号"（先走错过一步，记下来）：
+        # 第一版我用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
+        # 它在最需要它的那个场景上**是错的** —— 解析器会把"注释 / `call screen`
+        # + 紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出交叠
+        # 区间 → 对位率 50%（实测 whackamole）。合并**本来知道**每一拍写到了
+        # 哪几行，但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"
+        # 三套坐标系的换算（全仓最危险的一段）。而"内存 := 解析(磁盘)"
+        # 是**零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
+        #
+        # 代价（可接受，而且本来就该如此）：若刚插了一张只有注释/代码的卡，
+        # 重载后它会与后面那张并成一张 —— **那正是重新打开这个文件会看到的**，
+        # 只是把"下次打开才发生的事"提前到了现在。
+        if art.written and self.script_path \
+                and Path(target) == Path(self.script_path):
+            self._reload_after_inplace_write()
+
+        # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
+        #
+        # `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而删掉程序员的
+        # `$ x = 1` / `play music …` 是**写进去了、事后才发现**的那类事。
+        # 塞进 `warnings` 之后：编辑器这条路会进日志的"提示"段，剧本表那条路
+        # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
+        _warns = [self._issue_message(i) for i in art.issues
+                  if not i.is_blocking]
+        _removal = removal_note(note).lstrip('；')
+        if _removal:
+            _warns.insert(0, _removal.replace('**', ''))
+        return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
+                # 成功了也可能有告警（产物写在 game/ 里、有自定义块没被建模…）
+                'warnings': _warns,
+                'note': note['text_note'],
+                'used_patch': bool(note.get('used_patch')),
+                # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
+                'count': len(self.beats),
+                'todos': getattr(result, 'todo_count', 0)}
+
+    def _untouched_export(self, target, text, note, result):
+        """零改动往返：不写、不加标记（`export` 的第一道门）。"""
+        # —— **一个字节都没改 → 不写、不加标记**（2026-10-19，修 P1-1）——
+        #
+        # 与 CLI 那条路（`pipeline.compile.write_compiled`）同一条判据：
+        # 零改动往返从前会被 `ensure_generator_marker` 插进 2 行标记，
+        # 于是"表里一个字没改、产物逐字节还原"永远差 2 行。
+        # 目标就是源文件时连写都不写（mtime 也不动）；目标在别处时
+        # 按源文的载体风格原样复制 —— 复制品仍是作者那份文件。
+        if not (note.get('used_patch') and self.script_path):
+            return None
+        try:
+            from storygraph.story.source_style import detect as _style_of
+            from storygraph.story.source_style import read_text as _read_src
+            from storygraph.story.paths import write_text_atomic as _write
+            if text == _read_src(self.script_path)[0]:
+                tgt = Path(target)
+                same_path = (tgt.resolve()
+                             == Path(self.script_path).resolve())
+                may_skip = True
+                if same_path:
+                    pass                # 原地往返：连写都不写（mtime 不动）
+                elif not tgt.exists():
+                    # 新路径：原样复制（新文件是"新建"的正当用途）
+                    _write(tgt, _style_of(self.script_path).apply(
+                        text, source=self.script_path))
+                elif _read_src(tgt)[0] != text:
+                    # ⚠ **目标里是另一份东西**（别人的手写文件、别的章节）
+                    # —— 零改动也不是"可以不问就覆盖"的理由。
+                    # 交给下面的门禁：它会报 HANDWRITTEN_TARGET，
+                    # 由用户决定要不要 force。
+                    may_skip = False
+                if may_skip:
+                    return {'ok': True, 'path': target, 'blocking': [],
+                            'codes': [],
+                            'note': (note['text_note']
+                                     + '这一份与源文件逐字节相同：'
+                                       '**文件没有被改动**'),
+                            'used_patch': True, 'untouched': True,
+                            'count': len(self.beats),
+                            'todos': getattr(result, 'todo_count', 0)}
+        except (OSError, UnicodeDecodeError) as e:
+            # 读不到源就照老路走（过门禁），别把导出弄挂
+            swallow('session_export.zero_change_check', e)
+            return None
+        return None
+
+    def _patch_failed_export(self, target, note):
+        """补丁没对上、而覆盖会毁掉不进表的东西 → 拒写（第二道门）。"""
+        # **补丁失败 + 覆盖它会毁掉不进表的东西 = 拒绝写盘**（P0，2026-10-05）。
+        #
+        # 为什么必须拦：此时唯一的替代是"全量重生成"，而全量只认得"拍"，
+        # `default` / `init python` / `transform` / `screen` 一行都留不下。
+        #
+        # `_would_destroy_opaque` 的判据是"**目标文件里有没有工具不认识的
+        # 内容**"，而不是笼统的"补丁失败了"：
+        #
+        #   · 目标就是源 .rpy（原地导出）→ 那是作者手写的文件，
+        #     里面很可能有 `default` / `init python` → **必须拦**；
+        #   · 目标是一个**新建的**路径（导出到 `build/`、另存一章）→
+        #     覆盖它不会毁掉任何东西，全量正是要做的事 → **放行**；
+        #   · 目标已存在且**没有生成标记** → 别人的手写文件 → **拦**。
+        #
+        # 第一版只看 `had_source`（"有源 .rpy 可增量"），那会把
+        # "编辑 ch01、导出到 out.rpy"这种正常操作也拦掉 ——
+        # 实测 `test_export_reflects_the_edit` 当场红。
+        #
+        # 第二层护栏（`write_generation` 的 `HANDWRITTEN_TARGET`）仍然
+        # 会兜住"凭空新建到别人的手写文件上"那种情况。
+        return {'ok': False, 'path': target,
+                'blocking': list(note['blocking']) + [
+                    # **给一条能走的路**（2026-10-05，验收时自己撞到的）：
+                    # 以前这里只有一句"对位率不足（N%）"—— 用户看着它
+                    # 不知道下一步做什么，而"重载这一章再导出"通常就能解决
+                    # （行号过期是主因，见 `_resync_source_ranges`）。
+                    #
+                    # ③ 的措辞 2026-10-05 夜改过：它从前说"再明确要求覆盖"，
+                    # 而这一条**根本没有"仍然覆盖"按钮**（`_overwritable`
+                    # 只放 `HANDWRITTEN_TARGET`）—— 用户按着这句话找按钮，
+                    # 找不到，就变成"为何阻止我替换旧文件"。说实话：
+                    # 这条路是**刻意**关掉的（见 `_patch_note` 的 docstring）。
+                    '可以试：① 重新载入这一章再导出（行号过期是最常见的原因）；'
+                    '② 导出到 build/renpy/ 下的新路径（新建不受这条限制），'
+                    '比对之后再把改好的那一章放回去；'
+                    '③ 原地覆盖这条路**是刻意关掉的**：补丁没配上时写出去'
+                    '就是丢内容（`default` / `init python` 会没）。'
+                    '若这一章的结构被手工改过（例如把菜单标题写到了 '
+                    '`menu:` 的下一行），增量补丁做不了这种两行合一行，'
+                    '先改回"一行一个结构"再导。'],
+                'codes': ['PATCH_FAILED'],
+                'note': note['text_note'], 'todos': 0}
+
+    def _generation_blocked(self, target, text, note):
+        """产物本身坏了（重名 / 语法 / 图像名）→ 拒写；`force` 也不越过。"""
         occupied = labels_in_danger(target, self.project_root,
-                                   exclude={target, self.script_path})
+                                    exclude={target, self.script_path})
         issues = evaluate_generation(text, target,
                                      project_root=self.project_root,
                                      occupied=occupied, beats=self.beats)
         blocking = [i for i in issues if i.is_blocking]
-        if blocking:
-            # `force` **不**越过这几条：图像名非法 / label 重名 /
-            # Python 语法错误都是"产物本身坏了"，覆盖只会把坏脚本写进 game/。
-            # `force` 的语义只有一条 —— "我确认要覆盖手写文件"。
-            return {'ok': False, 'path': target,
-                    'blocking': [self._issue_message(i) for i in blocking],
-                    # **告警单独一格**（2026-10-25，审计第四轮 P2）：
-                    # 从前 warn 级也塞进 `blocking`，拒因列表里第一条是
-                    # "产物写在 game/ 目录里"（那需要**挪位置**，不是这次
-                    # 拒写的原因），真正的原因反而被挤到后面看不见。
-                    'warnings': [self._issue_message(i)
-                                 for i in issues if not i.is_blocking],
-                    'codes': [str(getattr(i, 'code', '')) for i in blocking],
-                    'note': note['text_note'], 'todos': 0}
+        if not blocking:
+            return None
+        # `force` **不**越过这几条：图像名非法 / label 重名 /
+        # Python 语法错误都是"产物本身坏了"，覆盖只会把坏脚本写进 game/。
+        # `force` 的语义只有一条 —— "我确认要覆盖手写文件"。
+        return {'ok': False, 'path': target,
+                'blocking': [self._issue_message(i) for i in blocking],
+                # **告警单独一格**（2026-10-25，审计第四轮 P2）：
+                # 从前 warn 级也塞进 `blocking`，拒因列表里第一条是
+                # "产物写在 game/ 目录里"（那需要**挪位置**，不是这次
+                # 拒写的原因），真正的原因反而被挤到后面看不见。
+                'warnings': [self._issue_message(i)
+                             for i in issues if not i.is_blocking],
+                'codes': [str(getattr(i, 'code', '')) for i in blocking],
+                'note': note['text_note'], 'todos': 0}
 
+    def _write_export(self, target, text, note, force):
+        """过兜底门禁 + 落盘，返回 `write_generation` 的产物对象。"""
         # `write_generation` 自己还有一道兜底门禁（`HANDWRITTEN_TARGET`：
         # 目标已存在且不是工具生成的，拒写）。它**必须被检查** ——
         # 不检查就回到当年那个形态：文件根本没写出去，却报告"导出成功"，
@@ -503,72 +580,30 @@ class ExportMixin:
                                # 就不写，改留 `.blocked.rpy` 给人对照。
                                engine_lint=True,
                                lint_ignore_heads=self._declared_stmt_heads())
-        if not art.written:
-            _blk = [i for i in art.issues if i.is_blocking]
-            _warn = [i for i in art.issues if not i.is_blocking]
-            return {'ok': False, 'path': target,
-                    'blocking': [self._issue_message(i) for i in _blk]
-                                or ['生成门禁拒绝写入'],
-                    'warnings': [self._issue_message(i) for i in _warn],
-                    'codes': [str(getattr(i, 'code', '')) for i in _blk],
-                    'review_path': art.review_path,
-                    'note': note['text_note'], 'todos': 0,
-                    # 这一刀到底是不是"无损的增量"（前端据此说**真话**，见
-                    # `ui_qt.window_export._confirm_force_overwrite`：
-                    # 补丁成功时"会丢掉 default/init python"那句话是**假的**）。
-                    #
-                    # 判据与门禁同源（`merging_onto`）：只有"补丁对上了
-                    # **且**合并底稿就是目标"时才敢说"不会丢东西" ——
-                    # 编辑甲章、却往乙章的手写文件上写，是另一回事
-                    # （那份产物里没有乙章的任何内容），照旧说真话。
-                    'used_patch': (bool(note.get('used_patch'))
-                                   and merging_onto(target,
-                                                    self.script_path))}
-        # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
-        #
-        # 为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
-        # 写回之后磁盘上那一份已经是新内容（补丁插了行、首行多了生成标记），
-        # 而内存拍的 `src_first/src_last` 还是**改动前**那份文件的 →
-        # 第二次原地导出对位率掉到 0~50% → 补丁失败 → P0 那条"目标就是源文件"
-        # 的护栏拒写。用户看到 `PATCH_FAILED：对位率不足`，而它偏偏落在
-        # **最常用的那条循环**上：
-        #
-        #     改一句 → 导出 → 再改一句 → 再导出   ← 第二次就断
-        #
-        # 为什么是"重新解析"而不是"按内容猜行号"（先走错过一步，记下来）：
-        # 第一版我用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
-        # 它在最需要它的那个场景上**是错的** —— 解析器会把"注释 / `call screen`
-        # + 紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出交叠
-        # 区间 → 对位率 50%（实测 whackamole）。合并**本来知道**每一拍写到了
-        # 哪几行，但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"
-        # 三套坐标系的换算（全仓最危险的一段）。而"内存 := 解析(磁盘)"
-        # 是**零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
-        #
-        # 代价（可接受，而且本来就该如此）：若刚插了一张只有注释/代码的卡，
-        # 重载后它会与后面那张并成一张 —— **那正是重新打开这个文件会看到的**，
-        # 只是把"下次打开才发生的事"提前到了现在。
-        if art.written and self.script_path \
-                and Path(target) == Path(self.script_path):
-            self._reload_after_inplace_write()
-        # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
-        #
-        # `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而删掉程序员的
-        # `$ x = 1` / `play music …` 是**写进去了、事后才发现**的那类事。
-        # 塞进 `warnings` 之后：编辑器这条路会进日志的"提示"段，剧本表那条路
-        # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
-        _warns = [self._issue_message(i) for i in art.issues
-                  if not i.is_blocking]
-        _removal = removal_note(note).lstrip('；')
-        if _removal:
-            _warns.insert(0, _removal.replace('**', ''))
-        return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
-                # 成功了也可能有告警（产物写在 game/ 里、有自定义块没被建模…）
-                'warnings': _warns,
-                'note': note['text_note'],
-                'used_patch': bool(note.get('used_patch')),
-                # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
-                'count': len(self.beats),
-                'todos': getattr(result, 'todo_count', 0)}
+        return art
+
+    def _write_refused(self, target, note, art):
+        """兜底门禁拒了 → 把它的理由与产物路径原样交出去（第四道门）。"""
+        _blk = [i for i in art.issues if i.is_blocking]
+        _warn = [i for i in art.issues if not i.is_blocking]
+        return {'ok': False, 'path': target,
+                'blocking': [self._issue_message(i) for i in _blk]
+                            or ['生成门禁拒绝写入'],
+                'warnings': [self._issue_message(i) for i in _warn],
+                'codes': [str(getattr(i, 'code', '')) for i in _blk],
+                'review_path': art.review_path,
+                'note': note['text_note'], 'todos': 0,
+                # 这一刀到底是不是"无损的增量"（前端据此说**真话**，见
+                # `ui_qt.window_export._confirm_force_overwrite`：
+                # 补丁成功时"会丢掉 default/init python"那句话是**假的**）。
+                #
+                # 判据与门禁同源（`merging_onto`）：只有"补丁对上了
+                # **且**合并底稿就是目标"时才敢说"不会丢东西" ——
+                # 编辑甲章、却往乙章的手写文件上写，是另一回事
+                # （那份产物里没有乙章的任何内容），照旧说真话。
+                'used_patch': (bool(note.get('used_patch'))
+                               and merging_onto(target,
+                                                self.script_path))}
 
     def _source_text_for_guard(self):
         """
