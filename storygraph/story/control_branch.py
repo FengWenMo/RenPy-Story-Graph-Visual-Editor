@@ -511,13 +511,7 @@ def _plan_menu_branch(plan: ControlBranchPlan, text: str, block) -> ControlBranc
     plan.kind = kind
     plan.old_lines = lines[per_edge[0]:per_edge[1]] if per_edge else []
     plan.new_lines = new_lines
-    plan.old_text = text
-    plan.new_text = '\n'.join(out)
-    if text.endswith('\n'):
-        plan.new_text += '\n'
-    plan.ok = True
-    plan.notes.append('只改编排层这一小段；章节剧本一个字不动')
-    return plan
+    return _finish_branch_plan(plan, text, out)
 
 
 def plan_control_branch(project_root, src_label, dst_label, etype='jump',
@@ -543,37 +537,66 @@ def plan_control_branch(project_root, src_label, dst_label, etype='jump',
     #: 这条边原来是一条普通路由时，要换掉的那一行（`if`/菜单两种汇合点共用）
     plan.replace_dst_label = str(replace_dst_label or '')
     plan.replace_etype = str(replace_etype or '')
-    if not src or not dst:
-        plan.blocking.append('起点或目标没有 label 名')
-        plan.reason = plan.blocking[-1]
+    if _branch_input_blocked(plan, src, dst, etype, cond, opt):
         return plan
-    if src == dst:
-        plan.blocking.append('起点和终点是同一章')
-        plan.reason = plan.blocking[-1]
+    loaded = _read_control_layer(plan, project_root, src)
+    if loaded is None:
         return plan
-    if etype not in ('jump', 'call'):
-        plan.blocking.append('类型只能是 jump / call')
-        plan.reason = plan.blocking[-1]
+    text, block = loaded
+    if _control_layer_not_ready(plan, project_root, text, dst, etype):
         return plan
-    if not (cond or opt):
-        plan.blocking.append('条件 / 菜单项都为空：这是普通路由，走 plan_control_route')
-        plan.reason = plan.blocking[-1]
-        return plan
-    if '\n' in cond or '\r' in cond or '\n' in opt or '\r' in opt:
-        plan.reason = '条件 / 菜单项里不能换行（会把一行语法拆坏）'
+    if opt:
+        return _plan_menu_branch(plan, text, block)
+    if _is_menu_option_edge(text, src, plan.edge_id):
+        plan.reason = ('这是菜单组里的一项：清空「菜单项」会留下空菜单；'
+                       '要改成条件分支请删掉这条线重接')
         plan.blocking.append(plan.reason)
         return plan
-    if cond.rstrip().endswith(':'):
-        plan.reason = '条件不能以冒号结尾（写出来会变成 `if 条件::`）'
-        plan.blocking.append(plan.reason)
+    out = _plan_condition_branch(plan, text, split_lines(text), block,
+                                 cond, opt, replace_dst_label, replace_etype)
+    if out is None:
         return plan
+    return _finish_branch_plan(plan, text, out)
 
+
+def _branch_input_blocked(plan, src, dst, etype, cond, opt) -> bool:
+    """
+    六条前置判据：任一条不成立就把理由写进 `plan.blocking` 并返回 True。
+
+    都是"还没读文件就能断定写不进去"的情况 —— 早退，不碰磁盘。
+    """
+    problems = (
+        (not src or not dst, '起点或目标没有 label 名'),
+        (src == dst, '起点和终点是同一章'),
+        (etype not in ('jump', 'call'), '类型只能是 jump / call'),
+        (not (cond or opt),
+         '条件 / 菜单项都为空：这是普通路由，走 plan_control_route'),
+        ('\n' in cond or '\r' in cond or '\n' in opt or '\r' in opt,
+         '条件 / 菜单项里不能换行（会把一行语法拆坏）'),
+        (cond.rstrip().endswith(':'),
+         '条件不能以冒号结尾（写出来会变成 `if 条件::`）'),
+    )
+    for hit, reason in problems:
+        if hit:
+            plan.reason = reason
+            plan.blocking.append(reason)
+            return True
+    return False
+
+
+def _read_control_layer(plan, project_root, src):
+    """
+    读编排层 + 定位这一章的 `X_control` 块，返回 `(文本, 块)`。
+
+    ⚠ 读不到就返回 `None`（**不留半份文本**）：两种情形都已在 `plan.reason`
+    里写明理由，调用方直接 `return plan`。
+    """
     path = find_control_file(project_root, src)
     if path is None:
         plan.reason = ('项目里没有编排层（没有任何 `*_control` label）。'
                        '分支要先接管这一章的入口，才能写在 `X_control` 里')
         plan.blocking.append(plan.reason)
-        return plan
+        return None
     plan.path = str(path)
     from storygraph.story.source_style import read_text
     text, _style = read_text(path)
@@ -586,20 +609,28 @@ def plan_control_branch(project_root, src_label, dst_label, etype='jump',
         plan.reason = (f'编排层里没有 `{plan.control_label}` —— 这一章现在'
                        f'不是从编排层进入的。' + plan.src_init.reason)
         plan.blocking.append(plan.reason)
-        return plan
+        return None
+    return text, block
 
+
+def _control_layer_not_ready(plan, project_root, text, dst, etype) -> bool:
+    """
+    读到了编排层，还要两道判据：源章怎么收尾、目标章的包装在不在。
+
+    不通过就把理由写进 `plan` 并返回 True。
+    """
     plan.target_label = _target_label(dst, etype)
-    tail = _source_tail_jump(project_root, src)
+    tail = _source_tail_jump(project_root, plan.src_label)
     if tail is not None:
         kind, target = tail
         if not (kind == 'jump' and target == plan.control_label):
             plan.reason = (
-                f'`{src}` 的最后一条是 `jump {target or "…"}` —— '
-                f'`{plan.control_label}` 里的 `call {src}` 永远不会返回，'
+                f'`{plan.src_label}` 的最后一条是 `jump {target or "…"}` —— '
+                f'`{plan.control_label}` 里的 `call {plan.src_label}` 永远不会返回，'
                 f'分支写进去也不会执行。先把那一章的收尾改成 return，'
                 f'或把它接到 `{plan.control_label}`，再来加条件 / 菜单分支')
             plan.blocking.append(plan.reason)
-            return plan
+            return True
     if etype == 'jump' and _block_for(text, plan.target_label) is None:
         plan.init = plan_control_init(project_root, dst, role='target')
         if plan.init.ok:
@@ -609,87 +640,121 @@ def plan_control_branch(project_root, src_label, dst_label, etype='jump',
             plan.reason = (f'没有 `{plan.target_label}`，而且补不了：'
                            f'{plan.init.reason}')
         plan.blocking.append(plan.reason)
-        return plan
+        return True
+    return False
 
-    if opt:
-        return _plan_menu_branch(plan, text, block)
-    if find_menu_group(text, src) and any(
-            o.edge_id == plan.edge_id
-            for o in parse_menu_group(text, src)):
-        plan.reason = ('这是菜单组里的一项：清空「菜单项」会留下空菜单；'
-                       '要改成条件分支请删掉这条线重接')
-        plan.blocking.append(plan.reason)
-        return plan
 
-    lines = split_lines(text)
+def _is_menu_option_edge(text, src, edge_id) -> bool:
+    """这条边现在是菜单组里的一个选项吗（清空它会在菜单里留个空壳）。"""
+    return bool(find_menu_group(text, src)) and any(
+        o.edge_id == edge_id for o in parse_menu_group(text, src))
+
+
+def _plan_condition_branch(plan, text, lines, block, cond, opt,
+                           replace_dst_label, replace_etype):
+    """
+    条件分支：有标记段就按标记换，没有就往插入点写。
+
+    返回**新的行表**；写不进去时返回 `None`（理由已在 `plan` 里，包括
+    "已经和输入一致"那种 `ok=True` 的情形 —— 那时 `plan.ok` 已经置好）。
+    """
     found = find_branch_range(text, plan.edge_id)
     if found is not None:
-        start, end, indent = found
-        plan.kind = 'replace'
-        plan.line_no = start + 1
-        plan.old_lines = lines[start:end]
-        # 编辑时沿用原来的缩进（不把作者的两空格风格改成四空格）
-        plan.new_lines = render_branch(plan.edge_id, etype,
-                                       plan.target_label, cond, opt,
-                                       indent=indent)
-        if plan.old_lines == plan.new_lines:
-            plan.kind = 'exists'
-            plan.ok = True
-            plan.old_text = text
-            plan.new_text = text
-            plan.reason = '这一段已经和输入一致，无需再写'
-            return plan
-        out = lines[:start] + plan.new_lines + lines[end:]
-        plan.reason = (f'改写 `{plan.control_label}` 里的分支段'
-                       f'（第 {start + 1} 行，标记 {branch_marker(plan.edge_id)}）')
-    else:
-        tops = _top_lines(lines, block)
-        at = _insert_before(lines, tops, block)
-        at = max(block['start'] + 2, min(at, block['end'] + 1))
-        plan.kind = 'insert'
-        plan.line_no = at
-        plan.new_lines = render_branch(plan.edge_id, etype,
-                                       plan.target_label, cond, opt)
-        old_route = None
-        if replace_dst_label:
-            old_etype = str(replace_etype or 'jump')
-            old_target = _target_label(replace_dst_label, old_etype)
-            matches = [i for i, ln in tops
-                       if _route_of(ln.strip()) == (old_etype, old_target)]
-            if len(matches) != 1:
-                plan.reason = (
-                    f'`{plan.control_label}` 里'
-                    + (f'有 {len(matches)} 条' if matches else '找不到')
-                    + f' `{old_etype} {old_target}` —— 不知道换哪一条，'
-                      f'先打开编排层核对')
-                plan.blocking.append(plan.reason)
-                return plan
-            idx = matches[0]
-            at = idx + 1
-            plan.line_no = at
-            old_route = lines[idx]
-            # 原来那一行是无条件出口；换成条件分支后，条件不成立时必须
-            # 自己结束，不能掉进下一个 label（同 `plan_control_route` 的
-            # call 收尾判据）。
-            if idx == tops[-1][0] and not str(old_route).strip().startswith(
-                    'return'):
-                plan.new_lines.append('    return')
-            out = lines[:idx] + plan.new_lines + lines[idx + 1:]
-            plan.reason = (f'把 `{plan.control_label}` 里的 '
-                           f'{str(old_route).strip()} 换成条件/菜单分支'
-                           f'（标记 {branch_marker(plan.edge_id)}）')
-        else:
-            # 如果插在**最后一个块之后**（没有原路由可落），补一句 return：
-            # 条件不成立时这一章应该结束，而不是掉进下一个 label。
-            fallback = (not any(str(lines[i]).strip().startswith(
-                ('return', 'jump ', 'call ')) for i in range(at - 1, block['end'])))
-            anchor_line = (str(lines[at - 1]) if 0 <= at - 1 < len(lines)
-                           else '')
-            if fallback and not anchor_line.strip().startswith('return'):
-                plan.new_lines.append('    return')
-            out = lines[:at - 1] + plan.new_lines + lines[at - 1:]
-            plan.reason = (f'在 `{plan.control_label}` 的第 {at} 行前写分支段'
-                           f'（标记 {branch_marker(plan.edge_id)}）')
+        return _rewrite_branch(plan, text, lines, found, cond, opt)
+    return _insert_branch(plan, text, lines, block, cond, opt,
+                          replace_dst_label, replace_etype)
+
+
+def _rewrite_branch(plan, text, lines, found, cond, opt):
+    """按标记改写已有的分支段；内容没变就标 `exists` 并返回 `None`。"""
+    start, end, indent = found
+    plan.kind = 'replace'
+    plan.line_no = start + 1
+    plan.old_lines = lines[start:end]
+    # 编辑时沿用原来的缩进（不把作者的两空格风格改成四空格）
+    plan.new_lines = render_branch(plan.edge_id, plan.etype,
+                                   plan.target_label, cond, opt,
+                                   indent=indent)
+    if plan.old_lines == plan.new_lines:
+        plan.kind = 'exists'
+        plan.ok = True
+        plan.old_text = text
+        plan.new_text = text
+        plan.reason = '这一段已经和输入一致，无需再写'
+        return None
+    out = lines[:start] + plan.new_lines + lines[end:]
+    plan.reason = (f'改写 `{plan.control_label}` 里的分支段'
+                   f'（第 {start + 1} 行，标记 {branch_marker(plan.edge_id)}）')
+    return out
+
+
+def _insert_branch(plan, text, lines, block, cond, opt,
+                   replace_dst_label, replace_etype):
+    """新写一段分支（原来那条线是普通路由时先把它换掉）。"""
+    tops = _top_lines(lines, block)
+    at = _insert_before(lines, tops, block)
+    at = max(block['start'] + 2, min(at, block['end'] + 1))
+    plan.kind = 'insert'
+    plan.line_no = at
+    plan.new_lines = render_branch(plan.edge_id, plan.etype,
+                                   plan.target_label, cond, opt)
+    if replace_dst_label:
+        return _replace_old_route(plan, lines, tops, replace_dst_label,
+                                  replace_etype)
+    # 如果插在**最后一个块之后**（没有原路由可落），补一句 return：
+    # 条件不成立时这一章应该结束，而不是掉进下一个 label。
+    fallback = (not any(str(lines[i]).strip().startswith(
+        ('return', 'jump ', 'call ')) for i in range(at - 1, block['end'])))
+    anchor_line = (str(lines[at - 1]) if 0 <= at - 1 < len(lines) else '')
+    if fallback and not anchor_line.strip().startswith('return'):
+        plan.new_lines.append('    return')
+    out = lines[:at - 1] + plan.new_lines + lines[at - 1:]
+    plan.reason = (f'在 `{plan.control_label}` 的第 {at} 行前写分支段'
+                   f'（标记 {branch_marker(plan.edge_id)}）')
+    return out
+
+
+def _replace_old_route(plan, lines, tops, replace_dst_label, replace_etype):
+    """
+    这条边原来是普通路由：把那一行换成刚写好的分支段（返回新行表）。
+
+    原来那一行是无条件出口；换成条件分支后，条件不成立时必须自己结束，
+    不能掉进下一个 label（同 `plan_control_route` 的 call 收尾判据）。
+
+    ⚠ 找不到 / 找到多条都返回 `None` —— 不知道换哪一条，**不猜**。
+    """
+    old_etype = str(replace_etype or 'jump')
+    old_target = _target_label(replace_dst_label, old_etype)
+    matches = [i for i, ln in tops
+               if _route_of(ln.strip()) == (old_etype, old_target)]
+    if len(matches) != 1:
+        plan.reason = (
+            f'`{plan.control_label}` 里'
+            + (f'有 {len(matches)} 条' if matches else '找不到')
+            + f' `{old_etype} {old_target}` —— 不知道换哪一条，'
+              f'先打开编排层核对')
+        plan.blocking.append(plan.reason)
+        return None
+    idx = matches[0]
+    plan.line_no = idx + 1
+    old_route = lines[idx]
+    if idx == tops[-1][0] and not str(old_route).strip().startswith('return'):
+        plan.new_lines.append('    return')
+    out = lines[:idx] + plan.new_lines + lines[idx + 1:]
+    plan.reason = (f'把 `{plan.control_label}` 里的 '
+                   f'{str(old_route).strip()} 换成条件/菜单分支'
+                   f'（标记 {branch_marker(plan.edge_id)}）')
+    return out
+
+
+def _finish_branch_plan(plan: ControlBranchPlan, text: str,
+                        out: list) -> ControlBranchPlan:
+    """
+    收尾：把新行表写成 `plan.new_text`（原文件的换行风格照抄）。
+
+    `_plan_menu_branch` 与条件分支汇合点共用 —— 两处各写一遍，迟早出现
+    "菜单分支能写回、条件分支忘了换行符"这种分叉。
+    """
     plan.old_text = text
     plan.new_text = '\n'.join(out)
     if text.endswith('\n'):
