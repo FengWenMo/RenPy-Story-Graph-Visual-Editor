@@ -66,11 +66,33 @@ def validate_mapping(data, *, where=None) -> list:
     `where` 是**定位器**（可选）：`where(*path) -> '图片 表第 12 行'`。
     Excel 来源的映射传它，同一句警告就从 `images['x'] kind 不认识`
     变成 `图片 表第 12 行：kind 不认识` —— 人要能按这句话直接在表里找到那一行。
-    """
-    warnings = []
 
+    每个顶层键一个检查助手（2026-11-01）：顺序是契约（警告按这个先后显示），
+    这里只负责串起来。
+    """
+    if not isinstance(data, dict):
+        return ['映射顶层不是对象']
+
+    at = _locator(where)
+    warnings = []
+    warnings += _warn_scaffold(data, at)
+    warnings += _warn_characters(data, at)
+    warnings += _warn_rules(data, at)
+    warnings += _warn_images(data, at)
+    warnings += _warn_code_sections(data, at)
+    warnings += _warn_attributes(data, at)
+    return warnings
+
+
+def _locator(where):
+    """
+    定位器 → ``at(*path)``：一句警告的**前缀**（`rules[0] ` / `规则 表第 9 行：`）。
+
+    没传 `where` 时退回默认写法；传了就优先用它给出的位置（人要能按这句话
+    直接在表里找到那一行）。定位器自己坏了不该拦校验 —— 记一笔 swallow，
+    退回默认前缀。
+    """
     def at(*path):
-        """一句警告的前缀（`rules[0] ` / `规则 表第 9 行：`）。"""
         default = path[0] if len(path) == 1 else (
             f'{path[0]}[{path[1]!r}]' if len(path) > 1 else str(path[0]))
         if where is not None:
@@ -82,9 +104,12 @@ def validate_mapping(data, *, where=None) -> list:
             if got:
                 return got + '：'
         return default + ' '
+    return at
 
-    if not isinstance(data, dict):
-        return ['映射顶层不是对象']
+
+def _warn_scaffold(data, at) -> list:
+    """顶层骨架：未知顶层键 + `schema` 版本。"""
+    warnings = []
     for key in data:
         if key not in KNOWN_TOP_KEYS:
             warnings.append(f'未知顶层键 {key!r}（已忽略；认识的键：'
@@ -95,6 +120,12 @@ def validate_mapping(data, *, where=None) -> list:
     elif schema != MAPPING_SCHEMA:
         warnings.append(f'schema 不认识：{schema!r}（本工具只认 '
                         f'{MAPPING_SCHEMA}，仍尽量按同结构读）')
+    return warnings
+
+
+def _warn_characters(data, at) -> list:
+    """`characters`：必须是 {tag: {...}}，tag 不许是空的。"""
+    warnings = []
     chars = data.get('characters')
     if chars is not None and not isinstance(chars, dict):
         warnings.append('characters 不是对象（应为 {tag: {...}}）')
@@ -104,6 +135,12 @@ def validate_mapping(data, *, where=None) -> list:
                 warnings.append('characters 里有空 tag')
             elif not isinstance(entry, dict):
                 warnings.append(f'{at("characters", tag)}不是对象')
+    return warnings
+
+
+def _warn_rules(data, at) -> list:
+    """`rules`：数组、每条是对象、`glob` 必填且得是项目相对路径、`kind` 得认得。"""
+    warnings = []
     rules = data.get('rules')
     if rules is not None and not isinstance(rules, list):
         warnings.append('rules 不是数组')
@@ -125,6 +162,12 @@ def validate_mapping(data, *, where=None) -> list:
             kind = str(rule.get('kind') or '').strip()
             if kind and kind not in KINDS:
                 warnings.append(f'{at("rules", i)}kind 不认识：{kind!r}')
+    return warnings
+
+
+def _warn_images(data, at) -> list:
+    """`images`：必须是 {asset_id 或相对路径: {kind: ...}}，简写不支持。"""
+    warnings = []
     images = data.get('images')
     if images is not None and not isinstance(images, dict):
         warnings.append('images 不是对象（应为 {asset_id 或相对路径: {...}}）')
@@ -143,6 +186,12 @@ def validate_mapping(data, *, where=None) -> list:
             kind = str(entry.get('kind') or '').strip()
             if kind and kind not in KINDS:
                 warnings.append(f'{at("images", key)}kind 不认识：{kind!r}')
+    return warnings
+
+
+def _warn_code_sections(data, at) -> list:
+    """`CODE_KEYS` 里那几张表（vocabulary / …）：数组、对象、键得认得。"""
+    warnings = []
     for section, keys in CODE_KEYS.items():
         entries = data.get(section)
         if entries is None:
@@ -158,17 +207,31 @@ def validate_mapping(data, *, where=None) -> list:
                 if field not in keys:
                     warnings.append(f'{at(section, i)}未知键 {field!r}（已忽略）')
             if section == 'vocabulary':
-                from storygraph.assets.vocabulary import is_kind, kind_label
-                kind = str(entry.get('kind') or '').strip()
-                if kind and not is_kind(kind):
-                    warnings.append(f'{at(section, i)}种类不认识：{kind!r}'
-                                    f'（认得的：' + '、'.join(
-                                        kind_label(k) for k in
-                                        ('transform', 'music', 'bg',
-                                         'character', 'cue', 'costume'))
-                                    + ' …）')
-                if not str(entry.get('id') or '').strip():
-                    warnings.append(f'{at(section, i)}缺 id（这一条对不上任何东西）')
+                warnings += _warn_vocabulary_entry(entry, at, section, i)
+    return warnings
+
+
+def _warn_vocabulary_entry(entry, at, section, i) -> list:
+    """`vocabulary` 那一条自己的两道检查：种类认得、id 不许空。"""
+    from storygraph.assets.vocabulary import is_kind, kind_label
+
+    warnings = []
+    kind = str(entry.get('kind') or '').strip()
+    if kind and not is_kind(kind):
+        warnings.append(f'{at(section, i)}种类不认识：{kind!r}'
+                        f'（认得的：' + '、'.join(
+                            kind_label(k) for k in
+                            ('transform', 'music', 'bg',
+                             'character', 'cue', 'costume'))
+                        + ' …）')
+    if not str(entry.get('id') or '').strip():
+        warnings.append(f'{at(section, i)}缺 id（这一条对不上任何东西）')
+    return warnings
+
+
+def _warn_attributes(data, at) -> list:
+    """`attributes`：{维度: {label / values / options}}。"""
+    warnings = []
     attributes = data.get('attributes')
     if attributes is not None and not isinstance(attributes, dict):
         warnings.append('attributes 不是对象（应为 {维度: {"label": ...}}）')
