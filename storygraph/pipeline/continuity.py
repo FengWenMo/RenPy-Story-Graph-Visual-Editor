@@ -1143,6 +1143,53 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
       · `files`：参与分析的文件（只用于展示与错误归属）。
     """
     t0 = time.time()
+    report, lg = _start_report(parse_result, project_root, files)
+    chapters = _chapter_map(lg, parse_result, report)
+    scan = _collect_seams(lg, chapters, report)
+    report.entries = _mark_roots(lg, chapters, report)
+    reachable = _mark_side_chapters(chapters, report)
+    active, topo, cycle_labels = _rank_chapters(chapters, reachable, report)
+    _derive_chapter_states(chapters, topo + cycle_labels, report)
+    _judge_seams(scan.seams, active, chapters, report)
+
+    # ---- 本地事实 / 分支 / 汇聚 / 判不出来的声明 ----
+    _collect_local_facts(report, active, chapters)
+    _collect_topology_notes(report, active, chapters)
+    _collect_condition_notes(report, active)
+    _collect_python_audio(report, lg, chapters)
+    _collect_unmodeled_channels(report, lg)
+    _collect_fallthrough(report, lg)
+
+    # ---- 确定链（只由"可判定接缝"串起来）----
+    report.chains = _build_chains(report, chapters, active)
+
+    # 排序：问题按严重度，不判定按发现顺序保持
+    report.findings.sort(key=lambda f: (_LEVEL_ORDER.get(f.level, 9),
+                                        f.chapters[:1], f.code))
+    # ⚠ 这里**故意**把全部接缝放回去（含旁支）：上面 `_judge_seams` 只判
+    # 可达章节之间的那几条，但报告要给用户看整张关系网。
+    report.seams = list(scan.seams)
+    report.elapsed = time.time() - t0
+    return report
+
+
+@dataclass
+class _SeamScan:
+    """
+    边扫描的三本账。
+
+    `seams` / `chain_end` / `edge_seen` 原来是 `analyze_parse_result` 里的三个
+    局部变量，被内嵌的 `_add_edge` 闭包改 —— 抽出来时要一起走，否则就得把
+    五个东西挨个传给每个调用点。
+    """
+
+    seams: list = field(default_factory=list)
+    chain_end: dict = field(default_factory=lambda: defaultdict(list))
+    edge_seen: set = field(default_factory=set)
+
+
+def _start_report(parse_result, project_root, files) -> tuple:
+    """空报告 + label 图（`route_labels` 是"编排层里能跳到的 label"计数）。"""
     report = ContinuityReport(
         root=str(project_root or ''),
         files=[str(p) for p in (files or ())],
@@ -1150,8 +1197,17 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
     )
     lg = _LabelGraph(parse_result)
     report.route_labels = len(lg.route_labels)
+    return report, lg
 
-    # ---- 拍（与剧本表同源）----
+
+def _chapter_map(lg: _LabelGraph, parse_result,
+                 report: ContinuityReport) -> dict:
+    """
+    label → `Chapter`（**与剧本表同一份 IR**：`beats_from_parse_result`）。
+
+    出不了拍也要继续：出口 / 可达性这些检查不依赖拍，只是"本地事实"那几段
+    会少东西 —— 比整份报告炸掉强。
+    """
     all_beats = []
     try:
         all_beats = beats_from_parse_result(parse_result, spec_registry={})
@@ -1163,117 +1219,143 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
         beats_by_label[str(getattr(beat, 'label', '') or '')].append(beat)
 
     chapter_labels = _chapter_candidates(lg)
-
     chapters = {}
     for i, label in enumerate(chapter_labels):
-        ch = _chapter_from_beats(label, beats_by_label.get(label) or [],
-                                 lg.labels.get(label), i)
-        chapters[label] = ch
+        chapters[label] = _chapter_from_beats(
+            label, beats_by_label.get(label) or [], lg.labels.get(label), i)
     report.chapters = list(chapters.values())
+    return chapters
 
-    call_sites = _call_sites_by_chapter(lg, chapters)
 
-    seams = []
-    edge_seen = set()
-    chain_end = defaultdict(list)
+def _add_seam_edge(p_label: str, outcome, *, chapters: dict, scan: _SeamScan,
+                   report: ContinuityReport, fallback_reason: str = '') -> None:
+    """
+    一条出口 → 一件"账"：接缝 / 旁支内容 / 链尾 / 判不出来。
 
-    def _add_edge(p_label, outcome, fallback_reason=''):
-        tgt = outcome.target
-        if outcome.kind == 'content' and tgt in chapters:
-            key = (p_label, tgt, outcome.condition, outcome.option,
-                   outcome.kind)
-            if key in edge_seen:
-                return
-            edge_seen.add(key)
-            seam = Seam(from_label=p_label, to_label=tgt,
-                        kind=('menu' if outcome.option
-                              else ('condition' if outcome.condition
-                                    else 'linear')),
-                        condition=outcome.condition, option=outcome.option)
-            seams.append(seam)
-            chapters[p_label].out_edges.append(seam)
-            chapters[tgt].in_edges.append(seam)
+    四种出口各自落一边（`Seam` 的 `kind` 是**推导出来的**，不是写死的）：
+    菜单项 → `menu`；带条件 → `condition`；其余 → `linear`。
+    """
+    tgt = outcome.target
+    if outcome.kind == 'content' and tgt in chapters:
+        key = (p_label, tgt, outcome.condition, outcome.option, outcome.kind)
+        if key in scan.edge_seen:
             return
-        if outcome.kind == 'content':
-            # 内容 label，但不是章节候选（旁支内容）
-            report.undetermined.append(Undetermined(
-                kind=UND_SIDE,
-                title=f'{p_label} 会进入非章节内容「{tgt}」',
-                message='它不是被编排层 call 的章节，按"旁支内容"处理，'
-                        '跨章继承不判。',
-                chapters=[p_label, tgt]))
-            return
-        if outcome.kind == 'fallthrough':
-            chain_end[p_label].append(outcome.reason or '落空')
-            return
-        if outcome.kind == 'end':
-            chain_end[p_label].append(outcome.reason or '链尾')
-            return
-        # unknown
+        scan.edge_seen.add(key)
+        seam = Seam(from_label=p_label, to_label=tgt,
+                    kind=('menu' if outcome.option
+                          else ('condition' if outcome.condition
+                                else 'linear')),
+                    condition=outcome.condition, option=outcome.option)
+        scan.seams.append(seam)
+        chapters[p_label].out_edges.append(seam)
+        chapters[tgt].in_edges.append(seam)
+        return
+    if outcome.kind == 'content':
+        # 内容 label，但不是章节候选（旁支内容）
         report.undetermined.append(Undetermined(
-            kind=UND_DYNAMIC,
-            title=f'{p_label} 的出口判不出来',
-            message=(fallback_reason or '出口不是静态可解的跳转')
-                    + ' —— 这一条支路到此为止，不猜它去哪。',
-            chapters=[p_label],
-            detail=[outcome.reason] if outcome.reason else []))
+            kind=UND_SIDE,
+            title=f'{p_label} 会进入非章节内容「{tgt}」',
+            message='它不是被编排层 call 的章节，按"旁支内容"处理，'
+                    '跨章继承不判。',
+            chapters=[p_label, tgt]))
+        return
+    if outcome.kind == 'fallthrough':
+        scan.chain_end[p_label].append(outcome.reason or '落空')
+        return
+    if outcome.kind == 'end':
+        scan.chain_end[p_label].append(outcome.reason or '链尾')
+        return
+    # unknown
+    report.undetermined.append(Undetermined(
+        kind=UND_DYNAMIC,
+        title=f'{p_label} 的出口判不出来',
+        message=(fallback_reason or '出口不是静态可解的跳转')
+                + ' —— 这一条支路到此为止，不猜它去哪。',
+        chapters=[p_label],
+        detail=[outcome.reason] if outcome.reason else []))
 
+
+def _chapter_outcomes(lg: _LabelGraph, label: str, chapter: Chapter,
+                      call_sites: dict, report: ContinuityReport) -> list:
+    """
+    这一章的出口候选。
+
+    被编排层 call 的章节：从**每个 call 点之后**接着扫（那才是它真正的入口），
+    条件/菜单项按调用点叠上去；章节内部自己写的跳转也算出口，但标低置信度。
+    没人 call 的章节（线性项目 / 入口章）：从第 0 条扫到底。
+    """
+    sites = call_sites.get(label) or []
+    outcomes = []
+    for caller, gi in sites:
+        cond = str(getattr(lg.statements[gi], 'condition', '') or '')
+        option = (lg.statement_options[gi]
+                  if gi < len(lg.statement_options) else '')
+        idxs = lg.by_label.get(caller) or []
+        try:
+            start = idxs.index(gi) + 1
+        except ValueError:                   # pragma: no cover - 平行数组错位
+            start = len(idxs)
+        for o in lg.scan_label(caller, start):
+            o.condition = (f'({cond}) and ({o.condition})'
+                           if cond and o.condition
+                           else (cond or o.condition))
+            o.option = option or o.option
+            outcomes.append(o)
+    if not sites:
+        return lg.scan_label(label, 0)
+    # 章节内部**自己写**的跳转（菜单/条件跳转）也算出口，但标低置信度
+    inner = [o for o in lg.scan_label(label, 0) if o.kind == 'content']
+    if inner:
+        chapter.internal_flow = len(inner)
+        outcomes.extend(inner)
+        report.undetermined.append(Undetermined(
+            kind=UND_INTERNAL,
+            title=f'{chapter.label} 章节内部有跳转',
+            message='这一章不是一条直线（内部有 jump/call 到别的章节）。'
+                    '工具按"可能性"把目标都算作出边，**不判**它们的顺序与汇合。',
+            chapters=[chapter.label]))
+    return outcomes
+
+
+def _collect_seams(lg: _LabelGraph, chapters: dict,
+                   report: ContinuityReport) -> _SeamScan:
+    """逐章把出口收成接缝，并记下每章的链尾与原由。"""
+    call_sites = _call_sites_by_chapter(lg, chapters)
+    scan = _SeamScan()
     for label, chapter in chapters.items():
-        sites = call_sites.get(label) or []
-        outcomes = []
-        for caller, gi in sites:
-            cond = str(getattr(lg.statements[gi], 'condition', '') or '')
-            option = (lg.statement_options[gi]
-                      if gi < len(lg.statement_options) else '')
-            idxs = lg.by_label.get(caller) or []
-            try:
-                start = idxs.index(gi) + 1
-            except ValueError:                   # pragma: no cover - 平行数组错位
-                start = len(idxs)
-            nxt = lg.scan_label(caller, start)
-            for o in nxt:
-                o.condition = (f'({cond}) and ({o.condition})'
-                               if cond and o.condition
-                               else (cond or o.condition))
-                o.option = option or o.option
-                outcomes.append(o)
-        if not sites:
-            outcomes = lg.scan_label(label, 0)
+        for o in _chapter_outcomes(lg, label, chapter, call_sites, report):
+            _add_seam_edge(label, o, chapters=chapters, scan=scan,
+                           report=report)
+        reasons = [r for r in (scan.chain_end.get(label) or []) if r]
+        if not reasons:
+            continue
+        if chapter.out_edges:
+            # 有明确去向、却有"条件全不成立才到"的收尾（if/elif 链后面
+            # 还留着 return）：工具不判断条件是否穷尽 —— 单独声明，不混进链尾。
+            report.undetermined.append(Undetermined(
+                kind='condition_exhaustive',
+                title=f'{chapter.label} 的条件分支是否穷尽，判不出来',
+                message='它有多个明确去向，但后面还留着一条收尾（'
+                        + ' / '.join(reasons) + '）—— 那条收尾只有在'
+                        '所有条件都不成立时才到。工具不算条件，不判定。',
+                chapters=[label]))
+            scan.chain_end[label] = []
         else:
-            # 章节内部**自己写**的跳转（菜单/条件跳转）也算出口，但标低置信度
-            inner = [o for o in lg.scan_label(label, 0)
-                     if o.kind == 'content']
-            if inner:
-                chapter.internal_flow = len(inner)
-                outcomes.extend(inner)
-                report.undetermined.append(Undetermined(
-                    kind=UND_INTERNAL,
-                    title=f'{chapter.label} 章节内部有跳转',
-                    message='这一章不是一条直线（内部有 jump/call 到别的章节）。'
-                            '工具按"可能性"把目标都算作出边，**不判**它们的顺序与汇合。',
-                    chapters=[chapter.label]))
-        for o in outcomes:
-            _add_edge(label, o)
-        reasons = [r for r in (chain_end.get(label) or []) if r]
-        if reasons:
-            if chapter.out_edges:
-                # 有明确去向、却有"条件全不成立才到"的收尾（if/elif 链后面
-                # 还留着 return）：工具不判断条件是否穷尽 —— 单独声明，不混进链尾。
-                report.undetermined.append(Undetermined(
-                    kind='condition_exhaustive',
-                    title=f'{chapter.label} 的条件分支是否穷尽，判不出来',
-                    message='它有多个明确去向，但后面还留着一条收尾（'
-                            + ' / '.join(reasons) + '）—— 那条收尾只有在'
-                            '所有条件都不成立时才到。工具不算条件，不判定。',
-                    chapters=[label]))
-                chain_end[label] = []
-            else:
-                chapter.chain_end = ' / '.join(dict.fromkeys(reasons))
+            chapter.chain_end = ' / '.join(dict.fromkeys(reasons))
+    return scan
 
-    # ---- 链根：Ren'Py 入口 label 会走到哪些章节 ----
-    # 有 `start` 就只从 `start` 出发（真正的游戏主线）；没有才用全部入口。
-    # 不这么做的话，同项目里的"另一个小应用"（番茄钟的 beginstory 等）会被
-    # 当成第二条主线 —— 实测把 pomodoro 的剧本拉进了跨章报告。
+
+def _mark_roots(lg: _LabelGraph, chapters: dict,
+                report: ContinuityReport) -> list:
+    """
+    链根：Ren'Py 入口 label 会走到哪些章节。
+
+    有 `start` 就只从 `start` 出发（真正的游戏主线）；没有才用全部入口。
+    不这么做的话，同项目里的"另一个小应用"（番茄钟的 beginstory 等）会被
+    当成第二条主线 —— 实测把 pomodoro 的剧本拉进了跨章报告。
+
+    没有入口能走到的（例如纯测试项目）：把入度为 0 的章节当链根。
+    """
     entry_labels = [label for label in lg.labels if label in ENTRY_LABELS]
     preferred = [label for label in entry_labels if label == 'start'] \
         or entry_labels
@@ -1284,15 +1366,20 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
         # 入口 label 自己就是内容章（没有编排层的线性项目）：它才是链根
         if label in chapters and label in lg.content_labels:
             chapters[label].root = True
-    report.entries = preferred
-
-    # 没有入口能走到的（例如纯测试项目）：把入度为 0 的章节当链根
     if not any(ch.root for ch in chapters.values()):
         for ch in chapters.values():
             if ch.in_degree == 0:
                 ch.root = True
+    return preferred
 
-    # ---- 可达章节（旁支剔除出主分析，但保留在"不判定"里说明）----
+
+def _mark_side_chapters(chapters: dict, report: ContinuityReport) -> set:
+    """
+    从链根 BFS → 可达章节；走不到的标旁支（保留在"不判定"里说明）。
+
+    旁支剔除出主分析，但**不安静丢掉**：用户看到报告里少了一章，
+    得知道是"从入口走不到"，不是"工具漏了"。
+    """
     reachable = set()
     queue = deque(ch.label for ch in chapters.values() if ch.root)
     while queue:
@@ -1302,8 +1389,9 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
         reachable.add(cur)
         for seam in chapters[cur].out_edges:
             queue.append(seam.to_label)
-    side = [ch for ch in chapters.values() if ch.label not in reachable]
-    for ch in side:
+    for ch in chapters.values():
+        if ch.label in reachable:
+            continue
         ch.side = True
         report.undetermined.append(Undetermined(
             kind=UND_SIDE,
@@ -1311,13 +1399,22 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
             message='从入口走不到（可能是小游戏 / 调试 / gallery 的入口），'
                     '不判它的跨章继承。',
             chapters=[ch.label]))
+    return reachable
 
-    # ---- 状态推导（拓扑序；成环 → 全部未知）----
+
+def _rank_chapters(chapters: dict, reachable: set,
+                   report: ContinuityReport) -> tuple:
+    """
+    可达章节的拓扑序；成环的单独挑出来（环里状态取决于转了几圈，判不出来）。
+
+    返回 `(active, topo, cycle_labels)`。
+
+    **旁支的边不算进主链的入度/出度**：一条"从入口走不到"的调试路径
+    也能指向主线章节，把它算成第二前驱会让主线莫名其妙变成"汇聚"。
+    判继承只认**可达章节之间**的边（与 `report.seams` 的过滤同一条口径）。
+    """
     active = [ch for ch in chapters.values() if ch.label in reachable]
     report.chapters = sorted(active, key=lambda c: c.order)
-    # **旁支的边不算进主链的入度/出度**：一条"从入口走不到"的调试路径
-    # 也能指向主线章节，把它算成第二前驱会让主线莫名其妙变成"汇聚"。
-    # 判继承只认**可达章节之间**的边（与 `report.seams` 的过滤同一条口径）。
     active_labels = {ch.label for ch in active}
     for ch in active:
         ch.in_edges = [s for s in ch.in_edges
@@ -1357,26 +1454,36 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
             message='环里的状态取决于转了几圈，静态判不出来 —— 整环按"未知"处理，'
                     '不判继承。',
             chapters=cycle_labels))
+    return active, topo, cycle_labels
 
-    def _entry_of(label: str) -> dict:
-        ch = chapters[label]
-        if ch.root or ch.cycle:
-            return _unknown_state()
-        preds = [s.from_label for s in ch.in_edges if s.from_label in chapters]
-        # **只看单一入边**（用户 2026-10-28）：有多个前驱就是分支汇聚，
-        # 不管"恰好一样不一样"都当未知 —— 不猜"反正一样"。
-        if len(preds) != 1:
-            return _unknown_state()
-        pred = chapters.get(preds[0])
-        if pred is None or not pred.exit:
-            return _unknown_state()
-        return pred.exit
 
-    # 拓扑序遍历；环里的章节用"未知入口"也能算出本地出口
-    ordered = topo + cycle_labels
+def _entry_of_chapter(chapters: dict, label: str) -> dict:
+    """这一章的入场舞台状态：单一前驱的出口，否则"未知"。"""
+    ch = chapters[label]
+    if ch.root or ch.cycle:
+        return _unknown_state()
+    preds = [s.from_label for s in ch.in_edges if s.from_label in chapters]
+    # **只看单一入边**（用户 2026-10-28）：有多个前驱就是分支汇聚，
+    # 不管"恰好一样不一样"都当未知 —— 不猜"反正一样"。
+    if len(preds) != 1:
+        return _unknown_state()
+    pred = chapters.get(preds[0])
+    if pred is None or not pred.exit:
+        return _unknown_state()
+    return pred.exit
+
+
+def _derive_chapter_states(chapters: dict, ordered: list,
+                           report: ContinuityReport) -> None:
+    """
+    拓扑序遍历，逐章推出 `entry` / `exit` 舞台状态。
+
+    环里的章节用"未知入口"也能算出本地出口 —— 所以 `ordered` 是拓扑序 + 环，
+    不是"跳过环"。
+    """
     for label in ordered:
         ch = chapters[label]
-        ch.entry = _entry_of(label)
+        ch.entry = _entry_of_chapter(chapters, label)
         try:
             ch.exit = stage_exit_state(ch.beats, initial_state=ch.entry)
         except Exception as e:                   # noqa: BLE001 - 一章推导失败不炸整轮
@@ -1384,7 +1491,10 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
                                   'error': f'舞台状态推导失败：{e}'})
             ch.exit = _unknown_state()
 
-    # ---- 接缝判定 ----
+
+def _judge_seams(seams: list, active: list, chapters: dict,
+                 report: ContinuityReport) -> None:
+    """只判**可达章节之间**的接缝（旁支那条调试路径不算主链条数）。"""
     active_labels = {ch.label for ch in active}
     report.seams = [s for s in seams
                     if s.from_label in active_labels
@@ -1395,24 +1505,6 @@ def analyze_parse_result(parse_result, *, project_root: str = '',
         if p is None or n is None:
             continue
         _judge_seam(seam, p, n, report)
-
-    # ---- 本地事实 / 分支 / 汇聚 / 判不出来的声明 ----
-    _collect_local_facts(report, active, chapters)
-    _collect_topology_notes(report, active, chapters)
-    _collect_condition_notes(report, active)
-    _collect_python_audio(report, lg, chapters)
-    _collect_unmodeled_channels(report, lg)
-    _collect_fallthrough(report, lg)
-
-    # ---- 确定链（只由"可判定接缝"串起来）----
-    report.chains = _build_chains(report, chapters, active)
-
-    # 排序：问题按严重度，不判定按发现顺序保持
-    report.findings.sort(key=lambda f: (_LEVEL_ORDER.get(f.level, 9),
-                                        f.chapters[:1], f.code))
-    report.seams = [s for s in seams]
-    report.elapsed = time.time() - t0
-    return report
 
 
 def _judge_seam(seam: Seam, p: Chapter, n: Chapter,
