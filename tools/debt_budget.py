@@ -18,12 +18,21 @@ sys.path.insert(0, str(ROOT / 'tools'))
 
 import debt_report as DR             # noqa: E402
 
+#: 写进预算文件的说明（**棘轮的"为什么"要跟数据住在一起**）。
+#: 三处"刻意不拆"是 2026-11-01 定的，免得下一轮有人又去动它们：
+#:   · `ui_qt/theme.qss()` —— 一张 QSS 文本（242 行 / **0 分支**）；
+#:   · `cli.build_parser()` —— argparse 声明（203 / 0），拆了只是多几个函数；
+#:   · `ui_qt/asset_picker._build()` —— 纯控件装配（190 / 2），没有判断可切。
+NOTE = ('技术债上限（棘轮）：只许降，不许升。生成：python tools/debt_budget.py。'
+        '刻意不拆的三处：ui_qt/theme.qss()（QSS 文本）/ cli.build_parser()'
+        '（argparse 声明）/ ui_qt/asset_picker._build()（纯装配，无判断）。')
+
 
 def main() -> int:
     data = DR.collect()
     cycles = data['import_cycles_all']
     payload = {
-        'note': '技术债上限（棘轮）：只许降，不许升。生成：python tools/debt_budget.py',
+        'note': NOTE,
         'thresholds': data['thresholds'],
         'limits': {
             'long_functions': data['long_functions'],

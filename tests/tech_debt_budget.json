@@ -1,5 +1,5 @@
 {
- "note": "技术债上限（棘轮）：只许降，不许升。生成：python tools/debt_budget.py",
+ "note": "技术债上限（棘轮）：只许降，不许升。生成：python tools/debt_budget.py。刻意不拆的三处：ui_qt/theme.qss()（QSS 文本）/ cli.build_parser()（argparse 声明）/ ui_qt/asset_picker._build()（纯装配，无判断）。",
  "thresholds": {
   "long_func": 120,
   "complex_func": 20,
@@ -21,9 +21,9 @@
  "cycle_modules": [],
  "cycle_shapes": [],
  "snapshot": {
-  "modules": 253,
-  "total_lines": 162679,
-  "functions": 5568,
-  "file_edges_all": 1248
+  "modules": 254,
+  "total_lines": 162809,
+  "functions": 5576,
+  "file_edges_all": 1254
  }
 }
