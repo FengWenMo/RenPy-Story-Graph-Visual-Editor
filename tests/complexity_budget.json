@@ -33,9 +33,9 @@
    "lines": 145,
    "branches": 50
   },
-  "storygraph/app/stage.py::plan_at_edit": {
-   "lines": 253,
-   "branches": 103
+  "storygraph/app/stage.py::_frame_of": {
+   "lines": 93,
+   "branches": 39
   },
   "storygraph/app/stage.py::plan_scene_change": {
    "lines": 166,
@@ -108,10 +108,6 @@
   "storygraph/pipeline/compile.py::write_compiled": {
    "lines": 194,
    "branches": 30
-  },
-  "storygraph/pipeline/continuity.py::analyze_parse_result": {
-   "lines": 281,
-   "branches": 90
   },
   "storygraph/pipeline/continuity.py::scan_label": {
    "lines": 123,
@@ -193,6 +189,10 @@
    "lines": 190,
    "branches": 2
   },
+  "storygraph/ui_qt/dialog_learn.py::_build_form_page": {
+   "lines": 160,
+   "branches": 1
+  },
   "storygraph/ui_qt/dialog_learn.py::_why_not": {
    "lines": 137,
    "branches": 61
@@ -201,13 +201,13 @@
    "lines": 177,
    "branches": 18
   },
+  "storygraph/ui_qt/dialogs.py::__init__": {
+   "lines": 160,
+   "branches": 38
+  },
   "storygraph/ui_qt/main_window.py::_build_card_page": {
    "lines": 268,
    "branches": 2
-  },
-  "storygraph/ui_qt/main_window.py::_build_graph_page": {
-   "lines": 293,
-   "branches": 1
   },
   "storygraph/ui_qt/main_window.py::_build_toolbars": {
    "lines": 227,

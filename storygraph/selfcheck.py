@@ -81,6 +81,10 @@ REQUIRED_MODULES = (
     'storygraph.ui_qt.window_engine',
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_graph_ops',
+    # 2026-11-01（第九段）：第 0 页构建器搬出去的新 mixin。它被
+    # `main_window` 顶层 import，但它**自己**又被 `tests/_source_paths` 与
+    # 那套 mixin 守卫当成"前端的一整块" —— 换名字或漏打包都从这里先炸。
+    'storygraph.ui_qt.window_graph_page',
     # 2026-11-01（解 `assets` 三模块环）：映射结构契约与身份词汇两个新叶子。
     # `mapping_schema` 里放着 `validate_mapping`，而 `mapping_excel` 现在是
     # **顶层** import 它 —— 打包时这两份文件要是没进 hiddenimports，

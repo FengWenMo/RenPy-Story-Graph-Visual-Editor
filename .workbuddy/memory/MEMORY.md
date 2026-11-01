@@ -172,3 +172,16 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   282→99（六段各是一个完整 `if`，原样搬成七个 `_apply_*`）、`BeatCardEditor._build` 272→38
   （台词区 / 当前舞台 / 立绘资产三段）。⚠ `MainWindowQt` 主类只剩 1 个方法位（守卫：KEEP 外
   不许留 + 方法数 ≤35），所以 `_build_graph_page` 那三兄弟下一轮要走**新 mixin**。
+
+- 2026-11-01 第九段（§84）：第 0 页构建器搬进新 mixin `ui_qt/window_graph_page.py`
+  （`GraphPageMixin`）后再拆：`_build_graph_page` 293→**54**（九个 `_graph_page_*`，按屏切）。
+  ⚠ 只搬第 0 页是**量出来**的决定：`_build_card_page` / `_build_toolbars` 各调 10 / 2 个
+  `main_window` 的**模块级函数**（`BeatCardEditor` / `apply_size_from_card` /
+  `open_mapping_from_card` …），一起搬立刻成模块级环；第 0 页依赖 **0** 个。下一刀必须先把
+  `BeatCardEditor`（1560 行，只依赖 `refresh_mapping_status`）搬去 `ui_qt/card_editor.py`。
+  ⚠ 守卫 `_read_deps()` 改一条：排掉 mixin **自己 `self.X = …` 造的**成员（`GraphPageMixin`
+  是第一个"造状态"的 mixin），判据与 `_instance_attrs()` 同一把尺子，`REQUIRES` 126→29 项；
+  生成器 `tools/_extract_window.py` 同步。另：`at/stage.plan_at_edit` 253/103→**48/4**
+  （`_AtPlan` + 7 个 `_plan_at_*`，八处拒绝文案一字未动）；`continuity.analyze_parse_result`
+  281/90→**39/0**（十一个阶段 helper + `_SeamScan`，两个内嵌闭包提成模块级）。数字：>120 行
+  86→**83**、>20 分支 231→**230**、环 1/29 未动、模块 242→243；全量 8849 通过 / 0 失败。

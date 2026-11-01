@@ -6,8 +6,8 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 86,
-  "complex_functions": 231,
+  "long_functions": 83,
+  "complex_functions": 230,
   "print_calls": 240,
   "print_library": 3,
   "swallow_calls": 1240,
@@ -53,9 +53,9 @@
   "storygraph.assets.asset_registry|storygraph.assets.asset_registry_scan|storygraph.pipeline.build|storygraph.pipeline.compile|storygraph.pipeline.engine_collect|storygraph.pipeline.engine_exporters|storygraph.pipeline.engine_lint|storygraph.pipeline.ir_validate|storygraph.pipeline.statement_probe|storygraph.pipeline.unity_package|storygraph.pipeline.validate|storygraph.story.beat_build|storygraph.story.beat_model|storygraph.story.beat_render|storygraph.story.beat_render_code|storygraph.story.call_expr|storygraph.story.chapter|storygraph.story.chapter_tree|storygraph.story.dsl|storygraph.story.excel_export|storygraph.story.excel_import|storygraph.story.generation_guard|storygraph.story.host_hooks|storygraph.story.patcher|storygraph.story.project_conventions|storygraph.story.script_table|storygraph.story.stage_snapshot|storygraph.story.statement_registry|storygraph.story.transition_expr"
  ],
  "snapshot": {
-  "modules": 242,
-  "total_lines": 160723,
-  "functions": 5409,
-  "file_edges_all": 1216
+  "modules": 243,
+  "total_lines": 161079,
+  "functions": 5435,
+  "file_edges_all": 1225
  }
 }
