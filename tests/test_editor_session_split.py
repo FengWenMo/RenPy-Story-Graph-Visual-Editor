@@ -54,18 +54,18 @@ BLOCKS = {
         'storygraph.app.session_table', 'TableSessionMixin', (
             'load', 'fields', 'cards', '_effective_positions', 'list_entry',
             'inherited_hint', 'stage_digest_text', 'speaking_card_index',
-            'apply', '_apply_stage', 'set_speaker', 'remove_sprite',
+            'apply', 'set_speaker', 'remove_sprite',
             'snapshot', 'restore', 'save',
             'can_undo', 'undo', 'has_undo', 'mark_loaded', 'loaded_index',
             'insert_beat', 'delete_beat', 'restore_last_removed',
             'has_removed',
             # 2026-10-22：`python:` 块 → `$` 行（搬出来，不是读懂它）
             'python_lift_report', 'apply_python_lift',
-            # 2026-11-01：`apply`（282 行 / 71 分支）拆成"一格一函数"，
-            # 六段各自是一个完整的 `if`，见 `docs/开发日志.md` §83。
-            '_apply_flow_fields', '_apply_main_columns',
-            '_apply_advanced_fields', '_apply_sprite_cards',
-            '_apply_word_cells', '_apply_condition',
+            # 2026-11-01（§92，服务化第二刀）：`apply` 里那十二段**写回规则**
+            # 搬去 `app.table_edits.FieldWriter`（`_apply_flow_fields` …
+            # `_apply_stage` 全都不再是这个类的成员）。它们仍在**契约里**，
+            # 只是换了住址 —— 见下面的 `MOVED_TO_SERVICES` 与
+            # `test_service_owns_the_rules_that_left_the_mixins`。
         ),
     ),
     'session_graph': (
@@ -92,8 +92,9 @@ BLOCKS = {
     'session_export': (
         'storygraph.app.session_export', 'ExportMixin', (
             'export_ir', 'frames', 'transform_index', 'screen_size',
-            'should_write_transforms', '_issue_message',
+            'should_write_transforms',
             'default_output_path', 'export', '_patch_note', 'health',
+            # 2026-11-01（§92）：`_issue_message` 搬去 `app.export_plan`。
         ),
     ),
     'session_collab': (
@@ -112,6 +113,24 @@ CORE_MEMBERS = ('__init__', 'registry', 'source', 'refresh_symbols', 'has',
 
 #: 搬成模块级函数、在 `editor.py` 里留了 re-export 的名字。
 GRAPH_FUNCS = ('files_look_like_control_flow', 'graph_from_layout_dict')
+
+#: 2026-11-01（§92）**搬去服务层**的名字：`(模块, 类名或 None, 名字…)`。
+#:
+#: 它们从 `BLOCKS` 里删掉了，但**没有从契约里消失** —— 换个住址继续被守着。
+#: 为什么非留这一条不可：服务化最坏的结果不是"搬错"，而是"搬丢了" ——
+#: 名字从 mixin 上删掉、服务里又没实现，谁都不会报错（`apply` 照样能跑，
+#: 只是少写回一格）。所以下面那条用例按**同一个清单**验"服务里真的有它"。
+MOVED_TO_SERVICES = {
+    'storygraph.app.table_edits': ('FieldWriter', (
+        '_apply_flow_fields', '_apply_main_columns', '_apply_advanced_fields',
+        '_apply_code_cell', '_apply_sprite_cards', '_apply_word_cells',
+        '_apply_condition', '_rechain_siblings', '_apply_label',
+        '_apply_stage', '_fold_dynamic_columns', 'write',
+    )),
+    'storygraph.app.export_plan': (None, (
+        'default_output_path', 'issue_message', 'block_codes', 'overridable',
+    )),
+}
 
 #: 允许多个 mixin 同名的成员（"冲突检查"里跳过）。
 #: `REQUIRES` 是**每个 mixin 都该有的契约声明**，同名正是设计。
@@ -164,6 +183,22 @@ class TestOwnership:
         assert not shadowed, (
             f'这些方法又被写回 EditorSession 了（会静默覆盖 '
             f'{cls_name} 的那份）：{shadowed}')
+
+    @pytest.mark.parametrize('mod_name', sorted(MOVED_TO_SERVICES))
+    def test_service_owns_the_rules_that_left_the_mixins(self, mod_name):
+        """
+        搬去服务的那批名字**必须真的在服务里**（2026-11-01，§92）。
+
+        服务化最坏的结果是"搬丢了"：名字从 mixin 上删掉、服务里又没落地，
+        没有一条用例会红 —— `apply` 照样跑得完，只是少写回一格。
+        所以 `BLOCKS` 里删掉的名字挪进 `MOVED_TO_SERVICES`，用同一条
+        `_reachable` 判据接着守。
+        """
+        cls_name, names = MOVED_TO_SERVICES[mod_name]
+        target = _import(mod_name, cls_name) if cls_name \
+            else __import__(mod_name, fromlist=['__name__'])
+        missing = [n for n in names if not _reachable(target, n)]
+        assert not missing, f'{mod_name} 少了这些（服务化搬丢）：{missing}'
 
     @pytest.mark.parametrize('key', sorted(BLOCKS))
     def test_requires_are_satisfied_by_the_composed_class(self, key):
