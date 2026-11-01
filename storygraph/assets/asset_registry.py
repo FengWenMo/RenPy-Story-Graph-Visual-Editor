@@ -16,9 +16,40 @@ asset_registry.py
 import re
 from pathlib import Path
 from collections import defaultdict
+from functools import wraps
+import threading
 from typing import Optional
 import openpyxl
 import importlib.util
+
+
+#: 资产表写入的**进程内**串行锁（2026-11-01，审查：「资产注册表无锁、
+#: 只靠口头约定」）。
+#:
+#: 为什么需要：资产表的写法是"读整张表 → 改几行 → 整份保存"。两个线程
+#: （缩略图池、引擎轮询、后台同步）同时走这条路时，后保存的那份会把前一份
+#: 的改动**整份盖掉** —— 不是写坏，是**悄悄少了几行**，而"少的那几行"
+#: 正是别人刚加的。
+#:
+#: 为什么是"全局一把"而不是"每个文件一把"：资产表的写入一天也就几十次，
+#: 串行化的代价可忽略；而按路径分锁要处理"相对/绝对/大小写"三套键，
+#: 做错了等于没锁。宁可粗一点，也不要"看起来有锁"。
+#:
+#: 为什么是 `RLock`：这些函数之间会互相调用（`add_asset_to_registry` →
+#: `append_rows_to_table`），普通 `Lock` 会自己把自己锁死。
+_ASSET_WRITE_LOCK = threading.RLock()
+
+
+def _serialized(fn):
+    """把一次"读表 → 改 → 落盘"包进同一把锁（可重入）。"""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _ASSET_WRITE_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
+
 
 from storygraph.core.vocabulary import (
     ASSET_TYPE_ATTR as _TYPE_ATTR,
@@ -30,6 +61,8 @@ from storygraph.excel.cells import append_text_row, set_text
 
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import save_workbook_atomic
+# 2026-11-01：读 Excel 只走这一个入口（zip 炸弹 / 声明维度 / 宏 / 外链 检查）。
+from storygraph.excel import safety as excel_safety
 from storygraph.assets.asset_registry_constants import (  # 2026-10-11 拆分
     SUPPORTED_IMAGE_EXT,
     SUPPORTED_AUDIO_EXT,
@@ -225,7 +258,7 @@ def read_excel_rows(file_path) -> list:
     file_path = Path(file_path)
     if not file_path.exists():
         return []
-    wb = openpyxl.load_workbook(file_path, data_only=False)
+    wb = excel_safety.open_workbook(file_path, data_only=False, purpose='assets')
     ws = wb.active
     # 表头中文 → 规范键（老表英文表头原样通过）—— 见 `_canon_field`。
     headers = [_canon_field(cell.value) for cell in ws[1]]
@@ -1145,6 +1178,7 @@ def _table_file_name(table_key: str) -> str:
     return fname or ''
 
 
+@_serialized
 def update_table_paths(asset_dir, table_key: str, updates: dict,
                        backup: bool = True) -> int:
     """
@@ -1168,7 +1202,7 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
         return 0
     changed = 0
     try:
-        wb = openpyxl.load_workbook(path)
+        wb = excel_safety.open_workbook(path)
         ws = wb.active
         headers = _sheet_headers(ws)
         if 'ID' not in headers or 'Path' not in headers:
@@ -1197,6 +1231,7 @@ def update_table_paths(asset_dir, table_key: str, updates: dict,
     return changed
 
 
+@_serialized
 def backfill_dimension_columns(asset_dir, rows, backup: bool = True) -> dict:
     """
     把**已经算出来的维度**写回 `images.xlsx` 的 `Group` / `Value` 列。
@@ -1221,7 +1256,7 @@ def backfill_dimension_columns(asset_dir, rows, backup: bool = True) -> dict:
     changed = 0
     added = []
     try:
-        wb = openpyxl.load_workbook(path)
+        wb = excel_safety.open_workbook(path)
         try:
             ws = wb.active
             headers = _sheet_headers(ws)
@@ -1282,6 +1317,7 @@ def backfill_dimension_columns(asset_dir, rows, backup: bool = True) -> dict:
             'saved': bool(changed or added), 'error': ''}
 
 
+@_serialized
 def delete_rows_from_table(asset_dir, table_key: str, paths,
                            backup: bool = True) -> int:
     """
@@ -1307,7 +1343,7 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
         return 0
     removed = 0
     try:
-        wb = openpyxl.load_workbook(path)
+        wb = excel_safety.open_workbook(path)
         ws = wb.active
         headers = _sheet_headers(ws)
         if 'Path' not in headers:
@@ -1328,6 +1364,7 @@ def delete_rows_from_table(asset_dir, table_key: str, paths,
     return removed
 
 
+@_serialized
 def delete_rows_by_id(asset_dir, table_key: str, ids, backup: bool = True) -> int:
     """
     按 **ID** 删行（`delete_rows_from_table` 是按 `Path` 删，删不掉"同一文件两行"）。
@@ -1348,7 +1385,7 @@ def delete_rows_by_id(asset_dir, table_key: str, ids, backup: bool = True) -> in
         return 0
     removed = 0
     try:
-        wb = openpyxl.load_workbook(path)
+        wb = excel_safety.open_workbook(path)
         ws = wb.active
         headers = _sheet_headers(ws)
         if 'ID' not in headers:
@@ -1774,6 +1811,7 @@ def load_hooks(config_path=None, project_root=None):
 # （顶部以 `_TYPE_ATTR` 别名导入）。别再就地写第二份——2026-09-28 之前
 # 这里、`validate._TYPE_ATTR`、`dsl.Symbols.has()` 内联 dict 各有一份。
 
+@_serialized
 def add_asset_to_registry(registry, asset_type, asset_id, path='',
                          asset_dir=None):
     """
@@ -1807,7 +1845,7 @@ def add_asset_to_registry(registry, asset_type, asset_id, path='',
             p = Path(asset_dir) / fname
             try:
                 if p.exists():
-                    wb = openpyxl.load_workbook(p)
+                    wb = excel_safety.open_workbook(p)
                     ws = wb.active
                     # 按文件真实表头对齐追加，避免列错位（老文件可能
                     # 只有 ID/Path/Notes，新文件才有 ATL/Params…）
@@ -1849,6 +1887,7 @@ def _update_row_cells(ws, row_no: int, headers: list, row: dict,
     return changed
 
 
+@_serialized
 def append_rows_to_table(asset_dir, table_key: str, rows: list,
                          update_keys: tuple = (), skip_paths=None,
                          backup: bool = False) -> int:
@@ -1888,7 +1927,7 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
     added = updated = 0
     try:
         if path.exists():
-            wb = openpyxl.load_workbook(path)
+            wb = excel_safety.open_workbook(path)
             ws = wb.active
             headers = _sheet_headers(ws)
             if not headers or all(h is None for h in headers):
@@ -3123,7 +3162,7 @@ def register_missing_assets(project_root, asset_dir=None,
                 shutil.copyfile(target, backup_path)
                 backup = str(backup_path)
                 backups.append(backup)
-            wb = openpyxl.load_workbook(target) if target.exists() \
+            wb = excel_safety.open_workbook(target) if target.exists() \
                 else openpyxl.Workbook()
             ws = wb.active
             if ws.max_row < 1 or not any(c.value for c in ws[1]):

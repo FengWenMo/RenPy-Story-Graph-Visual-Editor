@@ -86,6 +86,7 @@ from storygraph.assets.asset_identity import KINDS
 from storygraph.assets.asset_mapping import MAPPING_SCHEMA, MappingError
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import RefusedWrite
+from storygraph.excel import safety
 
 #: 项目里这份工作簿的名字（与 `MAPPING_FILENAME` 同一个模式：项目根或 `game/` 下）。
 MAPPING_XLSX_FILENAME = 'storygraph.mapping.xlsx'
@@ -307,7 +308,11 @@ def _open_workbook(p: Path):
         raise MappingError(
             '读 Excel 映射需要 openpyxl（python -m pip install openpyxl）') from e
     try:
-        return openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+        return safety.open_workbook(str(p), read_only=True, data_only=True,
+                                    purpose='mapping')
+    except safety.UnsafeWorkbook as e:
+        # 安全检查的结论原样交出去（已经是一句人话 + 为什么）
+        raise MappingError(str(e)) from e
     except PermissionError as e:
         raise MappingError(
             f'打不开 {p.name}：这个文件可能正被 Excel / WPS 独占打开着。'

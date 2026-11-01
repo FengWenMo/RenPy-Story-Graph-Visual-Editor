@@ -39,6 +39,7 @@ from pathlib import Path
 
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import save_workbook_atomic
+from storygraph.excel import safety
 from storygraph.core.collab_status import (  # noqa: F401  (本模块 re-export)
     STATUS_APPROVED, STATUS_DRAFT, STATUS_LABELS, STATUS_REVIEW, STATUSES)
 from storygraph.story.beat_fields import BEAT_FIELDS
@@ -853,7 +854,7 @@ def pull(db_path, sheet_path, actor: str = '', registry=None,
 
     # 追加协作信息表
     import openpyxl
-    wb = openpyxl.load_workbook(out)
+    wb = safety.open_workbook(out)
     if COLLAB_SHEET in wb.sheetnames:
         del wb[COLLAB_SHEET]
     ws = wb.create_sheet(COLLAB_SHEET)
@@ -896,7 +897,7 @@ def read_collab_sheet(sheet_path) -> dict:
     sheet_path = Path(sheet_path)
     if not sheet_path.exists():
         return {}
-    wb = openpyxl.load_workbook(sheet_path, data_only=True)
+    wb = safety.open_workbook(sheet_path, data_only=True)
     try:
         if COLLAB_SHEET not in wb.sheetnames:
             return {}
@@ -1020,7 +1021,7 @@ def read_pulled_at(sheet_path) -> str:
     sheet_path = Path(sheet_path)
     if not sheet_path.exists():
         return ''
-    wb = openpyxl.load_workbook(sheet_path, data_only=True)
+    wb = safety.open_workbook(sheet_path, data_only=True)
     try:
         if COLLAB_SHEET not in wb.sheetnames:
             return ''
@@ -1760,7 +1761,7 @@ def _drop_local_row(sheet_path, lid: str) -> bool:
     path = Path(sheet_path)
     if not path.exists():
         return False
-    wb = openpyxl.load_workbook(path)
+    wb = safety.open_workbook(path)
     try:
         ws = wb['Beats']
         cols = _sheet_headers_by_field(ws)
@@ -1809,7 +1810,7 @@ def _write_local_rows(sheet_path, payloads: dict) -> int:
         return 0
     import openpyxl
 
-    wb = openpyxl.load_workbook(sheet_path)
+    wb = safety.open_workbook(sheet_path)
     try:
         ws = wb['Beats']
         cols = _sheet_headers_by_field(ws)
@@ -1857,7 +1858,7 @@ def _refresh_collab_rows(db_path, sheet_path, line_ids) -> int:
     if not rows:
         return 0
 
-    wb = openpyxl.load_workbook(Path(sheet_path))
+    wb = safety.open_workbook(Path(sheet_path))
     try:
         if COLLAB_SHEET not in wb.sheetnames:
             return 0

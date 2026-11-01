@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.excel import safety
 
 #: 工具自己维护的工作表（重建时整张重写，用户不该在这里写东西）。
 #: 判据是"这张表由 `export_beats_to_excel` 造出来" —— 与写入函数一一对应，
@@ -162,6 +163,16 @@ def snapshot_user_content(table_path, *, tool_headers=()) -> 'Snapshot | None':
     读不出来（没有这张表 / 不是 xlsx / 文件坏了 / 正被 Excel 独占）→ `None`：
     这时候**不能假装"没有用户内容"**，调用方要据 `None` 决定是否拒绝覆盖
     （见 `export_beats_to_excel`：读不出 + 备份不成就拒写）。
+
+    ⚠ 2026-11-01（Excel 安全层）分两种情况，**不能一律返回 None**：
+
+      · 表**存在但被安全检查拒绝**（解压炸弹 / 声明维度炸弹 / 不是工作簿）——
+        抛 `safety.UnsafeWorkbook`。这种表一旦"假装没有用户内容"去重建，
+        用户自加的页和列就没了；正确做法是**不重建**，让人先处理那张表；
+      · 表被 Excel 独占（`PermissionError`）—— 同样抛：写入那一步也会失败，
+        提前说比"重建到一半才发现"好；
+      · 其余解析错误 —— 仍然返回 `None`（坏文件本来就救不回内容，
+        写入层还有 atomicio 的备份兜底）。
     """
     p = Path(table_path)
     if not p.is_file():
@@ -173,7 +184,9 @@ def snapshot_user_content(table_path, *, tool_headers=()) -> 'Snapshot | None':
     # 慢一点可以接受。
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(p, data_only=False)
+        wb = safety.open_workbook(p, data_only=False, purpose='preserve')
+    except (safety.UnsafeWorkbook, PermissionError):
+        raise
     except Exception as e:                     # noqa: BLE001 - 见 docstring
         swallow('story.xlsx_preserve.snapshot.open', e)
         return None
@@ -548,7 +561,7 @@ def snapshot_asset_table(table_path, tool_headers,
         return None
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(p, data_only=False)
+        wb = safety.open_workbook(p, data_only=False)
     except PermissionError:
         # **被占用 ≠ 坏表**（2026-10-26，P1 讨论④ 第一层）：Excel 开着时
         # Windows 抛 PermissionError。此时表没坏 —— 一个字节都不该动，

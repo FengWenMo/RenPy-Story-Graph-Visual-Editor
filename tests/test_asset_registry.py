@@ -509,3 +509,56 @@ class TestResolveReference:
     def test_no_match(self):
         assert resolve_reference('nope', AssetRegistry()) is None
         assert resolve_reference('', AssetRegistry()) is None
+
+
+# ---------------------------------------------------------------------------
+#  并发：两次"读表 → 改 → 存"不许互相盖掉（2026-11-01）
+# ---------------------------------------------------------------------------
+
+class TestConcurrentWritesDoNotLoseRows:
+    """
+    审查：「资产注册表无锁、只靠口头约定」。
+
+    资产表的写法是"读整张表 → 改几行 → 整份保存"。两个线程同时走这条路时，
+    后保存的那份会把前一份的改动**整份盖掉** —— 不是写坏，是**悄悄少了几行**。
+    修复是 `asset_registry._ASSET_WRITE_LOCK`（可重入的进程内串行锁）。
+    """
+
+    def test_eight_threads_appending_rows_keep_every_row(self, tmp_path):
+        import threading
+
+        from storygraph.assets.asset_registry import (append_rows_to_table,
+                                                      read_excel_rows)
+
+        errors = []
+
+        def worker(n):
+            try:
+                for j in range(4):
+                    append_rows_to_table(
+                        tmp_path, 'sounds',
+                        [{'ID': f'sfx-{n}-{j}', 'Path': f'sfx/{n}-{j}.wav',
+                          'Notes': '并发'}])
+            except BaseException as exc:           # noqa: BLE001 - 收集后统一断言
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+        assert not errors, errors
+
+        rows = read_excel_rows(tmp_path / 'sounds.xlsx')
+        ids = {str(r.get('ID') or '') for r in rows}
+        want = {f'sfx-{n}-{j}' for n in range(8) for j in range(4)}
+        missing = want - ids
+        assert not missing, f'并发写丢了 {len(missing)} 行：{sorted(missing)[:5]}'
+
+    def test_lock_is_reentrant(self):
+        """函数之间会互相调用 —— 普通 Lock 会把自己锁死，RLock 不会。"""
+        from storygraph.assets import asset_registry as AR
+
+        with AR._ASSET_WRITE_LOCK:
+            with AR._ASSET_WRITE_LOCK:
+                assert True

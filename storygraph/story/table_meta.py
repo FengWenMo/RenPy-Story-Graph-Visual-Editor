@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
+from storygraph.excel import safety
 
 #: 隐藏表名。与 `beat_model.FILE_BLOCK_SHEET` 同一档：工具维护的搬运工。
 META_SHEET = '表信息'
@@ -65,19 +66,42 @@ TOOL_NAME = "Renpy_Story_Graph_Editor"
 
 def fingerprint_of(path) -> str:
     """
-    源文件的**内容指纹**：`sha1(原始字节)` 的前 16 位十六进制。
+    源文件的**内容指纹**：`sha1(原始字节)` 的完整 40 位十六进制。
 
     为什么是字节而不是"规范化后的文本"：这张表将来可能被搬到别的机器、
     被 git 换行归一（`core.autocrlf`），而"源文件到底变没变"问的是
     盘上那份字节。指纹只用来判"变没变"，不参与任何还原 —— 所以
     CRLF/LF 差异导致的"变了"是**保守方向**（宁可多报一次"表旧了"）。
+
+    ⚠ 2026-11-01（审查：指纹窗口没关死，"哈希被截短"）：从前这里取前 16 位
+    （64 bit）。它只是"变没变"的判据，64 bit 撞车的概率实际可忽略，但
+    **既然完整哈希一样便宜，就没有理由截短**。老表里存的是 16 位 ——
+    比较一律走 `fingerprints_match()`（按前缀兼容），老表照样能用。
     """
     try:
         import hashlib
         data = Path(path).read_bytes()
     except OSError:
         return ''
-    return hashlib.sha1(data).hexdigest()[:16]
+    return hashlib.sha1(data).hexdigest()
+
+
+def fingerprints_match(stored, current) -> bool:
+    """
+    两个指纹是不是同一次内容 —— **兼容老表**（16 位前缀 vs 完整 40 位）。
+
+    规则：任一为空 → 不比（返回 False，调用方按"不知道"处理）；
+    相等 → 是；一方是另一方的前缀 → 是（老表存的就是 16 位）。
+
+    为什么不直接改成 40 位就完事：已经摊出来的表里存着 16 位，
+    直接比 40 位会让**每一张老表**都被判成"表比源码旧" —— 假警报刷屏，
+    而这类"狼来了"会让人开始不信提示（比不提示更坏）。
+    """
+    a = str(stored or '').strip().lower()
+    b = str(current or '').strip().lower()
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
 
 
 def write_meta(wb, *, source_file='', created: str = '',
@@ -129,7 +153,7 @@ def read_meta(table_path) -> dict:
         return {}
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(table_path, read_only=True,
+        wb = safety.open_workbook(table_path, read_only=True,
                                     data_only=True)
     except Exception as e:                     # noqa: BLE001 - 见 docstring
         swallow('story.table_meta.read_meta.open', e)
@@ -189,8 +213,8 @@ def source_of(table_path) -> 'Path | None':
 
 
 __all__ = ['META_SHEET', 'META_HEADER', 'KEY_SOURCE', 'KEY_CREATED',
-           'KEY_SHA1', 'KEY_TOOL', 'fingerprint_of', 'read_meta', 'source_of',
-           'staleness_note', 'write_meta']
+           'KEY_SHA1', 'KEY_TOOL', 'fingerprint_of', 'fingerprints_match',
+           'read_meta', 'source_of', 'staleness_note', 'write_meta']
 
 
 def staleness_note(table_path, source_path, removed_count: int = 0) -> str:
@@ -214,7 +238,7 @@ def staleness_note(table_path, source_path, removed_count: int = 0) -> str:
     if not stamp:
         return ''                    # 老表（没有指纹）：不猜，交给回执的删行清单
     now = fingerprint_of(source_path)
-    if not now or now == stamp:
+    if not now or fingerprints_match(stamp, now):
         return ''
     return ('；**这张表比源码旧**（源码在摊表之后又被改过）：这次删掉的那几行'
             '很可能是别人刚写的，不是你清空的。先把这一章重新载入'

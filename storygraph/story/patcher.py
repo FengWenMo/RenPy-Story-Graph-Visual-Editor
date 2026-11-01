@@ -3757,13 +3757,26 @@ def _patch_walk_blocks(st) -> None:
 
 def patch_export(beats: list, source_path, generated_text: str,
                  registry=None, symbols=None, indent: str = '    ',
-                 trust_ranges: bool = False) -> PatchResult:
+                 trust_ranges: bool = False,
+                 expect_sha1: str = '') -> PatchResult:
     """
     把 `generated_text` 增量补进 `source_path`，返回合并后的全文。
 
     **本函数绝不返回"半对"的产物**：任何一项校验不过，`ok` 就是 False、
     `reasons` 说明原因，调用方应当退回全量重生成。
     ⚠ `ok=False` 时 **`text` 不可用**（它只是"尝试过的中间结果"）。
+
+    `expect_sha1`（2026-11-01，审查：「指纹窗口没关死，先查后读的顺序反了」）：
+    调用方**核对过**的那份内容指纹（`write_gate.sha1_16`，16 位）。
+    读了正文之后，这里再读一次字节、算一次指纹：对不上就拒绝增量。
+
+    为什么必须是"读完再核对"：从前是
+    `session.source_unchanged()`（查）→ `patch_export` 再读一遍（读）——
+    两件事之间有窗口。窗口里被人 / 同步盘改了一笔的话，行号就是旧的，
+    而 `trust_ranges=True` 会把对位守卫让开 → **按旧行号改错行**。
+    现在核对发生在读之后（`read_text` → 再取字节算指纹），
+    窗口里发生过任何内容变化都会被看出来；退回全量是安全方向
+    （手写目标仍会被门禁拦住，不会覆盖）。多读一遍 15 KB 的章节，代价可忽略。
 
     `registry` / `symbols` 必须与生成 `generated_text` 时**同一套**，
     否则单拍渲染的写法会和真实产物不一致（`ling happy` vs 中文 tag）
@@ -3832,6 +3845,25 @@ def patch_export(beats: list, source_path, generated_text: str,
     except (OSError, UnicodeDecodeError) as exc:
         return PatchResult(generated_text, None, 0, len(beats), 0,
                            reasons=[f'源文件读不了：{exc}'])
+
+    # **读完再核对**（2026-11-01，审查「先查后读的顺序反了」）：
+    # 调用方核对"磁盘上还是载入那一份"发生在**读之前**。这里读完之后再取一次
+    # 字节算指纹：窗口里被动过 → 行号就是旧的 → 拒绝增量。
+    # 用 16 位 `write_gate.sha1_16`：与 `_source_fingerprint` / 会话那边同一口径，
+    # 不必为了这一层把存量的基线格式换掉。
+    if expect_sha1:
+        from storygraph.story import write_gate as _W
+        try:
+            _now_sha = _W.sha1_16(Path(source_path).read_bytes())
+        except OSError as exc:
+            return PatchResult(generated_text, None, 0, len(beats), 0,
+                               reasons=[f'源文件状态读不了：{exc}'])
+        if _now_sha != str(expect_sha1):
+            return PatchResult(
+                generated_text, None, 0, len(beats), 0,
+                reasons=['源文件在"核对"和"读取"之间被改过（内容指纹变了）：'
+                         '拒绝增量 —— 否则会按旧行号改错行。'
+                         '重新载入这一章再导出即可（或从备份恢复后再试）'])
 
     # 行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来。
     # 细节见 `_insert_ids_of` / `_recover_ranges` 的 docstring。

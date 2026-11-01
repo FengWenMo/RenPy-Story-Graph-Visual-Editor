@@ -1129,6 +1129,81 @@ def validate_label_collisions(project_root) -> list:
     return out
 
 
+def validate_workbook_safety(project_root) -> list:
+    """
+    **Excel 工作簿的安全体检**（2026-11-01，外部审查 §5.5 的另一半）。
+
+    审查只点对了写盘（19 处 `wb.save()` 是裸的）。读那一头也没人管：
+    xlsx 是 zip，解压炸弹 / 声明维度炸弹 / 宏 / 外部链接都能装进去。
+    `excel/safety.py` 在打开时挡这些；但**体检时就该看见** ——
+    否则用户点"载入项目"才会撞上一句拒绝。
+
+    判据：
+      · 打不开（炸弹、不是工作簿、加密、老 .xls）→ **E307 / L3 error**；
+      · 能打开但可疑（带宏、外链、嵌入对象、超大范围）→ **W123 / L2 warning**。
+
+    范围刻意收窄：只扫项目里**真会被打开**的那几类（资产表、章节表、
+    根目录的映射表），跳过 Excel 的锁文件 `~$*` 与备份 `*.bak*`；
+    文件数封顶 200（一个正常项目不会有几百张表）。
+    """
+    if not project_root:
+        return []
+    try:
+        from storygraph.excel import safety
+    except Exception as e:                     # noqa: BLE001 - 依赖缺失就别拦体检
+        swallow('pipeline.validate.workbook_safety.import', e)
+        return []
+    root = Path(project_root)
+    patterns = ('game/asset_tables/*.xlsx', 'game/asset_tables/*.xlsm',
+                'game/*.xlsx', 'game/*.xlsm', '*.xlsx')
+    seen, files = set(), []
+    for pattern in patterns:
+        try:
+            found = sorted(root.glob(pattern))
+        except OSError as e:                   # noqa: BLE001 - 扫不动就少报
+            swallow('pipeline.validate.workbook_safety.glob', e)
+            continue
+        for f in found:
+            key = str(f).lower()
+            if key in seen or not f.is_file():
+                continue
+            name = f.name
+            if name.startswith('~$') or '.bak' in name:
+                continue                       # Excel 锁文件 / 我们自己的备份
+            seen.add(key)
+            files.append(f)
+            if len(files) >= 200:
+                break
+        if len(files) >= 200:
+            break
+
+    out = []
+    for f in files:
+        try:
+            rep = safety.inspect_workbook(f)
+        except Exception as e:                 # noqa: BLE001 - 检查本身出错别炸体检
+            swallow('pipeline.validate.workbook_safety.inspect', e)
+            continue
+        if not rep.get('ok'):
+            detail = '；'.join(rep.get('hard') or []) or '未知原因'
+            out.append(Issue(
+                L3, 'E307', ERROR,
+                f'{f.name} 打不开：{detail}',
+                where=str(f),
+                hint='这份表会在"载入项目 / 摊表 / 导出"时被拒绝。'
+                     '修法见提示：不是工作簿就换一份、加密的先另存为 .xlsx、'
+                     '解压炸弹这类文件不要打开。'))
+        elif rep.get('soft'):
+            detail = '；'.join(rep.get('soft') or [])
+            out.append(Issue(
+                L2, 'W123', WARNING,
+                f'{f.name} 有需要注意的地方：{detail}',
+                where=str(f),
+                hint='这些不拦你，但读回来的数据可能不是你以为的那份'
+                     '（宏不会被执行、外链的值不在这份文件里）。'))
+    return out
+
+
 def validate_sg_transforms(project_root) -> list:
     """
     **尺寸变换的引用存在性**（护栏 ③，2026-10-31 用户拍板的前提）。
@@ -1193,6 +1268,9 @@ def validate_all(beats, registry=None, graph=None, script_warnings=None,
     # 护栏 ④：**跨文件 label 重名** —— 与生成门禁的 LABEL_COLLISION 同一条判据
     # （2026-11-01，外部审查 5.9：从前"体检通过"但一导出就被拦）。
     report.extend(validate_label_collisions(project_root))
+    # 护栏 ⑤：**Excel 工作簿安全**（zip 炸弹 / 声明维度 / 宏 / 外链）。
+    # 打开时才拒绝当然也行，但"载入项目"那一步撞上一句拒绝，体验是"工具坏了"。
+    report.extend(validate_workbook_safety(project_root))
     if dedupe or cap_per_code:
         report.issues = _dedupe_and_cap(report.issues, cap_per_code)
     return report

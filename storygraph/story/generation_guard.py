@@ -1408,9 +1408,20 @@ def write_generation(text: str, out_path, *, review_on_block: bool = True,
         # "和原文抢 label"才是致命问题；写到 build/ 或临时目录的产物
         # 根本不被扫描，与原文同名无害（见 labels_in_danger）。
         occupied = labels_in_danger(out_path, root, exclude={out_path})
-    issues = generation_guard(text, out_path, project_root=root,
-                              occupied_labels=occupied, beats=beats,
-                              unmanaged_blocks=unmanaged_blocks)
+    try:
+        issues = generation_guard(text, out_path, project_root=root,
+                                  occupied_labels=occupied, beats=beats,
+                                  unmanaged_blocks=unmanaged_blocks)
+    except Exception as e:                     # noqa: BLE001 - 见下（fail-closed）
+        # **门禁自己出错 = 不放行**（2026-11-01，审查：「关卡自身出错时静默
+        # 退化成'不检查'且照样报通过」）。判据是"这份产物会不会把游戏弄坏"，
+        # 而门禁崩了的时候我们**没有资格说"没发现问题"** —— 那等于把最后
+        # 一道闸关掉还报绿。所以这里判 block：不写目标路径，改留副本。
+        issues = [GuardIssue(
+            'GUARD_ERROR', 'block',
+            f'生成门禁自己出错了（{type(e).__name__}: {e}）—— '
+            f'为了不把可能坏掉的脚本写进目标路径，这次**不落盘**；'
+            f'请把这句话连同项目一起报给开发者（其余产物文件没有被改动）')]
     if source_text is not None:
         lost = opaque_loss(source_text, text)
         if lost:

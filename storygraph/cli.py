@@ -8,6 +8,7 @@ cli.py
     python cli.py build <项目根> --engine renpy # 体检 + 出产物
     python cli.py table rpy2xlsx <a.rpy>       # 单文件摊表
     python cli.py table xlsx2rpy <a.xlsx>      # 表写回脚本
+    python cli.py excel-check <表或目录>        # 读 Excel 之前的体检（炸弹/宏/外链）
     python cli.py collab init|pull|push|status|lock|unlock|approve
 
 退出码：0 通过；1 有错误；2 用法/环境问题。CI 直接看退出码。
@@ -527,6 +528,73 @@ def _cmd_table(args) -> int:
 
 
 # ==================================================================
+#  excel-check：读 Excel 之前的体检（2026-11-01，审查 §5.5 的另一半）
+# ==================================================================
+
+def _cmd_excel_check(args) -> int:
+    """
+    **这份工作簿能不能安全打开** —— xlsx 是 zip，里面装什么由写它的人决定。
+
+    判据分两档（与 `excel/safety.py` 同一套）：
+      · **打不开**：解压炸弹 / 声明维度炸弹 / 加密或老 `.xls` / 不是工作簿
+        → 退出码 1，逐条说为什么；
+      · **要当心**：带宏 / 外部链接 / 嵌入对象 / 查询连接 / 超大范围
+        → 默认只提醒（退出码 0），加 `--strict` 也算失败。
+
+    `path` 可以是单个文件或一个目录（扫目录下的 `.xlsx` / `.xlsm`，
+    跳过 Excel 的锁文件 `~$*`）；最多检查 500 份。
+    """
+    from storygraph.excel import safety
+
+    p = Path(str(getattr(args, 'path', '') or ''))
+    if not p.exists():
+        _err(f'找不到：{p}\n  这个路径不存在（检查一下路径或拼写）。')
+        return EXIT_USAGE
+    if p.is_file():
+        files = [p]
+    elif p.is_dir():
+        try:
+            files = sorted([*p.glob('*.xlsx'), *p.glob('*.xlsm')])
+        except OSError as e:                    # noqa: BLE001 - 目录读不了
+            _err(f'扫不动这个目录：{e}')
+            return EXIT_USAGE
+        files = [f for f in files
+                 if f.is_file() and not f.name.startswith('~$')]
+        if not files:
+            _err(f'{p} 里没有 .xlsx / .xlsm（Excel 的锁文件 ~$* 不算）。')
+            return EXIT_USAGE
+    else:
+        _err(f'{p} 既不是文件也不是目录。')
+        return EXIT_USAGE
+
+    if len(files) > 500:
+        _err(f'（目录里有 {len(files)} 份，只检查前 500 份）')
+        files = files[:500]
+
+    reports = [safety.inspect_workbook(f) for f in files]
+    hard = [r for r in reports if not r.get('ok')]
+    soft = [r for r in reports if r.get('ok') and r.get('soft')]
+
+    if getattr(args, 'json', False):
+        print(json.dumps({'checked': len(reports), 'hard': hard, 'soft': soft},
+                         ensure_ascii=False, indent=1))
+        return 1 if hard or (args.strict and soft) else 0
+
+    for rep in reports:
+        if not rep.get('ok') or rep.get('soft'):
+            print(safety.describe(rep))
+            print()
+    print(f'检查了 {len(reports)} 份工作簿：'
+          f'**{len(hard)} 份打不开** / {len(soft)} 份有提醒。')
+    if hard:
+        _err('打不开的这几份，会在载入项目 / 摊表 / 导出时被拒绝 —— '
+             '先按上面的提示处理（换一份、另存为 .xlsx、别打开来路不明的表）。')
+    elif soft:
+        print('提醒不算失败：数据还能读，只是"读回来的可能不是你以为的那份"。')
+    return 1 if hard or (args.strict and soft) else 0
+
+
+# ==================================================================
 #  collab：Excel 前端 + 数据库后端
 # ==================================================================
 
@@ -536,6 +604,88 @@ def _collab_db(args) -> Path:
     return Path(args.project) / 'collab.db'
 
 
+def _collab_init(args, db) -> int:
+    """`collab init`：建库 + 登记成员（拆自 `_cmd_collab`）。"""
+    import storygraph.collab.collab_store as cs
+
+    users = [u for u in (args.users or '').split(',') if u.strip()]
+    cs.init_db(db, users=users, owner=args.owner)
+    print(f'已建库：{db}')
+    if users:
+        print('成员：' + '，'.join(users))
+        print('角色：' + '，'.join(
+            f"{m['id']}[{m['role_label']}]" for m in cs.members(db)))
+    print('下一步：collab pull 把库导出成 Excel 交给文案；')
+    print('        collab push 把改好的 Excel 写回库。')
+    return 0
+
+
+
+def _collab_import_ir(args, db) -> int:
+    """`collab import-ir`：从 .rpy 灌进库（拆自 `_cmd_collab`）。"""
+    import storygraph.collab.collab_store as cs
+
+    # 从 .rpy 灌进数据库：新项目第一次入库走这个
+    from storygraph.pipeline.build import load_asset_registry
+    from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+    from storygraph.story.beat_build import beats_from_parse_result
+    from storygraph.pipeline.build import discover_scripts
+
+    # 2026-11-01（外部审查 C1，P0）：**这里以前会拿参数当输出路径**。
+    # `collab import-ir --sheet D:\mygame\game\ch01.rpy` 会先把这个
+    # 1488 字节的剧本写成 15481 字节的 Excel，再拿它去 push ——
+    # 一次误传 = 一章剧本没了，而且先覆盖后校验，退出码还是 0。
+    #
+    # 现在三条闸：
+    #   ① 输出路径只认 `--out`（`--sheet` 仍认，但会提示改用 `--out`）；
+    #   ② 默认写到**系统临时目录**，不往项目里扔 `_import_tmp.xlsx`；
+    #   ③ 目标已存在 → 必须 `--force`；写之前自动备份。
+    err = _check_project(args.project)
+    if err:
+        return err
+    out = getattr(args, 'out', None) or args.sheet
+    if args.sheet and not getattr(args, 'out', None):
+        _err('提示：import-ir 的 `--sheet` 是**输出**路径，已改名为 `--out`'
+             '（`--sheet` 仍然认，但建议改过来）。')
+    if out:
+        out_path = Path(out)
+        if out_path.exists() and not args.force:
+            _err(f'拒绝覆盖已有文件：{out_path}\n'
+                 f'  import-ir 会**整份重写**这个路径（它是张临时 Excel，'
+                 f'不是剧本库）。\n'
+                 f'  确认要覆盖就加 --force；想换个位置就用 --out <别的.xlsx>。')
+            return EXIT_USAGE
+    else:
+        import tempfile
+        out_path = Path(tempfile.mkdtemp(prefix='storygraph-import-')) \
+            / 'import_ir.xlsx'
+
+    scripts = discover_scripts(args.project)
+    if not scripts:
+        _err(f'{args.project} 里没有找到任何 .rpy —— 没什么可入库的。')
+        return EXIT_FAIL
+    analyzer = IncrementalRenPyAnalyzer()
+    pr, _ = analyzer.analyze(files=scripts, graph=None)
+    beats = beats_from_parse_result(pr)
+    if not beats:
+        _err(f'这 {len(scripts)} 个脚本里一条演出语句都没解析出来 —— '
+             f'不入库（从前会安静地建一个空库并报成功）。')
+        return EXIT_FAIL
+    cs.init_db(db, users=[args.user])
+    from storygraph.story.excel_export import export_beats_to_excel
+    from storygraph.core.atomicio import RefusedWrite
+    try:
+        export_beats_to_excel(beats, out_path)
+    except RefusedWrite as e:
+        _err(str(e))
+        return EXIT_USAGE
+    res = cs.push(db, out_path, actor=args.user, force=True)
+    cs.upsert_assets(db, load_asset_registry(args.project), actor=args.user)
+    print(f"入库 {len(res['added'])} 行（来自 {len(scripts)} 个脚本）")
+    return 0
+
+
+
 def _cmd_collab(args) -> int:
     import storygraph.collab.collab_store as cs
 
@@ -543,76 +693,9 @@ def _cmd_collab(args) -> int:
     action = args.action
 
     if action == 'init':
-        users = [u for u in (args.users or '').split(',') if u.strip()]
-        cs.init_db(db, users=users, owner=args.owner)
-        print(f'已建库：{db}')
-        if users:
-            print('成员：' + '，'.join(users))
-            print('角色：' + '，'.join(
-                f"{m['id']}[{m['role_label']}]" for m in cs.members(db)))
-        print('下一步：collab pull 把库导出成 Excel 交给文案；')
-        print('        collab push 把改好的 Excel 写回库。')
-        return 0
-
+        return _collab_init(args, db)
     if action == 'import-ir':
-        # 从 .rpy 灌进数据库：新项目第一次入库走这个
-        from storygraph.pipeline.build import load_asset_registry
-        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
-        from storygraph.story.beat_build import beats_from_parse_result
-        from storygraph.pipeline.build import discover_scripts
-
-        # 2026-11-01（外部审查 C1，P0）：**这里以前会拿参数当输出路径**。
-        # `collab import-ir --sheet D:\mygame\game\ch01.rpy` 会先把这个
-        # 1488 字节的剧本写成 15481 字节的 Excel，再拿它去 push ——
-        # 一次误传 = 一章剧本没了，而且先覆盖后校验，退出码还是 0。
-        #
-        # 现在三条闸：
-        #   ① 输出路径只认 `--out`（`--sheet` 仍认，但会提示改用 `--out`）；
-        #   ② 默认写到**系统临时目录**，不往项目里扔 `_import_tmp.xlsx`；
-        #   ③ 目标已存在 → 必须 `--force`；写之前自动备份。
-        err = _check_project(args.project)
-        if err:
-            return err
-        out = getattr(args, 'out', None) or args.sheet
-        if args.sheet and not getattr(args, 'out', None):
-            _err('提示：import-ir 的 `--sheet` 是**输出**路径，已改名为 `--out`'
-                 '（`--sheet` 仍然认，但建议改过来）。')
-        if out:
-            out_path = Path(out)
-            if out_path.exists() and not args.force:
-                _err(f'拒绝覆盖已有文件：{out_path}\n'
-                     f'  import-ir 会**整份重写**这个路径（它是张临时 Excel，'
-                     f'不是剧本库）。\n'
-                     f'  确认要覆盖就加 --force；想换个位置就用 --out <别的.xlsx>。')
-                return EXIT_USAGE
-        else:
-            import tempfile
-            out_path = Path(tempfile.mkdtemp(prefix='storygraph-import-')) \
-                / 'import_ir.xlsx'
-
-        scripts = discover_scripts(args.project)
-        if not scripts:
-            _err(f'{args.project} 里没有找到任何 .rpy —— 没什么可入库的。')
-            return EXIT_FAIL
-        analyzer = IncrementalRenPyAnalyzer()
-        pr, _ = analyzer.analyze(files=scripts, graph=None)
-        beats = beats_from_parse_result(pr)
-        if not beats:
-            _err(f'这 {len(scripts)} 个脚本里一条演出语句都没解析出来 —— '
-                 f'不入库（从前会安静地建一个空库并报成功）。')
-            return EXIT_FAIL
-        cs.init_db(db, users=[args.user])
-        from storygraph.story.excel_export import export_beats_to_excel
-        from storygraph.core.atomicio import RefusedWrite
-        try:
-            export_beats_to_excel(beats, out_path)
-        except RefusedWrite as e:
-            _err(str(e))
-            return EXIT_USAGE
-        res = cs.push(db, out_path, actor=args.user, force=True)
-        cs.upsert_assets(db, load_asset_registry(args.project), actor=args.user)
-        print(f"入库 {len(res['added'])} 行（来自 {len(scripts)} 个脚本）")
-        return 0
+        return _collab_import_ir(args, db)
 
     if action == 'pull':
         if not args.sheet:
@@ -1147,6 +1230,14 @@ def build_parser() -> argparse.ArgumentParser:
                     action='store_true',
                     help='把编译结果作为新表并进原工作簿（不碰 Beats）')
     sp.set_defaults(func=_cmd_compile)
+
+    sp = sub.add_parser('excel-check',
+                        help='读 Excel 之前的体检（zip 炸弹 / 宏 / 外链…）')
+    sp.add_argument('path', help='工作簿，或一个目录（扫 *.xlsx / *.xlsm）')
+    sp.add_argument('--strict', action='store_true',
+                    help='"要当心"的那些也算失败（退出码 1）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON（CI 用）')
+    sp.set_defaults(func=_cmd_excel_check)
 
     sp = sub.add_parser('selfcheck',
                         help='跑一遍主链路自检（打包后排查用，不碰用户文件）')

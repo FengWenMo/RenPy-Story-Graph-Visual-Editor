@@ -54,6 +54,9 @@ REQUIRED_MODULES = (
     # （函数体内 import / 启动早期 import），必须在打包环境里真的 import 一次。
     'storygraph.core.atomicio',
     'storygraph.core.preflight',
+    # 2026-11-01：读 Excel 的唯一入口（zip 炸弹/宏/外链检查）。虽然 `excel_export`
+    # 顶层就 import 它、间接已经覆盖，但"读表"是主链路，缺了要当场点名。
+    'storygraph.excel.safety',
     'storygraph.parsing.renpy_parser',
     'storygraph.story.beat_build',
     'storygraph.story.beat_render',

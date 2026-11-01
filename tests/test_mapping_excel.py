@@ -342,7 +342,10 @@ class TestBadFiles:
         p.write_bytes(b'not a zip at all')
         with pytest.raises(MappingError) as exc:
             load_mapping(str(p))
-        assert '读不出来' in str(exc.value)
+        # 2026-11-01：读 Excel 统一过 `excel/safety.py`，说法比从前那句
+        # "读不出来"具体 —— 要点名"它不是 zip / 不像 xlsx"，人才知道去改什么。
+        text = str(exc.value)
+        assert '拒绝打开' in text and ('zip' in text or '不像' in text), text
 
     def test_mapping_cached_把坏文件降级成一句话(self, tmp_path):
         """界面/选择器不该因为一份配置坏掉就整个打不开（与 JSON 那条同一个口径）。"""

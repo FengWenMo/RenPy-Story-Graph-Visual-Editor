@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from storygraph.core.atomicio import save_workbook_atomic
+from storygraph.excel import safety
 from storygraph.excel.cells import set_row
 
 EXPORT_SHEET = 'Export_RenPy'
@@ -565,7 +566,7 @@ def merge_export_sheet(table_path, result: CompileResult) -> Path:
     from openpyxl.styles import Alignment, Font, PatternFill
 
     table_path = Path(table_path)
-    wb = openpyxl.load_workbook(table_path)
+    wb = safety.open_workbook(table_path)
     if EXPORT_SHEET in wb.sheetnames:
         del wb[EXPORT_SHEET]
     ws = wb.create_sheet(EXPORT_SHEET)

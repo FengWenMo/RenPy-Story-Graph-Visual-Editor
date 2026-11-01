@@ -14,6 +14,7 @@ storygraph.story.excel_export
 from __future__ import annotations
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import save_workbook_atomic
+from storygraph.excel import safety
 import re
 from io import BytesIO
 from pathlib import Path
@@ -390,6 +391,19 @@ def export_beats_to_excel(beats: list, output_path,
     不给（手工新建、协作库导出）→ 不写那张表，行为与从前完全一致。
     """
     output_path = Path(output_path)
+    # **先过后缀白名单，再碰任何东西**（2026-11-01，Excel 安全层补的一刀）：
+    # 从前这条闸只在最后 `save_workbook_atomic` 里。可自打"重建前先读旧表、
+    # 把用户页/列接回来"之后，`.rpy` 这类路径会先在**读**那一步被安全检查拒绝，
+    # 报错就变成"拒绝打开 notes.rpy"（听起来像读坏了），而不是"这不是表格、
+    # 不许覆盖"。同一条判据两处说法不一致，人就分不清该改哪个参数。
+    # 现在提前用同一句人话拒绝，文件一个字节都不碰。
+    from storygraph.core.atomicio import WORKBOOK_SUFFIXES, RefusedWrite
+    _suffix = output_path.suffix.lower()
+    if _suffix not in WORKBOOK_SUFFIXES:
+        raise RefusedWrite(
+            f'拒绝把 Excel 写成 {output_path.name!r}：'
+            f'只允许 {" / ".join(WORKBOOK_SUFFIXES)}。'
+            f'（这里传进来的路径不是表格 —— 覆盖它会把原来的文件毁掉）')
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = openpyxl.Workbook()
@@ -431,6 +445,11 @@ def export_beats_to_excel(beats: list, output_path,
         _tool_names = list(headers) + [str(f) for f in BEAT_FIELDS]
         _user_snap = snapshot_user_content(output_path,
                                            tool_headers=_tool_names)
+    except (safety.UnsafeWorkbook, PermissionError):
+        # **表在、但读不了**：不能重建 —— 重建会把它整份换成新表，
+        # 用户自加的页 / 列 / 批注一起没（虽然 atomicio 会留 .bak，
+        # 但"需要你去翻备份"本身就是失败）。让人先处理那张表。
+        raise
     except Exception as e:                     # noqa: BLE001 - 快照失败不该拦住出表
         from storygraph.core.safeguard import swallow as _swallow
         _swallow('excel_export.snapshot_user_content', e)
@@ -1781,7 +1800,7 @@ def refresh_candidate_sheets(table_path, registry) -> Path:
     下拉就跟上，而不必重新导出 .rpy、丢掉文案改好的台词/立绘。
     """
     table_path = Path(table_path)
-    wb = openpyxl.load_workbook(table_path)
+    wb = safety.open_workbook(table_path)
     for ws in list(wb.worksheets):
         if ws.title.startswith('Candidates_') or ws.title in ('词表',
                                                               '使用说明'):
@@ -1822,7 +1841,7 @@ def refresh_stage_views(table_path, registry=None) -> Path:
     没有它的时候，改了脚本或表格之后那两张表还是旧的，而它长得和真值一样。
     """
     table_path = Path(table_path)
-    wb = openpyxl.load_workbook(table_path)
+    wb = safety.open_workbook(table_path)
     try:
         ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
         beats = _read_beats_from_ws(ws, strict_long_text=False)

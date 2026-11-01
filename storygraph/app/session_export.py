@@ -701,13 +701,19 @@ class ExportMixin:
         # `recover_source_ranges` **现算的猜值**，那边必须继续依赖守卫
         # （见 `patch_export` 的 `trust_ranges`）。
         trust = False
+        expect_sha1 = ''
         try:
             trust = bool(self.source_unchanged())
+            if trust:
+                # 核对过的那份指纹原样交给 patcher：它读完之后会再算一遍
+                # （"读完再核对"，2026-11-01）—— 窗口里被改过就拒绝增量。
+                _fp = getattr(self, '_source_fingerprint', None) or ()
+                expect_sha1 = str(_fp[2] if len(_fp) > 2 else '')
         except Exception as e:               # noqa: BLE001 - 判不了就当不新鲜
             swallow('session_export._patch_note.source_unchanged', e)
         try:
             res = patch_export(self.beats, src, text, registry=self.registry(),
-                               trust_ranges=trust)
+                               trust_ranges=trust, expect_sha1=expect_sha1)
             if res.ok:
                 _note = (f'增量补丁：对位 {res.matched_beats}/'
                          f'{res.total_beats} 拍，'

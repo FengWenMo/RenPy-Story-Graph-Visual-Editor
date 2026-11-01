@@ -286,3 +286,45 @@ label ch01:
             pytest.skip('这一刀被安全地增量完成了，拒写文案不适用')
         why = str(res.get('note') or '') + str(done.get('error') or '')
         assert '删了一拍' in why or '删了' in why, why
+
+
+# ---------------------------------------------------------------------------
+#  "核对"与"读取"之间那道窗口（2026-11-01）
+# ---------------------------------------------------------------------------
+
+class TestCheckThenReadWindow:
+    """
+    审查原话：「指纹窗口没关死（哈希被截短，加上先查后读的顺序反了）」。
+
+    会话是先 `source_unchanged()`（查）再让 patcher 读文件（读）。两件事之间
+    如果有人/同步盘改了一笔，行号就是旧的 —— 而 `trust_ranges=True` 会把
+    对位守卫让开，那就是"按旧行号改错行"。
+
+    现在 patcher 读完之后**再算一次指纹**：与调用方核对过的那份对不上，
+    就拒绝增量（退回全量，是安全方向）。
+    """
+
+    def _beats(self, write_rpy):
+        from storygraph.story import write_gate as W
+        fp = write_rpy(SRC, 'proj/game/ch1.rpy')
+        beats = _beats_of(fp)
+        return fp, beats, W.sha1_16(fp.read_bytes())
+
+    def test_a_changed_file_is_refused_even_with_trusted_ranges(self, write_rpy):
+        from storygraph.story.patcher import patch_export
+        fp, beats, sha = self._beats(write_rpy)
+        # 核对之后、patcher 读取之前，文件被改了一笔
+        fp.write_text(fp.read_text(encoding='utf-8').replace(
+            '第三句。', '第三句（别人改的）。'), encoding='utf-8')
+        res = patch_export(beats, fp, generated_text='', trust_ranges=True,
+                           expect_sha1=sha)
+        assert not res.ok, '窗口里被改过却还是走了增量'
+        assert any('内容指纹' in r for r in res.reasons), res.reasons
+
+    def test_an_unchanged_file_still_patches(self, write_rpy):
+        from storygraph.story.patcher import patch_export
+        fp, beats, sha = self._beats(write_rpy)
+        res = patch_export(beats, fp, generated_text='', trust_ranges=True,
+                           expect_sha1=sha)
+        assert res.ok, res.reasons
+        assert res.text == fp.read_text(encoding='utf-8')

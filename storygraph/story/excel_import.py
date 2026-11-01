@@ -10,6 +10,7 @@ storygraph.story.excel_import
 from __future__ import annotations
 from pathlib import Path
 import openpyxl
+from storygraph.excel import safety
 from storygraph.core.vocabulary import RENPY_BUILTIN_TRANSFORMS
 
 from storygraph.story.beat_build import hydrate_from_dsl
@@ -47,9 +48,13 @@ def import_beats_from_excel(path, registry=None) -> list:
     # 我们**不打算读任何真实公式的值**：表里唯一的公式是下拉框的
     # defined name（`_dynamic_range_formula`），它不属于单元格值。
     # 所以这里要的是"格子里的原始字符串"，正是 `data_only=False` 的语义。
-    wb = openpyxl.load_workbook(path, data_only=False)
+    wb = safety.open_workbook(path, data_only=False, purpose='import')
     try:
         ws = wb['Beats'] if 'Beats' in wb.sheetnames else wb.active
+        # **公式要留痕**（2026-11-01，Excel 安全）：表里若有人写了真公式，
+        # `data_only=False` 读到的是 `=SUM(A1:A5)` 这种文本 —— 工具不会替你算，
+        # 但"这一格显示的不是你以为的值"必须说出来。只扫一遍、大表有上限。
+        safety.warn_formulas(ws, purpose='import')
         # 超长文本（>32767）的真身在**隐藏表**里，格子里只有"预览 + 标记" ——
         # 这里先把那张表读成 `{(行号, 字段): 全文}`，读行时按同一把钥匙还原
         # （见 `beat_model.CELL_TEXT_LIMIT`）。没有那张表 → 空 dict → 行为不变。
