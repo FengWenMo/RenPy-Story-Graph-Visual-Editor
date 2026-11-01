@@ -169,10 +169,6 @@
    "lines": 157,
    "branches": 37
   },
-  "storygraph/story/renpy_gui.py::load_gui_profile": {
-   "lines": 172,
-   "branches": 64
-  },
   "storygraph/story/statement_registry.py::declare_attr_groups": {
    "lines": 146,
    "branches": 43
@@ -228,6 +224,10 @@
   "storygraph/ui_qt/window_graph_ops.py::learn_custom_statement": {
    "lines": 151,
    "branches": 34
+  },
+  "storygraph/ui_qt/window_keyboard.py::eventFilter": {
+   "lines": 130,
+   "branches": 36
   },
   "storygraph/ui_qt/window_nodes.py::edge_delete_plan": {
    "lines": 106,
