@@ -440,103 +440,13 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
             'actors': [(s[0], s[1]) for s in state['actors']],
             'layers': dict(state['layers']),
         }
-        actors = state['actors']
 
         def note_scene(new_image):
             changes.append({'kind': 'scene', 'column': 'scene',
                             'text': f'背景 → {new_image}'
                             if new_image else '背景 → （清空）'})
 
-        # ---- 舞台：**逐条**按顺序应用（缺口 4，2026-10-07）----
-        #
-        # 判据与渲染器**同一条**（`Beat.op_tokens_full`）。从前这里按
-        # **verb 分组**应用（先把所有 show 落上、再处理所有 hide），于是
-        #
-        #     show A / hide A / show A
-        #
-        # 的**当前舞台**是"台上没人"，而**产物**是"A 站着"：
-        # 预览/卡片与产物说法相反。这一条是**视觉复核截图**当场看出来的
-        # （`tools/shot_stage_order.py`：修后那一格仍写"（台上没人）"）。
-        show_items = _split_show_items(beat.show)
-        hide_items = _split_hide_items(beat.hide)
-        seen = {'show': 0, 'hide': 0}
-
-        def _pick(kind, items, idx):
-            """这一条 token → 实际要应用的条目（`idx=None` = 还没用过的那些）。"""
-            if idx is not None and 0 <= int(idx) < len(items):
-                seen[kind] = max(seen[kind], int(idx) + 1)
-                return [items[int(idx)]]
-            out = items[seen[kind]:]
-            seen[kind] = len(items)
-            return out
-
-        tokens = beat.op_tokens_full() or [(v, None) for v in _stage_order(beat)]
-        for verb, idx in tokens:
-            if verb == 'scene':
-                image = (beat.scene or '').strip()
-                if image:
-                    if actors:
-                        changes.append(
-                            {'kind': 'clear', 'column': 'actors',
-                             'text':
-                             f'× 清空立绘（{len(actors)} 个）'})
-                    actors = []
-                    state['actors'] = actors
-                    # `scene` 清的是**整个 master 层**（Ren'Py 官方措辞：
-                    # "removes all displayables from the master layer"）——
-                    # CG/UI 那些 `show cg …` 的图层和立绘一样会被清掉。
-                    # 2026-10-31 修：从前这里只清 actors，layers 原样留着，
-                    # 于是**产物里已经没了的 CG，预览/卡片还在画**。
-                    # 真机实测（sr_general，61 个 scene 拍）：**40 拍的图层
-                    # 其实被清掉、工具却继续显示** —— 正是本项目最贵的那类
-                    # "看到的 ≠ 生成的"。清了之后"换景会清掉什么"才说得准
-                    # （新「换景」入口的确认框直接读这里）。
-                    if state['layers']:
-                        changes.append(
-                            {'kind': 'clear', 'column': 'layer',
-                             'text':
-                             f'× 清空图层（{len(state["layers"])} 个）'})
-                        state['layers'] = {}
-                        state['layer_at'] = {}
-                        srcs = state.get('layer_src')
-                        if isinstance(srcs, dict):
-                            srcs.clear()
-                    state['scene'] = image
-                    # `scene bg X at bgfit` 的变换是背景 displayable 的一部分，
-                    # 之后所有继承背景的拍都要带着它（引擎语义，见 docstring）。
-                    state['scene_at'] = str(
-                        getattr(beat, 'scene_at', '') or '').strip()
-                    # 出处：这一拍的 `scene` 就是当前背景的来源（改尺寸时
-                    # 要回到这一行去写 at，不能在继承它的拍上硬塞）。
-                    state['scene_src'] = bi
-                    # `scene` 写明了背景，还清空了立绘 → 这两个元素重新已知
-                    state['unknown'].discard('scene')
-                    state['unknown'].discard('actors')
-            elif verb == 'show':
-                for item in _pick('show', show_items, idx):
-                    actors, _ch = _apply_show_verb(item, beat, actors, state,
-                                                   src_index=bi)
-                    changes.extend(_ch)
-            elif verb == 'hide':
-                for item in _pick('hide', hide_items, idx):
-                    actors, _ch = _apply_hide_verb(item, actors, state)
-                    changes.extend(_ch)
-                state['actors'] = actors
-
-        # ---- 补齐：令牌没点到的 show/hide 条目 ----
-        # 与渲染器 `beat_render._emit_leftover_stage` **同一条规矩**：
-        # `op_order` 只点到前几条时，渲染器会把剩下的追加在末尾；快照从前
-        # 直接丢掉 → "看到的 ≠ 生成的"（卡片加第二个立绘，预览只显示一个，
-        # 产物却两个）。2026-10-31 实测：真机两个项目 0 条触发，但合成用例
-        # `show='ling a; ye b'` + `op_order='show#0'` 当场复现。
-        for item in show_items[seen['show']:]:
-            actors, _ch = _apply_show_verb(item, beat, actors, state,
-                                           src_index=bi)
-            changes.extend(_ch)
-        for item in hide_items[seen['hide']:]:
-            actors, _ch = _apply_hide_verb(item, actors, state)
-            changes.extend(_ch)
-            state['actors'] = actors
+        _apply_stage_ops(beat, state, bi, changes)
 
         # ---- 音频 ----
         _audio_changes, _audio_notes = _apply_audio(beat, state)
@@ -552,7 +462,6 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
         # ---- 消歧：本拍"上了台又立刻被清掉" ----
         _note_add_then_clear(changes, state)
 
-
         if beat.raw:
             notes.append('原始语句')
         if beat.code:
@@ -560,52 +469,156 @@ def stage_snapshots(beats: list, initial_state: Optional[dict] = None) -> list:
         if beat.condition:
             notes.append(f"条件 {beat.condition}")
 
-        out.append({
-            'line_id': getattr(beat, 'line_id', '') or '',
-            'seq': beat.seq,
-            'label': beat.label,
-            'speaker': beat.speaker,
-            # 菜单拍的"无标题"占位符**不能漏进 Excel**：`\x00` 是控制字符，
-            # openpyxl 会直接抛 `IllegalCharacterError`（整张表写不出去）。
-            'text': menu_caption_text(beat.text),
-            'scene': state['scene'],
-            'actors': _render_actors(state['actors']),
-            'music': state['music'],
-            # 音效是**一次性**事件，不是状态：只有本拍有
-            'sound': (beat.sound
-                      if (beat.sound_action or 'play') != 'stop' else ''),
-            'voice': beat.voice,
-            'note': ' / '.join(notes),
-            'changes': changes,
-            'display_changes': _render_changes(changes),
-            'changed': changed,
-            'layers': _render_layers(state['layers']),
-            'state': {
-                'scene': state['scene'],
-                # 背景变换是**持续状态**（2026-10-30，⑦ P0）：
-                # `scene bg X at bgfit` 之后每一拍都带着它，直到下一次 scene。
-                # 只加内部键，**不改任何显示列**；老调用方缺键用默认空串。
-                'scene_at': state['scene_at'],
-                'actors': [[s[0], s[1]] for s in state['actors']],
-                'layers': dict(state['layers']),
-                # 图层 tag → `at`（`show cg cg01 at cg38402160` 的变换）；
-                # show 时记、hide 时清。缺键默认 {}。
-                'layer_at': dict(state['layer_at']),
-                # 出处（2026-10-31）：背景 / 每个图层是**第几拍**写的。
-                # 只给 UI 与"改尺寸"用，不参与任何显示列；跨章继承时是 -1。
-                'scene_src': state['scene_src'],
-                'layer_src': dict(state['layer_src']),
-                'music': state['music'],
-                'voice': state['voice'],
-                'condition': beat.condition or '',
-                # 只在"确实有不知道的元素"时出现 —— 默认路径（全新舞台）
-                # 的输出与历史**逐字节一致**，不惊动既有 golden。
-                **({'unknown': sorted(state['unknown'])}
-                   if state['unknown'] else {}),
-            },
-        })
+        out.append(_snapshot_row(beat, state, changes, changed, notes))
 
     return out
+
+
+def _apply_stage_ops(beat, state, bi, changes) -> None:
+    """
+    把这一拍的 `scene` / `show` / `hide` 按 `op_tokens_full()` 的顺序落到
+    `state` 上，变化记进 `changes`（就地改，不返回）。
+
+    ---- 舞台：**逐条**按顺序应用（缺口 4，2026-10-07）----
+
+    判据与渲染器**同一条**（`Beat.op_tokens_full`）。从前这里按
+    **verb 分组**应用（先把所有 show 落上、再处理所有 hide），于是
+
+        show A / hide A / show A
+
+    的**当前舞台**是"台上没人"，而**产物**是"A 站着"：
+    预览/卡片与产物说法相反。这一条是**视觉复核截图**当场看出来的
+    （`tools/shot_stage_order.py`：修后那一格仍写"（台上没人）"）。
+    """
+    actors = state['actors']
+    show_items = _split_show_items(beat.show)
+    hide_items = _split_hide_items(beat.hide)
+    seen = {'show': 0, 'hide': 0}
+
+    def _pick(kind, items, idx):
+        """这一条 token → 实际要应用的条目（`idx=None` = 还没用过的那些）。"""
+        if idx is not None and 0 <= int(idx) < len(items):
+            seen[kind] = max(seen[kind], int(idx) + 1)
+            return [items[int(idx)]]
+        out = items[seen[kind]:]
+        seen[kind] = len(items)
+        return out
+
+    tokens = beat.op_tokens_full() or [(v, None) for v in _stage_order(beat)]
+    for verb, idx in tokens:
+        if verb == 'scene':
+            image = (beat.scene or '').strip()
+            if image:
+                if actors:
+                    changes.append(
+                        {'kind': 'clear', 'column': 'actors',
+                         'text':
+                         f'× 清空立绘（{len(actors)} 个）'})
+                actors = []
+                state['actors'] = actors
+                # `scene` 清的是**整个 master 层**（Ren'Py 官方措辞：
+                # "removes all displayables from the master layer"）——
+                # CG/UI 那些 `show cg …` 的图层和立绘一样会被清掉。
+                # 2026-10-31 修：从前这里只清 actors，layers 原样留着，
+                # 于是**产物里已经没了的 CG，预览/卡片还在画**。
+                # 真机实测（sr_general，61 个 scene 拍）：**40 拍的图层
+                # 其实被清掉、工具却继续显示** —— 正是本项目最贵的那类
+                # "看到的 ≠ 生成的"。清了之后"换景会清掉什么"才说得准
+                # （新「换景」入口的确认框直接读这里）。
+                if state['layers']:
+                    changes.append(
+                        {'kind': 'clear', 'column': 'layer',
+                         'text':
+                         f'× 清空图层（{len(state["layers"])} 个）'})
+                    state['layers'] = {}
+                    state['layer_at'] = {}
+                    srcs = state.get('layer_src')
+                    if isinstance(srcs, dict):
+                        srcs.clear()
+                state['scene'] = image
+                # `scene bg X at bgfit` 的变换是背景 displayable 的一部分，
+                # 之后所有继承背景的拍都要带着它（引擎语义，见 docstring）。
+                state['scene_at'] = str(
+                    getattr(beat, 'scene_at', '') or '').strip()
+                # 出处：这一拍的 `scene` 就是当前背景的来源（改尺寸时
+                # 要回到这一行去写 at，不能在继承它的拍上硬塞）。
+                state['scene_src'] = bi
+                # `scene` 写明了背景，还清空了立绘 → 这两个元素重新已知
+                state['unknown'].discard('scene')
+                state['unknown'].discard('actors')
+        elif verb == 'show':
+            for item in _pick('show', show_items, idx):
+                actors, _ch = _apply_show_verb(item, beat, actors, state,
+                                               src_index=bi)
+                changes.extend(_ch)
+        elif verb == 'hide':
+            for item in _pick('hide', hide_items, idx):
+                actors, _ch = _apply_hide_verb(item, actors, state)
+                changes.extend(_ch)
+            state['actors'] = actors
+
+    # ---- 补齐：令牌没点到的 show/hide 条目 ----
+    # 与渲染器 `beat_render._emit_leftover_stage` **同一条规矩**：
+    # `op_order` 只点到前几条时，渲染器会把剩下的追加在末尾；快照从前
+    # 直接丢掉 → "看到的 ≠ 生成的"（卡片加第二个立绘，预览只显示一个，
+    # 产物却两个）。2026-10-31 实测：真机两个项目 0 条触发，但合成用例
+    # `show='ling a; ye b'` + `op_order='show#0'` 当场复现。
+    for item in show_items[seen['show']:]:
+        actors, _ch = _apply_show_verb(item, beat, actors, state,
+                                       src_index=bi)
+        changes.extend(_ch)
+    for item in hide_items[seen['hide']:]:
+        actors, _ch = _apply_hide_verb(item, actors, state)
+        changes.extend(_ch)
+        state['actors'] = actors
+
+
+def _snapshot_row(beat, state, changes, changed, notes) -> dict:
+    """一拍 → 一行快照（显示列 + `state` 全量状态）。"""
+    return {
+        'line_id': getattr(beat, 'line_id', '') or '',
+        'seq': beat.seq,
+        'label': beat.label,
+        'speaker': beat.speaker,
+        # 菜单拍的"无标题"占位符**不能漏进 Excel**：`\x00` 是控制字符，
+        # openpyxl 会直接抛 `IllegalCharacterError`（整张表写不出去）。
+        'text': menu_caption_text(beat.text),
+        'scene': state['scene'],
+        'actors': _render_actors(state['actors']),
+        'music': state['music'],
+        # 音效是**一次性**事件，不是状态：只有本拍有
+        'sound': (beat.sound
+                  if (beat.sound_action or 'play') != 'stop' else ''),
+        'voice': beat.voice,
+        'note': ' / '.join(notes),
+        'changes': changes,
+        'display_changes': _render_changes(changes),
+        'changed': changed,
+        'layers': _render_layers(state['layers']),
+        'state': {
+            'scene': state['scene'],
+            # 背景变换是**持续状态**（2026-10-30，⑦ P0）：
+            # `scene bg X at bgfit` 之后每一拍都带着它，直到下一次 scene。
+            # 只加内部键，**不改任何显示列**；老调用方缺键用默认空串。
+            'scene_at': state['scene_at'],
+            'actors': [[s[0], s[1]] for s in state['actors']],
+            'layers': dict(state['layers']),
+            # 图层 tag → `at`（`show cg cg01 at cg38402160` 的变换）；
+            # show 时记、hide 时清。缺键默认 {}。
+            'layer_at': dict(state['layer_at']),
+            # 出处（2026-10-31）：背景 / 每个图层是**第几拍**写的。
+            # 只给 UI 与"改尺寸"用，不参与任何显示列；跨章继承时是 -1。
+            'scene_src': state['scene_src'],
+            'layer_src': dict(state['layer_src']),
+            'music': state['music'],
+            'voice': state['voice'],
+            'condition': beat.condition or '',
+            # 只在"确实有不知道的元素"时出现 —— 默认路径（全新舞台）
+            # 的输出与历史**逐字节一致**，不惊动既有 golden。
+            **({'unknown': sorted(state['unknown'])}
+               if state['unknown'] else {}),
+        },
+    }
 
 
 #: 跨章状态要看的那几样（`stage_exit_state` 的输出键）。
