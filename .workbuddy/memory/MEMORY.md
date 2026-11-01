@@ -247,3 +247,22 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   同一轮还是里程碑：服务化三刀切完 ⇒ 重打包 147.9MB/242 文件 + 空目录 `selfcheck`
   六项全过 exit 0（stderr 只有 Qt 的 `QFontDatabase` 无字体警告）
   + zip 69.6MB；全量 8917 例 0 失败（3m38s）。
+
+- 2026-11-01 第十九段（§94）：**八刀同批**，>120 行 58→**50**、>20 分支 211→**208**、
+  最大分支 63→**5**。四个点名的头部：`analyze_reachability_full` 184/40→**64/5**、
+  `apply_script_definitions` 170/38→**43/5**、`StageSuspectDialog.__init__` 177→**10**、
+  `validate_mapping` 127/63→**27/1**（63 个分支其实是"七个顶层键各九个"：characters /
+  rules / images / attributes 各一段 + `CODE_KEYS` 一段 + 骨架一段，`at()` 闭包提成
+  `_locator(where)` 返回即可六段共用）。
+  同轮拆了三个**上一轮明写"不拆"**的（`qss` 242→12、`build_parser` 203→23、
+  `asset_picker._build` 190→10）+ `stage_preview._build` 168→10。**为什么改主意**：
+  阶段目标从"≤60"变成用户口头的"≤30"，"数据 / 声明 / 纯装配不拆"的成本收益就反过来了；
+  且这三刀各有**逐字节判据**兜底 —— `qss()` 拆前后 `sha256` 必须相同（6225 字符）、
+  14 个子命令 `format_help()` 逐字比对 0 处不一致。**纯数据也可以拆，前提是有哈希。**
+  ⚠ 三个可复用手法：(a) 大刀用脚本**按行号切原文件区间**再拼回，断言拼回源码 == 原文，
+  绝不手抄中文注释；(b) 拆完立刻 `python tools/complexity_report.py` 看有没有 helper
+  又超 120（别把债平移）；(c) 新增 helper 别把文件顶过 1500 行（long_files 26 守住）。
+  价格：总行数 +421、函数 +69（docstring 与"每段一个名字"）。全量 8917 例 0 失败（2m43s）。
+  下一批（纯判断链，得按"每段判什么"切）：`verify_package` 167/44、`plan_scene_change`
+  166/47、`build_declaration` 162/46、`plan_wire_landing` 162/53；宽泛 except 1227 处
+  已派只读审计（四类：真兜底 / 静默咽 bug / 宽但已收口 / 类型可收窄），下一步按 B 类收紧。
