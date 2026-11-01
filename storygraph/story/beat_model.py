@@ -1514,221 +1514,27 @@ class Beat:
 
     @classmethod
     def from_row(cls, row: dict) -> 'Beat':
+        """
+        Excel 一行 → `Beat`（`to_row` 的逆操作）。
+
+        这里只做**编排**（2026-11-01：250 行 / 31 分支 → 40 行 + 6 段）。
+        分段不按行数切，按"一次只想一件事"切：别名归一 → 造 beat →
+        隐藏列/头部 token → CodeBlock 那一格 → 结构化舞台列 → 音频列 →
+        折动态列并记留痕。每一步的坑都跟着代码搬进了对应的小函数
+        （"必须放在所有 `g()` 之后"、"块标记权威"、"清洗必须留痕"），
+        那些注释都是实测抓出来的，搬动时一条都没丢。
+        """
         # 中文表头 → 英文键名（策划看中文，程序用英文，两边都不别扭）
         row = {_HEADER_ALIASES.get(str(k).strip(), k):
                v for k, v in (row or {}).items()}
-
         # 读表时被清洗过的列名（见 `Beat.sanitized_cells` 的 docstring）
         sanitized: list = []
-
-        def g(key, default=''):
-            v = row.get(key, default)
-            if v is None:
-                return default
-            if isinstance(v, float) and v.is_integer():
-                v = int(v)
-            text = str(v).strip()
-            # 单行列不许有换行（见 `SINGLE_LINE_BEAT_FIELDS`）：这些值会被
-            # 逐字拼进一行代码，控制字符漏出去就是产物里的物理换行。
-            if key not in SINGLE_LINE_BEAT_FIELDS:
-                return text
-            clean = sanitize_single_line_cell(key, text)
-            if clean != text:
-                sanitized.append(key)
-            return clean
-
-        # 台词**逐字节原样**，首尾空白都不动。
-        #
-        # 为什么不能 `.strip()` / `.lstrip()`（2026-10-05 修正）：
-        # 以前这里写的是"首部空白仍去掉：Ren'Py 里台词字符串前面的空格
-        # 没有语义，而 Excel 单元格里它多半是手误"。**这个判断是错的** ——
-        # `beat.text` 是**字符串字面量的内容**，里面的空格就是内容：
-        #
-        #     jc " 听起来很有意思，来吧！"
-        #        ^ 这个空格是台词的一部分
-        #
-        # `lstrip()` 之后往返回来变成 `"听起来很有意思，来吧！"`，
-        # 而本项目的硬契约是"打开 → 导出**逐字节不变**"。
-        # 真实项目 `script_pomo.rpy` 一处就是这么丢的（审计里 6 条之一）。
-        #
-        # 尾部空白同理（老注释里记的那 116 条）：`.strip()` 会静默吃掉。
-        def g_text(key, default=''):
-            v = row.get(key, default)
-            if v is None:
-                return default
-            if isinstance(v, float) and v.is_integer():
-                v = int(v)
-            return str(v)
-
-        seq = row.get('Seq', 0)
-        try:
-            seq = int(seq) if seq not in (None, '') else 0
-        except (TypeError, ValueError):
-            seq = 0
-
-        kind = g('Kind') or KIND_SAY
-        kind_raw = g('Kind')
-        # `KIND_FLOW` **必须在这个白名单里**（2026-10-22 第二阶段）：
-        # 漏了它，表里写 `flow` 的行读回来会被降级成 `say` —— 拍还在、
-        # `raw` 还在，但 `parse_flow` 不认 `say`，**卡片上的控制流卡整个消失**。
-        # 这是"导出能写、读回来认不出"的静默退化，只有实测才看得见。
-        if kind not in (KIND_SAY, KIND_NARRATION, KIND_FLOW, KIND_MENU,
-                        KIND_MENU_OPTION, KIND_EXTEND):
-            kind = KIND_SAY
-
-        # Notes 已经取消：老表里有内容就并进注释，绝不丢字
-        comment = g('Comment')
-        notes = g('Notes')
-        if notes:
-            comment = f'{comment}\n{notes}'.strip() if comment else notes
-
-        beat = cls(
-            seq=seq,
-            label=g('Label'),
-            line_id=g('LineId'),
-            beat_fingerprint=g('ContentHash'),
-            # 条件（`if …:` 走哪一支）：与 Text 同样保真，是**语义**不是排版
-            condition=g('Condition'),
-            comment=comment,
-            kind=kind,
-            speaker=g('Speaker'),
-            text=g_text('Text'),
-            code=g('CodeBlock') or g('Raw'),
-            voice=g('Voice'),
-            kind_raw=kind_raw,
-        )
-        # CodeBlock 单元格里 raw 与 code 是混着写的（一个格子装两样）。
-        # 读回来时按"看起来像不像一条 Ren'Py 语句"重新分类，并把交错顺序
-        # 记进 ordered——否则 `$ f()` 与 `show screen`/`pause` 交替的演出
-        # 会被排成"先全部 show/pause 再全部 $ f()"，导出的代码和源脚本不一样。
-        beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
-        # 工具不认识的块语句：**整块原文**，走 `g_text`（不 strip）——
-        # 块体的相对缩进是它的**结构性内容**，压掉就重建不出块。
-        # 它刻意不在 `SINGLE_LINE_BEAT_FIELDS` 里（换行是内容）。
-        beat.opaque = g_text('Opaque')
-        # 声明来源（M3）：单行 token，走会清洗留痕的 `g`。
-        beat.spec_name = g('SpecName')
-        # 头行原文（M4）：单行列（一格一行可改）→ 也走会留痕的 `g`。
-        beat.spec_head = g('SpecHead')
-        # 循环头行（D2）：同上（单行列）。
-        beat.loop_header = g('LoopHeader')
-        # 相机头行（3D 舞台）：同上（单行列）。
-        beat.camera_header = g('CameraHeader')
-        # 台词后缀（2026-10-18）：单行列 —— 它会被逐字拼在台词引号之后，
-        # 所以换行必须被压掉（`g` 会清洗并留痕，见 W114）。
-        beat.say_tail = g('SayTail')
-        # label 参数表（2026-10-18）：单行列（它会逐字接在 `label 名` 之后）。
-        beat.label_header = g('LabelHeader')
-        # 菜单头（2026-10-19）：`menu 名(args):` 的 `名` 与 `(args)`。
-        # 都是单行列 —— 它们会被逐字拼成一行头（换行漏出去就是语法错）。
-        beat.menu_name = g('MenuName')
-        beat.menu_args = g('MenuArgs')
-        # 结构位（块路径）：`-` = 顶层（**有信息**）；空 = **不知道**
-        # （老表 / 手工加的行）。两者必须分得开 —— 否则对拍会把"不知道"
-        # 当成"在顶层"，凡是老表都天天假报。
-        #
-        # 用 `g`（会清洗并留痕）而不是 `g_text`：这一列在
-        # `SINGLE_LINE_BEAT_FIELDS` 里，脏值必须被压成一行**并且记进
-        # `sanitized_cells`**（W114），否则又是"静默改数据"
-        # —— `test_cleaning_is_recorded[Nest]` 当场抓过这一条。
-        _nest = g('Nest')
-        if _nest and 'Nest' in sanitized:
-            # 被清洗过 = 这一格本来就不是一条合法路径（有换行/控制字符）。
-            # 那就不许拿它当依据：按"**不知道**"处理（整份跳过对拍），
-            # 而不是拿一条残缺路径去指认"结构对不上"——假阳性比漏报贵。
-            _nest = ''
-        beat.nest_path = (None if not _nest
-                          else ('' if _nest == '-' else _nest))
-        # 行尾注释（C）：原文（含 `#`），空 = 没有。
-        # ⚠ 与 `Nest` 同一个道理：用 `g`（会清洗并记进 `sanitized_cells`），
-        # 不能用 `g_text` —— 后者不留痕，正是"静默改数据"
-        # （`test_cleaning_is_recorded[Inline]` 当场抓到）。
-        # 被清洗过 = 这一格本来不是一条干净的注释 → **丢掉**（不清洗过的才可信）。
-        _inline = g('Inline')
-        if 'Inline' in sanitized:
-            _inline = ''          # 清洗过 = 不可信（同 `Nest` 的道理）
-        beat.inline_comment, beat.cond_comment = parse_inline_cell(_inline)
-        (beat.raw, beat.code, beat.ordered,
-         marked_blocks) = _split_code_cell(
-             beat.code, expand_code_blocks(beat.code_blocks))
-        # 单元格里的块标记是**权威**（写表时打的）；隐藏列只在标记缺失
-        # （老表 / 手工新建行）时兜底。
-        beat.code_blocks = marked_blocks or beat.code_blocks
-
-        # —— 结构化列 → 内部字段 ——
-        # 新版表：背景 / 立绘 / 位置 / 转场 / 退场 / 音乐 / 音效 各自一列，
-        # 每列都能下拉。旧版表（Show/Hide/At/…）的列名在 LEGACY_* 里，
-        # 这里一并兼容，用户手上的老表升级后照样读得出来。
-        beat.scene = _spec_image(g('Scene'))
-        beat.scene_at = _spec_at(g('Scene'))
-        beat.at = g('At')
-        beat.with_ = g('With')
-        # ⚠ `dedup=False`：**表里那一格就是作者写的顺序与条数**（2026-10-07
-        # 缺口 4）。按内容去重会把 `ling; ling` 收成一条 —— 那可能正是
-        # `show A / hide A / show A` 里语义关键的最后一条。
-        # 影子重复由 `hydrate_from_dsl` 那条路自己挡（它只追加"还没有的"）。
-        # ⚠ **摊列（M3-2）**：`立绘2/立绘3…`（`退场2…`）是**同一列的续项**，
-        # 必须按序号接在原列后面一起拆 —— 读表时少读它们就是**静默丢立绘**。
-        # 旧表（没有这些列）行为不变：整格还是 `;` 多值。
-        _show_cells = [g('Show')] + [g(k) for k in
-                                     extra_columns_in(row, SHOW_EXTRA_PREFIX)]
-        _hide_cells = [g('Hide')] + [g(k) for k in
-                                     extra_columns_in(row, HIDE_EXTRA_PREFIX)]
-        beat.show = _join_show_items([
-            {'clause': '', 'image': img, 'at': at}
-            for _cell in _show_cells
-            for img, at in _split_spec_list(_cell)
-        ], dedup=False)
-        beat.hide = _join_hide_items([
-            {'image': img, 'with': w}
-            for _cell in _hide_cells
-            for img, w in _split_spec_list(_cell, sep='@')
-        ], dedup=False)
-        # 「舞台（高级）」列：结构化列表达不了的指令（复杂 show 子句、
-        # 自带位置的立绘、带转场的退场）都在这里；hydrate 会把它并回
-        # 结构化字段，渲染时再靠去重避免重复生成。读表时必须读它，否则
-        # 位置变换这类信息在"打开 rpy → 导出"往返里会丢。
-        beat.stage = g('Stage')
-        if g('StageOrder'):
-            beat.stage_order = g('StageOrder')
-        if g('OpOrder'):
-            beat.op_order = g('OpOrder')
-        beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
-
-        # —— 音频列 → 内部字段（含「停止/排队」伪值）——
-        _fill_audio_from_cells(beat, 'music', g('BGM'), g('BGMParams'))
-        _fill_audio_from_cells(beat, 'sound', g('SFX'), g('SFXParams'))
-
-        # 旧表（26 列）自动迁移。
-        #
-        # 注意判据：`Show/Hide/At/With` **当前表也有**（它们是结构化下拉列），
-        # 所以不能拿 `LEGACY_STAGE_COLUMNS` 里任意一个键当"这是老表"的信号
-        # ——那样每一行新表都会走进来，然后 `beat.raw = g('Raw')` 把从
-        # CodeBlock 拆出来的 raw 行（`show screen` / `pause` / `with`）
-        # **整批清空**，导出的代码就少了这些语句。只认真正的老表专属列。
-        legacy_keys = set(LEGACY_STAGE_COLUMNS) - set(BEAT_FIELDS)
-        if any(k in row for k in legacy_keys):
-            if not beat.show:
-                beat.show = g('Show')
-            if not beat.hide:
-                beat.hide = g('Hide')
-            # 老表的 Raw 列是**额外**内容，追加而不是覆盖（老表可能同时
-            # 有 CodeBlock 与 Raw 两列）。
-            legacy_raw = g('Raw')
-            if legacy_raw:
-                beat.raw = _append_line(beat.raw, legacy_raw)
-                beat.ordered.extend(
-                    ('raw', ln) for ln in _split_lines(legacy_raw))
-        if any(k in row for k in LEGACY_AUDIO_COLUMNS):
-            if not beat.music and not beat.sound:
-                _fill_audio_legacy(beat, g)
-
-        # 「音乐」/「音效」文本列（beat.bgm / beat.sfx）是真相源：从已填好的
-        # 结构化字段**合成回** DSL 文本，保证"老表迁移"与"打开 rpy → 导出"
-        # 两种来源下文本列都有一致的人话/原生写法，便于策划复核与二次编辑。
-        beat.bgm = compose_audio_text(beat, 'music')
-        beat.sfx = compose_audio_text(beat, 'sound')
-
+        g, g_text = _row_cell_readers(row, sanitized)
+        beat = _beat_identity_from_row(cls, row, g, g_text)
+        _beat_cells_from_row(beat, g, g_text)
+        _beat_code_from_row(beat, g, sanitized)
+        _beat_stage_from_row(beat, row, g)
+        _beat_audio_from_row(beat, row, g)
         # —— 「每参数一列」：把**改了的那一格**折回头行（M4 第二阶段）——
         #
         # 动态列名形如 `mycue·intensity`（`key=value` 参数）或
@@ -1763,7 +1569,6 @@ class Beat:
         # （这条是参数化用例当场抓到的：`test_cleaning_is_recorded[Show]` 等 12 条红。）
         beat.sanitized_cells = sorted(set(sanitized))
         return beat
-
     @property
     def order_ops(self) -> list:
         """
@@ -2728,6 +2533,272 @@ LONG_TEXT_PREVIEW = 200
 #: 认出"这一格的真身在保真表里"的标记。挑一对生僻括号，且**不含 `#`**
 #: （注释列的值本身以 `#` 开头，标记不能跟它混）。
 LONG_TEXT_MARK = '⟪全文见「长文本保真」表⟫'
+
+
+# ---------------------------------------------------------------------------
+#  `Beat.from_row` 的分段实现（2026-11-01：250 行 / 31 分支 → 编排 + 6 段）
+#
+#  为什么这些是**模块级**函数而不是方法：它们不是 `Beat` 的能力，是"读表"
+#  这件事的步骤 —— 吃 `row` / 吐字段，和 `Beat` 的公开行为无关。留成方法
+#  只会让 `Beat` 多 6 个只有 `from_row` 关心的名字。
+# ---------------------------------------------------------------------------
+
+def _row_cell_readers(row: dict, sanitized: list) -> tuple:
+    """
+    一行 → `(g, g_text)` 两个取值器（`from_row` 的两只手）。
+
+    差别是**故意的**，不是重复代码：
+      · `g`      —— `strip()` + 对"单行列"（`SINGLE_LINE_BEAT_FIELDS`）
+                    压掉控制字符，**并把改过的列名记进 `sanitized`**
+                    （清洗必须留痕，否则就是静默改数据，W114）；
+      · `g_text` —— **逐字节原样**：`Opaque`（块体缩进是结构）与 `Text`
+                    （台词首尾空格是内容）用它。
+    """
+
+    def g(key, default=''):
+        v = row.get(key, default)
+        if v is None:
+            return default
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        text = str(v).strip()
+        # 单行列不许有换行（见 `SINGLE_LINE_BEAT_FIELDS`）：这些值会被
+        # 逐字拼进一行代码，控制字符漏出去就是产物里的物理换行。
+        if key not in SINGLE_LINE_BEAT_FIELDS:
+            return text
+        clean = sanitize_single_line_cell(key, text)
+        if clean != text:
+            sanitized.append(key)
+        return clean
+
+    # 台词**逐字节原样**，首尾空白都不动。
+    #
+    # 为什么不能 `.strip()` / `.lstrip()`（2026-10-05 修正）：
+    # 以前这里写的是"首部空白仍去掉：Ren'Py 里台词字符串前面的空格
+    # 没有语义，而 Excel 单元格里它多半是手误"。**这个判断是错的** ——
+    # `beat.text` 是**字符串字面量的内容**，里面的空格就是内容：
+    #
+    #     jc " 听起来很有意思，来吧！"
+    #        ^ 这个空格是台词的一部分
+    #
+    # `lstrip()` 之后往返回来变成 `"听起来很有意思，来吧！"`，
+    # 而本项目的硬契约是"打开 → 导出**逐字节不变**"。
+    # 真实项目 `script_pomo.rpy` 一处就是这么丢的（审计里 6 条之一）。
+    #
+    # 尾部空白同理（老注释里记的那 116 条）：`.strip()` 会静默吃掉。
+    def g_text(key, default=''):
+        v = row.get(key, default)
+        if v is None:
+            return default
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v)
+
+    return g, g_text
+
+
+def _beat_identity_from_row(cls, row, g, g_text):
+    """`Seq` / `Kind` / 注释 / 台词 → 一个刚构造出来的 `Beat`（舞台列还没填）。"""
+
+    seq = row.get('Seq', 0)
+    try:
+        seq = int(seq) if seq not in (None, '') else 0
+    except (TypeError, ValueError):
+        seq = 0
+
+    kind = g('Kind') or KIND_SAY
+    kind_raw = g('Kind')
+    # `KIND_FLOW` **必须在这个白名单里**（2026-10-22 第二阶段）：
+    # 漏了它，表里写 `flow` 的行读回来会被降级成 `say` —— 拍还在、
+    # `raw` 还在，但 `parse_flow` 不认 `say`，**卡片上的控制流卡整个消失**。
+    # 这是"导出能写、读回来认不出"的静默退化，只有实测才看得见。
+    if kind not in (KIND_SAY, KIND_NARRATION, KIND_FLOW, KIND_MENU,
+                    KIND_MENU_OPTION, KIND_EXTEND):
+        kind = KIND_SAY
+
+    # Notes 已经取消：老表里有内容就并进注释，绝不丢字
+    comment = g('Comment')
+    notes = g('Notes')
+    if notes:
+        comment = f'{comment}\n{notes}'.strip() if comment else notes
+
+    beat = cls(
+        seq=seq,
+        label=g('Label'),
+        line_id=g('LineId'),
+        beat_fingerprint=g('ContentHash'),
+        # 条件（`if …:` 走哪一支）：与 Text 同样保真，是**语义**不是排版
+        condition=g('Condition'),
+        comment=comment,
+        kind=kind,
+        speaker=g('Speaker'),
+        text=g_text('Text'),
+        code=g('CodeBlock') or g('Raw'),
+        voice=g('Voice'),
+        kind_raw=kind_raw,
+    )
+
+    return beat
+
+
+def _beat_cells_from_row(beat, g, g_text) -> None:
+    """隐藏列 / 头行原文 / 台词后缀 → **单行 token** 字段（各列的坑见行内注释）。"""
+
+    # CodeBlock 单元格里 raw 与 code 是混着写的（一个格子装两样）。
+    # 读回来时按"看起来像不像一条 Ren'Py 语句"重新分类，并把交错顺序
+    # 记进 ordered——否则 `$ f()` 与 `show screen`/`pause` 交替的演出
+    # 会被排成"先全部 show/pause 再全部 $ f()"，导出的代码和源脚本不一样。
+    beat.code_blocks = parse_code_blocks_cell(g('CodeBlocks'))
+    # 工具不认识的块语句：**整块原文**，走 `g_text`（不 strip）——
+    # 块体的相对缩进是它的**结构性内容**，压掉就重建不出块。
+    # 它刻意不在 `SINGLE_LINE_BEAT_FIELDS` 里（换行是内容）。
+    beat.opaque = g_text('Opaque')
+    # 声明来源（M3）：单行 token，走会清洗留痕的 `g`。
+    beat.spec_name = g('SpecName')
+    # 头行原文（M4）：单行列（一格一行可改）→ 也走会留痕的 `g`。
+    beat.spec_head = g('SpecHead')
+    # 循环头行（D2）：同上（单行列）。
+    beat.loop_header = g('LoopHeader')
+    # 相机头行（3D 舞台）：同上（单行列）。
+    beat.camera_header = g('CameraHeader')
+    # 台词后缀（2026-10-18）：单行列 —— 它会被逐字拼在台词引号之后，
+    # 所以换行必须被压掉（`g` 会清洗并留痕，见 W114）。
+    beat.say_tail = g('SayTail')
+    # label 参数表（2026-10-18）：单行列（它会逐字接在 `label 名` 之后）。
+    beat.label_header = g('LabelHeader')
+    # 菜单头（2026-10-19）：`menu 名(args):` 的 `名` 与 `(args)`。
+    # 都是单行列 —— 它们会被逐字拼成一行头（换行漏出去就是语法错）。
+    beat.menu_name = g('MenuName')
+    beat.menu_args = g('MenuArgs')
+
+
+def _beat_code_from_row(beat, g, sanitized) -> None:
+    """`CodeBlock` 那一格 → `raw` / `code` / `ordered` / `code_blocks`。
+
+    `sanitized` 要传进来：`Nest` / `Inline` 两列**清洗过就不可信**（见行内注释）。
+    """
+
+    # 结构位（块路径）：`-` = 顶层（**有信息**）；空 = **不知道**
+    # （老表 / 手工加的行）。两者必须分得开 —— 否则对拍会把"不知道"
+    # 当成"在顶层"，凡是老表都天天假报。
+    #
+    # 用 `g`（会清洗并留痕）而不是 `g_text`：这一列在
+    # `SINGLE_LINE_BEAT_FIELDS` 里，脏值必须被压成一行**并且记进
+    # `sanitized_cells`**（W114），否则又是"静默改数据"
+    # —— `test_cleaning_is_recorded[Nest]` 当场抓过这一条。
+    _nest = g('Nest')
+    if _nest and 'Nest' in sanitized:
+        # 被清洗过 = 这一格本来就不是一条合法路径（有换行/控制字符）。
+        # 那就不许拿它当依据：按"**不知道**"处理（整份跳过对拍），
+        # 而不是拿一条残缺路径去指认"结构对不上"——假阳性比漏报贵。
+        _nest = ''
+    beat.nest_path = (None if not _nest
+                      else ('' if _nest == '-' else _nest))
+    # 行尾注释（C）：原文（含 `#`），空 = 没有。
+    # ⚠ 与 `Nest` 同一个道理：用 `g`（会清洗并记进 `sanitized_cells`），
+    # 不能用 `g_text` —— 后者不留痕，正是"静默改数据"
+    # （`test_cleaning_is_recorded[Inline]` 当场抓到）。
+    # 被清洗过 = 这一格本来不是一条干净的注释 → **丢掉**（不清洗过的才可信）。
+    _inline = g('Inline')
+    if 'Inline' in sanitized:
+        _inline = ''          # 清洗过 = 不可信（同 `Nest` 的道理）
+    beat.inline_comment, beat.cond_comment = parse_inline_cell(_inline)
+    (beat.raw, beat.code, beat.ordered,
+     marked_blocks) = _split_code_cell(
+         beat.code, expand_code_blocks(beat.code_blocks))
+    # 单元格里的块标记是**权威**（写表时打的）；隐藏列只在标记缺失
+    # （老表 / 手工新建行）时兜底。
+    beat.code_blocks = marked_blocks or beat.code_blocks
+
+
+def _beat_stage_from_row(beat, row, g) -> None:
+    """结构化舞台列（背景/立绘/位置/转场/退场/「舞台高级」）+ 两个顺序列。
+
+    ⚠ 原来这一段结尾还有一行 `beat.code_blocks = parse_code_blocks_cell(
+    g('CodeBlocks'))`（2026-10-03 加的），它把上面 `_beat_code_from_row`
+    刚算好的"标记权威"结果**整条盖掉**（同义赋值两遍，后写的赢）。
+    `2bbb09a`（2026-10-04）加合并时没注意下面还有这一行，于是那条
+    docstring 说的"标记是权威"从来没生效过。这里保留**合并**的结果：
+    工具自己写的表两列本来就一致（删掉这行对既有表**零影响**），
+    只有"手工改过单元格"的表才看得到差别 —— 那时标记才是对的。
+    """
+
+    # —— 结构化列 → 内部字段 ——
+    # 新版表：背景 / 立绘 / 位置 / 转场 / 退场 / 音乐 / 音效 各自一列，
+    # 每列都能下拉。旧版表（Show/Hide/At/…）的列名在 LEGACY_* 里，
+    # 这里一并兼容，用户手上的老表升级后照样读得出来。
+    beat.scene = _spec_image(g('Scene'))
+    beat.scene_at = _spec_at(g('Scene'))
+    beat.at = g('At')
+    beat.with_ = g('With')
+    # ⚠ `dedup=False`：**表里那一格就是作者写的顺序与条数**（2026-10-07
+    # 缺口 4）。按内容去重会把 `ling; ling` 收成一条 —— 那可能正是
+    # `show A / hide A / show A` 里语义关键的最后一条。
+    # 影子重复由 `hydrate_from_dsl` 那条路自己挡（它只追加"还没有的"）。
+    # ⚠ **摊列（M3-2）**：`立绘2/立绘3…`（`退场2…`）是**同一列的续项**，
+    # 必须按序号接在原列后面一起拆 —— 读表时少读它们就是**静默丢立绘**。
+    # 旧表（没有这些列）行为不变：整格还是 `;` 多值。
+    _show_cells = [g('Show')] + [g(k) for k in
+                                 extra_columns_in(row, SHOW_EXTRA_PREFIX)]
+    _hide_cells = [g('Hide')] + [g(k) for k in
+                                 extra_columns_in(row, HIDE_EXTRA_PREFIX)]
+    beat.show = _join_show_items([
+        {'clause': '', 'image': img, 'at': at}
+        for _cell in _show_cells
+        for img, at in _split_spec_list(_cell)
+    ], dedup=False)
+    beat.hide = _join_hide_items([
+        {'image': img, 'with': w}
+        for _cell in _hide_cells
+        for img, w in _split_spec_list(_cell, sep='@')
+    ], dedup=False)
+    # 「舞台（高级）」列：结构化列表达不了的指令（复杂 show 子句、
+    # 自带位置的立绘、带转场的退场）都在这里；hydrate 会把它并回
+    # 结构化字段，渲染时再靠去重避免重复生成。读表时必须读它，否则
+    # 位置变换这类信息在"打开 rpy → 导出"往返里会丢。
+    beat.stage = g('Stage')
+    if g('StageOrder'):
+        beat.stage_order = g('StageOrder')
+    if g('OpOrder'):
+        beat.op_order = g('OpOrder')
+
+
+def _beat_audio_from_row(beat, row, g) -> None:
+    """音频列 → 内部字段（含「停止/排队」伪值）+ 老表迁移 + 文本列回填。"""
+
+    # —— 音频列 → 内部字段（含「停止/排队」伪值）——
+    _fill_audio_from_cells(beat, 'music', g('BGM'), g('BGMParams'))
+    _fill_audio_from_cells(beat, 'sound', g('SFX'), g('SFXParams'))
+
+    # 旧表（26 列）自动迁移。
+    #
+    # 注意判据：`Show/Hide/At/With` **当前表也有**（它们是结构化下拉列），
+    # 所以不能拿 `LEGACY_STAGE_COLUMNS` 里任意一个键当"这是老表"的信号
+    # ——那样每一行新表都会走进来，然后 `beat.raw = g('Raw')` 把从
+    # CodeBlock 拆出来的 raw 行（`show screen` / `pause` / `with`）
+    # **整批清空**，导出的代码就少了这些语句。只认真正的老表专属列。
+    legacy_keys = set(LEGACY_STAGE_COLUMNS) - set(BEAT_FIELDS)
+    if any(k in row for k in legacy_keys):
+        if not beat.show:
+            beat.show = g('Show')
+        if not beat.hide:
+            beat.hide = g('Hide')
+        # 老表的 Raw 列是**额外**内容，追加而不是覆盖（老表可能同时
+        # 有 CodeBlock 与 Raw 两列）。
+        legacy_raw = g('Raw')
+        if legacy_raw:
+            beat.raw = _append_line(beat.raw, legacy_raw)
+            beat.ordered.extend(
+                ('raw', ln) for ln in _split_lines(legacy_raw))
+    if any(k in row for k in LEGACY_AUDIO_COLUMNS):
+        if not beat.music and not beat.sound:
+            _fill_audio_legacy(beat, g)
+
+    # 「音乐」/「音效」文本列（beat.bgm / beat.sfx）是真相源：从已填好的
+    # 结构化字段**合成回** DSL 文本，保证"老表迁移"与"打开 rpy → 导出"
+    # 两种来源下文本列都有一致的人话/原生写法，便于策划复核与二次编辑。
+    beat.bgm = compose_audio_text(beat, 'music')
+    beat.sfx = compose_audio_text(beat, 'sound')
 
 
 class LongTextPreviewEdited(ValueError):
