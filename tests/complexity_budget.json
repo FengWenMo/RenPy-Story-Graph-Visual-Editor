@@ -9,6 +9,10 @@
   "branches": 150
  },
  "functions": {
+  "storygraph/app/asset_report.py::format_asset_health": {
+   "lines": 115,
+   "branches": 35
+  },
   "storygraph/app/beats.py::expression_groups_for": {
    "lines": 90,
    "branches": 37
@@ -17,9 +21,21 @@
    "lines": 102,
    "branches": 48
   },
+  "storygraph/app/session_graph.py::export_control_flow": {
+   "lines": 125,
+   "branches": 28
+  },
+  "storygraph/app/session_graph.py::import_chapters": {
+   "lines": 129,
+   "branches": 24
+  },
   "storygraph/app/session_graph.py::rebuild_source_edges": {
    "lines": 148,
    "branches": 52
+  },
+  "storygraph/app/session_graph.py::variable_workbench": {
+   "lines": 125,
+   "branches": 30
   },
   "storygraph/app/source_line_delete.py::plan_source_line_delete": {
    "lines": 145,
@@ -33,9 +49,17 @@
    "lines": 166,
    "branches": 47
   },
+  "storygraph/app/stage_render.py::_draw_say": {
+   "lines": 112,
+   "branches": 35
+  },
   "storygraph/assets/asset_registry.py::append_rows_to_table": {
    "lines": 161,
    "branches": 39
+  },
+  "storygraph/assets/asset_registry.py::backfill_dimension_columns": {
+   "lines": 83,
+   "branches": 35
   },
   "storygraph/assets/asset_registry.py::describe_asset": {
    "lines": 87,
@@ -52,10 +76,6 @@
   "storygraph/assets/mapping_excel.py::write_workbook": {
    "lines": 148,
    "branches": 37
-  },
-  "storygraph/assets/mapping_schema.py::validate_mapping": {
-   "lines": 127,
-   "branches": 63
   },
   "storygraph/assets/sprite_codes.py::scan_project": {
    "lines": 156,
@@ -93,17 +113,13 @@
    "lines": 116,
    "branches": 37
   },
-  "storygraph/cli.py::build_parser": {
-   "lines": 203,
-   "branches": 0
-  },
   "storygraph/excel/safety.py::_inspect_uncached": {
    "lines": 131,
    "branches": 37
   },
-  "storygraph/graph/analysis.py::analyze_reachability_full": {
-   "lines": 184,
-   "branches": 40
+  "storygraph/main_qt.py::main": {
+   "lines": 128,
+   "branches": 34
   },
   "storygraph/parsing/renpy_parser.py::_top_level_region": {
    "lines": 131,
@@ -133,10 +149,6 @@
    "lines": 155,
    "branches": 54
   },
-  "storygraph/story/beat_build.py::apply_script_definitions": {
-   "lines": 170,
-   "branches": 38
-  },
   "storygraph/story/beat_model.py::compose_stage": {
    "lines": 108,
    "branches": 40
@@ -156,6 +168,10 @@
   "storygraph/story/control_route.py::plan_control_init": {
    "lines": 148,
    "branches": 32
+  },
+  "storygraph/story/excel_export.py::_write_asset_gallery": {
+   "lines": 125,
+   "branches": 35
   },
   "storygraph/story/exits.py::label_exits_for_result": {
    "lines": 95,
@@ -181,10 +197,6 @@
    "lines": 119,
    "branches": 37
   },
-  "storygraph/ui_qt/asset_picker.py::_build": {
-   "lines": 190,
-   "branches": 2
-  },
   "storygraph/ui_qt/card_actions.py::apply_scene_from_card": {
    "lines": 127,
    "branches": 38
@@ -197,10 +209,6 @@
    "lines": 137,
    "branches": 61
   },
-  "storygraph/ui_qt/dialog_stage_suspect.py::__init__": {
-   "lines": 177,
-   "branches": 18
-  },
   "storygraph/ui_qt/dialogs.py::__init__": {
    "lines": 160,
    "branches": 38
@@ -208,14 +216,6 @@
   "storygraph/ui_qt/mapping_editor.py::_build": {
    "lines": 159,
    "branches": 1
-  },
-  "storygraph/ui_qt/stage_preview.py::_build": {
-   "lines": 168,
-   "branches": 6
-  },
-  "storygraph/ui_qt/theme.py::qss": {
-   "lines": 242,
-   "branches": 0
   },
   "storygraph/ui_qt/window_graph_ops.py::import_chapter_files": {
    "lines": 142,

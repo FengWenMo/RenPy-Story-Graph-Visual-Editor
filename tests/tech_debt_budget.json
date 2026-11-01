@@ -6,8 +6,8 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 58,
-  "complex_functions": 211,
+  "long_functions": 50,
+  "complex_functions": 208,
   "print_calls": 240,
   "print_library": 3,
   "swallow_calls": 1239,
@@ -22,8 +22,8 @@
  "cycle_shapes": [],
  "snapshot": {
   "modules": 256,
-  "total_lines": 163111,
-  "functions": 5595,
+  "total_lines": 163433,
+  "functions": 5649,
   "file_edges_all": 1267
  }
 }
