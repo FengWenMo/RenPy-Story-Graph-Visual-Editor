@@ -2464,21 +2464,10 @@ def draw_readable_say(img, result, frame, profile=None):
     以下情况**原样返回、逐像素不变**：没有 say 窗口（`shows_window=False`）、
     文本框矩形无效、没有名字也没有台词。
     """
-    if img is None or result is None or frame is None or not _PIL_OK:
-        return img, {'drawn': False, 'reason': '没有可画的图 / 帧'}
-    if not getattr(frame, 'shows_window', False):
-        return img, {'drawn': False, 'reason': '这一拍没有 say 窗口'}
-    src_w = int(getattr(result, 'width', 0) or 0)
-    src_h = int(getattr(result, 'height', 0) or 0)
-    if src_w <= 0 or src_h <= 0:
-        return img, {'drawn': False, 'reason': 'RenderResult 没有分辨率'}
-    sx = float(img.width) / float(src_w)
-    sy = float(img.height) / float(src_h)
-    strip = _clamp_rect(
-        _scaled_rect(getattr(result, 'textbox_rect', (0, 0, 0, 0)), sx, sy),
-        img.width, img.height)
-    if strip[2] < 8 or strip[3] < 8:
-        return img, {'drawn': False, 'reason': '没有可用的文本框矩形'}
+    geom, reason = _readable_geometry(img, result, frame)
+    if geom is None:
+        return img, {'drawn': False, 'reason': reason}
+    strip, name_box = geom['strip'], geom['name_box']
 
     who_text, dlg_text, style = _readable_payload(frame, profile)
     if not who_text and not dlg_text:
@@ -2493,10 +2482,8 @@ def draw_readable_say(img, result, frame, profile=None):
 
     # 名条矩形：`name_rect` 可能整个贴在本框**上方**（`gui.name_ypos = -58`），
     # 所以铺底不能只铺条带 —— 不盖名条，原名字会和重画的名字叠成两个。
-    name_raw = _scaled_rect(getattr(result, 'name_rect', (0, 0, 0, 0)), sx, sy)
-    name_box = _clamp_rect(name_raw, img.width, img.height)
     name_ok = bool(who_text) and name_box[2] >= 8 and name_box[3] >= 8 \
-        and name_raw[0] < img.width and name_raw[1] < img.height
+        and geom['name_raw'][0] < img.width and geom['name_raw'][1] < img.height
 
     out = img.convert('RGBA').copy()
     draw = ImageDraw.Draw(out)
@@ -2513,151 +2500,236 @@ def draw_readable_say(img, result, frame, profile=None):
     if name_ok:
         name_tag, name_px = _fit_name_tag(
             draw, name_box, who_text, name_path, name_px, out.size)
-    # ① 铺底：条带 / 名条各自用**自己区域的平均色**、**不透明**盖平。
-    #    平均色必须在画任何东西之前采（要反映项目原本的底色）；名条后盖，
-    #    这样名条与文本框重叠的那条边仍是"有颜色的小标签"，不会被条带吃掉。
-    #    名条的底按**加宽/加高后**的 `name_tag` 铺（它一定盖住原 `name_box`），
-    #    否则长出来的那半截没有底色，字会压在原画面上。
-    strip_base = _readable_base_rgb(out, strip, dlg_color)
-    name_base = _readable_base_rgb(
-        out, name_box, name_color) if name_ok else None
-    _cover_rect(out, strip, strip_base)
-    if name_base is not None:
-        _cover_rect(out, name_tag, name_base)
+
+    plan = _readable_plan(geom, name_ok, name_tag, int(name_px), name_path,
+                          name_fell_back)
+    info = plan['info']
+    # ① 铺底（条带 / 名条各自平均色、不透明）—— 采色必须在画任何东西之前。
+    _readable_blank_base(out, plan, name_color, dlg_color)
+    # ② 名字；返回台词的起始 y
+    name_bottom = _readable_draw_name(draw, plan, who_text, name_color, profile)
+    # ③ 台词
+    _readable_draw_dialogue(draw, out, plan, dlg_text, name_bottom, dlg_color,
+                            profile, speaker, display)
+    return out, info
+
+
+def _readable_geometry(img, result, frame):
+    """
+    入口三道闸 + 坐标换算（原 `draw_readable_say` 的开头到取 `strip`）。
+
+    返回 `(geom, 原因)`：`geom` 为 None 表示**原样返回、逐像素不变**，原因
+    是写进 `info['reason']` 的一句话；否则 `geom` 里是 `sx/sy/strip/
+    name_raw/name_box/text_rect`（后三个已换到图上并夹到画面内）。
+    """
+    if img is None or result is None or frame is None or not _PIL_OK:
+        return None, '没有可画的图 / 帧'
+    if not getattr(frame, 'shows_window', False):
+        return None, '这一拍没有 say 窗口'
+    src_w = int(getattr(result, 'width', 0) or 0)
+    src_h = int(getattr(result, 'height', 0) or 0)
+    if src_w <= 0 or src_h <= 0:
+        return None, 'RenderResult 没有分辨率'
+    sx = float(img.width) / float(src_w)
+    sy = float(img.height) / float(src_h)
+    strip = _clamp_rect(
+        _scaled_rect(getattr(result, 'textbox_rect', (0, 0, 0, 0)), sx, sy),
+        img.width, img.height)
+    if strip[2] < 8 or strip[3] < 8:
+        return None, '没有可用的文本框矩形'
+    name_raw = _scaled_rect(getattr(result, 'name_rect', (0, 0, 0, 0)), sx, sy)
+    return {
+        'sx': sx, 'sy': sy, 'strip': strip, 'name_raw': name_raw,
+        'name_box': _clamp_rect(name_raw, img.width, img.height),
+        'text_rect': _clamp_rect(
+            _scaled_rect(getattr(result, 'text_rect', (0, 0, 0, 0)), sx, sy),
+            img.width, img.height),
+    }, None
+
+
+def _readable_plan(geom, name_ok, name_tag, name_px, name_path, name_fell_back):
+    """把位置 / 字号 / 名条收成一个 `plan`，给下面三步共用（`info` 也在里面）。"""
+    strip = geom['strip']
     pad = max(2, int(round(float(strip[3]) * 0.05)))
-    right = strip[0] + strip[2] - pad
-    bottom = strip[1] + strip[3] - pad
-    info = {'drawn': True, 'name_px': 0, 'dialogue_px': 0,
+    return {
+        'strip': strip, 'name_box': geom['name_box'], 'name_ok': name_ok,
+        'name_tag': name_tag, 'name_px': name_px, 'name_path': name_path,
+        'pad': pad, 'right': strip[0] + strip[2] - pad,
+        'bottom': strip[1] + strip[3] - pad, 'text_rect': geom['text_rect'],
+        'info': {
+            'drawn': True, 'name_px': 0, 'dialogue_px': 0,
             'name_lines': 0, 'dialogue_lines': 0, 'ellipsis': False,
-            'font_fallback': bool(name_fell_back), 'strip': tuple(strip),
-            'strip_base': tuple(strip_base), 'name_base': name_base,
-            'name_box': tuple(name_box) if name_ok else (0, 0, 0, 0),
+            'font_fallback': bool(name_fell_back),
+            'strip': tuple(strip), 'strip_base': (0, 0, 0), 'name_base': None,
+            'name_box': tuple(geom['name_box']) if name_ok else (0, 0, 0, 0),
             'name_tag': tuple(name_tag) if name_ok else (0, 0, 0, 0),
             'name_text_box': (0, 0, 0, 0),
             'dialogue_text_box': (0, 0, 0, 0),
-            'covered': [tuple(strip)] + ([tuple(name_tag)] if name_ok else [])}
+            'covered': [],
+        },
+    }
 
-    # ② 名字
-    #    · 有名条矩形：画进**长到包住字**的名条 `name_tag` 里（可读字号）；
-    #      名条在条带里时台词接在加长后的名条底下，名条在条带**上方**时
-    #      不推台词 —— 那样会把整块台词往下挤；
-    #    · 没有名条矩形（老项目 / 没名条图 / 字体加载失败）：退回"条带内
-    #      第一行"的画法。
+
+def _readable_blank_base(out, plan, name_color, dlg_color):
+    """
+    ① 铺底：条带 / 名条各自用**自己区域的平均色**、**不透明**盖平。
+
+    平均色必须在画任何东西之前采（要反映项目原本的底色）；名条后盖，
+    这样名条与文本框重叠的那条边仍是"有颜色的小标签"，不会被条带吃掉。
+    名条的底按**加宽/加高后**的 `name_tag` 铺（它一定盖住原 `name_box`），
+    否则长出来的那半截没有底色，字会压在原画面上。
+    """
+    strip, name_tag = plan['strip'], plan['name_tag']
+    strip_base = _readable_base_rgb(out, strip, dlg_color)
+    name_base = _readable_base_rgb(
+        out, plan['name_box'], name_color) if plan['name_ok'] else None
+    _cover_rect(out, strip, strip_base)
+    if name_base is not None:
+        _cover_rect(out, name_tag, name_base)
+    info = plan['info']
+    info['strip_base'] = tuple(strip_base)
+    info['name_base'] = name_base
+    info['covered'] = [tuple(strip)] + (
+        [tuple(name_tag)] if name_base is not None else [])
+
+
+def _readable_draw_name(draw, plan, who_text, name_color, profile):
+    """
+    ② 名字；返回台词该从哪个 y 起（`name_bottom`）。
+
+    · 有名条矩形：画进**长到包住字**的名条 `name_tag` 里（可读字号）；
+      名条在条带里时台词接在加长后的名条底下，名条在条带**上方**时
+      不推台词 —— 那样会把整块台词往下挤；
+    · 没有名条矩形（老项目 / 没名条图 / 字体加载失败）：退回"条带内
+      第一行"的画法。
+    """
+    strip, pad = plan['strip'], plan['pad']
     name_bottom = strip[1] + pad
-    if who_text:
-        name_outline = _readable_outline(profile, 'name')
-        ink, used_px, clipped = None, int(name_px), False
-        if name_ok:
-            ink, used_px, clipped = _draw_name_in_box(
-                draw, name_tag, who_text, name_path, name_px, name_color,
-                name_outline)
-            if ink is not None and name_tag[1] >= strip[1]:
-                # 名条落在条带里（模板的写法）：台词接在名条下面。
-                # 名条在条带**上方**时不推台词 —— 那样会把整块台词往下挤。
-                name_bottom = max(name_bottom,
-                                  name_tag[1] + name_tag[3] + max(1, pad // 2))
-        if ink is None:                        # 没有名条矩形 / 字体加载失败
-            used_px = int(name_px)
-            ink = _draw_name_in_strip(
-                draw, strip, pad, right, bottom, who_text, name_path,
-                used_px, name_color, name_outline)
-            if ink is not None:
-                name_bottom = max(name_bottom,
-                                  ink[1] + ink[3] + max(1, pad // 2))
+    if not who_text:
+        return name_bottom
+    name_tag, name_px = plan['name_tag'], plan['name_px']
+    name_outline = _readable_outline(profile, 'name')
+    ink, used_px, clipped = None, int(name_px), False
+    if plan['name_ok']:
+        ink, used_px, clipped = _draw_name_in_box(
+            draw, name_tag, who_text, plan['name_path'], name_px, name_color,
+            name_outline)
+        if ink is not None and name_tag[1] >= strip[1]:
+            # 名条落在条带里（模板的写法）：台词接在名条下面。
+            # 名条在条带**上方**时不推台词 —— 那样会把整块台词往下挤。
+            name_bottom = max(name_bottom,
+                              name_tag[1] + name_tag[3] + max(1, pad // 2))
+    if ink is None:                        # 没有名条矩形 / 字体加载失败
+        used_px = int(name_px)
+        ink = _draw_name_in_strip(
+            draw, strip, pad, plan['right'], plan['bottom'], who_text,
+            plan['name_path'], used_px, name_color, name_outline)
         if ink is not None:
-            info['name_px'] = int(used_px)
-            info['name_lines'] = 1
-            info['name_text_box'] = tuple(ink)
-            info['ellipsis'] = bool(info['ellipsis'] or clipped)
+            name_bottom = max(name_bottom, ink[1] + ink[3] + max(1, pad // 2))
+    if ink is not None:
+        info = plan['info']
+        info['name_px'] = int(used_px)
+        info['name_lines'] = 1
+        info['name_text_box'] = tuple(ink)
+        info['ellipsis'] = bool(info['ellipsis'] or clipped)
+    return name_bottom
 
-    # ③ 台词：在条带内按可读字号重排（中文逐字断行），放不下就末尾加 …
-    if dlg_text:
-        dlg_px = _readable_px('dialogue', out.width, strip[3])
-        dlg_rect = _clamp_rect(
-            _scaled_rect(getattr(result, 'text_rect', (0, 0, 0, 0)), sx, sy),
-            out.width, out.height)
-        dlg_x = strip[0] + pad
-        if dlg_rect[2] > 0:
-            # 起点照引擎的 dialogue_xpos（保留它给立绘留的左边距）；
-            # 换行宽度**用满文本框条带**（而不是引擎的 dialogue_width）：
-            # 288 宽的小图上 dialogue_width 往往只剩不到 170px，一行十来个字
-            # 就没了；既然这段文字本来就是"缩略图专用重排"，宽度就按条带给。
-            dlg_x = max(strip[0] + pad, min(right - 16, dlg_rect[0]))
-        dlg_w = max(16, right - dlg_x)
-        dlg_y = max(strip[1] + pad, name_bottom)
-        if dlg_rect[3] > 0 and dlg_rect[1] >= name_bottom - 2:
-            # 引擎排版里台词起点就在名条下面时照它来（保持"名上句下"）
-            dlg_y = max(dlg_y, dlg_rect[1])
-        engine_px = float(_attr(profile, 'dialogue_text_size', 0.0) or 0.0) \
-            or 33.0
-        dlg_align = 0.0
-        try:
-            dlg_align = float(
-                (getattr(profile, 'values', {}) or {}).get(
-                    'dialogue_text_xalign') or 0)
-        except (TypeError, ValueError, AttributeError) as e:
-            swallow('stage_render.readable_align', e)
-        # `{size=…}` 这类标签里的字号是**引擎尺度**的，按 target 的缩放比
-        # 一起缩下来，否则一行里会冒出一个 45px 的巨字把条带撑爆。
-        runs = text_runs(dlg_text, float(dlg_px), dlg_color)
-        ratio = float(dlg_px) / max(1.0, engine_px)
-        for _text, run_style in runs:
-            if abs(float(run_style.size) - float(dlg_px)) > 0.01:
-                run_style.size = max(
-                    6.0, min(float(MAX_READABLE_PX['dialogue']) * 1.5,
-                             float(run_style.size) * ratio))
-        dlg_font_path, dlg_fell_back = _pick_readable_font_path(
-            profile, speaker, display, 'what', dlg_text)
-        info['font_fallback'] = bool(info['font_fallback'] or dlg_fell_back)
-        font_cache = {}
 
-        def _run_font(run_style):
-            key = (int(round(run_style.size)), bool(run_style.bold),
-                   bool(run_style.italic))
-            if key not in font_cache:
-                font_cache[key] = _load_readable_font(
-                    dlg_font_path, key[0], key[1], key[2])
-            return font_cache[key]
+def _readable_draw_dialogue(draw, out, plan, dlg_text, name_bottom, dlg_color,
+                            profile, speaker, display):
+    """
+    ③ 台词：在条带内按可读字号重排（中文逐字断行），放不下就末尾加 …。
 
-        base_font = _load_readable_font(dlg_font_path, int(dlg_px))
-        if runs and base_font is not None:
-            ascent, descent = base_font.getmetrics()
-            line_h = max(1, int(ascent + descent))
-            avail = max(1, bottom - dlg_y)
-            max_lines = max(1, int(avail // line_h))
-            lines = _wrap(_units(runs, _run_font), float(dlg_w), draw)
-            clipped = False
-            if len(lines) > max_lines:
-                clipped = True
-                lines = lines[:max_lines]
-                last = lines[-1]
-                last_font = last[-1][1] if last else base_font
-                last_style = last[-1][2] if last else _TextStyle(
-                    color=dlg_color, size=float(dlg_px))
-                ell = _measure(draw, '…', last_font)
-                while last and sum(_measure(draw, t, f)
-                                   for t, f, _s in last) + ell > dlg_w:
-                    last.pop()
-                if ell <= dlg_w:
-                    last.append(('…', last_font, last_style))
-            if any(line for line in lines):
-                sink = _RectSink()
-                stroke_w = _readable_stroke(dlg_px)
-                outline = ([(stroke_w,
-                             _hex_color(_readable_outline(profile,
-                                                          'dialogue')),
-                             0, 0)] if stroke_w else [])
-                _draw_lines(
-                    out, lines, float(dlg_x), float(dlg_y), float(dlg_w),
-                    dlg_align, 0.0, outline, sink, float(dlg_px))
-                info['dialogue_px'] = int(dlg_px)
-                info['dialogue_lines'] = len(lines)
-                # 别把名字那边的「…」盖掉：名字与台词共用这一个标志位。
-                info['ellipsis'] = bool(info['ellipsis'] or clipped)
-                # 新字实际占的排版框（含行高）—— 测试拿它判"条带里除了新字
-                # 没有别的像素被改动"，也判"原文字已被铺底盖掉"。
-                info['dialogue_text_box'] = tuple(sink.text_rect)
-    return out, info
+    换行宽度**用满文本框条带**（而不是引擎的 `dialogue_width`）：288 宽的
+    小图上 dialogue_width 往往只剩不到 170px，一行十来个字就没了；既然这段
+    文字本来就是"缩略图专用重排"，宽度就按条带给。
+    """
+    if not dlg_text:
+        return
+    strip, pad = plan['strip'], plan['pad']
+    right, bottom = plan['right'], plan['bottom']
+    info = plan['info']
+    dlg_px = _readable_px('dialogue', out.width, strip[3])
+    dlg_rect = plan['text_rect']
+    dlg_x = strip[0] + pad
+    if dlg_rect[2] > 0:
+        # 起点照引擎的 dialogue_xpos（保留它给立绘留的左边距）
+        dlg_x = max(strip[0] + pad, min(right - 16, dlg_rect[0]))
+    dlg_w = max(16, right - dlg_x)
+    dlg_y = max(strip[1] + pad, name_bottom)
+    if dlg_rect[3] > 0 and dlg_rect[1] >= name_bottom - 2:
+        # 引擎排版里台词起点就在名条下面时照它来（保持"名上句下"）
+        dlg_y = max(dlg_y, dlg_rect[1])
+    engine_px = float(_attr(profile, 'dialogue_text_size', 0.0) or 0.0) \
+        or 33.0
+    dlg_align = 0.0
+    try:
+        dlg_align = float(
+            (getattr(profile, 'values', {}) or {}).get(
+                'dialogue_text_xalign') or 0)
+    except (TypeError, ValueError, AttributeError) as e:
+        swallow('stage_render.readable_align', e)
+    # `{size=…}` 这类标签里的字号是**引擎尺度**的，按 target 的缩放比
+    # 一起缩下来，否则一行里会冒出一个 45px 的巨字把条带撑爆。
+    runs = text_runs(dlg_text, float(dlg_px), dlg_color)
+    ratio = float(dlg_px) / max(1.0, engine_px)
+    for _text, run_style in runs:
+        if abs(float(run_style.size) - float(dlg_px)) > 0.01:
+            run_style.size = max(
+                6.0, min(float(MAX_READABLE_PX['dialogue']) * 1.5,
+                         float(run_style.size) * ratio))
+    dlg_font_path, dlg_fell_back = _pick_readable_font_path(
+        profile, speaker, display, 'what', dlg_text)
+    info['font_fallback'] = bool(info['font_fallback'] or dlg_fell_back)
+    font_cache = {}
+
+    def _run_font(run_style):
+        key = (int(round(run_style.size)), bool(run_style.bold),
+               bool(run_style.italic))
+        if key not in font_cache:
+            font_cache[key] = _load_readable_font(
+                dlg_font_path, key[0], key[1], key[2])
+        return font_cache[key]
+
+    base_font = _load_readable_font(dlg_font_path, int(dlg_px))
+    if not runs or base_font is None:
+        return
+    ascent, descent = base_font.getmetrics()
+    line_h = max(1, int(ascent + descent))
+    avail = max(1, bottom - dlg_y)
+    max_lines = max(1, int(avail // line_h))
+    lines = _wrap(_units(runs, _run_font), float(dlg_w), draw)
+    clipped = False
+    if len(lines) > max_lines:
+        clipped = True
+        lines = lines[:max_lines]
+        last = lines[-1]
+        last_font = last[-1][1] if last else base_font
+        last_style = last[-1][2] if last else _TextStyle(
+            color=dlg_color, size=float(dlg_px))
+        ell = _measure(draw, '…', last_font)
+        while last and sum(_measure(draw, t, f)
+                           for t, f, _s in last) + ell > dlg_w:
+            last.pop()
+        if ell <= dlg_w:
+            last.append(('…', last_font, last_style))
+    if not any(line for line in lines):
+        return
+    sink = _RectSink()
+    stroke_w = _readable_stroke(dlg_px)
+    outline = ([(stroke_w,
+                 _hex_color(_readable_outline(profile, 'dialogue')),
+                 0, 0)] if stroke_w else [])
+    _draw_lines(
+        out, lines, float(dlg_x), float(dlg_y), float(dlg_w),
+        dlg_align, 0.0, outline, sink, float(dlg_px))
+    info['dialogue_px'] = int(dlg_px)
+    info['dialogue_lines'] = len(lines)
+    # 别把名字那边的「…」盖掉：名字与台词共用这一个标志位。
+    info['ellipsis'] = bool(info['ellipsis'] or clipped)
+    # 新字实际占的排版框（含行高）—— 测试拿它判"条带里除了新字
+    # 没有别的像素被改动"，也判"原文字已被铺底盖掉"。
+    info['dialogue_text_box'] = tuple(sink.text_rect)
 
 
 def scale_result_image(result, target):
