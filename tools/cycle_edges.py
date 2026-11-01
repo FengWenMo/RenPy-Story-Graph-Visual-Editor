@@ -163,10 +163,12 @@ def main(argv) -> int:
         print()
         print('| 用了几次 | 层级 | 边 | 导入了什么 |')
         print('|---:|---|---|---|')
-        for uses, kind, a, b, names in rows:
+        for uses, kind, a, b, names in sorted(rows):    # 最便宜的边排前面
             shown = ', '.join(f'`{n}`' for n in names[:4])
             if len(names) > 4:
                 shown += f' …（共 {len(names)} 个）'
+            if not names:
+                shown = '（整模块 import / 别名）'
             print(f'| {uses} | {kind} | `{_short(a)}` → `{_short(b)}` | {shown} |')
         print()
         print('| 反馈边（要解环就处理这些） |')
