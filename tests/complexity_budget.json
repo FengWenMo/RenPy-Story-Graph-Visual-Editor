@@ -77,6 +77,10 @@
    "lines": 162,
    "branches": 46
   },
+  "storygraph/authoring/learn_statement.py::choice_sources": {
+   "lines": 126,
+   "branches": 38
+  },
   "storygraph/authoring/pattern.py::_spans": {
    "lines": 245,
    "branches": 66
@@ -149,6 +153,10 @@
    "lines": 251,
    "branches": 94
   },
+  "storygraph/story/beat_render.py::_render_menu_segments": {
+   "lines": 159,
+   "branches": 32
+  },
   "storygraph/story/control_branch.py::plan_control_branch": {
    "lines": 177,
    "branches": 45
@@ -205,17 +213,9 @@
    "lines": 160,
    "branches": 38
   },
-  "storygraph/ui_qt/main_window.py::_build_card_page": {
-   "lines": 268,
-   "branches": 2
-  },
-  "storygraph/ui_qt/main_window.py::_build_toolbars": {
-   "lines": 227,
-   "branches": 4
-  },
-  "storygraph/ui_qt/main_window.py::set_spec_args": {
-   "lines": 169,
-   "branches": 48
+  "storygraph/ui_qt/mapping_editor.py::_build": {
+   "lines": 159,
+   "branches": 1
   },
   "storygraph/ui_qt/param_editor.py::__init__": {
    "lines": 217,

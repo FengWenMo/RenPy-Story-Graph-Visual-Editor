@@ -391,6 +391,7 @@ pytest.importorskip('PySide6')
 
 from PySide6.QtWidgets import QMessageBox                     # noqa: E402
 
+from storygraph.ui_qt import card_actions as CA               # noqa: E402
 from storygraph.ui_qt import main_window as MW                # noqa: E402
 from storygraph.ui_qt.size_panel import SizePanel             # noqa: E402
 
@@ -494,7 +495,7 @@ class TestWindowSceneFlow:
             asked.update(req or {})
             return 'bg rooftop'
 
-        monkeypatch.setattr(MW, '_ask_scene_image', _ask)
+        monkeypatch.setattr(CA, '_ask_scene_image', _ask)
         bodies = []
 
         def _confirm(_parent, title, body, *_a, **_k):
@@ -521,7 +522,7 @@ class TestWindowSceneFlow:
         win = ui_window
         i = _beat_with_sprites(win)
         win._show_index(i)
-        monkeypatch.setattr(MW, '_ask_scene_image',
+        monkeypatch.setattr(CA, '_ask_scene_image',
                             lambda _w, _r: 'bg rooftop')
         monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_no))
         before = str(getattr(win._session.beats[i], 'scene', '') or '')
@@ -533,7 +534,7 @@ class TestWindowSceneFlow:
         win = ui_window
         i = _beat_with_sprites(win)
         win._show_index(i)
-        monkeypatch.setattr(MW, '_ask_scene_image', lambda _w, _r: '')
+        monkeypatch.setattr(CA, '_ask_scene_image', lambda _w, _r: '')
         before = str(getattr(win._session.beats[i], 'scene', '') or '')
         win._panel.size_panel().slots()[0]['swap'].click()
         assert str(win._session.beats[i].scene or '') == before
@@ -545,7 +546,7 @@ class TestWindowSceneFlow:
         win = ui_window
         i = _beat_with_sprites(win)
         win._show_index(i)
-        monkeypatch.setattr(MW, '_ask_scene_image',
+        monkeypatch.setattr(CA, '_ask_scene_image',
                             lambda _w, _r: 'bg nosuchimage')
         monkeypatch.setattr(MW.QMessageBox, 'question', staticmethod(_yes))
         win._panel.size_panel().slots()[0]['swap'].click()

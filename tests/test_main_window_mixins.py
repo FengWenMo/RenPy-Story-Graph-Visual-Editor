@@ -75,8 +75,6 @@ KEEP = {
     '_boot': '启动时序（QTimer 调它）',
     '_set_graph': '图的所有权',
     '_build': '搭界面骨架',
-    '_build_card_page': '第 1 页构建（暂时留：它调 10 个本模块的模块级函数）',
-    '_build_toolbars': '两组工具栏（暂时留：它调 2 个本模块的模块级函数）',
     '_boot_restore_session': '启动时按记忆恢复（并在命令行给了参数时不恢复）',
     '_set_page': '页切换',
     '_focus_into_card_page': '页切换配套',

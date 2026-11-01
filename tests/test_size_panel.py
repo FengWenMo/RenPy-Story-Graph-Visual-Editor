@@ -26,6 +26,7 @@ pytest.importorskip('PySide6')
 
 from PySide6.QtWidgets import QMessageBox                     # noqa: E402
 
+from storygraph.ui_qt import card_actions as CA               # noqa: E402
 from storygraph.ui_qt import main_window as MW                # noqa: E402
 from storygraph.ui_qt.main_window import BeatCardEditor       # noqa: E402
 from storygraph.ui_qt.size_panel import SizePanel             # noqa: E402
@@ -557,7 +558,7 @@ class TestMergeFromCard:
                                                      monkeypatch):
         win = ui_window
         i, scene = self._setup(win)
-        monkeypatch.setattr(MW, '_confirm_merge_plan',
+        monkeypatch.setattr(CA, '_confirm_merge_plan',
                             lambda parent, plan: {i + 1, i + 2})
         slot = win._panel.size_panel().slots()[0]
         assert '2 处' in slot['merge'].text(), slot['merge'].text()
@@ -571,7 +572,7 @@ class TestMergeFromCard:
                                                      monkeypatch):
         win = ui_window
         i, scene = self._setup(win)
-        monkeypatch.setattr(MW, '_confirm_merge_plan',
+        monkeypatch.setattr(CA, '_confirm_merge_plan',
                             lambda parent, plan: {i + 1})
         win._panel.size_panel().slots()[0]['merge'].click()
         assert win._session.beats[i + 1].show == scene
@@ -580,7 +581,7 @@ class TestMergeFromCard:
     def test_cancel_changes_nothing(self, ui_window, monkeypatch):
         win = ui_window
         i, scene = self._setup(win)
-        monkeypatch.setattr(MW, '_confirm_merge_plan',
+        monkeypatch.setattr(CA, '_confirm_merge_plan',
                             lambda parent, plan: None)
         win._panel.size_panel().slots()[0]['merge'].click()
         assert win._session.beats[i + 1].show == f'{scene}@half'
@@ -590,7 +591,7 @@ class TestMergeFromCard:
                                                         monkeypatch):
         win = ui_window
         i, scene = self._setup(win)
-        monkeypatch.setattr(MW, '_confirm_merge_plan',
+        monkeypatch.setattr(CA, '_confirm_merge_plan',
                             lambda parent, plan: set())
         win._panel.size_panel().slots()[0]['merge'].click()
         assert win._session.beats[i + 1].show == f'{scene}@half'
@@ -602,7 +603,7 @@ class TestMergeFromCard:
         i, scene = self._setup(win)
         win._session.beats[i].scene_at = 'leftish'
         win._show_index(i)
-        monkeypatch.setattr(MW, '_confirm_merge_plan',
+        monkeypatch.setattr(CA, '_confirm_merge_plan',
                             lambda parent, plan: {i + 1, i + 2})
         win._panel.size_panel().slots()[0]['merge'].click()
         assert win._session.beats[i + 1].show == f'{scene}@leftish'
