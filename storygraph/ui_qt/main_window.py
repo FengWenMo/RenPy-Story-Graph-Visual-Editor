@@ -1371,6 +1371,16 @@ class BeatCardEditor(QWidget):
 
         self._build_statement_area(root)
 
+        self._build_dialogue_area(root)
+        self._build_stage_now_area(root)
+        self._build_stage_area(root, loader)
+
+        self._build_meta_area(root)
+
+        self._build_footer(root)
+
+    def _build_dialogue_area(self, root) -> None:
+        """说话人 / 台词 / 字数 / 富文本预览 / 台词后缀（拆自 `_build`，2026-11-01）。"""
         # —— 台词区（说话人 / 台词 / 字数 / 富文本预览 / 后缀）——
         #
         # 整块套一个容器，为的是**控制流卡能把它收起来**（2026-10-23）：
@@ -1443,6 +1453,8 @@ class BeatCardEditor(QWidget):
         self._say_tail_label.setVisible(False)
         dlg_lay.addWidget(self._say_tail_label)
 
+    def _build_stage_now_area(self, root) -> None:
+        """「当前舞台」这一拍的只读小图 + 摘要 + 尺寸格（拆自 `_build`，2026-11-01）。"""
         # —— 「当前舞台」+ 这一拍的图（**永远可见**，2026-10-27）——
         #
         # 位置与大小是用户当面指正的（第一版放错了两处）：
@@ -1510,6 +1522,8 @@ class BeatCardEditor(QWidget):
         now_lay.addWidget(self._size_box)
         root.addWidget(self._stage_now)
 
+    def _build_stage_area(self, root, loader) -> None:
+        """立绘网格 + 背景 / 音乐 / 语音三格（拆自 `_build`，2026-11-01）。"""
         # —— 立绘 / 背景 / 音乐（**永远完整显示**，2026-10-29 用户要求）——
         #
         # 这里曾经是"没有舞台内容 → 收成一行说明 + 一个「＋ 改舞台」按钮"
@@ -1608,10 +1622,6 @@ class BeatCardEditor(QWidget):
         stage_lay.addWidget(_asset_row([('Scene', '背景')], 'assetRowScene'))
         stage_lay.addWidget(_asset_row([('BGM', '音乐'), ('Voice', '语音')],
                                        'assetRowAudio'))
-
-        self._build_meta_area(root)
-
-        self._build_footer(root)
 
     def _build_statement_area(self, root) -> None:
         """语句条 / 零散行 / 语句参数宿主（拆自 `_build`，2026-11-01）。"""
