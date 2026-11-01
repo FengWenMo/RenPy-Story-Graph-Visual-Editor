@@ -290,111 +290,19 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     # 重排（每条语句之间插空行、行尾空格被删、CRLF → LF）。真机
     # `definitions.rpy` 1120 行变 1288 行，而用户**一处都没改**。
     if inc.passthrough:
-        from storygraph.story.source_style import detect as _detect_style
-        from storygraph.story.paths import write_text_atomic
-        target = Path(rpy_path)
-        src = Path(source_path)
-        if target.resolve() != src.resolve():
-            # 目标是另一条路径：原样复制（含 BOM / 换行），不经过任何渲染。
-            from storygraph.story.source_style import SourceNotUtf8 as _NotUtf8
-            try:
-                write_text_atomic(target, _detect_style(src).apply(
-                    inc.text, source=src))
-            except _NotUtf8 as exc:
-                # 底稿不是 UTF-8：复制品会带着 U+FFFD 落地 —— 拒写并说清（P0-B）
-                result.written = False
-                result.patch_note = str(exc)
-                return result
-            except OSError:
-                result.written = False
-                return result
-        result.written = True
-        result.out_path = str(target)
-        result.patch_note = ('这一章没有可编辑的拍（纯定义 / 屏幕 / init 文件），'
-                            '原文逐字节保留')
-        return result
+        return _write_passthrough(result, rpy_path, source_path, inc)
 
     # 给了源就把原文交给门禁：它要**算**"这一份产物是不是丢了顶层语句"
     # （`define` / `init python` / `transform` …）。补丁没配上时，这是
     # 唯一能拦住"静默退回全量"的地方 —— 目标是新路径时手写护栏不适用。
-    source_text = None
-    if source_path:
-        try:
-            # 读源走 `source_style`：剥 BOM、换行统一成 LF。门禁按行比
-            # （`opaque_loss`），带 BOM 的第一行会与产物对不上 → 误报
-            # "丢了顶层语句"（2026-10-18 审计 P0-1 的连带修）。
-            from storygraph.story.source_style import read_text as _read_src
-            source_text = _read_src(source_path)[0]
-        except (OSError, UnicodeDecodeError):
-            source_text = None
-
-    # —— **一个字节都没改 → 不写**（2026-10-19，修 P1-1）——
-    #
-    # 从前这条路照样要走 `ensure_generator_marker`：零改动往返被插进
-    # 2 行生成标记（`# 由剧本表自动生成…` + 空行），于是"表里一个字没改、
-    # 产物逐字节还原"这个最硬的判据永远差 2 行（实测 22/55 个文件全栽在这）。
-    #
-    # 判据是**内容相等**，不是"改动行数 == 0"：后者只是计数，前者才是
-    # 用户会看到的那个事实。目标就是源文件时**连写都不写**（mtime 也不动）；
-    # 目标是别的路径时按源文的载体风格原样复制，同样不加标记 ——
-    # 复制品还是"作者的那份文件"，不该被认成工具产物。
-
-    # —— **说好 0 行改动，文本却变了 → 拒绝写**（2026-11-01，外部审查 P1-5）——
-    #
-    # 这是"逐字节保留"这条承诺的反向断言：补丁计数说"一行没改"，
-    # 产物却和源文不一样 —— 那就一定有一处**没人承认的改动**。
-    # 从前它会照常落盘（U+2028 / 换页符被 splitlines 换成真换行，
-    # 就是这么溜进来的）。现在当场拒绝，并说清是哪一类。
-    if (inc.used_patch and source_text is not None
-            and int(inc.changed_lines or 0) == 0
-            and inc.text != source_text):
-        from storygraph.story.generation_guard import GuardIssue
-        result.written = False
-        result.patch_note = (
-            '增量补丁报告"0 行改动"，但产物与原文**不一致** —— '
-            '这是"没有任何改动却改了文件"，拒绝写入（原文件没有被改动）。'
-            '请把这份 .rpy 连同 .xlsx 一起发给作者：这说明有一个'
-            '补丁计数没算进去的改动点。')
-        result.guard_issues = [GuardIssue(
-            code='SILENT_REWRITE', level='block',
-            message='增量补丁报告 0 行改动，产物却与源文不同：拒绝写入'
-                    '（多半是文件里含 U+2028 / 换页符这类不可见分隔符）')]
+    source_text = _read_source_text(source_path)
+    if _reject_silent_rewrite(result, inc, source_text):
         return result
 
-    if inc.used_patch and source_text is not None and inc.text == source_text:
-        from storygraph.story.source_style import detect as _detect_style
-        from storygraph.story.source_style import read_text as _read_style
-        from storygraph.story.paths import write_text_atomic
-        target = Path(rpy_path)
-        # ⚠ 零改动 ≠ 可以不问就覆盖别人：目标是**另一份东西**（别人的手写
-        # 文件 / 别的章节）时，照旧交给门禁（HANDWRITTEN_TARGET 由人拍板）。
-        overwritable = (target.resolve() == Path(source_path).resolve()
-                        or not target.exists())
-        if not overwritable:
-            try:
-                overwritable = _read_style(target)[0] == inc.text
-            except (OSError, UnicodeDecodeError):
-                overwritable = False
-        if overwritable:
-            if (target.resolve() != Path(source_path).resolve()
-                    and not target.exists()):
-                from storygraph.story.source_style import (
-                    SourceNotUtf8 as _NotUtf8)
-                try:
-                    write_text_atomic(
-                        target, _detect_style(source_path).apply(
-                            inc.text, source=source_path))
-                except _NotUtf8 as exc:
-                    result.written = False
-                    result.patch_note = str(exc)
-                    return result
-                except OSError:
-                    result.written = False
-                    return result
-            result.written = True
-            result.out_path = str(target)
-            result.untouched = True
-            return result
+    untouched = _write_untouched(result, rpy_path, source_path, inc,
+                                 source_text)
+    if untouched is not None:
+        return untouched
 
     if inc.used_patch:
         text = ensure_generator_marker(inc.text)
@@ -408,22 +316,7 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     else:
         text = result.rpy_text
 
-    _lint_heads = ()
-    if engine_lint:
-        from storygraph.pipeline.engine_lint import declared_heads_near
-        _lint_heads = declared_heads_near(rpy_path)
-    # **引擎 lint 的上下文根**（2026-10-19，修 P0-2）：产物常常写到临时
-    # 目录 / 别的路径，从 `rpy_path` 推不出项目根 —— 那就拿不到项目的
-    # `define` 骨架，`screens.rpy` 这类脚本会在 init 阶段 NameError 被误拒。
-    # 源 .rpy 一定在项目里，从它反推最可靠。
-    _lint_root = None
-    if engine_lint and source_path:
-        try:
-            from storygraph.story.paths import project_root_of as _root_of
-            _lint_root = _root_of(source_path)
-        except Exception as e:                 # noqa: BLE001 - 推不出来就用兜底
-            from storygraph.core.safeguard import swallow
-            swallow('pipeline.compile.lint_root', e)
+    _lint_heads, _lint_root = _lint_context(rpy_path, source_path, engine_lint)
     artifact = write_generation(text, rpy_path, force=force,
                                 merged_from_source=(source_path
                                                     if inc.used_patch
@@ -440,6 +333,158 @@ def write_compiled(result: CompileResult, rpy_path, *, beats=None,
     result.guard_issues = list(artifact.blocking)
     result.guard_warnings = list(artifact.warnings)
     return result
+
+
+def _write_passthrough(result: CompileResult, rpy_path, source_path, inc):
+    """
+    "这一章没有可编辑的拍" → 原文逐字节过去（含 BOM / 换行），不经过渲染。
+
+    目标是源文件自己时**连写都不写**（mtime 也不动）；是另一条路径时按源文
+    的载体风格复制一份。底稿不是 UTF-8 时报失败并说清（复制品会带着
+    U+FFFD 落地，那等于毁掉原文）。
+    """
+    from storygraph.story.source_style import detect as _detect_style
+    from storygraph.story.paths import write_text_atomic
+    target = Path(rpy_path)
+    src = Path(source_path)
+    if target.resolve() != src.resolve():
+        # 目标是另一条路径：原样复制（含 BOM / 换行），不经过任何渲染。
+        from storygraph.story.source_style import SourceNotUtf8 as _NotUtf8
+        try:
+            write_text_atomic(target, _detect_style(src).apply(
+                inc.text, source=src))
+        except _NotUtf8 as exc:
+            # 底稿不是 UTF-8：复制品会带着 U+FFFD 落地 —— 拒写并说清（P0-B）
+            result.written = False
+            result.patch_note = str(exc)
+            return result
+        except OSError:
+            result.written = False
+            return result
+    result.written = True
+    result.out_path = str(target)
+    result.patch_note = ('这一章没有可编辑的拍（纯定义 / 屏幕 / init 文件），'
+                         '原文逐字节保留')
+    return result
+
+
+def _read_source_text(source_path):
+    """按 `source_style` 读源文（剥 BOM、换行统一成 LF）；读失败 → None。"""
+    if not source_path:
+        return None
+    try:
+        # 读源走 `source_style`：剥 BOM、换行统一成 LF。门禁按行比
+        # （`opaque_loss`），带 BOM 的第一行会与产物对不上 → 误报
+        # "丢了顶层语句"（2026-10-18 审计 P0-1 的连带修）。
+        from storygraph.story.source_style import read_text as _read_src
+        return _read_src(source_path)[0]
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _reject_silent_rewrite(result: CompileResult, inc, source_text) -> bool:
+    """
+    说好 0 行改动、文本却变了 → 拒绝写（2026-11-01，外部审查 P1-5）。
+
+    这是"逐字节保留"这条承诺的反向断言：补丁计数说"一行没改"，产物却和
+    源文不一样 —— 那就一定有一处**没人承认的改动**。从前它会照常落盘
+    （U+2028 / 换页符被 splitlines 换成真换行，就是这么溜进来的）。
+    现在当场拒绝，并说清是哪一类。
+
+    返回 True = 已经拒写，调用方直接返回 `result`。
+    """
+    if not (inc.used_patch and source_text is not None
+            and int(inc.changed_lines or 0) == 0
+            and inc.text != source_text):
+        return False
+    from storygraph.story.generation_guard import GuardIssue
+    result.written = False
+    result.patch_note = (
+        '增量补丁报告"0 行改动"，但产物与原文**不一致** —— '
+        '这是"没有任何改动却改了文件"，拒绝写入（原文件没有被改动）。'
+        '请把这份 .rpy 连同 .xlsx 一起发给作者：这说明有一个'
+        '补丁计数没算进去的改动点。')
+    result.guard_issues = [GuardIssue(
+        code='SILENT_REWRITE', level='block',
+        message='增量补丁报告 0 行改动，产物却与源文不同：拒绝写入'
+                '（多半是文件里含 U+2028 / 换页符这类不可见分隔符）')]
+    return True
+
+
+def _write_untouched(result: CompileResult, rpy_path, source_path, inc,
+                     source_text):
+    """
+    **一个字节都没改 → 不写**（2026-10-19，修 P1-1）。
+
+    从前这条路照样要走 `ensure_generator_marker`：零改动往返被插进
+    2 行生成标记（`# 由剧本表自动生成…` + 空行），于是"表里一个字没改、
+    产物逐字节还原"这个最硬的判据永远差 2 行（实测 22/55 个文件全栽在这）。
+
+    判据是**内容相等**，不是"改动行数 == 0"：后者只是计数，前者才是
+    用户会看到的那个事实。目标就是源文件时**连写都不写**（mtime 也不动）；
+    目标是别的路径时按源文的载体风格原样复制，同样不加标记 ——
+    复制品还是"作者的那份文件"，不该被认成工具产物。
+
+    返回 None = 这一档不适用（照旧往下走门禁）。
+    """
+    if not (inc.used_patch and source_text is not None
+            and inc.text == source_text):
+        return None
+    from storygraph.story.source_style import detect as _detect_style
+    from storygraph.story.source_style import read_text as _read_style
+    from storygraph.story.paths import write_text_atomic
+    target = Path(rpy_path)
+    # ⚠ 零改动 ≠ 可以不问就覆盖别人：目标是**另一份东西**（别人的手写
+    # 文件 / 别的章节）时，照旧交给门禁（HANDWRITTEN_TARGET 由人拍板）。
+    overwritable = (target.resolve() == Path(source_path).resolve()
+                    or not target.exists())
+    if not overwritable:
+        try:
+            overwritable = _read_style(target)[0] == inc.text
+        except (OSError, UnicodeDecodeError):
+            overwritable = False
+    if not overwritable:
+        return None
+    if (target.resolve() != Path(source_path).resolve()
+            and not target.exists()):
+        from storygraph.story.source_style import (
+            SourceNotUtf8 as _NotUtf8)
+        try:
+            write_text_atomic(
+                target, _detect_style(source_path).apply(
+                    inc.text, source=source_path))
+        except _NotUtf8 as exc:
+            result.written = False
+            result.patch_note = str(exc)
+            return result
+        except OSError:
+            result.written = False
+            return result
+    result.written = True
+    result.out_path = str(target)
+    result.untouched = True
+    return result
+
+
+def _lint_context(rpy_path, source_path, engine_lint):
+    """引擎 lint 要的两样：本文件附近声明过的 head、以及项目根。"""
+    heads = ()
+    if engine_lint:
+        from storygraph.pipeline.engine_lint import declared_heads_near
+        heads = declared_heads_near(rpy_path)
+    # **引擎 lint 的上下文根**（2026-10-19，修 P0-2）：产物常常写到临时
+    # 目录 / 别的路径，从 `rpy_path` 推不出项目根 —— 那就拿不到项目的
+    # `define` 骨架，`screens.rpy` 这类脚本会在 init 阶段 NameError 被误拒。
+    # 源 .rpy 一定在项目里，从它反推最可靠。
+    root = None
+    if engine_lint and source_path:
+        try:
+            from storygraph.story.paths import project_root_of as _root_of
+            root = _root_of(source_path)
+        except Exception as e:                 # noqa: BLE001 - 推不出来就用兜底
+            from storygraph.core.safeguard import swallow
+            swallow('pipeline.compile.lint_root', e)
+    return heads, root
 
 
 def compile_beats(beats: list, registry=None, symbols=None,
