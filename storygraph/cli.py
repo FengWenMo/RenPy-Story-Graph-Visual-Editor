@@ -1132,6 +1132,13 @@ def _cmd_compile(args) -> int:
 # ==================================================================
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    命令行入口：顶层只有 `--debug`，其余全在子命令里。
+
+    子命令按"人会一起用的一组"分六段（2026-11-01）：只读体检 / 出产物 /
+    装完体检 / 协作 / 引擎事实 / 只读报告。**注册顺序是契约** ——
+    `--help` 里命令的排列顺序就是它，用例按顺序比，别随便挪段。
+    """
     p = argparse.ArgumentParser(
         prog='cli.py',
         description='RenPy 剧情编辑器命令行：体检 / 构建 / 表格 / 协作',
@@ -1140,16 +1147,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--debug', action='store_true',
                    help='打印被兜住的每一处错误（等价于 STORYGRAPH_DEBUG=1）')
     sub = p.add_subparsers(dest='cmd', required=True)
+    _add_inspect_commands(sub)
+    _add_build_commands(sub)
+    _add_check_commands(sub)
+    _add_collab_command(sub)
+    _add_engine_facts_command(sub)
+    _add_report_commands(sub)
+    return p
 
-    def add_build_args(sp):
-        sp.add_argument('project', help='项目根目录（含 game/）')
-        sp.add_argument('--asset-dir', default=None, help='资源表目录')
-        sp.add_argument('--out', default=None, help='产物目录')
-        sp.add_argument('--char-limit', type=int, default=120,
-                        help='单句台词字数上限，仅作提醒（W101）；设为 0 关闭该检查')
-        sp.add_argument('--no-strict', dest='strict', action='store_false',
-                        help='有错误也继续出产物')
 
+def _add_build_args(sp) -> None:
+    """`validate` / `build` 共用的那组参数（项目 / 资源表 / 产物 / 严格度）。"""
+    sp.add_argument('project', help='项目根目录（含 game/）')
+    sp.add_argument('--asset-dir', default=None, help='资源表目录')
+    sp.add_argument('--out', default=None, help='产物目录')
+    sp.add_argument('--char-limit', type=int, default=120,
+                    help='单句台词字数上限，仅作提醒（W101）；设为 0 关闭该检查')
+    sp.add_argument('--no-strict', dest='strict', action='store_false',
+                    help='有错误也继续出产物')
+
+
+def _add_inspect_commands(sub) -> None:
+    """只读体检 + 教规则（describe / diff3 / learn / validate）。
+
+    这四个都不写产物，`validate` 复用构建那套参数。"""
     sp = sub.add_parser('describe',
                         help='摊开"工具以为的自定义结构"（只读，可 diff）')
     sp.add_argument('project', nargs='?', default='.',
@@ -1182,12 +1203,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_cmd_learn)
 
     sp = sub.add_parser('validate', help='只做三级校验')
-    add_build_args(sp)
+    _add_build_args(sp)
     sp.add_argument('--json', action='store_true', help='输出 JSON（CI 用）')
     sp.set_defaults(func=_cmd_validate)
 
+
+def _add_build_commands(sub) -> None:
+    """真的出产物（build / table / compile）。"""
     sp = sub.add_parser('build', help='校验 + 导出产物')
-    add_build_args(sp)
+    _add_build_args(sp)
     sp.add_argument('--engine', default='renpy',
                     choices=['renpy', 'unity', 'godot', 'json', 'csv'],
                     help='目标引擎（默认 renpy）')
@@ -1235,6 +1259,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help='把编译结果作为新表并进原工作簿（不碰 Beats）')
     sp.set_defaults(func=_cmd_compile)
 
+
+def _add_check_commands(sub) -> None:
+    """读表之前 / 装完之后的体检（excel-check / selfcheck）。"""
     sp = sub.add_parser('excel-check',
                         help='读 Excel 之前的体检（zip 炸弹 / 宏 / 外链…）')
     sp.add_argument('path', help='工作簿，或一个目录（扫 *.xlsx / *.xlsm）')
@@ -1247,6 +1274,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help='跑一遍主链路自检（打包后排查用，不碰用户文件）')
     sp.set_defaults(func=_cmd_selfcheck)
 
+
+def _add_collab_command(sub) -> None:
+    """团队协作（Excel 前端 + SQLite 后端）。参数最多，单独一段。"""
     sp = sub.add_parser('collab', help='团队协作（Excel 前端 + SQLite 后端）')
     sp.add_argument('action',
                     choices=['init', 'pull', 'push', 'status', 'lock',
@@ -1277,6 +1307,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--force', action='store_true', help='忽略锁/冲突强制写入')
     sp.set_defaults(func=_cmd_collab)
 
+
+def _add_engine_facts_command(sub) -> None:
+    """引擎事实采集（E1/E3）—— 唯一需要 SDK 的命令。"""
     sp = sub.add_parser('engine-facts',
                         help='采集引擎事实（E1：lint + json-dump + 注入探针，一次运行）')
     sp.add_argument('--project', default='.', help='项目根目录（含 game/）')
@@ -1299,6 +1332,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help='语义/资源类问题（`is not an image` 等）也算失败（退 1）')
     sp.set_defaults(func=_cmd_engine_facts)
 
+
+def _add_report_commands(sub) -> None:
+    """只读报告（exits / continuity / shape）。"""
     sp = sub.add_parser(
         'exits',
         help='每章出口体检（只读）：会不会落空、能不能包控制流层')
@@ -1332,8 +1368,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help='把探测到的形状写进 storygraph.rules.json'
                          '（**读-改-写**，其它段原样保留；坏了就拒写）')
     sp.set_defaults(func=_cmd_shape)
-
-    return p
 
 
 def _cmd_exits(args) -> int:
