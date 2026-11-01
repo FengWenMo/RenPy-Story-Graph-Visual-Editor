@@ -147,9 +147,8 @@ KEEP = {
     '_boot': '启动时序（QTimer.singleShot 调它）',
     '_set_graph': '图的所有权在这里（换图要连带重置选中/历史）',
     '_build': '搭整个界面骨架',
-    '_build_graph_page': '第 0 页构建',
-    '_build_card_page': '第 1 页构建',
-    '_build_toolbars': '两组工具栏（随页切换）',
+    '_build_card_page': '第 1 页构建（暂时留：它调 10 个本模块的模块级函数）',
+    '_build_toolbars': '两组工具栏（暂时留：它调 2 个本模块的模块级函数）',
     '_set_page': '页切换：两组工具栏跟着显隐',
     '_focus_into_card_page': '页切换的配套',
     '_sync_action_states': '全局动作可用性（它读的东西最多）',
@@ -370,14 +369,20 @@ def main():
         chunks = sorted(((spans[m][0], spans[m][1]) for m in methods))
         body = ''.join(''.join(lines[a - 1:b]) for a, b in chunks)
 
-        # REQUIRES：实测"读了、但不是自己提供的、也不是 Qt 自己的"
+        # REQUIRES：实测"读了、但不是自己提供的、也不是 Qt 自己的"。
+        # 2026-11-01 起还要排掉"自己 `self.X = …` 造的"（`BuildPageMixin` 是
+        # 第一个造状态的 mixin：`self._canvas = GraphCanvas(...)`）—— 守卫
+        # `_read_deps()` 用的是同一条判据，两边必须一致，否则它就是假的。
         own = set(methods)
         need = set()
+        made = set()
         for m in methods:
-            loads, _stores = _self_attrs(by_name[m])
+            loads, stores = _self_attrs(by_name[m])
+            made |= stores
             for attr in loads:
                 if attr not in own and attr not in QT_MEMBERS:
                     need.add(attr)
+        need -= made
         requires = tuple(sorted(need))
 
         underline = '=' * len(f'storygraph.ui_qt.{dst}')

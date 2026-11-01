@@ -81,6 +81,7 @@ def main_window_source() -> Path:
 #: `MainWindowQt` 拆出去的 mixin 模块（与 `main_window.py` 的基类列表同源）。
 #: **加一块就加一行** —— 扫源码的测试靠它拿到"整个前端"。
 WINDOW_MIXIN_MODULES = (
+    'storygraph.ui_qt.window_graph_page',
     'storygraph.ui_qt.window_graph_ops',
     'storygraph.ui_qt.window_card',
     'storygraph.ui_qt.window_nodes',

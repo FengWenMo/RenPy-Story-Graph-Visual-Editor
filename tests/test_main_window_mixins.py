@@ -47,6 +47,7 @@ UI = PKG / 'ui_qt'
 #: `文件 → mixin 类名`。**加一块就加一行**（`_source_paths` 里也有一份，
 #: 见 `WINDOW_MIXIN_MODULES` —— 两处都改，这条守卫会提醒你）。
 BLOCKS = {
+    'window_graph_page': 'GraphPageMixin',
     'window_graph_ops': 'GraphOpsMixin',
     'window_card': 'CardPageMixin',
     'window_nodes': 'NodeEditMixin',
@@ -74,9 +75,8 @@ KEEP = {
     '_boot': '启动时序（QTimer 调它）',
     '_set_graph': '图的所有权',
     '_build': '搭界面骨架',
-    '_build_graph_page': '第 0 页构建',
-    '_build_card_page': '第 1 页构建',
-    '_build_toolbars': '两组工具栏',
+    '_build_card_page': '第 1 页构建（暂时留：它调 10 个本模块的模块级函数）',
+    '_build_toolbars': '两组工具栏（暂时留：它调 2 个本模块的模块级函数）',
     '_boot_restore_session': '启动时按记忆恢复（并在命令行给了参数时不恢复）',
     '_set_page': '页切换',
     '_focus_into_card_page': '页切换配套',
@@ -227,13 +227,23 @@ def _instance_attrs(*classes) -> set:
 
 def _read_deps(cls: ast.ClassDef) -> set:
     """
-    本 mixin **真正读**的 `self.X`，排掉自己提供的和 Qt 自己提供的。
+    本 mixin **真正读**的 `self.X`，排掉自己提供的、自己造的、和 Qt 提供的。
 
     排 Qt 那几个是必须的：`self.focusWidget()` / `self.rect()` 读的是
     Qt 的方法，不是宿主依赖 —— 不排掉就会报"宿主根本没有 `focusWidget`"。
+
+    排**自己 `self.X = …` 造的**（2026-11-01 加）：`BuildPageMixin` 是第一个
+    **造状态**的 mixin（`self._canvas = GraphCanvas(...)`），不是只消费宿主
+    状态的那种。它造的控件凭什么要宿主先有？不排掉这条，`REQUIRES` 会变成
+    "把界面上每个控件名抄一遍"，那就不再是依赖声明、而是一张没人看的清单。
+
+    这和 `_instance_attrs()` 的判据是**同一条**：`self.X = …` 算"有"。
+    两个方向用同一把尺子，`REQUIRES` 才有意义。真正该抓的漏项没丢 ——
+    **别人造的、我只读不造的**（如 `window_nav` 读 `_build_card_page` 里造的
+    `_inspector`）照样要声明。
     """
-    loads, _stores = _self_attrs(cls)
-    return loads - _members(cls) - QT_MEMBERS
+    loads, stores = _self_attrs(cls)
+    return loads - stores - _members(cls) - QT_MEMBERS
 
 
 def _host_members(exclude: str = '') -> set:
