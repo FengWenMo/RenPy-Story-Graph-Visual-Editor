@@ -25,10 +25,6 @@
    "lines": 148,
    "branches": 52
   },
-  "storygraph/app/session_table.py::apply": {
-   "lines": 282,
-   "branches": 71
-  },
   "storygraph/app/session_table.py::apply_node_variable_edits": {
    "lines": 214,
    "branches": 76
@@ -52,6 +48,10 @@
   "storygraph/app/tables.py::export_table": {
    "lines": 192,
    "branches": 24
+  },
+  "storygraph/assets/asset_registry.py::append_rows_to_table": {
+   "lines": 161,
+   "branches": 39
   },
   "storygraph/assets/asset_registry.py::describe_asset": {
    "lines": 87,
@@ -201,10 +201,6 @@
    "lines": 177,
    "branches": 18
   },
-  "storygraph/ui_qt/main_window.py::_build": {
-   "lines": 272,
-   "branches": 1
-  },
   "storygraph/ui_qt/main_window.py::_build_card_page": {
    "lines": 268,
    "branches": 2
@@ -240,6 +236,10 @@
   "storygraph/ui_qt/window_graph_ops.py::open_project_path": {
    "lines": 220,
    "branches": 57
+  },
+  "storygraph/ui_qt/window_nodes.py::edge_delete_plan": {
+   "lines": 106,
+   "branches": 40
   },
   "storygraph/ui_qt/window_nodes.py::edit_edge": {
    "lines": 101,
