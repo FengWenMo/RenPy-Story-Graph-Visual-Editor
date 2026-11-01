@@ -1057,9 +1057,15 @@ def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Place
     anchor 设成 0.5，`xpos` 只改 pos；`xoffset` 最后加。用 dict 会丢顺序，
     所以接口收 list。
     """
-    width, height = (tuple(screen) + (1920, 1080))[:2]
-    width, height = max(1.0, float(width)), max(1.0, float(height))
-    st = {
+    st, touched = _props_fold(props, env)
+    if not touched:
+        return None
+    return _placement_from_state(st, screen, source)
+
+
+def _blank_state() -> dict:
+    """一处都没写时的初值（`None` = 这一维没被提过，与"写成 0"不同）。"""
+    return {
         'xpos': None, 'xfrac': True, 'xanchor': None, 'xanchor_frac': True,
         'xoffset': 0.0, 'xkind': 'left',
         'ypos': None, 'yfrac': True, 'yanchor': None, 'yanchor_frac': True,
@@ -1069,11 +1075,27 @@ def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Place
         'fit': None, 'xsize': None, 'ysize': None,
         'xsize_frac': False, 'ysize_frac': False, 'nearest': False,
     }
+
+
+def _props_fold(props, env) -> tuple:
+    """把属性表逐条叠进状态字典：`(状态, 有没有写进过任何一条)`。
+
+    按**值的种类**分五族（顺序就是判据，别重排）：
+      ① 字符串/布尔（`fit` / `nearest`）—— 不走 `eval_number`；
+      ② 一次写两维（`xysize`）；
+      ③ 单维尺寸（`xsize` / `ysize`）；
+      ④ 位置族（`x/y` 的 align/pos/center/anchor/offset）；
+      ⑤ 视觉族（`zoom` / `alpha` / `rotate`）。
+    ②③④⑤ 都要先过 `eval_number`（算不出来的属性**跳过**，不算"写过"），
+    所以求值放在 ① 之后、③④⑤ 之前。
+    """
+    env = env or {}
+    st = _blank_state()
     touched = False
     for prop, raw in (props or ()):
         prop = str(prop)
+        # ① 字符串/布尔：不走 eval_number
         if prop in ('fit', 'nearest'):
-            # 字符串/布尔属性：不走 eval_number
             if prop == 'fit':
                 value = str(raw or '').strip().strip('"\'').lower()
                 st['fit'] = value or None
@@ -1082,87 +1104,116 @@ def _from_props_ordered(props, env: dict, screen, source: str) -> Optional[Place
                 st['nearest'] = text not in ('', '0', 'false', 'none')
             touched = True
             continue
+        # ② 一次写两维
         if prop == 'xysize':
             parts = str(raw or '').split(',', 1)
             if len(parts) != 2:
                 continue
             for key, expr in zip(('xsize', 'ysize'), parts):
-                number = eval_number(expr, env or {})
+                number = eval_number(expr, env)
                 if number is None:
                     continue
                 st[key] = number
                 st[key + '_frac'] = _frac(expr)
                 touched = True
             continue
-        number = eval_number(raw, env or {})
+        number = eval_number(raw, env)
         if number is None:
             continue
-        if prop == 'xsize':
-            st['xsize'] = number
-            st['xsize_frac'] = _frac(raw)
+        # ③ 单维尺寸
+        if prop in ('xsize', 'ysize'):
+            st[prop] = number
+            st[prop + '_frac'] = _frac(raw)
             touched = True
             continue
-        if prop == 'ysize':
-            st['ysize'] = number
-            st['ysize_frac'] = _frac(raw)
-            touched = True
+        # ④ 位置族（anchor 单独出现时不算"写过"，与旧实现一致）
+        hit = _apply_position(st, prop, number, raw)
+        if hit is not None:
+            touched = touched or hit
             continue
-        if prop == 'xalign':
-            st.update(xpos=number, xfrac=True, xanchor=number,
-                      xanchor_frac=True, xkind='align')
+        # ⑤ 视觉族
+        if _apply_visual(st, prop, number):
             touched = True
-        elif prop == 'xpos':
-            st.update(xpos=number, xfrac=_frac(raw),
-                      xkind='align' if _frac(raw) else 'left')
-            touched = True
-        elif prop == 'xcenter':
-            st.update(xpos=number, xfrac=_frac(raw), xanchor=0.5,
-                      xanchor_frac=True,
-                      xkind='align' if _frac(raw) else 'center')
-            touched = True
-        elif prop == 'xanchor':
-            st.update(xanchor=number, xanchor_frac=_frac(raw))
-        elif prop == 'xoffset':
-            st['xoffset'] = number
-            touched = True
-        elif prop == 'yalign':
-            st.update(ypos=number, yfrac=True, yanchor=number,
-                      yanchor_frac=True, ykind='align')
-            touched = True
-        elif prop == 'ypos':
-            st.update(ypos=number, yfrac=_frac(raw),
-                      ykind='align' if _frac(raw) else 'bottom')
-            touched = True
-        elif prop == 'ycenter':
-            st.update(ypos=number, yfrac=_frac(raw), yanchor=0.5,
-                      yanchor_frac=True, ykind='center')
-            touched = True
-        elif prop == 'yanchor':
-            st.update(yanchor=number, yanchor_frac=_frac(raw))
-        elif prop == 'yoffset':
-            st['yoffset'] = number
-            touched = True
-        elif prop == 'zoom':
-            if number > 0:
-                st['xz'] = st['yz'] = number
-                touched = True
-        elif prop == 'xzoom':
-            if number > 0:
-                st['xz'] = number
-                touched = True
-        elif prop == 'yzoom':
-            if number > 0:
-                st['yz'] = number
-                touched = True
-        elif prop == 'alpha':
-            st['alpha'] = max(0.0, min(1.0, number))
-            touched = True
-        elif prop == 'rotate':
-            st['rotate'] = number
-            touched = True
-    if not touched:
-        return None
+    return st, touched
 
+
+def _apply_position(st: dict, prop: str, number: float, raw) -> Optional[bool]:
+    """位置族一条属性 → 状态；返回"算不算写过"，`None` = 不认识这个属性名。
+
+    `xalign` 是 `xpos` + `xanchor` 两件事的简写，`xcenter` 是锚点 0.5 的那一种
+    —— 这三条**同源异名**，所以放在一张表里判，别各写一遍。
+    """
+    frac = _frac(raw)
+    if prop == 'xalign':
+        st.update(xpos=number, xfrac=True, xanchor=number,
+                  xanchor_frac=True, xkind='align')
+        return True
+    if prop == 'xpos':
+        st.update(xpos=number, xfrac=frac,
+                  xkind='align' if frac else 'left')
+        return True
+    if prop == 'xcenter':
+        st.update(xpos=number, xfrac=frac, xanchor=0.5,
+                  xanchor_frac=True,
+                  xkind='align' if frac else 'center')
+        return True
+    if prop == 'xanchor':
+        st.update(xanchor=number, xanchor_frac=frac)
+        return False
+    if prop == 'xoffset':
+        st['xoffset'] = number
+        return True
+    if prop == 'yalign':
+        st.update(ypos=number, yfrac=True, yanchor=number,
+                  yanchor_frac=True, ykind='align')
+        return True
+    if prop == 'ypos':
+        st.update(ypos=number, yfrac=frac,
+                  ykind='align' if frac else 'bottom')
+        return True
+    if prop == 'ycenter':
+        st.update(ypos=number, yfrac=frac, yanchor=0.5,
+                  yanchor_frac=True, ykind='center')
+        return True
+    if prop == 'yanchor':
+        st.update(yanchor=number, yanchor_frac=frac)
+        return False
+    if prop == 'yoffset':
+        st['yoffset'] = number
+        return True
+    return None
+
+
+def _apply_visual(st: dict, prop: str, number: float) -> bool:
+    """视觉族一条属性 → 状态；返回"算不算写过"（不认识的属性名 → False）。"""
+    if prop == 'zoom':
+        if number <= 0:
+            return False                # 0 倍缩放是坏定义，忽略
+        st['xz'] = st['yz'] = number
+        return True
+    if prop == 'xzoom':
+        if number <= 0:
+            return False
+        st['xz'] = number
+        return True
+    if prop == 'yzoom':
+        if number <= 0:
+            return False
+        st['yz'] = number
+        return True
+    if prop == 'alpha':
+        st['alpha'] = max(0.0, min(1.0, number))
+        return True
+    if prop == 'rotate':
+        st['rotate'] = number
+        return True
+    return False
+
+
+def _placement_from_state(st: dict, screen, source: str) -> Placement:
+    """状态字典 → `Placement`（含老字段 `x`/`y` 的归一化位置）。"""
+    width, height = (tuple(screen) + (1920, 1080))[:2]
+    width, height = max(1.0, float(width)), max(1.0, float(height))
     got = Placement(source=source)
     got.x_px = 0.0 if st['xpos'] is None else float(st['xpos'])
     got.xpos_frac = False if st['xpos'] is None else bool(st['xfrac'])

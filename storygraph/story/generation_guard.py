@@ -920,17 +920,38 @@ def generation_guard(text: str, out_path, *,
     out_path = Path(out_path) if out_path else None
     #: 哪些行在 `python:` 块体里（舞台/变换名扫描要跳过它们，见
     #: `_python_block_line_numbers` 的说明）。
-    _PY_BLOCK_LINES = _python_block_line_numbers(text)
+    py_block_lines = _python_block_line_numbers(text)
 
     # —— 0. 产物里的 Python 语法（P0，2026-10-05）——
     # 放在最前面：这是**唯一**一类"Ren'Py 连加载都加载不了"的错误，
     # 比图像名/标签重名更致命（那两类至少能进到解析阶段）。
-    issues.extend(_python_syntax_issues(
+    issues.extend(_guard_syntax_issues(text, beats))
+    # —— 1. 图像名 / transform 名的合法性 ——
+    issues.extend(_guard_image_ref_issues(text))
+    issues.extend(_guard_at_clause_issues(text, py_block_lines))
+    # —— 2. label 重名 ——
+    issues.extend(_guard_label_collisions(text, occupied_labels,
+                                          project_root, out_path))
+    # —— 3. TODO 未解决 ——
+    issues.extend(_guard_todo_issues(text))
+    # —— 3b. 工具不认识的块语句（M1，2026-10-07）——
+    issues.extend(_guard_unmanaged_issues(beats, unmanaged_blocks))
+    # —— 4. 产物位置：落在 Ren'Py 扫描目录里要提醒 ——
+    issues.extend(_guard_output_location(out_path, project_root))
+    return issues
+
+
+def _guard_syntax_issues(text: str, beats) -> list:
+    """规则 0：产物里的 Python 语法（`python:` 块体能不能编译）。"""
+    return _python_syntax_issues(
         text, declared={str(getattr(b, 'spec_name', '') or '').strip()
                         for b in (beats or ())
-                        if str(getattr(b, 'spec_name', '') or '').strip()}))
+                        if str(getattr(b, 'spec_name', '') or '').strip()})
 
-    # —— 1. 图像名 / transform 名的合法性 ——
+
+def _guard_image_ref_issues(text: str) -> list:
+    """规则 1a：`show`/`hide`/`scene` 的图像名必须是合法标识符。"""
+    issues = []
     for ref in _image_refs(text):
         if not _is_valid_ident(ref.image):
             issues.append(GuardIssue(
@@ -940,13 +961,21 @@ def generation_guard(text: str, out_path, *,
                 f'常见原因：把角色**显示名**当成了 image tag，'
                 f'或某个结构化列与「舞台（高级）」列写了同一拍的两份内容。',
                 ref.line_no))
-    # at 子句单独扫一遍：图像名与变换名是两个不同的合法性域。
-    # 注意 `at` 后面可以跟**多个**变换（`at left slide_in`），所以逐 token
-    # 判会误报——基准是"整个列表里至少有一个是合法标识符就算有人管"；
-    # 一个都没有（`at 左边`）才说明这是自由文本混进了代码。
+    return issues
+
+
+def _guard_at_clause_issues(text: str, py_block_lines) -> list:
+    """规则 1b：`at` 子句里的变换名。
+
+    图像名与变换名是两个不同的合法性域，所以单独扫一遍。
+    注意 `at` 后面可以跟**多个**变换（`at left slide_in`），所以逐 token
+    判会误报——基准是"整个列表里至少有一个是合法标识符就算有人管"；
+    一个都没有（`at 左边`）才说明这是自由文本混进了代码。
+    """
+    issues = []
     for i, line in enumerate(text.splitlines(), start=1):
         s = line.strip()
-        if not s or s.startswith('#') or i in _PY_BLOCK_LINES:
+        if not s or s.startswith('#') or i in py_block_lines:
             continue
         parts = line.split()
         if 'at' not in parts:
@@ -966,51 +995,65 @@ def generation_guard(text: str, out_path, *,
                 f'`at {" ".join(spec)}`：变换名没有一个合法'
                 f'（Ren\'Py 的 transform 名必须是 Python 标识符）。',
                 i))
+    return issues
 
-    # —— 2. label 重名 ——
-    if occupied_labels:
-        for name in re.findall(r'^label\s+([^\s:#]+)', text, re.M):
-            if name in occupied_labels:
-                # 说清**在哪个文件**（2026-10-26）：不带这句时，用户看到
-                # "`chapter2_1_2.rpy` 被拦下：`label chapter2_1` 已定义过"
-                # 的第一反应是"它明明叫 2_1_2" —— 消息里没有任何线索。
-                where = label_defined_in(name, project_root,
-                                         exclude={out_path} if out_path else ())
-                hint = (f'（就定义在 {_relative_hint(where, project_root)}）'
-                        if where else '')
-                issues.append(GuardIssue(
-                    'LABEL_COLLISION', 'block',
-                    f'`label {name}` 在项目其他 .rpy 里已经定义过{hint}。'
-                    f'Ren\'Py 把 game/ 下所有 .rpy 当同一个脚本，'
-                    f'重名 label 会让游戏直接起不来。'
-                    f'请把产物写到 build/ 目录，或改 label 名。'))
 
-    # —— 3. TODO 未解决 ——
+def _guard_label_collisions(text: str, occupied_labels, project_root,
+                            out_path) -> list:
+    """规则 2：要写的 label 在项目其他 .rpy 里已存在（游戏直接起不来）。"""
+    issues = []
+    if not occupied_labels:
+        return issues
+    for name in re.findall(r'^label\s+([^\s:#]+)', text, re.M):
+        if name in occupied_labels:
+            # 说清**在哪个文件**（2026-10-26）：不带这句时，用户看到
+            # "`chapter2_1_2.rpy` 被拦下：`label chapter2_1` 已定义过"
+            # 的第一反应是"它明明叫 2_1_2" —— 消息里没有任何线索。
+            where = label_defined_in(name, project_root,
+                                     exclude={out_path} if out_path else ())
+            hint = (f'（就定义在 {_relative_hint(where, project_root)}）'
+                    if where else '')
+            issues.append(GuardIssue(
+                'LABEL_COLLISION', 'block',
+                f'`label {name}` 在项目其他 .rpy 里已经定义过{hint}。'
+                f'Ren\'Py 把 game/ 下所有 .rpy 当同一个脚本，'
+                f'重名 label 会让游戏直接起不来。'
+                f'请把产物写到 build/ 目录，或改 label 名。'))
+    return issues
+
+
+def _guard_todo_issues(text: str) -> list:
+    """规则 3：生成结果里还留着"缺资源"的占位注释（`UNRESOLVED_TODO`）。"""
     todo_lines = [i for i, line in enumerate(text.splitlines(), start=1)
                   if '# TODO:' in line]
-    if todo_lines:
-        issues.append(GuardIssue(
-            'UNRESOLVED_TODO', 'warn',
-            f'生成结果里有 {len(todo_lines)} 条 `# TODO: 缺少资源`'
-            f'（第 {"、".join(str(n) for n in todo_lines[:8])}'
-            f'{"…" if len(todo_lines) > 8 else ""} 行）：'
-            f'这些语句没有被生成，脚本还不完整。'))
+    if not todo_lines:
+        return []
+    return [GuardIssue(
+        'UNRESOLVED_TODO', 'warn',
+        f'生成结果里有 {len(todo_lines)} 条 `# TODO: 缺少资源`'
+        f'（第 {"、".join(str(n) for n in todo_lines[:8])}'
+        f'{"…" if len(todo_lines) > 8 else ""} 行）：'
+        f'这些语句没有被生成，脚本还不完整。')]
 
-    # —— 3b. 工具不认识的块语句（M1，2026-10-07）——
-    #
-    # **这条是"不许静默"的落地**：内容已经被 `Beat.opaque` 逐字保住了，
-    # 所以它不再是一条"丢内容"的告警，而是一条"这几行不归我管"的告知。
-    # 它是 warn 而不是 block：工具不认识 != 脚本坏了 —— 拦下导出只会
-    # 把用户赶回"工具没用"那一步（D1 的选择是"透传 + 报警 + 报告"）。
-    # **三种"原样透传"必须分开说**，因为它们指向完全不同的动作：
-    #   · declared  → 项目声明过（T1）：**工具知道你是谁**，按通用行处理，
-    #                 这条不报警（它已经被管理了）；
-    #   · custom    → 真没声明（T3）：催用户/程序写下来；
-    #   · standard  → `while`/`for` 这类标准流程块（T2）：工具认识形状，
-    #                 该催的是**我们**把它建模。
-    # 混成一句"工具不认识"会把人引向错误的修法（真机实测逼出来的）。
-    # `declared` 这一桶**刻意不报警**（T1 已经被管理了）；它在这里只是
-    # 用来把"声明过的"从 custom 里摘出去，所以取出来不用。
+
+def _guard_unmanaged_issues(beats, unmanaged_blocks) -> list:
+    """规则 3b：工具不认识的块语句（M1，2026-10-07）。
+
+    **这条是"不许静默"的落地**：内容已经被 `Beat.opaque` 逐字保住了，
+    所以它不再是一条"丢内容"的告警，而是一条"这几行不归我管"的告知。
+    它是 warn 而不是 block：工具不认识 != 脚本坏了 —— 拦下导出只会
+    把用户赶回"工具没用"那一步（D1 的选择是"透传 + 报警 + 报告"）。
+    **三种"原样透传"必须分开说**，因为它们指向完全不同的动作：
+      · declared  → 项目声明过（T1）：**工具知道你是谁**，按通用行处理，
+                    这条不报警（它已经被管理了）；
+      · custom    → 真没声明（T3）：催用户/程序写下来；
+      · standard  → `while`/`for` 这类标准流程块（T2）：工具认识形状，
+                    该催的是**我们**把它建模。
+    混成一句"工具不认识"会把人引向错误的修法（真机实测逼出来的）。
+    `declared` 这一桶**刻意不报警**（T1 已经被管理了）；它在这里只是
+    用来把"声明过的"从 custom 里摘出去，所以取出来不用。
+    """
+    issues = []
     _declared, custom, standard = block_buckets(beats, unmanaged_blocks)
     if custom:
         shown = custom[:5]
@@ -1032,18 +1075,23 @@ def generation_guard(text: str, out_path, *,
             f'工具认识它的形状，但还没有把它结构化建模 —— '
             f'它们原样透传、内容不会丢。这一条是**给我们**的待办，'
             f'不是要你去改脚本。'))
-
-    # —— 4. 产物位置：落在 Ren'Py 扫描目录里要提醒 ——
-    # 只在"项目里真有 game/ 且产物确实写进它"时报：其余情况（临时目录、
-    # 单测的 tmp_path、非 Ren'Py 项目）一律不报，否则会变成噪音。
-    if inside_game_dir(out_path, project_root):
-        issues.append(GuardIssue(
-            'OUTSIDE_BUILD_DIR', 'warn',
-            f'产物写在 Ren\'Py 会扫描的 game/ 目录里（{out_path}）。'
-            f'建议写到 build/renpy/：放在 game/ 下的生成文件会和'
-            f'原文抢同一批 label。'))
-
     return issues
+
+
+def _guard_output_location(out_path, project_root) -> list:
+    """规则 4：产物落在 Ren'Py 扫描目录里要提醒。
+
+    只在"项目里真有 game/ 且产物确实写进它"时报：其余情况（临时目录、
+    单测的 tmp_path、非 Ren'Py 项目）一律不报，否则会变成噪音。
+    """
+    if not inside_game_dir(out_path, project_root):
+        return []
+    return [GuardIssue(
+        'OUTSIDE_BUILD_DIR', 'warn',
+        f'产物写在 Ren\'Py 会扫描的 game/ 目录里（{out_path}）。'
+        f'建议写到 build/renpy/：放在 game/ 下的生成文件会和'
+        f'原文抢同一批 label。')]
+
 
 @dataclass(frozen=True)
 class GeneratedArtifact:

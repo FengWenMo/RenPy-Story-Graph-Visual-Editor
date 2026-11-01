@@ -394,8 +394,32 @@ def scan_project(project_root) -> Scan:
         scan.notes.append('没有打开项目 —— 建不了表。')
         return scan
     texts = _script_texts(root)
+    known = _known_tags(texts)
+    char_dirs = _char_dirs(root)
+    for tag in char_dirs:
+        known.setdefault(tag, {'expr': [], 'outfit': []})
+    hits_all = []
+    for rel, text in texts.items():
+        hits_all.extend(scan_script_text(text, name=rel.rsplit('/', 1)[-1],
+                                         known=known))
+    chars = _character_tags(texts, known, char_dirs) | {h.char for h in hits_all}
+    known = {tag: groups for tag, groups in known.items() if tag in chars}
+
+    # -- 证据 ---------------------------------------------------------
+    hits = [h for h in hits_all if h.char in chars]
+
+    # -- 表情：哪份编号表和剧本对得上 ----------------------------------
+    _scan_expressions(scan, known, char_dirs, hits)
+    # -- 服装：字母从剧本注释里数 --------------------------------------
+    _scan_outfits(scan, known, hits)
+    scan.outfits.sort(key=lambda r: (r['char'], r['code'] or 'zz', r['attr']))
+    scan.expressions.sort(key=lambda r: (r['char'], _num_key(r['no'])))
+    return scan
+
+
+def _known_tags(texts: dict) -> dict:
+    """剧本里的 `layeredimage` 声明 → `{tag: {'expr': [...], 'outfit': [...]}}`。"""
     known = {}
-    char_dirs = {}
     for rel, text in texts.items():
         for tag, groups in parse_layeredimage(text).items():
             slot = known.setdefault(tag, {'expr': [], 'outfit': []})
@@ -403,6 +427,12 @@ def scan_project(project_root) -> Scan:
                 for name in groups[key]:
                     if name not in slot[key]:
                         slot[key].append(name)
+    return known
+
+
+def _char_dirs(root: Path) -> dict:
+    """`game/images/characters/<tag>/` → `{tag: 目录}`（读不了 = 没有角色文件夹）。"""
+    char_dirs = {}
     base = root / 'game' / 'images' / 'characters'
     if base.is_dir():
         try:
@@ -411,26 +441,25 @@ def scan_project(project_root) -> Scan:
                     char_dirs[child.name] = child
         except OSError as e:                   # 目录读不了 = 没有角色文件夹
             swallow('assets.sprite_codes.scan_project.char_dirs', e)
-    for tag in char_dirs:
-        known.setdefault(tag, {'expr': [], 'outfit': []})
-    # 只留下**真的是一张立绘**的那些 tag：`layeredimage lan_cc` 是预览图用的
-    # 变体，不是剧本里 show 的角色（真实项目里它会让表里凭空多出四行）。
-    # 判据：有 `images/characters/<tag>/` 文件夹，或者剧本里 `show` 过它。
+    return char_dirs
+
+
+def _character_tags(texts: dict, known: dict, char_dirs: dict) -> set:
+    """只留下**真的是一张立绘**的那些 tag。
+
+    `layeredimage lan_cc` 是预览图用的变体，不是剧本里 show 的角色（真实项目里
+    它会让表里凭空多出四行）。判据：有 `images/characters/<tag>/` 文件夹，
+    或者剧本里 `show` 过它。
+    """
     shown = set()
     for text in texts.values():
         shown |= set(re.findall(r'^\s*show\s+(\w+)', text, re.MULTILINE))
-    chars = set(char_dirs) | (shown & set(known))
-    hits_all = []
-    for rel, text in texts.items():
-        hits_all.extend(scan_script_text(text, name=rel.rsplit('/', 1)[-1],
-                                         known=known))
-    chars |= {h.char for h in hits_all}
-    known = {tag: groups for tag, groups in known.items() if tag in chars}
+    return set(char_dirs) | (shown & set(known))
 
-    # -- 证据 ---------------------------------------------------------
-    hits = [h for h in hits_all if h.char in chars]
 
-    # -- 表情：哪份编号表和剧本对得上 ----------------------------------
+def _scan_expressions(scan: Scan, known: dict, char_dirs: dict,
+                      hits: list) -> None:
+    """表情：按剧本注释给每份编号表投票，选出对得最多的那份，逐号落表。"""
     for tag in sorted(known):
         folder = char_dirs.get(tag)
         if folder is None:
@@ -487,7 +516,9 @@ def scan_project(project_root) -> Scan:
             scan.notes.append(f'{tag}：剧本注释写着第 {number} 号是 {attr}，'
                               '但编号表里没有这个号（已补一行，请核对）')
 
-    # -- 服装：字母从剧本注释里数 --------------------------------------
+
+def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
+    """服装：字母从剧本注释里数（票数弱的留空，只出现一次的只提醒）。"""
     votes = defaultdict(Counter)
     for hit in hits:
         if hit.outfit:
@@ -533,9 +564,6 @@ def scan_project(project_root) -> Scan:
                 continue
             scan.outfits.append({'char': tag, 'code': '', 'attr': attr,
                                  'label': '剧本里没出现过这个服装的代号'})
-    scan.outfits.sort(key=lambda r: (r['char'], r['code'] or 'zz', r['attr']))
-    scan.expressions.sort(key=lambda r: (r['char'], _num_key(r['no'])))
-    return scan
 
 
 def _script_texts(root: Path) -> dict:

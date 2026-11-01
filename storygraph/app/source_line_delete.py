@@ -156,26 +156,11 @@ def plan_source_line_delete(project_root, file_path, line_id,
         plan.blocking.append(plan.reason)
         return plan
 
-    from storygraph.app.editor import EditorSession
-    try:
-        session = EditorSession(project_root=project_root)
-        session.load(path)
-    except Exception as exc:                      # noqa: BLE001 - 读不了就拒绝
-        plan.reason = f'读不了这一章：{exc}'
-        plan.blocking.append(plan.reason)
+    found = _load_the_beat(project_root, path, plan)
+    if found is None:
         return plan
+    session, _idx, beat = found
 
-    idx = next((i for i, b in enumerate(session.beats or ())
-                if str(getattr(b, 'line_id', '') or '') == plan.line_id), None)
-    if idx is None:
-        plan.reason = ('这一章在导入之后改过，找不到边对应的那一拍了；'
-                       '先重新加载这一章，再删这条线')
-        plan.blocking.append(plan.reason)
-        return plan
-
-    beat = session.beats[idx]
-    plan.index = int(idx)
-    plan.label = str(getattr(beat, 'label', '') or plan.label)
     raw = str(getattr(beat, 'raw', '') or '').strip()
     if not (raw.startswith('jump ') or raw.startswith('call ')):
         plan.reason = f'这一拍不是 jump/call（{raw or "空拍"}），不能当源边删'
@@ -196,72 +181,16 @@ def plan_source_line_delete(project_root, file_path, line_id,
         plan.blocking.append(plan.reason)
         return plan
 
-    from storygraph.story.source_style import read_text
-    text, _style = read_text(path)
-    lines = split_lines(text)
-    if end > len(lines):
-        plan.reason = '拍上的行号已经超出文件范围；先重新加载这一章'
-        plan.blocking.append(plan.reason)
-        return plan
-    segment = lines[start - 1:end]
-    head = segment[0].strip() if segment else ''
-    if not (head.startswith('jump ') or head.startswith('call ')):
-        plan.reason = '拍上的行号和文件内容对不上；先重新加载这一章'
+    text, lines, why = _read_the_jump_lines(path, start, end)
+    if why:
+        plan.reason = why
         plan.blocking.append(plan.reason)
         return plan
 
     # —— 块体里只有这一行时，删"行"会把块删成空的（`"选项":` 下面没有语句，
     #    Ren'Py 直接报语法错）。所以要先判断能不能**连整块一起删**，
     #    不能删整块就往空块体里补 `pass`。
-    del_start, del_end = start, end          # 1 基、闭区间
-    block = _enclosing_header(lines, start - 1)
-    if block is not None:
-        b_last = _block_span(lines, block)[1]
-        others = [i for i in _body_indices(lines, block, b_last)
-                  if not (start - 1 <= i <= end - 1)]
-        cascade_ok = True
-        # `if` 后面紧跟 `elif` / `else` 时不能删整个 if 块 —— 那条链会失去
-        # 头（`elif` 单独存在是语法错）。这种情况只删 jump 并补 pass。
-        head_text = lines[block].strip()
-        if head_text.startswith('if '):
-            nxt = next((lines[i] for i in range(b_last + 1, len(lines))
-                        if _is_content(lines[i])), '')
-            if nxt.strip().startswith(('elif ', 'else:')) \
-                    and _indent_of(nxt) == _indent_of(lines[block]):
-                cascade_ok = False
-        if not others and cascade_ok:
-            # 块里只有这条 jump：往上收，`menu:` 只剩这一个选项时也一起删。
-            c_start, c_end = block, b_last
-            for _ in range(4):
-                parent = _parent_header(lines, c_start)
-                if parent is None:
-                    break
-                p_last = _block_span(lines, parent)[1]
-                p_others = [i for i in _body_indices(lines, parent, p_last)
-                            if not (c_start <= i <= c_end)]
-                if p_others:
-                    break
-                c_start, c_end = parent, p_last
-            # 整块删完这一章一拍不剩 → 不许（label 不能是空的）：
-            # 退回"只删这一行 + pass"，至少产物能解析。
-            remaining = []
-            for b in session.beats:
-                if str(getattr(b, 'label', '') or '') != plan.label:
-                    continue
-                first = int(getattr(b, 'src_first', 0) or 0)
-                if c_start + 1 <= first <= c_end + 1:
-                    continue
-                remaining.append(b)
-            if remaining:
-                del_start, del_end = c_start + 1, c_end + 1
-                plan.cascade = True
-                plan.block_start, plan.block_end = c_start + 1, c_end + 1
-            else:
-                plan.pass_line = (lines[start - 1][
-                    :_indent_of(lines[start - 1])] + 'pass')
-        elif not others:
-            plan.pass_line = (lines[start - 1][
-                :_indent_of(lines[start - 1])] + 'pass')
+    del_start, del_end = _plan_block_removal(lines, start, end, session, plan)
 
     removed = lines[del_start - 1:del_end]
     plan.start, plan.end = del_start, del_end
@@ -285,6 +214,119 @@ def plan_source_line_delete(project_root, file_path, line_id,
         plan.reason = (f'删掉 {Path(path).name} 第 {start} 行'
                        f'（{plan.text.strip()}）')
     return plan
+
+
+def _load_the_beat(project_root, path: Path, plan: SourceLinePlan):
+    """读这一章、按 `line_id` 找到那一拍，顺手把拍号/标签记进计划。
+
+    返回 `(session, idx, beat)`；读不了 / 找不到时把理由写进 `plan` 并返回
+    `None`（**不抛** —— 这是"能不能删"的预演，失败是正常答案）。
+    """
+    from storygraph.app.editor import EditorSession
+    try:
+        session = EditorSession(project_root=project_root)
+        session.load(path)
+    except Exception as exc:                      # noqa: BLE001 - 读不了就拒绝
+        plan.reason = f'读不了这一章：{exc}'
+        plan.blocking.append(plan.reason)
+        return None
+
+    idx = next((i for i, b in enumerate(session.beats or ())
+                if str(getattr(b, 'line_id', '') or '') == plan.line_id), None)
+    if idx is None:
+        plan.reason = ('这一章在导入之后改过，找不到边对应的那一拍了；'
+                       '先重新加载这一章，再删这条线')
+        plan.blocking.append(plan.reason)
+        return None
+
+    beat = session.beats[idx]
+    plan.index = int(idx)
+    plan.label = str(getattr(beat, 'label', '') or plan.label)
+    return session, idx, beat
+
+
+def _read_the_jump_lines(path: Path, start: int, end: int):
+    """按拍上的物理行号取出那几行，并**复核**它们真的是 `jump`/`call`。
+
+    返回 `(全文, 行列表, 拒绝理由)`；成功时理由为空串。
+
+    复核这一步不能省：拍上的行号是解析时的**真迹**，文件被外部改过就对不上
+    了，照旧删会删掉别人刚写的行。两种对不上要分开说 —— "超出文件范围"是
+    文件短了，"内容和类型不符"是文件换过了，修法不同。
+    """
+    from storygraph.story.source_style import read_text
+    text, _style = read_text(path)
+    lines = split_lines(text)
+    if end > len(lines):
+        return None, None, '拍上的行号已经超出文件范围；先重新加载这一章'
+    segment = lines[start - 1:end]
+    head = segment[0].strip() if segment else ''
+    if not (head.startswith('jump ') or head.startswith('call ')):
+        return None, None, '拍上的行号和文件内容对不上；先重新加载这一章'
+    return text, lines, ''
+
+
+def _plan_block_removal(lines, start: int, end: int, session,
+                        plan: SourceLinePlan) -> tuple:
+    """块体里只剩这一行时怎么办：能连整块删就连块，否则补 `pass`。
+
+    返回实际要删的 `(起, 止)`（1 基、闭区间）；副作用是往 `plan` 上写
+    `cascade` / `block_start` / `block_end` / `pass_line`。
+
+    三条拒绝/退路都在注释里：`if` 链后接 `elif`/`else` 时不能删头、往上收最多
+    四层（别把整个 label 收没）、收完一拍不剩就退回"删这一行 + pass"。
+    """
+    del_start, del_end = start, end          # 1 基、闭区间
+    block = _enclosing_header(lines, start - 1)
+    if block is None:
+        return del_start, del_end
+    b_last = _block_span(lines, block)[1]
+    others = [i for i in _body_indices(lines, block, b_last)
+              if not (start - 1 <= i <= end - 1)]
+    cascade_ok = True
+    # `if` 后面紧跟 `elif` / `else` 时不能删整个 if 块 —— 那条链会失去
+    # 头（`elif` 单独存在是语法错）。这种情况只删 jump 并补 pass。
+    head_text = lines[block].strip()
+    if head_text.startswith('if '):
+        nxt = next((lines[i] for i in range(b_last + 1, len(lines))
+                    if _is_content(lines[i])), '')
+        if nxt.strip().startswith(('elif ', 'else:')) \
+                and _indent_of(nxt) == _indent_of(lines[block]):
+            cascade_ok = False
+    if not others and cascade_ok:
+        # 块里只有这条 jump：往上收，`menu:` 只剩这一个选项时也一起删。
+        c_start, c_end = block, b_last
+        for _ in range(4):
+            parent = _parent_header(lines, c_start)
+            if parent is None:
+                break
+            p_last = _block_span(lines, parent)[1]
+            p_others = [i for i in _body_indices(lines, parent, p_last)
+                        if not (c_start <= i <= c_end)]
+            if p_others:
+                break
+            c_start, c_end = parent, p_last
+        # 整块删完这一章一拍不剩 → 不许（label 不能是空的）：
+        # 退回"只删这一行 + pass"，至少产物能解析。
+        remaining = []
+        for b in session.beats:
+            if str(getattr(b, 'label', '') or '') != plan.label:
+                continue
+            first = int(getattr(b, 'src_first', 0) or 0)
+            if c_start + 1 <= first <= c_end + 1:
+                continue
+            remaining.append(b)
+        if remaining:
+            del_start, del_end = c_start + 1, c_end + 1
+            plan.cascade = True
+            plan.block_start, plan.block_end = c_start + 1, c_end + 1
+        else:
+            plan.pass_line = (lines[start - 1][
+                :_indent_of(lines[start - 1])] + 'pass')
+    elif not others:
+        plan.pass_line = (lines[start - 1][
+            :_indent_of(lines[start - 1])] + 'pass')
+    return del_start, del_end
 
 
 def apply_source_line_delete(plan: SourceLinePlan) -> dict:

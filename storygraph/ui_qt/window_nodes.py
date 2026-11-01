@@ -314,6 +314,116 @@ def _beat_position_plan(beats, idx: int, block_heads=()) -> dict:
             'reason': f'接在第 {n} 拍之后'}
 
 
+def _wire_landing_control(host, empty, from_id, to_id, etype):
+    """P2：章末落到编排层。没有控制流文件时返回 None（照旧走源文件）。
+
+    编排层存在但这一段接不上时返回 `control_blocked` —— **不许**悄悄退回
+    源文件，那会让 `X_control` 的 `call X` 之后再跳一次目标章。
+    """
+    control_fn = getattr(host, '_control_route_plan', None)
+    if not callable(control_fn) or not getattr(host, '_project_root', None):
+        return None
+    ctrl = control_fn(from_id, to_id, etype)
+    if ctrl is None:
+        return None
+    base = {**empty, 'etype': etype, 'target': ctrl.target_label,
+            'control_plan': ctrl, 'structure': 'control',
+            'position': 'control_end', 'position_line_id': ''}
+    if ctrl.ok:
+        return {**base, 'ok': True, 'kind': 'control',
+                'reason': ctrl.reason,
+                'last_raw': ctrl.old_route}
+    init = getattr(ctrl, 'init', None)
+    if init is not None and getattr(init, 'ok', False):
+        return {**base, 'kind': 'control_init',
+                'reason': ctrl.reason,
+                'last_raw': ctrl.old_route}
+    return {**base, 'kind': 'control_blocked',
+            'reason': ctrl.reason or '编排层这一段接不上'}
+
+
+def _wire_landing_at_beat(base, session, info, beats, idxs, target,
+                          position_line_id) -> dict:
+    """落点选的是「某一拍」：那一拍还在不在、能不能接在它后面。
+
+    判据全在 `_beat_position_plan()`（下拉框也用同一份），这里只做
+    "选中的那一拍还找不找得到"的两条前置拒绝。
+    """
+    if not position_line_id:
+        return {**base, 'kind': 'bad_position', 'target': target,
+                'position': 'beat',
+                'reason': '选了「某一拍」，但没说是哪一拍 —— 重新选一个位置'}
+    idx = next((i for i in idxs
+                if str(getattr(beats[i], 'line_id', '') or '')
+                == position_line_id), None)
+    if idx is None:
+        return {**base, 'kind': 'stale_position', 'target': target,
+                'position': 'beat',
+                'position_line_id': position_line_id,
+                'reason': ('这条线选的那一拍已经不在这一章了'
+                           '（可能刚删过 / 改过）—— 重新选一个位置')}
+    sub = _beat_position_plan(beats, idx,
+                              (_session_block_heads(session)
+                               if info.get('loaded')
+                               else _block_heads_of(beats)))
+    return {**base, **sub, 'target': target, 'position': 'beat',
+            'position_line_id': position_line_id,
+            'structure': 'source',
+            'index': int(idx) if sub.get('ok') else -1,
+            'last_raw': str(getattr(beats[idx], 'raw', '') or '')}
+
+
+def _wire_landing_chapter_end(base, beats, idxs, label, target) -> dict:
+    """落点选的是「章末」：以 `label` 那一章的最后一拍为准，判它能不能接。
+
+    三条拒绝（块体收尾 / 已有去向 / 选项收尾）+ 两条放行（`return` 前、
+    末尾）。「已有去向」之所以不是直接改接，是因为一条章末只能有一个去向，
+    再写一条就变成两个"去哪"。
+    """
+    last = beats[idxs[-1]]
+    raw = str(getattr(last, 'raw', '') or '').strip()
+    kind_text = str(getattr(last, 'kind', '') or '')
+    nest = str(getattr(last, 'nest_path', '') or '')
+
+    # ⚠ **在块体里**（选项体 / if 分支）就归卡片（E3）。
+    # 实测：章末 menu 的最后一拍是 `menu:1>B` 里的那个 `return` ——
+    # 只看 `raw == 'return'` 会判成"插在它前面"，那一插就插进选项体了。
+    if nest:
+        return {**base, 'kind': 'ambiguous', 'target': target,
+                'last_raw': raw or kind_text,
+                'reason': f'这一章以块体收尾（{nest}）—— 分支归卡片，'
+                          '图上不插；也可以改选前面某一拍'}
+
+    # 已有明确去向 → 位置有歧义（E2：要问）
+    if raw.startswith('jump ') or raw.startswith('call '):
+        return {**base, 'kind': 'ambiguous', 'target': target,
+                'last_raw': raw,
+                'reason': f'这一章末尾已经有「{raw}」—— 再插一条就有两个'
+                          '"去哪"了；改选前面某一拍，或用卡片'}
+    from storygraph.core.statement import StatementKind
+    if kind_text in (StatementKind.MENU, StatementKind.MENU_OPTION):
+        return {**base, 'kind': 'ambiguous', 'target': target,
+                'last_raw': raw or kind_text,
+                'reason': '这一章以选项收尾 —— 分支归卡片，图上不插；'
+                          '也可以改选前面某一拍'}
+
+    # `return` → 插在它**前面**（before=True）。⚠ 不能用 `idxs[-2]`
+    # + after=True：倒数第二拍可能还在 `if`/`menu` 体里，那样插出来的
+    # jump 只在条件成立时执行（2026-10-24 实测）。用 return 自己当参考拍，
+    # 由树决定"与 return 同容器"，块体才会被整个跳过。
+    if raw == 'return' or raw.startswith('return'):
+        return {**base, 'ok': True, 'kind': 'chapter_end',
+                'index': idxs[-1], 'after': False, 'target': target,
+                'structure': 'source', 'last_raw': raw,
+                'reason': f'插在「{label}」的 return 之前'}
+
+    # 台词 / 舞台收尾 → 接在末尾（但那是"落空"的章，照样能接）
+    return {**base, 'ok': True, 'kind': 'chapter_end',
+            'index': idxs[-1], 'after': True, 'target': target,
+            'structure': 'source', 'last_raw': raw or kind_text,
+            'reason': f'接在「{label}」末尾'}
+
+
 class NodeEditMixin:
     """
     模块 ↔ 卡片、画布上的增删连边与右键菜单。
@@ -710,25 +820,10 @@ class NodeEditMixin:
 
         # P2：章末优先走编排层。没有控制流文件时 `_control_route_plan` 返回
         # None，下面照旧按章节源文件算。
-        control_fn = getattr(self, '_control_route_plan', None)
-        if position == 'chapter_end' and callable(control_fn) \
-                and getattr(self, '_project_root', None):
-            ctrl = control_fn(from_id, to_id, etype)
-            if ctrl is not None:
-                base = {**empty, 'etype': etype, 'target': ctrl.target_label,
-                        'control_plan': ctrl, 'structure': 'control',
-                        'position': 'control_end', 'position_line_id': ''}
-                if ctrl.ok:
-                    return {**base, 'ok': True, 'kind': 'control',
-                            'reason': ctrl.reason,
-                            'last_raw': ctrl.old_route}
-                init = getattr(ctrl, 'init', None)
-                if init is not None and getattr(init, 'ok', False):
-                    return {**base, 'kind': 'control_init',
-                            'reason': ctrl.reason,
-                            'last_raw': ctrl.old_route}
-                return {**base, 'kind': 'control_blocked',
-                        'reason': ctrl.reason or '编排层这一段接不上'}
+        if position == 'chapter_end':
+            landed = _wire_landing_control(self, empty, from_id, to_id, etype)
+            if landed is not None:
+                return landed
 
         if session is None:
             return {**empty, 'reason': '还没有载入章节'}
@@ -753,71 +848,10 @@ class NodeEditMixin:
                                '否则这条线只能画成草图')}
 
         if position == 'beat':
-            if not position_line_id:
-                return {**base, 'kind': 'bad_position', 'target': target,
-                        'position': 'beat',
-                        'reason': '选了「某一拍」，但没说是哪一拍 —— 重新选一个位置'}
-            idx = next((i for i in idxs
-                        if str(getattr(beats[i], 'line_id', '') or '')
-                        == position_line_id), None)
-            if idx is None:
-                return {**base, 'kind': 'stale_position', 'target': target,
-                        'position': 'beat',
-                        'position_line_id': position_line_id,
-                        'reason': ('这条线选的那一拍已经不在这一章了'
-                                   '（可能刚删过 / 改过）—— 重新选一个位置')}
-            sub = _beat_position_plan(beats, idx,
-                                      (_session_block_heads(session)
-                                       if info.get('loaded')
-                                       else _block_heads_of(beats)))
-            return {**base, **sub, 'target': target, 'position': 'beat',
-                    'position_line_id': position_line_id,
-                    'structure': 'source',
-                    'index': int(idx) if sub.get('ok') else -1,
-                    'last_raw': str(getattr(beats[idx], 'raw', '') or '')}
+            return _wire_landing_at_beat(base, session, info, beats, idxs,
+                                         target, position_line_id)
+        return _wire_landing_chapter_end(base, beats, idxs, label, target)
 
-        last = beats[idxs[-1]]
-        raw = str(getattr(last, 'raw', '') or '').strip()
-        kind_text = str(getattr(last, 'kind', '') or '')
-        nest = str(getattr(last, 'nest_path', '') or '')
-
-        # ⚠ **在块体里**（选项体 / if 分支）就归卡片（E3）。
-        # 实测：章末 menu 的最后一拍是 `menu:1>B` 里的那个 `return` ——
-        # 只看 `raw == 'return'` 会判成"插在它前面"，那一插就插进选项体了。
-        if nest:
-            return {**base, 'kind': 'ambiguous', 'target': target,
-                    'last_raw': raw or kind_text,
-                    'reason': f'这一章以块体收尾（{nest}）—— 分支归卡片，'
-                              '图上不插；也可以改选前面某一拍'}
-
-        # 已有明确去向 → 位置有歧义（E2：要问）
-        if raw.startswith('jump ') or raw.startswith('call '):
-            return {**base, 'kind': 'ambiguous', 'target': target,
-                    'last_raw': raw,
-                    'reason': f'这一章末尾已经有「{raw}」—— 再插一条就有两个'
-                              '"去哪"了；改选前面某一拍，或用卡片'}
-        from storygraph.core.statement import StatementKind
-        if kind_text in (StatementKind.MENU, StatementKind.MENU_OPTION):
-            return {**base, 'kind': 'ambiguous', 'target': target,
-                    'last_raw': raw or kind_text,
-                    'reason': '这一章以选项收尾 —— 分支归卡片，图上不插；'
-                              '也可以改选前面某一拍'}
-
-        # `return` → 插在它**前面**（before=True）。⚠ 不能用 `idxs[-2]`
-        # + after=True：倒数第二拍可能还在 `if`/`menu` 体里，那样插出来的
-        # jump 只在条件成立时执行（2026-10-24 实测）。用 return 自己当参考拍，
-        # 由树决定"与 return 同容器"，块体才会被整个跳过。
-        if raw == 'return' or raw.startswith('return'):
-            return {**base, 'ok': True, 'kind': 'chapter_end',
-                    'index': idxs[-1], 'after': False, 'target': target,
-                    'structure': 'source', 'last_raw': raw,
-                    'reason': f'插在「{label}」的 return 之前'}
-
-        # 台词 / 舞台收尾 → 接在末尾（但那是"落空"的章，照样能接）
-        return {**base, 'ok': True, 'kind': 'chapter_end',
-                'index': idxs[-1], 'after': True, 'target': target,
-                'structure': 'source', 'last_raw': raw or kind_text,
-                'reason': f'接在「{label}」末尾'}
 
     def _apply_control_route(self, plan) -> dict:
         """

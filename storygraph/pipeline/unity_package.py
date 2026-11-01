@@ -395,14 +395,7 @@ def verify_package(path_or_bytes) -> list:
         return [f'读不出包：{type(e).__name__}: {e}']
 
     try:
-        members = []
-        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
-            for member in tar:
-                if not member.isfile():
-                    continue
-                fh = tar.extractfile(member)
-                members.append((member.name,
-                                fh.read() if fh is not None else b''))
+        members = _tar_members(data)
     except Exception as e:                # noqa: BLE001 - 坏包是**预期输入**
         # 自检的输入本来就可能是截断的下载文件 / 手工改坏的包 ——
         # 那不是本函数的异常，而是要报告的"第 0 条问题"。
@@ -411,6 +404,40 @@ def verify_package(path_or_bytes) -> list:
     if not members:
         return ['包里没有任何资产条目（空包）']
 
+    groups = _group_verified_members(members, problems)
+
+    pathname_map: dict = {}               # pathname -> guid（查重复）
+    folder_flags: dict = {}               # pathname -> 是否目录
+    for guid in sorted(groups):
+        _check_asset(guid, groups[guid], problems, pathname_map, folder_flags)
+
+    _check_path_conflicts(pathname_map, folder_flags, problems)
+    return problems
+
+
+def _tar_members(data: bytes) -> list:
+    """把包解成 `[(tar 内条目名, 字节)]`（只收普通文件）。
+
+    坏包（截断 / 不是 gzip）让 `tarfile` / `gzip` 的异常冒出去 ——
+    调用方 `verify_package()` 把它翻译成"第 0 条问题"。
+    """
+    members = []
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            fh = tar.extractfile(member)
+            members.append((member.name,
+                            fh.read() if fh is not None else b''))
+    return members
+
+
+def _group_verified_members(members: list, problems: list) -> dict:
+    """按 GUID 归并条目：`{guid: {部分名: 字节}}`。
+
+    条目形状不对（不是 `<guid>/<part>`、部分是未知名字）的**不进 groups**，
+    直接记一条问题 —— 后面按 GUID 的检查看不见它们。
+    """
     groups: dict = {}
     for name, blob in members:
         parts = _member_parts(name)
@@ -430,96 +457,106 @@ def verify_package(path_or_bytes) -> list:
             problems.append(f'GUID {guid} 下 `{part}` 出现了不止一次')
             continue
         bucket[part] = blob
+    return groups
 
-    pathname_map: dict = {}               # pathname -> guid（查重复）
-    folder_flags: dict = {}               # pathname -> 是否目录
-    for guid in sorted(groups):
-        parts = groups[guid]
-        if not _GUID_RE.match(guid):
+
+def _check_asset(guid: str, parts: dict, problems: list,
+                 pathname_map: dict, folder_flags: dict) -> None:
+    """检查一个 GUID 目录，把问题追加进 `problems`。
+
+    顺手填两张表给 `_check_path_conflicts()`：pathname 去重表、目录标志。
+    """
+    if not _GUID_RE.match(guid):
+        problems.append(
+            f'`{guid}`：GUID 目录名不是 32 位小写十六进制')
+
+    path = ''
+    raw_path = parts.get(_PATHNAME_PART)
+    if raw_path is not None:
+        try:
+            path = raw_path.decode('utf-8')
+        except UnicodeDecodeError as e:
+            problems.append(f'GUID {guid}：pathname 不是 UTF-8：{e}')
+        if raw_path is not None and not path:
+            problems.append(f'GUID {guid}：pathname 为空')
+    label = f'{path or guid}（GUID {guid}）'
+
+    missing = [part for part in _PARTS if part not in parts]
+    if missing:
+        problems.append(
+            f'{label}：缺少 {" / ".join(missing)}（一个资产必须三项齐全）')
+
+    if path:
+        if not path.startswith('Assets/'):
             problems.append(
-                f'`{guid}`：GUID 目录名不是 32 位小写十六进制')
-
-        path = ''
-        raw_path = parts.get(_PATHNAME_PART)
-        if raw_path is not None:
-            try:
-                path = raw_path.decode('utf-8')
-            except UnicodeDecodeError as e:
-                problems.append(f'GUID {guid}：pathname 不是 UTF-8：{e}')
-            if raw_path is not None and not path:
-                problems.append(f'GUID {guid}：pathname 为空')
-        label = f'{path or guid}（GUID {guid}）'
-
-        missing = [part for part in _PARTS if part not in parts]
-        if missing:
+                f'{label}：pathname 必须以 `Assets/` 开头'
+                '（Unity 只导入 Assets 下的资产）')
+        if '\\' in path:
             problems.append(
-                f'{label}：缺少 {" / ".join(missing)}（一个资产必须三项齐全）')
-
-        if path:
-            if not path.startswith('Assets/'):
-                problems.append(
-                    f'{label}：pathname 必须以 `Assets/` 开头'
-                    '（Unity 只导入 Assets 下的资产）')
-            if '\\' in path:
-                problems.append(
-                    f'{label}：pathname 用了反斜杠，Unity 只认正斜杠')
-            if any(seg in ('', '.', '..') for seg in path.split('/')):
-                problems.append(
-                    f'{label}：pathname 含空段 / `.` / `..`（路径不干净）')
-            if path in pathname_map:
-                problems.append(
-                    f'{label}：pathname 重复（另一个 GUID 是 '
-                    f'{pathname_map[path]}）—— Unity 会二选一，另一份静默丢')
-            else:
-                pathname_map[path] = guid
-            if path.lower().endswith('.meta'):
-                problems.append(
-                    f'{label}：资产路径本身以 `.meta` 结尾，会与 Unity '
-                    '自动生成的 .meta 同名冲突')
+                f'{label}：pathname 用了反斜杠，Unity 只认正斜杠')
+        if any(seg in ('', '.', '..') for seg in path.split('/')):
+            problems.append(
+                f'{label}：pathname 含空段 / `.` / `..`（路径不干净）')
+        if path in pathname_map:
+            problems.append(
+                f'{label}：pathname 重复（另一个 GUID 是 '
+                f'{pathname_map[path]}）—— Unity 会二选一，另一份静默丢')
         else:
-            folder_flags[path] = False
+            pathname_map[path] = guid
+        if path.lower().endswith('.meta'):
+            problems.append(
+                f'{label}：资产路径本身以 `.meta` 结尾，会与 Unity '
+                '自动生成的 .meta 同名冲突')
+    else:
+        folder_flags[path] = False
 
-        meta = parts.get(_META_PART)
-        is_folder = False
-        if meta is not None:
-            try:
-                meta_text = meta.decode('utf-8')
-            except UnicodeDecodeError as e:
-                problems.append(f'{label}：asset.meta 不是 UTF-8：{e}')
-                meta_text = ''
-            if meta_text:
-                if 'fileFormatVersion:' not in meta_text:
-                    problems.append(
-                        f'{label}：asset.meta 缺少 `fileFormatVersion`')
-                found = _META_GUID_RE.search(meta_text)
-                if found is None:
-                    problems.append(f'{label}：asset.meta 缺少 `guid:`')
-                elif found.group(1).lower() != guid.lower():
-                    problems.append(
-                        f'{label}：asset.meta 的 guid（{found.group(1)}）'
-                        f'与目录名（{guid}）不一致 —— Unity 会把它当成'
-                        '另一份资产')
-                is_folder = 'folderAsset: yes' in meta_text
-                if is_folder:
-                    expected = 'DefaultImporter:'
-                    why = '目录资产'
-                elif path.lower().endswith('.cs'):
-                    expected = 'MonoImporter:'
-                    why = 'C# 脚本'
-                else:
-                    expected = 'TextScriptImporter:'
-                    why = '.json / .md 等文本资产'
-                if expected not in meta_text:
-                    problems.append(
-                        f'{label}：asset.meta 应使用 {expected}'
-                        f'（{why}的最小 importer）')
-                if is_folder and parts.get(_ASSET_PART):
-                    problems.append(f'{label}：目录资产的 asset 应为空字节')
-        if path:
-            folder_flags[path] = is_folder
+    meta = parts.get(_META_PART)
+    is_folder = False
+    if meta is not None:
+        try:
+            meta_text = meta.decode('utf-8')
+        except UnicodeDecodeError as e:
+            problems.append(f'{label}：asset.meta 不是 UTF-8：{e}')
+            meta_text = ''
+        if meta_text:
+            if 'fileFormatVersion:' not in meta_text:
+                problems.append(
+                    f'{label}：asset.meta 缺少 `fileFormatVersion`')
+            found = _META_GUID_RE.search(meta_text)
+            if found is None:
+                problems.append(f'{label}：asset.meta 缺少 `guid:`')
+            elif found.group(1).lower() != guid.lower():
+                problems.append(
+                    f'{label}：asset.meta 的 guid（{found.group(1)}）'
+                    f'与目录名（{guid}）不一致 —— Unity 会把它当成'
+                    '另一份资产')
+            is_folder = 'folderAsset: yes' in meta_text
+            if is_folder:
+                expected = 'DefaultImporter:'
+                why = '目录资产'
+            elif path.lower().endswith('.cs'):
+                expected = 'MonoImporter:'
+                why = 'C# 脚本'
+            else:
+                expected = 'TextScriptImporter:'
+                why = '.json / .md 等文本资产'
+            if expected not in meta_text:
+                problems.append(
+                    f'{label}：asset.meta 应使用 {expected}'
+                    f'（{why}的最小 importer）')
+            if is_folder and parts.get(_ASSET_PART):
+                problems.append(f'{label}：目录资产的 asset 应为空字节')
+    if path:
+        folder_flags[path] = is_folder
 
-    # 同一路径不能既是文件、又是别的资产的父目录（Unity 无法同时建文件和
-    # 文件夹）。`build_package` 不会制造这种情况；手工拼包时很容易。
+
+def _check_path_conflicts(pathname_map: dict, folder_flags: dict,
+                          problems: list) -> None:
+    """同一路径不能既是文件、又是别的资产的父目录。
+
+    Unity 无法同时建文件和文件夹。`build_package` 不会制造这种情况；
+    手工拼包时很容易。
+    """
     for path in pathname_map:
         segments = path.split('/')
         for i in range(2, len(segments)):
@@ -530,8 +567,6 @@ def verify_package(path_or_bytes) -> list:
                     f'{parent}（GUID {parent_guid}）：既是文件资产，'
                     f'又被 {path} 当作目录使用 —— 同一个路径不能既是'
                     '文件又是文件夹')
-
-    return problems
 
 
 # ==================================================================

@@ -1836,53 +1836,130 @@ def plan_scene_change(beats, index: int, image: str, *, at: str = '',
 
     返回 `SceneEdit`；`reason` 非空 = 拒绝（不写）。
     """
+    error, ctx = _check_scene_target(index, beats, image, at, project_root,
+                                     transform_index, screen)
+    if error is not None:
+        return error
+    idx, beats, beat, image, tag, at = ctx
+
+    # —— 同一拍里的背景 show：简单子句去掉，复杂子句拒绝 ——
+    error, stripped = _scene_strip_show(beat, tag, idx, image)
+    if error is not None:
+        return error
+    show_before, show_after, removed = stripped
+
+    # —— 这一拍开始前台上有什么（确认框里"会清掉 N 个立绘"的唯一来源）——
+    before_state = stage_before(beats, idx)
+    if before_state is None:
+        return SceneEdit(reason='算不出这一拍台上还有什么（舞台快照推导失败），'
+                               '不猜 —— 换景没做',
+                         beat_index=idx, _beat=beat, image=image)
+    reason, same_bg = _scene_noop_reason(beat, image, at, before_state, removed)
+    if reason:
+        return SceneEdit(reason=reason, beat_index=idx, _beat=beat, image=image)
+    cleared_sprites = tuple(before_state['sprites'])
+    cleared_layers = tuple(before_state['layers'])
+
+    scene_before = str(getattr(beat, 'scene', '') or '').strip()
+    scene_at_before = str(getattr(beat, 'scene_at', '') or '').strip()
+    added = not scene_before
+
+    # —— 顺序列：本来没有 scene 的拍要补一个排在最前面的令牌 ——
+    order_field, order_after = _scene_token_insert(beat)
+    order_before = str(getattr(beat, order_field, '') or '') if order_field else ''
+
+    edit = SceneEdit(
+        target='scene', field='scene', transform=at, added=added,
+        image=image, scene_before=scene_before,
+        scene_at_before=scene_at_before, scene_at_after=at,
+        show_before=show_before, show_after=show_after,
+        removed_show='; '.join(removed),
+        order_field=order_field, order_before=order_before,
+        order_after=order_after,
+        cleared_sprites=cleared_sprites, cleared_layers=cleared_layers,
+        same_image=bool(same_bg and added),
+        beat_index=idx, requested_index=idx, _beat=beat,
+        before=(f'{scene_before} at {scene_at_before}'.strip()),
+        after=(f'{image} at {at}'.strip()),
+        affects=_affected_range(beats, idx, kind='scene', tag=tag))
+    _fill_scene_diff(edit, beat, image, at, show_after,
+                     order_field, order_after)
+    return edit
+
+
+def _check_scene_target(index, beats, image, at, project_root,
+                        transform_index, screen):
+    """换景入参的形状与存在性检查（索引 / 图名 / 变换）。
+
+    返回 `(拒绝单, None)` 或 `(None, ctx)`；`ctx` 是
+    `(idx, beats, beat, image, tag, at)`，后面每一步都用它。
+    """
     try:
         idx = int(index)
     except (TypeError, ValueError):
-        return SceneEdit(reason='拍索引不合法', beat_index=-1)
+        return SceneEdit(reason='拍索引不合法', beat_index=-1), None
     beats = list(beats or ())
     if idx < 0 or idx >= len(beats):
-        return SceneEdit(reason='没有这一拍（索引越界）', beat_index=idx)
+        return SceneEdit(reason='没有这一拍（索引越界）', beat_index=idx), None
     beat = beats[idx]
     image = ' '.join(str(image or '').split())
     if not image:
-        return SceneEdit(reason='没有选新的背景图', beat_index=idx, _beat=beat)
+        return SceneEdit(reason='没有选新的背景图', beat_index=idx,
+                         _beat=beat), None
     if '@' in image:
         return SceneEdit(reason='背景图名里不能带 `@`（变换请用下拉里那一项）',
-                         beat_index=idx, _beat=beat, image=image)
+                         beat_index=idx, _beat=beat, image=image), None
     tag = image.split()[0]
     at = str(at or '').strip()
     if '@' in at:
         return SceneEdit(reason=f'变换名「{at}」里不能带 `@`', beat_index=idx,
-                         _beat=beat, image=image)
+                         _beat=beat, image=image), None
     if not _scene_image_known(image, project_root):
         return SceneEdit(
             reason=(f'项目里找不到这张图「{image}」——写进脚本引擎会报 '
                     f'NameError；请先在资源表/`image` 声明里登记它'),
-            beat_index=idx, _beat=beat, image=image)
+            beat_index=idx, _beat=beat, image=image), None
+    if at:
+        error = _check_scene_transform(at, idx, beat, image, project_root,
+                                       transform_index, screen)
+        if error is not None:
+            return error, None
+    return None, (idx, beats, beat, image, tag, at)
 
+
+def _check_scene_transform(at, idx, beat, image, project_root,
+                           transform_index, screen):
+    """只允许引用项目**已有**、且能解析出几何的 transform（不替人新建）。"""
     from storygraph.story.atl import (DEFAULT_SCREEN, placement_of,
                                       scan_transforms)
     screen_pair = tuple(screen) if screen else DEFAULT_SCREEN
-    if at:
-        if transform_index is None and project_root:
-            transform_index = scan_transforms(project_root)
-        transform_index = transform_index or {}
-        if at not in transform_index:
-            return SceneEdit(
-                reason=f'项目里没有 transform「{at}」（只允许引用项目已有的）',
-                beat_index=idx, _beat=beat, image=image)
-        try:
-            place = placement_of(at, transform_index, screen=screen_pair)
-        except Exception as e:                 # noqa: BLE001 - 坏定义拒绝
-            swallow('app.stage.plan_scene_change.place', e)
-            place = None
-        if place is None or not str(getattr(place, 'source', '')).startswith(
-                ('atl', 'builtin', 'word', 'letter', 'center')):
-            return SceneEdit(reason=f'transform「{at}」解析不出几何，拒绝写',
-                             beat_index=idx, _beat=beat, image=image)
+    if transform_index is None and project_root:
+        transform_index = scan_transforms(project_root)
+    transform_index = transform_index or {}
+    if at not in transform_index:
+        return SceneEdit(
+            reason=f'项目里没有 transform「{at}」（只允许引用项目已有的）',
+            beat_index=idx, _beat=beat, image=image)
+    try:
+        place = placement_of(at, transform_index, screen=screen_pair)
+    except Exception as e:                 # noqa: BLE001 - 坏定义拒绝
+        swallow('app.stage.plan_scene_change.place', e)
+        place = None
+    if place is None or not str(getattr(place, 'source', '')).startswith(
+            ('atl', 'builtin', 'word', 'letter', 'center')):
+        return SceneEdit(reason=f'transform「{at}」解析不出几何，拒绝写',
+                         beat_index=idx, _beat=beat, image=image)
+    return None
 
-    # —— 同一拍里的背景 show：简单子句去掉，复杂子句拒绝 ——
+
+def _scene_strip_show(beat, tag, idx, image):
+    """这一拍里那条会盖掉新背景的 `show`：简单子句去掉，复杂子句拒绝。
+
+    留着的话 `show` 排在 `scene` 后面，产物里的背景是**旧那张**。
+
+    返回 `(拒绝单, None)` 或 `(None, (show_before, show_after, removed))`；
+    `removed` 是原样的字符串列表（判空不能看拼好的文本，`; ` 会骗人）。
+    """
     from storygraph.core.vocabulary import split_stage_items
     show_before = str(getattr(beat, 'show', '') or '')
     parts = list(split_stage_items(show_before)) if show_before else []
@@ -1905,54 +1982,36 @@ def plan_scene_change(beats, index: int, image: str, *, at: str = '',
             reason=(f'这一拍还有一条背景 show 是复杂子句（`{blocked}`，'
                     '含 behind/with/expression）——换景会和它打架，'
                     '先去「高级区 · Stage」把那条改掉再换景'),
-            beat_index=idx, _beat=beat, image=image)
+            beat_index=idx, _beat=beat, image=image), None
     # 没去掉任何一条时**逐字保留原文**（别把用户写的 `;` 间距顺手重排）
     show_after = '; '.join(keep) if removed else show_before
+    return None, (show_before, show_after, removed)
 
-    # —— 这一拍开始前台上有什么（确认框里"会清掉 N 个立绘"的唯一来源）——
-    before_state = stage_before(beats, idx)
-    if before_state is None:
-        return SceneEdit(reason='算不出这一拍台上还有什么（舞台快照推导失败），'
-                               '不猜 —— 换景没做',
-                         beat_index=idx, _beat=beat, image=image)
-    cleared_sprites = tuple(before_state['sprites'])
-    cleared_layers = tuple(before_state['layers'])
 
+def _scene_noop_reason(beat, image, at, before_state, removed) -> tuple:
+    """这条 `scene` 会不会什么都没改：返回 `(拒绝理由, 台上已是这张图)`。
+
+    理由为空串 = 该写。三条判据都是"写了也白写"或"写了会出错"，区别只在
+    提示语 —— 所以要分开说，别合成一句"没变"。
+    """
     scene_before = str(getattr(beat, 'scene', '') or '').strip()
     scene_at_before = str(getattr(beat, 'scene_at', '') or '').strip()
     if '@' in scene_before:
-        return SceneEdit(reason='这一拍的背景是紧凑写法 `图@变换`，'
-                               '请先在卡片里拆开再换景',
-                         beat_index=idx, _beat=beat, image=image)
-    added = not scene_before
-    if not added and scene_before == image and scene_at_before == at:
-        return SceneEdit(reason='这一拍已经是这一景了（图和变换都没变）',
-                         beat_index=idx, _beat=beat, image=image)
+        return ('这一拍的背景是紧凑写法 `图@变换`，请先在卡片里拆开再换景',
+                False)
+    if scene_before and scene_before == image and scene_at_before == at:
+        return '这一拍已经是这一景了（图和变换都没变）', False
     same_bg = str(before_state['scene']).strip() == image
-    if (added and same_bg and not cleared_sprites and not cleared_layers
+    if (not scene_before and same_bg
+            and not before_state['sprites'] and not before_state['layers']
             and not removed):
-        return SceneEdit(reason='台上没人、背景也没变 —— 这条 scene 什么都不会改',
-                         beat_index=idx, _beat=beat, image=image)
+        return '台上没人、背景也没变 —— 这条 scene 什么都不会改', same_bg
+    return '', same_bg
 
-    # —— 顺序列：本来没有 scene 的拍要补一个排在最前面的令牌 ——
-    order_field, order_after = _scene_token_insert(beat)
-    order_before = str(getattr(beat, order_field, '') or '') if order_field else ''
 
-    edit = SceneEdit(
-        target='scene', field='scene', transform=at, added=added,
-        image=image, scene_before=scene_before,
-        scene_at_before=scene_at_before, scene_at_after=at,
-        show_before=show_before, show_after=show_after,
-        removed_show='; '.join(removed),
-        order_field=order_field, order_before=order_before,
-        order_after=order_after,
-        cleared_sprites=cleared_sprites, cleared_layers=cleared_layers,
-        same_image=bool(same_bg and added),
-        beat_index=idx, requested_index=idx, _beat=beat,
-        before=(f'{scene_before} at {scene_at_before}'.strip()),
-        after=(f'{image} at {at}'.strip()),
-        affects=_affected_range(beats, idx, kind='scene', tag=tag))
-    # 生成产物 diff（确认框的真相：不是"字段变了"，是"脚本会变成什么"）
+def _fill_scene_diff(edit, beat, image, at, show_after,
+                     order_field, order_after) -> None:
+    """生成产物 diff（确认框的真相：不是"字段变了"，是"脚本会变成什么"）。"""
     try:
         import copy
         from storygraph.story.beat_render import render_beat_to_rpy
@@ -1971,7 +2030,6 @@ def plan_scene_change(beats, index: int, image: str, *, at: str = '',
     except Exception as e:                     # noqa: BLE001 - diff 拿不到不影响计划
         swallow('app.stage.plan_scene_change.diff', e)
         edit.shows_before_scene = _shows_precede_scene(beat)
-    return edit
 
 
 def _shows_precede_scene(beat) -> bool:

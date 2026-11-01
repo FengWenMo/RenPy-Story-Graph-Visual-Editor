@@ -2021,131 +2021,174 @@ def append_rows_to_table(asset_dir, table_key: str, rows: list,
     asset_dir = Path(asset_dir)
     asset_dir.mkdir(parents=True, exist_ok=True)
     path = asset_dir / fname
-    added = updated = 0
     try:
         if path.exists():
-            wb = excel_safety.open_workbook(path)
-            ws = wb.active
-            headers = _sheet_headers(ws)
-            if not headers or all(h is None for h in headers):
-                headers = list(rows[0].keys())
-                ws.append(headers)
-            # ⚠ **老表没有这一列时，得先补列**（2026-10-10 实测踩到）：
-            # `_update_row_cells` 遇到"表头里没有的键"是**静默跳过**的，
-            # 于是"给真人项目加别名"整个动作**什么都没发生**（真机 `characters.xlsx`
-            # 是 2026-10-10 之前建的，只有 5 列：ID/Name/Color/ImageTag/Notes，
-            # 没有「别名」）。
-            #
-            # ⚠ 补列的规矩是**只追加在末尾、绝不挪动已有列**：
-            #   ① 挪列会连带数据一起挪（我第一版只改表头 → 整行错位，`Notes`
-            #      的备注跑到别列去）；
-            #   ② 就算连数据一起挪也是坏主意：表里的列位置是**别人写好的**，
-            #      按"模板顺序重排"等于替用户改表 —— 判据当场红
-            #      （`test_it_never_overwrites_a_hand_edited_row` 按列号找回那一行）。
-            #   ③ 也用不着 `insert_cols` 那种重家伙：追加到末尾最安全。
-            # ⚠ **内部键（下划线开头）永远不写进表**（2026-10-19 修）：
-            # 扫描行现在带 `_dims` / `_attrs` / `_dim_groups` 等运行期字段，
-            # 从前这里"看到新键就补列"，于是 `_dims` 被当表头、值
-            # `[{'group':…}]` 被写进单元格 → openpyxl 直接抛
-            # "Cannot convert ... to Excel"，整次补登失败。
-            for key in rows[0].keys():
-                if not key or str(key).startswith('_'):
-                    continue
-                if key not in headers:
-                    headers.append(key)
-                    # ⚠ 这里写的是**英文键**（`Aliases`），与 `write_dict_to_excel`
-                    # 的中文表头不一致 —— 但 `test_char_decisions` 已经把
-                    # "补列写英文"钉成契约（那次修的是"补列要生效"，不是措辞）。
-                    # 改措辞是另一件事（会同时牵动老表的读回），留作 P2。
-                    ws.cell(row=1, column=len(headers), value=key)
-            row_of = {}
-            # ⚠ **认不出身份列就先补一列**（2026-10-25 第六轮）：
-            # 用户把「编号」列改名/删掉之后，`headers` 里没有 `ID`，而下面
-            # 写行是 `[row.get(h) for h in headers]` —— 于是**每一行都没有
-            # ID**：判重全失效、每次扫描都把这批行再追加一遍（表越扫越长）。
-            # 补一列比"拒绝写入"更安全（用户只是改了个表头，不该把同步卡死），
-            # 而且补完之后 `_canon_field('编号')` 就能重新认出身份列。
-            if 'ID' not in headers:
-                headers.append('ID')
-                ws.cell(row=1, column=len(headers),
-                        value=ASSET_FIELD_LABELS.get('ID', 'ID'))
-            id_col = headers.index('ID') + 1
-            for r in range(2, ws.max_row + 1):
-                v = ws.cell(row=r, column=id_col).value
-                if v:
-                    row_of.setdefault(str(v), r)
-            # 表里已经登记过的**路径**（`skip_paths` 之外再从表里现读一遍，
-            # 免得调用方漏传）
-            have_paths = set(skip_paths or ())
-            if 'Path' in headers:
-                pcol = headers.index('Path') + 1
-                for r in range(2, ws.max_row + 1):
-                    v = ws.cell(row=r, column=pcol).value
-                    if v:
-                        have_paths.add(norm_asset_path(v))
-            for row in rows:
-                aid = str(row.get('ID') or '')
-                if not aid:
-                    continue
-                rp = norm_asset_path(row.get('Path'))
-                if rp and rp in have_paths:
-                    continue                    # 这个文件已经在表里了（一一对应）
-                if aid in row_of:
-                    # 已存在的行：默认跳过；给了 update_keys 才更新白名单列
-                    if update_keys:
-                        updated += _update_row_cells(
-                            ws, row_of[aid], headers, row, update_keys)
-                        continue
-                    if not rp:
-                        continue            # 没写 Path 的行：没有"另一个文件"
-                    # ⚠ **ID 撞车 ≠ 同一个文件**（2026-10-05 实测）：
-                    # `game/cc_preview/lan/angry.png` 生成的 ID 可能是
-                    # `lan_angry`，而表里已有一行 `lan_angry` 指
-                    # `game/images/characters/lan/angry.png`。老代码在这里
-                    # **静默丢掉**这个文件 —— 于是它永远登记不上，体检里
-                    # 永远显示"未登记 N 条"（用户看到的就是这个）。
-                    # 同一个文件在前面已经按 Path 判重跳过了，走到这里
-                    # 一定是**另一个文件** → 另起一个 ID 收下它。
-                    base = aid
-                    k = 2
-                    while f'{base}_{k}' in row_of:
-                        k += 1
-                    aid = f'{base}_{k}'
-                    row = dict(row, ID=aid)
-                row_of[aid] = _asset_append_row(
-                    ws, [row.get(h, '') if h else '' for h in headers])
-                if rp:
-                    have_paths.add(rp)
-                added += 1
-            if added or updated:
-                if backup:
-                    _backup_table(path)
-                save_workbook_atomic(wb, path, backup=False)
+            added, updated = _append_into_existing(path, rows, update_keys,
+                                                  skip_paths, backup)
         else:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            headers = [k for k in rows[0].keys()
-                       if k and not str(k).startswith('_')]
-            # **新建表也写中文表头**（2026-10-25，P1：与 `write_dict_to_excel`
-            # 统一）。从前这里写英文键，于是"哪条路径建的表"决定了表头是中是英 ——
-            # 同一批表里两种表头，用户看着像坏了；更糟的是**判定口径**也得
-            # 两套（中文标签比 vs 英文键比），这正是本轮三个坑的共同根因。
-            # 值仍按**规范键**取（`headers` 是英文键，`row.get(h)` 不变）。
-            ws.append([ASSET_FIELD_LABELS.get(h, h) for h in headers])
-            seen = set(skip_paths or ())
-            for row in rows:
-                rp = norm_asset_path(row.get('Path'))
-                if rp and rp in seen:
-                    continue
-                _asset_append_row(ws, [row.get(h, '') for h in headers])
-                if rp:
-                    seen.add(rp)
-                added += 1
-            save_workbook_atomic(wb, path)
+            added = _append_into_new_table(path, rows, skip_paths)
+            updated = 0
     except Exception as e:                      # noqa: BLE001 - 写不进去就报 0 行
         swallow('assets.asset_registry.append_rows.write_table', e)
         return 0
     return added + updated
+
+
+def _append_into_existing(path, rows, update_keys, skip_paths,
+                          backup) -> tuple:
+    """表已存在：补列 → 收集已有 ID/Path → 逐行追加或更新白名单列。
+
+    返回 `(新增行数, 被改写的单元格数)`；一个都没变就**不落盘**（也不备份）。
+    """
+    wb = excel_safety.open_workbook(path)
+    ws = wb.active
+    headers = _ensure_headers(ws, rows)
+    row_of = _row_index(ws, headers)
+    have_paths = _known_paths(ws, headers, skip_paths)
+    added, updated = _write_rows(ws, headers, rows, row_of, have_paths,
+                                 update_keys)
+    if added or updated:
+        if backup:
+            _backup_table(path)
+        save_workbook_atomic(wb, path, backup=False)
+    return added, updated
+
+
+def _ensure_headers(ws, rows) -> list:
+    """读出表头，把缺的列补上，返回**补完**的英文键表头（顺序即列序）。"""
+    headers = _sheet_headers(ws)
+    if not headers or all(h is None for h in headers):
+        headers = list(rows[0].keys())
+        ws.append(headers)
+    # ⚠ **老表没有这一列时，得先补列**（2026-10-10 实测踩到）：
+    # `_update_row_cells` 遇到"表头里没有的键"是**静默跳过**的，
+    # 于是"给真人项目加别名"整个动作**什么都没发生**（真机 `characters.xlsx`
+    # 是 2026-10-10 之前建的，只有 5 列：ID/Name/Color/ImageTag/Notes，
+    # 没有「别名」）。
+    #
+    # ⚠ 补列的规矩是**只追加在末尾、绝不挪动已有列**：
+    #   ① 挪列会连带数据一起挪（我第一版只改表头 → 整行错位，`Notes`
+    #      的备注跑到别列去）；
+    #   ② 就算连数据一起挪也是坏主意：表里的列位置是**别人写好的**，
+    #      按"模板顺序重排"等于替用户改表 —— 判据当场红
+    #      （`test_it_never_overwrites_a_hand_edited_row` 按列号找回那一行）。
+    #   ③ 也用不着 `insert_cols` 那种重家伙：追加到末尾最安全。
+    # ⚠ **内部键（下划线开头）永远不写进表**（2026-10-19 修）：
+    # 扫描行现在带 `_dims` / `_attrs` / `_dim_groups` 等运行期字段，
+    # 从前这里"看到新键就补列"，于是 `_dims` 被当表头、值
+    # `[{'group':…}]` 被写进单元格 → openpyxl 直接抛
+    # "Cannot convert ... to Excel"，整次补登失败。
+    for key in rows[0].keys():
+        if not key or str(key).startswith('_'):
+            continue
+        if key not in headers:
+            headers.append(key)
+            # ⚠ 这里写的是**英文键**（`Aliases`），与 `write_dict_to_excel`
+            # 的中文表头不一致 —— 但 `test_char_decisions` 已经把
+            # "补列写英文"钉成契约（那次修的是"补列要生效"，不是措辞）。
+            # 改措辞是另一件事（会同时牵动老表的读回），留作 P2。
+            ws.cell(row=1, column=len(headers), value=key)
+    # ⚠ **认不出身份列就先补一列**（2026-10-25 第六轮）：
+    # 用户把「编号」列改名/删掉之后，`headers` 里没有 `ID`，而下面
+    # 写行是 `[row.get(h) for h in headers]` —— 于是**每一行都没有
+    # ID**：判重全失效、每次扫描都把这批行再追加一遍（表越扫越长）。
+    # 补一列比"拒绝写入"更安全（用户只是改了个表头，不该把同步卡死），
+    # 而且补完之后 `_canon_field('编号')` 就能重新认出身份列。
+    if 'ID' not in headers:
+        headers.append('ID')
+        ws.cell(row=1, column=len(headers),
+                value=ASSET_FIELD_LABELS.get('ID', 'ID'))
+    return headers
+
+
+def _row_index(ws, headers) -> dict:
+    """表里已登记的 ID → 行号（重复 ID 只认第一次出现的行）。"""
+    id_col = headers.index('ID') + 1
+    row_of = {}
+    for r in range(2, ws.max_row + 1):
+        v = ws.cell(row=r, column=id_col).value
+        if v:
+            row_of.setdefault(str(v), r)
+    return row_of
+
+
+def _known_paths(ws, headers, skip_paths) -> set:
+    """表里已经登记过的**路径**（`skip_paths` 之外再从表里现读一遍，免得漏传）。"""
+    have_paths = set(skip_paths or ())
+    if 'Path' in headers:
+        pcol = headers.index('Path') + 1
+        for r in range(2, ws.max_row + 1):
+            v = ws.cell(row=r, column=pcol).value
+            if v:
+                have_paths.add(norm_asset_path(v))
+    return have_paths
+
+
+def _write_rows(ws, headers, rows, row_of, have_paths,
+                update_keys) -> tuple:
+    """逐行落表：按 Path 判重 → 按 ID 判重 → 追加或更新白名单列。"""
+    added = updated = 0
+    for row in rows:
+        aid = str(row.get('ID') or '')
+        if not aid:
+            continue
+        rp = norm_asset_path(row.get('Path'))
+        if rp and rp in have_paths:
+            continue                    # 这个文件已经在表里了（一一对应）
+        if aid in row_of:
+            # 已存在的行：默认跳过；给了 update_keys 才更新白名单列
+            if update_keys:
+                updated += _update_row_cells(
+                    ws, row_of[aid], headers, row, update_keys)
+                continue
+            if not rp:
+                continue            # 没写 Path 的行：没有"另一个文件"
+            # ⚠ **ID 撞车 ≠ 同一个文件**（2026-10-05 实测）：
+            # `game/cc_preview/lan/angry.png` 生成的 ID 可能是
+            # `lan_angry`，而表里已有一行 `lan_angry` 指
+            # `game/images/characters/lan/angry.png`。老代码在这里
+            # **静默丢掉**这个文件 —— 于是它永远登记不上，体检里
+            # 永远显示"未登记 N 条"（用户看到的就是这个）。
+            # 同一个文件在前面已经按 Path 判重跳过了，走到这里
+            # 一定是**另一个文件** → 另起一个 ID 收下它。
+            base = aid
+            k = 2
+            while f'{base}_{k}' in row_of:
+                k += 1
+            aid = f'{base}_{k}'
+            row = dict(row, ID=aid)
+        row_of[aid] = _asset_append_row(
+            ws, [row.get(h, '') if h else '' for h in headers])
+        if rp:
+            have_paths.add(rp)
+        added += 1
+    return added, updated
+
+
+def _append_into_new_table(path, rows, skip_paths) -> int:
+    """表还不存在：新建、写中文表头，然后只追加（没有"已存在的 ID"可言）。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [k for k in rows[0].keys()
+               if k and not str(k).startswith('_')]
+    # **新建表也写中文表头**（2026-10-25，P1：与 `write_dict_to_excel`
+    # 统一）。从前这里写英文键，于是"哪条路径建的表"决定了表头是中是英 ——
+    # 同一批表里两种表头，用户看着像坏了；更糟的是**判定口径**也得
+    # 两套（中文标签比 vs 英文键比），这正是本轮三个坑的共同根因。
+    # 值仍按**规范键**取（`headers` 是英文键，`row.get(h)` 不变）。
+    ws.append([ASSET_FIELD_LABELS.get(h, h) for h in headers])
+    seen = set(skip_paths or ())
+    added = 0
+    for row in rows:
+        rp = norm_asset_path(row.get('Path'))
+        if rp and rp in seen:
+            continue
+        _asset_append_row(ws, [row.get(h, '') for h in headers])
+        if rp:
+            seen.add(rp)
+        added += 1
+    save_workbook_atomic(wb, path)
+    return added
 
 
 def norm_asset_path(value) -> str:

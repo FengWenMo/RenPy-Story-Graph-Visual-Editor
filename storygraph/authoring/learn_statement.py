@@ -109,6 +109,37 @@ def build_declaration(name: str, label: str = '', docs: str = '',
                 'block': block, 'columns': [],
                 'warnings': [f'"{name}" 不是合法的语句名（用词 + 空格；'
                              f'不能用引号/括号/等号/冒号/逗号/井号）']}
+    columns = _declaration_columns(params, warnings)
+    # 后端默认 `possible`：不确定就别写死
+    # ⭐ **位置序列**（2026-10-11）：界面上的格子有顺序、有类型 —— 那是
+    #   "代码里长什么样"的唯一依据，所以必须与列**一起**交给后端存下来。
+    #   ⚠ 只增不改：没给 `pattern` 时，产物与以前**逐字节一样**
+    #   （既有的 golden / 60+ 条判据都压在这上面）。
+    slots, columns = _declaration_slots(pattern, columns)
+    # ⭐ **复杂子句**（2026-10-30）：`at` / `behind` / `with` 这类关键字后面的
+    #   一段（可能是一串词，也可能是带括号空格的表达式）。它们不是"格子"——
+    #   顺序可以任意、可以不出现，所以单独一段 `clauses` 交给 `spec_clauses`。
+    #
+    #   ⚠ 只增不改：没给 `clauses` 时**连这个键都不写**，旧清单/旧判据逐字节不变。
+    clause_rows = (_declaration_clauses(clauses, columns, slots, warnings)
+                   if clauses is not None else [])
+    out = {'ok': True, 'name': name, 'label': str(label or '').strip(),
+           'docs': str(docs or '').strip(), 'block': block,
+           'columns': columns, 'warnings': warnings}
+    if slots:
+        out['pattern'] = slots
+    if clauses is not None:
+        out['clauses'] = clause_rows
+    return out
+
+
+def _declaration_columns(params, warnings) -> list:
+    """表单的参数行 → `columns`；坏行**丢掉但出声**（旧版是静默的）。
+
+    ⚠ 这一格的 `name` 就是"编剧看到的列名"（2026-10-13 改），不是脚本里的
+    具名参数 —— 所以**只做**三件事：空名回填 `label`、剥掉顺手写的 `=`、去重。
+    不套标识符校验：中文列名（「人物」「服装」「神态」）天经地义。
+    """
     columns = []
     seen = set()
     for row in (params or ()):
@@ -154,92 +185,85 @@ def build_declaration(name: str, label: str = '', docs: str = '',
         if choices:
             col['choices'] = choices
         columns.append(col)
-    if block is None:
-        block = None                    # 后端默认 `possible`：不确定就别写死
-    # ⭐ **位置序列**（2026-10-11）：界面上的格子有顺序、有类型 —— 那是
-    #   "代码里长什么样"的唯一依据，所以必须与列**一起**交给后端存下来。
-    #   ⚠ 只增不改：没给 `pattern` 时，产物与以前**逐字节一样**
-    #   （既有的 golden / 60+ 条判据都压在这上面）。
+    return columns
+
+
+def _declaration_slots(pattern, columns) -> tuple:
+    """位置序列 → `(slots, columns)`；`columns` 可能被补列 / 重排（就地换新）。
+
+    ⚠ 只增不改：没给 `pattern` 时返回 `([], columns)`，产物逐字节不变。
+    """
     slots = []
-    if pattern:
-        from storygraph.authoring.pattern import parse_pattern
-        raw_list = list(pattern)
-        for i, slot in enumerate(parse_pattern(pattern)):
-            raw_slot = raw_list[i] if i < len(raw_list) else None
-            item = {'kind': slot['kind']}
-            if slot.get('text'):
-                item['text'] = slot['text']
-            if slot.get('column'):
-                item['column'] = slot['column']
-            if slot.get('group'):
-                item['group'] = slot['group']
+    if not pattern:
+        return slots, columns
+    from storygraph.authoring.pattern import parse_pattern
+    raw_list = list(pattern)
+    for i, slot in enumerate(parse_pattern(pattern)):
+        raw_slot = raw_list[i] if i < len(raw_list) else None
+        item = {'kind': slot['kind']}
+        if slot.get('text'):
+            item['text'] = slot['text']
+        if slot.get('column'):
+            item['column'] = slot['column']
+        if slot.get('group'):
+            item['group'] = slot['group']
+        if slot.get('options'):
+            item['options'] = slot['options']
+        # ⚠⚠ **`limit` / `multi` 必须一起写下来**（2026-10-13 修）。
+        #
+        # 这两个键是修"切不上"（候选≠限死）和"A 段可以有多个"时加的，
+        # **读**的那一侧全都认（`parse_pattern` / `WALK_KINDS` / 卡片），
+        # 只有这里漏了 —— 于是"只在半边生效"：
+        #   · 编剧勾了「编剧只能从下面这些里选」→ 试切是对的 →
+        #     点"写进清单" → **勾选蒸发** → 她以为自己限死过；
+        #   · 勾了「这一格可以有多个」→ 存下来变成一格一个词。
+        #
+        # ⚠ 写**输入里真的给过的**（含显式的 `False`）——
+        #   "说过 false"和"没说"在语义上是两件事，往返要保真；
+        #   而**整个键都没给**时不写，旧的产物因此逐字节不变。
+        for key in ('limit', 'multi', 'required'):
+            if isinstance(raw_slot, dict) and key in raw_slot:
+                item[key] = bool(slot.get(key))
+        slots.append(item)
+    # ⚠ 列名**不套脚本参数那套标识符校验**：这两件事不是一回事 ——
+    #   脚本里的具名参数（`intensity=3`）必须是合法标识符，
+    #   而**表格列**是我们自己的列，中文（「角色」「服装」）天经地义。
+    #   （用户撞墙记录里他要的正是中文列名；旧校验会把它们全丢掉。）
+    # ⚠⚠ 但**两套数据同时给时只认 `params` 的列**（否则同一列会出现两次：
+    #   `params` 给标识符+中文名，`pattern` 又给一个中文名 —— 判据抓到过）。
+    #   这时 `pattern` 只负责**顺序与类型**；它自己生列只在**没有 params** 时
+    #   （也就是纯位置序列那条界面路径）。
+    known = {c['name'] for c in columns}
+    if not known:
+        for slot in slots:
+            col = str(slot.get('column') or '').strip()
+            if not col or col in known:
+                continue
+            known.add(col)
+            row = {'name': col, 'label': col}
             if slot.get('options'):
-                item['options'] = slot['options']
-            # ⚠⚠ **`limit` / `multi` 必须一起写下来**（2026-10-13 修）。
-            #
-            # 这两个键是修"切不上"（候选≠限死）和"A 段可以有多个"时加的，
-            # **读**的那一侧全都认（`parse_pattern` / `WALK_KINDS` / 卡片），
-            # 只有这里漏了 —— 于是"只在半边生效"：
-            #   · 编剧勾了「编剧只能从下面这些里选」→ 试切是对的 →
-            #     点"写进清单" → **勾选蒸发** → 她以为自己限死过；
-            #   · 勾了「这一格可以有多个」→ 存下来变成一格一个词。
-            #
-            # ⚠ 写**输入里真的给过的**（含显式的 `False`）——
-            #   "说过 false"和"没说"在语义上是两件事，往返要保真；
-            #   而**整个键都没给**时不写，旧的产物因此逐字节不变。
-            for key in ('limit', 'multi', 'required'):
-                if isinstance(raw_slot, dict) and key in raw_slot:
-                    item[key] = bool(slot.get(key))
-            slots.append(item)
-        # ⚠ 列名**不套脚本参数那套标识符校验**：这两件事不是一回事 ——
-        #   脚本里的具名参数（`intensity=3`）必须是合法标识符，
-        #   而**表格列**是我们自己的列，中文（「角色」「服装」）天经地义。
-        #   （用户撞墙记录里他要的正是中文列名；旧校验会把它们全丢掉。）
-        # ⚠⚠ 但**两套数据同时给时只认 `params` 的列**（否则同一列会出现两次：
-        #   `params` 给标识符+中文名，`pattern` 又给一个中文名 —— 判据抓到过）。
-        #   这时 `pattern` 只负责**顺序与类型**；它自己生列只在**没有 params** 时
-        #   （也就是纯位置序列那条界面路径）。
-        known = {c['name'] for c in columns}
-        if not known:
-            for slot in slots:
-                col = str(slot.get('column') or '').strip()
-                if not col or col in known:
-                    continue
-                known.add(col)
-                row = {'name': col, 'label': col}
-                if slot.get('options'):
-                    row['choices'] = list(slot['options'])
-                columns.append(row)
-        # 顺序也决定列的顺序 —— 用户卡点之一："凭什么对应那个顺序"
-        #   ⚠ 两套数据都给时，`params` 的列名可能与格子的列名不同（标识符 vs 中文），
-        #     那就按"格子顺序能对上的排前面，剩下的保持原序"处理，不必强求改名。
-        ordered = [str(s.get('column')) for s in slots if s.get('column')]
-        if ordered:
-            by_name = {c['name']: c for c in columns}
-            head = [by_name[n] for n in ordered if n in by_name]
-            if head:
-                columns = head + [c for c in columns if c not in head]
-    # ⭐ **复杂子句**（2026-10-30）：`at` / `behind` / `with` 这类关键字后面的
-    #   一段（可能是一串词，也可能是带括号空格的表达式）。它们不是"格子"——
-    #   顺序可以任意、可以不出现，所以单独一段 `clauses` 交给 `spec_clauses`。
-    #
-    #   ⚠ 只增不改：没给 `clauses` 时**连这个键都不写**，旧清单/旧判据逐字节不变。
-    clause_rows: list = []
-    if clauses is not None:
-        from storygraph.story.spec_clauses import normalize_clauses
-        reserved = {str(c.get('name') or '').strip() for c in columns}
-        reserved |= {str(s.get('column') or '').strip() for s in slots}
-        reserved.discard('')
-        clause_rows = normalize_clauses(clauses, reserved_names=reserved,
-                                        warnings=warnings)
-    out = {'ok': True, 'name': name, 'label': str(label or '').strip(),
-           'docs': str(docs or '').strip(), 'block': block,
-           'columns': columns, 'warnings': warnings}
-    if slots:
-        out['pattern'] = slots
-    if clauses is not None:
-        out['clauses'] = clause_rows
-    return out
+                row['choices'] = list(slot['options'])
+            columns.append(row)
+    # 顺序也决定列的顺序 —— 用户卡点之一："凭什么对应那个顺序"
+    #   ⚠ 两套数据都给时，`params` 的列名可能与格子的列名不同（标识符 vs 中文），
+    #     那就按"格子顺序能对上的排前面，剩下的保持原序"处理，不必强求改名。
+    ordered = [str(s.get('column')) for s in slots if s.get('column')]
+    if ordered:
+        by_name = {c['name']: c for c in columns}
+        head = [by_name[n] for n in ordered if n in by_name]
+        if head:
+            columns = head + [c for c in columns if c not in head]
+    return slots, columns
+
+
+def _declaration_clauses(clauses, columns, slots, warnings) -> list:
+    """复杂子句 → `spec_clauses` 的行；列名/格子名算"保留名"，不许当关键字。"""
+    from storygraph.story.spec_clauses import normalize_clauses
+    reserved = {str(c.get('name') or '').strip() for c in columns}
+    reserved |= {str(s.get('column') or '').strip() for s in slots}
+    reserved.discard('')
+    return normalize_clauses(clauses, reserved_names=reserved,
+                             warnings=warnings)
 
 
 def build_group(name: str, label: str = '', options=None,
