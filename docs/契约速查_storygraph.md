@@ -649,6 +649,18 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
    · **`os.replace` 对瞬时 `PermissionError` 重试**（6×20ms）：并发写同一目标
      时两条替换会撞车，不重试就是"保存了但没变"；真被 Excel 占着时照样失败，
      由 `human_io_error` 给人话。
+   **读 Excel 也只有一条路=`storygraph/excel/safety.py`**（2026-11-01）：
+   `safety.open_workbook()` 先看 zip 目录（解压炸弹 / 声明维度炸弹 / 宏 /
+   外链 / 嵌入对象 / 加密 / 老 .xls），`hard` → `UnsafeWorkbook`（说人话），
+   `soft` → `swallow` 留痕。**不许再写 `openpyxl.load_workbook(`**
+   （AST 横扫判据在 `test_excel_safety.py`；写侧同规矩：除 `atomicio` /
+   `xlsx_preserve` 外不许 `wb.save(`）。同批三条硬规矩：
+   · 表的来源指纹存**完整 sha1**，比较走 `table_meta.fingerprints_match()`
+     （老表 16 位按前缀兼容 —— 直接比 40 位会让每张老表都报"旧了"）；
+   · `patch_export(expect_sha1=…)` **读完再核对**：关掉"先查后读"的窗口，
+     窗口里被改过就拒绝增量（退回全量是安全方向）；
+   · 资产表 6 个写函数过 `asset_registry._ASSET_WRITE_LOCK`（可重入的进程内锁；
+     无锁实测 8 线程写 32 行只剩 4 行）。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），

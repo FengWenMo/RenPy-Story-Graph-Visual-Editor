@@ -109,6 +109,13 @@ def main(argv=None) -> int:
     if code != 0:
         print((out + err)[-1200:])
 
+    # Excel 安全层（2026-11-01）：自检命令要在包里真的存在，而且对一张
+    # 正常表给 0（否则用户第一次用就撞上一句"打不开"）
+    code, out, err = _run(exe, 'excel-check', xlsx)
+    report('excel-check 对正常表给 0', code == 0, f'exit={code}')
+    if code != 0:
+        print((out + err)[-1200:])
+
     code, out, err = _run(exe, 'table', 'rpy2xlsx', game / 'nope.rpy',
                           '--no-engine-lint')
     report('坏路径退出码 2', code == 2, f'exit={code}')
