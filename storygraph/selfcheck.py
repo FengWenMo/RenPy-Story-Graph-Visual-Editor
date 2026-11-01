@@ -81,6 +81,12 @@ REQUIRED_MODULES = (
     'storygraph.ui_qt.window_engine',
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_graph_ops',
+    # 2026-11-01（解 `assets` 三模块环）：映射结构契约与身份词汇两个新叶子。
+    # `mapping_schema` 里放着 `validate_mapping`，而 `mapping_excel` 现在是
+    # **顶层** import 它 —— 打包时这两份文件要是没进 hiddenimports，
+    # 症状是"打开 Excel 映射就崩"，属于主链路，点名一次。
+    'storygraph.assets.mapping_schema',
+    'storygraph.assets.identity_core',
     'openpyxl',
 )
 

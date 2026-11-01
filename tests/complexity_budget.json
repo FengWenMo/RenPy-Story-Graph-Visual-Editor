@@ -53,10 +53,6 @@
    "lines": 192,
    "branches": 24
   },
-  "storygraph/assets/asset_mapping.py::validate_mapping": {
-   "lines": 127,
-   "branches": 63
-  },
   "storygraph/assets/asset_registry.py::describe_asset": {
    "lines": 87,
    "branches": 42
@@ -64,6 +60,10 @@
   "storygraph/assets/asset_registry.py::sync_asset_tables": {
    "lines": 182,
    "branches": 28
+  },
+  "storygraph/assets/mapping_schema.py::validate_mapping": {
+   "lines": 127,
+   "branches": 63
   },
   "storygraph/assets/sprite_codes.py::scan_project": {
    "lines": 156,
@@ -92,10 +92,6 @@
   "storygraph/cli.py::build_parser": {
    "lines": 203,
    "branches": 0
-  },
-  "storygraph/collab/collab_store.py::push": {
-   "lines": 314,
-   "branches": 74
   },
   "storygraph/graph/analysis.py::analyze_reachability_full": {
    "lines": 184,
@@ -157,10 +153,6 @@
    "lines": 251,
    "branches": 94
   },
-  "storygraph/story/beat_render.py::render_beat_to_rpy": {
-   "lines": 356,
-   "branches": 55
-  },
   "storygraph/story/control_branch.py::plan_control_branch": {
    "lines": 177,
    "branches": 45
@@ -176,6 +168,10 @@
   "storygraph/story/excel_export.py::export_beats_to_excel": {
    "lines": 218,
    "branches": 19
+  },
+  "storygraph/story/exits.py::label_exits_for_result": {
+   "lines": 95,
+   "branches": 40
   },
   "storygraph/story/generation_guard.py::write_generation": {
    "lines": 241,

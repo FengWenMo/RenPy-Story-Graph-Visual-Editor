@@ -79,18 +79,28 @@ from pathlib import Path, PurePosixPath
 from typing import Mapping, Optional
 
 from storygraph.core.safeguard import swallow
-from storygraph.assets.asset_identity import (
+from storygraph.assets.identity_core import (
     KINDS,
     SHOWABLE_KINDS,
     Identity,
     asset_id_of,
     build_copy_index,
     normalize_relpath,
-    resolve_image,
 )
+from storygraph.assets.mapping_schema import (
+    KNOWN_ENTRY_KEYS,
+    KNOWN_TOP_KEYS,
+    MAPPING_SCHEMA,
+    MappingError,
+    validate_mapping,
+    xls_unsupported,
+)
+#: ⚠ 这一条是 `assets` 层**剩下唯一**的 `asset_mapping → asset_identity` 边
+#: （`draft_mapping` 逐行算身份时用）。反方向的
+#: `asset_identity → asset_mapping`（映射层 / `project_context` 取缓存）还没拆，
+#: 所以那两个模块**仍然是 2 个模块的环**（见 `docs/开发日志.md` §82）。
+from storygraph.assets.asset_identity import resolve_image
 
-#: 映射文件的结构版本。**改结构就 +1**（读取方据此判断能不能认）。
-MAPPING_SCHEMA = 'storygraph.mapping/1'
 
 #: JSON 映射的文件名（项目根，或 `game/` 下同名 —— 两者都接受）。
 MAPPING_FILENAME = 'storygraph.mapping.json'
@@ -104,27 +114,10 @@ WORKBOOK_SUFFIXES = ('.xlsx', '.xlsm')
 #: 同一个目录里按这个顺序找（Excel 优先）。
 MAPPING_NAMES = (MAPPING_XLSX_FILENAME, MAPPING_FILENAME)
 
-#: 认识的顶层键（多出来的**警告不失败**：别的工具/未来版本加的键不该拦读）。
-KNOWN_TOP_KEYS = ('schema', 'name', 'characters', 'rules', 'images',
-                  'attributes', 'outfit_codes', 'expression_codes',
-                  'vocabulary')
-
-#: 代号两段（`sprite_codes`）+ 词汇表（`vocabulary`）里一条能有的键。
-CODE_KEYS = {'outfit_codes': ('char', 'code', 'attr', 'label'),
-             'expression_codes': ('char', 'no', 'attr', 'label'),
-             'vocabulary': ('kind', 'id', 'label', 'code', 'char', 'note')}
-
-#: `images` / `rules` 条目里认识的键（多出来同样只警告）。
-KNOWN_ENTRY_KEYS = ('glob', 'kind', 'char', 'tag', 'attr', 'attrs',
-                    'showable', 'display')
 
 #: 只缓存最近这么多份映射（多项目切换时不会无限长）。
 _CACHE_MAX = 32
 _CACHE: dict = {}
-
-
-class MappingError(ValueError):
-    """映射文件读不出来 / 不是合法 JSON / 顶层不是对象。"""
 
 
 # ---------------------------------------------------------------------------
@@ -181,18 +174,6 @@ def find_mapping_path(project_root: str) -> Optional[str]:
     return found[0] if found else None
 
 
-def xls_unsupported(path) -> str:
-    """
-    老式 `.xls` 的统一说法（两条读取路径共用同一句，别一处一个写法）。
-
-    `.xls` 是 OLE 复合文档，openpyxl 读不了；而它**恰好**也是"二进制当文本读"
-    会炸的东西 —— 不拦下来的话用户看到的是 `'utf-8' codec can't decode ...`，
-    等于没说。
-    """
-    return (f'{Path(str(path or "")).name} 是老式 .xls 格式，读不了 —— '
-            f'在 Excel / WPS 里「另存为」`.xlsx` 再从「载入映射…」选它。')
-
-
 def load_mapping(path: str) -> tuple:
     """
     读一份映射 → `(data, warnings)`（按后缀分派：JSON / Excel）。
@@ -228,142 +209,6 @@ def load_mapping(path: str) -> tuple:
     if not isinstance(data, dict):
         raise MappingError('映射文件的顶层必须是一个 JSON 对象')
     return data, validate_mapping(data)
-
-
-def validate_mapping(data, *, where=None) -> list:
-    """
-    映射结构检查 → **警告列表**（空 = 没问题）。纯函数、不改数据。
-
-    为什么警告不失败：这份文件是**人写的、会随项目长大**；多一个 `notes`
-    之类的键就拒绝加载，等于逼人删信息。但也不能静默 —— 认不出的键
-    要报出来，否则"我写进去了怎么没生效"永远查不出。
-
-    `where` 是**定位器**（可选）：`where(*path) -> '图片 表第 12 行'`。
-    Excel 来源的映射传它，同一句警告就从 `images['x'] kind 不认识`
-    变成 `图片 表第 12 行：kind 不认识` —— 人要能按这句话直接在表里找到那一行。
-    """
-    warnings = []
-
-    def at(*path):
-        """一句警告的前缀（`rules[0] ` / `规则 表第 9 行：`）。"""
-        default = path[0] if len(path) == 1 else (
-            f'{path[0]}[{path[1]!r}]' if len(path) > 1 else str(path[0]))
-        if where is not None:
-            try:
-                got = str(where(*path) or '').strip()
-            except Exception as e:            # noqa: BLE001 - 定位器坏了不该拦校验
-                swallow('assets.asset_mapping.validate_mapping.where', e)
-                got = ''
-            if got:
-                return got + '：'
-        return default + ' '
-
-    if not isinstance(data, dict):
-        return ['映射顶层不是对象']
-    for key in data:
-        if key not in KNOWN_TOP_KEYS:
-            warnings.append(f'未知顶层键 {key!r}（已忽略；认识的键：'
-                            + '、'.join(KNOWN_TOP_KEYS) + '）')
-    schema = data.get('schema')
-    if schema is None:
-        warnings.append(f'缺 schema 字段（本工具按 {MAPPING_SCHEMA} 读）')
-    elif schema != MAPPING_SCHEMA:
-        warnings.append(f'schema 不认识：{schema!r}（本工具只认 '
-                        f'{MAPPING_SCHEMA}，仍尽量按同结构读）')
-    chars = data.get('characters')
-    if chars is not None and not isinstance(chars, dict):
-        warnings.append('characters 不是对象（应为 {tag: {...}}）')
-    elif isinstance(chars, dict):
-        for tag, entry in chars.items():
-            if not str(tag or '').strip():
-                warnings.append('characters 里有空 tag')
-            elif not isinstance(entry, dict):
-                warnings.append(f'{at("characters", tag)}不是对象')
-    rules = data.get('rules')
-    if rules is not None and not isinstance(rules, list):
-        warnings.append('rules 不是数组')
-    elif isinstance(rules, list):
-        for i, rule in enumerate(rules):
-            if not isinstance(rule, dict):
-                warnings.append(f'{at("rules", i)}不是对象')
-                continue
-            for key in rule:
-                if key not in KNOWN_ENTRY_KEYS:
-                    warnings.append(f'{at("rules", i)}未知键 {key!r}（已忽略）')
-            glob = str(rule.get('glob') or '').strip()
-            if not glob:
-                warnings.append(f'{at("rules", i)}缺 glob（这条规则用不了）')
-            elif _looks_outside_project(glob):
-                warnings.append(
-                    f'{at("rules", i)}glob 像是绝对路径：{glob!r}'
-                    '（映射里的路径应写**项目相对**，否则换台机器就失效）')
-            kind = str(rule.get('kind') or '').strip()
-            if kind and kind not in KINDS:
-                warnings.append(f'{at("rules", i)}kind 不认识：{kind!r}')
-    images = data.get('images')
-    if images is not None and not isinstance(images, dict):
-        warnings.append('images 不是对象（应为 {asset_id 或相对路径: {...}}）')
-    elif isinstance(images, dict):
-        for key, entry in images.items():
-            if not str(key or '').strip():
-                warnings.append('images 里有空 key')
-                continue
-            if not isinstance(entry, dict):
-                warnings.append(f'{at("images", key)}不是对象（简短写法不支持，'
-                                '请写 {"kind": ...}）')
-                continue
-            for field in entry:
-                if field not in KNOWN_ENTRY_KEYS:
-                    warnings.append(f'{at("images", key)}未知键 {field!r}（已忽略）')
-            kind = str(entry.get('kind') or '').strip()
-            if kind and kind not in KINDS:
-                warnings.append(f'{at("images", key)}kind 不认识：{kind!r}')
-    for section, keys in CODE_KEYS.items():
-        entries = data.get(section)
-        if entries is None:
-            continue
-        if not isinstance(entries, list):
-            warnings.append(f'{section} 不是数组（应为 [{{...}}, ...]）')
-            continue
-        for i, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                warnings.append(f'{at(section, i)}不是对象')
-                continue
-            for field in entry:
-                if field not in keys:
-                    warnings.append(f'{at(section, i)}未知键 {field!r}（已忽略）')
-            if section == 'vocabulary':
-                from storygraph.assets.vocabulary import is_kind, kind_label
-                kind = str(entry.get('kind') or '').strip()
-                if kind and not is_kind(kind):
-                    warnings.append(f'{at(section, i)}种类不认识：{kind!r}'
-                                    f'（认得的：' + '、'.join(
-                                        kind_label(k) for k in
-                                        ('transform', 'music', 'bg',
-                                         'character', 'cue', 'costume'))
-                                    + ' …）')
-                if not str(entry.get('id') or '').strip():
-                    warnings.append(f'{at(section, i)}缺 id（这一条对不上任何东西）')
-    attributes = data.get('attributes')
-    if attributes is not None and not isinstance(attributes, dict):
-        warnings.append('attributes 不是对象（应为 {维度: {"label": ...}}）')
-    elif isinstance(attributes, dict):
-        for key, entry in attributes.items():
-            if not isinstance(entry, dict):
-                warnings.append(f'{at("attributes", key)}不是对象'
-                                '（应为 {"label": ...}）')
-                continue
-            for field in entry:
-                if field not in ('label', 'values', 'options'):
-                    warnings.append(f'{at("attributes", key)}未知键 {field!r}（已忽略）')
-    return warnings
-
-
-def _looks_outside_project(text: str) -> bool:
-    """这个写法是不是绝对路径（映射里应写项目相对路径）。"""
-    value = str(text or '').strip().replace('\\', '/')
-    return (value.startswith('/') or bool(re.match(r'^[A-Za-z]:', value))
-            or ':/' in value)
 
 
 def mapping_cached(project_root: str) -> tuple:

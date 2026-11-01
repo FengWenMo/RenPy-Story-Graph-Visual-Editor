@@ -82,8 +82,13 @@ import shutil
 from pathlib import Path
 from typing import Mapping
 
-from storygraph.assets.asset_identity import KINDS
-from storygraph.assets.asset_mapping import MAPPING_SCHEMA, MappingError
+from storygraph.assets.identity_core import KINDS
+from storygraph.assets.mapping_schema import (
+    MAPPING_SCHEMA,
+    MappingError,
+    validate_mapping,
+    xls_unsupported,
+)
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import RefusedWrite
 from storygraph.excel import safety
@@ -292,8 +297,6 @@ def _check_path(path) -> Path:
         raise MappingError(f'映射文件不存在：{p}')
     suffix = p.suffix.lower()
     if suffix == '.xls':
-        from storygraph.assets.asset_mapping import xls_unsupported
-
         raise MappingError(xls_unsupported(p))
     if suffix not in WORKBOOK_SUFFIXES:
         raise MappingError(f'{p.name} 不是 Excel 工作簿（只认 .xlsx / .xlsm）')
@@ -663,12 +666,10 @@ def read_workbook(path) -> tuple:
 
     · 读不出 / 不是工作簿 / 六张表一张都认不出 → 抛 `MappingError`；
     · 未知列、重复 key、认不出的布尔值 → `warnings`（**带表名 + 行号**）；
-    · 其余结构问题由 `asset_mapping.validate_mapping(data, where=…)` 统一判，
+    · 其余结构问题由 `mapping_schema.validate_mapping(data, where=…)` 统一判，
       同一句话在 JSON 里是 `images['x'] kind 不认识`，在这里就是
       `「图片」表第 12 行：kind 不认识`。
     """
-    from storygraph.assets.asset_mapping import validate_mapping
-
     p = _check_path(path)
     wb = _open_workbook(p)
     warnings: list = []
