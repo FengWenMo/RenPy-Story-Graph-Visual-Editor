@@ -266,3 +266,28 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   下一批（纯判断链，得按"每段判什么"切）：`verify_package` 167/44、`plan_scene_change`
   166/47、`build_declaration` 162/46、`plan_wire_landing` 162/53；宽泛 except 1227 处
   已派只读审计（四类：真兜底 / 静默咽 bug / 宽但已收口 / 类型可收窄），下一步按 B 类收紧。
+
+- 2026-11-01 第二十段（§95）：宽泛 except **第一次分类** + 24 处 B 全堵。审计（只读子代理，
+  AST 扫 1960 个 handler）先把数字纠正了：**1232** 而不是 1227 —— `debt_report` 只认
+  名字恰好是 `Exception` 的名字节点，不数 5 处 `BaseException`（atomicio 删 tmp 后 raise ×3、
+  host_worker 协议 ×2，都**本该宽**）。四类：A 真兜底 1023 / **B 静默咽 bug 24** / C 已收口 149 /
+  D 可收窄 36；另单列 **B′ 245 处**"有痕迹但返回值与正常空结果同形"。
+  **B 只有 24 不是口径松**：993 个 handler 体里有 swallow（2026-10 那轮的成果）；但
+  `test_no_silent_except` 的判据是"体内有没有 Call / 有没有 e"，拿它复算 24 处**只有 1 处判红**
+  （safeguard 白名单），其余靠 `set()` / `QColor(fallback)` / `_ = exc` / `text.setText()` 骗过 →
+  **改守卫（认"记录通道"）比全量收窄划算**，单独一轮做。D 只 36 处同理：其余 1196 处 try 体
+  调域函数，异常族静态不可枚举，所以"全量收窄 1227 处"这条路线本身不成立。
+  本轮：8 处收窄（tables→`ImportError`、excel_export→Key/Type/Value、dialog_learn→
+  Type/Value/Index、help_dialog、graph_canvas._elide、stage_preview.setInterval、
+  stage_entry、stage_render._measure）+ 14 处只补记录 + 3 处"返回值同形"
+  （`missing_chapter_files` 加 `error` 键 → golden +1 键，是有意改动；
+  `placement._build_placement` 不再拿绝对路径冒充 `FileFacts`，改记 warnings；
+  `asset_report` 文案"读到 N 条"→"读取失败"）。宽泛 except 1227→**1218**、swallow 1239→**1258**。
+  ⚠⚠ **给顶在棘轮上的函数加一行注释也会红**：`import_chapter_files` 142→145 当场
+  `test_no_budgeted_function_grew_longer_or_bushier` 失败。解法不是调棘轮 —— 而是发现
+  `import_chapter_files` / `load_layout` **抄了同一段 12 行 try/except**，抽成模块级
+  `_swap_graph(win, graph, old, where)` 后两处各短 10 行、记录只剩一处（`where` 分清来源）。
+  (`_why_not` 也顶在 137 行 → 只能"不动行数地收窄"，`swallow` 加不进去。)
+  ⚠ `engine_lint` 里 `swallow` 原来只在两个函数内 import，模块级用到就报
+  `test_no_undefined_names` 的 `'swallow'`；补顶层 import。
+  全量 8917 例 / 8914 通过 / 0 失败（12 进程 2m22s）。
