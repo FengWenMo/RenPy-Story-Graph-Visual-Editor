@@ -750,24 +750,41 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
     plan = ControlRoutePlan(src_label=src, dst_label=dst, etype=etype)
 
     if not src or not dst:
-        plan.blocking.append('起点或目标没有 label 名')
-        plan.reason = '起点或目标没有 label 名'
-        return plan
+        return _block(plan, '起点或目标没有 label 名')
     if src == dst:
-        plan.blocking.append('起点和终点是同一章')
-        plan.reason = '起点和终点是同一章'
-        return plan
+        return _block(plan, '起点和终点是同一章')
     if etype not in ('jump', 'call'):
-        plan.blocking.append('类型只能是 jump / call')
-        plan.reason = '类型只能是 jump / call'
-        return plan
+        return _block(plan, '类型只能是 jump / call')
 
+    found = _route_source_side(project_root, src, plan)
+    if found is None:
+        return plan
+    text, block = found
+    if not _route_target_side(project_root, dst, plan, text):
+        return plan
+    return _route_dispatch(plan, text, block, from_clause)
+
+
+def _block(plan: ControlRoutePlan, reason: str) -> ControlRoutePlan:
+    """把"不写"记在计划上（原因同时是 reason 与 blocking 的第一条）。"""
+    plan.blocking.append(reason)
+    plan.reason = reason
+    return plan
+
+
+def _route_source_side(project_root, src, plan):
+    """
+    找编排层文件、读它、确认 `src` 的 `_control` 包装在不在。
+
+    返回 `(text, block)`；`None` 表示 `plan` 已经被写成"不写"，调用方直接
+    返回它（原因与 blocking 都填好了）。
+    """
     path = find_control_file(project_root, src)
     if path is None:
         plan.reason = ('项目里没有独立控制流文件（没有任何 `*_control` label）；'
                        '章末接线会写章节源文件 —— 那是另一条落点，不是这里')
         plan.blocking.append(plan.reason)
-        return plan
+        return None
     plan.path = str(path)
 
     # 走 `_read`（= `scan_cache`）：一次接线里这份编排层会被算好几遍，
@@ -776,63 +793,75 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
     if not text.strip():
         plan.reason = f'编排层文件是空的：{path.name}'
         plan.blocking.append(plan.reason)
-        return plan
+        return None
 
     plan.control_label = control_label(src)
     block = _block_for(text, plan.control_label)
-    if block is None:
-        # 源章还没有 `_control` 包装 —— 先补，再接线（2026-10-27 真机：
-        # 以前这里一律拒写，于是"还没有进入口"的章节永远接不出线）。
-        plan.src_init = plan_control_init(project_root, src, role='source')
-        if (plan.src_init.ok and plan.src_init.kind == 'exists'
-                and Path(plan.src_init.path) != Path(path)):
-            # 同一 label 声明在两个编排层文件里：Ren'Py 自己就会报重复。
-            plan.src_init.ok = False
-            plan.src_init.kind = 'blocked'
-            plan.src_init.reason = (
-                f'`{plan.src_init.control_label}` 已经在另一个文件里'
-                f'（{Path(plan.src_init.path).name}），但又不在这个编排层'
-                f'文件里；同一 label 不能两处声明。先合并这两份编排层，再接线')
-            plan.src_init.blocking.append(plan.src_init.reason)
-        if plan.src_init.ok:
-            # `init` 就是"接线前要先落地的那一步"：命令层先补、再重算、再写。
-            plan.init = plan.src_init
-            plan.reason = (f'编排层里还没有 `{plan.control_label}`；'
-                           f'先把「{src}」的编排入口补上'
-                           f'（{plan.src_init.reason}），再接这条线')
-            plan.notes.extend(plan.src_init.notes)
-        else:
-            plan.reason = (f'编排层里没有 `{plan.control_label}`，'
-                           f'而且补不了：{plan.src_init.reason}')
-        plan.blocking.append(plan.reason)
-        return plan
+    if block is not None:
+        return text, block
+    # 源章还没有 `_control` 包装 —— 先补，再接线（2026-10-27 真机：
+    # 以前这里一律拒写，于是"还没有进入口"的章节永远接不出线）。
+    plan.src_init = plan_control_init(project_root, src, role='source')
+    if (plan.src_init.ok and plan.src_init.kind == 'exists'
+            and Path(plan.src_init.path) != Path(path)):
+        # 同一 label 声明在两个编排层文件里：Ren'Py 自己就会报重复。
+        plan.src_init.ok = False
+        plan.src_init.kind = 'blocked'
+        plan.src_init.reason = (
+            f'`{plan.src_init.control_label}` 已经在另一个文件里'
+            f'（{Path(plan.src_init.path).name}），但又不在这个编排层'
+            f'文件里；同一 label 不能两处声明。先合并这两份编排层，再接线')
+        plan.src_init.blocking.append(plan.src_init.reason)
+    if plan.src_init.ok:
+        # `init` 就是"接线前要先落地的那一步"：命令层先补、再重算、再写。
+        plan.init = plan.src_init
+        plan.reason = (f'编排层里还没有 `{plan.control_label}`；'
+                       f'先把「{src}」的编排入口补上'
+                       f'（{plan.src_init.reason}），再接这条线')
+        plan.notes.extend(plan.src_init.notes)
+    else:
+        plan.reason = (f'编排层里没有 `{plan.control_label}`，'
+                       f'而且补不了：{plan.src_init.reason}')
+    plan.blocking.append(plan.reason)
+    return None
 
+
+def _route_target_side(project_root, dst, plan, text) -> bool:
+    """
+    定 `plan.target_label`；jump 的目标章缺包装就补（能补就把 init 带上）。
+
+    返回 False = 目标这一侧走不通，`plan` 已经是"不写"。
+    """
     # 目标 label：jump 去 `B_control`，call 去 `B`。
-    plan.target_label = (control_label(dst) if etype == 'jump' else dst)
-    if etype == 'jump' and _block_for(text, plan.target_label) is None:
-        # P2.5：目标章缺包装。补出来的 `jump B_control` 就是它的第一个入口，
-        # 所以这一种可以安全补；补完再算一次路由（行号不变，只是文件变长）。
-        plan.init = plan_control_init(project_root, dst, role='target')
-        if (plan.init.ok and plan.init.kind == 'exists'
-                and Path(plan.init.path) != Path(path)):
-            # 同一个 `_control` 出现在两个文件里：Ren'Py 本身就会报重复。
-            # 这时候"已经有了"帮不上忙，让人先合并，别把路由写进另一个文件。
-            plan.init.ok = False
-            plan.init.kind = 'blocked'
-            plan.init.reason = (
-                f'`{plan.init.control_label}` 已经在另一个文件里'
-                f'（{Path(plan.init.path).name}），但又不在这个编排层文件里；'
-                f'同一 label 不能两处声明。先合并这两份编排层，再接线')
-            plan.init.blocking.append(plan.init.reason)
-        if plan.init.ok:
-            plan.reason = (f'编排层里还缺 `{plan.target_label}`（还没有目标章'
-                           f'包装）；可以先补上它（{plan.init.reason}），再接线')
-        else:
-            plan.reason = (f'编排层里没有 `{plan.target_label}`，'
-                           f'而且补不了：{plan.init.reason}')
-        plan.blocking.append(plan.reason)
-        return plan
+    plan.target_label = (control_label(dst) if plan.etype == 'jump' else dst)
+    if plan.etype != 'jump' or _block_for(text, plan.target_label) is not None:
+        return True
+    # P2.5：目标章缺包装。补出来的 `jump B_control` 就是它的第一个入口，
+    # 所以这一种可以安全补；补完再算一次路由（行号不变，只是文件变长）。
+    plan.init = plan_control_init(project_root, dst, role='target')
+    if (plan.init.ok and plan.init.kind == 'exists'
+            and Path(plan.init.path) != Path(plan.path)):
+        # 同一个 `_control` 出现在两个文件里：Ren'Py 本身就会报重复。
+        # 这时候"已经有了"帮不上忙，让人先合并，别把路由写进另一个文件。
+        plan.init.ok = False
+        plan.init.kind = 'blocked'
+        plan.init.reason = (
+            f'`{plan.init.control_label}` 已经在另一个文件里'
+            f'（{Path(plan.init.path).name}），但又不在这个编排层文件里；'
+            f'同一 label 不能两处声明。先合并这两份编排层，再接线')
+        plan.init.blocking.append(plan.init.reason)
+    if plan.init.ok:
+        plan.reason = (f'编排层里还缺 `{plan.target_label}`（还没有目标章'
+                       f'包装）；可以先补上它（{plan.init.reason}），再接线')
+    else:
+        plan.reason = (f'编排层里没有 `{plan.target_label}`，'
+                       f'而且补不了：{plan.init.reason}')
+    plan.blocking.append(plan.reason)
+    return False
 
+
+def _route_dispatch(plan, text, block, from_clause):
+    """最后一条语句决定怎么写：空块 / call / jump。"""
     lines = split_lines(text)
     tops = _top_lines(lines, block)
     if not tops:
@@ -840,7 +869,7 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
         plan.kind = 'insert'
         plan.line_no = block['start'] + 2        # 1 基，紧跟 header
         plan.old_line = ''
-        plan.new_lines = ['    ' + _render_route(etype, plan.target_label,
+        plan.new_lines = ['    ' + _render_route(plan.etype, plan.target_label,
                                                  from_clause)]
         plan.ok = True
         plan.reason = f'在空白的 `{plan.control_label}` 里写路由'
@@ -848,50 +877,52 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
 
     last_i, last_line = tops[-1]
     raw = last_line.strip()
-    route = _route_of(raw)
     plan.old_route = raw
     plan.line_no = last_i + 1
 
     if raw.startswith('menu:') or raw.startswith('if ') \
             or raw.startswith('elif ') or raw.startswith('else:'):
-        plan.reason = (f'`{plan.control_label}` 以「{raw}」收尾 —— 分支归'
-                       f'控制流图/卡片，不能把一条线插进块体')
-        plan.blocking.append(plan.reason)
-        return plan
+        return _block(plan, f'`{plan.control_label}` 以「{raw}」收尾 —— 分支归'
+                            f'控制流图/卡片，不能把一条线插进块体')
+    route = _route_of(raw)
     if route and route[0] == 'dynamic':
-        plan.reason = (f'`{plan.control_label}` 的最后一条是动态跳转'
-                       f'（{raw}）—— 工具判不出目标，不往里写')
-        plan.blocking.append(plan.reason)
-        return plan
+        return _block(plan, f'`{plan.control_label}` 的最后一条是动态跳转'
+                            f'（{raw}）—— 工具判不出目标，不往里写')
+    if plan.etype == 'call':
+        return _route_call(plan, lines, tops, raw, last_i, from_clause)
+    return _route_jump(plan, lines, raw, route, last_i, from_clause)
 
-    if etype == 'call':
-        # 要在**整段**里查，不只看最后一条：上一轮已经插过 `call B`，
-        # 后面还留着 `return` 时，最后一条仍是 return。
-        routes = [_route_of(ln.strip()) for _i, ln in tops]
-        if ('call', plan.target_label) in routes:
-            plan.kind = 'exists'
-            plan.ok = True
-            plan.new_lines = []
-            plan.reason = f'编排层已经 call 过 `{plan.target_label}`，无需再写'
-            return plan
-        # 已经 jump 到同一章 → 再 call 一次会让目标章跑两遍。
-        if ('jump', control_label(dst)) in routes:
-            plan.reason = (f'`{plan.control_label}` 已经 jump 到 '
-                           f'`{control_label(dst)}`；再插一条 call {dst} '
-                           f'会让这一章跑两遍')
-            plan.blocking.append(plan.reason)
-            return plan
-        # call 不改接：插在最后一条路由之前；返回后继续走原来的去向。
-        plan.kind = 'insert'
-        plan.old_line = lines[last_i]
-        plan.new_lines = ['    ' + _render_route('call', plan.target_label,
-                                                 from_clause)]
+
+def _route_call(plan, lines, tops, raw, last_i, from_clause):
+    """`call` 这一档：已 call 过 / 已 jump 过去 / 插在最后一条路由之前。"""
+    # 要在**整段**里查，不只看最后一条：上一轮已经插过 `call B`，
+    # 后面还留着 `return` 时，最后一条仍是 return。
+    routes = [_route_of(ln.strip()) for _i, ln in tops]
+    if ('call', plan.target_label) in routes:
+        plan.kind = 'exists'
         plan.ok = True
-        plan.reason = (f'在 `{plan.control_label}` 的「{raw}」之前接 '
-                       f'call {plan.target_label}（返回后继续原路）')
+        plan.new_lines = []
+        plan.reason = f'编排层已经 call 过 `{plan.target_label}`，无需再写'
         return plan
+    dst_control = control_label(plan.dst_label)
+    # 已经 jump 到同一章 → 再 call 一次会让目标章跑两遍。
+    if ('jump', dst_control) in routes:
+        return _block(plan, f'`{plan.control_label}` 已经 jump 到 '
+                            f'`{dst_control}`；再插一条 call {plan.dst_label} '
+                            f'会让这一章跑两遍')
+    # call 不改接：插在最后一条路由之前；返回后继续走原来的去向。
+    plan.kind = 'insert'
+    plan.old_line = lines[last_i]
+    plan.new_lines = ['    ' + _render_route('call', plan.target_label,
+                                             from_clause)]
+    plan.ok = True
+    plan.reason = (f'在 `{plan.control_label}` 的「{raw}」之前接 '
+                   f'call {plan.target_label}（返回后继续原路）')
+    return plan
 
-    # jump：最后是 return → 插在前面；最后是 jump → 改接（明确说）。
+
+def _route_jump(plan, lines, raw, route, last_i, from_clause):
+    """`jump` 这一档：已接上 / 改接原出口 / 替掉 return / 替掉终局语句。"""
     if route and route[0] == 'jump':
         if route[1] == plan.target_label:
             plan.kind = 'exists'
@@ -940,10 +971,8 @@ def plan_control_route(project_root, src_label, dst_label, etype='jump',
         plan.notes.append('原来那条「结束」会被换掉；Ctrl+Z 可以放回')
         return plan
 
-    plan.reason = (f'`{plan.control_label}` 的最后一条是「{raw}」—— '
-                   f'判不出安全的插入点，不写')
-    plan.blocking.append(plan.reason)
-    return plan
+    return _block(plan, f'`{plan.control_label}` 的最后一条是「{raw}」—— '
+                        f'判不出安全的插入点，不写')
 
 
 def _render_route(etype: str, target: str, from_clause: str = '') -> str:
