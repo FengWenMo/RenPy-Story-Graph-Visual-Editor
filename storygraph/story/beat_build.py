@@ -1877,63 +1877,20 @@ def _hydrate_audio(beat, channel, symbols, parse_audio):
 
 
 
-def apply_script_definitions(registry, parse_result) -> dict:
+def _merge_image_declarations(registry, images) -> int:
     """
-    把脚本里 `define` / `image` / `transform` 声明合并进资源表（内存）。
+    合并 `image` 声明，返回**新增条数**。
 
-    这是"程序敲代码 → 表格跟着变"的核心一步：
-      · `image bg bg1_1 = "..."` 声明 → 图像清单（`scene black`、
-        `show bg bg1_1` 引用的名字就在这里，不合并就会被报"未登记"）
-      · `transform bounce_quick:` → 变换清单（否则表格里选不到自定义变换）
-      · `define x = DynamicCharacter(...)` → 角色清单
-
-    合并策略分两种，因为"谁权威"本来就不同：
-
-      · **新增**：表里没有的条目直接加进来；
-      · **更新**：`transform` 的 `ATL` / `Params` / `Doc` 以**脚本为准**
-        （脚本里定义了这个 transform，它的定义就是权威）。
-
-    为什么要有第二种：原先对已登记条目一律"只补空缺"，于是**改了 .rpy 里的
-    定义、表格永远不跟着变**；更糟的是，解析器历史上写坏的旧 ATL 会被永久
-    固化在表里（2026-09-28 实测：`    #anchor(0.5, 0.5)` 被啃成
-    `    hor(0.5, 0.5)` 落进 transforms.xlsx，解析器修好后产物依旧是错的）。
-
-    其余字段不动：人写的 `Category` / `Notes` 保留；`image` / `character`
-    仍"只补空缺"（显示名之类可能被人改过）。
-
-    返回 `{'images': n, 'transforms': n, 'characters': n, 'updated': n}`：
-    前三个是**新增**数量，`updated` 是**被脚本改写的字段数**（调用方据此判断
-    "要不要落盘"——只更新时也得写）。
+    三种形态各走一条（判据在同一张表里，别处不要另写一套）：
+      · `layered`：合成立绘，以 tag 本身为 ID，属性清单单独存；
+      · `atl`：块形式的图像声明（`image logo blink:` + 块体，2026-10-19）；
+      · 其余：普通声明，已登记的只补空缺（显示名之类可能被人改过）。
     """
-    if registry is None or parse_result is None:
-        return {'images': 0, 'transforms': 0, 'characters': 0, 'updated': 0}
-
-    added = {'images': 0, 'transforms': 0, 'characters': 0}
-    updated = 0
-
-    # ---------- 图像声明 ----------
-    for name, info in (getattr(parse_result, 'images', {}) or {}).items():
+    added = 0
+    for name, info in (images or {}).items():
         info = info or {}
         if info.get('layered'):
-            # 合成立绘：以 tag 本身为 ID，属性清单单独存，
-            # 校验时按"tag 存在 + 属性都声明过"判定（见 validate）。
-            if name in registry.images:
-                row = registry.images[name]
-                if info.get('attrs'):
-                    row.setdefault('_attrs', list(info['attrs']))
-            else:
-                registry.images[name] = {
-                    'ID': name,
-                    'Path': info.get('expr') or '',
-                    'Tag': name,
-                    'Attributes': '',
-                    'Category': 'character',
-                    'Notes': _source_note(info),
-                    '_layered': True,
-                    '_attrs': list(info.get('attrs') or []),
-                    '_from_script': True,
-                }
-                added['images'] += 1
+            added += _merge_layered_image(registry, name, info)
             continue
 
         image_id = _image_id_from_name(name)
@@ -1941,52 +1898,95 @@ def apply_script_definitions(registry, parse_result) -> dict:
             continue
         tag, attrs = _split_image_name(name)
         if info.get('atl'):
-            # **ATL / 块形式**的图像声明（`image logo blink:` + 块体，
-            # 2026-10-19）：贴图在块里，可能一个都没有（纯 ATL 动画），
-            # 也可能有好几层 —— 所以 `Path` 留空，`Notes` 说清去哪看。
-            # 为什么必须进表：不进表就选不到、`show 名` 还会被报成缺资源。
-            if image_id not in registry.images:
-                registry.images[image_id] = {
-                    'ID': image_id,
-                    'Path': '',
-                    'Tag': tag,
-                    'Attributes': attrs,
-                    'Category': _category_from_tag(tag),
-                    'Notes': (_source_note(info)
-                              + '；ATL 定义（贴图写在块里，看源文件）').lstrip('；'),
-                    '_from_script': True,
-                    '_atl': True,
-                    # 只读定位要用的两个字段：`assets.atl_block` 直接读它们，
-                    # 不用再回头解析 Notes 里的 `文件:行号`（那是给人看的）。
-                    '_source_file': info.get('source_file') or '',
-                    '_source_line': info.get('source_line') or 0,
-                }
-                added['images'] += 1
+            added += _merge_atl_image(registry, image_id, tag, attrs, info)
             continue
-        row = {
-            'ID': image_id,
-            'Path': info.get('path') or '',
-            'Tag': tag,
-            'Attributes': attrs,
-            'Category': _category_from_tag(tag),
-            'Notes': _source_note(info),
-            '_from_script': True,
-        }
-        if info.get('solid') and not row['Path']:
-            row['Solid'] = info['solid']
-        if image_id in registry.images:
-            existing = registry.images[image_id]
-            for key, val in row.items():
-                if key.startswith('_'):
-                    continue
-                if not existing.get(key) and val:
-                    existing[key] = val
-        else:
-            registry.images[image_id] = row
-            added['images'] += 1
+        added += _merge_plain_image(registry, image_id, tag, attrs, info)
+    return added
 
-    # ---------- 变换 ----------
-    for name, tf in (getattr(parse_result, 'transforms', {}) or {}).items():
+
+def _merge_layered_image(registry, name, info) -> int:
+    """合成立绘：新增时整套写进来，已存在的只补属性清单。"""
+    if name in registry.images:
+        row = registry.images[name]
+        if info.get('attrs'):
+            row.setdefault('_attrs', list(info['attrs']))
+        return 0
+    registry.images[name] = {
+        'ID': name,
+        'Path': info.get('expr') or '',
+        'Tag': name,
+        'Attributes': '',
+        'Category': 'character',
+        'Notes': _source_note(info),
+        '_layered': True,
+        '_attrs': list(info.get('attrs') or []),
+        '_from_script': True,
+    }
+    return 1
+
+
+def _merge_atl_image(registry, image_id, tag, attrs, info) -> int:
+    """
+    块形式 ATL 的图像声明：`Path` 留空，`Notes` 说清贴图写在块里。
+
+    为什么必须进表：不进表就选不到、`show 名` 还会被报成缺资源。
+    两个只读定位字段（`_source_file` / `_source_line`）给 `assets.atl_block`
+    直接用，不用再回头解析 Notes 里那个给人看的 `文件:行号`。
+    """
+    if image_id in registry.images:
+        return 0
+    registry.images[image_id] = {
+        'ID': image_id,
+        'Path': '',
+        'Tag': tag,
+        'Attributes': attrs,
+        'Category': _category_from_tag(tag),
+        'Notes': (_source_note(info)
+                  + '；ATL 定义（贴图写在块里，看源文件）').lstrip('；'),
+        '_from_script': True,
+        '_atl': True,
+        '_source_file': info.get('source_file') or '',
+        '_source_line': info.get('source_line') or 0,
+    }
+    return 1
+
+
+def _merge_plain_image(registry, image_id, tag, attrs, info) -> int:
+    """普通 `image` 声明：新增整套写入，已登记的**只补空缺**。"""
+    row = {
+        'ID': image_id,
+        'Path': info.get('path') or '',
+        'Tag': tag,
+        'Attributes': attrs,
+        'Category': _category_from_tag(tag),
+        'Notes': _source_note(info),
+        '_from_script': True,
+    }
+    if info.get('solid') and not row['Path']:
+        row['Solid'] = info['solid']
+    if image_id in registry.images:
+        existing = registry.images[image_id]
+        for key, val in row.items():
+            if key.startswith('_'):
+                continue
+            if not existing.get(key) and val:
+                existing[key] = val
+        return 0
+    registry.images[image_id] = row
+    return 1
+
+
+def _merge_transform_definitions(registry, transforms) -> tuple:
+    """
+    合并 `transform` 声明 → ``(新增条数, 被改写的字段数)``。
+
+    脚本是 `ATL` / `Params` / `Doc` 的**权威来源**：值不同就更新（见
+    `apply_script_definitions` 的 docstring）。改写的字段数要回给调用方，
+    因为它决定"要不要落盘" —— 只更新时也得写。
+    """
+    added = 0
+    updated = 0
+    for name, tf in (transforms or {}).items():
         row = {
             'ID': name,
             'Path': '',
@@ -2000,7 +2000,6 @@ def apply_script_definitions(registry, parse_result) -> dict:
         }
         if name in registry.transforms:
             existing = registry.transforms[name]
-            # 脚本是 ATL / Params / Doc 的权威来源：**值不同就更新**（见 docstring）
             for key in ('ATL', 'Params', 'Doc'):
                 val = row.get(key)
                 if val and existing.get(key) != val:
@@ -2009,10 +2008,19 @@ def apply_script_definitions(registry, parse_result) -> dict:
             existing.setdefault('_from_script', True)
         else:
             registry.transforms[name] = row
-            added['transforms'] += 1
+            added += 1
+    return added, updated
 
-    # ---------- 角色 ----------
-    for var, ch in (getattr(parse_result, 'characters', {}) or {}).items():
+
+def _merge_character_definitions(registry, characters) -> int:
+    """
+    合并 `define x = Character(...)` → 新增条数。
+
+    已登记的角色**只补空缺**，只有 `_dialogue_count` 永远以脚本为准
+    （它是统计值，人不会去改它，旧值只会越来越旧）。
+    """
+    added = 0
+    for var, ch in (characters or {}).items():
         row = {
             'ID': var,
             'Name': getattr(ch, 'display_name', '') or var,
@@ -2043,10 +2051,53 @@ def apply_script_definitions(registry, parse_result) -> dict:
                     existing[key] = val
         else:
             registry.characters[var] = row
-            added['characters'] += 1
-
-    added['updated'] = updated
+            added += 1
     return added
+
+
+def apply_script_definitions(registry, parse_result) -> dict:
+    """
+    把脚本里 `define` / `image` / `transform` 声明合并进资源表（内存）。
+
+    这是"程序敲代码 → 表格跟着变"的核心一步：
+      · `image bg bg1_1 = "..."` 声明 → 图像清单（`scene black`、
+        `show bg bg1_1` 引用的名字就在这里，不合并就会被报"未登记"）
+      · `transform bounce_quick:` → 变换清单（否则表格里选不到自定义变换）
+      · `define x = DynamicCharacter(...)` → 角色清单
+
+    合并策略分两种，因为"谁权威"本来就不同：
+
+      · **新增**：表里没有的条目直接加进来；
+      · **更新**：`transform` 的 `ATL` / `Params` / `Doc` 以**脚本为准**
+        （脚本里定义了这个 transform，它的定义就是权威）。
+
+    为什么要有第二种：原先对已登记条目一律"只补空缺"，于是**改了 .rpy 里的
+    定义、表格永远不跟着变**；更糟的是，解析器历史上写坏的旧 ATL 会被永久
+    固化在表里（2026-09-28 实测：`    #anchor(0.5, 0.5)` 被啃成
+    `    hor(0.5, 0.5)` 落进 transforms.xlsx，解析器修好后产物依旧是错的）。
+
+    其余字段不动：人写的 `Category` / `Notes` 保留；`image` / `character`
+    仍"只补空缺"（显示名之类可能被人改过）。
+
+    返回 `{'images': n, 'transforms': n, 'characters': n, 'updated': n}`：
+    前三个是**新增**数量，`updated` 是**被脚本改写的字段数**（调用方据此判断
+    "要不要落盘"——只更新时也得写）。
+
+    三类声明各一个助手（2026-11-01）：图像还要再按 layered / ATL / 普通分三条，
+    因为"新条目长什么样"三套都不一样。这张门面只负责汇总计数。
+    """
+    if registry is None or parse_result is None:
+        return {'images': 0, 'transforms': 0, 'characters': 0, 'updated': 0}
+
+    n_images = _merge_image_declarations(
+        registry, getattr(parse_result, 'images', {}) or {})
+    n_transforms, updated = _merge_transform_definitions(
+        registry, getattr(parse_result, 'transforms', {}) or {})
+    n_characters = _merge_character_definitions(
+        registry, getattr(parse_result, 'characters', {}) or {})
+
+    return {'images': n_images, 'transforms': n_transforms,
+            'characters': n_characters, 'updated': updated}
 
 
 
