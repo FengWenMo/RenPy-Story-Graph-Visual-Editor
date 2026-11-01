@@ -630,7 +630,30 @@ class GraphOpsMixin:
             self._log(msg)
             self._status(msg)
             return res
-        c = res['counts']
+        self._report_asset_load(res)
+        # 打开项目之后：把上次的剧情图重建出来（L7 完整版，2026-10-24）。
+        # 放在最后：资源表读完了、状态栏也写了，这一步只加图。
+        try:
+            self._restore_graph_files()
+        except Exception as e:               # noqa: BLE001 - 恢复失败不该挡打开项目
+            swallow('ui_qt.open_project_path.restore_graph', e)
+        return res
+
+    def _report_asset_load(self, res) -> None:
+        """
+        把"这次打开项目读到了什么"逐条说给用户（2026-11-01 从
+        `open_project_path` 原样搬出，文案/判据未改）。
+
+        这一支有六种事实（重建 / 补登 / 自动删除 / 改指 / 合并 / 删不掉），
+        混在"打开项目"的流程里会把那条主线（设根 → 读表 → 刷候选 →
+        恢复图）淹掉。按"表怎么了"分三段说，每段只读 `res` 与 `self`。
+        """
+        self._report_table_update(res)
+        self._report_table_leftovers(res)
+        self._report_asset_counts(res)
+
+    def _report_table_update(self, res) -> None:
+        """表怎么了那一路：新建 / 修表留档 / 保住了多少手写内容 / 自动对齐。"""
         # **"没有表 → 我当场给你建了一张"必须说出来**（用户 2026-10-05 实测报：
         # 复制出来的项目里 `game/asset_tables/` 是空目录，从前只报一句
         # "读不到资源表（xlsx）"，用户不知道该怎么办）。建表是**写用户的项目**，
@@ -717,6 +740,9 @@ class GraphOpsMixin:
                 + f'\n        表：{self._project_root}/game/asset_tables/'
                   f'（表跟资源**一一对应**：盘上有的补进来、文件没了的删掉；'
                   f'想留一行"还没出图"的资源就在它的 Notes 里写「占位」）')
+
+    def _report_table_leftovers(self, res) -> None:
+        """删不掉的那些（最典型：表正开在 Excel 里被锁着）。"""
         # **删不掉的**（最典型：表正开在 Excel 里被锁着）才会留在这儿，
         # 那时才需要说"已标为不可用"。用户 2026-10-05：
         # > 如果不可用直接删了就行！
@@ -730,6 +756,10 @@ class GraphOpsMixin:
                 f'        在那之前它们被临时标为**不可用**（不进候选、解析不到）；'
                 f'关掉 Excel 再打开一次项目就会删掉。'
                 f'要留着当占位：在那一行 `Notes` 里写「占位」。')
+
+    def _report_asset_counts(self, res) -> None:
+        """最后一行数字 + 状态栏（数字来源必须说清，见下）。"""
+        c = res['counts']
         # 旧版的这一行原样搬回来（用户 2026-10-03："导入的时候没有反馈"）：
         # 图片/音乐/音效/语音/变换/角色的数量要看得见。
         #
@@ -752,13 +782,7 @@ class GraphOpsMixin:
                f'音效 {c["sounds"]} · 语音 {c["voices"]} · '
                f'角色 {c["characters"]}；'
                f'剧情图**不受影响**，要加章节请用「➕ 导入章节 .rpy」'))
-        # 打开项目之后：把上次的剧情图重建出来（L7 完整版，2026-10-24）。
-        # 放在最后：资源表读完了、状态栏也写了，这一步只加图。
-        try:
-            self._restore_graph_files()
-        except Exception as e:               # noqa: BLE001 - 恢复失败不该挡打开项目
-            swallow('ui_qt.open_project_path.restore_graph', e)
-        return res
+
 
     def _restore_graph_files(self) -> int:
         """
