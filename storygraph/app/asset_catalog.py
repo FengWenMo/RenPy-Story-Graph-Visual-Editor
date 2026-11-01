@@ -54,6 +54,256 @@ class AssetCatalog:
     def __init__(self, registry=None, project_root=None):
         self._registry = registry
         self.project_root = project_root
+        #: `source()` 的缓存：`RegistrySource` 很轻，但 `AssetPanelData` 会
+        #: 反复问它（一次概览里六七个查询），别每次新建一个。
+        self._source = None
+        #: `AssetIndex` 缓存（`resolve_references` 用；真实项目建一次 ~0.4 s）。
+        #: `image_path` 会被卡片**逐张**调用，绝不能每次重建。
+        self._index = None
+
+    @property
+    def registry(self):
+        """构造时拿到的那份 registry（`None` = 还没打开项目）。"""
+        return self._registry
+
+    def source(self):
+        """
+        当前资源表 → "看起来像 engine"的适配对象（`app.picker.RegistrySource`）。
+
+        `app.beats` 那批检索函数历史上收的都是 **engine**（用
+        `engine.get_registry()` 取表）；服务手上只有 registry，于是统一过一次
+        适配 —— 与 `EditorSession.source()` 同一个对象、同一条理由，
+        只是这一份归服务自己缓存。
+        """
+        if self._source is None:
+            from storygraph.app.picker import RegistrySource
+            self._source = RegistrySource(self._registry, self.project_root)
+        return self._source
+
+    def invalidate(self) -> None:
+        """资源表换了 / 重新读过之后调用：把**索引**缓存作废（源对象也重来）。"""
+        self._index = None
+        self._source = None
+
+    # ------------------------------------------------------------------
+    # 缩略图路径（"这张立绘在磁盘上到底是哪个文件"）
+    # ------------------------------------------------------------------
+
+    def resolve_ids(self, name: str) -> list:
+        """
+        `名字 → 资产 ID` 列表（走唯一真源 `resolve_references`），带索引缓存。
+
+        索引建一次就缓存起来（真实项目 3149 行，建一次 ~0.4 秒；`image_path`
+        会被卡片反复调用，不能每次重建）。`invalidate()` 之后重建。
+        """
+        if self._registry is None:
+            return []
+        idx = self._index
+        if idx is None:
+            try:
+                from storygraph.assets.asset_registry import AssetIndex
+                idx = AssetIndex(self._registry)
+                self._index = idx
+            except Exception as e:                # noqa: BLE001
+                swallow('app.asset_catalog.resolve_ids.index', e)
+                return []
+        try:
+            from storygraph.assets.asset_registry import resolve_references
+            return list(resolve_references(name, self._registry, idx))
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_catalog.resolve_ids', e)
+            return []
+
+    def composed_sprite_path(self, image_spec: str):
+        """
+        `ling close_happy base_swimsuit` → **叠好的那张图**的路径（叠不出来 None）。
+
+        为什么要它（用户 2026-10-16）：
+        > 我换了服装，但显然你的图片没有跟着随即切换……还是原来那张……不合理！
+
+        根因不是"图没换"，是**解析出来就是同一个文件**：多属性那一支一次只试
+        一个属性、命中即返回（当年为修"无头骑士"改的），于是第二维永远被吃掉。
+        正确做法是按项目自己的 `layeredimage` 分组（身体件 + 脸件）叠起来 ——
+        仓库里已经有这件（`app/layer_compose.compose_sprite`），只是**预览这条
+        路没用上**（演出预览那条路 `stage.resolve_frame_assets` 早在用了）。
+
+        ⚠ 两条诚实退化：
+          · 项目没有 `layeredimage` 声明 / 认不出这个 tag → 返回 None，
+            调用方走原来的单图路径（**老项目一个字节不变**）；
+          · 只有一层（单图立绘）→ `compose_sprite` 直接返回原图，零成本。
+        """
+        root = getattr(self, 'project_root', None)
+        if not root:
+            return None
+        try:
+            parts = str(image_spec or '').split()
+            if not parts:
+                return None
+            # ⚠ 一个词也照样试（`lan happy` 这种：表情有了、服装走引擎默认）——
+            #   分层项目里"一个词"同样要叠出完整立绘，不能退回单张表情件
+            #   （那正是当年"无头骑士"那个坑的另一面）。
+            #   没有 `layeredimage` 声明的 tag（`cg cg03` / `bg room`）会在下面
+            #   被 `model.has(tag)` 挡掉 → 老路，一个字都不改。
+            from storygraph.story.layered_model import (load_layer_model_cached,
+                                                        resolve_layers)
+            model = load_layer_model_cached(root)
+            tag, attrs = parts[0], parts[1:]
+            if model is None or not getattr(model, 'images', None) \
+                    or not model.has(tag):
+                return None
+            plan = resolve_layers(model, tag, attrs, root)
+            if not getattr(plan, 'ok', False):
+                return None
+            from storygraph.app.layer_compose import compose_sprite
+            path = compose_sprite(plan)
+            return path if path is not None else None
+        except Exception as e:                    # noqa: BLE001 - 合成不了走老路
+            swallow('app.asset_catalog.composed_sprite_path', e)
+            return None
+
+    def image_path(self, image_spec: str):
+        """
+        立绘 image spec（`ling happy`）→ 磁盘上的真实图片路径（找不到 None）。
+
+        **这是立绘缩略图的真源**：路径只在资源表的 `Path` 列里，
+        而 `symbols` 里没有资源表 —— 早期前端拿 `symbols.registry` 去取，
+        恒为 None，于是缩略图静默地永远加载不出来。
+        """
+        from storygraph.app.picker import thumbnail_path
+        spec = str(image_spec or '').strip()
+        if not spec or self._registry is None:
+            return None
+        try:
+            # ⚠⚠ **分层合成优先**（2026-10-16 用户实测报的"换了服装图不变"）。
+            #
+            # 这个项目（以及 Ren'Py 的 `layeredimage` 写法）里立绘是**分层**的：
+            # 身体件（`outfit`: base_swimsuit / base_arms_akimbo）与脸件
+            # （`expressions`: close_happy …）各是一张图，**必须叠起来**才是完整立绘。
+            #
+            # 从前这里在"多个属性"那一支**一次只试一个词、命中即 return**，
+            # 于是 `ling close_happy base_swimsuit` 永远命中 `close_happy.png`
+            # ——换服装（那一个词）**结果必然不变**，user 看到的就是"图没跟着换"。
+            # 现在先按项目自己的 `layeredimage` 结构叠（`compose_sprite` 有落盘缓存，
+            # 键含**每一层**的路径与 mtime/size，所以换哪一维都会重合成）。
+            composed = self.composed_sprite_path(spec)
+            if composed is not None:
+                return composed
+            from storygraph.app.beats import lookup_image_id
+            images = getattr(self._registry, 'images', {}) or {}
+            parts = spec.split()
+            if not parts:
+                return None
+            aid = None
+            if len(parts) < 2:
+                # ⚠ **下划线写法**（`ling_angry`）也要认（用户 2026-10-05：
+                # "为什么你改一个表……还是会导致立绘不显示呢？？？"）。
+                #
+                # 卡片里存的是工具自己的写法（空格→下划线，见
+                # `_normalize_image_name`），而 `image_path` 从前只认
+                # `"ling angry"` 这种空格形式 → 卡片明明是 `ling_angry`，
+                # 预览却恒为空。这里走**唯一真源**（引用解析），它顺带把
+                # "某一行 ID 恰好叫 ling_angry 但没有 Tag"那种劫持也修掉了。
+                for hit in self.resolve_ids(spec):
+                    if hit in images:
+                        aid = hit
+                        break
+                if aid is None:
+                    return None
+            else:
+                tag, rest = parts[0], parts[1:]
+                # `ling happy` → `ling_happy` 这类 ID，先在表里找准。
+                # ⚠ 多属性时**先试表情件**（`show ye base_handdown happy` 的
+                # `base_handdown` 只有身体没有头 → 无头骑士，2026-10-05）。
+                from storygraph.app.beats import preferred_image_attrs
+                if len(rest) > 1:
+                    for attr in preferred_image_attrs(rest):
+                        cand = lookup_image_id(images, tag, [attr])
+                        if cand:
+                            aid = cand
+                            break
+                if not aid:
+                    aid = lookup_image_id(images, tag, rest) or \
+                        '_'.join([tag] + rest)
+            hit = thumbnail_path(self._registry, 'image', aid, self.project_root)
+            if hit is None:
+                # 表里查不到这个写法 → 照**脚本里的 `image` 声明**认（与演出预览
+                # 同一条路，见 `app.stage.script_images`）。真实项目实测：
+                # `bg bg11_0` 的别名只写在脚本里（`image bg bg11_0 = "…/bg11.png"`），
+                # 不这么兜的话预览画得出来、卡片上却是一片空白。
+                from storygraph.app.stage import image_index, resolve_stage_asset
+                hit = resolve_stage_asset(spec, images, self.project_root,
+                                          image_index(self.project_root))
+            return hit
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.asset_catalog.image_path', e)
+            return None
+
+    # ------------------------------------------------------------------
+    # 资产概览（读，不改）
+    # ------------------------------------------------------------------
+
+    def overview(self, linker=None, top: int = 15) -> dict:
+        """
+        资产 / 角色的只读统计（资产面板那一套查询，界面用）。
+
+        数据源是 `app.asset_panel.AssetPanelData`（框架无关的查询层）——
+        界面**不重写**"按 category 分组 / 角色台词量排名"这类逻辑。
+        `linker` 由宿主传（它要读脚本、要缓存，那属于会话 / 引擎，不是表）。
+
+        返回 `{ok, statistics, categories, top_characters, undefined,
+        unused_characters, unused_assets, broken, error}`。
+        """
+        from storygraph.app.asset_panel import AssetPanelData
+        if self._registry is None:
+            return {'ok': False, 'error': '还没有资源表 —— 先「📁 打开项目」',
+                    'statistics': {}, 'categories': {}, 'top_characters': [],
+                    'undefined': [], 'unused_characters': [],
+                    'unused_assets': [], 'broken': []}
+        panel = AssetPanelData(self.source())
+        # 角色相关的查询走 linker（`AssetPanelData` 从 engine 上取）：
+        # 没有它，"角色台词量 / 未定义角色 / 没出场的角色"永远是空的。
+        if linker is not None:
+            try:
+                panel.engine.linker = linker
+            except Exception:                 # noqa: BLE001
+                swallow('app.asset_catalog.overview.linker')
+        out = {'ok': True, 'error': ''}
+        for key, fn in (('statistics', panel.get_statistics),
+                        ('categories', panel.get_category_breakdown),
+                        ('undefined', panel.get_undefined_characters),
+                        ('unused_characters', panel.get_unused_characters),
+                        ('broken', panel.get_broken_references),
+                        ('unused_assets', lambda: panel.get_unused_assets())):
+            try:
+                out[key] = fn()
+            except Exception as e:            # noqa: BLE001
+                out[key] = {} if key in ('statistics', 'categories') else []
+                out.setdefault('warnings', []).append(f'{key}: {e}')
+        try:
+            out['top_characters'] = panel.get_character_ranking()[:top]
+        except Exception as e:                     # noqa: BLE001
+            swallow('app.asset_catalog.overview.ranking', e)
+            out['top_characters'] = []
+        # **维度置信度**（2026-10-20）：资源表里的维度有多少是"表里写的"、
+        # 多少是"按引擎事实/文件名猜的"。猜的那些是结构化的软肋，
+        # 概览里必须能看见，不然"一维一格"会让人误以为全都可靠。
+        try:
+            from storygraph.assets.asset_dimensions import group_metadata
+            rows = list((getattr(self._registry, 'images', {}) or {}).values())
+            meta = group_metadata(rows)
+            groups = sum(len(g) for g in meta.values())
+            guessed = sum(1 for g in meta.values()
+                          for entry in g.values() if entry.get('guessed'))
+            out['dimension_confidence'] = {'groups': groups,
+                                           'guessed': guessed}
+        except Exception as e:                # noqa: BLE001 - 统计失败不影响概览
+            swallow('app.asset_catalog.overview.dimensions', e)
+            out['dimension_confidence'] = {}
+        # 大列表只给前 N 条（界面是给人看的，不是 dump）
+        for key in ('unused_assets', 'broken', 'undefined'):
+            if isinstance(out.get(key), list) and len(out[key]) > 200:
+                out[key] = out[key][:200]
+        return out
 
     # ------------------------------------------------------------------
     # 说话人

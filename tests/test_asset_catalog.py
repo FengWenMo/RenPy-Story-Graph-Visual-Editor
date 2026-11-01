@@ -132,3 +132,114 @@ class TestOneSourceOfTruth:
         assert [v for v, _d in session.asset_choices('music')] == ['bgm_dawn']
         assert session._image_spec_of('ling_happy', {
             'Tag': 'ling', 'Attributes': 'happy'}) == 'ling happy'
+
+
+# ----------------------------------------------------------------------
+#  第四刀：缩略图路径 / 资源概览（"读 + 缓存"那一半）
+# ----------------------------------------------------------------------
+
+class TestSource:
+    def test_source_is_memoized(self):
+        """`AssetPanelData` 一次概览要问它六七遍，别每次新建一个。"""
+        cat = AssetCatalog(registry(), project_root='.')
+        assert cat.source() is cat.source()
+
+    def test_invalidate_brings_a_new_one(self):
+        cat = AssetCatalog(registry(), project_root='.')
+        first = cat.source()
+        cat.invalidate()
+        assert cat.source() is not first
+
+    def test_an_empty_catalog_still_has_one(self):
+        """没有 registry 时也给一个空源（界面降级 ≠ 崩）。"""
+        assert AssetCatalog(None).source() is not None
+
+
+class TestResolveIds:
+    def test_the_index_is_built_once_and_reused(self):
+        """
+        索引要缓存：真实项目 3149 行、建一次 ~0.4 s，而 `image_path` 会被
+        卡片**逐张**调用。判据 = 两次调用拿到**同一个** `AssetIndex` 对象。
+        """
+        cat = AssetCatalog(registry(images={
+            'ling_happy': {'Tag': 'ling', 'Attributes': 'happy'}}))
+        cat.resolve_ids('ling_happy')
+        idx = cat._index
+        assert idx is not None, '没建索引（或没存下来）'
+        cat.resolve_ids('ling_happy')
+        assert cat._index is idx, '索引被重建了 —— 缓存等于没有'
+
+    def test_invalidate_drops_it(self):
+        cat = AssetCatalog(registry(images={
+            'ling_happy': {'Tag': 'ling', 'Attributes': 'happy'}}))
+        cat.resolve_ids('ling_happy')
+        cat.invalidate()
+        assert cat._index is None
+
+    def test_no_registry_answers_empty(self):
+        assert AssetCatalog(None).resolve_ids('ling_happy') == []
+
+
+class TestImagePath:
+    def test_empty_spec_and_no_registry_answer_none(self):
+        assert AssetCatalog(registry()).image_path('') is None
+        assert AssetCatalog(registry()).image_path('   ') is None
+        assert AssetCatalog(None).image_path('ling happy') is None
+
+    def test_a_registered_row_resolves_to_the_file_on_disk(self, tmp_path):
+        """表里那一行的 `Path` 就是缩略图的真源（不猜、不扫目录）。"""
+        img = tmp_path / 'game' / 'images' / 'characters' / 'ling' / 'happy.png'
+        img.parent.mkdir(parents=True)
+        img.write_bytes(b'\x89PNG\r\n\x1a\n')
+        reg = registry(images={'ling_happy': {
+            'ID': 'ling_happy', 'Tag': 'ling', 'Attributes': 'happy',
+            'Path': 'game/images/characters/ling/happy.png'}})
+        cat = AssetCatalog(reg, project_root=str(tmp_path))
+        hit = cat.image_path('ling happy')
+        assert hit is not None and str(hit).endswith('happy.png')
+
+    def test_a_missing_file_answers_none_instead_of_a_guess(self, tmp_path):
+        reg = registry(images={'ling_happy': {
+            'ID': 'ling_happy', 'Tag': 'ling', 'Attributes': 'happy',
+            'Path': 'game/images/characters/ling/happy.png'}})
+        cat = AssetCatalog(reg, project_root=str(tmp_path))
+        assert cat.image_path('ling happy') is None
+
+    def test_a_project_without_layeredimage_takes_the_old_path(self, tmp_path):
+        """没有分层声明 → `composed_sprite_path` 诚实返回 None（老项目不变）。"""
+        cat = AssetCatalog(registry(), project_root=str(tmp_path))
+        assert cat.composed_sprite_path('hero glad plain') is None
+
+
+class TestOverview:
+    def test_no_registry_says_so(self):
+        res = AssetCatalog(None).overview()
+        assert res['ok'] is False and '还没有资源表' in res['error']
+        assert res['statistics'] == {} and res['broken'] == []
+
+    def test_it_reports_the_panel_sections(self, tmp_path):
+        """六个查询 + 排名 + 维度置信度，全都是"拿表就能答"的。"""
+        reg = registry(images={'ling_happy': {
+            'ID': 'ling_happy', 'Tag': 'ling', 'Attributes': 'happy',
+            'Category': 'character'}})
+        res = AssetCatalog(reg, project_root=str(tmp_path)).overview(top=3)
+        assert res['ok'] is True
+        for key in ('statistics', 'categories', 'top_characters', 'undefined',
+                    'unused_characters', 'unused_assets', 'broken'):
+            assert key in res, key
+        assert len(res['top_characters']) <= 3
+        assert 'groups' in res['dimension_confidence']
+
+    def test_a_broken_query_does_not_take_the_whole_overview_down(self, tmp_path):
+        """一个查询炸了，其余照出 —— 只是把那条记进 `warnings`。"""
+        reg = registry()
+        cat = AssetCatalog(reg, project_root=str(tmp_path))
+        cat.source().get_statistics = _boom      # 只弄坏第一个查询
+        res = cat.overview()
+        assert res['ok'] is True
+        assert res['statistics'] == {}
+        assert any('statistics' in w for w in res['warnings'])
+
+
+def _boom(*_a, **_k):
+    raise RuntimeError('这个查询坏了')

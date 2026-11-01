@@ -1,4 +1,4 @@
-﻿'''
+'''
 卡片的立绘缩略图：**分层合成** + **一维一格的口径统一**
 =====================================================
 
@@ -68,7 +68,16 @@ def hero_project(tmp_path):
 
 
 class _FakeSession:
-    """只给 `path_of_image` 需要的两件东西（宿主接口是 `registry()` + project_root）。"""
+    """只给 `path_of_image` 需要的三件东西。
+
+    宿主接口是 `registry()` + `project_root` + `catalog()`（2026-11-01 服务化
+    第四刀之后，判据与缓存都搬进 `AssetCatalog`，混入类只剩转发 ——
+    真会话的 `catalog()` 会**缓存同一个实例**，这里每次都新建：这些用例
+    验的是合成结果与缓存键，不是"实例复用"）。
+
+    混入类上那几个方法仍按老写法（`AssetRegistryMixin._composed_sprite_path(s, …)`）
+    直接调 —— 那正是"转发之后调用方不用改"这条契约的落地检查。
+    """
 
     def __init__(self, root):
         from storygraph.assets.asset_registry import AssetRegistry
@@ -85,6 +94,10 @@ class _FakeSession:
 
     def registry(self):
         return self._reg
+
+    def catalog(self):
+        from storygraph.app.asset_catalog import AssetCatalog
+        return AssetCatalog(self._reg, self.project_root)
 
 
 # ----------------------------------------------------------------------
