@@ -312,9 +312,34 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
     同时追加到 `sanitized`（W114 留痕的依据）。
     """
     from storygraph.core.vocabulary import statement_head_token
-    from storygraph.story.spec_args import (fold_dynamic_columns,
-                                            parse_call_column,
-                                            parse_dynamic_full)
+    from storygraph.story.spec_args import parse_dynamic_full
+
+    cleaned, dyn = _clean_dynamic_columns(values, sanitized)
+    if not dyn:
+        return cleaned
+    head_token = statement_head_token(beat.statement_head())
+    leaf, code_calls, head_dyn = _group_dynamic_columns(beat, dyn, head_token)
+    # ① **叶语句**（`with`/`pause`/`window`）：折进 `Beat.raw` 那一行
+    #    （并同步 `ordered`）—— 不碰头行、不换渲染通道。
+    for key, value in leaf.items():
+        col_head, _param, pos = parse_dynamic_full(key)
+        _fold_leaf_arg(beat, col_head, pos, value)
+    # ①b **技术调用**（`$ renpy.transition(...)` / 项目包装函数）：折进
+    #     `Beat.code` 那一行（并同步 `ordered`）—— 同样不碰头行。
+    for head, kind, arg, value in code_calls.values():
+        _fold_code_call_arg(beat, head, kind, arg, value)
+    # ② **头行语句**（声明的自定义语句 / 循环 / 相机）：折进那个字段。
+    if head_dyn:
+        _fold_head_columns(beat, head_dyn, pattern)
+    return cleaned
+
+
+def _clean_dynamic_columns(values, sanitized):
+    """
+    先清洗每一列的值，返回 `(真的被改过的列名, {列名: 干净值})`。
+
+    只留动态列（`is_dynamic_column`）—— 别的列由调用方自己处理。
+    """
     cleaned: list = []
     dyn: dict = {}
     for key, val in (values or {}).items():
@@ -327,144 +352,184 @@ def fold_spec_arg_columns(beat, values, sanitized: list = None,
             if sanitized is not None:
                 sanitized.append(str(key))
         dyn[str(key)] = clean
-    if not dyn:
-        return cleaned
-    head_token = statement_head_token(beat.statement_head())
+    return cleaned, dyn
+
+
+def _group_dynamic_columns(beat, dyn, head_token):
+    """
+    把动态列分成三组：`(叶语句, 技术调用, 头行)`。
+
+    技术调用（2026-10-30）：列名带 `@N` / `@kw`，而且这一拍的 `code` 里
+    **真的**有那个 head 的调用 —— 三者同时成立才当调用列。
+    """
+    from storygraph.story.spec_args import parse_call_column, parse_dynamic_full
+    from storygraph.story.call_expr import has_call
+
     leaf: dict = {}
     head_dyn: dict = {}
     code_calls: dict = {}
     for key, value in dyn.items():
-        # 技术调用（2026-10-30）：列名带 `@N` / `@kw`，而且这一拍的 `code`
-        # 里**真的**有那个 head 的调用 —— 三者同时成立才当调用列。
         call_head, _cp, call_kind, call_arg = parse_call_column(key)
-        if call_head and call_kind:
-            from storygraph.story.call_expr import has_call
-            if has_call(beat.code, call_head):
-                code_calls[key] = (call_head, call_kind, call_arg, value)
-                continue
+        if call_head and call_kind and has_call(beat.code, call_head):
+            code_calls[key] = (call_head, call_kind, call_arg, value)
+            continue
         col_head, _param, _pos = parse_dynamic_full(key)
         if col_head and col_head != head_token:
             leaf[key] = value
         else:
             head_dyn[key] = value
-    # ① **叶语句**（`with`/`pause`/`window`）：折进 `Beat.raw` 那一行
-    #    （并同步 `ordered`）—— 不碰头行、不换渲染通道。
-    for key, value in leaf.items():
-        col_head, _param, pos = parse_dynamic_full(key)
-        _fold_leaf_arg(beat, col_head, pos, value)
-    # ①b **技术调用**（`$ renpy.transition(...)` / 项目包装函数）：折进
-    #     `Beat.code` 那一行（并同步 `ordered`）—— 同样不碰头行。
-    for _key, (head, kind, arg, value) in code_calls.items():
-        _fold_code_call_arg(beat, head, kind, arg, value)
-    # ② **头行语句**（声明的自定义语句 / 循环 / 相机）：折进那个字段。
-    if head_dyn:
-        target = beat._head_field()
-        # ⚠⚠ **`show` 要用 `statement_head()` 取 base，不能用字段原文**
-        #   （2026-10-13 实测修，这是"格子长出来但一改就少一个词"的真根因）。
-        #
-        # `positional_tokens()` **总是把第一个词当语句头跳过**。而 `Beat.show`
-        # 存的是动作名**后面**那一串（`'lan swim_suit happy'`）—— 拿它当 base，
-        # 跳掉的就是 `lan` 本身，于是整排左移：
-        #   `'lan swim_suit happy'` 改第 0 格 → `'lan ling happy'`（`swim_suit` 没了）。
-        # `statement_head()` 会把 `show ` 补回来（`'show lan swim_suit happy'`），
-        # 跳掉的才是真正的语句头，位置号从此对齐（与读值那一侧同一口径）。
-        # 写回之前再把前缀摘掉（见下面那段）。
-        base = (str(beat.statement_head() or '') if target == 'show'
-                else str(getattr(beat, target, '') or ''))
-        if not base:
-            base = next((ln for ln in str(beat.opaque or '').split('\n')
-                         if ln.strip()), '')
-        # ⚠ **自己解析"这一拍用的是哪套格子"**（2026-10-14 修，中期两条的真根因）：
-        #   折回要按**字符区间**整段换（多值格 / 可选段），而区间要靠
-        #   `pattern` 才认得出来 —— 以前这个参数**没人传**（只有 `pattern=`
-        #   的调用方才有），于是折回静默退回"位置号"那套：
-        #     · 多值格只换掉第一个词 → `mypose happy smile sad at left`；
-        #     · 可选段的旧值留在原地 → `mypose happy sad smile at left`。
-        #   格子由**读值那一侧记在拍上**（`spec_arg_cells` → `_spec_pattern`），
-        #   比让每个调用方记得传可靠（`EditorSession.apply` 就是漏传的那个）。
-        if not pattern:
-            pattern = _pattern_from_beat(beat)
-        # ⚠⚠ **格子认领要用"摘掉动作名之后"的那一段**（2026-10-14 实测修，
-        #   这是"折回按格子换值"最后一个坑）：
-        #
-        #   读值那一侧（`spec_arg_cells`）传给格子认领的是 `stripped`
-        #   （`'happy sad at left'`，动作名已经摘掉，因为那一格不属于任何格子）；
-        #   而折回这一侧手上是 `base`（`'mypose happy sad at left'`，带动作名）。
-        #   两边**口径不同** → 同一套格子算出**不同的区间**：
-        #     带动作名时第 0 格抢到 `mypose`、第 1 格（多值）算成 `'happy sad'`
-        #     → 改「表情」会把 `happy sad` 整段换掉（`mypose smile at left`）。
-        #
-        #   所以折回也先摘掉动作名、折完再补回去 —— **与读值同一口径**
-        #   （这正是白盒判据要防的"两套口径"）。
-        fold_base, head_prefix = base, ''
-        # ⚠⚠ **动作名自己在格子里时不许摘**（2026-10-18 修，与读值同一判据）。
-        #
-        # 读值那一侧用的是 `head_is_a_pattern_slot(base, pattern)`：声明里
-        # 第一格是"固定几个字 `chorus`"时，**整行**（含动作名）交给认领器。
-        # 折回这一侧从前**无条件摘掉第一个词**，于是同一套格子算出不同的区间：
-        #
-        #     chorus lan ling "一起说"        ← 人物格是"可以有多个"
-        #     读值：人物 = `lan ling`        ✅
-        #     折回（摘掉 chorus）：人物 = `ling`  → 改它只换 `ling`，
-        #     实测 `chorus lan lan "一起说"`（多出来一个词，语句坏了）
-        #
-        # 判据必须与读值**逐字同源**，否则两边永远在互相拆台。
-        from storygraph.story.spec_args import head_is_a_pattern_slot
-        if pattern and not head_is_a_pattern_slot(base, pattern):
-            head_word = str(statement_head_token(base) or '')
-            words = str(base or '').split()
-            if head_word and words and words[0] == head_word:
-                split_at = str(base).index(head_word) + len(head_word)
-                head_prefix = str(base)[:split_at]
-                fold_base = str(base)[split_at:].lstrip()
-        # ⚠ **把"格子"一起交给折回那一侧**（2026-10-13 修）：多值格与可选段
-        #   按位置号换是错的（只换第一个词 / 根本没有号）—— 有格子才能按
-        #   "这一格在行里的字符区间"整段换。见 `spec_args.set_slot_value`。
-        # ⭐ **复杂子句**（2026-10-30）：同理把声明带过去 —— 否则只能认出
-        #   "有这一句、改它的值"，插不进去（不知道声明顺序/类型）。
-        clauses = list(getattr(beat, '_spec_clauses', None) or ())
-        if not clauses:
-            from storygraph.story.spec_args import parse_clause_column
-            from storygraph.story.spec_clauses import normalize_clause
-            for key in head_dyn:
-                _h, c_name, c_kw = parse_clause_column(key)
-                if not c_kw:
-                    continue
-                clause = normalize_clause({
-                    'keyword': c_kw, 'name': c_name,
-                    'kind': ('transition' if c_kw == 'with' else 'word')})
-                if clause:
-                    clauses.append(clause)
-        meta = dict(head_dyn)
-        if pattern:
-            meta['__pattern__'] = list(pattern)
-        if clauses:
-            meta['__clauses__'] = list(clauses)
-        folded = fold_dynamic_columns(fold_base, meta)
-        if head_prefix and folded != fold_base:
-            folded = f'{head_prefix} {folded}'.strip()
-        # ⚠⚠ **`show` 那一支要把动作名摘掉再写回**（2026-10-13 实测修）。
-        #
-        # `Beat.show` 存的是动作名**后面**那一串（`'lan swim_suit happy'`），
-        # 而折回时我们手上的 `base` 是**语句头原文**（`statement_head()` 补过
-        # `show ` 前缀）。不摘的话字段会变成 `'show ling swim_suit happy'`，
-        # 渲染那一侧再加一次前缀 → 写出 `show show ling …`（语法错）。
-        # 别的头字段（`spec_head`/`loop_header`/`camera_header`）存的就是**整串**，
-        # 所以只有 `show` 需要这一下。
-        #
-        # ⚠ 判断"要不要写回"必须拿**原值**比（下面这个 `original`），
-        #   不能拿 `base` —— 第一版把 `base` 重绑成了摘完前缀的新串，
-        #   于是 `folded != base` 变成"折回来的串 vs 摘过的串"，
-        #   判据错乱、值被写成了残串（实测 `'ling happy'`：`swim_suit` 直接没了）。
-        original = str(getattr(beat, target, '') or '')
-        if target == 'show' and folded != base:
-            token = str(base or '').split()[0] if str(base or '').split() else ''
-            body = str(folded or '')
-            if token and body.split() and body.split()[0] == token:
-                folded = body[len(token):].lstrip()
-        if folded != original:
-            setattr(beat, target, folded)
-    return cleaned
+    return leaf, code_calls, head_dyn
+
+
+def _fold_head_columns(beat, head_dyn, pattern):
+    """
+    头行那一支：算 base、配格子、带声明、折值、写回。五步各一个具名助手。
+
+    ⚠ **自己解析"这一拍用的是哪套格子"**（2026-10-14 修，中期两条的真根因）：
+      折回要按**字符区间**整段换（多值格 / 可选段），而区间要靠 `pattern`
+      才认得出来 —— 以前这个参数**没人传**（只有 `pattern=` 的调用方才有），
+      于是折回静默退回"位置号"那套：
+        · 多值格只换掉第一个词 → `mypose happy smile sad at left`；
+        · 可选段的旧值留在原地 → `mypose happy sad smile at left`。
+      格子由**读值那一侧记在拍上**（`spec_arg_cells` → `_spec_pattern`），
+      比让每个调用方记得传可靠（`EditorSession.apply` 就是漏传的那个）。
+    """
+    from storygraph.story.spec_args import fold_dynamic_columns
+
+    target = beat._head_field()
+    base = _head_base(beat, target)
+    if not pattern:
+        pattern = _pattern_from_beat(beat)
+    fold_base, head_prefix = _split_head_prefix(base, pattern)
+    meta = dict(head_dyn)
+    if pattern:
+        meta['__pattern__'] = list(pattern)
+    clauses = _spec_clauses_for(beat, head_dyn)
+    if clauses:
+        meta['__clauses__'] = list(clauses)
+    folded = fold_dynamic_columns(fold_base, meta)
+    if head_prefix and folded != fold_base:
+        folded = f'{head_prefix} {folded}'.strip()
+    _write_back_head(beat, target, base, folded)
+
+
+def _head_base(beat, target):
+    """
+    头行折回用的原串（空的就退到 `opaque` 第一行）。
+
+    ⚠⚠ **`show` 要用 `statement_head()` 取 base，不能用字段原文**
+      （2026-10-13 实测修，这是"格子长出来但一改就少一个词"的真根因）。
+
+    `positional_tokens()` **总是把第一个词当语句头跳过**。而 `Beat.show`
+    存的是动作名**后面**那一串（`'lan swim_suit happy'`）—— 拿它当 base，
+    跳掉的就是 `lan` 本身，于是整排左移：
+      `'lan swim_suit happy'` 改第 0 格 → `'lan ling happy'`（`swim_suit` 没了）。
+    `statement_head()` 会把 `show ` 补回来（`'show lan swim_suit happy'`），
+    跳掉的才是真正的语句头，位置号从此对齐（与读值那一侧同一口径）。
+    写回之前再把前缀摘掉（见 `_write_back_head`）。
+    """
+    base = (str(beat.statement_head() or '') if target == 'show'
+            else str(getattr(beat, target, '') or ''))
+    if not base:
+        base = next((ln for ln in str(beat.opaque or '').split('\n')
+                     if ln.strip()), '')
+    return base
+
+
+def _split_head_prefix(base, pattern):
+    """
+    把 `base` 拆成 `(交给格子认领的串, 折完要补回去的前缀)`。
+
+    ⚠⚠ **格子认领要用"摘掉动作名之后"的那一段**（2026-10-14 实测修，
+      这是"折回按格子换值"最后一个坑）：
+
+      读值那一侧（`spec_arg_cells`）传给格子认领的是 `stripped`
+      （`'happy sad at left'`，动作名已经摘掉，因为那一格不属于任何格子）；
+      而折回这一侧手上是 `base`（`'mypose happy sad at left'`，带动作名）。
+      两边**口径不同** → 同一套格子算出**不同的区间**：
+        带动作名时第 0 格抢到 `mypose`、第 1 格（多值）算成 `'happy sad'`
+        → 改「表情」会把 `happy sad` 整段换掉（`mypose smile at left`）。
+
+      所以折回也先摘掉动作名、折完再补回去 —— **与读值同一口径**
+      （这正是白盒判据要防的"两套口径"）。
+
+    ⚠⚠ **动作名自己在格子里时不许摘**（2026-10-18 修，与读值同一判据）。
+
+      读值那一侧用的是 `head_is_a_pattern_slot(base, pattern)`：声明里
+      第一格是"固定几个字 `chorus`"时，**整行**（含动作名）交给认领器。
+      折回这一侧从前**无条件摘掉第一个词**，于是同一套格子算出不同的区间：
+
+          chorus lan ling "一起说"        ← 人物格是"可以有多个"
+          读值：人物 = `lan ling`        ✅
+          折回（摘掉 chorus）：人物 = `ling`  → 改它只换 `ling`，
+          实测 `chorus lan lan "一起说"`（多出来一个词，语句坏了）
+
+      判据必须与读值**逐字同源**，否则两边永远在互相拆台。
+    """
+    from storygraph.core.vocabulary import statement_head_token
+    from storygraph.story.spec_args import head_is_a_pattern_slot
+
+    if not pattern or head_is_a_pattern_slot(base, pattern):
+        return str(base or ''), ''
+    head_word = str(statement_head_token(base) or '')
+    words = str(base or '').split()
+    if head_word and words and words[0] == head_word:
+        split_at = str(base).index(head_word) + len(head_word)
+        return str(base)[split_at:].lstrip(), str(base)[:split_at]
+    return str(base or ''), ''
+
+
+def _spec_clauses_for(beat, head_dyn):
+    """
+    这一拍的**复杂子句**声明：拍上记着就用，没记就按列名现推。
+
+    ⭐ **复杂子句**（2026-10-30）：折回要把声明带过去 —— 否则只能认出
+      "有这一句、改它的值"，插不进去（不知道声明顺序/类型）。
+    """
+    clauses = list(getattr(beat, '_spec_clauses', None) or ())
+    if clauses:
+        return clauses
+    from storygraph.story.spec_args import parse_clause_column
+    from storygraph.story.spec_clauses import normalize_clause
+
+    for key in head_dyn:
+        _h, c_name, c_kw = parse_clause_column(key)
+        if not c_kw:
+            continue
+        clause = normalize_clause({
+            'keyword': c_kw, 'name': c_name,
+            'kind': ('transition' if c_kw == 'with' else 'word')})
+        if clause:
+            clauses.append(clause)
+    return clauses
+
+
+def _write_back_head(beat, target, base, folded):
+    """
+    把折好的串写回头字段（值没变就不写）。
+
+    ⚠⚠ **`show` 那一支要把动作名摘掉再写回**（2026-10-13 实测修）。
+
+    `Beat.show` 存的是动作名**后面**那一串（`'lan swim_suit happy'`），
+    而折回时我们手上的 `base` 是**语句头原文**（`statement_head()` 补过
+    `show ` 前缀）。不摘的话字段会变成 `'show ling swim_suit happy'`，
+    渲染那一侧再加一次前缀 → 写出 `show show ling …`（语法错）。
+    别的头字段（`spec_head`/`loop_header`/`camera_header`）存的就是**整串**，
+    所以只有 `show` 需要这一下。
+
+    ⚠ 判断"要不要写回"必须拿**原值**比（下面这个 `original`），
+      不能拿 `base` —— 第一版把 `base` 重绑成了摘完前缀的新串，
+      于是 `folded != base` 变成"折回来的串 vs 摘过的串"，
+      判据错乱、值被写成了残串（实测 `'ling happy'`：`swim_suit` 直接没了）。
+    """
+    original = str(getattr(beat, target, '') or '')
+    if target == 'show' and folded != base:
+        token = str(base or '').split()[0] if str(base or '').split() else ''
+        body = str(folded or '')
+        if token and body.split() and body.split()[0] == token:
+            folded = body[len(token):].lstrip()
+    if folded != original:
+        setattr(beat, target, folded)
 
 
 #: `Beat.show` / `Beat.hide` 这类"多值字段"的分隔符（`show a; show b` → `'a; b'`）。
