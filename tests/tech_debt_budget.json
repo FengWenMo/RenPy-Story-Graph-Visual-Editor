@@ -6,34 +6,24 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 73,
-  "complex_functions": 223,
+  "long_functions": 69,
+  "complex_functions": 220,
   "print_calls": 240,
   "print_library": 3,
-  "swallow_calls": 1240,
-  "broad_excepts": 1229,
+  "swallow_calls": 1238,
+  "broad_excepts": 1227,
   "todos": 110,
   "long_files": 26,
-  "import_cycles_all": 2,
+  "import_cycles_all": 0,
   "import_cycles_top": 0,
-  "modules_in_cycles_all": 6
+  "modules_in_cycles_all": 0
  },
- "cycle_modules": [
-  "storygraph.pipeline.engine_exporters",
-  "storygraph.pipeline.ir_validate",
-  "storygraph.pipeline.unity_package",
-  "storygraph.story.beat_model",
-  "storygraph.story.call_expr",
-  "storygraph.story.transition_expr"
- ],
- "cycle_shapes": [
-  "storygraph.pipeline.engine_exporters|storygraph.pipeline.ir_validate|storygraph.pipeline.unity_package",
-  "storygraph.story.beat_model|storygraph.story.call_expr|storygraph.story.transition_expr"
- ],
+ "cycle_modules": [],
+ "cycle_shapes": [],
  "snapshot": {
-  "modules": 252,
-  "total_lines": 162090,
-  "functions": 5499,
+  "modules": 253,
+  "total_lines": 162243,
+  "functions": 5511,
   "file_edges_all": 1248
  }
 }
