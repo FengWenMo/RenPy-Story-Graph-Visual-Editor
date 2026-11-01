@@ -37,7 +37,7 @@
 - **复杂度棘轮**：`tests/complexity_budget.json` 是"最长 40 + 最绕 40"的上限快照，`test_complexity_budget.py` 判"只许降、不许升"（新函数硬线 500 行 / 150 分支）。改完代码跑 `python tools/complexity_report.py` 看榜；**故意拆小**后不必改快照（只比"不超过"），要接纳新的大函数才用 `tools/complexity_budget.py` 重生成。
 - **拆函数的安全姿势**（2026-11-01 拆了 3 处，零回归）：只做"整段搬到新方法 + 原位置留一行调用"，**缩进不变**（class 方法体本来就是 8 空格）；新方法一律 `self, root` 这种显式依赖，别读上一段的局部变量；每搬一段就跑该模块的测试。判据：`_build` 450→272 行、244 条 UI 测试全过。
 - **改这四处先跑"地狱"判据**：`test_hell_atomic_io.py`（写盘故障注入 / 并发）/ `test_hell_excel_cycles.py`（往返收敛 / 反复导出）/ `test_hell_guardrails.py`（日志、preflight、解析统计）/ `test_patch_line_splitting.py`（切行）。它们问的是"承诺还在不在"，不是覆盖率。
-- **技术债棘轮**：`tools/debt_report.py` 量八项（超大函数 / 高分支 / print / swallow / 宽泛 except / TODO / 超长文件 / **导入环**），`tests/tech_debt_budget.json` 是上限快照，`test_tech_debt_budget.py` 判"只许降"（环按**模块集合**比，别只看个数）。现状（2026-11-01 第十段）：超大函数 **80** / 高分支 **229** / 顶层导入环 **0** / 含函数内 import 的环 **1 个 / 29 模块**（`story` ↔ `pipeline` 那个大环）——**环全藏在函数体里的 import**，要解就从那里下手。已解的两个环各留一个叶子：`parsing/continuation.py`（`_shift_continuations`）、`story/file_facts.py`（`FileFacts`/`scan_file`，`placement` 仍 re-export）。清债后重生成：`python tools/debt_budget.py`。
+- **技术债棘轮**：`tools/debt_report.py` 量八项（超大函数 / 高分支 / print / swallow / 宽泛 except / TODO / 超长文件 / **导入环**），`tests/tech_debt_budget.json` 是上限快照，`test_tech_debt_budget.py` 判"只许降"（环按**模块集合**比，别只看个数）。现状（2026-11-01 第十一段）：超大函数 **77** / 高分支 **227** / 顶层导入环 **0** / 含函数内 import 的环 **1 个 / 29 模块**（`story` ↔ `pipeline` 那个大环）——**环全藏在函数体里的 import**，要解就从那里下手。**动手前先跑 `python tools/cycle_edges.py`**：度表 + 92 条环内边的方向/导入名/使用次数 + `Eades–Lin–Smyth` **近似最小反馈边集（12 条）** —— 那 12 条才闭环，其余 80 条在 DAG 里一条都不用动（逐条记录：`docs/导入环_29模块_逐条记录_2026-11-01.md`）。⚠ **删单条边不会缩小 SCC**（只要还剩一条别的路径，29 个模块照样全在环里）；拆的过程里 `import_cycles_all`（环的个数）**可能先涨**，`modules_in_cycles_all`（模块数）才是"债有多大"。已解的两个环各留一个叶子：`parsing/continuation.py`（`_shift_continuations`）、`story/file_facts.py`（`FileFacts`/`scan_file`，`placement` 仍 re-export）。清债后重生成：`python tools/debt_budget.py`。
 - **拆大函数别把债平移**：拆完要立刻看 `complexity_report` —— 拆出来某个 helper 若仍 >120 行，棘轮数一个不降（`size_rows` 338→71 那轮，`_size_preset_items` 正好 121 行，又把名额吃了回去；再抽 `_size_custom_items` 才落回 93→92）。
 - 耗时由少数真机金标主导（scan/validate/patch/describe ~730s），方差 ±40%，别当回归。`test_disk_hygiene` 必须第一个跑。**pytest-xdist 默认 `--loadscope-reorder` 会覆盖重文件优先**（fasttest 已传 `--no-loadscope-reorder`；手写 `-n` 别漏，7m14s→4m36s）。**12 workers 会 `0x8007000e` 全体起不来** → `--workers 6`；**8 workers 偶发 `worker 'gwN' crashed`（Qt 段错误）**，单跑即过 —— 别当回归，重跑一遍或降到 6。
 
@@ -168,7 +168,7 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
 - 真机工程会长大（`sr_general` 55→96 章）：金标红先 `tools/golden_baseline.py --check`，确认项目变了再 `--save`。基线**别把工具副产物算成输入**（按 `resolve()` 去重、不收 `~$*` 与 `*.bak*`）。
 - **演出专用版**（`packaging/make_stage_release.py`）：`--dist dist/release --sdk <SDK> --out dist/stage --zip`。包内 = 标准版 + `renpy_sdk/`（约 330 MB）+ `项目预设/` + 两个说明；13 项 REQUIRED、3 项 FORBIDDEN、zip ≤ 4 GiB。**先 `make_release.py --stage-only` 铺带 extras 的 `dist/release` 再当 `--dist`**。
 - 2026-11-01 第六段（§81）：patch_export 469→90（照 docstring 的十步表拆成 _patch_step_* + _PatchRun）、_replace_matched 407→105（照 P0–P7 表拆成 _pair_* + _Pairing）；ui_qt 五模块环清零（新叶子 ui_qt/window_layout.py 六个数字、ui_qt/text_html.py 转换器，两处都 re-export 老名字）；print 分两档量（print_calls 240 总量 / **print_library 3**）：库内 12 处里 9 处换成 swallow。⚠ 拆函数最容易死在原来是覆盖还是累加（pre_changed 就是覆盖语义，写成 += 会把改动行数报成两倍）。
-- 2026-11-01 第七段（§82）：`render_beat_to_rpy` 356→49（闭包簇收进 `_BeatRender`，方法名 = `_OrderCtx` 槽位名，编排一行没改）、`collab_store.push` 314→53（六种结局各一个 `_push_*`，dict 改关键字参数才不会漏字段）；`assets` 三模块环 → 只剩 `[2] asset_identity ↔ asset_mapping`（新叶子 `assets/identity_core.py` / `assets/mapping_schema.py`，都 re-export；`mapping_excel` 已摘出环，函数内 import 提到顶层）。⚠ 判据：`tools/_probe_cycle_edges.py` 打环内**每一条边**；断剩下那条要抬 `assets/image_resolve.py` 到两层之上，**不是搬常量**。
+- 2026-11-01 第七段（§82）：`render_beat_to_rpy` 356→49（闭包簇收进 `_BeatRender`，方法名 = `_OrderCtx` 槽位名，编排一行没改）、`collab_store.push` 314→53（六种结局各一个 `_push_*`，dict 改关键字参数才不会漏字段）；`assets` 三模块环 → 只剩 `[2] asset_identity ↔ asset_mapping`（新叶子 `assets/identity_core.py` / `assets/mapping_schema.py`，都 re-export；`mapping_excel` 已摘出环，函数内 import 提到顶层）。⚠ 判据：`tools/cycle_edges.py` 打环内**每一条边**；断剩下那条要抬 `assets/image_resolve.py` 到两层之上，**不是搬常量**。
 - 2026-11-01 第八段（§83）：`assets` 环 `[2] → 0`（初稿层 `draft_mapping` 整块 290 行抬到
   `assets/mapping_draft.py` —— 抬的是**下游**，不是编排层；`rule_match` / `identity_from_entry`
   两个私有名公开；`asset_identity` 那两处函数体内 import 提到顶层）；`session_table.apply`
@@ -188,3 +188,18 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   （`_AtPlan` + 7 个 `_plan_at_*`，八处拒绝文案一字未动）；`continuity.analyze_parse_result`
   281/90→**39/0**（十一个阶段 helper + `_SeamScan`，两个内嵌闭包提成模块级）。数字：>120 行
   86→**83**、>20 分支 231→**230**、环 1/29 未动、模块 242→243；全量 8849 通过 / 0 失败。
+
+- 2026-11-01 第十一段（§86）：`app/beats.attr_slot_rows` 249/**96**→**15/4**（docstring 里的
+  ①–⑤ 分段各自成名：`_attr_slot_structure` 编排四档降级 + 四个 `_slot_rows_from_*` +
+  `_attr_slot_apply_split`/`_split_slots` + `_attr_slot_label` + `_attr_slot_cells`；
+  `beats.py` 现在 **0 个** >120 行）；`beat_model.spec_arg_cells` 251/**94**→编排 + 
+  `_spec_arg_cell` 六档分派（`_MISS` 哨兵区分"没命中"与"空格子"）；`session_table.
+  apply_node_variable_edits` 214/**76**→**116/32** —— 76 个分支里 64 个长在 5 个闭包上，
+  纯函数搬模块级、碰 `self` 的搬方法。全项目最大分支 **96 → 69**。
+  ⚠⚠ **踩坑：按"闭包块"整段删除时，块里除了 `def` 还可能有声明/常量** ——
+  `before_snaps: dict = {}` 恰好夹在 `line_of` 与 `remember` 之间，被一起删掉，
+  17 条用例红；点名的是 `test_editor_session_split::test_no_undefined_module_names`
+  （`symtable` 静态扫"引用了模块作用域里没有的名字" → `['before_snaps']`）。
+  **删之前先把块里所有非 `def` 的行列出来。**
+  ⚠ `by_slot` 的白盒判据按**源码正则**扫 `story/beat_model.py` → 拆 `spec_arg_cells` 时
+  辅助函数**必须留在同一文件**（否则那条"算完就扔"的判据会静默失效）。
