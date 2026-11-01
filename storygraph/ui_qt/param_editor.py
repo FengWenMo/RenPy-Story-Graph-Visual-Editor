@@ -490,6 +490,8 @@ class FieldCard(QFrame):
         self.setFrameShape(QFrame.NoFrame)
         self._on_change = on_change
         self._on_remove = on_remove
+        #: ↑ / ↓ 的核心在卡片外面（`FieldList.move`）—— 这里只留一手回调。
+        self._on_move = on_move
         self._sources_provider = sources_provider
         #: ⚠ "缺列名"状态一变就要让外面知道（弹窗据此**挡住确定键**）——
         #:   否则用户辛苦导入的候选会被后端**静默丢掉**（见 `_refresh_name_warning`）。
@@ -502,7 +504,45 @@ class FieldCard(QFrame):
         outer.setContentsMargins(T.SPACE['md'], T.SPACE['sm'],
                                  T.SPACE['md'], T.SPACE['sm'])
         outer.setSpacing(T.SPACE['xs'])
+        outer.addLayout(self._build_head())
 
+        # ---- 单列堆叠的字段（**没有多列网格**）----
+        self._build_kind()
+        self._build_name()
+        self._build_checks()
+        self._build_literal()
+
+        # ⚠⚠ **类型下拉必须是界面上的东西**（2026-10-18 第六版当场抓到的 P0）：
+        #   它以前**从来没有被加进任何布局** —— 于是"这一格是"根本选不了，
+        #   人只能拿到"任意文字"，`固定几个字` / `从候选里选` / 可选段
+        #   在界面上**无路可走**（判据一直用 `add_param(kind=…)` 直接塞，
+        #   所以从来没红过）。现在它在第一行，紧挨着"这一格是"。
+        kind_row = QHBoxLayout()
+        kind_row.setSpacing(T.SPACE['xs'])
+        kind_tag = QLabel('这一格是')
+        kind_tag.setProperty('role', 'fieldLabel')
+        kind_row.addWidget(kind_tag)
+        self._kind.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        kind_row.addWidget(self._kind, 1)
+        self.layout().addLayout(kind_row)
+        self._stack_add(self._literal_label)
+        self._stack_add(self._literal)
+        self._field('表格里这一列叫什么', self._name)
+        self._stack_add(self._checks)
+        self._stack_add(self._values)
+        self._values.setVisible(False)
+        # ⚠ `ValueChips` 是**普通 QWidget 当容器**（不用重写容器控件）——
+        #   Qt 认不出"它里面是布局"，`sizeHint()` 于是变成 0×0，
+        #   方块加进去了却不显示（实测：加了 8 个方块，界面一个都看不见）。
+        #   显式喂进去：高度 = 内容折行后的高度，宽度 = 可伸展。
+        self._values.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._values.setMinimumHeight(56)
+        self._values.set_height_source()
+        self._on_kind_changed()
+        self._refresh_title()
+
+    def _build_head(self) -> QHBoxLayout:
+        """卡头：标题 + 缺名警告 + 一键建议 + 分栏提示 + 导入 / ↑↓ / 删除。"""
         head = QHBoxLayout()
         head.setSpacing(T.SPACE['xs'])
         self._title = QLabel('这一格要填的东西')
@@ -547,22 +587,27 @@ class FieldCard(QFrame):
         head.addWidget(self._pick_btn)
         self._up = QPushButton('↑')
         self._down = QPushButton('↓')
-        for btn, tip in ((self._up, '跟上一格换位置'), (self._down, '跟下一格换位置')):
+        for btn, tip in ((self._up, '跟上一格换位置'),
+                         (self._down, '跟下一格换位置')):
             btn.setProperty('role', 'ghost')
             btn.setToolTip(tip)
             btn.setFixedWidth(28)
-        self._up.clicked.connect(lambda: on_move(self, -1) if on_move else None)
-        self._down.clicked.connect(lambda: on_move(self, +1) if on_move else None)
+        self._up.clicked.connect(
+            lambda: self._on_move(-1) if self._on_move else None)
+        self._down.clicked.connect(
+            lambda: self._on_move(+1) if self._on_move else None)
         head.addWidget(self._up)
         head.addWidget(self._down)
         self._rm = QPushButton('删掉这一格')
         self._rm.setProperty('role', 'ghost')
         self._rm.setToolTip('这个动作不需要填它')
-        self._rm.clicked.connect(lambda: on_remove(self) if on_remove else None)
+        self._rm.clicked.connect(
+            lambda: self._on_remove(self) if self._on_remove else None)
         head.addWidget(self._rm)
-        outer.addLayout(head)
+        return head
 
-        # ---- 单列堆叠的字段（**没有多列网格**）----
+    def _build_kind(self) -> None:
+        """「这一格是」下拉（四种类型）。"""
         self._kind = QComboBox()
         for key, text in (('keyword', '固定的字（剧本里必须原样出现）'),
                           ('variable', '任意文字（人名、数字…）'),
@@ -582,6 +627,9 @@ class FieldCard(QFrame):
         self._kind.setMinimumContentsLength(10)
         self._kind.currentIndexChanged.connect(self._on_kind_changed)
         self._kind.currentIndexChanged.connect(self._changed)
+
+    def _build_name(self) -> None:
+        """「表格里这一列叫什么」+ 兼容别名（老代码读 `card._label`）。"""
         # ⚠ **只有一个名字**（"剧本里怎么写"已删，见类 docstring）。
         #   它放的是**编剧看到的那一列叫什么**（例：角色 / 服装 / 神态）。
         self._name = QLineEdit()
@@ -605,6 +653,9 @@ class FieldCard(QFrame):
         #: `has_content()`，那时 `set_data` 还没跑（AttributeError 实测踩到）。
         self._fixed_text = ''
         self._display_name = ''
+
+    def _build_checks(self) -> None:
+        """三个约束（多值 / 可省略 / 只能从候选里选）+ 候选方块面板。"""
         self._limit = QCheckBox('编剧只能从下面这些里选')
         self._limit.setToolTip('不勾 = 编剧随便写（候选只是下拉里的备选）；'
                                '勾了 = 只能从你列的候选里挑。')
@@ -643,7 +694,15 @@ class FieldCard(QFrame):
         self._values.set_multi(self._multi.isChecked())
         #: 批量导入对话框要的"从项目里拿"来源（与卡片那枚 ⚡ 同一份）
         self._values.set_sources_provider(self._project_sources)
+        # 三个约束放**同一行**（窄了自动折行）—— 竖着排三行会把每张卡撑得很高，
+        # 两格就要滚屏（用户 2026-10-11 报的就是"多个参数还要下拉看"）。
+        self._checks = FlowRow(spacing=T.SPACE['md'])
+        self._checks.add(self._multi)
+        self._checks.add(self._optional)
+        self._checks.add(self._limit)
 
+    def _build_literal(self) -> None:
+        """可选段 / 固定字那一段的输入框（"这一格固定是哪几个字"）。"""
         # ⚠⚠ **固定段必须能写清"是哪几个字"**（2026-10-17 用户现场：
         #   `show lan base_swimsuit happy` 判"切不上"，预览里却列着这些候选）。
         #
@@ -665,41 +724,6 @@ class FieldCard(QFrame):
         self._literal_label = QLabel('这一格固定是哪几个字')
         self._literal_label.setProperty('role', 'fieldLabel')
         self._literal_label.setWordWrap(True)
-
-        # ⚠⚠ **类型下拉必须是界面上的东西**（2026-10-18 第六版当场抓到的 P0）：
-        #   它以前**从来没有被加进任何布局** —— 于是"这一格是"根本选不了，
-        #   人只能拿到"任意文字"，`固定几个字` / `从候选里选` / 可选段
-        #   在界面上**无路可走**（判据一直用 `add_param(kind=…)` 直接塞，
-        #   所以从来没红过）。现在它在第一行，紧挨着"这一格是"。
-        kind_row = QHBoxLayout()
-        kind_row.setSpacing(T.SPACE['xs'])
-        kind_tag = QLabel('这一格是')
-        kind_tag.setProperty('role', 'fieldLabel')
-        kind_row.addWidget(kind_tag)
-        self._kind.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        kind_row.addWidget(self._kind, 1)
-        self.layout().addLayout(kind_row)
-        self._stack_add(self._literal_label)
-        self._stack_add(self._literal)
-        self._field('表格里这一列叫什么', self._name)
-        # 三个约束放**同一行**（窄了自动折行）—— 竖着排三行会把每张卡撑得很高，
-        # 两格就要滚屏（用户 2026-10-11 报的就是"多个参数还要下拉看"）。
-        self._checks = FlowRow(spacing=T.SPACE['md'])
-        self._checks.add(self._multi)
-        self._checks.add(self._optional)
-        self._checks.add(self._limit)
-        self._stack_add(self._checks)
-        self._stack_add(self._values)
-        self._values.setVisible(False)
-        # ⚠ `ValueChips` 是**普通 QWidget 当容器**（不用重写容器控件）——
-        #   Qt 认不出"它里面是布局"，`sizeHint()` 于是变成 0×0，
-        #   方块加进去了却不显示（实测：加了 8 个方块，界面一个都看不见）。
-        #   显式喂进去：高度 = 内容折行后的高度，宽度 = 可伸展。
-        self._values.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._values.setMinimumHeight(56)
-        self._values.set_height_source()
-        self._on_kind_changed()
-        self._refresh_title()
 
     # ---- 内部 ----
     def _field(self, label: str, widget: QWidget):
