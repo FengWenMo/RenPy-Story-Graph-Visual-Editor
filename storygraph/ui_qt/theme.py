@@ -39,14 +39,32 @@ def font_weight(name: str) -> str:
 
 
 def qss() -> str:
-    """整份应用的 QSS（主窗口 `setStyleSheet(qss())` 一次到位）。"""
+    """
+    整份应用的 QSS（主窗口 `setStyleSheet(qss())` 一次到位）。
+
+    按"看得到的块"分六段（2026-11-01）：全局 / 输入 / 按钮 / 容器与列表 /
+    面板与卡片 / 滚动条。**拼接顺序就是 QSS 的层叠顺序** —— 后写的规则
+    覆盖前面的（按钮那三个 variant 的 disabled 就靠这个），别随便挪段。
+    """
     c = lambda k: t(k)
+    return ''.join((_qss_base(c), _qss_inputs(c), _qss_buttons(c),
+                    _qss_containers(c), _qss_panels(c),
+                    _qss_scrollbars(c)))
+
+
+def _qss_base(c) -> str:
+    """全局：字体、前景色、窗口底色（必须是第一段，后面每段都叠在它上面）。"""
     f = font_family()
     return f"""
 * {{ font-family: "{f}"; color: {c('text.primary')}; }}
 
 QMainWindow, QDialog, QWidget {{ background: {c('bg.canvas')}; }}
+"""
 
+
+def _qss_inputs(c) -> str:
+    """输入控件：输入框 / 多行文本 / 下拉 / 数字（含 focus 与 disabled 两种态）。"""
+    return f"""
 /* ---------- 输入控件 ---------- */
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
     background: {c('bg.canvas')};
@@ -65,7 +83,14 @@ QComboBox:disabled {{
     background: {c('bg.disabled')};
     color: {c('text.tertiary')};
 }}
+"""
 
+
+def _qss_buttons(c) -> str:
+    """按钮：普通 / primary / danger 三个变体。
+    
+    变体规则必须排在 `:disabled` **之后**（段内那条注释说的就是这件事）。"""
+    return f"""
 /* ---------- 按钮 ---------- */
 QPushButton {{
     background: {c('bg.surface')};
@@ -96,7 +121,12 @@ QPushButton[variant="danger"]:disabled {{
     background: {c('bg.disabled')}; color: {c('text.tertiary')};
     border: 1px solid {c('border.default')};
 }}
+"""
 
+
+def _qss_containers(c) -> str:
+    """容器与列表：列表 / 停靠区 / 工具栏 / 状态栏 / 分隔与标签 / 立绘卡 / Toast。"""
+    return f"""
 /* ---------- 列表 ---------- */
 QListWidget {{
     background: {c('bg.canvas')};
@@ -155,7 +185,12 @@ QFrame[role="toast"] {{
     border: 1px solid {c('border.default')};
     border-radius: {T.RADIUS['card']}px;
 }}
+"""
 
+
+def _qss_panels(c) -> str:
+    """面板与卡片：页签 / 分隔条 / 复选框 / 卡片与表单 / 对话框外壳 / 提示气泡。"""
+    return f"""
 /* ---------- 页签（说明窗口）---------- */
 QTabWidget::pane {{
     border: 1px solid {c('border.default')};
@@ -255,7 +290,12 @@ QToolTip {{
     border: 1px solid {c('border.default')};
     padding: 4px 6px;
 }}
+"""
 
+
+def _qss_scrollbars(c) -> str:
+    """滚动条：横竖两套（细轨 + 圆角滑块 + 隐藏箭头）。"""
+    return f"""
 /* ---------- 滚动条 ---------- */
 QScrollBar:vertical {{
     background: {c('scroll.trough')}; width: 10px; margin: 0;

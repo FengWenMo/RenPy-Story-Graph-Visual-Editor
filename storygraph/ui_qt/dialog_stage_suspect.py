@@ -85,6 +85,22 @@ class StageSuspectDialog(QDialog):
 
     def __init__(self, parent, result, allow_move: bool = True, identity=None):
         super().__init__(parent)
+        self._init_state(result, allow_move, identity)
+        root = self._build_layout()
+        n_stage = len(result)
+        self._build_stage_section(root, n_stage)
+        if self._identity:
+            self._build_identity_section(root)
+        self._build_buttons(root)
+        self._apply_mode(n_stage)
+
+    # ------------------------------------------------------------------
+    #  构造顺序：字段 → 标题/根布局 → 两类各自的控件 → 按钮 → 收尾
+    #  （2026-11-01 拆分；**创建顺序是契约**，Qt 的控件顺序跟着它走）
+    # ------------------------------------------------------------------
+
+    def _init_state(self, result, allow_move, identity) -> None:
+        """纯字段：三类数据源 + 这条路上的"能不能挪"。"""
         self._result = result
         self._rows = []                 # [(QTableWidgetItem 复选框项, Suspect)]
         #: 身份门禁的结果（没有 / 空 = 这一类不出现）。
@@ -101,7 +117,9 @@ class StageSuspectDialog(QDialog):
         #: 公式）。那边只提示"第几拍、原文是什么"，请人回 Excel 自己挪。
         self._allow_move = bool(allow_move)
 
-        n_stage = len(result)
+    def _build_layout(self):
+        """窗标题 + 根布局，返回根布局（其余控件按类往里追加）。"""
+        n_stage = len(self._result)
         if self._identity and not n_stage:
             self.setWindowTitle('导出前检查 —— 这些 show 的名字在项目里找不到')
         elif self._identity:
@@ -114,8 +132,10 @@ class StageSuspectDialog(QDialog):
         root.setContentsMargins(T.SPACE['md'], T.SPACE['md'],
                                 T.SPACE['md'], T.SPACE['md'])
         root.setSpacing(T.SPACE['sm'])
+        return root
 
-        # ---- 第一类：「舞台（高级）」里不像语句的行（可移动） -------------
+    def _build_stage_section(self, root, n_stage) -> None:
+        """第一类：「舞台（高级）」里不像语句的行（可移动）。"""
         self.summary = QLabel(
             f'「舞台（高级）」里有 {n_stage} 处不像 Ren\'Py 语句。'
             f'这一列导出时会原样变成脚本里的一行 —— 如果它其实是备注，'
@@ -144,7 +164,7 @@ class StageSuspectDialog(QDialog):
         head.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         head.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         head.setSectionResizeMode(3, QHeaderView.Stretch)
-        for row, suspect in enumerate(result.suspects):
+        for row, suspect in enumerate(self._result.suspects):
             check = QTableWidgetItem('')
             check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             check.setCheckState(Qt.Checked)          # 默认全勾（但按钮默认是"原样"）
@@ -160,7 +180,7 @@ class StageSuspectDialog(QDialog):
 
         # 提示：这一格里还有别的语句时，挪走可疑片段会把原文拆开 ——
         # 先说清，别让人以为"整格消失"。
-        if any(s.multi for s in result.suspects):
+        if any(s.multi for s in self._result.suspects):
             self.multi_note = QLabel(
                 '有的格子里除了这一行还有别的语句：挪走只会拿走这一行，'
                 '其余语句原地保留。')
@@ -169,52 +189,56 @@ class StageSuspectDialog(QDialog):
             self.multi_note.setProperty('role', 'note')
             root.addWidget(self.multi_note)
 
-        # ---- 第二类：show 的名字项目里找不到（只展示，不能移） ------------
-        # 这一类的证据来自 `assets.asset_identity`（只认字面量），处置只有
-        # "改名字"或"确认照写"—— 没有移动按钮（挪到备注 = 删掉一条演出）。
-        if self._identity:
-            self.identity_summary = QLabel(
-                f'另外，「立绘 / 舞台」里有 {len(self._identity)} 条 show '
-                f'写的名字在项目里找不到。导出后游戏运行到这几拍会报'
-                f'「找不到图像」—— 下面的表只列出来，工具不会替你改。')
-            self.identity_summary.setObjectName('identity_summary')
-            self.identity_summary.setWordWrap(True)
-            root.addWidget(self.identity_summary)
+    def _build_identity_section(self, root) -> None:
+        """
+        第二类：show 的名字项目里找不到（只展示，不能移）。
 
-            self.identity_hint = QLabel(
-                '请在卡片里把「立绘」列（或「舞台」里的 show）改成能上舞台的'
-                '名字：角色的立绘 tag，或项目 .rpy 里声明过的图像名。'
-                '认不出 / 预览图这类名字**不能**直接 show —— 选对应的立绘。'
-                '确认这些名字确实存在（比如别处有定义）也可以点「原样导出」。')
-            self.identity_hint.setObjectName('identity_hint')
-            self.identity_hint.setWordWrap(True)
-            self.identity_hint.setProperty('role', 'note')
-            root.addWidget(self.identity_hint)
+        这一类的证据来自 `assets.asset_identity`（只认字面量），处置只有
+        "改名字"或"确认照写"—— 没有移动按钮（挪到备注 = 删掉一条演出）。
+        """
+        self.identity_summary = QLabel(
+            f'另外，「立绘 / 舞台」里有 {len(self._identity)} 条 show '
+            f'写的名字在项目里找不到。导出后游戏运行到这几拍会报'
+            f'「找不到图像」—— 下面的表只列出来，工具不会替你改。')
+        self.identity_summary.setObjectName('identity_summary')
+        self.identity_summary.setWordWrap(True)
+        root.addWidget(self.identity_summary)
 
-            self.identity_table = QTableWidget(len(self._identity), 3, self)
-            self.identity_table.setObjectName('identity_suspects')
-            self.identity_table.setHorizontalHeaderLabels(
-                ['拍', '写的名字', '为什么'])
-            self.identity_table.verticalHeader().setVisible(False)
-            self.identity_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            self.identity_table.setEditTriggers(
-                QAbstractItemView.NoEditTriggers)
-            self.identity_table.setAlternatingRowColors(True)
-            ih = self.identity_table.horizontalHeader()
-            ih.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-            ih.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            ih.setSectionResizeMode(2, QHeaderView.Stretch)
-            for row, suspect in enumerate(self._identity.suspects):
-                self.identity_table.setItem(
-                    row, 0, QTableWidgetItem(str(suspect.seq or '')))
-                self.identity_table.setItem(
-                    row, 1, QTableWidgetItem(f'show {suspect.spec}'))
-                self.identity_table.setItem(
-                    row, 2, QTableWidgetItem(str(suspect.reason)))
-            self.identity_table.resizeColumnsToContents()
-            root.addWidget(self.identity_table, 1)
+        self.identity_hint = QLabel(
+            '请在卡片里把「立绘」列（或「舞台」里的 show）改成能上舞台的'
+            '名字：角色的立绘 tag，或项目 .rpy 里声明过的图像名。'
+            '认不出 / 预览图这类名字**不能**直接 show —— 选对应的立绘。'
+            '确认这些名字确实存在（比如别处有定义）也可以点「原样导出」。')
+        self.identity_hint.setObjectName('identity_hint')
+        self.identity_hint.setWordWrap(True)
+        self.identity_hint.setProperty('role', 'note')
+        root.addWidget(self.identity_hint)
 
-        # ---- 按钮：两类共用同一条"原样导出 / 取消"决定 -------------------
+        self.identity_table = QTableWidget(len(self._identity), 3, self)
+        self.identity_table.setObjectName('identity_suspects')
+        self.identity_table.setHorizontalHeaderLabels(
+            ['拍', '写的名字', '为什么'])
+        self.identity_table.verticalHeader().setVisible(False)
+        self.identity_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.identity_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers)
+        self.identity_table.setAlternatingRowColors(True)
+        ih = self.identity_table.horizontalHeader()
+        ih.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        ih.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        ih.setSectionResizeMode(2, QHeaderView.Stretch)
+        for row, suspect in enumerate(self._identity.suspects):
+            self.identity_table.setItem(
+                row, 0, QTableWidgetItem(str(suspect.seq or '')))
+            self.identity_table.setItem(
+                row, 1, QTableWidgetItem(f'show {suspect.spec}'))
+            self.identity_table.setItem(
+                row, 2, QTableWidgetItem(str(suspect.reason)))
+        self.identity_table.resizeColumnsToContents()
+        root.addWidget(self.identity_table, 1)
+
+    def _build_buttons(self, root) -> None:
+        """按钮：两类共用同一条"原样导出 / 取消"决定。"""
         bar = QHBoxLayout()
         bar.setSpacing(T.SPACE['sm'])
         self.btn_keep = QPushButton('原样导出')
@@ -234,6 +258,13 @@ class StageSuspectDialog(QDialog):
         bar.addWidget(self.btn_move, 0)
         root.addLayout(bar)
 
+    def _apply_mode(self, n_stage) -> None:
+        """
+        收尾：按钮文案、两处"这类没有就别显示"、窗口高度。
+
+        两种降级各走一路，互不影响：没有舞台可疑行 → 第一类整块隐掉；
+        从表导出 → 不给"移到备注"（不改用户的工作簿）。
+        """
         self._refresh_move_button()
         if not n_stage:
             # 只有第二类：舞台那张表和"移到备注"都不该出现（没有可挪的东西）。
