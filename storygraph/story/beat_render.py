@@ -545,40 +545,92 @@ def render_beat_to_rpy(beat: Beat,
     ②③④⑤ 只是"把每一类行造出来"，**排序由 ⑥ 负责**。读这段时先看 ⑥，
     再看其它节，会顺得多。
     """
-    pre = []
-    for c in _split_lines(beat.comment):
-        pre.append(c if c.startswith('#') else '# ' + c)
+    r = _BeatRender(beat, name_resolver, audit, trace)
+    _render_beat_order(r)
+    return _finish_beat_render(r)
 
-    lines = []
-    symbols = getattr(audit, 'symbols', None)
 
-    def emit(line, source='', intent='', status='ok'):
-        lines.append(line)
-        if trace is not None:
-            trace.append({'source': source, 'intent': intent,
-                          'code': line, 'status': status})
+class _BeatRender:
+    """
+    单拍渲染的**全部状态与输出通道**（2026-11-01 从 `render_beat_to_rpy` 里提出来）。
 
-    def todo(source, intent, message):
-        emit(f"# TODO: {message}", source, intent, 'todo')
+    从前这一个函数挂了九个嵌套闭包，彼此靠闭包变量通信：`emit_stage_tail`
+    读 `symbols`、`emit_opaque` 改 `lines[-1]`、`emit_audio` 往 `_audio_done`
+    记账；而顺序编排那一侧（M4）又早就用 `_OrderCtx` 打包同一批闭包 ——
+    两套打包并存，"这一拍渲染到哪一步"要在两处读。
 
-    # ---------------- 舞台 ----------------
-    # 结构化列（背景/立绘/位置/转场/退场）先按 StageOrder 出，
-    # 再把「舞台（高级）」列里那些结构化列表达不了的指令**追加**在后面。
-    # 两个来源可能表达同一条指令（hydrate 会把 Stage 原文并回结构化字段），
-    # 所以记下来做精确去重，避免同一句 show 被生成两次。
-    emitted_stage = set()
+    现在只留**一本账**：状态是属性，输出是方法，方法名与 `_OrderCtx` 的槽位
+    名一一对应（`emit` / `emit_audio` / `emit_code` / …），编排那边 `order_ctx()`
+    一次取齐，不用再包 lambda。`docs` 里那张九节表仍是阅读顺序：
+    ②③④⑤ 是下面这组 `emit_*`，⑥ 是 `_render_beat_order`，
+    ⑦⑧⑨ 在 `_finish_beat_render`。
+    """
 
-    def emit_stage_verbs(verbs):
+    __slots__ = ('beat', 'audit', 'name_resolver', 'trace', 'symbols',
+                 'pre', 'lines', 'emitted_stage', 'emitted_idx',
+                 'audio_done', 'opaque_done', 'stage_cache')
+
+    def __init__(self, beat, name_resolver=None, audit=None, trace=None):
+        self.beat = beat
+        self.audit = audit
+        self.name_resolver = name_resolver
+        self.trace = trace
+        self.symbols = getattr(audit, 'symbols', None)
+        #: ① 注释：每行补成 `# …`
+        self.pre = _comment_lines(beat)
+        self.lines = []
+        #: 结构化通道已经出过哪些舞台行（与 Stage 原文精确去重）
+        self.emitted_stage = set()
+        #: 已经出过的舞台行，**按 (verb, 下标) 记账**
+        self.emitted_idx = set()
+        #: 已经出过的音频通道（补齐用：`music` / `sound`）
+        self.audio_done = set()
+        #: 原样块只许出一次（令牌位与收尾兜底都会调用 `emit_opaque`）
+        self.opaque_done = False
+        #: 舞台行只算一次（`_stage_lines` 里有一堆字符串处理，别每个 token 重算）
+        self.stage_cache = None
+        self.fill_audio_cells()
+
+    # ---------------- 出口 ----------------
+
+    def emit(self, line, source='', intent='', status='ok'):
+        """所有行**唯一**的落地口（`lines` 与 `trace` 同行写入）。"""
+        self.lines.append(line)
+        if self.trace is not None:
+            self.trace.append({'source': source, 'intent': intent,
+                               'code': line, 'status': status})
+
+    def todo(self, source, intent, message):
+        """一条"缺资源 / 结构降级"的 TODO 行（`UNRESOLVED_TODO` 门禁认得）。"""
+        self.emit(f"# TODO: {message}", source, intent, 'todo')
+
+    def fill_audio_cells(self):
+        """
+        结构化字段为空时，从文本列（`bgm` / `sfx`）解析一次。
+
+        否则直接构造、没走过 `from_row` 的 Beat（如单测、内存里拼的）会丢掉
+        stop/play，生成不出音频语句。
+        """
+        beat = self.beat
+        if not beat.music:
+            _fill_audio_from_cells(beat, 'music', beat.bgm, beat.music_params)
+        if not beat.sound:
+            _fill_audio_from_cells(beat, 'sound', beat.sfx, beat.sound_params)
+
+    # ---------------- ② 舞台 ----------------
+
+    def emit_stage_verbs(self, verbs):
         """输出**指定的几个 stage verb**（供拍内交错用）。"""
-        _render_stage_from_fields(beat, emit,
-                                  _resolver_for(audit, name_resolver),
-                                  audit, emitted_stage, verbs=verbs)
+        _render_stage_from_fields(self.beat, self.emit,
+                                  _resolver_for(self.audit, self.name_resolver),
+                                  self.audit, self.emitted_stage, verbs=verbs)
 
-    def emit_stage_tail():
+    def emit_stage_tail(self):
         """舞台的收尾部分：Stage 高级列 + 旧 Transform 列。
 
         无论单条 verb 怎么切分，这部分都在**所有舞台指令之后**输出一次。
         """
+        beat = self.beat
         if beat.stage:
             from storygraph.story.dsl import compile_stage, parse_stage
             # 结构化字段已经承载了哪些指令（见 `_stage_op_covered`）。
@@ -587,36 +639,44 @@ def render_beat_to_rpy(beat: Beat,
             hide_parts = hide_item_parts(beat.hide)
             ops = parse_stage(beat.stage).ops
             for op, (intent, code, status) in zip(
-                    ops, compile_stage(beat.stage, symbols, audit)):
+                    ops, compile_stage(beat.stage, self.symbols, self.audit)):
                 if op.native:
                     # **作者手写的原生指令：逐字原样出去**（不做下划线改写，
                     # 也是"不把能跑的脚本改坏"的底线）。结构化列里那份是
                     # hydrate 留下的影子，`_stage_lines` 已经跳过它了。
                     # 只有"结构化通道自己又出了完全同一条"时才去重。
-                    if code in emitted_stage:
+                    if code in self.emitted_stage:
                         continue
-                    emit(code, '舞台', intent, status)
+                    self.emit(code, '舞台', intent, status)
                     continue
-                if code in emitted_stage:
+                if code in self.emitted_stage:
                     # 结构化列已原样出过同一条指令（Stage 原文被 hydrate 并回）
                     continue
                 if _stage_op_covered(code, op, beat, show_parts, hide_parts):
                     # 同一条指令换了写法重复出现在 Stage 里 → 不重复输出
                     continue
-                emit(code, '舞台', intent, status)
+                self.emit(code, '舞台', intent, status)
 
         # 旧表带过来的 Transform 列（现已取消）：当成这一拍的转场
         if beat.transform and not beat.with_:
-            emit(f"with {beat.transform}", '舞台', beat.transform)
+            self.emit(f"with {beat.transform}", '舞台', beat.transform)
 
-    def emit_stage():
-        """一次输出全部舞台指令（历史行为，给没有 op_order 的 Beat 用）。"""
-        emit_stage_verbs(None)
-        emit_stage_tail()
+    def emit_stage(self):
+        """一次输出全部舞台指令（历史行为，给没有 `op_order` 的 Beat 用）。"""
+        self.emit_stage_verbs(None)
+        self.emit_stage_tail()
 
-    # ---------------- 代码块（保真后门） ----------------
-    def emit_code():
-        if beat.kind == KIND_MENU:
+    def stage_lines_once(self):
+        """舞台行缓存（顺序编排里每个 token 都要问一次，不能重算）。"""
+        if not self.stage_cache:
+            self.stage_cache = _stage_lines(
+                self.beat, _resolver_for(self.audit, self.name_resolver))
+        return {k: list(v) for k, v in self.stage_cache.items()}
+
+    # ---------------- ③ 代码块（保真后门） ----------------
+
+    def emit_code(self):
+        if self.beat.kind == KIND_MENU:
             # **菜单 extras 不是 Python**（2026-10-26，P1 讨论①）：
             # `beat.raw` 在菜单拍上是 `menu:` 块里的原样语句（`set seen` /
             # `$ x = 1` …），由 `_emit_text_line` 的菜单头分支在**头行与
@@ -625,14 +685,12 @@ def render_beat_to_rpy(beat: Beat,
             # `$ set seen`，改坏脚本），而且排到 `menu:` **前面** ——
             # "两套出口两种待遇"的展示层版本。
             return
-        for c in _render_code_block(compose_code(beat)):
-            emit(c, '代码块', c)
+        for c in _render_code_block(compose_code(self.beat)):
+            self.emit(c, '代码块', c)
 
-    # ---------------- 工具不认识的块语句（M1） ----------------
-    #: 原样块只许出一次（令牌位与收尾兜底都会调用 `emit_opaque`）
-    _opaque_done: list = []
+    # ---------------- ④ 工具不认识的块语句（M1） ----------------
 
-    def emit_opaque():
+    def emit_opaque(self):
         """
         `Beat.opaque` → 逐字写回，**一个字都不动**。
 
@@ -649,10 +707,11 @@ def render_beat_to_rpy(beat: Beat,
         空行**保留**（`_split_lines` 会吃掉它们，所以这里自己切）——
         块体里的空行是作者排版的一部分。
         """
+        beat = self.beat
         text = str(getattr(beat, 'opaque', '') or '')
-        if not text.strip() or _opaque_done:
+        if not text.strip() or self.opaque_done:
             return
-        _opaque_done.append(True)
+        self.opaque_done = True
         text = text.replace('\r\n', '\n').replace('\r', '\n')
         blk = text.split('\n')
         # **块体紧跟头行时，头行必须有冒号**（2026-10-31）。
@@ -665,13 +724,13 @@ def render_beat_to_rpy(beat: Beat,
         # 只对 `show` / `scene` 动手（其余头行自带冒号，或根本不该有）；
         # 上一行已经以 `:` 结尾就不重复加。**认不出一律不动** —— 少补一个
         # 冒号只是语法错（引擎会喊），多补一个可能改到别人的行。
-        if blk and blk[0][:1] in (' ', '\t') and lines:
-            prev = str(lines[-1] or '')
+        if blk and blk[0][:1] in (' ', '\t') and self.lines:
+            prev = str(self.lines[-1] or '')
             prev_stripped = prev.lstrip()
             if (not prev_stripped.endswith(':')
                     and (prev_stripped.startswith('show ')
                          or prev_stripped.startswith('scene '))):
-                lines[-1] = prev.rstrip() + ':'
+                self.lines[-1] = prev.rstrip() + ':'
         # **头行可编辑**（M4，T1a/T1b 的参数编辑面）：
         # `spec_head` 是头行的**原样拷贝**，所以"没改"时它与首行相同 ——
         # 只有**真的不同**才替换。于是
@@ -689,107 +748,104 @@ def render_beat_to_rpy(beat: Beat,
         if head and blk and head.strip() != blk[0].strip():
             blk = [head] + blk[1:]
         for ln in blk:
-            emit(ln.rstrip(), '原样块', ln.strip())
+            self.emit(ln.rstrip(), '原样块', ln.strip())
 
-    # ---------------- 音频 ----------------
-    # 音乐/音效列存的是**资产 ID / DSL 文本**（可下拉），参数单独一列；
-    # 内部仍走同一套字段，停止/排队用「（停止音乐）」这类伪值表达。
-    # 结构化字段（beat.music / beat.sound）为空时，从文本列（beat.bgm /
-    # beat.sfx）解析一次——否则直接构造、没走过 from_row 的 Beat（如单测、
-    # 内存里拼的）会丢掉 stop/play，生成不出音频语句。
-    if not beat.music:
-        _fill_audio_from_cells(beat, 'music', beat.bgm, beat.music_params)
-    if not beat.sound:
-        _fill_audio_from_cells(beat, 'sound', beat.sfx, beat.sound_params)
+    # ---------------- ⑤ 音频 / 语音 ----------------
 
-    def emit_audio(only: str = ''):
+    def emit_audio(self, only: str = ''):
         if only:
-            _audio_done.add(only)
+            self.audio_done.add(only)
         else:
-            _audio_done.update(('music', 'sound'))
-        _render_audio_from_fields(beat, emit, audit, only=only)
+            self.audio_done.update(('music', 'sound'))
+        _render_audio_from_fields(self.beat, self.emit, self.audit, only=only)
 
-    def emit_voice():
+    def emit_voice(self):
+        beat = self.beat
         if not beat.voice:
             return
-        if audit is not None:
+        if self.audit is not None:
             from storygraph.story.dsl import TODO as _TODO
-            if audit.audio('voice', beat.voice) == _TODO:
-                todo('语音', beat.voice,
-                     f"缺少资源 语音 '{beat.voice}'")
+            if self.audit.audio('voice', beat.voice) == _TODO:
+                self.todo('语音', beat.voice, f"缺少资源 语音 '{beat.voice}'")
                 return
-            emit(f"voice {_quote(audit.audio_ref('voice', beat.voice))}",
-                 '语音', beat.voice)
+            self.emit(f"voice {_quote(self.audit.audio_ref('voice', beat.voice))}",
+                      '语音', beat.voice)
         else:
-            emit(f"voice {_audio_ref(beat.voice)}", '语音', beat.voice)
+            self.emit(f"voice {_audio_ref(beat.voice)}", '语音', beat.voice)
 
-    # ---------------- 按**源码里的顺序**输出 ----------------
-    # 这一节修的是「跨类别顺序」+「同类内交错」：
-    #   · `play music X` 写在 `show Y` 之前时，音频要真的在前（跨类别）；
-    #   · `scene → play → show` 这种**同类内交错**也要保住——
-    #     只按类别分组输出会得到一个"整块的舞台 + 整块的音频"，
-    #     语义近似但顺序错了，回放/时间轴看到的顺序不对。
-    #
-    # `op_order` 记的是 **verb 级**顺序（`scene,audio,show`），
-    # 所以这里逐条输出：stage verb 交给 `emit_stage_verbs` 单独渲染，
-    # 这才能把音频插进 `scene` 与 `show` 之间。
-    #
-    # 代码块（CodeBlock 后门）不在 op_order 里，按历史契约紧跟舞台之后
-    # 输出——它内部有更细的 `beat.ordered`（raw/code 交错）负责保真。
-    # "紧跟舞台之后"包含**舞台尾段**（见下面 `emit_stage_tail()` 的位置）。
-    # **逐条**输出（缺口 4，2026-10-07 修）：token 形如 `(verb, idx)`，
-    # `idx=None` = verb 级（老表 / 补齐）→ 整组输出；有下标 → **只出那一条**。
-    #
-    # 从前这里只按 **verb 名**分组（`('show', ...)` 就把该拍所有 show 一次出完），
-    # 于是"两条同名 verb 中间夹着别的"根本表达不出来：
-    #
-    #     show A / hide B / show C   →   show A / show C / hide B
-    #
-    # 顺序被改；`show A / hide A / show A` 更狠 —— 去重 + 分组之后最后那条
-    # show 没了，**收尾画面与作者要的相反**。
-    tokens = beat.op_tokens_full()
-    plan = beat.unified_plan() if tokens else None
-    if beat.kind == KIND_MENU:
+    # ---------------- ⑥ 顺序编排要的那一批 ----------------
+
+    def order_ctx(self):
+        """`_OrderCtx` 一次取齐（槽位名 = 上面的方法名）。"""
+        return _OrderCtx(beat=self.beat, lines=self.lines, emit=self.emit,
+                         emit_audio=self.emit_audio,
+                         emit_voice=self.emit_voice,
+                         emit_code=self.emit_code,
+                         emit_stage_tail=self.emit_stage_tail,
+                         emit_opaque=self.emit_opaque,
+                         stage_lines_once=self.stage_lines_once,
+                         emitted_stage=self.emitted_stage,
+                         emitted_idx=self.emitted_idx,
+                         audio_done=self.audio_done)
+
+
+def _comment_lines(beat) -> list:
+    """① 注释：每行补成 `# …`（已经带 `#` 的原文不动）。"""
+    out = []
+    for c in _split_lines(beat.comment):
+        out.append(c if c.startswith('#') else '# ' + c)
+    return out
+
+
+def _render_beat_order(r) -> None:
+    """
+    ⑥ **按源码里的顺序逐条输出**（没有顺序信息时退回历史固定顺序）。
+
+    这一节修的是「跨类别顺序」+「同类内交错」：
+      · `play music X` 写在 `show Y` 之前时，音频要真的在前（跨类别）；
+      · `scene → play → show` 这种**同类内交错**也要保住 ——
+        只按类别分组输出会得到一个"整块的舞台 + 整块的音频"，
+        语义近似但顺序错了，回放/时间轴看到的顺序不对。
+
+    `op_order` 记的是 **verb 级**顺序（`scene,audio,show`），所以这里逐条
+    输出：stage verb 交给 `emit_stage_verbs` 单独渲染，这才能把音频插进
+    `scene` 与 `show` 之间。代码块（CodeBlock 后门）不在 `op_order` 里，
+    按历史契约紧跟舞台之后输出 —— 它内部有更细的 `beat.ordered`
+    （raw/code 交错）负责保真。
+    """
+    tokens = r.beat.op_tokens_full()
+    plan = r.beat.unified_plan() if tokens else None
+    if r.beat.kind == KIND_MENU:
         # 菜单拍的 `raw` 是 extras、不是序列里的原生行 —— 序列/令牌通道会
         # 把它排到头行前面（`set seen` 跑到 `menu:` 上面）。菜单拍没有舞台/
         # 音频令牌，整张拍的出序由 `_emit_text_line` 一处负责。
         plan = None
         tokens = ()
-    #: 已经出过的音频通道（补齐用：`music` / `sound`）
-    _audio_done: set = set()
-    #: 舞台行只算一次（`_stage_lines` 里有一堆字符串处理，别每个 token 重算）
-    _stage_cache: list = []
-
-    def _stage_lines_once():
-        if not _stage_cache:
-            _stage_cache.append(
-                _stage_lines(beat, _resolver_for(audit, name_resolver)))
-        return {k: list(v) for k, v in _stage_cache[0].items()}
-
-    #: 已经出过的舞台行（**按 (verb, 下标) 记账**，见 `_emit_stage_token`）
-    _emitted_idx: set = set()
-    _ctx = _OrderCtx(
-        beat=beat, lines=lines, emit=emit, emit_audio=emit_audio,
-        emit_voice=emit_voice, emit_code=emit_code,
-        emit_stage_tail=emit_stage_tail, emit_opaque=emit_opaque,
-        stage_lines_once=_stage_lines_once, emitted_stage=emitted_stage,
-        emitted_idx=_emitted_idx, audio_done=_audio_done)
     if plan is not None:
-        _emit_in_source_order(_ctx, plan)
+        _emit_in_source_order(r.order_ctx(), plan)
     elif tokens:
-        _emit_in_token_order(_ctx, tokens)
+        _emit_in_token_order(r.order_ctx(), tokens)
     else:
         # 没有任何顺序信息（老表 / 直接构造的 Beat）：维持历史固定顺序
-        emit_stage()
-        emit_code()
-        emit_opaque()
-        emit_audio()
-        emit_voice()
+        r.emit_stage()
+        r.emit_code()
+        r.emit_opaque()
+        r.emit_audio()
+        r.emit_voice()
 
-    # ---------------- 台词 ----------------
-    speaker = _resolve_speaker(beat, audit, todo)
-    _emit_text_line(beat, speaker, emit)
 
+def _finish_beat_render(r) -> list:
+    """
+    ⑦ 台词 / ⑧ 兜底与条件包裹 / ⑨ 行尾注释 —— 单拍渲染的**唯一出口**。
+
+    放在这里是因为 `_attach_inline_note` 只该有一个调用点：顶层
+    （`render_beats_to_rpy`）、菜单头/选项行之外的所有拍都走这一条。
+    """
+    beat = r.beat
+    speaker = _resolve_speaker(beat, r.audit, r.todo)
+    _emit_text_line(beat, speaker, r.emit)
+
+    pre, lines = r.pre, r.lines
     if not lines:
         # **落单的结构化循环头**（有头行、无整块原文、没被归组）：
         # 结构位丢了（隐藏列 `Nest` 被清空 / 老工具写的表），这一块没法还原成
@@ -801,11 +857,10 @@ def render_beat_to_rpy(beat: Beat,
         # 条件）—— 比"结构没还原"严重得多。宁可少一个 `while` 行，
         # 也不要写出一份跑起来卡死的产物。
         if not pre and _is_orphan_loop_head(beat):
-            emit(f'# TODO: 循环（'
-                 f'{str(getattr(beat, "loop_header", "") or "").strip()}）'
-                 f'的结构位缺失（隐藏列 Nest 被清空？）：这一块没能还原成 '
-                 f'while/for —— 内容还在下面，但结构变了',
-                 '循环', str(getattr(beat, 'loop_header', '') or ''), 'todo')
+            head = str(getattr(beat, 'loop_header', '') or '').strip()
+            r.todo('循环', str(getattr(beat, 'loop_header', '') or ''),
+                   f'循环（{head}）的结构位缺失（隐藏列 Nest 被清空？）：'
+                   f'这一块没能还原成 while/for —— 内容还在下面，但结构变了')
             return _attach_inline_note(pre + lines, beat)
         return pre
 
@@ -846,10 +901,9 @@ def render_beat_to_rpy(beat: Beat,
         # 兜底（正常情况下上面那个 `if not lines` 已经处理）：条件拍那条路
         # 会先返回，所以这里只是"两处都守一下"——判据见
         # `_is_orphan_loop_head`，别在两处写不同的判据。
-        emit(f'# TODO: 循环（'
-             f'{str(getattr(beat, "loop_header", "") or "").strip()}）'
-             f'的结构位缺失：这一块没能还原成 while/for',
-             '循环', str(getattr(beat, 'loop_header', '') or ''), 'todo')
+        r.todo('循环', str(getattr(beat, 'loop_header', '') or ''),
+               f'循环（{str(getattr(beat, "loop_header", "") or "").strip()}）'
+               f'的结构位缺失：这一块没能还原成 while/for')
         return _attach_inline_note(pre + lines, beat)
     # **行尾注释**（C）：贴在这一拍的输出上（只在一拍一行、源语句也一行时贴，
     # 见 `_inline_note`）。放在**这里**是因为它是"单拍渲染"的唯一出口 ——
