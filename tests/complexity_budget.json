@@ -9,10 +9,6 @@
   "branches": 150
  },
  "functions": {
-  "storygraph/app/beats.py::attr_slot_rows": {
-   "lines": 249,
-   "branches": 96
-  },
   "storygraph/app/beats.py::fields_to_beat": {
    "lines": 102,
    "branches": 48
@@ -24,10 +20,6 @@
   "storygraph/app/session_graph.py::rebuild_source_edges": {
    "lines": 148,
    "branches": 52
-  },
-  "storygraph/app/session_table.py::apply_node_variable_edits": {
-   "lines": 214,
-   "branches": 76
   },
   "storygraph/app/source_line_delete.py::plan_source_line_delete": {
    "lines": 145,
@@ -149,10 +141,6 @@
    "lines": 250,
    "branches": 31
   },
-  "storygraph/story/beat_model.py::spec_arg_cells": {
-   "lines": 251,
-   "branches": 94
-  },
   "storygraph/story/beat_render.py::_render_menu_segments": {
    "lines": 159,
    "branches": 32
@@ -177,9 +165,17 @@
    "lines": 95,
    "branches": 40
   },
+  "storygraph/story/generation_guard.py::generation_guard": {
+   "lines": 157,
+   "branches": 29
+  },
   "storygraph/story/generation_guard.py::write_generation": {
    "lines": 241,
    "branches": 40
+  },
+  "storygraph/story/patcher.py::_verify_patch": {
+   "lines": 157,
+   "branches": 37
   },
   "storygraph/story/renpy_gui.py::load_gui_profile": {
    "lines": 172,
@@ -196,6 +192,10 @@
   "storygraph/ui_qt/asset_picker.py::_build": {
    "lines": 190,
    "branches": 2
+  },
+  "storygraph/ui_qt/card_actions.py::apply_scene_from_card": {
+   "lines": 127,
+   "branches": 38
   },
   "storygraph/ui_qt/dialog_learn.py::_build_form_page": {
    "lines": 160,
