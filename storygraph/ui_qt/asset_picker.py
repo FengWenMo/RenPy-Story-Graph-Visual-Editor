@@ -484,11 +484,18 @@ class AssetPickerDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build(self):
+        """整块界面：顶栏 → 三栏（左分类 / 中候选 / 右详情）→ 两条提示 → 按钮。"""
         root = QVBoxLayout(self)
         root.setContentsMargins(T.SPACE['md'], T.SPACE['md'],
                                 T.SPACE['md'], T.SPACE['md'])
         root.setSpacing(T.SPACE['sm'])
+        self._build_top_bar(root)
+        self._build_splitter(root)
+        self._build_hints(root)
+        self._build_buttons(root)
 
+    def _build_top_bar(self, root) -> None:
+        """搜索 + 用途过滤 + 底色切换 + 预热缩略图。"""
         top = QHBoxLayout()
         top.setSpacing(T.SPACE['sm'])
         lab = QLabel('搜索')
@@ -548,7 +555,17 @@ class AssetPickerDialog(QDialog):
         top.addWidget(self._warm_btn, 0)
         root.addLayout(top)
 
+    def _build_splitter(self, root) -> None:
+        """三栏：左分类 / 中候选 / 右详情（尺寸按"中栏最宽"分）。"""
         split = QSplitter(Qt.Horizontal)
+        split.addWidget(self._build_left_pane())
+        split.addWidget(self._build_items_pane())
+        split.addWidget(self._build_right_pane())
+        split.setSizes([200, 460, 240])
+        root.addWidget(split, 1)
+
+    def _build_left_pane(self):
+        """左：分类方式 + 类别。下拉贴着它影响的东西，别当成全窗口筛选器。"""
         # —— 左：分类方式 + 类别 ——
         #
         # 分类方式的下拉**贴着左栏**（不塞进顶部搜索那一条）：它改的是"左栏
@@ -581,7 +598,10 @@ class AssetPickerDialog(QDialog):
         ll.addWidget(self._cats, 1)
         left.setMaximumWidth(260)
         left.setMinimumWidth(170)
-        split.addWidget(left)
+        return left
+
+    def _build_items_pane(self):
+        """中：候选（严格网格 + 只解看得见的缩略图）。"""
         # —— 中：候选（**严格网格**）——
         #
         # 用户 2026-10-04：
@@ -621,7 +641,10 @@ class AssetPickerDialog(QDialog):
         self._fill_cursor = 0
         self._fill_deadline = 0
         self._fill_timer = None
-        split.addWidget(self._items)
+        return self._items
+
+    def _build_right_pane(self):
+        """右：详情 + 打开源文件（ATL 块形式唯一的"看原文"入口）。"""
         # —— 右：详情 ——
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -648,10 +671,10 @@ class AssetPickerDialog(QDialog):
         rl.addWidget(self._open_btn, 0)
         right.setMinimumWidth(200)
         right.setMaximumWidth(300)
-        split.addWidget(right)
-        split.setSizes([200, 460, 240])
-        root.addWidget(split, 1)
+        return right
 
+    def _build_hints(self, root) -> None:
+        """两条提示：选中即校验那条（含为什么不能加）+ 计数条。"""
         # **选中即校验的提示条**（预览图自动换真立绘 / 换不到为什么不能加）。
         # 单独一条，不去挤"N 条 · 已加载 M"那条计数（后者一直有用）。
         self._pick_hint = QLabel('')
@@ -665,6 +688,8 @@ class AssetPickerDialog(QDialog):
         self._hint.setProperty('role', 'caption')
         root.addWidget(self._hint)
 
+    def _build_buttons(self, root) -> None:
+        """确定 / 取消（`accept` / `reject`）。"""
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self._ok = buttons.button(QDialogButtonBox.Ok)
         self._ok.setText('确定')

@@ -1532,11 +1532,18 @@ class StagePreviewWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _build(self):
+        """整块界面：画布 → 文字三条 → 尺寸写回条 → 控制条。"""
         root = QVBoxLayout(self)
         root.setContentsMargins(T.SPACE['sm'], T.SPACE['sm'],
                                 T.SPACE['sm'], T.SPACE['sm'])
         root.setSpacing(T.SPACE['xs'])
+        self._build_canvas(root)
+        self._build_text_panels(root)
+        self._build_at_bar(root)
+        self._build_control_bar(root)
 
+    def _build_canvas(self, root) -> None:
+        """舞台画布（固定 16:9 尺寸、居中对齐）。"""
         self._canvas = StageCanvas(self, project_root=self._project_root,
                                    screen=self._screen,
                                    engine_render=self._engine)
@@ -1546,6 +1553,8 @@ class StagePreviewWindow(QDialog):
         self._canvas.setFixedSize(STAGE_W, STAGE_H)
         root.addWidget(self._canvas, 0, Qt.AlignCenter)
 
+    def _build_text_panels(self, root) -> None:
+        """说话人名条 / 对话框 / 本拍变化清单。"""
         # 说话人名条
         self._who = QLabel('')
         self._who.setStyleSheet(
@@ -1577,6 +1586,8 @@ class StagePreviewWindow(QDialog):
         self._summary.setWordWrap(True)
         root.addWidget(self._summary)
 
+    def _build_at_bar(self, root) -> None:
+        """尺寸变换写回条（工具不自动写 at，只给入口）。"""
         # —— 尺寸 / 写回 at（P2，2026-10-30）——
         # 用户拍板：**工具不自动写 at**（预览必须真实：没 at 就按引擎裁切），
         # 但经人手可以选一个**项目里已有**的 transform 写回（diff 确认、
@@ -1615,9 +1626,22 @@ class StagePreviewWindow(QDialog):
                 '这个窗口拿不到 Beat 数据（只预览，不写回）；'
                 '从主窗口打开预览时才可写回。')
 
+    def _build_control_bar(self, root) -> None:
+        """控制条：播放 / 跳拍 / 四个开关 / 当前位置。"""
         # —— 控制条 ——
         bar = QHBoxLayout()
         bar.setSpacing(T.SPACE['xs'])
+        self._build_transport(bar)
+        self._build_jump(bar)
+        self._build_toggles(bar)
+        bar.addStretch(1)
+        self._pos = QLabel('')
+        self._pos.setProperty('role', 'caption')
+        bar.addWidget(self._pos)
+        root.addLayout(bar)
+
+    def _build_transport(self, bar) -> None:
+        """上一句 / 播放 / 下一句。"""
         self._prev = QPushButton('◀ 上一句')
         self._prev.clicked.connect(self.prev_frame)
         bar.addWidget(self._prev)
@@ -1629,6 +1653,8 @@ class StagePreviewWindow(QDialog):
         self._next.clicked.connect(self.next_frame)
         bar.addWidget(self._next)
 
+    def _build_jump(self, bar) -> None:
+        """跳到第 N 拍 —— 手输数字也要能跳，所以三条路径都接上。"""
         bar.addSpacing(T.SPACE['md'])
         bar.addWidget(QLabel('跳到第'))
         self._jump = QSpinBox()
@@ -1652,6 +1678,8 @@ class StagePreviewWindow(QDialog):
         jump_btn.clicked.connect(self._on_jump)
         bar.addWidget(jump_btn)
 
+    def _build_toggles(self, bar) -> None:
+        """真实贴图 / 引擎排版 / 声音 / 只看有变化的拍。"""
         self._real_cb = QCheckBox('真实贴图')
         self._real_cb.setChecked(True)
         self._real_cb.toggled.connect(self._on_real)
@@ -1694,11 +1722,6 @@ class StagePreviewWindow(QDialog):
                 f'只留有舞台变化的拍（这一章 {_n_change} / {len(self.frames)} 拍）。\n'
                 '判据与「舞台快照」表的「本拍变化」是同一份文字。')
         bar.addWidget(self._only_cb)
-        bar.addStretch(1)
-        self._pos = QLabel('')
-        self._pos.setProperty('role', 'caption')
-        bar.addWidget(self._pos)
-        root.addLayout(bar)
 
     # ------------------------------------------------------------------
 
