@@ -134,6 +134,11 @@ from storygraph.core.indent import indent_width
 from storygraph.core.statement import (CONTENT_HASH_HEX, Statement,
                                        StatementKind)
 from storygraph.parsing.renpy_parser_stmts import StatementScreens
+# 续行缩进换算搬到了叶子模块（2026-11-01，技术债：解导入环）。这里保留
+# `_shift_continuations` 这个名字，老调用点/测试不用动。
+from storygraph.parsing.continuation import (
+    shift_continuations as _shift_continuations,
+)
 from storygraph.parsing.renpy_nodes import (  # 2026-10-11 拆分：见该模块文档
     ASTNode,
     AudioNode,
@@ -804,33 +809,10 @@ class RenPyLexer:
         return root.subblock
 
 
-def _shift_continuations(text: str, base: int) -> str:
-    """
-    多行文本 → **首行去缩进、续行相对 `base` 左移**（空行留空）。
+# `_shift_continuations` 已搬到 `storygraph.parsing.continuation`（2026-11-01，
+# 技术债：解 `renpy_parser ↔ renpy_parser_stmts` 的导入环）。函数体与文档
+# 一起搬走，行为一个字没改；本模块顶部以同名 re-export，老调用点照旧可用。
 
-    ⚠ 分工写清楚，否则会双重计算（2026-10-07 实测踩到）：
-      · **首行**的缩进由**调用方的 `rel`** 负责（`rel = node.indent - base`），
-        所以这里只 `lstrip()` 首行 —— 不在这里减 base，减了就加两次；
-      · **续行**才减 `base`。`_flatten` 会把括号未闭合的多行语句并成**一条
-        逻辑行**（`text` 含 `\n`），而 `lstrip()` 对多行字符串**只作用于
-        第一行** → 续行的**绝对**缩进原样留下，被当成"更深一层"；
-        渲染时整块再加一次基准，于是**每导出一次缩进就长一截**：
-
-            原文 12 → 第一轮 20 → 第二轮 28 → 第三轮 36 …（实测 mini_game1.rpy）
-
-        那不是"排版漂移"那么轻：文件**永远在变** → 增量对位每轮都判
-        "文本变了" → 整份退回全量。
-        判据：`tests/test_roundtrip_idempotent.py`、`tools/audit_idempotence.py`。
-    """
-    parts = str(text or '').split('\n')
-    out = [parts[0].lstrip()]
-    for ln in parts[1:]:
-        if not ln.strip():
-            out.append('')
-            continue
-        ind = len(ln) - len(ln.lstrip())
-        out.append(' ' * max(0, ind - base) + ln.lstrip())
-    return '\n'.join(out)
 
 
 def _dedent_block(lines: list) -> list:

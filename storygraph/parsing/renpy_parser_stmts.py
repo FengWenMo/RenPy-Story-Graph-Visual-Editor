@@ -46,6 +46,7 @@ from storygraph.parsing.renpy_nodes import (
     _skip_string,
     split_string_speaker,
 )
+from storygraph.parsing.continuation import shift_continuations
 
 
 def _say_tail(text: str, pos: int) -> str:
@@ -388,9 +389,11 @@ class StatementScreens:
         # 括号续行在真实工程里很常见（`renpy.pause(\n    1.0,\n    hard=True)`）。
         # 合并结果（`text`）里已经带着换行与续行缩进，直接整段取走；
         # 续行的**绝对缩进**要相对这一行的缩进左移，否则渲染时整块再加一次
-        # 基准，每导出一次就多缩一截（与 `_shift_continuations` 同一条口径）。
-        from storygraph.parsing.renpy_parser import _shift_continuations
-        code = _shift_continuations(raw_after.strip(), line.indent)
+        # 基准，每导出一次就多缩一截（与 `shift_continuations` 同一条口径）。
+        # 2026-11-01：换算函数搬到叶子模块，这里**顶层**导入 —— 从前是函数内
+        # `from renpy_parser import ...`，和 `renpy_parser` 顶层导入本模块正好
+        # 成一个环（技术债表里 `[2] parsing.renpy_parser ↔ ...stmts`）。
+        code = shift_continuations(raw_after.strip(), line.indent)
         return PythonNode(
             line_number=line.line_number,
             indent=line.indent,

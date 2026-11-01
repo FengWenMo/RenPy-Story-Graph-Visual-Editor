@@ -49,10 +49,6 @@
    "lines": 238,
    "branches": 62
   },
-  "storygraph/app/stage_render.py::size_rows": {
-   "lines": 338,
-   "branches": 61
-  },
   "storygraph/app/tables.py::export_table": {
    "lines": 192,
    "branches": 24
@@ -165,6 +161,10 @@
    "lines": 177,
    "branches": 45
   },
+  "storygraph/story/control_route.py::plan_control_edit": {
+   "lines": 160,
+   "branches": 42
+  },
   "storygraph/story/control_route.py::plan_control_route": {
    "lines": 208,
    "branches": 38
@@ -232,6 +232,10 @@
   "storygraph/ui_qt/param_editor.py::__init__": {
    "lines": 217,
    "branches": 5
+  },
+  "storygraph/ui_qt/stage_preview.py::_build": {
+   "lines": 168,
+   "branches": 6
   },
   "storygraph/ui_qt/theme.py::qss": {
    "lines": 242,

@@ -53,6 +53,11 @@ from collections import OrderedDict
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 
+# 2026-11-01：从 `placement` 改成顶层导入 `file_facts`（叶子）。从前这里是
+# 函数内 `from storygraph.story.placement import scan_file`，与
+# `placement` 顶层导入本模块合成一个 2 模块的导入环（技术债表 `[2]`）。
+from storygraph.story.file_facts import scan_file
+
 #: 每个缓存最多留多少条。几百章的项目也够；换项目时旧条目自然被挤掉。
 MAX_ENTRIES = 512
 
@@ -188,7 +193,7 @@ def labels_of(path) -> tuple:
 
 def file_facts(path, project_root):
     """
-    `placement.FileFacts` 的缓存版：同一份文件只**整份解析**一次。
+    `file_facts.FileFacts` 的缓存版：同一份文件只**整份解析**一次。
 
     这是最贵的那一步（完整 AST），也是 `detect_placement` 慢的全部原因。
     返回拷贝，调用方改自己的副本不影响缓存。
@@ -203,7 +208,6 @@ def file_facts(path, project_root):
             hits += 1
             return _copy_facts(hit[1])
         misses += 1
-    from storygraph.story.placement import scan_file
     facts = scan_file(path, project_root)
     if st is not None:
         with _lock:

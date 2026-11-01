@@ -1179,199 +1179,107 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
     """
     if frame is None:
         return []
-    from storygraph.story import size_presets as SP
-    from storygraph.story.atl import project_screen
+    ctx = _SizeCtx(frame, registry, project_root, screen, transform_index,
+                   limit, beats)
+    rows = []
+    scene = str(getattr(frame, 'scene', '') or '').strip()
+    if scene:
+        rows.append(_size_row(
+            ctx, len(rows), 'scene', '', scene, '背景',
+            str(getattr(frame, 'scene_at', '') or ''),
+            getattr(frame, 'scene_src', -1)))
+    raw = str(getattr(frame, 'layers', '') or '')
+    ats = dict(getattr(frame, 'layers_at', None) or {})
+    srcs = dict(getattr(frame, 'layer_src', None) or {})
+    for spec in [p.strip() for p in raw.split(';') if p.strip()][:max(0, limit)]:
+        tag = spec.split()[0] if spec.split() else spec
+        rows.append(_size_row(
+            ctx, len(rows), 'layer', tag, spec, ctx.layer_cn.get(tag, tag),
+            str(ats.get(tag) or ats.get(spec) or ''), srcs.get(tag)))
+    return rows
 
-    try:
-        sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen \
-            else (project_screen(project_root) if project_root
-                  else (1920, 1080))
-        screen_pair = (max(1, int(sw)), max(1, int(sh)))
-    except (TypeError, ValueError):
-        screen_pair = (1920, 1080)
-    images = getattr(registry, 'images', {}) or {}
-    index = _transform_index_of(project_root, transform_index)
-    from storygraph.app.stage import image_index, resolve_stage_asset
-    #: 这一帧是不是**接着上一章演**算出来的（`entry_state`）。只有它 + 出处
-    #: 不在这本剧本里，才能说"上一章的 at 看不到"（见 `items_for` 的 `cross`）。
-    from storygraph.app.stage import is_unknown_source
-    # 「按文件名回退」那一条（`resolve_stage_asset` 的 ③）要显式给索引才生效。
-    # 有些项目**不写 `image` 声明**、只靠 Ren'Py 的自动命名（`images/bg/x.png`
-    # → `bg x`）—— 不给索引的话，尺寸面板对这类项目永远是"找不到这张图"
-    # （渲染 / 提示行那边同源，但它们的调用方没传索引，这次只给尺寸面板补上）。
-    disk_index = None
-    if project_root:
-        try:
-            disk_index = image_index(project_root)
-        except Exception as e:                 # noqa: BLE001 - 索引建不出就不回退
-            swallow('stage_render.size_rows.disk_index', e)
-            disk_index = None
-    try:
-        from storygraph.core.vocabulary import LAYER_CN_TAG
-    except Exception as e:                     # noqa: BLE001 - 词表读不到就退 tag
-        swallow('stage_render.size_rows.layer_cn', e)
-        LAYER_CN_TAG = {}
 
-    def resolve(spec):
+# ---------------------------------------------------------------------------
+#  size_rows 的零件（2026-11-01，技术债第 5 刀：338 行 → 1 个上下文 + 3 个 helper）
+#
+# 为什么拆：这函数原来把"屏幕多大 / 图片索引 / transform 表 / 生成体检 /
+# 整章拍表"全做成闭包捕获，再在各分支里重复一遍"算尺寸 → 写提示 → 建行"。
+# 现在这些**一帧只算一次**的东西住进 `_SizeCtx`，每行只拿"上下文 + 自己那一行"。
+# 行为一个字没改：判据、措辞、`swallow` 标签全部沿用（`test_stage_size_rows.py`
+# 直接钉输出）。
+# ---------------------------------------------------------------------------
+
+class _SizeCtx:
+    """`size_rows` 一帧的共享上下文（只活一次调用，别往外传）。
+
+    `gen_file` 是 `game/sg_transforms.rpy` 的体检结果：4 个预设 × 最多 4 行
+    都要问"能不能生成"，**每帧只读一次文件**（从前是 `gen_cache` dict，
+    换成这个对象上的一个字段，口径不变）。
+    """
+
+    __slots__ = ('frame', 'registry', 'project_root', 'screen_pair', 'index',
+                 'limit', 'beats', 'gen_file', 'advice_map', 'advice_ok',
+                 'advice_why', 'images', 'disk_index', 'layer_cn')
+
+    def __init__(self, frame, registry, project_root, screen,
+                 transform_index, limit, beats):
+        from storygraph.story.atl import project_screen
+
         try:
-            return resolve_stage_asset(spec, images, project_root,
-                                       index=disk_index)
+            sw, sh = (tuple(screen) + (1920, 1080))[:2] if screen \
+                else (project_screen(project_root) if project_root
+                      else (1920, 1080))
+            self.screen_pair = (max(1, int(sw)), max(1, int(sh)))
+        except (TypeError, ValueError):
+            self.screen_pair = (1920, 1080)
+        self.frame = frame
+        self.registry = registry
+        self.project_root = project_root
+        self.index = _transform_index_of(project_root, transform_index)
+        self.limit = limit
+        self.beats = beats
+        self.gen_file = None
+        self.advice_map = None
+        self.advice_ok = beats is not None
+        self.advice_why = '没给整章的拍表' if not self.advice_ok else ''
+        self.images = _size_images_of(registry)
+        self.disk_index = _size_disk_index(project_root)
+        self.layer_cn = _size_layer_cn()
+        if self.advice_ok:
+            self._prefetch_advice()
+
+    def resolve(self, spec):
+        """图名 → 磁盘路径；解析失败就不给尺寸（不猜）。"""
+        from storygraph.app.stage import resolve_stage_asset
+
+        try:
+            return resolve_stage_asset(spec, self.images, self.project_root,
+                                       index=self.disk_index)
         except Exception as e:                 # noqa: BLE001 - 解析失败就不给尺寸
             swallow('stage_render.size_rows.resolve', e)
             return None
 
-    #: `game/sg_transforms.rpy` 的体检结果：**每帧只读一次**（4 个预设 × 最多
-    #: 4 行都要问"能不能生成"，不能每问一次读一遍文件）。
-    gen_cache: dict = {'file': None}
-
-    def items_for(row_at, natural, cross: bool = False):
-        """预设 + 自定义 → `items`（未匹配到的预设也列出来，只是 `ok=False`）。
-
-        `cross=True` = 这一行**从上一章继承来的**（`frame.entry_state` 且出处
-        不在这本剧本里）：这时"现在是哪个变换"根本看不到，「原样」也因此
-        补不了（`plan_size_edit` 会拒绝）—— 措辞要照这个说，不能写成
-        "已经是原样"。
-        """
-        out = []
-
-        def generate_for(key, natural_size):
-            """
-            项目里没有几何匹配的 transform 时，**提议生成**一条 `sg_*`
-            （2026-10-31 用户拍板：允许生成，但要三条护栏 —— 见
-            `story.sg_transforms`）。这里**只算不写**：人按下「改」并确认之后，
-            窗口层（`main_window.apply_size_from_card`）才落盘。
-
-            ⚠ 这里**不传 `natural`**：几何匹配刚刚才在 `items_for` 里做过一遍
-            （还是 None），再让 `plan_define` 拿同样的数据算一遍 `transform_options`
-            等于每帧多算三次全表。**生成前的查重照做** —— 在确认那一步
-            （`plan_for_project(..., natural=...)`），那才是写盘前的最后一道。
-            """
-            if not project_root:
-                return None
-            try:
-                from storygraph.story import sg_transforms as SG
-                if gen_cache.get('file') is None:
-                    gen_cache['file'] = SG.inspect(project_root)
-                return SG.plan_define(gen_cache['file'], key, index=index,
-                                      screen=screen_pair)
-            except Exception as e:             # noqa: BLE001 - 计划不出来就当没有
-                swallow('stage_render.size_rows.generate', e)
-                return None
-
-        for key in SP.PRESET_ORDER:
-            at = ''
-            hit = None
-            ok = False
-            why = ''
-            gen = False
-            item_note = SP.preset_note(key)
-            if key == 'as_is':
-                ok = bool(row_at)
-                why = '' if ok else '这一行本来就没有 at'
-                text = (SP.preset_label(key) if ok
-                        else '原样（已经是原样）')
-                if cross and not ok:
-                    # 上一章写的是什么 at 看不到：说"已经是原样"是**假装知道**
-                    # （真机截图当场露出来过）。`ok` / `current` 不动 ——
-                    # 按钮态与 `plan_size_edit` 的拒绝理由仍走同一个口径。
-                    why = ('上一章的 at 看不到：「原样」补不了，'
-                           '请挑一个变换')
-                    text = '原样（跨章这一行补不了）'
-            elif not natural:
-                why = '找不到这张图，算不出尺寸'
-                text = f'{SP.preset_label(key)}（算不出尺寸）'
-            else:
-                hit = SP.match_preset(key, natural, screen_pair, index)
-                if hit:
-                    at = hit['name']
-                    ok = str(at) != str(row_at)
-                    why = '' if ok else '已经是这个变换了'
-                    text = SP.describe_match(key, hit)
-                else:
-                    plan = generate_for(key, natural)
-                    if plan is not None and plan.writes:
-                        at = plan.name
-                        ok = str(at) != str(row_at)
-                        gen = True
-                        text = f'{SP.preset_label(key)}（生成 {plan.name}）'
-                        item_note = (f'{SP.preset_note(key)}\n'
-                                     f'项目里没有现成的：确认后会在 {plan.rel} 里'
-                                     f'写一条 {plan.name}（工具生成、带指纹；'
-                                     '以后手改过就不覆盖）')
-                        if plan.note:
-                            item_note += f'\n{plan.note}'
-                    elif plan is not None and plan.action == 'reuse':
-                        at = plan.name
-                        ok = str(at) != str(row_at)
-                        why = '' if ok else '已经是这个变换了'
-                        text = f'{SP.preset_label(key)} → {plan.name}'
-                    else:
-                        why = (plan.reason if plan is not None
-                               else '项目里没有几何匹配的 transform')
-                        text = f'{SP.preset_label(key)}（没有几何匹配的 transform）'
-            out.append({'key': key, 'at': at, 'text': text, 'ok': ok,
-                        'why': why, 'current': str(row_at) == str(at),
-                        'generate': gen, 'note': item_note})
-        # 「自定义倍数」（2026-10-31）：人填一个数（0.75 / 1.25 …）。
-        #
-        # 这一条**现在算不出 `at`**：数还没填。面板拿到它之后，按输入框里的值
-        # 换成一份算好的副本（`text` / `ok` / `zoom`），再发请求；真要把名字定
-        # 下来（复用项目里已有的那条，还是生成 `sg_zoom_075`）发生在窗口层确认
-        # 那一步 —— 只有那里有完整的 transform 表，也才该决定写不写项目文件。
-        #
-        # `generate=True` 是**准确**的：它迟早要走"生成/查重"那条路，只是名字
-        # 得等人把数填了才知道。`ok=False` 保证没填数时按钮是灰的。
-        out.append({
-            'key': 'custom', 'at': '', 'zoom': None,
-            'text': '自定义倍数…（先填一个数）',
-            'ok': False,
-            'why': (f'先在下面填一个倍数（{SP.ZOOM_MIN:g}–{SP.ZOOM_MAX:g}），'
-                    '例如 0.75'),
-            'current': False, 'generate': True,
-            'note': ('填一个倍数（0.05–5）：项目里已经有一样效果的就直接用它；'
-                     '没有才生成一条 sg_zoom_0xx（工具生成、带指纹）。'
-                     '不需要知道这张图多大 —— 倍数本身就是答案。')})
-        # 「自定义」= 项目里已有的 transform（带动画的/算不出几何的不列）
-        for opt in SP.transform_options(index, natural, screen_pair):
-            name = opt['name']
-            ok = str(name) != str(row_at)
-            out.append({
-                'key': 'pick', 'at': name,
-                'text': f'自定义：{name}（{opt["brief"]}）',
-                'ok': ok, 'why': '' if ok else '已经是这个变换了',
-                'current': str(name) == str(row_at), 'generate': False,
-                'note': '套用项目里已有的这个 transform（只改 @at，别的不动）。'})
-        return out
-
-    rows = []
-
-    # —— 本景"单独改写"的处数：**一次扫描**、四行共用（2026-10-31）——
-    #
-    # 一帧最多 4 行，每行各扫一遍整景是 4 倍白算；而 `override_map` 的边界
-    # 只取决于"起点之前"（起点取各行 source 里最靠前的那个，逐行再按自己的
-    # source 切片）。`beats=None`（单测/探针）→ 不算，`advice=None`。
-    advice_map = None
-    advice_ok = beats is not None
-    advice_why = '没给整章的拍表' if not advice_ok else ''
-    if advice_ok:
+    def _prefetch_advice(self):
+        """本景"单独改写"的处数：**一次扫描**、四行共用（2026-10-31）。"""
         try:
             from storygraph.story.override_advice import override_map
             starts = []
-            for value in [getattr(frame, 'scene_src', -1)] + \
-                    list((getattr(frame, 'layer_src', None) or {}).values()):
+            for value in [getattr(self.frame, 'scene_src', -1)] + \
+                    list((getattr(self.frame, 'layer_src', None) or {}).values()):
                 try:
                     value = int(value)
                 except (TypeError, ValueError):
                     continue
                 if value >= 0:
                     starts.append(value)
-            advice_map = override_map(beats, min(starts)) if starts else {}
+            self.advice_map = (override_map(self.beats, min(starts))
+                               if starts else {})
         except Exception as e:                 # noqa: BLE001 - 统计算不出就降档
             swallow('stage_render.size_rows.advice_map', e)
-            advice_ok = False
-            advice_why = '统计时出错了'
+            self.advice_ok = False
+            self.advice_why = '统计时出错了'
 
-    def advice_for(src, kind, tag):
+    def advice_for(self, src, kind, tag):
         """这一行的"本景还有几处单独改写"；`None` = 调用方没给拍表（不显示）。
 
         给了拍表却统计失败时**不返回 None**：那是"算不出来"，要说出来
@@ -1381,7 +1289,7 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
         （`None` = 不知道）—— 有它才能分清"那几处写的是另一个值"和"本来就
         写着同一个值"（`story.at_merge` 也用它当合并的目标值，同一个来源）。
         """
-        if beats is None:
+        if self.beats is None:
             return None, None
         try:
             from storygraph.story.override_advice import (OverrideAdvice,
@@ -1389,81 +1297,211 @@ def size_rows(frame, registry=None, project_root=None, screen=None,
         except Exception as e:                 # noqa: BLE001 - 模块进不来就不显示
             swallow('stage_render.size_rows.advice_import', e)
             return None, None
-        if not advice_ok:
+        if not self.advice_ok:
             return OverrideAdvice(level='hint', unknown=True,
-                                  reason=advice_why), None
+                                  reason=self.advice_why), None
         src_at = None
         try:
             from storygraph.story.at_merge import source_at_of
-            src_at = source_at_of(beats, src, kind=kind, tag=tag)
+            src_at = source_at_of(self.beats, src, kind=kind, tag=tag)
         except Exception as e:                 # noqa: BLE001 - 不知道就别猜
             swallow('stage_render.size_rows.source_at', e)
             src_at = None
-        return override_advice(beats, src, kind=kind, tag=tag,
-                               prefetched=advice_map,
+        return override_advice(self.beats, src, kind=kind, tag=tag,
+                               prefetched=self.advice_map,
                                source_at=src_at), src_at
 
-    scene = str(getattr(frame, 'scene', '') or '').strip()
-    if scene:
-        path = resolve(scene)
-        raw_px = _natural_size(path)
-        natural = display_size(path, raw_px) if raw_px else None
-        at = str(getattr(frame, 'scene_at', '') or '')
-        src = getattr(frame, 'scene_src', -1)
-        note = ''
+
+def _size_images_of(registry) -> dict:
+    """注册表里的图片表（没有就空表 —— 尺寸未知，不是错误）。"""
+    return getattr(registry, 'images', {}) or {}
+
+
+def _size_disk_index(project_root):
+    """「按文件名回退」用的图片索引；不传索引那条规则不生效（见 `size_rows`）。"""
+    if not project_root:
+        return None
+    try:
+        from storygraph.app.stage import image_index
+        return image_index(project_root)
+    except Exception as e:                 # noqa: BLE001 - 索引建不出就不回退
+        swallow('stage_render.size_rows.disk_index', e)
+        return None
+
+
+def _size_layer_cn() -> dict:
+    """图层 tag → 中文名（`cg` → `CG`）；词表读不到就退 tag 本身。"""
+    try:
+        from storygraph.core.vocabulary import LAYER_CN_TAG
+        return LAYER_CN_TAG
+    except Exception as e:                     # noqa: BLE001 - 词表读不到就退 tag
+        swallow('stage_render.size_rows.layer_cn', e)
+        return {}
+
+
+def _size_row(ctx, index, kind, tag, spec, label, at, src) -> dict:
+    """一行（背景 / 一个 CG/UI 图层）→ 尺寸面板那一行。
+
+    背景与图层从前后是**两段几乎逐字重复的代码**（只差取 `at` / `src` 的来源、
+    以及 `_size_note` 的第一个参数），现在合成一条：判据一致，措辞才一致。
+    """
+    from storygraph.app.stage import is_unknown_source
+
+    path = ctx.resolve(spec)
+    raw_px = _natural_size(path)
+    natural = display_size(path, raw_px) if raw_px else None
+    note = ''
+    why = ''
+    if natural:
+        note = _size_note(label, spec, natural, at, ctx.index, ctx.registry,
+                          ctx.project_root, ctx.screen_pair, raw=raw_px,
+                          oversample=oversample_of(path))
+    else:
+        why = '找不到这张图（尺寸未知，只能原样或自定义）'
+        note = f'{label} {spec}（尺寸未知：找不到图）'
+    src_i = src if isinstance(src, int) else -1
+    advice, src_at = ctx.advice_for(src_i, kind, tag)
+    cross = bool(getattr(ctx.frame, 'entry_state', False)) \
+        and is_unknown_source(src_i)
+    return {'index': index, 'kind': kind, 'tag': tag, 'spec': spec,
+            'label': label, 'at': at, 'source': src_i, 'source_at': src_at,
+            'natural': natural,
+            'note': note + _source_suffix(src, ctx.frame),
+            'items': _size_preset_items(ctx, at, natural, cross=cross),
+            'advice': advice, 'why': _row_why(why, src)}
+
+
+def _size_preset_items(ctx, row_at, natural, cross: bool = False) -> list:
+    """预设 + 自定义 → `items`（未匹配到的预设也列出来，只是 `ok=False`）。
+
+    `cross=True` = 这一行**从上一章继承来的**（`frame.entry_state` 且出处
+    不在这本剧本里）：这时"现在是哪个变换"根本看不到，「原样」也因此
+    补不了（`plan_size_edit` 会拒绝）—— 措辞要照这个说，不能写成
+    "已经是原样"。
+    """
+    from storygraph.story import size_presets as SP
+
+    out = []
+
+    def generate_for(key):
+        """
+        项目里没有几何匹配的 transform 时，**提议生成**一条 `sg_*`
+        （2026-10-31 用户拍板：允许生成，但要三条护栏 —— 见
+        `story.sg_transforms`）。这里**只算不写**：人按下「改」并确认之后，
+        窗口层（`main_window.apply_size_from_card`）才落盘。
+
+        ⚠ 这里**不传 `natural`**：几何匹配刚刚才在 `_size_preset_items` 里做过
+        一遍（还是 None），再让 `plan_define` 拿同样的数据算一遍
+        `transform_options` 等于每帧多算三次全表。**生成前的查重照做** ——
+        在确认那一步（`plan_for_project(..., natural=...)`），那才是写盘前的
+        最后一道。
+        """
+        if not ctx.project_root:
+            return None
+        try:
+            from storygraph.story import sg_transforms as SG
+            if ctx.gen_file is None:
+                ctx.gen_file = SG.inspect(ctx.project_root)
+            return SG.plan_define(ctx.gen_file, key, index=ctx.index,
+                                  screen=ctx.screen_pair)
+        except Exception as e:             # noqa: BLE001 - 计划不出来就当没有
+            swallow('stage_render.size_rows.generate', e)
+            return None
+
+    for key in SP.PRESET_ORDER:
+        at = ''
+        hit = None
+        ok = False
         why = ''
-        if natural:
-            note = _size_note('背景', scene, natural, at, index, registry,
-                              project_root, screen_pair, raw=raw_px,
-                              oversample=oversample_of(path))
+        gen = False
+        item_note = SP.preset_note(key)
+        if key == 'as_is':
+            ok = bool(row_at)
+            why = '' if ok else '这一行本来就没有 at'
+            text = (SP.preset_label(key) if ok
+                    else '原样（已经是原样）')
+            if cross and not ok:
+                # 上一章写的是什么 at 看不到：说"已经是原样"是**假装知道**
+                # （真机截图当场露出来过）。`ok` / `current` 不动 ——
+                # 按钮态与 `plan_size_edit` 的拒绝理由仍走同一个口径。
+                why = ('上一章的 at 看不到：「原样」补不了，'
+                       '请挑一个变换')
+                text = '原样（跨章这一行补不了）'
+        elif not natural:
+            why = '找不到这张图，算不出尺寸'
+            text = f'{SP.preset_label(key)}（算不出尺寸）'
         else:
-            why = '找不到这张图（尺寸未知，只能原样或自定义）'
-            note = f'背景 {scene}（尺寸未知：找不到图）'
-        src_i = src if isinstance(src, int) else -1
-        advice, src_at = advice_for(src_i, 'scene', '')
-        cross = bool(getattr(frame, 'entry_state', False)) \
-            and is_unknown_source(src_i)
-        rows.append({'index': len(rows), 'kind': 'scene', 'tag': '',
-                     'spec': scene, 'label': '背景', 'at': at,
-                     'source': src_i, 'source_at': src_at,
-                     'natural': natural,
-                     'note': note + _source_suffix(src, frame),
-                     'items': items_for(at, natural, cross=cross),
-                     'advice': advice,
-                     'why': _row_why(why, src)})
-    raw = str(getattr(frame, 'layers', '') or '')
-    ats = dict(getattr(frame, 'layers_at', None) or {})
-    srcs = dict(getattr(frame, 'layer_src', None) or {})
-    for spec in [p.strip() for p in raw.split(';') if p.strip()][:max(0, limit)]:
-        tag = spec.split()[0] if spec.split() else spec
-        at = str(ats.get(tag) or ats.get(spec) or '')
-        src = srcs.get(tag)
-        path = resolve(spec)
-        raw_px = _natural_size(path)
-        natural = display_size(path, raw_px) if raw_px else None
-        label = LAYER_CN_TAG.get(tag, tag)
-        note = ''
-        why = ''
-        if natural:
-            note = _size_note(label, spec, natural, at, index, registry,
-                              project_root, screen_pair, raw=raw_px,
-                              oversample=oversample_of(path))
-        else:
-            why = '找不到这张图（尺寸未知，只能原样或自定义）'
-            note = f'{label} {spec}（尺寸未知：找不到图）'
-        src_i = src if isinstance(src, int) else -1
-        advice, src_at = advice_for(src_i, 'layer', tag)
-        cross = bool(getattr(frame, 'entry_state', False)) \
-            and is_unknown_source(src_i)
-        rows.append({'index': len(rows), 'kind': 'layer', 'tag': tag,
-                     'spec': spec, 'label': label, 'at': at,
-                     'source': src_i, 'source_at': src_at,
-                     'natural': natural,
-                     'note': note + _source_suffix(src, frame),
-                     'items': items_for(at, natural, cross=cross),
-                     'advice': advice,
-                     'why': _row_why(why, src)})
-    return rows
+            hit = SP.match_preset(key, natural, ctx.screen_pair, ctx.index)
+            if hit:
+                at = hit['name']
+                ok = str(at) != str(row_at)
+                why = '' if ok else '已经是这个变换了'
+                text = SP.describe_match(key, hit)
+            else:
+                plan = generate_for(key)
+                if plan is not None and plan.writes:
+                    at = plan.name
+                    ok = str(at) != str(row_at)
+                    gen = True
+                    text = f'{SP.preset_label(key)}（生成 {plan.name}）'
+                    item_note = (f'{SP.preset_note(key)}\n'
+                                 f'项目里没有现成的：确认后会在 {plan.rel} 里'
+                                 f'写一条 {plan.name}（工具生成、带指纹；'
+                                 '以后手改过就不覆盖）')
+                    if plan.note:
+                        item_note += f'\n{plan.note}'
+                elif plan is not None and plan.action == 'reuse':
+                    at = plan.name
+                    ok = str(at) != str(row_at)
+                    why = '' if ok else '已经是这个变换了'
+                    text = f'{SP.preset_label(key)} → {plan.name}'
+                else:
+                    why = (plan.reason if plan is not None
+                           else '项目里没有几何匹配的 transform')
+                    text = f'{SP.preset_label(key)}（没有几何匹配的 transform）'
+        out.append({'key': key, 'at': at, 'text': text, 'ok': ok,
+                    'why': why, 'current': str(row_at) == str(at),
+                    'generate': gen, 'note': item_note})
+    out.extend(_size_custom_items(ctx, row_at, natural))
+    return out
+
+
+def _size_custom_items(ctx, row_at, natural) -> list:
+    """两类**不靠几何匹配**的选项：「自定义倍数」与「自定义」（项目已有的 transform）。
+
+    「自定义倍数」（2026-10-31）：人填一个数（0.75 / 1.25 …）。
+
+    这一条**现在算不出 `at`**：数还没填。面板拿到它之后，按输入框里的值
+    换成一份算好的副本（`text` / `ok` / `zoom`），再发请求；真要把名字定
+    下来（复用项目里已有的那条，还是生成 `sg_zoom_075`）发生在窗口层确认
+    那一步 —— 只有那里有完整的 transform 表，也才该决定写不写项目文件。
+
+    `generate=True` 是**准确**的：它迟早要走"生成/查重"那条路，只是名字
+    得等人把数填了才知道。`ok=False` 保证没填数时按钮是灰的。
+    """
+    from storygraph.story import size_presets as SP
+
+    out = [{
+        'key': 'custom', 'at': '', 'zoom': None,
+        'text': '自定义倍数…（先填一个数）',
+        'ok': False,
+        'why': (f'先在下面填一个倍数（{SP.ZOOM_MIN:g}–{SP.ZOOM_MAX:g}），'
+                '例如 0.75'),
+        'current': False, 'generate': True,
+        'note': ('填一个倍数（0.05–5）：项目里已经有一样效果的就直接用它；'
+                 '没有才生成一条 sg_zoom_0xx（工具生成、带指纹）。'
+                 '不需要知道这张图多大 —— 倍数本身就是答案。')}]
+    # 「自定义」= 项目里已有的 transform（带动画的/算不出几何的不列）
+    for opt in SP.transform_options(ctx.index, natural, ctx.screen_pair):
+        name = opt['name']
+        ok = str(name) != str(row_at)
+        out.append({
+            'key': 'pick', 'at': name,
+            'text': f'自定义：{name}（{opt["brief"]}）',
+            'ok': ok, 'why': '' if ok else '已经是这个变换了',
+            'current': str(name) == str(row_at), 'generate': False,
+            'note': '套用项目里已有的这个 transform（只改 @at，别的不动）。'})
+    return out
 
 
 # ---------------------------------------------------------------------------

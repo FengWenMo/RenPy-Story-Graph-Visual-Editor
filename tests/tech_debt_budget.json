@@ -6,16 +6,16 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 93,
-  "complex_functions": 238,
+  "long_functions": 92,
+  "complex_functions": 236,
   "print_calls": 249,
   "swallow_calls": 1231,
   "broad_excepts": 1229,
   "todos": 111,
   "long_files": 26,
-  "import_cycles_all": 5,
+  "import_cycles_all": 3,
   "import_cycles_top": 0,
-  "modules_in_cycles_all": 41
+  "modules_in_cycles_all": 37
  },
  "cycle_modules": [
   "storygraph.assets.asset_identity",
@@ -23,8 +23,6 @@
   "storygraph.assets.asset_registry",
   "storygraph.assets.asset_registry_scan",
   "storygraph.assets.mapping_excel",
-  "storygraph.parsing.renpy_parser",
-  "storygraph.parsing.renpy_parser_stmts",
   "storygraph.pipeline.build",
   "storygraph.pipeline.compile",
   "storygraph.pipeline.engine_collect",
@@ -47,9 +45,7 @@
   "storygraph.story.generation_guard",
   "storygraph.story.host_hooks",
   "storygraph.story.patcher",
-  "storygraph.story.placement",
   "storygraph.story.project_conventions",
-  "storygraph.story.scan_cache",
   "storygraph.story.script_table",
   "storygraph.story.stage_snapshot",
   "storygraph.story.statement_registry",
@@ -63,14 +59,12 @@
  "cycle_shapes": [
   "storygraph.assets.asset_identity|storygraph.assets.asset_mapping|storygraph.assets.mapping_excel",
   "storygraph.assets.asset_registry|storygraph.assets.asset_registry_scan|storygraph.pipeline.build|storygraph.pipeline.compile|storygraph.pipeline.engine_collect|storygraph.pipeline.engine_exporters|storygraph.pipeline.engine_lint|storygraph.pipeline.ir_validate|storygraph.pipeline.statement_probe|storygraph.pipeline.unity_package|storygraph.pipeline.validate|storygraph.story.beat_build|storygraph.story.beat_model|storygraph.story.beat_render|storygraph.story.beat_render_code|storygraph.story.call_expr|storygraph.story.chapter|storygraph.story.chapter_tree|storygraph.story.dsl|storygraph.story.excel_export|storygraph.story.excel_import|storygraph.story.generation_guard|storygraph.story.host_hooks|storygraph.story.patcher|storygraph.story.project_conventions|storygraph.story.script_table|storygraph.story.stage_snapshot|storygraph.story.statement_registry|storygraph.story.transition_expr",
-  "storygraph.parsing.renpy_parser|storygraph.parsing.renpy_parser_stmts",
-  "storygraph.story.placement|storygraph.story.scan_cache",
   "storygraph.ui_qt.main_window|storygraph.ui_qt.stage_preview|storygraph.ui_qt.stage_thumb|storygraph.ui_qt.window_export|storygraph.ui_qt.window_state"
  ],
  "snapshot": {
-  "modules": 235,
-  "total_lines": 159942,
-  "functions": 5348,
-  "file_edges_all": 1199
+  "modules": 237,
+  "total_lines": 160079,
+  "functions": 5355,
+  "file_edges_all": 1202
  }
 }
