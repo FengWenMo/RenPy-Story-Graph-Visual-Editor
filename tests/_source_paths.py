@@ -101,8 +101,13 @@ WINDOW_MIXIN_MODULES = (
 #: `QWidget`，被搬进了 `ui_qt/card_editor.py`。扫源码的用例（"保存/撤销按钮
 #: 在不在"、"脏标记在不在"）只扫入口 + mixin 就会当场误报三条 —— 所以这份
 #: 清单必须跟着走。**加一块就加一行**。
+#:
+#: 同一轮里卡片上的回调（`apply_size_from_card` 等 19 个）与「资源映射」
+#: 那一块也各搬了一个文件 —— 它们同样是"前端的一部分"，扫源码时不能漏。
 WINDOW_SIDE_MODULES = (
     'storygraph.ui_qt.card_editor',
+    'storygraph.ui_qt.card_actions',
+    'storygraph.ui_qt.mapping_status',
 )
 
 

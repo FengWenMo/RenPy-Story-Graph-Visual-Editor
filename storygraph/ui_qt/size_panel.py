@@ -52,8 +52,8 @@ master 层上**所有** displayable（立绘全没），所以它必须是**人�
 动作，确认框里还要写清"会清掉台上 N 个立绘"（`app.stage.SceneEdit`）。
 面板自己不弹框、不数人 —— 它只把请求递出去。
 
-真正的计划 / diff 确认 / 写回在窗口层（`main_window._on_card_size_requested`
-与 `main_window.apply_scene_from_card`）：面板不 import 会话、不碰 `.rpy`。
+真正的计划 / diff 确认 / 写回在窗口层（`ui_qt.card_actions.apply_size_from_card`
+与 `apply_scene_from_card`）：面板不 import 会话、不碰 `.rpy`。
 
 ## 行下面那一句"本景还有 N 处单独改写"（2026-10-31）
 

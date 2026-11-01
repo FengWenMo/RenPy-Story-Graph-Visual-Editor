@@ -54,6 +54,24 @@ Qt 版**主窗口**：剧情结构图（第一屏）+ 卡片编辑器（点进�
 舞台帧 / 结构分析。这里**不再**出现任何 `beat.xxx = ` 赋值、也不再有
 `self._panel._speaker` 这种"伸手进别人私有属性"的写法 —— 那些正是两套
 前端各写一套语义的根源。
+
+而且连"摆控件"也大半不在这里了（2026-11-01）：本文件从 4478 行降到 ~1200
+行，前端按"一块一文件、依赖单向"重新分层：
+
+    ui_qt/main_window.py        装配：主类 + 启动/页切换/日志/窗口状态
+    ui_qt/window_*.py           十一个 mixin（各一块职责）
+    ui_qt/window_graph_page.py  两页 + 两组工具栏的**构建**
+    ui_qt/card_editor.py        卡片表单本体（独立 QWidget）
+    ui_qt/card_actions.py       卡片上"按钮点下去干的事"（fn(win, req)）
+    ui_qt/mapping_status.py     「🗂 资源映射」菜单 + 状态栏那一格
+
+依赖方向是**单向**的：`main_window → window_graph_page → {card_editor,
+card_actions, mapping_status}`。判据：
+
+  · `tests/test_main_window_mixins.py`（主类 ≤35 个方法、每个成员都要认领、
+    每个 mixin 的 `REQUIRES` 要如实）；
+  · `tests/test_package_layering.py`（模块级不许有环）；
+  · `tools/debt_report.py`（导入环 / 超大函数 / 超长文件的棘轮）。
 """
 
 from __future__ import annotations

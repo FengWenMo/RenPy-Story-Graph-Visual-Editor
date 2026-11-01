@@ -81,7 +81,7 @@ def note_scene_added(card, idx: int, image: str) -> None:
 
     所以：数据照常保存（可撤销），控制台/状态栏**立刻**点名被带走的立绘与
     图层。要"事前确认"的那条路是尺寸面板背景行的「换景」
-    （`app.stage.SceneEdit` / `main_window.apply_scene_from_card`）——
+    （`app.stage.SceneEdit` / `ui_qt.card_actions.apply_scene_from_card`）——
     它会在写之前把 N 个立绘写进确认框。
 
     台上没人 → 一个字都不说（新建一景、空台换景是最常见的情形）。

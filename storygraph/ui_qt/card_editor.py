@@ -33,7 +33,6 @@ from storygraph.core.safeguard import swallow
 from storygraph.story.flow import is_valid_label, render_flow_line
 from storygraph.story.spec_args import is_dynamic_column
 from storygraph.ui_qt import tokens as T
-from storygraph.ui_qt.choice_picker import choose_from
 from storygraph.ui_qt.code_edit import CodeEditor
 from storygraph.ui_qt.labeled_choices import (as_choices, combo_value,
                                               fill_combo, legacy_pairs,
@@ -1232,7 +1231,15 @@ class BeatCardEditor(QWidget):
         登记的过场调用），靠下拉翻页找 `Fade(...)` 是不可能的；`choose_from`
         早就有"输入即筛"，只是一直只服务立绘 chip。选中后**写回下拉的真值**
         （屏幕上显示人话），与手点下拉是同一条路。
+
+        ⚠ `choose_from` **必须在这里 import**（不能提到模块顶层）：它是个
+        模态对话框，判据（`test_vocabulary_wiring.py`）只能靠替换
+        `choice_picker.choose_from` 来"不弹真窗"。顶层 import 会把名字在
+        模块加载时**绑死**，替换定义处就再也影响不到这里 —— 实测症状是
+        用例挂住 300s（真弹窗在等鼠标）。
         """
+        from storygraph.ui_qt.choice_picker import choose_from
+
         items = as_choices(options)
         if not items:
             return
