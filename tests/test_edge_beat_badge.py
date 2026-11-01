@@ -15,6 +15,7 @@ S0：边的"第几拍"徽标 + 悬停上下文。
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from storygraph.story.beat_model import Beat
@@ -178,8 +179,18 @@ def test_double_click_on_a_sketch_also_opens_properties(qapp):
 
 
 def _main_window_src() -> str:
-    return (Path(__file__).resolve().parents[1]
-            / 'storygraph' / 'ui_qt' / 'main_window.py').read_text(encoding='utf-8')
+    """
+    **整个前端**的源码（入口 + 全部 mixin）。
+
+    2026-11-01：画布那十来条 `connect` 随第 0 页构建器搬进了
+    `ui_qt/window_graph_page.py` —— 只读 `main_window.py` 会误报"没接这根线"。
+    取法统一走 `tests/_source_paths.main_window_source_text()`（它就是为这件事
+    建的：扫源码的用例不许硬编码单个文件）。
+    """
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _source_paths import main_window_source_text
+    return main_window_source_text()
 
 
 def test_main_window_listens_for_edge_edit_and_keeps_beat_locate():
