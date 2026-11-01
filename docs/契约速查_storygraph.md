@@ -661,6 +661,17 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
      窗口里被改过就拒绝增量（退回全量是安全方向）；
    · 资产表 6 个写函数过 `asset_registry._ASSET_WRITE_LOCK`（可重入的进程内锁；
      无锁实测 8 线程写 32 行只剩 4 行）。
+   **结构与债的纪律**（2026-11-01 起）：两套棘轮，**只许降不许升** ——
+   · `tests/complexity_budget.json`（"最长 40 + 最绕 40"的并集；新函数硬线
+     500 行 / 150 分支）；改完跑 `python tools/complexity_report.py` 看榜；
+   · `tests/tech_debt_budget.json`（超大函数数 / 高分支数 / print / swallow /
+     宽泛 except / TODO / 超长文件 / **导入环**）；改完跑
+     `python tools/debt_report.py`。⚠ 环按**模块集合**比，别只看个数：
+     两个小环并成一个大环时个数会变少、债却更重。
+   · 拆函数的安全姿势：**整段搬出 + 原位置留一行调用 + 缩进不变**；
+     新方法只吃显式参数（别读上一段的局部变量），每搬一段跑该模块的测试。
+   · 清债之后重生成快照：`python tools/complexity_budget.py` /
+     `python tools/debt_budget.py`。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
