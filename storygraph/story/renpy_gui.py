@@ -721,58 +721,118 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
 
     缓存键包含 `gui.rpy` / `screens.rpy` / `definitions.rpy` 的 mtime：
     作者改了字号再开预览，必须立刻看到新字号（不能一次会话只读一次盘）。
+
+    六段各一个助手（2026-11-01，§93）：路径与缓存键 / 读盘与 define / 分辨率 /
+    缺省值 / 字体 / 背景与角色。**顺序是契约** —— warning 的先后就是预览面板
+    上那几行的先后，用例按顺序比；搬的时候一段都没挪位。
     """
     root = Path(project_root) if project_root else None
     if root is None or not root.is_dir():
         return GuiProfile(warnings=['没有项目目录，无法读取 gui 排版'])
     game = root / 'game'
-    files = ['gui.rpy', 'screens.rpy', 'options.rpy', 'definitions.rpy',
-             'script.rpy']
+    paths = _profile_paths(game)
+    key = _profile_cache_key(root, paths, registry)
+    if not force:
+        got = _cached_profile(key)
+        if got is not None:
+            return got
+
+    texts = {str(p): _read(p) for p in paths}
+    raw = _raw_defines(texts)
+    values = _resolved_values(raw)
+
+    profile = GuiProfile(project_root=str(root), values=values)
+    profile.screen = _detect_screen(texts)
+    _fill_defaults(profile, values)
+    _apply_fonts(profile, root, values, raw)
+    _apply_backgrounds(profile, root, texts)
+    _apply_characters(profile, root, game, texts, registry)
+    _remember_profile(key, profile)
+    return profile
+
+
+def _profile_paths(game: Path) -> list:
+    """要读的那几个文件（不存在的就不读）。"""
     paths = []
-    for name in files:
+    for name in ('gui.rpy', 'screens.rpy', 'options.rpy', 'definitions.rpy',
+                 'script.rpy'):
         p = game / name
         if p.is_file():
             paths.append(p)
     # 角色定义可能不在 definitions.rpy：扫全部 rpy（有界）
     if not any(p.name == 'definitions.rpy' for p in paths):
         paths.extend(_scan_rpy_files(game)[:80])
+    return paths
+
+
+def _profile_cache_key(root, paths, registry) -> tuple:
+    """
+    缓存键：路径 + mtime + 大小 + registry 身份（`id()`）。
+
+    `stat()` 抛 OSError（文件在这一瞬间被删/被锁）时退回"只比路径"：
+    宁可多读一次盘，也不要因为一个拿不到的 mtime 把整个预览弄挂。
+    """
     try:
         stamp = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size)
                       for p in paths)
     except OSError:
         stamp = tuple(str(p) for p in paths)
-    key = (str(root), stamp, id(registry))
-    if not force:
-        got = _CACHE.get(key)
-        # 字体文件也是缓存的一部分：只比 `.rpy` 的 mtime 会让"刚丢进来的字体"
-        # 一直看不见（见 `GuiProfile.font_probe`）。
-        if got is not None and _font_probe_ok(got):
-            return got
+    return (str(root), stamp, id(registry))
 
-    texts = {}
-    for p in paths:
-        texts[str(p)] = _read(p)
+
+def _cached_profile(key):
+    """命中**且字体探针仍然成立**才复用，否则当作没命中（读一次盘）。"""
+    got = _CACHE.get(key)
+    # 字体文件也是缓存的一部分：只比 `.rpy` 的 mtime 会让"刚丢进来的字体"
+    # 一直看不见（见 `GuiProfile.font_probe`）。
+    if got is not None and _font_probe_ok(got):
+        return got
+    return None
+
+
+def _remember_profile(key, profile) -> None:
+    """写缓存；只留最近几份，避免长期运行时缓存无限长。"""
+    _CACHE[key] = profile
+    if len(_CACHE) > 32:
+        for old in list(_CACHE)[:-16]:
+            _CACHE.pop(old, None)
+
+
+def _raw_defines(texts) -> dict:
+    """所有文件里的 `define` / `default` **原文**（后读到覆盖先读到）。"""
     raw = {}
     for text in texts.values():
         for key_, value in _parse_defines(text).items():
             raw[key_] = value
+    return raw
+
+
+def _resolved_values(raw) -> dict:
+    """原文 → 最终值（引号、`gui.` 前缀那些交给 `_resolve_value`）。"""
     values = {}
     for key_, text in raw.items():
         got = _resolve_value(key_, text, values)
         if got is not _MISSING:
             values[key_] = got
+    return values
 
-    profile = GuiProfile(project_root=str(root), values=values)
-    # 分辨率
-    screen = DEFAULT_SCREEN
+
+def _detect_screen(texts) -> tuple:
+    """`gui.init(w, h)` → 分辨率；一句都没写就是 `DEFAULT_SCREEN`。"""
     for text in texts.values():
         m = re.search(r'gui\.init\s*\(\s*(\d+)\s*,\s*(\d+)', text)
         if m:
-            screen = (int(m.group(1)), int(m.group(2)))
-            break
-    profile.screen = screen
+            return (int(m.group(1)), int(m.group(2)))
+    return DEFAULT_SCREEN
 
-    # 缺省值 + warning
+
+def _fill_defaults(profile, values) -> None:
+    """
+    缺的键按 Ren'Py 默认补上。
+
+    只有 `textbox_height` 会报一句：其余默认值"补上就对了"（字号/边距那种
+    差一点看不出来），而对话框高度差 278 会让预览的排版整个对不上。
+    """
     for key_, default in DEFAULTS.items():
         if key_ not in values:
             if key_ == 'textbox_height':
@@ -780,9 +840,24 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
                     'gui.textbox_height 没写，按 Ren\'Py 默认 278 画')
             values[key_] = default
 
-    # 字体
+
+def _apply_fonts(profile, root, values, raw) -> None:
+    """
+    三支字（正文 / 名条 / 台词）各一段，末尾记下"探针"。
+
+    为什么分三段：它们的**来源**是三根不同的键（`gui.text_font` /
+    `gui.name_text_font` / `gui.dialogue_text_font`），预览面板上也是三行；
+    混在一个函数里时，"名条为什么退回了正文字体"这类问题只能靠读变量名猜。
+    """
+    font_rel = _apply_text_font(profile, root, values, raw)
+    name_rel = _apply_name_font(profile, root, values, font_rel)
+    _apply_dialogue_font(profile, root, values)
+    _apply_font_probe(profile, root, values, font_rel, name_rel)
+
+
+def _apply_text_font(profile, root, values, raw) -> str:
+    """正文：`gui.text_font`（含 FontGroup 的第一支）。返回解析用的相对路径。"""
     font_rel = str(values.get('text_font') or 'DejaVuSans.ttf')
-    name_rel = str(values.get('name_text_font') or font_rel)
     # **FontGroup**（`FontGroup().add("a.ttf", "0x20-0x7f")…`）预览模拟不了：
     # 它是"按字符区间混排多支字体"，PIL 只能画一支。这里取**第一支**并明说，
     # 绝不让用户以为预览的字形就是引擎的（2026-10-21）。
@@ -793,11 +868,11 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
             f'这里用其中第一支 {Path(first).name if first else "（找不到）"}，'
             '字形可能与引擎不同')
         font_rel = first or font_rel
-    requested_font = _find_file(root, font_rel)
+    requested = _find_file(root, font_rel)
     candidates = _font_candidates(root, font_rel)
-    profile.text_font_path = (requested_font
+    profile.text_font_path = (requested
                               or (str(candidates[0]) if candidates else None))
-    if not requested_font and profile.text_font_path:
+    if not requested and profile.text_font_path:
         used = Path(profile.text_font_path).name
         # 同名 = 引擎也会在同一个搜索路径里找到它（典型：SDK 自带的
         # DejaVuSans.ttf）。这不是"替换"，别吓用户。
@@ -808,25 +883,41 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     elif not profile.text_font_path:
         profile.warnings.append(f'项目里没有正文字体 {font_rel}，'
                                 '系统也找不到可用字体')
-    requested_name = _find_file(root, name_rel)
-    ncandidates = _font_candidates(root, name_rel)
-    profile.name_font_path = (requested_name
-                              or (str(ncandidates[0]) if ncandidates else
+    return font_rel
+
+
+def _apply_name_font(profile, root, values, font_rel) -> str:
+    """
+    名条：`gui.name_text_font`，没写就跟着正文走。
+
+    **来源标签也在这里定**（`text_font_source` / `name_font_source`）：
+    预览面板要能回答"这一句用的是哪支字、从哪儿来的"，而这两个标签与
+    "名条是否退回正文"是同一个判断。
+    """
+    name_rel = str(values.get('name_text_font') or font_rel)
+    requested = _find_file(root, name_rel)
+    candidates = _font_candidates(root, name_rel)
+    profile.name_font_path = (requested
+                              or (str(candidates[0]) if candidates else
                                   profile.text_font_path))
-    if not requested_name and profile.name_font_path and \
+    if not requested and profile.name_font_path and \
             Path(profile.name_font_path).name.lower() != \
             Path(name_rel).name.lower():
         used = Path(profile.name_font_path).name
         profile.fonts_substituted.append(f'{name_rel} → {used}')
-
-    # 来源标签：预览面板要能回答"这一句用的是哪支字、从哪儿来的"
     profile.text_font_source = 'gui.text_font'
     profile.name_font_source = ('gui.name_text_font'
                                 if values.get('name_text_font')
                                 else 'gui.text_font')
-    # **台词正文**：`gui.text_properties("dialogue")` 会优先用
-    # `gui.dialogue_text_font` —— 只读 `text_font` 时，项目一覆盖字体/字号，
-    # 预览画的就是另一支字（2026-10-21 补）。
+    return name_rel
+
+
+def _apply_dialogue_font(profile, root, values) -> None:
+    """
+    **台词正文**：`gui.text_properties("dialogue")` 会优先用
+    `gui.dialogue_text_font` —— 只读 `text_font` 时，项目一覆盖字体/字号，
+    预览画的就是另一支字（2026-10-21 补）。
+    """
     dlg_rel = str(values.get('dialogue_text_font') or '')
     if dlg_rel:
         dlg_path = (_find_file(root, dlg_rel)
@@ -841,20 +932,28 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
         profile.dialogue_font_path = profile.text_font_path
         profile.dialogue_font_source = 'gui.text_font'
 
-    # 角色单独指定的字体要等角色解析完才能做（见函数末尾 `_resolve_char_fonts`）。
-    # 记下"字体查过哪些路径、当时在不在"：缓存命中时复核（见 font_probe）。
+
+def _apply_font_probe(profile, root, values, font_rel, name_rel) -> None:
+    """
+    记下"字体查过哪些路径、当时在不在"：缓存命中时复核（见 `font_probe`）。
+
+    角色单独指定的字体要等角色解析完才做（见 `_resolve_char_fonts`），
+    所以探针先按这三支已知字体建。
+    """
     probe = []
-    probe_rels = [font_rel, name_rel]
+    rels = [font_rel, name_rel]
     if values.get('dialogue_text_font'):
-        probe_rels.append(str(values.get('dialogue_text_font')))
-    for rel in probe_rels:
+        rels.append(str(values.get('dialogue_text_font')))
+    for rel in rels:
         for p in _font_probe_paths(root, rel):
             item = (str(p), p.is_file())
             if item not in probe:
                 probe.append(item)
     profile.font_probe = tuple(probe)
 
-    # 背景图
+
+def _apply_backgrounds(profile, root, texts) -> None:
+    """对话框 / 名条底图（手机变体由 `_parse_say_screen` 整块跳过）。"""
     custom, backgrounds = _parse_say_screen(texts)
     profile.screen_say_custom = custom
     textbox_rel = backgrounds.get('window') or 'gui/textbox.png'
@@ -866,7 +965,14 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     if not profile.namebox_image:
         profile.warnings.append(f'找不到名条底图 {namebox_rel}')
 
-    # 角色（注册表名字优先：DynamicCharacter 的真名在 store 变量里）
+
+def _apply_characters(profile, root, game, texts, registry) -> None:
+    """
+    角色表 + 每个角色自己的字体。
+
+    **注册表里的名字优先**：`DynamicCharacter` 的真名在 store 变量里，
+    光读 `.rpy` 只能拿到变量名（`dynamic_character_uses_default_name` 那条）。
+    """
     registry_names = {}
     if registry is not None:
         for cid, row in (getattr(registry, 'characters', {}) or {}).items():
@@ -880,13 +986,6 @@ def load_gui_profile(project_root, registry=None, force: bool = False) -> GuiPro
     profile.names = by_name
     profile.warnings.extend(warnings)
     _resolve_char_fonts(profile, root)
-
-    _CACHE[key] = profile
-    # 只留最近几份，避免长期运行时缓存无限长
-    if len(_CACHE) > 32:
-        for old in list(_CACHE)[:-16]:
-            _CACHE.pop(old, None)
-    return profile
 
 
 __all__ = ['DEFAULT_SCREEN', 'DEFAULTS', 'CharacterStyle', 'GuiProfile',
