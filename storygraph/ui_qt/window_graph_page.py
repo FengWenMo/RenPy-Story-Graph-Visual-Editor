@@ -99,6 +99,10 @@ class GraphPageMixin:
         左栏的"剧情树"已按用户要求删除：
         > 这个左栏"剧情树"是不需要的！因为很显然中间的舞台就已经导入了
         > chapter，一看就知道有哪些！这个左边的根本没有用……
+
+        这一段只负责**编排**（2026-11-01 拆）：三块内容各是一个
+        `_graph_page_*`。调用顺序就是右栏从上到下的可见顺序 —— 控制台
+        （消息流）→ 当前模块与主入口 → 画布工具 → 更多工具。
         """
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -110,7 +114,38 @@ class GraphPageMixin:
         self._split_graph = split
         outer.addWidget(split)
 
-        # —— 左：结构图（画布）+ 缩放条 ——
+        mid = self._graph_page_canvas()
+        right = self._graph_page_right_column()
+        split.addWidget(mid)
+        split.addWidget(right)
+
+        # 右栏比上一版**更窄**（420 → 340）：用户要求给这一组按钮腾出位置，
+        # 同时控制台仍然是这一栏里最大的一块（它要显示导入/分析的流水）。
+        split.setSizes([1080, 340])
+        try:
+            # ⚠ 从前这里写的是 `left`（**没有这个变量**，左边那一栏叫 `mid`）——
+            # NameError 被下面这个 `except Exception` 吞掉，于是"右栏最窄 300 /
+            # 最宽 420"这两条约束**从来没生效过**（用户看到的右栏宽度不受控）。
+            # 静态扫"引用了但本模块看不到的全局名"才把它抓出来。
+            mid.setMinimumWidth(200)
+            right.setMinimumWidth(300)
+            right.setMaximumWidth(420)
+        except Exception:                     # noqa: BLE001
+            swallow('ui_qt.window_graph_page._build_graph_page')
+        return page
+
+    # ------------------------------------------------------------------
+    #  左栏：画布
+    # ------------------------------------------------------------------
+
+    def _graph_page_canvas(self) -> QWidget:
+        """
+        左栏 = 画布（伸展）+ 一行缩放按钮 + 一行手势提示。
+
+        画布那十来条 `connect` 是**旧版操作清单的逐条落地**（见
+        `graph_canvas` 的契约表）：请求接线 / 节点操作 / 加节点 / 右键 /
+        双击连边 / 双击连线进卡片 / 右键连边 / 选中 / 拖动 / 缩放 / 排完版。
+        """
         mid = QWidget()
         mv = QVBoxLayout(mid)
         mv.setContentsMargins(0, 0, 0, 0)
@@ -134,7 +169,11 @@ class GraphPageMixin:
         # 分排是按**当时舞台大小**算的，不说明白用户会以为排法乱变）。
         self._canvas.layout_arranged.connect(self._status)
         mv.addWidget(self._canvas, 1)
+        mv.addLayout(self._graph_page_zoom_row())
+        return mid
 
+    def _graph_page_zoom_row(self) -> QHBoxLayout:
+        """缩放四件套（➖ / 百分比 / ➕ / 1:1 / 适应窗口）+ 右侧手势提示。"""
         zrow = QHBoxLayout()
         zrow.setSpacing(T.SPACE['xs'])
         self._zoom_out_btn = QPushButton('➖')
@@ -167,15 +206,31 @@ class GraphPageMixin:
             ' · 滚轮缩放 · 空格 + 左键拖动 = 平移')
         self._graph_hint.setProperty('role', 'caption')
         zrow.addWidget(self._graph_hint)
-        mv.addLayout(zrow)
-        split.addWidget(mid)
+        return zrow
 
-        # —— 右：控制台 + 当前模块 + 主入口 + 分析 ——
+    # ------------------------------------------------------------------
+    #  右栏
+    # ------------------------------------------------------------------
+
+    def _graph_page_right_column(self) -> QWidget:
+        """右栏：控制台 → 当前模块与主入口 → 画布工具（从上到下就是可见顺序）。"""
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(T.SPACE['xs'])
+        self._graph_page_console(rv)
+        self._graph_page_actions(rv)
+        self._graph_page_canvas_tools(rv)
+        return right
 
+    def _graph_page_console(self, rv: QVBoxLayout) -> None:
+        """
+        控制台标题行 + 诊断摘要 + 日志框（右栏最上面，也是最大的一块）。
+
+        诊断摘要（2026-10-22，P1-5）：212 条同格式的 `[静默失败]` 不是
+        "日志详细"，是把诊断成本丢给用户。这里只留一行：代码问题优先，
+        资源/环境收进详情。
+        """
         crow = QHBoxLayout()
         crow.setSpacing(T.SPACE['xs'])
         cap_con = QLabel('控制台（导入 / 项目 / 体检 / 分析）')
@@ -187,9 +242,6 @@ class GraphPageMixin:
         crow.addWidget(self._console_clear_btn, 0)
         rv.addLayout(crow)
 
-        # —— 诊断摘要（2026-10-22，P1-5）——
-        # 212 条同格式的 `[静默失败]` 不是"日志详细"，是把诊断成本丢给用户。
-        # 这里只留一行：代码问题优先，资源/环境收进详情。
         self._diag_bar = QFrame()
         self._diag_bar.setProperty('role', 'card')
         self._diag_bar.setVisible(False)
@@ -222,20 +274,31 @@ class GraphPageMixin:
         self._console.setMinimumHeight(180)
         rv.addWidget(self._console, 1)
 
+    def _graph_page_actions(self, rv: QVBoxLayout) -> None:
+        """当前模块 + 四个主入口按钮 + 一行检查（可达性 / 变量 / 资源）。"""
         cap_mod = QLabel('当前模块')
         cap_mod.setProperty('role', 'section')
         rv.addWidget(cap_mod)
+
         self._chapter_label = QLabel('（在图上点一个模块）')
         self._chapter_label.setProperty('role', 'caption')
         self._chapter_label.setWordWrap(True)
         rv.addWidget(self._chapter_label)
 
+        self._graph_page_entry_buttons(rv)
+        rv.addLayout(self._graph_page_checks())
+
+    def _graph_page_entry_buttons(self, rv: QVBoxLayout) -> None:
+        """
+        四个"进这一章"的入口：改台词 / 编辑剧情变量 / 变量工作台 / 搬出 python 块。
+
+        ⚠ 「打开本章剧本」要过 `_menu_action` 安全壳（2026-10-26）：槽里异常
+        只打 stderr → 用户看到的是"点了没反应"。无源节点修复入口就在这个按钮上。
+        """
         self._open_script_btn = QPushButton('✎ 打开本章剧本（改台词）')
         self._open_script_btn.setToolTip(
             '进入卡片编辑器改这一章的台词（也可右键模块 → 改本章台词）')
         self._open_script_btn.setProperty('variant', 'primary')
-        # ⚠ 过 `_menu_action` 安全壳（2026-10-26）：槽里异常只打 stderr →
-        #   用户看到的是"点了没反应"。无源节点修复入口就在这个按钮上。
         self._open_script_btn.clicked.connect(
             self._menu_action('打开本章剧本', self._open_selected_in_card))
         rv.addWidget(self._open_script_btn)
@@ -266,6 +329,8 @@ class GraphPageMixin:
                               lambda: self.lift_python_assignments()))
         rv.addWidget(self._lift_btn)
 
+    def _graph_page_checks(self) -> QHBoxLayout:
+        """一行三个检查：逻辑问题 / 变量分析 / 资源体检（用户 2026-10-05 要求）。"""
         brow = QHBoxLayout()
         brow.setSpacing(T.SPACE['xs'])
         self._check_btn = QPushButton('🔎 检查逻辑问题')
@@ -286,29 +351,29 @@ class GraphPageMixin:
         self._health_btn.clicked.connect(self.check_asset_health)
         brow.addWidget(self._health_btn)
         brow.addStretch(1)
-        rv.addLayout(brow)
+        return brow
 
-        # —— 画布（旧版右栏 `LabelFrame(text="画布")` 那一组）——
-        #
-        # 用户 2026-10-04：
-        # > 我的旧版本有导出控制流图.rpy文件（label 末尾加 _control 的那个）…
-        # > 有保存布局.json！现在这个新版本呢？为何模块编辑器的功能缺失那么多？
-        # > （可以把右边的命令栏缩小点添加这两个东西）
-        #
-        # 后端 `pipeline.renpy_exporter.export_to_renpy` 与旧版 JSON 格式的
-        # `LoadLayoutCommand` 都还在，缺的只是这三个入口。
+    def _graph_page_canvas_tools(self, rv: QVBoxLayout) -> None:
+        """
+        右栏下半：画布工具箱（旧版 `LabelFrame(text="画布")` 那一组）。
+
+        用户 2026-10-04：
+        > 我的旧版本有导出控制流图.rpy文件（label 末尾加 _control 的那个）…
+        > 有保存布局.json！现在这个新版本呢？为何模块编辑器的功能缺失那么多？
+        > （可以把右边的命令栏缩小点添加这两个东西）
+
+        后端 `pipeline.renpy_exporter.export_to_renpy` 与旧版 JSON 格式的
+        `LoadLayoutCommand` 都还在，缺的只是这三个入口。
+        """
         cap_canvas = QLabel('画布')
         cap_canvas.setProperty('role', 'section')
         rv.addWidget(cap_canvas)
+
         c1 = QHBoxLayout()
         c1.setSpacing(T.SPACE['xs'])
         self._save_layout_btn = QPushButton('💾 保存布局(JSON)')
         self._save_layout_btn.setToolTip(
             '把手排好的块位置存成 .json（Ctrl+Shift+L）；格式与旧版一致')
-        # ⚠ 包 lambda：`clicked` 会发一个 `bool`，直接 connect 会让它变成
-        # `save_layout(target=False)` —— "没给路径就弹另存为"那条分支走不到，
-        # 接着拿 `False` 当路径写文件（TypeError）。三处同理（见下面的
-        # `load_layout` / `export_control_flow`，以及工具栏的 `act()`）。
         self._save_layout_btn.clicked.connect(lambda: self.save_layout())
         c1.addWidget(self._save_layout_btn)
         self._load_layout_btn = QPushButton('📂 加载布局')
@@ -316,6 +381,7 @@ class GraphPageMixin:
         self._load_layout_btn.clicked.connect(lambda: self.load_layout())
         c1.addWidget(self._load_layout_btn)
         rv.addLayout(c1)
+
         c2 = QHBoxLayout()
         c2.setSpacing(T.SPACE['xs'])
         self._undo_graph_btn = QPushButton('↩ 撤销')
@@ -329,12 +395,21 @@ class GraphPageMixin:
         self._redo_graph_btn.clicked.connect(self.redo_graph)
         c2.addWidget(self._redo_graph_btn)
         rv.addLayout(c2)
+        self._graph_page_more_tools(rv)
+
+    def _graph_page_more_tools(self, rv: QVBoxLayout) -> None:
+        """
+        右栏最底下三件：导出控制流 / 刷新下拉候选 / 更多工具菜单。
+
+        ⚠ 这里两处 `clicked.connect` 都要包 lambda（`export_control_flow` 一处）：
+        `clicked` 会发一个 `bool`，直接 connect 会让它变成
+        `export_control_flow(target=False)` —— "没给路径就弹「保存为」"那条
+        分支走不到，接着拿 `False` 当路径写文件（TypeError）。
+        """
         self._export_flow_btn = QPushButton('⤓ 导出控制流 .rpy')
         self._export_flow_btn.setToolTip(
             '按图生成 Ren\'Py 控制流脚本：每个模块一个 `<label>_control`，'
             '里面 call 原 label，再按连线写 jump/call/菜单/条件')
-        # 同上：`clicked` 的 bool 会变成 `target=False`，于是"没给路径就弹
-        # 「保存为」"那条分支走不到（拿 False 当路径 → TypeError）。
         self._export_flow_btn.clicked.connect(lambda: self.export_control_flow())
         rv.addWidget(self._export_flow_btn)
         self._refresh_assets_btn = QPushButton('🔄 刷新下拉候选')
@@ -356,21 +431,5 @@ class GraphPageMixin:
             '多引擎导出 / 资产与角色统计 / 协作库 / 校验当前章节')
         self._more_btn.clicked.connect(self._show_more_tools)
         rv.addWidget(self._more_btn)
-        split.addWidget(right)
-
-        # 右栏比上一版**更窄**（420 → 340）：用户要求给这一组按钮腾出位置，
-        # 同时控制台仍然是这一栏里最大的一块（它要显示导入/分析的流水）。
-        split.setSizes([1080, 340])
-        try:
-            # ⚠ 从前这里写的是 `left`（**没有这个变量**，左边那一栏叫 `mid`）——
-            # NameError 被下面这个 `except Exception` 吞掉，于是"右栏最窄 300 /
-            # 最宽 420"这两条约束**从来没生效过**（用户看到的右栏宽度不受控）。
-            # 静态扫"引用了但本模块看不到的全局名"才把它抓出来。
-            mid.setMinimumWidth(200)
-            right.setMinimumWidth(300)
-            right.setMaximumWidth(420)
-        except Exception:                     # noqa: BLE001
-            swallow('main_window._build_graph_page')
-        return page
 
 
