@@ -672,6 +672,11 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
      新方法只吃显式参数（别读上一段的局部变量），每搬一段跑该模块的测试。
    · 清债之后重生成快照：`python tools/complexity_budget.py` /
      `python tools/debt_budget.py`。
+   · **两个"解环叶子"不许长回来**（2026-11-01）：`parsing/continuation.py`
+     （`shift_continuations`，`renpy_parser` / `renpy_parser_stmts` 共用）与
+     `story/file_facts.py`（`FileFacts` / `scan_file`，`placement` 与
+     `scan_cache` 共用）只许导 `core.*`；**不许**反过来导入上层模块 ——
+     一旦导入，环就原样长回来（`debt_report --cycles` 会当场红）。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），

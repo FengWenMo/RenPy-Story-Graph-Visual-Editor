@@ -37,7 +37,8 @@
 - **复杂度棘轮**：`tests/complexity_budget.json` 是"最长 40 + 最绕 40"的上限快照，`test_complexity_budget.py` 判"只许降、不许升"（新函数硬线 500 行 / 150 分支）。改完代码跑 `python tools/complexity_report.py` 看榜；**故意拆小**后不必改快照（只比"不超过"），要接纳新的大函数才用 `tools/complexity_budget.py` 重生成。
 - **拆函数的安全姿势**（2026-11-01 拆了 3 处，零回归）：只做"整段搬到新方法 + 原位置留一行调用"，**缩进不变**（class 方法体本来就是 8 空格）；新方法一律 `self, root` 这种显式依赖，别读上一段的局部变量；每搬一段就跑该模块的测试。判据：`_build` 450→272 行、244 条 UI 测试全过。
 - **改这四处先跑"地狱"判据**：`test_hell_atomic_io.py`（写盘故障注入 / 并发）/ `test_hell_excel_cycles.py`（往返收敛 / 反复导出）/ `test_hell_guardrails.py`（日志、preflight、解析统计）/ `test_patch_line_splitting.py`（切行）。它们问的是"承诺还在不在"，不是覆盖率。
-- **技术债棘轮**：`tools/debt_report.py` 量八项（超大函数 / 高分支 / print / swallow / 宽泛 except / TODO / 超长文件 / **导入环**），`tests/tech_debt_budget.json` 是上限快照，`test_tech_debt_budget.py` 判"只许降"（环按**模块集合**比，别只看个数）。现状：顶层导入环 **0**、含函数内 import 的环 **5 个 / 41 模块**（最大 29 模块）——**环全藏在函数体里的 import**，要解就从那里下手。清债后重生成：`python tools/debt_budget.py`。
+- **技术债棘轮**：`tools/debt_report.py` 量八项（超大函数 / 高分支 / print / swallow / 宽泛 except / TODO / 超长文件 / **导入环**），`tests/tech_debt_budget.json` 是上限快照，`test_tech_debt_budget.py` 判"只许降"（环按**模块集合**比，别只看个数）。现状（2026-11-01 第五段）：超大函数 **92** / 高分支 **236** / 顶层导入环 **0** / 含函数内 import 的环 **3 个 / 37 模块**（29 模块大环 + `ui_qt` 5 个 + `assets` 3 个）——**环全藏在函数体里的 import**，要解就从那里下手。已解的两个环各留一个叶子：`parsing/continuation.py`（`_shift_continuations`）、`story/file_facts.py`（`FileFacts`/`scan_file`，`placement` 仍 re-export）。清债后重生成：`python tools/debt_budget.py`。
+- **拆大函数别把债平移**：拆完要立刻看 `complexity_report` —— 拆出来某个 helper 若仍 >120 行，棘轮数一个不降（`size_rows` 338→71 那轮，`_size_preset_items` 正好 121 行，又把名额吃了回去；再抽 `_size_custom_items` 才落回 93→92）。
 - 耗时由少数真机金标主导（scan/validate/patch/describe ~730s），方差 ±40%，别当回归。`test_disk_hygiene` 必须第一个跑。**pytest-xdist 默认 `--loadscope-reorder` 会覆盖重文件优先**（fasttest 已传 `--no-loadscope-reorder`；手写 `-n` 别漏，7m14s→4m36s）。**12 workers 会 `0x8007000e` 全体起不来** → `--workers 6`；**8 workers 偶发 `worker 'gwN' crashed`（Qt 段错误）**，单跑即过 —— 别当回归，重跑一遍或降到 6。
 
 **Qt**
