@@ -82,112 +82,173 @@ def timeline_of(beat) -> list:
 
     认不出的操作**不丢**：没被任何 token 点到的字段会补在末尾；
     `raw`/`code` 仍然原样留在 line 上，不在这里猜语义。
+
+    三段（2026-11-01 拆分，原先 117 行 / 69 个分支挤在一个函数里）：
+
+      1. `_timeline_ctx`    把字段读进一个 ctx（`getattr` 全在这一处）
+      2. `_timeline_verbs`  按 `op_tokens_full()` 的**顺序**翻译成事件
+      3. `_timeline_fill`   补齐没被 token 点到的（**绝不丢操作**）
+
+    ctx 是普通 dict：`events` / `emitted` / 字段 / `show_items` / `hide_items`。
+    用 dict 而不是闭包，是因为"顺序段"和"补齐段"必须共享同一份 `emitted`
+    —— 闭包能做到，但两段就没法各自成函数了（这就是当初 69 个分支的由来）。
     """
-    show_items = [i for i in split_show_items(getattr(beat, 'show', '')) if i]
-    hide_items = [i for i in split_hide_items(getattr(beat, 'hide', '')) if i]
-    scene = str(getattr(beat, 'scene', '') or '')
-    scene_at = str(getattr(beat, 'scene_at', '') or '')
-    with_ = str(getattr(beat, 'with_', '') or '')
-    at = str(getattr(beat, 'at', '') or '')
-    transform = str(getattr(beat, 'transform', '') or '')
-    events: list = []
-    emitted = set()
-
-    def push(op, target='', **extra):
-        item = {'op': str(op), 'target': str(target or ''),
-                'order': len(events)}
-        item.update({k: str(v or '') for k, v in extra.items()})
-        events.append(item)
-
-    def emit_show(idx=None):
-        items = ([show_items[idx]] if idx is not None
-                 and 0 <= idx < len(show_items) else show_items)
-        for it in items:
-            if not it or not str(it.get('image') or ''):
-                continue
-            key = ('show', str(it.get('image') or ''))
-            if key in emitted:
-                continue
-            emitted.add(key)
-            push('show', it.get('image'), at=it.get('at'),
-                 clause=it.get('clause'), transition=it.get('with'))
-
-    def emit_hide(idx=None):
-        items = ([hide_items[idx]] if idx is not None
-                 and 0 <= idx < len(hide_items) else hide_items)
-        for it in items:
-            if not it or not str(it.get('image') or ''):
-                continue
-            key = ('hide', str(it.get('image') or ''))
-            if key in emitted:
-                continue
-            emitted.add(key)
-            push('hide', it.get('image'), transition=it.get('with'))
-
+    ctx = _timeline_ctx(beat)
     # **顺序真源**：`op_tokens_full()` 与 Ren'Py 渲染器同源；拿不到就按字段补。
     tokens = []
     try:
         tokens = list(beat.op_tokens_full() or ())
     except Exception as e:                    # noqa: BLE001 - 手工构造的拍可能没有
         swallow('pipeline.engine_exporters.timeline_tokens', e)
+    _timeline_verbs(ctx, tokens)
+    _timeline_fill(ctx)
+    return ctx['events']
+
+
+def _timeline_ctx(beat) -> dict:
+    """`timeline_of` 要用的字段一次读出来（所有 `getattr` 都在这里）。"""
+    return {
+        'beat': beat,
+        'show_items': [i for i in split_show_items(getattr(beat, 'show', '')) if i],
+        'hide_items': [i for i in split_hide_items(getattr(beat, 'hide', '')) if i],
+        'scene': str(getattr(beat, 'scene', '') or ''),
+        'scene_at': str(getattr(beat, 'scene_at', '') or ''),
+        'with': str(getattr(beat, 'with_', '') or ''),
+        'at': str(getattr(beat, 'at', '') or ''),
+        'transform': str(getattr(beat, 'transform', '') or ''),
+        'events': [],
+        'emitted': set(),
+    }
+
+
+def _tl_push(ctx, op, target='', **extra) -> None:
+    """追加一条事件；`order` 就是它在列表里的下标。"""
+    item = {'op': str(op), 'target': str(target or ''),
+            'order': len(ctx['events'])}
+    item.update({k: str(v or '') for k, v in extra.items()})
+    ctx['events'].append(item)
+
+
+def _tl_emit_show(ctx, idx=None) -> None:
+    """发 `show`；给了 `idx` 就只发那一条（越界则退回"全发"）。"""
+    items = ctx['show_items']
+    if idx is not None and 0 <= idx < len(items):
+        items = [items[idx]]
+    for it in items:
+        if not it or not str(it.get('image') or ''):
+            continue
+        key = ('show', str(it.get('image') or ''))
+        if key in ctx['emitted']:
+            continue
+        ctx['emitted'].add(key)
+        _tl_push(ctx, 'show', it.get('image'), at=it.get('at'),
+                 clause=it.get('clause'), transition=it.get('with'))
+
+
+def _tl_emit_hide(ctx, idx=None) -> None:
+    """发 `hide`；给了 `idx` 就只发那一条（越界则退回"全发"）。"""
+    items = ctx['hide_items']
+    if idx is not None and 0 <= idx < len(items):
+        items = [items[idx]]
+    for it in items:
+        if not it or not str(it.get('image') or ''):
+            continue
+        key = ('hide', str(it.get('image') or ''))
+        if key in ctx['emitted']:
+            continue
+        ctx['emitted'].add(key)
+        _tl_push(ctx, 'hide', it.get('image'), transition=it.get('with'))
+
+
+def _tl_audio(ctx, verb) -> None:
+    """`music` / `sound` / `audio` 三条 verb 走同一段取值（只有字段名不同）。"""
+    beat = ctx['beat']
+    suffix = 'music' if verb == 'music' else 'sound'
+    action = getattr(beat, suffix + '_action', '')
+    target = getattr(beat, suffix, '')
+    params = getattr(beat, suffix + '_params', '')
+    if target and (verb, target) not in ctx['emitted']:
+        ctx['emitted'].add((verb, target))
+        _tl_push(ctx, verb, target, action=action, params=params)
+
+
+def _timeline_verbs(ctx, tokens) -> None:
+    """第一段：按 token 顺序翻译（`op_tokens_full()` 是唯一顺序真源）。"""
+    beat = ctx['beat']
+    emitted = ctx['emitted']
     for verb, idx in tokens:
-        if verb == 'scene' and scene and ('scene', scene) not in emitted:
-            emitted.add(('scene', scene))
-            push('scene', scene, at=scene_at)
+        if verb == 'scene':
+            scene = ctx['scene']
+            if scene and ('scene', scene) not in emitted:
+                emitted.add(('scene', scene))
+                _tl_push(ctx, 'scene', scene, at=ctx['scene_at'])
         elif verb == 'show':
-            emit_show(idx)
+            _tl_emit_show(ctx, idx)
         elif verb == 'hide':
-            emit_hide(idx)
-        elif verb == 'with' and with_ and ('with', with_) not in emitted:
-            emitted.add(('with', with_))
-            push('with', with_)
+            _tl_emit_hide(ctx, idx)
+        elif verb == 'with':
+            with_ = ctx['with']
+            if with_ and ('with', with_) not in emitted:
+                emitted.add(('with', with_))
+                _tl_push(ctx, 'with', with_)
         elif verb in ('music', 'sound', 'audio'):
-            action = (getattr(beat, 'music_action', '') if verb == 'music'
-                      else getattr(beat, 'sound_action', ''))
-            target = (getattr(beat, 'music', '') if verb == 'music'
-                      else getattr(beat, 'sound', ''))
-            params = (getattr(beat, 'music_params', '') if verb == 'music'
-                      else getattr(beat, 'sound_params', ''))
-            if target and (verb, target) not in emitted:
-                emitted.add((verb, target))
-                push(verb, target, action=action, params=params)
+            _tl_audio(ctx, verb)
         elif verb == 'voice':
             voice = str(getattr(beat, 'voice', '') or '')
             if voice and ('voice', voice) not in emitted:
                 emitted.add(('voice', voice))
-                push('voice', voice)
+                _tl_push(ctx, 'voice', voice)
 
-    # —— 补齐：有内容却没被 token 点到的操作（绝不因为顺序不全就丢）——
-    if scene and ('scene', scene) not in emitted:
-        push('scene', scene, at=scene_at)
-    for it in show_items:
-        if it and it.get('image'):
-            key = ('show', str(it.get('image')))
-            if key not in emitted:
-                emit_show(show_items.index(it))
-    for it in hide_items:
-        if it and it.get('image'):
-            key = ('hide', str(it.get('image')))
-            if key not in emitted:
-                emit_hide(hide_items.index(it))
-    if with_ and ('with', with_) not in emitted:
-        push('with', with_)
-    music = str(getattr(beat, 'music', '') or '')
-    if music and ('music', music) not in emitted:
-        push('music', music, action=getattr(beat, 'music_action', ''),
-             params=getattr(beat, 'music_params', ''))
-    sound = str(getattr(beat, 'sound', '') or '')
-    if sound and ('sound', sound) not in emitted:
-        push('sound', sound, action=getattr(beat, 'sound_action', ''),
-             params=getattr(beat, 'sound_params', ''))
+
+def _timeline_fill(ctx) -> None:
+    """
+    第二段：**补齐**。有内容却没被任何 token 点到的操作补在末尾。
+
+    这一段是"认不出的操作不丢"的兜底，不能省：`op_tokens_full()` 只认它
+    认识的形态，手工构造的拍 / 新语法可能一个 token 都没有。
+
+    分两半只为"分支密度"：舞台类（scene/show/hide/with）与
+    音频/其余（music/sound/voice/at/transform）各占一半，合在一起
+    21 个分支就压不住了（2026-11-01 实测：34 行 / 21 分支）。
+    """
+    _timeline_fill_stage(ctx)
+    _timeline_fill_audio(ctx)
+
+
+def _timeline_fill_stage(ctx) -> None:
+    """补齐舞台：scene / show / hide / with。"""
+    emitted = ctx['emitted']
+    if ctx['scene'] and ('scene', ctx['scene']) not in emitted:
+        _tl_push(ctx, 'scene', ctx['scene'], at=ctx['scene_at'])
+    for it in ctx['show_items']:
+        if it and it.get('image') and \
+                ('show', str(it.get('image'))) not in emitted:
+            _tl_emit_show(ctx, ctx['show_items'].index(it))
+    for it in ctx['hide_items']:
+        if it and it.get('image') and \
+                ('hide', str(it.get('image'))) not in emitted:
+            _tl_emit_hide(ctx, ctx['hide_items'].index(it))
+    if ctx['with'] and ('with', ctx['with']) not in emitted:
+        _tl_push(ctx, 'with', ctx['with'])
+
+
+def _timeline_fill_audio(ctx) -> None:
+    """补齐音频与尾部装饰：music / sound / voice / at / transform。"""
+    beat = ctx['beat']
+    emitted = ctx['emitted']
+    for verb in ('music', 'sound'):
+        target = str(getattr(beat, verb, '') or '')
+        if target and (verb, target) not in emitted:
+            _tl_push(ctx, verb, target,
+                     action=getattr(beat, verb + '_action', ''),
+                     params=getattr(beat, verb + '_params', ''))
     voice = str(getattr(beat, 'voice', '') or '')
     if voice and ('voice', voice) not in emitted:
-        push('voice', voice)
-    if at:
-        push('at', at)
-    if transform:
-        push('transform', transform)
-    return events
+        _tl_push(ctx, 'voice', voice)
+    if ctx['at']:
+        _tl_push(ctx, 'at', ctx['at'])
+    if ctx['transform']:
+        _tl_push(ctx, 'transform', ctx['transform'])
 
 
 def jump_targets_of(beat) -> list:
