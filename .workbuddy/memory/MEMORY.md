@@ -208,3 +208,31 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
   **删之前先把块里所有非 `def` 的行列出来。**
   ⚠ `by_slot` 的白盒判据按**源码正则**扫 `story/beat_model.py` → 拆 `spec_arg_cells` 时
   辅助函数**必须留在同一文件**（否则那条"算完就扔"的判据会静默失效）。
+
+- 2026-11-01 第十三段（§91）：三刀同批拆，>120 行函数 62→**59**（阶段阈值 ≤60 **达成**）、
+  >20 分支 213；服务化**第一刀** `app/asset_catalog.AssetCatalog`（四个只读查询：
+  characters / character_labels / vocabulary / asset_choices，`SimpleNamespace` 当
+  registry 就能测，11 例）。里程碑：重打包 147.9MB/242 文件 + 空目录 `selfcheck` 六项全过
+  + release zip 69.6MB。⚠ **`rebase -i` 改提交信息会把 todo 写坏**：`chore(budget)` 那条
+  被静默丢掉（budget 文件退回旧值）。规约：reword 一律 `git commit --amend -F 文件`，
+  rebase 之后立刻 `git log --oneline -N` 核对条数（丢了用 `git cherry-pick <reflog sha>` 补）。
+
+- 2026-11-01 第十四段（§92）：服务化**第二、三刀**（这轮没拆函数、没改语义，净变化是搬家）。
+  表格写回 12 段 → `app/table_edits.FieldWriter`（判据：只拿 `(这一拍, 表单, 符号表, 兄弟拍)`
+  能不能回答）：`session_table` 2465→**1972**，`apply` 只剩"哪一拍 / 改没改（指纹）/ 立未导出"；
+  31 例单测 = 造一拍 + 一个字典，**不造会话、不加载项目、不碰 Qt**。导出判定 →
+  `app/export_plan`（`default_output_path` / `issue_message` / `block_codes` / `overridable`
+  + `OVERRIDABLE_CODES`），`session_export` 788→775，21 例。
+  ⚠⚠ **同一句判据在仓库里躺了三份**：`window_export.overwritable`、`window_graph_ops`（内联）、
+  `cli._report_guard`（集合推导）—— **第三条是棘轮测试搜出来的**（第一次跑就报 `['cli.py']`）。
+  漂移的后果不是报错，而是"同一次被拦下的导出，GUI 给逃生舱、CLI 说另一套话"。现在三处都调
+  服务；棘轮两条：全 `storygraph/` 搜 `HANDWRITTEN_TARGET['"] in` **零命中**（注释也不许写这个
+  形状），两入口判定逐例等价。
+  ⚠ 拆开才看清的四件事：(a) `Stage` 格里写 `bg x` **不是** Stage DSL，`scene bg x` 才是
+  （`bg ` 是 `Scene` 列的值格式，界面那格显示的是 `compose_stage` 的投影）；
+  (b) `elif` 展平后的条件是**双括号** `(b == 2) and not ((a == 1))` —— 单括号会让
+  `_split_negation` 返回空 terms → `rechain_condition` 返回 None → **静默什么都不做**；
+  (c) `_fold_dynamic_columns` 是 `staticmethod`，顺序用例打桩要按 `FieldWriter.__dict__[name]`
+  判类型再决定要不要去掉 self；(d) 顺序（尤其"动态列最后折"）用一条 8 阶段用例钉住，
+  重排即红。数字：59 / **212**、模块 254→**256**、总行数 163,012 / 函数 5,580（搬家 +203 行，
+  是"可单测"的价格）。
