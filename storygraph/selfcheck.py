@@ -72,6 +72,12 @@ REQUIRED_MODULES = (
     'storygraph.app.engine_preview',
     'storygraph.app.stage_edition',
     'storygraph.ui_qt.main_window',
+    # 2026-11-01：主窗口的两个**叶子**模块（解导入环时新建的）。
+    # `main_window` 顶层导入它们，理论上打包会跟着带上；但它们正是
+    # "拆出来的新文件"——这类文件最容易在 spec 的 hiddenimports 里漏掉，
+    # 缺了就是启动时 `ModuleNotFoundError`。点名 import 一次最划算。
+    'storygraph.ui_qt.window_layout',
+    'storygraph.ui_qt.text_html',
     'storygraph.ui_qt.window_engine',
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_graph_ops',

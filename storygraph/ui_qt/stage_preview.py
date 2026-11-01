@@ -2330,7 +2330,7 @@ def _dialogue_html(frame) -> str:
     2026-10-18，审计 P1-8："台词标签不解析" —— 从前 `QLabel.setText(原文)`，
     预览里看到的是 `{color=#ff0000}红{/color} 色的字` 这样的**源码**。
 
-    转换器与卡片预览**同一份**（`main_window.renpy_text_to_html`）：
+    转换器与卡片预览**同一份**（`ui_qt.text_html.renpy_text_to_html`）：
     两处各写一套迟早漂移（一处认 `{size}`、另一处不认，同一句话在卡片上
     和预览里长得不一样）。只多一步 `\\n → <br>`：QLabel 的富文本不认换行。
     """
@@ -2338,7 +2338,7 @@ def _dialogue_html(frame) -> str:
     if not text:
         return '（这一拍没有台词）'
     try:
-        from storygraph.ui_qt.main_window import renpy_text_to_html
+        from storygraph.ui_qt.text_html import renpy_text_to_html
         html, _has = renpy_text_to_html(text)
     except Exception as e:               # noqa: BLE001 - 转不了就显示原文
         swallow('ui_qt.stage_preview._dialogue_html', e)

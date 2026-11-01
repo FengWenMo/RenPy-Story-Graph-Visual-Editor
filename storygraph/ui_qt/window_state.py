@@ -112,8 +112,10 @@ def narrow_layout(layout: dict) -> dict:
     out = dict(layout)
     out[LAYOUT_VERSION_KEY] = LAYOUT_VERSION
     try:
-        from storygraph.ui_qt.main_window import (CARD_SPLIT_DEFAULT,
-                                                  DEFAULT_WINDOW_SIZE)
+        # 顶层导入会成环（`main_window` 顶层导入本模块的 mixin）—— 常量的
+        # 叶子在 `ui_qt.window_layout`（2026-11-01 解环），这里直接拿。
+        from storygraph.ui_qt.window_layout import (CARD_SPLIT_DEFAULT,
+                                                    DEFAULT_WINDOW_SIZE)
     except Exception as e:                       # noqa: BLE001 - 拿不到常量就只打版本
         swallow('ui_qt.window_state.narrow_layout.constants', e)
         return out

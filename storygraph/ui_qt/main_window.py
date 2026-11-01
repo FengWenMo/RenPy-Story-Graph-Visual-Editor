@@ -64,61 +64,12 @@ from pathlib import Path
 
 import re
 
-#: Ren'Py 文字标签：`{color=#f00}` / `{/color}` / `{i}` / `{w=0.5}` …
-_RENPY_TAG_RE = re.compile(r'\{([^{}]*)\}')
-#: 预览认得的颜色值（只放行"看着像颜色"的东西 —— 预览是 HTML）
-_PREVIEW_COLOR_RE = re.compile(r'^(?:#[0-9a-fA-F]{3,8}|rgba?\([\d\s.,%]+\))$')
-
-
-def renpy_text_to_html(text: str) -> tuple:
-    """
-    Ren'Py 台词 →（预览用 HTML，是否含标签）。
-
-    只认最常用的几种：`color` / `b` / `i` / `u` / 绝对 `size`。
-    其余标签（`{w}` / `{p}` / `{nw}` / `{alpha=…}`…）**剥掉不显示**
-    （它们不改变"截一张静态图看到的样子"），`[变量]` 原样留字。
-    先转义再拼标签：文本里出现 `<` 也只是普通字符。
-    """
-    from html import escape as _esc
-
-    src = str(text or '')
-    if '{' not in src:
-        return _esc(src), False
-    out = []
-    pos = 0
-    has_tag = False
-    for m in _RENPY_TAG_RE.finditer(src):
-        out.append(_esc(src[pos:m.start()]))
-        pos = m.end()
-        tag = m.group(1).strip()
-        if not tag:
-            continue
-        closing = tag.startswith('/')
-        name = (tag[1:] if closing else tag).strip().lower()
-        base = name.split('=', 1)[0].strip()
-        if base in ('b', 'i', 'u'):
-            out.append(f'</{base}>' if closing else f'<{base}>')
-            has_tag = True
-        elif base == 'color':
-            if closing:
-                out.append('</span>')
-            else:
-                val = name.split('=', 1)[1].strip().strip('"\'')
-                if _PREVIEW_COLOR_RE.match(val):
-                    out.append(f'<span style="color:{val}">')
-                # 颜色不是合法值 → 不产出 style（但标签本身算数：
-                # 预览会出来，让人看得见"这句带样式"，而 Ren'Py 不报错）
-                has_tag = True
-        elif base == 'size':
-            if closing:
-                out.append('</span>')
-            else:
-                val = name.split('=', 1)[1].strip()
-                if val.isdigit():
-                    out.append(f'<span style="font-size:{int(val)}px">')
-                has_tag = True
-    out.append(_esc(src[pos:]))
-    return ''.join(out), has_tag
+#: Ren'Py 台词 → 预览用 HTML 的转换器搬到 `ui_qt.text_html`（2026-11-01 解导入环）：
+#: `stage_preview` 也要用**同一份**（卡片与预览不能各写一套），而
+#: `stage_thumb` 顶层导入 `stage_preview`、本模块顶层导入 `stage_thumb` ——
+#: 转换器放在这里就是 `main_window → stage_thumb → stage_preview → main_window`
+#: 那个三模块环。它只依赖 `re`，搬到叶子后环断了；这里 re-export 老名字。
+from storygraph.ui_qt.text_html import renpy_text_to_html  # noqa: F401 - 老调用点 re-export
 
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
@@ -174,41 +125,14 @@ from storygraph.ui_qt.window_nodes import NodeEditMixin
 #  卡片页宽度预算（2026-10-30，用户反馈第 5 条「UI 宽窄可变」）
 # ======================================================================
 #
-# 用户原话：
-#   > UI 能不能把这个部分改短点，目前看根本用不到滚动条才能滚出来的部分
-#
-# 探针、根因排序与分阶段方案见 `.pip-tmp/plan/05_ui_width.md`。落地成四个数：
-#
-#   · `DEFAULT_WINDOW_SIZE` —— 默认窗口（**没有记忆时**）1200×800，
-#     不再 1600×950（用户 2026-10-30 拍板：默认为窄）。**2026-10-30 晚改成 1200**：
-#     用户那块屏的可用区实测只有 1440×852（`System.Windows.Forms.Screen`），
-#     1360 宽 = 屏宽的 94%，他看到的还是"铺满整个屏幕"（原话："还是那么宽看不全"）。
-#     1200 ≈ 83%，右边留得下明显一截；记过位置的旧窗口由 `window_state.narrow_layout`
-#     一次性压到这个上限（见那里）。
-#   · `CARD_COLUMN_MIN_W`  —— 卡片页右栏（表单）的**硬下限**：分栏拖到这儿就停。
-#     卡片地板实测已压到 ~296px（描边短文本 / 小图 240 / 24px 图标按钮 /
-#     折行摘要标签），340 的兜底留了 40px 余量 = **结构性保证**"右栏永远不会
-#     出现横向滚动条"，而不是"这次数值调小了但愿别超"；
-#   · `CARD_SPLIT_DEFAULT` —— 默认分栏比例偏窄（1360 窗口下右栏实测 421）：
-#     浏览背景时「选择…」按钮就在眼前，不用把横向滚动条拖到最右边；
-#   · `CARD_STAGE_THUMB`   —— 卡片里「当前舞台」那张小图（16:9）。
-#     `stage_thumb.COMPACT_W/H` 仍是组件自己的 sizeHint 真源（288×162），
-#     但"288 + 摘要 45 + 间距 8 = 341"会把卡片地板顶在 365px（> 340 目标），
-#     所以卡片里再收窄一档到 240×135（仍是 16:9，字仍可读）。
-DEFAULT_WINDOW_W = 1200
-DEFAULT_WINDOW_H = 800
-DEFAULT_WINDOW_SIZE = (DEFAULT_WINDOW_W, DEFAULT_WINDOW_H)
-
-#: 右栏（`_split_card` 右半）的硬下限。见上：它等于"卡片放得下"的宽度。
-CARD_COLUMN_MIN_W = 340
-#: 卡片页分栏默认尺寸：左 = 拍列表，右 = 卡片表单（**默认窄**）。
-#: 比例 640:420 ≈ 60:40 —— 1360 宽的窗口下右栏实测 421px
-#: （视口 409、卡片最小宽 296）。
-CARD_SPLIT_DEFAULT = (640, 420)
-#: 一键「展开卡片」时右栏占的比例（双击分栏把手 / 右上角 ⤢）
-CARD_SPLIT_EXPANDED_RATIO = 0.72
-#: 卡片里「当前舞台」小图的落地尺寸（16:9）
-CARD_STAGE_THUMB = (240, 135)
+# 六个数字与那段"为什么是这些数"的推理搬到 `ui_qt.window_layout`
+# （2026-11-01 解导入环）：`window_state` 也要用它们，而它被本模块顶层
+# 导入 —— 常量放在这里就是 `main_window ↔ window_state` 的模块级环。
+# 数字本身零依赖，搬到叶子后两边都指向它；这里 re-export，
+# `MW.DEFAULT_WINDOW_SIZE` 之类的老写法（含 `tests/test_ui_width.py`）不变。
+from storygraph.ui_qt.window_layout import (  # noqa: F401 - 老调用点 re-export
+    CARD_COLUMN_MIN_W, CARD_SPLIT_DEFAULT, CARD_SPLIT_EXPANDED_RATIO,
+    CARD_STAGE_THUMB, DEFAULT_WINDOW_H, DEFAULT_WINDOW_SIZE, DEFAULT_WINDOW_W)
 
 
 def toggle_card_column(win) -> bool:
