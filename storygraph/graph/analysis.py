@@ -810,64 +810,67 @@ def _empty_result(message: str) -> dict:
             'reached': set(), 'authoritative': False}
 
 
-def analyze_reachability_full(graph, start_node_id=None) -> dict:
+#: 入口区间更新多少次之后开始加宽：允许几次精确传播再抽象，避免过早起 ⊤ 丢精度。
+_WIDEN_AFTER = 4
+
+#: worklist 步数兜底：至少这么多步，再按节点数线性放大 —— 任何情况下都不让算法无限跑。
+_MIN_STEPS = 1000
+_STEPS_PER_NODE = 200
+
+
+def _prepare_entry(graph, start_node_id):
     """
-    区间可达性分析（完整结果）。
+    定入口 → ``(entry_id, entry_name, authoritative, root_ids)``；定不下来返回 None。
 
-    start_node_id 传 None 时自动挑入口（`pick_entry_node`）。找不到权威
-    入口时，没有入边的节点按"可能是外部入口/独立章节"单独归类，**不再
-    一律报"不可达"**——多文件章节工程里几乎每个章节文件都是无入边的。
-
-    返回 dict：
-      states        节点 → 入口变量区间
-      warnings      人类可读的告警列表
-      entry_id/name 实际用的入口
-      authoritative 入口是否权威（可靠才能断言"不可达"）
-      independent   未接入主线的独立入口节点 label（仅非权威时归类）
-      stranded      真正走不到的节点 label
-      reached       可达节点 id 集合
+    `authoritative` 只给**有权威的**入口：显式传入的 ``start_node_id``，以及
+    `pick_entry_node` 认出来的 current / entry-label。single-root / multi-root /
+    fallback 都是猜的 —— 猜出来的起点不能拿来断言某个节点"不可达"。
     """
-    if not getattr(graph, 'nodes', None):
-        return _empty_result("图中没有节点")
-
-    entry_reason = 'explicit'
+    reason = 'explicit'
     if start_node_id is None:
-        start_node_id, entry_reason = pick_entry_node(graph)
+        start_node_id, reason = pick_entry_node(graph)
     if start_node_id is None or start_node_id not in graph.nodes:
-        return _empty_result("起始节点不存在！")
+        return None
+    authoritative = True if reason == 'explicit' else is_authoritative_entry(reason)
+    return (start_node_id, graph.nodes[start_node_id].label_name,
+            authoritative, set(root_nodes(graph)))
 
-    authoritative = is_authoritative_entry(entry_reason) \
-        if entry_reason != 'explicit' else True
-    entry_name = graph.nodes[start_node_id].label_name
-    root_ids = set(root_nodes(graph))
 
-    all_vars = collect_all_variables(graph)
-    entry_states = {}
-
+def _seed_entry_states(graph, all_vars, entry_id) -> dict:
+    """各节点的入口区间：除了入口是 ``[0, 0]``，其余全是空集（⊥）。"""
+    states = {}
     for nid in graph.nodes:
-        bottom_state = VariableState(all_vars)
-        for v in all_vars:
-            bottom_state.ranges[v] = ValueRange(1, -1)
-        entry_states[nid] = bottom_state
+        bottom = VariableState(all_vars)
+        for var in all_vars:
+            bottom.ranges[var] = ValueRange(1, -1)
+        states[nid] = bottom
+    init = VariableState(all_vars)
+    for var in all_vars:
+        init.ranges[var] = ValueRange(0, 0)
+    states[entry_id] = init
+    return states
 
-    init_state = VariableState(all_vars)
-    for v in all_vars:
-        init_state.ranges[v] = ValueRange(0, 0)
-    entry_states[start_node_id] = init_state
 
-    # 可达性单独记账，不能靠"区间是否为空"推断：
-    # 没有任何变量的图里所有节点区间都是空集，会被整片误判为不可达。
-    reached = {start_node_id}
+def _ranges_changed(old_state, new_state, all_vars) -> bool:
+    """合并之后有没有任何变量的区间边界真的动了（决定要不要重新入队）。"""
+    for var in all_vars:
+        old_r = old_state.ranges[var]
+        new_r = new_state.ranges[var]
+        if old_r.lo != new_r.lo or old_r.hi != new_r.hi:
+            return True
+    return False
 
-    # 每个节点的入口状态更新次数，超过阈值后对该节点加宽
+
+def _propagate_states(graph, start_id, states, reached, all_vars, max_steps) -> int:
+    """
+    区间传播到不动点（worklist + 加宽），返回实际走了多少步。
+
+    `states` / `reached` 都是**就地**更新：可达性单独记账，不能靠"区间是否为空"
+    推断 —— 没有任何变量的图里所有节点区间都是空集，会被整片误判为不可达。
+    """
     update_counts = {}
-    # 加宽阈值：允许几次精确传播再抽象，避免过早起 ⊤ 丢精度
-    WIDEN_THRESHOLD = 4
-    # 兜底：任何情况下都不让算法无限跑下去
-    max_steps = max(1000, 200 * len(graph.nodes))
-
-    worklist = [start_node_id]
-    in_worklist = {start_node_id}
+    worklist = [start_id]
+    in_worklist = {start_id}
     steps = 0
 
     while worklist and steps < max_steps:
@@ -875,7 +878,7 @@ def analyze_reachability_full(graph, start_node_id=None) -> dict:
         in_worklist.discard(nid)
         steps += 1
 
-        state = entry_states[nid]
+        state = states[nid]
         if state.is_bottom():
             continue
 
@@ -895,16 +898,9 @@ def analyze_reachability_full(graph, start_node_id=None) -> dict:
             if new_state is None:
                 continue
 
-            old_state = entry_states[target]
+            old_state = states[target]
             merged = old_state.merge(new_state)
-
-            changed = False
-            for var in all_vars:
-                old_r = old_state.ranges[var]
-                new_r = merged.ranges[var]
-                if old_r.lo != new_r.lo or old_r.hi != new_r.hi:
-                    changed = True
-                    break
+            changed = _ranges_changed(old_state, merged, all_vars)
 
             first_visit = target not in reached
             reached.add(target)
@@ -914,83 +910,142 @@ def analyze_reachability_full(graph, start_node_id=None) -> dict:
             if first_visit or changed:
                 if changed:
                     update_counts[target] = update_counts.get(target, 0) + 1
-                    if update_counts[target] > WIDEN_THRESHOLD:
+                    if update_counts[target] > _WIDEN_AFTER:
                         merged = _widen(old_state, merged, all_vars)
-                entry_states[target] = merged
+                states[target] = merged
                 if target not in in_worklist:
                     worklist.append(target)
                     in_worklist.add(target)
 
-    if steps >= max_steps:
-        result = _empty_result(
-            f"⚠️ 分析超出迭代上限（{max_steps} 步）已中止，结果可能不完整")
-        result.update(states=entry_states, entry_id=start_node_id,
-                      entry_name=entry_name, reached=reached,
-                      authoritative=authoritative)
-        return result
+    return steps
 
-    warnings = []
-    if not authoritative:
-        warnings.append(
-            f"ℹ️ 未找到标准入口 label（{'/'.join(ENTRY_LABELS[:3])}…），"
-            f"已从「{entry_name}」开始分析；"
-            f"没有入边的章节按「独立入口」处理，不计入不可达"
-        )
 
-    orphan_entries = []      # 无入边且走不到：多半是外部入口 / 独立章节
-    stranded = []            # 有入边却走不到：真的断了
+def _unreached_labels(graph, states, reached, root_ids, authoritative) -> tuple:
+    """
+    走不到的节点标签，分两类 → ``(independent, stranded)``。
+
+    · independent：走不到 + 无入边 + 入口不权威 —— 多章节工程里几乎每个章节
+      文件都是这样（被外部 call / 独立章节），报"不可达"就是误报；
+    · stranded：有入边却走不到，或者到了但入口区间是空集（传播被 ⊥ 挡下）——
+      真的断了。
+    """
+    independent, stranded = [], []
     for nid, node in graph.nodes.items():
         if nid not in reached:
             if not authoritative and nid in root_ids:
-                orphan_entries.append(node.label_name)
+                independent.append(node.label_name)
             else:
                 stranded.append(node.label_name)
             continue
-
-        instate = entry_states[nid]
-        if instate.is_bottom():
+        if states[nid].is_bottom():
             stranded.append(node.label_name)
+    return independent, stranded
+
+
+def _dangling_warnings(graph, states, reached) -> list:
+    """
+    "下落风险"：节点到了、区间非空，但**所有**出口条件在当前范围里都不可能满足。
+
+    用出口状态判断（入口区间 + 本节点的操作），和主循环里的传播口径一致。
+    """
+    warnings = []
+    for nid, node in graph.nodes.items():
+        if nid not in reached or states[nid].is_bottom():
             continue
 
         out_edges = [e for e in graph.edges.values() if e.from_id == nid]
         if not out_edges:
             continue
 
-        # 用出口状态判断，和主循环里的传播口径一致
-        current = instate.copy()
+        current = states[nid].copy()
         for op in _code_texts(node):
             current = apply_operation(current, op)
 
-        has_possible = False
-        for edge in out_edges:
-            if condition_possible(current, edge.condition):
-                has_possible = True
-                break
-
-        if not has_possible:
+        if not any(condition_possible(current, e.condition) for e in out_edges):
             warnings.append(
                 f"⚠️ 下落风险：{node.label_name} 的所有分支条件在当前变量范围内不可能满足"
             )
+    return warnings
 
+
+def _entry_warnings(authoritative, entry_name) -> list:
+    """入口不权威时先把"从哪开始分析的"说清楚，免得把猜测当成结论。"""
+    if authoritative:
+        return []
+    return [f"ℹ️ 未找到标准入口 label（{'/'.join(ENTRY_LABELS[:3])}…），"
+            f"已从「{entry_name}」开始分析；"
+            f"没有入边的章节按「独立入口」处理，不计入不可达"]
+
+
+def _orphan_summary(orphans) -> str:
+    """独立入口那一行：只列前 8 个 + 总数。"""
+    sample = '、'.join(sorted(orphans)[:8])
+    more = f' 等 {len(orphans)} 个' if len(orphans) > 8 else ''
+    return (f"🔌 未接入主线的独立入口：{sample}{more}"
+            f"（无入边，多为被外部调用/独立章节，通常无需处理）")
+
+
+def analyze_reachability_full(graph, start_node_id=None) -> dict:
+    """
+    区间可达性分析（完整结果）。
+
+    start_node_id 传 None 时自动挑入口（`pick_entry_node`）。找不到权威
+    入口时，没有入边的节点按"可能是外部入口/独立章节"单独归类，**不再
+    一律报"不可达"**——多文件章节工程里几乎每个章节文件都是无入边的。
+
+    返回 dict：
+      states        节点 → 入口变量区间
+      warnings      人类可读的告警列表
+      entry_id/name 实际用的入口
+      authoritative 入口是否权威（可靠才能断言"不可达"）
+      independent   未接入主线的独立入口节点 label（仅非权威时归类）
+      stranded      真正走不到的节点 label
+      reached       可达节点 id 集合
+
+    六段各一个助手（2026-11-01）：定入口 / 铺初始区间 / 传播到不动点 /
+    分类走不到的 / 下落风险 / 入口口径。**顺序是契约** —— 告警的先后就是
+    分析面板上那几行的先后，用例按顺序比；搬的时候一段都没挪位。
+    """
+    if not getattr(graph, 'nodes', None):
+        return _empty_result("图中没有节点")
+
+    entry = _prepare_entry(graph, start_node_id)
+    if entry is None:
+        return _empty_result("起始节点不存在！")
+    entry_id, entry_name, authoritative, root_ids = entry
+
+    all_vars = collect_all_variables(graph)
+    states = _seed_entry_states(graph, all_vars, entry_id)
+    # 可达性单独记账，不能靠"区间是否为空"推断（理由见 `_propagate_states`）。
+    reached = {entry_id}
+    # 兜底：任何情况下都不让算法无限跑下去。
+    max_steps = max(_MIN_STEPS, _STEPS_PER_NODE * len(graph.nodes))
+    steps = _propagate_states(graph, entry_id, states, reached, all_vars, max_steps)
+
+    if steps >= max_steps:
+        result = _empty_result(
+            f"⚠️ 分析超出迭代上限（{max_steps} 步）已中止，结果可能不完整")
+        result.update(states=states, entry_id=entry_id,
+                      entry_name=entry_name, reached=reached,
+                      authoritative=authoritative)
+        return result
+
+    warnings = _entry_warnings(authoritative, entry_name)
+    warnings.extend(_dangling_warnings(graph, states, reached))
+    independent, stranded = _unreached_labels(
+        graph, states, reached, root_ids, authoritative)
     for name in stranded:
         warnings.append(f"🚫 不可达节点：{name}（从入口「{entry_name}」走不到）")
-
-    if orphan_entries:
-        sample = '、'.join(sorted(orphan_entries)[:8])
-        more = (f' 等 {len(orphan_entries)} 个'
-                if len(orphan_entries) > 8 else '')
-        warnings.append(
-            f"🔌 未接入主线的独立入口：{sample}{more}"
-            f"（无入边，多为被外部调用/独立章节，通常无需处理）"
-        )
+    if independent:
+        warnings.append(_orphan_summary(independent))
 
     return {
-        'states': entry_states,
+        'states': states,
         'warnings': warnings,
-        'entry_id': start_node_id,
+        'entry_id': entry_id,
         'entry_name': entry_name,
         'authoritative': authoritative,
-        'independent': orphan_entries,
+        'independent': independent,
         'stranded': stranded,
         'reached': reached,
     }
