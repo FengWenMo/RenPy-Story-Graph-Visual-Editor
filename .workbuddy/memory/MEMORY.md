@@ -33,7 +33,8 @@
 - **两个 registry 不是一回事**：`session.registry()`=资产表；语句表是 `StatementRegistry.for_project(root)`。混用 → Qt 槽吞异常 → "点了没反应"。
 
 **测试入口**
-- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 独立 basetemp + 运行锁）。裸 pytest 串行 ~20 min，两个并发互删 `.pip-tmp/pytest`；`.pip-tmp/` 会到 GB 级，别用 du/find 扫。15s 心跳、300s 无输出退 **124** 并打印 nodeid；`--retry-failed` 只复跑上轮纯全量失败；`--lf` 无效（每轮新 basetemp）。
+- **全量测试只用 `python tools/fasttest/run.py`**（并行 + 独立 basetemp + 运行锁）。裸 pytest 串行 ~20 min，两个并发互删 `.pip-tmp/pytest`；`.pip-tmp/` 会到 GB 级，别用 du/find 扫。15s 心跳、300s 无输出退 **124** 并打印 nodeid；`--retry-failed` 只复跑上轮纯全量失败；`--lf` 无效（每轮新 basetemp）。8 workers 实测 2m40s 跑完 8799 条。
+- **改这四处先跑"地狱"判据**：`test_hell_atomic_io.py`（写盘故障注入 / 并发）/ `test_hell_excel_cycles.py`（往返收敛 / 反复导出）/ `test_hell_guardrails.py`（日志、preflight、解析统计）/ `test_patch_line_splitting.py`（切行）。它们问的是"承诺还在不在"，不是覆盖率。
 - 耗时由少数真机金标主导（scan/validate/patch/describe ~730s），方差 ±40%，别当回归。`test_disk_hygiene` 必须第一个跑。**pytest-xdist 默认 `--loadscope-reorder` 会覆盖重文件优先**（fasttest 已传 `--no-loadscope-reorder`；手写 `-n` 别漏，7m14s→4m36s）。**12 workers 会 `0x8007000e` 全体起不来** → `--workers 6`。
 
 **Qt**
@@ -46,6 +47,9 @@
 - **右栏宽度取决于"卡片自己多宽"**（`QComboBox` 是地板杀手）：`minimumSizeHint()` 按最长条目算（40 多字图名 → 下拉 1025px → 卡片 1077px，右栏 357 ⇒ 横向滚动条 + 全部越界）。`WheelSafeComboBox` 已钉 `AdjustToMinimumContentsLengthWithIcon` + `MinimumContentsLength=4`，**别改回默认**。同族：`_dirty_label` 只能留「● 未保存」；`window_state.LAYOUT_VERSION=3` + `LEGACY_CARD_SHARE=0.45`。
 
 **落盘/全局开关**
+- **写盘只有一条路**：`core/atomicio.py`（`write_text_atomic` / `save_workbook_atomic`）。`.rpy` 与 `.xlsx` 同一条：临时文件 → `newline=''` → fsync → 多代备份 → `os.replace`。**别再用 `wb.save(path)`**（`test_single_write_entry.py` 会抓）。三条地狱测试换来的规矩，**别改回去**：① 备份名必须带序号（`<名>.bak-<戳>-<序号>`；Windows 时钟粗到一个 tick，只按时间戳命名会**盖掉上一代**）；② `os.replace` 对**瞬时** `PermissionError` 重试 6×20ms（并发写同一目标时会撞车，不重试 = 一次保存**静默消失**）；③ Excel 后缀白名单只认 `.xlsx`（传 `.rpy` → `RefusedWrite`，实测事故是 1488 字节剧本被 15481 字节 xlsx 覆盖）。
+- **`open_rpy_as_table` 自己验路径**：不存在 / 是目录 / 后缀不对 → 抛（`FileNotFoundError` / `IsADirectoryError` / `ValueError`）。CLI 那道闸只管 CLI，界面与 MCP 不会走它。
+- **向上找项目根要有边界**：`statement_registry._NEVER_A_PROJECT_ROOT` 跳过 `.pip-tmp` / `build` / `.git` / `__pycache__`。事故形态：`.pip-tmp/storygraph.rules.json` 让**每一条** tmp 路径都反推出 `.pip-tmp`，把那份清单套到所有用例上（Beats 多 3 列、`show` 变 `show show show`，32 条红）。
 - **全局开关的判据要判在唯一写入口**：`remember_graph_files` 漏查曾往用户真实 `session.json` 写入 **849 个** tmp 项目。跑 UI 探针/截图先 `STORYGRAPH_NO_SESSION=1`；`session_store.save()` 自己判 `enabled()` 并剪 `.pip-tmp/`。
 - **纯文字导入前必问"导出到哪个文件夹"**（`out_dir`），不猜子目录。程序化调用 `import_plain_text` / `import_chapter_files([*.txt])` 的测试都要打桩 `_ask_plain_text_export_dir`，否则 offscreen 模态目录框挂死。
 - **中文源码别过 shell 文本管道**（`Get-Content|Set-Content` 乱码），只用 edit/write。
@@ -145,7 +149,8 @@ E1/E2/E3 引擎事实｜纯文字导入 S1~S4｜自定义动作弹窗 v4｜资�
 
 - 清单（`packaging/make_release.py::REQUIRED`）：两个 exe + `_internal\`、`剧本空表格.xlsx`、`demo\`（带真 PNG）、`快速上手.md`、`新手快速操作手册.md`、`manual_img\`、`storygraph.rules.json`、`storygraph.mapping.json`、`LICENSE`。判据 `test_release_manifest.py`。
 - 两份预设（`storygraph/presets/`）**是真项目扫出来的**，重建脚本 `tools/build_presets_real.py`（`--dry-run` 只打印）；映射与 rules 同源同发，但**不自动套进项目**（映射写的是"这个项目的哪张图是谁"），见契约 §82。
-- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip`。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
+- 顺序：fasttest 全绿 → `pyinstaller packaging/storygraph.spec --noconfirm` → `StoryGraph-CLI.exe selfcheck` → `make_release.py --zip` → **`python tools/_probe_release_zip.py <zip>` 开箱核对**（顶层只有 `StoryGraph/`、清单齐、`demo` 与 `.bak`/`__pycache__` 为 0）。⚠ PowerShell `2>&1 | Select-Object` 会把 stderr 变假 exit 1，用 `*> .pip-tmp/pyi.log`。
+- `selfcheck` 的 `REQUIRED_MODULES`（2026-11-01 起 **29** 个）要跟着新模块涨：`core.atomicio` / `core.preflight` 这类"函数体内 import / 启动早期 import"正是打包后最容易静默缺失的；「系统 DLL」项**缺 icuuc.dll 会红**（GUI 起不来就是失败，不许假绿）。
 - 手册截图 `tools/_shot_manual.py`：`offscreen` + `STORYGRAPH_NO_SESSION=1`；**不许 `win.close()`**（未导出改动弹模态框永卡），结尾 `os._exit(0)`；结构页用 `zoom_reset→zoom_by(2.0)→center_on_node`。
 - 真机工程会长大（`sr_general` 55→96 章）：金标红先 `tools/golden_baseline.py --check`，确认项目变了再 `--save`。基线**别把工具副产物算成输入**（按 `resolve()` 去重、不收 `~$*` 与 `*.bak*`）。
 - **演出专用版**（`packaging/make_stage_release.py`）：`--dist dist/release --sdk <SDK> --out dist/stage --zip`。包内 = 标准版 + `renpy_sdk/`（约 330 MB）+ `项目预设/` + 两个说明；13 项 REQUIRED、3 项 FORBIDDEN、zip ≤ 4 GiB。**先 `make_release.py --stage-only` 铺带 extras 的 `dist/release` 再当 `--dist`**。

@@ -637,9 +637,18 @@ whackamole.rpy  原文 2 个顶层 `init python:` / 56 行游戏逻辑
 5. **生成门禁是最后一道闸**：`write_generation` / `write_beats_to_rpy`。
    命中 block 级问题（中文图像名、产物落进 `game/` 时 label 重名）就**不写目标
    路径**，改写 `<stem>.blocked.rpy`。所有落盘路径都必须过它。
-   **落盘原语=`story.paths.write_text_atomic`**（2026-10-17，P1-2）：同目录临时
-   文件 → `newline=''` 写（**不许把 LF 翻成 CRLF**）→ fsync → `.bak` →
-   `os.replace`。禁用 `Path.write_text` 直接写 `.rpy`。守卫 `test_atomic_write.py`。
+   **落盘原语=`core.atomicio`**（2026-11-01 收口；`story.paths.write_text_atomic`
+   只是旧名转发）：同目录临时文件 → `newline=''` 写（**不许把 LF 翻成 CRLF**）→
+   fsync → 多代 `.bak` → `os.replace`。`.rpy` 与 `.xlsx` **共用这一条路**
+   （`save_workbook_atomic` 多一道后缀白名单：只认 `.xlsx`，传 `.rpy` 直接
+   `RefusedWrite`，绝不覆盖）。禁用 `Path.write_text` / `wb.save(path)` 直接写。
+   守卫：`test_atomic_write.py` + `test_atomic_io.py` + `test_hell_atomic_io.py`。
+   两条地狱测试换来的硬规矩（别改回去）：
+   · **备份名必须唯一**：`<名>.bak` 之后是 `<名>.bak-<时间戳>-<序号>` ——
+     Windows 时钟精度可能粗到一个 tick，只按时间戳命名会让第二代盖掉第一代；
+   · **`os.replace` 对瞬时 `PermissionError` 重试**（6×20ms）：并发写同一目标
+     时两条替换会撞车，不重试就是"保存了但没变"；真被 Excel 占着时照样失败，
+     由 `human_io_error` 给人话。
 6. **校验分级要克制**：某类资产**已有资源表**而引用不在其中 → 错误；
    项目压根没建这类表 → 警告。宁可少报，也不能刷屏（曾一次报 1073 条）。
 7. **`BEAT_FIELDS` 是列顺序唯一真源**（31 列 = 21 列编辑面 + 10 列隐藏元数据），
