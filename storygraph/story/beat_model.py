@@ -499,6 +499,267 @@ def _pattern_slot_index_for(columns, param: str, label: str = ''):
     return None
 
 
+#: 「这一列不归我管」的哨兵 —— 空格子（`''`）是**合法值**，不能用它表示没命中。
+_MISS = object()
+
+
+def _declared_pattern(columns) -> list:
+    """列描述里的 `pattern`（声明格子），交给认领器**之前先规范化**。
+
+    ⚠⚠ 两个来源都是坑，别删：
+
+    1. **先取声明里的格子，再判"动作名在不在格子里"**（2026-10-18 修）：
+       `head_is_a_pattern_slot` 要的是**格子**（`{'kind': 'keyword', ...}`），
+       不是列。列里没有 `kind`，于是它**永远返回 False** → 头一个词总被摘掉
+       → 只要声明的第一格是"固定几个字"（`show` / `mycue`），
+       `slot_value_map` 就少收到一个词，**整排值左移一格**：
+
+           mycue "闪电" intensity=3          ← 声明：[mycue=固定] [标题] [强度]
+           实测：标题 = intensity=3、强度 = （空）
+
+    2. **格子先规范化再交给认领器**：声明里存的是**写入时的形状**
+       （`choices` / `multi` / `required`），而词法层（`pattern.assign_tokens`
+       / `spec_args.slot_value_map`）读的是规范化之后的 `options` / `limit`
+       / `multi`。直接喂生的，"这一格可以有多个"会被**静默忽略**：
+
+           chorus lan ling "一起说"     ← 人物格用 `choices` 存的候选
+           实测：人物 = `lan`、内容 = `ling`   （多值格只吃一个词，后面串位）
+
+       `parse_pattern` 是那条**唯一**的规范化入口（界面、试切都走它）。
+    """
+    rows = [c.get('pattern') for c in (columns or ())
+            if isinstance(c, dict) and c.get('pattern')]
+    pattern = rows[0] if rows else []
+    if not pattern:
+        return []
+    try:
+        from storygraph.authoring.pattern import parse_pattern
+        return [dict(s) for s in parse_pattern(pattern) if isinstance(s, dict)]
+    except Exception as e:                  # noqa: BLE001 - 认不出就用原样
+        from storygraph.core.safeguard import swallow as _sw
+        _sw('story.beat_model.spec_arg_cells.normalize', e)
+        return pattern
+
+
+def _declared_clauses(columns) -> list:
+    """这一拍**复杂子句**的声明（`clauses`）—— 折回时按它决定"插到哪、是哪种值"。
+
+    与 `_spec_pattern` 同一个理由：读值侧已经有这份，不必让折回再查一次注册表
+    （`Beat.from_row` 也根本拿不到项目根）。
+    """
+    rows = [c.get('clauses') for c in (columns or ())
+            if isinstance(c, dict) and c.get('clauses')]
+    return list(rows[0]) if rows else []
+
+
+def _headed_text(base: str, pattern) -> tuple:
+    """头行 → `(从哪个文本开始数参数, 动作名是否真的被剥掉了)`。
+
+    ⚠⚠ 格子不对应动作名时，**位置参数要从动作名之后数**（2026-10-13 实测修）：
+    声明里只有「人物 / 服装 / 神态」几格，而脚本行是 `show lan swim_suit happy`
+    —— 不摘掉动作名，位置 0 就成了 `show`（「人物」空）而位置 1 成了 `lan`
+    （「服装」= lan），**整排错位**。
+
+    ⚠ 摘的必须是**语句头 token**（`show` / `camera`），不是"第一个词" ——
+    `positional_tokens` 自己会跳过第一个词当语句头，摘错一个就整体左移
+    （第一版摘成 `' '.join(split()[1:])`，于是 `lan` 被当成头吃掉）。
+    """
+    from storygraph.story.spec_args import head_is_a_pattern_slot
+    from storygraph.core.vocabulary import statement_head_token
+    stripped = str(base or '')
+    if head_is_a_pattern_slot(base, pattern):
+        return stripped, False
+    head_word = statement_head_token(base)
+    text = str(base or '').strip()
+    if head_word and text.split() and text.split()[0] == head_word:
+        return text[len(head_word):].lstrip(), True
+    return stripped, False
+
+
+def _slot_claims(stripped: str, pattern) -> dict:
+    """**按格子认领词**（`slot_value_map`）→ `{列名或显示名: 词}`。
+
+    ⚠⚠ 位置号那套数不准（2026-10-13 第三次修正）：`keyword` 格（固定几个字）
+    **不占位置号却确实吃掉一个词**，于是出现"三格只对一格"。认领法认得准。
+    **下面每一格都先问它**（它以前算完就扔了，见白盒判据
+    `test_the_card_reader_uses_the_declared_pattern_not_a_recount`）。
+    """
+    if not pattern:
+        return {}
+    from storygraph.story.spec_args import slot_value_map
+    try:
+        return slot_value_map(stripped, pattern)
+    except Exception as e:                  # noqa: BLE001 - 认不出就退回位置号
+        from storygraph.core.safeguard import swallow as _sw
+        _sw('story.beat_model.spec_arg_cells.slot_values', e)
+        return {}
+
+
+def _cell_of_call(code, col, header):
+    """① 技术调用列（2026-10-30）：值在 `Beat.code` 的那一次调用里。
+
+    不归这一列管 → `_MISS`（落给下一档）。
+    """
+    from storygraph.story.spec_args import parse_call_column
+    call = col.get('call') if isinstance(col, dict) else None
+    if not call:
+        ch, _cp, ckind, carg = parse_call_column(header)
+        if ch and ckind:
+            call = {'head': ch, 'kind': ckind,
+                    'position': carg if ckind == 'pos' else None,
+                    'kw': carg if ckind == 'kw' else ''}
+    if not call:
+        return _MISS
+    from storygraph.story.call_expr import has_call, read_arg
+    # ⚠ 列名 `camera·layer@0` 也长得像调用列（同样是 `@0`）——
+    #   必须再确认"这一拍的代码里真的有这个 head"。有 `call`
+    #   元数据时它来自调用声明，可以信（列只会为真调用生成）。
+    if not (isinstance(col, dict) and col.get('call')) \
+            and not has_call(code, call.get('head', '')):
+        return _MISS
+    col_kind = str(col.get('kind') or '') if isinstance(col, dict) else ''
+    return read_arg(code, call.get('head', ''),
+                    position=call.get('position'),
+                    kw=call.get('kw', ''),
+                    unquote=(col_kind != 'transition'))
+
+
+def _clause_context(columns, declared) -> list:
+    """这一拍**全部**子句的声明。
+
+    ⚠ 必须拿全部子句去扫：只给这一句时，`at` 会把后面的
+    `with Dissolve(0.3)` 一起吞进来（真机实测就是这么错的）。
+    """
+    context = list(declared or ())
+    if context:
+        return context
+    from storygraph.story.spec_args import parse_clause_column
+    from storygraph.story.spec_clauses import normalize_clause
+    for other in (columns or ()):
+        oh = (other if isinstance(other, str)
+              else str(other.get('header') or ''))
+        _oh, oname, okw = parse_clause_column(oh)
+        if not okw:
+            continue
+        synth = normalize_clause({'keyword': okw, 'name': oname,
+                                  'kind': ('transition' if okw == 'with'
+                                           else 'word')})
+        if synth:
+            context.append(synth)
+    return context
+
+
+def _cell_of_clause(base, col, header, columns, declared):
+    """② 复杂子句（2026-10-30）：值在头行里、由关键字引入 —— 既不是位置参数，
+    也不是 `key=value`。不归这一列管 → `_MISS`。
+    """
+    from storygraph.story.spec_args import parse_clause_column
+    _h, clause_param, clause_kw = parse_clause_column(header)
+    if not clause_kw:
+        return _MISS
+    from storygraph.story.spec_clauses import clause_values
+    clause = (col.get('clause') if isinstance(col, dict) else {}) or {}
+    if not clause:
+        clause = {'keyword': clause_kw, 'name': clause_param,
+                  'kind': ('transition' if clause_kw == 'with'
+                           else 'word')}
+    context = _clause_context(columns, declared) or [clause]
+    return clause_values(base, context).get(clause_param, '')
+
+
+def _cell_col_names(col, param: str, head_name) -> list:
+    """这一列**可能的所有名字**（`columns[].column` / `label` / `param` /
+    `name`），按"格子上的名字优先"排。
+
+    ⚠⚠ 声明里的 `columns[].name`（`who`）与 `pattern[].column`（`角色`）
+    **常常不同** —— 前者是给程序/表头的键，后者是格子上写的那个名字。
+    而 `by_slot` 是**按格子上的名字**给的，只拿 `param` 去查会查空，
+    于是有格子的语句在卡片上**全靠位置号**（多值格/可选段当场错）。
+
+    ⚠⚠ 但 `col['name']` 在动态列里是"语句名"，不是列名（2026-10-18 修）：
+    把它当列名去查 `by_slot`，凡是对不上格子的列都会落到 `by_slot[语句名]`
+    （= 关键字格吃到的那个词）：
+
+        多轨音效  [sfx_mix=固定] [声道] [文件] [可选段 gain]
+        实测：音量那格显示成 `sfx_mix`（明明是空的）
+
+    所以只有当它确实不是语句名时才算一个候选名字。
+    """
+    col_names = [str(col.get('column') or '').strip()
+                 if isinstance(col, dict) else '']
+    col_names += [str(col.get('label') or '').strip()
+                  if isinstance(col, dict) else '', param]
+    _nm = str(col.get('name') or '').strip() if isinstance(col, dict) else ''
+    if _nm and _nm != str(head_name or '').strip():
+        col_names.append(_nm)
+    return [n for n in col_names if n]
+
+
+def _cell_positional_of(col, positional):
+    """列描述里带了位置号（`dynamic_spec_columns` 的产物）→ 以它为准。"""
+    if positional is not None or isinstance(col, str):
+        return positional
+    try:
+        return (int(col['positional'])
+                if col.get('positional') is not None
+                else None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_of_slot(columns, col, param: str, col_names, pattern, by_slot):
+    """④ **格子认领法** → 值；这一列对不上格子 / 认不出词 → `_MISS`。
+
+    ⚠⚠ 这一段必须提在位置号**之前**（2026-10-13 修：它以前算完就扔了，
+    而且只写在 `positional is not None` 那一支里 —— 于是**可选段（没有位置号）
+    那格永远走不到这里**，恒空）。位置号那套在三种形态上必然错：
+
+      · `keyword` 格（固定几个字）吃掉一个词却不占号 → 整排串位；
+      · **多值格**（"这一格可以有多个"）占两个词的宽度、只算一个号；
+      · **可选段**（`at left`）在位置号里**根本没有号** → 那一格恒空。
+
+    只要这一列能对上格子，一律以格子认领为准（那与"试切"是同一套口径）。
+    """
+    if not pattern:
+        return _MISS
+    label = str(col.get('label') or '') if isinstance(col, dict) else ''
+    slot_idx = _pattern_slot_index_for(columns, param, label)
+    if slot_idx is None:
+        return _MISS
+    # ⚠ 依次试**这一列可能的所有名字** + **它在声明格子里的列名**
+    #   （`by_slot` 是按后者给的；而 `columns[].name` 与
+    #   `pattern[].column` 在真机里常常不同：`who` vs `角色`）。
+    slot_col = ''
+    if 0 <= slot_idx < len(pattern):
+        slot_col = str(pattern[slot_idx].get('column') or '').strip()
+    hit = next((by_slot[n] for n in [*col_names, slot_col]
+                if n and by_slot.get(n)), None)
+    if hit is not None and str(hit).strip():
+        return str(hit)
+    return _MISS
+
+
+def _cell_of_position(col, param: str, vals, positional: int, pos, columns):
+    """⑤ 位置号 → 值（具名的 `mood=happy` 优先，它**不进位置序列**）。
+
+    ⚠ **keyword 格（固定几个字）自己的文字不算值**：它确实吃掉一个词，
+    所以后面那些格的位置号会跟着往后挪；直接按位置号取，就会把
+    **关键字本身**当成值填进旁边的格子。
+    """
+    named = vals.get(param, '') if param else ''
+    if named != '':
+        return named
+    keyword_texts = {str(c.get('text') or '').strip()
+                     for c in (columns or ()) if isinstance(c, dict)
+                     and str(c.get('kind') or '') == 'keyword'
+                     and str(c.get('text') or '').strip()}
+    own = str(col.get('text') or '').strip() if isinstance(col, dict) else ''
+    word = pos[positional] if 0 <= positional < len(pos) else ''
+    if word in keyword_texts and word != own:
+        return ''                        # 那是隔壁关键字格吃掉的词
+    return word
+
+
 def _row_fields(spec_fields=None, extra_fields=None) -> list:
     """
     `to_row` 的列契约 = 基础列 + 动态列（**唯一一处拼法**）。
@@ -1063,244 +1324,73 @@ class Beat:
         参数），与 `key=value` 分开 —— 两套混在一起就会把 `camera background`
         读成"有个名叫 background 的参数"。
         """
-        from storygraph.story.spec_args import (parse_dynamic_full,
-                                                parse_call_column,
-                                                parse_clause_column,
-                                                positional_values,
-                                                spec_arg_values,
-                                                head_is_a_pattern_slot,
-                                                slot_value_map,
-                                                pattern_slot_values)
+        from storygraph.story.spec_args import (positional_values,
+                                                spec_arg_values)
         from storygraph.core.vocabulary import statement_head_token
         base = self.statement_head()
-        # ⚠⚠ **先取声明里的格子，再判"动作名在不在格子里"**（2026-10-18 修）。
-        #
-        # 从前这里是 `head_is_a_pattern_slot(base, columns)` —— 传的是**列**，
-        # 而那个函数要的是**格子**（`{'kind': 'keyword', 'text': 'show'}`）。
-        # 列里没有 `kind`，于是它**永远返回 False** → 头一个词总被摘掉 →
-        # 只要声明的第一格是"固定几个字"（`show` / `mycue`），
-        # `slot_value_map` 就少收到一个词，**整排值左移一格**：
-        #
-        #     mycue "闪电" intensity=3          ← 声明：[mycue=固定] [标题] [强度]
-        #     实测：标题 = intensity=3、强度 = （空）
-        #
-        # 也就是"三格只对上两格"那个老毛病的**同一个根**在中段又长了一遍。
-        pattern_rows = [c.get('pattern') for c in (columns or ())
-                        if isinstance(c, dict) and c.get('pattern')]
-        pattern = pattern_rows[0] if pattern_rows else []
-        # ⚠⚠ **格子先规范化再交给认领器**（2026-10-18 修）。
-        #
-        # 声明里存的是**写入时的形状**（`choices` / `multi` / `required`），
-        # 而词法层（`pattern.assign_tokens` / `spec_args.slot_value_map`）
-        # 读的是规范化之后的 `options` / `limit` / `multi`。直接喂生的，
-        # "这一格可以有多个"会被**静默忽略**：
-        #
-        #     chorus lan ling "一起说"     ← 人物格用 `choices` 存的候选
-        #     实测：人物 = `lan`、内容 = `ling`   （多值格只吃一个词，后面串位）
-        #
-        # `parse_pattern` 是那条**唯一**的规范化入口（界面、试切都走它）。
-        if pattern:
-            try:
-                from storygraph.authoring.pattern import parse_pattern
-                pattern = [dict(s) for s in parse_pattern(pattern)
-                           if isinstance(s, dict)]
-            except Exception as e:              # noqa: BLE001 - 认不出就用原样
-                from storygraph.core.safeguard import swallow as _sw
-                _sw('story.beat_model.spec_arg_cells.normalize', e)
+        pattern = _declared_pattern(columns)
         base_head = statement_head_token(base)
-        # ⚠⚠ 格子不对应动作名时，**位置参数要从动作名之后数**（2026-10-13 实测修）：
-        #   声明里只有「人物 / 服装 / 神态」几格，而脚本行是
-        #   `show lan swim_suit happy` —— 不摘掉动作名，位置 0 就成了 `show`
-        #   （「人物」空）而位置 1 成了 `lan`（「服装」= lan），**整排错位**。
-        #   ⚠ 摘的必须是**语句头 token**（`show` / `camera`），不是"第一个词" ——
-        #     `positional_tokens` 自己会跳过第一个词当语句头，摘错一个就整体左移
-        #     （第一版摘成 `' '.join(split()[1:])`，于是 `lan` 被当成头吃掉）。
-        stripped = str(base or '')
-        dropped_head = False
-        if not head_is_a_pattern_slot(base, pattern):
-            head_word = statement_head_token(base)
-            text = str(base or '').strip()
-            if head_word and text.split() and text.split()[0] == head_word:
-                stripped = text[len(head_word):].lstrip()
-                dropped_head = True
+        stripped, dropped_head = _headed_text(base, pattern)
         vals = spec_arg_values(stripped)
         # ⚠ 摘掉动作名之后，**第一个词就是第一个参数** —— 不能再让
         #   `positional_tokens` 跳一次"语句头"（实测：那会让整排左移一格）。
         pos = positional_values(stripped, skip_head=not dropped_head)
-        # ⚠⚠ **优先按格子认领词**（2026-10-13 第三次修正）：位置号那套数不准 ——
-        #   `keyword` 格（固定几个字）**不占位置号却确实吃掉一个词**，
-        #   于是出现"三格只对一格"。`slot_value_map` 是按格子顺序认领，认得准。
-        #
-        # 形状：`by_slot = {列名或显示名: 词}` —— **下面每一格都先问它**
-        # （它以前算完就扔了，见 `tests/test_hell_custom_module.py` 的白盒判据
-        # `test_the_card_reader_uses_the_declared_pattern_not_a_recount`）。
-        by_slot: dict = {}
         # ⚠ **记在拍上**：折回那一侧（`fold_spec_arg_columns`）要靠它按
         #   "格子区间"整段换值。不记的话它只能退回位置号那套 ——
         #   多值格只换掉第一个词、可选段的旧值留在原地（2026-10-14 实测）。
         self._spec_pattern = list(pattern) if pattern else []
-        #: 这一拍**复杂子句**的声明（`clauses`）—— 折回时按它决定"插到哪、
-        #: 是哪种值"。与 `_spec_pattern` 同一个理由：读值侧已经有这份，
-        #: 不必让折回再查一次注册表（`Beat.from_row` 也根本拿不到项目根）。
-        clause_rows = [c.get('clauses') for c in (columns or ())
-                       if isinstance(c, dict) and c.get('clauses')]
-        self._spec_clauses = (list(clause_rows[0]) if clause_rows else [])
-        if pattern:
-            try:
-                by_slot = slot_value_map(stripped, pattern)
-            except Exception as e:                  # noqa: BLE001 - 认不出就退回位置号
-                from storygraph.core.safeguard import swallow as _sw
-                _sw('story.beat_model.spec_arg_cells.slot_values', e)
-                by_slot = {}
-        out = []
-        for col in columns or ():
-            header = col if isinstance(col, str) else str(col.get('header') or '')
-            # 技术调用（2026-10-30）：值在 `Beat.code` 的那一次调用里。
-            call = col.get('call') if isinstance(col, dict) else None
-            if not call:
-                ch, cp, ckind, carg = parse_call_column(header)
-                if ch and ckind:
-                    call = {'head': ch, 'kind': ckind,
-                            'position': carg if ckind == 'pos' else None,
-                            'kw': carg if ckind == 'kw' else ''}
-            if call:
-                from storygraph.story.call_expr import has_call, read_arg
-                # ⚠ 列名 `camera·layer@0` 也长得像调用列（同样是 `@0`）——
-                #   必须再确认"这一拍的代码里真的有这个 head"。有 `call`
-                #   元数据时它来自调用声明，可以信（列只会为真调用生成）。
-                if not (isinstance(col, dict) and col.get('call')) \
-                        and not has_call(self.code, call.get('head', '')):
-                    call = None
-            if call:
-                col_kind = (str(col.get('kind') or '')
-                            if isinstance(col, dict) else '')
-                out.append(read_arg(
-                    self.code, call.get('head', ''),
-                    position=call.get('position'),
-                    kw=call.get('kw', ''),
-                    unquote=(col_kind != 'transition')))
-                continue
-            _clause_head, clause_param, clause_kw = parse_clause_column(header)
-            if clause_kw:
-                # 复杂子句（2026-10-30）：值在头行里、由关键字引入 ——
-                # 不是位置参数，也不是 `key=value`。
-                from storygraph.story.spec_clauses import clause_values
-                clause = (col.get('clause') if isinstance(col, dict) else {}) or {}
-                if not clause:
-                    clause = {'keyword': clause_kw, 'name': clause_param,
-                              'kind': ('transition' if clause_kw == 'with'
-                                       else 'word')}
-                # ⚠ 必须拿**全部子句**去扫：只给这一句时，`at` 会把后面的
-                #   `with Dissolve(0.3)` 一起吞进来（真机实测就是这么错的）。
-                context = list(getattr(self, '_spec_clauses', None) or ())
-                if not context:
-                    from storygraph.story.spec_clauses import normalize_clause
-                    for other in (columns or ()):
-                        oh = (other if isinstance(other, str)
-                              else str(other.get('header') or ''))
-                        _oh, oname, okw = parse_clause_column(oh)
-                        if not okw:
-                            continue
-                        synth = normalize_clause({
-                            'keyword': okw, 'name': oname,
-                            'kind': ('transition' if okw == 'with'
-                                     else 'word')})
-                        if synth:
-                            context.append(synth)
-                context = context or [clause]
-                out.append(clause_values(base, context).get(clause_param, ''))
-                continue
-            head_name, param, positional = parse_dynamic_full(header)
-            # ⚠⚠ **这一列可能有好几个名字**（2026-10-14 修）：声明里的
-            #   `columns[].name`（`who`）与 `pattern[].column`（`角色`）**常常不同**
-            #   —— 前者是给程序/表头的键，后者是格子上写的那个名字。
-            #   而 `by_slot` 是**按格子上的名字**给的，只拿 `param` 去查会查空，
-            #   于是有格子的语句在卡片上**全靠位置号**（多值格/可选段当场错）。
-            #   所以把这一列可能的名字都收齐，按"格子上的名字优先"去试。
-            col_names = [str(col.get('column') or '').strip()
-                         if isinstance(col, dict) else '']
-            col_names += [str(col.get('label') or '').strip()
-                          if isinstance(col, dict) else '',
-                          param]
-            # ⚠⚠ **`col['name']` 在动态列里是"语句名"，不是列名**（2026-10-18 修）。
-            #   把它当列名去查 `by_slot`，凡是对不上格子的列都会落到
-            #   `by_slot[语句名]`（= 关键字格吃到的那个词）：
+        self._spec_clauses = _declared_clauses(columns)
+        by_slot = _slot_claims(stripped, pattern)
+        return [self._spec_arg_cell(
+                    col, columns=columns, base=base, base_head=base_head,
+                    pattern=pattern, by_slot=by_slot, vals=vals, pos=pos)
+                for col in columns or ()]
+
+    def _spec_arg_cell(self, col, *, columns, base, base_head, pattern,
+                       by_slot, vals, pos) -> str:
+        """**一列一格**的取值分派（顺序即优先级，早命中早返回）。
+
+        | 档 | 认什么 | 为什么排这个位置 |
+        |---|---|---|
+        | ① | 技术调用列（`camera·retry@0`） | 值在 `Beat.code` 里，别处读不到 |
+        | ② | 复杂子句（`at` / `with`） | 值由关键字引入，不是位置参数 |
+        | ③ | 叶语句（`with` / `pause` / `window`） | 行在 `Beat.raw`，头行里没有 |
+        | ④ | 声明的格子（`slot_value_map`） | 多值格 / 可选段只有它数得准 |
+        | ⑤ | 位置号（`@0`） | 没声明格子时的老路 |
+        | ⑥ | `key=value` | 兜底 |
+
+        认不出的列 / 头行里没有的参数 → 空格子（**不猜**）。
+        """
+        from storygraph.story.spec_args import parse_dynamic_full
+        header = col if isinstance(col, str) else str(col.get('header') or '')
+        value = _cell_of_call(self.code, col, header)
+        if value is not _MISS:
+            return value
+        value = _cell_of_clause(base, col, header, columns,
+                                getattr(self, '_spec_clauses', None))
+        if value is not _MISS:
+            return value
+        head_name, param, positional = parse_dynamic_full(header)
+        if not param:
+            return ''
+        col_names = _cell_col_names(col, param, head_name)
+        positional = _cell_positional_of(col, positional)
+        if head_name and head_name != base_head:
+            # **叶语句**（`with`/`pause`/`window`）：它的行在 `Beat.raw` 里，
+            # 不在头行里（见 `LEAF_ARG_HEADS`）。这一拍没有它 / 有不只一条
+            # → 空格子（**不猜**）。
             #
-            #       多轨音效  [sfx_mix=固定] [声道] [文件] [可选段 gain]
-            #       实测：音量那格显示成 `sfx_mix`（明明是空的）
-            #
-            #   所以只有当它确实不是语句名时才算一个候选名字。
-            _nm = str(col.get('name') or '').strip() if isinstance(col, dict) else ''
-            if _nm and _nm != str(head_name or '').strip():
-                col_names.append(_nm)
-            col_names = [n for n in col_names if n]
-            if not param:
-                out.append('')
-                continue
-            if positional is None and not isinstance(col, str):
-                # 列描述里带了位置号（`dynamic_spec_columns` 的产物）→ 以它为准
-                try:
-                    positional = (int(col['positional'])
-                                   if col.get('positional') is not None
-                                   else None)
-                except (TypeError, ValueError):
-                    positional = None
-            if head_name and head_name != base_head:
-                # **叶语句**（`with`/`pause`/`window`）：它的行在 `Beat.raw` 里，
-                # 不在头行里（见 `LEAF_ARG_HEADS`）。这一拍没有它 / 有不只一条
-                # → 空格子（**不猜**）。
-                #
-                # ⚠ 判据是"列的头 ≠ 这一拍头行的头"，**不是**"头行非空且不同"：
-                # 叶语句所在的拍**根本没有头行**（它是 raw，不是 opaque），
-                # 写成"头行非空"就永远走不到这一支（第一版就是这么错的）。
-                out.append(_leaf_arg_value(self, head_name, positional))
-                continue
-            # ⚠⚠ **先问"格子认领法"**（2026-10-13 修：它以前算完就扔了，
-            #   而且只写在 `positional is not None` 那一支里 —— 于是
-            #   **可选段（没有位置号）那格永远走不到这里**，恒空）。
-            #   位置号那套在三种形态上必然错：
-            #     · `keyword` 格（固定几个字）吃掉一个词却不占号 → 整排串位；
-            #     · **多值格**（"这一格可以有多个"）占两个词的宽度、只算一个号；
-            #     · **可选段**（`at left`）在位置号里**根本没有号** → 那一格恒空。
-            #   所以这一段提在 `if positional` **之前**：只要这一列能对上格子，
-            #   一律以格子认领为准（那与"试切"是同一套口径）。
-            slot_idx = _pattern_slot_index_for(
-                columns, param,
-                str(col.get('label') or '') if isinstance(col, dict) else '')
-            if slot_idx is not None and pattern:
-                # ⚠ 依次试**这一列可能的所有名字** + **它在声明格子里的列名**
-                #   （`by_slot` 是按后者给的；而 `columns[].name` 与
-                #   `pattern[].column` 在真机里常常不同：`who` vs `角色`）。
-                slot_col = ''
-                if 0 <= slot_idx < len(pattern):
-                    slot_col = str(pattern[slot_idx].get('column')
-                                   or '').strip()
-                hit = next((by_slot[n] for n in [*col_names, slot_col]
-                            if n and by_slot.get(n)), None)
-                if hit is not None and str(hit).strip():
-                    out.append(str(hit))
-                    continue
-            if positional is not None:
-                # ⚠ 具名的（`mood=happy`）—— 那种**不进位置序列**
-                named = vals.get(param, '') if param else ''
-                if named != '':
-                    out.append(named)
-                    continue
-                # ⚠ **keyword 格（固定几个字）自己的文字不算值**：
-                #   它确实吃掉一个词，所以后面那些格的位置号会跟着往后挪；
-                #   直接按位置号取，就会把**关键字本身**当成值填进旁边的格子。
-                keyword_texts = {str(c.get('text') or '').strip()
-                                 for c in (columns or ()) if isinstance(c, dict)
-                                 and str(c.get('kind') or '') == 'keyword'
-                                 and str(c.get('text') or '').strip()}
-                own = str(col.get('text') or '').strip() if isinstance(col, dict) else ''
-                word = pos[positional] if 0 <= positional < len(pos) else ''
-                if word in keyword_texts and word != own:
-                    word = ''                    # 那是隔壁关键字格吃掉的词
-                out.append(word)
-            else:
-                out.append(vals.get(param, ''))
-        return out
+            # ⚠ 判据是"列的头 ≠ 这一拍头行的头"，**不是**"头行非空且不同"：
+            # 叶语句所在的拍**根本没有头行**（它是 raw，不是 opaque），
+            # 写成"头行非空"就永远走不到这一支（第一版就是这么错的）。
+            return _leaf_arg_value(self, head_name, positional)
+        value = _cell_of_slot(columns, col, param, col_names, pattern, by_slot)
+        if value is not _MISS:
+            return value
+        if positional is not None:
+            return _cell_of_position(col, param, vals, positional, pos, columns)
+        return vals.get(param, '')
+
 
     def to_row(self, symbols=None, spec_fields=None, extra_fields=None) -> list:
         """
