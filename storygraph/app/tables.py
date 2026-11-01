@@ -153,6 +153,73 @@ def export_table(table_path, registry=None, project_root=None,
     渲染 → 增量补丁 → 门禁评估 → 落盘（拦下则只留副本）。
     """
     table_path = Path(table_path)
+    loaded = _read_table_beats(table_path, registry, out_path)
+    if isinstance(loaded, dict):               # 读取阶段就失败 → 直接是结果包
+        return loaded
+    beats, unregistered = loaded
+
+    # 调用方**指名**了底稿，就说明"用户在改这一章"——从前这里仍然落到
+    # `build/renpy/`，于是表格里改完的台词**永远到不了游戏**（审计原话：
+    # "写回落到 build/renpy/，不改原章节"）。
+    #
+    # 只有"表旁边恰好有个同名 .rpy"（`_source_rpy` 的兜底）**不算指名**：
+    # 那条路只拿来走增量，产物仍旧落 build/ —— 往 game/ 里写东西必须由人
+    # 明确指认是哪一个章节（P0：多一份抢 label 的脚本，游戏起不来）。
+    explicit_src = bool(source_rpy)
+    src_for_patch = _source_rpy(source_rpy, table_path)
+    target = _export_target(table_path, project_root, source_rpy, out_path,
+                            explicit_src, src_for_patch)
+    text = render_beats_to_rpy(beats, label_name=None, registry=registry)
+
+    # —— 增量补丁优先（保住原文的注释与逐字节未改行）——
+    patch = _incremental_patch(beats, src_for_patch, table_path, text,
+                               registry)
+    text = patch['text']
+    merged_from = patch['merged_from']
+    note = patch['note']
+    removed_preview = patch['removed_preview']
+    removed_count = patch['removed_count']
+
+    facts = _gate_facts(beats, registry, target, project_root, table_path,
+                        src_for_patch, text)
+    base = {
+        'out_path': target,
+        'beats': len(beats),
+        'text': text,
+        'note': note,
+        'used_patch': bool(merged_from),
+        'merged_from': merged_from,
+        # 落盘那一步要它：门禁的「原地覆盖 + 非增量」与 `OPAQUE_LOST`
+        # 都靠 `source_text` / `source_path` 才判得出来（2026-10-21，P1）。
+        'source_path': (str(src_for_patch) if src_for_patch else None),
+        'removed_preview': removed_preview,
+        'removed_count': removed_count,
+        'unregistered': unregistered,
+        'unmanaged_blocks': facts['unmanaged_blocks'],
+        'error': '',
+    }
+    if facts['blocking']:
+        # 拒写，但**不把产物丢掉**：另存一份 .blocked.rpy 供对比，
+        # 否则"拒写"会让人连问题长什么样都看不到（信任 > 方便）。
+        # 注意用 `write_generation(review_on_block=True)` 走同一套逻辑，
+        # 不再手写副本 —— 副本命名规则只能有一个定义处。
+        art = write_generation(text, target, review_on_block=True,
+                               project_root=project_root,
+                               occupied=facts['occupied'], beats=beats)
+        return dict(base, ok=False,
+                    blocking=[i.format() for i in facts['blocking'][:12]],
+                    blocking_total=len(facts['blocking']),
+                    warnings=[i.format() for i in facts['warnings'][:6]],
+                    review_path=art.review_path)
+    return dict(base, ok=True, blocking=[], blocking_total=0,
+                warnings=[i.format() for i in facts['warnings'][:6]],
+                review_path=None)
+
+
+def _read_table_beats(table_path, registry, out_path):
+    """
+    读表 → `(beats, 未登记资产)`；读失败或空表 → 直接给结果包（`dict`）。
+    """
     try:
         beats = import_beats_from_excel(table_path, registry=registry)
     except Exception as e:                    # noqa: BLE001 - 报给前端
@@ -165,82 +232,85 @@ def export_table(table_path, registry=None, project_root=None,
     if registry is not None:
         try:
             unregistered = list(find_unregistered_assets(beats, registry))
-        except Exception as e:                     # noqa: BLE001 - 纯提示，不该拦住
+        except Exception as e:                # noqa: BLE001 - 纯提示，不该拦住
             swallow('app.tables.export_table', e)
             unregistered = []
+    return beats, unregistered
 
-    # **默认写回这一章自己的 .rpy**（2026-10-19，审计 P1-7 收尾）：
-    # 调用方**指名**了底稿，就说明"用户在改这一章"——从前这里仍然落到
-    # `build/renpy/`，于是表格里改完的台词**永远到不了游戏**（审计原话：
-    # "写回落到 build/renpy/，不改原章节"）。
-    #
-    # 只有"表旁边恰好有个同名 .rpy"（`_source_rpy` 的兜底）**不算指名**：
-    # 那条路只拿来走增量，产物仍旧落 build/ —— 往 game/ 里写东西必须由人
-    # 明确指认是哪一个章节（P0：多一份抢 label 的脚本，游戏起不来）。
-    explicit_src = bool(source_rpy)
-    src_for_patch = _source_rpy(source_rpy, table_path)
+
+def _export_target(table_path, project_root, source_rpy, out_path,
+                   explicit_src, src_for_patch):
+    """产物路径：人指名的 > 指名的底稿 > `build/renpy` 兜底。"""
     if out_path:
-        target = Path(out_path)
-    elif explicit_src and src_for_patch is not None:
-        target = Path(src_for_patch)
-    else:
-        target = planned_output_path(table_path, script_path=source_rpy,
-                                     project_root=project_root)
-    text = render_beats_to_rpy(beats, label_name=None, registry=registry)
+        return Path(out_path)
+    if explicit_src and src_for_patch is not None:
+        return Path(src_for_patch)
+    return planned_output_path(table_path, script_path=source_rpy,
+                               project_root=project_root)
 
-    # —— 增量补丁优先（保住原文的注释与逐字节未改行）——
-    note = ''
-    #: 这次合并的**底稿**（增量对上了才是路径，否则 None）。
-    #: 为什么要带出去（2026-10-05 实测修）：落盘那一步
-    #: （`apply_export` → `write_generation`）要靠它判断
-    #: "手写护栏让不让路" —— 少了它，增量产物写回**手写**文件时会被自己的
-    #: 护栏拦下，而报出来的错还是"检查文件是否被占用"（驴唇不对马嘴）。
-    merged_from = None
-    #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 确认框 / 日志要能点名。
-    removed_preview: tuple = ()
-    #: 真正删掉的行数（预览会截断，别拿长度算）。
-    removed_count: int = 0
+
+def _incremental_patch(beats, src_for_patch, table_path, text, registry) -> dict:
+    """
+    试一把增量补丁；对不上 / 不可用就退回全量。
+
+    返回 `{text, merged_from, note, removed_preview, removed_count}`。
+
+    `merged_from` 是这次合并的**底稿**（增量对上了才是路径，否则 None）。
+    为什么要带出去（2026-10-05 实测修）：落盘那一步
+    （`apply_export` → `write_generation`）要靠它判断"手写护栏让不让路" ——
+    少了它，增量产物写回**手写**文件时会被自己的护栏拦下，而报出来的错
+    还是"检查文件是否被占用"（驴唇不对马嘴）。
+    """
+    out = {'text': text, 'merged_from': None, 'note': '',
+           #: 这一刀从源文件里删掉的行（原文，最多 5 条）—— 确认框 / 日志要能点名。
+           'removed_preview': (),
+           #: 真正删掉的行数（预览会截断，别拿长度算）。
+           'removed_count': 0}
+    src = src_for_patch
     try:
-        src = src_for_patch
         # `registry` 必须传：补丁里的"单拍渲染"要与全量渲染用**同一套符号表**，
         # 否则生成写法会不一致（`ling happy` 被写成中文 tag / 下划线形态），
         # 那就是"把能跑的脚本改坏"。
         res = patch_export(beats, src, text, registry=registry)
-        if res.ok:
-            text = res.text
-            merged_from = src
-            note = (f'增量补丁：对位 {res.matched_beats}/{res.total_beats} 拍，'
-                    f'实际改动 {res.changed_lines} 行')
-            if getattr(res, 'unlanded_lines', 0):
-                note += (f'（{res.unlanded_lines} 行注释/代码未参与替换，'
-                         f'保持原文）')
-            removed_preview = tuple(
-                getattr(res, 'removed_preview', ()) or ())
-            # **数量用 `removed_count`**，不是预览的长度（预览截断在 5 条）。
-            # 2026-10-21 实测：批量删 30 拍时回执照着预览长度说"删掉了 5 行"。
-            removed_count = int(getattr(res, 'removed_count', 0) or 0) or \
-                len(removed_preview)
-            if removed_preview:
-                note += (f'；其中删掉了源文件里 {removed_count} 行'
-                         f'（{removed_preview[0][:40]}）')
-            # **表比源码旧？**（2026-10-25 第六轮）：删行时才值得说。
-            # 判据直接来自隐藏表的"来源指纹"，不是间接猜测。
-            try:
-                from storygraph.story.table_meta import staleness_note
-                note += staleness_note(table_path, src_for_patch,
-                                       removed_count)
-            except Exception as e:            # noqa: BLE001
-                from storygraph.core.safeguard import swallow
-                swallow('tables.export_table.staleness_note', e)
-        else:
-            why = '；'.join(res.reasons) if res.reasons else \
-                f'与源文件对位率不足（{res.coverage:.0%}）'
-            note = f'全量重生成（增量补丁未采用：{why}）'
     except Exception as e:                    # noqa: BLE001
-        note = f'全量重生成（增量补丁不可用：{e}）'
+        out['note'] = f'全量重生成（增量补丁不可用：{e}）'
+        return out
+    if not res.ok:
+        why = '；'.join(res.reasons) if res.reasons else \
+            f'与源文件对位率不足（{res.coverage:.0%}）'
+        out['note'] = f'全量重生成（增量补丁未采用：{why}）'
+        return out
 
-    # —— 生成安全门禁：判定在 story 层，这里只摆结果 ——
-    #
+    out['text'] = res.text
+    out['merged_from'] = src
+    note = (f'增量补丁：对位 {res.matched_beats}/{res.total_beats} 拍，'
+            f'实际改动 {res.changed_lines} 行')
+    if getattr(res, 'unlanded_lines', 0):
+        note += (f'（{res.unlanded_lines} 行注释/代码未参与替换，'
+                 f'保持原文）')
+    preview = tuple(getattr(res, 'removed_preview', ()) or ())
+    # **数量用 `removed_count`**，不是预览的长度（预览截断在 5 条）。
+    # 2026-10-21 实测：批量删 30 拍时回执照着预览长度说"删掉了 5 行"。
+    count = int(getattr(res, 'removed_count', 0) or 0) or len(preview)
+    if preview:
+        note += (f'；其中删掉了源文件里 {count} 行'
+                 f'（{preview[0][:40]}）')
+    # **表比源码旧？**（2026-10-25 第六轮）：删行时才值得说。
+    # 判据直接来自隐藏表的"来源指纹"，不是间接猜测。
+    try:
+        from storygraph.story.table_meta import staleness_note
+        note += staleness_note(table_path, src_for_patch, count)
+    except Exception as e:                    # noqa: BLE001
+        swallow('tables.export_table.staleness_note', e)
+    out['note'] = note
+    out['removed_preview'] = preview
+    out['removed_count'] = count
+    return out
+
+
+def _gate_facts(beats, registry, target, project_root, table_path,
+                src_for_patch, text) -> dict:
+    """生成安全门禁 + 回执里的提醒（**判定在 story 层，这里只摆结果**）。"""
     # **occupied 必须走 labels_in_danger，不能在这里自己算**：
     # 以前 UI 自己算了一遍，绕过了"产物在 build/ 就免查重名"的守卫，
     # 于是写到 build/ 也被拒写（用户 2026-09-28 实测）。
@@ -262,66 +332,20 @@ def export_table(table_path, registry=None, project_root=None,
                                  source_path=(str(src_for_patch)
                                               if src_for_patch else None))
     blocking = [i for i in issues if i.is_blocking]
-    warnings = [i for i in issues if not i.is_blocking]
     # **图像引用没在资源表里**：体检（`cli validate`）会报 W110 / W111，但
     # "改完直接导出"的人看不到它。2026-10-21 用户问的正是这件事：
     # `show lan base_swimsuit happy` 这种没登记的属性组合，导出时**会不会**
     # 被发现？—— 体检会，导出从前不会。这里把同类发现搬进导出回执。
-    warnings = _with_image_ref_warnings(warnings, beats, registry)
-    # 工具不认识的块语句（M1）：**结论必须随结果走到落盘那一步** ——
-    # `apply_export` 只拿得到这份 dict，拿不到 beat 对象，而门禁那条
-    # 判据（`UNMANAGED_BLOCK`）必须"说出口"，不许在这一跳上丢掉。
-    unmanaged_blocks = unmanaged_block_heads(beats, None)
-
-    if blocking:
-        # 拒写，但**不把产物丢掉**：另存一份 .blocked.rpy 供对比，
-        # 否则"拒写"会让人连问题长什么样都看不到（信任 > 方便）。
-        # 注意用 `write_generation(review_on_block=True)` 走同一套逻辑，
-        # 不再手写副本 —— 副本命名规则只能有一个定义处。
-        art = write_generation(text, target, review_on_block=True,
-                               project_root=project_root, occupied=occupied,
-                               beats=beats)
-        return {
-            'ok': False,
-            'out_path': target,
-            'beats': len(beats),
-            'text': text,
-            'note': note,
-            'used_patch': bool(merged_from),
-            'merged_from': merged_from,
-            # 落盘那一步要它：门禁的「原地覆盖 + 非增量」与 `OPAQUE_LOST`
-            # 都靠 `source_text` / `source_path` 才判得出来（2026-10-21，P1）。
-            'source_path': (str(src_for_patch) if src_for_patch else None),
-            'removed_preview': removed_preview,
-        'removed_count': removed_count,
-            'removed_count': removed_count,
-            'blocking': [i.format() for i in blocking[:12]],
-            'blocking_total': len(blocking),
-            'warnings': [i.format() for i in warnings[:6]],
-            'review_path': art.review_path,
-            'unregistered': unregistered,
-            'unmanaged_blocks': unmanaged_blocks,
-            'error': '',
-        }
-
+    warnings = _with_image_ref_warnings(
+        [i for i in issues if not i.is_blocking], beats, registry)
     return {
-        'ok': True,
-        'out_path': target,
-        'beats': len(beats),
-        'text': text,
-        'note': note,
-        'used_patch': bool(merged_from),
-        'merged_from': merged_from,
-        'source_path': (str(src_for_patch) if src_for_patch else None),
-        'removed_preview': removed_preview,
-        'removed_count': removed_count,
-        'blocking': [],
-        'blocking_total': 0,
-        'warnings': [i.format() for i in warnings[:6]],
-        'review_path': None,
-        'unregistered': unregistered,
-        'unmanaged_blocks': unmanaged_blocks,
-        'error': '',
+        'occupied': occupied,
+        'blocking': blocking,
+        'warnings': warnings,
+        # 工具不认识的块语句（M1）：**结论必须随结果走到落盘那一步** ——
+        # `apply_export` 只拿得到这份 dict，拿不到 beat 对象，而门禁那条
+        # 判据（`UNMANAGED_BLOCK`）必须"说出口"，不许在这一跳上丢掉。
+        'unmanaged_blocks': unmanaged_block_heads(beats, None),
     }
 
 
