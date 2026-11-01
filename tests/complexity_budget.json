@@ -141,6 +141,10 @@
    "lines": 170,
    "branches": 38
   },
+  "storygraph/story/beat_model.py::compose_stage": {
+   "lines": 108,
+   "branches": 40
+  },
   "storygraph/story/beat_model.py::fold_spec_arg_columns": {
    "lines": 172,
    "branches": 51
@@ -176,14 +180,6 @@
   "storygraph/story/generation_guard.py::write_generation": {
    "lines": 241,
    "branches": 40
-  },
-  "storygraph/story/patcher.py::_replace_matched": {
-   "lines": 407,
-   "branches": 94
-  },
-  "storygraph/story/patcher.py::patch_export": {
-   "lines": 469,
-   "branches": 63
   },
   "storygraph/story/renpy_gui.py::load_gui_profile": {
    "lines": 172,

@@ -6,16 +6,17 @@
   "long_file": 1500
  },
  "limits": {
-  "long_functions": 92,
-  "complex_functions": 236,
-  "print_calls": 249,
-  "swallow_calls": 1231,
+  "long_functions": 90,
+  "complex_functions": 234,
+  "print_calls": 240,
+  "print_library": 3,
+  "swallow_calls": 1240,
   "broad_excepts": 1229,
   "todos": 111,
   "long_files": 26,
-  "import_cycles_all": 3,
+  "import_cycles_all": 2,
   "import_cycles_top": 0,
-  "modules_in_cycles_all": 37
+  "modules_in_cycles_all": 32
  },
  "cycle_modules": [
   "storygraph.assets.asset_identity",
@@ -49,22 +50,16 @@
   "storygraph.story.script_table",
   "storygraph.story.stage_snapshot",
   "storygraph.story.statement_registry",
-  "storygraph.story.transition_expr",
-  "storygraph.ui_qt.main_window",
-  "storygraph.ui_qt.stage_preview",
-  "storygraph.ui_qt.stage_thumb",
-  "storygraph.ui_qt.window_export",
-  "storygraph.ui_qt.window_state"
+  "storygraph.story.transition_expr"
  ],
  "cycle_shapes": [
   "storygraph.assets.asset_identity|storygraph.assets.asset_mapping|storygraph.assets.mapping_excel",
-  "storygraph.assets.asset_registry|storygraph.assets.asset_registry_scan|storygraph.pipeline.build|storygraph.pipeline.compile|storygraph.pipeline.engine_collect|storygraph.pipeline.engine_exporters|storygraph.pipeline.engine_lint|storygraph.pipeline.ir_validate|storygraph.pipeline.statement_probe|storygraph.pipeline.unity_package|storygraph.pipeline.validate|storygraph.story.beat_build|storygraph.story.beat_model|storygraph.story.beat_render|storygraph.story.beat_render_code|storygraph.story.call_expr|storygraph.story.chapter|storygraph.story.chapter_tree|storygraph.story.dsl|storygraph.story.excel_export|storygraph.story.excel_import|storygraph.story.generation_guard|storygraph.story.host_hooks|storygraph.story.patcher|storygraph.story.project_conventions|storygraph.story.script_table|storygraph.story.stage_snapshot|storygraph.story.statement_registry|storygraph.story.transition_expr",
-  "storygraph.ui_qt.main_window|storygraph.ui_qt.stage_preview|storygraph.ui_qt.stage_thumb|storygraph.ui_qt.window_export|storygraph.ui_qt.window_state"
+  "storygraph.assets.asset_registry|storygraph.assets.asset_registry_scan|storygraph.pipeline.build|storygraph.pipeline.compile|storygraph.pipeline.engine_collect|storygraph.pipeline.engine_exporters|storygraph.pipeline.engine_lint|storygraph.pipeline.ir_validate|storygraph.pipeline.statement_probe|storygraph.pipeline.unity_package|storygraph.pipeline.validate|storygraph.story.beat_build|storygraph.story.beat_model|storygraph.story.beat_render|storygraph.story.beat_render_code|storygraph.story.call_expr|storygraph.story.chapter|storygraph.story.chapter_tree|storygraph.story.dsl|storygraph.story.excel_export|storygraph.story.excel_import|storygraph.story.generation_guard|storygraph.story.host_hooks|storygraph.story.patcher|storygraph.story.project_conventions|storygraph.story.script_table|storygraph.story.stage_snapshot|storygraph.story.statement_registry|storygraph.story.transition_expr"
  ],
  "snapshot": {
-  "modules": 237,
-  "total_lines": 160079,
-  "functions": 5355,
-  "file_edges_all": 1202
+  "modules": 239,
+  "total_lines": 160396,
+  "functions": 5378,
+  "file_edges_all": 1205
  }
 }

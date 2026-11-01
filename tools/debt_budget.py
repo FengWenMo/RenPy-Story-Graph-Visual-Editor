@@ -29,6 +29,7 @@ def main() -> int:
             'long_functions': data['long_functions'],
             'complex_functions': data['complex_functions'],
             'print_calls': data['print_calls'],
+            'print_library': data['print_library'],
             'swallow_calls': data['swallow_calls'],
             'broad_excepts': data['broad_excepts'],
             'todos': data['todos'],

@@ -15,6 +15,7 @@
 | **模块级导入环** | 真实的依赖方向被藏起来了；层次测试看不出、改一个模块全崩 |
 | **含函数内 import 的环** | 审查说的"27 个模块的环"就是这种：能跑，但依赖关系是隐形的 |
 | `print(` 数量 | 打包成无窗口程序后没有输出通道；日志才是可诊断的 |
+| **`print` 的库内残留** | 同上，但**只算真的在库里的**（CLI / 入口 / `python 文件.py` 演示必须留 stdout） |
 | 宽泛 `except` / `swallow(` | 失败被咽下去的入口数量（项目允许 swallow，但**总数**要看得见） |
 | `TODO` / `FIXME` / `XXX` / `HACK` | 写着"以后再说"的地方 |
 | 超长文件（>1500 行） | 单文件太大 → 阅读/合并冲突成本 |
@@ -39,6 +40,39 @@ COMPLEX_FUNC = 20
 LONG_FILE = 1500
 
 _TODO_RE = re.compile(r'\b(TODO|FIXME|XXX|HACK)\b')
+
+#: 允许（而且必须）用 `print` 的**呈现层**模块：它们的输出就是给用户看的。
+#:
+#: 这不是"豁免名单"的软约定：`storygraph/cli.py` 是命令行，`main.py` /
+#: `main_qt.py` / `schema.py` / `selfcheck.py` 是入口，`core/utils.py` 的
+#: print 在那份自测小工具里。**库里的 print 才叫债** —— 打包成无窗口程序后
+#: 它没有输出通道，出了问题一行日志都没有。
+PRESENTER_MODULES = frozenset({
+    'storygraph.cli', 'storygraph.core.utils', 'storygraph.main',
+    'storygraph.main_qt', 'storygraph.schema', 'storygraph.selfcheck',
+})
+
+
+def _main_guard_lines(tree) -> set:
+    """
+    `if __name__ == '__main__':` 块里**所有节点的行号**。
+
+    那些行上的 `print` 是这个模块自己的命令行演示（`python xxx.py` 才跑），
+    与 `cli.py` 一样是用户可见输出，不算库内债。
+    """
+    lines: set = set()
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        t = node.test
+        if (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name)
+                and t.left.id == '__name__'):
+            for sub in ast.walk(node):
+                ln = getattr(sub, 'lineno', 0) or 0
+                if ln:
+                    lines.add(ln)
+    return lines
+
 
 
 def _module_name(path: Path) -> str:
@@ -132,6 +166,7 @@ def collect() -> dict:
     top_edges = defaultdict(set)
     all_edges = defaultdict(set)
     prints = 0
+    print_library = 0
     broad = 0
     swallows = 0
     todos = 0
@@ -154,6 +189,7 @@ def collect() -> dict:
             print(f'⚠ 语法错 {path}: {e}', file=sys.stderr)
             continue
         cfg = _module_name(path)
+        guard = _main_guard_lines(tree)
         top, all_ = _imports_of(tree)
         for name in top:
             base = '.'.join(name.split('.')[:3])     # storygraph.a.b
@@ -167,6 +203,9 @@ def collect() -> dict:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 if node.func.id == 'print':
                     prints += 1
+                    if cfg not in PRESENTER_MODULES \
+                            and getattr(node, 'lineno', 0) not in guard:
+                        print_library += 1
                 elif node.func.id == 'swallow':
                     swallows += 1
             elif isinstance(node, ast.ExceptHandler):
@@ -200,6 +239,7 @@ def collect() -> dict:
         'import_cycles_top': [c for c in cycles_top],
         'import_cycles_all': [c for c in cycles_all],
         'print_calls': prints,
+        'print_library': print_library,
         'swallow_calls': swallows,
         'broad_excepts': broad,
         'todos': todos,
@@ -232,9 +272,10 @@ def report(data: dict, *, only_cycles: bool = False) -> int:
           f"{data['file_edges_all']} 条")
     _print_cycles('模块级导入环', data['import_cycles_top'])
     _print_cycles('含函数内 import 的环', data['import_cycles_all'])
-    print(f"print 调用 {data['print_calls']} 处 · swallow {data['swallow_calls']} 处 "
-          f"· 宽泛 except {data['broad_excepts']} 处 · "
-          f"TODO/FIXME {data['todos']} 处")
+    print(f"print 调用 {data['print_calls']} 处（**库内** "
+          f"{data['print_library']} 处；其余是 CLI / 入口 / `__main__` 演示的输出）")
+    print(f"swallow {data['swallow_calls']} 处 · 宽泛 except "
+          f"{data['broad_excepts']} 处 · TODO/FIXME {data['todos']} 处")
     if data['long_files']:
         print(f"超长文件（>{data['thresholds']['long_file']} 行）：")
         for f in data['long_files']:

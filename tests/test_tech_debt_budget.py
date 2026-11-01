@@ -17,6 +17,12 @@
 `swallow_calls` / `broad_excepts` 的口径是"全项目总数"：项目允许
 `swallow()`（它现在会进日志），允许 `except Exception`（带 `# noqa: BLE001`
 说明理由），但**总量不能涨** —— 涨了说明又有人图省事。
+
+`print_calls` 是**总量**（含 CLI 与 `python xxx.py` 演示，那部分必须留
+stdout），`print_library` 才是**真的债**：库里不许 print —— 打包成无窗口
+程序后没有输出通道。两个数都钉（2026-11-01 第六段把 12 处库内 print
+换成 `swallow` 后：12 → 3，剩下的 3 处是 `preflight` 的 stderr 兜底与
+`safeguard` 的 `--debug` 通道，本身就是要给人看的）。
 """
 from __future__ import annotations
 
@@ -53,8 +59,9 @@ def data():
 def test_budget_file_is_complete(budget):
     assert budget['limits'], '上限快照是空的 —— 棘轮等于没装'
     assert set(budget['limits']) >= {
-        'long_functions', 'complex_functions', 'print_calls', 'swallow_calls',
-        'broad_excepts', 'todos', 'long_files', 'import_cycles_all'}
+        'long_functions', 'complex_functions', 'print_calls', 'print_library',
+        'swallow_calls', 'broad_excepts', 'todos', 'long_files',
+        'import_cycles_all'}
 
 
 def test_every_counted_debt_does_not_grow(budget, data):
@@ -65,6 +72,7 @@ def test_every_counted_debt_does_not_grow(budget, data):
         'long_functions': data['long_functions'],
         'complex_functions': data['complex_functions'],
         'print_calls': data['print_calls'],
+        'print_library': data['print_library'],
         'swallow_calls': data['swallow_calls'],
         'broad_excepts': data['broad_excepts'],
         'todos': data['todos'],
