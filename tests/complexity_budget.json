@@ -9,13 +9,13 @@
   "branches": 150
  },
  "functions": {
+  "storygraph/app/beats.py::expression_groups_for": {
+   "lines": 90,
+   "branches": 37
+  },
   "storygraph/app/beats.py::fields_to_beat": {
    "lines": 102,
    "branches": 48
-  },
-  "storygraph/app/session_export.py::export": {
-   "lines": 263,
-   "branches": 27
   },
   "storygraph/app/session_graph.py::rebuild_source_edges": {
    "lines": 148,
@@ -33,14 +33,6 @@
    "lines": 166,
    "branches": 47
   },
-  "storygraph/app/stage_render.py::draw_readable_say": {
-   "lines": 238,
-   "branches": 62
-  },
-  "storygraph/app/tables.py::export_table": {
-   "lines": 192,
-   "branches": 24
-  },
   "storygraph/assets/asset_registry.py::append_rows_to_table": {
    "lines": 161,
    "branches": 39
@@ -49,9 +41,17 @@
    "lines": 87,
    "branches": 42
   },
-  "storygraph/assets/asset_registry.py::sync_asset_tables": {
-   "lines": 178,
+  "storygraph/assets/asset_registry.py::ensure_asset_tables": {
+   "lines": 134,
+   "branches": 23
+  },
+  "storygraph/assets/asset_registry.py::write_dict_to_excel": {
+   "lines": 131,
    "branches": 28
+  },
+  "storygraph/assets/mapping_excel.py::write_workbook": {
+   "lines": 148,
+   "branches": 37
   },
   "storygraph/assets/mapping_schema.py::validate_mapping": {
    "lines": 127,
@@ -73,37 +73,45 @@
    "lines": 126,
    "branches": 38
   },
-  "storygraph/authoring/pattern.py::_spans": {
-   "lines": 245,
-   "branches": 66
+  "storygraph/authoring/learn_statement.py::declaration_preview": {
+   "lines": 63,
+   "branches": 36
   },
-  "storygraph/authoring/pattern.py::solve": {
-   "lines": 165,
-   "branches": 56
+  "storygraph/authoring/txt_import.py::convert_text": {
+   "lines": 137,
+   "branches": 23
+  },
+  "storygraph/authoring/txt_pipeline.py::run": {
+   "lines": 138,
+   "branches": 31
   },
   "storygraph/cli.py::_cmd_collab": {
    "lines": 158,
    "branches": 62
   },
+  "storygraph/cli.py::_cmd_engine_facts": {
+   "lines": 116,
+   "branches": 37
+  },
   "storygraph/cli.py::build_parser": {
    "lines": 203,
    "branches": 0
+  },
+  "storygraph/excel/safety.py::_inspect_uncached": {
+   "lines": 131,
+   "branches": 37
   },
   "storygraph/graph/analysis.py::analyze_reachability_full": {
    "lines": 184,
    "branches": 40
   },
-  "storygraph/parsing/renpy_parser.py::_dispatch_node": {
-   "lines": 245,
-   "branches": 43
+  "storygraph/parsing/renpy_parser.py::_top_level_region": {
+   "lines": 131,
+   "branches": 21
   },
-  "storygraph/pipeline/build.py::build_project": {
-   "lines": 205,
-   "branches": 23
-  },
-  "storygraph/pipeline/compile.py::write_compiled": {
-   "lines": 194,
-   "branches": 30
+  "storygraph/parsing/renpy_parser.py::parse_translation_files": {
+   "lines": 152,
+   "branches": 27
   },
   "storygraph/pipeline/continuity.py::scan_label": {
    "lines": 123,
@@ -117,6 +125,10 @@
    "lines": 167,
    "branches": 44
   },
+  "storygraph/story/atl.py::_eval_def": {
+   "lines": 86,
+   "branches": 37
+  },
   "storygraph/story/atl.py::_from_props_ordered": {
    "lines": 155,
    "branches": 54
@@ -129,33 +141,21 @@
    "lines": 108,
    "branches": 40
   },
-  "storygraph/story/beat_model.py::fold_spec_arg_columns": {
-   "lines": 172,
-   "branches": 51
-  },
-  "storygraph/story/beat_model.py::from_row": {
-   "lines": 250,
-   "branches": 31
-  },
   "storygraph/story/beat_render.py::_render_menu_segments": {
    "lines": 159,
    "branches": 32
   },
-  "storygraph/story/control_branch.py::plan_control_branch": {
-   "lines": 177,
-   "branches": 45
+  "storygraph/story/beat_render.py::render_beats_to_rpy": {
+   "lines": 132,
+   "branches": 21
   },
   "storygraph/story/control_route.py::plan_control_edit": {
    "lines": 160,
    "branches": 42
   },
-  "storygraph/story/control_route.py::plan_control_route": {
-   "lines": 208,
-   "branches": 38
-  },
-  "storygraph/story/excel_export.py::export_beats_to_excel": {
-   "lines": 218,
-   "branches": 19
+  "storygraph/story/control_route.py::plan_control_init": {
+   "lines": 148,
+   "branches": 32
   },
   "storygraph/story/exits.py::label_exits_for_result": {
    "lines": 95,
@@ -165,10 +165,6 @@
    "lines": 157,
    "branches": 29
   },
-  "storygraph/story/generation_guard.py::write_generation": {
-   "lines": 241,
-   "branches": 40
-  },
   "storygraph/story/patcher.py::_verify_patch": {
    "lines": 157,
    "branches": 37
@@ -177,13 +173,17 @@
    "lines": 172,
    "branches": 64
   },
-  "storygraph/story/stage_snapshot.py::stage_snapshots": {
-   "lines": 202,
-   "branches": 28
-  },
   "storygraph/story/statement_registry.py::declare_attr_groups": {
    "lines": 146,
    "branches": 43
+  },
+  "storygraph/story/statement_registry.py::spec_columns": {
+   "lines": 102,
+   "branches": 36
+  },
+  "storygraph/story/xlsx_preserve.py::salvage_rows": {
+   "lines": 119,
+   "branches": 37
   },
   "storygraph/ui_qt/asset_picker.py::_build": {
    "lines": 190,
@@ -213,10 +213,6 @@
    "lines": 159,
    "branches": 1
   },
-  "storygraph/ui_qt/param_editor.py::__init__": {
-   "lines": 217,
-   "branches": 5
-  },
   "storygraph/ui_qt/stage_preview.py::_build": {
    "lines": 168,
    "branches": 6
@@ -229,9 +225,9 @@
    "lines": 142,
    "branches": 43
   },
-  "storygraph/ui_qt/window_graph_ops.py::open_project_path": {
-   "lines": 220,
-   "branches": 57
+  "storygraph/ui_qt/window_graph_ops.py::learn_custom_statement": {
+   "lines": 151,
+   "branches": 34
   },
   "storygraph/ui_qt/window_nodes.py::edge_delete_plan": {
    "lines": 106,
