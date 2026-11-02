@@ -519,6 +519,11 @@ def _scan_expressions(scan: Scan, known: dict, char_dirs: dict,
 
 def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
     """服装：字母从剧本注释里数（票数弱的留空，只出现一次的只提醒）。"""
+    # 引擎（`layeredimage` 的 outfit 组）认哪些词 —— 判"剧本里写的这身衣服，
+    # 引擎到底有没有"。空列表 = 这个项目没有可读的 layeredimage 声明，那就
+    # **无从判断**，一句都不多说（老项目行为不变）。
+    declared = {tag: [str(a) for a in ((groups or {}).get('outfit') or ())]
+                for tag, groups in (known or {}).items()}
     votes = defaultdict(Counter)
     for hit in hits:
         if hit.outfit:
@@ -547,6 +552,18 @@ def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
         else:
             taken[outfit] = (letter, count)
         label = f'剧本里出现 {count} 处'
+        allowed = declared.get(tag) or []
+        if allowed and outfit not in allowed:
+            # 剧本里写了、`layeredimage` 里没有 —— **行留着**（人是照它写剧本
+            # 的，藏起来等于骗人），但必须当场说清。真实项目 `sr_general` 就是
+            # 这么来的：`aa` 在 33 处 `show` 里当"普通"那身衣服用，注释也写着
+            # `# 表情A14`，可四个 `layeredimage` 里一个 `attribute aa` 都没有
+            # —— Ren'Py 8.4 的 lint 原话是 `'lan aa happy' is not an image`。
+            label += ' · ⚠ 引擎里没有这身衣服'
+            scan.notes.append(
+                f'{tag}：剧本里 {count} 处写了「{outfit}」，但 `layeredimage` 的 '
+                f'outfit 组里没有它（有：{"、".join(allowed)}）—— Ren\'Py 会报 '
+                f'"not an image"；要么补 `attribute {outfit}`，要么把剧本改掉')
         # 只提有分量的另一种说法（一次的大多是手误，列出来只会让人以为要处理）
         runner = [(k, v) for k, v in counter.most_common()[1:] if v >= 2]
         if runner:
@@ -554,12 +571,9 @@ def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
         scan.outfits.append({'char': tag, 'code': letter, 'attr': outfit,
                              'label': label})
     # 剧本里没出现过的服装：留一行空代号，等人照美术需求表填
-    declared = defaultdict(list)
-    for tag, groups in known.items():
-        declared[tag] = list(groups.get('outfit') or ())
     used = {(row['char'], row['attr']) for row in scan.outfits}
     for tag in sorted(declared):
-        for attr in declared[tag]:
+        for attr in declared.get(tag) or ():
             if (tag, attr) in used:
                 continue
             scan.outfits.append({'char': tag, 'code': '', 'attr': attr,

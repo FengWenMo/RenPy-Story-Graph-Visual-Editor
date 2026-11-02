@@ -280,6 +280,39 @@ class TestScanProject:
         assert not [r for r in scan.outfits if r['code']]
         assert any('证据太弱' in n for n in scan.notes), scan.notes
 
+    def test_剧本里出现但引擎没有的衣服要标出来(self, tmp_path):
+        """
+        真实项目 `sr_general` 的 `aa`：写在 33 处 `show` 里（注释也写着
+        `# 表情A14`），四个 `layeredimage` 里却一个 `attribute aa` 都没有 ——
+        Ren'Py 8.4 的 lint 原话是 `'lan aa happy' is not an image`。
+
+        用户 2026-11-02 的原话："这个 aa 从未被注册过……它哪儿来的 aa 映射？"
+        病根：表是**扫剧本注释**扫出来的，不是"注册"出来的。所以行要留着
+        （人家就是这么写的），但必须当场说清引擎不认 —— 否则人只会疑惑
+        "为什么卡片上的属性格里没有它"。
+        """
+        scan = SC.scan_project(_project(tmp_path))
+        row = next(r for r in scan.outfits if r['attr'] == 'aa')
+        assert row['code'] == 'A', row          # 字母照注释保留，不偷偷抹掉
+        assert '引擎里没有这身衣服' in row['label'], row
+        assert any('not an image' in n and 'aa' in n for n in scan.notes), \
+            scan.notes
+
+    def test_引擎认得的衣服不加警告(self, tmp_path):
+        """`layeredimage` 里有 `attribute aa` 的项目：一个字都不许多说。"""
+        text = LAYERED + ('        attribute aa:\n            x\n')
+        game = tmp_path / 'game'
+        game.mkdir()
+        (game / 'definitions.rpy').write_text(text, encoding='utf-8')
+        (game / 'c.rpy').write_text('# 表情A7\nshow ye aa care\n'
+                                   '# 表情A7\nshow ye aa care\n',
+                                   encoding='utf-8')
+        scan = SC.scan_project(str(tmp_path))
+        row = next(r for r in scan.outfits if r['attr'] == 'aa')
+        assert row['code'] == 'A', row
+        assert '引擎里没有' not in row['label'], row
+        assert not [n for n in scan.notes if 'not an image' in n], scan.notes
+
     def test_表情表里没有的号会补一行并提醒(self, tmp_path):
         script = '# 表情A20\nshow ye aa care\n# 表情A20\nshow ye aa care\n'
         scan = SC.scan_project(_project(tmp_path, scripts={'c.rpy': script}))
