@@ -184,7 +184,10 @@ class TestPreflight:
         def boom(name, *a, **kw):
             raise OSError(f'找不到 {name}')
 
-        monkeypatch.setattr(ctypes, 'WinDLL', boom)
+        # `raising=False`：POSIX 上 `ctypes` 根本没有 `WinDLL` 这个属性，
+        # 默认的 setattr 会先抛 AttributeError（CI 就是这么红的）。代码里
+        # 那条检查本身有平台闸门，打不进去只是"这一支不生效"。
+        monkeypatch.setattr(ctypes, 'WinDLL', boom, raising=False)
         res = preflight.check_gui_system_dlls()
         if sys.platform.startswith('win'):
             assert res['ok'] is False

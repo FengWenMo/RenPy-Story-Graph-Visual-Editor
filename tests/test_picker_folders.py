@@ -70,7 +70,9 @@ def _registry():
     return reg
 
 
-PROJECT = Path(r'D:\千连万理\renpytest\sr_general')   # 只为"去项目目录名"那一条
+# 只为"去项目目录名"那一条。⚠ 用正斜杠：`Path(r'D:\…\sr_general').name`
+# 在 POSIX 上不是 `sr_general`（整串没有 `/`），CI 上这条就会返回完整路径。
+PROJECT = Path('D:/千连万理/renpytest/sr_general')
 
 
 # ==================================================================

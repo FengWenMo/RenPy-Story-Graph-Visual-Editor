@@ -108,7 +108,11 @@ class EnginePreviewError(RuntimeError):
         self.hint = str(hint or '')
 
     def describe(self) -> str:
-        return f'{self}{("\\n" + self.hint) if self.hint else ""}'
+        # ⚠ 反斜杠不能出现在 f-string 的 `{}` 里 —— 那是 PEP 701（3.12+）。
+        # 3.10/3.11 会在 **import 这一行**就 SyntaxError，整个模块连带炸掉
+        # （CI 矩阵最低是 3.10）。拼到外面写，输出逐字不变。
+        tail = '\\n' + self.hint if self.hint else ''
+        return f'{self}{tail}'
 
 
 @dataclass(frozen=True)
@@ -559,6 +563,12 @@ def _make_junction(link: Path, target: Path) -> bool:
     失败返回 False，调用方退化成复制 —— "建不出 junction"不该让预览点不起来
     （跨盘/网络盘、被安全软件拦，都可能；复制慢但结果一样）。
     """
+    if os.name != 'nt':
+        # junction 是 Windows 独有：`cmd.exe` 和 `mbcs` 在 POSIX 上直接抛
+        # LookupError（不是 OSError，下面那个 except 接不住，整个镜像就炸了）。
+        # 返回 False 让调用方走**本来就有**的兜底 —— `mirror_project` 退化成
+        # 逐层复制，结果一样，只是慢一点。
+        return False
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.exists() or link.is_symlink():
         _remove_path(link)

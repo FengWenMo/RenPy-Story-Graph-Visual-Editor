@@ -400,7 +400,8 @@ class TestEmptyCard:
 #  P2-2 · 提示 vs 拦截
 # ======================================================================
 class TestWarningsAreNotBlocking:
-    def test_outside_build_dir_is_a_warning_not_a_blocker(self, tmp_path):
+    def test_outside_build_dir_is_a_warning_not_a_blocker(self, tmp_path,
+                                                          engine_sdk):
         """
         产物写在 game/ 里只是**提示**（要挪位置），不是这次拒写的原因。
         真原因（引擎读不了产物）必须单独看得见。

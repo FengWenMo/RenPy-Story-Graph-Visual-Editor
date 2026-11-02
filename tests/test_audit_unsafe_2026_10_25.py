@@ -99,8 +99,11 @@ class TestChoicePointAppend:
         assert res.get('ok'), res
         raw = cp.read_bytes()
         assert raw.startswith(b'\xef\xbb\xbf'), 'BOM 被丢了'
+        bare_lf = raw.count(b'\n') - raw.count(b'\r\n')
         assert raw.count(b'\n') == raw.count(b'\r\n'), (
-            f'追加后出现裸 LF：{raw.count(b"\\n") - raw.count(b"\\r\\n")} 处')
+            # 反斜杠不能写在 f-string 的 `{}` 里（PEP 701 是 3.12+），
+            # 先在表达式外面算好 —— 3.10/3.11 上这行是 SyntaxError。
+            f'追加后出现裸 LF：{bare_lf} 处')
         assert raw.startswith(before), '原有内容不是"逐字节保留"'
         assert '选项A' in raw.decode('utf-8-sig')
 

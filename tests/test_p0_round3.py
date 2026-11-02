@@ -244,7 +244,7 @@ class TestMenuCaptionOnHeadLine:
         assert res.text == want, repr(res.text)
         assert res.changed_lines == 1
 
-    def test_export_is_refused_by_the_engine_gate(self, tmp_path):
+    def test_export_is_refused_by_the_engine_gate(self, tmp_path, engine_sdk):
         """改完写盘时被引擎闸门拦下（这种写法引擎读不了）—— 说真话，不静默写坏。"""
         session, path = _project(tmp_path, SRC_MENU_HEAD_CAPTION)
         _submit(session, next(i for i, b in enumerate(session.beats)

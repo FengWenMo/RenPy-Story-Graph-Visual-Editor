@@ -159,6 +159,25 @@ def write_rpy(tmp_path):
     return _write
 
 
+@pytest.fixture
+def engine_sdk():
+    """
+    「引擎闸门」类判据的前置：**本机没有 Ren'Py SDK 就 skip**。
+
+    为什么要 skip 而不是硬断言：门禁把产物丢给真 SDK 的 `lint` 才会产出
+    `ENGINE_PARSE_ERROR`；找不到 SDK 时它按设计诚实报 `ran=False`
+    （见 `pipeline/engine_lint.py` 的三条纪律），门禁于是**不产生**那条
+    block。CI 的 ubuntu runner 上没有 SDK —— 硬断言只会红，而且那是环境
+    差异，不是回归。真机上有 SDK 时这条判据照旧全跑。
+    """
+    try:
+        from storygraph.pipeline.engine_collect import find_sdk
+        find_sdk()                      # 找不到会抛（它不猜），抛了就是没有
+    except Exception:                   # noqa: BLE001 - 没有 SDK 的任何形态都算没有
+        pytest.skip('本机没有 Ren\'Py SDK —— 引擎 lint 跑不起来（ran=False）')
+    return True
+
+
 class NotifyCalls:
     """
     后端通知端口的捕获器（见 `storygraph.app.notify`）。
