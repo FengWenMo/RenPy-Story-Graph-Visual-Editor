@@ -52,7 +52,8 @@ EDITOR_MOD = PKG / 'app' / 'editor.py'
 BLOCKS = {
     'session_table': (
         'storygraph.app.session_table', 'TableSessionMixin', (
-            'load', 'fields', 'cards', '_effective_positions', 'list_entry',
+            'load', 'fields', 'cards', '_snapshot_state', 'stage_state',
+            'list_entry',
             'inherited_hint', 'stage_digest_text', 'speaking_card_index',
             'apply', 'set_speaker', 'remove_sprite',
             'snapshot', 'restore', 'save',

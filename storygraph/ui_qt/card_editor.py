@@ -67,6 +67,10 @@ class BeatCardEditor(QWidget):
     save_requested = Signal()
     undo_requested = Signal()
 
+    #: 这两格在**这一拍没写**时可以从"当前舞台"沿用过来显示（改了才写回）。
+    #: 语音刻意不在里面：它是逐句的，沿用上一句的语音没有意义。
+    INHERITED_FIELDS = (('Scene', '背景'), ('BGM', '音乐'))
+
     def __init__(self, symbols=None, loader=None, parent=None,
                  on_pick_image=None, on_pick_asset=None,
                  on_pick_image_result=None, on_open_mapping=None,
@@ -91,6 +95,11 @@ class BeatCardEditor(QWidget):
         self._stage_loaded = ''
         #: 载入时的整份字段（判断"表单被改脏了没有"，纯显示用）。
         self._loaded_fields: dict = {}
+        #: `{字段名: 沿用来的值}`：这一拍没写、从"当前舞台"填进来的显示值。
+        #: 没改过就**不写回**（见 `_drop_inherited`）。
+        self._inherited_fields: dict = {}
+        #: 背景/音乐/语音三格的标题 QLabel（沿用时要改成「背景（沿用上一拍）」）
+        self._asset_caps: dict = {}
         self._loading = False
         #: 「语句参数」那一组的控件：`{动态列名: 控件}`（跟着这一拍的语句走，
         #: 没有参数就整组隐藏）。见 `set_spec_args`。
@@ -446,6 +455,7 @@ class BeatCardEditor(QWidget):
                 box.setSpacing(2)
                 cap = QLabel(label)
                 cap.setProperty('role', 'caption')
+                self._asset_caps[name] = cap
                 box.addWidget(cap)
                 line = QHBoxLayout()
                 line.setSpacing(T.SPACE['xs'])
@@ -1391,7 +1401,16 @@ class BeatCardEditor(QWidget):
         return bool(self._adv_open)
 
     def sprite_cards(self) -> list:
-        return self._grid.cards()
+        """
+        能**写回这一拍**的立绘卡。
+
+        `inherited=True` 的是"台上沿用着的"（`session.cards()` 按舞台快照补的
+        只读卡）—— 用户没动它就不能写回，否则"点一下保存"会把上一拍的人
+        物/表情整个物化进这一拍的 `show` 里（那不是他改了，是界面替他改了）。
+        在卡片上改一次表情/位置，`SpriteCardWidget` 就会把 `inherited` 清掉，
+        它才出现在这里。
+        """
+        return [it for it in self._grid.cards() if not it.get('inherited')]
 
     def prefetch_sprites(self, items: list):
         """把"之后几拍要显示的立绘"先解进缩略图缓存（见 `SpriteGridWidget.prefetch`）。"""
@@ -1405,7 +1424,7 @@ class BeatCardEditor(QWidget):
     EXTRA_WIDGETS = ('condition',)
 
     def load_fields(self, fields: dict, sprite_items: list,
-                    source_lines=None):
+                    source_lines=None, inherited: dict = None):
         """
         把一拍的内容填进卡片。
 
@@ -1415,6 +1434,17 @@ class BeatCardEditor(QWidget):
         `source_lines=(first, last)`：这一拍在源 `.rpy` 里的行号范围 ——
         给 CodeBlock 的**行号栏**用（用户要"精确到行"，好回编辑器里定位）。
         不给（新建卡片 / 单测）→ 行号退回 1/2/3…
+
+        `inherited`：这一拍**屏幕上生效**、但**不是这一拍写的**舞台值
+        （`app.session_table.stage_state(idx)` 的结果）。用户 2026-11-02：
+
+        > 当前舞台是有的，但是当前卡片却没有显示现在的 BGM 等东西呢……？
+        > 把当前舞台的持续状态填充到前端（后端自己知道这一列跟前面一样，
+        > 不做任何改变就行，只有确实已经改了，才再做真正的程序导出）
+
+        所以：**背景/音乐这一拍没写 → 填上沿用的值**，并在标题上写明
+        「沿用上一拍」；`collect_fields()` 会把"没改过的沿用值"还原成空串，
+        后端照样只写这一拍真有的东西。
         """
         self._loading = True
         try:
@@ -1424,6 +1454,7 @@ class BeatCardEditor(QWidget):
             self._flow_bar.setVisible(False)
             for name in self._all_names():
                 self._set_value(name, fields.get(name, ''))
+            self._fill_inherited_fields(fields, inherited)
             self._grid.load(sprite_items)
             _code = self._widgets.get('CodeBlock')
             if isinstance(_code, CodeEditor):
@@ -1431,6 +1462,10 @@ class BeatCardEditor(QWidget):
                 _code.set_source_lines(first, last)
             self._loaded_fields = {n: str(fields.get(n, '') or '')
                                    for n in self._all_names()}
+            # **填进去的"沿用"值也算基线**：它们显示在控件里，但这一拍没写。
+            # 不并进基线的话，翻页提交时"控件里有 black、字段里没有"会被判成
+            # "表单被改了"（关窗就会问"你改了 X 拍"，而那只是翻了一章）。
+            self._loaded_fields.update(self._inherited_fields)
             # Stage 那一格的原文单独记一份（判"手改过没有"要用它）
             self._stage_loaded = str(fields.get('Stage', '') or '')
             # 舞台块（立绘 / 背景 / 音乐 / 语音）**常显**（2026-10-29）：
@@ -1467,7 +1502,49 @@ class BeatCardEditor(QWidget):
         # 控制流条也一直可见（只在控制流拍出现），所以始终写回。
         out.update(self.flow_fields())
         self._flow_code_synced(out)
+        self._drop_inherited(out)
         return out
+
+    # ---------- 「沿用上一拍」的显示值（改了才写） ----------
+
+    def _fill_inherited_fields(self, fields: dict, inherited: dict = None) -> None:
+        """
+        这一拍**没写**的背景/音乐 → 填上屏幕上沿用的值（只显示）。
+
+        值本身要和"真写了"区分开：标题后面加「沿用上一拍」，tooltip 写清
+        "这一拍没写它"。改动任何一格之后，它就成了这一拍的真值
+        （`_drop_inherited` 只清掉**没改过**的那些）。
+        """
+        self._inherited_fields = {}
+        data = inherited if isinstance(inherited, dict) else {}
+        for name, label in self.INHERITED_FIELDS:
+            own = str(fields.get(name) or '').strip()
+            value = str(data.get(name) or '').strip()
+            cap = self._asset_caps.get(name)
+            if own or not value:
+                if cap is not None:
+                    cap.setText(label)
+                    cap.setToolTip('')
+                continue
+            self._set_value(name, value)
+            self._inherited_fields[name] = value
+            if cap is not None:
+                cap.setText(f'{label}（沿用上一拍）')
+                cap.setToolTip(
+                    f'这一拍**没写**{label} —— 画面沿用 `{value}`。\n'
+                    '直接改它就等于「这一拍换掉它」（会真的写进这一拍）；'
+                    '不改则一个字都不写。')
+
+    def _drop_inherited(self, out: dict) -> None:
+        """
+        填进来的"沿用"值：**没改过就不写回**（后端只写这一拍真有的东西）。
+
+        判据是"控件里的值 == 载入时填的沿用值"。用户一改就不相等 → 当这一拍
+        的真值交出去（这才是"确实已经改了才导出"）。
+        """
+        for name, value in list((self._inherited_fields or {}).items()):
+            if str(out.get(name) or '').strip() == value:
+                out[name] = ''
 
     # ---------- 保存 / 撤销 相关的状态 ----------
 

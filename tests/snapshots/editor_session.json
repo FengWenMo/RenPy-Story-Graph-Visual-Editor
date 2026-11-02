@@ -629,33 +629,181 @@
      "order_index": 0,
      "position": "right",
      "tag": "mary"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 1,
+     "position": "",
+     "tag": "ling"
     }
    ]
   ],
   [
    "cards[3]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "smile",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited": true,
+     "inherited_at": "right",
+     "order_index": 1,
+     "position": "",
+     "tag": "mary"
+    }
+   ]
   ],
   [
    "cards[4]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "smile",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited": true,
+     "inherited_at": "right",
+     "order_index": 1,
+     "position": "",
+     "tag": "mary"
+    }
+   ]
   ],
   [
    "cards[5]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "smile",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited": true,
+     "inherited_at": "right",
+     "order_index": 1,
+     "position": "",
+     "tag": "mary"
+    }
+   ]
   ],
   [
    "cards[6]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "smile",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited": true,
+     "inherited_at": "right",
+     "order_index": 1,
+     "position": "",
+     "tag": "mary"
+    }
+   ]
   ],
   [
    "cards[7]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "i11",
+     "expression": "oh",
+     "extra_rows": [],
+     "image": "ling oh",
+     "inherited": true,
+     "inherited_at": "i11",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    },
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "right",
+     "expression": "smile",
+     "extra_rows": [],
+     "image": "mary smile",
+     "inherited": true,
+     "inherited_at": "right",
+     "order_index": 1,
+     "position": "",
+     "tag": "mary"
+    }
+   ]
   ],
   [
    "cards[8]",
@@ -678,22 +826,78 @@
   [
    "cards[9]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "leftish",
+     "expression": "happy",
+     "extra_rows": [],
+     "image": "ling happy",
+     "inherited": true,
+     "inherited_at": "leftish",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    }
+   ]
   ],
   [
    "cards[10]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "leftish",
+     "expression": "happy",
+     "extra_rows": [],
+     "image": "ling happy",
+     "inherited": true,
+     "inherited_at": "leftish",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    }
+   ]
   ],
   [
    "cards[11]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "leftish",
+     "expression": "happy",
+     "extra_rows": [],
+     "image": "ling happy",
+     "inherited": true,
+     "inherited_at": "leftish",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    }
+   ]
   ],
   [
    "cards[12]",
    "ok",
-   []
+   [
+    {
+     "at": "",
+     "clause": "",
+     "effective_at": "leftish",
+     "expression": "happy",
+     "extra_rows": [],
+     "image": "ling happy",
+     "inherited": true,
+     "inherited_at": "leftish",
+     "order_index": 0,
+     "position": "",
+     "tag": "ling"
+    }
+   ]
   ],
   [
    "frames",

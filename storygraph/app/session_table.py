@@ -1473,11 +1473,20 @@ class TableSessionMixin:
         所以这里把**当前生效**的位置也算出来给前端显示（带"继承"标记）；
         写回仍然只写 `position`/`at` —— 用户没碰那一格就不会把继承值
         物化到这一拍（那是"改了才写"的底线）。
+
+        **整张卡也可能是"沿用"的**（2026-11-02）：这一拍没写 `show`，但台上
+        站着人（上一拍 show 的）—— 那些卡由 `stage_state(idx)` 补进来，
+        带 `inherited=True`。前端据此：显示它、允许改表情/位置，
+        但**改之前不写回**（`ui_qt.card_editor.sprite_cards` 会滤掉）。
         """
         if not self.has(idx):
             return []
         rows = B.beat_sprite_rows(self.beats[idx], self.symbols)
-        effective = self._effective_positions(idx)
+        # 舞台快照算**一次**：位置沿用（`effective_at`）与"台上还有谁"
+        # （`inherited` 卡）用的是同一份 `state['actors']`。
+        state = self.stage_state(idx)
+        effective = {str(a.get('spec') or ''): str(a.get('at') or '')
+                     for a in state.get('actors') or ()}
         items = []
         for card in B.group_sprites_by_tag(rows):
             it = dict(card.get('active') or {})
@@ -1489,25 +1498,88 @@ class TableSessionMixin:
             it['effective_at'] = eff
             it['inherited_at'] = '' if own else (eff or '')
             items.append(it)
+        # **把台上"沿用"的立绘也摆出来**（2026-11-02 用户："当前舞台是有的，
+        # 但是当前卡片却没有显示"）：这一拍没写 `show` 的，按快照补成
+        # **只读卡**（`inherited=True`）—— 看得见现在台上是谁、什么表情，
+        # 点一下 chip 就能改；**没改就不写回**（`card_editor.sprite_cards`
+        # 会把 `inherited` 的滤掉，与"位置继承"同一条底线）。
+        items.extend(self._inherited_cards(items, state))
         return items
 
-    def _effective_positions(self, idx: int) -> dict:
-        """
-        这一拍**屏幕上真正生效**的立绘位置：`{image: at}`。
+    def _inherited_cards(self, items: list, state: dict) -> list:
+        """这一拍没写、但台上站着的角色 → 只读卡（`inherited=True`）。"""
+        own_tags = {str(it.get('tag') or '').strip() for it in items}
+        out = []
+        for k, actor in enumerate((state or {}).get('actors') or ()):
+            tag = str(actor.get('image') or '').strip()
+            if not tag or tag in own_tags:
+                continue
+            at = str(actor.get('at') or '').strip()
+            out.append({
+                'tag': tag,
+                'image': str(actor.get('spec') or tag),
+                'expression': str(actor.get('expression') or ''),
+                'position': '',
+                'at': '',
+                'clause': '',
+                'extra_rows': [],
+                'order_index': len(items) + k,
+                'inherited': True,
+                'effective_at': at,
+                'inherited_at': at,
+            })
+        return out
 
-        来自 `snapshot_rows`（与预览、与 Excel 的舞台快照表同源）——
-        那里按 Ren'Py 的语义累积：`at` 不写就沿用上一次。
+    def stage_state(self, idx: int) -> dict:
+        """
+        这一拍**屏幕上生效**的舞台状态（只读；给卡片把"沿用"的部分填出来）。
+
+        返回::
+
+            {'Scene': 'black', 'BGM': 'bgm/夜晚.mp3',
+             'actors': [{'image': 'lan', 'spec': 'lan agreeable chuckle',
+                         'expression': 'agreeable chuckle', 'at': 'i21'}]}
+
+        真源是 `story.stage_snapshot.snapshot_rows`（与 Excel 的舞台快照表、
+        与「当前舞台」摘要**同一个**累积算法）—— 前端不自己再算一遍。
+
+        ⚠ 这些值**只用于显示**：写回仍然只写这一拍真有的东西（见
+        `ui_qt.card_editor.load_fields(inherited=...)` 与
+        `ui_qt.sprite_grid` 里"改了才算这一拍的"那两条）。
+        """
+        if not self.has(idx):
+            return {}
+        state = self._snapshot_state(idx)
+        actors = []
+        for spec, at in state.get('actors') or ():
+            words = str(spec or '').split()
+            if not words:
+                continue
+            actors.append({'image': words[0], 'spec': ' '.join(words),
+                           'expression': ' '.join(words[1:]),
+                           'at': str(at or '')})
+        return {'Scene': str(state.get('scene') or ''),
+                'BGM': str(state.get('music') or ''),
+                'actors': actors}
+
+    def _snapshot_state(self, idx: int) -> dict:
+        """
+        这一拍在舞台快照里的 `state`（`{scene, actors, music, …}`；算不出 = `{}`）。
+
+        ⚠ 这里是**唯一**读 `snapshot_rows` 的地方（`cards()` 的位置沿用与
+        "台上还有谁"都从它取），而快照要遍历整本剧本 —— 一张卡只算一次。
         """
         try:
             from storygraph.story.stage_snapshot import snapshot_rows
-            rows = snapshot_rows(self.beats)
+            rows = snapshot_rows(self.beats,
+                                 initial_state=self.stage_initial_state())
             if idx >= len(rows):
                 return {}
-            actors = (rows[idx].get('state') or {}).get('actors') or []
-            return {str(img): str(at or '') for img, at in actors}
+            return dict((rows[idx] or {}).get('state') or {})
         except Exception as e:                     # noqa: BLE001
-            swallow('app.session_table._effective_positions', e)
+            swallow('app.session_table._snapshot_state', e)
             return {}
+
     def list_entry(self, idx: int) -> dict:
         """
         章节列表要用的一行摘要（前缀图标 / 说话人 / 台词预览）。

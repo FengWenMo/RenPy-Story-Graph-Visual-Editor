@@ -436,6 +436,8 @@ class SpriteCardWidget(QFrame):
         close.setStyleSheet('padding:0;border-radius:10px;font-size:10px;')
         close.clicked.connect(lambda: self.remove_requested.emit(self))
         top.addWidget(close, 0, Qt.AlignTop | Qt.AlignRight)
+        #: 「沿用」卡不给删（这一拍没写过它，删它该走 `hide`）—— 见 `refresh`
+        self._close_btn = close
         lay.addLayout(top)
 
         self._name = QLabel()
@@ -719,6 +721,11 @@ class SpriteCardWidget(QFrame):
     def refresh(self):
         spec = str(self.item.get('image') or '').strip()
         tag = spec.split()[0] if spec else ''
+        # —— **"沿用"卡**：这一拍没写它、人还在台上（`session.cards()` 补的）。
+        # 照常显示，标题写「（沿用）」、✕ 隐藏；改一下就归这一拍。
+        is_inherited = bool(self.item.get('inherited'))
+        if hasattr(self, '_close_btn'):
+            self._close_btn.setVisible(not is_inherited)
         # —— 卡片标题 ——
         #
         # 有美术代号就显示 **`lan A3`**（用户 2026-11-02："你根本看不出来是
@@ -730,12 +737,15 @@ class SpriteCardWidget(QFrame):
         # 会去读项目的 `layeredimage`，一张卡算两遍不值当。
         rows = self._slot_rows()
         code, code_tip = self._art_code(spec, rows) if spec else ('', '')
-        self._name.setText(f'{tag} {code}' if code
-                           else (spec or '（点击换图）'))
-        self._name.setToolTip(
-            (f'引擎里写的是：`{spec}`'
-             + (f'\n\n{code_tip}\n（这张卡在脚本里仍然写引擎写法）' if code_tip
-                else '')) if spec else '')
+        base_text = f'{tag} {code}' if code else (spec or '（点击换图）')
+        self._name.setText(base_text + ('（沿用）' if is_inherited else ''))
+        _tip = ((f'引擎里写的是：`{spec}`'
+                 + (f'\n\n{code_tip}\n（这张卡在脚本里仍然写引擎写法）' if code_tip
+                    else '')) if spec else '')
+        if is_inherited:
+            _tip += ('\n\n**这一拍没写它**：人是上一拍 show 上来的（沿用）。\n'
+                     '改一下表情或位置，它才会写进这一拍；不改则一字不写。')
+        self._name.setToolTip(_tip)
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
         inherited = str(self.item.get('inherited_at') or '').strip()
@@ -946,6 +956,7 @@ class SpriteCardWidget(QFrame):
             return
         self.item['image'] = ' '.join(parts)
         self.item['expression'] = ' '.join(parts[1:])
+        self.item.pop('inherited', None)   # 动了它就归这一拍（看见 ≠ 写过）
         self._pick_note = self._pick_note_tip = ''   # 换过图了，上一条"换过"的说明作废
         self.refresh()
         if self._on_change is not None:
@@ -985,6 +996,7 @@ class SpriteCardWidget(QFrame):
         # 顺序很重要：候选表为空时也要能固定，所以这一支放在"没有候选就返回"之前。
         if cur and cur not in choices:
             self.item[field] = cur
+            self.item.pop('inherited', None)   # 动了它就归这一拍（看见 ≠ 写过）
             self.refresh()
             if self._on_change is not None:
                 self._on_change(self)
@@ -1022,6 +1034,7 @@ class SpriteCardWidget(QFrame):
         （`test_ui_qt` 当场抓到）。
         """
         self.item[field] = value
+        self.item.pop('inherited', None)   # 动了它就归这一拍（看见 ≠ 写过）
         if field == 'expression':
             tag = str(self.item.get('image') or '').split()
             if tag:

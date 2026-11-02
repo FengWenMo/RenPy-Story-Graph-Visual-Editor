@@ -1450,7 +1450,8 @@ class CardPageMixin:
         self._panel.load_fields(
             self._session.fields(idx), self._session.cards(idx),
             source_lines=(getattr(_beat, 'src_first', None),
-                          getattr(_beat, 'src_last', None)))
+                          getattr(_beat, 'src_last', None)),
+            inherited=self._session.stage_state(idx))
         self._sync_spec_args(idx)
         # 说话人下拉：屏幕上是人话（「大爷」），写回 beat 的仍是 tag（`DY`）
         self._panel.set_speakers(
@@ -1883,8 +1884,13 @@ class CardPageMixin:
         # 「背景」那一格也能写出一条 `scene`（从"没有背景"变成"有背景"）——
         # 那是换景，会清台。基线要在 `reset_baseline()` **之前**读
         # （保存成功后基线会被改成新值，再看就永远是"没变"）。
+        #
+        # ⚠ 判据是**这一拍自己有没有写过 `scene`**，不是"表单载入时那格是不是空的"
+        # （2026-11-02）：表单现在会把台上沿用的背景填出来（`inherited`），
+        # 拿它当基线的话，"这一拍原本没有背景、用户新写了一条"会被误判成
+        # "换图" → 那句"带走了 N 个立绘"就再也不说了。
         scene_loaded = _scene_cell_image(
-            (getattr(self._panel, '_loaded_fields', None) or {}).get('Scene'))
+            getattr(self._session.beats[idx], 'scene', ''))
         scene_now = _scene_cell_image(self._panel.collect_fields().get('Scene'))
         flow_change = self._panel.flow_change()
         if flow_change:

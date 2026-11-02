@@ -3246,15 +3246,21 @@ class TestAddingASpriteReachesTheFile:
         # 2026-10-23：`export_script` 只在**卡片页**才提交隐藏表单
         # （结构页的 Ctrl+S 现在也会走到导出，不许写用户看不见的卡片）。
         window._set_page(window.PAGE_CARD)
-        # `ch01_class` 那一拍：只有一句台词，没有任何立绘（mary 从没登场过）
+        # `ch01_class` 那一拍：只有一句台词，**这一拍自己没写过立绘**
+        # （mary 从没登场过）。⚠ 2026-11-02 起台上沿用的 `ling happy` 会作为
+        # **只读的"沿用"卡**摆出来（用户："当前舞台是有的，卡片却是空的"）——
+        # 所以这里数的是"这一拍自己的卡"。
         idx = next(i for i, b in enumerate(window._session.beats)
                    if b.label == 'ch01_class' and b.kind == 'say')
         window._show_index(idx)
         # 「＋ 添加立绘」的取图回调打桩（真跑会弹模态框，offscreen 下会卡住）
         _stub_pick_image(monkeypatch, window._panel._grid, 'mary smile')
         window._panel._grid._on_add()
-        assert [c.item.get('image') for c in window._panel._grid._cards] == \
-            ['mary smile'], '加了立绘却没进网格'
+        own = [c.item.get('image') for c in window._panel._grid._cards
+               if not c.item.get('inherited')]
+        assert own == ['mary smile'], f'加了立绘却没进网格：{own}'
+        assert any(c.item.get('inherited') for c in window._panel._grid._cards), \
+            '台上沿用的立绘该显示成"沿用"卡'
 
         target = Path(window._file_path)
         self._stub_dialogs(monkeypatch, target)
@@ -3267,6 +3273,9 @@ class TestAddingASpriteReachesTheFile:
             '加了立绘，导出后文件里却没有这条 show：\n'
             + '\n'.join(ln for ln in text.splitlines()
                         if 'show ' in ln or 'label ch01' in ln))
+        # **沿用下来的那一张不许被物化进这一拍**（这跟"加了立绘"是两件事）
+        assert 'ling happy' not in str(
+            getattr(window._session.beats[idx], 'show', '') or '')
 
     def test_a_multi_attribute_sprite_is_not_renamed(self, window, project,
                                                      monkeypatch):

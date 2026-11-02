@@ -342,6 +342,12 @@ class FieldWriter:
     def _apply_sprite_cards(self, b, cards) -> None:
         """立绘卡 → `show` / `at`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
         if cards is not None:
+            # **"沿用"来的卡不写回**（2026-11-02）：`session.cards(idx)` 会把台上
+            # 沿用的角色也摆出来（`inherited=True`，让人看得见现在是谁、能改表情）。
+            # 那些是**看见**不是**写过** —— 放它们进来，"点一下保存"就会把上一拍
+            # 的 `show` 物化进这一拍（用户没改任何东西却多了几行）。
+            # 卡片改过一次，`SpriteCardWidget._mark_local` 就会清掉这个标记。
+            cards = [c for c in (cards or []) if not (c or {}).get('inherited')]
             # **立绘写回的唯一出口**（2026-10-24 修 P0，见 `write_back_show`）。
             #
             # 从前这里直接 `b.show = cards_to_show(cards)` —— **整体替换**。
