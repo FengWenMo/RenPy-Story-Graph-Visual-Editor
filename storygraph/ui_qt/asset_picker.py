@@ -230,7 +230,8 @@ def identity_map(registry, project_root, *, mapping=None) -> dict:
                 row, relpath=str(row.get('Path') or ''),
                 known_tags=ctx['known_tags'], known_chars=ctx['known_chars'],
                 mapping=ctx['mapping'], rows=images,
-                copy_index=ctx.get('copy_index'))
+                copy_index=ctx.get('copy_index'),
+                sprite_words=ctx.get('sprite_words') or {})
         except Exception as e:                # noqa: BLE001 - 单行失败不影响别的
             swallow('ui_qt.asset_picker.identity_map.row', e)
     return idents

@@ -1427,7 +1427,8 @@ def categorize_assets(engine, asset_types=None, limit: int = 3000) -> dict:
         identities = I.resolve_images(
             image_rows, known_tags=ctx['known_tags'],
             known_chars=ctx['known_chars'], mapping=ctx['mapping'],
-            project_root=project_root, copy_index=ctx['copy_index'])
+            project_root=project_root, copy_index=ctx['copy_index'],
+            sprite_words=ctx.get('sprite_words') or {})
     except Exception as e:                      # noqa: BLE001 - 分组坏了仍要能选
         swallow('app.beats.categorize_assets.identity', e)
         identities = {}

@@ -434,7 +434,22 @@ class _Hints:
         self._idents = None
         self._name_hits = None
         self._copy_index = None
+        self._words = None
         self._display = _display_index(known_chars)
+
+    @property
+    def words(self) -> dict:
+        """
+        项目 `layeredimage` 的属性词表（`{tag: {图片文件名: 属性名}}`）。
+
+        为什么要它：`show qing stare` 里 `stare` 只是文件名，项目声明里
+        这条属性叫 `curious` —— 提示里必须写**引擎认的那个词**，否则
+        "照着提示改"改出来还是错。读不出来 = `{}`（退回按文件名写）。
+        """
+        if self._words is None:
+            from storygraph.assets import asset_identity as AI
+            self._words = AI.declared_sprite_words(self.project_root)
+        return self._words
 
     # -- 解析（懒） --------------------------------------------------
 
@@ -453,7 +468,8 @@ class _Hints:
                 self.rows, known_tags=self.known_tags,
                 known_chars=self.known_chars, mapping=self.mapping,
                 project_root=self.project_root,
-                copy_index=self._copy_index)
+                copy_index=self._copy_index,
+                sprite_words=self.words)
             for row in self.rows:
                 ident = self._idents.get(AI.asset_id_of(row))
                 if ident is None or ident.showable:
@@ -500,7 +516,8 @@ class _Hints:
             real_ident = AI.resolve_image(
                 real, known_tags=self.known_tags,
                 known_chars=self.known_chars, mapping=self.mapping,
-                rows=self.rows, copy_index=self._copy_index or None)
+                rows=self.rows, copy_index=self._copy_index or None,
+                sprite_words=self.words)
             return AI.spec_for_identity(real_ident, real)
         except Exception as e:                  # noqa: BLE001
             swallow('app.stage_identity_guard.real_sprite_spec', e)

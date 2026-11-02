@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from storygraph.core.safeguard import swallow
 
@@ -147,6 +147,9 @@ class LayerModel:
     poses: dict = field(default_factory=dict)       # tag -> ['', 'a', 'b']
     pose_labels: dict = field(default_factory=dict)  # 'ye|base_handdown' -> '泳装'
     warnings: list = field(default_factory=list)
+    #: 反查表 `{tag: {图片 stem: 声明的属性名}}`（见 `attribute_words`）。
+    #: 有属性的 tag 都在表里（值可能是 `{}` = 一个属性都展不开）。
+    words: dict = field(default_factory=dict)
 
     def has(self, tag: str) -> bool:
         return str(tag or '') in self.images
@@ -1004,6 +1007,73 @@ def parse_pose_tables(project_root, tags, images=None, declared=None) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def attribute_words(model: 'LayerModel') -> dict:
+    """
+    `layeredimage` 的**反查表**：`{tag: {图片文件 stem: 声明的属性名}}`。
+
+    为什么要有这张表（2026-11-02 用户：`qing` 明明有立绘，工具却说
+    "没有这个角色"、预览图也导不进来）：属性名和图片文件名**可以不是同一个词**——
+
+        layeredimage qing:
+            image_format 'images/characters/qing/{image}.png'
+            attribute curious:
+                'stare'                 # 属性叫 curious，图叫 stare.png
+
+    `show qing stare` 引擎不认（`stare` 只是那张图的文件名），
+    `show qing curious` 才是这条声明里的属性名。于是把每个属性的 displayable
+    真展开一遍，记下"这张图该写成哪个属性词"。
+
+    同一张图被多个属性用到时（`attribute base default: 'normal'` 与
+    `attribute abuse: 'normal'` 都指 `normal.png`），优先级：
+    **文件名与属性名同名 > `default` 属性 > 声明顺序** —— 三个都是项目里的
+    字面量。认不出（函数展不开）就留空，**不猜**。
+
+    **只要有属性就进表**（值可能是 `{}`）：`layeredimage` 带属性 = 这个 tag
+    是项目自己声明的立绘，那件事和"我能不能把属性词反查出来"是两回事 ——
+    展不开时只是退回"按文件名当属性词"，不该把这个人从名单里抹掉。
+    只有 `always` 的 tag（没有可写属性）不进表。
+    """
+    out: dict = {}
+    for tag, img in (getattr(model, 'images', None) or {}).items():
+        if not _has_attributes(img):
+            continue
+        out[str(tag)] = _words_of_image(img, getattr(model, 'helpers', None) or {})
+    return out
+
+
+def _has_attributes(img) -> bool:
+    """这个 `layeredimage` 有没有可写的属性（只有 `always` 的那种没有）。"""
+    return any(getattr(g, 'attrs', None)
+               for g in getattr(img, 'groups', None) or ())
+
+
+def _words_of_image(img, helpers: dict) -> dict:
+    """一个 `layeredimage` 块 → `{图片 stem: 属性名}`（不含该 tag 之外的判断）。"""
+    best: dict = {}
+    for group in getattr(img, 'groups', None) or ():
+        for name, attr in (getattr(group, 'attrs', None) or {}).items():
+            fmt = getattr(img, 'image_format', '') or ''
+            for stem in _stems_of_attr(attr, helpers, fmt):
+                rank = (0 if stem == str(name).lower() else 1,
+                        0 if getattr(attr, 'default', False) else 1)
+                if stem not in best or rank < best[stem][0]:
+                    best[stem] = (rank, str(name))
+    return {stem: word for stem, (_rank, word) in best.items()}
+
+
+def _stems_of_attr(attr, helpers: dict, image_format: str) -> set:
+    """一个属性展开后**引用到的图片文件名**（小写、无目录无后缀）。"""
+    stems = set()
+    for expr in getattr(attr, 'exprs', None) or ():
+        for layer in expand_displayable(expr, helpers, image_format):
+            if not isinstance(layer, dict):
+                continue
+            path = str(layer.get('path') or '').strip()
+            if path:
+                stems.add(PurePosixPath(path.replace('\\', '/')).stem.lower())
+    return stems
+
+
 def load_layer_model(project_root) -> LayerModel:
     """扫一遍项目，建出合成立绘模型（纯只读）。"""
     model = LayerModel()
@@ -1016,6 +1086,9 @@ def load_layer_model(project_root) -> LayerModel:
         model.poses = poses
         model.pose_labels = labels
         model.warnings = warns
+        # 反查表放在**同一段 try 里**：展开某个属性出错时，上面几样已经就位，
+        # 只有这张表是空的 —— 退回"按文件名当属性词"的老行为，不连累别的。
+        model.words = attribute_words(model)
     except Exception as e:                      # noqa: BLE001 - 建不出来就退回老路
         swallow('story.layered_model.load_layer_model', e)
     return model
@@ -1294,6 +1367,7 @@ __all__ = ['LayerAttr', 'LayerGroup', 'LayeredImage', 'LayerPlan',
            'LayerModel', 'parse_layeredimages', 'parse_helper_functions',
            'parse_expr', 'expand_displayable', 'evaluate_condition',
            'parse_pose_tables', 'load_layer_model', 'resolve_layers',
+           'attribute_words',
            'load_layer_model_cached', 'layer_model_stamp',
            'clear_layer_model_cache',
            'pose_switch_problem', 'frame_pose_warnings']

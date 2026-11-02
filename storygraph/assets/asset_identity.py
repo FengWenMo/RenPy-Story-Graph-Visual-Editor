@@ -336,6 +336,62 @@ def engine_fact_tags(project_root) -> set:
 # ---------------------------------------------------------------------------
 
 
+def declared_sprite_words(project_root) -> dict:
+    """
+    项目 `.rpy` 里的 `layeredimage` → `{tag: {图片文件名: 声明的属性名}}`。
+
+    为什么它是"已知角色 tag"的**第四路**来源（2026-11-02 用户：`qing` 明明
+    有立绘，工具却说"没有这个角色"、预览图也导不进来）：
+
+      · 角色表（`characters.xlsx`）登记的是**会说话的人**。`qing` 在剧本里
+        由 `q` 出声，自己只有一个 `layeredimage qing:` —— 前三路（角色表 /
+        映射 `characters` / 引擎事实）里都没有她，于是她的立绘、预览图、头像
+        全被归成"其他图片"，选择器里连"立绘：qing"这一组都不存在；
+      · 而**项目自己声明过**的东西就是事实：能写 `show qing …`、带属性、
+        有 `image_format`。判据与引擎事实同一条，只是不必先采过引擎。
+
+    值那一层还回答另一个问题："这张图的文件名该写成哪个属性词" ——
+    `attribute curious: 'stare'` 里，`show qing stare` 引擎不认，
+    `show qing curious` 才是属性名（反查表在
+    `story.layered_model.attribute_words`，这里只做取用与过滤）。
+
+    没有项目根 / 读不出来 → `{}`（**不猜**）。
+    """
+    root = str(project_root or '')
+    if not root:
+        return {}
+    try:
+        from storygraph.story.layered_model import load_layer_model_cached
+    except ImportError:                         # 判定层被裁掉的极端打包
+        return {}
+    model = load_layer_model_cached(root)
+    words = getattr(model, 'words', None)
+    if not isinstance(words, Mapping):
+        return {}
+    return {str(tag): dict(table) for tag, table in words.items()
+            if isinstance(table, Mapping)}
+
+
+def declared_sprite_tags(project_root) -> set:
+    """
+    项目**自己声明过 `layeredimage`** 的 tag（= 项目自己的立绘名单）。
+
+    见 `declared_sprite_words`：这一路补的是"角色表没登记、但项目确实有立绘"
+    的人（`qing`）。非角色 tag（`ui`/`bg`…）由 `_actor_words` 统一筛掉。
+    """
+    return set(declared_sprite_words(project_root))
+
+
+def _actor_words(words) -> dict:
+    """属性词表 → 只留**角色** tag（与 `known_tags` 同一把筛子，口径不许分叉）。"""
+    if not isinstance(words, Mapping):
+        return {}
+    return {str(tag): dict(table) for tag, table in words.items()
+            if str(tag or '').strip()
+            and str(tag).strip().lower() not in NON_ACTOR_TAGS
+            and isinstance(table, Mapping)}
+
+
 def _is_copy(tag: str, stem: str, copy_index) -> bool:
     """这张（Tag 空的）图是不是"另一行 Tag 非空"行注册过的同 tag+同 stem 副本。"""
     if not tag or not stem or not copy_index:
@@ -376,20 +432,65 @@ def path_kind(relpath: str) -> str:
 
 def resolve_image(row: dict, *, relpath: str = '', known_tags=None,
                   known_chars: Mapping | None = None, mapping=None,
-                  rows=None, copy_index=None) -> Identity:
+                  rows=None, copy_index=None,
+                  sprite_words=None) -> Identity:
     """
     一行图片资产 → `Identity`（判定顺序见模块 docstring）。
 
     参数
     ----
-    row         资源表的一行（`ID/Path/Tag/Attributes/Value/...`）。
-    relpath     项目相对路径；不给就用 `row['Path']` 现归一。
-    known_tags  已知角色 tag（`app.picker.pick_context` 会给三路合并后的集合）。
-    known_chars `{tag: 显示名}` 或 `{tag: {'display': ...}}`（只要显示名）。
-    mapping     映射文件数据（`asset_mapping.load_mapping` 的 dict）。
-    rows        全部图片行（用于**副本检测**）；支持 dict / list。
-    copy_index  `build_copy_index(rows)` 的结果；批量调用时传它可避免 O(n²)。
+    row          资源表的一行（`ID/Path/Tag/Attributes/Value/...`）。
+    relpath      项目相对路径；不给就用 `row['Path']` 现归一。
+    known_tags   已知角色 tag（`app.picker.pick_context` 会给四路合并后的集合）。
+    known_chars  `{tag: 显示名}` 或 `{tag: {'display': ...}}`（只要显示名）。
+    mapping      映射文件数据（`asset_mapping.load_mapping` 的 dict）。
+    rows         全部图片行（用于**副本检测**）；支持 dict / list。
+    copy_index   `build_copy_index(rows)` 的结果；批量调用时传它可避免 O(n²)。
+    sprite_words `{tag: {图片文件名: 声明的属性名}}`（`project_context` 的
+                 `sprite_words`）—— 给了就把 sprite 的属性词换成项目
+                 `layeredimage` 里**声明过的写法**（见 `_to_declared_words`）。
     """
+    ident = _resolve_image_raw(row, relpath=relpath, known_tags=known_tags,
+                               known_chars=known_chars, mapping=mapping,
+                               rows=rows, copy_index=copy_index)
+    return _to_declared_words(ident, sprite_words)
+
+
+def _to_declared_words(identity, sprite_words) -> Identity:
+    """
+    sprite 的属性词 → 项目 `layeredimage` 里**声明过的写法**。
+
+    真实项目（2026-11-02）：`layeredimage qing` 写着 `attribute curious:
+    'stare'`，于是 `stare.png` 这张图能写的是 `show qing curious`；
+    按文件名硬写 `show qing stare` 引擎不认（`stare` 只是文件名）。
+
+    ⚠ **只改 `kind='sprite'`**：预览图/头像的 `attrs` 还要拿去和**行里的
+    原词**（`Attributes` 列 / 文件名）对表（`find_real_sprite`）—— 换了词就
+    找不到那张真立绘；换成真立绘之后重新解析**那一行**时会再走一次这里。
+    没声明过（表里没有这个 tag / 这个词）就一个字都不动。
+    """
+    if not sprite_words or identity is None or identity.kind != 'sprite':
+        return identity
+    table = sprite_words.get(str(identity.tag or ''))
+    if not table:
+        return identity
+    out, seen, changed = [], set(), False
+    for word in identity.attrs or ():
+        new = table.get(str(word).strip().lower()) or word
+        changed = changed or new != word
+        if str(new).strip().lower() in seen:
+            continue
+        seen.add(str(new).strip().lower())
+        out.append(new)
+    if not changed:
+        return identity
+    return replace(identity, attrs=tuple(out))
+
+
+def _resolve_image_raw(row: dict, *, relpath: str = '', known_tags=None,
+                       known_chars: Mapping | None = None, mapping=None,
+                       rows=None, copy_index=None) -> Identity:
+    """`resolve_image` 的判定主体（不含"属性词换成声明名"那一步）。"""
     row = dict(row or {})
     aid = asset_id_of(row)
     rel = normalize_relpath(relpath or str(row.get('Path') or ''))
@@ -663,13 +764,16 @@ def _attrs_from_stem(stem: str, tag: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 def resolve_images(rows, *, known_tags=None, known_chars=None, mapping=None,
-                   project_root: str = '', copy_index=None) -> dict:
+                   project_root: str = '', copy_index=None,
+                   sprite_words=None) -> dict:
     """
     一批图片行 → `{asset_id: Identity}`（**批量入口**，一次建好副本索引）。
 
     为什么要有它：选择器分组 / 用途过滤都要遍历全部图片；逐行调
     `resolve_image` 会每行重建一次副本索引（1720 行 = O(n²)）。这里
     先建索引再逐行解析，结果与单行调用完全一致。
+
+    `sprite_words` 见 `resolve_image`（项目 `layeredimage` 声明的属性词表）。
     """
     row_list = _iter_rows(rows)
     out: dict = {}
@@ -685,7 +789,8 @@ def resolve_images(rows, *, known_tags=None, known_chars=None, mapping=None,
         rel = normalize_relpath(str(row.get('Path') or ''), root)
         out[aid] = resolve_image(row, relpath=rel, known_tags=known_tags,
                                  known_chars=known_chars, mapping=mapping,
-                                 rows=row_list, copy_index=copy_index)
+                                 rows=row_list, copy_index=copy_index,
+                                 sprite_words=sprite_words)
     return out
 
 
@@ -695,17 +800,20 @@ def project_context(registry, project_root: str = '', *, mapping=None) -> dict:
 
     返回::
 
-        {'known_tags': frozenset[str],   # 角色表 + 映射 characters + 引擎事实
+        {'known_tags': frozenset[str],   # 角色表 + 映射 characters + 引擎事实 + 项目 layeredimage
          'known_chars': dict,            # known_characters() 的结果
          'mapping': dict,                # 没有映射 = {}
          'mapping_path': str,            # 没有 = ''
          'warnings': tuple[str, ...],    # 映射文件的问题（不抛）
          'rows': dict,                   # registry.images（{id: row}）
          'copy_index': dict,             # 批量解析用的副本索引
+         'sprite_words': dict,           # {tag: {图片文件名: 声明的属性名}}（可空）
          'project_root': str}
 
-    已知角色 tag 三个来源（规划 §2.4）：characters 表「立绘 tag」、
-    映射 `characters`、引擎事实里**带属性**的 tag。三路都只是"候选集合"，
+    已知角色 tag **四个**来源（规划 §2.4 + 2026-11-02）：characters 表
+    「立绘 tag」、映射 `characters`、引擎事实里**带属性**的 tag、项目
+    `.rpy` 里 `layeredimage` 声明过的 tag（`declared_sprite_words` ——
+    补 `qing` 这类"角色表没登记、但有立绘"的人）。四路都只是"候选集合"，
     真正的身份判定仍在 `resolve_image`（只认字面量）。
     """
     root = str(project_root or '')
@@ -730,6 +838,10 @@ def project_context(registry, project_root: str = '', *, mapping=None) -> dict:
         known |= engine_fact_tags(root)
     except Exception as e:                      # noqa: BLE001
         swallow('assets.asset_identity.project_context.facts', e)
+    # ④ 项目自己 `.rpy` 里的 `layeredimage`：角色表只登记"会说话的人"，
+    # 而 `qing` 这种由别人出声、自己只有立绘声明的 tag 只能靠这一路认出来。
+    sprite_words = _actor_words(declared_sprite_words(root))
+    known |= set(sprite_words)
     known_tags = frozenset(t for t in known
                            if t and t.lower() not in NON_ACTOR_TAGS)
     rows = getattr(registry, 'images', None) if registry is not None else None
@@ -742,6 +854,7 @@ def project_context(registry, project_root: str = '', *, mapping=None) -> dict:
         'warnings': warnings,
         'rows': rows,
         'copy_index': build_copy_index(rows),
+        'sprite_words': sprite_words,
         'project_root': root,
     }
 
@@ -923,6 +1036,7 @@ __all__ = [
     'KINDS', 'SHOWABLE_KINDS', 'SOURCES', 'GROUP_ORDER', 'Identity',
     'normalize_relpath', 'asset_id_of', 'kind_from_tag_word',
     'known_characters', 'known_tags_of', 'engine_fact_tags',
+    'declared_sprite_tags', 'declared_sprite_words',
     'build_copy_index', 'path_kind', 'resolve_image', 'resolve_images',
     'project_context', 'find_real_sprite', 'spec_for_identity',
     'group_key_for_identity',

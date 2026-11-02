@@ -398,3 +398,92 @@ class TestPoseMarkerThatIsAWord:
                             {'calm', 'glad', 'tall', 'gown'}) is None
         assert _pose_marker(['', 'tall'], {'tall'}) == ''
         assert _pose_marker(['plain', 'tall'], {'tall'}) == 'plain'
+
+
+# ----------------------------------------------------------------------
+#  ④ 反查表：`show` 要写**属性名**，不是图片文件名
+# ----------------------------------------------------------------------
+
+_WORDS_RPY = '''\
+layeredimage delta:
+    image_format 'images/delta/{image}.png'
+
+    attribute plain default:
+        'normal'
+
+    group mood:
+        attribute shy:
+            'quiet'
+        attribute cross default:
+            'quiet'
+
+    group accent:
+        attribute glow:
+            'shine'
+        attribute shine:
+            'shine'
+
+layeredimage sigil:
+    image_format 'images/sigil/{image}.png'
+    always:
+        'ring'
+'''
+
+
+@pytest.fixture()
+def words_project(tmp_path):
+    game = tmp_path / 'game'
+    game.mkdir()
+    (game / 'defs.rpy').write_text(_WORDS_RPY, encoding='utf-8')
+    return tmp_path
+
+
+class TestAttributeWords:
+    """
+    属性名和图片文件名**可以不是同一个词**：`attribute shy: 'quiet'` 里，
+    能写进 `show` 的是 `shy`，`quiet` 只是那张图的文件名。
+
+    用户 2026-11-02：`qing` 的立绘明明在，工具却把"她的预览图"导成
+    `show qing stare`（Engine：`'qing stare' is not an image`）。
+    """
+
+    def test_file_name_maps_to_the_declared_attribute(self, words_project):
+        from storygraph.story.layered_model import (attribute_words,
+                                                    load_layer_model)
+        got = attribute_words(load_layer_model(words_project))
+        assert got['delta']['quiet'] == 'cross'
+        assert got['delta']['normal'] == 'plain'
+
+    def test_default_attribute_beats_declaration_order(self, words_project):
+        """`quiet.png` 被 `shy` 和 `cross default` 共用 → 取 default 那个。"""
+        from storygraph.story.layered_model import (attribute_words,
+                                                    load_layer_model)
+        got = attribute_words(load_layer_model(words_project))
+        assert got['delta']['quiet'] == 'cross', 'default 优先于声明顺序'
+
+    def test_same_name_beats_everything(self, words_project):
+        """文件名与属性名同名 → 就是它（哪怕别的属性先声明）。"""
+        from storygraph.story.layered_model import (attribute_words,
+                                                    load_layer_model)
+        got = attribute_words(load_layer_model(words_project))
+        assert got['delta']['shine'] == 'shine'
+
+    def test_tag_without_attributes_is_not_in_the_table(self, words_project):
+        """只有 `always` 的 `layeredimage`（没有可写属性）不算立绘 tag。"""
+        from storygraph.story.layered_model import (attribute_words,
+                                                    load_layer_model)
+        got = attribute_words(load_layer_model(words_project))
+        assert 'sigil' not in got
+
+    def test_helper_expansion_is_followed(self, project):
+        """经辅助函数包一层的属性（`part('glad', '_cut.png')`）也能反查。"""
+        from storygraph.story.layered_model import (attribute_words,
+                                                    load_layer_model)
+        got = attribute_words(load_layer_model(project))
+        assert got['alpha']['glad'] == 'glad'
+        assert got['alpha']['tall'] == 'tall'
+
+    def test_the_model_carries_the_table(self, words_project):
+        from storygraph.story.layered_model import load_layer_model
+        m = load_layer_model(words_project)
+        assert m.words['delta']['quiet'] == 'cross'

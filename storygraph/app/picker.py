@@ -333,14 +333,19 @@ def pick_context(registry=None, project_root=None, *, mapping=None,
     装配 `resolve_pick` / `resolve_image` 的关键字参数（**可直接 `**` 展开**）：
 
         {'known_tags': frozenset[str], 'known_chars': dict,
-         'mapping': dict, 'all_rows': dict[str, dict], 'dimensions': dict|None}
+         'mapping': dict, 'all_rows': dict[str, dict], 'dimensions': dict|None,
+         'sprite_words': dict}
 
     · `known_tags`：characters 表「立绘 tag」+ 映射 `characters` + 引擎事实
-      里带属性的 tag（三路合并，来自项目自己的数据）；
+      里带属性的 tag + 项目 `layeredimage` 声明过的 tag（四路合并，来自项目
+      自己的数据）；
     · `all_rows`：`registry.images`（`{asset_id: row}`）—— 副本检测要用"另一行"；
     · `mapping`：项目根 / `game/` 下的 `storygraph.mapping.json` **或**
       `storygraph.mapping.xlsx`（同目录 Excel 优先，见 `assets/mapping_excel.py`）；
       没有 = `{}`；
+    · `sprite_words`：`{tag: {图片文件名: 声明的属性名}}` —— 选中立绘时用它
+      写出项目 `layeredimage` **认的那个属性词**（`stare.png` 在 `qing` 名下
+      要写成 `curious`）；
     · `dimensions`：可选 `{asset_id 或相对路径: (w, h)}`，只有"换真立绘时
       优先像素更大"会用到；不传不影响正确性（只是少一条排序依据）。
 
@@ -353,6 +358,7 @@ def pick_context(registry=None, project_root=None, *, mapping=None,
         'mapping': ctx['mapping'],
         'all_rows': ctx['rows'],
         'dimensions': dimensions,
+        'sprite_words': ctx.get('sprite_words') or {},
     }
 
 
@@ -368,13 +374,24 @@ def _context_parts(context) -> tuple:
             rows if isinstance(rows, dict) else {})
 
 
+def _sprite_words_of(context) -> dict:
+    """
+    上下文里的**声明属性词表**（`{tag: {图片文件名: 属性名}}`）。
+
+    为什么单取一个函数而不是塞进 `_context_parts`：那四个片段是"每条判定都
+    要用"的，这张表只有"要写出一条 `show`"时才用得上（`spec_for_identity`
+    那一步）；没有它也能判定，只是属性词会退回文件名。
+    """
+    words = (context or {}).get('sprite_words') if isinstance(context, dict) else None
+    return words if isinstance(words, dict) else {}
+
+
 def identity_of(registry, asset_id: str, row: Optional[dict] = None, *,
                 project_root=None, context=None) -> Identity:
     """一条图片资产的身份（UI 的用途过滤 / 人话名都用它）。"""
-    known_tags, known_chars, mapping, rows = _context_parts(context)
     if context is None:
-        known_tags, known_chars, mapping, rows = _context_parts(
-            project_context(registry, str(project_root or '')))
+        context = project_context(registry, str(project_root or ''))
+    known_tags, known_chars, mapping, rows = _context_parts(context)
     aid = str(asset_id or '').strip()
     row = row or (rows or {}).get(aid) or {}
     if not row:
@@ -382,7 +399,8 @@ def identity_of(registry, asset_id: str, row: Optional[dict] = None, *,
     rel = normalize_relpath(row.get('Path') or '', str(project_root or ''))
     return resolve_image(row, relpath=rel, known_tags=known_tags,
                          known_chars=known_chars, mapping=mapping,
-                         rows=rows, copy_index=build_copy_index(rows))
+                         rows=rows, copy_index=build_copy_index(rows),
+                         sprite_words=_sprite_words_of(context))
 
 
 def identities(registry, project_root=None, *, context=None) -> dict:
@@ -400,14 +418,15 @@ def identities(registry, project_root=None, *, context=None) -> dict:
         copy_index = build_copy_index(rows)
     return resolve_images(rows, known_tags=known_tags,
                           known_chars=known_chars, mapping=mapping,
-                          project_root=root, copy_index=copy_index)
+                          project_root=root, copy_index=copy_index,
+                          sprite_words=_sprite_words_of(context))
 
 
 def resolve_pick(asset_id: str, row: Optional[dict], *,
                  project_root: str = '', known_tags=frozenset(),
                  known_chars: Optional[dict] = None, mapping=None,
                  all_rows=None, dimensions=None, registry=None,
-                 copy_index=None) -> PickResult:
+                 copy_index=None, sprite_words=None) -> PickResult:
     """
     "选中这张图，到底能不能加、加什么" → `PickResult`（契约 §1.1b）。
 
@@ -420,7 +439,11 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
       · 非角色图层但说不出名字 → `ok=False` + 一句话。
 
     `registry` 给了就用 `pick_context` 自动补齐 `known_tags / known_chars /
-    mapping / all_rows`（UI 可以只传 registry + project_root）。
+    mapping / all_rows / sprite_words`（UI 可以只传 registry + project_root）。
+
+    `sprite_words`（项目 `layeredimage` 的属性反查表）决定立绘那条 spec 里的
+    **属性词怎么写**：`stare.png` 在 `qing` 名下要写成 `curious`，否则
+    (`show qing stare`) 引擎不认 —— 又是一个"看着像对、其实非法"的 show。
     """
     aid = str(asset_id or '').strip()
     if registry is not None:
@@ -434,6 +457,8 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
             mapping = ctx['mapping']
         if all_rows is None:
             all_rows = ctx['all_rows']
+        if sprite_words is None:
+            sprite_words = ctx['sprite_words']
         if row is None:
             row = (all_rows or {}).get(aid)
     if not row:
@@ -446,7 +471,8 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
     rel = normalize_relpath(row.get('Path') or '', root)
     ident = resolve_image(row, relpath=rel, known_tags=known_tags,
                           known_chars=known_chars, mapping=mapping,
-                          rows=rows, copy_index=copy_index)
+                          rows=rows, copy_index=copy_index,
+                          sprite_words=sprite_words)
 
     if ident.showable:
         spec = spec_for_identity(ident, row)
@@ -462,7 +488,8 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
             real_ident = resolve_image(
                 real, relpath=normalize_relpath(real.get('Path') or '', root),
                 known_tags=known_tags, known_chars=known_chars,
-                mapping=mapping, rows=rows, copy_index=copy_index)
+                mapping=mapping, rows=rows, copy_index=copy_index,
+                sprite_words=sprite_words)
             spec = spec_for_identity(real_ident, real)
             if not spec:
                 spec = image_spec_of(real_id, real)
