@@ -49,6 +49,9 @@ from storygraph.app.session_table import uniform_position_of  # noqa: F401
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.labeled_choices import labeled
+from storygraph.ui_qt.sprite_codes_view import (art_code, code_of,
+                                                slot_choices,
+                                                slot_kind as _slot_kind)
 
 from storygraph.core.safeguard import swallow
 
@@ -114,14 +117,6 @@ def _short(text, limit: int = CHIP_TEXT_MAX) -> str:
     """chip 上的短名字：超长截断 + `…`（全文放 tooltip，见 `_raw_tip`）。"""
     got = str(text if text is not None else '').strip()
     return got if len(got) <= limit else got[:limit - 1] + '…'
-
-
-def _slot_kind(row) -> str:
-    """引擎分组 → 词汇表的种类（`outfit` → 服装，其余 → 表情）。"""
-    group = str((row or {}).get('group') or '').lower()
-    if group.startswith(('outfit', 'clothes')):
-        return 'costume'
-    return 'expression'
 
 
 def _raw_tip(kind: str, ident, vocabulary=None) -> str:
@@ -586,9 +581,13 @@ class SpriteCardWidget(QFrame):
             for r in rows]
         self._slot_box.show()
 
-    def _slot_rows(self) -> list:
+    def _slot_rows(self, spec=None) -> list:
         """
         这一格的**引擎分组行**（一维一格）；拿不到就 `[]`（→ 老路）。
+
+        `spec` 可以不传（= 卡片自己那张图）。传别的图是给**右键候选**用的：
+        那里要问的是"这条候选图有几个维度"，不是"卡片现在这张"。
+        两者混着用会得出"候选里 18 条全都没有服装格"这种假结论。
 
         ⚠ **不新增注入通道**：窗口已经把 `set_choice_groups_provider(_for_tag)`
         接好了，`_for_tag` 上挂着 `attr_groups` / `facts` / `engine_facts` 三个
@@ -598,33 +597,69 @@ class SpriteCardWidget(QFrame):
         provider = self._choice_groups_for
         if provider is None:
             return []
-        spec = str(self.item.get('image') or '').strip()
+        spec = str(spec if spec is not None
+                   else (self.item.get('image') or '')).strip()
         if not spec:
             return []
         facts = getattr(provider, 'engine_facts', None) or {}
         groups = getattr(provider, 'attr_groups', None) or []
-        # ⚠ 2026-10-16：没有引擎事实时，`attr_slot_rows` 要退回项目自己的
-        #   `layeredimage` —— 那条路**必须知道项目根**，所以窗口把它挂在
-        #   provider 上（`window_card._sync_choice_groups`）。从前这里不传，
-        #   于是"没采过引擎事实"的项目永远退回单格（用户报的"粘在一起了"）。
-        layer_model = getattr(provider, 'layer_model', None)
-        if layer_model is None:
-            root = getattr(provider, 'project_root', None)
-            if root:
-                try:
-                    from storygraph.story.layered_model import (
-                        load_layer_model_cached)
-                    layer_model = load_layer_model_cached(root)
-                except Exception as e:       # noqa: BLE001 - 读不到就走老路
-                    swallow('ui_qt.sprite_grid._slot_rows.layers', e)
-                    layer_model = None
         try:
             return list(attr_slot_rows(spec, self._symbols, groups=groups,
                                        facts=facts,
-                                       layer_model=layer_model) or [])
+                                       layer_model=self._layer_model()) or [])
         except Exception as e:               # noqa: BLE001 - 分组拿不到就走老路
             swallow('ui_qt.sprite_grid._slot_rows', e)
             return []
+
+    def _layer_model(self):
+        """
+        项目自己的 `layeredimage` 模型（没采过引擎事实时，维度只靠它认）。
+
+        ⚠ 2026-10-16：那条路**必须知道项目根**，所以窗口把 `project_root`
+        挂在 provider 上（`window_card._sync_choice_groups`）。三个地方都要它
+        （维度行 / 换一维 / 右键候选），所以只留这一个入口 —— 少一份
+        "忘了转发"的副本。
+        """
+        provider = self._choice_groups_for
+        model = getattr(provider, 'layer_model', None)
+        if model is not None:
+            return model
+        root = getattr(provider, 'project_root', None)
+        if not root:
+            return None
+        try:
+            from storygraph.story.layered_model import load_layer_model_cached
+            return load_layer_model_cached(root)
+        except Exception as e:               # noqa: BLE001 - 读不到就走老路
+            swallow('ui_qt.sprite_grid._layer_model', e)
+            return None
+
+    def _art_code(self, spec=None, rows=None) -> tuple:
+        """卡片标题的美术写法（`A7`）+ 拆解；规则在 `sprite_codes_view.art_code`。"""
+        spec = str(spec if spec is not None
+                   else (self.item.get('image') or '')).strip()
+        toks = spec.split()
+        rows = self._slot_rows(spec) if rows is None else list(rows or ())
+        return art_code(rows, self._vocabulary(), toks[0] if toks else '')
+
+    def _slot_apply(self, spec: str, group: str, value: str) -> str:
+        """
+        换一维的词 → 新 spec（认不出就**原样返回**，宁可不改也不猜）。
+
+        `_set_slot_value`（点 chip）与右键候选共用这一条 —— 从前两处各写一份
+        `apply_attr_slot(...)` 参数，右键那份漏了 `layer_model`，于是没采过
+        引擎事实的项目右键列表一条都拼不出来（空列表＝"点了没反应"）。
+        """
+        provider = self._choice_groups_for
+        try:
+            return apply_attr_slot(
+                spec, group, value, symbols=self._symbols,
+                groups=getattr(provider, 'attr_groups', None) or [],
+                facts=getattr(provider, 'engine_facts', None) or {},
+                layer_model=self._layer_model())
+        except Exception as e:               # noqa: BLE001 - 认不出就别改
+            swallow('ui_qt.sprite_grid._slot_apply', e)
+            return spec
 
     def _fallback_label(self) -> str:
         """
@@ -638,7 +673,24 @@ class SpriteCardWidget(QFrame):
         return '属性' if groups else '表情'
 
     def _cycle_slot(self, group: str):
-        """点某一维的 chip → **只换那一维的词**，其它维度原样保留。"""
+        """
+        点某一维的 chip → **只换那一维的词**，其它维度原样保留。
+
+        「空」也在圈里（用户 2026-11-02）：
+
+        > 这个属性，如果点了一次就没法变成默认那个空了……这是为什么呢？
+
+        从前候选只有引擎枚举出来的那几个词，`—`（这一维不写）**不在圈里**，
+        于是"点了一下就再也回不去"。现在 `''` 排在最后：从任何一个词一直点，
+        会走到空 → 再回到第一个词。空排最后（不是最前）是为了保住老行为 ——
+        没有值的拍点一下仍然先认第一个候选，而不是原地不动（那看起来就像
+        "点了没反应"，正是 2026-10-05 报过的那个症状）。
+
+        ⚠ 空**不等于**组里第一个词：不写这一维 = 交给 layeredimage 的默认
+        （`attribute x default` 或组里第一个），写上去则是把那一件钉死到这一拍。
+        对 `sr_general` 的 `lan` 来说两者**画面上就不一样**：有服装走裁脸+衣层，
+        没服装走全身表情差分（见 `definitions.rpy` 的 `when` 条件）。
+        """
         rows = self._slot_rows()
         hit = next((r for r in rows if str(r.get('group') or '') == str(group or '')), None)
         if hit is None:
@@ -647,39 +699,18 @@ class SpriteCardWidget(QFrame):
         cur = str(hit.get('value') or '')
         if not opts:
             return
+        cycle = opts + ['']                       # 最后一个是「不写这一维」
         # 当前值不在候选里（项目自定义写法）→ 第一次点 = **固定住它**（值不变），
         # 与位置 chip 同一条规矩：绝不悄悄改掉一个我们认不出的值。
-        if cur and cur not in opts:
+        if cur and cur not in cycle:
             self._set_slot_value(group, cur)
             return
-        if not cur:
-            nxt = opts[0]
-        else:
-            nxt = opts[(opts.index(cur) + 1) % len(opts)]
-        self._set_slot_value(group, nxt)
+        self._set_slot_value(group, cycle[(cycle.index(cur) + 1) % len(cycle)])
 
     def _set_slot_value(self, group: str, value: str):
-        """某一维换成 `value` → 合成新的 `image`（其余维度不丢）→ 通知窗口重投影。"""
+        """某一维换成 `value`（`''` = 不写这一维）→ 重投影，其余维度不丢。"""
         spec = str(self.item.get('image') or '').strip()
-        provider = self._choice_groups_for
-        facts = getattr(provider, 'engine_facts', None) or {}
-        groups = getattr(provider, 'attr_groups', None) or []
-        layer_model = getattr(provider, 'layer_model', None)
-        if layer_model is None and getattr(provider, 'project_root', None):
-            try:
-                from storygraph.story.layered_model import (
-                    load_layer_model_cached)
-                layer_model = load_layer_model_cached(provider.project_root)
-            except Exception as e:           # noqa: BLE001 - 读不到就按老路
-                swallow('ui_qt.sprite_grid._set_slot_value.layers', e)
-                layer_model = None
-        try:
-            new = apply_attr_slot(spec, group, value, symbols=self._symbols,
-                                  groups=groups, facts=facts,
-                                  layer_model=layer_model)
-        except Exception as e:               # noqa: BLE001 - 认不出就别改
-            swallow('ui_qt.sprite_grid._set_slot_value', e)
-            return
+        new = self._slot_apply(spec, group, value)
         if new and new != spec:
             self._apply_image_spec(new)
 
@@ -687,13 +718,28 @@ class SpriteCardWidget(QFrame):
 
     def refresh(self):
         spec = str(self.item.get('image') or '').strip()
-        self._name.setText(spec if spec else '（点击换图）')
+        tag = spec.split()[0] if spec else ''
+        # —— 卡片标题 ——
+        #
+        # 有美术代号就显示 **`lan A3`**（用户 2026-11-02："你根本看不出来是
+        # A3 呀！！！"—— 映射填了却只有那一页自己看得见）；没有代号的项目
+        # 照旧显示引擎写法（`lan base_hand_up angry`），一个字节都不变。
+        # 引擎写法本身**不丢**：chip 还在、tooltip 也写着，随时能核对。
+        #
+        # 分组行只算一次（标题要用它算代号，chip 也要用它）—— `attr_slot_rows`
+        # 会去读项目的 `layeredimage`，一张卡算两遍不值当。
+        rows = self._slot_rows()
+        code, code_tip = self._art_code(spec, rows) if spec else ('', '')
+        self._name.setText(f'{tag} {code}' if code
+                           else (spec or '（点击换图）'))
+        self._name.setToolTip(
+            (f'引擎里写的是：`{spec}`'
+             + (f'\n\n{code_tip}\n（这张卡在脚本里仍然写引擎写法）' if code_tip
+                else '')) if spec else '')
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
         inherited = str(self.item.get('inherited_at') or '').strip()
-        tag = spec.split()[0] if spec else ''
         # 一维一格（引擎分组）；只有一条维度时 `rows` 为空 → 回到单个表情格。
-        rows = self._slot_rows()
         signature = [(str(r.get('group') or ''), str(r.get('label') or ''))
                      for r in rows]
         if rows and signature != self._slot_signature:
@@ -711,15 +757,26 @@ class SpriteCardWidget(QFrame):
                     f"{shown or '—'}")
                 tip = (f"这一段是引擎的 `{row.get('group')}` 组"
                        f"（共 {len(row.get('options') or [])} 个候选）。\n"
-                       '左键 = 换下一个 · **右键 = 搜索选择**\n'
+                       '左键 = 换下一个（点到底会回到「不写这一维」）· '
+                       '**右键 = 搜索选择**\n'
                        '点它只改这一维，其余维度（服装/表情/…）原样保留。')
+                # 这一维在美术需求表里的代号（`A` / `3`）也写进提示：
+                # 卡片标题那个 `A7` 就是这两半拼起来的，点开能对上。
+                kind = _slot_kind(row)
+                half = code_of(self._vocabulary(), kind, raw, tag) if raw else ''
+                if half:
+                    tip = (f'美术需求表里这一维是「{half}」'
+                           f'（{"服装代号" if kind == "costume" else "表情编号"}）。\n'
+                           + tip)
                 if raw and shown != raw:
                     tip = f'引擎里写的是 `{raw}`（屏幕上显示的是词汇表起的名字）。\n' + tip
                 if not shown:
                     # ⚠ 空着的那一格要说清它**不是坏了**：这一拍自己没写这一维，
                     #   画面上按引擎的默认走；点一下才把它固定到这一拍。
                     tip = (f"这一拍**没写** `{row.get('group')}` 这一维"
-                           f"（画面上按引擎的默认走，不是坏了）。\n" + tip)
+                           f"（画面上按引擎的默认走，不是坏了）。\n"
+                           f'⚠ 空**不等于**组里第一个词：不写就交给引擎的默认，'
+                           f'写了就是把那一件钉死到这一拍。\n' + tip)
                 btn.setToolTip(tip)
         else:
             if getattr(self, '_expr_btn', None) is None or self._slot_btns:
@@ -1033,37 +1090,26 @@ class SpriteCardWidget(QFrame):
         实测（sr_general）：`ye` 有 `outfit`(2) × `expressions`(18) →
         36 条，按服装分两栏。这比"给一堆单词、挑一个就把别的维度吃掉"有用；
         也给了一条把作者手写的组合**原样点回来**的路。
+
+        2026-11-02 补两处（用户"看不出来是 A3 / 点了就回不到空"）：每条候选
+        前面挂**美术代号**（`A7｜base_hand_up angry`），每一栏顶上多一条
+        **「✕ 不写这一维」**。拼法与显示在 `sprite_codes_view.slot_choices`，
+        这里只负责问数据和弹框。
         """
         from storygraph.ui_qt.choice_picker import choose_from
         spec = str(self.item.get('image') or '').strip()
         tag = (spec.split() or [''])[0]
         if not tag:
             return
-        facts = getattr(self._choice_groups_for, 'engine_facts', None) or {}
-        groups = getattr(self._choice_groups_for, 'attr_groups', None) or []
-        grouped = []
-        for row in rows:
-            vals = []
-            for opt in (row.get('options') or ()):
-                try:
-                    full = apply_attr_slot(spec, row.get('group'), opt,
-                                           symbols=self._symbols,
-                                           groups=groups, facts=facts)
-                except Exception as e:        # noqa: BLE001
-                    swallow('ui_qt.sprite_grid._pick_slot_combo', e)
-                    continue
-                if full and full not in vals:
-                    vals.append(full)
-            if vals:
-                grouped.append({'group': str(row.get('group') or ''),
-                                'label': str(row.get('label') or ''), 'values': vals})
+        grouped = slot_choices(spec, tag, rows, self._vocabulary(),
+                               lambda g, v: self._slot_apply(spec, g, v))
         if not grouped:
             return
         value = choose_from(
             self,
             f"选择立绘组合 —— {sum(len(g['values']) for g in grouped)} 条"
             f"（{len(grouped)} 组）",
-            [v for g in grouped for v in g['values']], spec, groups=grouped)
+            [c for g in grouped for c in g['values']], spec, groups=grouped)
         if value:
             self._apply_image_spec(value)
 
@@ -1186,10 +1232,18 @@ class SpriteGridWidget(QWidget):
         """
         注入 `tag -> [{'group','label','values'}]`（分组值可能依赖 tag 的
         显示名，所以**现取**；见 `SpriteCardWidget._groups_for`）。
+
+        ⚠ 换完**要重画一遍卡片**：provider 上挂着词汇表（美术代号 `A7` 就是
+        从那儿来的）。只换引用不重画，用户刚在「🗂 资源映射」里存完映射，
+        卡片上还是老样子 —— 那正是 2026-11-02 报的"映射归映射"。
         """
         self._choice_groups_for = fn
         for card in self._cards:
             card._choice_groups_for = fn
+            try:
+                card.refresh()
+            except Exception as e:               # noqa: BLE001 - 一张卡重画失败不算错
+                swallow('ui_qt.sprite_grid.set_choice_groups_provider', e)
 
     def set_symbols(self, symbols):
         """

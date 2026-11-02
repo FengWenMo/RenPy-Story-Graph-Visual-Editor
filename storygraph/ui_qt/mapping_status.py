@@ -156,6 +156,15 @@ def open_mapping_dialog(win, *, mapping_path: str = '',
     finally:
         # 对话框里可能载入了 / 写了新映射 —— 状态栏那一行与"未识别张数"必须重算
         refresh_mapping_status(win, force=True)
+        # 卡片上的**美术代号**（`lan A7`）也要跟着换：词汇表是注入给立绘卡的
+        # 一份快照，不重新同步的话，人刚点完「保存到项目根」，卡片上还是老
+        # 样子 —— 用户 2026-11-02 的原话就是"映射归映射……看不出来是 A3"。
+        try:
+            sync = getattr(win, '_sync_choice_groups', None)
+            if callable(sync):
+                sync()
+        except Exception as e:                    # noqa: BLE001 - 同步失败不拦关闭
+            swallow('ui_qt.main_window.mapping_resync', e)
     return dlg
 
 

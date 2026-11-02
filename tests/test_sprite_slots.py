@@ -65,22 +65,41 @@ class _Sym:
         return ''
 
 
-def _provider(tag):
+def _provider(tag, vocabulary=None):
     """窗口那条注入通道：**属性挂在函数上**（见 `window_card._sync_choice_groups`）。"""
     def _for_tag(_tag):
         return []
     _for_tag.attr_groups = []
     _for_tag.engine_facts = _facts()
+    if vocabulary is not None:
+        _for_tag.vocabulary = vocabulary
     return _for_tag
 
 
-def _card(spec, provider=True):
+def _vocab(outfit='A', expr='7'):
+    """
+    一份**带代号**的词汇表（映射里 `outfit_codes` / `expression_codes` 的投影）。
+
+    真项目里那张表是 `lan B7` 这种写法：服装代号是字母、表情编号是数字，
+    两半拼起来才是美术需求表上那一串。
+    """
+    from storygraph.assets import vocabulary as V
+    terms = []
+    if outfit:
+        terms.append(V.Term('costume', 'base_handdown', code=outfit, char='ye'))
+    if expr:
+        terms.append(V.Term('expression', 'gratified', code=expr, char='ye'))
+    return V.Vocabulary(tuple(terms))
+
+
+def _card(spec, provider=True, vocabulary=None):
     from storygraph.ui_qt.sprite_grid import SpriteCardWidget
     item = {'image': spec, 'expression': ' '.join(spec.split()[1:]),
             'position': '', 'at': '', 'speaking': False, 'order_index': 0,
             'extra_rows': []}
     card = SpriteCardWidget(item, symbols=_Sym(),
-                            choice_groups_for=_provider(spec.split()[0])
+                            choice_groups_for=_provider(spec.split()[0],
+                                                        vocabulary)
                             if provider else None)
     card._loader = None
     card.refresh()
@@ -342,9 +361,11 @@ class TestSlotComboPicker:
         grabbed = {}
 
         def _fake_choose(parent, title, choices, current='', groups=None):
-            grabbed['choices'] = list(choices)
+            from storygraph.ui_qt.labeled_choices import as_choices
+            picked = as_choices(choices)     # (真值, 显示, 提示) / Choice 都认
+            grabbed['choices'] = picked
             grabbed['groups'] = list(groups or ())
-            return choices[-1] if choices else ''
+            return (picked[-1].value if picked else '')
 
         import storygraph.ui_qt.choice_picker as CP
         orig = CP.choose_from
@@ -353,16 +374,100 @@ class TestSlotComboPicker:
             card._pick_from_list('expression')
         finally:
             CP.choose_from = orig
-        picks = grabbed['choices']
+        picks = [c.value for c in grabbed['choices']]
+        labels = [c.text for c in grabbed['choices']]
         assert picks, grabbed
         outfits = {'base_handdown', 'base_swimsuit'}
-        for spec in picks:
+        # ① 完整组合：每条都带齐两个维度（「✕ 不写这一维」那几条单独算）
+        full = [v for v, t in zip(picks, labels) if not t.startswith('✕')]
+        assert full, labels
+        for spec in full:
             words = set(spec.split())
             assert 'ye' in words, spec
             assert words & outfits, spec                     # 服装那一维在
             assert words & {'ahah', 'gratified', 'happy'}, spec   # 表情那一维在
         assert {w for s in picks for w in s.split()} >= outfits, picks
+        # ② 每一栏顶上那条「不写这一维」：值就是**去掉那一维之后的 spec**
+        cleared = [v for v, t in zip(picks, labels) if t.startswith('✕')]
+        assert cleared, labels
+        assert 'ye gratified' in cleared or 'ye base_handdown' in cleared, cleared
         # 假选择器返回最后一条 → 卡片存下的就是**那一条完整路径**
         chosen = picks[-1]
         assert card.item['image'] == chosen, (card.item, chosen)
         assert card.item['expression'] == chosen.split(' ', 1)[1]
+
+
+class TestArtCodeAndEmpty:
+    """
+    用户 2026-11-02 的两条：
+
+    > 映射归映射……但是你看这个选项内！你也看不出来是 A3 呀！！！那我仍然
+    > 不知道这是 A3 表情……那这个映射注册出来的意义在哪儿呢？
+
+    > 这个属性，如果点了一次就没法变成默认那个空了……这是为什么呢？
+
+    ① 卡片标题要显示**美术需求表的写法**（服装代号 + 表情编号 = `A7`），
+       否则映射只活在「资源映射」那一页，看卡的人还得自己换算；
+    ② 「空」要能回到 —— `—` 也是候选之一，不是单行道。
+    """
+
+    def test_the_title_shows_the_art_spec_code(self, qapp):
+        card = _card('ye base_handdown gratified', vocabulary=_vocab('A', '7'))
+        assert card._name.text() == 'ye A7', card._name.text()
+        tip = card._name.toolTip()
+        assert 'A7' in tip and 'base_handdown' in tip and 'gratified' in tip, tip
+
+    def test_without_codes_the_title_keeps_the_engine_words(self, qapp):
+        """没填映射的项目**一个字节都不变**（这条是回归闸门）。"""
+        card = _card('ye base_handdown gratified')
+        assert card._name.text() == 'ye base_handdown gratified', card._name.text()
+
+    def test_half_a_code_is_not_shown(self, qapp):
+        """只有 `A` 没有 `7` 时**不显示**：半截代号看起来就像整张图是它。"""
+        card = _card('ye base_handdown gratified', vocabulary=_vocab('A', ''))
+        assert card._name.text() == 'ye base_handdown gratified', card._name.text()
+
+    def test_clicking_a_slot_walks_back_to_empty(self, qapp):
+        card = _card('ye base_handdown gratified')
+        assert card.item['image'] == 'ye base_handdown gratified'
+        card._cycle_slot('outfit')            # base_handdown → base_swimsuit
+        assert 'base_swimsuit' in card.item['image'], card.item['image']
+        assert 'gratified' in card.item['image'], card.item['image']
+        card._cycle_slot('outfit')            # 最后一个 → 空（这一维不写）
+        assert card.item['image'] == 'ye gratified', card.item['image']
+        card._cycle_slot('outfit')            # 空 → 回到第一个候选
+        assert 'base_handdown' in card.item['image'], card.item['image']
+        assert 'gratified' in card.item['image'], card.item['image']
+
+    def test_an_empty_slot_still_starts_at_the_first_candidate(self, qapp):
+        """空的那一格点一下**仍然先认第一个候选**（老行为，别被"回到空"改坏）。"""
+        card = _card('ye happy')
+        card._cycle_slot('outfit')
+        assert card.item['image'] == 'ye happy base_handdown', card.item['image']
+
+    def test_combo_rows_show_the_art_code_ahead_of_the_words(self, qapp):
+        """
+        右键列表是**真正挑表情的地方** —— 代号必须在这里认得出，
+        而且要看得出 `A7` 是"服装 A + 表情 7"，不是一串没头没尾的英文。
+        """
+        card = _card('ye base_handdown gratified', vocabulary=_vocab('A', '7'))
+        grabbed = {}
+
+        def _fake_choose(parent, title, choices, current='', groups=None):
+            from storygraph.ui_qt.labeled_choices import as_choices
+            grabbed['choices'] = as_choices(choices)
+            return ''
+
+        import storygraph.ui_qt.choice_picker as CP
+        orig = CP.choose_from
+        CP.choose_from = _fake_choose
+        try:
+            card._pick_from_list('expression')
+        finally:
+            CP.choose_from = orig
+        texts = [c.text for c in grabbed['choices']]
+        assert any(t.startswith('A7｜') for t in texts), texts
+        # 值仍是引擎写法（显示改了，写回不许改）
+        hit = next(c for c in grabbed['choices'] if c.text.startswith('A7｜'))
+        assert hit.value.startswith('ye '), hit.value
+        assert 'A7' not in hit.value, hit.value
