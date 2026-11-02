@@ -350,7 +350,7 @@ class MainWindowQt(GraphPageMixin, GraphOpsMixin, CardPageMixin,
         #: 这一章有没有**还没导出到 .rpy** 的改动（标题栏 `*` 标记）。
         self._script_dirty = False
         self._last_layout_path = ''
-        self._base_title = '剧情编辑器 · 剧情结构图 + 卡片界面'
+        self._base_title = '织言片语'
         # —— 图级撤销栈（旧版 `graph.commands.HistoryManager`）——
         #
         # 命令对象要一个"视图接口"：`graph` / `selected_node` / `selected_edge`
