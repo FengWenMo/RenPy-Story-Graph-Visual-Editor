@@ -2032,11 +2032,52 @@ def _slot_rows_from_layers(tag, symbols, overlay, layer_model) -> list:
             for n in names:
                 if n not in buckets[g.name or '']:
                     buckets[g.name or ''].append(n)
-        return [{'group': k, 'label': overlay.get(k) or k, 'values': v}
+        rows = [{'group': k, 'label': overlay.get(k) or k, 'values': v}
                 for k, v in buckets.items() if v]
+        return _merge_pose_words(rows, model, tag)
     except Exception as e:                        # noqa: BLE001
         swallow('app.beats.attr_slot_rows.layers', e)
         return []
+
+
+def _merge_pose_words(rows: list, model, tag) -> list:
+    """
+    把**项目自己那张服装表**里、引擎没声明的词补进服装那一格。
+
+    真实项目（2026-11-02 `sr_general`）：`CC_OUTFIT_CYCLE` 写着
+    `lan: [aa, base_hand_up, clothes2]`、`CC_OUTFIT_LABEL` 把 `aa` 叫「普通」，
+    可四个 `layeredimage` 的 outfit 组里**都没有 `aa`**。于是卡片的服装格只有
+    引擎声明的那两身，`aa` 落进 `extras`：
+
+      · 当前值显示成 `—`（那一拍其实写着 `aa`，人看不出自己在哪身衣服上）；
+      · 点别身衣服 → `_replace_attr_word(old='')` 走"追加" → 写出
+        `show ye aa base_handdown happy`（同组两个词，引擎也不认）。
+
+    补进来之后：`aa` 进候选、当前值认得出来，换衣服是**原位替换**。
+    ⚠ 只认**项目真写了表**的 tag（`model.poses` 里有它）：没有表时
+    `pose_options` 会从 `when` 条件里**推**一份（排序过的），拿那份去重排候选
+    等于把引擎的声明顺序悄悄换掉 —— 那种情况一个字都不动。
+    ⚠ 只补"哪个组都不认识"的词 —— 属于别的组的词（表情）一个都不许拖过来。
+    """
+    table = (getattr(model, 'poses', None) or {}).get(tag)
+    if not table or not rows:
+        return rows
+    words = [str(w) for w in table if str(w)]
+    if not words:
+        return rows
+    target, best = None, 0
+    for row in rows:
+        overlap = len(set(row.get('values') or ()) & set(words))
+        if overlap > best:
+            target, best = row, overlap
+    if target is None or not best:
+        return rows                       # 一个词都对不上 → 不猜是哪一格
+    others = {v for row in rows if row is not target
+              for v in (row.get('values') or ())}
+    take = [w for w in words if w not in others]
+    rest = [v for v in (target.get('values') or ()) if v not in take]
+    target['values'] = take + rest
+    return rows
 
 
 def _slot_rows_from_dims(tag, symbols, overlay) -> list:

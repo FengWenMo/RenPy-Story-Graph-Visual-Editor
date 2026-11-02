@@ -298,6 +298,33 @@ class TestScanProject:
         assert any('not an image' in n and 'aa' in n for n in scan.notes), \
             scan.notes
 
+    def test_项目自己的服装表给出人话名字(self, tmp_path):
+        """
+        项目在游戏代码里另有一张服装表（真实项目 `sr_general` 的
+        `CC_OUTFIT_CYCLE` + `CC_OUTFIT_LABEL`：`aa` → 「普通」）。
+
+        它**不是引擎声明**，所以警告照旧；但说明里必须带上这个名字 —— 否则人
+        对不上号："我明明在角色中心管它叫普通，工具表里为什么只有 `aa`？"
+        """
+        game = tmp_path / 'game'
+        game.mkdir()
+        (game / 'definitions.rpy').write_text(LAYERED, encoding='utf-8')
+        (game / 'center.rpy').write_text(
+            'init python:\n'
+            '    OUTFIT_CYCLE = {\n'
+            '        "ye": ["aa", "base_handdown"],\n'
+            '    }\n'
+            '    OUTFIT_LABEL = {\n'
+            '        "aa": "普通",\n'
+            '    }\n', encoding='utf-8')
+        (game / 'c.rpy').write_text('# 表情A7\nshow ye aa care\n'
+                                    '# 表情A7\nshow ye aa care\n',
+                                    encoding='utf-8')
+        scan = SC.scan_project(str(tmp_path))
+        row = next(r for r in scan.outfits if r['attr'] == 'aa')
+        assert '普通' in row['label'], row
+        assert '引擎里没有这身衣服' in row['label'], row
+
     def test_引擎认得的衣服不加警告(self, tmp_path):
         """`layeredimage` 里有 `attribute aa` 的项目：一个字都不许多说。"""
         text = LAYERED + ('        attribute aa:\n            x\n')

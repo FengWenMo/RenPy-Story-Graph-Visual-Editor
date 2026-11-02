@@ -326,3 +326,75 @@ class TestEmptyPoseNeedsHide:
         ]
         warns = frame_pose_warnings(frames, m)
         assert [i for i, _p in warns] == [1], warns
+
+
+class TestPoseMarkerThatIsAWord:
+    """
+    "普通"那一档写成一个**词**（不是空串）—— 真实项目 `sr_general` 正是这样：
+
+        CC_OUTFIT_CYCLE = {"lan": ["aa", "base_hand_up", "clothes2"]}
+        CC_OUTFIT_LABEL = {"aa": "普通", …}
+
+    提交 `b7cee91` 的说法是"立绘从 B 改回 A 要 hide，现在改为 aa 修饰为默认动作"
+    —— 等于**用 `aa` 这个属性名去指代"普通"**。
+
+    2026-11-02 之前，形状判据只认空串，于是这张表整张没被认出来：卡片的服装格
+    只剩引擎声明过的那两身，`aa` 落进"不认识的词"。
+    """
+
+    @pytest.fixture()
+    def word_project(self, tmp_path):
+        game = tmp_path / 'game'
+        game.mkdir(parents=True)
+        (game / 'defs.rpy').write_text(
+            'layeredimage alpha:\n'
+            '    group mood when not tall and not gown:\n'
+            '        attribute calm default:\n'
+            "            'calm'\n"
+            '        attribute glad:\n'
+            "            'glad'\n"
+            '    group outfit when tall:\n'
+            '        attribute tall:\n'
+            "            'tall'\n"
+            '    group outfit when gown:\n'
+            '        attribute gown:\n'
+            "            'gown'\n", encoding='utf-8')
+        (game / 'center.rpy').write_text(
+            'init python:\n'
+            '    CYCLE = {\n'
+            '        "alpha": ["plain", "tall", "gown"],\n'
+            '    }\n'
+            '    CYCLE_LABEL = {\n'
+            '        "plain": "普通",\n'
+            '        "tall": "高个",\n'
+            '    }\n', encoding='utf-8')
+        return tmp_path
+
+    def test_the_table_is_recognized(self, word_project):
+        from storygraph.story.layered_model import load_layer_model
+        m = load_layer_model(word_project)
+        assert m.poses.get('alpha') == ['plain', 'tall', 'gown'], m.poses
+
+    def test_the_word_keeps_its_human_label(self, word_project):
+        from storygraph.story.layered_model import load_layer_model
+        m = load_layer_model(word_project)
+        labels = {}
+        for _n, table in m.pose_labels.items():
+            labels.update(table)
+        assert labels.get('plain') == '普通', m.pose_labels
+
+    def test_going_back_to_it_needs_no_hide(self, word_project):
+        """`aa` 那套写法**本来就是为了免掉 hide** —— 认出来之后不该再报。"""
+        from storygraph.story.layered_model import (load_layer_model,
+                                                    pose_switch_problem)
+        m = load_layer_model(word_project)
+        assert pose_switch_problem(m, 'alpha', ['gown', 'glad'],
+                                   ['plain', 'glad']) is None
+
+    def test_a_plain_outfit_list_is_not_a_table(self):
+        """首项是**引擎声明过**的属性 → 没有"普通"那一档，不许当姿势表。"""
+        from storygraph.story.layered_model import _pose_marker
+        assert _pose_marker(['tall', 'gown'],
+                            {'calm', 'glad', 'tall', 'gown'}) is None
+        assert _pose_marker(['', 'tall'], {'tall'}) == ''
+        assert _pose_marker(['plain', 'tall'], {'tall'}) == 'plain'

@@ -855,12 +855,57 @@ _RE_LABEL_ITEM = re.compile(r"""^\s*['"]?([\w]*)['"]?\s*:\s*
                                 ['"](.+?)['"]\s*,?\s*$""", re.X)
 
 
-def parse_pose_tables(project_root, tags) -> tuple:
+def _pose_marker(vals, declared) -> str | None:
+    """
+    这张表里**哪个词表示"普通"**（认不出 → `None`，整张表就当没有）。
+
+    两条判据，按顺序：
+
+      1. 列表里有空串 → 空串就是"普通"（老写法，2026-10 之前的标准形状）；
+      2. 首项是**引擎没声明的词** → 那个词就是"普通"。
+
+    为什么加第 2 条（2026-11-02，真实项目 `sr_general`）：作者把 `''` 换成了
+    一个标记词 `aa`（`CC_OUTFIT_CYCLE = {"lan": ["aa", "base_hand_up",
+    "clothes2"]}`，注释写着"aa 修饰为默认动作"）。形状判据只认空串，于是这张
+    表**整张没被认出来** —— 卡片的服装格只剩引擎声明过的两身衣服，`aa` 变成
+    "不认识的词"，点一下别身衣服就把它留在原地 → 写出
+    `show ye aa base_handdown happy`（同组两个词）。
+
+    ⚠ 只认**首项**、且必须"引擎里没有这个词"：`['base_handdown', 'base_swimsuit']`
+    这种纯服装列表首项是声明过的属性，照旧不算表（没有"普通"那一档）。
+    """
+    vals = [str(v) for v in (vals or ())]
+    if '' in vals:
+        return ''
+    first = vals[0].strip() if vals else ''
+    if first and first not in {str(a) for a in (declared or ())}:
+        return first
+    return None
+
+
+def _pose_hits(items: dict, tags: set, declared: dict) -> dict:
+    """字典字面量 → `{tag: 列表}`（只留"是姿势表"的那些键）。"""
+    hit = {}
+    for key, vals in (items or {}).items():
+        if key not in tags:
+            continue
+        if _pose_marker(vals, declared.get(key) or ()) is not None:
+            hit[key] = list(vals)
+    return hit
+
+
+def parse_pose_tables(project_root, tags, images=None, declared=None) -> tuple:
     """
     自动认出"姿势循环表"（**按形状，不按变量名**）：
 
         {tag: ['', 'a', 'b'], …}     且键都是 layeredimage 的 tag、
-                                     列表里有一个空串（= 普通）
+                                     有"普通"那一档（空串，或引擎没声明的标记词）
+
+    "普通"那一档的判据见 `_pose_marker`：`images`（或 `declared`）用来知道引擎
+    声明了哪些词；都不给就只能认空串那种老写法。
+
+    `declared` 是给**不建 `LayeredImage` 对象**的调用方用的（`{tag: [属性名]}`），
+    例如资产表的代号扫描（`assets.sprite_codes`）—— 它只有词表，没有模型。
 
     顺带收人话标签 `{'': '普通', 'a': '泳装'}`（同文件里另一个字典）。
     返回 `(poses, labels, warnings)`。
@@ -872,6 +917,14 @@ def parse_pose_tables(project_root, tags) -> tuple:
     label_pool = {}
     if not tags:
         return poses, labels, warnings
+    # 每个 tag 引擎声明了哪些属性（判"首项是不是引擎没声明的词"要用）。
+    declared = {str(tag): {str(a) for a in (attrs or ())}
+                for tag, attrs in (declared or {}).items()}
+    for tag, img in (images or {}).items():
+        # 认不出就当它什么都没声明（`all_attrs` 不是模型对象时不存在）。
+        getter = getattr(img, 'all_attrs', None)
+        declared.setdefault(str(tag), set()).update(
+            str(a) for a in (getter() if callable(getter) else ()))
     for f in sorted(game.rglob('*.rpy')):
         try:
             lines = f.read_text(encoding='utf-8', errors='ignore') \
@@ -892,8 +945,7 @@ def parse_pose_tables(project_root, tags) -> tuple:
                                       for q in val[1:-1].split(',') if q.strip()]
                     else:
                         plain_labels[key] = val.strip("'")
-                hit = {k: v for k, v in items.items()
-                       if k in tags and '' in v}
+                hit = _pose_hits(items, tags, declared)
                 if hit:
                     poses.update({k: list(v) for k, v in hit.items()})
                     warnings.append(
@@ -924,9 +976,8 @@ def parse_pose_tables(project_root, tags) -> tuple:
                     if lm:
                         plain_labels[lm.group(1)] = lm.group(2)
                 j += 1
-            # 形状判据：键命中 layeredimage tag、且**列表里有空串**
-            hit = {k: v for k, v in items.items()
-                   if k in tags and '' in v}
+            # 形状判据：键命中 layeredimage tag，且有"普通"那一档（见 `_pose_marker`）
+            hit = _pose_hits(items, tags, declared)
             if hit:
                 poses.update({k: list(v) for k, v in hit.items()})
                 warnings.append(
@@ -960,7 +1011,8 @@ def load_layer_model(project_root) -> LayerModel:
         model.images = parse_layeredimages(project_root)
         model.helpers = parse_helper_functions(project_root)
         poses, labels, warns = parse_pose_tables(project_root,
-                                                 model.images.keys())
+                                                 model.images.keys(),
+                                                 images=model.images)
         model.poses = poses
         model.pose_labels = labels
         model.warnings = warns

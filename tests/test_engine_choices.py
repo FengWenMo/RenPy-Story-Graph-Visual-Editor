@@ -1025,3 +1025,96 @@ class TestSilentDefaultAttrs:
                                _facts(LAN_ATTRS, LAN_CANDS))
         assert '没生效' not in note
 
+
+class TestTheEverydayOutfitWrittenAsAWord:
+    """
+    项目的"普通"那身衣服写成**一个词**（真实项目 `sr_general` 里是 `aa`，
+    角色中心的表把它叫「普通」），而 `layeredimage` 里没有它。
+
+    2026-11-02 的两条实测后果（卡片上）：
+
+      · 服装格当前值显示成 `—` —— 那一拍明明写着 `aa`，人看不出自己在哪身；
+      · 点别身衣服 → 追加而不是替换 → `show ye aa base_swimsuit happy`
+        （同组两个词，引擎不认）。
+
+    修法不是去改用户的项目（那是别人的源码），而是**把项目自己那张表读进来**
+    （`CC_OUTFIT_CYCLE` / `CC_OUTFIT_LABEL` 一类的字典，见
+    `story.layered_model.parse_pose_tables`）。
+    """
+
+    @pytest.fixture()
+    def project(self, tmp_path):
+        game = tmp_path / 'game'
+        game.mkdir(parents=True)
+        (game / 'defs.rpy').write_text(
+            'layeredimage alpha:\n'
+            '    group mood when not tall and not gown:\n'
+            '        attribute calm default:\n'
+            "            'calm'\n"
+            '        attribute glad:\n'
+            "            'glad'\n"
+            '    group outfit when tall:\n'
+            '        attribute tall:\n'
+            "            'tall'\n"
+            '    group outfit when gown:\n'
+            '        attribute gown:\n'
+            "            'gown'\n", encoding='utf-8')
+        (game / 'center.rpy').write_text(
+            'init python:\n'
+            '    CYCLE = {\n'
+            '        "alpha": ["plain", "tall", "gown"],\n'
+            '    }\n'
+            '    CYCLE_LABEL = {\n'
+            '        "plain": "普通",\n'
+            '    }\n', encoding='utf-8')
+        return tmp_path
+
+    def _sym(self, root):
+        return _SlotSym({'alpha': ['calm', 'glad', 'tall', 'gown']},
+                        project_root=root)
+
+    def test_the_word_is_offered_and_is_the_current_value(self, project):
+        rows = beats.attr_slot_rows('alpha plain glad', self._sym(project))
+        by = {r['group']: r for r in rows}
+        assert by['outfit']['value'] == 'plain', by['outfit']
+        assert by['outfit']['options'] == ['plain', 'tall', 'gown'], by['outfit']
+
+    def test_switching_the_outfit_replaces_it_instead_of_appending(self, project):
+        """`alpha plain glad` → 换成礼服：**替换**，不是两个服装词叠在一行。
+
+        ⚠ 不钉词序（与 `test_sprite_slots` 同一口径）：`apply_attr_slot` 是
+        "没命中就追加"的语义，引擎按组取值、与顺序无关。钉的是**结构不变量**：
+        `plain` 必须消失（从前它留在原地 → `alpha plain glad gown`）。
+        """
+        got = beats.apply_attr_slot('alpha plain glad', 'outfit', 'gown',
+                                    symbols=self._sym(project))
+        words = got.split()
+        assert words[0] == 'alpha', got
+        assert 'plain' not in words, got
+        assert set(words[1:]) == {'gown', 'glad'}, got
+
+    def test_going_back_to_the_word_is_possible(self, project):
+        got = beats.apply_attr_slot('alpha gown glad', 'outfit', 'plain',
+                                    symbols=self._sym(project))
+        words = got.split()
+        assert 'plain' in words and 'gown' not in words, got
+        assert 'glad' in words, got
+
+    def test_without_that_table_nothing_changes(self, tmp_path):
+        """项目没写那张表 → 候选仍只有引擎声明的词（老行为一个字节不变）。"""
+        game = tmp_path / 'game'
+        game.mkdir(parents=True)
+        (game / 'defs.rpy').write_text(
+            'layeredimage alpha:\n'
+            '    group mood:\n'
+            '        attribute glad:\n'
+            "            'glad'\n"
+            '    group outfit:\n'
+            '        attribute tall:\n'
+            "            'tall'\n"
+            '        attribute gown:\n'
+            "            'gown'\n", encoding='utf-8')
+        rows = beats.attr_slot_rows('alpha tall glad', self._sym(tmp_path))
+        by = {r['group']: r for r in rows}
+        assert by['outfit']['options'] == ['tall', 'gown'], by['outfit']
+

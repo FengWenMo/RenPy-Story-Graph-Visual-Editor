@@ -411,10 +411,38 @@ def scan_project(project_root) -> Scan:
     # -- 表情：哪份编号表和剧本对得上 ----------------------------------
     _scan_expressions(scan, known, char_dirs, hits)
     # -- 服装：字母从剧本注释里数 --------------------------------------
-    _scan_outfits(scan, known, hits)
+    _scan_outfits(scan, known, hits, names=_project_outfit_names(root, known))
     scan.outfits.sort(key=lambda r: (r['char'], r['code'] or 'zz', r['attr']))
     scan.expressions.sort(key=lambda r: (r['char'], _num_key(r['no'])))
     return scan
+
+
+def _project_outfit_names(root, known) -> dict:
+    """
+    项目**自己在游戏代码里写的**服装表 → `{词: 人话}`。
+
+    真实项目 `sr_general`（2026-11-02）：`CC_OUTFIT_CYCLE` 写着
+    `lan: ["aa", "base_hand_up", "clothes2"]`、`CC_OUTFIT_LABEL` 把 `aa` 叫
+    「普通」。这张表**不是引擎声明**（`layeredimage` 里没有 `attribute aa`），
+    但它是"人怎么称呼这身衣服"的唯一出处 —— 表里那一行的说明不该只说
+    "引擎里没有它"，还得说"项目管它叫普通"，否则人根本对不上号。
+
+    ⚠ 只用来**写人话**：待选代号（A/B/C）仍然只来自剧本注释。
+    """
+    if not known:
+        return {}
+    from storygraph.story.layered_model import parse_pose_tables
+    declared = {str(tag): [*(groups.get('expr') or ()),
+                           *(groups.get('outfit') or ())]
+                for tag, groups in (known or {}).items()}
+    _poses, labels, _warns = parse_pose_tables(
+        root, set(declared), declared=declared)
+    out = {}
+    for _name, table in (labels or {}).items():
+        for key, label in (table or {}).items():
+            if str(key).strip() and str(label).strip():
+                out[str(key)] = str(label)
+    return out
 
 
 def _known_tags(texts: dict) -> dict:
@@ -517,8 +545,49 @@ def _scan_expressions(scan: Scan, known: dict, char_dirs: dict,
                               '但编号表里没有这个号（已补一行，请核对）')
 
 
-def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
-    """服装：字母从剧本注释里数（票数弱的留空，只出现一次的只提醒）。"""
+def _outfit_label(tag, outfit, count, called, allowed, counter) -> tuple:
+    """
+    一行服装的**说明**：`(label, 要给用户看的话)`。
+
+    · `called` = 项目自己那张服装表怎么称呼它（`aa` → 普通）。**这不是引擎
+      声明**，但它是人认得出这身衣服的唯一线索（2026-11-02 用户的困惑：
+      "aa 从未被注册过……它哪儿来的？"）；
+    · `allowed` = `layeredimage` 的 outfit 组里真有的词。剧本写了、这里没有
+      → **行留着**（人是照它写剧本的，藏起来等于骗人），但必须当场说清。
+      真实项目 `sr_general` 就是这么来的：`aa` 在 33 处 `show` 里当"普通"那身
+      衣服用，注释也写着 `# 表情A14`，可四个 `layeredimage` 里一个
+      `attribute aa` 都没有 —— Ren'Py 的 lint 原话是
+      `'lan aa happy' is not an image`（2026-11-02 拿同形最小工程验过，
+      Ren'Py 8.5.3；8.4 的结论一样）。
+    """
+    label = f'剧本里出现 {count} 处'
+    notes = []
+    called = str(called or '')
+    if called:
+        label += f' · 项目服装表叫「{called}」'
+    if allowed and outfit not in allowed:
+        label += ' · ⚠ 引擎里没有这身衣服'
+        notes.append(
+            f'{tag}：剧本里 {count} 处写了「{outfit}」'
+            + (f'（项目服装表叫「{called}」）' if called else '')
+            + f'，但 `layeredimage` 的 outfit 组里没有它'
+            f'（有：{"、".join(allowed)}）—— Ren\'Py 会报 '
+            f'"not an image"；要么补 `attribute {outfit}`（`when` 条件里也要'
+            f'带上它），要么把剧本改掉')
+    # 只提有分量的另一种说法（一次的大多是手误，列出来只会让人以为要处理）
+    runner = [(k, v) for k, v in counter.most_common()[1:] if v >= 2]
+    if runner:
+        label += '；另有 ' + '、'.join(f'{k}={v}' for k, v in runner)
+    return label, notes
+
+
+def _scan_outfits(scan: Scan, known: dict, hits: list,
+                  names=None) -> None:
+    """服装：字母从剧本注释里数（票数弱的留空，只出现一次的只提醒）。
+
+    `names` 是**项目自己那张服装表**的人话（`CC_OUTFIT_LABEL` 一类，见
+    `_project_outfit_names`）—— 引擎没声明的词也靠它才说得出"项目管它叫普通"。
+    """
     # 引擎（`layeredimage` 的 outfit 组）认哪些词 —— 判"剧本里写的这身衣服，
     # 引擎到底有没有"。空列表 = 这个项目没有可读的 layeredimage 声明，那就
     # **无从判断**，一句都不多说（老项目行为不变）。
@@ -551,23 +620,10 @@ def _scan_outfits(scan: Scan, known: dict, hits: list) -> None:
                 f'按票数留了「{letter}」，「{other_letter}」留空了')
         else:
             taken[outfit] = (letter, count)
-        label = f'剧本里出现 {count} 处'
-        allowed = declared.get(tag) or []
-        if allowed and outfit not in allowed:
-            # 剧本里写了、`layeredimage` 里没有 —— **行留着**（人是照它写剧本
-            # 的，藏起来等于骗人），但必须当场说清。真实项目 `sr_general` 就是
-            # 这么来的：`aa` 在 33 处 `show` 里当"普通"那身衣服用，注释也写着
-            # `# 表情A14`，可四个 `layeredimage` 里一个 `attribute aa` 都没有
-            # —— Ren'Py 8.4 的 lint 原话是 `'lan aa happy' is not an image`。
-            label += ' · ⚠ 引擎里没有这身衣服'
-            scan.notes.append(
-                f'{tag}：剧本里 {count} 处写了「{outfit}」，但 `layeredimage` 的 '
-                f'outfit 组里没有它（有：{"、".join(allowed)}）—— Ren\'Py 会报 '
-                f'"not an image"；要么补 `attribute {outfit}`，要么把剧本改掉')
-        # 只提有分量的另一种说法（一次的大多是手误，列出来只会让人以为要处理）
-        runner = [(k, v) for k, v in counter.most_common()[1:] if v >= 2]
-        if runner:
-            label += '；另有 ' + '、'.join(f'{k}={v}' for k, v in runner)
+        label, notes = _outfit_label(tag, outfit, count,
+                                     (names or {}).get(outfit),
+                                     declared.get(tag) or [], counter)
+        scan.notes.extend(notes)
         scan.outfits.append({'char': tag, 'code': letter, 'attr': outfit,
                              'label': label})
     # 剧本里没出现过的服装：留一行空代号，等人照美术需求表填
