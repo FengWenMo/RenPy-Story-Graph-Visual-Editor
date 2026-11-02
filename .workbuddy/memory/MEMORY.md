@@ -120,6 +120,10 @@
 - **归属审计（P1，2026-10-31）**：`_HANDLER_OF`（模块级）是"每种语句去哪"的**唯一清单**；`_BeatBuilder.unassigned` 记"既没进 pending 也没建拍"的语句，`beats_from_parse_result(..., report=[])` 取出来断言。判据是**结构**（不靠语法白名单），新加写法自动落进 attach。它当场抓到 `StatementKind.UNKNOWN` **一个 handler 都没有**（读新版表/手改 JSON 时静默丢语句）——已补 `_emit_unknown`，整条原文进 opaque。
 - **多行源码别走 shell 管道**（2026-10-31 又踩）：`python - <<'PY'` 里塞带 `show ...` 的测试源码，`show` 行会被吞掉，于是"复现"出"show 没了"的假回归。探针要写成 `.py` 文件再跑（铁律 10 的同族）。
 - **本机没装 pytest 且 pip 无网**（`from versions: none`，换镜像也一样）：验证只能跑 `tools/_*.py` 探针；`tests/` 里的用例照写（用户环境有 pytest）。`tests/test_hell_atl_mapping.py` 末尾自带标准库运行器，`python tests/test_hell_atl_mapping.py` 可直接跑。
+- **本机跑绿 ≠ CI 跑绿：本机 3.12，CI 矩阵最低 3.10**（2026-11-02 第二十三段 §98）：`ast.parse(feature_version=(3,10))` **抓不到 PEP 701**（反斜杠写进 f-string 的 `{}`）—— 扫 1094 个文件报"0 bad"，3.10 上照样在 import 处 SyntaxError，三个模块整批 ERROR。要抓就 `ruff check --target-version py310 --output-format json`，判据是 `code == "invalid-syntax"`（`E999` 已被 ruff 删，选它会直接报错）。`tools/` 下还有十几处同类写法（探针，不参与 CI）。
+- **Windows 专属调用在 POSIX 上要"退化"，别指望 except 接住**（2026-11-02 §98）：`_make_junction` 的 `cmd.exe` + `encoding='mbcs'` 在 Linux 抛 `LookupError` —— 它不是 `OSError`，`except (OSError, ValueError)` 接不住，整个镜像炸。做法是 `os.name != 'nt'` 直接 return False，走调用方本来就有那条"退化成逐层复制"。
+- **推不上去先看证书，再看网络**（2026-11-02 §98）：`SSL certificate problem` 而 `Invoke-WebRequest https://github.com` 返回 200 ⇒ 网络没问题，是 git 的 openssl 后端验不过；仓库级 `git config --local http.sslbackend schannel`（走 Windows 证书库，不关校验）。
+- **CI 红在哪没有 gh 也能查**（2026-11-02 §98）：公共仓 REST 免鉴权可读 run / job 列表（先定位到是哪一步红）；日志要鉴权 —— `git credential fill`（`host=github.com`）能取到本机已存的 token，`Authorization: Bearer` 拉 `actions/jobs/<id>/logs`。3.10 那种"收集期 ERROR"只看 job 列表是什么都看不出来的。
 
 **自定义语法**
 - **复杂子句靠"声明"**：`rules.json` 的 `statements[].clauses`（`story/spec_clauses`），`kind ∈ word/words/expr/transition/number`；列名 `head·列名~关键字`；读值**必须拿全部声明子句当边界**（只给 `at` 会把后面的 `with …` 吞进值里）；写回只换值那一段。关键字只在**顶层完整词**认。
