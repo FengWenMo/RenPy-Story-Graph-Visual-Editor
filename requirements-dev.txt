@@ -33,3 +33,9 @@ pytest-xdist>=3.6
 # 足够挡住回归，界面相关的仍在本机全量跑。
 openpyxl>=3.1
 Pillow>=10
+
+# 只在 Python 3.10 装（2026-11-02）：CI 矩阵里有 3.10，而 `tomllib` 是 3.11
+# 才进标准库的 —— `tests/test_release_manifest.py` 用它读 `pyproject.toml`
+# 核对 LICENSE 三处一致。没有这个，3.10 那条 job 会在 `import tomllib` 上红，
+# 而本机（3.12）永远看不见。测试里是 `try: tomllib / except: tomli as tomllib`。
+tomli>=2; python_version < "3.11"

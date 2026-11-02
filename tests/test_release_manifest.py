@@ -247,7 +247,10 @@ def test_manifest_reports_what_is_missing(tmp_path):
 
 def test_license_is_gpl_everywhere_it_matters():
     """LICENSE 文件、pyproject 字段、README 段 —— 三件必须一致（GPLv3）。"""
-    import tomllib
+    try:
+        import tomllib                       # Python 3.11+
+    except ImportError:                      # 3.10：CI 矩阵里有它，requirements-dev 装 tomli
+        import tomli as tomllib              # type: ignore[no-redef]
 
     license_text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
     assert 'GNU GENERAL PUBLIC LICENSE' in license_text
