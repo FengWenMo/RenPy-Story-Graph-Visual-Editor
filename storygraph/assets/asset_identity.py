@@ -67,6 +67,7 @@ from typing import Mapping, Optional
 from storygraph.core.safeguard import swallow
 from storygraph.core.vocabulary import NON_ACTOR_TAGS
 from storygraph.assets.asset_dimensions import row_values
+from storygraph.assets.asset_registry_constants import _PREVIEW_WORDS
 from storygraph.assets.atl_block import is_atl_row
 #: 身份词汇与"基础读取"（`KINDS` / `Identity` / 路径归一 / 副本索引）挪去了
 #: 叶子模块 `identity_core`（2026-11-01 解 `assets` 三模块环）：`asset_mapping`
@@ -98,11 +99,11 @@ from storygraph.assets.asset_mapping import (mapping_cached,
 SOURCES = ('declared', 'mapping', 'mapping-rule', 'tag-column', 'folder',
            'stem', 'unknown')
 
-#: 副本/缩略图目录的**通用词**（不是项目名！）。
-#: 只用来判 kind=preview；判 tag 仍然只靠目录段命中的已知角色 tag。
-_PREVIEW_DIR_WORDS = frozenset({
-    'preview', 'previews', 'thumb', 'thumbs', 'thumbnail', 'thumbnails',
-})
+#: 副本/缩略图目录的**通用词**（不是项目名！）。只用来判 kind=preview；
+#: 判 tag 仍然只靠目录段命中的已知角色 tag。
+#: ⚠ 与扫描器共用**同一份**（`asset_registry_constants._PREVIEW_WORDS`）：
+#: 两处各写一个集合，迟早漂移成"扫描认预览、身份不认"。
+_PREVIEW_DIR_WORDS = frozenset(_PREVIEW_WORDS)
 
 #: 头像目录的**通用词**：只有目录段明确写着它才给 kind=avatar（宁可 unknown）。
 _AVATAR_DIR_WORDS = frozenset({'avatar', 'avatars'})
@@ -656,6 +657,19 @@ def _from_tag_column(row, tag_col: str, rel: str, attrs: tuple,
     low = tag_col.lower()
     if low in tag_map:
         tag = tag_map[low]
+        # 预览副本 / 头像：**目录说了算，Tag 列说了不算**（2026-11-02）。
+        # 表可能被手改过、也可能是旧扫描器写的（真机 159 行预览副本一度带着
+        # 空 Tag，别家项目可能把真立绘的 tag 抄进去）；只要它在预览/头像目录里，
+        # 它就**不是能直接上舞台的立绘** —— 写成 sprite 会让 `show lan angry`
+        # 指到一张 1/4 预览图上。
+        if _has_dir_word(rel, _AVATAR_DIR_WORDS):
+            return Identity(kind='avatar', tag=tag, attrs=(),
+                            display=_display_of(known_chars, tag),
+                            source='tag-column', showable=False)
+        if _has_dir_word(rel, _PREVIEW_DIR_WORDS):
+            return Identity(kind='preview', tag=tag, attrs=attrs,
+                            display=_display_of(known_chars, tag),
+                            source='tag-column', showable=False)
         return Identity(kind='sprite', tag=tag, attrs=attrs,
                         display=_display_of(known_chars, tag),
                         source='tag-column', showable=True)

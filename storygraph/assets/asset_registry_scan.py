@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from storygraph.assets.asset_registry_constants import SUPPORTED_IMAGE_EXT, SUPPORTED_AUDIO_EXT, CATEGORY_KEYWORDS, ASSET_FIELD_LABELS, _asset_set_text, _asset_append_row, _UI_WORDS, _UI_SUFFIXES, _CHARACTER_CONTAINER_WORDS, _GENERIC_IMAGE_ROOTS, _BG_WORDS, _CG_WORDS, _BG_NAME_RE, _CG_NAME_RE, _UI_NAME_RE, _BG_NAME_HINTS, _CG_NAME_HINTS, _UI_NAME_HINTS, _NON_CHARACTER_FIRST_WORDS, _SKIP_SCAN_DIRS, _GENERIC_IMAGE_DIRS, _MUSIC_DIR_NAMES, _SOUND_DIR_NAMES, _SOUND_NAME_HINTS, _MUSIC_NAME_HINTS, _ASSET_KINDS, _STANDARD_TABLES, _TABLE_FIELDS, _PLACEHOLDER_MARKS, _COLOR_PATTERN, _SHOW_STOP_WORDS, _RE_SHOW_LINE, _RE_AUDIO_LINE, _RE_AT_TRANSFORM, _RE_WITH_TRANSITION, _RE_VOICE_LINE, _AUDIO_ID_PREFIXES
+from storygraph.assets.asset_registry_constants import SUPPORTED_IMAGE_EXT, SUPPORTED_AUDIO_EXT, CATEGORY_KEYWORDS, ASSET_FIELD_LABELS, _asset_set_text, _asset_append_row, _UI_WORDS, _UI_SUFFIXES, _CHARACTER_CONTAINER_WORDS, _GENERIC_IMAGE_ROOTS, _BG_WORDS, _CG_WORDS, _BG_DIR_SUFFIXES, _CG_DIR_SUFFIXES, _PREVIEW_WORDS, _BG_NAME_RE, _CG_NAME_RE, _UI_NAME_RE, _BG_NAME_HINTS, _CG_NAME_HINTS, _UI_NAME_HINTS, _NON_CHARACTER_FIRST_WORDS, _SKIP_SCAN_DIRS, _GENERIC_IMAGE_DIRS, _MUSIC_DIR_NAMES, _SOUND_DIR_NAMES, _SOUND_NAME_HINTS, _MUSIC_NAME_HINTS, _ASSET_KINDS, _STANDARD_TABLES, _TABLE_FIELDS, _PLACEHOLDER_MARKS, _COLOR_PATTERN, _SHOW_STOP_WORDS, _RE_SHOW_LINE, _RE_AUDIO_LINE, _RE_AT_TRANSFORM, _RE_WITH_TRANSITION, _RE_VOICE_LINE, _AUDIO_ID_PREFIXES
 from storygraph.core.safeguard import swallow
 from storygraph.assets.asset_dimensions import dimensions_of_row
 #: 缩略图路径解析（2026-11-01 从 `story/excel_export.py` 搬进同包 `thumb_paths`）：
@@ -73,6 +73,59 @@ def _segment_is_ui(segment: str) -> bool:
         return True
     low = str(segment or '').lower().strip()
     return any(low.endswith(sfx) for sfx in _UI_SUFFIXES)
+
+
+def _segment_is_bg(segment: str) -> bool:
+    """
+    这一段是背景容器吗（词元 **或词尾**）。
+
+    词尾这一条是 2026-11-02 补的：真实项目把背景缩在词尾 ——
+    `images/nbg/`（new bg，42 个 `bg1.1.png` 这种文件）、`images/hdbg/`。
+    词元匹配对 `nbg` 一无所知，于是整目录被判成"角色目录 nbg"，42 张背景
+    在资源表里写成 `Tag=nbg / Category=character`，选择器里归进「其他图片」。
+    """
+    toks = _segment_tokens(segment)
+    if any(t in _BG_WORDS for t in toks):
+        return True
+    low = str(segment or '').lower().strip()
+    return any(low.endswith(sfx) for sfx in _BG_DIR_SUFFIXES)
+
+
+def _segment_is_cg(segment: str) -> bool:
+    """这一段是 CG 容器吗（词元 **或词尾**，与 `_segment_is_bg` 对称）。"""
+    toks = _segment_tokens(segment)
+    if any(t in _CG_WORDS for t in toks):
+        return True
+    low = str(segment or '').lower().strip()
+    return any(low.endswith(sfx) for sfx in _CG_DIR_SUFFIXES)
+
+
+def _segment_is_preview(segment: str) -> bool:
+    """这一段是预览/缩略图目录吗（`cc_preview` / `thumbs` / `preview` …）。"""
+    return any(t in _PREVIEW_WORDS for t in _segment_tokens(segment))
+
+
+def _is_generic_image_root(segment: str) -> bool:
+    """
+    这一段是"装图片的通用目录"吗（`images` / `art` / `preview` …）？
+
+    允许**复合名**（`cc_preview` → ['cc','preview']）：真实项目的预览副本
+    目录就叫这个，而它的形状和 `images/<角色>/…` 完全一样。
+    """
+    return any(t in _GENERIC_IMAGE_ROOTS for t in _segment_tokens(segment))
+
+
+def _dir_can_be_a_character_tag(segment: str) -> bool:
+    """
+    `images/<这一段>/<图>` 里，这一段**有可能**是角色名吗？
+
+    位置约定（"父目录的父目录叫 images"）只是**猜测**，所以先排掉一眼就不像
+    角色的名字：`images/rhythm_game/`（小游戏箭头）、`images/try/`（试验图）、
+    `images/effects/` —— 它们真机里都被编成了 `rhythm game` / `try` 这种
+    脚本里根本不存在的 tag（2026-11-02，21 行）。
+    """
+    toks = _segment_tokens(segment)
+    return bool(toks) and not any(t in _NON_CHARACTER_FIRST_WORDS for t in toks)
 
 def _under_skip_dir(rel_path: Path) -> bool:
     """这一条路径下面是不是有"整目录跳过"的名字？"""
@@ -135,28 +188,59 @@ def _detect_category(rel_path: Path) -> str:
         `images/bg_1.jpg` → background ✓、`images/cg01.png` → cg ✓；
       · 都不认 → `other`（**不再瞎猜**：`pomodorro/images/*`、`minigamepieces/*`
         这些就是 other）。
+
+    2026-11-02 又收紧四条（用户："资源筛选与管理系统写得不够硬"）：
+
+      · **目录语义 > 文件名 > 位置猜测**：`nbg` 这种把 bg 缩在词尾的目录靠
+        `_segment_is_bg` 的词尾判据认出来；而 `images/nbg/bg1.1.png` 的
+        `bg1.1` 是文件名级的**字面**证据 —— 字面证据压过"父目录叫 images
+        所以它可能是立绘"这种位置猜测（真机 42 行背景被编成了角色 `nbg`）；
+      · **位置猜测先验一验名字**：`images/rhythm_game/`、`images/try/`、
+        `images/effects/` 不是角色目录（见 `_dir_can_be_a_character_tag`）；
+      · **平铺约定只管"就躺在 images/ 里"、且带下划线的文件**：
+        `images/try/changeover_lan.png` 不再套 `images/<tag>_<attr>.png`
+        那条（真机 17 行）；`pexels-photo-107937.jpeg` 这种下载来的散图也
+        不再成为"角色 pexels"（真机 12 张）；
+      · **预览/缩略图目录是立绘素材**：`cc_preview/lan/angry.png`、
+        `thumbs/lan/…` → character（真机 159 行从 `other` 变成 character）。
+
+    三段拆开写（`_category_by_dir` / `_category_by_name` / `_category_by_position`）：
+    优先级一眼能看懂，也不把这个函数顶到复杂度棘轮上。
     """
-    dirs = [p for p in rel_path.parts[:-1] if p]
-    for seg in reversed(dirs):                     # 从最近往外
-        toks = _segment_tokens(seg)
-        if not toks:
+    return (_category_by_dir(rel_path)
+            or _category_by_name(rel_path)
+            or _category_by_position(rel_path)
+            or 'other')
+
+
+def _category_by_dir(rel_path: Path) -> str:
+    """**目录语义**（最硬的一层）：从最靠近文件的目录往外找。认不出 = ''。"""
+    for seg in reversed([p for p in rel_path.parts[:-1] if p]):
+        if not _segment_tokens(seg):
             continue
-        if any(t in _CG_WORDS for t in toks):
+        if _segment_is_cg(seg):
             return 'cg'
-        if any(t in _BG_WORDS for t in toks):
+        if _segment_is_bg(seg):
             return 'background'
-        if any(t in _CHARACTER_CONTAINER_WORDS for t in toks):
+        if any(t in _CHARACTER_CONTAINER_WORDS
+               for t in _segment_tokens(seg)):
             return 'character'
         if _segment_is_ui(seg):
             return 'ui'
-    # `images/<tag>/x.png`：**`images` 的直接子目录**就是角色目录 —— 这是最常见的
-    # 立绘布局（`game/images/eileen/happy.png`），而目录名本身（`eileen`）
-    # 看不出任何语义。⚠ 只认"父目录的父目录叫 images"这一种：
-    # `game/pomodorro/images/dororo.png`（文件直接躺在 `images/` 里）不算，
-    # `game/minigamepieces/logo/x.png` 也不算（那个 `logo` 上面不是 `images`）。
-    if len(dirs) >= 2 and dirs[-2].lower() in _GENERIC_IMAGE_ROOTS:
-        return 'character'
-    name = rel_path.name.lower()                   # 弱线索：只看文件名
+        # 预览/缩略图目录**不在这里先判**：它可能装在 `gui/phone/preview/`
+        # 里（那是界面），也可能装在 `cc_preview/lan/` 里（那是立绘副本）。
+        # 交给"位置约定"（父目录是通用图片根）定。
+    return ''
+
+
+def _category_by_name(rel_path: Path) -> str:
+    """
+    **文件名**（第二硬，字面证据）：`bg_1.jpg` / `cg01.png` / `start.jpg`。
+
+    比"位置猜测"硬：`images/nbg/bg1.1.png` 的 `bg` 是写出来的，
+    而"父目录叫 images"只是个位置推测。
+    """
+    name = rel_path.name.lower()
     stem = rel_path.stem.lower()
     if _CG_NAME_RE.match(stem) or any(h in name for h in _CG_NAME_HINTS):
         return 'cg'
@@ -164,18 +248,32 @@ def _detect_category(rel_path: Path) -> str:
         return 'background'
     if _UI_NAME_RE.match(stem) or any(h in name for h in _UI_NAME_HINTS):
         return 'ui'
-    # **平铺约定**：`images/eileen_happy.png` —— 目录无语义，但文件名是
-    # `<tag>_<属性>`（Ren'Py 自动图像的惯例），按立绘收，tag = 首段。
-    #
-    # ⚠ 只认"确实在 `images/` 下"的：项目根目录的零散图
-    # （`about_collection_smoke.png`）不算 —— 否则会给它编出一个
-    # 脚本里根本不存在的角色 tag（用户表里那些行 Tag 是空的）。
-    low_dirs = [d.lower() for d in dirs]
-    if 'images' in low_dirs or 'image' in low_dirs:
-        toks = _segment_tokens(stem)
-        if len(toks) >= 2 and toks[0] not in _NON_CHARACTER_FIRST_WORDS:
-            return 'character'
-    return 'other'
+    return ''
+
+
+def _category_by_position(rel_path: Path) -> str:
+    """
+    **位置猜测**（最弱的证据）：`<通用图片根>/<名字>/x.png` 与平铺 `<tag>_<attr>.png`。
+
+    · `image`/`assets`/`art`/`preview`/… 的直接子目录当角色目录
+      （`game/images/eileen/happy.png`）。⚠ 先验名字（`_dir_can_be_a_character_tag`）：
+      `images/rhythm_game/`、`images/try/` 就不像；
+    · 平铺：文件**直接躺在**通用图片根里，且文件名 `<tag>_<属性>` 带**下划线**
+      （Ren'Py 自动图像的写法）。`images/try/changeover_lan.png` 的父目录是
+      `try` 不是 `images`，不算；`pexels-photo-107937.jpeg` 没有下划线，不算。
+    """
+    dirs = [p for p in rel_path.parts[:-1] if p]
+    if len(dirs) >= 2 and _is_generic_image_root(dirs[-2]) \
+            and _dir_can_be_a_character_tag(dirs[-1]):
+        return 'character'
+    if not dirs or not _is_generic_image_root(dirs[-1]):
+        return ''
+    if '_' not in rel_path.stem:
+        return ''
+    toks = _segment_tokens(rel_path.stem.lower())
+    if len(toks) >= 2 and toks[0] not in _NON_CHARACTER_FIRST_WORDS:
+        return 'character'
+    return ''
 
 def _normalize_tag(name: str) -> str:
     """目录名/文件名 → image tag：去分隔符、转小写。"""
@@ -183,6 +281,18 @@ def _normalize_tag(name: str) -> str:
     for ch in ('_', '-'):
         name = name.replace(ch, ' ')
     return ' '.join(name.split()).lower()
+
+def _tag_from_dir(segment: str) -> str:
+    """
+    目录名 → image tag：**保留下划线**（只归一空格、转小写）。
+
+    为什么不能走 `_normalize_tag`（它会把 `_` 换成空格）：Ren'Py 的 tag 是
+    一个标识符，**下划线是名字的一部分** —— `layeredimage star_girl:` 里
+    tag 就叫 `star_girl`，写成 `show star girl` 是两个词、引擎不认。
+    文件名那套"下划线当分隔符"的约定（`eileen_happy.png` → tag `eileen`）
+    只适用于**文件名**，目录名就是名字本身。
+    """
+    return ' '.join(str(segment or '').strip().lower().split())
 
 def _detect_image_tag(file: Path, rel_path: Path, category: str) -> str:
     """
@@ -216,12 +326,18 @@ def _detect_image_tag(file: Path, rel_path: Path, category: str) -> str:
         return 'ui'
 
     parts = list(rel_path.parts[:-1])              # 目录段（不含文件名）
+    # **预览/缩略图副本不编 show 名**（2026-11-02，真机 159 行）：它是立绘素材
+    # （category=character），但那张图的文件名不是能写进 `show` 的名字 ——
+    # 真立绘在 `images/characters/<tag>/` 那边。给了 tag，身份层就会把它当成
+    # 能直接上舞台的立绘（`show lan angry` 指到一张 1/4 预览图上）。
+    if any(_segment_is_preview(seg) for seg in parts):
+        return ''
     for i, seg in enumerate(parts):
         toks = _segment_tokens(seg)
         if any(t in _CHARACTER_CONTAINER_WORDS for t in toks):
             # 容器目录的下一段 = 角色名（`characters/ling/happy.png` → ling）
             if i + 1 < len(parts):
-                nxt = _normalize_tag(parts[i + 1])
+                nxt = _tag_from_dir(parts[i + 1])
                 if nxt:
                     return nxt
             stem = file.stem
@@ -245,7 +361,7 @@ def _detect_image_tag(file: Path, rel_path: Path, category: str) -> str:
         if any(t in _CHARACTER_CONTAINER_WORDS
                for t in _segment_tokens(seg)):
             continue
-        return _normalize_tag(seg)
+        return _tag_from_dir(seg)
     return ''
 
 def _classify_audio(rel_path: Path) -> str:

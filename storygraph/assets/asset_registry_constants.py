@@ -73,6 +73,8 @@ _UI_WORDS = frozenset({
     'checkboxs', 'window', 'windows', 'title', 'titles', 'logo', 'logos',
     'badge', 'badges', 'bar', 'bars', 'phone', 'phones', 'screen', 'screens',
     'center', 'centers', 'gallery', 'galleries', 'menu_ui', 'dutui',
+    # —— 中文目录（很常见：`game/界面/`、`game/按钮/`）——
+    '界面', '图标', '按钮', '菜单', '弹窗', '系统', '标题', '对话框',
 })
 
 _UI_SUFFIXES = ('gui', 'ui', 'hud', 'center', 'screen', 'menu', 'button',
@@ -82,19 +84,48 @@ _CHARACTER_CONTAINER_WORDS = frozenset({
     'character', 'characters', 'char', 'chars', 'sprite', 'sprites',
     'portrait', 'portraits', 'figure', 'figures', 'actor', 'actors',
     'tachie', 'standing',
+    # 中文：`game/立绘/<角色>/…` 是最常见的写法。
+    # ⚠ 只收「立绘」这种明确指代 sprite 的词 —— **不收「角色」**：
+    # 真机 `gui/dutui/Frame 45/角色/名称介绍.png` 是界面里的一格，
+    # 收进来就会把界面图判成立绘（2026-11-02 实测）。
+    '立绘',
 })
 
 _GENERIC_IMAGE_ROOTS = frozenset({
     'images', 'image', 'img', 'imgs', 'graphics', 'assets', 'art', 'pics',
     'pictures',
+    # 预览副本的容器（`cc_preview/lan/angry.png`、`thumbs/lan/…`）：它的形状
+    # 和 `images/<角色>/…` 一模一样 —— 里面装的是**角色目录**（2026-11-02，
+    # 真机 159 行预览副本因此被判成 `other`）。
+    'preview', 'previews', 'thumb', 'thumbs', 'thumbnail', 'thumbnails',
+    # 中文：`game/图片/<角色>/…`
+    '图片', '图像', '素材', '美术',
+})
+
+#: 预览 / 缩略图目录的通用词（**不是项目名**）。扫描与身份判定共用一份，
+#: 免得两处各写一个集合然后漂移。
+_PREVIEW_WORDS = frozenset({
+    'preview', 'previews', 'thumb', 'thumbs', 'thumbnail', 'thumbnails',
+    '预览', '缩略图',
 })
 
 _BG_WORDS = frozenset({'bg', 'bgs', 'background', 'backgrounds', 'backdrop',
-                       'backdrops', 'scene', 'scenes'})
+                       'backdrops', 'scene', 'scenes',
+                       # 中文
+                       '背景', '场景', '背景图', '底图'})
 
 _CG_WORDS = frozenset({'cg', 'cgs', 'event', 'events', 'cutscene',
                        'cutscenes', 'illust', 'illusts', 'illustration',
-                       'illustrations', 'gallery', 'galleries'})
+                       'illustrations', 'gallery', 'galleries',
+                       # 中文
+                       '插画', '剧情图', '事件图', '事件'})
+
+#: 目录名的**词尾**判据（与 `_UI_SUFFIXES` 同一个思路）。
+#: 真实项目把背景缩在词尾：`images/nbg/`（new bg，42 行）、`images/hdbg/`
+#: —— 词元匹配认不出 `nbg`，于是它被判成"角色目录 nbg"（2026-11-02 实测）。
+_BG_DIR_SUFFIXES = ('bg', 'bgs', 'background', 'backgrounds', 'backdrop')
+
+_CG_DIR_SUFFIXES = ('cg', 'cgs', 'cutscene')
 
 _BG_NAME_RE = re.compile(r'^(bg(?!m)|backdrop|background)([a-z\d_\-. ]|$)')
 
@@ -110,10 +141,10 @@ _BG_NAME_HINTS = ('bg_', '_bg', 'background', 'backdrop')
 _CG_NAME_HINTS = ('cg_', '_cg', 'cutscene')
 
 _UI_NAME_HINTS = ('ui_', '_ui', 'icon_', '_icon', 'button_', '_button',
-                  'btn_', '_btn', 'gui_', '_gui')
+                  'btn_', '_btn', 'gui_', '_gui', 'title')
 
 _NON_CHARACTER_FIRST_WORDS = frozenset(
-    set(_BG_WORDS) | set(_CG_WORDS) | set(_UI_WORDS) | {
+    set(_BG_WORDS) | set(_CG_WORDS) | set(_UI_WORDS) | set(_PREVIEW_WORDS) | {
         'bgm', 'music', 'sfx', 'sound', 'sound_effect', 'se', 'voice',
         'photo', 'pic', 'pics', 'img', 'imgs', 'image', 'screenshot',
         'clipboard', 'snipaste', 'test', 'tmp', 'temp', 'new', 'old',
@@ -129,6 +160,12 @@ _NON_CHARACTER_FIRST_WORDS = frozenset(
         'frame', 'panel', 'box', 'line', 'bar', 'label', 'note', 'card',
         'cards', 'list', 'grid', 'table', 'page', 'tab', 'tabs', 'arrow',
         'cursor', 'shadow', 'mask', 'overlay', 'layer', 'filter', 'blur',
+        # —— 小游戏 / 试验 / 草稿目录（2026-11-02 真机：`images/rhythm_game`、
+        #    `images/try` 被当成立绘目录，于是编出 `rhythm game` / `try` 两个
+        #    脚本里根本不存在的 tag）——
+        'game', 'games', 'minigame', 'minigames', 'try', 'tests', 'demo',
+        'demos', 'sample', 'samples', 'draft', 'drafts', 'wip', 'bak',
+        'backup', 'backups', 'unused', 'misc',
     })
 
 _SKIP_SCAN_DIRS = frozenset({
