@@ -1082,12 +1082,23 @@ class ExtensionDialog(QDialog):
         # `_save()` 会把状态栏换成它自己那句；导入的结果**拼在前面**（两件事都
         # 得说：导进了几条、存盘成没成）。导错了要有退路 —— 也写在同一行里，
         # 别指望用户自己发现右边多了个按钮（第九轮）。
-        # ⚠ 只在**这次导入真的写了盘**时才说：这次一条都没变（档案里的都一样的）
-        #   却提示"能退回"，退的会是更早那次保存 —— 那是骗人。
-        if self._undo and self._undo is not before_undo:
-            told += '｜导错了可以点「撤销上次保存」整体退回'
+        told += self._undo_hint(before_undo)
         self.status.setText(told + '｜' + self.status.text())
         return {**res, 'saved': True}
+
+    def _undo_hint(self, before_undo) -> str:
+        """
+        "导错了能退回" 这句话 —— **只在这次真的写了盘**时才给。
+
+        档案里的条目本来就一样 → `save()` 不给材料，那时提示"能退回"，
+        退的会是**更早那次**保存 —— 那是骗人。
+
+        （单独一个小方法：塞在 `import_archive` 里多两个分支，那一条函数就
+        越过"高分支 >20"的棘轮了 —— 仓库的技术债棘轮只许降。）
+        """
+        if self._undo and self._undo is not before_undo:
+            return '｜导错了可以点「撤销上次保存」整体退回'
+        return ''
 
     def _ask_import_conflict(self, data: dict, first: dict):
         """同名不同形 → 当面问（覆盖 / 保留 / 取消）。取消返回 None。"""
