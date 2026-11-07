@@ -113,6 +113,11 @@ class ExtensionDialog(QDialog):
         self._reg = ER.ExtensionRegistry.for_project(self._root_path)
         self._current = None
         self._loading = False
+        #: 上一次保存的撤销材料（`save()` 返回的 `undo`）。
+        #:
+        #: ⚠ 放在**窗口**里，不放在注册表里（2026-11-07 第九轮）：`_reread()`
+        #:   会换一个新的注册表对象，挂在注册表上的材料每次保存完就被自己弄丢了。
+        self._undo = None
         #: 存过盘没有（另一个窗口据此决定要不要重新读一遍项目）
         self.changed = False
 
@@ -345,12 +350,31 @@ class ExtensionDialog(QDialog):
         # （于是冲突照旧会被 `_ask_conflict` 拦下来）。
         b_export = QPushButton('导出…')
         b_export.setToolTip('把当前这些声明存成一份可移植档案（别的项目可以导入）')
-        b_export.clicked.connect(lambda: self._export_archive())
+        # ⚠ 连的是 `export_archive` —— 第九轮之前这里写的是
+        #   `self._export_archive()`，而类里根本没有这个方法：点下去是
+        #   AttributeError，PySide6 只把它打到 stderr，按钮看着**完全没反应**
+        #   （`tests/test_dead_slots.py` 现在钉着这一类）。包一层 lambda 仍然
+        #   必须：直接 `connect(self.export_archive)` 会把 `checked=False`
+        #   当第一个实参喂进去（`path='False'`）。
+        b_export.clicked.connect(lambda: self.export_archive())
         b_import = QPushButton('导入…')
         b_import.setToolTip('读一份扩展档案装进这个项目（先看冲突，再保存）')
-        b_import.clicked.connect(lambda: self._import_archive())
+        b_import.clicked.connect(lambda: self.import_archive())
         foot.addWidget(b_export)
         foot.addWidget(b_import)
+        # —— 撤销刚才那次保存（2026-11-07 第九轮，设计文档 §18.4）——
+        #
+        # 导入是**批量改**：走错一份档案就是几十条声明一起变。从前退路只有
+        # `save()` 留在同目录的 `.bak`（要人自己去翻文件）。现在这里能一键
+        # 退回去，而且**只退自己那一次**：文件在之后又被谁改过就拒绝动手。
+        self.btn_undo = QPushButton('撤销上次保存')
+        self.btn_undo.setToolTip(
+            '把 storygraph.ext.json 退回**上一次「保存到项目」之前**那副样子。\n'
+            '只退本窗口自己那次保存：文件在那之后又被改过 / 删了 → 拒绝动手，'
+            '一个字都不写。')
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(lambda: self._undo_save())
+        foot.addWidget(self.btn_undo)
         b_close = QPushButton('关闭')
         b_close.clicked.connect(self.reject)
         b_save = QPushButton('保存到项目')
@@ -862,6 +886,7 @@ class ExtensionDialog(QDialog):
                          + '、'.join(absorbed[:4])
                          + ('…' if len(absorbed) > 4 else ''))
         self.changed = True
+        self._remember_undo(res)
         self._reread(keep)
         if self._reg.problems:
             notes.append(f'{len(self._reg.problems)} 条读取问题（见左树 ⚠）')
@@ -893,6 +918,56 @@ class ExtensionDialog(QDialog):
         self.status.setText(self.status.text()
                             + '｜冲突的几条按你这边的版本覆盖了。')
         return True
+
+    # ==================================================================
+    #  撤销"刚才那次保存"（2026-11-07 第九轮）
+    # ==================================================================
+
+    def _remember_undo(self, res: dict) -> None:
+        """
+        记下"这次保存之前长什么样"，按钮据此亮不亮。
+
+        `save()` 只在**真的改了字节**时才给材料（连点两次保存 → `undo is None`）。
+        那时**保留上一份**：文件内容没变，上一份撤销材料照样成立，不该被清掉。
+        """
+        if res.get('undo'):
+            self._undo = res['undo']
+        self.btn_undo.setEnabled(bool(self._undo))
+
+    def _undo_save(self) -> dict:
+        """
+        把上一次保存退回去（文件整份恢复成保存之前那副样子）。
+
+        **不是**用 `save()` 再存一遍旧内容：那份是三方合并，会按 id 判"谁改过"，
+        撤销就会变成"部分撤销 + 一堆冲突提示"（见 `registry.restore_manifest`）。
+
+        文件在那之后被别人改过 / 删了 → **拒绝动手**，一个字不写；那种情况下
+        这份材料再也不会对上了，把按钮灰掉（别让人反复点一个注定失败的东西）。
+        拿不到锁是另一回事：那是"稍后再试"，按钮留着。
+        """
+        if not self._undo:
+            self.status.setText('没有可撤销的保存。')
+            self.btn_undo.setEnabled(False)
+            return {'ok': False, 'reason': '没有可撤销的保存'}
+        res = ER.restore_manifest(self._undo)
+        if not res.get('ok'):
+            self.status.setText('没撤销：' + str(res.get('reason') or '?'))
+            if res.get('changed'):
+                self._undo = None
+            self.btn_undo.setEnabled(bool(self._undo))
+            return res
+        self._undo = None
+        self.btn_undo.setEnabled(False)
+        self.changed = True
+        self._reread()
+        if res.get('deleted'):
+            self.status.setText(
+                f'已撤销上次保存：{ER.MANIFEST} 在保存前本来不存在，照原样删掉了。')
+        else:
+            self.status.setText(
+                f'已撤销上次保存：{ER.MANIFEST} 回到保存之前那副样子'
+                '（退掉的那份留在同目录的 .bak 里）。')
+        return res
 
     # ==================================================================
     #  把声明带走（导出 / 导入一份可移植档案）
@@ -990,6 +1065,7 @@ class ExtensionDialog(QDialog):
         #   如果它就是刚导入的那条，等于拿旧表单把档案覆盖回去。
         self._current = None
         self._reload_tree()
+        before_undo = self._undo
         saved = self._save()
         added = list(res.get('added') or ())
         replaced = list(res.get('replaced') or ())
@@ -1004,7 +1080,12 @@ class ExtensionDialog(QDialog):
             self.status.setText(told + '｜**还没存盘**：' + self.status.text())
             return {**res, 'saved': False}
         # `_save()` 会把状态栏换成它自己那句；导入的结果**拼在前面**（两件事都
-        # 得说：导进了几条、存盘成没成）。
+        # 得说：导进了几条、存盘成没成）。导错了要有退路 —— 也写在同一行里，
+        # 别指望用户自己发现右边多了个按钮（第九轮）。
+        # ⚠ 只在**这次导入真的写了盘**时才说：这次一条都没变（档案里的都一样的）
+        #   却提示"能退回"，退的会是更早那次保存 —— 那是骗人。
+        if self._undo and self._undo is not before_undo:
+            told += '｜导错了可以点「撤销上次保存」整体退回'
         self.status.setText(told + '｜' + self.status.text())
         return {**res, 'saved': True}
 
@@ -1089,6 +1170,7 @@ class ExtensionDialog(QDialog):
             self._reread(p.id)
             return
         self.changed = True
+        self._remember_undo(res)
         self._reread()
         self.status.setText(f'已删除「{p.label or p.id}」。')
 

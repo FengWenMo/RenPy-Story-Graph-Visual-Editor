@@ -209,12 +209,62 @@ class TestFileHelpers:
 # ---------------------------------------------------------------------------
 #  窗口：两个按钮（导出 / 导入）真的落到文件和项目里
 # ---------------------------------------------------------------------------
+#
+# ⚠ 第七轮这一节判的是"`export_archive()` / `import_archive()` 干活对不对"，
+#   **没有一条真的去点按钮** —— 而按钮连的是 `self._export_archive()`
+#   （多一个下划线，类里不存在）。于是这一节全绿、用户点下去毫无反应。
+#   第九轮补上真点击（下面两条），源码层面另有 `test_dead_slots.py` 守着。
 
 class TestWindow:
     @staticmethod
     def _dialog(root):
         from storygraph.ui_qt.dialog_extensions import ExtensionDialog
         return ExtensionDialog(None, project_root=root)
+
+    @staticmethod
+    def _button(dlg, text):
+        from PySide6.QtWidgets import QPushButton
+        for btn in dlg.findChildren(QPushButton):
+            if btn.text() == text:
+                return btn
+        raise AssertionError(f'窗口上没有「{text}」按钮：'
+                             f'{[b.text() for b in dlg.findChildren(QPushButton)]}')
+
+    def test_export_button_really_writes_the_file(
+            self, qapp, tmp_path, monkeypatch):
+        """**点按钮**（不是调方法）：第九轮之前这里是死按钮。"""
+        root = tmp_path / 'p'
+        _write_ext(root, [_cue(root)])
+        dlg = self._dialog(root)
+        out = tmp_path / 'pkg.sg-ext.json'
+        monkeypatch.setattr(dlg, '_ask_export_path', lambda: str(out))
+        btn = self._button(dlg, '导出…')
+        assert btn.isEnabled()
+        btn.click()                     # 槽里抛异常只会打到 stderr
+        assert out.is_file(), '「导出…」点下去什么都没发生'
+        assert '已导出 1 条' in dlg.status.text()
+        assert [e['id'] for e in
+                json.loads(out.read_text(encoding='utf-8'))['extensions']] \
+            == ['mycue']
+
+    def test_import_button_really_lands_in_the_project(
+            self, qapp, tmp_path, monkeypatch):
+        """**点按钮**：档案要真的进到项目的 `storygraph.ext.json` 里。"""
+        src = tmp_path / 'src'
+        _write_ext(src, [_wipe(src)])
+        arch = ExtensionRegistry.for_project(src).export_archive(name='包')
+        pkg = tmp_path / 'pkg.sg-ext.json'
+        pkg.write_text(A.dump_archive(arch), encoding='utf-8')
+
+        dst = tmp_path / 'dst'
+        (dst / 'game').mkdir(parents=True)
+        dlg = self._dialog(dst)
+        monkeypatch.setattr(dlg, '_ask_import_path', lambda: str(pkg))
+        btn = self._button(dlg, '导入…')
+        btn.click()
+        on_disk = json.loads((dst / MANIFEST).read_text(encoding='utf-8'))
+        assert [e['id'] for e in on_disk['extensions']] == ['my_wipe']
+        assert '导入：新增 1 条' in dlg.status.text()
 
     def test_export_writes_the_file_and_says_what_it_left_out(
             self, qapp, tmp_path, monkeypatch):
