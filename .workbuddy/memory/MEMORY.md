@@ -50,7 +50,7 @@
 - QSS 吞 `QTreeView` 展开三角 → 自绘 `▾/▸` + `setRootIsDecorated(False)`；判 dock 用 `isHidden()`；`saveState()` 要 `objectName`。
 - **滚轮永远不许改值**（`ui_qt/wheel_guard.py`：`WheelSafeComboBox` + `WheelValueGuard`，`ensure_installed()` 幂等）：不改值、**显式转交**外层滚动，只有候选已弹开才放行。
 - 右栏宽度由卡片自己决定：`WheelSafeComboBox` 已钉 `AdjustToMinimumContentsLengthWithIcon` + `MinimumContentsLength=4`，别改回默认；`_dirty_label` 只留「● 未保存」；`window_state.LAYOUT_VERSION=3`。
-- **chip 候选圈必须含「空」**（排最后）；⚠ 空 ≠ 组里第一个词（`when` 条件不成立时整组不叠）。`resolve_layers` 只认显式 `default`、无"组里第一个"兜底（`layered_model.py:1075`，未修）。
+- **chip 候选圈必须含「空」**（排最后）；⚠ 空 ≠ 组里第一个词（`when` 条件不成立时整组不叠）。`resolve_layers` 没命中又没 `default` 就整组跳过 —— **这是引擎语义，不是缺兜底**（2026-11-07 第八轮核过 SDK `renpy/common/00layeredimage_ren.py`：`Attribute.default` 的文档写着"没有别的属性被选中时才是它"，`get_displayable` 只认属性集合）。**别再给它加"组里第一个"兜底**。
 - 卡片标题拼代号才看得见：`SpriteCardWidget._art_code`（来源 `Term.code`，两半都查得到才显示）；右键候选挂 `A3｜base_hand_up angry`，**值仍是引擎写法**。
 
 **落盘/全局开关**
@@ -152,7 +152,7 @@
   对外返回键不变、界面未改。判据 `tests/test_manifest_locking.py` 7 条
   （含三条真并发），变异 4/4 抓住，全量 **10132 passed**。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底｜`field` 加新列的导出口径未定｜导入 + 保存后没有 undo（退路是 `.bak`）。
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜导入 + 保存后没有 undo（退路是 `.bak`）。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
