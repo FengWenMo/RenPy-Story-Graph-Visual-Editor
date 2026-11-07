@@ -984,18 +984,86 @@ def _sync_append_stage(root, table_dir, assets, unreg, diff, walk, added):
     return added_by_kind, backups
 
 
+def _path_coverage(registry) -> dict:
+    """
+    `{表名: (资源行总数, 其中写了「真实文件」的行数)}` —— `sync` 的补登守卫用。
+
+    ⚠ **必须按表分开数**（2026-11-02 压测第二轮打的补丁）：第一版数的是
+    全局合计，于是"图片表被删了 Path 列、而音乐表好好的"这种最真实的情形
+    会被音乐表那一行放行 —— 图片照样被重复补登一遍。
+
+    只数**资源表**（图片 / 音乐 / 音效 / 语音 / 自定义）：角色表与 transform
+    表本来就可以没有 Path（`transform` 是代码，`character` 不一定有立绘），
+    把它们算进来会让"角色表没填路径"误判成表头坏了。
+
+    没有 registry（表读不出来）→ `{}`，守卫不拦（那是另一条路的事）。
+    """
+    if registry is None:
+        return {}
+    out = {}
+    for name in ('images', 'music', 'sounds', 'voices'):
+        table = getattr(registry, name, {}) or {}
+        total = with_path = 0
+        for row in table.values():
+            total += 1
+            if str((row or {}).get('Path') or '').strip():
+                with_path += 1
+        if total:
+            out[name] = (total, with_path)
+    for name, table in (getattr(registry, 'custom', {}) or {}).items():
+        total = with_path = 0
+        for row in (table or {}).values():
+            total += 1
+            if str((row or {}).get('Path') or '').strip():
+                with_path += 1
+        if total:
+            out[f'custom_{name}'] = (total, with_path)
+    return out
+
+
+def _path_column_guard(registry) -> str:
+    """
+    补登前的守卫：**有没有哪张资源表"有行、但一行都没写 Path"**。
+
+    返回 `''` = 放行；否则是给人看的原因（`_sync_report` 的 `error`）。
+
+    为什么"有行没 Path"就是表头坏了、而不是"用户真的还没填"：**整表都没有**
+    才算。空表放行（那正是补登该做的事），部分行没 Path 也放行
+    （新加的行常常还没填 —— 这种情况到处都有，不能拦）。
+
+    为什么按表分开判：图片表的列被删、而音乐表好好的，是最真实的形态；
+    数全局合计会被"音乐表有一行 Path"整批放行，图片照样重复补登。
+    """
+    broken = [f'{name}（{n_rows} 行）'
+              for name, (n_rows, n_path) in _path_coverage(registry).items()
+              if n_rows and not n_path]
+    if not broken:
+        return ''
+    return ('这些资源表的**「真实文件」列不见了**：' + '、'.join(broken) + '。'
+            '表里的列被删过 / 改过名，于是每一行看起来都"没有文件" —— '
+            '这时候自动补登会把同一批文件再加一遍，把你整理过的标签和备注'
+            '劈成两份。所以这次**没有补登**。'
+            '把列名改回「真实文件」再打开项目即可；'
+            '或者先备份那几张表、再删掉它们，让工具按磁盘重建。')
+
+
 def _sync_report(*, table_dir, registry, diff, repaired, repair_error,
                  removed_by_kind=None, relinked_by_kind=None,
                  deduped_by_kind=None, added_by_kind=None, backup: str = '',
-                 dimensions=None, unjudged_by_kind=None):
-    """带"删/改指/合并/补登"四项统计的返回体（原先两处各写一遍）。"""
+                 dimensions=None, unjudged_by_kind=None, error: str = ''):
+    """带"删/改指/合并/补登"四项统计的返回体（原先两处各写一遍）。
+
+    `error`（2026-11-02）：**这次没敢动手**的原因。`ok` 仍为 True（表没坏、
+    工具也没坏），但"什么都没做"必须说出来 —— 从前这种情形直接 `ok=True`
+    静默返回，用户以为对齐过了。
+    """
     removed_by_kind = removed_by_kind or {}
     relinked_by_kind = relinked_by_kind or {}
     deduped_by_kind = deduped_by_kind or {}
     added_by_kind = added_by_kind or {}
     dimensions = dimensions or {}
     unjudged_by_kind = unjudged_by_kind or {}
-    return {'ok': True, 'created': '', 'table_dir': str(table_dir),
+    return {'ok': True, 'created': '', 'table_dir': str(table_dir), 'error': error,
             'added': sum(added_by_kind.values()), 'by_kind': added_by_kind,
             'removed': sum(removed_by_kind.values()),
             'removed_by_kind': removed_by_kind,
@@ -1106,6 +1174,20 @@ def sync_asset_tables(project_root, registry=None, asset_dir=None,
                             unjudged_by_kind=unjudged_by_kind,
                             backup=_sync_removed_backups(
                                 table_dir, removed_by_kind))
+    # —— ❹ **补登前先看这张表还认不认得「真实文件」列**（2026-11-02）——
+    # 人删掉这一列后"磁盘上每个文件都没登记"与"表头坏了"长得一模一样 →
+    # 补登把同一批文件再加一遍（实测 2 行变 4 行、`ok=True` 零提示）。
+    why = _path_column_guard(registry)
+    if why:
+        return _sync_report(
+            table_dir=table_dir, registry=registry, diff=diff,
+            repaired=repaired, repair_error=repair_error,
+            removed_by_kind=removed_by_kind,
+            relinked_by_kind=relinked_by_kind,
+            deduped_by_kind=deduped_by_kind,
+            dimensions=dimensions, unjudged_by_kind=unjudged_by_kind,
+            backup=_sync_removed_backups(table_dir, removed_by_kind),
+            error=why)
     # （`assets` 已经在上面扫过一次了，这里直接用 —— 别再扫第二遍。）
     # ❹ **补登**：磁盘上有、表里没有的 → 追加 + 记侧车。判重按**解析后的
     # 真实文件**（不是按字符串）—— 细节都在 `_sync_append_stage`（M4 重构）。
@@ -1175,6 +1257,57 @@ def _sync_registry(made, registry, table_dir, root):
         return None
 
 
+def _drop_outside_game(assets, root):
+    """
+    丢掉 `Path` 不在 `game/` 下的行 → `(干净的 assets, 丢了几条)`。
+
+    为什么必须在**建表侧**、而不是 `scan_assets` 里（2026-11-04，真机 232 条）：
+
+    调用方（`ensure_asset_tables` / `_sync_scan_assets`）传的是**项目根**，
+    于是这些全被当成资源写进了表：
+
+      · `模拟操作/lint_proj/game/images/…`（一个测试副本，231 条）
+      · `about_collection_smoke.png`（项目根下的散图，1 条）
+
+    这些行的 `Path` 都不在 `game/` 下 —— 而资源表这句话的语义就是
+    "**这个项目的 `game/` 里有什么**"。体检的 `outside_game` 正是这么判的。
+
+    ⚠ 不能在 `scan_assets` 里过滤：它也被"扫一个装着多个项目的父目录"
+    这种用法调（`test_scan_golden` 就是，路径长成 `sr_general/game/…`），
+    在那里按 `game/` 前缀过滤会把别的项目一起滤掉。
+
+    没有 `game/` 的项目（少见，但合法）原样返回 —— 不猜。
+    """
+    if not (Path(root) / 'game').is_dir():
+        return assets, 0
+    dropped = 0
+
+    def keep(rows):
+        nonlocal dropped
+        out = []
+        for r in (rows or []):
+            rel = str((r or {}).get('Path') or '').replace('\\', '/').lower()
+            if rel.startswith('game/'):
+                out.append(r)
+            else:
+                dropped += 1
+        return out
+
+    audio = assets.get('audio') or {}
+    return ({
+        'images': keep(assets.get('images')),
+        'audio': {'music': keep(audio.get('music')),
+                  'sound': keep(audio.get('sound'))},
+        'voices': keep(assets.get('voices')),
+    }, dropped)
+
+
+def _scan_inside_game(root, **kw):
+    """扫一次并丢掉 `game/` 外的行（建表 / 对账都该走它，见 `_drop_outside_game`）。"""
+    assets, _dropped = _drop_outside_game(scan_assets(root, **kw), root)
+    return assets
+
+
 def _sync_scan_assets(root, walk):
     """
     扫一次磁盘（对账与补登共用），顺手给新行带上维度。
@@ -1182,7 +1315,7 @@ def _sync_scan_assets(root, walk):
     ⚠ **磁盘只扫一次**：原先对账和补登各扫一次，各走一遍索引里的 5854 个
     文件。维度补不进只吞掉 —— 一次维度解析失败不该挡住建表。
     """
-    assets = scan_assets(root, include_ui=True, walk=walk)
+    assets = _scan_inside_game(root, include_ui=True, walk=walk)
     # 新补登的行也要带维度：否则它们在表里是"Value=整串文件名、Group 空"，
     # 要等下一次打开才被 `parse_asset_tables` 补上。
     try:
@@ -1688,8 +1821,8 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
                 enrich_image_rows, load_layer_model, load_project_facts)
             facts = load_project_facts(root)
             model = load_layer_model(root)
-            assets = scan_assets(root, include_ui=include_ui, walk=walk,
-                                 facts=facts, layer_model=model)
+            assets = _scan_inside_game(root, include_ui=include_ui, walk=walk,
+                                       facts=facts, layer_model=model)
             enrich_image_rows(assets.get('images') or [], facts=facts,
                               layer_model=model, load_project_context=False)
             write_asset_excel(assets, target, split_by_category=False)
@@ -1714,7 +1847,7 @@ def ensure_asset_tables(project_root, asset_dir=None, include_ui=True,
             target = root / 'game' / 'asset_tables'
         else:
             target = root / 'asset_tables'
-        assets = scan_assets(root, include_ui=include_ui)
+        assets = _scan_inside_game(root, include_ui=include_ui)
         from storygraph.assets.asset_dimensions import (
             enrich_image_rows, load_layer_model, load_project_facts)
         facts = load_project_facts(root)
@@ -2310,6 +2443,32 @@ def _backup_table(path: Path) -> str:
     return str(bak)
 
 
+def _norm_asset_id(row: dict, filename: str, registry) -> str:
+    """
+    取出这一行的**资产 ID**（一律是 `str`），顺手把"编号不是文本"记进诊断。
+
+    为什么必须归一（2026-11-02 压测）：`ID` 列里如果出现 `123`，注册表的
+    键就是 **int** —— 于是同一个资源有两种键（`'123'` 与 `123`），
+    `show 123` 解析不到、`get_asset_ids()` 返回的列表混着两种类型、
+    排序时直接 `TypeError`。而这不是假想：Excel 会把用户手打的 `001`
+    存成数字 `1`，**前导零当场消失**，两个 ID（`001` / `0001`）塌成同一个。
+
+    归一之后仍然救不回前导零（信息已经在 Excel 那边没了），所以给一条
+    warning 点名到文件，让用户知道"这一行最好按文本存"。
+    """
+    raw = (row or {}).get('ID')
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ''
+    asset_id = str(raw).strip()
+    row['ID'] = asset_id
+    if not isinstance(raw, str):
+        registry.warnings.append(
+            f'{filename}: 编号 {raw!r} 是**数字**不是文本 —— Excel 会把 '
+            f'`001` 存成 `1`（前导零消失）。这一行已按 `{asset_id}` 处理，'
+            '建议把那一格设成文本格式重新填一次。')
+    return asset_id
+
+
 def parse_asset_tables(asset_dir, hooks=None, project_root=None,
                        walk=None) -> AssetRegistry:
     """
@@ -2341,7 +2500,7 @@ def parse_asset_tables(asset_dir, hooks=None, project_root=None,
                 except Exception as e:
                     registry.warnings.append(
                         f"{filename}: pre_process_row 钩子异常 {e}")
-            asset_id = row.get('ID')
+            asset_id = _norm_asset_id(row, filename, registry)
             if not asset_id:
                 registry.errors.append(f"{filename}: 缺少ID字段")
                 continue

@@ -192,21 +192,49 @@ class TransformDef:
 
 
 def _strip_comment(line: str) -> str:
-    """去掉行尾注释（`#` 在引号里不算注释）。"""
+    """去掉行尾注释（`#` 在引号里不算注释）。
+
+    ⚠ **引号内的 `\\` 是转义，下一个字符不为字符串定界**（2026-11-02 修 P0）。
+
+    为什么（真机 `sr_general/chapter/chapter3_4_4.rpy` 首次导出就撞上）：
+    作者写了
+
+        xqlz "…你不会忘了吧\\" \\t\\t#这里出现名字但是不要出现立绘"
+
+    —— 字符串里的 `\\"` 是**转义引号**，`#` 仍在字符串内部。旧实现把
+    `\\"` 当成字符串结尾，于是 `#` 之后的整段被当成行尾注释截掉。截断位置
+    在"原文形态（真 tab）"与"渲染形态（tab 写成 `\\t`）"上**还不一样**：
+    原文截完恰好以 `"` 结尾，`_SAY_RE` 贪婪匹配勉强认出是台词；渲染形态截完
+    剩 `…\\" \\t\\t`（没有结尾引号）→ 认不出 → 身份键从 `('say','xqlz')`
+    掉成 `('other', 整行)` → 补丁认为这是**新内容**，插一行；原文那一行又
+    因为"台词不许删"（`_may_drop_line`）留着 → **同一句台词出现两遍**，
+    且多出来的那一条是把 tab 写成 `\\t` 的版本。
+
+    这就是"每导出一次就脏一分"的那类缺陷，所以判据必须在这里就正确，
+    而不是在补丁里收拾残局。
+    """
     out, quote = [], ''
-    for ch in line:
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
         if quote:
             out.append(ch)
-            if ch == quote:
+            if ch == '\\' and i + 1 < n:
+                # 转义序列：把下一个字符一并吞掉（它可能正是定界引号本身）。
+                i += 1
+                out.append(line[i])
+            elif ch == quote:
                 quote = ''
+            i += 1
             continue
         if ch in '"\'':
             quote = ch
             out.append(ch)
-            continue
-        if ch == '#':
+        elif ch == '#':
             break
-        out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
     return ''.join(out).rstrip()
 
 

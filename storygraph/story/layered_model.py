@@ -192,7 +192,11 @@ _COND_KEYWORDS = {'and', 'or', 'not', 'True', 'False', 'None', 'in'}
 #  解析：layeredimage 块
 # ---------------------------------------------------------------------------
 
-_RE_LAYERED = re.compile(r'^\s*layeredimage\s+([\w.]+)\s*:')
+#: `layeredimage <tag> [at <transform>] [其它子句]:`
+#: ⚠ 2026-11-04 地狱测试：`layeredimage qing at hell_pose:` 是**合法**的
+#: （引擎 lint 验证过），旧正则只认 `qing:`，于是整个声明读不到 → 卡片把
+#: `show qing base` 判成"不是已知立绘"。
+_RE_LAYERED = re.compile(r'^\s*layeredimage\s+([\w.]+)(?:\s+[^:]*)?:')
 _RE_FORMAT = re.compile(r"""^\s*image_format\s+['"](.+?)['"]""")
 _RE_GROUP = re.compile(
     r"""^\s*group\s+([\w]+)(.*?):\s*$""")
@@ -722,6 +726,16 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
             return [{'path': _image_path(img, image_format),
                      'mask': _image_path(mask, image_format),
                      'crop': None, 'offset': None, 'note': 'AlphaMask'}]
+        # ② 蒙版是**实心矩形**：`Crop((x,y,w,h), Solid("#fff"))`。
+        #    AlphaMask 只看蒙版的 alpha，白色实心 = 矩形内全保留、矩形外全透明
+        #    → 等价于对图做一次 Crop，不必真去生成蒙版图。真机 `crop_lan`
+        #    就是这种写法（2026-11-05：认不出时整张 `clothes2 happy` 判失败，
+        #    预览退回单张表情件 —— 换了服装图却不变）。
+        box = _solid_rect_of(args[1], helpers, image_format, params, depth)
+        if isinstance(img, str) and box:
+            return [{'path': _image_path(img, image_format),
+                     'mask': None, 'crop': box, 'offset': None,
+                     'note': 'AlphaMask(矩形裁切)'}]
         return [{'note': 'AlphaMask 的参数认不出', 'error': True}]
     if name in ('Crop', 'im.Crop') and len(args) >= 2:
         box = _value_of(args[0], helpers, image_format, params, depth)
@@ -741,6 +755,43 @@ def _expand_node(node, helpers, image_format, params, depth) -> list:
     if name == 'Null':
         return []
     return [{'note': f'不认识的 displayable：{name}', 'error': True}]
+
+
+def _solid_rect_of(node, helpers, image_format, params, depth):
+    """
+    `Crop((x, y, w, h), Solid(<颜色>))` → `(x, y, w, h)`（认不出 = None）。
+
+    为什么这种写法等价于裁切（2026-11-05 真机 `crop_lan`）：
+
+        def crop_lan(expr):
+            return AlphaMask(
+                "images/characters/lan/" + expr + ".png",
+                Crop((0, 0, 4320, 1895), Solid("#fff")))
+
+    `AlphaMask(图, 蒙版)` 只取蒙版的 **alpha**：`Solid` 整块不透明、`Crop`
+    把它裁成那个矩形 —— 结果就是"图只保留矩形内的像素"，与 `Crop(矩形, 图)`
+    完全一样。所以静态解析不需要去画一张蒙版图。
+
+    ⚠ 只认"矩形实心"这一种。`Solid` 换成图片 / 渐变 / 带 alpha 的颜色时
+    **不许猜**（返回 None），调用方照旧报"认不出"、退回老路。
+    """
+    if node is None or node.kind != 'call':
+        return None
+    if node.value.split('.')[-1] != 'Crop' or len(node.args) < 2:
+        return None
+    fill = node.args[1]
+    if fill.kind != 'call' or fill.value.split('.')[-1] != 'Solid':
+        return None
+    box = _value_of(node.args[0], helpers, image_format, params, depth)
+    if not (isinstance(box, tuple) and len(box) == 4):
+        return None
+    try:
+        box = tuple(int(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if box[2] <= 0 or box[3] <= 0:
+        return None
+    return box
 
 
 def _src_of(node) -> str:
@@ -1041,6 +1092,28 @@ def attribute_words(model: 'LayerModel') -> dict:
     return out
 
 
+def declared_attr_names(model: 'LayerModel') -> dict:
+    """
+    `{tag: [声明过的属性名, …]}` —— **属性名本身**，不是反查表。
+
+    为什么单开一个（2026-11-04 地狱测试）：`attribute_words` 的键是
+    **图片文件名**，两个属性指到同一张图时只会留下一个（`base` 与 `符_77`
+    都写 `'base'` → 反查表只剩 `base`）。提示层要判"这个词有没有声明过"，
+    拿反查表的值去比就会把另一个别名判成不存在 —— 那是误报。
+
+    只收有属性名的 tag（只有 `always` 的 tag 没有可写的属性，不算）。
+    """
+    out: dict = {}
+    for tag, img in (getattr(model, 'images', None) or {}).items():
+        if not _has_attributes(img):
+            continue
+        names = sorted({str(name) for name in
+                        (img.all_attrs() or {}).keys() if str(name).strip()})
+        if names:
+            out[str(tag)] = names
+    return out
+
+
 def _has_attributes(img) -> bool:
     """这个 `layeredimage` 有没有可写的属性（只有 `always` 的那种没有）。"""
     return any(getattr(g, 'attrs', None)
@@ -1075,8 +1148,16 @@ def _stems_of_attr(attr, helpers: dict, image_format: str) -> set:
 
 
 def load_layer_model(project_root) -> LayerModel:
-    """扫一遍项目，建出合成立绘模型（纯只读）。"""
+    """扫一遍项目，建出合成立绘模型（纯只读）。
+
+    ⚠ **空项目根 = 没有项目**，绝不能当成 `.`（当前工作目录）去扫
+    （2026-11-05 实测：卡片在没有项目根时问一次"实际显示哪张图"，
+    `discover_scripts('')` 把整个仓库连同 `.pip-tmp/` 里上千个临时项目
+    全扫一遍 —— 界面直接卡死，测试十分钟不返回）。
+    """
     model = LayerModel()
+    if not str(project_root or '').strip():
+        return model
     try:
         model.images = parse_layeredimages(project_root)
         model.helpers = parse_helper_functions(project_root)
@@ -1114,7 +1195,12 @@ def layer_model_stamp(project_root) -> tuple:
     便宜 4 倍；而"改了 `layeredimage` 不重开编辑器就看不到"是不能接受的，
     所以这里用指纹失效，而不是"一次会话只读一次盘"。
     认不出 / 读不动 → 返回 `()`（调用方据此**每次都重建**，宁可慢也不给旧数据）。
+
+    ⚠ 空项目根同样返回 `()`：`Path('')` 是 `.`，会把仓库当项目扫
+    （与 `load_layer_model` 同一条守卫）。
     """
+    if not str(project_root or '').strip():
+        return ()
     try:
         from storygraph.parsing.discover import discover_scripts
         files = list(discover_scripts(project_root))
@@ -1367,7 +1453,7 @@ __all__ = ['LayerAttr', 'LayerGroup', 'LayeredImage', 'LayerPlan',
            'LayerModel', 'parse_layeredimages', 'parse_helper_functions',
            'parse_expr', 'expand_displayable', 'evaluate_condition',
            'parse_pose_tables', 'load_layer_model', 'resolve_layers',
-           'attribute_words',
+           'attribute_words', 'declared_attr_names',
            'load_layer_model_cached', 'layer_model_stamp',
            'clear_layer_model_cache',
            'pose_switch_problem', 'frame_pose_warnings']

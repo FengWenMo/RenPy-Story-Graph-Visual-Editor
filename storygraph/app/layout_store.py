@@ -210,6 +210,12 @@ def read_placement(source, project_root=None) -> dict:
     if not isinstance(data, dict) or 'nodes' not in data:
         return {'ok': False, 'error': '这个文件不是版式文件（缺 nodes）',
                 'version': 0, 'nodes': {}, 'edges': [], 'migrated': False}
+    # ⚠ `nodes` 不是对象就不是版式（2026-11-05：项目里别的 JSON 也可能有个
+    #   `nodes` 键、值是列表 —— 直接 `.items()` 会 AttributeError，而调用方
+    #   （自动认领）在"导入章节"这条路上，崩了就是整张图导不进来。
+    if not isinstance(data.get('nodes'), dict):
+        return {'ok': False, 'error': '这个文件不是版式文件（nodes 不是对象）',
+                'version': 0, 'nodes': {}, 'edges': [], 'migrated': False}
 
     try:
         version = int(data.get('version') or 1)
@@ -217,8 +223,12 @@ def read_placement(source, project_root=None) -> dict:
         version = 1
 
     if version >= 2:
+        # ⚠ 值不是对象的一律丢掉：`apply_placement` 里会 `pos.get('x')`，
+        #   拿到列表就是 AttributeError —— 而这条路在"导入章节"上，崩了
+        #   等于整张图导不进来（2026-11-05 自动认领把它变成了必经之路）。
         nodes = {norm_key(k, project_root): v
-                 for k, v in (data.get('nodes') or {}).items()}
+                 for k, v in (data.get('nodes') or {}).items()
+                 if isinstance(v, dict)}
         edges = []
         for ed in (data.get('edges') or []):
             if not isinstance(ed, dict):
@@ -371,8 +381,217 @@ def find_existing(project_root):
     return None
 
 
+# ---------------------------------------------------------------------------
+#  自动认领：项目里**别处**存的版式（2026-11-05）
+# ---------------------------------------------------------------------------
+#
+# 用户真机报的：
+#
+# > 「为什么我明明导入了项目，却没有成功导入布局……？你能自动识别到对应布局
+# >   的 json 文件，并自动导入吗？（不能就算，没有也静默，不用报错）」
+#
+# 事实：他的 `sr_general` 里有两份版式 ——
+#   · `.storygraph/layout.json`（10-26 22:26，工具自动存的**旧**排列）；
+#   · `game/chapter/目前保存的布局(自动生成的，不用看）.json`
+#     （10-28 00:29，他**手动**「保存布局」存下的**新**排列，老格式整图）。
+# 打开项目只认前一个 → 看到的是两天前摆的样子，而且那份老文件里的 **50 条
+# 编排线**（`origin='control'`）也跟着一起丢了。
+#
+# 所以这里加一条"认领"：**项目里任何一份像版式的 JSON 都算候选**，
+# 按"能对上多少块 → 文件多新"挑一份。挑不到就什么都不做（静默）。
+
+#: 扫候选时跳过的目录（**性能护栏，不是对项目形态的断言**）：
+#: 资源 / 引擎自带 / 缓存里不会有版式，进去只会白读几千个文件。
+SCAN_SKIP_DIRS = frozenset({
+    'images', 'audio', 'sounds', 'voices', 'music', 'gui', 'fonts', 'tl',
+    'cache', 'saves', 'libs', 'build', 'node_modules', '__pycache__',
+    'cc_preview', 'minigamepieces', 'renpy', 'common',
+})
+
+#: 扫候选的上限（文件数 / 单文件字节 / 目录深度）。超了就只是一份不认领。
+SCAN_MAX_FILES = 200
+SCAN_MAX_BYTES = 8 * 1024 * 1024
+SCAN_MAX_DEPTH = 4
+
+#: 先读文件头这么多字节找 `"nodes"`（大文件不整个读进来）
+_HEAD_BYTES = 65536
+
+#: 判"像版式"时最多往后读这么多（真机老格式版式 134 KB；再大就不是版式了）
+_SCAN_READ_BYTES = 2 * 1024 * 1024
+
+#: 版式文件的**结构特征**：一个 `"nodes"` 键，后面跟的是**对象**（不是列表）。
+_NODES_KEY = b'"nodes"'
+
+
+def _nodes_object_in(buf: bytes) -> bool:
+    """
+    `buf` 里有没有 `"nodes" : {`（**只看形状，不看文件名**）。
+
+    为什么要求后面是 `{`（2026-11-05 用户："别通过名字认 json，看结构"）：
+    项目里别的 JSON 完全可能也有一个叫 `nodes` 的键（列表 / 数字），
+    那种文件按内容就不是版式 —— 靠文件名猜才会把它们混进来。
+    """
+    start = 0
+    while True:
+        i = buf.find(_NODES_KEY, start)
+        if i < 0:
+            return False
+        j = i + len(_NODES_KEY)
+        while j < len(buf) and buf[j] in b' \t\r\n':
+            j += 1
+        if buf[j:j + 1] == b':':
+            j += 1
+            while j < len(buf) and buf[j] in b' \t\r\n':
+                j += 1
+            if buf[j:j + 1] == b'{':
+                return True
+        start = i + 1
+
+
+def _looks_like_layout(path) -> bool:
+    """
+    这个文件**可能**是版式吗。
+
+    判据**只有内容形状**：JSON 里有 `"nodes": {…}` 这个对象。
+    **不看文件名、不看所在目录、不看 `version` 字段** —— 真机上用户
+    手动存的版式叫「目前保存的布局(自动生成的，不用看）.json」，名字毫无规律；
+    而叫 `layout.json` 的文件也可能是别的项目留下的预设（`sr_general` 的
+    `.storygraph/layout.json` 就和随包预设字节相同）。
+
+    流式读（64 KB 一块），因为老格式版式把 `operations` 放在前面，
+    `nodes` 可能在 100 KB 之后 —— 只看头 8 KB 会**漏掉**真正的版式。
+    读到 `_SCAN_READ_BYTES` 还没找到就当它不是（比整个读 8 MB 便宜）。
+    能不能真读出来由 `read_placement` 决定。
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    if not info.st_size or info.st_size > SCAN_MAX_BYTES:
+        return False
+    limit = min(int(info.st_size), _SCAN_READ_BYTES)
+    carry = b''
+    read = 0
+    try:
+        with open(path, 'rb') as f:
+            while read < limit:
+                chunk = f.read(min(_HEAD_BYTES, limit - read))
+                if not chunk:
+                    break
+                read += len(chunk)
+                buf = carry + chunk
+                if _nodes_object_in(buf):
+                    return True
+                # 只留尾巴：跨块的关键字/冒号可能被切断
+                carry = buf[-64:]
+    except OSError:
+        return False
+    return False
+
+
+def scan_candidates(project_root, *, limit: int = SCAN_MAX_FILES) -> list:
+    """
+    项目里所有**长得像版式**的 JSON（含标准位置），按修改时间从新到旧。
+
+    判定只到"文件头像版式"这一层；能不能真读出来由 `read_placement` 决定
+    （坏文件不在这里报错，挑的时候自然跳过）。
+    """
+    root = Path(str(project_root or ''))
+    if not root.is_dir():
+        return []
+    found, seen = [], 0
+    stack = [(root, 0)]
+    while stack:
+        folder, depth = stack.pop()
+        try:
+            entries = sorted(folder.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                is_dir = path.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                name = path.name
+                if depth >= SCAN_MAX_DEPTH or name in SCAN_SKIP_DIRS:
+                    continue
+                # 隐藏目录一律不进（`.git` / `.venv` …），只留 `.storygraph`
+                if name.startswith('.') and name != '.storygraph':
+                    continue
+                stack.append((path, depth + 1))
+                continue
+            if path.suffix.lower() != '.json':
+                continue
+            seen += 1
+            if seen > limit:
+                return _newest_first(found)
+            if _looks_like_layout(path):
+                found.append(path)
+    return _newest_first(found)
+
+
+def _newest_first(paths) -> list:
+    """按修改时间从新到旧（读不到时间的排最后，不丢）。"""
+    def stamp(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    return sorted(paths, key=lambda p: (-stamp(p), str(p)))
+
+
+def best_for(graph, project_root) -> dict:
+    """
+    给**当前这张图**挑一份最合适的版式 → `{ok, path, data, matched, total,
+    candidates, reason}`。
+
+    挑法（两个判据，缺一不可）：
+
+      1. **能对上多少块**（`file::label` 交集）—— 对不上的版式再新也没用；
+      2. 一样多时取**文件更新**的那份 —— "我最后存的那一版"。
+
+    为什么不是"只看标准位置"：真机上用户手动存的版式落在 `game/chapter/`
+    里（见本节开头），只认标准位置就会拿两天前的排列盖掉今天的。
+
+    为什么不是"只看最新"：项目里可能有上一章/别的项目的残留版式，它很新，
+    但一块都对不上 —— 那种必须跳过，不然会把图打散。
+    """
+    empty = {'ok': False, 'path': None, 'data': None, 'matched': 0,
+             'total': 0, 'candidates': 0, 'reason': '没有可用的版式文件'}
+    nodes = list((getattr(graph, 'nodes', {}) or {}).values())
+    if not nodes:
+        return {**empty, 'reason': '剧情图是空的，没有可贴的对象'}
+    root = Path(str(project_root or ''))
+    keys = {node_key(n, root) for n in nodes}
+    best = None
+    cands = scan_candidates(root)
+    for path in cands:
+        # ⚠ 不在这里包 `except`：`read_placement` 自己的判据已经够严（坏 JSON /
+        #   缺 nodes / nodes 不是对象 都返回 `ok=False`），再包一层宽捕获只会
+        #   让"技术债棘轮"（`broad_excepts`）多记一笔，却不多挡住什么。
+        data = read_placement(path, root)
+        if not data.get('ok'):
+            continue
+        matched = len(keys & set(data.get('nodes') or {}))
+        if not matched:
+            continue
+        row = {'ok': True, 'path': path, 'data': data, 'matched': matched,
+               'total': len(nodes), 'candidates': len(cands), 'reason': ''}
+        if best is None:
+            best = row
+            continue
+        # 先比"贴上多少块"，一样多再比"谁更新"（`scan_candidates` 已按新到旧，
+        # 所以 `>` 就够了：平手保留先出现的那份 = 更新的那份）。
+        if matched > best['matched']:
+            best = row
+    return best or {**empty, 'candidates': len(cands)}
+
+
 __all__ = [
     'PLACEMENT_VERSION', 'PLACEMENT_REL_PATH', 'LEGACY_LAYOUT_NAME',
+    'SCAN_MAX_BYTES', 'SCAN_MAX_DEPTH', 'SCAN_MAX_FILES', 'SCAN_SKIP_DIRS',
     'node_key', 'split_key', 'norm_key', 'placement_dict', 'save_placement',
     'read_placement', 'apply_placement', 'default_paths', 'find_existing',
+    'scan_candidates', 'best_for',
 ]

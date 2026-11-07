@@ -1,4 +1,4 @@
-aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
+bec4146a228c38d19f53d427506b774bbcd01dd2e43e55c46cfe5da043ed750c
 {
  "AAA示例.rpy": {
   "direct": {
@@ -1418,7 +1418,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "74dabd51beaf21e5",
+   "text": "b8563a80809b1911",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1429,7 +1429,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "fbb545e9df89af70",
+   "text": "fbac926986fab243",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1523,7 +1523,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "eae3f2138b38f0b1",
+   "text": "6c7927c98a79a627",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1534,7 +1534,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "1eb9baec926cac69",
+   "text": "d37e3040e01f2ba4",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1558,7 +1558,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "89f13c47e6239106",
+   "text": "e9e662de89cd7350",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1569,7 +1569,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "c43e7e05a19281fc",
+   "text": "ed5d32be87dd8924",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1582,7 +1582,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "84c5fa2a0e72b37a",
+   "text": "1ba922a2a917c73f",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1593,7 +1593,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "c269815350f28e17",
+   "text": "cd9391e2148d2751",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1604,7 +1604,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "84c5fa2a0e72b37a",
+   "text": "1ba922a2a917c73f",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1663,7 +1663,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "4d9dedcd45664fb3",
+   "text": "b3cd6f9672f7a6b1",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true
@@ -1674,7 +1674,7 @@ aea0857a06e04af47af0ed7a0988fdbd3f17a11c964445251c84cff1e10fe891
    "matched_beats": null,
    "reasons": [],
    "stale_beats": null,
-   "text": "cbdd888a49492d03",
+   "text": "1a3ed8eb39730831",
    "total_beats": null,
    "unlanded_lines": null,
    "used_patch": true

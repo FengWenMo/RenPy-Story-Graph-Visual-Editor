@@ -1,99 +1,71 @@
 {
   "schema": "storygraph.mapping/1",
-  "name": "sr_general · 立绘代号（服装字母 + 表情编号）",
-  "characters": {
-    "lan": {
-      "display": "蓝",
-      "avatar": "game/images/characters/avatar/lan.png"
-    },
-    "ling": {
-      "display": "凌跃捷",
-      "avatar": "game/images/characters/avatar/ling.png"
-    },
-    "xing": {
-      "display": "星桥理子",
-      "avatar": "game/images/characters/avatar/xing.png"
-    },
-    "ye": {
-      "display": "叶怀瑾",
-      "avatar": "game/images/characters/avatar/ye.png"
-    },
-    "qing": {
-      "avatar": "game/images/characters/avatar/qing.png"
-    }
-  },
   "outfit_codes": [
     {
       "char": "lan",
       "code": "A",
       "attr": "aa",
-      "label": "普通（剧本里出现 11 处）"
+      "label": "剧本里出现 11 处 · 项目服装表叫「普通」 · ⚠ 引擎里没有这身衣服"
     },
     {
       "char": "lan",
       "code": "B",
       "attr": "base_hand_up",
-      "label": "举手（剧本里出现 13 处）"
+      "label": "剧本里出现 13 处 · 项目服装表叫「举手」"
     },
     {
       "char": "lan",
       "code": "",
       "attr": "clothes2",
-      "label": "衣服2（剧本里没出现过这个服装的代号）"
+      "label": "剧本里没出现过这个服装的代号"
     },
     {
       "char": "ling",
       "code": "A",
       "attr": "aa",
-      "label": "普通（剧本里出现 9 处）"
+      "label": "剧本里出现 9 处 · 项目服装表叫「普通」 · ⚠ 引擎里没有这身衣服"
     },
     {
       "char": "ling",
       "code": "B",
       "attr": "base_arms_akimbo",
-      "label": "叉腰（剧本里出现 6 处）"
+      "label": "剧本里出现 6 处 · 项目服装表叫「叉腰」"
     },
     {
       "char": "ling",
       "code": "",
       "attr": "base_swimsuit",
-      "label": "泳装（剧本里没出现过这个服装的代号）"
-    },
-    {
-      "char": "xing",
-      "code": "",
-      "attr": "aa",
-      "label": "普通（项目里声明了这套，剧本没写过它的代号）"
+      "label": "剧本里没出现过这个服装的代号"
     },
     {
       "char": "xing",
       "code": "",
       "attr": "base_hands_down",
-      "label": "放下手（剧本里没出现过这个服装的代号）"
+      "label": "剧本里没出现过这个服装的代号"
     },
     {
       "char": "xing",
       "code": "",
       "attr": "hanfu_base",
-      "label": "汉服（剧本里没出现过这个服装的代号）"
+      "label": "剧本里没出现过这个服装的代号"
     },
     {
       "char": "ye",
       "code": "A",
       "attr": "aa",
-      "label": "普通（剧本里出现 41 处）"
+      "label": "剧本里出现 41 处 · 项目服装表叫「普通」 · ⚠ 引擎里没有这身衣服"
     },
     {
       "char": "ye",
       "code": "B",
       "attr": "base_handdown",
-      "label": "手放下（剧本里出现 39 处）"
+      "label": "剧本里出现 39 处 · 项目服装表叫「手放下」"
     },
     {
       "char": "ye",
       "code": "",
       "attr": "base_swimsuit",
-      "label": "泳装（剧本里没出现过这个服装的代号）"
+      "label": "剧本里没出现过这个服装的代号"
     }
   ],
   "expression_codes": [
@@ -643,5 +615,154 @@
       "attr": "relax",
       "label": "放松"
     }
-  ]
+  ],
+  "characters": {
+    "jc": {
+      "display": "蒋忱"
+    },
+    "ye": {
+      "display": "叶怀瑾"
+    },
+    "xing": {
+      "display": "星桥理子"
+    },
+    "lan": {
+      "display": "蓝"
+    },
+    "ling": {
+      "display": "凌跃捷",
+      "aliases": [
+        "LTJ"
+      ]
+    },
+    "dhy": {
+      "display": "杜恒远"
+    },
+    "hidden_name": {
+      "display": "？？？"
+    },
+    "ld": {
+      "display": "校领导"
+    },
+    "q": {
+      "display": "青"
+    },
+    "mm": {
+      "display": "妈妈",
+      "aliases": [
+        "MOM"
+      ]
+    },
+    "aaa": {
+      "display": "舍友A",
+      "aliases": [
+        "A"
+      ]
+    },
+    "bbb": {
+      "display": "舍友B",
+      "aliases": [
+        "B"
+      ]
+    },
+    "bd": {
+      "display": "班导"
+    },
+    "jg": {
+      "display": "教官"
+    },
+    "xy": {
+      "display": "校医"
+    },
+    "ly": {
+      "display": "姥爷"
+    },
+    "aabb": {
+      "display": "A&B"
+    },
+    "dhyab": {
+      "display": "杜恒远&A&B"
+    },
+    "jcab": {
+      "display": "蒋忱&A&B"
+    },
+    "ay": {
+      "display": "阿姨"
+    },
+    "ba": {
+      "display": "保安"
+    },
+    "fw": {
+      "display": "服务员",
+      "aliases": [
+        "FWY"
+      ]
+    },
+    "txf": {
+      "display": "汤X凤"
+    },
+    "dororo": {
+      "display": "Roro"
+    },
+    "u": {
+      "display": "???"
+    },
+    "ALL": {
+      "display": "所有人"
+    },
+    "CAT": {
+      "display": "猫"
+    },
+    "DOG": {
+      "display": "狗"
+    },
+    "DS": {
+      "display": "导师"
+    },
+    "DUCK": {
+      "display": "鸭子",
+      "aliases": [
+        "YA"
+      ]
+    },
+    "DY": {
+      "display": "大爷"
+    },
+    "GRANDMA": {
+      "display": "奶奶"
+    },
+    "GRANDPA": {
+      "display": "爷爷"
+    },
+    "HOST": {
+      "display": "主持人"
+    },
+    "LS": {
+      "display": "老师"
+    },
+    "MAN": {
+      "display": "男人"
+    },
+    "PET": {
+      "display": "宠物"
+    },
+    "PLAYER1": {
+      "display": "队友1"
+    },
+    "PLAYER2": {
+      "display": "队友2"
+    },
+    "PLAYER3": {
+      "display": "队友3"
+    },
+    "REPORTER": {
+      "display": "记者"
+    },
+    "SZ": {
+      "display": "校长"
+    },
+    "WOMAN": {
+      "display": "女人"
+    }
+  }
 }

@@ -341,11 +341,17 @@ class TestSheetContract:
         assert BEAT_FIELDS.index('Condition') < \
             BEAT_FIELDS.index('Scene'), '条件列应紧挨着台词，不该被赶到技术列区'
         assert 'Condition' not in HIDDEN_BEAT_COLUMNS
+        # 台词后缀（`with dissolve`）：**可见**，且是「台词」的邻居
+        assert 'SayTail' in BEAT_FIELDS
+        assert 'SayTail' not in HIDDEN_BEAT_COLUMNS
         # 三列内部元数据在表里，但必须整列隐藏；**新增的要排在最末尾**
         # （用户明确要求"放远点"），且先后顺序就是"加进来的顺序"。
+        # ⚠ `SayTail`（台词后缀）2026-11-03 从内部列**升为可见列** ——
+        # 用户原话："with 是 say 的一部分，凭什么要往下翻高级区？"
+        # 所以它已不在这张"必须隐藏"的名单里，下面单独断言它可见。
         for col in ('StageOrder', 'OpOrder', 'CodeBlocks', 'Nest', 'Inline',
                     'Opaque', 'SpecName', 'SpecHead', 'LoopHeader',
-                    'CameraHeader', 'SayTail', 'LabelHeader',
+                    'CameraHeader', 'LabelHeader',
                     'MenuName', 'MenuArgs'):
             assert col in BEAT_FIELDS, col
             assert col in HIDDEN_BEAT_COLUMNS, f'{col} 必须隐藏'

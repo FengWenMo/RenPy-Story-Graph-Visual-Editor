@@ -125,6 +125,20 @@ def _beats():
     ]
 
 
+def _attr_res():
+    """一条属性门禁结果（只用来测弹窗第三块，不跑真扫描）。"""
+    from storygraph.app.sprite_attr_guard import AttrSuspect
+    from storygraph.app.sprite_attr_guard import ScanResult as AttrScan
+    return AttrScan(
+        suspects=[AttrSuspect(
+            index=0, seq=1, label='ch01', spec='ye base_hand_down happy',
+            tag='ye', attr='base_hand_down', fix='base_handdown',
+            reason='「ye」没有「base_hand_down」这个属性 —— 项目里写的是'
+                   '「base_handdown」。',
+            consequence='引擎会忽略它：游戏通常还能跑，但画面不是你要的。')],
+        checked=1, judged=1)
+
+
 class TestScan:
     def test_finds_the_right_ones(self):
         res = scan(_beats())
@@ -265,6 +279,30 @@ class TestDialog:
         assert dlg.table.isColumnHidden(0), '不能挪却不该让人勾'
         dlg.close()
 
+    def test_attrs_section_rows_and_no_fix_button(self, qapp):
+        """第三类只摆出来：没有"修一下"按钮，默认仍是原样导出。"""
+        pytest.importorskip('PySide6')
+        from storygraph.story import stage_suspect as SS
+        from storygraph.ui_qt.dialog_stage_suspect import StageSuspectDialog
+
+        dlg = StageSuspectDialog(None, SS.ScanResult(), attrs=_attr_res())
+        assert dlg.attr_table.rowCount() == 1
+        assert not hasattr(dlg, 'btn_fix'), '只报，不许给一键改'
+        assert dlg.btn_keep.text() == '原样导出'
+        assert dlg.decision == 'keep'
+        dlg.close()
+
+    def test_attrs_only_hides_stage_table(self, qapp):
+        pytest.importorskip('PySide6')
+        from storygraph.story import stage_suspect as SS
+        from storygraph.ui_qt.dialog_stage_suspect import StageSuspectDialog
+
+        dlg = StageSuspectDialog(None, SS.ScanResult(), attrs=_attr_res())
+        assert dlg.table.isHidden(), '没有舞台可疑行，那张表不该出现'
+        assert dlg.btn_move.isHidden(), '没有可挪的东西，按钮也不该出现'
+        assert '立绘' in dlg.btn_cancel.text()
+        dlg.close()
+
 
 # ------------------------------------------------------------------
 #  五、接线：导出入口真的要问一句
@@ -391,3 +429,36 @@ class TestReviewHookBehaviour:
         assert WindowExportMixin._review_stage_suspects(
             self._fake_window(beats, qapp)) is True
         assert not called
+
+    def test_attr_suspects_open_the_dialog(self, qapp, monkeypatch):
+        """属性类也要在导出前问一句：`base_hand_down` 不能被静默放行。"""
+        pytest.importorskip('PySide6')
+        from PySide6.QtWidgets import QDialog
+
+        from storygraph.ui_qt import dialog_stage_suspect as D
+        from storygraph.ui_qt.window_export import WindowExportMixin
+
+        class _Sym:
+            def declared_attrs_of(self, tag):
+                return ['ahah', 'gratified', 'base_handdown'] if tag == 'ye' else []
+
+            def attrs_of_tag(self, tag):
+                return self.declared_attrs_of(tag)
+
+            def defined_words(self):
+                return ['aa']
+
+            def token_image_path(self, tag, token):
+                return ''
+
+        beats = [Beat(seq=1, label='x', text='台词',
+                      show='ye base_hand_down happy')]
+        win = self._fake_window(beats, qapp)
+        win._session.symbols = _Sym()
+
+        monkeypatch.setattr(D.StageSuspectDialog, 'exec',
+                            lambda self: QDialog.Rejected)
+
+        assert WindowExportMixin._review_stage_suspects(win) is False, \
+            '属性问题必须走"取消 = 零写"那条路'
+        assert beats[0].show == 'ye base_hand_down happy', '一个字都不许改'

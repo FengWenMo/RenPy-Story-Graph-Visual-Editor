@@ -73,14 +73,50 @@ def discover_scripts(project_root, extra_dirs=None) -> list:
     for root in roots:
         if not root.exists():
             continue
-        for fp in sorted(root.rglob('*.rpy')):
-            rel_parts = set(fp.relative_to(root).parts)
-            if rel_parts & SKIP_DIR_PARTS:
-                continue
-            if fp.name.endswith(DERIVED_SUFFIXES):
-                continue
-            found.append(fp)
+        found.extend(_walk_rpy(root))
     return found
+
+
+def _walk_rpy(root) -> list:
+    """
+    `root` 底下所有 `.rpy`（**遍历时剪枝**，不是扫完再过滤）。
+
+    为什么要换掉 `rglob`（2026-11-05 实测）：真机 `sr_general` 的 `game/`
+    底下有 `gui/`（1154 个文件）、`pomodorro/`、`minigamepieces/` 这些
+    **素材目录**，`Path.rglob` 会一个不落地全走一遍 —— 单次
+    `discover_scripts` **0.9 s**。而这个函数在一条点击链上会被调十几次
+    （`layer_model_stamp` / 章节导航 / 导入 / 卡片刷新），于是"点一下 chip
+    停 5 秒"里有一部分就是它。
+
+    `os.scandir` + 按目录名剪枝：`tl` / `common` / `renpy` / `cache` /
+    `saves` 这些**已知不含作者脚本**的目录直接不进 —— 结果与 `rglob`
+    完全一致（原来也是事后按 `SKIP_DIR_PARTS` 滤掉的），只是不再白走。
+    """
+    import os
+
+    out: list = []
+    stack = [Path(root)]
+    while stack:
+        folder = stack.pop()
+        try:
+            with os.scandir(folder) as it:
+                for entry in it:
+                    name = entry.name
+                    try:
+                        # 跟 junction / 符号链接（真机 `game/charactercenter`
+                        # 这类目录可能是指过去的），但不跟"跳过目录"。
+                        if entry.is_dir():
+                            if name not in SKIP_DIR_PARTS:
+                                stack.append(Path(entry.path))
+                        elif name.endswith('.rpy') \
+                                and not name.endswith(DERIVED_SUFFIXES):
+                            out.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    out.sort()
+    return out
 
 
 def labels_in_file(path) -> list:

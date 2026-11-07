@@ -42,12 +42,29 @@ storygraph.app.session_assets
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
 
 from storygraph.app import beats as B
 from storygraph.app.asset_catalog import ASSET_KINDS, AssetCatalog
+
+
+#: 合法的 image 名形态（字母/下划线开头，可带 `.` 分段）。
+#: 「青」这种**显示名**不在其中 —— 那正是 `show 青 base` 在引擎里报错的原因。
+_IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*')
+
+
+def _duplicate_ids(reg, kinds) -> list:
+    """同类资源里 ID 重复的行 → `[{'ID':k,'n':计数}]`（体检的 `duplicate_ids`）。"""
+    from collections import Counter
+    ids = Counter()
+    for _key, attr in kinds:
+        for aid in (getattr(reg, attr, {}) or {}):
+            ids[aid] += 1
+    return [{'ID': k, 'n': v} for k, v in ids.items() if v > 1]
 
 
 __all__ = ['AssetRegistryMixin']
@@ -207,6 +224,7 @@ class AssetRegistryMixin:
         self._last_reconcile = (sync_info.get('reconcile')
                                 or created_reconcile or {})
         self.refresh_symbols()
+        self._kick_engine_images()
         counts = {k: len(getattr(reg, k, []) or [])
                   for k in ('images', 'music', 'sounds', 'voices',
                             'transforms', 'characters')}
@@ -325,15 +343,14 @@ class AssetRegistryMixin:
                 missing[key] = rows
         unreg = {k: v for k, v in (diff.get('unregistered') or {}).items() if v}
         outside = diff.get('outside_game') or {}
-        ids = Counter()
-        for key, attr in kinds:
-            for aid in (getattr(reg, attr, {}) or {}):
-                ids[aid] += 1
-        dup_ids = [{'ID': k, 'n': v} for k, v in ids.items() if v > 1]
+        dup_ids = _duplicate_ids(reg, kinds)
+        # 映射把 `char` 填成显示名（`{"char":"青"}`）→ 生成 `show 青 base`，
+        # 引擎必报错。以前只有卡片提示会提，体检看不见（`_bad_mapping_rows`）。
+        bad_mapping = self._bad_mapping_rows(reg)
         problems = (sum(len(v) for v in missing.values())
                     + sum(len(v) for v in unreg.values())
-                    + int(outside.get('count') or 0)
-                    + len(dup_ids) + len(dup_paths) + len(no_path))
+                    + int(outside.get('count') or 0) + len(dup_ids)
+                    + len(dup_paths) + len(no_path) + len(bad_mapping))
         counts = {k: len(getattr(reg, k, []) or [])
                   for k in ('images', 'music', 'sounds', 'voices',
                             'transforms', 'characters')}
@@ -367,7 +384,79 @@ class AssetRegistryMixin:
                 'missing': missing, 'unregistered': unreg,
                 'outside_game': outside, 'duplicate_ids': dup_ids,
                 'duplicate_paths': dup_paths, 'no_path': no_path,
+                'bad_mapping': bad_mapping,
                 'placeholders': placeholders, 'problems': problems}
+
+    def _bad_mapping_rows(self, reg) -> list:
+        """
+        映射里 `char` 不是**合法 image 名**的那些条（`[{'asset','char','why'}]`）。
+
+        判据（2026-11-04）：`char` 必须是项目的 image tag 或合法标识符
+        （`\\w+`、可带点分段）。「青」这种**显示名**会让生成的
+        `show 青 base` 在引擎里报"找不到图像" —— 而这条错误以前
+        只有"卡片提示"一处会提，体检看不见。
+
+        没有映射文件 / 映射坏了 → `[]`（不是错误：绝大多数项目不需要映射）。
+        """
+        try:
+            from storygraph.assets.asset_identity import known_tags_of
+            from storygraph.assets.asset_mapping import mapping_cached
+            data, _warn, _path = mapping_cached(str(self.project_root))
+            mapping = data if isinstance(data, dict) else {}
+            images = (mapping.get('images')
+                      if isinstance(mapping, dict) else None)
+            if not isinstance(images, dict):
+                return []
+            # 「项目认的 tag」只有一处真源（characters 表 + 映射 + 声明）
+            known = {str(t).strip()
+                     for t in known_tags_of(reg, mapping) if str(t).strip()}
+        except Exception as e:                  # noqa: BLE001 - 报告不该因此失败
+            swallow('app.session_assets.bad_mapping', e)
+            return []
+        out = []
+        for aid, spec in images.items():
+            if not isinstance(spec, dict):
+                continue
+            char = str(spec.get('char') or '').strip()
+            if not char or char in known:
+                continue
+            if _IDENT_RE.fullmatch(char):
+                continue                        # 像 tag 的（合法标识符）不报
+            out.append({
+                'asset': str(aid), 'char': char,
+                'why': (f'映射把 image tag 填成了「{char}」—— 那不是合法的 '
+                        f'image 名，`show {char} …` 在引擎里找不到图像。'
+                        f'该填项目里的 tag（如 `qing`）'),
+            })
+        return out
+
+    def _kick_engine_images(self) -> dict:
+        """
+        **打开项目就自动问引擎**（用户 2026-11-04："不要做成按需的按钮……
+        慢就慢点，要真问！！而且自动问！在打开项目的那一刻就该问了！！！"）。
+
+        两档：
+          · 缓存新鲜（脚本指纹 + 图片数量没变）→ **立刻**用，不跑引擎；
+          · 否则起一个**后台线程**跑 lint（真项目 14 s），跑完写缓存；
+            用户下一次打开项目（或重启界面）就吃到新裁决。
+        """
+        try:
+            from storygraph.assets import engine_images as EI
+        except Exception as e:                    # noqa: BLE001 - 没有这一路也要能开项目
+            swallow('app.session_assets.kick_engine.import', e)
+            return {'ok': False, 'reason': str(e)}
+        hit = EI.cached(self.project_root)
+        if hit.get('ok'):
+            return hit
+        try:
+            import threading
+            threading.Thread(target=EI.verdicts, args=(self.project_root,),
+                             kwargs={'force': True}, daemon=True).start()
+        except Exception as e:                    # noqa: BLE001
+            swallow('app.session_assets.kick_engine.thread', e)
+            return {'ok': False, 'reason': str(e)}
+        return {'ok': False, 'running': True,
+                'reason': '后台正在问引擎（跑 lint），跑完下次打开项目生效'}
 
     def _cds_rows(self) -> tuple:
         """

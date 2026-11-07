@@ -57,6 +57,14 @@ WRITERS = {
         '（契约 H1 / `test_package_layering`）。只写映射文件，不碰用户脚本、'
         '不碰资源表',
     'assets/asset_registry.py::_write_autoscan_index': '写侧车 _autoscan.json',
+    'assets/engine_images.py::verdicts':
+        '写**用户级缓存**（`%LOCALAPPDATA%/StoryGraph/engine_images/<hash>.json`：'
+        'lint 的「is not an image」裁决），不是用户项目、不是 `.rpy`、不写 '
+        '`game/`；写失败只影响"下次重跑 lint"，不参与 generation_guard',
+    'assets/engine_images.py::verify_show_specs':
+        '写**临时验证工程**里的 `_sg_verify.rpy` / `_sg_verify_entry.rpy`'
+        '（只拷 `.rpy` 的镜像目录，`tempfile.mkdtemp`；跑完 lint 连目录一起删），'
+        '不碰用户项目、不是产物、不参与 generation_guard',
     'pipeline/build.py::build_project': '写构建报告 JSON',
     'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
     'story/statement_registry.py::declare_calls':
@@ -144,6 +152,9 @@ WRITERS = {
         '演出专用版把**随包预设**补进用户项目：缺 `storygraph.rules.json` / '
         '`.storygraph/layout.json` 时写一份（已有就一个字节不动；临时文件 + '
         'os.replace，不会留半份 JSON）',
+    'ext/plugins.py::write_example':
+        '写**插件模板** `extensions/示例插件.json`（只在人点「新建插件」时写；'
+        '已存在就一个字节不动）。它不是脚本、不参与生成门禁',
 }
 
 _WRITE_METHODS = {'write_text', 'write_bytes'}

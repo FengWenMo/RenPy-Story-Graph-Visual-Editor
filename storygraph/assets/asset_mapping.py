@@ -80,7 +80,8 @@ from typing import Mapping, Optional
 
 from storygraph.core.safeguard import swallow
 from storygraph.assets.identity_core import (KINDS, SHOWABLE_KINDS, Identity,
-                                             normalize_relpath)
+                                             normalize_relpath,
+                                             under_game_images)
 from storygraph.assets.mapping_schema import (
     KNOWN_ENTRY_KEYS,
     KNOWN_TOP_KEYS,
@@ -410,6 +411,20 @@ def identity_from_entry(entry, *, relpath: str, groups: Mapping,
     showable = entry.get('showable')
     if showable is None:
         showable = kind in SHOWABLE_KINDS and bool(tag)
+        if showable and source == 'mapping-rule' and kind in ('bg', 'cg', 'ui'):
+            # `rules` 只补空缺 —— **它不许替引擎答应"这个名字能 show"**。
+            # Ren'Py 只自动注册 `game/images/**` 下的图（见
+            # `asset_identity._under_game_images`）；映射规则是"这一类路径大概
+            # 是背景"，不是声明。真机反证：`pics/bg/*.png` 写成规则后
+            # `show bg room` 直接报"找不到图像"。
+            #
+            # 精确覆盖（`images`）不套这条：那是人指着这一张说"它叫什么"，
+            # 与 `asset_identity` 的判定顺序一致（精确覆盖 → 项目声明 → 规则）。
+            #
+            # 2026-11-07：两边口径不一致时 `mapping_draft._rules_consistent`
+            # 会把 `pics/bg/*.png` 这类**正确**的初稿规则判成"把行升成可 show"
+            # 而整条丢弃（`test_asset_mapping` 两条就是这么红的）。
+            showable = under_game_images(relpath)
     return Identity(kind=kind, tag=tag, attrs=attrs,
                     display=str(entry.get('display') or '').strip(),
                     source=source, showable=bool(showable))

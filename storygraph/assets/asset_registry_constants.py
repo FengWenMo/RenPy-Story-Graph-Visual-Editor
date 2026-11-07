@@ -91,6 +91,13 @@ _CHARACTER_CONTAINER_WORDS = frozenset({
     '立绘',
 })
 
+#: ⚠ **公开别名**（跨包用一份，别在调用方再抄一遍）。
+#: 为什么需要（2026-11-03）：`asset_identity.is_under_sprite_container` 与
+#: `story.dsl.Symbols` 都要回答"这张图是不是**放在立绘目录里**"，
+#: 而跨包 import 私有名被 `test_package_layering` 禁止 —— 于是要么公开，
+#: 要么第三份实现（本项目最忌讳的那种漂移）。
+CHARACTER_CONTAINER_WORDS = _CHARACTER_CONTAINER_WORDS
+
 _GENERIC_IMAGE_ROOTS = frozenset({
     'images', 'image', 'img', 'imgs', 'graphics', 'assets', 'art', 'pics',
     'pictures',

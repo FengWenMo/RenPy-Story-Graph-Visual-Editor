@@ -197,7 +197,7 @@ class TestRemovedLinesAreNamed:
         from storygraph.pipeline.compile import CompileResult
         from storygraph.cli import _report_incremental
 
-        result = CompileResult(rpy_text='label a:/n    return\n',
+        result = CompileResult(rpy_text='label a:\n    return\n',
                                changed_lines=2,
                                used_patch=True,
                                removed_preview=('show ling happy',))

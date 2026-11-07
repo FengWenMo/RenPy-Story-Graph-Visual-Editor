@@ -46,6 +46,7 @@ from storygraph.assets.asset_identity import (
     resolve_image,
     resolve_images,
     spec_for_identity,
+    spec_tag_problem,
 )
 
 
@@ -422,11 +423,33 @@ def identities(registry, project_root=None, *, context=None) -> dict:
                           sprite_words=_sprite_words_of(context))
 
 
+def _context_or_none(registry, project_root, mapping, dimensions, *,
+                     known_tags, known_chars, all_rows, sprite_words, row):
+    """
+    需要现建上下文时才建（`None` = 不用建 / 建不了）。
+
+    ⚠ **判据是"真缺东西"**（2026-11-03）：`pick_context` 里有两件重活 ——
+    `build_copy_index`（1979 行的两两比较）与 `load_layer_model_cached`
+    （扫全项目 `.rpy`），实测 97 ms/次。资源选择器是**逐张**调 `resolve_pick`
+    的；从前只要给了 `registry` 就无条件重建，1979 张图 = 3.2 分钟纯等待
+    （改完 2.4 ms/张，40×）。
+    """
+    if registry is None:
+        return None
+    need = (not known_tags) or (known_chars is None) or (mapping is None) \
+        or (all_rows is None) or (sprite_words is None) or (row is None)
+    if not need:
+        return None
+    return pick_context(registry, project_root, mapping=mapping,
+                        dimensions=dimensions)
+
+
 def resolve_pick(asset_id: str, row: Optional[dict], *,
                  project_root: str = '', known_tags=frozenset(),
                  known_chars: Optional[dict] = None, mapping=None,
                  all_rows=None, dimensions=None, registry=None,
-                 copy_index=None, sprite_words=None) -> PickResult:
+                 copy_index=None, sprite_words=None,
+                 context=None) -> PickResult:
     """
     "选中这张图，到底能不能加、加什么" → `PickResult`（契约 §1.1b）。
 
@@ -446,9 +469,18 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
     (`show qing stare`) 引擎不认 —— 又是一个"看着像对、其实非法"的 show。
     """
     aid = str(asset_id or '').strip()
-    if registry is not None:
-        ctx = pick_context(registry, project_root, mapping=mapping,
-                           dimensions=dimensions)
+    if context is None:
+        context = _context_or_none(
+            registry, project_root, mapping, dimensions,
+            known_tags=known_tags, known_chars=known_chars,
+            all_rows=all_rows, sprite_words=sprite_words, row=row)
+    # ⚠ **有 context 就用，不管有没有 registry**（2026-11-03 判据抓到）：
+    # 调用方可能提前把上下文备好（选择器就是这么做的），而 registry 只在
+    # "要不要现建一份"时才有用。从前这里要求两者同时给，于是
+    # `resolve_pick(..., context=ctx)` 单独用时上下文被**静默忽略**，
+    # 同一条图得出两个不同结论。
+    if context is not None:
+        ctx = context
         if not known_tags:
             known_tags = ctx['known_tags']
         if known_chars is None:
@@ -459,6 +491,8 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
             all_rows = ctx['all_rows']
         if sprite_words is None:
             sprite_words = ctx['sprite_words']
+        if copy_index is None:
+            copy_index = ctx.get('copy_index')
         if row is None:
             row = (all_rows or {}).get(aid)
     if not row:
@@ -477,6 +511,13 @@ def resolve_pick(asset_id: str, row: Optional[dict], *,
     if ident.showable:
         spec = spec_for_identity(ident, row)
         if spec:
+            # **生成器先过一遍校验器**（2026-11-03，地狱测试 I7）：
+            # 映射里 `char` 填成显示名（「青 base」）时，这里就不许产出 ——
+            # 否则 `show 青 base` 是一句引擎会报错的话，而旁边那条提示
+            # 还会说"这不行"，同一件事两个结论。
+            bad = spec_tag_problem(spec, known_tags)
+            if bad:
+                return PickResult(identity=ident, ok=False, message=bad)
             return PickResult(spec=spec, identity=ident, ok=True)
         return PickResult(identity=ident, ok=False,
                           message='这张图认不出该写什么名字（可在资源映射里登记）')

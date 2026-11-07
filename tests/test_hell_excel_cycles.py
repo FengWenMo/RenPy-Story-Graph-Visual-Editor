@@ -389,15 +389,22 @@ class TestPathologicalCells:
             set_text(wb.active, 1, 1, 'x' * 40000)
         assert wb.active['A1'].value is None, '拒绝之后还写进去了半截'
 
-    def test_illegal_control_chars_are_stripped_and_recorded(self):
-        """xlsx 装不下的控制字符：剜掉（否则整张表都写不出），但要留痕。"""
+    def test_illegal_control_chars_are_escaped_and_recorded(self):
+        """xlsx 装不下的控制字符：**写成 `\\xNN` 转义**（否则整张表都写不出），
+        并且留痕。
+
+        ⚠ 2026-11-02 判据改过：从前是"剜掉"，但那让 `.rpy → 表 → .rpy`
+        一趟就**永久少字符**（真机 4 章 9 处 `U+0005`）。改成转义之后，
+        读表时 `xml_unescape_row` 会还原成真字符 —— 逐字节保真。
+        见 `tests/test_excel_illegal_chars.py` 的往返用例。
+        """
         from storygraph.core import safeguard
         from storygraph.excel.cells import set_text
 
         safeguard.clear()
         wb = openpyxl.Workbook()
         set_text(wb.active, 1, 1, '台词\x05里有\x07脏字符')
-        assert wb.active['A1'].value == '台词里有脏字符'
+        assert wb.active['A1'].value == '台词\\x05里有\\x07脏字符'
         assert any('U+0005' in (r['samples'][0] if r['samples'] else '')
                    for r in safeguard.records() if isinstance(r, dict)) or \
             safeguard.total() >= 1, safeguard.report()

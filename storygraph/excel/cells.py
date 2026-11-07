@@ -34,31 +34,69 @@ from storygraph.core.cell_limits import (CELL_TEXT_LIMIT, CellTextTooLong,
 #:
 #: 2026-10-28 真机（用户项目 `chapter3_3_3.rpy` 第 79 行）撞上：一句台词里
 #: 混进两个 `U+0005`，`openpyxl` 直接抛 `IllegalCharacterError` ——
-#: **整份剧本表一行都导不出来**，而错因是五万行里的一格。它是不可见字符，
-#: Excel 里没有任何表示法；这里**剥掉**（而不是让整张表失败），但每剥一次
-#: 都进 `safeguard`：崩溃日志的「静默失败清单」会点名到具体单元格，
-#: "悄悄改内容"仍然是不允许的。
+#: **整份剧本表一行都导不出来**，而错因是五万行里的一格。
+#:
+#: ⚠ 2026-11-02 改正：**不再剥掉，改写成 `\x05` 这种看得见的转义**。
+#: 剥掉的代价是逐字节保真直接破功 —— 真机 `sr_general` 96 个章节里
+#: 有 4 个（9 处）含 `U+0005`，`.rpy → 表 → .rpy` 一趟回来那 9 个字符就没了，
+#: 而且用户完全不知道（只有 `safeguard` 日志里有一行）。
+#: 转义是**语义无损**的：Ren'Py 的字符串字面量本来就认 `\xNN`，
+#: 引擎读出来的字符与原来的控制字符**完全相同**；读表时 `xml_unescape`
+#: 再把它还原成真字符，于是 `原文 == 产物` 逐字节成立。
 _ILLEGAL_XML_CHARS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 
+#: 反向：`\x05`（四到六个可见字符）→ 控制字符。只认 `_ILLEGAL_XML_CHARS`
+#: 覆盖的那一段 —— `\x41` 是 `A`，属于普通可见字符，用户真写了 `\x41`
+#: 是想要 `A` 还是想要字面文本？**不猜**，原样留着。
+_ESCAPED_CONTROL = re.compile(
+    r'\\x(0[0-8]|0[bBcC]|0[eEfF]|1[0-9a-fA-F])')
 
-def xml_safe(value, where: str = ''):
+
+def xml_escape(value, where: str = ''):
     """
-    剥掉 Excel 装不下的控制字符（非字符串原样返回）。
+    把 xlsx 装不下的控制字符**写成 `\\xNN` 转义**（非字符串原样返回）。
 
     返回**新值**，不改入参。`where` 只用于留痕（`'Beats!R61C7'` 这种），
     让 `safeguard.report()` 能指到"哪张表哪一格"。
+
+    为什么不是剥掉：见 `_ILLEGAL_XML_CHARS` 上面的说明 —— 剥掉等于
+    静默改内容，而"表只是中转站"这个架构让它在导出时变成永久损失。
     """
     if not isinstance(value, str):
         return value
-    clean = _ILLEGAL_XML_CHARS.sub('', value)
-    if clean == value:
+    out = _ILLEGAL_XML_CHARS.sub(lambda m: '\\x%02x' % ord(m.group(0)), value)
+    if out == value:
         return value
     codes = sorted({f'U+{ord(ch):04X}' for ch in value
                     if _ILLEGAL_XML_CHARS.match(ch)})
-    swallow('excel.cells.xml_safe：剥掉 Excel 装不下的控制字符'
+    swallow('excel.cells.xml_escape：控制字符写成 \\xNN 转义'
             + (f'（{where}）' if where else ''),
-            ValueError(f'{len(value) - len(clean)} 个：{"、".join(codes)}'))
-    return clean
+            ValueError(f'{len(codes)} 种：{"、".join(codes)}'))
+    return out
+
+
+def xml_unescape(value):
+    """
+    读表时的反向还原：`\\x05` → `U+0005`（非字符串原样返回）。
+
+    与 `xml_escape` 是**同一对**，两处必须一起改（守卫见
+    `tests/test_excel_illegal_chars.py` 的往返用例）。
+    """
+    if not isinstance(value, str) or '\\x' not in value:
+        return value
+    return _ESCAPED_CONTROL.sub(lambda m: chr(int(m.group(1), 16)), value)
+
+
+def xml_unescape_row(row: dict) -> dict:
+    """整行还原（`Beat.from_row` 的入参）：只碰字符串值，其余原样。"""
+    if not isinstance(row, dict):
+        return row
+    return {k: (xml_unescape(v) if isinstance(v, str) else v)
+            for k, v in row.items()}
+
+
+#: 老名字（调用点与测试都还在用）。**语义已从"剥掉"变成"转义"**。
+xml_safe = xml_escape
 
 
 def set_text(ws, row, col, value):
@@ -72,13 +110,14 @@ def set_text(ws, row, col, value):
     行号的检查，这里只兜底 —— 任何一条漏网的写路径都不会把内容写残。
 
     ⚠ 还有一道：xlsx **装不下**的控制字符（`U+0000~08` / `0B` / `0C` /
-    `0E~1F`）在这里先剥掉并留痕 —— 见 `xml_safe`。不剥的话，
-    一格脏会让**整份工作簿**都写不出来（2026-10-28 真机就是这么撞上的）。
+    `0E~1F`）在这里先写成 `\\xNN` 转义并留痕 —— 见 `xml_escape`。不处理的话，
+    一格脏会让**整份工作簿**都写不出来（2026-10-28 真机就是这么撞上的）；
+    而像从前那样直接剥掉，则会静默丢字符（2026-11-02 改正）。
     """
     where = f'{ws.title}!R{row}C{col}'
-    # 先剥控制字符再判长度：剥完可能变短，但**不能**因为一格里有 `\x05`
-    # 就让整张表导不出来（见 `xml_safe` 的说明）。
-    value = xml_safe(value, where=where)
+    # 先转义控制字符再判长度：转义会变长，而 32767 是**写下去的字节**上限，
+    # 所以顺序必须是"先转义、后判长度"（与用户看到的那一格一致）。
+    value = xml_escape(value, where=where)
     if over_limit(value):
         raise CellTextTooLong([{'where': where,
                                 'field': '', 'length': len(str(value))}],
@@ -158,4 +197,5 @@ def set_row(ws, row: int, values: Iterable):
     return cells
 
 
-__all__ = ['set_text', 'append_text_row', 'set_row', 'xml_safe']
+__all__ = ['set_text', 'append_text_row', 'set_row', 'xml_safe',
+           'xml_escape', 'xml_unescape', 'xml_unescape_row']

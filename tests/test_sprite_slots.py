@@ -471,3 +471,123 @@ class TestArtCodeAndEmpty:
         hit = next(c for c in grabbed['choices'] if c.text.startswith('A7｜'))
         assert hit.value.startswith('ye '), hit.value
         assert 'A7' not in hit.value, hit.value
+
+
+class TestSpellingVariantOfAGroupValue:
+    """
+    拼法差一个下划线 ≠ 另一个属性（2026-11-05 用户截图 + 两句话）：
+
+    > 「为什么检测不到！明明是有的！！！」（卡片写着 `ye base_hand_down gratified`，
+    >  提示说"没有 base_hand_down 这个属性"—— 有的，项目里叫 `base_handdown`）
+    > 「后面这个属性 2 明显错误和不合法了！！！based_handdown 出现了两次！！！」
+
+    真机现场（`sr_general` `chapter2_5.rpy`）：脚本里写的是
+    `show ye base_hand_down hi`，而 `layeredimage ye` 声明的是 `base_handdown`。
+    旧行为有两处连锁毛病：
+
+      · 检测只报"没有这个属性"，不说**该写成什么** —— 人以为工具没看见项目里的声明；
+      · 换服装那一维时当前值**认不出**（`value=''`）→ 走"追加"，
+        拼出 `base_hand_down gratified base_handdown`（**同组两个词**），
+        右键候选里就整整齐齐地出现了这一串不合法组合。
+
+    这里钉住的是一条**与项目无关的不变式**：同一组只能有一个词。
+    判据用组自己的候选集，不写死组名/词，所以对任何项目都成立。
+    """
+
+    @staticmethod
+    def _words(spec):
+        return [w for w in str(spec or '').split()[1:] if w]
+
+    @classmethod
+    def _keys(cls, spec):
+        from storygraph.app.beats import attr_word_key
+        return [attr_word_key(str(w).split('@', 1)[0]) for w in cls._words(spec)]
+
+    def test_changing_the_outfit_replaces_the_misspelled_word(self):
+        """认得出的拼法变体 → **原位替换**，不是再添一个。"""
+        from storygraph.app import beats as B
+        out = B.apply_attr_slot('ye base_hand_down gratified', 'outfit',
+                                'base_handdown', symbols=_Sym(), facts=_facts())
+        assert out == 'ye base_handdown gratified', out
+
+    def test_clearing_the_dimension_drops_the_misspelled_word(self):
+        from storygraph.app import beats as B
+        out = B.apply_attr_slot('ye base_hand_down gratified', 'outfit', '',
+                                symbols=_Sym(), facts=_facts())
+        assert out == 'ye gratified', out
+
+    def test_a_value_outside_the_group_is_not_duplicated(self):
+        """自定义值（不在组候选里的 `aa` 这种）也只写一份。"""
+        from storygraph.app import beats as B
+        out = B.apply_attr_slot('ye base_hand_down gratified', 'outfit', 'aa',
+                                symbols=_Sym(), facts=_facts())
+        assert out == 'ye aa gratified', out
+
+    def test_two_words_of_the_same_group_collapse_to_one(self):
+        """组候选里的两个词都在 spec 里、点其中一个 → 只留点的那一个。"""
+        from storygraph.app import beats as B
+        out = B.apply_attr_slot('ye base_handdown base_swimsuit happy', 'outfit',
+                                'base_swimsuit', symbols=_Sym(), facts=_facts())
+        assert out == 'ye base_swimsuit happy', out
+
+    def test_a_spec_that_already_has_two_group_words_is_not_silently_cleaned(self):
+        """**别人的数据一个字节都不许动**：改表情时，服装那两个词原样留着。
+
+        这条与上一条是同一个取舍的两面 —— 只有"点了那一维"才动那一维；
+        工具不替人清理它觉得重复的东西（那可能是作者故意写的）。
+        """
+        from storygraph.app import beats as B
+        out = B.apply_attr_slot('ye base_handdown base_swimsuit happy',
+                                'expressions', 'sigh',
+                                symbols=_Sym(), facts=_facts())
+        assert out == 'ye base_handdown base_swimsuit sigh', out
+
+    def test_no_group_ever_ends_up_with_two_words(self):
+        """穷举：合法起点 × 任何组 × 任何候选值 → 每组最多一个词。"""
+        from storygraph.app import beats as B
+        specs = ['ye base_hand_down gratified', 'ye base_handdown gratified',
+                 'ye happy', 'ye base_hand_down']
+        values = {'outfit': ['base_handdown', 'base_swimsuit', 'aa', ''],
+                  'expressions': ['ahah', 'gratified', 'happy', 'sigh', '']}
+        members = {
+            'outfit': {'base_hand_down', 'base_handdown', 'base_swimsuit'},
+            'expressions': {'ahah', 'gratified', 'happy', 'sigh'}}
+        for spec in specs:
+            for group, choices in values.items():
+                keys = {self._key_of(w) for w in members[group]}
+                for value in choices:
+                    out = B.apply_attr_slot(spec, group, value, symbols=_Sym(),
+                                            facts=_facts())
+                    got = {self._key_of(w) for w in self._words(out)} & keys
+                    assert len(got) <= 1, (
+                        f'同组出现了两个词：{spec} + {group}={value!r} → {out}')
+
+    @staticmethod
+    def _key_of(word):
+        from storygraph.app.beats import attr_word_key
+        return attr_word_key(word)
+
+    def test_combo_candidates_never_repeat_a_group(self):
+        """右键候选（`slot_choices`）里每一条都合法 —— 用户看到的那 22 条。"""
+        from storygraph.app import beats as B
+        from storygraph.ui_qt.sprite_codes_view import slot_choices
+        spec = 'ye base_hand_down gratified'
+        rows = B.attr_slot_rows(spec, _Sym(), facts=_facts())
+        grouped = slot_choices(spec, 'ye', rows, None,
+                               lambda g, v: B.apply_attr_slot(
+                                   spec, g, v, symbols=_Sym(), facts=_facts()))
+        for group in grouped:
+            for value, shown, _tip in group['values']:
+                keys = self._keys(value)
+                assert len(keys) == len(set(keys)), (group['label'], shown, value)
+
+
+class TestSpellingHintNamesTheCorrectWord:
+    """检测层：不只是"没有这个属性"，还要说**该写成什么**（见
+    `tests/test_sprite_hint_detector.py` 的同类判据 —— 那里有完整的提示替身）。"""
+
+    def test_happy_and_close_happy_are_not_spelling_variants(self):
+        """**不做前缀/子串**匹配：`close_happy` 不是 `happy` 的拼法变体。"""
+        from storygraph.app.beats import attr_word_key
+        assert attr_word_key('close_happy') != attr_word_key('happy')
+        assert attr_word_key('base_hand_down') == attr_word_key('base_handdown')

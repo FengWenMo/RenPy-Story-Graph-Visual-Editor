@@ -67,7 +67,8 @@ from typing import Mapping, Optional
 from storygraph.core.safeguard import swallow
 from storygraph.core.vocabulary import NON_ACTOR_TAGS
 from storygraph.assets.asset_dimensions import row_values
-from storygraph.assets.asset_registry_constants import _PREVIEW_WORDS
+from storygraph.assets.asset_registry_constants import (
+    CHARACTER_CONTAINER_WORDS, _PREVIEW_WORDS)
 from storygraph.assets.atl_block import is_atl_row
 #: 身份词汇与"基础读取"（`KINDS` / `Identity` / 路径归一 / 副本索引）挪去了
 #: 叶子模块 `identity_core`（2026-11-01 解 `assets` 三模块环）：`asset_mapping`
@@ -85,6 +86,9 @@ from storygraph.assets.identity_core import (
     build_copy_index,
     normalize_relpath,
 )
+from storygraph.assets.identity_core import (
+    under_game_images as _core_under_game_images,
+)
 #: 映射层（精确覆盖 / glob 规则的**只读取**，不碰读盘与写回）。
 #: 2026-11-01 起可以是顶层 import 了：初稿生成（唯一需要反过来 import 本模块的
 #: 地方）已经抬到 `assets.mapping_draft`，所以 `asset_mapping` 不再指回这里，
@@ -92,6 +96,11 @@ from storygraph.assets.identity_core import (
 from storygraph.assets.asset_mapping import (mapping_cached,
                                              resolve_exact_image,
                                              resolve_rule_image)
+#: `.rpy` 的 Python 块切分与"直接声明过的图像名"扫描拆到了叶子模块
+#: （2026-11-04：`asset_identity.py` 撞 1500 行技术债红线；这两件事
+#: 也不再和"图片是谁"耦合）。这里**原样再导出**，老 import 一行不用改。
+from storygraph.assets.rpy_blocks import python_blocks as _python_blocks
+from storygraph.assets.image_declarations import image_statement_words
 
 
 #: 来源标记（对照表要显示"这个结论是谁给的"）。取值与层号的对应见
@@ -141,6 +150,301 @@ def _has_dir_word(relpath: str, words) -> bool:
         if seg in words or any(t in words for t in toks):
             return True
     return False
+
+
+def used_sprite_attrs(project_root) -> dict:
+    """
+    **剧本里实际用过的**属性词 → `{tag: set(attrs)}`（`show <tag> a b` 统计）。
+
+    为什么需要这一路（2026-11-04，用户："aa 明明就有定义，你这里怎么没扫出来"）：
+
+    `aa` 在项目里是**界面换装循环的代号**，写在 `init python` 的数据结构里：
+
+        CC_OUTFIT_CYCLE = {"lan": ["aa", "base_hand_up", "clothes2"], …}
+        CC_OUTFIT_LABEL = {"aa": "普通", …}
+
+    它不是 `layeredimage lan` 的 `attribute`（真机 `definitions.rpy:381` 里
+    只有 21 个表情 + `clothes2` / `base_hand_up`），资源表里也没有登记 ——
+    于是工具判定"没有这个属性"，而剧本里 `show lan aa …` 用了 **922 处**。
+
+    对工具来说，**"项目自己一直在用"就是事实**（跟"项目自己声明过"同一档证据：
+    都是作者写出来的）。所以这一路只做一件事：让"写了两百遍的词"不被判成
+    不存在。它不是猜测 —— 判据是**字面出现**，不是模糊匹配。
+
+    ⚠ 边界：一个**真的写错了**的词如果已经在剧本里，这里也会放过它。
+    那是"既有事实"而不是"新错误" —— 新写错的词还没进剧本，照样会报。
+
+    没有项目根 / 读不出来 → `{}`（不猜）。
+    """
+    root = str(project_root or '')
+    if not root:
+        return {}
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        files = list(discover_scripts(root))
+    except Exception as e:                      # noqa: BLE001 - 读不出来就没这一路
+        swallow('assets.asset_identity.used_sprite_attrs', e)
+        return {}
+    out: dict = {}
+    # ⚠ `[^:\n]*`（**不是** `[^:]*`）：后者包含换行，会把下一行的台词
+    # 当成属性词吃进来（真机实测：`lan` 的属性里混进了十几句对白）。
+    show_re = re.compile(r'^\s*show\s+([A-Za-z_]\w*)([^:\n]*)$', re.M)
+    for fp in files:
+        try:
+            text = Path(fp).read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        for m in show_re.finditer(text):
+            tag = m.group(1)
+            rest = m.group(2) or ''
+            # `show lan happy at i11` → 只取 `at` 之前的属性词
+            rest = rest.split('#')[0]                  # 行尾注释不算属性
+            rest = re.split(r'\s+at\s+', rest, maxsplit=1)[0]
+            words = {w for w in rest.split()
+                     if w and not w.startswith(('@', '#')) and w != 'with'}
+            if words:
+                out.setdefault(tag, set()).update(words)
+    return out
+
+
+def project_literal_words(project_root) -> set:
+    """
+    项目在 `init python` / `python` 块里**定义过**的代号词（`{str}`，与 tag 无关）。
+
+    为什么需要这一路（2026-11-04 用户："`aa` 明明是服装代号，这你也查不到？"）：
+
+        # game/charactercenter/charactercenter.rpy
+        init python:
+            CC_OUTFIT_CYCLE = {"lan": ["aa", "base_hand_up", "clothes2"], …}
+            CC_OUTFIT_LABEL = {"aa": "普通", …}
+
+    `aa` 是**界面换装循环的代号**（"普通"）：它不是 `layeredimage lan` 的
+    `attribute`，资源表里也没登记 —— 工具只看那两路就会说"没有这个属性"。
+
+    ⚠⚠ 判据必须落在**定义位置**，不能落在**使用位置**（第一版用的是"剧本里
+    `show` 过就算认识"，用户当场否掉："万一剧本错了呢？万一我用了 `ba` 呢？
+    这你也当认识？太粗糙了"）。所以：
+
+      · 只看 `init python:` / `python:` 块里的**字面量**；
+      · 只收 **dict 的键** 与 **list / tuple / set 的字符串元素**
+        —— 不收 dict 的值（那多半是中文说明，`{"aa": "普通"}` 里"普通"
+        不该因此变成合法属性名）；
+      · **剧本里 `show` 过什么都不算数**。
+
+    读不出来 → `set()`（不猜）。
+    """
+    root = str(project_root or '')
+    if not root:
+        return set()
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        files = list(discover_scripts(root))
+    except Exception as e:                      # noqa: BLE001 - 读不出来就没这一路
+        swallow('assets.asset_identity.project_literal_words', e)
+        return set()
+    words: set = set()
+    for fp in files:
+        try:
+            text = Path(fp).read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        for block in _python_blocks(text):
+            words |= _literal_words_of(block)
+        # 顶层 `define OUTFITS = [...]` 与 `init python` 里的同一张表等价
+        # （2026-11-04 地狱测试：只扫 python 块时，define 写法的自定义结构被漏掉）。
+        words |= _define_literal_words(text)
+    return words
+
+
+def declared_sprite_attrs(project_root) -> dict:
+    """
+    项目 `layeredimage` 声明过的**全部属性名** → `{tag: [属性, …]}`。
+
+    与 `declared_sprite_words` 的分工：那一张是**反查表**
+    `{tag: {图片 stem: 属性名}}`（回答"这张图的文件名该写哪个词"），两个
+    属性指到同一张图时会互相覆盖；提示层要的是**属性名本身**，所以从
+    `LayeredImage.all_attrs()` 直接取（2026-11-04 地狱测试：`base` 与
+    `符_77` 都写 `'base'`，反查表只剩 `base`，卡片就误报 `符_77`）。
+
+    没有项目根 / 读不出来 → `{}`（不猜）。
+    """
+    root = str(project_root or '')
+    if not root:
+        return {}
+    try:
+        from storygraph.story.layered_model import (
+            declared_attr_names, load_layer_model_cached)
+    except ImportError:                         # 判定层被裁掉的极端打包
+        return {}
+    model = load_layer_model_cached(root)
+    try:
+        return {str(tag): list(names)
+                for tag, names in (declared_attr_names(model) or {}).items()
+                if names}
+    except Exception as e:                      # noqa: BLE001 - 结构怪就当没声明
+        swallow('assets.asset_identity.declared_sprite_attrs', e)
+        return {}
+
+
+#: 一个"属性代号"该长什么样：纯标识符、不超过 32 字。
+_WORD_RE = re.compile(r'[A-Za-z_]\w{0,31}')
+
+
+def _literal_words_of(code: str, *, mode: str = 'exec') -> set:
+    """一段 Python 代码里，**作为 dict 键 / 容器元素**出现的字符串字面量。
+
+    2026-11-04 地狱测试把它从"只看顶层 `Assign`"改成**通用遍历**：
+    定义藏在 `if` / `for` / `with` / `try` / 函数体 / 类体 / 推导式里时，
+    旧实现一个词都收不到 → 卡片把项目自己定义的词判成"没有这个属性"。
+    """
+    import ast
+    try:
+        tree = ast.parse(code, mode=mode)
+    except SyntaxError:                         # 片段不是完整语法 → 不猜
+        return set()
+    out: set = set()
+
+    def visit(node, *, as_key_or_item: bool):
+        if isinstance(node, ast.Expression):
+            visit(node.body, as_key_or_item=False)
+            return
+        if isinstance(node, ast.Module):
+            for st in node.body:
+                visit(st, as_key_or_item=False)
+            return
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if k is not None:
+                    visit(k, as_key_or_item=True)
+            for v in node.values:
+                visit(v, as_key_or_item=False)   # 值不当词（多是中文说明）
+            return
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            for e in node.elts:
+                visit(e, as_key_or_item=True)
+            return
+        if isinstance(node, ast.DictComp):
+            visit(node.key, as_key_or_item=True)
+            visit(node.value, as_key_or_item=False)
+            for gen in node.generators:
+                visit(gen, as_key_or_item=False)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            visit(node.elt, as_key_or_item=True)
+            for gen in node.generators:
+                visit(gen, as_key_or_item=False)
+            return
+        if as_key_or_item and isinstance(node, ast.Constant) \
+                and isinstance(node.value, str):
+            word = node.value.strip()
+            # 只收**像标识符的短词**：`aa` / `clothes2` / `base_hand_up` ✓；
+            # `bgm/ed.mp3`、中文说明、长句 ✗（它们也在 `init python` 的容器里，
+            # 但那是资源路径/文案，不是属性代号）。
+            if _WORD_RE.fullmatch(word):
+                out.add(word)
+            return
+        # 其余节点（If / For / With / Try / FunctionDef / ClassDef / Call…）
+        # 一律下钻：定义位置不因包在控制流/函数体里就作废。
+        for child in ast.iter_child_nodes(node):
+            visit(child, as_key_or_item=False)
+
+    visit(tree, as_key_or_item=False)
+    return out
+
+
+#: `define NAME = <表达式>` / `default NAME = <表达式>`（Ren'Py 顶层语句）。
+#: 名字允许点号（`config.name`）；`-1` 之类的 init 偏移也允许。
+_DEFINE_RE = re.compile(
+    r'^[ \t]*(?:define|default)[ \t]+(?:[-+]?\d+[ \t]+)?'
+    r'[\w.]+[ \t]*=[ \t]*(?P<expr>.*)$')
+
+
+def _bracket_delta(line: str) -> int:
+    """一行里括号的净增量（忽略行尾注释；字符串里的括号不算）。"""
+    depth = 0
+    quote = ''
+    escaped = False
+    for ch in line:
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == quote:
+                quote = ''
+            continue
+        if ch == '#':
+            break
+        if ch in ('"', "'"):
+            quote = ch
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+    return depth
+
+
+def _define_literal_words(text: str) -> set:
+    """
+    顶层 `define` / `default` 的字面量值里的词（2026-11-04 地狱测试）。
+
+    为什么算定义位置：`define OUTFITS = ["aa", …]` 与 `init python` 里的
+    `OUTFITS = [...]` 是同一件事，只是 Ren'Py 语句写法不同。只收容器里的
+    **键/元素**（`_literal_words_of` 的老判据），所以
+    `define gui.name = "故事"` 这种裸字符串不会污染词表。
+    多行表达式按括号配平往后收。
+    """
+    lines = text.split('\n')
+    words: set = set()
+    i = 0
+    while i < len(lines):
+        m = _DEFINE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        expr_lines = [m.group('expr')]
+        depth = _bracket_delta(m.group('expr'))
+        while depth > 0 and i + 1 < len(lines):
+            i += 1
+            expr_lines.append(lines[i])
+            depth += _bracket_delta(lines[i])
+        try:
+            words |= _literal_words_of('\n'.join(expr_lines), mode='eval')
+        except (SyntaxError, ValueError) as e:
+            swallow('assets.asset_identity.define_literal', e)
+        i += 1
+    return words
+
+
+def _under_game_images(relpath: str) -> bool:
+    """
+    这条路径在 `game/images/` 下面吗（Ren'Py **自动注册 image name** 的根）。
+
+    判据本体在 `identity_core.under_game_images`（2026-11-07 起同一份给
+    `asset_mapping.identity_from_entry` 用：映射的 `rules` 层不许替引擎答应
+    "这个名字能 show"，两边口径必须同一份）。这里只是保留本模块的历史名字
+    （`test_asset_identity` / 调用处都按 `_under_game_images` 找）。
+    """
+    return _core_under_game_images(relpath)
+
+
+def is_under_sprite_container(relpath: str) -> bool:
+    """
+    这条路径的**目录段**里写着立绘容器词吗（`characters` / `立绘` / `sprite`…）。
+
+    与 `path_kind`（以及扫描侧的 `_category_by_dir`）的分工：
+      · 那一层认不出时会**退到位置猜测**（`images/<x>/…` 也可能是角色目录），
+        所以 `game/images/nbg/bg1.1.png`（42 张背景）被判成了 `character`；
+      · 本判据**只认写出来的目录名**，用来回答"这真的是立绘素材吗"，
+        而不是"它可能是立绘"。
+
+    真机用途（2026-11-03，用户报"qing 的立绘认不出来"）：
+    `game/images/characters/qing/normal.png` 是**真立绘**（目录写着 characters），
+    而它对应的角色（`q` /「青」）在角色表里 `立绘 tag` 是空的 —— 于是
+    卡片里写 `qing base` 就被判"不是已知的角色立绘标签"。有了这条判据，
+    提示才能说"它确实有立绘，只是没有角色认领"，而不是把用户推向"资源映射"。
+    """
+    return _has_dir_word(relpath, CHARACTER_CONTAINER_WORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -675,9 +979,18 @@ def _from_tag_column(row, tag_col: str, rel: str, attrs: tuple,
                         source='tag-column', showable=True)
     kind = kind_from_tag_word(low)
     if kind in ('bg', 'cg', 'ui'):
-        # 非角色图层：Tag 列明确写着它是哪一类 → 可以 show（真图层）。
+        # 非角色图层：Tag 列明确写着它是哪一类。
+        #
+        # ⚠ 能不能 `show`，取决于**引擎会不会自动注册这个名字**
+        # （2026-11-03，地狱测试第七轮 I7 抓到）：Ren'Py 只把
+        # `game/images/…` 下的图注册成 image name（`images/ui/x.png` → `ui x`）。
+        # 而界面素材常常住在 `game/charactercenter/` / `game/gui/` 这类目录里
+        # ——**不注册**。真机 `charactercenter/` 下 24 张图原本全被判成
+        # `showable=True`，选择器写出 `ui background` / `ui card_lan`，
+        # 而卡片的提示又说"ui 不是立绘"（**提示是对的，选择器错了**）。
+        showable = _under_game_images(rel)
         return Identity(kind=kind, tag=tag_col, attrs=attrs,
-                        source='tag-column', showable=True)
+                        source='tag-column', showable=showable)
     if kind == 'avatar' or _has_dir_word(rel, _AVATAR_DIR_WORDS):
         tag = _char_hint(rel, attrs, tag_map)
         return Identity(kind='avatar', tag=tag, attrs=(),
@@ -1001,6 +1314,18 @@ def spec_for_identity(identity: Identity, row: dict | None = None) -> str:
     tag = str(identity.tag or '').strip()
     if not tag:
         return asset_id_of(row)
+    # ⚠ **文件名已经带 tag 前缀时不要再拼一次**（2026-11-03，地狱测试 I7）：
+    # `game/images/bg_1.jpg` 的自动 image name 是 `bg_1`（单段），
+    # 而 Tag 列写的是 `bg`、Attributes 列写的是 `bg_1` —— 拼起来成了
+    # `bg bg_1`，引擎里没有这个名字。判据：**属性词恰好就是文件名本身**、
+    # 且文件名以 `<tag>_` 开头 → 名字就是文件名。
+    # （`images/bg/rooftop.png` 不受影响：stem=`rooftop` ≠ 属性词 `rooftop`
+    #   的前缀关系不成立 —— 它要的是 `bg rooftop`。）
+    stem = _stem_of(str((row or {}).get('Path') or ''))
+    if stem and tag and stem.lower().startswith(tag.lower() + '_'):
+        words = [str(w).strip() for w in (identity.attrs or ()) if str(w).strip()]
+        if len(words) == 1 and words[0].lower() == stem.lower():
+            return stem
     parts = [tag]
     seen = {tag.lower()}
     for word in identity.attrs or ():
@@ -1009,6 +1334,44 @@ def spec_for_identity(identity: Identity, row: dict | None = None) -> str:
             seen.add(word.lower())
             parts.append(word)
     return ' '.join(parts)
+
+
+def spec_tag_problem(spec, known_tags) -> str:
+    """
+    `spec` 的首词**项目认不认**（空串 = 认 / 判不了）。
+
+    为什么需要（2026-11-03，地狱测试第七轮 I7"自产自销"）：
+
+    `storygraph.mapping.json` 允许这样写
+
+        "images": {"qing": {"kind": "sprite", "char": "青", "attr": "base"}}
+
+    `char` 是**填 image tag 的槽**，真机里用户填了**显示名**「青」。工具老老实实
+    照做，`resolve_pick` 就返回 `spec='青 base'`；而引擎里根本没有这个 image
+    name，`show 青 base` 直接报错。
+
+    也就是说：**生成器产出了一个自己都不认识的名字**，而校验器（卡片提示）
+    在旁边说"这不行" —— 同一件事两个结论，用户只会觉得工具坏了。
+
+    这条判据让生成器**自己先跑一遍校验器**：不认识就不许输出。
+
+    「判不了就闭嘴」：`known_tags` 为空（没打开项目 / 没建表）时返回空串，
+    绝不因为"我这儿没有"就否掉用户项目里真实存在的名字。
+    """
+    tag = str(spec or '').strip().split(' ')[0]
+    if not tag:
+        return ''
+    words = {str(t).strip().lower() for t in (known_tags or ())
+             if str(t).strip()}
+    if not words:
+        return ''
+    if tag.lower() in words:
+        return ''
+    if tag.lower() in NON_ACTOR_TAGS:
+        return ''                       # bg / cg / ui … 是引擎内置语义，交给上层
+    return (f'「{tag}」不是项目里任何图像声明的名字 —— 写进 `show` 引擎会报错。'
+            f'多半是「资源映射」里把 image tag 填成了显示名'
+            f'（该填 `qing` 这种，不该填「{tag}」这种）。')
 
 
 def group_key_for_identity(identity: Identity) -> str:
@@ -1050,7 +1413,8 @@ __all__ = [
     'KINDS', 'SHOWABLE_KINDS', 'SOURCES', 'GROUP_ORDER', 'Identity',
     'normalize_relpath', 'asset_id_of', 'kind_from_tag_word',
     'known_characters', 'known_tags_of', 'engine_fact_tags',
-    'declared_sprite_tags', 'declared_sprite_words',
+    'declared_sprite_tags', 'declared_sprite_words', 'declared_sprite_attrs',
+    'project_literal_words', 'image_statement_words',
     'build_copy_index', 'path_kind', 'resolve_image', 'resolve_images',
     'project_context', 'find_real_sprite', 'spec_for_identity',
     'group_key_for_identity',

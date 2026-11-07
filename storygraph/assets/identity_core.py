@@ -133,6 +133,31 @@ def _looks_absolute(text: str) -> bool:
             or bool(_DRIVE_RE.match(text.split('/')[0])))
 
 
+def under_game_images(relpath: str) -> bool:
+    """
+    这条路径在 `game/images/` 下面吗（Ren'Py **自动注册 image name** 的根）。
+
+    规则是引擎的，不是我们的：`game/images/ui/x.png` → image name `ui x`
+    （可以 `show`）；而 `game/charactercenter/background.png` 不在那个根下，
+    引擎**不会**给它起名字 —— 写 `show ui background` 只会报"找不到图像"。
+
+    2026-11-03（地狱测试 I7）：真机 `charactercenter/` 下 24 张图原本被标成
+    `showable=True`，选择器于是写出 `ui background` / `ui card_lan`，
+    而卡片的提示说"ui 不是立绘" —— 两边打架，根因在这里。
+
+    2026-11-07：这条判据同时被 `asset_mapping.identity_from_entry`（映射的
+    `rules` 层**不许**替引擎答应"这个名字能 show"）用 —— 两边口径必须同一份，
+    所以放在这个叶子模块，而不是 `asset_identity`（那会重新绕出
+    `asset_mapping ↔ asset_identity` 的环）。
+    """
+    parts = PurePosixPath(str(relpath or '')).parts
+    dirs = [str(p).lower() for p in parts[:-1]]
+    for i, seg in enumerate(dirs):
+        if seg == 'images':
+            return i == 0 or (i == 1 and dirs[0] == 'game')
+    return False
+
+
 def _row_relpath(row: Mapping) -> str:
     """行内 `Path` → 归一路径（不带 project_root，只做字符串归一）。"""
     return normalize_relpath(str((row or {}).get('Path') or ''))

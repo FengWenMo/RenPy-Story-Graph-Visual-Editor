@@ -150,6 +150,42 @@ def test_换服装预览必须跟着变(hero_project, tmp_path):
         '属性选择没进合成签名 —— 换了维度会命中同一份缓存'
 
 
+def test_合成按目标尺寸做_不再产原图尺寸的中间图(tmp_path):
+    """
+    卡片上那张 88×118 的缩略图**不该**先按原图分辨率合成再缩（2026-11-05）。
+
+    真机（`sr_general` 的 4320×7680 立绘）：一次 `canvas.save()` ~1.0 s，
+    点一下服装 chip 要 2.4 s、卡片卡住 —— 而屏幕上的格子只有 88×118。
+    现在给 `max_size` 就按那个尺寸合成，`_sig` 里带尺寸（两种产物各存一份）。
+    """
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from storygraph.app import layer_compose
+
+    base = tmp_path / 'base.png'
+    over = tmp_path / 'over.png'
+    Image.new('RGBA', (800, 1200), (255, 0, 0, 255)).save(base)
+    Image.new('RGBA', (800, 1200), (0, 0, 255, 128)).save(over)
+    plan = SimpleNamespace(
+        layers=[{'path': str(base)}, {'path': str(over)}],
+        attrs_used=['a'], attrs_chosen=['a'])
+
+    big = layer_compose.compose_sprite(plan, cache_dir=tmp_path)
+    small = layer_compose.compose_sprite(plan, cache_dir=tmp_path,
+                                         max_size=(200, 300))
+    assert big != small, '尺寸没进缓存键 —— 小图会盖掉大图（或反过来）'
+    with Image.open(big) as a, Image.open(small) as b:
+        assert max(a.size) <= layer_compose.MAX_SIDE
+        assert max(b.size) <= 300 and tuple(b.size) == (200, 300)
+        # 合成内容还在（不是"缩没了"）
+        assert b.convert('RGBA').getpixel((100, 150))[3] > 0
+    # 幂等：同一组属性 + 同一尺寸 → 同一个缓存文件
+    assert layer_compose.compose_sprite(plan, cache_dir=tmp_path,
+                                        max_size=(200, 300)) == small
+
+
 def test_没有分层声明的项目照旧走老路(hero_project):
     """
     ⚠ **通用性底线**：没有 `layeredimage` 声明的 tag（`cg cg03` 这类）
