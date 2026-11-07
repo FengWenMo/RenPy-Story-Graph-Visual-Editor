@@ -42,9 +42,27 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QMessageBox
 
 from storygraph.core import autosave as AS
+from storygraph.core import versions as V
 from storygraph.core.safeguard import swallow
 
-__all__ = ['RecoverMixin']
+__all__ = ['RecoverMixin', 'history_summary']
+
+
+def history_summary(info: dict) -> str:
+    """
+    历史版本的"账"：多少个文件、占多大、几个脚本、最早到哪天。
+
+    纯函数（不建控件、不弹框）：判据要能直接看这句话。
+    """
+    files = int(info.get('files') or 0)
+    if not files:
+        return '这个项目还没有历史版本。'
+    oldest = info.get('oldest')
+    when = V.stamp_text(oldest)[:10] if oldest else '?'
+    return (f'这个项目有 {files} 个旧版本文件，共 '
+            f'{V.human_size(info.get("bytes"))}；'
+            f'覆盖 {int(info.get("scripts") or 0)} 个脚本，'
+            f'最早到 {when}（跨 {int(info.get("days") or 0)} 天）。')
 
 
 class RecoverMixin:
@@ -446,7 +464,7 @@ class RecoverMixin:
     #  磁盘上的旧版本（脚本 `.rpy`）
     # ------------------------------------------------------------------
 
-    #: 脚本历史版本窗口顶上那句说明（说清**在哪儿**，人才能自己去翻）
+    #: 脚本历史版本窗口顶上那句说明（说清**在哪儿**、**留多少**）
     #:
     #: ⚠ 窗口里是 `QLabel`，**不渲染 markdown**（反引号 / `**` 会原样显示）——
     #: 这里只能写纯文字，路径靠「」圈出来（第十轮在同一个控件上踩过 `**`）。
@@ -455,6 +473,13 @@ class RecoverMixin:
         '「.storygraph/versions」目录（不在 game/ 里：Ren\'Py 不扫它，'
         '也不会进 git status）。每一行是「被换掉的那一版」—— 挑一行看右边，'
         '确认了再放回；放回之前那份自动进新一代，放错了还能再放回来。')
+
+    @staticmethod
+    def _script_version_hint() -> str:
+        """`SCRIPT_VERSION_HINT` + 一句"留多久"（脚本和清单的规矩不一样）。"""
+        from storygraph.story import version_store as VS
+        return (RecoverMixin.SCRIPT_VERSION_HINT + '\n留多少：'
+                + VS.retention_hint() + '。')
 
     def show_script_versions(self):
         """
@@ -480,7 +505,7 @@ class RecoverMixin:
             self, path,
             summarize=VS.summarize_script,
             title=f'历史版本 —— {Path(path).name}',
-            hint=self.SCRIPT_VERSION_HINT,
+            hint=self._script_version_hint(),
             before_restore=self._script_restore_guard,
             store=VS.SCRIPT_STORE)
         dlg.restored.connect(self._after_script_restored)
@@ -532,3 +557,59 @@ class RecoverMixin:
         self._status(f'已放回 {version}，并按磁盘重读了这一章：'
                      f'{len(getattr(self._session, "beats", []) or [])} 拍'
                      f'（放回之前那份也进了历史）')
+
+    def show_history_cleanup(self):
+        """
+        菜单「🧹 历史版本（占多少 / 清掉）…」。
+
+        为什么要有这一条（2026-11-08 第十二轮）：这套东西被**故意**放在一个
+        隐藏目录里（`game/` 外面、`git status` 看不见）—— 代价就是"它占了多少"
+        在界面上完全不可见。看不见的东西，人要么忘了它，要么突然发现硬盘少了
+        几十兆。所以要有一个地方能把账摊开，也要有一个按钮能满足
+        "我不需要这些"。
+
+        删之前必须问过：这些版本**没有别处再存一份**（`.storygraph/versions`
+        是唯一的落点）。剧本本身不受影响 —— 删完工具照样继续留新的。
+        """
+        from storygraph.story import version_store as VS
+
+        root = getattr(self, '_project_root', None)
+        if not root:
+            self._status('先打开一个项目 —— 历史版本是按项目存的。')
+            return 'no-project'
+        info = VS.project_history(root)
+        if not int(info.get('files') or 0):
+            self._status('这个项目还没有历史版本 —— 工具改脚本时才会留'
+                         '（放在 .storygraph/versions 里，不在 game/ 里）。')
+            return 'empty'
+        box = self._history_box(info)
+        box.exec()
+        if box.clickedButton() is not self._history_delete_btn:
+            return 'cancelled'
+        res = VS.clear_history(root)
+        failed = list(res.get('failed') or [])
+        self._log(f'[历史版本] 清掉 {res["removed"]} 个'
+                  f'（{V.human_size(res["bytes"])}）'
+                  + (f'，{len(failed)} 个删不掉' if failed else ''))
+        if failed:
+            self._status(f'删掉了 {res["removed"]} 个旧版本，'
+                         f'还有 {len(failed)} 个删不掉（被占用 / 只读）：'
+                         f'{Path(str(failed[0][0])).name}')
+            return 'partial'
+        self._status(f'已删掉 {res["removed"]} 个旧版本'
+                     f'（{V.human_size(res["bytes"])}）—— 剧本没动，'
+                     f'之后工具照样会继续留新的')
+        return 'cleared'
+
+    def _history_box(self, info):
+        """建那个确认框（**只建不弹**：弹框会阻塞，判据碰不了它）。"""
+        box = QMessageBox(self)
+        box.setWindowTitle('历史版本')
+        box.setIcon(QMessageBox.Information)
+        box.setText(history_summary(info))
+        box.setInformativeText('删掉之后这些版本就没了（剧本本身不受影响，'
+                               '之后工具照样会继续留新的）。')
+        self._history_delete_btn = box.addButton('全部删掉',
+                                                 QMessageBox.DestructiveRole)
+        self._history_close_btn = box.addButton('关闭', QMessageBox.RejectRole)
+        return box

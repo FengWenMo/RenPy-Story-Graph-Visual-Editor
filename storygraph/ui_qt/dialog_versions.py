@@ -221,7 +221,10 @@ class VersionsDialog(QDialog):
             self.status.setText(head + '｜还没有备份 ——'
                                        f'第一次写盘时会把当时那份留成第 1 代。')
             return
-        self.status.setText(head + f'｜磁盘上有 {len(self._versions)} 代备份')
+        # 合计大小：这套东西藏在一个隐藏目录里，界面上不说，人只能自己去翻
+        total = sum(int(v.size or 0) for v in self._versions)
+        self.status.setText(head + f'｜磁盘上有 {len(self._versions)} 代备份'
+                                   f'（共 {V.human_size(total)}）')
 
     # ------------------------------------------------------------------
     #  选 / 放回
