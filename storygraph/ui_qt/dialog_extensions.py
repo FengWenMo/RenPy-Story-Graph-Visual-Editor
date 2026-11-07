@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 
+from storygraph.core import versions as V
 from storygraph.core.atomicio import write_text_atomic
 from storygraph.ext import archive as EA
 from storygraph.ext import card_fields as CF
@@ -48,6 +49,7 @@ from storygraph.ext import schema as ES
 from storygraph.ext.schema import (FIELD_KINDS, FIELD_KIND_LABELS,
                                    KIND_LABELS, KINDS, ExtError,
                                    ExtensionPoint, parse_field)
+from storygraph.ui_qt.dialog_versions import VersionsDialog
 from storygraph.ui_qt.dynamic_form import DynamicForm
 
 #: 字段表的列。
@@ -124,6 +126,9 @@ class ExtensionDialog(QDialog):
         self._build()
         self._reload_tree()
         self._report_problems()
+        # 开窗时**没选中任何一条** → 右栏停用（左边挑一条再解锁）。
+        # 留一个能打字却存不进去的表单，就是这个工具最烦的那种"改了不生效"。
+        self._detach_form()
         # 从别的窗口**带着一条 id 进来**（2026-11-07 第四轮）：调用窗口里
         # "这条归扩展管"要能点到这一条上，而不是让人在树上自己找。
         if focus_id:
@@ -375,6 +380,19 @@ class ExtensionDialog(QDialog):
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(lambda: self._undo_save())
         foot.addWidget(self.btn_undo)
+        # —— 历史版本（2026-11-07 第十轮，设计文档 §19）——
+        #
+        # 「撤销上次保存」只退**本窗口这一次**，关窗就没了；而那句"旧版本还在
+        # 同目录的 .bak 里"从前是句死路话（要人自己去资源管理器挑一份、
+        # 整份复制 —— 而复制不产生备份，刚退掉的那版就没了）。这里把磁盘上
+        # 真有的那几代摆出来，挑一版放回去。
+        self.btn_versions = QPushButton('历史版本…')
+        self.btn_versions.setToolTip(
+            f'翻看 {ER.MANIFEST} 最近的自动备份（{V.generations_hint()}），'
+            '挑一版放回去。\n'
+            '放回之前那份会自动进新一代备份（放错了还能再放回）。')
+        self.btn_versions.clicked.connect(lambda: self._show_versions())
+        foot.addWidget(self.btn_versions)
         b_close = QPushButton('关闭')
         b_close.clicked.connect(self.reject)
         b_save = QPushButton('保存到项目')
@@ -459,6 +477,8 @@ class ExtensionDialog(QDialog):
         self._loading = True
         try:
             self._current = point
+            # 先整片解锁，再按这一条的来源上锁（`_switch_only` / 种类那两句在后面）
+            self._set_shape_editable(True)
             self.head.setText(f'{point.label or point.id}'
                               f'   （{KIND_LABELS.get(point.kind, point.kind)}）')
             self.source_note.setText(self._where(point))
@@ -508,6 +528,36 @@ class ExtensionDialog(QDialog):
         self.tbl.setEnabled(bool(editable))
         self.btn_add_field.setEnabled(bool(editable))
         self.btn_rm_field.setEnabled(bool(editable))
+
+    def _shape_widgets(self) -> tuple:
+        """右栏里"改形状"的那几个控件（没有选中任何一条时要一起停掉）。"""
+        return (self.ed_id, self.ed_label, self.ed_docs, self.cb_kind,
+                self.ck_enabled, self.ck_batch, self.ed_effect, self.sp_seconds)
+
+    def _set_shape_editable(self, editable: bool) -> None:
+        for widget in self._shape_widgets():
+            widget.setEnabled(bool(editable))
+
+    def _detach_form(self) -> None:
+        """
+        没有选中任何一条 → 右栏**停用并清空**（不留一份"能改却存不进去"的表单）。
+
+        为什么（2026-11-07 第十轮，探针 `.pip-tmp/probe_r10_stale_form.py`）：
+        `_reread()` 会把 `_current` 置 None 再重建树，而右栏还显示着刚才那一格。
+        人在里面接着改、点保存 —— `_save` 里那句 `if self._current is not None`
+        把改动**静默跳过**：界面上"甲改过了"，文件里还是"甲"，一句提示都没有。
+        这条不是本轮引入的（上一轮撤销就踩过），是本轮量出来的。
+        """
+        self._current = None
+        self.head.setText('左边挑一个扩展点')
+        self.source_note.setText('')
+        for widget in (self.ed_id, self.ed_label, self.ed_docs):
+            widget.clear()
+        self.ed_effect.clear()
+        self.sp_seconds.setValue(-1)
+        self._set_shape_editable(False)
+        self._set_fields_editable(False)
+        self.tbl.setRowCount(0)
 
     # ==================================================================
     #  字段表
@@ -890,10 +940,16 @@ class ExtensionDialog(QDialog):
         self._reread(keep)
         if self._reg.problems:
             notes.append(f'{len(self._reg.problems)} 条读取问题（见左树 ⚠）')
-        self.status.setText(
-            f'已保存 {res.get("count", 0)} 条到 {ER.MANIFEST}'
-            '（旧清单没动；注册表缓存已刷新）。'
-            + ('｜' + '；'.join(notes) if notes else ''))
+        if res.get('unchanged'):
+            # 诚实一点：这次**没写盘**（内容一模一样）。说成"已保存"会让人
+            # 以为多了一代备份 / 文件被动过 —— 而实际上那两件事都没发生。
+            msg = (f'和 {ER.MANIFEST} 里一模一样，这次**没有重写**'
+                   f'（也就没多一代备份）：{res.get("count", 0)} 条。')
+        else:
+            msg = (f'已保存 {res.get("count", 0)} 条到 {ER.MANIFEST}'
+                   '（旧清单没动；注册表缓存已刷新）。'
+                   + ('｜' + '；'.join(notes) if notes else ''))
+        self.status.setText(msg)
         return True
 
     def _ask_conflict(self, keep: str, res: dict) -> bool:
@@ -949,6 +1005,7 @@ class ExtensionDialog(QDialog):
             self.status.setText('没有可撤销的保存。')
             self.btn_undo.setEnabled(False)
             return {'ok': False, 'reason': '没有可撤销的保存'}
+        keep = self._current.id if self._current is not None else ''
         res = ER.restore_manifest(self._undo)
         if not res.get('ok'):
             self.status.setText('没撤销：' + str(res.get('reason') or '?'))
@@ -959,7 +1016,7 @@ class ExtensionDialog(QDialog):
         self._undo = None
         self.btn_undo.setEnabled(False)
         self.changed = True
-        self._reread()
+        self._reread(keep)
         if res.get('deleted'):
             self.status.setText(
                 f'已撤销上次保存：{ER.MANIFEST} 在保存前本来不存在，照原样删掉了。')
@@ -968,6 +1025,46 @@ class ExtensionDialog(QDialog):
                 f'已撤销上次保存：{ER.MANIFEST} 回到保存之前那副样子'
                 '（退掉的那份留在同目录的 .bak 里）。')
         return res
+
+    # ==================================================================
+    #  历史版本：磁盘上那几代备份，挑一版放回来（2026-11-07 第十轮）
+    # ==================================================================
+
+    def _show_versions(self):
+        """
+        打开「历史版本」—— 关窗之后也能退，而且能退**不止一步**。
+
+        与「撤销上次保存」的分工（两条都留着，不是二选一）：
+
+          · 撤销  = **验证式**：只退我这一次，靠"磁盘上还是不是我写的那份"
+            来判；不知道自己在退哪一版，但一步到位；
+          · 历史  = **挑选式**：那几代都摊开，看得见、预览得到；退哪一版由人选，
+            代价是得自己认。
+
+        只有一条是共用的：放回**不碰**内存里的模型，回来一律按文件重读
+        （`_after_restore`）—— 否则树上是旧的、文件是新的，下一次保存就会
+        拿更旧的内存去盖。
+        """
+        if not self._root_path:
+            self.status.setText('先打开项目 —— 备份在项目根目录里。')
+            return None
+        path = Path(self._root_path) / ER.MANIFEST
+        dlg = VersionsDialog(self, path, summarize=ER.summarize_manifest)
+        dlg.restored.connect(self._after_restore)
+        dlg.exec()
+        return dlg
+
+    def _after_restore(self, res: dict) -> None:
+        """放回了一版 → 内存 / 树 / 卡片一律按文件重读。"""
+        keep = self._current.id if self._current is not None else ''
+        self.changed = True
+        # 撤销材料指向"我上次写下去的那份"，放回之后它已经对不上了：
+        # 留着只会让人按一个注定被拒的按钮。
+        self._undo = None
+        self.btn_undo.setEnabled(False)
+        self._reread(keep)
+        name = Path(str(res.get('version') or '')).name or '那一版'
+        self.status.setText(f'已放回 {name}（现在这份也在 .bak 里，放错了还能再放回）。')
 
     # ==================================================================
     #  把声明带走（导出 / 导入一份可移植档案）
@@ -1127,6 +1224,10 @@ class ExtensionDialog(QDialog):
         为什么不能只 `_reload_tree()`（2026-11-07 第六轮）：三方合并可能把
         **别人加的**条目收进文件、也可能把**我删的**条目真删掉 —— 内存里那份
         和文件已经不是一回事。不重读，下一次保存就会拿更旧的内存去盖。
+
+        `keep` 那一格（第十轮）：重读会把 `_current` 置空，而右栏还显示着旧表单。
+        这里要么把**同一条**重新选上（于是表单还是活的、改了能存），要么把表单
+        **停用**（那一条已经不在了）—— 绝不留下"能改却存不进去"的状态。
         """
         if not self._root_path:
             return
@@ -1135,8 +1236,8 @@ class ExtensionDialog(QDialog):
         self._reg = ER.ExtensionRegistry.for_project(self._root_path)
         self._reload_tree()
         self._current = None
-        if keep:
-            self.focus_on(keep)
+        if not (keep and self.focus_on(keep)):
+            self._detach_form()
 
     def _new_point(self):
         n = 1
