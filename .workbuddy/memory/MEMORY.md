@@ -174,7 +174,24 @@
   14 条（CRLF 逐字节 / 双进程同刻撤销恰好一个成功 / 别人持锁就拒绝），
   变异 5/5 抓住，全量 **10150 passed**。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜撤销只有"一次"且只在扩展窗口活着时（关窗就只剩 `.bak`），也不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
+- **扩展平台 v10（2026-11-07 第十轮）**：① **关窗之后也能退** ——
+  `core/versions.py`（通用：列 `.bak` 世代 / 读某一版 / **锁里放回**）+
+  扩展窗口「历史版本…」按钮 + `ui_qt/dialog_versions.py`。放回三道闸：
+  逐字节（`read_text_exact`）、`expect_current` 不符就**一个字不写**、
+  写前先备份现在这份（**不是单向门**）；`None` 是**合法期望值**（当时文件
+  不存在），"不校验"另用哨兵 `_UNCHECKED`。第 5 代上限来自
+  `atomicio.KEEP_BACKUPS`。② 顺手修 `save()`：**内容一样也重写**（白烧一代
+  备份、mtime 跳，`txt_pipeline` 2026-10-26 就立过"一样就不碰"的规矩）——
+  现在 `unchanged: True` + **不碰文件**。③ 顺手修 `_reread()` 之后的**死表单**：
+  `_current` 置 None 但右栏还显示旧那格，接着改会被 `_save` 里那句
+  `if self._current is not None` **静默跳过**（上一轮撤销就踩过）——现在要么
+  重选同一条、要么 `_detach_form()` 停用清空，开窗没选中也停用。
+  判据 `tests/test_versions.py` 23 条 + `tests/test_ext_stale_form.py` 4 条，
+  变异 9/9 抓住，全量 **10181 / 10177 passed**。
+  顺带：`atomicio.read_text_exact` 提为公开（与 `write_text_atomic` 对称），
+  `registry._read_text_exact` 改成转发 —— 换行翻译差一个字节，"逐字节放回"就破功。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜历史版本只接了 `ext.json`（`.rpy` 要接得先想清"放回之后怎么重载模型"）｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
