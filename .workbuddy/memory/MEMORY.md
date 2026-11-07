@@ -70,7 +70,8 @@
 - 向上找项目根要有边界（`_NEVER_A_PROJECT_ROOT` 跳过 `.pip-tmp`/`build`/`.git`/`__pycache__`；曾让 `show` 变 `show show show`）。
 - 全局开关判在唯一写入口（`remember_graph_files` 漏查写过 849 个 tmp 项目）。跑 UI 探针/截图先 `STORYGRAPH_NO_SESSION=1`。
 - 纯文字导入必须给 `out_dir`；测试要打桩 `_ask_plain_text_export_dir`，否则模态挂死。
-- 中文源码别过 shell 文本管道（PS 5.1 `Get-Content|Set-Content` 会乱码），只用 edit/write 或 Python 脚本。
+- 中文源码别过 shell 文本管道（PS 5.1 `Get-Content|Set-Content` 会乱码），只用 edit/write 或 Python 脚本。⚠ **`Set-Content -Encoding UTF8` 会写 BOM**（2026-11-08 真踩：改一行 `REQUIRES`，文件头多 3 个字节，`ast.parse` 报 `invalid non-printable character U+FEFF`）—— 内容没乱，所以更难看出来。
+- **写 `.rpy` 会自动留一代旧版本**（2026-11-08 第十一轮）：`story.paths.write_text_atomic` 默认 `history=True`，写之前把现在这份存进 `<项目>/.storygraph/versions/<相对 game/ 的目录>/`（`game/` 外；固定名那份永不裁 = 工具第一次动刀前的原稿；一样的内容不重复存；**备份失败就拒写**）。所以"改一条 `@at`/改源边/删一行源"这些原地小改也能在关窗之后退回去；别绕过这个函数直写 `.rpy`（`atomicio` 直写不会进历史目录）。`backup=True` 的整份导出仍留文件旁边的 `.rpy.bak`（老机制，`dialog_cleanup` 认它），列表会把两处合并。
 
 **扫描/刷新**
 - 项目级扫描一律走 `story/scan_cache.py`（`mtime_ns+size` + 项目指纹失效，**无 TTL**）。绕过缓存 → 整份解析 6~8 遍 → "连线很卡"。
@@ -191,7 +192,24 @@
   顺带：`atomicio.read_text_exact` 提为公开（与 `write_text_atomic` 对称），
   `registry._read_text_exact` 改成转发 —— 换行翻译差一个字节，"逐字节放回"就破功。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜历史版本只接了 `ext.json`（`.rpy` 要接得先想清"放回之后怎么重载模型"）｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
+- **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
+  `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
+  一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
+  不带 `backup=`：`graph/commands` 改 `@at`/换表情/改源边、`control_*`、`choice_point`、
+  `source_line_delete`、`sg_transforms`）**一个备份都不留**；真项目 95 个 `.rpy`
+  里 `*.rpy.bak*` 共 0 个。做法：`story/version_store.py` 把旧版本存进
+  `<项目>/.storygraph/versions/<相对 game/ 的目录>/`（`game/` 外，引擎不扫、
+  `git status` 看不见 —— 目录里有自忽略的 `.gitignore`，**不动**用户的），
+  命名/裁剪沿用 `atomicio`（固定名那份永不裁 = 原稿），**去重比全部世代**、
+  **空转写盘不烧一代**、**备份失败就拒写**。界面：菜单「🕘 这个脚本的旧版本…」
+  复用 `dialog_versions`，注入 `store`（一个壳：怎么列 + 怎么放回）与
+  `before_restore`（**有没导出的改动就不放回**）；放回后 `load_script` 按磁盘重读。
+  `story/roots.py` 抽出 `project_root_of` 断掉 `paths ↔ version_store` 的导入环。
+  判据 `tests/test_version_store.py` 29 条（含一条走**真命令**
+  `source_line_delete` 的、一条**真 `trigger()`** 菜单项的），变异 15/15，
+  全量 **10210 / 10206 passed**。详见 `docs/设计_脚本历史版本_2026-11-08.md`。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜`.storygraph/versions/` 没有界面清理入口（现在只能手动删目录）｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
