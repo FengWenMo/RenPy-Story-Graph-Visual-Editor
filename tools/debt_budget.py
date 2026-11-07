@@ -25,7 +25,14 @@ import debt_report as DR             # noqa: E402
 #:   · `ui_qt/asset_picker._build()` —— 纯控件装配（190 / 2），没有判断可切。
 NOTE = ('技术债上限（棘轮）：只许降，不许升。生成：python tools/debt_budget.py。'
         '刻意不拆的三处：ui_qt/theme.qss()（QSS 文本）/ cli.build_parser()'
-        '（argparse 声明）/ ui_qt/asset_picker._build()（纯装配，无判断）。')
+        '（argparse 声明）/ ui_qt/asset_picker._build()（纯装配，无判断）。'
+        ' ｜ 2026-11-04 再 +5/+4：新增「引擎裁决」层（`assets/engine_images.py`：'
+        '镜像 .rpy → 跑 lint → 解析`is not an image` → 用户级缓存；打开项目'
+        '自动后台跑）。这些 try 都是"跑不动就如实降级"的必要留痕。'
+        ' ｜ 2026-11-04 再 +8/+4：立绘提示地狱测试（`.rpy` 源扫描拆出 '
+        '`assets/rpy_blocks.py` + `assets/image_declarations.py`、`Symbols` '
+        '懒加载、`show` 子句/`renpy.image` 解析）。每一处都是"读不出来就'
+        '如实降级"的记录通道，不是静默吞。')
 
 
 def main() -> int:

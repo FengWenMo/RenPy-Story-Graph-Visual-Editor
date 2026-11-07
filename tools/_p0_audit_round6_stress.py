@@ -189,8 +189,8 @@ def main():
         from storygraph.story.paths import write_text_atomic
         from storygraph.story.source_style import detect as _detect
 
-        mixed = (b'label a_control://r//n    call a\r\n    return\r\n'
-                 b'label b_control://n    call b\n    return\n')
+        mixed = (b'label a_control:\r\n    call a\r\n    return\r\n'
+                 b'label b_control:\n    call b\n    return\n')
         mixp = tmp / 'game' / 'mixed_ctl.rpy'
         mixp.write_bytes(mixed)
         style = _detect(mixp)
