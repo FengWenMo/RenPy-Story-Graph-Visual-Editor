@@ -42,6 +42,7 @@
     "内容指纹": "ContentHash",
     "原样块（内部）": "Opaque",
     "台词": "Text",
+    "台词后缀": "SayTail",
     "台词后缀（内部）": "SayTail",
     "声明来源（内部）": "SpecName",
     "序号": "Seq",
@@ -354,8 +355,8 @@
     {
       "collab": true,
       "fingerprint": true,
-      "header": "台词后缀（内部）",
-      "hidden": true,
+      "header": "台词后缀",
+      "hidden": false,
       "name": "SayTail",
       "single_line": true,
       "snapshot": true
@@ -395,13 +396,13 @@
       "Label",
       "Kind",
       "Stage",
-      "SayTail",
       "MenuName",
       "MenuArgs"
     ],
     "primary": [
       "Speaker",
       "Text",
+      "SayTail",
       "Scene",
       "BGM",
       "Voice",
