@@ -74,3 +74,13 @@ collab.db-journal
 .idea/
 Thumbs.db
 desktop.ini
+
+# ==================================================================
+#  本机备份 / 探针中间产物（各自机器上的一时之物，不进版本库）
+# ==================================================================
+# `.workbuddy/backup/`：改大模块前手抄的一份"撤回点"（谁改谁留，勿提交）。
+# `presets/*.bak-<日期>`：同类的预设快照。
+# `docs/shots/mod_probe/`：探针中间截图（结论写进 docs/*.md，图不留）。
+.workbuddy/backup/
+storygraph/presets/*.bak-*
+docs/shots/mod_probe/
