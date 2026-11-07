@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout,
-                               QHeaderView, QLabel, QPushButton,
+                               QHeaderView, QLabel, QMessageBox, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from storygraph.core.safeguard import swallow
@@ -238,6 +238,12 @@ class CallDialog(QDialog):
     def _load(self):
         """项目里已有的 calls → 表格。读不到就空表（不炸窗）。"""
         self._loaded = {}
+        #: 打开窗口那一刻表里的**原话**（`save_calls(base=…)` 用）。
+        #:
+        #: 为什么必须留一份（2026-11-07 第七轮）：保存是"这一份就是全部"，
+        #: 没有 base 就分不出"我删掉的"与"别人在我打开之后加的" ——
+        #: 后者会被**整条删掉**，而界面只说"已保存"。
+        self._loaded_calls: list = []
         try:
             reg = (SR.StatementRegistry.for_project(self._root)
                    if self._root else None)
@@ -249,6 +255,7 @@ class CallDialog(QDialog):
         except Exception as e:                    # noqa: BLE001 - 读不到就空
             swallow('ui_qt.dialog_calls.load', e)
             calls = []
+        self._loaded_calls = [dict(c) for c in calls if isinstance(c, dict)]
         for call in calls:
             if isinstance(call, dict):
                 self._loaded[str(call.get('head') or '')] = str(
@@ -555,7 +562,10 @@ class CallDialog(QDialog):
         if bad:
             self.status.setText('还不能保存：' + '；'.join(bad[:3]))
             return None
-        res = SR.save_calls(self._root, calls)
+        base = list(getattr(self, '_loaded_calls', None) or ())
+        res = SR.save_calls(self._root, calls, base=base)
+        if not res.get('ok') and res.get('conflicts'):
+            res = self._ask_call_conflict(calls, base, res)
         if not res.get('ok'):
             self.status.setText('没写进项目清单：' + str(res.get('reason') or '?'))
             return res
@@ -566,6 +576,30 @@ class CallDialog(QDialog):
             self.changed = True
         self.status.setText(self._save_note(written, blocked, deleted))
         return res
+
+    def _ask_call_conflict(self, calls, base, first):
+        """
+        保存被"别人也改过同一条"挡住 → **当面问一次**（默认「否」= 这次不存）。
+
+        为什么不能只报一句话就结束：冲突不是程序错，是两个人同时在改；
+        但如果界面只说"没写"，人就永远存不进去（冲突条件一直在）。
+        所以给一次明确的"以界面为准覆盖"，与扩展窗口 `_ask_conflict` 同一个口径。
+        """
+        heads = list(first.get('conflicts') or ())
+        shown = '、'.join(heads[:5]) + ('…' if len(heads) > 5 else '')
+        box = QMessageBox(self)
+        box.setWindowTitle('这些调用也有人改过')
+        box.setText(f'下面几条在别的窗口/进程里也改过：{shown}')
+        box.setInformativeText(
+            '要以界面上这份为准覆盖吗？\n'
+            '选「否」= 这次不保存（先关掉另一个窗口再来）。')
+        box.setIcon(QMessageBox.Question)
+        yes = box.addButton('以界面为准覆盖', QMessageBox.AcceptRole)
+        box.addButton('否（这次不存）', QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not yes:
+            return first
+        return SR.save_calls(self._root, calls, base=base, on_conflict='mine')
 
     @staticmethod
     def _save_note(written, blocked, deleted) -> str:

@@ -26,11 +26,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from storygraph.core.atomicio import write_text_atomic as _write_text_atomic
+from storygraph.core.filelock import DEFAULT_TIMEOUT as DEFAULT_LOCK_WAIT
+from storygraph.core.filelock import LockTimeout, file_lock
 from storygraph.core.safeguard import swallow
+from storygraph.core.threeway import merge_by_key as _merge_by_key
 
 #: 清单里声明自定义语句的键名（`storygraph.rules.json` 的顶层键）
 #: `storygraph.rules.json` 里放"语句声明"列表的键
@@ -261,6 +266,11 @@ def _calls_from_manifest(raw, origin: str = '') -> list:
                 # 写 `required: true` 与不写完全一样（`call_columns` 读到的
                 # 永远是 False）。只在真写了的时候带上，老文件一个字节不变。
                 **({'required': True} if col.get('required') else {}),
+                # 提示 / 说明（第七轮）：同上，只在真写了时带 —— 卡片的参数格
+                # 靠这两位把"声明里写的提示"显示出来（`_column_entry` 再往上传）。
+                **({'placeholder': str(col.get('placeholder'))}
+                   if col.get('placeholder') else {}),
+                **({'help': str(col.get('help'))} if col.get('help') else {}),
             })
         if not columns:
             continue
@@ -933,7 +943,11 @@ def _column_entry(col: dict, *, name: str, pos, multi: bool, kinds: dict) -> dic
             'multi': multi,
             # 声明里这一格的类型（可能空 → 界面按"有没有候选"兜底）
             'kind': str(col.get('kind') or kinds.get(name) or ''),
-            'choices_from': str(col.get('choices_from') or '')}
+            'choices_from': str(col.get('choices_from') or ''),
+            # 声明里写的提示 / 说明（2026-11-07 第七轮）：卡片参数格的灰字与
+            # tooltip 直接读这两位 —— 从前它们到不了界面（只有按类型的默认值）。
+            'placeholder': str(col.get('placeholder') or ''),
+            'help': str(col.get('help') or '')}
 
 
 def spec_columns(registry, head: str) -> list:
@@ -997,7 +1011,9 @@ def spec_columns(registry, head: str) -> list:
             if not name or any(str(c.get('name')) == name for c in cols):
                 continue
             item = {'name': name, 'label': label,
-                    'choices': [str(c) for c in (slot.get('options') or ())]}
+                    'choices': [str(c) for c in (slot.get('options') or ())],
+                    'placeholder': str(slot.get('placeholder') or ''),
+                    'help': str(slot.get('help') or '')}
             if slot.get('multi'):
                 item['multi'] = True
             cols.append(item)
@@ -1234,6 +1250,9 @@ def call_columns(registry, head: str) -> list:
                     'multi': False,
                     'choices_from': '',
                     'kind': str(col.get('kind') or 'word'),
+                    # 提示 / 说明跟着列走（第七轮）：卡片参数格的灰字与 tooltip
+                    'placeholder': str(col.get('placeholder') or ''),
+                    'help': str(col.get('help') or ''),
                     'call': {'head': name,
                              'kind': 'kw' if kw else 'pos',
                              'position': position,
@@ -1701,6 +1720,81 @@ def spec_body_allows(registry, head: str) -> list:
     return []
 
 
+class _ManifestRefused(Exception):
+    """`_edit_manifest` 的 `edit` 用它表示"这次拒绝写"（带人话原因）。"""
+
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+        super().__init__(self.reason)
+
+
+class _ManifestConflict(_ManifestRefused):
+    """拒绝写的另一种：**两边都改过同一条**（把 id 带回去，界面要列出来）。"""
+
+    def __init__(self, conflicts, reason: str):
+        self.conflicts = list(conflicts or ())
+        super().__init__(reason)
+
+
+def _dump_manifest(data: dict) -> str:
+    """清单 → 落盘文本（**唯一**排版口径：2 空格缩进 + 结尾一个换行）。"""
+    return json.dumps(data, ensure_ascii=False, indent=2) + '\n'
+
+
+def _edit_manifest(project_root, edit, *, timeout: float = DEFAULT_LOCK_WAIT) -> dict:
+    """
+    在**跨进程锁**里：读 `storygraph.rules.json` → `edit(path, data)` → 原子写。
+
+    `edit` 返回 `(result, changed)`；`changed=False` = 这次什么都没改（不写盘、
+    不清缓存）。它也可以抛 `_ManifestRefused(reason)` —— 那就不写，把 reason
+    原样带回去（"清单坏了 / 这条本来就不在"这一类都是它）。
+
+    返回 `{'ok','path','reason','result','locked'}`：
+
+      · `locked=True` —— 等锁超时（**没写**，但这不是程序错：界面要说
+        "另一个进程正在存，稍后再来"，而不是报"保存失败"让人去查）；
+      · `ok=False` 且 `locked=False` —— 真写不了（坏 JSON / 权限 / 盘满）。
+
+    为什么读也要在锁里（2026-11-07 第七轮）：只锁"写"等于没锁 ——
+    甲读、乙读、甲写、乙写，乙写的是**甲写之前**看到的世界。读→改→写
+    必须是一段，这跟 `ext.registry.save()` 是同一条理由
+    （`core.filelock` 的模块文档里有那张时序图）。
+    """
+    path = manifest_path(project_root)
+    try:
+        with file_lock(path, timeout=timeout):
+            data = {}
+            if path.is_file():
+                try:
+                    data = json.loads(path.read_text(encoding='utf-8') or '{}')
+                except Exception as e:          # noqa: BLE001 - 坏清单不覆盖
+                    raise _ManifestRefused(
+                        f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝覆盖（{e}）')
+                if not isinstance(data, dict):
+                    raise _ManifestRefused('清单顶层不是对象，拒绝覆盖')
+            result, changed = edit(path, data)
+            if changed:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _write_text_atomic(path, _dump_manifest(data))
+                clear_cache()                   # 刚改完清单：装配缓存作废
+            return {'ok': True, 'path': str(path), 'reason': '',
+                    'result': result, 'locked': False}
+    except LockTimeout as e:
+        return {'ok': False, 'path': str(path), 'result': None, 'locked': True,
+                'conflicts': [],
+                'reason': f'{MANIFEST_NAMES[0]} 由另一个进程在写（{e}），'
+                          f'这次**没有保存**，请稍后再存'}
+    except _ManifestConflict as e:
+        return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
+                'conflicts': list(e.conflicts), 'reason': e.reason}
+    except _ManifestRefused as e:
+        return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
+                'conflicts': [], 'reason': e.reason}
+    except OSError as e:
+        return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
+                'conflicts': [], 'reason': f'写不进去：{e}'}
+
+
 def declare_statement(project_root, name: str, label: str = '',
                       columns=None, block=None, docs: str = '',
                       pattern=None, clauses=None) -> dict:
@@ -1710,8 +1804,8 @@ def declare_statement(project_root, name: str, label: str = '',
 
     为什么落盘才算数（设计文档 §1 那条最重要的约束）：只存在内存里的
     "工具知道"不算知道 —— 程序员改代码、工具改内存，第二天就对不上。
-    这个函数是**唯一的写入口**：CLI（`storygraph.cli learn`）与将来的
-    表/卡片入口都调它，所以"教一次"的结果永远是可评审、可 diff、可回滚的。
+    这个函数是**唯一的写入口**：CLI（`storygraph.cli learn`）与表/卡片
+    入口都调它，所以"教一次"的结果永远是可评审、可 diff、可回滚的。
 
     行为（都写进判据）：
 
@@ -1727,11 +1821,11 @@ def declare_statement(project_root, name: str, label: str = '',
 
     ⚠ 写回用 `json.dumps(indent=2, ensure_ascii=False)` —— 也就是说
     **整份清单会被重新排版**（键顺序按原 dict 顺序保留）。值一个不改。
+
+    2026-11-07 第七轮：读→改→写整段进了 `core.filelock` 的跨进程锁，
+    写盘走 `write_text_atomic`（从前是裸 `Path.write_text`：两个人同时教
+    两条语句时，后写的会把先写的**静默抹掉**，而两次都返回 `ok: True`）。
     """
-    import json
-
-    from storygraph.core.safeguard import swallow as _swallow  # noqa: F401
-
     name = str(name or '').strip()
     if not name:
         return {'ok': False, 'path': '', 'action': 'refused',
@@ -1740,24 +1834,6 @@ def declare_statement(project_root, name: str, label: str = '',
     if root is None:
         return {'ok': False, 'path': '', 'action': 'refused',
                 'reason': '没有项目根目录', 'entry': {}}
-    path = manifest_path(root)
-
-    data = {}
-    action = 'added'
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding='utf-8') or '{}')
-        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': f'storygraph.rules.json 不是合法 JSON，'
-                              f'拒绝覆盖（{e}）', 'entry': {}}
-        if not isinstance(data, dict):
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': '清单顶层不是对象，拒绝覆盖', 'entry': {}}
-
-    items = data.get(MANIFEST_KEY)
-    if not isinstance(items, list):
-        items = []
     entry = {'name': name}
     if label:
         entry['label'] = str(label)
@@ -1793,36 +1869,50 @@ def declare_statement(project_root, name: str, label: str = '',
         from storygraph.story.spec_clauses import normalize_clauses
         entry['clauses'] = normalize_clauses(clauses)
 
-    out = []
-    replaced = False
-    for it in items:
-        same = (isinstance(it, dict) and str(it.get('name') or '').strip() == name)
-        if same and not replaced:
-            merged = dict(it)
-            merged.update(entry)
-            out.append(merged)
-            entry = merged
-            replaced = True
-            action = 'updated'
-            continue
-        out.append(it)
-    if not replaced:
-        out.append(entry)
+    def edit(path, data):
+        """锁里那一步：**这一条**的增/改（其它条目原样保留）。"""
+        items = data.get(MANIFEST_KEY)
+        items = items if isinstance(items, list) else []
+        out, replaced, merged_entry = [], False, dict(entry)
+        for it in items:
+            same = (isinstance(it, dict)
+                    and str(it.get('name') or '').strip() == name)
+            if same and not replaced:
+                merged_entry = dict(it)
+                merged_entry.update(entry)
+                out.append(merged_entry)
+                replaced = True
+                continue
+            out.append(it)
+        if not replaced:
+            out.append(entry)
+        data[MANIFEST_KEY] = out
+        return ({'action': 'updated' if replaced else 'added',
+                 'entry': merged_entry}, True)
 
-    data[MANIFEST_KEY] = out
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                        encoding='utf-8')
-    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
-        return {'ok': False, 'path': str(path), 'action': 'refused',
-                'reason': f'写不进去：{e}', 'entry': entry}
-    clear_cache()                               # 刚改完清单：装配缓存作废
-    return {'ok': True, 'path': str(path), 'action': action,
-            'reason': '', 'entry': entry}
+    res = _edit_manifest(root, edit)
+    if not res['ok']:
+        got = (res.get('result') or {}).get('entry') or entry
+        return {'ok': False, 'path': res['path'], 'action': 'refused',
+                'reason': res['reason'], 'entry': got}
+    got = res['result']
+    return {'ok': True, 'path': res['path'], 'action': got['action'],
+            'reason': '', 'entry': got['entry']}
 
 
-def declare_calls(project_root, calls, *, replace: bool = True) -> dict:
+def _call_body(call) -> dict:
+    """
+    一条调用声明里**属于文件的那部分**（去掉 `origin`）。
+
+    `origin` 是"这条是从哪个清单读进来的"，不是声明内容。合并时必须先摘掉：
+    界面那边读到的条目全带着 `origin`，而文件里新读出来的条目没有 ——
+    带着它比，**每一条都会被算成"被人改过"**，于是全是假冲突（判据当场抓到）。
+    """
+    return {k: v for k, v in (call or {}).items() if k != 'origin'}
+
+
+def declare_calls(project_root, calls, *, replace: bool = True, base=None,
+                  on_conflict: str = 'abort') -> dict:
     """
     **技术调用**（`$ 项目包装函数(...)`）→ 写进 `storygraph.rules.json` 的
     `calls` 段（唯一写入口；与 `declare_statement` 同一条纪律）。
@@ -1830,46 +1920,60 @@ def declare_calls(project_root, calls, *, replace: bool = True) -> dict:
     `calls` 的形状见 `_calls_from_manifest`。`replace=True` = 这一份就是全部
     声明（UI 保存时用）；`False` = 按 head 合并（CLI 逐个装包时用）。
 
-    返回 `{'ok','path','count','reason'}`。坏 JSON / 顶层不是对象 → 拒绝写，
-    绝不覆盖用户手写的清单。
-    """
-    import json
+    **三方合并**（2026-11-07 第七轮，同一个药方见 `ext.registry.save`）：
 
+        base   = 我装载那一刻清单里的 calls（`None` = 不知道 → 按"整份替换"）
+        mine   = 这次要写的（`calls`）
+        theirs = 锁里读到的、此刻清单里的
+
+    按 `head` 逐条判（表见 `core.threeway.merge_by_key`）。`base=None` 时
+    `base := theirs`，于是退化成本轮之前的行为（"这一份就是全部"）——
+    **老调用方一个字不用改**，而界面那条路（`save_calls`）会传 `base`。
+
+    返回 `{'ok','path','count','reason','conflicts','deleted','locked'}`。
+    坏 JSON / 顶层不是对象 → 拒绝写，绝不覆盖用户手写的清单。
+    """
     root = Path(project_root) if project_root else None
     if root is None:
-        return {'ok': False, 'path': '', 'count': 0,
-                'reason': '没有项目根目录'}
-    path = manifest_path(root)
-    data = {}
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding='utf-8') or '{}')
-        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
-            return {'ok': False, 'path': str(path), 'count': 0,
-                    'reason': f'storygraph.rules.json 不是合法 JSON，'
-                              f'拒绝覆盖（{e}）'}
-        if not isinstance(data, dict):
-            return {'ok': False, 'path': str(path), 'count': 0,
-                    'reason': '清单顶层不是对象，拒绝覆盖'}
+        return {'ok': False, 'path': '', 'count': 0, 'conflicts': [],
+                'deleted': [], 'reason': '没有项目根目录'}
     clean = _calls_from_manifest(calls)
-    if replace:
-        data[CALLS_KEY] = clean
-    else:
-        old = _calls_from_manifest(data.get(CALLS_KEY))
-        by_head = {str(c['head']): c for c in old}
-        for call in clean:
-            by_head[str(call['head'])] = call
-        data[CALLS_KEY] = list(by_head.values())
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                        encoding='utf-8')
-    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
-        return {'ok': False, 'path': str(path), 'count': 0,
-                'reason': f'写不进去：{e}'}
-    clear_cache()
-    return {'ok': True, 'path': str(path),
-            'count': len(data.get(CALLS_KEY) or []), 'reason': ''}
+
+    def edit(path, data):
+        theirs_list = _calls_from_manifest(data.get(CALLS_KEY))
+        theirs = {str(c['head']): _call_body(c) for c in theirs_list}
+        mine = {str(c['head']): _call_body(c) for c in clean}
+        if not replace:
+            merged = dict(theirs)
+            merged.update(mine)                 # 逐个装包：同名覆盖，其余留着
+            data[CALLS_KEY] = list(merged.values())
+            return ({'conflicts': [], 'deleted': []}, True)
+        had = theirs if base is None else {
+            str(c['head']): _call_body(c)
+            for c in _calls_from_manifest(base)}
+        picks, conflicts, _absorbed = _merge_by_key(had, mine, theirs,
+                                                    on_conflict)
+        if conflicts and on_conflict == 'abort':
+            raise _ManifestConflict(
+                conflicts,
+                f'{MANIFEST_NAMES[0]} 里这些调用也有人改过：'
+                + '、'.join(conflicts[:4])
+                + ('…' if len(conflicts) > 4 else '') + '（这次没有保存）')
+        order = [*theirs, *(h for h in mine if h not in theirs)]
+        data[CALLS_KEY] = [picks[h] for h in order if picks.get(h) is not None]
+        deleted = [h for h in had if h not in mine and picks.get(h) is None]
+        return ({'conflicts': list(conflicts), 'deleted': deleted}, True)
+
+    res = _edit_manifest(root, edit)
+    if not res['ok']:
+        return {'ok': False, 'path': res['path'], 'count': 0,
+                'conflicts': list(res.get('conflicts') or ()),
+                'deleted': [], 'locked': res['locked'],
+                'reason': res['reason']}
+    got = res['result']
+    return {'ok': True, 'path': res['path'], 'count': len(clean),
+            'conflicts': got['conflicts'], 'deleted': sorted(got['deleted']),
+            'reason': ''}
 
 
 def call_kw_ok(text) -> bool:
@@ -1964,7 +2068,8 @@ def _call_heads_in_manifest(project_root) -> set:
             _calls_from_manifest(data.get(CALLS_KEY))}
 
 
-def save_calls(project_root, calls) -> dict:
+def save_calls(project_root, calls, *, base=None,
+               on_conflict: str = 'abort') -> dict:
     """
     界面上**一整份**调用表 → 落到**该落的文件**里（2026-11-07 第四轮）。
 
@@ -1987,10 +2092,17 @@ def save_calls(project_root, calls) -> dict:
     `replace` 语义保留（这一份就是规则文件里的全部）：于是"把被扩展盖住的
     旧条目顺手清掉"是自动的 —— 那些行不在可写集合里，写盘时就不见了。
 
-    返回 `{'ok','path','count','written','deleted','blocked','reason'}`：
+    **三方合并**（2026-11-07 第七轮）：界面打开时读到的调用表要作为 `base`
+    传进来。否则"我打开窗口 → 别人加了 wipe → 我存一次"会把 wipe 整条删掉
+    （`replace=True` 的语义就是"这一份是全部"），而界面上只会说"已保存"。
+    传了 `base` 之后：别人加的我没见过的照留；我删掉的、别人也动过的 →
+    **停下来报冲突**（不写）。
+
+    返回 `{'ok','path','count','written','deleted','blocked','reason','locked'}`：
 
       · `written`  —— 真写进规则文件的 head；
-      · `deleted`  —— 从规则文件里**清掉**的旧 head（被扩展 / 插件接管的那几条）；
+      · `deleted`  —— 从规则文件里**清掉**的旧 head（被扩展 / 插件接管、
+                      或我在界面里删掉的）；
       · `blocked`  —— 这次**没写**的 `[{'head','owner','origin'}]`（界面照着说话）。
     """
     root = Path(project_root) if project_root else None
@@ -2005,16 +2117,18 @@ def save_calls(project_root, calls) -> dict:
         return {'ok': True, 'path': str(manifest_path(root)), 'count': 0,
                 'written': [], 'deleted': [], 'blocked': blocked,
                 'reason': ''}
-    res = declare_calls(root, writable, replace=True)
+    res = declare_calls(root, writable, replace=True, base=base,
+                        on_conflict=on_conflict)
     if not res.get('ok'):
         return {'ok': False, 'path': str(res.get('path') or ''), 'count': 0,
                 'written': [], 'deleted': [], 'blocked': blocked,
+                'conflicts': list(res.get('conflicts') or ()),
+                'locked': bool(res.get('locked')),
                 'reason': str(res.get('reason') or '')}
-    keep = {str(c.get('head') or '') for c in writable}
     return {'ok': True, 'path': str(res.get('path') or ''),
             'count': int(res.get('count') or 0),
             'written': [str(c.get('head') or '') for c in writable],
-            'deleted': sorted(old_heads - keep), 'blocked': blocked,
+            'deleted': list(res.get('deleted') or []), 'blocked': blocked,
             'reason': ''}
 
 
@@ -2216,8 +2330,7 @@ def remove_statement(project_root, name: str) -> dict:
             deleted = True
         else:
             data[MANIFEST_KEY] = kept
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                            encoding='utf-8')
+            _write_text_atomic(path, _dump_manifest(data))
             deleted = False
     except Exception as e:                      # noqa: BLE001 - 写不动就如实说
         return {'ok': False, 'path': str(path), 'removed': False,
@@ -2452,8 +2565,7 @@ def declare_attr_groups(project_root, groups, *, replace: bool = False,
         data[ATTR_GROUPS_KEY] = merged
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                            encoding='utf-8')
+            _write_text_atomic(path, _dump_manifest(data))
         except Exception as e:                  # noqa: BLE001
             return {'ok': False, 'path': str(path), 'action': 'refused',
                     'reason': f'写不进去：{e}', 'count': 0}
@@ -2488,8 +2600,7 @@ def declare_attr_groups(project_root, groups, *, replace: bool = False,
     data[ATTR_GROUPS_KEY] = [by_name[n] for n in order]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                        encoding='utf-8')
+        _write_text_atomic(path, _dump_manifest(data))
     except Exception as e:                      # noqa: BLE001 - 写不动就如实说
         return {'ok': False, 'path': str(path), 'action': 'refused',
                 'reason': f'写不进去：{e}', 'count': 0}
@@ -2517,8 +2628,7 @@ def _write_manifest_after_removal(path: Path, data: dict) -> bool:
     if all(not v for v in data.values()):
         path.unlink()
         return True
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
-                    encoding='utf-8')
+    _write_text_atomic(path, _dump_manifest(data))
     return False
 
 

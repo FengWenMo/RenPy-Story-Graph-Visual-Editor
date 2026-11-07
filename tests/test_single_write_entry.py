@@ -66,11 +66,14 @@ WRITERS = {
         '（只拷 `.rpy` 的镜像目录，`tempfile.mkdtemp`；跑完 lint 连目录一起删），'
         '不碰用户项目、不是产物、不参与 generation_guard',
     'pipeline/build.py::build_project': '写构建报告 JSON',
-    'story/statement_registry.py::declare_statement': '写项目清单 storygraph.rules.json',
-    'story/statement_registry.py::declare_calls':
-        '写项目清单的 `calls` 段（技术调用的参数形状；2026-10-30）。'
-        '与 `declare_statement` 同一条纪律：坏 JSON 拒绝覆盖、同名合并、'
-        '只写清单不碰剧本/资源表',
+    'story/statement_registry.py::_backup_manifest':
+        '把改之前的整份 rules.json 备份到 storygraph.rules.backup/'
+        '（不是写 .rpy；清空/重置前先留退路）。⚠ `_edit_manifest`（第七轮起的'
+        '唯一写入口）不在这张表里：它只调 `core.atomicio.write_text_atomic`，'
+        '**自己不落盘**，不是旁路',
+    'core/filelock.py::file_lock':
+        '打开**锁文件**（用户缓存 `…/StoryGraph/locks/<sha1>.lock`，永远是空的）：'
+        '操作系统级的字节锁，不写用户项目、不写 .rpy；关句柄即释放',
     'mcp_surface.py::declare': 'MCP 的写入口 —— **自己不写盘**，只调上面那个唯一写入口'
                                '（`declare_statement`）；额外做三件事：'
                                '`dry_run` 试算（只给 diff 不落盘）、写前留 `.bak`、'
@@ -103,15 +106,8 @@ WRITERS = {
         '原子替换（`.tmp` + `os.replace`）；写失败只记台账、绝不拦编辑',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
-    'story/statement_registry.py::declare_attr_groups':
-        '写项目清单 storygraph.rules.json 的 attr_groups 段（词组分栏声明）',
     'story/statement_registry.py::remove_statement':
         '改/删项目清单（移除一条声明；**先备份**到 storygraph.rules.backup/）',
-    'story/statement_registry.py::_backup_manifest':
-        '把改之前的整份 rules.json 备份到 storygraph.rules.backup/'
-        '（不是写 .rpy；清空/重置前先留退路）',
-    'story/statement_registry.py::_write_manifest_after_removal':
-        '清空/重置声明时写回规则清单（只剩空段则删文件；**先备份**）',
     'pipeline/engine_collect.py::write_facts':
         '写 engine_facts.json（引擎事实快照 —— 不是 .rpy，不碰用户脚本）',
     'pipeline/engine_collect.py::_write_probe':
