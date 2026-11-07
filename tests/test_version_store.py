@@ -21,7 +21,9 @@ tests/test_version_store.py
 from __future__ import annotations
 
 import os
+import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,12 @@ from storygraph.ui_qt.window_recover import RecoverMixin
 
 CRLF = 'label ch01:\r\n    "第一句"\r\n    "第二句"\r\n    return\r\n'
 LF = CRLF.replace('\r\n', '\n')
+
+
+def _age(path, seconds):
+    """把某一份备份的 mtime 往前拨 `seconds` 秒（伪造"这是多久以前写的"）。"""
+    t = time.time() - float(seconds)
+    os.utime(path, (t, t))
 
 
 def _project(tmp_path, *, body=CRLF, rel='chapter/ch01.rpy'):
@@ -182,6 +190,149 @@ class TestSnapshot:
         with pytest.raises(OSError):
             write_text_atomic(script, LF.replace('第二句', '改了'))
         assert script.read_bytes() == CRLF.encode('utf-8')
+
+
+# ----------------------------------------------------------------------
+#  二半、留多久：最近的几次 + **时间台阶**（跨天的版本不许全被裁掉）
+# ----------------------------------------------------------------------
+
+class TestRetention:
+    """
+    纯按次数裁剪对**脚本**不够用：探针实测连改 30 次，5 代备份跨 1.1 秒；
+    跨几天各改十次之后，"昨天那一版"一个都不剩。这里钉住补上的时间台阶。
+    """
+
+    def test_an_old_generation_survives_a_busy_day(self, tmp_path):
+        root, script = _project(tmp_path)
+        for i in range(3):                       # 上午改三次
+            write_text_atomic(script, CRLF.replace('第二句', f'上午{i}'))
+        for ver in VS.versions_of(script):       # 把这几代拨成"两小时前"
+            _age(ver.path, 2 * 3600)
+        old = {v.path for v in VS.versions_of(script)
+               if time.time() - v.written > 3600}
+        assert old, '样本没造出来（没有"两小时前"的世代）'
+        for i in range(12):                      # 下午连改十二次
+            write_text_atomic(script, CRLF.replace('第二句', f'下午{i}'))
+        gens = VS.versions_of(script)
+        assert len(gens) > atomicio.KEEP_BACKUPS, '台阶没起作用：还是只有最近那几代'
+        assert old & {v.path for v in gens}, '两小时前那几代被裁光了'
+
+    def test_the_original_does_not_eat_every_step(self, tmp_path):
+        """
+        固定名那份**永远留着、而且通常最老** —— 它不能参与挑台阶。
+
+        第一版就是这么写错的：每个台阶都在"最新的、够老的"里命中它自己，
+        于是台阶一个版本也没多留（跨天的那几代照样被裁掉）。
+        """
+        root, script = _project(tmp_path)
+        for i in range(4):                       # 造几代"带时间戳的旧版本"
+            write_text_atomic(script, CRLF.replace('第二句', f'中{i}'))
+        for ver in VS.versions_of(script):
+            if ver.kind == V.KIND_STAMPED:       # 只拨带时间戳的
+                _age(ver.path, 6 * 3600)
+        for i in range(12):                      # 再改一堆，把最近几代挤满
+            write_text_atomic(script, CRLF.replace('第二句', f'新{i}'))
+        gens = VS.versions_of(script)
+        old_stamps = [v for v in gens
+                      if v.kind == V.KIND_STAMPED
+                      and time.time() - v.written > 3600]
+        assert old_stamps, '台阶只命中了固定名那份 —— 跨天版本一个都没留下'
+
+    def test_generations_are_still_bounded(self, tmp_path):
+        """台阶有上限：不可能越攒越多（每份脚本最多多 6 个老世代）。"""
+        root, script = _project(tmp_path)
+        for i in range(30):
+            write_text_atomic(script, CRLF.replace('第二句', f'第{i}'))
+            if i % 5 == 4:
+                for ver in VS.versions_of(script):
+                    _age(ver.path, (i // 5 + 1) * 3600)
+        gens = VS.versions_of(script)
+        assert len(gens) <= atomicio.KEEP_BACKUPS + len(VS.KEEP_AGES), \
+            [v.name for v in gens]
+
+    def test_hint_says_how_long_we_keep(self):
+        hint = VS.retention_hint()
+        assert '最近 5 次' in hint and '1 小时前' in hint and '14 天前' in hint
+
+
+# ----------------------------------------------------------------------
+#  二又半、占用与清理（要能说清"占多大"，也要能一键清掉）
+# ----------------------------------------------------------------------
+
+class TestProjectHistory:
+    def _make(self, tmp_path):
+        root, script = _project(tmp_path)
+        (root / 'game' / 'chapter' / 'ch02.rpy').write_text(LF, encoding='utf-8')
+        for i in range(3):
+            write_text_atomic(script, CRLF.replace('第二句', f'甲{i}'))
+        other = root / 'game' / 'chapter' / 'ch02.rpy'
+        write_text_atomic(other, LF.replace('第二句', '乙'))
+        return root, script, other
+
+    def test_counts_files_bytes_scripts_and_days(self, tmp_path):
+        root, script, other = self._make(tmp_path)
+        info = VS.project_history(root)
+        assert info['files'] == 4            # 3 + 1
+        assert info['scripts'] == 2          # 两个脚本
+        assert info['bytes'] > 0
+        assert info['days'] >= 1
+        assert info['oldest'] and info['newest']
+        # `.gitignore` 不算版本文件
+        assert VS.history_root(root).is_dir()
+
+    def test_nothing_to_count_on_a_fresh_project(self, tmp_path):
+        root, script = _project(tmp_path)
+        info = VS.project_history(root)
+        assert info == {'dir': str(VS.history_root(root)), 'files': 0,
+                        'bytes': 0, 'scripts': 0, 'days': 0,
+                        'oldest': None, 'newest': None}
+
+    def test_clear_removes_only_the_history(self, tmp_path):
+        root, script, other = self._make(tmp_path)
+        (root / '.storygraph' / 'layout.json').write_text('{}', encoding='utf-8')
+        game_before = _files_under(root / 'game')
+        res = VS.clear_history(root)
+        assert res['removed'] == 4 and res['failed'] == []
+        assert VS.project_history(root)['files'] == 0
+        # 剧本一个字节没动、别的元数据也留着
+        assert _files_under(root / 'game') == game_before
+        assert (root / '.storygraph' / 'layout.json').is_file()
+        # 清完还能继续用（下一次写盘会重新建目录并留一代）
+        write_text_atomic(script, CRLF.replace('第二句', '清完之后'))
+        assert VS.project_history(root)['files'] == 1
+
+    def test_a_symlink_in_the_history_is_not_followed(self, tmp_path,
+                                                      monkeypatch):
+        """
+        符号链接不跟：删它没事，但**不能**顺着它去删项目外面的东西。
+
+        Windows 默认建不了符号链接（要开发者模式），所以建不出来时改成
+        "假装它是链接"—— 这样这条判据在 Windows 上也真的跑（不许 skip：
+        跳过一次，`is_symlink` 那道闸就永远没人验）。
+        """
+        root, script = _project(tmp_path)
+        write_text_atomic(script, CRLF.replace('第二句', '甲'))
+        outside = tmp_path / 'outside.txt'
+        outside.write_text('别动我', encoding='utf-8')
+        link = VS.history_root(root) / 'chapter' / 'looks-like-a-version.txt'
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError):
+            link.write_text('历史目录里的一个普通文件', encoding='utf-8')
+            monkeypatch.setattr(type(link), 'is_symlink',
+                                lambda self: self == link)
+        assert VS.project_history(root)['files'] == 1     # 只数真的版本文件
+        VS.clear_history(root)
+        assert outside.read_text(encoding='utf-8') == '别动我'
+
+    def test_human_size(self):
+        assert V.human_size(0) == '0 B'
+        assert V.human_size(999) == '999 B'
+        assert V.human_size(2048) == '2 KB'
+        assert V.human_size(3 * 1024 * 1024) == '3.0 MB'
+        # 算不出来就说"?"，别假装 0（"0 B" 会让人以为历史被清空了）
+        assert V.human_size(None) == '?'
+        assert V.human_size('不是数字') == '?'
 
 
 # ----------------------------------------------------------------------
@@ -434,6 +585,15 @@ class TestWindowWiring:
         act.trigger()
         assert calls == ['script_versions']
 
+    def test_the_cleanup_action_is_wired_too(self, ui_window, monkeypatch):
+        calls = []
+        monkeypatch.setattr(ui_window, 'show_history_cleanup',
+                            lambda: calls.append('cleanup'))
+        menu = ui_window._more_tools_menu()
+        act = next(a for a in menu.actions() if '历史版本（占多少' in a.text())
+        act.trigger()
+        assert calls == ['cleanup']
+
     def test_the_entry_passes_the_three_injections(self, tmp_path, monkeypatch):
         root, script = _project(tmp_path)
         host = _Host(script)
@@ -479,3 +639,122 @@ class TestWindowWiring:
         host = _Host(script)
         host._after_script_restored({'ok': False, 'written': False})
         assert host.loaded == []
+
+
+# ----------------------------------------------------------------------
+#  六、清理入口（"占多少"要说得清，"清掉"要问过）
+# ----------------------------------------------------------------------
+
+class _FakeBox:
+    """
+    `QMessageBox` 的替身：记下文案，按 `click` 返回"用户点了哪个"。
+
+    它得**同时**当类用（`QMessageBox.Information` / `DestructiveRole` 是类属性，
+    生产代码在调 `addButton` 时要用到），所以这里直接做成"可调用的类"。
+    """
+
+    Information = 0
+    DestructiveRole = 1
+    RejectRole = 2
+
+    def __init__(self, click=None):
+        self._click = click
+        self.buttons = {}
+        self.text = ''
+        self.info = ''
+        self.title = ''
+
+    def __call__(self, parent=None):
+        return self
+
+    def setWindowTitle(self, text):
+        self.title = text
+
+    def setIcon(self, icon):            # noqa: N802 - Qt 风格
+        pass
+
+    def setText(self, text):            # noqa: N802
+        self.text = text
+
+    def setInformativeText(self, text):  # noqa: N802
+        self.info = text
+
+    def addButton(self, text, role):    # noqa: N802
+        self.buttons[text] = object()
+        return self.buttons[text]
+
+    def exec(self):                     # noqa: N802
+        return 0
+
+    def clickedButton(self):            # noqa: N802
+        return self.buttons.get(self._click)
+
+
+class TestHistoryCleanup:
+    def _host_with_history(self, tmp_path):
+        root, script = _project(tmp_path)
+        for i in range(3):
+            write_text_atomic(script, CRLF.replace('第二句', f'甲{i}'))
+        host = _Host(script)
+        host._project_root = root
+        return host, root, script
+
+    def test_summary_is_a_readable_account(self, tmp_path):
+        from storygraph.ui_qt.window_recover import history_summary
+        host, root, script = self._host_with_history(tmp_path)
+        text = history_summary(VS.project_history(root))
+        assert '3 个旧版本文件' in text
+        assert '1 个脚本' in text
+        assert ' B' in text and '最早到' in text
+        # 空项目也是一句话，不是空白
+        assert '还没有' in history_summary(VS.project_history(tmp_path / 'nope'))
+
+    def test_empty_project_says_so_and_shows_no_box(self, tmp_path,
+                                                    monkeypatch):
+        host = _Host(_project(tmp_path)[1])
+        host._project_root = tmp_path / 'proj'
+        monkeypatch.setattr('storygraph.ui_qt.window_recover.QMessageBox',
+                            lambda *a: pytest.fail('不该弹框'))
+        assert host.show_history_cleanup() == 'empty'
+        assert '还没有历史版本' in host.statuses[-1]
+
+    def test_clicking_delete_really_clears(self, tmp_path, monkeypatch):
+        host, root, script = self._host_with_history(tmp_path)
+        box = _FakeBox(click='全部删掉')
+        monkeypatch.setattr('storygraph.ui_qt.window_recover.QMessageBox', box)
+        assert host.show_history_cleanup() == 'cleared'
+        assert VS.project_history(root)['files'] == 0
+        assert '3 个旧版本文件' in box.text        # 先摊开账，再动手
+        assert '剧本本身不受影响' in box.info
+        assert '已删掉 3 个' in host.statuses[-1]
+        # 剧本一个字节没动
+        assert script.read_bytes() == CRLF.replace('第二句', '甲2').encode('utf-8')
+
+    def test_closing_the_box_keeps_everything(self, tmp_path, monkeypatch):
+        host, root, script = self._host_with_history(tmp_path)
+        monkeypatch.setattr('storygraph.ui_qt.window_recover.QMessageBox',
+                            _FakeBox(click='关闭'))
+        assert host.show_history_cleanup() == 'cancelled'
+        assert VS.project_history(root)['files'] == 3
+
+    def test_no_project_is_refused_politely(self, tmp_path):
+        host = _Host(_project(tmp_path)[1])
+        host._project_root = None
+        assert host.show_history_cleanup() == 'no-project'
+        assert '先打开一个项目' in host.statuses[-1]
+
+    def test_script_hint_says_both_where_and_how_long(self, tmp_path):
+        host = _Host(_project(tmp_path)[1])
+        hint = host._script_version_hint()
+        assert '.storygraph/versions' in hint
+        assert '留多少' in hint and '1 小时前' in hint
+
+    def test_dialog_status_shows_the_total_size(self, qapp, tmp_path):
+        root, script = _project(tmp_path)
+        for i in range(2):
+            write_text_atomic(script, CRLF.replace('第二句', f'甲{i}'))
+        from storygraph.ui_qt.dialog_versions import VersionsDialog
+        dlg = VersionsDialog(None, script, summarize=VS.summarize_script,
+                             store=VS.SCRIPT_STORE)
+        assert '共 ' in dlg.status.text() and 'B' in dlg.status.text()
+        dlg.close()
