@@ -264,6 +264,24 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
     return target
 
 
+def read_text_exact(path, *, encoding: str = 'utf-8'):
+    """
+    文件里的**原话**（`newline=''`：换行一个字节都不翻译）。不存在 → `None`。
+
+    `write_text_atomic` 的对称另一半：写不翻译换行，读也不翻译。用
+    `Path.read_text()` 读、再经 `write_text_atomic` 写回去，CRLF 文件会被
+    悄悄换成 LF —— 那就不叫"原样"了（用户拿 `git diff` 一眼就能看见满屏改动）。
+
+    ⚠ **除"不存在"以外的读失败往上抛**：把读不出来的文件当成"空文件"，
+       就是在静默丢掉它（调用方应当据此**拒绝覆盖**）。
+    """
+    try:
+        with open(path, 'r', encoding=encoding, newline='') as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
 def save_workbook_atomic(wb, path, *, backup: bool = True,
                          allowed_suffixes=WORKBOOK_SUFFIXES,
                          keep: int = KEEP_BACKUPS) -> Path:

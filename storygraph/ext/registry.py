@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from storygraph.core.atomicio import read_text_exact
 from storygraph.core.filelock import DEFAULT_TIMEOUT, LockTimeout, file_lock
 from storygraph.core.threeway import compose_rows, merge_by_key
 from storygraph.ext.schema import (EXT_SCHEMA, ExtError, ExtensionPoint,
@@ -87,24 +88,6 @@ def _from_ext_manifest(path: Path) -> tuple:
     return points, problems
 
 
-def _read_text_exact(path: Path):
-    """
-    文件里的**原话**（`newline=''`：换行一个字节都不翻译）。不存在 → `None`。
-
-    为什么要它（2026-11-07 第九轮）：撤销要把"保存之前那份文件"原样放回去。
-    用 `read_text()` 读、再写回去，CRLF 文件会被悄悄换成 LF —— 那就不叫
-    "恢复原样"了（用户拿 git diff 一眼就能看见满屏改动）。
-
-    ⚠ 除"不存在"以外的读失败**往上抛**，由调用方拒绝覆盖：把读不出来的文件
-      当成"空文件"就是在静默丢掉它。
-    """
-    try:
-        with open(path, 'r', encoding='utf-8', newline='') as fh:
-            return fh.read()
-    except FileNotFoundError:
-        return None
-
-
 def _parse_ext_records(text: str, name: str = MANIFEST) -> tuple:
     """
     `storygraph.ext.json` 的文本 → `([(id, 记录)], 别人的顶层键, problems)`。
@@ -143,6 +126,38 @@ def _parse_ext_records(text: str, name: str = MANIFEST) -> tuple:
             rows.append((ident, raw))       # 认得出 id、读不懂形状：原样留着
     extras = {k: v for k, v in data.items() if k not in ('schema', 'extensions')}
     return rows, extras, []
+
+
+def summarize_manifest(text) -> dict:
+    """
+    `storygraph.ext.json` 的**文本** → 一句人话（版本历史列表那一行）。
+
+    返回 `{'ok','count','ids','note','missing'}`：
+
+      · `ok: False` —— 这一版读不懂（坏 JSON / 顶层不是对象 / extensions
+        不是列表），`note` 里带原话。**照样列出来**：那是磁盘上真有的东西，
+        藏起来只会让人以为"备份丢了"；
+      · `missing: True` —— 那一代是"保存前本来没有这份文件"（空文本）;
+      · `note` —— `3 条：aa、bb、cc`（多于四条时后面加"…"）。
+
+    为什么只给摘要不给全文：列表里一行要能一眼看出"这一代是不是我要的"，
+    全文留给预览格（`read_text_exact` 读出来的原话）。
+    """
+    if text is None or not str(text).strip():
+        return {'ok': True, 'count': 0, 'ids': [], 'missing': True,
+                'note': '（这一版是空的：当时没有这份文件）'}
+    rows, _extras, problems = _parse_ext_records(str(text), MANIFEST)
+    if rows is None:
+        return {'ok': False, 'count': 0, 'ids': [], 'missing': False,
+                'note': '读不懂：' + (problems[0] if problems else '?')}
+    ids = [i for i, _rec in rows if i]
+    shown = '、'.join(ids[:4]) + ('…' if len(ids) > 4 else '')
+    odd = len(rows) - len(ids)
+    note = f'{len(ids)} 条' + (f'：{shown}' if shown else '（清单是空的）')
+    if odd:
+        note += f'，另有 {odd} 条认不出'
+    return {'ok': True, 'count': len(ids), 'ids': ids, 'missing': False,
+            'note': note}
 
 
 def _statement_point(raw) -> object:
@@ -688,10 +703,13 @@ class ExtensionRegistry:
         它只挡"读得早"，挡不住"读得同时"）。等锁超过 `lock_timeout` 秒
         → `ok: False` + `locked: True`，**不静默跳过**。
 
-        返回 `{'ok','path','count','reason','conflicts','absorbed','conflict','undo'}`：
+        返回 `{'ok','path','count','reason','conflicts','absorbed','conflict',
+        'unchanged','undo'}`：
 
           · `conflicts` —— 两边都改过的 id（`on_conflict='abort'` 时没写盘）；
           · `absorbed`  —— 文件那边改过、我没动，于是**顺手收进来**的 id；
+          · `unchanged` —— 这一存和文件里**逐字节一样**，于是**没碰文件**
+            （不烧备份、mtime 不跳）；
           · `undo`      —— 撤销材料 `{'path','before','after'}`（`before=None`
             表示"保存前没有这份文件"）。**这次一个字节没改**时是 `None`
             —— 没有可撤销的。拿它调 `restore_manifest()` 就能退回去。
@@ -717,7 +735,7 @@ class ExtensionRegistry:
     def _save_locked(self, path: Path, on_conflict: str) -> dict:
         """`save()` 的主体（**已经在锁里**：读 theirs → 合并 → 写盘）。"""
         try:
-            before = _read_text_exact(path)          # None = 文件本来就不存在
+            before = read_text_exact(path)          # None = 文件本来就不存在
         except OSError as e:
             return {'ok': False, 'path': str(path), 'count': 0,
                     'reason': f'{MANIFEST} 读不出来，拒绝覆盖（{e}）',
@@ -747,25 +765,35 @@ class ExtensionRegistry:
         payload.update(extras)
         payload['extensions'] = out
         text = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
-        try:
-            from storygraph.core.atomicio import write_text_atomic
-            write_text_atomic(path, text, backup=True)
-        except (OSError, ValueError) as e:
-            return {'ok': False, 'path': str(path), 'count': 0,
-                    'reason': f'写不进去：{e}', 'conflicts': [], 'absorbed': []}
+        # 一个字节都没变 → **不碰文件**（2026-11-07 第十轮）。
+        #
+        # 与 `authoring/txt_pipeline` 同一条口径（"内容一样就不重写，那一份
+        # `.bak` 自然也不产生"）：从前这里照样 `write_text_atomic(backup=True)`，
+        # 于是连点两次"保存"就会白烧一代备份（最多 5 代）——**把还有人要的那
+        # 一版挤掉**，顺带让文件 mtime 跳一下（看门狗 / 别的工具会以为它变了）。
+        unchanged = before == text
+        if not unchanged:
+            try:
+                from storygraph.core.atomicio import write_text_atomic
+                write_text_atomic(path, text, backup=True)
+            except (OSError, ValueError) as e:
+                return {'ok': False, 'path': str(path), 'count': 0,
+                        'reason': f'写不进去：{e}',
+                        'conflicts': [], 'absorbed': []}
         self.root = path.parent
         self._baseline = {str(r.get('id')): r for r in out
                           if isinstance(r, dict) and r.get('id')}
         # 撤销材料（第九轮）：**锁里读到的那份原话** + 这次真正写下去的那份。
-        # 一个字节都没变（比如连点两次保存）→ 没有可撤销的，给 None ——
+        # 一个字节都没变（比如连点两次保存）→ 没有可撤销的，给 `None` ——
         # 别给一份"前后一样"的材料让调用方以为退得回去。
-        undo = None if before == text else {'path': str(path),
-                                            'before': before, 'after': text}
+        undo = None if unchanged else {'path': str(path),
+                                       'before': before, 'after': text}
         return {'ok': True, 'path': str(path),
                 'count': len([r for r in out
                               if isinstance(r, dict) and r.get('id')]),
                 'reason': '', 'conflicts': list(conflicts),
-                'absorbed': list(absorbed), 'undo': undo}
+                'absorbed': list(absorbed), 'unchanged': bool(unchanged),
+                'undo': undo}
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +840,7 @@ def _restore_locked(path: Path, before, after: str) -> dict:
     """`restore_manifest()` 的主体（**已经在锁里**）。"""
     from storygraph.core.atomicio import write_text_atomic
     try:
-        current = _read_text_exact(path)
+        current = read_text_exact(path)
     except OSError as e:
         return {'ok': False, 'path': str(path), 'deleted': False,
                 'changed': True, 'locked': False,
