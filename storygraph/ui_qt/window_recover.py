@@ -558,6 +558,48 @@ class RecoverMixin:
                      f'{len(getattr(self._session, "beats", []) or [])} 拍'
                      f'（放回之前那份也进了历史）')
 
+    def show_retention(self):
+        """
+        菜单「🗂 历史版本留多久…」：选留档档位（每档都把代价算给用户看）。
+
+        为什么单独一条入口（2026-11-08 第十三轮）：第十二轮把"留多久"补成了
+        "5 代 + 时间台阶"，但那两个数是**模块常量** —— 用户觉得占地方，或者
+        想留久一点，只能改代码。而这条设置是**用户级**的（`settings.json`，
+        不分项目），所以没打开项目也照样能改。
+
+        窗口只负责"选"；写盘在 `version_store.save_retention`（锁里合并，
+        文件坏了就一个字不写）。
+        """
+        from storygraph.story import version_store as VS
+        from storygraph.ui_qt.dialog_retention import RetentionDialog
+
+        root = getattr(self, '_project_root', None)
+        dlg = RetentionDialog(
+            self,
+            rule=VS.retention(),
+            scripts=VS.project_scripts(root) if root else {},
+            stats=VS.project_history(root) if root else {})
+        dlg.saved.connect(self._after_retention_changed)
+        dlg.exec()
+        return 'closed'
+
+    def _after_retention_changed(self, rule):
+        """
+        存好之后说一句：改了哪一档、以及"从下一次写盘起才算"。
+
+        为什么强调"下一次"：改小不会立刻腾地方（旧版本要等下一次改动那个脚本
+        时才裁），改大也不会把已经删掉的变回来。这两句不说，用户会以为
+        "调大 = 找回昨天"。
+        """
+        from storygraph.story import version_store as VS
+
+        preset = str((rule or {}).get('preset') or '')
+        label = str(VS.PRESETS.get(preset, {}).get('label') or preset)
+        self._log(f'[历史版本] 留档改成「{label}」：{VS.retention_hint()}')
+        self._status(f'留档改成「{label}」—— 从下一次改脚本起按新规矩裁'
+                     f'（已经删掉的旧版本找不回来）')
+        return label
+
     def show_history_cleanup(self):
         """
         菜单「🧹 历史版本（占多少 / 清掉）…」。

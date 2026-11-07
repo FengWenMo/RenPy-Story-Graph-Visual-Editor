@@ -167,7 +167,7 @@ class GraphOpsMixin:
     """
 
     #: 本 mixin 要求宿主提供的成员（由 `tests/test_main_window_mixins.py` 守）。
-    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_script_dirty', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_beat', 'show_history_cleanup', 'show_recovery', 'show_script_versions')
+    REQUIRES = ('ASSET_FIELD_KINDS', 'PAGE_GRAPH', '_base_title', '_canvas', '_console', '_diag_items', '_ensure_registry', '_file_path', '_graph_dirty', '_graph_saved_sig', '_history', '_last_layout_path', '_loaded_idx', '_loader', '_log', '_nav', '_panel', '_project_root', '_record_applied', '_refresh_asset_choices', '_registry_provider', '_script_dirty', '_session', '_set_graph', '_set_page', '_show_index', '_status', '_status_bar', 'adopt_loaded_session', 'apply_current_beat', 'autosave_clear', 'clear_console', 'engine', 'graph', 'load_script', 'refresh_chapter_nav', 'resync_after_export', 'set_assets_ready', 'show_beat', 'show_history_cleanup', 'show_recovery', 'show_retention', 'show_script_versions')
 
     def _show_analysis_text(self, text: str):
         """
@@ -1957,6 +1957,10 @@ class GraphOpsMixin:
                        self.show_script_versions).setStatusTip(
             '翻这个 .rpy 在磁盘上的历史版本：看一眼、放回某一版'
             '（放在项目的 .storygraph/versions 里，不在 game/ 里）')
+        menu.addAction('🗂 历史版本留多久（占多少 / 改小改大）…',
+                       self.show_retention).setStatusTip(
+            '选留档档位：每份脚本最多几个旧版本、这个项目大约占多少；'
+            '改完下一次写盘就按新规矩裁')
         menu.addAction('🧹 历史版本（占多少 / 清掉）…',
                        self.show_history_cleanup).setStatusTip(
             '看看这个项目的历史版本占了多少空间，需要时可以全部删掉'
