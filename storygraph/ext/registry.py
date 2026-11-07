@@ -87,27 +87,49 @@ def _from_ext_manifest(path: Path) -> tuple:
     return points, problems
 
 
-def _read_ext_records(path: Path) -> tuple:
+def _read_text_exact(path: Path):
     """
-    `storygraph.ext.json` → `([(id, 记录)], 别人的顶层键, problems)`。
+    文件里的**原话**（`newline=''`：换行一个字节都不翻译）。不存在 → `None`。
+
+    为什么要它（2026-11-07 第九轮）：撤销要把"保存之前那份文件"原样放回去。
+    用 `read_text()` 读、再写回去，CRLF 文件会被悄悄换成 LF —— 那就不叫
+    "恢复原样"了（用户拿 git diff 一眼就能看见满屏改动）。
+
+    ⚠ 除"不存在"以外的读失败**往上抛**，由调用方拒绝覆盖：把读不出来的文件
+      当成"空文件"就是在静默丢掉它。
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', newline='') as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def _parse_ext_records(text: str, name: str = MANIFEST) -> tuple:
+    """
+    `storygraph.ext.json` 的文本 → `([(id, 记录)], 别人的顶层键, problems)`。
 
     与 `_from_ext_manifest` 的分工：那个是**装载**（读不懂就跳过并出声，
     不在乎原话）；这个是**落盘前对表**（文件里长什么样，就得能原样还回去）——
     所以认不出的条目返回 `id=''` + 原始值，写的时候照抄。
 
     `rows is None` 表示整份读不出来（坏 JSON / 顶层不是对象 / extensions 不是列表）。
+
+    收的是**文本**不是路径（第九轮）：`save()` 要在锁里只读一次文件，
+    同一个字符串既用来对表、又要原样存成"撤销材料"。
     """
+    name = name or MANIFEST
     try:
-        data = json.loads(path.read_text(encoding='utf-8') or '{}')
-    except (OSError, ValueError) as e:
-        return None, {}, [f'{path.name} 读不出来：{e}']
+        data = json.loads(text or '{}')
+    except ValueError as e:
+        return None, {}, [f'{name} 读不出来：{e}']
     if not isinstance(data, dict):
-        return None, {}, [f'{path.name} 顶层不是对象']
+        return None, {}, [f'{name} 顶层不是对象']
     raw_list = data.get('extensions')
     if raw_list is None:
         raw_list = []
     if not isinstance(raw_list, list):
-        return None, {}, [f'{path.name} 的 extensions 不是列表']
+        return None, {}, [f'{name} 的 extensions 不是列表']
     rows = []
     for raw in raw_list:
         ident = str(raw.get('id') or '').strip() \
@@ -666,10 +688,13 @@ class ExtensionRegistry:
         它只挡"读得早"，挡不住"读得同时"）。等锁超过 `lock_timeout` 秒
         → `ok: False` + `locked: True`，**不静默跳过**。
 
-        返回 `{'ok','path','count','reason','conflicts','absorbed','conflict'}`：
+        返回 `{'ok','path','count','reason','conflicts','absorbed','conflict','undo'}`：
 
           · `conflicts` —— 两边都改过的 id（`on_conflict='abort'` 时没写盘）；
-          · `absorbed`  —— 文件那边改过、我没动，于是**顺手收进来**的 id。
+          · `absorbed`  —— 文件那边改过、我没动，于是**顺手收进来**的 id；
+          · `undo`      —— 撤销材料 `{'path','before','after'}`（`before=None`
+            表示"保存前没有这份文件"）。**这次一个字节没改**时是 `None`
+            —— 没有可撤销的。拿它调 `restore_manifest()` 就能退回去。
         """
         root = Path(project_root) if project_root else self.root
         if root is None:
@@ -691,14 +716,19 @@ class ExtensionRegistry:
 
     def _save_locked(self, path: Path, on_conflict: str) -> dict:
         """`save()` 的主体（**已经在锁里**：读 theirs → 合并 → 写盘）。"""
-        rows, extras, problems = [], {}, []
-        if path.is_file():
-            rows, extras, problems = _read_ext_records(path)
-            if rows is None:
-                return {'ok': False, 'path': str(path), 'count': 0,
-                        'reason': f'{MANIFEST} 不是合法 JSON，拒绝覆盖'
-                                  f'（{problems[0] if problems else "?"}）',
-                        'conflicts': [], 'absorbed': []}
+        try:
+            before = _read_text_exact(path)          # None = 文件本来就不存在
+        except OSError as e:
+            return {'ok': False, 'path': str(path), 'count': 0,
+                    'reason': f'{MANIFEST} 读不出来，拒绝覆盖（{e}）',
+                    'conflicts': [], 'absorbed': []}
+        rows, extras, problems = ([], {}, []) if before is None \
+            else _parse_ext_records(before, MANIFEST)
+        if rows is None:
+            return {'ok': False, 'path': str(path), 'count': 0,
+                    'reason': f'{MANIFEST} 不是合法 JSON，拒绝覆盖'
+                              f'（{problems[0] if problems else "?"}）',
+                    'conflicts': [], 'absorbed': []}
         theirs = {i: r for i, r in rows if i}
         mine = {str(r.get('id') or ''): r for r in self.records()
                 if str(r.get('id') or '').strip()}
@@ -716,19 +746,100 @@ class ExtensionRegistry:
         payload = {'schema': EXT_SCHEMA}
         payload.update(extras)
         payload['extensions'] = out
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
         try:
             from storygraph.core.atomicio import write_text_atomic
-            write_text_atomic(path,
-                              json.dumps(payload, ensure_ascii=False, indent=2)
-                              + '\n', backup=True)
+            write_text_atomic(path, text, backup=True)
         except (OSError, ValueError) as e:
             return {'ok': False, 'path': str(path), 'count': 0,
                     'reason': f'写不进去：{e}', 'conflicts': [], 'absorbed': []}
         self.root = path.parent
         self._baseline = {str(r.get('id')): r for r in out
                           if isinstance(r, dict) and r.get('id')}
+        # 撤销材料（第九轮）：**锁里读到的那份原话** + 这次真正写下去的那份。
+        # 一个字节都没变（比如连点两次保存）→ 没有可撤销的，给 None ——
+        # 别给一份"前后一样"的材料让调用方以为退得回去。
+        undo = None if before == text else {'path': str(path),
+                                            'before': before, 'after': text}
         return {'ok': True, 'path': str(path),
                 'count': len([r for r in out
                               if isinstance(r, dict) and r.get('id')]),
                 'reason': '', 'conflicts': list(conflicts),
-                'absorbed': list(absorbed)}
+                'absorbed': list(absorbed), 'undo': undo}
+
+
+# ---------------------------------------------------------------------------
+#  撤销"刚才那次保存"（2026-11-07 第九轮，设计文档 §18.4）
+# ---------------------------------------------------------------------------
+
+def restore_manifest(undo, *, lock_timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """
+    把 `save()` 之前的那份文本**原样放回去** —— 撤销刚才那次保存。
+
+    为什么不是"再存一次旧内容"（2026-11-07 第九轮）：`save()` 是**三方合并**，
+    它按 id 判"谁改过"。用它来做撤销，冲突的那几条会被合并规则挡下来，
+    于是"撤销"变成"部分撤销 + 一堆冲突提示" —— 那不是撤销，是另一次编辑。
+
+    这里做的是**整份恢复**，所以必须自己守住两件事：
+
+      ① **只在锁里比对、只在锁里写**：读→比→写是一段；
+      ② 磁盘上那份必须还是**我写下去的那份**（`undo['after']`）才动手。
+         别人在这之后改过 / 删过 —— **一个字都不写**，如实说"没撤销"：
+         拿一份旧文本盖掉别人的改动，正是这个工具一直在防的那件事。
+
+    `undo['before'] is None`（保存前本来没有这份文件）→ 撤销 = **把它删掉**，
+    与 `rules.json` 的"清单空了就删文件"同一条口径：不留一份空清单当遗迹。
+
+    返回 `{'ok','path','reason','deleted','changed','locked'}`。
+    """
+    if not isinstance(undo, dict) or not undo.get('path'):
+        return {'ok': False, 'path': '', 'reason': '没有可撤销的保存',
+                'deleted': False, 'changed': False, 'locked': False}
+    path = Path(str(undo['path']))
+    before = undo.get('before')
+    after = str(undo.get('after') or '')
+    try:
+        with file_lock(path, timeout=lock_timeout):
+            return _restore_locked(path, before, after)
+    except LockTimeout as e:
+        return {'ok': False, 'path': str(path), 'deleted': False,
+                'changed': False, 'locked': True,
+                'reason': f'{path.name} 现在由另一个进程在写（{e}），'
+                          f'这次**没有撤销**，请稍后再试'}
+
+
+def _restore_locked(path: Path, before, after: str) -> dict:
+    """`restore_manifest()` 的主体（**已经在锁里**）。"""
+    from storygraph.core.atomicio import write_text_atomic
+    try:
+        current = _read_text_exact(path)
+    except OSError as e:
+        return {'ok': False, 'path': str(path), 'deleted': False,
+                'changed': True, 'locked': False,
+                'reason': f'{path.name} 读不出来（{e}），这次**没有撤销**'}
+    if current != after:
+        return {'ok': False, 'path': str(path), 'deleted': False,
+                'changed': True, 'locked': False,
+                'reason': f'{path.name} 在那次保存之后又被改过'
+                          f'（或删了），为了不覆盖别人，这次**没有撤销**'
+                          f'（旧版本还在同目录的 .bak 里）'}
+    if before is None:
+        try:
+            # `missing_ok`：已经不在 = 结果一样（"保存前没有这份文件、现在也没有"），
+            # 不是失败 —— 别为此写一条 `except: pass`（`test_code_health` 会红）。
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            return {'ok': False, 'path': str(path), 'deleted': False,
+                    'changed': False, 'locked': False,
+                    'reason': f'{path.name} 删不掉（{e}），这次**没有撤销**'}
+        return {'ok': True, 'path': str(path), 'deleted': True, 'changed': False,
+                'locked': False, 'reason': ''}
+    try:
+        # 备份的是"撤销之前那份"（也就是我上次写下去的那份）：撤销按错了还能找回
+        write_text_atomic(path, before, backup=True)
+    except (OSError, ValueError) as e:
+        return {'ok': False, 'path': str(path), 'deleted': False,
+                'changed': False, 'locked': False,
+                'reason': f'{path.name} 写不回去（{e}），这次**没有撤销**'}
+    return {'ok': True, 'path': str(path), 'deleted': False, 'changed': False,
+            'locked': False, 'reason': ''}
