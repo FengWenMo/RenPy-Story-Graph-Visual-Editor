@@ -28,7 +28,7 @@ storygraph.story.version_store
   · **落点**：`<项目>/.storygraph/versions/<脚本相对 game/ 的目录>/`。
     `game/` 之外 —— Ren'Py 不扫，清理残留也不列它；
   · **命名**：还是 `atomicio` 那套（固定名 `<名>.bak` 是第一代、之后带
-    时间戳 + 序号，最多 `KEEP_BACKUPS` 代），固定名那份永远不裁 ——
+    时间戳 + 序号），固定名那份永远不裁 ——
     它可能是"工具第一次动这份手写稿之前"的原件；
   · **自忽略**：目录里放一个 `.gitignore`（内容 `*`），用户 `git status`
     不会看见几千个备份。**不动**用户自己的 `.gitignore`；
@@ -40,6 +40,18 @@ storygraph.story.version_store
 
 放回旧版本走 `core.versions.restore`（锁里比对 `expect_current`、
 写前先备份现在这份）。这个模块只负责"世代放哪儿"，不另写一套闸。
+
+## 留多久**不是**写死的（2026-11-08 第十三轮）
+
+第十二轮把"最近 5 代"补成了"5 代 + 时间台阶"，但那两个数是**模块常量**：
+用户觉得 12 个文件/脚本太占地方，或者想留久一点，都没有地方改。探针
+`.pip-tmp/probe_r13_settings.py` 量到：默认档在真项目里最多约 15 MB，
+而改小 / 改大在源码层面只能改代码。
+
+所以现在：`retention()` 读**用户级设置**（`core.user_prefs` 的 `backups` 节），
+只有三档（`PRESETS`）—— 每一档的代价（每份脚本最多几个文件、这个项目约几 MB）
+由界面算给用户看，不让他自己心算。`snapshot()` 每一代都读一次设置（约 0.2 ms，
+不值得为它加缓存），所以改完**下一次写盘**就生效。
 """
 from __future__ import annotations
 
@@ -47,6 +59,7 @@ import hashlib
 from pathlib import Path
 
 from storygraph.core import atomicio
+from storygraph.core import user_prefs
 from storygraph.core import versions as V
 from storygraph.story.roots import project_root_of
 
@@ -74,6 +87,45 @@ SCRIPT_SUFFIX = '.rpy'
 #:
 #: 6 个台阶 → 每份脚本最多多 6 个备份文件（每个几十 KB），95 个脚本约 25 MB。
 KEEP_AGES = (3600, 6 * 3600, 86400, 3 * 86400, 7 * 86400, 14 * 86400)
+
+#: 用户能选的三个档位（`settings.json` 里的 `backups.preset`）。
+#:
+#: 为什么不让人直接填数字（2026-11-08 第十三轮）：这个开关的代价是**磁盘**，
+#: 而"留 8 代、6 个台阶"换算成"这个项目最多 17 个文件、21 MB"是工具该算的账，
+#: 不是该让编剧去心算的。档位只有三档，每一档在界面上都把那笔账算给他看。
+#:
+#: 最省的一档也留「原件 + 最近 3 次」—— **界面不提供"一个都不留"**：
+#: 那与本工具"改坏了能退回去"的承诺直接冲突。真要在文件里手写 `keep: 0`
+#: （只留原件）可以，但那是自己选的，窗口会如实说"自定义"。
+PRESETS = {
+    'lean': {
+        'label': '省地方',
+        'note': '只留最近几步，不跨天',
+        'keep': 3,
+        'ages': (),
+    },
+    'default': {
+        'label': '默认',
+        'note': '最近 5 步，外加跨小时 / 跨天 / 跨两周各一份',
+        'keep': atomicio.KEEP_BACKUPS,
+        'ages': KEEP_AGES,
+    },
+    'more': {
+        'label': '留久一点',
+        'note': '最近 8 步，外加跨小时 / 跨天 / 跨月 / 跨年各一份',
+        'keep': 8,
+        'ages': KEEP_AGES + (30 * 86400, 90 * 86400, 365 * 86400),
+    },
+}
+#: 没设置过 / 设置看不懂时用哪一档
+DEFAULT_PRESET = 'default'
+#: `settings.json` 里放这件事的节名
+SETTINGS_SECTION = 'backups'
+
+#: 手改文件时的合法范围（超出 → 夹住并**记一笔**，不静默）
+KEEP_MIN, KEEP_MAX = 0, 40
+#: 时间台阶的合法范围：1 分钟 ~ 10 年；最多 12 档
+AGE_MIN, AGE_MAX, AGE_STEPS_MAX = 60, 3650 * 86400, 12
 
 
 def _root_of(path: Path, project_root=None):
@@ -155,13 +207,17 @@ def _same_text(path: Path, text: str) -> bool:
         return False    # 读不出来就照常存一代（宁多不缺）
 
 
-def snapshot(path, *, project_root=None, keep: int = atomicio.KEEP_BACKUPS,
-             incoming=None):
+def snapshot(path, *, project_root=None, keep=None, incoming=None):
     """
     把**现在这份**原话复制成新一代（在写盘之前调用）。
 
     返回新备份的路径；`None` = 不需要（不是项目里的 `.rpy`、文件还不存在、
     内容已经存过、或者 `incoming` 说明**这次写的就是现在这份**）。
+
+    留多少**不在这里定**：默认读用户级设置（`retention()`），所以用户在界面上
+    改了档位，下一次写盘就按新规矩裁 —— 不需要重启，也不需要改代码。
+    `keep` 传了就是显式覆盖（**台阶一起关掉**：只说"留几代"的人要的就是那个数，
+    判据里造场景用）。
 
     `incoming` 是"马上要写进去的文本"：给了就先比一下 —— 逐字节一样时
     这次写盘本来就是空转，不该白烧一代备份（`q4_after_identical` 那条）。
@@ -173,13 +229,21 @@ def snapshot(path, *, project_root=None, keep: int = atomicio.KEEP_BACKUPS,
     where = history_dir(src, project_root=project_root)
     if where is None or not src.is_file():
         return None
+    keep, ages = _rule_for(keep)
     if incoming is not None and _same_text(src, incoming):
         return None
     if _already_stored(src, where):
         return None
     ensure_ignored(where)
-    return atomicio.backup_file(src, keep=keep, where=where,
-                                keep_ages=KEEP_AGES)
+    return atomicio.backup_file(src, keep=keep, where=where, keep_ages=ages)
+
+
+def _rule_for(keep):
+    """这一代按什么规矩留：显式 `keep` 优先，否则读设置。"""
+    if keep is not None:
+        return int(keep), ()
+    rule = retention()
+    return int(rule['keep']), tuple(rule['ages'])
 
 
 def versions_of(path, *, project_root=None, where=None) -> list:
@@ -214,11 +278,89 @@ def summarize_script(text) -> dict:
             'note': f'{lines} 行 · {len(text)} 字'}
 
 
-def retention_hint() -> str:
-    """一句人话：脚本的旧版本到底留多少（界面与文档共用这一句）。"""
-    steps = '、'.join(_age_label(s) for s in KEEP_AGES)
-    return (f'最近 {atomicio.KEEP_BACKUPS} 次改动，'
-            f'外加 {steps} 各留一版')
+def retention() -> dict:
+    """
+    现在**生效**的留档规矩 → `{preset, keep, ages, custom, problems}`。
+
+    读的是用户级设置（`core.user_prefs` 的 `backups` 节），所以 CLI / 批处理
+    也照同一份规矩留档 —— 它们没有窗口，但同样会改用户的 `.rpy`。
+
+    `problems` 是"设置文件里有看不懂的东西"的清单：给界面**如实说出来**用。
+    不静默吞掉的理由：用户把 `keep` 手改成 `"很多"`，我们按 5 算而一个字不说，
+    他会以为改生效了（下次裁掉东西时才发现）。
+    """
+    sec, state = user_prefs.read_state()
+    problems = []
+    if state == 'corrupt':
+        # 坏文件和"没设置过"必须分开说：前者是用户手改错了（他会以为自己改生效了）
+        problems.append(f'设置文件读不懂（{user_prefs.path()}）→ 全部按默认算')
+    raw = sec.get(SETTINGS_SECTION)
+    sec = dict(raw) if isinstance(raw, dict) else {}
+    name = sec.get('preset', DEFAULT_PRESET)
+    if not isinstance(name, str) or name not in PRESETS:
+        problems.append(f'档位写成了 {name!r}（认得的只有 '
+                        f'{"、".join(PRESETS)}）→ 按默认算')
+        name = DEFAULT_PRESET
+    base = PRESETS[name]
+    return {'preset': name,
+            'keep': _clean_keep(sec.get('keep'), base['keep'], problems),
+            'ages': _clean_ages(sec.get('ages'), base['ages'], problems),
+            'custom': 'keep' in sec or 'ages' in sec,
+            'problems': problems}
+
+
+def save_retention(preset) -> dict:
+    """
+    选一档并**清掉**可能存在的自定义 `keep`/`ages`（选了档位就不再是自定义）；
+    返回新的生效规矩。
+
+    文件坏了 → `core.user_prefs.CorruptSettings`（**一个字都不写**：那是人也会
+    手改的文件，覆盖等于删别人的内容）。
+    """
+    if preset not in PRESETS:
+        raise KeyError(f'不认识的档位：{preset!r}')
+    user_prefs.update(SETTINGS_SECTION,
+                      {'preset': preset, 'keep': None, 'ages': None})
+    return retention()
+
+
+def _clean_keep(raw, fallback, problems) -> int:
+    """`keep` 的校验：不是数字 → 默认；超出范围 → 夹住 + 记一笔。"""
+    if raw is None:
+        return int(fallback)
+    # `True == 1`：布尔值能混进 int，先挡掉（写 `true` 的人想的是"开着"）
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        problems.append(f'留几代写成了 {raw!r}（要 {KEEP_MIN}~{KEEP_MAX} 的整数）'
+                        f'→ 按默认的 {fallback} 算')
+        return int(fallback)
+    value = int(raw)
+    if KEEP_MIN <= value <= KEEP_MAX:
+        return value
+    clipped = min(max(value, KEEP_MIN), KEEP_MAX)
+    problems.append(f'留几代 {value} 超出 {KEEP_MIN}~{KEEP_MAX}'
+                    f' → 按 {clipped} 算')
+    return clipped
+
+
+def _clean_ages(raw, fallback, problems) -> tuple:
+    """`ages` 的校验：逐条过滤（不合法就跳过），排序去重，最多 `AGE_STEPS_MAX` 档。"""
+    if raw is None:
+        return tuple(float(s) for s in fallback)
+    if not isinstance(raw, (list, tuple)):
+        problems.append(f'时间台阶要一个列表，写成了 {raw!r} → 按默认算')
+        return tuple(float(s) for s in fallback)
+    out = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            problems.append(f'时间台阶里 {item!r} 不是秒数 → 跳过')
+            continue
+        secs = float(item)
+        if not AGE_MIN <= secs <= AGE_MAX:
+            problems.append(f'时间台阶 {secs:g} 秒超出 {AGE_MIN:g}~{AGE_MAX:g}'
+                            f' → 跳过')
+            continue
+        out.append(secs)
+    return tuple(sorted(set(out))[:AGE_STEPS_MAX])
 
 
 def _age_label(seconds: float) -> str:
@@ -229,6 +371,58 @@ def _age_label(seconds: float) -> str:
     if s < 86400:
         return f'{s / 3600:g} 小时前'
     return f'{s / 86400:g} 天前'
+
+
+def max_files(keep, ages) -> int:
+    """
+    每份脚本**最多**几个版本文件（含固定名那份原件）。
+
+    与 `atomicio._kept_backups` 对齐：固定名永远留 + 最近 `keep-1` 代 +
+    每个台阶一份。`keep=0` 时只剩固定名（1 个）+ 台阶。
+    """
+    return max(1, int(keep)) + len(tuple(ages))
+
+
+def retention_hint() -> str:
+    """一句人话：脚本的旧版本到底留多少（界面与文档共用这一句）。"""
+    rule = retention()
+    if rule['keep'] <= 0 and rule['ages']:
+        head = '只留最初那份原件'
+    elif rule['keep'] <= 0:
+        return '只留最初那份原件，之后的改动都不留'
+    else:
+        head = f'最近 {rule["keep"]} 次改动'
+    if not rule['ages']:
+        return head + '，更早的不留'
+    steps = '、'.join(_age_label(s) for s in rule['ages'])
+    return f'{head}，外加 {steps} 各留一版'
+
+
+def project_scripts(project_root) -> dict:
+    """
+    这个项目 `game/` 下的 `.rpy` → `{count, bytes}`（估算"最多占多少"用）。
+
+    `.rpy.bak` 不算（**靠后缀**：它最后一段是 `.bak`，不是 `.rpy`）、
+    符号链接不跟（与 `_history_files` 同一条：别把别人的东西算进这个项目的账）。
+    **只给界面上的估算用**，不进写盘路。
+    """
+    game = Path(project_root) / 'game'
+    count, total = 0, 0
+    try:
+        walker = game.rglob('*')
+        for path in walker:
+            try:
+                if path.is_symlink() or path.suffix.lower() != SCRIPT_SUFFIX:
+                    continue
+                if not path.is_file():
+                    continue
+                total += path.stat().st_size
+            except OSError:
+                continue
+            count += 1
+    except OSError:
+        return {'count': 0, 'bytes': 0}
+    return {'count': count, 'bytes': total}
 
 
 def history_root(project_root) -> Path:
@@ -358,7 +552,9 @@ def restore_version(path, version, *, expect_current=V.UNCHECKED,
 SCRIPT_STORE = V.Store(versions_of, restore_version)
 
 
-__all__ = ['HISTORY_ROOT', 'IGNORE_TEXT', 'KEEP_AGES', 'SCRIPT_STORE',
-           'SCRIPT_SUFFIX', 'VERSIONS_DIR', 'clear_history', 'ensure_ignored',
-           'history_dir', 'history_root', 'project_history', 'restore_version',
-           'retention_hint', 'snapshot', 'summarize_script', 'versions_of']
+__all__ = ['DEFAULT_PRESET', 'HISTORY_ROOT', 'IGNORE_TEXT', 'KEEP_AGES',
+           'PRESETS', 'SCRIPT_STORE', 'SCRIPT_SUFFIX', 'SETTINGS_SECTION',
+           'VERSIONS_DIR', 'clear_history', 'ensure_ignored', 'history_dir',
+           'history_root', 'max_files', 'project_history', 'project_scripts',
+           'restore_version', 'retention', 'retention_hint', 'save_retention',
+           'snapshot', 'summarize_script', 'versions_of']

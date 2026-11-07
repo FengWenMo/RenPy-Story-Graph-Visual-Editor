@@ -139,6 +139,31 @@ def _isolated_qt_prefs(tmp_path):
 
 
 # ------------------------------------------------------------------
+#  用户级设置文件的隔离（**autouse**，2026-11-08 第十三轮）
+# ------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolated_user_prefs(tmp_path, monkeypatch):
+    """
+    `core.user_prefs` 指向一份**临时**设置文件，读写你真实的那份都不许。
+
+    为什么必须 autouse：脚本写盘路（`version_store.snapshot`）**每一代都会读**
+    这份设置来决定留多少。没有这道闸，两条都会出事：
+
+      · 你机器上正好把档位调成"省地方" → 断言"留 12 代"的用例集体变红（假回归）；
+      · 有"真的点一下保存"的用例 → 会往你真实的设置文件里写东西。
+
+    没装 Qt 也照样要隔离（这一层在 core，`ui_qt.prefs` 那道闸管不到它）。
+    `STORYGRAPH_SETTINGS` 同时保证**子进程**（真并发的那些用例）也落在 tmp 里。
+    """
+    from storygraph.core import user_prefs
+
+    target = tmp_path / 'user_settings.json'
+    monkeypatch.setenv(user_prefs.ENV_CONFIG, str(target))
+    yield target
+
+
+# ------------------------------------------------------------------
 #  夹具
 # ------------------------------------------------------------------
 
