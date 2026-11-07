@@ -43,6 +43,10 @@
 **Qt**
 - 无 `QApplication` 就建控件 = 进程 abort（无 traceback）→ 测试类 `qapp` autouse。
 - 面板少一个转发方法 = AttributeError → 模态 → 挂死（守卫 `test_every_panel_method_the_window_calls_really_exists`）。
+- **按钮连到不存在的方法 = "点了没反应"**（2026-11-07 第九轮真踩）：PySide6 里槽函数抛异常
+  **只打 stderr，进程不崩、界面不变**。守卫两头都要有：`tests/test_dead_slots.py`
+  （扫 `connect(lambda ...: self._x())` 的名字在包里声明过）+ **真 `btn.click()`** 的判据。
+  只测"方法干了什么"（`dlg.export_archive()`）测不出按钮是死的。
 - **Qt 槽异常只打 stderr = "点了没反应"**：`QMessageBox.addButton(文本, 角色)` 第二参数是 **ButtonRole**（传 StandardButton 当场 TypeError，真机四入口一起失效）。菜单/右栏动作过 `window_nodes._menu_action` 安全壳；有模态的动作要"真建框"判据。
 - **模态要打全**：`_ask_delete_mode` 的 `box.exec()`、`_review_stage_suspects` 的 `dlg.exec()`；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测。
 - **延迟 import 是打桩点**（`card_editor._pick_spec_value` 的 `choose_from`、`_build_toolbars` 闭包里的 `act()`），提到顶层就判据失效 → 真弹框 → 124。
@@ -152,7 +156,25 @@
   对外返回键不变、界面未改。判据 `tests/test_manifest_locking.py` 7 条
   （含三条真并发），变异 4/4 抓住，全量 **10132 passed**。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜导入 + 保存后没有 undo（退路是 `.bak`）。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
+- **扩展平台 v9（2026-11-07 第九轮）**：① **两个死按钮**修好 —— 上一轮
+  「导出… / 导入…」连的是 `self._export_archive()` / `self._import_archive()`
+  （类里没有这两个名字），PySide6 槽里抛异常**只打 stderr**，用户看到的就是
+  "点了没反应"；上一轮判据直接调方法、没一条真点按钮，所以全绿。
+  现在 `tests/test_ext_carry.py` 有两条**真点击**，`tests/test_dead_slots.py`
+  （2 条）扫 `connect(lambda ...: self._x())` 的名字必须在包里声明过
+  （⚠ 只挡"名字整个不存在"，跨模块 mixin 靠 `def` 同名蒙过）。
+  ② **导入的退路**：`save()` 多返一个 `undo = {path, before, after}`
+  （`before` = **锁里用 `newline=''` 读到的原话**，`None` = 保存前没有这份文件；
+  **一个字节没改就返回 None**，连点两次保存不该假装能退）；新函数
+  `ext.registry.restore_manifest(undo)` **锁里比对**：磁盘上还是 `after` 才
+  整份写回 `before`（`write_text_atomic`，`backup=True`）/ 删文件；
+  别人改过或删了 → **一个字不写**，`changed: True`。窗口里
+  「撤销上次保存」按钮（`_undo_save`），快照放**窗口**不放注册表
+  （`_reread()` 每次保存后换新注册表对象）。判据 `tests/test_ext_undo.py`
+  14 条（CRLF 逐字节 / 双进程同刻撤销恰好一个成功 / 别人持锁就拒绝），
+  变异 5/5 抓住，全量 **10150 passed**。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜撤销只有"一次"且只在扩展窗口活着时（关窗就只剩 `.bak`），也不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
