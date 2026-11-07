@@ -435,6 +435,11 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
   可覆盖）—— 与 `ai.json` / `crash.log` 同一处约定。
   ⚠ **工具自己的记忆不写进项目仓库**（否则进 git diff、多人协作互相打架；判据
   `test_it_does_not_write_into_the_project_repo` 扫项目目录证明"一个新文件都没加"）。
+- **同目录还有 `settings.json`**（2026-11-08 第十三轮）：脚本旧版本的**留档档位**
+  （三档：省地方 / 默认 / 留久一点），出口是 `core/user_prefs.update()`，
+  `STORYGRAPH_SETTINGS` 可覆盖。与 `session.json` 一样是**用户级的策略**，
+  不进项目仓库；⚠ 写盘路**每一代都会读它**，所以缺/坏只能退化成默认 ——
+  绝不许因为偏好拦下写入（判据 `tests/test_retention_settings.py`）。
 - **项目里那份**：`<项目根>/storygraph.session.json` —— `layout` 段**只读**，
   字段**覆盖**用户级那份（团队可以放一份布局一起评审）。这就是用户说的
   "项目内部有保存布局，一并读取"。

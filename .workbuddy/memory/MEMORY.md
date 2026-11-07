@@ -49,6 +49,7 @@
   只测"方法干了什么"（`dlg.export_archive()`）测不出按钮是死的。
 - **Qt 槽异常只打 stderr = "点了没反应"**：`QMessageBox.addButton(文本, 角色)` 第二参数是 **ButtonRole**（传 StandardButton 当场 TypeError，真机四入口一起失效）。菜单/右栏动作过 `window_nodes._menu_action` 安全壳；有模态的动作要"真建框"判据。
 - **模态要打全**：`_ask_delete_mode` 的 `box.exec()`、`_review_stage_suspects` 的 `dlg.exec()`；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测。
+- **`QLabel` 不渲染 markdown**：`**`、反引号会**原样显示**（第十轮踩过、第十三轮又踩一次：窗口里写着"这里定的是\*\*留多少\*\*"）。说明文字只能纯文字，路径/名字用「」圈；判据 `test_no_markdown_leaks_into_the_labels`（扫窗口里所有 `QLabel`）。
 - **延迟 import 是打桩点**（`card_editor._pick_spec_value` 的 `choose_from`、`_build_toolbars` 闭包里的 `act()`），提到顶层就判据失效 → 真弹框 → 124。
 - "扫源码"类判据统一走 `tests/_source_paths.main_window_source_text()`；新模块加进 `WINDOW_SIDE_MODULES`。卡片回调搬走后要 `import ... as CA` 打 `CA.*`。
 - QSS 吞 `QTreeView` 展开三角 → 自绘 `▾/▸` + `setRootIsDecorated(False)`；判 dock 用 `isHidden()`；`saveState()` 要 `objectName`。
@@ -60,6 +61,7 @@
 **落盘/全局开关**
 - 写盘只有一条路 `core/atomicio.py`（临时文件 → `newline=''` → fsync → 多代备份 → `os.replace`），别用 `wb.save(path)`。三条别改回去：备份名带序号（同 tick 会盖掉上一代）｜`os.replace` 对瞬时 `PermissionError` 重试 6×20ms｜Excel 后缀白名单只认 `.xlsx`。
 - **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七、八轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写；**删文件与备份也在这个出口**：`edit` 返回 3 元组 `(result, changed, delete)`，`backup=True` 备份的是**锁里读到的那份文本**，备份失败 = 整次拒写）。四个删改入口（`remove_statement` / `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`）全都走它，**别再自己读一遍清单**。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
+- **用户级设置**（第十三轮）：`%LOCALAPPDATA%/StoryGraph/settings.json` 只有 `core.user_prefs.update(name, patch)` 一个出口（锁里读→**只改这一节**→原子写；patch 里 `None`=删键；读不懂就 `CorruptSettings` **拒写** —— 那文件人也会手改）。⚠ **写盘路每一代都要读它**（脚本留档档位），所以缺/坏时只能退化成默认，**绝不许拦写盘**；`STORYGRAPH_SETTINGS` 可改位置（测试那道 autouse 夹具靠它）。这类东西别用 `QSettings` —— core 没有（也不该有）Qt。
 - 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
 - 读 Excel 只有一条路 `excel/safety.py::open_workbook()`（AST 横扫守卫，直接 `load_workbook` 会被抓）。阈值：拒 256MB / 解开 512MB / 单条目 256MB / 2 万条目 / 声明 800 万格。
 - **表读不出来时不许重建**：`snapshot_user_content` 对 `UnsafeWorkbook`/`PermissionError` **抛**，只有坏文件才 `None`。
@@ -223,7 +225,25 @@
   最早到哪天，再问，点「全部删掉」才删；符号链接不跟，`.storygraph/` 留着）。
   判据 46 条，变异 11/11，全量 **10227 / 10223 passed**。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜历史版本的代数 / 台阶是硬编码（没有设置项）｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
+- **脚本 v13（2026-11-08 第十三轮，同日）**：**留多久可以改**（上一轮的代数 /
+  台阶是模块常量）。探针 `.pip-tmp/probe_r13_settings.py`：真项目（95 个 `.rpy` /
+  1.26 MB）默认档每份最多 **11** 个（固定名含在 5 代里 + 6 台阶）≈ **13.9 MB**；
+  读一次设置 **0.2 ms** → **不加缓存**（每代都读，改完立刻生效）。
+  做法：`core/user_prefs.py`（**用户级** `settings.json`，`STORYGRAPH_SETTINGS`
+  可覆盖；`read()` 缺/坏 → 全默认、**绝不拦写盘**；`update()` 锁里读→只改这一节→
+  原子写，`None`=删键；文件坏了 → `CorruptSettings` **一个字不写**）+
+  `version_store.PRESETS`（`lean` 3 / `default` 5+6 台阶 / `more` 8+9 台阶，
+  **界面不提供"一个都不留"**；手写 `keep: 0` = 只留原件，窗口标"自定义"且不可选）+
+  `retention()`（`problems` 点名看不懂的值）/ `save_retention()` / `max_files()` /
+  `project_scripts()` + 窗口 `ui_qt/dialog_retention.py` + 菜单
+  「🗂 历史版本留多久（占多少 / 改小改大）…」。**改小下一次写盘才裁、改大不补回**
+  —— 窗口里写着这两句（判据也钉住）。`tests/test_retention_settings.py` 42 条，
+  变异 **12/12**，全量 **10269 / 10265 passed / 0 failed**（2m15s，12 进程；
+  上一轮 10227，差 42 = 新判据）。`tests/conftest.py` 多了 autouse
+  `_isolated_user_prefs`（不然本机档位会让旧判据集体变红）。
+  详见 `docs/设计_脚本历史版本_2026-11-08.md` §十四~十七。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
