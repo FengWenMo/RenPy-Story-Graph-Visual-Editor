@@ -1741,58 +1741,108 @@ def _dump_manifest(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + '\n'
 
 
-def _edit_manifest(project_root, edit, *, timeout: float = DEFAULT_LOCK_WAIT) -> dict:
+def _edit_outcome(outcome) -> tuple:
     """
-    在**跨进程锁**里：读 `storygraph.rules.json` → `edit(path, data)` → 原子写。
+    `edit` 的返回 → `(result, changed, delete)`。
 
-    `edit` 返回 `(result, changed)`；`changed=False` = 这次什么都没改（不写盘、
-    不清缓存）。它也可以抛 `_ManifestRefused(reason)` —— 那就不写，把 reason
-    原样带回去（"清单坏了 / 这条本来就不在"这一类都是它）。
+    `edit` 可以返回 2 元组 `(result, changed)`，也可以返回 3 元组
+    `(result, changed, delete)` —— 最后那个 `True` = "这次的结果是**把清单
+    整个删掉**"（什么都不剩时才这样；`remove_statement` / `clear_attr_groups`
+    / `reset_declarations` 用）。
+    """
+    if not isinstance(outcome, tuple) or not 2 <= len(outcome) <= 3:
+        raise TypeError('edit 要返回 (result, changed) 或 (result, changed, delete)，'
+                        f'收到 {outcome!r}')
+    delete = bool(outcome[2]) if len(outcome) == 3 else False
+    return outcome[0], bool(outcome[1]), delete
 
-    返回 `{'ok','path','reason','result','locked'}`：
+
+def _edit_manifest(project_root, edit, *, timeout: float = DEFAULT_LOCK_WAIT,
+                   backup: bool = False, refuse_word: str = '拒绝覆盖') -> dict:
+    """
+    在**跨进程锁**里：读 `storygraph.rules.json` → `edit(path, data)` → 原子写
+    （或者把文件删掉）。
+
+    `edit` 返回 `(result, changed)` / `(result, changed, delete)`；
+    `changed=False` = 这次什么都没改（不写盘、不备份、不清缓存）。它也可以抛
+    `_ManifestRefused(reason)` —— 那就不写，把 reason 原样带回去（"清单坏了 /
+    这条本来就不在"这一类都是它）。
+
+    `backup=True`：**真的改了**才备份，且备份的是**这次在锁里读到的那份文本**
+    （不是再读一遍 —— 再读一次可能读到别人刚写的版本，撤销回去就错位了）。
+    备份失败 = 整次拒绝，一个字节都不写（没有备份就不许删东西）。
+
+    `refuse_word` 只改"坏清单"那句人话的动词：新增/覆盖是 `拒绝覆盖`，
+    删除/清空是 `拒绝改动`（对用户来说那确实是两件事）。
+
+    返回 `{'ok','path','reason','result','locked','backup'}`：
 
       · `locked=True` —— 等锁超时（**没写**，但这不是程序错：界面要说
         "另一个进程正在存，稍后再来"，而不是报"保存失败"让人去查）；
-      · `ok=False` 且 `locked=False` —— 真写不了（坏 JSON / 权限 / 盘满）。
+      · `ok=False` 且 `locked=False` —— 真写不了（坏 JSON / 权限 / 盘满）；
+      · `backup` —— 这次改动之前那一份的备份路径（没备份就是空串）。
 
     为什么读也要在锁里（2026-11-07 第七轮）：只锁"写"等于没锁 ——
     甲读、乙读、甲写、乙写，乙写的是**甲写之前**看到的世界。读→改→写
     必须是一段，这跟 `ext.registry.save()` 是同一条理由
     （`core.filelock` 的模块文档里有那张时序图）。
+
+    为什么删文件与备份也在这里（第八轮）：`remove_statement` 从前是
+    "锁外读 → 锁外备份 → 再读一遍写回去"，读到的、备份的、被删的可以是
+    **三个不同版本**；而且两个进程同时删两条时，后删的那次会把先删的
+    结果覆盖回去（先删的那条复活）。现在"备份哪一份、删不删、写什么"
+    全在锁里的同一份 `data` 上决定。
     """
     path = manifest_path(project_root)
     try:
         with file_lock(path, timeout=timeout):
+            text = ''
             data = {}
             if path.is_file():
+                text = path.read_text(encoding='utf-8')
                 try:
-                    data = json.loads(path.read_text(encoding='utf-8') or '{}')
+                    data = json.loads(text or '{}')
                 except Exception as e:          # noqa: BLE001 - 坏清单不覆盖
                     raise _ManifestRefused(
-                        f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝覆盖（{e}）')
+                        f'{MANIFEST_NAMES[0]} 不是合法 JSON，{refuse_word}（{e}）')
                 if not isinstance(data, dict):
-                    raise _ManifestRefused('清单顶层不是对象，拒绝覆盖')
-            result, changed = edit(path, data)
+                    raise _ManifestRefused(f'清单顶层不是对象，{refuse_word}')
+            result, changed, delete = _edit_outcome(edit(path, data))
+            saved = ''
             if changed:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                _write_text_atomic(path, _dump_manifest(data))
+                if backup and text:
+                    try:
+                        saved = _backup_manifest(path.parent, path, text=text)
+                    except Exception as e:      # noqa: BLE001 - 备不了就不写
+                        raise _ManifestRefused(
+                            f'备份失败，为安全起见没有改动：{e}')
+                try:
+                    if delete:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        _write_text_atomic(path, _dump_manifest(data))
+                except OSError as e:
+                    raise _ManifestRefused(
+                        f'写不进去：{e}'
+                        + (f'（备份在 {saved}）' if saved else ''))
                 clear_cache()                   # 刚改完清单：装配缓存作废
             return {'ok': True, 'path': str(path), 'reason': '',
-                    'result': result, 'locked': False}
+                    'result': result, 'locked': False, 'backup': saved}
     except LockTimeout as e:
         return {'ok': False, 'path': str(path), 'result': None, 'locked': True,
-                'conflicts': [],
+                'conflicts': [], 'backup': '',
                 'reason': f'{MANIFEST_NAMES[0]} 由另一个进程在写（{e}），'
                           f'这次**没有保存**，请稍后再存'}
     except _ManifestConflict as e:
         return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
-                'conflicts': list(e.conflicts), 'reason': e.reason}
+                'conflicts': list(e.conflicts), 'backup': '', 'reason': e.reason}
     except _ManifestRefused as e:
         return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
-                'conflicts': [], 'reason': e.reason}
+                'conflicts': [], 'backup': '', 'reason': e.reason}
     except OSError as e:
         return {'ok': False, 'path': str(path), 'result': None, 'locked': False,
-                'conflicts': [], 'reason': f'写不进去：{e}'}
+                'conflicts': [], 'backup': '', 'reason': f'写不进去：{e}'}
 
 
 def declare_statement(project_root, name: str, label: str = '',
@@ -2268,10 +2318,13 @@ def remove_statement(project_root, name: str) -> dict:
       · 清单坏了 / 名字不在里面 → **如实说**，不猜、不改。
 
     返回 `{'ok','path','removed','deleted_file','backup','reason'}`。
-    """
-    import json
-    from datetime import datetime
 
+    2026-11-07 第八轮：整个"读 → 判断 → 备份 → 写/删"进了 `_edit_manifest`
+    的锁。从前的顺序是**锁外读一次、备份时再读一次、写时用第一次那份** ——
+    两次读之间别人写进来的东西，备份里有、删掉的却没有，撤销回去对不上；
+    两个进程同时删两条时还会互相覆盖（先删的那条复活）。现在备份、删不删、
+    写什么，全在锁里的**同一份** `data` 上决定。
+    """
     name = str(name or '').strip()
     if not name:
         return {'ok': False, 'path': '', 'removed': False,
@@ -2281,64 +2334,37 @@ def remove_statement(project_root, name: str) -> dict:
     if root is None:
         return {'ok': False, 'path': '', 'removed': False,
                 'deleted_file': False, 'backup': '', 'reason': '没有项目根目录'}
-    path = manifest_path(root)
-    if not path.is_file():
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '',
-                'reason': f'没有 {MANIFEST_NAMES[0]}'}
-    try:
-        data = json.loads(path.read_text(encoding='utf-8') or '{}')
-    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '',
-                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
-    if not isinstance(data, dict):
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '',
-                'reason': '清单顶层不是对象，拒绝改动'}
 
-    items = data.get(MANIFEST_KEY)
-    items = items if isinstance(items, list) else []
-    kept = [it for it in items
-            if not (isinstance(it, dict)
-                    and str(it.get('name') or '').strip() == name)]
-    if len(kept) == len(items):
-        return {'ok': True, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '',
-                'reason': f'清单里本来就没有 "{name}"'}
+    def edit(path, data):
+        """锁里那一步：删这一条，或者连文件一起删（其它段为空时）。"""
+        if not path.is_file():
+            raise _ManifestRefused(f'没有 {MANIFEST_NAMES[0]}')
+        items = data.get(MANIFEST_KEY)
+        items = items if isinstance(items, list) else []
+        kept = [it for it in items
+                if not (isinstance(it, dict)
+                        and str(it.get('name') or '').strip() == name)]
+        if len(kept) == len(items):
+            return ({'removed': False, 'deleted_file': False,
+                     'reason': f'清单里本来就没有 "{name}"'}, False)
+        rest = {k: v for k, v in data.items() if k != MANIFEST_KEY}
+        if not kept and all(not v for v in rest.values()):
+            return ({'removed': True, 'deleted_file': True, 'reason': ''},
+                    True, True)                # ← 第三条：整个文件删掉
+        data[MANIFEST_KEY] = kept
+        return ({'removed': True, 'deleted_file': False, 'reason': ''}, True)
 
-    # ① 先备份（改之前的内容）
-    backup = ''
-    try:
-        bdir = root / 'storygraph.rules.backup'
-        bdir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        bpath = bdir / f'{MANIFEST_NAMES[0].replace(".json", "")}.{stamp}.json'
-        bpath.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
-        backup = str(bpath)
-    except Exception as e:                      # noqa: BLE001 - 备不了就不删
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '',
-                'reason': f'备份失败，为安全起见没有改动：{e}'}
-
-    # ② 还有别的段 → 保留文件；什么都没了 → 删文件
-    rest = {k: v for k, v in data.items() if k != MANIFEST_KEY}
-    empty_rest = all(not v for v in rest.values())
-    try:
-        if not kept and empty_rest:
-            path.unlink()
-            deleted = True
-        else:
-            data[MANIFEST_KEY] = kept
-            _write_text_atomic(path, _dump_manifest(data))
-            deleted = False
-    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': backup,
-                'reason': f'写不进去：{e}（备份在 {backup}）'}
-    clear_cache()
-    return {'ok': True, 'path': str(path), 'removed': True,
-            'deleted_file': deleted, 'backup': backup, 'reason': ''}
+    res = _edit_manifest(root, edit, backup=True, refuse_word='拒绝改动')
+    if not res['ok']:
+        return {'ok': False, 'path': res['path'], 'removed': False,
+                'deleted_file': False, 'backup': res.get('backup') or '',
+                'reason': res['reason']}
+    body = res['result'] or {}
+    return {'ok': True, 'path': res['path'],
+            'removed': bool(body.get('removed')),
+            'deleted_file': bool(body.get('deleted_file')),
+            'backup': res.get('backup') or '',
+            'reason': str(body.get('reason') or '')}
 
 
 def discover_undeclared(project_root, *, limit_files: int = 400,
@@ -2489,9 +2515,11 @@ def declare_attr_groups(project_root, groups, *, replace: bool = False,
     明确的按钮/参数发起。
 
     返回 `{'ok','path','action','reason','count'}`。
-    """
-    import json
 
+    2026-11-07 第八轮：读→改→写整段进了 `_edit_manifest` 的锁。`replace`
+    的备份从"再读一遍文件"改成"备份刚才读到的那一份" —— 两次读之间
+    别人写进来的东西，备份里有、被整段替换掉的却没有，那就不是"改之前"。
+    """
     root = Path(project_root) if project_root else None
     if root is None:
         return {'ok': False, 'path': '', 'action': 'refused',
@@ -2526,110 +2554,81 @@ def declare_attr_groups(project_root, groups, *, replace: bool = False,
                            '「清空候选分栏」（replace 空列表不会清空）'),
                 'count': 0}
 
-    path = manifest_path(root)
-    data = {}
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding='utf-8') or '{}')
-        except Exception as e:                  # noqa: BLE001 - 坏清单不覆盖
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': f'storygraph.rules.json 不是合法 JSON，'
-                              f'拒绝覆盖（{e}）', 'count': 0}
-        if not isinstance(data, dict):
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': '清单顶层不是对象，拒绝覆盖', 'count': 0}
+    def edit(path, data):
+        """锁里那一步：整段替换，或者按名字合并（其它段/其它键原样保留）。"""
+        if replace:
+            # 整段替换时，**同名条目里用户手写的未知字段原样保留**（`when` /
+            # 备注 / 以后新增的键）—— 只换编辑器认识的那三样（name/label/options）。
+            old_entries = data.get(ATTR_GROUPS_KEY)
+            old_by_name = {}
+            if isinstance(old_entries, list):
+                for it in old_entries:
+                    if isinstance(it, dict) and str(it.get('name') or '').strip():
+                        old_by_name[str(it['name']).strip()] = it
+            merged = []
+            for entry in clean:
+                old = old_by_name.get(entry['name'], {})
+                extra = {k: v for k, v in old.items()
+                         if k not in ('name', 'label', 'options')}
+                extra.update(entry)
+                merged.append(extra)
+            data[ATTR_GROUPS_KEY] = merged
+            return {'action': 'replaced', 'count': len(merged)}, True
 
-    if replace:
-        # 整段替换 = 会删掉编辑器里已经去掉的那些栏，必须先留退路。
-        try:
-            if path.is_file():
-                _backup_manifest(root, path)
-        except Exception as e:                  # noqa: BLE001 - 备不了就不删
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': f'备份失败，为安全起见没有改动：{e}', 'count': 0}
-        # 整段替换时，**同名条目里用户手写的未知字段原样保留**（`when` /
-        # 备注 / 以后新增的键）—— 只换编辑器认识的那三样（name/label/options）。
-        old_entries = data.get(ATTR_GROUPS_KEY)
-        old_by_name = {}
-        if isinstance(old_entries, list):
-            for it in old_entries:
-                if isinstance(it, dict) and str(it.get('name') or '').strip():
-                    old_by_name[str(it['name']).strip()] = it
-        merged = []
-        for entry in clean:
-            old = old_by_name.get(entry['name'], {})
-            extra = {k: v for k, v in old.items()
-                     if k not in ('name', 'label', 'options')}
-            extra.update(entry)
-            merged.append(extra)
-        data[ATTR_GROUPS_KEY] = merged
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _write_text_atomic(path, _dump_manifest(data))
-        except Exception as e:                  # noqa: BLE001
-            return {'ok': False, 'path': str(path), 'action': 'refused',
-                    'reason': f'写不进去：{e}', 'count': 0}
-        clear_cache()
-        return {'ok': True, 'path': str(path), 'action': 'replaced',
-                'reason': '', 'count': len(clean)}
-
-    existing = data.get(ATTR_GROUPS_KEY)
-    if not isinstance(existing, list):
-        existing = []
-    by_name = {}
-    order = []
-    for it in existing:                         # 保留原有顺序与其它字段
-        if not isinstance(it, dict) or not str(it.get('name') or '').strip():
-            continue
-        n = str(it['name']).strip()
-        if n in by_name:
-            continue
-        by_name[n] = dict(it)
-        order.append(n)
-    action = 'updated' if by_name else 'added'
-    for entry in clean:                         # 同名 = 合并更新
-        n = entry['name']
-        if n in by_name:
-            merged = dict(by_name[n])
-            merged.update(entry)
-            by_name[n] = merged
-            action = 'updated'
-        else:
-            by_name[n] = entry
+        existing = data.get(ATTR_GROUPS_KEY)
+        if not isinstance(existing, list):
+            existing = []
+        by_name = {}
+        order = []
+        for it in existing:                     # 保留原有顺序与其它字段
+            if not isinstance(it, dict) or not str(it.get('name') or '').strip():
+                continue
+            n = str(it['name']).strip()
+            if n in by_name:
+                continue
+            by_name[n] = dict(it)
             order.append(n)
-    data[ATTR_GROUPS_KEY] = [by_name[n] for n in order]
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_text_atomic(path, _dump_manifest(data))
-    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
-        return {'ok': False, 'path': str(path), 'action': 'refused',
-                'reason': f'写不进去：{e}', 'count': 0}
-    clear_cache()                               # 刚改完清单：装配缓存作废
-    return {'ok': True, 'path': str(path), 'action': action, 'reason': '',
-            'count': len(data[ATTR_GROUPS_KEY])}
+        action = 'updated' if by_name else 'added'
+        for entry in clean:                     # 同名 = 合并更新
+            n = entry['name']
+            if n in by_name:
+                merged = dict(by_name[n])
+                merged.update(entry)
+                by_name[n] = merged
+                action = 'updated'
+            else:
+                by_name[n] = entry
+                order.append(n)
+        data[ATTR_GROUPS_KEY] = [by_name[n] for n in order]
+        return {'action': action, 'count': len(data[ATTR_GROUPS_KEY])}, True
+
+    res = _edit_manifest(root, edit, backup=replace)
+    if not res['ok']:
+        return {'ok': False, 'path': res['path'], 'action': 'refused',
+                'reason': res['reason'], 'count': 0}
+    body = res['result'] or {}
+    return {'ok': True, 'path': res['path'],
+            'action': str(body.get('action') or ''), 'reason': '',
+            'count': int(body.get('count') or 0)}
 
 
-def _backup_manifest(root: Path, path: Path) -> str:
-    """把清单**改之前**的整份内容备份到 `storygraph.rules.backup/`。"""
+def _backup_manifest(root: Path, path: Path, text: str | None = None) -> str:
+    """
+    把清单**改之前**的整份内容备份到 `storygraph.rules.backup/`。
+
+    `text` 给了就备份它（`_edit_manifest` 在锁里读到的那一份）—— 不要再读
+    一遍：两次读之间别人写了新版本的话，备份里是新的、被改掉的是旧的，
+    "回退"回去就等于把别人的改动也一起回退了。
+    """
     from datetime import datetime
 
     bdir = root / 'storygraph.rules.backup'
     bdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     bpath = bdir / f'{path.stem}.{stamp}.json'
-    bpath.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
+    blob = text if text is not None else path.read_text(encoding='utf-8')
+    bpath.write_text(blob, encoding='utf-8')
     return str(bpath)
-
-
-def _write_manifest_after_removal(path: Path, data: dict) -> bool:
-    """清单里只剩空段 → 删文件；还有别的段 → 写回。返回是否删了文件。"""
-    import json
-
-    if all(not v for v in data.values()):
-        path.unlink()
-        return True
-    _write_text_atomic(path, _dump_manifest(data))
-    return False
 
 
 def clear_attr_groups(project_root) -> dict:
@@ -2643,51 +2642,44 @@ def clear_attr_groups(project_root) -> dict:
     保留）。
 
     返回 `{'ok','path','removed','deleted_file','backup','count','reason'}`。
-    """
-    import json
 
+    2026-11-07 第八轮：读 → 判断 → 备份 → 写/删全在 `_edit_manifest` 的锁里。
+    """
     root = Path(project_root) if project_root else None
     if root is None:
         return {'ok': False, 'path': '', 'removed': False,
                 'deleted_file': False, 'backup': '', 'count': 0,
                 'reason': '没有项目根目录'}
-    path = manifest_path(root)
-    if not path.is_file():
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '', 'count': 0,
-                'reason': f'没有 {MANIFEST_NAMES[0]}（本来就没有分组）'}
-    try:
-        data = json.loads(path.read_text(encoding='utf-8') or '{}')
-    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '', 'count': 0,
-                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
-    if not isinstance(data, dict):
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '', 'count': 0,
-                'reason': '清单顶层不是对象，拒绝改动'}
-    old = data.get(ATTR_GROUPS_KEY)
-    if not isinstance(old, list) or not old:
-        return {'ok': True, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '', 'count': 0,
-                'reason': '清单里本来就没有 attr_groups'}
-    try:
-        backup = _backup_manifest(root, path)
-    except Exception as e:                      # noqa: BLE001 - 备不了就不删
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': '', 'count': 0,
-                'reason': f'备份失败，为安全起见没有改动：{e}'}
-    rest = {k: v for k, v in data.items() if k != ATTR_GROUPS_KEY}
-    try:
-        deleted = _write_manifest_after_removal(path, rest)
-    except Exception as e:                      # noqa: BLE001 - 写不动就如实说
-        return {'ok': False, 'path': str(path), 'removed': False,
-                'deleted_file': False, 'backup': backup, 'count': 0,
-                'reason': f'写不进去：{e}（备份在 {backup}）'}
-    clear_cache()
-    return {'ok': True, 'path': str(path), 'removed': True,
-            'deleted_file': deleted, 'backup': backup, 'count': len(old),
-            'reason': ''}
+
+    def edit(path, data):
+        """锁里那一步：清掉 `attr_groups`，别的段为空就整份删掉。"""
+        if not path.is_file():
+            raise _ManifestRefused(f'没有 {MANIFEST_NAMES[0]}（本来就没有分组）')
+        old = data.get(ATTR_GROUPS_KEY)
+        if not isinstance(old, list) or not old:
+            return ({'removed': False, 'deleted_file': False, 'count': 0,
+                     'reason': '清单里本来就没有 attr_groups'}, False)
+        rest = {k: v for k, v in data.items() if k != ATTR_GROUPS_KEY}
+        if all(not v for v in rest.values()):
+            return ({'removed': True, 'deleted_file': True,
+                     'count': len(old), 'reason': ''}, True, True)
+        data.clear()
+        data.update(rest)
+        return ({'removed': True, 'deleted_file': False,
+                 'count': len(old), 'reason': ''}, True)
+
+    res = _edit_manifest(root, edit, backup=True, refuse_word='拒绝改动')
+    if not res['ok']:
+        return {'ok': False, 'path': res['path'], 'removed': False,
+                'deleted_file': False, 'backup': res.get('backup') or '',
+                'count': 0, 'reason': res['reason']}
+    body = res['result'] or {}
+    return {'ok': True, 'path': res['path'],
+            'removed': bool(body.get('removed')),
+            'deleted_file': bool(body.get('deleted_file')),
+            'backup': res.get('backup') or '',
+            'count': int(body.get('count') or 0),
+            'reason': str(body.get('reason') or '')}
 
 
 def reset_declarations(project_root) -> dict:
@@ -2699,55 +2691,48 @@ def reset_declarations(project_root) -> dict:
     改之前整份备份到 `storygraph.rules.backup/`。
 
     返回 `{'ok','path','statements','groups','deleted_file','backup','reason'}`。
-    """
-    import json
 
+    2026-11-07 第八轮：读 → 判断 → 备份 → 写/删全在 `_edit_manifest` 的锁里。
+    """
     root = Path(project_root) if project_root else None
     if root is None:
         return {'ok': False, 'path': '', 'statements': 0, 'groups': 0,
                 'deleted_file': False, 'backup': '',
                 'reason': '没有项目根目录'}
-    path = manifest_path(root)
-    if not path.is_file():
-        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
-                'deleted_file': False, 'backup': '',
-                'reason': f'没有 {MANIFEST_NAMES[0]}'}
-    try:
-        data = json.loads(path.read_text(encoding='utf-8') or '{}')
-    except Exception as e:                      # noqa: BLE001 - 坏清单不覆盖
-        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
-                'deleted_file': False, 'backup': '',
-                'reason': f'{MANIFEST_NAMES[0]} 不是合法 JSON，拒绝改动（{e}）'}
-    if not isinstance(data, dict):
-        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
-                'deleted_file': False, 'backup': '',
-                'reason': '清单顶层不是对象，拒绝改动'}
-    st = data.get(MANIFEST_KEY)
-    gr = data.get(ATTR_GROUPS_KEY)
-    n_st = len(st) if isinstance(st, list) else 0
-    n_gr = len(gr) if isinstance(gr, list) else 0
-    if not n_st and not n_gr:
-        return {'ok': True, 'path': str(path), 'statements': 0, 'groups': 0,
-                'deleted_file': False, 'backup': '',
-                'reason': '清单里没有 statements / attr_groups'}
-    try:
-        backup = _backup_manifest(root, path)
-    except Exception as e:                      # noqa: BLE001
-        return {'ok': False, 'path': str(path), 'statements': 0, 'groups': 0,
-                'deleted_file': False, 'backup': '',
-                'reason': f'备份失败，为安全起见没有改动：{e}'}
-    rest = {k: v for k, v in data.items()
-            if k not in (MANIFEST_KEY, ATTR_GROUPS_KEY)}
-    try:
-        deleted = _write_manifest_after_removal(path, rest)
-    except Exception as e:                      # noqa: BLE001
-        return {'ok': False, 'path': str(path), 'statements': n_st,
-                'groups': n_gr, 'deleted_file': False, 'backup': backup,
-                'reason': f'写不进去：{e}（备份在 {backup}）'}
-    clear_cache()
-    return {'ok': True, 'path': str(path), 'statements': n_st,
-            'groups': n_gr, 'deleted_file': deleted, 'backup': backup,
-            'reason': ''}
+
+    def edit(path, data):
+        """锁里那一步：两段都清掉，别的键为空就整份删掉。"""
+        if not path.is_file():
+            raise _ManifestRefused(f'没有 {MANIFEST_NAMES[0]}')
+        st = data.get(MANIFEST_KEY)
+        gr = data.get(ATTR_GROUPS_KEY)
+        n_st = len(st) if isinstance(st, list) else 0
+        n_gr = len(gr) if isinstance(gr, list) else 0
+        if not n_st and not n_gr:
+            return ({'statements': 0, 'groups': 0, 'deleted_file': False,
+                     'reason': '清单里没有 statements / attr_groups'}, False)
+        rest = {k: v for k, v in data.items()
+                if k not in (MANIFEST_KEY, ATTR_GROUPS_KEY)}
+        if all(not v for v in rest.values()):
+            return ({'statements': n_st, 'groups': n_gr,
+                     'deleted_file': True, 'reason': ''}, True, True)
+        data.clear()
+        data.update(rest)
+        return ({'statements': n_st, 'groups': n_gr,
+                 'deleted_file': False, 'reason': ''}, True)
+
+    res = _edit_manifest(root, edit, backup=True, refuse_word='拒绝改动')
+    if not res['ok']:
+        return {'ok': False, 'path': res['path'], 'statements': 0, 'groups': 0,
+                'deleted_file': False, 'backup': res.get('backup') or '',
+                'reason': res['reason']}
+    body = res['result'] or {}
+    return {'ok': True, 'path': res['path'],
+            'statements': int(body.get('statements') or 0),
+            'groups': int(body.get('groups') or 0),
+            'deleted_file': bool(body.get('deleted_file')),
+            'backup': res.get('backup') or '',
+            'reason': str(body.get('reason') or '')}
 
 
 def format_registry_report(registry) -> str:

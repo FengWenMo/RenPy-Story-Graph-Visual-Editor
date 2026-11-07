@@ -69,8 +69,8 @@ WRITERS = {
     'story/statement_registry.py::_backup_manifest':
         '把改之前的整份 rules.json 备份到 storygraph.rules.backup/'
         '（不是写 .rpy；清空/重置前先留退路）。⚠ `_edit_manifest`（第七轮起的'
-        '唯一写入口）不在这张表里：它只调 `core.atomicio.write_text_atomic`，'
-        '**自己不落盘**，不是旁路',
+        '唯一写入口）不在这张表里：它只调 `core.atomicio.write_text_atomic` 与'
+        '`Path.unlink`（清单里什么都不剩时删掉整个文件），**自己不落盘**，不是旁路',
     'core/filelock.py::file_lock':
         '打开**锁文件**（用户缓存 `…/StoryGraph/locks/<sha1>.lock`，永远是空的）：'
         '操作系统级的字节锁，不写用户项目、不写 .rpy；关句柄即释放',
@@ -106,8 +106,6 @@ WRITERS = {
         '原子替换（`.tmp` + `os.replace`）；写失败只记台账、绝不拦编辑',
     'ui_qt/dialog_ai.py::_clear': '「清掉已存的 key」= 把那份**用户级**配置写成 `{}`。'
                                   '只清这一个文件；清完界面改口（不静默）',
-    'story/statement_registry.py::remove_statement':
-        '改/删项目清单（移除一条声明；**先备份**到 storygraph.rules.backup/）',
     'pipeline/engine_collect.py::write_facts':
         '写 engine_facts.json（引擎事实快照 —— 不是 .rpy，不碰用户脚本）',
     'pipeline/engine_collect.py::_write_probe':
