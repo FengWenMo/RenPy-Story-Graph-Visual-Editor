@@ -89,7 +89,7 @@ def history_dir(path, *, project_root=None):
     return Path(root) / HISTORY_ROOT / VERSIONS_DIR / rel.parent
 
 
-def ensure_ignored(where, *, dry_run: bool = False) -> bool:
+def ensure_ignored(where) -> bool:
     """
     往历史目录里放一个 `.gitignore`（`*`）—— 备份不打扰用户的 `git status`。
 
@@ -99,8 +99,6 @@ def ensure_ignored(where, *, dry_run: bool = False) -> bool:
     path = Path(where) / '.gitignore'
     if path.is_file():
         return False
-    if dry_run:
-        return True
     path.parent.mkdir(parents=True, exist_ok=True)
     atomicio.write_text_atomic(path, IGNORE_TEXT)
     return True
