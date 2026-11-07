@@ -115,10 +115,17 @@ class BatchDialog(QDialog):
         self._plan = None
         #: `[{'raw': dict, 'form': dict|None, 'why': str}]`（见 batch_recipes）
         self._items = []
+        #: 项目里"开了批处理"的扩展声明（`app.batch_edit.rules_from_extensions`）
+        self._declared = []
+        #: 合并/装载过程中要人看一眼的话（不阻断）
+        self._declared_notes = []
+        #: 最近一次 `_rules_for_plan` 的合并说明（同 id 写法不同之类）
+        self._merge_notes = []
         self._current = -1
         self._loading = False
         self._build_ui()
         self._load_rules()
+        self._refresh_declared()
         self._sync_buttons()
 
     # ---- 界面 ----
@@ -205,6 +212,20 @@ class BatchDialog(QDialog):
         for b in (self._btn_new, self._btn_del):
             bar.addWidget(b)
         lay.addLayout(bar)
+        # 声明出来的批处理（扩展窗口里那个开关）：以前它们只让"预演"看着有东西，
+        # 计划里其实没有它们。这里既**随计划一起生效**，也能一键放进列表编辑。
+        self._declared_hint = QLabel('')
+        self._declared_hint.setProperty('role', 'caption')
+        self._declared_hint.setWordWrap(True)
+        self._declared_hint.setVisible(False)
+        lay.addWidget(self._declared_hint)
+        self._btn_import = QPushButton('导入扩展声明…')
+        self._btn_import.setToolTip(
+            '把项目里「是否能够批处理」打开的声明，作为规则放进这个列表 '
+            '（放进来后可以改、可以保存进规则文件）')
+        self._btn_import.clicked.connect(lambda: self.import_declared_rules())
+        self._btn_import.setVisible(False)
+        lay.addWidget(self._btn_import)
         return box
 
     def _build_form(self) -> QWidget:
@@ -309,6 +330,93 @@ class BatchDialog(QDialog):
         if self._root:
             return self._root / RULE_FILENAME
         return None
+
+    def _uses_project_rules(self) -> bool:
+        """
+        现在这扇窗用的是不是**项目自己的**规则文件？
+
+        「换个文件…」= "就按这一份来"：那时不并入扩展声明（与
+        `cli batch --rule` 同一条口径）。传进来的路径正好等于项目默认文件时，
+        仍然算"项目自己的"。
+        """
+        if self._rule_path is None:
+            return True
+        if not self._root:
+            return False
+        try:
+            return (Path(self._rule_path).resolve()
+                    == (self._root / RULE_FILENAME).resolve())
+        except OSError:
+            return False
+
+    def _refresh_declared(self) -> None:
+        """
+        读一次项目里「是否能够批处理」打开的声明（会装扩展层，含 `.py` 插件）。
+
+        ⚠ 这是**这一层才做**的事，不是逐章热路径：`for_project` 会执行项目里的
+          插件代码，所以只在开窗/重读时问一次。
+        """
+        from storygraph.app.batch_edit import rules_from_extensions
+
+        self._declared, self._declared_notes = [], []
+        if self._root and self._uses_project_rules():
+            self._declared, self._declared_notes = rules_from_extensions(self._root)
+        self._update_declared_ui()
+
+    def _update_declared_ui(self) -> None:
+        """声明那一条提示 + 「导入」按钮（导入之后要跟着变，别让人对着旧字点）。"""
+        have = {str((item.get('raw') or {}).get('id') or '')
+                for item in self._items}
+        left = [rule for rule in self._declared if rule.id not in have]
+        n = len(self._declared)
+        self._declared_hint.setVisible(bool(n or self._declared_notes))
+        self._btn_import.setVisible(bool(left))
+        self._btn_import.setEnabled(bool(left))
+        self._btn_import.setText(f'把声明里的 {len(left)} 条放进列表…'
+                                 if left else '导入扩展声明…')
+        if n and not left:
+            self._declared_hint.setText(
+                f'扩展声明里的 {n} 条都已经在列表里了 —— 改完点「保存规则」'
+                '才会写进规则文件（声明本身还在 storygraph.ext.json 里）。')
+        elif n:
+            self._declared_hint.setText(
+                f'另有 {n} 条来自扩展声明（扩展窗口里「是否能够批处理」打开的'
+                '那些）—— 预演和应用时会一并生效；要改它们请回扩展窗口，'
+                '或者先导进这个列表再改。')
+        elif self._declared_notes:
+            self._declared_hint.setText('扩展声明：' +
+                                        '；'.join(self._declared_notes[:3]))
+
+    def import_declared_rules(self) -> int:
+        """
+        扩展声明里的规则 → 规则列表（**已经在列表里的跳过**），返回放进几条。
+
+        为什么要有这一步：声明是"我开了一个开关"，文件才是"能改、能审、能进
+        版本库"的那一份。让人能一键把它们落成列表项，改起来才有地方改。
+        """
+        from storygraph.app.batch_recipes import read_form
+
+        have = {str((item.get('raw') or {}).get('id') or '')
+                for item in self._items}
+        pending = [rule for rule in self._declared if rule.id not in have]
+        if not pending:
+            self._status.setText('声明里的规则都已经在列表里了。')
+            return 0
+        for rule in pending:
+            raw = rule.to_dict()
+            # `CueRule.to_dict()` 带一个 `source`（那是"从哪读进来的"，
+            # 供报错定位用，不是规则内容）—— 规则文件的白名单里没有它，
+            # 存回去会被整份拒绝。列表里要的是**能保存的**那一份。
+            raw.pop('source', None)
+            form, why = read_form(raw)
+            self._items.append({'raw': raw, 'form': form, 'why': why})
+        self._reload_list()
+        self._update_declared_ui()
+        self._sync_buttons()
+        self._status.setText(
+            f'放进来了 {len(pending)} 条 —— 它们原本跟着扩展开关走；'
+            '要长期留下就点「保存规则」写成文件。')
+        return len(pending)
 
     def _load_rules(self) -> None:
         """读规则文件 → `self._items`（读不动就空着，把原因留给 preview 说）。"""
@@ -581,6 +689,8 @@ class BatchDialog(QDialog):
         self._view.setPlainText('')
         self._status.setText('')
         self._load_rules()
+        # 换了一份文件 → "用不用扩展声明"的答案可能会变（显式文件 = 不并入）
+        self._refresh_declared()
         self._sync_buttons()
 
     # ---- 保存规则 ----
@@ -602,6 +712,7 @@ class BatchDialog(QDialog):
             return None
         self._rule_path = path
         self._load_rules()
+        self._update_declared_ui()
         self._status.setText(f'规则已保存：{path.name}（{len(self._items)} 条）')
         self._sync_buttons()
         return path
@@ -613,17 +724,35 @@ class BatchDialog(QDialog):
         ready = bool(self._plan is not None
                      and not self._plan.errors
                      and self._plan.pending)
-        has_rules = bool(self._items) or bool(self._rule_path)
-        # 一条规则都没有时"保存"也灰：不然点下去只会得到"一条规则都没有"
-        self._btn_save.setEnabled(bool(has_rules and (self._root or self._rule_path)))
+        # 只有扩展声明、还没有规则文件时，也**能**预演（声明随计划跑）
+        has_rules = (bool(self._items) or bool(self._rule_path)
+                     or bool(self._declared))
+        # 一条规则都没有时"保存"也灰：不然点下去只会得到"一条规则都没有"。
+        # 只有扩展声明时同样灰：声明在 `storygraph.ext.json` 里，这里的"保存"
+        # 写的是规则文件 —— 想落成文件请先「把声明放进列表」。
+        self._btn_save.setEnabled(bool(self._items
+                                       and (self._root or self._rule_path)))
         self._btn_new.setEnabled(bool(self._root))
         self._btn_del.setEnabled(0 <= self._current < len(self._items))
         self._btn_preview.setEnabled(bool(self._root and has_rules))
         self._btn_apply.setEnabled(ready)
         path = self._default_rule_path()
-        if has_rules and path is not None:
+        # "有规则文件"= **磁盘上真有**那份文件（列表里装着东西不代表存过）
+        # 或显式选了别的文件。只有声明/只有界面上的规则时，别把
+        # `storygraph.batch.json` 显示成"规则文件" —— 那会让人以为已经存过一次了。
+        file_exists = bool(self._rule_path and Path(self._rule_path).is_file())
+        if self._items and not file_exists:
+            self._rule_label.setText(
+                f'{path}（还没保存 · 界面里 {len(self._items)} 条）'
+                if path is not None
+                else f'界面里 {len(self._items)} 条（还没保存）')
+        elif file_exists:
             self._rule_label.setText(
                 f'{path}（{len(self._items)} 条）' if self._items else str(path))
+        elif self._declared:
+            self._rule_label.setText(
+                f'还没有规则文件 —— 但扩展声明里有 {len(self._declared)} 条'
+                '（预演会带上它们）')
         else:
             self._rule_label.setText(
                 '还没有规则文件 —— 点左边「新建」配一条，或右上角换一份')
@@ -633,24 +762,32 @@ class BatchDialog(QDialog):
         """界面上的规则 → `[CueRule]`（与保存走同一条序列化/校验路径）。"""
         import json
 
-        from storygraph.app.batch_edit import load_rule_file, parse_rule
+        from storygraph.app.batch_edit import (load_rule_file, merge_declared_rules,
+                                               parse_rule)
         from storygraph.app.batch_recipes import dump_rules
 
+        base = []
         if self._items:
             data = json.loads(dump_rules(self._items))
-            return [parse_rule(r, f'规则 {r.get("id")!r}')
+            base = [parse_rule(r, f'规则 {r.get("id")!r}')
                     for r in data.get('rules') or ()]
-        if self._rule_path:
-            return load_rule_file(self._rule_path)
-        raise ValueError('还没有规则文件')
+        elif self._rule_path:
+            base = load_rule_file(self._rule_path)
+        # 声明出来的规则**随计划一起跑**（同 id 以文件/列表那份为准，见
+        # `merge_declared_rules`）。没有它们，开关打开也只是"预演时看着有"。
+        base, self._merge_notes = merge_declared_rules(base, self._declared)
+        if not base:
+            raise ValueError('还没有规则文件')
+        return base
 
     def _build_plan(self):
         """读规则 + 扫项目 → 计划；失败抛给调用方显示，不弹二次错误框。"""
         from storygraph.app.batch_edit import BatchRuleError, plan_batch
         if not self._root or not self._root.is_dir():
             raise BatchRuleError(f'项目目录不存在：{self._root}')
+        self._merge_notes = []
         self._flush_form()
-        if not self._items and not self._rule_path:
+        if not self._items and not self._rule_path and not self._declared:
             raise BatchRuleError('还没有规则：点左边「新建」配一条，再预演')
         rules = self._rules_for_plan()
         return plan_batch(self._root, rules,
@@ -686,6 +823,9 @@ class BatchDialog(QDialog):
             chunks.append('（有问题，不会写：' + '；'.join(plan.errors) + '）')
         else:
             chunks.append(_cap_diff(format_diff(plan)))
+        notes = [*self._declared_notes, *self._merge_notes]
+        if notes:
+            chunks.append('注：' + '；'.join(notes[:4]))
         if body.strip():
             chunks.append(body)
         lines = '\n\n'.join(chunks).split('\n')
@@ -694,8 +834,10 @@ class BatchDialog(QDialog):
             lines = lines[:PREVIEW_LIMIT] + [f'… 还有 {extra} 行没显示'
                                              '（写入的是全部计划）']
         self._view.setPlainText('\n'.join(lines))
+        extra = (f' · 另含 {len(self._declared)} 条扩展声明'
+                 if self._declared else '')
         self._status.setText(
-            f'{len(plan.files)} 个文件 · {plan.pending} 处待处理'
+            f'{len(plan.files)} 个文件 · {plan.pending} 处待处理{extra}'
             if not plan.errors else '有错误，不能写')
         self._sync_buttons()
         return plan

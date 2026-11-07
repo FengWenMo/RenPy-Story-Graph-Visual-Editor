@@ -284,6 +284,90 @@ def parse_rule(raw, where: str = 'rule') -> CueRule:
     return _parse_rule(raw, where)
 
 
+def parse_rules(raw_rules, where: str = 'rules') -> list:
+    """
+    一串**原始 dict** → `[CueRule]`（例如扩展点 `batchable` 产出的那几条）。
+
+    为什么需要这一步（2026-11-07 探针实测）：`ExtensionRegistry.cue_rules()`
+    产出的是普通 dict，而 `plan_batch` 要的是 `CueRule` —— 直接把前者喂
+    进去会 `AttributeError: 'dict' object has no attribute 'when'`。
+    也就是说"批处理开关"在界面上看着能开，真跑批处理时**断在这里**。
+    现在断口补上：不管规则从哪来（文件 / 表单 / 扩展点），都过同一个
+    `_parse_rule`，校验只有一份。
+    """
+    out = []
+    for index, raw in enumerate(raw_rules or ()):
+        if isinstance(raw, CueRule):
+            out.append(raw)                 # 已经是规则对象：幂等
+            continue
+        out.append(_parse_rule(raw, f'{where}[{index}]'))
+    return out
+
+
+def rules_from_extensions(project_root) -> tuple:
+    """
+    项目里**开了批处理**的扩展点 → `([CueRule], [problems])`。
+
+    这是「是否能够批处理」那个开关的**唯一消费口**：开关关着 → `cue_rules()`
+    不产出 → 这里一条都没有（不会偷偷跑）。坏规则不连坐：一条坏了记进
+    `problems`，其余照常返回（与插件装载同一条纪律）。
+
+    ⚠ 会装载扩展层（含 `extensions/*.py` 插件）—— 所以这里是"点一下预演"
+      才走的路径，不是逐章热路径。
+    """
+    try:
+        from storygraph.ext.registry import ExtensionRegistry
+    except ImportError:                     # 后端被裁剪过
+        return [], []
+    registry = ExtensionRegistry.for_project(project_root)
+    rules, problems = [], []
+    for raw in registry.cue_rules():
+        try:
+            rules.append(parse_rule(raw, f'扩展点 {raw.get("id")!r}'))
+        except BatchRuleError as exc:
+            problems.append(str(exc))
+    return rules, problems
+
+
+def _same_rule(left: CueRule, right: CueRule) -> bool:
+    """两条规则是不是**同一个写法**（`source` 不算：那是来处，不是内容）。"""
+    a = left.to_dict()
+    b = right.to_dict()
+    a.pop('source', None)
+    b.pop('source', None)
+    return a == b
+
+
+def merge_declared_rules(rules, declared, *, where: str = '扩展声明') -> tuple:
+    """
+    已有规则 + 声明出来的规则 → `([CueRule], [要人看一眼的话])`。
+
+    这是「是否能够批处理」那个开关**接进批量执行**的那一步（2026-11-07 第三轮）。
+    之前 `rules_from_extensions()` 只有判据在调：扩展窗口里把开关打开、点「预演」
+    也能看到效果，但 CLI 的 `batch` 与批处理窗口读的是
+    `storygraph.batch.json` / 界面上的规则 —— 声明的规则**从来没有进过这两条路**。
+    也就是"开关看着能开、真跑起来少一条"。
+
+    去重口径：**同名时留下原来那条**。原来那条来自文件/界面，是能改、能审、
+    能进版本库的一份；声明是"我开了一个开关"。两者同名却内容不同时**说出来**
+    （这正好是两份真源开始漂移的那一刻），但不算错误、不阻断计划 —— 否则
+    一个人把规则抄进文件之后，整章都跑不了。
+    """
+    merged = list(rules or ())
+    seen = {rule.id: rule for rule in merged}
+    notes = []
+    for rule in declared or ():
+        old = seen.get(rule.id)
+        if old is not None:
+            if not _same_rule(old, rule):
+                notes.append(f'{where}里也有一条 {rule.id!r}，写法不同 —— '
+                             f'用的是原来那条（要改请改原来那条）')
+            continue
+        seen[rule.id] = rule
+        merged.append(rule)
+    return merged, notes
+
+
 def _parse_rule(raw, where: str) -> CueRule:
     if not isinstance(raw, dict):
         raise BatchRuleError(f'{where} 必须是对象')
@@ -1320,5 +1404,6 @@ __all__ = [
     'BatchPlan', 'BatchRuleError', 'CueRule', 'FilePlan', 'Insertion',
     'LineEdit', 'MATCH_MODES', 'OCCURRENCES', 'PLAN_SCHEMA', 'SCHEMA',
     'SCOPES', 'SPAN_MODES', 'apply_plan', 'format_diff', 'format_plan',
-    'load_rule_file', 'parse_rule', 'plan_batch',
+    'load_rule_file', 'merge_declared_rules', 'parse_rule', 'parse_rules',
+    'plan_batch', 'rules_from_extensions',
 ]

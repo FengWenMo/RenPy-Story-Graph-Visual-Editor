@@ -1,0 +1,24 @@
+{
+  "schema": "storygraph.batch/1",
+  "rules": [
+    {
+      "id": "retime-atl",
+      "when": {
+        "show": "sprite"
+      },
+      "replace": {
+        "scope": "beat",
+        "match": {
+          "mode": "exact",
+          "pattern": "show ye happy:"
+        },
+        "span": "block",
+        "text": [
+          "show ye happy:",
+          "    xalign 0.3",
+          "    ease 0.4 alpha 1.0"
+        ]
+      }
+    }
+  ]
+}

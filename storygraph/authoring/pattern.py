@@ -89,7 +89,33 @@ from __future__ import annotations
 import re
 
 #: 格子的类型（**这是"工具怎么知道小明是变量、泳装是枚举"的答案**）
-SLOT_KINDS = ('keyword', 'variable', 'choice', 'optional')
+#:
+#: ⚠ 2026-11-07 扩了五种（用户："不管它是代码还是别的什么东西"）：
+#:   · `number`     —— 数字（`zorder 5`）；
+#:   · `expr`       —— 一段表达式（`Dissolve(0.1)`，可含空格括号）；
+#:   · `transition` —— 同上，但预览会按它演（见 `app.stage`）；
+#:   · `code` / `multiline` —— **一段代码**（卡片上给带行号的框，写回折成一行）。
+#:
+#: 它们**都算"值格"**：吃词的方式与 `variable` 一样（见 `_moves`），
+#: 区别只在界面画什么控件。加进这个元组之前，不认识的 kind 会被
+#: **静默当成固定关键字**（`kind: "code"` → 声明里凭空多出一个叫 `code` 的固定词），
+#: 那一格就再也不出现了。
+SLOT_KINDS = ('keyword', 'variable', 'choice', 'optional',
+              'number', 'expr', 'transition', 'code', 'multiline')
+
+#: 旧写法 → 规范格类型。
+#:
+#: `word` / `words` / `text` 这三样在旧清单、插件和上一版字段表里都出现过。
+#: 以前它们**不在** `SLOT_KINDS` 里，于是走下面 `parse_pattern` 的"猜"分支：
+#: `kind: "words"` 会凭空多出一个叫 `words` 的**固定关键字**，那一格再也不
+#: 出现（2026-11-07 探针实测：整条扩展点直接消失）。现在统一在这里归一。
+#:
+#: ⚠ `words` 还额外意味着"这一格可以吃多个词"（见 `MULTI_ALIASES`）——
+#:   只把名字改成 `variable` 会丢掉"多个"这半句话。
+SLOT_ALIASES = {'word': 'variable', 'words': 'variable', 'text': 'variable'}
+
+#: 这些别名**还额外**意味着"这一格可以吃多个词"
+MULTI_ALIASES = frozenset({'words'})
 
 #: 给界面/文档看的中文名（**用词说人话**：不出现 schema/JST 这类实现者词汇）
 KIND_LABELS = {
@@ -97,6 +123,11 @@ KIND_LABELS = {
     'variable': '任意变量',
     'choice': '从这些里选',
     'optional': '可选的固定段',
+    'number': '数字',
+    'expr': '一段表达式',
+    'transition': '转场表达式',
+    'code': '一段代码',
+    'multiline': '多行文本',
 }
 
 
@@ -501,6 +532,12 @@ def parse_pattern(raw) -> list:
         else:
             kind = str(item or '').strip()
             slot['_required_set'] = False     # 旧形状（一个字符串）从没说过
+        # ⚠ 别名先归一，再判断认不认识（2026-11-07）：
+        #   不先归一的话，下面那段"猜"会把 `words` 当成一个**固定关键字**——
+        #   声明里凭空多出一个叫 words 的固定词，那一格永远对不上。
+        if kind in SLOT_ALIASES:
+            slot['multi'] = bool(slot.get('multi')) or kind in MULTI_ALIASES
+            kind = SLOT_ALIASES[kind]
         if kind not in SLOT_KINDS:
             # 兼容旧形状：`foo=`（带等号的）猜成 variable，纯词猜成 keyword
             if kind.endswith('='):
@@ -513,7 +550,8 @@ def parse_pattern(raw) -> list:
         slot['kind'] = kind
         if kind in ('keyword', 'optional') and not slot['text']:
             slot['problems'].append('固定段得写清是哪个字（不然这一格永远对不上）')
-        if kind in ('variable', 'choice', 'optional') and not slot['column']:
+        if kind in ('variable', 'choice', 'optional', 'number', 'expr',
+                    'transition', 'code', 'multiline') and not slot['column']:
             slot['problems'].append('这一格要有个列名（表格里显示什么）')
         if kind == 'choice' and slot['limit'] \
                 and not (slot['options'] or slot['group']):
@@ -699,6 +737,10 @@ class _SpanSolver:
         self.max_lens: list = []
         self.own_sets: list = []
         self.stop_sets: list = []
+        #: 哪些格子是**代码 / 表达式**（没给候选 → 内容本来就不在候选表里）。
+        #: 它们吃词的计价走"自由文本"（`_tok_cost(..., free=True)`）：
+        #: "不认识"这一档降到 0，但"抢别人写明的候选"照旧贵（8）。
+        self.free_flags: list = []
         for si, slot in enumerate(slots):
             allowed = {str(o) for o in _allowed_of(slot, groups) if str(o)}
             self.allowed_sets.append(allowed)
@@ -715,6 +757,12 @@ class _SpanSolver:
             self.stop_sets.append(
                 {str(s.get('text') or '').strip() for s in slots[si + 1:]
                  if str(s.get('kind') or '') in ('keyword', 'optional')} - {''})
+            #: `code` / `multiline` / `expr` / `transition` 且**没有候选**
+            #: → 自由文本（见 `pattern_cost._tok_cost` 的 `free` 那段）。
+            self.free_flags.append(
+                not allowed
+                and str(slot.get('kind') or '') in ('code', 'multiline',
+                                                    'expr', 'transition'))
         #: `(第几格, 第几个词)` → `(代价, 下一步吃到第几个词, 这一格占的区间)`
         #:
         #: ⚠ 这里**只存回溯指针，不存 spans 副本**：以前每个候选分支都 `dict(...)`
@@ -854,6 +902,7 @@ class _SpanSolver:
         multi = bool(slot.get('multi'))
         limited = bool(slot.get('limit')) and str(
             slot.get('kind') or 'variable') == 'choice'
+        free = self.free_flags[si]
 
         # ── 取值格：任意变量 / 从这些里选 / 可选的固定段之外的吃词逻辑 ──
         #
@@ -882,7 +931,8 @@ class _SpanSolver:
         for start, skipped in starts:
             if start >= m:
                 continue             # 话说到头了 → 交给"这一格空着"
-            one = _tok_cost(tokens[start], si, allowed, owners, limited, dead)
+            one = _tok_cost(tokens[start], si, allowed, owners, limited, dead,
+                            free=free)
             if one is None:
                 continue             # 限死的格子：这个位置吃不动
             # ① 只吃这一个词（自由文本 / 单个候选 / 引号串）
@@ -909,7 +959,8 @@ class _SpanSolver:
                         break        # 后面那一格的固定字，绝不吃
                     if own and tok not in own:
                         break        # 不是自己人 → 到这儿为止（不焊接）
-                    c = _tok_cost(tok, si, allowed, owners, limited, dead)
+                    c = _tok_cost(tok, si, allowed, owners, limited, dead,
+                                  free=free)
                     if c is None:
                         break        # 限死的格子吃到候选外 → 到此为止
                     cost += c

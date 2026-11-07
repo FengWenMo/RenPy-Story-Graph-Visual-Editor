@@ -1,0 +1,20 @@
+{
+  "schema": "storygraph.batch/1",
+  "rules": [
+    {
+      "id": "retime",
+      "when": {
+        "show": "sprite",
+        "code_contains": "renpy.transition(Dissolve(0.1"
+      },
+      "replace": {
+        "scope": "beat",
+        "match": {
+          "mode": "contains",
+          "pattern": "renpy.transition(Dissolve(0.1"
+        },
+        "text": "$ renpy.transition(Dissolve(0.2), layer=\"master\")"
+      }
+    }
+  ]
+}

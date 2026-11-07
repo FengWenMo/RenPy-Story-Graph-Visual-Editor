@@ -173,7 +173,8 @@ def _owners_of(slots, groups) -> dict:
     return owners
 
 
-def _tok_cost(tok, si: int, allowed, owners, limited: bool, dead=()):
+def _tok_cost(tok, si: int, allowed, owners, limited: bool, dead=(),
+              free: bool = False):
     """
     一个词单独交给第 `si` 格，代价多少；`None` = **这一格不能这么吃**。
 
@@ -215,6 +216,16 @@ def _tok_cost(tok, si: int, allowed, owners, limited: bool, dead=()):
     foreign = bool(owners.get(tok)) and bool(owners[tok] - {si} - set(dead))
     if not allowed:
         #: 这一格**随便写**：谁的词都能进来，只是"占了别人写明的候选"贵一点
+        if free:
+            #: `free` = 这一格是**代码 / 表达式**（`code` / `multiline` /
+            #: `expr` / `transition`，而且没给候选）：它的内容本来就不在候选
+            #: 表里，`Dissolve(0.1, 0.2)` 这种词被判成"不认识"再正常不过 ——
+            #: 计 2 点的后果是**晾着更便宜**（3 > 2+2），于是多值格永远不肯
+            #: 把它焊成一整段，卡片只读到 `Dissolve(0.1,`、剩下两个词报
+            #: "没人认领"（用户看到的是"我明明写对了，工具说切不上"）。
+            #: 只把"不认识"这一档降到 0；**抢别人写明的候选仍然贵**（8），
+            #: 所以代码格不会把后面那一格的表情词吃掉。
+            return COST_BORROW if foreign else COST_OWN
         return COST_BORROW if foreign else COST_UNKNOWN
     if foreign:
         return COST_STOLEN            # 封闭枚举去抢别人写明的候选：几乎总是错的

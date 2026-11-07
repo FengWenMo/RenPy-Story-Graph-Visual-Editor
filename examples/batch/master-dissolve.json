@@ -1,0 +1,17 @@
+{
+  "schema": "storygraph.batch/1",
+  "rules": [
+    {
+      "id": "master-dissolve",
+      "when": {
+        "show": "sprite",
+        "transition": "none",
+        "code_not_contains": "renpy.transition"
+      },
+      "insert": {
+        "placement": "after_last_show",
+        "text": "$ renpy.transition(Dissolve(0.1), layer=\"master\")"
+      }
+    }
+  ]
+}

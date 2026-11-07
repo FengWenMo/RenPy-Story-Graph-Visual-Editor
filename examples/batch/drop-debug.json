@@ -1,0 +1,19 @@
+{
+  "schema": "storygraph.batch/1",
+  "rules": [
+    {
+      "id": "drop-debug",
+      "when": {
+        "code_contains": "debug_print"
+      },
+      "delete": {
+        "scope": "beat",
+        "match": {
+          "mode": "contains",
+          "pattern": "debug_print"
+        },
+        "occurrence": "all"
+      }
+    }
+  ]
+}
