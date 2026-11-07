@@ -55,7 +55,7 @@
 
 **落盘/全局开关**
 - 写盘只有一条路 `core/atomicio.py`（临时文件 → `newline=''` → fsync → 多代备份 → `os.replace`），别用 `wb.save(path)`。三条别改回去：备份名带序号（同 tick 会盖掉上一代）｜`os.replace` 对瞬时 `PermissionError` 重试 6×20ms｜Excel 后缀白名单只认 `.xlsx`。
-- **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写）。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
+- **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七、八轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写；**删文件与备份也在这个出口**：`edit` 返回 3 元组 `(result, changed, delete)`，`backup=True` 备份的是**锁里读到的那份文本**，备份失败 = 整次拒写）。四个删改入口（`remove_statement` / `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`）全都走它，**别再自己读一遍清单**。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
 - 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
 - 读 Excel 只有一条路 `excel/safety.py::open_workbook()`（AST 横扫守卫，直接 `load_workbook` 会被抓）。阈值：拒 256MB / 解开 512MB / 单条目 256MB / 2 万条目 / 声明 800 万格。
 - **表读不出来时不许重建**：`snapshot_user_content` 对 `UnsafeWorkbook`/`PermissionError` **抛**，只有坏文件才 `None`。
@@ -144,7 +144,15 @@
   卡片参数格。判据 4 个新文件 40 条，变异 5/5 抓住，全量 **10125 passed**。
   ⚠ `field` 扩展点**加新列**仍没做 —— 卡在"这一列导出成什么"（文档 §16.6）。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底｜`declare_attr_groups`/`remove_statement` 的读还没进锁｜`field` 加新列的导出口径未定。
+- **扩展平台 v8（2026-11-07 第八轮）**：清单的**删**与**备份**也进锁。
+  `_edit_manifest` 多了 `delete` 出口（`edit` 返回 3 元组）与 `backup=`
+  （备份**锁里读到的那份文本**，失败即拒写）；`remove_statement` /
+  `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`
+  四条路的"读→判断→备份→删/写"全在锁里，`_write_manifest_after_removal` 删掉。
+  对外返回键不变、界面未改。判据 `tests/test_manifest_locking.py` 7 条
+  （含三条真并发），变异 4/4 抓住，全量 **10132 passed**。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底｜`field` 加新列的导出口径未定｜导入 + 保存后没有 undo（退路是 `.bak`）。
 
 ## 六、协作 / 发布
 
