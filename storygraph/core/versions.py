@@ -127,6 +127,20 @@ def stamp_text(written: float) -> str:
         return '?'
 
 
+def human_size(size) -> str:
+    """字节数 → 人看的大小（界面上说"占多大"，别让人自己算）。"""
+    try:
+        n = max(0, int(size))
+    except (TypeError, ValueError):
+        return '?'
+    if n < 1024:
+        return f'{n} B'
+    kb = n / 1024
+    if kb < 1024:
+        return f'{kb:.0f} KB'
+    return f'{kb / 1024:.1f} MB'
+
+
 def generations_hint() -> str:
     """一句人话：工具最多留几代（界面提示与文档共用这一句）。"""
     return f'工具每次写盘前自动留一份备份，最多留 {KEEP_BACKUPS} 代'
@@ -241,5 +255,5 @@ CORE_STORE = Store(backups_of, restore)
 
 
 __all__ = ['KIND_FIXED', 'KIND_STAMPED', 'UNCHECKED', 'CORE_STORE', 'Store',
-           'Version', 'backups_of', 'generations_hint', 'restore',
-           'stamp_text']
+           'Version', 'backups_of', 'generations_hint', 'human_size',
+           'restore', 'stamp_text']

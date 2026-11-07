@@ -171,12 +171,61 @@ def _backup_candidates(target: Path, where=None) -> list:
     return ([fixed] if fixed.exists() else []) + stamped
 
 
-def backup_file(path, *, keep: int = KEEP_BACKUPS, where=None) -> Path:
+def _age_seconds(path: Path, now: float):
+    """这一代离现在多少秒（读不到 stat → `None`，调用方当"不参与台阶"）。"""
+    try:
+        return max(0.0, now - path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def _kept_backups(olds, *, fixed, keep: int, keep_ages=()) -> set:
+    """
+    从"新的在前"的候选里挑出**该留的**那一批（其余的会被删）。
+
+    两种规矩叠在一起：
+
+      · 最新的 `keep` 份（含固定名那份）永远留；
+      · `keep_ages` 是**时间台阶**（秒）：每个台阶留"最新的、已经比它更旧"
+        的那一份。
+
+    为什么需要台阶（2026-11-08 第十二轮，探针 `.pip-tmp/probe_r12_window.py`）：
+    脚本是高频改的东西 —— 连改 30 次，5 代备份的时间跨度只有 **1.1 秒**；
+    跨几天各改十次之后，"昨天关工具之前那一版"早就被裁掉了。而用户真正的
+    诉求常常是"回到昨天"，不是"回到十分钟前"。
+
+    ⚠ 台阶按 **年龄** 算，不按"日历上的哪一天"：用户昨天关工具之前那一版，
+    是在**今天第一次保存时**才被写进备份的（那时它才被换掉），mtime 是今天。
+    按日历分组会把"昨天那一版"算成今天的，一裁就没 —— 第一版就是这么写错的。
+    """
+    kept, taken = set(), 0
+    for cand in olds:                       # 新的在前
+        if cand == fixed or taken < keep:   # 固定名那份 = 原件，永远留
+            kept.add(cand)
+            taken += 1
+    if keep_ages:
+        now = time.time()
+        # ⚠ 台阶只在**带时间戳的**那几代里挑：固定名那份永远留着，而且它
+        # 一定是最老的一代 —— 让它参与挑台阶，每个台阶都会落在它身上，
+        # 等于台阶全废（第一版就是这么写错的：跨天的版本一个都没留下）。
+        stamps = [c for c in olds if c != fixed]
+        for step in sorted(float(s) for s in keep_ages):
+            for cand in stamps:             # 新的在前 → 第一个够老的正好是台阶上最新的
+                age = _age_seconds(cand, now)
+                if age is not None and age >= step:
+                    kept.add(cand)
+                    break
+    return kept
+
+
+def backup_file(path, *, keep: int = KEEP_BACKUPS, where=None,
+                keep_ages=()) -> Path:
     """
     复制一份 `<名>.bak`（多代）；目标不存在 → 返回 `None`。
 
     `where` 给了就落到那个目录（**先建目录**），不给就紧挨着目标 ——
     两种落点共用同一套命名与裁剪规则，见 `_backup_base`。
+    `keep_ages` 见 `_kept_backups`（脚本的历史版本用时间台阶跨天留档）。
 
     ⚠ **失败直接抛 `OSError`，不吞**：调用方必须据此中止整次写入。
     磁盘满 / 权限不足 / 杀毒软件占着文件时，用户以为有 `.bak`、其实没有 ——
@@ -204,21 +253,25 @@ def backup_file(path, *, keep: int = KEEP_BACKUPS, where=None) -> Path:
             tmp.unlink()
         except OSError as exc:          # noqa: BLE001
             swallow('core.atomicio.cleanup_tmp', exc)
-    _prune_backups(target, keep=keep, where=where)
+    _prune_backups(target, keep=keep, where=where, keep_ages=keep_ages)
     return bak
 
 
 def _prune_backups(target: Path, *, keep: int = KEEP_BACKUPS,
-                   where=None) -> None:
+                   where=None, keep_ages=()) -> None:
     """
-    只留最近 `keep` 份备份。**清理失败不算写入失败**（最坏是多个备份文件）。
+    只留该留的那些。**清理失败不算写入失败**（最坏是多个备份文件）。
 
     固定名那份永远留着：它可能是用户手写的原件，也是"按 `.bak` 找备份"
-    的人唯一认得的名字。
+    的人唯一认得的名字。该留几份见 `_kept_backups`。
     """
     try:
         olds = _backup_candidates(target, where)
-        for extra in olds[keep:]:
+        keepers = _kept_backups(olds, fixed=_backup_base(target, where),
+                                keep=keep, keep_ages=keep_ages)
+        for extra in olds:
+            if extra in keepers:
+                continue
             try:
                 extra.unlink()
             except OSError as exc:      # noqa: BLE001
@@ -259,12 +312,13 @@ def write_bytes_atomic(path, data: bytes, *, backup: bool = False,
 
 def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
                       backup: bool = False, keep: int = KEEP_BACKUPS,
-                      backup_dir=None) -> Path:
+                      backup_dir=None, keep_ages=()) -> Path:
     """
     把文本**逐字节**写进 `path`（`newline=''`，不翻译换行）。
 
     `backup_dir`：这一代备份落到**别的目录**（默认紧挨着目标）。脚本的
     原地小改走这条 —— 见 `story/version_store.py` 里的理由。
+    `keep_ages`：时间台阶（见 `_kept_backups`），只有脚本的历史版本用。
 
     细节（为什么不能直接 `Path.write_text`）见模块文档与
     `story.paths.write_text_atomic` 的历史注释。
@@ -278,7 +332,8 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
             fh.flush()
             os.fsync(fh.fileno())
         if backup:
-            backup_file(target, keep=keep, where=backup_dir)
+            backup_file(target, keep=keep, where=backup_dir,
+                        keep_ages=keep_ages)
         _replace_with_retry(tmp, target)
     except BaseException:                   # noqa: BLE001 - 清理后原样抛出
         try:

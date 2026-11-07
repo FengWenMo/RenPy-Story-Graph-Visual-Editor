@@ -61,6 +61,20 @@ IGNORE_TEXT = '*\n'
 #: `.xlsx` 是 `save_workbook_atomic` 自己的事。
 SCRIPT_SUFFIX = '.rpy'
 
+#: 除了"最近几代"，还按**年龄**留档：每个台阶留"最新的、已经比它更旧"的那一份。
+#:
+#: 为什么（2026-11-08 第十二轮，探针 `.pip-tmp/probe_r12_window.py`）：
+#: 脚本是高频改的东西 —— 连改 30 次之后 5 代备份的时间跨度只有 **1.2 秒**；
+#: 跨几天各改十次之后，"昨天关工具之前那一版"已经不在了。而用户真正的
+#: 诉求往往是"回到昨天"，不是"回到十分钟前"。纯按次数裁剪对剧本不够用。
+#:
+#: ⚠ 为什么按**年龄**而不是"日历上的哪一天"：昨天关工具之前那一版，是在
+#: **今天第一次保存时**才被写进备份的（那时它才被换掉），mtime 是今天。
+#: 按日历分组会把"昨天那一版"算成今天的，一裁就没 —— 第一版就是这么写错的。
+#:
+#: 6 个台阶 → 每份脚本最多多 6 个备份文件（每个几十 KB），95 个脚本约 25 MB。
+KEEP_AGES = (3600, 6 * 3600, 86400, 3 * 86400, 7 * 86400, 14 * 86400)
+
 
 def _root_of(path: Path, project_root=None):
     """项目根（含 `game/` 的那一级）；推不出来 → `None`。"""
@@ -164,7 +178,8 @@ def snapshot(path, *, project_root=None, keep: int = atomicio.KEEP_BACKUPS,
     if _already_stored(src, where):
         return None
     ensure_ignored(where)
-    return atomicio.backup_file(src, keep=keep, where=where)
+    return atomicio.backup_file(src, keep=keep, where=where,
+                                keep_ages=KEEP_AGES)
 
 
 def versions_of(path, *, project_root=None, where=None) -> list:
@@ -199,6 +214,125 @@ def summarize_script(text) -> dict:
             'note': f'{lines} 行 · {len(text)} 字'}
 
 
+def retention_hint() -> str:
+    """一句人话：脚本的旧版本到底留多少（界面与文档共用这一句）。"""
+    steps = '、'.join(_age_label(s) for s in KEEP_AGES)
+    return (f'最近 {atomicio.KEEP_BACKUPS} 次改动，'
+            f'外加 {steps} 各留一版')
+
+
+def _age_label(seconds: float) -> str:
+    """台阶 → 人话（`3600 → 1 小时前`）。"""
+    s = float(seconds)
+    if s < 3600:
+        return f'{int(s / 60)} 分钟前'
+    if s < 86400:
+        return f'{s / 3600:g} 小时前'
+    return f'{s / 86400:g} 天前'
+
+
+def history_root(project_root) -> Path:
+    """这个项目的历史版本目录（**不管它在不在**）。"""
+    return Path(project_root) / HISTORY_ROOT / VERSIONS_DIR
+
+
+def _history_files(project_root) -> list:
+    """
+    历史目录里的**版本文件**（不含 `.gitignore`、不含符号链接、不含目录）。
+
+    符号链接要跳过：删它没事，但如果它指向项目外面，`is_file()` 会跟进去 ——
+    那就会把"清历史版本"变成"删别处的东西"。
+    """
+    base = history_root(project_root)
+    try:
+        if not base.is_dir():
+            return []
+    except OSError:
+        return []
+    out = []
+    for path in sorted(base.rglob('*')):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+        except OSError:
+            continue
+        if path.name == '.gitignore':
+            continue
+        out.append(path)
+    return out
+
+
+def project_history(project_root) -> dict:
+    """
+    这个项目的历史版本**占了多少** → `{dir, files, bytes, scripts, days,
+    oldest, newest}`。
+
+    界面上要能说清"占多大、几个脚本、最早到哪天" —— 说不清，用户就只能
+    自己去翻一个隐藏目录（而"隐藏"正是这套东西被设计成不打扰人的代价）。
+    """
+    base = history_root(project_root)
+    files = _history_files(project_root)
+    total, oldest, newest, scripts, days = 0, None, None, set(), set()
+    for path in files:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        total += st.st_size
+        oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+        newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
+        scripts.add((str(path.parent), path.name.split('.bak')[0]))
+        days.add(V.stamp_text(st.st_mtime)[:10])
+    return {'dir': str(base), 'files': len(files), 'bytes': total,
+            'scripts': len(scripts), 'days': len(days),
+            'oldest': oldest, 'newest': newest}
+
+
+def clear_history(project_root) -> dict:
+    """
+    把这个项目的旧版本**全删掉** → `{removed, bytes, failed, dir}`。
+
+    删之前要做的事（都是"不静默"那一条的延伸）：
+      · 只删 `history_root()` 里认得的版本文件（符号链接、目录、`.gitignore` 都不动）；
+      · 删完把空目录收掉，但 `.storygraph/` 本身留着（`layout.json` 在里面）；
+      · 单个文件删不掉（被占用 / 只读）→ 记进 `failed`，不当中断。
+
+    ⚠ 这一步是**单向**的：那些版本没有别处再存一份。界面必须先问过。
+    """
+    base = history_root(project_root)
+    removed, total, failed = 0, 0, []
+    for path in _history_files(project_root):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            path.unlink()
+        except OSError as e:
+            failed.append((str(path), e))
+            continue
+        removed += 1
+        total += size
+    # 空目录收掉（从最深的开始），`history_root` 本身也收，但 `.storygraph` 留着
+    for folder in sorted((p for p in base.rglob('*') if p.is_dir()),
+                         key=lambda p: len(p.parts), reverse=True):
+        _rmdir_if_empty(folder)
+    _rmdir_if_empty(base)
+    return {'removed': removed, 'bytes': total, 'failed': failed,
+            'dir': str(base)}
+
+
+def _rmdir_if_empty(folder: Path) -> bool:
+    """空的就删掉这个目录；不空 / 删不掉都返回 False（**不是错误**）。"""
+    try:
+        if any(folder.iterdir()):
+            return False
+        folder.rmdir()
+        return True
+    except OSError:
+        return False
+
+
 def restore_version(path, version, *, expect_current=V.UNCHECKED,
                     project_root=None, lock_timeout=None) -> dict:
     """
@@ -224,6 +358,7 @@ def restore_version(path, version, *, expect_current=V.UNCHECKED,
 SCRIPT_STORE = V.Store(versions_of, restore_version)
 
 
-__all__ = ['HISTORY_ROOT', 'IGNORE_TEXT', 'SCRIPT_STORE', 'SCRIPT_SUFFIX',
-           'VERSIONS_DIR', 'ensure_ignored', 'history_dir', 'restore_version',
-           'snapshot', 'summarize_script', 'versions_of']
+__all__ = ['HISTORY_ROOT', 'IGNORE_TEXT', 'KEEP_AGES', 'SCRIPT_STORE',
+           'SCRIPT_SUFFIX', 'VERSIONS_DIR', 'clear_history', 'ensure_ignored',
+           'history_dir', 'history_root', 'project_history', 'restore_version',
+           'retention_hint', 'snapshot', 'summarize_script', 'versions_of']
