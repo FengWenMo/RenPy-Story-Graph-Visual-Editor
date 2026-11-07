@@ -45,6 +45,7 @@ import os
 import time
 import uuid
 from datetime import datetime
+from glob import escape
 from itertools import count
 from pathlib import Path
 
@@ -125,7 +126,21 @@ def _replace_with_retry(src, dst, *, attempts: int = None,
     raise last
 
 
-def _unique_backup_path(target: Path) -> Path:
+def _backup_base(target: Path, where=None) -> Path:
+    """
+    这一代备份的**固定名**该落在哪儿。
+
+    `where=None` → 紧挨着目标（`<名>.bak`，老读者按这个名字找）；给了
+    `where` → 落到那个目录里的同名备份（2026-11-08，见 `story/version_store.py`：
+    脚本原地小改频率极高，**不能**往 `game/` 里一代代堆 `.rpy.bak`，
+    但旧版本又必须有 —— 于是挪到项目自己的 `.storygraph/versions/` 里）。
+    """
+    if where is None:
+        return target.with_name(target.name + '.bak')
+    return Path(where) / (target.name + '.bak')
+
+
+def _unique_backup_path(target: Path, where=None) -> Path:
     """
     一个**还没被占用**的备份名：固定名 → 带时间戳 + 本进程序号。
 
@@ -138,27 +153,30 @@ def _unique_backup_path(target: Path) -> Path:
     （`next()` 是原子的）；跨进程撞名还要"同一微秒 + 同一序号"，而且下面
     还有 `exists()` 兜一层。
     """
-    bak = target.with_name(target.name + '.bak')
+    bak = _backup_base(target, where)
     if not bak.exists():
         return bak
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     while True:
         seq = next(_BACKUP_SEQ)
-        cand = target.with_name(f'{target.name}.bak-{stamp}-{seq:04d}')
+        cand = bak.with_name(f'{bak.name}-{stamp}-{seq:04d}')
         if not cand.exists():
             return cand
 
 
-def _backup_candidates(target: Path) -> list:
-    """已有的备份，**新的在前**（固定名那份算最老的一份）。"""
-    fixed = target.with_name(target.name + '.bak')
-    stamped = sorted(target.parent.glob(f'{target.name}.bak-*'), reverse=True)
+def _backup_candidates(target: Path, where=None) -> list:
+    """已有的备份，**新的在前**（固定名那份排第一 = 永远不会被裁掉）。"""
+    fixed = _backup_base(target, where)
+    stamped = sorted(fixed.parent.glob(escape(fixed.name) + '-*'), reverse=True)
     return ([fixed] if fixed.exists() else []) + stamped
 
 
-def backup_file(path, *, keep: int = KEEP_BACKUPS) -> Path:
+def backup_file(path, *, keep: int = KEEP_BACKUPS, where=None) -> Path:
     """
     复制一份 `<名>.bak`（多代）；目标不存在 → 返回 `None`。
+
+    `where` 给了就落到那个目录（**先建目录**），不给就紧挨着目标 ——
+    两种落点共用同一套命名与裁剪规则，见 `_backup_base`。
 
     ⚠ **失败直接抛 `OSError`，不吞**：调用方必须据此中止整次写入。
     磁盘满 / 权限不足 / 杀毒软件占着文件时，用户以为有 `.bak`、其实没有 ——
@@ -167,7 +185,9 @@ def backup_file(path, *, keep: int = KEEP_BACKUPS) -> Path:
     target = Path(path)
     if not target.is_file():
         return None
-    bak = _unique_backup_path(target)
+    if where is not None:
+        Path(where).mkdir(parents=True, exist_ok=True)
+    bak = _unique_backup_path(target, where)
     tmp = _tmp_beside(bak, 'bak')
     try:
         with open(target, 'rb') as src, open(tmp, 'wb') as dst:
@@ -184,11 +204,12 @@ def backup_file(path, *, keep: int = KEEP_BACKUPS) -> Path:
             tmp.unlink()
         except OSError as exc:          # noqa: BLE001
             swallow('core.atomicio.cleanup_tmp', exc)
-    _prune_backups(target, keep=keep)
+    _prune_backups(target, keep=keep, where=where)
     return bak
 
 
-def _prune_backups(target: Path, *, keep: int = KEEP_BACKUPS) -> None:
+def _prune_backups(target: Path, *, keep: int = KEEP_BACKUPS,
+                   where=None) -> None:
     """
     只留最近 `keep` 份备份。**清理失败不算写入失败**（最坏是多个备份文件）。
 
@@ -196,7 +217,7 @@ def _prune_backups(target: Path, *, keep: int = KEEP_BACKUPS) -> None:
     的人唯一认得的名字。
     """
     try:
-        olds = _backup_candidates(target)
+        olds = _backup_candidates(target, where)
         for extra in olds[keep:]:
             try:
                 extra.unlink()
@@ -207,7 +228,7 @@ def _prune_backups(target: Path, *, keep: int = KEEP_BACKUPS) -> None:
 
 
 def write_bytes_atomic(path, data: bytes, *, backup: bool = False,
-                       keep: int = KEEP_BACKUPS) -> Path:
+                       keep: int = KEEP_BACKUPS, backup_dir=None) -> Path:
     """
     **逐字节**写 `data` 进 `path`：原子替换 + 可选备份（多代）。
 
@@ -225,7 +246,7 @@ def write_bytes_atomic(path, data: bytes, *, backup: bool = False,
         # 备份在 `os.replace` **之前**：备份失败 → 异常往上抛 → 目标文件
         # 一个字节没动。反过来（先替换再备份）就等于"备份失败了也覆盖了"。
         if backup:
-            backup_file(target, keep=keep)
+            backup_file(target, keep=keep, where=backup_dir)
         _replace_with_retry(tmp, target)
     except BaseException:                   # noqa: BLE001 - 清理后原样抛出
         try:
@@ -237,9 +258,13 @@ def write_bytes_atomic(path, data: bytes, *, backup: bool = False,
 
 
 def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
-                      backup: bool = False, keep: int = KEEP_BACKUPS) -> Path:
+                      backup: bool = False, keep: int = KEEP_BACKUPS,
+                      backup_dir=None) -> Path:
     """
     把文本**逐字节**写进 `path`（`newline=''`，不翻译换行）。
+
+    `backup_dir`：这一代备份落到**别的目录**（默认紧挨着目标）。脚本的
+    原地小改走这条 —— 见 `story/version_store.py` 里的理由。
 
     细节（为什么不能直接 `Path.write_text`）见模块文档与
     `story.paths.write_text_atomic` 的历史注释。
@@ -253,7 +278,7 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
             fh.flush()
             os.fsync(fh.fileno())
         if backup:
-            backup_file(target, keep=keep)
+            backup_file(target, keep=keep, where=backup_dir)
         _replace_with_retry(tmp, target)
     except BaseException:                   # noqa: BLE001 - 清理后原样抛出
         try:

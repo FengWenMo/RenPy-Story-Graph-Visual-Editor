@@ -12,10 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from storygraph.core import atomicio
+from storygraph.story.roots import guess_project_root as _roots_guess
 
 
 def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
-                      backup: bool = False) -> Path:
+                      backup: bool = False, history: bool = True) -> Path:
     """
     把文本**逐字节**写进 `path`：保留换行、原子替换、可选备份。
 
@@ -45,7 +46,19 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
     `UnicodeEncodeError`（`ValueError` 子类）和 `KeyboardInterrupt` 都不会
     被 `except OSError` 接住，从前会留下 `.xxx.tmp-<pid>`（写进 `game/`
     就是一个 Ren'Py 不认的垃圾文件）。
+
+    `history=True`（默认）：**项目 `game/` 下的 `.rpy`，写之前先把现在这份
+    存进 `<项目>/.storygraph/versions/…`**（见 `story.version_store`）。
+    这是 2026-11-08 第十一轮补的那半边：整份导出一直有 `.rpy.bak`，而走这个
+    函数的原地小改（改 `@at`、改源边、删一行源、换编排层…）**一个备份都
+    不留** —— 探针实测，改完目录里什么都不多。`backup=True` 的调用方
+    自带"文件旁边留一代"，就不再进历史目录（同一份内容不存两处）。
     """
+    if not backup and history:
+        # 备份失败 → 抛 OSError → 下面那一句不会执行（目标是游戏脚本，
+        # 宁可这次改不成，也不要"以为留了旧版本、其实没有"）。
+        from storygraph.story.version_store import snapshot
+        snapshot(path, incoming=text)
     return atomicio.write_text_atomic(path, text, encoding=encoding,
                                       backup=backup)
 
@@ -80,40 +93,14 @@ def project_root_of(path):
     """
     从一个**产物路径**反推项目根（含 `game/` 的那一级）—— 公开入口。
 
-    与 `_guess_project_root` 是同一份实现：那个名字是**旧调用点的私有约定**，
-    但跨包（`pipeline.engine_lint` 要做"项目声明过的自定义语句"豁免）
-    也需要它 —— 于是给一个**不带下划线**的公开名，而不是让别的包去取私有名
-    （`tests/test_package_layering.py` 就是拦这个的）。
+    ⚠ 2026-11-08：实现已经**搬进 `story/roots.py`**（`version_store` 也要它，
+    留在这里会和 `watch` 那条"写盘前存旧版本"的路互相 import 成环）。
+    这里保留原名，是因为调用点（`pipeline.compile` / `pipeline.engine_lint`）
+    与测试都用它 —— 换名只会制造一次无谓的搬家风险。
     """
     return _guess_project_root(path)
 
 
 def _guess_project_root(out_path=None):
-    """
-    从一个**产物路径**反推项目根（含 `game/` 的那一级）。
-
-    两处用途都要求它真的推得出来：
-      · 缩略图定位（`export_beats_to_excel` 里给资源图库用）；
-      · **生成门禁的 label 重名检查**（`write_beats_to_rpy` → `occupied_labels`）。
-
-    2026-09-28 修：这个函数以前**恒返回 None**，于是 `occupied_labels(...)`
-    永远拿到空集 —— `LABEL_COLLISION` 这条 block 级门禁**形同虚设**。
-    它要拦的是"生成的 label 与项目其他 .rpy 重名"：Ren'Py 把 game/ 下
-    所有 .rpy 当同一个脚本，重名 label 会让游戏直接起不来（真实事故形态）。
-
-    推不出来（临时目录、产物不在任何含 game/ 的项目里）就返回 None：
-    缩略图退回"多基准尝试"，门禁退回"不检查"——两者都安全，宁可少报。
-    """
-    if not out_path:
-        return None
-    try:
-        path = Path(out_path).resolve()
-    except (OSError, TypeError):
-        return None
-    for parent in path.parents:
-        try:
-            if (parent / 'game').is_dir():
-                return parent
-        except OSError:
-            continue
-    return None
+    """旧私有名的**转发**（实现见 `story/roots.py::guess_project_root`）。"""
+    return _roots_guess(out_path)
