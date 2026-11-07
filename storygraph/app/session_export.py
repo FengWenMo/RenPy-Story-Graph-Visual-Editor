@@ -634,6 +634,22 @@ class ExportMixin:
             swallow('session_export._declared_stmt_heads', e)
             return set()
 
+    def reload_script_from_disk(self) -> int:
+        """
+        把**当前章节**按磁盘重读一遍（返回拍数）。
+
+        两个调用方，同一件事：
+          · 原地写回之后（`_reload_after_inplace_write`）—— 磁盘上那份已经
+            是新内容，内存里的行号还是旧的；
+          · 放回旧版本之后（`window_recover.show_script_versions`）—— 换了一份
+            内容，拍数、行号、脏标记全要跟着变。
+
+        **失败往上抛**（"没重载成功"必须说出口）；要不要吞由调用方决定。
+        """
+        if not self.script_path:
+            raise ValueError('还没有打开章节，没得重读')
+        return self.load(self.script_path)
+
     def _reload_after_inplace_write(self) -> None:
         """
         原地写回之后把内存重新对齐到刚写出的那份文件（见调用点的说明）。
@@ -643,7 +659,7 @@ class ExportMixin:
         """
         from storygraph.core.safeguard import swallow
         try:
-            self.load(self.script_path)
+            self.reload_script_from_disk()
         except Exception as e:                  # noqa: BLE001
             swallow('session_export._reload_after_inplace_write', e)
 

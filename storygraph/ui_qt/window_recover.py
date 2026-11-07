@@ -441,3 +441,94 @@ class RecoverMixin:
             return
         menu.addAction('🕘 上次没导出的改动…', self.show_recovery).setStatusTip(
             '崩溃 / 断电之后回到上次编辑的位置：列出自动保存的快照，可恢复或删掉')
+
+    # ------------------------------------------------------------------
+    #  磁盘上的旧版本（脚本 `.rpy`）
+    # ------------------------------------------------------------------
+
+    #: 脚本历史版本窗口顶上那句说明（说清**在哪儿**，人才能自己去翻）
+    #:
+    #: ⚠ 窗口里是 `QLabel`，**不渲染 markdown**（反引号 / `**` 会原样显示）——
+    #: 这里只能写纯文字，路径靠「」圈出来（第十轮在同一个控件上踩过 `**`）。
+    SCRIPT_VERSION_HINT = (
+        '工具每次改动这个脚本之前，都会把当时那份存进项目的 '
+        '「.storygraph/versions」目录（不在 game/ 里：Ren\'Py 不扫它，'
+        '也不会进 git status）。每一行是「被换掉的那一版」—— 挑一行看右边，'
+        '确认了再放回；放回之前那份自动进新一代，放错了还能再放回来。')
+
+    def show_script_versions(self):
+        """
+        菜单「🕘 这个脚本的旧版本…」：翻**当前章节文件**的磁盘世代。
+
+        为什么要有这一条（2026-11-08 第十一轮）：工具改 `.rpy` 一直是
+        原地动刀，而"退回去"只有内存里那套撤销 —— 关窗就没了。探针实测：
+        原地小改那条路从前**一个备份都不留**（整份导出才有 `.rpy.bak`）。
+        现在写盘前会存进项目的历史目录，这个窗口是唯一能把它翻出来的入口。
+
+        打开**不拦人**（看看又不改东西）；真正的闸在
+        `_script_restore_guard`（写之前才问"内存里还有没导出的改动吗"）。
+        """
+        from storygraph.story import version_store as VS
+        from storygraph.ui_qt.dialog_versions import VersionsDialog
+
+        session = getattr(self, '_session', None)
+        path = getattr(session, 'script_path', None) if session is not None else None
+        if not path:
+            self._status('先在左边打开一个章节，再翻它的旧版本。')
+            return 'no-script'
+        dlg = VersionsDialog(
+            self, path,
+            summarize=VS.summarize_script,
+            title=f'历史版本 —— {Path(path).name}',
+            hint=self.SCRIPT_VERSION_HINT,
+            before_restore=self._script_restore_guard,
+            store=VS.SCRIPT_STORE)
+        dlg.restored.connect(self._after_script_restored)
+        dlg.exec()
+        return 'closed'
+
+    def _script_restore_guard(self):
+        """
+        放回脚本之前的闸：**内存里还有没导出的改动 → 不放回**。
+
+        为什么要拦：放回会换掉磁盘上那一份，紧接着 `load_script` 会按新文件
+        重建拍列表 —— 用户手上没导出的改动就**凭空消失**了（没有撤销能救，
+        因为撤销栈也会跟着重置）。这与"绝不静默丢掉用户写的东西"同一条。
+        返回一句人话 = 不放回；返回 `None` = 放。
+        """
+        session = getattr(self, '_session', None)
+        try:
+            dirty = bool(session is not None and session.has_unsaved_edits())
+        except Exception as e:                  # noqa: BLE001 - 算不出来就别放回
+            return f'没法确认现在有没有未导出的改动（{e}），这次没有放回'
+        if dirty:
+            return ('内存里还有**没导出的改动** —— 放回旧版本会把它们盖掉。'
+                    '先点「⤓ 导出 .rpy」存下来，或者按 Ctrl+Z 撤回，再来放回。')
+        return None
+
+    def _after_script_restored(self, res):
+        """
+        放回成功之后：按磁盘重读当前章节 + 如实说一句。
+
+        顺序不能反：`load_script` 末尾会把状态栏写成「已载入 …：N 拍」，
+        先写"已放回"就会被它盖掉（第十轮在对话框里踩过同一个坑）。
+        """
+        if not isinstance(res, dict) or not res.get('ok') \
+                or not res.get('written'):
+            return
+        path = res.get('path')
+        version = Path(str(res.get('version') or '')).name
+        try:
+            self.load_script(path, goto_card=False)
+        except Exception as e:                  # noqa: BLE001
+            # 这里**不** `swallow`：失败原因直接进状态栏（比台账显眼），
+            # 而且技术债棘轮对 `swallow` 调用点只许降 —— 别为了留痕再加一个。
+            self._log(f'[历史版本] 放回 {version} 之后重读失败：{e}')
+            self._status(f'已经放回 {version}，但这一章没重新载入（{e}）——'
+                         f'关掉重开这个章节就好。')
+            return
+        self._log(f'[历史版本] 放回 {version} → {Path(str(path)).name}'
+                  f'（{len(getattr(self._session, "beats", []) or [])} 拍）')
+        self._status(f'已放回 {version}，并按磁盘重读了这一章：'
+                     f'{len(getattr(self._session, "beats", []) or [])} 拍'
+                     f'（放回之前那份也进了历史）')

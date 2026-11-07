@@ -22,6 +22,20 @@ storygraph.ui_qt.dialog_versions
 
 放回成功会发 `restored(res)`，由调用方去重读内存 / 重画树 —— 这个窗口
 **不碰**任何模型，只碰文件。
+
+## 两份文件、两个落点，同一个窗口（2026-11-08 第十一轮）
+
+它最初只服务 `storygraph.ext.json`（世代就在文件旁边）。脚本 `.rpy` 接了
+进来之后多一层：脚本的世代不在 `game/` 里，而在
+`<项目>/.storygraph/versions/…`（见 `story.version_store`，理由在那边）。
+于是这个窗口多了两个注入口：
+
+  · `store` —— **一个**版本库（`core.versions.Store`：怎么列 + 怎么放回）。
+    脚本传 `version_store.SCRIPT_STORE`：列表要多列 `.storygraph/versions/`
+    （与文件旁边老机制留下的 `.rpy.bak` 合成一个列表），放回时那份新备份
+    也进历史目录，绝不凭空往 `game/` 里丢 `.rpy.bak`；
+  · `before_restore` —— 放回**之前**问一句（脚本那条路用它挡"内存里还有
+    没导出的改动"，否则放回会把用户手上的改动悄悄盖掉）。
 """
 from __future__ import annotations
 
@@ -55,19 +69,52 @@ def _hint(text: str) -> QLabel:
     return lab
 
 
+def read_version_text(path):
+    """
+    `(原话, 读不出来那句)` —— 两种失败都要**说得出话**。
+
+    `read_text_exact` 只把"文件不存在"当 `None`，其余往上抛：权限 / 被占用是
+    `OSError`，**不是 UTF-8 是 `UnicodeDecodeError`（`ValueError` 的子类）**。
+    从前这里只 `except OSError` —— 一份 GBK 的旧 `.rpy.bak` 会让槽函数抛异常，
+    而 PySide6 的槽抛异常只打 stderr：界面**一点反应都没有**（"点了没反应"
+    的老毛病，第九轮踩过一次）。
+    """
+    try:
+        return V.read_text_exact(path), ''
+    except UnicodeDecodeError as e:
+        return None, f'不是 UTF-8（{e.reason or e}）—— 只列出来，不放回'
+    except OSError as e:
+        return None, f'读不出来（{e}）'
+
+
 class VersionsDialog(QDialog):
     """一份文件的备份世代：列表 + 预览 + 放回。"""
 
     restored = Signal(dict)
 
     def __init__(self, parent=None, path=None, *, summarize=None,
-                 title: str = ''):
+                 title: str = '', before_restore=None, store=None,
+                 hint: str = ''):
         super().__init__(parent)
         self._path = Path(str(path)) if path else None
         self._summarize = summarize or plain_summary
+        #: 放回**之前**问一句（返回一句人话 = 不许放回，返回 `None` = 放）。
+        #: 脚本那条路用它挡"内存里还有没导出的改动" —— 见 `window_recover`。
+        self._before_restore = before_restore
+        #: **这个窗口只认一个版本库**：怎么列 + 怎么放回都在它里面
+        #: （`core.versions.Store`）。默认是"世代就在文件旁边"那份；
+        #: 脚本传 `story.version_store.SCRIPT_STORE` —— 列表要多列
+        #: `.storygraph/versions/`，放回也要落回那里。
+        #: ⚠ 从前这里拆成 `list_fn` / `restore_fn` 两个参数：调用方只传一个
+        #: 就静默半残（列的是旧目录、写的是新目录），所以合成一个。
+        self._store = store or V.CORE_STORE
+        self._hint_text = hint or (
+            f'{V.generations_hint()}（本工具写的每份文件都是这样）。'
+            '每一行是「保存时被换掉的那一版」—— 挑一行看右边，确认了再放回。')
         #: 打开这一刻文件里的**原话**：放回时的闸（别人改过就不动手）。
         self._current = None
         self._current_ok = True
+        self._current_why = ''
         self._versions: list = []
         self.setWindowTitle(title or (f'历史版本 —— {self._path.name}'
                                       if self._path else '历史版本'))
@@ -83,9 +130,7 @@ class VersionsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(8)
-        root.addWidget(_hint(
-            f'{V.generations_hint()}（本工具写的每份文件都是这样）。'
-            '每一行是「保存时被换掉的那一版」—— 挑一行看右边，确认了再放回。'))
+        root.addWidget(_hint(self._hint_text))
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(['时间', '文件', '内容'])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -124,7 +169,7 @@ class VersionsDialog(QDialog):
 
     def reload(self) -> None:
         """重新读"现在这份"与磁盘上的几代备份（内容变了就重填表）。"""
-        self._versions = V.backups_of(self._path) if self._path else []
+        self._versions = self._store.versions_of(self._path) if self._path else []
         self._read_current()
         self.table.setRowCount(0)
         for ver in self._versions:
@@ -136,19 +181,20 @@ class VersionsDialog(QDialog):
     def _read_current(self) -> None:
         """记下"现在这份"的原话（放回时的闸）。读不出来 → 闸失效并说明。"""
         self._current, self._current_ok = None, True
+        self._current_why = ''
         if not self._path:
             return
-        try:
-            self._current = V.read_text_exact(self._path)
-        except OSError:
-            self._current, self._current_ok = None, False
+        text, why = read_version_text(self._path)
+        if why:
+            self._current, self._current_ok, self._current_why = None, False, why
+            return
+        self._current = text
 
     def _add_row(self, ver: V.Version) -> None:
         """一代备份 → 表里一行（读不出来也照样列出，内容那格写明）。"""
-        try:
-            text = V.read_text_exact(ver.path)
-        except OSError:
-            summary = {'note': '读不出来（权限 / 被占用）'}
+        text, why = read_version_text(ver.path)
+        if why:
+            summary = {'note': why}
         else:
             summary = self._summarize(text)
         row = self.table.rowCount()
@@ -166,8 +212,8 @@ class VersionsDialog(QDialog):
             self.status.setText('没有文件 —— 没得看。')
             return
         if not self._current_ok:
-            self.status.setText(f'{self._path.name} 现在读不出来（权限 / 被占用）——'
-                                '只列历史，不放回。')
+            self.status.setText(f'{self._path.name} 现在{self._current_why or "读不出来"}'
+                                ' —— 只列历史，不放回。')
             return
         now = self._summarize(self._current)
         head = f'现在：{now.get("note") or "?"}'
@@ -196,10 +242,9 @@ class VersionsDialog(QDialog):
         if ver is None:
             self.preview.clear()
             return
-        try:
-            text = V.read_text_exact(ver.path)
-        except OSError as e:
-            self.preview.setPlainText(f'（读不出来：{e}）')
+        text, why = read_version_text(ver.path)
+        if why:
+            self.preview.setPlainText(f'（{why}）')
             return
         self.preview.setPlainText('' if text is None else text)
 
@@ -209,7 +254,17 @@ class VersionsDialog(QDialog):
         if ver is None:
             self.status.setText('先在上面挑一版。')
             return {'ok': False, 'reason': '没有选中任何一版'}
-        res = V.restore(self._path, ver.path, expect_current=self._current)
+        if self._before_restore is not None:
+            # 先问再动手：拦在写盘之前，文件连碰都不碰。
+            try:
+                why = self._before_restore()
+            except Exception as e:              # noqa: BLE001 - 问不出来就别放回
+                why = f'没法确认现在能不能放回（{e}），这次没有放回'
+            if why:
+                self.status.setText('没放回：' + str(why))
+                return {'ok': False, 'reason': str(why)}
+        res = self._store.restore_version(self._path, ver.path,
+                                          expect_current=self._current)
         if res.get('ok'):
             # 先重读（列表多了一代、闸也要跟着现在这份换），再写状态栏 ——
             # 顺序反了会被 `reload()` 的 `_fill_status()` 当场盖掉。
@@ -238,4 +293,5 @@ class VersionsDialog(QDialog):
             '放回之前那份进了新一代备份 —— 放错了还能再放回。')
 
 
-__all__ = ['COL_FILE', 'COL_NOTE', 'COL_TIME', 'VersionsDialog', 'plain_summary']
+__all__ = ['COL_FILE', 'COL_NOTE', 'COL_TIME', 'VersionsDialog',
+           'plain_summary', 'read_version_text']
