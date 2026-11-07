@@ -14,7 +14,7 @@ storygraph.story.excel_export
 from __future__ import annotations
 from storygraph.core.safeguard import swallow
 from storygraph.core.atomicio import save_workbook_atomic
-from storygraph.excel import safety
+from storygraph.excel import cells, safety
 import re
 from io import BytesIO
 from pathlib import Path
@@ -985,8 +985,12 @@ _COLUMN_HELP = {
     'SpecHead': ('高级区', '程序', '自定义语句的头行；改了才替换首行'),
     'LoopHeader': ('程序区', '程序', 'while / for 的头行'),
     'CameraHeader': ('程序区', '程序', '3D 舞台 camera 块的头行'),
-    'SayTail': ('高级区', '程序',
-                '台词引号后的样式子句（`(what_color="#f00")` / `with` / `id`）；空 = 普通台词'),
+    #: 台词后缀 2026-11-03 从「内部列」升为可见列（用户："`with` 是 say 本身
+    #: 的属性，不是自定义语句"）—— 归属与"给谁看"跟着改，否则表里看得见、
+    #: 说明却写着"高级区 / 程序"，自相矛盾。
+    'SayTail': ('基础列', '策划',
+                '台词引号后的子句：`with dissolve` / `(what_color="#f00")` / '
+                '`id 名字` / `nointeract`；空 = 普通台词（原样写回，不改字节）'),
     'LabelHeader': ('程序区', '程序',
                     '`label 名(flag=True):` 的参数表；只记在该 label 的第一张拍上'),
     'MenuName': ('高级区', '程序',
@@ -1940,6 +1944,12 @@ def _read_beats_from_ws(ws, long_text: dict = None,
                 continue
             row_dict[str(header)] = row[i] if i < len(row) else None
         _restore_long_text(row_dict, long_text, lid_label, conflicts)
+        # **控制字符还原**（2026-11-02）：写表时 `cells.set_text` 把
+        # xlsx 装不下的字符（如 `U+0005`）写成 `\x05` 这种看得见的转义，
+        # 这里必须还原回真字符 —— 否则 `.rpy → 表 → .rpy` 一趟，
+        # 台词末尾那个不可见字符就变成 4 个可见字符（真机 4 个章节 9 处）。
+        # 走整行还原：舞台/注释/代码格里的控制字符同样要保住。
+        row_dict = cells.xml_unescape_row(row_dict)
         beat = Beat.from_row(row_dict)
         if not beat.is_empty():
             beats.append(beat)

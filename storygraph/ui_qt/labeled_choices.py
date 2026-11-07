@@ -423,7 +423,12 @@ def combo_value(combo: QComboBox) -> str:
     text = (combo.currentText() or '').strip()
     if 0 <= row < combo.count():
         data = combo.itemData(row)
-        if isinstance(data, str) and data:
+        # ⚠ **空串也是合法真值**（2026-11-03，台词后缀的「（无）」项抓到）：
+        # 从前这里写的是 `and data`，于是 `addItem('（无）', '')` 那一项被判成
+        # "没有真值" → 落到第 3 步返回**显示文本** `（无）` —— 用户选"无"，
+        # 剧本里却写进了 `（无）` 三个字。判据：
+        # `tests/test_say_tail_choices.py::test_choosing_none_clears_it`。
+        if isinstance(data, str):
             if not combo.isEditable() or text == (combo.itemText(row) or '').strip():
                 return data
     if not text:

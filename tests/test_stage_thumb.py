@@ -500,7 +500,14 @@ class TestCardWiring:
         # ② 那一块的第一行是标题，第二行才是 图 + 摘要
         lay = panel._stage_now.layout()
         head = lay.itemAt(0).widget()
-        assert isinstance(head, QLabel) and '当前舞台' in head.text(), head
+        # 2026-11-07（Unity 式排布）：标题不再是裸 `QLabel`，而是
+        # `card_rows.section()` 造的**行容器**（标题 + 可选的同行说明，
+        # 上下自带呼吸间距）。判据的意思没变（"第一行是标题"），所以把里层
+        # 那个 QLabel 找出来，而不是退回"裸控制件"的形状。
+        head_label = head.findChild(QLabel) if head is not None else None
+        assert head_label is not None and '当前舞台' in head_label.text(), head
+        assert head_label.property('role') == 'section', \
+            '标题不是 card_rows.section() 造的（又有人在调用处自己拼布局了）'
         row = lay.itemAt(1).layout()
         assert row is not None, '图与摘要不是并排的一行'
         assert row.itemAt(0).widget() is thumb, '图不在这一行的最左边'

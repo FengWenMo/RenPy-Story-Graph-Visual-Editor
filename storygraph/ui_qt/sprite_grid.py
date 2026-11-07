@@ -54,6 +54,13 @@ from storygraph.ui_qt.sprite_codes_view import (art_code, code_of,
                                                 slot_kind as _slot_kind)
 
 from storygraph.core.safeguard import swallow
+# 立绘卡的**提示语**与**缩略图解析**各是一个叶子模块（2026-11-03 / 2026-11-05
+# 两次拆分：本文件原本 1498 行，两次都顶到了 1500 行技术债红线）。
+# 这里各 re-export 一次，`from ...sprite_grid import ...` 的老调用点（含测试）
+# 一个字都不用改。
+from storygraph.ui_qt.sprite_hints import known_tag_warning  # noqa: F401
+from storygraph.ui_qt.sprite_thumbs import (  # noqa: F401
+    resolve_sprite_thumb_path)
 
 CARD_W = T.CARD['w'] + 26            # 卡片宽（含 chip 行）
 THUMB_W = T.CARD['thumbW'] + 8
@@ -65,48 +72,15 @@ def sprite_thumb_size() -> tuple:
     return (THUMB_W, THUMB_H)
 
 
-def resolve_sprite_thumb_path(spec, resolver=None, project_root=None):
+def sprite_compose_size() -> tuple:
     """
-    立绘 image spec → 磁盘上的真实图片路径（卡片与预取共用这一份）。
+    分层合成时用的目标尺寸 = **2× 格子**（2026-11-05）。
 
-    两级查找，**第二级是关键**：
-
-      1. 主窗口注入的解析器（`session.path_of_image`）—— 真源是资源表的
-         `Path` 列，最准；
-      2. 它查不到时**退回按 Ren'Py 的目录约定猜**
-         （`<tag> <attrs>` → `game/images/<tag>/<attrs>.png`）。
-
-    为什么必须有第 2 级：CG 这类图**往往不在资源表里**（实测
-    `sr_general`：`cg03.png` 在磁盘上，但 2828 条图片记录里一条 cg 都没有）。
-    以前一拿到 None 就放弃，`_guess_image_path` 永远走不到 ——
-    于是"CG 很难出现"，而立绘（在表里）正常，看起来像"只有 CG 坏了"。
+    为什么不是 1×：合成图之后还要被 `ThumbLoader` 再缩一次，2× 留够余量
+    （HiDPI 也不糊），而 PNG 编码量只有 240×320 级别 —— 比原图 4320×7680
+    快三个数量级（真机：一次合成 2.4s → 十几毫秒）。
     """
-    spec = str(spec or '').strip()
-    if not spec:
-        return None
-    if resolver is not None:
-        try:
-            found = resolver(spec)
-        except Exception as e:                    # noqa: BLE001
-            swallow('ui_qt.sprite_grid.resolve_sprite_thumb_path', e)
-            found = None
-        if found:
-            return found
-    parts = [p for p in spec.split() if p]
-    if len(parts) < 2 or not project_root:
-        return None
-    rel = '/'.join([parts[0], '_'.join(parts[1:])])
-    try:
-        from storygraph.story.excel_export import resolve_thumb_source
-        for cand in (f'game/images/{rel}.png', f'game/images/{rel}.webp',
-                     f'images/{rel}.png', f'{rel}.png'):
-            found = resolve_thumb_source(cand, project_root)
-            if found:
-                return found
-    except Exception as e:                        # noqa: BLE001
-        swallow('ui_qt.sprite_grid.resolve_sprite_thumb_path', e)
-        return None
-    return None
+    return (THUMB_W * 2, THUMB_H * 2)
 
 
 #: chip 上最多显示这么多个字（右栏 340px 是硬预算，长名字会顶宽卡片）。
@@ -179,37 +153,6 @@ def pick_spec_and_result(value) -> tuple:
     spec = str(getattr(value, 'spec', '') or '').strip()
     return spec, value
 
-
-def known_tag_warning(spec, symbols) -> str:
-    """
-    `spec` 的首词**不是已知角色 tag** 时给的一句话（空串 = 没问题 / 判不了）。
-
-    为什么判据是"角色 tag"而不是随便一个 image tag：这一格是**立绘**。
-    选了背景 / CG / 界面图写进 `show` 里，引擎不会报错但演出是错的
-    （用户 2026-10-30："不能直接放立绘图，直接放角色那个头像图就能动"
-    —— 反方向同样成立：立绘格里放背景图是同一个错误）。
-
-    ⚠ **判不了就闭嘴**（与缩略图"没有"同一条纪律）：项目没打开时
-    `symbols` 是 None；项目有图但没有角色表时 `Symbols.is_actor_tag`
-    会按"非背景/CG/UI"粗判 —— 这两种情况都不许报"未知角色"（假警报
-    比不提示更糟，用户会去改本来没问题的东西）。
-    """
-    spec = str(spec or '').strip()
-    if not spec or symbols is None:
-        return ''
-    tag = spec.split()[0]
-    if not tag:
-        return ''
-    try:
-        if not (symbols.has('image') or symbols.has('character')):
-            return ''                              # 无从判定：不猜
-        if symbols.is_actor_tag(tag):
-            return ''
-    except Exception as e:                         # noqa: BLE001 - 符号表怪就当判不了
-        swallow('ui_qt.sprite_grid.known_tag_warning', e)
-        return ''
-    return (f'「{tag}」不是已知的角色立绘标签 —— 这一格要的是立绘；'
-            f'如果它其实属于某个角色，去「资源映射」把它认成角色/立绘。')
 
 
 class SpriteCardWidget(QFrame):
@@ -856,6 +799,19 @@ class SpriteCardWidget(QFrame):
         path = self._thumb_path(spec)
         tag = spec.split()[0]
         if not path:
+            # ⚠ “这一格不是图像名”（`show expression …` / `screen` / `layer`）：
+            #   预览判不了，**不许写“没有”** —— 那是在说项目缺图，而它压根
+            #   不是按图像名解析的（用户 2026-11-05：“有的时候这些东西也不是
+            #   图片”）。写清楚“判不了”，不猜。
+            from storygraph.ui_qt.sprite_hints import _image_part_of_spec
+            if not _image_part_of_spec(spec):
+                self._thumb.setText('非图像')
+                self._thumb.setToolTip(
+                    f'{spec}\n'
+                    f'（这一格不是图像名：`show expression` / `screen` / '
+                    f'`layer` 这类形态，预览判不了 —— 不猜。）')
+                self._mark_missing(False)
+                return
             # ⚠ 判不了（项目还没打开）时**不许**说"没有" —— 那是假警报。
             #   这时照旧显示 tag 名（一眼看得出"还没解析"，不吓人）。
             if not self._assets_ready:
@@ -937,7 +893,8 @@ class SpriteCardWidget(QFrame):
         """立绘 image spec → 磁盘路径（规则在 `resolve_sprite_thumb_path`）。"""
         return resolve_sprite_thumb_path(
             spec, self._on_resolve_path,
-            getattr(self._loader, 'project_root', None))
+            getattr(self._loader, 'project_root', None),
+            max_size=sprite_compose_size())
 
     def _apply_image_spec(self, spec: str):
         """
@@ -1315,7 +1272,9 @@ class SpriteGridWidget(QWidget):
             if not spec or spec in seen:
                 continue
             seen.add(spec)
-            path = resolve_sprite_thumb_path(spec, self._on_resolve_path, root)
+            path = resolve_sprite_thumb_path(
+                spec, self._on_resolve_path, root,
+                max_size=sprite_compose_size())
             if path:
                 loader.prefetch(str(path), max_size=sprite_thumb_size())
 

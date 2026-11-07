@@ -88,7 +88,13 @@ from storygraph.core.safeguard import swallow
 #: （`session_table.py` 里 re-export 了同一对名字，两边指向同一个对象。）
 
 #: 主区字段（每一拍真正常改的）—— 与两套前端共用同一份划分
-PRIMARY_FIELDS = ['Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
+#:
+#: `SayTail`（台词转场）2026-11-03 从高级区**移到这里**（用户："with 是 say
+#: 的一部分，凭什么要往下翻高级区？"）。⚠ 关键不是"挪控件"，是**挪分组**：
+#: `collect_fields` 只在高级区展开时才收 `ADVANCED_FIELDS` ——
+#: 留在那边的话，高级区一收起，`with dissolve` 就**不写回**（静默丢）。
+PRIMARY_FIELDS = ['Speaker', 'Text', 'SayTail', 'Scene', 'BGM', 'Voice',
+                  'Comment']
 #: 高级区字段（默认折叠）
 #:
 #: **不含 `Notes`**（2026-10-05 定：这个字段取消）。它以前在这里，
@@ -103,7 +109,7 @@ PRIMARY_FIELDS = ['Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
 #: 老表里的 `Notes` 列**仍然读得回来**（`Beat.from_row` 把它并进
 #: `Comment`，绝不丢字）—— 这条兼容链路没动，见
 #: `tests/test_editor_session_mixin_contract.py` 的 `TestFieldContract`。
-ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage', 'SayTail',
+ADVANCED_FIELDS = ['SFX', 'CodeBlock', 'Label', 'Kind', 'Stage',
                    # 菜单头（2026-10-19）：`menu 名(args):` 的两段。
                    # 只在菜单拍上有值；其它拍空着（写回是 no-op）。
                    # 放进高级区而不是主区：它们是程序面的结构（screen 参数 /

@@ -16,16 +16,18 @@
 判据（谁可疑、为什么）**一行都不在这里**：
 
   · 「舞台（高级）」里不像 Ren'Py 语句的行 → `storygraph.story.stage_suspect`；
-  · 「立绘 / 舞台」里 show 的名字项目里找不到 → `storygraph.app.stage_identity_guard`。
+  · 「立绘 / 舞台」里 show 的名字项目里找不到 → `storygraph.app.stage_identity_guard`；
+  · 「立绘」里 show 的属性项目没声明 → `storygraph.app.sprite_attr_guard`
+    （2026-11-05 加：`show ye base_hand_down …` 导出前再警告一次）。
 
 本文件只做三件事：
 
-  1. 把两类可疑行**摆出来**（各一张只读表：第几拍 / 原文 / 为什么）；
+  1. 把三类可疑行**摆出来**（各一张只读表：第几拍 / 原文 / 为什么）；
   2. 让人决定：勾掉不想动的，点「移到备注」；或者「原样导出」（= 我知道，
      就要这么写）；或者「取消导出」（= 我去改，一个字节都不写）；
   3. **不替人做决定，也不偷偷写**。
 
-## 两类的处置为什么不一样
+## 三类的处置为什么不一样
 
 「舞台可疑行」的处置是**移动**（把备忘从代码列挪到备注列，内容一个字不丢），
 所以有勾选框、有「移到备注」按钮。
@@ -33,7 +35,12 @@
 「名字找不到」的处置**只能是改名字**（把 `show refusing` 改成 `show ling`）
 或**确认照写**（也许那名字是别处定义的）。挪到备注等于把一条演出删掉 ——
 那是**改剧情**，不是修名字。所以这一类没有勾选框、没有移动按钮，只有
-「回卡片改」或「原样导出」。别把两种处置混成一个按钮：那会让"我点了移到
+「回卡片改」或「原样导出」。
+
+「属性没声明」的处置**只能是改写法**（`base_hand_down` → `base_handdown`）
+或**确认照写**（项目自定义写法）。同样没有勾选框、没有"修一下"按钮：
+改错一个下划线就换了一张图，工具不替人做这个决定（用户 2026-11-05：
+"只报，不乱改"）。别把两种处置混成一个按钮：那会让"我点了移到
 备注"变成"我的立绘静默消失了"。
 
 ## 为什么不是 `QMessageBox.question`
@@ -68,29 +75,34 @@ class StageSuspectDialog(QDialog):
     """
     用法（调用方 `window_export._review_stage_suspects`）::
 
-        dlg = StageSuspectDialog(self, stage_result, identity=ident_result)
+        dlg = StageSuspectDialog(self, stage_result, identity=ident_result,
+                                 attrs=attr_result)
         if dlg.exec() != QDialog.Accepted:
             return False                            # 取消 = 零写
         if dlg.decision == MOVE:
             move_to_comment(beats, dlg.selected())
         return True
 
-    `identity` 是 `app.stage_identity_guard.ScanResult`（或任何带
-    `.suspects` 的列表容器）。**只有**「舞台可疑行」那类能移动；身份问题
-    只展示、不改任何东西（见模块 docstring 的"两类的处置为什么不一样"）。
+    `identity` 是 `app.stage_identity_guard.ScanResult`，`attrs` 是
+    `app.sprite_attr_guard.ScanResult`（或任何带 `.suspects` 的列表容器）。
+    **只有**「舞台可疑行」那类能移动；身份问题和属性问题都只展示、
+    不改任何东西（见模块 docstring 的"三类的处置为什么不一样"）。
 
     本类**不碰 Beat、不调用 `move_to_comment`**：它只收集"要不要挪、挪哪几条"。
     真正动手在调用方 —— 这样这一层可以脱离会话单测（`test_stage_suspect.py`）。
     """
 
-    def __init__(self, parent, result, allow_move: bool = True, identity=None):
+    def __init__(self, parent, result, allow_move: bool = True, identity=None,
+                 attrs=None):
         super().__init__(parent)
-        self._init_state(result, allow_move, identity)
+        self._init_state(result, allow_move, identity, attrs)
         root = self._build_layout()
         n_stage = len(result)
         self._build_stage_section(root, n_stage)
         if self._identity:
             self._build_identity_section(root)
+        if self._attrs:
+            self._build_attr_section(root)
         self._build_buttons(root)
         self._apply_mode(n_stage)
 
@@ -99,8 +111,8 @@ class StageSuspectDialog(QDialog):
     #  （2026-11-01 拆分；**创建顺序是契约**，Qt 的控件顺序跟着它走）
     # ------------------------------------------------------------------
 
-    def _init_state(self, result, allow_move, identity) -> None:
-        """纯字段：三类数据源 + 这条路上的"能不能挪"。"""
+    def _init_state(self, result, allow_move, identity, attrs=None) -> None:
+        """纯字段：四类数据源 + 这条路上的"能不能挪"。"""
         self._result = result
         self._rows = []                 # [(QTableWidgetItem 复选框项, Suspect)]
         #: 身份门禁的结果（没有 / 空 = 这一类不出现）。
@@ -108,6 +120,11 @@ class StageSuspectDialog(QDialog):
         #: 现场取 `len()` 判空：`stage_identity_guard.ScanResult` 实现了
         #: `__len__`，但调用方也可能传 `None`（没有资源表 → 这次判不了）。
         self._identity = identity if (identity and len(identity)) else None
+        #: 立绘属性门禁的结果（`app.sprite_attr_guard.ScanResult`；同上）。
+        #:
+        #: ⚠ **只展示，不提供"修一下"按钮**（用户 2026-11-05："只报，不乱改"）：
+        #: 这类词改错一个下划线就换了一张图，默认动作必须是"人自己回卡片改"。
+        self._attrs = attrs if (attrs and len(attrs)) else None
         self.decision = KEEP
         #: 这一条路能不能"移"。
         #:
@@ -120,12 +137,15 @@ class StageSuspectDialog(QDialog):
     def _build_layout(self):
         """窗标题 + 根布局，返回根布局（其余控件按类往里追加）。"""
         n_stage = len(self._result)
-        if self._identity and not n_stage:
-            self.setWindowTitle('导出前检查 —— 这些 show 的名字在项目里找不到')
-        elif self._identity:
-            self.setWindowTitle('导出前检查 —— 舞台内容与 show 的名字都有问题')
-        else:
-            self.setWindowTitle('导出前检查 —— 这几行舞台内容看着不像语句')
+        parts = []
+        if n_stage:
+            parts.append('舞台内容看着不像语句')
+        if self._identity:
+            parts.append('show 的名字项目里找不到')
+        if self._attrs:
+            parts.append('show 的属性项目里没声明')
+        title = '导出前检查 —— ' + '；'.join(parts) if parts else '导出前检查'
+        self.setWindowTitle(title)
         theme.apply_to(self)
 
         root = QVBoxLayout(self)
@@ -237,13 +257,70 @@ class StageSuspectDialog(QDialog):
         self.identity_table.resizeColumnsToContents()
         root.addWidget(self.identity_table, 1)
 
+    def _build_attr_section(self, root) -> None:
+        """
+        第三类：`show` 的属性项目没声明（只展示，不能移、也不能一键改）。
+
+        用户 2026-11-05：
+
+        > 只报，不乱改……导出时也要再警告一次，并且说明其可能导致无法运行。
+
+        后果必须说准（引擎源码 `00layeredimage_ren.py`）：认不出的属性
+        **不抛异常、只忽略**，所以这里写"通常还能跑，但画面不是你要的"；
+        真正会起不来的是未知 tag / 语法错，那两类在别的小节里单独报。
+        """
+        self.attr_summary = QLabel(
+            f'另外，「立绘」里有 {len(self._attrs)} 条 show 写了项目没声明的'
+            f'属性。导出后最坏会让游戏起不来；最常见是引擎忽略这些词 —— '
+            f'能跑，但这一层不会出现，画面不是你要的。下面只列出来，'
+            f'工具不会替你改。')
+        self.attr_summary.setObjectName('attr_summary')
+        self.attr_summary.setWordWrap(True)
+        root.addWidget(self.attr_summary)
+
+        self.attr_hint = QLabel(
+            '请在卡片里把属性改成项目声明过的写法（例如「base_handdown」）；'
+            '确认这是项目自定义写法（项目里定义过的代号不算错），'
+            '也可以点「原样导出」。')
+        self.attr_hint.setObjectName('attr_hint')
+        self.attr_hint.setWordWrap(True)
+        self.attr_hint.setProperty('role', 'note')
+        root.addWidget(self.attr_hint)
+
+        self.attr_table = QTableWidget(len(self._attrs), 4, self)
+        self.attr_table.setObjectName('attr_suspects')
+        self.attr_table.setHorizontalHeaderLabels(
+            ['拍', '原文', '为什么', '后果'])
+        self.attr_table.verticalHeader().setVisible(False)
+        self.attr_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.attr_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers)
+        self.attr_table.setAlternatingRowColors(True)
+        ah = self.attr_table.horizontalHeader()
+        ah.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        ah.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        ah.setSectionResizeMode(2, QHeaderView.Stretch)
+        ah.setSectionResizeMode(3, QHeaderView.Stretch)
+        for row, suspect in enumerate(self._attrs.suspects):
+            self.attr_table.setItem(
+                row, 0, QTableWidgetItem(str(suspect.seq or '')))
+            self.attr_table.setItem(
+                row, 1, QTableWidgetItem(f'show {suspect.spec}'))
+            self.attr_table.setItem(
+                row, 2, QTableWidgetItem(str(suspect.reason)))
+            self.attr_table.setItem(
+                row, 3, QTableWidgetItem(str(suspect.consequence)))
+        self.attr_table.resizeColumnsToContents()
+        root.addWidget(self.attr_table, 1)
+
     def _build_buttons(self, root) -> None:
-        """按钮：两类共用同一条"原样导出 / 取消"决定。"""
+        """按钮：三类共用同一条"原样导出 / 取消"决定（属性类没有"修一下"）。"""
         bar = QHBoxLayout()
         bar.setSpacing(T.SPACE['sm'])
         self.btn_keep = QPushButton('原样导出')
         self.btn_keep.setObjectName('btn_keep')
-        self.btn_keep.setToolTip('一个字都不改，这几行照原文写进脚本')
+        self.btn_keep.setToolTip(
+            '一个字都不改，这些行照原文写进脚本（包括项目没声明的属性）')
         self.btn_keep.clicked.connect(self._on_keep)
         self.btn_cancel = QPushButton('取消导出（什么都不写）')
         self.btn_cancel.setObjectName('btn_cancel')
@@ -260,14 +337,15 @@ class StageSuspectDialog(QDialog):
 
     def _apply_mode(self, n_stage) -> None:
         """
-        收尾：按钮文案、两处"这类没有就别显示"、窗口高度。
+        收尾：按钮文案、三处"这类没有就别显示"、窗口高度。
 
-        两种降级各走一路，互不影响：没有舞台可疑行 → 第一类整块隐掉；
-        从表导出 → 不给"移到备注"（不改用户的工作簿）。
+        三种降级各走一路，互不影响：没有舞台可疑行 → 第一类整块隐掉；
+        从表导出 → 不给"移到备注"（不改用户的工作簿）；属性类永远没有
+        "修一下"按钮（只报，不改）。
         """
         self._refresh_move_button()
         if not n_stage:
-            # 只有第二类：舞台那张表和"移到备注"都不该出现（没有可挪的东西）。
+            # 只有身份 / 属性类：舞台那张表和"移到备注"都不该出现。
             self.summary.setVisible(False)
             self.hint.setVisible(False)
             self.table.setVisible(False)
@@ -285,12 +363,15 @@ class StageSuspectDialog(QDialog):
                 self.identity_hint.setText(
                     '这些名字请在表格里改（或确认确实存在后点「原样导出」）—— '
                     '工具不会在这里改你的工作簿。')
-        if self._identity and n_stage:
-            self.resize(860, 580)
-        elif self._identity:
-            self.resize(860, 460)
-        else:
-            self.resize(860, 420)
+            if self._attrs:
+                self.attr_hint.setText(
+                    '请在表格里把这些属性改成项目声明过的写法（或确认这是'
+                    '项目自定义写法后点「原样导出」）—— 工具不会在这里改'
+                    '你的工作簿。')
+        # 每多一类问题，多给一点高度；没有的那类不会建控件，不算。
+        sections = int(bool(n_stage)) + int(bool(self._identity)) \
+            + int(bool(self._attrs))
+        self.resize(860, {0: 420, 1: 460, 2: 600, 3: 720}.get(sections, 420))
 
     # ------------------------------------------------------------------
     #  勾选框

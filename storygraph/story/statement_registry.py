@@ -45,6 +45,13 @@ CALLS_KEY = 'calls'
 #: （这里再写一遍是为了不让 `story` 内部互相 import；两处都有测试钉着）。
 MANIFEST_NAMES = ('storygraph.rules.json',)
 
+#: 扩展点清单（`storygraph.ext.json`）—— 与 `ext.registry.MANIFEST` 同一个名字。
+#:
+#: 它在这个模块里的角色很窄：**只当"声明来源"**（`RegisteredStatement.origin`）。
+#: 命名**不另抄一份**会漂，所以由 `tests/test_ext_platform.py` 钉着两处相等。
+EXT_MANIFEST = 'storygraph.ext.json'
+
+
 
 @dataclass
 class RegisteredStatement:
@@ -142,7 +149,10 @@ def _from_manifest(data: dict, manifest_path: str) -> list:
         out.append(RegisteredStatement(
             name=words[0], aliases=[*words[1:], *[str(a) for a in aliases]],
             block=block, source='declared',
-            origin=Path(manifest_path).name if manifest_path else MANIFEST_KEY,
+            # 来处可以说得更细（扩展点会写 `plugin:xxx.json`），没写就退回清单名
+            origin=str(item.get('origin')
+                       or (Path(manifest_path).name if manifest_path
+                           else MANIFEST_KEY)),
             docs=str(item.get('docs') or ''),
             label=str(item.get('label') or ''),
             columns=[c for c in (item.get('columns') or ())
@@ -188,7 +198,7 @@ def _ident_ok(text: str) -> bool:
     return bool(_IDENT_RE.fullmatch(str(text or '')))
 
 
-def _calls_from_manifest(raw) -> list:
+def _calls_from_manifest(raw, origin: str = '') -> list:
     """
     清单里的 `calls` → 规范形状（坏条目跳过）。
 
@@ -197,11 +207,18 @@ def _calls_from_manifest(raw) -> list:
         {"head": "my_wipe", "label": "擦除",
          "columns": [{"name": "transition", "label": "转场",
                       "position": 0, "kind": "transition"}],
-         "effect": "Dissolve", "seconds_arg": 1}
+         "effect": "Dissolve", "seconds_arg": 1,
+         "origin": "storygraph.rules.json"}
 
     `effect` / `seconds_arg` 只影响**演出预览**：包装函数本身不是转场，
     但项目可以在声明里说"它等价于哪个效果、时长取第几个参数"。
     认不出/没写 → 预览如实标"认不出"，不假装淡入。
+
+    `origin`（2026-11-07 第四轮）= **这条声明写在哪**（`rules.json` /
+    `storygraph.ext.json` / `plugin:xxx.json`）。参数里的同名键优先，
+    否则用调用方给的默认值。为什么必须有：同一个 head 可以被两个文件声明，
+    而装配顺序是「扩展 > 旧清单」—— 界面要知道"我改的这份会不会被盖住"，
+    否则就是"保存成功、实际没变"（见 `save_calls`）。
     """
     out = []
     for item in (raw or ()):
@@ -240,6 +257,10 @@ def _calls_from_manifest(raw) -> list:
                 'position': pos,
                 'kw': kw,
                 'choices': [str(c) for c in (col.get('choices') or ())],
+                # 必填（2026-11-07 第五轮）：以前这里**把它丢了**，于是声明里
+                # 写 `required: true` 与不写完全一样（`call_columns` 读到的
+                # 永远是 False）。只在真写了的时候带上，老文件一个字节不变。
+                **({'required': True} if col.get('required') else {}),
             })
         if not columns:
             continue
@@ -252,7 +273,13 @@ def _calls_from_manifest(raw) -> list:
         out.append({'head': head, 'label': str(item.get('label') or ''),
                     'columns': columns,
                     'effect': str(item.get('effect') or ''),
-                    'seconds_arg': seconds_arg})
+                    'seconds_arg': seconds_arg,
+                    # 来处：写进参数的优先（插件会写 `plugin:闪电动画.json`），
+                    # 否则用调用方给的默认（`rules.json` / `storygraph.ext.json`）。
+                    # **空就不写这个键** —— 老代码拿它当"普通 dict"逐字比较，
+                    # 多一个恒为空的键只会制造噪音。
+                    **({'origin': str(item.get('origin') or origin)}
+                       if (item.get('origin') or origin) else {})})
     return out
 
 
@@ -268,7 +295,10 @@ def _from_cds(project_root) -> list:
                 name=spec.name, aliases=list(spec.aliases[1:]),
                 block=spec.block, source='host-registry', origin=where,
                 docs=spec.note or ''))
-    except Exception as e:                    # noqa: BLE001 - 读不出来不该炸
+    except (ImportError, OSError, ValueError, KeyError, AttributeError,
+            TypeError, RuntimeError) as e:
+        # 扫描器是纯 Python（正则 + 读文件），能出的就是这几类；
+        # 真出了别的类型，那说明扫描器自身坏了 —— 该炸出来，不该咽掉。
         swallow('story.statement_registry._from_cds', e)
     return out
 
@@ -346,8 +376,17 @@ class StatementRegistry:
         **带缓存**（与 `project_conventions.conventions_for` 同一套做法）：
         装配要扫一遍全项目 .rpy 找 CDS，而 `beats_from_parse_result` 会被
         逐章调用 —— 不缓存就是 O(章数 × 文件数)。缓存键是项目根，
-        用户改了 `storygraph.rules.json` 后清一下即可（`clear_cache()`，
-        `EditorSession` 打开项目时也会清）。
+        用户改了 `storygraph.rules.json` / `storygraph.ext.json` 后清一下即可
+        （`clear_cache()`；`EditorSession` 打开项目时、扩展窗口保存后都会清）。
+
+        声明的**四个来源**（优先级从高到低，同名的后面盖前面）：
+
+            扩展点（`storygraph.ext.json` + `extensions/` 插件）
+            > `storygraph.rules.json` 的 statements / calls
+            > 宿主 `renpy.register_statement`（CDS）
+
+        前两个都在 `declared` / `calls` 里，所以"哪个更强"就落在这里的
+        列表顺序上，不散在调用方的 if 里。
         """
         key = str(project_root or '')
         if not key:
@@ -370,15 +409,111 @@ class StatementRegistry:
                 # 工具不写死"服装/表情"（用户 2026-10-10 的通用性要求）
                 groups = parse_attr_groups(data.get(ATTR_GROUPS_KEY))
                 # 技术调用（2026-10-30）：`$ 包装函数(...)` 的参数形状
-                calls = _calls_from_manifest(data.get(CALLS_KEY))
+                # `origin` 记下"写在哪"：清单可能在项目根或 `game/` 下
+                # （见 `manifest_path`），界面要照实说，不能一律叫 rules.json。
+                calls = _calls_from_manifest(
+                    data.get(CALLS_KEY),
+                    Path(path).name if path else MANIFEST_NAMES[0])
         except Exception as e:                # noqa: BLE001
             swallow('story.statement_registry.for_project.manifest', e)
         host = _from_cds(project_root)
+        # 「是否使用」开关的落地点（用户 2026-11-07）：
+        # `storygraph.ext.json` 里 `enabled: false` 的扩展点 → **注册表里没有它**。
+        # 于是卡片不出格子、表格不出列、批处理也不会拿它当理由 —— 但声明本身
+        # 还在磁盘上，随时能再打开（不是删除）。
+        off_st, off_calls = _ext_disabled(project_root)
+        if off_st:
+            declared = [d for d in declared
+                        if str(getattr(d, 'name', '')) not in off_st]
+        if off_calls:
+            calls = [c for c in calls
+                     if str(c.get('head') or '') not in off_calls]
+        # 扩展点里**新建**的写法 / 调用（用户 2026-11-07："我想在工具里加个
+        # 新写法"）。它们与 `rules.json` 是同一份形状，所以走同一条装配线；
+        # 同名的**以扩展点为准** —— 界面上改过的那份比手写清单更新
+        # （"改了要生效"，不是"改了没反应"）。
+        ext_st, ext_calls = _from_extensions(project_root)
+        if ext_st:
+            heads = {d.name for d in ext_st}
+            declared = [d for d in declared if d.name not in heads] + ext_st
+        if ext_calls:
+            heads = {str(c.get('head') or '') for c in ext_calls}
+            calls = [c for c in calls
+                     if str(c.get('head') or '') not in heads] + ext_calls
         reg = cls(declared=declared, host=host, attr_groups=groups,
                   calls=calls)
         if use_cache:
             _CACHE[key] = reg
         return reg
+
+
+def _ext_disabled(project_root) -> tuple:
+    """
+    扩展清单里被**关掉**的扩展点 → `(语句名集合, 调用 head 集合)`。
+
+    ⚠ 这里**只读** `storygraph.ext.json`，不调 `ext.registry`：摘掉一个声明
+    只需要 id，不需要装配插件 / 校验字段。装配那条重路在 `_from_extensions`
+    （**按项目缓存**，一个项目只走一次），两条路分工不同、不许互相替代。
+    读不到 / 坏 JSON → 当作"没有关掉任何东西"（**关闭开关不该让工具打不开**）。
+    """
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        path = _Path(project_root) / 'storygraph.ext.json'
+        if not path.is_file():
+            return set(), set()
+        data = _json.loads(path.read_text(encoding='utf-8') or '{}')
+    except (OSError, ValueError):
+        # 读不到 / 坏 JSON → 当作"没有关掉任何东西"：**关闭开关不该让工具打不开**
+        return set(), set()
+    off_st, off_calls = set(), set()
+    if not isinstance(data, dict):
+        return off_st, off_calls
+    for item in (data.get('extensions') or ()):
+        if not isinstance(item, dict) or item.get('enabled') is not False:
+            continue
+        ident = str(item.get('id') or '').strip()
+        if not ident:
+            continue
+        if str(item.get('kind') or '') == 'call':
+            off_calls.add(ident)
+        else:
+            off_st.add(ident)
+    return off_st, off_calls
+
+
+def _from_extensions(project_root) -> tuple:
+    """
+    扩展点（`storygraph.ext.json` + `<项目>/extensions/`）里**开着的**写法与
+    调用 → 与 `rules.json` 同一份形状的 `([RegisteredStatement], [call dict])`。
+
+    为什么要在这一层接：`spec_columns` / 卡片 / 批处理 / 覆盖率统计全都只问
+    `StatementRegistry`，不各自去翻 JSON。**把扩展点变成注册表里的条目**，
+    等于让"界面上配出来的写法"与"手写 rules.json 的写法"对工具是同一件事。
+
+    ⚠ 会**装载插件**（`extensions/*.py` 是要执行的）：所以只在 `for_project`
+      这一层调，而它按项目根缓存 —— 一个项目只付一次。插件里请别在 import
+      时回调工具（那会重入本函数）；正常写法（只放 `EXTENSIONS` 数据）没问题。
+
+    ⚠ 被关掉的（`enabled: false`）在这里**不会出现**（`ext.bridge` 按开关过滤），
+      与 `_ext_disabled` 那条"摘掉"的路互为补集，不会互相打架。
+    """
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return [], []
+    #: 绝大多数项目两者都没有 —— 快路走掉，别为了"可能没有扩展点"付一次装配
+    #: （装配会读清单、扫插件目录；插件目录里的 `.py` 还要执行）。
+    if not (root / EXT_MANIFEST).is_file() and not (root / 'extensions').is_dir():
+        return [], []
+    try:
+        from storygraph.ext import bridge
+        raw = bridge.for_project(project_root)
+    except ImportError:
+        # 后端被裁剪过（与 `_from_cds` 同一条纪律）：没有扩展层就只当没声明过。
+        return [], []
+    return (_from_manifest({'statements': raw.get('statements') or ()},
+                           EXT_MANIFEST),
+            _calls_from_manifest(raw.get('calls'), EXT_MANIFEST))
 
 
 #: 项目根 → `StatementRegistry`（见 `for_project` 的说明）
@@ -758,6 +893,49 @@ def spec_arg_choices(registry, head: str, column: str = '') -> list:
     return out
 
 
+def _declared_kinds(spec) -> dict:
+    """
+    格子名 → 格子类型（`keyword` / `variable` / `choice` / `optional` / …）。
+
+    为什么要单独一步（2026-11-07）：**类型只存在 `pattern` 的格子上**，列描述里
+    原本没有它。于是卡片只能"看有没有候选"猜一个 —— `keyword`（固定几个字，
+    剧本里必须原样出现）那一格成了**可编辑的输入框**，人改一次就把语句名改掉
+    （写回时按位置替换第 0 个词）。带上类型，界面才有东西可以分派。
+
+    ⚠ 只用**声明的原始格子**（`spec.pattern`），不走 `parse_pattern` ——
+    后者会把格子规范化成另一套键，而这里要的是"原始声明说了什么"。
+    """
+    kinds: dict = {}
+    for slot in (getattr(spec, 'pattern', None) or ()):
+        if not isinstance(slot, dict):
+            continue
+        kind = str(slot.get('kind') or '')
+        for key in (slot.get('column'), slot.get('name'), slot.get('text')):
+            text = str(key or '').strip()
+            if text and text not in kinds:
+                kinds[text] = kind
+    return kinds
+
+
+def _column_entry(col: dict, *, name: str, pos, multi: bool, kinds: dict) -> dict:
+    """
+    一条列描述（`spec_columns` 里那 8 个键的**唯一出处**）。
+
+    抽出来是因为 `spec_columns` 已经顶到复杂度棘轮了（它做"声明优先 / 内置表 /
+    从格子推列"三件事），而这段键表纯属拼装 —— 拼装就该有自己的名字。
+    """
+    return {'name': name,
+            'label': str(col.get('label') or ''),
+            'choices': [str(c) for c in (col.get('choices') or ())],
+            'required': bool(col.get('required')),
+            'positional': pos,
+            # "这一格能装好几个词"（多音轨 / 多声部）：卡片据此给提示
+            'multi': multi,
+            # 声明里这一格的类型（可能空 → 界面按"有没有候选"兜底）
+            'kind': str(col.get('kind') or kinds.get(name) or ''),
+            'choices_from': str(col.get('choices_from') or '')}
+
+
 def spec_columns(registry, head: str) -> list:
     """
     这条声明的**列描述**（M4）：
@@ -784,6 +962,7 @@ def spec_columns(registry, head: str) -> list:
         return []
     positions = _declared_positionals(spec)
     multi = _declared_multi(spec)
+    kinds = _declared_kinds(spec)
     cols = [c for c in (spec.columns or ()) if isinstance(c, dict)]
     if not cols:
         # ⚠⚠ **只有格子、没有列**的声明也要能编辑（2026-10-18）。
@@ -830,14 +1009,9 @@ def spec_columns(registry, head: str) -> list:
         pos = col.get('positional')
         if pos is None:
             pos = positions.get(name)
-        out.append({'name': name,
-                    'label': str(col.get('label') or ''),
-                    'choices': [str(c) for c in (col.get('choices') or ())],
-                    'required': bool(col.get('required')),
-                    'positional': pos,
-                    # "这一格能装好几个词"（多音轨 / 多声部）：卡片据此给提示
-                    'multi': bool(col.get('multi')) or name in multi,
-                    'choices_from': str(col.get('choices_from') or '')})
+        out.append(_column_entry(col, name=name, pos=pos,
+                                 multi=bool(col.get('multi')) or name in multi,
+                                 kinds=kinds))
     # ---- 复杂子句（2026-10-30）------------------------------------------
     # 子句**不是位置参数**：它由关键字引入、可以不出现、顺序也可变。
     # 所以 `positional=None`，并带上 `clause` 元数据，让读值/折回知道
@@ -1136,6 +1310,9 @@ def dynamic_spec_columns(beats, registry) -> list:
             out.append({'header': header, 'name': name, 'param': col['name'],
                         'label': col['label'], 'choices': list(col['choices']),
                         'required': col['required'],
+                        # 声明里这一格的类型（`keyword` / `choice` / `number` …）：
+                        # 卡片据此选控件，不再"所有格子都是输入框"。
+                        'kind': str(col.get('kind') or ''),
                         'positional': col.get('positional'),
                         # "这一格能装好几个词"（2026-10-18）：卡片据此在那一格
                         # 旁边写"可写多个（空格分隔）"，Excel 侧目前不看它。
@@ -1693,6 +1870,152 @@ def declare_calls(project_root, calls, *, replace: bool = True) -> dict:
     clear_cache()
     return {'ok': True, 'path': str(path),
             'count': len(data.get(CALLS_KEY) or []), 'reason': ''}
+
+
+def call_kw_ok(text) -> bool:
+    """`layer` 这样的**关键字参数名**合不合法（唯一一份规则：`_IDENT_RE`）。
+
+    公开它（2026-11-07 第四轮）是为了让"参数编辑窗口"和"清单读取"用同一条
+    规则：界面报"这个名字不能当关键字"，存盘时那边就真的会跳过它 ——
+    两边各写一遍正则，迟早出现"界面说行、存进去没了"。
+    """
+    return _ident_ok(text)
+
+
+#: 一条调用声明**归谁管**（`call_owner` 的返回值）→ 界面上的说法。
+#:
+#: 为什么要按"归谁"分流：同一个 head 可以被 `storygraph.ext.json` 与
+#: `storygraph.rules.json` 各声明一次，而装配顺序是**扩展优先**
+#: （`for_project` 里 `ext_calls` 盖掉同名条目）。于是写错文件 = 写的这份
+#: 永远读不到 —— 界面还回一句"已保存"，这就是最坏的一种"能骗人"。
+CALL_OWNER_LABELS = {
+    'rules': '规则文件',
+    'ext': '扩展',
+    'plugin': '插件',
+    'builtin': '工具自带',
+}
+
+
+def call_owner(origin) -> str:
+    """
+    调用声明的 `origin` → 管辖区（`'rules'` / `'ext'` / `'plugin'` / `'builtin'`）。
+
+    没有 `origin`（老数据、或手写的 rules.json）→ `'rules'`：在 2026-11-07
+    之前，调用声明只有 rules.json 这一条路，所以这是唯一安全的默认。
+    """
+    text = str(origin or '').strip()
+    if not text:
+        return 'rules'
+    if text.startswith('plugin:'):
+        return 'plugin'
+    if text == 'builtin':
+        return 'builtin'
+    # 清单可能在项目根或 `game/` 下（`manifest_path`），所以按**文件名**认。
+    base = text.replace('\\', '/').rsplit('/', 1)[-1]
+    if base == EXT_MANIFEST or text == 'project':
+        return 'ext'
+    return 'rules'
+
+
+#: 语句声明的来处用**同一套判据**：`origin` 只看文件名，与"调用还是语句"无关。
+#:
+#: `host-registry`（脚本里的 `renpy.register_statement`）落在 `rules`：写进
+#: `rules.json` 会**覆盖** CDS —— 那正是"教工具认出脚本里已经注册的写法"该
+#: 有的行为（`declared` 盖 `host`）。只有扩展 / 插件 / 内置那三种写了会被盖住。
+statement_owner = call_owner
+
+
+def _split_call_owners(calls) -> tuple:
+    """
+    一整份调用表 → `(能写进规则文件的, 被挡住的)`（纯函数）。
+
+    `origin` 是"来处"，**不是**声明内容：可写的那份先把它摘掉，
+    否则它会被原样写进 `rules.json`（读回来又被当成参数里的 origin）。
+    """
+    writable, blocked = [], []
+    for call in (calls or ()):
+        if not isinstance(call, dict):
+            continue
+        head = str(call.get('head') or '').strip()
+        if not head:
+            continue
+        origin = str(call.get('origin') or '')
+        owner = call_owner(origin)
+        if owner != 'rules':
+            blocked.append({'head': head, 'owner': owner, 'origin': origin})
+            continue
+        writable.append({k: v for k, v in call.items() if k != 'origin'})
+    return writable, blocked
+
+
+def _call_heads_in_manifest(project_root) -> set:
+    """规则文件里现在有哪些调用 head（读不出来 / 没有文件 → 空集合）。"""
+    import json as _json
+    path = manifest_path(project_root)
+    if not path.is_file():
+        return set()
+    try:
+        data = _json.loads(path.read_text(encoding='utf-8') or '{}')
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {str(c.get('head') or '') for c in
+            _calls_from_manifest(data.get(CALLS_KEY))}
+
+
+def save_calls(project_root, calls) -> dict:
+    """
+    界面上**一整份**调用表 → 落到**该落的文件**里（2026-11-07 第四轮）。
+
+    为什么不能直接 `declare_calls`（探针 `.pip-tmp/probe_call_owner.py`）：
+
+        项目里扩展声明了 my_wipe（方向 / 秒数）
+          → 在看板上改名字、点保存 → 写进 rules.json（`ok: True`，"已保存 1 条"）
+          → 重新装配：认到的**还是扩展那份**（改了个寂寞）
+          → 再把扩展那条关掉：rules.json 里那份**跟着消失**（按 head 摘掉）
+
+    所以这里按 `origin` 分流，并且**不假装**：
+
+      · `rules`   → 写 `storygraph.rules.json`（`declare_calls` 那一份）；
+      · `ext`     → **不写**：声明住在 `storygraph.ext.json`，写规则文件会被
+                    它盖住。返回里说清"去扩展窗口改同一条"；
+      · `plugin`  → **不写**：插件文件是输入（可能还是别人的），就地改会被
+                    下次加载冲掉；
+      · `builtin` → **不写**：形状是工具内置的（引擎 API）。
+
+    `replace` 语义保留（这一份就是规则文件里的全部）：于是"把被扩展盖住的
+    旧条目顺手清掉"是自动的 —— 那些行不在可写集合里，写盘时就不见了。
+
+    返回 `{'ok','path','count','written','deleted','blocked','reason'}`：
+
+      · `written`  —— 真写进规则文件的 head；
+      · `deleted`  —— 从规则文件里**清掉**的旧 head（被扩展 / 插件接管的那几条）；
+      · `blocked`  —— 这次**没写**的 `[{'head','owner','origin'}]`（界面照着说话）。
+    """
+    root = Path(project_root) if project_root else None
+    if root is None:
+        return {'ok': False, 'path': '', 'count': 0, 'written': [],
+                'deleted': [], 'blocked': [],
+                'reason': '没有项目根目录'}
+    writable, blocked = _split_call_owners(calls)
+    old_heads = _call_heads_in_manifest(root)
+    # 没有任何可写的、规则文件里也没有 calls → 不建一个空文件（写盘也要有理由）
+    if not writable and not old_heads:
+        return {'ok': True, 'path': str(manifest_path(root)), 'count': 0,
+                'written': [], 'deleted': [], 'blocked': blocked,
+                'reason': ''}
+    res = declare_calls(root, writable, replace=True)
+    if not res.get('ok'):
+        return {'ok': False, 'path': str(res.get('path') or ''), 'count': 0,
+                'written': [], 'deleted': [], 'blocked': blocked,
+                'reason': str(res.get('reason') or '')}
+    keep = {str(c.get('head') or '') for c in writable}
+    return {'ok': True, 'path': str(res.get('path') or ''),
+            'count': int(res.get('count') or 0),
+            'written': [str(c.get('head') or '') for c in writable],
+            'deleted': sorted(old_heads - keep), 'blocked': blocked,
+            'reason': ''}
 
 
 def is_known_head(head: str, registry=None) -> bool:
@@ -2351,17 +2674,22 @@ def format_registry_report(registry) -> str:
     return '\n'.join(lines)
 
 
-__all__ = ['ATTR_GROUPS_KEY', 'MANIFEST_KEY', 'RegisteredStatement',
+__all__ = ['ATTR_GROUPS_KEY', 'CALL_OWNER_LABELS', 'MANIFEST_KEY',
+           'RegisteredStatement',
            'StatementRegistry',
            'UNMODELED_KINDS', 'annotate_spec_statements', 'arg_columns',
            'as_registered',
+           'call_kw_ok', 'call_owner',
            'capability_of', 'classify_head', 'clear_attr_groups', 'clear_cache',
            'coverage_of_beats', 'coverage_of_statements',
-           'declare_attr_groups', 'declare_statement', 'declared_builtins',
+           'declare_attr_groups', 'declare_calls', 'declare_statement',
+           'declared_builtins',
            'describe_statements',
            'discover_undeclared',
            'dynamic_spec_columns', 'format_capability_summary',
            'format_registry_report', 'manifest_path',
            'registry_for_parse_result',
            'remove_statement', 'reset_declarations', 'root_of',
-           'spec_arg_choices', 'spec_body_allows', 'spec_columns']
+           'save_calls',
+           'spec_arg_choices', 'spec_body_allows', 'spec_columns',
+           'statement_owner']

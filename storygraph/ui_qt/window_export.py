@@ -120,6 +120,63 @@ def _scan_stage_identity(host, beats):
         return None
 
 
+def _symbols_for_attr_scan(host):
+    """
+    属性门禁要的符号表：会话里那份优先；没有就现造一份。
+
+    为什么不能只信 `session.symbols`：
+      · 从 `.xlsx` 导回时会话可能是空的（`len(session)==0`），但资源表在；
+      · 手工构造会话 / 测试替身不一定调过 `refresh_symbols()`。
+    两份都拿不到 → 返回 None，扫描会标 `degraded`（判不了就不报）。
+    """
+    session = getattr(host, '_session', None)
+    symbols = getattr(session, 'symbols', None)
+    if symbols is not None and getattr(symbols, '_project_root', ''):
+        return symbols
+    provider = getattr(host, '_registry_provider', None)
+    registry = provider() if callable(provider) else None
+    if registry is not None:
+        from storygraph.story.beat_render import make_symbols
+        made = make_symbols(registry)
+        if getattr(made, '_project_root', ''):
+            return made
+    return symbols
+
+
+def _scan_sprite_attrs(host, beats):
+    """
+    导出前的**立绘属性门禁**：这几条 `show` 的属性，项目里声明过吗？
+
+    判据在 `app.sprite_attr_guard`（只读、不猜；与卡片黄条同一个
+    "known" 集合）：声明 / 资源表 / `defined_words` / 同名图片。
+    `aa` 这种项目定义的哨兵**不会**被报；`base_hand_down` 这种
+    唯一拼法变体会报，并给出正确写法，但**一个字都不改**。
+
+    没有符号表（项目没打开 / 会话没载入）→ `degraded` 空结果：
+    **判不了就不报**（假警报比不报更坏），也绝不因此拦导出。
+    """
+    try:
+        from storygraph.app import sprite_attr_guard as AG
+
+        symbols = _symbols_for_attr_scan(host)
+        res = AG.scan_sprite_attrs(beats, symbols)
+        log = getattr(host, '_log', None)
+        if callable(log):
+            if res.degraded:
+                log('[导出] 立绘属性检查跳过：没有可用的符号表/声明，'
+                    '这次判不了')
+            elif res:
+                log(f'[导出] 立绘属性检查：{len(res)} 条 show 的属性'
+                    f'项目里没声明（共看 {res.checked} 条）')
+        return res
+    except (AttributeError, TypeError, ValueError, KeyError, OSError) as e:
+        # 检查失败不拦导出：说一句，跳过这一道；绝不因为一次检查把导出弄挂。
+        log = getattr(host, '_log', None)
+        if callable(log):
+            log(f'[导出] 立绘属性检查失败（跳过）：{e}')
+        return None
+
+
 class WindowExportMixin:
     """
     导出 / 体检 / 舞台预览 / 剧本表 —— 与外部世界打交道的那一批。
@@ -240,18 +297,20 @@ class WindowExportMixin:
         """
         导出前查一遍「舞台（高级）」和「立绘」列，返回 `False` = 人点了取消（零写）。
 
-        两类问题（判据各自在模块里，一行都不在这里）：
+        三类问题（判据各自在模块里，一行都不在这里）：
 
           · `story.stage_suspect` —— 舞台列里"看着不像 Ren'Py 语句"的行
             （宽进：宁可多问一次，不要漏一句），可以挪到「备注」列；
           · `app.stage_identity_guard` —— `show` 写的名字项目里根本找不到
-            （2026-10-30 用户：**不许静默写出 `show refusing`**），只能改名字。
+            （2026-10-30 用户：**不许静默写出 `show refusing`**），只能改名字；
+          · `app.sprite_attr_guard` —— `show` 的属性项目没声明
+            （2026-11-05 用户：`base_hand_down` 导出前再警告一次），只能改写法。
 
-        两类**并排摆进同一个弹窗**（同一个流程、同一个"原样导出 / 取消"决定），
+        三类**并排摆进同一个弹窗**（同一个流程、同一个"原样导出 / 取消"决定），
         别另造一套框 —— 一次导出最多问一次，问完就写。
 
-        为什么**默认原样导出**而不是默认处理：挪走/改名都会改用户填的格子。
-        工具不该把"改用户的表"当默认动作 —— 要改得人自己点。
+        为什么**默认原样导出**而不是默认处理：挪走/改名/改写法都会改用户填的
+        格子。工具不该把"改用户的表"当默认动作 —— 要改得人自己点。
         """
         from storygraph.story import stage_suspect as SS
 
@@ -265,13 +324,19 @@ class WindowExportMixin:
             swallow('main_window._review_stage_suspects', e)
             res = SS.ScanResult()
         ident = _scan_stage_identity(self, beats)
-        if not res and not ident:
+        attrs = _scan_sprite_attrs(self, beats)
+        if not res and not ident and not attrs:
             return True
 
         from PySide6.QtWidgets import QDialog
         from storygraph.ui_qt import dialog_stage_suspect as D
 
-        dlg = D.StageSuspectDialog(self, res or SS.ScanResult(), identity=ident)
+        # 只有**真有**属性问题时才把 `attrs=` 传进去：老调用方/测试替身
+        # 可能还是 `__init__(..., identity=None)` 的签名，没东西可报时
+        # 不该因为多一个空参数炸掉（也少建一个空表）。
+        extra = {'attrs': attrs} if attrs else {}
+        dlg = D.StageSuspectDialog(self, res or SS.ScanResult(),
+                                   identity=ident, **extra)
         if dlg.exec() != QDialog.Accepted:
             self._status('已取消导出 —— 什么都没写')
             self._log('[导出] 已取消（未写任何文件）')
@@ -370,14 +435,16 @@ class WindowExportMixin:
             swallow('main_window._review_table_stage_suspects', e)
             res = SS.ScanResult()
         ident = _scan_stage_identity(self, beats)
-        if not res and not ident:
+        attrs = _scan_sprite_attrs(self, beats)
+        if not res and not ident and not attrs:
             return True
 
         from PySide6.QtWidgets import QDialog
         from storygraph.ui_qt import dialog_stage_suspect as D
 
+        extra = {'attrs': attrs} if attrs else {}
         dlg = D.StageSuspectDialog(self, res or SS.ScanResult(),
-                                   allow_move=False, identity=ident)
+                                   allow_move=False, identity=ident, **extra)
         if dlg.exec() != QDialog.Accepted:
             self._status('已取消导出 —— 什么都没写')
             self._log('[导出] 已取消（未写任何文件）')

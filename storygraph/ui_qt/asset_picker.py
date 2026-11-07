@@ -461,6 +461,11 @@ class AssetPickerDialog(QDialog):
         self._identities = None
         #: `asset_id → PickResult | None`：选中即校验的结果（切来切去不重复算）
         self._pick_cache: dict = {}
+        #: **项目上下文只建一次**（2026-11-03）：`pick_context` 里有
+        #: `build_copy_index`（1979 行两两比较）与扫全项目 `.rpy`，
+        #: 实测 98 ms + 68 ms。选择器是**逐张**调 `resolve_pick` 的，
+        #: 从前每张都重建一次 —— 1979 张图 = 5 分钟纯等待（用户感觉是"卡死"）。
+        self._pick_ctx: dict = {}
         #: `分组名 → 用途档`（只用于"选了用途就藏起不相关的分组"）
         self._group_purpose_cache: dict = {}
         #: 左栏口径（`GROUP_MODES` 之一）。**不落盘**：这是"这一眼怎么找"，
@@ -1366,6 +1371,28 @@ class AssetPickerDialog(QDialog):
         """一条图片的判定结论（`Identity`；判定层不可用时为 None）。"""
         return self._identity_map().get(str(aid or ''))
 
+    def _shared_pick_context(self):
+        """
+        整个窗口共用一份 `pick_context`（**含 `copy_index`**），懒建一次。
+
+        为什么把 `copy_index` 也塞进来：`resolve_pick` 内部默认会自己建一份
+        （1979 行两两比较 ≈ 100 ms），逐张调用时又是一次平方级。
+        实测（真机 60 张）：不传上下文 175 ms/张，传了 2 ms/张。
+        """
+        if self._pick_ctx:
+            return self._pick_ctx
+        ctx: dict = {}
+        try:
+            ctx = dict(pick_context(self._registry, self._project_root) or {})
+            if ctx:
+                from storygraph.assets.asset_identity import build_copy_index
+                ctx['copy_index'] = build_copy_index(ctx.get('all_rows') or {})
+        except Exception as e:                     # noqa: BLE001 - 判定层坏了也要能开窗
+            swallow('ui_qt.asset_picker._shared_pick_context', e)
+            ctx = {}
+        self._pick_ctx = ctx
+        return ctx
+
     def _pick_result(self, aid):
         """
         选中一条图时的判定：能 show 吗 / 预览图换成哪张真立绘 / 为什么不能加。
@@ -1382,7 +1409,8 @@ class AssetPickerDialog(QDialog):
         try:
             res = P.resolve_pick(aid, self._row(aid) or {},
                                  project_root=self._project_root,
-                                 registry=self._registry)
+                                 registry=self._registry,
+                                 context=self._shared_pick_context())
         except Exception as e:                     # noqa: BLE001 - 不让判定炸掉界面
             swallow('ui_qt.asset_picker._pick_result', e)
             res = None

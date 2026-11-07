@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from storygraph.core.vocabulary import (
@@ -44,6 +45,9 @@ from storygraph.core.vocabulary import (
 
 from storygraph.core.safeguard import swallow
 from storygraph.assets.asset_dimensions import dimensions_by_tag
+#: "这张图放在立绘目录里吗" —— 唯一实现在 assets（2026-11-03）。
+#: story → assets 是下行（`assets` 是底座，不反向 import story），不会成环。
+from storygraph.assets.asset_identity import is_under_sprite_container
 
 # ---------------------------------------------------------------------------
 # 词表：把"人话"映射成 Ren'Py 认识的东西。
@@ -561,6 +565,69 @@ class Symbols:
         #: 来源是资源表的 `Group`/`Value` 列；老表没有时按 `Attributes`
         #: 逐词展开（`group=''`）—— 行为与从前一致，只是多了一个入口。
         self._dims_by_tag = {}
+        #: **有成套立绘的 tag**（路径目录里写着 `characters` / `立绘` / `sprite`…）。
+        #:
+        #: 与 `_attrs_by_tag` 的区别：那个只说明"有这个 tag 的图"，
+        #: 这个还要求"作者把它放在立绘目录里" —— 是**写出来的**证据，
+        #: 不是位置猜测（`images/nbg/bg1.1.png` 那 42 张背景进不来）。
+        #:
+        #: 用途：卡片里写了 `qing base` 而 `qing` 没有角色认领时，
+        #: 提示要说清"它确实有 4 张立绘，只是角色表没认领"，
+        #: 而不是把用户打发去「资源映射」（2026-11-03 用户实测）。
+        self._sprite_tags = set()
+        #: **项目 `layeredimage` 声明过的 tag** → `{tag: [属性, …]}`（第四路）。
+        #:
+        #: 为什么必须有这一路（2026-11-03，用户第二次报同一件事）：
+        #: `definitions.rpy` 里写着
+        #:
+        #:     layeredimage qing:
+        #:         image_format 'images/characters/qing/{image}.png'
+        #:         attribute base default: "normal"
+        #:         group expressions:
+        #:             attribute angry: 'speechless'
+        #:
+        #: 也就是说 **`show qing base` 是合法的**（`base` 映射到 `normal.png`），
+        #: 而 `qing` 这个 tag 在 `characters.xlsx` 里根本没有对应行
+        #: （出声的是 `q`，显示名「青」）。只查角色表的判据会把**引擎认识的东西**
+        #: 判成"不是立绘" —— 用户看到的正是"预览有图、提示说没有"。
+        #:
+        #: 数据来自 `asset_identity.declared_sprite_attrs`（属性名本身；
+        #: `layeredimage`，以及项目里直接的 `image` / `renpy.image()` 声明）。
+        #:
+        #: ⚠ **懒加载**（2026-11-04）：读声明要扫一遍 `.rpy`，而 `Symbols` 在
+        #: 编译/导出/金标里会被构造很多次（真机 hydrate 金标每文件一次）。
+        #: 只有真正问"这个属性声明过吗"的提示层才付这笔钱。
+        self._declared_attrs = {}
+        #: 项目在 `init python` / `python` 块 / `define` 里**定义过**的代号词。
+        #: `None` = 还没读（不是空集）。
+        #:
+        #: 为什么需要（用户："`aa` 明明是服装代号，这你也查不到？"）：
+        #: `aa` 写在 `CC_OUTFIT_CYCLE` / `CC_OUTFIT_LABEL` 这类**数据结构**里
+        #: （界面换装循环的代号，"普通"），**不是** `layeredimage` 的
+        #: `attribute`，资源表也没登记 —— 只看那两路会说"没有这个属性"。
+        #:
+        #: ⚠⚠ 判据落在**定义位置**，不落在使用位置：第一版用"剧本里 `show` 过
+        #: 就算认识"，用户当场否掉（"万一剧本错了呢？万一我用了 `ba` 呢？"）。
+        self._project_words = None
+        self._declared_loaded = False
+        self._project_root = str(getattr(registry, 'project_root', '') or '')
+        #: 引擎说"这几个 image 名不存在"（归一化键 `lan|aa|happy`）。
+        #: 空集 = 还没问过 / 问失败（**不是**"全都合法"）。
+        self._engine_bad = set()
+        #: 引擎裁决的新鲜度缓存（`None` = 还没算过）。
+        #: ⚠ 别在这里再写 `self._project_root = ''` —— 上面已经赋过真值了，
+        #: 覆盖成空串会让 `engine_verdict_state()` 永远问空路径 → `unknown`
+        #: （2026-11-05 自己踩的：两次 replace 顺序反了）。
+        self._verdict_state = None
+        root = self._project_root
+        if root:
+            try:
+                # **引擎的裁决**（打开项目时后台跑出来的缓存）——只读一个小
+                # JSON，不扫盘，所以放在构造里。
+                from storygraph.assets.engine_images import bad_keys
+                self._engine_bad = bad_keys(root)
+            except Exception as e:                  # noqa: BLE001 - 读不到就当没有
+                swallow('story.dsl.Symbols.engine_bad', e)
         self._index = index
 
         for category, target in (keywords or {}).items():
@@ -604,6 +671,14 @@ class Symbols:
             for a in (row.get('_attrs') or []):
                 if a and a not in attrs:
                     attrs.append(a)
+            # **这个 tag 有"放在立绘目录里"的图吗**（2026-11-03）。
+            #
+            # 为什么不能只看"有这个 tag 的图"：`game/images/nbg/bg1.1.png`
+            # 那 42 张背景被位置猜测判成了 `character`，只看 tag 会把背景
+            # 也算成"一套立绘"。判据取**路径目录写着 characters/立绘/sprite** ——
+            # 写出来的字才是证据（唯一实现在 `asset_identity`）。
+            if is_under_sprite_container(str(row.get('Path') or '')):
+                self._sprite_tags.add(tag)
         self._dims_by_tag = dimensions_by_tag(
             (getattr(reg, 'images', {}) or {}).values())
 
@@ -663,6 +738,186 @@ class Symbols:
 
     def attrs_of_tag(self, tag: str) -> list:
         return list(self._attrs_by_tag.get((tag or '').strip(), []))
+
+    def has_sprites(self, tag: str) -> bool:
+        """
+        这个 tag 有**放在立绘目录里**的图吗（`images/characters/<tag>/…`）。
+
+        注意它回答的不是"这个 tag 是角色"（那要角色表认领，见 `is_actor_tag`），
+        而是"这套立绘素材真的存在"。两者分开，提示才能说准话：
+        素材在、角色没认领 —— 那一步得人去角色表填「立绘 tag」。
+        """
+        return (tag or '').strip() in self._sprite_tags
+
+    def engine_bad_keys(self) -> set:
+        """引擎说"不是图像"的归一化键（`lan|aa|happy`）；空集 = 没问过。"""
+        return set(self._engine_bad)
+
+    def engine_verdict_state(self) -> str:
+        """
+        这份引擎裁决**还新不新** → `'fresh' | 'stale' | 'unknown'`。
+
+        ⚠ **懒算**（2026-11-05 L1-2）：算它要 stat 93 个 `.rpy`，真机
+        39–68 ms —— 塞进 `__init__` 会让**每张卡片**都等一次。所以第一次
+        问的时候才算，结果缓存在 `self._verdict_state`。
+
+        为什么要这一层：`.rpy` 改过之后（加了 `attribute` / 删了 `image`），
+        旧裁决会**说反话** —— 那比"没有裁决"更糟。
+        """
+        if self._verdict_state is None:
+            try:
+                from storygraph.assets.engine_images import verdict_state
+                self._verdict_state = verdict_state(self._project_root)
+            except Exception as e:              # noqa: BLE001 - 算不出来就说不知道
+                swallow('story.dsl.engine_verdict_state', e)
+                self._verdict_state = 'unknown'
+        return self._verdict_state
+
+    def defined_words(self) -> list:
+        """项目 `init python` / `define` 里**定义过**的代号词（与 tag 无关）。
+
+        ⚠ 名字不能叫 `project_words` —— `Symbols` 早就有一个**属性**
+        `project_words`（关键词表 `{kind: {词}}`），撞上去就是
+        `'dict' object is not callable`。
+
+        ⚠ 懒加载：第一次问才扫 `.rpy`（`None` 是"还没读"，空集是"读过了"）。
+        """
+        if self._project_words is None:
+            self._project_words = self._load_project_words()
+        return sorted(self._project_words)
+
+    def _load_project_words(self) -> set:
+        root = self._project_root
+        if not root:
+            return set()
+        try:
+            from storygraph.assets.asset_identity import (
+                project_literal_words)
+            return set(project_literal_words(root) or ())
+        except Exception as e:                      # noqa: BLE001 - 读不出来就当没有
+            swallow('story.dsl.Symbols.project_words', e)
+            return set()
+
+    def token_image_path(self, tag: str, token: str) -> str:
+        """
+        这个词按 `layeredimage` 的 `image_format` 展开后**真实存在**的图片
+        （项目相对路径，`''` = 没有）。
+
+        为什么"有图"也算证据：声明可能漏写 `attribute`，但图在 ——
+        真机 `images/characters/lan/lose.png` 存在、剧本写 `show lan aa lose`。
+        只查声明会说"没有这个属性"，而用户要的是"找到对应的图"。
+        """
+        tag = str(tag or '').strip()
+        token = str(token or '').strip()
+        if not tag or not token or not self._project_root:
+            return ''
+        try:
+            from storygraph.story.layered_model import load_layer_model_cached
+            model = load_layer_model_cached(self._project_root)
+            img = (getattr(model, 'images', None) or {}).get(tag)
+            fmt = str(getattr(img, 'image_format', '') or '')
+        except Exception as e:                      # noqa: BLE001 - 结构怪就当没有
+            swallow('story.dsl.Symbols.token_image', e)
+            return ''
+        if not fmt:
+            return ''
+        rel = fmt.replace('{image}', token)
+        root = Path(self._project_root)
+        for base in (root / 'game', root):
+            path = base / rel
+            if path.is_file():
+                try:
+                    return str(path.relative_to(root)).replace('\\', '/')
+                except ValueError:
+                    return str(path).replace('\\', '/')
+        return ''
+
+    def resolved_paths_of(self, tag: str, attrs) -> list:
+        """
+        `show <tag> <attrs>` **实际会叠出哪些图**（项目相对路径，只列存在的）。
+
+        这是"找到对应的图"的唯一实现：走 `layeredimage` 的组条件 / 默认属性
+        / 函数展开（`resolve_layers`），不是按文件名猜。
+        """
+        if not self._project_root:
+            # 没有项目根时连扫都不扫：`Path('') == '.'`，会把仓库当项目
+            # （2026-11-05 实测界面卡死，见 `layered_model.load_layer_model`）。
+            return []
+        try:
+            from storygraph.story.layered_model import (
+                load_layer_model_cached, resolve_layers)
+            model = load_layer_model_cached(self._project_root)
+            plan = resolve_layers(model, str(tag or ''), list(attrs or ()),
+                                  self._project_root)
+        except Exception as e:                      # noqa: BLE001 - 判不了就不给
+            swallow('story.dsl.Symbols.resolved_paths', e)
+            return []
+        root = Path(self._project_root)
+        out = []
+        for path in plan.paths():
+            try:
+                out.append(str(Path(path).relative_to(root)).replace('\\', '/'))
+            except ValueError:
+                out.append(str(path).replace('\\', '/'))
+        return out
+
+    def _ensure_declared(self) -> None:
+        """第一次问 `declared_attrs_of` 时读声明（见 `_declared_attrs` 的说明）。"""
+        if self._declared_loaded:
+            return
+        self._declared_loaded = True               # 先置位：读失败也不反复扫
+        root = self._project_root
+        if not root:
+            return
+        try:
+            from storygraph.assets.asset_identity import (
+                declared_sprite_attrs, image_statement_words)
+            # ① `layeredimage` 的属性名（**全部**，不是反查表的唯一值）
+            # ② 直接的 `image <tag> <attr> …` / `renpy.image("tag attr")`
+            #    —— 引擎认这些名字，但不是 `layeredimage` 的 attribute。
+            groups = (declared_sprite_attrs(root) or {},
+                      image_statement_words(root) or {})
+        except Exception as e:                      # noqa: BLE001 - 声明读不出来就当没有
+            swallow('story.dsl.Symbols.declared', e)
+            return
+        for mapping in groups:
+            for _tag, _names in mapping.items():
+                bucket = self._declared_attrs.setdefault(str(_tag), [])
+                for _name in _names:
+                    _name = str(_name).strip()
+                    if _name and _name not in bucket:
+                        bucket.append(_name)
+
+    def declared_attrs_of(self, tag: str) -> list:
+        """
+        **项目脚本自己声明过**的属性名（`layeredimage qing:` 的 attribute）。
+
+        `show qing base` 之所以合法，就是因为这里声明了 `attribute base`；
+        属性名与**文件名**经常不是一回事（`attribute angry: 'speechless'`
+        —— 文件叫 speechless、属性叫 angry）。所以候选与校验都该用这一份。
+
+        也包含项目里直接的 `image <tag> <attr>` / `renpy.image("tag attr")`
+        声明（引擎认，但不是 `layeredimage` 的属性）。
+
+        没有声明 / 没有项目根 → `[]`（不猜）。
+        """
+        self._ensure_declared()
+        return list(self._declared_attrs.get((tag or '').strip(), []))
+
+    def sprite_tags_without_owner(self) -> dict:
+        """
+        **有立绘素材、但角色表没认领**的 tag → `{tag: [属性, …]}`（按 tag 排序）。
+
+        给资源管理器的体检 / 诊断面板用：一次列出"这些立绘没人认领"，
+        比用户在 1979 行表里猜哪条是立绘可靠得多（2026-11-03）。
+        """
+        out = {}
+        for tag in sorted(self._sprite_tags):
+            if self.is_actor_tag(tag):
+                continue
+            attrs = self._attrs_by_tag.get(tag) or []
+            out[tag] = list(attrs)
+        return out
 
     def dimensions_of_tag(self, tag: str) -> list:
         """

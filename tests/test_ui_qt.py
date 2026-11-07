@@ -3400,7 +3400,11 @@ class TestAddingASpriteReachesTheFile:
         idx = next(i for i, b in enumerate(window._session.beats)
                    if (b.text or '').strip())
         window._show_index(idx)
-        window._panel._toggle_adv()               # 高级区：类型那一格才写回
+        # 高级区那一格才写回 —— **确认它开着**，而不是"切一下"：
+        # 2026-11-07 起高级区默认展开，`_toggle_adv()` 会把默认状态关掉，
+        # 于是"类型"那一格写了也不落地（`FieldWriter` 按展开状态过滤）。
+        if not window._panel.is_advanced_open():
+            window._panel._toggle_adv()
         # 造出用户的起始状态：类型 narration、说话人空
         window._panel._set_value('Kind', 'narration')
         window._panel._set_value('Speaker', '')

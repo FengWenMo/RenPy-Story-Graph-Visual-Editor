@@ -37,6 +37,9 @@ from storygraph.ui_qt.code_edit import CodeEditor
 from storygraph.ui_qt.labeled_choices import (as_choices, combo_value,
                                               fill_combo, legacy_pairs,
                                               select_value)
+from storygraph.ext import card_fields as CF
+from storygraph.ext.schema import FieldSpec
+from storygraph.ui_qt import card_rows, field_widgets
 from storygraph.ui_qt.mapping_status import refresh_mapping_status
 from storygraph.ui_qt.size_panel import SizePanel
 from storygraph.ui_qt.sprite_grid import SpriteGridWidget
@@ -164,7 +167,11 @@ class BeatCardEditor(QWidget):
         super().__init__(parent)
         self._symbols = symbols
         self._widgets: dict = {}
-        self._adv_open = False
+        #: 高级区**默认展开**（2026-11-07 按 Unity：`Foldout` 默认是开的）。
+        #:
+        #: 折叠只是"这一屏我看完了"的临时动作，不是"藏起来不用管"——
+        #: 收起之后里面的字段照样写回（见 `collect_fields`）。
+        self._adv_open = True
         self._on_pick_image = on_pick_image
         #: `(字段名, 当前值) -> 新值`：背景/音乐/语音那三格的「选择…」用它。
         #: 卡片不认识资源表与选择器 —— 那条路由主窗口注入（同一个回调模式）。
@@ -349,10 +356,8 @@ class BeatCardEditor(QWidget):
         dlg_lay.setSpacing(T.SPACE['xs'])
         root.addWidget(self._dialogue_box)
 
-        # —— 说话人 ——（一行，右边留白，视觉上"标签 + 值"）
-        row1 = QHBoxLayout()
-        row1.setSpacing(T.SPACE['sm'])
-        row1.addWidget(self._section('说话人'))
+        # —— 说话人 ——（**一行一条**：标签右对齐到全局那条竖线，见 `card_rows`）
+        #
         # ⚠ 这格必须是 `WheelSafeComboBox`（2026-10-30 用户："滚动会导致选择切换"）。
         #   它是可编辑组合框 —— 实测这种控件**连焦点都不用**就会被滚轮换值，
         #   而且把滚动吃掉，于是滚页面时"人换了、页面没动"。
@@ -361,16 +366,15 @@ class BeatCardEditor(QWidget):
         self._speaker.setMinimumWidth(160)
         self._speaker.setMaximumWidth(240)
         self._widgets['Speaker'] = self._speaker
-        row1.addWidget(self._speaker, 0)
-        row1.addStretch(1)
-        dlg_lay.addLayout(row1)
+        # `stretch=0`：说话人是短值，不该拉满整行（Unity 的 ObjectField 同理）
+        dlg_lay.addWidget(card_rows.row('说话人', self._speaker, stretch=0))
 
         # —— 台词（这张卡的主角，给足高度）——
         self._text = QPlainTextEdit()
         self._text.setPlaceholderText('这一拍要说的台词…')
         self._text.setFixedHeight(3 * 24 + 16)
         self._widgets['Text'] = self._text
-        dlg_lay.addWidget(self._text)
+        dlg_lay.addWidget(card_rows.row('台词', self._text))
 
         # —— 字数：超长台词在游戏里会溢出对话框 ——
         # tkinter 版有这一项，搬 Qt 时漏了。它属于"作者看不见的坑"：
@@ -409,9 +413,6 @@ class BeatCardEditor(QWidget):
         #     写回时由 `join_say_tail` 补成 `with dissolve`；
         #   · 仍是可编辑下拉：`(what_color="#f00") with dissolve` 这种
         #     组合子句照原样存（`split/join` 都认"不是纯 with 形式"）。
-        row_tail = QHBoxLayout()
-        row_tail.setSpacing(T.SPACE['sm'])
-        row_tail.addWidget(self._section('转场'))
         self._say_tail = WheelSafeComboBox()
         self._say_tail.setEditable(True)
         self._say_tail.setMinimumWidth(180)
@@ -422,9 +423,7 @@ class BeatCardEditor(QWidget):
             '这一句的转场（say 的后缀）：选一个就行，会写成 `"台词" with dissolve`。\n'
             '也可以手打其它子句：`(what_color="#f00") with dissolve` / `nointeract`。')
         self._widgets['SayTail'] = self._say_tail
-        row_tail.addWidget(self._say_tail, 0)
-        row_tail.addStretch(1)
-        dlg_lay.addLayout(row_tail)
+        dlg_lay.addWidget(card_rows.row('转场', self._say_tail, stretch=0))
 
         # —— 台词后缀的**只读提示**（样式类子句，`(what_color=…)` / `id`）——
         # 转场有下拉了，但 kwargs / `id` 这类没有候选，写了就照样给一行提示，
@@ -463,7 +462,7 @@ class BeatCardEditor(QWidget):
         now_lay.setSpacing(T.SPACE['xs'])
         # 用户 2026-10-03："为何不写明现在的舞台情况是什么样的，旧版明明都有"
         # 旧版预览面板用的是 `stage_snapshot.stage_digest`，卡片搬 Qt 时没接上。
-        now_lay.addWidget(self._section('当前舞台（这一拍生效）'))
+        now_lay.addWidget(card_rows.section('当前舞台（这一拍生效）'))
         now_row = QHBoxLayout()
         now_row.setSpacing(T.SPACE['sm'])
         self._stage_thumb = BeatStageThumb(parent=self, compact=True)
@@ -495,7 +494,7 @@ class BeatCardEditor(QWidget):
         size_lay = QVBoxLayout(self._size_box)
         size_lay.setContentsMargins(0, 0, 0, 0)
         size_lay.setSpacing(T.SPACE['xs'])
-        size_lay.addWidget(self._section('尺寸'))
+        size_lay.addWidget(card_rows.section('尺寸'))
         size_lay.addWidget(self._size_panel)
         # 这一拍台上没有背景/图层时**整格收起**（`set_stage_size([])`）：
         # 空着还要占三行"没有尺寸可调"，在一张控制流卡上就是纯噪音 ——
@@ -526,14 +525,9 @@ class BeatCardEditor(QWidget):
         root.addWidget(self._stage_box)
 
         # —— 立绘网格 ——
-        head = QHBoxLayout()
-        head.setSpacing(T.SPACE['xs'])
-        head.addWidget(self._section('立绘'))
-        hint = QLabel('点 chip 换表情/位置 · 双击卡换图')
-        hint.setProperty('role', 'caption')
-        head.addWidget(hint, 0)
-        head.addStretch(1)
-        stage_lay.addLayout(head)
+        # 标题 + 一句提示：走 `card_rows.section(hint=…)`，不再自己拼一行
+        stage_lay.addWidget(card_rows.section(
+            '立绘', hint='点 chip 换表情/位置 · 双击卡换图'))
         self._grid = SpriteGridWidget(
             symbols=self._symbols, loader=loader,
             on_pick_image=self._on_pick_image,
@@ -544,10 +538,17 @@ class BeatCardEditor(QWidget):
         stage_lay.addWidget(self._grid)
 
         # —— 背景 / 音乐 / 语音（**两行**：背景一行，音乐 + 语音一行）——
-        # 每格 = 下拉候选（从**资源表**来）+ 「选择…」按钮（打开资产选择器）。
+        #
+        # 每格 = 下拉候选（从**资源表**来）+ 「⋯」按钮（打开资产选择器）。
         # 用户 2026-10-03："添加立绘，添加语音，添加音乐，全部都没有反应！"
         #   以前这三格是**空的可编辑下拉** —— 没有任何候选可挑。
         # 用户 2026-10-04："把三格改成两行布局（背景一行、音乐+语音一行）"。
+        #
+        # ⚠ 2026-11-07：这一段的"下拉 + ⋯"**不再自己拼布局**，改走
+        #   `card_rows.picker_row`（唯一实现，语句参数格也用它）。滚轮守卫、
+        #   24px 按钮、`padding:0` 那些坑都写在那个函数里了 —— 从前它们散在
+        #   这里，谁想复用得再抄一遍；用户原话："相似或者相同的功能，应当
+        #   放在一处！不许东一块西一块的"。
         self._asset_btns = {}
 
         def _asset_row(specs, row_name):
@@ -556,50 +557,28 @@ class BeatCardEditor(QWidget):
 
             外面套一层 QWidget 并给 objectName：布局本身没法被断言，
             有了具名容器，测试才能钉住"哪几格在同一行"。
+            并排时用**窄标签**（`NARROW_LABEL_WIDTH`）：两个 88px 会吃掉半屏。
             """
             holder = QWidget()
             holder.setObjectName(row_name)
-            row = QHBoxLayout(holder)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(T.SPACE['sm'])
+            lay = QHBoxLayout(holder)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(T.SPACE['sm'])
             for name, label in specs:
-                box = QVBoxLayout()
-                box.setSpacing(2)
-                cap = QLabel(label)
-                cap.setProperty('role', 'caption')
-                self._asset_caps[name] = cap
-                box.addWidget(cap)
-                line = QHBoxLayout()
-                line.setSpacing(T.SPACE['xs'])
-                # ⚠ **滚轮不许改这三格的值**（用户 2026-10-29："不要让滚轮上下
+                # ⚠ 滚轮不许改这三格的值（用户 2026-10-29："不要让滚轮上下
                 # 滑动调整背景，音乐和语音这三个东西……太容易误触了！！！"）。
-                # 卡片在滚动区里，鼠标扫过字段时滚轮就会把值换掉，而且换的是
-                # 自由文本（图名 / bgm id），改错了不一定看得出来。
-                # `WheelSafeComboBox`：只有点进去（有焦点）才响应滚轮，否则把
-                # 滚轮转交给父级滚动区 —— 滚页面照常滚。规则写在那个模块里。
                 combo = WheelSafeComboBox()
                 combo.setEditable(True)
                 self._widgets[name] = combo
-                line.addWidget(combo, 1)
-                # ⚠ 2026-10-30（用户第 5 条反馈）：从「选择…」缩成 24px「⋯」。
-                # 三个「选择…」按钮的结构性成本是 58px/个（含 2 个一行的音乐+语音
-                # 行 = 116px），而卡片地板被它顶在 380px —— 右栏拖窄就出横向滚动条。
-                # 按钮**必须看得出能点**：保留 hover/边框样式 + tooltip 写全
-                # （"从资源表里挑背景（分类 / 搜索 / 预览）"）。
-                pick = QPushButton('⋯')
-                pick.setFixedSize(T.CONTROL['iconW'], T.CONTROL['iconW'])  # 24×24
-                # ⚠ **必须 `padding:0`**：默认 QSS 的内边距有十几 px，24px 宽的
-                # 按钮里那个「⋯」会被裁成**一片空白**（offscreen 截图实测），
-                # 用户看到的是"一个点了没反应的方块" —— 正是本项目最怕的形态。
-                # 判据：`tests/test_ui_width.py::test_the_asset_pickers_are_icon_sized`。
-                pick.setStyleSheet('padding:0;')
-                pick.setToolTip(f'从资源表里挑{label}（分类 / 搜索 / 预览）')
-                pick.setAccessibleName(f'选择{label}')
-                pick.clicked.connect(lambda _=False, f=name: self._choose_asset(f))
-                self._asset_btns[name] = pick
-                line.addWidget(pick, 0)
-                box.addLayout(line)
-                row.addLayout(box, 1)
+                cell = card_rows.compact_picker(
+                    label, combo, lambda f=name: self._choose_asset(f),
+                    hint=f'从资源表里挑{label}（分类 / 搜索 / 预览）')
+                self._asset_caps[name] = cell._label
+                pick = cell.findChild(QPushButton)
+                if pick is not None:
+                    pick.setAccessibleName(f'选择{label}')
+                    self._asset_btns[name] = pick
+                lay.addWidget(cell, 1)
             return holder
 
         stage_lay.addWidget(_asset_row([('Scene', '背景')], 'assetRowScene'))
@@ -675,99 +654,54 @@ class BeatCardEditor(QWidget):
 
     def _build_meta_area(self, root) -> None:
         """备注 / 条件 / 高级区（拆自 `_build`，2026-11-01）。"""
-        # —— 备注 ——
-        row3 = QHBoxLayout()
-        row3.setSpacing(T.SPACE['sm'])
-        cap = QLabel('备注')
-        cap.setProperty('role', 'caption')
-        row3.addWidget(cap, 0)
-        self._comment = QLineEdit()
-        self._comment.setPlaceholderText(
-            '写进脚本的注释（不用自己加 #）：例 bg1.2 bgm13 / 场景备忘 / '
-            '给同事的说明')
-        self._widgets['Comment'] = self._comment
-        row3.addWidget(self._comment, 1)
-        root.addLayout(row3)
-
-        # —— 条件显示（`if <条件>:`）——
-        # 数据层的 `Beat.condition` 一直存在（解析时从语句取、渲染时包成
-        # `if`），但**从来没暴露给策划**。这里给一格：空 = 无条件。
-        row4 = QHBoxLayout()
-        row4.setSpacing(T.SPACE['sm'])
-        cap = QLabel('＋ 条件')
-        cap.setProperty('role', 'caption')
-        cap.setToolTip('填了就在这一拍外面包一层 if（例：love >= 5）。'
-                       '留空 = 无条件。')
-        row4.addWidget(cap, 0)
-        self._condition = QLineEdit()
-        self._condition.setPlaceholderText('留空 = 无条件（例：love >= 5）')
-        self._widgets['condition'] = self._condition
-        row4.addWidget(self._condition, 1)
-        root.addLayout(row4)
+        specs = self._card_field_specs()
+        # —— 备注 / 条件显示 ——（一行一条，标签右对齐到全局那条竖线）
+        #
+        # 2026-11-07 第三轮：这两格的标签、灰字提示、tooltip 现在都在
+        # `ext.card_fields` 那张表里（从前是这里写死的字符串）—— 于是"字段表 →
+        # 界面"在最后一米没断：扩展窗口里凭空多出来的一格也能有提示。
+        for name in ('Comment', 'condition'):
+            spec = specs.get(name) or FieldSpec(key=name)
+            w = field_widgets.make_editor(spec)
+            self._widgets[name] = w
+            self._hook_dirty(w)
+            if name == 'Comment':
+                self._comment = w
+            else:
+                self._condition = w
+            root.addWidget(card_rows.row(spec.shown, w,
+                                         label_tip=spec.help or ''))
 
         # —— 语句参数组已经挪到卡片顶部（见上面的 `_spec_host`）——
 
-        # —— 高级区（可折叠）——
+        # —— 高级区（**默认展开**，可折叠）——
+        # Unity 的 `Foldout` 默认是开的：折叠是"这屏看完了"的临时动作，
+        # 不是"藏起来不用管"。收起只影响显示，字段照样写回。
         self._adv_btn = QPushButton(self._adv_label())
         self._adv_btn.setProperty('variant', 'chip')
         self._adv_btn.setFlat(True)
         # 标签只写"高级区"（2026-10-30：原来那句 51 字的长标签一个控件就把
         # 卡片最小宽顶到 356px、整卡地板 380px —— 右栏一窄就出横向滚动条）。
-        # "里面有什么"放进 tooltip，信息一点没少。
+        # "里面有什么"放进 tooltip，信息一点没少 —— 而且**由字段表生成**：
+        # 从前这里写死过 `… / Notes / 台词后缀 / …`，那两格早就不在高级区了。
         self._adv_btn.setToolTip(
-            '代码 / Label / 类型 / Notes / Stage / 台词后缀 / 菜单头'
-            '\n（收起时这些字段不会被写回）')
+            ' / '.join(self._adv_names())
+            + '\n（收起只是不显示 —— 里面的字段照样会写回）')
         self._adv_btn.clicked.connect(self._toggle_adv)
         root.addWidget(self._adv_btn, 0, Qt.AlignLeft)
 
         self._adv_host = QWidget()
-        adv = QVBoxLayout(self._adv_host)
-        adv.setContentsMargins(0, 0, 0, 0)
-        adv.setSpacing(T.SPACE['xs'])
-        self._adv_host.setVisible(False)
-        for name in ADVANCED_FIELDS:
-            box = QHBoxLayout()
-            box.setSpacing(T.SPACE['xs'])
-            lab = QLabel('台词后缀' if name == 'SayTail' else name)
-            lab.setProperty('role', 'caption')
-            lab.setMinimumWidth(72)
-            box.addWidget(lab, 0)
-            # **CodeBlock 用带行号栏的编辑器**（用户 2026-10-25："跟 IDE 那种
-            # 一样，左边写个数字……不然我都不知道它到底在哪儿"）。
-            # 行号是**源文件里的真实行号**（`load_fields` 把这一拍的
-            # `src_first/src_last` 传下去）；新建的卡片没有源行 → 退回 1/2/3…
-            if name == 'CodeBlock':
-                w = CodeEditor()
-            elif name in ('Stage', 'Notes'):
-                w = QPlainTextEdit()
-            elif name == 'SayTail':
-                # 台词后缀 = **引号之后原样拼回去的整段**（`with dissolve` /
-                # `(what_color="#f00") with dissolve` / `nointeract`）。
-                #
-                # 2026-11-03 用户："纯文本框是必须手打整一个句子？还是只打个
-                # with 就行？逻辑没说明白……我觉得还是来个候选变换表吧"：
-                #   · 从前的答案是"必须打**整句** `with dissolve`"——只打
-                #     `with` 会写出 `e "台词" with`（引擎报错）；
-                #   · 现在给候选（项目 `transforms` 各生成一条 `with xxx`），
-                #     仍然**可编辑**：`(kwargs)` / 组合子句照样能手打。
-                w = WheelSafeComboBox()
-                w.setEditable(True)
-                for label, value in say_tail_choices(self._symbols):
-                    w.addItem(label, value)
-                w.setCurrentIndex(0)
-                w.setToolTip(
-                    '选一个转场（候选来自项目的 transform），或直接手打整段：'
-                    '`with dissolve` / `(what_color="#f00") with dissolve` / '
-                    '`nointeract`。\n⚠ 要写**整段**（含 `with`），不是只写 '
-                    '`dissolve`。')
-            else:
-                w = QLineEdit()
-            if isinstance(w, QPlainTextEdit):
-                w.setFixedHeight(3 * 20 + 12)
-            self._widgets[name] = w
-            box.addWidget(w, 1)
-            adv.addLayout(box)
+        self._adv_lay = QVBoxLayout(self._adv_host)
+        self._adv_lay.setContentsMargins(0, 0, 0, 0)
+        self._adv_lay.setSpacing(T.SPACE['xs'])
+        self._adv_host.setVisible(True)
+        self._build_advanced_rows()
         root.addWidget(self._adv_host)
+
+    def _adv_names(self) -> list:
+        """高级区那一串名字（tooltip 用；从 schema 来，不再写死）。"""
+        specs = self._card_field_specs()
+        return [specs[n].shown if n in specs else n for n in ADVANCED_FIELDS]
 
     def _build_footer(self, root) -> None:
         """保存 / 撤销 / 防御性提示（拆自 `_build`，2026-11-01）。"""
@@ -1122,6 +1056,92 @@ class BeatCardEditor(QWidget):
     #: 能让"舞台块"有意义的字段：任意一个有值，就说明这一拍真的动了舞台。
     STAGE_FIELDS = ('Scene', 'Show', 'Hide', 'Stage')
 
+    #: 声明里的格子类型 → 参数格用哪种控件（**唯一一份**）。
+    #:
+    #: ⚠ 2026-11-07 第三轮：`SPEC_EDITOR_KIND` 已经删了。它曾是"kind → 控件"
+    #: 的**第二份**实现（第一份在 `dynamic_form._make_editor`），两份行为还不
+    #: 一样 —— 声明里的 `transition` 在这边是下拉、在扩展窗口里是输入框，于是
+    #: 用户说的"定义出来的模块和卡片上那一格对不上"就出在这里。现在两处都调
+    #: `ui_qt.field_widgets.make_editor`，控件由 `ext.schema.KIND_TO_WIDGET`
+    #: 推出来（判据：`tests/test_ext_card_fields.py` 直接比控件类）。
+
+    def _card_field_specs(self) -> dict:
+        """
+        卡片上"由字段表画出来"的那几格：`{字段名: FieldSpec}`（**唯一一份**）。
+
+        初始化时取一次（`ext.card_fields.card_field_specs`）：内置 schema 加上
+        项目里 `kind: "field"` 的扩展点。主窗口在打开项目时注入（
+        `set_card_field_specs`），这里只是保管 —— 卡片不认识项目根。
+        """
+        specs = getattr(self, '_field_specs', None)
+        if not specs:
+            specs = CF.builtin_card_fields()
+            self._field_specs = specs
+        return specs
+
+    def set_card_field_specs(self, specs) -> None:
+        """
+        换一套卡片字段 schema（内置 + 项目扩展点），**按新 schema 重建那几行**。
+
+        为什么要重建而不是改现有控件的标签：类型可能从"输入框"变成"代码框"
+        （`field` 扩展点最常用的用法），换控件就得换人；而且旧值不能丢 ——
+        重建前后按名字把值搬过去（`_get_value` → `_set_value`）。
+
+        ⚠ **形状没变就一行都不动**（`CF.signature`）：这一条不是优化，是
+        交互状态 —— 重建会把正在编辑的那一格换掉（光标 / 选区 / 输入法丢），
+        窗口的初始焦点也会跑到别的格上（判据当场抓到过）。
+        """
+        merged = dict(CF.builtin_card_fields())
+        merged.update(dict(specs or {}))
+        if CF.signature(merged) == CF.signature(self._card_field_specs()):
+            self._field_specs = merged
+            return                            # 形状没变：不重建（保住光标）
+        self._field_specs = merged
+        if not hasattr(self, '_adv_host'):
+            return                            # 还没建界面：`_build` 会用它
+        old = {name: self._get_value(name) for name in CF.overridable_keys()
+               if name in self._widgets}
+        self._build_advanced_rows()
+        for name, value in old.items():
+            if value:
+                self._set_value(name, value)
+        self.refresh_dirty()
+
+    def _build_advanced_rows(self) -> None:
+        """
+        按 schema 重建「高级区」那一块（**字段表 → 界面**的最后一步）。
+
+        从前这里是三条 if/elif：标签 `'台词后缀' if name == 'SayTail'`、控件
+        `if name == 'CodeBlock': CodeEditor()` …… 而且 `SayTail` / `Notes`
+        两个分支**已经是死代码**（`SayTail` 搬去主区、`Notes` 取消了），没人
+        发现。现在"这一格长什么样"只在 `ext.card_fields` 说一次。
+
+        `CodeBlock` 那一格带行号（用户 2026-10-25："跟 IDE 那种一样，左边写个
+        数字……不然我都不知道它到底在哪儿"）—— 那是 `kind: "code"` 的画法，
+        现在由字段表说，不再在这里 `if name == 'CodeBlock'`。
+        """
+        lay = self._adv_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                # `setParent(None)` 才是立刻从画面拿掉（只 `deleteLater` 会留下
+                # 一排孤儿控件，与 `dynamic_form.rebuild` 同一个坑）
+                w.setParent(None)
+                w.deleteLater()
+        specs = self._card_field_specs()
+        for name in ADVANCED_FIELDS:
+            spec = specs.get(name)
+            if spec is None:
+                # schema 没声明这一格 → **仍然画出来**（普通输入框）：
+                # 少一格等于这一拍的这个字段没法改，比"外观不对"糟得多。
+                spec = FieldSpec(key=name)
+            w = field_widgets.make_editor(spec)
+            self._widgets[name] = w
+            self._hook_dirty(w)
+            lay.addWidget(card_rows.row(spec.shown, w,
+                                        label_tip=spec.help or ''))
+
     def _sync_field_groups(self, statement=None) -> None:
         """
         右栏的**组**跟着"这一拍实际是什么"走（2026-11-07，用户原话）：
@@ -1282,27 +1302,33 @@ class BeatCardEditor(QWidget):
 
         这一格**没有 header 就整格跳过**：header 是"列名"（写进 Excel 的键），
         空 header 的列无处可存，建出来只会是个改了不生效的输入框。
+
+        ⚠ 2026-11-07：**不再自己拼布局** —— 走 `card_rows.row()`，与台词区 /
+        舞台块 / 高级区用同一个构造口。从前这里是 `QHBoxLayout` + 标签
+        `setMinimumWidth(72)`，而全局标签宽是 88 —— 就差 16px，于是参数格那几行
+        的竖线**和上面所有行都错开一点**（用户说的"折磨"里最难查的一类）。
         """
         header = str(col.get('header') or '')
         if not header:
             return
-        box = QHBoxLayout()
-        box.setSpacing(T.SPACE['xs'])
-        box.addWidget(self._spec_cell_label(col, header), 0)
         opts = as_choices(choices.get(col.get('param'), ()) or ())
         value = str(values.get(header, '') or '')
         # 颜色值：先给色块，再给输入框（色块跟着输入实时变）
         sw = self._make_swatch(value)
         if sw is not None:
             self._spec_swatches[header] = sw
-            box.addWidget(sw, 0)
-        editor = self._spec_cell_editor(header, opts, sw)
-        box.addWidget(editor, 1)
-        if opts:
-            box.addWidget(self._spec_cell_pick(header, editor, opts), 0)
+        kind = str(col.get('kind') or '')
+        editor = self._spec_cell_editor(header, opts, sw, kind)
+        tail = []
+        if opts and kind != 'keyword':
+            tail.append(self._spec_cell_pick(header, editor, opts))
         if col.get('multi'):
-            box.addWidget(self._spec_multi_hint(), 0)
-        self._spec_form.addLayout(box)
+            tail.append(self._spec_multi_hint())
+        host = card_rows.row(
+            str(col.get('label') or col.get('param') or header), editor,
+            lead=((sw,) if sw is not None else ()), tail=tuple(tail),
+            label_tip=self._spec_label_tip(col, header))
+        self._spec_form.addWidget(host)
 
     def _spec_cell_label(self, col, header: str) -> QLabel:
         """
@@ -1315,37 +1341,56 @@ class BeatCardEditor(QWidget):
         lab = QLabel(str(col.get('label') or col.get('param') or header))
         lab.setProperty('role', 'caption')
         lab.setMinimumWidth(72)
-        pos = col.get('positional')
-        if pos is None:
-            lab.setToolTip(f'{header}（具名参数，脚本里写成 '
-                           f'{col.get("param")}=值）')
-        else:
-            lab.setToolTip(
-                f'{header}（位置参数：按顺序写，第 {int(pos) + 1} 位）')
+        lab.setToolTip(self._spec_label_tip(col, header))
         return lab
 
-    def _spec_cell_editor(self, header: str, opts, sw):
+    @staticmethod
+    def _spec_label_tip(col, header: str) -> str:
         """
-        输入控件：有候选 → 可编辑下拉；没有 → 普通输入框。
+        这一格标签的 tooltip：**位置参数还是具名参数**。
 
-        两条都**可编辑**：候选只是提示，项目里临时用了新值也得能填进去
-        （与 Excel 那套口径一致）。色块跟着输入实时变，且**不重建控件**
+        ⚠ 两者在脚本里的写法不同（`se` vs `gain=-6`），而卡片上长得一模一样 ——
+        人改错了只会得到一条"参数过多"的报错。措辞只有这一处。
+        """
+        pos = col.get('positional')
+        if pos is None:
+            return (f'{header}（具名参数，脚本里写成 '
+                    f'{col.get("param")}=值）')
+        return f'{header}（位置参数：按顺序写，第 {int(pos) + 1} 位）'
+
+    def _spec_cell_editor(self, header: str, opts, sw, kind: str = ''):
+        """
+        输入控件：走 `ui_qt.field_widgets.make_editor`（**唯一一处画法**）。
+
+        2026-11-07 第三轮：这里原来是第二份"kind → 控件"（`SPEC_EDITOR_KIND`），
+        而第一份在 `dynamic_form._make_editor`。两份行为还不一样，于是
+        "定义出来的模块"和"卡片上那一格"长得不一样 —— 用户说的"一定要对应"。
+
+        三条都**可编辑**（固定字除外）：候选只是提示，项目里临时用了新值也得
+        能填进去（与 Excel 那套口径一致）。色块跟着输入实时变，且**不重建控件**
         —— 重建会把光标冲掉，人打字打到一半就跳走了。
         """
-        if opts:
-            w = QComboBox()
-            w.setEditable(True)              # 手打新值照样能过（同 Excel）
-            # 候选可能是人话（`1人，近处`），**选出来的是真值**
-            fill_combo(w, opts, '', blank=True)
-            w.setToolTip('从下拉里选，或直接写一个项目里在用的值'
-                         '\n（候选里带人话名字时，悬停能看到引擎写法）')
-        else:
-            w = QLineEdit()
-            w.setPlaceholderText('留空 = 不带这个参数')
+        raw_kind = str(kind or '').strip()
+        if not raw_kind and opts:
+            # 老声明**没写类型，但给了候选**（项目词汇表 / `choices_from`）：
+            # 从前这里靠 `combo if opts else text` 兜底成下拉，现在明说成
+            # `choice` —— 判据 `test_undeclared_kind_with_choices_is_still_a_combo`。
+            raw_kind = 'choice'
+        spec = FieldSpec(key=header, kind=raw_kind or 'variable',
+                         choices=tuple(str(c.value) for c in opts))
+        # ⚠ 固定字那格的 tooltip 是**卡片特有**的：它得说清"去哪改"
+        #   （扩展窗口里那句话不成立 —— 那里本来就是改声明的地方）。
+        tip = ''
+        if spec.fixed:
+            tip = (f'这一格是**固定字**（剧本里原样出现，不能改）：{header}\n'
+                   '要改请去「🧩 自定义语句」改那条声明。')
+        w = field_widgets.make_editor(spec, choices=opts, parser_only=True,
+                                      tip=tip)
         if sw is not None:
-            sig = (w.editTextChanged if isinstance(w, QComboBox)
-                   else w.textChanged)
-            sig.connect(lambda text, s=sw: self._paint_swatch(s, text))
+            # 色块跟着输入实时变（连接方式按控件类，不用在这里再分派一遍）
+            field_widgets.connect_change(
+                w, lambda *a, s=sw, ed=w: self._paint_swatch(
+                    s, field_widgets.text_of(ed)))
         self._spec_widgets[header] = w
         self._widgets[header] = w            # `_set_value` / `_get_value` 复用
         return w
@@ -1356,14 +1401,12 @@ class BeatCardEditor(QWidget):
 
         与资产那三格的「⋯」同一个形态、同一个 24px 尺寸。
         """
-        pick = QPushButton('⋯')
-        pick.setFixedSize(T.CONTROL['iconW'], T.CONTROL['iconW'])
-        pick.setStyleSheet('padding:0;')
-        pick.setToolTip(f'从候选里搜索挑选（共 {len(opts)} 个）')
+        # ⚠ 按钮本体走 `card_rows.picker_button()`（24px / `padding:0` /
+        #   吞掉 clicked 的 bool —— 三条坑都在那儿）。这里只负责"点了要干嘛"。
+        pick = card_rows.picker_button(
+            lambda: self._pick_spec_value(header, editor, opts),
+            hint=f'从候选里搜索挑选（共 {len(opts)} 个）')
         pick.setAccessibleName(f'挑选{header}')
-        pick.clicked.connect(
-            lambda _=False, h=header, ed=editor, items=opts:
-            self._pick_spec_value(h, ed, items))
         return pick
 
     @staticmethod
@@ -1384,6 +1427,8 @@ class BeatCardEditor(QWidget):
             value = str(values.get(header, '') or '')
             if isinstance(w, QComboBox):
                 select_value(w, value)
+            elif isinstance(w, QPlainTextEdit):
+                w.setPlainText(value)       # `code` 格（CodeEditor 也是它）
             else:
                 w.setText(value)
 
@@ -1448,36 +1493,40 @@ class BeatCardEditor(QWidget):
         if w is None:
             return
         value = str(value or '')
-        if isinstance(w, QComboBox):
-            # 显示的可能是人话（`18 嗯？`）、**存的是真值**（`bgm/嗯？.mp3`）
-            # 台词转场反过来：存的是整段（`with dissolve`），显示只要转场名。
-            select_value(w, split_say_tail(value) if name == 'SayTail' else value)
-        elif isinstance(w, QPlainTextEdit):
-            w.setPlainText(value)
-        elif isinstance(w, QLineEdit):
-            w.setText(value)
+        if name == 'SayTail':
+            # 台词转场：控件里显示的是**转场名**（`dissolve`），写回的是
+            # **整段子句**（`with dissolve`）—— 见 `split_say_tail` / `join_say_tail`
+            value = split_say_tail(value)
+        field_widgets.write_value(w, value)
 
     def _get_value(self, name) -> str:
         """
         这一格**现在代表什么**（写进剧本的那个值，不是屏幕上那句）。
 
-        ⚠ 下拉一定走 `labeled_choices.combo_value`：词汇表让下拉显示
-        `1人，近处`，而写回 beat 的必须还是 `i11`。从前这里读
-        `currentText()` —— 一接上是直接往剧本里写中文。
+        ⚠ 读值走 `field_widgets.read_value`（按**控件类**分派，与画法同源）：
+        下拉一定按**真值**读（词汇表让下拉显示 `1人，近处`，写回 beat 的必须
+        还是 `i11`）；只有两件事是卡片自己的业务后处理 ——
+        `SayTail` 要拼回整段、参数格要折成一行。
         """
         w = self._widgets.get(name)
         if w is None:
             return ''
-        if isinstance(w, QComboBox):
-            raw = combo_value(w)
-            # 台词转场：控件里显示的是**转场名**（`dissolve`），写回的是
-            # **整段子句**（`with dissolve`）—— 见 `join_say_tail`。
-            return join_say_tail(raw) if name == 'SayTail' else raw
-        if isinstance(w, QPlainTextEdit):
-            return w.toPlainText().strip()
-        if isinstance(w, QLineEdit):
-            return w.text().strip()
-        return ''
+        raw = field_widgets.read_value(w)
+        if isinstance(raw, bool) or isinstance(raw, list):
+            # 卡片上的格都是**字符串**（写回 `Beat` 的字段 / 折进语句头）。
+            # 开关和多选读出来不是字符串 —— 到这一步说明有人给卡片字段声明了
+            # 这两种类型（`ext.card_fields` 会拒；这里兜底不让它写坏数据）。
+            return ''
+        text = str(raw or '')
+        if name == 'SayTail':
+            return join_say_tail(text)
+        text = text.strip()
+        if name in (getattr(self, '_spec_widgets', None) or {}):
+            # 参数格**折成一行**：它最终要折回语句头，多行会让那条语句语法坏掉。
+            # 高级区的 `CodeBlock` 不在这里，保持原样多行（它就是块体）。
+            text = ' '.join(part.strip() for part in text.splitlines()
+                            if part.strip())
+        return text
 
     def set_symbols(self, symbols):
         self._symbols = symbols
@@ -1680,8 +1729,18 @@ class BeatCardEditor(QWidget):
 
     def collect_fields(self) -> dict:
         out = {n: self._get_value(n) for n in PRIMARY_FIELDS}
-        if self._adv_open:
-            out.update({n: self._get_value(n) for n in ADVANCED_FIELDS})
+        # ⚠ 2026-11-07：**收起高级区也照旧写回**。
+        #
+        # 从前这里是 `if self._adv_open:` —— "收了高级区"就等于"这些字段不算数"，
+        # `SayTail` 曾经因此**静默丢**过一次（当时靠把它挪到主区绕过去，根因没修）。
+        # Unity 的 Foldout 正是这个语义：折叠只影响**显示**，不改变数据。
+        #
+        # ⚠⚠ **收集与落地还没统一**（2026-11-07 第三轮记在案）：数据层
+        #   `FieldWriter._apply_advanced_fields` 仍按 `advanced_open` 过滤
+        #   （"收起 ≠ 清空"）。也就是说收起时这里收齐了，落地仍不动那几格。
+        #   实际影响很小（收起时人看不见、也编辑不到高级区），但两边口径
+        #   不一致这件事要写出来，别让下一轮的人以为已经统一了。
+        out.update({n: self._get_value(n) for n in ADVANCED_FIELDS})
         # 条件始终写回（有值就包 if，空就不是条件）——它一直可见，
         # 所以适用"始终可编辑就必须始终写回"那条规则。
         out['condition'] = self._get_value('condition')
@@ -1932,17 +1991,26 @@ class BeatCardEditor(QWidget):
         except Exception:                    # noqa: BLE001
             swallow('main_window.update_char_count')
 
-    def _connect_dirty_tracking(self):
-        """任何输入变化都刷新一次"未保存"提示。"""
-        def hook(_=None):
+    def _dirty_hook(self):
+        """一个"输入变了 → 刷新未保存提示"的回调（**载入期间静默**）。"""
+        def hook(*_a):
             if not self._loading:
                 self.refresh_dirty()
+        return hook
+
+    def _hook_dirty(self, w) -> None:
+        """给一个控件挂上未保存提示（按**信号名**试，不按控件类分派）。"""
+        for sig in ('textChanged', 'currentTextChanged'):
+            s = getattr(w, sig, None)
+            if s is None:
+                continue
+            try:
+                s.connect(self._dirty_hook())
+            except Exception:                # noqa: BLE001 - 挂不上不拦操作
+                swallow('main_window._connect_dirty_tracking')
+
+    def _connect_dirty_tracking(self):
+        """任何输入变化都刷新一次"未保存"提示。"""
         for w in self._widgets.values():
-            for sig in ('textChanged', 'currentTextChanged'):
-                s = getattr(w, sig, None)
-                if s is not None:
-                    try:
-                        s.connect(hook)
-                    except Exception:        # noqa: BLE001
-                        swallow('main_window._connect_dirty_tracking')
-        self._grid.change.connect(hook)
+            self._hook_dirty(w)
+        self._grid.change.connect(self._dirty_hook())

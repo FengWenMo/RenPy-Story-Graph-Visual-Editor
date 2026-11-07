@@ -151,14 +151,26 @@ class TestCardMinWidthBudget:
             f'实际尺寸 {(thumb.width(), thumb.height())}（应 240×135）')
 
     def test_the_advanced_toggle_is_short(self, ui_window):
-        """「高级区」按钮不许再挂 51 字长文本（它是卡片地板的最大单项）。"""
+        """
+        「高级区」按钮不许再挂 51 字长文本（它是卡片地板的最大单项）。
+
+        "里面有什么"不能丢，但**内容由字段表生成**（2026-11-07 第三轮）：
+        从前这里写死过 `代码 / Label / 类型 / Notes / …`，而 `Notes` 早就
+        取消了 —— 一条永远对不上的说明。现在断言的是"schema 里那几格的名字
+        都在 tooltip 里"，改字段表时它跟着走。
+        """
+        from storygraph.app.editor import ADVANCED_FIELDS
+        from storygraph.ext.card_fields import builtin_card_fields
+
         win = _card_page(ui_window)
         btn = win._panel._adv_btn
         assert len(btn.text()) <= 12, f'高级区按钮文本又变长了：{btn.text()!r}'
         assert '高级区' in btn.text()
-        # "里面有什么"不能丢：tooltip 里还写着（信息没少，只是不占宽度）
-        for word in ('代码', 'Label', 'Notes', 'Stage'):
-            assert word in btn.toolTip(), f'tooltip 里丢了 {word}：{btn.toolTip()!r}'
+        specs = builtin_card_fields()
+        for name in ADVANCED_FIELDS:
+            word = specs[name].shown
+            assert word in btn.toolTip(), (
+                f'tooltip 里丢了「{word}」：{btn.toolTip()!r}')
 
     def test_the_asset_pickers_are_icon_sized(self, ui_window):
         """背景 / 音乐 / 语音的「选择…」→ 24px「⋯」图标按钮（tooltip 说明去哪挑）。"""

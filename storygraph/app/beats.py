@@ -931,6 +931,114 @@ def beat_group_conflicts(beat: Beat, facts) -> list:
     return out
 
 
+#: `show` 语句里的**子句关键字**（Ren'Py 文档）：
+#
+#     show <image name> [at <transform>…] [as <tag>] [behind <tag>…]
+#                      [onlayer <layer>] [zorder <int>] [with <transition>]
+#
+# ⚠ 属性（`layeredimage` 的 attribute）**只能出现在 `at` 之前**。把属性追加到
+# `with` 后面就是**语法错误**（2026-11-05 用户："顺序不能够错！错了 rpy 就完全
+# 不能跑啊！"—— 真机 `show='lan scared at i11 with vpunch'` 正是这种形态）。
+SHOW_CLAUSE_KEYWORDS = ('at', 'as', 'behind', 'onlayer', 'zorder', 'with')
+
+
+def _declared_clause_keywords(symbols) -> tuple:
+    """
+    项目在 `rules.json` 里为 `show` **声明**的子句关键字（`optional` 段）。
+
+    为什么不能硬编码（2026-11-05 用户）：
+
+    > 「这可不一定！我的意思是……自定义一个新结构……这个结构是 with 后面跟两个变量，
+    >   比如 with tt form ，transform 也要这样，还有，show 增添多几个自定义结构，
+    >   变成 show 角色 动作 服装 表情 特效，一个都不许乱！」
+
+    `SHOW_CLAUSE_KEYWORDS` 只是 **Ren'Py 原生**那六个。项目完全可以声明自己的
+    （比如 `with tt form` 里 `with` 后面跟**两个**变量、或者自造 `vfx` 段）。
+
+    ⚠⚠ **是并集，不是替换**（2026-11-05 用户明确）：
+
+    > 「原生+自定义需要并存！at 和 with 实际上是关键字优先，所以不会设置为
+    >   变量本身，放心」
+
+    所以返回 `原生六个 + 项目声明的`（去重、原生在前）。两者并存不会打架 ——
+    关键字**优先于**变量，`at` / `with` 永远不会同时是某一列的值。
+
+    判据：`pattern` 里 `kind` 是 `optional` / `keyword` 的段，取它的 `text`；
+    **语句头那个 keyword（`show` 本身）不算**子句。
+    """
+    base = list(SHOW_CLAUSE_KEYWORDS)
+    root = str(getattr(symbols, '_project_root', '') or '')
+    if not root:
+        return tuple(base)
+    try:
+        from storygraph.story.statement_registry import StatementRegistry
+        reg = StatementRegistry.for_project(root)
+        spec = reg.match('show') or reg.call_spec('show')
+        segs = getattr(spec, 'pattern', None) or []
+    except Exception as e:                      # noqa: BLE001 - 读不到就用原生
+        swallow('app.beats.declared_clause_keywords', e)
+        return tuple(base)
+    for seg in segs:
+        if str(seg.get('kind')) not in ('optional', 'keyword'):
+            continue
+        text = str(seg.get('text') or '').strip()
+        if not text or text == 'show':
+            continue                            # 语句头，不是子句
+        if text not in base:
+            base.append(text)
+    return tuple(base)
+
+
+def split_show_spec(spec, clause_keywords=None) -> tuple:
+    """
+    `show` 的 image spec → `(tag, attrs, clauses)`。
+
+        'lan scared at i11 with vpunch'
+            → ('lan', ['scared'], 'at i11 with vpunch')
+        'ye aa happy@l11'
+            → ('ye', ['aa', 'happy@l11'], '')
+        'lan aa close_happy'
+            → ('lan', ['aa', 'close_happy'], '')
+
+    `clauses` 是**原样字符串**（从第一个子句关键字起到结尾）—— 调用方拼回去时
+    一个字节都不许动它。
+
+    ## 为什么必须拆（不是"顺手做的整理"）
+
+    `beat.show` 里**真的带子句**（真机实测）：
+
+        show='lan scared at i11 with vpunch'
+        show='cg cg02_2 at cg38402160 behind ye'
+
+    从前 `apply_attr_slot` 把 `at` / `i11` / `with` / `vpunch` 全当属性词，
+    切一维时按"替换 + 追加"重拼 —— 追加出来的词会落到 `with vpunch` **后面**，
+    那在 Ren'Py 里是**语法错误**，整份 `.rpy` 都跑不起来。
+
+    ## `at` 与 `@` 的区别
+
+    · `at i11`：**子句**，作用在整张图上；
+    · `happy@l11`：**内联位置**，只作用在它附着的那个属性上 —— 所以切这一维时
+      必须把 `@l11` 搬到新值上（`happy@l11` → `angry@l11`）。
+    """
+    text = str(spec or '').strip()
+    if not text:
+        return '', [], ''
+    # 项目声明的关键字优先（`with tt form` 这种自定义结构靠它认）
+    kws = tuple(clause_keywords) if clause_keywords else SHOW_CLAUSE_KEYWORDS
+    toks = text.split()
+    tag = toks[0]
+    attrs, clauses = [], ''
+    cut = -1
+    for i, w in enumerate(toks[1:], 1):
+        if w in kws:
+            cut = i
+            break
+        attrs.append(w)
+    if cut > 0:
+        clauses = ' '.join(toks[cut:])
+    return tag, attrs, clauses
+
+
 def _show_item_word(token: str) -> str:
     """`close_happy@i11` → `close_happy`（`@` 后面是位置变换，**不算属性**）。"""
     return str(token or '').split('@', 1)[0]
@@ -2339,13 +2447,16 @@ def attr_slot_rows(image_spec: str, symbols, groups=None,
        其余维度的词，防"点一格吃掉另一格"）、`extras`（不认识的词原样留着）。
     """
     spec = str(image_spec or '').strip()
-    toks = [t for t in (_show_item_attr(t) for t in spec.split()) if t]
+    # ⚠ **先剥子句**（`at i11` / `with vpunch` / `behind ye` …）：它们不是属性，
+    # 当成属性会建出"属性 3: i11"这种格，还会让候选全空（2026-11-05）。
+    tag, attrs, _clauses = split_show_spec(
+        spec, _declared_clause_keywords(symbols))
+    attrs = [t for t in (_show_item_attr(a) for a in attrs) if t]
     # ⚠ 只要**认得出 tag** 就往下走：`show lan`（这一拍没写属性）也应该能长出
     #   "服装 / 表情"格 —— 否则用户想补一个属性时根本没有入口
     #   （2026-10-18 实测："卡片编辑器内服装不显示"）。
-    if not toks or symbols is None:
+    if not tag or symbols is None:
         return []
-    tag, attrs = toks[0], toks[1:]
     overlay = _attr_slot_overlay(groups)
     group_rows = _attr_slot_structure(tag, symbols, groups, facts,
                                       layer_model, overlay)
@@ -2359,8 +2470,164 @@ def attr_slot_rows(image_spec: str, symbols, groups=None,
     if not group_rows:
         return []
     group_rows = _attr_slot_apply_split(group_rows, groups)
+    # **按 `rules.json` 的列顺序**重排（2026-11-05）：`服装` 那一列必须排在
+    # `表情` 前面 —— 否则卡片上「属性 1」是表情、「属性 2」是服装，正好反着。
+    group_rows = _reorder_by_declared(group_rows, _declared_column_order(symbols))
     group_rows = _attr_slot_label(group_rows, overlay)
     return _attr_slot_cells(group_rows, attrs, tag, symbols)
+
+
+def _declared_column_order(symbols) -> list:
+    """
+    `rules.json` 里 `show` 声明的**列顺序** → `[(列名, 候选值集合), …]`（去掉了 tag 那列）。
+
+    为什么这是真源（2026-11-05 用户拍桌子）：
+
+    > 「我不是已经自定义了结构吗……？为什么工具说不知道原本想写哪个顺序……？
+    >   我的 json 文件里面难道没有顺序码？你列出来的时候不是按照我说的属性列的吗？」
+
+    真机 `storygraph.rules.json`：
+
+        {"statements": [{"name": "show", "pattern": [
+            {"kind": "choice", "column": "角色"},
+            {"kind": "choice", "column": "服装"},
+            {"kind": "choice", "column": "表情"}]}]}
+
+    ⇒ 作者写的是 **人物 → 服装 → 表情**。卡片上却把 `表情` 摆成了「属性 1」、
+    `服装` 摆成「属性 2」，两格正好反着。
+
+    ⚠ **怎么把"列"认到"引擎组"上**：靠**候选值交集**，不靠列名猜。
+    列里列的 `options`（`clothes2` / `base_hand_up` …）和某个组枚举出的词
+    交集最大，那一列就是那个组 —— 这是作者自己写下的数据，不是我们猜的语义。
+    """
+    root = str(getattr(symbols, '_project_root', '') or '')
+    if not root:
+        return []
+    try:
+        from storygraph.story.statement_registry import StatementRegistry
+        reg = StatementRegistry.for_project(root)
+        spec = reg.match('show') or reg.call_spec('show')
+        segs = getattr(spec, 'pattern', None) or []
+    except Exception as e:                      # noqa: BLE001 - 读不到就按老顺序
+        swallow('app.beats.declared_column_order', e)
+        return []
+    out = []
+    for seg in segs:
+        if str(seg.get('kind')) != 'choice':
+            continue
+        col = str(seg.get('column') or '').strip()
+        opts = {str(o).strip() for o in (seg.get('options') or ()) if str(o).strip()}
+        if col and opts:
+            out.append((col, opts))
+    return out
+
+
+def _reorder_by_declared(rows: list, order: list) -> list:
+    """
+    把"引擎给的一组组"按 `rules.json` 的**列顺序**重排。
+
+    认不出的**单列跳过**（多半是 `角色` 那列 —— 它是 tag，根本不在组里）；
+    但**一列都认不出**时保持原样（排错比不排更糟：用户的 `服装` 列要是被错认成
+    表情组，每个 chip 都会改错维度）。
+
+    ⚠ 这里踩过一次（2026-11-05）：第一版把"某列对不上"当成整体放弃，
+    于是 `角色` 那列（tag，与任何组都无交集）**永远**让排序失效 ——
+    代码看着在跑，顺序一个都没动。
+    """
+    if not order or len(rows) < 2:
+        return rows
+    # ⚠ 字段名是 **`values`**（`_attr_slot_structure` 的产出），`options` 是
+    # `_attr_slot_cells` 之后才有的 —— 读错键的话交集恒空，排序**静默失效**
+    # （第一版就是这么"看起来在跑、顺序一个都没动"的）。
+    def cands_of(r):
+        return {str(x) for x in (r.get('values') or r.get('options') or ())}
+
+    used, out = set(), []
+    for _col, opts in order:
+        rest = [r for r in rows if id(r) not in used]
+        if not rest:
+            break
+        best = max(rest, key=lambda r: len(opts & cands_of(r)))
+        if not (opts & cands_of(best)):
+            continue                             # 这列不对应任何组（`角色`）→ 跳过
+        used.add(id(best))
+        out.append(best)
+    if not out:
+        return rows                              # 一列都没认出来 → 不排
+    return out + [r for r in rows if id(r) not in used]
+
+
+def attr_word_key(word: str) -> str:
+    """
+    属性词的**写法键**：只忽略大小写与 `_` / `-`，别的一律不动。
+
+    用途只有一个 —— 判"这是同一个属性的另一种拼法吗"。真机
+    `sr_general` 的 `chapter2_5.rpy` 里写着 `show ye base_hand_down gratified`，
+    而项目在 `layeredimage ye` 里声明的是 `base_handdown`：Ren'Py 的
+    image attribute 名里 `_` 是名字的一部分，多一个下划线就是**另一个**属性
+    （引擎不报错、只是忽略它 → 演出不是作者要的那张图）。
+
+    ⚠ 只做"写法"归一，**不做任何模糊匹配**（不作前缀/子串/编辑距离）：
+    猜一个名字比说不知道坏得多。所以 `happy` 与 `close_happy` 的键**不同**。
+
+    2026-11-05 用户："`base_hand_down` 明明是有的" —— 有，只是拼法差一个下划线。
+    这一条让"检测"和"换一维"都能认出来，而不用给项目写特例。
+    """
+    return str(word or '').strip().lower().replace('_', '').replace('-', '')
+
+
+def _spelling_variant_in(words, options) -> str:
+    """
+    `words` 里**只是拼法不同**的那个组内词（`base_hand_down` ↔ `base_handdown`）。
+
+    返回的是 `words` 里**原来的那个拼法**（调用方拿它做原位替换）。
+
+    ⚠ 只认"写法键相等"（大小写 / `_` / `-` 不算差异），**不认精确相等**：
+    精确相等是 `hit['value']` 那一支的活。混进来的后果有判据
+    （`test_show_spec_hell.py::test_appends_at_the_end_when_there_are_no_clauses`
+    的替身把一组候选写得很宽，精确匹配会把 `happy` 当成服装的当前值吃掉）。
+    """
+    toks = [str(w) for w in (words or ()) if w]
+    opts = [str(o) for o in (options or ()) if o]
+    if not toks or not opts:
+        return ''
+    exact = set(opts)
+    norm = {attr_word_key(o) for o in opts}
+    for w in toks:
+        if w in exact:
+            continue                             # 精确相等 → 归 `hit['value']`
+        if attr_word_key(w) in norm:
+            return w
+    return ''
+
+
+def _dedupe_by_key(attrs, keep: str) -> list:
+    """
+    `attrs` 里**同一个词只留一份**（按写法键比；`@位置` 跟着第一份走）。
+
+    ⚠ 只去"同一个词"的重复，**不按整组候选扫**（2026-11-05 的取舍）：
+    组候选集是"这一维可以取哪些值"，里面可能混着别的维度的词（项目声明宽 /
+    引擎事实不全）。按整组扫会把**别的维度的词**一起吃掉 —— 那违反本仓
+    最硬的一条：改一维，别的词一个字节都不许动
+    （`tests/test_show_spec_hell.py::TestOnlyOneWordChanges` 钉着它）。
+
+    重复的两个来源都在这条判据里：
+      · 新值本来就在 spec 里（`_replace_attr_word` 会先把旧的那份去掉）；
+      · spec 里本来就有**两种拼法**的同一个词（`base_hand_down` + `basehanddown`）。
+    """
+    key = attr_word_key(keep)
+    if not key:
+        return [a for a in (attrs or ()) if a]
+    out, seen = [], False
+    for a in (attrs or ()):
+        if not a:
+            continue
+        if attr_word_key(str(a).split('@', 1)[0]) == key:
+            if seen:
+                continue
+            seen = True
+        out.append(a)
+    return out
 
 
 def _replace_attr_word(attrs, old: str, new: str) -> list:
@@ -2369,11 +2636,29 @@ def _replace_attr_word(attrs, old: str, new: str) -> list:
 
     为什么原位：Ren'Py 的 `show ye base_handdown happy` 是作者写的顺序，
     换表情不该让服装突然跳到后面去（往返 diff 越小越好）。
+
+    ⚠ `old == new`（点了同一个词）必须**原样返回**（2026-11-05 判据抓到）：
+    下面的实现是"先去掉 new、再把 old 换成 new、没有就追加"——同一个词时
+    `out` 里已经没它了，于是走"追加"那一支，把这一维**挪到末尾**。
+    用户在同一格再点一次当前值，就会看到顺序莫名变了。
     """
-    out = [a for a in (attrs or ()) if a and a != new]
-    if old and old in out:
-        out[out.index(old)] = new
-        return out
+    def _base(a):
+        return str(a).split('@', 1)[0]
+
+    def _at(a):
+        parts = str(a).split('@', 1)
+        return '@' + parts[1] if len(parts) > 1 else ''
+
+    if old and new and old == new:
+        return [a for a in (attrs or ()) if a]
+    # ⚠ 按**剥掉 `@` 之后的词**比较：`happy@l11` 的属性名是 `happy`。
+    # 替换时把 `@l11` 带到新值上（`happy@l11` → `angry@l11`）——
+    # 内联位置是**附着在这个属性上**的，丢了它就等于把演出位置改了。
+    out = [a for a in (attrs or ()) if a and _base(a) != new]
+    for i, a in enumerate(out):
+        if _base(a) == old:
+            out[i] = new + _at(a)
+            return out
     return out + [new]
 
 
@@ -2392,19 +2677,35 @@ def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
     hit = next((r for r in rows if r['group'] == str(group or '')), None)
     if hit is None:
         return spec
-    toks = spec.split()
-    tag = toks[0] if toks else ''
+    # ⚠ **必须先拆子句**（`at i11 with vpunch`）：属性只能出现在 `at` 之前，
+    # 把它们当属性词重拼会拼出 `... with vpunch clothes2` —— 语法错、整份跑不了。
+    tag, toks_attrs, clauses = split_show_spec(
+        spec, _declared_clause_keywords(symbols))
     if not tag:
         return spec
     value = str(value or '').strip()
-    attrs = _replace_attr_word(toks[1:], hit['value'], value)
-    # **不认识的词留在原位**（`base_handdown_mask` / `_hd_cut` 这类内部件）——
+    # `_replace_attr_word` 已经是**原位替换**（不认识的词也留在原位）——
     # 一维一格只负责换它认识的那一维，其余一个字节都不动。
-    attrs = [a for a in attrs if a and a != value]
-    if value:
-        attrs = attrs + [value]
-    out = [tag] + attrs
-    return ' '.join(out)
+    #
+    # ⚠⚠ **别再"删掉新值再追加"**（2026-11-05 真机事故）：
+    #     attrs = [a for a in attrs if a != value]
+    #     attrs = attrs + [value]
+    # 这两行等于把刚换上的词**挪到末尾**，原位替换白做。用户注册的是
+    # `show 人物 服装 表情`，切一下服装就变成 `lan happy clothes2` ——
+    # 而且**一旦保存，`.rpy` 里那行的字节也被改了**（顺序虽然语义等价，
+    # 但不是作者写的那个顺序）。
+    old = str(hit.get('value') or '')
+    if not old:
+        # 认不出当前值 ≠ 这一维没有词：真机有**拼法不同**的写法
+        # （脚本写 `base_hand_down`、项目声明的是 `base_handdown`）。
+        # 认出来才能**原位替换**；认不出就会追加成"同组两个词"
+        # （2026-11-05 用户截图里那条 `base_hand_down gratified base_handdown`）。
+        old = _spelling_variant_in(toks_attrs, hit.get('options'))
+    attrs = _replace_attr_word(toks_attrs, old, value)
+    # 同一个词只留一份（新值本来就在 spec 里、或 spec 里用了两种拼法时）。
+    attrs = _dedupe_by_key(attrs, value)
+    line = ' '.join([tag] + [a for a in attrs if a])
+    return f'{line} {clauses}'.strip() if clauses else line
 
 
 def choices_for_image(image_spec: str, symbols) -> dict:

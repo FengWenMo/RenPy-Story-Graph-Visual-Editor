@@ -186,7 +186,8 @@ class GraphPageMixin:
         '_edit_selected_vars', '_menu_action', '_on_canvas_select',
         '_on_connect_requested', '_on_edge_menu', '_on_node_menu',
         '_on_node_moved', '_on_zoom_changed', '_open_edge_in_card',
-        '_open_selected_in_card', '_refresh_choices_now',
+        '_open_selected_in_card', '_refresh_card_field_specs',
+        '_refresh_choices_now',
         '_show_more_tools', '_status',
         # 宿主已有的槽与动作（这里只连线，不实现）
         'add_node_at', 'check_asset_health', 'check_logic',
@@ -214,7 +215,7 @@ class GraphPageMixin:
         'export_from_table', 'export_script', 'import_chapters',
         'import_plain_text', 'learn_custom_statement', 'next_beat',
         'next_dialogue', 'open_ai_panel', 'open_asset_rename_dialog',
-        'open_project', 'prev_beat', 'refresh_stage_views',
+        'open_extensions', 'open_project', 'prev_beat', 'refresh_stage_views',
         'reload_imported_chapters', 'rescan_project',
         'show_analysis_dialog', 'show_continuity', 'show_health',
         'show_help',
@@ -806,6 +807,9 @@ class GraphPageMixin:
             on_notice=partial(notify_card_notice, self))
         # 立绘缩略图的路径解析：真源是资源表的 Path 列，只有会话拿得到
         self._panel.set_path_resolver(self._session.path_of_image)
+        # 卡片那几格的**外观**来自项目扩展点（`kind: "field"`）——建面板这一刻
+        # 就把 schema 交过去（打开项目时还会再刷一次，见 `open_project_path`）。
+        self._refresh_card_field_specs()
         # 卡片里那两个按钮直接连过来（用户要的"保存 / 撤销这张卡片"）
         self._panel.save_requested.connect(self.save_current_beat)
         self._panel.undo_requested.connect(self.undo_current_beat)
@@ -988,6 +992,15 @@ class GraphPageMixin:
             '之后这些格就是表格列、候选值就是下拉。'
             '候选分栏与项目清单（删除 / 重置）在同一个弹窗里。',
             primary=True)
+        # 「🛠 扩展」紧跟「自定义语句」（用户 2026-11-07：四个入口"太散了"）。
+        # 它不替代左边那个：那个是"教一次"最顺手的地方，这个是**唯一能看见
+        # 技术调用 / 批处理开关 / 拍字段**的地方，字段表是动态的。
+        act('🛠 扩展', self.open_extensions,
+            '四种自定义放一张脸：写法 / 技术调用（`$ 函数(...)`）/ 拍字段 / 批处理。\n'
+            '每条都有「是否使用」和「是否能够批处理」两个开关；\n'
+            '右边的格子按「字段」表**动态**长出来 —— 加一格，卡片上就多一列。\n'
+            '存进项目根的 storygraph.ext.json（不动旧清单），'
+            '项目 extensions/ 目录下的插件也会列在这里。')
         # 「填 API key」**不再单独占一个按钮**（用户 2026-10-26：
         #   "ai 助手那里填入 api 的那个功能完全归入 ai 助手之中"）——
         #   它已经是 AI 助手面板里的「🔑 填 API key」按钮（`panel_ai.AiPanel`）。

@@ -593,6 +593,9 @@ class GraphOpsMixin:
         self._project_root = Path(root)
         self._session.project_root = self._project_root
         self._loader.project_root = self._project_root
+        # 卡片那几格的**外观**由项目的扩展点决定（`kind: "field"`）：每换一个
+        # 项目就重新取一次 schema。取不到只回内置那份 —— 卡片不该因此画不出来。
+        self._refresh_card_field_specs()
         # 左侧「章节导航」跟着换项目（**先扫一遍再读资源表**：扫盘 ~10ms，
         # 而读表要 1.8 秒 —— 那几个文件先列出来，等待期间界面就不是空的）。
         try:
@@ -1447,6 +1450,69 @@ class GraphOpsMixin:
                       f'（key {AI.masked(cfg.get("api_key"))}）—— 可以开工了')
         else:
             self._log(f'[AI] 还没配好：{why}')
+
+    def open_extensions(self):
+        """
+        「🛠 扩展」：**一个窗口看全四种自定义**（写法 / 技术调用 / 拍字段 / 批处理）。
+
+        用户 2026-11-07：
+
+        > "你现在根本没办法让我把 `$ renpy.transition(...)` 当自定义写法输入进去，
+        >  并自由决定它是否使用、是否能够批处理！你的工具 UI 根本就没有给我这个
+        >  功能！而且**太散了**！"
+
+        这个入口不替代「🧩 自定义语句」（那个仍是"教一次"最顺手的地方），
+        它补的是另外三件没有界面的事：**技术调用的声明、把一段代码批处理到整章、
+        以及一条扩展点能不能用**。扩展点的字段表与 `DynamicForm` 是动态的，
+        所以以后加新能力不用再改界面代码。
+        """
+        from storygraph.ui_qt.dialog_extensions import ExtensionDialog
+
+        root = self._project_root
+        if not root:
+            QMessageBox.information(
+                self, '提示',
+                '先「📁 打开项目」—— 扩展点要写进项目根的 '
+                'storygraph.ext.json。')
+            return
+        dlg = ExtensionDialog(self, project_root=root)
+        dlg.exec()
+        # 扩展点可能改过"这条写法用不用"——注册表缓存作废，卡片/表格按新的来。
+        # 这个 import 在 `ui_qt` 里必然成立（`ui_qt` 已经依赖 `story`），所以
+        # 只兜 `ImportError`；真出错就该炸出来，不该悄悄不刷新。
+        try:
+            from storygraph.story.statement_registry import clear_cache
+        except ImportError:
+            return dlg
+        clear_cache()
+        self._refresh_card_field_specs()
+        return dlg
+
+    def _refresh_card_field_specs(self):
+        """
+        把项目的**拍字段扩展点**交给卡片：`{字段名: FieldSpec}`，然后重建那几行。
+
+        这是 `kind: "field"` 的消费方（2026-11-07 第三轮）：在那之前它和上一轮
+        的 `statement` 一样是**断链**的 —— 窗口里建得出来、存得下、树上看得见，
+        卡片上什么都不会发生。现在"改一格的样子"不用改核心代码：
+        在扩展窗口的字段表里写 `Stage`（键名）+ 想要的样子，保存即生效。
+
+        读不出来的（键名不在卡片上 / 想改成开关）走 `problems` → 控制台；
+        **不静默**：卡片照旧画原来那一格。
+        """
+        panel = getattr(self, '_panel', None)
+        if panel is None or not getattr(self, '_project_root', None):
+            return
+        from storygraph.ext import card_fields as CF
+
+        try:
+            specs, problems = CF.for_project(self._project_root)
+        except (OSError, ValueError) as exc:
+            self._log(f'[扩展] 拍字段读不出来（卡片用内置的样子）：{exc}')
+            return
+        panel.set_card_field_specs(specs)
+        for text in problems[:3]:
+            self._log(f'[扩展] ⚠ {text}')
 
     def learn_custom_statement(self):
         """

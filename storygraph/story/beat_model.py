@@ -57,6 +57,7 @@ from storygraph.story.beat_fields import (  # noqa: E402
     BEAT_HEADERS,
     FINGERPRINT_FIELDS,
     HIDDEN_BEAT_COLUMNS,
+    LEGACY_BEAT_HEADERS,
     SINGLE_LINE_BEAT_FIELDS,
     SNAPSHOT_FIELDS,
     stable_value,
@@ -64,6 +65,10 @@ from storygraph.story.beat_fields import (  # noqa: E402
 
 #: 中文表头 → 列名（`from_row` 读表时用）；同时兼容英文表头（旧表）。
 _HEADER_ALIASES = {v: k for k, v in BEAT_HEADERS.items()}
+#: **改过名的老表头也认**（`台词后缀（内部）` → `SayTail`，2026-11-03）。
+#: 不加这条，列改名那天全项目的 `with dissolve` 会**静默消失**：
+#: 按名匹配找不到 → 字段留空 → 渲染时那一截就没了。
+_HEADER_ALIASES.update(LEGACY_BEAT_HEADERS)
 _HEADER_ALIASES.update({f: f for f in BEAT_FIELDS})
 
 #: C0 控制字符 + DEL（`\n` / `\r` / `\t` 是这里最主要的三位）。

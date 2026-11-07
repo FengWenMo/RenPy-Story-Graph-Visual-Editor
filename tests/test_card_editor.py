@@ -74,9 +74,15 @@ class TestCardShape:
         2026-09-30：按用户要求把 `Scene` / `BGM` / `Voice` / `Comment`
         **从折叠的高级区提上来**——"背景 / 音乐 / 语音 / 备注"本来就是每一拍的
         基本信息，藏在折叠区里等于没有。
+        2026-11-03：`SayTail`（台词转场）**也从高级区提上来**。用户：
+        "with 是 say 的一部分，凭什么要往下翻高级区？"
+        ⚠ 这条判据当时没跟着改，于是它一直红着（判据比实现旧）——
+        2026-11-07 第三轮统一字段表时一并修正。搬家真正要紧的不是"控件放哪"，
+        而是**分组**：`collect_fields` 只看 `PRIMARY_FIELDS` 就收，高级区
+        收起时不收 `ADVANCED_FIELDS`（`SayTail` 留在那边会静默丢）。
         """
         assert PRIMARY_FIELDS == [
-            'Speaker', 'Text', 'Scene', 'BGM', 'Voice', 'Comment']
+            'Speaker', 'Text', 'SayTail', 'Scene', 'BGM', 'Voice', 'Comment']
 
     def test_primary_and_advanced_are_disjoint(self):
         """两项不许重叠——重了意味着同一个值能被两个控件改（互相打架）。"""
@@ -114,10 +120,19 @@ class TestCardShape:
         assert 'Notes' not in PRIMARY_FIELDS, 'Notes 已取消，不该在主区'
         assert 'Notes' not in ADVANCED_FIELDS, 'Notes 已取消，不该在高级区'
 
-    def test_advanced_is_collapsed_by_default(self, qapp, ui_window):
+    def test_advanced_is_open_by_default(self, qapp, ui_window):
+        """
+        高级区**默认展开**（2026-11-07，按 Unity 的 `Foldout` 口径）。
+
+        这条判据原来叫 `test_advanced_is_collapsed_by_default`，断言的正好相反
+        —— 折叠默认是 2026-10 的决定，2026-11-07 改成了默认展开：
+        折叠是"这一屏我看完了"的临时动作，不是"藏起来不用管"（而且收起只是
+        不显示，里面照样写回，见 `test_card_field_groups`）。判据没跟着改，
+        于是它一直红着。
+        """
         assert ADVANCED_FIELDS, '高级区不该是空的'
-        assert ui_window._panel.is_advanced_open() is False, \
-            '高级区默认必须是收起的'
+        assert ui_window._panel.is_advanced_open() is True, \
+            '高级区默认是展开的（Unity Foldout 口径）'
 
     def test_condition_is_editable_and_reachable(self, qapp, ui_window):
         """

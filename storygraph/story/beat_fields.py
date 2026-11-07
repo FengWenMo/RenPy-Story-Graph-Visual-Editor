@@ -144,12 +144,29 @@ COLUMN_SPECS = (
     FieldSpec('CameraHeader', 'camera_header', header='相机头行（内部）',
               hidden=True, single_line=True,
               note='3D 舞台 camera 块的头行。'),
-    #: 台词**引号串之后**的合法子句（`(what_color="#f00")` / `with` / `id` /
-    #: `nointeract`）。2026-10-18 追加：从前它被 `_RE_SAY` 静默吃掉，
-    #: 真机 `script_pomo.rpy` 的 `jc "…" (no_skip=True)` 导出后括号没了。
-    FieldSpec('SayTail', 'say_tail', header='台词后缀（内部）',
-              hidden=True, single_line=True,
-              note='台词的样式/控制子句，原样写回；空 = 普通台词。'),
+    #: 台词**引号串之后**的合法子句：`with dissolve` / `(what_color="#f00")` /
+    #: `id 名字` / `nointeract`。
+    #:
+    #: 2026-10-18 追加（从前被 `_RE_SAY` 静默吃掉：真机 `script_pomo.rpy`
+    #: 的 `jc "…" (no_skip=True)` 导出后括号没了）。
+    #:
+    #: **2026-11-03 从「内部列」升为可见列**（用户："`with` 不是自定义语句，
+    #: 是 say 本身的属性"—— 说得对）：藏在第 32 列既看不见也改不了。
+    #:   · 表里能直接写 `with dissolve`；卡片高级区也能改（`ADVANCED_FIELDS`）；
+    #:   · **老表照样读得回来** —— 表头名从「台词后缀（内部）」改成「台词后缀」，
+    #:     旧名进 `LEGACY_BEAT_HEADERS`（`from_row` 按名匹配，缺这条就会
+    #:     **静默丢掉所有 `with`**）。
+    #:
+    #: ⚠⚠ **位置一个字都不能动**（今天是第 32 列）：`Beat.to_row()` 返回的是
+    #: **硬编码的位置列表**（不像注释说的"按 `BEAT_FIELDS` 遍历"）。把它挪到
+    #: 「台词」旁边尝试过 —— 值立刻整体错位（`say_tail` 落进 `CameraHeader`
+    #: 列），而且写表时看不出来，是 `zip(BEAT_FIELDS, to_row())` 才暴露。
+    #: 要挪，先把 `to_row` 改成按 `BEAT_FIELDS` 遍历（守卫：
+    #: `tests/test_beat_row_order.py`）。
+    FieldSpec('SayTail', 'say_tail', header='台词后缀',
+              single_line=True,
+              note='台词的样式/控制子句（with / (kwargs) / id / nointeract），'
+                   '原样写回；空 = 普通台词。'),
     #: `label 名(参数…):` 的参数表。2026-10-18 追加：从前解析器把参数
     #: "扫过去"就扔了，产物成 `label 名:` —— 而 `call 名(...)` 是原样保真的，
     #: 于是调用方传参、被调方不收，Ren'Py 报"参数过多"，游戏起不来。
@@ -234,6 +251,16 @@ BEAT_FIELDS = [s.name for s in COLUMN_SPECS]
 #: 列名 → 中文表头。
 BEAT_HEADERS = {s.name: s.header for s in COLUMN_SPECS}
 
+#: **改过名的表头**：旧表头 → 列名。
+#:
+#: 为什么必须有（2026-11-03）：`from_row` 是按**表头名**匹配的，而列一旦
+#: 改名（`台词后缀（内部）` → `台词后缀`），老表的表头就对不上了 ——
+#: 结果不是报错，是**静默丢掉所有 `with dissolve`**（真机现在有 0 处，
+#: 但用户马上要用）。加别名比"不改名"好：语义对了，老表也照样读得回来。
+LEGACY_BEAT_HEADERS = {
+    '台词后缀（内部）': 'SayTail',
+}
+
 #: 整列隐藏的列（顺序同列顺序）。
 HIDDEN_BEAT_COLUMNS = tuple(s.name for s in COLUMN_SPECS if s.hidden)
 
@@ -270,6 +297,7 @@ def stable_value(value) -> str:
 
 __all__ = [
     'ATTR_OF', 'BEAT_FIELDS', 'BEAT_FIELD_SPECS', 'BEAT_HEADERS',
+    'LEGACY_BEAT_HEADERS',
     'COLUMN_SPECS', 'FINGERPRINT_FIELDS', 'FieldSpec', 'HIDDEN_BEAT_COLUMNS',
     'INTERNAL_SPECS', 'SINGLE_LINE_BEAT_FIELDS', 'SNAPSHOT_FIELDS',
     'SPEC_OF_ATTR', 'spec_for', 'stable_value',

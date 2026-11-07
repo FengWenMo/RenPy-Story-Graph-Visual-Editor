@@ -131,3 +131,77 @@ def test_switching_back_to_a_say_card_restores_the_blocks(qapp):
         assert not card._stage_box.isHidden()
     finally:
         _close(card)
+
+
+# ----------------------------------------------------------------------
+#  高级区：默认展开 + **收起也写回**（Unity 的 Foldout 语义）
+# ----------------------------------------------------------------------
+
+def test_the_advanced_area_starts_expanded(qapp):
+    """
+    Unity 的 `Foldout` 默认是开的：折叠是"这屏看完了"的临时动作，
+    不是"藏起来不用管"。默认收起会让人以为"这块没东西"。
+    """
+    card = _card(qapp)
+    try:
+        assert card._adv_host.isHidden() is False
+        assert card._adv_open is True
+    finally:
+        _close(card)
+
+
+def test_collapsing_the_advanced_area_still_writes_back(qapp):
+    """
+    ⚠ 收起只影响**显示**，不改变"要不要保存"。
+
+    从前 `collect_fields` 里是 `if self._adv_open:` —— 收了高级区，
+    里面的字段就**不算数**了。`SayTail` 曾经因此静默丢过一次
+    （当时靠把 SayTail 挪到主区绕过去，根因没修）。这条钉住根因。
+    """
+    card = _card(qapp)
+    try:
+        _load(card, {'Text': '一句台词'}, None)
+        card._adv_open = False
+        card._adv_host.setVisible(False)          # 模拟人点了收起
+        card._widgets['Label'].setText('ch01')
+        out = card.collect_fields()
+        assert out.get('Label') == 'ch01', '收起高级区之后字段就不写回了（会静默丢）'
+    finally:
+        _close(card)
+
+
+# ----------------------------------------------------------------------
+#  高级区：默认展开 + **收起也写回**（Unity 的 Foldout 语义）
+# ----------------------------------------------------------------------
+
+def test_the_advanced_area_starts_expanded(qapp):
+    """
+    Unity 的 `Foldout` 默认是开的：折叠是"这屏看完了"的临时动作，
+    不是"藏起来不用管"。默认收起会让人以为"这块没东西"。
+    """
+    card = _card(qapp)
+    try:
+        assert card._adv_host.isHidden() is False
+        assert card._adv_open is True
+    finally:
+        _close(card)
+
+
+def test_collapsing_the_advanced_area_still_writes_back(qapp):
+    """
+    ⚠ 收起只影响**显示**，不改变"要不要保存"。
+
+    从前 `collect_fields` 里是 `if self._adv_open:` —— 收了高级区，
+    里面的字段就**不算数**了。`SayTail` 曾经因此静默丢过一次
+    （当时靠把 SayTail 挪到主区绕过去，根因没修）。这条钉住根因。
+    """
+    card = _card(qapp)
+    try:
+        _load(card, {'Text': '一句台词'}, None)
+        card._adv_open = False
+        card._adv_host.setVisible(False)          # 模拟人点了收起
+        card._widgets['Label'].setText('ch01')
+        out = card.collect_fields()
+        assert out.get('Label') == 'ch01', '收起高级区之后字段就不写回了（会静默丢）'
+    finally:
+        _close(card)

@@ -1406,6 +1406,10 @@ def _rewrite_line(old_line, pick, relax_speaker):
         # 生成器 `"file \"c:\\\\a.py\", line 24"`）：Ren'Py 读出来是同一句，
         # 同样保留原文那一行 —— 这也是"没改就不许动文件"的一部分。
         return old_line, False
+    if _escaped_same(body, pick_body):
+        # **只差"真字符 vs 转义写法"**（原文两个真制表符、
+        # 生成器 `\t\t`）—— 等价，保留原文（2026-11-02，见 `_escaped_same`）。
+        return old_line, False
     # **原文那一行只是"生成结果 + 行尾注释"时也不许动**（2026-10-05 修 O1）。
     #
     # 一拍渲染成多行时，它自己的行尾注释本来就贴不回去（见不变量 78 的
@@ -2240,6 +2244,54 @@ def _unescaped(line: str) -> str:
     return re.sub(r'[ \t]+', ' ', s).strip()
 
 
+#: `\x` 转义表 —— 只认 Ren'Py 字符串里真正会出现的几种。
+#: 与 `beat_render._quote` 的转义集合**必须对得上**（那边转义哪些，
+#: 这边就得认得哪些），否则"生成器写的形态"解不回来。
+_ESCAPE_MAP = {'n': '\n', 't': '\t', 'r': '\r', '0': '\0',
+               '\\': '\\', '"': '"', "'": "'"}
+
+
+def _decode_escapes(s: str) -> str:
+    """把 Ren'Py 字符串里的转义序列还原成真字符（`\\t` → 制表符）。
+
+    认不出的转义**原样保留**（`\\x` 这种情况在文本里就是两个字符，
+    不猜它是控制字符 —— 猜错会把两行不同的台词判成同一句）。
+    """
+    out, i, n = [], 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == '\\' and i + 1 < n:
+            mapped = _ESCAPE_MAP.get(s[i + 1])
+            if mapped is not None:
+                out.append(mapped)
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+def _escaped_same(a: str, b: str) -> bool:
+    """
+    两行只差"**真字符 vs 转义写法**"吗（`\\t\\t` ↔ 两个真制表符）？
+
+    为什么单独一条（2026-11-02，真机 `chapter3_4_4.rpy`）：作者写的
+
+        xqlz "…忘了罢\\" <TAB><TAB>#这里出现名字但是不要出现立绘"
+
+    在表里往返一趟之后，渲染器按 `_quote` 把制表符写成 `\\t`——
+    两行**语义完全相同**（Ren'Py 读出来一字不差），但逐字节不同。
+    没有这一条，补丁会认为"这一行被改了"→ 每次导出都把作者的原始制表符
+    换成 `\\t`，文件看起来"没改却变了"。
+
+    `_unescaped` 管不了它：那条只归一空白与引号，`\\t` 与真 tab 在它眼里
+    是两个不同的东西（这正是 `\\n` / `\\t` 会被当成"内容不同"的原因）。
+    """
+    return (a or '') != (b or '') and \
+        _decode_escapes(_norm(a)) == _decode_escapes(_norm(b))
+
+
+
 def _condition_reasons(new_beats: list, beats: list,
                        renumber=()) -> list:
     """
@@ -2437,7 +2489,14 @@ def _missing_generated_lines(text: str, blocks: list) -> list:
         # 与 `'第一章':`（去引号失败，因为它以 `:` 结尾）→ 判成"内容丢了"
         # → `script.rpy` 整章退回全量（7 条菜单选项）。
         for base in (n, n.rstrip(':')):
-            for k in (base, _unescaped(base)):
+            # ⚠ 第三档 `_decode_escapes`（2026-11-02）：**真制表符与 `\t`
+            # 是同一行**。`_unescaped` 只归一空白与引号，`\t` 字面它不动、
+            # 真 tab 它归一成空格 —— 于是"生成器写 `\t\t`、产物里是两个真
+            # tab"被判成"内容丢了"，整章退回全量（真机 `chapter3_4_4` 的
+            # edited 场景：`used_patch` 从 True 掉成 False）。
+            # 与 `_rewrite_line` 里的 `_escaped_same` 是**同一条等价**，
+            # 两处必须一起改，否则"保留原文"与"内容都在"互相打架。
+            for k in (base, _unescaped(base), _decode_escapes(base)):
                 if k:
                     out.add(k)
                     out.add(re.sub(r'\s+', '', k))

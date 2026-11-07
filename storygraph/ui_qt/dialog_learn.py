@@ -100,10 +100,11 @@ from storygraph.authoring.learn_statement import (build_declaration,
 from storygraph.core.safeguard import swallow
 from storygraph.story.spec_clauses import CLAUSE_KIND_LABELS, CLAUSE_KINDS
 from storygraph.ui_qt import theme
-from storygraph.ui_qt import tokens as T
+from storygraph.ui_qt import card_rows, tokens as T
 from storygraph.ui_qt.column_editor import ColumnList
 from storygraph.ui_qt.flow import FlowRow
 from storygraph.ui_qt.param_editor import FieldList
+from storygraph.ui_qt.spec_preview import SpecPreview
 
 #: 页面栈下标（`self.pages`）
 PAGE_LIST = 0       # 有哪些写法 / 已经认识哪些
@@ -482,6 +483,19 @@ class CustomStatementDialog(QDialog):
         self.mode_note = _hint('')
         lay.addWidget(self.mode_note)
 
+        # —— 卡片上会长这样（**只读预览**）——
+        #
+        # 用户 2026-11-07："卡片编辑器右边的 UI 和自定义模块定义出的模块
+        # 一定要对应！" —— 最好的"对应"是**配置时就能看见结果**。
+        #
+        # ⚠ 位置在**开头词之后、格子之前**（第一版放在格子列表下面，
+        #   三张格子卡就把它顶出屏幕了 —— 截图当场看到，等于没有）。
+        #   这块不参与保存、不写盘，纯粹是面镜子；排布走 `card_rows`
+        #   （与真卡片同一套构造口，否则"预览"和"真卡片"会是两个样子）。
+        lay.addWidget(card_rows.section('卡片上会长这样', hint='只读预览'))
+        self.card_preview = SpecPreview()
+        lay.addWidget(self.card_preview)
+
         meta = QHBoxLayout()
         meta.setSpacing(T.SPACE['sm'])
         cn = QVBoxLayout()
@@ -524,6 +538,7 @@ class CustomStatementDialog(QDialog):
 
         # —— 2.5 复杂子句（高级，可选）——
         self._build_clause_section(lay)
+
 
         # —— 3. 拿一行剧本试试 ——
         lay.addWidget(_step(4, '拿一行剧本试试'))
@@ -1207,6 +1222,7 @@ class CustomStatementDialog(QDialog):
         self._baseline = self._signature()
         self._refresh_form_head()
         self._refresh_preview()
+        self._refresh_card_preview()
 
     def _roles_cached(self) -> dict:
         """
@@ -1480,6 +1496,17 @@ class CustomStatementDialog(QDialog):
                              f'先给它们起个名字（或者删掉那几格）。')
             return False
         from storygraph.story import statement_registry as SR
+        # ⚠ 2026-11-07 第四轮：**别往会被盖住的那份文件里写**。
+        #   装配顺序是「扩展点 > rules.json」（`StatementRegistry.for_project`），
+        #   所以「这条语句本来就是扩展里声明的」时候在这里保存，写进
+        #   rules.json 的那份**永远读不到**（调用窗口那边用探针实测过同一个坑：
+        #   `.pip-tmp/probe_call_owner.py`）。
+        origin = str(getattr(self._editing, 'origin', '') or '')
+        owner = SR.statement_owner(origin)
+        if owner in ('ext', 'plugin', 'builtin'):
+            self._set_status('error', _blocked_origin_note(
+                built['name'], owner, origin))
+            return False
         res = SR.declare_statement(
             self._root_path, built['name'], label=built.get('label', ''),
             columns=built.get('columns') or [], block=built.get('block'),
@@ -1546,6 +1573,20 @@ class CustomStatementDialog(QDialog):
     def _on_form_changed(self, *_a):
         """表单里任何一个字变了：重算预览 / 状态 / 保存键。"""
         self._refresh_preview()
+        self._refresh_card_preview()
+
+    def _refresh_card_preview(self) -> None:
+        """
+        「卡片上会长这样」那一块。
+
+        防抖在 `SpecPreview.refresh` 里做（比较签名）—— 这里每个按键都会被
+        调用一次，重建控件的代价（尤其下拉）不该跟着按键走。
+        """
+        preview = getattr(self, 'card_preview', None)
+        if preview is None:
+            return
+        preview.refresh(self.name.text().strip(), self.params.rows(),
+                        self._clause_rows())
 
     def _show_like(self) -> bool:
         """这个语句的头是不是 `show` / `scene` / `hide`（属性格可填可不填）。"""
@@ -2403,6 +2444,25 @@ def _with_optional_defaults(slots, head):
     except Exception as e:                      # noqa: BLE001 - 不许炸界面
         swallow('ui_qt.dialog_learn.with_optional_defaults', e)
         return list(slots or ())
+
+
+def _blocked_origin_note(name: str, owner: str, origin: str) -> str:
+    """
+    「这条语句的形状住在别处」→ 说清*为什么这里存不了*、*去哪存*。
+
+    这句话必须具体：只回一句"保存失败"，人会以为是工具坏了（或者干脆
+    手改 rules.json —— 那更糟，那份读不到）。
+    """
+    if owner == 'plugin':
+        where = f'插件 extensions/{origin.split(":", 1)[-1]}'
+        return (f'「{name}」住在{where}里（插件文件是只读输入，就地改会被下次'
+                f'加载冲掉）—— 去「扩展」窗口改同一条。')
+    if owner == 'builtin':
+        return (f'「{name}」的形状是工具内置的（引擎 API）—— '
+                f'在「扩展」窗口里只能停用 / 配批处理，形状不在这里改。')
+    return (f'「{name}」的形状住在 {origin or "扩展清单"} 里 —— 这里保存会写进 '
+            f'storygraph.rules.json，但装配时扩展优先，那份读不到。'
+            f'去「扩展」窗口改同一条（那扇窗的树上就有它）。')
 
 
 def _hint(text: str) -> QLabel:
