@@ -246,7 +246,10 @@ def test_health_actually_reads_a_project_rather_than_always_failing(tmp_path):
     ws = wb.active
     ws.title = 'images'
     ws.append(['ID', 'Path', 'Notes'])
-    ws.append(['a', 'a.png', ''])
+    # ⚠ Path 要写**项目相对**（`game/…`）：2026-11-04 起体检会如实把
+    # `game/` 之外的路径算成 `outside_game`（真机 232 条就是这么来的），
+    # 写成 `a.png` 会让 `ok=False`，那是**正确行为**、不是这条判据要测的东西。
+    ws.append(['a', 'game/images/a.png', ''])
     wb.save(tables / 'images.xlsx')
     (root / 'storygraph.rules.json').write_text(json.dumps({}), encoding='utf-8')
     got = M.health(root)

@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 from storygraph.core.safeguard import swallow
@@ -102,6 +103,35 @@ def capabilities() -> dict:
                               '`dry_run` **默认 True**（只算 diff、不写盘）；'
                               '要真写必须显式 `dry_run=False`',
                               '回执必带 `written` / `diff` / `backup`']},
+            # —— 剧本 / 资源（2026-11-03 补：能力早就有，MCP 一直没同步）——
+            {'name': 'storygraph_chapters', 'kind': 'read',
+             'status': 'done', 'summary': '有哪些章节（label）＋文件与行号',
+             'source': 'scanner', 'tri_state': False,
+             'known_limits': ['只列有 label 的文件；没有 label 的散块不在其中']},
+            {'name': 'storygraph_beats', 'kind': 'read',
+             'status': 'done',
+             'summary': '某一章（label）或某个文件的**拍**（逐行演出结构）',
+             'source': 'parser', 'tri_state': False,
+             'known_limits': [
+                 '拍与引擎语句不一定 1:1（结构单位）',
+                 'label 与 file 都不给 = 解析整个项目（慢）',
+                 '不给 limit 是全量（大章节几百拍，注意上下文预算）']},
+            {'name': 'storygraph_assets', 'kind': 'read',
+             'status': 'done',
+             'summary': '资源表里的图/音频，含**能不能写进 show**（showable）',
+             'source': 'table', 'tri_state': False,
+             'known_limits': [
+                 '表读不出来 ≠ 没有资产（reason 会写清"没表"还是"表坏了"）',
+                 '`category` 按**目录语义**判（`phone_msg/` → ui），不看图片内容',
+                 '默认只返回前 200 条']},
+            {'name': 'storygraph_image_lookup', 'kind': 'read',
+             'status': 'done',
+             'summary': '一个图像名/资产 ID → 它是什么、能不能 show、为什么不行',
+             'source': 'table', 'tri_state': True,
+             'known_limits': [
+                 '认不出 → kind=unknown + showable=false（**不是**"这张图不存在"）',
+                 '`show` 的名字由项目 `layeredimage` 声明决定，'
+                 '文件名经常对不上（`attribute angry: \'speechless\'`）']},
             # ⚠ `storygraph_table_export` **不在清单里**（2026-11-01，审查 5.10）：
             # 它永远返回 `ok=False + 还没实现`，却被列进"工具清单"和"可写工具"
             # 名单里 —— 给模型广告一个永远失败的工具，比不给更糟：
@@ -198,7 +228,13 @@ def project_context(project_root) -> dict:
     try:
         from storygraph.app.asset_report import health_dict
         from storygraph.app.editor import EditorSession
-        rep = EditorSession(project_root=root).asset_health_report()
+        session = EditorSession(project_root=root)
+        # ⚠ **必须先 `load_assets()`**（2026-11-03）：`asset_health_report`
+        # 第一句就是 `reg = self.assets_registry()`，不载入恒为 None ——
+        # 于是明明有资源表的项目会得到"还没有打开项目 / 读不到资源表"这个
+        # **假失败**，而同一份 `assets` 工具却能正常读到。外部 AI 会信这句话。
+        session.load_assets()
+        rep = session.asset_health_report()
         hd = health_dict(rep)
         out['health'] = {k: hd.get(k) for k in
                          ('ok', 'error', 'problems', 'findings', 'source')}
@@ -210,6 +246,22 @@ def project_context(project_root) -> dict:
                          'source': 'table+engine',
                          'error': f'体检没做成：{type(e).__name__}: {e}'}
         out['notes'].append(out['health']['error'])
+
+    # ---- 剧本规模（2026-11-03 补：说"一次拿全"就得有章节数）----
+    #
+    # 只给**计数**，不解析拍（那要读全部 `.rpy`，`beats` 工具按章取更省）。
+    try:
+        from storygraph.app.chapter_index import build_index
+        idx = build_index(str(root))
+        out['story'] = {'files': len(idx.files),
+                        'labels': sum(len(f.labels) for f in idx.files),
+                        'source': 'scanner',
+                        'how_to': '要章名列明细 → storygraph_chapters；'
+                                  '要某一章的拍 → storygraph_beats'}
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.context.story', e)
+        out['story'] = {'files': 0, 'labels': 0, 'source': 'scanner',
+                        'error': f'数不出章节：{type(e).__name__}: {e}'}
     return out
 
 
@@ -381,6 +433,355 @@ def health(project_root) -> dict:
         swallow('mcp_surface.health', e)
         return _result('table+engine', ok=False, findings=[],
                        reason=f'体检没做成：{type(e).__name__}: {e}')
+
+
+# ======================================================================
+#  剧本 / 资产（2026-11-03 补：这些能力做好很久了，MCP 一直没同步）
+# ======================================================================
+#
+# 背景（外部 AI 审查的原话）："好久之前做的，现在加了很多新功能却没同步"。
+# 上面那批工具只覆盖**语句解析层**（未知写法 / 引擎事实 / 声明）；而工具
+# 这几年长出来的三大块 —— 章节与拍、资源表与图像身份、剧本表与补丁 ——
+# 在 MCP 里一个都没有。MCP 客户端（别家的 agent）连"这个项目有几章、
+# 第 3 章第 12 句台词是什么"都问不出来，只能自己去读 `.rpy`。
+#
+# 这一节先补**读**（`kind: read`）。写的那几个（改台词 / 导出 / 补丁）
+# 必须带 `dry_run` 默认 True 的回执，另收一节。
+
+def _guarded(name: str):
+    """
+    读工具的**统一失败回执**（一个装饰器，四个工具共用一份 except）。
+
+    为什么不是每个工具各写一个 `try/except`（2026-11-03）：技术债棘轮数的是
+    全仓 `swallow` / `except Exception` 的**条数**，而且"清债阶段只许降"。
+    四个工具各抄一遍 = 4 个 except + 4 处留痕；合成一处之后只剩 1 条，
+    行为完全一样（都是"如实说失败，不抛给客户端"）。
+
+    ⚠ 失败回执永远带 `ok=False` + `reason`：MCP 客户端会把 `ok` 当"有没有做成"，
+    少一个字段它就只能瞎猜。
+    """
+    def wrap(fn):
+        @functools.wraps(fn)
+        def inner(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:                  # noqa: BLE001 - 读工具不许炸
+                swallow(f'mcp_surface.{name}', e)
+                return _result('none', ok=False,
+                               reason=f'{name} 出错：{type(e).__name__}: {e}')
+        return inner
+    return wrap
+
+
+def _check_root(project_root) -> tuple:
+    """`(root, 错误回执)` —— 不是工程根时**立刻**给结论，别让后面报怪错。"""
+    root = Path(project_root) if project_root else None
+    if root is None or not (root / 'game').is_dir():
+        return None, _result('none', ok=False,
+                             reason=f'不是工程根（没有 game/）：{project_root}')
+    return root, None
+
+
+@_guarded("chapters")
+def chapters(project_root) -> dict:
+    """
+    项目里**有哪些章节**（= 有哪些 `label`），以及它们在哪个文件第几行。
+
+    这是"先看地图再下手"的那一步：外部 agent 想读某一章，得先知道
+    章名和文件，否则只能 `rglob('*.rpy')` 硬扫。
+
+    ⚠ 已知边界：只列**有 label 的文件**里的 label（没有 label 的散块
+    不在这里 —— 它们属于"原样块"，见 `scan_unknown`）。
+    """
+    root, bad = _check_root(project_root)
+    if bad:
+        return bad
+    try:
+        from storygraph.app.chapter_index import build_index
+        idx = build_index(str(root))
+        rows = [{'label': lab.name, 'file': f.rel, 'line': lab.line}
+                for f in idx.files for lab in f.labels]
+        notes = ['只列有 label 的文件；没有 label 的散块不在其中']
+        if idx.errors:
+            notes.append(f'{len(idx.errors)} 个文件读不出来（见 errors）')
+            if idx.errors:
+                notes.append('读不出来的第一个：'
+                             + f'{idx.errors[0][0]}（{idx.errors[0][1]}）')
+        return _result('scanner', chapters=rows, count=len(rows),
+                       files=len(idx.files),
+                       errors=[{'file': r, 'why': w} for r, w in idx.errors],
+                       notes=notes)
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.chapters', e)
+        return _result('scanner', ok=False, chapters=[], count=0,
+                       reason=f'列章节出错：{type(e).__name__}: {e}')
+
+
+#: `beats` 回执里每一拍暴露的字段（**只读快照**，名字与剧本表的列同名）
+_BEAT_FIELDS_OUT = ('line_id', 'seq', 'line', 'end_line', 'label', 'kind',
+                    'speaker',
+                    'text', 'say_tail', 'condition', 'scene', 'show', 'at',
+                    'with_', 'hide', 'bgm', 'sfx', 'voice')
+
+
+@_guarded("beats")
+def beats(project_root, label='', file='', limit=0) -> dict:
+    """
+    某一章（`label`）或某个文件（`file`，项目相对路径）的**拍**（逐行演出）。
+
+    "拍"是工具的结构单位：一句台词、一次 `show`、一个 `if` 头都算一拍。
+    外部 agent 想"读第 3 章"或"这句台词在第几拍"，走这里比正则扫 `.rpy`
+    可靠得多（后者认不出块结构、续行、选项）。
+
+    ⚠ 已知边界：
+      · `label` 与 `file` 都不给 → 解析**整个项目**（慢；大项目请给一个）；
+      · 拍与引擎语句**不一定 1:1**（`scene` + `with` 可能合成一拍）；
+      · 不给 `limit` 是全量返回（大章节几百拍，注意上下文预算）。
+    """
+    root, bad = _check_root(project_root)
+    if bad:
+        return bad
+    try:
+        from storygraph.parsing.discover import discover_scripts
+        from storygraph.parsing.renpy_parser import IncrementalRenPyAnalyzer
+        from storygraph.story.beat_build import beats_from_parse_result
+
+        files = []
+        if file:
+            cand = root / str(file).replace('\\', '/')
+            if not cand.is_file():
+                return _result('parser', ok=False, beats=[], count=0,
+                               reason=f'没有这个文件：{file}')
+            files = [str(cand)]
+        elif label:
+            # **先定位到文件再解析**（2026-11-04）：从前按 label 取也要把整个
+            # 项目解析一遍（真机 60 个 `.rpy`，2 秒起）。章节索引只读文件头
+            # 那点 label 声明，快一个数量级。
+            from storygraph.app.chapter_index import build_index
+            for entry in build_index(str(root)).files:
+                if entry.has_label(str(label)):
+                    files = [entry.path]
+                    break
+            if not files:
+                return _result('parser', ok=False, beats=[], count=0,
+                               reason=f'没有哪个文件声明了 label {label!r}'
+                                      f' —— 先调 storygraph_chapters 看章名')
+        else:
+            files = [str(p) for p in sorted(discover_scripts(str(root)))]
+        pr, _inc = IncrementalRenPyAnalyzer().analyze(files=files, graph=None)
+        all_beats = beats_from_parse_result(pr)
+        if label:
+            all_beats = [b for b in all_beats if (b.label or '') == str(label)]
+        total = len(all_beats)
+        rows = []
+        for b in (all_beats[:int(limit)] if limit else all_beats):
+            row = {k: getattr(b, k, None) for k in _BEAT_FIELDS_OUT}
+            # `line` 给的是**源文件真实行号**（`src_first`），排查要用它
+            row['line'] = int(getattr(b, 'src_first', 0) or 0)
+            row['end_line'] = int(getattr(b, 'src_last', 0) or 0)
+            rows.append({k: v for k, v in row.items() if v not in ('', None)})
+        notes = ['拍与引擎语句不一定 1:1（结构单位，不是逐行镜像）']
+        if label and not rows:
+            notes.append(f'没有 label 叫 {label!r} 的拍 —— 先调 chapters 看章名')
+        if limit and total > len(rows):
+            notes.append(f'只返回前 {len(rows)} 拍（共 {total}）；'
+                         f'用 limit 调大或给 label 缩小范围')
+        return _result('parser', beats=rows, count=len(rows), total=total,
+                       files=len(files), notes=notes)
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.beats', e)
+        return _result('parser', ok=False, beats=[], count=0,
+                       reason=f'读拍出错：{type(e).__name__}: {e}')
+
+
+def _image_id_for_spec(images, spec, sprite_words) -> str:
+    """
+    图像名（`qing base`）→ 资源表里的资产 ID（找不到 = ''）。
+
+    ⚠ **不能直接拼 `qing_base`**（2026-11-03 实测踩到）：项目用
+    `layeredimage` 时，属性名与文件名是两回事 —— `definitions.rpy` 里写着
+
+        layeredimage qing:
+            attribute base default: "normal"
+            attribute angry: 'speechless'
+
+    也就是 `show qing base` 用的是 `normal.png`，`show qing angry` 用的是
+    `speechless.png`。拼名字去找只会得到"没有这张图"，而它明明在。
+    反查表来自 `declared_sprite_words`（`sprite_words` 那个参数）：
+    `{tag: {文件名: 属性名}}`，这里反过来用。
+    """
+    parts = [p for p in str(spec or '').split() if p]
+    if len(parts) < 2:
+        return ''
+    tag, attrs = parts[0], parts[1:]
+    words = (sprite_words or {}).get(tag) or {}
+    # 属性名 → 文件名（声明过的那些）
+    files = {str(attr): str(fname) for fname, attr in dict(words).items()}
+    want = {files.get(a, a) for a in attrs}
+    for aid, row in (images or {}).items():
+        if str((row or {}).get('Tag') or '') != tag:
+            continue
+        have = {w for w in str((row or {}).get('Attributes') or '').split() if w}
+        if want <= have:
+            return str(aid)
+    return ''
+
+
+@_guarded("assets")
+def assets(project_root, category='', query='', limit=200) -> dict:
+    """
+    资源表里的图片/音频，含**能不能直接写进 `show`**（`showable`）。
+
+    外部 agent 最容易踩的坑就是"有个文件就叫它"：磁盘上躺着
+    `characters/qing/normal.png`，但能不能写 `show qing normal` 取决于
+    项目声明（`layeredimage qing:` 里 `attribute angry: 'speechless'`
+    这种**文件名 ≠ 属性名**是常态）。这张表就是那个答案。
+
+    ⚠ 已知边界：
+      · 表读不出来 ≠ 没有资产（`reason` 会写清是"没表"还是"表坏了"）；
+      · `category` 是按**目录语义**判的（`phone_msg/` → ui），
+        不是按图片内容；
+      · `limit` 默认 200（大项目 1979 张图，全量会撑爆上下文）。
+    """
+    root, bad = _check_root(project_root)
+    if bad:
+        return bad
+    try:
+        from storygraph.assets.registry_load import load_asset_registry
+        from storygraph.app.picker import pick_context
+        from storygraph.assets.asset_identity import resolve_images
+
+        reg = load_asset_registry(root)
+        if reg is None:
+            return _result('table', ok=False, assets=[], count=0,
+                           reason='读不出资源表（没打开过编辑器，或表坏了）'
+                                  ' —— 这不等于"项目没有资产"')
+        from storygraph.app.picker import resolve_pick
+        ctx = pick_context(reg, str(root))
+        idents = resolve_images(reg.images.values(),
+                                known_tags=ctx['known_tags'],
+                                known_chars=ctx['known_chars'],
+                                mapping=ctx['mapping'],
+                                project_root=str(root),
+                                sprite_words=ctx.get('sprite_words'))
+        rows = []
+        q = str(query or '').strip().lower()
+        cat = str(category or '').strip().lower()
+        for aid, row in (reg.images or {}).items():
+            ident = idents.get(aid)
+            kind = getattr(ident, 'kind', '') if ident else ''
+            row_cat = str((row or {}).get('Category') or '')
+            if cat and row_cat.lower() != cat:
+                continue
+            if q:
+                hay = ' '.join([str(aid),
+                                str((row or {}).get('Path') or ''),
+                                str((row or {}).get('Tag') or '')]).lower()
+                if q not in hay:
+                    continue
+            # ⚠ `showable` 要问**实际上能不能写进 `show`**（`resolve_pick`），
+            # 不能只看 `identity.showable`：映射把资产配错时（真机
+            # `{"char": "青"}`）两者不一致，报 True 会让外部 AI 写出
+            # 引擎报错的 `show 青 base`。
+            res = resolve_pick(aid, row, project_root=str(root), registry=reg,
+                               known_tags=ctx['known_tags'],
+                               known_chars=ctx['known_chars'],
+                               mapping=ctx['mapping'],
+                               all_rows=ctx['all_rows'],
+                               sprite_words=ctx.get('sprite_words'))
+            rows.append({
+                'id': aid,
+                'path': (row or {}).get('Path'),
+                'tag': (row or {}).get('Tag'),
+                'attrs': (row or {}).get('Attributes'),
+                'category': row_cat,
+                'kind': kind,
+                'showable': bool(res.ok),
+                'spec': res.spec if res.ok else '',
+            })
+        total = len(rows)
+        shown = rows[:int(limit)] if limit else rows
+        notes = ['`category` 按目录语义判（`phone_msg/` → ui），不是看图片内容']
+        if total > len(shown):
+            notes.append(f'只返回前 {len(shown)} 条（共 {total}）')
+        return _result('table', assets=shown, count=len(shown), total=total,
+                       notes=notes)
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.assets', e)
+        return _result('table', ok=False, assets=[], count=0,
+                       reason=f'读资源表出错：{type(e).__name__}: {e}')
+
+
+@_guarded("image_lookup")
+def image_lookup(project_root, name='') -> dict:
+    """
+    一个**图像名**（`qing base` / `bg rooftop`）或**资产 ID**（`qing_normal`）
+    → 它是什么、能不能写进 `show`、为什么不行。
+
+    这条是"别猜"的落点：`show` 里的名字由项目自己的 `layeredimage` /
+    `image` 声明决定，磁盘文件名经常对不上（`attribute angry:
+    'speechless'`）。外部 agent 硬猜会写出引擎报错的 `show`。
+
+    ⚠ 已知边界：
+      · 认不出 → `kind: 'unknown'` + `showable: false`（**不是**"这张图不存在"）；
+      · `warning` 与编辑器卡片上那句是**同一套判据**（`spec_tag_problem`
+        + 属性名核对），但文案更短（没有 UI 专用措辞）。
+    """
+    root, bad = _check_root(project_root)
+    if bad:
+        return bad
+    spec = str(name or '').strip()
+    if not spec:
+        return _result('table', ok=False,
+                       reason='要给 name（图像名 `qing base` 或资产 ID）')
+    try:
+        from storygraph.assets.registry_load import load_asset_registry
+        from storygraph.app.picker import pick_context, resolve_pick
+        from storygraph.assets.asset_identity import spec_tag_problem
+
+        reg = load_asset_registry(root)
+        if reg is None:
+            return _result('table', ok=False,
+                           reason='读不出资源表 —— 这不等于"没有这张图"')
+        ctx = pick_context(reg, str(root))
+        aid = spec if spec in (reg.images or {}) else ''
+        if not aid:
+            # 图像名 → 资产 ID（走 `layeredimage` 反查表，不拼名字）
+            aid = _image_id_for_spec(reg.images, spec,
+                                     ctx.get('sprite_words'))
+        row = (reg.images or {}).get(aid) if aid else None
+        if row is None:
+            # 不是资产 ID → 当成图像名，问"能不能写进 show"
+            tag = spec.split()[0] if spec.split() else ''
+            why = spec_tag_problem(spec, ctx['known_tags'])
+            return _result(
+                'table', found=False, spec=spec, asset_id='',
+                identity=None, path='',
+                warning=why,
+                notes=['没在资源表里找到同名资产；'
+                       '`warning` 为空只说明"这个 tag 项目认"，'
+                       '不代表这张图一定存在'])
+        res = resolve_pick(aid, row, project_root=str(root), registry=reg,
+                           known_tags=ctx['known_tags'],
+                           known_chars=ctx['known_chars'],
+                           mapping=ctx['mapping'],
+                           all_rows=ctx['all_rows'])
+        ident = res.identity
+        return _result(
+            'table', found=True, spec=res.spec or spec, asset_id=aid,
+            path=(row or {}).get('Path') or '',
+            identity=({'kind': ident.kind, 'tag': ident.tag,
+                       'attrs': list(ident.attrs),
+                       'display': ident.display,
+                       'source': ident.source,
+                       'showable': ident.showable} if ident else None),
+            ok_show=bool(res.ok),
+            warning='' if res.ok else (res.message or ''),
+            notes=['`spec` 是可以直接写进 `show` 的那串（为空 = 不能写）'])
+    except Exception as e:                          # noqa: BLE001
+        swallow('mcp_surface.image_lookup', e)
+        return _result('table', ok=False,
+                       reason=f'解析出错：{type(e).__name__}: {e}')
 
 
 def _receipt(source, *, ok=True, reason='', written=None, diff='', backup='',

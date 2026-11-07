@@ -83,6 +83,27 @@ _SCHEMAS = {
                     'description': '**默认 true**（只试算给 diff、不写盘）；'
                                    '要真写必须显式给 dry_run=false'}},
         'required': ['name']},
+    # —— 剧本 / 资源（2026-11-03 补；这几个是外部 AI 最常问的）——
+    'chapters': {'type': 'object', 'properties': {}, 'required': []},
+    'beats': {'type': 'object', 'properties': {
+        'label': {'type': 'string',
+                  'description': '章名（label）。与 file 都不给 = 解析整个项目'},
+        'file': {'type': 'string',
+                 'description': '项目相对路径（`game/ch01.rpy`）；给了只解析它'},
+        'limit': {'type': 'integer',
+                  'description': '最多返回几拍（不给 = 全量）'}},
+        'required': []},
+    'assets': {'type': 'object', 'properties': {
+        'category': {'type': 'string',
+                     'description': '按类别过滤（background/cg/character/ui/other）'},
+        'query': {'type': 'string',
+                  'description': '在 ID / 路径 / tag 里搜（不区分大小写）'},
+        'limit': {'type': 'integer', 'description': '默认 200'}},
+        'required': []},
+    'image_lookup': {'type': 'object', 'properties': {
+        'name': {'type': 'string',
+                 'description': '图像名（`qing base`）或资产 ID（`qing_normal`）'}},
+        'required': ['name']},
     # ⚠ `table_export` **撤下**（2026-11-01，外部审查 5.10 / P1-11）：
     # 它永远返回 `ok=False + 还没实现`，却一直出现在"工具清单"里 ——
     # 给模型广告一个永远失败的工具，它会一直重试。`mcp_surface.table_export`
