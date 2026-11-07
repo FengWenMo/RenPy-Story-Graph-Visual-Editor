@@ -107,8 +107,10 @@ class CallDialog(QDialog):
             '剧本里写成 `$ my_wipe("left", 0.6)` 的包装函数，不是 Ren\'Py 语句。'
             '在这里声明它的参数形状，卡片/Excel 就会给这些参数长出可编辑的列。'))
         lay.addWidget(_hint(
-            '参数列的写法：`转场@0` = 第 0 个位置参数；`层=layer` = 关键字参数；'
-            '多个用分号隔开。等价效果可留空（留空 = 预览如实标「认不出」，不假装淡入）。'))
+            '不用手写参数列：点下面「扫一遍剧本」，工具会把剧本里真实出现的'
+            '`$ 名字(...)` 找出来、参数按逗号拆好填进去 —— 你只需要改中文名。'
+            '（也可以手写：`转场@0` = 第 0 个位置参数，`层=layer` = 关键字参数，'
+            '分号隔开。等价效果留空 = 预览如实标「认不出」，不假装淡入。）'))
         lay.addWidget(_hint(
             '中文名填了之后，`with …`（过场）那一格的下拉里就叫这个名字 —— '
             '★ 连下拉里找不到的写法也能在「⋯」候选框里搜到。'
@@ -139,12 +141,30 @@ class CallDialog(QDialog):
         rm.clicked.connect(self.remove_row)
         tools.addWidget(add)
         tools.addWidget(rm)
+        # ⭐ 2026-11-07：**别再让人写 `转场@0; 层=layer`**。剧本里怎么写的，
+        #   就照那个填 —— 参数按逗号拆、名字取原文，人只改中文名。
+        self.scan_btn = QPushButton('扫一遍剧本，把用到的调用列出来')
+        self.scan_btn.setProperty('variant', 'primary')
+        self.scan_btn.setToolTip(
+            '扫项目里所有 `$ 名字(...)`，把工具还没登记的那些补进表里'
+            '（只加不改，已有的一行都不动）')
+        self.scan_btn.clicked.connect(lambda: self.scan_project())
+        tools.addWidget(self.scan_btn)
         tools.addStretch(1)
         self.status = _hint('')
         tools.addWidget(self.status, 1)
         lay.addLayout(tools)
 
         bottom = QHBoxLayout()
+        # 2026-11-07：这里只管"这个调用长什么样"，不管"要不要给全章加上"。
+        # 但人会先跑到这个窗口来找"批量的入口"（"自定义模块里能不能定义这玩意"）
+        # —— 所以给一条路过去，别让人回菜单里再找一遍。
+        self.batch_btn = QPushButton('按规则批量加这一行…')
+        self.batch_btn.setToolTip(
+            '去「按规则批处理」：选"什么时候加"（例如每处立绘变化后）+ '
+            '"加什么"，那行代码由工具拼，不用手写')
+        self.batch_btn.clicked.connect(lambda: self._go_batch())
+        bottom.addWidget(self.batch_btn)
         bottom.addStretch(1)
         cancel = QPushButton('取消')
         cancel.clicked.connect(self.reject)
@@ -191,6 +211,90 @@ class CallDialog(QDialog):
         self.table.setItem(row, 4, QTableWidgetItem(
             format_columns_text(call.get('columns') or ())))
 
+    def scan_project(self) -> int:
+        """
+        扫剧本里 `$ 名字(...)` → 把**还没在表里**的补进来（**只加不改**）。
+
+        为什么是"扫"而不是"让人填"：`$ my_wipe("left", 0.6)` 的形状，
+        剧本里已经写得清清楚楚；参数列的 `left@0` 只是它的另一种写法。
+        让人把前者翻译成后者，纯属白干 —— 而且很容易写错（写成 `left=0`
+        就成了关键字参数，读值那侧会去找 `left=`）。
+
+        返回补了几条（0 = 没有新东西 / 没打开项目，状态栏会说）。
+        """
+        if not self._root:
+            self.status.setText('先打开项目 —— 扫描要读项目里的 .rpy。')
+            return 0
+        # 大项目要读几百个文件（真机 88 个 rpy 约 0.2s，上千个就 1~2s）——
+        # 按钮先变个样，别让人以为"点了没反应"然后连点三下。
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText('正在扫描…')
+        self.status.setText('正在读项目里的脚本…')
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except (ImportError, RuntimeError):
+            pass
+        try:
+            return self._scan_project_inner()
+        finally:
+            self.scan_btn.setText('扫一遍剧本，把用到的调用列出来')
+            self.scan_btn.setEnabled(True)
+
+    def _scan_project_inner(self) -> int:
+        """`scan_project` 的主体（拆出来只为让"扫描中"的收尾走 `finally`）。"""
+        from storygraph.authoring.autospec import call_columns, guess_call_heads
+        from storygraph.parsing.discover import discover_scripts
+        from storygraph.story.source_style import read_text
+
+        try:
+            files = list(discover_scripts(self._root))[:400]
+        except OSError as e:
+            self.status.setText(f'扫不了项目脚本：{e}')
+            return 0
+        texts = []
+        for path in files:
+            try:
+                # ⚠ `read_text` 返回 **(文本, 风格)** 二元组 —— 直接 append 它，
+                #   后面拿到的是 `"('label …', SourceStyle(…))"`，正则一条都匹配
+                #   不上，而界面上只显示"没看到任何调用"（判据当场抓到）。
+                text, _style = read_text(path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if text:
+                texts.append(text)
+        cands = guess_call_heads(texts)
+        if not cands:
+            self.status.setText('剧本里没看到"项目自己的函数调用"'
+                                '（`$ 名字(...)` 那种）。')
+            return 0
+        have = set()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.text().strip():
+                have.add(item.text().strip())
+        added = 0
+        for rec in cands:
+            head = str(rec.get('head') or '')
+            if not head or head in have:
+                continue
+            columns = call_columns(str(rec.get('sample') or ''), head)
+            if not columns:
+                continue
+            self.add_row({'head': head, 'label': '', 'effect': '',
+                          'columns': columns})
+            have.add(head)
+            added += 1
+            if added >= 20:                   # 别把表撑成一面墙
+                break
+        if added:
+            self.status.setText(
+                f'从剧本里补了 {added} 条（参数已经拆好，改中文名就行）——'
+                '不用的点「删掉选中」。')
+        else:
+            self.status.setText('剧本里用到的调用都已经在表里了。')
+        return added
+
     def remove_row(self):
         row = self.table.currentRow()
         if row < 0 and self.table.rowCount():
@@ -228,6 +332,28 @@ class CallDialog(QDialog):
                         'seconds_arg': seconds_arg})
         self._bad = bad
         return out
+
+    def _go_batch(self):
+        """
+        「这一行怎么批量加」→ 交给 `BatchDialog`（**唯一实现，不在这里再写一份**）。
+
+        为什么不开一个新窗口自己拼文本：同一个意图如果两个界面各拼一遍，
+        迟早出现"这里写 `layer="master"`、那里写 `layer = master`" ——
+        而两边都看不出错。批处理那层的 `batch_recipes.build_text` 是唯一一份。
+        """
+        if not self._root:
+            self.status.setText('先打开项目 —— 批处理要扫项目里的 .rpy。')
+            return None
+        try:
+            from storygraph.ui_qt.dialog_batch import BatchDialog
+        except ImportError as e:                  # 打包漏文件时只说话，不炸窗
+            self.status.setText(f'打不开批处理窗口：{e}')
+            return None
+        dlg = BatchDialog(self._root, parent=self)
+        if not dlg._items:                        # 一条规则都没有就先摆一条默认的
+            dlg.add_rule()
+        dlg.exec()
+        return dlg
 
     def _save(self):
         if not self._root:

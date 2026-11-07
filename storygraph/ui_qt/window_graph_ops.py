@@ -1074,12 +1074,7 @@ class GraphOpsMixin:
         # —— 贴上次的版式（W1b）：扫描结果为准，只把坐标贴上去 ——
         # 放在 `set_graph` / 撤销命令**之后**：先让图按自动排版成形，再覆盖坐标。
         placed = self._apply_saved_placement()
-        if placed.get('matched'):
-            extra = (f'；{len(placed["missing"])} 个版式条目找不到对应章节（按自动排版）'
-                     if placed.get('missing') else '')
-            self._log(f'[版式] 用上次的位置摆了 {placed["matched"]} 个模块{extra}')
-        elif placed.get('reason') and placed.get('reason') != '这个项目还没有版式文件':
-            self._log(f'[版式] 没有套用上次的位置：{placed["reason"]}')
+        self._report_placement(placed)
         try:
             self._panel.set_symbols(self._session.symbols)
             self._refresh_asset_choices()
@@ -1883,6 +1878,7 @@ class GraphOpsMixin:
         menu.addAction('📈 资产 / 角色统计…', self.show_asset_overview)
         menu.addAction('🔍 只看选中模块的连线 / 恢复', self.focus_edges_on_selected)
         menu.addAction('✅ 校验当前章节（三级校验）', self.validate_current_script)
+        menu.addAction('🧩 按规则批处理 .rpy（预演 → 应用）…', self.show_batch_rules)
         menu.addAction('➕ 补登缺失资源（扫描磁盘 → 写进资产表）…',
                        self.register_missing_assets)
         menu.addAction('⤓ 导出控制流 .rpy（按章节图，补 _control）…',
@@ -1903,6 +1899,38 @@ class GraphOpsMixin:
         pos = (btn.mapToGlobal(btn.rect().bottomLeft()) if btn is not None
                else self.mapToGlobal(self.rect().center()))
         menu.exec(pos)
+
+    def show_batch_rules(self):
+        """
+        「按规则批处理 .rpy」：预演 → 应用。
+
+        规则文件属于项目（`<项目>/storygraph.batch.json`），界面不内置任何
+        具体写法 —— "每个立绘变化后补一行" 也只是它的一条规则而已。
+        """
+        from storygraph.ui_qt.dialog_batch import BatchDialog
+        root = getattr(self, '_project_root', None)
+        if not root:
+            self._status('先打开一个项目，再按规则批处理。')
+            return ''
+        dlg = BatchDialog(root, parent=self)
+        dlg.applied.connect(self._after_batch_applied)
+        dlg.exec()
+        return 'closed'
+
+    def _after_batch_applied(self, result: dict):
+        """写完之后：源文件已经变了，当前章节必须重新解析（不然卡片上是旧的）。"""
+        n = (int(result.get('inserted') or 0)
+             + int(result.get('replaced') or 0)
+             + int(result.get('deleted') or 0))
+        self._status(f'批处理写了 {len(result.get("written") or [])} 个文件、'
+                     f'{n} 行；正在重新载入当前章节…')
+        path = getattr(self, '_file_path', None)
+        if path:
+            try:
+                self.load_script(path, goto_card=False)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._status(f'改完了，但这章没重新载入：{exc}')
+
     def export_other_engine(self, engine=None):
         """
         多引擎导出：`pipeline.engine_exporters.export_ir`。
@@ -2239,6 +2267,36 @@ class GraphOpsMixin:
         except Exception as e:                  # noqa: BLE001
             swallow('ui_qt.window_graph_ops.mark_graph_saved', e)
 
+    def _report_placement(self, placed) -> None:
+        """
+        把"这次贴上了哪一份版式"念出来（2026-11-05 从 `import_chapter_files` 拆出）。
+
+        为什么要说**哪一份**：项目里可能有好几份版式（自动存的、手动存的、
+        随包预设），用户只记得"我最后存的那一版" —— 只报"摆了 43 个模块"，
+        他会以为又用错了、白改一遍。
+
+        为什么拆出来：`import_chapter_files` 已经顶到复杂度预算
+        （`tests/test_complexity_budget.py` 钉着行数/分支数），这段只是"念结果"，
+        与导入本身无关。
+        """
+        placed = placed or {}
+        if placed.get('matched'):
+            extra = (f'；{len(placed["missing"])} 个版式条目找不到对应章节'
+                     f'（按自动排版）' if placed.get('missing') else '')
+            rel = ''
+            if placed.get('path'):
+                try:
+                    rel = Path(placed['path']).relative_to(
+                        Path(self._project_root or '')).as_posix()
+                except (ValueError, OSError):
+                    rel = str(placed['path'])
+            edges = (f'，补回 {placed["edges_added"]} 条编排线'
+                     if placed.get('edges_added') else '')
+            self._log(f'[版式] 用 {rel or "上次的位置"} 摆了 '
+                      f'{placed["matched"]} 个模块{edges}{extra}')
+        elif placed.get('reason') and placed.get('reason') != '这个项目还没有版式文件':
+            self._log(f'[版式] 没有套用上次的位置：{placed["reason"]}')
+
     def _apply_saved_placement(self) -> dict:
         """
         把上次的版式**贴**到当前图上（W1b，2026-10-23）。
@@ -2254,30 +2312,36 @@ class GraphOpsMixin:
         导入章节之后（`import_chapter_files`）。打开项目本身不生成图，
         所以那里没有可贴的对象 —— 这不是偷懒，是"打开项目只读资源表"的既有约定。
 
+        ## 2026-11-05：版式不再只认标准位置
+
+        用户真机报的「明明导入了项目，却没有成功导入布局」：他手动存的版式在
+        `game/chapter/目前保存的布局(自动生成的，不用看）.json`（**新**，
+        带 50 条编排线），而工具只读 `.storygraph/layout.json`（**旧**，
+        两天前的排列）—— 于是看到的是旧图，还丢了那些编排线。
+        现在交给 `layout_store.best_for`：项目里任何一份像版式的 JSON 都算候选，
+        先比"能贴上几块"，一样多再比"谁更新"。
+
         失败一律静默：版式是增强，读不出来不该拦住导入。
         """
-        from storygraph.app.layout_store import (
-            apply_placement, find_existing, read_placement,
-        )
+        from storygraph.app.layout_store import apply_placement, best_for
         empty = {'ok': False, 'matched': 0, 'missing': [], 'reason': ''}
         root = getattr(self, '_project_root', None)
         if not root or self.graph is None or not getattr(self.graph, 'nodes', None):
             return empty
 
         try:
-            path = find_existing(root)
-            if path is None:
-                return {**empty, 'reason': '这个项目还没有版式文件'}
-            data = read_placement(path, root)
-            if not data.get('ok'):
-                return {**empty, 'reason': str(data.get('error') or '')}
-            res = apply_placement(self.graph, data, root)
+            picked = best_for(self.graph, root) or {}
+            if not picked.get('ok'):
+                return {**empty, 'reason': str(picked.get('reason') or '')}
+            path = picked['path']
+            res = apply_placement(self.graph, picked['data'], root)
             if res.get('matched'):
                 self._set_graph(self.graph, keep_view=False)
                 # 贴完就是"和磁盘一致"：不能因为恢复版式就把图标成未保存。
                 self._mark_graph_saved(str(path))
             res['path'] = str(path)
-            res['migrated'] = bool(data.get('migrated'))
+            res['migrated'] = bool(picked['data'].get('migrated'))
+            res['candidates'] = int(picked.get('candidates') or 0)
             return res
         except Exception as e:                   # noqa: BLE001 - 版式坏了不该挡导入
             swallow('ui_qt.window_graph_ops._apply_saved_placement', e)

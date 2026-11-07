@@ -70,8 +70,26 @@ def _write(path: Path, nodeid: str) -> None:
 
 
 def _clear(path: Path) -> None:
+    """
+    把 watch 文件清成"没有用例在跑"—— **不删文件**。
+
+    为什么不能 `unlink`（2026-11-07 实测，代价是一轮全量）：
+    自动化沙箱里有"批量删除守卫"，一个回合内 unlink 到阈值（50）就抛
+    `SystemExit(1)`（`sitecustomize.py::_check_bulk_delete_guard`）。这个插件
+    **每条用例结束都要清一次**，全量九千条必然撞上；而它跑在
+    `pytest_runtest_logfinish` 这个钩子里，SystemExit 直接穿过 pytest 的
+    结果上报，xdist 于是报 `worker … crashed: <某条用例>` —— 看上去像那条
+    用例的问题，其实和它毫无关系（本次实测：`test_hell_excel_cycles`、
+    `test_writeback_fidelity` 各背过一次锅，单跑都过）。
+
+    读方 `run.py::_active_tests` 只认"`nodeid` 非空"，所以写成 `{}` 与删除
+    等价；而且一次删除都不产生，守卫永远不会被触发。
+    """
     try:
-        path.unlink(missing_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+        tmp.write_text('{}', encoding='utf-8')
+        os.replace(tmp, path)
     except OSError:
         pass
 

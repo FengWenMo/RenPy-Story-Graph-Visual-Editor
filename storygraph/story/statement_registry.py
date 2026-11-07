@@ -1695,6 +1695,26 @@ def declare_calls(project_root, calls, *, replace: bool = True) -> dict:
             'count': len(data.get(CALLS_KEY) or []), 'reason': ''}
 
 
+def is_known_head(head: str, registry=None) -> bool:
+    """
+    工具**认不认识**这个语句头（内置 ∪ 已声明 ∪ 宿主 CDS）。
+
+    为什么单开一个公开函数（2026-11-07）：界面上要决定"这一行值不值得
+    教一句"——右键菜单不能对一个 `show` 说"教工具认识它"，那是骂人。
+    判据必须和 `discover_undeclared` **同一份**（它用的是 `_is_builtin_head`
+    + `reg.match`），否则会出现"列表里不显示、右键却说可以教"。
+    """
+    name = str(head or '').strip().rstrip(':')
+    if not name:
+        return True
+    if _is_builtin_head(name):
+        return True
+    try:
+        return bool(registry is not None and registry.match(name) is not None)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
 def _is_builtin_head(head: str) -> bool:
     """
     这个语句头是**工具已经会**的吗（不该叫用户去声明）。
@@ -1962,9 +1982,18 @@ def discover_undeclared(project_root, *, limit_files: int = 400,
         # 一份被误导写出来的 `pause` 声明）。
         if _is_builtin_head(head):
             continue
-        # 名字必须像个标识符（首字符不能是数字）。`$ renpy.notify(...)` 这类
-        # 会被切出 `$` 之类的东西，不是"作者自定义的写法"。
-        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', head):
+        # 名字必须像个标识符（首字符不能是数字/符号）。`$ renpy.notify(...)`
+        # 这类会被切出 `$` 之类的东西，不是"作者自定义的写法"。
+        #
+        # ⚠ 2026-11-07：从前这里是 `^[A-Za-z_][A-Za-z0-9_]*$`（**纯 ASCII**）——
+        #   于是**中文项目的自定义语句永远发现不了**：`泳装切换 小明 泳装 开心`
+        #   是一条合法的 CDS 用法（`renpy.register_statement("泳装切换")`），
+        #   模板/界面文件里也常见，但它连"待认领"都进不去，用户看到的是
+        #   "这个模块根本不认识我的写法"。
+        #   `[^\W\d_]` = **任意 Unicode 字母**（吃中文/日文，不吃数字/下划线），
+        #   与 `learn_statement._STMT_RE` 同一口径（那边 2026-10-14 就修了，
+        #   这里当时漏了 —— 两处判据不一致本身就是缺陷）。
+        if not re.match(r'^[^\W\d_]\w*$', head):
             continue
         suspect = _looks_like_dialogue(head, text, roles)
         if suspect and not include_suspect:

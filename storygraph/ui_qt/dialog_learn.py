@@ -528,21 +528,7 @@ class CustomStatementDialog(QDialog):
         # —— 3. 拿一行剧本试试 ——
         lay.addWidget(_step(4, '拿一行剧本试试'))
         lay.addWidget(_hint('从剧本里粘一整行最准（开头那个词不用删，工具认得出）。'))
-        cut_row = FlowRow(spacing=T.SPACE['xs'])
-        self.sample = QLineEdit()
-        self.sample.setPlaceholderText('例：show 小明 泳装 开心')
-        self.sample.setMinimumWidth(240)
-        self.sample.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        cut_row.add(self.sample)
-        self.cut_try = QPushButton('切一下')
-        self.cut_try.setToolTip('按上面这些格子，把这行剧本切开看看')
-        self.cut_try.clicked.connect(self._refresh_cut)
-        cut_row.add(self.cut_try)
-        self._verify_btn = QPushButton('用引擎验证')
-        self._verify_btn.setToolTip('真跑一次引擎（慢，要 SDK）')
-        self._verify_btn.clicked.connect(self._do_verify)
-        cut_row.add(self._verify_btn)
-        lay.addWidget(cut_row)
+        lay.addWidget(self._build_cut_row())
         self.cut_view = QLabel()
         self.cut_view.setWordWrap(True)
         self.cut_view.setProperty('role', 'caption')
@@ -577,6 +563,40 @@ class CustomStatementDialog(QDialog):
         # ⚠ 只接"试切"这一个落点：接两次再断开是自找麻烦（顺序错一次就炸）
         self.sample.textChanged.connect(self._refresh_cut)
         return outer
+
+    def _build_cut_row(self) -> QWidget:
+        """
+        第 4 步那一行：粘一行剧本 + 三个动作（**单独一个方法**）。
+
+        为什么抽出来：这一行本来就长；2026-11-07 又加了「照着这行建格子」，
+        再堆在 `_build_form_page` 里就顶到复杂度棘轮了（160 → 170 行）。
+        抽出来之后父函数比原来还短 —— 棘轮要的是"别变长"，不是"别加功能"。
+        """
+        cut_row = FlowRow(spacing=T.SPACE['xs'])
+        self.sample = QLineEdit()
+        self.sample.setPlaceholderText('例：show 小明 泳装 开心')
+        self.sample.setMinimumWidth(240)
+        self.sample.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        cut_row.add(self.sample)
+        # ⭐「别让人填逆天的表」的落点（2026-11-07）：工具已经把剧本里真实
+        #   出现的那行扫出来了（`discover_undeclared` 给 count/samples），
+        #   没道理还让人从 0 想"有几格、每格什么类型"。
+        self.autofill_btn = QPushButton('照着这行建格子')
+        self.autofill_btn.setProperty('variant', 'primary')
+        self.autofill_btn.setToolTip(
+            '按这一行的词自动建好格子：名字用剧本里那个词，类型自动判断，'
+            '你只需要改一改中文名')
+        self.autofill_btn.clicked.connect(lambda: self._autofill_from_sample())
+        cut_row.add(self.autofill_btn)
+        self.cut_try = QPushButton('切一下')
+        self.cut_try.setToolTip('按上面这些格子，把这行剧本切开看看')
+        self.cut_try.clicked.connect(self._refresh_cut)
+        cut_row.add(self.cut_try)
+        self._verify_btn = QPushButton('用引擎验证')
+        self._verify_btn.setToolTip('真跑一次引擎（慢，要 SDK）')
+        self._verify_btn.clicked.connect(self._do_verify)
+        cut_row.add(self._verify_btn)
+        return cut_row
 
     def _build_clause_section(self, lay: QVBoxLayout):
         """
@@ -1128,8 +1148,12 @@ class CustomStatementDialog(QDialog):
         if not (0 <= r < len(self._pending)):
             return
         rec = self._pending[r]
+        # ⚠ 样例的形状是 `(文件, 原文)`（`discover_undeclared` 的 order）；
+        #   取 `[1]` 才是那一行 —— 取错就是把人指向一个文件名。
+        first = (rec.get('samples') or [('', '')])[0]
+        sample = str((list(first) + ['', ''])[1] or '')
         self._load_statement(None, head=str(rec.get('head') or ''),
-                             block=bool(rec.get('block')))
+                             block=bool(rec.get('block')), sample=sample)
         self._teach_btn.setEnabled(True)
 
     def _on_known_pick(self):
@@ -1143,11 +1167,14 @@ class CustomStatementDialog(QDialog):
     def _new_statement(self):
         self._load_statement(None)
 
-    def _load_statement(self, decl=None, head: str = '', block=None):
+    def _load_statement(self, decl=None, head: str = '', block=None,
+                        sample: str = ''):
         """
         把一条声明（或一个待认领的词）灌进表单。
 
         `decl` 给 `RegisteredStatement` = 编辑已有；给 `None` = 新语句。
+        `sample` 给了（从「还不认识的写法」点进来时就是那一行）→ 顺手把
+        **格子建好**：人进来看到的是"3 格，名字都填了"，不是"请自己加格"。
         """
         self._loading = True
         try:
@@ -1165,11 +1192,15 @@ class CustomStatementDialog(QDialog):
             else:
                 checked = bool(block)
             self.block.setChecked(checked)
-            self.sample.clear()
+            self.sample.setText(str(sample or ''))
             self.cut_view.clear()
             self._verify_view.setVisible(False)
             self._fill_params(decl)
             self._fill_clauses(decl)
+            # ⚠ 必须在 `_fill_clauses` **之后**：它会把子句表清空（`decl=None`
+            #   就是"一条都没有"），先填后清等于白填（判据当场抓到）。
+            if decl is None and str(sample or '').strip():
+                self._autofill_from_sample(notify=False)
             self._sync_optional_defaults()
         finally:
             self._loading = False
@@ -1232,6 +1263,60 @@ class CustomStatementDialog(QDialog):
                                      'after': len(got.get('values') or ())})
         labels = dict(got.get('labels') or {}) or None
         return '、'.join(str(v) for v in (got.get('values') or ())), labels
+
+    def _autofill_from_sample(self, notify: bool = True) -> int:
+        """
+        把「这一行剧本」切成格子（`authoring.autospec.split_sample`）。
+
+        为什么不让人自己加格：Ren'Py 的 CDS **没有 schema**（`parse=` 是一个
+        任意 Python 函数），所以"参数形状"唯一可靠的证据就是**剧本里真实
+        写出来的那一行** —— 而那行工具早就扫到了。人只需要看一眼、改改中文名。
+
+        返回建了几格（0 = 这一行里没看到参数，界面会说一句，不静默）。
+        """
+        from storygraph.authoring.autospec import split_sample
+
+        line = self.sample.text().strip()
+        slots, clauses = split_sample(line, self.name.text().strip())
+        if not slots and not clauses:
+            if notify:
+                self._form_sub.setText(
+                    '这一行里没看出参数 —— 先粘一行真实剧本（开头那个词可以有）')
+            return 0
+        was = self._loading
+        self._loading = True
+        try:
+            self.params.clear()
+            for slot in slots:
+                self.params.add_field(name=slot['name'], label=slot['label'],
+                                      kind=slot['kind'])
+            # 子句（`at left` / `with Dissolve(0.3)`）**不占位置格** ——
+            # 它们进下面那张「复杂子句」表。混在位置格里的话，试切会报
+            # "多出 at、left"（工具认错，却怪人写错）。
+            table = getattr(self, 'clause_table', None)
+            if table is not None:
+                table.blockSignals(True)
+                try:
+                    table.setRowCount(0)
+                finally:
+                    table.blockSignals(False)
+                for clause in clauses:
+                    self._add_clause_row(clause['keyword'], clause['name'],
+                                         clause['kind'])
+        finally:
+            self._loading = was
+        if notify:
+            names = '、'.join(str(s['name']) for s in slots[:4])
+            more = f' 等 {len(slots)} 格' if len(slots) > 4 else ''
+            tail = (f'，另有 {len(clauses)} 个子句（'
+                    + '、'.join(c['keyword'] for c in clauses) + '）'
+                    ) if clauses else ''
+            self._form_sub.setText(
+                f'已照这一行建好 {len(slots)} 格（{names}{more}）{tail}'
+                ' —— 改名或删格都行')
+        self._on_form_changed()
+        self._refresh_cut()
+        return len(slots)
 
     def _fill_params(self, decl):
         """声明 → 格子卡（顺序与类型都照 `pattern`；没有 pattern 就照 columns）。"""
@@ -1787,6 +1872,16 @@ class CustomStatementDialog(QDialog):
                              '后面还没写东西，先把那一行粘全。'
                              + (('\n' + problems) if problems else ''))
                 return
+        # 子句（`at left` / `with Dissolve(0.3)`）**不归位置格管** ——
+        # 不摘掉它们，试切就永远报"多出 at、left"，而人写的是对的。
+        # 实测（2026-11-07）：`pattern.match_line` 只吃位置格，
+        # `'"闪电" at left'` 直接 `leftover: ['at','left']`。
+        # ⚠ 必须在"摘开头词"**之后**做，且只在真的粘了整行时才有东西可摘。
+        line = self._strip_declared_clauses(line)
+        if not line:
+            view.setText('摘掉开头词和子句之后，这一行没有位置参数了 —— '
+                         '（这是正常的：这条语句可能只有子句）')
+            return
         try:
             got = P.match_line(slots, line, groups=groups, word_offset=dropped)
         except Exception as e:                  # noqa: BLE001 - 试切不许炸窗口
@@ -1817,6 +1912,32 @@ class CustomStatementDialog(QDialog):
         view.setText('切出来是这样：' + cells
                      + f'　—　共 {len(got["cells"])} 格'
                      + (('\n' + problems) if problems else ''))
+
+    def _strip_declared_clauses(self, line: str) -> str:
+        """
+        把**已经声明过的**子句从这一行里摘掉（试切/预览用）。
+
+        复用 `spec_clauses.set_clause_value(..., value='')` —— 它的语义就是
+        "清空 = 连同关键字一起删掉，只吃一个分隔空格"，正好是我们要的；
+        另写一份"按正则删 at..."会漏掉引号/括号里的同名词。
+
+        认不出（声明里没有这个名字）→ 原样返回，不猜。
+        """
+        from storygraph.story.spec_clauses import set_clause_value
+
+        clauses = self._clause_rows()
+        if not clauses:
+            return line
+        out = str(line or '')
+        for clause in clauses:
+            name = str(clause.get('name') or '')
+            if not name:
+                continue
+            try:
+                out = set_clause_value(out, clauses, name, '')
+            except (ValueError, KeyError, TypeError):
+                return line
+        return out
 
     def _cut_groups(self) -> dict:
         """

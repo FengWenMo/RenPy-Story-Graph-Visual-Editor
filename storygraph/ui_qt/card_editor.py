@@ -47,6 +47,92 @@ from storygraph.ui_qt.window_layout import CARD_STAGE_THUMB
 from storygraph.ui_qt.wrap_label import NarrowWrapLabel
 
 
+#: `with` 后面**真正**该出现的那些 —— Ren'Py 内置 transition。
+#:
+#: 为什么写死这一份不算"猜项目"（2026-11-03）：它们是**引擎的标准词汇**
+#: （官方文档的 `with` 示例就是这几个），任何项目都能用；而项目自己的
+#: `transform` 是另一回事 —— 真机 `sr_general` 有 167 个 transform，
+#: 里面混着 `i11`（位置）、`ui_hover_nudge`（界面动效）、`bounce_duration`
+#: （动画）—— 拿 `with` 去套它们基本都不是作者的意图。所以：内置排前面，
+#: 项目 transform 全量排在后面（用户自己认出哪个是转场）。
+BUILTIN_TRANSITIONS = (
+    'dissolve', 'fade', 'vpunch', 'hpunch', 'flash',
+    'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+    'irisin', 'irisout', 'pixellate', 'squares', 'move',
+)
+
+
+#: 纯 `with <名字>` 的形态（`with dissolve` / `with my.trans`）。
+_PURE_WITH_RE = re.compile(r'^with\s+([\w.]+)$')
+
+
+def split_say_tail(tail: str) -> str:
+    """
+    存的 `say_tail` → **控件里显示**的那串（纯转场剥掉 `with `，其余原样）。
+
+    `with dissolve` → `dissolve`；`nointeract` → 原样；
+    `(what_color="#f00") with dissolve` → **原样**（它不是"一个转场名"，
+    剥了就没法编辑回原样了）。
+    """
+    text = str(tail or '').strip()
+    m = _PURE_WITH_RE.match(text)
+    return m.group(1) if m else text
+
+
+def join_say_tail(text: str) -> str:
+    """
+    控件里的那串 → 写回 `say_tail` 的**整段**（纯转场补回 `with `）。
+
+    这是"用户不用打整句"的关键：下拉选了 `dissolve`，写出去就是
+    `with dissolve`；手打 `(what_color="#f00") with dissolve` 或 `nointeract`
+    则原样保留（**不猜**它是不是转场）。
+    """
+    text = str(text or '').strip()
+    if not text:
+        return ''
+    if text == 'nointeract' or text.startswith('with ') or text.startswith('('):
+        return text
+    # 单个标识符（`dissolve` / `my.trans`）→ 当成转场名补 `with `
+    if re.fullmatch(r'[\w.]+', text):
+        return f'with {text}'
+    return text                              # 别的写法一律原样（不猜）
+
+
+def say_tail_choices(symbols) -> list:
+    """
+    台词后缀的候选 `[(显示, 真值), …]`；第一项是「（无）」。
+
+    顺序：**内置 transition（引擎标准）→ 项目自己的 transform（字母序）→
+    `nointeract`**。
+
+    为什么两段（2026-11-03 用户："还是来个候选变换表吧"）：只列项目 transform
+    会有 169 条噪声（真机 167 个里大部分是位置/界面动效，`with` 套上去没有
+    意义）；只列内置又会漏掉项目自造的转场（`ImageEmergeOnRight` 这种）。
+    两段并排，常用的在上面，自定义的在下面。
+
+    读不到资源表（没打开项目 / 表坏了）→ 只剩内置 + 「（无）」+ `nointeract`，
+    **手打仍然可用**（这一格始终是可编辑下拉）。
+    """
+    out: list = [('（无）', '')]
+    seen = set()
+    for name in BUILTIN_TRANSITIONS:
+        # 显示/真值都是**转场名**（`dissolve`）—— 写回时由 `join_say_tail`
+        # 补成 `with dissolve`。用户不用自己打 `with`。
+        out.append((name, name))
+        seen.add(name.lower())
+    rows = {}
+    try:
+        reg = getattr(symbols, 'registry', None)
+        rows = getattr(reg, 'transforms', None) or {}
+    except Exception as e:                     # noqa: BLE001 - 候选坏了不该挡卡片
+        swallow('ui_qt.card_editor.say_tail_choices', e)
+        rows = {}
+    names = sorted({str(k).strip() for k in (rows or {}) if str(k).strip()})
+    out += [(n, n) for n in names if n.lower() not in seen][:150]
+    out.append(('nointeract', 'nointeract'))
+    return out
+
+
 class BeatCardEditor(QWidget):
     """
     一张**拍**的卡片：说话人 / 台词 / 立绘网格 / 背景 / 音乐 / 语音 / 备注
@@ -311,12 +397,38 @@ class BeatCardEditor(QWidget):
         # 输入时实时更新预览（只在这句话真有标签时才显示）
         self._text.textChanged.connect(self._refresh_rich_preview)
 
-        # —— 台词后缀（`(what_color="#f00")` / `with` / `id`）：真有时才露 ——
+        # —— 台词转场（`with dissolve`）：紧贴台词，不藏进高级区 ——
         #
-        # 它就是"给这句台词上色/加样式"那一类写法。从前它在导出时被静默
-        # 吃掉（`_RE_SAY` 只 match 到引号），现在它有自己的隐藏列
-        # （`SayTail`），高级区里能改；这里再给一行**看得见**的提示，
-        # 免得"这句台词带样式"这件事只存在于折叠区里。
+        # 2026-11-03 用户："说话人是 say、摆在上面的；然而我想要 with 的 say
+        # 却必须要在下面的高级模式点，并且还要重新打整句，这不合理吧？要不你
+        # 给个 say 后面紧跟一个 with？"
+        #
+        # 说得对：`with` 是**这一句怎么说**的一部分，和台词同层。所以：
+        #   · 控件就在台词下面（不算高级区）；
+        #   · 候选是**转场名**（`dissolve`），显示不带 `with` ——
+        #     写回时由 `join_say_tail` 补成 `with dissolve`；
+        #   · 仍是可编辑下拉：`(what_color="#f00") with dissolve` 这种
+        #     组合子句照原样存（`split/join` 都认"不是纯 with 形式"）。
+        row_tail = QHBoxLayout()
+        row_tail.setSpacing(T.SPACE['sm'])
+        row_tail.addWidget(self._section('转场'))
+        self._say_tail = WheelSafeComboBox()
+        self._say_tail.setEditable(True)
+        self._say_tail.setMinimumWidth(180)
+        for label, value in say_tail_choices(self._symbols):
+            self._say_tail.addItem(label, value)
+        self._say_tail.setCurrentIndex(0)
+        self._say_tail.setToolTip(
+            '这一句的转场（say 的后缀）：选一个就行，会写成 `"台词" with dissolve`。\n'
+            '也可以手打其它子句：`(what_color="#f00") with dissolve` / `nointeract`。')
+        self._widgets['SayTail'] = self._say_tail
+        row_tail.addWidget(self._say_tail, 0)
+        row_tail.addStretch(1)
+        dlg_lay.addLayout(row_tail)
+
+        # —— 台词后缀的**只读提示**（样式类子句，`(what_color=…)` / `id`）——
+        # 转场有下拉了，但 kwargs / `id` 这类没有候选，写了就照样给一行提示，
+        # 免得"这句台词带样式"只存在于下拉框的输入框里。
         self._say_tail_label = QLabel('')
         self._say_tail_label.setProperty('role', 'caption')
         self._say_tail_label.setWordWrap(True)
@@ -616,7 +728,7 @@ class BeatCardEditor(QWidget):
         for name in ADVANCED_FIELDS:
             box = QHBoxLayout()
             box.setSpacing(T.SPACE['xs'])
-            lab = QLabel(name)
+            lab = QLabel('台词后缀' if name == 'SayTail' else name)
             lab.setProperty('role', 'caption')
             lab.setMinimumWidth(72)
             box.addWidget(lab, 0)
@@ -628,6 +740,26 @@ class BeatCardEditor(QWidget):
                 w = CodeEditor()
             elif name in ('Stage', 'Notes'):
                 w = QPlainTextEdit()
+            elif name == 'SayTail':
+                # 台词后缀 = **引号之后原样拼回去的整段**（`with dissolve` /
+                # `(what_color="#f00") with dissolve` / `nointeract`）。
+                #
+                # 2026-11-03 用户："纯文本框是必须手打整一个句子？还是只打个
+                # with 就行？逻辑没说明白……我觉得还是来个候选变换表吧"：
+                #   · 从前的答案是"必须打**整句** `with dissolve`"——只打
+                #     `with` 会写出 `e "台词" with`（引擎报错）；
+                #   · 现在给候选（项目 `transforms` 各生成一条 `with xxx`），
+                #     仍然**可编辑**：`(kwargs)` / 组合子句照样能手打。
+                w = WheelSafeComboBox()
+                w.setEditable(True)
+                for label, value in say_tail_choices(self._symbols):
+                    w.addItem(label, value)
+                w.setCurrentIndex(0)
+                w.setToolTip(
+                    '选一个转场（候选来自项目的 transform），或直接手打整段：'
+                    '`with dissolve` / `(what_color="#f00") with dissolve` / '
+                    '`nointeract`。\n⚠ 要写**整段**（含 `with`），不是只写 '
+                    '`dissolve`。')
             else:
                 w = QLineEdit()
             if isinstance(w, QPlainTextEdit):
@@ -987,6 +1119,48 @@ class BeatCardEditor(QWidget):
                 '这是这句话在游戏里的样子（只预览 color / b / i / u / size，'
                 '其余标签与 [变量] 不在预览里展开）')
 
+    #: 能让"舞台块"有意义的字段：任意一个有值，就说明这一拍真的动了舞台。
+    STAGE_FIELDS = ('Scene', 'Show', 'Hide', 'Stage')
+
+    def _sync_field_groups(self, statement=None) -> None:
+        """
+        右栏的**组**跟着"这一拍实际是什么"走（2026-11-07，用户原话）：
+
+        > 我觉得不应该在代码的那个高级上面配置吧……？自定义模块归自定义模块，
+        > 别挪到高级那里去……而且工具本来就认识啊！这是标准 renpy 写法！
+        > 这么整理太乱了！！！所以我才三番五次说卡片编辑器右边的 UI 和
+        > 自定义模块定义出的模块一定要对应！UI 要重构……
+
+        用户说的"乱"具体是这样：一条**自定义语句**（`泳装切换 小明 泳装 开心`）
+        的卡片上，仍然铺着"说话人""台词""背景""立绘"四个空块 —— 那些字段跟
+        这条语句**毫无关系**，却占掉了右栏大半，而真正的三格参数挤在顶上。
+
+        规则只两条，都按**有没有值 / 是不是语句拍**判，不按 `kind` 猜：
+
+          · 台词区：**没有台词就收起**（语句拍、`show` 拍都没台词）；
+          · 舞台块（背景/立绘/音乐/语音的输入）：**语句拍且没有舞台动作**时收起
+            —— 一条 `泳装切换 …` 不会顺带改背景，留着那几格只是噪音。
+            普通台词拍**不变**（仍常显），因为"说着话顺手 show 一个"是真写法。
+
+        ⚠ **只是不显示，不是不收集**：`collect_fields()` 按 `PRIMARY_FIELDS`
+        遍历，不看可见性 —— 收起不会丢数据。这一点和高级区**不同**（那边
+        "展开才收"，`SayTail` 曾因此静默丢过），判据里钉了这条。
+
+        ⚠ 控制流卡（`set_flow`）自己会把三块全收起，且它在这之后调用 ——
+        最后说话的是它，这里不跟它抢。
+        """
+        is_statement = bool(str((statement or {}).get('head') or '').strip())
+        # ⚠ 判据读**载入时的字段快照**（`_loaded_fields`），不读控件：
+        #   `Show` 那一格背后是立绘网格（chip），`_get_value('Show')` 在
+        #   没有 sprite items 时恒为空 —— 用它判就会把"这一拍真的在改立绘"
+        #   当成"没动舞台"（判据当场抓到）。
+        data = dict(getattr(self, '_loaded_raw', {}) or {})
+        has_text = bool(str(data.get('Text') or '').strip())
+        has_stage = any(str(data.get(name) or '').strip()
+                        for name in self.STAGE_FIELDS)
+        self._dialogue_box.setVisible(has_text)
+        self._stage_box.setVisible(has_stage or not is_statement)
+
     # ---------- 语句参数那一组（`app.beats.spec_arg_*`） ----------
     def set_spec_args(self, columns, values=None, choices=None,
                       statement=None, loose=None):
@@ -1030,6 +1204,7 @@ class BeatCardEditor(QWidget):
         finally:
             self._loading = False
         self._set_statement(statement, loose)
+        self._sync_field_groups(statement)
         self._absorb_spec_baseline()
         self.refresh_dirty()
 
@@ -1275,7 +1450,8 @@ class BeatCardEditor(QWidget):
         value = str(value or '')
         if isinstance(w, QComboBox):
             # 显示的可能是人话（`18 嗯？`）、**存的是真值**（`bgm/嗯？.mp3`）
-            select_value(w, value)
+            # 台词转场反过来：存的是整段（`with dissolve`），显示只要转场名。
+            select_value(w, split_say_tail(value) if name == 'SayTail' else value)
         elif isinstance(w, QPlainTextEdit):
             w.setPlainText(value)
         elif isinstance(w, QLineEdit):
@@ -1293,7 +1469,10 @@ class BeatCardEditor(QWidget):
         if w is None:
             return ''
         if isinstance(w, QComboBox):
-            return combo_value(w)
+            raw = combo_value(w)
+            # 台词转场：控件里显示的是**转场名**（`dissolve`），写回的是
+            # **整段子句**（`with dissolve`）—— 见 `join_say_tail`。
+            return join_say_tail(raw) if name == 'SayTail' else raw
         if isinstance(w, QPlainTextEdit):
             return w.toPlainText().strip()
         if isinstance(w, QLineEdit):
@@ -1446,6 +1625,10 @@ class BeatCardEditor(QWidget):
         「沿用上一拍」；`collect_fields()` 会把"没改过的沿用值"还原成空串，
         后端照样只写这一拍真有的东西。
         """
+        #: 这一拍**源文件里的原始字段**（不是控件读回值）。`_sync_field_groups`
+        #: 靠它判"有没有台词 / 有没有舞台动作" —— `Show` 那格背后是立绘网格，
+        #: 不在 `_all_names()` 里，从 `_loaded_fields` 取会永远为空。
+        self._loaded_raw = {str(k): str(v or '') for k, v in (fields or {}).items()}
         self._loading = True
         try:
             # 控制流条由 `_sync_spec_args` 在 load_fields 之后按这一拍重建；
@@ -1474,12 +1657,18 @@ class BeatCardEditor(QWidget):
             # 真正的控制流卡由随后的 `set_flow(info)` 再收起，见那里的说明。
             self._stage_box.setVisible(True)
             self._stage_now.setVisible(True)
-            # 台词后缀：有才提示（它就是"给这句台词上色/加样式"那一类写法）
+            # 台词后缀：**下拉表示不了的那几类**才提示。
+            #
+            # 2026-11-03：纯 `with xxx` 现在就在台词下面有下拉，不用再提示
+            # （从前这句还写着"在「高级区 · 台词后缀」里改"—— 那句已经不成立）。
+            # 剩下 `(what_color="#f00")` / `id 名字` / `nointeract` 这些
+            # 手写的子句没有候选，才给一行只读提示。
             tail = str(fields.get('SayTail', '') or '').strip()
+            extra = '' if not tail or _PURE_WITH_RE.match(tail) else tail
             self._say_tail_label.setText(
-                f'这句台词带后缀（文字样式 / 控制）：{tail}'
-                f' —— 在「高级区 · 台词后缀」里改' if tail else '')
-            self._say_tail_label.setVisible(bool(tail))
+                f'这一句还带了手写子句：{extra}'
+                f'（在台词下面那格的输入框里改）' if extra else '')
+            self._say_tail_label.setVisible(bool(extra))
         finally:
             self._loading = False
         self.refresh_dirty()

@@ -166,8 +166,12 @@ def _active_tests(watch_dir: Path, limit: int = _ACTIVE_SHOWN
         except (TypeError, ValueError):
             pid = 0
         if pid and not _pid_alive(pid):
+            # worker 崩溃时 logfinish 没机会清文件；心跳别一直报"僵尸用例"。
+            # ⚠ 这里也**不 unlink**：沙箱的批量删除守卫会抛 SystemExit，
+            #   那是"看心跳"这一步在杀整个 run（见 `fasttest_watch_plugin._clear`
+            #   的注释）。写成空对象，读方自然跳过。
             try:
-                path.unlink()
+                path.write_text('{}', encoding='utf-8')
             except OSError:
                 pass
             continue
