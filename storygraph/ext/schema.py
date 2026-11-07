@@ -487,6 +487,14 @@ def slot_of_field(field_spec: FieldSpec) -> dict:
         out['multi'] = True
     if field_spec.limit:
         out['limit'] = True
+    # 提示（`placeholder`）与说明（`help`）跟着格子走（2026-11-07 第七轮）：
+    # 从前它们只活在**扩展窗口**那半边，卡片上的参数格拿不到 ——
+    # 字段表上写的"留空 = 不写这一格"到不了人眼前。`parse_pattern` 会原样
+    # 带过去，`spec_columns` 再把它们放进列描述（`_column_entry`）。
+    if field_spec.placeholder:
+        out['placeholder'] = field_spec.placeholder
+    if field_spec.help:
+        out['help'] = field_spec.help
     return out
 
 
@@ -523,7 +531,21 @@ def field_of_column(col: dict) -> FieldSpec:
                      kind=kind,
                      choices=tuple(str(c) for c in (col.get('choices') or ())),
                      required=bool(col.get('required')),
-                     position=position, kw=kw)
+                     position=position, kw=kw,
+                     placeholder=str(col.get('placeholder') or ''),
+                     help=str(col.get('help') or ''))
+
+
+def _put_hints(out: dict, spec: FieldSpec) -> None:
+    """
+    把提示 / 说明放进一条列描述（**有才写**，老文件不多出空键）。
+
+    为什么单独一个函数：`column_of_field` 已经在分支棘轮上（21 条），
+    这段是纯拼装 —— 拼装就该有自己的名字（与 `_column_entry` 同一条理由）。
+    """
+    for key, value in (('placeholder', spec.placeholder), ('help', spec.help)):
+        if value:
+            out[key] = value
 
 
 def column_of_field(field_spec: FieldSpec, position=None) -> dict:
@@ -567,6 +589,7 @@ def column_of_field(field_spec: FieldSpec, position=None) -> dict:
         out['choices'] = [str(c) for c in field_spec.choices]
     if field_spec.required:
         out['required'] = True
+    _put_hints(out, field_spec)
     return out
 
 

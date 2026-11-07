@@ -1318,7 +1318,9 @@ class BeatCardEditor(QWidget):
         if sw is not None:
             self._spec_swatches[header] = sw
         kind = str(col.get('kind') or '')
-        editor = self._spec_cell_editor(header, opts, sw, kind)
+        editor = self._spec_cell_editor(header, opts, sw, kind,
+                                        placeholder=str(col.get('placeholder')
+                                                        or ''))
         tail = []
         if opts and kind != 'keyword':
             tail.append(self._spec_cell_pick(header, editor, opts))
@@ -1358,7 +1360,8 @@ class BeatCardEditor(QWidget):
                     f'{col.get("param")}=值）')
         return f'{header}（位置参数：按顺序写，第 {int(pos) + 1} 位）'
 
-    def _spec_cell_editor(self, header: str, opts, sw, kind: str = ''):
+    def _spec_cell_editor(self, header: str, opts, sw, kind: str = '',
+                          placeholder: str = ''):
         """
         输入控件：走 `ui_qt.field_widgets.make_editor`（**唯一一处画法**）。
 
@@ -1366,9 +1369,9 @@ class BeatCardEditor(QWidget):
         而第一份在 `dynamic_form._make_editor`。两份行为还不一样，于是
         "定义出来的模块"和"卡片上那一格"长得不一样 —— 用户说的"一定要对应"。
 
-        三条都**可编辑**（固定字除外）：候选只是提示，项目里临时用了新值也得
-        能填进去（与 Excel 那套口径一致）。色块跟着输入实时变，且**不重建控件**
-        —— 重建会把光标冲掉，人打字打到一半就跳走了。
+        `placeholder`（2026-11-07 第七轮）：**声明里写的那句提示**。
+        从前这一格只有按类型的默认灰字（`留空 = 不带这个参数`），声明里
+        写的 `placeholder` 到不了这里 —— 字段表上的提示在"最后一米"断掉。
         """
         raw_kind = str(kind or '').strip()
         if not raw_kind and opts:
@@ -1377,7 +1380,8 @@ class BeatCardEditor(QWidget):
             # `choice` —— 判据 `test_undeclared_kind_with_choices_is_still_a_combo`。
             raw_kind = 'choice'
         spec = FieldSpec(key=header, kind=raw_kind or 'variable',
-                         choices=tuple(str(c.value) for c in opts))
+                         choices=tuple(str(c.value) for c in opts),
+                         placeholder=str(placeholder or ''))
         # ⚠ 固定字那格的 tooltip 是**卡片特有**的：它得说清"去哪改"
         #   （扩展窗口里那句话不成立 —— 那里本来就是改声明的地方）。
         tip = ''

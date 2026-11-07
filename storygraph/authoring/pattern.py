@@ -473,13 +473,19 @@ def parse_pattern(raw) -> list:
     for i, item in enumerate(raw or ()):
         slot = {'kind': '', 'text': '', 'column': '', 'group': '',
                 'options': [], 'limit': False, 'multi': False,
-                'required': True, 'problems': []}
+                'required': True, 'problems': [],
+                # 显示用的两位：提示灰字与说明（2026-11-07 第七轮）。
+                # 解析器**不读**它们 —— 它们只是跟着格子走到卡片的参数格上
+                # （`spec_columns` → `_column_entry` → `make_editor`）。
+                'placeholder': '', 'help': ''}
         if isinstance(item, dict):
             kind = str(item.get('kind') or '').strip()
             slot['text'] = str(item.get('text') or '').strip()
             slot['column'] = str(item.get('column') or item.get('label')
                                  or '').strip()
             slot['group'] = str(item.get('group') or '').strip()
+            slot['placeholder'] = str(item.get('placeholder') or '')
+            slot['help'] = str(item.get('help') or '')
             opts = item.get('options') or item.get('choices') or []
             if isinstance(opts, str):
                 opts = [o.strip() for o in opts.replace('，', ',').split(',')]
