@@ -31,7 +31,15 @@ import re
 from pathlib import Path
 
 #: 事实文件的结构版本。**改结构就 +1**（读取方据此判断能不能认）。
-SCHEMA_VERSION = 1
+#:
+#: v2（2026-11-05）：只**加**四段顶层字段 —— `adapter` / `capabilities` /
+#: `degraded` / `freshness`。`facts[key]` 的 `{value, source}` 形状**一个字节
+#: 都没改**（`value_of()` / `source_of()` 的老消费者不受影响），所以 v1 文件
+#: 仍然完全可读，`validate_facts` 同时认 1 和 2。
+SCHEMA_VERSION = 2
+
+#: `validate_facts` **认**的版本（v1 老文件不许因为升版变红）。
+READABLE_SCHEMAS = (1, 2)
 
 #: 事实文件的名字（放在**项目根**，与 `storygraph.rules.json` 同级）。
 FACTS_FILENAME = 'storygraph.engine_facts.json'
@@ -106,6 +114,15 @@ def empty_facts() -> dict:
         'gaps': [],
         'derived': {},
         'conflicts': [],
+        # —— v2 才有四段（v1 文件里没有，读取方按 schema 判断）——
+        #: 谁产出的（`{'id': 'renpy', 'version': 1}`）
+        'adapter': {},
+        #: 引擎**能不能回答**（三态：True / False / None，见 engine.capabilities）
+        'capabilities': {},
+        #: **为什么降级**（`{'reason': '', 'missing': [...]}`；不降级时两处都空）
+        'degraded': {'reason': '', 'missing': []},
+        #: 这份回答**还算不算数**（`fresh` / `stale` / `unknown`）
+        'freshness': {'verdict': 'unknown', 'checked_at': '', 'rpy_stamp': ''},
     }
 
 
@@ -178,10 +195,12 @@ def validate_facts(facts) -> list:
         return [f'事实不是 dict：{type(facts).__name__}']
 
     got = facts.get('schema')
+    is_v2 = got == 2
     if got is None:
         problems.append('缺 schema 字段')
-    elif got != SCHEMA_VERSION:
-        problems.append(f'schema 版本不认识：{got!r}（本工具只认 {SCHEMA_VERSION}）')
+    elif got not in READABLE_SCHEMAS:
+        problems.append(f'schema 版本不认识：{got!r}'
+                        f'（本工具只认 {READABLE_SCHEMAS}）')
 
     facts_sec = facts.get('facts')
     if not isinstance(facts_sec, dict):
@@ -254,7 +273,53 @@ def validate_facts(facts) -> list:
             problems.append(
                 f'derived 缺 {key} —— 采到了就要算它；没算出来请写一条 '
                 f'gaps: {{"key": "{derived_gap_key(key)}", "reason": …}}')
+    if is_v2:
+        problems.extend(_validate_v2(facts))
     return problems
+
+
+def _validate_v2(facts) -> list:
+    """
+    v2 才有的四段（`adapter` / `capabilities` / `degraded` / `freshness`）。
+
+    ⚠ **不校验令牌名字**（2026-11-05，交接文档 §3.2）：`capabilities` 里出现
+    未登记的令牌是 `engine.capabilities` 的事，core 保持"哑" —— 这一层多认识
+    一个东西，就多一条从 `core` 指向 `engine` 的依赖（§2 禁止）。
+
+    也**不要求** v2 文件一定有这四段：`build_facts()` 不给这四参时产出的 v2
+    文件照样合法（`is_collectable()` 的语义一个字节都不许变）。
+    """
+    out = []
+    ad = facts.get('adapter')
+    if ad is not None and not isinstance(ad, dict):
+        out.append('adapter 段不是 dict')
+    caps = facts.get('capabilities')
+    if caps is not None:
+        if not isinstance(caps, dict):
+            out.append('capabilities 段不是 dict')
+        else:
+            for name, val in caps.items():
+                if val is not True and val is not False and val is not None:
+                    out.append(f'capabilities.{name} 不是三态之一'
+                               f'（True/False/None）：{val!r}')
+    deg = facts.get('degraded')
+    if deg is not None:
+        if not isinstance(deg, dict):
+            out.append('degraded 段不是 dict')
+        else:
+            missing = deg.get('missing') or []
+            if missing and not str(deg.get('reason') or ''):
+                out.append('degraded.missing 非空但没有 reason'
+                           '（降级必须能追到原因）')
+            if not isinstance(missing, list):
+                out.append('degraded.missing 不是列表')
+    fr = facts.get('freshness')
+    if fr is not None:
+        if not isinstance(fr, dict):
+            out.append('freshness 段不是 dict')
+        elif fr.get('verdict') not in ('fresh', 'stale', 'unknown', ''):
+            out.append(f"freshness.verdict 不合法：{fr.get('verdict')!r}")
+    return out
 
 
 def is_collectable(facts) -> tuple:
@@ -940,7 +1005,8 @@ def merge_fact(contributions) -> tuple:
 
 def build_facts(payloads: dict, *, engine=None, fingerprint=None,
                 collection=None, lint=None, derived=None,
-                extra_gaps=None) -> dict:
+                extra_gaps=None, adapter=None, capabilities=None,
+                degraded=None, freshness=None) -> dict:
     """
     把 `{键: [(来源, 值), …]}` 装配成一份完整事实（含冲突记录）。纯函数。
 
@@ -959,6 +1025,20 @@ def build_facts(payloads: dict, *, engine=None, fingerprint=None,
     out['collection'].update(collection or {})
     out['lint'] = dict(lint or {})
     out['derived'] = dict(derived or {})
+    # —— v2 四段（全部可选：不传就保持 `empty_facts()` 的空壳）——
+    if adapter is not None:
+        out['adapter'] = dict(adapter or {})
+    if capabilities is not None:
+        out['capabilities'] = dict(capabilities or {})
+    if degraded is not None:
+        out['degraded'] = {'reason': str((degraded or {}).get('reason') or ''),
+                           'missing': [str(x) for x in
+                                       ((degraded or {}).get('missing') or ())]}
+    if freshness is not None:
+        fr = dict(freshness or {})
+        out['freshness'] = {'verdict': str(fr.get('verdict') or 'unknown'),
+                            'checked_at': str(fr.get('checked_at') or ''),
+                            'rpy_stamp': str(fr.get('rpy_stamp') or '')}
 
     conflicts = []
     gaps = []

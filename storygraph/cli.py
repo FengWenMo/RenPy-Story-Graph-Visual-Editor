@@ -8,6 +8,7 @@ cli.py
     python cli.py build <项目根> --engine renpy # 体检 + 出产物
     python cli.py table rpy2xlsx <a.rpy>       # 单文件摊表
     python cli.py table xlsx2rpy <a.xlsx>      # 表写回脚本
+    python cli.py batch <项目> --rule r.json   # 按规则批插/改/删（默认预演）
     python cli.py excel-check <表或目录>        # 读 Excel 之前的体检（炸弹/宏/外链）
     python cli.py collab init|pull|push|status|lock|unlock|approve
 
@@ -43,6 +44,11 @@ EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 def _err(msg: str) -> None:
     """错误一律走 stderr（CI 只读 stderr 时也能拿到原因）。"""
     print(msg, file=sys.stderr)
+
+
+def _out(msg: str = '') -> None:
+    """正常输出走 stdout。用 `write` 而不是 `print`：批量报告可能上千行。"""
+    sys.stdout.write(str(msg) + '\n')
 
 
 def _require_file(path, *, suffix: str = '', what: str = '文件'):
@@ -919,6 +925,60 @@ def _undetermined_exit(facts, *, strict: bool) -> tuple:
     return (1 if strict else 0), (note + '\n' + text)
 
 
+def _print_collect_failure(result) -> None:
+    """
+    采集失败 → **在控制台说一句**，然后回退静态（2026-11-05 用户："不要弹窗，
+    直接控制台说失败，回退回静态解析就好"）。
+
+    不弹框、不中断：工具照常用**静态解析**跑（`decide.rung` 落到 R2），
+    用户该知道的只有"少了运行期证据"这一件事。
+    """
+    if (result or {}).get('ok'):
+        return
+    print(f'  ⚠ 引擎事实**采不到**：{str((result or {}).get("reason") or "")[:120]}')
+    print('  → 已回退到**静态解析**（声明 / 资源表 / 剧本用法），'
+          '功能不受影响，只是少了运行期证据')
+
+
+def _print_fact_rows(facts) -> None:
+    """事实条数 + 每条的来源，然后接**能力 / 档位**两行（P0-4）。"""
+    from storygraph.core import engine_facts as EF
+
+    for key in EF.FACT_KEYS:
+        value = EF.value_of(facts, key)
+        n = len(value) if isinstance(value, (list, dict)) else 0
+        src = EF.source_of(facts, key) or '—'
+        print(f'  {key:<11}{n:>6} 条   来源 {src}')
+    _print_capabilities(facts)
+
+
+def _print_capabilities(facts) -> None:
+    """
+    打印**能力**与**档位**（2026-11-05 P0-4）—— 这是**两个轴**：
+
+    · `capability`（能力）= 引擎**能不能**回答（三态：True / False / None）；
+    · `rung`（档位）      = 这份回答**算不算数**（R0–R4）。
+
+    分行打是因为它们会各自出问题：能力齐但数据过期（R1）、能力缺但数据新（R2 起）。
+    只看一个数就会得出"没问题"的错误结论。
+
+    只在 facts 里有 `capabilities` 段时打（v1 老文件没有这一层，打了反而像
+    "这台机器什么都没采到"）。`--check-only` 也走这里 —— 它读的是现成 facts。
+    """
+    caps = (facts or {}).get('capabilities') or {}
+    if not caps:
+        return
+    from storygraph.core import engine_facts as EF
+    from storygraph.engine import capabilities as EC
+    from storygraph.engine import decide as ED
+
+    ok, _why = EF.is_collectable(facts)
+    print(f'  能力：{EC.describe(caps)}')
+    name = ED.rung(facts, collectable=ok,
+                   freshness=((facts.get('freshness') or {}).get('verdict') or ''))
+    print(f'  档位：{ED.describe(name, facts)}')
+
+
 def _cmd_engine_facts(args) -> int:
     """
     **采集引擎事实**（E1）+ **漂移检测**（E3）。
@@ -959,6 +1019,7 @@ def _cmd_engine_facts(args) -> int:
             print(note_u)
         print()
         print(EF.format_behavior_line(cur))
+        _print_capabilities(cur)          # 现成 facts 里也有这两段
         return 1 if (text or code_u) else 0
 
     result = EC.collect(project, sdk=args.sdk, mode=args.mode,
@@ -972,11 +1033,8 @@ def _cmd_engine_facts(args) -> int:
     print(f'  parse_clean    = {coll.get("parse_clean")}')
     print(f'  probe_complete = {coll.get("probe_complete")}')
     print(f'  lint 退出码     = {coll.get("lint_exit")}')
-    for key in EF.FACT_KEYS:
-        value = EF.value_of(facts, key)
-        n = len(value) if isinstance(value, (list, dict)) else 0
-        src = EF.source_of(facts, key) or '—'
-        print(f'  {key:<11}{n:>6} 条   来源 {src}')
+    _print_fact_rows(facts)
+    _print_collect_failure(result)
 
     lint = facts.get('lint') or {}
     for bucket in ('parse_errors', 'semantic_errors', 'program_errors'):
@@ -1037,14 +1095,18 @@ def _cmd_engine_facts(args) -> int:
     return 0
 
 
-def _warn_stage_suspects(table_path: Path, project=None) -> int:
+def _warn_stage_suspects(table_path: Path, project=None, registry=None) -> int:
     """
-    编译前查一遍「舞台（高级）」列，把"看着不像 Ren'Py 语句"的行打出来。
+    编译前查一遍「舞台（高级）」列 + 立绘属性，把可疑的行打出来。
 
     **只报告，不阻塞、不改表**：命令行常常挂在 CI / 批处理上，"要不要把
-    这行挪到备注"是人该拿的主意（界面上有弹窗问，见
+    这行挪到备注 / 改成哪个属性"是人该拿的主意（界面上有弹窗问，见
     `ui_qt.dialog_stage_suspect`）。这里把话说明白就够 ——
     退出码与从前一致，导出照常。
+
+    立绘属性那一类（2026-11-05 加）与卡片黄条**同一个判据**：
+    `aa` 这类项目定义的哨兵不报；`base_hand_down` 这类唯一拼法变体报，
+    并说清正确写法。**一个字都不改**。
 
     返回报出来的条数（调用方目前不看，留给以后 `--strict-stage`）。
     """
@@ -1059,12 +1121,30 @@ def _warn_stage_suspects(table_path: Path, project=None) -> int:
     except Exception as e:                      # noqa: BLE001 - 查不了不影响编译
         swallow('cli.warn_stage_suspects', e)
         return 0
-    if not res:
-        return 0
-    print(res.report(), file=sys.stderr)
-    print('（只是提示，导出照常进行。要它们变成注释请挪到「备注」列。）',
-          file=sys.stderr)
-    return len(res)
+    n = 0
+    parts = []
+    if res:
+        parts.append(res.report())
+        parts.append('（只是提示，导出照常进行。要它们变成注释请挪到「备注」列。）')
+        n += len(res)
+    # —— 立绘属性：另一条判据，另一个报告（只提示，不拦）——
+    try:
+        from storygraph.app import sprite_attr_guard as AG
+        from storygraph.story.beat_render import make_symbols
+
+        symbols = make_symbols(registry) if registry is not None else None
+        attr_res = AG.scan_sprite_attrs(beats, symbols)
+        if attr_res:
+            parts.append(attr_res.report())
+            parts.append('（只是提示，导出照常进行。请回卡片把属性改成'
+                         '项目声明过的写法。）')
+            n += len(attr_res)
+    except (ImportError, AttributeError, TypeError, ValueError, KeyError,
+            OSError) as e:
+        parts.append(f'  ⚠ 立绘属性检查跳过（不影响导出）：{e}')
+    if parts:
+        print('\n'.join(parts), file=sys.stderr)
+    return n
 
 
 def _cmd_compile(args) -> int:
@@ -1106,7 +1186,8 @@ def _cmd_compile(args) -> int:
     # 只改你改过的行，default / init python / transform 原样保留。
     # **导出前先看一眼**（2026-10-29）：「舞台（高级）」是代码，写错的备忘
     # 会原样进脚本、启动时才报语法错。这里只提示，不拦（人要能批处理）。
-    _warn_stage_suspects(table_path, getattr(args, 'project', None))
+    _warn_stage_suspects(table_path, getattr(args, 'project', None),
+                         registry=registry)
     _path, sheet, result = compile_table(
         table_path,
         rpy_path=out,
@@ -1127,6 +1208,124 @@ def _cmd_compile(args) -> int:
     print()
     print(format_compile_result(result))
     return 0
+
+
+def _cmd_batch(args) -> int:
+    """
+    按规则批量插入 / 修改 / 删除一行或一段（默认只预演，`--apply` 才写）。
+
+    规则来自项目自己的 `storygraph.batch.json`（或 `--rule`）。这一层不认识
+    `renpy.transition`，只认识"对谁 / 做什么 / 在哪 / 写什么"—— 同一套能插
+    `$ camera(...)`、能替换旧转场、也能删掉废弃的 `$` 行；`span` 还能把
+    整个 `if:` / `python:` / ATL 块或到某个结束行为止的一段一起换掉/删掉。
+
+    2026-11-07 第三轮起：**扩展窗口里「是否能够批处理」打开的声明也在这里生效**
+    （`merge_declared_rules`）。所以项目里只有声明、没有规则文件时也能跑；
+    `--rule` 是"就按这一份来"，那时**不**并入声明。
+
+    ⚠ 合并声明会装扩展层（`ExtensionRegistry.for_project`），也就是**会执行
+      项目里的 `extensions/*.py` 插件** —— 这是插件本来的代价，与批处理窗口
+      同一条路；不需要它时用 `--rule` 指定一份文件即可。
+    """
+    from storygraph.app.batch_edit import (BatchRuleError, apply_plan,
+                                           format_diff, format_plan,
+                                           load_rule_file, merge_declared_rules,
+                                           plan_batch, rules_from_extensions)
+
+    root = Path(str(args.project or '.'))
+    if not root.is_dir():
+        _err(f'项目目录不存在：{root}')
+        return EXIT_USAGE
+
+    rule_paths = [Path(str(p)) for p in (getattr(args, 'rule', None) or [])]
+    #: `--rule` 指定了文件 = "就按这一份来"，整份覆盖；用项目默认文件时才
+    #: 合并项目里"已打开"的扩展声明（见下面的 `merge_declared_rules` 注释）。
+    explicit_rules = bool(rule_paths)
+
+    # 「是否能够批处理」那个开关的产物（2026-11-07 第三轮接上这条线）。
+    #
+    # 以前 `rules_from_extensions()` 只有判据在调：扩展窗口里把开关打开、
+    # 点「预演」也能看到效果，但 CLI 的 `batch` 只读规则文件 —— 声明的规则
+    # **从来没进过这条路**。也就是"开关看着能开、真跑起来少一条"。
+    #
+    # `--rule` 时不合并：那是"就按我给的这份来"（否则同一个命令会因为项目里
+    # 多了一个开关而悄悄多出几行，写盘类操作最怕这种事）。
+    declared, ext_problems = ([], [])
+    if not explicit_rules:
+        declared, ext_problems = rules_from_extensions(root)
+
+    if not rule_paths:
+        default = root / 'storygraph.batch.json'
+        if not default.is_file() and not declared:
+            _err(f'没有规则文件：{default}')
+            _err('用 --rule 指定，或在项目根放一份 '
+                 '{"schema":"storygraph.batch/1","rules":[...]}；'
+                 '也可以在扩展窗口里声明一条并打开「是否能够批处理」。')
+            return EXIT_USAGE
+        if default.is_file():
+            rule_paths = [default]
+
+    rules = []
+    for path in rule_paths:
+        if not path.is_absolute() and not path.is_file():
+            path = root / path
+        try:
+            rules.extend(load_rule_file(path))
+        except BatchRuleError as exc:
+            _err(str(exc))
+            return EXIT_USAGE
+    seen = set()
+    for rule in rules:
+        if rule.id in seen:
+            _err(f'规则 id 重复：{rule.id!r}')
+            return EXIT_USAGE
+        seen.add(rule.id)
+
+    if not explicit_rules:
+        rules, notes = merge_declared_rules(rules, declared)
+        for msg in (*ext_problems, *notes):
+            if not args.json:
+                _out(f'注：{msg}')
+        if declared and not args.json:
+            _out(f'注：另有 {len(declared)} 条来自扩展声明'
+                 f'（批处理开关；共 {len(rules)} 条规则）')
+
+    plan = plan_batch(root, rules, chapters=getattr(args, 'chapter', None))
+    if not args.json:
+        _out(format_plan(plan, limit=int(getattr(args, 'limit', 3) or 0)))
+        if getattr(args, 'diff', False):
+            _out()
+            _out(format_diff(plan))
+    if plan.errors:
+        if args.json:
+            _out(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        for err in plan.errors:
+            _err(err)
+        return EXIT_USAGE
+    if args.check:
+        if args.json:
+            _out(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        return EXIT_FAIL if plan.pending else EXIT_OK
+    if not args.apply:
+        if args.json:
+            _out(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    result = apply_plan(plan)
+    if args.json:
+        _out(json.dumps({'plan': plan.to_dict(), 'apply': result},
+                        ensure_ascii=False, indent=2))
+    else:
+        if result['written']:
+            _out(f'已写 {len(result["written"])} 个文件：'
+                 f'插入 {result["inserted"]} 行、'
+                 f'替换 {result["replaced"]} 行、'
+                 f'删除 {result["deleted"]} 行（写前已备份）。')
+        else:
+            _out('没有写任何文件。')
+        for rel, why in result['failed']:
+            _err(f'没写 {rel}：{why}')
+    return EXIT_FAIL if result['failed'] else EXIT_OK
 
 
 # ==================================================================
@@ -1258,6 +1457,27 @@ def _add_build_commands(sub) -> None:
                     action='store_true',
                     help='把编译结果作为新表并进原工作簿（不碰 Beats）')
     sp.set_defaults(func=_cmd_compile)
+
+    sp = sub.add_parser(
+        'batch',
+        help='按规则批量插入/修改/删除一行或一段（默认只预演，--apply 才写）')
+    sp.add_argument('project', nargs='?', default='.',
+                    help='项目根目录（含 game/）')
+    sp.add_argument('--rule', action='append', default=[],
+                    help='规则 JSON（可重复；默认 <项目>/storygraph.batch.json）')
+    sp.add_argument('--chapter', action='append', default=[],
+                    help='只处理匹配的 .rpy（glob，可重复；默认全部）')
+    sp.add_argument('--limit', type=int, default=3,
+                    help='每份文件最多列几处（默认 3；0 = 只报数量）')
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument('--apply', action='store_true',
+                   help='真的写盘（默认只预演）')
+    g.add_argument('--check', action='store_true',
+                   help='有可处理行就退 1（CI 用，不写盘）')
+    sp.add_argument('--diff', action='store_true',
+                    help='另外打印统一 diff（预演用；大项目建议配 --chapter）')
+    sp.add_argument('--json', action='store_true', help='输出 JSON')
+    sp.set_defaults(func=_cmd_batch)
 
 
 def _add_check_commands(sub) -> None:

@@ -71,6 +71,10 @@ REQUIRED_MODULES = (
     'storygraph.assets.asset_registry',
     'storygraph.app.engine_preview',
     'storygraph.app.stage_edition',
+    # 2026-11-06：`cli batch` 在函数体内 import；打包漏了它，命令会在
+    # `--help` 之后才炸。点名 import 一次（`batch_insert` 是兼容别名）。
+    'storygraph.app.batch_edit',
+    'storygraph.app.batch_insert',
     'storygraph.ui_qt.main_window',
     # 2026-11-01：主窗口的两个**叶子**模块（解导入环时新建的）。
     # `main_window` 顶层导入它们，理论上打包会跟着带上；但它们正是
@@ -81,6 +85,9 @@ REQUIRED_MODULES = (
     'storygraph.ui_qt.window_engine',
     'storygraph.ui_qt.window_export',
     'storygraph.ui_qt.window_graph_ops',
+    # 2026-11-07：「按规则批处理」对话框只在菜单回调里 import（延迟 import），
+    # 和 `cli batch` 同一类坑 —— 打包漏了就是"点菜单才崩"。点名一次。
+    'storygraph.ui_qt.dialog_batch',
     # 2026-11-01（第九段）：第 0 页构建器搬出去的新 mixin。它被
     # `main_window` 顶层 import，但它**自己**又被 `tests/_source_paths` 与
     # 那套 mixin 守卫当成"前端的一整块" —— 换名字或漏打包都从这里先炸。

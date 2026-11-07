@@ -492,6 +492,93 @@ def collect(project_root, sdk=None, *, mode='in-place', out_path=None,
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _run_lint_ladder(engine_root, work, dump_out, timeout):
+    """
+    按**兼容阶梯**跑 lint：全（诊断+清单+退出码）→ 简（只要诊断）。
+
+    为什么退阶而不是直接放弃（2026-11-05 用户："如果引擎读不到或者版本不对应
+    的话，尝试一下兼容地读取"）：`--json-dump` / `--error-code` 不是所有版本
+    都认，认不出的表现是**立刻退出**（`unrecognized arguments`）。
+
+    返回 `(rc, out, 真正跑成的那一档 argv)` —— 第三项进 facts 的 `engine` 段，
+    出问题时能一眼看出"这次是退到第几档跑的"。
+
+    ⚠ 判"要不要退"看的是**引擎不认旗**（`compat.reject_reason`），**不是**
+    exit code：项目有语法错时 exit 1 是正常的，那种情况重试只会白跑一轮。
+    """
+    from storygraph.engine import compat as ECompat
+    from storygraph.engine import detect
+
+    version = detect.parse_version(_engine_version(engine_root))
+    ladder = ECompat.lint_ladder(version, dump_out)
+    last_rc, last_out, used = -1, '', []
+    for argv in ladder:
+        last_rc, last_out = run_engine(engine_root, work, argv, timeout=timeout)
+        used = argv
+        if last_rc != -1 and not ECompat.reject_reason(last_out):
+            return last_rc, last_out, argv
+        # 退阶前把上一档可能写了一半的 dump 清掉（下一档可能没有 --json-dump）
+        try:
+            Path(dump_out).unlink(missing_ok=True)
+        except OSError as e:                  # noqa: BLE001 - 清不掉不影响重试
+            swallow('pipeline.engine_collect.ladder_cleanup', e)
+    return last_rc, last_out, used
+
+
+def _capabilities_of(probe_data: dict, dump_loc: dict, *,
+                     lint_parsed: bool) -> dict:
+    """
+    按"这次**真采到没有**"填能力三态（2026-11-05 P0-3）。
+
+    判据只用一件事：**那个 payload 是不是 None**。
+    - `None` → 这次没采到（探针抛了 / dump 没产出）；
+    - 空 dict / 空 list → **`True`**：项目真的没有图片也是合法结果，
+      不能因为"空"就说没采到。
+
+    两个恒 `False` 的（`CAP_LAYERED_CONDITIONALS` / `CAP_STORE_SNAPSHOT`）是
+    **能力清单的事实**（探针不采它们），不是"这次失败" —— 所以给 `False`
+    而不是 `None`，免得 `decide.rung` 把它们算成降级。
+    """
+    from storygraph.engine import capabilities as EC
+
+    probe_data = probe_data if isinstance(probe_data, dict) else {}
+    dump_loc = dump_loc if isinstance(dump_loc, dict) else {}
+
+    def got(value):
+        return None if value is None else True
+
+    return {
+        EC.CAP_IMAGE_REGISTRY: got(probe_data.get('images')),
+        EC.CAP_IMAGE_TAGS: got(probe_data.get('tags')),
+        EC.CAP_LAYERED_ATTRIBUTES: got(probe_data.get('attributes')),
+        # P0 的探针不采 conditions / image_format
+        EC.CAP_LAYERED_CONDITIONALS: EC.NOT_SUPPORTED,
+        EC.CAP_STATEMENT_REGISTRY: got(probe_data.get('statements')),
+        EC.CAP_TRANSFORM_TABLE: got(dump_loc.get('transform')),
+        EC.CAP_SCREEN_TABLE: got(dump_loc.get('screen')),
+        EC.CAP_DEFINES: got(dump_loc.get('define')),
+        EC.CAP_LABELS: got(probe_data.get('labels')),
+        # ⚠ **不看 exit code**：语义错误时 exit 1 是正常的，lint 照样给了诊断
+        EC.CAP_LINT_DIAGS: True if lint_parsed else None,
+        EC.CAP_STORE_SNAPSHOT: EC.NOT_SUPPORTED,
+    }
+
+
+def _degraded_of(caps: dict, *, probe_ok: bool) -> dict:
+    """
+    能力表 → `degraded` 段（`{'reason', 'missing'}`）。
+
+    ⚠ `missing` **只装 `None`**（这次没采到），不装 `False`（引擎没有）——
+    与 `decide.rung` 的判据同源，两处对不上就会出现"档位说没降级、
+    报告说降级了"。
+    """
+    miss = [str(n) for n, v in (caps or {}).items() if v is None]
+    if not miss:
+        return {'reason': '', 'missing': []}
+    return {'reason': 'probe_partial' if probe_ok else 'probe_failed',
+            'missing': miss}
+
+
 def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
                 ask: bool = False, ask_limit: int = 12) -> dict:
     sdk_path = find_sdk(sdk)
@@ -523,9 +610,8 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
     env_backup = os.environ.get(FACTS_ENV)
     os.environ[FACTS_ENV] = str(facts_out)
     try:
-        rc, out = run_engine(engine_root, work,
-                             ['lint', '--error-code', '--json-dump', str(dump_out)],
-                             timeout=timeout)
+        rc, out, _used_argv = _run_lint_ladder(engine_root, work, dump_out,
+                                               timeout)
     finally:
         if env_backup is None:
             os.environ.pop(FACTS_ENV, None)
@@ -584,9 +670,15 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
         # ⭐ 第一层：引擎自己的语句注册表（"你注册了什么"的权威名单）
         'statements': [(EF.SRC_PROBE, probe_data.get('statements') or {})],
     }
+    # 能力表**只算一次**，两个字段共用（算两遍会白跑，还可能出现
+    # "capabilities 说采到了、degraded 说没采到"这种自相矛盾）
+    _caps = _capabilities_of(probe_data, dump_loc, lint_parsed=bool(lint))
     facts = EF.build_facts(
         payloads,
-        engine={'version': _engine_version(engine_root), 'sdk': str(engine_root)},
+        engine={'version': _engine_version(engine_root),
+                'sdk': str(engine_root),
+                # 退阶痕迹（2026-11-05）：一看就知道是"全档"还是"退到最简"
+                'lint_argv': ' '.join(str(a) for a in _used_argv)},
         fingerprint={'inputs': _fingerprint_inputs(manifest_before)},
         collection={'parse_clean': bool(clean), 'probe_complete': bool(probe_ok),
                     'lint_exit': rc},
@@ -595,6 +687,10 @@ def _collect_at(work: Path, sdk, *, out_path=None, timeout=DEFAULT_TIMEOUT,
                  'undeclared_heads': undeclared,
                  'scan_disclaimer': '以上是「我认出的」，不代表项目里只有这些（N1）'},
         extra_gaps=derived_gaps,
+        # —— v2：能力 / 降级 / 适配器（2026-11-05 P0-3）——
+        adapter={'id': 'renpy', 'version': 1},
+        capabilities=_caps,
+        degraded=_degraded_of(_caps, probe_ok=bool(probe_ok)),
     )
 
     manifest_after = _sha1_manifest(work)
@@ -628,16 +724,11 @@ def _engine_version(engine_root: Path) -> str:
     （实测踩到：原先找的是 `version_tuple`，而它在 `__init__.py` 里是**算**出来的，
       `vc_version.py` 里只有 `version = '…'` —— 于是版本一直是空的。）
     """
-    path = Path(engine_root) / 'renpy' / 'vc_version.py'
-    try:
-        for line in path.read_text(encoding='utf-8',
-                                   errors='replace').splitlines():
-            m = _VERSION_LINE.match(line)
-            if m:
-                return m.group('v')
-    except OSError as e:
-        swallow('pipeline.engine_collect.engine_version', e)
-    return ''
+    # 转发 `engine.detect`（2026-11-05 P0-3）：解析逻辑只有一份，
+    # 这里保留同名函数是为了老调用方/测试不用改。
+    from storygraph.engine import detect
+    got = detect.version_of(engine_root)
+    return str(got) if got is not None else ''
 
 
 def _fingerprint_inputs(manifest: dict) -> dict:

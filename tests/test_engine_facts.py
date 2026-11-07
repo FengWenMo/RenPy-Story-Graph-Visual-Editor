@@ -552,3 +552,185 @@ def test_write_facts_is_the_only_write_point_here():
     guard = (Path(__file__).resolve().parent /
              'test_single_write_entry.py').read_text(encoding='utf-8')
     assert "'pipeline/engine_collect.py::write_facts'" in guard
+
+
+# ---------------------------------------------------------------------------
+#  v2 信封四段（2026-11-05 P0-2/P0-3）
+# ---------------------------------------------------------------------------
+
+class TestSchemaV2:
+    """只**加**字段：`facts[key]` 的 `{value, source}` 形状一个字节都没改。"""
+
+    def _v1_file(self):
+        """造一份**老** v1 事实（v2 四段全没有）。"""
+        f = EF.empty_facts()
+        f['schema'] = 1
+        for k in ('adapter', 'capabilities', 'degraded', 'freshness'):
+            f.pop(k, None)
+        f['collection'] = {'parse_clean': True, 'probe_complete': True,
+                           'lint_exit': 0}
+        f['facts'] = {'images': {'value': ['a'], 'source': EF.SRC_PROBE}}
+        # ⚠ "采到了"就必须交代派生段（`validate_facts` 的规矩）——
+        # 缺这三个键会被判成"声明采到了却没算"，那不是 v1/v2 的事。
+        f['derived'] = {'overridden_builtins': [], 'undeclared_heads': [],
+                        'scan_disclaimer': ''}
+        return f
+
+    def test_v1_file_still_validates(self):
+        """⭐ 老文件不许因为升版变红（`tests/test_asset_identity.py:538` 就是 v1）。"""
+        assert EF.validate_facts(self._v1_file()) == []
+
+    def test_readable_schemas(self):
+        assert 1 in EF.READABLE_SCHEMAS and 2 in EF.READABLE_SCHEMAS
+        assert EF.SCHEMA_VERSION == 2
+
+    def test_unknown_schema_still_rejected(self):
+        f = self._v1_file()
+        f['schema'] = 99
+        assert any('版本不认识' in p for p in EF.validate_facts(f))
+
+    def test_build_facts_passes_the_four_sections(self):
+        f = EF.build_facts(
+            {},
+            adapter={'id': 'renpy', 'version': 1},
+            capabilities={'CAP_LABELS': True, 'CAP_STORE_SNAPSHOT': False,
+                          'CAP_DEFINES': None},
+            degraded={'reason': 'probe_partial', 'missing': ['CAP_DEFINES']},
+            freshness={'verdict': 'fresh', 'checked_at': 'now',
+                       'rpy_stamp': 'x'})
+        assert f['schema'] == 2
+        assert f['adapter'] == {'id': 'renpy', 'version': 1}
+        assert f['capabilities']['CAP_LABELS'] is True
+        assert f['degraded'] == {'reason': 'probe_partial',
+                                 'missing': ['CAP_DEFINES']}
+        assert f['freshness']['verdict'] == 'fresh'
+        assert EF.validate_facts(f) == []
+
+    def test_empty_facts_has_the_four_sections(self):
+        f = EF.empty_facts()
+        for key in ('adapter', 'capabilities', 'degraded', 'freshness'):
+            assert key in f, key
+        assert f['freshness']['verdict'] == 'unknown'
+
+    def test_capability_must_be_three_state(self):
+        f = EF.empty_facts()
+        f['capabilities'] = {'CAP_LABELS': 'true'}
+        assert any('三态' in p for p in EF.validate_facts(f))
+
+    def test_unknown_capability_token_is_not_core_business(self):
+        """⭐ core 保持**哑**：未登记令牌不报错（那是 engine.capabilities 的事）。
+
+        这条要是红了，说明有人把 `engine` 的认知塞进了 `core` —— 依赖方向就破了。
+        """
+        f = EF.empty_facts()
+        f['capabilities'] = {'CAP_MADE_UP': True}
+        assert EF.validate_facts(f) == []
+
+    def test_degraded_without_reason_is_reported(self):
+        f = EF.empty_facts()
+        f['degraded'] = {'reason': '', 'missing': ['CAP_LABELS']}
+        assert any('没有 reason' in p for p in EF.validate_facts(f))
+
+    def test_bad_freshness_verdict_is_reported(self):
+        f = EF.empty_facts()
+        f['freshness'] = {'verdict': 'maybe', 'checked_at': '', 'rpy_stamp': ''}
+        assert any('freshness.verdict' in p for p in EF.validate_facts(f))
+
+    def test_is_collectable_semantics_unchanged(self):
+        """硬不变量：`is_collectable()` **一个字节都不许变**。"""
+        ok, _why = EF.is_collectable(self._v1_file())
+        assert ok is True
+        bad = self._v1_file()
+        bad['collection']['probe_complete'] = False
+        assert EF.is_collectable(bad)[0] is False
+
+
+# ---------------------------------------------------------------------------
+#  v2 信封四段（2026-11-05 P0-2/P0-3）
+# ---------------------------------------------------------------------------
+
+class TestSchemaV2:
+    """只**加**字段：`facts[key]` 的 `{value, source}` 形状一个字节都没改。"""
+
+    def _v1_file(self):
+        """造一份**老** v1 事实（v2 四段全没有）。"""
+        f = EF.empty_facts()
+        f['schema'] = 1
+        for k in ('adapter', 'capabilities', 'degraded', 'freshness'):
+            f.pop(k, None)
+        f['collection'] = {'parse_clean': True, 'probe_complete': True,
+                           'lint_exit': 0}
+        f['facts'] = {'images': {'value': ['a'], 'source': EF.SRC_PROBE}}
+        # ⚠ "采到了"就必须交代派生段（`validate_facts` 的规矩）——
+        # 缺这三个键会被判成"声明采到了却没算"，那不是 v1/v2 的事。
+        f['derived'] = {'overridden_builtins': [], 'undeclared_heads': [],
+                        'scan_disclaimer': ''}
+        return f
+
+    def test_v1_file_still_validates(self):
+        """⭐ 老文件不许因为升版变红（`tests/test_asset_identity.py:538` 就是 v1）。"""
+        assert EF.validate_facts(self._v1_file()) == []
+
+    def test_readable_schemas(self):
+        assert 1 in EF.READABLE_SCHEMAS and 2 in EF.READABLE_SCHEMAS
+        assert EF.SCHEMA_VERSION == 2
+
+    def test_unknown_schema_still_rejected(self):
+        f = self._v1_file()
+        f['schema'] = 99
+        assert any('版本不认识' in p for p in EF.validate_facts(f))
+
+    def test_build_facts_passes_the_four_sections(self):
+        f = EF.build_facts(
+            {},
+            adapter={'id': 'renpy', 'version': 1},
+            capabilities={'CAP_LABELS': True, 'CAP_STORE_SNAPSHOT': False,
+                          'CAP_DEFINES': None},
+            degraded={'reason': 'probe_partial', 'missing': ['CAP_DEFINES']},
+            freshness={'verdict': 'fresh', 'checked_at': 'now',
+                       'rpy_stamp': 'x'})
+        assert f['schema'] == 2
+        assert f['adapter'] == {'id': 'renpy', 'version': 1}
+        assert f['capabilities']['CAP_LABELS'] is True
+        assert f['degraded'] == {'reason': 'probe_partial',
+                                 'missing': ['CAP_DEFINES']}
+        assert f['freshness']['verdict'] == 'fresh'
+        assert EF.validate_facts(f) == []
+
+    def test_empty_facts_has_the_four_sections(self):
+        f = EF.empty_facts()
+        for key in ('adapter', 'capabilities', 'degraded', 'freshness'):
+            assert key in f, key
+        assert f['freshness']['verdict'] == 'unknown'
+
+    def test_capability_must_be_three_state(self):
+        f = EF.empty_facts()
+        f['capabilities'] = {'CAP_LABELS': 'true'}
+        assert any('三态' in p for p in EF.validate_facts(f))
+
+    def test_unknown_capability_token_is_not_core_business(self):
+        """⭐ core 保持**哑**：未登记令牌不报错（那是 engine.capabilities 的事）。
+
+        这条要是红了，说明有人把 `engine` 的认知塞进了 `core` —— 依赖方向就破了。
+        """
+        f = EF.empty_facts()
+        f['capabilities'] = {'CAP_MADE_UP': True}
+        assert EF.validate_facts(f) == []
+
+    def test_degraded_without_reason_is_reported(self):
+        f = EF.empty_facts()
+        f['degraded'] = {'reason': '', 'missing': ['CAP_LABELS']}
+        assert any('没有 reason' in p for p in EF.validate_facts(f))
+
+    def test_bad_freshness_verdict_is_reported(self):
+        f = EF.empty_facts()
+        f['freshness'] = {'verdict': 'maybe', 'checked_at': '', 'rpy_stamp': ''}
+        assert any('freshness.verdict' in p for p in EF.validate_facts(f))
+
+    def test_is_collectable_semantics_unchanged(self):
+        """硬不变量：`is_collectable()` **一个字节都不许变**。"""
+        ok, _why = EF.is_collectable(self._v1_file())
+        assert ok is True
+        bad = self._v1_file()
+        bad['collection']['probe_complete'] = False
+        assert EF.is_collectable(bad)[0] is False
