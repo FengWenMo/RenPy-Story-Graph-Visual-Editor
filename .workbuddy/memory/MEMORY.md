@@ -55,6 +55,8 @@
 
 **落盘/全局开关**
 - 写盘只有一条路 `core/atomicio.py`（临时文件 → `newline=''` → fsync → 多代备份 → `os.replace`），别用 `wb.save(path)`。三条别改回去：备份名带序号（同 tick 会盖掉上一代）｜`os.replace` 对瞬时 `PermissionError` 重试 6×20ms｜Excel 后缀白名单只认 `.xlsx`。
+- **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写）。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
+- 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
 - 读 Excel 只有一条路 `excel/safety.py::open_workbook()`（AST 横扫守卫，直接 `load_workbook` 会被抓）。阈值：拒 256MB / 解开 512MB / 单条目 256MB / 2 万条目 / 声明 800 万格。
 - **表读不出来时不许重建**：`snapshot_user_content` 对 `UnsafeWorkbook`/`PermissionError` **抛**，只有坏文件才 `None`。
 - 来源指纹是完整 sha1（`table_meta.fingerprint_of`），比较走 `fingerprints_match()`（老表 16 位前缀兼容）。
@@ -132,7 +134,17 @@
   生成非法 `.rpy`，而解析只认另一个文件的错误 → 真机"引擎裁决"静默全绿。
   提交前 `grep -rn '://n\|//n'`（详见当日记忆「收口」）。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底。
+- **扩展平台 v7（2026-11-07 第七轮）**：① 声明可移植档案
+  `ext/archive.py` + 窗口「导出…/导入…」（`*.sg-ext.json`，只带
+  `project`/`plugin:` 来源，冲突两方判定，坏一处整份拒绝）；② **跨进程锁**
+  `core/filelock.py`（用户缓存里的 OS 级字节锁；`ext.save()` 与
+  `_edit_manifest` 的"读→合并→写"整段在锁里）；③ `rules.json` 写路收成
+  `_edit_manifest` + `core/threeway.merge_by_key`（与 ext 同一张决策表），
+  `save_calls(base=…)` 不再删别人新加的调用；④ `placeholder` 一路串到
+  卡片参数格。判据 4 个新文件 40 条，变异 5/5 抓住，全量 **10125 passed**。
+  ⚠ `field` 扩展点**加新列**仍没做 —— 卡在"这一列导出成什么"（文档 §16.6）。
+
+真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底｜`declare_attr_groups`/`remove_statement` 的读还没进锁｜`field` 加新列的导出口径未定。
 
 ## 六、协作 / 发布
 
