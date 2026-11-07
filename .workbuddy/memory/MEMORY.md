@@ -125,6 +125,13 @@
   （`enabled/batchable/batch` 在插件之后再贴一遍，不只 override 记录）。
   判据 `tests/test_ext_merge.py`（24 条），详见同文档 §十五。
 
+- **收口（2026-11-07 22:40）**：七天的未提交工作清进库（9 个提交
+  `1c8c75c`…`0c144b2`，239 文件）。并行工作留下的 7 条红逐条判断后
+  修掉 / 改判据 / 更新金标，全量 **10085 passed / 0 failed**。
+  ⚠ 老病复发：`assets/engine_images.py` 里 `:\n` 被写成了 `://n` ——
+  生成非法 `.rpy`，而解析只认另一个文件的错误 → 真机"引擎裁决"静默全绿。
+  提交前 `grep -rn '://n\|//n'`（详见当日记忆「收口」）。
+
 真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`resolve_layers` 无"组里第一个"兜底。
 
 ## 六、协作 / 发布
