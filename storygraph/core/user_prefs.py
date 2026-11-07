@@ -19,7 +19,7 @@ storygraph.core.user_prefs
 ## 一个出口
 
     read()                  → dict           读整份；缺 / 坏 / 不是对象 → {}
-    section(name)           → dict           只取一节（不是对象 → {}）
+    read_state()            → (dict, 状态)   还要分清"没设置过"和"坏了"时用它
     update(name, patch)     → dict           锁里读 → 只改这一节 → 原子写
 
 **写只有 `update`**：它只覆盖你给的键，文件里别的键、别的节原样留着 ——
@@ -107,12 +107,6 @@ def read_state():
     return _load(path())
 
 
-def section(name) -> dict:
-    """只取一节；没有 / 不是对象 → `{}`（调用方自己套默认值）。"""
-    got = read().get(name)
-    return dict(got) if isinstance(got, dict) else {}
-
-
 def update(name, patch, *, lock_timeout: float = DEFAULT_TIMEOUT) -> dict:
     """
     锁里读 → 只改 `name` 这一节 → 原子写；返回这一节的新内容。
@@ -153,4 +147,4 @@ def _dumps(data: dict) -> str:
 
 
 __all__ = ['CorruptSettings', 'ENV_CONFIG', 'FILE_NAME', 'path', 'read',
-           'read_state', 'section', 'update']
+           'read_state', 'update']
