@@ -29,16 +29,19 @@ storygraph.ui_qt.dialog_extensions
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
-                               QDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMessageBox, QPlainTextEdit,
+                               QDialog, QFileDialog, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QSplitter, QTableWidget,
                                QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 
+from storygraph.core.atomicio import write_text_atomic
+from storygraph.ext import archive as EA
 from storygraph.ext import card_fields as CF
 from storygraph.ext import registry as ER
 from storygraph.ext import schema as ES
@@ -335,6 +338,19 @@ class ExtensionDialog(QDialog):
         foot = QHBoxLayout()
         self.status = _hint('')
         foot.addWidget(self.status, 1)
+        # —— 把声明带走（2026-11-07 第七轮，设计文档 §15.10 第 1 条）——
+        #
+        # 导出 / 导入走**另一份文件**（`*.sg-ext.json` 档案），不碰项目里的
+        # `storygraph.ext.json`：导入只改内存，落盘还是「保存到项目」那一步
+        # （于是冲突照旧会被 `_ask_conflict` 拦下来）。
+        b_export = QPushButton('导出…')
+        b_export.setToolTip('把当前这些声明存成一份可移植档案（别的项目可以导入）')
+        b_export.clicked.connect(lambda: self._export_archive())
+        b_import = QPushButton('导入…')
+        b_import.setToolTip('读一份扩展档案装进这个项目（先看冲突，再保存）')
+        b_import.clicked.connect(lambda: self._import_archive())
+        foot.addWidget(b_export)
+        foot.addWidget(b_import)
         b_close = QPushButton('关闭')
         b_close.clicked.connect(self.reject)
         b_save = QPushButton('保存到项目')
@@ -877,6 +893,140 @@ class ExtensionDialog(QDialog):
         self.status.setText(self.status.text()
                             + '｜冲突的几条按你这边的版本覆盖了。')
         return True
+
+    # ==================================================================
+    #  把声明带走（导出 / 导入一份可移植档案）
+    # ==================================================================
+
+    def _ask_export_path(self) -> str:
+        """问导出到哪 —— **单独一个方法**：判据要打桩它，不弹模态。"""
+        path, _ = QFileDialog.getSaveFileName(
+            self, '导出扩展档案',
+            str(Path.home() / f'扩展档案{EA.ARCHIVE_SUFFIX}'),
+            f'扩展档案 (*{EA.ARCHIVE_SUFFIX});;JSON (*.json)')
+        return str(path or '')
+
+    def _ask_import_path(self) -> str:
+        """问从哪导入（同上：打桩点）。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, '导入扩展档案', str(Path.home()),
+            f'扩展档案 (*{EA.ARCHIVE_SUFFIX});;JSON (*.json);;所有文件 (*)')
+        return str(path or '')
+
+    def export_archive(self, path: str = '') -> dict:
+        """
+        当前声明 → 档案文件（`path` 空 = 先问人）。
+
+        只带**形状真的住在文件里**的声明；内置 / 只带开关的记录跳过，并把
+        "跳过了几条、为什么"写在状态栏（**不静默**：人要知道带走的东西不全）。
+        """
+        if not self._root_path:
+            self.status.setText('先打开项目 —— 档案要从项目的声明里生成。')
+            return {'ok': False, 'reason': '没有项目根目录'}
+        arch = self._reg.export_archive(name=Path(self._root_path).name)
+        if not arch['extensions']:
+            self.status.setText('这个项目还没有可带走的声明（内置 / 只带开关的'
+                                '记录不算）。')
+            return {'ok': False, 'reason': '没有可导出的声明'}
+        target = str(path or '')
+        if not target:
+            target = self._ask_export_path()
+        if not target:
+            return {'ok': False, 'reason': '取消了'}
+        try:
+            write_text_atomic(target, EA.dump_archive(arch))
+        except OSError as e:
+            self.status.setText(f'导出失败：{e}')
+            return {'ok': False, 'reason': str(e)}
+        skipped = EA.describe_skipped(self._reg.all())
+        note = (f'已导出 {len(arch["extensions"])} 条到 {Path(target).name}')
+        if skipped:
+            note += (f'；{len(skipped)} 条没带'
+                     f'（{"、".join(s["id"] for s in skipped[:3])}'
+                     f'{"…" if len(skipped) > 3 else ""} —— 形状在别处）')
+        self.status.setText(note + '。别的项目「导入…」就能用。')
+        return {'ok': True, 'path': target, 'count': len(arch['extensions']),
+                'skipped': skipped}
+
+    def _warn(self, title: str, text: str) -> None:
+        """弹一句警告。**单独一个方法**：判据里打桩它，否则模态把测试挂住。"""
+        QMessageBox.warning(self, title, text)
+
+    def import_archive(self, path: str = '') -> dict:
+        """
+        档案 → **内存里的注册表**，然后走「保存到项目」落盘。
+
+        `path` 空 = 先问人。冲突（同名、形状不同）时**当面问**：
+        用档案的覆盖 / 保留项目里的 / 取消 —— 默认不写任何东西。
+        """
+        if not self._root_path:
+            self.status.setText('先打开项目 —— 档案要装进项目的声明里。')
+            return {'ok': False, 'reason': '没有项目根目录'}
+        target = str(path or '') or self._ask_import_path()
+        if not target:
+            return {'ok': False, 'reason': '取消了'}
+        try:
+            data = json.loads(Path(target).read_text(encoding='utf-8') or '{}')
+        except (OSError, ValueError) as e:
+            self.status.setText(f'{Path(target).name} 读不出来：{e}')
+            return {'ok': False, 'reason': str(e)}
+        res = self._reg.import_archive(data)
+        if not res.get('ok') and res.get('problems'):
+            self._warn(
+                '这份档案读不懂',
+                '下面这些地方不对，所以**整份没有导入**：\n\n'
+                + '\n'.join(res['problems'][:8])
+                + ('\n…' if len(res['problems']) > 8 else ''))
+            self.status.setText(f'没导入：{Path(target).name} 有 '
+                                f'{len(res["problems"])} 处读不懂。')
+            return res
+        if not res.get('ok') and res.get('conflicts'):
+            res = self._ask_import_conflict(data, res)
+            if res is None:
+                self.status.setText('没导入：档案里那几条与项目同名，'
+                                    '这次什么都没改。')
+                return {'ok': False, 'reason': '取消了'}
+        # ⚠ 先断开"当前选中条目"：`_save()` 会把表单上的值写进它再 upsert ——
+        #   如果它就是刚导入的那条，等于拿旧表单把档案覆盖回去。
+        self._current = None
+        self._reload_tree()
+        saved = self._save()
+        added = list(res.get('added') or ())
+        replaced = list(res.get('replaced') or ())
+        told = f'导入：新增 {len(added)} 条'
+        if added:
+            told += f'（{"、".join(added[:4])}{"…" if len(added) > 4 else ""}）'
+        if replaced:
+            told += f'，覆盖 {len(replaced)} 条'
+        if res.get('same'):
+            told += f"，{len(res['same'])} 条本来一样"
+        if not saved:
+            self.status.setText(told + '｜**还没存盘**：' + self.status.text())
+            return {**res, 'saved': False}
+        # `_save()` 会把状态栏换成它自己那句；导入的结果**拼在前面**（两件事都
+        # 得说：导进了几条、存盘成没成）。
+        self.status.setText(told + '｜' + self.status.text())
+        return {**res, 'saved': True}
+
+    def _ask_import_conflict(self, data: dict, first: dict):
+        """同名不同形 → 当面问（覆盖 / 保留 / 取消）。取消返回 None。"""
+        ids = [str(i) for i in (first.get('conflicts') or ())]
+        shown = '、'.join(ids[:6]) + ('…' if len(ids) > 6 else '')
+        box = QMessageBox(self)
+        box.setWindowTitle('档案里有同名但形状不同的条目')
+        box.setText(f'项目里已经有这些条，形状与档案里不一样：\n\n{shown}')
+        box.setInformativeText('现在**什么都没改**。要怎么办？')
+        box.setIcon(QMessageBox.Question)
+        use_archive = box.addButton('用档案的覆盖', QMessageBox.AcceptRole)
+        keep = box.addButton('保留项目里的', QMessageBox.AcceptRole)
+        box.addButton('取消', QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is use_archive:
+            return self._reg.import_archive(data, on_conflict='replace')
+        if clicked is keep:
+            return self._reg.import_archive(data, on_conflict='keep')
+        return None
 
     def _reread(self, keep: str = '') -> None:
         """

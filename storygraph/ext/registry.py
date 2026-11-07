@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from storygraph.core.filelock import DEFAULT_TIMEOUT, LockTimeout, file_lock
+from storygraph.core.threeway import compose_rows, merge_by_key
 from storygraph.ext.schema import (EXT_SCHEMA, ExtError, ExtensionPoint,
                                    field_of_column, parse_extension)
 
@@ -338,6 +340,10 @@ def _merge_records(base: dict, mine: dict, theirs: dict,
     """
     三方合并（**纯函数**，不碰文件）→ `(picks, conflicts, absorbed)`。
 
+    判据表与实现都在 `storygraph.core.threeway.merge_by_key`（第七轮搬到那里：
+    `rules.json` 的 `calls` 段要用**同一张表**）。这里只保留本模块的名字 ——
+    它说的是"扩展点记录"，`test_ext_merge.py` 的注释也按这个名字讲故事。
+
         mine == theirs  → 一样，随便取
         mine == base    → 我没动过 → **用文件里的**（收进别人的改动）
         theirs == base  → 别人没动 → 用我的
@@ -347,36 +353,12 @@ def _merge_records(base: dict, mine: dict, theirs: dict,
     按 id 逐条判，所以"甲窗改 A、乙窗改 B"两边都能落下，只有**同一条**被两边
     改过才停下来问。返回的 `picks` 里 `None` 表示"这条该删"。
     """
-    picks, conflicts, absorbed = {}, [], []
-    for ident in [*theirs, *(i for i in mine if i not in theirs)]:
-        want, had, now = mine.get(ident), base.get(ident), theirs.get(ident)
-        if want == now:
-            picks[ident] = want
-        elif want == had:
-            picks[ident] = now                  # 我没动：听文件的
-            if now != had:
-                absorbed.append(ident)
-        elif now == had:
-            picks[ident] = want                 # 别人没动：听我的
-        else:
-            conflicts.append(ident)
-            picks[ident] = want if on_conflict in ('abort', 'mine') else now
-    return picks, conflicts, absorbed
+    return merge_by_key(base, mine, theirs, on_conflict)
 
 
 def _compose(rows: list, picks: dict, mine: dict) -> list:
-    """合并结果 → 文件里那份列表（照文件顺序；认不出的原样；新增的接在后面）。"""
-    out, seen = [], set()
-    for ident, raw in rows:
-        seen.add(ident)
-        if not ident:
-            out.append(raw)                     # 认不出的条目：原样写回去
-        elif picks.get(ident) is not None:
-            out.append(picks[ident])
-    for ident in mine:
-        if ident not in seen and picks.get(ident) is not None:
-            out.append(picks[ident])            # 我新加的那几条
-    return out
+    """合并结果 → 文件里那份列表（实现见 `core.threeway.compose_rows`）。"""
+    return compose_rows(rows, picks, mine)
 
 
 class ExtensionRegistry:
@@ -602,7 +584,57 @@ class ExtensionRegistry:
         """要写进 `storygraph.ext.json` 的内容（文件里那几条 + 我改的）。"""
         return {'schema': EXT_SCHEMA, 'extensions': self.records()}
 
-    def save(self, project_root=None, on_conflict: str = 'abort') -> dict:
+    # ---------- 带走（导出 / 导入一份可移植档案，2026-11-07 第七轮）----------
+
+    def export_archive(self, *, name: str = '', only=None, now: str = '') -> dict:
+        """
+        当前的声明 → 一份**可移植档案**（纯内存，不写盘）。
+
+        只带走形状真的住在文件里的那些条（`project` / `plugin`），并跳过
+        `override`（只带开关的空壳）。被跳过的条目用
+        `ext.archive.describe_skipped()` 问，界面上给人一句交代。
+        """
+        from datetime import datetime
+
+        from storygraph import __version__
+        from storygraph.ext.archive import build_archive
+        return build_archive(
+            self._points, name=name, only=only,
+            now=now or datetime.now().isoformat(timespec='seconds'),
+            tool=f'storygraph {__version__}')
+
+    def import_archive(self, data, *, on_conflict: str = 'abort') -> dict:
+        """
+        一份档案 → **装进内存里的注册表**（落盘仍走 `save()`）。
+
+        `data` 可以是档案 dict 或它的 JSON 文本。`on_conflict` 见
+        `ext.archive.import_into`（`abort` / `replace` / `keep`）。
+
+        返回 `{'ok','added','same','replaced','conflicts','problems','reason'}`；
+        档案里有一处读不懂 → `ok: False` 且**一条都不装**（要么全对、要么不动）。
+        """
+        from storygraph.ext.archive import import_into, parse_archive
+        if isinstance(data, (str, bytes)):
+            try:
+                data = json.loads(data)
+            except ValueError as e:
+                return {'ok': False, 'added': [], 'same': [], 'replaced': [],
+                        'conflicts': [], 'problems': [f'档案不是合法 JSON：{e}'],
+                        'reason': '档案读不出来'}
+        incoming, meta, problems = parse_archive(data)
+        if problems:
+            return {'ok': False, 'added': [], 'same': [], 'replaced': [],
+                    'conflicts': [], 'problems': list(problems),
+                    'meta': meta,
+                    'reason': f'这份档案有 {len(problems)} 处读不懂，'
+                              f'整份**没有导入**'}
+        res = import_into(self, incoming, on_conflict=on_conflict)
+        res['problems'] = []
+        res['meta'] = meta
+        return res
+
+    def save(self, project_root=None, on_conflict: str = 'abort',
+             lock_timeout: float = DEFAULT_TIMEOUT) -> dict:
         """
         写 `<项目>/storygraph.ext.json`（唯一写入口）—— **先对表，再落盘**。
 
@@ -628,6 +660,12 @@ class ExtensionRegistry:
           · 文件里**别人加的顶层键**原样留着（只改 `schema` / `extensions`）；
           · 认不出的条目（坏形状 / 没有 id）原样写回去，不删。
 
+        **跨进程锁**（2026-11-07 第七轮）：读 `theirs` → 合并 → 写盘整段都在
+        `core.filelock.file_lock` 里。否则两个进程同时点保存时，两边读到的是
+        同一份 `theirs`，后写的把先写的**静默抹掉**（合并本身挡不住这个 ——
+        它只挡"读得早"，挡不住"读得同时"）。等锁超过 `lock_timeout` 秒
+        → `ok: False` + `locked: True`，**不静默跳过**。
+
         返回 `{'ok','path','count','reason','conflicts','absorbed','conflict'}`：
 
           · `conflicts` —— 两边都改过的 id（`on_conflict='abort'` 时没写盘）；
@@ -642,6 +680,17 @@ class ExtensionRegistry:
                     'reason': f'on_conflict 只认 abort/mine/theirs，收到 '
                               f'{on_conflict!r}', 'conflicts': [], 'absorbed': []}
         path = root / MANIFEST
+        try:
+            with file_lock(path, timeout=lock_timeout):
+                return self._save_locked(path, on_conflict)
+        except LockTimeout as e:
+            return {'ok': False, 'path': str(path), 'count': 0, 'locked': True,
+                    'reason': f'{MANIFEST} 现在由另一个进程在写（{e}），'
+                              f'这次**没有保存**，请稍后再存',
+                    'conflicts': [], 'absorbed': []}
+
+    def _save_locked(self, path: Path, on_conflict: str) -> dict:
+        """`save()` 的主体（**已经在锁里**：读 theirs → 合并 → 写盘）。"""
         rows, extras, problems = [], {}, []
         if path.is_file():
             rows, extras, problems = _read_ext_records(path)
@@ -675,7 +724,7 @@ class ExtensionRegistry:
         except (OSError, ValueError) as e:
             return {'ok': False, 'path': str(path), 'count': 0,
                     'reason': f'写不进去：{e}', 'conflicts': [], 'absorbed': []}
-        self.root = root
+        self.root = path.parent
         self._baseline = {str(r.get('id')): r for r in out
                           if isinstance(r, dict) and r.get('id')}
         return {'ok': True, 'path': str(path),
