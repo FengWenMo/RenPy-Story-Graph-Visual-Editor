@@ -75,6 +75,25 @@ storygraph.story.write_gate
 
 这几种都**拒写**，而且措辞必须分开：说成"撞在同一处"在它们身上是假话
 （他根本没碰我改的那一行），用户会去找一个不存在的"他改了我这句"。
+
+**这道闸得两边都看**（2026-11-08 第十七轮）
+--------------------------------------------
+第十六轮那道闸只查"**我**改的那几段"。可是"合出来那份能不能启动"是**文件**
+的性质，不是我这半边的性质 —— 把我这一侧和他那一侧对调，同一个坏文件、同一份
+产物，闸就一句不吭。第十七轮的探针（`.pip-tmp/probe_r17_symmetry.py`）拿第十六
+轮那个例子量了两个方向：
+
+    A（盘上=他删了块头，我改菜单项）→ **拒写**        ← 第十六轮修的那个方向
+    B（盘上=我改的菜单项，我删了块头）→ **合上了**     ← 产物里 8 个空格的选项悬空
+
+同一个剧本、同两个人，**谁先导出**决定这份文件坏不坏。现在**两边改过的行都查**：
+每一行合完之后必须还挂在**它自己那一份**里的同一个父语句下面（身份按基线坐标
+算，所以"块头只是换了个写法"仍然算同一个）。换了 → 拒写，并且说清是谁那几行
+（`CLASH_REPARENTED` = 你的几行被挪，`CLASH_REPARENTED_OTHER` = 他的几行被挪）。
+
+⚠ 只管**两边动过**的行。谁都没动过的基线行不查：把 `if x:` 整个换成
+`while True:`（层级也跟着变）是正当改动，硬查会误伤 —— 这一条**已知不拦**，
+记在 `docs/设计_导出这条大路_三路合并_2026-11-08.md` §四·八。
 """
 
 from __future__ import annotations
@@ -176,12 +195,12 @@ def classify(disk_bytes, base_sha1, draft_text, base_text=None) -> Verdict:
 #  三路合并（只有在 `base_text` 给了以后才会被调用）
 # ---------------------------------------------------------------------------
 
-def edits_between(base_lines, other_lines) -> list:
-    """`base` → `other` 的改动段：`[(起, 止, 新行), …]`（0 基，止不含）。
+def _edits_raw(base_lines, other_lines) -> list:
+    """`[(起, 止, 源起, 新行), …]` —— `edits_between` 再加一个**源坐标**。
 
-    2026-11-08 第十四轮从私有 `_edits` 提为公开：`commit_text` 要把
-    "别人改了哪几段"翻译成人话（`Kept`），两边必须**同一份** diff ——
-    各写一遍就会出现"报的行号和实际合并的行号对不上"。
+    `源起` = 这几行在 `other` 里的起点（0 基）。合并之后要回答"它本来挂在哪个
+    块下面"，那个"本来"只能在**它自己那一份**里找 —— 拿基线坐标去查，两边各
+    删几行就全错开了（第十六轮那道闸就是这么写成只看一半的，见第十七轮）。
     """
     matcher = difflib.SequenceMatcher(a=base_lines, b=other_lines,
                                       autojunk=False)
@@ -189,7 +208,39 @@ def edits_between(base_lines, other_lines) -> list:
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
             continue
-        out.append((i1, i2, list(other_lines[j1:j2])))
+        out.append((i1, i2, j1, list(other_lines[j1:j2])))
+    return out
+
+
+def edits_between(base_lines, other_lines) -> list:
+    """`base` → `other` 的改动段：`[(起, 止, 新行), …]`（0 基，止不含）。
+
+    2026-11-08 第十四轮从私有 `_edits` 提为公开：`commit_text` 要把
+    "别人改了哪几段"翻译成人话（`Kept`），两边必须**同一份** diff ——
+    各写一遍就会出现"报的行号和实际合并的行号对不上"。
+    """
+    return [(i1, i2, lines)
+            for i1, i2, _j1, lines in _edits_raw(base_lines, other_lines)]
+
+
+def _home_of(base_lines, edits, other_lines) -> list:
+    """
+    `other` 的每一行 → 它对应**基线**里的第几行（改/加出来的落到那一段的段首）。
+
+    只用来比"父语句是不是同一条"（身份），**不参与拼文本**：文本永远照抄原样。
+    有了它，"块头只是换了个写法"（`menu:` → `menu 选项:`）自然算同一条 ——
+    不用再去猜"是不是以冒号收尾、缩进一样吗"。
+    """
+    out = [0] * len(other_lines)
+    base_at = other_at = 0
+    for i1, _i2, j1, lines in edits:
+        for k in range(j1 - other_at):               # 照抄的那一段：1 对 1
+            out[other_at + k] = base_at + k
+        for k in range(j1, j1 + len(lines)):         # 改/加出来的：落到段首
+            out[k] = i1
+        base_at, other_at = _i2, j1 + len(lines)
+    for k in range(len(other_lines) - other_at):     # 尾巴
+        out[other_at + k] = base_at + k
     return out
 
 
@@ -223,6 +274,8 @@ CLASH_OVERLAP = 'overlap'
 CLASH_TOUCHING = 'touching'
 #: 撞是没撞，但**你的改动会被挪到别的块里**（第十六轮地狱测试抓到的）
 CLASH_REPARENTED = 'reparented'
+#: 反过来的一面（第十七轮）：**你那边的改动会把别人那几行挪进别的块**
+CLASH_REPARENTED_OTHER = 'reparented_other'
 #: 两边各删一部分，合起来整份文件会变成空的（第十六轮）
 CLASH_ERASED = 'erased'
 
@@ -231,6 +284,7 @@ MERGE_PROBLEM_CN = {
     CLASH_OVERLAP: '两边的改动落在同一处，认不出该听谁的',
     CLASH_TOUCHING: '两边的改动紧挨着，中间没有一行能把它们分开',
     CLASH_REPARENTED: '你改的那几行所在的块，开头那一行被别人改掉了',
+    CLASH_REPARENTED_OTHER: '你这一版删/改了别人那几行的块头',
     CLASH_ERASED: '两边各删了一部分，合起来整份文件会变成空的',
     '': '两边的改动落在一起，认不出该听谁的',      # 兜底：判定说不行、原因不详
 }
@@ -275,7 +329,7 @@ def _clash_kind(base_lines, disk_lines, draft_lines) -> str:
 
 
 # ---------------------------------------------------------------------------
-#  合并之后**你的那几行还挂在同一个块里吗**（第十六轮）
+#  合并之后**两边改过的那几行还挂在同一个块里吗**（第十六 / 十七轮）
 # ---------------------------------------------------------------------------
 
 def _indent_of(line) -> int:
@@ -290,82 +344,92 @@ def _is_skippable(line) -> bool:
     return not text or text.startswith('#')
 
 
-def _is_block_opener(line) -> bool:
-    """这一行是不是"块头"（`menu:` / `if x:` / `"选项":` 都以冒号收尾）。"""
-    return str(line or '').rstrip().endswith(':')
-
-
-def _parent_at(lines, idx: int, depth: int) -> int:
+def _parents(lines) -> list:
     """
-    `idx` **上面**最近的一行"缩进比 `depth` 浅"的语句 → 它的下标；没有 → `-1`。
+    每一行的**父语句**下标（`-1` = 文件开头）—— 一次扫描，O(行数)。
 
-    这就是 Ren'Py 里的"父语句"：块靠缩进嵌套，父语句一换，块的身份就换了。
-    空行 / 整行注释不构成块，跳过（否则他删个空行就会被当成"块头没了"）。
+    父语句 = 上方最近一条"缩进更浅"的语句；空行与整行注释不构成块（跳过，
+    否则他删个空行就会被当成"块头没了"）。
+
+    用栈而不是"每行往回扫"：后者在一个大块里是 O(n²)。2 万行那条判据
+    （`test_hell_merge_structure.py::TestScale`）量的就是这个。
     """
-    for j in range(int(idx) - 1, -1, -1):
-        if _is_skippable(lines[j]):
-            continue
-        if _indent_of(lines[j]) < int(depth):
-            return j
-    return -1
+    out = [-1] * len(lines)
+    stack: list = []                    # [(缩进, 下标)]，缩进严格递增
+    for i, line in enumerate(lines):
+        if _is_skippable(line):
+            continue                    # 不构成块：不记账、也不入栈
+        depth = _indent_of(line)
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        if stack:
+            out[i] = stack[-1][1]
+        stack.append((depth, i))
+    return out
 
 
 def _assemble(base, left, right) -> tuple:
     """
-    把两边的改动落到基线上 → `(merged, mine, tail_from)`。
+    把两边的改动落到基线上 → `(merged, origins, tail_from)`。
 
-    `mine` = 我这一侧的每一段在 `merged` 里的位置 `(起始下标, 基线里的插入点)`
-    —— "合完之后我的改动还挂在同一个块里吗"那道闸要它。
+    `origins` 与 `merged` 等长：`(来自哪一份, 那一份里的第几行)` —— "合完之后
+    它换了块没有"要拿**它自己那一份**去比（第十七轮：只比我这半边，同一个坏
+    文件换个方向就写下去了）。
     `tail_from` = 文件最后一段来自哪一侧（决定末尾那个换行符听谁的）。
     """
     merged: list = []
-    mine: list = []
+    origins: list = []
     tail_from = 'base'
     pos = 0
-    for start, end, lines, is_mine in sorted(left + right,
-                                             key=lambda o: (o[0], o[0] == o[1])):
-        merged.extend(base[pos:start])
-        at = len(merged)
+    for start, end, src_start, lines, is_mine in sorted(
+            left + right, key=lambda o: (o[0], o[0] == o[1])):
+        for k in range(pos, start):
+            merged.append(base[k])
+            origins.append(('base', k))
+        owner = 'draft' if is_mine else 'disk'
         merged.extend(lines)
-        if is_mine and lines:
-            mine.append((at, start))
+        origins.extend((owner, src_start + k) for k in range(len(lines)))
         if lines:
-            tail_from = 'draft' if is_mine else 'disk'
+            tail_from = owner
         pos = end
     if pos < len(base):
-        merged.extend(base[pos:])
+        for k in range(pos, len(base)):
+            merged.append(base[k])
+            origins.append(('base', k))
         tail_from = 'base'
-    return merged, mine, tail_from
+    return merged, origins, tail_from
 
 
-def _moved_block(base, merged, mine):
+def _orphan(merged, origins, parents, home) -> tuple:
     """
-    我的改动有没有被**挪进别的块里** → 返回被改掉的那条父语句的行号（1 基），
-    没问题时返回 `None`。
+    合完之后，**两边改过的**那一行里，第一处"换了父语句"的 →
+    `(来自哪一份, 它那一份里旧父语句的下标)`；没有 → `('', -1)`。
 
-    行级合并不认缩进：他要是删/改了我这一块的**开头那一行**（`menu:` /
-    `if flag:` / `label x:`），我的那几行就会挂到另一个块下面 —— 产物是
-    一个**两边谁都没写过**的文件，Ren'Py 启动就报缩进错，而判定说"合上了"。
-    块头只是**换了个写法**（同缩进、仍以冒号收尾）不算：块还在。
+    为什么两边都要查（第十七轮）：这道闸问的是"合出来那份能不能启动"，
+    那是**文件**的性质，不是我这半边的性质。第十六轮只查我这一侧，于是同一个
+    例子、同样两份文本，把左右对调就写出去一份 8 个空格悬空的文件（探针
+    `.pip-tmp/probe_r17_symmetry.py` 量到 A 方向拒、B 方向写）。
+
+    父语句的**身份按基线坐标**比（`home`），所以"块头只是换了个写法"
+    （`menu:` → `menu 选项:`）仍然是同一条 —— 不用猜缩进和冒号。
+
+    ⚠ 只管**两边动过**的行。谁都没动过的基线行不查：把 `if x:` 整个换成
+    `while True:`（层级也跟着变）是正当改动，硬查会误伤 —— 已知不拦。
     """
-    for at, start in mine:
-        head = next((k for k, line in enumerate(merged[at:])
-                     if not _is_skippable(line)), None)
-        if head is None:
+    for at, (src, idx) in enumerate(origins):
+        if src == 'base' or _is_skippable(merged[at]):
             continue
-        depth = _indent_of(merged[at + head])
-        old_parent = _parent_at(base, start, depth)
-        new_parent = _parent_at(merged, at + head, depth)
-        old_line = base[old_parent] if old_parent >= 0 else ''
-        new_line = merged[new_parent] if new_parent >= 0 else ''
-        if new_line == old_line:
-            continue
-        if (old_line and new_line and _is_block_opener(old_line)
-                and _is_block_opener(new_line)
-                and _indent_of(old_line) == _indent_of(new_line)):
-            continue
-        return old_parent + 1 if old_parent >= 0 else 0
-    return None
+        old = parents[src][idx]
+        new = parents['merged'][at]
+        old_home = home[src][old] if old >= 0 else -1
+        if new < 0:
+            new_home = -1
+        else:
+            nsrc, nidx = origins[new]
+            new_home = nidx if nsrc == 'base' else home[nsrc][nidx]
+        if old_home != new_home:
+            return src, old
+    return '', -1
 
 
 def _merge_plan(base_text, disk_text, draft_text) -> tuple:
@@ -374,10 +438,10 @@ def _merge_plan(base_text, disk_text, draft_text) -> tuple:
     （`merge_text` / `merge_three_way` 都从这里拿）。
 
     原因：`''`（能合）/ `CLASH_OVERLAP` / `CLASH_TOUCHING` / `CLASH_REPARENTED`
-    / `CLASH_ERASED`。`merge_text` 的公开契约只有"`''` = 合不了"，
-    要分清是**哪一种**合不了（措辞不同）必须拿这一份。
+    / `CLASH_REPARENTED_OTHER` / `CLASH_ERASED`。`merge_text` 的公开契约只有
+    "`''` = 合不了"，要分清是**哪一种**合不了（措辞不同）必须拿这一份。
 
-    `相关行号`：`CLASH_REPARENTED` 时是**被改掉的父语句**在基线里的行号
+    `相关行号`：两种 `REPARENTED_*` 时是**被改掉的那条父语句**在基线里的行号
     （1 基；0 = 父语句在文件开头，没有行号可用）。
     """
     base_text = str(base_text if base_text is not None else '')
@@ -387,22 +451,35 @@ def _merge_plan(base_text, disk_text, draft_text) -> tuple:
     disk = split_lines(disk_text)
     draft = split_lines(draft_text)
 
-    left = [(s, e, lines, False) for s, e, lines in edits_between(base, disk)]
-    right = [(s, e, lines, True) for s, e, lines in edits_between(base, draft)]
+    raw_left = _edits_raw(base, disk)
+    raw_right = _edits_raw(base, draft)
+    left = [(s, e, j, lines, False) for s, e, j, lines in raw_left]
+    right = [(s, e, j, lines, True) for s, e, j, lines in raw_right]
     for a in left:
         for b in right:
             if _touch(a, b):
                 return '', _clash_kind(base, disk, draft), 0
 
-    merged, mine, tail_from = _assemble(base, left, right)
+    merged, origins, tail_from = _assemble(base, left, right)
     if not merged:
         # 两边把它拆光了。**不许**当成"合不了"以外的东西：`''` 同时是
         # "空文件"和"合不了"的哨兵，说清楚是哪种才不会写出一份空文件。
         return '', (CLASH_ERASED if base else ''), 0
 
-    moved = _moved_block(base, merged, mine)
-    if moved is not None:
-        return '', CLASH_REPARENTED, moved
+    # **两边**改过的那几行，合完之后还得挂在同一个块下面（第十七轮）：
+    # 只查我这一侧的话，同一个坏文件左右对调就写下去了。
+    home = {'base': list(range(len(base))),
+            'disk': _home_of(base, raw_left, disk),
+            'draft': _home_of(base, raw_right, draft)}
+    who, old_parent = _orphan(
+        merged, origins,
+        parents={'merged': _parents(merged), 'disk': _parents(disk),
+                 'draft': _parents(draft)},
+        home=home)
+    if who:
+        line = home[who][old_parent] + 1 if old_parent >= 0 else 0
+        return '', (CLASH_REPARENTED_OTHER if who == 'disk'
+                    else CLASH_REPARENTED), line
 
     text = '\n'.join(merged)
     # 末尾那个换行符听谁的（第十六轮）：谁的那一行收尾，就按谁的原文。
@@ -410,11 +487,20 @@ def _merge_plan(base_text, disk_text, draft_text) -> tuple:
     # 从前一律按**基线**：基线末尾没有换行、而他往文件末尾追加了一行（带换行）
     # 时，合并结果会把他那一行的换行吞掉 —— 写回盘上就是"他没碰过的地方少了
     # 一个字节"，`git diff` 报 "\ No newline at end of file"。
+    #
+    # 第十七轮补上剩下那半格："收尾那一行谁都没动"时，要按**谁改了文件末尾**
+    # 来定；只认盘上那份的结尾，这一判定就又变成"取决于谁是盘上"了。
     if tail_from == 'draft':
         tail = draft_text.endswith('\n')
-    else:
-        # 收尾的是基线（或他那份）里的同一行 → 盘上那份的结尾就是正确答案
+    elif tail_from == 'disk':
         tail = disk_text.endswith('\n')
+    else:
+        # 收尾那一行来自基线（谁都没动它）：那就看**谁动了"文件末尾有没有
+        # 换行"**这件事。只看 disk_text 会又变成"取决于谁是盘上"（第十七轮：
+        # 同一次三方合并，左右对调之后他那边的末尾换行会被吞掉）。
+        base_nl = base_text.endswith('\n')
+        disk_nl = disk_text.endswith('\n')
+        tail = disk_nl if disk_nl != base_nl else draft_text.endswith('\n')
     if text and tail:
         text += '\n'
     return text, '', 0
@@ -431,7 +517,8 @@ def merge_text(base_text, disk_text, draft_text) -> str:
     —— 见文件头那条注释。
 
     ⚠ "合不了"不止"撞车"一种（第十六轮）：**合起来会把文件拆空**、或者
-    **你的那几行会被挪进别的块**（他删/改了你那一块的开头那一行）也算。
+    **你的那几行会被挪进别的块**（他删/改了你那一块的开头那一行）也算；
+    **反过来**（你这一版会把他那几行挪进别的块）同样算（第十七轮）。
     要分清是哪一种，用 `merge_three_way` 的 `clash_kind`（它拿 `_merge_plan`
     同一份判定，不再各算一遍）。
     """
@@ -520,9 +607,11 @@ class Commit:
     #: 第十六轮又添两种（也只为说人话，判定仍然只有一处）：
     #: `CLASH_REPARENTED`（他会把你改的那几行挪进别的块）/
     #: `CLASH_ERASED`（合起来整份文件会变成空的）。
+    #: 第十七轮再添一种，是 `CLASH_REPARENTED` 的**另一面**：
+    #: `CLASH_REPARENTED_OTHER`（你这一版会把**他**那几行挪进别的块）。
     clash_kind: str = ''
-    #: 被你改的那一块的**开头那一行**（1 基行号, 原文）—— 只在
-    #: `CLASH_REPARENTED` 时有。`clash` 里给的也是这一行。
+    #: 被改掉的那一块的**开头那一行**（1 基行号, 原文）—— 两种
+    #: `CLASH_REPARENTED*` 都有。`clash` 里给的也是这一行。
     parent: tuple = ()
     detail: str = ''
 
@@ -585,6 +674,16 @@ class Commit:
                     f'（{at}）下面，他把这一行改掉或删了 —— 合起来你的改动会'
                     f'落进别的块里，所以这次没有写。先看一眼那几行，或者重新'
                     f'载入这一章再改一次。')
+        if self.clash_kind == CLASH_REPARENTED_OTHER:
+            # 反过来的一面（第十七轮）：**你**这一版删/改的是别人那几行的块头。
+            # 同一个坏文件只看一半，就成了"拒一个方向、写另一个方向"。
+            line, head = (list(self.parent) + ['', ''])[:2]
+            quote = f'「{head}」' if head else '那一行'
+            at = f'第 {line} 行' if line else '那一行'
+            return (f'这个脚本在你算完之后又被改过：你这一版把{quote}（{at}）'
+                    f'删掉或改了，而别人那几行正挂在它下面 —— 合起来那几行会'
+                    f'落进别的块里，所以这次没有写。先看一眼那几行，或者重新'
+                    f'载入这一章再改一次。')
         if self.clash_kind == CLASH_ERASED:
             return ('两边各删了一部分，合起来整份文件会变成空的 —— 那不像你要'
                     '的结果，所以这次没有写。先看一眼再决定，或者重新载入这一章。')
@@ -600,10 +699,12 @@ class Commit:
 
     def sentence(self) -> str:
         text = COMMIT_CN.get(self.state, self.state)
-        # `COMMIT_CN[conflict]` 写的是"撞在同一处" —— 另外两种合不了**不是**撞车
+        # `COMMIT_CN[conflict]` 写的是"撞在同一处" —— 另外三种合不了**不是**撞车
         # （见 `clash_kind`），照搬就是假话。
         if self.state == GATE_CONFLICT:
             text = {CLASH_REPARENTED: '没有写（合起来你的改动会落进别的块里）',
+                    CLASH_REPARENTED_OTHER:
+                        '没有写（合起来别人那几行会落进别的块里）',
                     CLASH_ERASED: '没有写（合起来文件会变成空的）'}.get(
                         self.clash_kind, text)
         return f'{text}：{self.detail}' if self.detail else text
@@ -671,6 +772,10 @@ def merge_three_way(base_text, disk_text, draft_text, path='') -> Commit:
     | 合不了（撞车 / 会落进别的块 / 会变成空文件） | `conflict`
       （`final_text` 是空串 —— **一个字都不许写**；`clash_kind` 说清是哪一种） |
 
+    ⚠ 这个判定**左右对称**：把 `disk_text` 和 `draft_text` 对调，`ok` 与
+    `final_text` 不该变（第十七轮）。"合出来能不能启动"是文件的性质，不是
+    我这半边的性质 —— 只查一半就会"拒一个方向、写另一个方向"。
+
     `path` 只是回执里的路标，判定与它无关。
     """
     base = str(base_text if base_text is not None else '')
@@ -689,7 +794,7 @@ def merge_three_way(base_text, disk_text, draft_text, path='') -> Commit:
         kept = _kept_of(base_lines, disk_lines)
         return Commit(MERGED, where, disk, merged, kept=kept,
                       detail=f'另有 {len(kept)} 处别人的改动')
-    if problem == CLASH_REPARENTED:
+    if problem in (CLASH_REPARENTED, CLASH_REPARENTED_OTHER):
         head = (base_lines[line - 1].strip()
                 if 0 < line <= len(base_lines) else '')
         return Commit(GATE_CONFLICT, where, disk, '',
@@ -743,7 +848,7 @@ def commit_text(path, base_text, draft_text, *, history: bool = True,
 
 
 __all__ = ['ADOPT', 'CLASH_ERASED', 'CLASH_OVERLAP', 'CLASH_REPARENTED',
-           'CLASH_TOUCHING', 'COMMIT_CN',
+           'CLASH_REPARENTED_OTHER', 'CLASH_TOUCHING', 'COMMIT_CN',
            'CONFLICT', 'Commit', 'GATE_CONFLICT', 'Kept', 'MERGE_PROBLEM_CN',
            'MERGED', 'REBASE', 'SAME', 'STATE_CN', 'Verdict', 'WROTE',
            'classify', 'commit_text', 'edits_between', 'merge_text',

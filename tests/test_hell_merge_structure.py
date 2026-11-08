@@ -27,6 +27,13 @@
 4. 随机对照：自己构造的改动**唯一答案**已知，合并结果必须与之逐字相同；
    重复行那一档退一步，只要求"一行不多、一行不少"（顺序可辩，内容不可丢）。
 
+5. **反过来那一面（第十七轮）**：上面第 1 条只查"**我**改的那几行会不会被挪走"。
+   把左右对调 —— 盘上是我改的那一份、我这一刀删的是块头 —— 同一个坏文件、
+   同样两份文本，闸就一句不吭，把 8 个空格悬空的选项**写下去**。也就是说
+   第十六轮的修复是**单边**的：谁先导出，决定这份文件坏不坏。现在两边都查
+   （`CLASH_REPARENTED_OTHER` 是新增的那一面，措辞分开："你那几行会被挪"
+   ≠ "他那几行会被挪"）。
+
 约定：本文件里所有"逐字节"判据都用 `newline=''` 写盘 —— 不这样的话
 `Path.write_text()` 在 Windows 上会把 `\\n` 翻成 `\\r\\n`，比字节永远不相等
 （第十五轮踩过，探针自己报了 5 个假警报）。
@@ -250,6 +257,191 @@ class TestReparentedIsNotOverzealous:
 
 
 # ---------------------------------------------------------------------------
+#  一·五、反过来那一面：**我**这一刀会把他那几行挪走（第十七轮）
+# ---------------------------------------------------------------------------
+#
+# 第十六轮那道闸只查"我改的那几段"。可"合出来能不能启动"是**文件**的性质 ——
+# 把左右对调，同一个坏文件、同样两份文本，闸就一句不吭。下面这些钉住两面。
+
+MINE_EDIT = BASE.replace('"去左边"', f'"{MINE}"')
+
+
+class TestTheOtherDirection:
+    def test_the_same_trio_is_refused_whichever_side_is_mine(self):
+        """
+        同一个剧本、同样两份文本：**谁是盘上那份**不能决定"能不能写"。
+
+        改之前（第十六轮）：A 方向（盘上=他删了块头）拒写；B 方向（盘上=我改的
+        菜单项、我这一刀删块头）**合上了**，写出去的是：
+
+            label a:
+                    "改过的左边":        ← 8 个空格，上面没有块头
+
+        Ren'Py 起不来，而回执说"两边都落上了"。同一个剧本、同两个人，**谁先
+        导出**决定这份文件坏不坏 —— 单边的闸拦不住任何一边。
+        """
+        from storygraph.story.write_gate import (CLASH_REPARENTED,
+                                                 CLASH_REPARENTED_OTHER,
+                                                 merge_three_way)
+
+        his_version = HIS_DELETE_HEADER
+        my_version = MINE_EDIT
+        a = merge_three_way(BASE, his_version, my_version)
+        b = merge_three_way(BASE, my_version, his_version)
+
+        assert not a.ok and not b.ok, (a.as_dict(), b.as_dict())
+        assert a.clash_kind == CLASH_REPARENTED, a.clash_kind
+        assert b.clash_kind == CLASH_REPARENTED_OTHER, b.clash_kind
+        # 两面点到的是**同一行**：基线第 4 行的 `    menu:`
+        assert a.parent == (4, 'menu:'), a.parent
+        assert b.parent == (4, 'menu:'), b.parent
+        assert a.clash == b.clash == ((4, 4),), (a.clash, b.clash)
+        assert a.final_text == '' and b.final_text == '', '拒写却给了可用的正文'
+
+    def test_commit_text_refuses_when_i_delete_the_header(self, tmp_path):
+        """`commit_text` 这条路也一样：**拒写**，文件逐字节不动。"""
+        from storygraph.story.write_gate import (CLASH_REPARENTED_OTHER,
+                                                 GATE_CONFLICT, commit_text)
+
+        fp = tmp_path / 'ch.rpy'
+        _write(fp, MINE_EDIT)                  # 盘上：我改过的菜单项那一份
+        before = fp.read_bytes()
+        c = commit_text(fp, BASE, HIS_DELETE_HEADER)   # 我这一刀把块头删了
+
+        assert c.state == GATE_CONFLICT and not c.ok
+        assert c.clash_kind == CLASH_REPARENTED_OTHER, c.clash_kind
+        assert c.final_text == '', '拒写却给了可用的正文（有人会拿它去写盘）'
+        assert c.parent == (4, 'menu:'), c.parent
+        assert fp.read_bytes() == before, '拒写却动了文件'
+        msg = c.error()
+        assert '落进别的块' in msg, f'没说清合起来会坏在哪：{msg}'
+        assert '撞在' not in msg, f'这句是假话（两边没碰同一行）：{msg}'
+        assert '「menu:」' in msg and '第 4 行' in msg, msg
+        assert '撞在' not in c.sentence(), c.sentence()
+
+    def test_wording_says_whose_lines_will_move(self):
+        """
+        两面措辞必须分开：一面是"你的几行会被挪"，另一面是"他那几行会被挪"。
+
+        说反了用户会去查错方向（第十六轮就吃过一次"说成撞在同一处"的假话）。
+        """
+        from storygraph.story.write_gate import merge_three_way
+
+        mine = merge_three_way(BASE, HIS_DELETE_HEADER, MINE_EDIT)
+        his = merge_three_way(BASE, MINE_EDIT, HIS_DELETE_HEADER)
+
+        assert '你改的那几行' in mine.error(), mine.error()
+        assert '别人那几行' in his.error(), his.error()
+        assert '你改的那几行' not in his.error(), his.error()
+        assert '别人那几行' in his.error() and '没有写' in his.sentence(), \
+            his.sentence()
+        # 两种都不是撞车 —— 措辞里不许出现"撞在…"
+        for v in (mine, his):
+            assert '撞在' not in v.error() and '撞在' not in v.sentence(), \
+                v.error()
+
+    def test_export_wording_for_the_other_direction(self, tmp_path):
+        """
+        导出那条路（`_merge_conflict_reason`）也要认这一面。
+
+        不认的话，用户在这一面看到的是兜底那句"别人也改过，而且改的正是同一处"——
+        又是一句假话（两边根本没碰同一行）。
+        """
+        from storygraph.story.write_gate import (CLASH_REPARENTED_OTHER,
+                                                 merge_three_way)
+
+        s, _src = _session(tmp_path)
+        v = merge_three_way(BASE, MINE_EDIT, HIS_DELETE_HEADER)
+        assert v.clash_kind == CLASH_REPARENTED_OTHER, v.clash_kind
+        msg = s._merge_conflict_reason(v)
+        assert '落进别的块' in msg, msg
+        assert '撞在' not in msg and '正是同一处' not in msg, msg
+        assert '「menu:」' in msg, msg
+
+    def test_renaming_a_header_on_my_side_still_merges(self):
+        """反向的误伤方向：我这一版只是给块头**换个写法** → 他那几行没被挪，照合。"""
+        from storygraph.story.write_gate import merge_three_way
+
+        his = BASE.replace('"去右边"', '"去右边（他改过）"')
+        mine = BASE.replace('    menu:\n', '    menu 选项:\n')
+        v = merge_three_way(BASE, his, mine)
+        assert v.ok, v.as_dict()
+        assert 'menu 选项:' in v.final_text and '去右边（他改过）' in v.final_text
+
+    def test_his_new_option_is_not_moved_by_my_header_rename(self):
+        """
+        他往菜单里**加**一个选项、我把 `menu:` 改成 `menu 选项:` → 照合。
+
+        加进去的那几行在**他那份**里的父语句是 `menu:`；合并之后父语句是
+        "同一个位置的另一行写法"→ 块没换。这条钉的是"按基线坐标认身份"，
+        不是"按文字长得像不像"。
+        """
+        from storygraph.story.write_gate import merge_three_way
+
+        his = BASE.replace('    e "收尾"\n',
+                           '        "他加的":\n            e "他加的"\n'
+                           '    e "收尾"\n')
+        assert his != BASE
+        mine = BASE.replace('    menu:\n', '    menu 选项:\n')
+        v = merge_three_way(BASE, his, mine)
+        assert v.ok, v.as_dict()
+        assert '他加的' in v.final_text and 'menu 选项:' in v.final_text
+
+    def test_symmetry_over_random_block_trios(self):
+        """
+        随机三份（带块结构）里，结论必须**左右对称**：ok 一样、能合时正文一样。
+
+        为什么钉这条：这道闸问的是"合出来那份能不能启动"，那是**文件**的性质。
+        判定一旦和"谁是盘上、谁是草稿"有关，就必然有一个方向把坏文件写下去
+        （第十六轮那个漏洞就是这么长出来的）。
+        """
+        from storygraph.story.write_gate import merge_three_way
+
+        pool = ['label a:', '    menu:', '        "x":', '            e "a"',
+                '    if x:', '        e "b"', '    e "c"', '']
+        rng = random.Random(17711)
+        merged = refused = 0
+        for _ in range(300):
+            n = rng.randrange(4, 14)
+            base = [rng.choice(pool) for _ in range(n)]
+            his = _edits(rng, n, [], 1)
+            mine = _edits(rng, n, his, 1)
+            base_t = '\n'.join(base) + '\n'
+            disk_t = '\n'.join(_apply(base, his)) + '\n'
+            draft_t = '\n'.join(_apply(base, mine)) + '\n'
+            a = merge_three_way(base_t, disk_t, draft_t)
+            b = merge_three_way(base_t, draft_t, disk_t)
+            assert a.ok == b.ok, (
+                f'左右结论不同\nbase={base}\nhis={his}\nmine={mine}\n'
+                f'{a.as_dict()}\n{b.as_dict()}')
+            if a.ok:
+                merged += 1
+                assert a.final_text == b.final_text, (
+                    f'左右正文不同\nbase={base}\nhis={his}\nmine={mine}\n'
+                    f'{a.final_text!r}\n{b.final_text!r}')
+            else:
+                refused += 1
+        assert merged and refused, f'样本没测到两种结局（合 {merged} / 拒 {refused}）'
+
+    def test_file_ending_follows_who_changed_it_not_who_is_mine(self):
+        """
+        只有**文件末尾有没有换行**变了（行 diff 看不见）时，也得左右对称。
+
+        改之前：`tail_from == 'base'` 那一支只看**盘上**那份的结尾 —— 于是
+        同一次合并，左右对调之后他那边的末尾换行会被吞掉（第十六轮补了一半，
+        第十七轮补上这半格）。
+        """
+        from storygraph.story.write_gate import merge_text
+
+        base = 'a\nb'                     # 末尾没换行
+        mine = 'A\nb'                     # 我改第 1 行
+        his = 'a\nb\n'                    # 他只在末尾加了换行
+        assert merge_text(base, his, mine) == 'A\nb\n'
+        assert merge_text(base, mine, his) == 'A\nb\n', \
+            '换了个方向，他那边的末尾换行就被吞了'
+
+
+# ---------------------------------------------------------------------------
 #  二、合起来会把文件拆空
 # ---------------------------------------------------------------------------
 
@@ -449,8 +641,11 @@ class TestRandomAgainstConstructedAnswer:
 
     def test_refusals_that_are_not_collisions_never_call_it_a_collision(self):
         """
-        **说人话的守则**：判不了可以拒，但拒因只有两种 —— 说真话的（撞车）
+        **说人话的守则**：判不了可以拒，但拒因只有两类 —— 说真话的（撞车）
         和**不说撞车**的（挪块 / 拆空）。
+
+        挪块那一类有两面：`CLASH_REPARENTED`（你的几行被挪）和
+        `CLASH_REPARENTED_OTHER`（他那几行被挪，第十七轮）。
 
         注意"撞没撞"要按 **difflib 实际认出来的改动段**算，不能按我构造的：
         重复行会让对齐换一种解法，我这边"隔着一行"可能在对齐里变成"挨着"。
@@ -459,6 +654,7 @@ class TestRandomAgainstConstructedAnswer:
         from storygraph.story.write_gate import (CLASH_ERASED,
                                                  CLASH_OVERLAP,
                                                  CLASH_REPARENTED,
+                                                 CLASH_REPARENTED_OTHER,
                                                  CLASH_TOUCHING, _touch,
                                                  edits_between, merge_three_way)
 
@@ -485,7 +681,8 @@ class TestRandomAgainstConstructedAnswer:
                 assert v.clash_kind in (CLASH_OVERLAP, CLASH_TOUCHING), \
                     v.clash_kind
                 continue
-            assert v.clash_kind in (CLASH_REPARENTED, CLASH_ERASED), (
+            assert v.clash_kind in (CLASH_REPARENTED, CLASH_REPARENTED_OTHER,
+                                    CLASH_ERASED), (
                 f'没撞车却报 {v.clash_kind!r}：base={base} his={his} mine={mine}')
             assert '撞在' not in v.error(), v.error()
             assert '撞在' not in v.sentence(), v.sentence()

@@ -600,6 +600,7 @@ class ExportMixin:
         """合不了时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
         from storygraph.story.write_gate import (CLASH_ERASED,
                                                  CLASH_REPARENTED,
+                                                 CLASH_REPARENTED_OTHER,
                                                  CLASH_TOUCHING)
         spans = tuple(getattr(verdict, 'clash', ()) or ())
         where = '、'.join(_span_cn(a, b) for a, b in spans[:2]) or '同一处'
@@ -616,6 +617,21 @@ class ExportMixin:
             return (f'{who} 那一块的开头{quote}（{at}）被别人改掉或删了 —— '
                     f'合起来你改的那几行会落进别的块里，所以这次一个字节都没写。'
                     f'先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
+                    f'② 或导出到 build/renpy/ 下比对。')
+        if kind == CLASH_REPARENTED_OTHER:
+            # `CLASH_REPARENTED` 的**另一面**（第十七轮）：这一次不是他动你的块，
+            # 是**你这一版**动了他那几行的块头。同一个坏文件，只看一半就会
+            # "拒一个方向、把另一个方向写下去"（探针 probe_r17_symmetry.py）。
+            #
+            # ⚠ 这里**不点卡片**（`who`）：删掉的那一行在**我这一版里**已经不在了，
+            # `card_at_lines` 认不出它，硬点只会点到一句兜底话上。
+            line, head = (list(getattr(verdict, 'parent', ()) or ())
+                          + ['', ''])[:2]
+            quote = f'「{head}」' if head else '那一行'
+            at = f'第 {line} 行' if line else '那一行'
+            return (f'你这一版把{quote}（{at}）删掉或改了，而他那几行正挂在它'
+                    f'下面 —— 合起来那几行会落进别的块里，所以这次一个字节都'
+                    f'没写。先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
                     f'② 或导出到 build/renpy/ 下比对。')
         if kind == CLASH_ERASED:
             return ('两边各删了一部分，合起来整份文件会变成空的 —— 那不像你要的'
