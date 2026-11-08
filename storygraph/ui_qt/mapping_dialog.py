@@ -721,24 +721,38 @@ class MappingDialog(QDialog):
         所以这里不是"给个空表让他在 3889 行里自己填"，而是打开就有内容 ——
         表情编号读角色文件夹里的 `对应.txt`，服装字母从剧本注释里数。
 
-        只填空表：两段里**只要有一段已经有内容**就整段不动（那是人写的，
-        或者上次自动填完又改过的），免得每次开窗都把人改的字母冲回去。
+        2026-11-08 补：**音乐这类编号表也算**。真实项目 `sr_general` 的
+        `game/bgm/对应.txt`（`1——Empt1y` … 剧本写 `# bgm13`）是同一件事，
+        从前只认角色文件夹，于是音乐永远进不了映射。现在「中文叫法」那段
+        也按 `code_tables` 填；**两件事分开判**：表情两段已经有人填过，
+        不代表音乐编号也该跳过。
+
+        只填空表：某一段里只要已经有内容就整段不动（那是人写的，或者上次
+        自动填完又改过的），免得每次开窗都把人改的东西冲回去。
         """
         data = self._editor.current_data()
-        sections = ('outfit_codes', 'expression_codes')
-        if any(data.get(name) for name in sections):
+        want_codes = not any(data.get(name) for name in
+                             ('outfit_codes', 'expression_codes'))
+        want_vocabulary = not data.get('vocabulary')
+        if not (want_codes or want_vocabulary):
             return
         if not str(getattr(self, '_project_root', '') or '').strip():
             return
-        counts = self._editor.autofill_codes()
+        counts = self._editor.autofill_codes(codes=want_codes,
+                                             vocabulary=want_vocabulary)
         if not counts:
             return
-        total = counts.get('outfits', 0) + counts.get('expressions', 0)
-        if total:
-            self.say(f'已经照项目自动填了 {total} 条代号（服装 '
-                     f'{counts.get("outfits", 0)} / 表情 '
-                     f'{counts.get("expressions", 0)}）—— 还没保存，'
-                     f'核一下「服装代号」「表情编号」两段，再点「保存到项目根」。')
+        parts = []
+        if counts.get('outfits') or counts.get('expressions'):
+            parts.append(f'服装 {counts.get("outfits", 0)} / 表情 '
+                         f'{counts.get("expressions", 0)} 条代号')
+        if counts.get('vocabulary'):
+            parts.append(f'中文叫法 {counts["vocabulary"]} 条'
+                         '（音乐/音效的编号表）')
+        if parts:
+            self.say(f'已经照项目自动填了 {"，".join(parts)} —— 还没保存，'
+                     f'核一下「服装代号」「表情编号」「中文叫法」几段，再点'
+                     f'「保存到项目根」。')
 
     def current_data(self) -> dict:
         """当前这份映射（**表优先** —— 它是人正在改的那份；表空就是空）。"""

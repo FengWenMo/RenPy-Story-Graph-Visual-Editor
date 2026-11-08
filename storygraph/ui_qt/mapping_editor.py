@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox,
                                QListWidgetItem, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from storygraph.assets import code_tables as CT
 from storygraph.assets import mapping_edit as ME
 from storygraph.assets import sprite_codes as SC
 from storygraph.core.safeguard import swallow
@@ -318,8 +319,8 @@ class MappingEditor(QWidget):
         self._btn_autofill = QPushButton('按项目自动填')
         self._btn_autofill.setObjectName('btn_code_autofill')
         self._btn_autofill.setToolTip(
-            '照项目现状数一遍：表情编号读角色文件夹里的对应.txt，'
-            '服装字母从剧本注释（# 表情B7）里数出来。数不出来的留空，不硬编。')
+            '照项目数一遍：表情编号读角色文件夹，服装字母从注释数；'
+            '「中文叫法」另读任何目录的对应.txt（bgm/对应.txt ↔ # bgm13）。')
         self._btn_autofill.clicked.connect(lambda *_: self.autofill_codes())
         line.addWidget(self._btn_autofill, 0)
         code_lay.addLayout(line)
@@ -772,23 +773,93 @@ class MappingEditor(QWidget):
             self._emit_changed()
         return counts
 
-    def autofill_codes(self) -> dict:
-        """「按项目自动填」：扫一遍项目，把两段补上（数不出来的留空）。"""
+    def apply_vocabulary(self, scan) -> dict:
+        """
+        把一次 `code_tables.scan_project` 的结果并进「中文叫法」那段（**只加不改**）。
+
+        为什么叫"中文叫法"而不是"音乐编号"：那段本来就是一个**通用**的
+        "引擎写法 → 人话 + 编号"表（`kind` 决定它管哪类资产）。音乐只是
+        第一个能自动读出来的 —— 以后哪个目录里放一张 `对应.txt`，这里就
+        多一类，不用再加一段。
+
+        同一件资产（`kind` + `id`）已经有一条就跳过：人可能已经改过它，
+        或者它是上一次自动填出来的。返回 `{'added': 新加几条, 'kept': 已有
+        几条, 'notes': [...]}`。
+        """
+        counts = {'added': 0, 'kept': 0, 'notes': list(scan.notes)}
+        if not self._edit.editable('vocabulary'):
+            counts['notes'].append(
+                '「中文叫法」这段结构不对（应为数组），没往里写 —— 先去'
+                '「原始文件」页修好。')
+            return counts
+        have = {_vocab_identity(entry) for entry in
+                self._edit.entries('vocabulary')}
+        for row in scan.rows or ():
+            identity = _vocab_identity(row)
+            if identity in have:
+                counts['kept'] += 1
+                continue
+            index = self._edit.add('vocabulary', '', dict(row))
+            if index < 0:
+                continue
+            have.add(identity)
+            counts['added'] += 1
+        if counts['added']:
+            if self._section == 'vocabulary':
+                self._rebuild()
+            else:
+                # 左栏的「中文叫法 N」也得跟上（与代号两段同一条规矩）。
+                self._fill_sections()
+            self._emit_changed()
+        return counts
+
+    def autofill_codes(self, *, codes: bool = True,
+                       vocabulary: bool = True) -> dict:
+        """
+        「按项目自动填」：扫一遍项目，把该补的补上（数不出来的留空）。
+
+        `codes` = 服装代号 / 表情编号两段（`sprite_codes`：角色文件夹的
+        `对应.txt` + 剧本注释）；`vocabulary` = 「中文叫法」那段里的编号行
+        （`code_tables`：**任何**目录里的 `对应.txt`，例如
+        `game/bgm/对应.txt` ↔ 剧本里的 `# bgm13`）。
+
+        两件事分开判定：表情那两段已经有人填过，不代表音乐编号也该跳过 ——
+        反过来也一样。两个开关只由调用方（开窗那一次）决定，手动点按钮
+        时两个都开。
+        """
+        counts = {'outfits': 0, 'expressions': 0, 'kept': 0,
+                  'vocabulary': 0, 'vocab_kept': 0}
+        notes = []
         if not self._root:
             self.note.emit('还没有打开项目 —— 不知道去哪儿数代号。', True)
             return {}
-        scan = SC.scan_project(self._root)
-        counts = self.apply_codes(scan)
-        if not (counts.get('outfits') or counts.get('expressions')):
-            self.note.emit(
-                '没数出新代号：表里已经有了，或项目里没有对应.txt / '
-                '剧本注释（# 表情B7）可数。', True)
+        if codes:
+            counts.update(self.apply_codes(SC.scan_project(self._root)))
+        if vocabulary:
+            got = self.apply_vocabulary(CT.scan_project(self._root))
+            counts['vocabulary'] = got['added']
+            counts['vocab_kept'] = got['kept']
+            notes = got['notes']
+        if not (counts['outfits'] or counts['expressions']
+                or counts['vocabulary']):
+            said = ('没数出新代号：表里已经有了，或项目里没有对应.txt / '
+                    '剧本注释（# 表情B7、# bgm13）可数。')
+            if notes:
+                said += ' 项目里还有：' + notes[0]
+            self.note.emit(said, True)
             return counts
-        self.note.emit(
-            f'照项目数了一遍：服装代号 +{counts["outfits"]}，'
-            f'表情编号 +{counts["expressions"]}'
-            + (f'（{counts["kept"]} 条本来就有，没动）' if counts.get('kept') else '')
-            + '。核对一下再「保存到项目根」。', False)
+        said = (f'照项目数了一遍：服装代号 +{counts["outfits"]}，'
+                f'表情编号 +{counts["expressions"]}，'
+                f'中文叫法 +{counts["vocabulary"]}')
+        kept = counts['kept'] + counts.get('vocab_kept', 0)
+        if kept:
+            said += f'（{kept} 条本来就有，没动）'
+        said += '。核对一下再「保存到项目根」。'
+        if notes:
+            said += ' 要你看一眼：' + '；'.join(notes[:2])
+            if len(notes) > 2:
+                said += f'（还有 {len(notes) - 2} 条）'
+        self.note.emit(said, False)
         return counts
 
     def _update_code(self):
@@ -1130,6 +1201,18 @@ def _code_identity(section: str, row) -> tuple:
     else:
         code = str((row or {}).get('no') or '').strip()
     return (char, code or 'attr:' + str((row or {}).get('attr') or '').strip())
+
+
+def _vocab_identity(row) -> tuple:
+    """
+    「中文叫法」里"这是同一条"的判据：种类 + 原名（剧本里那个写法）。
+
+    与 `Vocabulary` 的键同口径（一条词 = 种类 + 写法）：`bgm/嗯？.mp3`
+    与 `bgm\\嗯？.mp3` 是同一个文件，斜杠先统一。
+    """
+    kind = str((row or {}).get('kind') or '').strip().lower()
+    ident = str((row or {}).get('id') or '').strip().replace('\\', '/')
+    return (kind, ident)
 
 
 def _repolish(widget):
