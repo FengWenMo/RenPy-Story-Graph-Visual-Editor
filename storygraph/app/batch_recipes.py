@@ -14,8 +14,13 @@
         ↓  build_rule()
     {"when": {"change": "sprite", "transition": "none",
               "code_not_contains": "renpy.transition"},
-     "insert": {"placement": "after_last_change",
+     "insert": {"placement": "after_each_change",
                 "text": "$ renpy.transition(Dissolve(0.1), layer=\\"master\\")"}}
+
+⚠ 「每次」= **一拍里每一条 `show`/`hide` 后面都补一行**（`after_each_change`），
+不是"每拍一行"；要后者选「每拍只在最后一次…」（`after_last_change`）。
+2026-11-08 第十九轮改的这一条：用户指着 2_2 里并排的三条 `show` 说
+「本来是两条分别的 show！你应该加两个那一句话……你只给了一个」。
 
 三条纪律
 --------
@@ -39,9 +44,16 @@ from pathlib import Path
 from storygraph.app.batch_edit import (SCHEMA, BatchRuleError, parse_rule)
 
 #: 「什么时候加」——值 → 人话。顺序就是界面下拉的顺序（常用在前）。
+#:
+#: 2026-11-08 第十九轮：用户拿真机 2_2 指着一个拍里的三条 `show` 说
+#: 「本来是两条分别的 show！你应该加两个那一句话……你只给了一个……」——
+#: 所以"每次"按字面意思落到 `after_each_*`（**每一条都加**），
+#: 而"只加在最后一次"另立两个值，认得出、也说得出。
 MODES = (
-    ('sprite_change', '每次立绘出现或改变（含退场）'),
-    ('sprite_show', '每次立绘出现（不含退场）'),
+    ('sprite_change', '每次立绘出现或改变（含退场）—— 每一条都加'),
+    ('sprite_show', '每次立绘出现（不含退场）—— 每一条都加'),
+    ('sprite_change_last', '每拍只在最后一次立绘变化后面加一行'),
+    ('sprite_show_last', '每拍只在最后一次立绘后面加一行'),
     ('say_line', '每一句台词后面'),
     ('every_beat', '每一拍后面'),
 )
@@ -78,8 +90,10 @@ DEFAULT_FORM = {
 
 #: `mode` → `(when, placement)`。**唯一一份映射**（读回来也用它反查）。
 _MODE_RULES = {
-    'sprite_change': ({'change': 'sprite'}, 'after_last_change'),
-    'sprite_show': ({'show': 'sprite'}, 'after_last_show'),
+    'sprite_change': ({'change': 'sprite'}, 'after_each_change'),
+    'sprite_show': ({'show': 'sprite'}, 'after_each_show'),
+    'sprite_change_last': ({'change': 'sprite'}, 'after_last_change'),
+    'sprite_show_last': ({'show': 'sprite'}, 'after_last_show'),
     'say_line': ({'say': True}, 'after_beat'),
     'every_beat': ({}, 'after_beat'),
 }
@@ -213,6 +227,8 @@ def describe(rule) -> str:
         text = body.get('text')
         text = '\n'.join(text) if isinstance(text, list) else str(text or '')
         where = {
+            'after_each_change': '每一条立绘变化后面',
+            'after_each_show': '每一条立绘后面',
             'after_last_change': '最后一个立绘变化后面',
             'after_last_show': '最后一个立绘后面',
             'after_beat': '这一拍末尾',

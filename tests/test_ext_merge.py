@@ -447,3 +447,36 @@ def test_deleting_does_not_lie_when_a_conflict_blocks_it(
     assert '没落盘' in dlg.status.text()
     assert dlg._reg.get('alpha') is not None     # 树上也还在（不骗人）
     dlg.close()
+
+
+# ---------------------------------------------------------------------------
+#  七、就地改 `point.batch` 也算"我改过"（2026-11-08 第十九轮，真踩）
+# ---------------------------------------------------------------------------
+
+BATCH_POINT = {
+    'id': 'renpy.transition', 'kind': 'call', 'label': '转场', 'enabled': True,
+    'override': True, 'batchable': True,
+    'batch': {'when': {}, 'insert': {
+        'placement': 'after_last_change', 'skip_if_present': True,
+        'text': '$ renpy.transition(Dissolve(0.1), layer="master")'}},
+}
+
+
+def test_editing_the_batch_dict_in_place_is_not_mistaken_for_no_change(tmp_path):
+    """`to_dict()` 从前对 `batch` 是**浅拷贝**，`_baseline` 与活的那份共用
+    `insert` 那个 dict —— 就地改 placement 再保存，三方合并判成"我没动过"，
+    **静默写回文件里那份**（`ok: True`、一个字节没变）。"""
+    root = _project(tmp_path, ext=[BATCH_POINT])
+    reg = ER.ExtensionRegistry.for_project(root)
+    reg.get('renpy.transition').batch['insert']['placement'] = 'after_each_change'
+    res = reg.save(root)
+    assert res['ok'], res
+    assert not res.get('unchanged')
+    got = _rows(root)['renpy.transition']['batch']['insert']['placement']
+    assert got == 'after_each_change', got
+
+
+def test_to_dict_does_not_hand_out_the_live_batch_dict():
+    point = ES.parse_extension(dict(BATCH_POINT))
+    point.to_dict()['batch']['insert']['placement'] = 'after_each_show'
+    assert point.batch['insert']['placement'] == 'after_last_change'

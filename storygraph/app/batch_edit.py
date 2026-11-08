@@ -59,7 +59,15 @@ from storygraph.app.batch_text import (GUARD_SKIPS, SKIP_APPENDED,
 SCHEMA = 'storygraph.batch/1'
 PLAN_SCHEMA = 'storygraph.batch.plan/1'
 
-PLACEMENTS = ('after_last_show', 'after_last_change', 'after_beat', 'before_beat')
+#: 插入位置。前四个的差别是"**一条还是每一条**"（2026-11-08 第十九轮，见 `_anchors`）：
+#: 一拍拍里可能有好几条 `show`（`show lan … at i31` / `show xing …` / `show ye …`），
+#: 用户原话：「本来是两条分别的 show！你应该加两个那一句话」—— `after_last_*`
+#: 只在**最后一条**后面补一次，`after_each_*` 是**每一条都补**。
+PLACEMENTS = ('after_last_show', 'after_last_change',
+              'after_each_show', 'after_each_change',
+              'after_beat', 'before_beat')
+#: "每一条都补"的那两个（一个锚点一拍里可以有好几处）。
+EACH_PLACEMENTS = ('after_each_show', 'after_each_change')
 SCOPES = ('beat', 'after_last_show', 'after_last_change')
 SPAN_MODES = ('', 'block', 'until')
 OCCURRENCES = ('first', 'last', 'all')
@@ -818,13 +826,43 @@ def _after_block(lines: list, idx: int, hi: int) -> int:
     return last
 
 
-def _anchor(beat, placement: str, tag_kind: str, symbols, lines: list,
-            statement_lines: set):
-    """
-    这一拍的插入锚点 → `(行下标 0 基, 缩进)`；找不到返回 `None`。
+def _stage_hits(beat, placement: str, tag_kind: str, symbols, lines: list,
+                statement_lines: set) -> list:
+    """拍内符合这条规则的全部 `show` / `hide` 行（0 基下标，按源码顺序）。"""
+    first = int(getattr(beat, 'src_first', 0) or 0)
+    last = int(getattr(beat, 'src_last', 0) or 0)
+    if first < 1 or last < first or last > len(lines):
+        return []
+    kinds = ('show',) if placement.endswith('_show') else ('show', 'hide')
+    hits = []
+    for i in range(first - 1, last):
+        if (i + 1) not in statement_lines:
+            continue
+        m = _LINE_KIND.match(lines[i])
+        if not m or m.group(2) not in kinds:
+            continue
+        tag = m.group(3).split('@')[0]
+        if tag_kind == 'sprite' and not _is_sprite_tag(tag, symbols):
+            continue
+        hits.append(i)
+    return hits
 
-    `anchor` 是**源文件行下标**；`after_last_show` 取拍内最后一条符合
-    tag_kind 的 show，`after_beat` / `before_beat` 取拍区间首尾。
+
+def _anchors(beat, placement: str, tag_kind: str, symbols, lines: list,
+             statement_lines: set) -> list:
+    """
+    这一拍的全部插入锚点 → `[(行下标 0 基, 缩进), …]`；找不到返回 `[]`。
+
+    为什么是**列表**不是单值（2026-11-08 第十九轮，用户原话）：
+
+    > 本来是两条分别的 show！你应该加两个那一句话……三个 show 并列在一个
+    > 卡片内……你只给了一个……
+
+    一拍里可以并排好几条 `show`（真机 2_2：`show lan … at i31` /
+    `show xing …` / `show ye …`）。`after_last_*` 只补在**最后一条**后面
+    （一拍一行），`after_each_*` 是**每一条后面都补**（一拍 N 条 → N 行）。
+    两种都是合法需求：`$ renpy.transition(...)` 这种"设一次就够"的补一遍就
+    行，而"每次换装都要记一笔"的就得逐条补。
 
     `statement_lines` = 解析器确认过的 `show` / `hide` **语句行号**（1 基）。
     文本行匹配必须过这一关：`python:` 块里的字符串/变量也可能以 `show `
@@ -833,50 +871,56 @@ def _anchor(beat, placement: str, tag_kind: str, symbols, lines: list,
     first = int(getattr(beat, 'src_first', 0) or 0)
     last = int(getattr(beat, 'src_last', 0) or 0)
     if first < 1 or last < first or last > len(lines):
-        return None
-    lo, hi = first - 1, last
-    if placement in ('after_last_show', 'after_last_change'):
-        kinds = ('show',) if placement == 'after_last_show' else ('show', 'hide')
-        hit = None
-        for i in range(lo, hi):
-            if (i + 1) not in statement_lines:
+        return []
+    if placement in ('after_last_show', 'after_last_change') \
+            or placement in EACH_PLACEMENTS:
+        hits = _stage_hits(beat, placement, tag_kind, symbols, lines,
+                           statement_lines)
+        if not hits:
+            return []
+        if placement not in EACH_PLACEMENTS:
+            hits = hits[-1:]
+        out, seen = [], set()
+        for hit in hits:
+            # 块体可能不在 beat 的 src 区间里（`python:` / ATL 都实测过），
+            # 所以块尾要扫到整份文件，按缩进回流判断，不能卡在 src_last。
+            anchor = _after_block(lines, hit, len(lines))
+            if anchor in seen:              # 同一处只补一次（ATL 块相邻之类）
                 continue
-            m = _LINE_KIND.match(lines[i])
-            if not m or m.group(2) not in kinds:
-                continue
-            tag = m.group(3).split('@')[0]
-            if tag_kind == 'sprite' and not _is_sprite_tag(tag, symbols):
-                continue
-            hit = i
-        if hit is None:
-            return None
-        # 块体可能不在 beat 的 src 区间里（`python:` / ATL 都实测过），
-        # 所以块尾要扫到整份文件，按缩进回流判断，不能卡在 src_last。
-        return _after_block(lines, hit, len(lines)), \
-            lines[hit][:_indent_of(lines[hit])]
-    indices = [i for i in range(lo, hi) if lines[i].strip()]
+            seen.add(anchor)
+            out.append((anchor, lines[hit][:_indent_of(lines[hit])]))
+        return out
+    indices = [i for i in range(first - 1, last) if lines[i].strip()]
     if not indices:
-        return None
+        return []
     if placement == 'before_beat':
         idx = indices[0]
-        return idx, lines[idx][:_indent_of(lines[idx])]
+        return [(idx, lines[idx][:_indent_of(lines[idx])])]
     # `after_beat`：不能拿"最后一行"当锚点 —— 那一行可能是 `python:` /
     # `if:` / ATL 块的**块体**，在它的缩进上插一行会插进块里。
     # 取这一拍最后一个**顶层**行；如果它是块头，再落到整块后面。
     base = _indent_of(lines[indices[0]])
     top = [i for i in indices if _indent_of(lines[i]) == base]
     idx = top[-1] if top else indices[-1]
-    return _after_block(lines, idx, len(lines)), lines[idx][:base]
+    return [(_after_block(lines, idx, len(lines)), lines[idx][:base])]
 
 
-def _already_present(lines: list, beat, text: str, anchor: int) -> bool:
-    """整段正文已经连续出现过（插入幂等）。比较时忽略缩进。"""
+def _already_present(lines: list, beat, text: str, anchor: int,
+                     near_only: bool = False) -> bool:
+    """
+    整段正文已经连续出现过（插入幂等）。比较时忽略缩进。
+
+    `near_only=True` 只认**锚点这一处**（`after_each_*` 用）：一拍里有 3 条
+    show 就有 3 个插入点，整拍扫一遍的话"第 1 条已经补过"会把第 2、3 条也
+    判成补过 —— 那正是"只给了一个"的另一面。
+    """
     needles = [line.strip() for line in text.split('\n')]
-    lo = max(0, int(getattr(beat, 'src_first', 1) or 1) - 1)
-    hi = min(len(lines), int(getattr(beat, 'src_last', 0) or 0))
-    for i in range(lo, hi):
-        if _sequence_at(lines, i, needles):
-            return True
+    if not near_only:
+        lo = max(0, int(getattr(beat, 'src_first', 1) or 1) - 1)
+        hi = min(len(lines), int(getattr(beat, 'src_last', 0) or 0))
+        for i in range(lo, hi):
+            if _sequence_at(lines, i, needles):
+                return True
     # 插在拍边界时，上一轮插进去的段落可能被算进了邻拍；只看锚点这一格
     # 和它后面一格（不往前看：前一拍的同名行不是本拍的，不能因此跳过）。
     for i in (anchor, anchor + 1):
@@ -943,11 +987,11 @@ def _scope_range(beat, rule, symbols, lines: list, statement_lines: set):
             if head is not None:
                 lo = head
         return lo, last
-    got = _anchor(beat, rule.scope, rule.tag_kind, symbols, lines,
-                  statement_lines)
-    if got is None:
+    got = _anchors(beat, rule.scope, rule.tag_kind, symbols, lines,
+                   statement_lines)
+    if not got:
         return None
-    anchor, _indent = got
+    anchor, _indent = got[0]
     return anchor + 1, max(last, anchor + 1)
 
 
@@ -1195,6 +1239,52 @@ def _symbols(registry, root: Path):
         return None
 
 
+def _skip(fp: FilePlan, beat, rule, reason: str) -> None:
+    """记一条"这一处没做，为什么"（导出要把保护性跳过说出来）。"""
+    fp.skipped.append({'seq': int(getattr(beat, 'seq', 0) or 0),
+                       'rule': rule.id, 'reason': reason})
+
+
+def _plan_insertions(fp: FilePlan, beat, rule, symbols, lines: list,
+                     statement_lines: set, seen: set) -> None:
+    """
+    一条 insert 规则在这一拍上的**全部**插入点（2026-11-08 第十九轮拆出来）。
+
+    拆出来的理由很实在：`after_each_*` 让"一个拍 = 一个插入点"变成"一组"，
+    那段循环塞回 `_plan_file` 会把它推过技术债棘轮的 20 分支线（
+    `complex_functions` 只许降）。这里只做"拍 × 规则"这一件事，
+    `_plan_file` 继续管扫文件、收尾校验。
+    """
+    anchors = _anchors(beat, rule.placement, rule.tag_kind, symbols, lines,
+                       statement_lines)
+    if not anchors:
+        _skip(fp, beat, rule, f'拍里找不到 {rule.placement} 锚点')
+        return
+    before = rule.placement == 'before_beat'
+    near_only = rule.placement in EACH_PLACEMENTS
+    done = missed = 0
+    for anchor, indent in anchors:
+        if rule.skip_if_present and _already_present(
+                lines, beat, rule.text, anchor, near_only=near_only):
+            missed += 1
+            continue
+        line = anchor + 1
+        key = (line, before, rule.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        fp.insertions.append(Insertion(
+            line=line, text=rule.text, indent=indent,
+            seq=int(getattr(beat, 'seq', 0) or 0), rule_id=rule.id,
+            before=before))
+        done += 1
+    if not done and missed == len(anchors):
+        # 逐条补的那几个：只有**每一处**都已有同一行时才记跳过；
+        # 补了一部分就正常记插入（不把已补上的那几条说成"跳过"）。
+        _skip(fp, beat, rule, '已经有同一行' if '\n' not in rule.text
+              else '已经有同一段')
+
+
 def _plan_file(root: Path, path: Path, rules: list, symbols) -> FilePlan:
     try:
         rel = path.resolve().relative_to(root).as_posix()
@@ -1228,35 +1318,8 @@ def _plan_file(root: Path, path: Path, rules: list, symbols) -> FilePlan:
                 _plan_line_edits(fp, beat, rule, symbols, lines,
                                  statement_lines)
                 continue
-            got = _anchor(beat, rule.placement, rule.tag_kind, symbols, lines,
-                          statement_lines)
-            if got is None:
-                fp.skipped.append({
-                    'seq': int(getattr(beat, 'seq', 0) or 0),
-                    'rule': rule.id,
-                    'reason': f'拍里找不到 {rule.placement} 锚点',
-                })
-                continue
-            anchor, indent = got
-            if rule.skip_if_present and _already_present(lines, beat, rule.text,
-                                                         anchor):
-                fp.skipped.append({
-                    'seq': int(getattr(beat, 'seq', 0) or 0),
-                    'rule': rule.id,
-                    'reason': ('已经有同一行' if '\n' not in rule.text
-                               else '已经有同一段'),
-                })
-                continue
-            before = rule.placement == 'before_beat'
-            line = anchor + 1
-            key = (line, before, rule.text)
-            if key in seen:
-                continue
-            seen.add(key)
-            fp.insertions.append(Insertion(
-                line=line, text=rule.text, indent=indent,
-                seq=int(getattr(beat, 'seq', 0) or 0), rule_id=rule.id,
-                before=before))
+            _plan_insertions(fp, beat, rule, symbols, lines,
+                             statement_lines, seen)
     _check_conflicts(fp)
     if not fp.error:
         _check_span_blocks(fp, lines)
@@ -1384,9 +1447,10 @@ def apply_plan(plan: BatchPlan) -> dict:
 
 
 __all__ = [
-    'BatchPlan', 'BatchRuleError', 'CueRule', 'FilePlan', 'GUARD_SKIPS',
-    'Insertion', 'LineEdit', 'MATCH_MODES', 'OCCURRENCES', 'PLAN_SCHEMA',
-    'SCHEMA', 'SCOPES', 'SPAN_MODES', 'apply_plan', 'format_diff',
-    'format_plan', 'load_rule_file', 'merge_declared_rules', 'parse_rule',
-    'parse_rules', 'plan_batch', 'rules_from_extensions',
+    'BatchPlan', 'BatchRuleError', 'CueRule', 'EACH_PLACEMENTS', 'FilePlan',
+    'GUARD_SKIPS', 'Insertion', 'LineEdit', 'MATCH_MODES', 'OCCURRENCES',
+    'PLACEMENTS', 'PLAN_SCHEMA', 'SCHEMA', 'SCOPES', 'SPAN_MODES',
+    'apply_plan', 'format_diff', 'format_plan', 'load_rule_file',
+    'merge_declared_rules', 'parse_rule', 'parse_rules', 'plan_batch',
+    'rules_from_extensions',
 ]

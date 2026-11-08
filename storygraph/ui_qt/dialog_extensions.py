@@ -325,11 +325,20 @@ class ExtensionDialog(QDialog):
         brow.setContentsMargins(0, 0, 0, 0)
         brow.addWidget(QLabel('放在哪'))
         self.cb_placement = QComboBox()
-        for key, text in (('after_last_show', '最后一次立绘之后'),
-                          ('after_last_change', '最后一次立绘变化之后'),
-                          ('after_beat', '这一拍之后'),
-                          ('before_beat', '这一拍之前')):
+        # 顺序 = 默认在前。`after_each_*` 放最前，因为「每次立绘出现或改变」
+        # 按字面就是"每一条都加"（2026-11-08 第十九轮：真机 2_2 一拍三条
+        # `show`，从前只补在最后一条后面，用户说"你只给了一个"）。
+        for key, text in (
+                ('after_each_change', '每一条立绘变化之后（含退场；一拍几条就加几条）'),
+                ('after_each_show', '每一条立绘之后（不含退场；一拍几条就加几条）'),
+                ('after_last_change', '最后一次立绘变化之后（每拍只加一条）'),
+                ('after_last_show', '最后一次立绘之后（每拍只加一条）'),
+                ('after_beat', '这一拍之后'),
+                ('before_beat', '这一拍之前')):
             self.cb_placement.addItem(text, key)
+        self.cb_placement.setToolTip(
+            '「每一条」= 一拍里并排三条 `show` 就补三行（拍内逐条幂等）；'
+            '「最后一次」= 整拍只补一行。')
         brow.addWidget(self.cb_placement, 1)
         bl.addWidget(self._place_row)
         # —— 追加：匹配哪一行（正则，按搜索口径）——
@@ -788,7 +797,7 @@ class ExtensionDialog(QDialog):
         is_append = bool(str(replace.get('append') or ''))
         idx = self.cb_op.findData('append' if is_append else 'insert')
         self.cb_op.setCurrentIndex(max(0, idx))
-        placement = str(insert.get('placement') or 'after_last_show')
+        placement = str(insert.get('placement') or 'after_each_show')
         idx = self.cb_placement.findData(placement)
         self.cb_placement.setCurrentIndex(max(0, idx))
         match = dict(replace.get('match') or {})
@@ -821,7 +830,7 @@ class ExtensionDialog(QDialog):
                 'skip_if_present': True}}
         insert = {'text': self.ed_text.toPlainText().strip(),
                   'placement': str(self.cb_placement.currentData()
-                                   or 'after_last_show'),
+                                   or 'after_each_show'),
                   'skip_if_present': True}
         return {'when': when, 'insert': insert}
 

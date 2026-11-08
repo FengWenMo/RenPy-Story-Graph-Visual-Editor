@@ -91,21 +91,50 @@ def test_unknown_effect_is_refused_not_silently_written():
 #  拼规则：`when` / `placement` 的映射
 # ----------------------------------------------------------------------
 
-def test_sprite_change_covers_hide_and_uses_after_last_change():
+def test_sprite_change_covers_hide_and_adds_after_every_change():
+    """「每次…」= 一拍里每一条 `show`/`hide` 后面都补（2026-11-08 第十九轮）。
+
+    用户拿真机 2_2 指着一个拍里并排的三条 `show`：
+
+    > 本来是两条分别的 show！你应该加两个那一句话……三个 show 并列在一个
+    > 卡片内……你只给了一个……
+    """
     rule = build_rule(_form(mode='sprite_change'), 'r1')
-    assert rule['insert']['placement'] == 'after_last_change'
+    assert rule['insert']['placement'] == 'after_each_change'
     assert rule['when'] == {'change': 'sprite', 'transition': 'none',
                             'code_not_contains': 'renpy.transition'}
     parse_rule(rule)                              # 唯一校验必须放行
 
 
-def test_sprite_show_mode_matches_the_shipped_example():
-    """`examples/batch/master-dissolve.json` 的语义要能被界面原样造出来。"""
+def test_the_last_only_modes_still_reach_the_engine():
+    """「每拍只在最后一次…」也要留着：`$ renpy.transition` 这种设一次就够。"""
+    change = build_rule(_form(mode='sprite_change_last'), 'r1')
+    assert change['insert']['placement'] == 'after_last_change'
+    assert change['when'] == {'change': 'sprite', 'transition': 'none',
+                              'code_not_contains': 'renpy.transition'}
+    show = build_rule(_form(mode='sprite_show_last'), 'r2')
+    assert show['insert']['placement'] == 'after_last_show'
+
+
+def test_sprite_show_mode_is_per_show_and_keeps_the_shipped_example_readable():
+    """`examples/batch/master-dissolve.json`（`after_last_show`）打开要能原样存回。"""
     rule = build_rule(_form(mode='sprite_show'), 'r1')
-    assert rule['insert'] == {'placement': 'after_last_show', 'text': CUE,
+    assert rule['insert'] == {'placement': 'after_each_show', 'text': CUE,
                               'skip_if_present': True}
     assert rule['when'] == {'show': 'sprite', 'transition': 'none',
                             'code_not_contains': 'renpy.transition'}
+    shipped = {'id': 'master-dissolve',
+               'when': {'show': 'sprite', 'transition': 'none',
+                        'code_not_contains': 'renpy.transition'},
+               'insert': {'placement': 'after_last_show', 'text': CUE}}
+    form, why = read_form(shipped)
+    assert why == '' and form['mode'] == 'sprite_show_last'
+    again = build_rule(form, 'master-dissolve')
+    # 语义一致：只在**最后一条**立绘后面补（多写的那个 `skip_if_present`
+    # 是界面自己的默认，不是把规则改味了）
+    assert again['insert']['placement'] == 'after_last_show'
+    assert again['insert']['text'] == CUE
+    assert again['when'] == shipped['when']
 
 
 def test_say_and_beat_modes():
@@ -260,5 +289,7 @@ def test_next_id_skips_taken_names(tmp_path):
 
 def test_describe_speaks_human():
     text = describe(build_rule(_form(), 'r1'))
-    assert '立绘变化' in text and '最后一个立绘变化后面' in text
+    assert '立绘变化' in text and '每一条立绘变化后面' in text
     assert 'renpy.transition' in text
+    last = describe(build_rule(_form(mode='sprite_change_last'), 'r2'))
+    assert '最后一个立绘变化后面' in last

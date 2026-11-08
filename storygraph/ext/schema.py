@@ -69,6 +69,7 @@ code / multiline`，从 `authoring.pattern.SLOT_KINDS` **直接 import**，不�
 """
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field as _dc_field
 
@@ -663,7 +664,13 @@ class ExtensionPoint:
                 out['seconds_arg'] = int(self.seconds_arg)
         if self.batchable:
             out['batchable'] = True
-            out['batch'] = dict(self.batch)
+            # **深拷贝**（2026-11-08 第十九轮，真踩）：浅拷贝会让
+            # `to_dict()['batch']['insert']` 和 `self.batch['insert']` 是同一个
+            # dict。`registry._baseline` 正是用 `to_dict()` 记"装载那一刻的原话"，
+            # 于是"就地改 `point.batch['insert']['placement']` 再保存"会把
+            # base 一起改掉 —— 三方合并判成"我没动过"，**静默写回文件里那份**，
+            # 界面/脚本都说保存成功了，磁盘上一个字节没变。
+            out['batch'] = copy.deepcopy(self.batch)
         return out
 
 
