@@ -164,14 +164,24 @@ class TestP0AcceptanceMatrix:
         assert 'default score = 0' in body
         assert 'init python:' in body
 
-    def test_1d_the_same_rewrite_after_an_external_edit_is_refused(
-            self, project):
+    def test_1d_the_same_rewrite_after_an_external_edit_is_merged(self,
+                                                                 project):
         """
-        **文件被外部改过之后，同一刀必须拒绝**（行号不再可信）。
+        **文件被外部改过（改在别处）之后，同一刀要能合上**（2026-11-08 第十五轮）。
 
-        这是 1c 的保险丝：`trust_ranges` 只许在"证明过文件没变"时打开。
-        否则就是当年那次事故的形态 —— 源文件被手工改过、行号整体错位，
-        补丁照着行号写，**把别人的行覆盖掉**。
+        这一条原来钉的是"必须拒绝"。它的**意图**是"不许按旧行号覆盖别人的行"，
+        这个意图没有放弃 —— 换了一种更彻底的方式守：
+
+        * 现在的做法是"补丁打在**底稿**上，再和盘上那份做三路合并"：
+          两边的改动不重叠 → 两边都落上；重叠 → 拒绝（见 1e）。
+        * 为什么"一律拒绝"不够：第十五轮的探针（`.pip-tmp/probe_r15_export_drift.py`）
+          实测，**一律拒绝反而守不住这个意图** —— 在另外两种场景下
+          （他改了我没动的那一拍 / 他改的正是我在改的那一拍），
+          导出报 `ok=True`、文件写出去了、**他那行被静默改回原样**。
+          只挡"加行 / 删行"、不挡"换行"，等于没挡。
+
+        所以 1d 现在测的是：他加的那一行**还在**，我改的那一拍**也落地**，
+        `default` / `init python` 逐字不动，而且**说出口**了（note 开头那句）。
         """
         src = project / 'ch.rpy'
         src.write_text(OPAQUE, encoding='utf-8')
@@ -182,13 +192,51 @@ class TestP0AcceptanceMatrix:
         beat.show = 'ling angry@d11'
 
         # 外部改一行（模拟用户拿 VSCode 改了这个文件）
-        src.write_text('# 外部加的一行\n' + OPAQUE, encoding='utf-8')
+        external = '# 外部加的一行\n' + OPAQUE
+        src.write_text(external, encoding='utf-8')
         assert not s.source_unchanged(), '前置条件：指纹必须发现文件变了'
 
         res = s.export(src)
-        assert res['ok'] is False, (
-            f'文件被外部改过还按老行号写 —— 会覆盖别人的行：{res}')
-        assert src.read_text(encoding='utf-8') == '# 外部加的一行\n' + OPAQUE, \
+        assert res['ok'] is True, res
+        assert res['used_patch'] is True, res
+        body = src.read_text(encoding='utf-8')
+        assert 'e "全新的正文"' in body, '我改的那一拍没落地'
+        assert 'show ling angry at d11' in body, body
+        assert '# 外部加的一行' in body, '别人加的那一行被吞了'
+        assert 'default score = 0' in body
+        assert 'init python:' in body
+        # **说出口**：短句在 note 开头，长句在 warnings 里（长句要说清他改了哪一行）
+        assert res['note'].startswith('别人也改过这个脚本'), res['note']
+        assert any('加了 1 行' in w and '外部加的一行' in w
+                   for w in res.get('warnings') or []), res.get('warnings')
+
+    def test_1e_the_same_rewrite_on_the_same_line_is_refused(self, project):
+        """
+        **撞在同一处 → 拒绝，文件逐字节不变**（第十五轮）。
+
+        这是 1d 的另一半：他改的**正是我在改的那一行**。这时没有任何判据能说
+        "该留谁的那一版"，按契约（M4 认不出就报）**不猜** ——
+        一个字不写，而且理由要点到**哪一张卡**（用户面对的是卡片，不是行号）。
+        """
+        src = project / 'ch.rpy'
+        src.write_text(OPAQUE, encoding='utf-8')
+        s = _loaded_session(project, src)
+        beat = s.beats[0]
+        beat.speaker = 'e'
+        beat.text = '全新的正文'
+
+        # 外部改的正是那一行（同一个位置、不同的内容）
+        external = OPAQUE.replace('e "原文台词"', 'e "别人改过的台词"')
+        src.write_text(external, encoding='utf-8')
+        assert not s.source_unchanged(), '前置条件：指纹必须发现文件变了'
+
+        res = s.export(src)
+        assert res['ok'] is False, res
+        assert 'PATCH_FAILED' in (res.get('codes') or []), res.get('codes')
+        joined = ' '.join(res.get('blocking') or [])
+        assert '第 1 张卡' in joined, f'拒绝理由要点到哪一张卡：{joined}'
+        assert '一个字节都没写' in joined, joined
+        assert src.read_text(encoding='utf-8') == external, \
             '拒绝时文件一个字节都不许动'
 
     def test_1b_in_place_full_regen_is_still_refused(self, project,

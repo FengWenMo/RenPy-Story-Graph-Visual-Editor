@@ -309,6 +309,16 @@ class TestStaleChapterExportIsNeverSilent:
         blob = json.dumps(res, ensure_ascii=False, default=str)
         refused = not res.get('ok')
         named = '删掉了源文件里' in blob
-        assert refused or named, (
+        # 第三种合法结局（2026-11-08 第十五轮）：**合上了**。
+        # 那时它加的那两行根本没被删 —— 比"在回执里点名"更强，所以判据是
+        # "盘上还在"，不是"说了没有"。
+        merged_kept = (bool(res.get('ok'))
+                       and res.get('note', '').startswith('别人也改过这个脚本'))
+        if merged_kept:
+            body = path.read_text(encoding='utf-8')
+            assert '$ flag = True' in body, '合上了却丢了他加的 $ 行'
+            assert 'play music "bgm.ogg"' in body, '合上了却丢了他加的 play'
+            assert '改过的第一句' in body, '我改的那一句没落地'
+        assert refused or named or merged_kept, (
             '导出既没拒写，也没说删掉了哪些行 —— 这就是静默丢行\n'
             f'回执：{blob}')
