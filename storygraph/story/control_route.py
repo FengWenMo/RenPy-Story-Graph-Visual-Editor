@@ -64,6 +64,9 @@ from pathlib import Path
 from storygraph.core.textlines import split_lines
 from storygraph.story import scan_cache
 from storygraph.story.source_style import SourceNotUtf8
+from storygraph.story.control_anchor import (
+    LABEL_LINE as _RE_LABEL_LINE, label_block as _label_block,
+    locate as _locate_anchor)
 
 CONTROL_SUFFIX = '_control'
 
@@ -305,8 +308,6 @@ def _find_control_file_uncached(root: Path, src: str):
     return sorted(with_control, key=_rank)[0][0]
 
 
-_RE_LABEL_LINE = re.compile(
-    r'^label\s+([^\s:(#]+)\s*(?:\(([^)]*)\))?\s*:')
 _RE_LABEL_NAME = re.compile(r'^[\w\u4e00-\u9fff][\w\u4e00-\u9fff.]*$')
 
 
@@ -356,8 +357,6 @@ def _label_decl_uncached(root: Path, want: str):
 def _read(path):
     """读源文件 → `(text, style)`；走 `scan_cache`（同一次接线里会读很多遍）。"""
     return scan_cache.read_text(path)
-
-
 def _incoming_refs(project_root, name: str) -> list:
     """
     谁 `jump` / `call` 了这个 label（含 `jump X_control`）。
@@ -631,17 +630,15 @@ def apply_control_init(plan: ControlInitPlan) -> dict:
                 'new_text': plan.old_text, 'line_no': 0, 'error': ''}
     path = Path(plan.path)
     try:
-        text, style = _read(path)
+        text, _style = _read(path)
     except OSError as exc:
         return {'ok': False, 'path': str(path), 'old_text': '',
                 'new_text': '', 'line_no': 0, 'error': f'读不了编排层：{exc}'}
-    if text != plan.old_text:
-        return {'ok': False, 'path': str(path), 'old_text': text,
-                'new_text': text, 'line_no': 0,
-                'error': '编排层刚被改过（全文对不上）；重新算一次'}
+    # 2026-11-08（第十四轮）：整份比对 → `commit_text`（别人改了别处就合并）。
+    # 补包装是一次**追加**，前后两份文本都是计划里算好的，正好喂三路合并。
+    from storygraph.story.write_gate import commit_text
     try:
-        from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(plan.new_text, source=path))
+        commit = commit_text(path, plan.old_text, plan.new_text)
     except SourceNotUtf8 as exc:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': 0, 'error': str(exc)}
@@ -649,8 +646,14 @@ def apply_control_init(plan: ControlInitPlan) -> dict:
         return {'ok': False, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': 0,
                 'error': f'写不进编排层：{exc}'}
+    if not commit.ok:
+        return {'ok': False, 'path': str(path), 'old_text': commit.disk_text,
+                'new_text': commit.disk_text, 'line_no': 0,
+                'error': commit.error(), 'note': ''}
     return {'ok': True, 'path': str(path), 'old_text': text,
-            'new_text': plan.new_text, 'line_no': 0, 'error': ''}
+            'new_text': plan.new_text, 'line_no': 0, 'error': '',
+            'note': commit.note(), 'note_full': commit.full_note(),
+            'commit': commit.as_dict()}
 
 
 #: 一次接线里最多补几个 `_control` 包装（实际最多两个：源章一个、目标章一个）
@@ -1039,20 +1042,14 @@ def apply_control_route(plan: ControlRoutePlan) -> dict:
         return {'ok': True, 'path': str(path), 'old_text': text,
                 'new_text': text, 'line_no': plan.line_no, 'error': ''}
 
+    # 只动那一行：锚点按**内容**找回来（别人在上面插了行也不会误判）
+    idx, why = _locate_anchor(lines, plan.old_line, plan.line_no)
+    if why:
+        return {'ok': False, 'path': str(path), 'old_text': text,
+                'new_text': text, 'line_no': plan.line_no, 'error': why}
     if plan.kind == 'insert':
-        if plan.old_line:
-            if idx >= len(lines) or lines[idx] != plan.old_line:
-                return {'ok': False, 'path': str(path), 'old_text': text,
-                        'new_text': text, 'line_no': plan.line_no,
-                        'error': '编排层刚被改过（锚点行对不上）；重新接线'}
-            out = lines[:idx] + list(plan.new_lines) + lines[idx:]
-        else:
-            out = lines[:idx] + list(plan.new_lines) + lines[idx:]
+        out = lines[:idx] + list(plan.new_lines) + lines[idx:]
     elif plan.kind == 'replace':
-        if idx >= len(lines) or lines[idx] != plan.old_line:
-            return {'ok': False, 'path': str(path), 'old_text': text,
-                    'new_text': text, 'line_no': plan.line_no,
-                    'error': '编排层刚被改过（要替换的行对不上）；重新接线'}
         out = lines[:idx] + list(plan.new_lines) + lines[idx + 1:]
     else:
         return {'ok': False, 'path': str(path), 'old_text': text,
@@ -1145,11 +1142,12 @@ def apply_control_unroute(plan: ControlRoutePlan) -> dict:
     from storygraph.story.source_style import read_text
     text, style = read_text(path)
     lines = split_lines(text)
-    idx = int(plan.line_no) - 1
-    if not (0 <= idx < len(lines)) or lines[idx] != plan.old_line:
+    # 锚点按内容找回来（2026-11-08 第十四轮）：别人在上面插了行、这一行还在
+    # 原地/挪到别处都认得出；改过或删掉才拒写。
+    idx, why = _locate_anchor(lines, plan.old_line, plan.line_no)
+    if why:
         return {'ok': False, 'path': str(path), 'old_text': text,
-                'new_text': text, 'line_no': plan.line_no,
-                'error': '编排层刚被改过（要删的行对不上）；重新算一次'}
+                'new_text': text, 'line_no': plan.line_no, 'error': why}
     out = lines[:idx] + list(plan.new_lines) + lines[idx + 1:]
     body = '\n'.join(out)
     if text.endswith('\n'):
@@ -1430,11 +1428,11 @@ def apply_control_edit(plan: ControlEditPlan) -> dict:
                 'new_text': text, 'line_no': plan.line_no,
                 'error': '新目标还缺 `_control` 包装：先补包装，再改这一行'}
     lines = split_lines(text)
-    idx = int(plan.line_no) - 1
-    if not (0 <= idx < len(lines)) or lines[idx] != plan.old_line:
+    # 锚点按内容找回来（2026-11-08 第十四轮，同 `apply_control_unroute`）
+    idx, why = _locate_anchor(lines, plan.old_line, plan.line_no)
+    if why:
         return {'ok': False, 'path': str(path), 'old_text': text,
-                'new_text': text, 'line_no': plan.line_no,
-                'error': '编排层刚被改过（要替换的行对不上）；重新算一次'}
+                'new_text': text, 'line_no': plan.line_no, 'error': why}
     out = lines[:idx] + list(plan.new_lines) + lines[idx + 1:]
     body = '\n'.join(out)
     if text.endswith('\n'):

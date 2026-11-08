@@ -827,36 +827,44 @@ def plan_control_branch_remove(project_root, src_label, edge_id,
 
 def apply_control_branch(plan) -> dict:
     """
-    把计划写进编排层（原子替换）；计划之后文件又被改过就**拒绝写**。
+    把计划写进编排层（原子替换）；撞在同一处就**拒绝写**。
 
-    返回 `{ok, old_text, new_text, path, error}`。
+    返回 `{ok, old_text, new_text, path, error, note}`。
+
+    2026-11-08（第十四轮）：判据从"整份逐字相同"改成 `commit_text`
+    —— 别人改的是**别处**就三路合并（他加的行留下、我的分支段落上），
+    撞在同一处才拒写。`old_text` / `new_text` 仍是计划里那两份
+    （撤销那道闸拿它比，见 `write_gate.Commit` 的字段注释）。
     """
     if not isinstance(plan, ControlBranchPlan) or not plan.ok:
         return {'ok': False, 'old_text': '', 'new_text': '',
-                'path': '', 'error': '计划无效'}
+                'path': '', 'error': '计划无效', 'note': ''}
     if plan.kind == 'exists':
         return {'ok': True, 'old_text': plan.old_text,
-                'new_text': plan.new_text, 'path': plan.path, 'error': ''}
+                'new_text': plan.new_text, 'path': plan.path, 'error': '',
+                'note': ''}
     path = Path(plan.path)
     from storygraph.story.source_style import read_text
-    text, style = read_text(path)
-    if text != plan.old_text:
-        return {'ok': False, 'old_text': text, 'new_text': text,
-                'path': str(path),
-                'error': '编排层在计划之后又被改过；为了不覆盖新改动，'
-                         '这次没有写'}
+    from storygraph.story.write_gate import commit_text
+    text, _style = read_text(path)
     try:
-        from storygraph.story.paths import write_text_atomic
-        write_text_atomic(path, style.apply(plan.new_text, source=path))
+        commit = commit_text(path, plan.old_text, plan.new_text)
     except SourceNotUtf8 as exc:
         # 非 UTF-8：读的时候坏字节已变成 U+FFFD，写回去就是改坏它（P0-B）
         return {'ok': False, 'old_text': text, 'new_text': text,
-                'path': str(path), 'error': str(exc)}
+                'path': str(path), 'error': str(exc), 'note': ''}
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
-                'path': str(path), 'error': f'写不进编排层：{exc}'}
+                'path': str(path), 'error': f'写不进编排层：{exc}',
+                'note': ''}
+    if not commit.ok:
+        return {'ok': False, 'old_text': commit.disk_text,
+                'new_text': commit.disk_text, 'path': str(path),
+                'error': commit.error(), 'note': ''}
     return {'ok': True, 'old_text': plan.old_text,
-            'new_text': plan.new_text, 'path': str(path), 'error': ''}
+            'new_text': plan.new_text, 'path': str(path), 'error': '',
+            'note': commit.note(), 'note_full': commit.full_note(),
+            'commit': commit.as_dict()}
 
 
 __all__ = ['MARKER_PREFIX', 'ControlBranchPlan', 'apply_control_branch',

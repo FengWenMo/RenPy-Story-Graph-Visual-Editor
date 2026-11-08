@@ -330,32 +330,46 @@ def _plan_block_removal(lines, start: int, end: int, session,
 
 
 def apply_source_line_delete(plan: SourceLinePlan) -> dict:
-    """真的删掉那一行（原子替换）。返回 `{ok, old_text, new_text, error}`。"""
+    """
+    真的删掉那一行（原子替换）。返回 `{ok, old_text, new_text, error, note}`。
+
+    ⚠ 2026-11-08（第十四轮）：判据从"整份逐字相同"放宽成"我要删的那一段还在"
+    —— 走 `story.write_gate.commit_text`：
+      · 盘上还是计划时那份 → 照写（与从前逐字节一致）；
+      · 盘上被别人改过、但**改的不是同一处** → **三路合并**：他加的行留下、
+        我删的行删掉，回执里说清保住了谁的那几行（`note`）；
+      · 撞在同一处（他改的正是我要删的那行 / 紧贴着我删的区间）→ 拒写，
+        一个字不动，并指出撞在第几行。
+    `old_text` / `new_text` 仍然是**计划里那两份**（不是合并结果）——
+    撤销那道闸拿它比"盘上还是我写的那份吗"，拿合并结果去比就会放行，
+    然后把别人那几行一起抹掉。
+    """
     if not isinstance(plan, SourceLinePlan) or not plan.ok:
         return {'ok': False, 'old_text': '', 'new_text': '',
-                'error': '计划无效'}
+                'error': '计划无效', 'note': ''}
     path = Path(plan.path)
     from storygraph.story.source_style import SourceNotUtf8
     from storygraph.story.source_style import read_text
-    text, style = read_text(path)
-    if text != plan.old_text:
-        return {'ok': False, 'old_text': text, 'new_text': text,
-                'error': '源文件在计划之后又被改过；为了不误删，这次没有写'}
+    from storygraph.story.write_gate import commit_text
+
+    text, _style = read_text(path)
     try:
-        from storygraph.story.paths import write_text_atomic
-        # `source=path` → **逐行**还原换行符（P1-5b）：混合换行文件里没碰过的
-        # 行一个字节都不动。这里与 `control_route` 同级（原地改写），
-        # 而且 `plan.new_text` 就是从盘上这一份算出来的 —— 没有理由不传。
-        write_text_atomic(path, style.apply(plan.new_text, source=path))
+        # `source=path` 由 `commit_text` 内部铺（逐行还原换行符，P1-5b）
+        commit = commit_text(path, plan.old_text, plan.new_text)
     except SourceNotUtf8 as exc:
         # 非 UTF-8：读的时候坏字节已经变成 U+FFFD，写回去就是改坏它（P0-B）
         return {'ok': False, 'old_text': text, 'new_text': text,
-                'error': str(exc)}
+                'error': str(exc), 'note': ''}
     except OSError as exc:
         return {'ok': False, 'old_text': text, 'new_text': text,
-                'error': f'写不进源文件：{exc}'}
+                'error': f'写不进源文件：{exc}', 'note': ''}
+    if not commit.ok:
+        return {'ok': False, 'old_text': commit.disk_text,
+                'new_text': commit.disk_text, 'error': commit.error(),
+                'note': '', 'commit': commit.as_dict()}
     return {'ok': True, 'old_text': plan.old_text, 'new_text': plan.new_text,
-            'error': ''}
+            'error': '', 'note': commit.note(),
+            'note_full': commit.full_note(), 'commit': commit.as_dict()}
 
 
 __all__ = ['SourceLinePlan', 'apply_source_line_delete',
