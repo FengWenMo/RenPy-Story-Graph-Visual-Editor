@@ -5249,6 +5249,24 @@ if len(with_control) == 1:
 - 卡片面板的公共接口：`show_stage_frame(idx, session)` / `clear_stage_frame()` /
   `stage_thumb()` / `shutdown_stage_thumb()`（窗口关闭时清线程池）。
 
+### 58.4 这张图是"谁"：分层声明优先（2026-11-08 第十八轮）
+
+真机症状：`show qing en` 的卡片写着 `qing en`，上面「当前舞台」小图站着的却是
+**星桥理子**（`xing/en.png`）—— 说话人还是「青」。
+
+两级根因：① `stage.image_index_lookup` 把多词写法的**最后一个词**当文件名全盘撞
+（`qing en` → `en` → 第一个撞上的 `en.png` 是别人的）；② `stage_render` 这条路
+**没有分层那一级**（卡片 `ui_qt.sprite_thumbs` 与 `resolve_frame_assets` 有）。
+
+| 规矩 | 判据 / 说明 |
+|---|---|
+| 舞台与卡片、引擎**同一个答案** | `stage_render._sprite_source`：有 `layeredimage` 就 `resolve_layers` + `compose_sprite`，认不出才走资源表 / `image` 声明 / 磁盘索引 |
+| 属性件不是文件名 | `image_index` 多存 `目录/文件名` 键；`image_index_lookup` 只认 `tag/属性` 或 `_belongs_to_tag`（目录名 = tag / 文件名以 `tag_` 开头）的那份，否则 `None` |
+| 几何按**原图** | `layer_compose.plan_natural_size(plan)` × zoom；合成产物（封顶 1400/1920）只当像素来源，拿它算尺寸人会变小 |
+| 合成代价 | 按屏幕上的框合成（`_compose_box`，长边封顶 1920）：真机冷 ≈ 0.2 s、热 ≈ 6 ms |
+
+判据：`tests/test_stage_sprite_identity.py`（10 条；旧代码上 6 条红）。
+
 ## §59 「可整块删掉的独立件」：顶部模式条的 ⭐ GitHub Star（2026-10-27 晚）
 
 用户原话："再在（卡片编辑器）的稍稍右上方空白处去做一个 github 的快速 star 呢？……

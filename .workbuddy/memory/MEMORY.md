@@ -174,6 +174,7 @@
 
 **舞台/卡片/过场**
 - 卡片单拍舞台图走 `stage_render.render_frame`；后台线程 + 防抖 120ms + 2 线程 + 门闩；重画判据用 `frame_signature` 内容指纹（不许 `id(frame)`）。
+- **"属性件不是文件名"**（2026-11-08 第十八轮）：`image_index_lookup` 从前拿多词写法的**最后一个词**（`qing en` 的 `en`）去全盘索引里撞 → `xing/en.png`（台上站着另一个人，用户截图报"绑到另一个人身上"）。现在 `image_index` 多存 `目录/文件名` 键；属性件只认 `tag/属性` 或**以 tag 命名的目录**里的那份（`_belongs_to_tag`），否则 `None`。舞台那条也补上了分层那一级（`stage_render._composed_sprite`，与卡片/引擎同一真源）；几何必须用 `layer_compose.plan_natural_size`（原图尺寸），合成产物封顶 1400/1920 只当像素来源 —— 拿它乘 zoom 人会变小。
 - **过场是项目自定义的**：`$ renpy.transition(...)` → `story/transition_expr`（安全字面量解析，无 eval）→ `transition_catalog` → `app/transition_fx`。**认不出就降级并标「无法精确预览」，绝不假装淡入**。
 - 带 ATL 块的 `show`：判据是"节点有没有块体载体"（`_BLOCK_CARRYING_NODES`）；`ln.text` 自带缩进；`LogicalLine.subblock` 没有空行（按行号从源取）；opaque 令牌排在 `mark_op('show')` 之后。
 - 归属审计：`_HANDLER_OF` 是"每种语句去哪"的唯一清单，`_BeatBuilder.unassigned` 断言既不进 pending 也不建拍的语句。
@@ -324,6 +325,14 @@
   变了就说"要重新导入这一章"。旧代码上 28 条红 12 条。改了
   `test_hell_custom_card_layout.py` 里 2026-10-29 那条（与 11-07 的"语句拍收起"
   相反，后者更新）。详见 `docs/开发日志.md` §110。
+
+- **立绘认人（2026-11-08 第十八轮，同日）**：真机 `show qing en`，卡片写
+  `qing en`、舞台小图却站着**星桥理子**（`xing/en.png`）。两个根因：
+  `image_index_lookup` 丢 tag 裸查属性名；`stage_render` 没有分层那一级
+  （卡片有）。现在舞台与卡片同走 `layeredimage` 合成，几何按
+  `plan_natural_size`（合成产物只当像素来源）。判据
+  `tests/test_stage_sprite_identity.py`（10 条，旧代码 6 红），
+  详见 `docs/开发日志.md` §111。
 
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
