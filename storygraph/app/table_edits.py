@@ -36,7 +36,8 @@ from storygraph.app import beats as B
 from storygraph.story.flow import FLOW_FIELD_KEYS
 from storygraph.story.beat_build import hydrate_from_dsl, stage_only_ops
 from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
-                                         compose_stage_extra)
+                                         compose_stage_extra, hide_item_part,
+                                         join_hide_items, split_hide_items)
 from storygraph.story.spec_args import is_dynamic_column
 
 
@@ -340,7 +341,7 @@ class FieldWriter:
                     b.raw = ''
 
     def _apply_sprite_cards(self, b, cards) -> None:
-        """立绘卡 → `show` / `at`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
+        """立绘卡 → `show` / `at` / `hide`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
         if cards is not None:
             # **"沿用"来的卡不写回**（2026-11-02）：`session.cards(idx)` 会把台上
             # 沿用的角色也摆出来（`inherited=True`，让人看得见现在是谁、能改表情）。
@@ -348,6 +349,11 @@ class FieldWriter:
             # 的 `show` 物化进这一拍（用户没改任何东西却多了几行）。
             # 卡片改过一次，`SpriteCardWidget._mark_local` 就会清掉这个标记。
             cards = [c for c in (cards or []) if not (c or {}).get('inherited')]
+            # **退场卡**（`hide=True`，2026-11-08）：用户把一张"沿用"卡点了 ✕。
+            # 它要写的是 `hide <tag>`，**不是** show —— 混进 `write_back_show`
+            # 会变成"这一拍又 show 一下"，人反而留在台上。
+            hide_cards = [c for c in cards if (c or {}).get('hide')]
+            show_cards = [c for c in cards if not (c or {}).get('hide')]
             # **立绘写回的唯一出口**（2026-10-24 修 P0，见 `write_back_show`）。
             #
             # 从前这里直接 `b.show = cards_to_show(cards)` —— **整体替换**。
@@ -359,7 +365,7 @@ class FieldWriter:
             # `write_back_show` 把表达不了的项按原锚点插回去；没有这类项时
             # 它的输出与 `cards_to_show` **逐字节相同**（老语义不变）。
             old_show = str(getattr(b, 'show', '') or '').strip()
-            new_show = B.write_back_show(old_show, cards, self.symbols)
+            new_show = B.write_back_show(old_show, show_cards, self.symbols)
             # 卡片空 → 保留原值（"空网格不清空立绘"）。这一条是防误删，
             # 不是保真：用户真要清空立绘，得用卡片上的删除按钮（会走
             # `remove_sprite`，那条路是逐条精确匹配的）。
@@ -367,8 +373,38 @@ class FieldWriter:
                 b.show = new_show
             # 整拍位置只在真有立绘卡时才重算：空网格连位置也不许动
             # （同一条规矩；以前这里无条件清空 `b.at`）。
-            if cards:
-                b.at = uniform_position_of(cards)
+            if show_cards:
+                b.at = uniform_position_of(show_cards)
+            self._apply_hide_cards(b, hide_cards)
+
+    def _apply_hide_cards(self, b, hide_cards) -> None:
+        """
+        退场卡 → `beat.hide`（**只加不减**：原先那些 `hide` 条目一个字不动）。
+
+        为什么要有这条路（2026-11-08 用户）：角色是**上一拍** `show` 上来的，
+        这一拍没写 `show`，卡片网格里那张「沿用」卡就是它。对这种卡点 ✕，
+        光把卡拿掉什么都不写（`show` 本来就没有它），只能写 `hide <tag>`。
+        不加 `hide` 的话"角色只会越来越多"——正是用户报的那个现象。
+
+        ⚠ 只加不减是**故意的**：`hide` 里可能还有 `cg@dissolve` 这类卡片
+        表达不了、也看不懂的条目；这里没有的东西一律不动（宁可多留一条，
+        也不静默删别人的演出指令）。
+        """
+        if not hide_cards:
+            return
+        existing = split_hide_items(getattr(b, 'hide', '') or '')
+        # 已经 hide 过这个 tag 的（哪怕带转场 `lan@dissolve`）不再重复加：
+        # `hide lan` + `hide lan@dissolve` 是两行没意义的重复。
+        have = {hide_item_part(it).split('@')[0] for it in existing}
+        add = []
+        for card in hide_cards:
+            tag = (str((card or {}).get('tag') or '').strip()
+                   or str((card or {}).get('image') or '').split()[0])
+            if tag and tag not in have:
+                have.add(tag)
+                add.append({'image': tag})
+        if add:
+            b.hide = join_hide_items(existing + add)
 
     def _apply_word_cells(self, b, fields, cards) -> None:
         """「表情 / 位置」两格（**只在没有立绘卡时**写）（拆自 `apply`，2026-11-01）。"""

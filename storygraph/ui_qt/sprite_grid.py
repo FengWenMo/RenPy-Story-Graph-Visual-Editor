@@ -49,6 +49,7 @@ from storygraph.app.session_table import uniform_position_of  # noqa: F401
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.labeled_choices import labeled
+from storygraph.ui_qt import sprite_hide as SH
 from storygraph.ui_qt.sprite_codes_view import (art_code, code_of,
                                                 slot_choices,
                                                 slot_kind as _slot_kind)
@@ -664,11 +665,13 @@ class SpriteCardWidget(QFrame):
     def refresh(self):
         spec = str(self.item.get('image') or '').strip()
         tag = spec.split()[0] if spec else ''
-        # —— **"沿用"卡**：这一拍没写它、人还在台上（`session.cards()` 补的）。
-        # 照常显示，标题写「（沿用）」、✕ 隐藏；改一下就归这一拍。
-        is_inherited = bool(self.item.get('inherited'))
+        is_hide = SH.is_hide(self.item)
         if hasattr(self, '_close_btn'):
-            self._close_btn.setVisible(not is_inherited)
+            # **✕ 一直都在**（2026-11-08）：沿用卡也删得掉，删 = 这一拍
+            # `hide` 掉 ta（语义在 `ui_qt.sprite_hide`）；退场卡变 ↺ 撤销。
+            self._close_btn.setVisible(True)
+            self._close_btn.setText(SH.close_text(self.item))
+            self._close_btn.setToolTip(SH.close_tip(self.item))
         # —— 卡片标题 ——
         #
         # 有美术代号就显示 **`lan A3`**（用户 2026-11-02："你根本看不出来是
@@ -681,14 +684,17 @@ class SpriteCardWidget(QFrame):
         rows = self._slot_rows()
         code, code_tip = self._art_code(spec, rows) if spec else ('', '')
         base_text = f'{tag} {code}' if code else (spec or '（点击换图）')
-        self._name.setText(base_text + ('（沿用）' if is_inherited else ''))
+        self._name.setText(SH.title(self.item, base_text))
         _tip = ((f'引擎里写的是：`{spec}`'
                  + (f'\n\n{code_tip}\n（这张卡在脚本里仍然写引擎写法）' if code_tip
                     else '')) if spec else '')
-        if is_inherited:
-            _tip += ('\n\n**这一拍没写它**：人是上一拍 show 上来的（沿用）。\n'
-                     '改一下表情或位置，它才会写进这一拍；不改则一字不写。')
+        _tip += SH.title_tip(self.item)
         self._name.setToolTip(_tip)
+        # 退场卡上的表情/位置没有意义（人不在台上）→ 置灰，点不动。
+        for btn in list(getattr(self, '_slot_btns', ())) + [
+                b for b in (getattr(self, '_expr_btn', None), self._pos_btn)
+                if b is not None]:
+            btn.setEnabled(not is_hide)
         expr = str(self.item.get('expression') or '').strip()
         pos = str(self.item.get('position') or '').strip()
         inherited = str(self.item.get('inherited_at') or '').strip()
@@ -1431,6 +1437,24 @@ class SpriteGridWidget(QWidget):
         self.change.emit(self)
 
     def _on_remove(self, card):
+        """
+        右上角那颗按钮：**删卡** / **退场** / **撤销退场** 三件事。
+
+        沿用卡不拿掉 —— 角色是上一拍 show 上来的，光把卡删掉什么都不会写
+        （用户 2026-11-08："一旦变成沿用的……就没法删了"）。语义在
+        `ui_qt.sprite_hide.toggle`，这里只管重画与提示。
+        """
+        item = card.item if isinstance(card.item, dict) else {}
+        how = SH.toggle(item)
+        if how:
+            card.refresh()
+            if how == 'hide':
+                tag = SH.tag_of(item)
+                self.notice.emit(
+                    f'「{tag}」这一拍退场（保存后写出 `hide {tag}`）—— '
+                    f'再点 ↺ 可以撤销。')
+            self.change.emit(self)
+            return
         if card in self._cards:
             self._cards.remove(card)
             card.setParent(None)

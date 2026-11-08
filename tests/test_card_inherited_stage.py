@@ -180,3 +180,95 @@ class TestSavingDoesNotMaterializeTheInheritedStage:
         assert str(getattr(beat, 'show', '') or '') == ''
         assert str(getattr(beat, 'scene', '') or '') == ''
         assert isinstance(beat, Beat)
+
+
+# ==================================================================
+#  ④ 「沿用」卡也能删 —— 删 = 这一拍 hide 掉 ta（用户 2026-11-08）
+# ==================================================================
+
+class TestDeletingAnInheritedSprite:
+    """
+    用户原话：
+
+    > 我的立绘为什么加了就无法删除了！你的删除按钮呢？改UI！！！你的删除
+    > 按钮出BUG了！！！一旦变成沿用的……就没法删了！我就不能选择把沿用的
+    > 也删了，后保存，就等于hide角色吗？那不然我角色一定越来越多！
+
+    现象：`inherited=True` 的卡把 ✕ 藏了（2026-11-02 留的口子）。可角色是
+    上一拍 `show` 上来的，**光删卡什么都不写** —— 等于"上了台就下不去"。
+    现在的语义：✕ = 这一拍写 `hide <tag>`；再点 ↺ = 撤销。
+    """
+
+    def test_the_delete_button_is_there(self, panel):
+        card = panel._grid._cards[0]
+        assert not card._close_btn.isHidden(), '沿用卡也得有删除按钮'
+        assert card._close_btn.text() == '✕'
+
+    def test_clicking_it_turns_the_card_into_a_hide(self, panel):
+        grid = panel._grid
+        card = grid._cards[0]
+        card._close_btn.click()
+        assert card.item.get('hide') is True
+        assert not card.item.get('inherited')
+        assert len(grid.cards()) == 1, '卡不能被拿掉（它代表"这一拍退场"）'
+        assert '退场' in card._name.text(), card._name.text()
+        assert card._close_btn.text() == '↺'
+
+    def test_the_hide_card_is_what_gets_saved(self, panel):
+        panel._grid._cards[0]._close_btn.click()
+        cards = panel.sprite_cards()
+        assert len(cards) == 1 and cards[0].get('hide') is True, cards
+
+    def test_undo_puts_it_back_to_inherited(self, panel):
+        card = panel._grid._cards[0]
+        card._close_btn.click()
+        card._close_btn.click()
+        assert card.item.get('inherited') is True
+        assert not card.item.get('hide')
+        assert panel.sprite_cards() == []
+        assert '沿用' in card._name.text(), card._name.text()
+
+    def test_saving_writes_hide_and_not_show(self, session):
+        cards = session.cards(1)
+        cards[0]['hide'] = True
+        cards[0].pop('inherited', None)
+        session.save(1, session.fields(1), cards=cards)
+        beat = session.beats[1]
+        assert str(getattr(beat, 'hide', '') or '') == 'ye', beat.hide
+        assert str(getattr(beat, 'show', '') or '') == ''
+
+    def test_the_export_really_says_hide(self, session):
+        cards = session.cards(1)
+        cards[0]['hide'] = True
+        cards[0].pop('inherited', None)
+        session.save(1, session.fields(1), cards=cards)
+        from storygraph.story.beat_render import render_beats_to_rpy
+        text = render_beats_to_rpy(session.beats)
+        assert 'hide ye' in text, text
+
+    def test_after_saving_the_actor_is_no_longer_on_stage(self, session):
+        cards = session.cards(1)
+        cards[0]['hide'] = True
+        cards[0].pop('inherited', None)
+        session.save(1, session.fields(1), cards=cards)
+        assert [a['image'] for a in session.stage_state(1)['actors']] == [], \
+            session.stage_state(1)
+        # 再翻到第 2 拍：也不该再把它当"沿用"摆出来
+        assert [c for c in session.cards(2) if c.get('inherited')] == []
+
+    def test_existing_hide_entries_are_untouched(self, session):
+        """`hide cg@dissolve` 是卡片看不懂的条目 —— 只加不减，一个字不许丢。"""
+        session.beats[1].hide = 'cg@dissolve'
+        cards = session.cards(1)
+        cards[0]['hide'] = True
+        cards[0].pop('inherited', None)
+        session.save(1, session.fields(1), cards=cards)
+        assert session.beats[1].hide == 'cg@dissolve; ye', session.beats[1].hide
+
+    def test_deleting_an_own_card_still_just_removes_it(self, session):
+        """这一拍自己 show 的卡：删掉就是删掉（不凭空多一条 hide）。"""
+        own = [c for c in session.cards(0) if not c.get('inherited')]
+        assert own, session.cards(0)
+        session.save(0, session.fields(0), cards=[])
+        assert str(getattr(session.beats[0], 'hide', '') or '') == ''
+
