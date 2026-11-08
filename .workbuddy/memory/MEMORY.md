@@ -169,6 +169,7 @@
 - 同目录 Excel 优先：`storygraph.mapping.xlsx`（`assets/mapping_excel.py`：一表=一顶层键、空格子不写、`备注` 列忽略）。**xlsx 只读，绝不回写人做的表**；生效源每处都要说出来。
 - 表格编辑 `ui_qt/mapping_editor.py` + `assets/mapping_edit.py`（`SPECS` 六段），**JSON 是唯一产出**：深拷贝 + 只改认识的键；空壳行不落盘；表不许 import `save_mapping`。坑：`itemChanged` 里不许重建表；列宽不许伸缩有内容的列。
 - **「角色 0」= 没有覆盖，不是没读到**；编辑页当场说明 + 给「把资源表里的角色写进来」按钮（只加不改），不许开窗自动抄。
+- **删立绘卡 = "这一拍不要让 ta 在台上"**（2026-11-08）：沿用卡（`inherited`）点 ✕ 不删卡，改成「退场卡」（`hide: True`，↺ 撤销）；保存走 `table_edits._apply_hide_cards` 并进 `beat.hide`（**只加不减**，`cg@dissolve` 这类看不懂的条目一个字不动）。退场卡**不跨重开回填**（存完就是一条 `hide`，改回来去表格「退场」列）。自己的 `show` 卡删掉只是删 show —— 人还在台上时网格会把 ta 以「沿用」摆回来，再点一次 ✕ 才 hide。
 - 编号表**不只角色文件夹**（2026-11-08）：`assets/code_tables.py` 读**任何**目录里的 `对应.txt`（`1——Empt1y`；`8——` 空号也算读出来），名字去尾部 `（备注）`/`……` 后**只认唯一命中**（两个都像就报 ambiguous，不猜）；产出 `vocabulary` 行（`kind/id/code/label/note`），目录里有、表里没号的文件也出一行空号，缺口进 `notes`（剧本在用却空号 → 预留空号 → 对不上文件 → 同曲两号 → 没号文件）。接在「按项目自动填」：`autofill_codes(codes=, vocabulary=)` 两段**分开判**、只加不改。⚠ 这里三处 `except OSError` 是窄捕获、不调 `swallow`（技术债棘轮 `swallow_calls` 上限 1293，加一个就红）。
 
 **舞台/卡片/过场**
