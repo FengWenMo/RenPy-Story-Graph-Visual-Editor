@@ -65,7 +65,7 @@ class TestTheExportAppliesTheDeclaredBatch:
         assert res['ok'], res
         text = ch.read_text(encoding='utf-8')
         assert text.count(_CUE) == 2, text
-        assert '扩展批处理补了 2 行' in str(res.get('note') or ''), res
+        assert '扩展批处理改了 2 行' in str(res.get('note') or ''), res
 
     def test_a_second_export_does_not_double_it(self, tmp_path):
         root, ch = _project(tmp_path)

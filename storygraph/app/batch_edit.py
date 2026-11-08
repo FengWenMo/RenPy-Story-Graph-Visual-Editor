@@ -60,8 +60,8 @@ _WHEN_KEYS = frozenset({
 })
 _INSERT_KEYS = frozenset({'text', 'placement', 'tag_kind', 'skip_if_present'})
 _REPLACE_KEYS = frozenset({
-    'scope', 'match', 'text', 'occurrence', 'tag_kind', 'skip_if_present',
-    'span',
+    'scope', 'match', 'text', 'append', 'occurrence', 'tag_kind',
+    'skip_if_present', 'span',
 })
 _DELETE_KEYS = frozenset({'scope', 'match', 'occurrence', 'tag_kind', 'span'})
 _RULE_KEYS = frozenset({'id', 'when', 'insert', 'replace', 'delete'})
@@ -85,6 +85,12 @@ class CueRule:
     id: str
     op: str = 'insert'
     text: str = ''
+    #: `replace.append` 用：**追加到匹配行末尾**的那一小段（含前导空格）。
+    #: 为什么单列一个字段（2026-11-08）：`play music "x"` 要变成
+    #: `play music "x" fadein 1.0` —— 原行必须原样保留，只加尾巴；
+    #: `text` 是"整行替换"，拿它拼原行要么丢内容、要么得支持正则反向引用
+    #: （那会让每条规则都变成模板，误伤面太大）。
+    append: str = ''
     placement: str = 'after_last_show'
     tag_kind: str = 'sprite'
     skip_if_present: bool = True
@@ -109,11 +115,14 @@ class CueRule:
             body = {
                 'scope': self.scope,
                 'match': dict(self.match),
-                'text': _text_json(self.text),
                 'occurrence': self.occurrence,
                 'tag_kind': self.tag_kind,
                 'skip_if_present': self.skip_if_present,
             }
+            if self.append:
+                body['append'] = self.append
+            else:
+                body['text'] = _text_json(self.text)
         elif self.op == 'delete':
             body = {
                 'scope': self.scope,
@@ -167,6 +176,7 @@ class LineEdit:
     old: str = ''
     old_lines: list = field(default_factory=list)
     text: str = ''             # replace 的新内容（不含基准缩进，可多行）
+    append: str = ''           # replace.append：追加到原行末尾的一小段
     indent: str = ''
     seq: int = 0
     rule_id: str = ''
@@ -414,22 +424,7 @@ def _parse_rule(raw, where: str) -> CueRule:
                        when=dict(when), source=where)
 
     if op == 'replace':
-        unknown = set(body) - _REPLACE_KEYS
-        if unknown:
-            raise BatchRuleError(f'{where}.replace 有不认识的键：{sorted(unknown)}')
-        scope = _parse_scope(body.get('scope'), f'{where}.replace.scope')
-        match = _parse_match(body.get('match'), f'{where}.replace.match')
-        text = _parse_text(body.get('text'), f'{where}.replace.text')
-        occurrence = _parse_occurrence(
-            body.get('occurrence'), f'{where}.replace.occurrence')
-        tag_kind = _parse_tag_kind(
-            body.get('tag_kind'), f'{where}.replace.tag_kind')
-        span, until = _parse_span(body.get('span'), f'{where}.replace.span')
-        return CueRule(id=rid, op='replace', text=text, scope=scope,
-                       match=match, occurrence=occurrence, tag_kind=tag_kind,
-                       span=span, until=until,
-                       skip_if_present=bool(body.get('skip_if_present', True)),
-                       when=dict(when), source=where)
+        return _parse_replace_body(rid, body, when, where)
 
     unknown = set(body) - _DELETE_KEYS
     if unknown:
@@ -445,6 +440,58 @@ def _parse_rule(raw, where: str) -> CueRule:
                    occurrence=occurrence, tag_kind=tag_kind,
                    span=span, until=until,
                    when=dict(when), source=where)
+
+
+def _parse_replace_body(rid: str, body: dict, when: dict, where: str) -> CueRule:
+    """
+    `replace` 的规则体 → `CueRule`（拆出来只为把 `_parse_rule` 的分支压回去，
+    那条函数一直是复杂度棘轮边上那一个）。
+
+    `text` 与 `append` **必须且只能有一个**：前者整行替换，后者原行末尾追加
+    （2026-11-08 起；详见 `_parse_append`）。
+    """
+    unknown = set(body) - _REPLACE_KEYS
+    if unknown:
+        raise BatchRuleError(f'{where}.replace 有不认识的键：{sorted(unknown)}')
+    scope = _parse_scope(body.get('scope'), f'{where}.replace.scope')
+    match = _parse_match(body.get('match'), f'{where}.replace.match')
+    span, until = _parse_span(body.get('span'), f'{where}.replace.span')
+    has_text = 'text' in body
+    has_append = 'append' in body
+    if has_text == has_append:
+        raise BatchRuleError(
+            f'{where}.replace 必须且只能有 text / append 之一'
+            f'（text = 整行替换；append = 原行末尾追加）')
+    text = ('' if has_append
+            else _parse_text(body.get('text'), f'{where}.replace.text'))
+    append = ('' if has_text
+              else _parse_append(body.get('append'),
+                                 f'{where}.replace.append'))
+    occurrence = _parse_occurrence(
+        body.get('occurrence'), f'{where}.replace.occurrence')
+    tag_kind = _parse_tag_kind(
+        body.get('tag_kind'), f'{where}.replace.tag_kind')
+    return CueRule(id=rid, op='replace', text=text, append=append,
+                   scope=scope, match=match, occurrence=occurrence,
+                   tag_kind=tag_kind, span=span, until=until,
+                   skip_if_present=bool(body.get('skip_if_present', True)),
+                   when=dict(when), source=where)
+
+
+def _parse_append(raw, where: str) -> str:
+    """
+    `replace.append`：**追加到原行末尾**的一小段（含前导空格，原样）。
+
+    与 `text` 的校验刻意不同：这里**允许**以空格开头（` fadein 1.0`），
+    也允许是片段而不是完整语句 —— 它不是"写一行"，是"补在这行后面"。
+    只挡三种真会写出坏脚本的：空、含换行、含 CR。
+    """
+    text = str(raw or '')
+    if not text.strip():
+        raise BatchRuleError(f'{where} 不能为空')
+    if '\n' in text or '\r' in text:
+        raise BatchRuleError(f'{where} 只能是单行（换行请用 text 整行替换）')
+    return text
 
 
 def _parse_text(raw, where: str) -> str:
@@ -976,6 +1023,34 @@ def _span_candidates(lines: list, rule, lo: int, hi: int):
     return spans, reasons
 
 
+def _append_already_there(line: str, append: str) -> bool:
+    """
+    这一行是不是**已经加过这条尾巴**（append 的幂等判据）。
+
+    两个判据，任一成立就算"加过了"：
+
+      · 行尾已经是这段（逐字）；
+      · **追加内容的第一个词**（`fadein` / `fadeout` / `with`）已经作为
+        一个词出现在行里。
+
+    为什么要有第二条（真实语料踩点，2026-11-08）：项目里本来就有
+    `play music "bgm/bgm02.mp3" fadein 1.0`（作者手写的），逐字比行尾当然
+    不相等 —— 再加一次会变成 `… fadein 1.0 fadein 1.0`，**重复关键字 =
+    语法错**，脚本直接起不来。宁可少补一次，也不能补出跑不了的脚本。
+    """
+    line = str(line or '')
+    append = str(append or '')
+    if not append.strip():
+        return False
+    if line.rstrip().endswith(append.rstrip()):
+        return True
+    word = append.strip().split()[0]
+    # 只在**引号外面**找那个词：`play music "volume.mp3"` 里的 volume
+    # 是文件名，不是参数名 —— 拿它判"加过了"会永远不补。
+    bare = re.sub(r'"[^"]*"|\'[^\']*\'', '""', line)
+    return re.search(rf'(?<!\w){re.escape(word)}(?!\w)', bare) is not None
+
+
 def _plan_one_span(fp: FilePlan, rule, seq: int, lines: list,
                    start: int, end: int) -> None:
     """把一条已算好范围的行/段编辑收进 `fp.edits`；不合判据就跳过。"""
@@ -1007,6 +1082,18 @@ def _plan_one_span(fp: FilePlan, rule, seq: int, lines: list,
     if not raw_line.strip():
         fp.skipped.append({'seq': seq, 'rule': rule.id,
                            'reason': '空白行不 replace（缩进不可信）'})
+        return
+    if rule.append:
+        # **原行末尾追加**（2026-11-08）：`play music "x"` → `… "x" fadein 1.0`。
+        # 原行一个字节都不动，只加尾巴；已经是目标内容的就跳过（幂等）。
+        if rule.skip_if_present and _append_already_there(raw_line, rule.append):
+            fp.skipped.append({'seq': seq, 'rule': rule.id,
+                               'reason': '已经是目标内容'})
+            return
+        fp.edits.append(LineEdit(
+            kind='replace', line=start + 1, end_line=end + 1,
+            old=raw_line, old_lines=list(lines[start:end + 1]),
+            append=rule.append, seq=seq, rule_id=rule.id))
         return
     indent = raw_line[:_indent_of(raw_line)]
     if rule.skip_if_present and \
@@ -1312,7 +1399,10 @@ def _splice_edits(text: str, insertions: list, edits: list) -> str:
             lines[pos:pos] = _render_lines(obj.text, obj.indent)
         elif kind == 'replace':
             end = min(max(obj.last_line - 1, pos), len(lines) - 1)
-            lines[pos:end + 1] = _render_lines(obj.text, obj.indent)
+            if obj.append:
+                lines[pos:end + 1] = [obj.old.rstrip() + obj.append]
+            else:
+                lines[pos:end + 1] = _render_lines(obj.text, obj.indent)
         elif kind == 'delete':
             end = min(max(obj.last_line - 1, pos), len(lines) - 1)
             del lines[pos:end + 1]

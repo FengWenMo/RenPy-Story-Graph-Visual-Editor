@@ -221,6 +221,10 @@ def describe(rule) -> str:
         cond = _describe_when(when)
         return f'{cond} → 在{where}加一行：{_short(text)}'
     if 'replace' in rule:
+        append = str(body.get('append') or '')
+        if append:
+            return (f'{_describe_when(when)} → 在符合条件的一行后面追加：'
+                    f'{_short(append.strip())}')
         return f'{_describe_when(when)} → 替换符合条件的一行'
     if 'delete' in rule:
         return f'{_describe_when(when)} → 删掉符合条件的一行'

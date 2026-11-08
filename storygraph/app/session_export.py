@@ -116,18 +116,20 @@ def _batch_plan(project_root, rules, rel, warnings) -> object:
 
 
 def _apply_batch_plan(plan, warnings) -> int:
-    """落盘 → 补了几行。写不进去的进 `warnings`；"全都已有"也要说一句。"""
+    """落盘 → **改了几行**（插入 + 替换 + 删除）。写不进去的进 `warnings`。"""
     from storygraph.app import batch_edit as BE
 
     done = BE.apply_plan(plan)
-    inserted = int(done.get('inserted') or 0)
+    changed = sum(int(done.get(key) or 0)
+                  for key in ('inserted', 'replaced', 'deleted'))
     for name, why in done.get('failed') or ():
         warnings.append(f'扩展批处理没写进去（{name}）：{why}')
-    if not inserted and not warnings:
-        skipped = sum(len(fp.skipped) for fp in plan.files)
-        if skipped:
-            warnings.append(f'扩展批处理：{skipped} 处都已有同一行，没有重复补')
-    return inserted
+    if not changed and not warnings:
+        already = sum(1 for fp in plan.files for sk in (fp.skipped or ())
+                      if sk.get('reason') == '已经是目标内容')
+        if already:
+            warnings.append(f'扩展批处理：{already} 处都已经是目标内容，没有重复补')
+    return changed
 
 
 def _span_cn(start, end) -> str:
@@ -961,7 +963,7 @@ class ExportMixin:
             return dict(_NO_BATCH, warnings=warnings)
         done = _apply_batch_plan(plan, warnings)
         rule_ids = '、'.join(str(r.id) for r in rules)
-        note = (f'扩展批处理补了 {done} 行（{rule_ids}）' if done else '')
+        note = (f'扩展批处理改了 {done} 行（{rule_ids}）' if done else '')
         return {'applied': done, 'rule': rule_ids, 'note': note,
                 'warnings': warnings}
 

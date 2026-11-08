@@ -294,13 +294,35 @@ class ExtensionDialog(QDialog):
         rl.addWidget(self.form)
 
     def _build_batch_section(self, rl):
-        """批处理：放在哪 / 对谁 / 写什么 / **预演**。"""
+        """批处理：做什么 / 放在哪 / 匹配哪一行 / 写什么 / **预演**。"""
         self.batch_box = QWidget()
         bl = QVBoxLayout(self.batch_box)
         bl.setContentsMargins(0, 4, 0, 0)
         bl.setSpacing(4)
         bl.addWidget(_hint('批处理：把这段代码按规则补到整章（默认只预演，不写盘）'))
-        brow = QHBoxLayout()
+        # —— 做什么：插一行 / 给已有行**追加**（2026-11-08）——
+        #
+        # 为什么要有"追加"：`play music "x"` 要变成 `… "x" fadein 1.0`，
+        # 原行必须原样保留 —— 用"整行替换"就得把原行抄一遍，抄错一个字
+        # 就把台词/曲名改坏了。追加只加尾巴，最安全。
+        oprow = QHBoxLayout()
+        oprow.addWidget(QLabel('做什么'))
+        self.cb_op = QComboBox()
+        self.cb_op.addItem('插入一行代码', 'insert')
+        self.cb_op.addItem('给匹配的行追加（例如 fadein 1.0）', 'append')
+        self.cb_op.currentIndexChanged.connect(self._on_batch_op_changed)
+        oprow.addWidget(self.cb_op, 2)
+        oprow.addWidget(QLabel('对谁'))
+        self.cb_when = QComboBox()
+        for key, text in (('', '全部拍'), ('sprite', '有立绘的拍'),
+                          ('say', '有台词的拍')):
+            self.cb_when.addItem(text, key)
+        oprow.addWidget(self.cb_when, 1)
+        bl.addLayout(oprow)
+        # —— 插入：放在哪 ——
+        self._place_row = QWidget()
+        brow = QHBoxLayout(self._place_row)
+        brow.setContentsMargins(0, 0, 0, 0)
         brow.addWidget(QLabel('放在哪'))
         self.cb_placement = QComboBox()
         for key, text in (('after_last_show', '最后一次立绘之后'),
@@ -309,19 +331,28 @@ class ExtensionDialog(QDialog):
                           ('before_beat', '这一拍之前')):
             self.cb_placement.addItem(text, key)
         brow.addWidget(self.cb_placement, 1)
-        brow.addWidget(QLabel('对谁'))
-        self.cb_when = QComboBox()
-        for key, text in (('', '全部拍'), ('sprite', '有立绘的拍'),
-                          ('say', '有台词的拍')):
-            self.cb_when.addItem(text, key)
-        brow.addWidget(self.cb_when, 1)
-        bl.addLayout(brow)
-        bl.addWidget(QLabel('写入的代码（原样一行）'))
+        bl.addWidget(self._place_row)
+        # —— 追加：匹配哪一行（正则，按搜索口径）——
+        self._match_row = QWidget()
+        mrow = QHBoxLayout(self._match_row)
+        mrow.setContentsMargins(0, 0, 0, 0)
+        mrow.addWidget(QLabel('匹配哪一行（正则）'))
+        self.ed_match = QLineEdit()
+        self.ed_match.setPlaceholderText(r'^\s*play music\b')
+        self.ed_match.setToolTip(
+            '正则里用 `^\\s*` 开头最稳：只认这一行开头的语句，不会匹配到'
+            '注释或台词里的同名文字。例：`^\\s*play music\\b` / '
+            '`^\\s*stop music\\b`')
+        mrow.addWidget(self.ed_match, 1)
+        bl.addWidget(self._match_row)
+        self._text_label = QLabel('写入的代码（原样一行）')
+        bl.addWidget(self._text_label)
         self.ed_text = QPlainTextEdit()
         self.ed_text.setMaximumHeight(64)
         self.ed_text.setPlaceholderText(
             '$ renpy.transition(Dissolve(0.1), layer="master")')
         bl.addWidget(self.ed_text)
+        self._match_row.setVisible(False)
         # —— 预演：**开关的产物必须能跑一遍引擎**（2026-11-07 探针实测：
         #    以前 `cue_rules()` 产出的是 dict，`plan_batch` 直接 AttributeError，
         #    也就是"开关看着能开、真跑批处理就断"）。
@@ -737,18 +768,38 @@ class ExtensionDialog(QDialog):
         return ('写法：键名是这一格的列名（写回脚本 / 表格上用它的名字）；'
                 '固定关键字那格写"语句里必须原样出现的那个词"。')
 
+    def _on_batch_op_changed(self, *_):
+        """「插入一行」↔「给匹配的行追加」两套字段各自显隐（2026-11-08）。"""
+        append = str(self.cb_op.currentData() or 'insert') == 'append'
+        if getattr(self, '_place_row', None) is not None:
+            self._place_row.setVisible(not append)
+        if getattr(self, '_match_row', None) is not None:
+            self._match_row.setVisible(append)
+        if getattr(self, '_text_label', None) is not None:
+            self._text_label.setText(
+                '追加到行尾（原样，含前导空格）' if append
+                else '写入的代码（原样一行）')
+
     def _fill_batch(self, point: ExtensionPoint):
         batch = dict(point.batch or {})
         insert = dict(batch.get('insert') or {})
+        replace = dict(batch.get('replace') or {})
         when = dict(batch.get('when') or {})
+        is_append = bool(str(replace.get('append') or ''))
+        idx = self.cb_op.findData('append' if is_append else 'insert')
+        self.cb_op.setCurrentIndex(max(0, idx))
         placement = str(insert.get('placement') or 'after_last_show')
         idx = self.cb_placement.findData(placement)
         self.cb_placement.setCurrentIndex(max(0, idx))
+        match = dict(replace.get('match') or {})
+        self.ed_match.setText(str(match.get('pattern') or ''))
         want = 'sprite' if when.get('show') == 'sprite' else (
             'say' if when.get('say') else '')
         idx = self.cb_when.findData(want)
         self.cb_when.setCurrentIndex(max(0, idx))
-        self.ed_text.setPlainText(str(insert.get('text') or ''))
+        text = replace.get('append') if is_append else insert.get('text')
+        self.ed_text.setPlainText(str(text or ''))
+        self._on_batch_op_changed()
         self.batch_box.setVisible(bool(point.batchable))
 
     def _collect_batch(self) -> dict:
@@ -758,6 +809,16 @@ class ExtensionDialog(QDialog):
             when['show'] = 'sprite'
         elif w == 'say':
             when['say'] = True
+        if str(self.cb_op.currentData() or 'insert') == 'append':
+            # **追加**（2026-11-08）：原行原样保留、只加尾巴 ——
+            # `play music "x"` → `play music "x" fadein 1.0`。
+            return {'when': when, 'replace': {
+                'scope': 'beat',
+                'match': {'mode': 'regex',
+                          'pattern': self.ed_match.text().strip()},
+                'append': self.ed_text.toPlainText().rstrip('\n'),
+                'occurrence': 'all',
+                'skip_if_present': True}}
         insert = {'text': self.ed_text.toPlainText().strip(),
                   'placement': str(self.cb_placement.currentData()
                                    or 'after_last_show'),
