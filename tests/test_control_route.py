@@ -228,17 +228,46 @@ class TestApply:
         assert b'\n    jump ch02_control\r\n' in raw
 
     def test_stale_anchor_writes_nothing(self, tmp_path):
+        """
+        锚点那一行**本身**被改过 → 拒写、逐字节不动。
+
+        ⚠ 2026-11-08（第十四轮）判据校准：这一条从前喂的是"在锚点上面插
+        一行"（行号漂了）。现在那种局面**能认回来**（下一条
+        `test_anchor_shifted_down_is_found_again`），所以这里换成真的改坏
+        锚点内容 —— "认不出就不动"那一半必须还在。
+        """
+        root = _project(tmp_path)
+        path = _controller(root)
+        plan = plan_control_route(root, 'ch01', 'ch02', 'jump')
+        path.write_text(CONTROLLER.replace('    return\n',
+                                           '    jump ch09_control\n', 1),
+                        encoding='utf-8')
+        before = path.read_bytes()
+        res = apply_control_route(plan)
+        assert res['ok'] is False
+        assert '不在了' in res['error'], res['error']
+        assert path.read_bytes() == before
+
+    def test_anchor_shifted_down_is_found_again(self, tmp_path):
+        """
+        别人在锚点**上面**插了一行 → 按内容把它认回来，他那一行留着。
+
+        这是第十四轮的正题：`return` 在每个 `_control` 里都有一条，所以只
+        在**它自己那个 label 块**里认（`_label_block`）；认不出才拒写。
+        """
         root = _project(tmp_path)
         path = _controller(root)
         plan = plan_control_route(root, 'ch01', 'ch02', 'jump')
         path.write_text(CONTROLLER.replace('    call ch01\n',
                                            '    call ch01\n    $ x = 1\n'),
                         encoding='utf-8')
-        before = path.read_bytes()
         res = apply_control_route(plan)
-        assert res['ok'] is False
-        assert '对不上' in res['error']
-        assert path.read_bytes() == before
+        assert res['ok'] is True, res
+        after = path.read_text(encoding='utf-8')
+        assert '    $ x = 1\n' in after, '别人插的那一行被吞了'
+        assert ('label ch01_control:\n    call ch01\n    $ x = 1\n'
+                '    jump ch02_control\n') in after
+        assert after.count('    call ch01\n') == 1, '别把锚点认到别的 label 里'
 
     def test_undo_restores_the_exact_old_text(self, tmp_path):
         root = _project(tmp_path)

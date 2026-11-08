@@ -175,15 +175,40 @@ def test_stale_line_id_is_refused_not_guessed(project):
 
 
 def test_source_file_changed_after_plan_writes_nothing(project):
+    """
+    计划之后文件被改过、而且**改的正是要动的那一行** → 拒写、逐字节不动。
+
+    ⚠ 2026-11-08（第十四轮）判据校准：这条从前是"只要整份变过就拒写"
+    （那时末尾追加一行也会被拒）。现在改的是**同一处**才拒 ——
+    "改在别处的"走三路合并（下一条 `..._elsewhere_is_merged`）。
+    这一条是"拒"那一半，必须还在。
+    """
     _s, _g, _h, edges, _o = _setup(project)
     plan = plan_source_line_delete(project, edges, 'main.0002')
     assert plan.ok is True
-    edges.write_text(plan.old_text + '\n# 新加的一行\n', encoding='utf-8')
+    # 别人把**要删的那一行**改了（行尾加注释）→ 认不出该不该删，只能拒
+    edges.write_text(plan.old_text.replace(
+        '    call side from _call_side_1\n',
+        '    call side from _call_side_1  # 先别删\n'), encoding='utf-8')
     before = edges.read_bytes()
     res = apply_source_line_delete(plan)
     assert res['ok'] is False
     assert '又被改过' in res['error']
     assert edges.read_bytes() == before
+
+
+def test_source_file_changed_elsewhere_is_merged(project):
+    """别人改在**别处** → 三路合并：他那一行留着，我要删的那行照删。"""
+    _s, _g, _h, edges, _o = _setup(project)
+    plan = plan_source_line_delete(project, edges, 'main.0002')
+    assert plan.ok is True
+    edges.write_text(plan.old_text + '\n# 新加的一行\n', encoding='utf-8')
+    res = apply_source_line_delete(plan)
+    assert res['ok'] is True, res
+    now = edges.read_text(encoding='utf-8')
+    assert 'call side from _call_side_1' not in now, '我要删的那行得真删掉'
+    assert '# 新加的一行' in now, '别人的改动被吞了'
+    assert 'note' in res and res['note'], '合并了却不吭声 = 静默改别人的文件'
 
 
 def test_command_undo_restores_bytes_and_edge(project):

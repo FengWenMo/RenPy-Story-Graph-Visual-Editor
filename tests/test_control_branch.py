@@ -288,6 +288,28 @@ def test_insert_after_a_trailing_menu_block(tmp_path):
 
 
 def test_apply_refuses_when_the_file_changed_after_plan(tmp_path):
+    """
+    撞在**同一处**（要动的那个 `return` 被人改了）→ 拒写、文件不动。
+
+    ⚠ 2026-11-08（第十四轮）判据校准：从前是"整份变过就拒"（末尾加一行也拒）。
+    现在末尾/别处的改动走三路合并（下一条），只有撞在一起才拒。
+    """
+    root = _project(tmp_path, BASE)
+    plan = plan_control_branch(root, 'ch01', 'ch02', 'jump',
+                               condition='flag', edge_id=13)
+    assert plan.ok
+    path = _control(root)
+    path.write_text(BASE.replace('    return\n', '    jump ch09_control\n', 1),
+                    encoding='utf-8')
+    before = path.read_bytes()
+    res = apply_control_branch(plan)
+    assert res['ok'] is False
+    assert '又被改过' in res['error']
+    assert path.read_bytes() == before, '拒绝写时不该动文件'
+
+
+def test_changes_elsewhere_are_merged_not_refused(tmp_path):
+    """别人改在**别处**（文件末尾）→ 合并：他那一行留着，分支段落上。"""
     root = _project(tmp_path, BASE)
     plan = plan_control_branch(root, 'ch01', 'ch02', 'jump',
                                condition='flag', edge_id=13)
@@ -295,9 +317,11 @@ def test_apply_refuses_when_the_file_changed_after_plan(tmp_path):
     path = _control(root)
     path.write_text(BASE + '\n# 别处的新改动\n', encoding='utf-8')
     res = apply_control_branch(plan)
-    assert res['ok'] is False
-    assert '又被改过' in res['error']
-    assert '# 别处的新改动' in _text(path), '拒绝写时不该动文件'
+    assert res['ok'] is True, res
+    text = _text(path)
+    assert '# 别处的新改动' in text, '别人的改动被吞了'
+    assert f'    {branch_marker(13)}' in text, '我的分支段没落上'
+    assert res.get('note'), '合并了却不吭声'
 
 
 def test_no_control_file_is_explained(tmp_path):

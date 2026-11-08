@@ -169,6 +169,13 @@ class TestApplyInit:
         assert b'label ch02_control:\r\n    call ch02\r\n    return\r\n' in raw
 
     def test_stale_text_writes_nothing(self, tmp_path):
+        """
+        补包装要**追加在文件末尾**，而别人也在末尾加了东西 → 撞在同一处，拒写。
+
+        ⚠ 2026-11-08（第十四轮）：判据从"整份对不上就拒"改成三路合并
+        （`write_gate.commit_text`）。这条用例的姿势刚好是**两边都往末尾加**
+        —— 谁先谁后认不出，仍然必须拒；变的只是那句话的措辞。
+        """
         root = _project(tmp_path)
         path = _controller(root)
         plan = plan_control_init(root, 'ch02')
@@ -177,7 +184,7 @@ class TestApplyInit:
         before = path.read_bytes()
         res = apply_control_init(plan)
         assert res['ok'] is False
-        assert '全文对不上' in res['error']
+        assert '又被改过' in res['error']
         assert path.read_bytes() == before
 
     def test_exists_is_a_successful_noop(self, tmp_path):
