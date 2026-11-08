@@ -323,8 +323,12 @@ class TestEditorExportNamesTheLoss:
 
     @staticmethod
     def _break_the_patch(s, monkeypatch):
-        """把补丁那条路按成"对不上" → 导出会退回全量。"""
-        monkeypatch.setattr(s, '_patch_note', lambda _text: {
+        """把补丁那条路按成"对不上" → 导出会退回全量。
+
+        `_patch_note` 现在多收一个 `target`（2026-11-08：诊断要拿目标文件比
+        "这些台词这份文件里有没有"），stub 也跟着两个参数。
+        """
+        monkeypatch.setattr(s, '_patch_note', lambda _text, _target=None: {
             'used_patch': False, 'text': '',
             'blocking': ['对位率不足（模拟）'],
             'text_note': '（模拟：补丁对不上）', 'had_source': True})

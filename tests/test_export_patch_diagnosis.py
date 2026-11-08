@@ -91,3 +91,20 @@ def test_no_fact_is_invented_when_nothing_is_new(tmp_path):
     joined = ' '.join(facts)
     assert '在载入时那份文件里找不到' not in joined, facts
     assert '没有对应行' not in joined, facts
+
+
+def test_a_target_from_another_version_is_named_as_such(tmp_path):
+    """目标文件里根本没有这些台词 → 一定是"两份不是同一版"，不是"对不上行号"。
+
+    真机那次（`演出剧本/chapter2_2_2.rpy` 是从 txt 重新导入的：`REPORTER`
+    没映射、`（bgX）` 变成 `scene`、`(A7)` 变成 `# A7`）就是这一类。
+    """
+    s, _ch = _session(tmp_path)
+    other = tmp_path / 'game' / 'other.rpy'
+    other.write_text('label c1:\n    "完全另一种写法的一句"\n    return\n',
+                     encoding='utf-8')
+    facts = s._patch_failed_facts(_FakePatch(), other)
+    joined = ' '.join(facts)
+    assert '目标文件里根本没有' in joined, facts
+    assert '不是同一版' in joined, facts
+    assert '载入时那份文件里找不到' not in joined, facts

@@ -76,6 +76,20 @@ _BATCH_ERRORS = (ImportError, OSError, ValueError, TypeError, KeyError,
                  AttributeError, RuntimeError)
 
 
+def _missing_texts(beats, lines) -> list:
+    """这一章的台词里有哪几句**在 `lines` 里根本找不到**（例：'…'，最多取前三）。"""
+    if not lines:
+        return []
+    out = []
+    for b in beats or ():
+        text = str(getattr(b, 'text', '') or '').strip()
+        if not text:
+            continue
+        if not any(text in ln for ln in lines):
+            out.append(text[:16])
+    return out
+
+
 def _batch_rel_target(project_root, target) -> str:
     """导出目标 → 项目内相对路径（不在项目内 / 不在 `game/` 下 → `''`）。"""
     root = str(project_root or '')
@@ -448,7 +462,7 @@ class ExportMixin:
                     'codes': ['COMPILE'], 'note': '', 'todos': 0}
 
         text = result.rpy_text
-        note = self._patch_note(text)
+        note = self._patch_note(text, target)
         note['text_note'] = self._with_sanitize_note(note.get('text_note', ''))
         if note['used_patch']:
             text = note['text']
@@ -698,7 +712,7 @@ class ExportMixin:
         return {'blocking': [], 'text': verdict.final_text,
                 'note': verdict.note(), 'warning': verdict.full_note()}
 
-    def _patch_failed_facts(self, res) -> list:
+    def _patch_failed_facts(self, res, target=None) -> list:
         """
         补丁没对上时补一句**能看出是哪一类**的事实（2026-11-08 第十九轮）。
 
@@ -709,12 +723,16 @@ class ExportMixin:
         `19 句台词在补丁结果里找不到` 这句只说了"多少"，说不出"**为什么**" ——
         而三种原因的处理办法完全不同：
 
-          · 那些台词/卡片是**新写的**（源文件里本来没有）→ 增量只能改已有的行；
-          · 源文件被换成了**另一版**（拍数/行数都不一样）→ 先对齐版本；
+          · **目标文件里根本没有这些台词**（两份不是同一版）→ 先对齐版本
+            （在工具里打开**那一份**再改，或整份导成新章）；
+          · 那些台词/卡片是**新写的**（载入时那份文件里没有）→ 增量只能改已有的行；
           · 只是说话人/章节变了 → 重新载入那一版再改。
 
-        这里只算**便宜又确定**的两件事（不解析第二遍盘上那份）：
-        新加的卡有几张、新台词有几条；再加上两边关于文件规模的事实。
+        第二类判据（"目标文件里有没有"）就是真机那次的关键：用户说
+        「这新一份（演出剧本）就是从它里面改的」—— 实测不是：那一份是从
+        `2-2-2凌跃捷线-定稿.txt` **重新导入**的（`REPORTER`/`HOST` 没映射成
+        已声明角色、`（bgX）` 变成了 `scene`、`(A7)` 变成 `# A7`），和游戏目录
+        那份差 211 行。两版之间没有"行"可以对应，增量补丁无从下手。
 
         返回**一句话的列表**（空 = 没算出什么，不硬说）。
         """
@@ -723,6 +741,12 @@ class ExportMixin:
             beats = list(self.beats or ())
             base = str(getattr(self, '_source_baseline_text', '') or '')
             lines = [ln for ln in base.splitlines()] if base else []
+            target_text = ''
+            if target is not None:
+                tgt = Path(target)
+                if tgt.is_file() and tgt != Path(self.script_path or ''):
+                    from storygraph.story.source_style import read_text
+                    target_text = read_text(tgt)[0]
             fresh_beats = [b for b in beats
                            if not int(getattr(b, 'src_first', 0) or 0)]
             if fresh_beats:
@@ -730,18 +754,18 @@ class ExportMixin:
                     f'工具里这一章有 {len(fresh_beats)} 张卡**在源文件里没有对应行**'
                     f'（新加的卡 / 从别处写回来的）—— 增量补丁只能改**文件里已有'
                     f'的行**，这类卡它写不进去')
-            if lines:
-                missing = []
-                for b in beats:
-                    text = str(getattr(b, 'text', '') or '').strip()
-                    if not text:
-                        continue
-                    if not any(text in ln for ln in lines):
-                        missing.append(text[:16])
-                if missing:
-                    facts.append(
-                        f'{len(missing)} 句台词在载入时那份文件里找不到（例：'
-                        f'{missing[0]!r}）—— 它们是新写的，不是"对不上行号"')
+            missing_base = _missing_texts(beats, lines)
+            missing_tgt = _missing_texts(beats, target_text.splitlines()
+                                         if target_text else [])
+            if missing_tgt:
+                facts.append(
+                    f'{len(missing_tgt)} 句台词**目标文件里根本没有**（例：'
+                    f'{missing_tgt[0]!r}）—— 工具里这一章和这个文件不是同一版；'
+                    f'增量补丁只能在同一份文件上改，两版之间先对齐再导')
+            elif missing_base:
+                facts.append(
+                    f'{len(missing_base)} 句台词在载入时那份文件里找不到（例：'
+                    f'{missing_base[0]!r}）—— 它们是新写的，不是"对不上行号"')
             if getattr(res, 'total_beats', 0):
                 facts.append(f'这次对位 {res.matched_beats}/{res.total_beats} 拍；'
                              f'工具里 {len(beats)} 拍')
@@ -1097,7 +1121,7 @@ class ExportMixin:
         extra = '；'.join(notes)
         return f'{text}；{extra}' if text else extra
 
-    def _patch_note(self, text: str) -> dict:
+    def _patch_note(self, text: str, target=None) -> dict:
         """
         试着走增量补丁。**补不上时不许装作"换了个写法"**（P0，2026-10-05）。
 
@@ -1191,7 +1215,7 @@ class ExportMixin:
             reason = ('；'.join(res.reasons)
                       or f'对位率不足（{res.coverage:.0%}）')
             return {'used_patch': False, 'text': '',
-                    'blocking': [reason] + self._patch_failed_facts(res),
+                    'blocking': [reason] + self._patch_failed_facts(res, target),
                     'had_source': had_source, 'base_text': base_text,
                     'text_note': f'增量未采用：{reason}'}
         except Exception as e:               # noqa: BLE001
