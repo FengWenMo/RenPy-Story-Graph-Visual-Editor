@@ -37,6 +37,10 @@
 - **复杂度棘轮** `tests/complexity_budget.json`（最长 40 + 最绕 40）只许降不许升；硬线 500 行 / 150 分支；`python tools/complexity_report.py`。给顶格函数加注释也会红 → 抽公共段，不改棘轮。
 - **技术债棘轮** `tools/debt_report.py` 八项，`tests/tech_debt_budget.json` 快照（环按模块集合比）。⚠ 删单条边不缩小 SCC；互引对要两条都动；共享常量要随函数搬；`modules_in_cycles_all` 才是真债。
 - **改这四处先跑地狱判据**：`test_hell_atomic_io.py` / `test_hell_excel_cycles.py` / `test_hell_guardrails.py` / `test_patch_line_splitting.py`。
+- **变异脚本不许和全量同时跑**（2026-11-08 第十四轮真踩）：`mutation_*.py` 会**原地**
+  改写生产模块再还原；同时在跑 fasttest 时，worker 会导入到变异版 —— 本轮 5 条
+  判据集体红（全是 M2/M3/M9 该抓的那几条），一度以为是真失败。看到"整批同类判据
+  同时红"先怀疑这个。规矩：mutation 跑完再起 fasttest。
 - **搬家会把"断言 0 次调用"变成空话**：`from ... import` 是绑值。移动任何被 patch 的符号要全仓库搜字符串，**定义处 + 转发处两处都打桩**。
 - **搬函数用 `ast` 取范围**（`n.lineno-1 : n.end_lineno`）；"切到下一个 def"会吞掉中间的模块常量。
 
@@ -50,6 +54,9 @@
 - **Qt 槽异常只打 stderr = "点了没反应"**：`QMessageBox.addButton(文本, 角色)` 第二参数是 **ButtonRole**（传 StandardButton 当场 TypeError，真机四入口一起失效）。菜单/右栏动作过 `window_nodes._menu_action` 安全壳；有模态的动作要"真建框"判据。
 - **模态要打全**：`_ask_delete_mode` 的 `box.exec()`、`_review_stage_suspects` 的 `dlg.exec()`；`QMenu.exec` 打桩不可靠 → 菜单建成纯函数再测。
 - **`QLabel` 不渲染 markdown**：`**`、反引号会**原样显示**（第十轮踩过、第十三轮又踩一次：窗口里写着"这里定的是\*\*留多少\*\*"）。说明文字只能纯文字，路径/名字用「」圈；判据 `test_no_markdown_leaks_into_the_labels`（扫窗口里所有 `QLabel`）。
+- **Toast 是一行 `wordWrap=False` 的浮层**（第十四轮踩）：超过窗口宽就被裁，用户看到
+  半句话。给 `notify` 的消息要**短**（一个短句）；细节（第几行、为什么）走窗口日志
+  `host._log`。窗口里拿 `Toast` 截图 = 最便宜的验收方式。
 - **延迟 import 是打桩点**（`card_editor._pick_spec_value` 的 `choose_from`、`_build_toolbars` 闭包里的 `act()`），提到顶层就判据失效 → 真弹框 → 124。
 - "扫源码"类判据统一走 `tests/_source_paths.main_window_source_text()`；新模块加进 `WINDOW_SIDE_MODULES`。卡片回调搬走后要 `import ... as CA` 打 `CA.*`。
 - QSS 吞 `QTreeView` 展开三角 → 自绘 `▾/▸` + `setRootIsDecorated(False)`；判 dock 用 `isHidden()`；`saveState()` 要 `objectName`。
@@ -60,6 +67,15 @@
 
 **落盘/全局开关**
 - 写盘只有一条路 `core/atomicio.py`（临时文件 → `newline=''` → fsync → 多代备份 → `os.replace`），别用 `wb.save(path)`。三条别改回去：备份名带序号（同 tick 会盖掉上一代）｜`os.replace` 对瞬时 `PermissionError` 重试 6×20ms｜Excel 后缀白名单只认 `.xlsx`。
+- **写章节脚本 / 编排层的原地小改走闸 `write_gate.commit_text`**（第十四轮）：
+  `commit_text(path, base_text, draft_text)` = 读现在这份 → 判定 →（必要时）**行级
+  三路合并** → 落盘（仍走 `paths.write_text_atomic`）。四态：`same`（盘上已是草稿，
+  **不写**）/ `wrote` / `merged` / `conflict`（**一个字不写**）。⚠ `Commit.final_text`
+  **不许**当撤销的"期望内容"（撤销比的是"盘上还是我写的那份"，拿合并结果比会放行、
+  把别人那几行抹掉）。**只动一行**的那三处（接线/断线/改接线）走
+  `story/control_anchor.locate`：按内容认、**只在自己那个 label 块里认**（全文找
+  "唯一一处"会认到别的 `_control`）。新落盘点过不了
+  `tests/test_merge_gate_coverage.py`（AST 扫，四类之一）。
 - **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七、八轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写；**删文件与备份也在这个出口**：`edit` 返回 3 元组 `(result, changed, delete)`，`backup=True` 备份的是**锁里读到的那份文本**，备份失败 = 整次拒写）。四个删改入口（`remove_statement` / `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`）全都走它，**别再自己读一遍清单**。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
 - **用户级设置**（第十三轮）：`%LOCALAPPDATA%/StoryGraph/settings.json` 只有 `core.user_prefs.update(name, patch)` 一个出口（锁里读→**只改这一节**→原子写；patch 里 `None`=删键；读不懂就 `CorruptSettings` **拒写** —— 那文件人也会手改）。⚠ **写盘路每一代都要读它**（脚本留档档位），所以缺/坏时只能退化成默认，**绝不许拦写盘**；`STORYGRAPH_SETTINGS` 可改位置（测试那道 autouse 夹具靠它）。这类东西别用 `QSettings` —— core 没有（也不该有）Qt。
 - 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
@@ -243,7 +259,29 @@
   `_isolated_user_prefs`（不然本机档位会让旧判据集体变红）。
   详见 `docs/设计_脚本历史版本_2026-11-08.md` §十四~十七。
 
-真缺口：D4 Excel 前端上限｜拍级三路合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜撤销不做重做。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
+- **别人也在改这个脚本（2026-11-08 第十四轮）**：上一轮补"退回去"，这轮补
+  **写进去的那一刻**。探针量到：`.rpy` 落盘点 **18 处**，"内容变了就拒写"的闸
+  17 处有、1 处没有、**三路合并 0 处** —— 而 `write_gate.merge_text` 2026-10-31
+  就写好了，**生产代码零调用方**（"已实现没接线"）。做法：
+  `write_gate.commit_text(path, base, draft)` 四种结局
+  `same`（盘上已是草稿→**不写**，不烧历史版本）/ `wrote`（=从前逐字节）/
+  `merged`（两边不重叠→都落上，`kept` 说清保住谁那几段）/ `conflict`（撞同一处→
+  一个字不写）；写盘仍只走 `paths.write_text_atomic`。
+  `story/control_anchor.py`（新）管"只动一行"那三处：**按内容找回锚点**，
+  而且**只在自己那个 label 块里认**（全文找"唯一一处"会把 `ch02_control` 的
+  `return` 认成 `ch01_control` 的，接线写错章）。
+  ⚠ **`Commit.final_text` 不许当撤销的期望内容**（撤销比的是"盘上还是我写的那份"，
+  拿合并结果比会放行、把别人那几行抹掉）；回执里 `old_text/new_text` 仍是计划那两份。
+  ⚠ **Toast 是一行 `wordWrap=False`** → 短句进 notify、长句（第几行 + "要重新载入"）
+  进窗口日志（第一版 110 字被裁在句子中间，**截图才发现**）。
+  判据 `tests/test_merge_commit.py` 28 + `tests/test_merge_gate_coverage.py` 7
+  （后者用 `ast` 扫"真调了 `write_text_atomic` 的函数"，每处必须落进
+  过闸/认锚点/撤销/例外 四类之一），变异 **16/16**，全量 **10307 / 10303 passed**。
+  ⚠ **变异脚本与全量并发 = 假失败**：mutation 会原地改写生产模块再还原，
+  同时在跑 fasttest 会让 worker 导入到变异版（本轮 5 条判据集体红，以为天塌了）。
+  详见 `docs/设计_别人也在改_三路合并_2026-11-08.md`。
+
+真缺口：拍级三路合并（**导出那条大路**仍拒写：改一句台词→导出，被别人动过就退回）｜相邻冲突没有"人来点"的界面｜`batch_edit` 的合并（要先让预演显示合并进来哪几行）｜`control_takeover` 多文件合并｜G1 行为级契约进 CI（`skipif(not REAL)` 在 Linux 必 skip）｜G2 引擎版本适配层｜引擎试玩只支持 Windows 源生 SDK｜`field` 加新列的导出口径未定｜撤销不做重做（卡片页/表页那边，图级有 `redo()`）｜D4 Excel 前端上限。（`resolve_layers` 那条老账第八轮核掉了：引擎本来就没有"组里第一个"兜底。）
 
 ## 六、协作 / 发布
 
