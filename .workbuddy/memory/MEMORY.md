@@ -76,6 +76,27 @@
   `story/control_anchor.locate`：按内容认、**只在自己那个 label 块里认**（全文找
   "唯一一处"会认到别的 `_control`）。新落盘点过不了
   `tests/test_merge_gate_coverage.py`（AST 扫，四类之一）。
+- **导出那条大路也过三路合并**（第十五轮）：`_patch_note` 发现文件被外人改过时，
+  把补丁打在**底稿**（`_source_baseline_text`，`load()` 解析出这些拍的那份文本）上；
+  `export()` 再调 `_settle_with_disk` → `write_gate.merge_three_way`
+  （与 `commit_text` **同一个判定**）。
+  ⚠ `patch_export(base_text=…)` 的产物**一定缺**别人那几行，**必须接着合并**——
+  否则就是拿旧底稿覆盖他的文件（守卫 `test_every_base_text_call_site_merges`）。
+  ⚠ 合并**只在 `note['used_patch']` 为真时**进：补丁失败时 `text` 还是
+  `result.rpy_text`（**全量重生成**），拿它合并 = 静默全量覆盖 + 把真拒因盖掉。
+  ⚠ 没有底稿（手工塞 beats / 表格那条路）→ 照旧保守拒绝，别以为它自动好了。
+  只合"目标就是源文件"；导出到 `build/` 是"我这一版"，不碰他的文件。
+  撞车时理由要点到**第几张卡**（`card_at_lines`），用户面对的是卡片不是行号。
+- **`_report_swallowed(mark)` 末尾也调 `_status`**（第十五轮真踩）：任何
+  "要说一句成功"的地方都要**先报静默失败、再报成功**，否则那句成功
+  **永远看不见**（实测被一条无关的 `cleanup_tmp` 盖成「⚠ 本次有 N 次失败被跳过」，
+  判据全绿、截图才发现）。明细不在状态栏：左边 `_diag_bar` 永久一条 + 控制台 + 诊断面板。
+- ⚠ **G1 已知缺口**：同一拍"旁白 → 台词 **+ 顺手加一张 `show`**"仍然拒
+  （`1 条生成内容在补丁结果里找不到`，**没有外部改动也一样**）。根因：
+  旁白被整句换掉时走 `_narration_slot_replaced`，它只做一对一替换
+  （`allow_edit=False`）；能加行的 `trust_ranges` 分支在它之后。**是拒绝，不是静默丢。**
+  另记一条：`trust_ranges` 真正不可替代的场景是"**连说话人都换了**"
+  （`e` → `jc` + 换词）—— 只换正文靠说话人认得出，旁白被换掉有上面那条分支兜着。
 - **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七、八轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写；**删文件与备份也在这个出口**：`edit` 返回 3 元组 `(result, changed, delete)`，`backup=True` 备份的是**锁里读到的那份文本**，备份失败 = 整次拒写）。四个删改入口（`remove_statement` / `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`）全都走它，**别再自己读一遍清单**。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
 - **用户级设置**（第十三轮）：`%LOCALAPPDATA%/StoryGraph/settings.json` 只有 `core.user_prefs.update(name, patch)` 一个出口（锁里读→**只改这一节**→原子写；patch 里 `None`=删键；读不懂就 `CorruptSettings` **拒写** —— 那文件人也会手改）。⚠ **写盘路每一代都要读它**（脚本留档档位），所以缺/坏时只能退化成默认，**绝不许拦写盘**；`STORYGRAPH_SETTINGS` 可改位置（测试那道 autouse 夹具靠它）。这类东西别用 `QSettings` —— core 没有（也不该有）Qt。
 - 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
