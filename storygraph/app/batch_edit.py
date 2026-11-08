@@ -43,6 +43,18 @@ from pathlib import Path
 
 from storygraph.core.vocabulary import NON_ACTOR_TAGS, SHOW_INTRO_KEYWORDS
 from storygraph.story.source_style import read_text
+# 一行/整表的纯文本判据、以及"计划 → 人话"分别住在两个叶子模块里
+# （2026-11-08 拆，理由见各自文件头：超长文件 / 分支数都顶到棘轮上限）。
+from storygraph.app.batch_report import format_diff, format_plan
+from storygraph.app.batch_text import (GUARD_SKIPS, SKIP_APPENDED,
+                                       SKIP_COMMENT, SKIP_PYTHON,
+                                       append_already_there, append_line,
+                                       check_top_level_only,
+                                       indent_of as _indent_of,
+                                       is_block_header as _is_block_header,
+                                       python_block_head,
+                                       render_lines as _render_lines,
+                                       splice_edits, split_comment)
 
 SCHEMA = 'storygraph.batch/1'
 PLAN_SCHEMA = 'storygraph.batch.plan/1'
@@ -67,7 +79,6 @@ _DELETE_KEYS = frozenset({'scope', 'match', 'occurrence', 'tag_kind', 'span'})
 _RULE_KEYS = frozenset({'id', 'when', 'insert', 'replace', 'delete'})
 
 _LINE_KIND = re.compile(r'^([ \t]*)(show|hide)[ \t]+(\S+)')
-_BLOCK_TAIL = re.compile(r':[ \t]*(?:#.*)?$')
 
 
 class BatchRuleError(ValueError):
@@ -177,6 +188,10 @@ class LineEdit:
     old_lines: list = field(default_factory=list)
     text: str = ''             # replace 的新内容（不含基准缩进，可多行）
     append: str = ''           # replace.append：追加到原行末尾的一小段
+    #: append 算出来的**成品行**（含原缩进/原行尾注释）。为什么存下来
+    #: （2026-11-08）：追加的落点不再是"整行末尾"—— 行尾注释要留在最后，
+    #: 所以成品行必须由算计划的那一处决定，落盘时不能再拼一次。
+    new: str = ''
     indent: str = ''
     seq: int = 0
     rule_id: str = ''
@@ -197,6 +212,8 @@ class LineEdit:
             'lines': self.span_lines,
             'old': self.old,
             'text': _text_json(self.text),
+            'append': self.append,
+            'new': self.new,
             'seq': self.seq,
             'rule': self.rule_id,
         }
@@ -462,6 +479,13 @@ def _parse_replace_body(rid: str, body: dict, when: dict, where: str) -> CueRule
         raise BatchRuleError(
             f'{where}.replace 必须且只能有 text / append 之一'
             f'（text = 整行替换；append = 原行末尾追加）')
+    if has_append and (span or until):
+        # 追加是"**这一行**末尾补一段"；带上 span 就变成"把一段换成首行+尾巴"，
+        # 中间那几行会被**删掉**（2026-11-08 地狱测试：这类规则以前能算计划，
+        # 一落盘就丢行，而且没人会想这么写）。
+        raise BatchRuleError(
+            f'{where}.replace: append 只能作用于单行，不能和 span 一起用'
+            f'（要做整段替换请写 text）')
     text = ('' if has_append
             else _parse_text(body.get('text'), f'{where}.replace.text'))
     append = ('' if has_text
@@ -523,6 +547,10 @@ def _parse_text(raw, where: str) -> str:
         raise BatchRuleError(f'{where} 第一行不能是空行')
     if lines[0][:1] in (' ', '\t'):
         raise BatchRuleError(f'{where} 第一行不要自己带缩进（缩进跟锚点走）')
+    try:
+        check_top_level_only(lines, where)
+    except ValueError as exc:           # 叶子模块不认 `BatchRuleError`（防环）
+        raise BatchRuleError(str(exc)) from exc
     _check_text_structure(lines, where)
     return '\n'.join(lines)
 
@@ -774,17 +802,6 @@ def _compose_code(beat) -> str:
         return str(getattr(beat, 'code', '') or '')
 
 
-def _indent_of(line: str) -> int:
-    return len(line) - len(line.lstrip(' \t'))
-
-
-def _is_block_header(line: str) -> bool:
-    """`if:` / `python:` / `show …:` / `menu:`；注释不算。"""
-    stripped = line.strip()
-    return bool(stripped) and not stripped.startswith('#') \
-        and bool(_BLOCK_TAIL.search(line.rstrip()))
-
-
 def _after_block(lines: list, idx: int, hi: int) -> int:
     """锚点行若以 `:` 收尾（show + ATL 块），返回块尾；否则就是它自己。"""
     if not _is_block_header(lines[idx]):
@@ -982,12 +999,6 @@ def _span_cuts_block(lines: list, start: int, end: int):
     return None
 
 
-def _render_lines(text: str, indent: str) -> list:
-    """把规则正文渲染成源文件行：基准缩进 + 续行的相对缩进。"""
-    return ['' if not line.strip() else indent + line
-            for line in text.split('\n')]
-
-
 def _span_candidates(lines: list, rule, lo: int, hi: int):
     """在 `[lo, hi)` 里找匹配行并算出范围；返回 `(spans, 跳过原因)`。"""
     hits = [i for i in range(lo, min(hi, len(lines)))
@@ -1021,34 +1032,6 @@ def _span_candidates(lines: list, rule, lo: int, hi: int):
             continue
         spans.append((start, end))
     return spans, reasons
-
-
-def _append_already_there(line: str, append: str) -> bool:
-    """
-    这一行是不是**已经加过这条尾巴**（append 的幂等判据）。
-
-    两个判据，任一成立就算"加过了"：
-
-      · 行尾已经是这段（逐字）；
-      · **追加内容的第一个词**（`fadein` / `fadeout` / `with`）已经作为
-        一个词出现在行里。
-
-    为什么要有第二条（真实语料踩点，2026-11-08）：项目里本来就有
-    `play music "bgm/bgm02.mp3" fadein 1.0`（作者手写的），逐字比行尾当然
-    不相等 —— 再加一次会变成 `… fadein 1.0 fadein 1.0`，**重复关键字 =
-    语法错**，脚本直接起不来。宁可少补一次，也不能补出跑不了的脚本。
-    """
-    line = str(line or '')
-    append = str(append or '')
-    if not append.strip():
-        return False
-    if line.rstrip().endswith(append.rstrip()):
-        return True
-    word = append.strip().split()[0]
-    # 只在**引号外面**找那个词：`play music "volume.mp3"` 里的 volume
-    # 是文件名，不是参数名 —— 拿它判"加过了"会永远不补。
-    bare = re.sub(r'"[^"]*"|\'[^\']*\'', '""', line)
-    return re.search(rf'(?<!\w){re.escape(word)}(?!\w)', bare) is not None
 
 
 def _plan_one_span(fp: FilePlan, rule, seq: int, lines: list,
@@ -1086,16 +1069,39 @@ def _plan_one_span(fp: FilePlan, rule, seq: int, lines: list,
     if rule.append:
         # **原行末尾追加**（2026-11-08）：`play music "x"` → `… "x" fadein 1.0`。
         # 原行一个字节都不动，只加尾巴；已经是目标内容的就跳过（幂等）。
-        if rule.skip_if_present and _append_already_there(raw_line, rule.append):
+        # ⚠ 落点是**代码末尾**，不是整行末尾：行尾注释要留在最后
+        #   （`batch_text.append_line` 有现场说明）。
+        body, _comment = split_comment(raw_line)
+        if not body.strip():
             fp.skipped.append({'seq': seq, 'rule': rule.id,
-                               'reason': '已经是目标内容'})
+                               'reason': SKIP_COMMENT})
+            return
+        if python_block_head(lines, start) is not None:
+            fp.skipped.append({'seq': seq, 'rule': rule.id,
+                               'reason': SKIP_PYTHON})
+            return
+        if rule.skip_if_present and append_already_there(raw_line, rule.append):
+            fp.skipped.append({'seq': seq, 'rule': rule.id,
+                               'reason': SKIP_APPENDED})
+            return
+        new_line = append_line(raw_line, rule.append)
+        if new_line == raw_line:
+            # 成品行和原行一模一样（`skip_if_present=False` 时才会走到）
+            fp.skipped.append({'seq': seq, 'rule': rule.id,
+                               'reason': SKIP_APPENDED})
             return
         fp.edits.append(LineEdit(
             kind='replace', line=start + 1, end_line=end + 1,
             old=raw_line, old_lines=list(lines[start:end + 1]),
-            append=rule.append, seq=seq, rule_id=rule.id))
+            append=rule.append, new=new_line, seq=seq, rule_id=rule.id))
         return
     indent = raw_line[:_indent_of(raw_line)]
+    if start == end and python_block_head(lines, start) is not None:
+        # 单行整行替换落在 python 块体里 → 同样是改坏 Python
+        # （见 `batch_text.python_block_head`）
+        fp.skipped.append({'seq': seq, 'rule': rule.id,
+                           'reason': SKIP_PYTHON})
+        return
     if rule.skip_if_present and \
             _render_lines(rule.text, indent) == lines[start:end + 1]:
         fp.skipped.append({'seq': seq, 'rule': rule.id,
@@ -1362,7 +1368,7 @@ def apply_plan(plan: BatchPlan) -> dict:
             text, style = read_text(fp.path)
             if text != fp.old_text:
                 raise RuntimeError('源文件在计划之后又被改过；为了不误改，这次没有写')
-            new_text = _splice_edits(text, fp.insertions, fp.edits)
+            new_text = splice_edits(text, fp.insertions, fp.edits)
             write_text_atomic(fp.path, style.apply(new_text, source=fp.path),
                               backup=True)
         except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
@@ -1377,123 +1383,10 @@ def apply_plan(plan: BatchPlan) -> dict:
             'replaced': replaced, 'deleted': deleted}
 
 
-def _splice_edits(text: str, insertions: list, edits: list) -> str:
-    """按**原始行号**从后往前改；同一位置的多条插入保持规则顺序。"""
-    lines = text.split('\n')
-    ops = []
-    for ins in insertions:
-        pos = ins.line if not ins.before else ins.line - 1
-        pos = max(0, min(pos, len(lines)))
-        ops.append((pos, int(ins.seq), 0, 'insert', ins))
-    for edit in edits:
-        start = edit.line - 1
-        end = edit.last_line - 1
-        if 0 <= start < len(lines):
-            end = min(max(end, start), len(lines) - 1)
-            ops.append((start, int(edit.seq), 1, edit.kind, edit))
-    # 从后往前；同一位置先做线编辑、后做插入；插入按 seq 逆序放入，
-    # 最终文件里的顺序才是 seq 正序。
-    ops.sort(key=lambda op: (op[0], op[2], op[1]), reverse=True)
-    for pos, _seq, _kind_order, kind, obj in ops:
-        if kind == 'insert':
-            lines[pos:pos] = _render_lines(obj.text, obj.indent)
-        elif kind == 'replace':
-            end = min(max(obj.last_line - 1, pos), len(lines) - 1)
-            if obj.append:
-                lines[pos:end + 1] = [obj.old.rstrip() + obj.append]
-            else:
-                lines[pos:end + 1] = _render_lines(obj.text, obj.indent)
-        elif kind == 'delete':
-            end = min(max(obj.last_line - 1, pos), len(lines) - 1)
-            del lines[pos:end + 1]
-    return '\n'.join(lines)
-
-
-# ---------------------------------------------------------------------------
-#  报告
-# ---------------------------------------------------------------------------
-
-def format_diff(plan: BatchPlan, context: int = 2) -> str:
-    """统一 diff（预演用）；只对有计划改动的文件生成。"""
-    import difflib
-
-    out = []
-    for fp in plan.files:
-        if fp.error or not (fp.insertions or fp.edits):
-            continue
-        new_text = _splice_edits(fp.old_text, fp.insertions, fp.edits)
-        out.extend(difflib.unified_diff(
-            fp.old_text.split('\n'), new_text.split('\n'),
-            fromfile=f'{fp.rel} (before)', tofile=f'{fp.rel} (after)',
-            n=max(0, int(context)), lineterm=''))
-    return '\n'.join(out) if out else '（没有差异）'
-
-
-def format_plan(plan: BatchPlan, limit: int = 5) -> str:
-    """人话报告：每份文件几处 insert / replace / delete，前几处是什么。"""
-    out = [f'批量编辑预演：{len(plan.rules)} 条规则，'
-           f'{plan.pending} 处待处理']
-    for fp in plan.files:
-        if fp.error:
-            out.append(f'  {fp.rel}: 跳过（{fp.error}）')
-            continue
-        n_ins = len(fp.insertions)
-        n_rep = sum(1 for e in fp.edits if e.kind == 'replace')
-        n_del = sum(1 for e in fp.edits if e.kind == 'delete')
-        out.append(f'  {fp.rel}: {fp.total} 处'
-                   f'（+{n_ins} ~{n_rep} -{n_del}）')
-        if limit > 0:
-            items = []
-            for ins in fp.insertions:
-                arrow = 'before' if ins.before else 'after'
-                first = ins.text.split('\n')[0]
-                more = '' if '\n' not in ins.text else \
-                    f'… 共 {len(ins.text_lines)} 行'
-                items.append((ins.line, 0,
-                              f'    L{ins.line} {arrow}  + '
-                              f'{ins.indent}{first}{more}'))
-            for ed in fp.edits:
-                where = (f'L{ed.line}' if ed.span_lines == 1
-                         else f'L{ed.line}-L{ed.last_line}')
-                if ed.kind == 'replace':
-                    items.append((ed.line, 1,
-                                  f'    {where} replace  - {ed.old.strip()}'))
-                    first = ed.text.split('\n')[0]
-                    more = '' if ed.span_lines == 1 and '\n' not in ed.text \
-                        else f'… {ed.span_lines} 行'
-                    items.append((ed.line, 2,
-                                  f'    {" " * len(where)} replace  + '
-                                  f'{ed.indent}{first}{more}'))
-                else:
-                    suffix = ('' if ed.span_lines == 1
-                              else f'… 共 {ed.span_lines} 行')
-                    items.append((ed.line, 3,
-                                  f'    {where} delete   - '
-                                  f'{ed.old.strip()}{suffix}'))
-            items.sort(key=lambda item: (item[0], item[1]))
-            out.extend(item[2] for item in items[:limit])
-            if len(items) > limit:
-                out.append(f'    … 还有 {len(items) - limit} 行明细')
-        if fp.skipped:
-            reasons = {}
-            for sk in fp.skipped:
-                reasons[sk['reason']] = reasons.get(sk['reason'], 0) + 1
-            tail = '；'.join(f'{k} {v}' for k, v in reasons.items())
-            out.append(f'    （跳过 {len(fp.skipped)}：{tail}）')
-    if plan.errors:
-        for err in plan.errors:
-            out.append(f'  ! {err}')
-    if not plan.pending:
-        out.append('没有待处理的编辑。')
-    else:
-        out.append('未写盘；加 --apply 才写。')
-    return '\n'.join(out)
-
-
 __all__ = [
-    'BatchPlan', 'BatchRuleError', 'CueRule', 'FilePlan', 'Insertion',
-    'LineEdit', 'MATCH_MODES', 'OCCURRENCES', 'PLAN_SCHEMA', 'SCHEMA',
-    'SCOPES', 'SPAN_MODES', 'apply_plan', 'format_diff', 'format_plan',
-    'load_rule_file', 'merge_declared_rules', 'parse_rule', 'parse_rules',
-    'plan_batch', 'rules_from_extensions',
+    'BatchPlan', 'BatchRuleError', 'CueRule', 'FilePlan', 'GUARD_SKIPS',
+    'Insertion', 'LineEdit', 'MATCH_MODES', 'OCCURRENCES', 'PLAN_SCHEMA',
+    'SCHEMA', 'SCOPES', 'SPAN_MODES', 'apply_plan', 'format_diff',
+    'format_plan', 'load_rule_file', 'merge_declared_rules', 'parse_rule',
+    'parse_rules', 'plan_batch', 'rules_from_extensions',
 ]

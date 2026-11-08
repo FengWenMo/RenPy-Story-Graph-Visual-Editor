@@ -124,11 +124,24 @@ def _apply_batch_plan(plan, warnings) -> int:
                   for key in ('inserted', 'replaced', 'deleted'))
     for name, why in done.get('failed') or ():
         warnings.append(f'扩展批处理没写进去（{name}）：{why}')
+    counts = {}
+    for fp in plan.files:
+        for sk in (fp.skipped or ()):
+            reason = str(sk.get('reason') or '')
+            counts[reason] = counts.get(reason, 0) + 1
     if not changed and not warnings:
-        already = sum(1 for fp in plan.files for sk in (fp.skipped or ())
-                      if sk.get('reason') == '已经是目标内容')
+        already = counts.get('已经是目标内容', 0)
         if already:
             warnings.append(f'扩展批处理：{already} 处都已经是目标内容，没有重复补')
+    # **保护性跳过要说出来**（2026-11-08，地狱测试）：规则打中的行在
+    # `python:` 块里 / 是注释行时，补进去是改坏脚本 —— 工具拒绝是对的，
+    # 但导出若只说"文件没有被改动"，人只会以为规则没生效。哪怕别处补上了，
+    # 这几处也要点名（否则永远查不出"为什么这一条没生效"）。
+    guards = [(reason, n) for reason, n in counts.items()
+              if reason in getattr(BE, 'GUARD_SKIPS', ())]
+    if guards:
+        detail = '；'.join(f'{n} 处：{reason}' for reason, n in guards)
+        warnings.append(f'扩展批处理没有补 {detail} —— 为不改坏脚本')
     return changed
 
 
