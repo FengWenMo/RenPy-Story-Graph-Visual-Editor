@@ -1807,7 +1807,7 @@ class TableSessionMixin:
 
     def apply(self, idx: int, fields: dict, cards: list = None,
               advanced_open: bool = False,
-              stage_loaded: str = None) -> Optional[Beat]:
+              stage_loaded: str = None, notes: list = None) -> Optional[Beat]:
         """
         把表单内容写回第 idx 拍。返回那一拍（越界返回 None）。
 
@@ -1843,7 +1843,7 @@ class TableSessionMixin:
         # ⚠ **顺序是契约**（尤其"动态列最后折"那一条，见那边的长注释）：
         # 原封不动搬过去，没有在这里重排。
         FieldWriter(self.symbols, self.beats).write(
-            b, fields, cards, advanced_open, stage_loaded)
+            b, fields, cards, advanced_open, stage_loaded, notes)
 
         # 真的变了才把"未导出"立起来（翻页 / 空提交不算改动）。
         if self._beat_edits_print(idx) != _before_print:
@@ -1948,9 +1948,12 @@ class TableSessionMixin:
             return {'ok': False, 'beat': None, 'changed': False,
                     'line_id': '', 'index': idx}
         before = self.snapshot(idx)
+        # **工具替用户改的地方**要说出来（2026-11-08 第十九轮：两次点击各自
+        # 写了一行 `hide` → 并成一次，摘掉的那条必须让人看见）。
+        notes: list = []
         beat = self.apply(idx, fields, cards=cards,
                           advanced_open=advanced_open,
-                          stage_loaded=stage_loaded)
+                          stage_loaded=stage_loaded, notes=notes)
         changed = (self.snapshot(idx).fingerprint() != before.fingerprint())
         if changed:
             self._last_saved[idx] = before
@@ -1959,6 +1962,7 @@ class TableSessionMixin:
             'ok': True,
             'beat': beat,
             'changed': changed,
+            'notes': notes,
             # `line_id` 的字段名只有一个含义：**合法 LineId**。没有就返回 None，
             # 不许再塞一个 `'第 3 拍'` 进这个字段（清单 §二十）。
             # 给人看的文字放 `display_name`（前端显示用）。

@@ -1953,10 +1953,18 @@ class CardPageMixin:
             warn = ''
             if scene_now and not scene_loaded:
                 warn = note_scene_added(self, idx, scene_now) or ''
+            # **工具替你改的**（2026-11-08：两次点 ✕ 写了重复的 hide，
+            # 后一次并进前一次、把多余那条摘掉）—— 明细进窗口日志，
+            # 状态栏只留一句短的（Toast 只有一行，长了会被裁在句子中间）。
+            for note in (res.get('notes') or ()):
+                self._log(f'[退场] {note}')
+            extra = (f'（顺手并掉了 {len(res["notes"])} 处重复退场，明细见日志）'
+                     if res.get('notes') else '')
             self._status(f'✔ 已保存到这一拍（{res["display_name"]}）。'
                          + (f'{edge_note}；' if edge_note else '')
                          + f'改动在内存里，点「⤓ 导出 .rpy」时才落盘。'
-                         + (f' {warn}' if warn else ''))
+                         + (f' {warn}' if warn else '')
+                         + extra)
             if flow_change:
                 self._log(
                     f'[控制流] {flow_change["old"]["type"]} '

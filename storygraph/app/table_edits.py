@@ -37,11 +37,106 @@ from storygraph.story.flow import FLOW_FIELD_KEYS
 from storygraph.story.beat_build import hydrate_from_dsl, stage_only_ops
 from storygraph.story.beat_model import (Beat, KIND_MENU, MENU_NO_CAPTION,
                                          compose_stage_extra, hide_item_part,
-                                         join_hide_items, split_hide_items)
+                                         join_hide_items, show_item_part,
+                                         split_hide_items, split_show_items)
 from storygraph.story.spec_args import is_dynamic_column
 
 
-__all__ = ['FieldWriter', 'uniform_position_of', 'write_statement_head']
+__all__ = ['FieldWriter', 'drop_hide_tag', 'hide_flow', 'hide_tags',
+           'show_tags', 'uniform_position_of', 'write_statement_head']
+
+
+#: `show` / `hide` 里**不是立绘 tag** 的那几种首词（舞台/屏幕/表达式）。
+_NOT_A_TAG = frozenset({'expression', 'screen', 'layer', 'scene', 'behind'})
+
+
+def _op_tags(text: str, split, encode) -> set:
+    """
+    一段 `show` / `hide` 文本 → 它涉及的**角色 tag** 集合。
+
+    `lan@dissolve` 只认 `lan`；`show expression holo("x")` / `show screen hud`
+    这类**不是立绘**，跳过 —— 拿它们去判"谁在台上"会把不相干的东西算进来。
+    """
+    out = set()
+    for item in split(str(text or '')):
+        head = encode(item).split('@')[0].strip()
+        if not head:
+            continue
+        word = head.split()[0]
+        if word in _NOT_A_TAG:
+            continue
+        out.add(word)
+    return out
+
+
+def show_tags(text: str) -> set:
+    """这段 `show` 让谁上台（tag 集合）。"""
+    return _op_tags(text, split_show_items, show_item_part)
+
+
+def hide_tags(text: str) -> set:
+    """这段 `hide` 把谁赶下台（tag 集合）。"""
+    return _op_tags(text, split_hide_items, hide_item_part)
+
+
+def hide_flow(peers, idx: int, tag: str) -> tuple:
+    """
+    同一个 tag 在**兄弟拍**里的上下台曲线 → `(before, after)`。
+
+    · `before` —— 最近的、在 `idx` **之前**就写了 `hide tag`、而从那之后
+      **没有** `show tag` 的那一拍下标（`None` = 到 `idx` 时人还在台上）；
+    · `after`  —— `idx` **之后**、在下一次 `show tag` 之前还写着 `hide tag`
+      的拍下标（这些是"重复退场"）。
+
+    为什么要这层判断（2026-11-08 用户实测）：
+
+    > 我一开始先做了一次，是在后面一拍操作的，然后又在前头再点了一次
+    > hide……两个就重复了！！！
+
+    两次操作各改各的拍，谁也不看对方 —— 于是同一章里躺着两条 `hide ling`。
+    它的反方向（先在前面 hide、再到后面 hide）是同一件事。判据只有一条：
+    **中间有没有再 `show` 上来**；没有，多的那条就是噪声。
+    """
+    peers = list(peers or ())
+    if not (0 <= int(idx) < len(peers)):
+        return None, []
+    idx = int(idx)
+    before = None
+    for i in range(idx - 1, -1, -1):
+        beat = peers[i]
+        if tag in show_tags(getattr(beat, 'show', '')):
+            break
+        if tag in hide_tags(getattr(beat, 'hide', '')):
+            before = i
+            break
+    after = []
+    for i in range(idx + 1, len(peers)):
+        beat = peers[i]
+        if tag in show_tags(getattr(beat, 'show', '')):
+            break
+        if tag in hide_tags(getattr(beat, 'hide', '')):
+            after.append(i)
+    return before, after
+
+
+def drop_hide_tag(beat, tag: str) -> list:
+    """从这一拍的 `hide` 里摘掉 `tag`（同一个 tag 的重复退场）；返回被摘的条目。"""
+    items = split_hide_items(str(getattr(beat, 'hide', '') or ''))
+    keep, gone = [], []
+    for item in items:
+        if hide_item_part(item).split('@')[0].strip() == tag:
+            gone.append(item)
+        else:
+            keep.append(item)
+    if gone:
+        beat.hide = join_hide_items(keep) if keep else ''
+    return gone
+
+
+def _note(notes, text: str) -> None:
+    """把一句"我替你做了什么"收进清单（`None` = 调用方不要提示）。"""
+    if notes is not None and text:
+        notes.append(text)
 
 
 def uniform_position_of(cards: list) -> str:
@@ -122,7 +217,8 @@ class FieldWriter:
     # ------------------------------------------------------------------
 
     def write(self, b: Beat, fields: dict, cards: list = None,
-              advanced_open: bool = False, stage_loaded: str = None) -> Beat:
+              advanced_open: bool = False, stage_loaded: str = None,
+              notes: list = None) -> Beat:
         """
         把表单内容写回 `b`。返回同一个对象（调用方递进来的那一拍）。
 
@@ -134,6 +230,11 @@ class FieldWriter:
           · `Stage` **每次重算**（它是投影，不是输入），**除非用户真的手改了
             那一格**（见 `_apply_stage`）；
           · 最后过一遍 `hydrate_from_dsl`，保证与 .rpy 同源。
+
+        `notes`：调用方给的清单（`None` = 不要提示）。**工具替用户改的地方**
+        往里说一句（现在只有一处：重复的退场被并成一次）——
+        "我替你删了一条 `hide`"必须让人看得见，静默改别人的演出指令是本项目
+        最不能接受的那一类事。
 
         `stage_loaded`：表单**载入时**那一格里的原文（Q 前端从
             `BeatCardEditor.load_fields` 里记下来回传）。
@@ -169,7 +270,7 @@ class FieldWriter:
         # "我填的说话人没生效"（2026-10-05 实测报的）。
         b.kind = B.kind_from_speaker(b.kind, b.speaker)
 
-        self._apply_sprite_cards(b, cards)
+        self._apply_sprite_cards(b, cards, notes)
 
         self._apply_word_cells(b, fields, cards)
 
@@ -340,7 +441,7 @@ class FieldWriter:
                     b.code = new_code
                     b.raw = ''
 
-    def _apply_sprite_cards(self, b, cards) -> None:
+    def _apply_sprite_cards(self, b, cards, notes: list = None) -> None:
         """立绘卡 → `show` / `at` / `hide`（**空网格不清空**）（拆自 `apply`，2026-11-01）。"""
         if cards is not None:
             # **"沿用"来的卡不写回**（2026-11-02）：`session.cards(idx)` 会把台上
@@ -375,9 +476,9 @@ class FieldWriter:
             # （同一条规矩；以前这里无条件清空 `b.at`）。
             if show_cards:
                 b.at = uniform_position_of(show_cards)
-            self._apply_hide_cards(b, hide_cards)
+            self._apply_hide_cards(b, hide_cards, notes)
 
-    def _apply_hide_cards(self, b, hide_cards) -> None:
+    def _apply_hide_cards(self, b, hide_cards, notes: list = None) -> None:
         """
         退场卡 → `beat.hide`（**只加不减**：原先那些 `hide` 条目一个字不动）。
 
@@ -389,6 +490,21 @@ class FieldWriter:
         ⚠ 只加不减是**故意的**：`hide` 里可能还有 `cg@dissolve` 这类卡片
         表达不了、也看不懂的条目；这里没有的东西一律不动（宁可多留一条，
         也不静默删别人的演出指令）。
+
+        **同一个角色只该退场一次**（2026-11-08 第十九轮补，用户原话）：
+
+        > hide 了两遍！（为什么我能做到……？因为我一开始先做了一次，是在
+        > 后面一拍操作的，然后又在前头再点了一次 hide……两个就重复了！！！）
+
+        两条判据（都在 `scripts_hide_flow` 里，纯函数）：
+
+          · **前面已经把他赶下去了**（中间没有再 `show` 上来）→ 这一拍不用再写
+            `hide`，说了原因；
+          · **后面还有一条多余的 `hide`**（中间没有再 `show`）→ 把那一条摘掉
+            （摘的是"同一个 tag 的重复退场"，块里其它条目原样留着）。
+
+        为什么摘后面的而不是只警告：Ren'Py 里对不在台上的人再 `hide` 一次是
+        空操作，重复只是噪声；而"人已经下台了"这件事以**最早**那一拍为准。
         """
         if not hide_cards:
             return
@@ -403,8 +519,39 @@ class FieldWriter:
             if tag and tag not in have:
                 have.add(tag)
                 add.append({'image': tag})
-        if add:
-            b.hide = join_hide_items(existing + add)
+        if not add:
+            return
+        keep = self._drop_redundant_hides(b, add, notes)
+        if not keep:
+            return
+        b.hide = join_hide_items(existing + keep)
+
+    def _drop_redundant_hides(self, b, add, notes: list = None) -> list:
+        """挑出真该写的退场条目，并摘掉后面那些重复的（见 `_apply_hide_cards`）。"""
+        idx = self._peer_index(b)
+        if idx is None:
+            return list(add)                 # 没有兄弟拍（单测/局部表单）：照写
+        keep = []
+        for item in add:
+            tag = str(item.get('image') or '').strip()
+            before, after = hide_flow(self.peers, idx, tag)
+            if before is not None:
+                _note(notes, f'「{tag}」在第 {before + 1} 拍就退场了'
+                             f'（中间没有再出场），这一拍没有再写 `hide {tag}`')
+                continue
+            keep.append(item)
+            for later in after:
+                drop_hide_tag(self.peers[later], tag)
+                _note(notes, f'第 {later + 1} 拍那条 `hide {tag}` 变多余了'
+                             f'（这一拍已经让他退场），已一并去掉')
+        return keep
+
+    def _peer_index(self, b):
+        """这一拍在 `peers` 里的下标（没有兄弟拍 / 找不到 → `None`）。"""
+        for i, peer in enumerate(self.peers or ()):
+            if peer is b:
+                return i
+        return None
 
     def _apply_word_cells(self, b, fields, cards) -> None:
         """「表情 / 位置」两格（**只在没有立绘卡时**写）（拆自 `apply`，2026-11-01）。"""

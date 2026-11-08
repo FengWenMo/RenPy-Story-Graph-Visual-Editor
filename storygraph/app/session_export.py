@@ -698,6 +698,60 @@ class ExportMixin:
         return {'blocking': [], 'text': verdict.final_text,
                 'note': verdict.note(), 'warning': verdict.full_note()}
 
+    def _patch_failed_facts(self, res) -> list:
+        """
+        补丁没对上时补一句**能看出是哪一类**的事实（2026-11-08 第十九轮）。
+
+        为什么要有（用户原话）：
+
+        > 工具报错说有19处不统一！不给我增量导出……查原因！
+
+        `19 句台词在补丁结果里找不到` 这句只说了"多少"，说不出"**为什么**" ——
+        而三种原因的处理办法完全不同：
+
+          · 那些台词/卡片是**新写的**（源文件里本来没有）→ 增量只能改已有的行；
+          · 源文件被换成了**另一版**（拍数/行数都不一样）→ 先对齐版本；
+          · 只是说话人/章节变了 → 重新载入那一版再改。
+
+        这里只算**便宜又确定**的两件事（不解析第二遍盘上那份）：
+        新加的卡有几张、新台词有几条；再加上两边关于文件规模的事实。
+
+        返回**一句话的列表**（空 = 没算出什么，不硬说）。
+        """
+        facts = []
+        try:
+            beats = list(self.beats or ())
+            base = str(getattr(self, '_source_baseline_text', '') or '')
+            lines = [ln for ln in base.splitlines()] if base else []
+            fresh_beats = [b for b in beats
+                           if not int(getattr(b, 'src_first', 0) or 0)]
+            if fresh_beats:
+                facts.append(
+                    f'工具里这一章有 {len(fresh_beats)} 张卡**在源文件里没有对应行**'
+                    f'（新加的卡 / 从别处写回来的）—— 增量补丁只能改**文件里已有'
+                    f'的行**，这类卡它写不进去')
+            if lines:
+                missing = []
+                for b in beats:
+                    text = str(getattr(b, 'text', '') or '').strip()
+                    if not text:
+                        continue
+                    if not any(text in ln for ln in lines):
+                        missing.append(text[:16])
+                if missing:
+                    facts.append(
+                        f'{len(missing)} 句台词在载入时那份文件里找不到（例：'
+                        f'{missing[0]!r}）—— 它们是新写的，不是"对不上行号"')
+            if getattr(res, 'total_beats', 0):
+                facts.append(f'这次对位 {res.matched_beats}/{res.total_beats} 拍；'
+                             f'工具里 {len(beats)} 拍')
+        except (OSError, UnicodeError, ValueError, TypeError,
+                AttributeError):
+            # **窄捕获、不调 `swallow`**（技术债棘轮：`swallow_calls` 只许降）。
+            # 这里算不出来就是"没这条事实"，不该影响拒写这件事本身。
+            return facts
+        return facts
+
     def _merge_conflict_reason(self, verdict) -> str:
         """合不了时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
         from storygraph.story.write_gate import (CLASH_ERASED,
@@ -1136,7 +1190,8 @@ class ExportMixin:
                         'base_text': base_text}
             reason = ('；'.join(res.reasons)
                       or f'对位率不足（{res.coverage:.0%}）')
-            return {'used_patch': False, 'text': '', 'blocking': [reason],
+            return {'used_patch': False, 'text': '',
+                    'blocking': [reason] + self._patch_failed_facts(res),
                     'had_source': had_source, 'base_text': base_text,
                     'text_note': f'增量未采用：{reason}'}
         except Exception as e:               # noqa: BLE001
