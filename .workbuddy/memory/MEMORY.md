@@ -292,6 +292,20 @@
   被改动"——现在按 inserted+replaced+deleted 说"改了 N 行"。真机只读预演：
   2-1 / 2-1-3 各 4 处。全量 **10435 passed**。
 
+- **扩展平台 v13（2026-11-08 第十三轮）**：**跨模块地狱测试**（init python /
+  自定义语句 / 映射，`tests/test_hell_extension_cross_module.py` 21 条，全部
+  从真控件走）。抓到并修掉六件事：① 行尾注释让追加落进注释（音乐永不淡入，
+  第二次还报"已经加过"）② 正则打中 `python:` 块体 → 产物是语法错的 Python
+  ③ 注释里的关键词骗过幂等判据（永远不补）④ 插入 `init python:` 块头被缩进着
+  塞进 label ⑤ `append` + `span` 能算计划、落盘会删掉中间几行 ⑥ 保护性跳过
+  导出时一声不吭。做法：拆两个叶子模块 —— `app/batch_text.py`（`split_comment`
+  认引号/三引号、`append_line` 落点是代码末尾、`append_already_there` 只看代码
+  部分、`python_block_head`、`check_top_level_only`、`splice_edits`）与
+  `app/batch_report.py`（`format_plan` / `format_diff`，预演显示成品行）；
+  规则校验拒绝只能写最外层的块头、拒绝 append+span；导出把保护性跳过写进
+  `warnings`。技术债棘轮没动预算文件：`batch_edit` 1687 → 1391 行、
+  `complex_functions` 195、`long_files` 26。全量 **10456 passed**。
+
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
   一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
