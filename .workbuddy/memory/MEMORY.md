@@ -279,6 +279,19 @@
   窗口保存时勾了批处理但代码框为空 → 状态栏当场点破。判据
   `tests/test_export_extension_batch.py` 8 条，全量 **10430 passed**。
 
+- **扩展平台 v12（2026-11-08 第十二轮）**：**追加到行尾**（`replace.append`）。
+  地狱测试（`tests/test_hell_extension_music_fade.py` 5 条）问的是"play music
+  自动 fadein 1.0、stop music 自动 fadeout 1.0，全程不动剧本代码"—— 旧引擎
+  只有 insert / replace（整行替换）/ delete，整行替换必须把原行连曲名一起抄，
+  做不到。现在 `replace` 多一个 `append`（与 `text` 二选一）：**原行原样保留、
+  只加尾巴**；`append` 允许以空格开头（`_parse_append`），幂等判据
+  `_append_already_there`：行尾已相同 **或追加的第一个词已出现在引号外**就
+  跳过（真机 `… fadein 1.0` 的那条，再补就是重复关键字 = 语法错）。
+  界面「做什么」下拉加了「给匹配的行追加」，露出正则输入框。顺带修计数谎报：
+  `apply_plan` 的 `inserted` 不数 replace，导出会把"改了两行"说成"文件没有
+  被改动"——现在按 inserted+replaced+deleted 说"改了 N 行"。真机只读预演：
+  2-1 / 2-1-3 各 4 处。全量 **10435 passed**。
+
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
   一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
