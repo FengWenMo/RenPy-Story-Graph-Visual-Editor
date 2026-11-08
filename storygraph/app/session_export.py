@@ -597,12 +597,31 @@ class ExportMixin:
                 'note': verdict.note(), 'warning': verdict.full_note()}
 
     def _merge_conflict_reason(self, verdict) -> str:
-        """撞车时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
-        from storygraph.story.write_gate import CLASH_TOUCHING
+        """合不了时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
+        from storygraph.story.write_gate import (CLASH_ERASED,
+                                                 CLASH_REPARENTED,
+                                                 CLASH_TOUCHING)
         spans = tuple(getattr(verdict, 'clash', ()) or ())
         where = '、'.join(_span_cn(a, b) for a, b in spans[:2]) or '同一处'
         who = card_at_lines(self.beats, spans) or '你改的那几行'
-        if getattr(verdict, 'clash_kind', '') == CLASH_TOUCHING:
+        kind = getattr(verdict, 'clash_kind', '')
+        if kind == CLASH_REPARENTED:
+            # 没撞车：他改/删的是你那一块的**开头那一行**，合起来你的几行会
+            # 挂到别的块下面（第十六轮地狱测试：Ren'Py 启动就报缩进错，
+            # 而判定说"合上了"）。说成"撞在同一处"同样是假话。
+            line, head = (list(getattr(verdict, 'parent', ()) or ())
+                          + ['', ''])[:2]
+            quote = f'「{head}」' if head else '那一行'
+            at = f'你那一版第 {line} 行' if line else '那一行'
+            return (f'{who} 那一块的开头{quote}（{at}）被别人改掉或删了 —— '
+                    f'合起来你改的那几行会落进别的块里，所以这次一个字节都没写。'
+                    f'先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
+                    f'② 或导出到 build/renpy/ 下比对。')
+        if kind == CLASH_ERASED:
+            return ('两边各删了一部分，合起来整份文件会变成空的 —— 那不像你要的'
+                    '结果，所以这次一个字节都没写。先看一眼再决定：'
+                    '① 重新载入这一章；② 或导出到 build/renpy/ 下比对。')
+        if kind == CLASH_TOUCHING:
             # 他没动你那一行，只是贴着你加/改了一行 —— 说成"改的正是同一处"
             # 是假话（第十五轮地狱测试抓到：有人只是在旁边加了个注释）。
             return (f'{who}（{where}）旁边，别人也加/改了一行 —— 挨在一起时'
