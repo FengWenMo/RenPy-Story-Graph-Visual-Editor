@@ -283,21 +283,27 @@ class TestCardLayout:
         # 台词框仍然在那个容器里（别为了过用例把台词挪丢）
         assert panel._dialogue_box.isAncestorOf(panel._text)
 
-    def test_a_beat_without_stage_content_still_shows_the_stage_block(self, window):
+    def test_a_statement_beat_without_stage_content_hides_the_stage_block(
+            self, window):
         """
-        没有舞台改动 ≠ 把舞台藏起来（2026-10-29 用户）：
+        语句拍**没动舞台**时，舞台块该收起（2026-11-07 用户新要求）：
 
-        > 用户表示找不到入口！！！不要这个 + 改舞台/音乐这个了！直接完整
-        > 显示……因为这是基本信息！默认不应当收起……
+        > 一条 `泳装切换 小明 泳装 开心` 的卡片上，仍然铺着"说话人""台词"
+        > "背景""立绘"四个空块 —— 那些字段跟这条语句**毫无关系**，却占掉
+        > 右栏大半。
 
-        所以这类拍上「立绘 / 背景 / 音乐 / 语音」要**一直看得见**，并且
-        「＋ 改舞台」按钮和"没有改动"那行说明都不再存在（它们只服务于"收起"）。
+        与 2026-10-29 那句"默认不应当收起"怎么共存：**普通拍仍常显**
+        （`test_a_beat_with_stage_content_still_shows_the_stage_block` 与
+        `test_card_field_groups.py::test_a_plain_say_card_keeps_both_blocks`
+        钉着），收起只发生在"语句拍 + 没动舞台"这一种卡上。
+
+        ⚠ 这条以前是绿的假象：`_sync_field_groups` 收起了，紧接着
+        `set_flow(None)`（每张卡都会走）又全放回来 —— 2026-11-08 修。
         """
         _show(window, _idx_of(window, 'styled'))
         panel = _panel(window)
-        assert panel._stage_box.isVisibleTo(panel), \
-            '没有舞台改动的拍把舞台块收起来了 —— 用户就找不到入口'
-        assert panel._grid.isVisibleTo(panel), '立绘网格没显示出来'
+        assert panel._stage_box.isHidden(), \
+            '语句拍没动舞台，那一块仍是噪音（收起只是不显示，字段照样写回）'
         assert not hasattr(panel, '_stage_toggle'), '「＋ 改舞台」按钮应该已经删掉'
         assert not hasattr(panel, '_stage_empty'), '"没有改动"那行收起说明应该已经删掉'
 
