@@ -8,6 +8,34 @@ from storygraph.core.statement import python_operation
 from storygraph.parsing.renpy_parser import parse_renpy_file
 
 
+def report_merge(res, host=None) -> None:
+    """
+    把这个落盘结果里"别人的改动也保住了"这件事**说出来**（第十四轮）。
+
+    两句，两个落点（为什么必须分两句：`Toast` 是一行 `wordWrap=False` 的浮层，
+    超过窗口宽就被裁 —— 第一版把 110 个字塞进 Toast，截图里正好裁在句子中间）：
+
+      · **短句** → `notify`（状态栏 + Toast），一眼能读完；
+      · **长句**（第几行、什么内容、"界面还是旧的"）→ 窗口的日志（`host._log`）。
+
+    合并不弹框、不问人（见 `write_gate.Commit`），所以它更欠这两句解释。
+    `notify` 是无头安全的（没人订阅就什么也不发生）；`host` 没有 `_log`
+    （测试的假宿主）时也照常工作。
+    """
+    if not isinstance(res, dict):
+        return
+    note = str(res.get('note') or '')
+    if note:
+        notify.info(note, title='两边的改动都保住了')
+    full = str(res.get('note_full') or '')
+    log = getattr(host, '_log', None)
+    if full and callable(log):
+        # 不包 `swallow`：宿主回调的可信度与 `on_graph_structure_changed()`
+        # 同一档（那些也没包）；而 `notify` 自己"永不抛"，Toast 那一句是安全的。
+        # 技术债棘轮里 `swallow` 只许降 —— 这一处不值得占一个名额。
+        log(full)
+
+
 def restore_beat_states(beat_states, which: str):
     """
     把拍退到 `before` / 进到 `after`（没有快照就什么都不做）。
@@ -310,6 +338,7 @@ class ControlRouteCommand(Command):
             self._rollback_init()
             self.error = str(res.get('error') or '写编排层失败')
             raise RuntimeError(self.error)
+        report_merge(res, self.graph_view)     # 别人改的是别处 → 已经合过来了
         self.path = str(res.get('path') or self.path)
         self.old_text = (self._original_text(self.path)
                          or str(res.get('old_text') or ''))
@@ -486,6 +515,7 @@ class EditControlRouteCommand(Command):
                 self.error = str(init_res.get('error') or '补包装失败')
                 raise RuntimeError(self.error)
             init_old_text = str(init_res.get('old_text') or '')
+            report_merge(init_res, self.graph_view)  # 补包装那一步也可能合过
             self.path = str(init_res.get('path') or '')
             self._init_written = True
             plan = plan_control_edit(
@@ -500,6 +530,7 @@ class EditControlRouteCommand(Command):
             self._rollback_init(init_old_text)
             self.error = str(res.get('error') or '改编排层失败')
             raise RuntimeError(self.error)
+        report_merge(res, self.graph_view)     # 别人改的是别处 → 已经合过来了
         self.old_text = init_old_text or str(res.get('old_text') or '')
         self.new_text = str(res.get('new_text') or '')
         self.path = str(res.get('path') or self.path)
@@ -623,6 +654,7 @@ class DeleteSourceLineCommand(Command):
         if not res.get('ok'):
             self.error = str(res.get('error') or '删源文件失败')
             raise RuntimeError(self.error)
+        report_merge(res, self.graph_view)     # 别人改的是别处 → 已经合过来了
         graph = self.graph_view.graph
         edge = graph.edges.get(self.edge_id)
         if edge is not None:
@@ -986,6 +1018,7 @@ class _ControlBranchBase:
         if not res.get('ok'):
             self._rollback_init()
             raise RuntimeError(str(res.get('error') or '写编排层分支失败'))
+        report_merge(res, self.graph_view)     # 别人改的是别处 → 已经合过来了
         self.path = str(res.get('path') or self.path)
         self.old_text = self.init_old_text or plan.old_text
         self.new_text = plan.new_text
