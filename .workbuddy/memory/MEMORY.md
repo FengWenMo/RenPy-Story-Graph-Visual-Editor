@@ -306,6 +306,25 @@
   `warnings`。技术债棘轮没动预算文件：`batch_edit` 1687 → 1391 行、
   `complex_functions` 195、`long_files` 26。全量 **10456 passed**。
 
+- **扩展平台 v14（2026-11-08 第十四轮）**：**扩展 × 卡片编辑器显示**的地狱测试
+  （`tests/test_hell_extension_card_display.py` 28 条，全走真控件 + 真窗口 +
+  保存/导出）。抓到四件事：① 扩展窗口把 `Comment` / `condition` 列进"能改的键"，
+  但卡片上那两格是 `_build_meta_area` 建一次的 —— 存完**一个像素都没变**；
+  ② 把一格改成「固定关键字」→ 只读框里的字被 `collect_fields()` 当成这一拍的
+  内容（`Stage='show'`）；③ 语句拍的收起被 `set_flow(None)` 当场放回来
+  （`_sync_flow_card` 每张卡都调它，面板单测全绿、真窗口里还是四个空块；
+  修成真的之后当场暴露 ⑤ **空卡片把自己的台词框也收掉了**，`insert_card()`
+  之后一个字写不进去 —— 台词区判据补"这一拍是不是已经有别的样子"）；
+  ④ **最重**：声明里没有关键字格时（扩展窗口声明的、自定义语句窗教出来的），
+  折回头行把动作名摘成前缀、"值没变"那一路**不补前缀** —— 一格不改按保存，
+  `mycue 3 "x"` → `3 "x"`，导出还报成功。修法：主区两格进 `_meta_host` 与高级区
+  同一条重建链（`_build_meta_rows` + `_adv_tooltip`）；`card_fields` 拒固定字；
+  `set_flow` 按 `_statement` 重放 `_sync_field_groups`；`_fold_head_columns` 无条件
+  补前缀（值没变用原串）。顺带 `open_extensions` 关窗后比一次"认得的写法"，
+  变了就说"要重新导入这一章"。旧代码上 28 条红 12 条。改了
+  `test_hell_custom_card_layout.py` 里 2026-10-29 那条（与 11-07 的"语句拍收起"
+  相反，后者更新）。详见 `docs/开发日志.md` §110。
+
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
   一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
