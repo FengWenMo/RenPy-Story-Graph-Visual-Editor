@@ -771,6 +771,55 @@ def validate_level2(beats, registry=None, menu_labels=None) -> list:
                 '这是导入时按「序号」列做的自动排序；要改剧情顺序，'
                 '请直接改「序号」列（只拖动行 / 按别的列排序不会生效）'))
 
+    # 控制流之后的拍永远不会执行（W204，2026-11-08 第二十轮）。
+    issues.extend(_terminal_flow_issues(beats))
+
+    return issues
+
+
+def _terminal_flow_issues(beats) -> list:
+    """
+    `return` / `jump` **之后**的拍 → W204（死代码）。
+
+    真机现场（`演出剧本/chapter2_2_2.rpy` 末尾）：
+
+        return
+        $ Plotnode223=1        ← 永远执行不到，标志位永远是初值
+
+    那是工具自己写的（新增剧情变量落在"本章最后一拍"），不是人敲的。修法在
+    `session.apply_node_variable_edits`（落到最后一个非控制流拍）；这一条是
+    给**已经写坏的文件**留的网 —— 解析之后那条 `$` 会自成一张卡
+    （`kind='say'`、没有台词），所以判据不能是"flow 拍上有代码"，而是
+    "这一拍排在 `return` / `jump` 后面"。
+
+    `call` 会回来（继续执行下一行），不是终点，不算。
+    """
+    issues = []
+    #: `label → (seq, 控制流原文)`：这个 label 已经在哪一拍 `return` / `jump` 掉了。
+    stop: dict = {}
+    for b in beats or ():
+        label = str(getattr(b, 'label', '') or '')
+        where = getattr(b, 'line_id', '') or f'{label}.{getattr(b, "seq", 0):04d}'
+        flow = stop.get(label)
+        if flow is not None:
+            dead = (str(getattr(b, 'code', '') or '').strip().splitlines()
+                    or [str(getattr(b, 'text', '') or '').strip()
+                        or str(getattr(b, 'raw', '') or '').strip()])
+            issues.append(Issue(
+                L2, 'W204', WARNING,
+                f'这一拍排在 `{flow[1]}`（第 {flow[0]} 拍）后面，'
+                f'永远不会执行：{dead[0][:40]}',
+                where,
+                '把它挪到 `return` 前面（或删掉）：写在控制流后面是死代码，'
+                '变量永远是初值'))
+            continue
+        raw_lines = str(getattr(b, 'raw', '') or '').strip().splitlines()
+        head = (raw_lines[0].split()[0]
+                if raw_lines and raw_lines[0].split() else '')
+        if str(getattr(b, 'kind', '') or '') == 'flow' \
+                and head in ('return', 'jump'):
+            stop[label] = (getattr(b, 'seq', 0),
+                           ' '.join(raw_lines[0].split())[:24])
     return issues
 
 

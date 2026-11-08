@@ -219,7 +219,14 @@ class TestBlockInsertion:
         assert text.index('$ total += 1') > text.index('for i in range(2):')
 
     def test_end_placement_stays_top_level(self, blocks):
-        """用户选"本章末尾"时用一个越界锚点（-1）明确表达，不许退回某一块。"""
+        """用户选"本章末尾"时用一个越界锚点（-1）明确表达，不许退回某一块。
+
+        ⚠ 2026-11-08 改判据：从前这条断言的是"末尾 = **最后一拍**"，而那一拍
+        是 `return`（控制流）—— 落在它上面的代码**永远执行不到**（真机
+        `$ Plotnode223=1` 就是这么被写进 `演出剧本/chapter2_2_2.rpy` 的，
+        见 `docs/开发日志.md` §114）。现在"本章末尾"= 最后一个**能装代码**的拍
+        （`return` 前面那一张）；不变的是"不许退回 `if` / `for` 块里"。
+        """
         session, graph, node, _script, _root = blocks
         data = session.variable_workbench(graph, node.id)
         old = list(data['operations'])
@@ -227,10 +234,14 @@ class TestBlockInsertion:
             graph, node.id, old + ['ending = True'],
             insert_beat=1, anchors={len(old): -1})
 
-        assert out['inserted'] and out['inserted'][0] == len(session.beats) - 1, \
-            '本章末尾 = 最后一拍'
+        flow_at = next(i for i, b in enumerate(session.beats)
+                       if str(getattr(b, 'kind', '')) == 'flow')
+        assert out['inserted'] and out['inserted'][0] == flow_at - 1, \
+            f'本章末尾 = `return` 前面那一拍（第 {flow_at - 1} 拍）'
         text = str(session.compile().rpy_text or '')
         assert '\n    $ ending = True\n' in text, '顶层缩进应是 4'
+        assert text.index('$ ending = True') < text.index('return'), \
+            '不能落在 `return` 后面（死代码）'
 
     def test_block_header_with_a_trailing_comment_is_still_a_block(self, app,
                                                                    tmp_path):

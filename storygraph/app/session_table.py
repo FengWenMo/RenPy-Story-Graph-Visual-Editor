@@ -54,7 +54,7 @@ from storygraph.story.beat_build import (beats_from_parse_result,
 from storygraph.story.beat_render import make_symbols
 from storygraph.story.chapter import ChapterDocument
 from storygraph.story.chapter_tree import ChapterTreeError
-from storygraph.story.beat_model import (Beat, SNAPSHOT_FIELDS,
+from storygraph.story.beat_model import (Beat, KIND_FLOW, SNAPSHOT_FIELDS,
                                          compose_stage_extra)
 
 
@@ -503,26 +503,11 @@ class TableSessionMixin:
             else:
                 # 新增：优先放进用户选中那条所在的拍（同一个块体 → 同一个
                 # `if` / `for` 里面）；没选/对不上就放到本章最后一拍。
-                beat, where = self._variable_anchor_of(
-                    i, label, anchors, insert_beat)
-                if beat is None:
-                    beat, where = beats[-1], 'end'
-                if where == 'head':
-                    entry = heads.get(id(beat))
-                    if entry is None:
-                        heads[id(beat)] = (beat, [new])
-                    else:
-                        entry[1].append(new)
+                if self._place_new_op(i, new, label, anchors, insert_beat,
+                                      beats, heads, before_snaps, inserted):
+                    applied += 1
                 else:
-                    self._remember_beat_snapshot(beat, before_snaps)
-                    beat.code = ((str(beat.code or '') + '\n')
-                                 if str(beat.code or '').strip() else '') + new
-                try:
-                    inserted.append(next(
-                        n for n, b in enumerate(self.beats) if b is beat))
-                except StopIteration:
-                    inserted.append(-1)
-                applied += 1
+                    unplaced += 1
         for beat, rows in heads.values():
             self._remember_beat_snapshot(beat, before_snaps)
             self._prepend_beat_code(beat, rows)
@@ -596,6 +581,64 @@ class TableSessionMixin:
             return
         if snap is not None:
             before_snaps[idx] = snap
+
+    def _place_new_op(self, i, new, label, anchors, insert_beat, beats, heads,
+                      before_snaps, inserted) -> bool:
+        """
+        一条**新增**的剧情变量落进哪一拍（拆自 `apply_node_variable_edits`）。
+
+        返回 True = 落好了；False = 这一章没有能装代码的拍（只剩控制流），
+        调用方记 `unplaced`。
+
+        拆出来的原因（2026-11-08）：这段原本内联在
+        `apply_node_variable_edits` 里，加上"跳过 `return` 那一拍"的判据之后
+        那个函数顶破了技术债棘轮的超长函数线（120 行，只许降）。
+        """
+        beat, where = self._variable_anchor_of(i, label, anchors, insert_beat)
+        if beat is None:
+            beat, where = self._last_code_beat(beats), 'end'
+        if beat is None:
+            # 这一章只剩控制流拍（`label:` 下面直接 `return`）——
+            # 放哪儿都是死代码，**不猜**，报出来让人自己挑拍。
+            return False
+        if where == 'head':
+            entry = heads.get(id(beat))
+            if entry is None:
+                heads[id(beat)] = (beat, [new])
+            else:
+                entry[1].append(new)
+        else:
+            self._remember_beat_snapshot(beat, before_snaps)
+            beat.code = ((str(beat.code or '') + '\n')
+                         if str(beat.code or '').strip() else '') + new
+        try:
+            inserted.append(next(
+                n for n, b in enumerate(self.beats) if b is beat))
+        except StopIteration:
+            inserted.append(-1)
+        return True
+
+    def _last_code_beat(self, beats):
+        """
+        这一章**最后一张能装代码的拍**（从末尾往回找，跳过控制流拍）。
+
+        为什么不能直接 `beats[-1]`（2026-11-08 第二十轮，真机复刻）：
+        一章的最后一拍几乎总是 `return`（控制流拍，`kind='flow'`）。把新增的
+        剧情变量追加到它上面，渲染出来是
+
+            return
+            $ Plotnodes223=1        ← 永远执行不到
+
+        用户看到的是「谁没事儿手敲这玩意儿啊！！！」——**是工具自己写的**，
+        而且写在 `return` 后面。现在退到它前面那一张（真正的"章末"）。
+
+        整章只有控制流拍（`label:` 下面直接 `return`）时返回 `None`：
+        放哪儿都是死代码，宁可报 `unplaced`，也不写一行不执行的。
+        """
+        for beat in reversed(list(beats or ())):
+            if str(getattr(beat, 'kind', '') or '') != KIND_FLOW:
+                return beat
+        return None
 
     def _variable_anchor_of(self, op_index, label: str, anchors, insert_beat):
         """
