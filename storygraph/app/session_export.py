@@ -63,6 +63,73 @@ __all__ = ['ExportMixin', 'removal_note']
 from storygraph.story.patcher import removal_note  # noqa: E402
 
 
+# ---------------------------------------------------------------------------
+#  扩展批处理（导出之后补那几行 —— 2026-11-08）
+# ---------------------------------------------------------------------------
+
+#: 扩展批处理"什么都没做"的返回（调用方只读，别原地改）。
+_NO_BATCH = {'applied': 0, 'rule': '', 'note': '', 'warnings': []}
+
+#: `rules_from_extensions` / `plan_batch` 可能抛的这些 —— 批处理坏了不该把
+#: 导出弄挂；宽捕获的守卫也认"把 e 拼进给人看的话"这条记录通道。
+_BATCH_ERRORS = (ImportError, OSError, ValueError, TypeError, KeyError,
+                 AttributeError, RuntimeError)
+
+
+def _batch_rel_target(project_root, target) -> str:
+    """导出目标 → 项目内相对路径（不在项目内 / 不在 `game/` 下 → `''`）。"""
+    root = str(project_root or '')
+    tgt = Path(str(target or ''))
+    if not root or not tgt.is_file():
+        return ''
+    try:
+        rel = tgt.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (ValueError, OSError):
+        return ''
+    return rel if rel.startswith('game/') else ''
+
+
+def _declared_batch_rules(project_root) -> tuple:
+    """扩展声明 → `(规则列表, 要人看一眼的话)`；坏的不连坐（一条不合法其余照跑）。"""
+    from storygraph.app import batch_edit as BE
+
+    try:
+        rules, problems = BE.rules_from_extensions(project_root)
+    except _BATCH_ERRORS as e:
+        return [], [f'扩展批处理没跑起来：{e}']
+    warnings = [f'扩展批处理规则不合法（这次一条都没补）：{p}'
+                for p in problems]
+    return rules, warnings
+
+
+def _batch_plan(project_root, rules, rel, warnings) -> object:
+    """算这一章的计划；算不出来 → `None`（原因进 `warnings`）。"""
+    from storygraph.app import batch_edit as BE
+
+    try:
+        plan = BE.plan_batch(project_root, rules, chapters=[rel])
+    except _BATCH_ERRORS as e:
+        warnings.append(f'扩展批处理算不出计划：{e}')
+        return None
+    warnings.extend(f'扩展批处理：{msg}' for msg in plan.errors)
+    return plan
+
+
+def _apply_batch_plan(plan, warnings) -> int:
+    """落盘 → 补了几行。写不进去的进 `warnings`；"全都已有"也要说一句。"""
+    from storygraph.app import batch_edit as BE
+
+    done = BE.apply_plan(plan)
+    inserted = int(done.get('inserted') or 0)
+    for name, why in done.get('failed') or ():
+        warnings.append(f'扩展批处理没写进去（{name}）：{why}')
+    if not inserted and not warnings:
+        skipped = sum(len(fp.skipped) for fp in plan.files)
+        if skipped:
+            warnings.append(f'扩展批处理：{skipped} 处都已有同一行，没有重复补')
+    return inserted
+
+
 def _span_cn(start, end) -> str:
     """`(4, 4)` → `第 4 行`；`(4, 6)` → `第 4–6 行`（1 基、闭区间）。"""
     start, end = int(start or 0), int(end or 0)
@@ -420,6 +487,11 @@ class ExportMixin:
         # （为什么、以及为什么是"重新解析"而不是"猜行号"，见那个方法）。
         self._realign_memory_after_write(art, target)
 
+        # **扩展点的「整章应用」在这里落地**（2026-11-08 用户：扩展窗口里配了
+        # "允许把它批处理到整章"、导出 2-1-3 却一个字都没有）。只看扩展声明，
+        # 算计划/落盘都用 `app.batch_edit` 那一份；细节见 `_batch_after_write`。
+        batch = self._batch_after_write(target, note)
+
         # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
         #
         # `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而删掉程序员的
@@ -428,6 +500,9 @@ class ExportMixin:
         # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
         _warns = [export_plan.issue_message(i) for i in art.issues
                   if not i.is_blocking]
+        # 扩展批处理要说的话（写了多少行 / 哪条规则不合法）**排最前**：
+        # 它正是用户"导出没效果"时最该看到的那一句。
+        _warns = list(batch.get('warnings') or ()) + _warns
         # "别人也改过这个脚本"的长句（第十五轮）放**最前面**：它是这一刀最该
         # 被看见的事（他改的那几行已经进磁盘了，界面还是旧的）。短句在 `note`。
         if note.get('merge_warning'):
@@ -524,12 +599,24 @@ class ExportMixin:
                     # 由用户决定要不要 force。
                     may_skip = False
                 if may_skip:
+                    # **零改动也要跑扩展批处理**（2026-11-08）：表里一个字没改，
+                    # 但"整章应用"那条规则可能还没落地 —— 早退之前先补，
+                    # 不然"导出没效果"会永远复现（用户 2-1-3 正是这一条）。
+                    batch = self._apply_declared_batch(tgt)
+                    if batch.get('applied') and same_path:
+                        self._reload_after_inplace_write()
+                    said = [note['text_note']] if note['text_note'] else []
+                    if batch.get('note'):
+                        said.append(batch['note'])
+                    else:
+                        said.append('这一份与源文件逐字节相同：'
+                                    '**文件没有被改动**')
                     return {'ok': True, 'path': target, 'blocking': [],
                             'codes': [],
-                            'note': (note['text_note']
-                                     + '这一份与源文件逐字节相同：'
-                                       '**文件没有被改动**'),
-                            'used_patch': True, 'untouched': True,
+                            'note': '；'.join(said),
+                            'warnings': list(batch.get('warnings') or ()),
+                            'used_patch': True,
+                            'untouched': not batch.get('applied'),
                             'count': len(self.beats),
                             'todos': getattr(result, 'todo_count', 0)}
         except (OSError, UnicodeDecodeError) as e:
@@ -845,6 +932,54 @@ class ExportMixin:
         if not self.script_path:
             raise ValueError('还没有打开章节，没得重读')
         return self.load(self.script_path)
+
+    def _apply_declared_batch(self, target) -> dict:
+        """
+        导出之后，把**开了批处理的扩展点**按规则补进这一章（2026-11-08）。
+
+        用户 2026-11-08：扩展窗口里勾了「允许把它批处理到整章」，规则写着
+        `$ renpy.transition(Dissolve(0.1), layer="master")`，导出 2-1-3
+        **一个字都没有** —— 因为「是否能够批处理」那个开关从前只喂
+        「批处理窗口 / CLI batch」，导出这条路从不看它。现在导出自己收口。
+
+        只看**扩展声明**（`rules_from_extensions`）；文件里手写的
+        `storygraph.batch.json` 仍归批处理窗口 —— 免得同一条规则被两条路
+        各补一次（声明那几条自带 `skip_if_present`，但文件里的不一定有）。
+
+        返回 `{'applied': 行数, 'rule': '规则 id', 'note': 一句话,
+        'warnings': [...]}`。**规则不合法也照实说**（真机上第一条就是
+        `insert.text 不能为空`：界面上打了字、存的时候没带上），一个字不写。
+        """
+        rel = _batch_rel_target(getattr(self, 'project_root', ''), target)
+        if not rel:
+            return _NO_BATCH
+        rules, warnings = _declared_batch_rules(self.project_root)
+        if not rules:
+            return dict(_NO_BATCH, warnings=warnings)
+        plan = _batch_plan(self.project_root, rules, rel, warnings)
+        if plan is None:
+            return dict(_NO_BATCH, warnings=warnings)
+        done = _apply_batch_plan(plan, warnings)
+        rule_ids = '、'.join(str(r.id) for r in rules)
+        note = (f'扩展批处理补了 {done} 行（{rule_ids}）' if done else '')
+        return {'applied': done, 'rule': rule_ids, 'note': note,
+                'warnings': warnings}
+
+    def _batch_after_write(self, target, note) -> dict:
+        """
+        写完之后补扩展批处理；补进去了就把内存重读、把话并进 `note`。
+
+        为什么**必须重读**：补进去的是原样一行代码，拍的边界会变；下一次
+        导出拿旧行号去对位就会掉（见 `_realign_memory_after_write`）。
+        """
+        batch = self._apply_declared_batch(target)
+        if batch.get('applied') and self.script_path \
+                and Path(target) == Path(self.script_path):
+            self._reload_after_inplace_write()
+        if batch.get('note'):
+            note['text_note'] = '；'.join(
+                x for x in (note.get('text_note', ''), batch['note']) if x)
+        return batch
 
     def _reload_after_inplace_write(self) -> None:
         """

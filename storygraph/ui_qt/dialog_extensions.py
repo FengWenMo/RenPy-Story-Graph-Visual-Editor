@@ -949,6 +949,13 @@ class ExtensionDialog(QDialog):
             msg = (f'已保存 {res.get("count", 0)} 条到 {ER.MANIFEST}'
                    '（旧清单没动；注册表缓存已刷新）。'
                    + ('｜' + '；'.join(notes) if notes else ''))
+        if self.ck_batch.isChecked() and not self.ed_text.toPlainText().strip():
+            # 真机踩过（2026-11-08）：勾了「允许批处理」、代码框里打了字，
+            # 但**存的时候没带上**（打字在保存之后 / 没再点保存）——
+            # 存进去的是一条 `insert.text` 为空的规则，导出时被引擎判不合法，
+            # 人只看到"导出完全没效果"。这里当场把话说死。
+            msg += (' ⚠ 「允许把它批处理到整章」开着，但「写入的代码」是空的'
+                    ' —— 这条规则**不会生效**（补一行代码再存一次）。')
         self.status.setText(msg)
         return True
 
