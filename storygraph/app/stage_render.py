@@ -707,12 +707,7 @@ def _draw_background(canvas, frame, ctx, result):
     if path is None:
         color = _solid(scene, ctx)
     if path:
-        try:
-            with Image.open(path) as src:
-                natural = display_size(path, src.size)
-        except Exception as e:                # noqa: BLE001
-            swallow('stage_render.background_size', e)
-            natural = None
+        natural = _image_natural(path)
         if natural:
             at = str(getattr(frame, 'scene_at', '') or '')
             box = _at_box(at, ctx, natural, result, '背景', scene)
@@ -728,6 +723,99 @@ def _draw_background(canvas, frame, ctx, result):
         result.missing.append(scene)
 
 
+#: 合成立绘的产物体积上限（长边）。画布最宽也就 1920，再大只是白烧 CPU。
+_COMPOSE_MAX_SIDE = 1920
+
+
+def _image_natural(path):
+    """
+    图片的**显示尺寸**（超采样 `@N` 已折算）；读不出 → `None`。
+
+    背景 / CG 图层 / 立绘三处从前各抄一遍同一个 try/except（技术债棘轮里
+    算三处 `swallow`）—— 合并成一处，行为不变：坏图只让这一张降级。
+    """
+    try:
+        with Image.open(path) as src:
+            return display_size(path, src.size)
+    except Exception as e:                    # noqa: BLE001 - 坏图不该炸整帧
+        swallow('stage_render.image_natural', e)
+        return None
+
+
+def _sprite_source(sprite, spec, ctx):
+    """这条 show 的 `(图片路径, 引擎里的原始尺寸)`：分层声明优先，其余走老路。"""
+    composed = _composed_sprite(spec, sprite, ctx)
+    if composed is not None:
+        return composed
+    return _resolve_path(spec, ctx), None
+
+
+
+def _composed_sprite(spec, sprite, ctx):
+    """
+    有 `layeredimage` 声明时：这条 show **实际显示的那张图** + 引擎里的原始尺寸。
+
+    为什么卡片那条路对、舞台这条会错（2026-11-08 用户实拍）：
+
+        「不是一个 en 的表情吗？怎么绑到另一个人上去了？？？
+          qing 的 en 表情与图片不对应！」
+
+    卡片（`ui_qt.sprite_thumbs`）先按项目自己的分层结构合成；舞台这条从前
+    只查资源表 → `image` 声明 → 磁盘索引，`qing en` 不在表里，落到"按名字
+    找文件"就把 `xing/en.png` 当成了它 —— 台上站的是星桥理子。
+    引擎里 `show qing en` 显示的是 `layeredimage qing` 里 `en → thinking`。
+
+    返回 `(路径, 原始尺寸)`。没有声明 / 认不出 / 合成失败 → `None`，
+    调用方走老路；**绝不因为合成不了就画别人的图**。
+    """
+    root = getattr(ctx, 'project_root', None)
+    parts = str(spec or '').split()
+    if not root or not parts:
+        return None
+    try:
+        from storygraph.story.layered_model import (load_layer_model_cached,
+                                                    resolve_layers)
+        model = getattr(ctx, 'layer_model', None)
+        if model is None or not getattr(model, 'images', None):
+            model = load_layer_model_cached(root)
+        if model is None or not model.has(parts[0]):
+            return None
+        plan = resolve_layers(model, parts[0], parts[1:], root)
+        if not getattr(plan, 'ok', False) or not getattr(plan, 'layers', None):
+            return None
+        from storygraph.app.layer_compose import compose_sprite, plan_natural_size
+        natural = plan_natural_size(plan)
+        path = compose_sprite(plan, max_size=_compose_box(sprite, natural, ctx))
+        if path is None:
+            return None
+        return path, natural
+    except Exception as e:                    # noqa: BLE001 - 合成失败走老路
+        swallow('stage_render.composed_sprite', e)
+        return None
+
+
+def _compose_box(sprite, natural, ctx):
+    """
+    合成多大：**屏幕上画多大就合成多大**（长边再封顶 `_COMPOSE_MAX_SIDE`）。
+
+    合成图只当像素来源；几何仍按 `natural`（原图）算 —— 拿 1400 高的合成图
+    去乘 zoom，人会小一大截（`compose_sprite` 默认封顶 `MAX_SIDE`）。
+    """
+    place = getattr(sprite, 'place', None)
+    if not natural or place is None:
+        return None
+    box = placement_box(place, natural, ctx.screen)
+    if box is None:
+        return None
+    target = (max(1, int(round(box[2]))), max(1, int(round(box[3]))))
+    from storygraph.app.layer_compose import MAX_SIDE
+    cap = max(_COMPOSE_MAX_SIDE, MAX_SIDE)
+    if max(target) > cap:
+        k = cap / float(max(target))
+        target = (max(1, int(target[0] * k)), max(1, int(target[1] * k)))
+    return target
+
+
 def _draw_sprites(canvas, frame, ctx, result):
     sprites = list(getattr(frame, 'sprites', []) or [])
     # 按 `snapshot_rows` 的原始顺序叠（先 show 的在下面）；说话人高亮
@@ -737,7 +825,7 @@ def _draw_sprites(canvas, frame, ctx, result):
     for i in order:
         s = sprites[i]
         spec = str(getattr(s, 'image', '') or '')
-        path = _resolve_path(spec, ctx)
+        path, natural = _sprite_source(s, spec, ctx)
         if not path:
             color = _solid(spec, ctx)
             if color:
@@ -746,10 +834,8 @@ def _draw_sprites(canvas, frame, ctx, result):
             result.missing.append(spec)
             continue
         place = getattr(s, 'place', None)
-        try:
-            with Image.open(path) as src:
-                natural = display_size(path, src.size)
-        except Exception:                     # noqa: BLE001
+        natural = natural or _image_natural(path)
+        if natural is None:
             result.warnings.append(f'立绘读不出：{spec}')
             continue
         try:
@@ -800,12 +886,7 @@ def _draw_layers(canvas, frame, ctx, result):
         if path is None:
             color = _solid(spec, ctx)
         if path:
-            try:
-                with Image.open(path) as src:
-                    natural = display_size(path, src.size)
-            except Exception as e:            # noqa: BLE001
-                swallow('stage_render.layer_size', e)
-                natural = None
+            natural = _image_natural(path)
             if natural:
                 what = 'CG' if tag == 'cg' else f'图层 {tag}'
                 box = _at_box(at, ctx, natural, result, what, spec)

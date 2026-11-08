@@ -934,6 +934,13 @@ class StageCanvas(QWidget):
                 # 位置按项目 transform 的真实几何算；尺寸问图片的**原始像素**
                 # （只读文件头，快）—— 立绘大小 = 原图 × zoom，缺一不可。
                 size = natural_size(path, self.project_root)
+                # 合成立绘的产物被 `MAX_SIDE` 封过顶（1400），拿它的尺寸算几何
+                # 会把人画小一截 —— 几何仍按引擎里的原图尺寸（2026-11-08）。
+                plan = (assets.get('composed') or {}).get(
+                    str(getattr(s, 'image', '') or ''))
+                if plan is not None:
+                    from storygraph.app.layer_compose import plan_natural_size
+                    size = plan_natural_size(plan) or size
                 box = sprite_box(s, size, self.screen)
                 if box is not None:
                     self._boxes[i] = box

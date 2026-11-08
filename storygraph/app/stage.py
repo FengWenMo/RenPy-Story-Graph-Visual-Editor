@@ -2435,28 +2435,89 @@ def image_index(project_root, refresh_seconds: float = None) -> dict:
                 if 'gui' in parts or 'screenshots' in parts:
                     continue
                 idx.setdefault(f.stem.lower(), str(f))
+                # 同一张名字的图可能不止一个（`images/characters/*/en.png`）：
+                # 只留"第一个撞上的"会把属性件绑到**别人**身上（见
+                # `image_index_lookup`）。多存一把 `目录/文件名` 的键，
+                # 查的时候按 tag 认自己那一份。
+                parent = f.parent.name.lower()
+                if parent:
+                    idx.setdefault(f'{parent}/{f.stem.lower()}', str(f))
     except OSError as e:
         swallow('stage.image_index', e)
     _IMAGE_INDEX_CACHE[key] = (sig, now, idx)
     return idx
 
 
+def _index_key_variants(text: str):
+    """同一个名字的几种写法：`bg6.2` / `bg6_2`（真实项目两种都有人用）。"""
+    low = str(text or '').lower()
+    return low, low.replace('.', '_'), low.replace('_', '.')
+
+
+def _belongs_to_tag(path, tag: str) -> bool:
+    """
+    这份文件是不是**这个 tag 的**（防止属性件认成别人的图）。
+
+    两条都认：所在目录名就是 tag（`images/characters/qing/en.png`），
+    或者文件名自带 tag 前缀（`qing_en.png`，扁平目录的老项目）。只看名字，
+    不做模糊匹配。
+    """
+    tag = str(tag or '').lower()
+    if not tag:
+        return False
+    try:
+        p = Path(str(path))
+    except (TypeError, ValueError):
+        return False
+    if tag in [x.lower() for x in p.parts]:
+        return True
+    stem = p.stem.lower()
+    return stem.startswith(tag + '_') or stem.startswith(tag + '.')
+
+
 def image_index_lookup(spec: str, index: dict):
-    """图像名 → 索引里的文件。`bg6_2` 与 `bg6.2` 视为同一个（真实项目两种写法都有人用）。"""
+    """
+    图像名 → 索引里的文件。`bg6_2` 与 `bg6.2` 视为同一个（真实项目两种写法都有人用）。
+
+    ⚠ **多词写法的最后一个词不许单独去全盘索引里撞**（2026-11-08 用户实测）：
+
+        show qing en   →  `images/characters/xing/en.png`（星桥理子的表情）
+
+    索引按文件名认图，而 `en.png` 每个角色都可能有；拿裸属性名去查，
+    第一个撞上的就是**别人的**那张 —— 舞台上站着的是另一个人，
+    卡片上却写着 `qing en`。所以属性件只认：
+    ① `tag/属性`（目录 + 文件名，精确）；② 落在**以 tag 命名**的目录里的那份。
+    两样都不成立 → `None`（**认不出就说找不到**，绝不绑到别人身上）。
+    """
     if not index:
         return None
     parts = str(spec or '').split()
     if not parts:
         return None
-    cands = [parts[-1], '_'.join(parts), ' '.join(parts)]
-    if len(parts) > 1:
-        cands.append(parts[-1].replace('_', '.'))
-    for c in cands:
-        for key in (c.lower(), c.lower().replace('.', '_'),
-                    c.lower().replace('_', '.')):
+
+    def _find(text):
+        for key in _index_key_variants(text):
             hit = index.get(key)
             if hit:
                 return hit
+        return None
+
+    # ① 整条写法当文件名（`qing_en` / `qing en`）：名字里本来就带着 tag。
+    for cand in ('_'.join(parts), ' '.join(parts)):
+        hit = _find(cand)
+        if hit:
+            return hit
+    if len(parts) < 2:
+        return None
+    # ② 属性件：先在 `目录/属性` 这一档上认（精确按 tag 的目录）。
+    rest = '_'.join(parts[1:])
+    hit = _find(f'{parts[0]}/{rest}')
+    if hit:
+        return hit
+    # ③ 再退到裸属性名 —— 只许是**这个 tag 的**文件。
+    hit = _find(rest)
+    if hit and _belongs_to_tag(hit, parts[0]):
+        return hit
     return None
 
 

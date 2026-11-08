@@ -144,6 +144,42 @@ def compose_sprite(plan, cache_dir=None, max_size=None):
         return None
 
 
+def _big_layer_size(layers) -> tuple:
+    """
+    一张立绘的**引擎原始尺寸**：各层里面积最大那层的像素尺寸。
+
+    Ren'Py 的 layeredimage 各层通常同尺寸（脸件是从整身图上裁的），
+    不同尺寸的层按"最大那张"对齐 —— 这也就是引擎里这张立绘占多大。
+    读不到任何一层 → `()`（调用方自己退化）。
+    """
+    from storygraph.app.thumbs import natural_size
+    big = (0, 0)
+    for ly in layers or ():
+        p = (ly or {}).get('path') if isinstance(ly, dict) else None
+        if not p:
+            continue
+        size = natural_size(p)
+        if not size:
+            continue
+        if size[0] * size[1] > big[0] * big[1]:
+            big = (int(size[0]), int(size[1]))
+    return big if big[0] and big[1] else ()
+
+
+def plan_natural_size(plan) -> tuple:
+    """
+    合成**之前**这张立绘在引擎里的原始像素尺寸（`LayerPlan` → `(w, h)`）。
+
+    为什么必须有它（2026-11-08 用户报"qing 的 en 表情绑到别人身上"时顺带查到的）：
+    `compose_sprite` 不传 `max_size` 时最长边封顶 `MAX_SIDE`（1400），
+    产物比原图**小得多**。舞台几何是 `原图 × zoom`（`atl.placement_box`），
+    拿合成图的尺寸去算，4320×7680 的立绘会被画成 787×1400 那么大 ——
+    "换了个表情，人变小了一半"。所以要留着原图尺寸给几何用，
+    合成图只当像素来源。
+    """
+    return _big_layer_size(getattr(plan, 'layers', None))
+
+
 def _scale_for(layers, box) -> tuple:
     """
     `(factor, (target_w, target_h))` —— 把所有层缩到 `box` 以内要用的比例。
@@ -151,14 +187,7 @@ def _scale_for(layers, box) -> tuple:
     以**面积最大那层**的原图尺寸为准（Ren'Py 的 layeredimage 各层通常同尺寸；
     不同尺寸的层在下面按目标尺寸对齐，与"原图分辨率"那条路的行为一致）。
     """
-    from storygraph.app.thumbs import natural_size
-    big = (0, 0)
-    for ly in layers:
-        size = natural_size(ly['path'])
-        if not size:
-            continue
-        if size[0] * size[1] > big[0] * big[1]:
-            big = tuple(int(v) for v in size)
+    big = _big_layer_size(layers)
     if not big[0] or not big[1]:
         return 1.0, ()
     factor = min(1.0, float(max(box)) / float(max(big)))
@@ -280,4 +309,4 @@ def _default_cache_dir() -> Path:
         return Path(tempfile.gettempdir()) / 'storygraph_thumbs'
 
 
-__all__ = ['MAX_SIDE', 'compose_sprite']
+__all__ = ['MAX_SIDE', 'compose_sprite', 'plan_natural_size']
