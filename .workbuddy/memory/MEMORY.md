@@ -97,6 +97,22 @@
   （`allow_edit=False`）；能加行的 `trust_ranges` 分支在它之后。**是拒绝，不是静默丢。**
   另记一条：`trust_ranges` 真正不可替代的场景是"**连说话人都换了**"
   （`e` → `jc` + 换词）—— 只换正文靠说话人认得出，旁白被换掉有上面那条分支兜着。
+- **切行只认 `\n`，一律用 `core.textlines.split_lines`**（第十五轮地狱测试）：
+  `str.splitlines()` 把 **U+2028**（从 Word/网页粘台词常带）/ `\x0c` / `\x85` /
+  U+2029 都当换行。谁拿它切 .rpy 行、再用 `'\n'.join()` 拼回去，那一行就被
+  **撕成两行**（`"你好␨世界"` → `"你好` + `世界"`，台词没结引号），而且可能
+  **静默**（合并报 ok=True）。已知踩过三处：`patcher`（早修）、
+  `write_gate`（第十四轮写 merge_text 时）、`generation_guard`
+  （`top_level_chunks` → 半截像顶层语句 → `OPAQUE_LOST` **假拒写**）。
+  守卫：`test_hell_export_merge.py::test_no_splitlines_in_the_merge_chain`（AST 扫）+ 
+  `test_patch_line_splitting.py`。
+- **"紧挨着" ≠ "同一处"**（第十五轮）：他插的那一行正好贴着你改的那一行时**拒写**
+  （第十四轮定的，插入点落在替换段端点上，先后说不准），但措辞必须分开
+  —— `write_gate._clash_kind()` 给 `overlap` / `touching`。说成"改的正是同一处"
+  时用户会去找"他什么时候改了我这句"，找不到，然后就不信这个提示了。
+- **探针/判据比字节时 `write_text(..., newline='')`**：Windows 上
+  `Path.write_text()` 会把 `\n` 翻成 `\r\n`，拿 `read_bytes()` 跟
+  `text.encode()` 比就永远"文件变了"（第十五轮探针因此报了两个假 P0）。
 - **两份 JSON 清单各只有一个写入口，且都带跨进程锁**（2026-11-07 第七、八轮）：`storygraph.ext.json` → `ExtensionRegistry.save()`（三方合并）；`storygraph.rules.json` → `statement_registry._edit_manifest()`（锁里读→改→原子写；**删文件与备份也在这个出口**：`edit` 返回 3 元组 `(result, changed, delete)`，`backup=True` 备份的是**锁里读到的那份文本**，备份失败 = 整次拒写）。四个删改入口（`remove_statement` / `declare_attr_groups(replace)` / `clear_attr_groups` / `reset_declarations`）全都走它，**别再自己读一遍清单**。**别再 `path.write_text(json.dumps(...))`** —— 那会让"两个人同时存"静默丢一条。锁在 `core/filelock.py`，文件放**用户缓存**（`…/StoryGraph/locks/<sha1>.lock`），**不写进用户项目**；放锁 = 关句柄（别手删锁文件）。
 - **用户级设置**（第十三轮）：`%LOCALAPPDATA%/StoryGraph/settings.json` 只有 `core.user_prefs.update(name, patch)` 一个出口（锁里读→**只改这一节**→原子写；patch 里 `None`=删键；读不懂就 `CorruptSettings` **拒写** —— 那文件人也会手改）。⚠ **写盘路每一代都要读它**（脚本留档档位），所以缺/坏时只能退化成默认，**绝不许拦写盘**；`STORYGRAPH_SETTINGS` 可改位置（测试那道 autouse 夹具靠它）。这类东西别用 `QSettings` —— core 没有（也不该有）Qt。
 - 合并的"我没动"必须用**规范形**比：`base` 里读来的条目可能带 `origin` 之类的运行时键，文件里新读出来的没有 —— 带着比就全是**假冲突**（`_call_body()` / `to_dict()` 两边同一套）。
