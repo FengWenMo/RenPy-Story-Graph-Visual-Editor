@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 from storygraph.core.safeguard import swallow
+#: 行边界只认 `\n`（见 `top_level_chunks` 的说明：U+2028 会让一行被切成两半）
+from storygraph.core.textlines import split_lines
 from storygraph.core.vocabulary import (GENERATOR_MARKER,
                                         SHOW_CLAUSE_KEYWORDS)
 from storygraph.story.beat_render import render_beats_to_rpy
@@ -217,8 +219,14 @@ def top_level_chunks(text: str) -> list:
       · 空行与 `#` 注释**不算**（文件头注释丢了不难看，不值得拦人 ——
         "宁可少报"是这道门禁的既定口径）；
       · `label x:` 及其块体跳过（那属于"拍"，由增量/全量各自负责）。
+
+    ⚠ 切行只认 `\\n`（`core.textlines.split_lines`，2026-11-08 第十五轮）：
+    用 `str.splitlines()` 时，一行中间的 U+2028（从 Word 粘台词常带）会把那行
+    **切成两半**，后半截 `世界"` 看着像一条"顶层语句" → 报 `OPAQUE_LOST`
+    假拒写（实测：补丁明明对了，导出却被拦）。与 `patcher` / `write_gate`
+    用同一个助手，别再各写一份。
     """
-    lines = str(text or '').splitlines()
+    lines = split_lines(text)
     out = []
     i, n = 0, len(lines)
     while i < n:
@@ -262,7 +270,7 @@ def opaque_loss(source_text, product_text) -> list:
     比对口径：顶层块的**每一行**（去空白）都要能在产物的某一行里找到。
     宽松是刻意的 —— 产物可能重排、可能加缩进，只要东西还在就不算丢。
     """
-    product = {_squash(ln) for ln in str(product_text or '').splitlines()}
+    product = {_squash(ln) for ln in split_lines(product_text)}
     product.discard('')
     lost = []
     for line_no, chunk in top_level_chunks(source_text):
@@ -751,7 +759,7 @@ def _python_syntax_issues(text: str, declared=()) -> list:
     编译不过就是 block：**这一份产物写进 game/ 会让游戏起不来**。
     """
     out = []
-    lines = text.splitlines()
+    lines = split_lines(text)
 
     for line_no, header, body in _iter_python_blocks(lines):
         code = textwrap.dedent('\n'.join(body))
@@ -778,7 +786,8 @@ def _python_syntax_issues(text: str, declared=()) -> list:
         try:
             compile(code, '<generated>', 'exec')
         except SyntaxError as exc:
-            head = code.splitlines()[0].strip() if code.splitlines() else ''
+            _code = split_lines(code)
+            head = _code[0].strip() if _code else ''
             # **"这是自定义语句，不是 Python"要说出口**（2026-10-25，审计第四轮 P2）。
             #
             # 现场：项目里声明过 `mycue`，用户在「代码」格里写
@@ -826,7 +835,7 @@ def _iter_dollar_statements(lines: list):
             continue
         group = _group_code_statements(lines[i:])
         chunk = group[0][0] if group else lines[i]
-        body = chunk.splitlines()
+        body = split_lines(chunk)
         head_line = body[0].strip()
         body[0] = head_line[2:] if head_line.startswith('$ ') else head_line[1:]
         yield i + 1, textwrap.dedent('\n'.join(body))
@@ -852,7 +861,7 @@ def _python_block_line_numbers(text: str) -> set:
     """
     inside = set()
     base = None                      # 当前 python 块的块头缩进
-    for i, line in enumerate(str(text or '').splitlines(), start=1):
+    for i, line in enumerate(split_lines(text), start=1):
         stripped = line.strip()
         if not stripped:
             continue
@@ -872,7 +881,7 @@ def _image_refs(text: str) -> list:
     """抽出生成文本里所有的 show/hide/scene 图像名（跳过注释行与 python 块）。"""
     refs = []
     in_python = _python_block_line_numbers(text)
-    for i, line in enumerate(text.splitlines(), start=1):
+    for i, line in enumerate(split_lines(text), start=1):
         s = line.strip()
         if not s or s.startswith('#') or i in in_python:
             continue
@@ -973,7 +982,7 @@ def _guard_at_clause_issues(text: str, py_block_lines) -> list:
     一个都没有（`at 左边`）才说明这是自由文本混进了代码。
     """
     issues = []
-    for i, line in enumerate(text.splitlines(), start=1):
+    for i, line in enumerate(split_lines(text), start=1):
         s = line.strip()
         if not s or s.startswith('#') or i in py_block_lines:
             continue
@@ -1024,7 +1033,7 @@ def _guard_label_collisions(text: str, occupied_labels, project_root,
 
 def _guard_todo_issues(text: str) -> list:
     """规则 3：生成结果里还留着"缺资源"的占位注释（`UNRESOLVED_TODO`）。"""
-    todo_lines = [i for i, line in enumerate(text.splitlines(), start=1)
+    todo_lines = [i for i, line in enumerate(split_lines(text), start=1)
                   if '# TODO:' in line]
     if not todo_lines:
         return []

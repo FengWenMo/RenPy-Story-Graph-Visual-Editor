@@ -58,6 +58,13 @@ import difflib
 import hashlib
 from dataclasses import dataclass
 
+#: 行边界**只认 `\n`**（第十五轮地狱测试抓到的坑）：
+#: `str.splitlines()` 还把 U+2028 / U+2029 / U+0085 / `\x0b` / `\x0c` 都当换行 ——
+#: 从 Word / 网页粘一句台词最容易带进 U+2028。用它切，同一份文本在这里是 6 行、
+#: 在解析器/补丁那边是 5 行，diff 就整体错位：**该合的判成冲突**（实测），
+#: `_clash_of` 报出来的行号也是错的。与 `patcher` 同一个助手，别再各写一份。
+from storygraph.core.textlines import split_lines
+
 ADOPT = 'adopt'
 REBASE = 'rebase'
 CONFLICT = 'conflict'
@@ -167,6 +174,12 @@ def _touch(a, b) -> bool:
 
     插入（起 == 止）当成一个点：落在别人替换段里、或两个插入在同一点，
     都算冲突 —— 宁可让人二选一，也别猜一个顺序。
+
+    ⚠ 这条判据**故意**把"插入点正好落在替换段的端点上"（他刚在你改的那一行
+    上面/下面加了一行）也算冲突 —— 第十四轮就这么定的，见
+    `test_merge_commit.py::test_adjacent_insert_is_refused_on_purpose`。
+    但那种情况**不是**"改到了同一处"，措辞由 `_clash_kind` 分开
+    （第十五轮地狱测试：原来两种都报"撞在同一处"，用户看到的是一句假话）。
     """
     a1, a2 = int(a[0]), int(a[1])
     b1, b2 = int(b[0]), int(b[1])
@@ -179,17 +192,64 @@ def _touch(a, b) -> bool:
     return max(a1, b1) < min(a2, b2)
 
 
+#: 两边**真的**动到了同一行（或者两个插入落在同一点）
+CLASH_OVERLAP = 'overlap'
+#: 只是**紧挨着**：他加/改的那一行贴着你改的那一行，没有共用任何基线行
+CLASH_TOUCHING = 'touching'
+
+
+def _adjacent_only(a, b) -> bool:
+    """
+    这两段碰上了，但**没有共用任何基线行**吗？
+
+    只有"插入点落在替换段的端点上"算：他插在你改的那一行前面 / 后面。
+    两段都插在同一点**不算** —— 先后说不准，那是真的同一处。
+    """
+    a1, a2 = int(a[0]), int(a[1])
+    b1, b2 = int(b[0]), int(b[1])
+    if a1 == a2 and b1 == b2:
+        return False
+    if a1 == a2:
+        return b1 != b2 and a1 in (b1, b2)
+    if b1 == b2:
+        return a1 != a2 and b1 in (a1, a2)
+    return False
+
+
+def _clash_kind(base_lines, disk_lines, draft_lines) -> str:
+    """
+    撞车属于哪一种（只用于**说人话**，不参与判定）。
+
+    * `overlap`  —— 两边真动到同一行（或两个插入落在同一点）；
+    * `touching` —— 只是紧挨着（他加/改的那一行贴着你改的那一行）；
+    * `''`       —— 其实没撞（不该发生：走到这里就说明 `merge_text` 说不成）。
+    """
+    hard = soft = False
+    for a in edits_between(base_lines, disk_lines):
+        for b in edits_between(base_lines, draft_lines):
+            if not _touch(a, b):
+                continue
+            if _adjacent_only(a, b):
+                soft = True
+            else:
+                hard = True
+    return CLASH_OVERLAP if hard else (CLASH_TOUCHING if soft else '')
+
+
 def merge_text(base_text, disk_text, draft_text) -> str:
     """
     两边对同一份 base 的改动**不重叠**时 → 合并结果；否则 `''`（= 合不了）。
 
     行级合并（`difflib` 的 opcode），不逐字符：这个项目的文本单位就是"行"，
     逐字符合并会把缩进/引号拼成谁也没写过的样子。
+
+    ⚠ 切行走 `core.textlines.split_lines`（**只认 `\\n`**），不用 `splitlines()`
+    —— 见文件头那条注释。
     """
     base_text = str(base_text if base_text is not None else '')
-    base = base_text.splitlines()
-    disk = str(disk_text if disk_text is not None else '').splitlines()
-    draft = str(draft_text if draft_text is not None else '').splitlines()
+    base = split_lines(base_text)
+    disk = split_lines(disk_text)
+    draft = split_lines(draft_text)
 
     left = edits_between(base, disk)
     right = edits_between(base, draft)
@@ -288,6 +348,9 @@ class Commit:
     kept: tuple = ()
     #: 撞在一起的范围（1 基闭区间，基线坐标）—— 只在 `conflict` 时有
     clash: tuple = ()
+    #: 撞的是"同一行"还是"只是紧挨着"（`CLASH_OVERLAP` / `CLASH_TOUCHING`）。
+    #: 只影响**措辞**：两种都拒写，但说成"撞在同一处"在紧挨着那种场合是**假话**。
+    clash_kind: str = ''
     detail: str = ''
 
     @property
@@ -338,6 +401,13 @@ class Commit:
         if self.state != GATE_CONFLICT:
             return ''
         where = '、'.join(_fmt_span(a, b) for a, b in self.clash[:2]) or '同一处'
+        if self.clash_kind == CLASH_TOUCHING:
+            # 他没有动你那一行，只是**贴着你**加/改了一行。说成"撞在同一处"
+            # 是假话（用户会去找"他什么时候改了我这句"，找不到）。
+            # 开头那句"又被改过"两种都留着：它是这次拒写的共同事实。
+            return (f'这个脚本在你算完之后又被改过：别人的改动紧挨着你改的那一行'
+                    f'（{where}），中间没有一行能把两段分开 —— 谁在前说不准，'
+                    f'所以这次没有写。先看一眼那几行，或者重新载入这一章再改一次。')
         return (f'这个脚本在你算完之后又被改过，而且正撞在{where}；'
                 f'为了不误删，这次没有写。重新载入之后再改一次。')
 
@@ -348,7 +418,8 @@ class Commit:
     def as_dict(self) -> dict:
         return {'state': self.state, 'path': self.path,
                 'kept': [k.as_dict() for k in self.kept],
-                'clash': [list(c) for c in self.clash], 'detail': self.detail}
+                'clash': [list(c) for c in self.clash],
+                'clash_kind': self.clash_kind, 'detail': self.detail}
 
 
 def _kept_of(base_lines, disk_lines) -> tuple:
@@ -417,12 +488,15 @@ def merge_three_way(base_text, disk_text, draft_text, path='') -> Commit:
         return Commit(WROTE, where, disk, draft, detail='盘上还是你算计划时那一份')
     merged = merge_text(base, disk, draft)
     if merged:
-        kept = _kept_of(base.splitlines(), disk.splitlines())
+        kept = _kept_of(split_lines(base), split_lines(disk))
         return Commit(MERGED, where, disk, merged, kept=kept,
                       detail=f'另有 {len(kept)} 处别人的改动')
-    clash = _clash_of(base.splitlines(), disk.splitlines(),
-                      draft.splitlines())
+    clash = _clash_of(split_lines(base), split_lines(disk),
+                      split_lines(draft))
+    kind = _clash_kind(split_lines(base), split_lines(disk),
+                       split_lines(draft))
     return Commit(GATE_CONFLICT, where, disk, '', clash=clash,
+                  clash_kind=kind,
                   detail='两边的改动落在同一处，认不出该听谁的')
 
 
@@ -462,7 +536,7 @@ def commit_text(path, base_text, draft_text, *, history: bool = True,
     return v
 
 
-__all__ = ['ADOPT', 'COMMIT_CN', 'CONFLICT', 'Commit', 'GATE_CONFLICT',
-           'Kept', 'MERGED', 'REBASE', 'SAME', 'STATE_CN', 'Verdict',
-           'WROTE', 'classify', 'commit_text', 'edits_between', 'merge_text',
-           'merge_three_way', 'sha1_16']
+__all__ = ['ADOPT', 'CLASH_OVERLAP', 'CLASH_TOUCHING', 'COMMIT_CN',
+           'CONFLICT', 'Commit', 'GATE_CONFLICT', 'Kept', 'MERGED', 'REBASE',
+           'SAME', 'STATE_CN', 'Verdict', 'WROTE', 'classify', 'commit_text',
+           'edits_between', 'merge_text', 'merge_three_way', 'sha1_16']

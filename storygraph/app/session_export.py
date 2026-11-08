@@ -85,7 +85,10 @@ def card_at_lines(beats, spans) -> str:
             continue
         for start, end in spans:
             if first <= int(end or 0) and last >= int(start or 0):
-                head = str(getattr(b, 'text', '') or '').strip()
+                # 台词里万一带了换行/制表符，**不许漏进这句提示**：它是状态栏/
+                # 单行浮层里的一句话（第十五轮地狱测试：`第一行\n第二行` 直接把
+                # 那句话折成两行，后半截被裁掉）。
+                head = ' '.join(str(getattr(b, 'text', '') or '').split())
                 if len(head) > 14:
                     head = head[:13] + '…'
                 return (f'第 {i + 1} 张卡「{head}」' if head
@@ -595,9 +598,17 @@ class ExportMixin:
 
     def _merge_conflict_reason(self, verdict) -> str:
         """撞车时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
+        from storygraph.story.write_gate import CLASH_TOUCHING
         spans = tuple(getattr(verdict, 'clash', ()) or ())
         where = '、'.join(_span_cn(a, b) for a, b in spans[:2]) or '同一处'
         who = card_at_lines(self.beats, spans) or '你改的那几行'
+        if getattr(verdict, 'clash_kind', '') == CLASH_TOUCHING:
+            # 他没动你那一行，只是贴着你加/改了一行 —— 说成"改的正是同一处"
+            # 是假话（第十五轮地狱测试抓到：有人只是在旁边加了个注释）。
+            return (f'{who}（{where}）旁边，别人也加/改了一行 —— 挨在一起时'
+                    f'认不出谁在前，所以这次一个字节都没写。'
+                    f'先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
+                    f'② 或导出到 build/renpy/ 下比对。')
         return (f'{who}（{where}）别人也改过，而且改的正是同一处 —— '
                 f'认不出该留谁的那一版，所以这次一个字节都没写。'
                 f'先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
