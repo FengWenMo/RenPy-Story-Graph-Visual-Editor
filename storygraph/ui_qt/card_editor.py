@@ -654,23 +654,23 @@ class BeatCardEditor(QWidget):
 
     def _build_meta_area(self, root) -> None:
         """备注 / 条件 / 高级区（拆自 `_build`，2026-11-01）。"""
-        specs = self._card_field_specs()
         # —— 备注 / 条件显示 ——（一行一条，标签右对齐到全局那条竖线）
         #
-        # 2026-11-07 第三轮：这两格的标签、灰字提示、tooltip 现在都在
+        # 2026-11-07 第三轮：这两格的标签、灰字提示、tooltip 都在
         # `ext.card_fields` 那张表里（从前是这里写死的字符串）—— 于是"字段表 →
         # 界面"在最后一米没断：扩展窗口里凭空多出来的一格也能有提示。
-        for name in ('Comment', 'condition'):
-            spec = specs.get(name) or FieldSpec(key=name)
-            w = field_widgets.make_editor(spec)
-            self._widgets[name] = w
-            self._hook_dirty(w)
-            if name == 'Comment':
-                self._comment = w
-            else:
-                self._condition = w
-            root.addWidget(card_rows.row(spec.shown, w,
-                                         label_tip=spec.help or ''))
+        #
+        # 2026-11-08 第四轮：它们**还要能重建**。从前这两行直接挂在 root 上，
+        # 而 `set_card_field_specs` 只重建高级区 —— 于是字段表里改
+        # `Comment` / `condition`（那两格就在"能改的键"列表里）存完之后，
+        # 卡片**一个像素都不变**，也没有任何提示。现在给它们一个容器，
+        # 与高级区同一条重建链（判据：`test_hell_extension_card_display.py`）。
+        self._meta_host = QWidget()
+        self._meta_lay = QVBoxLayout(self._meta_host)
+        self._meta_lay.setContentsMargins(0, 0, 0, 0)
+        self._meta_lay.setSpacing(T.SPACE['xs'])
+        root.addWidget(self._meta_host)
+        self._build_meta_rows()
 
         # —— 语句参数组已经挪到卡片顶部（见上面的 `_spec_host`）——
 
@@ -684,9 +684,7 @@ class BeatCardEditor(QWidget):
         # 卡片最小宽顶到 356px、整卡地板 380px —— 右栏一窄就出横向滚动条）。
         # "里面有什么"放进 tooltip，信息一点没少 —— 而且**由字段表生成**：
         # 从前这里写死过 `… / Notes / 台词后缀 / …`，那两格早就不在高级区了。
-        self._adv_btn.setToolTip(
-            ' / '.join(self._adv_names())
-            + '\n（收起只是不显示 —— 里面的字段照样会写回）')
+        self._adv_btn.setToolTip(self._adv_tooltip())
         self._adv_btn.clicked.connect(self._toggle_adv)
         root.addWidget(self._adv_btn, 0, Qt.AlignLeft)
 
@@ -697,6 +695,42 @@ class BeatCardEditor(QWidget):
         self._adv_host.setVisible(True)
         self._build_advanced_rows()
         root.addWidget(self._adv_host)
+
+    #: 主区那两格（由字段表画；顺序 = 卡片上的顺序）。
+    META_FIELDS = ('Comment', 'condition')
+
+    def _build_meta_rows(self) -> None:
+        """
+        按字段表重建「备注 / 条件」两格（与 `_build_advanced_rows` 同一套画法）。
+
+        为什么要单独一个函数：这两格是**主区**的，不在 `ADVANCED_FIELDS` 里，
+        所以高级区那条重建链到不了它们。和高级区一样，先拆旧控件（`setParent`
+        才真的从画面拿掉）再按新 schema 画，值由调用方搬（`set_card_field_specs`）。
+        """
+        lay = self._meta_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        specs = self._card_field_specs()
+        for name in self.META_FIELDS:
+            spec = specs.get(name) or FieldSpec(key=name)
+            w = field_widgets.make_editor(spec)
+            self._widgets[name] = w
+            self._hook_dirty(w)
+            if name == 'Comment':
+                self._comment = w
+            else:
+                self._condition = w
+            lay.addWidget(card_rows.row(spec.shown, w,
+                                        label_tip=spec.help or ''))
+
+    def _adv_tooltip(self) -> str:
+        """「高级区」按钮的 tooltip（里面有哪些格 —— **由字段表生成**）。"""
+        return (' / '.join(self._adv_names())
+                + '\n（收起只是不显示 —— 里面的字段照样会写回）')
 
     def _adv_names(self) -> list:
         """高级区那一串名字（tooltip 用；从 schema 来，不再写死）。"""
@@ -768,6 +802,9 @@ class BeatCardEditor(QWidget):
     def _set_statement(self, statement, loose):
         """填顶部的「语句条」+ 下面那行"原样行"提示（各自独立显隐）。"""
         info = dict(statement or {})
+        # 这一拍是哪条语句（`{}` = 台词拍）。**留着**是为了 `set_flow(None)`
+        # 能把"该收哪几块"按**这一拍**重放一遍（见 `set_flow` 的说明）。
+        self._statement = info
         name = str(info.get('name') or '').strip()
         label = str(info.get('label') or '').strip()
         head = str(info.get('head') or '').strip()
@@ -830,12 +867,23 @@ class BeatCardEditor(QWidget):
         self._flow_brief = dict(brief or {}) if info else {}
         if not info:
             self._flow_bar.setVisible(False)
-            # 回到普通卡片：台词区与舞台块都放出来。舞台块**平时常显**
-            # （理由见 `_build` 里「立绘 / 背景 / 音乐（永远完整显示）」），
-            # 这里只要把控制流卡收掉的再放出来就行。
-            self._dialogue_box.setVisible(True)
+            # 回到普通卡片：把**这一拍自己的**组放回来 —— 不是无脑全放。
+            #
+            # ⚠ 2026-11-08 第四轮：从前这里是 `setVisible(True)` 两连发。
+            #   而每张卡都会走到这里（`_sync_flow_card` 对普通拍传的是
+            #   `None`），于是 `_sync_spec_args` 刚按语句收起的台词 / 舞台块
+            #   被**紧接着**放回来 —— 语句拍照样铺着四个空块。
+            #   面板单测全绿（`test_card_field_groups.py` 不经过 `set_flow`），
+            #   真窗口里却是另一回事；判据：
+            #   `tests/test_hell_extension_card_display.py` 的 B 组。
             self._stage_now.setVisible(True)
-            self._stage_box.setVisible(True)
+            statement = getattr(self, '_statement', None)
+            if statement is None:
+                # 还没载入过任何一拍（单测里直接建面板）：保持老行为
+                self._dialogue_box.setVisible(True)
+                self._stage_box.setVisible(True)
+            else:
+                self._sync_field_groups(statement)
             if self._loaded_fields:
                 self._loaded_fields.pop('FlowType', None)
                 self._loaded_fields.pop('FlowTarget', None)
@@ -1083,6 +1131,10 @@ class BeatCardEditor(QWidget):
         """
         换一套卡片字段 schema（内置 + 项目扩展点），**按新 schema 重建那几行**。
 
+        重建的是**两处**：主区那两格（`Comment` / `condition`，见
+        `_build_meta_rows`）与高级区（`_build_advanced_rows`）。字段表把它们
+        都算"能改的键"，少一处就是"保存成功了、卡片没变"（2026-11-08 实测）。
+
         为什么要重建而不是改现有控件的标签：类型可能从"输入框"变成"代码框"
         （`field` 扩展点最常用的用法），换控件就得换人；而且旧值不能丢 ——
         重建前后按名字把值搬过去（`_get_value` → `_set_value`）。
@@ -1097,14 +1149,18 @@ class BeatCardEditor(QWidget):
             self._field_specs = merged
             return                            # 形状没变：不重建（保住光标）
         self._field_specs = merged
-        if not hasattr(self, '_adv_host'):
+        if not hasattr(self, '_adv_host') or not hasattr(self, '_meta_lay'):
             return                            # 还没建界面：`_build` 会用它
         old = {name: self._get_value(name) for name in CF.overridable_keys()
                if name in self._widgets}
+        # 主区两格（Comment / condition）与高级区**一起**重建：字段表里它们
+        # 都是"能改的键"，少重建一边就是"改完保存什么都不变"（2026-11-08）。
+        self._build_meta_rows()
         self._build_advanced_rows()
         for name, value in old.items():
             if value:
                 self._set_value(name, value)
+        self._adv_btn.setToolTip(self._adv_tooltip())
         self.refresh_dirty()
 
     def _build_advanced_rows(self) -> None:
@@ -1157,7 +1213,9 @@ class BeatCardEditor(QWidget):
 
         规则只两条，都按**有没有值 / 是不是语句拍**判，不按 `kind` 猜：
 
-          · 台词区：**没有台词就收起**（语句拍、`show` 拍都没台词）；
+          · 台词区：**没有台词就收起**（语句拍、`show` 拍都没台词）——
+            但"什么都没有"的空卡片例外：刚 `insert_card()` 插出来那一拍，
+            台词框就是人要打字的地方（2026-11-08 补，见下面的 `has_other`）；
           · 舞台块（背景/立绘/音乐/语音的输入）：**语句拍且没有舞台动作**时收起
             —— 一条 `泳装切换 …` 不会顺带改背景，留着那几格只是噪音。
             普通台词拍**不变**（仍常显），因为"说着话顺手 show 一个"是真写法。
@@ -1178,7 +1236,17 @@ class BeatCardEditor(QWidget):
         has_text = bool(str(data.get('Text') or '').strip())
         has_stage = any(str(data.get(name) or '').strip()
                         for name in self.STAGE_FIELDS)
-        self._dialogue_box.setVisible(has_text)
+        # 台词区：没有台词通常收起，但**空卡片**要留着 —— 那是人要打字的地方。
+        #
+        # ⚠ 2026-11-08（收起第一次真正生效之后量到）：`insert_card()` 插出来的
+        #   拍什么内容都没有，按"没有台词就收起"办，那张卡片的台词框直接不见、
+        #   一个字也写不进去。所以判据不是"有没有台词"，而是
+        #   "**这一拍是不是已经有别的样子**"（语句 / 舞台动作 / 音频 / 代码）。
+        has_other = has_stage or any(
+            str(data.get(name) or '').strip()
+            for name in ('BGM', 'SFX', 'Voice', 'CodeBlock'))
+        self._dialogue_box.setVisible(
+            has_text or (not is_statement and not has_other))
         self._stage_box.setVisible(has_stage or not is_statement)
 
     # ---------- 语句参数那一组（`app.beats.spec_arg_*`） ----------

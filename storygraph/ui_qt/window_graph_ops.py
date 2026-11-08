@@ -1475,6 +1475,7 @@ class GraphOpsMixin:
                 '先「📁 打开项目」—— 扩展点要写进项目根的 '
                 'storygraph.ext.json。')
             return
+        names_before = self._statement_names(root)
         dlg = ExtensionDialog(self, project_root=root)
         dlg.exec()
         # 扩展点可能改过"这条写法用不用"——注册表缓存作废，卡片/表格按新的来。
@@ -1486,7 +1487,23 @@ class GraphOpsMixin:
             return dlg
         clear_cache()
         self._refresh_card_field_specs()
+        if self._statement_names(root) != names_before:
+            # 拍字段那几格立刻生效（`_refresh_card_field_specs` 重建界面），
+            # 但"这条行字认不认得"是**解析时**定下的：已经读进来的拍不会自己
+            # 重认。不说的话，用户在扩展窗口里声明完写法、回卡片一看没变化，
+            # 只会以为"保存了却没效果"（与「自定义语句」窗同一句口径）。
+            self._log('[扩展] 可识别的写法变了 —— 已经读进来的章节要'
+                      '重新导入才会重认那几行（拍字段那几格已经生效）。')
         return dlg
+
+    def _statement_names(self, root) -> tuple:
+        """项目当前认得哪些写法（读不出来就当空 —— 只用来判"变没变"）。"""
+        try:
+            from storygraph.story.statement_registry import StatementRegistry
+            return tuple(sorted(StatementRegistry.for_project(str(root)).names()))
+        except Exception as e:                  # noqa: BLE001 - 提示不该拦住关窗
+            self._log(f'[扩展] 认得的写法读不出来（不比对"变没变"）：{e}')
+            return ()
 
     def _refresh_card_field_specs(self):
         """

@@ -413,8 +413,16 @@ def _fold_head_columns(beat, head_dyn, pattern):
     if clauses:
         meta['__clauses__'] = list(clauses)
     folded = fold_dynamic_columns(fold_base, meta)
-    if head_prefix and folded != fold_base:
-        folded = f'{head_prefix} {folded}'.strip()
+    if head_prefix:
+        # ⚠ 前缀**无条件补回来**（2026-11-08 地狱测试抓到，P0）。
+        #
+        #   声明里没有"关键字格"时（「自定义语句」窗教出来的写法、扩展窗口里
+        #   加字段声明的那种），动作名会被 `_split_head_prefix` 摘成前缀；
+        #   而"一格都没改"那一路 `folded == fold_base` —— 从前这里
+        #   `if folded != fold_base` 才补前缀，于是**什么都不改、按一次保存**，
+        #   头行就少了语句名：`mycue 3 "x"` → `3 "x"`（剧本直接坏掉，
+        #   导出还报成功）。值没变时用原串 `base`，逐字节不动。
+        folded = base if folded == fold_base else f'{head_prefix} {folded}'.strip()
     _write_back_head(beat, target, base, folded)
 
 

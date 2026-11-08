@@ -51,6 +51,10 @@ storygraph.ext.card_fields
   · **专用控件的格不在表里**（说话人下拉 / 立绘网格 / 背景色块 / 台词转场）：
     它们的"控件"是业务逻辑，不是一个 kind 能描述的。覆盖它们同样进
     `problems`；
+  · **值格只装值**：开关 / 多选 / 固定字（`keyword` / `optional`）一律拒。
+    卡片上那几格的值要折回 `Beat` 的字段、要折进语句头；`True`、列表、
+    或者"写死的那个字"都不是这一拍的内容（固定字那一版实测会把
+    `Stage='show'` 写进每一拍，2026-11-08）；
   · 关掉（`enabled: false`）就等于没有这条覆盖 —— 与其它三类扩展点同一条口径。
 """
 from __future__ import annotations
@@ -134,6 +138,18 @@ def field_overrides(points, base=None) -> tuple:
         for spec in specs:
             key = str(spec.key or '').strip()
             if key in base:
+                if spec.fixed:
+                    # 固定字（`keyword` / `optional`）不是"这一拍的值"。那一格
+                    # 只装值：画成只读框之后，`collect_fields()` 会把框里那几个
+                    # 字当成内容交出去（`Stage='show'`），于是"把一格改成固定字"
+                    # 等于"给每一拍塞一句脚本"（2026-11-08 用真控件量到）。
+                    # 与开关 / 多选同一条口径：值格放不下的类型，当场拒。
+                    problems.append(
+                        f'拍字段扩展点「{_point_name(point)}」把「{key}」'
+                        f'改成了固定字（{FIELD_KIND_LABELS.get(spec.kind, spec.kind)}）：'
+                        f'卡片上的格只装这一拍的值 —— 那几个字会被当成内容'
+                        f'写进脚本')
+                    continue
                 if spec.widget in ('bool', 'multi_choice'):
                     # 卡片上那几格的值**都是字符串**（要写回 `Beat` 的字段、
                     # 要折进语句头）。开关/多选读出来是 True / 列表 —— 到
