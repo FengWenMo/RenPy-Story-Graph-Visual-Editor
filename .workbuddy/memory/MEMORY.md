@@ -267,6 +267,18 @@
   顺带：`atomicio.read_text_exact` 提为公开（与 `write_text_atomic` 对称），
   `registry._read_text_exact` 改成转发 —— 换行翻译差一个字节，"逐字节放回"就破功。
 
+- **扩展平台 v11（2026-11-08 第十一轮）**：**「整章应用」真的进导出了**。
+  `batchable` 那个开关从前只喂「批处理窗口 / CLI batch」（v3 接的那两条），
+  `session_export.export()` 压根不读 `rules_from_extensions` —— 用户配得再对，
+  导出也不会有那行代码；而且他那次存进 `ext.json` 的 `insert.text` 是**空串**
+  （界面上打了字、存的时候没带上），引擎判不合法，**没有人说出来**。
+  现在：导出落盘后 `_batch_after_write` 按声明补行（计划/落盘全用
+  `app.batch_edit`，只吃扩展声明，`storygraph.batch.json` 仍归批处理窗口）；
+  **零改动早退那条路也跑**（2-1-3 正是 0 改动）；补完若动的是载入的文件就重读；
+  不合法/算不出/写不进 → `warnings` 最前（"导出没效果"时最该看到的那句）。
+  窗口保存时勾了批处理但代码框为空 → 状态栏当场点破。判据
+  `tests/test_export_extension_batch.py` 8 条，全量 **10430 passed**。
+
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
   一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
