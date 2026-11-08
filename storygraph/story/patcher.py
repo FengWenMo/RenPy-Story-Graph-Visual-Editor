@@ -475,7 +475,8 @@ def recover_source_ranges(beats: list, source_path,
                           apply_ranges: bool = True,
                           apply_inserts: bool = False,
                           dropped_out: list = None,
-                          inserted_out: list = None) -> tuple:
+                          inserted_out: list = None,
+                          source_text: str = None) -> tuple:
     """
     给**没有行号**的拍找回源码区间（就地写回 `src_first` / `src_last`）。
 
@@ -499,14 +500,22 @@ def recover_source_ranges(beats: list, source_path,
     实测："表格里插一行 → 导出报告成功，产物里却没有那一句"。
 
     只读源文件，**不改表结构**。返回 `(对上的拍数, 总拍数, 被删掉的拍数)`。
+
+    `source_text`（2026-11-08 第十五轮）：**用这份文本代替盘上那份**。
+    导出那条大路在"文件被外人动过"时把补丁打在**底稿**上（见
+    `patch_export(base_text=…)`），而这里数的是"哪几拍在源里没人认领
+    = 被删了"，也必须数**底稿**：拿现在这份盘去数，`dropped` 就会是
+    别人的行号，删除通道照着它删 = 删别人的行。
     """
     src = Path(source_path) if source_path else None
-    if src is None or not src.exists() or not beats:
+    if src is None or not beats or (source_text is None
+                                    and not src.exists()):
         return 0, len(beats or []), 0
     try:
         from storygraph.parsing.renpy_parser import RenPyParser, ParseResultBuilder
         from storygraph.story.beat_build import beats_from_parse_result
-        parsed = ParseResultBuilder().build(RenPyParser().parse(src))
+        parsed = ParseResultBuilder().build(
+            RenPyParser().parse(src, text=source_text))
         src_beats = beats_from_parse_result(parsed)
     except Exception as e:                   # noqa: BLE001 - 解析失败就不找
         # 解析失败 → 一拍都对不上（`(0, N, 0)`），于是整章退回全量重写。
@@ -3585,7 +3594,7 @@ def _insert_ids_of(beats: list) -> set:
             if not int(getattr(b, 'src_first', 0) or 0)}
 
 
-def _recover_ranges(beats: list, source_path):
+def _recover_ranges(beats: list, source_path, source_text: str = None):
     """
     取"被删掉的源拍"与"要插入的位置"。
 
@@ -3603,6 +3612,9 @@ def _recover_ranges(beats: list, source_path):
 
     返回 `(insert_ids, dropped, dropped_src, fresh)`。
 
+    `source_text` 给了就**用这份文本数**（第十五轮，见 `recover_source_ranges`
+    的 `source_text` 说明）：底稿补丁时它必须是底稿。
+
     `fresh=True` 表示**行号是这一刀刚解析出来的**（不是拍上带来的旧值）：
     那时"这一段像不像这一拍"的守卫是多余的 —— 行号本来就来自当前磁盘上的
     这一份文件，不存在"过期"。2026-10-21 实测（`pomodorro.rpy`，表格路径）：
@@ -3614,7 +3626,8 @@ def _recover_ranges(beats: list, source_path):
         aligned_inserts: list = []
         _m, _t, dropped = recover_source_ranges(beats, source_path,
                                                 dropped_out=dropped_src,
-                                                inserted_out=aligned_inserts)
+                                                inserted_out=aligned_inserts,
+                                                source_text=source_text)
         return set(aligned_inserts), dropped, dropped_src, True
     try:
         # `apply_inserts=False`：插入点**不用对位算** —— 对位可能把新拍
@@ -3623,7 +3636,7 @@ def _recover_ranges(beats: list, source_path):
         # 前一句台词之后）。
         _m, _t, dropped = recover_source_ranges(
             beats, source_path, apply_ranges=False, apply_inserts=False,
-            dropped_out=dropped_src)
+            dropped_out=dropped_src, source_text=source_text)
     except Exception as e:                    # noqa: BLE001 - 查不了就当没有
         swallow('story.patcher.patch_export', e)
         dropped = 0
@@ -3947,7 +3960,8 @@ def _patch_walk_blocks(st) -> None:
 def patch_export(beats: list, source_path, generated_text: str,
                  registry=None, symbols=None, indent: str = '    ',
                  trust_ranges: bool = False,
-                 expect_sha1: str = '') -> PatchResult:
+                 expect_sha1: str = '',
+                 base_text: str = '') -> PatchResult:
     """
     把 `generated_text` 增量补进 `source_path`，返回合并后的全文。
 
@@ -4006,12 +4020,34 @@ def patch_export(beats: list, source_path, generated_text: str,
     为什么第 ⑨ 步要拆成七八个独立判据、而不是一个 `if`：每一条都对应一次真机
     事故（附录见各条注释里的日期），合并成一个 `if` 就没法在 `reasons` 里说清
     到底是哪一条挡的 —— 而用户看到的必须是一句能读懂的中文。
+
+    `base_text`（2026-11-08 第十五轮）
+    --------------------------------
+    **第 ② 步不读盘，用这份文本当原文**（`''` = 照旧读盘）。
+
+    它解决的是"文件被外人动过，而拍上的行号是载入时那份的行号"这件事：
+
+    * 不给 → 第 ③ 步的数删、第 ④ 步的守卫、第 ⑦ 步的落地全部面对
+      **现在这份盘**，而拍上带的是**旧行号** —— 于是 `trust_ranges` 不敢开，
+      内容证据又随着"用户改了那句台词"一起没了，只能靠**说话人**认行
+      （`_range_looks_like`）→ 别人的那一行被当成"我的那一拍"**改回去**。
+      实测见 `docs/设计_导出这条大路_三路合并_2026-11-08.md` §一。
+    * 给 → 补丁打在**底稿**上：拍上的行号与原文同一个来源，`trust_ranges`
+      的前提不是"磁盘没动过"而是"**这份底稿没动过**"（我们自己的字节）。
+      调用方拿到的 `text` = 底稿 + 我的改动，**再**去和盘上那份合并
+      （`write_gate.merge_three_way`）。他改的那几行因此要么被保住、
+      要么撞车被拒 —— 不会被静默改回去。
+
+    ⚠ 给了 `base_text` 时 `expect_sha1` 不参与（没有读盘那一步）。
+    调用方要保证 `base_text` 就是**解析出这些拍的那份文本**
+    （`session_export._patch_note` 靠 `_source_baseline_text` + 指纹保证）。
     """
     run = _PatchRun(beats=beats or [], generated_text=generated_text,
                     source_path=source_path, registry=registry,
                     symbols=symbols, indent=indent,
                     trust_ranges=bool(trust_ranges),
-                    expect_sha1=str(expect_sha1 or ''))
+                    expect_sha1=str(expect_sha1 or ''),
+                    base_text=str(base_text or ''))
     # ① 前置检查 + ② 读源（读完之后再核对一次指纹）
     fail = _patch_step_source(run)
     if fail is not None:
@@ -4048,7 +4084,7 @@ class _PatchRun:
     __slots__ = (
         # —— 入参（只读）——
         'beats', 'generated_text', 'source_path', 'registry', 'symbols',
-        'indent', 'trust_ranges', 'expect_sha1',
+        'indent', 'trust_ranges', 'expect_sha1', 'base_text',
         # —— ② 读源之后 ——
         'original', 'orig_lines', 'audit',
         # —— ③④ 定行号 / 表过期守卫 ——
@@ -4090,6 +4126,12 @@ def _patch_step_source(run: '_PatchRun') -> 'PatchResult | None':
     if run.symbols is None and run.registry is not None:
         from storygraph.story.beat_render import make_symbols
         run.symbols = make_symbols(run.registry)
+    if run.base_text:
+        # **底稿**（第十五轮）：不读盘。调用方保证它是"解析出这些拍的那份文本"，
+        # 所以拍上的行号与它同源，`trust_ranges` 的前提成立。
+        # 指纹不参与：这里没有"读完之后再核对"那个窗口（没有读）。
+        run.original = run.base_text
+        return None
     try:
         # ⚠ 读源必须走 `source_style`（2026-10-18，审计 P0-1）：
         #   `Path.read_text(encoding='utf-8')` 会把开头的 BOM 留成正文第一个
@@ -4137,8 +4179,11 @@ def _patch_step_locate(run: '_PatchRun') -> 'PatchResult | None':
     """
     # 行号是运行期元数据（不入表）；从表里读出来的拍没有 → 现找回来。
     # 细节见 `_insert_ids_of` / `_recover_ranges` 的 docstring。
-    insert_ids, dropped, dropped_src, fresh = _recover_ranges(run.beats,
-                                                             run.source_path)
+    insert_ids, dropped, dropped_src, fresh = _recover_ranges(
+        run.beats, run.source_path,
+        # 底稿补丁时"数被删的拍"也必须数底稿（见 `recover_source_ranges`）：
+        # 拿现在这份盘去数，`dropped` 就是别人的行号，删除通道会删别人的行。
+        source_text=(run.base_text or None))
 
     # —— **表过期守卫**（2026-10-21，P0）——
     #

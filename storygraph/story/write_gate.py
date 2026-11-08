@@ -389,6 +389,43 @@ def _clash_of(base_lines, disk_lines, draft_lines) -> tuple:
     return tuple(spans)
 
 
+def merge_three_way(base_text, disk_text, draft_text, path='') -> Commit:
+    """
+    **纯判定**：底稿 / 盘上 / 我这份 → 该写什么（不读盘、不写盘）。
+
+    第十五轮提成公开的：导出那条大路（`session_export._patch_note`）和
+    `commit_text` 必须是**同一份**判定，否则两处会各说一套
+    （第十四轮已经吃过一次：`merge_text` 写好了半年没人调，因为每个落盘点
+    都自己判了一遍"盘上变了就拒"）。
+
+    | 盘上是 | 结局 |
+    |---|---|
+    | 我这份 | `same`（不写） |
+    | 底稿（他其实没动） | `wrote`（照我的写） |
+    | 底稿 + 他的改动、不重叠 | `merged`（写合并结果，`kept` 说清保住他哪几处） |
+    | 撞在同一处 | `conflict`（`final_text` 是空串 —— **一个字都不许写**） |
+
+    `path` 只是回执里的路标，判定与它无关。
+    """
+    base = str(base_text if base_text is not None else '')
+    disk = str(disk_text if disk_text is not None else '')
+    draft = str(draft_text if draft_text is not None else '')
+    where = str(path or '')
+    if disk == draft:
+        return Commit(SAME, where, disk, disk, detail='盘上已经是这份内容')
+    if disk == base:
+        return Commit(WROTE, where, disk, draft, detail='盘上还是你算计划时那一份')
+    merged = merge_text(base, disk, draft)
+    if merged:
+        kept = _kept_of(base.splitlines(), disk.splitlines())
+        return Commit(MERGED, where, disk, merged, kept=kept,
+                      detail=f'另有 {len(kept)} 处别人的改动')
+    clash = _clash_of(base.splitlines(), disk.splitlines(),
+                      draft.splitlines())
+    return Commit(GATE_CONFLICT, where, disk, '', clash=clash,
+                  detail='两边的改动落在同一处，认不出该听谁的')
+
+
 def commit_text(path, base_text, draft_text, *, history: bool = True,
                 backup: bool = False) -> Commit:
     """
@@ -415,31 +452,17 @@ def commit_text(path, base_text, draft_text, *, history: bool = True,
     from storygraph.story.source_style import read_text
 
     p = Path(path)
-    base = str(base_text if base_text is not None else '')
-    draft = str(draft_text if draft_text is not None else '')
     disk, style = read_text(p)
-
-    if disk == draft:
-        return Commit(SAME, str(p), disk, disk, detail='盘上已经是这份内容')
-    if disk == base:
-        write_text_atomic(p, style.apply(draft, source=p),
+    # 判定只有一处（`merge_three_way`）—— 导出那条大路用的是同一个函数，
+    # 于是"两边都改了时该怎么办"不会有两套答案。
+    v = merge_three_way(base_text, disk, draft_text, path=str(p))
+    if v.wrote_bytes:
+        write_text_atomic(p, style.apply(v.final_text, source=p),
                           history=history, backup=backup)
-        return Commit(WROTE, str(p), disk, draft, detail='盘上还是你算计划时那一份')
-
-    merged = merge_text(base, disk, draft)
-    if merged:
-        kept = _kept_of(base.splitlines(), disk.splitlines())
-        write_text_atomic(p, style.apply(merged, source=p),
-                          history=history, backup=backup)
-        return Commit(MERGED, str(p), disk, merged, kept=kept,
-                      detail=f'另有 {len(kept)} 处别人的改动')
-    clash = _clash_of(base.splitlines(), disk.splitlines(),
-                      draft.splitlines())
-    return Commit(GATE_CONFLICT, str(p), disk, '', clash=clash,
-                  detail='两边的改动落在同一处，认不出该听谁的')
+    return v
 
 
 __all__ = ['ADOPT', 'COMMIT_CN', 'CONFLICT', 'Commit', 'GATE_CONFLICT',
            'Kept', 'MERGED', 'REBASE', 'SAME', 'STATE_CN', 'Verdict',
            'WROTE', 'classify', 'commit_text', 'edits_between', 'merge_text',
-           'sha1_16']
+           'merge_three_way', 'sha1_16']

@@ -63,6 +63,36 @@ __all__ = ['ExportMixin', 'removal_note']
 from storygraph.story.patcher import removal_note  # noqa: E402
 
 
+def _span_cn(start, end) -> str:
+    """`(4, 4)` → `第 4 行`；`(4, 6)` → `第 4–6 行`（1 基、闭区间）。"""
+    start, end = int(start or 0), int(end or 0)
+    return f'第 {start} 行' if start == end else f'第 {start}–{end} 行'
+
+
+def card_at_lines(beats, spans) -> str:
+    """
+    这几行落在**第几张卡**上（1 基，带上卡里的台词好让人认出来）。
+
+    为什么要点到卡：导出被拒时用户看到的是"第 4–5 行"，而他面对的是卡片列表
+    —— 行号他不认识，卡号他认识（`docs/设计_导出这条大路_三路合并_2026-11-08.md`
+    §3.4）。找不到就返回空串（不猜，交给调用方写"你改的那几行"）。
+    """
+    spans = tuple(spans or ())
+    for i, b in enumerate(beats or ()):
+        first = int(getattr(b, 'src_first', 0) or 0)
+        last = int(getattr(b, 'src_last', 0) or 0)
+        if not first:
+            continue
+        for start, end in spans:
+            if first <= int(end or 0) and last >= int(start or 0):
+                head = str(getattr(b, 'text', '') or '').strip()
+                if len(head) > 14:
+                    head = head[:13] + '…'
+                return (f'第 {i + 1} 张卡「{head}」' if head
+                        else f'第 {i + 1} 张卡')
+    return ''
+
+
 class ExportMixin:
     """
     导出那一半（见模块 docstring 的职责边界）。
@@ -100,7 +130,13 @@ class ExportMixin:
                 # （`load` / `_fingerprint_of` 那一块）—— **由
                 # `test_editor_session_mixin_contract.py` 守着**，正是它当场
                 # 抓到了这次跨块调用没声明。
-                'source_unchanged')
+                'source_unchanged',
+                # **底稿文本**（2026-11-08 第十五轮）：`load()` 解析出这些拍
+                # 的那份原文。文件被外人动过时补丁打在**它**上面（见
+                # `_patch_note`），否则拍上的行号与原文不同源 —— 实测会把
+                # 别人改的那一行静默改回去。写入方是 `SessionTableMixin.load`，
+                # 宿主 `EditorSession.__init__` 初始化为 `''`。
+                '_source_baseline_text')
 
     EXPORT_ENGINES = ('unity', 'godot', 'json', 'csv', 'renpy')
     def export_ir(self, engine: str, out_dir) -> dict:
@@ -302,6 +338,10 @@ class ExportMixin:
             前端靠它决定"要不要给用户一个强制覆盖的选项" ——
             只有手写目标这一条是**可覆盖**的，语法/重名那几条不可；
           · note 说明用了增量补丁还是全量重生成。
+          · 文件被外人改过时（第十五轮）：note **开头**多一句短话
+            （"别人也改过这个脚本（不是同一处）：两边都落上了…"），
+            长的哪句（他在第几行改了什么）在 `warnings` 里 —— 短话进状态栏、
+            长话进日志，与原地小改那条路同一个规矩（Toast 是一行，长了会被裁）。
           · ok=False 且 `review_path` 非空时，产物留在那个 `.blocked.rpy`
             副本里供人对比（沿用门禁既有机制）。
 
@@ -328,6 +368,30 @@ class ExportMixin:
         if note['used_patch']:
             text = note['text']
 
+        # 第二道门：和盘上那份合**（只在补丁真的用上了的时候）**。
+        # 上一道门在有外人改过时把补丁打在**底稿**上（产物 = 底稿 + 我），
+        # 这一步才把它和"底稿 + 他"合起来：不重叠 → 两边都落上（说出口）；
+        # 撞在同一处 → **一个字节都不写**，理由点到哪一张卡。
+        #
+        # ⚠ 补丁**没用上**时绝不能进来合：那时的 `text` 是 `result.rpy_text`
+        # （全量重生成，只认得"拍"），拿它去合并会把这个"全量"写进用户文件 ——
+        # 正是 P0 那条要拦的形态。而且它还会把真正的拒因（"某句生成内容
+        # 找不到"）盖成一句"撞在同一处"（实测踩到，第十五轮）。
+        settled = self._settle_with_disk(
+            text, target, note.get('base_text', '') if note['used_patch'] else '')
+        if settled['blocking']:
+            return {'ok': False, 'path': target,
+                    'blocking': list(settled['blocking']),
+                    'codes': ['PATCH_FAILED'], 'note': note['text_note'],
+                    'todos': 0}
+        text = settled['text']
+        if settled['note']:
+            # 短句放**最前面**：状态栏会截断，后面才是"对位 3/3 拍"这类细节。
+            note['text_note'] = (f'{settled["note"]}；{note["text_note"]}'
+                                 if note['text_note'] else settled['note'])
+        if settled['warning']:
+            note['merge_warning'] = settled['warning']
+
         untouched = self._untouched_export(target, text, note, result)
         if untouched is not None:
             return untouched
@@ -339,18 +403,8 @@ class ExportMixin:
             return self._patch_failed_export(target, note)
 
         # **产物必须带生成标记**，补丁那条路也一样（2026-10-05 实测）。
-        #
-        # 为什么：`patch_export` 的合并策略是"保留原文那一行"，
-        # 它产出的首行是**源文件的首行**（常常是 `default …` 之类），
-        # 于是补丁产出的文件**没有生成标记**。后果是护栏认不出自家产物：
-        #
-        #     第一次导出 → ok=True   （补丁成功，写出去的没有标记）
-        #     第二次导出 → 拒绝覆盖  （被判成"手写文件"）
-        #
-        # 也就是说"再导出一次"在一个已经由工具生成的文件上必然失败 ——
-        # 这正是 `test_allows_overwriting_its_own_output` 想防的那种事故，
-        # 只不过它当时只在 `write_generation` 这一层测，没经过 export。
-        text = ensure_generator_marker(text)
+        # 为什么（"再导出一次必然失败"那个坑）见 `_with_generator_marker`。
+        text = self._with_generator_marker(text)
         blocked = self._generation_blocked(target, text, note)
         if blocked is not None:
             return blocked
@@ -359,32 +413,9 @@ class ExportMixin:
         if not art.written:
             return self._write_refused(target, note, art)
 
-        # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
-        #
-        # 为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
-        # 写回之后磁盘上那一份已经是新内容（补丁插了行、首行多了生成标记），
-        # 而内存拍的 `src_first/src_last` 还是**改动前**那份文件的 →
-        # 第二次原地导出对位率掉到 0~50% → 补丁失败 → P0 那条"目标就是源文件"
-        # 的护栏拒写。用户看到 `PATCH_FAILED：对位率不足`，而它偏偏落在
-        # **最常用的那条循环**上：
-        #
-        #     改一句 → 导出 → 再改一句 → 再导出   ← 第二次就断
-        #
-        # 为什么是"重新解析"而不是"按内容猜行号"（先走错过一步，记下来）：
-        # 第一版我用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
-        # 它在最需要它的那个场景上**是错的** —— 解析器会把"注释 / `call screen`
-        # + 紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出交叠
-        # 区间 → 对位率 50%（实测 whackamole）。合并**本来知道**每一拍写到了
-        # 哪几行，但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"
-        # 三套坐标系的换算（全仓最危险的一段）。而"内存 := 解析(磁盘)"
-        # 是**零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
-        #
-        # 代价（可接受，而且本来就该如此）：若刚插了一张只有注释/代码的卡，
-        # 重载后它会与后面那张并成一张 —— **那正是重新打开这个文件会看到的**，
-        # 只是把"下次打开才发生的事"提前到了现在。
-        if art.written and self.script_path \
-                and Path(target) == Path(self.script_path):
-            self._reload_after_inplace_write()
+        # **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘**
+        # （为什么、以及为什么是"重新解析"而不是"猜行号"，见那个方法）。
+        self._realign_memory_after_write(art, target)
 
         # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
         #
@@ -394,6 +425,10 @@ class ExportMixin:
         # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
         _warns = [export_plan.issue_message(i) for i in art.issues
                   if not i.is_blocking]
+        # "别人也改过这个脚本"的长句（第十五轮）放**最前面**：它是这一刀最该
+        # 被看见的事（他改的那几行已经进磁盘了，界面还是旧的）。短句在 `note`。
+        if note.get('merge_warning'):
+            _warns.insert(0, note['merge_warning'])
         _removal = removal_note(note).lstrip('；')
         if _removal:
             _warns.insert(0, _removal.replace('**', ''))
@@ -405,6 +440,53 @@ class ExportMixin:
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
                 'count': len(self.beats),
                 'todos': getattr(result, 'todo_count', 0)}
+
+    def _with_generator_marker(self, text: str) -> str:
+        """
+        产物**必须带生成标记**，补丁那条路也一样（2026-10-05 实测）。
+
+        为什么：`patch_export` 的合并策略是"保留原文那一行"，
+        它产出的首行是**源文件的首行**（常常是 `default …` 之类），
+        于是补丁产出的文件**没有生成标记**。后果是护栏认不出自家产物：
+
+            第一次导出 → ok=True   （补丁成功，写出去的没有标记）
+            第二次导出 → 拒绝覆盖  （被判成"手写文件"）
+
+        也就是说"再导出一次"在一个已经由工具生成的文件上必然失败 ——
+        这正是 `test_allows_overwriting_its_own_output` 想防的那种事故，
+        只不过它当时只在 `write_generation` 这一层测，没经过 export。
+        """
+        return ensure_generator_marker(text)
+
+    def _realign_memory_after_write(self, art, target) -> None:
+        """
+        **写回"我们载入的那个文件"之后，内存必须重新对齐到磁盘。**
+
+        为什么（2026-10-05 实测，`tools/acceptance_workflow.py` 抓到）：
+        写回之后磁盘上那一份已经是新内容（补丁插了行、首行多了生成标记），
+        而内存拍的 `src_first/src_last` 还是**改动前**那份文件的 →
+        第二次原地导出对位率掉到 0~50% → 补丁失败 → P0 那条"目标就是源文件"
+        的护栏拒写。用户看到 `PATCH_FAILED：对位率不足`，而它偏偏落在
+        **最常用的那条循环**上：
+
+            改一句 → 导出 → 再改一句 → 再导出   ← 第二次就断
+
+        为什么是"重新解析"而不是"按内容猜行号"（先走错过一步，记下来）：
+        第一版我用 `recover_source_ranges`（解析磁盘 + difflib 对拍）贴行号，
+        它在最需要它的那个场景上**是错的** —— 解析器会把"注释 / `call screen`
+        + 紧随其后的台词"吸成**一张**拍，而内存里是**两张** → 对齐给出交叠
+        区间 → 对位率 50%（实测 whackamole）。合并**本来知道**每一拍写到了
+        哪几行，但把它报出来要动 `patch_export` 里"替换 / 插入 / 删除"
+        三套坐标系的换算（全仓最危险的一段）。而"内存 := 解析(磁盘)"
+        是**零启发**的：磁盘就是真源（契约 A1），解析器怎么读、内存就怎么存。
+
+        代价（可接受，而且本来就该如此）：若刚插了一张只有注释/代码的卡，
+        重载后它会与后面那张并成一张 —— **那正是重新打开这个文件会看到的**，
+        只是把"下次打开才发生的事"提前到了现在。
+        """
+        if art.written and self.script_path \
+                and Path(target) == Path(self.script_path):
+            self._reload_after_inplace_write()
 
     def _untouched_export(self, target, text, note, result):
         """零改动往返：不写、不加标记（`export` 的第一道门）。"""
@@ -452,6 +534,74 @@ class ExportMixin:
             swallow('session_export.zero_change_check', e)
             return None
         return None
+
+    def _settle_with_disk(self, patched: str, target, base_text: str) -> dict:
+        """
+        导出的**第二道门**：把"底稿 + 我的改动"和磁盘上那份合起来。
+
+        什么时候真的起作用：`_patch_note` 发现文件被外人改过、于是把补丁打在
+        **底稿**上（`base_text` 非空）。那时 `patched` 里**没有**他改的那几行，
+        直接用它会把他那几行抹掉 —— 也就是这一轮修的那个"静默覆盖"。
+
+        三路合并的三种结局（判定在 `write_gate.merge_three_way`，与原地小改
+        那条路**同一个函数**）：
+
+          · 不重叠 → 合并结果，短句进状态栏、长句进告警；
+          · 撞在同一处 → `blocking`（**一个字节都不写**），理由点到第几张卡；
+          · 盘上 == 我这份 → 合并结果就是盘上那份（下一道 `_untouched_export`
+            会认出"零改动"）。
+
+        **只有目标是"这一章的源文件本身"时才合**：导出到 `build/` 或别处时，
+        产物是"我这一版"—— 他的改动不在目标文件里，合进来反而是往别人的文件里
+        掺东西（那也不是他的文件，不归我们管）。
+
+        返回 `{'blocking': […], 'text': …, 'note': 短句, 'warning': 长句}`。
+        """
+        idle = {'blocking': [], 'text': patched, 'note': '', 'warning': ''}
+        base = str(base_text or '')
+        if not base or not self.script_path:
+            return idle                  # 没有底稿 = 没有"我改了什么"可依据
+        try:
+            same = (Path(target).resolve()
+                    == Path(self.script_path).resolve())
+        except OSError:
+            # 路径解析不了（极少见：坏盘符 / 太长的路径）→ **当成"就是这一章的
+            # 源文件"**。拿不准时合并是安全的那一边：多合一次最多是多重写两行，
+            # 少合一次就是静默覆盖别人改过的行（这一轮修的就是后者）。
+            # 这里不 `swallow`：它是个窄 except，兜底方向已经在上一句写清了。
+            same = True
+        if not same:
+            return idle
+        from storygraph.story.source_style import read_text
+        from storygraph.story.write_gate import CONFLICT, merge_three_way
+        disk = read_text(self.script_path)[0]
+        if not disk:
+            # 读成空：要么文件刚被清空、要么正被别的程序占着。**不猜**，也不写。
+            return {'blocking': ['这一章的文件刚才读不出来（可能正被别的程序写）：'
+                                 '这次没有写。'], 'text': '', 'note': '',
+                    'warning': ''}
+        if patched == base:
+            # 我这一章**一个字都没改**（补丁产出的就是底稿）：盘上那份是他的版本，
+            # 原样留着 —— 交给下一道 `_untouched_export` 说"文件没有被改动"。
+            # 不要在这里说"两边都落上了"，那会让人以为我这边也写了什么。
+            return {'blocking': [], 'text': disk, 'note': '', 'warning': ''}
+        verdict = merge_three_way(base, disk, patched,
+                                  path=str(self.script_path))
+        if verdict.state == CONFLICT:
+            return {'blocking': [self._merge_conflict_reason(verdict)],
+                    'text': '', 'note': '', 'warning': ''}
+        return {'blocking': [], 'text': verdict.final_text,
+                'note': verdict.note(), 'warning': verdict.full_note()}
+
+    def _merge_conflict_reason(self, verdict) -> str:
+        """撞车时给用户的一句话（**点到第几张卡**，并给两条退路）。"""
+        spans = tuple(getattr(verdict, 'clash', ()) or ())
+        where = '、'.join(_span_cn(a, b) for a, b in spans[:2]) or '同一处'
+        who = card_at_lines(self.beats, spans) or '你改的那几行'
+        return (f'{who}（{where}）别人也改过，而且改的正是同一处 —— '
+                f'认不出该留谁的那一版，所以这次一个字节都没写。'
+                f'先看一眼那几行再决定：① 重新载入这一章（会显示他那版）；'
+                f'② 或导出到 build/renpy/ 下比对。')
 
     def _patch_failed_export(self, target, note):
         """补丁没对上、而覆盖会毁掉不进表的东西 → 拒写（第二道门）。"""
@@ -721,6 +871,21 @@ class ExportMixin:
           · `False` → 新建章节，本来就没有可增量的源 → 全量是唯一正确做法。
 
         调用方 `export` 靠它区分这两种"补丁失败"（见那里的注释）。
+
+        **底稿**（2026-11-08 第十五轮）
+        ------------------------------
+        文件被外人改过时（`source_unchanged()` 为假），从前一律退成
+        "只能靠内容证据认行"。可内容证据正好被用户自己改掉了（他在改的就是
+        那句台词），于是退回**靠说话人认行** —— 实测把别人改的那一行
+        **静默改回去**（`docs/设计_导出这条大路_三路合并_2026-11-08.md` §一）。
+
+        现在这种情况把补丁打在**底稿**上（`base_text`，即 `load()` 解析出这些拍
+        的那份文本）：行号与原文同源，`trust_ranges` 的前提从"磁盘没动过"变成
+        "这份底稿没动过"。产物是"底稿 + 我的改动"，**再**由 `export` 交给
+        `write_gate.merge_three_way` 与盘上那份合并 —— 那一步才知道该保住谁。
+
+        返回值多一个 `base_text`：非空 = 这一刀是打在底稿上的，
+        调用方**必须**接着合并（不许直接落盘，否则就是拿旧底稿覆盖他的文件）。
         """
         from storygraph.story.patcher import patch_export
         src = (self.script_path
@@ -748,9 +913,17 @@ class ExportMixin:
                 expect_sha1 = str(_fp[2] if len(_fp) > 2 else '')
         except Exception as e:               # noqa: BLE001 - 判不了就当不新鲜
             swallow('session_export._patch_note.source_unchanged', e)
+        # **底稿**（第十五轮）：文件被外人动过时，补丁打在"解析出这些拍的那份"
+        # 上面，而不是打在现在这份盘上 —— 否则拍上的行号与原文不同源，
+        # 只能靠"说话人一样就认这一拍"猜，实测会把别人改的那一行改回去。
+        base_text = ''
+        if not trust and src is not None:
+            base_text = str(getattr(self, '_source_baseline_text', '') or '')
         try:
             res = patch_export(self.beats, src, text, registry=self.registry(),
-                               trust_ranges=trust, expect_sha1=expect_sha1)
+                               trust_ranges=(trust or bool(base_text)),
+                               expect_sha1=expect_sha1,
+                               base_text=base_text)
             if res.ok:
                 _note = (f'增量补丁：对位 {res.matched_beats}/'
                          f'{res.total_beats} 拍，'
@@ -763,18 +936,19 @@ class ExportMixin:
                     _note += (f'；另有 {res.empty_beats} 张空卡片还没有任何内容'
                               f'（不会产生行 —— 填上台词/舞台再导出）')
                 return {'used_patch': True, 'text': res.text, 'blocking': [],
-                        'had_source': had_source, 'text_note': _note}
+                        'had_source': had_source, 'text_note': _note,
+                        'base_text': base_text}
             reason = ('；'.join(res.reasons)
                       or f'对位率不足（{res.coverage:.0%}）')
             return {'used_patch': False, 'text': '', 'blocking': [reason],
-                    'had_source': had_source,
+                    'had_source': had_source, 'base_text': base_text,
                     'text_note': f'增量未采用：{reason}'}
         except Exception as e:               # noqa: BLE001
             # 异常**也是**拦截理由，不是"退回全量"的许可证：
             # patcher 崩了说明状态不可信，此时覆盖手写文件风险最大。
             return {'used_patch': False, 'text': '',
                     'blocking': [f'增量不可用：{e}'],
-                    'had_source': had_source,
+                    'had_source': had_source, 'base_text': base_text,
                     'text_note': f'增量不可用：{e}'}
     def health(self, limit: int = 30) -> dict:
         """项目体检（**只读，不写盘**）。返回 {'issues': [...], 'total': n}。"""

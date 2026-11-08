@@ -377,11 +377,17 @@ class TableSessionMixin:
         from storygraph.parsing.renpy_parser import (ParseResultBuilder,
                                                      RenPyParser)
         path = Path(path)
+        #: 解析出来的那一份原文（LF、已剥 BOM）—— 见下面 `_source_baseline_text`
+        #: 的说明。读字节那一步已经有了，顺手归一化，不多读一遍盘。
+        baseline = ''
         try:
-            path.read_bytes().decode('utf-8-sig')
+            raw = path.read_bytes()
+            baseline = raw.decode('utf-8-sig').replace(
+                '\r\n', '\n').replace('\r', '\n')
         except UnicodeDecodeError as exc:
             self.beats = []
             self.script_path = path
+            self._source_baseline_text = ''
             raise ValueError(
                 f'这个文件不是 UTF-8（Ren\'Py 只认 UTF-8）：{path.name}'
                 f'（第 {exc.start} 字节起）。'
@@ -413,6 +419,13 @@ class TableSessionMixin:
         # 旁白改成台词、同时加了一张立绘时，内容证据本来就全没了）。
         # 文件要是被外部改过，指纹就对不上 → 退回保守的对位守卫（今天的默认）。
         self._source_fingerprint = self._fingerprint_of(path)
+        #: **底稿**（2026-11-08 第十五轮）：解析出这些拍的那份文本本身。
+        #:
+        #: 指纹（上一行）回答"盘上还是不是那一份"；这份文本回答"**我**动了
+        #: 哪几行"。文件被外人改过时，导出把补丁打在**它**上面
+        #: （`patch_export(base_text=…)`），再和盘上那份做三路合并 ——
+        #: 于是"他改的"和"我改的"能分开，谁也不会被静默吞掉。
+        self._source_baseline_text = baseline
         # 换了文件，上一章那份入口状态就不再属于这次载入（跨章继承按文件算）。
         self.set_stage_entry(None)
         # 换了文件，旧的撤销记录就没有意义了（拍号对不上别的章节）。

@@ -197,6 +197,15 @@ class EditorSession(TableSessionMixin, GraphSessionMixin,
         #: 之前发生过什么"的状态，正是拆分时最容易漏的东西 ——
         #: `test_editor_session_split` 的 `REQUIRES` 守卫就要求它一开始就在。
         self._transforms_decision = None
+        #: **底稿文本**：上次 `load()` 解析出来的那一份（LF、已剥 BOM）。
+        #: `''` = 还没载入过 / 载入失败。
+        #:
+        #: 为什么留文本而不只留指纹（2026-11-08 第十五轮）：指纹只能回答
+        #: "盘上还是不是那一份"，回答不了"**我**动了哪几行"。文件被外人动过时，
+        #: 导出要拿它做三路合并的 base（见 `session_export._patch_note`）——
+        #: 没有它就只能靠"说话人一样就认这一拍"猜，实测会把别人改的那一行
+        #: **静默改回去**。**在这里初始化**（理由同 `_transforms_decision`）。
+        self._source_baseline_text = ''
         #: 内存里的拍**有没有还没导出的改动**（2026-10-22）。
         #:
         #: 为什么需要它：卡片页从前只在"保存这一拍"时把状态栏切成「● 未导出」，

@@ -283,6 +283,14 @@ class WindowExportMixin:
         warn = f'，缺资源 {todos} 处（见 TODO）' if todos else ''
         self._log(f'[导出] 已写入 {Path(path).name}'
                   f'（{res.get("note", "")}{warn}）')
+        # ⚠ **先报静默失败，再报"导出成功"**（2026-11-08 第十五轮）：
+        # 这一步和状态栏抢同一个坑位（`_report_swallowed` 末尾也调 `_status`）。
+        # 顺序反了的话，"两边都落上了…他改的那 1 处也保住了"这句**永远看不见**
+        # —— 实测被一条与本次导出无关的 `cleanup_tmp`（临时文件收尾巴）
+        # 盖成「⚠ 本次有 1 次失败被跳过」，截图当场发现。
+        # 明细不丢：永久那条在状态栏左边（`_diag_bar`）、控制台一行、
+        # 诊断面板里还有全文。
+        self._report_swallowed(mark)
         self._status(f'✔ 已导出 {Path(path).name}（{res.get("note", "")}{warn}）')
         # **写成功了也把提示说出来**（审计第四轮 P2）：`OUTSIDE_BUILD_DIR`
         # 这类 warn 从前只在"拒写"时混进 blocking 列表出现 —— 写成功时
@@ -291,7 +299,6 @@ class WindowExportMixin:
         _warns = res.get('warnings') or []
         if _warns:
             self._log('[导出] 提示：' + '；'.join(str(w) for w in _warns[:4]))
-        self._report_swallowed(mark)
 
     def _review_stage_suspects(self) -> bool:
         """

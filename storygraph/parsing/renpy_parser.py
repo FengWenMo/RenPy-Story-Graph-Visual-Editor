@@ -1207,7 +1207,18 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         self.errors: list = []
         self.warnings: list = []
 
-    def parse(self, filepath) -> list:
+    def parse(self, filepath, text: Optional[str] = None) -> list:
+        """
+        `text` 给了就**不读盘**，拿这份快照解析（2026-11-08 第十五轮）。
+
+        为什么需要：导出那条大路要"把补丁打在自己的**底稿**上"，而底稿是
+        会话里留的那份文本 —— 磁盘上可能已经是别人改过的另一份了。
+        拿路径去解析会读到**别人的**行号，`recover_source_ranges` 数出来的
+        "被删的拍"就会按别人的行号删行（见 `patch_export(base_text=…)`）。
+
+        给 `text` 时**照样记进 `_src_cache`**：`source_texts()` 的契约是
+        "我这一趟解析看到的那份文本"，不是"磁盘上现在是什么"。
+        """
         self.errors = []
         self.warnings = []
         # 源文件文本缓存**按一次 parse 的生命周期**清掉：解析器实例是复用的，
@@ -1218,7 +1229,10 @@ class RenPyParser(StatementScreens):  # 2026-10-11 拆分：`_stmt_*` 在 renpy_
         # 喂给词法器、顶层区间、以及 CST 真迹的挂载（`IncrementalRenPyAnalyzer`
         # 从 `source_texts()` 取走它）。三处各读一遍时，只要中间有人改了文件，
         # **AST 的行号**与**原文切片**就不是同一份快照 → 真迹贴错行。
-        text = self._source_text(str(filepath))
+        if text is None:
+            text = self._source_text(str(filepath))
+        else:
+            self.__dict__.setdefault('_src_cache', {})[str(filepath)] = text
         lexer = RenPyLexer()
         lines = lexer.tokenize(filepath, text=text)
         self.errors.extend(lexer.errors)
