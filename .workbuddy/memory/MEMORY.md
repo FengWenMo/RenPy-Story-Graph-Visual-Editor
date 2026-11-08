@@ -334,6 +334,22 @@
   `tests/test_stage_sprite_identity.py`（10 条，旧代码 6 红），
   详见 `docs/开发日志.md` §111。
 
+- **扩展平台 v15（2026-11-08 第十九轮）**：**「每次」= 每一条，不是每拍一条**。
+  真机 2_2 一拍并排三条 `show`，扩展只补了最后一条后面一行（用户："三个 show
+  并列在一个卡片内……你只给了一个"）。`batch_edit` 多两个位置
+  `after_each_show` / `after_each_change`：`_anchor` → `_anchors` 返回**一组**
+  锚点，`_already_present(near_only=True)` 逐条幂等（否则补过第 1 条就连坐
+  第 2、3 条）；`after_last_*` 原样留着（`$ renpy.transition` 设一次就够）。
+  配方层「每次…」落到 `after_each_*`，另立 `sprite_change_last` /
+  `sprite_show_last`；扩展窗口 `placement` 下拉 4 → 6 项（「每一条」默认在前）。
+  顺手修：`ExtensionPoint.to_dict()` 对 `batch` 是浅拷贝 → `_baseline` 与活的
+  那份共用 `insert` dict，就地改 placement 再 `save()` 被三方合并判成"我没动过"、
+  **静默写回文件里那份**（`ok: True`）。现在 deepcopy，判据在
+  `tests/test_ext_merge.py`。真机 2_2：10 行纯插入，再导一次逐字节相同。
+  判据 `tests/test_hell_extension_per_sprite.py`（15 条），详见 §112。
+  ⚠ 抽 `_plan_insertions` 不是洁癖：那段循环塞回 `_plan_file` 会把它推过
+  技术债棘轮的 20 分支线（`complex_functions` 195 → 196，实测红）。
+
 - **脚本 v11（2026-11-08 第十一轮）**：**剧本也有磁盘退路了**。上一轮只覆盖
   `ext.json`；这一轮补"真正值钱的文件"。量到的事实：整份导出（`write_generation`）
   一直在文件旁边留 `.rpy.bak`，而**原地小改家族**（`story.paths.write_text_atomic`
