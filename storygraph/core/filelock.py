@@ -86,8 +86,18 @@ def lock_path_for(target) -> Path:
 
     键用**绝对路径 + 大小写归一**（Windows 不区分大小写：`C:\\A.json` 与
     `c:\\a.json` 必须是同一把锁）；盘符/路径分隔符先归一，再取 sha1。
+
+    ⚠ **斜杠方向**要先归一再去 `Path()`（2026-11-10，CI 在 Linux 上抓到）：
+    POSIX 上 `Path('\\tmp\\a.json')` 是**一个叫 `\\tmp\\a.json` 的文件名**
+    （反斜杠在 Linux 里是正名字符，不是分隔符），`resolve()` 会把它挂到
+    cwd 下面 —— 于是"同一个文件的两种写法"算出两把锁，两个人各改各的，
+    谁也没等谁。Windows 上碰巧对得上（那边 `Path()` 自己就把 `/` 翻成 `\\`），
+    所以这条只能在 Linux 上暴露。
     """
-    text = str(Path(str(target)).expanduser().resolve())
+    raw = str(target)
+    if '\\' in raw:
+        raw = raw.replace('\\', '/')      # 先按"斜杠是分隔符"读，再去 resolve
+    text = str(Path(raw).expanduser().resolve())
     key = text.replace('\\', '/').lower() if os.name == 'nt' else text
     digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:24]
     return lock_dir() / f'{digest}.lock'

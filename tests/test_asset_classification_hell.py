@@ -31,6 +31,8 @@ jpg/png/jpeg/webp 混着来、角色/背景/CG/UI/垃圾素材混在一个 `imag
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from storygraph.assets.asset_registry import (_detect_category,
@@ -226,9 +228,10 @@ def _by_path(rows) -> dict:
     """
     扫描结果 → `{相对路径: 行}`。
 
-    ⚠ **按小写比**：`_scan_file_items` 把相对路径规范成小写（跨平台可复现的
-    取舍，见 `test_path_is_stored_lowercased_today`），而 HELL 表里写的是磁盘
-    上的真实大小写（`CG_frame.png` / `Frame 24/CG鉴赏.png`）。
+    ⚠ **按小写比**：`_scan_file_items` 的索引键是相对小写路径（跨平台可复现的
+    取舍），而 HELL 表里写的是磁盘上的真实大小写（`CG_frame.png` /
+    `Frame 24/CG鉴赏.png`）—— 2026-11-10 起 `Path` 写的是**真名**，
+    所以这里只用小写做 `= 同一个文件` 的比较，不再假定表里是小写。
     """
     return {str((r or {}).get('Path') or '').replace('\\', '/').lower(): r
             for r in rows}
@@ -252,26 +255,34 @@ class TestScanWritesTheRightRows:
             f'{rel}\n  期望 {want_cat}/{want_tag!r}\n'
             f'  实际 {row.get("Category")}/{row.get("Tag")!r}')
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason='已知（2026-11-02 记下，未修）：扫描把 Path 规范成小写，'
-               '真机 1720 行全是小写 —— Linux（大小写敏感）上这些路径找不到文件，'
-               '`打开源文件` / 缩略图会失败')
     def test_path_is_stored_with_its_original_case(self, hell):
         paths = {str(r.get('Path') or '') for r in hell['rows']}
         assert 'game/gui/CG_frame.png' in paths, sorted(paths)[:5]
 
-    def test_path_is_stored_lowercased_today(self, hell):
+    def test_every_path_matches_the_disk_name_exactly(self, hell):
         """
-        **现状**（不是理想）：`Path` 一律小写 —— `_scan_file_items` 的
-        "相对小写路径"就是这么设计的（去重、跨平台可复现、ID 稳定）。
+        **2026-11-10 修**：`Path` 一律按磁盘**真名**写（不再规范化成小写）。
 
-        上面那条 xfail 钉的是**理想**；这一条把现状写清楚，免得有人以为
-        大写路径能活着进表（2026-11-02 真机 1720 行 0 个带大写）。
+        为什么（CI 在 Linux 上抓到）：小写路径在区分大小写的文件系统上是
+        "另一个文件" —— `打开源文件` / 缩略图 / 下一轮对账的"解析不到就删行"
+        全都会栽在它上面。真机 1720 行全小写，其中两条图片在 Linux 上被判
+        "文件不存在"、行被删掉（`test_asset_table_guards` 那条红）。
+        跨平台可复现靠的是**小写索引键**（`_scan_file_items`），不是把真名改写掉。
+
+        逐行比 `scandir`（不是 `is_file()`）：Windows 不区分大小写，
+        `is_file()` 在上面的 bug 上照样返回 True，钉不住它。
         """
-        paths = {str(r.get('Path') or '') for r in hell['rows']}
-        assert 'game/gui/cg_frame.png' in paths
-        assert not [p for p in paths if any(c.isupper() for c in p)]
+        root = hell['root']
+        bad = []
+        for row in hell['rows']:
+            rel = str(row.get('Path') or '').replace('\\', '/')
+            cand = root / rel
+            if not cand.is_file():
+                bad.append(f'{rel}（磁盘上没有这个文件）')
+                continue
+            if cand.name not in {e.name for e in os.scandir(cand.parent)}:
+                bad.append(f'{rel}（大小写与磁盘不符）')
+        assert not bad, bad[:5]
 
     def test_noise_never_reaches_the_table(self, hell):
         paths = set(_by_path(hell['rows']))

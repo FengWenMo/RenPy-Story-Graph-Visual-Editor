@@ -42,6 +42,7 @@ storygraph.core.atomicio
 from __future__ import annotations
 
 import os
+import stat as _stat
 import time
 import uuid
 from datetime import datetime
@@ -79,6 +80,30 @@ class RefusedWrite(ValueError):
     继承 `ValueError`：调用方既有的 `except OSError` 不会被误触发，
     而 `except ValueError` / `except Exception` 都能接住它。
     """
+
+
+def _refuse_readonly(target: Path) -> None:
+    """
+    目标是**只读文件** → 拒写（抛 `PermissionError`）。两个平台同一个结果。
+
+    为什么必须自己判（2026-11-10，CI 在 Linux 上抓到）：
+
+      · Windows：`os.replace` 覆盖只读文件会 `PermissionError` —— 也就是说
+        "只读 = 写不进去"是靠**系统**给的；
+      · POSIX：`os.replace` 只看**目录**权限，目录可写就能把只读文件换掉
+        （rename 不动 inode 的权限位）。于是同一份代码在 Linux 上**照样覆盖**
+        用户明确设成只读的剧本 —— 而那一章他可能只是想"先锁住别被改"。
+
+    `stat.S_IWRITE` 在 Windows 上就是 `FILE_ATTRIBUTE_READONLY`（Python 的
+    `os.stat` 会把它翻成 mode 里少一位），所以这一个判据两边都成立。
+    目标不存在 / 摸不到时**不拦** —— 那是另一类错误，交给真正的写入去报。
+    """
+    try:
+        st = target.stat()
+    except OSError:
+        return
+    if not st.st_mode & _stat.S_IWRITE:
+        raise PermissionError(f'目标文件是只读的，拒绝覆盖：{target}')
 
 
 def _tmp_beside(target: Path, kind: str = 'tmp') -> Path:
@@ -289,6 +314,7 @@ def write_bytes_atomic(path, data: bytes, *, backup: bool = False,
     走这条（复制时编码/换行/BOM 一个都不该动）。
     """
     target = Path(path)
+    _refuse_readonly(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_beside(target)
     try:
@@ -324,6 +350,7 @@ def write_text_atomic(path, text: str, *, encoding: str = 'utf-8',
     `story.paths.write_text_atomic` 的历史注释。
     """
     target = Path(path)
+    _refuse_readonly(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_beside(target)
     try:

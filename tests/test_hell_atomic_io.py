@@ -243,8 +243,9 @@ class TestInterruptedWriteLeavesTheOldFile:
 # ---------------------------------------------------------------------------
 
 class TestHostilePaths:
-    @pytest.mark.skipif(os.name != 'nt', reason='POSIX 允许替换只读文件（只看目录权限）')
     def test_readonly_target_is_not_replaced(self, tmp_path):
+        """只读目标 → 拒写，**两个平台一样**（POSIX 上靠 `_refuse_readonly`：
+        `os.replace` 只看目录权限，不自己判就会把只读文件换掉）。"""
         target = tmp_path / 'a.rpy'
         target.write_bytes(b'old\n')
         os.chmod(target, stat.S_IREAD)

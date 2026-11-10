@@ -438,6 +438,26 @@ def _scan_result(images, music, sound, voices) -> dict:
         'voices': list(voices or []),
     }
 
+def _real_rel(rel_key: str, file: Path) -> str:
+    """
+    小写键 → 磁盘上**真实大小写**的相对路径（表里 `Path` 只能写后者）。
+
+    键必须是大小写不敏感的（Windows 上 `BG02.png` 与 `bg02.png` 是同一个
+    文件，判重/索引全指着这一点）；但**写进 Excel 的那一列是给文件系统看的**：
+    Linux 区分大小写，写小写就等于写了一个不存在的文件 —— 下一次
+    `sync_asset_tables` 的"解析不到就删行"会连人填的 Tag/备注一起删掉。
+    （2026-11-10，CI 在 Linux 上实测：两张图登记成 1 行，另一行被删。）
+
+    用 `file` 的**后 N 段**还原，不碰 `rel_key` 的分类用途（tag/类别/跳过目录
+    照旧按小写键判，两边结果一样）。
+    """
+    depth = rel_key.count('/') + 1
+    parts = file.parts[-depth:]
+    if len(parts) != depth:                  # 理论上不会：键就是由它派生的
+        return rel_key
+    return '/'.join(parts)
+
+
 def _music_row(stem: str, rel_posix: str) -> dict:
     """音乐行（`bgm_` 前缀只补一次 —— 原来两处各写一遍，必须一致）。"""
     return {'ID': f"bgm_{stem}" if not stem.startswith('bgm_') else stem,
@@ -479,6 +499,7 @@ def _scan_images(items, include_ui, existing_image_ids, facts=None,
             continue
         rel_path = Path(rel_low)
         rel_str = rel_low
+        rel_real = _real_rel(rel_low, file)   # 表里那一列必须写真名（见 _real_rel）
 
         if _under_skip_dir(rel_path):
             continue                            # tmp/ 之类的目录不是素材
@@ -498,14 +519,14 @@ def _scan_images(items, include_ui, existing_image_ids, facts=None,
         # 见 `asset_dimensions._strip_tag_prefix`。
         stem = file.stem
         dims = dimensions_of_row({'Tag': tag, 'Attributes': stem,
-                                  'Path': rel_path.as_posix()},
+                                  'Path': rel_real},
                                  facts=facts, layer_model=layer_model)
         value = dims[0]['value'] if len(dims) == 1 else stem
         group = dims[0]['group'] if len(dims) == 1 else ''
         unique_id = _make_unique_id(stem, parent_dirs, existing_image_ids)
         out.append({
             'ID': unique_id,
-            'Path': rel_path.as_posix(),
+            'Path': rel_real,
             'Tag': tag,
             'Attributes': value,
             'Category': category,
@@ -529,18 +550,19 @@ def _scan_audio_from_index(items):
         if _is_scan_noise(file.name):
             continue
         rel_path = Path(rel_low)
+        rel_real = _real_rel(rel_low, file)
         if _under_skip_dir(rel_path):
             continue
         stem = file.stem
         if any(p.lower() in ('voice', 'voices')
                for p in rel_path.parts[:-1]):
-            voices.append({'ID': stem, 'Path': rel_path.as_posix(),
+            voices.append({'ID': stem, 'Path': rel_real,
                            'Notes': ''})
             continue
         if _classify_audio(rel_path) == 'music':
-            music.append(_music_row(stem, rel_path.as_posix()))
+            music.append(_music_row(stem, rel_real))
         else:
-            sound.append(_sound_row(stem, rel_path.as_posix()))
+            sound.append(_sound_row(stem, rel_real))
     return music, sound, voices
 
 def _scan_audio_from_dirs(audio_dirs, scan_root, voice_dirs) -> tuple:
