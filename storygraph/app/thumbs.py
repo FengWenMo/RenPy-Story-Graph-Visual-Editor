@@ -26,6 +26,7 @@ import cache_key` —— 于是 **Qt 前端间接依赖了 tkinter**。所以把
 """
 from __future__ import annotations
 
+from storygraph.core.decode_budget import cost_of, decoding
 from storygraph.core.safeguard import swallow
 import hashlib
 from pathlib import Path
@@ -130,15 +131,18 @@ def decode_sync(path, max_size, project_root=None):
         cache_file = None
 
     try:
-        with Image.open(real) as im:
-            # draft：JPEG 让解码器**直接按缩小尺寸**解码，不必先把
-            # 几千万像素读进内存再缩（冷缓存下是数量级差别）
-            if max_size:
-                try:
-                    im.draft('RGB', tuple(max_size))
-                except Exception:           # noqa: BLE001 - PNG 不支持
-                    swallow('thumbs.decode_sync')
-            out = _downscale(im, max_size)
+        # 进程级闸门（2026-11-10）：一张 4320×7680 的立绘解码峰值 ~270MB，
+        # 从前 16 个 worker 一起解会顶到 2.7GB（见 `core/decode_budget`）。
+        with decoding(cost_of(real)):
+            with Image.open(real) as im:
+                # draft：JPEG 让解码器**直接按缩小尺寸**解码，不必先把
+                # 几千万像素读进内存再缩（冷缓存下是数量级差别）
+                if max_size:
+                    try:
+                        im.draft('RGB', tuple(max_size))
+                    except Exception:       # noqa: BLE001 - PNG 不支持
+                        swallow('thumbs.decode_sync')
+                out = _downscale(im, max_size)
         if cache_file is not None:
             try:
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +153,52 @@ def decode_sync(path, max_size, project_root=None):
     except Exception as e:                       # noqa: BLE001 - 损坏文件不阻断界面
         swallow('app.thumbs.decode_sync', e)
         return None
+
+
+def decode_sizes(path, sizes, project_root=None):
+    """
+    一次解码，产出**多个尺寸**的缩略图缓存（预热专用）。
+
+    为什么要有：预热默认两个尺寸（选择器 104×74 / 卡片 156×204），从前按
+    `(路径, 尺寸)` 展开成两个任务 —— 同一张 8K 立绘要**整解两遍**（每遍
+    ~270MB、0.4s）。这里先查两个缓存文件，缺几个才解**一次**，再从同一张
+    解码结果缩出各尺寸（缩的是已缩小的小图，几乎不占内存）。
+
+    返回 `{尺寸: 是否可用}`。坏图 / 没装 Pillow 会**抛给调用方**（预热在
+    `_one` 里记一次 `failed`）—— 这里不静默吞，也不新增一处 swallow。
+    """
+    sizes = [tuple(int(v) for v in s)[:2] for s in (sizes or ())]
+    result = {s: False for s in sizes}
+    real = resolve_thumb_source(path, project_root)
+    if real is None or not sizes:
+        return result
+    try:
+        st = real.stat()
+        stamp = (int(st.st_mtime), st.st_size)
+    except OSError:
+        stamp = (0, 0)
+    todo = []
+    for size in sizes:
+        key = cache_key(real, size, stamp)
+        cache_file = thumb_cache_file(key, thumb_cache_dir())
+        if cache_file is not None and cache_file.is_file():
+            result[size] = True
+        else:
+            todo.append((size, cache_file))
+    if not todo:
+        return result
+    from PIL import Image
+    base_size = max((s for s, _f in todo), key=lambda s: s[0] * s[1])
+    with decoding(cost_of(real)):
+        with Image.open(real) as im:
+            base = _downscale(im, base_size)
+    for size, cache_file in todo:
+        img = base if size == base_size else _downscale(base.copy(), size)
+        if cache_file is not None:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            img.save(cache_file, 'PNG')
+        result[size] = True
+    return result
 
 
 #: 旧名（tkinter 版内部叫 `_decode_sync`）。保留别名只为少改一处调用点。
@@ -191,5 +241,5 @@ def natural_size(path, project_root=None, use_cache: bool = True):
     return size
 
 
-__all__ = ['cache_key', 'decode_sync', 'natural_size', 'resolve_thumb_source',
-           'thumb_cache_dir']
+__all__ = ['cache_key', 'decode_sizes', 'decode_sync', 'natural_size',
+           'resolve_thumb_source', 'thumb_cache_dir']

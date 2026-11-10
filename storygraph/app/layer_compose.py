@@ -209,15 +209,25 @@ def _layer_image(ly, factor, target):
         return None
 
 
+def _open_full_layer(path):
+    """整图打开一层（过解码闸门；8K 层展开也是 ~133MB，别绕过预算）。"""
+    from PIL import Image
+    from storygraph.core.decode_budget import acquire, cost_of, release
+    got = acquire(cost_of(path))
+    try:
+        return Image.open(path).convert('RGBA')
+    finally:
+        release(got)
+
+
 def _load_layer_image(path, factor, target):
     """真正打开一层：能按目标尺寸解就按目标尺寸解，解不动就整图开。"""
-    from PIL import Image
     if factor >= 1.0 or not target:
-        return Image.open(path).convert('RGBA')
+        return _open_full_layer(path)
     from storygraph.app.thumbs import decode_sync
     img = decode_sync(path, target)
     if img is None:
-        return Image.open(path).convert('RGBA')
+        return _open_full_layer(path)
     if tuple(img.size) != tuple(target):
         img = img.resize(target)
     return img

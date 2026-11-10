@@ -51,13 +51,21 @@ def _pixmap_bytes(pixmap) -> int:
 #: "这个选择器内图片的加载还是不够迅速，优先加载目前在窗口内的图片！"）。
 #: 自己限流之后，池子里**始终只有我们要的那几张**，剩下的按优先级排队。
 def default_max_in_flight() -> int:
+    """
+    同时在解的**线程数**上限（2026-11-10 从 `min(16, 核数)` 收到 4）。
+
+    光限线程不够：真正吃内存的是"一张图解码要 ~270MB"，16 个线程一起解
+    就是 2.7GB（实测，见 `core/decode_budget`）。现在内存由那道**字节预算
+    闸门**管；这里只留 4 个线程去等闸门 —— 线程也有栈和缓冲，开 16 个只是
+    把峰值抬高。
+    """
     try:
         from PySide6.QtCore import QThread
         n = int(QThread.idealThreadCount() or 4)
     except Exception as e:                         # noqa: BLE001
         swallow('ui_qt.thumb_loader.default_max_in_flight', e)
         n = 4
-    return max(2, min(16, n))
+    return max(2, min(4, n))
 
 #: 优先级：**窗口内可见的** > 普通请求（卡片上的立绘） > 预取 / 已经滚过去的
 PRIORITY_FOCUS = 100

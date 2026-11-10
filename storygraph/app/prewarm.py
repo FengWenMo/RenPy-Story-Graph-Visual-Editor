@@ -84,41 +84,46 @@ def prewarm(paths, sizes=UI_THUMB_SIZES, workers=None,
     已经解好的都在缓存里，下次接着来就是命中。
     """
     import time
-    from storygraph.app.thumbs import decode_sync
 
-    paths = [p for p in (paths or []) if p]
+    paths = list(dict.fromkeys(p for p in (paths or []) if p))
     sizes = [(int(w), int(h)) for (w, h) in (sizes or UI_THUMB_SIZES)]
     total = len(paths) * max(1, len(sizes))
     done = failed = 0
     stopped = False
     t0 = time.monotonic()
 
-    def _one(path, size):
+    def _one(path):
+        """
+        一张图**只解一遍**、缺哪个尺寸缩哪个（2026-11-10）。
+
+        从前按 `(路径, 尺寸)` 展开：8K 立绘要整解两遍（两遍都 ~270MB）。
+        现在 `decode_sizes` 先查两个缓存文件，缺几个才解一次。
+        """
         try:
-            return decode_sync(path, size, None) is not None
+            from storygraph.app.thumbs import decode_sizes
+            got = decode_sizes(path, sizes, None)
+            ok = sum(1 for v in got.values() if v)
+            return ok, len(sizes)
         except Exception as e:                 # noqa: BLE001 - 坏图不该中断预热
             swallow('app.prewarm.prewarm', e)
-            return False
+            return 0, len(sizes)
 
-    def _bump(ok: bool):
+    def _bump(ok: int, n: int):
         nonlocal done, failed
-        if ok:
-            done += 1
-        else:
-            failed += 1
+        done += max(0, ok)
+        failed += max(0, n - ok)
         if on_progress is not None:
             try:
                 on_progress(done + failed, total)
             except Exception as e:             # noqa: BLE001 - 回调坏了不影响预热
                 swallow('app.prewarm.prewarm.on_progress', e)
 
-    jobs = [(p, s) for p in paths for s in sizes]
     n_workers = int(workers or 0) or _default_workers()
-    if not jobs:
+    if not total:
         return {'total': 0, 'done': 0, 'failed': 0, 'sizes': sizes,
                 'seconds': 0.0, 'stopped': False}
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_one, p, s): (p, s) for p, s in jobs}
+        futures = {pool.submit(_one, p): p for p in paths}
         for fut in as_completed(futures):
             if should_stop is not None and should_stop():
                 stopped = True
@@ -126,20 +131,27 @@ def prewarm(paths, sizes=UI_THUMB_SIZES, workers=None,
                     f.cancel()
                 break
             try:
-                ok = bool(fut.result())
+                ok, n = fut.result()
             except Exception as e:             # noqa: BLE001
                 swallow('app.prewarm.prewarm.result', e)
-                ok = False
-            _bump(ok)
+                ok, n = 0, len(sizes)
+            _bump(ok, n)
     return {'total': total, 'done': done, 'failed': failed, 'sizes': sizes,
             'seconds': round(time.monotonic() - t0, 1), 'stopped': stopped}
 
 
 def _default_workers() -> int:
-    """并行度：核数（解码是 CPU 密集，再高只会互相抢）。"""
+    """
+    并行度：核数，但**封顶 4**（2026-11-10 从 16 收下来）。
+
+    解码是 CPU 密集，可 8K 立绘的解码峰值是 ~270MB/张 —— 16 个 worker
+    一起解就是 2.7GB（实测 `.pip-tmp/probe_r29_decode_peak.py`）。现在真正
+    的并发由 `core/decode_budget` 的**字节预算**管（大图自然只放行 1–2 张）；
+    这里压到 4 只是少开几个线程，免得它们全堵在闸门前各抱一份缓冲。
+    """
     try:
         import os
-        return max(1, min(16, (os.cpu_count() or 4)))
+        return max(1, min(4, (os.cpu_count() or 4)))
     except Exception as e:                     # noqa: BLE001
         swallow('app.prewarm._default_workers', e)
         return 4

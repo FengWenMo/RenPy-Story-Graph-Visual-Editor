@@ -33,6 +33,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from storygraph.core.decode_budget import acquire, cost_of, release
 from storygraph.core.safeguard import swallow
 
 try:                                    # Pillow 是可选依赖
@@ -431,6 +432,9 @@ def _load_scaled(path: str, mtime: int, w: int, h: int, crop=None,
     cached = _SCALED_CACHE.get(key)
     if cached is not None:
         return cached
+    # 解码闸门（2026-11-10）：这一张可能是 8K 立绘/背景，`convert('RGBA')`
+    # 会整图展开 ~133MB；和缩略图/预热共用同一份预算，别各算各的。
+    got = acquire(cost_of(path))
     try:
         with Image.open(path) as src:
             img = src.convert('RGBA')
@@ -459,6 +463,8 @@ def _load_scaled(path: str, mtime: int, w: int, h: int, crop=None,
     except Exception as e:                    # noqa: BLE001 - 坏图不炸预览
         swallow('stage_render.load_scaled', e)
         return None
+    finally:
+        release(got)
 
 
 def _cache_put(key, img):

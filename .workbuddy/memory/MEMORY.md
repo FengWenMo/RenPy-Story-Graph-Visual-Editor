@@ -179,6 +179,17 @@
 - 带 ATL 块的 `show`：判据是"节点有没有块体载体"（`_BLOCK_CARRYING_NODES`）；`ln.text` 自带缩进；`LogicalLine.subblock` 没有空行（按行号从源取）；opaque 令牌排在 `mark_op('show')` 之后。
 - 归属审计：`_HANDLER_OF` 是"每种语句去哪"的唯一清单，`_BeatBuilder.unassigned` 断言既不进 pending 也不建拍的语句。
 
+**内存/解码**
+- 一张 4320×7680 立绘解码峰值 ~230–280 MB；16 线程一起解 = **2.7 GB**
+  （真机实测，2026-11-10 用户报"卡死机重启"）。所有解码入口必须过
+  `core/decode_budget` 的**进程级字节闸门**（默认 640 MB，
+  `STORYGRAPH_DECODE_BUDGET_MB` 可调）：`app.thumbs.decode_sync` /
+  `app.prewarm` / `app.stage_render._load_scaled` /
+  `app.layer_compose._open_full_layer`。新加一条解码路径不走它 = 回到
+  2.7 GB 尖峰；`tests/test_decode_budget.py` 钉着这四个入口。
+- 预热同一张图只解一遍（`thumbs.decode_sizes`：两个尺寸从一次解码里缩），
+  解码次数 3954 → 1977。
+
 **CI/环境**
 - 本机 3.12、CI 最低 3.10：用 `ruff check --target-version py310`，判据 `invalid-syntax`（E999 已删）。
 - Windows 专属调用在 POSIX 上要退化（`cmd.exe`+`mbcs` 抛 `LookupError` 不是 `OSError`）。
