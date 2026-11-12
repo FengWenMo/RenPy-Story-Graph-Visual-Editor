@@ -150,6 +150,7 @@ class BeatCardEditor(QWidget):
         set_stage_loaded / set_stage_digest / show_stage_frame
         set_stage_size / size_panel / clear_stage_frame
         stage_thumb / shutdown_stage_thumb / is_modified / set_undo_enabled
+        cards_modified（立绘网格改脏了没有 —— `is_modified` 只管表单字段）
     """
 
     #: 「保存这张卡片」/「撤销修改」两个按钮被按下时发出
@@ -188,6 +189,11 @@ class BeatCardEditor(QWidget):
         self._stage_loaded = ''
         #: 载入时的整份字段（判断"表单被改脏了没有"，纯显示用）。
         self._loaded_fields: dict = {}
+        #: 载入时**能写回这一拍**的立绘卡（判"网格被改脏了没有"）。
+        #: 卡片上的 chip 改动直接写在 `item` 字典上、不进表单字段，
+        #: 所以要和 `_loaded_fields` 分开记（见 `cards_modified`）。
+        #: None = 还没载入过任何一拍。
+        self._loaded_cards: list | None = None
         #: `{字段名: 沿用来的值}`：这一拍没写、从"当前舞台"填进来的显示值。
         #: 没改过就**不写回**（见 `_drop_inherited`）。
         self._inherited_fields: dict = {}
@@ -1772,6 +1778,8 @@ class BeatCardEditor(QWidget):
             self._loaded_fields.update(self._inherited_fields)
             # Stage 那一格的原文单独记一份（判"手改过没有"要用它）
             self._stage_loaded = str(fields.get('Stage', '') or '')
+            # 立绘卡的基线同样要在**载入完**之后记（`_grid.load` 可能补默认值）
+            self._loaded_cards = self._card_state()
             # 舞台块（立绘 / 背景 / 音乐 / 语音）**常显**（2026-10-29）：
             # 载入一张普通卡片时确保它在上面 —— 上一拍可能是控制流卡
             # （`set_flow(info)` 会把整块收起来），不能让它一直收着。
@@ -1881,6 +1889,8 @@ class BeatCardEditor(QWidget):
         """
         self._loaded_fields = self.collect_all_fields()
         self._stage_loaded = self._get_value('Stage')
+        # 立绘卡也算进"已提交状态"：保存 / 顺带提交之后，网格不再是"改脏"的
+        self._loaded_cards = self._card_state()
         self.refresh_dirty()
 
     def collect_all_fields(self) -> dict:
@@ -1920,6 +1930,40 @@ class BeatCardEditor(QWidget):
         if not self._loaded_fields:
             return False
         return self.collect_all_fields() != self._loaded_fields
+
+    #: 立绘卡上**用户能改**的那几格（判"改没改"只比这些）。
+    #: `effective_at` / `inherited_at` 是**显示派生**（舞台快照一变就跟着变），
+    #: 拿它们当判据会把"翻了一页"判成"改了立绘"。
+    CARD_EDIT_KEYS = ('image', 'expression', 'position', 'at', 'speaking',
+                      'order_index', 'extra_rows')
+
+    def _card_state(self) -> list:
+        """要写回这一拍的立绘卡，投影成可比对的不可变列表。"""
+        out = []
+        for it in self.sprite_cards():
+            row = []
+            for key in self.CARD_EDIT_KEYS:
+                value = (it or {}).get(key)
+                # `extra_rows` 是格子行列表：转成不可变形式才好比
+                row.append(repr(value) if isinstance(value, (list, dict))
+                           else value)
+            out.append(tuple(row))
+        return out
+
+    def cards_modified(self) -> bool:
+        """
+        立绘卡和"载入时 / 上一次提交时"相比变了吗？
+
+        `is_modified()` 只管表单字段；立绘的改动直接写在卡片自己的 `item`
+        字典上（见 `SpriteCardWidget._set_field`），所以单独判 —— 没有这一条，
+        "改了个表情就翻页"会被当成"什么都没改"：内容写进了拍，却不留撤销。
+
+        只比**能写回**的卡（`sprite_cards()` 会把"台上沿用、用户没动"的滤掉）：
+        那些卡本来就不该因为翻页而物化进这一拍。
+        """
+        if self._loaded_cards is None:
+            return False
+        return self._card_state() != self._loaded_cards
 
     def set_undo_enabled(self, on: bool):
         """撤销按钮是否可用（由窗口按会话的撤销栈状态决定）。"""

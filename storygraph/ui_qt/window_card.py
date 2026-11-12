@@ -1811,18 +1811,48 @@ class CardPageMixin:
         if cards:
             panel.prefetch_sprites(cards)
     def apply_current_beat(self):
-        """表单 → 当前拍（语义在 `EditorSession.apply`，这里只递数据）。"""
-        if not self._session.has(self._loaded_idx):
+        """表单 → 当前拍（语义在 `EditorSession.apply`，这里只递数据）。
+
+        **顺带提交也是真提交**（2026-11-12 用户实测报）：
+
+            > 我先改完了一张卡片，切换到下一张卡片，再回来，就发现已经
+            > 无法按撤销修改的按钮了……改错了无法改回去
+
+        翻页 / 预览 / 导出前都会走这里，把卡片上的字悄悄写进拍。从前它只调
+        `apply` —— 那是"无脑写回"，**不记撤销快照**（只有 `save()` 会用
+        `_last_saved` 记下"写之前的样子"）。于是"改了不点 💾 直接翻页"的人
+        内容进了内存、撤销栈却是空的：翻回来按钮是灰的，改错了退不回去。
+        点过 💾 的人不会遇到 —— 这就是"有时候"的来源。
+
+        所以**确实改过**时改走 `save()`：同一份写回，外加把"保存前"压进
+        撤销栈。判"改过没有"用面板自己的基线（`is_modified` +
+        `cards_modified`），**不**拿快照指纹判 —— `apply` 第一次会把
+        `op_order` / `stage_order` 归一化，那是 hydrate 的副作用、不是用户
+        改的字；拿它当判据，光翻一遍本章就会给每一拍点亮"可撤销"。
+        """
+        idx = self._loaded_idx
+        if not self._session.has(idx):
             return None
         old_flow = (dict(self._panel._flow)
                     if getattr(self._panel, '_flow', None) else None)
-        beat = self._session.apply(
-            self._loaded_idx,
-            self._panel.collect_fields(),
-            self._panel.sprite_cards(),
-            advanced_open=self._panel.is_advanced_open(),
-            # 载入时那一格的原文：会话靠它判断"用户手改了 Stage 没有"
-            stage_loaded=self._panel.stage_loaded())
+        fields = self._panel.collect_fields()
+        cards = self._panel.sprite_cards()
+        # 只有**用户真改过**才值得记撤销：没改的卡片翻页提交是"无改动"的，
+        # 走 save() 也行，但会白拍两份快照（大户章节里翻页会变慢）。
+        pending = bool(self._panel.is_modified()
+                       or self._panel.cards_modified())
+        if pending:
+            beat = self._session.save(
+                idx, fields, cards=cards,
+                advanced_open=self._panel.is_advanced_open(),
+                # 载入时那一格的原文：会话靠它判断"用户手改了 Stage 没有"
+                stage_loaded=self._panel.stage_loaded()).get('beat')
+        else:
+            beat = self._session.apply(
+                idx, fields, cards,
+                advanced_open=self._panel.is_advanced_open(),
+                # 载入时那一格的原文：会话靠它判断"用户手改了 Stage 没有"
+                stage_loaded=self._panel.stage_loaded())
         self._sync_kind_field(beat)
         # 翻页 / 预览 / 导出前的"顺带提交"也重新派生一次图边：
         # 否则卡片上改了目标、一翻页，图还指着旧目标。
@@ -1837,6 +1867,10 @@ class CardPageMixin:
                 note = self._flow_edge_note(self._refresh_flow_edges())
                 if note:
                     self._log(f'[控制流] {note}')
+        if pending:
+            # 提交完了 → 表单/网格重新成为"已提交状态"（与 💾 保存一致）。
+            # 不重置的话，下一次顺带提交会再进 save() 分支空跑一遍。
+            self._panel.reset_baseline()
         return beat
 
     def _sync_kind_field(self, beat):
