@@ -239,10 +239,20 @@ class TestExport:
         text = export(g)
         assert '自动生成的控制流' in text
 
-    def test_export_failure_reports_error(self, export, notify_calls):
+    def test_export_failure_reports_error(self, export, notify_calls, tmp_path):
+        """写不出去时必须报一条 error（"点了没反应"是最糟的失败形态）。
+
+        ⚠ 目标要**在每个平台都不可创建**：从前写死 `/nonexistent/dir/out.rpy`，
+        而在 Windows 上它落到当前盘根（`D:\\nonexistent\\…`）—— `mkdir` 直接
+        建得出来，于是这个判据**随"这台机器跑过没有"变脸**（2026-11-14 在干净
+        检出上实测：第一遍红、主仓里却绿，因为 `out.rpy` 已经躺在那里、第二次
+        变成 HANDWRITTEN_TARGET 才报错）。用"父路径是个文件"就与平台无关了。
+        """
+        blocker = tmp_path / 'not-a-dir.txt'
+        blocker.write_text('x', encoding='utf-8')
         g = Graph()
         g.add_node('a', 0, 0)
-        export_to_renpy(g, '/nonexistent/dir/out.rpy')
+        export_to_renpy(g, blocker / 'out.rpy')
         assert notify_calls.of('error')
 
     def test_success_reports_info(self, export, notify_calls, tmp_path):
