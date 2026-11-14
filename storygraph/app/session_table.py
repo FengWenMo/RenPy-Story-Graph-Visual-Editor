@@ -48,7 +48,7 @@ from storygraph.app.table_edits import (FieldWriter,  # noqa: F401
 from storygraph.app import table_structure as TS
 from storygraph.app.table_structure import (STRUCT_UNDO_LIMIT,  # noqa: F401
                                             ClearOp, DeleteOp, InsertOp,
-                                            MoveOp)
+                                            MoveOp, SplitOp)
 from storygraph.story.beat_build import (beats_from_parse_result,
                                          hydrate_from_dsl)
 from storygraph.story.beat_render import make_symbols
@@ -1196,6 +1196,86 @@ class TableSessionMixin:
         self.forget_undo()                    # 拍号变了，旧的撤销记录对不上
         return {'ok': True, 'error': '', 'index': at,
                 'label': beat.label, 'count': len(self.beats)}
+
+    #: 能"句中断开"的卡：一句台词（对白 / 旁白）以及它后面接着说的那几张。
+    #:
+    #: `extend` 也算 —— 用户要的正是"同一句里**反复**换表情"：拆一次得到
+    #: 对白 + 接续，再拆接续就是 对白 + 接续 + 接续，Ren'Py 那条链照样成立
+    #: （`extend` 续的是同一个对话框）。
+    SPLIT_KINDS = ('say', 'narration', 'extend')
+
+    def split_say_at(self, idx: int, pos: int) -> dict:
+        """
+        把第 `idx` 拍这句台词在**第 `pos` 个字**处断开（2026-11-14，用户：
+
+        > 在同一句中需要反复变换表情的情况，我们的编辑器可否再做得更直接
+        > 一点？我理解 Renpy 是写 {nw} 后接 extend……但要是剧本不明白怎么办？
+
+        `pos` 是**字符下标**（0 基，来自台词框的光标）。出来的东西是：
+
+            前半句{nw}
+            show 某人 新表情         ← 后半句那张卡上的立绘（可以换表情）
+            extend "后半句"
+
+        这里只做**一件事**：前半句末尾加 `{nw}`、再插一张 `kind='extend'`
+        的空舞台卡（`show` 留空 = 沿用台上的人，用户改表情时才写）。
+        中间的 `show` 由渲染器按"接续卡上改过的立绘"生成 —— 也就是说，
+        **不换表情时一行 `show` 都不多写**（不制造冗余行）。
+
+        "接续"是 Ren'Py 的语义：`extend` 把字接在**同一个对话框**里，
+        所以用户看到的还是一整句话，只是中间换了张画。
+
+        返回 `{ok, index, error, count}`；`index` 是**新那张卡**的拍号
+        （前端跳过去，好让人一眼看到"改表情就在这改"）。
+        """
+        if not self.has(idx):
+            return {'ok': False, 'error': '还没有载入这一拍', 'index': -1}
+        beat = self.beats[idx]
+        kind = str(getattr(beat, 'kind', '') or '')
+        if kind not in self.SPLIT_KINDS:
+            return {'ok': False, 'index': -1,
+                    'error': '只有对白 / 旁白 / 接续卡能这样断开'
+                             '（这一张不是台词卡）'}
+        # **在条件块 / 循环体 / 菜单块里的那句不许拆**（2026-11-14 实测）：
+        # 渲染器是"一拍一个 `if` 头"（`beat_render` 的 `if beat.condition`），
+        # 于是拆完会变成两个同条件的 `if` 块；而增量补丁对这种条件叠加会
+        # **拒写**（"条件与要写的拍对不上"）→ 导出退回全量重生成，
+        # 把用户文件的结构改掉。宁可不动，也不能悄悄改块结构（铁律 1/5）。
+        inside = (str(getattr(beat, 'condition', '') or '').strip()
+                  or str(getattr(beat, 'nest_path', '') or '').strip())
+        if inside:
+            return {'ok': False, 'index': -1,
+                    'error': '这句话在条件块 / 循环 / 菜单里：拆开会让工具多写一个'
+                             '同条件的 `if` 块（块结构还原不回原样），所以这里'
+                             '不动。想在这句里换表情，先把这句挪到块外，'
+                             '或在「备注」里写明给程序看。'}
+        text = str(getattr(beat, 'text', '') or '')
+        try:
+            cut = int(pos)
+        except (TypeError, ValueError):
+            cut = len(text)
+        cut = max(0, min(cut, len(text)))
+        head, tail = text[:cut].rstrip(), text[cut:].lstrip()
+        if not head.strip() or not tail:
+            # 光标在两头时**不猜**要切哪儿（铁律 4）：说清怎么用就行。
+            return {'ok': False, 'index': -1,
+                    'error': '先把光标放到这句话中间：前半句留在这一张，'
+                             '后半句放进下一张「接续」卡。'}
+        new = Beat(seq=0, label=str(getattr(beat, 'label', '') or ''),
+                   kind='extend', text=tail,
+                   speaker=str(getattr(beat, 'speaker', '') or ''))
+        doc = self._chapter_doc()
+        at = doc.insert_beat(new, idx + 1)
+        self.beats = doc.beats
+        # 原文先记下来再改：撤销要把 `{nw}` 一起收回去（`SplitOp`）。
+        old_text = str(getattr(self.beats[idx], 'text', '') or '')
+        self.beats[idx].text = head + '{nw}'
+        self._sync_chapter()                  # 结构变了，顶层块仍要保住
+        self._push_struct_undo(SplitOp(at=at, old_text=old_text))
+        self._renumber()
+        self.forget_undo()                    # 拍号变了，内容撤销对不上
+        return {'ok': True, 'error': '', 'index': at,
+                'count': len(self.beats), 'text': tail}
 
     def insert_flow_beat(self, idx=None, after=True, flow_type='call',
                          target='', args='', from_clause='') -> dict:

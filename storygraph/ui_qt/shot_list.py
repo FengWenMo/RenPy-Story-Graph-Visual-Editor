@@ -67,6 +67,18 @@ def badge_of(entry: dict) -> tuple:
     return ('对白', 'brand.primary', 'brand.subtle')
 
 
+def _preview_text(text: str) -> str:
+    """
+    列表里只给"人看的那句话"：`{nw}`（不等点击）这种**节拍标签**不占字。
+
+    为什么只清 `{nw}`（2026-11-14）：它是本工具「✂ 句中换表情」自己写进去的
+    —— 列表里那一行后面紧跟一张「接续」卡，本来就说明"这句没说完"，
+    再把标签抄进正文反而像乱码。其它标签（`{color=…}` / `{i}`）是作者自己
+    写的样式，留着（卡片里看到源码是对的）。
+    """
+    return str(text or '').replace('{nw}', '')
+
+
 def row_text_of(entry: dict) -> tuple:
     """
     一拍 → `(加粗的那一小段, 后面的正文)`。
@@ -88,7 +100,7 @@ def row_text_of(entry: dict) -> tuple:
         tail = f' · {label}' if label else ''
         return (f'{name}{tail}', f'  {rest}')
     who = str(e.get('who') or '').strip()
-    text = str(e.get('text') or '')
+    text = _preview_text(str(e.get('text') or ''))
     if who:
         return (f'{who}：', f' {text}')
     # **不再把 `☁ ⚑ ➜` 抄进正文**：类型牌已经说了是旁白/分支/选项，

@@ -156,6 +156,13 @@ class BeatCardEditor(QWidget):
     #: 「保存这张卡片」/「撤销修改」两个按钮被按下时发出
     save_requested = Signal()
     undo_requested = Signal()
+    #: 「✂ 句中换表情」：参数是**台词框里的光标位置**（字符下标），
+    #: 由会话在那一处把这句话断成"前半{nw} + 接续卡"（2026-11-14）。
+    split_requested = Signal(int)
+
+    #: 能"句中断开"的卡（与 `EditorSession.SPLIT_KINDS` 同源）。
+    #: 这里只决定**按钮出不出现**；认不认由会话判 —— 前端不另立一套规矩。
+    SPLIT_KINDS = ('say', 'narration', 'extend')
 
     #: 这两格在**这一拍没写**时可以从"当前舞台"沿用过来显示（改了才写回）。
     #: 语音刻意不在里面：它是逐句的，沿用上一句的语音没有意义。
@@ -390,6 +397,9 @@ class BeatCardEditor(QWidget):
         self._char_label.setAlignment(Qt.AlignRight)
         dlg_lay.addWidget(self._char_label)
 
+        # —— 句中换表情（2026-11-14）——
+        self._build_sentence_split(dlg_lay)
+
         # —— 内联标签**预览**（2026-10-18）——
         #
         # Ren'Py 的文字样式写在台词里：`{color=#f00}红{/color}` /
@@ -439,6 +449,41 @@ class BeatCardEditor(QWidget):
         self._say_tail_label.setWordWrap(True)
         self._say_tail_label.setVisible(False)
         dlg_lay.addWidget(self._say_tail_label)
+
+    def _build_sentence_split(self, lay) -> None:
+        """
+        「✂ 句中换表情」按钮 + 那一行说明（2026-11-14，拆自 `_build_dialogue_area`）。
+
+        为什么是**动作**而不是教语法（用户原话）：
+
+        > 在同一句中需要反复变换表情的情况，我们的编辑器可否再做得更直接
+        > 一点……我理解 Renpy 是写 {nw} 后接 extend，新建语句然后再分表情
+        > 的……但要是剧本不明白怎么办？
+
+        点一下就在光标处断成「前半{nw}」+ 一张「接续」卡（后半句），并跳到
+        那张卡上 —— 换表情就在那张卡的立绘里改（改完才多出那一行 `show`）。
+        只有按了这个按钮才会写 `{nw}`；手写 `{nw}` 的人照旧，两不相干。
+        """
+        self._split_btn = QPushButton('✂ 句中换表情')
+        self._split_btn.setToolTip(
+            '把这句话在光标处断开：前半句留在这张卡，后半句放进下一张'
+            '「接续」卡（同一个对话框，不会另起一句）。\n'
+            '断开之后在下一张卡上改立绘表情，就得到 Ren\'Py 的\n'
+            '  l "前半句{nw}"\n'
+            '  show l 新表情\n'
+            '  extend "后半句"\n'
+            '不换表情的话，一行 show 都不会多写。')
+        # 只有台词卡才出现（`set_sentence_context` 按这一拍判；不认识的卡上
+        # 留着这个按钮只会让人点出一个错误提示）。
+        self._split_btn.setVisible(False)
+        self._split_btn.clicked.connect(self._emit_split)
+        lay.addWidget(self._split_btn, 0, Qt.AlignRight)
+        #: 「这句没说完 / 这张是接续」那一行说明（纯文字，QLabel 不认 Markdown）。
+        self._sentence_label = QLabel('')
+        self._sentence_label.setProperty('role', 'caption')
+        self._sentence_label.setWordWrap(True)
+        self._sentence_label.setVisible(False)
+        lay.addWidget(self._sentence_label)
 
     def _build_stage_now_area(self, root) -> None:
         """「当前舞台」这一拍的只读小图 + 摘要 + 尺寸格（拆自 `_build`，2026-11-01）。"""
@@ -1702,6 +1747,63 @@ class BeatCardEditor(QWidget):
 
     def set_text(self, value):
         self._text.setPlainText(str(value or ''))
+
+    # ---------- 句中换表情（2026-11-14） ----------
+
+    def text_cursor_position(self) -> int:
+        """
+        台词框里光标的位置（**选了字就是选区起点**）——「句中换表情」从这里断。
+
+        为什么用选区起点而不是"选区的结尾"：人圈住"哇！"再点断开，想的是
+        "这一段单独成一口"——那么断开点就在这段**前面**。
+        """
+        cursor = self._text.textCursor()
+        if cursor.hasSelection():
+            return int(cursor.selectionStart())
+        return int(cursor.position())
+
+    def set_sentence_context(self, kind: str, text: str,
+                             next_kind: str = '') -> None:
+        """
+        按"这一拍是不是一句话的一口"来摆那个按钮和说明行。
+
+        `kind`      这一拍的 `kind`（`say` / `narration` / `extend` / …）
+        `text`      这一拍的台词原文（判"结尾有没有 `{nw}`"用它，不看控件，
+                    因为控件里可能还没提交）
+        `next_kind` 下一拍的 `kind` —— 用来点破那个常见的坑：
+                    写了 `{nw}` 却没有「接续」卡跟在后面。
+
+        ⚠ 说明行是 **QLabel**：不渲染 Markdown，只写纯文字（`**` 会原样显示）。
+        """
+        kind = str(kind or '').strip()
+        body = str(text or '')
+        can_split = kind in self.SPLIT_KINDS and bool(body.strip())
+        self._split_btn.setVisible(can_split)
+        self._split_btn.setEnabled(can_split)
+        ends_nw = body.rstrip().endswith('{nw}')
+        msg = ''
+        if kind == 'extend':
+            msg = '这张接上一句：和上一张是同一个对话框，不会另起一句。'
+            if ends_nw:
+                msg += '这句也还没说完，后面的「接续」卡接着讲。'
+        elif ends_nw:
+            if str(next_kind or '').strip() == 'extend':
+                msg = '这句不等点击就往下走（{nw}）：下一张「接续」卡接着说。'
+            else:
+                # 真坑：`{nw}` 后面没有 extend，那句话会直接跳到下一句去
+                msg = ('注意：这句写了 {nw}（不等点击），但下一拍不是「接续」卡'
+                       ' —— 后面那半句会直接跳到下一句去。')
+        self._sentence_label.setText(msg)
+        self._sentence_label.setVisible(bool(msg))
+
+    def _emit_split(self, *_):
+        """「✂ 句中换表情」被按下 → 把光标位置交给窗口（它会问会话）。
+
+        `*_` 收下 `QPushButton.clicked` 那个 `checked=False` 参数 —— Qt 的
+        信号是带参的，槽签名不收会在某些绑定下抛 TypeError（只打 stderr、
+        界面不动，正是"点了没反应"那一类）。
+        """
+        self.split_requested.emit(self.text_cursor_position())
 
     def is_advanced_open(self) -> bool:
         return bool(self._adv_open)

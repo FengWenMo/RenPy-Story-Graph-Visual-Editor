@@ -204,6 +204,8 @@ class GraphPageMixin:
         '_pick_asset_for', '_pick_image', '_session', '_toggle_location',
         'delete_card', 'insert_card', 'insert_choice_point',
         'insert_flow_card', 'restore_card', 'save_current_beat',
+        # 「✂ 句中换表情」（2026-11-14）：实现在 `window_card`，这里只接线
+        'split_say_here',
         'undo_current_beat',
         # ---- 工具栏（`_build_toolbars`，同一轮搬进来）----
         # 一条 QAction 一条槽：这些名字就是"点了会发生什么"，实现都在别的
@@ -813,6 +815,13 @@ class GraphPageMixin:
         # 卡片里那两个按钮直接连过来（用户要的"保存 / 撤销这张卡片"）
         self._panel.save_requested.connect(self.save_current_beat)
         self._panel.undo_requested.connect(self.undo_current_beat)
+        # 「✂ 句中换表情」：一句话中间换立绘（`{nw}` + 接续卡），
+        # 语义在 `EditorSession.split_say_at`，前端只递光标位置（2026-11-14）。
+        # ⚠ 包一层 lambda：`split_say_here(pos=-1)` 有个可选位置参数，
+        # 直接 connect 的话 Qt 可能把信号的值当第一个实参喂进去
+        # （`tools/audit_qt_signal_slots.py` 那条守卫就是防这个）。
+        self._panel.split_requested.connect(
+            lambda pos=-1: self.split_say_here(pos))
         # 「尺寸」一格的「改」：计划 / diff 确认 / 写回。
         # ⚠ 直接连**面板上**那个信号：卡片不转一层（少一个"信号连信号"）。
         self._panel.size_panel().size_requested.connect(

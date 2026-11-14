@@ -912,6 +912,43 @@ class CardPageMixin:
         self._status(f"✔ 已插入一张空卡片（第 {res['index'] + 1} 拍）——"
                      f"填完按「💾 保存这一拍」，导出时才落盘。")
 
+    def split_say_here(self, pos: int = -1):
+        """
+        「✂ 句中换表情」：在光标处把这句话断成"前半{nw} + 接续卡"（2026-11-14）。
+
+        用户 2026-11-14：
+
+        > 在同一句中需要反复变换表情的情况，我们的编辑器可否再做得更直接
+        > 一点？我理解 Renpy 是写 {nw} 后接 extend……但要是剧本不明白怎么办？
+
+        写出来的东西（会话负责，判据在 `EditorSession.split_say_at`）：
+
+            l "前半句{nw}"
+            show l 新表情        ← 在下一张卡上改立绘才出现
+            extend "后半句"
+
+        这里只做三件前端的事：把表单提交掉（台词框里的字才进拍）、把结果
+        摆出来（列表 / 跳到新卡 / 结构按钮）、并说清楚"下一步该在哪改"。
+        """
+        idx = self._loaded_idx
+        if not self._session.has(idx):
+            self._status('还没有载入章节，没法断开这句话。')
+            return
+        self.apply_current_beat()          # 先把台词框里的字提交进这一拍
+        res = self._session.split_say_at(idx, pos)
+        if not res.get('ok'):
+            self._status(res.get('error') or '断开失败')
+            return
+        # 插卡会让后面的拍全部换 line_id：图边跟着重认身份（与 `insert_card` 同源）
+        self._refresh_flow_edges()
+        self._reload_list()
+        self._show_index(res['index'])
+        self._sync_structural_buttons()
+        self._log(f'[卡片] 第 {idx + 1} 拍在句中断开：后半句进了第 '
+                  f'{res["index"] + 1} 拍（「接续」卡，同一个对话框）')
+        self._status(f'✂ 已在句中断开：后半句在第 {res["index"] + 1} 拍「接续」卡上。'
+                     f'在那张卡上改立绘，就是句中换表情。')
+
     def _flow_target_labels(self) -> list:
         """
         插入控制流卡时「目标 label」的**全部**候选。
@@ -1274,10 +1311,14 @@ class CardPageMixin:
 
     def restore_card(self):
         """
-        撤销**最近一次结构编辑**（插卡或删卡，可连按多级）。
+        撤销**最近一次结构编辑**（插卡 / 删卡 / 清空 / 移卡 / 句中换表情，可多级）。
 
         优先走结构撤销栈（`undo_structural`）；栈空时退回旧的单级
         `restore_last_removed`（老表/老调用方仍能拿到那个行为）。
+
+        ⚠ 措辞用 `res['note']`（"撤销插卡" / "恢复删除" / "撤销「句中换表情」"）：
+        从前这里写死"已把删掉的卡片放回"，而撤销**插卡**也是走这条路 ——
+        文案会说反（2026-11-14 顺手修）。
         """
         if self._session.can_undo_structural():
             res = self._session.undo_structural()
@@ -1453,6 +1494,14 @@ class CardPageMixin:
                           getattr(_beat, 'src_last', None)),
             inherited=self._session.stage_state(idx))
         self._sync_spec_args(idx)
+        # 「✂ 句中换表情」：按**这一拍是什么卡** + "下一拍接不接"摆按钮与说明
+        # （2026-11-14）。判据读 beat 原文，不读控件 —— 控件里可能还是半截。
+        _next = (self._session.beats[idx + 1] if self._session.has(idx + 1)
+                 else None)
+        self._panel.set_sentence_context(
+            str(getattr(_beat, 'kind', '') or ''),
+            str(getattr(_beat, 'text', '') or ''),
+            str(getattr(_next, 'kind', '') or '') if _next is not None else '')
         # 说话人下拉：屏幕上是人话（「大爷」），写回 beat 的仍是 tag（`DY`）
         self._panel.set_speakers(
             pairs(self._session.characters(), self._character_labels()),

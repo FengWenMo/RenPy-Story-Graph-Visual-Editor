@@ -72,6 +72,19 @@ class MoveOp:
     condition: str = ''
 
 
+@dataclass(frozen=True)
+class SplitOp:
+    """把一句台词拆成两口（`{nw}` + 接续卡）；逆操作 = 拔掉新卡 + 还原原文。
+
+    `at` 是**新插进来那张**的拍号（原卡 +1）。只记 `old_text` 一份就够：
+    拆的时候除了"原文末尾加了 `{nw}`"没有别的改动（说话人 / 标签 / 舞台
+    都原样留着），所以撤的时候把原文写回去、再把新卡删掉，就回到了没拆之前
+    —— 一步到位，**不是两次撤销**（用户要的是"这一下能不能退回去"）。
+    """
+    at: int
+    old_text: str = ''
+
+
 class StructureUndoStack:
     """有界结构撤销栈：只记"做过什么"，不碰会话状态。
 
@@ -153,6 +166,22 @@ def undo(op, host) -> dict:
         restore_fields(host.beats[at], op.saved or {})
         note = '撤销清空'
         index = at
+    elif isinstance(op, SplitOp):
+        # 一句拆两口：新卡拔掉、原文写回 —— **一步**回到没拆之前。
+        at = int(op.at)
+        src = at - 1
+        if not (0 <= src < len(host.beats)) or not (0 <= at < len(host.beats)):
+            return {'ok': False,
+                    'error': '那两张卡已经不在了（可能被别的操作改过）',
+                    'index': -1}
+        try:
+            doc.remove_beat_at(at)
+        except ChapterTreeError as e:
+            return {'ok': False, 'error': str(e), 'index': -1}
+        host.beats = doc.beats
+        host.beats[src].text = str(op.old_text or '')
+        note = '撤销「句中换表情」'
+        index = src
     elif isinstance(op, MoveOp):
         src, new_index = int(op.src), int(op.dst)
         try:
