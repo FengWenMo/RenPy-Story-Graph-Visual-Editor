@@ -324,6 +324,11 @@ def validate_statement(head, text):    # True / (False, 原因) / None(我不管
   真机建一次 0.28 s、卡片每翻一页都要问，所以缓存必须能失效）。`ui_qt` 那份已收敛到它。
 - **判据**：`tests/test_sprite_slots.py`（卡片 9 条）+ `tests/test_engine_choices.py`
   的 `TestAttrSlotRows` / `TestApplyAttrSlot` / `TestSilentDefaultAttrs`。
+- **属性顺序（2026-11-14）**：`apply_attr_slot(spec, group, value, insert_at=, order=)`。
+  `order` 是**这张卡自己**的维度顺序（`['outfit','expressions']`）；这一维缺席时插哪，
+  优先级 `insert_at` > `order` > 项目惯例（`story/attr_order.py`，数作者写过的行，
+  证据 <2 条不猜）> 追加。**不许记"下标"**：连清两维下标会失效。
+  判据 `tests/test_attr_order_hell*.py`：每维清空再填回 = **逐字节不变**（随机游走 7 组种子）。
 
 ### 八·补：弹窗里的按键归弹窗（2026-10-12，用户报"选一次就回车……按了没反应"）
 - **现场**：`ChoicePickerDialog(parent=卡片)` 的 `parentWidget()` 是主窗口；

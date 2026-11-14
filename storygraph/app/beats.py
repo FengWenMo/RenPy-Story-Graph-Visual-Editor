@@ -2615,7 +2615,10 @@ def _dedupe_by_key(attrs, keep: str) -> list:
       · 新值本来就在 spec 里（`_replace_attr_word` 会先把旧的那份去掉）；
       · spec 里本来就有**两种拼法**的同一个词（`base_hand_down` + `basehanddown`）。
     """
-    key = attr_word_key(keep)
+    # ⚠ `keep` 也要剥 `@位置` 再算键（2026-11-14 地狱测试）：下面比较别的词时
+    #   剥了，`keep` 没剥 —— `'aa@l33'` 的键会变成 `aa@l33`，和 `'aa'` 对不上，
+    #   于是同一个词留下两份。
+    key = attr_word_key(str(keep).split('@', 1)[0])
     if not key:
         return [a for a in (attrs or ()) if a]
     out, seen = [], False
@@ -2630,6 +2633,35 @@ def _dedupe_by_key(attrs, keep: str) -> list:
     return out
 
 
+def _attr_base(word) -> str:
+    """属性词剥掉 `@位置`（`happy@l11` → `happy`）。"""
+    return str(word).split('@', 1)[0]
+
+
+def _attr_at(word) -> str:
+    """属性词上的内联位置（`happy@l11` → `'@l11'`；没有就 `''`）。"""
+    parts = str(word).split('@', 1)
+    return '@' + parts[1] if len(parts) > 1 else ''
+
+
+def _drop_attr_word(attrs, old: str) -> list:
+    """
+    **清空这一维**：整词连 `@位置` 一起删，位置挂到新的**最后一个属性词**上。
+
+    `aa@l11` 不是"删掉 aa、留下 `@l11`"—— 那会拼出 `lan @l11 uh`（语法错，
+    2026-11-14 地狱测试抓到）。内联位置是**这张图**的位置，删词不该删位置；
+    一个属性都不剩才丢弃（卡片另有 `position` 列，`_card_parts` 会补 `图@位置`）。
+    """
+    if not old:
+        return [a for a in (attrs or ()) if a]
+    pos = next((_attr_at(a) for a in (attrs or ())
+                if _attr_base(a) == old and _attr_at(a)), '')
+    out = [a for a in (attrs or ()) if a and _attr_base(a) != old]
+    if pos and out and not _attr_at(out[-1]):
+        out[-1] = out[-1] + pos
+    return out
+
+
 def _replace_attr_word(attrs, old: str, new: str) -> list:
     """
     把 `attrs` 里的 `old` **原位**换成 `new`（没有 `old` 就追加到末尾）。
@@ -2641,30 +2673,27 @@ def _replace_attr_word(attrs, old: str, new: str) -> list:
     下面的实现是"先去掉 new、再把 old 换成 new、没有就追加"——同一个词时
     `out` 里已经没它了，于是走"追加"那一支，把这一维**挪到末尾**。
     用户在同一格再点一次当前值，就会看到顺序莫名变了。
+
+    `new` 为空串 = **清空这一维**，走 `_drop_attr_word`（连 `@位置` 一起处理）。
     """
-    def _base(a):
-        return str(a).split('@', 1)[0]
-
-    def _at(a):
-        parts = str(a).split('@', 1)
-        return '@' + parts[1] if len(parts) > 1 else ''
-
     if old and new and old == new:
         return [a for a in (attrs or ()) if a]
+    if not new:
+        return _drop_attr_word(attrs, old)
     # ⚠ 按**剥掉 `@` 之后的词**比较：`happy@l11` 的属性名是 `happy`。
     # 替换时把 `@l11` 带到新值上（`happy@l11` → `angry@l11`）——
     # 内联位置是**附着在这个属性上**的，丢了它就等于把演出位置改了。
-    out = [a for a in (attrs or ()) if a and _base(a) != new]
+    out = [a for a in (attrs or ()) if a and _attr_base(a) != new]
     for i, a in enumerate(out):
-        if _base(a) == old:
-            out[i] = new + _at(a)
+        if _attr_base(a) == old:
+            out[i] = new + _attr_at(a)
             return out
     return out + [new]
 
 
 def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
                     groups=None, facts=None, layer_model=None,
-                    insert_at=None) -> str:
+                    insert_at=None, order=None) -> str:
     """
     **只换一个维度的词**，其余维度原样保留 → 新的 `show` spec。
 
@@ -2675,7 +2704,12 @@ def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
     `insert_at`（2026-11-14）：这一维**原来没写**时，新词插在第几个属性词
     之前（`None` = 按项目自己的写法排；没惯例就追加到末尾）。
 
-    为什么要有这个参数：从前这一支是 `_replace_attr_word` 里的"没有 old 就
+    `order`（2026-11-14）：**这张卡自己**的维度顺序（`['outfit', 'expressions']`）。
+    清空一维再选回来时，按它插回原位 —— 比"项目惯例"更准（作者手写的那一行
+    可能本来就和项目主流不一样），也比"记住下标"更稳（连清两维下标会失效）。
+    优先级：`insert_at` > `order` > 项目惯例 > 追加。
+
+    为什么要有这两个参数：从前这一支是 `_replace_attr_word` 里的"没有 old 就
     追加到末尾"。于是"先选表情、再选服装"（卡片上「属性 1」正好是表情）
     会写出 `lan shy aa`，而这个项目其余 1269 条都是 `lan aa shy`
     —— 真机 `chapter2_2_3.rpy` 第 17/25/33 行就是这么来的。
@@ -2716,6 +2750,9 @@ def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
     else:
         at = insert_at
         if at is None:
+            at = _card_insert_index(toks_attrs, str(hit.get('group') or ''),
+                                    order, rows)
+        if at is None:
             at = _declared_insert_index(toks_attrs, tag, rows,
                                         str(hit.get('group') or ''), symbols)
         attrs = _insert_attr_word(toks_attrs, value, at)
@@ -2723,6 +2760,31 @@ def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
     attrs = _dedupe_by_key(attrs, value)
     line = ' '.join([tag] + [a for a in attrs if a])
     return f'{line} {clauses}'.strip() if clauses else line
+
+
+def _card_insert_index(attrs, group: str, order, rows):
+    """
+    **这张卡自己**的维度顺序 → 新词插在第几个属性词之前；没有这个信息 → `None`。
+
+    与 `_declared_insert_index`（项目惯例）的区别：这一份认的是"作者/这张卡
+    原来那一行怎么写"。`insert_index` 的 `None` 是"后面没有该在我之后的维度"
+    （= 追加），这里翻成明确的下标 —— 否则调用方会退回项目惯例，把顺序又翻
+    回去（`lan shy aa` 这种作者自己写反的卡就会在"清一下再选回来"时被悄悄
+    改成 `lan aa shy`）。
+    """
+    order = [str(g) for g in (order or ())]
+    group = str(group or '')
+    if not attrs or not order or group not in order:
+        return None
+    group_of = {}
+    for row in rows or ():
+        for opt in (row.get('options') or ()):
+            group_of.setdefault(str(opt), str(row.get('group') or ''))
+    if not group_of:
+        return None
+    from storygraph.story import attr_order as AO
+    at = AO.insert_index(attrs, group, order, group_of)
+    return len([a for a in attrs if a]) if at is None else at
 
 
 def _declared_insert_index(attrs, tag: str, rows, group: str, symbols):

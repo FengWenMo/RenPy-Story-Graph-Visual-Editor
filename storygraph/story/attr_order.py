@@ -136,6 +136,34 @@ def learned_order(project_root, tag: str, group_of: dict) -> list:
     return list(order) if evidence >= MIN_EVIDENCE else []
 
 
+def card_order(rows, spec: str, memory=()) -> list:
+    """
+    **这张卡自己**把各维度排成什么顺序（`show lan aa shy` → `['outfit', 'expressions']`）。
+
+    `rows` 是 `attr_slot_rows` 那一份（拿它的 `options` 建"词 → 组"）。
+    与 `learned_order` 的分工：那个问的是"整个项目怎么写"，这个问的是"**这一行**
+    怎么写" —— 清空一维再选回来时后者更准（作者可能本来就写反了）。
+
+    只往前更新：新顺序必须**覆盖**记忆里的全部维度。少了某一维（刚被清空）时
+    原样返回记忆 —— 少的那个正是接下来要插回去的那个；小于两维也说明不了顺序。
+    """
+    group_of = {}
+    for row in rows or ():
+        for opt in (row.get('options') or ()):
+            group_of.setdefault(str(opt), str(row.get('group') or ''))
+    seq = []
+    for word in str(spec or '').split()[1:]:
+        group = group_of.get(word.split('@', 1)[0])
+        if group and group not in seq:
+            seq.append(group)
+    memory = [str(g) for g in (memory or ())]
+    if len(seq) < 2:
+        return memory
+    if memory and not set(memory) <= set(seq):
+        return memory
+    return seq
+
+
 def insert_index(attrs, value_group: str, order, group_of: dict):
     """
     新词该插在第几个属性词之前 → 下标；`None` = 追加到末尾。
@@ -156,4 +184,4 @@ def insert_index(attrs, value_group: str, order, group_of: dict):
     return None
 
 
-__all__ = ['MIN_EVIDENCE', 'insert_index', 'learned_order']
+__all__ = ['MIN_EVIDENCE', 'card_order', 'insert_index', 'learned_order']

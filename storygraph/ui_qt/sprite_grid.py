@@ -46,6 +46,7 @@ from storygraph.app.beats import (apply_attr_slot, attr_slot_rows,
 # "卡片上显示的位置"与"存进 .rpy 的位置"就会不一致
 # （那正是当年"立绘错位"事故的形态）。所以这里只 re-export，不再自带实现。
 from storygraph.app.session_table import uniform_position_of  # noqa: F401
+from storygraph.story.attr_order import card_order
 from storygraph.ui_qt import tokens as T
 from storygraph.ui_qt import theme
 from storygraph.ui_qt.labeled_choices import labeled
@@ -180,9 +181,9 @@ class SpriteCardWidget(QFrame):
         #: 只在"这次选中"之后显示一次；关掉提示条或再换一次图就没了。
         self._pick_note = ''
         self._pick_note_tip = ''
-        #: 刚被清掉的那一维原来在第几位（`{组: 下标}`）—— 再选回来必须回原位
-        #: （否则 `lan clothes2 uh` 会变成 `lan uh clothes2`，2026-11-14）。
-        self._slot_holes: dict = {}
+        #: **这张卡自己**的维度顺序（`['outfit', 'expressions']`）—— 清空一维
+        #: 再选回来要插回原位；记"顺序"不记"下标"（连清两维下标全失效，2026-11-14）。
+        self._slot_order: list = []
         #: 现在提示条显示的是什么（`_refresh_hint` 维护；判据读它）
         self._hint_text = ''
         #: **现在有没有"判得了"的底子**（项目打开过 / 资源表读过）。
@@ -600,7 +601,7 @@ class SpriteCardWidget(QFrame):
         `apply_attr_slot(...)` 参数，右键那份漏了 `layer_model`，于是没采过
         引擎事实的项目右键列表一条都拼不出来（空列表＝"点了没反应"）。
 
-        `insert_at`：这一维原来没写时插在第几个词之前（`None` = 按项目惯例）。
+        `insert_at`：这一维原来没写时插在第几个词之前（`None` = 按这张卡自己的维度顺序，再没有就按项目惯例）。
         """
         provider = self._choice_groups_for
         try:
@@ -609,7 +610,7 @@ class SpriteCardWidget(QFrame):
                 groups=getattr(provider, 'attr_groups', None) or [],
                 facts=getattr(provider, 'engine_facts', None) or {},
                 layer_model=self._layer_model(),
-                insert_at=insert_at)
+                insert_at=insert_at, order=self._slot_order)
         except Exception as e:               # noqa: BLE001 - 认不出就别改
             swallow('ui_qt.sprite_grid._slot_apply', e)
             return spec
@@ -661,19 +662,15 @@ class SpriteCardWidget(QFrame):
         self._set_slot_value(group, cycle[(cycle.index(cur) + 1) % len(cycle)])
 
     def _set_slot_value(self, group: str, value: str):
-        """某一维换成 `value`（`''` = 不写这一维）→ 重投影，其余维度不丢。"""
+        """
+        某一维换成 `value`（`''` = 不写这一维）→ 重投影，其余维度不丢。
+
+        "插回原位"的记忆在 `_slot_order`（见 `attr_order.card_order`），不在这里：
+        从前这一支先记下标再 `pop` 出去落值，等于**清空那一次就把记忆用掉**了
+        —— 没有惯例的项目会又写成 `lan uh aa`（2026-11-14 地狱测试抓到）。
+        """
         spec = str(self.item.get('image') or '').strip()
-        # 清空这一维 → **记下它原来在第几位**（见 `_slot_holes` 的说明）。
-        if not value:
-            rows = self._slot_rows(spec)
-            hit = next((r for r in rows
-                        if str(r.get('group') or '') == str(group or '')), None)
-            old = str((hit or {}).get('value') or '').strip()
-            words = [w.split('@', 1)[0] for w in spec.split()[1:]]
-            if old and old in words:
-                self._slot_holes[str(group)] = words.index(old)
-        insert_at = self._slot_holes.pop(str(group), None)
-        new = self._slot_apply(spec, group, value, insert_at=insert_at)
+        new = self._slot_apply(spec, group, value)
         if new and new != spec:
             self._apply_image_spec(new)
 
@@ -699,6 +696,8 @@ class SpriteCardWidget(QFrame):
         # 分组行只算一次（标题要用它算代号，chip 也要用它）—— `attr_slot_rows`
         # 会去读项目的 `layeredimage`，一张卡算两遍不值当。
         rows = self._slot_rows()
+        # 这张卡自己的维度顺序（清空再选回来要插回原位）—— 每次重画从当前 spec 重认。
+        self._slot_order = card_order(rows, spec, self._slot_order)
         code, code_tip = self._art_code(spec, rows) if spec else ('', '')
         base_text = f'{tag} {code}' if code else (spec or '（点击换图）')
         self._name.setText(SH.title(self.item, base_text))
