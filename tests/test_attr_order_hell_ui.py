@@ -270,7 +270,7 @@ def test_combo_menu_clear_then_pick_the_same_combination_is_identity(card):
     右键组合里"✕ 不写「服装」" → 再选回同一条 —— 与 chip 那条路同一个结果。
 
     这条路**不经过** `_set_slot_value`（它直接拿整串 spec 落盘），从前是第二个
-    入口：从 chained 记忆放到 `_slot_apply`/`_note_slot_order` 之后两处才一致。
+    入口：记忆放到 `_slot_apply`（`order=`）/`card_order` 之后两处才一致。
     """
     from storygraph.ui_qt.sprite_codes_view import slot_choices
 
