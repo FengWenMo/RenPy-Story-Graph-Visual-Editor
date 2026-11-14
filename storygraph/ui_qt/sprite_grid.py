@@ -180,6 +180,9 @@ class SpriteCardWidget(QFrame):
         #: 只在"这次选中"之后显示一次；关掉提示条或再换一次图就没了。
         self._pick_note = ''
         self._pick_note_tip = ''
+        #: 刚被清掉的那一维原来在第几位（`{组: 下标}`）—— 再选回来必须回原位
+        #: （否则 `lan clothes2 uh` 会变成 `lan uh clothes2`，2026-11-14）。
+        self._slot_holes: dict = {}
         #: 现在提示条显示的是什么（`_refresh_hint` 维护；判据读它）
         self._hint_text = ''
         #: **现在有没有"判得了"的底子**（项目打开过 / 资源表读过）。
@@ -588,13 +591,16 @@ class SpriteCardWidget(QFrame):
         rows = self._slot_rows(spec) if rows is None else list(rows or ())
         return art_code(rows, self._vocabulary(), toks[0] if toks else '')
 
-    def _slot_apply(self, spec: str, group: str, value: str) -> str:
+    def _slot_apply(self, spec: str, group: str, value: str,
+                    insert_at=None) -> str:
         """
         换一维的词 → 新 spec（认不出就**原样返回**，宁可不改也不猜）。
 
         `_set_slot_value`（点 chip）与右键候选共用这一条 —— 从前两处各写一份
         `apply_attr_slot(...)` 参数，右键那份漏了 `layer_model`，于是没采过
         引擎事实的项目右键列表一条都拼不出来（空列表＝"点了没反应"）。
+
+        `insert_at`：这一维原来没写时插在第几个词之前（`None` = 按项目惯例）。
         """
         provider = self._choice_groups_for
         try:
@@ -602,7 +608,8 @@ class SpriteCardWidget(QFrame):
                 spec, group, value, symbols=self._symbols,
                 groups=getattr(provider, 'attr_groups', None) or [],
                 facts=getattr(provider, 'engine_facts', None) or {},
-                layer_model=self._layer_model())
+                layer_model=self._layer_model(),
+                insert_at=insert_at)
         except Exception as e:               # noqa: BLE001 - 认不出就别改
             swallow('ui_qt.sprite_grid._slot_apply', e)
             return spec
@@ -656,7 +663,17 @@ class SpriteCardWidget(QFrame):
     def _set_slot_value(self, group: str, value: str):
         """某一维换成 `value`（`''` = 不写这一维）→ 重投影，其余维度不丢。"""
         spec = str(self.item.get('image') or '').strip()
-        new = self._slot_apply(spec, group, value)
+        # 清空这一维 → **记下它原来在第几位**（见 `_slot_holes` 的说明）。
+        if not value:
+            rows = self._slot_rows(spec)
+            hit = next((r for r in rows
+                        if str(r.get('group') or '') == str(group or '')), None)
+            old = str((hit or {}).get('value') or '').strip()
+            words = [w.split('@', 1)[0] for w in spec.split()[1:]]
+            if old and old in words:
+                self._slot_holes[str(group)] = words.index(old)
+        insert_at = self._slot_holes.pop(str(group), None)
+        new = self._slot_apply(spec, group, value, insert_at=insert_at)
         if new and new != spec:
             self._apply_image_spec(new)
 

@@ -2663,13 +2663,23 @@ def _replace_attr_word(attrs, old: str, new: str) -> list:
 
 
 def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
-                    groups=None, facts=None, layer_model=None) -> str:
+                    groups=None, facts=None, layer_model=None,
+                    insert_at=None) -> str:
     """
     **只换一个维度的词**，其余维度原样保留 → 新的 `show` spec。
 
     这是"点一下服装 chip，表情不丢"的唯一实现点（用户 2026-10-12 的原始诉求）。
     认不出这个维度 / 这张图没有多条维度 → 原样返回 `image_spec`（宁可不改，
     也不猜着改 —— 猜错就是演出事故）。
+
+    `insert_at`（2026-11-14）：这一维**原来没写**时，新词插在第几个属性词
+    之前（`None` = 按项目自己的写法排；没惯例就追加到末尾）。
+
+    为什么要有这个参数：从前这一支是 `_replace_attr_word` 里的"没有 old 就
+    追加到末尾"。于是"先选表情、再选服装"（卡片上「属性 1」正好是表情）
+    会写出 `lan shy aa`，而这个项目其余 1269 条都是 `lan aa shy`
+    —— 真机 `chapter2_2_3.rpy` 第 17/25/33 行就是这么来的。
+    语义没差（Ren'Py 的属性顺序等价），但作者读自己的脚本会以为工具乱改。
     """
     spec = str(image_spec or '').strip()
     rows = attr_slot_rows(spec, symbols, groups=groups, facts=facts,
@@ -2701,11 +2711,63 @@ def apply_attr_slot(image_spec: str, group: str, value: str, *, symbols=None,
         # 认出来才能**原位替换**；认不出就会追加成"同组两个词"
         # （2026-11-05 用户截图里那条 `base_hand_down gratified base_handdown`）。
         old = _spelling_variant_in(toks_attrs, hit.get('options'))
-    attrs = _replace_attr_word(toks_attrs, old, value)
+    if old:
+        attrs = _replace_attr_word(toks_attrs, old, value)
+    else:
+        at = insert_at
+        if at is None:
+            at = _declared_insert_index(toks_attrs, tag, rows,
+                                        str(hit.get('group') or ''), symbols)
+        attrs = _insert_attr_word(toks_attrs, value, at)
     # 同一个词只留一份（新值本来就在 spec 里、或 spec 里用了两种拼法时）。
     attrs = _dedupe_by_key(attrs, value)
     line = ' '.join([tag] + [a for a in attrs if a])
     return f'{line} {clauses}'.strip() if clauses else line
+
+
+def _declared_insert_index(attrs, tag: str, rows, group: str, symbols):
+    """
+    新词该插在第几个属性词之前 —— **按这个项目自己写过的顺序**；没有惯例 → `None`。
+
+    `rows` 是 `attr_slot_rows` 那一份（组名 + 候选值），拿它建"词 → 组"；
+    "项目惯例"见 `story.attr_order`（只认作者真写过的行，不猜）。
+    """
+    if not attrs:
+        return None
+    root = str(getattr(symbols, '_project_root', '') or '')
+    if not root or not tag:
+        return None
+    group_of = {}
+    for row in rows or ():
+        for opt in (row.get('options') or ()):
+            group_of.setdefault(str(opt), str(row.get('group') or ''))
+    if not group_of:
+        return None
+    # ⚠ 不在这里 try/except：调用方 `ui_qt.sprite_grid._slot_apply` 已有宽捕获 +
+    #   `swallow` 记痕（2026-11-14；技术债棘轮 `swallow_calls` 正好卡在上限）。
+    from storygraph.story import attr_order as AO
+    order = AO.learned_order(root, str(tag), group_of)
+    return AO.insert_index(attrs, group, order, group_of)
+
+
+def _insert_attr_word(attrs, word: str, index) -> list:
+    """
+    把 `word` 插进属性词列表（`index=None` / 越界 → 追加到末尾）。
+
+    与 `_replace_attr_word` 分开：那个管"原位替换"，这个只管"这一维原来没有词
+    时插在哪"。插进去之后仍会过 `_dedupe_by_key`。
+    """
+    out = [a for a in (attrs or ()) if a]
+    word = str(word or '').strip()
+    if not word:
+        return out
+    if index is None:
+        return out + [word]
+    try:
+        pos = max(0, min(int(index), len(out)))
+    except (TypeError, ValueError):
+        return out + [word]
+    return out[:pos] + [word] + out[pos:]
 
 
 def choices_for_image(image_spec: str, symbols) -> dict:
