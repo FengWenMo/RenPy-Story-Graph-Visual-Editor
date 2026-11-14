@@ -48,6 +48,7 @@ from storygraph.assets.asset_dimensions import dimensions_by_tag
 #: "这张图放在立绘目录里吗" —— 唯一实现在 assets（2026-11-03）。
 #: story → assets 是下行（`assets` 是底座，不反向 import story），不会成环。
 from storygraph.assets.asset_identity import is_under_sprite_container
+from storygraph.story.script_characters import script_actor  # define 过的角色
 
 # ---------------------------------------------------------------------------
 # 词表：把"人话"映射成 Ren'Py 认识的东西。
@@ -708,7 +709,9 @@ class Symbols:
             return None
         if word in self._by_var:
             return self._by_var[word]
-        return self._by_name.get(_clean_name(word))
+        # 表里没有 ≠ 不存在：脚本里 `define` 过的比表权威（见 script_characters）。
+        return (self._by_name.get(_clean_name(word))
+                or script_actor(self._project_root, word))
 
     def actor_image_tag(self, word: str) -> str:
         row = self.actor(word)

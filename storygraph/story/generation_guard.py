@@ -1031,17 +1031,31 @@ def _guard_label_collisions(text: str, occupied_labels, project_root,
     return issues
 
 
+def todo_lines(text: str) -> list:
+    """
+    生成结果里还留着几条"缺资源 / 结构降级"的说明注释 → **1 基行号**列表。
+
+    唯一实现（`_guard_todo_issues` 与导出回执都用它）：判据是**行内**带标记，
+    不是"行首以它开头" —— 缩进里的那一条同样算（旧写法用 `startswith`，
+    四空格缩进时漏数，回执与门禁会说两套话）。
+
+    切行必须走 `split_lines`（`core.textlines`）：`str.splitlines()` 会把
+    U+2028 / `\x0c` / `\x85` 也当换行，一行被撕成两行（铁律里的老坑）。
+    """
+    return [i for i, line in enumerate(split_lines(text), start=1)
+            if '# TODO:' in line]
+
+
 def _guard_todo_issues(text: str) -> list:
     """规则 3：生成结果里还留着"缺资源"的占位注释（`UNRESOLVED_TODO`）。"""
-    todo_lines = [i for i, line in enumerate(split_lines(text), start=1)
-                  if '# TODO:' in line]
-    if not todo_lines:
+    lines = todo_lines(text)
+    if not lines:
         return []
     return [GuardIssue(
         'UNRESOLVED_TODO', 'warn',
-        f'生成结果里有 {len(todo_lines)} 条 `# TODO: 缺少资源`'
-        f'（第 {"、".join(str(n) for n in todo_lines[:8])}'
-        f'{"…" if len(todo_lines) > 8 else ""} 行）：'
+        f'生成结果里有 {len(lines)} 条 `# TODO: 缺少资源`'
+        f'（第 {"、".join(str(n) for n in lines[:8])}'
+        f'{"…" if len(lines) > 8 else ""} 行）：'
         f'这些语句没有被生成，脚本还不完整。')]
 
 

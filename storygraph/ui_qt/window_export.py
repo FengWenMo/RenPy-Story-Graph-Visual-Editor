@@ -71,6 +71,25 @@ def overwritable(res: dict) -> bool:
     return export_plan.overridable(res)
 
 
+def _log_missing_refs(host, res: dict, todos: int) -> None:
+    """
+    把"编译期判了缺资源、产物里却没写成注释"的那一半**记进日志**（2026-11-14）。
+
+    为什么不放进状态栏：那一行已经是"已导出 + 补丁对位 + 逐字节相同"的长句，
+    再加一句就超宽被裁（Toast 本来就只有一行）。而这件事又不能不说 ——
+    增量补丁按约定**不写**说明注释（作者原来那一行已经带着这个引用，见
+    `patcher._is_new_content`），所以"编译说 N 处、产物 0 条"是常态。
+
+    从前这里只报编译期那个数，用户打开文件一条注释都没有 —— 他说的
+    "假的误报"就是这一条（真机 `sr_general` 42 章里 15 章是这个形态）。
+    """
+    missing = int(res.get('missing_refs') or 0)
+    if missing > todos:
+        host._log(f'[导出] 另有 {missing - todos} 处引用在资源表里查不到，'
+                  f'产物里没有写成 `# 缺少资源` 注释'
+                  f'（原文那几行按原样保留/降级，明细见编译摘要）')
+
+
 def _scan_stage_identity(host, beats):
     """
     导出前的**身份门禁**：这几条 `show` 写的名字，项目里真的有吗？
@@ -280,9 +299,10 @@ class WindowExportMixin:
         # 写进文件了 → 自动保存那份快照已经没有可恢复的东西（2026-10-23）。
         self.autosave_clear()
         todos = res.get('todos') or 0
-        warn = f'，缺资源 {todos} 处（见 TODO）' if todos else ''
+        warn = f'，缺资源 {todos} 处（见 # TODO）' if todos else ''
         self._log(f'[导出] 已写入 {Path(path).name}'
                   f'（{res.get("note", "")}{warn}）')
+        _log_missing_refs(self, res, todos)
         # ⚠ **先报静默失败，再报"导出成功"**（2026-11-08 第十五轮）：
         # 这一步和状态栏抢同一个坑位（`_report_swallowed` 末尾也调 `_status`）。
         # 顺序反了的话，"两边都落上了…他改的那 1 处也保住了"这句**永远看不见**

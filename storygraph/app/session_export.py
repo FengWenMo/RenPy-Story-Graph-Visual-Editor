@@ -52,6 +52,7 @@ from storygraph.story.generation_guard import (ensure_generator_marker,
                                                evaluate_generation,
                                                labels_in_danger,
                                                merging_onto,
+                                               todo_lines,
                                                would_destroy_opaque,
                                                write_generation)
 
@@ -190,6 +191,23 @@ def card_at_lines(beats, spans) -> str:
                 return (f'第 {i + 1} 张卡「{head}」' if head
                         else f'第 {i + 1} 张卡')
     return ''
+
+
+def receipt_counts(text: str, result) -> dict:
+    """
+    导出回执里两个**不同**的数字（2026-11-14）。
+
+      · `todos`        —— **产物里**真有几条缺资源注释（用户打开文件数得到）；
+      · `missing_refs` —— **编译期**判"资源表里查不到"的处数。
+
+    为什么不合成一个：增量补丁按约定**不写**说明注释（作者原来那一行已经
+    带着这个引用，见 `patcher._is_new_content`），于是"编译说 9 处、产物 0 条"
+    是常态而不是异常。从前回执直接报前者 → 用户打开文件一条都没有，
+    回执却在说"见注释"（真机 42 章里 15 章是这个形态）。
+    回执只该说产物里的事；那另一半进日志（一句话说不完）。
+    """
+    return {'todos': len(todo_lines(text)),
+            'missing_refs': int(getattr(result, 'todo_count', 0))}
 
 
 class ExportMixin:
@@ -521,24 +539,9 @@ class ExportMixin:
         # 算计划/落盘都用 `app.batch_edit` 那一份；细节见 `_batch_after_write`。
         batch = self._batch_after_write(target, note)
 
-        # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）。
-        #
-        # `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而删掉程序员的
-        # `$ x = 1` / `play music …` 是**写进去了、事后才发现**的那类事。
-        # 塞进 `warnings` 之后：编辑器这条路会进日志的"提示"段，剧本表那条路
-        # （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
-        _warns = [export_plan.issue_message(i) for i in art.issues
-                  if not i.is_blocking]
-        # 扩展批处理要说的话（写了多少行 / 哪条规则不合法）**排最前**：
-        # 它正是用户"导出没效果"时最该看到的那一句。
-        _warns = list(batch.get('warnings') or ()) + _warns
-        # "别人也改过这个脚本"的长句（第十五轮）放**最前面**：它是这一刀最该
-        # 被看见的事（他改的那几行已经进磁盘了，界面还是旧的）。短句在 `note`。
-        if note.get('merge_warning'):
-            _warns.insert(0, note['merge_warning'])
-        _removal = removal_note(note).lstrip('；')
-        if _removal:
-            _warns.insert(0, _removal.replace('**', ''))
+        # **"这一刀删掉了你写的行"要进告警**（P0-D，2026-10-25 第五轮）——
+        # 措辞、顺序与理由见 `_export_warnings`。
+        _warns = self._export_warnings(art, batch, note)
         return {'ok': True, 'path': target, 'blocking': [], 'codes': [],
                 # 成功了也可能有告警（产物写在 game/ 里、有自定义块没被建模…）
                 'warnings': _warns,
@@ -546,7 +549,35 @@ class ExportMixin:
                 'used_patch': bool(note.get('used_patch')),
                 # 重载之后拍数可能变（结构由解析器定）→ 告诉前端重新取列表
                 'count': len(self.beats),
-                'todos': getattr(result, 'todo_count', 0)}
+                # **产物里真有几条 vs 编译期判了几处**（两个数，见
+                # `receipt_counts`）：回执只报前者，另一半点进日志。
+                **receipt_counts(text, result)}
+
+    def _export_warnings(self, art, batch, note) -> list:
+        """
+        导出成功时要带给用户的告警（**顺序是契约**，别随手重排）。
+
+        为什么这些必须进 `warnings` 而不是只进 `note`（P0-D，2026-10-25 第五轮）：
+        `note` 会进状态栏和日志，但状态栏会截断、日志没人翻；而"这一刀删掉了
+        你写的 `$ x = 1` / `play music …`"是**写进去了、事后才发现**的那类事。
+        进了 `warnings`：编辑器这条路会进日志的"提示"段，剧本表那条路
+        （`ui_qt.window_export` 的确认框）会把它列在"提醒"里。
+
+        排序：删行 > 别人也改过 > 扩展批处理 > 门禁提示 —— 越靠前越该被看见。
+        """
+        warns = [export_plan.issue_message(i) for i in art.issues
+                 if not i.is_blocking]
+        # 扩展批处理要说的话（写了多少行 / 哪条规则不合法）**排最前**：
+        # 它正是用户"导出没效果"时最该看到的那一句。
+        warns = list(batch.get('warnings') or ()) + warns
+        # "别人也改过这个脚本"的长句（第十五轮）放**最前面**：它是这一刀最该
+        # 被看见的事（他改的那几行已经进磁盘了，界面还是旧的）。短句在 `note`。
+        if note.get('merge_warning'):
+            warns.insert(0, note['merge_warning'])
+        removal = removal_note(note).lstrip('；')
+        if removal:
+            warns.insert(0, removal.replace('**', ''))
+        return warns
 
     def _with_generator_marker(self, text: str) -> str:
         """
@@ -647,7 +678,9 @@ class ExportMixin:
                             'used_patch': True,
                             'untouched': not batch.get('applied'),
                             'count': len(self.beats),
-                            'todos': getattr(result, 'todo_count', 0)}
+                            # 零改动也照样按**这一份文本**报（原地往返时它与
+                            # 源文件逐字节相同；导出本身不会新增注释）。
+                            **receipt_counts(text, result)}
         except (OSError, UnicodeDecodeError) as e:
             # 读不到源就照老路走（过门禁），别把导出弄挂
             swallow('session_export.zero_change_check', e)
