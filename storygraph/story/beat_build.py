@@ -38,6 +38,7 @@ from storygraph.story.beat_model import (
     _show_item_text,
     _split_hide_items,
     _split_lines,
+    _split_op_token,
     _split_show_items,
     _split_code_lines,
     compose_audio_text,
@@ -1777,9 +1778,14 @@ def _hydrate_stage(beat, symbols, audit, parse_stage):
     existing = [v.strip() for v in (beat.stage_order or '').split(',')
                 if v.strip()]
     merged = list(existing)
+    # ⚠ 判据是**verb 名**（`#idx` 剥掉），不是原始 token：`'show' not in
+    #   ['scene#0', 'show#0']` 恒为真 → 每次 hydrate 都会把 scene/show 追加一遍
+    #   （与 `Beat._stage_order_merged` 同一个坑，2026-11-14 一起修）。
+    have = {_split_op_token(t)[0] for t in merged}
     for v in dedup:
-        if v not in merged:
+        if v not in have:
             merged.append(v)
+            have.add(v)
     if merged:
         beat.stage_order = ','.join(merged)
 

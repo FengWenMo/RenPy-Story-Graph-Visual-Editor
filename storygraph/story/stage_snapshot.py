@@ -505,8 +505,17 @@ def _apply_stage_ops(beat, state, bi, changes) -> None:
         return out
 
     tokens = beat.op_tokens_full() or [(v, None) for v in _stage_order(beat)]
+    #: 一拍只有**一个** `scene`（`Beat.scene` 就一个值）。`stage_order` 里若出现
+    #: 第二条 `scene` token（2026-11-14 之前每次 `apply()` 都会追加一条，
+    #: 见 `Beat._stage_order_merged`），照它清第二遍台就是把 `show` 刚站上去的
+    #: 人再抹掉 —— 卡片上明明有立绘，「当前舞台」却写"台上没人"。
+    #: 这里只认第一条，坏数据不再放大（`show`/`hide` 是逐条的，不受影响）。
+    scene_done = False
     for verb, idx in tokens:
         if verb == 'scene':
+            if scene_done:
+                continue
+            scene_done = True
             image = (beat.scene or '').strip()
             if image:
                 if actors:

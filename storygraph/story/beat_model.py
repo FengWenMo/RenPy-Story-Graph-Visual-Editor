@@ -1781,6 +1781,45 @@ class Beat:
                 recorded.append(verb)
         return recorded
 
+    def _stage_order_merged(self) -> list:
+        """
+        `stage_order` + `stage_verbs` 里**缺的** verb（保序；两者共用这一份判据）。
+
+        ⚠ 2026-11-14 修（用户截图："选中了立绘，却无法展示出来"）：
+        从前这里是拿 **verb 名**去比 **原始 token** ——
+
+            'show' in ['scene#0', 'show#0']   # False！
+
+        于是每次 `apply()`（改卡片 / 翻页顺带提交）都把 `scene`、`show`
+        再追加一遍，`stage_order` 变成 `'scene#0,show#0,scene,show'`。
+        多出来的那条 `('scene', None)` 让**舞台快照再清一次台**：
+        `scene black` 前面明明有 `show lan …`，卡片上立绘也在，
+        「当前舞台」却写"台上没人"、小图一片黑、还附一句"被 scene 清掉了"。
+
+        判据落在**verb 名**上（`_split_op_token` 剥掉 `#idx`），与
+        `stage_verbs` 自己那条完全同源。顺手把两种脏数据清掉：
+          · 完全相同的 token（历史表里出现过 `show,show`）；
+          · 重复的 `scene` —— `Beat.scene` 是**单值**，第二条一定是脏数据
+            （2026-11-14 之前每次提交都会补一条，正是这一轮修的那个 bug）。
+            `show#0` 与 `show` **不算重复**：后者是"剩下的全出"，老格式合法。
+        """
+        merged: list = []
+        seen: set = set()
+        for token in (self.stage_order or '').split(','):
+            token = token.strip()
+            if not token or token in merged:
+                continue
+            verb = _split_op_token(token)[0]
+            if verb == 'scene' and verb in seen:
+                continue                    # 一拍只有一个 scene
+            merged.append(token)
+            seen.add(verb)
+        for verb in self.stage_verbs:
+            if verb not in seen:
+                merged.append(verb)
+                seen.add(verb)
+        return merged
+
     def merged_stage_order(self) -> str:
         """
         `stage_order` 的**归一化**形式：把 `stage_verbs` 里缺的 verb 补上
@@ -1790,12 +1829,7 @@ class Beat:
         （例如快照/指纹：对齐顺序列不算用户改动，见
         `session_table.snapshot`）。
         """
-        merged = [v.strip() for v in (self.stage_order or '').split(',')
-                  if v.strip()]
-        for verb in self.stage_verbs:
-            if verb not in merged:
-                merged.append(verb)
-        return ','.join(merged)
+        return ','.join(self._stage_order_merged())
 
     def sync_stage_order(self) -> str:
         """
@@ -1807,11 +1841,7 @@ class Beat:
         （`scene` 在 `Scene` 列，`Stage` 列推导不出来），所以只补不覆盖
         ——与 `beat_build._hydrate_stage` 同一条规矩。
         """
-        merged = [v.strip() for v in (self.stage_order or '').split(',')
-                  if v.strip()]
-        for verb in self.stage_verbs:
-            if verb not in merged:
-                merged.append(verb)
+        merged = self._stage_order_merged()
         if merged:
             self.stage_order = ','.join(merged)
         return self.stage_order
