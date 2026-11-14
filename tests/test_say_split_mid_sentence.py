@@ -234,6 +234,8 @@ class TestRefusals:
         assert '条件块' in res['error']
         assert len(s.beats) == 2                  # say + return 那拍
         assert '{nw}' not in s.beats[idx].text
+        # 界面在**按下按钮之前**就要说同一句话（前端不许另编一套理由）
+        assert s.split_blocked_reason(s.beats[idx]) == res['error']
 
     def test_越界拍号也不炸(self, session):
         assert not session.split_say_at(99, 1)['ok']

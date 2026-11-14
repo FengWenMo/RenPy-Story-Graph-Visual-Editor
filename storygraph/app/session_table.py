@@ -1204,6 +1204,29 @@ class TableSessionMixin:
     #: （`extend` 续的是同一个对话框）。
     SPLIT_KINDS = ('say', 'narration', 'extend')
 
+    def split_blocked_reason(self, beat) -> str:
+        """
+        这一拍**为什么**不能句中断开（空串 = 能）。2026-11-14 用户报：
+
+        > 我点击了这个句中换表情一点反应都没有！
+
+        根因有两层，这是第一层：那张卡在条件块 / 循环 / 菜单里，会话会拒绝，
+        而拒绝的话只进了状态栏 —— 卡片里什么都不动，看着就是"按钮是死的"。
+        所以理由抽成**一份**，前端在**按下按钮之前**就摆在按钮下面，会话拒绝
+        时用的也是同一句（不让两处措辞各说各的）。
+
+        为什么块里不能拆：渲染器是"一拍一个 `if` 头"，拆完会变成两个同条件的
+        `if` 块；增量补丁对这种条件叠加会**拒写** → 导出退回全量重生成，
+        把用户文件的结构改掉。宁可不动，也不能悄悄改块结构（铁律 1/5）。
+        """
+        inside = (str(getattr(beat, 'condition', '') or '').strip()
+                  or str(getattr(beat, 'nest_path', '') or '').strip())
+        if not inside:
+            return ''
+        return ('这句话在条件块 / 循环 / 菜单里：拆开会让工具多写一个同条件的 '
+                '`if` 块（块结构还原不回原样），所以这里不动。想在这句里换表情，'
+                '先把这句挪到块外，或在「备注」里写明给程序看。')
+
     def split_say_at(self, idx: int, pos: int) -> dict:
         """
         把第 `idx` 拍这句台词在**第 `pos` 个字**处断开（2026-11-14，用户：
@@ -1241,14 +1264,9 @@ class TableSessionMixin:
         # 于是拆完会变成两个同条件的 `if` 块；而增量补丁对这种条件叠加会
         # **拒写**（"条件与要写的拍对不上"）→ 导出退回全量重生成，
         # 把用户文件的结构改掉。宁可不动，也不能悄悄改块结构（铁律 1/5）。
-        inside = (str(getattr(beat, 'condition', '') or '').strip()
-                  or str(getattr(beat, 'nest_path', '') or '').strip())
-        if inside:
-            return {'ok': False, 'index': -1,
-                    'error': '这句话在条件块 / 循环 / 菜单里：拆开会让工具多写一个'
-                             '同条件的 `if` 块（块结构还原不回原样），所以这里'
-                             '不动。想在这句里换表情，先把这句挪到块外，'
-                             '或在「备注」里写明给程序看。'}
+        why = self.split_blocked_reason(beat)
+        if why:
+            return {'ok': False, 'index': -1, 'error': why}
         text = str(getattr(beat, 'text', '') or '')
         try:
             cut = int(pos)

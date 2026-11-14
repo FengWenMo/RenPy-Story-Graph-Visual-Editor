@@ -937,7 +937,11 @@ class CardPageMixin:
         self.apply_current_beat()          # 先把台词框里的字提交进这一拍
         res = self._session.split_say_at(idx, pos)
         if not res.get('ok'):
-            self._status(res.get('error') or '断开失败')
+            # **不能只进状态栏**（2026-11-14 用户："点了一点反应都没有"）：
+            # 卡片里那颗按钮下面也要说一句，否则屏幕上看不出发生过什么。
+            why = res.get('error') or '断开失败'
+            self._panel.show_split_note(why)
+            self._status(why)
             return
         # 插卡会让后面的拍全部换 line_id：图边跟着重认身份（与 `insert_card` 同源）
         self._refresh_flow_edges()
@@ -1501,7 +1505,10 @@ class CardPageMixin:
         self._panel.set_sentence_context(
             str(getattr(_beat, 'kind', '') or ''),
             str(getattr(_beat, 'text', '') or ''),
-            str(getattr(_next, 'kind', '') or '') if _next is not None else '')
+            str(getattr(_next, 'kind', '') or '') if _next is not None else '',
+            # "为什么不能拆"（条件块 / 循环 / 菜单）在**按下按钮之前**就摆在
+            # 按钮下面 —— 理由只有会话那一份（`split_blocked_reason`）。
+            blocked=self._session.split_blocked_reason(_beat))
         # 说话人下拉：屏幕上是人话（「大爷」），写回 beat 的仍是 tag（`DY`）
         self._panel.set_speakers(
             pairs(self._session.characters(), self._character_labels()),

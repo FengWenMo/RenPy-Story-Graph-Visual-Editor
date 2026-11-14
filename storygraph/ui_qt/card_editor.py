@@ -164,6 +164,11 @@ class BeatCardEditor(QWidget):
     #: 这里只决定**按钮出不出现**；认不认由会话判 —— 前端不另立一套规矩。
     SPLIT_KINDS = ('say', 'narration', 'extend')
 
+    #: 按钮上那行字（平时）。按下之后它变成「✂ 就断在这儿」—— 第二次才是真断，
+    #: 第一步是"让你在台词里点一个字"（见 `_build_sentence_split` 的说明）。
+    SPLIT_BTN_TEXT = '✂ 句中换表情…'
+    SPLIT_BTN_CONFIRM = '✂ 就断在这儿'
+
     #: 这两格在**这一拍没写**时可以从"当前舞台"沿用过来显示（改了才写回）。
     #: 语音刻意不在里面：它是逐句的，沿用上一句的语音没有意义。
     INHERITED_FIELDS = (('Scene', '背景'), ('BGM', '音乐'))
@@ -452,7 +457,7 @@ class BeatCardEditor(QWidget):
 
     def _build_sentence_split(self, lay) -> None:
         """
-        「✂ 句中换表情」按钮 + 那一行说明（2026-11-14，拆自 `_build_dialogue_area`）。
+        「✂ 句中换表情」按钮 + 说明行 + **选择断开点**那一条（2026-11-14）。
 
         为什么是**动作**而不是教语法（用户原话）：
 
@@ -460,30 +465,79 @@ class BeatCardEditor(QWidget):
         > 一点……我理解 Renpy 是写 {nw} 后接 extend，新建语句然后再分表情
         > 的……但要是剧本不明白怎么办？
 
-        点一下就在光标处断成「前半{nw}」+ 一张「接续」卡（后半句），并跳到
-        那张卡上 —— 换表情就在那张卡的立绘里改（改完才多出那一行 `show`）。
+        为什么是**两步**（2026-11-14 当晚用户实测报）：
+
+        > 我点击了这个句中换表情一点反应都没有！也没有让我精确到哪个字去
+        > 换表情啊……？？？有bug
+
+        第一版是"一步到位"：按钮直接用台词框里的光标位置断开。毛病不在断开，
+        在**断开点看不见** —— 卡片刚载入时光标在句首（0），界面和我脑子里那个
+        "中间"长得一模一样；点下去要么被拒（只在状态栏说一句，卡片里纹丝不动，
+        看着就是死按钮），要么断在他没想过的位置。
+
+        所以改成两步，中间那步就是"让你指到哪个字"：
+
+        1. 按一下 → 进**选择模式**：按钮变成「✂ 就断在这儿」，旁边出现「取消」，
+           台词框描一圈主色、拿走焦点（光标看得见），下面实时预览断完之后的两半，
+           并且**点名**是断在哪个字前面；
+        2. 在台词里点那个字 → 预览立刻更新；再按一下 → 真断。
+
         只有按了这个按钮才会写 `{nw}`；手写 `{nw}` 的人照旧，两不相干。
         """
-        self._split_btn = QPushButton('✂ 句中换表情')
+        #: 选择模式的状态。`_split_blocked` = 这一拍**为什么不能拆**（会话给的
+        #: 理由，空串 = 能）；`_split_kind` / `_split_text` = 载入时这一拍是什么卡、
+        #: 什么台词（按钮出不出现看它们，不看控件 —— 见 `set_sentence_context`）。
+        self._picking = False
+        self._split_kind = ''
+        self._split_text = ''
+        self._split_blocked = ''
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        #: 「取消」只在选择模式里出现 —— 那时候按钮已经改行"确认"了，
+        #: 没有退路的话点错一次就只能断完再撤销（多一步、还容易忘）。
+        self._split_cancel = QPushButton('取消')
+        self._split_cancel.setFlat(True)
+        self._split_cancel.setVisible(False)
+        self._split_cancel.clicked.connect(self.cancel_split)
+        row.addWidget(self._split_cancel)
+        self._split_btn = QPushButton(self.SPLIT_BTN_TEXT)
         self._split_btn.setToolTip(
-            '把这句话在光标处断开：前半句留在这张卡，后半句放进下一张'
-            '「接续」卡（同一个对话框，不会另起一句）。\n'
-            '断开之后在下一张卡上改立绘表情，就得到 Ren\'Py 的\n'
+            '一句话中间换立绘表情：\n'
+            '  1) 按一下 → 在台词里点要断开的那个字（断在它前面）；\n'
+            '  2) 再按一下 → 前半句留在这一张（末尾加 {nw}），后半句进'
+            '「接续」卡（同一个对话框）。\n'
+            '在接续卡上改立绘表情，就得到 Ren\'Py 的\n'
             '  l "前半句{nw}"\n'
             '  show l 新表情\n'
-            '  extend "后半句"\n'
-            '不换表情的话，一行 show 都不会多写。')
+            '  extend "后半句"')
         # 只有台词卡才出现（`set_sentence_context` 按这一拍判；不认识的卡上
         # 留着这个按钮只会让人点出一个错误提示）。
         self._split_btn.setVisible(False)
-        self._split_btn.clicked.connect(self._emit_split)
-        lay.addWidget(self._split_btn, 0, Qt.AlignRight)
-        #: 「这句没说完 / 这张是接续」那一行说明（纯文字，QLabel 不认 Markdown）。
+        self._split_btn.clicked.connect(self._begin_split)
+        row.addWidget(self._split_btn)
+        lay.addLayout(row)
+        #: 选择模式里的**实时预览**：断在哪个字前面、两半各是什么。
+        #: 行数固定 3 行左右，平时 `setVisible(False)` 不占版面。
+        self._split_preview = QLabel('')
+        self._split_preview.setProperty('role', 'caption')
+        self._split_preview.setWordWrap(True)
+        self._split_preview.setVisible(False)
+        lay.addWidget(self._split_preview)
+        #: 「这句没说完 / 这张是接续 / 为什么不能拆」那一行说明
+        #: （纯文字，QLabel 不认 Markdown）。
         self._sentence_label = QLabel('')
         self._sentence_label.setProperty('role', 'caption')
         self._sentence_label.setWordWrap(True)
         self._sentence_label.setVisible(False)
         lay.addWidget(self._sentence_label)
+        # 光标一动、台词一改，选择模式里的预览就跟着变
+        # （平时它先 return，等于没连）。
+        self._text.cursorPositionChanged.connect(self._refresh_split_preview)
+        self._text.textChanged.connect(self._refresh_split_preview)
+        # 台词框里有没有字，决定按钮出不出现 —— 边打边看得到那颗按钮，
+        # 不用"存一下再翻回来"（用户 2026-11-14 的下一步就会撞上这个）。
+        self._text.textChanged.connect(self._refresh_split_availability)
 
     def _build_stage_now_area(self, root) -> None:
         """「当前舞台」这一拍的只读小图 + 摘要 + 尺寸格（拆自 `_build`，2026-11-01）。"""
@@ -1763,7 +1817,7 @@ class BeatCardEditor(QWidget):
         return int(cursor.position())
 
     def set_sentence_context(self, kind: str, text: str,
-                             next_kind: str = '') -> None:
+                             next_kind: str = '', blocked: str = '') -> None:
         """
         按"这一拍是不是一句话的一口"来摆那个按钮和说明行。
 
@@ -1772,11 +1826,20 @@ class BeatCardEditor(QWidget):
                     因为控件里可能还没提交）
         `next_kind` 下一拍的 `kind` —— 用来点破那个常见的坑：
                     写了 `{nw}` 却没有「接续」卡跟在后面。
+        `blocked`   这一拍**为什么不能拆**（条件块 / 循环 / 菜单里；空串 = 能）。
+                    由会话的 `split_blocked_reason` 给 —— 前端不另编一套理由。
+                    按下按钮时**摆在按钮下面**，不能只往状态栏扔一句：
+                    用户 2026-11-14 报的"点了没反应"，一半就是那句话没人看见。
 
         ⚠ 说明行是 **QLabel**：不渲染 Markdown，只写纯文字（`**` 会原样显示）。
         """
         kind = str(kind or '').strip()
         body = str(text or '')
+        self._split_kind, self._split_text = kind, body
+        self._split_blocked = str(blocked or '').strip()
+        # 换了一张卡 = 上一次"选到一半"作废：不退出来的话，第二次点击会拿着
+        # **上一张卡**的位置去断**这一张**的句子（比没反应严重得多）。
+        self._exit_pick()
         can_split = kind in self.SPLIT_KINDS and bool(body.strip())
         self._split_btn.setVisible(can_split)
         self._split_btn.setEnabled(can_split)
@@ -1796,14 +1859,121 @@ class BeatCardEditor(QWidget):
         self._sentence_label.setText(msg)
         self._sentence_label.setVisible(bool(msg))
 
-    def _emit_split(self, *_):
-        """「✂ 句中换表情」被按下 → 把光标位置交给窗口（它会问会话）。
+    # ---------- 「选断开点」那一步（2026-11-14 晚上加） ----------
+
+    def is_picking_split_point(self) -> bool:
+        """现在是不是"等你在台词里点一个字"那一步（窗口 / 测试要看这个状态）。"""
+        return bool(self._picking)
+
+    def _begin_split(self, *_):
+        """按下「✂ 句中换表情」：**第一次**进选择模式，**第二次**才真断。
 
         `*_` 收下 `QPushButton.clicked` 那个 `checked=False` 参数 —— Qt 的
         信号是带参的，槽签名不收会在某些绑定下抛 TypeError（只打 stderr、
         界面不动，正是"点了没反应"那一类）。
         """
-        self.split_requested.emit(self.text_cursor_position())
+        if self._picking:
+            self._confirm_split()
+            return
+        if not self._can_split():
+            # 按钮本该隐藏着（`set_sentence_context` 按卡的 kind 判）。真走到
+            # 这里说明状态不同步 —— 也要出声，不能让它"点了没反应"。
+            self.show_split_note('这一张没有"一句台词"可以断（只有对白 / 旁白 / '
+                                 '接续卡能这样拆）。')
+            return
+        if self._split_blocked:
+            # 条件块 / 循环 / 菜单里不能拆：理由摆在按钮下面，不是只扔状态栏。
+            self.show_split_note(self._split_blocked)
+            return
+        self._enter_pick()
+
+    def _can_split(self) -> bool:
+        """这一拍现在能不能拆（种类对 + 台词框里真有字）。"""
+        return (self._split_kind in self.SPLIT_KINDS
+                and bool(self.text()))
+
+    def _refresh_split_availability(self, *_):
+        """打字时跟着改按钮的可见性（台词从空变成有字，按钮就该出现）。"""
+        if self._picking:
+            return
+        ok = self._can_split()
+        self._split_btn.setVisible(ok)
+        self._split_btn.setEnabled(ok)
+
+    def _enter_pick(self) -> None:
+        """进「选断开点」模式：光标看得见、预览会说话、按钮变成"确认"。"""
+        self._picking = True
+        self._split_btn.setText(self.SPLIT_BTN_CONFIRM)
+        self._split_cancel.setVisible(True)
+        # 台词框描一圈主色：告诉人"要在这上面点"，别去别处找。
+        self._text.setStyleSheet(
+            f'QPlainTextEdit {{ border: 2px solid {T.t("brand.primary")}; }}')
+        self._text.setFocus(Qt.OtherFocusReason)     # 光标得亮着，否则还是看不见
+        self._refresh_split_preview()
+
+    def _exit_pick(self) -> None:
+        """退出选择模式（取消 / 断开之后 / 换卡）。**一个字都不改。**
+
+        ⚠ 这里必须把按钮重新置为可用：选择模式里"光标在句首"那会儿它是灰的，
+        取消之后不恢复就是**又一颗点不动的按钮**（正是这一轮要修的那个病）。
+        """
+        self._picking = False
+        self._split_btn.setText(self.SPLIT_BTN_TEXT)
+        self._split_btn.setEnabled(self._can_split())
+        self._split_cancel.setVisible(False)
+        self._split_preview.setVisible(False)
+        self._text.setStyleSheet('')
+
+    def cancel_split(self, *_):
+        """「取消」：退出选择模式，什么都不动。"""
+        self._exit_pick()
+
+    def _pick_position(self) -> int:
+        """
+        光标落在**去掉首尾空白**的台词里是第几个字（预览与断开都用它）。
+
+        为什么要减 `lead`：光标下标是控件里那串原文的，而写回 / 断开用的是
+        `text()`（`strip` 过的）。两者差的就是行首空白那几个字 —— 不减的话
+        断点会整体往后挪。
+        """
+        raw = self._text.toPlainText()
+        lead = len(raw) - len(raw.lstrip())
+        return max(0, min(len(self.text()),
+                          int(self.text_cursor_position()) - lead))
+
+    def _refresh_split_preview(self, *_):
+        """选择模式里实时说：断在哪个字前面、两半各是什么。"""
+        if not self._picking:
+            return
+        body = self.text()
+        cut = self._pick_position()
+        if not 0 < cut < len(body):
+            # 光标在两头断不出两半 —— 不猜（铁律 4），把该怎么做说出来。
+            self._split_preview.setText(
+                '第 1 步：在台词里点要断开的那个字（就断在它前面）。\n'
+                '点好之后按「✂ 就断在这儿」。\n'
+                '现在光标在句首/句尾，那里断不出两半。')
+            self._split_btn.setEnabled(False)
+        else:
+            head, tail = body[:cut].rstrip(), body[cut:].lstrip()
+            self._split_preview.setText(
+                f'断在「{body[cut]}」前面：\n'
+                f'前半（留在这张卡）  {head}{{nw}}\n'
+                f'后半（接续卡，可换表情）  {tail}')
+            self._split_btn.setEnabled(True)
+        self._split_preview.setVisible(True)
+
+    def _confirm_split(self, *_):
+        """第二步：真断。位置要在退出选择模式**之前**取（退出会动按钮/焦点）。"""
+        cut = self._pick_position()
+        self._exit_pick()
+        self.split_requested.emit(int(cut))
+
+    def show_split_note(self, msg: str) -> None:
+        """把"为什么没断 / 为什么不能拆"摆在按钮下面（状态栏太远，会被当成没反应）。"""
+        text = str(msg or '').strip()
+        self._sentence_label.setText(text)
+        self._sentence_label.setVisible(bool(text))
 
     def is_advanced_open(self) -> bool:
         return bool(self._adv_open)
